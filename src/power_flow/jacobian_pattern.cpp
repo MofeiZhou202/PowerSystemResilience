@@ -6,6 +6,8 @@
 
 #include <Eigen/Sparse>
 
+#include "hacdcpf/power_flow/lcc_model.hpp"
+
 namespace hacdcpf::powerflow {
 
 namespace {
@@ -179,8 +181,10 @@ JacobianPattern build_jacobian_pattern(const SolverData& data, const JacobianCon
   for (const auto& lcc : data.lcc_converters) {
     if (!lcc.in_service) continue;
     const int ac_bus = lcc.ac_bus - 1;
+    const int commutation_ac_bus = lcc_commutation_ac_bus(data, lcc);
     const int dc_bus = lcc.dc_bus - 1;
-    if (ac_bus < 0 || ac_bus >= ctx.n || dc_bus < 0 || dc_bus >= ctx.ndc) {
+    if (ac_bus < 0 || ac_bus >= ctx.n || commutation_ac_bus < 0 ||
+        commutation_ac_bus >= ctx.n || dc_bus < 0 || dc_bus >= ctx.ndc) {
       continue;
     }
     const int p_row = ctx.p_row[static_cast<size_t>(ac_bus)];
@@ -188,9 +192,14 @@ JacobianPattern build_jacobian_pattern(const SolverData& data, const JacobianCon
     const int dc_row = ctx.dc_row[static_cast<size_t>(dc_bus)];
     const int vdc_col = ctx.vdc_col[static_cast<size_t>(dc_bus)];
     const int vm_col = ctx.vm_col[static_cast<size_t>(ac_bus)];
+    const int commutation_vm_col =
+        ctx.vm_col[static_cast<size_t>(commutation_ac_bus)];
     add_pattern_position(p_row, vdc_col, triplets, seen);
     add_pattern_position(q_row, vdc_col, triplets, seen);
     add_pattern_position(dc_row, vm_col, triplets, seen);
+    add_pattern_position(p_row, commutation_vm_col, triplets, seen);
+    add_pattern_position(q_row, commutation_vm_col, triplets, seen);
+    add_pattern_position(dc_row, commutation_vm_col, triplets, seen);
   }
 
   pattern.matrix.setFromTriplets(triplets.begin(), triplets.end());
@@ -389,19 +398,24 @@ JacobianPattern build_jacobian_pattern(const SolverData& data, const JacobianCon
     const auto& lcc = data.lcc_converters[li];
     if (!lcc.in_service) continue;
     const int ac_bus = lcc.ac_bus - 1;
+    const int commutation_ac_bus = lcc_commutation_ac_bus(data, lcc);
     const int dc_bus = lcc.dc_bus - 1;
-    if (ac_bus < 0 || ac_bus >= ctx.n || dc_bus < 0 || dc_bus >= ctx.ndc) {
+    if (ac_bus < 0 || ac_bus >= ctx.n || commutation_ac_bus < 0 ||
+        commutation_ac_bus >= ctx.n || dc_bus < 0 || dc_bus >= ctx.ndc) {
       continue;
     }
     JacobianPattern::LCCEntry le;
     le.lcc_index = static_cast<int>(li);
     le.ac_bus = ac_bus;
+    le.commutation_ac_bus = commutation_ac_bus;
     le.dc_bus = dc_bus;
     const int p_row = ctx.p_row[static_cast<size_t>(ac_bus)];
     const int q_row = ctx.q_row[static_cast<size_t>(ac_bus)];
     const int dc_row = ctx.dc_row[static_cast<size_t>(dc_bus)];
     const int vdc_col = ctx.vdc_col[static_cast<size_t>(dc_bus)];
     const int vm_col = ctx.vm_col[static_cast<size_t>(ac_bus)];
+    const int commutation_vm_col =
+        ctx.vm_col[static_cast<size_t>(commutation_ac_bus)];
     if (p_row >= 0 && vm_col >= 0) {
       le.p_vm_nz = lookup_nz(pattern, p_row, vm_col);
     }
@@ -416,6 +430,18 @@ JacobianPattern build_jacobian_pattern(const SolverData& data, const JacobianCon
     }
     if (dc_row >= 0 && vm_col >= 0) {
       le.dc_vm_nz = lookup_nz(pattern, dc_row, vm_col);
+    }
+    if (p_row >= 0 && commutation_vm_col >= 0) {
+      le.p_vm_comm_nz =
+          lookup_nz(pattern, p_row, commutation_vm_col);
+    }
+    if (q_row >= 0 && commutation_vm_col >= 0) {
+      le.q_vm_comm_nz =
+          lookup_nz(pattern, q_row, commutation_vm_col);
+    }
+    if (dc_row >= 0 && commutation_vm_col >= 0) {
+      le.dc_vm_comm_nz =
+          lookup_nz(pattern, dc_row, commutation_vm_col);
     }
     pattern.lcc_entries.push_back(le);
   }

@@ -189,6 +189,8 @@ struct DcSlackPlan {
   std::vector<int> dc_slacks;               ///< DC bus indices to pin as fixed-voltage slack.
   std::vector<int> promoted_converter_idx;  ///< indices into `converters` promoted PQ->VDC_Q.
   std::vector<int> rigid_converter_idx;     ///< indices into `converters` acting as rigid DC slacks.
+  std::vector<int> sole_former_idx;         ///< authored Vdc-mode converters that are
+                                            ///< their island's ONLY voltage reference.
   std::vector<std::pair<int, double>> rigid_pins;  ///< (bus index, v_set) for rigid Vdc formers.
   std::vector<std::string> warnings;        ///< human-readable diagnostics.
 };
@@ -263,7 +265,10 @@ DcSlackPlan plan_dc_island_references(const SolverData& data,
 
     // Does a converter already regulate Vdc on a bus in this island?
     bool converter_regulates = false;
-    for (const auto& conv : converters) {
+    int regulating_count = 0;
+    int regulating_idx = -1;
+    for (int gi = 0; gi < static_cast<int>(converters.size()); ++gi) {
+      const auto& conv = converters[static_cast<size_t>(gi)];
       if (!conv.in_service) continue;
       const int db = conv.bus_dc - 1;
       if (db < 0 || db >= ndc || component[static_cast<size_t>(db)] != c) continue;
@@ -271,8 +276,17 @@ DcSlackPlan plan_dc_island_references(const SolverData& data,
           conv.control_mode == ConverterMode::VDC_VAC ||
           conv.control_mode == ConverterMode::DC_V_DROOP_AC_V) {
         converter_regulates = true;
-        break;
+        ++regulating_count;
+        regulating_idx = gi;
       }
+    }
+    // An authored Vdc-mode converter that is the island's ONLY voltage
+    // reference must never be demoted back to PQ by the adaptive mode switch:
+    // without it the island has no reference and the Newton system goes
+    // singular (the same rationale as the promotion lock).  Record it so the
+    // caller can lock it alongside the promoted/rigid formers.
+    if (converter_regulates && regulating_count == 1 && regulating_idx >= 0) {
+      plan.sole_former_idx.push_back(regulating_idx);
     }
 
     // A droop DC/DC anchors its OUTPUT bus voltage: in droop mode the output-side
@@ -973,6 +987,12 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
   // Rigid DC-slack formers are PQ converters whose injection was sized to balance
   // a pinned island; lock them too so the adaptive mode switch leaves them alone.
   for (int idx : dc_plan.rigid_converter_idx) {
+    if (idx >= 0 && idx < static_cast<int>(promotion_lock.size())) promotion_lock[idx] = 1;
+  }
+  // Authored sole Vdc formers (e.g. a constant-Udc VSC station from a BZ card)
+  // are locked for the same reason: demoting the island's only reference to PQ
+  // leaves the Newton system singular and the solve blows up.
+  for (int idx : dc_plan.sole_former_idx) {
     if (idx >= 0 && idx < static_cast<int>(promotion_lock.size())) promotion_lock[idx] = 1;
   }
   out.diagnostics.promoted_vsc_indices = dc_plan.promoted_converter_idx;

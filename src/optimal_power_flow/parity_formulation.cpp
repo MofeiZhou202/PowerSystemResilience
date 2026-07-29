@@ -14,6 +14,7 @@
 #include "hacdcpf/assembly/solver_data.hpp"
 #include "hacdcpf/model/device_control_role.hpp"
 #include "hacdcpf/model/effective_capacity.hpp"
+#include "hacdcpf/power_flow/lcc_model.hpp"
 #include "hacdcpf/power_flow/pv_power_curve.hpp"
 
 namespace hacdcpf::opf::parity {
@@ -325,6 +326,64 @@ Problem build_problem(const HybridPowerSystem& sys, const ParityOptions& opt) {
     }
   }
 
+  // Anchor one angle in every conductive AC island. A single global reference
+  // leaves one rotational nullspace per additional island; hybrid links do not
+  // couple AC phase angles, so each island must be grounded independently.
+  prob.ac_angle_reference_buses.clear();
+  std::vector<std::vector<int>> ac_adjacency(static_cast<size_t>(nb));
+  for (const auto& branch : prob.data.ac_branches) {
+    if (!branch.in_service) continue;
+    const int from = branch.from_bus - 1;
+    const int to = branch.to_bus - 1;
+    if (from < 0 || from >= nb || to < 0 || to >= nb) continue;
+    ac_adjacency[static_cast<size_t>(from)].push_back(to);
+    ac_adjacency[static_cast<size_t>(to)].push_back(from);
+  }
+  std::vector<unsigned char> ac_seen(static_cast<size_t>(nb), 0);
+  std::vector<int> stack;
+  std::vector<int> component;
+  for (int start = 0; start < nb; ++start) {
+    if (ac_seen[static_cast<size_t>(start)] != 0) continue;
+    stack.clear();
+    component.clear();
+    stack.push_back(start);
+    ac_seen[static_cast<size_t>(start)] = 1;
+    while (!stack.empty()) {
+      const int bus = stack.back();
+      stack.pop_back();
+      component.push_back(bus);
+      for (const int adjacent :
+           ac_adjacency[static_cast<size_t>(bus)]) {
+        if (ac_seen[static_cast<size_t>(adjacent)] != 0) continue;
+        ac_seen[static_cast<size_t>(adjacent)] = 1;
+        stack.push_back(adjacent);
+      }
+    }
+
+    int reference = -1;
+    for (const int bus : component) {
+      if (prob.data.ac_buses[static_cast<size_t>(bus)].bus_type ==
+          BusType::SLACK) {
+        reference = bus;
+        break;
+      }
+    }
+    if (reference < 0) {
+      for (const auto& generator : prob.data.generators) {
+        if (!generator.in_service || !generator.is_slack) continue;
+        const int bus = generator.bus - 1;
+        if (std::find(component.begin(), component.end(), bus) !=
+            component.end()) {
+          reference = bus;
+          break;
+        }
+      }
+    }
+    if (reference < 0 && !component.empty()) reference = component.front();
+    if (reference >= 0)
+      prob.ac_angle_reference_buses.push_back(reference);
+  }
+
   // Every eligible DC_V bus defines voltage. Eligibility is checked before
   // formulation assembly; its physical storage/converter variable balances
   // KCL, so this model never creates an implicit source.
@@ -416,6 +475,7 @@ Problem build_problem(const HybridPowerSystem& sys, const ParityOptions& opt) {
   cidx.n_dcdc_bal = 0;
   // One active-power conservation row per in-service energy router.
   cidx.n_er_bal = static_cast<int>(prob.er_router_to_data.size());
+  cidx.n_ac_ref = static_cast<int>(prob.ac_angle_reference_buses.size());
   cidx.n_dc_ref = static_cast<int>(prob.dc_voltage_reference_buses.size());
   cidx.i_pbal_ac = 0;
   cidx.i_qbal_ac = cidx.i_pbal_ac + cidx.n_pbal_ac;
@@ -423,7 +483,8 @@ Problem build_problem(const HybridPowerSystem& sys, const ParityOptions& opt) {
   cidx.i_conv_bal = cidx.i_pbal_dc + cidx.n_pbal_dc;
   cidx.i_dcdc_bal = cidx.i_conv_bal + cidx.n_conv_bal;
   cidx.i_er_bal = cidx.i_dcdc_bal + cidx.n_dcdc_bal;
-  cidx.i_dc_ref = cidx.i_er_bal + cidx.n_er_bal;
+  cidx.i_ac_ref = cidx.i_er_bal + cidx.n_er_bal;
+  cidx.i_dc_ref = cidx.i_ac_ref + cidx.n_ac_ref;
   cidx.n_eq_total = cidx.i_dc_ref + cidx.n_dc_ref;
   cidx.n_sf = static_cast<int>(prob.branch_limited.size());
   cidx.n_st = cidx.n_sf;
@@ -761,15 +822,7 @@ void dc_warm_start(const Problem& prob, Eigen::VectorXd& x0) {
     return;
   }
 
-  // Find slack bus (bus_type == SLACK = 3)
-  int slack_idx = -1;
-  for (int i = 0; i < nb; ++i) {
-    if (prob.data.ac_buses[static_cast<size_t>(i)].bus_type == BusType::SLACK) {
-      slack_idx = i;
-      break;
-    }
-  }
-  if (slack_idx < 0) {
+  if (prob.ac_angle_reference_buses.empty()) {
     return;
   }
 
@@ -790,14 +843,25 @@ void dc_warm_start(const Problem& prob, Eigen::VectorXd& x0) {
     p_inj[bus] += x0[idx.i_pac + k];
   }
 
-  // Build reduced B matrix (remove slack row/col)
-  const int n_red = nb - 1;
-  std::vector<int> non_slack;
-  non_slack.reserve(static_cast<size_t>(n_red));
+  // Build the reduced B matrix after grounding one angle in each AC island.
+  std::vector<unsigned char> is_reference(static_cast<size_t>(nb), 0);
+  Eigen::VectorXd va = Eigen::VectorXd::Zero(nb);
+  for (const int bus : prob.ac_angle_reference_buses) {
+    if (bus < 0 || bus >= nb) continue;
+    is_reference[static_cast<size_t>(bus)] = 1;
+    va[bus] =
+        prob.data.ac_buses[static_cast<size_t>(bus)].va_deg * kDegToRad;
+  }
+  std::vector<int> non_reference;
+  non_reference.reserve(static_cast<size_t>(nb));
   for (int i = 0; i < nb; ++i) {
-    if (i != slack_idx) {
-      non_slack.push_back(i);
-    }
+    if (is_reference[static_cast<size_t>(i)] == 0)
+      non_reference.push_back(i);
+  }
+  const int n_red = static_cast<int>(non_reference.size());
+  if (n_red == 0) {
+    for (int i = 0; i < nb; ++i) x0[idx.i_va + i] = va[i];
+    return;
   }
 
   // Assemble the reduced B' sparsely.  A dense (nb−1)×(nb−1) copy plus a dense
@@ -808,11 +872,12 @@ void dc_warm_start(const Problem& prob, Eigen::VectorXd& x0) {
   std::vector<Eigen::Triplet<double>> b_trips;
   b_trips.reserve(static_cast<size_t>(prob.data.ybus.nonZeros()));
   Eigen::VectorXd P_red(n_red);
-  // Map from bus index to reduced index (-1 for slack)
+  // Map from bus index to reduced index (-1 for an island reference).
   std::vector<int> bus_to_red(static_cast<size_t>(nb), -1);
   for (int ri = 0; ri < n_red; ++ri) {
-    bus_to_red[static_cast<size_t>(non_slack[static_cast<size_t>(ri)])] = ri;
-    P_red[ri] = -p_inj[non_slack[static_cast<size_t>(ri)]];
+    bus_to_red[static_cast<size_t>(
+        non_reference[static_cast<size_t>(ri)])] = ri;
+    P_red[ri] = -p_inj[non_reference[static_cast<size_t>(ri)]];
   }
   // Fill B_red from sparse Ybus imaginary part (duplicate entries are summed,
   // matching the dense "+=" accumulation).
@@ -822,6 +887,9 @@ void dc_warm_start(const Problem& prob, Eigen::VectorXd& x0) {
       const int rj = bus_to_red[static_cast<size_t>(it.col())];
       if (ri >= 0 && rj >= 0) {
         b_trips.emplace_back(ri, rj, it.value().imag());
+      } else if (ri >= 0 &&
+                 is_reference[static_cast<size_t>(it.col())] != 0) {
+        P_red[ri] -= it.value().imag() * va[it.col()];
       }
     }
   }
@@ -844,11 +912,9 @@ void dc_warm_start(const Problem& prob, Eigen::VectorXd& x0) {
   }
 
   // Assemble full θ vector
-  Eigen::VectorXd va = Eigen::VectorXd::Zero(nb);
   for (int ri = 0; ri < n_red; ++ri) {
-    va[non_slack[static_cast<size_t>(ri)]] = theta_red[ri];
+    va[non_reference[static_cast<size_t>(ri)]] = theta_red[ri];
   }
-  va.array() -= va[slack_idx];  // reference to slack
   va = va.cwiseMax(-kPi).cwiseMin(kPi);  // clamp to [-π, π]
 
   for (int i = 0; i < nb; ++i) {
@@ -1487,6 +1553,28 @@ void equality_constraints(const Problem& prob,
     g[cidx.i_pbal_dc + k] -= ws.p_stor_dc[k];
   }
 
+  // LCC stations are fixed-order, state-dependent injections. Unlike VSCs,
+  // they add no OPF decision variables: the same quasi-steady characteristic
+  // used by hybrid PF is evaluated from the current Vm/Vdc iterate.
+  for (const auto& lcc : prob.data.lcc_converters) {
+    if (!lcc.in_service) continue;
+    const int ac = lcc.ac_bus - 1;
+    const int commutation_ac =
+        powerflow::lcc_commutation_ac_bus(prob.data, lcc);
+    const int dc = lcc.dc_bus - 1;
+    if (ac < 0 || ac >= nb || commutation_ac < 0 ||
+        commutation_ac >= nb || dc < 0 || dc >= ndc) {
+      continue;
+    }
+    const auto [p_ac, q_ac] =
+        powerflow::lcc_ac_injection(prob.data, lcc, vm, vdc);
+    const double p_dc =
+        powerflow::lcc_dc_injection(prob.data, lcc, vm, vdc);
+    g[cidx.i_pbal_ac + ac] -= p_ac * prob.scale_p;
+    g[cidx.i_qbal_ac + ac] -= q_ac * prob.scale_q;
+    g[cidx.i_pbal_dc + dc] -= p_dc;
+  }
+
   // DC-DC converter contributions to DC power balance.
   // Sign convention (正方向): positive p_in = forward transfer (bus_in → bus_out).
   // The OPF variable p_in is INPUT-referenced: the power drawn from bus_in.
@@ -1563,6 +1651,12 @@ void equality_constraints(const Problem& prob,
     // Lossless real-power conservation: Σ_ports P_port = 0.  (loss_percent
     // refinement deferred; PF replays the written-back per-port p_mw regardless.)
     g[cidx.i_er_bal + static_cast<int>(r)] = sum_p;
+  }
+  for (size_t r = 0; r < prob.ac_angle_reference_buses.size(); ++r) {
+    const int bus = prob.ac_angle_reference_buses[r];
+    g[cidx.i_ac_ref + static_cast<int>(r)] =
+        va[bus] -
+        prob.data.ac_buses[static_cast<size_t>(bus)].va_deg * kDegToRad;
   }
   for (size_t r = 0; r < prob.dc_voltage_reference_buses.size(); ++r) {
     const int bus = prob.dc_voltage_reference_buses[r];
@@ -1675,6 +1769,41 @@ void equality_jacobian(const Problem& prob,
     t.emplace_back(row, idx.i_pdc + k, -1.0);
   }
 
+  // LCC AC/DC cross-domain derivatives. The injection helper returns
+  // derivatives in pu/pu; balance rows use the negative-injection convention.
+  for (const auto& lcc : prob.data.lcc_converters) {
+    if (!lcc.in_service) continue;
+    const int ac = lcc.ac_bus - 1;
+    const int commutation_ac =
+        powerflow::lcc_commutation_ac_bus(prob.data, lcc);
+    const int dc = lcc.dc_bus - 1;
+    if (ac < 0 || ac >= nb || commutation_ac < 0 ||
+        commutation_ac >= nb || dc < 0 || dc >= ndc) {
+      continue;
+    }
+    const auto jac =
+        powerflow::lcc_ac_dc_jacobian(prob.data, lcc, vm, vdc);
+    const int col_vm = idx.i_vm + ac;
+    const int col_vm_comm = idx.i_vm + commutation_ac;
+    const int col_vdc = idx.i_vdc + dc;
+    t.emplace_back(cidx.i_pbal_ac + ac, col_vm,
+                   -jac.dpac_dvm * prob.scale_p);
+    t.emplace_back(cidx.i_pbal_ac + ac, col_vdc,
+                   -jac.dpac_dvdc * prob.scale_p);
+    t.emplace_back(cidx.i_qbal_ac + ac, col_vm,
+                   -jac.dqac_dvm * prob.scale_q);
+    t.emplace_back(cidx.i_qbal_ac + ac, col_vdc,
+                   -jac.dqac_dvdc * prob.scale_q);
+    t.emplace_back(cidx.i_pbal_dc + dc, col_vm, -jac.dpdc_dvm);
+    t.emplace_back(cidx.i_pbal_dc + dc, col_vdc, -jac.dpdc_dvdc);
+    t.emplace_back(cidx.i_pbal_ac + ac, col_vm_comm,
+                   -jac.dpac_dvm_comm * prob.scale_p);
+    t.emplace_back(cidx.i_qbal_ac + ac, col_vm_comm,
+                   -jac.dqac_dvm_comm * prob.scale_q);
+    t.emplace_back(cidx.i_pbal_dc + dc, col_vm_comm,
+                   -jac.dpdc_dvm_comm);
+  }
+
   const double eps_iac = std::max(prob.options.eps_iac, 1e-12);
   for (int k = 0; k < idx.n_pac; ++k) {
     const auto& conv = prob.data.converters[static_cast<size_t>(prob.conv_var_to_data[static_cast<size_t>(k)])];
@@ -1767,6 +1896,11 @@ void equality_jacobian(const Problem& prob,
       if (port.router_idx == ri)
         t.emplace_back(cidx.i_er_bal + static_cast<int>(r), idx.i_erp + port.pvar, 1.0);
     }
+  }
+  for (size_t r = 0; r < prob.ac_angle_reference_buses.size(); ++r) {
+    const int bus = prob.ac_angle_reference_buses[r];
+    t.emplace_back(cidx.i_ac_ref + static_cast<int>(r),
+                   idx.i_va + bus, 1.0);
   }
   for (size_t r = 0; r < prob.dc_voltage_reference_buses.size(); ++r) {
     const int bus = prob.dc_voltage_reference_buses[r];
@@ -2260,6 +2394,141 @@ void lagrangian_hessian(const Problem& prob,
         continue;
       }
       add_sym_trip(row, idx.i_vdc + m, lambda_k * gkm);
+    }
+  }
+
+  // LCC equality curvature is local to the unique variables among valve-side
+  // Vm, transformer-primary/commutation Vm, and terminal Vdc. First
+  // derivatives are analytical; differentiating that compact Jacobian here
+  // keeps the Hessian aligned with the piecewise PF characteristic without
+  // duplicating its lengthy Q derivatives. Away from the rated-current
+  // switching surface this is a centered, second-order local derivative. At
+  // the switching kink only the perturbation that stays in the current active
+  // set is used; crossing the kink would create artificial O(1/h) curvature
+  // and stall the KKT step.
+  for (const auto& lcc : prob.data.lcc_converters) {
+    if (!lcc.in_service) continue;
+    const int ac = lcc.ac_bus - 1;
+    const int commutation_ac =
+        powerflow::lcc_commutation_ac_bus(prob.data, lcc);
+    const int dc = lcc.dc_bus - 1;
+    if (ac < 0 || ac >= nb || commutation_ac < 0 ||
+        commutation_ac >= nb || dc < 0 || dc >= ndc) {
+      continue;
+    }
+
+    const double lambda_p =
+        lambda_eq[cidx.i_pbal_ac + ac] * prob.scale_p;
+    const double lambda_q =
+        lambda_eq[cidx.i_qbal_ac + ac] * prob.scale_q;
+    const double lambda_dc = lambda_eq[cidx.i_pbal_dc + dc];
+    if (std::abs(lambda_p) < 1e-14 && std::abs(lambda_q) < 1e-14 &&
+        std::abs(lambda_dc) < 1e-14) {
+      continue;
+    }
+
+    const bool shared_ac_voltage = commutation_ac == ac;
+    const int local_vm = 0;
+    const int local_vm_comm = shared_ac_voltage ? -1 : 1;
+    const int local_vdc = shared_ac_voltage ? 1 : 2;
+    const int n_local = shared_ac_voltage ? 2 : 3;
+    std::vector<int> local_columns;
+    local_columns.reserve(static_cast<size_t>(n_local));
+    local_columns.push_back(idx.i_vm + ac);
+    if (!shared_ac_voltage)
+      local_columns.push_back(idx.i_vm + commutation_ac);
+    local_columns.push_back(idx.i_vdc + dc);
+
+    struct LocalEvaluation {
+      Eigen::VectorXd gradient;
+      bool current_limited{false};
+    };
+    const auto weighted_gradient = [&](const powerflow::LCCJacobian& jac) {
+      Eigen::VectorXd gradient = Eigen::VectorXd::Zero(n_local);
+      gradient[local_vm] =
+          -lambda_p * jac.dpac_dvm - lambda_q * jac.dqac_dvm -
+          lambda_dc * jac.dpdc_dvm;
+      if (!shared_ac_voltage) {
+        gradient[local_vm_comm] =
+            -lambda_p * jac.dpac_dvm_comm -
+            lambda_q * jac.dqac_dvm_comm -
+            lambda_dc * jac.dpdc_dvm_comm;
+      }
+      gradient[local_vdc] =
+          -lambda_p * jac.dpac_dvdc - lambda_q * jac.dqac_dvdc -
+          lambda_dc * jac.dpdc_dvdc;
+      return gradient;
+    };
+    const auto evaluate = [&](int perturbed_local, double delta) {
+      Eigen::VectorXd vm_eval(vm);
+      Eigen::VectorXd vdc_eval(vdc);
+      if (perturbed_local == local_vm) {
+        vm_eval[ac] += delta;
+      } else if (!shared_ac_voltage &&
+                 perturbed_local == local_vm_comm) {
+        vm_eval[commutation_ac] += delta;
+      } else if (perturbed_local == local_vdc) {
+        vdc_eval[dc] += delta;
+      }
+      const auto jac = powerflow::lcc_ac_dc_jacobian(
+          prob.data, lcc, vm_eval, vdc_eval);
+      const double terminal_e_kv =
+          std::max(vm_eval[ac], 0.0) * lcc.vn_ac_kv;
+      const double commutation_e_kv =
+          powerflow::lcc_commutation_voltage_kv(prob.data, lcc, vm_eval);
+      const double ud_kv =
+          vdc_eval[dc] * powerflow::lcc_dc_base_kv(prob.data, lcc);
+      const auto op = powerflow::lcc_operating_point(
+          lcc, terminal_e_kv, commutation_e_kv, ud_kv);
+      return LocalEvaluation{weighted_gradient(jac), op.id_at_limit};
+    };
+    const auto derivative_in_active_set =
+        [](double plus, bool plus_active,
+           double centre, bool centre_active,
+           double minus, bool minus_active, double step) {
+          if (plus_active == centre_active && minus_active == centre_active)
+            return (plus - minus) / (2.0 * step);
+          if (plus_active == centre_active)
+            return (plus - centre) / step;
+          if (minus_active == centre_active)
+            return (centre - minus) / step;
+          return 0.0;
+        };
+
+    const LocalEvaluation centre = evaluate(-1, 0.0);
+    Eigen::MatrixXd local_hessian =
+        Eigen::MatrixXd::Zero(n_local, n_local);
+    for (int j = 0; j < n_local; ++j) {
+      double value = vdc[dc];
+      if (j == local_vm) {
+        value = vm[ac];
+      } else if (!shared_ac_voltage && j == local_vm_comm) {
+        value = vm[commutation_ac];
+      }
+      const double step = 1e-5 * std::max(1.0, std::abs(value));
+      const LocalEvaluation plus = evaluate(j, step);
+      const LocalEvaluation minus = evaluate(j, -step);
+      for (int i = 0; i < n_local; ++i) {
+        local_hessian(i, j) = derivative_in_active_set(
+            plus.gradient[i], plus.current_limited,
+            centre.gradient[i], centre.current_limited,
+            minus.gradient[i], minus.current_limited, step);
+      }
+    }
+    local_hessian =
+        (0.5 * (local_hessian + local_hessian.transpose())).eval();
+    for (int i = 0; i < n_local; ++i) {
+      for (int j = 0; j <= i; ++j) {
+        const double value = local_hessian(i, j);
+        if (!std::isfinite(value)) continue;
+        if (i == j) {
+          add(local_columns[static_cast<size_t>(i)],
+              local_columns[static_cast<size_t>(j)], value);
+        } else {
+          add_sym_trip(local_columns[static_cast<size_t>(i)],
+                       local_columns[static_cast<size_t>(j)], value);
+        }
+      }
     }
   }
 

@@ -2770,10 +2770,12 @@ const std::vector<ComponentIOMapping>& registry() {
           "Native solver keeps AC/DC coupling; GridLAB-D can optionally see the "
           "AC boundary injection only."),
       row("LCCConverter", "lcc_converters", D::Hybrid, P::Exact,
-          P::Unsupported, P::Unsupported, P::Unsupported, V::NativeSolver,
-          "LCCConverter (model only)", "", "",
-          "Quasi-steady LCC HVDC station (BD/LD card model); native solvers do "
-          "not consume it yet — solver coupling is the next milestone."),
+          P::Projected, P::Unsupported, P::Unsupported, V::NativeSolver,
+          "LCCConverter", "", "",
+          "Quasi-steady LCC HVDC station (BD/LD card model); canonical "
+          "projection preserves the station with remapped AC/DC references, "
+          "and unified Newton PF plus shared Parity/Ipopt OPF consume its "
+          "native AC-P/AC-Q/DC coupling."),
       row("EnergyRouter", "energy_routers", D::Hybrid, P::Exact, P::Projected,
           P::BoundaryInjection, P::Unsupported, V::NativeSolver,
           "VSCConverter/DCDCConverter expansion", "boundary injection", "",

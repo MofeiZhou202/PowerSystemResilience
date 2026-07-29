@@ -84,6 +84,11 @@ struct ACOPFResult {
   std::vector<double> pac_mw;
   std::vector<double> qac_mvar;
 
+  /// LCC quasi-steady operating points evaluated at the optimized AC/DC
+  /// voltages. Entries are keyed by LCCConverter.index and use authored bus
+  /// identifiers, matching PowerFlowResult::lcc_transfers.
+  std::vector<LCCTransfer> lcc_transfers;
+
   std::vector<double> pren_mw;
   std::vector<double> qren_mvar;
   std::vector<double> pstor_mw;

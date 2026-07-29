@@ -333,8 +333,14 @@ static json ac_branch_to_json(const ACBranch& br) {
   j["rate_a_mva"] = br.rate_a_mva;
   j["rate_b_mva"] = br.rate_b_mva;
   j["rate_c_mva"] = br.rate_c_mva;
+  j["n_parallel"] = br.n_parallel;
   j["in_service"] = br.in_service;
   j["name"] = br.name;
+  const bool transformer_like =
+      br.name.rfind("T_", 0) == 0 || br.vn_hv_kv > 0.0 ||
+      br.vn_lv_kv > 0.0 || br.sn_mva > 0.0 ||
+      std::abs(br.tap - 1.0) > 1e-8 || std::abs(br.shift_deg) > 1e-8;
+  j["branch_kind"] = transformer_like ? "transformer" : "line";
   j["length_km"] = br.length_km;
   j["r_ohm_per_km"] = br.r_ohm_per_km;
   j["x_ohm_per_km"] = br.x_ohm_per_km;
@@ -351,6 +357,9 @@ static json ac_branch_to_json(const ACBranch& br) {
   j["b0_pu"] = br.b0_pu;
   j["failure_rate"] = br.failure_rate;
   j["mttr_hr"] = br.mttr_hr;
+  j["vn_hv_kv"] = br.vn_hv_kv;
+  j["vn_lv_kv"] = br.vn_lv_kv;
+  j["sn_mva"] = br.sn_mva;
   j["dynamic_rl"] = br.dynamic_rl;
   return j;
 }
@@ -368,6 +377,7 @@ static ACBranch ac_branch_from_json(const json& j) {
   br.rate_a_mva = jget(j, "rate_a_mva", 0.0);
   br.rate_b_mva = jget(j, "rate_b_mva", 0.0);
   br.rate_c_mva = jget(j, "rate_c_mva", 0.0);
+  br.n_parallel = jget(j, "n_parallel", 1);
   br.in_service = jget(j, "in_service", true);
   br.name = jget<std::string>(j, "name", "");
   br.length_km = jget(j, "length_km", 0.0);
@@ -386,6 +396,9 @@ static ACBranch ac_branch_from_json(const json& j) {
   br.b0_pu = jget(j, "b0_pu", 0.0);
   br.failure_rate = jget(j, "failure_rate", 0.0);
   br.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
+  br.vn_hv_kv = jget(j, "vn_hv_kv", 0.0);
+  br.vn_lv_kv = jget(j, "vn_lv_kv", 0.0);
+  br.sn_mva = jget(j, "sn_mva", 0.0);
   br.dynamic_rl = jget(j, "dynamic_rl", false);
   return br;
 }
@@ -1104,7 +1117,13 @@ static json lcc_to_json(const LCCConverter& c) {
   j["alpha_set_deg"] = c.alpha_set_deg;
   j["gamma_set_deg"] = c.gamma_set_deg;
   j["v_dc_set_kv"] = c.v_dc_set_kv;
+  j["external_control_code"] = c.external_control_code;
+  j["tap_control_modelled"] = c.tap_control_modelled;
   j["converter_transformer_branch"] = c.converter_transformer_branch;
+  j["transformer_tap_min_pu"] = c.transformer_tap_min_pu;
+  j["transformer_tap_max_pu"] = c.transformer_tap_max_pu;
+  j["transformer_tap_steps"] = c.transformer_tap_steps;
+  j["transformer_tap_winding"] = c.transformer_tap_winding;
   j["model_scope"] = c.model_scope;
   j["model_limitations"] = c.model_limitations;
   return j;
@@ -1138,7 +1157,14 @@ static LCCConverter lcc_from_json(const json& j) {
   c.alpha_set_deg = jget(j, "alpha_set_deg", 0.0);
   c.gamma_set_deg = jget(j, "gamma_set_deg", 0.0);
   c.v_dc_set_kv = jget(j, "v_dc_set_kv", 0.0);
+  c.external_control_code =
+      jget<std::string>(j, "external_control_code", "");
+  c.tap_control_modelled = jget(j, "tap_control_modelled", false);
   c.converter_transformer_branch = jget(j, "converter_transformer_branch", -1);
+  c.transformer_tap_min_pu = jget(j, "transformer_tap_min_pu", 0.0);
+  c.transformer_tap_max_pu = jget(j, "transformer_tap_max_pu", 0.0);
+  c.transformer_tap_steps = jget(j, "transformer_tap_steps", 0);
+  c.transformer_tap_winding = jget(j, "transformer_tap_winding", 0);
   c.model_scope = jget<std::string>(j, "model_scope", "");
   c.model_limitations = jget<std::string>(j, "model_limitations", "");
   return c;
@@ -3338,6 +3364,66 @@ Result<HybridPowerSystem> try_load_json(const std::string& path,
   }
 }
 
+static json lcc_transfer_to_json(const LCCTransfer& transfer) {
+  return {
+      {"index", transfer.index},
+      {"bus_ac", transfer.bus_ac},
+      {"bus_dc", transfer.bus_dc},
+      {"station_role", transfer.station_role},
+      {"control_mode", transfer.control_mode},
+      {"alpha_deg", transfer.alpha_deg},
+      {"gamma_deg", transfer.gamma_deg},
+      {"ud0_kv", transfer.ud0_kv},
+      {"ud_kv", transfer.ud_kv},
+      {"id_ka", transfer.id_ka},
+      {"p_ac_mw", transfer.p_ac_mw},
+      {"q_ac_mvar", transfer.q_ac_mvar},
+      {"p_dc_mw", transfer.p_dc_mw},
+      {"transformer_tap", transfer.transformer_tap},
+      {"tap_target_angle_deg", transfer.tap_target_angle_deg},
+      {"tap_control_iterations", transfer.tap_control_iterations},
+      {"tap_control_active", transfer.tap_control_active},
+      {"tap_control_converged", transfer.tap_control_converged},
+      {"tap_at_limit", transfer.tap_at_limit},
+      {"id_at_limit", transfer.id_at_limit},
+      {"alpha_within_limits", transfer.alpha_within_limits},
+      {"gamma_within_limits", transfer.gamma_within_limits},
+  };
+}
+
+static LCCTransfer lcc_transfer_from_json(const json& j) {
+  LCCTransfer transfer;
+  transfer.index = jget(j, "index", 0);
+  transfer.bus_ac = jget(j, "bus_ac", 0);
+  transfer.bus_dc = jget(j, "bus_dc", 0);
+  transfer.station_role = jget(j, "station_role", 0);
+  transfer.control_mode = jget(j, "control_mode", 0);
+  transfer.alpha_deg = jget(j, "alpha_deg", 0.0);
+  transfer.gamma_deg = jget(j, "gamma_deg", 0.0);
+  transfer.ud0_kv = jget(j, "ud0_kv", 0.0);
+  transfer.ud_kv = jget(j, "ud_kv", 0.0);
+  transfer.id_ka = jget(j, "id_ka", 0.0);
+  transfer.p_ac_mw = jget(j, "p_ac_mw", 0.0);
+  transfer.q_ac_mvar = jget(j, "q_ac_mvar", 0.0);
+  transfer.p_dc_mw = jget(j, "p_dc_mw", 0.0);
+  transfer.transformer_tap = jget(j, "transformer_tap", 1.0);
+  transfer.tap_target_angle_deg =
+      jget(j, "tap_target_angle_deg", 0.0);
+  transfer.tap_control_iterations =
+      jget(j, "tap_control_iterations", 0);
+  transfer.tap_control_active =
+      jget(j, "tap_control_active", false);
+  transfer.tap_control_converged =
+      jget(j, "tap_control_converged", false);
+  transfer.tap_at_limit = jget(j, "tap_at_limit", false);
+  transfer.id_at_limit = jget(j, "id_at_limit", false);
+  transfer.alpha_within_limits =
+      jget(j, "alpha_within_limits", true);
+  transfer.gamma_within_limits =
+      jget(j, "gamma_within_limits", true);
+  return transfer;
+}
+
 std::string power_flow_result_to_json(const HybridPowerSystem& sys,
                                       const PowerFlowResult& result,
                                       int indent) {
@@ -3484,6 +3570,11 @@ std::string power_flow_result_to_json(const HybridPowerSystem& sys,
   }
   root["vsc_transfers"] = std::move(vsc_transfers);
 
+  json lcc_transfers = json::array();
+  for (const auto& transfer : result.lcc_transfers)
+    lcc_transfers.push_back(lcc_transfer_to_json(transfer));
+  root["lcc_transfers"] = std::move(lcc_transfers);
+
   json dcdc_transfers = json::array();
   for (const auto& transfer : result.dcdc_transfers) {
     dcdc_transfers.push_back({
@@ -3541,6 +3632,9 @@ std::string opf_result_to_json(const opf::ACOPFResult& result, int indent) {
   j["dqd_mvar"] = result.dqd_mvar;
   j["pac_mw"] = result.pac_mw;
   j["qac_mvar"] = result.qac_mvar;
+  j["lcc_transfers"] = json::array();
+  for (const auto& transfer : result.lcc_transfers)
+    j["lcc_transfers"].push_back(lcc_transfer_to_json(transfer));
 
   // Enhanced component dispatch vectors with identity metadata.
   // Each category is serialized as an object with "values" (the dispatch
@@ -3710,6 +3804,10 @@ opf::ACOPFResult opf_result_from_json(const std::string& json_str) {
   if (j.contains("dqd_mvar")) r.dqd_mvar = j["dqd_mvar"].get<std::vector<double>>();
   if (j.contains("pac_mw")) r.pac_mw = j["pac_mw"].get<std::vector<double>>();
   if (j.contains("qac_mvar")) r.qac_mvar = j["qac_mvar"].get<std::vector<double>>();
+  if (j.contains("lcc_transfers") && j["lcc_transfers"].is_array()) {
+    for (const auto& transfer : j["lcc_transfers"])
+      r.lcc_transfers.push_back(lcc_transfer_from_json(transfer));
+  }
 
   // Enhanced component dispatch vectors
   if (j.contains("pren_mw")) r.pren_mw = j["pren_mw"].get<std::vector<double>>();

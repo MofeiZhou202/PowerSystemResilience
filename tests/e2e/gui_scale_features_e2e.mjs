@@ -16,7 +16,8 @@
 //
 // Usage:
 //   node tests/e2e/gui_scale_features_e2e.mjs \
-//        [--server build/macos-release/run_gui_server] [--data-dir data] [--port 0]
+//        [--server build/macos-release/run_gui_server] [--data-dir data]
+//        [--port 0] [--browser-channel msedge]
 //
 // Exit code 0 on success, 1 on any failed assertion. Starts (and stops) the GUI
 // server itself unless --base-url points at an already-running instance.
@@ -27,8 +28,9 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
+import { fileURLToPath } from 'node:url';
 
-const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..');
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 function arg(name, def) {
   const i = process.argv.indexOf(`--${name}`);
@@ -112,7 +114,10 @@ async function main() {
     if (!cond) failures++;
   };
 
-  const browser = await chromium.launch();
+  const browserChannel = arg('browser-channel', null);
+  const browser = await chromium.launch(
+    browserChannel ? { channel: browserChannel } : {},
+  );
   try {
     const page = await browser.newPage();
     page.on('pageerror', (e) => { console.error('  [pageerror]', e.message); failures++; });
@@ -316,6 +321,7 @@ async function main() {
     }));
     check(bpaImport.buses === 39 && bpaImport.importButton && bpaImport.exportButton,
       'model IO imports a BPA/DSP DAT file through the binary-safe frontend path');
+
     const bpaDownloadPromise = page.waitForEvent('download');
     await page.locator('#btnIoExportBpaDat').click();
     const bpaDownload = await bpaDownloadPromise;
@@ -324,6 +330,70 @@ async function main() {
     check(bpaDownload.suggestedFilename().endsWith('.dat') &&
           bpaExportText.includes('A0000001') && bpaExportText.includes('(END)'),
       'model IO downloads a fixed-column BPA/DSP DAT export');
+
+    const lccImportResponse = page.waitForResponse(response =>
+      response.url().includes('/api/session/load_bpa_dat') && response.status() === 200);
+    await page.locator('#fileImportBpaDat').setInputFiles(path.join(REPO_ROOT, 'data', 'dsp', 'cigre.dat'));
+    await lccImportResponse;
+    await page.waitForFunction(() => Canvas.buildSystemJson().lcc_converters?.length === 2);
+    const lccImport = await page.evaluate(() => {
+      const maps = Canvas.getCompBusMap();
+      const system = Canvas.buildSystemJson();
+      return {
+        converters: system.lcc_converters?.length || 0,
+        mappedIds: Object.keys(maps.lcc || {}).sort(),
+        jsonContractOk: (system.lcc_converters || []).every(lcc =>
+          Number.isFinite(Number(lcc.ac_bus)) &&
+          Number.isFinite(Number(lcc.dc_bus)) &&
+          !Object.prototype.hasOwnProperty.call(lcc, 'bus_ac') &&
+          !Object.prototype.hasOwnProperty.call(lcc, 'bus_dc')),
+        controlMetadataOk:
+          system.lcc_converters?.[0]?.external_control_code === 'PAAL' &&
+          system.lcc_converters?.[1]?.external_control_code === 'VDGA' &&
+          system.lcc_converters.every(lcc =>
+            lcc.tap_control_modelled === false),
+      };
+    });
+    check(lccImport.converters === 2 &&
+          JSON.stringify(lccImport.mappedIds) === JSON.stringify(['0', '1']) &&
+          lccImport.jsonContractOk && lccImport.controlMetadataOk,
+      'model IO maps imported BPA/DSP LCC converters and preserves the C++ JSON contract');
+
+    const lccRoundTrip = await page.evaluate(async () => {
+      const system = Canvas.buildSystemJson();
+      const response = await fetch(window.location.origin + '/api/session/load_json_string', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ json_string: JSON.stringify(system) }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      let restored = {};
+      try {
+        restored = JSON.parse(payload._raw_json || '{}');
+      } catch (_) {
+        restored = {};
+      }
+      return {
+        ok: response.ok,
+        status: response.status,
+        error: payload.error || '',
+        converters: restored.lcc_converters?.length || 0,
+        jsonContractOk: (restored.lcc_converters || []).every(lcc =>
+          Number.isFinite(Number(lcc.ac_bus)) &&
+          Number.isFinite(Number(lcc.dc_bus)) &&
+          !Object.prototype.hasOwnProperty.call(lcc, 'bus_ac') &&
+          !Object.prototype.hasOwnProperty.call(lcc, 'bus_dc')),
+        controlMetadataOk:
+          restored.lcc_converters?.[0]?.external_control_code === 'PAAL' &&
+          restored.lcc_converters?.[1]?.external_control_code === 'VDGA' &&
+          restored.lcc_converters.every(lcc =>
+            lcc.tap_control_modelled === false),
+      };
+    });
+    check(lccRoundTrip.ok && lccRoundTrip.converters === 2 &&
+          lccRoundTrip.jsonContractOk && lccRoundTrip.controlMetadataOk,
+      'C++ accepts canvas-rebuilt LCC JSON and preserves both converters ' +
+      '(HTTP ' + lccRoundTrip.status + ': ' + (lccRoundTrip.error || 'ok') + ')');
 
     // ---- 1) Large case -> WebGL overview, PF + OPF run against the backend ----
     const big = await page.evaluate(async (caseName) => {

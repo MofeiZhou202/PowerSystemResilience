@@ -9,18 +9,25 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <cmath>
 #include <iostream>
 #include <string>
+#include <vector>
 
 #include "hacdcpf/io/case_builders.hpp"
+#include "hacdcpf/io/bpa_io.hpp"
+#include "hacdcpf/io/json_io.hpp"
 #include "hacdcpf/io/matpower_parser.hpp"
 #include "hacdcpf/optimal_power_flow/ac_opf_solver.hpp"
+#include "hacdcpf/optimal_power_flow/dc_opf_solver.hpp"
 #include "hacdcpf/optimal_power_flow/formulation.hpp"
 #include "hacdcpf/optimal_power_flow/opf_options.hpp"
 #include "hacdcpf/optimal_power_flow/opf_result.hpp"
+#include "hacdcpf/power_flow/hybrid.hpp"
+#include "hacdcpf/power_flow/lcc_model.hpp"
 
 #ifndef HACDCPF_MATPOWER_DATA_DIR
 #define HACDCPF_MATPOWER_DATA_DIR "../../external_data/matpower"
@@ -298,6 +305,576 @@ TEST_CASE("DC slack KCL Jacobian matches finite differences",
     const Eigen::VectorXd analytic = Eigen::VectorXd(jacobian.col(col));
     CHECK((analytic - finite_difference).lpNorm<Eigen::Infinity>() < 1e-6);
   }
+}
+
+TEST_CASE("LCC parity balance Jacobian matches finite differences",
+          "[opf][acdc][lcc][jacobian]") {
+  const auto imported = io::parse_bpa_dat("../../data/dsp/2DC.dat");
+  REQUIRE_FALSE(imported.report.has_errors());
+  REQUIRE(imported.system.lcc_converters.size() == 2);
+
+  const opf::parity::Problem prob = opf::parity::build_problem(imported.system);
+  REQUIRE(prob.data.lcc_converters.size() == 2);
+  Eigen::VectorXd xmin, xmax, x;
+  opf::parity::build_variable_bounds(prob, xmin, xmax);
+  opf::parity::build_initial_point(prob, xmin, xmax, x);
+
+  const PowerFlowResult pf = powerflow::solve_hybrid(imported.system);
+  REQUIRE(pf.converged);
+  REQUIRE(pf.vm.size() == static_cast<size_t>(prob.vidx.n_vm));
+  REQUIRE(pf.vdc.size() == static_cast<size_t>(prob.vidx.n_vdc));
+  for (int i = 0; i < prob.vidx.n_vm; ++i)
+    x[prob.vidx.i_vm + i] = pf.vm[static_cast<size_t>(i)];
+  for (int i = 0; i < prob.vidx.n_vdc; ++i)
+    x[prob.vidx.i_vdc + i] = pf.vdc[static_cast<size_t>(i)];
+  // Both DSP schedules sit on I_rated. Move fixed-power stations just off the
+  // clamp kink and place characteristic-controlled stations at 90% rated
+  // current by solving their public inverse characteristic.
+  for (const auto& lcc : prob.data.lcc_converters) {
+    const int dc = lcc.dc_bus - 1;
+    if (lcc.control_mode == LCCControlMode::ConstantPower) {
+      x[prob.vidx.i_vdc + dc] += 1e-4;
+      continue;
+    }
+    if (lcc.control_mode != LCCControlMode::ConstantGamma &&
+        lcc.control_mode != LCCControlMode::ConstantAlpha) {
+      continue;
+    }
+    REQUIRE(lcc.rated_current_a > 0.0);
+    const int commutation_ac =
+        powerflow::lcc_commutation_ac_bus(prob.data, lcc);
+    const double desired_id_ka =
+        0.9 * lcc.rated_current_a * 1e-3;
+    const double ud_kv =
+        x[prob.vidx.i_vdc + dc] *
+        powerflow::lcc_dc_base_kv(prob.data, lcc);
+    const double angle_deg =
+        lcc.control_mode == LCCControlMode::ConstantGamma
+            ? lcc.gamma_set_deg
+            : lcc.alpha_set_deg;
+    const double required_e_kv =
+        powerflow::lcc_required_valve_voltage_kv(
+            lcc, ud_kv, desired_id_ka, angle_deg);
+    const double sensitivity =
+        powerflow::lcc_commutation_voltage_sensitivity_kv_per_pu(
+            prob.data, lcc);
+    REQUIRE(commutation_ac >= 0);
+    REQUIRE(required_e_kv > 0.0);
+    REQUIRE(sensitivity > 0.0);
+    x[prob.vidx.i_vm + commutation_ac] = required_e_kv / sensitivity;
+
+    const double terminal_e_kv =
+        x[prob.vidx.i_vm + lcc.ac_bus - 1] * lcc.vn_ac_kv;
+    const auto operating_point = powerflow::lcc_operating_point(
+        lcc, terminal_e_kv, required_e_kv, ud_kv);
+    REQUIRE(operating_point.valid);
+    REQUIRE_FALSE(operating_point.id_at_limit);
+    CHECK(std::abs(operating_point.id_ka - desired_id_ka) < 1e-10);
+  }
+
+  opf::parity::EvalWorkspace ws;
+  Eigen::VectorXd g;
+  Eigen::SparseMatrix<double> jacobian;
+  opf::parity::equality_constraints(prob, x, ws, g);
+  opf::parity::equality_jacobian(prob, x, ws, jacobian);
+
+  constexpr double eps = 1e-7;
+  bool saw_distinct_commutation_bus = false;
+  bool saw_nonzero_commutation_derivative = false;
+  for (const auto& lcc : prob.data.lcc_converters) {
+    const int ac = lcc.ac_bus - 1;
+    const int commutation_ac =
+        powerflow::lcc_commutation_ac_bus(prob.data, lcc);
+    const int dc = lcc.dc_bus - 1;
+    std::vector<int> columns{prob.vidx.i_vm + ac};
+    if (commutation_ac != ac) {
+      saw_distinct_commutation_bus = true;
+      columns.push_back(prob.vidx.i_vm + commutation_ac);
+    }
+    columns.push_back(prob.vidx.i_vdc + dc);
+    for (const int col : columns) {
+      Eigen::VectorXd xp = x;
+      Eigen::VectorXd xm = x;
+      xp[col] += eps;
+      xm[col] -= eps;
+      opf::parity::EvalWorkspace wsp, wsm;
+      Eigen::VectorXd gp, gm;
+      opf::parity::equality_constraints(prob, xp, wsp, gp);
+      opf::parity::equality_constraints(prob, xm, wsm, gm);
+      const Eigen::VectorXd fd = (gp - gm) / (2.0 * eps);
+      for (const int row : {prob.cidx.i_pbal_ac + ac,
+                            prob.cidx.i_qbal_ac + ac,
+                            prob.cidx.i_pbal_dc + dc}) {
+        INFO("lcc=" << lcc.index << " row=" << row << " col=" << col
+                    << " analytic=" << jacobian.coeff(row, col)
+                    << " fd=" << fd[row]);
+        CHECK(std::abs(jacobian.coeff(row, col) - fd[row]) < 2e-5);
+        if (commutation_ac != ac &&
+            col == prob.vidx.i_vm + commutation_ac &&
+            std::abs(jacobian.coeff(row, col)) > 1e-8) {
+          saw_nonzero_commutation_derivative = true;
+        }
+      }
+    }
+  }
+  CHECK(saw_distinct_commutation_bus);
+  CHECK(saw_nonzero_commutation_derivative);
+}
+
+TEST_CASE("Transformer-aware LCC parity Hessian matches Jacobian differences",
+          "[opf][acdc][lcc][hessian][derivatives]") {
+  const auto imported = io::parse_bpa_dat("../../data/dsp/2DC.dat");
+  REQUIRE_FALSE(imported.report.has_errors());
+  REQUIRE(imported.system.lcc_converters.size() == 2);
+
+  const opf::parity::Problem prob =
+      opf::parity::build_problem(imported.system);
+  const auto target = std::find_if(
+      prob.data.lcc_converters.begin(), prob.data.lcc_converters.end(),
+      [&](const LCCConverter& lcc) {
+        return lcc.in_service &&
+               lcc.control_mode == LCCControlMode::ConstantGamma &&
+               powerflow::lcc_commutation_ac_bus(prob.data, lcc) !=
+                   lcc.ac_bus - 1;
+      });
+  REQUIRE(target != prob.data.lcc_converters.end());
+
+  Eigen::VectorXd xmin, xmax, x;
+  opf::parity::build_variable_bounds(prob, xmin, xmax);
+  opf::parity::build_initial_point(prob, xmin, xmax, x);
+  const PowerFlowResult pf = powerflow::solve_hybrid(imported.system);
+  REQUIRE(pf.converged);
+  REQUIRE(pf.vm.size() == static_cast<size_t>(prob.vidx.n_vm));
+  REQUIRE(pf.vdc.size() == static_cast<size_t>(prob.vidx.n_vdc));
+  for (int i = 0; i < prob.vidx.n_vm; ++i)
+    x[prob.vidx.i_vm + i] = pf.vm[static_cast<size_t>(i)];
+  for (int i = 0; i < prob.vidx.n_vdc; ++i)
+    x[prob.vidx.i_vdc + i] = pf.vdc[static_cast<size_t>(i)];
+
+  const int ac = target->ac_bus - 1;
+  const int commutation_ac =
+      powerflow::lcc_commutation_ac_bus(prob.data, *target);
+  const int dc = target->dc_bus - 1;
+  REQUIRE(commutation_ac >= 0);
+  REQUIRE(commutation_ac != ac);
+  // The fixed imported tap places the calibrated point on the current clamp.
+  // Keep the physical 3 kA limit and use the public inverse characteristic to
+  // construct a smooth ConstantGamma point at 90% rated current.
+  REQUIRE(target->rated_current_a > 0.0);
+  const double desired_id_ka =
+      0.9 * target->rated_current_a * 1e-3;
+  const double ud_kv =
+      x[prob.vidx.i_vdc + dc] *
+      powerflow::lcc_dc_base_kv(prob.data, *target);
+  const double required_e_kv =
+      powerflow::lcc_required_valve_voltage_kv(
+          *target, ud_kv, desired_id_ka, target->gamma_set_deg);
+  const double sensitivity =
+      powerflow::lcc_commutation_voltage_sensitivity_kv_per_pu(
+          prob.data, *target);
+  REQUIRE(required_e_kv > 0.0);
+  REQUIRE(sensitivity > 0.0);
+  x[prob.vidx.i_vm + commutation_ac] = required_e_kv / sensitivity;
+
+  const double terminal_e_kv =
+      x[prob.vidx.i_vm + ac] * target->vn_ac_kv;
+  const auto operating_point = powerflow::lcc_operating_point(
+      *target, terminal_e_kv, required_e_kv, ud_kv);
+  REQUIRE(operating_point.valid);
+  REQUIRE_FALSE(operating_point.id_at_limit);
+  CHECK(std::abs(operating_point.id_ka - desired_id_ka) < 1e-10);
+  CHECK(std::abs(operating_point.gamma_deg - target->gamma_set_deg) <
+        1e-10);
+  REQUIRE(operating_point.ud0_kv > 0.0);
+  CHECK(ud_kv / operating_point.ud0_kv < 0.95);
+
+  HybridPowerSystem without_lcc = imported.system;
+  for (auto& lcc : without_lcc.lcc_converters) lcc.in_service = false;
+  const opf::parity::Problem baseline =
+      opf::parity::build_problem(without_lcc);
+  REQUIRE(baseline.vidx.n_total == prob.vidx.n_total);
+
+  Eigen::VectorXd lambda =
+      Eigen::VectorXd::Zero(prob.cidx.n_eq_total);
+  Eigen::VectorXd baseline_lambda =
+      Eigen::VectorXd::Zero(baseline.cidx.n_eq_total);
+  const auto set_multipliers = [&](const opf::parity::Problem& problem,
+                                   Eigen::VectorXd& values) {
+    values[problem.cidx.i_pbal_ac + ac] = 0.7;
+    values[problem.cidx.i_qbal_ac + ac] = -0.4;
+    values[problem.cidx.i_pbal_dc + dc] = 0.3;
+  };
+  set_multipliers(prob, lambda);
+  set_multipliers(baseline, baseline_lambda);
+
+  Eigen::SparseMatrix<double> hessian, baseline_hessian;
+  opf::parity::lagrangian_hessian(
+      prob, x, lambda, nullptr, hessian);
+  opf::parity::lagrangian_hessian(
+      baseline, x, baseline_lambda, nullptr, baseline_hessian);
+  const Eigen::MatrixXd isolated_hessian =
+      Eigen::MatrixXd(hessian) - Eigen::MatrixXd(baseline_hessian);
+  CHECK((isolated_hessian - isolated_hessian.transpose())
+            .cwiseAbs()
+            .maxCoeff() < 1e-10);
+
+  const auto equality_gradient =
+      [](const opf::parity::Problem& problem,
+         const Eigen::VectorXd& state,
+         const Eigen::VectorXd& multipliers) {
+        opf::parity::EvalWorkspace workspace;
+        Eigen::VectorXd constraints;
+        Eigen::SparseMatrix<double> jacobian;
+        opf::parity::equality_constraints(
+            problem, state, workspace, constraints);
+        opf::parity::equality_jacobian(
+            problem, state, workspace, jacobian);
+        Eigen::VectorXd gradient = jacobian.transpose() * multipliers;
+        return gradient;
+      };
+  const auto isolated_gradient =
+      [&](const Eigen::VectorXd& state) -> Eigen::VectorXd {
+    const Eigen::VectorXd with_lcc =
+        equality_gradient(prob, state, lambda);
+    const Eigen::VectorXd without_lcc =
+        equality_gradient(baseline, state, baseline_lambda);
+    return with_lcc - without_lcc;
+  };
+
+  const std::vector<int> local_columns{
+      prob.vidx.i_vm + ac,
+      prob.vidx.i_vm + commutation_ac,
+      prob.vidx.i_vdc + dc,
+  };
+  const Eigen::VectorXd centre_gradient = isolated_gradient(x);
+  Eigen::VectorXd state_vm(prob.vidx.n_vm);
+  Eigen::VectorXd state_vdc(prob.vidx.n_vdc);
+  for (int i = 0; i < prob.vidx.n_vm; ++i)
+    state_vm[i] = x[prob.vidx.i_vm + i];
+  for (int i = 0; i < prob.vidx.n_vdc; ++i)
+    state_vdc[i] = x[prob.vidx.i_vdc + i];
+  const auto target_jacobian = powerflow::lcc_ac_dc_jacobian(
+      prob.data, *target, state_vm, state_vdc);
+  CHECK(std::abs(target_jacobian.dpac_dvm_comm) +
+            std::abs(target_jacobian.dqac_dvm_comm) +
+            std::abs(target_jacobian.dpdc_dvm_comm) >
+        1e-4);
+  INFO("isolated LCC gradient: valve="
+       << centre_gradient[local_columns[0]]
+       << " commutation=" << centre_gradient[local_columns[1]]
+       << " vdc=" << centre_gradient[local_columns[2]]
+       << " commutation jac=[" << target_jacobian.dpac_dvm_comm << ","
+       << target_jacobian.dqac_dvm_comm << ","
+       << target_jacobian.dpdc_dvm_comm << "]");
+  double max_commutation_curvature = 0.0;
+  for (const int col : local_columns) {
+    const double step =
+        2e-6 * std::max(1.0, std::abs(x[col]));
+    Eigen::VectorXd xp = x;
+    Eigen::VectorXd xm = x;
+    xp[col] += step;
+    xm[col] -= step;
+    const Eigen::VectorXd finite_difference =
+        (isolated_gradient(xp) - isolated_gradient(xm)) /
+        (2.0 * step);
+    for (const int row : local_columns) {
+      const double analytic = isolated_hessian(row, col);
+      const double numeric = finite_difference[row];
+      const double tolerance =
+          5e-3 * std::max({1.0, std::abs(analytic), std::abs(numeric)});
+      INFO("row=" << row << " col=" << col
+                   << " analytic=" << analytic
+                   << " numeric=" << numeric
+                   << " tolerance=" << tolerance);
+      CHECK(std::abs(analytic - numeric) < tolerance);
+      if (row == prob.vidx.i_vm + commutation_ac ||
+          col == prob.vidx.i_vm + commutation_ac) {
+        max_commutation_curvature =
+            std::max(max_commutation_curvature, std::abs(analytic));
+      }
+    }
+  }
+  CHECK(max_commutation_curvature > 1e-4);
+}
+
+TEST_CASE("Raw CIGRE LCC OPF converges and a bounded variant fails safely",
+          "[opf][acdc][lcc][regression][raw-cigre]") {
+  const auto imported = io::parse_bpa_dat("../../data/dsp/cigre.dat");
+  REQUIRE_FALSE(imported.report.has_errors());
+  REQUIRE(imported.system.dc.branches.size() == 1);
+  REQUIRE(imported.system.lcc_converters.size() == 2);
+  REQUIRE(imported.system.ac.generators.size() == 2);
+
+  // The LD card is a 10 ohm link. On the 500 kV / 100 MVA base this is
+  // r_pu=0.004 and produces the calibrated 1500 -> 1410 MW transfer. The OPF
+  // failure contract must never be obtained by deleting that physical loss.
+  CHECK(std::abs(imported.system.dc.branches[0].r_pu - 0.004) < 1e-12);
+  const PowerFlowResult pf = powerflow::solve_hybrid(imported.system);
+  REQUIRE(pf.converged);
+  REQUIRE(pf.lcc_transfers.size() == 2);
+  const double dc_loss_mw = pf.lcc_transfers[0].p_dc_mw +
+                            pf.lcc_transfers[1].p_dc_mw;
+  CHECK(std::abs(dc_loss_mw - 90.0) < 2.0);
+  const opf::parity::Problem raw_problem =
+      opf::parity::build_problem(imported.system);
+  REQUIRE(raw_problem.ac_angle_reference_buses.size() == 2);
+  REQUIRE(raw_problem.cidx.n_ac_ref == 2);
+
+  // BS is a balancing-machine declaration: its card has no Pmin field and DSP
+  // permits negative output. The PF-derived warm start must recover those
+  // actual balancing injections instead of reusing the authored zero dispatch.
+  CHECK(imported.system.ac.generators[0].pmin_mw == -9999.0);
+  CHECK(imported.system.ac.generators[1].pmin_mw == -9999.0);
+  opf::ACOPFOptions options;
+  options.ac_solver_backend = opf::ACOPFSolverBackend::ParityIPM;
+  options.ac_pf_warm_start = true;
+  options.allow_fallback = false;
+  options.max_inner_iterations = 200;
+  const opf::ACOPFResult result =
+      opf::solve_ac_opf(imported.system, options);
+  INFO("status=" << result.status
+                 << " primal=" << result.max_constraint_violation
+                 << " dual=" << result.max_stationarity
+                 << " iterations=" << result.iterations);
+
+  REQUIRE(result.converged);
+  REQUIRE(result.solver_path == opf::OPFSolverPath::ParityIPM);
+  REQUIRE(result.vm.size() == imported.system.ac.buses.size());
+  REQUIRE(result.va.size() == imported.system.ac.buses.size());
+  REQUIRE(result.pg_mw.size() == imported.system.ac.generators.size());
+  REQUIRE(result.qg_mvar.size() == imported.system.ac.generators.size());
+  REQUIRE(result.vdc.size() == imported.system.dc.buses.size());
+  REQUIRE(result.lcc_transfers.size() == 2);
+  CHECK(result.profiling.warm_start_used);
+  CHECK(result.converter_model_scope.validity.lcc_quasi_steady_modelled);
+  CHECK(std::abs(result.pg_mw[0] - 1500.0) < 2.0);
+  CHECK(std::abs(result.pg_mw[1] + 1410.0) < 2.0);
+  CHECK(std::abs(result.lcc_transfers[0].p_dc_mw +
+                 result.lcc_transfers[1].p_dc_mw - 90.0) < 2.0);
+  CHECK(result.max_constraint_violation < 1e-6);
+  CHECK(std::abs(imported.system.dc.branches[0].r_pu - 0.004) < 1e-12);
+
+  std::string serialized;
+  REQUIRE_NOTHROW(serialized = io::opf_result_to_json(result, -1));
+  REQUIRE_FALSE(serialized.empty());
+  opf::ACOPFResult round_trip;
+  REQUIRE_NOTHROW(round_trip = io::opf_result_from_json(serialized));
+  CHECK(round_trip.pg_mw.size() == result.pg_mw.size());
+  CHECK(round_trip.vdc.size() == result.vdc.size());
+  REQUIRE(round_trip.lcc_transfers.size() == result.lcc_transfers.size());
+  for (size_t i = 0; i < result.lcc_transfers.size(); ++i) {
+    CHECK(round_trip.lcc_transfers[i].index == result.lcc_transfers[i].index);
+    CHECK(std::abs(round_trip.lcc_transfers[i].p_ac_mw -
+                   result.lcc_transfers[i].p_ac_mw) < 1e-12);
+    CHECK(std::abs(round_trip.lcc_transfers[i].p_dc_mw -
+                   result.lcc_transfers[i].p_dc_mw) < 1e-12);
+  }
+
+  // Recreate the former importer bug explicitly. With the receiving-end
+  // balancing machine unable to absorb 1410 MW, the model is truly infeasible.
+  // The solver must return a finite, serializable failure result, never an
+  // access violation or a fabricated lossless DC solution.
+  HybridPowerSystem infeasible_system = imported.system;
+  infeasible_system.ac.generators[1].pmin_mw = 0.0;
+  const opf::ACOPFResult infeasible =
+      opf::solve_ac_opf(infeasible_system, options);
+  INFO("infeasible status=" << infeasible.status
+                            << " primal="
+                            << infeasible.max_constraint_violation
+                            << " dual=" << infeasible.max_stationarity
+                            << " iterations=" << infeasible.iterations);
+  CHECK_FALSE(infeasible.converged);
+  CHECK(infeasible.solver_path == opf::OPFSolverPath::ParityIPM);
+  CHECK_FALSE(infeasible.status.empty());
+  CHECK(infeasible.vm.size() == infeasible_system.ac.buses.size());
+  CHECK(infeasible.va.size() == infeasible_system.ac.buses.size());
+  CHECK(infeasible.pg_mw.size() ==
+        infeasible_system.ac.generators.size());
+  CHECK(infeasible.qg_mvar.size() ==
+        infeasible_system.ac.generators.size());
+  CHECK((infeasible.vdc.empty() ||
+         infeasible.vdc.size() == infeasible_system.dc.buses.size()));
+  const auto all_finite = [](const std::vector<double>& values) {
+    return std::all_of(values.begin(), values.end(),
+                       [](double value) { return std::isfinite(value); });
+  };
+  CHECK(all_finite(infeasible.vm));
+  CHECK(all_finite(infeasible.va));
+  CHECK(all_finite(infeasible.pg_mw));
+  CHECK(all_finite(infeasible.qg_mvar));
+  CHECK(all_finite(infeasible.vdc));
+  CHECK(std::abs(infeasible_system.dc.branches[0].r_pu - 0.004) <
+        1e-12);
+  REQUIRE_NOTHROW(serialized = io::opf_result_to_json(infeasible, -1));
+  CHECK_FALSE(serialized.empty());
+}
+
+TEST_CASE("LCC OPF uses parity model and unsupported linear backends reject it",
+          "[opf][acdc][lcc][regression]") {
+  // CIGRE carries usable generator P bounds. The 2DC card case intentionally
+  // has pmin=pmax=0 and is therefore a PF/Jacobian reference, not OPF-ready.
+  auto imported = io::parse_bpa_dat("../../data/dsp/cigre.dat");
+  REQUIRE_FALSE(imported.report.has_errors());
+  REQUIRE(imported.system.lcc_converters.size() == 2);
+
+  // Additional calibrated variant: explicitly pin the inverter DC voltage and
+  // add a small convex dispatch cost while retaining the imported BS bounds.
+  REQUIRE(imported.system.ac.generators.size() == 2);
+  REQUIRE(imported.system.dc.buses.size() == 2);
+  imported.system.dc.buses[1].bus_type = DCBusType::DC_V;
+  imported.system.dc.buses[1].vm_pu = 470.0 / 500.0;
+  for (auto& generator : imported.system.ac.generators) {
+    generator.cost_c1 = 0.0;
+    generator.cost_c2 = 1e-3;
+  }
+  const PowerFlowResult calibration_pf =
+      powerflow::solve_hybrid(imported.system);
+  REQUIRE(calibration_pf.converged);
+  REQUIRE(calibration_pf.lcc_transfers.size() == 2);
+  for (const auto& transfer : calibration_pf.lcc_transfers) {
+    const size_t generator_row =
+        transfer.station_role == static_cast<int>(LCCStationRole::Rectifier)
+            ? 0u : 1u;
+    imported.system.ac.generators[generator_row].pg_mw = -transfer.p_ac_mw;
+    imported.system.ac.generators[generator_row].qg_mvar = -transfer.q_ac_mvar;
+  }
+
+  opf::ACOPFOptions parity_options;
+  parity_options.ac_solver_backend = opf::ACOPFSolverBackend::ParityIPM;
+  parity_options.ac_pf_warm_start = true;
+  parity_options.allow_fallback = false;
+  parity_options.max_inner_iterations = 500;
+  const opf::ACOPFResult result =
+      opf::solve_ac_opf(imported.system, parity_options);
+  INFO("status=" << result.status
+                 << " primal=" << result.max_constraint_violation
+                 << " dual=" << result.max_stationarity
+                 << " initial_primal="
+                 << result.profiling.initial_primal_residual
+                 << " warm=" << result.profiling.warm_start_used
+                 << " iterations=" << result.iterations
+                 << " accepted=" << result.profiling.accepted_steps
+                 << " rejected=" << result.profiling.rejected_steps
+                 << " ac_p=" << result.profiling.max_ac_p_balance_residual_pu
+                 << " ac_q=" << result.profiling.max_ac_q_balance_residual_pu
+                 << " dc=" << result.profiling.max_dc_balance_residual_pu);
+  for (size_t i = 0; i < result.vdc.size(); ++i)
+    INFO("vdc[" << i << "]=" << result.vdc[i]);
+  for (size_t i = 0; i < result.dpd_mw.size(); ++i) {
+    if (std::abs(result.dpd_mw[i]) > 1e-6)
+      INFO("dpd_mw[" << i << "]=" << result.dpd_mw[i]);
+  }
+  REQUIRE(result.solver_path == opf::OPFSolverPath::ParityIPM);
+  REQUIRE(result.converged);
+  REQUIRE(result.converter_model_scope.validity.lcc_quasi_steady_modelled);
+  REQUIRE(result.lcc_transfers.size() == 2);
+  REQUIRE(result.max_constraint_violation < 1e-6);
+  REQUIRE(result.profiling.max_ac_p_balance_residual_pu < 1e-6);
+  REQUIRE(result.profiling.max_ac_q_balance_residual_pu < 1e-6);
+  REQUIRE(result.profiling.max_dc_balance_residual_pu < 1e-6);
+  const LCCTransfer* rectifier = nullptr;
+  const LCCTransfer* inverter = nullptr;
+  for (const auto& transfer : result.lcc_transfers) {
+    CHECK(transfer.q_ac_mvar < 0.0);
+    CHECK(transfer.id_ka >= 0.0);
+    if (transfer.station_role == static_cast<int>(LCCStationRole::Rectifier))
+      rectifier = &transfer;
+    if (transfer.station_role == static_cast<int>(LCCStationRole::Inverter))
+      inverter = &transfer;
+    const auto authored = std::find_if(
+        imported.system.lcc_converters.begin(),
+        imported.system.lcc_converters.end(),
+        [&](const LCCConverter& lcc) { return lcc.index == transfer.index; });
+    REQUIRE(authored != imported.system.lcc_converters.end());
+    CHECK(transfer.bus_ac == authored->ac_bus);
+    CHECK(transfer.bus_dc == authored->dc_bus);
+  }
+  REQUIRE(rectifier != nullptr);
+  REQUIRE(inverter != nullptr);
+  REQUIRE(result.vdc.size() == 2);
+  REQUIRE(result.pg_mw.size() == 2);
+  REQUIRE(result.qg_mvar.size() == 2);
+  INFO("calibration vdc=[" << result.vdc[0] << "," << result.vdc[1]
+       << "] pg_mw=[" << result.pg_mw[0] << "," << result.pg_mw[1]
+       << "] qg_mvar=[" << result.qg_mvar[0] << "," << result.qg_mvar[1]
+       << "] rect={P=" << rectifier->p_ac_mw
+       << ",Q=" << rectifier->q_ac_mvar << ",Pdc=" << rectifier->p_dc_mw
+       << ",Ud=" << rectifier->ud_kv << ",Id=" << rectifier->id_ka
+       << ",alpha=" << rectifier->alpha_deg << "} inv={P="
+       << inverter->p_ac_mw << ",Q=" << inverter->q_ac_mvar
+       << ",Pdc=" << inverter->p_dc_mw << ",Ud=" << inverter->ud_kv
+       << ",Id=" << inverter->id_ka << ",gamma=" << inverter->gamma_deg
+       << "}");
+  CHECK(std::abs(rectifier->p_ac_mw + 1500.0) < 2.0);
+  CHECK(std::abs(inverter->p_ac_mw - 1410.0) < 2.0);
+  CHECK(std::abs(rectifier->id_ka - 3.0) < 0.02);
+  CHECK(std::abs(inverter->id_ka - 3.0) < 0.02);
+  CHECK(std::abs(rectifier->p_dc_mw + inverter->p_dc_mw - 90.0) < 2.0);
+
+  HybridPowerSystem replay_system = imported.system;
+  // OPF treats converter-transformer taps as fixed formulation inputs. The
+  // replay must solve that same network, not run the PF-only R-card outer
+  // loop and silently change Ybus before comparing terminal injections.
+  for (auto& lcc : replay_system.lcc_converters)
+    lcc.tap_control_modelled = false;
+  REQUIRE(result.pg_mw.size() == replay_system.ac.generators.size());
+  REQUIRE(result.qg_mvar.size() == replay_system.ac.generators.size());
+  for (size_t i = 0; i < replay_system.ac.generators.size(); ++i) {
+    replay_system.ac.generators[i].pg_mw = result.pg_mw[i];
+    replay_system.ac.generators[i].qg_mvar = result.qg_mvar[i];
+  }
+  for (size_t i = 0; i < replay_system.ac.buses.size(); ++i) {
+    replay_system.ac.buses[i].vm_pu = result.vm[i];
+    replay_system.ac.buses[i].va_deg =
+        result.va[i] * 180.0 / 3.14159265358979323846;
+  }
+  for (size_t i = 0; i < replay_system.dc.buses.size(); ++i)
+    replay_system.dc.buses[i].vm_pu = result.vdc[i];
+  const PowerFlowResult replay = powerflow::solve_hybrid(replay_system);
+  REQUIRE(replay.converged);
+  REQUIRE(replay.lcc_transfers.size() == result.lcc_transfers.size());
+  for (const auto& opf_transfer : result.lcc_transfers) {
+    const auto pf_transfer = std::find_if(
+        replay.lcc_transfers.begin(), replay.lcc_transfers.end(),
+        [&](const LCCTransfer& transfer) {
+          return transfer.index == opf_transfer.index;
+        });
+    REQUIRE(pf_transfer != replay.lcc_transfers.end());
+    CHECK(std::abs(pf_transfer->p_ac_mw - opf_transfer.p_ac_mw) < 0.5);
+    CHECK(std::abs(pf_transfer->q_ac_mvar - opf_transfer.q_ac_mvar) < 0.5);
+    CHECK(std::abs(pf_transfer->p_dc_mw - opf_transfer.p_dc_mw) < 0.5);
+  }
+
+  opf::ACOPFOptions economic_options;
+  economic_options.ac_solver_backend =
+      opf::ACOPFSolverBackend::EconomicDispatch;
+  const opf::ACOPFResult economic =
+      opf::solve_ac_opf(imported.system, economic_options);
+  CHECK_FALSE(economic.converged);
+  CHECK(economic.status.find("hybrid AC/DC/LCC") != std::string::npos);
+
+  const opf::DCOPFResult dc = opf::solve_dc_opf(imported.system);
+  CHECK_FALSE(dc.converged);
+  CHECK(dc.status.find("DC OPF rejected") != std::string::npos);
+  CHECK(dc.converter_model_scope.model_scope == "dc-opf:rejected-lcc");
+
+  HybridPowerSystem unsupported_control = imported.system;
+  unsupported_control.lcc_converters[0].control_mode =
+      LCCControlMode::ConstantGamma;
+  const opf::ACOPFResult unsupported =
+      opf::solve_ac_opf(unsupported_control, parity_options);
+  CHECK_FALSE(unsupported.converged);
+  CHECK(unsupported.iterations == 0);
+  CHECK(unsupported.status.find("LCC readiness check failed") !=
+        std::string::npos);
+
+  HybridPowerSystem missing_characteristic = imported.system;
+  missing_characteristic.lcc_converters[1].x_comm_ohm = 0.0;
+  const opf::ACOPFResult missing =
+      opf::solve_ac_opf(missing_characteristic, parity_options);
+  CHECK_FALSE(missing.converged);
+  CHECK(missing.iterations == 0);
+  CHECK(missing.status.find("positive x_comm_ohm") != std::string::npos);
 }
 
 TEST_CASE("AC OPF converges on internal hybrid case2000_acdc", "[opf][acdc]") {

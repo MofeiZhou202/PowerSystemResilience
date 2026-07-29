@@ -810,6 +810,19 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
   auto start_time = std::chrono::high_resolution_clock::now();
 
   DCOPFResult result;
+  if (std::any_of(sys_in.lcc_converters.begin(),
+                  sys_in.lcc_converters.end(),
+                  [](const LCCConverter& lcc) { return lcc.in_service; })) {
+    result.status =
+        "DC OPF rejected: this AC-only linear formulation does not model LCC AC/DC coupling; use solve_ac_opf with ParityIPM or Ipopt.";
+    result.solver_name = "none (unsupported LCC model)";
+    result.converter_model_scope.model_scope = "dc-opf:rejected-lcc";
+    result.model_limitations.push_back(
+        "No optimization was run because DC OPF omits the physical DC network and LCC converter equations.");
+    result.runtime_sec = std::chrono::duration<double>(
+        std::chrono::high_resolution_clock::now() - start_time).count();
+    return result;
+  }
   // DC OPF must consume the same canonical topology as AC OPF/PF. In
   // particular, closed rich switches and circuit breakers merge their buses.
   ProjectionOptions projection_options;

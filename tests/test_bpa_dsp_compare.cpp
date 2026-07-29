@@ -18,32 +18,18 @@
 ///   inverter  : gamma = 17.00 deg, Vdc = 470 kV, Id = 3000 A, P_ac = +1410 MW
 ///   DC line loss = 90 MW (10 ohm * (3 kA)^2).
 ///
-/// FIXED-TAP / CURRENT-LIMIT NOTE (declared model limitation):
+/// R-CARD TAP-CONTROL NOTE:
 /// DSP holds alpha = AlphaN = 15 deg and gamma = GamaN = 17 deg by moving the
-/// converter-transformer taps (2DC.pf shows the ratios adjusted to
-/// 217/549.25 and 217/574.48, lowering the valve-side voltage ~10-15%).  Our
-/// model keeps the tap at its nominal ratio, so U_d0 = (3*sqrt(2)/pi)*n_b*E
-/// is ~10-15% HIGHER than DSP's tapped value.  The solved operating point is
-/// then the physically consistent one for the declared controls:
-///   * the rectifier holds the scheduled DC power exactly (P_ac = -1500 MW);
-///   * the inverter's CEA characteristic at the nominal-tap U_d0 would demand
-///     far more than the rated current, so the rated-current limit (current
-///     order, Id = 3 kA — exactly the LD-card schedule Psch/Udr) binds, and
-///     the DC voltage settles at the scheduled 500/470 kV: all DC-side
-///     quantities (P, Id, Vdc, line loss) match DSP exactly;
-///   * the back-calculated alpha / gamma depart from 15/17 deg (the degrees
-///     of freedom a tap changer would absorb); gamma stays ABOVE gamma_min,
-///     so commutation margin is preserved;
-///   * the converter-station reactive draw differs from DSP (Q = P*tan(phi)
-///     with cos(phi) = U_d/U_d0 and a higher U_d0), which shows up as a
-///     modest voltage deviation at the converter buses (2DC; cigre's AC
-///     system is stiff enough that the deviation stays ~2.6e-4 pu).
-/// The tolerance choices below document the measured fixed-tap deviations
-/// instead of hiding them.
+/// existing converter-transformer taps within each R-card range. The unified
+/// power-flow outer loop models the same action; it does not add a second
+/// transformer. The checks below keep three reactive-power quantities
+/// separate: valve-side LCC consumption, transformer leakage consumption,
+/// and their sum at the primary AC terminal.
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <sstream>
@@ -172,7 +158,10 @@ namespace {
 void check_lcc_case(const std::string& dat,
                     const std::string& sol_file,
                     double v_tol_pu,
-                    double a_tol_deg) {
+                    double a_tol_deg,
+                    double rect_tap_pu,
+                    double inv_tap_pu,
+                    double transformer_q_loss_mvar) {
   auto res = hacdcpf::io::parse_bpa_dat(dsp_path(dat));  // default: LccQuasiSteady
   REQUIRE_FALSE(res.report.has_errors());
   REQUIRE(res.system.lcc_converters.size() == 2);
@@ -184,8 +173,8 @@ void check_lcc_case(const std::string& dat,
   REQUIRE(pf.converged);
 
   // AC bus voltages vs DSP SOL (valve-side stub buses are not listed by DSP
-  // and are skipped).  See the header note for the fixed-tap deviation
-  // mechanism behind the 2DC voltage tolerance.
+  // and are skipped). The tolerances cover the remaining importer/model
+  // simplifications outside LCC tap control.
   const auto sol = parse_sol(dsp_path(sol_file));
   const auto [max_dv, max_da] = compare_vs_sol_by_name(res.system, pf, sol);
   REQUIRE(max_dv <= v_tol_pu);
@@ -202,6 +191,21 @@ void check_lcc_case(const std::string& dat,
   REQUIRE(rect != nullptr);
   REQUIRE(inv != nullptr);
 
+  const hacdcpf::LCCConverter* rect_model = nullptr;
+  const hacdcpf::LCCConverter* inv_model = nullptr;
+  for (const auto& model : res.system.lcc_converters) {
+    if (model.station_role == hacdcpf::LCCStationRole::Rectifier) {
+      rect_model = &model;
+    }
+    if (model.station_role == hacdcpf::LCCStationRole::Inverter) {
+      inv_model = &model;
+    }
+  }
+  REQUIRE(rect_model != nullptr);
+  REQUIRE(inv_model != nullptr);
+  REQUIRE(rect_model->tap_control_modelled);
+  REQUIRE(inv_model->tap_control_modelled);
+
   // DC-side operating point: exact match with DSP (see header note).
   REQUIRE_THAT(rect->p_ac_mw, WithinAbs(-1500.0, 1.0));   // DSP: -1500 MW
   REQUIRE_THAT(inv->p_ac_mw, WithinAbs(1410.0, 1.0));     // DSP: +1410 MW
@@ -212,36 +216,124 @@ void check_lcc_case(const std::string& dat,
   const double loss_mw = rect->p_dc_mw + inv->p_dc_mw;    // R*Id^2
   REQUIRE_THAT(loss_mw, WithinAbs(90.0, 1.0));            // DSP: 90 MW
 
-  // Both stations consume reactive power (Q = P*tan(phi), cos(phi)=U_d/U_d0).
-  REQUIRE(rect->q_ac_mvar < 0.0);
-  REQUIRE(inv->q_ac_mvar < 0.0);
+  // R-card control moves the existing T branches until the LD normal angles
+  // are recovered. Valve-side Q and tap remain calibrated bounded
+  // approximations rather than bit-for-bit DSP reproductions.
+  REQUIRE_THAT(rect->alpha_deg, WithinAbs(15.0, 0.1));
+  REQUIRE_THAT(inv->gamma_deg, WithinAbs(17.0, 0.1));
+  REQUIRE_THAT(rect->q_ac_mvar, WithinAbs(-526.54, 1.5));
+  REQUIRE_THAT(inv->q_ac_mvar, WithinAbs(-530.90, 1.5));
+  REQUIRE_THAT(rect->transformer_tap, WithinAbs(rect_tap_pu, 2e-3));
+  REQUIRE_THAT(inv->transformer_tap, WithinAbs(inv_tap_pu, 2e-3));
+  REQUIRE(rect->tap_control_active);
+  REQUIRE(inv->tap_control_active);
+  REQUIRE(rect->tap_control_converged);
+  REQUIRE(inv->tap_control_converged);
+  REQUIRE(rect->tap_control_iterations > 0);
+  REQUIRE(inv->tap_control_iterations > 0);
+  REQUIRE_FALSE(rect->tap_at_limit);
+  REQUIRE_FALSE(inv->tap_at_limit);
 
-  // The inverter runs at its rated current: the current limit binds (the
-  // nominal-tap U_d0 would drive the CEA characteristic far above 3 kA), so
-  // the CEA setpoint becomes a lower bound and the physical gamma floats.
+  // Rated current remains the active current order at the calibrated point.
   REQUIRE(inv->id_at_limit);
-  // Back-calculated angles depart from AlphaN/GamaN (tap-absorbed degrees of
-  // freedom): alpha = 28.5 deg (2DC) / 23.9 deg (cigre), gamma = 33.1 / 29.1
-  // deg — always above the 17 deg CEA minimum, i.e. commutation-safe.
-  REQUIRE(rect->alpha_deg > 15.0);
-  REQUIRE(rect->alpha_deg < 45.0);
-  REQUIRE(inv->gamma_deg >= 17.0 - 1e-6);
-  REQUIRE(inv->gamma_deg < 45.0);
-  // Firing/extinction angles remain inside the physical windows.
   REQUIRE(rect->alpha_within_limits);
   REQUIRE(inv->gamma_within_limits);
+
+  // Valve-side Q above excludes converter-transformer leakage. The authored
+  // T branch must independently reproduce DSP's roughly 258 Mvar Q loss.
+  const auto check_transformer_q_loss = [&](const hacdcpf::LCCConverter& model) {
+    const auto branch = std::find_if(
+        res.system.ac.branches.begin(), res.system.ac.branches.end(),
+        [&](const auto& item) {
+          return item.index == model.converter_transformer_branch;
+        });
+    REQUIRE(branch != res.system.ac.branches.end());
+    const auto position =
+        static_cast<size_t>(branch - res.system.ac.branches.begin());
+    REQUIRE(position < pf.branch_flows.size());
+    const auto& flow = pf.branch_flows[position];
+    REQUIRE_THAT(flow.qf_mvar + flow.qt_mvar,
+                 WithinAbs(transformer_q_loss_mvar, 2.0));
+  };
+  check_transformer_q_loss(*rect_model);
+  check_transformer_q_loss(*inv_model);
 }
 
 }  // namespace
 
 TEST_CASE("DSP compare: 2DC LCC link vs DSP solution", "[bpa][dsp][lcc]") {
-  // Measured: max |dV| = 7.9e-3 pu (converter buses SOUTH/STATIONS/NORTH, the
-  // fixed-tap reactive-draw gap — see header), max |d_delta| = 0.15 deg.
-  check_lcc_case("2DC.dat", "2DCNEW.SOL", 1e-2, 1.0);
+  // The broad bus tolerance also covers non-LCC shunt and Q-control details.
+  check_lcc_case("2DC.dat", "2DCNEW.SOL", 1e-2, 1.0,
+                 549.25 / 500.0, 574.48 / 500.0, 258.15);
 }
 
 TEST_CASE("DSP compare: cigre LCC link vs DSP solution", "[bpa][dsp][lcc]") {
-  // Measured: max |dV| = 2.6e-4 pu, max |d_delta| < 1e-3 deg (stiff 525 kV
-  // system; the fixed-tap Q gap barely moves the bus voltages).
-  check_lcc_case("cigre.dat", "cigreNEW.SOL", 5e-3, 1.0);
+  // DSP: transformer taps 547.97/525 and 571.25/525, with about 258.11 Mvar
+  // leakage consumption in each converter-transformer branch.
+  check_lcc_case("cigre.dat", "cigreNEW.SOL", 5e-3, 1.0,
+                 547.97 / 525.0, 571.25 / 525.0, 258.11);
+}
+
+TEST_CASE("DSP compare: vsc2 VSC-HVDC link vs DSP solution", "[bpa][dsp][vsc]") {
+  // data/dsp/vsc2.dat is a synthetic two-terminal VSC-HVDC case (BZ/BZ+/LZ
+  // cards, layout cross-checked against a production grid dat).  The DSP
+  // reference (data/dsp/vsc2NEW.SOL, bus voltages; data/dsp/vsc2.pf,
+  // ">>>柔性直流换流器" / ">>>直流线路潮流" sections) was produced by
+  // DSP 2.1.47 Pwrflow (PQ -> NR, 6 iterations).
+  //
+  // DSP reference operating point (hard-coded from vsc2.pf):
+  //   VSCA (BZ+ no flag -> mode 2, constant P/Q): P_ac = +1470.00 MW
+  //     (inverter injecting; the card carries -1470 in the BPA load
+  //     convention), Q_ac = -50.00 Mvar (50 absorbed), Udc = 299.9753 kV;
+  //   VSCB (BZ+ flag 1 -> mode 1, constant Udc): Udc = 300.0000 kV exactly,
+  //     P_ac = -1491.69 MW (rectifier), Q_ac = +50.00 Mvar (50 injected);
+  //   station losses 10.363 / 10.442 MW (|P|*Rc, Rc = 0.007 pu);
+  //   DC line (R = 0.01 ohm/pole, 2 poles): loss 0.12 MW, I = 4.935 kA.
+  auto res = hacdcpf::io::parse_bpa_dat(dsp_path("vsc2.dat"));
+  REQUIRE_FALSE(res.report.has_errors());
+  REQUIRE(res.system.vsc_converters.size() == 2);
+  REQUIRE(res.system.lcc_converters.empty());
+
+  const auto pf = hacdcpf::solve_power_flow(res.system);
+  INFO("termination: " + pf.diagnostics.termination_reason);
+  for (const auto& w : pf.diagnostics.warnings) INFO("warning: " + w);
+  REQUIRE(pf.converged);
+
+  // AC bus voltages vs the DSP SOL.  The AC-terminal injections are the
+  // controlled quantities and match DSP almost exactly (see below), so the
+  // AC network solution should too; the residual gap comes from the ~0.9 MW
+  // (0.06%) transfer difference at VSCB.
+  const auto sol = parse_sol(dsp_path("vsc2NEW.SOL"));
+  const auto [max_dv, max_da] = compare_vs_sol_by_name(res.system, pf, sol);
+  // Measured: max |dV| = 2.4e-4 pu (VSCB), max |d_delta| = 0.021 deg.
+  REQUIRE(max_dv <= 1e-3);
+  REQUIRE(max_da <= 0.1);
+
+  // Converter operating point vs the DSP .pf report.  Station A holds its
+  // card setpoints exactly; station B forms Udc (very stiff droop, see the
+  // k_vdc note in make_vsc_station) and balances the link.
+  REQUIRE(pf.vsc_transfers.size() == 2);
+  const auto& ta = pf.vsc_transfers[0];  // VSCA, inverter (constant P/Q)
+  const auto& tb = pf.vsc_transfers[1];  // VSCB, rectifier (constant Udc)
+  REQUIRE_THAT(ta.p_ac_mw, WithinAbs(1470.0, 0.5));     // DSP: +1470.00
+  REQUIRE_THAT(ta.q_ac_mvar, WithinAbs(-50.0, 0.5));    // DSP: -50.00
+  REQUIRE_THAT(ta.p_dc_mw, WithinAbs(-1480.36, 0.5));   // DSP: 1480.36 drawn
+  REQUIRE_THAT(ta.loss_mw, WithinAbs(10.363, 0.2));     // DSP: 10.363
+  REQUIRE_THAT(tb.p_ac_mw, WithinAbs(-1491.69, 1.5));   // DSP: -1491.69
+  REQUIRE_THAT(tb.q_ac_mvar, WithinAbs(50.0, 0.5));     // DSP: +50.00
+  REQUIRE_THAT(tb.p_dc_mw, WithinAbs(1481.25, 1.5));    // DSP: 1481.25
+  REQUIRE_THAT(tb.loss_mw, WithinAbs(10.442, 0.2));     // DSP: 10.442
+
+  // DC voltage: DSP holds 300.0000 kV at B; HySim's stiff droop lands
+  // within 0.03 kV.  Station A sits one I*R drop below (DSP 299.9753).
+  const double udc_b = pf.vdc[static_cast<size_t>(
+                                res.system.vsc_converters[1].bus_dc) - 1] *
+                       300.0;
+  const double udc_a = pf.vdc[static_cast<size_t>(
+                                res.system.vsc_converters[0].bus_dc) - 1] *
+                       300.0;
+  REQUIRE_THAT(udc_b, WithinAbs(300.0, 0.05));
+  REQUIRE_THAT(udc_a, WithinAbs(299.9753, 0.05));
+  // DC current from the line transfer: 1480.4 MW at ~300 kV = 4.935 kA.
+  REQUIRE_THAT(tb.p_dc_mw / udc_b, WithinAbs(4.935, 0.01));
 }

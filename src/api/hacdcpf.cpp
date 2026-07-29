@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <unordered_map>
 
@@ -33,6 +34,7 @@ struct SolverHandle {
   powerflow::DCSolver dc_solver;
   LossModelType configured_loss_model{LossModelType::Linear};
   std::unordered_map<int, int> original_vsc_bus_ac;
+  std::unordered_map<int, int> original_lcc_bus_ac;
   size_t authored_ac_branch_count{0};
 };
 
@@ -159,6 +161,15 @@ std::uint64_t hash_system_signature(const HybridPowerSystem& sys, LossModelType 
     h = hash_combine(h, hash_double(c.alpha_set_deg));
     h = hash_combine(h, hash_double(c.gamma_set_deg));
     h = hash_combine(h, hash_double(c.v_dc_set_kv));
+    h = hash_combine(h, static_cast<std::uint64_t>(c.tap_control_modelled));
+    h = hash_combine(
+        h, static_cast<std::uint64_t>(c.converter_transformer_branch));
+    h = hash_combine(h, hash_double(c.transformer_tap_min_pu));
+    h = hash_combine(h, hash_double(c.transformer_tap_max_pu));
+    h = hash_combine(h,
+                     static_cast<std::uint64_t>(c.transformer_tap_steps));
+    h = hash_combine(h,
+                     static_cast<std::uint64_t>(c.transformer_tap_winding));
   }
   for (const auto& c : sys.dc.dcdc_converters) {
     h = hash_combine(h, static_cast<std::uint64_t>(c.bus_in));
@@ -475,11 +486,14 @@ powerflow::SolverData& get_cached_solver_data(const HybridPowerSystem& sys, Loss
 
 std::unordered_map<int, int> build_original_vsc_ac_bus_map(
     const HybridPowerSystem& sys);
+std::unordered_map<int, int> build_original_lcc_ac_bus_map(
+    const HybridPowerSystem& sys);
 
 void rebuild_handle_data(SolverHandle& handle,
                          const HybridPowerSystem& sys,
                          LossModelType loss_model) {
   handle.original_vsc_bus_ac = build_original_vsc_ac_bus_map(sys);
+  handle.original_lcc_bus_ac = build_original_lcc_ac_bus_map(sys);
   handle.authored_ac_branch_count = sys.ac.branches.size();
   handle.data = powerflow::make_solver_data(sys, loss_model);
   handle.configured_loss_model = loss_model;
@@ -526,6 +540,16 @@ std::unordered_map<int, int> build_original_vsc_ac_bus_map(
   return bus_by_index;
 }
 
+std::unordered_map<int, int> build_original_lcc_ac_bus_map(
+    const HybridPowerSystem& sys) {
+  std::unordered_map<int, int> bus_by_index;
+  bus_by_index.reserve(sys.lcc_converters.size());
+  for (const auto& conv : sys.lcc_converters) {
+    bus_by_index[conv.index] = conv.ac_bus;
+  }
+  return bus_by_index;
+}
+
 void apply_zip_weights(powerflow::SolverData& data, const PowerFlowOptions& opt) {
   for (int k = 0; k < 3; ++k) {
     data.zip_pw[k] = opt.zip_pw[k];
@@ -537,9 +561,361 @@ void apply_zip_weights(powerflow::SolverData& data, const PowerFlowOptions& opt)
   data.enable_semi_smooth_newton = opt.enable_semi_smooth_newton;
 }
 
+struct LCCTapControlStatus {
+  bool active{false};
+  bool converged{false};
+  bool at_limit{false};
+  bool outer_solve_limit_reached{false};
+  bool update_blocked{false};
+  int accepted_changes{0};
+  double target_angle_deg{0.0};
+  double final_angle_deg{0.0};
+  double target_dc_voltage_kv{0.0};
+  double final_dc_voltage_kv{0.0};
+  double final_tap{1.0};
+};
+
+using LCCTapControlStatusMap =
+    std::unordered_map<int, LCCTapControlStatus>;
+
+ACBranch* find_ac_branch_by_index(powerflow::SolverData& data, int index) {
+  const auto it = std::find_if(
+      data.ac_branches.begin(), data.ac_branches.end(),
+      [index](const ACBranch& branch) { return branch.index == index; });
+  return it == data.ac_branches.end() ? nullptr : &*it;
+}
+
+const ACBranch* find_ac_branch_by_index(const powerflow::SolverData& data,
+                                        int index) {
+  const auto it = std::find_if(
+      data.ac_branches.begin(), data.ac_branches.end(),
+      [index](const ACBranch& branch) { return branch.index == index; });
+  return it == data.ac_branches.end() ? nullptr : &*it;
+}
+
+bool solver_data_requests_lcc_tap_control(
+    const powerflow::SolverData& data) {
+  return std::any_of(
+      data.lcc_converters.begin(), data.lcc_converters.end(),
+      [](const LCCConverter& lcc) {
+        return lcc.in_service && lcc.tap_control_modelled;
+      });
+}
+
+double lcc_tap_target_angle_deg(const LCCConverter& lcc) {
+  return lcc.station_role == LCCStationRole::Rectifier
+             ? lcc.alpha_set_deg
+             : lcc.gamma_set_deg;
+}
+
+double next_lcc_transformer_tap(const LCCConverter& lcc,
+                                const ACBranch& branch,
+                                double actual_commutation_kv,
+                                double required_commutation_kv) {
+  if (!(branch.tap > 0.0) || !(actual_commutation_kv > 0.0) ||
+      !(required_commutation_kv > 0.0)) {
+    return branch.tap;
+  }
+
+  // ACBranch places its ideal off-nominal tap at the from terminal:
+  // V_from/tap ~= V_to. This local response update is corrected after every
+  // full Newton solve, so transformer leakage and AC-network feedback remain
+  // in the closed loop instead of being discarded by an import-time guess.
+  double requested = branch.tap;
+  if (branch.to_bus == lcc.ac_bus) {
+    requested *= actual_commutation_kv / required_commutation_kv;
+  } else if (branch.from_bus == lcc.ac_bus) {
+    requested *= required_commutation_kv / actual_commutation_kv;
+  } else {
+    return branch.tap;
+  }
+  requested = std::clamp(requested, lcc.transformer_tap_min_pu,
+                         lcc.transformer_tap_max_pu);
+
+  if (lcc.transformer_tap_steps > 1) {
+    const double step =
+        (lcc.transformer_tap_max_pu - lcc.transformer_tap_min_pu) /
+        static_cast<double>(lcc.transformer_tap_steps - 1);
+    if (step > 0.0) {
+      const int last = lcc.transformer_tap_steps - 1;
+      const int current_pos = std::clamp(
+          static_cast<int>(std::lround(
+              (branch.tap - lcc.transformer_tap_min_pu) / step)),
+          0, last);
+      const int target_pos = std::clamp(
+          static_cast<int>(std::lround(
+              (requested - lcc.transformer_tap_min_pu) / step)),
+          0, last);
+      const int next_pos = current_pos +
+                           (target_pos > current_pos ? 1
+                            : target_pos < current_pos ? -1
+                                                       : 0);
+      return lcc.transformer_tap_min_pu +
+             static_cast<double>(next_pos) * step;
+    }
+  }
+
+  constexpr double kTapDamping = 0.65;
+  return std::clamp(
+      branch.tap + kTapDamping * (requested - branch.tap),
+      lcc.transformer_tap_min_pu, lcc.transformer_tap_max_pu);
+}
+
+double normalize_lcc_transformer_tap(const LCCConverter& lcc,
+                                     double tap) {
+  const double positive_tap = std::isfinite(tap) && tap > 0.0 ? tap : 1.0;
+  double normalized = std::clamp(positive_tap,
+                                 lcc.transformer_tap_min_pu,
+                                 lcc.transformer_tap_max_pu);
+  if (lcc.transformer_tap_steps > 1) {
+    const double step =
+        (lcc.transformer_tap_max_pu - lcc.transformer_tap_min_pu) /
+        static_cast<double>(lcc.transformer_tap_steps - 1);
+    if (step > 0.0) {
+      const int last = lcc.transformer_tap_steps - 1;
+      const int position = std::clamp(
+          static_cast<int>(std::lround(
+              (normalized - lcc.transformer_tap_min_pu) / step)),
+          0, last);
+      normalized = lcc.transformer_tap_min_pu +
+                   static_cast<double>(position) * step;
+    }
+  }
+  return normalized;
+}
+
+PowerFlowResult solve_newton_with_lcc_tap_control(
+    powerflow::SolverData& data,
+    powerflow::NewtonSolver& solver,
+    const PowerFlowOptions& opt,
+    const InitialState* initial_state,
+    LCCTapControlStatusMap& statuses) {
+  constexpr int kMaxOuterSolves = 30;
+  constexpr double kAngleToleranceDeg = 0.005;
+  constexpr double kDcVoltageToleranceKv = 0.05;
+  constexpr double kTapTolerance = 1e-10;
+
+  std::vector<std::string> setup_warnings;
+  std::unordered_map<int, int> branch_owner;
+  bool has_active_control = false;
+  bool initial_tap_changed = false;
+  for (const auto& lcc : data.lcc_converters) {
+    if (!lcc.in_service || !lcc.tap_control_modelled) continue;
+
+    LCCTapControlStatus status;
+    status.target_angle_deg = lcc_tap_target_angle_deg(lcc);
+    if (lcc.station_role == LCCStationRole::Inverter &&
+        lcc.control_mode == LCCControlMode::ConstantGamma) {
+      status.target_dc_voltage_kv = lcc.v_dc_set_kv;
+    }
+    ACBranch* branch =
+        find_ac_branch_by_index(data, lcc.converter_transformer_branch);
+    if (branch != nullptr && std::isfinite(branch->tap)) {
+      status.final_tap = branch->tap;
+    }
+    const bool branch_touches_valve =
+        branch != nullptr &&
+        (branch->from_bus == lcc.ac_bus || branch->to_bus == lcc.ac_bus);
+    const bool valid_branch = branch != nullptr && branch->in_service &&
+                              std::isfinite(branch->tap);
+    const bool valid_range =
+        std::isfinite(lcc.transformer_tap_min_pu) &&
+        std::isfinite(lcc.transformer_tap_max_pu) &&
+        lcc.transformer_tap_min_pu > 0.0 &&
+                             lcc.transformer_tap_max_pu >=
+                                 lcc.transformer_tap_min_pu;
+    const bool compound_control_closed =
+        lcc.station_role != LCCStationRole::Inverter ||
+        lcc.control_mode != LCCControlMode::ConstantGamma ||
+        status.target_dc_voltage_kv > 0.0;
+    if (!valid_branch || !branch_touches_valve || !valid_range ||
+        !(status.target_angle_deg > 0.0) || !compound_control_closed) {
+      setup_warnings.push_back(
+          "[LCC-TAP-01] LCC station " + std::to_string(lcc.index) +
+          " declares R-card tap control, but its in-service transformer "
+          "branch/tap, valve terminal, finite tap range, angle target, or "
+          "companion inverter DC-voltage target is invalid; the T-card tap "
+          "remains fixed.");
+      statuses.emplace(lcc.index, status);
+      continue;
+    }
+    if (const auto owner = branch_owner.find(branch->index);
+        owner != branch_owner.end()) {
+      setup_warnings.push_back(
+          "[LCC-TAP-01] LCC stations " + std::to_string(owner->second) +
+          " and " + std::to_string(lcc.index) +
+          " request the same converter-transformer tap; only the first "
+          "controller is active.");
+      statuses.emplace(lcc.index, status);
+      continue;
+    }
+    branch_owner.emplace(branch->index, lcc.index);
+    const double normalized_tap =
+        normalize_lcc_transformer_tap(lcc, branch->tap);
+    if (std::abs(normalized_tap - branch->tap) > kTapTolerance) {
+      branch->tap = normalized_tap;
+      status.final_tap = normalized_tap;
+      ++status.accepted_changes;
+      initial_tap_changed = true;
+    }
+    status.active = true;
+    status.final_tap = branch->tap;
+    statuses.emplace(lcc.index, status);
+    has_active_control = true;
+  }
+
+  if (initial_tap_changed) {
+    powerflow::rebuild_matrices(data);
+  }
+
+  if (!has_active_control) {
+    PowerFlowResult result = solver.solve(data, opt, initial_state);
+    result.diagnostics.warnings.insert(result.diagnostics.warnings.end(),
+                                       setup_warnings.begin(),
+                                       setup_warnings.end());
+    return result;
+  }
+
+  InitialState warm_start;
+  const InitialState* solve_initial = initial_state;
+  PowerFlowResult result;
+  for (int outer_solve = 0; outer_solve < kMaxOuterSolves; ++outer_solve) {
+    result = solver.solve(data, opt, solve_initial);
+    if (!result.converged) break;
+
+    bool all_converged = true;
+    bool any_tap_changed = false;
+    for (const auto& lcc : data.lcc_converters) {
+      const auto status_it = statuses.find(lcc.index);
+      if (status_it == statuses.end() || !status_it->second.active) continue;
+      auto& status = status_it->second;
+      status.update_blocked = false;
+      ACBranch* branch =
+          find_ac_branch_by_index(data, lcc.converter_transformer_branch);
+      if (branch == nullptr) continue;
+
+      const int ac_pos = lcc.ac_bus - 1;
+      const int dc_pos = lcc.dc_bus - 1;
+      if (ac_pos < 0 || dc_pos < 0 ||
+          ac_pos >= static_cast<int>(result.vm.size()) ||
+          dc_pos >= static_cast<int>(result.vdc.size())) {
+        all_converged = false;
+        status.update_blocked = true;
+        continue;
+      }
+      const double actual_valve_kv =
+          result.vm[static_cast<size_t>(ac_pos)] * lcc.vn_ac_kv;
+      const Eigen::Map<const Eigen::VectorXd> solved_vm(
+          result.vm.data(), static_cast<Eigen::Index>(result.vm.size()));
+      const double actual_commutation_kv =
+          powerflow::lcc_commutation_voltage_kv(data, lcc, solved_vm);
+      const double ud_kv =
+          result.vdc[static_cast<size_t>(dc_pos)] *
+          powerflow::lcc_dc_base_kv(data, lcc);
+      const auto operating = powerflow::lcc_operating_point(
+          lcc, actual_valve_kv, actual_commutation_kv, ud_kv);
+      if (!operating.valid) {
+        all_converged = false;
+        status.update_blocked = true;
+        continue;
+      }
+
+      status.final_angle_deg =
+          lcc.station_role == LCCStationRole::Rectifier
+              ? operating.alpha_deg
+              : operating.gamma_deg;
+      status.final_dc_voltage_kv = operating.ud_kv;
+      status.final_tap = branch->tap;
+      const double tap_scale = std::max(1.0, std::abs(branch->tap));
+      status.at_limit =
+          std::abs(branch->tap - lcc.transformer_tap_min_pu) <=
+              1e-8 * tap_scale ||
+          std::abs(branch->tap - lcc.transformer_tap_max_pu) <=
+              1e-8 * tap_scale;
+      const bool angle_converged =
+          std::abs(status.final_angle_deg - status.target_angle_deg) <=
+          kAngleToleranceDeg;
+      const bool dc_voltage_converged =
+          !(status.target_dc_voltage_kv > 0.0) ||
+          std::abs(status.final_dc_voltage_kv -
+                   status.target_dc_voltage_kv) <=
+              kDcVoltageToleranceKv;
+      status.converged = angle_converged && dc_voltage_converged;
+      if (status.converged) continue;
+      all_converged = false;
+
+      if (outer_solve + 1 >= kMaxOuterSolves) {
+        status.outer_solve_limit_reached = true;
+        continue;
+      }
+      const double controlled_ud_kv =
+          status.target_dc_voltage_kv > 0.0
+              ? status.target_dc_voltage_kv
+              : operating.ud_kv;
+      const double required_commutation_kv =
+          powerflow::lcc_required_valve_voltage_kv(
+              lcc, controlled_ud_kv, operating.id_ka,
+              status.target_angle_deg);
+      const double next_tap = next_lcc_transformer_tap(
+          lcc, *branch, actual_commutation_kv,
+          required_commutation_kv);
+      if (!std::isfinite(next_tap) ||
+          std::abs(next_tap - branch->tap) <= kTapTolerance) {
+        status.update_blocked = true;
+        continue;
+      }
+      branch->tap = next_tap;
+      status.final_tap = next_tap;
+      ++status.accepted_changes;
+      any_tap_changed = true;
+    }
+
+    if (all_converged || !any_tap_changed) break;
+    powerflow::rebuild_matrices(data);
+    warm_start.vm = result.vm;
+    warm_start.va = result.va;
+    warm_start.vdc = result.vdc;
+    solve_initial = &warm_start;
+  }
+
+  result.diagnostics.warnings.insert(result.diagnostics.warnings.end(),
+                                     setup_warnings.begin(),
+                                     setup_warnings.end());
+  if (result.converged) {
+    for (const auto& [index, status] : statuses) {
+      if (!status.active || status.converged) continue;
+      std::string detail =
+          " final angle=" + std::to_string(status.final_angle_deg) +
+          " deg, tap=" + std::to_string(status.final_tap);
+      if (status.target_dc_voltage_kv > 0.0) {
+        detail += ", final Udc=" +
+                  std::to_string(status.final_dc_voltage_kv) +
+                  " kV (target " +
+                  std::to_string(status.target_dc_voltage_kv) + " kV)";
+      }
+      result.diagnostics.warnings.push_back(
+          "[LCC-TAP-02] LCC station " + std::to_string(index) +
+          " could not hold its R/LD angle target " +
+          std::to_string(status.target_angle_deg) + " deg;" + detail +
+          (status.at_limit
+               ? " (R-card limit reached)."
+               : status.outer_solve_limit_reached
+                     ? " (tap-control outer iteration limit reached)."
+                     : " (no further admissible tap update)."));
+    }
+  } else {
+    result.diagnostics.warnings.push_back(
+        "[LCC-TAP-03] Newton power flow failed during the R-card tap-control "
+        "outer loop; no converged controlled operating point is available.");
+  }
+  return result;
+}
+
 void populate_derived_results(const powerflow::SolverData& data,
                               PowerFlowResult& result,
-                              LossModelType loss_model) {
+                              LossModelType loss_model,
+                              const LCCTapControlStatusMap* tap_statuses =
+                                  nullptr) {
   result.branch_flows.clear();
   result.vsc_transfers.clear();
   result.lcc_transfers.clear();
@@ -793,9 +1169,8 @@ void populate_derived_results(const powerflow::SolverData& data,
 
   // ── LCC stations (quasi-steady, dat manual ch.4) ─────────────────────────
   // Re-evaluate each station at the converged state and report the full
-  // operating point.  Firing/extinction angles are back-calculated; with
-  // fixed converter-transformer taps the rectifier alpha departs from the
-  // scheduled AlphaN a tap changer would hold (declared limitation).
+  // operating point, including the effective converter-transformer tap and
+  // the outcome of any R-card outer-loop control.
   result.lcc_transfers.reserve(data.lcc_converters.size());
   for (const auto& lcc : data.lcc_converters) {
     if (!lcc.in_service) continue;
@@ -803,8 +1178,11 @@ void populate_derived_results(const powerflow::SolverData& data,
     const int dci = dc_pos(lcc.dc_bus);
     if (aci < 0 || dci < 0) continue;
     const double e_kv = vm[aci] * lcc.vn_ac_kv;
+    const double commutation_e_kv =
+        powerflow::lcc_commutation_voltage_kv(data, lcc, vm);
     const double ud_kv = vdc[dci] * powerflow::lcc_dc_base_kv(data, lcc);
-    const auto op = powerflow::lcc_operating_point(lcc, e_kv, ud_kv);
+    const auto op = powerflow::lcc_operating_point(
+        lcc, e_kv, commutation_e_kv, ud_kv);
     if (!op.valid) continue;
 
     LCCTransfer tr;
@@ -821,6 +1199,23 @@ void populate_derived_results(const powerflow::SolverData& data,
     tr.p_ac_mw = op.p_ac_mw;
     tr.q_ac_mvar = op.q_ac_mvar;
     tr.p_dc_mw = op.p_dc_mw;
+    tr.tap_target_angle_deg = lcc_tap_target_angle_deg(lcc);
+    if (const ACBranch* branch =
+            find_ac_branch_by_index(data,
+                                    lcc.converter_transformer_branch);
+        branch != nullptr) {
+      tr.transformer_tap = branch->tap;
+    }
+    if (tap_statuses != nullptr) {
+      const auto status = tap_statuses->find(lcc.index);
+      if (status != tap_statuses->end()) {
+        tr.tap_control_active = status->second.active;
+        tr.tap_control_converged = status->second.converged;
+        tr.tap_control_iterations = status->second.accepted_changes;
+        tr.tap_at_limit = status->second.at_limit;
+        tr.tap_target_angle_deg = status->second.target_angle_deg;
+      }
+    }
     tr.id_at_limit = op.id_at_limit;
     tr.alpha_within_limits =
         op.alpha_deg >= lcc.alpha_min_deg - 1e-6 &&
@@ -829,9 +1224,7 @@ void populate_derived_results(const powerflow::SolverData& data,
         lcc.gamma_min_deg <= 0.0 || op.gamma_deg >= lcc.gamma_min_deg - 1e-6;
     result.lcc_transfers.push_back(tr);
 
-    // Honest post-solve angle-limit diagnostics (no silent wrong solution):
-    // outside the alpha/gamma window the physical response would be tap
-    // action or mode degradation, neither of which this model simulates.
+    // Honest post-solve angle-limit diagnostics (no silent wrong solution).
     if (!tr.alpha_within_limits &&
         lcc.station_role == LCCStationRole::Rectifier) {
       result.diagnostics.warnings.push_back(
@@ -853,7 +1246,8 @@ void populate_derived_results(const powerflow::SolverData& data,
           "is modelled.");
     }
     if (op.id_at_limit && op.id_ka > 0.0 &&
-        powerflow::lcc_forms_dc_voltage(lcc)) {
+        powerflow::lcc_forms_dc_voltage(lcc) &&
+        (!tr.tap_control_active || !tr.tap_control_converged)) {
       // Honest control-mode note: the rated-current clamp (current order)
       // binds, so the declared CEA / constant-alpha setpoint is not held;
       // the reported gamma/alpha is the back-calculated physical value
@@ -891,18 +1285,19 @@ void restore_original_vsc_bus_ac(PowerFlowResult& result, const HybridPowerSyste
 // LCC valve-side AC buses go through the same canonical reindexing as VSC
 // bus_ac; restore the AUTHORED component ids for reporting (three-ID rule:
 // results are attributed back to stable component ids).
-void restore_original_lcc_bus_ac(PowerFlowResult& result,
-                                 const HybridPowerSystem& sys) {
-  if (sys.lcc_converters.empty() || result.lcc_transfers.empty()) return;
-  std::unordered_map<int, int> bus_by_index;
-  bus_by_index.reserve(sys.lcc_converters.size());
-  for (const auto& lcc : sys.lcc_converters) {
-    bus_by_index[lcc.index] = lcc.ac_bus;
-  }
+void restore_original_lcc_bus_ac(
+    PowerFlowResult& result,
+    const std::unordered_map<int, int>& bus_by_index) {
+  if (bus_by_index.empty() || result.lcc_transfers.empty()) return;
   for (auto& tr : result.lcc_transfers) {
     const auto it = bus_by_index.find(tr.index);
     if (it != bus_by_index.end()) tr.bus_ac = it->second;
   }
+}
+
+void restore_original_lcc_bus_ac(PowerFlowResult& result,
+                                 const HybridPowerSystem& sys) {
+  restore_original_lcc_bus_ac(result, build_original_lcc_ac_bus_map(sys));
 }
 
 void unproject_branch_flows(PowerFlowResult& result, const BusMergeMap& map,
@@ -1061,6 +1456,24 @@ PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOp
             "no commutation reactance (converter transformer not identified); "
             "its DC voltage characteristic is undefined.");
       }
+      if (lcc.tap_control_modelled) {
+        const auto transformer = std::find_if(
+            sys.ac.branches.begin(), sys.ac.branches.end(),
+            [&](const ACBranch& branch) {
+              return branch.index == lcc.converter_transformer_branch;
+            });
+        const bool valid_transformer =
+            transformer != sys.ac.branches.end() && transformer->in_service &&
+            (transformer->from_bus == lcc.ac_bus ||
+             transformer->to_bus == lcc.ac_bus);
+        if (!valid_transformer) {
+          lcc_errors.push_back(
+              "[LCC-TAP-01] LCC station " + std::to_string(lcc.index) +
+              " declares R-card tap control, but its bound T-card branch is "
+              "missing, out of service, or does not touch the valve-side AC "
+              "bus.");
+        }
+      }
     }
     if (!lcc_errors.empty()) {
       PowerFlowResult result;
@@ -1091,11 +1504,33 @@ PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOp
       return result;
     }
   }
-  powerflow::SolverData& data = get_cached_solver_data(sys, opt.loss_model);
+  powerflow::SolverData& cached_data =
+      get_cached_solver_data(sys, opt.loss_model);
+  const bool requests_lcc_tap_control =
+      solver_data_requests_lcc_tap_control(cached_data);
+  std::optional<powerflow::SolverData> controlled_data;
+  if (requests_lcc_tap_control) {
+    // Tap control rebuilds Ybus repeatedly. Work on a private snapshot so the
+    // thread-local cache and the authored HybridPowerSystem remain immutable.
+    controlled_data.emplace(cached_data);
+  }
+  powerflow::SolverData& data =
+      controlled_data ? *controlled_data : cached_data;
   apply_zip_weights(data, opt);
-  static thread_local powerflow::NewtonSolver solver;
   const InitialState* init_ptr = opt.initial_state ? &*opt.initial_state : nullptr;
-  PowerFlowResult result = solver.solve(data, opt, init_ptr);
+  LCCTapControlStatusMap lcc_tap_statuses;
+  PowerFlowResult result;
+  if (requests_lcc_tap_control) {
+    // A controlled solve uses a private SolverData snapshot whose stack address
+    // can be reused by a later call. Keep its Newton pattern cache local to the
+    // invocation so no stale mode/layout state can cross that address reuse.
+    powerflow::NewtonSolver controlled_solver;
+    result = solve_newton_with_lcc_tap_control(
+        data, controlled_solver, opt, init_ptr, lcc_tap_statuses);
+  } else {
+    static thread_local powerflow::NewtonSolver solver;
+    result = solver.solve(data, opt, init_ptr);
+  }
   result.diagnostics.converter_coordination = coordination;
   if (coordination.enabled) {
     for (const auto& issue : coordination.issues) {
@@ -1105,7 +1540,8 @@ PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOp
       }
     }
   }
-  populate_derived_results(data, result, opt.loss_model);
+  populate_derived_results(data, result, opt.loss_model,
+                           &lcc_tap_statuses);
   // Post-solve DC/DC duty-ratio feasibility (multi-converter §3.2): a converged
   // solution can still demand an infeasible voltage conversion for the declared
   // power-stage topology.
@@ -1173,9 +1609,18 @@ PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOp
   // solve honored (multi-converter model, docs/multiple_converter.md).
   {
     auto& sc = result.converter_model_scope;
-    sc.model_scope = sys.lcc_converters.empty()
+    const bool has_active_lcc = std::any_of(
+        sys.lcc_converters.begin(), sys.lcc_converters.end(),
+        [](const LCCConverter& lcc) { return lcc.in_service; });
+    const bool has_lcc_tap_control = std::any_of(
+        lcc_tap_statuses.begin(), lcc_tap_statuses.end(),
+        [](const auto& item) { return item.second.active; });
+    sc.model_scope = !has_active_lcc
                          ? "steady-state-newton:vsc-3mode+dcdc-power-transfer"
                          : "steady-state-newton:vsc-3mode+dcdc-power-transfer+lcc-quasi-steady";
+    if (has_lcc_tap_control) {
+      sc.model_scope += "+r-card-transformer-tap-control";
+    }
     sc.validity.vsc_loss_modelled = true;
     sc.validity.vsc_ac_conduction_loss_modelled = true;  // r_conv_ac_pu coupling (opt-in)
     sc.validity.vsc_vdc_control_modelled = true;          // VDC_Q/VDC_VAC + stiff droop forming
@@ -1186,7 +1631,9 @@ PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOp
     sc.validity.vsc_capacity_circle_enforced = opt.enforce_converter_physical_limits;
     sc.validity.vsc_current_limits_enforced = opt.enforce_converter_physical_limits;
     sc.validity.vsc_modulation_limits_enforced = opt.enforce_converter_physical_limits;
-    sc.validity.lcc_quasi_steady_modelled = !sys.lcc_converters.empty();
+    sc.validity.lcc_quasi_steady_modelled = has_active_lcc;
+    sc.validity.lcc_transformer_tap_control_modelled =
+        has_lcc_tap_control;
     sc.validity.dc_multisource_coordination_modelled = true;  // is_master + participation in solve
     sc.validity.dcdc_duty_ratio_enforced = opt.enforce_converter_physical_limits;
     sc.validity.equation_closure_checked = result.diagnostics.equation_closure_checked;
@@ -1299,12 +1746,43 @@ PowerFlowResult solve_handle(SolverHandle* handle, const PowerFlowOptions& opt) 
   if (handle == nullptr) {
     throw std::invalid_argument("solve_handle: handle is null.");
   }
-  handle->data.loss_model = opt.loss_model;
   handle->configured_loss_model = opt.loss_model;
+  const InitialState* init_ptr = opt.initial_state ? &*opt.initial_state : nullptr;
+
+  if (solver_data_requests_lcc_tap_control(handle->data)) {
+    // The handle owns the authored fixed-tap snapshot. R-card control is a
+    // per-solve operating action, so keep every accepted tap and rebuilt Ybus
+    // in a private copy and leave repeated handle calls deterministic.
+    powerflow::SolverData controlled_data = handle->data;
+    controlled_data.loss_model = opt.loss_model;
+    apply_zip_weights(controlled_data, opt);
+    powerflow::NewtonSolver controlled_solver;
+    LCCTapControlStatusMap tap_statuses;
+    PowerFlowResult result = solve_newton_with_lcc_tap_control(
+        controlled_data, controlled_solver, opt, init_ptr, tap_statuses);
+    populate_derived_results(controlled_data, result, opt.loss_model,
+                             &tap_statuses);
+    restore_original_vsc_bus_ac(result, handle->original_vsc_bus_ac);
+    restore_original_lcc_bus_ac(result, handle->original_lcc_bus_ac);
+    if (controlled_data.bus_merge_map) {
+      unproject_pf_result(result, *controlled_data.bus_merge_map,
+                          handle->authored_ac_branch_count);
+    } else if (result.branch_flows.size() >
+               handle->authored_ac_branch_count) {
+      result.branch_flows.resize(handle->authored_ac_branch_count);
+    }
+    trim_internal_dc_bus_results(result,
+                                 controlled_data.projection_certificate);
+    return result;
+  }
+
+  handle->data.loss_model = opt.loss_model;
   apply_zip_weights(handle->data, opt);
-  PowerFlowResult result = handle->newton_solver.solve(handle->data, opt, nullptr);
+  PowerFlowResult result =
+      handle->newton_solver.solve(handle->data, opt, init_ptr);
   populate_derived_results(handle->data, result, opt.loss_model);
   restore_original_vsc_bus_ac(result, handle->original_vsc_bus_ac);
+  restore_original_lcc_bus_ac(result, handle->original_lcc_bus_ac);
   if (handle->data.bus_merge_map) {
     unproject_pf_result(result, *handle->data.bus_merge_map,
                         handle->authored_ac_branch_count);

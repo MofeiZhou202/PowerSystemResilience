@@ -820,8 +820,13 @@ engine::SolverAdapterPtr create_market_milp_adapter(
       if (structured_branching_used != nullptr) {
         *structured_branching_used = true;
       }
+#if defined(HACDCPF_MIPSOLVERS_HAVE_STRICT_HIGHS_ADAPTER)
       return std::make_shared<StrictHighsBranchAndCutAdapter>(
           market_scuc_bc_options(market_options));
+#else
+      return std::make_shared<NativeBranchAndCutAdapter>(
+          market_scuc_bc_options(market_options));
+#endif
     }
     return std::make_shared<HighsAdapter>();
   };
@@ -1647,7 +1652,9 @@ MarketCommitmentBuild build_market_commitment_model(
   hint.pmax.resize(static_cast<size_t>(build.G), 0.0);
   hint.ramp.resize(static_cast<size_t>(build.G), kLargeBound);
   hint.gen_bus.resize(static_cast<size_t>(build.G), -1);
+#if defined(HACDCPF_MIPSOLVERS_HAVE_EXTENDED_SCUC_HINTS)
   hint.up_reserve_headroom_cap.resize(static_cast<size_t>(build.G), 0.0);
+#endif
   for (int g = 0; g < build.G; ++g) {
     const int position = build.generator_positions[static_cast<size_t>(g)];
     const auto& generator = system.ac.generators[static_cast<size_t>(position)];
@@ -1671,9 +1678,11 @@ MarketCommitmentBuild build_market_commitment_model(
     hint.ramp[static_cast<size_t>(g)] = std::max(ramp_up, ramp_down);
     const auto bus = bus_positions.find(generator.bus);
     if (bus != bus_positions.end()) hint.gen_bus[static_cast<size_t>(g)] = bus->second;
+#if defined(HACDCPF_MIPSOLVERS_HAVE_EXTENDED_SCUC_HINTS)
     hint.up_reserve_headroom_cap[static_cast<size_t>(g)] =
         std::max(0.0, hint.pmax[static_cast<size_t>(g)] -
                           hint.pmin[static_cast<size_t>(g)]);
+#endif
     for (int t = 0; t < build.T; ++t) {
       const size_t slot = static_cast<size_t>(t * build.G + g);
       hint.ig_cols[slot] = build.commitment(g, t);
@@ -1716,7 +1725,9 @@ MarketCommitmentBuild build_market_commitment_model(
   }
   hint.certifies_power_balance_rows = true;
   hint.certifies_generation_capacity_rows = true;
+#if defined(HACDCPF_MIPSOLVERS_HAVE_EXTENDED_SCUC_HINTS)
   hint.certifies_ramping_rows = true;
+#endif
   hint.certifies_min_up_down_rows = true;
   hint.certifies_segment_bound_rows = true;
   hint.certifies_system_reserve_rows = true;
@@ -1916,11 +1927,13 @@ struct SCUCNetworkLimitViolation {
   double violation_mw{0.0};
 };
 
+#if defined(HACDCPF_MIPSOLVERS_HAVE_SCUC_CROSS_ROUND_STATE)
 struct SCUCCrossRoundSolverState {
   std::shared_ptr<engine::BCRootCuts> root_cuts;
   std::shared_ptr<engine::BCRootBasis> root_basis;
   std::shared_ptr<engine::BCPseudocostInit> pseudocosts;
 };
+#endif
 
 UCSchedule solve_market_commitment(
     const HybridPowerSystem& system,
@@ -2061,7 +2074,9 @@ UCSchedule solve_market_commitment(
   int network_iterations = 0;
   int network_remaining = 0;
   double network_worst_violation = 0.0;
+#if defined(HACDCPF_MIPSOLVERS_HAVE_SCUC_CROSS_ROUND_STATE)
   SCUCCrossRoundSolverState reusable_state;
+#endif
   bool solver_state_reuse_used = false;
   int solver_state_reuse_rounds = 0;
   bool root_cuts_reused = false;
@@ -2093,9 +2108,15 @@ UCSchedule solve_market_commitment(
     const bool iteration_structured = market_uses_structured_highs(
         options.uc_options.uc_solver, iteration_options, binary_variables);
     if (iteration_structured) {
+#if defined(HACDCPF_MIPSOLVERS_HAVE_STRICT_HIGHS_ADAPTER)
       auto bc_options = engine::make_strict_highs_problem_options(
           build.model, market_scuc_bc_options(iteration_options));
+#else
+      auto bc_options = market_scuc_bc_options(iteration_options);
+      bc_options.use_vendored_highs_lp_kernel = true;
+#endif
       bool reused_this_round = false;
+#if defined(HACDCPF_MIPSOLVERS_HAVE_SCUC_CROSS_ROUND_STATE)
       if (iteration > 1 &&
           options.enable_scuc_cross_round_solver_state_reuse) {
         const int num_columns =
@@ -2133,6 +2154,7 @@ UCSchedule solve_market_commitment(
           reused_this_round = true;
         }
       }
+#endif
       if (reused_this_round) {
         solver_state_reuse_used = true;
         ++solver_state_reuse_rounds;
@@ -2217,6 +2239,7 @@ UCSchedule solve_market_commitment(
       solved.x = std::move(bc_result.x);
       solved.stats = std::move(bc_result.stats);
       solved.stats.solver_name = "StrictHiGHS";
+#if defined(HACDCPF_MIPSOLVERS_HAVE_SCUC_CROSS_ROUND_STATE)
       if (bc_result.highs_root_cuts &&
           !bc_result.highs_root_cuts->empty()) {
         reusable_state.root_cuts = std::move(bc_result.highs_root_cuts);
@@ -2227,6 +2250,7 @@ UCSchedule solve_market_commitment(
         reusable_state.pseudocosts =
             std::move(bc_result.highs_pseudocost_init);
       }
+#endif
     } else {
       bool adapter_structured = false;
       solved = solve_market_milp_with_fallback(
@@ -2288,8 +2312,12 @@ UCSchedule solve_market_commitment(
       build.model.branching_priority.size() ==
       build.model.linear_part.vars.size();
   schedule.warm_start_generation_sec = warm_start_generation_sec;
+#if defined(HACDCPF_MIPSOLVERS_HAVE_SCUC_CROSS_ROUND_STATE)
   schedule.cross_round_solver_state_reuse_enabled =
       options.enable_scuc_cross_round_solver_state_reuse;
+#else
+  schedule.cross_round_solver_state_reuse_enabled = false;
+#endif
   schedule.cross_round_solver_state_reuse_used = solver_state_reuse_used;
   schedule.cross_round_solver_state_reuse_rounds =
       solver_state_reuse_rounds;

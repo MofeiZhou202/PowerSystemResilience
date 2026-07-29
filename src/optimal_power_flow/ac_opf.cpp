@@ -22,6 +22,7 @@
 #include "hacdcpf/power_flow/ac.hpp"
 #include "hacdcpf/power_flow/hybrid.hpp"
 #include "hacdcpf/power_flow/jacobian_builder.hpp"
+#include "hacdcpf/power_flow/lcc_model.hpp"
 #include "hacdcpf/detail/core_compat.hpp"
 #include "hacdcpf/assembly/solver_data.hpp"
 #include "hacdcpf/projection/project_to_canonical.hpp"
@@ -2053,6 +2054,172 @@ std::vector<double> map_power_flow_dc_voltage_to_parity(
   return values;
 }
 
+void recover_power_flow_generator_dispatch(const parity::Problem& prob,
+                                           ACOPFResult& warm) {
+  const auto& idx = prob.vidx;
+  const auto& cidx = prob.cidx;
+  const double base = prob.data.base_mva;
+  if (!(base > 0.0) || idx.n_pg == 0 ||
+      warm.vm.size() != static_cast<size_t>(idx.n_vm) ||
+      warm.va.size() != static_cast<size_t>(idx.n_va) ||
+      warm.vdc.size() != static_cast<size_t>(idx.n_vdc)) {
+    return;
+  }
+
+  // Re-evaluate the same nodal balances used by Parity at the converged PF
+  // voltage state. PowerFlowResult intentionally carries voltages and device
+  // transfers rather than mutable generator rows, so the balance residual is
+  // the authoritative way to recover the slack/PV dispatch.
+  Eigen::VectorXd x = Eigen::VectorXd::Zero(idx.n_total);
+  for (int i = 0; i < idx.n_va; ++i)
+    x[idx.i_va + i] = warm.va[static_cast<size_t>(i)];
+  for (int i = 0; i < idx.n_vm; ++i)
+    x[idx.i_vm + i] = warm.vm[static_cast<size_t>(i)];
+  for (int i = 0; i < idx.n_vdc; ++i)
+    x[idx.i_vdc + i] = warm.vdc[static_cast<size_t>(i)];
+
+  for (int k = 0; k < idx.n_pg; ++k) {
+    const int data_index = prob.gen_var_to_data[static_cast<size_t>(k)];
+    if (data_index < 0 ||
+        data_index >= static_cast<int>(prob.data.generators.size()))
+      continue;
+    const auto& gen = prob.data.generators[static_cast<size_t>(data_index)];
+    const double pg = data_index < static_cast<int>(warm.pg_mw.size())
+                          ? warm.pg_mw[static_cast<size_t>(data_index)]
+                          : gen.pg_mw;
+    const double qg = data_index < static_cast<int>(warm.qg_mvar.size())
+                          ? warm.qg_mvar[static_cast<size_t>(data_index)]
+                          : gen.qg_mvar;
+    x[idx.i_pg + k] = std::isfinite(pg) ? pg / base : 0.0;
+    x[idx.i_qg + k] = std::isfinite(qg) ? qg / base : 0.0;
+  }
+  for (int k = 0; k < idx.n_pac; ++k) {
+    if (k < static_cast<int>(warm.pac_mw.size()))
+      x[idx.i_pac + k] = warm.pac_mw[static_cast<size_t>(k)] / base;
+    if (k < static_cast<int>(warm.qac_mvar.size()))
+      x[idx.i_qac + k] = warm.qac_mvar[static_cast<size_t>(k)] / base;
+  }
+
+  // Seed every other AC-side decision component at its PF operating value.
+  // Load-shedding variables deliberately remain zero: PF did not shed load.
+  for (int k = 0; k < idx.n_pren; ++k) {
+    const int data_index = prob.ren_var_to_data[static_cast<size_t>(k)];
+    if (prob.ren_source[static_cast<size_t>(k)] == 0) {
+      const auto& renewable =
+          prob.data.renewable_gens[static_cast<size_t>(data_index)];
+      x[idx.i_pren + k] = renewable.p_mw / base;
+      x[idx.i_qren + k] = renewable.q_mvar / base;
+    } else {
+      const auto& pv = prob.data.pv_systems[static_cast<size_t>(data_index)];
+      x[idx.i_pren + k] = pv.p_mw / base;
+      x[idx.i_qren + k] = pv.q_mvar / base;
+    }
+  }
+  for (int k = 0; k < idx.n_pstor; ++k) {
+    const auto& storage = prob.data.storage_units[static_cast<size_t>(
+        prob.stor_var_to_data[static_cast<size_t>(k)])];
+    x[idx.i_pstor + k] = storage.p_mw / base;
+    x[idx.i_qstor + k] = storage.q_mvar / base;
+  }
+  for (int k = 0; k < idx.n_pflex; ++k) {
+    const auto& load = prob.data.flexible_loads[static_cast<size_t>(
+        prob.flex_var_to_data[static_cast<size_t>(k)])];
+    x[idx.i_pflex + k] = load.p_mw / base;
+  }
+  for (const auto& port : prob.er_ports) {
+    const auto& authored =
+        prob.data.energy_routers[static_cast<size_t>(port.router_idx)]
+            .ports[static_cast<size_t>(port.port_idx)];
+    x[idx.i_erp + port.pvar] = authored.p_mw / base;
+    if (port.qvar >= 0)
+      x[idx.i_erq + port.qvar] = authored.q_mvar / base;
+  }
+
+  parity::EvalWorkspace ws;
+  Eigen::VectorXd residual;
+  parity::equality_constraints(prob, x, ws, residual);
+  if (!residual.allFinite() ||
+      residual.size() != prob.cidx.n_eq_total) {
+    return;
+  }
+
+  std::vector<std::vector<int>> generators_by_bus(
+      static_cast<size_t>(idx.n_vm));
+  for (int k = 0; k < idx.n_pg; ++k) {
+    const int bus = prob.gen_bus[static_cast<size_t>(k)];
+    if (bus >= 0 && bus < idx.n_vm)
+      generators_by_bus[static_cast<size_t>(bus)].push_back(k);
+  }
+
+  auto distribute_at_bus = [&](const std::vector<int>& compact_rows,
+                               double target_mw, bool reactive) {
+    if (compact_rows.empty() || !std::isfinite(target_mw)) return;
+    auto& values = reactive ? warm.qg_mvar : warm.pg_mw;
+    std::vector<int> order = compact_rows;
+    std::stable_sort(order.begin(), order.end(), [&](int lhs, int rhs) {
+      const int li = prob.gen_var_to_data[static_cast<size_t>(lhs)];
+      const int ri = prob.gen_var_to_data[static_cast<size_t>(rhs)];
+      return prob.data.generators[static_cast<size_t>(li)].is_slack &&
+             !prob.data.generators[static_cast<size_t>(ri)].is_slack;
+    });
+
+    double assigned = 0.0;
+    for (const int k : order) {
+      const int data_index = prob.gen_var_to_data[static_cast<size_t>(k)];
+      const auto& gen = prob.data.generators[static_cast<size_t>(data_index)];
+      double lo = reactive ? gen.qmin_mvar : gen.pmin_mw;
+      double hi = reactive ? gen.qmax_mvar : gen.pmax_mw;
+      if (lo > hi) std::swap(lo, hi);
+      double value = values[static_cast<size_t>(data_index)];
+      if (!std::isfinite(value)) value = 0.0;
+      value = std::clamp(value, lo, hi);
+      values[static_cast<size_t>(data_index)] = value;
+      assigned += value;
+    }
+
+    double remaining = target_mw - assigned;
+    for (const int k : order) {
+      if (std::abs(remaining) <= 1e-9) break;
+      const int data_index = prob.gen_var_to_data[static_cast<size_t>(k)];
+      const auto& gen = prob.data.generators[static_cast<size_t>(data_index)];
+      double lo = reactive ? gen.qmin_mvar : gen.pmin_mw;
+      double hi = reactive ? gen.qmax_mvar : gen.pmax_mw;
+      if (lo > hi) std::swap(lo, hi);
+      double& value = values[static_cast<size_t>(data_index)];
+      if (remaining > 0.0) {
+        const double step = std::min(remaining, hi - value);
+        value += step;
+        remaining -= step;
+      } else {
+        const double step = std::min(-remaining, value - lo);
+        value -= step;
+        remaining += step;
+      }
+    }
+  };
+
+  const double p_scale = std::max(std::abs(prob.scale_p), 1e-12);
+  const double q_scale = std::max(std::abs(prob.scale_q), 1e-12);
+  for (int bus = 0; bus < idx.n_vm; ++bus) {
+    const auto& rows = generators_by_bus[static_cast<size_t>(bus)];
+    if (rows.empty()) continue;
+    double pg_current_pu = 0.0;
+    double qg_current_pu = 0.0;
+    for (const int k : rows) {
+      pg_current_pu += x[idx.i_pg + k];
+      qg_current_pu += x[idx.i_qg + k];
+    }
+    const double pg_target_mw =
+        (pg_current_pu + residual[cidx.i_pbal_ac + bus] / p_scale) *
+        base;
+    const double qg_target_mvar =
+        (qg_current_pu + residual[cidx.i_qbal_ac + bus] / q_scale) *
+        base;
+    distribute_at_bus(rows, pg_target_mw, false);
+    distribute_at_bus(rows, qg_target_mvar, true);
+  }
+}
+
 ACOPFResult build_hybrid_power_flow_warm_start(
     const parity::Problem& prob, const HybridPowerSystem& sys,
     const PowerFlowResult& pf) {
@@ -2093,6 +2260,7 @@ ACOPFResult build_hybrid_power_flow_warm_start(
     const auto* transfer = find_dcdc(prob.data.dcdc_converters[static_cast<size_t>(data_index)].index);
     if (transfer != nullptr) warm.pdcdc_mw[static_cast<size_t>(k)] = transfer->p_in_mw;
   }
+  recover_power_flow_generator_dispatch(prob, warm);
   return warm;
 }
 
@@ -2331,6 +2499,10 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
     if (opt.enforce_converter_current_limits) tag += "+iac";
     if (opt.enforce_converter_modulation_limits) tag += "+modulation+dcdc-duty";
     if (opt.enforce_branch_limits) tag += "+branch-limits";
+    const bool has_lcc = std::any_of(
+        sys.lcc_converters.begin(), sys.lcc_converters.end(),
+        [](const LCCConverter& lcc) { return lcc.in_service; });
+    if (has_lcc) tag += "+lcc-quasi-steady";
     sc.model_scope = tag;
     sc.validity.vsc_loss_modelled = true;
     sc.validity.vsc_capacity_circle_enforced = opt.enforce_converter_capacity;
@@ -2338,6 +2510,17 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
     sc.validity.vsc_modulation_limits_enforced = opt.enforce_converter_modulation_limits;
     sc.validity.dcdc_duty_ratio_enforced = opt.enforce_converter_modulation_limits;
     sc.validity.vsc_vdc_control_modelled = true;
+    sc.validity.lcc_quasi_steady_modelled = has_lcc;
+    if (has_lcc) {
+      out.model_limitations.push_back(
+          "LCC P/I/alpha/gamma orders and converter-transformer taps are fixed inputs, not economic dispatch variables.");
+      out.model_limitations.push_back(
+          "LCC rated-current saturation is modelled, while alpha/gamma limits are post-solve audits rather than hard OPF inequalities.");
+      out.model_limitations.push_back(
+          "LCC commutation-overlap iteration, tap-changer control, and active converter losses are not modelled.");
+      out.model_limitations.push_back(
+          "LCC equality second derivatives use a local finite difference of the analytical injection Jacobian; the rated-current transition is nonsmooth.");
+    }
   }
 
   parity::ParityOptions form_opt;
@@ -2500,7 +2683,7 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
   out.profiling.final_barrier_mu = ipm_res.complementarity;
   const auto save_state = [](const Eigen::VectorXd& source,
                              std::vector<double>& destination) {
-    if (source.size() == 0) {
+    if (source.size() == 0 || !source.allFinite()) {
       destination.clear();
     } else {
       destination.assign(source.data(), source.data() + source.size());
@@ -2513,7 +2696,9 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
 
   // Optional Davidenko homotopy tangent at the returned point (one extra
   // inertia-controlled KKT solve) for objective-continuation drivers.
-  if (opt.compute_homotopy_tangent && ipm_res.x.size() == vidx.n_total) {
+  const bool have_finite_primal =
+      ipm_res.x.size() == vidx.n_total && ipm_res.x.allFinite();
+  if (opt.compute_homotopy_tangent && have_finite_primal) {
     Eigen::VectorXd dxdt;
     Eigen::VectorXd dzdt;
     Eigen::VectorXd dldt;
@@ -2538,7 +2723,7 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
     out.qg_mvar[gi] = prob.data.generators[gi].qg_mvar;
   }
 
-  if (ipm_res.x.size() == vidx.n_total) {
+  if (have_finite_primal) {
     for (int i = 0; i < vidx.n_vm; ++i) {
       out.vm[static_cast<size_t>(i)] = ipm_res.x[vidx.i_vm + i];
     }
@@ -2666,6 +2851,80 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
       }
     }
 
+    // Re-evaluate every in-service LCC at the optimized voltage state. The
+    // canonical formulation may renumber or merge buses, so restore authored
+    // bus identifiers by stable LCCConverter.index before exposing the rows.
+    if (!prob.data.lcc_converters.empty()) {
+      const Eigen::Map<const Eigen::VectorXd> vm_state(
+          ipm_res.x.data() + vidx.i_vm, vidx.n_vm);
+      const Eigen::Map<const Eigen::VectorXd> vdc_state(
+          ipm_res.x.data() + vidx.i_vdc, vidx.n_vdc);
+      out.lcc_transfers.reserve(prob.data.lcc_converters.size());
+      for (const auto& lcc : prob.data.lcc_converters) {
+        if (!lcc.in_service) continue;
+        const int ac = lcc.ac_bus - 1;
+        const int dc = lcc.dc_bus - 1;
+        if (ac < 0 || ac >= vm_state.size() ||
+            dc < 0 || dc >= vdc_state.size()) {
+          continue;
+        }
+        const double e_kv = vm_state[ac] * lcc.vn_ac_kv;
+        const double commutation_e_kv =
+            powerflow::lcc_commutation_voltage_kv(
+                prob.data, lcc, vm_state);
+        const double ud_kv =
+            vdc_state[dc] * powerflow::lcc_dc_base_kv(prob.data, lcc);
+        const auto operating_point = powerflow::lcc_operating_point(
+            lcc, e_kv, commutation_e_kv, ud_kv);
+        if (!operating_point.valid) continue;
+
+        LCCTransfer transfer;
+        transfer.index = lcc.index;
+        transfer.bus_ac = lcc.ac_bus;
+        transfer.bus_dc = lcc.dc_bus;
+        const auto authored = std::find_if(
+            sys.lcc_converters.begin(), sys.lcc_converters.end(),
+            [&](const LCCConverter& candidate) {
+              return candidate.index == lcc.index;
+            });
+        if (authored != sys.lcc_converters.end()) {
+          transfer.bus_ac = authored->ac_bus;
+          transfer.bus_dc = authored->dc_bus;
+        }
+        transfer.station_role = static_cast<int>(lcc.station_role);
+        transfer.control_mode = static_cast<int>(lcc.control_mode);
+        transfer.alpha_deg = operating_point.alpha_deg;
+        transfer.gamma_deg = operating_point.gamma_deg;
+        transfer.ud0_kv = operating_point.ud0_kv;
+        transfer.ud_kv = operating_point.ud_kv;
+        transfer.id_ka = operating_point.id_ka;
+        transfer.p_ac_mw = operating_point.p_ac_mw;
+        transfer.q_ac_mvar = operating_point.q_ac_mvar;
+        transfer.p_dc_mw = operating_point.p_dc_mw;
+        transfer.id_at_limit = operating_point.id_at_limit;
+        transfer.alpha_within_limits =
+            operating_point.alpha_deg >= lcc.alpha_min_deg - 1e-6 &&
+            operating_point.alpha_deg <= lcc.alpha_stop_deg + 1e-6;
+        transfer.gamma_within_limits =
+            lcc.gamma_min_deg <= 0.0 ||
+            operating_point.gamma_deg >= lcc.gamma_min_deg - 1e-6;
+        out.lcc_transfers.push_back(transfer);
+
+        if (lcc.station_role == LCCStationRole::Rectifier &&
+            !transfer.alpha_within_limits) {
+          out.model_limitations.push_back(
+              "LCC rectifier " + std::to_string(lcc.index) +
+              " violates its post-solve firing-angle window at the fixed tap.");
+        }
+        if (lcc.station_role == LCCStationRole::Inverter &&
+            !transfer.gamma_within_limits) {
+          out.model_limitations.push_back(
+              "LCC inverter " + std::to_string(lcc.index) +
+              " violates its post-solve minimum extinction angle at the fixed tap.");
+        }
+      }
+    }
+
     out.objective = parity::objective(prob, ipm_res.x);
 
     // Extract LMP from dual variables of power balance constraints
@@ -2730,6 +2989,7 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
     other_eq = std::max(other_eq,
                         block_inf(cidx.i_dcdc_bal, cidx.n_dcdc_bal));
     other_eq = std::max(other_eq, block_inf(cidx.i_er_bal, cidx.n_er_bal));
+    other_eq = std::max(other_eq, block_inf(cidx.i_ac_ref, cidx.n_ac_ref));
     other_eq = std::max(other_eq, block_inf(cidx.i_dc_ref, cidx.n_dc_ref));
     out.profiling.max_other_equality_residual_pu = other_eq;
     out.profiling.max_nonlinear_inequality_violation_pu = max_hplus;
@@ -2764,6 +3024,7 @@ bool contains_hybrid_acdc_components(const HybridPowerSystem& sys) {
          !sys.dc.branches.empty()            ||
          !sys.dc.loads.empty()               ||
          !sys.vsc_converters.empty()         ||
+         !sys.lcc_converters.empty()         ||
          !sys.dc.dcdc_converters.empty()     ||
          !sys.dc.dc_circuit_breakers.empty() ||
          !sys.dc.storage.empty()             ||
@@ -2828,6 +3089,54 @@ ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_i
   if (sys.ac.buses.empty()) {
     out.status = "AC OPF failed: empty AC bus set.";
     return out;
+  }
+
+  // The LCC injection helpers deliberately return zero for unusable station
+  // configurations so PF can emit diagnostics without producing NaNs. OPF
+  // must be stricter: silently dropping a fixed transfer changes feasibility
+  // and the optimum, so reject unsupported controls and missing characteristic
+  // data before canonical projection.
+  for (const auto& lcc : sys.lcc_converters) {
+    if (!lcc.in_service) continue;
+    const auto reject_lcc = [&](const std::string& reason) {
+      out.status = "AC OPF failed: LCC readiness check failed for converter " +
+                   std::to_string(lcc.index) + ": " + reason;
+      out.infeasibility_hints.push_back(out.status);
+    };
+    if (!powerflow::lcc_control_supported(lcc)) {
+      reject_lcc("station role and control mode are not a supported pair.");
+      return out;
+    }
+    if (lcc.n_bridges <= 0 || !(lcc.vn_ac_kv > 0.0)) {
+      reject_lcc("n_bridges and vn_ac_kv must both be positive.");
+      return out;
+    }
+    const bool characteristic =
+        lcc.control_mode == LCCControlMode::ConstantAlpha ||
+        lcc.control_mode == LCCControlMode::ConstantGamma;
+    if (characteristic && !(lcc.x_comm_ohm > 0.0)) {
+      reject_lcc(
+          "constant-alpha/gamma control requires positive x_comm_ohm; the numerical reactance floor is not an OPF model.");
+      return out;
+    }
+    const bool ac_bus_exists = std::any_of(
+        sys.ac.buses.begin(), sys.ac.buses.end(),
+        [&](const ACBus& bus) {
+          return bus.in_service && bus.index == lcc.ac_bus;
+        });
+    const auto dc_bus = std::find_if(
+        sys.dc.buses.begin(), sys.dc.buses.end(),
+        [&](const DCBus& bus) {
+          return bus.in_service && bus.index == lcc.dc_bus;
+        });
+    if (!ac_bus_exists || dc_bus == sys.dc.buses.end()) {
+      reject_lcc("the in-service AC or DC terminal bus cannot be resolved.");
+      return out;
+    }
+    if (!(dc_bus->base_kv > 0.0) && !(lcc.rated_dc_kv > 0.0)) {
+      reject_lcc("a positive DC bus base_kv or rated_dc_kv is required.");
+      return out;
+    }
   }
 
   const auto reference_validation =
@@ -2950,13 +3259,16 @@ ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_i
   };
 
   const bool has_hybrid_acdc = contains_hybrid_acdc_components(sys);
+  const bool has_lcc = std::any_of(
+      sys.lcc_converters.begin(), sys.lcc_converters.end(),
+      [](const LCCConverter& lcc) { return lcc.in_service; });
   const bool dropped_dc = has_hybrid_acdc;
   auto append_hybrid_fallback_suppression = [&]() {
     if (!dropped_dc || !opt.allow_fallback) {
       return;
     }
     const std::string hint =
-        "AC-only economic-dispatch fallback suppressed because the case contains DC/VSC components.";
+        "AC-only economic-dispatch fallback suppressed because the case contains DC/VSC/LCC components.";
     const auto already_present = std::any_of(
         out.infeasibility_hints.begin(), out.infeasibility_hints.end(),
         [&](const std::string& existing) { return existing.find(hint) != std::string::npos; });
@@ -3024,6 +3336,14 @@ ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_i
   // Auto-enable a hybrid-capable primal-dual path when any DC/VSC subsystem is
   // present (unless the caller explicitly chose the economic-dispatch backend).
   if (has_hybrid_acdc && !opt.enable_primal_dual &&
+      opt.ac_solver_backend != ACOPFSolverBackend::EconomicDispatch) {
+    opt.enable_primal_dual = true;
+    opt.use_parity_ipm = true;
+  }
+  // The legacy native formulation does not have Vdc columns for LCC coupling.
+  // Force every non-EconomicDispatch LCC solve through the shared
+  // Parity/Ipopt formulation even when legacy flags were set inconsistently.
+  if (has_lcc &&
       opt.ac_solver_backend != ACOPFSolverBackend::EconomicDispatch) {
     opt.enable_primal_dual = true;
     opt.use_parity_ipm = true;
@@ -3180,7 +3500,7 @@ ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_i
 
   if (!opt.enable_primal_dual) {
     if (dropped_dc) {
-      out.status = "AC OPF failed: hybrid AC/DC cases require a hybrid-capable primal-dual solver; "
+      out.status = "AC OPF failed: hybrid AC/DC/LCC cases require a hybrid-capable primal-dual solver; "
                    "AC-only economic-dispatch fallback was not used.";
       append_hybrid_fallback_suppression();
       out.infeasibility_hints.push_back(

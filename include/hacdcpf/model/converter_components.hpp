@@ -155,10 +155,12 @@ struct LCCConverter {
   double gamma_min_deg{0.0};
   double v_drop_v{0.0};        // forward voltage drop per bridge valve (V)
   double rated_current_a{0.0}; // rated bridge (DC) current (A)
-  // Commutation reactance per phase, in pu on x_comm_base_mva at the
-  // valve-side voltage (T-card convention: leakage on transformer Sn base,
-  // divided by the parallel transformer count).  x_comm_ohm is the same
-  // quantity in ohms referred to the valve side, derived as
+  // Per-bridge commutation reactance per phase, in pu on x_comm_base_mva at
+  // the valve-side voltage. For BPA/DSP, one T-card branch is the AC-parallel
+  // equivalent of the n_bridges series-connected DC bridge transformers; the
+  // importer therefore multiplies the branch-equivalent leakage by
+  // n_bridges to recover one bridge's X_c. x_comm_ohm is the same quantity in
+  // ohms referred to the valve side, derived as
   // x_comm_pu * vn_ac_kv^2 / x_comm_base_mva.  0 = not available (the
   // converter transformer was not identified).
   double x_comm_pu{0.0};
@@ -178,15 +180,33 @@ struct LCCConverter {
   double i_set_ka{0.0};        // DC current setpoint (kA)
   double alpha_set_deg{0.0};   // normal firing angle, rectifier (deg)
   double gamma_set_deg{0.0};   // normal extinction angle, inverter CEA (deg)
-  double v_dc_set_kv{0.0};     // scheduled rectifier-side DC voltage (kV)
+  double v_dc_set_kv{0.0};     // scheduled local DC-terminal voltage (kV)
+
+  // Non-solving provenance/capability metadata. DSP may report compound
+  // station codes such as PAAL (power+alpha) or VDGA (Vdc+gamma); these are
+  // not interchangeable with control_mode, which selects the C++ equation
+  // actually enforced. tap_control_modelled is true only when a converter-
+  // transformer branch and a valid adjustable-tap range are available to the
+  // unified power-flow tap-control outer loop.
+  std::string external_control_code;
+  bool tap_control_modelled{false};
 
   // Converter transformer reference: ACBranch.index of the T-card branch
   // between the primary AC bus and the valve-side bus; -1 = not identified.
   int converter_transformer_branch{-1};
 
+  // Converter-transformer tap-control range in ACBranch::tap coordinates.
+  // The BPA R-card winding limits are normalized during import, so the solver
+  // need not reinterpret card orientation. transformer_tap_steps <= 1 means
+  // continuous adjustment; otherwise it is the number of discrete positions.
+  double transformer_tap_min_pu{0.0};
+  double transformer_tap_max_pu{0.0};
+  int transformer_tap_steps{0};
+  int transformer_tap_winding{0};  // source winding number, 1 or 2
+
   // Honest-result bookkeeping (project convention): this is a quasi-steady
-  // model — no commutation overlap iteration, no tap-changer control, no
-  // reactive-power equation yet; see model_limitations.
+  // model with an approximate Q=P*tan(phi) relation and no commutation
+  // overlap iteration; see model_limitations for source-specific coverage.
   std::string model_scope;
   std::string model_limitations;
 };

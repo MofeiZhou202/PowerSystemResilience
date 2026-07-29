@@ -189,6 +189,12 @@ struct LCCTransfer {
   double p_ac_mw{0.0};
   double q_ac_mvar{0.0};
   double p_dc_mw{0.0};
+  double transformer_tap{1.0};       // effective ACBranch.tap used by the solve
+  double tap_target_angle_deg{0.0};  // alpha target (rectifier) or gamma target
+  int tap_control_iterations{0};     // accepted tap changes in the outer loop
+  bool tap_control_active{false};
+  bool tap_control_converged{false};
+  bool tap_at_limit{false};
   bool id_at_limit{false};           // DC current clamped at rated_current_a:
                                      // the current order/limit binds, so a
                                      // CEA/constant-alpha setpoint is NOT

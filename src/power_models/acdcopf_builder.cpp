@@ -41,6 +41,12 @@ static constexpr double kEpsIac   = 1e-6;   // numerical regularisation inside s
 // ════════════════════════════════════════════════════════════════════════════
 
 ACDCOPFData to_acdcopf_data(const HybridPowerSystem& sys) {
+  if (std::any_of(sys.lcc_converters.begin(), sys.lcc_converters.end(),
+                  [](const LCCConverter& lcc) { return lcc.in_service; })) {
+    throw std::invalid_argument(
+        "Experimental AML ACDCOPF does not model LCC converter equations; "
+        "use opf::solve_ac_opf with the ParityIPM or Ipopt backend.");
+  }
   ACDCOPFData d;
   d.ac = to_acopf_data(sys);   // reuse existing pure-AC converter
 

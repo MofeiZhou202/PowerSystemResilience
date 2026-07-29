@@ -9,21 +9,26 @@
 ///   * AC bus cards        B / BS / BE / BQ
 ///   * AC branch cards     L (line), T (two-winding transformer)
 ///   * Two-terminal HVDC   BD (converter node), LD (DC line)
+///   * VSC-HVDC            BZ / BZ+ (converter station), LZ (DC line)
 /// Control cards ((...), /..., >...<, comments) are consumed for MVA base and
 /// case id; unsupported cards are skipped with a report record.
 ///
 /// LCC converter stations can be imported two ways (see BpaImportOptions::
 /// lcc_model):
-///   * VscApprox — each station is approximated by a VSC converter:
+///   * VscApprox (legacy opt-in) — each station is approximated by a VSC
+///     converter:
 ///     the rectifier runs PQ_MODE drawing the scheduled power, the inverter
 ///     runs VDC_Q forming the DC voltage so the delivered power emerges from
 ///     the island balance.
 ///   * LccQuasiSteady (default) — each LD link produces a DCBranch plus two
-///     native LCCConverter elements carrying the full BD/LD quasi-steady parameters
+///     native
+///     LCCConverter elements carrying the full BD/LD quasi-steady parameters
 ///     (bridge count, alpha/gamma limits, valve drop, commutation reactance
-///     from the converter transformer T card, control setpoints). The unified
-///     Newton power-flow solver consumes this fixed-tap quasi-steady model;
-///     unsupported dynamics and tap action are recorded in model_limitations.
+///     from the converter transformer T card, control setpoints).  The unified
+///     Newton power flow consumes the native AC-P/AC-Q/DC coupling directly;
+///     the shared Parity/Ipopt OPF formulation consumes the same quasi-steady
+///     characteristic.  Fixed taps and other declared limitations remain on
+///     each element's model_scope / model_limitations.
 /// The approximation and every skipped record are documented in the uniform
 /// ImportReport (docs §8).
 

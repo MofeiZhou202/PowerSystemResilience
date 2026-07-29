@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -14,6 +15,7 @@
 #include "hacdcpf/optimal_power_flow/ac_opf_solver.hpp"
 #include "hacdcpf/power_flow/converter_coordination.hpp"
 #include "hacdcpf/power_flow/converter_model.hpp"
+#include "hacdcpf/power_models/ac_pf_model_builder.hpp"
 #include "hacdcpf/power_models/hybrid_opf_model_builder.hpp"
 
 #ifndef HACDCPF_TEST_DATA_DIR
@@ -1422,6 +1424,40 @@ TEST_CASE("OPF DC-slack selection is consistent with the control-role resolver",
     REQUIRE(data.converters.size() == 1);
     CHECK(data.converters[0].is_vdc_slack);
   }
+}
+
+TEST_CASE("Experimental AML OPF builders reject in-service LCC coupling",
+          "[converter][opf][lcc][scope]") {
+  using namespace hacdcpf;
+  HybridPowerSystem sys = build_hybrid_opf_case();
+  LCCConverter lcc;
+  lcc.index = 91;
+  lcc.ac_bus = sys.ac.buses.front().index;
+  lcc.dc_bus = sys.dc.buses.front().index;
+  lcc.in_service = true;
+  sys.lcc_converters.push_back(lcc);
+
+  bool ac_rejected = false;
+  try {
+    (void)power_models::to_acopf_data(sys);
+  } catch (const std::invalid_argument& error) {
+    ac_rejected = std::string(error.what()).find("does not model LCC") !=
+                  std::string::npos;
+  }
+  CHECK(ac_rejected);
+
+  bool acdc_rejected = false;
+  try {
+    (void)power_models::to_acdcopf_data(sys);
+  } catch (const std::invalid_argument& error) {
+    acdc_rejected = std::string(error.what()).find("does not model LCC") !=
+                    std::string::npos;
+  }
+  CHECK(acdc_rejected);
+
+  sys.lcc_converters.front().in_service = false;
+  CHECK_NOTHROW(power_models::to_acopf_data(sys));
+  CHECK_NOTHROW(power_models::to_acdcopf_data(sys));
 }
 
 TEST_CASE("OPF AC reference matches the resolver for a grid-forming converter",
