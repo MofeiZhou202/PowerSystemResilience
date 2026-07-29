@@ -1135,14 +1135,26 @@ bool solve_lp_relaxation_with_vendored_highs(const LPModel& lp,
       return false;
     }
   }
-  const bool use_direct_highs_lp = opt.auto_highs_root_pipeline;
+  const bool use_direct_highs_lp =
+      opt.auto_highs_root_pipeline ||
+      (basis_hint == nullptr &&
+       std::getenv("MIPSOLVERS_BC_NO_DIRECT_HIGHS_LP") == nullptr);
   if (use_direct_highs_lp) {
     auto highs = std::make_shared<Highs>();
     highs->setOptionValue("output_flag", false);
     highs->setOptionValue("log_to_console", false);
     highs->setOptionValue("random_seed", 0);
     highs->setOptionValue("threads", 1);
-    highs->setOptionValue("presolve", "off");
+    // L2a: presolve the COLD root LP (no incoming basis) so HiGHS reduces the
+    // full model before the simplex solve.  On root-gap-closable SCUC the
+    // un-presolved 10151-row solve (~120ms) collapses to the presolved path
+    // (~17ms).  Node LPs (basis_hint present) keep presolve OFF so the
+    // original-space warm basis is applied directly.  Env escape hatch for A/B.
+    const bool cold_root_solve = (basis_hint == nullptr);
+    const bool cold_root_presolve =
+        cold_root_solve &&
+        std::getenv("MIPSOLVERS_BC_NO_COLD_ROOT_PRESOLVE") == nullptr;
+    highs->setOptionValue("presolve", cold_root_presolve ? "on" : "off");
     highs->setOptionValue("parallel", "off");
     highs->setOptionValue("solver", "simplex");
     highs->setOptionValue("simplex_strategy", 1);

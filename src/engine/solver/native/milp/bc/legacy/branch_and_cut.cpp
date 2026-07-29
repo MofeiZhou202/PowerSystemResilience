@@ -2993,20 +2993,19 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   }
 #endif
 
-  // ── Native MILPPresolve top-level presolve (EXPERIMENTAL; OFF by default) ──
-  // The B&C integration here (reduce base_lp, remap uc_hint/branching_priority/
-  // initial_solution through the presolve column map, postsolve the incumbent
-  // before the original-space objective recompute) is validated CORRECT: with
-  // the presolver forced to a no-op the reduced-space solve reproduces the exact
-  // optimum on every SCUC case.  BUT MILPPresolve itself is currently UNSOUND on
-  // these MIPs — several reductions fix constrained binaries and cut off the
-  // integer optimum on the 39-bus cases — so this path is gated OFF pending a
-  // MILPPresolve correctness fix.  Do NOT enable in production; --check catches
-  // the wrong objectives it produces today.
+  // ── Native MILPPresolve top-level presolve (default ON; disable with
+  //    MIPSOLVERS_NATIVE_TOPLEVEL_PRESOLVE_OFF) ──
+  // Reduces base_lp so every node/root LP solve AND the objective-propagation
+  // machinery operate on the smaller system; the incumbent is postsolved back to
+  // original space before the objective recompute, and uc_hint / branching_
+  // priority / initial_solution are remapped through the presolve column map.
+  // MILPPresolve runs its VALIDATED-SOUND reduction subset (singleton-row /
+  // forcing-row / probing are gated off in PresolveOptions pending a soundness
+  // fix); objectives stay exact (native_kernel_comparison --check).
   MILPPresolve native_ps;
   bool native_model_reduced = false;
   if (!strict_highs_root_fixed_point && !papilo_model_reduced &&
-      bc_env_flag_enabled("MIPSOLVERS_NATIVE_TOPLEVEL_PRESOLVE")) {
+      !bc_env_flag_enabled("MIPSOLVERS_NATIVE_TOPLEVEL_PRESOLVE_OFF")) {
     std::vector<int> nps_bin, nps_int;
     const PresolveStats nps_stats = native_ps.run(base_lp, nps_bin, nps_int);
     if (nps_stats.final_cols > 0 &&
