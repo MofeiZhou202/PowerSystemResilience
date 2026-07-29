@@ -15594,6 +15594,19 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	    return rel_gap <= opt.gap_tol;
 	  };
 
+	  // Exact-optimality predicate usable regardless of
+	  // require_tree_exhaustion_certificate: root.bound is a rigorous lower bound
+	  // on the optimum, so a valid incumbent meeting it (gap exactly 0) is proven
+	  // optimal and all further proof / bound-lifting certificate work is
+	  // redundant.  This lets root-closed instances stop immediately instead of
+	  // grinding the certificate tail to the time limit.
+	  auto incumbent_proven_optimal_exact = [&]() -> bool {
+	    return has_incumbent && std::isfinite(incumbent_obj) &&
+	           std::isfinite(root.bound) &&
+	           incumbent_obj - root.bound <=
+	               1e-9 * std::max(1.0, std::abs(incumbent_obj));
+	  };
+
 	  auto publish_root_bound_gap_certificate = [&](const char* source) -> bool {
 	    if (!root_bound_gap_certifies_incumbent()) {
 	      return false;
@@ -25200,7 +25213,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	          const char* tag) -> int {
 	    // Honor the wall-clock limit mid-node: this leaf drives the O(pool*L^2)
 	    // binary-resolution learning and is called from several per-node loops.
-	    if (bc_time_limit_expired()) return 0;
+	    // Also skip entirely once the incumbent is proven optimal (gap 0): the
+	    // learned conflicts cannot change a certified-optimal outcome.
+	    if (bc_time_limit_expired() || incumbent_proven_optimal_exact()) return 0;
 	    canonicalize_branch_literals(clause);
 	    if (clause.empty() ||
 	        static_cast<int>(clause.size()) >
@@ -25269,7 +25284,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	    // native scoped gate may decide where the artifact is consumed, but it is
 	    // not part of the published frontier unless the resolver selected it.
 	    (void)extra_scope;
-	    if (bc_time_limit_expired()) return 0;
+	    if (bc_time_limit_expired() || incumbent_proven_optimal_exact()) return 0;
 	    if (rb.bound.var_idx < 0 || rb.bound.var_idx >= n ||
 	        !std::isfinite(rb.bound.value) ||
 	        !rb.has_source_conflict_literal ||
@@ -33423,10 +33438,20 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       const double rel_gap = std::max(0.0, (incumbent_obj - lb) / denom);
       out.bc_stats.gap = rel_gap;
       out.bc_stats.best_bound = lb;
-	      if (root_gap_certificate_ready &&
-	          current_incumbent_valid_for_proof("early_gap_check") &&
-	          !opt.require_tree_exhaustion_certificate &&
-	          rel_gap <= opt.gap_tol) {
+	      // Exact optimality: when a certified dual bound meets the incumbent
+	      // (rel_gap ~ 0) the incumbent is proven optimal and every open node is
+	      // bound-dominated.  require_tree_exhaustion_certificate governs only
+	      // *tolerance*-based pruning of within-gap nodes, so it must not block
+	      // termination once the gap is exactly closed -- HiGHS/Gurobi likewise
+	      // stop as soon as best_bound meets the incumbent.
+	      const bool incumbent_proof_valid =
+	          current_incumbent_valid_for_proof("early_gap_check");
+	      const bool proven_optimal_exact =
+	          incumbent_proof_valid && rel_gap <= 1e-9;
+	      if (proven_optimal_exact ||
+	          (root_gap_certificate_ready && incumbent_proof_valid &&
+	           !opt.require_tree_exhaustion_certificate &&
+	           rel_gap <= opt.gap_tol)) {
 	        out.stats.status = bc_status::kOptimalRootGapClosed;
         skip_tree = true;
       }
@@ -34765,9 +34790,15 @@ if (node_sf_cuts_augmented) { node_sf = tree_base_sf; node_sf_cuts_augmented = f
       if (std::isfinite(live_lb) && std::isfinite(inc_obj)) {
         const double denom = std::max(1.0, std::abs(inc_obj));
         const double rel_gap = std::max(0.0, (inc_obj - live_lb) / denom);
-        if (root_gap_certificate_ready &&
-            !opt.require_tree_exhaustion_certificate &&
-            rel_gap <= opt.gap_tol) {
+        // Exact optimality (mirrors the sequential skip_tree path): a certified
+        // dual bound meeting the incumbent proves optimality independent of
+        // require_tree_exhaustion_certificate.
+        const bool proven_optimal_exact =
+            root_gap_certificate_ready && rel_gap <= 1e-9;
+        if (proven_optimal_exact ||
+            (root_gap_certificate_ready &&
+             !opt.require_tree_exhaustion_certificate &&
+             rel_gap <= opt.gap_tol)) {
           par_certified_bound_at_stop = live_lb;
           par_gap_at_stop = rel_gap;
           out.stats.status = bc_status::kOptimalityGapReached;
