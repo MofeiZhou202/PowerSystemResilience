@@ -1,0 +1,13 @@
+.DSP 01000
+( POWERFLOW,CASEID=VSC2,PROJECT=VSC TEST)
+/ P_OUTPUT_LIST,FULL \
+/ P_ANALYSIS_REPORT,LEVEL=4\
+BS    SLACK   525. 1                       10001500. -5001050
+L     SLACK   525. VSCA    525.1         300  3000      400000
+L     SLACK   525. VSCB    525.1         300  3000      400000
+BZ    VSCA    525.51 1500        .06    286 15000 .0070   1.   2  300.
+BZ    VSCB    525.51 1500        .06    286 15000 .0070   1.   2  300.
+BZ+   VSCA    525. -1470 50.       300. 300.        .01043 525.  300.
+BZ+   VSCB    525. 1470. -50.    1 300. 300.        .01043 525.  300.
+LZ    VSCA    525. VSCB    525.  1429.01   .001  10.
+(END)
