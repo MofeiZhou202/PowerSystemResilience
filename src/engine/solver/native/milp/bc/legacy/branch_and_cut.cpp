@@ -5300,7 +5300,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 
 		  ConflictPool conflict_pool(
 		      opt.cut_pool_max_size,
-		      std::max(64, opt.reduced_cost_conflict_pool_max_literals));
+		      std::max(64, opt.reduced_cost_conflict_pool_max_literals),
+		      opt.enable_reduced_cost_proof_conflict_minimization);
 		  std::uint64_t global_domain_learning_epoch = 0;
 		  std::uint64_t objective_artifact_epoch = 0;
 		  std::uint64_t incumbent_cutoff_epoch = 0;
@@ -23820,6 +23821,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	                 opt.reduced_cost_conflict_pool_max_literals);
 	      for (const auto& forbidden : forbidden_literals) {
 	        if (n_learned >= max_to_learn) break;
+	        if (bc_time_limit_expired()) break;
 	        if (forbidden.var_idx < 0 || forbidden.var_idx >= n) continue;
 	        std::vector<BranchDomainLiteral> clause;
 	        const std::uint64_t full_clause_len =
@@ -24454,6 +24456,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     int learned_frontier = 0;
 	    for (const auto& candidate : candidates) {
 	      if (learned_frontier >= max_frontier_clauses) break;
+	      if (bc_time_limit_expired()) break;
 	      const auto& frontier_clause = candidate.clause;
 	      if (!strict_highs_lp_contract && candidate.cut_violation > 1e-7 &&
 	          local_proof_cuts != nullptr) {
@@ -24870,6 +24873,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     int local_rows_added = 0;
 	    std::unordered_set<std::size_t> seen;
 	    for (int t = 0; t < max_attempts && learned < max_to_learn; ++t) {
+	      if (bc_time_limit_expired()) break;
 		      const DomainReasonBound& rb = *targets[static_cast<std::size_t>(t)].rb;
 		      const bool direct_domain_target =
 		          targets[static_cast<std::size_t>(t)].direct_domain_target;
@@ -25194,6 +25198,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	      [&](std::vector<BranchDomainLiteral> clause,
 	          std::uint64_t source_literal_count,
 	          const char* tag) -> int {
+	    // Honor the wall-clock limit mid-node: this leaf drives the O(pool*L^2)
+	    // binary-resolution learning and is called from several per-node loops.
+	    if (bc_time_limit_expired()) return 0;
 	    canonicalize_branch_literals(clause);
 	    if (clause.empty() ||
 	        static_cast<int>(clause.size()) >
@@ -25262,6 +25269,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	    // native scoped gate may decide where the artifact is consumed, but it is
 	    // not part of the published frontier unless the resolver selected it.
 	    (void)extra_scope;
+	    if (bc_time_limit_expired()) return 0;
 	    if (rb.bound.var_idx < 0 || rb.bound.var_idx >= n ||
 	        !std::isfinite(rb.bound.value) ||
 	        !rb.has_source_conflict_literal ||

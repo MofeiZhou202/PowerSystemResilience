@@ -415,8 +415,9 @@ class SharedConflictPool {
   }
 
  public:
-  explicit SharedConflictPool(int max_size = 1024, int max_literals = 64)
-      : pool_(max_size, max_literals) {
+  explicit SharedConflictPool(int max_size = 1024, int max_literals = 64,
+                              bool minimize = false)
+      : pool_(max_size, max_literals, minimize) {
     // std::atomic default-construction leaves the value unspecified in C++17;
     // explicitly zero the Bloom filter so early has_conflict/add see clean bits.
     for (auto& w : bloom_) w.store(0, std::memory_order_relaxed);

@@ -49,7 +49,8 @@ struct ConcurrentTreeState {
       : shared_cp(opt.cut_pool_max_size, opt.cut_pool_max_age, cut_coeff_size),
         shared_conflicts(
             opt.cut_pool_max_size,
-            std::max(64, opt.reduced_cost_conflict_pool_max_literals)),
+            std::max(64, opt.reduced_cost_conflict_pool_max_literals),
+            opt.enable_reduced_cost_proof_conflict_minimization),
         shared_sp(opt.solution_pool_size),
         shared_queue(opt.node_sel),
         cut_req_queue(opt.cut_worker_queue_size),

@@ -176,10 +176,22 @@ class ConflictPool {
   std::vector<ConflictClause> clauses_;
   int max_pool_size_;
   int max_literals_;
+  bool minimize_enabled_;
+  int max_scan_;
+
+  // Bound the superlinear pool scans (redundancy / subsumption / binary
+  // resolution) to the most-recent max_scan_ clauses.  Scanning only a suffix
+  // is SOUND: at worst it keeps a few redundant clauses or misses a subsumption,
+  // which never invalidates a stored no-good nor changes the optimum.  It turns
+  // the per-add cost from O(P) to O(max_scan_) in the pool-size factor.
+  int scan_begin() const {
+    const int n = static_cast<int>(clauses_.size());
+    return (max_scan_ > 0 && n > max_scan_) ? n - max_scan_ : 0;
+  }
 
   bool redundant_given_pool(const std::vector<BranchDomainLiteral>& literals,
                             int skip_index = -1) const {
-    for (int i = 0; i < static_cast<int>(clauses_.size()); ++i) {
+    for (int i = scan_begin(); i < static_cast<int>(clauses_.size()); ++i) {
       if (i == skip_index) continue;
       if (conflict_clause_implies(literals, clauses_[i].literals)) {
         return true;
@@ -251,13 +263,26 @@ class ConflictPool {
   }
 
  public:
-  explicit ConflictPool(int max_size = 1024, int max_literals = 64)
-      : max_pool_size_(max_size), max_literals_(max_literals) {}
+  explicit ConflictPool(int max_size = 1024, int max_literals = 64,
+                        bool minimize = false, int max_scan = 512)
+      : max_pool_size_(max_size),
+        max_literals_(max_literals),
+        minimize_enabled_(minimize),
+        max_scan_(max_scan > 0 ? max_scan : max_size) {}
 
   bool empty() const { return clauses_.empty(); }
 
   bool add(std::vector<BranchDomainLiteral> literals) {
-    minimize_clause(literals);
+    // Clause minimization is O(P * L^4) and is only intended to run when
+    // reduced-cost proof-conflict minimization is explicitly enabled.  When
+    // disabled (the default) we merely canonicalize so the dedup/subsumption
+    // logic below still relies on a stable literal order; the stored no-good is
+    // longer (weaker) but valid, which never changes the optimum.
+    if (minimize_enabled_) {
+      minimize_clause(literals);
+    } else {
+      canonicalize_branch_literals(literals);
+    }
     if (literals.empty() || static_cast<int>(literals.size()) > max_literals_) {
       return false;
     }
@@ -282,7 +307,7 @@ class ConflictPool {
       if (same) return false;
     }
 
-    clauses_.erase(std::remove_if(clauses_.begin(), clauses_.end(),
+    clauses_.erase(std::remove_if(clauses_.begin() + scan_begin(), clauses_.end(),
         [&](const ConflictClause& clause) {
           return conflict_clause_implies(clause.literals, literals);
         }),
@@ -322,7 +347,13 @@ class ConflictPool {
         added_clauses != nullptr && !added_clauses->empty()
             ? added_clauses->front()
             : clauses_.back().literals;
-    for (int ci = 0; ci < old_count && added <= max_resolvents; ++ci) {
+    // Only attempt binary resolution against the most-recent max_scan_ clauses.
+    // Fewer resolvents is sound (they are optional derived strengthenings) and
+    // bounds this loop from O(P) to O(max_scan_).
+    const int res_begin = (max_scan_ > 0 && old_count > max_scan_)
+                              ? old_count - max_scan_
+                              : 0;
+    for (int ci = res_begin; ci < old_count && added <= max_resolvents; ++ci) {
       if (ci >= static_cast<int>(clauses_.size())) break;
       const auto& other = clauses_[static_cast<std::size_t>(ci)].literals;
       int base_complement = -1;
