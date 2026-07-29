@@ -3282,8 +3282,16 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     publish_verified_warm_start_time_limit();
     return return_with_profile();
   }
+  // Historically, large models (n>10000) with a short time budget (<=10s)
+  // short-circuited to the verified warm start instead of running the tree.
+  // That warm start can be a high-penalty value (e.g. IEEE-118 returns ~2.1e11
+  // with bound=-inf and nodes=0), so bailing produces a useless result.  With
+  // top-level presolve + the direct-HiGHS root LP the root now solves fast
+  // enough to make real tree progress on a short budget, so this shortcut is
+  // OFF by default (re-enable with MIPSOLVERS_BC_SHORT_LIMIT_WARMSTART_BAIL).
   if (!strict_highs_lp_contract && opt.time_limit_sec <= 10.0 && n > 10000 &&
-      heuristic_x_orig.size() == orig_n && std::isfinite(heuristic_obj)) {
+      heuristic_x_orig.size() == orig_n && std::isfinite(heuristic_obj) &&
+      bc_env_flag_enabled("MIPSOLVERS_BC_SHORT_LIMIT_WARMSTART_BAIL")) {
     publish_verified_warm_start_time_limit();
     return return_with_profile();
   }
