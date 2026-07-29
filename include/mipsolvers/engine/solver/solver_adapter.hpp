@@ -1,5 +1,6 @@
 #pragma once
 
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -36,6 +37,13 @@ struct SolveStats {
   Eigen::VectorXd farkas_ray;         ///< Dual ray (y for inequality rows)
   Eigen::VectorXd farkas_ray_eq;      ///< Dual ray (y_eq for equality rows)
   bool has_farkas_certificate{false};
+
+  /// Rigorous LP dual bound (minimize convention) certified at an interrupted
+  /// solve (time / iteration limit): the exact original-cost dual objective of
+  /// an audited dual-feasible point.  NaN when no certified bound exists.  Set
+  /// only by the native dual-simplex kernel; `objective` on an interrupted
+  /// result remains the (uncertified) working-cost value.
+  double certified_dual_bound{std::numeric_limits<double>::quiet_NaN()};
 };
 
 struct SolveResult {

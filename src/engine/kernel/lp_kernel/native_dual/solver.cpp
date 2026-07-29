@@ -104,12 +104,12 @@ struct DSProfile {
   double start_clock = 0.0;
   double leaving = 0.0, price = 0.0, entering = 0.0, ftran = 0.0, dse = 0.0,
          rebuild = 0.0, minor_total = 0.0, primal = 0.0, edge_init = 0.0,
-         postcond = 0.0, valid = 0.0;
+         postcond = 0.0, valid = 0.0, lu_update = 0.0, cycle = 0.0;
   long pivots = 0, rebuilds = 0;
   void reset() {
     enabled = std::getenv("MIPSOLVERS_DS_PROFILE") != nullptr;
     leaving = price = entering = ftran = dse = rebuild = minor_total = primal =
-        edge_init = postcond = valid = 0.0;
+        edge_init = postcond = valid = lu_update = cycle = 0.0;
     pivots = rebuilds = 0;
     start_clock = enabled ? std::chrono::duration<double>(
                                 std::chrono::steady_clock::now()
@@ -132,10 +132,11 @@ struct DSProfile {
                  "leaving(CHUZR+BTRAN)=%.2f price(A^T*rEP)=%.2f "
                  "entering(ratio/BFRT)=%.2f ftran=%.2f dse=%.2f "
                  "postcond(O(n)dualfeas)=%.2f validBlock(predFull+resid)=%.2f "
-                 "OTHER(update/copy)=%.2f\n",
+                 "luUpdate=%.2f cycleGuard=%.2f OTHER(update/copy)=%.2f\n",
                  m, n, wall, pivots, rebuilds, minor_total, rebuild, primal,
                  edge_init, leaving, price, entering, ftran, dse, postcond,
-                 valid, other - postcond - valid);
+                 valid, lu_update, cycle,
+                 other - postcond - valid - lu_update - cycle);
   }
 };
 thread_local DSProfile g_ds_profile;
@@ -153,10 +154,103 @@ inline double ds_clock() {
 // storage when the size is unchanged).
 struct MinorScratch {
   Eigen::VectorXd column, transaction_cost_shift, predicted_full, flipped_basic,
-      bfrt_delta;
+      bfrt_delta, candidate_reduced_costs, predicted_post_pivot, candidate_cost,
+      candidate_cost_shift;
   std::vector<char> flipped;
 };
 thread_local MinorScratch g_ds_scratch;
+
+// `g_ds_scratch.column` keeps an all-zero invariant between pivots so the
+// O(m) setZero can be replaced by re-zeroing only the entries filled from the
+// entering column of A.  The guard runs on every exit path (including the
+// numerical-trouble returns between fill and consumption).
+class SparseColumnClearGuard {
+ public:
+  SparseColumnClearGuard(Eigen::VectorXd& column,
+                         const Eigen::SparseMatrix<double>& A, int col)
+      : column_(column), A_(A), col_(col) {}
+  ~SparseColumnClearGuard() {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(A_, col_); it; ++it) {
+      column_[it.row()] = 0.0;
+    }
+  }
+  SparseColumnClearGuard(const SparseColumnClearGuard&) = delete;
+  SparseColumnClearGuard& operator=(const SparseColumnClearGuard&) = delete;
+
+ private:
+  Eigen::VectorXd& column_;
+  const Eigen::SparseMatrix<double>& A_;
+  int col_;
+};
+
+// `g_ds_scratch.flipped` likewise stays all-zero between pivots; only the
+// marks set for this transaction's flips are cleared.  Bounds are re-checked
+// because an invalid flip returns before its mark is written.
+class FlipMarkClearGuard {
+ public:
+  FlipMarkClearGuard(std::vector<char>& flipped,
+                     const std::vector<BoundFlip>& flips, int n)
+      : flipped_(flipped), flips_(flips), n_(n) {}
+  ~FlipMarkClearGuard() {
+    for (const BoundFlip& flip : flips_) {
+      if (flip.col >= 0 && flip.col < n_ &&
+          static_cast<std::size_t>(flip.col) < flipped_.size()) {
+        flipped_[static_cast<std::size_t>(flip.col)] = 0;
+      }
+    }
+  }
+  FlipMarkClearGuard(const FlipMarkClearGuard&) = delete;
+  FlipMarkClearGuard& operator=(const FlipMarkClearGuard&) = delete;
+
+ private:
+  std::vector<char>& flipped_;
+  const std::vector<BoundFlip>& flips_;
+  int n_;
+};
+
+// The pivot's move/basis mutations are applied to `state` in place (instead of
+// copy-modify-commit on O(n)/O(m) vectors).  Every numerical-trouble return
+// between the mutation and the commit must restore the pre-pivot state exactly
+// — the driver rebuilds from `state.basis`/`state.move` after a failure, so a
+// partially applied exchange would corrupt the iterate.  Restoration is exact
+// (the old values are integers/enums, not recomputed floats).
+class PivotStateGuard {
+ public:
+  PivotStateGuard(State& state, const PivotTransaction& transaction,
+                  int leaving_row, int leaving_col, Move old_leaving_move,
+                  int entering_col, Move old_entering_move)
+      : state_(state),
+        transaction_(transaction),
+        leaving_row_(leaving_row),
+        leaving_col_(leaving_col),
+        old_leaving_move_(old_leaving_move),
+        entering_col_(entering_col),
+        old_entering_move_(old_entering_move) {}
+  ~PivotStateGuard() {
+    if (dismissed_) return;
+    state_.basis[static_cast<std::size_t>(leaving_row_)] = leaving_col_;
+    state_.move[static_cast<std::size_t>(leaving_col_)] = old_leaving_move_;
+    state_.move[static_cast<std::size_t>(entering_col_)] = old_entering_move_;
+    for (const BoundFlip& flip : transaction_.flips) {
+      if (flip.col >= 0 && flip.col < state_.n) {
+        state_.move[static_cast<std::size_t>(flip.col)] = flip.old_move;
+      }
+    }
+  }
+  void dismiss() { dismissed_ = true; }
+  PivotStateGuard(const PivotStateGuard&) = delete;
+  PivotStateGuard& operator=(const PivotStateGuard&) = delete;
+
+ private:
+  State& state_;
+  const PivotTransaction& transaction_;
+  int leaving_row_;
+  int leaving_col_;
+  Move old_leaving_move_;
+  int entering_col_;
+  Move old_entering_move_;
+  bool dismissed_{false};
+};
 
 // Pivots between full primal-reconstruction audits in minor_iteration (see the
 // audit gate there).  Small enough to stay well inside the driver's reinversion
@@ -228,17 +322,19 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
   }
 
     Eigen::VectorXd& column = g_ds_scratch.column;
-    column.setZero(state.m);
+    if (column.size() != state.m) column.setZero(state.m);
     for (Eigen::SparseMatrix<double>::InnerIterator it(state.sf->A,
                                                         entering.col);
          it; ++it) {
       column[it.row()] = it.value();
     }
+    const SparseColumnClearGuard column_guard(column, state.sf->A,
+                                              entering.col);
     const double _t_ft = g_ds_profile.enabled ? ds_clock() : 0.0;
     detail::SolveEvidence direction_solve =
         state.factor->checked_ftran(column, true);
     if (g_ds_profile.enabled) g_ds_profile.ftran += ds_clock() - _t_ft;
-    Eigen::VectorXd direction = direction_solve.solution;
+    Eigen::VectorXd direction = std::move(direction_solve.solution);
     if (!direction_solve.accepted) {
     return numerical_trouble(
         "pivotal-column FTRAN failed backward-error validation (" +
@@ -258,7 +354,7 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
       if (!pivot_evidence.accepted && !direction_solve.refined) {
         direction_solve = state.factor->refine_ftran(column, direction);
         if (direction_solve.accepted) {
-          direction = direction_solve.solution;
+          direction = std::move(direction_solve.solution);
           ++statistics.iterative_refinements;
           ++statistics.pivot_identity_refinements;
           pivot_evidence = state.factor->pivot_evidence(
@@ -283,8 +379,21 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
     }
     const double column_pivot = direction[leaving.row];
 
+    // The flip marks and the transaction cost-shift vector are only non-zero
+    // for BFRT flip / cost-shift pivots.  Both scratch vectors keep an
+    // all-zero invariant between pivots (see the clear guards), so the common
+    // shift-free pivot pays nothing for them: no O(n) assign/setZero, no O(n)
+    // cost-vector construction, and the reduced-cost update below drops the
+    // all-zero third operand.
+    const bool has_flips = !transaction.flips.empty();
+    const bool has_shifts = !transaction.cost_shifts.empty();
     std::vector<char>& flipped = g_ds_scratch.flipped;
-    flipped.assign(static_cast<std::size_t>(state.n), 0);
+    if ((has_flips || has_shifts) &&
+        flipped.size() != static_cast<std::size_t>(state.n)) {
+      flipped.assign(static_cast<std::size_t>(state.n), 0);
+    }
+    const FlipMarkClearGuard flip_mark_guard(flipped, transaction.flips,
+                                             state.n);
     for (const BoundFlip& flip : transaction.flips) {
       if (flip.col < 0 || flip.col >= state.n ||
           state.basic[static_cast<std::size_t>(flip.col)] ||
@@ -296,31 +405,42 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
       }
       flipped[static_cast<std::size_t>(flip.col)] = 1;
     }
-    Eigen::VectorXd& transaction_cost_shift = g_ds_scratch.transaction_cost_shift;
-    transaction_cost_shift.setZero(state.n);
-    for (const detail::WorkingCostShift& shift : transaction.cost_shifts) {
-      if (shift.col < 0 || shift.col >= state.n ||
-          state.basic[static_cast<std::size_t>(shift.col)] ||
-          shift.col == entering.col ||
-          flipped[static_cast<std::size_t>(shift.col)] ||
-          !std::isfinite(shift.delta) ||
-          transaction_cost_shift[shift.col] != 0.0) {
-        return numerical_trouble(
-            "BFRT transaction contains an invalid working-cost shift");
+    Eigen::VectorXd* transaction_cost_shift = nullptr;
+    if (has_shifts) {
+      transaction_cost_shift = &g_ds_scratch.transaction_cost_shift;
+      transaction_cost_shift->setZero(state.n);
+      for (const detail::WorkingCostShift& shift : transaction.cost_shifts) {
+        if (shift.col < 0 || shift.col >= state.n ||
+            state.basic[static_cast<std::size_t>(shift.col)] ||
+            shift.col == entering.col ||
+            flipped[static_cast<std::size_t>(shift.col)] ||
+            !std::isfinite(shift.delta) ||
+            (*transaction_cost_shift)[shift.col] != 0.0) {
+          return numerical_trouble(
+              "BFRT transaction contains an invalid working-cost shift");
+        }
+        (*transaction_cost_shift)[shift.col] = shift.delta;
       }
-      transaction_cost_shift[shift.col] = shift.delta;
     }
+    const double* tcs_data =
+        has_shifts ? transaction_cost_shift->data() : nullptr;
+    // The scratch may be sized for a previous (different-n) solve when this
+    // pivot carries no flips; it is only readable when sized for this solve.
+    // All entries are zero apart from this transaction's marks (clear guard).
+    const char* flip_marks =
+        flipped.size() == static_cast<std::size_t>(state.n) ? flipped.data()
+                                                            : nullptr;
     const double _t_pc = g_ds_profile.enabled ? ds_clock() : 0.0;
     for (int j = 0; j < state.n; ++j) {
       if (state.basic[static_cast<std::size_t>(j)] || j == entering.col)
         continue;
       int move = detail::sign(state.move[static_cast<std::size_t>(j)]);
-      if (flipped[static_cast<std::size_t>(j)]) move = -move;
+      if (flip_marks != nullptr && flip_marks[j]) move = -move;
       if (move == 0) continue;
       const double updated_reduced_cost =
           state.reduced_costs[j] +
           leaving.side * entering.theta * pivot_row[j] +
-          transaction_cost_shift[j];
+          (tcs_data != nullptr ? tcs_data[j] : 0.0);
       if (move * updated_reduced_cost > state.options->optimality_tol) {
       return numerical_trouble(
           "analytical BFRT postcondition violates dual feasibility at column " +
@@ -329,18 +449,21 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
     }
     if (g_ds_profile.enabled) g_ds_profile.postcond += ds_clock() - _t_pc;
 
-    Eigen::VectorXd& flipped_basic = g_ds_scratch.flipped_basic;
-    flipped_basic = state.x_basic;
-    Eigen::VectorXd& bfrt_delta = g_ds_scratch.bfrt_delta;
-    bfrt_delta.setZero(state.m);
-    if (!transaction.flips.empty()) {
+    // Shift-free pivots read the pre-flip basic values directly from
+    // state.x_basic; only flip pivots pay the O(m) copy and the BFRT FTRAN.
+    const Eigen::VectorXd* flipped_basic = &state.x_basic;
+    if (has_flips) {
+      Eigen::VectorXd& flipped_basic_scratch = g_ds_scratch.flipped_basic;
+      Eigen::VectorXd& bfrt_delta = g_ds_scratch.bfrt_delta;
       bfrt_delta = state.factor->ftran(transaction.bfrt_rhs);
       if (bfrt_delta.size() != state.m || !bfrt_delta.allFinite()) {
       return numerical_trouble(
           "BFRT RHS FTRAN failed backward-error validation (" +
           state.factor->last_solve_diagnostics() + ")");
       }
-      flipped_basic -= bfrt_delta;
+      flipped_basic_scratch = state.x_basic;
+      flipped_basic_scratch -= bfrt_delta;
+      flipped_basic = &flipped_basic_scratch;
     }
 
     const int leaving_col =
@@ -348,7 +471,7 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
     const double leaving_bound =
         leaving.side < 0 ? state.bounds.lower[leaving_col]
                          : state.bounds.upper[leaving_col];
-    double remaining_delta = flipped_basic[leaving.row] - leaving_bound;
+    double remaining_delta = (*flipped_basic)[leaving.row] - leaving_bound;
     if (transaction.covered_violation == leaving.violation) {
       remaining_delta = 0.0;
     }
@@ -360,11 +483,15 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
     // Tier 2 (paranoid only): long-double row-solve consistency of the BFRT
     // flip FTRAN.  The cheap remaining-delta sign check below stays active in
     // both tiers, and the BFRT analytical dual-feasibility postcondition above
-    // already validated the flip transaction.
+    // already validated the flip transaction.  Without flips there is no BFRT
+    // FTRAN to validate — bfrt_rhs is identically zero and the identity holds
+    // vacuously (exactly what the pre-scratch code checked against a zeroed
+    // delta vector).
     const bool solve_consistent =
-        !paranoid || state.factor->row_solve_consistent(
-                         leaving.row, transaction.bfrt_rhs, bfrt_delta,
-                         leaving.row_ep, solve_discrepancy, solve_envelope);
+        !paranoid || !has_flips ||
+        state.factor->row_solve_consistent(
+            leaving.row, transaction.bfrt_rhs, g_ds_scratch.bfrt_delta,
+            leaving.row_ep, solve_discrepancy, solve_envelope);
     if (!solve_consistent || leaving.side * remaining_delta < 0.0) {
       long double rhs_projection = 0.0L;
       for (int row = 0; row < state.m; ++row) {
@@ -377,7 +504,7 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
       const long double ftran_coverage =
           static_cast<long double>(leaving.side) *
           (static_cast<long double>(state.x_basic[leaving.row]) -
-           static_cast<long double>(flipped_basic[leaving.row]));
+           static_cast<long double>((*flipped_basic)[leaving.row]));
       std::ostringstream message;
       message << std::setprecision(18)
               << "BFRT FTRAN disagrees with the priced leaving-row change"
@@ -404,41 +531,67 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
     return numerical_trouble(std::move(failure));
     }
 
-    std::vector<Move> candidate_move = state.move;
+    // The pivot's move/basis exchange is applied to `state` in place (the old
+    // copy-modify-commit built and discarded an O(n) move vector and an O(m)
+    // basis vector on every pivot).  The guard restores the pre-pivot values
+    // exactly on every failure return below; `state.basic` and the float
+    // vectors are still only touched at the commit point.
+    const Move old_leaving_move =
+        state.move[static_cast<std::size_t>(leaving_col)];
+    const Move entering_old_move =
+        state.move[static_cast<std::size_t>(entering.col)];
+    PivotStateGuard pivot_guard(state, transaction, leaving.row, leaving_col,
+                                old_leaving_move, entering.col,
+                                entering_old_move);
     for (const BoundFlip& flip : transaction.flips) {
-      candidate_move[static_cast<std::size_t>(flip.col)] =
+      state.move[static_cast<std::size_t>(flip.col)] =
           flip.old_move == Move::Up ? Move::Down : Move::Up;
     }
-    const Move entering_old_move =
-        candidate_move[static_cast<std::size_t>(entering.col)];
     const double entering_bound =
         entering_old_move == Move::Up ? state.bounds.lower[entering.col]
                                       : state.bounds.upper[entering.col];
     const double primal_step = remaining_delta / column_pivot;
-    Eigen::VectorXd predicted_post_pivot =
-        flipped_basic - direction * primal_step;
+    Eigen::VectorXd& predicted_post_pivot = g_ds_scratch.predicted_post_pivot;
+    predicted_post_pivot = *flipped_basic - direction * primal_step;
     predicted_post_pivot[leaving.row] = entering_bound + primal_step;
 
-    candidate_move[static_cast<std::size_t>(leaving_col)] =
+    state.move[static_cast<std::size_t>(leaving_col)] =
         state.bounds.enterable[static_cast<std::size_t>(leaving_col)]
             ? (leaving.side < 0 ? Move::Up : Move::Down)
             : Move::Fixed;
-    candidate_move[static_cast<std::size_t>(entering.col)] = Move::Fixed;
-    std::vector<int> candidate_basis = state.basis;
-    candidate_basis[static_cast<std::size_t>(leaving.row)] = entering.col;
+    state.move[static_cast<std::size_t>(entering.col)] = Move::Fixed;
+    state.basis[static_cast<std::size_t>(leaving.row)] = entering.col;
 
     // Incremental reduced-cost update — committed on every pivot (the standard
-    // O(n) dual update; pivot_row is dense).
-    Eigen::VectorXd candidate_reduced_costs =
-        state.reduced_costs +
-        leaving.side * entering.theta * pivot_row + transaction_cost_shift;
+    // O(n) dual update; pivot_row is dense).  Built in a reused scratch and
+    // swapped in at the commit; the all-zero cost-shift operand is dropped on
+    // shift-free pivots.
+    Eigen::VectorXd& candidate_reduced_costs =
+        g_ds_scratch.candidate_reduced_costs;
+    if (has_shifts) {
+      candidate_reduced_costs = state.reduced_costs +
+                                leaving.side * entering.theta * pivot_row +
+                                *transaction_cost_shift;
+    } else {
+      candidate_reduced_costs =
+          state.reduced_costs + leaving.side * entering.theta * pivot_row;
+    }
     for (int row = 0; row < state.m; ++row) {
       candidate_reduced_costs[
-          candidate_basis[static_cast<std::size_t>(row)]] = 0.0;
+          state.basis[static_cast<std::size_t>(row)]] = 0.0;
     }
-    const Eigen::VectorXd candidate_cost = state.cost + transaction_cost_shift;
-    const Eigen::VectorXd candidate_cost_shift =
-        state.cost_shift + transaction_cost_shift;
+    // The working cost and its shift ledger only change on cost-shift pivots;
+    // shift-free pivots (the overwhelming majority) reuse state.cost /
+    // state.cost_shift directly instead of copying both O(n) vectors twice.
+    const Eigen::VectorXd* candidate_cost = &state.cost;
+    const Eigen::VectorXd* candidate_cost_shift = &state.cost_shift;
+    if (has_shifts) {
+      g_ds_scratch.candidate_cost = state.cost + *transaction_cost_shift;
+      g_ds_scratch.candidate_cost_shift =
+          state.cost_shift + *transaction_cost_shift;
+      candidate_cost = &g_ds_scratch.candidate_cost;
+      candidate_cost_shift = &g_ds_scratch.candidate_cost_shift;
+    }
     const bool refined_pivotal_solve =
         leaving.row_ep_refined || direction_solve.refined;
 
@@ -469,11 +622,11 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
       Eigen::VectorXd& predicted_full = g_ds_scratch.predicted_full;
       predicted_full = state.bounds.lower;
       for (int j = 0; j < state.n; ++j) {
-        if (candidate_move[static_cast<std::size_t>(j)] == Move::Down)
+        if (state.move[static_cast<std::size_t>(j)] == Move::Down)
           predicted_full[j] = state.bounds.upper[j];
       }
       for (int row = 0; row < state.m; ++row) {
-        predicted_full[candidate_basis[static_cast<std::size_t>(row)]] =
+        predicted_full[state.basis[static_cast<std::size_t>(row)]] =
             predicted_post_pivot[row];
       }
       for (int j = 0; j < state.n; ++j) {
@@ -482,7 +635,7 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
             (state.basic[static_cast<std::size_t>(j)] && j != leaving_col);
         if (candidate_basic) continue;
         const int move = detail::sign(
-            candidate_move[static_cast<std::size_t>(j)]);
+            state.move[static_cast<std::size_t>(j)]);
         if (move != 0 &&
             move * candidate_reduced_costs[j] >
                 state.options->optimality_tol) {
@@ -491,14 +644,14 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
             std::to_string(j));
         }
       }
-      refreshed_objective = candidate_cost.dot(predicted_full);
+      refreshed_objective = candidate_cost->dot(predicted_full);
       const double predicted_residual = detail::equation_residual_inf(
           state.sf->A, predicted_full, state.sf->b);
       const double equation_limit =
           state.options->feasibility_tol *
           std::max(1.0, state.sf->b.lpNorm<Eigen::Infinity>());
-      if (!predicted_full.allFinite() || !candidate_cost.allFinite() ||
-          !candidate_cost_shift.allFinite() ||
+      if (!predicted_full.allFinite() || !candidate_cost->allFinite() ||
+          !candidate_cost_shift->allFinite() ||
           !std::isfinite(refreshed_objective) ||
           !std::isfinite(predicted_residual)) {
         return numerical_trouble(
@@ -523,29 +676,57 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
     // canonical feasibility limit, atomically commit only the basis exchange;
     // the driver immediately INVERTs and reconstructs that new basis before
     // another minor iteration. The over-limit state is never used for pricing.
-    if (!reinvert_pivotal_basis &&
-        !state.factor->update(leaving.row, entering.col, direction,
-                              leaving.row_ep, failure)) {
+    const double _t_lu = g_ds_profile.enabled ? ds_clock() : 0.0;
+    const bool _lu_ok =
+        reinvert_pivotal_basis ||
+        state.factor->update(leaving.row, entering.col, direction,
+                             leaving.row_ep, failure);
+    if (g_ds_profile.enabled) g_ds_profile.lu_update += ds_clock() - _t_lu;
+    if (!_lu_ok) {
       return numerical_trouble(std::move(failure));
     }
+    // Commit.  state.move / state.basis already hold the post-pivot values;
+    // the guard is dismissed so they are kept.  The float vectors swap with
+    // their scratch (O(1) pointer exchange) instead of copying; the working
+    // cost only changes on cost-shift pivots.
+    pivot_guard.dismiss();
+    const double _t_cy = g_ds_profile.enabled ? ds_clock() : 0.0;
     detail::record_cycle_departure(state, leaving_col, entering.col);
-    state.move = std::move(candidate_move);
-    state.basis = std::move(candidate_basis);
+    // O(changes) incremental cycle-signature maintenance: the pivot swaps one
+    // basis slot, moves the entering column out of (and the leaving column
+    // into) the nonbasic token set, and flips each BFRT column's side token.
+    detail::cycle_signature_apply_basis_swap(state, leaving.row, leaving_col,
+                                             entering.col);
+    detail::cycle_signature_apply_move_toggle(
+        state, entering.col, detail::sign(entering_old_move));
+    detail::cycle_signature_apply_move_toggle(
+        state, leaving_col,
+        detail::sign(state.move[static_cast<std::size_t>(leaving_col)]));
+    for (const BoundFlip& flip : transaction.flips) {
+      const int old_sign = detail::sign(flip.old_move);
+      detail::cycle_signature_apply_move_toggle(state, flip.col, old_sign);
+      detail::cycle_signature_apply_move_toggle(state, flip.col, -old_sign);
+    }
+    if (g_ds_profile.enabled) g_ds_profile.cycle += ds_clock() - _t_cy;
     state.edge_weight = std::move(updated_edge_weight);
     state.basic[static_cast<std::size_t>(leaving_col)] = 0;
     state.basic[static_cast<std::size_t>(entering.col)] = 1;
-    state.x_basic = std::move(predicted_post_pivot);
-    state.reduced_costs = std::move(candidate_reduced_costs);
-    state.cost = candidate_cost;
-    state.cost_shift = candidate_cost_shift;
-    if (!transaction.cost_shifts.empty()) state.costs_shifted = true;
-    for (const detail::WorkingCostShift& shift : transaction.cost_shifts) {
-      ++statistics.cost_shifts;
-      statistics.max_cost_shift =
-          std::max(statistics.max_cost_shift, std::abs(shift.delta));
+    state.x_basic.swap(predicted_post_pivot);
+    state.reduced_costs.swap(candidate_reduced_costs);
+    if (has_shifts) {
+      state.cost.swap(g_ds_scratch.candidate_cost);
+      state.cost_shift.swap(g_ds_scratch.candidate_cost_shift);
+      state.costs_shifted = true;
+      for (const detail::WorkingCostShift& shift : transaction.cost_shifts) {
+        ++statistics.cost_shifts;
+        statistics.max_cost_shift =
+            std::max(statistics.max_cost_shift, std::abs(shift.delta));
+      }
     }
     if (objective_refreshed) state.objective = refreshed_objective;
+    const double _t_ca = g_ds_profile.enabled ? ds_clock() : 0.0;
     detail::record_cycle_arrival(state, statistics);
+    if (g_ds_profile.enabled) g_ds_profile.cycle += ds_clock() - _t_ca;
     if (state.edge_weight_mode == detail::EdgeWeightMode::Devex) {
       ++state.devex_iterations;
       if (restart_devex) {
@@ -565,6 +746,28 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
     MinorOutcome outcome;
     outcome.kind = MinorKind::Pivoted;
     return outcome;
+}
+
+// At a time / iteration limit the running objective is a dual bound only for
+// the WORKING cost (stabilization perturbations from initialize_stabilized_cost
+// plus any accumulated shifts), so publishing it as a bound on the original LP
+// would be unsound.  Recover a rigorous original-cost bound instead: drop every
+// stabilization delta, reconstruct the state from the current basis with
+// checked solves, re-classify the nonbasic bound sides against the original
+// reduced costs, and audit dual feasibility — the same certificate an Optimal
+// result rests on.  On success state.objective is the exact original-cost dual
+// objective of a dual-feasible point, which by weak duality bounds the LP
+// optimum even though the solve is unfinished.  On failure the state may hold
+// a partially restored iterate; that is acceptable because interrupted results
+// only export statistics (see the non-Optimal early-return in the caller).
+bool certify_interrupted_dual_bound(State& state) {
+  if (state.phase != Phase::Two) return false;
+  std::string failure;
+  detail::restore_original_cost(state);
+  if (!detail::reconstruct(state, failure)) return false;
+  if (!detail::normalize_nonbasic_moves(state, failure)) return false;
+  const Audit certification = detail::audit(state, false, true, false);
+  return certification.ok && std::isfinite(state.objective);
 }
 
 Result run_phase(State& state, Statistics& statistics,
@@ -619,8 +822,11 @@ Result run_phase(State& state, Statistics& statistics,
                 << state.canonical_primal_corrections
                 << ", canonical_pivot_reinversions="
                 << statistics.canonical_pivot_reinversions << ')';
-        return detail::make_result(state, Status::IterationLimit,
-                                   message.str(), statistics);
+        const bool bound_certified = certify_interrupted_dual_bound(state);
+        Result result = detail::make_result(state, Status::IterationLimit,
+                                            message.str(), statistics);
+        result.dual_bound_certified = bound_certified;
+        return result;
       }
       if (wall_time_hit(*state.options, start)) {
         std::ostringstream message;
@@ -640,8 +846,11 @@ Result run_phase(State& state, Statistics& statistics,
                 << ", pivot_identity_refinements="
                 << statistics.pivot_identity_refinements << ')';
         g_ds_profile.report(state.m, state.n);
-        return detail::make_result(state, Status::TimeLimit,
-                                   message.str(), statistics);
+        const bool bound_certified = certify_interrupted_dual_bound(state);
+        Result result = detail::make_result(state, Status::TimeLimit,
+                                            message.str(), statistics);
+        result.dual_bound_certified = bound_certified;
+        return result;
       }
       if (state.options->incumbent_bound != nullptr &&
           statistics.iterations %

@@ -78,6 +78,14 @@ struct Result {
   double farkas_error_bound{0.0};
   bool has_farkas_certificate{false};
   double max_objective{0.0};
+  // Set on TimeLimit / IterationLimit results when the interrupted state was
+  // re-certified against the ORIGINAL cost (stabilization deltas removed,
+  // state reconstructed, dual feasibility audited).  When true, max_objective
+  // is the exact original-cost dual objective of a dual-feasible point — a
+  // rigorous bound on the LP optimum despite the unfinished solve, resting on
+  // the same audit an Optimal result rests on.  When false, max_objective is
+  // the working-cost objective and must not be used as a bound.
+  bool dual_bound_certified{false};
   std::shared_ptr<BasisOps> basis_ops;
 };
 

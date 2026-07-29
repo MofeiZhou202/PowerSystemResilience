@@ -2151,6 +2151,13 @@ static SimplexResult solve_lp_from_sf_impl(
     out.result.stats.success = false;
     out.result.stats.iterations = actual_iters;
     out.result.stats.objective = sf.objective_const - native.max_objective;
+    if (native.dual_bound_certified) {
+      // The kernel re-certified the interrupted state against the original
+      // cost (dual-feasibility audit), so objective_const - max_objective is a
+      // rigorous lower bound on the LP minimum despite the unfinished solve.
+      out.result.stats.certified_dual_bound =
+          sf.objective_const - native.max_objective;
+    }
     if (native.status == native_dual::Status::ObjectiveCutoff) {
       out.result.stats.status = "Objective cutoff";
     } else if (native.status == native_dual::Status::TimeLimit) {

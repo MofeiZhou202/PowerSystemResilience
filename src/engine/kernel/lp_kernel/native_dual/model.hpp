@@ -74,6 +74,13 @@ struct State {
   bool reinvert_after_pivot{false};
   std::uint64_t cycle_signature_a{0};
   std::uint64_t cycle_signature_b{0};
+  // Incrementally maintained signature of the CURRENT (basis, nonbasic-side)
+  // state.  Updated by O(1) token XORs at each pivot commit and fully resynced
+  // by resync_cycle_signature whenever basis/move change outside the minor
+  // iteration (major rebuilds reclassify every nonbasic side).
+  // record_cycle_arrival publishes it into cycle_signature_a/b.
+  std::uint64_t cycle_signature_live_a{0};
+  std::uint64_t cycle_signature_live_b{0};
   int pivot_sequence{0};
   int pricing_epoch{0};
 

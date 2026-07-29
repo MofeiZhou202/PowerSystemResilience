@@ -1954,6 +1954,13 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
     }
   }
 
+  // A successfully solved IPM root is a valid dual bound for this relaxation
+  // even when the simplex crossover afterwards fails or times out.  Retain it
+  // across the fallthrough paths so a timed-out root never reports -inf with
+  // the bound already in hand (observed on IEEE-118: IPM had the exact root
+  // bound after 1.8s, the crossover timeout then discarded it).
+  double ipm_root_dual_bound = std::numeric_limits<double>::quiet_NaN();
+
   // ---- Interior-point root-LP path ----
   // Uses the new LP IPM adapter (based on Mehrotra LCQP core) to solve
   // the root relaxation directly, then crosses over to simplex to get
@@ -1999,6 +2006,13 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
       trace_ipm_handoff_audit("ipm_raw", lp, ipm_res, nullptr, nullptr);
     }
     if (ipm_res.stats.success) {
+      // A converged IPM root (status Optimal, duality gap ≈ 0) is an exact
+      // dual bound for this relaxation.  Retain it so that if the mandatory
+      // IPM→simplex crossover or the fallthrough cold simplex later times out,
+      // the root still publishes this rigorous bound instead of -inf (observed
+      // on IEEE-118: IPM had the exact root bound in 1.8 s, the crossover
+      // timeout then discarded it, leaving best_bound = -inf).
+      ipm_root_dual_bound = ipm_res.stats.objective;
       // ═══════════════════════════════════════════════════════════════════
       // 3-Phase IPM→Simplex Crossover
       //
@@ -2536,6 +2550,11 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
     if (lp_budget_exhausted()) {
       out.primal.stats.success = false;
       out.primal.stats.status = "Time limit";
+      // The IPM root above may have converged to an exact bound before the
+      // crossover consumed the rest of the budget; publish it rather than -inf.
+      if (std::isfinite(ipm_root_dual_bound)) {
+        out.dual_bound = ipm_root_dual_bound;
+      }
       return out;
     }
     SimplexOptions simplex_opt;
@@ -2561,10 +2580,34 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
     out.simplex = simplex;
     out.primal = simplex->result;
     if (!out.primal.stats.success) {
+      // An interrupted native dual-simplex solve can carry a kernel-certified
+      // original-cost dual bound (audited dual-feasible point).  Publish it so
+      // a timed-out root still reports a rigorous bound instead of -inf.  It
+      // survives the repair attempts below unless a successful solve
+      // overwrites it with a tighter bound.
+      const double certified_bound = out.primal.stats.certified_dual_bound;
+      if (std::isfinite(certified_bound)) {
+        out.dual_bound = certified_bound;
+      }
+      // A converged IPM root bound (retained above) is a valid lower bound on
+      // this relaxation and is typically tighter than a certified
+      // interrupted-simplex bound; keep the tighter of the two so the
+      // fallthrough never loses the IPM bound.  NaN (no IPM root) is a no-op.
+      if (std::isfinite(ipm_root_dual_bound)) {
+        out.dual_bound = std::isfinite(out.dual_bound)
+                             ? std::max(out.dual_bound, ipm_root_dual_bound)
+                             : ipm_root_dual_bound;
+      }
       if (lp_wall_budget > 0.0 && lp_wall_budget <= 10.0) {
         out.primal.stats.success = false;
         out.primal.stats.status = "Time limit";
-        out.dual_bound = out.primal.stats.objective;
+        if (!std::isfinite(certified_bound) &&
+            !std::isfinite(ipm_root_dual_bound)) {
+          // Legacy behavior for kernels without certification (vendored
+          // HiGHS): publish the working objective as a best-effort bound.
+          // Skipped when a converged IPM root bound is already in hand.
+          out.dual_bound = out.primal.stats.objective;
+        }
         return out;
       }
       if (lp_budget_exhausted()) {

@@ -465,6 +465,10 @@ TEST_CASE("DualSimplex: repeated basis state taboos its prior outgoing edge",
   state.basis[0] = 2;
   state.basic = {0, 1, 1, 0};
   state.move = {Move::Up, Move::Fixed, Move::Fixed, Move::Down};
+  // This test simulates a pivot by mutating basis/move directly, so it must
+  // resync the incrementally maintained live signature the way the kernel's
+  // pivot commit (or a major rebuild) would.
+  mipsolvers::engine::native_dual::detail::resync_cycle_signature(state);
   Statistics statistics;
   CHECK_FALSE(mipsolvers::engine::native_dual::detail::record_cycle_arrival(
       state, statistics));
@@ -473,6 +477,7 @@ TEST_CASE("DualSimplex: repeated basis state taboos its prior outgoing edge",
   state.basis[0] = 0;
   state.basic = {1, 1, 0, 0};
   state.move = {Move::Fixed, Move::Fixed, Move::Up, Move::Down};
+  mipsolvers::engine::native_dual::detail::resync_cycle_signature(state);
   REQUIRE(mipsolvers::engine::native_dual::detail::record_cycle_arrival(
       state, statistics));
   CHECK(statistics.cycles_detected == 1);

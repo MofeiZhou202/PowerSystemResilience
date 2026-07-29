@@ -2876,6 +2876,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     out.stats.runtime_sec = bc_elapsed_sec();
     out.bc_stats.runtime_sec = out.stats.runtime_sec;
     out.stats.solver_name = "NativeBranchAndCut";
+    // The dual bound stands on its own certificate; publish it even when no
+    // incumbent is publishable (or the quality gate below rejects one), so a
+    // timed-out run reports a real bound instead of -inf.
+    if (std::isfinite(best_known_root_bound)) {
+      out.bc_stats.best_bound = best_known_root_bound;
+    }
     if (heuristic_x_orig.size() == orig_n && std::isfinite(heuristic_obj)) {
       if (!incumbent_quality_acceptable(heuristic_obj, best_known_root_bound)) {
         if (opt.verbose) {
@@ -5048,6 +5054,13 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       return retry;
     }
     if (out.stats.status == bc_status::kTimeLimitReached) {
+      // A timed-out root relaxation can still carry a kernel-certified dual
+      // bound (see LPRelaxationResult::dual_bound on the simplex time-limit
+      // path).  Feed it to the publisher so the result reports a real bound
+      // and the incumbent quality gate compares against something honest.
+      if (std::isfinite(root_relax.dual_bound)) {
+        best_known_root_bound = root_relax.dual_bound;
+      }
       publish_verified_warm_start_time_limit();
     }
     join_root_background_tasks();

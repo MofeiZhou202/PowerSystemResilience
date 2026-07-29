@@ -40,6 +40,13 @@ void release_taboo_row(State& state, int leaving_col,
                        Statistics& statistics);
 void record_cycle_departure(State& state, int leaving_col, int entering_col);
 bool record_cycle_arrival(State& state, Statistics& statistics);
+// Incremental cycle-signature maintenance (see State::cycle_signature_live_*).
+void resync_cycle_signature(State& state);
+void cycle_signature_apply_basis_swap(State& state, int row, int old_col,
+                                      int new_col);
+// XOR-toggles the nonbasic move token (col, move_sign): adds it when absent,
+// removes it when present.  A move-side change is two toggles.
+void cycle_signature_apply_move_toggle(State& state, int col, int move_sign);
 
 Eigen::VectorXd multiply_A(const Eigen::SparseMatrix<double>& A,
                            const Eigen::VectorXd& x);
