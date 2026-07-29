@@ -297,6 +297,20 @@ bool BasisFactor::row_solve_consistent(
 double BasisFactor::residual_norm(const Eigen::VectorXd& rhs,
                                   const Eigen::VectorXd& solution,
                                   bool transpose) const {
+  // Guard against an inconsistent basis/matrix binding (e.g. after rebind_A to a
+  // differently-shaped matrix): indexing residual[pos]/solution[pos] or a stale
+  // basis_ column into A_ would read out of bounds.  Returning a large residual
+  // makes backward_error_acceptable reject the solve instead of crashing.
+  if (A_ == nullptr || rhs.size() != A_->rows() ||
+      solution.size() != A_->rows() ||
+      static_cast<int>(basis_.size()) != A_->rows()) {
+    return std::numeric_limits<double>::infinity();
+  }
+  for (const int col : basis_) {
+    if (col < 0 || col >= A_->cols()) {
+      return std::numeric_limits<double>::infinity();
+    }
+  }
   Eigen::VectorXd residual = rhs;
   if (transpose) {
     for (int pos = 0; pos < static_cast<int>(basis_.size()); ++pos) {
@@ -326,8 +340,14 @@ Eigen::VectorXd BasisFactor::residual_vector(
     const Eigen::VectorXd& rhs, const Eigen::VectorXd& solution,
     bool transpose) const {
   if (A_ == nullptr || rhs.size() != A_->rows() ||
-      solution.size() != A_->rows()) {
+      solution.size() != A_->rows() ||
+      static_cast<int>(basis_.size()) != A_->rows()) {
     return {};
+  }
+  for (const int col : basis_) {
+    if (col < 0 || col >= A_->cols()) {
+      return {};
+    }
   }
   Eigen::VectorXd residual(rhs.size());
   if (transpose) {
@@ -602,6 +622,23 @@ SparseFactorTelemetry BasisFactor::factor_telemetry() const {
 
 void BasisFactor::rebind_A(const Eigen::SparseMatrix<double>& A) {
   A_ = &A;
+  // Only treat the factor as usable if the stored basis is dimensionally
+  // compatible with the newly bound matrix.  rebuild() enforces the same
+  // invariants (basis.size()==A.rows() and every basis column in range); a
+  // rebind to a differently-shaped matrix would otherwise leave basis_ indexing
+  // out of range and crash the next solve/residual/norm.  On mismatch, drop the
+  // factor's validity so solves return empty evidence (a rejected dual proof)
+  // instead of reading out of bounds.
+  if (static_cast<int>(basis_.size()) != A.rows()) {
+    rank_factor_.valid = false;
+    return;
+  }
+  for (const int col : basis_) {
+    if (col < 0 || col >= A.cols()) {
+      rank_factor_.valid = false;
+      return;
+    }
+  }
   rebuild_norms();
 }
 

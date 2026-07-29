@@ -1555,6 +1555,14 @@ Eigen::VectorXd scaled_row_duals_from_simplex(const SimplexResult& simplex,
   // the first-class basis used to compute reduced costs.  A dense inverse may
   // be only the crash/base inverse and can give a stale, degenerate proof.
   if (simplex.basis.cached_sparse_basis) {
+    // The cached factor stores a raw pointer to the standard-form matrix it was
+    // built against, which may dangle if the SimplexResult's form was moved
+    // after the solve.  Rebind to the live sf.A before solving so btran never
+    // dereferences freed memory.  rebind_A invalidates the factor when the
+    // stored basis is incompatible with sf.A, in which case btran returns an
+    // empty vector and the caller falls back to solver row duals or rejects the
+    // proof -- never a crash, never a wrong dual (validated by backward error).
+    rebind_sparse_basis_matrix(simplex.basis.cached_sparse_basis, sf.A);
     y_scaled = sparse_basis_btran(simplex.basis.cached_sparse_basis, c_b);
   } else if (simplex.basis_inverse.rows() == m &&
              simplex.basis_inverse.cols() == m) {
