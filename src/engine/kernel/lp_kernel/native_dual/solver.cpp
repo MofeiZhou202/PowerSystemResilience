@@ -95,12 +95,84 @@ MinorOutcome numerical_trouble(std::string message) {
   return outcome;
 }
 
+// ── Per-phase profiling (env MIPSOLVERS_DS_PROFILE) ──────────────────────────
+// Accumulates wall time in each dual-simplex phase so a slow large-LP root can
+// be attributed to CHUZR/BTRAN, PRICE (A^T*row_ep), the ratio test, FTRAN, DSE
+// weight updates, or LU refactorization.  Zero cost when the env is unset.
+struct DSProfile {
+  bool enabled = false;
+  double start_clock = 0.0;
+  double leaving = 0.0, price = 0.0, entering = 0.0, ftran = 0.0, dse = 0.0,
+         rebuild = 0.0, minor_total = 0.0, primal = 0.0, edge_init = 0.0,
+         postcond = 0.0, valid = 0.0;
+  long pivots = 0, rebuilds = 0;
+  void reset() {
+    enabled = std::getenv("MIPSOLVERS_DS_PROFILE") != nullptr;
+    leaving = price = entering = ftran = dse = rebuild = minor_total = primal =
+        edge_init = postcond = valid = 0.0;
+    pivots = rebuilds = 0;
+    start_clock = enabled ? std::chrono::duration<double>(
+                                std::chrono::steady_clock::now()
+                                    .time_since_epoch())
+                                .count()
+                          : 0.0;
+  }
+  void report(int m, int n) const {
+    if (!enabled) return;
+    const double wall =
+        std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count() -
+        start_clock;
+    const double phases = leaving + price + entering + ftran + dse;
+    const double other = minor_total - phases;
+    std::fprintf(stderr,
+                 "[DS-PROFILE] m=%d n=%d wall=%.2fs pivots=%ld rebuilds=%ld "
+                 "minor=%.2f rebuild=%.2f primalPhaseI=%.2f edgeInit=%.2f | "
+                 "leaving(CHUZR+BTRAN)=%.2f price(A^T*rEP)=%.2f "
+                 "entering(ratio/BFRT)=%.2f ftran=%.2f dse=%.2f "
+                 "postcond(O(n)dualfeas)=%.2f validBlock(predFull+resid)=%.2f "
+                 "OTHER(update/copy)=%.2f\n",
+                 m, n, wall, pivots, rebuilds, minor_total, rebuild, primal,
+                 edge_init, leaving, price, entering, ftran, dse, postcond,
+                 valid, other - postcond - valid);
+  }
+};
+thread_local DSProfile g_ds_profile;
+inline double ds_clock() {
+  return std::chrono::duration<double>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+// Reusable per-pivot scratch buffers.  minor_iteration() previously allocated
+// ~half a dozen O(n)/O(m) temporaries on every pivot; on a large root (n≈45k)
+// that alloc/zero churn and the cold-cache traffic dominated the non-simplex
+// cost.  Reusing thread_local buffers keeps them warm and skips the malloc/free
+// while computing byte-identical values (Eigen assignment / setZero reuse the
+// storage when the size is unchanged).
+struct MinorScratch {
+  Eigen::VectorXd column, transaction_cost_shift, predicted_full, flipped_basic,
+      bfrt_delta;
+  std::vector<char> flipped;
+};
+thread_local MinorScratch g_ds_scratch;
+
+// Pivots between full primal-reconstruction audits in minor_iteration (see the
+// audit gate there).  Small enough to stay well inside the driver's reinversion
+// cadence (updates_since_rebuild reaches ~200 before a forced rebuild) so drift
+// is caught promptly, large enough to amortise the O(n)+O(nnz) audit cost.
+constexpr int kPivotAuditStride = 16;
+
 MinorOutcome minor_iteration(State& state, Statistics& statistics) {
   ++state.pricing_epoch;
   const bool paranoid = resolve_paranoid(state);
   Leaving leaving;
   std::string failure;
-  if (!detail::choose_leaving(state, leaving, failure)) {
+  const double _t_lv = g_ds_profile.enabled ? ds_clock() : 0.0;
+  const bool _lv_ok = detail::choose_leaving(state, leaving, failure);
+  if (g_ds_profile.enabled) g_ds_profile.leaving += ds_clock() - _t_lv;
+  if (!_lv_ok) {
     return numerical_trouble(std::move(failure));
   }
   statistics.taboo_row_rejections += leaving.taboo_row_rejections;
@@ -115,11 +187,16 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
     return outcome;
   }
 
+  const double _t_pr = g_ds_profile.enabled ? ds_clock() : 0.0;
   const Eigen::VectorXd pivot_row =
       detail::multiply_AT(state.sf->A, leaving.row_ep);
+  if (g_ds_profile.enabled) g_ds_profile.price += ds_clock() - _t_pr;
   PivotTransaction transaction;
-  if (!detail::choose_entering_bfrt(state, leaving, pivot_row, transaction,
-                                    failure)) {
+  const double _t_en = g_ds_profile.enabled ? ds_clock() : 0.0;
+  const bool _en_ok = detail::choose_entering_bfrt(state, leaving, pivot_row,
+                                                   transaction, failure);
+  if (g_ds_profile.enabled) g_ds_profile.entering += ds_clock() - _t_en;
+  if (!_en_ok) {
     return numerical_trouble(std::move(failure));
   }
   statistics.taboo_rejections += transaction.taboo_rejections;
@@ -150,14 +227,17 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
     return outcome;
   }
 
-    Eigen::VectorXd column = Eigen::VectorXd::Zero(state.m);
+    Eigen::VectorXd& column = g_ds_scratch.column;
+    column.setZero(state.m);
     for (Eigen::SparseMatrix<double>::InnerIterator it(state.sf->A,
                                                         entering.col);
          it; ++it) {
       column[it.row()] = it.value();
     }
+    const double _t_ft = g_ds_profile.enabled ? ds_clock() : 0.0;
     detail::SolveEvidence direction_solve =
         state.factor->checked_ftran(column, true);
+    if (g_ds_profile.enabled) g_ds_profile.ftran += ds_clock() - _t_ft;
     Eigen::VectorXd direction = direction_solve.solution;
     if (!direction_solve.accepted) {
     return numerical_trouble(
@@ -203,7 +283,8 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
     }
     const double column_pivot = direction[leaving.row];
 
-    std::vector<char> flipped(static_cast<std::size_t>(state.n), 0);
+    std::vector<char>& flipped = g_ds_scratch.flipped;
+    flipped.assign(static_cast<std::size_t>(state.n), 0);
     for (const BoundFlip& flip : transaction.flips) {
       if (flip.col < 0 || flip.col >= state.n ||
           state.basic[static_cast<std::size_t>(flip.col)] ||
@@ -215,7 +296,8 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
       }
       flipped[static_cast<std::size_t>(flip.col)] = 1;
     }
-    Eigen::VectorXd transaction_cost_shift = Eigen::VectorXd::Zero(state.n);
+    Eigen::VectorXd& transaction_cost_shift = g_ds_scratch.transaction_cost_shift;
+    transaction_cost_shift.setZero(state.n);
     for (const detail::WorkingCostShift& shift : transaction.cost_shifts) {
       if (shift.col < 0 || shift.col >= state.n ||
           state.basic[static_cast<std::size_t>(shift.col)] ||
@@ -228,6 +310,7 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
       }
       transaction_cost_shift[shift.col] = shift.delta;
     }
+    const double _t_pc = g_ds_profile.enabled ? ds_clock() : 0.0;
     for (int j = 0; j < state.n; ++j) {
       if (state.basic[static_cast<std::size_t>(j)] || j == entering.col)
         continue;
@@ -244,9 +327,12 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
           std::to_string(j));
       }
     }
+    if (g_ds_profile.enabled) g_ds_profile.postcond += ds_clock() - _t_pc;
 
-    Eigen::VectorXd flipped_basic = state.x_basic;
-    Eigen::VectorXd bfrt_delta = Eigen::VectorXd::Zero(state.m);
+    Eigen::VectorXd& flipped_basic = g_ds_scratch.flipped_basic;
+    flipped_basic = state.x_basic;
+    Eigen::VectorXd& bfrt_delta = g_ds_scratch.bfrt_delta;
+    bfrt_delta.setZero(state.m);
     if (!transaction.flips.empty()) {
       bfrt_delta = state.factor->ftran(transaction.bfrt_rhs);
       if (bfrt_delta.size() != state.m || !bfrt_delta.allFinite()) {
@@ -309,9 +395,12 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
 
     std::vector<double> updated_edge_weight;
     bool restart_devex = false;
-    if (!detail::compute_dse_weights(state, leaving, pivot_row, direction,
-                                     column_pivot, updated_edge_weight,
-                                     restart_devex, failure)) {
+    const double _t_dse = g_ds_profile.enabled ? ds_clock() : 0.0;
+    const bool _dse_ok = detail::compute_dse_weights(
+        state, leaving, pivot_row, direction, column_pivot, updated_edge_weight,
+        restart_devex, failure);
+    if (g_ds_profile.enabled) g_ds_profile.dse += ds_clock() - _t_dse;
+    if (!_dse_ok) {
     return numerical_trouble(std::move(failure));
     }
 
@@ -338,15 +427,8 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
     std::vector<int> candidate_basis = state.basis;
     candidate_basis[static_cast<std::size_t>(leaving.row)] = entering.col;
 
-    Eigen::VectorXd predicted_full = state.bounds.lower;
-    for (int j = 0; j < state.n; ++j) {
-      if (candidate_move[static_cast<std::size_t>(j)] == Move::Down)
-        predicted_full[j] = state.bounds.upper[j];
-    }
-    for (int row = 0; row < state.m; ++row) {
-      predicted_full[candidate_basis[static_cast<std::size_t>(row)]] =
-          predicted_post_pivot[row];
-    }
+    // Incremental reduced-cost update — committed on every pivot (the standard
+    // O(n) dual update; pivot_row is dense).
     Eigen::VectorXd candidate_reduced_costs =
         state.reduced_costs +
         leaving.side * entering.theta * pivot_row + transaction_cost_shift;
@@ -354,42 +436,83 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
       candidate_reduced_costs[
           candidate_basis[static_cast<std::size_t>(row)]] = 0.0;
     }
-    for (int j = 0; j < state.n; ++j) {
-      const bool candidate_basic =
-          j == entering.col ||
-          (state.basic[static_cast<std::size_t>(j)] && j != leaving_col);
-      if (candidate_basic) continue;
-      const int move = detail::sign(
-          candidate_move[static_cast<std::size_t>(j)]);
-      if (move != 0 &&
-          move * candidate_reduced_costs[j] >
-              state.options->optimality_tol) {
-      return numerical_trouble(
-          "incremental BFRT state violates dual feasibility at column " +
-          std::to_string(j));
-      }
-    }
     const Eigen::VectorXd candidate_cost = state.cost + transaction_cost_shift;
     const Eigen::VectorXd candidate_cost_shift =
         state.cost_shift + transaction_cost_shift;
-    const double candidate_objective = candidate_cost.dot(predicted_full);
-    const double predicted_residual = detail::equation_residual_inf(
-        state.sf->A, predicted_full, state.sf->b);
-    const double equation_limit =
-        state.options->feasibility_tol *
-        std::max(1.0, state.sf->b.lpNorm<Eigen::Infinity>());
-    if (!predicted_post_pivot.allFinite() || !predicted_full.allFinite() ||
-        !candidate_reduced_costs.allFinite() || !candidate_cost.allFinite() ||
-        !candidate_cost_shift.allFinite() ||
-        !std::isfinite(candidate_objective) ||
-        !std::isfinite(predicted_residual)) {
+    const bool refined_pivotal_solve =
+        leaving.row_ep_refined || direction_solve.refined;
+
+    // The full primal reconstruction (predicted_full, O(n)), the ‖Ax−b‖
+    // residual audit (O(nnz)), the post-swap dual-feasibility re-scan (O(n)),
+    // and the exact objective refresh dominate the per-pivot cost on a large
+    // root, yet are not required on every pivot: dual feasibility is already
+    // re-validated every pivot by the analytical BFRT postcondition above; the
+    // committed primal state (predicted_post_pivot) has per-pivot error bounded
+    // by the checked-FTRAN backward error; and the driver reinverts on a fixed
+    // cadence (updates_since_rebuild) and whenever a pivotal solve was refined.
+    // Run the full audit periodically (also under paranoid mode or right after
+    // a refined solve) and refresh state.objective then.  Between audits the
+    // objective stays stale — a valid, conservative dual bound (the dual
+    // objective is monotone) — and optimality is only ever declared after a
+    // fresh rebuild that reconstructs the state exactly.
+    bool residual_requires_reinvert = false;
+    bool objective_refreshed = false;
+    double refreshed_objective = state.objective;
+    // A refined pivotal solve already forces a reinversion below, which
+    // reconstructs the state exactly, so it does not additionally need the full
+    // audit here — only paranoid mode and the periodic stride trigger it.
+    const bool do_full_audit =
+        paranoid ||
+        (state.updates_since_rebuild % kPivotAuditStride == 0);
+    if (do_full_audit) {
+      const double _t_vb = g_ds_profile.enabled ? ds_clock() : 0.0;
+      Eigen::VectorXd& predicted_full = g_ds_scratch.predicted_full;
+      predicted_full = state.bounds.lower;
+      for (int j = 0; j < state.n; ++j) {
+        if (candidate_move[static_cast<std::size_t>(j)] == Move::Down)
+          predicted_full[j] = state.bounds.upper[j];
+      }
+      for (int row = 0; row < state.m; ++row) {
+        predicted_full[candidate_basis[static_cast<std::size_t>(row)]] =
+            predicted_post_pivot[row];
+      }
+      for (int j = 0; j < state.n; ++j) {
+        const bool candidate_basic =
+            j == entering.col ||
+            (state.basic[static_cast<std::size_t>(j)] && j != leaving_col);
+        if (candidate_basic) continue;
+        const int move = detail::sign(
+            candidate_move[static_cast<std::size_t>(j)]);
+        if (move != 0 &&
+            move * candidate_reduced_costs[j] >
+                state.options->optimality_tol) {
+        return numerical_trouble(
+            "incremental BFRT state violates dual feasibility at column " +
+            std::to_string(j));
+        }
+      }
+      refreshed_objective = candidate_cost.dot(predicted_full);
+      const double predicted_residual = detail::equation_residual_inf(
+          state.sf->A, predicted_full, state.sf->b);
+      const double equation_limit =
+          state.options->feasibility_tol *
+          std::max(1.0, state.sf->b.lpNorm<Eigen::Infinity>());
+      if (!predicted_full.allFinite() || !candidate_cost.allFinite() ||
+          !candidate_cost_shift.allFinite() ||
+          !std::isfinite(refreshed_objective) ||
+          !std::isfinite(predicted_residual)) {
+        return numerical_trouble(
+            "BFRT incremental primal transaction is non-finite");
+      }
+      residual_requires_reinvert = predicted_residual > equation_limit;
+      objective_refreshed = true;
+      if (g_ds_profile.enabled) g_ds_profile.valid += ds_clock() - _t_vb;
+    }
+    if (!predicted_post_pivot.allFinite() ||
+        !candidate_reduced_costs.allFinite()) {
       return numerical_trouble(
           "BFRT incremental primal transaction is non-finite");
     }
-
-    const bool refined_pivotal_solve =
-        leaving.row_ep_refined || direction_solve.refined;
-    const bool residual_requires_reinvert = predicted_residual > equation_limit;
     const bool reinvert_pivotal_basis =
         refined_pivotal_solve || residual_requires_reinvert;
     if (residual_requires_reinvert) {
@@ -421,7 +544,7 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
       statistics.max_cost_shift =
           std::max(statistics.max_cost_shift, std::abs(shift.delta));
     }
-    state.objective = candidate_objective;
+    if (objective_refreshed) state.objective = refreshed_objective;
     detail::record_cycle_arrival(state, statistics);
     if (state.edge_weight_mode == detail::EdgeWeightMode::Devex) {
       ++state.devex_iterations;
@@ -435,6 +558,7 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
     if (std::abs(entering.theta) < 1e-9) ++statistics.degenerate_dual_steps;
     if (std::abs(primal_step) < 1e-9) ++statistics.degenerate_primal_steps;
     ++statistics.iterations;
+    if (g_ds_profile.enabled) ++g_ds_profile.pivots;
     ++state.updates_since_rebuild;
     state.fresh_rebuild = false;
     state.reinvert_after_pivot = reinvert_pivotal_basis;
@@ -456,8 +580,14 @@ Result run_phase(State& state, Statistics& statistics,
   std::string first_fresh_numerical_failure;
   for (;;) {
     const bool reinvert = rebuild_reason != detail::RebuildReason::Initial;
-    if (!detail::major_rebuild(state, rebuild_reason, reinvert, statistics,
-                               failure)) {
+    const double _t_rb = g_ds_profile.enabled ? ds_clock() : 0.0;
+    const bool _rb_ok = detail::major_rebuild(state, rebuild_reason, reinvert,
+                                              statistics, failure);
+    if (g_ds_profile.enabled) {
+      g_ds_profile.rebuild += ds_clock() - _t_rb;
+      ++g_ds_profile.rebuilds;
+    }
+    if (!_rb_ok) {
       return detail::make_result(state, Status::NumericalFailure,
                                  std::move(failure), statistics);
     }
@@ -509,6 +639,7 @@ Result run_phase(State& state, Statistics& statistics,
                 << statistics.stability_blocked_rows
                 << ", pivot_identity_refinements="
                 << statistics.pivot_identity_refinements << ')';
+        g_ds_profile.report(state.m, state.n);
         return detail::make_result(state, Status::TimeLimit,
                                    message.str(), statistics);
       }
@@ -526,7 +657,9 @@ Result run_phase(State& state, Statistics& statistics,
         }
       }
 
+      const double _t_minor = g_ds_profile.enabled ? ds_clock() : 0.0;
       MinorOutcome outcome = minor_iteration(state, statistics);
+      if (g_ds_profile.enabled) g_ds_profile.minor_total += ds_clock() - _t_minor;
       if (outcome.kind == MinorKind::CycleBlocked) continue;
       if (outcome.kind == MinorKind::Pivoted) {
         first_fresh_numerical_failure.clear();
@@ -642,6 +775,7 @@ Result solve_impl(const StandardFormLP& sf, const SimplexOptions& options,
   State state;
   std::string failure;
   const auto start = std::chrono::steady_clock::now();
+  g_ds_profile.reset();
   if (!detail::initialize(state, sf, options, Phase::Two, basis_hint,
                           statistics, failure)) {
     return empty_result(Status::InvalidBasis, std::move(failure), statistics);
@@ -654,10 +788,13 @@ Result solve_impl(const StandardFormLP& sf, const SimplexOptions& options,
     const int crash_replacements =
         detail::apply_certified_singleton_crash(sf, state.basis);
     if (crash_replacements > 0) {
-      if (!state.factor->rebuild(state.basis, statistics.rank_repairs,
-                                 failure) ||
-          !detail::reconstruct(state, failure) ||
-          !detail::initialize_exact_edge_weights(state, statistics, failure)) {
+      const double _t_ew = g_ds_profile.enabled ? ds_clock() : 0.0;
+      const bool _ew_ok =
+          state.factor->rebuild(state.basis, statistics.rank_repairs, failure) &&
+          detail::reconstruct(state, failure) &&
+          detail::initialize_exact_edge_weights(state, statistics, failure);
+      if (g_ds_profile.enabled) g_ds_profile.edge_init += ds_clock() - _t_ew;
+      if (!_ew_ok) {
         return detail::make_result(
             state, Status::NumericalFailure,
             "certified singleton crash reconstruction failed: " + failure,

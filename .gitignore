@@ -142,3 +142,5 @@ third_party/install/
 /cmake_install.cmake
 /Makefile
 /libmipsolvers/
+
+.github/

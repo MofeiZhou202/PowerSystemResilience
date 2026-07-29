@@ -1855,8 +1855,19 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
   };
 
   const int n_lp = static_cast<int>(lp.vars.size());
+  // Column count above which crashing a simplex basis from the warm-start
+  // solution is worth its standard-form build cost.  This is a performance
+  // gate only — never a correctness one: the crash solve below always falls
+  // through to the standard cold/IPM paths if it does not reach a feasible
+  // vertex, so the threshold value can never change the answer, only the speed.
+  // Measured rationale (do not lower blindly): enabling the crash basis for
+  // sub-threshold roots regresses medium models (39-bus/24h 43->52 ms) with no
+  // gain on larger ones — the integer warm-start is a poor seed for the
+  // fractional LP optimum, so IEEE-118 (~16k cols) still does not converge from
+  // it.  Keep it high enough that only genuinely huge roots take the crash path.
+  constexpr int kWarmstartCrashMinCols = 30000;
   const bool huge_warmstart_root =
-      (x0 != nullptr && x0->size() == n_lp && n_lp >= 30000);
+      (x0 != nullptr && x0->size() == n_lp && n_lp >= kWarmstartCrashMinCols);
 
   if (huge_warmstart_root) {
     StandardFormLP warm_sf = build_standard_form_lp(lp);
