@@ -83,6 +83,7 @@
 #include "mipsolvers/engine/kernel/kkt/kkt_system.hpp"
 #include "mipsolvers/engine/strategy/highs_presolve_side_state.hpp"
 #include "mipsolvers/engine/strategy/papilo_presolve.hpp"
+#include "mipsolvers/engine/solver/native/milp/bc/milp_presolve.hpp"
 #include "util/HighsHash.h"
 
 namespace mipsolvers::engine {
@@ -2992,6 +2993,36 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   }
 #endif
 
+  // ── Native MILPPresolve top-level presolve (EXPERIMENTAL; OFF by default) ──
+  // The B&C integration here (reduce base_lp, remap uc_hint/branching_priority/
+  // initial_solution through the presolve column map, postsolve the incumbent
+  // before the original-space objective recompute) is validated CORRECT: with
+  // the presolver forced to a no-op the reduced-space solve reproduces the exact
+  // optimum on every SCUC case.  BUT MILPPresolve itself is currently UNSOUND on
+  // these MIPs — several reductions fix constrained binaries and cut off the
+  // integer optimum on the 39-bus cases — so this path is gated OFF pending a
+  // MILPPresolve correctness fix.  Do NOT enable in production; --check catches
+  // the wrong objectives it produces today.
+  MILPPresolve native_ps;
+  bool native_model_reduced = false;
+  if (!strict_highs_root_fixed_point && !papilo_model_reduced &&
+      bc_env_flag_enabled("MIPSOLVERS_NATIVE_TOPLEVEL_PRESOLVE")) {
+    std::vector<int> nps_bin, nps_int;
+    const PresolveStats nps_stats = native_ps.run(base_lp, nps_bin, nps_int);
+    if (nps_stats.final_cols > 0 &&
+        (nps_stats.cols_removed > 0 || nps_stats.rows_removed > 0)) {
+      native_model_reduced = true;
+      if (opt.verbose || bc_env_flag_enabled("MIPSOLVERS_PRESOLVE_VERBOSE"))
+        fmt::print(stderr,
+                   "[NATIVE-PRESOLVE] rows {}->{} cols {}->{} nnz {}->{} "
+                   "{:.1f}ms\n",
+                   nps_stats.orig_rows, nps_stats.final_rows,
+                   nps_stats.orig_cols, nps_stats.final_cols,
+                   nps_stats.orig_nnz, nps_stats.final_nnz,
+                   nps_stats.presolve_time_sec * 1000.0);
+    }
+  }
+
   HiGHSPresolvedModelStats highs_presolve_side_state;
   bool strict_highs_presolved_working_space = false;
   double strict_highs_presolved_objective_offset = 0.0;
@@ -3156,6 +3187,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         orig_j = papilo_ps.reduced_to_orig_col[static_cast<std::size_t>(j)];
       }
 #endif
+      if (native_model_reduced) {
+        const auto& r2o = native_ps.reduced_to_orig_col();
+        if (j >= static_cast<int>(r2o.size())) continue;
+        orig_j = r2o[static_cast<std::size_t>(j)];
+      }
       if (orig_j >= 0 && orig_j < orig_n &&
           original_declared_integer_cols[static_cast<std::size_t>(orig_j)] !=
               0) {
@@ -3330,6 +3366,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       if (j < 0) return -1;
     }
 #endif
+    if (native_model_reduced) {
+      const auto& o2r = native_ps.orig_to_reduced_col();
+      if (j < 0 || j >= static_cast<int>(o2r.size())) return -1;
+      j = o2r[static_cast<std::size_t>(j)];
+      if (j < 0) return -1;
+    }
     return j;
   };
 
@@ -3342,6 +3384,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       mapped = papilo_forward_map(papilo_ps, mapped);
     }
 #endif
+    if (native_model_reduced) {
+      mapped = native_ps.forward_map(mapped);
+    }
     if (mapped.size() == n) {
       reduced_initial_solution = std::move(mapped);
       reduced_warmstart_available = true;
@@ -3443,6 +3488,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         if (j < 0) continue;
       }
 #endif
+      if (native_model_reduced) {
+        const auto& o2r = native_ps.orig_to_reduced_col();
+        if (j < 0 || j >= static_cast<int>(o2r.size())) continue;
+        j = o2r[static_cast<std::size_t>(j)];
+        if (j < 0) continue;
+      }
       if (j >= 0 && j < n)
         branch_priority[static_cast<size_t>(j)] = prob.branching_priority[static_cast<size_t>(orig_j)];
     }
@@ -6775,6 +6826,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       x_fwd = papilo_forward_map(papilo_ps, x_fwd);
     }
 #endif
+    if (native_model_reduced) {
+      x_fwd = native_ps.forward_map(x_fwd);
+    }
     try_register_root_cutoff("forward_mapped_heuristic", x_fwd);
   }
 		  const bool has_root_cutoff_for_propagation =
@@ -7567,6 +7621,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         x_out = papilo_postsolve(papilo_ps, cert.x);
       }
 #endif
+      if (native_model_reduced) {
+        x_out = native_ps.postsolve(cert.x);
+      }
       const auto original_validation =
           validate_incumbent_solution(prob.linear_part, x_out, 1e-6);
       if (original_validation.ok()) {
@@ -16431,6 +16488,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       x_fwd = papilo_forward_map(papilo_ps, x_fwd);
     }
 #endif
+
+    if (native_model_reduced) {
+      x_fwd = native_ps.forward_map(x_fwd);
+    }
 
     if (x_fwd.size() != n) {
       return;
@@ -35434,6 +35495,32 @@ if (node_sf_cuts_augmented) { node_sf = tree_base_sf; node_sf_cuts_augmented = f
   }
 #endif
 
+  // ── Native MILPPresolve postsolve (undo presolve reduction) ──
+  // Restores the original-space incumbent (fixed/substituted columns) so the
+  // objective recompute below evaluates orig_lp.c · out.x correctly.
+  if (has_incumbent && native_model_reduced) {
+    out.x = native_ps.postsolve(out.x);
+    const auto native_validation =
+        validate_incumbent_solution(prob.linear_part, out.x, 1e-6);
+    if (!native_validation.ok()) {
+      if (opt.verbose) {
+        fprintf(stderr, "[B&C-VALIDATE-FAIL] native-postsolve failed: %s\n",
+                format_incumbent_validation_failure("native-postsolve",
+                                                    prob.linear_part,
+                                                    native_validation)
+                    .c_str());
+      }
+      has_incumbent = false;
+      out.x = Eigen::VectorXd::Zero(
+          static_cast<int>(prob.linear_part.vars.size()));
+      out.stats.objective = 0.0;
+      out.stats.mip_gap = kInf;
+      out.stats.success = false;
+      out.stats.status = fmt::format("{} (native-postsolve)",
+                                     bc_status::kInvalidReducedIncumbent);
+    }
+  }
+
   // Recompute objective in original space after all postsolve passes.
   if (has_incumbent && !strict_highs_presolved_working_space) {
     const auto& orig_lp = prob.linear_part;
@@ -35485,6 +35572,11 @@ if (node_sf_cuts_augmented) { node_sf = tree_base_sf; node_sf_cuts_augmented = f
         orig_col = papilo_ps.reduced_to_orig_col[static_cast<size_t>(col)];
       }
 #endif
+      if (native_model_reduced) {
+        const auto& r2o = native_ps.reduced_to_orig_col();
+        if (col < 0 || col >= static_cast<int>(r2o.size())) continue;
+        orig_col = r2o[static_cast<std::size_t>(col)];
+      }
       if (orig_col < 0 || orig_col >= orig_n) continue;
       const PseudoCost& p = pc[col];
       exported->pseudocostup[static_cast<size_t>(orig_col)] = p.up_avg();
