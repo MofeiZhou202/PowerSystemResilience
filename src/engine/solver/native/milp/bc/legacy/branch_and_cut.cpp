@@ -2999,17 +2999,24 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   // machinery operate on the smaller system; the incumbent is postsolved back to
   // original space before the objective recompute, and uc_hint / branching_
   // priority / initial_solution are remapped through the presolve column map.
-  // MILPPresolve runs its VALIDATED-SOUND reduction subset (singleton-row /
-  // forcing-row / probing are gated off in PresolveOptions pending a soundness
-  // fix); objectives stay exact (native_kernel_comparison --check).
+  // MILPPresolve runs its full validated-sound reduction set (native_kernel_
+  // comparison --check keeps objectives exact).
   MILPPresolve native_ps;
   bool native_model_reduced = false;
   if (!strict_highs_root_fixed_point && !papilo_model_reduced &&
       !bc_env_flag_enabled("MIPSOLVERS_NATIVE_TOPLEVEL_PRESOLVE_OFF")) {
     std::vector<int> nps_bin, nps_int;
-    const PresolveStats nps_stats = native_ps.run(base_lp, nps_bin, nps_int);
+    // run() rewrites the LPModel in place, so presolve on a copy and only adopt
+    // the reduced model when it still has columns to branch on.  When presolve
+    // fully solves the problem (final_cols == 0) the reduced model is empty and
+    // the B&C cannot operate on it; fall back to the untouched base_lp (all
+    // postsolve/mapping hooks are gated on native_model_reduced, so leaving it
+    // false keeps the original model authoritative and correct).
+    LPModel presolved_lp = base_lp;
+    const PresolveStats nps_stats = native_ps.run(presolved_lp, nps_bin, nps_int);
     if (nps_stats.final_cols > 0 &&
         (nps_stats.cols_removed > 0 || nps_stats.rows_removed > 0)) {
+      base_lp = std::move(presolved_lp);
       native_model_reduced = true;
       if (opt.verbose || bc_env_flag_enabled("MIPSOLVERS_PRESOLVE_VERBOSE"))
         fmt::print(stderr,

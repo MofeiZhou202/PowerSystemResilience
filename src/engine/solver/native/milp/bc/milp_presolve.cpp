@@ -440,6 +440,23 @@ int MILPPresolve::process_singleton_columns() {
       row_lb_[singleton_row] = implied_lb;
       row_ub_[singleton_row] = implied_ub;
 
+      // Transfer the eliminated variable's objective cost onto the remaining
+      // variables.  Substituting x_j = (rhs - sum_k a_k x_k) / a_j turns the
+      // objective term c_j*x_j into (c_j*rhs/a_j) - sum_k (c_j*a_k/a_j) x_k, so
+      // each remaining var k gains -(c_j/a_j)*a_k in cost.  Omitting this makes
+      // the reduced model optimize the wrong objective whenever c_j != 0 (e.g.
+      // a costed generation variable reduced to a singleton by prior row
+      // deletions), which silently cuts off the true optimum.  The constant
+      // c_j*rhs/a_j only shifts the objective value (recovered post-postsolve)
+      // and does not affect the argmin, so it is not tracked here.
+      if (std::abs(col_cost_[j]) > opts_.zero_tol) {
+        const double cost_ratio = col_cost_[j] / singleton_val;
+        for (const auto& e : rows_[singleton_row]) {
+          if (col_deleted_[e.col]) continue;
+          col_cost_[e.col] -= cost_ratio * e.val;
+        }
+      }
+
       col_deleted_[j] = true;
       stats_.cols_removed++;
       stats_.singletons_removed++;
