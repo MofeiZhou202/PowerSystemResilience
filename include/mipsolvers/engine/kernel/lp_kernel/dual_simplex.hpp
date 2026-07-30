@@ -177,6 +177,15 @@ struct SimplexOptions {
   // final original-space feasibility audit all remain active, so a wrong answer
   // is still never published.  Env MIPSOLVERS_DS_PARANOID=0/1 overrides.
   bool paranoid{true};
+  // Tier the per-solve backward-error validation on the hot pivot path.  When
+  // true, the O(nnz) checked-FTRAN/BTRAN residual audit inside choose_leaving
+  // (row_ep BTRAN) and the pivotal-column FTRAN runs only on the periodic
+  // audit stride instead of every pivot; between audits the raw LU solve is
+  // trusted (finiteness still guarded).  Correctness is preserved because the
+  // periodic full-primal-residual audit reinverts on drift and optimality is
+  // only ever declared after a fresh rebuild.  Default off (strict per-solve
+  // audit).  Env MIPSOLVERS_DS_TIER_CHECKED_SOLVES=0/1 overrides.
+  bool tier_checked_solves{false};
 };
 
 struct SimplexBasis {

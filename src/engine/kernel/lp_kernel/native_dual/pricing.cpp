@@ -92,7 +92,8 @@ bool choose_leaving(State& state, Leaving& leaving, std::string& failure) {
 
   Eigen::VectorXd unit = Eigen::VectorXd::Zero(state.m);
   unit[leaving.row] = 1.0;
-  const SolveEvidence row_solve = state.factor->checked_btran(unit, true);
+  const SolveEvidence row_solve =
+      state.factor->checked_btran(unit, true, should_verify_checked_solve(state));
   leaving.row_ep = row_solve.solution;
   leaving.row_ep_refined = row_solve.refined;
   if (!row_solve.accepted) {

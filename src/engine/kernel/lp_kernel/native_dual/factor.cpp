@@ -410,7 +410,8 @@ void BasisFactor::rebuild_norms() {
 
 SolveEvidence BasisFactor::solve_checked(const Eigen::VectorXd& rhs,
                                          bool transpose,
-                                         bool capture_update) const {
+                                         bool capture_update,
+                                         bool verify) const {
   SolveEvidence evidence;
   if (A_ == nullptr || rhs.size() != A_->rows() || !rhs.allFinite()) {
     return evidence;
@@ -436,13 +437,24 @@ SolveEvidence BasisFactor::solve_checked(const Eigen::VectorXd& rhs,
   last_solve_transpose_ = transpose;
   last_solve_refined_ = false;
   Eigen::VectorXd solution = solve_current_factor();
-  if (solution.allFinite() &&
-      backward_error_acceptable(rhs, solution, transpose)) {
-    evidence.solution = std::move(solution);
-    evidence.accepted = true;
-    evidence.residual = last_residual_;
-    evidence.error_limit = last_error_limit_;
-    return evidence;
+  if (solution.allFinite()) {
+    // Tiered posture: trust a finite raw LU solve without the O(nnz)
+    // backward-error residual audit.  Only reached on non-audit pivots when
+    // tier_checked_solves is enabled; the periodic full-primal-residual audit
+    // reinverts on accumulated drift and optimality is only declared after a
+    // fresh rebuild, so the published answer stays certified.
+    if (!verify) {
+      evidence.solution = std::move(solution);
+      evidence.accepted = true;
+      return evidence;
+    }
+    if (backward_error_acceptable(rhs, solution, transpose)) {
+      evidence.solution = std::move(solution);
+      evidence.accepted = true;
+      evidence.residual = last_residual_;
+      evidence.error_limit = last_error_limit_;
+      return evidence;
+    }
   }
 
   return refine_checked(rhs, solution, transpose);
@@ -542,13 +554,15 @@ Eigen::VectorXd BasisFactor::btran_for_update(
 }
 
 SolveEvidence BasisFactor::checked_ftran(const Eigen::VectorXd& rhs,
-                                         bool capture_update) const {
-  return solve_checked(rhs, false, capture_update);
+                                         bool capture_update,
+                                         bool verify) const {
+  return solve_checked(rhs, false, capture_update, verify);
 }
 
 SolveEvidence BasisFactor::checked_btran(const Eigen::VectorXd& rhs,
-                                         bool capture_update) const {
-  return solve_checked(rhs, true, capture_update);
+                                         bool capture_update,
+                                         bool verify) const {
+  return solve_checked(rhs, true, capture_update, verify);
 }
 
 SolveEvidence BasisFactor::refine_ftran(

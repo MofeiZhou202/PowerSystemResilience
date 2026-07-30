@@ -62,9 +62,11 @@ class BasisFactor final : public BasisOps {
   Eigen::VectorXd ftran_for_update(const Eigen::VectorXd& rhs) const;
   Eigen::VectorXd btran_for_update(const Eigen::VectorXd& rhs) const;
   SolveEvidence checked_ftran(const Eigen::VectorXd& rhs,
-                              bool capture_update = false) const;
+                              bool capture_update = false,
+                              bool verify = true) const;
   SolveEvidence checked_btran(const Eigen::VectorXd& rhs,
-                              bool capture_update = false) const;
+                              bool capture_update = false,
+                              bool verify = true) const;
   SolveEvidence refine_ftran(const Eigen::VectorXd& rhs,
                              const Eigen::VectorXd& solution) const;
   EdgeWeightEvidence compute_exact_edge_weights() const;
@@ -86,7 +88,8 @@ class BasisFactor final : public BasisOps {
 
  private:
   SolveEvidence solve_checked(const Eigen::VectorXd& rhs,
-                              bool transpose, bool capture_update) const;
+                              bool transpose, bool capture_update,
+                              bool verify = true) const;
   SolveEvidence refine_checked(const Eigen::VectorXd& rhs,
                                const Eigen::VectorXd& solution,
                                bool transpose) const;

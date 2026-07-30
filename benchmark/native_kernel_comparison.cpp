@@ -9,7 +9,9 @@
 ///
 ///   MILP level : native branch-and-cut with the native dual simplex as the
 ///                LP relaxation kernel (ExperimentalNative),
-///                optionally with the native IPM at the root
+///                optionally with the native IPM at the root; the *production*
+///                Native MILP solver (native B&C driving its LP relaxations
+///                through the HiGHS LP kernel, i.e. the StrictHiGHS contract);
 ///                vs. raw-API HiGHS MIP as the reference.
 ///   LP level   : native dual simplex (UMFPACK LU + eta updates, Ruiz
 ///                scaling) and native IPM-LP vs. HiGHS LP on
@@ -56,6 +58,7 @@
 #include "mipsolvers/engine/kernel/linear_algebra/hfactor_backend.hpp"
 #include "mipsolvers/engine/kernel/lp_kernel/dual_simplex.hpp"
 #include "mipsolvers/engine/problem_types.hpp"
+#include "mipsolvers/engine/solver/native/native_adapters.hpp"
 #include "mipsolvers/scuc/case_builder.hpp"
 
 using namespace mipsolvers;
@@ -314,6 +317,51 @@ MilpRow run_native_bc(const TestCase& tc, bool ipm_root, double time_limit_sec) 
     if (std::getenv("MIPSOLVERS_NKC_VERBOSE") != nullptr) opt.verbose = true;
     if (std::getenv("MIPSOLVERS_NKC_REQUIRE_TREE_CERT") != nullptr)
         opt.require_tree_exhaustion_certificate = true;
+
+    const auto t0 = std::chrono::steady_clock::now();
+    engine::BCResult res = engine::solve_milp_bc(mip, opt);
+    const auto t1 = std::chrono::steady_clock::now();
+
+    r.success    = res.stats.success;
+    r.nodes      = res.bc_stats.nodes_explored;
+    r.lp_solves  = res.bc_stats.lp_solves;
+    r.objective  = res.stats.objective;
+    r.best_bound = res.bc_stats.best_bound;
+    r.runtime_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    r.status     = res.bc_stats.status.empty() ? res.stats.status : res.bc_stats.status;
+    if (r.success) {
+        r.gap = rel_gap(r.objective, r.best_bound);
+        audit_milp(mip, res.x, r.max_row_viol, r.max_bound_viol, r.max_int_viol);
+    }
+    return r;
+}
+
+// Production Native MILP solver row: the native branch-and-cut orchestration
+// driving its LP relaxations through the vendored HiGHS LP kernel, configured
+// exactly as the dispatched StrictHiGHS production adapter
+// (make_strict_highs_problem_options -> lp_kernel_backend = HiGHS + the
+// auto-HiGHS root pipeline, ZI-round/shifting heuristics, forced presolve, and
+// symmetry detection, with the size-gated IPM-root policy).  Unlike the
+// natSimplex / natIPMroot rows above — which exercise the development-only
+// ExperimentalNative numerical stack — this row exercises the *production*
+// numerical path, for a direct comparison against raw-API HiGHS[direct].
+MilpRow run_native_bc_highs(const TestCase& tc, double time_limit_sec) {
+    MilpRow r;
+    r.case_name = tc.name;
+    r.solver    = "NativeBC[HiGHS]";
+
+    engine::MIPModel mip = build_scuc_mip(tc.inp);
+
+    engine::BCOptions opt;
+    opt.time_limit_sec = time_limit_sec;
+    opt.gap_tol        = 1e-3;
+    opt.verbose        = false;
+    // Apply the StrictHiGHS production contract (sets lp_kernel_backend = HiGHS
+    // and the full production root pipeline / heuristics), identical to the
+    // dispatched StrictHighsBranchAndCutAdapter and the solver_comparison
+    // "Native[StrictHiGHS]" row.
+    opt = engine::make_strict_highs_problem_options(mip, opt);
+    if (std::getenv("MIPSOLVERS_NKC_VERBOSE") != nullptr) opt.verbose = true;
 
     const auto t0 = std::chrono::steady_clock::now();
     engine::BCResult res = engine::solve_milp_bc(mip, opt);
@@ -1150,6 +1198,10 @@ int main(int argc, char** argv) {
             std::printf("  NativeBC[natIPMroot] done (%.1f ms)\n", rows.back().runtime_ms);
             std::fflush(stdout);
 
+            rows.push_back(run_native_bc_highs(tc, time_limit_sec));
+            std::printf("  NativeBC[HiGHS]      done (%.1f ms)\n", rows.back().runtime_ms);
+            std::fflush(stdout);
+
             rows.push_back(run_highs_mip(tc, time_limit_sec));
             std::printf("  HiGHS[direct]        done (%.1f ms)\n", rows.back().runtime_ms);
             std::fflush(stdout);
@@ -1161,9 +1213,11 @@ int main(int argc, char** argv) {
                 if (tc.name.find("118bus") != std::string::npos) continue;
                 const MilpRow* native = nullptr;
                 const MilpRow* highs = nullptr;
+                const MilpRow* native_highs = nullptr;
                 for (const auto& r : rows) {
                     if (r.case_name != tc.name) continue;
                     if (r.solver == "NativeBC[natSimplex]") native = &r;
+                    if (r.solver == "NativeBC[HiGHS]") native_highs = &r;
                     if (r.solver == "HiGHS[direct]") highs = &r;
                 }
                 if (!native || !native->success) {
@@ -1179,6 +1233,19 @@ int main(int argc, char** argv) {
                 if (rel > 1e-4) {
                     check_fail(tc.name + ": NativeBC/HiGHS optima differ (rel " +
                                std::to_string(rel) + ")");
+                }
+                // Production HiGHS-kernel Native B&C must agree with raw HiGHS.
+                if (!native_highs || !native_highs->success) {
+                    check_fail(tc.name + ": NativeBC[HiGHS] failed");
+                } else {
+                    const double rel_prod =
+                        std::abs(native_highs->objective - highs->objective) /
+                        std::max(1.0, std::abs(highs->objective));
+                    if (rel_prod > 1e-4) {
+                        check_fail(tc.name +
+                                   ": NativeBC[HiGHS]/HiGHS optima differ (rel " +
+                                   std::to_string(rel_prod) + ")");
+                    }
                 }
             }
         }

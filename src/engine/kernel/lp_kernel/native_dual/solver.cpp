@@ -256,7 +256,9 @@ class PivotStateGuard {
 // audit gate there).  Small enough to stay well inside the driver's reinversion
 // cadence (updates_since_rebuild reaches ~200 before a forced rebuild) so drift
 // is caught promptly, large enough to amortise the O(n)+O(nnz) audit cost.
-constexpr int kPivotAuditStride = 16;
+// Shared with detail::should_verify_checked_solve so the tiered per-solve
+// backward-error audit aligns to the same stride.
+constexpr int kPivotAuditStride = detail::kNativeDualAuditStride;
 
 MinorOutcome minor_iteration(State& state, Statistics& statistics) {
   ++state.pricing_epoch;
@@ -332,7 +334,8 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
                                               entering.col);
     const double _t_ft = g_ds_profile.enabled ? ds_clock() : 0.0;
     detail::SolveEvidence direction_solve =
-        state.factor->checked_ftran(column, true);
+        state.factor->checked_ftran(column, true,
+                                    detail::should_verify_checked_solve(state));
     if (g_ds_profile.enabled) g_ds_profile.ftran += ds_clock() - _t_ft;
     Eigen::VectorXd direction = std::move(direction_solve.solution);
     if (!direction_solve.accepted) {

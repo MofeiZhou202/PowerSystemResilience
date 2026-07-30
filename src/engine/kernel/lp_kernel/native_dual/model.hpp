@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstdlib>
 #include <map>
 #include <memory>
 #include <string>
@@ -96,6 +97,32 @@ struct State {
       taboo_changes;
   std::map<std::tuple<std::uint64_t, std::uint64_t, int>, int> taboo_rows;
 };
+
+// Cadence (in pivots since the last refactorization) of the periodic
+// full-primal-residual audit in minor_iteration.  The tiered per-solve
+// backward-error validation aligns to this stride so that on every audit pivot
+// the hot-path solves are also fully verified.
+inline constexpr int kNativeDualAuditStride = 16;
+
+// Whether the current pivot's hot-path checked solves (choose_leaving row_ep
+// BTRAN, pivotal-column FTRAN) should run the O(nnz) backward-error residual
+// audit.  Strict posture (tier_checked_solves == false) always verifies; the
+// tiered posture verifies only on the periodic audit stride, trusting the raw
+// LU solve in between (finiteness is still guarded and drift is caught by the
+// periodic full-residual audit + reinvert).  Env
+// MIPSOLVERS_DS_TIER_CHECKED_SOLVES (0 = force strict, 1 = force tiered)
+// overrides the option, mirroring MIPSOLVERS_DS_PARANOID.
+inline bool should_verify_checked_solve(const State& state) {
+  static const int env_override = [] {
+    const char* e = std::getenv("MIPSOLVERS_DS_TIER_CHECKED_SOLVES");
+    return e ? (e[0] == '0' ? 0 : 1) : -1;
+  }();
+  const bool tier =
+      env_override >= 0
+          ? (env_override != 0)
+          : (state.options != nullptr && state.options->tier_checked_solves);
+  return !tier || (state.updates_since_rebuild % kNativeDualAuditStride == 0);
+}
 
 struct Audit {
   bool ok{false};

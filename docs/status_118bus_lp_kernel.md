@@ -342,3 +342,97 @@ ordering the highest-value remaining change for the 118-bus campaign.
   `native_dual/{state,model}.hpp`, `native_dual_core.hpp`,
   `dual_simplex.cpp`, `solver_adapter.hpp`, `bc_relaxation.cpp`,
   `branch_and_cut.cpp`, `tests/test_dual_simplex.cpp`.
+
+---
+
+# Progress log — natIPMroot bound + basis-free heuristic + checked-solve tiering (2026-07-30)
+
+## 15. `NativeBC[natIPMroot]` fails at 8 s despite `natIPM` solving the root
+
+### 15.1 Diagnosis — the converged IPM bound was discarded (not an IPM problem)
+
+Verbose trace (`MIPSOLVERS_NKC_VERBOSE=1`, 118-bus, 8 s) showed the IPM is **not**
+the bottleneck:
+
+1. native presolve 35599→28210 rows / 26400→16301 cols (37 ms);
+2. `[BC_RELAX] IPM root: success=1 status='Optimal' iter=53 obj=123363.6143
+   time=1.781s` — the IPM **converges to the exact root LP bound in 1.8 s**
+   (faster than the 5.4 s standalone because it runs on the natively-presolved
+   model);
+3. because `use_simplex_lp_nodes=true` ⇒ `require_simplex_crossover=true`, a
+   **mandatory IPM→simplex crossover** runs, starts from a numerically bad
+   basis and times out (`unstable_pivot_rejections=3345`, `sxObj` regresses to
+   62730, `sxSfPr=inf`);
+4. the crossover-fail path falls through to a cold simplex, `lp_budget_exhausted()`
+   fires, and the relaxation returns `success=false` **without writing
+   `out.dual_bound`** → default `+inf` → `branch_and_cut` publishes
+   `bound=-inf` and the 2.1e11 warm-start garbage.
+
+The `ipm_root_dual_bound` variable (bc_relaxation.cpp) was declared for exactly
+this retention but **was never assigned** — the documented fix was never wired
+up.
+
+### 15.2 Fix (Option A, committed `36b96d7`)
+
+Retain the converged IPM root objective and publish it on the crossover-timeout
+fallthrough (and floor the cold-simplex certified bound with it). Result at 8 s:
+`NativeBC[natIPMroot]` now reports **bound = 123363.6140** (the exact root LP
+bound, was −inf) and the quality gate rejects the 2.1e11 incumbent — matching
+`natSimplex`'s honest reporting but with a ~2× stronger bound (`natSimplex`
+64785; HiGHS 137272 with root cuts). Validated: 5 LP/MILP suites, `--check`
+0 must-pass, small cases exact.
+
+### 15.3 Measured dead-ends for a 118-bus incumbent (all reverted)
+
+- **IPM crash-basis crossover** (force the optimal-partition crash basis): 6/39-bus
+  converge in 12–349 pivots, but 118-bus thrashes worse — `unstable_pivot_
+  rejections=16955`, objective regresses 123363→77243. Severe SCUC degeneracy
+  makes the optimal-partition basis near-singular.
+- **Skip crossover → basis-free heuristics**: reaches the heuristics (lp_solves
+  1→3) but overruns the budget (12.5 s @8 s) and finds no incumbent. Every
+  incumbent-capable heuristic (`feasibility_pump`, `prog_round`, `dive`, `lns`,
+  `low_fractionality_rens`) is gated off for large roots; native RENS is only
+  enabled for the vendored-HiGHS kernel.
+- **Force native low-fractionality RENS @30 s**: the IPM root is only 216/3882
+  fractional (ideal for RENS), and RENS runs and fixes 1278 vars — but its
+  residual sub-MILP LP is solved by the native dual simplex, which hits its
+  5000-iteration limit with `unstable_pivot_rejections=9651`. No incumbent.
+
+**Unified conclusion:** every path to an integer-feasible 118-bus point (root LP,
+crossover, RENS sub-solve) needs the native dual simplex to solve a variant of
+the degenerate SCUC LP, and it can't (~5000 iters, ~9k unstable rejections
+everywhere). The IPM solves the LP but yields no integer-usable basis, and
+IPM-at-all-nodes is a documented dead end. This is the **LP-kernel gap**, not a
+heuristic/orchestration gap.
+
+## 16. Dual-simplex stability — the anti-degeneracy is already advanced
+
+`unstable_pivot_rejections` are per-*candidate* skips (`stability_blocked_rows=0`),
+not stalls: the Harris two-pass BFRT still finds a stable pivot every iteration
+(pass 2 picks the largest-α pivot), backed by DSE pricing, taboo anti-cycling,
+and cost-shifting. The barrier is pivot **count × per-pivot cost** (§4/§5), not
+stability. There is no targeted stability fix to make.
+
+## 17. Checked-solve tiering (opt-in, default off)
+
+The single largest recoverable per-pivot cost is the checked-solve contract:
+every FTRAN/BTRAN runs an O(nnz) backward-error residual (`residual_norm`) on
+every solve. New `SimplexOptions::tier_checked_solves` (default **false**; env
+`MIPSOLVERS_DS_TIER_CHECKED_SOLVES=0/1`) tiers the two hot per-pivot solves
+(`choose_leaving` row_ep BTRAN, pivotal-column FTRAN) so the residual audit runs
+only on the periodic audit stride (`kNativeDualAuditStride=16`), trusting a
+finite raw LU solve in between. Soundness is preserved: the periodic full
+primal-residual audit reinverts on drift, `certify_interrupted_dual_bound` and
+`reconstruct` stay strict, and optimality is only declared after a fresh rebuild.
+
+**Measured** (118-bus SF root, ~6.9 s window): pivots 4756→5189 (**+9.1%**),
+`leaving` 0.214→0.112 ms/pivot (−48%), `ftran` 0.088→0.054 (−39%); the certified
+8 s bound is *tighter* (64785→67642). It is +9 %, not ~1.4×, because §4's
+"25–30 %" also counted the periodic `validBlock` audit that is deliberately kept
+as the drift backstop. It does **not** cross HiGHS on 118-bus (needs *fewer*
+pivots, §5). Validated: 5 suites + `--check` 0 must-pass under
+`MIPSOLVERS_DS_TIER_CHECKED_SOLVES=1`; default path byte-identical.
+
+Files (uncommitted): `dual_simplex.hpp`, `native_dual/{model,factor}.hpp`,
+`native_dual/{factor,pricing,solver}.cpp`.
+
