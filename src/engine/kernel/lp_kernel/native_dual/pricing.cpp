@@ -568,28 +568,45 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
     begin = end;
   }
   long double rhs_projection = 0.0L;
+  long double rhs_projection_abs = 0.0L;
   for (std::size_t k = 0; k < transaction.bfrt_rhs.index.size(); ++k) {
     const int row = transaction.bfrt_rhs.index[k];
-    rhs_projection +=
+    const long double term =
         static_cast<long double>(leaving.row_ep.at(row)) *
         static_cast<long double>(transaction.bfrt_rhs.value[k]);
+    rhs_projection += term;
+    rhs_projection_abs += std::abs(term);
   }
   const long double materialized_coverage =
       static_cast<long double>(leaving.side) * rhs_projection;
-  if (!(materialized_coverage >= 0.0L) ||
-      !(materialized_coverage <=
-        static_cast<long double>(leaving.violation)) ||
-      !std::isfinite(materialized_coverage)) {
+  // The projection and the stored violation are computed by different
+  // summation orders, so a flip set that exactly covers the violation can
+  // land a few ulps outside [0, violation] (observed on 118-bus SCUC:
+  // coverage exceeding violation by ~5e-16 relative turned a legal
+  // exact-cover pivot into a terminal failure). Accept within the
+  // projection's own rounding envelope, then clamp so the downstream
+  // entering step (violation - coverage) stays exactly >= 0; the
+  // exact-cover clamp lands on the established covered==violation path.
+  const long double violation_ld =
+      static_cast<long double>(leaving.violation);
+  const long double coverage_slack =
+      (static_cast<long double>(transaction.bfrt_rhs.index.size()) + 256.0L) *
+      static_cast<long double>(std::numeric_limits<double>::epsilon()) *
+      std::max({rhs_projection_abs, std::abs(violation_ld), 1.0L});
+  if (!std::isfinite(materialized_coverage) ||
+      !(materialized_coverage >= -coverage_slack) ||
+      !(materialized_coverage <= violation_ld + coverage_slack)) {
     std::ostringstream message;
     message << std::setprecision(18)
             << "materialized BFRT flips do not leave a valid entering step"
             << " (coverage=" << materialized_coverage
-            << ", violation=" << leaving.violation << ')';
+            << ", violation=" << leaving.violation
+            << ", slack=" << coverage_slack << ')';
     failure = message.str();
     return false;
   }
-  transaction.covered_violation =
-      static_cast<double>(materialized_coverage);
+  transaction.covered_violation = static_cast<double>(
+      std::min(std::max(materialized_coverage, 0.0L), violation_ld));
   return true;
 }
 

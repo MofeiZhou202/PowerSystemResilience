@@ -2243,6 +2243,25 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
         out.dual_bound = ipm_res.stats.objective;
         return out;
       }
+      const int ipm_row_count =
+          static_cast<int>(lp.A.rows() + lp.Aeq.rows());
+      const bool short_budget_large_crossover =
+          require_simplex_crossover && ipm_row_count > 10000 &&
+          lp_wall_budget > 0.0 && lp_wall_budget <= 10.0;
+      if (short_budget_large_crossover &&
+          lp_solution_feasible(lp, ipm_res, 1e-6)) {
+        if (opt.verbose) {
+          std::fprintf(stderr,
+                       "[BC_RELAX] short-budget large root (rows=%d, "
+                       "budget=%.2fs) — bypassing crossover and routing "
+                       "subsequent LPs to IPM\n",
+                       ipm_row_count, lp_wall_budget);
+        }
+        out.primal = ipm_res;
+        out.dual_bound = ipm_res.stats.objective;
+        out.requires_ipm_nodes = true;
+        return out;
+      }
       StandardFormLP sf = build_standard_form_lp(lp);
       auto relax_t_sf = std::chrono::steady_clock::now();
       ruiz_scale_standard_form(sf);
@@ -2608,6 +2627,13 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
 
         SimplexOptions sx_opt;
         sx_opt.max_iter = std::max(opt.max_lp_iter * 10, 2000);
+        // A rank-valid crash basis is not necessarily close to a feasible
+        // vertex. On large roots, bound the crossover experiment so a poor
+        // Phase-I trajectory cannot consume the entire LP budget before the
+        // already-converged IPM result is handed back to B&C.
+        if (sf_m > 10000) {
+          sx_opt.max_iter = std::min(sx_opt.max_iter, 1000);
+        }
         sx_opt.feasibility_tol = std::max(1e-10, opt.lp_tol * 0.1);
         sx_opt.optimality_tol = std::max(1e-10, opt.lp_tol * 0.1);
         sx_opt.verbose = false;
@@ -2705,7 +2731,7 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
         trace_ipm_handoff_audit("crossover_reject", lp, ipm_res, &sf, simplex.get());
       }
       if (opt.verbose) {
-        fprintf(stderr, "[BC_RELAX] IPM→simplex crossover FAILED: success=%d status='%s' — falling through to simplex\n",
+        fprintf(stderr, "[BC_RELAX] IPM→simplex crossover FAILED: success=%d status='%s'\n",
                 simplex->result.stats.success ? 1 : 0,
                 simplex->result.stats.status.c_str());
         // Diagnostic: find worst violation in BOTH scaled SF and original space.
@@ -2741,16 +2767,19 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
                   worst_bnd, worst_ineq, worst_eq);
         }
       }
-      // Legacy IPM-only fallback only. When simplex nodes are enabled, keep
-      // the strict basis contract and continue to the simplex path below.
-      if (!require_simplex_crossover &&
-          lp_solution_feasible(lp, ipm_res, 1e-6)) {
+      // The converged IPM point and bound remain valid even if crossover did
+      // not reach a vertex. Return them explicitly and make the caller switch
+      // the downstream LP mode; falling through here would launch an expensive
+      // cold simplex from scratch and discard most of the root budget.
+      if (lp_solution_feasible(lp, ipm_res, 1e-6)) {
         if (opt.verbose) {
-          fprintf(stderr, "[BC_RELAX] crossover failed — using raw IPM result (no basis)\n");
+          fprintf(stderr,
+                  "[BC_RELAX] crossover failed — using raw IPM result and "
+                  "routing subsequent LPs to IPM\n");
         }
         out.primal = ipm_res;
         out.dual_bound = ipm_res.stats.objective;
-        // No simplex, no basis_hint — tree exploration uses IPMDiver.
+        out.requires_ipm_nodes = require_simplex_crossover;
         return out;
       }
     }

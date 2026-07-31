@@ -322,6 +322,7 @@ PaPILOPresolveResult papilo_presolve_mip(const LPModel& lp, bool verbose,
   const int red_nrows = problem.getNRows();
   const auto& matrix = problem.getConstraintMatrix();
   const auto& obj = problem.getObjective();
+  result.objective_offset = obj.offset;
   const auto& col_flags = problem.getColFlags();
   const auto& row_flags = problem.getRowFlags();
   const auto& lbs = problem.getLowerBounds();

@@ -65,6 +65,9 @@ struct PaPILOPresolveResult {
   /// Presolve statistics
   int orig_rows{0}, orig_cols{0}, orig_nnz{0};
   int reduced_rows{0}, reduced_cols{0}, reduced_nnz{0};
+  /// Constant objective contribution introduced by eliminated columns, in
+  /// the solver's internal minimization convention.
+  double objective_offset{0.0};
   /// Number of active PaPILO rows before the native LPModel expands finite
   /// lower/upper row sides into separate <= rows.
   int reduced_compact_rows{0};

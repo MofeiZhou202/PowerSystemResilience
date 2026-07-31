@@ -734,6 +734,10 @@ struct LPRelaxationResult {
   std::shared_ptr<SimplexBasis> basis_hint;
   std::shared_ptr<SimplexResult> simplex;
   Eigen::VectorXd row_duals;
+  // The LP is solved and certified, but a requested IPM-to-simplex crossover
+  // did not produce a usable basis. Callers must route subsequent LPs to IPM
+  // instead of silently cold-starting simplex from this basis-free result.
+  bool requires_ipm_nodes{false};
 };
 
 /// @brief HiGHS-aligned persistent LP/basis state for the root B&C phase.

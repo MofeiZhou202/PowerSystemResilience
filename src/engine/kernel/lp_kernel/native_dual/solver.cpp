@@ -405,16 +405,27 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
     const double leaving_bound =
         leaving.side < 0 ? state.bounds.lower[leaving_col]
                          : state.bounds.upper[leaving_col];
-    double remaining_delta = state.x_basic[leaving.row] -
-                             bfrt_delta.at(leaving.row) - leaving_bound;
+    const double bfrt_delta_at_row = bfrt_delta.at(leaving.row);
+    double remaining_delta =
+        state.x_basic[leaving.row] - bfrt_delta_at_row - leaving_bound;
     if (transaction.covered_violation == leaving.violation) {
       remaining_delta = 0.0;
     }
+    // The projected coverage (row_ep dot) and the FTRAN image agree only to
+    // rounding, so a flip set that near-exactly covers the violation leaves a
+    // remaining step whose sign is noise. Treat wrong-signed noise inside the
+    // rounding envelope as the degenerate zero step; a disagreement beyond it
+    // is still a real failure.
+    const double remaining_slack =
+        1024.0 * std::numeric_limits<double>::epsilon() *
+        std::max({1.0, std::abs(state.x_basic[leaving.row]),
+                  std::abs(bfrt_delta_at_row), std::abs(leaving_bound)});
     if (!std::isfinite(remaining_delta) ||
-        leaving.side * remaining_delta < 0.0) {
+        leaving.side * remaining_delta < -remaining_slack) {
       return numerical_trouble(
           "packed BFRT FTRAN disagrees with the leaving-row change");
     }
+    if (leaving.side * remaining_delta < 0.0) remaining_delta = 0.0;
 
     std::vector<detail::EdgeWeightChange>& edge_weight_changes =
         g_ds_scratch.edge_weight_changes;

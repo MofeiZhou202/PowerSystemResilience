@@ -1,7 +1,9 @@
 #pragma once
 
 #include <memory>
+#include <limits>
 #include <string>
+#include <vector>
 
 #include <Eigen/Core>
 #include <Eigen/Sparse>
@@ -48,6 +50,19 @@ struct IPMLPOptions {
 /// Forward declaration for Apple Accelerate sparse Cholesky cache.
 struct AccelSparseCache;
 
+/// One structure-preserving node-domain change for a cached IPM batch.
+/// Bounds are intersected with the shared parent domain.
+struct IPMNodeBoundChange {
+  int variable{-1};
+  double lower_bound{-std::numeric_limits<double>::infinity()};
+  double upper_bound{std::numeric_limits<double>::infinity()};
+};
+
+struct IPMNodeBatchEntry {
+  bool attempted{false};
+  SolveResult result;
+};
+
 /// Native high-performance IPM for LP.
 ///
 /// Converts general LP (inequality + equality + box) to standard form
@@ -82,6 +97,14 @@ class NativeIPMLPAdapter final : public SolverAdapter {
                             const Eigen::VectorXd& node_ub,
                             const Eigen::VectorXd& x0) const;
 
+  /// Solve against prepared structure while selecting the linear-system path
+  /// that matches it. Dense-coupling models use the augmented KKT kernel;
+  /// narrow/sparse-normal models use the regular cached node path.
+  SolveResult solve_structure_aware_node_lp(
+      const Eigen::VectorXd& node_lb,
+      const Eigen::VectorXd& node_ub,
+      const Eigen::VectorXd& x0) const;
+
   /// Prepare cached solver state for repeated node solves on the same LP.
   /// Caches CSR, scatter maps, symbolic factorization — only bounds change.
   void prepare_for_node_solves(const LPModel& base_lp);
@@ -92,10 +115,24 @@ class NativeIPMLPAdapter final : public SolverAdapter {
                                     const Eigen::VectorXd& node_ub,
                                     const Eigen::VectorXd& x0) const;
 
+  /// Solve one-variable bound changes over a shared parent domain. The batch
+  /// reuses one bounds buffer and the prepared structural cache. Its wall
+  /// budget is divided over entries that have not yet been attempted.
+  std::vector<IPMNodeBatchEntry> solve_cached_bound_change_batch(
+      const Eigen::VectorXd& parent_lb,
+      const Eigen::VectorXd& parent_ub,
+      const Eigen::VectorXd& x0,
+      const std::vector<IPMNodeBoundChange>& changes,
+      double batch_time_limit_sec);
+
   /// Update the cached cost vector (for feasibility pump objective changes).
   /// new_c is in the original LP convention (sense_sign applied internally).
   /// Length must be n_orig. Slack costs remain 0.
   void update_cached_cost(const Eigen::VectorXd& new_c);
+
+  /// Set the wall-clock limit applied independently to subsequent solves.
+  /// Updating this does not invalidate cached structural state.
+  void set_solve_time_limit(double time_limit_sec);
 
  private:
   /// Core solve with an explicit Ruiz round count.  The public entry points

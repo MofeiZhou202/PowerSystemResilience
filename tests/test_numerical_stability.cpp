@@ -257,6 +257,46 @@ TEST_CASE("Cached node LP matches fresh solve with Ruiz scaling on",
   }
 }
 
+TEST_CASE("Cached IPM bound-change batch matches independent node solves",
+          "[numerical][ipm][cached][batch]") {
+  LPModel lp = make_scaled_lp(1e3, 1e-3, 1e-2, 1e2);
+  IPMLPOptions opt;
+  opt.ruiz_rounds = 10;
+  NativeIPMLPAdapter batch_solver(opt);
+  batch_solver.prepare_for_node_solves(lp);
+
+  Eigen::VectorXd parent_lb(2), parent_ub(2);
+  parent_lb << 0.0, 0.0;
+  parent_ub << 1e20, 1e20;
+  std::vector<IPMNodeBoundChange> changes(2);
+  changes[0].variable = 0;
+  changes[0].upper_bound = 150.0;
+  changes[1].variable = 1;
+  changes[1].upper_bound = 0.03;
+
+  auto batch = batch_solver.solve_cached_bound_change_batch(
+      parent_lb, parent_ub, Eigen::VectorXd(), changes, 2.0);
+  REQUIRE(batch.size() == 2);
+
+  for (std::size_t i = 0; i < batch.size(); ++i) {
+    INFO("batch entry " << i << " status=" << batch[i].result.stats.status);
+    REQUIRE(batch[i].attempted);
+    REQUIRE(batch[i].result.stats.success);
+
+    LPModel node_lp = lp;
+    const auto& change = changes[i];
+    node_lp.vars[change.variable].lb =
+        std::max(node_lp.vars[change.variable].lb, change.lower_bound);
+    node_lp.vars[change.variable].ub =
+        std::min(node_lp.vars[change.variable].ub, change.upper_bound);
+    NativeIPMLPAdapter fresh_solver(opt);
+    const SolveResult fresh = fresh_solver.solve_lp(node_lp);
+    REQUIRE(fresh.stats.success);
+    CHECK(batch[i].result.stats.objective ==
+          Approx(fresh.stats.objective).margin(1e-6));
+  }
+}
+
 // ─── CHOLMOD backend wrapper ────────────────────────────────────────────────
 // Direct test of the vendored CHOLMOD int64 sparse Cholesky: analyze once,
 // factorize per numerical refresh, solve.  Also covers the not-PD failure

@@ -71,8 +71,15 @@ struct AccelSparseCache {
   int cached_nnz = 0;
   bool valid = false;
 
+  SparseOpaqueSymbolicFactorization augmented_symbolic{};
+  std::vector<long> augmented_col_starts;
+  int augmented_cached_dim = 0;
+  int augmented_cached_nnz = 0;
+  bool augmented_valid = false;
+
   ~AccelSparseCache() {
     if (valid) SparseCleanup(symbolic);
+    if (augmented_valid) SparseCleanup(augmented_symbolic);
   }
 #endif
 };
@@ -363,6 +370,10 @@ RuizScaling ruiz_equilibrate(const Eigen::SparseMatrix<double>& A,
 NativeIPMLPAdapter::NativeIPMLPAdapter(IPMLPOptions opt)
     : opt_(std::move(opt)), accel_cache_(std::make_unique<AccelSparseCache>()) {}
 NativeIPMLPAdapter::~NativeIPMLPAdapter() = default;
+void NativeIPMLPAdapter::set_solve_time_limit(double time_limit_sec) {
+  opt_.time_limit_sec =
+      std::isfinite(time_limit_sec) ? std::max(0.0, time_limit_sec) : 0.0;
+}
 std::string NativeIPMLPAdapter::name() const { return "NativeIPMLP"; }
 bool NativeIPMLPAdapter::supports(ProblemClass cls) const {
   return cls == ProblemClass::LP;
@@ -1298,6 +1309,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
   SparseOpaqueSymbolicFactorization aug_accel_symbolic{};
   SparseOpaqueFactorization_Double aug_accel_numeric{};
   bool aug_accel_symbolic_valid = false;
+  bool aug_accel_symbolic_cached = false;
   bool aug_accel_numeric_valid = false;
 #endif
   if (use_augmented) {
@@ -1364,18 +1376,38 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
       // Apple Sparse symbolic factor of the symmetric (lower-triangle stored)
       // quasidefinite K, unpivoted LDLᵀ (multithreaded on Apple Silicon).
       aug_accel_colstarts.assign(aug_ko.begin(), aug_ko.end());
-      SparseMatrixStructure s{};
-      s.rowCount = kdim;
-      s.columnCount = kdim;
-      s.columnStarts = aug_accel_colstarts.data();
-      s.rowIndices = aug_ki.data();
-      s.attributes.transpose = false;
-      s.attributes.triangle = SparseLowerTriangle;
-      s.attributes.kind = SparseSymmetric;
-      s.attributes._reserved = 0;
-      s.attributes._allocatedBySparse = false;
-      s.blockSize = 1;
-      aug_accel_symbolic = SparseFactor(SparseFactorizationLDLTUnpivoted, s);
+      const int aug_nnz = static_cast<int>(aug_ki.size());
+      if (accel_cache_->augmented_valid &&
+          accel_cache_->augmented_cached_dim == kdim &&
+          accel_cache_->augmented_cached_nnz == aug_nnz) {
+        aug_accel_symbolic = accel_cache_->augmented_symbolic;
+        aug_accel_symbolic_cached = true;
+      } else {
+        SparseMatrixStructure s{};
+        s.rowCount = kdim;
+        s.columnCount = kdim;
+        s.columnStarts = aug_accel_colstarts.data();
+        s.rowIndices = aug_ki.data();
+        s.attributes.transpose = false;
+        s.attributes.triangle = SparseLowerTriangle;
+        s.attributes.kind = SparseSymmetric;
+        s.attributes._reserved = 0;
+        s.attributes._allocatedBySparse = false;
+        s.blockSize = 1;
+        aug_accel_symbolic =
+            SparseFactor(SparseFactorizationLDLTUnpivoted, s);
+        if (aug_accel_symbolic.status == SparseStatusOK) {
+          if (accel_cache_->augmented_valid) {
+            SparseCleanup(accel_cache_->augmented_symbolic);
+          }
+          accel_cache_->augmented_symbolic = aug_accel_symbolic;
+          accel_cache_->augmented_col_starts = aug_accel_colstarts;
+          accel_cache_->augmented_cached_dim = kdim;
+          accel_cache_->augmented_cached_nnz = aug_nnz;
+          accel_cache_->augmented_valid = true;
+          aug_accel_symbolic_cached = true;
+        }
+      }
       aug_accel_symbolic_valid = true;
       aug_use_accel = (aug_accel_symbolic.status == SparseStatusOK);
     }
@@ -2007,7 +2039,9 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
 #if MIPSOLVERS_USE_ACCELERATE
   // Release the Accelerate augmented-KKT factorizations (numeric + symbolic).
   if (aug_accel_numeric_valid) SparseCleanup(aug_accel_numeric);
-  if (aug_accel_symbolic_valid) SparseCleanup(aug_accel_symbolic);
+  if (aug_accel_symbolic_valid && !aug_accel_symbolic_cached) {
+    SparseCleanup(aug_accel_symbolic);
+  }
 #endif
 
   // === Extract solution ===
@@ -2588,6 +2622,39 @@ void NativeIPMLPAdapter::update_cached_cost(const Eigen::VectorXd& new_c) {
     cs.c[j] = cs.sense_sign * new_c[j] *
               (cs.scaling_active ? cs.scal_dc[static_cast<size_t>(j)] : 1.0);
   // Slack costs (indices n_orig..nn-1) remain 0.
+}
+
+SolveResult NativeIPMLPAdapter::solve_structure_aware_node_lp(
+    const Eigen::VectorXd& node_lb,
+    const Eigen::VectorXd& node_ub,
+    const Eigen::VectorXd& x0) const {
+  if (!cached_state_) {
+    SolveResult out;
+    out.stats.solver_name = name();
+    out.stats.status = "NoCachedState";
+    return out;
+  }
+  const bool use_augmented_direct =
+      !cached_state_->use_banded && cached_state_->m > 256 &&
+      cached_state_->bandwidth > cached_state_->m / 4;
+  if (!use_augmented_direct) {
+    return solve_cached_node_lp(node_lb, node_ub, x0);
+  }
+
+  LPModel node_lp = cached_state_->base_lp_copy;
+  const int n = cached_state_->n_orig;
+  if (node_lb.size() != n || node_ub.size() != n ||
+      (x0.size() != 0 && x0.size() != n)) {
+    SolveResult out;
+    out.stats.solver_name = name();
+    out.stats.status = "Invalid structure-aware IPM node domain";
+    return out;
+  }
+  for (int j = 0; j < n; ++j) {
+    node_lp.vars[static_cast<std::size_t>(j)].lb = node_lb[j];
+    node_lp.vars[static_cast<std::size_t>(j)].ub = node_ub[j];
+  }
+  return solve_lp_impl(node_lp, x0, opt_.ruiz_rounds);
 }
 
 SolveResult NativeIPMLPAdapter::solve_cached_node_lp(
@@ -3320,6 +3387,111 @@ SolveResult NativeIPMLPAdapter::solve_cached_node_lp(
             out.stats.iterations, (int)out.stats.success,
             out.stats.runtime_sec * 1000.0, out.stats.status.c_str());
   return out;
+}
+
+std::vector<IPMNodeBatchEntry>
+NativeIPMLPAdapter::solve_cached_bound_change_batch(
+    const Eigen::VectorXd& parent_lb,
+    const Eigen::VectorXd& parent_ub,
+    const Eigen::VectorXd& x0,
+    const std::vector<IPMNodeBoundChange>& changes,
+    double batch_time_limit_sec) {
+  std::vector<IPMNodeBatchEntry> entries(changes.size());
+  if (changes.empty()) return entries;
+
+  const int n = cached_state_ ? cached_state_->n_orig : 0;
+  if (n <= 0 || parent_lb.size() != n || parent_ub.size() != n ||
+      (x0.size() != 0 && x0.size() != n)) {
+    for (auto& entry : entries) {
+      entry.result.stats.solver_name = name();
+      entry.result.stats.status = "Invalid cached IPM batch domain";
+    }
+    return entries;
+  }
+
+  Eigen::VectorXd node_lb = parent_lb;
+  Eigen::VectorXd node_ub = parent_ub;
+  const bool use_augmented_direct =
+      !cached_state_->use_banded && cached_state_->m > 256 &&
+      cached_state_->bandwidth > cached_state_->m / 4;
+  LPModel direct_lp;
+  if (use_augmented_direct) {
+    direct_lp = cached_state_->base_lp_copy;
+    for (int j = 0; j < n; ++j) {
+      direct_lp.vars[static_cast<std::size_t>(j)].lb = parent_lb[j];
+      direct_lp.vars[static_cast<std::size_t>(j)].ub = parent_ub[j];
+    }
+  }
+  const double previous_solve_limit = opt_.time_limit_sec;
+  const bool has_batch_deadline =
+      std::isfinite(batch_time_limit_sec) && batch_time_limit_sec > 0.0;
+  const auto batch_start = std::chrono::steady_clock::now();
+  int previous_var = -1;
+
+  for (std::size_t i = 0; i < changes.size(); ++i) {
+    if (previous_var >= 0) {
+      node_lb[previous_var] = parent_lb[previous_var];
+      node_ub[previous_var] = parent_ub[previous_var];
+      if (use_augmented_direct) {
+        direct_lp.vars[static_cast<std::size_t>(previous_var)].lb =
+            parent_lb[previous_var];
+        direct_lp.vars[static_cast<std::size_t>(previous_var)].ub =
+            parent_ub[previous_var];
+      }
+      previous_var = -1;
+    }
+
+    auto& entry = entries[i];
+    entry.result.stats.solver_name = name();
+    const auto& change = changes[i];
+    if (change.variable < 0 || change.variable >= n ||
+        std::isnan(parent_lb[change.variable]) ||
+        std::isnan(parent_ub[change.variable]) ||
+        parent_lb[change.variable] > parent_ub[change.variable]) {
+      entry.result.stats.status = "Invalid cached IPM batch bound change";
+      continue;
+    }
+
+    node_lb[change.variable] =
+        std::max(parent_lb[change.variable], change.lower_bound);
+    node_ub[change.variable] =
+        std::min(parent_ub[change.variable], change.upper_bound);
+    previous_var = change.variable;
+    if (node_lb[change.variable] > node_ub[change.variable]) {
+      entry.result.stats.status = "Infeasible (batch bounds)";
+      continue;
+    }
+    if (use_augmented_direct) {
+      direct_lp.vars[static_cast<std::size_t>(change.variable)].lb =
+          node_lb[change.variable];
+      direct_lp.vars[static_cast<std::size_t>(change.variable)].ub =
+          node_ub[change.variable];
+    }
+
+    double solve_limit = previous_solve_limit;
+    if (has_batch_deadline) {
+      const double elapsed = std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - batch_start).count();
+      const double remaining = batch_time_limit_sec - elapsed;
+      if (remaining <= 0.001) {
+        entry.result.stats.status = "Time limit (batch not started)";
+        continue;
+      }
+      solve_limit = remaining /
+          static_cast<double>(std::max<std::size_t>(1, changes.size() - i));
+    }
+
+    opt_.time_limit_sec = has_batch_deadline
+        ? std::max(0.001, solve_limit)
+        : previous_solve_limit;
+    entry.attempted = true;
+    entry.result = use_augmented_direct
+        ? solve_lp_impl(direct_lp, x0, opt_.ruiz_rounds)
+        : solve_cached_node_lp(node_lb, node_ub, x0);
+  }
+
+  opt_.time_limit_sec = previous_solve_limit;
+  return entries;
 }
 
 }  // namespace mipsolvers::engine

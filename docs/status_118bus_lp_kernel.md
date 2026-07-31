@@ -1381,3 +1381,176 @@ Files touched this round: `hfactor_backend.cpp` (single-build fast path,
 no eager lookup, fused finiteness), `native_dual/model.hpp` (lazy
 `IndexedVector` lookup), `native_dual/factor.cpp` (redundant `finite()`
 removed), `native_dual/primal.cpp` (`direction_value` capture).
+
+---
+
+# Progress log — bounded crossover and root re-solve removal (2026-07-31)
+
+## 28.1 Explicit basis-free IPM handoff
+
+The sparse recovered basis remained rank-valid but still exhausted its
+5,000-pivot primal Phase-I limit. The failure then silently fell through to a
+cold simplex and consumed the rest of the 8 s root budget even though IPM had
+already converged to the exact `123363.614` bound.
+
+`LPRelaxationResult` now carries an explicit `requires_ipm_nodes` transition.
+After a bounded crossover failure, `solve_lp_relaxation` returns the audited
+IPM point and bound; the B&C caller disables simplex-node dispatch and enables
+IPM-node dispatch before any later LP solve. Large roots with at most 10 s of
+LP budget bypass crossover up front, while longer runs retain a capped
+1,000-pivot experiment. A failed experiment no longer launches cold simplex.
+
+## 28.2 Redundant second root solve removed
+
+The `2.104e11` warm start was rejected by the incumbent quality gate only at
+publication time, after it had already been registered as an objective cutoff
+and used for root-domain learning. Cutoff registration now applies the same
+quality gate. On IEEE-118 this removes all 3,299 artificial root bound
+tightenings and therefore the second full IPM solve.
+
+For legitimate propagation tightenings, the root path now audits the existing
+optimal point against every tightened bound. If it remains feasible, the
+unchanged constraints/objective plus the retained dual bound certify the same
+optimum and the result is reused. A violating point still takes the existing
+re-solve path, with a refreshed remaining-time budget.
+
+## 28.3 Measured result and validation
+
+At the 8 s limit, native IPM now performs one root relaxation, retains the
+exact `123363.614` bound, performs no crossover/cold-simplex cascade, and does
+no propagation re-solve. Measured end-to-end rows are `7.77-7.96 s` (previously
+the root LP alone consumed the 8 s budget); the remaining time is spent in
+root heuristics and probing.
+
+- `test_milp_solver`: 131/131 assertions.
+- `native_kernel_comparison --check --time-limit 8`: 0 must-pass failures.
+- `native_kernel_comparison --milp118-native-ipm --time-limit 8`: one root
+  relaxation, exact root bound, total 7.77-7.96 s.
+
+---
+
+# Progress log - basis-free root branching and IPM deadlines (2026-07-31)
+
+## 29.1 Remove basis-dependent work after the IPM handoff
+
+Simplex diving is useful as a sequence of warm bound-change reoptimizations;
+without `root.basis_hint`, each dive LP instead pays for a new Phase-I solve.
+Large basis-free roots now skip that path. Under a short budget (at most 10 s),
+they also skip standalone split-bound probing. Those probes produced no
+fixings or bound lift on IEEE-118 and duplicated the same two domains needed
+by the first real branch.
+
+The root now enters the tree immediately. Reliability probing is disabled for
+this short-budget case, and the down and up domains of the selected branch are
+processed as the actual children. When longer-budget IPM reliability probes
+are used, successful selected-direction results are retained and consumed by
+child processing if domain closure has not changed their bounds. The usual
+queue logic retains both valid solved children.
+
+## 29.2 Deadline-aware IPM solves
+
+`NativeIPMLPAdapter` now exposes a per-solve wall-clock limit that does not
+invalidate its cached matrix structure. Root probes divide their local
+remaining budget across unattempted directions. The first real down/up child
+solves divide the global remaining budget fairly, and later node, fallback,
+cut, proof, pool-separation, and repair IPM solves receive the current global
+remainder. A child that reaches this deadline records `Time limit reached`
+instead of allowing an empty frontier to be reported as search exhaustion.
+
+Short-budget IPM roots also keep the remaining post-presolve budget instead of
+reserving half of the original limit for a much larger unpresolved fallback.
+The redundant background analytic-centre IPM is disabled in this mode. A 10%
+(at most 1 s) finalization reserve prevents domain closure or a child solve
+from being admitted when it cannot finish before the global deadline.
+
+This follows two scheduling principles: speculative solves should be admitted
+only when their information cannot be obtained from mandatory tree solves,
+and every iterative solve needs a local deadline derived from the enclosing
+phase deadline. It reduces redundant factorization/KKT work without changing
+the branch-and-bound proof contract.
+
+## 29.3 Measured result and remaining work
+
+On IEEE-118 with an 8 s limit, root diving performs zero LP solves and
+standalone probing is skipped. A clean build performs one root IPM, retains
+the exact `123363.6142` root bound, and terminates correctly on its deadline
+in 7.32 solver-seconds. The admission gate does not start the first branch in
+this run because less than the finalization reserve remains. With a longer
+budget, the direct branch path solves the actual down/up children, shares the
+remaining deadline between them, and retains both valid results.
+
+PaPILO's constant objective contribution from eliminated columns is now
+preserved and added at result reporting. The reduced root objective is
+`121383.6142`; the eliminated-column offset restores the original-space bound
+`123363.6142`. This constant does not affect branch decisions inside the
+reduced search.
+
+- `test_milp_solver`: 131/131 assertions.
+- `native_kernel_comparison --check --time-limit 8`: 0 must-pass failures.
+- `native_kernel_comparison --milp118-native-ipm --time-limit 8`: 0 nodes,
+  1 LP solve, 7.32 s, exact root bound, time-limit status.
+
+Batched structure-aware IPM diving remains the next larger step. It should
+group sibling/fixing domains that share the same constraint matrix, reuse
+symbolic KKT analysis and scaling, and schedule the batch by predicted
+information gain per remaining second rather than treating every fixing as an
+independent solve.
+
+---
+
+# Progress log - structure-aware IPM batches (2026-07-31)
+
+## 30.1 Bound-change batch contract
+
+`NativeIPMLPAdapter` now accepts a batch of one-column bound changes over a
+shared parent domain. The batch reuses one bounds scratch buffer and prepared
+matrix structure, divides a single wall deadline over unattempted entries,
+and reports whether each LP was actually started. Nonselected reliability
+candidates keep only `(variable, direction, result)`; full `n`-column domains
+are materialized only for the selected candidate.
+
+The initial cached normal-equations experiment confirmed that structural
+reuse alone is insufficient. At 15 s, six directions consumed 4.57 s and all
+timed out. Capping admission to one down/up pair still consumed 4.53 s with no
+convergence. The cached normal-equations kernel was the wrong linear system
+for the dense SCUC coupling pattern.
+
+## 30.2 Augmented-KKT structure selection
+
+Dense-coupling prepared models now route node and batch solves through the
+sparse augmented-KKT kernel used by the successful root IPM. Apple Accelerate
+symbolic LDLT analysis for that augmented pattern is retained across solves;
+numeric factorization remains per iteration because the barrier diagonal
+changes. Narrow-band and sparse-normal models keep the existing cached normal
+equations path.
+
+With the same one-pair experiment, both directions converged in 2.95-3.03 s
+total instead of timing out after 4.53 s. Raw reliability results can still
+have a different domain after child closure; such results are never consumed
+as child bounds, but their primal points are clamped and retained as warm
+starts.
+
+## 30.3 Sibling-first root expansion
+
+Basis-free roots now skip IPM reliability probing at every time limit. The
+selected pseudocost branch is moved forward, both actual child domains are
+closed, and their primary augmented-KKT solves share the remaining deadline.
+Optional proof, pool, cut, and repair re-solves for the first child are
+deferred until the sibling has a primary bound. A pair-admission gate stops
+before popping another node when the remaining budget is below 2.2 times the
+measured root-IPM runtime, preserving the solved frontier.
+
+On IEEE-118 with a 15 s limit, both first children now converge and remain in
+the queue: the down bound is `135170.6017`, the up bound is `29526229.34`, and
+the original-space frontier lower bound is `137150.6017` after PaPILO's 1980
+objective offset. The run explores 1 node, performs 5 LP solves, and stops in
+13.93 solver-seconds. Before sibling-first structure selection, the same run
+spent 11 LP solves, retained no child, and stopped at the root bound.
+
+The 8 s behavior is unchanged: 1 root LP, 0 nodes, exact original-space bound
+`123363.6141`, and 7.22 solver-seconds.
+
+- `test_numerical_stability`: 403/403 assertions, including the cached batch
+  equivalence test.
+- `test_milp_solver`: 131/131 assertions.
+- `native_kernel_comparison --check --time-limit 8`: 0 must-pass failures.
