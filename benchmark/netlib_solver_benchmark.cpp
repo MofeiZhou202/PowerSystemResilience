@@ -1,0 +1,766 @@
+/// Cross-algorithm benchmark over the NETLIB MPS data in tests/data/netlib.
+///
+/// The comparison is deliberately end-to-end at the adapter boundary: model
+/// setup, backend presolve, and solve time are included, while the shared MPS
+/// parse is measured separately. Results are independently audited against the
+/// original LPModel and the reference objectives in mps_manifest.csv.
+///
+/// Usage:
+///   netlib_solver_benchmark --data-dir tests/data --repeat 1
+///       --time-limit 30 --csv reports/netlib_benchmark.csv
+///       --json reports/netlib_benchmark.json
+///   netlib_solver_benchmark --case afiro --solvers highs-simplex,ipopt
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <iomanip>
+#include <iostream>
+#include <limits>
+#include <map>
+#include <numeric>
+#include <sstream>
+#include <string>
+#include <tuple>
+#include <unordered_map>
+#include <vector>
+
+#include <Eigen/Core>
+#include <Eigen/Sparse>
+#include <nlohmann/json.hpp>
+
+#include "Highs.h"
+#include "io/HMPSIO.h"
+
+#include "mipsolvers/engine/kernel/ipm/ipm_lp_solver.hpp"
+#include "mipsolvers/engine/kernel/ipm/lcqp_solver.hpp"
+#include "mipsolvers/engine/kernel/lp_kernel/dual_simplex.hpp"
+#include "mipsolvers/engine/problem_types.hpp"
+#include "mipsolvers/engine/solver/external/adapters.hpp"
+#include "mipsolvers/engine/solver/native/lp/pdlp_solver.hpp"
+
+#ifdef HACDCPF_HAVE_SCIP_LIB
+#include "scip/scip.h"
+#include "scip/scipdefplugins.h"
+#endif
+
+namespace fs = std::filesystem;
+using json = nlohmann::json;
+namespace eng = mipsolvers::engine;
+
+namespace {
+
+constexpr double kObjectiveTolerance = 1e-5;
+constexpr double kFeasibilityTolerance = 1e-7;
+
+struct Config {
+  fs::path data_dir{"tests/data"};
+  fs::path csv_path;
+  fs::path json_path;
+  std::string case_filter;
+  std::vector<std::string> solvers;
+  int repeats{1};
+  int max_iterations{100000};
+  double time_limit_sec{30.0};
+};
+
+struct CaseInfo {
+  std::string name;
+  fs::path path;
+  double reference_objective{std::numeric_limits<double>::quiet_NaN()};
+  eng::LPModel lp;
+  double load_ms{0.0};
+};
+
+struct RunResult {
+  std::string case_name;
+  std::string solver;
+  int repeat{0};
+  int rows{0};
+  int columns{0};
+  int nonzeros{0};
+  bool available{true};
+  bool success{false};
+  bool accurate{false};
+  int iterations{0};
+  double runtime_ms{0.0};
+  double objective{std::numeric_limits<double>::quiet_NaN()};
+  double reference_objective{std::numeric_limits<double>::quiet_NaN()};
+  double objective_rel_error{std::numeric_limits<double>::infinity()};
+  double max_row_violation{std::numeric_limits<double>::infinity()};
+  double max_bound_violation{std::numeric_limits<double>::infinity()};
+  double normalized_primal_violation{std::numeric_limits<double>::infinity()};
+  std::string status;
+  Eigen::VectorXd x;
+};
+
+struct Summary {
+  std::string solver;
+  int attempts{0};
+  int successes{0};
+  int accurate{0};
+  double total_sec{0.0};
+  double median_ms{0.0};
+  double geometric_mean_ms{0.0};
+  double geometric_speedup_vs_highs_simplex{
+      std::numeric_limits<double>::quiet_NaN()};
+};
+
+std::vector<std::string> split(const std::string& text, char delimiter) {
+  std::vector<std::string> out;
+  std::istringstream in(text);
+  std::string item;
+  while (std::getline(in, item, delimiter)) {
+    if (!item.empty()) out.push_back(item);
+  }
+  return out;
+}
+
+std::string csv_escape(const std::string& text) {
+  if (text.find_first_of(",\"\n") == std::string::npos) return text;
+  std::string out = "\"";
+  for (char c : text) out += (c == '\"') ? "\"\"" : std::string(1, c);
+  return out + "\"";
+}
+
+bool parse_args(int argc, char** argv, Config& cfg) {
+  const std::vector<std::string> defaults = {
+      "highs-simplex", "highs-ipm", "highs-pdlp", "scip-direct", "scip",
+      "native-dual-simplex", "native-ipm", "native-pdlp",
+      "native-lcqp", "ipopt"};
+  cfg.solvers = defaults;
+  for (int i = 1; i < argc; ++i) {
+    const std::string arg = argv[i];
+    auto value = [&](const char* flag) -> const char* {
+      if (i + 1 >= argc) {
+        std::cerr << "Missing value after " << flag << "\n";
+        return nullptr;
+      }
+      return argv[++i];
+    };
+    if (arg == "--data-dir") {
+      const char* v = value("--data-dir"); if (!v) return false; cfg.data_dir = v;
+    } else if (arg == "--csv") {
+      const char* v = value("--csv"); if (!v) return false; cfg.csv_path = v;
+    } else if (arg == "--json") {
+      const char* v = value("--json"); if (!v) return false; cfg.json_path = v;
+    } else if (arg == "--case") {
+      const char* v = value("--case"); if (!v) return false; cfg.case_filter = v;
+    } else if (arg == "--solvers") {
+      const char* v = value("--solvers"); if (!v) return false;
+      cfg.solvers = split(v, ',');
+    } else if (arg == "--repeat") {
+      const char* v = value("--repeat"); if (!v) return false;
+      cfg.repeats = std::max(1, std::atoi(v));
+    } else if (arg == "--time-limit") {
+      const char* v = value("--time-limit"); if (!v) return false;
+      cfg.time_limit_sec = std::max(0.001, std::atof(v));
+    } else if (arg == "--max-iterations") {
+      const char* v = value("--max-iterations"); if (!v) return false;
+      cfg.max_iterations = std::max(1, std::atoi(v));
+    } else if (arg == "--help" || arg == "-h") {
+      std::cout
+          << "Usage: netlib_solver_benchmark [options]\n"
+          << "  --data-dir DIR       tests/data directory\n"
+          << "  --case TEXT          run matching instance names only\n"
+          << "  --solvers A,B        select algorithms\n"
+          << "  --repeat N           repetitions per case/algorithm\n"
+          << "  --time-limit SEC     supported backend wall limit\n"
+          << "  --max-iterations N   iterative algorithm limit\n"
+          << "  --csv PATH           raw result CSV\n"
+          << "  --json PATH          raw and summary JSON\n";
+      return false;
+    } else {
+      std::cerr << "Unknown option: " << arg << "\n";
+      return false;
+    }
+  }
+  return true;
+}
+
+std::map<std::string, double> read_references(const fs::path& manifest) {
+  std::ifstream in(manifest);
+  if (!in) throw std::runtime_error("cannot open " + manifest.string());
+  std::map<std::string, double> refs;
+  std::string line;
+  std::getline(in, line);
+  while (std::getline(in, line)) {
+    const auto fields = split(line, ',');
+    if (fields.size() >= 8 && fields[0] == "netlib") {
+      refs[fields[1]] = std::stod(fields[6]);
+    }
+  }
+  return refs;
+}
+
+bool read_mps_as_lp(const fs::path& path, eng::LPModel& lp, std::string& error) {
+  bool output_flag = false;
+  bool log_to_console = false;
+  HighsInt log_dev_level = kHighsLogDevLevelNone;
+  HighsLogOptions log_options;
+  log_options.output_flag = &output_flag;
+  log_options.log_to_console = &log_to_console;
+  log_options.log_dev_level = &log_dev_level;
+  HighsInt num_row = 0, num_col = 0;
+  ObjSense sense = ObjSense::kMinimize;
+  double offset = 0.0;
+  std::vector<HighsInt> a_start, a_index, q_start, q_index;
+  std::vector<double> a_value, col_cost, col_lower, col_upper;
+  std::vector<double> row_lower, row_upper, q_value;
+  std::vector<HighsVarType> integer;
+  std::string objective_name;
+  std::vector<std::string> col_names, row_names;
+  HighsInt q_dim = 0, cost_row_location = 0;
+  bool warning_issued = false;
+  const FilereaderRetcode rc = readMps(
+      log_options, path.string(), -1, -1, num_row, num_col, sense, offset,
+      a_start, a_index, a_value, col_cost, col_lower, col_upper, row_lower,
+      row_upper, integer, objective_name, col_names, row_names, q_dim, q_start,
+      q_index, q_value, cost_row_location, warning_issued);
+  if (rc != FilereaderRetcode::kOk || q_dim != 0) {
+    error = rc != FilereaderRetcode::kOk ? "MPS parse failed" : "quadratic MPS";
+    return false;
+  }
+
+  lp = {};
+  lp.sense = sense == ObjSense::kMaximize ? eng::Sense::Maximize
+                                          : eng::Sense::Minimize;
+  const int n = static_cast<int>(num_col);
+  const int m = static_cast<int>(num_row);
+  lp.c = Eigen::VectorXd::Map(col_cost.data(), n);
+  lp.vars.resize(static_cast<std::size_t>(n));
+  for (int j = 0; j < n; ++j) {
+    auto& var = lp.vars[static_cast<std::size_t>(j)];
+    var.type = eng::VarType::Continuous;
+    var.lb = std::isfinite(col_lower[static_cast<std::size_t>(j)])
+                 ? col_lower[static_cast<std::size_t>(j)] : -1e20;
+    var.ub = std::isfinite(col_upper[static_cast<std::size_t>(j)])
+                 ? col_upper[static_cast<std::size_t>(j)] : 1e20;
+    if (j < static_cast<int>(col_names.size())) var.name = col_names[j];
+  }
+
+  std::vector<int> ineq_row(static_cast<std::size_t>(m), -1);
+  std::vector<int> eq_row(static_cast<std::size_t>(m), -1);
+  int n_ineq = 0, n_eq = 0;
+  for (int i = 0; i < m; ++i) {
+    if (row_lower[static_cast<std::size_t>(i)] ==
+        row_upper[static_cast<std::size_t>(i)]) {
+      eq_row[static_cast<std::size_t>(i)] = n_eq++;
+    } else {
+      ineq_row[static_cast<std::size_t>(i)] = n_ineq++;
+    }
+  }
+  std::vector<Eigen::Triplet<double>> ineq_trips, eq_trips;
+  std::vector<double> upper(static_cast<std::size_t>(n_ineq));
+  std::vector<double> lower(static_cast<std::size_t>(n_ineq));
+  std::vector<double> equal(static_cast<std::size_t>(n_eq));
+  for (int i = 0; i < m; ++i) {
+    if (eq_row[static_cast<std::size_t>(i)] >= 0) {
+      equal[static_cast<std::size_t>(eq_row[static_cast<std::size_t>(i)])] =
+          row_lower[static_cast<std::size_t>(i)];
+    } else {
+      const int r = ineq_row[static_cast<std::size_t>(i)];
+      lower[static_cast<std::size_t>(r)] = row_lower[static_cast<std::size_t>(i)];
+      upper[static_cast<std::size_t>(r)] = row_upper[static_cast<std::size_t>(i)];
+    }
+  }
+  for (int j = 0; j < n; ++j) {
+    for (HighsInt p = a_start[j]; p < a_start[j + 1]; ++p) {
+      const int i = static_cast<int>(a_index[static_cast<std::size_t>(p)]);
+      const double v = a_value[static_cast<std::size_t>(p)];
+      if (eq_row[static_cast<std::size_t>(i)] >= 0) {
+        eq_trips.emplace_back(eq_row[static_cast<std::size_t>(i)], j, v);
+      } else {
+        ineq_trips.emplace_back(ineq_row[static_cast<std::size_t>(i)], j, v);
+      }
+    }
+  }
+  lp.A.resize(n_ineq, n);
+  lp.A.setFromTriplets(ineq_trips.begin(), ineq_trips.end());
+  lp.row_lhs = Eigen::VectorXd::Map(lower.data(), n_ineq);
+  lp.b = Eigen::VectorXd::Map(upper.data(), n_ineq);
+  lp.Aeq.resize(n_eq, n);
+  lp.Aeq.setFromTriplets(eq_trips.begin(), eq_trips.end());
+  lp.beq = Eigen::VectorXd::Map(equal.data(), n_eq);
+  return true;
+}
+
+std::vector<CaseInfo> load_cases(const Config& cfg) {
+  const auto refs = read_references(cfg.data_dir / "mps_manifest.csv");
+  std::vector<CaseInfo> cases;
+  for (const auto& [name, reference] : refs) {
+    if (!cfg.case_filter.empty() && name.find(cfg.case_filter) == std::string::npos)
+      continue;
+    CaseInfo info;
+    info.name = name;
+    info.path = cfg.data_dir / "netlib" / (name + ".mps");
+    info.reference_objective = reference;
+    const auto t0 = std::chrono::steady_clock::now();
+    std::string error;
+    if (!read_mps_as_lp(info.path, info.lp, error)) {
+      throw std::runtime_error(info.path.string() + ": " + error);
+    }
+    info.load_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t0).count();
+    cases.push_back(std::move(info));
+  }
+  return cases;
+}
+
+double rhs_scale(const eng::LPModel& lp) {
+  double scale = 1.0;
+  for (int i = 0; i < lp.b.size(); ++i)
+    if (std::isfinite(lp.b[i])) scale = std::max(scale, std::abs(lp.b[i]));
+  for (int i = 0; i < lp.row_lhs.size(); ++i)
+    if (std::isfinite(lp.row_lhs[i]))
+      scale = std::max(scale, std::abs(lp.row_lhs[i]));
+  for (int i = 0; i < lp.beq.size(); ++i)
+    scale = std::max(scale, std::abs(lp.beq[i]));
+  return scale;
+}
+
+void audit(const eng::LPModel& lp, RunResult& row) {
+  if (row.x.size() != lp.c.size() || !row.x.allFinite()) return;
+  row.objective = lp.c.dot(row.x);
+  row.objective_rel_error = std::abs(row.objective - row.reference_objective) /
+                            std::max(1.0, std::abs(row.reference_objective));
+  row.max_row_violation = 0.0;
+  if (lp.A.rows() > 0) {
+    const Eigen::VectorXd ax = lp.A * row.x;
+    for (int i = 0; i < ax.size(); ++i) {
+      if (std::isfinite(lp.b[i]))
+        row.max_row_violation = std::max(row.max_row_violation, ax[i] - lp.b[i]);
+      const double lhs = eng::lp_row_lhs_or_neg_inf(lp, i);
+      if (std::isfinite(lhs))
+        row.max_row_violation = std::max(row.max_row_violation, lhs - ax[i]);
+    }
+  }
+  if (lp.Aeq.rows() > 0) {
+    row.max_row_violation = std::max(
+        row.max_row_violation, (lp.Aeq * row.x - lp.beq).lpNorm<Eigen::Infinity>());
+  }
+  row.max_bound_violation = 0.0;
+  for (int j = 0; j < row.x.size(); ++j) {
+    const auto& v = lp.vars[static_cast<std::size_t>(j)];
+    row.max_bound_violation = std::max(
+        row.max_bound_violation,
+        std::max(std::max(0.0, v.lb - row.x[j]), std::max(0.0, row.x[j] - v.ub)));
+  }
+  row.normalized_primal_violation =
+      std::max(row.max_row_violation, row.max_bound_violation) / rhs_scale(lp);
+  row.accurate = row.success && row.objective_rel_error <= kObjectiveTolerance &&
+                 row.normalized_primal_violation <= kFeasibilityTolerance;
+}
+
+eng::NLPModel lp_to_nlp(const eng::LPModel& lp, int max_iterations) {
+  eng::NLPModel nlp;
+  nlp.sense = lp.sense;
+  nlp.vars = lp.vars;
+  nlp.solver_options.max_iterations = std::min(max_iterations, 2000);
+  nlp.solver_options.tolerance = 1e-8;
+  nlp.solver_options.acceptable_tolerance = 1e-6;
+  nlp.x0 = Eigen::VectorXd::Zero(lp.c.size());
+  for (int j = 0; j < nlp.x0.size(); ++j) {
+    const auto& v = lp.vars[static_cast<std::size_t>(j)];
+    if (v.lb > 0.0 && v.lb < 1e19) nlp.x0[j] = v.lb;
+    if (v.ub < 0.0 && v.ub > -1e19) nlp.x0[j] = v.ub;
+  }
+  const Eigen::VectorXd cost = lp.sense == eng::Sense::Minimize ? lp.c : -lp.c;
+  nlp.f = [cost](const Eigen::VectorXd& x) { return cost.dot(x); };
+  nlp.grad = [cost](const Eigen::VectorXd&, Eigen::VectorXd& out) { out = cost; };
+
+  const Eigen::SparseMatrix<double> aeq = lp.Aeq;
+  const Eigen::VectorXd beq = lp.beq;
+  if (aeq.rows() > 0) {
+    nlp.g = [aeq, beq](const Eigen::VectorXd& x, Eigen::VectorXd& out) {
+      out = aeq * x - beq;
+    };
+    nlp.jac_g = [aeq](const Eigen::VectorXd&, Eigen::SparseMatrix<double>& out) {
+      out = aeq;
+    };
+  }
+
+  std::vector<int> upper_row(static_cast<std::size_t>(lp.A.rows()), -1);
+  std::vector<int> lower_row(static_cast<std::size_t>(lp.A.rows()), -1);
+  int h_rows = 0;
+  for (int i = 0; i < lp.A.rows(); ++i) {
+    if (std::isfinite(lp.b[i])) upper_row[static_cast<std::size_t>(i)] = h_rows++;
+    if (std::isfinite(eng::lp_row_lhs_or_neg_inf(lp, i)))
+      lower_row[static_cast<std::size_t>(i)] = h_rows++;
+  }
+  Eigen::SparseMatrix<double> hmat(h_rows, lp.A.cols());
+  Eigen::VectorXd hrhs(h_rows);
+  std::vector<Eigen::Triplet<double>> trips;
+  trips.reserve(static_cast<std::size_t>(2 * lp.A.nonZeros()));
+  for (int j = 0; j < lp.A.outerSize(); ++j) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(lp.A, j); it; ++it) {
+      const int ur = upper_row[static_cast<std::size_t>(it.row())];
+      const int lr = lower_row[static_cast<std::size_t>(it.row())];
+      if (ur >= 0) trips.emplace_back(ur, it.col(), it.value());
+      if (lr >= 0) trips.emplace_back(lr, it.col(), -it.value());
+    }
+  }
+  for (int i = 0; i < lp.A.rows(); ++i) {
+    const int ur = upper_row[static_cast<std::size_t>(i)];
+    const int lr = lower_row[static_cast<std::size_t>(i)];
+    if (ur >= 0) hrhs[ur] = lp.b[i];
+    if (lr >= 0) hrhs[lr] = -eng::lp_row_lhs_or_neg_inf(lp, i);
+  }
+  hmat.setFromTriplets(trips.begin(), trips.end());
+  if (h_rows > 0) {
+    nlp.h = [hmat, hrhs](const Eigen::VectorXd& x, Eigen::VectorXd& out) {
+      out = hmat * x - hrhs;
+    };
+    nlp.jac_h = [hmat](const Eigen::VectorXd&, Eigen::SparseMatrix<double>& out) {
+      out = hmat;
+    };
+  }
+  return nlp;
+}
+
+RunResult run_highs(const CaseInfo& kase, const std::string& algorithm,
+                    double time_limit_sec) {
+  RunResult row;
+  row.solver = "HiGHS-" + algorithm;
+  const auto t0 = std::chrono::steady_clock::now();
+  Highs::resetGlobalScheduler(true);
+  Highs highs;
+  highs.setOptionValue("output_flag", false);
+  highs.setOptionValue("log_to_console", false);
+  highs.setOptionValue("threads", static_cast<HighsInt>(1));
+  highs.setOptionValue("time_limit", time_limit_sec);
+  highs.setOptionValue("solver", algorithm);
+  if (algorithm == "ipm") highs.setOptionValue("run_crossover", "off");
+  if (highs.readModel(kase.path.string()) == HighsStatus::kError) {
+    row.success = false;
+    row.status = "readModel failed";
+  } else {
+    const HighsStatus run_status = highs.run();
+    const HighsModelStatus status = highs.getModelStatus();
+    row.success = run_status != HighsStatus::kError &&
+                  status == HighsModelStatus::kOptimal;
+    row.status = highs.modelStatusToString(status);
+    const HighsInfo& info = highs.getInfo();
+    row.iterations = static_cast<int>(info.simplex_iteration_count +
+                                      info.ipm_iteration_count +
+                                      info.pdlp_iteration_count);
+    const auto& values = highs.getSolution().col_value;
+    if (static_cast<int>(values.size()) == kase.lp.c.size())
+      row.x = Eigen::VectorXd::Map(values.data(), static_cast<int>(values.size()));
+  }
+  row.runtime_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - t0).count();
+  return row;
+}
+
+RunResult run_scip_direct(const CaseInfo& kase, double time_limit_sec) {
+  RunResult row;
+  row.solver = "SCIP-direct-MPS";
+#ifdef HACDCPF_HAVE_SCIP_LIB
+  const auto t0 = std::chrono::steady_clock::now();
+  SCIP* scip = nullptr;
+  SCIP_RETCODE rc = SCIPcreate(&scip);
+  if (rc != SCIP_OKAY || scip == nullptr) {
+    row.status = "SCIPcreate failed";
+  } else {
+    SCIPincludeDefaultPlugins(scip);
+    SCIPsetIntParam(scip, "display/verblevel", 0);
+    SCIPsetRealParam(scip, "limits/time", time_limit_sec);
+    rc = SCIPreadProb(scip, kase.path.string().c_str(), nullptr);
+    if (rc != SCIP_OKAY) {
+      row.status = "SCIPreadProb failed";
+    } else {
+      rc = SCIPsolve(scip);
+      const SCIP_STATUS status = SCIPgetStatus(scip);
+      SCIP_SOL* sol = SCIPgetBestSol(scip);
+      row.success = rc == SCIP_OKAY && status == SCIP_STATUS_OPTIMAL && sol != nullptr;
+      switch (status) {
+        case SCIP_STATUS_OPTIMAL: row.status = "Optimal"; break;
+        case SCIP_STATUS_TIMELIMIT: row.status = "Time limit"; break;
+        case SCIP_STATUS_INFEASIBLE: row.status = "Infeasible"; break;
+        case SCIP_STATUS_UNBOUNDED: row.status = "Unbounded"; break;
+        default: row.status = "SCIP status " + std::to_string(static_cast<int>(status));
+      }
+      if (sol != nullptr) {
+        std::unordered_map<std::string, int> name_to_column;
+        for (int j = 0; j < static_cast<int>(kase.lp.vars.size()); ++j)
+          name_to_column[kase.lp.vars[static_cast<std::size_t>(j)].name] = j;
+        row.x = Eigen::VectorXd::Zero(kase.lp.c.size());
+        SCIP_VAR** vars = SCIPgetOrigVars(scip);
+        const int nvars = SCIPgetNOrigVars(scip);
+        for (int j = 0; j < nvars; ++j) {
+          const char* name = SCIPvarGetName(vars[j]);
+          const auto it = name == nullptr ? name_to_column.end()
+                                          : name_to_column.find(name);
+          if (it != name_to_column.end())
+            row.x[it->second] = SCIPgetSolVal(scip, sol, vars[j]);
+        }
+      }
+    }
+    SCIPfree(&scip);
+  }
+  row.runtime_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - t0).count();
+#else
+  (void)kase;
+  (void)time_limit_sec;
+  row.available = false;
+  row.status = "embedded SCIP unavailable";
+#endif
+  return row;
+}
+
+RunResult run_adapter(const CaseInfo& kase, const std::string& solver,
+                      const Config& cfg) {
+  RunResult row;
+  row.solver = solver;
+  eng::SolveResult result;
+  const auto t0 = std::chrono::steady_clock::now();
+  if (solver == "native-dual-simplex") {
+    eng::SimplexOptions opt;
+    opt.lp_kernel_backend = eng::LpKernelBackend::ExperimentalNative;
+    opt.max_iter = cfg.max_iterations;
+    opt.time_limit_sec = cfg.time_limit_sec;
+    opt.use_highs_presolve = true;
+    result = eng::solve_lp_with_basis(kase.lp, opt).result;
+    row.solver = "Native-DualSimplex(+HiGHS-presolve)";
+  } else if (solver == "native-ipm") {
+    eng::IPMLPOptions opt;
+    opt.max_iter = std::min(cfg.max_iterations, 2000);
+    opt.time_limit_sec = cfg.time_limit_sec;
+    opt.use_highs_presolve = true;
+    result = eng::NativeIPMLPAdapter(opt).solve_lp(kase.lp);
+    row.solver = "Native-IPM(+HiGHS-presolve)";
+  } else if (solver == "native-pdlp") {
+    eng::PDLPOptions opt;
+    opt.max_iter = cfg.max_iterations;
+    result = eng::NativePDLPAdapter(opt).solve_lp(kase.lp);
+    row.solver = "Native-PDLP";
+  } else if (solver == "native-lcqp") {
+    eng::LCQPOptions opt;
+    opt.max_iter = std::min(cfg.max_iterations, 2000);
+    result = eng::NativeLCQPAdapter(opt).solve_lp(kase.lp);
+    row.solver = "Native-LCQP";
+  } else if (solver == "scip") {
+    eng::ScipAdapter adapter;
+    row.available = adapter.available();
+    if (row.available) {
+      eng::MIPModel mip;
+      mip.linear_part = kase.lp;
+      result = adapter.solve_milp(mip);
+    } else {
+      row.status = "SCIP unavailable";
+    }
+    row.solver = "SCIP-LP(adapter)";
+  } else if (solver == "ipopt") {
+    eng::IpoptAdapter adapter;
+    row.available = adapter.available();
+    if (row.available) result = adapter.solve_nlp(lp_to_nlp(kase.lp, cfg.max_iterations));
+    else row.status = "Ipopt unavailable";
+    row.solver = "Ipopt-LP-as-NLP";
+  } else {
+    row.available = false;
+    row.status = "unknown solver key";
+  }
+  row.runtime_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - t0).count();
+  if (row.available) {
+    row.success = result.stats.success;
+    row.status = result.stats.status;
+    row.iterations = result.stats.iterations;
+    row.x = std::move(result.x);
+  }
+  return row;
+}
+
+RunResult run_one(const CaseInfo& kase, const std::string& solver,
+                  const Config& cfg, int repeat) {
+  RunResult row;
+  if (solver == "highs-simplex") row = run_highs(kase, "simplex", cfg.time_limit_sec);
+  else if (solver == "highs-ipm") row = run_highs(kase, "ipm", cfg.time_limit_sec);
+  else if (solver == "highs-pdlp") row = run_highs(kase, "pdlp", cfg.time_limit_sec);
+  else if (solver == "scip-direct") row = run_scip_direct(kase, cfg.time_limit_sec);
+  else row = run_adapter(kase, solver, cfg);
+  row.case_name = kase.name;
+  row.repeat = repeat;
+  row.rows = kase.lp.A.rows() + kase.lp.Aeq.rows();
+  row.columns = kase.lp.c.size();
+  row.nonzeros = kase.lp.A.nonZeros() + kase.lp.Aeq.nonZeros();
+  row.reference_objective = kase.reference_objective;
+  audit(kase.lp, row);
+  return row;
+}
+
+double median(std::vector<double> values) {
+  if (values.empty()) return 0.0;
+  std::sort(values.begin(), values.end());
+  const std::size_t n = values.size();
+  return n % 2 ? values[n / 2] : 0.5 * (values[n / 2 - 1] + values[n / 2]);
+}
+
+std::vector<Summary> summarize(const std::vector<RunResult>& rows) {
+  std::map<std::string, std::vector<const RunResult*>> groups;
+  for (const auto& row : rows) groups[row.solver].push_back(&row);
+  std::map<std::tuple<std::string, int>, double> baseline;
+  for (const auto& row : rows)
+    if (row.solver == "HiGHS-simplex" && row.accurate)
+      baseline[{row.case_name, row.repeat}] = row.runtime_ms;
+  std::vector<Summary> out;
+  for (const auto& [solver, members] : groups) {
+    Summary s;
+    s.solver = solver;
+    std::vector<double> times;
+    std::vector<double> speedups;
+    double log_sum = 0.0;
+    for (const RunResult* row : members) {
+      ++s.attempts;
+      s.successes += row->success ? 1 : 0;
+      s.accurate += row->accurate ? 1 : 0;
+      s.total_sec += row->runtime_ms / 1000.0;
+      times.push_back(row->runtime_ms);
+      log_sum += std::log(std::max(1e-6, row->runtime_ms));
+      const auto it = baseline.find({row->case_name, row->repeat});
+      if (row->accurate && it != baseline.end())
+        speedups.push_back(it->second / std::max(1e-6, row->runtime_ms));
+    }
+    s.median_ms = median(times);
+    s.geometric_mean_ms = std::exp(log_sum / std::max<std::size_t>(1, members.size()));
+    if (!speedups.empty()) {
+      double log_speedup = 0.0;
+      for (double value : speedups) log_speedup += std::log(value);
+      s.geometric_speedup_vs_highs_simplex =
+          std::exp(log_speedup / speedups.size());
+    }
+    out.push_back(std::move(s));
+  }
+  return out;
+}
+
+json finite_or_null(double value) {
+  return std::isfinite(value) ? json(value) : json(nullptr);
+}
+
+void write_csv(const fs::path& path, const std::vector<RunResult>& rows) {
+  if (path.empty()) return;
+  if (!path.parent_path().empty()) fs::create_directories(path.parent_path());
+  std::ofstream out(path);
+  out << "case,solver,repeat,rows,columns,nonzeros,available,success,accurate,"
+         "runtime_ms,iterations,objective,reference_objective,objective_rel_error,"
+         "max_row_violation,max_bound_violation,normalized_primal_violation,status\n";
+  out << std::setprecision(17);
+  for (const auto& r : rows) {
+    out << r.case_name << ',' << csv_escape(r.solver) << ',' << r.repeat << ','
+        << r.rows << ',' << r.columns << ',' << r.nonzeros << ',' << r.available
+        << ',' << r.success << ',' << r.accurate << ',' << r.runtime_ms << ','
+        << r.iterations << ',' << r.objective << ',' << r.reference_objective
+        << ',' << r.objective_rel_error << ',' << r.max_row_violation << ','
+        << r.max_bound_violation << ',' << r.normalized_primal_violation << ','
+        << csv_escape(r.status) << '\n';
+  }
+}
+
+void write_json(const fs::path& path, const Config& cfg,
+                const std::vector<CaseInfo>& cases,
+                const std::vector<RunResult>& rows,
+                const std::vector<Summary>& summaries) {
+  if (path.empty()) return;
+  if (!path.parent_path().empty()) fs::create_directories(path.parent_path());
+  json root;
+  root["configuration"] = {{"data_dir", cfg.data_dir.string()},
+                           {"repeats", cfg.repeats},
+                           {"time_limit_sec", cfg.time_limit_sec},
+                           {"max_iterations", cfg.max_iterations},
+                           {"objective_tolerance", kObjectiveTolerance},
+                           {"normalized_feasibility_tolerance", kFeasibilityTolerance},
+                           {"single_threaded_highs", true}};
+  for (const auto& c : cases) {
+    root["cases"].push_back({{"name", c.name}, {"path", c.path.string()},
+                              {"load_ms", c.load_ms}});
+  }
+  for (const auto& r : rows) {
+    root["runs"].push_back({
+        {"case", r.case_name}, {"solver", r.solver}, {"repeat", r.repeat},
+        {"available", r.available}, {"success", r.success},
+        {"accurate", r.accurate}, {"runtime_ms", r.runtime_ms},
+        {"iterations", r.iterations}, {"objective", finite_or_null(r.objective)},
+        {"reference_objective", r.reference_objective},
+        {"objective_rel_error", finite_or_null(r.objective_rel_error)},
+        {"normalized_primal_violation", finite_or_null(r.normalized_primal_violation)},
+        {"status", r.status}});
+  }
+  for (const auto& s : summaries) {
+    root["summary"].push_back({
+        {"solver", s.solver}, {"attempts", s.attempts},
+        {"successes", s.successes}, {"accurate", s.accurate},
+        {"total_sec", s.total_sec}, {"median_ms", s.median_ms},
+        {"geometric_mean_ms", s.geometric_mean_ms},
+        {"geometric_speedup_vs_highs_simplex",
+         finite_or_null(s.geometric_speedup_vs_highs_simplex)}});
+  }
+  std::ofstream(path) << std::setw(2) << root << '\n';
+}
+
+void print_summary(const std::vector<Summary>& summaries) {
+  std::cout << "\nSummary (accuracy requires success, rel.obj<=1e-5, "
+               "normalized primal violation<=1e-7)\n";
+  std::printf("%-40s %9s %9s %12s %12s %11s\n", "Algorithm", "Success",
+              "Accurate", "Median ms", "GeoMean ms", "vs HiGHS");
+  std::printf("%s\n", std::string(100, '-').c_str());
+  for (const auto& s : summaries) {
+    char speedup[32] = "-";
+    if (std::isfinite(s.geometric_speedup_vs_highs_simplex))
+      std::snprintf(speedup, sizeof(speedup), "%.3fx",
+                    s.geometric_speedup_vs_highs_simplex);
+    std::printf("%-40s %4d/%-4d %4d/%-4d %12.3f %12.3f %11s\n",
+                s.solver.c_str(), s.successes, s.attempts, s.accurate,
+                s.attempts, s.median_ms, s.geometric_mean_ms, speedup);
+  }
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+  Config cfg;
+  if (!parse_args(argc, argv, cfg)) return argc > 1 ? 1 : 0;
+  try {
+    const std::vector<CaseInfo> cases = load_cases(cfg);
+    if (cases.empty()) throw std::runtime_error("no matching NETLIB cases");
+    std::cout << "NETLIB cross-algorithm benchmark: " << cases.size()
+              << " cases, " << cfg.solvers.size() << " algorithms, "
+              << cfg.repeats << " repeat(s)\n";
+    std::vector<RunResult> rows;
+    rows.reserve(cases.size() * cfg.solvers.size() * cfg.repeats);
+    for (const auto& kase : cases) {
+      std::cout << "\n[" << kase.name << "] "
+                << kase.lp.A.rows() + kase.lp.Aeq.rows() << "x"
+                << kase.lp.c.size() << ", nnz="
+                << kase.lp.A.nonZeros() + kase.lp.Aeq.nonZeros() << '\n';
+      for (const auto& solver : cfg.solvers) {
+        for (int repeat = 1; repeat <= cfg.repeats; ++repeat) {
+          RunResult row = run_one(kase, solver, cfg, repeat);
+          std::printf("  %-38s %9.2f ms  %-8s rel=%9.2e feas=%9.2e  %s\n",
+                      row.solver.c_str(), row.runtime_ms,
+                      row.accurate ? "ACCURATE" : (row.success ? "WRONG" : "FAIL"),
+                      row.objective_rel_error, row.normalized_primal_violation,
+                      row.status.c_str());
+          std::fflush(stdout);
+          rows.push_back(std::move(row));
+        }
+      }
+    }
+    const std::vector<Summary> summaries = summarize(rows);
+    print_summary(summaries);
+    write_csv(cfg.csv_path, rows);
+    write_json(cfg.json_path, cfg, cases, rows, summaries);
+    if (!cfg.csv_path.empty()) std::cout << "CSV:  " << cfg.csv_path << '\n';
+    if (!cfg.json_path.empty()) std::cout << "JSON: " << cfg.json_path << '\n';
+    return 0;
+  } catch (const std::exception& e) {
+    std::cerr << "netlib_solver_benchmark: " << e.what() << '\n';
+    return 2;
+  }
+}

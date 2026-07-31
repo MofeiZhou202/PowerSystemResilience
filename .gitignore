@@ -144,3 +144,5 @@ third_party/install/
 /libmipsolvers/
 
 .github/
+
+tests/data/

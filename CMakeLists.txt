@@ -320,6 +320,31 @@ if(MIPSOLVERS_HAVE_HIGHS_LIB)
         TIMEOUT  600)
     endif()
   endif()
+
+  # Cross-algorithm NETLIB LP benchmark. This is intentionally an explicit
+  # benchmark target rather than a CTest: the full 24-instance matrix includes
+  # first-order and general NLP methods that can take substantially longer than
+  # the integration regression subset.
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/netlib_solver_benchmark.cpp")
+    add_executable(netlib_solver_benchmark
+      benchmark/netlib_solver_benchmark.cpp)
+    set_target_properties(netlib_solver_benchmark PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+    target_include_directories(netlib_solver_benchmark PRIVATE
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+      ${CMAKE_CURRENT_SOURCE_DIR}/highs
+      ${CMAKE_CURRENT_BINARY_DIR}/_deps/embedded_highs)
+    target_link_libraries(netlib_solver_benchmark PRIVATE
+      mipsolvers highs::highs)
+    if(MIPSOLVERS_HAVE_SCIP_LIB)
+      target_link_libraries(netlib_solver_benchmark PRIVATE libscip)
+    endif()
+    if(NOT MSVC)
+      target_compile_options(netlib_solver_benchmark PRIVATE -Wall -Wextra
+        $<$<CONFIG:Release>:-O3 -DNDEBUG>
+        $<$<CONFIG:RelWithDebInfo>:-O2 -g -DNDEBUG>)
+    endif()
+  endif()
 endif()
 
 # ── SCIP in-process library ───────────────────────────────────────────────────
