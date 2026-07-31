@@ -18,22 +18,19 @@ void assemble_dc_injections(const SolverData& data,
   const int ndc = static_cast<int>(data.dc_buses.size());
   pdc_spec.setZero();
 
-  // DC loads (or bus pd_mw when the load table is absent).
+  // DC bus demand and explicit DCLoad records are additive.
   // pdc_spec is the NET power injection at a bus (generation positive,
   // consumption negative), matching pdc_calc = V .* (gdc * V) where gdc is the
   // positive-diagonal nodal conductance Laplacian. A load therefore enters as a
   // negative injection.
-  if (data.dc_loads.empty()) {
-    for (int i = 0; i < ndc; ++i) {
-      pdc_spec[i] = -data.dc_buses[static_cast<size_t>(i)].pd_mw / data.base_mva;
-    }
-  } else {
-    for (const auto& ld : data.dc_loads) {
-      if (!ld.in_service) continue;
-      const int dc_bus = ld.bus - 1;
-      if (dc_bus >= 0 && dc_bus < ndc) {
-        pdc_spec[dc_bus] -= model::effective_load_p_mw(ld) / data.base_mva;
-      }
+  for (int i = 0; i < ndc; ++i) {
+    pdc_spec[i] = -data.dc_buses[static_cast<size_t>(i)].pd_mw / data.base_mva;
+  }
+  for (const auto& ld : data.dc_loads) {
+    if (!ld.in_service) continue;
+    const int dc_bus = ld.bus - 1;
+    if (dc_bus >= 0 && dc_bus < ndc) {
+      pdc_spec[dc_bus] -= model::effective_load_p_mw(ld) / data.base_mva;
     }
   }
 

@@ -262,6 +262,9 @@
         <label class="sub-label">潮流算法
           <select id="pfMethod" title="潮流计算方法">
             <option value="ac_newton">交直流统一NR</option>
+            <option value="helm">全纯嵌入(HELM)</option>
+            <option value="homotopy">显式同伦连续</option>
+            <option value="newton_krylov">Newton-Krylov</option>
             <option value="pure_ac">交流NR</option>
             <option value="dc">直流潮流(B-θ)</option>
             <option value="fdpf">快速解耦</option>
@@ -402,6 +405,30 @@
         <label class="sub-label sub-checkbox"><input id="pfRobustHomotopy" type="checkbox" checked/><span>同伦</span></label>
         <label class="sub-label sub-checkbox"><input id="pfRobustKrylov" type="checkbox"/><span>Krylov</span></label>
         <label class="sub-label">最低Vm<input id="pfRobustMinVm" type="number" step="1e-8" value="1e-8"/></label>
+      </div>
+      <div id="pfHelmOptions" class="pf-option-group" data-pf-model="balanced" hidden>
+        <div class="pf-option-title">HELM</div>
+        <label class="sub-label">级数上限<input id="pfHelmMaxCoef" type="number" min="4" step="2" value="100"/></label>
+        <label class="sub-label">Padé容差<input id="pfHelmMismatch" type="number" min="1e-12" step="1e-7" value="1e-6"/></label>
+        <label class="sub-label sub-checkbox"><input id="pfHelmQLimits" type="checkbox" checked/><span>无功限值</span></label>
+        <label class="sub-label">热启动
+          <select id="pfHelmWarmStart">
+            <option value="none">平坦启动</option>
+            <option value="dcpf">直流潮流</option>
+            <option value="gauss_seidel">Gauss-Seidel</option>
+          </select>
+        </label>
+        <label class="sub-label">GS迭代<input id="pfHelmGaussIter" type="number" min="1" step="1" value="5"/></label>
+      </div>
+      <div id="pfHomotopyOptions" class="pf-option-group" data-pf-model="balanced" hidden>
+        <div class="pf-option-title">同伦 / Krylov</div>
+        <label class="sub-label">同伦初步长<input id="pfHomotopyStep0" type="number" min="0.001" max="1" step="0.05" value="0.2"/></label>
+        <label class="sub-label">最小步长<input id="pfHomotopyStepMin" type="number" min="0.000001" max="1" step="0.001" value="0.001"/></label>
+        <label class="sub-label">最大步长<input id="pfHomotopyStepMax" type="number" min="0.001" max="1" step="0.05" value="1"/></label>
+        <label class="sub-label">最大步数<input id="pfHomotopyMaxSteps" type="number" min="1" step="1" value="30"/></label>
+        <label class="sub-label">GMRES重启<input id="pfGmresRestart" type="number" min="2" step="1" value="30"/></label>
+        <label class="sub-label">GMRES外循环<input id="pfGmresMaxOuter" type="number" min="1" step="1" value="10"/></label>
+        <label class="sub-label">GMRES容差<input id="pfGmresTol" type="number" min="1e-14" step="1e-10" value="1e-10"/></label>
       </div>
       <div class="pf-option-group">
         <div class="pf-option-title">运行</div>

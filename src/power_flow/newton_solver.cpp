@@ -198,12 +198,10 @@ struct DcSlackPlan {
 // converter so it exactly absorbs/supplies the island imbalance.
 double net_fixed_dc_injection_mw(const SolverData& data, int bus_idx) {
   const auto& bus = data.dc_buses[static_cast<size_t>(bus_idx)];
-  double net = 0.0;
-  if (data.dc_loads.empty()) {
-    net -= bus.pd_mw;
-  } else {
-    for (const auto& ld : data.dc_loads) {
-      if (ld.bus - 1 == bus_idx) net -= model::effective_load_p_mw(ld);
+  double net = -bus.pd_mw;
+  for (const auto& ld : data.dc_loads) {
+    if (ld.in_service && ld.bus - 1 == bus_idx) {
+      net -= model::effective_load_p_mw(ld);
     }
   }
   for (const auto& st : data.dc_storage) {

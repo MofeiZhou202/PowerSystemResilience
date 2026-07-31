@@ -1833,6 +1833,63 @@ void merge_zero_impedance_buses(HybridPowerSystem& sys, bool allow_merge) {
                                   kBusMergeZThreshold, nullptr);
 }
 
+// Canonical solvers use (bus.index - 1) throughout the DC assembly path. Keep
+// vector order (and result-vector attribution), while rewriting all DC-domain
+// references into the contiguous 1..N positional index space.
+static void canonicalize_dc_bus_indices(HybridPowerSystem& sys) {
+  const int n = static_cast<int>(sys.dc.buses.size());
+  std::unordered_map<int, int> remap;
+  remap.reserve(static_cast<size_t>(n));
+  bool already_canonical = true;
+  for (int i = 0; i < n; ++i) {
+    const int authored = sys.dc.buses[static_cast<size_t>(i)].index;
+    if (!remap.emplace(authored, i + 1).second) {
+      throw std::invalid_argument(
+          "project_to_canonical_models: duplicate DC bus index " +
+          std::to_string(authored));
+    }
+    already_canonical = already_canonical && authored == i + 1;
+  }
+  if (already_canonical) return;
+
+  auto dc_bus = [&](int authored) {
+    const auto it = remap.find(authored);
+    return it != remap.end() ? it->second : authored;
+  };
+  for (int i = 0; i < n; ++i) {
+    sys.dc.buses[static_cast<size_t>(i)].index = i + 1;
+  }
+  for (auto& branch : sys.dc.branches) {
+    branch.from_bus = dc_bus(branch.from_bus);
+    branch.to_bus = dc_bus(branch.to_bus);
+  }
+  for (auto& load : sys.dc.loads) load.bus = dc_bus(load.bus);
+  for (auto& storage : sys.dc.storage) storage.bus = dc_bus(storage.bus);
+  for (auto& storage : sys.dc.dc_storage) storage.bus = dc_bus(storage.bus);
+  for (auto& source : sys.dc.static_generators) source.bus = dc_bus(source.bus);
+  for (auto& source : sys.dc.dc_static_generators) source.bus = dc_bus(source.bus);
+  for (auto& array : sys.dc.pv_arrays) array.bus = dc_bus(array.bus);
+  for (auto& breaker : sys.dc.dc_circuit_breakers) {
+    breaker.bus_from = dc_bus(breaker.bus_from);
+    breaker.bus_to = dc_bus(breaker.bus_to);
+  }
+  for (auto& converter : sys.dc.dcdc_converters) {
+    converter.bus_in = dc_bus(converter.bus_in);
+    converter.bus_out = dc_bus(converter.bus_out);
+  }
+  for (auto& converter : sys.vsc_converters) {
+    converter.bus_dc = dc_bus(converter.bus_dc);
+  }
+  for (auto& converter : sys.lcc_converters) {
+    converter.dc_bus = dc_bus(converter.dc_bus);
+  }
+  for (auto& router : sys.energy_routers) {
+    for (auto& port : router.ports) {
+      if (port.port_type == ERPortType::DC) port.bus = dc_bus(port.bus);
+    }
+  }
+}
+
 // 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 // unproject_bus_vector
 // 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
@@ -2185,6 +2242,7 @@ static void project_in_place(HybridPowerSystem& out,
     }
     merge_zero_impedance_buses_impl(out, /*allow_merge=*/false, nullptr,
                                     options.impedance_threshold, nullptr);
+    canonicalize_dc_bus_indices(out);
     if (options.strip_dead_islands) strip_dead_islands(out);
     return;
   }
@@ -2193,10 +2251,8 @@ static void project_in_place(HybridPowerSystem& out,
 
   // When FlexibleLoads or AsymmetricLoads will be projected into the loads
   // table, first migrate any bus-level pd_mw/qd_mvar into Load entries so
-  // that the loads table becomes the single authoritative source.  Consumers
-  // (ONR, DPF, PF) use an exclusive if/else: if loads table is non-empty
-  // they ignore bus pd_mw.  Without this normalisation step, adding a single
-  // equivalent Load would cause all bus-level demand to be dropped.
+  // that generated component loads retain the original load model and identity
+  // without leaving the same demand duplicated in both representations.
   const bool will_add_loads =
       std::any_of(out.ac.flexible_loads.begin(), out.ac.flexible_loads.end(),
                   [](const FlexibleLoad& fl) { return fl.in_service && fl.bus != 0; }) ||
@@ -2248,6 +2304,7 @@ static void project_in_place(HybridPowerSystem& out,
   const std::size_t vsc_before_router = out.vsc_converters.size();
   const std::size_t dcdc_before_router = out.dc.dcdc_converters.size();
   expand_energy_routers(out);
+  canonicalize_dc_bus_indices(out);
   for (const auto& er : authored_energy_routers) {
     const std::string prefix = er.name + "_";
     for (std::size_t i = vsc_before_router; i < out.vsc_converters.size(); ++i) {

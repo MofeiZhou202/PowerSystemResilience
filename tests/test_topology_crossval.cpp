@@ -284,6 +284,12 @@ TEST_CASE("Topology reconfiguration load accounting includes DCBus demand",
         make_dc_bus(102, DCBusType::DC_P, dc_bus_pd_mw),
     };
     sys.dc.branches = {make_dc_branch(1, 101, 102, 0.001, true)};
+    DCLoad dc_load;
+    dc_load.index = 1;
+    dc_load.bus = 102;
+    dc_load.in_service = true;
+    dc_load.p_mw = 0.25;
+    sys.dc.loads = {dc_load};
     sys.vsc_converters = {make_vsc(1, 2, 101)};
     return sys;
   };

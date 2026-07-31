@@ -184,6 +184,7 @@ struct CanonicalCarbonInput {
   HybridPowerSystem system;
   PowerFlowResult power_flow;
   std::optional<BusMergeMap> ac_bus_map;
+  std::vector<int> dc_canonical_to_original;
   std::vector<int> original_branch_to_canonical;
 };
 
@@ -263,6 +264,10 @@ CanonicalCarbonInput build_canonical_carbon_input(
   input.system =
       projection::RichToCanonicalOperator::apply(original).canonical;
   input.ac_bus_map = input.system.bus_merge_map;
+  input.dc_canonical_to_original.reserve(original.dc.buses.size());
+  for (const auto& bus : original.dc.buses) {
+    input.dc_canonical_to_original.push_back(bus.index);
+  }
   input.power_flow = original_pf;
   input.power_flow.vm = project_ac_bus_values(
       original, input.system, original_pf.vm, input.ac_bus_map, 1.0);
@@ -461,22 +466,19 @@ std::vector<UnifiedLoad> build_unified_ac_loads(const ACSystem& ac,
 std::vector<UnifiedLoad> build_unified_dc_loads(const DCSystem& dc,
                                                 const HybridIDMap& id) {
   std::vector<UnifiedLoad> out;
-  if (!dc.loads.empty()) {
-    for (const auto& ld : dc.loads) {
-      const double p_mw = model::effective_load_p_mw(ld);
-      if (p_mw <= kTol) continue;
-      const int node_loc = global_bus_loc(id, true, ld.bus);
-      if (node_loc < 0) continue;
-      out.push_back({ld.index, ld.bus, true, node_loc, p_mw, 0.0});
-    }
-  } else {
-    int syn_id = -1;
-    for (const auto& b : dc.buses) {
-      if (!b.in_service || b.pd_mw <= kTol) continue;
-      const int node_loc = global_bus_loc(id, true, b.index);
-      if (node_loc < 0) continue;
-      out.push_back({syn_id--, b.index, true, node_loc, b.pd_mw, 0.0});
-    }
+  for (const auto& ld : dc.loads) {
+    const double p_mw = model::effective_load_p_mw(ld);
+    if (!ld.in_service || p_mw <= kTol) continue;
+    const int node_loc = global_bus_loc(id, true, ld.bus);
+    if (node_loc < 0) continue;
+    out.push_back({ld.index, ld.bus, true, node_loc, p_mw, 0.0});
+  }
+  int syn_id = -1;
+  for (const auto& b : dc.buses) {
+    if (!b.in_service || b.pd_mw <= kTol) continue;
+    const int node_loc = global_bus_loc(id, true, b.index);
+    if (node_loc < 0) continue;
+    out.push_back({syn_id--, b.index, true, node_loc, b.pd_mw, 0.0});
   }
 
   int signed_device_sink_id = -500000;
@@ -698,17 +700,10 @@ std::vector<FlowEdge> build_directed_flows(const HybridPowerSystem& sys,
   // transfer. Recover radial DC terminal flows from solved nodal injections so
   // carbon tracing uses the same KCL-consistent operating point as PF output.
   std::unordered_map<int, double> dc_net_export;
-  // Match build_unified_dc_loads(): an explicit DCLoad table is authoritative
-  // and DC bus pd_mw is only a fallback representation.  Mixing both here
-  // double-counts demand and makes an otherwise balanced carbon snapshot fail
-  // the node-balance gate.
-  if (sys.dc.loads.empty()) {
-    for (const auto& bus : sys.dc.buses)
-      if (bus.in_service) dc_net_export[bus.index] -= bus.pd_mw;
-  } else {
-    for (const auto& ld : sys.dc.loads)
-      if (ld.in_service) dc_net_export[ld.bus] -= model::effective_load_p_mw(ld);
-  }
+  for (const auto& bus : sys.dc.buses)
+    if (bus.in_service) dc_net_export[bus.index] -= bus.pd_mw;
+  for (const auto& ld : sys.dc.loads)
+    if (ld.in_service) dc_net_export[ld.bus] -= model::effective_load_p_mw(ld);
   for (const auto& pv : sys.dc.pv_arrays)
     if (pv.in_service) dc_net_export[pv.bus] += pv.p_set_mw;
   for (const auto& sg : sys.dc.static_generators)
@@ -1137,29 +1132,26 @@ SourceBuildResult build_sources(const HybridPowerSystem& sys,
                 pv.name.empty() ? "DCPV" + std::to_string(pv.index) : pv.name);
   }
 
-  if (!sys.dc.loads.empty()) {
-    for (const auto& load : sys.dc.loads) {
-      const double p_mw = model::effective_load_p_mw(load);
-      if (p_mw >= -kTol) continue;
-      const int node_loc = global_bus_loc(id, true, load.bus);
-      if (node_loc < 0) continue;
-      push_source(load.bus, true, node_loc, -p_mw, 0.0, false, false,
-                  "negative_dc_load_injection", load.index,
-                  load.name.empty()
-                      ? "DCLoadInjection" + std::to_string(load.index)
-                      : load.name);
-    }
-  } else {
-    for (const auto& bus : sys.dc.buses) {
-      if (!bus.in_service || bus.pd_mw >= -kTol) continue;
-      const int node_loc = global_bus_loc(id, true, bus.index);
-      if (node_loc < 0) continue;
-      push_source(bus.index, true, node_loc, -bus.pd_mw, 0.0, false,
-                  false, "negative_dc_bus_demand", bus.index,
-                  bus.name.empty()
-                      ? "DCBusInjection" + std::to_string(bus.index)
-                      : bus.name);
-    }
+  for (const auto& load : sys.dc.loads) {
+    const double p_mw = model::effective_load_p_mw(load);
+    if (!load.in_service || p_mw >= -kTol) continue;
+    const int node_loc = global_bus_loc(id, true, load.bus);
+    if (node_loc < 0) continue;
+    push_source(load.bus, true, node_loc, -p_mw, 0.0, false, false,
+                "negative_dc_load_injection", load.index,
+                load.name.empty()
+                    ? "DCLoadInjection" + std::to_string(load.index)
+                    : load.name);
+  }
+  for (const auto& bus : sys.dc.buses) {
+    if (!bus.in_service || bus.pd_mw >= -kTol) continue;
+    const int node_loc = global_bus_loc(id, true, bus.index);
+    if (node_loc < 0) continue;
+    push_source(bus.index, true, node_loc, -bus.pd_mw, 0.0, false,
+                false, "negative_dc_bus_demand", bus.index,
+                bus.name.empty()
+                    ? "DCBusInjection" + std::to_string(bus.index)
+                    : bus.name);
   }
 
   // A DC_V bus is an ideal voltage boundary in the power-flow equations and
@@ -2401,6 +2393,15 @@ int canonical_ac_bus_to_external(const std::optional<BusMergeMap>& map,
   return external_bus > 0 ? external_bus : canonical_bus;
 }
 
+int canonical_dc_bus_to_external(const std::vector<int>& map,
+                                 int canonical_bus) {
+  if (canonical_bus <= 0 ||
+      canonical_bus > static_cast<int>(map.size())) {
+    return canonical_bus;
+  }
+  return map[static_cast<size_t>(canonical_bus - 1)];
+}
+
 void remap_carbon_result_to_original(
     CarbonAnalysisResult& result,
     const HybridPowerSystem& original,
@@ -2421,6 +2422,25 @@ void remap_carbon_result_to_original(
     result.bus_carbon = std::move(original_bus_carbon);
   }
 
+  std::unordered_map<int, double> dc_intensity_by_canonical_bus;
+  dc_intensity_by_canonical_bus.reserve(result.dc_bus_carbon.size());
+  for (const auto& bus : result.dc_bus_carbon) {
+    dc_intensity_by_canonical_bus.emplace(
+        bus.bus_index, bus.carbon_intensity_tco2_mwh);
+  }
+  std::vector<BusCarbonResult> original_dc_bus_carbon;
+  original_dc_bus_carbon.reserve(original.dc.buses.size());
+  for (size_t i = 0; i < original.dc.buses.size(); ++i) {
+    const int canonical_bus = static_cast<int>(i) + 1;
+    const auto intensity = dc_intensity_by_canonical_bus.find(canonical_bus);
+    original_dc_bus_carbon.push_back(
+        {original.dc.buses[i].index,
+         intensity != dc_intensity_by_canonical_bus.end()
+             ? intensity->second
+             : 0.0});
+  }
+  result.dc_bus_carbon = std::move(original_dc_bus_carbon);
+
   std::unordered_map<int, int> original_load_bus;
   original_load_bus.reserve(original.ac.loads.size());
   for (const auto& load : original.ac.loads) {
@@ -2432,24 +2452,72 @@ void remap_carbon_result_to_original(
                    ? it->second
                    : canonical_ac_bus_to_external(input.ac_bus_map, load.bus);
   }
+  std::unordered_map<int, int> original_dc_load_bus;
+  original_dc_load_bus.reserve(original.dc.loads.size());
+  for (const auto& load : original.dc.loads) {
+    original_dc_load_bus.emplace(load.index, load.bus);
+  }
+  for (auto& load : result.dc_load_carbon) {
+    const auto it = original_dc_load_bus.find(load.load_index);
+    load.bus = (it != original_dc_load_bus.end())
+                   ? it->second
+                   : canonical_dc_bus_to_external(
+                         input.dc_canonical_to_original, load.bus);
+  }
   for (auto& storage : result.storage_carbon) {
-    if (!storage.is_dc) {
+    if (storage.is_dc) {
+      storage.bus = canonical_dc_bus_to_external(
+          input.dc_canonical_to_original, storage.bus);
+    } else {
       storage.bus = canonical_ac_bus_to_external(input.ac_bus_map, storage.bus);
     }
   }
   for (auto& source : result.carbon_sources) {
-    if (!source.is_dc) {
+    if (source.is_dc) {
+      source.bus = canonical_dc_bus_to_external(
+          input.dc_canonical_to_original, source.bus);
+    } else {
       source.bus = canonical_ac_bus_to_external(input.ac_bus_map, source.bus);
     }
   }
   for (auto& converter : result.vsc_carbon) {
     converter.bus_ac =
         canonical_ac_bus_to_external(input.ac_bus_map, converter.bus_ac);
+    converter.bus_dc = canonical_dc_bus_to_external(
+        input.dc_canonical_to_original, converter.bus_dc);
+  }
+  for (auto& converter : result.dcdc_carbon) {
+    converter.bus_in = canonical_dc_bus_to_external(
+        input.dc_canonical_to_original, converter.bus_in);
+    converter.bus_out = canonical_dc_bus_to_external(
+        input.dc_canonical_to_original, converter.bus_out);
   }
   for (auto& error : result.node_power_balance_errors) {
-    if (!error.is_dc) {
+    if (error.is_dc) {
+      error.bus_index = canonical_dc_bus_to_external(
+          input.dc_canonical_to_original, error.bus_index);
+    } else {
       error.bus_index =
           canonical_ac_bus_to_external(input.ac_bus_map, error.bus_index);
+    }
+  }
+
+  std::unordered_map<int, std::pair<int, int>> original_dc_branch_buses;
+  original_dc_branch_buses.reserve(original.dc.branches.size());
+  for (const auto& branch : original.dc.branches) {
+    original_dc_branch_buses.emplace(
+        branch.index, std::pair{branch.from_bus, branch.to_bus});
+  }
+  for (auto& branch : result.dc_branch_carbon) {
+    const auto it = original_dc_branch_buses.find(branch.branch_index);
+    if (it != original_dc_branch_buses.end()) {
+      branch.from_bus = it->second.first;
+      branch.to_bus = it->second.second;
+    } else {
+      branch.from_bus = canonical_dc_bus_to_external(
+          input.dc_canonical_to_original, branch.from_bus);
+      branch.to_bus = canonical_dc_bus_to_external(
+          input.dc_canonical_to_original, branch.to_bus);
     }
   }
 

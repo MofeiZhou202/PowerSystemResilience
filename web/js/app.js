@@ -4412,6 +4412,20 @@ const App = (() => {
         enable_homotopy: pfBool('pfRobustHomotopy', true),
         enable_newton_krylov_fallback: pfBool('pfRobustKrylov', false),
         min_vm_pu: pfNumber('pfRobustMinVm', 1e-8),
+        homotopy_step0: pfNumber('pfHomotopyStep0', 0.2),
+        homotopy_step_min: pfNumber('pfHomotopyStepMin', 0.001),
+        homotopy_step_max: pfNumber('pfHomotopyStepMax', 1),
+        homotopy_max_steps: pfInteger('pfHomotopyMaxSteps', 30),
+        gmres_restart: pfInteger('pfGmresRestart', 30),
+        gmres_max_outer: pfInteger('pfGmresMaxOuter', 10),
+        gmres_tol: pfNumber('pfGmresTol', 1e-10),
+      },
+      helm: {
+        max_coef: pfInteger('pfHelmMaxCoef', 100),
+        mismatch: pfNumber('pfHelmMismatch', 1e-6),
+        enforce_q_limits: pfBool('pfHelmQLimits', true),
+        warm_start: document.getElementById('pfHelmWarmStart')?.value || 'none',
+        gauss_iter: pfInteger('pfHelmGaussIter', 5),
       },
       three_phase: {
         algorithm: document.getElementById('pfThreePhaseAlgorithm')?.value || 'compact',
@@ -12053,13 +12067,16 @@ const App = (() => {
   // The phase-domain method remains available on hybrid cases when the model
   // carries an abc subsystem; the backend labels that path as staged coupling.
   const HYBRID_PF_METHODS = new Set([
-    'ac_newton', 'adaptive', 'islanded', 'distributed_slack', 'three_phase_hybrid',
+    'ac_newton', 'homotopy', 'newton_krylov', 'adaptive', 'islanded',
+    'distributed_slack', 'three_phase_hybrid',
   ]);
   function updateAnalysisParameterVisibility() {
     const pfMethod = document.getElementById('pfMethod')?.value;
     const isThreePhaseAc = pfMethod === 'three_phase';
     const isThreePhaseHybrid = pfMethod === 'three_phase_hybrid';
     const isThreePhase = isThreePhaseAc || isThreePhaseHybrid;
+    const isHelm = pfMethod === 'helm';
+    const isHomotopyOrKrylov = pfMethod === 'homotopy' || pfMethod === 'newton_krylov';
     const phaseScopeControl = document.getElementById('pfThreePhaseScope');
     const phaseScope = phaseScopeControl?.value || 'auto';
     const phaseHasDc = phaseScopeControl?.dataset.hasDc === 'true';
@@ -12072,6 +12089,9 @@ const App = (() => {
     document.querySelectorAll('#pfAdvancedPanel [data-pf-model="balanced"]').forEach(group => {
       group.toggleAttribute('hidden', isThreePhase);
     });
+    document.getElementById('pfHelmOptions')?.toggleAttribute('hidden', !isHelm || isThreePhase);
+    document.getElementById('pfHomotopyOptions')?.toggleAttribute(
+      'hidden', !isHomotopyOrKrylov || isThreePhase);
     const boundaryControlsVisible = !isThreePhase || isThreePhaseHybrid ||
       (phaseHasDc && (phaseScope === 'auto' || phaseScope === 'staged_hybrid'));
     document.getElementById('pfLossModelControl')?.toggleAttribute('hidden', !boundaryControlsVisible);

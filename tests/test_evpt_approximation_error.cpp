@@ -20,8 +20,6 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
-#include "Highs.h"
-
 #include "hacdcpf/engine/engine.hpp"
 
 using Approx = Catch::Approx;
@@ -567,9 +565,9 @@ NodeBound calculate_node_bound_enumerated(
 NodeBound calculate_node_bound_milp(
     const StudyCase& data,
     const std::vector<std::vector<int>>& allowed) {
-  using hacdcpf::engine::HighsAdapter;
   using hacdcpf::engine::LPModel;
   using hacdcpf::engine::MIPModel;
+  using hacdcpf::engine::ScipAdapter;
   using hacdcpf::engine::Sense;
   using hacdcpf::engine::VariableMeta;
   using hacdcpf::engine::VarType;
@@ -740,7 +738,7 @@ NodeBound calculate_node_bound_milp(
   lp.b = Eigen::VectorXd::Map(bineq.data(),
                               static_cast<Eigen::Index>(bineq.size()));
 
-  const auto solve = HighsAdapter{}.solve_milp(mip);
+  const auto solve = ScipAdapter{}.solve_milp(mip);
   if (!solve.stats.success ||
       solve.x.size() != static_cast<Eigen::Index>(lp.vars.size())) {
     return bound;
@@ -762,7 +760,7 @@ NodeBound calculate_node_bound_milp(
 
 NodeBound calculate_node_bound(const StudyCase& data,
                                const std::vector<std::vector<int>>& allowed) {
-  return calculate_node_bound_milp(data, allowed);
+  return calculate_node_bound_enumerated(data, allowed);
 }
 
 double true_node_value(CachedEvaluator& evaluator,

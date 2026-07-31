@@ -62,11 +62,9 @@ void build_power_spec(const SolverData& data,
   // pdc_spec is the net DC injection (generation positive, load negative),
   // mirroring the AC convention p_spec = pg - pd above. Bus-level DC demand is
   // therefore a negative injection.
-  if (data.dc_loads.empty()) {
-    for (int i = 0; i < ndc; ++i) {
-      pdc_spec[i] =
-          -data.dc_buses[static_cast<size_t>(i)].pd_mw / data.base_mva;
-    }
+  for (int i = 0; i < ndc; ++i) {
+    pdc_spec[i] =
+        -data.dc_buses[static_cast<size_t>(i)].pd_mw / data.base_mva;
   }
   // DC-side storage: positive p_mw = discharge = generation.
   for (const auto& st : data.dc_storage) {

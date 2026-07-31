@@ -18,6 +18,8 @@
 #include "hacdcpf/power_flow/lcc_model.hpp"
 #include "hacdcpf/power_flow/dc_solver.hpp"
 #include "hacdcpf/power_flow/fdpf_solver.hpp"
+#include "hacdcpf/power_flow/helm_solver.hpp"
+#include "hacdcpf/power_flow/homotopy_continuation.hpp"
 #include "hacdcpf/power_flow/newton_solver.hpp"
 #include "hacdcpf/assembly/solver_data.hpp"
 #include "hacdcpf/power_flow/adaptive_solver.hpp"
@@ -33,6 +35,10 @@ struct SolverHandle {
   powerflow::DCSolver dc_solver;
   LossModelType configured_loss_model{LossModelType::Linear};
   std::unordered_map<int, int> original_vsc_bus_ac;
+  std::unordered_map<int, int> original_vsc_bus_dc;
+  std::unordered_map<int, int> original_lcc_bus_ac;
+  std::unordered_map<int, int> original_lcc_bus_dc;
+  std::unordered_map<int, std::pair<int, int>> original_dcdc_buses;
   size_t authored_ac_branch_count{0};
 };
 
@@ -448,26 +454,14 @@ bool same_storage_view(const SolverDataCache::StorageView& cached, const HybridP
 
 powerflow::SolverData& get_cached_solver_data(const HybridPowerSystem& sys, LossModelType loss_model) {
   thread_local SolverDataCache cache;
-
-  // Hot-path reuse for repeated solves on an unchanged system object.
-  // Requires pointer match, storage view match, AND hash consistency to
-  // guard against dangling-pointer aliasing (e.g. a stack-local copy that
-  // was destroyed and reallocated at the same address with different data).
-  if (cache.valid && cache.system_ptr == &sys && cache.loss_model == loss_model &&
-      same_storage_view(cache.storage, sys)) {
-    const std::uint64_t sig = hash_system_signature(sys, loss_model);
-    if (cache.signature == sig) {
-      return cache.data;
-    }
-  }
-
-  const std::uint64_t sig = hash_system_signature(sys, loss_model);
-  if (!cache.valid || cache.signature != sig || cache.loss_model != loss_model) {
-    cache.data = powerflow::make_solver_data(sys, loss_model);
-    cache.signature = sig;
-    cache.loss_model = loss_model;
-    cache.valid = true;
-  }
+  // The facade accepts a mutable rich model by const reference. A handwritten
+  // field hash cannot prove that every assembly-relevant field is unchanged,
+  // so implicit reuse risks solving stale Ybus/injection data. Performance
+  // callers use the explicit SolverHandle lifecycle instead.
+  cache.data = powerflow::make_solver_data(sys, loss_model);
+  cache.signature = hash_system_signature(sys, loss_model);
+  cache.loss_model = loss_model;
+  cache.valid = true;
   cache.system_ptr = &sys;
   cache.storage = capture_storage_view(sys);
   return cache.data;
@@ -480,6 +474,21 @@ void rebuild_handle_data(SolverHandle& handle,
                          const HybridPowerSystem& sys,
                          LossModelType loss_model) {
   handle.original_vsc_bus_ac = build_original_vsc_ac_bus_map(sys);
+  handle.original_vsc_bus_dc.clear();
+  handle.original_lcc_bus_ac.clear();
+  handle.original_lcc_bus_dc.clear();
+  handle.original_dcdc_buses.clear();
+  for (const auto& converter : sys.vsc_converters) {
+    handle.original_vsc_bus_dc[converter.index] = converter.bus_dc;
+  }
+  for (const auto& converter : sys.lcc_converters) {
+    handle.original_lcc_bus_ac[converter.index] = converter.ac_bus;
+    handle.original_lcc_bus_dc[converter.index] = converter.dc_bus;
+  }
+  for (const auto& converter : sys.dc.dcdc_converters) {
+    handle.original_dcdc_buses[converter.index] =
+        {converter.bus_in, converter.bus_out};
+  }
   handle.authored_ac_branch_count = sys.ac.branches.size();
   handle.data = powerflow::make_solver_data(sys, loss_model);
   handle.configured_loss_model = loss_model;
@@ -905,6 +914,49 @@ void restore_original_lcc_bus_ac(PowerFlowResult& result,
   }
 }
 
+void restore_original_dc_bus_ids(
+    PowerFlowResult& result,
+    const std::unordered_map<int, int>& vsc_bus_dc,
+    const std::unordered_map<int, int>& lcc_bus_dc,
+    const std::unordered_map<int, std::pair<int, int>>& dcdc_buses) {
+  for (auto& transfer : result.vsc_transfers) {
+    const auto it = vsc_bus_dc.find(transfer.index);
+    if (it != vsc_bus_dc.end()) transfer.bus_dc = it->second;
+  }
+  for (auto& converter : result.diagnostics.effective_converters) {
+    const auto it = vsc_bus_dc.find(converter.index);
+    if (it != vsc_bus_dc.end()) converter.bus_dc = it->second;
+  }
+  for (auto& transfer : result.lcc_transfers) {
+    const auto it = lcc_bus_dc.find(transfer.index);
+    if (it != lcc_bus_dc.end()) transfer.bus_dc = it->second;
+  }
+  for (auto& transfer : result.dcdc_transfers) {
+    const auto it = dcdc_buses.find(transfer.index);
+    if (it != dcdc_buses.end()) {
+      transfer.bus_in = it->second.first;
+      transfer.bus_out = it->second.second;
+    }
+  }
+}
+
+void restore_original_dc_bus_ids(PowerFlowResult& result,
+                                 const HybridPowerSystem& sys) {
+  std::unordered_map<int, int> vsc_bus_dc;
+  std::unordered_map<int, int> lcc_bus_dc;
+  std::unordered_map<int, std::pair<int, int>> dcdc_buses;
+  for (const auto& converter : sys.vsc_converters) {
+    vsc_bus_dc[converter.index] = converter.bus_dc;
+  }
+  for (const auto& converter : sys.lcc_converters) {
+    lcc_bus_dc[converter.index] = converter.dc_bus;
+  }
+  for (const auto& converter : sys.dc.dcdc_converters) {
+    dcdc_buses[converter.index] = {converter.bus_in, converter.bus_out};
+  }
+  restore_original_dc_bus_ids(result, vsc_bus_dc, lcc_bus_dc, dcdc_buses);
+}
+
 void unproject_branch_flows(PowerFlowResult& result, const BusMergeMap& map,
                             size_t authored_branch_count) {
   if (map.n_original_branches <= 0 || map.branch_orig_to_proj.empty()) return;
@@ -1149,6 +1201,7 @@ PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOp
   }
   restore_original_vsc_bus_ac(result, sys);
   restore_original_lcc_bus_ac(result, sys);
+  restore_original_dc_bus_ids(result, sys);
   if (data.bus_merge_map) {
     unproject_pf_result(result, *data.bus_merge_map, sys.ac.branches.size());
   } else if (result.branch_flows.size() > sys.ac.branches.size()) {
@@ -1305,6 +1358,13 @@ PowerFlowResult solve_handle(SolverHandle* handle, const PowerFlowOptions& opt) 
   PowerFlowResult result = handle->newton_solver.solve(handle->data, opt, nullptr);
   populate_derived_results(handle->data, result, opt.loss_model);
   restore_original_vsc_bus_ac(result, handle->original_vsc_bus_ac);
+  for (auto& transfer : result.lcc_transfers) {
+    const auto it = handle->original_lcc_bus_ac.find(transfer.index);
+    if (it != handle->original_lcc_bus_ac.end()) transfer.bus_ac = it->second;
+  }
+  restore_original_dc_bus_ids(result, handle->original_vsc_bus_dc,
+                              handle->original_lcc_bus_dc,
+                              handle->original_dcdc_buses);
   if (handle->data.bus_merge_map) {
     unproject_pf_result(result, *handle->data.bus_merge_map,
                         handle->authored_ac_branch_count);
@@ -1343,6 +1403,7 @@ PowerFlowResult solve_power_flow_fdpf(const HybridPowerSystem& sys,
   populate_derived_results(data, result, opt.loss_model);
   restore_original_vsc_bus_ac(result, sys);
   restore_original_lcc_bus_ac(result, sys);
+  restore_original_dc_bus_ids(result, sys);
   if (data.bus_merge_map) {
     unproject_pf_result(result, *data.bus_merge_map, sys.ac.branches.size());
   } else if (result.branch_flows.size() > sys.ac.branches.size()) {
@@ -1350,6 +1411,93 @@ PowerFlowResult solve_power_flow_fdpf(const HybridPowerSystem& sys,
   }
   trim_internal_dc_bus_results(result, data.projection_certificate);
   return result;
+}
+
+PowerFlowResult solve_power_flow_helm(
+    const HybridPowerSystem& sys,
+    const PowerFlowOptions& opt,
+    const powerflow::HelmOptions& helm_opt) {
+  const bool has_hybrid_assets =
+      !sys.dc.buses.empty() || !sys.dc.branches.empty() ||
+      !sys.vsc_converters.empty() || !sys.lcc_converters.empty() ||
+      !sys.dc.dcdc_converters.empty() || !sys.energy_routers.empty();
+  if (has_hybrid_assets) {
+    PowerFlowResult result;
+    result.diagnostics.termination_reason =
+        "HELM facade supports the balanced AC subsystem only";
+    result.diagnostics.warnings.push_back(
+        "HELM was not run because the model contains DC buses or AC/DC/DC-DC "
+        "converter assets; use unified Newton, homotopy, or Newton-Krylov.");
+    result.converter_model_scope.model_scope = "ac-only-helm:not-applicable-to-hybrid";
+    return result;
+  }
+
+  const auto nonconstant_zip = [](const Load& load) {
+    return load.in_service &&
+           (std::abs(load.z_percent_p) > 1e-12 ||
+            std::abs(load.i_percent_p) > 1e-12 ||
+            std::abs(load.z_percent_q) > 1e-12 ||
+            std::abs(load.i_percent_q) > 1e-12);
+  };
+  const bool option_zip =
+      std::abs(opt.zip_pw[1]) > 1e-12 || std::abs(opt.zip_pw[2]) > 1e-12 ||
+      std::abs(opt.zip_qw[1]) > 1e-12 || std::abs(opt.zip_qw[2]) > 1e-12;
+  if (option_zip || std::any_of(sys.ac.loads.begin(), sys.ac.loads.end(),
+                                nonconstant_zip)) {
+    PowerFlowResult result;
+    result.diagnostics.termination_reason =
+        "HELM facade requires constant-power load models";
+    result.diagnostics.warnings.push_back(
+        "Voltage-dependent ZIP load terms are not embedded by this HELM "
+        "implementation; the solve was rejected instead of silently treating "
+        "them as constant power.");
+    result.converter_model_scope.model_scope = "ac-only-helm:constant-power-loads";
+    return result;
+  }
+
+  powerflow::SolverData& data = get_cached_solver_data(sys, opt.loss_model);
+  apply_zip_weights(data, opt);
+  powerflow::HelmSolver solver;
+  solver.helm_opts = helm_opt;
+  PowerFlowResult result = solver.solve(data, opt);
+  populate_derived_results(data, result, opt.loss_model);
+  if (data.bus_merge_map) {
+    unproject_pf_result(result, *data.bus_merge_map, sys.ac.branches.size());
+  } else if (result.branch_flows.size() > sys.ac.branches.size()) {
+    result.branch_flows.resize(sys.ac.branches.size());
+  }
+  result.converter_model_scope.model_scope =
+      "ac-only-helm:constant-power-pq-pv-slack";
+  return result;
+}
+
+PowerFlowResult solve_power_flow_homotopy(
+    const HybridPowerSystem& sys,
+    const PowerFlowOptions& opt) {
+  powerflow::HomotopyContinuationSolver solver;
+  powerflow::HomotopyState state;
+  PowerFlowResult result = solver.solve(sys, opt, state);
+  result.diagnostics.warnings.push_back(
+      "Explicit homotopy path: lambda=" + std::to_string(state.lambda) +
+      ", accepted=" + std::to_string(state.accepted_steps) +
+      ", rejected=" + std::to_string(state.rejected_steps) + ".");
+  if (state.failed) {
+    result.converged = false;
+    result.diagnostics.converged = false;
+    result.diagnostics.termination_reason =
+        "Explicit homotopy path did not reach full loading";
+  }
+  return result;
+}
+
+PowerFlowResult solve_power_flow_newton_krylov(
+    const HybridPowerSystem& sys,
+    const PowerFlowOptions& opt) {
+  PowerFlowOptions krylov_opt = opt;
+  krylov_opt.robust_nonlinear.enable_condition_monitor = true;
+  krylov_opt.robust_nonlinear.enable_newton_krylov_fallback = true;
+  krylov_opt.robust_nonlinear.nk_condition_trigger = 0.0;
+  return solve_power_flow(sys, krylov_opt);
 }
 
 powerflow::ACLinearizedDCResult solve_ac_dc_power_flow(const HybridPowerSystem& sys,

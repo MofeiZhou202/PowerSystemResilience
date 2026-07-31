@@ -43,7 +43,10 @@ hacdcpf_add_test(test_uc_storage_efficiency test_uc_storage_efficiency.cpp)
 hacdcpf_add_test(test_uc_vpp               test_uc_vpp.cpp)
 hacdcpf_add_test(test_uc_energy_router     test_uc_energy_router.cpp)
 hacdcpf_add_test(test_uc_mobile_storage    test_uc_mobile_storage.cpp)
-hacdcpf_add_test(test_market_simulation    test_market_simulation.cpp)
+# MIPSolvers full-dev also owns a test_market_simulation target. Keep this
+# project's executable target distinct so both dependency and application
+# integration suites can be configured in the same CTest tree.
+hacdcpf_add_test(hacdcpf_test_market_simulation test_market_simulation.cpp)
 hacdcpf_add_test(test_integrated_energy_campus test_integrated_energy_campus.cpp)
 hacdcpf_add_test(test_scaling_regression  test_scaling_regression.cpp)
 hacdcpf_add_test(test_hacdcdss            test_hacdcdss.cpp)

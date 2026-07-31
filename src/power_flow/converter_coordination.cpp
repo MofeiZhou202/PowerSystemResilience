@@ -858,7 +858,7 @@ ConverterCoordinationReport evaluate_converter_coordination(const HybridPowerSys
                       "otherwise the island is reported as having no reference.");
       }
     }
-    if (sys.dc.loads.empty() && std::abs(bus.pd_mw) > kTol) {
+    if (std::abs(bus.pd_mw) > kTol) {
       summary.fixed_power_devices += 1;
       summary.fixed_power_mw -= bus.pd_mw;
     }

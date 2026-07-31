@@ -908,16 +908,15 @@ TopoReconfResult run_topology_reconfiguration(
     Pd_pu[it->second] += ld.p_mw / base_mva;
     Qd_pu[it->second] += ld.q_mvar / base_mva;
   }
-  if (!dc.loads.empty()) {
-    for (const auto& ld : dc.loads) {
-      auto it = dc_id_map.find(ld.bus);
-      if (it == dc_id_map.end()) continue;
-      Pd_pu[it->second] += model::effective_load_p_mw(ld) / base_mva;
-    }
-  } else {
-    for (int i = 0; i < nb_dc; ++i) {
-      Pd_pu[nb_ac + i] += dc.buses[i].pd_mw / base_mva;
-    }
+  for (const auto& ld : dc.loads) {
+    if (!ld.in_service) continue;
+    auto it = dc_id_map.find(ld.bus);
+    if (it == dc_id_map.end()) continue;
+    Pd_pu[it->second] += model::effective_load_p_mw(ld) / base_mva;
+  }
+  for (int i = 0; i < nb_dc; ++i) {
+    if (!dc.buses[i].in_service) continue;
+    Pd_pu[nb_ac + i] += dc.buses[i].pd_mw / base_mva;
   }
   for (int i = 0; i < nb_ac; ++i) {
     Pd_pu[i] += ac.buses[i].pd_mw / base_mva;

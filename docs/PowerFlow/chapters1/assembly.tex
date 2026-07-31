@@ -1,0 +1,168 @@
+% 第 2 章：SolverData 装配与网络矩阵
+% 本章文件由 \input 引入，不含导言区。
+\section{SolverData 装配与网络矩阵}\label{sec:assembly}
+
+\subsection{SolverData 结构}
+
+\compmeta{SolverData}{\srcpath{include/hacdcpf/assembly/solver\_data.hpp}}
+
+\subsubsection*{功能说明}
+\texttt{SolverData} 是潮流求解的\textbf{扁平 POD 数据底座}：rich 工程模型经
+canonical 投影后，全部网络、设备、预聚合注入与矩阵以 0-based 向量形式集中存放，
+求解器不再接触工程语义层。它同时携带投影回溯映射与精确 Newton 的开关量，
+是"装配一次、多求解器复用"的核心（FDPF、DC、Newton、CPF 校正器均以其为输入）。
+
+\subsubsection*{字段分组}
+（\srcpath{solver\_data.hpp:21--82}）
+\begin{itemize}
+  \item \textbf{网络}：\fld{ac\_buses}、\fld{ac\_branches}、\fld{dc\_buses}、
+        \fld{dc\_branches}、\fld{converters}（VSC）、\fld{dcdc\_converters}、
+        \fld{energy\_routers}、\fld{switches}；
+  \item \textbf{设备}：AC 侧 \fld{generators}、\fld{loads}、\fld{flexible\_loads}、
+        \fld{static\_generators}、\fld{renewable\_gens}、\fld{pv\_systems}、
+        \fld{storage\_units}；DC 侧 \fld{dc\_loads}、\fld{dc\_storage}、
+        \fld{dc\_static\_generators}、\fld{dc\_pv\_arrays}；另有 \fld{shunts}、
+        \fld{charging\_stations}、\fld{chargers}、\fld{external\_grids}、
+        \fld{vpps}、\fld{microgrids}、\fld{mobile\_storage}；
+  \item \textbf{标量与 ZIP}：\fld{base\_mva}=100、\fld{loss\_model}=Linear、
+        \fld{zip\_pw[3]}/\fld{zip\_qw[3]}=\{1,0,0\}；
+  \item \textbf{负荷聚合缓存}：\fld{has\_component\_loads}、\fld{pd\_pu}/\fld{qd\_pu}、
+        每母线 ZIP 权重 \fld{bus\_zip\_zp}/\fld{\_ip}/\fld{\_pp}/\fld{\_zq}/\fld{\_iq}/\fld{\_pq}；
+  \item \textbf{精确 Newton 开关}：\fld{enable\_coupled\_jacobian}、
+        \fld{enable\_augmented\_equations}、\fld{enable\_semi\_smooth\_newton}、\fld{ncp\_mu}；
+  \item \textbf{预聚合注入与矩阵}：\fld{pg}、\fld{qg}（Eigen 向量）、
+        \fld{ybus}（稀疏复数阵）、\fld{gdc}（稀疏实数阵）、\fld{build\_id}（原子递增缓存键）；
+  \item \textbf{投影回溯}：\fld{bus\_merge\_map}、\fld{projection\_certificate}、
+        \fld{projection\_report}（\texttt{std::optional}）。
+\end{itemize}
+配套映射类型 \srcpath{BusIndexMap}/\srcpath{BranchIndexMap}/\srcpath{SystemIndexMap}
+见 \srcpath{include/hacdcpf/assembly/index\_map.hpp:17--48}。
+
+\subsection{装配流程}
+入口 \srcpath{make\_solver\_data(const HybridPowerSystem\&, LossModelType)}
+（\srcpath{src/power\_flow/solver\_data.cpp:265}），步骤：
+\begin{enumerate}
+  \item rich$\to$canonical 投影 \srcpath{projection::RichToCanonicalOperator::apply}
+        （:268--269，含开关/零阻抗合并）；
+  \item \srcpath{materialize\_dc\_storage} 与逐字段 move；\texttt{StaticGeneratorDC}
+        转换为 \texttt{StaticGenerator}（:293--306）；
+  \item \fld{build\_id} 取自原子计数器（:266,319），作为全部缓存的失效标记；
+  \item \textbf{ExternalGrid 处理}（:327--337）：把母线 \fld{vm\_pu}/\fld{va\_deg}
+        写为外部电网整定，并将该母线 PQ 提升为 SLACK；
+  \item \textbf{成网换流器提升} \srcpath{apply\_acpv\_voltage\_control}（:236--263）：
+        按 \srcpath{resolve\_device\_control\_role}，AC\_GRID\_FORMING 换流器的交流母线
+        提升为 SLACK 并钉住 \fld{v\_ac\_set\_pu}/\fld{v\_ac\_angle\_set\_deg}；
+        AC\_PV / DC\_V\_DROOP\_AC\_V 模式提升为 PV；已有 SLACK 不动；
+  \item \srcpath{rebuild\_matrices}（:214--219）$=$ 发电聚合 $+$ 负荷聚合 $+$
+        $Y_{bus}$ 构建 $+$ $G_{dc}$ 构建。
+\end{enumerate}
+
+\subsection{注入聚合（指定功率）}
+\subsubsection*{发电聚合}
+\srcpath{aggregate\_generation}（solver\_data.cpp:15--94）把下列注入聚进
+\fld{pg}/\fld{qg}（除以 \fld{base\_mva} 转 pu）：发电机、
+\texttt{StaticGenerator}（$p\cdot$\fld{scaling}）、可再生能源、
+PV（经功率曲线 \srcpath{compute\_pv\_power\_mw}，见第~\ref{sec:distribution}~章）、
+储能（放电为正）、VPP（PCC 交换功率）、并网微网（\fld{p\_exchange} 出口为正）、
+非在途移动储能。
+
+\subsubsection*{负荷聚合与 ZIP 归一化}
+\srcpath{aggregate\_load\_demand}（solver\_data.cpp:96--212）：
+Load 表为空（且无充电站）时 \fld{has\_component\_loads}=false，回退母线级
+\fld{pd\_mw}/\fld{qd\_mvar}；否则以母线级需求为底（恒定功率，ZIP 种子 $(1,0,0)$），
+叠加 $p_{\mathrm{mw}}\cdot$\fld{scaling} 的分量负荷，并按 $|P|/|Q|$ 加权平均
+归一化出每母线 ZIP 系数（:160--168, 193--211）。充电站恒功率叠加
+（kW$\to$MW，:173--188）。潮流方程中的指定注入为
+（\srcpath{src/power\_flow/jacobian\_builder.cpp:58--59}）：
+\begin{align*}
+P_i^{\mathrm{spec}} &= P_{g,i}-p_{d,i}\big(w_{p0}+w_{p1}V_i+w_{p2}V_i^2\big)\\
+Q_i^{\mathrm{spec}} &= Q_{g,i}-q_{d,i}\big(w_{q0}+w_{q1}V_i+w_{q2}V_i^2\big)
+\end{align*}
+权重顺序 $w_0$=恒功率、$w_1$=恒电流、$w_2$=恒阻抗。VSC 交流注入经
+\srcpath{converter\_ac\_injection} 加入 spec（jacobian\_builder.cpp:137--178）。
+
+\subsection{交流导纳阵 $Y_{bus}$}
+\srcpath{build\_admittance\_matrix(data)}（\srcpath{src/power\_flow/admittance\_builder.cpp:11--88}），
+π 型支路 + 复变比（MATPOWER \texttt{makeYbus} 约定）。对在役支路 $i\to j$
+（\fld{from\_bus}/\fld{to\_bus} 为 1-based，代码中 $-1$）：
+\begin{align*}
+y_s &= \frac{1}{r+\mathrm{j}x},\qquad
+y_{tt} = y_s+\mathrm{j}\frac{b}{2},\qquad
+\hat{t} = |\mathrm{tap}|\,\mathrm{e}^{\mathrm{j}\,\mathrm{shift}\cdot\pi/180}\\
+Y_{ff} &= \frac{y_{tt}}{|\hat{t}|^2},\qquad
+Y_{ft} = -\frac{y_s}{\hat{t}^{*}},\qquad
+Y_{tf} = -\frac{y_s}{\hat{t}}
+\end{align*}
+对角元累加 $Y_{ii}\leftarrow Y_{ii}+Y_{ff}$、$Y_{jj}\leftarrow Y_{jj}+y_{tt}$，
+非对角元 $Y_{ij}=Y_{ft}$、$Y_{ji}=Y_{tf}$（:38--57）。\fld{tap}=0 按 1.0 处理；
+$|z|=0$ 支路跳过（:34，正常已被投影层合并）。母线对地并联（$V=1.0$~pu 功率口径，
+MATPOWER 惯例）直接入对角（:61--65）：
+\[
+Y_{ii}\leftarrow Y_{ii}+\frac{g_s+\mathrm{j}b_s}{S_{\mathrm{base}}}
+\]
+独立 \texttt{Shunt} 表同样入对角；可投切并联按
+\fld{bs\_per\_step}$\times$\fld{current\_step} 取值（:68--80）。
+装配用三元组列表 + \texttt{setFromTriplets}。
+
+\subsection{直流电导阵 $G_{dc}$}
+\srcpath{build\_dc\_conductance(data)}（admittance\_builder.cpp:90--125）：
+正对角 Laplacian。对在运且 $r_{pu}\neq 0$ 的 DC 支路取
+\[
+g=\frac{1}{r_{pu}},\qquad G_{ii}\leftarrow G_{ii}+g,\qquad G_{ij}=G_{ji}=-g
+\]
+（:101--117）。DC 节点功率方程为 $\mathbf p_{dc}=\mathbf v_{dc}\odot(G_{dc}\mathbf v_{dc})$
+（jacobian\_builder.cpp:285--286）。
+
+\subsection{FDPF 电纳阵 $B'/B''$}
+\srcpath{build\_susceptance\_matrix}（admittance\_builder.cpp:127--182）取
+$-\mathrm{Im}(Y^{\mathrm{mod}}_{ij})$，构型由 \texttt{BpBuildFlags} 控制
+（\fld{zero\_resistance}/\fld{zero\_charging}/\fld{unit\_tap}/\fld{zero\_phase\_shift}/%
+\fld{add\_bus\_shunts}/\fld{min\_x\_pu}，头文件
+\srcpath{include/hacdcpf/assembly/ybus\_builder.hpp:21--33}）：
+\begin{itemize}
+  \item $B'$（\srcpath{make\_bp\_flags}）：\textbf{FDXB} 方案——$R=0$、忽略充电、
+        变比幅值取 1、相移取 0、不含母线并联；$|x|<$\fld{min\_x\_pu} 的支路跳过；
+  \item $B''$（\srcpath{make\_bpp\_flags}）：\textbf{FDBX} 风格——保留 $R$、充电与变比
+        （即 $-\mathrm{Im}(Y)$ 全量）、相移取 0，并加母线并联 $-B_s/S_{\mathrm{base}}$。
+\end{itemize}
+
+\subsection{DC 注入装配与残差独立复算}
+\srcpath{assemble\_dc\_injections(data, vm, va, vdc, pdc\_spec)}
+（\srcpath{src/power\_flow/pf\_injection\_assembly.cpp:12--101}），净注入约定发电为正：
+DC 负荷为负（Load 表空时回退母线 \fld{pd\_mw}，:25--37）、DC 储能放电为正、
+静态发电机 $p\cdot$\fld{scaling}、PV 阵列 \fld{p\_set}、VSC 经
+\srcpath{converter\_dc\_injection}、DC/DC（入端 $-P_{in}$、出端 $+P_{out}$，
+含 $I^2R$ 损耗，:79--88）、能量路由器 DC 端口。DC 参考选择
+\srcpath{first\_dc\_slack\_or\_default}（\srcpath{pf\_utils.hpp:34--46}）。
+
+\srcpath{evaluate\_power\_flow\_residual}（\srcpath{src/power\_flow/residual\_evaluator.cpp:37--155}）
+提供独立于 Newton 热路径的残差复算，返回 \{ac, dc, full\} 三块 $\ell_\infty$ 范数，
+供诊断与测试交叉校验。交流注入采用\textbf{稀疏复数形式}
+\srcpath{compute\_ac\_power\_injections}（:14--33）：$\mathbf V=\mathrm{polar}(V_m,\theta)$，
+$\mathbf I=Y_{bus}\mathbf V$ 为一次稀疏矩阵-向量乘，$S_i=V_i\,\overline{I_i}$
+（:23--32，调用点 :72），复杂度 $O(\mathrm{nnz}(Y_{bus}))$，不再把 $Y_{bus}$
+稠密化后做 $O(n^2)$ 双重循环（数学上与逐元素 $g\cos\theta+b\sin\theta$ 求和等价）。
+其母线分类用
+\srcpath{classify\_ac\_buses}（\srcpath{pf\_utils.hpp:80--98}，额外 SLACK 归 PV），
+与 Newton 上下文（额外 SLACK 整体剔除）略有差异。
+
+\subsection{支路功率回算}
+求解收敛后 \srcpath{compute\_branch\_flows}（\srcpath{src/power\_flow/branch\_flow.cpp:8}）
+按 π 等值 + 复变比逐支路回算两端功率（:36--63）：
+\begin{align*}
+S_f &= V_f\,\overline{\big(y_{ff}V_f+y_{ft}V_t\big)}\cdot S_{\mathrm{base}}\\
+S_t &= V_t\,\overline{\big(y_{tf}V_f+y_{tt}V_t\big)}\cdot S_{\mathrm{base}}
+\end{align*}
+输出 \texttt{BranchFlow\{pf\_mw, qf\_mvar, pt\_mw, qt\_mvar\}}（MW/Mvar），
+按 \fld{data.ac\_branches} 顺序；停运/零阻抗支路保持 0。注意：本文件名为
+"branch\_flow" 但\textbf{不是} Baran--Wu 支路潮流法；配网前推回代见
+第~\ref{sec:distribution}~章。
+
+\subsection{验证与校核}
+装配层的验证以端到端方式覆盖：85 个 MATPOWER 算例的电压对照直接检验 $Y_{bus}$
+装配（含分接头/移相/充电的正确性）；\srcpath{tools/transformer\_tap\_crosscheck.py}
+对 12 组双节点变压器配置做 pandapower/MATPOWER/本平台三向对照；ZIP 聚合与
+换流器提升逻辑由 \srcpath{tests/test\_all\_components\_pf.cpp}（29 类组件逐类禁用、
+解变化量阈值断言）与 \srcpath{tests/test\_dc\_island\_reference.cpp} 覆盖；
+投影幂等性、合并映射复合与结果恢复由投影蜕变测试与
+\srcpath{tools/gui\_api\_e2e.py}（Bus 1 P/Q 闭合）保证。

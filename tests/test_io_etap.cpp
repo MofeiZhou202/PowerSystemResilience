@@ -767,10 +767,37 @@ TEST_CASE("ETAP I/O preserves power-flow solvability (case14)",
   REQUIRE_NOTHROW(save_etap(orig, path));
   HybridPowerSystem restored;
   REQUIRE_NOTHROW(restored = load_etap(path));
+  const EtapFidelityReport fidelity = etap_fidelity_check(orig);
+  for (const auto& mismatch : fidelity.mismatches) WARN(mismatch);
+  CHECK(fidelity.lossless);
 
   // Topology is preserved.
   REQUIRE(restored.ac.buses.size() == orig.ac.buses.size());
   REQUIRE(restored.ac.branches.size() == orig.ac.branches.size());
+  REQUIRE(restored.ac.generators.size() == orig.ac.generators.size());
+  for (size_t i = 0; i < orig.ac.buses.size(); ++i) {
+    CHECK(restored.ac.buses[i].bus_type == orig.ac.buses[i].bus_type);
+    CHECK_THAT(restored.ac.buses[i].vm_pu,
+               WithinAbs(orig.ac.buses[i].vm_pu, 1e-12));
+    CHECK_THAT(restored.ac.buses[i].va_deg,
+               WithinAbs(orig.ac.buses[i].va_deg, 1e-12));
+    CHECK_THAT(restored.ac.buses[i].gs_mw,
+               WithinAbs(orig.ac.buses[i].gs_mw, 1e-12));
+  }
+  for (size_t i = 0; i < orig.ac.branches.size(); ++i) {
+    CHECK_THAT(restored.ac.branches[i].tap,
+               WithinAbs(orig.ac.branches[i].tap, 1e-12));
+    CHECK_THAT(restored.ac.branches[i].shift_deg,
+               WithinAbs(orig.ac.branches[i].shift_deg, 1e-12));
+  }
+  for (size_t i = 0; i < orig.ac.generators.size(); ++i) {
+    CHECK_THAT(restored.ac.generators[i].qg_mvar,
+               WithinAbs(orig.ac.generators[i].qg_mvar, 1e-12));
+    CHECK_THAT(restored.ac.generators[i].vg_pu,
+               WithinAbs(orig.ac.generators[i].vg_pu, 1e-12));
+    CHECK(restored.ac.generators[i].is_slack ==
+          orig.ac.generators[i].is_slack);
+  }
 
   // Power flow on the ETAP round-trip must converge to the same voltages.
   const PowerFlowResult r_orig = solve_power_flow(orig);

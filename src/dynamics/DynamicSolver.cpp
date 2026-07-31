@@ -281,18 +281,22 @@ bool apply_event_to_network(DynamicSystem& sys, const DynamicEvent& event) {
       break;
     }
     case DynamicEventType::ACLoadScale: {
+      const int event_bus = static_cast<int>(std::llround(
+          event_param(event, "canonical_bus", event.bus)));
       for (auto& load : sys.network.ac_bus_loads) {
-        if (event.bus != 0 && load.bus != event.bus) continue;
-        if (event.bus == 0 && event.component_index != 0 && load.bus != event.component_index) continue;
+        if (event_bus != 0 && load.bus != event_bus) continue;
+        if (event_bus == 0 && event.component_index != 0 && load.bus != event.component_index) continue;
         load.scale = std::max(0.0, event_param(event, "scale", event.value));
         rebuild = true;
       }
       break;
     }
     case DynamicEventType::DCLoadScale: {
+      const int event_bus = static_cast<int>(std::llround(
+          event_param(event, "canonical_bus", event.bus)));
       for (auto& load : sys.network.dc_bus_loads) {
-        if (event.bus != 0 && load.bus != event.bus) continue;
-        if (event.bus == 0 && event.component_index != 0 && load.bus != event.component_index) continue;
+        if (event_bus != 0 && load.bus != event_bus) continue;
+        if (event_bus == 0 && event.component_index != 0 && load.bus != event.component_index) continue;
         load.scale = std::max(0.0, event_param(event, "scale", event.value));
         rebuild = true;
       }

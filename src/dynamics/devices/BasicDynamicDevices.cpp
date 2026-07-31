@@ -2295,8 +2295,12 @@ void DynamicLoad::addJacobian(double,
 
 void DynamicLoad::handleEvent(const DynamicEvent& event, DynamicState&, NetworkState&) {
   if (event.type != DynamicEventType::ACLoadScale) return;
-  const bool bus_targeted = event.bus != 0;
-  if (bus_targeted && event.bus != params_.bus) return;
+  const auto canonical_bus = event.params.find("canonical_bus");
+  const int event_bus = canonical_bus == event.params.end()
+                            ? event.bus
+                            : static_cast<int>(std::llround(canonical_bus->second));
+  const bool bus_targeted = event_bus != 0;
+  if (bus_targeted && event_bus != params_.bus) return;
   if (!bus_targeted && event.component_index != 0 &&
       event.component_index != params_.component_index) {
     return;
@@ -2536,8 +2540,12 @@ void ThreePhaseDynamicLoad::handleEvent(const DynamicEvent& event,
                                         DynamicState&,
                                         NetworkState&) {
   if (event.type != DynamicEventType::ACLoadScale) return;
-  const bool bus_targeted = event.bus != 0;
-  if (bus_targeted && event.bus != params_.bus) return;
+  const auto canonical_bus = event.params.find("canonical_bus");
+  const int event_bus = canonical_bus == event.params.end()
+                            ? event.bus
+                            : static_cast<int>(std::llround(canonical_bus->second));
+  const bool bus_targeted = event_bus != 0;
+  if (bus_targeted && event_bus != params_.bus) return;
   if (!bus_targeted && event.component_index != 0 &&
       event.component_index != params_.component_index) {
     return;
@@ -2615,8 +2623,12 @@ void DCDynamicLoad::addJacobian(double,
 
 void DCDynamicLoad::handleEvent(const DynamicEvent& event, DynamicState&, NetworkState&) {
   if (event.type != DynamicEventType::DCLoadScale) return;
-  const bool bus_targeted = event.bus != 0;
-  if (bus_targeted && event.bus != params_.bus) return;
+  const auto canonical_bus = event.params.find("canonical_bus");
+  const int event_bus = canonical_bus == event.params.end()
+                            ? event.bus
+                            : static_cast<int>(std::llround(canonical_bus->second));
+  const bool bus_targeted = event_bus != 0;
+  if (bus_targeted && event_bus != params_.bus) return;
   if (!bus_targeted && event.component_index != 0 &&
       event.component_index != params_.component_index) {
     return;

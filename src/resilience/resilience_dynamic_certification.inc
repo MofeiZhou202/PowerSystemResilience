@@ -25,6 +25,43 @@ struct BusServiceState {
   double ratio{1.0};
 };
 
+struct CanonicalBusIds {
+  std::unordered_map<int, int> ac;
+  std::unordered_map<int, int> dc;
+
+  int resolve(const std::string& domain, int authored_bus) const {
+    const auto& mapping = domain == "DC" ? dc : ac;
+    const auto it = mapping.find(authored_bus);
+    return it == mapping.end() ? authored_bus : it->second;
+  }
+};
+
+CanonicalBusIds canonical_bus_ids(const HybridPowerSystem& authored,
+                                  const HybridPowerSystem& canonical) {
+  CanonicalBusIds out;
+  if (canonical.bus_merge_map) {
+    out.ac.reserve(canonical.bus_merge_map->ext_to_int.size());
+    for (const auto& [external, internal] :
+         canonical.bus_merge_map->ext_to_int) {
+      out.ac[external] = internal + 1;
+    }
+  } else {
+    const std::size_t count =
+        std::min(authored.ac.buses.size(), canonical.ac.buses.size());
+    out.ac.reserve(count);
+    for (std::size_t i = 0; i < count; ++i) {
+      out.ac[authored.ac.buses[i].index] = canonical.ac.buses[i].index;
+    }
+  }
+  const std::size_t dc_count =
+      std::min(authored.dc.buses.size(), canonical.dc.buses.size());
+  out.dc.reserve(dc_count);
+  for (std::size_t i = 0; i < dc_count; ++i) {
+    out.dc[authored.dc.buses[i].index] = canonical.dc.buses[i].index;
+  }
+  return out;
+}
+
 std::unordered_map<BusServiceKey, BusServiceState> service_map(
     const DistributionResilienceStepResult& step) {
   std::unordered_map<BusServiceKey, BusServiceState> out;
@@ -46,34 +83,39 @@ std::unordered_map<BusServiceKey, BusServiceState> service_map(
 }
 
 void apply_bus_service_ratio(HybridPowerSystem& system,
-                             const BusServiceState& service) {
+                             const BusServiceState& service,
+                             const CanonicalBusIds& bus_ids) {
+  const int canonical_bus = bus_ids.resolve(service.domain, service.bus);
   if (service.domain == "AC") {
     for (auto& bus : system.ac.buses) {
-      if (bus.index != service.bus) continue;
+      if (bus.index != canonical_bus) continue;
       bus.pd_mw *= service.ratio;
       bus.qd_mvar *= service.ratio;
     }
     for (auto& load : system.ac.loads) {
-      if (load.bus == service.bus) load.scaling *= service.ratio;
+      if (load.bus == canonical_bus) load.scaling *= service.ratio;
     }
     for (auto& load : system.ac.asymmetric_loads) {
-      if (load.bus == service.bus) load.scaling *= service.ratio;
+      if (load.bus == canonical_bus) load.scaling *= service.ratio;
     }
   } else if (service.domain == "DC") {
     for (auto& bus : system.dc.buses) {
-      if (bus.index == service.bus) bus.pd_mw *= service.ratio;
+      if (bus.index == canonical_bus) {
+        bus.pd_mw *= service.ratio;
+      }
     }
     for (auto& load : system.dc.loads) {
-      if (load.bus == service.bus) load.scaling *= service.ratio;
+      if (load.bus == canonical_bus) load.scaling *= service.ratio;
     }
   }
 }
 
 void apply_step_service(HybridPowerSystem& system,
-                        const DistributionResilienceStepResult& step) {
+                        const DistributionResilienceStepResult& step,
+                        const CanonicalBusIds& bus_ids) {
   for (const auto& [key, service] : service_map(step)) {
     (void)key;
-    apply_bus_service_ratio(system, service);
+    apply_bus_service_ratio(system, service, bus_ids);
   }
 }
 
@@ -81,6 +123,7 @@ void append_load_service_events(
     const DistributionResilienceStepResult* previous,
     const DistributionResilienceStepResult& target,
     const DistributionResilienceDAECertificationOptions& options,
+    const CanonicalBusIds& bus_ids,
     CertifiedRestorationAction& action,
     std::vector<std::string>& unsupported) {
   if (!options.replay_mip_load_service) return;
@@ -121,6 +164,8 @@ void append_load_service_events(
     event.bus = target_state.bus;
     event.value = std::max(0.0, transition_scale);
     event.params["scale"] = event.value;
+    event.params["canonical_bus"] =
+        bus_ids.resolve(target_state.domain, target_state.bus);
     event.component_type = target_state.domain;
     event.label = "mip_bus_service_" + target_state.domain + "_" +
                   std::to_string(target_state.bus) + "_to_" +
@@ -319,6 +364,7 @@ CertifiedRestorationAction make_action(
     const DistributionResilienceStepResult* previous,
     const DistributionResilienceStepResult& target,
     const DistributionResilienceDAECertificationOptions& options,
+    const CanonicalBusIds& bus_ids,
     std::vector<std::string>& unsupported) {
   CertifiedRestorationAction action;
   action.id = "mip_transition_" +
@@ -355,7 +401,8 @@ CertifiedRestorationAction make_action(
     }
   }
 
-  append_load_service_events(previous, target, options, action, unsupported);
+  append_load_service_events(previous, target, options, bus_ids, action,
+                             unsupported);
 
   for (const auto& mess : target.mess_states) {
     if (mess.dispatch_mw <= 1e-9) continue;
@@ -402,6 +449,7 @@ build_distribution_resilience_dae_transitions(
   }
 
   const HybridPowerSystem canonical = canonical_restoration_system(system);
+  const CanonicalBusIds bus_ids = canonical_bus_ids(system, canonical);
   const auto append_transition = [&](const DistributionResilienceStepResult* previous,
                                      const DistributionResilienceStepResult& target,
                                      bool force,
@@ -415,10 +463,11 @@ build_distribution_resilience_dae_transitions(
         set_initial_component_state(transition.initial_system, state);
       }
       if (options.replay_mip_load_service) {
-        apply_step_service(transition.initial_system, *previous);
+        apply_step_service(transition.initial_system, *previous, bus_ids);
       }
     }
     transition.action = make_action(canonical, previous, target, options,
+                                    bus_ids,
                                     transition.unsupported_transitions);
     if (force || has_material_change(transition)) {
       output.push_back(std::move(transition));

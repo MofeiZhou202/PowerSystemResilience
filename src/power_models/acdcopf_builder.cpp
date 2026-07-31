@@ -64,12 +64,10 @@ ACDCOPFData to_acdcopf_data(const HybridPowerSystem& sys) {
     bd.vdc_min  = (b.vmin_pu > 0.0) ? b.vmin_pu : 0.9;
     bd.vdc_max  = (b.vmax_pu > 0.0) ? b.vmax_pu : 1.1;
     bd.vdc0     = (b.vm_pu   > 0.0) ? b.vm_pu   : 1.0;
-    bd.pd_pu = sys.dc.loads.empty() ? b.pd_mw / Sb : 0.0;
-    if (!sys.dc.loads.empty()) {
-      for (const auto& ld : sys.dc.loads) {
-        if (ld.bus == b.index) {
-          bd.pd_pu += model::effective_load_p_mw(ld) / Sb;
-        }
+    bd.pd_pu = b.pd_mw / Sb;
+    for (const auto& ld : sys.dc.loads) {
+      if (ld.in_service && ld.bus == b.index) {
+        bd.pd_pu += model::effective_load_p_mw(ld) / Sb;
       }
     }
     // VDC_Q bus: Vdc fixed (will be identified from converter control modes below)

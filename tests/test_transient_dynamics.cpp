@@ -9684,6 +9684,7 @@ TEST_CASE("Strict MIP bus service maps to domain-qualified DAE load scaling",
   CHECK(initial_ac->value == Catch::Approx(0.5));
   CHECK(initial_dc->bus == 101);
   CHECK(initial_dc->value == Catch::Approx(0.25));
+  CHECK(initial_dc->params.at("canonical_bus") == Catch::Approx(1.0));
 
   REQUIRE(transitions[1].action.dynamic_events.size() == 1);
   CHECK(transitions[1].action.dynamic_events.front().type ==

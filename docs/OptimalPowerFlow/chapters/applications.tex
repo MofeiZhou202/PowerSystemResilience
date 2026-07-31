@@ -1,0 +1,242 @@
+% 第 10 章：OPF 在平台中的应用与接入
+\section{OPF 在平台中的应用与接入}\label{sec:applications}
+
+本章盘点调用 OPF 求解器的下游模块与外部接入层（GUI/HTTP、Python 绑定）。
+各模块自身的数学模型见其专章/文档，此处只记\textbf{OPF 调用配置}。
+
+\subsection{时序流水线 UC$\to$OPF$\to$PF}
+\srcpath{src/time\_series/time\_series\_pf.cpp:4218} 每时步调用
+\srcpath{opf::solve\_ac\_opf(sys\_t, step\_opf\_options)}，选项来自
+\fld{TimeSeriesPFOptions.opf\_options}（time\_series\_pf.hpp:105），\fld{run\_opf}
+开关（:120）。
+\begin{itemize}
+  \item \textbf{逐时步暖启动链}：上一时步收敛则 \fld{step\_opf\_options.warm\_start =
+        \&previous}（:4214--4217）——这是 \fld{ACOPFOptions::warm\_start} 唯一的
+        生产级用户；
+  \item OPF 不收敛时回退为 UC 出力直接跑 PF（:4224--4235）；
+  \item 收敛时把 \fld{pg/qg}、VSC \fld{pac/qac}（置 PQ 模式）、可再生 \fld{pren}
+        （经 \fld{ren\_map} 归因）注入系统再跑 PF 校验（:4238--4275）；
+        储能保留跨时段调度不回放（:4277 注释）。
+\end{itemize}
+
+\subsection{可靠性评估的 DC OPF 配置}
+\srcpath{src/reliability/reliability\_assessment.cpp:1057}（\srcpath{evaluate\_state}，
+被 MC/FMEA/时序可靠性批量复用，另见 :4268--4275、:4418--4422）调用
+\srcpath{opf::solve\_dc\_opf}：
+\begin{itemize}
+  \item 强制 \fld{load\_shedding}=true、\fld{voll}=\srcpath{reliability\_shedding\_voll}
+        （VOLL 压过发电成本，字典序最小切负荷）、\fld{verbose}=false、
+        \fld{compute\_lmp}=\textbf{false}（批量路径跳过支撑 LP，:1224--1228、:1701--1705）；
+  \item 死岛负荷直接计切负荷，与 OPF \fld{total\_load\_shedding\_mw} 合并为
+        EENS/LOLE（:1089--1099）；
+  \item \textbf{OPF 不收敛保守处理为存活负荷全切}（:1062--1087）；
+  \item 含 DC 负荷时 warn ``AC-only DC-OPF，EENS 偏乐观''（:1052--1054）——
+        诚实口径的典型实例。
+\end{itemize}
+
+\subsection{EV-交通耦合的 LMP 价格迭代}
+\srcpath{src/ev\_power\_traffic/joint\_social\_welfare.cpp:262} 与
+\srcpath{ctm\_joint\_welfare.cpp:254}：每时步 \srcpath{opf::solve\_dc\_opf(sys\_k, dcopf)}，
+\fld{compute\_lmp}=true、\fld{load\_shedding}=true（:259--261 / :251--253）。
+取每时步 bus$\to$LMP 表，按
+\[
+\pi_{new}=\alpha\,\lambda/1000+(1-\alpha)\,\pi_{old}
+\]
+更新充电站电价，构成 CTM-DUE/LP 分配 $\leftrightarrow$ DC OPF 的定点价格迭代
+（:273--290 / :282--289）；OPF 失败则保留旧价（\fld{all\_opf\_ok}=false）。
+\fld{use\_dcopf\_prices}=false 时退化为固定价 + 边际成本估成本。
+
+\subsection{反事实规划与 SPPT 投影证书}
+\begin{itemize}
+  \item \textbf{反事实规划}（\srcpath{src/analysis/counterfactual\_planning.cpp:144}）：
+        \srcpath{hacdcpf::solve\_ac\_opf}，\fld{max\_inner\_iterations}=120、
+        \fld{allow\_fallback}=true（:141--143）；收敛且目标有限时
+        $\fld{objective}\times\fld{annual\_hours}$ 作为年化经济基线（:145--148），
+        否则回退 ``PF 物理损耗 $\times$ 电价 $\times$ 年小时'' 货币化损耗并把口径写入
+        \fld{diagnostics[0]}（:149--161）；
+  \item \textbf{SPPT MR3d}（\srcpath{src/sppt/metamorphic.cpp:223--225}）：对 rich 系统与
+        \srcpath{project\_to\_canonical\_models(sys)} 各跑一次 DC OPF，按 bus index 对齐
+        比较两次求解的 LMP——``投影前后 DC OPF 对偶不变性''的可执行证书；
+        残差超 tol 或任一侧不收敛即判 fail。
+\end{itemize}
+
+\subsection{与市场模块的边界声明}
+市场模块（\srcpath{src/market/market\_simulation.cpp}）的 SCUC/SCED/LMP 是
+\textbf{自建优化，不复用} \srcpath{opf::solve\_dc\_opf}：
+SCUC MILP 经 \srcpath{build\_market\_commitment\_model} + MIPSolvers 引擎
+\srcpath{solve\_milp}（:675--705）；SCED 定价 LP 用
+\srcpath{engine::solve\_lp\_with\_basis}（:1897、:2017），
+LMP 直接取 \fld{solve.constraint\_duals[balance\_row]}/dt（:1248--1251）；
+AC-only 守卫：含 DC 母线直接拒绝（:175）；AC 校验用 \srcpath{solve\_power\_flow}。
+因此市场 LMP 与 DC OPF LMP \textbf{不同源}，口径不可互换。
+
+\subsection{GUI/HTTP 参数映射}
+统一路由 \texttt{POST} \srcpath{/api/session/opf}（tests/run\_gui\_server.cpp:14533）
+是 GUI 与 Python 客户端的主入口。
+
+\paragraph{顶层字段}
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}L{3.4cm}L{5.6cm}L{5.4cm}@{}}
+\toprule
+请求字段 & 取值 / 默认 & 去向\\
+\midrule
+\fld{solver} & parity（默认）/ ipopt / auto / robust / dispatch / dc &
+  backend 选择；robust 触发策略（见下）\\
+\fld{network\_model} & balanced\_aggregate（默认）/ balanced\_with\_three\_phase\_validation
+  / three\_phase\_hybrid（:14554--14560） & 三档网络模型；第三档禁 dc/dispatch（:14609--14612）\\
+\fld{check\_consistency} & false & OPF 点 PF 回放审计（:14562）\\
+\fld{constraints.*} & \fld{branch\_limits}/\fld{converter\_capacity}/\fld{converter\_current}/
+  \fld{converter\_modulation} 全默认 true（:14564--14567） & \fld{enforce\_*} 四开关
+  （:14989--14992）；dc 分支只接 \fld{branch\_limits}（:14872）\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{solver 字符串 $\to$ backend（:14916--14947）}
+\texttt{parity}$\to$ParityIPM；\texttt{ipopt}$\to$Ipopt（强制
+\fld{objective\_homotopy}=false，:14993--14998）；\texttt{dispatch}$\to$EconomicDispatch；
+\texttt{auto}$\to$Auto + primal\_dual + parity + \fld{allow\_fallback}，
+混合交直流时 \fld{ac\_pf\_warm\_start}=true；
+\texttt{robust}$\to$Auto + \fld{ac\_pf\_warm\_start} + \fld{objective\_homotopy}，
+且请求级开关\textbf{不可关闭}（:14968--14974）。
+
+\paragraph{AC \fld{options.*}（:14949--14987，默认来自 ACOPFOptions）}
+\fld{max\_inner\_iterations}（非线性 400 / dispatch 120，clamp 1--$10^5$）、
+\fld{max\_outer\_iterations}（8，1--$10^4$）、\fld{max\_line\_search\_steps}（20）、
+\fld{feasibility\_tol}/\fld{stationarity\_tol}（$10^{-6}$）、\fld{barrier\_mu0}（$10^{-2}$）、
+\fld{barrier\_mu\_reduction}（0.2）、\fld{barrier\_mu\_min}（$10^{-8}$）、
+\fld{merit\_penalty}（10）、\fld{regularization}（$10^{-6}$）、\fld{step\_backoff}（0.5）、
+\fld{interior\_fraction}（0.995）、\fld{ac\_eval\_threads}（1）、\fld{allow\_fallback}（true）、
+\fld{ac\_pf\_warm\_start}（false）、\fld{objective\_homotopy}（false）、
+\fld{homotopy\_dt0}（0.10）、\fld{verbose}。
+
+\paragraph{DC \fld{options.*}（:14870--14885）}
+\fld{feasibility\_tol}（$10^{-6}$）、\fld{max\_iterations}（10000，1--$10^6$）、
+\fld{pwl\_segments}（4，1--1000）、\fld{branch\_limit\_margin}（1.0，$10^{-6}$--10）、
+\fld{load\_shedding}（true）、\fld{voll}（0.0$\to\ge0$）、\fld{compute\_lmp}（true）、
+\fld{verbose}。
+
+\paragraph{\fld{three\_phase.*}（:14613--14645）}
+\fld{include\_shunts}（true）、\fld{vuf\_max}（0.03，0--1）、
+\fld{variant}（graph\_reduced / full）、\fld{verify\_derivatives}（false）、
+\fld{constraint\_oracle}（false）、\fld{oracle\_max\_rounds}（8）、
+\fld{reduction\_max\_front}（64）、\fld{reduction\_max\_nnz\_ratio}（10.0）；
+auto/robust 失败时 Ipopt fallback（:14650--14656），robust 时
+\fld{warm\_start\_with\_ipopt}=true（:14629）。
+
+\paragraph{RPO 路由 \srcpath{/api/session/run\_rpo}（:18406--18448）}
+\fld{objective}（voltage / loss / combined）、\fld{vdev\_weight}/\fld{loss\_weight}（1.0）、
+\fld{v\_target}（1.0）、\fld{mip\_gap}（0.01）、\fld{time\_limit\_s}（120）、
+\fld{max\_evaluations}（50000）、\fld{max\_ipm\_iter}（2000）、\fld{ipm\_tol}（$10^{-6}$）、
+\fld{stationarity\_tol}（$10^{-3}$）、\fld{max\_tap\_move}（2，-1--1000）、
+\fld{restrict\_tap\_indices}/\fld{enabled\_tap\_indices}、四个约束开关、
+\fld{relax\_only}（仅根松弛，max\_nodes=1）。
+解后用 \srcpath{apply\_rpo\_discrete\_solution} 重建系统并跑独立
+\srcpath{solve\_ac\_opf} 交叉验证（:18453--18500）。
+
+\paragraph{其他路由与 v1 差异}
+\srcpath{/api/session/opf\_ac}（:15633，solver 默认 auto，max\_inner=120）、
+\srcpath{/api/session/opf\_parity}（:15709，固定 parity 禁 fallback）、
+\srcpath{/api/session/opf\_dc}（:15763）、\srcpath{/api/session/rpo\_inputs}（:18358）、
+遗留 \srcpath{/api/opf/ac|dc}（:22621/22641）。
+v1 作业 API（\srcpath{src/server/runtime\_api\_v1.cpp:825--840}）：
+\fld{network\_model} 仅支持 \fld{balanced\_aggregate}（:826--832），
+solver 支持 parity / ipopt / auto / dispatch / dc（:751--766）；
+序列化含 \fld{solver\_backend}/\fld{solver\_chain}/\fld{objective\_model}/
+\fld{branch\_mu\_valid}/\fld{model\_scope}/\fld{validity\_flags}（:725--745）。
+
+\paragraph{参数契约与自省端点（2026-07-22 新增）}
+为消除``前端控件 $\leftrightarrow$ 请求字段 $\leftrightarrow$ 后端语义''三方口径漂移，
+服务端把 OPF 参数元数据做成了机器可读的单一事实来源：
+\begin{itemize}
+  \item \srcpath{opf\_parameter\_contract\_json()}（\srcpath{tests/run\_gui\_server.cpp:6740--6816}）：
+        返回 \fld{schema}=\texttt{opf\_parameter\_contract\_v1}，逐项列出 32 个参数的
+        \fld{key}、\fld{label}（中文标签）、\fld{unit}、\fld{default}、
+        \fld{applies\_to}（ac / dc / phase / all 适用路径）与 \fld{description}
+        （用途与影响说明，含``QP 后端 \fld{pwl\_segments} 生效值为 0''一类口径注记）；
+  \item \srcpath{opf\_debug\_environment\_json()}（:6818--6832）：枚举 10 个
+        \texttt{HACDCPF\_OPF\_*} 调试环境变量（KKT\_FORM、LINEAR\_SOLVER、
+        SPARSE\_SOLVER、MU\_STRATEGY、INERTIA\_GATE、RESCALE\_PER\_ITER、DELTA\_C、
+        FILTER\_ALL、STRICT\_THETA、NO\_LEGACY），只回显当前已设置者，
+        接口等级显式标注 \fld{contract}=\texttt{debug\_only\_not\_stable\_api}；
+  \item 新路由 \texttt{GET} \srcpath{/api/opf/parameter\_contract}（:14769--14771），
+        无会话状态要求，供前端与外部客户端在请求前自省参数语义；
+  \item 统一 OPF 端点响应新增三个公共字段（:14838--14840）：
+        \fld{options\_requested}（请求 \fld{options} 原文回显）、
+        \fld{parameter\_contract\_schema}（契约模式版本）、
+        \fld{debug\_environment}（本次求解生效的调试环境快照）。
+\end{itemize}
+
+\paragraph{结果回显增强（诚实口径的机器可读化）}
+各 OPF 分支在响应中追加``结果能解释到什么程度''的显式声明：
+\begin{itemize}
+  \item \textbf{DC OPF 分支}（:15154--15168）：\fld{lmp\_valid} /
+        \fld{lmp\_validity\_reason}、\fld{branch\_mu\_valid} /
+        \fld{branch\_mu\_validity\_reason}（对应支路对偶未认证的既有声明，见第~1~章）、
+        \fld{objective\_model}、\fld{pwl\_segments\_effective}；
+        \fld{options\_effective} 中区分 \fld{pwl\_segments\_requested} 与生效值；
+        附 \fld{model\_limitations} 与 \fld{scope} 块（DC 路径换流器四族约束
+        恒 false）；
+  \item \textbf{AC OPF 分支}（:15311--15313）：\fld{lmp\_valid}(\fld{\_reason})
+        与 \fld{model\_limitations}；
+  \item \textbf{三相混合 OPF 分支}（:15049--15054）：\fld{lmp\_valid}=false 并注明
+        该路径不导出约束乘子作为 LMP；\fld{model\_limitations} 声明不执行
+        AC 支路热限与换流器调制约束；
+  \item \textbf{RPO 端点}（:19118--19121）：\fld{terminated\_by\_time\_limit}、
+        \fld{terminated\_by\_evaluation\_limit} 与 \fld{model\_limitations}，
+        把``达到时限/评估上限''从日志升格为结构化字段。
+\end{itemize}
+
+\paragraph{前端映射与结果呈现（web/js/app.js、web/index.html）}
+\begin{itemize}
+  \item \fld{OPF\_PARAMETER\_INPUTS} 映射表（app.js:4398--4416）：契约参数键
+        $\to$ DOM 控件 id；\srcpath{loadOpfParameterContract()}（:4452--4468）
+        拉取契约后为控件挂 tooltip（描述 + 单位）并渲染可检索的参数说明表；
+        运行 OPF 前自动加载（:4494），参数指南面板打开时亦加载（:16425）；
+  \item \textbf{DC 求解器专属请求参数}（app.js:4522--4528）：新增 \fld{opfDcOptions}
+        控件组（index.html:506--513，仅 solver=dc 时显示，app.js:11830），
+        对应请求字段如下表。
+\end{itemize}
+\begin{paramtable}
+\fld{pwl\_segments} & --- & 段/机组 & 1--1000 & 4 &
+  二次成本分段线性区间数（LP 回退后端；QP 后端生效值为 0）\\
+\fld{branch\_limit\_margin} & --- & 倍 & $10^{-6}$--10 & 1.0 &
+  DC 支路 rate\_a 统一倍率，$<1$ 收紧、$>1$ 放宽\\
+\fld{load\_shedding} & --- & 开关 & --- & true &
+  为正负荷加削减变量保可行，按 VOLL 计入目标\\
+\fld{voll} & --- & 成本/MWh & $\ge 0$ & 0.0 &
+  切负荷惩罚；0 表示按最大发电边际成本自动生成\\
+\fld{compute\_lmp} & --- & 开关 & --- & true &
+  跑支撑 LP 恢复节点功率平衡对偶；不代表支路拥塞 $\mu$ 已认证\\
+\end{paramtable}
+\begin{itemize}
+  \item \textbf{结果渲染}：scope 表新增``节点电价乘子''行（认证 / 未认证 + 原因，
+        app.js:4777）与 DC 专属``支路拥塞 $\mu$''行（:4778）；
+        \fld{model\_limitations} 渲染为``模型边界''表（:4780--4783）；
+        调试环境变量表（:4784--4788，标注``仅调试，不是稳定接口''）；
+        新增 \fld{opfParameterResults}``请求值 vs 实际值''逐参数核对表
+        （:4791--4840），判定列三档：按请求生效 / 后端调整或路径决定 / 未回显；
+  \item DC / 三相混合模式下隐藏不适用的 AC 专属控件（:11828--11835：
+        barrier 参数组、外迭代、线搜索、驻点容差），避免``可调但不生效''的误导；
+  \item RPO 结果新增``搜索终止''显示（:5297：达到时限 / 达到评估上限 /
+        局部邻域完成）与``能力边界''列表（:5304，逐条展示 \fld{model\_limitations}）。
+\end{itemize}
+
+\subsection{Python 绑定与能力查询}
+\begin{itemize}
+  \item 模型层 \srcpath{python/src/hysim/models.py:130--183}：\texttt{OPFSolver}
+        （parity / ipopt / auto / dc / dispatch）、\texttt{OPFNetworkModel} 三档枚举、
+        \texttt{OPFConstraints} 四开关（全默认 true）、\texttt{OPFRequest}
+        （含 \fld{three\_phase}、\fld{check\_consistency}）；
+  \item 客户端 \srcpath{client.py:156} \texttt{optimal\_power\_flow()} 映射到
+        \srcpath{/api/session/opf}；v1 会话 \srcpath{v1.py:340--349}；
+        AI 工具 \srcpath{ai.py:163}（\texttt{hysim\_run\_optimal\_power\_flow}）。
+        Python 侧无独立求解，纯 HTTP 包装；
+  \item 能力查询 \srcpath{include/hacdcpf/api/solver\_capabilities.hpp}：
+        \fld{supports\_ac\_opf}/\fld{supports\_dc\_opf} 恒 true；
+        \fld{has\_ipopt}（决定 solver=ipopt 与 auto fallback 可用性）、
+        \fld{has\_highs}/\fld{has\_gurobi}/\fld{has\_scip}（影响 DC OPF LP 后端与
+        RPO 内层）、\fld{has\_native\_ipm} 恒 true、\fld{supports\_quadratic\_objective}；
+        运行时入口 \srcpath{get\_solver\_capabilities()}。
+\end{itemize}

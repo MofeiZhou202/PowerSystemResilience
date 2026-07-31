@@ -20,7 +20,7 @@
 #     environments where the tree layout differs from the default.
 #
 # Last verified compatible commit (update when upgrading MIPSolvers):
-set(_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT "2ede2a1d28d5480930a0c2d27295877d168708d3"
+set(_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT "78d9272299f8202eee7377aeca5e6bf359193d92"
   CACHE STRING "Expected MIPSolvers HEAD commit (empty = skip check)" FORCE)
 
 set(MIPSOLVERS_SOURCE_DIR "" CACHE PATH
@@ -133,10 +133,12 @@ if(NOT DEFINED MIPSOLVERS_BUILD_TESTS)
       "Build MIPSolvers tests when used as dependency")
 endif()
 
+set(_HACDCDSS_MIPSOLVERS_BINARY_DIR
+    "${CMAKE_CURRENT_BINARY_DIR}/_deps/mipsolvers_build")
 if(NOT TARGET mipsolvers::mipsolvers)
   add_subdirectory(
     "${_HACDCDSS_MIPSOLVERS_DIR}"
-    "${CMAKE_CURRENT_BINARY_DIR}/_deps/mipsolvers_build"
+    "${_HACDCDSS_MIPSOLVERS_BINARY_DIR}"
     EXCLUDE_FROM_ALL)
 endif()
 
@@ -144,6 +146,16 @@ if(NOT TARGET mipsolvers::mipsolvers)
   message(FATAL_ERROR
     "add_subdirectory(MIPSolvers) did not produce the mipsolvers::mipsolvers "
     "target.  Check the MIPSolvers CMakeLists.txt.")
+endif()
+
+# MIPSolvers' NETLIB regression resolves checked-in MPS fixtures beneath its
+# working directory. Parent directories cannot portably override test
+# properties created in an add_subdirectory() on every supported CMake
+# version, so mirror the small fixture set into the dependency build tree.
+if(MIPSOLVERS_BUILD_TESTS AND
+   EXISTS "${_HACDCDSS_MIPSOLVERS_DIR}/tests/data/netlib")
+  file(COPY "${_HACDCDSS_MIPSOLVERS_DIR}/tests/data/netlib"
+       DESTINATION "${_HACDCDSS_MIPSOLVERS_BINARY_DIR}/tests/data")
 endif()
 
 # ── Catch2 (test framework, vendored by MIPSolvers) ──────────────────────────

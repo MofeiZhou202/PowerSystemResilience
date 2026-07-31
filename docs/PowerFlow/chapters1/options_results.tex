@@ -1,0 +1,408 @@
+% 第 10 章：选项、结果与诊断参考
+% 本章文件由 \input 引入，不含导言区。
+\section{选项、结果与诊断参考}\label{sec:options}
+
+\subsection{概述与阅读约定}
+
+\compmeta{hacdcpf::PowerFlowOptions}{\srcpath{include/hacdcpf/power\_flow/power\_flow\_options.hpp:100--173}}
+
+本章给出潮流计算全部对外选项与结果结构的\textbf{逐字段参考}，每个字段均与头文件
+逐一核对，说明列注明源码读取点；默认值以 \srcpath{include/hacdcpf/model/defaults.hpp}
+与头内初始化器为准，\texttt{src/} 中无读取点的字段一律标注“\textbf{当前未接线}”。
+
+\texttt{PowerFlowOptions} 采用平铺布局（向后兼容），另提供 7 个分组子结构与静态
+工厂 \srcpath{from\_parts}（hacdcpf.cpp:1254--1322）按组装配。主入口
+\srcpath{solve\_power\_flow}（第~\ref{sec:overview}~章）把 ZIP 权重与三开关抄入
+\texttt{SolverData}（hacdcpf.cpp:509--515）。内部计算一律标幺值
+（$S_{\mathrm{base}}=100$~MVA）；选项/结果的验证体系见第~\ref{sec:validation}~章。
+
+\subsection{收敛控制}
+\begin{paramtable}
+\fld{max\_iter} & $K_{\max}$ & 次 & 10--100 & 50 & Newton 内层迭代上限；\texttt{Defaults::kPFMaxIter}（defaults.hpp:47）；读取点\srcpath{src/power\_flow/newton\_solver.cpp:1357}\\
+\fld{tol} & $\varepsilon$ & pu & $10^{-10}$--$10^{-6}$ & $10^{-8}$ &缩放后 $\lVert F\rVert_\infty$ 收敛容差；\texttt{Defaults::kPFTol}（defaults.hpp:46）；判定点 newton\_solver.cpp:1456 与最终诚实重判 :1827--1829\\
+\fld{fdpf\_max\_iter} & --- & 次 & 100--5000 & 1000 & FDPF 专用迭代上限，仅 \srcpath{src/power\_flow/fdpf\_solver.cpp:152} 读取（Newton 不用）\\
+\end{paramtable}
+
+\subsection{步长截断与线性回退}
+\begin{paramtable}
+\fld{max\_delta\_va\_rad} & $\Delta\theta_{\max}$ & rad & 0.5--3.0 & 1.50 &单步相角截断；\srcpath{clip\_step}（newton\_solver.cpp:471）\\
+\fld{max\_delta\_vm\_pu} & $\Delta V_{\max}$ & pu & 0.1--1.0 & 0.50 &单步 $V_m$ 截断（newton\_solver.cpp:472）\\
+\fld{max\_delta\_vdc\_pu} & $\Delta V_{dc,\max}$ & pu & 0.1--1.0 & 0.50 &单步 $V_{dc}$ 截断（newton\_solver.cpp:473）\\
+\fld{max\_line\_search\_steps} & --- & 次 & 4--20 & 10 & 回溯线搜索最大步数（newton\_solver.cpp:1127，见第~\ref{sec:newton}~章回退链）\\
+\fld{max\_regularization\_steps} & --- & 次 & 0--16 & 8 & 对角正则化$J+\lambda I$ 最大步数（newton\_solver.cpp:1604）\\
+\fld{regularization\_lambda0} & $\lambda_0$ & --- & $10^{-8}$--$10^{-4}$ & $10^{-6}$ &正则化初值（newton\_solver.cpp:1605）\\
+\fld{regularization\_growth} & --- & --- & 2--100 & 10.0 & 正则化增长因子（newton\_solver.cpp:1606）\\
+\end{paramtable}
+
+\subsection{全局化策略}
+\begin{paramtable}
+\fld{globalization} & --- & --- & 三选一 & LineSearch & 全局化策略枚举\texttt{GlobalizationStrategy\allowbreak\{LineSearch,\allowbreak TrustRegion,\allowbreak PseudoTransient\}}（power\_flow\_options.hpp:153--154）；分派点 newton\_solver.cpp:1501, 1547\\
+\fld{trust\_region\_radius0} & $\Delta_0$ & --- & 0.1--5 & 1.0 & 信赖域初始半径（newton\_solver.cpp:1321）\\
+\fld{trust\_region\_max} & $\Delta_{\max}$ & --- & 1--100 & 10.0 & 信赖域半径上限（newton\_solver.cpp:1542）\\
+\fld{ptc\_delta0} & $\delta t_0$ & --- & 0.01--10 & 1.0 & 伪瞬态延拓初始步长（newton\_solver.cpp:1322）\\
+\fld{ptc\_growth} & --- & --- & 1.2--5 & 2.0 & PTC 步长增长因子（newton\_solver.cpp:1579，\srcpath{ptc\_update\_timestep}）\\
+\end{paramtable}
+
+\subsection{PV/PQ 切换与参考母线}
+\begin{paramtable}
+\fld{enable\_pv\_pq\_conversion} & --- & --- & true/false & true &MATPOWER 风格无功限值切换外环总开关（newton\_solver.cpp:1746, 1757）\\
+\fld{pv\_q\_hysteresis\_pu} & --- & pu & 0--0.05 & 0.01 & PV$\to$PQ 无功越限迟滞带（newton\_solver.cpp:1273）\\
+\fld{pv\_recover\_vm\_tol\_pu} & --- & pu & 0--0.05 & 0.01 & PQ$\to$PV 恢复判据的$V_m$ 偏差容差（newton\_solver.cpp:1274）\\
+\fld{enable\_auto\_swing\_selection} & --- & --- & true/false & true &孤岛缺 slack 时自动遴选参考；读取点\srcpath{src/power\_flow/adaptive\_solver.cpp:204}（Newton 主路径不读）\\
+\end{paramtable}
+
+\subsection{换流器、DC 与方程模式}
+\begin{paramtable}
+\fld{enable\_converter\_mode\_switching} & --- & --- & true/false & true &换流器 PQ$\leftrightarrow$VDC\_Q 模式切换（newton\_solver.cpp:1444，逻辑见第~\ref{sec:hybrid}~章）\\
+\fld{converter\_vdc\_switch\_high\_pu} & --- & pu & 0.01--0.1 & 0.03 &切换评估高阈值（newton\_solver.cpp:811）\\
+\fld{converter\_vdc\_switch\_low\_pu} & --- & pu & 0--0.05 & 0.01 &切换评估低阈值（newton\_solver.cpp:812）\\
+\fld{mode\_hysteresis\_iters} & --- & 次 & 1--5 & 2 &模式切换迟滞迭代数（newton\_solver.cpp:810）\\
+\fld{enable\_rigid\_vdc\_former} & --- & --- & true/false & false &单换流器 DC 岛刚性电压源模式（DC-slack，多换流器模型 \S 6.3）；默认关，droop 提升已使 $V_{dc}$ 偏差约 0.1\%；读取点 newton\_solver.cpp:945\\
+\fld{enable\_converter\_coordination\_check} & --- & --- & true/false & false &预求解换流器协调可行性校核（hacdcpf.cpp:893；distributed\_slack\_solver.cpp:285），Error/Fatal 阻断求解\\
+\fld{enforce\_converter\_physical\_limits} & --- & --- & true/false & false &换流器容量圆/电流/调制比/占空比限值转为硬可行性门卫（定义 power\_flow\_options.hpp:128--134）：违反限值的 Newton 根被拒绝为物理不可行而非报告收敛（hacdcpf.cpp:957--978），并回填四个 \texttt{enforced} validity 标志（:1012--1016）；默认 false 保持仅告警行为；需再调度找可行点时用 OPF。仅平铺字段，不经 \srcpath{from\_parts} 装配\\
+\fld{loss\_model} & --- & --- & Linear/\allowbreak CurrentBased & Linear &换流器损耗模型 \texttt{LossModelType}（enums/converter\_enums.hpp:46--49）；作为 SolverData 缓存键（hacdcpf.cpp:434--446）并参与派生结果回算（:937）\\
+\fld{enable\_coupled\_jacobian} & --- & --- & true/false & false &注入 AC$\leftrightarrow$DC 交叉耦合雅可比块；经 SolverData 转交（hacdcpf.cpp:513），消费点 jacobian\_builder.cpp:296、jacobian\_pattern.cpp:119\\
+\fld{enable\_augmented\_equations} & --- & --- & true/false & false &增强方程模式（VDC\_VAC 母线改 PQ + $V_m{=}V_{set}$ 行替换）；转交 hacdcpf.cpp:514，消费点 newton\_solver.cpp:576, 702\\
+\fld{enable\_semi\_smooth\_newton} & --- & --- & true/false & false &半光滑 Newton（PV 全转 PQ 记 NCP 限值）；转交 hacdcpf.cpp:515，消费点 newton\_solver.cpp:601, 670, 1465\\
+\end{paramtable}
+
+\subsection{ZIP 负荷权重}
+\begin{paramtable}
+\fld{zip\_pw[3]} & $w_{p}$ & --- & $[0,1]$，$\sum=1$ & $(1,0,0)$ &有功 ZIP 权重（恒功率/恒电流/恒阻抗）；抄入 SolverData（hacdcpf.cpp:509），装配消费 jacobian\_builder.cpp:55, 260\\
+\fld{zip\_qw[3]} & $w_{q}$ & --- & $[0,1]$，$\sum=1$ & $(1,0,0)$ &无功 ZIP 权重（hacdcpf.cpp:510；jacobian\_builder.cpp:56, 275）\\
+\end{paramtable}
+
+\subsection{运行时与诊断开关}
+\begin{paramtable}
+\fld{ac\_eval\_threads} & --- & 线程 & 0=自动 & 0 & AC 内核并行线程数，$<1024$ 条目或 1 线程回退串行（newton\_solver.cpp:460--461）\\
+\fld{enable\_solver\_profiling} & --- & --- & true/false & false &计时统计开关，填充 \fld{profiling} 各 ms 计数（newton\_solver.cpp:1432, 1724）\\
+\fld{enable\_iteration\_log} & --- & --- & true/false & false &逐迭代日志开关；服务器层读取（\srcpath{src/server/runtime\_api\_v1.cpp:542}），Newton 主路径\textbf{当前未接线}（\fld{iteration\_log} 不被填充）\\
+\fld{verbose} & --- & --- & true/false & false & 详细日志；三相 NR 转发使用（three\_phase.hpp:46），统一 Newton 主路径\textbf{当前未接线}\\
+\end{paramtable}
+
+\subsection{初始状态、嵌套选项与分组构造}
+结构体成员 \fld{initial\_state}（\texttt{PowerFlowOptions} 内，\srcpath{power\_flow\_options.hpp:161}）类型为
+\texttt{std::optional<\allowbreak InitialState>}；API 层取指针传给 Newton（hacdcpf.cpp:926），
+DC 初值由 \srcpath{load\_dc\_initial\_state} 应用（newton\_solver.cpp:933）；
+\fld{robust\_nonlinear}（:163）为五阶段鲁棒管线选项（第~\ref{subsec:robustopts}~节）。
+
+\compmeta{hacdcpf::InitialState}{\srcpath{include/hacdcpf/power\_flow/power\_flow\_options.hpp:19--23}}
+\begin{paramtable}
+\fld{vm} & $V_m^{(0)}$ & pu & $[0.9,1.1]$ & 空=平启动 & AC 母线电压幅值初值；索引空间为 canonical AC 母线位置（0-based）\\
+\fld{va} & $\theta^{(0)}$ & rad & $(-\pi,\pi]$ & 空=0 & AC 母线相角初值，同上索引空间\\
+\fld{vdc} & $V_{dc}^{(0)}$ & pu & $[0.9,1.1]$ & 空=1.0 & DC 母线电压初值；索引空间为 canonical DC 母线位置（0-based）\\
+\end{paramtable}
+
+同头文件另有两个辅助结构（如实列出，本章不展开）：\fld{ReactiveLimit}
+（\fld{qmin}$=-0.5$、\fld{qmax}$=0.5$，:25--28）与 \fld{DistributedSlack}
+（参与母线/因子/参考母线/参与上限，:30--35）；以及 7 个分组子结构
+（\fld{ConvergenceOptions} 等，:41--95），字段与默认值同平铺字段一一对应，
+由 \srcpath{from\_parts} 展开装配（例外：\fld{enforce\_converter\_physical\_limits}
+仅存在于平铺层，分组子结构未收录）。
+
+\subsection{RobustNonlinearOptions：五阶段鲁棒管线选项}\label{subsec:robustopts}
+
+\compmeta{powerflow::RobustNonlinearOptions}{\srcpath{include/hacdcpf/power\_flow/globalization/robust\_nonlinear\_options.hpp:13--210}}
+（\srcpath{power\_flow/robust\_nonlinear\_options.hpp} 为转发头，对应 .cpp 仅含
+include。）算法语义见第~\ref{sec:robust}~章，此处仅列字段契约；Newton 内以
+\texttt{ropts}（\texttt{opt.robust\_nonlinear}）引用。
+
+\subsubsection*{Phase 1：缩放与诊断（默认全开）}
+\begin{paramtable}
+\fld{enable\_residual\_scaling} & --- & --- & true/false & true &残差按 $\max(|F_i^{spec}|,1)$ 行缩放；收敛判定用缩放范数（newton\_solver.cpp:1414, 1827；实现 nonlinear\_scaling.cpp:44）\\
+\fld{enable\_variable\_scaling} & --- & --- & true/false & true &变量缩放 $D_x=\mathrm{diag}(\pi,V_i,V_{dc,i})$（nonlinear\_scaling.cpp:75）\\
+\fld{enable\_jacobian\_row\_col\_equilibration} & --- & --- & true/false & true &$\hat J=D_FJD_x^{-1}$ 均衡，需至少一个缩放开关打开（newton\_solver.cpp:1418--1420）\\
+\fld{enable\_condition\_monitor} & --- & --- & true/false & true &逐迭代条件数代理，写入 \fld{profiling.condition\_estimate}（newton\_solver.cpp:1427）\\
+\fld{min\_scale} & --- & --- & $[10^{-9},10^{-3}]$ & $10^{-6}$ &缩放因子下限（nonlinear\_scaling.cpp:36）\\
+\fld{max\_scale} & --- & --- & $[10^{3},10^{9}]$ & $10^{6}$ &缩放因子上限（nonlinear\_scaling.cpp:37）\\
+\fld{min\_vm\_pu} & $\underline V$ & pu & $10^{-9}$--$10^{-4}$ & $10^{-8}$ &雅可比 $\partial/\partial V$ 项分母电压下限；抄入雅可比上下文（newton\_solver.cpp:965），消费 jacobian\_builder.cpp:235\\
+\fld{min\_branch\_x\_pu} & --- & pu & $10^{-20}$--$10^{-6}$ & $10^{-20}$ &FDPF $B'$ 矩阵零电抗支路剔除阈值（fdpf\_solver.cpp:103）\\
+\fld{bad\_condition\_threshold} & --- & --- & $10^{6}$--$10^{12}$ & $10^{10}$ &“坏条件数”阈值；\textbf{当前未接线}（仅 GUI/服务器层暴露）\\
+\fld{tiny\_pivot\_threshold} & --- & --- & $10^{-15}$--$10^{-9}$ & $10^{-12}$ &微小主元日志阈值；\textbf{当前未接线}（仅 GUI/服务器层暴露）\\
+\end{paramtable}
+
+\subsubsection*{Phase 2：非单调线搜索与光滑 NCP}
+\begin{paramtable}
+\fld{enable\_nonmonotone\_linesearch} & --- & --- & true/false & true &GLL 非单调 Armijo 接受准则（newton\_solver.cpp:1131, 1191）\\
+\fld{nonmonotone\_window} & $M$ & 次 & 3--10 & 5 & 非单调参考 Merit 滑窗（newton\_solver.cpp:1036）\\
+\fld{armijo\_c} & $c_1$ & --- & $(0,1)$ & $10^{-4}$ & Armijo 充分下降常数（newton\_solver.cpp:1037, 1193）\\
+\fld{line\_search\_beta} & $\beta$ & --- & $(0,1)$ & 0.5 & 回溯缩减因子（newton\_solver.cpp:1038）\\
+\fld{max\_line\_search\_trials} & --- & 次 & 5--30 & 12 & 非单调搜索最大试探数；\textbf{当前未接线}（实际试探数由 \fld{max\_line\_search\_steps} 控制）\\
+\fld{enable\_smooth\_ncp} & --- & --- & true/false & false &光滑 Fischer--Burmeister $\varphi_\mu$ NCP 延拓开关；需\fld{enable\_semi\_smooth\_newton} 同时打开（newton\_solver.cpp:1465）\\
+\fld{ncp\_mu0} & $\mu_0$ & --- & $10^{-4}$--$10^{-1}$ & $10^{-2}$ &NCP 平滑参数初值（newton\_solver.cpp:1468）\\
+\fld{ncp\_mu\_min} & $\mu_{\min}$ & --- & $10^{-14}$--$10^{-8}$ & $10^{-12}$ &平滑参数下限（newton\_solver.cpp:1480）\\
+\fld{ncp\_mu\_factor} / \fld{ncp\_mu\_factor\_coarse} & --- & --- & 0.05--0.9 & 0.1 / 0.5 & 精细/粗糙阶段退火因子（newton\_solver.cpp:1477--1478）\\
+\fld{ncp\_mu\_phase\_transition} & --- & --- & 0.01--0.5 & 0.1 &粗/细阶段切换的相对残差阈值（newton\_solver.cpp:1476）\\
+\fld{enable\_activity\_hysteresis} & --- & --- & true/false & true &PV/PQ 活跃集保持防抖；\textbf{当前未接线}（仅 GUI/服务器层暴露）\\
+\fld{min\_active\_set\_hold\_iters} & --- & 次 & 1--10 & 3 &活跃集最小保持迭代数；\textbf{当前未接线}\\
+\fld{q\_limit\_hysteresis} & --- & pu & $10^{-5}$--$10^{-2}$ & $10^{-4}$ &Q 限值邻近迟滞带；\textbf{当前未接线}（实际迟滞用\fld{pv\_q\_hysteresis\_pu}）\\
+\end{paramtable}
+
+\subsubsection*{Phase 3：LM 信赖域与 PTC-SER}
+\begin{paramtable}
+\fld{enable\_lm\_trust\_region\_fallback} & --- & --- & true/false & true &LM 恢复步总开关（newton\_solver.cpp:1661）；经\fld{enable\_auto\_fallback\_scheduling} 挂入主线搜索回退链（:1658--1661）\\
+\fld{lm\_lambda0} & $\lambda_0$ & --- & $10^{-6}$--$10^{-2}$ & $10^{-4}$ &LM 阻尼初值（newton\_solver.cpp:1662）\\
+\fld{lm\_lambda\_min} & $\lambda_{\min}$ & --- & $10^{-14}$--$10^{-8}$ & $10^{-12}$ &LM 阻尼下限；\textbf{当前未接线}（仅 GUI/服务器层暴露）\\
+\fld{lm\_lambda\_max} & $\lambda_{\max}$ & --- & $10^{4}$--$10^{10}$ & $10^{8}$ &LM 阻尼上限（newton\_solver.cpp:1684）\\
+\fld{trust\_region\_radius0} & $\Delta_0$ & --- & 0.1--5 & 1.0 &LM 信赖域初始半径（归一化）；\textbf{当前未接线}（信赖域全局化实际用\fld{PowerFlowOptions::trust\_region\_radius0}）\\
+\fld{trust\_region\_radius\_min} & $\Delta_{\min}$ & --- & $10^{-8}$--$10^{-4}$ & $10^{-6}$ &信赖域半径下限；\textbf{当前未接线}\\
+\fld{trust\_region\_radius\_max} & $\Delta_{\max}$ & --- & 10--$10^{3}$ & 100.0 &信赖域半径上限；\textbf{当前未接线}\\
+\fld{enable\_ptc\_ser} & --- & --- & true/false & true &PTC 恢复步开关（newton\_solver.cpp:1688）；SER 时间步升级尚未接线，实际 PTC 步长仍由 \fld{ptc\_delta0}/\fld{ptc\_growth}（PowerFlowOptions 层）驱动\\
+\fld{ptc\_dt0} & $\delta t_0$ & --- & $10^{-3}$--1 & 0.1 & SER 初始伪时间步；\textbf{当前未接线}\\
+\fld{ptc\_dt\_min} / \fld{ptc\_dt\_max} & --- & --- & $10^{-6}$--$10^{8}$ & $10^{-4}$ / $10^{6}$ &伪时间步下/上限；\textbf{当前未接线}\\
+\fld{ptc\_gamma} & $\gamma$ & --- & 0.1--2 & 0.7 &SER 指数 $\delta t_{k+1}=\delta t_k(r_{k-1}/r_k)^\gamma$；\textbf{当前未接线}\\
+\end{paramtable}
+
+\subsubsection*{Phase 4：同伦延拓}
+\begin{paramtable}
+\fld{enable\_homotopy} & --- & --- & true/false & true &同伦求解器使能；\texttt{HomotopyContinuationSolver::\allowbreak solve} 内对子求解关闭以防递归（homotopy\_continuation.cpp:106）；该求解器当前由测试/GUI 直接驱动，不在 Newton 失败链中自动调用（见第~\ref{sec:robust}~章）\\
+\fld{homotopy\_step0} & $\Delta\lambda_0$ & --- & 0.05--0.5 & 0.2 &负荷/设定值爬坡初始步长（homotopy\_continuation.cpp:102）\\
+\fld{homotopy\_step\_min} & --- & --- & $10^{-4}$--$10^{-2}$ & $10^{-3}$ &最小步长，低于则判同伦失败（homotopy\_continuation.cpp:136）\\
+\fld{homotopy\_step\_max} & --- & --- & 0.5--1.0 & 1.0 & 步长上限（homotopy\_continuation.cpp:162）\\
+\fld{homotopy\_max\_steps} & --- & 步 & 10--100 & 30 & $\lambda$ 路径最大步数（homotopy\_continuation.cpp:132）；每步以 \fld{initial\_state} 热启动（:151）\\
+\end{paramtable}
+
+\subsubsection*{Phase 5：高级与 Newton--Krylov（默认全关）}
+\begin{paramtable}
+\fld{enable\_log\_voltage} & --- & --- & true/false & false &以 $\ln V$、$\ln V_{dc}$ 为未知量；\textbf{当前未接线}（仅 GUI/服务器层暴露）\\
+\fld{auto\_enable\_log\_voltage\_on\_failure} & --- & --- & true/false & false &失败后自动重试对数电压；\textbf{当前未接线}\\
+\fld{enable\_newton\_krylov\_fallback} & --- & --- & true/false & false &病态雅可比时 GMRES 内迭代回退（newton\_solver.cpp:1427--1428, 1497）\\
+\fld{enable\_schur\_preconditioner} & --- & --- & true/false & false &AC/DC 块 Schur 补预条件子（newton\_solver.cpp:1241）\\
+\fld{enable\_auto\_fallback\_scheduling} & --- & --- & true/false & false &线搜索耗尽后自动挂接 LM/PTC 恢复步（newton\_solver.cpp:1658--1661）；需 Phase 3 对应开关同时打开\\
+\fld{nk\_condition\_trigger} & --- & --- & $10^{4}$--$10^{10}$ & $10^{8}$ &NK-GMRES 触发的条件数代理阈值（newton\_solver.cpp:1498）\\
+\fld{gmres\_restart} & $m$ & 维 & 10--100 & 30 & GMRES($m$) 重启维数（newton\_solver.cpp:1234）\\
+\fld{gmres\_max\_outer} & --- & 轮 & 5--50 & 10 & GMRES 外重启轮数上限（newton\_solver.cpp:1235）\\
+\fld{gmres\_tol} & --- & --- & $10^{-12}$--$10^{-6}$ & $10^{-10}$ &GMRES 相对残差容差（newton\_solver.cpp:1236）\\
+\end{paramtable}
+
+同头文件还定义策略切换日志类型：枚举 \texttt{NonlinearSolveMode}（ScaledNewton /
+DampedNewton / NonmonotoneLineSearch / LMTrustRegion / PtcSer / Homotopy /
+NewtonKrylovFallback，:213--221）与记录结构 \fld{SolverModeSwitchRecord}
+\{\fld{iteration}, \fld{from}, \fld{to}, \fld{reason}\}（:224--229）。
+
+\subsection{PowerFlowProblem：求解任务描述符}
+
+\compmeta{hacdcpf::PowerFlowProblem}{\srcpath{include/hacdcpf/power\_flow/power\_flow\_problem.hpp:23--32}}
+
+由投影层工厂 \srcpath{build\_power\_flow\_problem}（声明
+\srcpath{power\_flow\_problem.hpp:44--46}，实现
+\srcpath{src/power\_flow/solver\_interface.cpp:27--37}）装配，
+供求解器抽象层 \texttt{IPowerFlowSolver} 消费；生产主路径（统一 Newton）
+不经过该描述符（见第~\ref{sec:overview}~章诚实口径）。
+\begin{paramtable}
+\fld{network} & --- & --- & --- & --- & canonical 网络装配数据\texttt{powerflow::SolverData}（含 $Y_{bus}$、$G_{dc}$ 与映射，见第~\ref{sec:assembly}~章）\\
+\fld{options} & --- & --- & --- & --- & 本次求解的 \texttt{PowerFlowOptions}\\
+\fld{name} & --- & --- & --- & 空 & 可选算例名（人类可读）\\
+\fld{n\_ac\_buses} & $n_{ac}$ & 个 & --- & 0 & canonical AC 母线数（规模摘要）\\
+\fld{n\_dc\_buses} & $n_{dc}$ & 个 & --- & 0 & canonical DC 母线数\\
+\fld{n\_converters} & --- & 个 & --- & 0 & 换流器台数\\
+\end{paramtable}
+
+\subsection{PowerFlowResult：顶层字段与索引空间}
+
+\compmeta{hacdcpf::PowerFlowResult}{\srcpath{include/hacdcpf/power\_flow/power\_flow\_result.hpp:204--226}}
+
+索引空间总约定：求解器内部向量为 canonical 位置（0-based）；API 出口经
+\srcpath{unproject\_pf\_result}（hacdcpf.cpp:810--817，调用点 :981）广播回
+\textbf{原始母线编号空间}，内部辅助 DC 母线经
+\srcpath{trim\_internal\_dc\_bus\_results}（:819--826，调用点 :985）裁剪。\fld{va} 以\textbf{弧度}
+存储，展示层转换为度（run\_gui\_server.cpp:15952）。
+\begin{paramtable}
+\fld{vm} & $V_m$ & pu & $[0.5,1.5]$ & 1.0 & AC 母线电压幅值；索引=原始 AC母线向量位置（0-based），长度=原始 AC 母线数\\
+\fld{va} & $\theta$ & rad & $\pm\pi$ & 0 & AC 母线相角（弧度；展示层为度）；索引空间同 \fld{vm}\\
+\fld{vdc} & $V_{dc}$ & pu & $[0.5,1.5]$ & 1.0 & DC 母线电压；索引=对外 DC母线向量位置（内部辅助 DC 母线已裁剪）\\
+\fld{converged} & --- & --- & true/false & false & 末态残差重新判定的诚实收敛标志（newton\_solver.cpp:1827--1829）；\fld{enforce\_converter\_physical\_limits} 门卫拒绝时置 false（hacdcpf.cpp:968--970）\\
+\fld{iterations} & --- & 次 & --- & 0 & 外层+内层+1（newton\_solver.cpp:1395）\\
+\fld{residual} & $\lVert F\rVert_\infty$ & pu & --- & 0 &最终（缩放）失配无穷范数\\
+\fld{profiling} & --- & --- & --- & --- & 计数/计时统计\texttt{SolverProfiling}，见第~\ref{subsec:profiling}~节\\
+\fld{diagnostics} & --- & --- & --- & --- & 高层诊断\texttt{SolverDiagnostics}，见第~\ref{subsec:diagnostics}~节\\
+\fld{branch\_flows} & --- & MW/Mvar & --- & 空 & AC 支路两端潮流\texttt{BranchFlow}；索引=原始 AC 支路 .index 顺序（\texttt{sys.ac.branches}）\\
+\fld{vsc\_transfers} & --- & MW/Mvar & --- & 空 & VSC 换流器传输\texttt{VSCTransfer}；\fld{index} 为组件稳定 .index\\
+\fld{dcdc\_transfers} & --- & MW & --- & 空 & DC/DC 传输\texttt{DCDCTransfer}，含占空比事后校核\\
+\fld{trafo3w\_flows} & --- & MW/Mvar & --- & 空 & 三绕组变压器三侧潮流\texttt{Trafo3WFlow}\\
+\fld{er\_port\_transfers} & --- & MW/Mvar & --- & 空 & 能量路由器端口潮流\texttt{ERPortTransfer}\\
+\fld{ac\_switch\_flows} & --- & MW/Mvar & --- & 空 & 被合并开关的端子潮流恢复\texttt{DeviceTerminalFlow}（hacdcpf.cpp:995--997）；无开关时为空\\
+\fld{ac\_circuit\_breaker\_flows} & --- & MW/Mvar & --- & 空 &被合并断路器的端子潮流恢复，同上\\
+\fld{converter\_model\_scope} & --- & --- & --- & unset &换流器模型覆盖声明 \texttt{ConverterModelScope}，见第~\ref{subsec:scope}~节\\
+\end{paramtable}
+
+\subsection{组件潮流结果结构}
+以下结构同头文件（power\_flow\_result.hpp:134--199）：功率 MW/Mvar、容量 MVA、
+负载率 \%、电压 pu；\fld{index}/\fld{bus\_*} 均为对外稳定 ID，非向量位置。
+
+\subsubsection*{BranchFlow（:134--139）——AC 支路两端潮流}
+\begin{paramtable}
+\fld{pf\_mw} & $P_f$ & MW & --- & 0 & 首端（from）有功，流出母线为正\\
+\fld{qf\_mvar} & $Q_f$ & Mvar & --- & 0 & 首端无功\\
+\fld{pt\_mw} & $P_t$ & MW & --- & 0 & 末端（to）有功\\
+\fld{qt\_mvar} & $Q_t$ & Mvar & --- & 0 & 末端无功\\
+\end{paramtable}
+
+\subsubsection*{VSCTransfer（:154--162）——VSC 换流器传输}
+\begin{paramtable}
+\fld{index} & --- & --- & --- & 0 & 换流器组件 .index（稳定 ID）\\
+\fld{bus\_ac} & --- & --- & --- & 0 & 交流侧母线编号（原始编号空间，经 \srcpath{restore\_original\_vsc\_bus\_ac} 恢复，hacdcpf.cpp:979）\\
+\fld{bus\_dc} & --- & --- & --- & 0 & 直流侧母线编号\\
+\fld{p\_ac\_mw} & $P_{ac}$ & MW & --- & 0 & 交流侧有功（注入约定见阅读指南）\\
+\fld{q\_ac\_mvar} & $Q_{ac}$ & Mvar & --- & 0 & 交流侧无功\\
+\fld{p\_dc\_mw} & $P_{dc}$ & MW & --- & 0 & 直流侧有功；$P_{ac}+P_{dc}+P_{loss}=0$\\
+\fld{loss\_mw} & $P_{loss}$ & MW & $\ge 0$ & 0 & 换流器损耗（依\fld{loss\_model}）\\
+\end{paramtable}
+
+\subsubsection*{DCDCTransfer（:164--178）——DC/DC 传输与占空比校核}
+\begin{paramtable}
+\fld{index} & --- & --- & --- & 0 & DC/DC 组件 .index\\
+\fld{bus\_in} / \fld{bus\_out} & --- & --- & --- & 0 & 输入/输出侧 DC 母线编号\\
+\fld{p\_in\_mw} & $P_{in}$ & MW & --- & 0 & 输入侧有功（解后状态回算，非计划值，hacdcpf.cpp:724--733）\\
+\fld{p\_out\_mw} & $P_{out}$ & MW & --- & 0 & 输出侧有功\\
+\fld{loss\_mw} & $P_{loss}$ & MW & $\ge 0$ & 0 & 效率+$I^2R$ 损耗\\
+\fld{duty} & $D$ & --- & $[d_{\min},d_{\max}]$ & 0 & 由解出端口电压反推的理想 CCM 占空比（Isolated 拓扑为调制增益）\\
+\fld{voltage\_ratio} & $V_{out}/V_{in}$ & --- & --- & 0 & 端口电压比\\
+\fld{duty\_defined} & --- & --- & true/false & false & Generic 拓扑为 false\\
+\fld{duty\_feasible} & --- & --- & true/false & true & 越窗时触发[DCDC-PHYS-01] 告警（hacdcpf.cpp:944--949）\\
+\end{paramtable}
+
+\subsubsection*{Trafo3WFlow（:180--189）——三绕组变压器}
+\begin{paramtable}
+\fld{index} & --- & --- & --- & 0 & 组件 .index\\
+\fld{hv\_bus} / \fld{mv\_bus} / \fld{lv\_bus} & --- & --- & --- & 0 &高/中/低压侧母线编号\\
+\fld{p\_hv\_mw}，\fld{q\_hv\_mvar} 等六量 & $P,Q$ & MW/Mvar & --- & 0 &三侧各 $P$、$Q$（\fld{p\_mv\_mw}、\fld{q\_mv\_mvar}、\fld{p\_lv\_mw}、\fld{q\_lv\_mvar} 同构）\\
+\fld{loss\_mw} & $P_{loss}$ & MW & $\ge 0$ & 0 & 三侧功率不平衡（损耗）\\
+\fld{loading\_pct} & --- & \% & --- & 0 & 负载率\\
+\fld{rate\_mva} & $S_{rate}$ & MVA & --- & 0 & 额定容量\\
+\end{paramtable}
+
+\subsubsection*{ERPortTransfer（:191--199）——能量路由器端口}
+\begin{paramtable}
+\fld{router\_index} / \fld{port\_index} & --- & --- & --- & 0 &路由器与端口组件 .index\\
+\fld{bus} & --- & --- & --- & 0 & 端口所接母线编号\\
+\fld{is\_ac} & --- & --- & true/false & true & 端口域（AC/DC）\\
+\fld{p\_mw} / \fld{q\_mvar} & $P,Q$ & MW/Mvar & --- & 0 & 端口有功/无功\\
+\fld{v\_pu} & $V$ & pu & --- & 1.0 & 端口母线电压幅值\\
+\end{paramtable}
+
+\subsubsection*{DeviceTerminalFlow（:144--152）——开关/断路器端子潮流}
+投影层把闭合开关/断路器折叠进零阻抗合并（第~\ref{sec:assembly}~章），
+求解后由 \srcpath{compute\_device\_terminal\_flows}（hacdcpf.cpp:995）恢复其端子潮流：
+\begin{paramtable}
+\fld{index} & --- & --- & --- & 0 & 设备组件 .index\\
+\fld{bus\_from} / \fld{bus\_to} & --- & --- & --- & 0 & 两端母线编号（原始编号空间）\\
+\fld{closed} & --- & --- & true/false & true & 合/分状态\\
+\fld{pf\_mw}，\fld{pt\_mw}，\fld{qf\_mvar}，\fld{qt\_mvar} & $P,Q$ & MW/Mvar & --- & 0 &两端 $P$、$Q$（四字段同行声明）\\
+\fld{rate\_mva} & $S_{rate}$ & MVA & --- & 0 & 容量（0=不限）\\
+\fld{loading\_pct} & --- & \% & --- & 0 & 负载率\\
+\end{paramtable}
+
+\subsection{SolverProfiling：计数与计时}\label{subsec:profiling}
+
+\compmeta{hacdcpf::SolverProfiling}{\srcpath{include/hacdcpf/power\_flow/power\_flow\_result.hpp:102--129}}
+
+逐迭代向量索引空间为 Newton 迭代序号（0-based）；计时字段单位毫秒，仅在
+\fld{enable\_solver\_profiling} 打开时填充（newton\_solver.cpp:1432, 1724）。
+\begin{paramtable}
+\fld{linear\_solver\_backend} & --- & --- & KLU/UMFPACK/\dots & 空 &实际选用的稀疏线性后端名（优先级见第~\ref{sec:newton}~章）\\
+\fld{ac\_eval\_threads} & --- & 线程 & --- & 1 & 实际生效的 AC 内核线程数\\
+\fld{jacobian\_pattern\_rebuilds} & --- & 次 & --- & 0 & 稀疏模式重建次数（缓存失效计数）\\
+\fld{jacobian\_analyze\_calls} & --- & 次 & --- & 0 &\texttt{analyzePattern} 调用次数\\
+\fld{factorization\_calls} & --- & 次 & --- & 0 & 数值分解次数\\
+\fld{linear\_solve\_calls} & --- & 次 & --- & 0 & 三角回代次数\\
+\fld{regularization\_attempts} & --- & 次 & --- & 0 & 对角正则化尝试次数\\
+\fld{line\_search\_evaluations} & --- & 次 & --- & 0 & 线搜索残差评估总次数\\
+\fld{rejected\_steps} & --- & 次 & --- & 0 & 被拒绝步数\\
+\fld{pv\_to\_pq\_switches} / \fld{pq\_to\_pv\_switches} & --- & 次 & --- & 0 &PV/PQ 双向切换计数\\
+\fld{converter\_mode\_switches} & --- & 次 & --- & 0 & 换流器模式切换计数\\
+\fld{residual\_by\_iter} & --- & pu & --- & 空 & 逐迭代（缩放）残差；索引=迭代序号\\
+\fld{line\_search\_evals\_by\_iter} & --- & 次 & --- & 空 & 逐迭代线搜索评估数\\
+\fld{eval\_jacobian\_ms\_by\_iter} / \fld{linear\_solve\_ms\_by\_iter} / \fld{line\_search\_ms\_by\_iter} & --- & ms & --- & 空 & 逐迭代三段耗时（装配求值/线性求解/线搜索）\\
+\fld{eval\_jacobian\_ms\_total} / \fld{linear\_solve\_ms\_total} / \fld{line\_search\_ms\_total} & --- & ms & --- & 0 & 三段累计耗时\\
+\fld{raw\_residual\_norm} / \fld{scaled\_residual\_norm} & --- & pu & --- & 0 & 未缩放/缩放后残差范数（后者为收敛判定所用）\\
+\fld{condition\_estimate} & $\kappa$ 代理 & --- & --- & 0 &条件数 $\ell_1$ 行/列范数比代理（newton\_solver.cpp:494 起；\fld{enable\_condition\_monitor} 控制，写入 :1429）\\
+\fld{regularization\_count} / \fld{linear\_solver\_status} & --- & 次/串 & --- & 0 / "not\_run" & 正则化累计次数；线性后端状态串\\
+\end{paramtable}
+
+\subsection{SolverDiagnostics：诊断与诚实口径}\label{subsec:diagnostics}
+
+\compmeta{hacdcpf::SolverDiagnostics}{\srcpath{include/hacdcpf/power\_flow/power\_flow\_result.hpp:56--97}}
+
+\begin{paramtable}
+\fld{converged} & --- & --- & true/false & false & 诊断层收敛标志；\textbf{当前未接线}（以顶层 \fld{PowerFlowResult::converged} 为准；\fld{enforce\_converter\_physical\_limits} 门卫拒绝时同步置 false，hacdcpf.cpp:970）\\
+\fld{termination\_reason} & --- & --- & --- & 空 & 终止原因；仅阻断/拒绝时写入：参考母线资格失败（hacdcpf.cpp:886）、协调校核失败（:898）、无合法 slack AC 岛（:917）、硬约束门卫判物理不可行（:971）\\
+\fld{iterations} & --- & 次 & --- & 0 & 诊断层迭代数；\textbf{当前未接线}（以顶层 \fld{iterations} 为准）\\
+\fld{initial\_mismatch\_norm} & --- & pu & --- & 0 & 初始失配范数；\textbf{当前未接线}（逐迭代残差见 \fld{profiling.residual\_by\_iter}）\\
+\fld{final\_mismatch\_norm} & --- & pu & --- & 0 & 末态失配范数；\textbf{当前未接线}（以顶层 \fld{residual} 为准）\\
+\fld{max\_p\_mismatch\_pu} & --- & pu & --- & 0 & 最大有功失配；\textbf{当前未接线}（市场层读取，market\_simulation.cpp:1394）\\
+\fld{max\_q\_mismatch\_pu} & --- & pu & --- & 0 & 最大无功失配；\textbf{当前未接线}\\
+\fld{max\_i\_violation\_pu} & --- & pu & --- & 0 & 最大电流越限；\textbf{当前未接线}\\
+\fld{condition\_estimate} & --- & --- & --- & 0 & 诊断层条件数；\textbf{当前未接线}（以 \fld{profiling.condition\_estimate} 为准）\\
+\fld{equation\_closure\_checked} & --- & --- & true/false & false &结构闭合扫描已执行（首外层一次，newton\_solver.cpp:1335--1337）\\
+\fld{equation\_closure\_ok} & --- & --- & true/false & true &雅可比无全零行/列（:1342）；失败时追加告警（:1343）\\
+\fld{n\_equations} / \fld{n\_variables} & $n_{eq},n_{var}$ & --- & --- & 0 & 方程数/未知量数（闭合校核 $n_{eq}=n_{var}$）\\
+\fld{empty\_jacobian\_rows} / \fld{empty\_jacobian\_cols} & --- & 行/列 & --- & 0 & 全零行/列计数（\srcpath{scan\_empty\_rows\_cols}）\\
+\fld{final\_breakdown} & --- & pu & --- & --- & 分类残差\texttt{ResidualBreakdown}（见下）\\
+\fld{iteration\_log} & --- & --- & --- & 空 & 逐迭代日志\texttt{IterationLogEntry}；\textbf{当前未接线}（Newton 不填充）\\
+\fld{warnings} & --- & --- & --- & 空 & 告警字符串（含规则码，见下）\\
+\fld{converter\_coordination} & --- & --- & --- & --- & 预求解协调报告\texttt{ConverterCoordinationReport}（hacdcpf.cpp:928 回填）\\
+\fld{promoted\_vsc\_indices} & --- & --- & --- & 空 & 因 DC 岛无电压参考而被自动提升为调压模式的 VSC 下标（求解器换流器列表 0-based，newton\_solver.cpp:962）\\
+\fld{effective\_converters} & --- & --- & --- & 空 & 求解终态换流器列表（含自动提升/刚性增益/模式切换），派生结果回算以它为准（newton\_solver.cpp:975, 1862）\\
+\end{paramtable}
+
+分类残差 \texttt{ResidualBreakdown}（power\_flow\_result.hpp:21--38）：
+\fld{ac\_p\_norm}、\fld{ac\_q\_norm}、\fld{dc\_p\_norm}、\fld{converter\_p\_norm}、
+\fld{converter\_q\_norm}、\fld{control\_eq\_norm} 六个分类无穷范数（pu），
+\texttt{total\_norm()} 取六者最大。逐迭代日志条目 \texttt{IterationLogEntry}
+（:43--51）：\fld{iteration}、\fld{residual\_norm}（pu）、\fld{step\_norm}、
+\fld{damping\_factor}、\fld{jacobian\_refactorized}、\fld{lm\_fallback\_used}、\fld{breakdown}。
+
+告警码（写入 \fld{warnings}；默认模式下均为\textbf{事后校核}而非硬约束，
+\fld{enforce\_converter\_physical\_limits} 开启时转为收敛拒绝依据，
+读取点 hacdcpf.cpp:679--714, 944--949）：
+\begin{itemize}
+  \item [ACDC-PHYS-01] VSC 调制比 $m<m_{\min}$；
+  \item [ACDC-PHYS-02] VSC 交流电流 $I_{ac}>$ \fld{i\_ac\_max\_pu}；
+  \item [ACDC-PHYS-03] VSC 直流电流 $I_{dc}>$ \fld{i\_dc\_max\_pu}；
+  \item [ACDC-PHYS-04] VSC 视在功率越额定 \fld{p\_rated\_mw}；
+  \item [ACDC-PHYS-05] VSC 调制比 $m>m_{\max}$（直流电压不足以支撑交流电压）；
+  \item [DCDC-PHYS-01] DC/DC 占空比越 $[d_{\min},d_{\max}]$ 窗口；
+  \item [CONVERTER-PHYS-HARD] 硬约束门卫：Newton 已收敛但运行点违反已声明的
+        换流器不等式，被判物理不可行（hacdcpf.cpp:973--976）；
+  \item 换流器协调规则码（\fld{rule\_id}，Warning/Info 级汇入，
+        hacdcpf.cpp:929--935；规则目录见第~\ref{sec:hybrid}~章）。
+\end{itemize}
+\texttt{ConverterCoordinationReport}（converter\_coordination.hpp:65--77）：
+\fld{enabled}、\fld{feasible}、\fld{issues}（严重度 Info/Warning/Error/Fatal、
+\fld{rule\_id}、组件 .index、岛号、消息）与逐 DC 岛摘要 \fld{dc\_islands}
+（\texttt{DCIslandCoordinationSummary}，:40--63）。
+
+\subsection{ConverterModelScope：模型覆盖声明}\label{subsec:scope}
+
+\compmeta{hacdcpf::ConverterModelScope}{\srcpath{include/hacdcpf/model/converter\_model\_scope.hpp:21--53}}
+
+潮流快照求解的填充点：hacdcpf.cpp:1003--1017。\texttt{ValidityFlags} 十标志逐一
+声明该次求解\textbf{实际}建模/执行的换流器特性，false 项即诚实口径边界：
+\begin{paramtable}
+\fld{model\_scope} & --- & --- & --- & "unset" & 作用域标签；快照潮流填 \texttt{steady-state-newton:\allowbreak vsc-3mode+\allowbreak dcdc-power-transfer}\\
+\fld{vsc\_loss\_modelled} & --- & --- & --- & true & VSC 损耗（线性/电流基）\\
+\fld{vsc\_ac\_conduction\_loss\_modelled} & --- & --- & --- & true &交流侧传导损耗（\fld{r\_conv\_ac\_pu} 耦合，opt-in）\\
+\fld{vsc\_capacity\_circle\_enforced} & --- & --- & --- & 随选项 &容量圆 $P^2+Q^2\le S^2$ 未嵌入方程；回填 \fld{enforce\_converter\_physical\_limits}（hacdcpf.cpp:1012）——false 时仅 [ACDC-PHYS-04] 事后告警，true 时违反即拒绝收敛\\
+\fld{vsc\_current\_limits\_enforced} & --- & --- & --- & 随选项 &电流限，同上回填（:1013）；false 时仅事后告警（02/03）\\
+\fld{vsc\_modulation\_limits\_enforced} & --- & --- & --- & 随选项 &调制比限，同上回填（:1014）；false 时仅事后告警（01/05）\\
+\fld{vsc\_vdc\_control\_modelled} & --- & --- & --- & true &VDC\_Q/VDC\_VAC 控制与刚性 droop 成压\\
+\fld{dc\_multisource\_coordination\_modelled} & --- & --- & --- & true &多源协调（\fld{is\_master}+参与因子）影响解点\\
+\fld{dcdc\_loss\_modelled} & --- & --- & --- & true & DC/DC 效率+$I^2R$ 损耗\\
+\fld{dcdc\_duty\_ratio\_enforced} & --- & --- & --- & 随选项 &占空比，同上回填（:1016）；false 时仅事后校核（[DCDC-PHYS-01]）\\
+\fld{equation\_closure\_checked} & --- & --- & --- & 随求解 &回填 \fld{diagnostics.equation\_closure\_checked}\\
+\end{paramtable}
+
+\subsection{其他求解器结果类型}
+同头文件另有四个轻量结果结构（power\_flow\_result.hpp:228--266），字段含义与
+\texttt{PowerFlowResult} 同名项一致，\fld{vm}/\fld{va}/\fld{vdc} 索引空间与
+单位约定亦同（弧度相角、回投影后原始编号空间）：
+\begin{itemize}
+  \item \texttt{DCPowerFlowResult}（:228--233）：\fld{vdc}、\fld{converged}、
+        \fld{iterations}、\fld{residual}——纯 DC 网络求解（第~\ref{sec:hybrid}~章）；
+  \item \texttt{AdaptiveSolveResult}（:235--244）/ \texttt{IslandedSolveResult}
+        （:246--254）：增 \fld{islands}（\texttt{IslandInfo} 逐岛信息），前者另含 \fld{branch\_flows}；
+  \item \texttt{DistributedSlackResult}（:256--266）：增 \fld{diagnostics}、
+        \fld{distributed\_slack\_p}（母线 .index $\to$ 分摊有功 MW）、
+        \fld{hit\_limits}（触及参与上限的母线 .index）。
+\end{itemize}

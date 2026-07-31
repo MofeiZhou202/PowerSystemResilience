@@ -1,0 +1,466 @@
+% 第 6 章：直流网络与混合交直流潮流
+% 本章文件由 \input 引入，不含导言区。
+\section{直流网络与混合交直流潮流}\label{sec:hybrid}
+
+本章给出 DC 网络方程、纯 DC 求解器、混合 AC/DC 联立求解的耦合机制、
+VSC 与 DC/DC 换流器稳态模型、DC 岛电压参考规划，以及换流器协调校核体系。
+统一 Newton 主循环（状态变量排序、全局化、收敛判定）见第~\ref{sec:newton}~章，
+本章只展开 DC 侧与换流器相关的部分。设计背景文档为
+\srcpath{docs/multiple\_converter.md}（多变换器统一模型）与
+\srcpath{docs/multiple\_converter\_r1.md}（AC 侧构网与七类控制模式补充）。
+
+\subsection{功能定位与入口}
+
+混合 AC/DC 潮流的公共入口族（薄包装，均委托统一主链，见第~\ref{sec:overview}~章）：
+
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}L{4.2cm}L{4.6cm}L{6.2cm}@{}}
+\toprule
+入口 & 实现 & 说明\\
+\midrule
+\srcpath{powerflow::solve\_dc} & \srcpath{src/power\_flow/dc.cpp:7--10} & 委托 \srcpath{solve\_dc\_power\_flow}（\srcpath{src/api/hacdcpf.cpp:1022}）\\
+\srcpath{powerflow::solve\_hybrid} & \srcpath{src/power\_flow/hybrid.cpp:7--10} & 委托 \srcpath{solve\_power\_flow}（统一 Newton）\\
+\srcpath{powerflow::solve\_hybrid\_adaptive} & \srcpath{src/power\_flow/hybrid.cpp:12--15} & 委托分岛自适应求解\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+DC 母线类型枚举 \texttt{DCBusType}（\srcpath{include/hacdcpf/model/enums/bus\_types.hpp:14--18}）：
+\texttt{DC\_P}=1（功率母线）、\texttt{DC\_V}=3（电压参考母线）、
+\texttt{DC\_ISOLATED}=4（失电母线，剔除出方程组）。
+\textbf{如实说明}：\srcpath{include/hacdcpf/power\_flow/dc.hpp:9} 的注释称
+"linear approximation"，但实现（见下节）是 $V\odot GV=P$ 的\textbf{非线性} Newton，
+与线性化角度直流潮流（$B\theta=P$，纯 AC）不是一回事。
+
+\subsection{DC 网络方程与纯 DC 求解器}
+
+\compmeta{powerflow::DCSolver}{\srcpath{include/hacdcpf/power\_flow/solvers/dc\_solver.hpp}}
+
+\subsubsection*{功能说明}
+\texttt{DCSolver} 是独立纯 DC 求解器（实现 \srcpath{src/power\_flow/dc\_solver.cpp:22--178}）：
+只解 DC 电压向量 $\mathbf v_{dc}$，AC 侧仅以其初始 $\fld{vm\_pu}$ 参与换流器注入求值
+（\texttt{va} 取 0，dc\_solver.cpp:72--80），不回代交流网络。输出
+\texttt{DCPowerFlowResult\{vdc, converged, iterations, residual\}}
+（\srcpath{include/hacdcpf/power\_flow/power\_flow\_result.hpp:228--233}）。
+
+\subsubsection*{数学模型与算法}
+DC 节点功率方程（注入发电为正）与失配（dc\_solver.cpp:88--98）：
+\[
+p_{dc,i}^{\mathrm{calc}}=v_{dc,i}\sum_{j}g_{ij}v_{dc,j},\qquad
+F_i=p_{dc,i}^{\mathrm{spec}}-p_{dc,i}^{\mathrm{calc}}
+\]
+其中 $G_{dc}=[g_{ij}]$ 为第~\ref{sec:assembly}~章的正对角 Laplacian 电导阵
+（$g=1/r_{pu}$）；\fld{pdc\_spec} 由 \srcpath{assemble\_dc\_injections}
+（\srcpath{src/power\_flow/pf\_injection\_assembly.cpp:12--101}）装配：DC 负荷为负
+（Load 表空时回退母线 \fld{pd\_mw}，:20--37）、DC 储能放电为正（:39--46）、
+静态发电机与 PV 阵列（:48--64）、VSC 经 \srcpath{converter\_dc\_injection}（:66--74）、
+DC/DC 入端 $-P_{in}$、出端 $+P_{out}$（:76--88）、能量路由器 DC 端口（:90--100）。
+
+求解流程（Newton + 回溯线搜索，致密代数）：
+\begin{enumerate}
+  \item \textbf{参考与方程集}：\srcpath{first\_dc\_slack\_or\_default}
+        （\srcpath{include/hacdcpf/power\_flow/pf\_utils.hpp:34--46}）优先首个
+        \texttt{DC\_V} 母线，否则首个非孤立母线；\texttt{DC\_ISOLATED} 母线钉住初值、
+        剔除出方程组（dc\_solver.cpp:40--56，避免零行/零列奇异）；方程数为 0 时
+        直接按 \fld{vm\_pu} 返回（:59--67）；
+  \item \textbf{雅可比}（:109--120）：
+        $J_{kk}=p_{dc,k}^{\mathrm{linear}}+g_{kk}v_{dc,k}$（$p^{\mathrm{linear}}=G_{dc}\mathbf v_{dc}$），
+        $J_{kl}=g_{kl}v_{dc,k}\ (l\neq k)$；
+  \item \textbf{线性求解}：致密 \texttt{Eigen::FullPivLU}，不可逆或解含 NaN/Inf 即判失败
+        （:122--132）；
+  \item \textbf{回溯线搜索}（:134--164）：$\alpha$ 初值 1、最多 8 次减半，试验步满足
+        $v_{dc}\ge\texttt{kMinVdc}=0.05$（:18），残差改善即采纳最优试探；
+  \item \textbf{收敛}：$\lVert F\rVert_\infty<\fld{opt.tol}$；结束后以末态残差重新判定
+        \fld{converged}（:167--171，与统一 Newton 的诚实收敛口径一致）。
+\end{enumerate}
+
+\subsubsection*{参数表}
+\begin{paramtable}
+\fld{DCBus::bus\_type} & --- & --- & DC\_P / DC\_V / DC\_ISOLATED & DC\_P & 母线角色，决定参考与剔除（\srcpath{include/hacdcpf/model/dc\_components.hpp:22}）\\
+\fld{DCBus::vm\_pu} & $v_{dc,0}$ & pu & $0.9$--$1.1$ & 1.0 & DC 电压初值/钉住值（dc\_components.hpp:23）\\
+\fld{DCBus::vmax\_pu} / \fld{vmin\_pu} & --- & pu & --- & 1.1 / 0.9 & 仅事后越限告警（newton\_solver.cpp:1839--1857）\\
+\fld{DCBranch::r\_pu} & $r$ & pu & $10^{-4}$--$10^{-1}$ & 0.0 & 支路电阻，$g=1/r$（dc\_components.hpp:52）\\
+\fld{opt.tol} / \fld{opt.max\_iter} & $\varepsilon$ & pu/次 & --- & $10^{-8}$ / 50 & 收敛容差/迭代上限（同第~\ref{sec:newton}~章默认值）\\
+\texttt{kMinVdc} & --- & pu & --- & 0.05 & 线搜索电压下限（dc\_solver.cpp:18）\\
+\end{paramtable}
+
+\subsubsection*{验证与校核}
+纯 DC 路径由 \srcpath{tests/test\_all\_components\_pf.cpp} 的 DC 组件族
+（DCBus、DCBranch、DCLoad、StaticGeneratorDC、PVArrayDC，文件头注释 :15--16）与
+\srcpath{tools/validate\_case\_capabilities.py} 的 NR/FDPF/DC 三法互验覆盖；
+DC 岛参考行为见第~\ref{sec:hybrid-dcref}~节。
+
+\subsection{混合 AC/DC 联立求解耦合机制}
+
+\subsubsection*{功能说明}
+统一 Newton 把 AC 与 DC 未知量放在\textbf{同一}方程组、同一稀疏雅可比中联立求解
+（非 AC/DC 主从交替）。状态排序 $x=[\Delta\theta;\Delta V_m;\Delta V_{dc}]$ 与
+DC 行列映射（偏移 $n_p+n_q$）见第~\ref{sec:newton}~章；本小节展开换流器注入
+进 spec 的方式与换流器导数的\textbf{三档注入}机制。
+
+\subsubsection*{换流器注入与三档雅可比注入}
+残差与雅可比统一装配于 \srcpath{evaluate\_residual\_impl}（:181--367，
+\srcpath{src/power\_flow/jacobian\_builder.cpp}）。换流器对指定注入的贡献在
+\srcpath{build\_power\_spec}（同文件 :25--178）：AC 侧
+$P^{\mathrm{spec}} \mathrel{+}=p_{ac}$、$Q^{\mathrm{spec}}\mathrel{+}=q_{ac}$
+（:143--147）；DC 侧 \fld{pdc\_spec} 加 \srcpath{converter\_dc\_injection}（:172--176）。
+DC 网络块与其雅可比（:285--293）：
+\[
+p_{dc}^{\mathrm{calc}}=\mathbf v_{dc}\odot(G_{dc}\mathbf v_{dc}),\qquad
+J_{ii}=p_{dc,i}^{\mathrm{linear}}+g_{ii}v_{dc,i},\qquad
+J_{ij}=g_{ij}v_{dc,i}\ (i\neq j)
+\]
+DC 失配行 $=p_{dc}^{\mathrm{spec}}-p_{dc}^{\mathrm{calc}}$（:364--367）。
+
+换流器导数分\textbf{三档}注入（符号约定 $J\mathrel{+}=-(\partial\mathrm{spec}/\partial x)$，
+jacobian\_builder.cpp:327）：
+\begin{enumerate}
+  \item \textbf{AC 构网能量导管（无条件）}：\texttt{AC\_GRID\_FORMING} 换流器的
+        AC 母线是 slack，其 AC 有功为自由平衡量；DC 注入按能量守恒跟踪
+        $P_{dc}=-\big(P_{ac}+\mathrm{loss}(P_{ac})\big)$，
+        $P_{ac}=p^{\mathrm{calc}}-p^{\mathrm{spec}}$（:150--172，
+        可选叠加 $r\cdot P_{ac}^2/V_m^2$ 交流传导损耗）；
+  \item \textbf{DC 自洽导数（始终注入）}：VSC 的
+        $\partial p_{dc}^{\mathrm{spec}}/\partial v_{dc}$ 与 DC/DC droop/Voltage 模式的
+        DC 块内导数（:322--353），保证耦合关闭时 DC 方程仍有精确导数；
+  \item \textbf{AC$\leftrightarrow$DC 交叉块（仅 \fld{enable\_coupled\_jacobian} 开启）}：
+        AC P/Q 行 $\times$ $V_{dc}$ 列注入 $-\partial p_{ac}/\partial v_{dc}$、
+        $-\partial q_{ac}/\partial v_{dc}$（:296--303）；DC 行 $\times$ AC $V_m$ 列
+        （仅 \fld{r\_conv\_ac\_pu}$>0$）注入 $-\partial p_{dc}/\partial V_m$（:304--314）。
+\end{enumerate}
+稀疏模式侧：DC 对角槽 \fld{dc\_vdc\_diag\_nz} 与 DC/DC droop 槽
+\fld{dcdc\_droop\_entries} \textbf{始终}构建
+（\srcpath{src/power\_flow/jacobian\_pattern.cpp:204--242}）；交叉耦合槽
+\fld{coupling\_entries} 与 \fld{dcdc\_coupling\_entries}（后者仅 \fld{r\_eq\_pu}$>0$）
+仅在耦合开启时构建（:312--363）。DC/DC 导数注入：输出行$\times$输入电压列
+$-\partial p_{out}/\partial v_{dc,in}$（jacobian\_builder.cpp:339--343），
+droop/Voltage 项 $-\partial p_{out}/\partial v_{dc,out}$ 与
+$+\partial p_{in}/\partial v_{dc,out}$（:344--353）。
+
+\subsubsection*{参数表}
+\begin{paramtable}
+\fld{enable\_coupled\_jacobian} & --- & --- & on/off & \textbf{false} & AC$\leftrightarrow$DC 交叉雅可比块开关（\srcpath{include/hacdcpf/power\_flow/power\_flow\_options.hpp:149}）\\
+\fld{enable\_augmented\_equations} & --- & --- & on/off & false & VDC\_VAC 母线增广方程（Direction 2，见第~\ref{sec:newton}~章）\\
+\fld{r\_conv\_ac\_pu} & $r_{ac}$ & pu & 0--0.05 & 0.0 & AC 传导损耗耦合（opt-in，0 保持 legacy 行为）\\
+\fld{r\_eq\_pu} & $r_{eq}$ & pu & 0--0.05 & 0.0 & DC/DC 等值电阻（$I^2R$ 损耗，opt-in）\\
+\end{paramtable}
+
+\subsubsection*{验证与校核}
+\srcpath{tests/test\_unified\_pf\_upgrade.cpp:232--341} 在强化耦合的混合算例上
+（\fld{enable\_coupled\_jacobian}=true、\fld{loss\_model}=CurrentBased）
+对 $V_{dc}$ 列（耦合项）及前 10 个 $\theta/V_m$ 列做中心差分对拍：
+$\varepsilon=10^{-6}$，max\_rel\_error $<10^{-3}$、violations==0；
+同文件 :349 起的第二个用例证明耦合雅可比降低 $V_{dc}$ 扰动的 Taylor 模型误差。
+\fld{r\_conv\_ac\_pu} 注入与导数由 \srcpath{tests/test\_converter\_coordination.cpp:610--650}
+逐项精确断言（容差 $10^{-12}$）。
+
+\subsection{VSC 换流器稳态模型}\label{sec:hybrid-vsc}
+
+\compmeta{VSCConverter}{\srcpath{include/hacdcpf/model/converter\_components.hpp}}
+
+\subsubsection*{功能说明}
+VSC 是 AC/DC 双端口耦合设备，稳态模型在 \srcpath{src/power\_flow/converter\_model.cpp}。
+控制模式枚举 \texttt{ConverterMode} 共\textbf{六种}
+（\srcpath{include/hacdcpf/model/enums/converter\_enums.hpp:6--23}），
+对应七类典型控制分类 \texttt{ACDCControlMode}（:25--43，
+\srcpath{docs/multiple\_converter\_r1.md} §4）的 Mode 1--7
+（$\delta_s{+}V_s$ / $P_s{+}V_s$ / $P_s{+}Q_s$ / $U_{dc}{+}Q_s$ / $U_{dc}{+}V_s$ /
+droop $U_{dc}{+}V_s$ / droop $U_{dc}{+}Q_s$）；控制角色统一由
+\srcpath{resolve\_device\_control\_role}（\srcpath{include/hacdcpf/model/device\_control\_role.hpp:62--118}）判定。
+
+\subsubsection*{数学模型：注入与损耗}
+\textbf{AC 侧注入} \srcpath{converter\_ac\_injection}（converter\_model.cpp:52--97）：
+\texttt{AC\_GRID\_FORMING} 返回 $(0,0)$（AC 母线为 slack，P/Q 行整体剔除，:66--73）；
+\texttt{PQ\_MODE}/\texttt{AC\_PV} 返回 $(p_{set},q_{set})$（AC\_PV 的 Q 行为占位，
+其 AC 母线经装配层提升为 PV，:75--83）；\texttt{VDC\_*} 族先算下垂转移功率
+（:85--87）
+\[
+P_{tr}=k_{vdc}\big(v_{dc}^{2}-v_{dc,set}^{2}\big),\qquad P_{ac}=P_{tr}-P_{loss}(P_{tr},v_{dc})
+\]
+\texttt{VDC\_Q} 返回 $(P_{ac},q_{set})$；\texttt{VDC\_VAC} 与
+\texttt{DC\_V\_DROOP\_AC\_V} 返回 $(P_{ac},0)$（:89--96）。
+
+\textbf{DC 侧注入} \srcpath{converter\_dc\_injection}（:99--146）：
+PQ/AC\_PV/AC\_GRID\_FORMING 族 $P_{dc}=-(p_{set}+P_{loss}(p_{set}))$（:113--124）；
+\texttt{VDC\_*} 族 $P_{dc}=-P_{tr}$（:125--131）；opt-in 交流传导损耗
+（\fld{r\_conv\_ac\_pu}$>0$）使 DC 侧多抽
+$P_{loss}^{AC}=r_{ac}\,P_{ac}^{2}/\max(V_m,0.1)^{2}$（:133--143）。
+
+\textbf{损耗模型} \srcpath{converter\_loss}（:8--23）与导数
+\srcpath{converter\_loss\_jacobian}（:25--50），按 \fld{loss\_model} 二选一：
+\[
+P_{loss}=\begin{cases}
+(1-\eta)\,|p| & \text{Linear（默认）}\\[2pt]
+a+bI+cI^{2},\quad I=\dfrac{|p|}{\max(v_{dc},0.1)} & \text{CurrentBased}
+\end{cases}
+\]
+其中 $a=\fld{loss\_mw}/S_{base}$（固定损耗）、$b=\fld{loss\_percent}/100$（$\propto I$）、
+$c=1-\eta$（$\propto I^2$）。
+
+\textbf{交叉导数}（耦合雅可比用，converter\_model.cpp:152--211, 330--344）：
+\texttt{VDC\_*} 族
+$\partial P_{ac}/\partial v_{dc}=2k_{vdc}v_{dc}\big(1-\partial P_{loss}/\partial p\big)-\partial P_{loss}/\partial v_{dc}$
+（:181）；DC 侧 PQ 族 $\partial P_{dc}/\partial v_{dc}=-\partial P_{loss}/\partial v_{dc}$、
+\texttt{VDC\_*} 族 $-2k_{vdc}v_{dc}$（:200--209）；
+$\partial P_{dc}/\partial V_m=2r_{ac}P_{ac}^{2}/V_m^{3}$（:341--343）。
+
+\subsubsection*{PQ$\leftrightarrow$VDC\_Q 模式切换迟滞}
+\srcpath{apply\_converter\_mode\_switching}（\srcpath{src/power\_flow/newton\_solver.cpp:797--861}）：
+误差 $e=|v_{dc}-v_{dc,set}|$；PQ 下 $e>$ 高阈值且持续 \fld{mode\_hysteresis\_iters}
+次迭代则升 \texttt{VDC\_Q}（:826--838）；\texttt{VDC\_Q} 下 $e<$ 低阈值且持续则降回 PQ，
+但被 DC 岛参考规划提升/刚性构网锁定的换流器禁止降级（:839--854，
+\fld{promotion\_lock} 见 :953--961）。切换仅在迭代残差 $<10^{-6}$ 后评估
+（:1444--1452），切换计数入 \fld{profiling.converter\_mode\_switches}。
+\texttt{VDC\_VAC} 母线每次试探后由 \srcpath{enforce\_vac\_setpoints}（:446--457）
+钉住 $V_m=v_{ac,set}$（增广方程模式下跳过）。
+
+\subsubsection*{参数表（converter\_components.hpp:19--128）}
+\begin{paramtable}
+\fld{control\_mode} & --- & --- & 六种模式 & PQ\_MODE & 控制模式（:24）\\
+\fld{p\_set\_mw} / \fld{q\_set\_mvar} & $p_{set},q_{set}$ & MW/Mvar & --- & 0.0 & AC 侧功率整定（:27,43）\\
+\fld{p\_is\_hard\_constraint} / \fld{p\_schedule\_mw} / \fld{p\_initial\_mw} & --- & --- & --- & false / 0 / 0 & P 硬约束与释放后的调度/初值（:40--42）\\
+\fld{v\_dc\_set\_pu} & $v_{dc,set}$ & pu & 0.95--1.05 & 1.0 & DC 电压整定（:44）\\
+\fld{v\_ac\_set\_pu} / \fld{v\_ac\_angle\_set\_deg} & $v_{ac,set}$ & pu/deg & --- & 1.0 / 0.0 & AC 构网/AC\_PV 整定（:45,49）\\
+\fld{eta} & $\eta$ & --- & 0.95--0.99 & 0.99 & 效率（Linear 损耗，:51）\\
+\fld{loss\_mw} / \fld{loss\_percent} & $a,b$ & MW/\% & --- & 0.0 & CurrentBased 损耗系数（:52--53）\\
+\fld{k\_vdc} & $k_{vdc}$ & pu & 0.1--25 & 0.1 & $v_{dc}^2$ 下垂增益（:54）\\
+\fld{r\_conv\_ac\_pu} & $r_{ac}$ & pu & 0--0.05 & 0.0 & AC 传导电阻（opt-in，:89）\\
+\fld{i\_ac\_max\_pu} / \fld{i\_dc\_max\_pu} & --- & pu & --- & 0.0 & 电流限（0=不校核，:70--71）\\
+\fld{k\_m\_modulation} / \fld{m\_min} / \fld{m\_max} & $K_m,m$ & --- & --- & 0.0 & 调制比校核参数（0=不校核，:72--74）\\
+\fld{coordination\_group\_id} / \fld{is\_master} / \fld{participation\_factor} & $\alpha$ & --- & --- & 空/false/0.0 & 多源 DC 电压协调（:115--117）\\
+\fld{converter\_vdc\_switch\_high\_pu} / \fld{\_low\_pu} & --- & pu & --- & 0.03 / 0.01 & PQ$\leftrightarrow$VDC\_Q 切换阈值（power\_flow\_options.hpp:120--121）\\
+\fld{mode\_hysteresis\_iters} & --- & 次 & --- & 2 & 切换持续次数（:122）\\
+\fld{enable\_converter\_mode\_switching} & --- & --- & on/off & true & 模式切换总开关（:126）\\
+\end{paramtable}
+
+\subsubsection*{验证与校核}
+AC\_PV 保持交流电压（:1174）、\texttt{DC\_V\_DROOP\_AC\_V} 下垂构网（:1577）、
+\texttt{AC\_GRID\_FORMING} 孤岛成参考（:1670）、七模式映射（:1299）等用例见
+\srcpath{tests/test\_converter\_coordination.cpp}（括号为行号）；
+换流器接入全组件回归见 \srcpath{tests/test\_all\_components\_pf.cpp:486--502}。
+
+\subsection{DC/DC 变换器}\label{sec:hybrid-dcdc}
+
+\compmeta{DCDCConverter}{\srcpath{include/hacdcpf/model/converter\_components.hpp}}
+
+\subsubsection*{功能说明}
+DC/DC 是两 DC 母线间的电力电子接口：耦合两侧功率但\textbf{不}在电气上合并岛
+（岛识别注释 newton\_solver.cpp:86--90）。控制模式 \texttt{DCDCControlMode}：
+\texttt{Voltage}=0、\texttt{Power}=1、\texttt{Droop}=2
+（converter\_enums.hpp:52--56）。统一实现在
+\srcpath{dcdc\_power\_transfer}（converter\_model.cpp:227--282）。
+
+\subsubsection*{数学模型}
+符号约定：\fld{p\_ref\_mw} 为\textbf{输出侧}参考功率，正值表示 bus\_in$\to$bus\_out
+正向传输（\srcpath{src/power\_flow/pf\_injection\_assembly.cpp:76--88}）。
+效率 $\eta$ 钳制 $[0.01,1]$（converter\_model.cpp:239）。输出侧参考指令：
+\[
+P_{out}^{ref}=\begin{cases}
+p_{ref}/S_{base} & \text{Power（默认路径）}\\
+p_{ref}/S_{base}+k_{droop}\big(v_{dc,out}-v_{ref}\big) & \text{Droop（:241--244）}\\
+-k_{form}\big(v_{dc,out}-v_{ref}\big) & \text{Voltage（:245--264）}
+\end{cases}
+\]
+Voltage 模式为真电压成形：刚性负反馈律，整定项 \fld{p\_ref\_mw} 故意不加；
+增益 $k_{form}=\max\big(p_{rated,pu}\cdot 100,\ 25\big)$，\fld{k\_droop}$\neq0$ 时再与
+$|k_{droop}|$ 取大（:255--263），$p_{rated,pu}$ 取 \fld{sn\_mva} 或
+$\max(|\fld{pmax\_mw}|,|\fld{pmin\_mw}|)$ 除以基准。功率反射与 $I^2R$ 损耗（:266--280）：
+\[
+P_{in}=P_{out}^{ref}\cdot\big(1/\eta\ \text{若}\ P_{out}^{ref}\ge 0\ \text{否则}\ \eta\big),\qquad
+P_{loss}^{I^2R}=r_{eq}\frac{P_{in}^{2}}{\max(v_{dc,in},0.1)^{2}},\qquad
+P_{out}=P_{out}^{ref}-P_{loss}^{I^2R}
+\]
+DC 注入：入端 $-P_{in}$、出端 $+P_{out}$（pf\_injection\_assembly.cpp:86--87）。
+雅可比由 \srcpath{dcdc\_jacobian\_vdc}（converter\_model.cpp:213--225）共享同一
+transfer 结构给出 $\partial P_{in}/\partial v_{dc,out}$、$\partial P_{out}/\partial v_{dc,in}$、
+$\partial P_{out}/\partial v_{dc,out}$。
+
+\textbf{占空比反演} \srcpath{dcdc\_duty\_ratio}（:290--328）：端口 pu 电压乘
+\fld{vn\_in\_kv}/\fld{vn\_out\_kv}（缺省按 1.0）得名值后按理想 CCM 律反演：
+\[
+D=\begin{cases}
+V_{out}/V_{in} & \text{Buck（:303--306）}\\
+1-V_{in}/V_{out} & \text{Boost（:307--310）}\\
+V_{out}/(V_{in}+V_{out}) & \text{BuckBoost（:311--314）}\\
+V_{out}/(n\,V_{in}) & \text{Isolated（调制增益 }M\text{，:315--320）}
+\end{cases}
+\]
+\texttt{Generic} 拓扑不评估（\fld{defined}=false，:293）；
+可行性窗口 $D\in[\fld{d\_min},\fld{d\_max}]$，容差 $10^{-9}$（:325--326）。
+
+\subsubsection*{参数表（converter\_components.hpp:133--173）}
+\begin{paramtable}
+\fld{control\_mode} & --- & --- & Voltage / Power / Droop & Voltage & 控制模式（:140）\\
+\fld{p\_ref\_mw} & $p_{ref}$ & MW & --- & 0.0 & 输出侧参考功率（:142）\\
+\fld{v\_ref\_pu} & $v_{ref}$ & pu & 0.95--1.05 & 1.0 & 输出电压整定（:143）\\
+\fld{sn\_mva}、\fld{pmax/pmin\_mw} & --- & MVA/MW & --- & 0.0 & 容量与功率限（:144,150--151）\\
+\fld{eta} & $\eta$ & --- & 0.95--0.99 & 0.98 & 效率（钳制 $[0.01,1]$，:147）\\
+\fld{r\_eq\_pu} & $r_{eq}$ & pu & 0--0.05 & 0.0 & 等值电阻（$I^2R$ 损耗，:148）\\
+\fld{k\_droop} & $k_{droop}$ & pu & --- & 0.0 & 下垂增益（:153）\\
+\fld{topology} & --- & --- & 五种拓扑 & Generic & 占空比律选择（:160）\\
+\fld{d\_min} / \fld{d\_max} & $D$ & --- & 0.05--0.95 & 0.05 / 0.95 & 占空比可行性窗（:161--162）\\
+\fld{n\_ratio} & $n$ & --- & --- & 1.0 & 隔离型变比（:163）\\
+\end{paramtable}
+
+\subsubsection*{验证与校核}
+\srcpath{tests/test\_converter\_coordination.cpp}：
+DC/DC 不合并电压岛（:279、:295 对比闭合金属路径）、
+Buck 占空比反演与可行性（:493）、droop 输出成岛参考（:713）、
+Voltage 模式输出成形与输入侧参考要求（:394、:419）；
+OPF 三模式建模见同文件 :1493；全组件回归
+\srcpath{tests/test\_all\_components\_pf.cpp:516--528}。
+
+\subsection{DC 岛参考规划}\label{sec:hybrid-dcref}
+
+\subsubsection*{功能说明}
+每个 DC 电压岛必须恰有一个电压参考，否则 DC 子块奇异。规划器
+（\srcpath{src/power\_flow/newton\_solver.cpp:238--444}，求解开始时调用一次 :944--945）
+在求解器的换流器\textbf{可变副本}上工作：必要时把 PQ 换流器提升为电压成形，
+并产出 \texttt{DcSlackPlan\{dc\_slacks, promoted\_converter\_idx, rigid\_pins, warnings\}}
+（:187--193）。岛识别 \srcpath{compute\_dc\_components}（:71--111）：
+邻接仅来自在运 DC 支路（闭合 DC 断路器已在投影层折叠为支路），
+VSC 与 DC/DC \textbf{不}构成连边（:86--90），与协调校核器的岛定义一致。
+
+\subsubsection*{算法：逐岛优先级}
+对每岛按以下顺序确定参考（:247--441）：
+\begin{enumerate}
+  \item 岛内有 \texttt{DC\_V} 母线 $\to$ 钉住该母线（:300--304）；
+  \item 已有 \texttt{VDC\_Q}/\texttt{VDC\_VAC}/\texttt{DC\_V\_DROOP\_AC\_V} 换流器
+        下垂持压（:264--275），或 droop/Voltage 模式 DC/DC 锚定其输出母线
+        （:283--298）$\to$ 无需钉母线；
+  \item 否则在岛内\textbf{最大额定}的在运 PQ 换流器中选候选
+        （\fld{is\_master} 声明者优先，:310--327），分两路：
+        \begin{itemize}
+          \item \textbf{刚性 DC-slack 构网}（opt-in \fld{enable\_rigid\_vdc\_former}，
+                默认 false，\srcpath{power\_flow\_options.hpp:135--140}）：仅当岛为
+                单非孤立母线、唯一 VSC 且无 DC/DC/ER 耦合时适用（:343--374）——
+                母线钉于 $v_{set}$（初值种子 :950--952），换流器保持 PQ 并按线性损耗
+                口径整定 $p_{set}$ 以恰好抵消岛固定注入（:376--398）：
+                $\mathrm{net}\ge0$ 时 $p_{set}=\mathrm{net}/(2-\eta)$，
+                $\mathrm{net}<0$ 时 $p_{set}=\mathrm{net}/\eta$；
+                $\mathrm{net}$ 由 \srcpath{net\_fixed\_dc\_injection\_mw}（:198--218）计算；
+          \item \textbf{刚性下垂提升（默认）}：提升为 \texttt{VDC\_Q}，增益强制
+                $k_{vdc}\leftarrow\max\big(|k_{vdc}|,\ \max(p_{rated,pu}\cdot100,\ 25)\big)$，
+                \fld{v\_dc\_set\_pu}$\le0.1$ 时置 1.0（:400--429），避免弱下垂下
+                $V_{dc}$ 漂移越限；
+        \end{itemize}
+  \item 岛内无任何 VSC $\to$ 钉首个非孤立母线并告警"非物理参考"（:431--440）。
+\end{enumerate}
+配套机制：\srcpath{apply\_participation\_factor\_sharing}（:153--184，调用 :940）
+对成员 $\ge2$、$\alpha_i\ge0$ 且 $\sum\alpha\approx1$（容差 $10^{-6}$）的协调组
+重分配总下垂增益 $k_{vdc,i}\leftarrow k_{total}\cdot\alpha_i$
+（$k_{total}=\sum|k_{vdc}|$，退化时取 $0.1\times$ 成员数）；被提升/刚性锁定的换流器
+记入 \fld{promotion\_lock}（:953--961）防止外环降级；提升名单与告警写入
+\fld{diagnostics.promoted\_vsc\_indices} 与 \fld{diagnostics.warnings}（:962--963），
+终态换流器列表经 \fld{diagnostics.effective\_converters} 输出（:975, :1862）。
+
+\subsubsection*{验证与校核}
+\srcpath{tests/test\_dc\_island\_reference.cpp}：无参考 DC 岛自动提升 PQ 换流器后
+收敛、$|v_{dc}-1|<0.05$ 且无越限告警（:33--70）；真 \texttt{DC\_V} 母线钉住、
+不提升（:72--90）；opt-in 刚性构网把母线\textbf{精确}钉在整定值（$10^{-9}$），
+且换流器恰好吸收 0.05 MW 光伏盈余（:92--120）；默认仍为下垂提升（:122--133）。
+主从指定与参与因子重分配见 \srcpath{tests/test\_converter\_coordination.cpp:756--813}。
+
+\subsection{换流器协调校核与诚实口径}\label{sec:hybrid-coord}
+
+\subsubsection*{功能说明}
+两层校核体系：求解\textbf{前}的可行性预校核
+\srcpath{powerflow::evaluate\_converter\_coordination}
+（\srcpath{src/power\_flow/converter\_coordination.cpp:809--1368}，头文件
+\srcpath{include/hacdcpf/power\_flow/converter\_coordination.hpp}），
+与求解\textbf{后}的物理不等式校核（\srcpath{src/api/hacdcpf.cpp}，:661--718 与 :941--951）。
+预校核为 opt-in（开关 \fld{enable\_converter\_coordination\_check}，默认 false，
+见 \srcpath{power\_flow\_options.hpp:127}）：Fatal/Error 级问题直接阻断求解
+（\srcpath{src/api/hacdcpf.cpp:894--903}），Warning/Info 附入诊断（:928--936）。
+岛识别与求解器一致（converter\_coordination.cpp:56--109，DC/DC 不合并岛）。
+
+\subsubsection*{预校核规则目录}
+严重度四级 \texttt{Info/Warning/Error/Fatal}（converter\_coordination.hpp:10--15）。
+主要规则（实现行号括注）：
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}llp{8.6cm}@{}}
+\toprule
+规则 ID & 级别 & 触发条件\\
+\midrule
+\texttt{ACDC-REF-01} & Fatal & VSC 引用缺失 DC 母线（:323--333）\\
+\texttt{ACDC-GFM-01} & Error & DC 构网换流器又声明 AC P 硬约束（:353--366）\\
+\texttt{ACDC-03} & Warning & VDC 模式下 \fld{p\_set\_mw} 仅作调度值（:367--382）\\
+\texttt{ACDC-DROOP-01} & Error & VDC 模式但 \fld{k\_vdc}$=0$，无法成参考（:384--398）\\
+\texttt{ACDC-CTRL-03/04} & Error/Warn & AC\_PV 无有效 $v_{ac,set}$ / \fld{q\_set\_mvar} 被忽略（:403--428）\\
+\texttt{ACDC-GFM-03} & Fatal & 普通两端口同时 AC/DC 双侧构网（:437--452）\\
+\texttt{ACDC-GFM-04/05/06} & Error & AC 构网又钉 P / 无 DC 侧能量支撑 / DC 构网无 AC 侧平衡源（:456--515）\\
+\texttt{DCDC-REF-01} & Fatal & DC/DC 引用缺失母线（:534--544）\\
+\texttt{DCDC-DROOP-01} & Error & Droop 模式但 \fld{k\_droop}$=0$（:546--556）\\
+\texttt{DCDC-TOPO-01} & Warning & DC/DC 两端落在同一金属 DC 岛（:926--937）\\
+\texttt{DCDC-CTRL-03} & Error & 输出成形但输入岛无电压参考（:1330--1346）\\
+\texttt{DCDC-CTRL-05} & Error & Power 模式两侧缺一参考（:1347--1364）\\
+\texttt{DCBUS-01} & Warning & \texttt{DC\_V} 仅为声明类型、非物理电压源（:847--858）\\
+\texttt{DCISLAND-01} & Fatal & 岛无电压成形设备且无可提升 PQ VSC（:1104--1121）\\
+\texttt{DCISLAND-PROMOTE-01} & Info & 将由求解器自动提升形成参考（:1122--1134）\\
+\texttt{DCISLAND-05} & Fatal & 多电压源整定冲突（$>10^{-4}$ pu，:1143--1165）\\
+\texttt{DCISLAND-04} & Error & 多刚性电压源且无下垂分摊（:1173--1187）\\
+\texttt{DCISLAND-DROOP-01} & Error & 下垂源总增益为零（:1192--1203）\\
+\texttt{DCISLAND-MS-01} & Error & 主从组 master 数 $\neq1$（:1224--1238）\\
+\texttt{DCISLAND-PARTICIPATION-01/02} & Error & 参与因子和 $\neq1$ / 刚性源与参与因子并存（:1240--1267）\\
+\texttt{DCISLAND-02/03} & Fatal/Warn & 纯固定注入无平衡源 / 灵活性裕度不足（:1269--1310）\\
+\texttt{ACISLAND-REF-01/02} & Warning & AC 岛缺/多相角参考（:702--731）\\
+\texttt{ACISLAND-BALANCE-01} & Warning & AC 岛无有功平衡源（:739--751）\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsubsection*{事后物理不等式校核与诚实口径（重要）}
+\textbf{换流器物理不等式约束未嵌入 Newton 方程}：容量圆、AC/DC 电流限、
+调制比窗口、占空比窗口\textbf{不}作为约束参与求解。默认（仅告警）模式下，
+收敛后逐台校核并以\textbf{告警}输出，不阻断收敛
+（\srcpath{src/api/hacdcpf.cpp}，:661--718 与 :941--951，
+裕度容差 $10^{-6}$；各检查 opt-in，限值字段为 0 即不校核）：
+\begin{gather*}
+\underbrace{\sqrt{p_{ac}^{2}+q_{ac}^{2}}>S_{rated}}_{\text{ACDC-PHYS-04 容量圆}},\qquad
+\underbrace{S_{ac}/V_m>\fld{i\_ac\_max\_pu}}_{\text{PHYS-02 AC 电流}},\qquad
+\underbrace{|p_{dc}|/v_{dc}>\fld{i\_dc\_max\_pu}}_{\text{PHYS-03 DC 电流}}\\
+\underbrace{m=\frac{V_m\cdot\mathrm{vn}_{ac}}{K_m\cdot v_{dc}\cdot\mathrm{vn}_{dc}}\notin[m_{min},m_{max}]}_{\text{PHYS-05/01 调制比}},\qquad
+\underbrace{D\notin[\fld{d\_min},\fld{d\_max}]}_{\text{DCDC-PHYS-01 占空比}}
+\end{gather*}
+opt-in 开关 \fld{enforce\_converter\_physical\_limits}（默认 false，
+\srcpath{power\_flow\_options.hpp:128--134}）把同一组不等式转为\textbf{硬可行性门卫}：
+确定性潮流没有再调度自由度去修复不相容的整定，因此收敛后若存在任一
+ACDC-PHYS 告警或占空比越窗，该 Newton 根被\textbf{拒绝为物理不可行}——
+\fld{converged} 置 false、\fld{diagnostics.termination\_reason} 记
+"Converter physical-limit feasibility check failed" 并追加
+[CONVERTER-PHYS-HARD] 告警（hacdcpf.cpp:957--978）；需要再调度寻找可行
+运行点时应改用 OPF。
+求解后另有 DC 母线电压越限告警
+（$v_{dc}\notin[\fld{vmin\_pu},\fld{vmax\_pu}]$，\srcpath{src/power\_flow/newton\_solver.cpp:1839--1857}）。
+
+结果对象的 \fld{converter\_model\_scope}（结构
+\srcpath{include/hacdcpf/model/converter\_model\_scope.hpp:21--53}，
+填充 \srcpath{src/api/hacdcpf.cpp:1002--1018}）如实声明本次快照求解的模型覆盖：
+\fld{model\_scope}=\texttt{"steady-state-newton:vsc-3mode+dcdc-power-transfer"}；
+\texttt{true} 项：VSC 损耗、AC 传导损耗耦合、$V_{dc}$ 控制、DC/DC 损耗、
+多源协调、方程闭合检查；四个 \texttt{enforced} 标志
+\fld{vsc\_capacity\_circle\_enforced}、\fld{vsc\_current\_limits\_enforced}、
+\fld{vsc\_modulation\_limits\_enforced}、\fld{dcdc\_duty\_ratio\_enforced}
+回填 \fld{opt.enforce\_converter\_physical\_limits}（:1012--1016）——
+默认仅告警模式下为 \texttt{false}（不等式未在方程内强制），
+开启硬约束门卫后为 \texttt{true}（违反限值的根被拒绝而非报告收敛）。
+
+\subsubsection*{验证与校核}
+规则覆盖见 \srcpath{tests/test\_converter\_coordination.cpp}：GFM-01/03/04/05/06
+（:433, 1142, 1162, 1766, 1788）、DCISLAND-05 整定冲突判 Fatal（:379）、
+MS/PARTICIPATION 系列（:527--586）、ACISLAND 系列（:1106, 1830）；
+\fld{converter\_model\_scope} 声明与 PHYS-03 触发分别由 :652--669、:671--693 断言
+（后者证明限值越限时\textbf{仍收敛}、仅告警——默认模式行为）；方程闭合检查见 :695--711。
+
+\subsection{验证与校核汇总}
+本章各节的专项验证之外，统一交叉验证包括：\srcpath{tests/test\_unified\_pf\_upgrade.cpp}
+的耦合雅可比中心差分对拍（:232--341，$\varepsilon=10^{-6}$，max\_rel\_error $<10^{-3}$）、
+\srcpath{tests/test\_all\_components\_pf.cpp} 的 29 类组件逐类禁用回归
+（混合族含 VSCConverter、DCDCConverter、EnergyRouter，文件头 :15--19）。
+\textbf{已知边界（如实）}：换流器不等式默认仅事后告警，硬可行性门卫需显式打开
+\fld{enforce\_converter\_physical\_limits}（第~\ref{sec:hybrid-coord}~节）；
+\fld{enable\_coupled\_jacobian} 默认关闭，交叉块导数需显式开启；
+DC/DC \texttt{Generic} 拓扑无占空比约束；纯 DC 求解器的 AC 侧固定为初值、
+不做 AC/DC 联立。

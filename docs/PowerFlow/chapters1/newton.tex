@@ -1,0 +1,189 @@
+% 第 3 章：统一 Newton-Raphson 潮流核心
+% 本章文件由 \input 引入，不含导言区。
+\section{统一 Newton--Raphson 潮流核心}\label{sec:newton}
+
+\subsection{功能定位与入口}
+
+\compmeta{engine::NewtonSolver}{\srcpath{include/hacdcpf/engine/solver/native/nle/newton\_solver.hpp}}
+
+统一 Newton 求解器是全平台潮流的\textbf{生产主路径}：AC（$\theta,V_m$）、
+DC（$V_{dc}$）与换流器耦合在同一方程组、同一雅可比中联立求解
+（\textbf{不是} AC/DC 主从交替迭代）。入口签名
+（newton\_solver.hpp:17--46；实现 \srcpath{src/power\_flow/newton\_solver.cpp:866}）：
+\begin{quote}\footnotesize
+\texttt{PowerFlowResult solve(const SolverData\& data, const PowerFlowOptions\& opt,\\
+\hspace*{2em}const InitialState* init = nullptr) const;}
+\end{quote}
+可变成员 \texttt{PatternCache cache\_} 缓存雅可比上下文、稀疏模式与线性求解器实例
+（见第~\ref{sec:overview}~章缓存体系）。每个求解器实例另复用一个
+\texttt{SolverWorkspace}（newton\_solver.hpp:47--48，接口
+\srcpath{include/hacdcpf/power\_flow/workspace.hpp:33--46}）：\texttt{vm}/\texttt{va}/\texttt{vdc}
+经 \srcpath{prepare\_state} 按平启动重置、\texttt{mismatch}/\texttt{dx} 经
+\srcpath{prepare\_equations} 按方程数重置，求解体内均为工作区成员引用
+（newton\_solver.cpp:904--907, 1010--1014），而非每次求解在栈上新建；递归守卫
+\texttt{workspace\_in\_use\_} 使同伦延拓的内层求解改用局部工作区，避免覆写外层状态
+（:872--884）。
+
+\subsection{状态变量与节点类型}
+未知量排序（\srcpath{build\_jacobian\_context}，newton\_solver.cpp:537--724）：
+\[
+x=\big[\Delta\theta_{\,n_p};\ \Delta V_{m,\,n_q};\ \Delta V_{dc,\,n_{dc}}\big]^{\mathsf T},
+\qquad n_{\mathrm{var}}=n_p+n_q+n_{dc}
+\]
+行/列映射（:635--651）：非 slack 母线 $k$ 的有功行=角度列；PQ 母线的无功行=
+$V_m$ 列（偏移 $n_p$）；非 slack DC 母线的 $P_{dc}$ 行=$V_{dc}$ 列（偏移 $n_p+n_q$）。
+节点角色：
+\begin{itemize}
+  \item \textbf{Slack}：首个 SLACK 为主参考；\textbf{额外 SLACK 同样整体剔除}
+        （$\theta$、$V_m$ 全固定），每个孤立 AC 区域各自保留参考（:556--567）；
+  \item \textbf{PV}：仅 P 方程、$\theta$ 未知，$V_m$ 固定；
+  \item \textbf{PQ}：P、Q 方程与 $\theta$、$V_m$ 皆未知；
+  \item \textbf{DC}：\texttt{DC\_V} 母线为 DC 参考（钉住）；\texttt{DC\_ISOLATED}
+        剔除出方程组（:612--621）；其余为 P 型 DC 母线。DC 参考由
+        \srcpath{plan\_dc\_island\_references} 逐 DC 孤岛规划（:238--444，
+        详见第~\ref{sec:hybrid}~章）。
+\end{itemize}
+两种精确建模扩展（Direction 2/3）：\texttt{VDC\_VAC} 换流器交流母线在增强方程模式下
+强制改 PQ、Q 行替换为 $V_m=V_{set}$（:576--597, 701--721）；半光滑 Newton 模式下
+PV 全转 PQ 并记录 NCP 限值（:600--605, 670--699，见第~\ref{sec:robust}~章）。
+
+\subsection{失配方程}
+约定 $\mathrm{mismatch}=F^{\mathrm{spec}}-F^{\mathrm{calc}}$，解
+$J\,\Delta x=\mathrm{mismatch}$，$J=\partial F^{\mathrm{calc}}/\partial x$
+（注释见 \srcpath{src/power\_flow/jacobian\_builder.cpp:461--470}）。
+AC 节点注入（\srcpath{src/power\_flow/ac\_kernel.cpp:52--53}，
+$\theta_{ij}=\theta_i-\theta_j$）：
+\begin{align*}
+P_i^{\mathrm{calc}}&=\sum_{j}V_iV_j\big(G_{ij}\cos\theta_{ij}+B_{ij}\sin\theta_{ij}\big)\\
+Q_i^{\mathrm{calc}}&=\sum_{j}V_iV_j\big(G_{ij}\sin\theta_{ij}-B_{ij}\cos\theta_{ij}\big)
+\end{align*}
+指定注入含 ZIP 负荷（见第~\ref{sec:assembly}~章）；VSC 交流注入加入 spec。
+DC 节点：$\mathbf p_{dc}^{\mathrm{calc}}=\mathbf v_{dc}\odot(G_{dc}\mathbf v_{dc})$，
+失配行 $=p_{dc}^{\mathrm{spec}}-p_{dc}^{\mathrm{calc}}$（:364--367）。
+装配入口 \srcpath{evaluate\_residual\_and\_jacobian}（:498）与
+\srcpath{evaluate\_residual\_only}（:539）共享 \srcpath{evaluate\_residual\_impl}（:181），
+返回 $\lVert\mathrm{mismatch}\rVert_\infty$（:493）。
+
+\subsection{雅可比结构}
+$J=\begin{bmatrix}H&N\\ M&L\end{bmatrix}$ 为极坐标非归一化（MATPOWER）形式，
+增量为 $\Delta V$ 本身（非 $\Delta V/V$）：
+$H=\partial P/\partial\theta$、$N=\partial P/\partial V$、$M=\partial Q/\partial\theta$、
+$L=\partial Q/\partial V$。
+
+非对角元（$i\neq j$，AC kernel 累加，ac\_kernel.cpp:58--69）：
+\begin{align*}
+H_{ij}&\mathrel{+}=V_iV_j\big(G_{ij}\sin\theta_{ij}-B_{ij}\cos\theta_{ij}\big) &
+M_{ij}&\mathrel{+}=-V_iV_j\big(G_{ij}\cos\theta_{ij}+B_{ij}\sin\theta_{ij}\big)\\
+N_{ij}&\mathrel{+}=V_i\big(G_{ij}\cos\theta_{ij}+B_{ij}\sin\theta_{ij}\big) &
+L_{ij}&\mathrel{+}=V_i\big(G_{ij}\sin\theta_{ij}-B_{ij}\cos\theta_{ij}\big)
+\end{align*}
+对角元（jacobian\_builder.cpp:232--281），含 ZIP 负荷导数，
+$\underline V=$ \fld{min\_vm\_pu}（默认 $10^{-8}$）：
+\begin{align*}
+H_{ii}&=-Q_i^{\mathrm{calc}}-B_{ii}V_i^2 &
+M_{ii}&=P_i^{\mathrm{calc}}-G_{ii}V_i^2\\
+N_{ii}&=\frac{P_i^{\mathrm{calc}}}{\max(|V_i|,\underline V)}+G_{ii}V_i-\big(p_dw_{p1}+2V_ip_dw_{p2}\big)\\
+L_{ii}&=\frac{Q_i^{\mathrm{calc}}}{\max(|V_i|,\underline V)}-B_{ii}V_i-\big(q_dw_{q1}+2V_iq_dw_{q2}\big)
+\end{align*}
+DC 块：对角 $p_{dc,i}^{\mathrm{linear}}+g_{ii}v_{dc,i}$、非对角 $g_{ij}v_{dc,i}$
+（:288--293）。换流器导数分三档注入（详见第~\ref{sec:hybrid}~章）：DC 自洽导数
+始终注入（:322--353）；AC$\leftrightarrow$DC 交叉耦合块仅在
+\fld{enable\_coupled\_jacobian} 时注入（:296--320）；AC 构网换流器的能量导管
+无条件生效（:150--172）。
+
+\subsection{稀疏模式与求值内核}
+\begin{itemize}
+  \item \srcpath{build\_jacobian\_pattern}（\srcpath{src/power\_flow/jacobian\_pattern.cpp:54--370}）：
+        从 $Y_{bus}$ 稀疏结构生成 $4\times nnz(Y)$ 个 AC 块槽位 + DC 块 + 耦合槽；
+        以 \fld{entry\_to\_nz} 哈希把 (row,col)$\to$nz 下标写入
+        \texttt{ACEntry\{p\_va\_nz, p\_vm\_nz, q\_va\_nz, q\_vm\_nz, g, b\}}（:244--283）；
+        模式固定后每次迭代仅 \texttt{valuePtr()} 清零再累加
+        （jacobian\_builder.cpp:217--222），不再分配；
+  \item \srcpath{evaluate\_ac\_kernel\_serial}/\srcpath{\_parallel}
+        （ac\_kernel.cpp:34,73）：遍历 \fld{ac\_entries} 同时累加
+        $P^{\mathrm{calc}}$/$Q^{\mathrm{calc}}$ 与（可选）雅可比值；并行版每线程
+        独立累加器再归约，条目数 $<1024$ 或单线程回退串行（:13--30，
+        \srcpath{util::ThreadPool::global()}），线程数由 \fld{ac\_eval\_threads} 控制；
+  \item 一致性校验工具 \srcpath{check\_jacobian}（\srcpath{src/power\_flow/jacobian\_check.cpp:14--57}）：
+        中心差分 $h=10^{-6}$、容差 $10^{-5}$。
+\end{itemize}
+
+\subsection{线性求解}
+抽象 \srcpath{SparseLinearSolver}\{analyze\_pattern, factorize, solve, backend\_name\}
+（\srcpath{include/hacdcpf/engine/kernel/linear\_algebra/linear\_solver.hpp}，转发 MIPSolvers）。
+默认后端优先级 \textbf{KLU $>$ UMFPACK $>$ MKL Pardiso $>$ SuperLU $>$ Eigen SparseLU}
+（\srcpath{MIPSolvers/src/engine/kernel/linear\_algebra/linear\_solver.cpp:230--240}；
+CMake 选项 \srcpath{HACDCPF\_USE\_SUITESPARSE}，缺失回退 Eigen SparseLU）。
+稀疏模式仅在缓存失效时 \texttt{analyzePattern} 一次；每次 Newton 迭代重新数值分解
+（\srcpath{solve\_linear}，newton\_solver.cpp:1199--1223；计数
+\fld{factorization\_calls}/\fld{linear\_solve\_calls}）。坏条件数
+（代理 $\kappa=(\max/\min$ 行范数$)\times(\max/\min$ 列范数$)$，:494--535）
+可触发 NK-GMRES 回退（:1225--1257，默认关闭，见第~\ref{sec:robust}~章）。
+
+\subsection{更新、步长截断与收敛}
+\begin{itemize}
+  \item \textbf{步长截断} \srcpath{clip\_step}（:467--492）：
+        $|\Delta\theta|\le 1.5$~rad、$|\Delta V_m|\le 0.5$~pu、$|\Delta V_{dc}|\le 0.5$~pu；
+        $V_m,V_{dc}$ 下限 \texttt{kMinVm}$=0.05$（:29, 1150--1155）；
+  \item \textbf{收敛判据}：缩放后 $\lVert F\rVert_\infty<\texttt{opt.tol}$；
+        \fld{tol}=$10^{-8}$、\fld{max\_iter}=50（\texttt{Defaults::kPFTol}/\texttt{kPFMaxIter}，
+        \srcpath{include/hacdcpf/model/defaults.hpp:46--47}）；NaN/Inf 立即判失败（:1437--1442）；
+  \item \textbf{诚实收敛}：最终以末态残差重新判定 \fld{out.converged}（:1823--1829）；
+        DC 电压越限仅告警（:1839--1857）；
+  \item \textbf{缩放}（默认全开）：$D_F=\mathrm{diag}(1/\max(|F_i^{\mathrm{spec}}|,1))$、
+        $D_x=\mathrm{diag}(\pi,V_i,V_{dc,i})$，解 $\hat J\Delta\hat x=\hat F$，
+        $\hat J=D_FJD_x^{-1}$（\srcpath{src/power\_flow/nonlinear\_scaling.cpp:23--95}，
+        钳制 $[10^{-6},10^6]$；详见第~\ref{sec:robust}~章）。
+\end{itemize}
+
+\subsection{PV$\leftrightarrow$PQ 外环}
+MATPOWER 风格无功限值切换（newton\_solver.cpp:1271--1317）：外环上限 30 次；
+内层收敛后检查隐含无功 $Q_g^{\mathrm{implied}}=Q^{\mathrm{calc}}+Q^{\mathrm{load}}-Q^{\mathrm{conv}}$
+越限（迟滞 \fld{pv\_q\_hysteresis\_pu}=0.01），越限则转 PQ 并把 \fld{qg} 钉在限值；
+全部限内后尝试恢复 PV（\fld{pv\_recover\_vm\_tol\_pu}=0.01）。迭代内仅在残差
+$<10^{-3}$ 时才允许切换（:1746--1752），未收敛时仅残差 $\le 0.1$ 才允许（:1769--1771）。
+换流器 PQ$\leftrightarrow$VDC\_Q 模式切换在残差 $<10^{-6}$ 后按迟滞评估
+（高/低阈值 0.03/0.01 pu、持续 2 次迭代，:797--861, 1444--1454；
+逻辑见第~\ref{sec:hybrid}~章）。
+
+\subsection{失败回退链与全局化}
+默认全局化策略为线搜索（\fld{globalization}=LineSearch），回退链依次为
+（newton\_solver.cpp:1581--1717）：
+\begin{enumerate}
+  \item 回溯线搜索 $\alpha\leftarrow\alpha/2$（\fld{max\_line\_search\_steps}=10），
+        接受比随残差分级（2.0/1.5/1.2/1.01，:1178--1186）；
+        非单调 GLL 窗口 $M=5$、$c_1=10^{-4}$、$\beta=0.5$（默认启用，:1189--1195）；
+  \item 对角正则化 $J+\lambda I$（$\lambda_0=10^{-6}$、增长 $\times10$、最多 8 步）；
+  \item "逃逸步" $\alpha=0.5$（:1625--1648）；
+  \item 可选 LM 恢复 $(J^{\mathsf T}J+\lambda I)\Delta x=-J^{\mathsf T}F$ 与
+        PTC 恢复（:1651--1717，\fld{enable\_auto\_fallback\_scheduling} 默认关）。
+\end{enumerate}
+另两种全局化策略：信赖域 dogleg（半径 1.0$\to$10）与伪瞬态延拓
+（$J+I/\delta t$，SER 时间步；\fld{ptc\_delta0}=1.0、\fld{ptc\_growth}=2.0），
+由 \fld{opt.globalization} 三选一。完整算法伪代码见技术笔记
+\srcpath{docs/technical\_notebook/sections/03\_power\_flow.tex} 的 Algorithm PF-1；
+五阶段鲁棒管线的组件细节见本手册第~\ref{sec:robust}~章。
+
+\subsection{结构闭合检查与结果}
+首次装配后扫描空行/空列（\srcpath{scan\_empty\_rows\_cols}，:1332--1351），
+做 $n_{eq}=n_{var}$ 闭合校核，结果入 \fld{diagnostics.equation\_closure\_*}。
+输出 \texttt{PowerFlowResult\{vm, va, vdc, converged, iterations, residual,
+profiling, diagnostics, branch\_flows, vsc\_transfers, ...\}}
+（\srcpath{power\_flow\_result.hpp:204--226}），字段全集见第~\ref{sec:options}~章。
+迭代计数 \fld{out.iterations} = 外层 + 内层 + 1（:1395）。
+
+\subsection{验证与校核}
+\begin{itemize}
+  \item \textbf{MATPOWER 回归}：\srcpath{tests/test\_matpower\_cases.cpp} 三档
+        85 算例；Tier1 九算例逐案断言（收敛 + $|V|\in[0.5,1.5]$、$|\delta|<60^\circ$、
+        残差 $<10^{-4}$），Tier2 批收敛率 $\ge 85\%$，Tier3 大系统至约 8.2 万节点；
+        \srcpath{tests/test\_powerflow\_performance.cpp} 用独立残差复算交叉验证；
+  \item \textbf{雅可比对差分}：\srcpath{tests/test\_unified\_pf\_upgrade.cpp}
+        解析雅可比 vs 中心差分 max\_rel\_error $<10^{-3}$（差分 $\varepsilon=10^{-6}$）；
+  \item \textbf{缩放回归}：\srcpath{tests/test\_scaling\_regression.cpp}
+        （case9/14/30/57/118 默认缩放开收敛、关缩放回退仍收敛）；
+  \item \textbf{基准性能}：技术笔记 03 节 84 算例基准表（Apple M4 单线程）：
+        NR 对 8.2 万节点 1.75~s/17 次迭代，实际标度约 $O(N^{1.2})$；
+  \item 已知边界：PV$\leftrightarrow$PQ 为离散切换外环（半光滑 NCP 为可选替代）；
+        换流器不等式约束仅事后校核（见第~\ref{sec:hybrid}~章诚实口径）。
+\end{itemize}

@@ -1,0 +1,90 @@
+% 第 1 章：架构总览与数据流
+\section{架构总览与数据流}\label{sec:overview}
+
+\subsection{两条 OPF 对外面}
+平台 OPF 代码分两层，定位不同（docs/technical\_notebook/sections/04\_opf.tex:4--22）：
+\begin{itemize}
+  \item \textbf{生产链路} \srcpath{src/optimal\_power\_flow/}：\srcpath{opf::solve\_ac\_opf}
+        （ac\_opf.cpp:2699）是全功能入口——含负荷削减、DER、储能、DC/DC、柔性负荷、
+        能量路由器、多后端 fallback 链与诚实诊断；\srcpath{opf::solve\_dc\_opf}
+        （dc\_opf.cpp:731）与 \srcpath{opf::solve\_rpo}（reactive\_power\_opt.cpp:621）同层。
+  \item \textbf{AML 建模层} \srcpath{src/power\_models/}：基于兄弟仓库 MIPSolvers 的 AML
+        的求解器无关 builder（acopf/acdcopf/dc\_opf/lindistflow/scuc），
+        \textbf{不含}负荷削减、DER、储能、柔性负荷、能量路由器与 fallback 链，
+        生产 \texttt{src/} 中无调用方，定位为独立/备用的公式化与验证层
+        （详见第~\ref{sec:powermodels}~章）。
+\end{itemize}
+
+\subsection{数据流流水线}
+\begin{quote}\footnotesize
+\texttt{Rich HybridPowerSystem} $\to$ 校验/预处理（参考母线资格、孤岛预检、external grid 提升）
+$\to$ rich$\to$canonical 投影 $\to$ NLP/LP/QP 装配（parity formulation 或 DC OPF LP）
+$\to$ 求解（原生 IPM / Ipopt / QP-LP 链）$\to$ 结果回投影（ authored 母线/机组序）
+$\to$ 独立审计（\srcpath{verify\_opf\_result}）
+\end{quote}
+混合算例（含 VSC/DC/DC/储能等 DC 侧组件）在分发处自动强制启用 parity 全空间路径
+（ac\_opf.cpp:2930--2934）；纯 AC 算例可走 Native AC 简约空间旧路径或经济调度快路径。
+
+\subsection{后端分发路由}\label{sec:overview-routing}
+\fld{ACOPFSolverBackend} 语义（ac\_opf.cpp:2905--2934）：
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}lL{4.2cm}L{8.3cm}@{}}
+\toprule
+后端枚举 & 内层求解器 & 说明\\
+\midrule
+\texttt{Auto} & ParityIPM 先行 $\to$ Ipopt 兜底 & \fld{allow\_fallback} 时生效；
+  \fld{ac\_pf\_warm\_start} 时 Ipopt 先行 + 原生 IPM 精炼\\
+\texttt{ParityIPM} & 原生原对偶 IPM & 强制 \fld{use\_parity\_ipm}\\
+\texttt{Ipopt} & 嵌入式 Ipopt & 强制 \fld{use\_parity\_ipm}；受
+  \texttt{HACDCPF\_DISABLE\_IPOPT\_OPF} 门控\\
+\texttt{EconomicDispatch} & merit-order $\lambda$ 二分 + 单次 AC NR & 仅纯 AC；
+  混合算例禁用（会丢掉 DC/VSC/DCDC 方程）\\
+\bottomrule
+\end{tabular}
+\end{center}
+DC OPF 的后端链（\fld{solver\_chain} 全程记录，dc\_opf.cpp:945--1097）：
+Auto $\to$ NativeQP(LCQP) $\to$ Gurobi QP $\to$ HiGHS（QP 路由，失败回退 HiGHS-LP）
+$\to$ NativeDualSimplex。
+
+\subsection{公共 API 门面}
+\compmeta{hacdcpf::（公共门面）}{\srcpath{include/hacdcpf/api/hacdcpf.hpp}}
+\begin{itemize}
+  \item \srcpath{solve\_ac\_opf}（src/api/hacdcpf.cpp:1182--1207）：调用
+        \srcpath{opf::solve\_ac\_opf} 后，收敛且有开关/断路器时补算设备端子潮流
+        （canonical 电压投影 $\to$ 支路潮流 $\to$ \srcpath{unproject\_branch\_flows}
+        $\to$ \srcpath{compute\_device\_terminal\_flows}）。
+  \item \srcpath{solve\_dc\_opf} / \srcpath{solve\_rpo}（:1209--1215）：直通。
+  \item \srcpath{verify\_opf\_result}（:1348--1451）：独立审计电压限、机组限、目标值重算
+        （含 external grid 成本），生成 \fld{infeasibility\_hints}，写入 \fld{result.audit}。
+  \item \srcpath{get\_solver\_capabilities}（:1297--1344）：运行时后端能力查询
+        （HiGHS / Gurobi / Ipopt / KLU / UMFPACK 按编译宏上报）。
+\end{itemize}
+求解器命名空间入口（\texttt{hacdcpf::opf::}）：
+\srcpath{solve\_ac\_opf}（ac\_opf\_solver.hpp:42）、
+\srcpath{compute\_jacobian\_diagnostics}（:54）、
+\srcpath{solve\_dc\_opf} 与 \srcpath{check\_dc\_opf\_feasibility}（\srcpath{dc\_opf\_solver.hpp:17,22}）、
+\srcpath{solve\_rpo} / \srcpath{inspect\_rpo\_controls} / \srcpath{apply\_rpo\_discrete\_solution}
+（\srcpath{reactive\_power\_opt.hpp:236--302}）、
+\srcpath{solve\_three\_phase\_hybrid\_opf}（\srcpath{three\_phase\_hybrid\_opf.hpp:186}）。
+
+\subsection{缓存与暖启动}
+API 层无结果缓存；暖启动链存在于：
+\begin{itemize}
+  \item \fld{ACOPFOptions::warm\_start} + 结果中的 \fld{ipm\_*\_state} 字段续传
+        （x/λ/μ/z 全套，opf\_result.hpp）；
+  \item \fld{ac\_pf\_warm\_start}：先跑 AC 潮流取电压初值（实测使 case13659pegase
+        189 次迭代/$\sim$40~s 收敛）；
+  \item RPO 内部 \fld{eval\_cache}：离散候选解缓存，就地修改避免深拷贝；
+  \item 目标同伦的 Davidenko 预测器以前一步 KKT 切线预热下一步（见第~\ref{sec:acopf}~章）。
+\end{itemize}
+
+\subsection{GUI/HTTP 接入}
+生产路由见 \srcpath{tests/run\_gui\_server.cpp}：
+\texttt{POST} \srcpath{/api/session/opf}（统一端点，solver = ac / parity / dc / robust，约束族开关，
+\fld{network\_model} 支持 three\_phase\_hybrid）、\srcpath{/api/session/opf\_ac}、
+\srcpath{/api/session/opf\_parity}（固定 parity IPM 无 fallback，400 迭代）、
+\srcpath{/api/session/opf\_dc}、\srcpath{/api/session/run\_rpo}，
+以及无状态轻量端点 \srcpath{/api/opf/ac}、\srcpath{/api/opf/dc}。
+收敛后自动跑 post-PF 与碳流分析；parity/native/dc 路径以 \fld{scope.model\_scope}
+返回实际约束范围。

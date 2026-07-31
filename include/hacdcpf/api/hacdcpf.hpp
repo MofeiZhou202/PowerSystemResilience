@@ -18,6 +18,7 @@
 #include "hacdcpf/power_flow/ac_linearized_pf.hpp"
 #include "hacdcpf/power_flow/power_flow_options.hpp"
 #include "hacdcpf/power_flow/power_flow_result.hpp"
+#include "hacdcpf/power_flow/helm_solver.hpp"
 #include "hacdcpf/projection/project_to_canonical.hpp"
 #include "hacdcpf/carbon_analysis/carbon_analysis.hpp"
 #include "hacdcpf/time_series/annual_production_sim.hpp"
@@ -93,6 +94,23 @@ void destroy_solver_handle(SolverHandle* handle);
 
 PowerFlowResult solve_power_flow_fdpf(const HybridPowerSystem& sys,
                                        const PowerFlowOptions& opt = {});
+
+/// AC-only Holomorphic Embedding Load-flow Method. Hybrid AC/DC models and
+/// voltage-dependent ZIP loads are rejected with explicit diagnostics.
+PowerFlowResult solve_power_flow_helm(
+    const HybridPowerSystem& sys,
+    const PowerFlowOptions& opt = {},
+    const powerflow::HelmOptions& helm_opt = {});
+
+/// Explicit load/setpoint homotopy path to the full hybrid AC/DC snapshot.
+PowerFlowResult solve_power_flow_homotopy(
+    const HybridPowerSystem& sys,
+    const PowerFlowOptions& opt = {});
+
+/// Unified AC/DC Newton solve with the GMRES Newton-Krylov linear path forced.
+PowerFlowResult solve_power_flow_newton_krylov(
+    const HybridPowerSystem& sys,
+    const PowerFlowOptions& opt = {});
 
 powerflow::ACLinearizedDCResult solve_ac_dc_power_flow(const HybridPowerSystem& sys,
                                                         const PowerFlowOptions& opt = {});

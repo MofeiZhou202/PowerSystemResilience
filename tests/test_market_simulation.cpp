@@ -229,8 +229,18 @@ TEST_CASE("SCUC exact network constraint generation matches the full thermal mod
   CHECK(generated.commitment.network_constraint_generation_converged);
   CHECK(generated.commitment.network_constraint_generation_iterations >= 1);
   CHECK(generated.commitment.in_solve_network_constraint_generation_used);
-  CHECK(generated.commitment.in_solve_network_constraint_callback_calls >= 1);
-  CHECK(generated.commitment.in_solve_network_constraints_submitted > 0);
+  CHECK(generated.commitment.in_solve_network_constraints_submitted <=
+        generated.commitment.network_constraints_activated);
+  if (generated.commitment.in_solve_network_constraint_callback_calls == 0) {
+    // The updated MIPSolvers kernel may prove the root optimal before entering
+    // node search. In that case the outer exact-constraint round owns all
+    // submissions and no node callback is expected.
+    CHECK(generated.commitment.solver_status.find("root gap closed") !=
+          std::string::npos);
+    CHECK(generated.commitment.in_solve_network_constraints_submitted == 0);
+  } else {
+    CHECK(generated.commitment.in_solve_network_constraints_submitted > 0);
+  }
   CHECK(generated.commitment.cross_round_solver_state_reuse_enabled);
   CHECK(generated.commitment.search_tree_rebuilt ==
         (generated.commitment.network_constraint_generation_iterations > 1));

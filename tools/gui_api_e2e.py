@@ -318,7 +318,60 @@ def main() -> int:
             "GUI/backend capability handshake advertises compact PF support",
         )
 
-        print("1a. load and solve internal urban LVNTS benchmark")
+        print("1a. hybrid Auto OPF preserves its required PF warm start")
+        st, body = c.post_json(
+            "/api/session/load_builtin",
+            {"case": "ieee24_3area_acdc_expanded"},
+        )
+        counts = body.get("counts", {})
+        chk.check(
+            st == 200 and counts.get("ac_buses") == 24 and
+            counts.get("dc_buses") == 8,
+            "default hybrid showcase loaded",
+        )
+        st, opf = c.post_json(
+            "/api/session/opf",
+            {
+                "solver": "auto",
+                "network_model": "balanced_aggregate",
+                "constraints": {
+                    "branch_limits": True,
+                    "converter_capacity": True,
+                    "converter_current": True,
+                    "converter_modulation": True,
+                },
+                "options": {
+                    "max_inner_iterations": 400,
+                    "max_outer_iterations": 8,
+                    "max_line_search_steps": 20,
+                    "feasibility_tol": 1e-6,
+                    "stationarity_tol": 1e-6,
+                    "barrier_mu0": 1e-2,
+                    "barrier_mu_reduction": 0.2,
+                    "regularization": 1e-6,
+                    "ac_eval_threads": 1,
+                    "allow_fallback": True,
+                    "ac_pf_warm_start": False,
+                    "objective_homotopy": False,
+                    "homotopy_dt0": 0.10,
+                    "verbose": False,
+                },
+            },
+        )
+        effective_options = opf.get("options_effective", {})
+        max_violation = float(opf.get("max_constraint_violation_pu", float("inf")))
+        chk.check(
+            st == 200 and effective_options.get("ac_pf_warm_start") is True,
+            "hybrid Auto overrides the GUI's unchecked warm-start toggle",
+        )
+        chk.check(
+            opf.get("converged") is True and max_violation < 1e-6,
+            "hybrid Auto OPF converged="
+            f"{opf.get('converged')} violation={max_violation} "
+            f"backend={opf.get('solver_backend')} status={opf.get('status')}",
+        )
+
+        print("1b. load and solve internal urban LVNTS benchmark")
         st, body = c.post_json(
             "/api/session/load_builtin",
             {"case": "urban_lvn_primary_secondary"},
@@ -356,6 +409,89 @@ def main() -> int:
         counts = body.get("counts", {})
         chk.check(st == 200 and counts.get("ac_buses") == 14,
                   f"load_builtin -> {counts.get('ac_buses')} AC buses")
+
+        print("2-PF. explicit HELM, homotopy, and Newton-Krylov GUI API paths")
+        for method, expected_actual, expected_scope in (
+            ("homotopy", "hybrid_ac_dc_explicit_homotopy",
+             "balanced_hybrid_ac_dc_homotopy"),
+            ("newton_krylov", "hybrid_ac_dc_newton_krylov",
+             "balanced_hybrid_ac_dc_newton_krylov"),
+        ):
+            st, algorithm_pf = c.post_json(
+                "/api/session/pf",
+                {
+                    "method": method,
+                    "options": {
+                        "max_iter": 100,
+                        "tol": 1e-8,
+                        "enable_converter_coordination_check": True,
+                    },
+                },
+            )
+            scope = algorithm_pf.get("analysis_scope") or {}
+            chk.check(
+                st == 200 and algorithm_pf.get("converged") is True and
+                algorithm_pf.get("method_actual") == expected_actual and
+                scope.get("model_scope") == expected_scope and
+                len(algorithm_pf.get("vm", [])) == 14 and
+                len(algorithm_pf.get("vdc", [])) == 2 and
+                len(algorithm_pf.get("branch_abs", [])) == 20 and
+                len(algorithm_pf.get("geo_buses", [])) == 16,
+                f"{method} converged={algorithm_pf.get('converged')} "
+                f"actual={algorithm_pf.get('method_actual')} "
+                f"scope={scope.get('model_scope')}",
+            )
+
+        st, rejected_helm = c.post_json(
+            "/api/session/pf", {"method": "helm", "options": {}},
+        )
+        helm_limitations = rejected_helm.get("model_limitations") or []
+        chk.check(
+            st == 200 and rejected_helm.get("converged") is False and
+            rejected_helm.get("method_actual") == "helm_holomorphic_embedding" and
+            any("hybrid" in item.lower() and "rejected" in item.lower()
+                for item in helm_limitations),
+            "hybrid HELM request is rejected with an explicit AC-only scope",
+        )
+
+        st, pure_ac = c.post_json(
+            "/api/session/load_builtin", {"case": "market_3bus_toy"},
+        )
+        st, helm_pf = c.post_json(
+            "/api/session/pf",
+            {
+                "method": "helm",
+                "options": {
+                    "max_iter": 100,
+                    "tol": 1e-8,
+                    "helm": {
+                        "max_coef": 100,
+                        "pade_tolerance": 1e-6,
+                        "enforce_q_limits": True,
+                        "warm_start": "flat",
+                        "gs_iterations": 5,
+                    },
+                },
+            },
+        )
+        helm_scope = helm_pf.get("analysis_scope") or {}
+        chk.check(
+            st == 200 and pure_ac.get("counts", {}).get("dc_buses") == 0 and
+            helm_pf.get("converged") is True and
+            helm_pf.get("method_actual") == "helm_holomorphic_embedding" and
+            helm_scope.get("model_scope") == "balanced_ac_only_helm" and
+            len(helm_pf.get("vm", [])) == 3 and
+            len(helm_pf.get("branch_abs", [])) == 3 and
+            len(helm_pf.get("geo_buses", [])) == 3,
+            f"HELM pure-AC converged={helm_pf.get('converged')} "
+            f"residual={helm_pf.get('residual')}",
+        )
+
+        st, body = c.post_json("/api/session/load_builtin", {"case": "ieee14_acdc"})
+        chk.check(
+            st == 200 and body.get("counts", {}).get("ac_buses") == 14,
+            "reload ieee14_acdc after HELM scope check",
+        )
 
         print("2a. modeling parameter library validation + auto-fulfill")
         st, library = c.get("/api/session/parameter_library")

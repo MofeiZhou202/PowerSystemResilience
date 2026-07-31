@@ -28,6 +28,7 @@
 #include <Eigen/SparseLU>
 
 #include "hacdcpf/model/enums/bus_types.hpp"
+#include "hacdcpf/power_flow/residual_evaluator.hpp"
 
 namespace hacdcpf::powerflow {
 
@@ -390,13 +391,43 @@ void apply_distributed_slack(VecCplx& S_inj,
 // HelmSolver::solve
 // ─────────────────────────────────────────────────────────────────────────────
 PowerFlowResult HelmSolver::solve(const SolverData& data,
-                                  const PowerFlowOptions& /*opt*/) const {
+                                  const PowerFlowOptions& opt) const {
   PowerFlowResult result;
   const int N = static_cast<int>(data.ac_buses.size());
   result.vm.assign(static_cast<size_t>(N), 1.0);
   result.va.assign(static_cast<size_t>(N), 0.0);
 
-  if (N == 0) { result.converged = true; return result; }
+  auto verify_physical_residual = [&]() {
+    if (!result.converged) return;
+    Eigen::Map<const Eigen::VectorXd> vm(result.vm.data(),
+                                         static_cast<Eigen::Index>(result.vm.size()));
+    Eigen::Map<const Eigen::VectorXd> va(result.va.data(),
+                                         static_cast<Eigen::Index>(result.va.size()));
+    const Eigen::VectorXd vdc;
+    const auto residual = evaluate_power_flow_residual(data, vm, va, vdc);
+    result.residual = residual.full.size() > 0
+                          ? residual.full.lpNorm<Eigen::Infinity>()
+                          : 0.0;
+    const double tolerance = std::max(opt.tol, helm_opts.mismatch);
+    if (!std::isfinite(result.residual) || result.residual > tolerance) {
+      result.converged = false;
+      result.diagnostics.warnings.push_back(
+          "HELM Pade coefficients stabilized, but the physical AC power-flow "
+          "residual exceeds the requested tolerance.");
+    }
+    result.diagnostics.converged = result.converged;
+    result.diagnostics.iterations = result.iterations;
+    result.diagnostics.final_mismatch_norm = result.residual;
+    result.diagnostics.termination_reason = result.converged
+        ? "HELM converged with physical residual verification"
+        : "HELM physical residual verification failed";
+  };
+
+  if (N == 0) {
+    result.converged = true;
+    verify_physical_residual();
+    return result;
+  }
 
   // ── Bus classification ──────────────────────────────────────────────────────
   std::vector<BusType> btype(static_cast<size_t>(N));
@@ -656,6 +687,7 @@ PowerFlowResult HelmSolver::solve(const SolverData& data,
     if (!helm_opts.enforce_q_limits) {
       result.converged  = converged_helm;
       result.iterations = n_computed;
+      verify_physical_residual();
       return result;
     }
 
@@ -682,6 +714,7 @@ PowerFlowResult HelmSolver::solve(const SolverData& data,
     if (!q_violated) {
       result.converged  = converged_helm;
       result.iterations = n_computed;
+      verify_physical_residual();
       return result;
     }
     // If Q limits were violated the outer loop will rebuild Y_mod and re-solve.

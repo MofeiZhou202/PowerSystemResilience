@@ -1,6 +1,6 @@
 # Documentation Index
 
-Updated: 2026-07-28
+Updated: 2026-07-30
 
 This directory separates implementation contracts from mathematical references.
 When documentation and runtime behavior differ, `include/`, `src/`,

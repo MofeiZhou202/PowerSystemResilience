@@ -1,0 +1,380 @@
+% 第 5 章：全局化与鲁棒求解器族
+% 本章文件由 \input 引入，不含导言区。
+\section{全局化与鲁棒求解器族}\label{sec:robust}
+
+本章给出统一 Newton 核心（第~\ref{sec:newton}~章）所用全局化组件与鲁棒回退
+求解器的实现细节：非线性缩放、非单调（GLL）线搜索、LM 信赖域与伪瞬态延拓、
+NCP 半光滑 Newton、HELM 全纯嵌入、同伦延拓与 Newton--Krylov 内迭代，以及把
+它们组织为五阶段管线的 \texttt{RobustNonlinearOptions}。第~\ref{sec:newton}~章
+已概述缩放、线搜索与失败回退链的主流程，本章逐组件给出数学模型、参数与验证依据。
+
+\subsection{非线性缩放（$D_F$、$D_x$ 对角缩放）}\label{sec:robust:scaling}
+
+\compmeta{powerflow::NonlinearScaling}{\srcpath{include/hacdcpf/power\_flow/globalization/nonlinear\_scaling.hpp}}
+\paragraph{功能说明} 对 Newton 方程做行/列对角平衡，使缩放后残差与步长均为
+无量纲 $O(1)$ 量，收敛判据与病态探测都作用在缩放系统上。类只存两个向量并
+施加逐元运算（\srcpath{nonlinear\_scaling.hpp:27--82}），构造由自由函数
+\srcpath{build\_nonlinear\_scaling} 完成（\srcpath{src/power\_flow/nonlinear\_scaling.cpp:23--95}）；
+三个开关 \fld{enable\_residual\_scaling}/\fld{enable\_variable\_scaling}/
+\fld{enable\_jacobian\_row\_col\_equilibration} 默认全开
+（\srcpath{robust\_nonlinear\_options.hpp:18--26}）。
+\paragraph{数学模型与算法} 缩放系统（头文件契约注释
+\srcpath{nonlinear\_scaling.hpp:15--25}）：
+\[
+\hat F=D_F F,\qquad \hat J=D_F\,J\,D_x^{-1},\qquad
+\Delta\hat x=D_x\,\Delta x,\qquad \Delta x=D_x^{-1}\Delta\hat x
+\]
+行缩放 $D_F$（nonlinear\_scaling.cpp:44--69）：P/Q/DC 三类方程行分别取
+$D_{F,i}=1/\max(|F_i^{\mathrm{spec}}|,1)$，经 \srcpath{clamp\_inv\_scale}（:11--14）
+钳制到 $[\,$\fld{min\_scale},\fld{max\_scale}$\,]$。列缩放 $D_x$（:75--92）：
+$\theta$ 列取 $\pi$；$V_m$ 列取当前 $V_m$（$>10^{-3}$ 时，否则取 1，:81--85）；
+$V_{dc}$ 列同规则（:87--91）。施加方式：残差逐元乘、雅可比遍历非零元行乘列除、
+物理步长逐元除恢复（头 :44--73）。主循环挂接
+（\srcpath{src/power\_flow/newton\_solver.cpp:1398--1425}）：每次迭代重建缩放；
+\fld{enable\_residual\_scaling} 开时以缩放残差的 $\ell_\infty$ 范数判定收敛
+（:1414--1415）；仅当 equilibration 开\textbf{且}至少一个缩放开关开时才替换
+线性系统（:1417--1425）。条件数代理
+$\kappa=(\max/\min$ 行$\ell_1$范数$)\times(\max/\min$ 列$\ell_1$范数$)$
+（\srcpath{estimate\_condition\_proxy}，:494--535）在
+\fld{enable\_condition\_monitor} 或 NK 回退开启时每轮写入
+\fld{profiling.condition\_estimate}（:1427--1430）。
+\paragraph{参数表}
+\begin{paramtable}
+\fld{enable\_residual\_scaling} & — & — & on/off & true & 行缩放 $D_F$ 开关；同时决定收敛判据用缩放残差\\
+\fld{enable\_variable\_scaling} & — & — & on/off & true & 列缩放 $D_x$ 开关\\
+\fld{enable\_jacobian\_row\_col\_equilibration} & — & — & on/off & true & 是否把 $\hat J=D_FJD_x^{-1}$ 送入分解\\
+\fld{enable\_condition\_monitor} & — & — & on/off & true & 每轮计算条件数代理（NK 触发也依赖它）\\
+\fld{min\_scale} & $s_{\min}$ & — & $10^{-8}$--$10^{-4}$ & $10^{-6}$ & 缩放因子下限（防除零）\\
+\fld{max\_scale} & $s_{\max}$ & — & $10^{4}$--$10^{8}$ & $10^{6}$ & 缩放因子上限\\
+\fld{min\_vm\_pu} & $\underline V$ & pu & $10^{-9}$--$10^{-6}$ & $10^{-8}$ & 雅可比 $\partial/\partial V$ 除法下限（\srcpath{jacobian\_builder.cpp:235}）\\
+\end{paramtable}
+\paragraph{验证与校核} \srcpath{tests/test\_scaling\_regression.cpp}：
+case9/14/30/57/118 默认缩放开全部收敛且 \fld{scaled\_residual\_norm}/
+\fld{raw\_residual\_norm} 有限（:37--81）；条件监控开启时
+\fld{condition\_estimate} 为正有限（:87--95）；三开关全关的 case14 回退仍收敛
+（:101--109）。
+
+\subsection{非单调线搜索（GLL）}\label{sec:robust:gll}
+
+\compmeta{powerflow::NonmonotoneLineSearch}{\srcpath{include/hacdcpf/power\_flow/globalization/nonmonotone\_linesearch.hpp}}
+\paragraph{功能说明} Grippo--Lampariello--Lucidi（1986）非单调 Armijo 搜索，
+header-only 实现（\srcpath{src/power\_flow/nonmonotone\_linesearch.cpp} 仅为
+空壳翻译单元）。在 Newton 主循环中它维护最近 $M$ 轮 merit 历史、给出非单调
+参考值，并在单调回溯失败时做事后 GLL 接受判定。
+\paragraph{数学模型与算法} Merit 函数 $\phi(x)=\tfrac12\lVert F(x)\rVert_2^2$，
+滑动窗口参考 $\varphi_k^{\max}=\max_{0\le j\le M-1}\phi_{k-j}$，接受条件
+（\srcpath{nonmonotone\_linesearch.hpp:21--27, 66--99}）：
+\[
+\phi(x+\alpha\,\Delta x)\le \varphi_k^{\max}+c_1\,\alpha\,\nabla\phi(x)^{\mathsf T}\Delta x,
+\qquad \alpha\leftarrow\beta\alpha
+\]
+$M=1$ 退化为标准单调 Armijo。主循环中的实际形态
+（newton\_solver.cpp:1033--1038 构造、:1115--1197 搜索）：窗口每轮压入当前残差
+（:1461--1462）；回溯 $\alpha\leftarrow\alpha/2$、上限
+\fld{max\_line\_search\_steps}$=10$ 次（:1127, :1139--1173）；单调改善失败时先按残差
+分级放宽比（2.0/1.5/1.2/1.01，:1178--1188）再试，仍未改善时若最优试探残差
+$\le\varphi_k^{\max}(1+c_1)$ 则按 GLL 条件事后接受（:1189--1195）。如实说明：
+生产回溯次数由 \fld{max\_line\_search\_steps}（默认 10）控制、折半系数 0.5
+为硬编码；类自带的 \fld{max\_line\_search\_trials}$=12$ 当前未被主循环消费，
+\fld{line\_search\_beta} 仅作构造参数传入。
+\paragraph{参数表}
+\begin{paramtable}
+\fld{enable\_nonmonotone\_linesearch} & — & — & on/off & true & GLL 参考窗口与事后接受开关（关则退化为单调）\\
+\fld{nonmonotone\_window} & $M$ & — & 3--10 & 5 & 滑动窗口长度（\srcpath{nonmonotone\_linesearch.hpp:40}）\\
+\fld{armijo\_c} & $c_1$ & — & $10^{-5}$--$10^{-3}$ & $10^{-4}$ & Armijo 充分下降常数\\
+\fld{line\_search\_beta} & $\beta$ & — & 0.3--0.7 & 0.5 & 类的回溯折减系数\\
+\fld{max\_line\_search\_trials} & — & 次 & 8--20 & 12 & 类内试探上限（当前未被主循环消费，保留字段）\\
+\end{paramtable}
+\paragraph{验证与校核} 无独立单元测试；由
+\srcpath{tests/test\_scaling\_regression.cpp} 与
+\srcpath{tests/test\_unified\_pf\_upgrade.cpp} 的全局化对比用例间接覆盖
+（默认配置下 GLL 开启，全部基线用例收敛）。
+
+\subsection{LM 信赖域与伪瞬态延拓（PTC）}\label{sec:robust:lmptc}
+
+\compmeta{powerflow::LMController / PtcSerController}{\srcpath{include/hacdcpf/power\_flow/globalization/lm\_trust\_region.hpp}}
+\paragraph{功能说明} 两个 header-only 自适应控制器
+（\srcpath{src/power\_flow/lm\_trust\_region.cpp} 为空壳翻译单元）：
+\texttt{LMController} 按增益比 $\rho$ 调节 LM 阻尼 $\lambda$
+（$\rho\ge0.75\Rightarrow\lambda/3$，$0.1\le\rho<0.75$ 保持，
+$\rho<0.1$ 或 pred$\le0\Rightarrow\lambda\times10$，
+\srcpath{lm\_trust\_region.hpp:43--78}）；\texttt{PtcSerController} 按 SER 公式
+$\delta t\leftarrow\mathrm{clamp}(\delta t(r_{k-1}/r_k)^\gamma,
+\delta t_{\min},\delta t_{\max})$ 调节伪时间步（:87--115）。如实说明：这两个
+控制器类当前\textbf{未被} Newton 主循环调用——生产的信赖域 dogleg 与 PTC
+直接使用 MIPSolvers 内核函数（见下），控制器与 \fld{ptc\_dt0}/
+\fld{ptc\_gamma} 等选项是预留接口。
+\paragraph{数学模型与算法}
+\begin{itemize}
+  \item \textbf{信赖域 dogleg}（\fld{globalization}=TrustRegion，
+        newton\_solver.cpp:1501--1546）：Cauchy 步长
+        $\alpha_c=\lVert g\rVert^2/\lVert Jg\rVert^2$（$g=J^{\mathsf T}F$），
+        dogleg 路径在 Cauchy 点与 Newton 步间插值并截断到半径 $\Delta$
+        （\srcpath{MIPSolvers/include/mipsolvers/engine/kernel/globalization/globalization.hpp:20--49}）；
+        增益比 $\rho=\mathrm{ared}/\mathrm{pred}$：$\rho>0.75$ 且触界时
+        $\Delta\leftarrow\min(2\Delta,\Delta_{\max})$，$\rho<0.25$ 时
+        $\Delta\leftarrow\max(0.25\Delta,10^{-10})$，$\rho>0$ 才接受
+        （同文件 :62--80；调用 :1541--1542）。
+  \item \textbf{PTC}（\fld{globalization}=PseudoTransient，:1547--1579）：
+        求解 $(J+I/\delta t)\Delta x=-F$（:1553--1554），步\textbf{无条件接受}
+        （:1559--1577）；SER 更新 $\delta t\leftarrow\delta t\cdot(r_{k-1}/r_k)$，
+        残差近零时改乘 \fld{ptc\_growth}，上限 $10^{12}$
+        （globalization.hpp:91--103；调用 :1579）。初值
+        \fld{ptc\_delta0}$=1.0$、增长 \fld{ptc\_growth}$=2.0$
+        （:1322，\srcpath{power\_flow\_options.hpp:158--159}）。
+  \item \textbf{LM/PTC 自动恢复}（\fld{enable\_auto\_fallback\_scheduling}，
+        默认关；:1651--1717）：线搜索、正则化与逃逸步全部失败后，LM 恢复解
+        $(J^{\mathsf T}J+\lambda I)\Delta x=-J^{\mathsf T}F$（:1660--1686），
+        最多 4 次尝试、$\lambda$ 自 \fld{lm\_lambda0} 起 $\times10$ 增至
+        \fld{lm\_lambda\_max}（:1662, :1684）；仍失败则以 $J+I/\delta t$ 做
+        PTC 恢复并无条件接受（:1687--1716）。
+\end{itemize}
+\paragraph{参数表}
+\begin{paramtable}
+\fld{enable\_lm\_trust\_region\_fallback} & — & — & on/off & true & 允许 LM 恢复步（仅在自动调度开启时生效）\\
+\fld{lm\_lambda0}/\fld{lm\_lambda\_max} & $\lambda$ & — & — & $10^{-4}$/$10^{8}$ & LM 初始阻尼与上限（:1662--1684 使用）\\
+\fld{enable\_ptc\_ser} & — & — & on/off & true & 允许 PTC 恢复步（仅在自动调度开启时生效）\\
+\fld{ptc\_dt0} 等四字段 & $\delta t$ 族 & — & — & 0.1 / $10^{-4}$ / $10^{6}$ / 0.7 & SER 控制器预留（\fld{ptc\_dt\_min}/\fld{\_max}/\fld{ptc\_gamma}；生产 PTC 用 \fld{opt.ptc\_delta0}/\fld{ptc\_growth}）\\
+\fld{trust\_region\_radius0} & $\Delta_0$ & — & 0.1--2 & 1.0 & 信赖域初始半径（\texttt{PowerFlowOptions}，:1321）\\
+\fld{trust\_region\_max} & $\Delta_{\max}$ & — & 5--50 & 10.0 & 信赖域半径上限\\
+\fld{enable\_auto\_fallback\_scheduling} & — & — & on/off & false & 失败时自动追加 LM/PTC 恢复（:1658--1659）\\
+\end{paramtable}
+\paragraph{验证与校核} \srcpath{tests/test\_unified\_pf\_upgrade.cpp}
+「Globalization improves flat-start convergence」（:747--820）：IEEE 118 混合
+算例、$\pm5\%$ 初值噪声、30 次试验，断言 LineSearch 30/30 收敛、TrustRegion
+与 PTC 各 $\ge50\%$；「Full comparison」（:890--961）在 5 个压力算例
+$\times$ 8 种配置（含 TR、PTC）打印迭代对照表。自动恢复调度（默认关）无
+专门回归用例。
+
+\subsection{NCP 半光滑 Newton（PV 无功限值光滑化）}\label{sec:robust:ncp}
+
+\compmeta{powerflow::pv\_pq\_ncp 等内联函数族}{\srcpath{include/hacdcpf/power\_flow/ncp\_functions.hpp}}
+\paragraph{功能说明} 把 PV 母线的无功限值互补约束写成 Fischer--Burmeister
+NCP 方程直接嵌入 Newton 系统，替代 MATPOWER 风格 PV$\leftrightarrow$PQ 离散
+外环（第~\ref{sec:newton}~章）。全部函数为
+\srcpath{include/hacdcpf/power\_flow/ncp\_functions.hpp} 内联实现；由
+\fld{enable\_semi\_smooth\_newton}（默认 false，
+\srcpath{power\_flow\_options.hpp:151}；SolverData 侧镜像
+\srcpath{solver\_data.hpp:69}）开启。
+\paragraph{数学模型与算法} 近零扰动 FB 函数
+（\srcpath{ncp\_functions.hpp:14--25}）：
+\[
+\phi(a,b)=\sqrt{a^2+b^2+\varepsilon}-a-b,\qquad \varepsilon=10^{-14},
+\qquad \partial_a\phi=a/r-1,\ \partial_b\phi=b/r-1
+\]
+PV 母线全部转 PQ（$V_m$ 自由，newton\_solver.cpp:599--605），其 Q 行替换为
+（:669--699 汇集同母线发电机限值，无穷限取 $\pm10^{6}$，:684--693）：
+\[
+F_{\mathrm{ncp}}=\phi\big(Q_{\max}-Q_g,\ V_m-V_{\mathrm{set}}\big)
+                 +\phi\big(Q_g-Q_{\min},\ V_{\mathrm{set}}-V_m\big)
+\]
+（\srcpath{pv\_pq\_ncp}，ncp\_functions.hpp:42--45）。限内时迫使 $V_m=V_{set}$
+（PV 行为），触限时钉住 $Q_g$ 并放开 $V_m$。行装配在
+\srcpath{src/power\_flow/jacobian\_builder.cpp:433--487}：隐含无功
+$Q_g=Q^{\mathrm{calc}}+Q^{\mathrm{load}}$（:440--444，\fld{has\_component\_loads}
+为真时 $Q^{\mathrm{load}}$ 取逐母线 \fld{qd\_pu}，否则取母线级 \fld{qd\_mvar}），
+失配行直接写
+$F_{\mathrm{ncp}}$（:446--453）；雅可比行按链式
+$J_{\mathrm{ncp}}=-(\partial F/\partial Q_g)\,dQ^{\mathrm{calc}}/dx
+-(\partial F/\partial V_m)\,\partial V_m/\partial x$ 改写（:455--487）。
+可选光滑延拓（Phase 2，\fld{enable\_smooth\_ncp} 默认关，
+\srcpath{robust\_nonlinear\_options.hpp:79}）：
+$\phi_\mu(a,b)=\sqrt{a^2+b^2+2\mu}-a-b$（ncp\_functions.hpp:79--93），
+$\mu$ 随残差退火：初值 \fld{ncp\_mu0}，残差每降 10\% 按两阶段因子缩减——
+粗阶段（resid $>0.1\times$初值）用 \fld{ncp\_mu\_factor\_coarse}$=0.5$，
+细阶段用 \fld{ncp\_mu\_factor}$=0.1$，下限 \fld{ncp\_mu\_min}
+（newton\_solver.cpp:1464--1482）。
+\paragraph{参数表}
+\begin{paramtable}
+\fld{enable\_semi\_smooth\_newton} & — & — & on/off & false & NCP 模式总开关（\texttt{PowerFlowOptions}，GUI 暴露于 \srcpath{tests/run\_gui\_server.cpp:697}）\\
+\fld{enable\_smooth\_ncp} & — & — & on/off & false & $\mu$ 光滑 FB 延拓开关\\
+\fld{ncp\_mu0} & $\mu_0$ & — & $10^{-3}$--$10^{-1}$ & $10^{-2}$ & 初始光滑参数\\
+\fld{ncp\_mu\_min} & $\mu_{\min}$ & — & $10^{-14}$--$10^{-10}$ & $10^{-12}$ & 退火下限（趋近精确 NCP）\\
+\fld{ncp\_mu\_factor(\_coarse)} & — & — & — & 0.1/0.5 & 细/粗两阶段退火因子；\fld{ncp\_mu\_phase\_transition}$=0.1$ 为切换残差比\\
+\fld{enable\_activity\_hysteresis} 等 & — & — & — & true / 3 / $10^{-4}$ & 迟滞三字段（预留，未消费）\\
+\end{paramtable}
+\paragraph{验证与校核} \srcpath{tests/test\_unified\_pf\_upgrade.cpp}：
+IEEE 118 收紧无功限值算例，NCP 一遍求解、\fld{pv\_to\_pq\_switches}$=0$ 且
+残差 $<2\times10^{-3}$，而启发式外环需多次切换（:709--739）；case30/57/118
+（Q 限 $\times0.9$）NCP 与启发式对照表（:827--884）；5 压力算例含
+\texttt{ncp} 配置的全对比（:890--961）。如实说明：$\mu$ 光滑延拓（默认关）
+无单独回归用例。
+
+\subsection{HELM 全纯嵌入}\label{sec:robust:helm}
+
+\compmeta{powerflow::HelmSolver}{\srcpath{include/hacdcpf/power\_flow/solvers/helm\_solver.hpp}}
+\paragraph{功能说明} Holomorphic Embedding Load-flow Method：把潮流方程嵌入
+复参数 $s$ 的全纯函数，在 $s=0$（平启动，精确解已知）展开幂级数，用 Padé
+逼近解析延拓到 $s=1$。\textbf{不依赖初值}，Padé 发散可作为算例不可解的判证。
+代码移植自 HELMpy 参考实现（AGPLv3，\srcpath{src/power\_flow/helm\_solver.cpp:1--14}），
+增强：稀疏 $Y_{\mathrm{trans}}$、多 slack、K 因子分布式松弛与
+DCPF/Gauss--Seidel 暖启动（:10--14）。纯 AC（只用 AC 子系统，头文件
+:97--100），编译进 \texttt{hacdcpf} 库（\srcpath{CMakeLists.txt:394}）。
+\paragraph{数学模型与算法}
+\begin{itemize}
+  \item \textbf{导纳分解}（\srcpath{build\_ytrans\_yshunt}，:105--153）：
+        串联支路按 $\pi$ 模型生成 $Y_{\mathrm{trans}}$（$y_{ff}=y_s/|\tau|^2$ 等
+        四元组，:131--139），对地支路 $jb/2$ 与母线 $G_s+jB_s$ 入
+        $Y_{\mathrm{shunt}}$（:141--152）；
+  \item \textbf{修正导纳阵} $Y_{\mathrm{mod}}\in\mathbb R^{2N\times2N}$
+        （\srcpath{build\_ymod}，:159--196）：slack 置单位行；PQ 行写
+        $\Re/\Im$ 2$\times$2 块；PV 用 Model 2——P 行取实部、第 $2i{+}1$ 行写
+        $|V|^2$ 约束（:168--190）；
+  \item \textbf{系数递推}（:504--628）：每阶解一次
+        $Y_{\mathrm{mod}}\,c^{[n]}=\mathrm{rhs}$（共享一次 LU 分解，:475--484）。
+        PQ 右端 $\overline{S_i}\,\overline{W_i^{[n-1]}}-Y_{\mathrm{sh},i}V_i^{[n-1]}$
+        （:523--531）；PV 的 $|V|^2$ 行右端 $V\!V/2$（:535--547）、P 平衡行经
+        $CC$ 缓存的卷积递推（:549--582）；$W=1/V$ 逆元递推
+        $W^{[n]}=-\sum_{k<n}W^{[k]}V^{[n-k]}$（:598--606）；
+  \item \textbf{Padé 求值与外环}（\srcpath{pade\_at\_one}，:50--97）：$[L/L]$
+        矩阵法，解 Toeplitz 方程得分母系数、卷积得分子系数，$s=1$ 处取
+        $\sum a/\sum b$；每 2 阶做一次收敛检查（幅值/相角变化
+        $<$\fld{mismatch}，:610--627），终值提取 :635--653；无功限值外环至多
+        10 次 PV$\to$PQ 切换、越限 $10^{-6}$ 判据、Q 注入钉限
+        （:472--473, :655--688）；暖启动 DCPF 角度基线（:239--296）/GS 预迭代
+        （:302--350）；K 因子在 PV+SLACK 间分摊不平衡（:356--385）。
+\end{itemize}
+\paragraph{参数表（\texttt{HelmOptions}，helm\_solver.hpp:27--71）}
+\begin{paramtable}
+\fld{max\_coef} & $n_{\max}$ & 阶 & 50--200 & 100 & 幂级数最大系数数\\
+\fld{mismatch} & $\varepsilon$ & pu/rad & $10^{-8}$--$10^{-4}$ & $10^{-6}$ & Padé 收敛容差（幅值与相角）\\
+\fld{enforce\_q\_limits} & — & — & on/off & true & 无功限值 PV$\to$PQ 外环开关\\
+\fld{warm\_start}/\fld{gauss\_iter} & — & — & None / DCPF / GS & None/5 & 暖启动策略与 GS 预迭代次数（:12--24, :46）\\
+\fld{allow\_multi\_slack} & — & — & on/off & true & 多 slack 母线（均置单位行）\\
+\fld{participation\_factors} & $K$ & — & $\ge0$ & 空 & 分布式松弛参与因子（非空即启用）\\
+\fld{sparse\_threshold} & — & 母线 & — & 200 & 稀疏阈值（当前实现恒为稀疏，该字段未消费）；\fld{pade\_trace\_out} 为收敛轨迹输出指针\\
+\end{paramtable}
+\paragraph{验证与校核} 如实说明：HELM 当前\textbf{无生产 API 自动挂接}
+（\srcpath{solve\_power\_flow} 不分发该求解器，GUI 亦无对应路由），只能由
+C++ 直接构造 \texttt{HelmSolver} 调用。回归覆盖：\srcpath{tests/test\_helm\_solver.cpp}
+（注册于 \srcpath{tests/CMakeLists.txt:122}）「HELM matches Newton on a
+well-conditioned AC case」——两节点良性算例上 HELM（\fld{max\_coef}$=120$、
+关无功限值外环）与 Newton 逐母线 $|V|/\theta$ 对照，容差 $2\times10^{-5}$
+（:11--30）。仍未覆盖：PV 无功限值外环、多 slack 与 K 因子分摊、暖启动路径、
+不可解算例的 Padé 发散判证，覆盖仍薄；数值正确性同时依赖与 HELMpy 参考实现的
+对口移植。
+
+\subsection{同伦延拓}\label{sec:robust:homotopy}
+
+\compmeta{powerflow::HomotopyContinuationSolver}{\srcpath{include/hacdcpf/power\_flow/continuation\_solver.hpp}}
+\paragraph{功能说明} 把所有负荷与发电/换流器功率设定按同伦参数
+$\lambda\in[0,1]$ 从平启动零注入基态缓步爬升到目标值，每步以上一步解暖启动，
+作为难收敛算例的兜底路径（设计定位：鲁棒管线 Phase 4）。实现
+\srcpath{src/power\_flow/homotopy\_continuation.cpp:88--179}；状态记录
+\texttt{HomotopyState\{lambda, step, accepted\_steps, rejected\_steps, failed\}}
+（\srcpath{continuation\_solver.hpp:18--24}）。
+\paragraph{数学模型与算法} 嵌入构造
+（\srcpath{scale\_system\_by\_lambda}，:14--84）：AC/DC 母线集总负荷、显式
+负荷、发电机/储能/可再生/静态发电机有功无功、VSC $P_{set}$、DC/DC $P_{ref}$、
+移动储能等全部注入 $\times\lambda$；电压设定与网络参数不变。路径跟踪
+（:95--179）：子求解关闭同伦递归（:105--106），中间步迭代预算
+$\max(10,\lfloor\,$\fld{max\_iter}$/2\rfloor)$（:110--111）；$\lambda=0$ 基态
+必先可解（:115--126）；主循环 $\lambda_{\mathrm{next}}=\min(1,\lambda+
+\Delta\lambda)$，以 \fld{initial\_state} 暖启动调 \srcpath{solve\_hybrid}
+（:141--154）；成功则 $\Delta\lambda\leftarrow\min(2\Delta\lambda,
+\Delta\lambda_{\max})$，失败则 $\Delta\lambda\leftarrow\Delta\lambda/2$
+（:160--167）；步数超 \fld{homotopy\_max\_steps} 或步长低于
+\fld{homotopy\_step\_min} 判失败（:131--139）。
+\paragraph{参数表}
+\begin{paramtable}
+\fld{enable\_homotopy} & — & — & on/off & true & 同伦开关（当前仅用于子求解防递归，见下）\\
+\fld{homotopy\_step0} & $\Delta\lambda_0$ & — & 0.05--0.5 & 0.2 & 初始步长\\
+\fld{homotopy\_step\_min}/\fld{\_max} & — & — & — & $10^{-3}$/1.0 & 最小/最大步长（低于最小步长判失败）\\
+\fld{homotopy\_max\_steps} & — & 步 & 20--100 & 30 & 接受+拒绝总步数上限\\
+\end{paramtable}
+\paragraph{验证与校核} 如实说明：同伦求解器\textbf{未被 Newton 失败路径自动
+链入}——\fld{enable\_homotopy} 仅在 \srcpath{homotopy\_continuation.cpp:106}
+用于防止子求解递归，GUI 仅透传该选项
+（\srcpath{tests/run\_gui\_server.cpp:739}）；调用方需显式构造
+\texttt{HomotopyContinuationSolver} 使用。回归覆盖：
+\srcpath{tests/test\_homotopy\_continuation.cpp}（注册于
+\srcpath{tests/CMakeLists.txt:123}）单用例——两节点电压稳定算例从 $\lambda=0$
+爬升，断言收敛、\fld{state.failed}=false、终态 $\lambda=1.0$、
+\fld{accepted\_steps}$\ge3$ 且负荷母线 $|V|<1.0$（:6--25）；另
+\srcpath{tests/test\_newton\_krylov.cpp:37--54} 经
+\srcpath{PowerFlowSolverFactory} 对含 \texttt{Continuation} 的六种方法做
+可构造、可求解的接线冒烟。仍未覆盖：步长回退/失败路径
+（$\Delta\lambda$ 折半、\fld{homotopy\_max\_steps} 判负）、混合 AC/DC 算例，
+覆盖仍薄。
+
+\subsection{Newton--Krylov（NK-GMRES 回退）}\label{sec:robust:nk}
+
+\compmeta{powerflow::newton\_krylov\_step}{\srcpath{include/hacdcpf/power\_flow/solvers/newton\_krylov.hpp}}
+\paragraph{功能说明} 以重启 GMRES($m$)（MGS Arnoldi + Givens 旋转）替代稀疏
+LU 求解 Newton 线性系统，并配 Schur 补 AC/DC 块预条件器，面向病态雅可比
+场景（\srcpath{src/power\_flow/newton\_krylov.cpp:1--8}）。\textbf{默认关闭}
+（\fld{enable\_newton\_krylov\_fallback}=false），仅在条件数代理越限时可选回退。
+\paragraph{数学模型与算法}
+\begin{itemize}
+  \item \textbf{GMRES($m$)}（\srcpath{gmres\_solve}，:19--140）：左预条件
+        重启型；MGS 正交化（:81--90）、Givens 旋转消 Hessenberg 次对角
+        （:93--112）、估计残差 $|\,g_{j+1}\,|/\lVert b\rVert$（:114）；每轮
+        重启后以真残差复判（:127--133）；
+  \item \textbf{Schur 块预条件}（\srcpath{SchurBlockPreconditioner}，
+        :144--207）：利用 $J=\big[\begin{smallmatrix}A&B\\0&D\end{smallmatrix}\big]$
+        块上三角结构（AC 块 $A$、DC 块 $D$ 各作 SparseLU 分解，:156--174），
+        $P^{-1}r$：$z_{dc}=D^{-1}r_{dc}$，$z_{ac}=A^{-1}(r_{ac}-Bz_{dc})$
+        （:192--198）；任一块分解失败则退化为单位预条件（:230--238）；
+  \item \textbf{接受准则}（:244--249）：GMRES 收敛，或最终相对残差
+        $<100\times$\fld{gmres\_tol} 且步有限、$\max|\Delta x|<10^{6}$；
+  \item \textbf{触发与回退}（newton\_solver.cpp）：条件代理
+        $>$\fld{nk\_condition\_trigger} 且开关开启时本轮用 NK（:1489--1498）；
+        三种全局化分支均可受益（:1506--1509, :1555--1558, :1583--1588），
+        默认分支 NK 失败或步不被接受时回落标准 LU（:1590--1595）；状态写入
+        \fld{profiling.linear\_solver\_status}（\texttt{nk\_gmres}/
+        \texttt{nk\_gmres\_schur}/\texttt{nk\_gmres\_failed}，:1250--1255）。
+\end{itemize}
+\paragraph{参数表}
+\begin{paramtable}
+\fld{enable\_newton\_krylov\_fallback} & — & — & on/off & false & NK-GMRES 回退总开关（默认关）\\
+\fld{enable\_schur\_preconditioner} & — & — & on/off & false & Schur 补块预条件开关\\
+\fld{nk\_condition\_trigger} & $\kappa_{\mathrm{trig}}$ & — & $10^{6}$--$10^{10}$ & $10^{8}$ & 触发阈值（对条件数代理）\\
+\fld{gmres\_restart} & $m$ & — & 20--50 & 30 & Krylov 子空间重启维度\\
+\fld{gmres\_max\_outer} & — & 轮 & 5--20 & 10 & 最大重启轮数（总 matvec 上界 $m\times$轮数）\\
+\fld{gmres\_tol} & $\varepsilon$ & — & $10^{-12}$--$10^{-8}$ & $10^{-10}$ & 相对残差容差 $\lVert r\rVert/\lVert b\rVert$\\
+\end{paramtable}
+\paragraph{验证与校核} 如实说明：生产路径默认不经过 NK（默认关闭 + 触发
+阈值 $10^{8}$），属覆盖较薄组件。回归覆盖：
+\srcpath{tests/test\_newton\_krylov.cpp}（注册于
+\srcpath{tests/CMakeLists.txt:125}）——(i) GMRES$+$Schur 预条件求解
+$3\times3$ 耦合 AC/DC 块系统，断言 \fld{used\_schur} 且解误差
+$<10^{-10}$（:11--35）；(ii) \srcpath{PowerFlowSolverFactory} 对含
+\texttt{NewtonKrylov} 的六种方法逐一构造并求解两节点算例均收敛
+（:37--54）；(iii) \texttt{SolverWorkspace} 布局保持的重置语义（:56--70）。
+仍未覆盖：Newton 主循环内经条件数代理触发的真实病态算例路径、GMRES
+重启与失败回退路径。
+
+\subsection{\texttt{RobustNonlinearOptions} 与五阶段鲁棒管线}\label{sec:robust:pipeline}
+
+\compmeta{powerflow::RobustNonlinearOptions}{\srcpath{include/hacdcpf/power\_flow/globalization/robust\_nonlinear\_options.hpp}}
+\paragraph{功能说明与接线状态} \texttt{RobustNonlinearOptions}
+（\srcpath{robust\_nonlinear\_options.hpp:13--210}，经
+\fld{PowerFlowOptions::robust\_nonlinear} 挂载）按 Phase 1--5 组织全部鲁棒
+组件开关与参数；\texttt{NonlinearSolveMode} 枚举与
+\texttt{SolverModeSwitchRecord}（:213--229）为策略切换的诊断记录类型。
+各 Phase 的\textbf{实际接线状态}（如实）：
+\begin{enumerate}
+  \item \textbf{Phase 1 缩放与诊断}：已接线，默认全开（\ref{sec:robust:scaling} 节）；
+  \item \textbf{Phase 2 非单调线搜索与光滑 NCP}：GLL 已接线默认开
+        （\ref{sec:robust:gll} 节）；光滑 NCP 已接线但默认关（\ref{sec:robust:ncp} 节）；
+  \item \textbf{Phase 3 LM/PTC}：信赖域 dogleg 与 PTC 作为 \fld{globalization}
+        三策略之二已接线；自动恢复调度默认关（\ref{sec:robust:lmptc} 节）；
+  \item \textbf{Phase 4 同伦延拓}：求解器存在但\textbf{未自动链入}，需显式调用
+        （\ref{sec:robust:homotopy} 节）；
+  \item \textbf{Phase 5 高级项}：NK-GMRES 已接线默认关（\ref{sec:robust:nk} 节）；
+        \fld{enable\_log\_voltage}/\fld{auto\_enable\_log\_voltage\_on\_failure}
+        为保留字段，当前无实现消费（:174--177）。
+\end{enumerate}
+字段全集（含本表未列的诊断阈值 \fld{bad\_condition\_threshold}、
+\fld{tiny\_pivot\_threshold} 等当前未消费字段）见第~\ref{sec:options}~章完整字段表。
+\paragraph{验证与校核总览} 本章组件的回归矩阵汇总：缩放与条件监控——
+\srcpath{tests/test\_scaling\_regression.cpp}（6 用例）；NCP 半光滑与信赖域/
+PTC 全局化——\srcpath{tests/test\_unified\_pf\_upgrade.cpp}（:709--961 四个
+用例）；GLL 随默认配置被上述用例间接覆盖；HELM、同伦延拓、Newton--Krylov
+现各有专项冒烟回归——\srcpath{tests/test\_helm\_solver.cpp}（HELM 对 Newton
+两节点对照）、\srcpath{tests/test\_homotopy\_continuation.cpp}（端点到达）、
+\srcpath{tests/test\_newton\_krylov.cpp}（GMRES/Schur 精度与求解器工厂接线），
+注册于 \srcpath{tests/CMakeLists.txt:122--125}。如实说明：三者仍
+\textbf{无生产 API 自动挂接}，回归均为单算例/单路径冒烟，失败与回退路径
+未覆盖，覆盖仍薄（与第~\ref{sec:validation}~章现状声明一致）；CPF 的相关
+诚实口径见连续潮流章。

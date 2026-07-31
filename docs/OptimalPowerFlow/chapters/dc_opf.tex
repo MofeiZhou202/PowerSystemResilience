@@ -1,0 +1,135 @@
+% 第 5 章：DC OPF
+\section{DC OPF}\label{sec:dcopf}
+
+\subsection{功能定位与入口}
+\compmeta{opf::solve\_dc\_opf}{\srcpath{include/hacdcpf/optimal\_power\_flow/dc\_opf\_solver.hpp}}
+入口（dc\_opf\_solver.hpp:17；实现 src/optimal\_power\_flow/dc\_opf.cpp:808）：
+\begin{quote}\footnotesize
+\texttt{DCOPFResult solve\_dc\_opf(const HybridPowerSystem\& sys, const DCOPFOptions\& opt);}
+\end{quote}
+\textbf{仅 AC 侧线性化模型}：不建模任何 DC/换流器物理，
+\fld{converter\_model\_scope}=``dc-opf:linear-no-converter-model''（dc\_opf.cpp:679）。
+独立复核入口 \srcpath{check\_dc\_opf\_feasibility}（:1223--1376）。
+
+\subsection{数学模型}
+装配 \srcpath{build\_dc\_opf\_lp}（:120--507）。变量
+$x=[\theta(n_b);\ P_g(n_g);\ P_f(n_{l,active});\ \Delta P_d(n_b);\ \lambda_{pwl}]$：
+$\theta_{slack}=0$，其余 $\pm\pi$；$P_g\in[P^{min},P^{max}]$（pu）；
+$P_f\in\pm\fld{rate\_a}\cdot\fld{branch\_limit\_margin}$；
+$0\le\Delta P_{d,i}\le\max(p_{d,i},\ 0.01/S_b)$；
+$\lambda_{pwl}\in[0,1]$ 为 PWL 凸组合变量（见下）。
+\fld{DCOPFFormulation} 含 \fld{pwl\_offset}/\fld{pwl\_segments\_effective}
+（:81--82）与索引助手 \srcpath{i\_pwl(gen,point)}（:89--91）；
+每机组的断点偏移/个数存于 \fld{pwl\_point\_offset\_by\_gen}/
+\fld{pwl\_point\_count\_by\_gen}（:105--108），无二次成本项的机组个数为 0。
+
+\paragraph{目标（\fld{objective\_model} 如实区分 QP / LP-PWL / LP）}
+\begin{itemize}
+  \item \textbf{LP-PWL}：凸二次成本改用分段线性 $\lambda$ 凸组合插值。
+        仅对 $\fld{cost\_c2}>10^{-12}$ 且 $P^{max}>P^{min}$ 的机组建 PWL：
+        $\fld{requested\_segments}=\mathrm{clamp}(\fld{opt.pwl\_segments},1,1000)$
+        （:166），每机组 $\fld{segments}+1$ 个断点（:171），
+        生效段数记入 \fld{form.pwl\_segments\_effective}（:176）。
+        PWL 机组的 $P_g$ \textbf{不带线性系数}（:192 直接跳过），
+        $\lambda$ 变量界 $[0,1]$、目标系数为断点处真实成本
+        $c_2P_g^2+c_1P_g+c_0$（:231--247）；
+        无二次项机组保留纯 $c_1$ 线性（:189--203），
+        无成本数据时默认 \$1/MWh（:196--198）；
+  \item \textbf{QP}（NativeQP 路径）：真二次 $\tfrac12x^{\mathsf T}Qx+c^{\mathsf T}x$，
+        $Q$ 对角 $2c_2S_b^2$（:514--566）；结果重算含 $c_0$ 常数（:571--587）。
+        \fld{objective\_model} 口径（:1200--1207）：QP 收敛报 ``QP'' 且
+        \fld{pwl\_segments\_effective}=0；否则报 ``LP-PWL''（有 PWL 段）或 ``LP''，
+        并回填 \fld{pwl\_segments\_effective}。
+\end{itemize}
+
+\paragraph{约束}
+等式行数计入 $2\times n_{pwl}$（每个 PWL 机组两行，:336--340）。
+节点平衡（全部母线含 slack，:347--376）：$\sum P_g+\Delta P_d-\sum P_f=P_d$；
+支路定义 $P_f=(\theta_i-\theta_j)/x$，$x$ 下限 $10^{-6}$（:396--416）；
+\fld{include\_branch\_limits}=false 时改用 $B$ 矩阵直接进平衡行（:417--468）。
+每个 PWL 机组新增两条等式行（:471--491）：\textbf{凸性行} $\sum_p\lambda_{g,p}=1$
+与\textbf{插值行} $P_g=\sum_p \mathrm{breakpoint}_{g,p}\cdot\lambda_{g,p}$；
+凸性 $+$ 最小化保证自动选取相邻断点，\textbf{无需二进制/SOS2 变量}（注释 :231--232）。
+负荷聚合（:264--297）：bus.pd + loads$\times$scaling $-$ static\_gen $-$ renewable
+$-$ pv $-$ storage；VOLL 自动 $=\max(100,\ 1.1\times\max$边际成本$)$（:304--316）。
+
+\paragraph{预处理}
+rich$\to$canonical 投影（\fld{strip\_dead\_islands}=false，:813--819）；
+external grid 提升为 $\pm10^5$~MW 机组（\fld{is\_slack}=true，:821--842）；
+无 slack 孤岛预切负荷并计入 \fld{load\_shedding\_mw}（:908--987）——剪枝副本中
+死母线的 bus.pd/qd 清零，loads/gens/static gen/可再生/PV/储能 \fld{in\_service}=false，
+跨死母线支路退出；切负荷账镜像 ``bus.pd + loads$\times$scaling'' 双源约定；
+切负荷 $<10^{-6}$~MW 归零（:794）。
+
+\subsection{求解路径与 LMP}
+后端链（\fld{solver\_chain} 全程记录，:1017--1174）：
+Auto $\to$ NativeQP(LCQP) $\to$ Gurobi QP $\to$ HiGHS（QP 路由，失败回退 HiGHS-LP，
+回退名 ``HiGHS-LP(QP-fallback)''）$\to$ NativeDualSimplex；显式选择 NativeQP 失败时
+回退双单纯形；\fld{use\_qp} 在回退链上按需重置（:1091, :1121）；\fld{DCOPFSolverBackend}
+枚举为 Auto/Native（双单纯形）/NativeQP/HiGHS/Gurobi（opf\_options.hpp:128--134）。
+
+LMP：\fld{compute\_lmp}=true（默认）时以支撑 LP 补取对偶，$\mathrm{lmp}_i=\lambda_i^{bal}/S_b$
+（:752--759）。\textbf{支撑 LP 方法}（:589--665）：仅当 \fld{has\_complete\_duals}
+检查（行对偶 + 两组 box 对偶尺寸齐全）失败才触发；QP 情形支撑 LP 的成本向量替换为
+\textbf{解点梯度} $c_{supp}=Qx^*+c$（:642--645）；
+\srcpath{solve\_lp\_with\_basis}（固定原解起点）成功后按尺寸拷贝
+\fld{constraint\_duals}/\fld{box\_dual\_lb}/\fld{box\_dual\_ub}。
+\fld{lmp\_valid} \textbf{当且仅当}从支撑 LP 平衡行对偶恢复成功时为 true
+（:760--762），否则 false 并附 \fld{lmp\_validity\_reason}（:763--767）；
+\fld{compute\_lmp}=false 时清空 \fld{lmp} 且 \fld{lmp\_valid}=false（:1190--1195）。
+\textbf{注意}：平衡行对偶认证\textbf{不蕴含}支路拥塞对偶有效（见下节）。
+
+\subsection{可行性复核 \srcpath{check\_dc\_opf\_feasibility}（:1223--1376）}
+容差按 $\fld{tol}\times S_b$ 缩放（MW 口径）；检查内容：
+\begin{enumerate}
+  \item 机组 $[P^{min},P^{max}]$ 限；
+  \item 支路 $|P_f|\le\fld{rate\_a}$（rate $\le10^{-9}$ 跳过）；
+  \item \textbf{含 slack 在内}逐母线平衡——平衡账含 bus.pd + loads$\times$scaling、
+        切负荷回补、external grids、static gen、可再生、PV、储能固定注入与支路潮流。
+\end{enumerate}
+返回 \{feasible, \fld{max\_viol\_mw}, 首条违规描述\}。
+
+\subsection{诚实口径（支路对偶与模型边界）}
+原生单纯形不能正确处理有界 $P_f$ 变量，故 \fld{branch\_mu\_lower/upper}
+在支路限生效时\textbf{不可靠}，\fld{branch\_mu\_valid} \textbf{恒为 false}
+（NOTE :621--634；赋值 :680, :785），并附带 \fld{branch\_mu\_validity\_reason}
+字符串说明原因（:681--682；字段 opf\_result.hpp:200--201），直到实现 KKT 基提取。
+README 能力表同口径：
+``DCOPF branch congestion dual 仅在 branch\_mu\_valid=true 时可作工程解释''。
+\fld{model\_limitations}（opf\_result.hpp:230）追加
+``无损线性化 AC 网络、无电压幅值/无功/换流器物理''（:683--684）；
+有储能时追加``储能单时段固定注入、无 SOC 动态''（:685--688）。
+
+\subsection{参数表（DCOPFOptions）}
+定义 opf\_options.hpp:139--160。
+\begin{paramtable}
+\fld{feasibility\_tol} & -- & -- & $10^{-8}$--$10^{-4}$ & $10^{-6}$ & 可行性容差\\
+\fld{optimality\_tol} & -- & -- & $10^{-8}$--$10^{-4}$ & $10^{-6}$ & 最优性容差\\
+\fld{max\_iterations} & -- & 次 & -- & 10000 & 单纯形迭代上限\\
+\fld{verbose} & -- & bool & -- & false & 日志\\
+\fld{solver} & -- & 枚举 & -- & Auto & Auto / Native（双单纯形）/ NativeQP / HiGHS / Gurobi\\
+\fld{pwl\_segments} & -- & 段 & 1--1000 & 4 & \textbf{已接线}：凸二次成本的 PWL 段数（clamp 到 $[1,1000]$），仅对 $c_2>10^{-12}$ 且 $P^{max}>P^{min}$ 的机组生效，$\lambda$ 凸组合插值、无需 SOS2（dc\_opf.cpp:166--176, 471--491）\\
+\fld{include\_branch\_limits} & -- & bool & -- & true & 支路 $P_f$ box 限\\
+\fld{branch\_limit\_margin} & -- & 倍 & 0.5--1.0 & 1.0 & 支路限缩放因子\\
+\fld{load\_shedding} & -- & bool & -- & true & 启用 $\Delta P_d$ 切负荷变量\\
+\fld{voll} & VOLL & \$/MWh & $\ge100$ & 0（自动） & 切负荷价值\\
+\fld{compute\_lmp} & -- & bool & -- & true & 支撑 LP 补取 LMP\\
+\end{paramtable}
+
+\subsection{验证与校核}
+\begin{itemize}
+  \item 三方交叉验证（test\_acopf\_dcopf\_crossval.cpp:250--303）：case5/9/14/30/39/57，
+        DCOPF 调度重跑 AC PF 收敛（case57 仅 WARN）；注释明确 DCOPF 目标为线性化成本、
+        与 ACOPF 目标不可直接比（:284--286）；
+  \item 可行性复核：case14 \srcpath{check\_dc\_opf\_feasibility}（:308--346）；
+        含 slack 行的伪造结果检出 5.0~MW 违规（:446--485）；
+  \item 孤岛切负荷逐母线断言（bus3 = 5~MW，margin $10^{-8}$，:348--444）；
+  \item LMP 符号/尺度：$\ge-10^{-4}$ 且 $\le10\times\max$边际成本$+1$（:703--741）；
+        无阻塞 LMP 均匀性 spread$<10^{-4}$（:748--787）；
+  \item 阻塞再调度：$|flow|\le$限值$\times1.01+0.1$、成本不降、
+        \texttt{CHECK\_FALSE(branch\_mu\_valid)}（:800--870）；
+        并新增断言 \texttt{CHECK\_FALSE(branch\_mu\_validity\_reason.empty())}
+        与 \texttt{CHECK(lmp\_valid)}（:871--872）；
+  \item 手算算例：\srcpath{external\_data/opf\_hand\_cases/} 4 个解析解案例
+        （merit-order、双母线阻塞、切负荷、二次成本 LP 线性化），供 GUI 手工核对。
+\end{itemize}

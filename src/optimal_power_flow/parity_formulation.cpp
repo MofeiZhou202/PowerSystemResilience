@@ -1450,23 +1450,19 @@ void equality_constraints(const Problem& prob,
       if (gkm != 0.0) current_pu += gkm * vdc[m];
     }
     const double pflow = vdc[k] * current_pu;
-    const double bus_demand = prob.data.dc_loads.empty()
-                                  ? prob.data.dc_buses[static_cast<size_t>(k)].pd_mw /
-                                        prob.data.base_mva
-                                  : 0.0;
+    const double bus_demand =
+        prob.data.dc_buses[static_cast<size_t>(k)].pd_mw / prob.data.base_mva;
     g[cidx.i_pbal_dc + k] = bus_demand + pflow - ws.p_conv_dc[k];
   }
 
   // Add DC-side component injections to DC power balance
   // (mirrors residual_evaluator.cpp approach)
-  if (!prob.data.dc_loads.empty()) {
-    for (const auto& ld : prob.data.dc_loads) {
-      if (!ld.in_service) continue;
-      const int dc_bus = ld.bus - 1;
-      if (dc_bus >= 0 && dc_bus < ndc) {
-        g[cidx.i_pbal_dc + dc_bus] +=
-            model::effective_load_p_mw(ld) / prob.data.base_mva;
-      }
+  for (const auto& ld : prob.data.dc_loads) {
+    if (!ld.in_service) continue;
+    const int dc_bus = ld.bus - 1;
+    if (dc_bus >= 0 && dc_bus < ndc) {
+      g[cidx.i_pbal_dc + dc_bus] +=
+          model::effective_load_p_mw(ld) / prob.data.base_mva;
     }
   }
   for (const auto& sg : prob.data.dc_static_generators) {

@@ -344,7 +344,7 @@ void write_xform2w(XLWorksheet ws, const HybridPowerSystem& sys) {
                      "Sn_MVA", "Z_percent", "ZR_percent", "XR_ratio",
                      "ShiftDeg", "Pk_kW", "InService", "MTBF_hr", "MTTR_hr",
                      "TapSide", "TapPos", "TapMin", "TapMax", "TapNeutral",
-                     "TapStepPct", "Z0_percent"});
+                     "TapStepPct", "Z0_percent", "SourceBranchIdx"});
   for (size_t i = 0; i < sys.ac.transformers_2w.size(); ++i) {
     const auto& t = sys.ac.transformers_2w[i];
     const uint32_t r = static_cast<uint32_t>(i + 2);
@@ -375,6 +375,7 @@ void write_xform2w(XLWorksheet ws, const HybridPowerSystem& sys) {
     ws.cell(r, 20).value() = t.tap_neutral;
     ws.cell(r, 21).value() = t.tap_step_percent;
     ws.cell(r, 22).value() = t.z0_percent;
+    ws.cell(r, 23).value() = t.source_branch_idx;
   }
 }
 
@@ -867,6 +868,8 @@ void read_xform2w(const XLWorksheet& ws, HybridPowerSystem& sys,
     t.tap_neutral = int_from_str(cell_by_name(ws, r, col, "TapNeutral"), t.tap_neutral);
     t.tap_step_percent = dbl_from_str(cell_by_name(ws, r, col, "TapStepPct"), t.tap_step_percent);
     t.z0_percent = dbl_from_str(getv(ws, r, col, {"Z0_percent", "AnsiZeroZ"}), t.z0_percent);
+    t.source_branch_idx =
+        int_from_str(cell_by_name(ws, r, col, "SourceBranchIdx"));
     sys.ac.transformers_2w.push_back(std::move(t));
     ++n;
   }
@@ -1697,6 +1700,8 @@ EtapFidelityReport etap_fidelity_check(const HybridPowerSystem& sys, double tol)
       fi(p + "tap_pos", a.tap_pos, b.tap_pos);
       fd(p + "tap_step_percent", a.tap_step_percent, b.tap_step_percent);
       fd(p + "z0_percent", a.z0_percent, b.z0_percent);
+      fi(p + "source_branch_idx", a.source_branch_idx,
+         b.source_branch_idx);
     }
   }
   if (sys.ac.generators.size() == rt.ac.generators.size()) {

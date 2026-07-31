@@ -5,9 +5,13 @@
 
 本文档面向工程使用者和开发者，说明 HySim-XJTU-HRPES 从“工程场景建模”到“规范模型求解”、再到“结果回投”的完整链路。文档入口见 `docs/README.md`，更底层的公式和接口见 `docs/technical_notebook/`。
 
-## 文档同步状态（2026-07-28）
+## 文档同步状态（2026-07-30）
 
 - `docs/README.md` 是当前文档的唯一导航入口，明确区分运行契约与理论参考。
+- 2026-07-30 将 MIPSolvers 固定到 `78d9272`：纳入重写的 native dual
+  simplex、生产级 HiGHS LP kernel 选择、增强的 LP IPM/锥 IPM 与 MILP
+  presolve/B&C 修复；`full-dev` 可同时构建并注册 MIPSolvers 与本项目的
+  完整测试树。
 - 2026-07-28 增加 IEC-CGE 注释配电单线图 SVG 导入：从
   `cge:psr_ref` 与几何端点恢复导线、母线、开关、母联和配变拓扑，按
   `BestEffort` 口径补齐缺失电气参数，源外孤岛保持隔离；两个真实馈线

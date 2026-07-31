@@ -170,16 +170,13 @@ double estimate_boundary_loss_mw(const HybridPowerSystem& sys) {
   }
 
   // DC-side injections (positive = supply, negative = demand).
-  if (!sys.dc.loads.empty()) {
-    for (const auto& ld : sys.dc.loads) {
-      if (!ld.in_service) continue;
-      total_demand_mw += std::max(0.0, ld.p_mw);
-    }
-  } else {
-    for (const auto& b : sys.dc.buses) {
-      if (!b.in_service) continue;
-      total_demand_mw += std::max(0.0, b.pd_mw);
-    }
+  for (const auto& ld : sys.dc.loads) {
+    if (!ld.in_service) continue;
+    total_demand_mw += std::max(0.0, model::effective_load_p_mw(ld));
+  }
+  for (const auto& b : sys.dc.buses) {
+    if (!b.in_service) continue;
+    total_demand_mw += std::max(0.0, b.pd_mw);
   }
   for (const auto& st : sys.dc.storage) {
     if (!st.in_service) continue;

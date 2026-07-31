@@ -13537,8 +13537,79 @@ int main(int argc, char** argv) {
 	            std::chrono::steady_clock::now() - presentation_started).count();
 	      };
 
+      auto publish_balanced_pf = [&](const hacdcpf::PowerFlowResult& pf,
+                                     const std::string& method_actual,
+                                     const std::string& model_scope,
+                                     json limitations) {
+        out["converged"] = pf.converged;
+        out["iterations"] = pf.iterations;
+        out["residual"] = pf.residual;
+        out["vm"] = pf.vm;
+        out["va"] = pf.va;
+        out["vdc"] = pf.vdc;
+        out["method_actual"] = method_actual;
+        out["analysis_scope"] =
+            json{{"model_scope", model_scope}, {"balanced_positive_sequence", true}};
+        out["model_limitations"] = std::move(limitations);
+        for (const auto& flow : pf.branch_flows) {
+          out["branch_abs"].push_back(std::abs(flow.pf_mw));
+        }
+        if (pf.converged) {
+          add_transfers(pf);
+          add_geo_data(pf);
+          store_last_pf(&pf);
+        } else {
+          add_solver_diagnostics(pf.diagnostics);
+        }
+        add_converter_coordination(pf);
+      };
+
       const auto analysis_started = std::chrono::steady_clock::now();
-      if (method == "ac_newton") {
+      if (method == "helm") {
+        hacdcpf::powerflow::HelmOptions helm;
+        json helm_json = json::object();
+        if (j.contains("options") && j["options"].is_object() &&
+            j["options"].contains("helm") && j["options"]["helm"].is_object()) {
+          helm_json = j["options"]["helm"];
+        }
+        helm.max_coef = std::clamp(helm_json.value("max_coef", 100), 4, 2000);
+        helm.mismatch = std::clamp(
+            helm_json.value("mismatch", 1.0e-6), 1.0e-14, 1.0);
+        helm.enforce_q_limits = helm_json.value("enforce_q_limits", true);
+        helm.gauss_iter = std::clamp(helm_json.value("gauss_iter", 5), 1, 10000);
+        const std::string warm_start = helm_json.value("warm_start", "none");
+        if (warm_start == "dcpf") {
+          helm.warm_start = hacdcpf::powerflow::HelmWarmStart::DCPF;
+        } else if (warm_start == "gauss_seidel") {
+          helm.warm_start = hacdcpf::powerflow::HelmWarmStart::GaussSeidel;
+        }
+        out["options_effective"]["helm"] =
+            json{{"max_coef", helm.max_coef},
+                 {"mismatch", helm.mismatch},
+                 {"enforce_q_limits", helm.enforce_q_limits},
+                 {"warm_start", warm_start},
+                 {"gauss_iter", helm.gauss_iter}};
+        const auto pf = hacdcpf::solve_power_flow_helm(sys, opt, helm);
+        publish_balanced_pf(
+            pf, "helm_holomorphic_embedding", "balanced_ac_only_helm",
+            json::array({
+                "HELM is exposed for balanced AC snapshots only; hybrid DC and converter assets are rejected.",
+                "Only constant-power load embedding is implemented; voltage-dependent ZIP terms are rejected."}));
+      } else if (method == "homotopy") {
+        const auto pf = hacdcpf::solve_power_flow_homotopy(sys, opt);
+        publish_balanced_pf(
+            pf, "hybrid_ac_dc_explicit_homotopy",
+            "balanced_hybrid_ac_dc_homotopy",
+            json::array({
+                "Loads and converter setpoints are ramped along an adaptive lambda path; this is a snapshot solve, not a CPF voltage-stability trace."}));
+      } else if (method == "newton_krylov") {
+        const auto pf = hacdcpf::solve_power_flow_newton_krylov(sys, opt);
+        publish_balanced_pf(
+            pf, "hybrid_ac_dc_newton_krylov",
+            "balanced_hybrid_ac_dc_newton_krylov",
+            json::array({
+                "The nonlinear equations match unified Newton; GMRES is forced for the linearized Newton step and may use configured preconditioning."}));
+      } else if (method == "ac_newton") {
         // Island detection: dead islands (no generation source) are
         // automatically stripped during canonical projection
         // (strip_dead_islands in project_in_place), so the monolithic
@@ -15498,6 +15569,11 @@ int main(int argc, char** argv) {
           opt.allow_fallback = true;
           opt.ac_pf_warm_start = true;
           opt.objective_homotopy = true;
+        } else if (solver == "auto" && has_hybrid_case) {
+          // The GUI always sends its unchecked warm-start toggle as false.
+          // Hybrid Auto requires the coupled PF start to reach the fallback
+          // basin, so preserve the strategy invariant after request overrides.
+          opt.ac_pf_warm_start = true;
         }
 	        opt.max_inner_iterations = std::clamp(opt.max_inner_iterations, 1, 100000);
 	        opt.max_outer_iterations = std::clamp(opt.max_outer_iterations, 1, 10000);

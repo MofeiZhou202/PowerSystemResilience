@@ -1,0 +1,188 @@
+% 第 11 章：验证与校核总览
+\section{验证与校核总览}\label{sec:validation}
+
+\subsection{三层验证体系}
+\begin{enumerate}
+  \item \textbf{手算小算例}：\srcpath{external\_data/opf\_hand\_cases/} 4 个带解析解的
+        DC OPF 案例（README 给出期望调度/目标/LMP）：
+        01 单母线 merit-order（$P_g=[40,20]$，obj=800，LMP$\approx$20）；
+        02 双母线阻塞（$P_g=[40,60]$，obj=3400，$\theta_2=-0.04$~rad，LMP=[10,50]，
+        明确支路对偶未认证）；03 切负荷（VOLL 自动=100，切 30~MW，obj=4000）；
+        04 二次成本 LP 线性化（$c^{lin}=c_1+2c_2P^{max}$，期望 $P_g=[80,0]$、obj=1120；
+        真 QP 参考 obj$\approx$815.333）。\textbf{仅供 GUI 手工核对，未接入自动回归。}
+  \item \textbf{MATPOWER 标准算例回归}：\srcpath{external\_data/matpower/} 共 85 个
+        \texttt{.m} 文件（经 \texttt{ls} 核实），其中 \texttt{contab\_*}（4 个）与
+        \texttt{scenarios\_*}（2 个）为扰动/场景辅助文件，标准算例 79 个
+        （case4gs 至 case13659pegase、ACTIVSg 系列、RTE/Polish 系列），
+        由 test\_opf\_solver\_backends 与 test\_acopf\_dcopf\_crossval 驱动。
+        79 个标准算例按规模粗分三档：\textbf{小规模}（$\le$500 节点，50 个，
+        case4gs--case89pegase 及 case300、ACTIVSg200/500，含 IEEE 标准系与
+        配网等值 case33bw/case141/case\_ieee123、RTS-GMLC）；\textbf{中规模}
+        （501--4000 节点，18 个，case533mt\_hi/lo 至 case3375wp，含 RTE
+        1888/1951/2848/2868、Polish 2383wp--3375wp、pegase 1354/2869、
+        ACTIVSg2000）；\textbf{大规模}（$>$4000 节点，11 个，case6468rte--%
+        case13659pegase、ACTIVSg10k/25k/70k、case\_SyntheticUSA）。
+  \item \textbf{大系统鲁棒性}：case2869pegase/case6515rte/case2000\_acdc，
+        稀疏 KKT + filter 回溯（\srcpath{docs/large\_hybrid\_ipm\_diagnostics.md}）。
+\end{enumerate}
+
+\subsection{测试矩阵}
+\begin{footnotesize}
+\begin{longtable}{@{}L{4.2cm}L{3.6cm}L{6.6cm}@{}}
+\toprule
+测试目标 & 算例 & 关键断言（容差）\\
+\midrule
+\endhead
+test\_opf\_solver\_backends & case300\_acdc, case2000\_acdc, case2383wp, case30,
+  case9, case2869pegase, case6515rte, 混合微网 &
+  parity 收敛；暖启动目标差 $\le10^{-5}$；DC 参考 $|v_{dc}-v_{set}|<2\times10^{-6}$；
+  KCL Jacobian FD $<10^{-6}$；case2000 $<160$ 迭代；case2869 $<100$ 迭代稀疏后端；
+  case6515rte 不发散；Parity 成本 $\le$ ED$\times1.001+1$\\
+test\_acopf\_dcopf\_crossval & MATPOWER case5/9/14/30/39/57 &
+  ACOPF/DCOPF 调度重跑 PF 收敛（case57 WARN）；孤岛切负荷逐母线 margin $10^{-8}$；
+  LMP $\ge-10^{-4}$ 且 $\le10\times$maxMC$+1$；无阻塞 LMP spread $<10^{-4}$；
+  阻塞 $|flow|\le$限$\times1.01+0.1$；\fld{branch\_mu\_valid}=false 显式断言，
+  且 \fld{branch\_mu\_validity\_reason} 非空、\fld{lmp\_valid}=true
+  （:870--872）\\
+test\_reactive\_power\_opt & case9, case300 &
+  \fld{globally\_certified}=false、\fld{gap}=1.0；\fld{model\_limitations} 非空
+  （:33）；目标不劣于基线 $+10^{-10}$；
+  排除原因枚举；固定变比不伪造 OLTC；tap 联动 $1.03\times1.025$\\
+test\_three\_phase\_hybrid\_opf & 3 母线$\times$3 相 + 2 DC 手工算例 &
+  Full vs GraphReduced 目标差 $\le10^{-6}$；动态平衡残差 $<10^{-7}$；
+  导数误差 $<10^{-5}$；独立 PF 复现 $<2\times10^{-6}$\\
+test\_nighttime\_opf & Canvas 系统、南沙全网 &
+  ng=0 时 external grid 提升；储能钉调度 WithinAbs $2\times10^{-4}$；
+  DC/DC $I^2R$ 复核；24 步 UC$\to$OPF$\to$PF 全收敛\\
+test\_converter\_coordination & 构造混合算例 &
+  AML Vdc 松弛/AC 参考与控制角色解析器一致；DC/DC 三模式
+  margin $10^{-3}$--$2\times10^{-2}$；DC/DC 数据捕获 \fld{r\_eq\_pu}=0.01
+  （:1541,1555）、Power 模式 \fld{max\_dc\_p\_viol\_pu}$<10^{-4}$（:1575）\\
+test\_market\_simulation & case9 24h &
+  SCUC$\to$SCED/LMP$\to$N-1$\to$结算闭环；AC 认证 residual $<10^{-5}$；
+  结算现金流残差 $\approx0$（margin $10^{-6}$）\\
+test\_hacdcdss & 自建 2/3 母线、case9 &
+  DC OPF 5 用例（:315--443，6 处 \srcpath{solve\_dc\_opf} 调用）：
+  廉价机组优先调度；Native LP 目标与 LMP 为 MW 标度、\fld{lmp\_valid}=true、
+  \fld{branch\_mu\_valid}=false 且 reason 非空（:350--352）；
+  \fld{pwl\_segments} 分段数控制 LP 二次成本逼近；单机带载在限值内；
+  case9 经济调度可行；\texttt{OPFProblem}$\to$\texttt{DefaultOPFSolver}
+  接线用例（:408--424）\\
+test\_crossmodule\_integration & IEEE14、case33bw &
+  Pipeline 1：AC/DC OPF$\to$Newton PF$\to$碳流（:142 起），DC OPF 成本
+  $\le$ AC OPF$\times1.05$（松弛性）、$|V_m^{PF}-V_m^{OPF}|<0.05$~pu；
+  Pipeline 2：ONR$\to$DC OPF$\to$PF$\to$碳流（:283 起），重构后 DC OPF 成本
+  $\le$基准$\times1.05$、调度在 $[P_{min},P_{max}]$\\
+test\_graph\_roundtrip & 自建链式/环网、case33bw &
+  AC OPF 结果经重索引反投影尺寸守恒（:223--258）；DC OPF 目标在 series
+  降阶下保持 WithinAbs $10^{-3}$（:671--704）\\
+test\_distribution\_pipeline & 自建 CB/开关/VSC 配网 &
+  rich$\to$graph$\to$PF$\to$OPF 端到端管线（:410 起）；Stage 6 DC OPF
+  DER 优先调度（:637--667），$P_g$ 在限值内、$P_g[1]\approx3.0$
+  （margin 0.1）\\
+test\_multiscale\_comprehensive & 多尺度 AC/DC 综合算例 &
+  ParityIPM 受限 OPF 收敛（:170 起），AC/DC 电压范围有限、诊断带
+  \texttt{opf\_} 前缀；毫秒至年度多尺度链（:231 起）\\
+test\_solver\_capabilities & case9 等 &
+  \fld{supports\_ac\_opf}/\fld{supports\_dc\_opf} 能力标志与实际求解一致
+  （:135--158）；\srcpath{verify\_opf\_result} 独立审计通过/不收敛提示
+  （:194 起）；混合算例抑制 AC-only 回退（:241 起）\\
+test\_matpower\_cases & MATPOWER 三档 + case9/14 &
+  Tier1 九算例 PF 收敛与电压合理性（另驱动潮流手册三档回归）；
+  DC OPF 一致性：case9 目标有限（:618 起）、case14 调度在机组限值内
+  （:626 起）\\
+rpo\_gui\_e2e（E2E） & case24、case300（浏览器） &
+  ctest 目标 \texttt{rpo\_gui\_e2e}（\srcpath{tests/CMakeLists.txt:502--507}，
+  标签 \texttt{gui;e2e;browser;rpo;cross\_validation}，超时 180~s，Node +
+  Playwright chromium 门控）：RPO 模块在稳态工作流暴露、
+  \texttt{/api/session/run\_rpo} 响应契约、结果面板渲染（局部可行解/
+  电压越限母线/覆盖范围/独立 OPF 重算）、case300 RPO 输入清单与 OLTC
+  档位定位\\
+\bottomrule
+\end{longtable}
+\end{footnotesize}
+
+\subsection{交叉验证机制}
+\begin{itemize}
+  \item \textbf{OPF$\to$PF 回放}：AC OPF/DC OPF/三相 OPF 的调度与运行点均由独立潮流
+        复现（三相电压差 $<2\times10^{-6}$）；
+  \item \textbf{RPO 交叉验证}（\srcpath{docs/reactive\_power\_optimization\_validation.md}）：
+        独立 OPF 复算 + PF 回放，判据目标相对差 $\le\max(10^{-3},10\epsilon_d)$、
+        电压差 $\le\max(5\times10^{-4},10\epsilon_p)$~pu；富混合 AC/DC 标注“部分覆盖”；
+  \item \textbf{解析导数校核}：\srcpath{check\_ac\_opf\_jacobian\_fd}（死代码，见
+        第~\ref{sec:acopf}~章注）、
+        DC slack KCL FD（$<10^{-6}$）、三相 Jacobian/Hessian（$<10^{-5}$，
+        另用 dynamics 设备模型独立复核 $<10^{-7}$）；
+  \item \textbf{独立审计}：\srcpath{verify\_opf\_result} 重算限值与目标；
+  \item \textbf{能力打点}：\srcpath{tools/validate\_case\_capabilities.py}
+        （OPF 收敛+成本$>$0+出力在限值内；RPO 动作非空）与
+        \srcpath{tools/gui\_api\_e2e.py}（\texttt{/api/session/opf} 回归、OPF$\to$PF 一致性）。
+\end{itemize}
+
+\subsection{性能实测锚点（代码注释与文档）}
+case2869pegase 经济目标精确参考值 133999（同伦 154$\to$73 迭代）；
+case9241 参考目标 315837（$-0.013\%$）；case13659 经 \fld{ac\_pf\_warm\_start}
+189 迭代/$\sim$40~s；case2000\_acdc $\sim$2~s；
+IEEE24-3area-expanded 内层 IPM 640$\to$36 迭代（冻结 Ruiz 缩放）；
+RPO 大规模（case2869+20 OLTC+10 并联）基线 74 迭代/25~s，暖启动链均值 0.46~s/次。
+
+\subsection{已知边界与覆盖缺口}
+\begin{enumerate}
+  \item DC OPF \fld{branch\_mu\_valid} 恒 false（支路对偶未认证）；\fld{pwl\_segments}
+        未接入构建；
+  \item RPO 无全局最优证书；3000+ 母线完整搜索受时限约束；LossEconomic 内层
+        不直接为电压最优；
+  \item Native AC 旧路径用外部二次罚处理限值、不钉 DC\_V 电压、支路 $\pi$ 模型不含 shift；
+  \item 储能无跨时段 SOC 模型（钉 UC 调度值）；能量路由器无损守恒；
+  \item AML 层非生产链路；AC OPF/DC OPF/LinDistFlow/SCUC 的 AML 版本无直接测试；
+        AML 混合 OPF 省略 DC/DC $I^2R$、\fld{max\_dc\_p\_viol\_pu} 未计 DC/DC 项；
+        AML SCUC 无网络约束、MILP 下价格对偶通常不可得；
+        LinDistFlow 头注释含 DG 而实现无 DG；
+  \item Ipopt 路径无约束乘子 $\Rightarrow$ 无 LMP；
+  \item \texttt{compute\_jacobian\_diagnostics} 声明无实现（实际 FD 诊断
+        \srcpath{check\_ac\_opf\_jacobian\_fd} 为死代码）；
+        \srcpath{external\_data/opf\_hand\_cases/} 未接入自动回归；
+        \texttt{IOPFSolver} 抽象已有默认实现 \texttt{DefaultOPFSolver}
+        （\srcpath{include/hacdcpf/optimal\_power\_flow/opf\_solver\_interface.hpp:30--42}，
+        按 \fld{is\_ac}/\fld{is\_dc} 域转发生产 \srcpath{solve\_ac\_opf}/%
+        \srcpath{solve\_dc\_opf}），并被测试消费
+        （\srcpath{tests/test\_hacdcdss.cpp:408--424}），但生产 \texttt{src/}
+        仍无调用方，属测试侧接线；
+  \item 三相混合 OPF 活跃研发：AC 支路热限与 VSC 调制比未进入相域模型；
+        Delta/ZIP 负荷、DCDC、能量路由器显式拒绝；
+  \item 环境变量开关（KKT 形式、线性后端、$\mu$ 策略、inertia gate）效果因算例而异，
+        属调试通道而非承诺接口。
+\end{enumerate}
+
+\subsection{如何运行验证}
+configure/build/test 三段 preset（\srcpath{CMakePresets.json}，与根
+\srcpath{AGENTS.md} 一致）：configure 侧 \texttt{macos-release}/
+\texttt{linux-release}/\texttt{windows-msvc-release}/
+\texttt{windows-vcpkg-release}/\texttt{full-dev}；test 侧同名 preset
+仅前四个（\texttt{full-dev} 无 testPreset）。
+\begin{quote}\footnotesize
+\texttt{cmake --preset windows-vcpkg-release}\\
+\texttt{cmake --build --preset windows-vcpkg-release}\\
+\texttt{ctest --preset windows-vcpkg-release}
+\end{quote}
+（Linux/macOS 将 preset 名换成 \texttt{linux-release}/\texttt{macos-release} 即可。）
+常用定向运行（ctest 正则，目标名以 \srcpath{tests/CMakeLists.txt} 实际注册为准）：
+\begin{itemize}
+  \item OPF 后端与大系统鲁棒性：\texttt{ctest -R opf\_solver\_backends}；
+  \item AC/DC OPF 交叉验证：\texttt{ctest -R acopf\_dcopf\_crossval}；
+  \item 无功优化：\texttt{ctest -R reactive\_power\_opt}；
+  \item 三相混合 OPF：\texttt{ctest -R three\_phase\_hybrid\_opf}；
+  \item DC OPF 基元与 \texttt{OPFProblem} 接口接线：\texttt{ctest -R hacdcdss}；
+  \item 跨模块/图降阶回环/配网管线/多尺度：\texttt{ctest -R}
+        \srcpath{'crossmodule\_integration|graph\_roundtrip|distribution\_pipeline|multiscale\_comprehensive'}；
+  \item 能力打点与独立审计：\texttt{ctest -R solver\_capabilities}；
+  \item MATPOWER 回归（含 DC OPF 一致性）：\texttt{ctest -R matpower\_cases}；
+  \item 夜间 OPF 与换流器协调：\texttt{ctest -R}
+        \srcpath{'nighttime\_opf|converter\_coordination'}；
+  \item GUI 全链路：\texttt{ctest -R gui\_api\_e2e}（需
+        \texttt{HACDCPF\_ENABLE\_ETAP=ON}（默认 ON）与 Python3 双重门控）；
+  \item RPO 浏览器 E2E：\texttt{ctest -R rpo\_gui\_e2e}（需 Node 与
+        \texttt{npx playwright install chromium}，带 \texttt{browser} 标签）。
+\end{itemize}
+外部依赖（MATLAB、gridlabd、Julia、OpenDSS、chromium）缺失时对应测试自动
+skip；判读报告时须区分“通过”与“跳过”，与主文档诚实口径一致。

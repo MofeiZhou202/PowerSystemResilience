@@ -1,0 +1,207 @@
+% 第 2 章：AC OPF 顶层求解器
+\section{AC OPF 顶层求解器}\label{sec:acopf}
+
+\subsection{功能定位与入口}
+\compmeta{opf::solve\_ac\_opf}{\srcpath{include/hacdcpf/optimal\_power\_flow/ac\_opf\_solver.hpp}}
+入口签名（ac\_opf\_solver.hpp:42；实现 src/optimal\_power\_flow/ac\_opf.cpp:2712）：
+\begin{quote}\footnotesize
+\texttt{ACOPFResult solve\_ac\_opf(const HybridPowerSystem\& sys, const ACOPFOptions\& opt = \{\});}
+\end{quote}
+适用纯 AC 与混合 AC/DC 网络（VSC、DC/DC、储能、能量路由器、可切负荷、可再生、
+柔性负荷全家族）。
+
+\textbf{诚实口径注}：头文件 ac\_opf\_solver.hpp:54 声明的公开诊断入口
+\texttt{compute\_jacobian\_diagnostics} 在全库\textbf{无实现}；实际存在的 FD 诊断是
+\srcpath{check\_ac\_opf\_jacobian\_fd(sys, max\_columns, fd\_eps, ac\_eval\_threads)}
+（ac\_opf.cpp:3826--4024，判据 $\max|\mathrm{err}|\le5\times10^{-4}$ 或
+相对误差 $\le5\times10^{-3}$），目前无调用方（死代码）。
+
+\subsection{预处理}
+\begin{itemize}
+  \item \textbf{参考母线资格校验} \srcpath{validation::validate\_reference\_bus\_eligibility}
+        （ac\_opf.cpp:2768--2787）：裸理想 DC\_V 边界（无可调度 DC 平衡设备）直接拒绝
+        并在 \fld{infeasibility\_hints} 写明原因；
+  \item \textbf{拓扑孤岛预检}（:2903--2932）：无含 slack 的岛屿判不可行并给 hints；
+  \item \textbf{external grid 提升为合成发电机}（:2792--2822）：界限
+        $\pm\max(1, s\_sc\_max\_mva, base\_mva)$，合成 index = \texttt{INT\_MIN}+i；
+        求解后拆分回 \fld{external\_grid\_p\_mw/q\_mvar} 与 authored \fld{pg\_mw}（:2829--2885），
+        映射错位直接 \texttt{throw}（:2858--2862）。
+        该统一后处理 lambda 开头回填 \fld{model\_limitations}（opf\_result.hpp:159）：
+        非凸 NLP 只认证\textbf{局部 KKT 点}而非全局最优（:2831--2832）；
+        有储能时追加``储能按单时段注入、无 SOC 跨时段动态''（:2833--2836）；
+        有能量路由器时追加``端口平衡无损、内部变换损耗未表示''（:2837--2840）；
+        \fld{lmp\_valid}=false 且无原因串时补通用原因（:2841--2844）；
+        NativeAC 路径追加``legacy 外部障碍/罚循环，生产建议 ParityIPM''（:2845--2848）；
+  \item 混合算例禁用 AC-only 经济调度兜底并追加 hint（:2887--2901）。
+\end{itemize}
+
+\subsection{后端分发与目标同伦}
+分发语义见第~\ref{sec:overview-routing}~节。\textbf{目标联动}：非经济目标
+（VoltageDeviation / ActiveLoss / VoltageDeviationAndLoss）下 parity 问题
+\textbf{自动禁用切负荷}——\fld{form\_opt.load\_shedding} = (objective == Economic)
+（ac\_opf.cpp:2277），即不含 $\Delta P_d/\Delta Q_d$ 变量与 VOLL 项
+（RPO 语义：不许靠丢负荷改善电压/网损）。
+
+\textbf{目标同伦}
+（\fld{objective\_homotopy}，ac\_opf.cpp:2940--3066）求解路径
+$P(t):\min\ t\cdot f$，将 \fld{cost\_c0/c1/c2} 与
+\fld{voltage\_deviation\_weight}/\fld{active\_loss\_weight} 乘以 $t$（:2955--2969），
+$t:0\to1$ 最多 120 步：
+\begin{itemize}
+  \item 步长自适应：快步（$\le20$ 次迭代）$dt$ 翻倍至 0.5 上限；失败减半，
+        $dt<0.005$ 停止（:2979--3027）；
+  \item Davidenko 预测：$w_{pred}=w+h\,w'$，$h$ 受参数度量信赖半径 $\kappa=0.05$ 限制，
+        $h=\min(dt,\ 0.05/\lVert dx/dt\rVert_\infty)$（:2993--2994），
+        松弛/不等式对偶地板 $10^{-8}$（:3014--3018）；
+  \item 诚实失败报告：$t_{ok}<1$ 时返回 ``minimal-violation region; full objective not
+        solved''，\fld{converged}=false（:3057--3062）。
+\end{itemize}
+
+\subsection{经济调度 + AC PF 快路径}
+\srcpath{try\_dispatch\_pf\_fallback}（ac\_opf.cpp:1759）：merit-order $\lambda$ 二分经济调度
+\srcpath{solve\_economic\_dispatch}（:1496--1610）+ 单次 AC NR 潮流（:1763--1840）。
+二次成本 $C_g(P)=c_2P^2+c_1P+c_0$ 下增量成本 $\lambda=2c_2P+c_1$，
+$\lambda$ 二分区间内按 $P_g=(\lambda-c_1)/(2c_2)$ 裁剪到 $[P^{min},P^{max}]$。
+仅纯 AC；目标值由调度成本重算（:1827--1832）。
+
+\subsection{嵌入式 Ipopt 适配器}
+\srcpath{solve\_parity\_with\_ipopt}（ac\_opf.cpp:2105--2247）把 parity 问题经
+engine NLPModel 接口交给 Ipopt：
+\begin{itemize}
+  \item NLPModel 映射：box 界直通变量界，无限界改 $\pm10^{20}$；
+        \fld{solver\_options.tolerance}$=\min(\text{三个容差})$、
+        \fld{acceptable\_tolerance}$=\max(\text{三个容差})$（:2164--2170）；
+  \item \textbf{接受判据}（Ipopt 报 MaxIter 等非 success 时）：
+        $\fld{primal\_feas}\le\fld{tol\_primal}$ 且
+        $\fld{dual\_feas}\le1000\cdot\fld{tol\_dual}$ 且
+        互补 $\le\max(10^{-2},\ 1000\cdot\fld{tol\_comp})$；
+        接受时 status 记 ``Ipopt: acceptable residuals after ...''（:2214--2238）；
+  \item 暖启动裁剪到界内 $\pm10^{-8}$，置 \fld{warm\_start\_used}（:2127--2138）；
+        \fld{initial\_primal\_inf} 在 $x_0$ 处评估（:2140--2149）；
+  \item \textbf{诚实口径}：Ipopt 适配器不返回约束乘子，$\lambda$ 为空（:2107--2108）。
+        该事实现已\textbf{形式化}为 \fld{lmp\_valid}/\fld{lmp\_validity\_reason} 字段
+        （opf\_result.hpp:101--102）：Parity IPM 路径在等式乘子维度齐全时置
+        \fld{lmp\_valid}=true（:2619--2621）；否则 false，
+        \fld{lmp\_validity\_reason} 区分``嵌入式 Ipopt 适配器不返回乘子''与
+        ``未返回完整等式对偶''两种情形（:2622--2628）。
+        受 \texttt{HACDCPF\_DISABLE\_IPOPT\_OPF} 门控（:2119--2124）；
+        MUMPS 5.6.2 ABI 兼容注释见 :2114--2118。
+\end{itemize}
+
+\subsection{暖启动与状态续传}
+\paragraph{\fld{ac\_pf\_warm\_start}（混合潮流暖启动）}
+实际跑的是 \srcpath{powerflow::solve\_hybrid}（耦合混合潮流，非纯 AC PF），选项
+\fld{max\_iter}$=\max(100,\text{inner})$、\fld{tol}$=\min(\fld{feas\_tol},10^{-8})$，
+开启 converter mode switching / PV$\to$PQ / auto swing（ac\_opf.cpp:2305--2326）；
+除 $(v_m,v_a,v_{dc})$ 外还从 \fld{pf.vsc\_transfers}/\fld{pf.dcdc\_transfers}
+按组件 index 提取 $P_{ac}/Q_{ac}/P_{dcdc}$ 种子（:2052--2093）。
+
+\paragraph{parity 原变量暖启动 \srcpath{build\_parity\_primal\_warm\_start}（:1874--2003）}
+\begin{itemize}
+  \item 优先消费 \fld{ipm\_primal\_state}（维数$==n_{total}$ 且 allFinite），
+        裁剪到 $[x_{min}+10^{-8},\ x_{max}-10^{-8}]$（:1886--1901）；
+  \item 退化路径按公共物理量逐族映射（vm/va/vdc/pac/qac/dpd/dqd/pren/qren/pdcdc/
+        pflex/erp），任意族缺失则回退物理初值（:1903--1947）；
+  \item $P_{dc}$ 由 $P_{ac}/Q_{ac}$ 经损耗式重建：
+        $p_{dc}=-(p+a+bI+cI^2)$，$I=\sqrt{p^2+q^2+\max(\fld{eps\_iac},10^{-12})}/v_m$
+        （:1919--1939）；
+  \item 合成 external-grid 机组按 $\fld{data\_index}-\fld{pg\_mw.size()}$ 偏移识别并
+        映射到 \fld{external\_grid\_p/q\_mw}（:1948--1972）；
+        ER 无功按 \fld{port.qvar} 映射（:1992--2000）；
+  \item 对偶三族（equality/inequality/slack）原样透传（:2327--2350）；
+        IPM 侧兼容性检查：尺寸 + allFinite + minCoeff$>$0（parity\_ipm.cpp:910--919）。
+\end{itemize}
+生产级用例：时序流水线逐时步 \fld{warm\_start=\&previous}（见第~\ref{sec:applications}~章）。
+
+\subsection{Native AC 简约空间旧路径}
+\srcpath{OPFSolverPath::NativeAC}（ac\_opf.cpp:3112--3793）是不含 DCDC 调度的
+简约空间原对偶 IPM。
+
+\paragraph{变量与等式}
+变量布局（\srcpath{build\_index}，:224--343）：
+$x=[\theta_{\text{非slack}};\ v_{m,\text{PQ}};\ p_g;\ q_g;\ v_{dc};\ p_{ac};\ q_{ac};\ p_{dc}]$；
+等式 $=[P\text{平衡}(n_p),\ Q\text{平衡}(n_q),\ DC\text{平衡}(n_{dc}),\ \text{换流器平衡}(n_c)]$。
+
+\paragraph{目标}
+二次发电成本 $f=\sum_g(c_2P_g^2+c_1P_g+c_0)$（:539--549），梯度/对角 Hessian 按 pu 换算（:551--571）。
+
+\paragraph{约束处理（诚实口径）}
+\begin{itemize}
+  \item 变量界 $\to$ 对数障碍 $-\mu(\log s^-+\log s^+)$（:573--592）；
+  \item 非线性限值 $\to$ \textbf{外部二次罚}（非障碍）：$\tfrac12\rho\max(h,0)^2$，
+        支路两端 $h=P_f^2+Q_f^2-S_{max}^2$（from 端 :899--924、to 端 :926--951，
+        $\pi$ 模型含 tap \textbf{与} shift），换流器容量圆 $P_{ac}^2+Q_{ac}^2-S_{max}^2$（:954--958）；
+        \textbf{相移修复}：\fld{BranchLimitEntry} 新增 \fld{shift\_rad} 字段（:646），
+        装配时 \fld{e.shift\_rad} = \fld{shift\_deg}$\times$\fld{kDegToRad}（:685），
+        非线性支路限值评估的角度差为 $\theta_i-\theta_j-\mathrm{shift}$（:891--893）——
+        修复前带相移支路（复变比 $|t|\cdot e^{j\cdot\mathrm{shift}}$）的 $S$ 限值评估
+        漏掉相移角、与 Ybus/支路潮流装配不一致，修复后一致；
+        罚系数 $\rho=100\cdot\fld{merit\_penalty}\cdot\fld{ineq\_gate}$，
+        $\fld{ineq\_gate}=\mathrm{clamp}(10^{-2}/\max\_eq\_mismatch,\ 10^{-3},\ 1)$（:3262--3263）；
+  \item DC 平衡 $P_{dc,k}=p_{d,k}+V_k(G_{dc}V)_k-\sum p_{dc}$（:738--752）；
+        VSC 耦合 $p_{ac}+p_{dc}+a+bI_{ac}+cI_{ac}^2=0$，
+        $I_{ac}=\sqrt{P_{ac}^2+Q_{ac}^2+\varepsilon}/V_m$，$a=\fld{loss\_mw}/S_b$、
+        $b=\fld{loss\_percent}/100$、$c=1-\eta$（:754--769）；
+  \item VSC 容量圆半径为\textbf{推断值}：$s_{max}=\max(|p_{max}|,|p_{min}|,|q_{max}|,|q_{min}|)$
+        （无独立 s\_rated 字段，:689--701；parity 路径不同，优先 \fld{p\_rated\_mw}，
+        见第~\ref{sec:parity}~章）。DC\_V 母线 $v_{dc}$ 界 $v_{set}\pm0.05$，
+        其余 DC 母线 0.8--1.2（:414--427）。
+\end{itemize}
+
+\paragraph{KKT 与全局化}
+KKT 系统 $\begin{bmatrix}H_{diag}+\delta I & J^{\mathsf T}\\ J & -\delta I\end{bmatrix}$
+（:1318--1429），线性求解器 \srcpath{core::make\_default\_sparse\_solver()}。
+全局化：6 次信赖尝试、正则化 $\times10$ 递增（:3270--3425）；
+$\Delta x$ 限幅 $0.25\times$ 区间宽且 $\infty$-范数 $\le0.25$，$\Delta\lambda$ 限 $\pm10^3$
+（:3306--3318）；fraction-to-boundary + merit 滤波接受
+（不可行度下降 $(1-5\times10^{-3}\alpha)$ 或近可行时 merit 下降，:3387--3397）；
+失败后依次：恢复阶段（纯可行性步，$H_{diag}=0$，:3427--3542）$\to$
+梯度回退步 $\Delta x=-J^{\mathsf T}g$（:3544--3619）。
+$\mu$ 更新：内层收敛或近可行时 $\mu=\max(\mu\cdot\fld{barrier\_mu\_reduction},\ \mu_{min})$，
+否则加大罚与正则化（:3673--3681）。
+收敛判据（:3251--3257）：
+\[
+\max\_mismatch\le\fld{feasibility\_tol}\ \land\
+\max\_stationarity\le\fld{stationarity\_tol}\ \land\ \mu\le1.01\,\mu_{min}.
+\]
+不可行度 $\le10^{-3}$ 时用对偶最小二乘估计 stationarity（:598--626, 3243--3245）。
+动态权重：\fld{objective\_weight} 初值 0.05，停滞/恢复时自适应（:3185, 3650--3664）。
+
+\paragraph{全局化实测常量补充}
+merit 函数显式形式 $\mathrm{merit}=w_{obj}\,f+\mathrm{barrier}+\tfrac12\rho(\lVert g\rVert^2+\lVert h^+\rVert^2)$
+（:3260--3262）；near-neutral 步接受：近可行且 infeas/merit 各 $\le1.005\times$
+现值时接受但 $\alpha$ 限 $5\times10^{-3}$（:3401--3417）；
+\fld{stagnation\_count}$\ge3$ 且不可行度 $>\max(10^{-3},10\cdot\fld{feas\_tol})$
+时强制跳过信赖尝试直进恢复（:3273--3275）；
+接受后 $x$ 重夹：受约束列 $10^{-3}\times$width、未受约束列 $10^{-8}\times$width
+（:3629--3641）；\textbf{每步接受后 $\lambda$ 清零}（:3643，旧路径不带对偶续传）；
+动态参数：恢复接受后 $\rho\times1.2/\delta\times1.5/w_{obj}\times0.9$；
+停滞 $\ge4$ 时 $\rho\times2/\delta\times5/w_{obj}\times0.8$；进展好（$<0.8\times$）
+时 $\rho\times0.95$ 回落；不可行度 $<10^{-2}$ 时 $w_{obj}\times1.15$ 上限 1.0
+（:3650--3664）；外层退出：近可行阈值 $\fld{max\_viol}\le\max(10^{-4},50\cdot\fld{feas\_tol})$
+时也减 $\mu$（:3673--3681）；恢复阶段限幅 $0.10\times$width、$\infty$-范数 0.12，
+梯度回退限 0.08（:3429, 3547）；
+失败 status 诊断格式 \texttt{[max|P|=…, max|Q|=…, max|DC|=…, max|Conv|=…, max(h+)=…,
+worst\_stat=varname:val]}（:3780--3784）。
+
+\subsection{参数表}
+ACOPFOptions 全字段见第~\ref{sec:options}~章表~\ref{tab:acopfopts}；
+$\le0$ 的数值字段在 ac\_opf.cpp:2713--2748 重置为默认。
+与 IPMOptions 的映射：\fld{max\_iter} = inner$\times$outer、
+\fld{tol\_complementarity} = \fld{barrier\_mu\_min}、
+\fld{alpha\_max} = \fld{interior\_fraction}（ac\_opf.cpp:2292--2299）。
+
+\subsection{验证与校核}
+\begin{itemize}
+  \item \srcpath{tests/test\_opf\_solver\_backends.cpp}：case300\_acdc parity 收敛
+        （:79--105）；Ipopt 选项透传（:107--142）；暖启动目标差 $\le10^{-5}$（:144--170）；
+        混合微网 DC 参考 $|v_{dc}-v_{set}|<2\times10^{-6}$（:172--195）；
+        裸 DC\_V 拒绝（:244--265）；case2000\_acdc $<160$ 迭代（:303--335）；
+        case2383wp 目标缩放回归（:481--494）；case30 后端语义与
+        Parity 成本 $\le$ ED$\times1.001+1$（:498--553）；case2869pegase $<100$ 迭代
+        稀疏后端（:577--599）；case6515rte 不发散（:601--618）。
+  \item 经济调度兜底：case30 ``economic-dispatch'' 状态断言（test\_opf\_solver\_backends.cpp:498--535）。
+  \item 雅可比诊断：实际 FD 诊断 \srcpath{check\_ac\_opf\_jacobian\_fd} 目前无调用方
+        （死代码，见本章诚实口径注）；DC slack KCL Jacobian FD $<10^{-6}$
+        （test\_opf\_solver\_backends.cpp:267--301）。
+\end{itemize}

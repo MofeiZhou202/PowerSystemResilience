@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "hacdcpf/model/device_control_role.hpp"
+#include "hacdcpf/model/effective_capacity.hpp"
 #include "hacdcpf/power_flow/pv_power_curve.hpp"
 
 namespace hacdcpf::sppt {
@@ -217,15 +218,16 @@ IndependentResidualCertificate certify_independent_hybrid_residual(
     gdc[static_cast<std::size_t>(j)][static_cast<std::size_t>(i)] -= g;
   }
   std::vector<double> pdc_spec(static_cast<std::size_t>(ndc), 0.0);
-  if (authored.dc.loads.empty()) {
-    for (int i = 0; i < ndc; ++i)
-      pdc_spec[static_cast<std::size_t>(i)] -=
-          authored.dc.buses[static_cast<std::size_t>(i)].pd_mw;
-  } else {
-    for (const auto& load : authored.dc.loads) {
-      const auto position = dc_pos.find(load.bus);
-      if (load.in_service && position != dc_pos.end())
-        pdc_spec[static_cast<std::size_t>(position->second)] -= load.p_mw;
+  for (int i = 0; i < ndc; ++i) {
+    if (!authored.dc.buses[static_cast<std::size_t>(i)].in_service) continue;
+    pdc_spec[static_cast<std::size_t>(i)] -=
+        authored.dc.buses[static_cast<std::size_t>(i)].pd_mw;
+  }
+  for (const auto& load : authored.dc.loads) {
+    const auto position = dc_pos.find(load.bus);
+    if (load.in_service && position != dc_pos.end()) {
+      pdc_spec[static_cast<std::size_t>(position->second)] -=
+          model::effective_load_p_mw(load);
     }
   }
   auto add_dc = [&](int bus, double p) {

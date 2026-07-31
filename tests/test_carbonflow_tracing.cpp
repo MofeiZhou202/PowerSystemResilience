@@ -619,7 +619,7 @@ TEST_CASE("Carbon flow maps reordered non-contiguous DC bus IDs by identity",
   CHECK(ca.matrix_summary.balance_error_pct == Approx(0.0).margin(1e-10));
 }
 
-TEST_CASE("DC load scaling and component-table precedence match power flow",
+TEST_CASE("DC bus demand and scaled component loads are additive in carbon flow",
           "[carbonflow][matrix][dc][load][integration][regression]") {
   using namespace hacdcpf;
   using namespace hacdcpf::analysis;
@@ -639,7 +639,7 @@ TEST_CASE("DC load scaling and component-table precedence match power flow",
   load_bus.in_service = true;
   load_bus.bus_type = DCBusType::DC_P;
   load_bus.vm_pu = 1.0;
-  load_bus.pd_mw = 0.75;  // Backup representation; ignored when DCLoad exists.
+  load_bus.pd_mw = 0.75;
   sys.dc.buses = {source_bus, load_bus};
 
   DCBranch branch;
@@ -665,13 +665,15 @@ TEST_CASE("DC load scaling and component-table precedence match power flow",
   REQUIRE(ca.power_balance_verified);
   REQUIRE(ca.matrix_solved);
   REQUIRE(ca.tracing_verified);
-  REQUIRE(ca.dc_load_carbon.size() == 1);
+  REQUIRE(ca.dc_load_carbon.size() == 2);
   CHECK(ca.dc_load_carbon[0].demand_mw == Approx(0.5));
   CHECK(ca.dc_load_carbon[0].carbon_intensity_tco2_mwh == Approx(0.5));
+  CHECK(ca.dc_load_carbon[1].demand_mw == Approx(0.75));
+  CHECK(ca.dc_load_carbon[1].carbon_intensity_tco2_mwh == Approx(0.5));
   REQUIRE(ca.carbon_sources.size() == 1);
   CHECK(ca.carbon_sources[0].source_type == "dc_voltage_boundary");
-  CHECK(ca.carbon_sources[0].power_mw > 0.5);
-  CHECK(ca.carbon_sources[0].power_mw < 0.501);
+  CHECK(ca.carbon_sources[0].power_mw > 1.25);
+  CHECK(ca.carbon_sources[0].power_mw < 1.251);
   CHECK(ca.matrix_summary.balance_error_pct == Approx(0.0).margin(1e-10));
 }
 

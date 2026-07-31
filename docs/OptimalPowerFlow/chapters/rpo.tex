@@ -1,0 +1,170 @@
+% 第 6 章：无功优化（RPO）
+\section{无功优化（RPO）}\label{sec:rpo}
+
+\subsection{功能定位与入口}
+\compmeta{opf::solve\_rpo}{\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp}}
+实现 src/optimal\_power\_flow/reactive\_power\_opt.cpp:621--1386。
+MINLP 结构：连续变量（$V_m$、$Q_g$，嵌在 parity OPF 内）+ 整数变量
+（OLTC 档位 $t\in[t_{min},t_{max}]$、可切并联 $s\in[0,n_{steps}]$）
+（reactive\_power\_opt.hpp:293--304）。配套入口
+\srcpath{inspect\_rpo\_controls}（离散控制清单含排除原因）与
+\srcpath{apply\_rpo\_discrete\_solution}（动作回写）。
+
+\subsection{数学模型}
+档位-变比：$\mathrm{ratio}=1+(t-t_{neutral})\cdot\fld{step\_pct}/100$
+（reactive\_power\_opt.cpp:80--82），经 \fld{source\_branch\_idx} 联动更新 AC 支路 tap
+（:84--106）。目标 \fld{RPOObjective}（hpp:13--17）：
+MinVoltageDeviation $\sum(V-V^*)^2$ / MinActiveLoss / Combined，
+由内层 OPF 解出后从潮流账重算（\srcpath{rpo\_objective} :269--285；
+\srcpath{compute\_loss} 全源-全荷台账 :189--266）。
+
+\paragraph{内层 NLP 目标解耦（RPOInnerObjective，hpp:21--34）}
+\begin{itemize}
+  \item \texttt{MatchRPO}：内层直接优化 RPO 目标，机组无功参与调压（中小电网默认）；
+  \item \texttt{LossEconomic}：单位边际成本经济调度（min 总发电 $\equiv$ min 网损，
+        理论论证 :687--704），大电网稳健；MinActiveLoss 恒用 LossEconomic；
+        $\ge100$ 母线先做经济种子，$\ge$\fld{robust\_inner\_min\_buses}=1000 直接
+        LossEconomic 起步（:720--724）。
+\end{itemize}
+OLTC 准入条件：投运 + \fld{tap\_max}$>$\fld{tap\_min} + \fld{tap\_step\_percent}$>0$
++ 当前档位在铭牌内；MATPOWER 固定变比不伪造为 OLTC；默认档位窗口 $\pm2$
+（GUI 显式默认 \fld{max\_tap\_move}=2，run\_gui\_server.cpp:18370/18426）。
+
+\paragraph{网损台账 \srcpath{compute\_loss}（:189--266）}
+源侧 = pg + external\_grid + pren + pstor + 固定 DER（static gen、不可削减可再生、
+不可控 PV 功率曲线、DC SG、DC DCSG(\fld{p\_set})、DC PV 阵列、移动储能、VPP）
+$-$ microgrid 交换；\textbf{VSC/DC-DC/能量路由器为内部转移不计入}；
+荷侧 = bus.pd + loads + 不对称负荷（pa+pb+pc）+ pflex（结果空则
+\fld{flexible\_loads.p\_mw}）+ 充电站（\fld{p\_total\_kw}$>$0 用之，否则
+max$\times$utilization$\times$simultaneity/1000）+ 电机（$s_n\cos\varphi/\eta$）
++ DC bus.pd + DC loads $-$ $\max(0,\text{切负荷})$。
+
+\paragraph{并联设备建模}
+排除原因全集：\texttt{not\_in\_service} / \texttt{not\_switchable} /
+\texttt{insufficient\_step\_range}（$n_{steps}\le1$）/ \texttt{zero\_or\_invalid\_step\_size}
+/ \texttt{current\_step\_out\_of\_range}（:118--127）；
+动作回写 \fld{current\_step}$=s$、\fld{bs\_mvar}$=$\fld{bs\_per\_step}$\cdot s$（:302--307）；
+ShuntResult 报告 \fld{bs\_mvar\_before/after}（:1362--1371）。
+
+\paragraph{控制清单 \srcpath{inspect\_rpo\_controls}（:512--601）}
+\fld{selected\_for\_optimization} = adjustable $\land$
+（\fld{restrict\_tap\_indices}$\to$在 enabled 列表）$\land$ \fld{max\_tap\_move}$\ne0$；
+优化窗口 \fld{optimization\_tap\_min/max} $=\mathrm{clamp}(\fld{tap\_pos}\mp\fld{max\_tap\_move},\ \text{铭牌})$；
+\fld{electrical\_tap\_base} $=$ \fld{branch.tap}/\fld{ratio\_current}，
+\fld{electrical\_tap\_min/max} $=$ base$\times$\fld{ratio\_min/max}（:560--575）；
+字段全集（hv/lv\_bus、tap\_side、position\_count 等）见 reactive\_power\_opt.hpp:181--208。
+
+\subsection{算法流程（离散坐标搜索）}
+文件头注释 :1--20；主流程 :621--1358：
+\begin{enumerate}
+  \item \textbf{Phase 0 灵敏度排序}：每变量 $\pm1$ 扰动按 $|\Delta obj|$ 降序（:1006--1083）；
+  \item \textbf{Phase 1 离散三分搜索}（近似单峰，$O(\log R)$），保持 Gauss--Seidel 串行（:1085--1159）；
+  \item \textbf{Phase 2 坐标下降} $\le3$ 轮（:1162--1224）；
+  \item \textbf{Phase 3 成对 $\pm1$ 邻域抛光}（:1227--1284）。
+\end{enumerate}
+每个候选 = 一次完整 AC OPF；解缓存 \fld{eval\_cache}、就地修改避免深拷贝；
+并行 Jacobi 波次（\srcpath{evaluate\_batch\_parallel}，:405--486）——
+动态 work-stealing（共享 atomic 索引）、每线程一次深拷贝复用、最优候选在互斥锁下
+连结果一起留存、incumbent 免二次求解推进、不可行候选记 $10^{30}$；
+混合 AC/DC 强制单线程（MUMPS 进程级互斥，:937--941）；
+接受准则：内层 converged 或实测容差（viol $\le$ \fld{ipm\_tol} 且 stat $\le$
+\fld{stationarity\_tol}）（:376--380）；纯 AC 用 \fld{search\_ipm\_iter} 快速失败，
+混合保留 Ipopt 第二腿（:904--911）。局部敏感度面永不用于剪枝（:1164--1166）。
+
+\paragraph{搜索细节}
+Phase 1 三分搜索整数网格更新：$f_1<f_2\to hi=m_2-1$，否则 $lo=m_1+1$，余窗穷举
+（:1104--1159）；Phase 2 循环改善判据 $obj < incumbent - \fld{gap\_tol}$（:1200, 1217）；
+无可调离散设备时直接返回 baseline（converged，
+``Feasible OPF point (no adjustable discrete devices)''，\fld{nodes\_explored}=1，
+:843--865）。
+
+\paragraph{内层求解配置 \srcpath{solve\_opf\_inplace}（:312--403）}
+\fld{max\_outer\_iterations}=1；目标映射 Economic（LossEconomic）/
+VoltageDeviationAndLoss（Combined）/VoltageDeviation；
+第二腿按 $\fld{quality}=\max(viol,stat)$ 择优保留（:392--397）；
+经济种子：$\ge100$ 母线触发，ParityIPM、
+\fld{max\_inner}$=\mathrm{clamp}(\fld{max\_ipm\_iter},200,800)$、
+\fld{stationarity\_tol}$=\min(\fld{rpo\_tol},10^{-6})$、无 fallback；
+$\ge$\fld{robust\_inner\_min\_buses} 直接同伦起步、跳过注定失败的直接种子（:737--782）；
+\srcpath{apply\_unit\_costs} 一次性改写 $c_1=1/c_2=c_0=0$ 保证暖链同源（:705--711）。
+相位计时可由 \texttt{HACDCPF\_RPO\_PROF}=1 开启（:42--53）。
+
+\subsection{诚实口径与结果结构}
+RPOResult 定义 \srcpath{reactive\_power\_opt.hpp:245--291}（逐字段表见第~\ref{sec:options}~章）：
+\fld{algorithm}=\fld{discrete\_coordinate\_search\_with\_ac\_opf}、
+\fld{globally\_certified}=false、\fld{optimality\_gap\_available}=false、\fld{gap}=1.0
+（hpp:248--255）；离散动作报告于 \fld{taps}/\fld{shunts}
+（\texttt{TapResult}/\texttt{ShuntResult} 向量，hpp:275--276）；
+状态文案区分 time-limit/evaluation-limit/local optimum（:1328--1333）；
+\fld{bc\_stats} 仅为兼容信封，注释明确“非 B\&B 全局 gap 证书”（hpp:284--286）——
+字段映射 \fld{cuts\_added}=灵敏度平面数、\fld{lp\_solves}=\fld{nlp\_solves}（:1374--1383）；
+基线容差接受会附加 ``[baseline accepted at measured tolerance: ...]''（:829--834）。
+即：只返回可行局部最优点，不报虚假 $\mathrm{gap}=0$，不声称全局 MINLP 最优。
+
+\paragraph{终止状态标志（hpp:256--257）}
+两个布尔标志默认 false：\fld{terminated\_by\_time\_limit}
+（$=$ \fld{time\_limit\_sec}$>0$ 且耗时 $\ge$ 时限，:1298--1299）与
+\fld{terminated\_by\_evaluation\_limit}（$=$ \fld{nlp\_solves} $\ge$ \fld{max\_nodes}，:1300）；
+状态串 ``Feasible incumbent at time limit'' / ``Feasible incumbent at evaluation limit'' /
+``Feasible local optimum (heuristic search)'' 的判定复用这两个标志
+（:1328--1333，语义不变、判定单点化）。
+
+\paragraph{\fld{model\_limitations}（hpp:258）}
+string 向量、默认空；``无全局 MINLP 证书''口径现以结构化字段对外暴露，追加点：
+\begin{itemize}
+  \item 基线 OPF 失败路径：离散坐标/邻域搜索无全局 MINLP 最优性证书（:821--823）；
+  \item 无可调离散设备早退路径：结果即连续 OPF 基线而非全局 MINLP 证书（:858--859）；
+  \item LossEconomic 内层目标与非 MinActiveLoss 外层目标不匹配：
+        早退路径（:860--863）与正常路径（:1311--1314）各追加一条说明；
+  \item 正常路径无条件条目（可行局部 incumbent、无全局证书，:1301--1302），
+        以及时限截断（:1303--1305）/ 评估上限截断（:1307--1309）各一条。
+\end{itemize}
+
+\subsection{参数表（RPOOptions）}
+定义 reactive\_power\_opt.hpp:37--155。
+\begin{paramtable}
+\fld{objective} & -- & 枚举 & 三档 & Min\-Voltage\-Deviation & RPO 目标\\
+\fld{inner\_nlp\_objective} & -- & 枚举 & 两档 & Match\-RPO & 内层 NLP 目标解耦\\
+\fld{robust\_inner\_on\_failure} & -- & bool & -- & true & 失败时稳健内层重试\\
+\fld{robust\_inner\_min\_buses} & -- & 母线 & -- & 1000 & 直接 LossEconomic 阈值\\
+\fld{vdev\_weight}/\fld{loss\_weight} & $w_v,w_l$ & -- & $\ge0$ & 1.0/1.0 & Combined 目标权重\\
+\fld{v\_target} & $V^*$ & pu & 0.95--1.05 & 1.0 & 电压目标\\
+\fld{max\_nodes} & -- & 个 & -- & 50000 & 离散评估上限\\
+\fld{time\_limit\_sec} & -- & s & -- & 120 & 时限\\
+\fld{gap\_tol} & -- & -- & -- & $10^{-4}$ & 兼容保留\\
+\fld{int\_tol} & -- & -- & -- & $10^{-5}$ & 兼容遗留（未用）\\
+\fld{num\_threads} & -- & 线程 & 0=auto & 0 & 并行波次线程数\\
+\fld{branching}/\fld{node\_sel} & -- & -- & -- & -- & 遗留未用\\
+\fld{max\_ipm\_iter} & -- & 次 & -- & 2000 & 内层 IPM 迭代上限\\
+\fld{search\_ipm\_iter} & -- & 次 & -- & 200 & 搜索期快速失败迭代上限\\
+\fld{ipm\_tol} & -- & -- & -- & $10^{-6}$ & 内层可行性容差\\
+\fld{stationarity\_tol} & -- & -- & -- & $10^{-3}$ & 内层 stationarity 容差\\
+\fld{inner\_solver\_backend} & -- & 枚举 & -- & ParityIPM & 内层求解器\\
+\fld{seed\_homotopy\_on\_failure} & -- & bool & -- & true & 失败时目标同伦种子\\
+\fld{max\_tap\_move} & -- & 档 & -- & -1（全程） & 档位窗口；GUI 显式默认 2\\
+\fld{restrict\_tap\_indices} + \fld{enabled\_tap\_indices} & -- & -- & -- & false & 限定可调 OLTC 子集\\
+\fld{verbose} & -- & bool & -- & false & 透传内层 AC OPF 迭代日志（:364）\\
+\fld{enforce\_*}（四项） & -- & bool & -- & true & 内层约束族开关\\
+\end{paramtable}
+
+\subsection{验证与校核}
+\begin{itemize}
+  \item case9 诚实本地证书：\fld{globally\_certified}=false、
+        \fld{optimality\_gap\_available}=false、\fld{model\_limitations} 非空（:33）、
+        \fld{gap}=1.0、$0<\mathrm{loss}<50$~MW（test\_reactive\_power\_opt.cpp:16--42）；
+  \item 并联动作与目标不劣化（:43--81）；case300 seeded 求解 \fld{nlp\_solves}=3、
+        \fld{max\_tap\_move}=2（:83--109）；
+  \item 控制清单排除原因（\texttt{fixed\_or\_invalid\_tap\_range} 等）与
+        \fld{max\_tap\_move}=1 窗口（:111--181）；
+  \item MATPOWER 固定变比不被虚构为 OLTC（:183--210）；
+        \srcpath{apply\_rpo\_discrete\_solution} 联动支路 tap=$1.03\times1.025$（:212--241）；
+  \item 交叉验证文档 \srcpath{docs/reactive\_power\_optimization\_validation.md}：
+        独立 OPF 复算 + PF 回放，判据目标相对差 $\le\max(10^{-3},10\epsilon_d)$、
+        电压差 $\le\max(5\times10^{-4},10\epsilon_p)$~pu；
+        大规模实测（case2869+20 OLTC+10 并联）：基线 74 迭代/25~s 收敛到参考值 133999，
+        暖启动链 2--7 迭代、均值 $\approx0.46$~s/次；MinActiveLoss 网损 1561.8$\to$1558.8~MW；
+  \item GUI E2E：\srcpath{tests/e2e/rpo\_gui\_e2e.mjs}（ctest 目标 \texttt{rpo\_gui\_e2e}，
+        tests/CMakeLists.txt:502--507，标签含 \texttt{cross\_validation}）；
+  \item 已知限制：LossEconomic 内层不直接为电压最优（2869 上 vdev 0.1392$\to$0.1401
+        基本未降）；3000+ 母线完整搜索受时限约束。
+\end{itemize}

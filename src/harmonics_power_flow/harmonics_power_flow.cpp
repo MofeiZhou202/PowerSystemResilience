@@ -382,7 +382,40 @@ HPFResult solve_harmonic_power_flow(const HybridPowerSystem& rich_sys,
   const auto projection_bundle =
       projection::RichToCanonicalOperator::apply(rich_sys);
   const auto& sys = projection_bundle.canonical;
+  std::unordered_map<int, int> authored_to_canonical_dc;
+  std::unordered_map<int, int> canonical_to_authored_dc;
+  const std::size_t mapped_dc_count =
+      std::min(rich_sys.dc.buses.size(), sys.dc.buses.size());
+  authored_to_canonical_dc.reserve(mapped_dc_count);
+  canonical_to_authored_dc.reserve(mapped_dc_count);
+  for (std::size_t i = 0; i < mapped_dc_count; ++i) {
+    authored_to_canonical_dc[rich_sys.dc.buses[i].index] =
+        sys.dc.buses[i].index;
+    canonical_to_authored_dc[sys.dc.buses[i].index] =
+        rich_sys.dc.buses[i].index;
+  }
+  const auto canonical_dc_bus = [&](int authored_bus) {
+    const auto it = authored_to_canonical_dc.find(authored_bus);
+    return it == authored_to_canonical_dc.end() ? authored_bus : it->second;
+  };
+  const auto authored_dc_bus = [&](int canonical_bus) {
+    const auto it = canonical_to_authored_dc.find(canonical_bus);
+    return it == canonical_to_authored_dc.end() ? canonical_bus : it->second;
+  };
+  HPFOptions canonical_options = opt;
+  canonical_options.dc_ripple_model.bus_b_pu.clear();
+  for (const auto& [authored_bus, susceptance] :
+       opt.dc_ripple_model.bus_b_pu) {
+    canonical_options.dc_ripple_model.bus_b_pu[
+        canonical_dc_bus(authored_bus)] = susceptance;
+  }
   HarmonicStudyInputs canonical_inputs = rich_inputs;
+  for (auto& source : canonical_inputs.sources) {
+    if (source.is_dc) source.bus = canonical_dc_bus(source.bus);
+  }
+  for (auto& nic : canonical_inputs.nics) {
+    nic.bus_dc = canonical_dc_bus(nic.bus_dc);
+  }
   if (sys.bus_merge_map) {
     const auto& bus_map = *sys.bus_merge_map;
     const auto canonical_ac_bus = [&](int rich_bus) {
@@ -524,7 +557,7 @@ HPFResult solve_harmonic_power_flow(const HybridPowerSystem& rich_sys,
     ac_res[i].v_by_order[1] = op.vac1[i];
   }
   for (int k = 0; k < n_dc; ++k) {
-    dc_res[k].bus = sys.dc.buses[k].index;
+    dc_res[k].bus = authored_dc_bus(sys.dc.buses[k].index);
     dc_res[k].is_dc = true;
     dc_res[k].v_fund_pu = std::abs(op.vdc0[k]);
     dc_res[k].v_by_order[0] = Cx(op.vdc0[k], 0.0);
@@ -573,7 +606,8 @@ HPFResult solve_harmonic_power_flow(const HybridPowerSystem& rich_sys,
   };
 
   auto solve_dc_order = [&](int r, Eigen::VectorXcd& V) -> bool {
-    SpMat Y = build_dc_ybus(sys.dc, dc_id2pos, nic_dc_positions, r, opt);
+    SpMat Y = build_dc_ybus(sys.dc, dc_id2pos, nic_dc_positions, r,
+                            canonical_options);
     Eigen::VectorXcd I = Eigen::VectorXcd::Zero(n_dc);
     for (const auto& src : inputs.sources) {
       if (!src.is_dc) continue;
@@ -676,8 +710,8 @@ HPFResult solve_harmonic_power_flow(const HybridPowerSystem& rich_sys,
       int f = dc_pos(br.from_bus), t = dc_pos(br.to_bus);
       if (f < 0 || t < 0) continue;
       HarmonicBranchFlow bf;
-      bf.from_bus = br.from_bus;
-      bf.to_bus = br.to_bus;
+      bf.from_bus = authored_dc_bus(br.from_bus);
+      bf.to_bus = authored_dc_bus(br.to_bus);
       bf.is_dc = true;
       double r = std::max(br.r_pu, 1e-6);
       // Ripple reactance (if configured) so the reported branch current uses the
