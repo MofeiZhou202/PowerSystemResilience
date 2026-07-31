@@ -1616,6 +1616,9 @@ json post_power_flow_terminal_flows_json(
     const int bus = it != original_vsc_dc_bus.end() ? it->second : v.bus_dc;
     dc_net_export_p[bus] += v.p_dc_mw;
   }
+  for (const auto& t : pf.lcc_transfers) {
+    dc_net_export_p[t.bus_dc] += t.p_dc_mw;
+  }
   for (const auto& d : pf.dcdc_transfers) {
     dc_net_export_p[d.bus_in] -= d.p_in_mw;
     dc_net_export_p[d.bus_out] += d.p_out_mw;
@@ -8630,6 +8633,7 @@ json system_summary(const hacdcpf::HybridPowerSystem& sys,
       {"pv_arrays", {"dc", "pv_arrays"}},
       {"dc_circuit_breakers", {"dc", "dc_circuit_breakers"}},
       {"vsc_converters", {"vsc_converters"}},
+      {"lcc_converters", {"lcc_converters"}},
       {"dcdc_converters", {"dcdc_converters"}},
       {"energy_routers", {"energy_routers"}},
       {"mobile_storage", {"mobile_storage"}},
@@ -10808,7 +10812,10 @@ int main(int argc, char** argv) {
       out["branch_abs"] = json::array();
       out["dc_branch_flows"] = json::array();
       out["vsc_transfers"] = json::array();
+      out["lcc_transfers"] = json::array();
       out["dcdc_transfers"] = json::array();
+      out["validity_flags"] =
+          json{{"lcc_transformer_tap_control_modelled", false}};
       out["ac_switch_flows"] = json::array();
       out["ac_circuit_breaker_flows"] = json::array();
       out["dc_circuit_breaker_flows"] = json::array();
@@ -10826,9 +10833,47 @@ int main(int argc, char** argv) {
         for (const auto& v : pf.vsc_transfers)
           out["vsc_transfers"].push_back(json{{"index",v.index},{"bus_ac",v.bus_ac},{"bus_dc",v.bus_dc},
             {"p_ac_mw",v.p_ac_mw},{"q_ac_mvar",v.q_ac_mvar},{"p_dc_mw",v.p_dc_mw},{"loss_mw",v.loss_mw}});
+        for (const auto& t : pf.lcc_transfers)
+          out["lcc_transfers"].push_back(json{{"index",t.index},{"bus_ac",t.bus_ac},{"bus_dc",t.bus_dc},
+            {"station_role",t.station_role},{"control_mode",t.control_mode},
+            {"alpha_deg",t.alpha_deg},{"gamma_deg",t.gamma_deg},
+            {"ud0_kv",t.ud0_kv},{"ud_kv",t.ud_kv},{"id_ka",t.id_ka},
+            {"p_ac_mw",t.p_ac_mw},{"q_ac_mvar",t.q_ac_mvar},{"p_dc_mw",t.p_dc_mw},
+            {"transformer_tap",t.transformer_tap},
+            {"tap_target_angle_deg",t.tap_target_angle_deg},
+            {"tap_control_iterations",t.tap_control_iterations},
+            {"tap_control_active",t.tap_control_active},
+            {"tap_control_converged",t.tap_control_converged},
+            {"tap_at_limit",t.tap_at_limit},{"id_at_limit",t.id_at_limit},
+            {"alpha_within_limits",t.alpha_within_limits},
+            {"gamma_within_limits",t.gamma_within_limits}});
         for (const auto& d : pf.dcdc_transfers)
           out["dcdc_transfers"].push_back(json{{"index",d.index},{"bus_in",d.bus_in},{"bus_out",d.bus_out},
             {"p_in_mw",d.p_in_mw},{"p_out_mw",d.p_out_mw},{"loss_mw",d.loss_mw}});
+        const auto& validity = pf.converter_model_scope.validity;
+        out["model_scope"] = pf.converter_model_scope.model_scope;
+        out["validity_flags"] = json{
+            {"vsc_loss_modelled", validity.vsc_loss_modelled},
+            {"vsc_ac_conduction_loss_modelled",
+             validity.vsc_ac_conduction_loss_modelled},
+            {"vsc_capacity_circle_enforced",
+             validity.vsc_capacity_circle_enforced},
+            {"vsc_current_limits_enforced",
+             validity.vsc_current_limits_enforced},
+            {"vsc_modulation_limits_enforced",
+             validity.vsc_modulation_limits_enforced},
+            {"vsc_vdc_control_modelled", validity.vsc_vdc_control_modelled},
+            {"dc_multisource_coordination_modelled",
+             validity.dc_multisource_coordination_modelled},
+            {"dcdc_loss_modelled", validity.dcdc_loss_modelled},
+            {"dcdc_duty_ratio_enforced",
+             validity.dcdc_duty_ratio_enforced},
+            {"lcc_quasi_steady_modelled",
+             validity.lcc_quasi_steady_modelled},
+            {"lcc_transformer_tap_control_modelled",
+             validity.lcc_transformer_tap_control_modelled},
+            {"equation_closure_checked",
+             validity.equation_closure_checked}};
       };
 
       auto add_converter_coordination = [&](const hacdcpf::PowerFlowResult& pf) {
@@ -11013,6 +11058,40 @@ int main(int argc, char** argv) {
         json geo_dc_branches = json::array();
         json geo_vsc = json::array();
         json geo_dcdc = json::array();
+
+        // BPA T cards live in the canonical ACBranch collection, while their
+        // R-card controller reports the effective post-control tap through the
+        // associated LCC transfer. Keep that relationship in the presentation
+        // payload without mutating the authored system model.
+        std::unordered_map<int, const hacdcpf::LCCTransfer*>
+            lcc_transfer_by_transformer_branch;
+        for (const auto& converter : sys.lcc_converters) {
+          if (converter.converter_transformer_branch < 0) continue;
+          const auto transfer = std::find_if(
+              pf.lcc_transfers.begin(), pf.lcc_transfers.end(),
+              [&](const hacdcpf::LCCTransfer& item) {
+                return item.index == converter.index;
+              });
+          if (transfer != pf.lcc_transfers.end()) {
+            lcc_transfer_by_transformer_branch.emplace(
+                converter.converter_transformer_branch, &*transfer);
+          }
+        }
+        auto is_transformer_branch = [&](const hacdcpf::ACBranch& branch) {
+          return lcc_transfer_by_transformer_branch.count(branch.index) != 0 ||
+                 branch.sn_mva > 0.0 || branch.vn_hv_kv > 0.0 ||
+                 branch.vn_lv_kv > 0.0 ||
+                 branch.name.rfind("T_", 0) == 0 ||
+                 std::abs(branch.tap - 1.0) > 1e-9 ||
+                 std::abs(branch.shift_deg) > 1e-9;
+        };
+        auto effective_branch_tap = [&](const hacdcpf::ACBranch& branch) {
+          const auto transfer =
+              lcc_transfer_by_transformer_branch.find(branch.index);
+          return transfer != lcc_transfer_by_transformer_branch.end()
+                     ? transfer->second->transformer_tap
+                     : branch.tap;
+        };
 
         // Aggregate load demand and generation per bus for display.
         std::unordered_map<int, double> bus_pd, bus_qd, bus_pg, bus_qg;
@@ -11442,6 +11521,7 @@ int main(int argc, char** argv) {
         // AC branches with coordinates and power flow
         for (size_t i = 0; i < sys.ac.branches.size(); ++i) {
           const auto& br = sys.ac.branches[i];
+          const bool transformer = is_transformer_branch(br);
           auto from_it = ac_bus_coords.find(br.from_bus);
           auto to_it = ac_bus_coords.find(br.to_bus);
           if (from_it == ac_bus_coords.end() || to_it == ac_bus_coords.end()) continue;
@@ -11460,6 +11540,11 @@ int main(int argc, char** argv) {
           geo_ac_branches.push_back(json{
             {"index", br.index},
             {"name", br.name.empty() ? ("Line" + std::to_string(i)) : br.name},
+            {"canvas_type", "ac_branch"},
+            {"component_type", transformer ? "transformer_2w" : "ac_branch"},
+            {"type_label", transformer ? "双绕组变压器" : "交流线路"},
+            {"is_transformer", transformer},
+            {"transformer_tap", transformer ? effective_branch_tap(br) : 1.0},
             {"from", br.from_bus}, {"to", br.to_bus},
             {"from_lat", from_it->second.first}, {"from_lon", from_it->second.second},
             {"to_lat", to_it->second.first}, {"to_lon", to_it->second.second},
@@ -11799,6 +11884,11 @@ int main(int argc, char** argv) {
           vsc_inj_ac_p[v.bus_ac] += v.p_ac_mw;
           vsc_inj_ac_q[v.bus_ac] += v.q_ac_mvar;
           conv_inj_dc_p[v.bus_dc] += v.p_dc_mw;
+        }
+        for (const auto& t : pf.lcc_transfers) {
+          vsc_inj_ac_p[t.bus_ac] += t.p_ac_mw;
+          vsc_inj_ac_q[t.bus_ac] += t.q_ac_mvar;
+          conv_inj_dc_p[t.bus_dc] += t.p_dc_mw;
         }
         for (const auto& d : pf.dcdc_transfers) {
           conv_inj_dc_p[d.bus_in] += -d.p_in_mw;
@@ -12936,10 +13026,20 @@ int main(int argc, char** argv) {
         // AC branch and transformer rows.
         for (size_t i = 0; i < sys.ac.branches.size(); ++i) {
           const auto& br = sys.ac.branches[i];
+          const bool transformer = is_transformer_branch(br);
           json row = base_row("ac_branch", "AC", br.index, static_cast<int>(i),
-                              "交流线路", br.name.empty() ? ("Line " + std::to_string(br.index)) : br.name,
+                              transformer ? "双绕组变压器" : "交流线路",
+                              br.name.empty() ? (transformer ? "Transformer " : "Line ") +
+                                                    std::to_string(br.index)
+                                              : br.name,
                               is_solved(br.in_service),
                               ac_conn(br.from_bus) + " -> " + ac_conn(br.to_bus));
+          if (transformer) {
+            add_metric(row, "Tap", effective_branch_tap(br), "pu", "scalar", 6);
+            if (lcc_transfer_by_transformer_branch.count(br.index) != 0) {
+              add_note(row, "Tap取自R卡外循环完成后的最终潮流工作点");
+            }
+          }
           if (i < pf.branch_flows.size()) {
             const auto& fl = pf.branch_flows[i];
             add_metric(row, "Pf", fl.pf_mw, "MW", "p", 4);
@@ -13406,6 +13506,60 @@ int main(int argc, char** argv) {
           }
           component_results.push_back(std::move(row));
         }
+        for (size_t i = 0; i < sys.lcc_converters.size(); ++i) {
+          const auto& c = sys.lcc_converters[i];
+          const auto tit = std::find_if(
+              pf.lcc_transfers.begin(), pf.lcc_transfers.end(),
+              [&](const hacdcpf::LCCTransfer& item) {
+                return item.index == c.index;
+              });
+          const hacdcpf::LCCTransfer* transfer =
+              tit != pf.lcc_transfers.end() ? &*tit : nullptr;
+          json row = base_row(
+              "lcc_converter", "ACDC", c.index, static_cast<int>(i),
+              "LCC换流器",
+              c.name.empty() ? ("LCC " + std::to_string(c.index)) : c.name,
+              c.in_service
+                  ? (transfer ? "已求解"
+                              : (pf.converged ? "已参与计算" : "未收敛"))
+                  : "停运",
+              ac_conn(c.ac_bus) + " <-> " + dc_conn(c.dc_bus));
+          add_text_metric(row, "角色",
+                          hacdcpf::lcc_station_role_str(c.station_role));
+          add_text_metric(row, "模式",
+                          hacdcpf::lcc_control_mode_str(c.control_mode));
+          add_metric(row, "Pac", transfer ? transfer->p_ac_mw : 0.0,
+                     "MW", "p", 4);
+          add_metric(row, "Qac", transfer ? transfer->q_ac_mvar : 0.0,
+                     "MVar", "q", 4);
+          add_metric(row, "Pdc", transfer ? transfer->p_dc_mw : 0.0,
+                     "MW", "p", 4);
+          add_metric(row, "Alpha", transfer ? transfer->alpha_deg : 0.0,
+                     "deg", "scalar", 3);
+          add_metric(row, "Gamma", transfer ? transfer->gamma_deg : 0.0,
+                     "deg", "scalar", 3);
+          add_metric(row, "Tap", transfer ? transfer->transformer_tap : 1.0,
+                     "pu", "scalar", 6);
+          add_text_metric(row, "Tap控制active",
+                          transfer && transfer->tap_control_active ? "true"
+                                                                   : "false");
+          add_text_metric(row, "Tap控制converged",
+                          transfer && transfer->tap_control_converged ? "true"
+                                                                      : "false");
+          add_text_metric(row, "Tap达到限值",
+                          transfer && transfer->tap_at_limit ? "true"
+                                                             : "false");
+          add_metric(row, "Tap控制迭代",
+                     transfer ? transfer->tap_control_iterations : 0,
+                     "step", "scalar", 0);
+          if (transfer && transfer->tap_control_active &&
+              !transfer->tap_control_converged) {
+            add_note(row, transfer->tap_at_limit
+                              ? "R卡分接控制未达到目标，最终tap位于限值"
+                              : "R卡分接控制未达到目标");
+          }
+          component_results.push_back(std::move(row));
+        }
         for (size_t i = 0; i < sys.dc.dcdc_converters.size(); ++i) {
           const auto& c = sys.dc.dcdc_converters[i];
           const auto dit = std::find_if(pf.dcdc_transfers.begin(), pf.dcdc_transfers.end(),
@@ -13624,7 +13778,15 @@ int main(int argc, char** argv) {
         out["islands_detected"] = static_cast<int>(islands.size());
         out["solvable_islands"] = solvable_islands;
 
-        if (solvable_islands > 1) {
+        // Islands that are coupled through the DC network (LCC/VSC converters,
+        // DC branches) must be solved by the unified hybrid Newton — the
+        // per-island adaptive path neither models the DC coupling nor
+        // reconstructs the DC state (vdc / DC branch flows) in its report.
+        const bool dc_coupled = !sys.dc.branches.empty() ||
+                                !sys.vsc_converters.empty() ||
+                                !sys.lcc_converters.empty();
+
+        if (solvable_islands > 1 && !dc_coupled) {
           // Multiple solvable islands: use adaptive solver which
           // extracts and solves each island independently.
           auto pf = hacdcpf::solve_power_flow_adaptive(sys, opt);
@@ -15184,6 +15346,14 @@ int main(int argc, char** argv) {
       };
 
 	      if (network_model == "three_phase_hybrid") {
+	        const bool has_in_service_lcc = std::any_of(
+	            original_sys.lcc_converters.begin(),
+	            original_sys.lcc_converters.end(),
+	            [](const auto& converter) { return converter.in_service; });
+	        if (has_in_service_lcc) {
+	          throw std::invalid_argument(
+	              "Three-phase hybrid OPF does not currently support in-service LCC converters; use the balanced AC/DC Parity or Ipopt model");
+	        }
 	        if (solver == "dc" || solver == "dispatch") {
 	          throw std::invalid_argument(
 	              "Three-phase hybrid OPF requires Ipopt, Parity, or Auto backend");
@@ -15514,7 +15684,11 @@ int main(int argc, char** argv) {
         using SB = hacdcpf::opf::ACOPFSolverBackend;
         const bool has_hybrid_case =
             !sys.dc.buses.empty() || !sys.dc.branches.empty() ||
-            !sys.vsc_converters.empty() || !sys.dc.dcdc_converters.empty();
+            !sys.vsc_converters.empty() || !sys.dc.dcdc_converters.empty() ||
+            std::any_of(sys.lcc_converters.begin(), sys.lcc_converters.end(),
+                        [](const auto& converter) {
+                          return converter.in_service;
+                        });
         if (solver == "ipopt") {
           opt.ac_solver_backend = SB::Ipopt;
         } else if (solver == "dispatch") {
@@ -15635,6 +15809,26 @@ int main(int argc, char** argv) {
 	        out["external_grid_p_mw"]=r.external_grid_p_mw;
 	        out["external_grid_q_mvar"]=r.external_grid_q_mvar;
 	        out["vdc"]=r.vdc; out["pac_mw"]=r.pac_mw; out["qac_mvar"]=r.qac_mvar;
+	        out["lcc_transfers"] = json::array();
+	        for (const auto& t : r.lcc_transfers) {
+	          out["lcc_transfers"].push_back(
+	              json{{"index", t.index}, {"bus_ac", t.bus_ac},
+	                   {"bus_dc", t.bus_dc}, {"station_role", t.station_role},
+	                   {"control_mode", t.control_mode},
+	                   {"alpha_deg", t.alpha_deg}, {"gamma_deg", t.gamma_deg},
+	                   {"ud0_kv", t.ud0_kv}, {"ud_kv", t.ud_kv},
+	                   {"id_ka", t.id_ka}, {"p_ac_mw", t.p_ac_mw},
+	                   {"q_ac_mvar", t.q_ac_mvar}, {"p_dc_mw", t.p_dc_mw},
+	                   {"transformer_tap", t.transformer_tap},
+	                   {"tap_target_angle_deg", t.tap_target_angle_deg},
+	                   {"tap_control_iterations", t.tap_control_iterations},
+	                   {"tap_control_active", t.tap_control_active},
+	                   {"tap_control_converged", t.tap_control_converged},
+	                   {"tap_at_limit", t.tap_at_limit},
+	                   {"id_at_limit", t.id_at_limit},
+	                   {"alpha_within_limits", t.alpha_within_limits},
+	                   {"gamma_within_limits", t.gamma_within_limits}});
+	        }
 	        out["dpd_mw"]=r.dpd_mw; out["pren_mw"]=r.pren_mw; out["pstor_mw"]=r.pstor_mw;
 	        out["pdcdc_mw"]=r.pdcdc_mw; out["pflex_mw"]=r.pflex_mw;
 	        out["er_port_p_mw"]=r.er_port_p_mw; out["er_port_q_mvar"]=r.er_port_q_mvar;
@@ -15655,7 +15849,10 @@ int main(int argc, char** argv) {
                         {"current", v.vsc_current_limits_enforced},
                         {"modulation", v.vsc_modulation_limits_enforced},
                         {"dcdc_duty", v.dcdc_duty_ratio_enforced},
-                        {"vdc_control", v.vsc_vdc_control_modelled}};
+                        {"vdc_control", v.vsc_vdc_control_modelled},
+                        {"lcc_quasi_steady", v.lcc_quasi_steady_modelled},
+                        {"lcc_transformer_tap_control_modelled",
+                         v.lcc_transformer_tap_control_modelled}};
 	        if (network_model == "balanced_with_three_phase_validation") {
 	          if (!sys.three_phase_ac.has_value()) {
 	            out["three_phase_validation"] =
@@ -16012,6 +16209,22 @@ int main(int argc, char** argv) {
               vtr.push_back(json{{"index",v.index},{"bus_ac",v.bus_ac},{"bus_dc",v.bus_dc},
                 {"p_ac_mw",v.p_ac_mw},{"q_ac_mvar",v.q_ac_mvar},{"p_dc_mw",v.p_dc_mw},{"loss_mw",v.loss_mw}});
             post_pf["vsc_transfers"] = vtr;
+            json ltr = json::array();
+            for (const auto& t : ac_pf.lcc_transfers)
+              ltr.push_back(json{{"index",t.index},{"bus_ac",t.bus_ac},{"bus_dc",t.bus_dc},
+                {"station_role",t.station_role},{"control_mode",t.control_mode},
+                {"alpha_deg",t.alpha_deg},{"gamma_deg",t.gamma_deg},
+                {"ud0_kv",t.ud0_kv},{"ud_kv",t.ud_kv},{"id_ka",t.id_ka},
+                {"p_ac_mw",t.p_ac_mw},{"q_ac_mvar",t.q_ac_mvar},{"p_dc_mw",t.p_dc_mw},
+                {"transformer_tap",t.transformer_tap},
+                {"tap_target_angle_deg",t.tap_target_angle_deg},
+                {"tap_control_iterations",t.tap_control_iterations},
+                {"tap_control_active",t.tap_control_active},
+                {"tap_control_converged",t.tap_control_converged},
+                {"tap_at_limit",t.tap_at_limit},{"id_at_limit",t.id_at_limit},
+                {"alpha_within_limits",t.alpha_within_limits},
+                {"gamma_within_limits",t.gamma_within_limits}});
+            post_pf["lcc_transfers"] = ltr;
             json dtr = json::array();
             for (const auto& d : ac_pf.dcdc_transfers)
               dtr.push_back(json{{"index",d.index},{"bus_in",d.bus_in},{"bus_out",d.bus_out},
@@ -16071,7 +16284,17 @@ int main(int argc, char** argv) {
 	            post_pf["geo_ac_branches"] = brf;
 	            post_pf["geo_dc_branches"] = dcbr;
 	            post_pf["geo_vsc"] = vtr;
+	            post_pf["geo_lcc"] = ltr;
 	            post_pf["geo_dcdc"] = dtr;
+	            const auto& post_pf_validity =
+	                ac_pf.converter_model_scope.validity;
+	            post_pf["model_scope"] =
+	                ac_pf.converter_model_scope.model_scope;
+	            post_pf["validity_flags"] = json{
+	                {"lcc_quasi_steady_modelled",
+	                 post_pf_validity.lcc_quasi_steady_modelled},
+	                {"lcc_transformer_tap_control_modelled",
+	                 post_pf_validity.lcc_transformer_tap_control_modelled}};
 	            json branch_abs = json::array();
 	            for (const auto& f : ac_pf.branch_flows)
 	              branch_abs.push_back(std::abs(f.pf_mw));

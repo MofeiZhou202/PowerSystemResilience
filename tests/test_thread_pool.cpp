@@ -52,3 +52,19 @@ TEST_CASE("ThreadPool dynamic parallel_for cancels, joins, and rethrows",
       std::runtime_error);
   CHECK(active.load(std::memory_order_relaxed) == 0);
 }
+
+TEST_CASE("ThreadPool global instance completes work before process exit",
+          "[thread-pool][global]") {
+  std::atomic<int> completed{0};
+  auto& pool = hacdcpf::util::ThreadPool::global();
+
+  pool.parallel_for(
+      64,
+      [&](size_t begin, size_t end) {
+        completed.fetch_add(static_cast<int>(end - begin),
+                            std::memory_order_relaxed);
+      },
+      4);
+
+  CHECK(completed.load(std::memory_order_relaxed) == 64);
+}

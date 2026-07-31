@@ -28,7 +28,7 @@
   SuiteSparse、Catch2、PaPILO 3.0.0 与所需 Boost 头均从本地源码解析；ETAP 所需 OpenXLSX 也已纳入本仓库，
   配置和构建过程不再下载依赖。
 - 已删除被实现取代的阶段计划、一次性代码审查和重复暂态设计稿；不再用历史 roadmap 描述当前行为。
-- 本次同步（2026-07-22）补入 2026 年 5–7 月新增能力域：电力市场、园区综合能源、承载力/薄弱环节/反事实规划、场景生成与台风弹性、年度碳/GEC、SPPT 可执行理论层、三相混合 OPF、电压稳定 CPF，以及 CIM/GridLAB-D/PSD.jl 等 IO 通道；并补齐高级潮流求解器专属回归、CPF 弧长增广、FDPF 稀疏注入与统一求解器接口。
+- 本次同步（2026-07-24）补入 2026 年 5–7 月新增能力域，并核实 BPA/DSP BD/LD/T 到原生 `LCCConverter` 的接口链：统一 Newton PF 消费 LCC 的 AC P/Q、DC 注入和交叉 Jacobian；平衡聚合 OPF 的 Parity/Ipopt 路径复用同一准稳态特性，不能保持物理闭合的后端显式拒绝。
 - 2026-07-19 增加 `/api/v1` 多会话、模型 revision/ETag、异步 PF/OPF 作业，以及对应 Python SDK 与 AI 工具层；设计边界见 `docs/python_api.md`。
 - 同步依据为当前 `CMakeLists.txt`、`CMakePresets.json`、`tests/CMakeLists.txt`、`src/`、`include/`、GUI 路由和 E2E 验证。
 - 如文档描述与代码行为冲突，以仓库实现为准：`src/`、`include/`、`tests/`、`CMake` 配置优先。
@@ -55,7 +55,7 @@ cmake --build --preset windows-msvc-release
 ctest --preset windows-msvc-release
 ```
 
-## 当前建模与仿真包状态快照（2026-07-19）
+## 当前建模与仿真包状态快照（2026-07-24）
 
 本节用于快速回答“现在这个包到底做到哪一步了”。结论基于当前仓库源码组织、CMake 选项与已注册测试目标，而不是历史规划文档。
 
@@ -63,8 +63,8 @@ ctest --preset windows-msvc-release
 
 | 能力域 | 当前状态 | 说明 |
 |---|---|---|
-| 混合 AC/DC 潮流与聚合建模 | 已实现并持续回归 | 覆盖 canonical projection、AC/DC 潮流、换流器协调与图分析链路；求解器族含 Newton、FDPF（稀疏 Ybus 注入）、DC、自适应孤岛、分布式松弛、HELM、同伦延拓与 Newton-Krylov，并有 LM 信赖域/非单调线搜索/非线性缩放全局化层。`PowerFlowSolverFactory` 六类入口已接线，Newton 跨调用复用 `SolverWorkspace` 与 Jacobian pattern。 |
-| OPF 与约束优化 | 已实现并持续回归 | AC OPF / DC OPF / RPO（含 OLTC 离散档位控制）已集成，支持 Native AC、Parity IPM、嵌入式 Ipopt 等多后端路径；GUI 回显参数用途、请求值/生效值、对偶有效性和模型边界。 |
+| 混合 AC/DC 潮流与聚合建模 | 已实现并持续回归 | 覆盖 canonical projection、AC/DC 潮流、换流器协调与图分析链路；统一 Newton 完整消费原生 LCC 的 AC P/Q、DC 注入及 `Vm/Vdc` 交叉 Jacobian。FDPF、自适应分岛和独立 DC solver 不宣称等价 LCC 覆盖。 |
+| OPF 与约束优化 | 已实现并持续回归 | AC OPF / DC OPF / RPO（含 OLTC 离散档位控制）已集成。含在役 LCC 的平衡聚合 OPF 强制走共享 Parity/Ipopt NLP，控制指令与 tap 作为固定输入；EconomicDispatch、DC OPF、实验 AML 和三相适配路径不支持时显式拒绝。 |
 | 三相混合 PF / OPF | 活跃研发中，GUI 已接入 | `powerflow::solve_three_phase_hybrid_pf` 与 `opf::phase_hybrid` 已接入 `/xjtu/` 潮流/OPF 工具栏；OPF 提供 Full 与 GraphReduced（稀疏 Kron 降阶）、Ipopt/NativeIPM 双后端。GUI rich-model 适配范围见下文。 |
 | 电压稳定 | 已实现 | 连续潮流（CPF）采用增广 `[state, lambda]` 弧长预测-校正，可越过 P-V 鼻点并保留下支采样；输出 P-V 曲线与 VSI 指标。 |
 | 图建模、网络降阶、重构 | 已实现并持续回归 | 支持连通性、开关收缩、Kron/series/pendant/sparse-Kron reduction、ONR。 |
@@ -152,7 +152,7 @@ Rich HybridPowerSystem
 | 充电设施 | `ChargingStation`, `Charger` | 站级或桩级 EV 负荷 | 桩级可投影到站级；作为恒功率负荷进入组装 |
 | DC 网络 | `DCBus`, `DCBranch`, `DCLoad` | DC 母线（`DC_P` 有功母线 / `DC_V` 电压参考母线 / `DC_ISOLATED` 停电隔离母线）、线路、负荷 | 进入 DC 电导矩阵和混合潮流/优化模型；`DC_ISOLATED` 母线在图/孤岛分析中按停电处理，不作为电压参考，且在潮流方程组中以固定电压剔除，避免雅可比奇异 |
 | DC 电源/设备 | `StaticGeneratorDC`, `PVArrayDC`, `DCDCConverter`, `DCCircuitBreaker`, DC storage | DC 电源、PV 阵列、DC/DC、DC 开断设备 | 投影到 DC 注入、DC 边或耦合设备；DC/DC 保留拓扑和占空比可行性字段 |
-| AC/DC 耦合 | `VSCConverter`, `LCCConverter`, `EnergyRouter` | VSC/LCC 换流器、能量路由器、多端口耦合 | VSC 保留为带控制角色的耦合元件；LCC 为准稳态外特性模型（α/γ 角、换相电抗、内生无功），用于 BPA/DSP 的 BD/LD 直流卡；EnergyRouter 展开为内部 DC 母线、VSC 和 DC/DC |
+| AC/DC 耦合 | `VSCConverter`, `LCCConverter`, `EnergyRouter` | VSC/LCC 换流器、能量路由器、多端口耦合 | VSC 保留为带控制角色的耦合元件；LCC 为本仓库 C++ 准稳态外特性模型（α/γ 角、换相电抗、内生无功），由统一 Newton PF 和 Parity/Ipopt OPF 消费；DSP 只用于 BD/LD 卡片语义与外部校准。EnergyRouter 展开为内部 DC 母线、VSC 和 DC/DC |
 | 聚合资源 | `VirtualPowerPlant`, `Microgrid`, `MobileStorage` | VPP、微电网、移动储能 | VPP/Microgrid 可转换为 PCC 注入；移动储能按位置和状态注入 |
 | 三相系统 | `ThreePhaseACSystem` | abc 三相馈线和设备 | 可投影或单独由三相 NR 分析处理 |
 
@@ -217,11 +217,11 @@ Canonical 层的一个重要设计原则是：求解器只看到必要的数学�
 
 | 模块 | 入口/路径 | 使用模型 | 输出 |
 |---|---|---|---|
-| AC/DC Power Flow | `solve_power_flow`, `solve_dc_power_flow`, `solve_power_flow_fdpf`, `solve_ac_dc_power_flow`, `solve_power_flow_adaptive`, `solve_power_flow_distributed_slack` | canonical AC/DC network + converter coupling | 电压、相角、支路/VSC/DC-DC/ER 潮流、收敛状态、converter coordination 诊断、`converter_model_scope` |
+| AC/DC Power Flow | `solve_power_flow`, `solve_dc_power_flow`, `solve_power_flow_fdpf`, `solve_ac_dc_power_flow`, `solve_power_flow_adaptive`, `solve_power_flow_distributed_slack` | canonical AC/DC network + converter coupling | 统一 Newton 返回电压、相角、支路/VSC/LCC/DC-DC/ER 潮流、收敛状态、converter coordination 诊断和 `converter_model_scope`；其他求解器按各自范围解释 |
 | 高级/回退潮流求解器 | `HelmSolver`、`HomotopyContinuationSolver`、`NewtonKrylovSolver`、`AdaptiveSolver`（`solver_factory.hpp`，`PowerFlowMethod`） | 全纯嵌入、同伦延拓、GMRES+Schur 预条件 | 难收敛算例的回退求解路径与诊断 |
 | 三相潮流 | `analysis::solve_three_phase_nr` | `ThreePhaseACSystem` | abc 相电压、电流和三相收敛信息 |
 | 三相混合 PF | `powerflow::solve_three_phase_hybrid_pf` | 原生相域 AC + DC 节点平衡 + equal-phase/GFL/GFM 变换器稳态闭合 | AC/DC 电压、逐相变换器功率/电流、VUF、分域物理残差；可从工程初值独立复核三相混合 OPF 点 |
-| OPF | `solve_ac_opf`, `solve_dc_opf`, `solve_rpo` | AC/IPM、DC LP/QP、无功优化模型（RPO 含 OLTC 离散档位邻域搜索） | 调度、目标值、节点 LMP、约束诊断、solver path、audit/infeasibility hints、`converter_model_scope`；DCOPF branch congestion dual 仅在 `branch_mu_valid=true` 时可作工程解释 |
+| OPF | `solve_ac_opf`, `solve_dc_opf`, `solve_rpo` | AC/IPM、DC LP/QP、无功优化模型（RPO 含 OLTC 离散档位邻域搜索） | Parity/Ipopt 对在役 LCC 返回稳定 ID 的 `lcc_transfers` 并闭合 AC/DC KCL；不支持的线性路径拒绝。其余输出含调度、目标值、节点 LMP、约束诊断、solver path、audit/infeasibility hints 与 `converter_model_scope` |
 | 三相混合 OPF | `opf::phase_hybrid::solve_three_phase_hybrid_opf`（Full / GraphReduced 变体，Ipopt / NativeIPM 后端） | 相域 AC + DC 混合 OPF，可选稀疏 Kron 降阶 | 三相调度、约束诊断与同模型 PF 回放（活跃研发中） |
 | 电压稳定 | `CpfSolver`、`compute_vsi`（`power_flow/voltage_stability.hpp`） | 连续潮流（CPF） | P-V 曲线、VSI 指标 |
 | 网络重构 | `solve_optimal_reconfiguration`, `run_topology_reconfiguration` | LinDistFlow MILP + graph connectivity | 开/合支路集合、损耗 proxy、PF 校验 |
@@ -423,9 +423,9 @@ Python 侧 `etap-main/src/canonical_schema.py` 提供与 C++ 完全一致的列�
 | 导入 ETAP `.xlsx`（二进制上传） | `POST /api/session/load_etap_xlsx`；「加载算例」对话框「导入ETAP工作簿 (.xlsx)」 |
 | 导入原生 ETAP `.xml` | `POST /api/session/load_etap_xml`；「加载算例」对话框「导入ETAP工程 (.xml)」 |
 
-GUI 潮流入口 `POST /api/session/pf` 新增 `method=three_phase_hybrid`，在同一 Newton 系统中联立 abc 相域 AC、DC 节点平衡与 VSC 稳态方程。GUI OPF 入口 `POST /api/session/opf` 新增 `network_model=three_phase_hybrid`，可选择 Full / GraphReduced 与 NativeIPM / Ipopt，并返回逐相电压、DC 电压、逐相电源/VSC 调度及同模型 `post_pf` 回放。该 GUI 适配器当前精确覆盖恒功率星形相负荷、纯电阻 DC 支路与直接 VSC；Delta/ZIP、DC/DC、能量路由器和可调 DC 静态电源会在前端禁用并由后端显式拒绝。AC 支路热限与 VSC 调制比尚未进入相域混合 OPF，响应通过 `scope` / `model_limitations` 如实标注。
+GUI 潮流入口 `POST /api/session/pf` 新增 `method=three_phase_hybrid`，在同一 Newton 系统中联立 abc 相域 AC、DC 节点平衡与 VSC 稳态方程。GUI OPF 入口 `POST /api/session/opf` 新增 `network_model=three_phase_hybrid`，可选择 Full / GraphReduced 与 NativeIPM / Ipopt，并返回逐相电压、DC 电压、逐相电源/VSC 调度及同模型 `post_pf` 回放。该 GUI 适配器当前精确覆盖恒功率星形相负荷、纯电阻 DC 支路与直接 VSC；LCC、Delta/ZIP、DC/DC、能量路由器和可调 DC 静态电源不在其模型范围内，由后端显式拒绝。AC 支路热限与 VSC 调制比尚未进入相域混合 OPF，响应通过 `scope` / `model_limitations` 如实标注。
 
-平衡聚合 OPF 仍支持 parity/native/dc 求解路径，并把实际约束范围以 `scope.model_scope` 与布尔 flags 返回。AC/parity OPF 收敛后，后端会在 OPF 调度点再跑一次 PF，并返回 `post_pf` 支路潮流/VSC 转移以及 best-effort `post_carbon` 碳流结果；前端将 `post_pf.branch_flows` 用于 OPF 解上的潮流/负载率热力图叠加。
+平衡聚合 OPF 支持 parity/native/dc 求解路径，并把实际约束范围以 `scope.model_scope` 与布尔 flags 返回；含在役 LCC 时只允许共享 Parity/Ipopt 模型，响应包含 `lcc_transfers` 与 `scope.lcc_quasi_steady`。AC/parity OPF 收敛后，后端会在 OPF 调度点再跑一次 PF，并返回 `post_pf` 支路潮流/VSC/LCC 转移以及 best-effort `post_carbon` 碳流结果；前端将 `post_pf.branch_flows` 用于 OPF 解上的潮流/负载率热力图叠加。
 
 GUI 第一阶段统一契约包括：`hysim_task_status_v1`（任务状态、耗时与模型版本）、`hysim_result_v1`（分析、请求 ID、结果状态与陈旧性）和 `hysim_canvas_ref_v1`（结果行的元件类型、模型索引与 Canvas ID）。PF/OPF 在计算期间检测到模型版本变化时会丢弃过期结果；结果表统一通过 `data-result-ref` / `data-comp-id` 定位 Canvas，并支持鼠标和键盘操作。
 

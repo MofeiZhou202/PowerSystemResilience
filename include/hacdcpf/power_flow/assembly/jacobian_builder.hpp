@@ -114,12 +114,16 @@ struct JacobianPattern {
   struct LCCEntry {
     int lcc_index{0};
     int ac_bus{0};
+    int commutation_ac_bus{0};
     int dc_bus{0};
     int p_vm_nz{-1};    // P-row(ac_bus) → Vm-col(ac_bus)
     int q_vm_nz{-1};    // Q-row(ac_bus) → Vm-col(ac_bus)
     int p_vdc_nz{-1};   // P-row(ac_bus) → Vdc-col(dc_bus)
     int q_vdc_nz{-1};   // Q-row(ac_bus) → Vdc-col(dc_bus)
     int dc_vm_nz{-1};   // DC-row(dc_bus) → Vm-col(ac_bus)
+    int p_vm_comm_nz{-1};   // P-row(ac_bus) → Vm-col(commutation_ac_bus)
+    int q_vm_comm_nz{-1};   // Q-row(ac_bus) → Vm-col(commutation_ac_bus)
+    int dc_vm_comm_nz{-1};  // DC-row(dc_bus) → Vm-col(commutation_ac_bus)
   };
 
   Eigen::SparseMatrix<double> matrix;

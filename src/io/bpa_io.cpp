@@ -6,6 +6,9 @@
 /// carry an explicit decimal point anywhere in the field; when the point is
 /// omitted some fields use an implied-decimal convention (Vsch: F4.3,
 /// transformer taps: F6.2).  Blank numeric fields default to zero / absent.
+/// The BZ/BZ+/LZ (VSC-HVDC) column layout is not covered by the dat card
+/// manual; it was established empirically against DSP Pwrflow (see the
+/// BzStation struct comment and docs/bpa_dsp_component_mapping.md §5).
 ///
 /// GBK-encoded files (Chinese bus names, e.g. IEEE90.dat) are parsed in the
 /// raw byte domain so fixed columns stay aligned (GBK characters are 2 bytes);
@@ -17,12 +20,14 @@
 #include <cerrno>
 #include <cctype>
 #include <cmath>
+#include <complex>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -34,6 +39,9 @@
 
 namespace hacdcpf::io {
 namespace {
+
+constexpr double kBpaOpenActivePowerBoundMw = 9999.0;
+constexpr double kBpaMinLineReactancePu = 1e-4;
 
 // ── Small parsing helpers ────────────────────────────────────────────────────
 
@@ -192,8 +200,107 @@ struct PendingLccLink {
   std::string inv_name;
   double p_sch{0.0};
   double vdc_kv{0.0};
+  double inv_vdc_set_kv{0.0};
   double alpha_n_deg{0.0};
   double gamma_n_deg{0.0};
+};
+
+/// R card attached to one T-card transformer. R is a control record, not a
+/// second electrical branch. For two-terminal LCC links it supplies the
+/// adjustable winding and tap bounds consumed by the power-flow control loop.
+struct RControl {
+  std::string locator;
+  std::string name1;
+  std::string name2;
+  double kv1{0.0};
+  double kv2{0.0};
+  int adjustable_terminal{0};
+  std::string controlled_name;
+  double controlled_kv{0.0};
+  double tap_max_kv{0.0};
+  double tap_min_kv{0.0};
+  int tap_count{0};
+};
+
+struct TransformerCardData {
+  int branch_index{-1};
+  std::string name1;
+  std::string name2;
+  double kv1{0.0};
+  double kv2{0.0};
+  double tap1_kv{0.0};
+  double tap2_kv{0.0};
+};
+
+/// Pending VSC-HVDC station (BZ card, plus the BZ+ continuation card when
+/// present).  The VSCConverter element is materialized only after the whole
+/// file is parsed (see run()), mirroring the pending-LCC pattern, so the BZ+
+/// card and the DC base voltage are known.  Column layout was established
+/// empirically against DSP 2.1.47 Pwrflow (single-field perturbation runs on
+/// a synthetic two-terminal VSC case, cross-checked against a production
+/// grid dat file; see docs/bpa_dsp_component_mapping.md §5):
+///   BZ : 7-14 station (= AC bus) name, 15-18 AC base kV, 19-20 zone,
+///        21-25 rated capacity Sn (MVA, informational), 34-37 a pu reactance
+///        (steady-state inert in DSP; dynamic-suspect, not imported),
+///        51-55 Rc converter resistance (pu on the converter base — DSP books
+///        |P|*Rc as the station active loss), 64 number of poles (the DC
+///        network sees the LZ resistance divided by this), 67-70 rated DC kV
+///        (informational; superseded by the BZ+ value).
+///   BZ+: 7-14 station name, 20-24 P setpoint (MW; >0 ABSORBS from the AC
+///        grid = rectifier, <0 injects = inverter — the BPA load sign
+///        convention, verified against DSP branch-flow signs), 26-29 Q
+///        setpoint (Mvar; >0 ABSORBS reactive power), 34 control-mode flag
+///        (1 = constant DC
+///        voltage station; blank/other = constant P/Q), 36-39 rated DC
+///        voltage UdcN (kV; DSP requires it > 0 and equal for every station
+///        of one DC network), 41-44 DC voltage setpoint (kV; mode-1
+///        stations), 53-58 Xc converter reactance (pu; internal reactive
+///        loss only — invisible at the AC terminal, not imported),
+///        60-63 / 66-69 AC/DC voltage references (informational).
+struct BzStation {
+  std::string name;         // station name (also the AC bus name)
+  std::string locator;      // locator of the BZ card
+  int ac_bus{0};            // AC bus index of the station bus
+  int dc_bus{0};            // DC bus index created for this station
+  double ac_kv{0.0};        // AC base voltage (kV), cols 15-18
+  double sn_mva{0.0};       // rated capacity (MVA), cols 21-25 (informational)
+  double rc_pu{0.0};        // converter resistance (pu), cols 51-55
+  int n_poles{1};           // number of poles, col 64 (blank -> 1)
+  double udcn_bz_kv{0.0};   // rated DC voltage from the BZ card, cols 67-70
+  // BZ+ continuation card fields (has_plus = false until one is seen):
+  bool has_plus{false};
+  int mode_flag{0};         // col 34: 1 = constant DC voltage, else const P/Q
+  double p_set_mw{0.0};     // cols 20-24 (sign: >0 absorbs = rectifier)
+  double q_card_mvar{0.0};  // cols 26-29 (sign: >0 absorbs reactive power)
+  double udcn_kv{0.0};      // cols 36-39 (required > 0 by DSP)
+  double udc_set_kv{0.0};   // cols 41-44 (mode-1 stations)
+  double xc_pu{0.0};        // cols 53-58 (internal reactive loss; not imported)
+};
+
+/// Pending VSC-HVDC line (LZ card).  Steady state uses only the resistance;
+/// L / C / smoothing reactors / length are dynamic-only and ignored (same
+/// treatment as the LD card).  Columns: 7-14 / 20-27 terminal BZ names,
+/// 15-18 / 28-31 terminal nominal kV (informational), 34-37 rated current
+/// (A), 38-43 resistance per pole (ohm; the DC network sees R/n_poles).
+struct PendingLzLink {
+  std::string locator;
+  std::string name1;
+  std::string name2;
+  double i_rated_a{0.0};
+  double r_ohm{0.0};
+};
+
+/// L+ continuation data for line shunt reactors. The two Mvar values belong
+/// to the terminal buses of an existing L card; L+ never creates a branch.
+struct PendingLineShunt {
+  std::string locator;
+  std::string name1;
+  std::string name2;
+  double kv1{0.0};
+  double kv2{0.0};
+  std::string circuit;
+  double q1_mvar{0.0};
+  double q2_mvar{0.0};
 };
 
 struct Importer {
@@ -206,10 +313,17 @@ struct Importer {
   std::string case_id;
   std::string project;
 
-  std::unordered_map<std::string, int> ac_bus_by_name;
+  std::unordered_map<std::string, int> ac_bus_by_key;
+  std::unordered_set<int> ac_bus_stubs;
   std::unordered_map<std::string, int> dc_bus_by_name;
   std::unordered_map<std::string, BdStation> bd_by_name;
   std::vector<PendingLccLink> pending_lcc_links;
+  std::vector<RControl> r_controls;
+  std::unordered_map<int, TransformerCardData> transformer_card_data;
+  std::unordered_map<std::string, BzStation> bz_by_name;
+  std::vector<std::string> bz_order;  // BZ card order -> stable VSC .index
+  std::vector<PendingLzLink> pending_lz_links;
+  std::vector<PendingLineShunt> pending_line_shunts;
   bool g_half_note_emitted{false};
   bool magnetizing_note_emitted{false};
 
@@ -222,17 +336,34 @@ struct Importer {
     result.report.add(disp, code, ImportSeverity::Warning, locator, msg);
   }
 
+  static double normalized_ac_kv(double base_kv) {
+    return base_kv > 0.0 ? base_kv : 110.0;
+  }
+
+  static std::string ac_bus_key(const std::string& name, double base_kv) {
+    // BPA identifies a terminal by fixed-width name and nominal voltage.
+    const auto kv_millivolts = static_cast<long long>(
+        std::llround(normalized_ac_kv(base_kv) * 1000.0));
+    return name + '\x1f' + std::to_string(kv_millivolts);
+  }
+
+  int find_ac_bus(const std::string& name, double base_kv) const {
+    const auto it = ac_bus_by_key.find(ac_bus_key(name, base_kv));
+    return it == ac_bus_by_key.end() ? 0 : it->second;
+  }
+
   /// Fetch (or create as PQ stub) an AC bus by UTF-8 name.  When
   /// @p quiet is true the creation is not reported (used by cards that are
   /// themselves a bus declaration, e.g. BD).
   int ensure_ac_bus(const std::string& name, double base_kv,
                     const std::string& locator, bool quiet = false) {
-    auto it = ac_bus_by_name.find(name);
-    if (it != ac_bus_by_name.end()) return it->second;
+    const std::string key = ac_bus_key(name, base_kv);
+    auto it = ac_bus_by_key.find(key);
+    if (it != ac_bus_by_key.end()) return it->second;
     ACBus bus;
     bus.index = static_cast<int>(result.system.ac.buses.size()) + 1;
     bus.bus_type = BusType::PQ;
-    bus.base_kv = base_kv > 0.0 ? base_kv : 110.0;
+    bus.base_kv = normalized_ac_kv(base_kv);
     bus.name = name;
     if (!quiet) {
       warn(ImportDisposition::Coerced, ImportReasonCode::UnresolvedBusRef,
@@ -240,7 +371,8 @@ struct Importer {
                     "as PQ stub (base_kv from referencing card).");
     }
     result.system.ac.buses.push_back(bus);
-    ac_bus_by_name.emplace(name, bus.index);
+    ac_bus_by_key.emplace(key, bus.index);
+    ac_bus_stubs.insert(bus.index);
     return bus.index;
   }
 
@@ -280,8 +412,7 @@ struct Importer {
     const double tail = num_scaled(field(line, 62, 65), 1000.0, present);
 
     ACBus bus;
-    bus.index = static_cast<int>(result.system.ac.buses.size()) + 1;
-    bus.base_kv = kv > 0.0 ? kv : 110.0;
+    bus.base_kv = normalized_ac_kv(kv);
     bus.name = name;
     const std::string zone = field(line, 19, 20);
     if (!zone.empty() && std::isdigit(static_cast<unsigned char>(zone[0]))) {
@@ -300,8 +431,23 @@ struct Importer {
       bus.vmax_pu = vsch > 0.0 ? vsch : bus.vmax_pu;
       bus.vmin_pu = tail > 0.0 ? tail : bus.vmin_pu;
     }
-    result.system.ac.buses.push_back(bus);
-    ac_bus_by_name.emplace(name, bus.index);
+    const std::string key = ac_bus_key(name, kv);
+    const auto existing = ac_bus_by_key.find(key);
+    if (existing == ac_bus_by_key.end()) {
+      bus.index = static_cast<int>(result.system.ac.buses.size()) + 1;
+      result.system.ac.buses.push_back(bus);
+      ac_bus_by_key.emplace(key, bus.index);
+    } else if (ac_bus_stubs.erase(existing->second) > 0) {
+      // Preserve the stable ID already used by preceding L/T/BD/BZ cards.
+      bus.index = existing->second;
+      result.system.ac.buses[static_cast<size_t>(bus.index) - 1] = bus;
+    } else {
+      warn(ImportDisposition::Rejected, ImportReasonCode::DuplicateId,
+           locator, "Duplicate " + type + " bus declaration for '" + name +
+                        "' at " + std::to_string(bus.base_kv) +
+                        " kV; skipped.");
+      return;
+    }
 
     if (std::abs(pload) > 0.0 || std::abs(qload) > 0.0) {
       Load ld;
@@ -321,15 +467,33 @@ struct Importer {
       sh.name = name;
       result.system.ac.shunts.push_back(std::move(sh));
     }
-    if (type != "B") {
+    const bool has_generation_data =
+        std::abs(pgenmax) > 0.0 || std::abs(pgen) > 0.0 ||
+        std::abs(qgenmax) > 0.0 || std::abs(qgenmin) > 0.0;
+    if (type != "B" || has_generation_data) {
       Generator gen;
       gen.index = static_cast<int>(result.system.ac.generators.size());
       gen.bus = bus.index;
       gen.pg_mw = pgen;
+      // On a plain B (PQ) card, columns 48-52 are the scheduled fixed
+      // reactive injection.  The same columns are Qmax on BE/BQ/BS cards.
+      if (type == "B") gen.qg_mvar = qgenmax;
       gen.vg_pu = vsch > 0.0 ? vsch : 1.0;
-      gen.pmax_mw = pgenmax;
-      gen.qmax_mvar = qgenmax;
-      gen.qmin_mvar = qgenmin;
+      if (type == "BS") {
+        gen.pmin_mw = -kBpaOpenActivePowerBoundMw;
+        gen.pmax_mw = pgenmax > 0.0 ? pgenmax
+                                    : kBpaOpenActivePowerBoundMw;
+      } else {
+        gen.pmin_mw = 0.0;
+        gen.pmax_mw = pgenmax;
+      }
+      if (type == "B") {
+        gen.qmax_mvar = qgenmax;
+        gen.qmin_mvar = qgenmax;
+      } else {
+        gen.qmax_mvar = qgenmax;
+        gen.qmin_mvar = qgenmin;
+      }
       gen.is_slack = (type == "BS");
       gen.name = name;
       result.system.ac.generators.push_back(std::move(gen));
@@ -354,6 +518,17 @@ struct Importer {
     br.to_bus = ensure_ac_bus(n2, kv2, locator);
     br.r_pu = num_rx(field(line, 39, 44), present);
     br.x_pu = num_rx(field(line, 45, 50), present);
+    if (std::abs(br.x_pu) > 0.0 &&
+        std::abs(br.x_pu) < kBpaMinLineReactancePu) {
+      const double source_x = br.x_pu;
+      br.x_pu = std::copysign(kBpaMinLineReactancePu, source_x);
+      std::ostringstream msg;
+      msg << "L-card reactance " << source_x
+          << " pu is below the DSP numerical floor; coerced to "
+          << br.x_pu << " pu.";
+      warn(ImportDisposition::Coerced, ImportReasonCode::RangeCoerced,
+           locator, msg.str());
+    }
     const double g_half = num_gb(field(line, 51, 56), present);
     const double b_half = num_gb(field(line, 57, 62), present);
     br.b_pu = 2.0 * b_half;  // card stores B/2 per side; model stores total.
@@ -373,6 +548,77 @@ struct Importer {
     const std::string ckt = field(line, 32, 32);
     br.name = "L_" + n1 + "_" + n2 + (ckt.empty() ? "" : "_" + ckt);
     result.system.ac.branches.push_back(std::move(br));
+  }
+
+  // AC line continuation card: L+ (terminal shunt reactors).
+  void parse_line_plus_card(const std::string& line,
+                            const std::string& locator) {
+    bool present = false;
+    PendingLineShunt extension;
+    extension.locator = locator;
+    extension.name1 = name_of(raw_field(line, 7, 14));
+    extension.kv1 = num(field(line, 15, 18), present);
+    extension.name2 = name_of(raw_field(line, 20, 27));
+    extension.kv2 = num(field(line, 28, 31), present);
+    extension.circuit = field(line, 32, 32);
+    extension.q1_mvar = num(field(line, 34, 38), present);
+    extension.q2_mvar = num(field(line, 44, 48), present);
+    if (extension.name1.empty() || extension.name2.empty()) {
+      warn(ImportDisposition::Rejected, ImportReasonCode::MissingRequired,
+           locator, "L+ card with a missing terminal name; skipped.");
+      return;
+    }
+    pending_line_shunts.push_back(std::move(extension));
+  }
+
+  void make_line_shunts(const PendingLineShunt& extension) {
+    const int bus1 = find_ac_bus(extension.name1, extension.kv1);
+    const int bus2 = find_ac_bus(extension.name2, extension.kv2);
+    if (bus1 == 0 || bus2 == 0) {
+      warn(ImportDisposition::Rejected, ImportReasonCode::UnresolvedBusRef,
+           extension.locator,
+           "L+ card references an undeclared terminal bus; skipped.");
+      return;
+    }
+
+    const std::string line_name =
+        "L_" + extension.name1 + "_" + extension.name2 +
+        (extension.circuit.empty() ? "" : "_" + extension.circuit);
+    const auto line_it = std::find_if(
+        result.system.ac.branches.begin(), result.system.ac.branches.end(),
+        [&](const ACBranch& branch) {
+          return branch.name == line_name && branch.from_bus == bus1 &&
+                 branch.to_bus == bus2;
+        });
+    if (line_it == result.system.ac.branches.end()) {
+      warn(ImportDisposition::Rejected, ImportReasonCode::UnresolvedBusRef,
+           extension.locator,
+           "L+ card has no corresponding L branch '" + line_name +
+               "'; skipped.");
+      return;
+    }
+
+    const auto add_reactor = [&](int bus, double q_mvar,
+                                 const std::string& terminal) {
+      if (std::abs(q_mvar) <= 0.0) return;
+      Shunt shunt;
+      shunt.index = static_cast<int>(result.system.ac.shunts.size());
+      shunt.bus = bus;
+      // Positive L+ Mvar absorbs Q; positive model susceptance injects Q.
+      shunt.bs_mvar = -q_mvar;
+      shunt.name = "L+_" + extension.name1 + "_" + extension.name2 +
+                   (extension.circuit.empty()
+                        ? ""
+                        : "_" + extension.circuit) +
+                   "_" + terminal;
+      result.system.ac.shunts.push_back(std::move(shunt));
+    };
+    add_reactor(bus1, extension.q1_mvar, "from");
+    add_reactor(bus2, extension.q2_mvar, "to");
+    result.report.add(ImportDisposition::Accepted, ImportReasonCode::Ok,
+                      ImportSeverity::Info, extension.locator,
+                      "L+ line-reactor continuation bound to '" + line_name +
+                          "' as terminal shunt element(s).");
   }
 
   // ── AC transformer card: T ─────────────────────────────────────────────
@@ -405,6 +651,12 @@ struct Importer {
     const double tap1 = num_scaled(field(line, 62, 67), 100.0, present);
     const double tap2 = num_scaled(field(line, 68, 73), 100.0, present);
     if (tap1 > 0.0 && tap2 > 0.0 && kv1 > 0.0 && kv2 > 0.0) {
+      // BPA T-card R/X is referred to the second winding's stated voltage.
+      // DSP converts it to the terminal-2 bus base before building Ybus.
+      const double ratio2 = tap2 / kv2;
+      const double impedance_scale = ratio2 * ratio2;
+      br.r_pu *= impedance_scale;
+      br.x_pu *= impedance_scale;
       // Per-unit turns ratio referred to the from-bus (side 1).
       br.tap = (tap1 / kv1) / (tap2 / kv2);
     }
@@ -415,10 +667,54 @@ struct Importer {
     if (n_par > 0.0) br.n_parallel = static_cast<int>(std::lround(n_par));
     const std::string ckt = field(line, 32, 32);
     br.name = "T_" + n1 + "_" + n2 + (ckt.empty() ? "" : "_" + ckt);
+    TransformerCardData card;
+    card.branch_index = br.index;
+    card.name1 = n1;
+    card.name2 = n2;
+    card.kv1 = kv1;
+    card.kv2 = kv2;
+    card.tap1_kv = tap1;
+    card.tap2_kv = tap2;
+    transformer_card_data.emplace(br.index, std::move(card));
     result.system.ac.branches.push_back(std::move(br));
   }
 
   // ── Two-terminal HVDC node card: BD ────────────────────────────────────
+  // R is a control record bound to an existing T card; it never creates a
+  // second electrical branch. For an LCC transformer it supplies the tap
+  // range used by the unified power-flow alpha/gamma control outer loop.
+  void parse_r_card(const std::string& line, const std::string& locator) {
+    bool present = false;
+    RControl control;
+    control.locator = locator;
+    control.name1 = name_of(raw_field(line, 7, 14));
+    control.kv1 = num(field(line, 15, 18), present);
+    control.adjustable_terminal =
+        static_cast<int>(std::lround(num(field(line, 19, 19), present)));
+    if (control.adjustable_terminal != 2) {
+      // DSP treats a blank winding flag as side 1 (e.g. Samples/2DC).
+      control.adjustable_terminal = 1;
+    }
+    control.name2 = name_of(raw_field(line, 20, 27));
+    control.kv2 = num(field(line, 28, 31), present);
+    control.controlled_name = name_of(raw_field(line, 34, 41));
+    control.controlled_kv = num(field(line, 42, 45), present);
+    control.tap_max_kv = num_scaled(field(line, 46, 50), 100.0, present);
+    control.tap_min_kv = num_scaled(field(line, 51, 55), 100.0, present);
+    control.tap_count =
+        static_cast<int>(std::lround(num(field(line, 56, 57), present)));
+    if (control.name1.empty() || control.name2.empty()) {
+      warn(ImportDisposition::Rejected, ImportReasonCode::MissingRequired,
+           locator, "R card with a missing transformer terminal; skipped.");
+      return;
+    }
+    r_controls.push_back(std::move(control));
+    result.report.add(ImportDisposition::Accepted, ImportReasonCode::Ok,
+                      ImportSeverity::Info, locator,
+                      "R tap-control card retained and bound to its T-card "
+                      "transformer; no duplicate electrical branch created.");
+  }
+
   void parse_bd_card(const std::string& line, const std::string& locator) {
     bool present = false;
     const std::string name = name_of(raw_field(line, 7, 14));
@@ -449,16 +745,61 @@ struct Importer {
   // Builds one LCCConverter from the pending BD data of one LD terminal.
   // The commutation reactance is taken from the converter-transformer T card
   // connecting the BD primary-side bus (cols 51-58) to the valve-side bus.
-  // NOTE on bases: per the dat card manual (ch3, T card) the T-card R/X is
-  // in pu on the transformer Sn base — NOT on the system base (the legacy AC
-  // branch import above reads it verbatim into ACBranch::x_pu, which is a
-  // separate known approximation).  Here the card value is divided by the
-  // parallel-unit count and stored on the transformer Sn base, exactly as the
-  // manual's X_c = X_T' formula prescribes; x_comm_ohm refers it to the
-  // valve-side voltage: X_ohm = X_pu * V_valve^2 / S_N.
+  // DSP consumes T-card R/X directly on the case MVA base. The explicit
+  // transformer branch keeps that AC-parallel equivalent leakage. The LCC
+  // characteristic needs the leakage of one bridge transformer; n_bridges
+  // bridge transformers are parallel on the AC side and series on the DC side,
+  // so one bridge's X_c is n_bridges times the branch-equivalent value.
+  const RControl* find_lcc_r_control(const BdStation& st) const {
+    for (const auto& control : r_controls) {
+      const bool direct = control.name1 == st.primary_name &&
+                          control.name2 == st.name;
+      const bool reverse = control.name2 == st.primary_name &&
+                           control.name1 == st.name;
+      if ((direct || reverse) &&
+          (control.controlled_name.empty() ||
+           control.controlled_name == st.name)) {
+        return &control;
+      }
+    }
+    return nullptr;
+  }
+
+  std::pair<double, double> r_card_tap_bounds(const RControl& control,
+                                               int branch_index) const {
+    if (!(control.tap_min_kv > 0.0) || !(control.tap_max_kv > 0.0)) {
+      return {0.0, 0.0};
+    }
+    const auto card_it = transformer_card_data.find(branch_index);
+    if (card_it == transformer_card_data.end()) return {0.0, 0.0};
+    const auto& card = card_it->second;
+    const double ratio1 = card.tap1_kv > 0.0 && card.kv1 > 0.0
+                              ? card.tap1_kv / card.kv1
+                              : 1.0;
+    const double ratio2 = card.tap2_kv > 0.0 && card.kv2 > 0.0
+                              ? card.tap2_kv / card.kv2
+                              : 1.0;
+    const std::string adjustable = control.adjustable_terminal == 2
+                                       ? control.name2
+                                       : control.name1;
+    auto branch_tap = [&](double winding_kv) {
+      if (adjustable == card.name1 && card.kv1 > 0.0) {
+        return (winding_kv / card.kv1) / ratio2;
+      }
+      if (adjustable == card.name2 && card.kv2 > 0.0) {
+        return ratio1 / (winding_kv / card.kv2);
+      }
+      return 0.0;
+    };
+    const double a = branch_tap(control.tap_min_kv);
+    const double b = branch_tap(control.tap_max_kv);
+    return {std::min(a, b), std::max(a, b)};
+  }
+
   void make_lcc_station(const BdStation& st, LCCStationRole role,
                         const std::string& locator, double p_sch,
-                        double vdc_kv, double alpha_n_deg,
+                        double vdc_kv, double local_vdc_set_kv,
+                        double alpha_n_deg,
                         double gamma_n_deg) {
     LCCConverter c;
     c.index = static_cast<int>(result.system.lcc_converters.size());
@@ -480,8 +821,7 @@ struct Importer {
     const ACBranch* xfmr = nullptr;
     int primary_bus = 0;
     if (!st.primary_name.empty()) {
-      const auto it = ac_bus_by_name.find(st.primary_name);
-      if (it != ac_bus_by_name.end()) primary_bus = it->second;
+      primary_bus = find_ac_bus(st.primary_name, st.primary_kv);
     }
     for (const auto& br : result.system.ac.branches) {
       const bool touches_valve =
@@ -496,16 +836,9 @@ struct Importer {
     }
     if (xfmr != nullptr) {
       c.converter_transformer_branch = xfmr->index;
-      const double n_par = std::max(1.0, static_cast<double>(xfmr->n_parallel));
-      c.x_comm_pu = xfmr->x_pu / n_par;
-      c.x_comm_base_mva = xfmr->sn_mva > 0.0 ? xfmr->sn_mva : mva_base;
-      if (xfmr->sn_mva <= 0.0) {
-        warn(ImportDisposition::Coerced, ImportReasonCode::UnitInferred,
-             locator, "Converter transformer '" + xfmr->name +
-                      "' has no rated capacity (Sn); commutation reactance "
-                      "kept on the system base instead of the transformer "
-                      "base.");
-      }
+      const double n_bridges = static_cast<double>(c.n_bridges);
+      c.x_comm_pu = xfmr->x_pu * n_bridges;
+      c.x_comm_base_mva = mva_base;
       if (st.ac_kv > 0.0 && c.x_comm_base_mva > 0.0) {
         c.x_comm_ohm =
             c.x_comm_pu * st.ac_kv * st.ac_kv / c.x_comm_base_mva;
@@ -524,22 +857,52 @@ struct Importer {
     c.p_set_mw = p_sch;
     if (role == LCCStationRole::Rectifier) {
       c.control_mode = LCCControlMode::ConstantPower;
-      c.v_dc_set_kv = vdc_kv;
+      c.external_control_code = "PAAL";
+      c.v_dc_set_kv = local_vdc_set_kv;
       c.alpha_set_deg = alpha_n_deg;
     } else {
       c.control_mode = LCCControlMode::ConstantGamma;
+      c.external_control_code = "VDGA";
+      c.v_dc_set_kv = local_vdc_set_kv;
       c.gamma_set_deg = gamma_n_deg;
     }
 
-    c.model_scope = "lcc-quasi-steady";
+    if (xfmr != nullptr) {
+      if (const RControl* control = find_lcc_r_control(st);
+          control != nullptr) {
+        const auto [tap_min, tap_max] =
+            r_card_tap_bounds(*control, xfmr->index);
+        const double target_angle =
+            role == LCCStationRole::Rectifier ? alpha_n_deg : gamma_n_deg;
+        if (tap_min > 0.0 && tap_max >= tap_min && target_angle > 0.0) {
+          c.tap_control_modelled = true;
+          c.transformer_tap_min_pu = tap_min;
+          c.transformer_tap_max_pu = tap_max;
+          c.transformer_tap_steps = control->tap_count;
+          c.transformer_tap_winding =
+              control->adjustable_terminal == 2 ? 2 : 1;
+        } else {
+          warn(ImportDisposition::Coerced,
+               ImportReasonCode::UnsupportedControl, control->locator,
+               "R card could not be activated for LCC tap control because "
+               "its tap range or LD angle target is missing.");
+        }
+      }
+    }
+
+    c.model_scope = c.tap_control_modelled
+                        ? "lcc-quasi-steady+transformer-tap-control"
+                        : "lcc-quasi-steady";
     c.model_limitations =
         "Quasi-steady LCC station model (BD/LD card import): no commutation "
-        "overlap-angle iteration, no converter-transformer tap control, "
-        "smoothing reactor ignored (dynamic-only). Consumed by the unified "
-        "Newton power flow (Q = P*tan(phi), cos(phi) ~= U_d/U_d0). With "
-        "fixed taps the back-calculated alpha departs from AlphaN and the DC "
-        "voltage level floats with the solved valve-side voltage — no tap "
-        "action is simulated.";
+        "overlap-angle iteration; smoothing reactor ignored (dynamic-only). "
+        "Consumed by the unified Newton power flow (Q = P*tan(phi), "
+        "cos(phi) ~= U_d/U_d0).";
+    if (!c.tap_control_modelled) {
+      c.model_limitations +=
+          " No applicable R card was found, so the converter-transformer tap "
+          "is fixed and the reported alpha/gamma may depart from its target.";
+    }
     result.system.lcc_converters.push_back(std::move(c));
   }
 
@@ -596,6 +959,12 @@ struct Importer {
       br.rate_a_mva = vdc_kv * i_rated / 1000.0;
     }
     br.length_km = length;
+    if (length > 0.0) {
+      // LD columns 38-41 contain the resistance of the complete DC line.
+      // Preserve the equivalent engineering value used by the GUI instead of
+      // leaving the per-kilometre field at its default zero.
+      br.r_ohm_per_km = r_ohm / length;
+    }
     br.name = "LD_" + n_rect + "_" + n_inv;
     result.system.dc.branches.push_back(std::move(br));
 
@@ -620,15 +989,22 @@ struct Importer {
       link.inv_name = n_inv;
       link.p_sch = p_sch;
       link.vdc_kv = vdc_kv;
+      const double scheduled_id_ka =
+          p_sch > 0.0 && vdc_kv > 0.0 ? p_sch / vdc_kv : 0.0;
+      link.inv_vdc_set_kv =
+          vdc_kv > 0.0
+              ? std::max(0.0, vdc_kv - scheduled_id_ka * r_ohm)
+              : 0.0;
       link.alpha_n_deg = alpha_n_deg;
       link.gamma_n_deg = gamma_n_deg;
       pending_lcc_links.push_back(std::move(link));
       return;
     }
 
-    // LCC link approximated by VSC converters (default VscApprox path; the
-    // native LCCConverter import above is opt-in via BpaImportOptions::
-    // lcc_model).  Station roles mirror the physical LCC link:
+    // Legacy opt-in path: approximate the LCC link with VSC converters when
+    // BpaImportOptions::lcc_model is explicitly VscApprox.  Native
+    // LCCConverter import is the default path above.  Station roles mirror
+    // the physical LCC link:
     //   * Rectifier (sending end): PQ_MODE, draws the scheduled power from
     //     its AC system (p_set = -Psch) — matches the DSP solution exactly.
     //   * Inverter (receiving end): VDC_Q, forms the inverter-side DC voltage
@@ -706,6 +1082,228 @@ struct Importer {
          msg.str());
   }
 
+  // ── VSC-HVDC station node card: BZ ───────────────────────────────────
+  void parse_bz_card(const std::string& line, const std::string& locator) {
+    bool present = false;
+    const std::string name = name_of(raw_field(line, 7, 14));
+    if (name.empty()) {
+      warn(ImportDisposition::Rejected, ImportReasonCode::MissingRequired,
+           locator, "BZ card without a station name; skipped.");
+      return;
+    }
+    if (bz_by_name.count(name) != 0) {
+      warn(ImportDisposition::Rejected, ImportReasonCode::DuplicateId, locator,
+           "Duplicate BZ station '" + name + "'; skipped.");
+      return;
+    }
+    const double kv = num(field(line, 15, 18), present);
+    BzStation st;
+    st.name = name;
+    st.locator = locator;
+    st.ac_bus = ensure_ac_bus(name, kv, locator, /*quiet=*/true);
+    st.ac_kv = kv;
+    st.sn_mva = num(field(line, 21, 25), present);
+    st.rc_pu = num(field(line, 51, 55), present);
+    const double poles = num(field(line, 64, 64), present);
+    if (poles >= 1.0) st.n_poles = static_cast<int>(std::lround(poles));
+    st.udcn_bz_kv = num(field(line, 67, 70), present);
+    st.dc_bus = ensure_dc_bus(name, st.udcn_bz_kv);
+    bz_order.push_back(name);
+    bz_by_name.emplace(name, std::move(st));
+  }
+
+  // ── VSC-HVDC station continuation card: BZ+ ──────────────────────────
+  void parse_bz_plus_card(const std::string& line, const std::string& locator) {
+    bool present = false;
+    const std::string name = name_of(raw_field(line, 7, 14));
+    const auto it = bz_by_name.find(name);
+    if (name.empty() || it == bz_by_name.end()) {
+      // DSP aborts with "THE FOLLOWING BZ+ CARD DO NOT HAVE CORRESPONDING BZ
+      // CARD"; mirror that as an import error.
+      result.report.add(ImportDisposition::Rejected,
+                        ImportReasonCode::UnresolvedBusRef,
+                        ImportSeverity::Error, locator,
+                        "BZ+ card for station '" + name +
+                            "' has no corresponding BZ card; skipped.");
+      return;
+    }
+    BzStation& st = it->second;
+    if (st.has_plus) {
+      warn(ImportDisposition::Coerced, ImportReasonCode::DuplicateId, locator,
+           "Duplicate BZ+ card for station '" + name + "'; later card wins.");
+    }
+    st.has_plus = true;
+    st.p_set_mw = num(field(line, 20, 24), present);
+    st.q_card_mvar = num(field(line, 26, 29), present);
+    const std::string flag = field(line, 34, 34);
+    st.mode_flag = flag.empty() ? 0 : std::atoi(flag.c_str());
+    st.udcn_kv = num(field(line, 36, 39), present);
+    st.udc_set_kv = num(field(line, 41, 44), present);
+    st.xc_pu = num(field(line, 53, 58), present);
+    if (st.udcn_kv <= 0.0) {
+      // DSP aborts with "直流额定电压<=0kV" here; fall back to the BZ-card
+      // value (which may itself be 0 -> handled at materialization).
+      warn(ImportDisposition::Coerced, ImportReasonCode::MissingRequired,
+           locator, "BZ+ card for station '" + name +
+                        "' has no rated DC voltage (cols 36-39); falling back "
+                        "to the BZ-card value.");
+    }
+  }
+
+  // ── VSC-HVDC line card: LZ ───────────────────────────────────────────
+  void parse_lz_card(const std::string& line, const std::string& locator) {
+    bool present = false;
+    PendingLzLink lz;
+    lz.locator = locator;
+    lz.name1 = name_of(raw_field(line, 7, 14));
+    lz.name2 = name_of(raw_field(line, 20, 27));
+    lz.i_rated_a = num(field(line, 34, 37), present);
+    lz.r_ohm = num(field(line, 38, 43), present);
+    pending_lz_links.push_back(std::move(lz));
+  }
+
+  /// Rated DC voltage of a BZ station: the BZ+ value governs; the BZ-card
+  /// value (cols 67-70) is the fallback.
+  static double bz_udcn_kv(const BzStation& st) {
+    return st.udcn_kv > 0.0 ? st.udcn_kv : st.udcn_bz_kv;
+  }
+
+  // ── VSC station construction (materialized after the whole file) ──────
+  void make_vsc_station(BzStation& st) {
+    const double udcn = bz_udcn_kv(st);
+    if (udcn > 0.0) {
+      DCBus& b = result.system.dc.buses[static_cast<size_t>(st.dc_bus) - 1];
+      if (b.base_kv <= 0.0) b.base_kv = udcn;
+    }
+    if (!st.has_plus) {
+      warn(ImportDisposition::Coerced, ImportReasonCode::MissingRequired,
+           st.locator, "BZ station '" + st.name +
+                           "' has no BZ+ continuation card; imported as a "
+                           "constant-P/Q station with zero setpoints.");
+    }
+
+    VSCConverter c;
+    c.index = static_cast<int>(result.system.vsc_converters.size());
+    c.bus_ac = st.ac_bus;
+    c.bus_dc = st.dc_bus;
+    c.vn_ac_kv = st.ac_kv;
+    c.vn_dc_kv = udcn;
+    // Station active loss: DSP books |P|*Rc (Rc in pu on the converter
+    // base), i.e. an efficiency eta = 1 - Rc under the engine's Linear loss
+    // model.  (DSP applies the factor in the power-flow direction on both
+    // stations, so its reported DC-side power exceeds the physical
+    // conservation value by ~Rc*|P| at each end; see the compare test.)
+    c.eta = st.rc_pu > 0.0 ? std::max(0.9, 1.0 - st.rc_pu) : 1.0;
+    if (st.mode_flag == 1) {
+      // Constant DC voltage station (定直流电压站): forms the DC voltage,
+      // AC active power is free; P from the card is schedule/warm-start only.
+      c.control_mode = ConverterMode::VDC_Q;
+      if (st.udc_set_kv > 0.0 && udcn > 0.0) {
+        c.v_dc_set_pu = st.udc_set_kv / udcn;
+      } else {
+        c.v_dc_set_pu = 1.0;
+        warn(ImportDisposition::Coerced, ImportReasonCode::MissingRequired,
+             st.locator, "Constant-DC-voltage station '" + st.name +
+                             "' without a valid DC voltage setpoint "
+                             "(BZ+ cols 41-44); 1.0 pu used.");
+      }
+      // Very stiff Vdc hold: DSP mode-1 stations hold Udc exactly, and the
+      // sole-former lock (plan_dc_island_references) keeps the adaptive
+      // mode switch from demoting the station, so a much stiffer droop than
+      // the LCC-approx precedent (1e3) is safe and lands Udc within ~0.01%
+      // of the setpoint for typical transfers.
+      c.k_vdc = 1e5;
+      c.p_set_mw = -st.p_set_mw;  // card: >0 absorbs; model: >0 injects
+      c.p_schedule_mw = -st.p_set_mw;
+      c.p_initial_mw = -st.p_set_mw;
+    } else {
+      // Constant power station (定功率站): P and Q held at the AC terminal.
+      if (st.mode_flag != 0 && st.mode_flag != 2) {
+        warn(ImportDisposition::Coerced, ImportReasonCode::UnsupportedControl,
+             st.locator, "BZ+ control-mode flag " +
+                             std::to_string(st.mode_flag) + " on station '" +
+                             st.name +
+                             "' is not modeled; constant-P/Q control assumed.");
+      }
+      c.control_mode = ConverterMode::PQ_MODE;
+      c.p_set_mw = -st.p_set_mw;  // card: >0 absorbs; model: >0 injects
+    }
+    // BPA card P/Q signs follow the load convention (positive absorbs —
+    // verified against DSP branch-flow signs and the bus-voltage response);
+    // the model uses the injection convention.
+    c.q_set_mvar = -st.q_card_mvar;
+    c.name = "VSC_" + st.name;
+    c.type = "VSC(BZ)";
+    result.system.vsc_converters.push_back(std::move(c));
+
+    std::ostringstream msg;
+    msg << "VSC station '" << st.name << "' (BZ/BZ+): "
+        << (st.mode_flag == 1 ? "constant DC voltage, Udc=" : "constant P/Q, P=")
+        << (st.mode_flag == 1 ? st.udc_set_kv : -st.p_set_mw)
+        << (st.mode_flag == 1 ? " kV" : " MW") << ", Q=" << -st.q_card_mvar
+        << " Mvar (injection), UdcN=" << udcn << " kV, eta=" << 1.0 - st.rc_pu
+        << " (from Rc=" << st.rc_pu
+        << " pu). The Xc internal reactive loss (BZ+ cols 53-58) is inside "
+           "DSP's converter model and does not reach the AC terminal; it is "
+           "not part of the imported power-flow model.";
+    result.report.add(ImportDisposition::Accepted, ImportReasonCode::Ok,
+                      ImportSeverity::Info, st.locator, msg.str());
+  }
+
+  // ── VSC-HVDC line construction (materialized after the whole file) ────
+  void make_lz_branch(const PendingLzLink& lz) {
+    const auto it1 = bz_by_name.find(lz.name1);
+    const auto it2 = bz_by_name.find(lz.name2);
+    if (lz.name1.empty() || lz.name2.empty() || it1 == bz_by_name.end() ||
+        it2 == bz_by_name.end()) {
+      // DSP aborts with "LZ卡没有对应BZ卡"; here the line is dropped.
+      warn(ImportDisposition::Rejected, ImportReasonCode::UnresolvedBusRef,
+           lz.locator, "LZ card references a VSC station without a BZ card "
+                       "('" + lz.name1 + "' / '" + lz.name2 + "'); skipped.");
+      return;
+    }
+    const BzStation& st1 = it1->second;
+    const BzStation& st2 = it2->second;
+    const double udcn1 = bz_udcn_kv(st1);
+    const double udcn2 = bz_udcn_kv(st2);
+    const double udcn = udcn1 > 0.0 ? udcn1 : udcn2;
+    if (udcn1 > 0.0 && udcn2 > 0.0 && std::abs(udcn1 - udcn2) > 1e-6) {
+      // The card manual requires equal rated DC voltages at both ends.
+      warn(ImportDisposition::Coerced, ImportReasonCode::UnitInferred,
+           lz.locator, "LZ card '" + lz.name1 + "'-'" + lz.name2 +
+                           "': terminal rated DC voltages differ (" +
+                           std::to_string(udcn1) + " / " +
+                           std::to_string(udcn2) + " kV); the first is used.");
+    }
+    if (st1.n_poles != st2.n_poles) {
+      warn(ImportDisposition::Coerced, ImportReasonCode::UnitInferred,
+           lz.locator, "LZ card '" + lz.name1 + "'-'" + lz.name2 +
+                           "': terminal pole counts differ; the first "
+                           "station's is used.");
+    }
+
+    DCBranch br;
+    br.index = static_cast<int>(result.system.dc.branches.size());
+    br.from_bus = st1.dc_bus;
+    br.to_bus = st2.dc_bus;
+    // R on the card is per pole; n poles in parallel give R/n (verified
+    // against DSP: poles 2 -> 1 doubles the line loss).
+    const double r_eff = lz.r_ohm / std::max(1, st1.n_poles);
+    if (udcn > 0.0) {
+      br.r_pu = r_eff * mva_base / (udcn * udcn);
+      br.base_kv = udcn;
+    } else {
+      warn(ImportDisposition::Coerced, ImportReasonCode::MissingRequired,
+           lz.locator, "LZ card: no DC voltage known; DC line resistance "
+                       "left 0.");
+    }
+    if (lz.i_rated_a > 0.0 && udcn > 0.0) {
+      br.rate_a_mva = udcn * lz.i_rated_a / 1000.0;
+    }
+    br.name = "LZ_" + lz.name1 + "_" + lz.name2;
+    result.system.dc.branches.push_back(std::move(br));
+  }
+
   // ── Line dispatch ──────────────────────────────────────────────────────
   void parse_control_card(const std::string& line) {
     const std::string up = line;
@@ -740,8 +1338,10 @@ struct Importer {
       ++line_no;
       if (!line.empty() && line.back() == '\r') line.pop_back();
       if (trim(line).empty()) continue;
-      const char c0 = line.size() > 0 ? line[0] : ' ';
-      const char c1 = line.size() > 1 ? line[1] : ' ';
+      // Network/control card types occupy column 1. Indented nonblank lines
+      // in production decks are free-form equipment descriptions.
+      if (line[0] == ' ' || line[0] == '\t') continue;
+      const char c0 = line[0];
       const std::string locator =
           "line " + std::to_string(line_no);
 
@@ -764,18 +1364,27 @@ struct Importer {
         parse_bus_card(line, locator);
       } else if (type == "L ") {
         parse_line_card(line, locator);
+      } else if (type == "L+") {
+        parse_line_plus_card(line, locator);
       } else if (type == "T ") {
         parse_transformer_card(line, locator);
       } else if (type == "BD") {
         parse_bd_card(line, locator);
       } else if (type == "LD") {
         parse_ld_card(line, locator);
+      } else if (type == "BZ") {
+        // BZ+ shares the leading "BZ"; column 3 disambiguates.
+        if (line.size() > 2 && line[2] == '+') {
+          parse_bz_plus_card(line, locator);
+        } else {
+          parse_bz_card(line, locator);
+        }
+      } else if (type == "LZ") {
+        parse_lz_card(line, locator);
       } else if (type == "R ") {
-        warn(ImportDisposition::Skipped, ImportReasonCode::UnsupportedControl,
-             locator, "R (LTC tap-control) card not modeled; transformer tap "
-                      "held at the fixed T-card value.");
+        parse_r_card(line, locator);
       } else if (type == "BA" || type == "LY" || type == "DC" || type == "BB" ||
-                 type == "LZ" || type == "BM" || type == "LM") {
+                 type == "BM" || type == "LM") {
         warn(ImportDisposition::Skipped, ImportReasonCode::UnsupportedControl,
              locator, type + " card (multi-terminal / LCCDC DC data) is not "
                       "supported by this importer; skipped.");
@@ -786,6 +1395,12 @@ struct Importer {
       }
     }
 
+    // L+ cards repeat the parent L-card identity, so they can be bound after
+    // the full deck has declared every line and formal bus.
+    for (const auto& extension : pending_line_shunts) {
+      make_line_shunts(extension);
+    }
+
     // Materialize pending LCC links now that every T card has been seen (the
     // converter transformer may be declared after the LD card).
     for (const auto& link : pending_lcc_links) {
@@ -793,20 +1408,30 @@ struct Importer {
       const auto it_i = bd_by_name.find(link.inv_name);
       if (it_r == bd_by_name.end() || it_i == bd_by_name.end()) continue;
       make_lcc_station(it_r->second, LCCStationRole::Rectifier, link.locator,
-                       link.p_sch, link.vdc_kv, link.alpha_n_deg,
-                       link.gamma_n_deg);
+                       link.p_sch, link.vdc_kv, link.vdc_kv,
+                       link.alpha_n_deg, link.gamma_n_deg);
       make_lcc_station(it_i->second, LCCStationRole::Inverter, link.locator,
-                       link.p_sch, link.vdc_kv, link.alpha_n_deg,
-                       link.gamma_n_deg);
+                       link.p_sch, link.vdc_kv, link.inv_vdc_set_kv,
+                       link.alpha_n_deg, link.gamma_n_deg);
       std::ostringstream lcc_msg;
       lcc_msg << "LCC HVDC link '" << link.rect_name << "' -> '"
               << link.inv_name << "' (P=" << link.p_sch
               << " MW, V=" << link.vdc_kv
               << " kV) imported as two quasi-steady LCCConverter elements "
-                 "(consumed by the unified Newton power flow; fixed taps, "
-                 "see model_limitations on each element).";
+                 "(consumed by the unified Newton power flow; applicable R "
+                 "cards activate the converter-transformer tap outer loop).";
       result.report.add(ImportDisposition::Accepted, ImportReasonCode::Ok,
                         ImportSeverity::Info, link.locator, lcc_msg.str());
+    }
+
+    // Materialize VSC-HVDC stations (BZ/BZ+) and lines (LZ) now that every
+    // card has been seen: the BZ+ continuation and the LZ terminals may in
+    // principle appear anywhere after their BZ cards.
+    for (const auto& name : bz_order) {
+      make_vsc_station(bz_by_name.at(name));
+    }
+    for (const auto& lz : pending_lz_links) {
+      make_lz_branch(lz);
     }
 
     HybridPowerSystem& sys = result.system;

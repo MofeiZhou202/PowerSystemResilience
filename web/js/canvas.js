@@ -105,7 +105,7 @@ const Canvas = (() => {
     const dcBuses = len(dc.buses);
     const acBranches = len(ac.branches) + len(ac.transformers_2w) + len(ac.transformers_3w);
     const dcBranches = len(dc.branches);
-    const converters = len(jsonSys?.vsc_converters) + len(jsonSys?.dcdc_converters);
+    const converters = len(jsonSys?.vsc_converters) + len(jsonSys?.dcdc_converters) + len(jsonSys?.lcc_converters);
     // Every non-bus device becomes a glyph + a connection on the canvas.
     const acDevices = len(ac.generators) + len(ac.loads) + len(ac.static_generators) +
       len(ac.storage) + len(ac.renewable_gens) + len(ac.pv_systems) + len(ac.external_grids) +
@@ -984,18 +984,27 @@ const Canvas = (() => {
     return Number.isFinite(p) ? 100 * (p - minPower) / powerRange : 0;
   }
 
-  function addFlowLabel(x, y, powerMW, color) {
+  function addFlowMetadata(element, metadata) {
+    if (!element || !metadata) return element;
+    Object.entries(metadata).forEach(([key, value]) => {
+      if (value !== undefined && value !== null) element.dataset[key] = String(value);
+    });
+    return element;
+  }
+
+  function addFlowLabel(x, y, powerMW, color, metadata = null) {
     const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
     label.classList.add('viz-overlay', 'flow-label');
     label.setAttribute('x', x);
     label.setAttribute('y', y);
     label.setAttribute('fill', color);
     label.textContent = `${pFmt(Math.abs(numOr(powerMW, 0)))} ${pUnit()}`;
+    addFlowMetadata(label, metadata);
     resultsLayer.appendChild(label);
     return label;
   }
 
-  function addFlowArrow(fa, absPowerMW, color) {
+  function addFlowArrow(fa, absPowerMW, color, metadata = null) {
     const absPower = Math.abs(numOr(absPowerMW, 0));
     if (absPower <= FLOW_ARROW_EPS_MW) return null;
     const arrow = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
@@ -1005,15 +1014,16 @@ const Canvas = (() => {
     arrow.setAttribute('transform', `translate(${fa.mx},${fa.my}) rotate(${fa.angle})`);
     arrow.setAttribute('fill', color);
     arrow.setAttribute('opacity', '0.85');
+    addFlowMetadata(arrow, metadata);
     resultsLayer.appendChild(arrow);
     return arrow;
   }
 
-  function addFlowMarker(g, headPt, powerMW, color) {
+  function addFlowMarker(g, headPt, powerMW, color, metadata = null) {
     const fa = flowArrow(g, headPt);
     const absPower = Math.abs(numOr(powerMW, 0));
-    addFlowArrow(fa, absPower, color);
-    addFlowLabel(fa.mx + fa.offX, fa.my + fa.offY, absPower, color);
+    addFlowArrow(fa, absPower, color, metadata);
+    addFlowLabel(fa.mx + fa.offX, fa.my + fa.offY, absPower, color, metadata);
     return fa;
   }
 
@@ -1247,7 +1257,7 @@ const Canvas = (() => {
     if (!comp) return null;
     const t = comp.type;
     if (isIntegratedEnergyCanvasType(t)) return null;
-    if (t === 'vsc_converter' || t === 'dcdc_converter' || t === 'energy_router') return 'converter';
+    if (t === 'vsc_converter' || t === 'lcc_converter' || t === 'dcdc_converter' || t === 'energy_router') return 'converter';
     if (t.startsWith('dc_')) return 'dc';
     return 'ac';
   }
@@ -1738,7 +1748,7 @@ const Canvas = (() => {
   const BUS_TYPES = new Set(['ac_bus', 'dc_bus']);
   const INLINE_LAYOUT_TYPES = new Set([
     'ac_branch', 'dc_branch', 'transformer_2w', 'transformer_3w',
-    'switch_comp', 'circuit_breaker', 'vsc_converter', 'dcdc_converter',
+    'switch_comp', 'circuit_breaker', 'vsc_converter', 'lcc_converter', 'dcdc_converter',
     'energy_router'
   ]);
 
@@ -2477,7 +2487,7 @@ const Canvas = (() => {
     const inlineOffset = {
       ac_branch: 42, dc_branch: 42, switch_comp: 38, circuit_breaker: 38,
       transformer_2w: 60, transformer_3w: 72, vsc_converter: 64,
-      dcdc_converter: 64, energy_router: 80,
+      lcc_converter: 64, dcdc_converter: 64, energy_router: 80,
     };
     const isLineType = (t) => t === 'ac_branch' || t === 'dc_branch' ||
                             t === 'switch_comp' || t === 'circuit_breaker';
@@ -2939,6 +2949,7 @@ const Canvas = (() => {
 	        ac: { ...acSkel, ...(stored.ac || {}) },
 	        dc: { ...dcSkel, ...(stored.dc || {}) },
 	        vsc_converters: stored.vsc_converters || [],
+        lcc_converters: stored.lcc_converters || [],
 	        dcdc_converters: stored.dcdc_converters || [],
 	        energy_routers: stored.energy_routers || [],
 	        mobile_storage: stored.mobile_storage || [],
@@ -2967,6 +2978,7 @@ const Canvas = (() => {
             transformers_3w: [], chargers: [], charging_stations: [] },
       dc: { buses: [], branches: [], loads: [], dc_storage: [], static_generators: [], dc_static_generators: [], pv_arrays: [], dc_circuit_breakers: [] },
       vsc_converters: [],
+      lcc_converters: [],
       dcdc_converters: [],
       energy_routers: [],
       mobile_storage: [],
@@ -3105,7 +3117,7 @@ const Canvas = (() => {
     }
 
     // Second pass: create devices
-    let genIdx = 0, brIdx = 0, vscIdx = 0, loadIdx = 0, trafoIdx = 0, egIdx = 0,
+    let genIdx = 0, brIdx = 0, vscIdx = 0, lccIdx = 0, loadIdx = 0, trafoIdx = 0, egIdx = 0,
         storIdx = 0, pvIdx = 0, renIdx = 0, sgenIdx = 0, dcLoadIdx = 0, dcBrIdx = 0,
         swIdx = 0, cbIdx = 0, motorIdx = 0, dcPvIdx = 0, dcStorIdx = 0;
     state.components.forEach(comp => {
@@ -3180,6 +3192,7 @@ const Canvas = (() => {
           sys.ac.branches.push({
             index: Number.isFinite(Number(p.index)) ? Number(p.index) : brIdx,
             name: p.name || `Line ${Number.isFinite(Number(p.index)) ? Number(p.index) : brIdx}`,
+            branch_kind: String(p.branch_kind || 'line').toLowerCase(),
             from_bus: from, to_bus: to,
             r_pu: numOr(p.r_pu, 0.01),
             x_pu: numOr(p.x_pu, 0.1),
@@ -3222,14 +3235,23 @@ const Canvas = (() => {
             const sourceBranchIndex = Number.isFinite(Number(p.source_branch_idx))
               ? Number(p.source_branch_idx)
               : (Number.isFinite(Number(p.index)) ? Number(p.index) : brIdx);
+            const preservedBranch = p._branch_json &&
+              typeof p._branch_json === 'object' && !Array.isArray(p._branch_json)
+              ? p._branch_json : {};
             const relativeTap = Math.max(1e-6, 1 +
               (numOr(p.tap_pos, 0) - numOr(p.tap_neutral, 0)) *
               numOr(p.tap_step_percent, 0) / 100);
             const effectiveTap = Math.max(1e-6,
               numOr(p._tap_base_ratio, numOr(p.tap, 1.0)) * relativeTap);
             sys.ac.branches.push({
+              ...preservedBranch,
               index: sourceBranchIndex,
-              name: p._branch_name || p.name || `Line ${sourceBranchIndex}`,
+              name: p._branch_only_transformer
+                ? (p.name || p._branch_name || `Trafo ${sourceBranchIndex}`)
+                : (p._branch_name || p.name || `Line ${sourceBranchIndex}`),
+              branch_kind: String(
+                p.branch_kind || preservedBranch.branch_kind || 'transformer',
+              ).toLowerCase(),
               from_bus: hv, to_bus: lv,
               r_pu: numOr(p.r_pu, 0.01),
               x_pu: numOr(p.x_pu, 0.1),
@@ -3237,36 +3259,42 @@ const Canvas = (() => {
               rate_a_mva: numOr(p.rate_a_mva, 100),
               rate_b_mva: numOr(p.rate_b_mva, 0),
               rate_c_mva: numOr(p.rate_c_mva, 0),
-              length_km: 0,
+              length_km: numOr(p.length_km, numOr(preservedBranch.length_km, 0)),
               tap: effectiveTap,
               shift_deg: numOr(p.shift_deg, 0),
               in_service: p.in_service !== false,
-              n_parallel: 1,
+              n_parallel: Math.max(1, parseInt(p.n_parallel) ||
+                parseInt(preservedBranch.n_parallel) || 1),
+              vn_hv_kv: numOr(p.vn_hv_kv, numOr(preservedBranch.vn_hv_kv, 0)),
+              vn_lv_kv: numOr(p.vn_lv_kv, numOr(preservedBranch.vn_lv_kv, 0)),
+              sn_mva: numOr(p.sn_mva, numOr(preservedBranch.sn_mva, 0)),
             });
-            sys.ac.transformers_2w.push({
-              index: Number.isFinite(Number(p._transformer_index))
-                ? Number(p._transformer_index) : trafoIdx,
-              name: p.name || `Trafo ${trafoIdx}`,
-              hv_bus: hv, lv_bus: lv,
-              sn_mva: numOr(p.sn_mva, numOr(p.rate_a_mva, 100)),
-              vn_hv_kv: numOr(p.vn_hv_kv, 0),
-              vn_lv_kv: numOr(p.vn_lv_kv, 0),
-              vk_percent: numOr(p.vk_percent, 0),
-              vkr_percent: numOr(p.vkr_percent, 0),
-              pfe_kw: numOr(p.pfe_kw, 0),
-              i0_percent: numOr(p.i0_percent, 0),
-              shift_deg: numOr(p.shift_deg, 0),
-              tap_side: numOr(p.tap_side, 0),
-              tap_pos: numOr(p.tap_pos, 0),
-              tap_min: numOr(p.tap_min, 0),
-              tap_max: numOr(p.tap_max, 0),
-              tap_neutral: numOr(p.tap_neutral, 0),
-              tap_step_percent: numOr(p.tap_step_percent, 0),
-              source_branch_idx: sourceBranchIndex,
-              in_service: p.in_service !== false,
-            });
+            if (!p._branch_only_transformer) {
+              sys.ac.transformers_2w.push({
+                index: Number.isFinite(Number(p._transformer_index))
+                  ? Number(p._transformer_index) : trafoIdx,
+                name: p.name || `Trafo ${trafoIdx}`,
+                hv_bus: hv, lv_bus: lv,
+                sn_mva: numOr(p.sn_mva, numOr(p.rate_a_mva, 100)),
+                vn_hv_kv: numOr(p.vn_hv_kv, 0),
+                vn_lv_kv: numOr(p.vn_lv_kv, 0),
+                vk_percent: numOr(p.vk_percent, 0),
+                vkr_percent: numOr(p.vkr_percent, 0),
+                pfe_kw: numOr(p.pfe_kw, 0),
+                i0_percent: numOr(p.i0_percent, 0),
+                shift_deg: numOr(p.shift_deg, 0),
+                tap_side: numOr(p.tap_side, 0),
+                tap_pos: numOr(p.tap_pos, 0),
+                tap_min: numOr(p.tap_min, 0),
+                tap_max: numOr(p.tap_max, 0),
+                tap_neutral: numOr(p.tap_neutral, 0),
+                tap_step_percent: numOr(p.tap_step_percent, 0),
+                source_branch_idx: sourceBranchIndex,
+                in_service: p.in_service !== false,
+              });
+              trafoIdx++;
+            }
             brIdx++;
-            trafoIdx++;
           } else {
             const trafoIndex = Number.isFinite(Number(p.index)) ? Number(p.index) : trafoIdx;
             const trafo = {
@@ -3587,6 +3615,46 @@ const Canvas = (() => {
           vscIdx++;
           break;
         }
+        case 'lcc_converter': {
+          sys.lcc_converters.push(addDynamicModel({
+            index: Number.isFinite(Number(p.index)) ? Number(p.index) : lccIdx,
+            name: p.name || `LCC ${Number.isFinite(Number(p.index)) ? Number(p.index) : lccIdx}`,
+            // C++ LCC JSON uses ac_bus/dc_bus (unlike VSC's bus_ac/bus_dc).
+            ac_bus: findBusIndexByPort(comp.id, 'ac') || parseInt(p.bus_ac) || 0,
+            dc_bus: findBusIndexByPort(comp.id, 'dc') || parseInt(p.bus_dc) || 0,
+            control_mode: p.control_mode || 'CONSTANT_POWER',
+            station_role: p.station_role || 'RECTIFIER',
+            p_set_mw: numOr(p.p_set_mw, 0),
+            i_set_ka: numOr(p.i_set_ka, 0),
+            alpha_set_deg: numOr(p.alpha_set_deg, 15),
+            alpha_min_deg: numOr(p.alpha_min_deg, 5),
+            alpha_stop_deg: numOr(p.alpha_stop_deg, 140),
+            gamma_set_deg: numOr(p.gamma_set_deg, 0),
+            gamma_min_deg: numOr(p.gamma_min_deg, 0),
+            v_dc_set_kv: numOr(p.v_dc_set_kv, 0),
+            rated_dc_kv: numOr(p.rated_dc_kv, 0),
+            rated_current_a: numOr(p.rated_current_a, 0),
+            n_bridges: numOr(p.n_bridges, 1),
+            v_drop_v: numOr(p.v_drop_v, 0),
+            smoothing_reactor_mh: numOr(p.smoothing_reactor_mh, 0),
+            vn_ac_kv: numOr(p.vn_ac_kv, 0),
+            x_comm_ohm: numOr(p.x_comm_ohm, 0),
+            x_comm_pu: numOr(p.x_comm_pu, 0),
+            x_comm_base_mva: numOr(p.x_comm_base_mva, 0),
+            converter_transformer_branch: numOr(p.converter_transformer_branch, -1),
+            transformer_tap_min_pu: numOr(p.transformer_tap_min_pu, 0),
+            transformer_tap_max_pu: numOr(p.transformer_tap_max_pu, 0),
+            transformer_tap_steps: numOr(p.transformer_tap_steps, 0),
+            transformer_tap_winding: numOr(p.transformer_tap_winding, 0),
+            external_control_code: p.external_control_code || '',
+            tap_control_modelled: p.tap_control_modelled === true || p.tap_control_modelled === 'true',
+            model_scope: p.model_scope || 'lcc-quasi-steady',
+            model_limitations: p.model_limitations || '',
+            in_service: p.in_service !== false,
+          }, p));
+          lccIdx++;
+          break;
+        }
         case 'dc_load': {
           const busIdx = findBusIndex(comp.id);
           sys.dc.loads.push(addDynamicModel({
@@ -3613,6 +3681,8 @@ const Canvas = (() => {
             r_pu: numOr(p.r_pu, 0.01),
             rate_a_mva: numOr(p.rate_a_mva, 200),
             length_km: numOr(p.length_km, 100),
+            base_kv: numOr(p.base_kv, 0),
+            r_ohm_per_km: numOr(p.r_ohm_per_km, 0),
             in_service: p.in_service !== false,
           });
           dcBrIdx++;
@@ -4485,6 +4555,10 @@ const Canvas = (() => {
       (jsonSys.ac?.transformers_2w || [])
         .filter(tr => Number(tr.source_branch_idx) > 0)
         .map(tr => [Number(tr.source_branch_idx), tr]));
+    const converterTransformerBranches = new Set(
+      (jsonSys.lcc_converters || [])
+        .map(converter => Number(converter.converter_transformer_branch))
+        .filter(index => Number.isFinite(index) && index >= 0));
 
     // Branches (lines)
     jsonSys.ac?.branches?.forEach(br => {
@@ -4503,10 +4577,25 @@ const Canvas = (() => {
       // so that buildSystemJson() still exports them as ac.branches.
       const tapVal = br.tap || 1.0;
       const shiftVal = br.shift_deg || 0;
-      const isTrafo = (Math.abs(tapVal - 1.0) > 1e-6) || (Math.abs(shiftVal) > 1e-6);
+      const linked = linkedTransformerByBranch.get(Number(br.index));
+      const hasTransformerNameplate = Number(br.sn_mva) > 0 ||
+        Number(br.vn_hv_kv) > 0 || Number(br.vn_lv_kv) > 0;
+      // Older BPA JSON omitted nameplate fields but retained the T_ prefix.
+      const hasLegacyBpaTransformerName = String(br.name || '').startsWith('T_');
+      const isBranchTransformer = hasTransformerNameplate ||
+        hasLegacyBpaTransformerName;
+      const explicitBranchKind = String(br.branch_kind || '').trim().toLowerCase();
+      const hasExplicitBranchKind = explicitBranchKind === 'line' ||
+        explicitBranchKind === 'transformer';
+      const inferredTransformer = Boolean(linked) || isBranchTransformer ||
+        (Math.abs(tapVal - 1.0) > 1e-6) || (Math.abs(shiftVal) > 1e-6);
+      // New JSON carries the authored equipment kind. Only legacy JSON without
+      // a valid kind uses the tap/name/nameplate inference above.
+      const isTrafo = hasExplicitBranchKind
+        ? explicitBranchKind === 'transformer'
+        : inferredTransformer;
 
       if (isTrafo) {
-        const linked = linkedTransformerByBranch.get(Number(br.index));
         const linkedTapRatio = Math.max(1e-6, 1 +
           (Number(linked?.tap_pos || 0) - Number(linked?.tap_neutral || 0)) *
           Number(linked?.tap_step_percent || 0) / 100);
@@ -4517,15 +4606,24 @@ const Canvas = (() => {
           hv_bus: br.from_bus, lv_bus: br.to_bus,
           // Store branch-model parameters so roundtrip is consistent
           _from_branch: true,
+          _branch_only_transformer: !linked &&
+            (explicitBranchKind === 'transformer' || isBranchTransformer),
+          _converter_transformer: converterTransformerBranches.has(Number(br.index)),
+          _branch_json: cloneJsonBlock(br) || {},
           _branch_name: br.name || `Line${br.index}`,
+          branch_kind: explicitBranchKind || 'transformer',
           _transformer_index: linked?.index,
           _tap_base_ratio: tapVal / linkedTapRatio,
           source_branch_idx: br.index,
           r_pu: br.r_pu, x_pu: br.x_pu, b_pu: br.b_pu,
-          rate_a_mva: br.rate_a_mva, tap: tapVal, shift_deg: shiftVal,
-          sn_mva: linked?.sn_mva || br.rate_a_mva || 100,
-          vn_hv_kv: linked?.vn_hv_kv,
-          vn_lv_kv: linked?.vn_lv_kv,
+          rate_a_mva: br.rate_a_mva,
+          rate_b_mva: br.rate_b_mva,
+          rate_c_mva: br.rate_c_mva,
+          length_km: br.length_km,
+          tap: tapVal, shift_deg: shiftVal,
+          sn_mva: linked?.sn_mva ?? br.sn_mva ?? br.rate_a_mva ?? 0,
+          vn_hv_kv: linked?.vn_hv_kv ?? br.vn_hv_kv ?? 0,
+          vn_lv_kv: linked?.vn_lv_kv ?? br.vn_lv_kv ?? 0,
           vk_percent: linked?.vk_percent ?? (br.x_pu || 0.1) * 100,
           vkr_percent: linked?.vkr_percent ?? (br.r_pu || 0.01) * 100,
           tap_side: linked?.tap_side ?? 0,
@@ -4534,6 +4632,7 @@ const Canvas = (() => {
           tap_max: linked?.tap_max ?? 0,
           tap_neutral: linked?.tap_neutral ?? 0,
           tap_step_percent: linked?.tap_step_percent ?? 0,
+          n_parallel: linked?.n_parallel ?? br.n_parallel ?? 1,
           in_service: br.in_service !== false,
         });
         addConnection(comp.id, 'hv', fromCompId, 'bottom');
@@ -4543,6 +4642,7 @@ const Canvas = (() => {
           ...COMP.defaults.ac_branch,
           index: br.index,
           name: br.name || `Line ${br.index !== undefined ? br.index : ''}`,
+          branch_kind: explicitBranchKind || 'line',
           from_bus: br.from_bus, to_bus: br.to_bus,
           r_pu: br.r_pu, x_pu: br.x_pu, b_pu: br.b_pu,
           rate_a_mva: br.rate_a_mva,
@@ -4672,6 +4772,55 @@ const Canvas = (() => {
       if (dcCompId !== undefined) addConnection(comp.id, 'dc', dcCompId, 'left');
     });
 
+    // LCC converters (BD/LD card import, quasi-steady model)
+    jsonSys.lcc_converters?.forEach(lcc => {
+      const acCompId = busCompMap[lcc.bus_ac ?? lcc.ac_bus];
+      const dcCompId = dcBusCompMap[lcc.bus_dc ?? lcc.dc_bus];
+      const acComp = acCompId !== undefined ? getComponent(acCompId) : null;
+      const dcComp = dcCompId !== undefined ? getComponent(dcCompId) : null;
+
+      const x = acComp ? acComp.x + 100 : (dcComp ? dcComp.x - 100 : 400);
+      const y = acComp ? acComp.y : (dcComp ? dcComp.y : 300);
+      const comp = addComponent('lcc_converter', x, y, {
+        ...COMP.defaults.lcc_converter,
+        index: lcc.index,
+        name: lcc.name || `LCC ${lcc.index !== undefined ? lcc.index : ''}`,
+        bus_ac: lcc.bus_ac ?? lcc.ac_bus, bus_dc: lcc.bus_dc ?? lcc.dc_bus,
+        control_mode: lcc.control_mode || 'CONSTANT_POWER',
+        station_role: lcc.station_role || 'RECTIFIER',
+        p_set_mw: lcc.p_set_mw ?? 0,
+        i_set_ka: lcc.i_set_ka ?? 0,
+        alpha_set_deg: lcc.alpha_set_deg ?? 15,
+        alpha_min_deg: lcc.alpha_min_deg ?? 5,
+        alpha_stop_deg: lcc.alpha_stop_deg ?? 140,
+        gamma_set_deg: lcc.gamma_set_deg ?? 0,
+        gamma_min_deg: lcc.gamma_min_deg ?? 0,
+        v_dc_set_kv: lcc.v_dc_set_kv ?? 0,
+        rated_dc_kv: lcc.rated_dc_kv ?? 0,
+        rated_current_a: lcc.rated_current_a ?? 0,
+        n_bridges: lcc.n_bridges ?? 1,
+        v_drop_v: lcc.v_drop_v ?? 0,
+        smoothing_reactor_mh: lcc.smoothing_reactor_mh ?? 0,
+        vn_ac_kv: lcc.vn_ac_kv ?? 0,
+        x_comm_ohm: lcc.x_comm_ohm ?? 0,
+        x_comm_pu: lcc.x_comm_pu ?? 0,
+        x_comm_base_mva: lcc.x_comm_base_mva ?? 0,
+        converter_transformer_branch: lcc.converter_transformer_branch ?? -1,
+        transformer_tap_min_pu: lcc.transformer_tap_min_pu ?? 0,
+        transformer_tap_max_pu: lcc.transformer_tap_max_pu ?? 0,
+        transformer_tap_steps: lcc.transformer_tap_steps ?? 0,
+        transformer_tap_winding: lcc.transformer_tap_winding ?? 0,
+        external_control_code: lcc.external_control_code || '',
+        tap_control_modelled: lcc.tap_control_modelled === true,
+        model_scope: lcc.model_scope || 'lcc-quasi-steady',
+        model_limitations: lcc.model_limitations || '',
+        dynamic_model: cloneDynamicModel(lcc.dynamic_model) || COMP.defaults.lcc_converter.dynamic_model,
+        in_service: lcc.in_service !== false,
+      });
+      if (acCompId !== undefined) addConnection(comp.id, 'ac', acCompId, 'right');
+      if (dcCompId !== undefined) addConnection(comp.id, 'dc', dcCompId, 'left');
+    });
+
     // DC branches
     jsonSys.dc?.branches?.forEach(br => {
       const fromCompId = dcBusCompMap[br.from_bus];
@@ -4690,6 +4839,9 @@ const Canvas = (() => {
         to_bus: br.to_bus,
         r_pu: br.r_pu, rate_a_mva: br.rate_a_mva,
         length_km: br.length_km,
+        base_kv: br.base_kv,
+        r_ohm_per_km: br.r_ohm_per_km,
+        r_total_ohm: numOr(br.r_ohm_per_km, 0) * numOr(br.length_km, 0),
         in_service: br.in_service !== false,
       });
       addConnection(comp.id, 'left', fromCompId, 'right');
@@ -5558,6 +5710,11 @@ const Canvas = (() => {
       addKnownBusOutflow(busMap.ac[vsc.bus_ac], -numOr(vsc.p_ac_mw, 0));
       addKnownBusOutflow(busMap.dc[vsc.bus_dc], -numOr(vsc.p_dc_mw, 0));
     });
+    const solvedLccTransfers = firstNonEmptyArray(_lastPfResult.geo_lcc, _lastPfResult.lcc_transfers);
+    solvedLccTransfers.forEach(lcc => {
+      addKnownBusOutflow(busMap.ac[lcc.bus_ac], -numOr(lcc.p_ac_mw, 0));
+      addKnownBusOutflow(busMap.dc[lcc.bus_dc], -numOr(lcc.p_dc_mw, 0));
+    });
     const solvedDcdcTransfers = firstNonEmptyArray(_lastPfResult.geo_dcdc, _lastPfResult.dcdc_transfers);
     solvedDcdcTransfers.forEach(dcdc => {
       addKnownBusOutflow(busMap.dc[dcdc.bus_in], numOr(dcdc.p_in_mw, 0));
@@ -5733,6 +5890,9 @@ const Canvas = (() => {
     const dcBranchDataAll = firstNonEmptyArray(_lastPfResult.geo_dc_branches, _lastPfResult.dc_branch_flows);
     const powers = branchData.map(bd => Math.abs(bd.pf_mw))
       .concat(dcBranchDataAll.map(bd => Math.abs(numOr(bd.pf_mw, 0))))
+      .concat(solvedLccTransfers.flatMap(lcc => [
+        Math.abs(numOr(lcc.p_ac_mw, 0)), Math.abs(numOr(lcc.p_dc_mw, 0)),
+      ]))
       .concat(estimatedTrafo2wFlows.map(tf => Math.abs(numOr(tf.absPower, 0))))
       .concat(expandedSwitchFlows.map(sw => Math.max(Math.abs(numOr(sw.flow?.pf_mw, 0)), Math.abs(numOr(sw.flow?.pt_mw, 0)))))
       .filter(v => v > 0.01);
@@ -6145,7 +6305,7 @@ const Canvas = (() => {
       const deadBusSet = new Set();
       (_lastPfResult.geo_buses || []).forEach(gb => { if (gb.bus_type === 'DEAD') deadBusSet.add(gb.id); });
 
-      const skipTypes = new Set(['ac_bus', 'dc_bus', 'ac_branch', 'dc_branch', 'transformer_2w', 'transformer_3w', 'switch_comp', 'circuit_breaker', 'shunt', 'vsc_converter', 'dcdc_converter', 'energy_router']);
+      const skipTypes = new Set(['ac_bus', 'dc_bus', 'ac_branch', 'dc_branch', 'transformer_2w', 'transformer_3w', 'switch_comp', 'circuit_breaker', 'shunt', 'vsc_converter', 'lcc_converter', 'dcdc_converter', 'energy_router']);
 
       // Compute bus net injection from branch flows for external_grid power estimation
       const busInject = {};
@@ -6161,12 +6321,18 @@ const Canvas = (() => {
       });
 
       const solvedVscTransfersForOverlay = firstNonEmptyArray(_lastPfResult.geo_vsc, _lastPfResult.vsc_transfers);
+      const solvedLccTransfersForOverlay = firstNonEmptyArray(_lastPfResult.geo_lcc, _lastPfResult.lcc_transfers);
       const solvedDcdcTransfersForOverlay = firstNonEmptyArray(_lastPfResult.geo_dcdc, _lastPfResult.dcdc_transfers);
 
       // VSC transfer power at AC-side buses
       solvedVscTransfersForOverlay.forEach(vsc => {
         if (vsc.p_ac_mw !== undefined) {
           busInject[vsc.bus_ac] = numOr(busInject[vsc.bus_ac], 0) - numOr(vsc.p_ac_mw, 0);
+        }
+      });
+      solvedLccTransfersForOverlay.forEach(lcc => {
+        if (lcc.p_ac_mw !== undefined) {
+          busInject[lcc.bus_ac] = numOr(busInject[lcc.bus_ac], 0) - numOr(lcc.p_ac_mw, 0);
         }
       });
 
@@ -6331,8 +6497,33 @@ const Canvas = (() => {
             const isFromSide = isForward ? (busCompId === fromBusCompId) : (busCompId === toBusCompId);
             const segPower = isFromSide ? Math.abs(pf_mw_dc) : Math.abs(pt_mw_dc);
 
-            addFlowMarker(g, flowsTowardBus ? g.busEnd : g.compEnd, segPower, loadingColor(colorPct));
+            const signedPower = isFromSide ? pf_mw_dc : pt_mw_dc;
+            addFlowMarker(
+              g, flowsTowardBus ? g.busEnd : g.compEnd, segPower,
+              loadingColor(colorPct), {
+                flowKind: 'dc-branch-terminal',
+                componentIndex: comp.params?.index ?? dcBrIdx - 1,
+                side: isFromSide ? 'from' : 'to',
+                signedPowerMw: signedPower,
+              });
           });
+
+          const lossMW = Math.abs(pf_mw_dc + pt_mw_dc);
+          if (lossMW > 0.01) {
+            const lossLabel = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            lossLabel.classList.add('viz-overlay', 'flow-label', 'dc-branch-loss-label');
+            lossLabel.setAttribute('x', comp.x);
+            lossLabel.setAttribute('y', comp.y + (showHeat ? 58 : 30));
+            lossLabel.setAttribute('text-anchor', 'middle');
+            lossLabel.setAttribute('fill', '#e06c75');
+            lossLabel.textContent = `损耗 ${pFmt(lossMW)} ${pUnit()}`;
+            addFlowMetadata(lossLabel, {
+              flowKind: 'dc-branch-loss',
+              componentIndex: comp.params?.index ?? dcBrIdx - 1,
+              lossMw: lossMW,
+            });
+            resultsLayer.appendChild(lossLabel);
+          }
         }
 
         // Heatmap label for the DC branch (mirrors the AC branch label so DC
@@ -6437,6 +6628,78 @@ const Canvas = (() => {
           label.setAttribute('fill', '#e06c75');
           label.textContent = `Loss: ${pFmt(Math.abs(vd.loss_mw), 2)} ${pUnit()}`;
           resultsLayer.appendChild(label);
+        }
+      });
+    }
+
+    // LCC terminal powers use the same bus-injection-positive convention as
+    // VSC transfers, but are matched independently by the authored stable ID.
+    if (showFlow || showHeat) {
+      const lccData = firstNonEmptyArray(_lastPfResult.geo_lcc, _lastPfResult.lcc_transfers);
+      let lccPosition = 0;
+      state.components.forEach(comp => {
+        if (comp.type !== 'lcc_converter') return;
+        const compIndex = Number(comp.params?.index);
+        const ld = Number.isFinite(compIndex)
+          ? lccData.find(value => Number(value.index) === compIndex)
+          : lccData[lccPosition];
+        lccPosition++;
+        if (!ld) return;
+
+        const busConns = getComponentBusConnections(
+          comp, new Set(['ac_bus', 'dc_bus']));
+        const sides = [
+          { p: ld.p_ac_mw, matchBus: ld.bus_ac, side: 'AC', busType: 'ac_bus' },
+          { p: ld.p_dc_mw, matchBus: ld.bus_dc, side: 'DC', busType: 'dc_bus' },
+        ];
+
+        sides.forEach(({ p, matchBus, side, busType }) => {
+          const powerMW = numOr(p, 0);
+          const absPower = Math.abs(powerMW);
+          const bc = busConns.find(value =>
+            value.busIdx === matchBus && value.busType === busType);
+          if (!bc?.conn?.el) return;
+          const g = getConnGeom(bc.conn, { fromCompId: comp.id });
+          if (!g) return;
+          labeledFlowConnections.add(bc.conn.id);
+
+          const colorPct = normalizedPowerPct(absPower, minPower, powerRange);
+          const color = loadingColor(colorPct);
+          const metadata = {
+            flowKind: 'lcc-terminal',
+            componentIndex: ld.index,
+            side,
+            signedPowerMw: powerMW,
+            direction: powerMW > 0 ? 'converter-to-bus' : 'bus-to-converter',
+          };
+          if (showFlow) {
+            addFlowMarker(
+              g, powerMW > 0 ? g.busEnd : g.compEnd,
+              absPower, color, metadata);
+          }
+        });
+
+        if (showHeat) {
+          const absPower = Math.max(
+            Math.abs(numOr(ld.p_ac_mw, 0)),
+            Math.abs(numOr(ld.p_dc_mw, 0)));
+          const colorPct = normalizedPowerPct(absPower, minPower, powerRange);
+          heatItems.push({
+            comp, colorPct, absPower, maxPower,
+            bd: { rate_mva: 0 }, hasLoading: false, loading: 0,
+          });
+          if (absPower > 0.01) {
+            const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            label.classList.add('viz-overlay', 'heatmap-label');
+            label.setAttribute('x', comp.x);
+            label.setAttribute('y', comp.y + 55);
+            label.setAttribute('fill', loadingColor(colorPct));
+            label.textContent = `${pFmt(absPower)} ${pUnit()}`;
+            addFlowMetadata(label, {
+              flowKind: 'lcc-heatmap', componentIndex: ld.index,
+            });
+            resultsLayer.appendChild(label);
+          }
         }
       });
     }
@@ -6985,6 +7248,7 @@ const Canvas = (() => {
       ac_branch: 'branch', ACBranch: 'branch',
       dc_branch: 'dcBranch', DCBranch: 'dcBranch',
       vsc_converter: 'vsc', VSCConverter: 'vsc',
+      lcc_converter: 'lcc', LCCConverter: 'lcc',
       static_generator: 'sgen', StaticGen: 'sgen',
       renewable_gen: 'renGen', RenewableGen: 'renGen',
       storage: 'storage', ACStorage: 'storage',
@@ -7348,7 +7612,7 @@ const Canvas = (() => {
   function getCompBusMap() {
 	    const maps = { ac: {}, dc: {}, branch: {}, gen: {}, load: {}, trafo: {},
 	      extGrid: {}, storage: {}, pv: {}, renGen: {}, sgen: {}, dcSgen: {}, sw: {}, cb: {}, dcCb: {},
-	      motor: {}, dcLoad: {}, dcBranch: {}, vsc: {}, shunt: {}, trafo3w: {},
+	      motor: {}, dcLoad: {}, dcBranch: {}, vsc: {}, lcc: {}, shunt: {}, trafo3w: {},
 	      flexLoad: {}, asymLoad: {}, charger: {}, chargingStation: {},
 	      mobileStorage: {}, dcdcConverter: {}, energyRouter: {}, vpp: {}, microgrid: {}, dcPv: {}, dcStorage: {},
 	      byPosition: {} };
@@ -7377,7 +7641,7 @@ const Canvas = (() => {
     const idx = { br: 0, gen: 0, load: 0, trafo: 0, eg: 0, stor: 0, pv: 0,
       ren: 0, sgen: 0, dcSgen: 0, sw: 0, cb: 0, dcCb: 0, motor: 0, dcLoad: 0, dcBr: 0, vsc: 0,
       shunt: 0, trafo3w: 0, flex: 0, asym: 0, charger: 0, cs: 0, ms: 0,
-      dcdc: 0, er: 0, vpp: 0, mg: 0, dcpv: 0, dcStor: 0 };
+      dcdc: 0, er: 0, vpp: 0, mg: 0, dcpv: 0, dcStor: 0, lcc: 0 };
     state.components.forEach(comp => {
       const p = comp.params;
       switch (comp.type) {
@@ -7419,6 +7683,7 @@ const Canvas = (() => {
 	        case 'dc_storage': putIndexed('dcStorage', comp, idx.dcStor++); break;
 	        case 'dc_branch': putIndexed('dcBranch', comp, idx.dcBr++); break;
 	        case 'vsc_converter': putIndexed('vsc', comp, idx.vsc++); break;
+        case 'lcc_converter': putIndexed('lcc', comp, idx.lcc++); break;
 	        case 'shunt': putIndexed('shunt', comp, idx.shunt++); break;
 	        case 'transformer_3w': putIndexed('trafo3w', comp, idx.trafo3w++); break;
 	        case 'flexible_load': putIndexed('flexLoad', comp, idx.flex++); break;

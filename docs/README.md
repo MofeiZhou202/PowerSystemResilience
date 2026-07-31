@@ -43,6 +43,7 @@ When documentation and runtime behavior differ, `include/`, `src/`,
 | EV/traffic scenario schema | [ev_traffic_scenario_format.md](ev_traffic_scenario_format.md) |
 | Code commenting conventions | [commenting_guide.md](commenting_guide.md) |
 | BPA/DSP 元件卡片对照、LCCConverter 集成与四案例潮流对比 | [bpa_dsp_component_mapping.md](bpa_dsp_component_mapping.md) |
+| 中文 LaTeX：DAT 映射、原生 LCC 模型、DSP 对比、PF/OPF 嵌入与校准 | [lcc_dat_opf_report/LCC_DAT_OPF_technical_report.tex](lcc_dat_opf_report/LCC_DAT_OPF_technical_report.tex) |
 
 ## Technical notebook
 

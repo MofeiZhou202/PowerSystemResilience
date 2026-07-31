@@ -502,6 +502,14 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
               --data-dir "${CMAKE_SOURCE_DIR}/data")
     set_tests_properties(gui_scale_features_e2e PROPERTIES LABELS "gui;e2e;browser" TIMEOUT 300)
 
+    add_test(NAME gui_lcc_dat_roundtrip_e2e
+      COMMAND "${HACDCPF_NODE_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/tests/e2e/gui_lcc_dat_roundtrip_e2e.mjs"
+              --server "$<TARGET_FILE:run_gui_server>"
+              --data-dir "${CMAKE_SOURCE_DIR}/data")
+    set_tests_properties(gui_lcc_dat_roundtrip_e2e PROPERTIES
+      LABELS "gui;e2e;browser;bpa;lcc" TIMEOUT 120)
+
     add_test(NAME network_overview_e2e
       COMMAND "${HACDCPF_NODE_EXECUTABLE}"
               "${CMAKE_SOURCE_DIR}/tests/e2e/network_overview_e2e.mjs"

@@ -492,9 +492,43 @@ json converter_scope_json(const ConverterModelScope& scope) {
         {"vsc_vdc_control_modelled", value.vsc_vdc_control_modelled},
         {"dc_multisource_coordination_modelled",
          value.dc_multisource_coordination_modelled},
-        {"dcdc_loss_modelled", value.dcdc_loss_modelled},
-        {"dcdc_duty_ratio_enforced", value.dcdc_duty_ratio_enforced},
-        {"equation_closure_checked", value.equation_closure_checked}}}};
+         {"dcdc_loss_modelled", value.dcdc_loss_modelled},
+         {"dcdc_duty_ratio_enforced", value.dcdc_duty_ratio_enforced},
+         {"lcc_quasi_steady_modelled",
+          value.lcc_quasi_steady_modelled},
+         {"lcc_transformer_tap_control_modelled",
+          value.lcc_transformer_tap_control_modelled},
+         {"equation_closure_checked", value.equation_closure_checked}}}};
+}
+
+json lcc_transfers_json(const std::vector<LCCTransfer>& transfers) {
+  json rows = json::array();
+  for (const auto& transfer : transfers) {
+    rows.push_back(
+        {{"index", transfer.index},
+         {"ac_bus", {{"domain", "ac"}, {"index", transfer.bus_ac}}},
+         {"dc_bus", {{"domain", "dc"}, {"index", transfer.bus_dc}}},
+         {"station_role", transfer.station_role},
+         {"control_mode", transfer.control_mode},
+         {"alpha_deg", transfer.alpha_deg},
+         {"gamma_deg", transfer.gamma_deg},
+         {"ud0_kv", transfer.ud0_kv},
+         {"ud_kv", transfer.ud_kv},
+         {"id_ka", transfer.id_ka},
+         {"p_ac_mw", transfer.p_ac_mw},
+         {"q_ac_mvar", transfer.q_ac_mvar},
+         {"p_dc_mw", transfer.p_dc_mw},
+         {"transformer_tap", transfer.transformer_tap},
+         {"tap_target_angle_deg", transfer.tap_target_angle_deg},
+         {"tap_control_iterations", transfer.tap_control_iterations},
+         {"tap_control_active", transfer.tap_control_active},
+         {"tap_control_converged", transfer.tap_control_converged},
+         {"tap_at_limit", transfer.tap_at_limit},
+         {"id_at_limit", transfer.id_at_limit},
+         {"alpha_within_limits", transfer.alpha_within_limits},
+         {"gamma_within_limits", transfer.gamma_within_limits}});
+  }
+  return rows;
 }
 
 void set_if_int(const json& body, const char* key, int& target) {
@@ -609,6 +643,7 @@ json serialize_power_flow(const HybridPowerSystem& system,
          {"loss_mw", transfer.loss_mw}});
   }
   const json scope = converter_scope_json(result.converter_model_scope);
+  json lcc = lcc_transfers_json(result.lcc_transfers);
   return json{{"schema", "power_flow_result_v1"},
               {"method", method},
               {"method_actual", "hybrid_ac_dc_newton"},
@@ -622,9 +657,10 @@ json serialize_power_flow(const HybridPowerSystem& system,
               {"vdc", result.vdc},
               {"ac_bus_results", std::move(ac_buses)},
               {"dc_bus_results", std::move(dc_buses)},
-              {"ac_branch_results", std::move(branches)},
-              {"vsc_transfers", std::move(vsc)},
-              {"model_scope", scope.at("model_scope")},
+               {"ac_branch_results", std::move(branches)},
+               {"vsc_transfers", std::move(vsc)},
+               {"lcc_transfers", std::move(lcc)},
+               {"model_scope", scope.at("model_scope")},
               {"validity_flags", scope.at("validity_flags")}};
 }
 
@@ -672,6 +708,7 @@ json serialize_ac_opf(const HybridPowerSystem& system,
     generators.push_back(std::move(row));
   }
   const json scope = converter_scope_json(result.converter_model_scope);
+  json lcc = lcc_transfers_json(result.lcc_transfers);
   return json{{"schema", "optimal_power_flow_result_v1"},
               {"solver", solver},
               {"network_model", "balanced_aggregate"},
@@ -684,16 +721,18 @@ json serialize_ac_opf(const HybridPowerSystem& system,
                result.max_constraint_violation},
               {"max_stationarity", result.max_stationarity},
               {"solver_backend", result.profiling.linear_solver_backend},
-              {"infeasibility_hints", result.infeasibility_hints},
-              {"audit", opf_audit_json(result.audit)},
+               {"infeasibility_hints", result.infeasibility_hints},
+               {"model_limitations", result.model_limitations},
+               {"audit", opf_audit_json(result.audit)},
               {"vm", result.vm},
               {"va", result.va},
               {"vdc", result.vdc},
               {"pg_mw", result.pg_mw},
               {"qg_mvar", result.qg_mvar},
-              {"ac_bus_results", std::move(buses)},
-              {"generator_dispatch", std::move(generators)},
-              {"model_scope", scope.at("model_scope")},
+               {"ac_bus_results", std::move(buses)},
+               {"generator_dispatch", std::move(generators)},
+               {"lcc_transfers", std::move(lcc)},
+               {"model_scope", scope.at("model_scope")},
               {"validity_flags", scope.at("validity_flags")}};
 }
 

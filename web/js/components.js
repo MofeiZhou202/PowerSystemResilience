@@ -104,6 +104,13 @@ const COMP = (() => {
               <line x1="18" y1="0" x2="30" y2="0" stroke="#56b6c2" stroke-width="2" stroke-dasharray="4 2"/>
               <text class="comp-label" x="0" y="30">${p.name||'VSC'}</text>`;
     },
+    lcc_converter(p) {
+      return `<rect x="-18" y="-18" width="36" height="36" rx="3" class="symbol" fill="none" stroke="#c19a6b" stroke-width="2"/>
+              <text x="0" y="4" text-anchor="middle" fill="#c19a6b" font-size="10" font-weight="700">LCC</text>
+              <line x1="-18" y1="0" x2="-30" y2="0" stroke="#61afef" stroke-width="2"/>
+              <line x1="18" y1="0" x2="30" y2="0" stroke="#56b6c2" stroke-width="2" stroke-dasharray="4 2"/>
+              <text class="comp-label" x="0" y="30">${p.name||'LCC'}</text>`;
+    },
     dc_bus(p) {
       return `<line x1="-40" y1="0" x2="40" y2="0" stroke="#56b6c2" stroke-width="5" stroke-dasharray="8 4"/>
               <text class="comp-label" x="0" y="-12">${p.name||'DC Bus'}</text>
@@ -408,6 +415,7 @@ const COMP = (() => {
     renewable_gen:    [{id:'top',   x:0, y:-30}],
     static_generator: [{id:'top',   x:0, y:-30}],
     vsc_converter:    [{id:'ac',    x:-30, y:0}, {id:'dc', x:30, y:0}],
+    lcc_converter:    [{id:'ac',    x:-30, y:0}, {id:'dc', x:30, y:0}],
     dc_bus:           [{id:'left',  x:-40, y:0}, {id:'right', x:40, y:0},
                        {id:'top',   x:0, y:-6}, {id:'bottom',x:0, y:6}],
     dc_branch:        [{id:'left',  x:-40, y:0}, {id:'right', x:40, y:0}],
@@ -639,6 +647,23 @@ const COMP = (() => {
       },
       in_service: true
     },
+    lcc_converter: {
+      name: 'LCC', bus_ac: 0, bus_dc: 0,
+      control_mode: 'CONSTANT_POWER', station_role: 'RECTIFIER',
+      p_set_mw: 0, i_set_ka: 0,
+      alpha_set_deg: 15, alpha_min_deg: 5, alpha_stop_deg: 140,
+      gamma_set_deg: 0, gamma_min_deg: 0,
+      v_dc_set_kv: 0, rated_dc_kv: 0, rated_current_a: 0,
+      n_bridges: 1, v_drop_v: 0, smoothing_reactor_mh: 0,
+      vn_ac_kv: 0, x_comm_ohm: 0, x_comm_pu: 0, x_comm_base_mva: 0,
+      converter_transformer_branch: -1,
+      transformer_tap_min_pu: 0, transformer_tap_max_pu: 0,
+      transformer_tap_steps: 0, transformer_tap_winding: 0,
+      external_control_code: '', tap_control_modelled: false,
+      model_scope: 'lcc-quasi-steady', model_limitations: '',
+      dynamic_model: { standard: 'HACDCPF', model_name: 'LCCConverter', parameter_set: 'default' },
+      in_service: true
+    },
     dc_bus: {
       name: 'DC Bus', bus_type: 'DC_P', base_kv: 320,
       vm_pu: 1.0, vmax_pu: 1.1, vmin_pu: 0.9, pd_mw: 0,
@@ -648,6 +673,7 @@ const COMP = (() => {
     dc_branch: {
       name: 'DC Line', from_bus: 0, to_bus: 0,
       r_pu: 0.01, rate_a_mva: 200, length_km: 100,
+      base_kv: 0, r_ohm_per_km: 0, r_total_ohm: 0,
       in_service: true
     },
     switch_comp: {
@@ -937,6 +963,7 @@ const COMP = (() => {
     ],
     converterComponents: [
       { type: 'vsc_converter',    label: 'VSC换流器' },
+      { type: 'lcc_converter',    label: 'LCC换流器' },
       { type: 'dcdc_converter',   label: 'DC/DC变换器' },
       { type: 'energy_router',    label: '能量路由器' },
       { type: 'switch_comp',      label: '开关' },
@@ -1012,7 +1039,9 @@ const COMP = (() => {
     cap_charging_strategy: '承载力:充电策略(opf/static)', cap_static_charging_mw: '承载力:静态充电功率(MW)',
     from_bus: '起始母线', to_bus: '终止母线',
     r_pu: '电阻(pu)', x_pu: '电抗(pu)', b_pu: '电纳(pu)',
-    r_ohm_per_km: '电阻(Ω/km)', x_ohm_per_km: '电抗(Ω/km)',
+    r_ohm_per_km: '电阻(Ω/km)',
+    r_total_ohm: '\u6574\u7ebf\u603b\u7535\u963b(\u03a9)',
+    x_ohm_per_km: '电抗(Ω/km)',
     b_us_per_km: '电纳(μS/km)', c_nf_per_km: '电容(nF/km)',
     conductor_model: '导线/电缆型号', cross_section_mm2: '导体截面(mm²)',
     cross_section_inferred: '导体截面是否推断',
@@ -1033,6 +1062,13 @@ const COMP = (() => {
     type: '类型', curtailable: '可削减', capacity_factor: '容量因子',
     sgen_type: '类型', controllable: '可控',
     bus_ac: 'AC侧母线', bus_dc: 'DC侧母线', control_mode: '控制模式',
+    station_role: 'LCC换流站角色',
+    external_control_code: 'DSP外部复合控制码',
+    tap_control_modelled: '换流变分接控制已建模',
+    transformer_tap_min_pu: 'LCC换流变分接比下限(pu)',
+    transformer_tap_max_pu: 'LCC换流变分接比上限(pu)',
+    transformer_tap_steps: 'LCC换流变分接档位数',
+    transformer_tap_winding: 'LCC换流变可调绕组号',
     p_set_mw: '有功设定(MW)', q_set_mvar: '无功设定(MVar)',
     p_is_hard_constraint: 'P硬约束', p_schedule_mw: 'P计划(MW)', p_initial_mw: 'P初值(MW)',
     r_conv_ac_pu: 'AC侧等效电阻(pu)',
@@ -1151,6 +1187,7 @@ const COMP = (() => {
     renewable_gen:    { collection: 'ac.renewable_gens',     idField: null },
     static_generator: { collection: 'ac.static_generators', idField: null },
     vsc_converter:    { collection: 'vsc_converters',       idField: 'index' },
+    lcc_converter:    { collection: 'lcc_converters',       idField: 'index' },
     dc_bus:           { collection: 'dc.buses',             idField: 'index' },
     dc_branch:        { collection: 'dc.branches',          idField: null },
     dc_load:          { collection: 'dc.loads',             idField: null },

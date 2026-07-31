@@ -193,6 +193,58 @@ if(WIN32 AND NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
       "Use the dynamic MSVC runtime so vcpkg x64-windows DLL packages link cleanly")
 endif()
 include(cmake/Dependencies.cmake)
+
+# MIPSolvers revisions differ in whether the StrictHiGHS branch-and-cut API
+# can export and re-import root cuts, a root basis, and pseudocosts. Treat the
+# group as one capability: partial support is not sufficient for the market
+# SCUC cross-round reuse path.
+function(_hacdcpf_header_has_tokens result header)
+  set(_found ON)
+  if(EXISTS "${header}")
+    file(READ "${header}" _contents)
+    foreach(_token IN LISTS ARGN)
+      string(FIND "${_contents}" "${_token}" _position)
+      if(_position EQUAL -1)
+        set(_found OFF)
+      endif()
+    endforeach()
+  else()
+    set(_found OFF)
+  endif()
+  set(${result} ${_found} PARENT_SCOPE)
+endfunction()
+
+set(_hacdcpf_engine_include
+    "${_HACDCDSS_MIPSOLVERS_DIR}/include/mipsolvers/engine")
+_hacdcpf_header_has_tokens(_hacdcpf_cross_round_options
+  "${_hacdcpf_engine_include}/bc/options.hpp"
+  BCRootCuts BCRootBasis BCPseudocostInit highs_root_cut_warm_start
+  highs_root_basis_warm_start highs_pseudocost_warm_start)
+_hacdcpf_header_has_tokens(_hacdcpf_cross_round_results
+  "${_hacdcpf_engine_include}/bc/stats.hpp"
+  highs_root_cuts highs_root_basis highs_pseudocost_init)
+if(_hacdcpf_cross_round_options AND _hacdcpf_cross_round_results)
+  set(HACDCPF_MIPSOLVERS_HAVE_SCUC_CROSS_ROUND_STATE ON)
+else()
+  set(HACDCPF_MIPSOLVERS_HAVE_SCUC_CROSS_ROUND_STATE OFF)
+endif()
+_hacdcpf_header_has_tokens(HACDCPF_MIPSOLVERS_HAVE_STRICT_HIGHS_ADAPTER
+  "${_hacdcpf_engine_include}/solver/native/native_adapters.hpp"
+  StrictHighsBranchAndCutAdapter make_strict_highs_problem_options)
+_hacdcpf_header_has_tokens(HACDCPF_MIPSOLVERS_HAVE_EXTENDED_SCUC_HINTS
+  "${_hacdcpf_engine_include}/problem_types.hpp"
+  up_reserve_headroom_cap certifies_ramping_rows)
+
+message(STATUS
+  "MIPSolvers SCUC cross-round solver-state reuse: ${HACDCPF_MIPSOLVERS_HAVE_SCUC_CROSS_ROUND_STATE}")
+message(STATUS
+  "MIPSolvers StrictHiGHS adapter API: ${HACDCPF_MIPSOLVERS_HAVE_STRICT_HIGHS_ADAPTER}")
+message(STATUS
+  "MIPSolvers extended SCUC hint API: ${HACDCPF_MIPSOLVERS_HAVE_EXTENDED_SCUC_HINTS}")
+unset(_hacdcpf_engine_include)
+unset(_hacdcpf_cross_round_options)
+unset(_hacdcpf_cross_round_results)
+
 if(MINGW AND NOT HACDCPF_ENABLE_IPO)
   foreach(_hacdcpf_no_ipo_target
           mipsolvers libhighs libscip scip mipsolvers_hfactor)
@@ -520,6 +572,16 @@ target_include_directories(hacdcpf
 target_compile_definitions(hacdcpf PRIVATE
   HACDCPF_PROJECT_ROOT="${CMAKE_SOURCE_DIR}"
 )
+foreach(_hacdcpf_mipsolvers_capability
+        HACDCPF_MIPSOLVERS_HAVE_SCUC_CROSS_ROUND_STATE
+        HACDCPF_MIPSOLVERS_HAVE_STRICT_HIGHS_ADAPTER
+        HACDCPF_MIPSOLVERS_HAVE_EXTENDED_SCUC_HINTS)
+  if(${_hacdcpf_mipsolvers_capability})
+    target_compile_definitions(hacdcpf PRIVATE
+      "${_hacdcpf_mipsolvers_capability}=1")
+  endif()
+endforeach()
+unset(_hacdcpf_mipsolvers_capability)
 if(HACDCPF_ENABLE_ETAP)
   target_compile_definitions(hacdcpf PUBLIC HACDCPF_ENABLE_ETAP)
 endif()
@@ -704,6 +766,14 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/bpa_dat_convert.cpp")
   add_executable(bpa_dat_convert tools/bpa_dat_convert.cpp)
   target_link_libraries(bpa_dat_convert PRIVATE hacdcpf::hacdcpf)
   hacdcpf_copy_opendss_runtime(bpa_dat_convert)
+endif()
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/dsp_pf_compare_dump.cpp")
+  add_executable(dsp_pf_compare_dump tools/dsp_pf_compare_dump.cpp)
+  target_link_libraries(dsp_pf_compare_dump PRIVATE hacdcpf::hacdcpf)
+  target_compile_definitions(dsp_pf_compare_dump PRIVATE
+    HACDCPF_DSP_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/dsp")
+  hacdcpf_copy_opendss_runtime(dsp_pf_compare_dump)
 endif()
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/gridlabd_validation_matrix.cpp")

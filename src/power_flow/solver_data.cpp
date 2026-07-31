@@ -216,6 +216,11 @@ void rebuild_matrices(SolverData& data) {
   aggregate_load_demand(data);
   data.ybus = build_admittance_matrix(data);
   data.gdc = build_dc_conductance(data);
+  // JacobianPattern caches the numerical AC/DC admittance entries as well as
+  // their sparsity. Advance the data revision even when Eigen reuses the same
+  // matrix storage, otherwise a solver can silently retain pre-rebuild values
+  // after an OLTC/tap update.
+  ++data.build_id;
 }
 
 // AC-side voltage-forming converters (multi-converter model r1 §1/§2/§4.2/§4.7).

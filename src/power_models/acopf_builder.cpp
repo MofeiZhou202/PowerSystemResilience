@@ -29,6 +29,12 @@ constexpr double kMinImpedance = 1e-6;  // skip zero-impedance branches in data 
 // to_acopf_data — HybridPowerSystem → ACOPFData
 // ════════════════════════════════════════════════════════════════════════════
 ACOPFData to_acopf_data(const HybridPowerSystem& sys) {
+  if (std::any_of(sys.lcc_converters.begin(), sys.lcc_converters.end(),
+                  [](const LCCConverter& lcc) { return lcc.in_service; })) {
+    throw std::invalid_argument(
+        "AML ACOPF data conversion does not model LCC AC/DC coupling; use "
+        "opf::solve_ac_opf with the ParityIPM or Ipopt backend.");
+  }
   ACOPFData d;
   d.base_mva = sys.base_mva > 0.0 ? sys.base_mva : 100.0;
   const double Sb = d.base_mva;

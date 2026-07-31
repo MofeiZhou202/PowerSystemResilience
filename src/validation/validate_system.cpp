@@ -92,7 +92,16 @@ ValidationReport validate_reference_bus_eligibility(
                        item.bus_out == bus && voltage_mode &&
                        item.pmax_mw > item.pmin_mw;
             });
-        return storage || vsc || dcdc;
+        const bool lcc = std::any_of(
+            sys.lcc_converters.begin(), sys.lcc_converters.end(),
+            [&](const LCCConverter& item) {
+                const bool voltage_characteristic =
+                    item.control_mode == LCCControlMode::ConstantGamma ||
+                    item.control_mode == LCCControlMode::ConstantAlpha;
+                return item.in_service && item.dc_bus == bus &&
+                       voltage_characteristic;
+            });
+        return storage || vsc || dcdc || lcc;
     };
 
     std::unordered_set<int> ac_reference_buses;
@@ -121,7 +130,7 @@ ValidationReport validate_reference_bus_eligibility(
                   "DC voltage-reference bus " + std::to_string(bus.index) +
                   " has no in-service physical balancing device. It will be "
                   "treated as an ideal bidirectional DC voltage boundary; add "
-                  "controllable DC storage, a DC-voltage-forming VSC, or a "
+                  "controllable DC storage, a DC-voltage-forming VSC/LCC, or a "
                   "voltage-forming DC/DC converter when a physical boundary "
                   "model is required.");
         }
@@ -542,6 +551,37 @@ ValidationReport validate(const HybridPowerSystem& sys) {
                   "converter_transformer_branch",
                   "converter_transformer_branch " +
                   std::to_string(c.converter_transformer_branch) + " not found");
+        if (c.tap_control_modelled) {
+            if (c.converter_transformer_branch < 0)
+                r.add(S::Error, "LCCConverter", std::to_string(c.index),
+                      "converter_transformer_branch",
+                      "tap control requires a converter-transformer branch");
+            if (!(c.transformer_tap_min_pu > 0.0) ||
+                c.transformer_tap_max_pu < c.transformer_tap_min_pu)
+                r.add(S::Error, "LCCConverter", std::to_string(c.index),
+                      "transformer_tap_min_pu",
+                      "tap control requires 0 < tap_min <= tap_max");
+            if (c.transformer_tap_winding != 1 &&
+                c.transformer_tap_winding != 2)
+                r.add(S::Error, "LCCConverter", std::to_string(c.index),
+                      "transformer_tap_winding",
+                      "tap control winding must be 1 or 2");
+            const double angle_target =
+                c.station_role == LCCStationRole::Rectifier
+                    ? c.alpha_set_deg
+                    : c.gamma_set_deg;
+            if (!(angle_target > 0.0))
+                r.add(S::Error, "LCCConverter", std::to_string(c.index),
+                      "tap_control_modelled",
+                      "tap control requires a positive alpha/gamma target");
+            if (c.station_role == LCCStationRole::Inverter &&
+                c.control_mode == LCCControlMode::ConstantGamma &&
+                !(c.v_dc_set_kv > 0.0))
+                r.add(S::Error, "LCCConverter", std::to_string(c.index),
+                      "v_dc_set_kv",
+                      "constant-gamma tap control requires a companion local "
+                      "DC-voltage target");
+        }
         if (c.n_bridges < 1)
             r.add(S::Error, "LCCConverter", std::to_string(c.index),
                   "n_bridges", "n_bridges must be >= 1");

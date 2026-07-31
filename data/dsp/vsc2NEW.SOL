@@ -1,0 +1,6 @@
+BPASOLV1.0
+>>>Bus Voltage
+SLACK   525.      1.050000     0.000000      1
+VSCA    525.      1.144266    20.806838      2
+VSCB    525.      1.051377   -24.755391      3
+EOD / end of bus voltage

@@ -13,6 +13,13 @@ const WIRING_DERIVED_BUS_FIELDS = new Set([
   'port1_bus', 'port2_bus', 'port3_bus', 'port4_bus',
 ]);
 
+// Imported provenance and solver-capability facts are displayed for audit but
+// cannot be edited into an unsupported capability.
+const READONLY_CAPABILITY_FIELDS = new Set([
+  'external_control_code', 'tap_control_modelled',
+]);
+const READONLY_DERIVED_FIELDS = new Set(['r_total_ohm']);
+
 const App = (() => {
   // ========== Canvas Dirty Tracking ==========
   // When a built-in case or JSON is loaded, the backend already has the correct
@@ -696,6 +703,7 @@ const App = (() => {
     (sys.ac?.transformers_2w || []).forEach(t => link('ac', Number(t.hv_bus), 'ac', Number(t.lv_bus), 'trafo'));
     (sys.dc?.branches || []).forEach(br => link('dc', Number(br.from_bus), 'dc', Number(br.to_bus), 'dcline'));
     (sys.vsc_converters || []).forEach(v => link('ac', Number(v.bus_ac), 'dc', Number(v.bus_dc), 'vsc'));
+    (sys.lcc_converters || []).forEach(v => link('ac', Number(v.bus_ac ?? v.ac_bus), 'dc', Number(v.bus_dc ?? v.dc_bus), 'lcc'));
     (sys.dcdc_converters || []).forEach(d => {
       const a = Number(d.bus_in ?? d.from_bus ?? d.port1_bus);
       const b = Number(d.bus_out ?? d.to_bus ?? d.port2_bus);
@@ -2170,6 +2178,8 @@ const App = (() => {
     data.dc_branch_flows = firstNonEmptyArray(data.dc_branch_flows, data.geo_dc_branches);
     data.vsc_transfers = firstNonEmptyArray(data.vsc_transfers, data.geo_vsc);
     data.geo_vsc = firstNonEmptyArray(data.geo_vsc, data.vsc_transfers);
+    data.lcc_transfers = firstNonEmptyArray(data.lcc_transfers, data.geo_lcc);
+    data.geo_lcc = firstNonEmptyArray(data.geo_lcc, data.lcc_transfers);
     data.dcdc_transfers = firstNonEmptyArray(data.dcdc_transfers, data.geo_dcdc);
     data.geo_dcdc = firstNonEmptyArray(data.geo_dcdc, data.dcdc_transfers);
     data.ac_switch_flows = Array.isArray(data.ac_switch_flows) ? data.ac_switch_flows : [];
@@ -9378,6 +9388,8 @@ const App = (() => {
 	      DCBranch: 'DC线路',
 	      vsc_converter: 'VSC换流器',
 	      VSCConverter: 'VSC换流器',
+      lcc_converter: 'LCC换流器',
+      LCCConverter: 'LCC换流器',
 	      static_generator: '静态电源',
 	      StaticGen: '静态电源',
 	      renewable_gen: '新能源电源',
@@ -9554,7 +9566,9 @@ const App = (() => {
             comp.type === 'vpp' || comp.type === 'microgrid') domain = 'AC';
         else if (comp.type === 'dc_bus' || comp.type === 'dc_branch' || comp.type === 'dc_load' ||
             comp.type === 'dc_storage' || comp.type === 'dc_pv_array' || comp.type === 'dcdc_converter') domain = 'DC';
-        else if (comp.type === 'vsc_converter' || comp.type === 'energy_router') domain = 'ACDC';
+        else if (comp.type === 'vsc_converter' ||
+         comp.type === 'lcc_converter' ||
+         comp.type === 'energy_router') domain = 'ACDC';
         else {
           const buses = resultConnectedBuses(comp.id);
           const hasAc = buses.some(b => b.domain === 'ac');
@@ -9724,6 +9738,7 @@ const App = (() => {
         case 'dc_load': addOrder('dcLoad', comp); break;
         case 'dc_pv_array': addOrder('dcPv', comp); break;
         case 'vsc_converter': addOrder('vsc', comp); break;
+        case 'lcc_converter': addOrder('lcc', comp); break;
         case 'dcdc_converter': addOrder('dcdcConverter', comp); break;
         case 'energy_router': addOrder('energyRouter', comp); break;
         case 'shunt': addOrder('shunt', comp); break;
@@ -9804,6 +9819,10 @@ const App = (() => {
     firstNonEmptyArray(data.vsc_transfers, data.geo_vsc).forEach(v => {
       addBal('ac', v.bus_ac, -(v.p_ac_mw || 0), -(v.q_ac_mvar || 0));
       addBal('dc', v.bus_dc, -(v.p_dc_mw || 0), 0);
+    });
+    firstNonEmptyArray(data.lcc_transfers, data.geo_lcc).forEach(l => {
+      addBal('ac', l.bus_ac, -(l.p_ac_mw || 0), -(l.q_ac_mvar || 0));
+      addBal('dc', l.bus_dc, -(l.p_dc_mw || 0), 0);
     });
     firstNonEmptyArray(data.dcdc_transfers, data.geo_dcdc).forEach(d => {
       addBal('dc', d.bus_in, d.p_in_mw, 0);
@@ -9918,6 +9937,7 @@ const App = (() => {
       const p = comp.params || {};
       switch (comp.type) {
         case 'vsc_converter': return `AC Bus ${p.bus_ac || '-'}; DC Bus ${p.bus_dc || '-'}`;
+        case 'lcc_converter': return `AC Bus ${p.ac_bus || p.bus_ac || '-'}; DC Bus ${p.dc_bus || p.bus_dc || '-'}`;
         case 'dcdc_converter': return `DC Bus in ${p.bus_in || '-'}; DC Bus out ${p.bus_out || '-'}`;
         case 'dc_branch': return `DC Bus ${p.from_bus || '-'} -> ${p.to_bus || '-'}`;
         case 'ac_branch': return `AC Bus ${p.from_bus || '-'} -> ${p.to_bus || '-'}`;
@@ -10088,6 +10108,8 @@ const App = (() => {
               `Qt=${fmtQ(br.qt_mvar, 3)}`,
               `Loss=${fmtP(br.loss_mw ?? ((br.pf_mw || 0) + (br.pt_mw || 0)), 3)}`,
               `Loading=${pct(br.loading_pct, 1)}`,
+              br.type_label ? `类型=${br.type_label}` : '',
+              br.is_transformer ? `Tap=${fmt(br.transformer_tap, 6)} pu` : '',
             ];
           } else if (comp.type === 'transformer_2w') {
             detail = [`HV=${p.hv_bus || '-'}`, `LV=${p.lv_bus || '-'}`, `Sn=${fmt(p.sn_mva, 3)} MVA`, `Tap=${fmt(p.tap_pos, 3)}`];
@@ -10124,6 +10146,26 @@ const App = (() => {
             !v ? `Q计算=${fmtQ(p.q_set_mvar, 3)}` : '',
           ];
           if (!v) note.push('本次潮流无该VSC分项返回');
+          break;
+        }
+        case 'lcc_converter': {
+          const l = rowByIndexOrPos(firstNonEmptyArray(data.lcc_transfers, data.geo_lcc), 'lcc', comp.id);
+          const flag = value => value === undefined || value === null ? '-' : (value ? '是' : '否');
+          solved = !!l;
+          detail = [
+            `角色=${l?.station_role ?? p.station_role ?? '-'}`,
+            `模式=${l?.control_mode ?? p.control_mode ?? '-'}`,
+            `Pac=${fmtP(l?.p_ac_mw, 3)}`,
+            `Qac=${fmtQ(l?.q_ac_mvar, 3)}`,
+            `Pdc=${fmtP(l?.p_dc_mw, 3)}`,
+            `Alpha=${fmt(l?.alpha_deg, 3)} deg`,
+            `Gamma=${fmt(l?.gamma_deg, 3)} deg`,
+            `Tap=${fmt(l?.transformer_tap, 6)} pu`,
+            `Tap控制active=${flag(l?.tap_control_active)}`,
+            `Tap控制converged=${flag(l?.tap_control_converged)}`,
+            `Tap达到限值=${flag(l?.tap_at_limit)}`,
+          ];
+          if (!l) note.push('本次潮流无该LCC分项返回');
           break;
         }
         case 'dcdc_converter': {
@@ -11141,7 +11183,7 @@ const App = (() => {
     // AC Branch flow table (prefer geo_ac_branches with full Pf/Pt/Q/Loss data)
     const brDiv = document.getElementById('pfBranchResults');
     if (data.geo_ac_branches && data.geo_ac_branches.length > 0) {
-      let html = `<table><thead><tr><th>#</th><th>From</th><th>To</th><th>Pf(${pUnit()})</th><th>Pt(${pUnit()})</th><th>Qf(${qUnit()})</th><th>Qt(${qUnit()})</th><th>Loss(${pUnit()})</th><th>Loading%</th></tr></thead><tbody>`;
+      let html = `<table><thead><tr><th>#</th><th>类型</th><th>From</th><th>To</th><th>Pf(${pUnit()})</th><th>Pt(${pUnit()})</th><th>Qf(${qUnit()})</th><th>Qt(${qUnit()})</th><th>Loss(${pUnit()})</th><th>Loading%</th><th>Tap(pu)</th></tr></thead><tbody>`;
       data.geo_ac_branches.forEach((br, i) => {
         const fallbackCompId = (busMap.branch && busMap.branch[br.index] !== undefined)
           ? busMap.branch[br.index]
@@ -11150,10 +11192,13 @@ const App = (() => {
         const loss = (br.loss_mw != null) ? br.loss_mw : ((br.pf_mw || 0) + (br.pt_mw || 0));
         const ldg = br.loading_pct != null ? br.loading_pct.toFixed(1) + '%' : '-';
         const ldgStyle = (br.loading_pct || 0) > 100 ? ' style="color:#e06c75;font-weight:bold"' : '';
-        html += `<tr${attr}><td>${i}</td><td>${br.from}</td><td>${br.to}</td>`;
+        const typeLabel = br.type_label || (br.is_transformer ? '双绕组变压器' : '交流线路');
+        const tap = br.is_transformer && Number.isFinite(Number(br.transformer_tap))
+          ? Number(br.transformer_tap).toFixed(6) : '-';
+        html += `<tr${attr}><td>${i}</td><td>${escapeHtml(typeLabel)}</td><td>${br.from}</td><td>${br.to}</td>`;
         html += `<td>${pFmt(br.pf_mw || 0, 4)}</td><td>${pFmt(br.pt_mw || 0, 4)}</td>`;
         html += `<td>${qFmt(br.qf_mvar || 0, 4)}</td><td>${qFmt(br.qt_mvar || 0, 4)}</td>`;
-        html += `<td>${pFmt(loss, 4)}</td><td${ldgStyle}>${ldg}</td></tr>`;
+        html += `<td>${pFmt(loss, 4)}</td><td${ldgStyle}>${ldg}</td><td>${tap}</td></tr>`;
       });
       html += '</tbody></table>';
       brDiv.innerHTML = html;
@@ -11255,6 +11300,33 @@ const App = (() => {
     } else {
       vscSec.style.display = 'none';
       vscDiv.innerHTML = '';
+    }
+
+    // LCC converter transfers and R-card tap-control status.
+    const lccSec = document.getElementById('pfLccSection');
+    const lccDiv = document.getElementById('pfLccResults');
+    const lccRows = firstNonEmptyArray(data.lcc_transfers, data.geo_lcc);
+    if (lccSec && lccDiv && lccRows.length > 0) {
+      lccSec.style.display = '';
+      const flag = value => value === undefined || value === null ? '-' : (value ? '是' : '否');
+      const scalar = (value, digits) => Number.isFinite(Number(value))
+        ? Number(value).toFixed(digits) : '-';
+      let html = `<table><thead><tr><th>#</th><th>AC Bus</th><th>DC Bus</th><th>Pac(${pUnit()})</th><th>Qac(${qUnit()})</th><th>Pdc(${pUnit()})</th><th>Alpha(°)</th><th>Gamma(°)</th><th>Tap(pu)</th><th>控制状态</th></tr></thead><tbody>`;
+      lccRows.forEach((l, i) => {
+        const fallbackCompId = busMap.lcc
+          ? (busMap.lcc[l.index] ?? busMap.lcc[i])
+          : undefined;
+        const attr = resultRowAttr({ ...l, canvas_type: l.canvas_type || 'lcc_converter', canvas_index: l.canvas_index ?? l.index, position: l.position ?? i }, fallbackCompId);
+        html += `<tr${attr}><td>${l.index ?? i}</td><td>${l.bus_ac ?? '-'}</td><td>${l.bus_dc ?? '-'}</td>`;
+        html += `<td>${l.p_ac_mw != null ? pFmt(l.p_ac_mw, 3) : '-'}</td><td>${l.q_ac_mvar != null ? qFmt(l.q_ac_mvar, 3) : '-'}</td>`;
+        html += `<td>${l.p_dc_mw != null ? pFmt(l.p_dc_mw, 3) : '-'}</td><td>${scalar(l.alpha_deg, 3)}</td><td>${scalar(l.gamma_deg, 3)}</td>`;
+        html += `<td>${scalar(l.transformer_tap, 6)}</td><td>active=${flag(l.tap_control_active)}; converged=${flag(l.tap_control_converged)}; at-limit=${flag(l.tap_at_limit)}</td></tr>`;
+      });
+      html += '</tbody></table>';
+      lccDiv.innerHTML = html;
+    } else if (lccSec && lccDiv) {
+      lccSec.style.display = 'none';
+      lccDiv.innerHTML = '';
     }
 
     // Clear SC and topo results
@@ -12443,11 +12515,29 @@ const App = (() => {
     });
 
     // Branch table (always shown, includes _from_branch transformers)
-    fillTable('#branchTableInner', null, sys.ac.branches, m.branch, br =>
-      `<td>${br.index ?? ''}</td><td>${escapeHtml(br.name || '')}</td><td>${br.from_bus}</td><td>${br.to_bus}</td>
+    fillTable('#branchTableInner', null, sys.ac.branches, m.branch, br => {
+      const explicitKind = String(br.branch_kind || '').trim().toLowerCase();
+      const hasExplicitKind =
+        explicitKind === 'transformer' || explicitKind === 'line';
+      const inferredTransformer =
+        String(br.name || '').startsWith('T_') ||
+        Number(br.sn_mva) > 0 || Number(br.vn_hv_kv) > 0 ||
+        Number(br.vn_lv_kv) > 0 ||
+        Math.abs(Number(br.tap ?? 1) - 1) > 1e-6 ||
+        Math.abs(Number(br.shift_deg ?? 0)) > 1e-6;
+      const isTransformer = hasExplicitKind
+        ? explicitKind === 'transformer'
+        : inferredTransformer;
+      const branchKind = isTransformer ? 'transformer' : 'line';
+      const typeLabel = isTransformer ? '变压器' : '线路';
+      const typePrefix = Canvas.isHeadless && Canvas.isHeadless()
+        ? `<span data-branch-kind=${branchKind}>${typeLabel}</span> · `
+        : '';
+      return `<td>${br.index ?? ''}</td><td>${typePrefix}${escapeHtml(br.name || '')}</td><td>${br.from_bus}</td><td>${br.to_bus}</td>
         <td>${Number(br.r_pu || 0).toFixed(6)}</td><td>${Number(br.x_pu || 0).toFixed(6)}</td>
         <td>${Number(br.b_pu || 0).toFixed(6)}</td><td>${br.rate_a_mva}</td>
-        <td>${(br.tap || 1).toFixed(4)}</td><td>${(br.shift_deg || 0).toFixed(2)}</td>`);
+        <td>${(br.tap || 1).toFixed(4)}</td><td>${(br.shift_deg || 0).toFixed(2)}</td>`;
+    });
 
     // Generator table (always shown). Pg/Qg/Vg/Pmax/Pmin cells are editable
     // (double-click) and commit straight to the backend session.
@@ -13065,6 +13155,10 @@ const App = (() => {
         sel.dataset.field = key;
         sel.innerHTML = `<option value="true" ${val ? 'selected' : ''}>是</option>
                          <option value="false" ${!val ? 'selected' : ''}>否</option>`;
+        if (READONLY_CAPABILITY_FIELDS.has(key)) {
+          sel.disabled = true;
+          sel.title = '只读能力事实；不能通过属性或 JSON 启用求解功能';
+        }
         div.appendChild(sel);
       } else if (key === 'bus_type') {
         const sel = document.createElement('select');
@@ -13123,11 +13217,28 @@ const App = (() => {
           sel.innerHTML += `<option value="${o.v}" ${val === o.v ? 'selected' : ''}>${o.l}</option>`;
         });
         div.appendChild(sel);
+      } else if (key === 'station_role' && comp.type === 'lcc_converter') {
+        const sel = document.createElement('select');
+        sel.dataset.field = key;
+        [
+          {v:'RECTIFIER', l:'RECTIFIER (整流站)'},
+          {v:'INVERTER',  l:'INVERTER (逆变站)'},
+        ].forEach(o => {
+          sel.innerHTML += `<option value="${o.v}" ${val === o.v ? 'selected' : ''}>${o.l}</option>`;
+        });
+        div.appendChild(sel);
       } else if (key === 'control_mode') {
         const sel = document.createElement('select');
         sel.dataset.field = key;
         let modeOptions;
-        if (comp.type === 'pv_system') {
+        if (comp.type === 'lcc_converter') {
+          modeOptions = [
+            {v:'CONSTANT_POWER',   l:'CONSTANT_POWER (定直流功率)'},
+            {v:'CONSTANT_CURRENT', l:'CONSTANT_CURRENT (定直流电流)'},
+            {v:'CONSTANT_ALPHA',   l:'CONSTANT_ALPHA (定触发角)'},
+            {v:'CONSTANT_GAMMA',   l:'CONSTANT_GAMMA (定熄弧角)'},
+          ];
+        } else if (comp.type === 'pv_system') {
           modeOptions = [
             {v:'MPPT',   l:'MPPT (最大功率追踪)'},
             {v:'PQ',     l:'PQ (恒功率)'},
@@ -13163,9 +13274,15 @@ const App = (() => {
         // Bus terminals are resolved from the canvas wiring (connected ports),
         // not typed by hand. Show them read-only so the user wires ports — e.g.
         // a DC/DC's 'in'/'out' — instead of guessing internal bus IDs.
-        if (WIRING_DERIVED_BUS_FIELDS.has(key)) {
+        if (WIRING_DERIVED_BUS_FIELDS.has(key) ||
+            READONLY_CAPABILITY_FIELDS.has(key) ||
+            READONLY_DERIVED_FIELDS.has(key)) {
           inp.readOnly = true;
-          inp.title = '由接线自动确定（请通过连线修改端口）';
+          inp.title = WIRING_DERIVED_BUS_FIELDS.has(key)
+            ? '由接线自动确定（请通过连线修改端口）'
+            : (READONLY_DERIVED_FIELDS.has(key)
+              ? '由线路长度与单位长度电阻自动计算'
+              : '只读来源/能力事实；不能通过属性启用求解功能');
           inp.style.opacity = '0.65';
           inp.style.cursor = 'not-allowed';
         }

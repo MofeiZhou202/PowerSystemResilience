@@ -383,6 +383,15 @@ double evaluate_residual_impl(const SolverData& data,
       if (le.p_vdc_nz >= 0) values[le.p_vdc_nz] -= jac.dpac_dvdc;
       if (le.q_vdc_nz >= 0) values[le.q_vdc_nz] -= jac.dqac_dvdc;
       if (le.dc_vm_nz >= 0) values[le.dc_vm_nz] -= jac.dpdc_dvm;
+      if (le.p_vm_comm_nz >= 0) {
+        values[le.p_vm_comm_nz] -= jac.dpac_dvm_comm;
+      }
+      if (le.q_vm_comm_nz >= 0) {
+        values[le.q_vm_comm_nz] -= jac.dqac_dvm_comm;
+      }
+      if (le.dc_vm_comm_nz >= 0) {
+        values[le.dc_vm_comm_nz] -= jac.dpdc_dvm_comm;
+      }
     }
     for (const auto& de : pattern.dcdc_coupling_entries) {
       const auto& dcdc = data.dcdc_converters[static_cast<size_t>(de.dcdc_index)];

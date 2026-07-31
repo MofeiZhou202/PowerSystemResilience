@@ -25,6 +25,7 @@
     motor: 'motor', dc_branch: 'dcBranch', dc_line: 'dcBranch', dc_load: 'dcLoad',
     dc_storage: 'dcStorage', dc_pv_array: 'dcPv', dc_pv: 'dcPv',
     vsc: 'vsc', vsc_converter: 'vsc', vsc_grid_forming: 'vsc', vsc_grid_following: 'vsc',
+    lcc: 'lcc', lcc_converter: 'lcc',
     dcdc: 'dcdcConverter', dc_dc: 'dcdcConverter', dcdc_converter: 'dcdcConverter',
     dc_dc_converter: 'dcdcConverter', energy_router: 'energyRouter', er: 'energyRouter',
     shunt: 'shunt', flexible_load: 'flexLoad', flex_load: 'flexLoad',

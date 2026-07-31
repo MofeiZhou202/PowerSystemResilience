@@ -21,8 +21,10 @@ const NetworkOverview = (() => {
     gl: null,
     program: null,
     lineBuffer: null,
+    transformerBuffer: null,
     nodeBuffer: null,
     lineCount: 0,
+    transformerCount: 0,
     nodeCount: 0,
     resizeObserver: null,
   };
@@ -56,14 +58,39 @@ const NetworkOverview = (() => {
         const from = Number(item[fromField]);
         const to = Number(item[toField]);
         if (!finite(from) || !finite(to)) return;
+        const edgeKind = typeof kind === 'function' ? kind(item) : kind;
         edges.push({
-          key: `${domain}:${kind}:${item.index ?? position + 1}`,
+          key: `${domain}:${edgeKind}:${item.index ?? position + 1}`,
           source: keyOf(domain, from), target: keyOf(domain, to),
-          domain, kind, count: 1, inService: item.in_service !== false,
+          domain, kind: edgeKind, count: 1, inService: item.in_service !== false,
         });
       });
-    addEdges(system?.ac?.branches, 'ac', 'from_bus', 'to_bus', 'branch');
-    addEdges(system?.ac?.transformers_2w, 'ac', 'hv_bus', 'lv_bus', 'transformer');
+    const acBranches = Array.isArray(system?.ac?.branches) ? system.ac.branches : [];
+    const acBranchIndices = new Set(acBranches.map(item => Number(item.index)).filter(finite));
+    const linkedTransformerBranches = new Set(
+      (Array.isArray(system?.ac?.transformers_2w) ? system.ac.transformers_2w : [])
+        .map(item => Number(item.source_branch_idx))
+        .filter(index => index > 0 && acBranchIndices.has(index)));
+    const acBranchKind = item => {
+      const explicit = String(item?.branch_kind || '').trim().toLowerCase();
+      if (explicit === 'transformer') return 'transformer';
+      if (explicit === 'line') return 'branch';
+      const transformerLike =
+        linkedTransformerBranches.has(Number(item?.index)) ||
+        String(item?.name || '').startsWith('T_') ||
+        Number(item?.sn_mva) > 0 || Number(item?.vn_hv_kv) > 0 ||
+        Number(item?.vn_lv_kv) > 0 ||
+        Math.abs(Number(item?.tap ?? 1) - 1) > 1e-6 ||
+        Math.abs(Number(item?.shift_deg ?? 0)) > 1e-6;
+      return transformerLike ? 'transformer' : 'branch';
+    };
+    addEdges(acBranches, 'ac', 'from_bus', 'to_bus', acBranchKind);
+    // A Transformer2W with source_branch_idx is metadata for the same canonical
+    // branch, not a second physical edge.
+    addEdges(
+      (Array.isArray(system?.ac?.transformers_2w) ? system.ac.transformers_2w : [])
+        .filter(item => !linkedTransformerBranches.has(Number(item.source_branch_idx))),
+      'ac', 'hv_bus', 'lv_bus', 'transformer');
     addEdges(system?.ac?.switches, 'ac', 'bus_from', 'bus_to', 'switch');
     addEdges(system?.ac?.circuit_breakers, 'ac', 'bus_from', 'bus_to', 'breaker');
     addEdges(system?.dc?.branches, 'dc', 'from_bus', 'to_bus', 'branch');
@@ -235,6 +262,7 @@ const NetworkOverview = (() => {
     gl.linkProgram(state.program);
     if (!gl.getProgramParameter(state.program, gl.LINK_STATUS)) return false;
     state.lineBuffer = gl.createBuffer();
+    state.transformerBuffer = gl.createBuffer();
     state.nodeBuffer = gl.createBuffer();
     return true;
   }
@@ -256,6 +284,7 @@ const NetworkOverview = (() => {
       dc: cssColor('--accent2', '#56b6c2'),
       hybrid: cssColor('--purple', '#c678dd'),
       edge: cssColor('--ink3', '#657086'),
+      transformer: cssColor('--purple', '#c678dd'),
       selected: cssColor('--yellow', '#e5c07b'),
       background: cssColor('--canvas-bg', '#10141d'),
     };
@@ -271,15 +300,25 @@ const NetworkOverview = (() => {
     const colors = palette();
     colors.edge[3] = 0.22;
     colors.hybrid[3] = 0.7;
+    colors.transformer[3] = 0.85;
     const byKey = new Map(state.graph.nodes.map(node => [node.key, node]));
     const lines = [];
+    const transformerPoints = [];
     state.graph.edges.forEach(edge => {
       const a = byKey.get(edge.source);
       const b = byKey.get(edge.target);
       if (!a || !b) return;
-      const color = edge.domain === 'hybrid' ? colors.hybrid : colors.edge;
+      const color = edge.kind === 'transformer'
+        ? colors.transformer
+        : (edge.domain === 'hybrid' ? colors.hybrid : colors.edge);
       pushVertex(lines, a, color);
       pushVertex(lines, b, color);
+      if (edge.kind === 'transformer') {
+        pushVertex(transformerPoints, {
+          x: (a.x + b.x) / 2,
+          y: (a.y + b.y) / 2,
+        }, colors.transformer);
+      }
     });
     const points = [];
     state.graph.nodes.forEach(node => {
@@ -289,9 +328,12 @@ const NetworkOverview = (() => {
     });
     gl.bindBuffer(gl.ARRAY_BUFFER, state.lineBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(lines), gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, state.transformerBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(transformerPoints), gl.STATIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, state.nodeBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(points), gl.STATIC_DRAW);
     state.lineCount = lines.length / 6;
+    state.transformerCount = transformerPoints.length / 6;
     state.nodeCount = points.length / 6;
   }
 
@@ -336,6 +378,10 @@ const NetworkOverview = (() => {
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     drawBuffer(state.lineBuffer, gl.LINES, state.lineCount, 1, false);
+    const transformerSize = state.nodeCount > 2000 ? 5 : 9;
+    drawBuffer(
+      state.transformerBuffer, gl.POINTS, state.transformerCount,
+      transformerSize, false);
     const pointSize = state.lod < 2 ? 13 : (state.nodeCount > 2000 ? 3 : 7);
     drawBuffer(state.nodeBuffer, gl.POINTS, state.nodeCount, pointSize, true);
   }
@@ -502,9 +548,15 @@ const NetworkOverview = (() => {
   }
 
   function stats() {
+    const edgeKinds = {};
+    (state.full?.edges || []).forEach(edge => {
+      edgeKinds[edge.kind] = (edgeKinds[edge.kind] || 0) + 1;
+    });
     return {
       schema: 'hysim_network_overview_v1', active: state.active, lod: state.lod,
       nodes: state.graph?.nodes.length || 0, edges: state.graph?.edges.length || 0,
+      edge_kinds: edgeKinds,
+      transformer_edges: edgeKinds.transformer || 0,
       webgl2: !!state.gl, selected: state.selected ? { ...state.selected } : null,
       canvas_pixels: canvas ? canvas.width * canvas.height : 0,
     };

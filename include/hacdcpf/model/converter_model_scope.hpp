@@ -46,9 +46,11 @@ struct ConverterModelScope {
     /// DC/DC topology duty-ratio feasibility (d_min <= D <= d_max) enforced.
     bool dcdc_duty_ratio_enforced{false};
     /// LCC quasi-steady stations (U_d0/cos(alpha)/cos(gamma) characteristics,
-    /// Q = P*tan(phi)) consumed by the solve; fixed converter-transformer
-    /// taps, no overlap-angle iteration.
+    /// Q = P*tan(phi)) consumed by the solve; no overlap-angle iteration.
     bool lcc_quasi_steady_modelled{false};
+    /// Converter-transformer taps were iterated against the LCC alpha/gamma
+    /// targets within their declared R-card ranges.
+    bool lcc_transformer_tap_control_modelled{false};
     /// Equation/variable closure (N_eq == N_var) and structural rank verified
     /// before the numerical solve.
     bool equation_closure_checked{false};

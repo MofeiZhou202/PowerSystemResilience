@@ -5,23 +5,27 @@
 /// LCC (line-commutated converter) quasi-steady station model for the unified
 /// Newton power flow (dat card manual ch.4, BD/LD cards).
 ///
-/// The station is evaluated from the CURRENT Newton iterate (valve-side AC
-/// voltage magnitude and DC terminal voltage), exactly like the VSC injection
-/// helpers in converter_model.hpp: the injections enter p_spec/q_spec/pdc_spec
-/// and the DC-side derivative enters the always-on DC self-consistency
-/// Jacobian.  Per station (E = valve-side line voltage, X_c per phase):
-///   U_d0 = (3*sqrt(2)/pi) * n_bridges * E
+/// The station is evaluated from the CURRENT Newton iterate, exactly like the
+/// VSC injection helpers in converter_model.hpp. Two AC-voltage quantities are
+/// intentionally distinct when a converter transformer is present:
+///   E_t  = loaded valve-bus line voltage, used by the fundamental-current
+///          reactive-power relation;
+///   E_0  = ideal no-load valve-side voltage behind the T-card leakage,
+///          obtained from the primary-bus voltage and transformer tap and used
+///          by the commutation characteristic.
+/// Per station (X_c is the per-bridge, per-phase commutation reactance):
+///   U_d0 = (3*sqrt(2)/pi) * n_bridges * E_0
 ///   rectifier: U_d = U_d0*cos(alpha) - (3/pi)*n_b*X_c*I_d - n_b*dU_v
 ///   inverter:  U_d = U_d0*cos(gamma) - (3/pi)*n_b*X_c*I_d + n_b*dU_v
-///   Q = P * tan(phi),  cos(phi) ~= U_d / U_d0
+///   Q = P * tan(phi),  cos(phi) ~= U_d / U_d0,t,
+///   U_d0,t = (3*sqrt(2)/pi) * n_bridges * E_t.
 ///
-/// Fixed-tap honesty note: no converter-transformer tap control is modelled.
-/// With the tap fixed at its nominal ratio the valve-side voltage — and hence
-/// U_d0 — floats with the AC solution, so the back-calculated firing /
-/// extinction angles depart from the scheduled AlphaN/GamaN that a tap
-/// changer would hold; the gap against a tapped reference solution (e.g.
-/// DSP) is a modelling limitation, reported in LCCTransfer /
-/// model_limitations.
+/// Tap-control scope: the Newton equations evaluate this station at a fixed
+/// transformer tap. The public PF API may wrap Newton in an R-card outer loop:
+/// solve PF, infer the commutation angle, update the bound T-card tap, rebuild
+/// Ybus, and solve again. The tap is therefore not a Newton state variable.
+/// OPF currently keeps the imported/calibrated tap fixed and reports that
+/// limitation in its model scope.
 ///
 /// Current-limit note: the DC current is clamped to [0, rated_current_a]
 /// (LCC current cannot reverse; the rated current is also the link's current
@@ -74,6 +78,39 @@ LCCOperatingPoint lcc_operating_point(const LCCConverter& conv,
                                       double e_kv,
                                       double ud_kv);
 
+/// Transformer-aware overload. @p terminal_e_kv is the loaded valve-bus line
+/// voltage used for Q; @p commutation_e_kv is the ideal no-load valve-side
+/// voltage used by the alpha/gamma characteristic. The legacy overload above
+/// passes the same voltage for both quantities.
+LCCOperatingPoint lcc_operating_point(const LCCConverter& conv,
+                                      double terminal_e_kv,
+                                      double commutation_e_kv,
+                                      double ud_kv);
+
+/// Ideal no-load valve-side line voltage required by the converter
+/// characteristic to hold @p angle_deg at the specified DC terminal
+/// voltage/current. The angle is alpha for a rectifier and gamma for an
+/// inverter. Returns 0 for unusable inputs.
+double lcc_required_valve_voltage_kv(const LCCConverter& conv,
+                                     double ud_kv,
+                                     double id_ka,
+                                     double angle_deg);
+
+/// AC-bus position (0-based) whose voltage determines the ideal no-load
+/// commutation voltage. This is the transformer primary/other terminal when a
+/// valid converter-transformer branch is available, otherwise the valve bus.
+int lcc_commutation_ac_bus(const SolverData& data,
+                           const LCCConverter& conv);
+
+/// Ideal no-load valve-side line voltage and its derivative with respect to
+/// the voltage magnitude at lcc_commutation_ac_bus(). Both fall back to the
+/// loaded valve-bus voltage when no valid transformer binding is available.
+double lcc_commutation_voltage_kv(const SolverData& data,
+                                  const LCCConverter& conv,
+                                  const Eigen::VectorXd& vm);
+double lcc_commutation_voltage_sensitivity_kv_per_pu(
+    const SolverData& data, const LCCConverter& conv);
+
 /// DC bus voltage base (kV) used to convert the solved vdc pu of the
 /// station's DC bus to kV: DCBus.base_kv, falling back to rated_dc_kv.
 double lcc_dc_base_kv(const SolverData& data, const LCCConverter& conv);
@@ -118,6 +155,9 @@ struct LCCJacobian {
   double dqac_dvdc{0.0};
   double dpdc_dvm{0.0};
   double dpdc_dvdc{0.0};
+  double dpac_dvm_comm{0.0};
+  double dqac_dvm_comm{0.0};
+  double dpdc_dvm_comm{0.0};
 };
 
 LCCJacobian lcc_ac_dc_jacobian(const SolverData& data,

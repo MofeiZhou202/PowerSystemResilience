@@ -162,8 +162,16 @@ class ThreadPool {
 
   /// Process-wide singleton (lazy, thread-safe).
   static ThreadPool& global() {
+#if defined(_WIN32)
+    // Keep Windows workers alive until process termination. Joining them from
+    // static teardown can run after a linked runtime has destroyed its TLS
+    // state (MinGW manifests this in _tinycthread_tss_callback).
+    static ThreadPool* const pool = new ThreadPool();
+    return *pool;
+#else
     static ThreadPool pool;
     return pool;
+#endif
   }
 
  private:
