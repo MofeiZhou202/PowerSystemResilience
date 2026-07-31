@@ -20,6 +20,7 @@
 
 #include "mipsolvers/engine/kernel/ipm/ipm_lp_solver.hpp"
 #include "mipsolvers/engine/kernel/ipm/ipm_solver.hpp"
+#include "mipsolvers/engine/kernel/linear_algebra/hfactor_backend.hpp"
 
 #ifdef MIPSOLVERS_HAVE_HIGHS_LIB
 #include "Highs.h"
@@ -1535,7 +1536,9 @@ void trace_ipm_handoff_audit(const char* stage,
 }
 
 double row_col_coefficient(const StandardFormLP& sf, int row, int col) {
-  for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sf.A_row, row); it; ++it) {
+  for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(
+           sf.A_row, row);
+       it; ++it) {
     if (it.col() == col) return it.value();
   }
   return 0.0;
@@ -1559,8 +1562,10 @@ CrashBasisRecoveryStats recover_primal_activity_basis_impl(const StandardFormLP&
   out_basis.cached_reduced_costs.reset();
   out_basis.persist_eta_count = 0;
 
-  std::vector<double> interior_score(static_cast<size_t>(sf.n_original), 0.0);
   std::vector<double> partition_score(static_cast<size_t>(sf.n_original), 0.0);
+  std::vector<char> col_interior(static_cast<size_t>(sf.n_original), 0);
+  std::vector<double> col_max_abs(static_cast<size_t>(sf.n_original), 0.0);
+  std::vector<int> col_nnz(static_cast<size_t>(sf.n_original), 0);
   std::vector<double> row_dual_score(static_cast<size_t>(sf_m), 1.0);
   const double crash_rel_tol = 1e-5;
   const bool have_col_scale = (sf.col_scale.size() == sf_n);
@@ -1573,7 +1578,9 @@ CrashBasisRecoveryStats recover_primal_activity_basis_impl(const StandardFormLP&
     if (ipm_res->constraint_duals.size() > 0) {
       Eigen::VectorXd y_sf = Eigen::VectorXd::Zero(sf_m);
       for (int i = 0; i < sf_m && i < static_cast<int>(ipm_res->constraint_duals.size()); ++i) {
-        double y_orig = sf.row_sign[i] * ipm_res->constraint_duals[i];
+        // Match populate_dual_certificate's public simplex convention:
+        // row_dual = -row_sign * row_scale * y_scaled.
+        double y_orig = -sf.row_sign[i] * ipm_res->constraint_duals[i];
         y_sf[i] = have_row_scale ? (y_orig / sf.row_scale[i]) : y_orig;
         row_dual_score[static_cast<size_t>(i)] = std::abs(y_sf[i]) / (1.0 + std::abs(y_sf[i]));
       }
@@ -1582,6 +1589,14 @@ CrashBasisRecoveryStats recover_primal_activity_basis_impl(const StandardFormLP&
     }
     have_box = (ipm_res->box_dual_lb.size() >= sf.n_original &&
                 ipm_res->box_dual_ub.size() >= sf.n_original);
+  }
+
+  for (int j = 0; j < sf.n_original; ++j) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(sf.A, j); it; ++it) {
+      col_max_abs[static_cast<size_t>(j)] =
+          std::max(col_max_abs[static_cast<size_t>(j)], std::abs(it.value()));
+      ++col_nnz[static_cast<size_t>(j)];
+    }
   }
 
   for (int j = 0; j < sf_n; ++j) {
@@ -1594,21 +1609,51 @@ CrashBasisRecoveryStats recover_primal_activity_basis_impl(const StandardFormLP&
     if (rel_from_ub < crash_rel_tol && std::isfinite(ub_j)) {
       out_basis.at_upper[static_cast<size_t>(j)] = 1;
     }
-    if (j < sf.n_original && rel_from_lb >= crash_rel_tol && rel_from_ub >= crash_rel_tol) {
-      interior_score[static_cast<size_t>(j)] = std::min(rel_from_lb, rel_from_ub);
-      if (have_box) {
+    if (j < sf.n_original) {
+      const bool interior =
+          rel_from_lb >= crash_rel_tol && rel_from_ub >= crash_rel_tol;
+      col_interior[static_cast<size_t>(j)] = interior ? 1 : 0;
+      if (have_rc) {
+        // A column can be basic at a degenerate bound, but its reduced cost
+        // still has to be zero. This is the direct dual-feasibility signal;
+        // primal distance and bound multipliers are only fallbacks when row
+        // duals are unavailable.
+        const double dual_zero_tol =
+            1e-7 * std::max(1.0, std::abs(sf.c_max[j]));
+        const double dual_score = dual_zero_tol /
+            (dual_zero_tol + std::abs(s_sf[j]));
+        // Interior columns must survive every per-row edge truncation: forcing
+        // one nonbasic would move it to a bound and destroy the IPM primal
+        // point. Degenerate bound columns are rank-completion candidates only.
+        partition_score[static_cast<size_t>(j)] =
+            interior ? 2.0 + dual_score : dual_score;
+      } else if (have_box) {
         const double col_sc = have_col_scale ? sf.col_scale[j] : 1.0;
         const double zl_j = ipm_res->box_dual_lb(j) * col_sc;
         const double zu_j = ipm_res->box_dual_ub(j) * col_sc;
         const double gap_lb = val;
         const double gap_ub = std::isfinite(ub_j) ? (ub_j - val) : 1.0;
-        const double pi_lb = gap_lb / std::sqrt(gap_lb * gap_lb + zl_j * zl_j + 1e-20);
-        const double pi_ub = gap_ub / std::sqrt(gap_ub * gap_ub + zu_j * zu_j + 1e-20);
-        partition_score[static_cast<size_t>(j)] = pi_lb * pi_ub;
-      } else if (have_rc) {
-        partition_score[static_cast<size_t>(j)] = val / (val + std::abs(s_sf[j]) + 1e-10);
+        if (interior) {
+          const double pi_lb = gap_lb /
+              std::sqrt(gap_lb * gap_lb + zl_j * zl_j + 1e-20);
+          const double pi_ub = gap_ub /
+              std::sqrt(gap_ub * gap_ub + zu_j * zu_j + 1e-20);
+          partition_score[static_cast<size_t>(j)] = pi_lb * pi_ub;
+        } else {
+          // Degenerate vertex variables can be both basic and exactly at a
+          // bound. Distance-only scoring assigned all of them score zero and
+          // made a useful SCUC basis impossible to identify. A small active
+          // bound multiplier is the correct optimal-partition signal here.
+          const double active_dual = rel_from_lb < crash_rel_tol
+              ? std::abs(zl_j) : std::abs(zu_j);
+          const double dual_zero_tol =
+              1e-7 * std::max(1.0, std::abs(sf.c_max[j]));
+          partition_score[static_cast<size_t>(j)] =
+              dual_zero_tol / (dual_zero_tol + active_dual);
+        }
       } else {
-        partition_score[static_cast<size_t>(j)] = interior_score[static_cast<size_t>(j)];
+        partition_score[static_cast<size_t>(j)] = interior
+            ? std::min(rel_from_lb, rel_from_ub) : 0.0;
       }
     }
   }
@@ -1641,21 +1686,24 @@ CrashBasisRecoveryStats recover_primal_activity_basis_impl(const StandardFormLP&
     double partition;
     double row_dual;
     double activity;
+    double coefficient_quality;
+    double sparsity;
     int row;
     int col;
-    bool operator<(const RowCandidate& other) const { return score > other.score; }
   };
 
+  // Compact sparse adjacency. Keeping a bounded number of strong edges per
+  // row prevents a high-degree network row from dominating recovery work.
+  constexpr int kMaxCandidatesPerRow = 12;
   std::vector<RowCandidate> candidates;
-  candidates.reserve(sf_m * 2);
+  candidates.reserve(static_cast<size_t>(sf_m) * 4);
   std::vector<char> col_used(static_cast<size_t>(sf_n), 0);
   for (int i = 0; i < sf_m; ++i) {
     const int idx = out_basis.indices[static_cast<size_t>(i)];
     if (idx >= 0 && idx < sf_n) col_used[static_cast<size_t>(idx)] = 1;
   }
 
-  const int max_candidates_per_row = 3;
-  const double min_partition_for_swap = (have_box || have_rc) ? 0.15 : 1e-6;
+  const double min_partition_for_swap = (have_box || have_rc) ? 0.05 : 1e-6;
   const double min_row_dual_for_swap = (ipm_res != nullptr && ipm_res->constraint_duals.size() > 0)
       ? 1e-2 : 0.0;
   for (int row = 0; row < sf_m; ++row) {
@@ -1673,11 +1721,11 @@ CrashBasisRecoveryStats recover_primal_activity_basis_impl(const StandardFormLP&
         : (art_col >= 0);
     if (!tight_row && row_score < min_row_dual_for_swap) continue;
 
-    std::array<RowCandidate, 3> best{{
-        { -std::numeric_limits<double>::infinity(), 0.0, 0.0, 0.0, row, -1 },
-        { -std::numeric_limits<double>::infinity(), 0.0, 0.0, 0.0, row, -1 },
-        { -std::numeric_limits<double>::infinity(), 0.0, 0.0, 0.0, row, -1 },
-    }};
+    std::array<RowCandidate, kMaxCandidatesPerRow> best;
+    for (auto& item : best) {
+      item = {-std::numeric_limits<double>::infinity(), 0.0, 0.0,
+              0.0, 0.0, 0.0, row, -1};
+    }
     int row_candidates = 0;
     for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sf.A_row, row); it; ++it) {
       const int col = it.col();
@@ -1685,13 +1733,19 @@ CrashBasisRecoveryStats recover_primal_activity_basis_impl(const StandardFormLP&
       const double part_score = partition_score[static_cast<size_t>(col)];
       if (part_score < min_partition_for_swap) continue;
       const double coeff = std::abs(it.value());
+      const double normalized_coeff = coeff /
+          std::max(col_max_abs[static_cast<size_t>(col)], 1e-30);
       const double activity = coeff * std::abs(x_sf[col]);
-      const double score = activity * (0.25 + part_score) * (0.25 + row_score);
-      RowCandidate cand{score, part_score, row_score, activity, row, col};
+      const double sparsity = 1.0 /
+          std::sqrt(static_cast<double>(std::max(1, col_nnz[static_cast<size_t>(col)])));
+      const double score = part_score * (0.25 + row_score) *
+                           (0.25 + normalized_coeff) * sparsity;
+      RowCandidate cand{score, part_score, row_score, activity,
+                        normalized_coeff, sparsity, row, col};
       ++row_candidates;
-      for (int pos = 0; pos < max_candidates_per_row; ++pos) {
+      for (int pos = 0; pos < kMaxCandidatesPerRow; ++pos) {
         if (cand.score > best[static_cast<size_t>(pos)].score) {
-          for (int shift = max_candidates_per_row - 1; shift > pos; --shift) {
+          for (int shift = kMaxCandidatesPerRow - 1; shift > pos; --shift) {
             best[static_cast<size_t>(shift)] = best[static_cast<size_t>(shift - 1)];
           }
           best[static_cast<size_t>(pos)] = cand;
@@ -1705,71 +1759,219 @@ CrashBasisRecoveryStats recover_primal_activity_basis_impl(const StandardFormLP&
       if (cand.col >= 0) candidates.push_back(cand);
     }
   }
-  std::sort(candidates.begin(), candidates.end());
+  stats.candidate_edges = static_cast<int>(candidates.size());
 
-  const int max_structural_swaps = std::min({sf_m, sf.n_original, seeded ? 64 : 256});
-  std::vector<int> selected_rows;
-  std::vector<int> selected_cols;
-  std::vector<char> row_swapped(static_cast<size_t>(sf_m), 0);
-  Eigen::MatrixXd selected_submatrix(0, 0);
+  const std::vector<int> base_basis = out_basis.indices;
+  struct ColumnCandidate {
+    int col;
+    bool interior;
+    double score;
+    double partition;
+    double row_dual;
+    double activity;
+    double coefficient_quality;
+    double sparsity;
+  };
+  std::vector<ColumnCandidate> ordered_columns;
+  ordered_columns.reserve(candidates.size());
+  std::vector<int> candidate_slot(static_cast<size_t>(sf.n_original), -1);
+  for (const RowCandidate& edge : candidates) {
+    int& slot = candidate_slot[static_cast<size_t>(edge.col)];
+    if (slot < 0) {
+      slot = static_cast<int>(ordered_columns.size());
+      ordered_columns.push_back(
+          {edge.col, col_interior[static_cast<size_t>(edge.col)] != 0,
+           edge.score, edge.partition, edge.row_dual, edge.activity,
+           edge.coefficient_quality, edge.sparsity});
+      continue;
+    }
+    ColumnCandidate& column = ordered_columns[static_cast<size_t>(slot)];
+    column.coefficient_quality =
+        std::max(column.coefficient_quality, edge.coefficient_quality);
+    if (edge.score > column.score) {
+      column.score = edge.score;
+      column.partition = edge.partition;
+      column.row_dual = edge.row_dual;
+      column.activity = edge.activity;
+    }
+  }
+  std::stable_sort(ordered_columns.begin(), ordered_columns.end(),
+                   [](const ColumnCandidate& lhs, const ColumnCandidate& rhs) {
+    if (lhs.interior != rhs.interior) return lhs.interior > rhs.interior;
+    if (lhs.partition != rhs.partition) return lhs.partition > rhs.partition;
+    if (lhs.coefficient_quality != rhs.coefficient_quality) {
+      return lhs.coefficient_quality > rhs.coefficient_quality;
+    }
+    if (lhs.sparsity != rhs.sparsity) return lhs.sparsity > rhs.sparsity;
+    if (lhs.score != rhs.score) return lhs.score > rhs.score;
+    return lhs.col < rhs.col;
+  });
+
+  std::vector<char> replaceable(static_cast<size_t>(sf_m), 0);
+  int remaining_replaceable = 0;
+  for (int position = 0; position < sf_m; ++position) {
+    const int basic_col = base_basis[static_cast<size_t>(position)];
+    const bool logical =
+        basic_col == sf.row_to_slack_col[static_cast<size_t>(position)] ||
+        basic_col == sf.row_to_artificial_col[static_cast<size_t>(position)];
+    replaceable[static_cast<size_t>(position)] = logical ? 1 : 0;
+    remaining_replaceable += logical ? 1 : 0;
+  }
+
+  constexpr double kCrashAbsolutePivot = 1e-9;
+  constexpr double kCrashRelativePivot = 0.1;
+  constexpr int kMaxCrashUpdatesBeforeRefactor = 128;
+  HFactorBackend crash_factor;
+  bool construction_valid =
+      remaining_replaceable > 0 &&
+      crash_factor.factorize(sf.A, out_basis.indices.data(), sf_m);
+  int updates_since_refactor = 0;
   double selected_partition_sum = 0.0;
   double selected_row_dual_sum = 0.0;
   double selected_activity_sum = 0.0;
+  double accepted_relative_pivot_sum = 0.0;
+  double min_accepted_relative_pivot =
+      std::numeric_limits<double>::infinity();
+  std::vector<int> rhs_index;
+  std::vector<double> rhs_value;
+  std::vector<int> direction_index;
+  std::vector<double> direction_value;
+  std::vector<int> direction_lookup;
+  std::vector<int> row_ep_index;
+  std::vector<double> row_ep_value;
+  std::vector<int> row_ep_lookup;
+  const std::vector<double> unit_value{1.0};
+  for (const ColumnCandidate& candidate : ordered_columns) {
+    if (!construction_valid || remaining_replaceable == 0) break;
+    ++stats.attempted_columns;
+    rhs_index.clear();
+    rhs_value.clear();
+    rhs_index.reserve(static_cast<size_t>(
+        std::max(0, col_nnz[static_cast<size_t>(candidate.col)])));
+    rhs_value.reserve(rhs_index.capacity());
+    for (Eigen::SparseMatrix<double>::InnerIterator it(sf.A, candidate.col);
+         it; ++it) {
+      if (it.value() == 0.0) continue;
+      rhs_index.push_back(it.row());
+      rhs_value.push_back(it.value());
+    }
+    if (!crash_factor.ftran_indexed(
+            rhs_index, rhs_value, direction_index, direction_value,
+            direction_lookup, true)) {
+      ++stats.stable_pivot_rejections;
+      continue;
+    }
 
-  for (const auto& cand : candidates) {
-    if (static_cast<int>(selected_rows.size()) >= max_structural_swaps) break;
-    if (row_swapped[static_cast<size_t>(cand.row)] || col_used[static_cast<size_t>(cand.col)]) continue;
-
-    const int k = static_cast<int>(selected_rows.size());
-    Eigen::MatrixXd trial = Eigen::MatrixXd::Zero(k + 1, k + 1);
-    if (k > 0) {
-      trial.topLeftCorner(k, k) = selected_submatrix;
-      for (int idx = 0; idx < k; ++idx) {
-        trial(idx, k) = row_col_coefficient(sf, selected_rows[static_cast<size_t>(idx)], cand.col);
-        trial(k, idx) = row_col_coefficient(sf, cand.row, selected_cols[static_cast<size_t>(idx)]);
+    double max_abs_direction = 0.0;
+    double pivot_abs = 0.0;
+    int pivot_position = -1;
+    for (size_t k = 0; k < direction_index.size(); ++k) {
+      const int position = direction_index[k];
+      const double magnitude = std::abs(direction_value[k]);
+      if (!std::isfinite(magnitude)) {
+        max_abs_direction = std::numeric_limits<double>::infinity();
+        break;
+      }
+      max_abs_direction = std::max(max_abs_direction, magnitude);
+      if (position >= 0 && position < sf_m &&
+          replaceable[static_cast<size_t>(position)] &&
+          magnitude > pivot_abs) {
+        pivot_abs = magnitude;
+        pivot_position = position;
       }
     }
-    trial(k, k) = row_col_coefficient(sf, cand.row, cand.col);
-
-    Eigen::FullPivLU<Eigen::MatrixXd> lu(trial);
-    if (lu.rank() != k + 1) continue;
-
-    const int old_col = out_basis.indices[static_cast<size_t>(cand.row)];
-    if (old_col >= 0 && old_col < sf_n) {
-      col_used[static_cast<size_t>(old_col)] = 0;
+    const double relative_pivot =
+        max_abs_direction > 0.0 ? pivot_abs / max_abs_direction : 0.0;
+    if (pivot_position < 0 || !std::isfinite(relative_pivot) ||
+        pivot_abs < kCrashAbsolutePivot ||
+        relative_pivot < kCrashRelativePivot) {
+      ++stats.stable_pivot_rejections;
+      continue;
     }
-    selected_submatrix = std::move(trial);
-    selected_rows.push_back(cand.row);
-    selected_cols.push_back(cand.col);
-    row_swapped[static_cast<size_t>(cand.row)] = 1;
-    col_used[static_cast<size_t>(cand.col)] = 1;
-    out_basis.indices[static_cast<size_t>(cand.row)] = cand.col;
-    selected_partition_sum += cand.partition;
-    selected_row_dual_sum += cand.row_dual;
-    selected_activity_sum += cand.activity;
+
+    const std::vector<int> unit_index{pivot_position};
+    if (!crash_factor.btran_indexed(
+            unit_index, unit_value, row_ep_index, row_ep_value,
+            row_ep_lookup, true) ||
+        !crash_factor.update_captured(pivot_position, candidate.col)) {
+      ++stats.stable_pivot_rejections;
+      continue;
+    }
+
+    out_basis.indices[static_cast<size_t>(pivot_position)] = candidate.col;
+    replaceable[static_cast<size_t>(pivot_position)] = 0;
+    --remaining_replaceable;
+    ++updates_since_refactor;
+    ++stats.structural_matches;
+    selected_partition_sum += candidate.partition;
+    selected_row_dual_sum += candidate.row_dual;
+    selected_activity_sum += candidate.activity;
+    accepted_relative_pivot_sum += relative_pivot;
+    min_accepted_relative_pivot =
+        std::min(min_accepted_relative_pivot, relative_pivot);
+
+    if (crash_factor.needs_refactorise() ||
+        updates_since_refactor >= kMaxCrashUpdatesBeforeRefactor) {
+      if (!crash_factor.factorize(
+              sf.A, out_basis.indices.data(), sf_m)) {
+        construction_valid = false;
+        break;
+      }
+      ++stats.crash_refactors;
+      updates_since_refactor = 0;
+    }
   }
 
-  stats.selected_swaps = static_cast<int>(selected_rows.size());
+  // Every exchange above was admitted through the current factor. A final
+  // full build is the publication check; there is deliberately no rank-repair
+  // path that can silently replace an accepted or protected basis column.
+  if (construction_valid && stats.structural_matches > 0) {
+    stats.rank_valid = crash_factor.factorize(
+        sf.A, out_basis.indices.data(), sf_m);
+  }
+  if (!stats.rank_valid) out_basis.indices = base_basis;
+
+  stats.selected_swaps = 0;
+  for (int row = 0; row < sf_m; ++row) {
+    if (out_basis.indices[static_cast<size_t>(row)] !=
+        base_basis[static_cast<size_t>(row)]) {
+      ++stats.selected_swaps;
+    }
+    const int basic_col = out_basis.indices[static_cast<size_t>(row)];
+    if (basic_col >= 0 && basic_col < sf_n) {
+      out_basis.at_upper[static_cast<size_t>(basic_col)] = 0;
+    }
+  }
   if (stats.selected_swaps > 0) {
-    stats.mean_partition_score = selected_partition_sum / stats.selected_swaps;
-    stats.mean_row_dual_score = selected_row_dual_sum / stats.selected_swaps;
-    stats.mean_activity_score = selected_activity_sum / stats.selected_swaps;
+    const double denominator = std::max(1, stats.structural_matches);
+    stats.mean_partition_score = selected_partition_sum / denominator;
+    stats.mean_row_dual_score = selected_row_dual_sum / denominator;
+    stats.mean_activity_score = selected_activity_sum / denominator;
+    stats.min_accepted_relative_pivot = min_accepted_relative_pivot;
+    stats.mean_accepted_relative_pivot =
+        accepted_relative_pivot_sum / denominator;
   }
   const int min_required_swaps = std::min(seeded ? 3 : 8, stats.candidate_rows);
   stats.passes_screen =
-      stats.selected_swaps > 0 &&
+      stats.rank_valid && stats.selected_swaps > 0 &&
       stats.selected_swaps >= min_required_swaps &&
       stats.mean_partition_score >= ((have_box || have_rc) ? 0.2 : 0.05) &&
       stats.mean_row_dual_score >= ((ipm_res != nullptr && ipm_res->constraint_duals.size() > 0) ? 0.02 : 0.0);
   if (lp_basis_trace_enabled()) {
     char detail[256];
     std::snprintf(detail, sizeof(detail),
-                  "seeded=%d haveBox=%d haveRc=%d candRows=%d cand=%zu "
-                  "swaps=%d minReq=%d part=%.6g rowdual=%.6g activity=%.6g "
-                  "screen=%d",
+                  "seeded=%d haveBox=%d haveRc=%d candRows=%d edges=%d "
+                  "attempted=%d rejected=%d accepted=%d swaps=%d "
+                  "refactors=%d rankValid=%d minReq=%d relPivot=%.3g:%.3g "
+                  "part=%.6g rowdual=%.6g activity=%.6g screen=%d",
                   seeded ? 1 : 0, have_box ? 1 : 0, have_rc ? 1 : 0,
-                  stats.candidate_rows, candidates.size(), stats.selected_swaps,
-                  min_required_swaps, stats.mean_partition_score,
+                  stats.candidate_rows, stats.candidate_edges,
+                  stats.attempted_columns, stats.stable_pivot_rejections,
+                  stats.structural_matches, stats.selected_swaps,
+                  stats.crash_refactors, stats.rank_valid ? 1 : 0,
+                  min_required_swaps, stats.min_accepted_relative_pivot,
+                  stats.mean_accepted_relative_pivot,
+                  stats.mean_partition_score,
                   stats.mean_row_dual_score, stats.mean_activity_score,
                   stats.passes_screen ? 1 : 0);
     trace_basis_source("primal_activity_recovered", sf, out_basis, detail);
@@ -2068,16 +2270,12 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
         return out;
       }
 
-      // HiGHS' MIP LP relaxation does not build tableau rows from an
-      // interior-only optimal partition basis. It starts from a logical basis
-      // (rows basic, columns nonbasic at bounds) and lets simplex/recoverBasis
-      // determine the degenerate vertex used by separators. For non-xlarge
-      // roots, recover the simplex basis in that same way. The old IPM crash
-      // partition is kept only for the exceptional path where simplex node LPs
-      // are not requested.
-      const bool highs_style_logical_recovery = opt.use_simplex_lp_nodes;
+      // Mandatory simplex-node mode uses the sparse, rank-validated IPM basis
+      // recovery below. Keep the legacy partition push only for the optional
+      // IPM-only path, where no basis handoff contract exists.
+      const bool sparse_ipm_basis_recovery = opt.use_simplex_lp_nodes;
 
-      if (sf_m > 200 && !highs_style_logical_recovery) {
+      if (sf_m > 200 && !sparse_ipm_basis_recovery) {
         // ══════════════════════════════════════════════════════════════════
         // Phase 1: Basis Identification via Optimal Partition
         // ══════════════════════════════════════════════════════════════════
@@ -2401,35 +2599,48 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
           // If cleanup fails, keep the Phase 2 result — still has a valid basis.
         }
       } else {
-        // HiGHS-style logical-basis recovery: dual simplex from previous
-        // basis when available (xpool warm-start), or cold-start from the
-        // slack/artificial logical basis otherwise.
-        // solve_lp_from_sf has built-in basis extension when basis_hint->rows
-        // < sf_m (the dimension mismatch that occurs after cut rows are added).
-        // Passing basis_hint activates PATH A sparse warm-start and restores
-        // primal feasibility via dual simplex in ~N_cuts iterations.
+        SimplexBasis recovered_basis;
+        const CrashBasisRecoveryStats recovery =
+            recover_primal_activity_basis_impl(
+                sf, ipm_res.x, &ipm_res, basis_hint, recovered_basis);
+        const SimplexBasis* crossover_hint =
+            recovery.passes_screen ? &recovered_basis : basis_hint;
+
         SimplexOptions sx_opt;
         sx_opt.max_iter = std::max(opt.max_lp_iter * 10, 2000);
         sx_opt.feasibility_tol = std::max(1e-10, opt.lp_tol * 0.1);
         sx_opt.optimality_tol = std::max(1e-10, opt.lp_tol * 0.1);
         sx_opt.verbose = false;
         sx_opt.allow_cold_start = true;  // Fall back to cold-start if warm fails
+        sx_opt.allow_warm_primal_phase_one = recovery.passes_screen;
         sx_opt.use_partial_pricing = false;
         sx_opt.factor_backend = simplex_factor_backend_from_id(opt.simplex_factor_backend);
         sx_opt.lp_kernel_backend = opt.lp_kernel_backend;
         apply_simplex_budget(sx_opt);
         apply_root_simplex_conformance_options(sx_opt, require_simplex_crossover);
-        if (lp_basis_trace_enabled()) {
+        if (lp_basis_trace_enabled() ||
+            std::getenv("MIPSOLVERS_IPM_RECOVERY_TRACE") != nullptr) {
           std::fprintf(stderr,
-                       "[B&C-LPBASIS-RECOVER] stage=ipm_logical_recovery "
-                       "m=%d n=%d nOrig=%d nSlack=%d reason=highs_logical_basis "
-                       "hint_rows=%d hint_cols=%d\n",
+                       "[B&C-LPBASIS-RECOVER] stage=ipm_sparse_recovery "
+                       "m=%d n=%d nOrig=%d nSlack=%d candRows=%d edges=%d "
+                       "attempted=%d rejected=%d accepted=%d swaps=%d "
+                       "refactors=%d relPivot=%.3g:%.3g rankValid=%d screen=%d "
+                       "seedRows=%d seedCols=%d\n",
                        sf_m, sf_n, sf.n_original, sf.n_slack,
+                       recovery.candidate_rows, recovery.candidate_edges,
+                       recovery.attempted_columns,
+                       recovery.stable_pivot_rejections,
+                       recovery.structural_matches, recovery.selected_swaps,
+                       recovery.crash_refactors,
+                       recovery.min_accepted_relative_pivot,
+                       recovery.mean_accepted_relative_pivot,
+                       recovery.rank_valid ? 1 : 0,
+                       recovery.passes_screen ? 1 : 0,
                        basis_hint ? basis_hint->rows : -1,
                        basis_hint ? basis_hint->cols : -1);
         }
         simplex = std::make_shared<SimplexResult>(
-            solve_lp_from_sf(sf, sx_opt, basis_hint));
+            solve_lp_from_sf(sf, sx_opt, crossover_hint));
       }
 
       // Store StandardFormLP for root Gomory cut generation.
@@ -2530,10 +2741,10 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
                   worst_bnd, worst_ineq, worst_eq);
         }
       }
-      // Legacy IPM-only fallback only.  When simplex nodes are enabled, falling
-      // through to the pure simplex path below is mandatory so the root always
-      // publishes a valid basis/nonbasic side/reduced-cost state.
-      if (!require_simplex_crossover && lp_solution_feasible(lp, ipm_res, 1e-6)) {
+      // Legacy IPM-only fallback only. When simplex nodes are enabled, keep
+      // the strict basis contract and continue to the simplex path below.
+      if (!require_simplex_crossover &&
+          lp_solution_feasible(lp, ipm_res, 1e-6)) {
         if (opt.verbose) {
           fprintf(stderr, "[BC_RELAX] crossover failed — using raw IPM result (no basis)\n");
         }

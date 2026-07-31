@@ -24,7 +24,7 @@ option(MIPSOLVERS_ENABLE_IPO
        "Enable interprocedural/link-time optimization for optimized builds"
        ${_MIPSOLVERS_ENABLE_IPO_DEFAULT})
 unset(_MIPSOLVERS_ENABLE_IPO_DEFAULT)
-option(MIPSOLVERS_BUILD_HFACTOR   "Build vendored HiGHS HFactor static lib"    ON)
+option(MIPSOLVERS_BUILD_HFACTOR   "Enable the HFactor basis backend"           ON)
 option(MIPSOLVERS_EIGEN_VECTORIZE "Enable Eigen vectorization intrinsics"      ON)
 option(MIPSOLVERS_ENABLE_NATIVE_ARCH
        "Enable -march=native for host-specific builds"                         OFF)
@@ -156,8 +156,14 @@ endif()
 
 # ── HFactor vendored library ──────────────────────────────────────────────────
 if(MIPSOLVERS_BUILD_HFACTOR)
-  add_subdirectory(src/engine/kernel/linear_algebra/highs_factor)
-  target_link_libraries(mipsolvers PRIVATE mipsolvers_hfactor)
+  # Embedded HiGHS already defines HFactor. Building and linking the standalone
+  # mirror as well creates duplicate global symbols whose selected
+  # implementation depends on archive order. Use the mirror only as a fallback
+  # when the complete HiGHS library is unavailable.
+  if(NOT MIPSOLVERS_HAVE_HIGHS_LIB)
+    add_subdirectory(src/engine/kernel/linear_algebra/highs_factor)
+    target_link_libraries(mipsolvers PRIVATE mipsolvers_hfactor)
+  endif()
   target_compile_definitions(mipsolvers PUBLIC MIPSOLVERS_HAVE_HFACTOR=1 HACDCPF_HAVE_HFACTOR=1)
 endif()
 
@@ -889,7 +895,7 @@ install(TARGETS mipsolvers
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-if(MIPSOLVERS_BUILD_HFACTOR)
+if(TARGET mipsolvers_hfactor)
   install(TARGETS mipsolvers_hfactor
     EXPORT mipsolversTargets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})

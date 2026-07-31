@@ -36,10 +36,19 @@ class VariableBoundTable;
 
 struct CrashBasisRecoveryStats {
     int candidate_rows{0};
+    int candidate_edges{0};
+    int attempted_columns{0};
+    int stable_pivot_rejections{0};
+    int structural_matches{0};
     int selected_swaps{0};
+    int rank_repairs{0};
+    int crash_refactors{0};
     double mean_partition_score{0.0};
     double mean_row_dual_score{0.0};
     double mean_activity_score{0.0};
+    double min_accepted_relative_pivot{0.0};
+    double mean_accepted_relative_pivot{0.0};
+    bool rank_valid{false};
     bool passes_screen{false};
 };
 

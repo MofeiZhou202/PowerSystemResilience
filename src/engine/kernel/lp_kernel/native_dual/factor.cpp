@@ -122,6 +122,19 @@ bool BasisFactor::update(int pivot_row, int entering_col,
   return true;
 }
 
+bool BasisFactor::update_indexed(int pivot_row, int entering_col,
+                                 std::string& failure) {
+  if (A_ == nullptr || pivot_row < 0 || pivot_row >= A_->rows() ||
+      entering_col < 0 || entering_col >= A_->cols() ||
+      !rank_factor_.update_captured(pivot_row, entering_col)) {
+    failure = "Forrest-Tomlin basis update rejected the packed exchange";
+    return false;
+  }
+  basis_[static_cast<std::size_t>(pivot_row)] = entering_col;
+  ++generation_;
+  return true;
+}
+
 PivotEvidence BasisFactor::pivot_evidence(
     int pivot_row, int entering_col, const Eigen::VectorXd& direction,
     const Eigen::VectorXd& row_ep) const {
@@ -411,45 +424,48 @@ void BasisFactor::rebuild_norms() {
 SolveEvidence BasisFactor::solve_checked(const Eigen::VectorXd& rhs,
                                          bool transpose,
                                          bool capture_update,
-                                         bool verify) const {
+                                         bool verify,
+                                         const std::vector<int>* rhs_pattern) const {
   SolveEvidence evidence;
   if (A_ == nullptr || rhs.size() != A_->rows() || !rhs.allFinite()) {
     return evidence;
   }
   auto solve_current_factor = [&]() {
     Eigen::VectorXd solution(rhs.size());
+    std::vector<int> pattern;
     if (transpose) {
       if (capture_update) {
-        rank_factor_.btran_for_update(rhs.data(), solution.data());
+        rank_factor_.btran_for_update(rhs.data(), solution.data(), rhs_pattern,
+                                      &pattern);
       } else {
-        rank_factor_.btran(rhs.data(), solution.data());
+        rank_factor_.btran(rhs.data(), solution.data(), rhs_pattern, &pattern);
       }
     } else {
       if (capture_update) {
-        rank_factor_.ftran_for_update(rhs.data(), solution.data());
+        rank_factor_.ftran_for_update(rhs.data(), solution.data(), rhs_pattern,
+                                      &pattern);
       } else {
-        rank_factor_.ftran(rhs.data(), solution.data());
+        rank_factor_.ftran(rhs.data(), solution.data(), rhs_pattern, &pattern);
       }
     }
-    return solution;
+    return std::make_pair(std::move(solution), std::move(pattern));
   };
   if (!rank_factor_.valid) return evidence;
   last_solve_transpose_ = transpose;
   last_solve_refined_ = false;
-  Eigen::VectorXd solution = solve_current_factor();
+  auto [solution, pattern] = solve_current_factor();
   if (solution.allFinite()) {
-    // Tiered posture: trust a finite raw LU solve without the O(nnz)
-    // backward-error residual audit.  Only reached on non-audit pivots when
-    // tier_checked_solves is enabled; the periodic full-primal-residual audit
-    // reinverts on accumulated drift and optimality is only declared after a
-    // fresh rebuild, so the published answer stays certified.
     if (!verify) {
       evidence.solution = std::move(solution);
+      evidence.pattern = std::move(pattern);
+      evidence.pattern_known = true;
       evidence.accepted = true;
       return evidence;
     }
     if (backward_error_acceptable(rhs, solution, transpose)) {
       evidence.solution = std::move(solution);
+      evidence.pattern = std::move(pattern);
+      evidence.pattern_known = true;
       evidence.accepted = true;
       evidence.residual = last_residual_;
       evidence.error_limit = last_error_limit_;
@@ -495,6 +511,11 @@ SolveEvidence BasisFactor::refine_checked(const Eigen::VectorXd& rhs,
     return evidence;
   }
   evidence.solution = std::move(solution);
+  evidence.pattern.reserve(static_cast<std::size_t>(evidence.solution.size()));
+  for (int row = 0; row < evidence.solution.size(); ++row) {
+    if (evidence.solution[row] != 0.0) evidence.pattern.push_back(row);
+  }
+  evidence.pattern_known = true;
   evidence.accepted = true;
   evidence.needs_rebuild = false;
   evidence.residual = last_residual_;
@@ -555,14 +576,48 @@ Eigen::VectorXd BasisFactor::btran_for_update(
 
 SolveEvidence BasisFactor::checked_ftran(const Eigen::VectorXd& rhs,
                                          bool capture_update,
-                                         bool verify) const {
-  return solve_checked(rhs, false, capture_update, verify);
+                                         bool verify,
+                                         const std::vector<int>* rhs_pattern) const {
+  return solve_checked(rhs, false, capture_update, verify, rhs_pattern);
 }
 
 SolveEvidence BasisFactor::checked_btran(const Eigen::VectorXd& rhs,
                                          bool capture_update,
-                                         bool verify) const {
-  return solve_checked(rhs, true, capture_update, verify);
+                                         bool verify,
+                                         const std::vector<int>* rhs_pattern) const {
+  return solve_checked(rhs, true, capture_update, verify, rhs_pattern);
+}
+
+IndexedSolveEvidence BasisFactor::indexed_ftran(const IndexedVector& rhs,
+                                                bool capture_update) const {
+  IndexedSolveEvidence evidence;
+  evidence.solution.clear(rhs.dimension);
+  if (A_ == nullptr || rhs.dimension != A_->rows() || !rhs.finite() ||
+      !rank_factor_.valid) {
+    return evidence;
+  }
+  // The backend rejects non-finite results during export, so an accepted
+  // solve is already known finite.
+  evidence.accepted = rank_factor_.ftran_indexed(
+      rhs.index, rhs.value, evidence.solution.index, evidence.solution.value,
+      evidence.solution.lookup_slot, capture_update);
+  return evidence;
+}
+
+IndexedSolveEvidence BasisFactor::indexed_btran(const IndexedVector& rhs,
+                                                bool capture_update) const {
+  IndexedSolveEvidence evidence;
+  evidence.solution.clear(rhs.dimension);
+  if (A_ == nullptr || rhs.dimension != A_->rows() || !rhs.finite() ||
+      !rank_factor_.valid) {
+    return evidence;
+  }
+  // The backend rejects non-finite results during export, so an accepted
+  // solve is already known finite.
+  evidence.accepted = rank_factor_.btran_indexed(
+      rhs.index, rhs.value, evidence.solution.index, evidence.solution.value,
+      evidence.solution.lookup_slot, capture_update);
+  return evidence;
 }
 
 SolveEvidence BasisFactor::refine_ftran(

@@ -436,3 +436,948 @@ pivots, §5). Validated: 5 suites + `--check` 0 must-pass under
 Files (uncommitted): `dual_simplex.hpp`, `native_dual/{model,factor}.hpp`,
 `native_dual/{factor,pricing,solver}.cpp`.
 
+---
+
+# Theoretical analysis — why the native simplex root is still slow (2026-07-30)
+
+## 18. Decomposing the wall time: pivot count × per-pivot cost
+
+The root-LP wall time factors exactly as
+
+$$T_{\text{root}} \;=\; N_{\text{pivots}} \times c_{\text{pivot}}.$$
+
+Both factors are worse than HiGHS, but for **different** reasons: $N_{\text{pivots}}$
+is a property of the *method* (simplex on a degenerate LP), while $c_{\text{pivot}}$
+is a property of the *implementation* (hyper-sparsity handling). Measured anchors:
+
+| solver | LP-root time | pivots/iters | per unit |
+|---|---|---|---|
+| native dual simplex | 57.5 s | 37054 | **1.55 ms/pivot** |
+| vendored HiGHS-LP | 20.1 s (unconverged) | 29974 | **0.67 ms/pivot** |
+| native IPM | **5.4 s** | **74** | 73 ms/iter |
+
+### 18.1 The pivot count is a method limit, not an implementation bug
+
+Dual simplex needs $\Theta(m)$–$\Theta(3m)$ pivots; with $m=28210$ (presolved
+standard form) the $\sim$30k–37k pivots of *both* the native kernel and HiGHS-LP
+are squarely in that band. SCUC degeneracy (min-up/down feasibility windows,
+symmetric identical-generator commitments) inflates the count *within* the band
+but not pathologically — and crucially HiGHS-LP is **also** stuck (29974 iters,
+fails a 20 s limit). So no simplex implementation crosses this root cheaply by
+pivoting; the count is intrinsic to the method on a 28k-row degenerate LP.
+
+The interior-point method escapes it: **74 Newton steps** (§13). An IPM's
+iteration count is essentially independent of $m$ and of degeneracy
+($O(\sqrt{n}\log 1/\varepsilon)$ worst case, $\sim$50–100 in practice); it
+replaces 37 000 rank-1 pivots with $\sim$74 full re-factorizations. That is the
+entire reason `natIPM` solves the root in 5.4 s — at the cost of an interior
+point with **no vertex/basis** for the B&C (§15.3).
+
+### 18.2 The per-pivot cost is hyper-sparsity-blind — the fixable half
+
+Measured per-pivot profile (`MIPSOLVERS_DS_PROFILE`, $m=28210$, $n=45250$,
+$\mathrm{nnz}(A)=255687$, 4920 pivots):
+
+| phase | ms/pivot | complexity as coded |
+|---|---|---|
+| leaving (CHUZR + BTRAN) | 0.209 | O(m) infeasibility scan + BTRAN |
+| **price (Aᵀ·row_ep)** | **0.144** | **dense O(nnz(A))** |
+| **entering (ratio/BFRT)** | **0.185** | **dense O(n) candidate scan** |
+| ftran | 0.085 | B⁻¹a_q |
+| dse | 0.108 | steepest-edge weight update |
+| postcond (dual-feas) | 0.020 | dense O(n) |
+| validBlock (periodic audit) | 0.191 | O(nnz(A)) every 16 pivots |
+| luUpdate | 0.093 | Forrest–Tomlin update |
+| OTHER (incl. **rc update**) | 0.358 | dense O(n) reduced-cost update + copies |
+| **total minor** | **1.40** | |
+
+The decisive new measurement (`[DS-DENSITY]`, same run) is that the two hot
+simplex vectors are **extraordinarily hyper-sparse**:
+
+$$\mathrm{nnz}(\texttt{row\_ep}) \approx 6.5 \;(0.02\%\text{ of }m), \qquad
+  \mathrm{nnz}(\texttt{pivot\_row}) \approx 44 \;(0.10\%\text{ of }n).$$
+
+This is exactly the "hyper-sparse family" SCUC belongs to (the time-block /
+staircase coupling keeps each basis-inverse row localized to a handful of
+periods). It means the dense phases above are doing $\sim$3 orders of magnitude
+more arithmetic than the problem requires:
+
+- **PRICE** (`multiply_AT`, `native_dual/state.cpp`) forms $A^\top\texttt{row\_ep}$
+  by iterating **all** $\mathrm{nnz}(A)=255687$ entries, though `row_ep` has 6.5
+  nonzeros and the result 44. A hyper-sparse *row-wise* PRICE costs
+  $\mathrm{nnz}(\texttt{row\_ep})\times \overline{\mathrm{nnz}}_{\text{row}} \approx
+  6.5\times 9.06 \approx 59$ multiply-adds — a **~4300× arithmetic reduction**.
+  This is what HiGHS' `HEkkDual` hyper-sparse PRICE does.
+- **Ratio test / BFRT** (`native_dual/pricing.cpp`) loops over **all** $n=45250$
+  nonbasic columns testing `pivot_row[j] != 0`, though only $\sim$44 are nonzero
+  → should be O(44).
+- **Reduced-cost update + dual-feasibility postcondition**
+  (`native_dual/solver.cpp`) sweep **all** $n$ columns, though only the 44 with
+  `pivot_row[j] ≠ 0` actually change → should be O(44).
+- **CHUZR** rescans all $m$ primal infeasibilities each pivot; HiGHS maintains
+  the infeasibility set incrementally.
+
+The identifiable dense O(nnz(A)) + O(n) sweeps (PRICE + ratio + postcond + the
+reduced-cost update) sum to $\approx 0.5$ ms of the 1.40 ms/pivot, and their
+hyper-sparse floor is tens of microseconds. This — not stability (§16) and not
+per-solve validation alone (§17) — is the bulk of the 2.3× per-pivot gap to
+HiGHS. The kernel already gets hyper-sparse *triangular solves* from
+`HFactorBackend` (BTRAN/FTRAN are cheap: 0.085 ms), but then **re-densifies** in
+PRICE, the ratio test, and the reduced-cost update.
+
+### 18.3 What the numbers say about the ceiling
+
+- **Per-pivot**: a full hyper-sparse rewrite of PRICE / ratio / rc-update would
+  plausibly take the kernel from 1.55 → ~0.5–0.7 ms/pivot, i.e. to parity with
+  or below HiGHS-LP. But $0.6\text{ ms} \times 37000 \approx 22$ s — it closes
+  the gap to HiGHS yet **still does not** put the root under an 8 s budget,
+  because the pivot count is unchanged.
+- **Pivot count**: only a *method* change removes it — the IPM (done, 5.4 s), or
+  presolve/decomposition that shrinks $m$, or warm starts that cut the count.
+- **Therefore** the honest decomposition of "still slow" is:
+  1. $N_{\text{pivots}}\approx 37\text{k}$ — intrinsic to simplex on this
+     degenerate 28k-row LP (HiGHS-LP pays it too); only the IPM avoids it.
+  2. $c_{\text{pivot}}\approx 1.55$ ms — a ~1000×-arithmetic-overhead
+     *implementation* gap (dense PRICE/ratio/update on 6.5/44-nonzero vectors),
+     provably fixable, and the concrete reason our simplex trails HiGHS' simplex.
+
+The strategic consequence is unchanged and now quantified: the 8 s root is an
+**IPM job** (§8.3), and the remaining value of the native simplex is (a) a fast
+hyper-sparse *crossover* from the IPM point to a basis, and (b) warm-started
+node LPs in the tree — both of which are worth a hyper-sparse PRICE/ratio/update
+rewrite, but neither of which is a root-LP speed lever on its own.
+
+### 18.4 Reproduce
+
+```sh
+# per-pivot profile + hyper-sparsity of row_ep / pivot_row on the 118-bus root
+env MIPSOLVERS_DS_PROFILE=1 ./tests/native_kernel_comparison --full --skip-lp \
+  --time-limit 8 2>&1 | grep -E "DS-PROFILE|DS-DENSITY"
+```
+
+The `[DS-DENSITY]` line is emitted by an env-gated probe in
+`native_dual/solver.cpp` `minor_iteration` (zero cost when `MIPSOLVERS_DS_PROFILE`
+is unset), alongside the existing `[DS-PROFILE]` phase timers.
+
+## 19. Optimization step 1 — hyper-sparse PRICE (done, default on)
+
+Acting on §18.2, the dense PRICE (`multiply_AT`, dense $A^\top\texttt{row\_ep}$
+over all $\mathrm{nnz}(A)$) is replaced by a **hyper-sparse row-wise PRICE**
+(`multiply_AT_hypersparse`, `native_dual/state.cpp`): it scatters only the
+nonzero entries of `row_ep` through the row-major `A_row` (which
+`StandardFormLP` already maintains and `ruiz_scale_standard_form` scales in
+sync). It is numerically equal to the dense product up to summation order and
+falls back to the dense product if `A_row` is dimensionally inconsistent.
+
+- New option `SimplexOptions::use_hypersparse_price` (**default true**), env
+  `MIPSOLVERS_DS_HYPERSPARSE_PRICE=0/1`; `MIPSOLVERS_DS_VERIFY_PRICE=1`
+  cross-checks the hyper-sparse pivot row against the dense product every pivot.
+
+**Measured** (118-bus root, ~7 s window): the PRICE phase collapses
+**0.71 s → 0.05 s (~14×**, 0.145 → 0.009 ms/pivot), lifting throughput
+4903 → 5319 pivots (**+8.5%** end-to-end). The end-to-end gain is "only" +8.5%
+because PRICE was ~10% of the per-pivot cost — the theory (§18.2) is confirmed
+exactly, and the *next* dominant terms are now the dense O(n) `entering`
+(ratio/BFRT) and `OTHER` (reduced-cost update) sweeps.
+
+**Validation:** 5 LP/MILP suites pass **with 0 `[DS-VERIFY-PRICE]` mismatches**
+under `MIPSOLVERS_DS_VERIFY_PRICE=1` (proving equivalence on NETLIB, adversarial
+scaling, and node LPs with appended cut rows), and `--check` reports 0 must-pass
+failures with the feature default-on.
+
+**Step 2 status:** PRICE now emits its structural column pattern; BFRT and the
+non-audit reduced-cost postcondition/update consume it instead of sweeping all
+$n=45250$ columns. See §20 for the post-PRICE diagnosis and §21 for the
+reduced-cost implementation and measurement.
+
+Files (uncommitted): `dual_simplex.hpp`, `native_dual/{model,state}.hpp`,
+`native_dual/{state,solver}.cpp`.
+
+## 20. Post-hyper-sparse analysis: why it is still slow
+
+The sparse pivot-pattern continuation described at the end of §19 is now also
+present in the working tree: `choose_entering_bfrt` scans the PRICE pattern
+instead of `0..n`. A fresh profile of that code gives:
+
+| phase | before hyper-sparse work (ms/pivot) | PRICE + sparse BFRT (ms/pivot) |
+|---|---:|---:|
+| leaving (CHUZR + BTRAN) | 0.209 | 0.209 |
+| PRICE | 0.144 | **0.014** |
+| entering (ratio/BFRT) | 0.185 | **0.030** |
+| FTRAN | 0.085 | 0.081 |
+| DSE | 0.108 | 0.103 |
+| postcondition | 0.020 | 0.020 |
+| periodic audit | 0.191 | 0.180 |
+| LU update | 0.093 | 0.089 |
+| OTHER | 0.358 | 0.361 |
+| **total** | **1.40** | **1.09** |
+
+The new run completed 6400 pivots in a 7.16 s simplex window, about **894
+pivots/s**. PRICE and BFRT are behaving as intended: together they fell from
+0.329 to 0.044 ms/pivot. The important result is that they now occupy only
+**4%** of an iteration. The remaining slowness is therefore not evidence that
+row-wise PRICE failed; it is evidence that the rest of the iteration is not
+hyper-sparse yet.
+
+### 20.1 Amdahl's-law explanation
+
+Before the change, PRICE + BFRT were about 23.5% of the 1.40 ms pivot. Even an
+infinitely fast implementation of just those two phases has a speedup ceiling
+
+$$S_{\max}=\frac{1}{1-0.235}\approx 1.31.$$
+
+The measured 1.40 -> 1.09 ms improvement is **1.28x**, very close to that
+ceiling. Thus the apparently small end-to-end improvement is the expected
+result of optimizing the selected region almost completely.
+
+The 8 s outer budget leaves about 7.2 s for simplex after model construction
+and presolve. At the historical 37054-pivot trajectory, it would require
+
+$$c_{\text{pivot}} \le \frac{7.2\text{ s}}{37054}
+  \approx 0.194\text{ ms/pivot},$$
+
+or more than another **5.6x** reduction from the measured 1.09 ms. Eliminating
+the remaining 0.044 ms PRICE/BFRT cost cannot materially approach that target.
+
+### 20.2 The implementation is hyper-sparse only in the middle
+
+The current dataflow is sparse for the triangular-solve kernel and for
+PRICE/BFRT, but becomes dense at their interfaces:
+
+$$
+e_p \xrightarrow{\text{dense wrapper}} B^{-T}e_p
+\xrightarrow{\text{sparse PRICE}} A^TB^{-T}e_p
+\xrightarrow{\text{sparse BFRT}} q
+\xrightarrow{\text{dense state updates}} (x_B,\bar c,w).
+$$
+
+Concretely:
+
+- `HFactorBackend::{ftran,btran}*` accepts and returns dense length-$m$
+  pointers. The large-system path scans the full input to construct an
+  `HVector`, runs the hyper-sparse HFactor solve, then copies/scatters a full
+  dense result. The `*_for_update` variants additionally construct a new
+  `HVector` and save dense RHS/solution buffers. Consequently a solve with a
+  one-entry RHS and a 6-entry result is still **Omega(m)** at the wrapper
+  boundary.
+- `Leaving::row_ep`, `direction`, `rho`, and `pivot_row` are dense Eigen
+  vectors. PRICE still zero-initializes a length-$n$ result; guards such as
+  `allFinite()` and norms rescan the full vector. The sparse pattern accompanies
+  the dense vector instead of replacing it.
+- BFRT starts by zeroing a length-$m$ RHS and constructs length-$n$
+  `flipped_col`/`shifted_col` markers. Its candidate scan is sparse, but its
+  transaction setup is not.
+- The reduced-cost commit still evaluates a dense length-$n$ Eigen expression,
+  then zeroes basic reduced costs with an $m$-row loop. The analytical
+  postcondition separately scans all $n$ columns.
+- The primal update forms all $m$ entries of `predicted_post_pivot`. DSE copies
+  all $m$ weights, performs another FTRAN, and updates all $m$ rows. CHUZR then
+  scans all $m$ rows again to find the largest weighted infeasibility.
+- Every 16 pivots, the full audit deliberately reconstructs a length-$n$
+  primal vector, scans dual feasibility, evaluates the objective, and computes
+  an $O(\mathrm{nnz}(A))$ residual. This alone remains about 0.18 ms/pivot when
+  amortized.
+
+Therefore the current iteration is still
+
+$$
+\Theta(m+n+\mathrm{nnz}(A)/16)
+$$
+
+outside the factorization, despite
+$\mathrm{nnz}(\texttt{row\_ep})\approx 6$--12 and
+$\mathrm{nnz}(\texttt{pivot\_row})\approx 50$--60. A true hyper-sparse
+iteration must preserve index sets across the whole pipeline, not merely use
+them for the matrix product and ratio test.
+
+### 20.3 The new dominant costs
+
+After sparse BFRT, the factor/edge pipeline dominates:
+
+- CHUZR + checked BTRAN: 0.209 ms/pivot;
+- pivotal-column FTRAN: 0.081 ms/pivot;
+- DSE solve and weight update: 0.103 ms/pivot;
+- Forrest-Tomlin update: 0.089 ms/pivot.
+
+These four terms already total **0.482 ms/pivot**, 2.5 times the complete
+per-pivot budget needed for an 8 s simplex root, before primal/reduced-cost
+state maintenance or audits. Much of the first three terms is not sparse
+factor arithmetic: it is dense marshaling, backward-error residual evaluation,
+vector copying, and dense CHUZR/DSE loops.
+
+With `MIPSOLVERS_DS_TIER_CHECKED_SOLVES=1`, a current 4 s profile falls from
+1.09 to about **0.915 ms/pivot** (3235 pivots in 3.04 s, about 1064/s): leaving
+drops to 0.105 and FTRAN to 0.050 ms/pivot. This is a useful further 16% but
+still projects to roughly 34 s for 37k pivots. It confirms that checked-solve
+residuals matter, while also showing that they are not the root solution.
+
+### 20.4 Algorithmic work required for a true hyper-sparse iteration
+
+The next implementation boundary should be an indexed vector (`HVector` or the
+existing `SparseVec`) carried end-to-end:
+
+1. Return the BTRAN/FTRAN pattern from `HFactorBackend` without full input and
+   output scans; retain the packed update data without duplicating dense RHS
+   and solution arrays.
+2. Update reduced costs, basic values, and DSE weights in place over touched
+   indices, with a sparse undo log for numerical-failure rollback. For reduced
+   costs, columns outside the pivot-row/shift pattern are unchanged, so the
+   existing dual-feasibility invariant is sufficient between full audits.
+3. Maintain CHUZR candidates incrementally. A pivot changes primal values and
+   DSE weights only on the union of the FTRAN/BFRT/DSE patterns; update those
+   rows in a heap or bucket structure instead of rescanning all $m$ rows.
+4. Keep periodic dense audits as a correctness backstop, but measure an
+   adaptive cadence separately. At stride 16 their 0.18 ms amortized cost alone
+   nearly consumes the entire 0.194 ms target.
+5. Remove the profiling observer effect: `[DS-DENSITY]` currently counts
+   nonzeros by scanning both dense vectors on every profiled pivot. Once vector
+   patterns are authoritative, report their stored counts directly.
+
+This work can plausibly close the remaining per-pivot gap to HiGHS and is
+valuable for crossover and warm node LPs. It still cannot guarantee the 8 s
+root target: the historical 37k pivot count leaves essentially no budget for
+factor solves, updates, and audits even at HiGHS-class pivot speed. The primary
+root path should remain IPM; full hyper-sparsity is the enabling work for fast
+crossover and simplex reoptimization after the IPM root.
+
+### 20.5 Two measurement corrections
+
+- A 4 s no-profile run completed **3000 pivots** after root setup, consistent
+  with the profiled order of magnitude. The density probe makes `OTHER`
+  slightly pessimistic but does not explain the multi-fold gap.
+- The same run reported **8504 individual bound flips over 3000 pivots**. This
+  does not reveal how many pivots contained at least one flip, but it means the
+  older statement that flip work is negligible cannot be assumed for the new
+  numerical trajectory. Instrument `flip_pivots` separately before optimizing
+  away the BFRT-RHS FTRAN path. Hyper-sparse row-wise summation changes floating
+  point order; on a degenerate LP, tiny coefficient differences can legitimately
+  change the pivot path and hence flip/iteration statistics even when every
+  computed tableau row agrees within tolerance.
+
+### 20.6 Reproduce the post-change measurements
+
+```sh
+# Sparse PRICE + sparse BFRT, strict checked solves
+env MIPSOLVERS_DS_PROFILE=1 MIPSOLVERS_DS_TIER_CHECKED_SOLVES=0 \
+  ./tests/native_kernel_comparison --full --skip-lp --time-limit 8
+
+# Same kernel with tiered hot-path solve validation
+env MIPSOLVERS_DS_PROFILE=1 MIPSOLVERS_DS_TIER_CHECKED_SOLVES=1 \
+  ./tests/native_kernel_comparison --full --skip-lp --time-limit 4
+
+# Iteration count without the density/profile scans
+env MIPSOLVERS_DS_VERBOSE=1 ./tests/native_kernel_comparison --full --skip-lp \
+  --time-limit 4
+```
+
+## 21. Optimization step 2 — sparse reduced-cost invariant (done)
+
+The remaining reduced-cost work in `minor_iteration` now uses the structural
+PRICE pattern end-to-end on ordinary pivots:
+
+- the analytical BFRT postcondition scans only pattern columns, including the
+  leaving column under its **post-pivot** bound move;
+- the reduced-cost commit updates only pattern columns in place and explicitly
+  zeros the entering column;
+- unchanged basic columns retain their exact-zero invariant;
+- every periodic audit pivot still materializes the complete dense candidate,
+  zeros the new basis, checks all columns, and runs the original residual audit;
+- dense PRICE/fallback configurations retain the original dense reduced-cost
+  construction.
+
+This avoids an $O(n)$ Eigen expression, an $O(m)$ basic-column zeroing loop,
+an $O(n)$ `allFinite`, and the separate $O(n)$ analytical postcondition on 15
+of every 16 pivots. No rollback log is needed: all failure-prone checks and the
+factor update occur before the sparse reduced-cost mutation; after that point
+the pivot commit cannot fail.
+
+Fresh strict profile, same 8 s command as §20:
+
+| metric | sparse BFRT only (§20) | + sparse reduced costs |
+|---|---:|---:|
+| simplex window | 7.16 s | 7.17 s |
+| pivots | 6400 | **6586** |
+| minor cost | 1.089 ms/pivot | **1.057 ms/pivot** |
+| postcondition | 0.020 ms/pivot | **<0.001 ms/pivot** |
+| reduced-cost materialization | hidden in `OTHER` | **0.014 ms/pivot** |
+| throughput change | baseline | **+2.9%** |
+
+The small end-to-end change is consistent with §20: after sparse PRICE and
+BFRT, the remaining dense reduced-cost work was only a few percent of the
+pivot. The audit-only `rcUpdate` timer is now explicit; most of the remaining
+1.057 ms is CHUZR/BTRAN, primal and DSE state maintenance, checked solves, the
+periodic audit, and the factor update.
+
+Validation:
+
+- `test_dual_simplex`: 1018 assertions / 23 cases;
+- dense fallback (`MIPSOLVERS_DS_HYPERSPARSE_PRICE=0 test_dual_simplex`): same;
+- `test_lp_solver`, `test_numerical_stability`, `test_netlib_regression`, and
+  `test_milp_solver`: all pass;
+- `native_kernel_comparison --check`: 0 must-pass failures;
+- `git diff --check`: clean.
+
+**Next implementation target:** expose indexed FTRAN/BTRAN results from
+`HFactorBackend` and carry those patterns into the primal and DSE updates. The
+factor already computes with `HVector`, but its public dense-pointer API scans
+and copies all $m$ entries at both boundaries. Removing that boundary is a
+prerequisite for sparse `x_basic`/DSE updates and incremental CHUZR; optimizing
+another isolated dense loop before it will have another low Amdahl ceiling.
+
+## 22. Optimization step 3 - indexed factor solves (done)
+
+The HFactor boundary now accepts an optional RHS pattern and returns the
+structural result pattern for FTRAN and BTRAN. The backend also retains the
+pivotal `HVector`s captured by `ftran_for_update` / `btran_for_update`; the FT
+update consumes those vectors directly instead of reconstructing two sparse
+packs from dense arrays on every pivot. Capture serials prevent a stale vector
+from crossing a rebuild or a later pivotal solve.
+
+The native dual driver carries the patterns through CHUZR, PRICE, pivotal
+FTRAN, and DSE. A result pattern is allowed to contain cancellation zeros, but
+it must contain every nonzero result entry. `test_dual_simplex` now verifies
+that contract directly for indexed FTRAN and BTRAN under a permuted,
+non-diagonal basis.
+
+Fresh strict 118-bus measurements after this step (before the later sparse
+commit and heap changes):
+
+| metric | sparse reduced costs (§21) | + indexed factor solves |
+|---|---:|---:|
+| pivots in the 7.16 s simplex window | 6586 | **7412** |
+| minor cost | 1.057 ms/pivot | **0.934 ms/pivot** |
+| leaving | - | 0.185 ms/pivot |
+| FTRAN | - | 0.058 ms/pivot |
+| DSE | - | 0.078 ms/pivot |
+| periodic audit | - | 0.186 ms/pivot |
+| `OTHER` | - | 0.339 ms/pivot |
+
+This was an 8.3% throughput increase over §21 and a 33% reduction from the
+original 1.40 ms/pivot baseline. The structural supports averaged 24.7 rows
+for `row_ep` and 122.9 rows for the pivotal FTRAN result. These are HVector
+supports, not numerical `abs(value)>tol` counts.
+
+## 23. Optimization step 4 - sparse state and incremental CHUZR (done)
+
+Three remaining dense state operations have been removed from ordinary
+pivots:
+
+1. `compute_dse_weights` returns validated `(row, new_weight)` assignments
+   instead of copying all $m$ weights. Devex and steepest-edge recurrences scan
+   the pivotal FTRAN pattern when it is known.
+2. The primal transaction computes assignments only for the pivotal FTRAN
+   support. It validates them before the LU update and applies them only at the
+   commit point. Flip, audit, and unknown-pattern pivots retain the dense path.
+3. CHUZR uses a versioned lazy max-heap. Only rows touched by the primal/DSE
+   update receive new entries; stale entries are discarded at the top. A
+   reconstruction or dense flip invalidates the heap, which is rebuilt on the
+   next CHUZR. Taboo-row ordering and the lowest-row deterministic tie break are
+   unchanged.
+
+These changes preserve the transaction boundary: no primal or edge-weight
+state is mutated until every failure-prone postcondition and the factor update
+has succeeded. Duplicate structural indices are harmless because commits are
+assignments computed from the pre-pivot state, not repeated increments.
+
+The profiling harness now reports on every solver return and
+`--lp118-native --time-limit S` passes the cap into the native LP solve. This
+exposed an important measurement limitation: the isolated 118-bus cold run
+currently spends the full 8 s in primal Phase I (7830 primal pivots) and never
+enters this dual hot loop. Therefore there is no honest final 118-bus
+ms-per-dual-pivot number for this step yet. A warm-basis snapshot or a dedicated
+Phase-II benchmark entry point is required for the next apples-to-apples run.
+
+## 24. Optimization step 5 - tiered large-basis audits (done)
+
+The old stride-16 full audit cost 0.186 ms/pivot by itself, already exceeding
+the requested 0.14 ms/pivot total. Large bases (`m >= 4096`) now use stride 128;
+smaller bases retain stride 16. Hot-path FTRAN/BTRAN residual checks use the
+same cadence by default, including the advisory DSE solve. Finiteness checks,
+pivot stability, the analytical BFRT dual-feasibility postcondition, rebuild
+audits, interrupted-bound certification, and the fresh terminal original-space
+audit remain active.
+
+The safety/performance controls are explicit:
+
+```sh
+# Every-pivot diagnostic posture
+env MIPSOLVERS_DS_PARANOID=1 MIPSOLVERS_DS_TIER_CHECKED_SOLVES=0 ...
+
+# Override the periodic full-state/checked-solve cadence
+env MIPSOLVERS_DS_AUDIT_STRIDE=16 ...
+```
+
+On the reproducible 39-bus relaxation, alternating warm-cache runs kept the
+same 178 pivots and objective. The median was about 20.0 ms in paranoid/strict
+mode and 17.2 ms with the tiered defaults. This medium model does not exercise
+the large-basis stride 128, so it is a correctness/sanity measurement rather
+than a proxy for the expected 118-bus audit saving.
+
+### 24.1 Status of the 10% target
+
+The 10% target means approximately 0.14 ms/pivot. It is **not yet measured as
+achieved**. From the last comparable 118-bus profile, merely changing the audit
+amortization from stride 16 to 128 reduces its theoretical contribution from
+0.186 to about 0.023 ms/pivot, a saving of 0.163 ms/pivot. Sparse state commits
+and incremental CHUZR remove additional $O(m)$ bandwidth, while tiered solves
+remove repeated $O(nnz(B))$ residual products. But the previously measured
+entering test (0.031), LU update (0.041), sparse factor solves, and remaining
+bookkeeping leave little room under 0.14.
+
+The next required work is therefore not another dense loop in the simplex
+driver. It is a warm Phase-II 118-bus benchmark followed by an HVector-native
+solve result API that avoids allocating/materializing a dense Eigen vector and
+running dense `allFinite` scans for every solve. If that fresh profile remains
+above 0.14 ms/pivot, the target requires a different factor-update architecture
+or using IPM as the primary large-root path; audit tuning alone cannot supply
+another order of magnitude.
+
+Final validation for §§22-24:
+
+- `test_dual_simplex`: 1038 assertions / 24 cases in default, paranoid/strict,
+  dense-PRICE, and PRICE/signature-verification configurations;
+- `test_lp_solver`: 41 assertions / 6 cases;
+- `test_numerical_stability`: 394 assertions / 15 cases;
+- `test_netlib_regression`: 220 assertions / 2 cases;
+- `test_milp_solver`: 131 assertions / 15 cases;
+- `native_kernel_comparison --check --time-limit 8`: 0 must-pass failures;
+- `git diff --check`: clean.
+
+## 25. Packed pivot kernels - dense-plus-pattern removed
+
+Sections 22-24 describe intermediate implementations and are superseded by
+this section. A pattern attached to an `Eigen::VectorXd` was not a genuinely
+indexed algorithm: construction, finiteness checks, fallback paths, and state
+transactions could still touch all `m` or `n` entries. Those structures and
+fallbacks have now been removed from both simplex pivot loops.
+
+The hot solve boundary now uses `IndexedVector`, with parallel index/value
+arrays and no full-length numeric payload. Indices are sorted after HFactor
+solves, so random coordinate lookup is logarithmic rather than a linear scan of
+the support. HFactor's captured pivotal `HVector`s pass directly to the
+Forrest-Tomlin update. If HFactor reports `count < 0` (no valid packed index
+list), the wrapper rejects the solve; it no longer accepts an empty result and
+silently loses a dense solution.
+
+### 25.1 Revised-dual pivot complexity
+
+The ordinary dual pivot now has these support-bounded operations:
+
+| operation | work |
+|---|---:|
+| CHUZR | lazy heap changes only |
+| BTRAN/FTRAN | HFactor indexed solve support |
+| PRICE | nonzeros in rows reached by packed `row_ep` |
+| BFRT ratio/postcondition | packed pivot-row support plus shifts |
+| BFRT primal update | union of BFRT-FTRAN and pivotal-FTRAN supports |
+| reduced-cost update | union of PRICE and cost-shift supports |
+| DSE/Devex update | pivotal-FTRAN support |
+| FT update | captured HFactor vectors |
+
+There is no periodic pivot audit, full primal reconstruction, dense candidate
+reduced-cost vector, dense BFRT marker, dense cost-shift vector, or dense PRICE
+fallback in `minor_iteration`. The obsolete audit/PRICE switches and dense
+hypersparse helper were deleted so the pivot cannot silently select the old
+path.
+
+### 25.2 Primal Phase I and cleanup
+
+The cold 118-bus benchmark did not spend time in the revised-dual loop; it was
+running primal Phase I. That separate pivot loop contained another complete set
+of full scans and dense solve/state temporaries. It now uses:
+
+- an indexed mutable entering heap with at most one entry per column;
+- packed pivotal FTRAN and update BTRAN;
+- ratio tests over the FTRAN support only;
+- packed row-wise PRICE;
+- sparse bound-flip, primal, and reduced-cost commits;
+- captured-vector FT updates;
+- no pre-pivot full-state audit.
+
+Publication still requires a fresh reconstruction and terminal audit. That is
+outside the pivot loop. A fixed 256-update reinversion interval controls FT
+fill and drift. Measurements rejected 32 (18.8 s), 128 (14.1 s), 512 (9.0 s),
+and 320 (numerical reconstruction failure); 256 was the fastest successful
+setting.
+
+### 25.3 Fresh 118-bus result and remaining floor
+
+For `UC_118bus_24T-relax` (`m=35,599`, `n=62,786`), the old cold run completed
+about 7,830 primal pivots in an 8-second window without solving. The packed
+kernel with the 256-update policy solves the relaxation in **7.44 s**, with
+37,475 pivots, objective `1.23363614e+05`, row violation about `1.0e-12`, and
+bound violation about `2.0e-13`.
+
+The two primal phases measured:
+
+| phase | pivots | time | ms/pivot | FTRAN | PRICE | update |
+|---|---:|---:|---:|---:|---:|---:|
+| Phase I | 19,854 | 2.765 s | 0.139 | 1.655 s | 0.074 s | 0.014 s |
+| Phase II | 17,621 | 4.639 s | 0.263 | 2.723 s | 0.329 s | 0.028 s |
+
+This is a large improvement, but the weighted cost is about 0.198 ms/pivot,
+so the 0.14 ms/pivot interpretation of the 10% target is not yet met. Packed
+FTRAN alone contributes about 0.117 ms/pivot. The next material improvement is
+therefore inside HFactor's triangular/FT solve representation and fill growth,
+not another driver-level vector conversion. Reusing output storage may remove
+some allocation cost, but it cannot supply the remaining reduction unless the
+factor solve itself also becomes cheaper.
+
+Final validation after the packed conversion:
+
+- `test_dual_simplex`: 1038 assertions / 24 cases;
+- `test_lp_solver`: 41 assertions / 6 cases;
+- `test_numerical_stability`: 394 assertions / 15 cases;
+- `test_netlib_regression`: 220 assertions / 2 cases;
+- `test_milp_solver`: 131 assertions / 15 cases;
+- `native_kernel_comparison --check`: 0 must-pass failures.
+
+## 26. HFactor FTRAN data-structure analysis and implementation
+
+The first HFactor experiment exposed a build-ownership defect: the executable
+linked both embedded HiGHS and `mipsolvers_hfactor`, which define the same
+global `HFactor` symbols. Archive order selected `highs/util/HFactor.cpp`; edits
+to the nominal native copy were not executed. Configurations with embedded
+HiGHS now use that single implementation. The standalone mirror is built only
+when the full HiGHS library is unavailable, and the two source copies retain
+the same indexed-solve changes.
+
+### 26.1 Rejected FT dependency graph
+
+The chronological FT loop originally visits every stored update and ETA entry.
+An inverted row-to-update dependency graph measured genuine reach sparsity over
+the 118-bus run:
+
+- reached FT updates: 647,423 / 4,691,595 = 13.8%;
+- reached ETA entries: 20,585,561 / 50,744,746 = 40.6%;
+- dependency edges examined: 6,895,225.
+
+Despite skipping work, a linked row graph plus binary heap increased the solve
+from 7.44 s to about 8.0 s. FT application itself was only about 66 ms over
+37,000 profiled FTRANs; pointer chasing and heap scheduling cost more than the
+short chronological scan over at most 256 updates. The experiment also needed
+a model-sized `ft_row_head`, contrary to the packed design. It has been removed
+completely. A fused heap frontier for U was also rejected: it changed numerical
+accumulation order, increased the run to 48,401 pivots and 14.6 s, and is not in
+the final code.
+
+### 26.2 Actual dominant operations
+
+Internal timing showed that FT was not the FTRAN floor. Before the retained
+changes, 37,000 FTRAN calls accumulated approximately:
+
+| internal operation | time |
+|---|---:|
+| lower triangular reach/solve | 0.021 s |
+| FT updates | 0.066 s |
+| upper triangular reach/solve | 1.91 s |
+| `HVector::reIndex` | 0.32 s |
+
+The upper solve expands roughly 115 intermediate entries per call to several
+thousand output entries. Its DFS symbolic reach and numerical scatter are the
+remaining intrinsic HFactor cost. Only 144 / 37,000 calls selected HFactor's
+full U scan, so changing the 5% hyper-sparse switch is not a material answer.
+
+Two avoidable data-structure costs were removed:
+
+1. Indexed FTRAN/BTRAN no longer calls `reIndex()`. Every indexed triangular
+   and FT kernel already maintains its support; `reIndex()` discarded that
+   fact and scanned all 35,599 rows whenever support exceeded 10%.
+2. HFactor results no longer allocate `pair<int,double>` entries and comparison
+   sort them. `IndexedVector` carries a flat, support-sized open-address lookup.
+   The backend constructs it while exporting HFactor's support, so there is no
+   second pass. Iteration remains over parallel packed index/value arrays and
+   random `at(row)` lookup is expected O(1). No lookup storage or operation is
+   proportional to `m` or `n`.
+
+### 26.3 Measured result
+
+The retained implementation solves `UC_118bus_24T-relax` in **5.54 s** with
+36,545 pivots, objective `1.23363614e+05`, row violation about `1.1e-12`, and
+bound violation about `2.6e-13`:
+
+| phase | pivots | time | ms/pivot | FTRAN |
+|---|---:|---:|---:|---:|
+| Phase I | 19,854 | 2.189 s | 0.110 | 1.033 s |
+| Phase II | 16,691 | 3.314 s | 0.199 | 1.487 s |
+
+Compared with section 25, wall time fell from 7.44 s to 5.54 s (25.5%) and
+profiled FTRAN fell from 4.378 s to 2.520 s (42.4%). The weighted total is about
+0.151 ms/pivot and FTRAN is about 0.069 ms/pivot.
+
+The requested 10% cost target is **not achieved**: current wall time is 74.5%
+of the section-25 case, and FTRAN is 57.6% of its former cost. The next HFactor
+step must reduce the upper triangular symbolic/numeric reach itself without
+changing accumulation order. FT scheduling, another density threshold, or
+another packed-output micro-optimization cannot provide the remaining factor.
+
+Validation:
+
+- `test_dual_simplex`: 1038 assertions / 24 cases;
+- `native_kernel_comparison --check`: 0 must-pass failures;
+- `git diff --check`: clean.
+
+### 26.4 Order-preserving U-reach representation
+
+The old U representation stores a physical row in `u_index[k]`. During every
+symbolic DFS edge visit, `solveHyper()` translated it to a logical U node with
+
+```cpp
+u_pivot_lookup[u_index[k]]
+```
+
+The first load is sequential, but the second is an input-dependent access into
+the row-to-pivot permutation. The arithmetic pass subsequently traverses the
+same U entry range again in stored order. Changing the traversal, merging the
+symbolic and arithmetic frontiers, or sorting the frontier is not admissible:
+those changes alter DFS postorder and therefore floating-point accumulation
+order.
+
+HFactor now maintains a parallel packed symbolic adjacency:
+
+```cpp
+u_reach_index[k] == u_pivot_lookup[u_index[k]]
+```
+
+`u_reach_index` contains 32-bit logical node IDs even when `HighsInt` is 64
+bit. It therefore costs four bytes per stored U entry, is proportional to U
+storage rather than the model dimension, and turns the symbolic child access
+into one sequential load. Models whose logical node count cannot fit in 32
+bits retain the original lookup path.
+
+The ordering proof is direct:
+
+1. RHS roots are still consumed in the same packed order and translated by
+   `u_pivot_lookup`.
+2. Each node still scans exactly `[u_start[i], u_last_p[i])` in increasing
+   physical entry order.
+3. For every scanned entry, the cached child equals the child returned by the
+   old double lookup.
+4. Hence marks, stack pushes, DFS postorder, and reverse-postorder node order
+   are identical.
+5. The numeric pass is unchanged and still uses `u_index` and `u_value` in the
+   original stored order.
+
+The cache is built in `O(stored nnz(U))` during factorization and invert
+restore. An FT deletion copies the cached ID with the same last-entry swap as
+`u_index`; an FT append records the current lookup of the appended physical
+row. This is valid because all incoming entries for the pivotal row are
+deleted before that row's lookup moves to its newly appended logical pivot.
+Unsupported structural update paths invalidate the cache and use the original
+sparse lookup. There is no dense or model-dimension fallback.
+
+Two consecutive 118-bus profiles after the compact representation measured
+5.430 s and 5.419 s total, with FTRAN totals of 2.314 s and 2.306 s. Both runs
+had 36,545 pivots, objective `1.23363614e+05`, row violation `1.14e-12`, and
+bound violation `2.56e-13`. Relative to section 26.3, typical FTRAN time fell
+from 2.520 s to about 2.31 s (8.3%), while total time fell from 5.54 s to about
+5.42 s (2.2%). Relative to the section-25 baseline, total time is still about
+72.8% and FTRAN about 52.8%. Thus this redesign removes the symbolic
+row-to-pivot indirection without numerical drift, but the requested 10% total
+cost target remains far away; the unchanged upper numeric scatter is now the
+next HFactor-level cost to isolate.
+
+### 26.5 FTRAN call topology and factor-age measurement
+
+The first algorithm-level step was to classify the hot solves before trying to
+reuse or remove them. `MIPSOLVERS_DS_PROFILE=1` now reports pivotal FTRAN and
+basis-update BTRAN call counts, average RHS/result support, and FTRAN time and
+result support in 32-update factor-age buckets. The counters reuse the existing
+environment-gated primal profiler; they add no scan and execute no accounting
+on the normal path.
+
+The 118-bus cold solve contains two primal-simplex passes, not a dual minor
+iteration trajectory:
+
+| pass | pivots / pivotal FTRANs | average FTRAN RHS | average FTRAN result | update BTRANs |
+|---|---:|---:|---:|---:|
+| Phase I | 19,854 | 30.6 | 2,446.3 | 18,928 |
+| Phase II | 16,691 | 30.7 | 4,861.9 | 16,675 |
+
+Thus every one of the 36,545 hot FTRANs has a distinct entering column and is
+the pivotal direction required by the ratio test and factor update. There is
+no repeated BFRT/DSE FTRAN in this trajectory to eliminate algebraically.
+
+Factor age does increase solve cost. In Phase II, age 0--31 accumulated 0.155 s
+over 2,113 calls (73 microseconds/call), while age 224--255 accumulated 0.195 s
+over 2,081 calls (94 microseconds/call). However, the average result support
+only increased from 4,772 to 5,083 entries. A measured 128-update reinversion
+experiment changed the degenerate pivot path, increasing the run from 36,545
+pivots and about 5.42 s to 42,782 pivots and 8.83 s. It was removed and the
+256-update policy restored.
+
+A primal Devex experiment was also removed. It reduced Phase I to 10,704
+pivots, but selected fill-heavy Phase-II columns; the run reached 41,058 total
+pivots at the 20 s limit without finishing. This demonstrates that minimizing
+pivot count or a local norm proxy alone is insufficient. Restricting Devex to
+Phase I did not isolate the benefit: the different Phase-I exit basis caused
+48,942 Phase-II pivots and 59,646 total pivots, taking 12.4 s. An exact attempt
+to hand the Phase-I basis directly to dual simplex also found that the basis
+could not be made dual feasible. Both experiments were removed. Any future
+pricing or crash change must optimize Phase-II exit-basis quality together with
+Phase-I progress and factor reach.
+
+### 26.6 Step 2: sparse IPM-to-simplex basis handoff
+
+The old recovery kept three candidates per row, greedily replaced at most 256
+logicals, and repeatedly formed a growing `Eigen::MatrixXd`. `FullPivLU` proved
+rank only for that dense corner, not for the complete simplex basis. The
+mandatory native-MILP path then ignored the recovered basis and started from
+the cold logical basis.
+
+The replacement is sparse throughout:
+
+1. IPM primal, row-dual, and bound-dual values are mapped to scaled standard
+   form. Row duals now use the public simplex sign convention rather than the
+   opposite legacy crash convention.
+2. Basic likelihood uses scaled reduced cost. Interior columns have lexical
+   priority; bound columns are eligible only when their reduced cost is
+   numerically zero.
+3. Each row contributes at most 12 strong structural edges to one bounded
+   packed edge array. Scores combine optimal partition, normalized coefficient
+   magnitude, row-dual activity, and column sparsity.
+4. Retained edges are deduplicated into a candidate-column order: interior
+   status first, then reduced-cost/basic score, coefficient quality, and
+   sparsity. The valid logical or seeded basis is factorized before the first
+   exchange; seeded structural positions are never eligible to leave.
+5. Each sparse candidate column is packed directly from `A` and FTRANed by the
+   current HFactor. The largest coefficient at a replaceable logical position
+   is eligible only when its absolute magnitude is at least `1e-9` and it is at
+   least 10% of the largest magnitude in the complete transformed direction.
+   BTRAN of the selected unit position is then captured and the exchange is
+   committed through `update_captured`. The published basis index changes only
+   after that commit succeeds.
+6. HFactor requests an early refactor when update fill requires it; otherwise
+   the crash refactors after 128 accepted exchanges. One final complete sparse
+   factorization is mandatory. There is no post-hoc rank repair: a failed final
+   build rejects the recovered basis as a whole, and protected seed columns
+   cannot be silently replaced.
+7. `allow_warm_primal_phase_one` is off by default and enabled only for a
+   screened IPM crossover basis. A dual-infeasible crash basis now enters the
+   existing artificial-objective Phase I from that basis instead of being
+   discarded at iteration zero for a cold logical restart.
+
+The primal Phase-I driver also applies its one-reinvert confirmation policy to
+non-finite pre-commit dual updates and impossible unbounded Phase-I ratio
+results. No suspect pivot is committed; a repeated failure from the fresh
+factor remains terminal.
+
+On the presolved 118-bus root (`m=26,499`, `n=43,313`), the incremental version
+retained 9,890 packed edges and admitted 1,184 structural columns. It performed
+nine bounded sparse refactors, required zero rank repairs, and the accepted
+relative pivots ranged from 0.117 to 1.0 with mean 0.597. The complete basis
+factorized and entered warm Phase I. This is a stronger construction result
+than the old batch basis (672 matches followed by 93 repairs): every published
+exchange has now been admitted against the actual preceding numerical basis.
+
+Crossover is still not complete. Warm Phase I reaches its existing 5,000-pivot
+limit, after which the strict simplex-basis fallback remains necessary. Stable
+incremental construction therefore removes the batch rank/conditioning bug but
+does not prove that the selected optimal-partition columns give a short primal
+Phase-I trajectory. A basis-free IPM return was remeasured and rejected because
+downstream cold LP solves expanded the 20-second case to 68 seconds.
+
+Step 2 therefore removes the dense rank test, fixes the dual-sign and warm-start
+contract bugs, and now constructs the recovered basis by stable packed HFactor
+updates. It does not yet meet the 10% target. The remaining boundary is Phase-I
+trajectory quality: candidate admission controls linear independence and local
+pivot stability, but not the number of primal pivots needed to reach a vertex.
+
+---
+
+# Progress log — rebuild/boundary round (2026-07-30, later)
+
+## 27. Duplicate INVERT eliminated; 0.14 ms/pivot target met
+
+### 27.1 Diagnosis — every rebuild factorized the basis twice
+
+A `sample` profile of the §26.4 baseline (5.34 s) attributed ~21 % of wall time
+to the INVERT path — twice what one build per rebuild should cost. The call
+tree showed why: `HFactorBackend::factorize_with_logicals` ran a **complete
+HFactor build twice per rebuild** — first the diagnostic build with HFactor's
+implicit logicals (rank detection/repair), then, because the caller's logical
+columns are Ruiz-scaled multiples of $e_i$, a second full build in the real
+column space via `factorize()`. Every one of the ~142 rebuilds in the 118-bus
+run is full rank (`rank_repairs = 0`), so the diagnostic build was pure
+overhead, ~0.5 s of the run.
+
+### 27.2 Fix — real-space build first, diagnostic build only on deficiency
+
+`factorize_with_logicals` now tries the real-space `factorize()` on the
+caller's basis first and returns immediately when it succeeds; the
+implicit-logical diagnostic build and repair run only after a real-space build
+reports deficiency (a rank-deficient input now costs one extra build — it is
+rare and confined to crash bases). In the full-rank case the final factor
+state is the same build the old path ended with, so the pivot trajectory is
+**bit-identical**: 36,545 pivots, obj `1.23363614e+05`, rowviol `1.14e-12`,
+bndviol `2.56e-13` before and after.
+
+**Measured: 5.34 s → 4.61 s (−13.6 %).** This also speeds every node-LP and
+warm-start factorization fleet-wide (39-bus/24T MILP row now ~13 ms, was ~35 ms
+in §10).
+
+### 27.3 Solve-boundary cleanups (kept; ≈1–3 % combined)
+
+- `ftran_indexed`/`btran_indexed` built an open-address coordinate-lookup
+  table over the full result support (~2.4k–4.9k entries) on **every** solve —
+  ~130 M hash inserts per 118-bus run — while the primal loop queries the
+  direction at exactly one row. The lookup is now built **lazily** by
+  `IndexedVector::at()` (mutable `lookup_slot`; supports < 8 use a linear scan
+  with no allocation), the backend no longer populates it, and the unsorted
+  `lower_bound` hazard is gone because `at()` never binary-searches. The
+  primal ratio test additionally captures the selected direction entry in
+  `PrimalLeaving::direction_value`, so the hot loop performs no coordinate
+  lookups at all.
+- The separate `finite()` pass over every exported solve result was fused into
+  the backend's export loop; a non-finite solve now rejects at the boundary
+  (also closing a latent NaN-acceptance hole in the §26.6 crossover, which
+  consumed backend solves without a finiteness check).
+
+Individually these measured near the noise floor on this hardware (the §10.1
+lesson again — the eliminated work was memory-cheap); together with the INVERT
+fix the run lands at **4.47–4.53 s**.
+
+### 27.4 Rejected: software prefetch in `solveHyper`
+
+Prefetching the next node's pivot slot and entry range (distance 2, reverse
+DFS postorder) in the numeric pass made the run **slower** (4.60–4.66 s vs
+4.47–4.53 s): Apple-silicon's out-of-order window already hides the latency
+and the hint instructions are pure overhead. Removed; `solveHyper` is
+unchanged from §26.4.
+
+### 27.5 Result vs the 10 % target, and the benchmark rows
+
+`UC_118bus_24T-relax` (`m=35,599`, `n=62,786`), same 36,545-pivot trajectory:
+
+| round | wall | weighted ms/pivot | Phase I | Phase II |
+|---|---:|---:|---:|---:|
+| §26.4 baseline | 5.34 s | 0.148 | 0.106 | 0.192 |
+| this round | **4.49 s** | **0.123** | 0.089 | 0.168 |
+
+The **0.14 ms/pivot reading of the 10 % target is met** (§24.1/§26.3 said it
+required an HFactor-level change; the change turned out to be *not building
+the factor twice*). Benchmark rows at 8 s: `NativeBC[natSimplex]` certified
+bound improved **64.8k–67.6k → 80,516** (more pivots fit the budget);
+`NativeBC[natIPMroot]` unchanged at the exact root bound 123,363.61.
+
+Remaining profile: `solveHyper` ~38 % (upper-solve reach — intrinsic per
+§26.2–26.4), single INVERT + reconstruct ~12 %, driver state
+maintenance/ratio/PRICE the rest. The next material lever on this LP is not
+per-pivot cost: it is the §26.6 crossover Phase-I trajectory (pivot count),
+unchanged from that section's conclusion.
+
+### 27.6 Validation
+
+- `native_kernel_comparison --check` — **0 must-pass failures** (exact
+  objectives), before and after each change in this round;
+- `test_lp_solver` 41/41 · `test_numerical_stability` 394/394 ·
+  `test_dual_simplex` 1052/1052 (also under
+  `MIPSOLVERS_DS_PARANOID=1 MIPSOLVERS_DS_TIER_CHECKED_SOLVES=0`) ·
+  `test_netlib_regression` 220/220 · `test_milp_solver` 131/131;
+- 118-bus pivot trajectory bit-identical across the INVERT fix (36,545 pivots,
+  identical objective and residuals), confirming no numerical drift.
+
+Files touched this round: `hfactor_backend.cpp` (single-build fast path,
+no eager lookup, fused finiteness), `native_dual/model.hpp` (lazy
+`IndexedVector` lookup), `native_dual/factor.cpp` (redundant `finite()`
+removed), `native_dual/primal.cpp` (`direction_value` capture).

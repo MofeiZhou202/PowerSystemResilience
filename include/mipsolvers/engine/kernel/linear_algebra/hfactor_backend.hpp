@@ -94,12 +94,33 @@ class HFactorBackend {
   // permitted (`rhs == result`).
   //
   // On entry, `result` need not be initialised.  On exit it holds B^{-1} rhs.
-  void ftran(const double* rhs, double* result) const;
-  void ftran_for_update(const double* rhs, double* result) const;
+  void ftran(const double* rhs, double* result,
+             const std::vector<int>* rhs_pattern = nullptr,
+             std::vector<int>* result_pattern = nullptr) const;
+  void ftran_for_update(const double* rhs, double* result,
+                        const std::vector<int>* rhs_pattern = nullptr,
+                        std::vector<int>* result_pattern = nullptr) const;
 
   // ── BTRAN: solve B^T y = rhs ───────────────────────────────────────────
-  void btran(const double* rhs, double* result) const;
-  void btran_for_update(const double* rhs, double* result) const;
+  void btran(const double* rhs, double* result,
+             const std::vector<int>* rhs_pattern = nullptr,
+             std::vector<int>* result_pattern = nullptr) const;
+  void btran_for_update(const double* rhs, double* result,
+                        const std::vector<int>* rhs_pattern = nullptr,
+                        std::vector<int>* result_pattern = nullptr) const;
+
+  bool ftran_indexed(const std::vector<int>& rhs_index,
+                     const std::vector<double>& rhs_value,
+                     std::vector<int>& result_index,
+                     std::vector<double>& result_value,
+                     std::vector<int>& result_lookup,
+                     bool capture_update = false) const;
+  bool btran_indexed(const std::vector<int>& rhs_index,
+                     const std::vector<double>& rhs_value,
+                     std::vector<int>& result_index,
+                     std::vector<double>& result_value,
+                     std::vector<int>& result_lookup,
+                     bool capture_update = false) const;
 
   // ── Product-form basis update ──────────────────────────────────────────
   //
@@ -118,6 +139,7 @@ class HFactorBackend {
               int entering_col,
               const double* a_q_after_ftran,
               const double* btran_e_p);
+  bool update_captured(int pivot_row, int entering_col);
 
   // ── Refactor heuristic ─────────────────────────────────────────────────
   // Mirrors HiGHS' `u_total_x > u_merit_x` fill-based trigger as set by

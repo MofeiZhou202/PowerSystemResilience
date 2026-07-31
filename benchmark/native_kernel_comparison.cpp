@@ -408,7 +408,7 @@ MilpRow run_highs_mip(const TestCase& tc, double time_limit_sec) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 LpRow run_native_simplex_lp(const std::string& case_name, const engine::LPModel& lp,
-                            double ref_obj) {
+                            double ref_obj, double time_limit_sec = 0.0) {
     LpRow r;
     r.case_name = case_name;
     r.solver    = "natDualSimplex";
@@ -416,6 +416,7 @@ LpRow run_native_simplex_lp(const std::string& case_name, const engine::LPModel&
     engine::SimplexOptions opts;
     opts.lp_kernel_backend = engine::LpKernelBackend::ExperimentalNative;
     opts.max_iter = 100000;
+    opts.time_limit_sec = time_limit_sec;
     // Adaptive HiGHS presolve is a fair production comparison: HiGHS-LP presolves
     // internally, so the native kernels get the same lever.  Primal + objective
     // are all this LP-relaxation row reports, so primal-only postsolve suffices.
@@ -1094,6 +1095,7 @@ int main(int argc, char** argv) {
     bool   check_mode     = false;
     bool   warm_probe     = false;
     bool   warm_probe_39  = false;
+    bool   milp_118_ipm_only = false;
     int    lp_native_only = 0;  // 118 or 39: run just that SCUC relaxation
                                 // through natDualSimplex (fast profiling loop)
     double time_limit_sec = 120.0;
@@ -1116,12 +1118,24 @@ int main(int argc, char** argv) {
             lp_native_only = 118;
         } else if (std::strcmp(argv[i], "--lp39-native") == 0) {
             lp_native_only = 39;
+        } else if (std::strcmp(argv[i], "--milp118-native-ipm") == 0) {
+            milp_118_ipm_only = true;
         } else if (std::strcmp(argv[i], "--time-limit") == 0 && i + 1 < argc) {
             time_limit_sec = std::atof(argv[++i]);
         }
     }
     if (warm_probe) return run_warm_probe(true);
     if (warm_probe_39) return run_warm_probe(false);
+
+    if (milp_118_ipm_only) {
+        SCUCInput inp = build_ieee118_case(/*T=*/24);
+        inp.config.solve_sced = false;
+        inp.config.solve_lmp = false;
+        TestCase tc{"UC_118bus_54G_24T", std::move(inp)};
+        print_milp_table({run_native_bc(tc, /*ipm_root=*/true,
+                                        time_limit_sec)});
+        return 0;
+    }
 
     if (lp_native_only != 0) {
         SCUCInput inp = (lp_native_only == 118) ? build_ieee118_case(/*T=*/24)
@@ -1133,7 +1147,8 @@ int main(int argc, char** argv) {
         const char* label = (lp_native_only == 118) ? "UC_118bus_24T-relax"
                                                     : "UC_39bus_24T-relax";
         LpRow r = run_native_simplex_lp(
-            label, lp, std::numeric_limits<double>::quiet_NaN());
+            label, lp, std::numeric_limits<double>::quiet_NaN(),
+            time_limit_sec);
         std::printf("%s natDualSimplex %.1f ms iters=%d obj=%.8e "
                     "rowviol=%.2e bndviol=%.2e status=%s\n",
                     label, r.runtime_ms, r.iterations, r.objective,

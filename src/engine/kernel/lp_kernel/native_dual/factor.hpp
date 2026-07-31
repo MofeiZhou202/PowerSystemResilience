@@ -11,11 +11,18 @@ namespace mipsolvers::engine::native_dual::detail {
 
 struct SolveEvidence {
   Eigen::VectorXd solution;
+  std::vector<int> pattern;
+  bool pattern_known{false};
   bool accepted{false};
   bool needs_rebuild{false};
   bool refined{false};
   double residual{0.0};
   double error_limit{0.0};
+};
+
+struct IndexedSolveEvidence {
+  IndexedVector solution;
+  bool accepted{false};
 };
 
 struct EdgeWeightEvidence {
@@ -47,6 +54,7 @@ class BasisFactor final : public BasisOps {
   bool update(int pivot_row, int entering_col,
               const Eigen::VectorXd& direction,
               const Eigen::VectorXd& row_ep, std::string& failure);
+  bool update_indexed(int pivot_row, int entering_col, std::string& failure);
   PivotEvidence pivot_evidence(int pivot_row, int entering_col,
                                const Eigen::VectorXd& direction,
                                const Eigen::VectorXd& row_ep) const;
@@ -63,10 +71,16 @@ class BasisFactor final : public BasisOps {
   Eigen::VectorXd btran_for_update(const Eigen::VectorXd& rhs) const;
   SolveEvidence checked_ftran(const Eigen::VectorXd& rhs,
                               bool capture_update = false,
-                              bool verify = true) const;
+                              bool verify = true,
+                              const std::vector<int>* rhs_pattern = nullptr) const;
   SolveEvidence checked_btran(const Eigen::VectorXd& rhs,
                               bool capture_update = false,
-                              bool verify = true) const;
+                              bool verify = true,
+                              const std::vector<int>* rhs_pattern = nullptr) const;
+  IndexedSolveEvidence indexed_ftran(const IndexedVector& rhs,
+                                     bool capture_update = false) const;
+  IndexedSolveEvidence indexed_btran(const IndexedVector& rhs,
+                                     bool capture_update = false) const;
   SolveEvidence refine_ftran(const Eigen::VectorXd& rhs,
                              const Eigen::VectorXd& solution) const;
   EdgeWeightEvidence compute_exact_edge_weights() const;
@@ -89,7 +103,8 @@ class BasisFactor final : public BasisOps {
  private:
   SolveEvidence solve_checked(const Eigen::VectorXd& rhs,
                               bool transpose, bool capture_update,
-                              bool verify = true) const;
+                              bool verify = true,
+                              const std::vector<int>* rhs_pattern = nullptr) const;
   SolveEvidence refine_checked(const Eigen::VectorXd& rhs,
                                const Eigen::VectorXd& solution,
                                bool transpose) const;

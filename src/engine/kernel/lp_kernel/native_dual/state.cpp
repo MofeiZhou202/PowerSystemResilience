@@ -300,6 +300,7 @@ bool rebuild_membership(State& state, std::string& failure) {
 }
 
 bool correct_canonical_primal_residual(State& state, std::string& failure) {
+  state.leaving_heap_valid = false;
   const double equation_limit =
       state.options->feasibility_tol *
       std::max(1.0, state.sf->b.lpNorm<Eigen::Infinity>());
@@ -352,6 +353,7 @@ bool correct_canonical_primal_residual(State& state, std::string& failure) {
 }
 
 bool reconstruct(State& state, std::string& failure) {
+  state.leaving_heap_valid = false;
   if (!rebuild_membership(state, failure)) return false;
   Eigen::VectorXd rhs = state.sf->b;
   for (int j = 0; j < state.n; ++j) {
@@ -430,6 +432,7 @@ bool normalize_nonbasic_moves(State& state, std::string& failure) {
 
 bool initialize_exact_edge_weights(State& state, Statistics& statistics,
                                    std::string& failure) {
+  state.leaving_heap_valid = false;
   state.edge_weight_mode = EdgeWeightMode::SteepestEdge;
   state.devex_reference.clear();
   state.devex_iterations = 0;
@@ -473,6 +476,7 @@ bool initialize_exact_edge_weights(State& state, Statistics& statistics,
 }
 
 void initialize_devex_framework(State& state, Statistics& statistics) {
+  state.leaving_heap_valid = false;
   state.edge_weight_mode = EdgeWeightMode::Devex;
   state.edge_weight.assign(static_cast<std::size_t>(state.m), 1.0);
   state.devex_reference.assign(static_cast<std::size_t>(state.n), 0);

@@ -43,13 +43,6 @@ int hyper_sparse_min_rows() {
 }  // namespace
 
 struct HFactorBackend::Impl {
-  struct UpdatePack {
-    std::vector<HighsInt> index;
-    std::vector<double> value;
-    std::uint64_t serial = 0;
-    bool valid = false;
-  };
-
   HFactor f;
 
   // CSC copy of the bound A matrix in HighsInt format (HFactor::setupGeneral
@@ -66,6 +59,7 @@ struct HFactorBackend::Impl {
   // backend contract stores them in the caller's basis-position ordering.
   // external_to_internal[p] is the HFactor position of caller position p.
   std::vector<HighsInt> external_to_internal;
+  std::vector<HighsInt> internal_to_external;
 
   // Cached dimensions (for ftran/btran sanity checks).
   HighsInt num_row = 0;
@@ -82,11 +76,15 @@ struct HFactorBackend::Impl {
   // solve path (real RHS density) without per-call HVector setup.
   mutable HVector solve_vec_ftran;
   mutable HVector solve_vec_btran;
-  mutable UpdatePack aq_pack;
-  mutable UpdatePack ep_pack;
-  mutable std::vector<double> aq_rhs;
-  mutable std::vector<double> ep_rhs;
-  mutable std::vector<double> aq_solution_internal;
+  // Pivotal solves must retain their HFactor pack data until update(). Reuse
+  // the complete HVectors directly: reconstructing them from copied dense and
+  // packed buffers allocated and initialized several O(m) arrays per pivot.
+  mutable HVector update_vec_aq;
+  mutable HVector update_vec_ep;
+  mutable std::uint64_t aq_capture_serial = 0;
+  mutable std::uint64_t ep_capture_serial = 0;
+  mutable bool aq_capture_valid = false;
+  mutable bool ep_capture_valid = false;
   std::uint64_t factor_serial = 0;
 };
 
@@ -107,8 +105,8 @@ bool HFactorBackend::factorize(const Eigen::SparseMatrix<double>& A,
   rank_deficiency = 0;
   refactor_hint_ = 0;
   ++p_->factor_serial;
-  p_->aq_pack.valid = false;
-  p_->ep_pack.valid = false;
+  p_->aq_capture_valid = false;
+  p_->ep_capture_valid = false;
 
   if (n_basic <= 0 || basic_index == nullptr) return false;
   if (A.rows() <= 0 || A.cols() <= 0) return false;
@@ -206,6 +204,7 @@ bool HFactorBackend::factorize(const Eigen::SparseMatrix<double>& A,
     external_position_by_col[static_cast<std::size_t>(col)] = external;
   }
   p_->external_to_internal.assign(static_cast<std::size_t>(n_basic), -1);
+  p_->internal_to_external.assign(static_cast<std::size_t>(n_basic), -1);
   for (int internal = 0; internal < n_basic; ++internal) {
     const int col =
         static_cast<int>(p_->basic_index[static_cast<std::size_t>(internal)]);
@@ -218,11 +217,14 @@ bool HFactorBackend::factorize(const Eigen::SparseMatrix<double>& A,
       return false;
     }
     p_->external_to_internal[static_cast<std::size_t>(external)] = internal;
+    p_->internal_to_external[static_cast<std::size_t>(internal)] = external;
   }
 
   p_->solve_buf.assign(static_cast<size_t>(num_row), 0.0);
   p_->solve_vec_ftran.setup(static_cast<HighsInt>(num_row));
   p_->solve_vec_btran.setup(static_cast<HighsInt>(num_row));
+  p_->update_vec_aq.setup(static_cast<HighsInt>(num_row));
+  p_->update_vec_ep.setup(static_cast<HighsInt>(num_row));
 
   m = static_cast<int>(num_row);
   valid = true;
@@ -253,6 +255,16 @@ bool HFactorBackend::factorize_with_logicals(
       return false;
     }
     logical_row_by_col[static_cast<std::size_t>(col)] = row;
+  }
+
+  // Fast path: a healthy simplex basis is full rank in the real column
+  // space, so one real-space build both proves that and produces the working
+  // factor. The implicit-logical diagnostic build below exists only to
+  // identify repairable singular positions, so pay for it only after a
+  // real-space build reports deficiency.
+  if (factorize(A, basic_index, n_basic)) {
+    repaired_basis.assign(basic_index, basic_index + n_basic);
+    return true;
   }
 
   std::vector<int> hfactor_basis(static_cast<std::size_t>(n_basic), -1);
@@ -368,7 +380,10 @@ bool HFactorBackend::factorize_with_logicals(
 // HFactor's ftranCall(std::vector<double>&) overload moves the buffer in,
 // so we copy into a temporary vector.
 // ────────────────────────────────────────────────────────────────────────────
-void HFactorBackend::ftran(const double* rhs, double* result) const {
+void HFactorBackend::ftran(const double* rhs, double* result,
+                           const std::vector<int>* rhs_pattern,
+                           std::vector<int>* result_pattern) const {
+  if (result_pattern != nullptr) result_pattern->clear();
   if (!valid) return;
   HFactor& nc = const_cast<HFactor&>(p_->f);
   if (m < hyper_sparse_min_rows()) {
@@ -380,6 +395,9 @@ void HFactorBackend::ftran(const double* rhs, double* result) const {
       const int internal = static_cast<int>(
           p_->external_to_internal[static_cast<std::size_t>(external)]);
       result[external] = buf[static_cast<std::size_t>(internal)];
+      if (result_pattern != nullptr && result[external] != 0.0) {
+        result_pattern->push_back(external);
+      }
     }
     return;
   }
@@ -388,13 +406,24 @@ void HFactorBackend::ftran(const double* rhs, double* result) const {
   // the real RHS density selects sparse vs dense internally.  Same permutation
   // convention as the dense path (no input remap, output remapped).
   HVector& vector = p_->solve_vec_ftran;
-  vector.count = 0;
+  vector.clear();
   vector.packFlag = false;
-  for (int row = 0; row < m; ++row) {
-    const double value = rhs[row];
-    vector.array[static_cast<std::size_t>(row)] = value;
-    if (value != 0.0) {
-      vector.index[static_cast<std::size_t>(vector.count++)] = row;
+  if (rhs_pattern != nullptr) {
+    for (int row : *rhs_pattern) {
+      if (row < 0 || row >= m) continue;
+      const double value = rhs[row];
+      vector.array[static_cast<std::size_t>(row)] = value;
+      if (value != 0.0) {
+        vector.index[static_cast<std::size_t>(vector.count++)] = row;
+      }
+    }
+  } else {
+    for (int row = 0; row < m; ++row) {
+      const double value = rhs[row];
+      vector.array[static_cast<std::size_t>(row)] = value;
+      if (value != 0.0) {
+        vector.index[static_cast<std::size_t>(vector.count++)] = row;
+      }
     }
   }
   const double density =
@@ -405,18 +434,40 @@ void HFactorBackend::ftran(const double* rhs, double* result) const {
         p_->external_to_internal[static_cast<std::size_t>(external)]);
     result[external] = vector.array[static_cast<std::size_t>(internal)];
   }
+  if (result_pattern != nullptr && vector.count >= 0) {
+    result_pattern->reserve(static_cast<std::size_t>(vector.count));
+    for (HighsInt k = 0; k < vector.count; ++k) {
+      const HighsInt internal = vector.index[static_cast<std::size_t>(k)];
+      result_pattern->push_back(static_cast<int>(
+          p_->internal_to_external[static_cast<std::size_t>(internal)]));
+    }
+  }
 }
 
-void HFactorBackend::ftran_for_update(const double* rhs, double* result) const {
+void HFactorBackend::ftran_for_update(
+    const double* rhs, double* result, const std::vector<int>* rhs_pattern,
+    std::vector<int>* result_pattern) const {
+  if (result_pattern != nullptr) result_pattern->clear();
   if (!valid) return;
-  HVector vector;
-  vector.setup(static_cast<HighsInt>(m));
+  HVector& vector = p_->update_vec_aq;
+  vector.clear();
   vector.packFlag = true;
-  for (int row = 0; row < m; ++row) {
-    const double value = rhs[row];
-    vector.array[static_cast<std::size_t>(row)] = value;
-    if (value != 0.0) {
-      vector.index[static_cast<std::size_t>(vector.count++)] = row;
+  if (rhs_pattern != nullptr) {
+    for (int row : *rhs_pattern) {
+      if (row < 0 || row >= m) continue;
+      const double value = rhs[row];
+      vector.array[static_cast<std::size_t>(row)] = value;
+      if (value != 0.0) {
+        vector.index[static_cast<std::size_t>(vector.count++)] = row;
+      }
+    }
+  } else {
+    for (int row = 0; row < m; ++row) {
+      const double value = rhs[row];
+      vector.array[static_cast<std::size_t>(row)] = value;
+      if (value != 0.0) {
+        vector.index[static_cast<std::size_t>(vector.count++)] = row;
+      }
     }
   }
   // Pass the true RHS density so HFactor selects its hyper-sparse FTRAN
@@ -429,22 +480,27 @@ void HFactorBackend::ftran_for_update(const double* rhs, double* result) const {
           : 1.0;
   HFactor& nc = const_cast<HFactor&>(p_->f);
   nc.ftranCall(vector, density, nullptr);
-  p_->aq_rhs.assign(rhs, rhs + m);
-  p_->aq_solution_internal = vector.array;
   for (int external = 0; external < m; ++external) {
     const int internal = static_cast<int>(
         p_->external_to_internal[static_cast<std::size_t>(external)]);
     result[external] = vector.array[static_cast<std::size_t>(internal)];
   }
-  p_->aq_pack.index.assign(vector.packIndex.begin(),
-                           vector.packIndex.begin() + vector.packCount);
-  p_->aq_pack.value.assign(vector.packValue.begin(),
-                           vector.packValue.begin() + vector.packCount);
-  p_->aq_pack.serial = p_->factor_serial;
-  p_->aq_pack.valid = true;
+  if (result_pattern != nullptr && vector.count >= 0) {
+    result_pattern->reserve(static_cast<std::size_t>(vector.count));
+    for (HighsInt k = 0; k < vector.count; ++k) {
+      const HighsInt internal = vector.index[static_cast<std::size_t>(k)];
+      result_pattern->push_back(static_cast<int>(
+          p_->internal_to_external[static_cast<std::size_t>(internal)]));
+    }
+  }
+  p_->aq_capture_serial = p_->factor_serial;
+  p_->aq_capture_valid = true;
 }
 
-void HFactorBackend::btran(const double* rhs, double* result) const {
+void HFactorBackend::btran(const double* rhs, double* result,
+                           const std::vector<int>* rhs_pattern,
+                           std::vector<int>* result_pattern) const {
+  if (result_pattern != nullptr) result_pattern->clear();
   if (!valid) return;
   HFactor& nc = const_cast<HFactor&>(p_->f);
   if (m < hyper_sparse_min_rows()) {
@@ -457,21 +513,39 @@ void HFactorBackend::btran(const double* rhs, double* result) const {
     }
     nc.btranCall(buf, /*factor_timer_clock_pointer*/ nullptr);
     std::memcpy(result, buf.data(), static_cast<size_t>(m) * sizeof(double));
+    if (result_pattern != nullptr) {
+      for (int row = 0; row < m; ++row) {
+        if (result[row] != 0.0) result_pattern->push_back(row);
+      }
+    }
     return;
   }
   // Large system: hyper-sparse BTRAN via a reused HVector.  Same permutation
   // convention as the dense path (input remapped external->internal, output not
   // remapped).  Overwrite every array entry so no stale solution leaks in.
   HVector& vector = p_->solve_vec_btran;
-  vector.count = 0;
+  vector.clear();
   vector.packFlag = false;
-  for (int external = 0; external < m; ++external) {
-    const int internal = static_cast<int>(
-        p_->external_to_internal[static_cast<std::size_t>(external)]);
-    const double value = rhs[external];
-    vector.array[static_cast<std::size_t>(internal)] = value;
-    if (value != 0.0) {
-      vector.index[static_cast<std::size_t>(vector.count++)] = internal;
+  if (rhs_pattern != nullptr) {
+    for (int external : *rhs_pattern) {
+      if (external < 0 || external >= m) continue;
+      const int internal = static_cast<int>(
+          p_->external_to_internal[static_cast<std::size_t>(external)]);
+      const double value = rhs[external];
+      vector.array[static_cast<std::size_t>(internal)] = value;
+      if (value != 0.0) {
+        vector.index[static_cast<std::size_t>(vector.count++)] = internal;
+      }
+    }
+  } else {
+    for (int external = 0; external < m; ++external) {
+      const int internal = static_cast<int>(
+          p_->external_to_internal[static_cast<std::size_t>(external)]);
+      const double value = rhs[external];
+      vector.array[static_cast<std::size_t>(internal)] = value;
+      if (value != 0.0) {
+        vector.index[static_cast<std::size_t>(vector.count++)] = internal;
+      }
     }
   }
   const double density =
@@ -479,20 +553,43 @@ void HFactorBackend::btran(const double* rhs, double* result) const {
   nc.btranCall(vector, density, nullptr);
   std::memcpy(result, vector.array.data(),
               static_cast<size_t>(m) * sizeof(double));
+  if (result_pattern != nullptr && vector.count >= 0) {
+    result_pattern->reserve(static_cast<std::size_t>(vector.count));
+    for (HighsInt k = 0; k < vector.count; ++k) {
+      result_pattern->push_back(
+          static_cast<int>(vector.index[static_cast<std::size_t>(k)]));
+    }
+  }
 }
 
-void HFactorBackend::btran_for_update(const double* rhs, double* result) const {
+void HFactorBackend::btran_for_update(
+    const double* rhs, double* result, const std::vector<int>* rhs_pattern,
+    std::vector<int>* result_pattern) const {
+  if (result_pattern != nullptr) result_pattern->clear();
   if (!valid) return;
-  HVector vector;
-  vector.setup(static_cast<HighsInt>(m));
+  HVector& vector = p_->update_vec_ep;
+  vector.clear();
   vector.packFlag = true;
-  for (int external = 0; external < m; ++external) {
-    const double value = rhs[external];
-    const HighsInt internal =
-        p_->external_to_internal[static_cast<std::size_t>(external)];
-    vector.array[static_cast<std::size_t>(internal)] = value;
-    if (value != 0.0) {
-      vector.index[static_cast<std::size_t>(vector.count++)] = internal;
+  if (rhs_pattern != nullptr) {
+    for (int external : *rhs_pattern) {
+      if (external < 0 || external >= m) continue;
+      const double value = rhs[external];
+      const HighsInt internal =
+          p_->external_to_internal[static_cast<std::size_t>(external)];
+      vector.array[static_cast<std::size_t>(internal)] = value;
+      if (value != 0.0) {
+        vector.index[static_cast<std::size_t>(vector.count++)] = internal;
+      }
+    }
+  } else {
+    for (int external = 0; external < m; ++external) {
+      const double value = rhs[external];
+      const HighsInt internal =
+          p_->external_to_internal[static_cast<std::size_t>(external)];
+      vector.array[static_cast<std::size_t>(internal)] = value;
+      if (value != 0.0) {
+        vector.index[static_cast<std::size_t>(vector.count++)] = internal;
+      }
     }
   }
   // Pass the true RHS density so HFactor selects its hyper-sparse BTRAN
@@ -505,14 +602,121 @@ void HFactorBackend::btran_for_update(const double* rhs, double* result) const {
           : 1.0;
   HFactor& nc = const_cast<HFactor&>(p_->f);
   nc.btranCall(vector, density, nullptr);
-  p_->ep_rhs.assign(rhs, rhs + m);
   std::memcpy(result, vector.array.data(), static_cast<size_t>(m) * sizeof(double));
-  p_->ep_pack.index.assign(vector.packIndex.begin(),
-                           vector.packIndex.begin() + vector.packCount);
-  p_->ep_pack.value.assign(vector.packValue.begin(),
-                           vector.packValue.begin() + vector.packCount);
-  p_->ep_pack.serial = p_->factor_serial;
-  p_->ep_pack.valid = true;
+  if (result_pattern != nullptr && vector.count >= 0) {
+    result_pattern->reserve(static_cast<std::size_t>(vector.count));
+    for (HighsInt k = 0; k < vector.count; ++k) {
+      result_pattern->push_back(
+          static_cast<int>(vector.index[static_cast<std::size_t>(k)]));
+    }
+  }
+  p_->ep_capture_serial = p_->factor_serial;
+  p_->ep_capture_valid = true;
+}
+
+bool HFactorBackend::ftran_indexed(
+    const std::vector<int>& rhs_index, const std::vector<double>& rhs_value,
+    std::vector<int>& result_index, std::vector<double>& result_value,
+    std::vector<int>& result_lookup, bool capture_update) const {
+  result_index.clear();
+  result_value.clear();
+  result_lookup.clear();
+  if (!valid || rhs_index.size() != rhs_value.size()) return false;
+  HVector& vector = capture_update ? p_->update_vec_aq : p_->solve_vec_ftran;
+  vector.clear();
+  vector.packFlag = capture_update;
+  for (std::size_t k = 0; k < rhs_index.size(); ++k) {
+    const int row = rhs_index[k];
+    const double entry = rhs_value[k];
+    if (row < 0 || row >= m || entry == 0.0) continue;
+    vector.array[static_cast<std::size_t>(row)] = entry;
+    vector.index[static_cast<std::size_t>(vector.count++)] = row;
+  }
+  HFactor& nc = const_cast<HFactor&>(p_->f);
+  nc.ftranCall(vector,
+               static_cast<double>(vector.count) / std::max(1, m), nullptr);
+  if (vector.count < 0) {
+    if (capture_update) p_->aq_capture_valid = false;
+    return false;
+  }
+  result_index.reserve(
+      static_cast<std::size_t>(std::max<HighsInt>(0, vector.count)));
+  result_value.reserve(result_index.capacity());
+  // result_lookup stays empty: IndexedVector::at() builds it lazily, and the
+  // hot pivot loops only iterate the packed support. Finiteness is checked
+  // here so callers do not need a second pass over the exported values.
+  bool all_finite = true;
+  for (HighsInt k = 0; k < vector.count; ++k) {
+    const HighsInt internal = vector.index[static_cast<std::size_t>(k)];
+    const double entry = vector.array[static_cast<std::size_t>(internal)];
+    if (entry == 0.0) continue;
+    all_finite = all_finite && std::isfinite(entry);
+    result_index.push_back(static_cast<int>(
+        p_->internal_to_external[static_cast<std::size_t>(internal)]));
+    result_value.push_back(entry);
+  }
+  if (!all_finite) {
+    if (capture_update) p_->aq_capture_valid = false;
+    return false;
+  }
+  if (capture_update) {
+    p_->aq_capture_serial = p_->factor_serial;
+    p_->aq_capture_valid = true;
+  }
+  return true;
+}
+
+bool HFactorBackend::btran_indexed(
+    const std::vector<int>& rhs_index, const std::vector<double>& rhs_value,
+    std::vector<int>& result_index, std::vector<double>& result_value,
+    std::vector<int>& result_lookup, bool capture_update) const {
+  result_index.clear();
+  result_value.clear();
+  result_lookup.clear();
+  if (!valid || rhs_index.size() != rhs_value.size()) return false;
+  HVector& vector = capture_update ? p_->update_vec_ep : p_->solve_vec_btran;
+  vector.clear();
+  vector.packFlag = capture_update;
+  for (std::size_t k = 0; k < rhs_index.size(); ++k) {
+    const int external = rhs_index[k];
+    const double entry = rhs_value[k];
+    if (external < 0 || external >= m || entry == 0.0) continue;
+    const HighsInt internal =
+        p_->external_to_internal[static_cast<std::size_t>(external)];
+    vector.array[static_cast<std::size_t>(internal)] = entry;
+    vector.index[static_cast<std::size_t>(vector.count++)] = internal;
+  }
+  HFactor& nc = const_cast<HFactor&>(p_->f);
+  nc.btranCall(vector,
+               static_cast<double>(vector.count) / std::max(1, m), nullptr);
+  if (vector.count < 0) {
+    if (capture_update) p_->ep_capture_valid = false;
+    return false;
+  }
+  result_index.reserve(
+      static_cast<std::size_t>(std::max<HighsInt>(0, vector.count)));
+  result_value.reserve(result_index.capacity());
+  // result_lookup stays empty: IndexedVector::at() builds it lazily, and the
+  // hot pivot loops only iterate the packed support. Finiteness is checked
+  // here so callers do not need a second pass over the exported values.
+  bool all_finite = true;
+  for (HighsInt k = 0; k < vector.count; ++k) {
+    const HighsInt row = vector.index[static_cast<std::size_t>(k)];
+    const double entry = vector.array[static_cast<std::size_t>(row)];
+    if (entry == 0.0) continue;
+    all_finite = all_finite && std::isfinite(entry);
+    result_index.push_back(static_cast<int>(row));
+    result_value.push_back(entry);
+  }
+  if (!all_finite) {
+    if (capture_update) p_->ep_capture_valid = false;
+    return false;
+  }
+  if (capture_update) {
+    p_->ep_capture_serial = p_->factor_serial;
+    p_->ep_capture_valid = true;
+  }
+  return true;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -526,55 +730,29 @@ bool HFactorBackend::update(int pivot_row,
                             int entering_col,
                             const double* a_q_after_ftran,
                             const double* btran_e_p) {
+  if (a_q_after_ftran == nullptr || btran_e_p == nullptr) return false;
+  return update_captured(pivot_row, entering_col);
+}
+
+bool HFactorBackend::update_captured(int pivot_row, int entering_col) {
   if (!valid) return false;
   if (pivot_row < 0 || pivot_row >= m) return false;
   if (entering_col < 0 || entering_col >= p_->num_col) return false;
-  if (a_q_after_ftran == nullptr || btran_e_p == nullptr) return false;
-  if (!p_->aq_pack.valid || p_->aq_pack.serial != p_->factor_serial) {
-    if (static_cast<int>(p_->aq_rhs.size()) != m) return false;
-    const std::vector<double> rhs = p_->aq_rhs;
-    std::vector<double> refreshed(static_cast<std::size_t>(m));
-    ftran_for_update(rhs.data(), refreshed.data());
-  }
-  if (!p_->ep_pack.valid || p_->ep_pack.serial != p_->factor_serial) {
-    if (static_cast<int>(p_->ep_rhs.size()) != m) return false;
-    const std::vector<double> rhs = p_->ep_rhs;
-    std::vector<double> refreshed(static_cast<std::size_t>(m));
-    btran_for_update(rhs.data(), refreshed.data());
+  if (!p_->aq_capture_valid ||
+      p_->aq_capture_serial != p_->factor_serial ||
+      !p_->ep_capture_valid ||
+      p_->ep_capture_serial != p_->factor_serial) {
+    return false;
   }
 
   const HighsInt internal_pivot =
       p_->external_to_internal[static_cast<std::size_t>(pivot_row)];
   if (internal_pivot < 0 || internal_pivot >= m) return false;
 
-  HVector aq;
-  HVector ep;
-  aq.setup(static_cast<HighsInt>(m));
-  ep.setup(static_cast<HighsInt>(m));
-  for (int external = 0; external < m; ++external) {
-    if (!std::isfinite(a_q_after_ftran[external])) return false;
-    const HighsInt internal =
-        p_->external_to_internal[static_cast<std::size_t>(external)];
-    aq.array[static_cast<std::size_t>(internal)] =
-        p_->aq_solution_internal[static_cast<std::size_t>(internal)];
-  }
-  for (int row = 0; row < m; ++row) {
-    const double value = btran_e_p[row];
-    if (!std::isfinite(value)) return false;
-    ep.array[static_cast<std::size_t>(row)] = value;
-  }
+  HVector& aq = p_->update_vec_aq;
+  HVector& ep = p_->update_vec_ep;
   const double pivot = aq.array[static_cast<std::size_t>(internal_pivot)];
   if (pivot == 0.0 || !std::isfinite(1.0 / pivot)) return false;
-  aq.packCount = static_cast<HighsInt>(p_->aq_pack.index.size());
-  ep.packCount = static_cast<HighsInt>(p_->ep_pack.index.size());
-  std::copy(p_->aq_pack.index.begin(), p_->aq_pack.index.end(),
-            aq.packIndex.begin());
-  std::copy(p_->aq_pack.value.begin(), p_->aq_pack.value.end(),
-            aq.packValue.begin());
-  std::copy(p_->ep_pack.index.begin(), p_->ep_pack.index.end(),
-            ep.packIndex.begin());
-  std::copy(p_->ep_pack.value.begin(), p_->ep_pack.value.end(),
-            ep.packValue.begin());
 
   p_->basic_index[static_cast<std::size_t>(internal_pivot)] =
       static_cast<HighsInt>(entering_col);
@@ -584,11 +762,8 @@ bool HFactorBackend::update(int pivot_row,
 
   ++n_updates;
   ++p_->factor_serial;
-  p_->aq_pack.valid = false;
-  p_->ep_pack.valid = false;
-  p_->aq_rhs.clear();
-  p_->ep_rhs.clear();
-  p_->aq_solution_internal.clear();
+  p_->aq_capture_valid = false;
+  p_->ep_capture_valid = false;
   refactor_hint_ = static_cast<int>(hint);
   return true;
 }

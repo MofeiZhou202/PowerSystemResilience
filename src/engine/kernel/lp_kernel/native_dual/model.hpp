@@ -1,7 +1,8 @@
 #pragma once
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
-#include <cstdlib>
 #include <map>
 #include <memory>
 #include <string>
@@ -45,6 +46,12 @@ struct Bounds {
 class BasisFactor;
 
 struct State {
+  struct LeavingHeapEntry {
+    double merit{0.0};
+    int row{-1};
+    std::uint64_t version{0};
+  };
+
   const StandardFormLP* sf{nullptr};
   const SimplexOptions* options{nullptr};
   Phase phase{Phase::Two};
@@ -84,6 +91,12 @@ struct State {
   std::uint64_t cycle_signature_live_b{0};
   int pivot_sequence{0};
   int pricing_epoch{0};
+  // Lazy CHUZR heap. Each touched row gets a new version and, when infeasible,
+  // a new heap entry. Stale entries are discarded when they reach the top.
+  // Dense primal changes and reconstructions invalidate the whole structure.
+  std::vector<LeavingHeapEntry> leaving_heap;
+  std::vector<std::uint64_t> leaving_row_version;
+  bool leaving_heap_valid{false};
 
   struct CycleRecord {
     std::uint64_t signature_a{0};
@@ -98,32 +111,6 @@ struct State {
   std::map<std::tuple<std::uint64_t, std::uint64_t, int>, int> taboo_rows;
 };
 
-// Cadence (in pivots since the last refactorization) of the periodic
-// full-primal-residual audit in minor_iteration.  The tiered per-solve
-// backward-error validation aligns to this stride so that on every audit pivot
-// the hot-path solves are also fully verified.
-inline constexpr int kNativeDualAuditStride = 16;
-
-// Whether the current pivot's hot-path checked solves (choose_leaving row_ep
-// BTRAN, pivotal-column FTRAN) should run the O(nnz) backward-error residual
-// audit.  Strict posture (tier_checked_solves == false) always verifies; the
-// tiered posture verifies only on the periodic audit stride, trusting the raw
-// LU solve in between (finiteness is still guarded and drift is caught by the
-// periodic full-residual audit + reinvert).  Env
-// MIPSOLVERS_DS_TIER_CHECKED_SOLVES (0 = force strict, 1 = force tiered)
-// overrides the option, mirroring MIPSOLVERS_DS_PARANOID.
-inline bool should_verify_checked_solve(const State& state) {
-  static const int env_override = [] {
-    const char* e = std::getenv("MIPSOLVERS_DS_TIER_CHECKED_SOLVES");
-    return e ? (e[0] == '0' ? 0 : 1) : -1;
-  }();
-  const bool tier =
-      env_override >= 0
-          ? (env_override != 0)
-          : (state.options != nullptr && state.options->tier_checked_solves);
-  return !tier || (state.updates_since_rebuild % kNativeDualAuditStride == 0);
-}
-
 struct Audit {
   bool ok{false};
   std::string failure;
@@ -135,12 +122,69 @@ struct Audit {
   int worst_dual_col{-1};
 };
 
+struct IndexedVector {
+  int dimension{0};
+  std::vector<int> index;
+  std::vector<double> value;
+  // Coordinate-lookup table, built lazily by at(): most solve results are
+  // only iterated over their support, while the few queried vectors amortize
+  // one build across their queries. Entries need not be sorted.
+  mutable std::vector<int> lookup_slot;
+
+  void clear(int size) {
+    dimension = size;
+    index.clear();
+    value.clear();
+    lookup_slot.clear();
+  }
+  double at(int target) const {
+    if (lookup_slot.empty()) {
+      if (index.size() < 8) {
+        for (std::size_t k = 0; k < index.size(); ++k) {
+          if (index[k] == target) return value[k];
+        }
+        return 0.0;
+      }
+      build_lookup();
+    }
+    const std::size_t mask = lookup_slot.size() - 1;
+    std::size_t slot =
+        (static_cast<std::uint32_t>(target) * 0x9e3779b1u) & mask;
+    for (;;) {
+      const int position = lookup_slot[slot];
+      if (position < 0) return 0.0;
+      if (index[static_cast<std::size_t>(position)] == target)
+        return value[static_cast<std::size_t>(position)];
+      slot = (slot + 1) & mask;
+    }
+  }
+  void build_lookup() const {
+    std::size_t slot_count = 4;
+    while (slot_count < index.size() * 2) slot_count *= 2;
+    lookup_slot.assign(slot_count, -1);
+    const std::size_t mask = slot_count - 1;
+    for (std::size_t k = 0; k < index.size(); ++k) {
+      std::size_t slot =
+          (static_cast<std::uint32_t>(index[k]) * 0x9e3779b1u) & mask;
+      while (lookup_slot[slot] >= 0) slot = (slot + 1) & mask;
+      lookup_slot[slot] = static_cast<int>(k);
+    }
+  }
+  bool finite() const {
+    if (index.size() != value.size()) return false;
+    for (double entry : value) {
+      if (!std::isfinite(entry)) return false;
+    }
+    return true;
+  }
+};
+
 struct Leaving {
   int row{-1};
   int side{0};
   double delta{0.0};
   double violation{0.0};
-  Eigen::VectorXd row_ep;
+  IndexedVector row_ep;
   bool released_taboo_row{false};
   int taboo_row_rejections{0};
   bool row_ep_refined{false};
@@ -168,7 +212,7 @@ struct PivotTransaction {
   Entering entering;
   std::vector<BoundFlip> flips;
   std::vector<WorkingCostShift> cost_shifts;
-  Eigen::VectorXd bfrt_rhs;
+  IndexedVector bfrt_rhs;
   double covered_violation{0.0};
   double dual_step_lower{0.0};
   double dual_step_upper{0.0};

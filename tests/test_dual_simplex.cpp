@@ -11,6 +11,7 @@
 
 #include "Highs.h"
 
+#include "mipsolvers/engine/detail/bc_utils.hpp"
 #include "mipsolvers/engine/kernel/lp_kernel/dual_simplex.hpp"
 #include "mipsolvers/engine/kernel/linear_algebra/hfactor_backend.hpp"
 #include "../src/engine/kernel/lp_kernel/native_dual_core.hpp"
@@ -180,12 +181,90 @@ TEST_CASE("DualSimplex: 2-variable LP", "[dual_simplex]") {
   CHECK(res.result.x[1] == Approx(0.0).margin(1e-5));
 }
 
+TEST_CASE("IPM crossover basis can enter warm primal Phase I",
+          "[dual_simplex][crossover][primal_phase_one]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c.resize(2);
+  lp.c << -3.0, -2.0;
+  lp.A.resize(1, 2);
+  lp.A.insert(0, 0) = 1.0;
+  lp.A.insert(0, 1) = 1.0;
+  lp.A.makeCompressed();
+  lp.b = Eigen::VectorXd::Constant(1, 4.0);
+  lp.Aeq.resize(0, 2);
+  lp.beq.resize(0);
+  lp.vars.push_back({VarType::Continuous, 0.0, 1e20});
+  lp.vars.push_back({VarType::Continuous, 0.0, 1e20});
+
+  StandardFormLP sf = build_standard_form_lp(lp);
+  mipsolvers::engine::SimplexBasis hint;
+  hint.rows = 1;
+  hint.cols = static_cast<int>(sf.A.cols());
+  hint.indices = {1};
+  hint.at_upper.assign(static_cast<std::size_t>(sf.A.cols()), 0);
+
+  auto options = native_simplex_options();
+  options.max_iter = 20;
+  const auto strict = native_dual::solve(sf, options, hint);
+  REQUIRE(strict.status == native_dual::Status::DualInfeasibleStart);
+
+  options.allow_warm_primal_phase_one = true;
+  const auto crossover = native_dual::solve(sf, options, hint);
+  INFO("status=" << native_dual::status_name(crossover.status)
+                  << " message=" << crossover.message);
+  REQUIRE(crossover.status == native_dual::Status::Optimal);
+  CHECK(crossover.statistics.iterations == 1);
+  CHECK(crossover.max_objective == Approx(12.0).margin(1e-10));
+}
+
 // ─── 3-variable LP ────────────────────────────────────────────────────────
 // min  x1 + x2 + x3
 // s.t. x1 + x2 >= 2
 //      x2 + x3 >= 2
 //      all >= 0
 // Optimal: x1=0, x2=2, x3=0, obj=2
+TEST_CASE("IPM crash construction rejects an incrementally dependent column",
+          "[dual_simplex][crossover][hfactor][hypersparse]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Zero(3);
+  lp.A.resize(2, 3);
+  lp.A.insert(0, 0) = 1.0;
+  lp.A.insert(0, 1) = 2.0;
+  lp.A.insert(1, 2) = 1.0;
+  lp.A.makeCompressed();
+  lp.b.resize(2);
+  lp.b << 13.0, 3.0;
+  lp.Aeq.resize(0, 3);
+  lp.beq.resize(0);
+  for (int col = 0; col < 3; ++col) {
+    lp.vars.push_back({VarType::Continuous, 0.0, 10.0});
+  }
+
+  StandardFormLP sf = build_standard_form_lp(lp);
+  Eigen::VectorXd interior(3);
+  interior << 5.0, 4.0, 3.0;
+  mipsolvers::engine::SimplexBasis recovered;
+  const detail::CrashBasisRecoveryStats stats =
+      detail::recover_primal_activity_basis(
+          sf, interior, nullptr, nullptr, recovered);
+
+  REQUIRE(stats.rank_valid);
+  REQUIRE(stats.passes_screen);
+  CHECK(stats.attempted_columns == 3);
+  CHECK(stats.stable_pivot_rejections == 1);
+  CHECK(stats.structural_matches == 2);
+  CHECK(stats.selected_swaps == 2);
+  CHECK(stats.rank_repairs == 0);
+  CHECK(stats.min_accepted_relative_pivot >= 0.1);
+
+  HFactorBackend factor;
+  REQUIRE(factor.factorize(
+      sf.A, recovered.indices.data(), static_cast<int>(recovered.index_count())));
+  CHECK(factor.rank_deficiency == 0);
+}
+
 TEST_CASE("DualSimplex: 3-variable LP with >= constraints", "[dual_simplex]") {
   LPModel lp;
   lp.sense = Sense::Minimize;
@@ -753,6 +832,51 @@ TEST_CASE("HFactor preserves caller basis positions and solve coordinates",
   factor.btran(basic_cost.data(), dual.data());
   CHECK((dual - Eigen::Vector3d(5.0, 7.0, 3.0))
             .lpNorm<Eigen::Infinity>() == Approx(0.0).margin(1e-12));
+}
+
+TEST_CASE("HFactor indexed solves cover every nonzero result entry",
+          "[dual_simplex][hfactor][hypersparse][factor_differential]") {
+  Eigen::Matrix4d dense;
+  dense << 4.0, 1.0, 0.0, 2.0,
+           1.0, 5.0, 2.0, 0.0,
+           0.0, 2.0, 6.0, 1.0,
+           2.0, 0.0, 1.0, 7.0;
+  Eigen::SparseMatrix<double> A = dense.sparseView();
+  A.makeCompressed();
+  const std::vector<int> basis{2, 0, 3, 1};
+  Eigen::Matrix4d B;
+  for (int position = 0; position < 4; ++position) {
+    B.col(position) = dense.col(basis[static_cast<std::size_t>(position)]);
+  }
+  REQUIRE(B.fullPivLu().rank() == 4);
+
+  HFactorBackend factor;
+  REQUIRE(factor.factorize(A, basis.data(), 4));
+  Eigen::Vector4d rhs = Eigen::Vector4d::Zero();
+  rhs[0] = 3.0;
+  rhs[3] = -2.0;
+  const std::vector<int> rhs_pattern{0, 3};
+  Eigen::Vector4d ftran_result;
+  Eigen::Vector4d btran_result;
+  std::vector<int> ftran_pattern;
+  std::vector<int> btran_pattern;
+  factor.ftran(rhs.data(), ftran_result.data(), &rhs_pattern, &ftran_pattern);
+  factor.btran(rhs.data(), btran_result.data(), &rhs_pattern, &btran_pattern);
+
+  CHECK((ftran_result - B.fullPivLu().solve(rhs)).lpNorm<Eigen::Infinity>() ==
+        Approx(0.0).margin(2e-11));
+  CHECK((btran_result - B.transpose().fullPivLu().solve(rhs))
+            .lpNorm<Eigen::Infinity>() == Approx(0.0).margin(2e-11));
+  for (int row = 0; row < 4; ++row) {
+    if (ftran_result[row] != 0.0) {
+      CHECK(std::count(ftran_pattern.begin(), ftran_pattern.end(), row) == 1);
+    }
+    if (btran_result[row] != 0.0) {
+      CHECK(std::count(btran_pattern.begin(), btran_pattern.end(), row) == 1);
+    }
+  }
+  for (int row : ftran_pattern) CHECK((row >= 0 && row < 4));
+  for (int row : btran_pattern) CHECK((row >= 0 && row < 4));
 }
 
 TEST_CASE("HFactor fresh solves arbitrary non-diagonal bases",

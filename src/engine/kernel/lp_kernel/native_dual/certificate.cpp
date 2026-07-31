@@ -72,7 +72,16 @@ Certificate certificate_from_multiplier(const State& state,
 
 Certificate primal_infeasibility_certificate(const State& state,
                                               const Leaving& leaving) {
-  return certificate_from_multiplier(state, leaving.row_ep);
+  if (leaving.row_ep.dimension != state.m || !leaving.row_ep.finite()) {
+    return {};
+  }
+  Eigen::VectorXd multiplier = Eigen::VectorXd::Zero(state.m);
+  for (std::size_t k = 0; k < leaving.row_ep.index.size(); ++k) {
+    const int row = leaving.row_ep.index[k];
+    if (row < 0 || row >= state.m) return {};
+    multiplier[row] = leaving.row_ep.value[k];
+  }
+  return certificate_from_multiplier(state, std::move(multiplier));
 }
 
 Certificate phase_one_farkas_certificate(const State& state) {

@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -441,6 +442,9 @@ class HFactor {
   vector<HighsInt> u_start;
   vector<HighsInt> u_last_p;
   vector<HighsInt> u_index;
+  // Logical child for each stored U entry, in exactly u_index order.
+  vector<int32_t> u_reach_index;
+  bool u_reach_index_valid = false;
   vector<double> u_value;
   vector<HighsInt> ur_start;
   vector<HighsInt> ur_lastp;
@@ -465,6 +469,7 @@ class HFactor {
   void buildReportRankDeficiency();
   void buildMarkSingC();
   void buildFinish();
+  void buildUReachIndex();
   void zeroCol(const HighsInt iCol);
   void luClear();
   // Rebuild using refactor information
