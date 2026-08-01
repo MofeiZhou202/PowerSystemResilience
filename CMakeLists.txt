@@ -345,6 +345,30 @@ if(MIPSOLVERS_HAVE_HIGHS_LIB)
         $<$<CONFIG:RelWithDebInfo>:-O2 -g -DNDEBUG>)
     endif()
   endif()
+
+  # Standard MILP comparison over MIPLIB 2017. Unlike the NETLIB runner this
+  # target preserves MPS integrality and audits every returned incumbent.
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/miplib2017_benchmark.cpp")
+    find_package(ZLIB REQUIRED)
+    add_executable(miplib2017_benchmark
+      benchmark/miplib2017_benchmark.cpp)
+    set_target_properties(miplib2017_benchmark PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+    target_include_directories(miplib2017_benchmark PRIVATE
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+      ${CMAKE_CURRENT_SOURCE_DIR}/highs
+      ${CMAKE_CURRENT_BINARY_DIR}/_deps/embedded_highs)
+    target_link_libraries(miplib2017_benchmark PRIVATE
+      mipsolvers highs::highs ZLIB::ZLIB)
+    if(MIPSOLVERS_HAVE_SCIP_LIB)
+      target_link_libraries(miplib2017_benchmark PRIVATE libscip)
+    endif()
+    if(NOT MSVC)
+      target_compile_options(miplib2017_benchmark PRIVATE -Wall -Wextra
+        $<$<CONFIG:Release>:-O3 -DNDEBUG>
+        $<$<CONFIG:RelWithDebInfo>:-O2 -g -DNDEBUG>)
+    endif()
+  endif()
 endif()
 
 # ── SCIP in-process library ───────────────────────────────────────────────────

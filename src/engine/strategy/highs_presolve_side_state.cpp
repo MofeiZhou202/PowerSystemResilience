@@ -455,7 +455,8 @@ HiGHSPresolveBridgeInfo highs_presolve_bridge_info() {
   return info;
 }
 
-HiGHSPresolvedModelStats highs_presolve_model_stats(const LPModel& lp) {
+HiGHSPresolvedModelStats highs_presolve_model_stats(const LPModel& lp,
+                                                    double time_limit_sec) {
   HiGHSPresolvedModelStats stats;
   const auto bridge = highs_presolve_bridge_info();
   stats.available = bridge.available;
@@ -463,6 +464,24 @@ HiGHSPresolvedModelStats highs_presolve_model_stats(const LPModel& lp) {
 
 #ifdef MIPSOLVERS_HAVE_HIGHS_LIB
   if (!bridge.available) return stats;
+
+  const auto start_time = std::chrono::steady_clock::now();
+  auto remaining_time = [&]() {
+    if (!(time_limit_sec > 0.0) || !std::isfinite(time_limit_sec)) {
+      return std::numeric_limits<double>::infinity();
+    }
+    const double elapsed = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - start_time).count();
+    return time_limit_sec - elapsed;
+  };
+  auto deadline_expired = [&]() {
+    return time_limit_sec > 0.0 && std::isfinite(time_limit_sec) &&
+           remaining_time() <= 0.0;
+  };
+  auto mark_timeout = [&]() {
+    stats.presolve_ok = false;
+    stats.highs_status = "timeout";
+  };
 
   const int ncols = static_cast<int>(lp.vars.size());
   const int m_ineq = static_cast<int>(lp.A.rows());
@@ -481,6 +500,10 @@ HiGHSPresolvedModelStats highs_presolve_model_stats(const LPModel& lp) {
   std::vector<HighsInt> integrality(static_cast<std::size_t>(ncols),
                                     static_cast<HighsInt>(HighsVarType::kContinuous));
   for (int j = 0; j < ncols; ++j) {
+    if ((j & 255) == 0 && deadline_expired()) {
+      mark_timeout();
+      return stats;
+    }
     col_cost[static_cast<std::size_t>(j)] =
         (lp.sense == Sense::Maximize ? -lp.c[j] : lp.c[j]);
     col_lower[static_cast<std::size_t>(j)] =
@@ -513,6 +536,10 @@ HiGHSPresolvedModelStats highs_presolve_model_stats(const LPModel& lp) {
   index.reserve(static_cast<std::size_t>(lp.A.nonZeros() + lp.Aeq.nonZeros()));
   value.reserve(index.capacity());
   for (int j = 0; j < ncols; ++j) {
+    if ((j & 255) == 0 && deadline_expired()) {
+      mark_timeout();
+      return stats;
+    }
     start[static_cast<std::size_t>(j)] = static_cast<HighsInt>(index.size());
     for (Eigen::SparseMatrix<double>::InnerIterator it(lp.A, j); it; ++it) {
       if (it.value() == 0.0) continue;
@@ -544,11 +571,24 @@ HiGHSPresolvedModelStats highs_presolve_model_stats(const LPModel& lp) {
     return stats;
   }
 
+  const double presolve_budget = remaining_time();
+  if (presolve_budget <= 0.0) {
+    mark_timeout();
+    return stats;
+  }
+  if (std::isfinite(presolve_budget)) {
+    highs.setOptionValue("time_limit", std::max(0.001, presolve_budget));
+  }
+
   const auto presolve_status = highs.presolve();
   stats.presolve_ok = (presolve_status == HighsStatus::kOk ||
                        presolve_status == HighsStatus::kWarning);
   stats.highs_status =
       highs_presolve_status_name(highs.getModelPresolveStatus());
+  if (stats.highs_status == "timeout" || deadline_expired()) {
+    mark_timeout();
+    return stats;
+  }
   if (!stats.presolve_ok) return stats;
 
   const HighsLp& presolved = highs.getPresolvedLp();

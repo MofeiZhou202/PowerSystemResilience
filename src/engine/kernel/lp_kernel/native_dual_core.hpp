@@ -34,9 +34,12 @@ struct Statistics {
   int canonical_pivot_reinversions{0};
   int pivot_identity_refinements{0};
   int cost_shifts{0};
+  int dual_start_cost_shifts{0};
   int cleanup_passes{0};
   int dual_phase_one_iterations{0};
   int dual_phase_two_iterations{0};
+  int primal_phase_one_iterations{0};
+  int primal_phase_two_iterations{0};
   int primal_cleanup_iterations{0};
   int phase_transitions{0};
   int cleanup_required{0};
@@ -80,6 +83,8 @@ struct Statistics {
   double max_cost_shift{0.0};
   double dual_phase_one_time_sec{0.0};
   double dual_phase_two_time_sec{0.0};
+  double primal_phase_one_time_sec{0.0};
+  double primal_phase_two_time_sec{0.0};
   double cleanup_time_sec{0.0};
   double primal_cleanup_time_sec{0.0};
   double dual_phase_one_initial_objective{0.0};

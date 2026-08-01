@@ -1096,30 +1096,11 @@ class CallbackTNLP final : public Ipopt::TNLP {
     m_ = meq_ + mineq_;
 
     nnz_jac_ = 0;
-    // Sparse Jacobian: detect the structural sparsity pattern by evaluating the
-    // Jacobian callbacks at a probe point with all variables shifted away from
-    // the flat-start. The AML jac_g/jac_h lambdas now emit ALL symbolic
-    // nonzeros (including structurally nonzero entries that are zero at flat
-    // start), so the probe detects the complete pattern reliably.
-    //
-    // Replacing nnz_jac_ = m_ * n_ with the true structural nnz reduces
-    // memory and compute per Ipopt iteration from O(m*n) → O(nnz) ≈ O(n)
-    // for sparse power networks — the main scalability bottleneck for large cases.
+    // The callbacks emit structural zeros, so x0 exposes the complete pattern.
     {
-      // Probe point: shift each variable by 0.05*(i+1), clamped to bounds.
-      Eigen::VectorXd x_probe(n_);
-      for (int i = 0; i < n_; ++i) {
-        double lo = prob_.vars[static_cast<std::size_t>(i)].lb;
-        double hi = prob_.vars[static_cast<std::size_t>(i)].ub;
-        double v  = prob_.x0.size() == n_ ? prob_.x0[i]
-                                           : 0.5 * (lo + hi);
-        v += 0.05 * (i + 1);
-        x_probe[i] = std::min(hi, std::max(lo, v));
-      }
-
       auto collect = [&](const auto& jac_cb, int row_offset) {
         Eigen::SparseMatrix<double> J;
-        jac_cb(x_probe, J);
+        jac_cb(prob_.x0, J);
         J.makeCompressed();
         for (int k = 0; k < J.outerSize(); ++k)
           for (Eigen::SparseMatrix<double>::InnerIterator it(J, k); it; ++it) {
@@ -1307,60 +1288,33 @@ class CallbackTNLP final : public Ipopt::TNLP {
         ++cursor;
       }
     } else {
-      // Value pass: evaluate sparse Jacobian and fill in the same (row,col) order.
+      // Value pass: callbacks preserve their compressed-column structural order.
       if (x == nullptr) {
         return false;
       }
       Eigen::Map<const Eigen::VectorXd> xv(x, n_);
-
-      // Build a map (row,col) → index in jac_rows_ for lookup.
-      // For efficiency, materialise both sparse Jacobians and walk them.
-      // Use a flat parallel value array: values_flat[k] corresponds to
-      // (jac_rows_[k], jac_cols_[k]).
-      //
-      // Strategy: build sparse matrices, convert to a lookup dictionary,
-      // then fill the values array in declared order.
-      // For typical AC OPF nnz << m*n this is O(nnz) rather than O(m*n).
-      std::vector<double> sparse_vals(static_cast<std::size_t>(nnz_jac_), 0.0);
-
-      // Helper: accumulate from a sparse Jacobian block into sparse_vals.
-      // `block_offset` is the row offset for this block in the global pattern.
-      // We need to match (row+block_offset, col) → position in jac_rows_/jac_cols_.
-      // Since jac_rows_/jac_cols_ are stored in the same order as produced by
-      // the pattern probe (compressed column-major), we can use binary search
-      // or a hash map. Use a small hash map keyed by encoded (row,col).
       auto fill_block = [&](const Eigen::SparseMatrix<double>& J, int row_offset) {
         for (int k = 0; k < J.outerSize(); ++k)
           for (Eigen::SparseMatrix<double>::InnerIterator it(J, k); it; ++it) {
             const int gr = row_offset + static_cast<int>(it.row());
             const int gc = static_cast<int>(it.col());
-            // Find the position in jac_rows_/jac_cols_ — linear scan over
-            // the nnz entries (fast because nnz is small for sparse networks).
-            // The probe and value passes produce the same column-major ordering,
-            // so we can match by the same traversal order.
-            for (int p = 0; p < nnz_jac_; ++p) {
-              if (jac_rows_[static_cast<std::size_t>(p)] == gr &&
-                  jac_cols_[static_cast<std::size_t>(p)] == gc) {
-                sparse_vals[static_cast<std::size_t>(p)] = it.value();
-                break;
-              }
-            }
+            if (cursor >= nnz_jac_ ||
+                jac_rows_[static_cast<std::size_t>(cursor)] != gr ||
+                jac_cols_[static_cast<std::size_t>(cursor)] != gc) return false;
+            values[cursor++] = it.value();
           }
+        return true;
       };
 
       if (meq_ > 0 && prob_.jac_g) {
         Eigen::SparseMatrix<double> jg;
         prob_.jac_g(xv, jg);
-        fill_block(jg, 0);
+        if (!fill_block(jg, 0)) return false;
       }
       if (mineq_ > 0 && prob_.jac_h) {
         Eigen::SparseMatrix<double> jh;
         prob_.jac_h(xv, jh);
-        fill_block(jh, meq_);
-      }
-
-      for (int k = 0; k < nnz_jac_; ++k) {
-        values[cursor++] = sparse_vals[static_cast<std::size_t>(k)];
+        if (!fill_block(jh, meq_)) return false;
       }
     }
 

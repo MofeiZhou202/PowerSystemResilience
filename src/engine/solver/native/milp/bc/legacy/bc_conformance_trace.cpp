@@ -123,9 +123,11 @@ std::uint64_t bc_model_side_state_signature(const LPModel& lp) {
 
 const HiGHSPresolvedModelStats& cached_highs_presolve_side_state(
     const LPModel& lp,
+    double time_limit_sec,
     bool* cache_hit) {
   static std::mutex cache_mutex;
   static std::unordered_map<std::uint64_t, HiGHSPresolvedModelStats> cache;
+  static thread_local HiGHSPresolvedModelStats timed_out_result;
   const std::uint64_t sig = bc_model_side_state_signature(lp);
   {
     std::lock_guard<std::mutex> lock(cache_mutex);
@@ -135,7 +137,15 @@ const HiGHSPresolvedModelStats& cached_highs_presolve_side_state(
       return it->second;
     }
   }
-  HiGHSPresolvedModelStats computed = highs_presolve_model_stats(lp);
+  HiGHSPresolvedModelStats computed =
+      highs_presolve_model_stats(lp, time_limit_sec);
+  // A time-limited partial presolve is not reusable: a later solve may have a
+  // larger budget and must be allowed to compute the complete side state.
+  if (computed.highs_status == "timeout") {
+    timed_out_result = std::move(computed);
+    if (cache_hit != nullptr) *cache_hit = false;
+    return timed_out_result;
+  }
   std::lock_guard<std::mutex> lock(cache_mutex);
   auto [it, inserted] = cache.emplace(sig, std::move(computed));
   (void)inserted;

@@ -15,6 +15,11 @@ void refresh_leaving_heap(State& state, const std::vector<int>* changed_rows,
 IndexedVector multiply_AT_indexed(
     const Eigen::SparseMatrix<double, Eigen::RowMajor>& A_row,
     const IndexedVector& y);
+// Same product written into a caller-owned vector so hot loops can reuse
+// its backing storage across pivots.
+void multiply_AT_indexed(
+    const Eigen::SparseMatrix<double, Eigen::RowMajor>& A_row,
+    const IndexedVector& y, IndexedVector& result);
 bool choose_entering_bfrt(const State& state, const Leaving& leaving,
                           const IndexedVector& pivot_row,
                           PivotTransaction& transaction,

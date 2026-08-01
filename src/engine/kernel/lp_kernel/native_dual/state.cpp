@@ -516,66 +516,70 @@ bool correct_canonical_primal_residual(State& state, std::string& failure) {
   return true;
 }
 
-bool reconstruct(State& state, std::string& failure) {
+bool reconstruct(State& state, std::string& failure, bool primal, bool dual) {
   state.leaving_heap_valid = false;
   if (!rebuild_membership(state, failure)) return false;
-  const bool anchored_dual_phase_one =
-      state.phase == Phase::DualOne &&
-      state.dual_phase_one_anchor.size() == state.n;
-  Eigen::VectorXd rhs = anchored_dual_phase_one
-                            ? Eigen::VectorXd::Zero(state.m)
-                            : state.sf->b;
-  for (int j = 0; j < state.n; ++j) {
-    if (state.basic[static_cast<std::size_t>(j)]) continue;
-    double value = state.bounds.lower[j];
-    if (state.move[static_cast<std::size_t>(j)] == Move::Down) {
-      value = state.bounds.upper[j];
-      if (!std::isfinite(value)) {
-        failure = "nonbasic variable is at an infinite upper bound";
-        return false;
+  if (primal) {
+    const bool anchored_dual_phase_one =
+        state.phase == Phase::DualOne &&
+        state.dual_phase_one_anchor.size() == state.n;
+    Eigen::VectorXd rhs = anchored_dual_phase_one
+                              ? Eigen::VectorXd::Zero(state.m)
+                              : state.sf->b;
+    for (int j = 0; j < state.n; ++j) {
+      if (state.basic[static_cast<std::size_t>(j)]) continue;
+      double value = state.bounds.lower[j];
+      if (state.move[static_cast<std::size_t>(j)] == Move::Down) {
+        value = state.bounds.upper[j];
+        if (!std::isfinite(value)) {
+          failure = "nonbasic variable is at an infinite upper bound";
+          return false;
+        }
+      }
+      if (anchored_dual_phase_one) {
+        value -= state.dual_phase_one_anchor[j];
+      }
+      if (value == 0.0) continue;
+      for (Eigen::SparseMatrix<double>::InnerIterator it(state.sf->A, j); it;
+           ++it) {
+        rhs[it.row()] -= it.value() * value;
       }
     }
+    const SolveEvidence primal_solve = state.factor->checked_ftran(rhs);
+    state.x_basic = primal_solve.solution;
+    if (!primal_solve.accepted || state.x_basic.size() != state.m ||
+        !state.x_basic.allFinite()) {
+      failure = "FTRAN failed backward-error validation: " +
+                state.factor->last_solve_diagnostics();
+      return false;
+    }
     if (anchored_dual_phase_one) {
-      value -= state.dual_phase_one_anchor[j];
+      for (int row = 0; row < state.m; ++row) {
+        state.x_basic[row] += state.dual_phase_one_anchor[
+            state.basis[static_cast<std::size_t>(row)]];
+      }
     }
-    if (value == 0.0) continue;
-    for (Eigen::SparseMatrix<double>::InnerIterator it(state.sf->A, j); it;
-         ++it) {
-      rhs[it.row()] -= it.value() * value;
-    }
+    if (!correct_canonical_primal_residual(state, failure)) return false;
   }
-  const SolveEvidence primal_solve = state.factor->checked_ftran(rhs);
-  state.x_basic = primal_solve.solution;
-  if (!primal_solve.accepted || state.x_basic.size() != state.m ||
-      !state.x_basic.allFinite()) {
-    failure = "FTRAN failed backward-error validation: " +
-              state.factor->last_solve_diagnostics();
-    return false;
-  }
-  if (anchored_dual_phase_one) {
-    for (int row = 0; row < state.m; ++row) {
-      state.x_basic[row] += state.dual_phase_one_anchor[
-          state.basis[static_cast<std::size_t>(row)]];
-    }
-  }
-  if (!correct_canonical_primal_residual(state, failure)) return false;
 
-  Eigen::VectorXd c_basic(state.m);
-  for (int row = 0; row < state.m; ++row) {
-    c_basic[row] =
-        state.cost[state.basis[static_cast<std::size_t>(row)]];
+  if (dual) {
+    Eigen::VectorXd c_basic(state.m);
+    for (int row = 0; row < state.m; ++row) {
+      c_basic[row] =
+          state.cost[state.basis[static_cast<std::size_t>(row)]];
+    }
+    const Eigen::VectorXd y = state.factor->btran(c_basic);
+    if (y.size() != state.m || !y.allFinite()) {
+      failure = "BTRAN failed backward-error validation";
+      return false;
+    }
+    state.reduced_costs = state.cost - multiply_AT(state.sf->A, y);
+    if (!state.reduced_costs.allFinite()) {
+      failure = "reduced-cost reconstruction is non-finite";
+      return false;
+    }
+    for (int col : state.basis) state.reduced_costs[col] = 0.0;
   }
-  const Eigen::VectorXd y = state.factor->btran(c_basic);
-  if (y.size() != state.m || !y.allFinite()) {
-    failure = "BTRAN failed backward-error validation";
-    return false;
-  }
-  state.reduced_costs = state.cost - multiply_AT(state.sf->A, y);
-  if (!state.reduced_costs.allFinite()) {
-    failure = "reduced-cost reconstruction is non-finite";
-    return false;
-  }
-  for (int col : state.basis) state.reduced_costs[col] = 0.0;
 
   const Eigen::VectorXd x = full_primal(state);
   state.objective = state.cost.dot(x);
@@ -617,6 +621,10 @@ bool initialize_cost_shifted_dual_start(State& state, Statistics& statistics,
   state.costs_shifted = false;
   state.perturbation_disabled = false;
 
+  const int previous_cost_shifts = statistics.cost_shifts;
+  const double previous_max_cost_shift = statistics.max_cost_shift;
+  int start_cost_shifts = 0;
+  double start_max_cost_shift = 0.0;
   const double tolerance = state.options->optimality_tol;
   for (int j = 0; j < state.n; ++j) {
     if (state.basic[static_cast<std::size_t>(j)] ||
@@ -643,9 +651,8 @@ bool initialize_cost_shifted_dual_start(State& state, Statistics& statistics,
     state.reduced_costs[j] = 0.0;
     state.move[static_cast<std::size_t>(j)] = Move::Up;
     state.costs_shifted = true;
-    ++statistics.cost_shifts;
-    statistics.max_cost_shift =
-        std::max(statistics.max_cost_shift, std::abs(shift));
+    ++start_cost_shifts;
+    start_max_cost_shift = std::max(start_max_cost_shift, std::abs(shift));
   }
 
   if (!reconstruct(state, failure)) {
@@ -657,6 +664,10 @@ bool initialize_cost_shifted_dual_start(State& state, Statistics& statistics,
     failure = "cost-shifted dual-start invariant failed: " + initial.failure;
     return false;
   }
+  statistics.cost_shifts = previous_cost_shifts + start_cost_shifts;
+  statistics.dual_start_cost_shifts += start_cost_shifts;
+  statistics.max_cost_shift =
+      std::max(previous_max_cost_shift, start_max_cost_shift);
   statistics.max_primal_infeasibility = initial.max_primal_infeasibility;
   statistics.max_dual_infeasibility = initial.max_dual_infeasibility;
   return true;
@@ -829,7 +840,7 @@ bool major_rebuild(State& state, RebuildReason reason, bool reinvert,
             ? Move::Down
             : Move::Up;
   }
-  if (!reconstruct(state, failure)) {
+  if (!reconstruct(state, failure, true, false)) {
     failure = "bound-side reconstruction failed: " + failure;
     return false;
   }
@@ -856,7 +867,7 @@ bool major_rebuild(State& state, RebuildReason reason, bool reinvert,
     statistics.max_cost_shift =
         std::max(statistics.max_cost_shift, std::abs(shift));
   }
-  if (state.costs_shifted && !reconstruct(state, failure)) {
+  if (state.costs_shifted && !reconstruct(state, failure, false, true)) {
     failure = "working-cost shift reconstruction failed: " + failure;
     return false;
   }
@@ -1072,6 +1083,27 @@ bool initialize(State& state, const StandardFormLP& sf,
   state.cost_perturbation = Eigen::VectorXd::Zero(state.n);
   state.cost_shift = Eigen::VectorXd::Zero(state.n);
   state.move.assign(static_cast<std::size_t>(state.n), Move::Up);
+  // Dominating coefficient for the BFRT dot-product error bound. For column
+  // j with k stored entries, dot_error_bound computes
+  //   fl(gamma_k * dot + 256*eps*dot),  dot = fl(sum_i |row_ep_i * A_ij|),
+  // whose value is bounded above in exact arithmetic by
+  //   (gamma_k + 256*eps) * ||A_j||_1 * max|row_ep| * (1+eps)^(k+4).
+  // The factor 2 dominates every accumulated rounding term for any k far
+  // below 1/eps, so coefficient * max|row_ep| >= the computed bound always.
+  state.bfrt_error_coef.assign(static_cast<std::size_t>(state.n), 0.0);
+  for (int j = 0; j < state.n; ++j) {
+    double norm1 = 0.0;
+    int terms = 0;
+    for (Eigen::SparseMatrix<double>::InnerIterator it(sf.A, j); it; ++it) {
+      norm1 += std::abs(it.value());
+      ++terms;
+    }
+    const double eps = std::numeric_limits<double>::epsilon();
+    const double product = terms * eps;
+    const double gamma = product < 0.5 ? product / (1.0 - product) : 1.0;
+    state.bfrt_error_coef[static_cast<std::size_t>(j)] =
+        2.0 * ((gamma + 256.0 * eps) * norm1);
+  }
   if (hint != nullptr) {
     if (hint->rows != state.m || hint->cols != state.n ||
         static_cast<int>(hint->index_count()) != state.m) {
@@ -1110,6 +1142,20 @@ bool initialize(State& state, const StandardFormLP& sf,
   if (hint != nullptr) {
     initialize_devex_framework(state, statistics);
     return true;
+  }
+  return initialize_cold_edge_weights(state, statistics, failure);
+}
+
+bool initialize_cold_edge_weights(State& state, Statistics& statistics,
+                                  std::string& failure) {
+  // Diagnostic/experimental selection of the cold-start dual pricing weights,
+  // mirroring MIPSOLVERS_PRIMAL_DEVEX for the primal cleanup. Unset keeps the
+  // production policy.
+  if (const char* pricing = std::getenv("MIPSOLVERS_DUAL_PRICING")) {
+    if (std::string(pricing) == "devex") {
+      initialize_devex_framework(state, statistics);
+      return true;
+    }
   }
   return initialize_exact_edge_weights(state, statistics, failure);
 }

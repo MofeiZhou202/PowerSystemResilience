@@ -61,6 +61,26 @@ TEST_CASE("MILP: compact pseudocost table preserves branching scores",
   CHECK(compact.storage_bytes() < dense.size() * sizeof(detail::PseudoCost) / 8);
 }
 
+TEST_CASE("MILP: pseudocost observations are normalized by branch distance",
+          "[milp][branching][math]") {
+  detail::PseudoCost pc;
+  detail::PCUpdate down{3, false};
+  down.branch_distance = 0.25;
+  down.has_gain = true;
+  down.gain = 6.0;
+  down.apply(pc);
+
+  detail::PCUpdate up{3, true};
+  up.branch_distance = 0.75;
+  up.has_gain = true;
+  up.gain = 6.0;
+  up.apply(pc);
+
+  CHECK(pc.down_avg() == Approx(24.0));
+  CHECK(pc.up_avg() == Approx(8.0));
+  CHECK(detail::normalized_pseudocost_gain(-1.0, 0.5) == 0.0);
+}
+
 // ─── Simple binary knapsack ────────────────────────────────────────────────
 // max  5x1 + 4x2 + 3x3
 // s.t. 2x1 + 3x2 + x3 <= 5

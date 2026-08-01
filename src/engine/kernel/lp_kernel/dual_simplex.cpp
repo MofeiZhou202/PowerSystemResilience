@@ -863,11 +863,13 @@ class VendoredHighsBasis : public BasisOps {
   VendoredHighsBasis(std::shared_ptr<Highs> highs,
                      int rows,
                      int cols,
-                     const Eigen::SparseMatrix<double>* A)
+                     std::uint64_t structure_id)
       : highs_(std::move(highs)),
         m_(rows),
         n_(cols),
-        A_owned_(A != nullptr ? *A : Eigen::SparseMatrix<double>()) {}
+        structure_id_(structure_id) {
+    if (highs_) capture_snapshot(owner_snapshot_);
+  }
 
   BasisOpsKind kind() const override { return BasisOpsKind::VendoredHighs; }
 
@@ -929,13 +931,7 @@ class VendoredHighsBasis : public BasisOps {
       for (int j = 0; j < n_; ++j) out[j] = h_row[static_cast<std::size_t>(j)];
       return out.allFinite();
     }
-    if (A_owned_.rows() != m_ || A_owned_.cols() != n_) return false;
-    Eigen::VectorXd e = Eigen::VectorXd::Zero(m_);
-    e[row] = 1.0;
-    Eigen::VectorXd y = btran(e);
-    if (y.size() != m_ || !y.allFinite()) return false;
-    out = y.transpose() * A_owned_;
-    return out.allFinite();
+    return false;
   }
 
   SparseFactorTelemetry factor_telemetry() const override {
@@ -944,7 +940,7 @@ class VendoredHighsBasis : public BasisOps {
     return t;
   }
 
-  void rebind_A(const Eigen::SparseMatrix<double>& A) override { A_owned_ = A; }
+  void rebind_A(const Eigen::SparseMatrix<double>&) override {}
 
   bool bound_to_A(const Eigen::SparseMatrix<double>& A) const override {
     return A.rows() == m_ && A.cols() == n_;
@@ -1057,7 +1053,8 @@ class VendoredHighsBasis : public BasisOps {
           std::make_shared<const Eigen::VectorXd>(sf.col_scale);
     }
     out.basis.cached_sparse_basis =
-        std::make_shared<VendoredHighsBasis>(highs, m, n, &out.form.A);
+        std::make_shared<VendoredHighsBasis>(
+            highs, m, n, sf.structure_id);
     out.basis.persist_eta_count = 0;
 
     double primal_residual = 0.0;
@@ -1093,6 +1090,123 @@ class VendoredHighsBasis : public BasisOps {
                               out.basis_inverse, out.basis.cached_sparse_basis,
                               out.reduced_costs, out.result);
     return true;
+  }
+
+  bool resolve_same_structure(const StandardFormLP& sf,
+                              const SimplexBasis* basis_hint,
+                              const SimplexOptions& opt,
+                              SimplexResult& out) override {
+    if (!highs_ || basis_hint == nullptr || sf.structure_id == 0 ||
+        sf.structure_id != structure_id_ ||
+        sf.A.rows() != m_ || sf.A.cols() != n_ ||
+        !owner_snapshot_.basis.valid) {
+      return false;
+    }
+    HighsBasis requested_basis;
+    if (!native_sf_basis_to_highs(sf, basis_hint, requested_basis)) {
+      return false;
+    }
+
+    const int m = m_;
+    const int n = n_;
+    std::vector<double> target_col_lower(static_cast<std::size_t>(n), 0.0);
+    std::vector<double> target_col_upper(static_cast<std::size_t>(n), kInf);
+    std::vector<char> artificial(static_cast<std::size_t>(n), 0);
+    for (int col : sf.row_to_artificial_col) {
+      if (col >= 0 && col < n) artificial[static_cast<std::size_t>(col)] = 1;
+    }
+    for (int col = 0; col < n; ++col) {
+      if (artificial[static_cast<std::size_t>(col)]) {
+        target_col_upper[static_cast<std::size_t>(col)] = 0.0;
+      } else if (sf.var_ub.size() > col) {
+        target_col_upper[static_cast<std::size_t>(col)] = sf.var_ub[col];
+      }
+    }
+    std::vector<double> target_row(static_cast<std::size_t>(m), 0.0);
+    for (int row = 0; row < m; ++row) {
+      target_row[static_cast<std::size_t>(row)] = sf.b[row];
+    }
+
+    const HighsLp& active_lp = highs_->getLp();
+    if (active_lp.num_row_ != m || active_lp.num_col_ != n ||
+        active_lp.col_cost_.size() != static_cast<std::size_t>(n)) {
+      return false;
+    }
+    for (int col = 0; col < n; ++col) {
+      if (active_lp.col_cost_[static_cast<std::size_t>(col)] != sf.c_max[col]) {
+        return false;
+      }
+    }
+
+    if (!same_basis(highs_->getBasis(), requested_basis) &&
+        highs_->setBasis(requested_basis,
+                         "MIPSOLVERS persistent node LP basis") ==
+            HighsStatus::kError) {
+      return false;
+    }
+
+    std::vector<HighsInt> changed_cols;
+    std::vector<double> changed_col_lower;
+    std::vector<double> changed_col_upper;
+    changed_cols.reserve(static_cast<std::size_t>(n));
+    for (int col = 0; col < n; ++col) {
+      if (active_lp.col_lower_[static_cast<std::size_t>(col)] ==
+              target_col_lower[static_cast<std::size_t>(col)] &&
+          active_lp.col_upper_[static_cast<std::size_t>(col)] ==
+              target_col_upper[static_cast<std::size_t>(col)]) {
+        continue;
+      }
+      changed_cols.push_back(col);
+      changed_col_lower.push_back(target_col_lower[static_cast<std::size_t>(col)]);
+      changed_col_upper.push_back(target_col_upper[static_cast<std::size_t>(col)]);
+    }
+    std::vector<HighsInt> changed_rows;
+    std::vector<double> changed_row_lower;
+    std::vector<double> changed_row_upper;
+    changed_rows.reserve(static_cast<std::size_t>(m));
+    for (int row = 0; row < m; ++row) {
+      if (active_lp.row_lower_[static_cast<std::size_t>(row)] ==
+              target_row[static_cast<std::size_t>(row)] &&
+          active_lp.row_upper_[static_cast<std::size_t>(row)] ==
+              target_row[static_cast<std::size_t>(row)]) {
+        continue;
+      }
+      changed_rows.push_back(row);
+      changed_row_lower.push_back(target_row[static_cast<std::size_t>(row)]);
+      changed_row_upper.push_back(target_row[static_cast<std::size_t>(row)]);
+    }
+
+    bool ok = changed_cols.empty() ||
+              highs_->changeColsBounds(
+                  static_cast<HighsInt>(changed_cols.size()),
+                  changed_cols.data(), changed_col_lower.data(),
+                  changed_col_upper.data()) != HighsStatus::kError;
+    if (ok && !changed_rows.empty()) {
+      ok = highs_->changeRowsBounds(
+               static_cast<HighsInt>(changed_rows.size()), changed_rows.data(),
+               changed_row_lower.data(), changed_row_upper.data()) !=
+           HighsStatus::kError;
+    }
+    if (ok && opt.time_limit_sec > 0.0 &&
+        std::isfinite(opt.time_limit_sec)) {
+      highs_->setOptionValue("time_limit", std::max(0.001, opt.time_limit_sec));
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    if (ok) ok = highs_->run() != HighsStatus::kError;
+    if (ok && highs_->getModelStatus() == HighsModelStatus::kOptimal) {
+      ok = import_optimal_result(highs_, sf, opt, true,
+                                 "persistent_bounds", out);
+    } else {
+      ok = false;
+    }
+    if (ok) {
+      out.result.stats.runtime_sec = std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - t0).count();
+      out.result.stats.solver_name = "VendoredHighsPersistentLpKernel";
+      return true;
+    }
+    (void)restore_snapshot(owner_snapshot_);
+    return false;
   }
 
   bool delete_rows_cols_and_resolve(
@@ -1165,10 +1279,59 @@ class VendoredHighsBasis : public BasisOps {
   }
 
  private:
+  struct Snapshot {
+    std::vector<double> col_lower;
+    std::vector<double> col_upper;
+    std::vector<double> row_lower;
+    std::vector<double> row_upper;
+    HighsBasis basis;
+  };
+
+  bool capture_snapshot(Snapshot& snapshot) const {
+    if (!highs_ || highs_->getNumRow() != m_ || highs_->getNumCol() != n_) {
+      return false;
+    }
+    const HighsLp& lp = highs_->getLp();
+    snapshot.col_lower = lp.col_lower_;
+    snapshot.col_upper = lp.col_upper_;
+    snapshot.row_lower = lp.row_lower_;
+    snapshot.row_upper = lp.row_upper_;
+    snapshot.basis = highs_->getBasis();
+    return snapshot.basis.valid;
+  }
+
+  bool restore_snapshot(const Snapshot& snapshot) {
+    if (!highs_ || highs_->getNumRow() != m_ || highs_->getNumCol() != n_) {
+      return false;
+    }
+    bool ok = n_ == 0 ||
+              highs_->changeColsBounds(0, n_ - 1, snapshot.col_lower.data(),
+                                        snapshot.col_upper.data()) !=
+                  HighsStatus::kError;
+    if (ok && m_ > 0) {
+      ok = highs_->changeRowsBounds(0, m_ - 1, snapshot.row_lower.data(),
+                                    snapshot.row_upper.data()) !=
+           HighsStatus::kError;
+    }
+    if (ok) {
+      ok = highs_->setBasis(snapshot.basis,
+                            "MIPSOLVERS persistent LP rollback") !=
+           HighsStatus::kError;
+    }
+    if (ok) highs_->setOptionValue("time_limit", kHighsInf);
+    return ok && highs_->run() != HighsStatus::kError;
+  }
+
+  static bool same_basis(const HighsBasis& lhs, const HighsBasis& rhs) {
+    return lhs.valid && lhs.col_status == rhs.col_status &&
+           lhs.row_status == rhs.row_status;
+  }
+
   std::shared_ptr<Highs> highs_;
   int m_{0};
   int n_{0};
-  Eigen::SparseMatrix<double> A_owned_;
+  std::uint64_t structure_id_{0};
+  Snapshot owner_snapshot_;
 };
 
 bool solve_standard_form_with_vendored_highs(const StandardFormLP& sf,
@@ -1178,6 +1341,13 @@ bool solve_standard_form_with_vendored_highs(const StandardFormLP& sf,
   const int m = static_cast<int>(sf.A.rows());
   const int n = static_cast<int>(sf.A.cols());
   if (m <= 0 || n <= 0) return false;
+
+  if (opt.allow_persistent_lp_state && basis_hint &&
+      basis_hint->cached_sparse_basis &&
+      basis_hint->cached_sparse_basis->resolve_same_structure(
+          sf, basis_hint, opt, out)) {
+    return true;
+  }
 
   const auto t0 = std::chrono::steady_clock::now();
   const bool trace_sf = std::getenv("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr;
@@ -1463,7 +1633,8 @@ bool solve_standard_form_with_vendored_highs(const StandardFormLP& sf,
         std::make_shared<const Eigen::VectorXd>(sf.col_scale);
   }
   out.basis.cached_sparse_basis =
-      std::make_shared<VendoredHighsBasis>(highs, m, n, &out.form.A);
+      std::make_shared<VendoredHighsBasis>(
+          highs, m, n, sf.structure_id);
   out.basis.persist_eta_count = 0;
   const int degenerate_duals = inject_basic_degenerate_col_duals_from_highs(
       sf, *highs, sol, out.basis.basis_indices(), out.reduced_costs,

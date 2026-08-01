@@ -7,7 +7,9 @@
 #include <Eigen/LU>
 #include <Eigen/Sparse>
 
+#include <cstdlib>
 #include <limits>
+#include <string>
 
 #include "Highs.h"
 
@@ -24,6 +26,30 @@ using namespace mipsolvers::engine;
 using Catch::Approx;
 
 namespace {
+
+class EnvVarGuard {
+ public:
+  EnvVarGuard(const char* name, const char* value) : name_(name) {
+    if (const char* previous = std::getenv(name)) {
+      had_previous_ = true;
+      previous_ = previous;
+    }
+    ::setenv(name, value, 1);
+  }
+
+  ~EnvVarGuard() {
+    if (had_previous_) {
+      ::setenv(name_.c_str(), previous_.c_str(), 1);
+    } else {
+      ::unsetenv(name_.c_str());
+    }
+  }
+
+ private:
+  std::string name_;
+  std::string previous_;
+  bool had_previous_{false};
+};
 
 double solve_with_highs(const LPModel& lp) {
   const int cols = static_cast<int>(lp.vars.size());
@@ -152,6 +178,116 @@ TEST_CASE("HiGHS infeasibility never falls through to native dual",
   CHECK(result.result.stats.solver_name == "VendoredHighsLpKernel");
 }
 
+TEST_CASE("HiGHS persistent LP state reuses the model and rolls back failure",
+          "[dual_simplex][persistent][transaction]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Constant(1, -1.0);
+  lp.A.resize(1, 1);
+  lp.A.insert(0, 0) = 1.0;
+  lp.A.makeCompressed();
+  lp.b = Eigen::VectorXd::Constant(1, 10.0);
+  lp.Aeq.resize(0, 1);
+  lp.beq.resize(0);
+  lp.vars.push_back({VarType::Continuous, 0.0, 10.0});
+
+  SimplexOptions options;
+  options.lp_kernel_backend = LpKernelBackend::HiGHS;
+  options.allow_persistent_lp_state = true;
+  StandardFormLP root_sf = build_standard_form_lp(lp);
+  auto root = solve_lp_from_sf(root_sf, options);
+  REQUIRE(root.result.stats.success);
+  REQUIRE(root.basis.cached_sparse_basis);
+  auto root_handle = root.basis.cached_sparse_basis->highs_handle();
+  REQUIRE(root_handle);
+
+  StandardFormLP child_sf = root_sf;
+  Eigen::VectorXd child_lb = Eigen::VectorXd::Constant(1, 0.0);
+  Eigen::VectorXd child_ub = Eigen::VectorXd::Constant(1, 4.0);
+  update_standard_form_bounds(child_sf, lp, child_lb, child_ub);
+  auto child = solve_lp_from_sf(child_sf, options, &root.basis);
+  REQUIRE(child.result.stats.success);
+  CHECK(child.result.stats.solver_name == "VendoredHighsPersistentLpKernel");
+  CHECK(child.result.stats.objective == Approx(-4.0).margin(1e-9));
+  REQUIRE(child.basis.cached_sparse_basis);
+  CHECK(child.basis.cached_sparse_basis->highs_handle() == root_handle);
+
+  StandardFormLP rejected_sf = root_sf;
+  rejected_sf.b[0] = -1.0;
+  auto rejected = solve_lp_from_sf(rejected_sf, options, &root.basis);
+  CHECK_FALSE(rejected.result.stats.success);
+
+  const HighsLp& restored_lp = root_handle->getLp();
+  REQUIRE(restored_lp.num_row_ == root_sf.A.rows());
+  REQUIRE(restored_lp.num_col_ == root_sf.A.cols());
+  CHECK(restored_lp.row_lower_[0] == Approx(root_sf.b[0]));
+  CHECK(restored_lp.row_upper_[0] == Approx(root_sf.b[0]));
+  CHECK(restored_lp.col_upper_[0] == Approx(root_sf.var_ub[0]));
+  std::vector<double> rhs(static_cast<std::size_t>(root_sf.A.rows()), 1.0);
+  std::vector<double> solution(rhs.size(), 0.0);
+  CHECK(root_handle->getBasisSolve(rhs.data(), solution.data()) ==
+        HighsStatus::kOk);
+
+  child_ub[0] = 7.0;
+  StandardFormLP next_sf = root_sf;
+  update_standard_form_bounds(next_sf, lp, child_lb, child_ub);
+  auto next = solve_lp_from_sf(next_sf, options, &root.basis);
+  REQUIRE(next.result.stats.success);
+  CHECK(next.result.stats.objective == Approx(-7.0).margin(1e-9));
+  CHECK(next.basis.cached_sparse_basis->highs_handle() == root_handle);
+}
+
+TEST_CASE("Direct HiGHS cut rows commit or roll back atomically",
+          "[dual_simplex][persistent][transaction][cuts]") {
+  LPModel root_lp;
+  root_lp.sense = Sense::Minimize;
+  root_lp.c = Eigen::VectorXd::Constant(1, -1.0);
+  root_lp.A.resize(1, 1);
+  root_lp.A.insert(0, 0) = 1.0;
+  root_lp.A.makeCompressed();
+  root_lp.b = Eigen::VectorXd::Constant(1, 10.0);
+  root_lp.Aeq.resize(0, 1);
+  root_lp.beq.resize(0);
+  root_lp.vars.push_back({VarType::Continuous, 0.0, 10.0});
+
+  BCOptions options;
+  options.use_simplex_lp_nodes = true;
+  options.lp_kernel_backend = LpKernelBackend::HiGHS;
+  auto root = detail::solve_lp_relaxation(root_lp, nullptr, nullptr, options);
+  REQUIRE(root.primal.stats.success);
+  REQUIRE(root.basis_hint);
+  auto state = root.basis_hint->cached_sparse_basis;
+  REQUIRE(state);
+  REQUIRE(state->supports_incremental_rows());
+  auto handle = state->highs_handle();
+  REQUIRE(handle);
+
+  LPModel cut_lp = root_lp;
+  cut_lp.A.resize(2, 1);
+  cut_lp.A.insert(0, 0) = 1.0;
+  cut_lp.A.insert(1, 0) = 1.0;
+  cut_lp.A.makeCompressed();
+  cut_lp.b.resize(2);
+  cut_lp.b << 10.0, 4.0;
+
+  REQUIRE(state->begin_lp_transaction());
+  auto cut = detail::solve_lp_relaxation(
+      cut_lp, &root.primal.x, root.basis_hint.get(), options);
+  REQUIRE(cut.primal.stats.success);
+  CHECK(cut.primal.stats.objective == Approx(-4.0).margin(1e-9));
+  CHECK(handle->getNumRow() == 2);
+  REQUIRE(state->rollback_lp_transaction());
+  CHECK(handle->getNumRow() == 1);
+  CHECK(handle->getInfo().objective_function_value == Approx(-10.0).margin(1e-9));
+
+  REQUIRE(state->begin_lp_transaction());
+  cut = detail::solve_lp_relaxation(
+      cut_lp, &root.primal.x, root.basis_hint.get(), options);
+  REQUIRE(cut.primal.stats.success);
+  REQUIRE(state->commit_lp_transaction());
+  CHECK(handle->getNumRow() == 2);
+}
+
 // ─── 2-variable LP solved via dual simplex ────────────────────────────────
 // min -3x - 2y  s.t.  x+y <= 4,  x >= 0,  y >= 0
 // Optimal: x=4, y=0, obj=-12
@@ -213,6 +349,7 @@ TEST_CASE("DualSimplex: cost-shift crash certifies a cold dual start",
   CHECK(audit.ok);
   CHECK(state.costs_shifted);
   CHECK(statistics.cost_shifts == 1);
+  CHECK(statistics.dual_start_cost_shifts == 1);
   CHECK(state.original_cost[0] == Approx(1.0));
   CHECK(state.reduced_costs[0] == Approx(0.0).margin(1e-12));
 }
@@ -410,8 +547,8 @@ TEST_CASE("DualSimplex: zero dual Phase-I defect transitions without a basis cha
             .lpNorm<Eigen::Infinity>() <= 1e-12);
 }
 
-TEST_CASE("DualSimplex: cold solve uses dual Phase I before Phase II",
-          "[dual_simplex][dual_phase_one][telemetry]") {
+TEST_CASE("DualSimplex: cold solve bypasses dual Phase I with shifted start",
+          "[dual_simplex][dual_start][telemetry]") {
   LPModel lp;
   lp.sense = Sense::Minimize;
   lp.c.resize(2);
@@ -436,24 +573,29 @@ TEST_CASE("DualSimplex: cold solve uses dual Phase I before Phase II",
   REQUIRE(result.status == native_dual::Status::Optimal);
   CHECK(sf.objective_const - result.max_objective ==
         Approx(solve_with_highs(lp)).margin(1e-9));
-  CHECK(result.statistics.dual_phase_one_iterations >= 1);
-  CHECK(result.statistics.phase_transitions == 1);
-  CHECK(result.statistics.dual_phase_one_initial_objective == Approx(1.0));
-  CHECK(result.statistics.dual_phase_one_final_objective ==
-        Approx(0.0).margin(1e-10));
+  CHECK(result.statistics.dual_phase_one_iterations == 0);
+  CHECK(result.statistics.phase_transitions == 0);
+  CHECK(result.statistics.dual_phase_one_initial_objective == Approx(0.0));
+  CHECK(result.statistics.dual_phase_one_final_objective == Approx(0.0));
   CHECK(result.statistics.transition_dual_infeasibility_count == 0);
   CHECK(result.statistics.transition_max_dual_infeasibility <=
         options.optimality_tol);
-  CHECK(result.statistics.dual_phase_one_terminal_reason == 3);
-  CHECK(result.statistics.cost_shifts == 0);
+  CHECK(result.statistics.dual_phase_one_terminal_reason == 0);
+  CHECK(result.statistics.dual_start_cost_shifts == 1);
+  CHECK(result.statistics.cost_shifts >=
+        result.statistics.dual_start_cost_shifts);
   CHECK(result.statistics.dual_phase_one_time_sec >= 0.0);
   CHECK(result.statistics.dual_phase_two_time_sec >= 0.0);
   CHECK(result.statistics.dual_phase_two_iterations == 0);
-  CHECK(result.statistics.primal_cleanup_iterations == 0);
-  CHECK(result.statistics.cleanup_required == 0);
-  CHECK(result.statistics.cleanup_avoided == 1);
+  CHECK(result.statistics.primal_phase_one_iterations == 0);
+  CHECK(result.statistics.primal_phase_two_iterations == 0);
+  CHECK(result.statistics.primal_cleanup_iterations == 1);
+  CHECK(result.statistics.cleanup_required == 1);
+  CHECK(result.statistics.cleanup_avoided == 0);
   CHECK(result.statistics.dual_phase_one_iterations +
             result.statistics.dual_phase_two_iterations +
+            result.statistics.primal_phase_one_iterations +
+            result.statistics.primal_phase_two_iterations +
             result.statistics.primal_cleanup_iterations ==
         result.statistics.iterations);
 }
@@ -814,6 +956,8 @@ TEST_CASE("DualSimplex: stabilized warm solve rebuilds and cleans original cost"
   CHECK(result.statistics.cleanup_passes == 1);
   CHECK(result.statistics.dual_phase_one_iterations == 0);
   CHECK(result.statistics.dual_phase_two_iterations == 1);
+  CHECK(result.statistics.primal_phase_one_iterations == 0);
+  CHECK(result.statistics.primal_phase_two_iterations == 0);
   CHECK(result.statistics.primal_cleanup_iterations == 0);
   CHECK(result.statistics.cleanup_required == 1);
   CHECK(result.statistics.cleanup_avoided == 0);
@@ -821,6 +965,8 @@ TEST_CASE("DualSimplex: stabilized warm solve rebuilds and cleans original cost"
         result.statistics.primal_cleanup_time_sec);
   CHECK(result.statistics.dual_phase_one_iterations +
             result.statistics.dual_phase_two_iterations +
+            result.statistics.primal_phase_one_iterations +
+            result.statistics.primal_phase_two_iterations +
             result.statistics.primal_cleanup_iterations ==
         result.statistics.iterations);
   CHECK(result.max_objective == Approx(-4.5).margin(1e-10));
@@ -1674,6 +1820,7 @@ TEST_CASE("DualSimplex: BFRT warm sequence agrees with HiGHS",
 
 TEST_CASE("DualSimplex: cold Phase I honors the explicit pivot budget",
           "[dual_simplex][phase1]") {
+  const EnvVarGuard shift_start("MIPSOLVERS_DUAL_SHIFT_START", "off");
   constexpr int rows = 256;
   constexpr int cols = 2 * rows + 1;
 

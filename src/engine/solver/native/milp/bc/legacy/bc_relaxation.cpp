@@ -386,11 +386,92 @@ class DirectHighsLpBasisOps : public BasisOps {
   std::shared_ptr<Highs> highs_handle() const override { return highs_; }
   int row_count() const { return m_; }
 
+  bool begin_lp_transaction() override {
+    if (!highs_ || transaction_.has_value()) return false;
+    const HighsLp& lp = highs_->getLp();
+    if (lp.num_row_ != m_ || lp.num_col_ <= 0) return false;
+    transaction_.emplace();
+    transaction_->rows = lp.num_row_;
+    transaction_->cols = lp.num_col_;
+    transaction_->col_lower = lp.col_lower_;
+    transaction_->col_upper = lp.col_upper_;
+    transaction_->row_lower = lp.row_lower_;
+    transaction_->row_upper = lp.row_upper_;
+    transaction_->basis = highs_->getBasis();
+    transaction_->A = A_owned_;
+    if (transaction_->basis.valid) return true;
+    transaction_.reset();
+    return false;
+  }
+
+  bool commit_lp_transaction() override {
+    if (!transaction_) return false;
+    transaction_.reset();
+    return true;
+  }
+
+  bool rollback_lp_transaction() override {
+    if (!highs_ || !transaction_) return false;
+    const Transaction snapshot = std::move(*transaction_);
+    transaction_.reset();
+    bool ok = highs_->getNumCol() == snapshot.cols &&
+              highs_->getNumRow() >= snapshot.rows;
+    if (ok && highs_->getNumRow() > snapshot.rows) {
+      ok = highs_->deleteRows(snapshot.rows, highs_->getNumRow() - 1) !=
+           HighsStatus::kError;
+    }
+    if (ok && snapshot.cols > 0) {
+      ok = highs_->changeColsBounds(0, snapshot.cols - 1,
+                                    snapshot.col_lower.data(),
+                                    snapshot.col_upper.data()) !=
+           HighsStatus::kError;
+    }
+    if (ok && snapshot.rows > 0) {
+      ok = highs_->changeRowsBounds(0, snapshot.rows - 1,
+                                    snapshot.row_lower.data(),
+                                    snapshot.row_upper.data()) !=
+           HighsStatus::kError;
+    }
+    if (ok) {
+      ok = highs_->setBasis(snapshot.basis,
+                            "MIPSOLVERS direct LP transaction rollback") !=
+           HighsStatus::kError;
+    }
+    if (ok) {
+      highs_->setOptionValue("time_limit", kHighsInf);
+      ok = highs_->run() != HighsStatus::kError &&
+           highs_->getNumRow() == snapshot.rows &&
+           highs_->getNumCol() == snapshot.cols;
+    }
+    if (ok) {
+      m_ = static_cast<int>(snapshot.rows);
+      n_ = static_cast<int>(snapshot.cols + snapshot.rows);
+      A_owned_ = snapshot.A;
+    }
+    return ok;
+  }
+
+  bool lp_transaction_active() const override {
+    return transaction_.has_value();
+  }
+  bool supports_incremental_rows() const override { return true; }
+
  private:
+  struct Transaction {
+    HighsInt rows{0};
+    HighsInt cols{0};
+    std::vector<double> col_lower;
+    std::vector<double> col_upper;
+    std::vector<double> row_lower;
+    std::vector<double> row_upper;
+    HighsBasis basis;
+    Eigen::SparseMatrix<double> A;
+  };
   std::shared_ptr<Highs> highs_;
   int m_{0};
   int n_{0};
   Eigen::SparseMatrix<double> A_owned_;
+  std::optional<Transaction> transaction_;
 };
 
 bool highs_pass_lp_model(Highs& highs, const LPModel& lp) {
@@ -1021,14 +1102,29 @@ bool solve_lp_relaxation_with_vendored_highs(const LPModel& lp,
                                              const BCOptions& opt,
                                              LPRelaxationResult& out) {
   const auto t0 = std::chrono::steady_clock::now();
+  auto remaining_time = [&]() {
+    if (!(opt.time_limit_sec > 0.0) || !std::isfinite(opt.time_limit_sec)) {
+      return std::numeric_limits<double>::infinity();
+    }
+    const double elapsed = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - t0).count();
+    return opt.time_limit_sec - elapsed;
+  };
+  auto set_remaining_highs_budget = [&](Highs& highs) {
+    const double remaining = remaining_time();
+    if (remaining <= 0.0) return false;
+    if (std::isfinite(remaining)) {
+      highs.setOptionValue("time_limit", std::max(0.001, remaining));
+    }
+    return true;
+  };
   std::optional<std::string> live_append_reject;
   const int live_append_candidate_rows =
       static_cast<int>(lp.A.rows() + lp.Aeq.rows());
   const bool has_appended_rows =
       basis_hint != nullptr && basis_hint->rows >= 0 &&
       basis_hint->rows < live_append_candidate_rows;
-  const bool require_live_append =
-      opt.auto_highs_root_pipeline && has_appended_rows;
+  const bool require_live_append = has_appended_rows;
   if (require_live_append && basis_hint != nullptr) {
     const int n = static_cast<int>(lp.vars.size());
     const int m_ineq = static_cast<int>(lp.A.rows());
@@ -1084,6 +1180,36 @@ bool solve_lp_relaxation_with_vendored_highs(const LPModel& lp,
       starts[static_cast<std::size_t>(new_rows)] =
           static_cast<HighsInt>(indices.size());
       auto highs = direct_lp_basis->highs_handle();
+      const bool owns_transaction = !direct_lp_basis->lp_transaction_active();
+      if (owns_transaction && !direct_lp_basis->begin_lp_transaction()) {
+        live_append_reject = "cannot snapshot direct HiGHS state";
+      }
+      if (live_append_reject) {
+        if (require_live_append) return false;
+      }
+      std::vector<HighsInt> changed_cols;
+      std::vector<double> changed_lower;
+      std::vector<double> changed_upper;
+      const HighsLp& active_lp = highs->getLp();
+      for (int col = 0; col < n; ++col) {
+        const double lower_bound = lp.vars[static_cast<std::size_t>(col)].lb;
+        const double upper_bound = lp.vars[static_cast<std::size_t>(col)].ub;
+        if (active_lp.col_lower_[static_cast<std::size_t>(col)] == lower_bound &&
+            active_lp.col_upper_[static_cast<std::size_t>(col)] == upper_bound) {
+          continue;
+        }
+        changed_cols.push_back(col);
+        changed_lower.push_back(lower_bound);
+        changed_upper.push_back(upper_bound);
+      }
+      if (!changed_cols.empty() &&
+          highs->changeColsBounds(
+              static_cast<HighsInt>(changed_cols.size()), changed_cols.data(),
+              changed_lower.data(), changed_upper.data()) ==
+              HighsStatus::kError) {
+        if (owns_transaction) (void)direct_lp_basis->rollback_lp_transaction();
+        return false;
+      }
       const double pack_ms =
           std::chrono::duration<double, std::milli>(
               std::chrono::steady_clock::now() - pack_t0)
@@ -1098,6 +1224,10 @@ bool solve_lp_relaxation_with_vendored_highs(const LPModel& lp,
               std::chrono::steady_clock::now() - add_t0)
               .count();
       if (add_status == HighsStatus::kOk || add_status == HighsStatus::kWarning) {
+        if (!set_remaining_highs_budget(*highs)) {
+          if (owns_transaction) (void)direct_lp_basis->rollback_lp_transaction();
+          return false;
+        }
         const auto run_t0 = std::chrono::steady_clock::now();
         const HighsStatus run_status = highs->run();
         const double run_ms =
@@ -1119,8 +1249,14 @@ bool solve_lp_relaxation_with_vendored_highs(const LPModel& lp,
                        runtime_sec * 1000.0, finished ? 1 : 0);
         }
         if (finished) {
+          if (owns_transaction) {
+            (void)direct_lp_basis->commit_lp_transaction();
+          }
           return true;
         }
+      }
+      if (owns_transaction) {
+        (void)direct_lp_basis->rollback_lp_transaction();
       }
       live_append_reject = "Highs::addRows/run failed";
     }
@@ -1176,6 +1312,9 @@ bool solve_lp_relaxation_with_vendored_highs(const LPModel& lp,
         std::fprintf(stderr,
                      "[BC_RELAX] VendoredHiGHS direct LP failed: pass_model\n");
       }
+      return false;
+    }
+    if (!set_remaining_highs_budget(*highs)) {
       return false;
     }
     HighsBasis warm_basis;
@@ -1287,6 +1426,9 @@ bool solve_lp_relaxation_with_vendored_highs(const LPModel& lp,
   sf_opt.perturb_degenerate_primal = false;
   sf_opt.lp_kernel_backend = LpKernelBackend::HiGHS;
   sf_opt.factor_backend = simplex_factor_backend_from_id(opt.simplex_factor_backend);
+  const double sf_remaining = remaining_time();
+  if (sf_remaining <= 0.0) return false;
+  sf_opt.time_limit_sec = std::isfinite(sf_remaining) ? sf_remaining : 0.0;
   apply_root_simplex_conformance_options(sf_opt, /*force=*/true);
 
   auto simplex = std::make_shared<SimplexResult>(

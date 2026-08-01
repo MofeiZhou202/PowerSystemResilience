@@ -113,6 +113,18 @@ struct BCStats {
   std::uint64_t incumbent_local_branching_attempts{0};
   std::uint64_t incumbent_local_branching_improvements{0};
   double incumbent_local_branching_time_ms{0.0};
+  std::uint64_t reliability_branch_nodes{0};
+  std::uint64_t strong_branch_candidates{0};
+  std::uint64_t strong_branch_lp_solves{0};
+  std::uint64_t strong_branch_cache_exact_hits{0};
+  std::uint64_t strong_branch_cache_warm_hits{0};
+  std::uint64_t strong_branch_duplicate_lp_avoided{0};
+  std::uint64_t branching_regret_samples{0};
+  double branching_regret_sum{0.0};
+  double branching_regret_max{0.0};
+  std::uint64_t strong_branch_regret_samples{0};
+  double strong_branch_regret_sum{0.0};
+  double strong_branch_regret_max{0.0};
   int parallel_requested_threads{1};
   int parallel_effective_threads{1};
   int parallel_explorer_threads{0};

@@ -35,13 +35,18 @@ bool initialize(State& state, const StandardFormLP& sf,
                 const SimplexBasis* hint, Statistics& statistics,
                 std::string& failure);
 bool rebuild_membership(State& state, std::string& failure);
-bool reconstruct(State& state, std::string& failure);
+bool reconstruct(State& state, std::string& failure,
+                 bool primal = true, bool dual = true);
 bool correct_canonical_primal_residual(State& state, std::string& failure);
 bool normalize_nonbasic_moves(State& state, std::string& failure);
 bool initialize_cost_shifted_dual_start(State& state, Statistics& statistics,
                                         std::string& failure);
 bool initialize_exact_edge_weights(State& state, Statistics& statistics,
                                    std::string& failure);
+// Cold-start dual pricing-weight policy: exact DSE unless overridden by the
+// MIPSOLVERS_DUAL_PRICING diagnostic environment selection.
+bool initialize_cold_edge_weights(State& state, Statistics& statistics,
+                                  std::string& failure);
 void initialize_devex_framework(State& state, Statistics& statistics);
 bool initialize_stabilized_cost(State& state, Statistics& statistics,
                                 std::string& failure);

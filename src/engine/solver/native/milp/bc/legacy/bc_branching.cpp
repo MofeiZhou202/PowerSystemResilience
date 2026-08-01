@@ -454,7 +454,7 @@ int choose_branch_var_reliability_impl(
           ++lp_solves;
           if (res.result.stats.success) {
             const double gain = std::max(0.0, res.result.stats.objective - parent_bound);
-            pc[j].add_down(gain);
+            pc[j].add_down(normalized_pseudocost_gain(gain, xj - floor_xj));
           } else {
             const auto ft = classify_lp_result(res, static_cast<int>(base_lp.vars.size()));
             if (ft == LPFailureType::Infeasible) {
@@ -463,7 +463,8 @@ int choose_branch_var_reliability_impl(
                 pc[j].add_down_conflict();
               }
             }
-            pc[j].add_down(1e6);
+            pc[j].add_down(
+                normalized_pseudocost_gain(1e6, xj - floor_xj));
           }
         }
         probe_ub[j] = saved_ub;
@@ -479,7 +480,8 @@ int choose_branch_var_reliability_impl(
           ++lp_solves;
           if (res.result.stats.success) {
             const double gain = std::max(0.0, res.result.stats.objective - parent_bound);
-            pc[j].add_up(gain);
+            pc[j].add_up(
+                normalized_pseudocost_gain(gain, floor_xj + 1.0 - xj));
           } else {
             const auto ft = classify_lp_result(res, static_cast<int>(base_lp.vars.size()));
             if (ft == LPFailureType::Infeasible) {
@@ -488,7 +490,8 @@ int choose_branch_var_reliability_impl(
                 pc[j].add_up_conflict();
               }
             }
-            pc[j].add_up(1e6);
+            pc[j].add_up(
+                normalized_pseudocost_gain(1e6, floor_xj + 1.0 - xj));
           }
         }
         probe_lb[j] = saved_lb;

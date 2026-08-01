@@ -100,6 +100,11 @@ struct State {
   std::vector<LeavingHeapEntry> leaving_heap;
   std::vector<std::uint64_t> leaving_row_version;
   bool leaving_heap_valid{false};
+  // Per-column dominating coefficient for the BFRT dot-product error bound:
+  // coefficient * max|row_ep| is provably >= dot_error_bound for that column
+  // on every pivotal row (see choose_entering_bfrt). Derived from A alone;
+  // filled once by initialize.
+  std::vector<double> bfrt_error_coef;
 
   struct CycleRecord {
     std::uint64_t signature_a{0};

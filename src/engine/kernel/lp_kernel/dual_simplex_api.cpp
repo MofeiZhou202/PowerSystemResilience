@@ -3,6 +3,7 @@
 #include "mipsolvers/engine/kernel/lp_kernel/dual_simplex.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <limits>
 #include <numeric>
@@ -20,6 +21,7 @@ constexpr double kInf = std::numeric_limits<double>::infinity();
 // state must contain mathematical infinities, never huge finite pseudo-bounds
 // that contaminate bound-side selection and residual reconstruction.
 constexpr double kModelBoundSentinel = 1e19;
+std::atomic<std::uint64_t> next_structure_id{1};
 
 bool has_finite_lower_bound(double value) {
   return std::isfinite(value) && value > -kModelBoundSentinel;
@@ -33,6 +35,7 @@ bool has_finite_upper_bound(double value) {
 StandardFormLP build_standard_form_lp(const LPModel& lp) {
   const int n = static_cast<int>(lp.vars.size());
   StandardFormLP sf;
+  sf.structure_id = next_structure_id.fetch_add(1, std::memory_order_relaxed);
   sf.n_original = n;
   sf.original_types.reserve(static_cast<size_t>(n));
   sf.lb_shift = Eigen::VectorXd::Zero(n);
@@ -339,6 +342,7 @@ bool append_leq_rows_to_standard_form(
   };
 
   out = StandardFormLP{};
+  out.structure_id = next_structure_id.fetch_add(1, std::memory_order_relaxed);
   out.n_original = n_orig;
   out.n_slack = new_slack;
   out.n_surplus = old_surplus;
@@ -571,6 +575,7 @@ bool append_leq_rows_to_canonical_standard_form(
   };
 
   out = StandardFormLP{};
+  out.structure_id = next_structure_id.fetch_add(1, std::memory_order_relaxed);
   out.n_original = n_orig;
   out.n_slack = new_slack;
   out.n_surplus = new_surplus;

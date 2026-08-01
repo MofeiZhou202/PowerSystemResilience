@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <utility>
@@ -56,6 +57,23 @@ struct BasisOps {
   virtual SparseFactorTelemetry factor_telemetry() const;
   virtual void rebind_A(const Eigen::SparseMatrix<double>&) {}
   virtual bool bound_to_A(const Eigen::SparseMatrix<double>&) const {
+    return false;
+  }
+  // A transaction snapshots the mutable solver model and basis represented by
+  // this object. Rollback must also leave basis solves usable, i.e. restore or
+  // deterministically rebuild the corresponding numeric factorization.
+  virtual bool begin_lp_transaction() { return false; }
+  virtual bool commit_lp_transaction() { return false; }
+  virtual bool rollback_lp_transaction() { return false; }
+  virtual bool lp_transaction_active() const { return false; }
+  virtual bool supports_incremental_rows() const { return false; }
+  // Reoptimize an unchanged standard-form matrix after bounds/RHS updates.
+  // Implementations must be transactional: false leaves the owner snapshot
+  // active and usable.
+  virtual bool resolve_same_structure(const StandardFormLP&,
+                                      const SimplexBasis*,
+                                      const SimplexOptions&,
+                                      SimplexResult&) {
     return false;
   }
 #ifdef MIPSOLVERS_HAVE_HIGHS_LIB
@@ -146,6 +164,10 @@ struct SimplexOptions {
   // basis, so SparseBasis can reuse the parent factor for FTRAN/BTRAN instead
   // of rebuilding a large factorization.
   bool allow_incremental_row_append_factor{false};
+  // Internal ownership contract: the caller guarantees this solve belongs to
+  // one sequential workspace, so a cached HiGHS model may be mutated in place.
+  // Parallel workers leave this false and retain thread-local solver state.
+  bool allow_persistent_lp_state{false};
   // A HiGHS rejection is terminal; this field never describes a fallback
   // chain. ExperimentalNative is an explicit development-only selection.
   LpKernelBackend lp_kernel_backend{LpKernelBackend::HiGHS};
@@ -249,6 +271,9 @@ struct SimplexBasis {
 };
 
 struct StandardFormLP {
+  // Immutable across copies and bound/cost updates; regenerated whenever the
+  // matrix structure is rebuilt. Enables O(1) persistent-model validation.
+  std::uint64_t structure_id{0};
   Eigen::SparseMatrix<double> A;                        // column-major (fast col access)
   Eigen::SparseMatrix<double, Eigen::RowMajor> A_row;   // row-major (fast row access for GMI)
   Eigen::VectorXd b;

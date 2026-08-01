@@ -65,6 +65,7 @@ struct DispatcherConfig {
   bool enable_degenerate_frontier_remap{false};
   bool suppress_degenerate_frontier_remap{false};
   bool disable_partial_pricing_for_conformance{false};
+  bool allow_persistent_lp_state{false};
   LpKernelBackend lp_kernel_backend{LpKernelBackend::HiGHS};
 
   static DispatcherConfig from_bc_options(const BCOptions& opt) {
@@ -195,6 +196,7 @@ class SolverDispatcher {
     opts.suppress_degenerate_frontier_remap =
         config_.suppress_degenerate_frontier_remap;
     opts.lp_kernel_backend = config_.lp_kernel_backend;
+    opts.allow_persistent_lp_state = config_.allow_persistent_lp_state;
     if (config_.disable_partial_pricing_for_conformance) {
       opts.use_partial_pricing = false;
       opts.perturb_degenerate_primal = false;

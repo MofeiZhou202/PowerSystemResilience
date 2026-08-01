@@ -52,8 +52,11 @@ void update_statistics(const Audit& audit, Statistics& statistics) {
 }
 
 void sync_phase_telemetry(const Statistics& source, Statistics& target) {
+  target.dual_start_cost_shifts = source.dual_start_cost_shifts;
   target.dual_phase_one_iterations = source.dual_phase_one_iterations;
   target.dual_phase_two_iterations = source.dual_phase_two_iterations;
+  target.primal_phase_one_iterations = source.primal_phase_one_iterations;
+  target.primal_phase_two_iterations = source.primal_phase_two_iterations;
   target.primal_cleanup_iterations = source.primal_cleanup_iterations;
   target.phase_transitions = source.phase_transitions;
   target.cleanup_required = source.cleanup_required;
@@ -74,6 +77,8 @@ void sync_phase_telemetry(const Statistics& source, Statistics& target) {
       source.dual_phase_one_stable_candidates;
   target.dual_phase_one_time_sec = source.dual_phase_one_time_sec;
   target.dual_phase_two_time_sec = source.dual_phase_two_time_sec;
+  target.primal_phase_one_time_sec = source.primal_phase_one_time_sec;
+  target.primal_phase_two_time_sec = source.primal_phase_two_time_sec;
   target.cleanup_time_sec = source.cleanup_time_sec;
   target.primal_cleanup_time_sec = source.primal_cleanup_time_sec;
   target.dual_phase_one_initial_objective =
@@ -210,19 +215,26 @@ struct DSProfile {
     }
     std::fprintf(
         stderr,
-        "[DS-PHASES] dualI=%.6fs/%d dualII=%.6fs/%d cleanup=%.6fs "
+        "[DS-PHASES] dualI=%.6fs/%d dualII=%.6fs/%d "
+        "primalI=%.6fs/%d primalII=%.6fs/%d cleanup=%.6fs "
         "primalCleanup=%.6fs/%d transitions=%d phaseIObjective=%.17g->%.17g "
-        "transitionDualInfeas=%d/%.3e cleanupRequired=%d cleanupAvoided=%d\n",
+        "transitionDualInfeas=%d/%.3e startShifts=%d cleanupRequired=%d "
+        "cleanupAvoided=%d\n",
         statistics.dual_phase_one_time_sec,
         statistics.dual_phase_one_iterations,
         statistics.dual_phase_two_time_sec,
-        statistics.dual_phase_two_iterations, statistics.cleanup_time_sec,
+        statistics.dual_phase_two_iterations,
+        statistics.primal_phase_one_time_sec,
+        statistics.primal_phase_one_iterations,
+        statistics.primal_phase_two_time_sec,
+        statistics.primal_phase_two_iterations, statistics.cleanup_time_sec,
         statistics.primal_cleanup_time_sec,
         statistics.primal_cleanup_iterations, statistics.phase_transitions,
         statistics.dual_phase_one_initial_objective,
         statistics.dual_phase_one_final_objective,
         statistics.transition_dual_infeasibility_count,
         statistics.transition_max_dual_infeasibility,
+        statistics.dual_start_cost_shifts,
         statistics.cleanup_required, statistics.cleanup_avoided);
     const char* terminal =
         statistics.dual_phase_one_terminal_reason == 1
@@ -345,8 +357,12 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
       state.sf->A_row.cols() != state.n) {
     return numerical_trouble("PRICE row matrix is dimensionally inconsistent");
   }
-  const detail::IndexedVector pivot_row =
-      detail::multiply_AT_indexed(state.sf->A_row, leaving.row_ep);
+  // The priced row is consumed entirely within this pivot, so its backing
+  // storage is reused across iterations.
+  static thread_local detail::IndexedVector pivot_row_storage;
+  detail::multiply_AT_indexed(state.sf->A_row, leaving.row_ep,
+                              pivot_row_storage);
+  const detail::IndexedVector& pivot_row = pivot_row_storage;
   if (!pivot_row.finite()) {
     return numerical_trouble("packed PRICE produced non-finite values");
   }
@@ -559,12 +575,12 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
     detail::IndexedVector bfrt_delta;
     bfrt_delta.dimension = state.m;
     if (has_flips) {
-      const detail::IndexedSolveEvidence bfrt_solve =
+      detail::IndexedSolveEvidence bfrt_solve =
           state.factor->indexed_ftran(transaction.bfrt_rhs);
       if (!bfrt_solve.accepted) {
         return numerical_trouble("packed BFRT RHS FTRAN failed");
       }
-      bfrt_delta = bfrt_solve.solution;
+      bfrt_delta = std::move(bfrt_solve.solution);
     }
 
     const double leaving_bound =
@@ -1128,6 +1144,20 @@ Result solve_impl(const StandardFormLP& sf, const SimplexOptions& options,
     return result;
   };
 
+  auto run_primal_stage = [&](int& stage_iterations,
+                              double& stage_time_sec) -> Result {
+    const int iteration_start = statistics.iterations;
+    const auto phase_start = std::chrono::steady_clock::now();
+    Result result = detail::run_primal_phase(state, statistics, start);
+    stage_iterations += statistics.iterations - iteration_start;
+    stage_time_sec +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                      phase_start)
+            .count();
+    sync_phase_telemetry(statistics, result.statistics);
+    return result;
+  };
+
   auto run_primal_phase_one_from_current_basis = [&]() -> Result {
     state.phase = Phase::One;
     state.bounds = detail::make_primal_phase_one_bounds(sf);
@@ -1138,7 +1168,9 @@ Result solve_impl(const StandardFormLP& sf, const SimplexOptions& options,
           state, Status::NumericalFailure,
           "primal Phase-I initialization failed: " + failure, statistics);
     }
-    Result phase_one = detail::run_primal_phase(state, statistics, start);
+    Result phase_one =
+        run_primal_stage(statistics.primal_phase_one_iterations,
+                         statistics.primal_phase_one_time_sec);
     if (phase_one.status != Status::Optimal) {
       phase_one.message = "primal Phase I: " + phase_one.message;
       return phase_one;
@@ -1181,7 +1213,8 @@ Result solve_impl(const StandardFormLP& sf, const SimplexOptions& options,
           state, Status::NumericalFailure,
           "primal Phase-I transition failed: " + failure, statistics);
     }
-    return detail::run_primal_phase(state, statistics, start);
+    return run_primal_stage(statistics.primal_phase_two_iterations,
+                            statistics.primal_phase_two_time_sec);
   };
 
   // A cold basis that cannot select original-bound dual-feasible endpoints
@@ -1196,7 +1229,7 @@ Result solve_impl(const StandardFormLP& sf, const SimplexOptions& options,
       const bool _ew_ok =
           state.factor->rebuild(state.basis, statistics.rank_repairs, failure) &&
           detail::reconstruct(state, failure) &&
-          detail::initialize_exact_edge_weights(state, statistics, failure);
+          detail::initialize_cold_edge_weights(state, statistics, failure);
       if (g_ds_profile.enabled) g_ds_profile.edge_init += ds_clock() - _t_ew;
       if (!_ew_ok) {
         return detail::make_result(
@@ -1208,8 +1241,11 @@ Result solve_impl(const StandardFormLP& sf, const SimplexOptions& options,
     }
 
     // For this fixed cold basis, original-bound endpoint selection is an exact
-    // dual-feasibility classification. Enter Phase II directly when it
-    // succeeds; otherwise Dual Phase I changes bounds, never costs.
+    // dual-feasibility classification. When it fails, zero the reduced costs
+    // of infeasible one-sided nonbasics and enter Phase II directly. The
+    // existing mandatory original-cost cleanup removes those shifts. Dual
+    // Phase I remains the audited fallback if the shifted start cannot be
+    // constructed.
     std::string dual_start_failure;
     if (detail::normalize_nonbasic_moves(state, dual_start_failure)) {
       const Audit initial = detail::audit(state, false, true, false);
@@ -1221,6 +1257,23 @@ Result solve_impl(const StandardFormLP& sf, const SimplexOptions& options,
             statistics);
       }
       return run_dual_phase();
+    }
+
+    const char* shift_start_policy =
+        std::getenv("MIPSOLVERS_DUAL_SHIFT_START");
+    const bool try_shift_start =
+        shift_start_policy == nullptr || std::string(shift_start_policy) != "off";
+    if (try_shift_start) {
+      if (detail::initialize_cost_shifted_dual_start(
+              state, statistics, dual_start_failure)) {
+        return run_dual_phase();
+      }
+      if (std::getenv("MIPSOLVERS_DS_VERBOSE") != nullptr) {
+        std::fprintf(stderr,
+                     "[DUAL-SHIFT-START] initialization failed; falling back "
+                     "to dual Phase I: %s\n",
+                     dual_start_failure.c_str());
+      }
     }
 
     const std::vector<int> pre_phase_one_basis = state.basis;
@@ -1367,15 +1420,17 @@ Result solve(const StandardFormLP& sf, const SimplexOptions& options,
     std::fprintf(
         stderr,
         "DS %s: m=%d n=%d iters=%d degen_dual=%d degen_primal=%d "
-        "bound_flips=%d cost_shifts=%d devex_frameworks=%d devex_restarts=%d "
+        "bound_flips=%d cost_shifts=%d start_shifts=%d devex_frameworks=%d "
+        "devex_restarts=%d "
         "cycles=%d taboo_rej=%d taboo_row_rej=%d stab_blocked=%d "
         "major_rebuilds=%d reinversions=%d message='%s'\n",
         status_name(result.status), static_cast<int>(result.basis.size()),
         static_cast<int>(result.reduced_costs.size()), s.iterations,
         s.degenerate_dual_steps, s.degenerate_primal_steps, s.bound_flips,
-        s.cost_shifts, s.devex_frameworks, s.devex_restarts, s.cycles_detected,
-        s.taboo_rejections, s.taboo_row_rejections, s.stability_blocked_rows,
-        s.major_rebuilds, s.reinversions, result.message.c_str());
+        s.cost_shifts, s.dual_start_cost_shifts, s.devex_frameworks,
+        s.devex_restarts, s.cycles_detected, s.taboo_rejections,
+        s.taboo_row_rejections, s.stability_blocked_rows, s.major_rebuilds,
+        s.reinversions, result.message.c_str());
   }
   return result;
 }

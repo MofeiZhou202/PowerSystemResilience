@@ -10,6 +10,7 @@
 #include <string>
 
 #include "mipsolvers/engine/bc/api.hpp"
+#include "mipsolvers/engine/detail/bc_conformance_trace.hpp"
 #include "mipsolvers/engine/problem_types.hpp"
 
 using namespace mipsolvers::engine;
@@ -115,4 +116,25 @@ TEST_CASE("B&C: fallback respects the minimum-remaining-time guard",
   CHECK(!res.stats.success);
   CHECK(res.stats.status == "Root relaxation failed");
   CHECK(res.bc_stats.presolve_fallback_attempts == 0);
+}
+
+TEST_CASE("B&C: timed-out HiGHS presolve side state is not cached",
+          "[bc][deadline]") {
+  LPModel lp = make_knapsack_10().linear_part;
+  // Make the cache signature unique to this contract test.
+  lp.c[0] = 1234567.89;
+
+  bool cache_hit = true;
+  const auto& timed_out = detail::cached_highs_presolve_side_state(
+      lp, 1e-12, &cache_hit);
+  CHECK_FALSE(cache_hit);
+  CHECK(timed_out.highs_status == "timeout");
+
+  const auto& complete = detail::cached_highs_presolve_side_state(
+      lp, 1.0, &cache_hit);
+  CHECK_FALSE(cache_hit);
+  CHECK(complete.highs_status != "timeout");
+
+  (void)detail::cached_highs_presolve_side_state(lp, 1.0, &cache_hit);
+  CHECK(cache_hit);
 }

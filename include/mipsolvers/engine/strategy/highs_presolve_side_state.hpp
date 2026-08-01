@@ -130,7 +130,9 @@ HiGHSPresolveBridgeInfo highs_presolve_bridge_info();
 /// Run HiGHS presolve in-process and return presolved model side-state counts.
 /// This is intentionally diagnostic-only: it does not replace native presolve
 /// or change B&C behavior.
-HiGHSPresolvedModelStats highs_presolve_model_stats(const LPModel& lp);
+HiGHSPresolvedModelStats highs_presolve_model_stats(
+    const LPModel& lp,
+    double time_limit_sec = 0.0);
 
 /// Solve the supplied LP relaxation with HiGHS, presolve disabled, and return a
 /// diagnostic LP-state/frontier signature.  This is intentionally diagnostic

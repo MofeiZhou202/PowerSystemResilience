@@ -520,6 +520,13 @@ struct PseudoCost {
   void add_up_conflict(double score = 1.0) { up_conflict_score += score; }
 };
 
+/// Convert a child objective gain into the unit directional cost predicted by
+/// pseudocost branching. Distance is measured before child propagation.
+inline double normalized_pseudocost_gain(double gain, double distance) {
+  if (!std::isfinite(gain) || gain <= 0.0) return 0.0;
+  return gain / std::max(1e-9, std::abs(distance));
+}
+
 /// Dense global-column lookup backed by statistics for branchable columns only.
 /// Slot zero is a harmless sentinel for non-branchable columns, allowing legacy
 /// pc[col] call sites to retain their global indexing contract.
@@ -683,6 +690,7 @@ struct CutRequest {
 struct PCUpdate {
   int var;
   bool is_up;
+  double branch_distance{1.0};
   bool has_gain{false};
   double gain{0.0};
   bool has_inference{false};
@@ -692,8 +700,10 @@ struct PCUpdate {
 
   void apply(PseudoCost& pseudocost) const {
     if (has_gain) {
-      if (is_up) pseudocost.add_up(gain);
-      else pseudocost.add_down(gain);
+      const double unit_gain =
+          normalized_pseudocost_gain(gain, branch_distance);
+      if (is_up) pseudocost.add_up(unit_gain);
+      else pseudocost.add_down(unit_gain);
     }
     if (has_inference) {
       if (is_up) pseudocost.add_up_inference(inference_count);

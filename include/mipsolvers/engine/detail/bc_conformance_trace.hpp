@@ -27,6 +27,7 @@ double bc_native_reduced_cost(int col, const SimplexBasis* basis_hint);
 std::uint64_t bc_model_side_state_signature(const LPModel& lp);
 const HiGHSPresolvedModelStats& cached_highs_presolve_side_state(
     const LPModel& lp,
+    double time_limit_sec = 0.0,
     bool* cache_hit = nullptr);
 
 std::uint64_t bc_trace_hash_mix(std::uint64_t seed, std::uint64_t value);

@@ -3,9 +3,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <iomanip>
 #include <sstream>
+#include <string>
 #include <vector>
 
 namespace mipsolvers::engine::native_dual::detail {
@@ -108,7 +110,14 @@ IndexedVector multiply_AT_indexed(
     const Eigen::SparseMatrix<double, Eigen::RowMajor>& A_row,
     const IndexedVector& y) {
   IndexedVector result;
-  result.dimension = static_cast<int>(A_row.cols());
+  multiply_AT_indexed(A_row, y, result);
+  return result;
+}
+
+void multiply_AT_indexed(
+    const Eigen::SparseMatrix<double, Eigen::RowMajor>& A_row,
+    const IndexedVector& y, IndexedVector& result) {
+  result.clear(static_cast<int>(A_row.cols()));
   struct Accumulator {
     std::vector<double> value;
     std::vector<unsigned int> stamp;
@@ -144,16 +153,29 @@ IndexedVector multiply_AT_indexed(
       accumulator.value[index] += multiplier * it.value();
     }
   }
+  // Sub-tiny accumulated products are numerical noise from cancellation, not
+  // structural tableau entries; HiGHS PRICE drops them the same way
+  // (HVector::tight with kHighsTiny). Keeping them would only enlarge every
+  // downstream ratio-test, postcondition, and reduced-cost traversal. The
+  // dropped mass per entry is below 1e-14, and reduced costs are fully
+  // reconstructed at every INVERT, which bounds the accumulated drift.
+  // MIPSOLVERS_PRICE_TIGHT=off restores the keep-all-nonzeros behaviour.
+  static const double price_tiny = [] {
+    const char* env = std::getenv("MIPSOLVERS_PRICE_TIGHT");
+    if (env != nullptr && std::string(env) == "off") return 0.0;
+    return 1e-14;
+  }();
   result.index.reserve(accumulator.touched.size());
   result.value.reserve(accumulator.touched.size());
   for (const int col : accumulator.touched) {
     const double value = accumulator.value[static_cast<std::size_t>(col)];
-    if (value != 0.0) {
+    // Negated <= keeps non-finite values in the export so the caller's
+    // finiteness check still rejects them, exactly as `value != 0.0` did.
+    if (!(std::abs(value) <= price_tiny)) {
       result.index.push_back(col);
       result.value.push_back(value);
     }
   }
-  return result;
 }
 
 void refresh_leaving_heap(State& state, const std::vector<int>* changed_rows,
@@ -196,7 +218,8 @@ bool choose_leaving(State& state, Leaving& leaving, std::string& failure) {
   double taboo_merit = -1.0;
   int taboo_expiry = std::numeric_limits<int>::max();
   Leaving taboo_fallback;
-  std::vector<State::LeavingHeapEntry> deferred;
+  static thread_local std::vector<State::LeavingHeapEntry> deferred;
+  deferred.clear();
   while (true) {
     remove_stale_leaving_entries(state);
     if (state.leaving_heap.empty()) break;
@@ -247,12 +270,12 @@ bool choose_leaving(State& state, Leaving& leaving, std::string& failure) {
   }
   if (leaving.row < 0) return true;
 
-  IndexedVector unit;
-  unit.dimension = state.m;
+  static thread_local IndexedVector unit;
+  unit.clear(state.m);
   unit.index.push_back(leaving.row);
   unit.value.push_back(1.0);
-  const IndexedSolveEvidence row_solve = state.factor->indexed_btran(unit, true);
-  leaving.row_ep = row_solve.solution;
+  IndexedSolveEvidence row_solve = state.factor->indexed_btran(unit, true);
+  leaving.row_ep = std::move(row_solve.solution);
   if (!row_solve.accepted) {
     failure = "CHUZR packed BTRAN failed";
     return false;
@@ -311,11 +334,32 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
     }
   };
   static thread_local std::vector<double> dense_row_ep;
-  dense_row_ep.assign(static_cast<std::size_t>(state.m), 0.0);
+  double row_ep_max_abs = 0.0;
   for (std::size_t k = 0; k < leaving.row_ep.index.size(); ++k) {
-    const double value = leaving.row_ep.value[k];
-    dense_row_ep[static_cast<std::size_t>(leaving.row_ep.index[k])] = value;
+    row_ep_max_abs =
+        std::max(row_ep_max_abs, std::abs(leaving.row_ep.value[k]));
   }
+  // The dense scatter only serves dot_error_bound lookups; build it on the
+  // first exact bound evaluation so fully short-circuited scans skip the
+  // O(m) clear. The scattered values are identical either way.
+  bool dense_row_ep_built = false;
+  auto dense_row_ep_for_dot = [&]() -> const std::vector<double>* {
+    if (!dense_row_ep_built) {
+      dense_row_ep.assign(static_cast<std::size_t>(state.m), 0.0);
+      for (std::size_t k = 0; k < leaving.row_ep.index.size(); ++k) {
+        dense_row_ep[static_cast<std::size_t>(leaving.row_ep.index[k])] =
+            leaving.row_ep.value[k];
+      }
+      dense_row_ep_built = true;
+    }
+    return &dense_row_ep;
+  };
+  const bool have_error_coef =
+      state.bfrt_error_coef.size() == static_cast<std::size_t>(state.n);
+  const int bfrt_leaving_col =
+      state.basis[static_cast<std::size_t>(leaving.row)];
+  // An empty taboo table cannot mark any exchange; skip the keyed lookup.
+  const bool taboo_possible = !state.taboo_changes.empty();
   for (int s = 0; s < scan_count; ++s) {
     const int j = scan_col(s);
     if (state.basic[static_cast<std::size_t>(j)]) continue;
@@ -341,14 +385,51 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
       ++transaction.bfrt_stability_prefiltered;
       continue;
     }
-    const double error =
-        dot_error_bound(state, leaving.row_ep, j, &dense_row_ep);
-    if (!(signed_alpha > error)) {
+    if (!(signed_alpha > 0.0)) {
+      // A nonpositive signed pivot can never pass the certificate
+      // signed_alpha > error (the bound is nonnegative), so its only effect
+      // is the stability flag when the error envelope reaches -signed_alpha.
+      // bfrt_error_coef * max|row_ep| dominates dot_error_bound for this
+      // column, and rounding to nearest is monotone, so a nonpositive cheap
+      // sum proves the exact sum is also nonpositive: the branch outcome is
+      // decided without the column-wise traversal.
+      if (have_error_coef) {
+        const double cheap_error =
+            state.bfrt_error_coef[static_cast<std::size_t>(j)] *
+            row_ep_max_abs;
+        if (!(signed_alpha + cheap_error > 0.0)) continue;
+      }
+      const double error =
+          dot_error_bound(state, leaving.row_ep, j, dense_row_ep_for_dot());
       if (signed_alpha + error > 0.0) {
         transaction.stability_blocked = true;
         ++transaction.unstable_pivot_rejections;
       }
       continue;
+    }
+    double error;
+    if (state.phase == Phase::Two && have_error_coef &&
+        signed_alpha >
+            state.bfrt_error_coef[static_cast<std::size_t>(j)] *
+                row_ep_max_abs) {
+      // The dominating bound already certifies signed_alpha > error, so the
+      // certificate and the stability threshold below are decided without
+      // the column-wise traversal. The exact bound's only remaining use is
+      // the stable_capacity_error accumulation, which no Phase II path
+      // consumes; the dominating bound keeps that field a sound envelope.
+      // Dual Phase I retains the exact evaluation because its capacity
+      // evidence is part of the terminal exact-cover contract.
+      error = state.bfrt_error_coef[static_cast<std::size_t>(j)] *
+              row_ep_max_abs;
+    } else {
+      error = dot_error_bound(state, leaving.row_ep, j, dense_row_ep_for_dot());
+      if (!(signed_alpha > error)) {
+        if (signed_alpha + error > 0.0) {
+          transaction.stability_blocked = true;
+          ++transaction.unstable_pivot_rejections;
+        }
+        continue;
+      }
     }
     ++transaction.certified_candidate_count;
     add_capacity(signed_alpha, range, transaction.certified_capacity);
@@ -370,10 +451,9 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
       return false;
     }
     int taboo_expiry = -1;
-    const int leaving_col =
-        state.basis[static_cast<std::size_t>(leaving.row)];
     const bool taboo =
-        is_taboo_change(state, leaving_col, j, &taboo_expiry);
+        taboo_possible &&
+        is_taboo_change(state, bfrt_leaving_col, j, &taboo_expiry);
     candidates.push_back({j, pivot, signed_alpha, margin, breakpoint, range,
                           taboo, taboo_expiry});
   }
@@ -631,17 +711,24 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
     return marks.flipped[static_cast<std::size_t>(col)] == marks.epoch;
   };
 
+  auto is_shifted = [&](int col) {
+    return marks.shifted[static_cast<std::size_t>(col)] == marks.epoch;
+  };
+
   // A coefficient whose sign is inside its dot-product error bound cannot be
   // used as a pivot, but a large accepted dual step can still carry its
   // reduced cost across zero. Boxed columns join the BFRT bound transaction;
   // one-sided columns receive a deterministic working-cost shift that the
   // mandatory original-cost cleanup later removes.
+  //
+  // The flip/shift determination and the dual-step interval accumulation
+  // both traverse the pivotal-row support. The interval terms of a column
+  // depend only on that column's own flip/shift marks, which are final once
+  // its flip/shift determination has run, so the two traversals are fused
+  // into one pass without changing any computed value or its order.
   for (int s = 0; s < scan_count; ++s) {
     const int col = scan_col(s);
-    if (state.basic[static_cast<std::size_t>(col)] || col == selected->col ||
-        is_flipped(col)) {
-      continue;
-    }
+    if (state.basic[static_cast<std::size_t>(col)]) continue;
     const int direction = sign(state.move[static_cast<std::size_t>(col)]);
     if (direction == 0) continue;
     const long double alpha =
@@ -649,48 +736,31 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
         pivot_row.value[static_cast<std::size_t>(s)];
     const long double signed_reduced_cost =
         static_cast<long double>(direction) * state.reduced_costs[col];
-    const long double updated_signed_reduced_cost =
-        signed_reduced_cost + alpha * theta;
-    if (!(updated_signed_reduced_cost > dual_tolerance)) continue;
-
-    const double range = state.bounds.upper[col] - state.bounds.lower[col];
-    if (std::isfinite(range) && range > 0.0) {
-      transaction.flips.push_back(
-          {col, state.move[static_cast<std::size_t>(col)], range});
-      marks.flipped[static_cast<std::size_t>(col)] = marks.epoch;
-      continue;
+    if (col != selected->col && !is_flipped(col)) {
+      const long double updated_signed_reduced_cost =
+          signed_reduced_cost + alpha * theta;
+      if (updated_signed_reduced_cost > dual_tolerance) {
+        const double range = state.bounds.upper[col] - state.bounds.lower[col];
+        if (std::isfinite(range) && range > 0.0) {
+          transaction.flips.push_back(
+              {col, state.move[static_cast<std::size_t>(col)], range});
+          marks.flipped[static_cast<std::size_t>(col)] = marks.epoch;
+        } else {
+          const double updated_reduced_cost =
+              state.reduced_costs[col] +
+              leaving.side * static_cast<double>(theta) *
+                  pivot_row.value[static_cast<std::size_t>(s)];
+          if (!std::isfinite(updated_reduced_cost)) {
+            failure = "Harris BFRT requires a non-finite working-cost shift";
+            return false;
+          }
+          transaction.cost_shifts.push_back({col, -updated_reduced_cost});
+          marks.shifted[static_cast<std::size_t>(col)] = marks.epoch;
+        }
+      }
     }
-
-    const double updated_reduced_cost =
-        state.reduced_costs[col] +
-        leaving.side * static_cast<double>(theta) *
-            pivot_row.value[static_cast<std::size_t>(s)];
-    if (!std::isfinite(updated_reduced_cost)) {
-      failure = "Harris BFRT requires a non-finite working-cost shift";
-      return false;
-    }
-    transaction.cost_shifts.push_back({col, -updated_reduced_cost});
-    marks.shifted[static_cast<std::size_t>(col)] = marks.epoch;
-  }
-
-  auto is_shifted = [&](int col) {
-    return marks.shifted[static_cast<std::size_t>(col)] == marks.epoch;
-  };
-
-  for (int s = 0; s < scan_count; ++s) {
-    const int col = scan_col(s);
-    if (state.basic[static_cast<std::size_t>(col)] ||
-        is_shifted(col)) {
-      continue;
-    }
-    const int direction = sign(state.move[static_cast<std::size_t>(col)]);
-    if (direction == 0) continue;
-    const long double alpha =
-        static_cast<long double>(leaving.side) * direction *
-        pivot_row.value[static_cast<std::size_t>(s)];
+    if (is_shifted(col)) continue;
     if (!(alpha > 0.0L)) continue;
-    const long double signed_reduced_cost =
-        static_cast<long double>(direction) * state.reduced_costs[col];
     if (is_flipped(col)) {
       step_lower =
           std::max(step_lower,
