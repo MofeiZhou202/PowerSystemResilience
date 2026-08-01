@@ -245,9 +245,9 @@ bool MKLPardisoSolver::solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) {
 
 namespace {
 
-// Homebrew/system MUMPS runs through the mpiseq sequential stub, whose
+// Homebrew/system MUMPS runs through the mpiseq sequential compatibility layer, whose
 // MPI_Init is a no-op but which MUMPS expects to have been called before the
-// first dmumps_c call.  The stub has no MPI_Initialized, so we track it here.
+// first dmumps_c call. mpiseq has no MPI_Initialized, so we track it here.
 void ensure_mpi_initialized() {
   static bool done = false;
   if (!done) {

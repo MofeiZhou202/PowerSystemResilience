@@ -99,11 +99,6 @@ static bool hacdcpfHighsRootRoundTraceEnabled() {
   return env != nullptr && env[0] != '\0' && env[0] != '0';
 }
 
-static bool hacdcpfRootOracleStopAfterRootRound() {
-  const char* env = std::getenv("HACDCPF_ROOT_ORACLE_STOP_AFTER_ROOT_ROUND");
-  return env != nullptr && env[0] != '\0' && env[0] != '0';
-}
-
 struct HacdcpfRootLedgerScopeGuard {
   HighsLpRelaxation& lp;
   HighsCutPool& cutpool;
@@ -3151,7 +3146,8 @@ restart:
           static_cast<long long>(stall), ncuts == 0 ? 1 : 0,
           frac_after == 0 ? 1 : 0, stall >= 3 ? 1 : 0);
     }
-    if (!mipsolver.submip && hacdcpfRootOracleStopAfterRootRound()) {
+    if (!mipsolver.submip &&
+        mipsolver.options_mip_->hacdcpf_root_oracle_stop_after_root_round) {
       analysis.mipTimerStop(kMipClockRootSeparation);
       return clockOff(analysis);
     }

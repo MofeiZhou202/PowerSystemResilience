@@ -55,13 +55,6 @@ Highs::Highs() : callback_(this) {}
 
 Highs::~Highs() { this->closeLogFile(); }
 
-namespace {
-bool hacdcpfRetainRootLpRelaxation() {
-  const char* env = std::getenv("HACDCPF_RETAIN_ROOT_LP_RELAXATION");
-  return env != nullptr && env[0] != '\0' && env[0] != '0';
-}
-}
-
 Highs* Highs::hacdcpfRootLpSolver() {
   if (!hacdcpf_root_mipdata_) return nullptr;
   return &hacdcpf_root_mipdata_->lp.getLpSolver();
@@ -4478,7 +4471,7 @@ HighsStatus Highs::callSolveMip() {
     }
   }
   hacdcpf_root_mipdata_.reset();
-  if (hacdcpfRetainRootLpRelaxation() && solver.mipdata_ &&
+  if (options_.hacdcpf_retain_root_lp_relaxation && solver.mipdata_ &&
       solver.mipdata_->lp.getLpSolver().getLp().num_col_ > 0) {
     hacdcpf_root_mipdata_ = solver.releaseMipdataForHacdcpfRootOracle();
   }

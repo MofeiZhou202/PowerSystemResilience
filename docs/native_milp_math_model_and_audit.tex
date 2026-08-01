@@ -1,0 +1,2090 @@
+% MIPSolvers 原生 MILP 分支切割引擎：数学模型与严苛的数据结构与算法效率审计
+% 编译：xelatex（两遍）或 latexmk -xelatex
+\documentclass[11pt]{ctexart}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage[colorlinks=true,linkcolor=blue!60!black,citecolor=blue!60!black,urlcolor=blue!60!black]{hyperref}
+
+\emergencystretch=3em
+\tolerance=2000
+
+\lstdefinestyle{code}{
+  basicstyle=\ttfamily\footnotesize,
+  breaklines=true,
+  frame=single,
+  framesep=2pt,
+  xleftmargin=6pt,
+  xrightmargin=2pt,
+  aboveskip=6pt,
+  belowskip=6pt,
+  columns=fullflexible,
+  keepspaces=true
+}
+
+\newtheorem{definition}{定义}
+\newtheorem{remark}{注记}
+\newtheorem{finding}{发现}
+
+% \file 以等宽字体排版路径，允许在 '/'、'_'、'.'、':'、'<' 后断行
+% \code 以等宽字体排版标识符，允许在 '_'、'.'、':'、'<' 后断行
+\ExplSyntaxOn
+\seq_new:N \l__audit_sa_seq
+\seq_new:N \l__audit_sb_seq
+\seq_new:N \l__audit_sc_seq
+\seq_new:N \l__audit_sd_seq
+\seq_new:N \l__audit_se_seq
+\seq_new:N \l__audit_sf_seq
+\seq_new:N \l__audit_sg_seq
+\cs_new:Nn \__audit_lt:n {
+  \seq_set_split:Nnn \l__audit_sf_seq {<} {#1}
+  \seq_use:Nn \l__audit_sf_seq {<\allowbreak}
+}
+\cs_new:Nn \__audit_colon:n {
+  \seq_set_split:Nnn \l__audit_se_seq {:} {#1}
+  \seq_set_map:NNn \l__audit_sg_seq \l__audit_se_seq { \__audit_lt:n {##1} }
+  \seq_use:Nn \l__audit_sg_seq {:\allowbreak}
+}
+\cs_new:Nn \__audit_dot:n {
+  \seq_set_split:Nnn \l__audit_sc_seq {.} {#1}
+  \seq_set_map:NNn \l__audit_sd_seq \l__audit_sc_seq { \__audit_colon:n {##1} }
+  \seq_use:Nn \l__audit_sd_seq {.\allowbreak}
+}
+\cs_new:Nn \__audit_us:n {
+  \seq_set_split:Nnn \l__audit_sa_seq {\_} {#1}
+  \seq_set_map:NNn \l__audit_sb_seq \l__audit_sa_seq { \__audit_dot:n {##1} }
+  \seq_use:Nn \l__audit_sb_seq {\_\allowbreak}
+}
+\NewDocumentCommand{\file}{m}{
+  \texttt{
+    \seq_set_split:Nnn \l__audit_sa_seq {/} {#1}
+    \seq_set_map:NNn \l__audit_sb_seq \l__audit_sa_seq { \__audit_us:n {##1} }
+    \seq_use:Nn \l__audit_sb_seq {/\allowbreak}
+  }
+}
+\NewDocumentCommand{\code}{m}{\texttt{\__audit_us:n {#1}}}
+\ExplSyntaxOff
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\Z}{\mathbb{Z}}
+\newcommand{\nnz}{\mathrm{nnz}}
+\newcommand{\fracpart}[1]{\{#1\}}
+\DeclareMathOperator*{\argmax}{arg\,max}
+\DeclareMathOperator*{\argmin}{arg\,min}
+
+\title{\textbf{MIPSolvers 原生 MILP 分支切割引擎}\\[6pt]
+\large 数学模型与严苛的数据结构与算法效率审计}
+\author{代码级审计报告（静态分析，所有论断附 file:line 引用）}
+\date{2026 年 8 月 1 日}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+本报告直接依据源代码，记录三方面的内容：（i）MIPSolvers 仓库原生 MILP
+求解器所接受的数学模型，以及其分支切割机器（预求解、LP 松弛处理、割平面、
+分支、节点选择、原始启发式、域传播、冲突学习与并行化）的完整数学内容；
+（ii）以国际先进 MILP 求解器工程水准（SCIP、HiGHS、Gurobi）为基准，对其
+数据结构与算法效率进行的刻意严苛的审计；（iii）对“占位符层”进行的系统性、
+可复现的普查——即那些被声明、被宣传、甚至被执行，却不产生任何计算的机器。
+每项技术论断均附仓库内的 \texttt{file:line} 引用；行号对应报告日期当日的
+工作区状态。本审计为静态审计：未做运行时性能剖析，复杂度陈述均源自代码
+本身。凡代码意图不明之处，文中明确指出，不做臆测。
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%=====================================================================
+\section{范围、方法与文件清单}
+%=====================================================================
+
+\subsection{范围}
+本次审计的组件是\emph{原生 MILP 分支切割（B\&C）引擎}：
+\begin{center}
+\file{src/engine/solver/native/milp/bc/} \quad （实现）\\
+\file{include/mipsolvers/engine/bc/}, \file{include/mipsolvers/engine/detail/},
+\file{include/mipsolvers/engine/solver/native/milp/bc/} \quad （头文件）
+\end{center}
+以及它所驱动的 LP 内核接口（\file{src/engine/kernel/lp\_kernel/}）。
+外部求解器适配器（HiGHS-MIP、SCIP、Gurobi）\emph{不}在审计范围内，
+唯原生引擎委托给内嵌（vendored）HiGHS LP 内核之处除外。
+
+\subsection{方法}
+对代码进行了八个子系统轮次的审查（公共 API/选项、核心
+数据结构、主 B\&C 引擎、割生成、预求解/传播、
+搜索/分支/并行、LP 松弛层，以及工具层）。
+随后，本报告中所有关键论断均通过直接阅读所引用的代码行
+逐一复核。另有一项针对选项/统计表面（按声明字段统计的
+成员访问读取次数）以及隐藏配置通道的独立定量普查，
+见 \S\ref{sec:census-method}。报告在关键之处引用精确常量
+与简短代码摘录。本报告区分三类陈述：
+\textbf{(V)} 经直接阅读所引代码验证（占绝大多数）；
+\textbf{(I)} 由代码结构推断，并明示推断依据；
+\textbf{(U)} 代码本身不清晰/含糊——显式标注。
+
+\subsection{文件清单与活跃性}
+\label{sec:inventory}
+表~\ref{tab:files} 列出了主要文件。一个塑造全篇报告的事实：
+\emph{生产环境引擎是一个单一的 legacy 翻译单元}，而
+“现代”的 \file{search/}、\file{parallel/} 和 \file{root/} 模块虽被编译
+（\file{CMakeLists.txt:204--209}），但在其自身文件之外
+\textbf{没有任何调用点}（已在 \file{src/} 和 \file{tests/} 范围内
+经 grep 验证）。
+
+\begin{table}[h]
+\centering\small
+\caption{原生 MILP B\&C 引擎的主要文件（大小以行数计）。}
+\label{tab:files}
+\begin{tabular}{@{}lrl@{}}
+\toprule
+文件 & 行数 & 职责 \\
+\midrule
+\file{legacy/branch\_and\_cut.cpp} & 36\,921 & \textbf{整个存活引擎} \\
+\file{legacy/bc\_cuts.cpp} & 8\,364 & 割分离器 \\
+\file{legacy/bc\_utils.cpp} & 6\,352 & 传播、队列、对偶证明 \\
+\file{legacy/bc\_relaxation.cpp} & 3\,288 & 根节点 LP、HiGHS 互操作 \\
+\file{milp\_presolve.cpp} & 1\,669 & 原生预求解 \\
+\file{legacy/bc\_parallel.cpp} & 1\,644 & 并行探索器（存活） \\
+\file{legacy/bc\_implied\_bounds.cpp} & 1\,311 & 隐含整数/VB/团遗留构件 \\
+\file{legacy/bc\_branching.cpp} & 1\,089 & 分支规则 \\
+\file{legacy/bc\_clique\_table.cpp} & 999 & 持久化团表 \\
+\file{legacy/bc\_cglp.cpp} + \file{bc\_cglp\_model.cpp} & 677 & CGLP 提升-投影 \\
+\file{search/}（2 个驱动文件） & 696 & 死代码 \\
+\file{parallel/}（2 个驱动文件） & 452 & 死代码 \\
+\file{root/root\_solve.cpp} & 284 & 死代码 \\
+\midrule
+\file{detail/bc\_utils.hpp} & 3\,270 & 节点队列、蕴含图（内联） \\
+\file{detail/bc\_objective\_propagation.hpp} & 2\,368 & 目标传播（仅头文件） \\
+\file{detail/bc\_threading.hpp} & 1\,266 & 线程安全队列、共享池 \\
+\file{detail/bc\_pools.hpp} & 1\,070 & 割/冲突/解池 \\
+\file{detail/bc\_types.hpp} & 884 & \code{Node}, \code{PoolCut}, \code{PseudoCost}, \dots \\
+\file{bc/options.hpp} & 881 & \code{BCOptions}（$\sim$230 个公共字段） \\
+\file{detail/bc\_domain.hpp} & 512 & \code{BCDomain} 增量传播 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{路径简写。}
+全文中，\file{bac.cpp} $=$
+\file{src/engine/solver/native/milp/bc/legacy/branch\_and\_cut.cpp}；
+\file{bc\_cuts.cpp}、\file{bc\_utils.cpp}、\file{bc\_branching.cpp}、
+\file{bc\_parallel.cpp}、\file{bc\_relaxation.cpp}、
+\file{bc\_legacy\_helpers.cpp} 为 \file{legacy/} 中的同级文件；
+\file{options.hpp} $=$ \file{include/mipsolvers/engine/bc/options.hpp}；
+\file{bc\_types.hpp}、\file{bc\_pools.hpp}、\file{bc\_domain.hpp}、
+\file{bc\_threading.hpp}、\file{bc\_utils.hpp} $=$
+\file{include/mipsolvers/engine/detail/} 中的对应文件；
+\file{dual\_simplex.{hpp,cpp}}、\file{dual\_simplex\_api.cpp} $=$
+\file{include/mipsolvers/engine/kernel/lp\_kernel/} 与
+\file{src/engine/kernel/lp\_kernel/} 中的同名文件；
+\file{problem\_types.hpp} $=$ \file{include/mipsolvers/engine/problem\_types.hpp}。
+
+%=====================================================================
+\section{数学模型}
+%=====================================================================
+
+\subsection{接受的问题类}
+\label{sec:problem}
+原生求解器恰好接受如下混合整数线性规划
+（\textbf{V}：\code{LPModel} 见 \file{problem\_types.hpp:127--146}，
+\code{MIPModel} 见 \file{problem\_types.hpp:269--277}）：
+\begin{align}
+\min_{x \in \R^n} \quad & c^\top x \label{eq:milp}\\
+\text{s.t.}\quad
+& \ell^{\mathrm{row}} \;\le\; A x \;\le\; b,
+  && A \in \R^{m_1 \times n},\ \ell^{\mathrm{row}} \in (\R\cup\{-\infty\})^{m_1},\
+     b \in (\R\cup\{+\infty\})^{m_1}, \notag\\
+& A^{eq} x = b^{eq},
+  && A^{eq} \in \R^{m_2 \times n}, \notag\\
+& \ell_j \le x_j \le u_j, && j = 1,\dots,n,\ \ell_j \in \R\cup\{-1\mathrm{e}20\},\
+     u_j \in \R\cup\{+1\mathrm{e}20\}, \notag\\
+& x_j \in \Z, && j \in \mathcal{I} \subseteq \{1,\dots,n\}, \notag\\
+& x_j \in \{0,1\}, && j \in \mathcal{B} \subseteq \{1,\dots,n\}. \notag
+\end{align}
+结构性事实：
+\begin{itemize}[nosep]
+\item \textbf{目标：仅线性}，方向为 \code{Minimize}/\code{Maximize}
+  （\file{problem\_types.hpp:20,128--129}）。不存在二次目标，且
+  \code{LPModel} 中\emph{没有目标常数/偏移字段}——MPS 文件中的
+  常数必须在模型结构体之外另行跟踪。
+\item \textbf{约束：仅线性。}不等式行原生为
+  \emph{双侧（range）行}：\code{row\_lhs} 向量为空表示所有
+  下侧均为 $-\infty$（\file{problem\_types.hpp:130--136}；辅助函数
+  \code{lp\_has\_row\_lhs}/\code{lp\_row\_lhs\_or\_neg\_inf} 见 :148--161）。
+  等式单独存储（\code{Aeq}、\code{beq}）。
+\item \textbf{变量类型}恰好为 \code{Continuous}、\code{Integer}、
+  \code{Binary}（\file{problem\_types.hpp:18}）。\textbf{没有 SOS，没有
+  半连续/半整数变量，没有指示约束}（在全仓库范围内 grep
+  SOS/半连续，仅命中内嵌 HiGHS 的 LP 文件读取器，
+  从未命中原生模型或 B\&C 头文件）。
+\item 事实上的无穷界为 $\pm 10^{20}$
+  （\code{VariableMeta\{lb\{-1e20\}, ub\{1e20\}\}}，
+  \file{problem\_types.hpp:105--110}）；\code{kInf}$=10^{20}$ 同时也是
+  预求解的无穷大（\file{milp\_presolve.cpp:32}）。
+\item 一个领域特定的 \code{UCGenHint}（机组组合元数据：机组
+  分段、最小开/停机时间、爬坡、PTDF 行、储能循环、十个
+  \code{certifies\_*} 标志）被嵌入通用的 \code{MIPModel}
+  （\file{problem\_types.hpp:279--406}），且仅在设置
+  \code{enable\_domain\_heuristics} 时才会被读取。
+\end{itemize}
+
+\subsection{整数性的双重指定}
+\label{sec:dual-integrality}
+整数性被指定了\emph{两次}：逐变量的 \code{VariableMeta.type}
+与索引向量 \code{integer\_idx}/\code{binary\_idx}。二者由
+\code{normalize\_declared\_integrality}
+（\file{bc\_legacy\_helpers.cpp:156--189}）合并，该例程会静默修改
+变量类型，并\emph{强制将二进制变量的界钳制到 $[0,1]$}。一般整数
+变量只得到类型赋值，但\textbf{没有界健全性检查}：自由整数变量
+（$\ell_j=-10^{20}, u_j=+10^{20}$）不受任何质疑地进入
+分支定界——SCIP、HiGHS 和 Gurobi 都会拒绝或特殊处理无界整数
+变量，因为分支要求有限的子域。同一索引同时出现在两个列表中
+仅在引擎路径上才报错
+（\file{src/engine/util/problem\_validation.cpp:262--270}，由
+\file{src/engine/api/solver.cpp} 调用）；直接的 \code{solve\_milp\_bc}
+入口（\file{src/engine/solver/native/milp/bc/api.cpp:7--9}）不执行
+此类验证。
+
+\subsection{松弛与定界的形式化}
+在内部，LP 松弛 \eqref{eq:milp}（去掉整数性）在每次求解时
+被一次性转换为带平移、带符号的标准形
+（\code{StandardFormLP}，\file{dual\_simplex.hpp:273--313}）：
+\begin{equation}
+\min\ \bar c^\top \bar x \quad \text{s.t.}\quad
+\bar A \bar x = \bar b,\quad 0 \le \bar x \le \bar u,
+\label{eq:sf}
+\end{equation}
+其中 $\bar x = D_c^{-1}(x - \ell^{\mathrm{shift}})$，此前经过 Ruiz
+均衡化（$D_r A D_c$、$D_r b$、$D_c c$，至多 10 轮，
+$\ge$2 轮后当最大偏差 $<10^{-2}$ 时提前停止；
+\file{dual\_simplex.hpp:361}，
+\file{dual\_simplex\_api.cpp:818}），并含显式的
+松弛/剩余/人工列，且对每行施加 \code{row\_sign} 翻转。
+该标准形将约束矩阵存储了\textbf{两次}，列主序\emph{与}行主序
+各一份（\file{dual\_simplex.hpp:277--278}）。
+
+对偶界来自各节点处的 LP 对偶；现任解截断值镜像自
+HiGHS 的 \code{computeNewUpperLimit}
+（\file{bac.cpp:1221--1239}）：当目标尺度 $s$ 为整数时，
+$U = (\lceil s\cdot z - \mathrm{tol}\rceil - 1)/s + \mathrm{tol}$，否则为
+$\min(z - \mathrm{tol}, \mathrm{nextafter}(z, -\infty))$。不可行剪枝
+要求 Farkas 证书（\file{bc\_fallback.hpp:82--84}）；数值
+失败\emph{绝不}允许剪枝（\file{bc\_fallback.hpp:232,268--270}）——
+这是本代码库中真正健全的设计决策之一。
+
+%=====================================================================
+\section{架构与执行路径拓扑}
+%=====================================================================
+
+\subsection{遗留单体是唯一的活跃路径}
+\label{sec:topology}
+全部四个公共入口点都无条件转发至遗留核心
+（\textbf{V}：\file{api.cpp:7--27}）：
+\begin{lstlisting}[style=code]
+BCResult solve_milp_bc(const MIPModel& prob, const BCOptions& opt) {
+  return detail::solve_milp_bc_legacy_core(prob, opt);      // api.cpp:7-9
+}
+\end{lstlisting}
+\code{solve\_milp\_bc\_legacy\_core}（\file{bac.cpp:36634--36638}）调用
+\code{branch\_and\_cut\_lp}，\textbf{后者是横跨第 1568--36629 行
+（$\approx$35\,000 行）的单个函数}（\textbf{V}：定义位于
+\file{bac.cpp:1568}，闭合花括号位于 \file{bac.cpp:36629}，匿名命名空间
+结束于 :36632）。所有“子例程”都是其内部按引用捕获的 lambda
+（\code{process\_single\_child} 位于 :30537，\code{adopt\_tree\_incumbent}
+位于 :23828，\code{build\_node\_lp\_with\_local\_cuts} 位于 :23663，等等），
+通过捕获共享数百个可变局部变量。
+
+\file{search/}、\file{parallel/}、\file{root/} 模块——
+\code{SequentialSearchDriver}、\code{NodeEvaluator}、
+\code{ParallelSearchDriver}、\code{RootSolvePhase}——会被编译但
+不可达（\textbf{V}：对 \file{src/} 执行 grep 只能在其各自文件内部
+找到引用）。它们复制了活跃路径的逻辑，且行为已经分化，
+例如在
+\file{include/mipsolvers/engine/detail/bc/branching/pseudocost.hpp:18}
+中存在第二个相互冲突的 \code{detail::PseudoCost} 定义（一个
+无人包含的孤儿头文件），以及一套与生产实现
+（\file{bac.cpp:35717--35720}）不一致的角色分配方案
+（\file{parallel/parallel\_search.cpp:287--305}）。
+
+\subsection{默认路径：并行，基于 vendored HiGHS LP 内核}
+\label{sec:defaultpath}
+两个默认值决定了每次运行的形态：
+\begin{itemize}[nosep]
+\item \code{num\_threads\{-1\}}（\file{options.hpp:213}）解析为
+  \code{std::thread::hardware\_concurrency()}，并以
+  $\ge$ \code{auto\_parallel\_min\_threads\{2\}}
+  （\file{bc\_legacy\_helpers.cpp:23--36}）为下限截断；\code{par\_mode = (resolved\_threads > 1)}
+  （\file{bac.cpp:14133}）。\textbf{在任何多核机器上，并行搜索树都是
+  默认路径}，仅有两个使其串行化的例外：
+  \code{parallel\_serial\_on\_low\_fractionality\_root\{true\}}
+  （\file{options.hpp:247}，\file{bac.cpp:14256--14261}）和
+  \code{parallel\_delay\_until\_incumbent\{true\}}（\file{options.hpp:243}），
+  后者在根节点启发式未能找到现任解时，迫使\emph{整个剩余求解过程}在
+  单个线程上运行（\file{bac.cpp:33828--33834}）；不存在
+  树中段的串行$\to$并行转换。
+\item \code{lp\_kernel\_backend\{LpKernelBackend::HiGHS\}}
+  （\file{options.hpp:135--137}，注释：\emph{“HiGHS is the production
+  default; ExperimentalNative is for kernel development only”}）。节点 LP 由
+  \textbf{vendored HiGHS 对偶单纯形}求解，而非自研的原生
+  对偶单纯形（\file{dual\_simplex.cpp:2054--2062} 路由至
+  \code{solve\_standard\_form\_with\_vendored\_highs}；原生内核仅在
+  \code{ExperimentalNative} 下才会被触及）。\file{bc/api.hpp:16--17}
+  中的公开文档注释仍声称原生对偶单纯形是默认值
+  ——过时文档。
+\end{itemize}
+
+\begin{remark}[命名陷阱]
+引擎级默认 MILP 适配器列表为
+\code{\{"StrictHiGHS", "HiGHS", "NativeBranchAndCut"\}}
+（\file{src/engine/strategy/dispatcher.cpp:78--79}）。尽管名字如此，
+\code{StrictHiGHS} 运行的是\emph{原生}搜索树，HiGHS 仅充当 LP 预言机：
+将整个 MIP 委托给 \code{Highs::run()} 受
+\code{strict\_highs\_mip\_contract \&\& auto\_highs\_root\_pipeline}
+（\file{bac.cpp:1576--1579, 1703--1705}）门控，而
+\code{strict\_highs\_mip\_contract} 默认为 \code{false}
+（\file{options.hpp:141}），且\emph{不会}被
+\code{make\_strict\_highs\_production\_options}
+（\file{src/engine/solver/native/native\_adapters.cpp:395--420}）设置。
+\end{remark}
+
+\subsection{顶层流水线}
+\label{sec:pipeline}
+在 \code{branch\_and\_cut\_lp} 内部，各阶段按以下顺序执行（均位于
+\file{bac.cpp}；\textbf{V} 依据逐行阅读）：
+\begin{enumerate}[nosep]
+\item 选项/契约设置（:1568--1600），包括
+  \code{apply\_bc\_strict\_highs\_contract}；
+\item PaPILO 预求解（:2967；\code{use\_papilo\_presolve\{true\}}，
+  \file{options.hpp:162}），随后\emph{仅当 PaPILO 未缩减模型时}才运行
+  原生 \code{MILPPresolve}（:3015--3025）；
+\item 来自\emph{原始}模型的隐含整数/变量界附属状态
+  （:2942--2955），UC 提示重映射（:3440）；
+\item 探测/强分支预算计算（:3632--3647）：若 $n\ge 10^5$ 或
+  $m>$ \code{large\_problem\_threshold} 则 \code{probe\_reliability}$=0$，
+  若 $m>12\,000$ 则为 $1$，否则为
+  \code{probe\_reliability\{2\}}；
+\item 根节点 LP 求解（:5047）；
+\item 根节点域不动点机制（$\sim$:7400--14100）：界提升
+  证书、目标传播、隐含界、简约成本潜伏界、
+  冲突学习；根节点伪成本播种（:5338--5400）；
+\item 规模自适应的割参数调优（:14006--14100）；
+\item 根节点割平面循环（:14292--14800），节~\ref{sec:cuts}；
+\item 根节点原始启发式（:16980--22170），节~\ref{sec:heuristics}；
+\item 根节点探测（:22174--22320）；
+\item 搜索树搭建：持久 LP 状态（:15295--15315），不可变的已缩放
+  \code{tree\_base\_sf}（:23689--23695），\code{NodeQueue} + 根节点
+  入队（:23447--23455）；
+\item 早期间隙检查（:33926--33978），节~\ref{sec:termination}；
+\item 串行循环（:34091--35645）\emph{或}并行监控器
+  （:35766--36020）；
+\item 还原（PaPILO :36431，原生 :36488）并返回。
+\end{enumerate}
+
+%=====================================================================
+\section{预求解}
+%=====================================================================
+
+\subsection{接线：PaPILO 优先，原生预求解作为后备}
+\label{sec:presolve-wiring}
+原生预求解\emph{并非}叠加在 PaPILO 之后；它是一个后备
+替代方案（\file{bac.cpp:2967--3049}）：PaPILO 先运行
+（\code{use\_papilo\_presolve\{true\}}，\file{options.hpp:162}）；原生
+\code{MILPPresolve} 顶层遍历仅当
+\code{!papilo\_model\_reduced} 时才运行（\file{bac.cpp:3025}），并额外受
+环境标志 \code{MIPSOLVERS\_NATIVE\_TOPLEVEL\_PRESOLVE\_OFF} 门控。PaPILO
+封装（\file{src/engine/strategy/papilo\_presolve.cpp}）与
+\code{MILPPresolve} 不共享任何代码。后果：在 PaPILO 哪怕只缩减了
+一点内容的实例上，下述原生约减都\emph{永远不会执行}——它们实际上是
+冷备代码，却仍然被发布、维护并纳入基准测试。
+
+\subsection{原生预求解：表示与约减}
+\label{sec:presolve-reductions}
+内部存储为统一的区间行形式
+$\ell^{\mathrm{row}} \le a^\top x \le u^{\mathrm{row}}$，行向与列向
+关联表分别为 \code{std::vector<std::vector<Entry>> rows\_}
+和 \code{std::vector<std::vector<CEntry>> cols\_}
+（\file{include/mipsolvers/engine/solver/native/milp/bc/milp\_presolve.hpp:124,131}），
+由 Eigen 矩阵的行主序副本构建
+（\file{milp\_presolve.cpp:81,98}）。并保留缓存的逐行活动度
+$\{\underline{\mathrm{act}}, \overline{\mathrm{act}}, n^{-\infty}, n^{+\infty}\}$。
+容差：\code{zero\_tol}$=10^{-10}$，
+\code{bound\_tol}$=10^{-9}$，\code{max\_rounds}$=20$
+（\file{milp\_presolve.hpp:53,70--71}）。
+
+约减清单（均位于 \file{milp\_presolve.cpp}；数学已核验）：
+\begin{enumerate}[nosep]
+\item \textbf{固定变量移除}（:238--248）：$|u_j-\ell_j|<10^{-9}$；
+  对 \code{cols\_[j]} 中的每一行做右端项平移
+  $b_r \mathrel{-}= a_{rj} v$；压入撤销记录。此处\emph{不}更新
+  行活动度。
+\item \textbf{空行/空列}（:254--297）：空行仅当
+  $0\in[\ell_r, u_r]$ 时才删除；不可行的空行被\emph{静默保留}
+  （“let LP detect it”，:262--265）。空列被固定到
+  成本最优的界。
+\item \textbf{单元素行}（:303--370）：$a x_j \in [\ell_r,u_r]$ 蕴含
+  界 $\ell_r/a$、$u_r/a$（$a<0$ 时翻转方向），整数取整为
+  $\lceil x - 10^{-9}\rceil$ / $\lfloor x + 10^{-9}\rfloor$；随后
+  删除该行（隐含自由变量论证成立）。
+\item \textbf{单元素列（仅等式）}（:376--473）：代入
+  $x_j = (b_r - \sum_{k\ne j} a_{rk} x_k)/a_{rj}$；被消去变量的
+  界转化为残差行上的一个区间带；成本转移
+  $c_k \mathrel{-}= (c_j/a_j) a_k$。不等式单元素列明确
+  \emph{不}处理（:464--470）。
+\item \textbf{双元等式代入}（:479--633）：从
+  $a_1 x_1 + a_2 x_2 = b$ 消去一个变量，优先选择连续变量，
+  否则选择行出现次数\emph{更少}者（:517--527；:501--502 处的
+  注释说的是“more”——注释与代码不符）。整数--整数
+  消去仅当系数比值在 \code{bound\_tol} 内为整数时进行
+  （:531--536）。
+\item \textbf{基于活动度的界收紧}（:639--741）：对每个非零元
+  $u_j' = (u_r - (\underline{\mathrm{act}}_r - \mathrm{contrib}_j))/a_{rj}$
+  等，要求无穷贡献者数为零，另有一个特殊的
+  单无穷贡献者情形，会对每个候选非零元重新扫描整行
+  （:699--736）——长度为 $k$ 的行复杂度为 $O(k^2)$。
+\item \textbf{强制行/冗余行}（:747--807）：若
+  $\overline{\mathrm{act}}_r \le u_r$（且下侧安全）则冗余；若
+  $\underline{\mathrm{act}}_r \ge u_r - \mathrm{tol}$ 则在最小活动度一侧
+  强制，将每个变量固定到其最小贡献界。
+\item \textbf{“被支配”列}（:813--873）：仅按成本符号固定
+  （$c_j>0 \Rightarrow$ 若不危及任何行侧，则固定于 $\ell_j$）。
+  这\emph{并非}成对列支配检验。
+\item \textbf{平行行}（:879--968）：按列模式做哈希；在同一桶内
+  成对比较，且每对都要对双方的非零元列表做一次复制+排序
+  （:913--923）；以相对容差做比例系数检验；合并时按比值缩放界，
+  比值为负时翻转方向。仅在
+  \code{round < 3} 时运行（:1441）。
+\item \textbf{系数强化}（:974--1013）：仅针对 $\le$ 行中
+  $a_j>0$ 的二元变量做大 $M$ 约减：
+  $a_j' = u_r - \underline{\mathrm{act}}_r^{\setminus j}$，当
+  $0 < a_j' < a_j - \mathrm{tol}$ 时应用，同时
+  $u_r \mathrel{-}= (a_j - a_j') u_j$。没有负系数、
+  一般整数或下侧变体。
+\item \textbf{二元探测}（:1019--1165）：候选 = 未固定的二元变量；
+  \code{max\_probes}$=\min(500, \#\text{cand})$，若 $m>2\,000$
+  削减至 100，若 $m>5\,000$ 削减至 50（:1033--1037）；
+  硬性墙钟上限为 \textbf{1.0\,s}（:1040--1047）。每次探测都对
+  \emph{整个}界向量做快照（:1053--1054），在包含 $j$ 的行上
+  传播 \code{probing\_depth}$=3$ 轮（:1071--1108）。两侧均不可行
+  $\Rightarrow$ \code{return count}，\textbf{且不设置任何不可行
+  标志}（:1132--1135）；一侧不可行 $\Rightarrow$ 固定；否则在全部
+  $n$ 列上对两个探测世界求交：$\ell = \min(\ell^0,\ell^1)$，
+  $u = \max(u^0,u^1)$（:1147--1161）。
+  \textbf{探测中发现的蕴含关系被丢弃。}
+\end{enumerate}
+
+主循环（\code{run()}，:1413--1485）：每轮按序执行——固定变量
+$\to$ 空行/空列 $\to$ 单元素行 $\to$ 单元素列 $\to$ 界收紧
+$\to$ 固定变量 $\to$ 强制行 $\to$ 固定变量 $\to$ 空行/空列 $\to$
+双元等式 $\to$ 被支配列 $\to$ 平行行（轮次 $<3$）$\to$ 系数强化
+$\to$ 探测（轮次 $\ge 1$）$\to$ 固定变量 $\to$ 空行/空列；以
+变更计数器之和判定不动点，硬性上限 20 轮，除探测的 1\,s 外
+无时间限制。\code{PresolveStats} \textbf{没有不可行性字段}
+（\file{milp\_presolve.hpp:33--49}）。
+
+\begin{finding}[预求解的活动度维护是非增量式的]
+\label{find:presolve-activity}
+每轮至少三次完整的 $O(\nnz)$ 活动度扫描（$\le 20$ 轮）：
+\code{tighten\_bounds} 重算全部活动度
+（\file{milp\_presolve.cpp:641}），\code{detect\_forcing\_rows} 重算
+全部（:749）\emph{外加}一次逐行刷新（:759），
+\code{strengthen\_coefficients} 重算全部（:977）；
+\code{fix\_variable} 从不触碰活动度（:170--196）。在 HiGHS/PaPILO
+只做 $O(\Delta)$ 工作表更新的地方，这里最多要做 $\sim$60 次
+全矩阵扫描——而代码库已经拥有一个增量域（\code{BCDomain}），
+预求解却没有使用。头文件宣称“tracks row/column nonzero counts
+for O(1) singleton detection”（\file{milp\_presolve.hpp:16--17}）；
+\textbf{这样的计数器并不存在}——单元素检测是重新扫描
+（\file{milp\_presolve.cpp:309--318,382--391}）。
+\end{finding}
+
+\begin{finding}[探测学不到任何结构性信息，且每次探测复制 $O(n)$]
+每探测一个二元变量：两份大小为 $n$ 的快照、恢复复制、两份大小为
+$n$ 的输出副本、再次恢复，然后一次 $O(n)$ 的求交扫描
+（\file{milp\_presolve.cpp:1053--1161}）——无论受影响集合大小如何，
+每次探测约复制 $\sim$5$n$ 个 double；蕴含关系被丢弃；再加上
+1\,s 的墙钟上限和 $m>5\,000$ 时的 50 次探测上限，使得探测在
+MIPLIB 规模的实例上形同虚设。
+\end{finding}
+
+\begin{finding}[预求解丢失不可行性并退化区间行]
+双侧均不可行的探测返回时不带任何状态位
+（\file{milp\_presolve.cpp:1132--1135}）；不可行空行被跳过
+（:262--265）；可证明不可行的实例会继续进入 LP/B\&C。重建时，
+每个双侧行变成\emph{两个} $\le$ 行
+（\file{milp\_presolve.cpp:1197--1200,1228--1246}），行数翻倍，且
+行映射只记录上侧（:1234,1244）——区间结构在下游丢失。
+\end{finding}
+
+\subsection{经核实缺失的标准约减}
+经 grep 核实确实缺失的内容（均在检索之后才断言）：预求解\emph{中}
+无对偶/简约成本固定（它仅存在于节点级，
+\file{bc\_utils.cpp:1405}，\file{options.hpp:270}）；无稀疏化；无
+平行/重复\emph{列}检测；无成对被支配列检验；不会将探测派生的
+蕴含插入蕴含图（对比 HiGHS/PaPILO）；无单元素\emph{不等式}列
+消去；无针对负系数或一般整数的系数强化。
+PaPILO 覆盖了其中若干项，但参见 \S\ref{sec:presolve-wiring}：
+PaPILO 运行时原生遍历会被跳过，反之亦然。
+
+%=====================================================================
+\section{LP 松弛层}
+%=====================================================================
+
+\subsection{三层嵌套表示，逐节点拷贝流转}
+\label{sec:lp-representations}
+\begin{itemize}[nosep]
+\item \code{LPModel}（\file{problem\_types.hpp:127--146}）：CSC $A$、$A^{eq}$、
+  稠密 $c$，外加一份镜像的 HiGHS CSR 拷贝
+  （\code{highs\_row\_start/index/value}，:142--145）。
+\item \code{StandardFormLP}（\file{dual\_simplex.hpp:273--313}）：矩阵存储
+  \textbf{两次}——CSC $A$ \emph{以及}行主序 $A_{\mathrm{row}}$
+  （:277--278）——外加松弛/人工列、\code{lb\_shift}、
+  \code{var\_ub}、Ruiz 缩放因子，以及用于 $O(1)$
+  持久模型校验的 \code{structure\_id}。
+\item HiGHS CSC 数组，每次求解由
+  \code{pass\_standard\_form\_to\_highs}（\file{dual\_simplex.cpp:627--680}）重建：
+  全新的 \code{col\_cost/lower/upper}、\code{row\_lower/upper}、
+  \code{start/index/value} 向量，用 \code{InnerIterator} 遍历所有
+  列，然后 \code{highs.passModel(...)}——其内部还会再拷贝一次。
+\end{itemize}
+搜索树保存一份不可变的已缩放 \code{tree\_base\_sf}
+（\file{bac.cpp:23689--23695}）和一个共享的可变 \code{node\_sf} 工作区。
+
+\subsection{界变更：SF 层是增量的，在求解器边界被丢弃}
+\label{sec:bound-updates}
+\code{update\_standard\_form\_bounds}（\file{dual\_simplex\_api.cpp:855--971}）
+在每个子节点（\file{bac.cpp:30719}）和每次探测时被调用。它扫描全部 $n$
+列以\emph{检测}变更（内联缓冲 64；阈值
+\code{kIncrementalThreshold}$=50$，:865），当变更数 $\le 50$ 时对 $b$
+应用 $O(\nnz_j)$ 稀疏列更新（:906--920），否则回退为一次完整的
+$A\,\ell^{\mathrm{shift}}$ 矩阵乘（:923--947），重写全部 $n$ 个
+\code{var\_ub} 条目（:952--959），并更新目标常数项。
+接受\emph{已知}变更的快速路径
+\code{update\_standard\_form\_bounds\_incremental}
+（\file{dual\_simplex\_api.cpp:976}）确实存在——却\textbf{没有任何调用点}
+（经 grep 验证）。于是每个子节点都要付出一次 $O(n)$ 检测扫描加一次
+$O(n)$ 的 \code{var\_ub} 重写，尽管分支只改动了一对界，
+而且 B\&C 层明确知道改的是哪一对。
+
+\subsection{逐节点求解：全新 HiGHS，仅状态的热启动}
+\label{sec:node-solve}
+\begin{finding}[持久 LP 机制存在、已启用，随后却被中和]
+\label{find:persistent-lp}
+默认的节点求解（\file{dual\_simplex.cpp:1337--1410}）：
+\begin{lstlisting}[style=code]
+if (opt.allow_persistent_lp_state && basis_hint &&
+    basis_hint->cached_sparse_basis &&
+    basis_hint->cached_sparse_basis->resolve_same_structure(sf, basis_hint, opt, out))
+  return true;                              // dual_simplex.cpp:1345-1350
+...
+auto highs = std::make_shared<Highs>();     // :1354  <- fresh solver per node
+highs->setOptionValue("presolve","off"); "solver","simplex";
+                      "simplex_strategy",1 /*dual*/; "threads",1;  // :1357-1361
+pass_standard_form_to_highs(*highs, sf);    // :1394  full O(n+m+nnz) serialization
+highs->setBasis(hbasis);                    // :1397-1400  statuses only
+highs->run();                               // :1402  cold INVERT first
+out.form = sf;                              // :1406  full SF deep copy per solve
+\end{lstlisting}
+一条真正的增量路径 \code{VendoredHighsBasis::resolve\_same\_structure}
+（\file{dual\_simplex.cpp:1095--1210}）会校验 \code{structure\_id}、
+对所有列/行界做差分、仅对变更的条目调用 \code{changeColsBounds} 与
+\code{changeRowsBounds}、在基未变时跳过 \code{setBasis}，
+并连同其因子分解一起复用存活的 \code{Highs} 对象——这正是
+SCIP/HiGHS-MIP 的设计。串行调度器明确选择了启用
+（\code{allow\_persistent\_lp\_state = true}，\file{bac.cpp:23814}）。\emph{但是}，
+每次节点求解之后，所存储的基提示由
+\code{persist\_bc\_node\_basis\_from\_simplex}
+（\file{bc\_legacy\_helpers.cpp:191--208}）生成，它会执行
+\begin{lstlisting}[style=code]
+// Tree/node SF objects are per-node workspaces. Do not persist live BasisOps
+// pointers tied to those temporary matrices across queue siblings.
+basis->cached_sparse_basis.reset();          // bc_legacy_helpers.cpp:203-205
+\end{lstlisting}
+——在\textbf{全部十一处}树更新点（\file{bac.cpp:28526, 28656, 31118,
+31257, 31760, 32550, 32665, 33150, 33669, 33769, 34322}——经 grep 验证），
+而 \code{Node::branch\_child()} 拷贝的正是
+这份被剥空的提示（\file{bc\_types.hpp:366}）。因此，每个常规树节点
+都无法通过 :1345 处的门槛检查，只能付出全新 \code{Highs} +
+\code{passModel} + 完全冷因子分解的代价。持久路径只可能对
+强分支的探测热启动子节点触发（\file{bac.cpp:30697--30713}）。
+并行调度器从不启用（\file{bc\_parallel.cpp:280--281}；默认
+\code{allow\_persistent\_lp\_state\{false\}}，
+\file{bc\_solver\_dispatch.hpp:68}）。\textbf{(U)} 这一 reset 究竟是
+正确性变通（注释声称为了兄弟节点安全）还是未完成的管线，
+从代码本身无法判定；启用开关的存在与完整实现的
+\code{resolve\_same\_structure} 暗示后者，但按现状，
+全新重建就是事实上的节点 LP 算法。
+\end{finding}
+
+基热启动在发生时仅传递\emph{状态}
+（\code{native\_sf\_basis\_to\_highs}，\file{dual\_simplex.cpp:558--599}）：
+HiGHS 在第一次对偶迭代前必须重新因子分解（冷 INVERT）——
+因子分解、eta 文件、DSE 权重均不跨节点复用。存在一项部分缓解：
+\code{SimplexBasis::try\_share\_indices\_from}
+（\file{dual\_simplex.hpp:258--270}）将相同的基索引向量去重存入
+共享的不可变存储，这是一个真正不错的内存优化。
+
+强分支探测对每个候选变量的每个方向都深拷贝整个标准形
+（\file{bac.cpp:35017--35019}：\code{probe\_sf = tree\_base\_sf;}——
+两种矩阵朝向和全部向量一并拷贝），然后在全新的 HiGHS 上求解。
+
+\begin{finding}[每次求解物化 $O(m^3)$ 稠密基逆，且在该路径上是死重]
+当 $m \le 4096$ 时，vendored 封装层物化
+\code{out.basis\_inverse = Eigen::MatrixXd::Zero(m,m)} 外加 $m$ 次
+\code{getBasisInverseRow} 调用（总计 $O(m^3)$，$m=4096$ 时达 128\,MB）
+（\file{dual\_simplex.cpp:1602--1618}）；而证书路径在
+\code{cached\_sparse\_basis} 存在时总是优先走稀疏 BTRAN
+（\file{dual\_simplex.cpp:486--489}），持久导入路径则显式跳过它
+（\file{dual\_simplex.cpp:1036}）。该稠密矩阵在默认路径上纯属死重——
+它还会撑大每一条 \code{CutRequest} 消息
+（\S\ref{sec:parallel}）。
+\end{finding}
+
+\subsection{向 LP 添加割与重新求解}
+根节点割插入按批次从三元组重建整个矩阵：
+\code{add\_rows\_to\_lp} / \code{add\_sparse\_rows\_to\_lp} 把全部现存
+非零元流入一份新的三元组列表并调用 \code{setFromTriplets}
+（$O(\nnz \log \nnz)$ 的分配+排序，\file{bc\_utils.cpp:762--835, 837--902}；
+三元组预留使用硬编码的每行 20 非零元猜测值，:798）。唯一
+真正增量的路径是根节点的\emph{实时追加}事务
+（\code{DirectHighsLpBasisOps}，\file{bc\_relaxation.cpp:1121--1274}）：
+只打包新行、对列界做差分、\code{highs->addRows(...)}、热启动
+\code{run()}、提交/回滚——但对任何含等式行的模型都会被拒绝
+（``equalities not supported by live append''，:1138--1139），
+且仅在根节点使用。节点上的割后重解（默认关闭，见
+\S\ref{sec:root-tree-cuts}）使用一次冷的完整 IPM 求解
+（\file{bac.cpp:33309}），而非热的对偶单纯形。
+
+\subsection{容差、缩放与迭代上限}
+\label{sec:tolerances}
+核心：\code{int\_tol}$=10^{-5}$，\code{gap\_tol}$=10^{-4}$，
+\code{lp\_tol}$=10^{-6}$，\code{max\_lp\_iter}$=500$，
+\code{max\_nodes}$=50\,000$，\code{time\_limit\_sec}$=120$
+（\file{options.hpp:89--94}）。调度器的节点 LP：
+\code{feas\_tol = opt\_tol = max(1e-10, lp\_tol*0.1)}$=10^{-7}$，
+\code{max\_iter = max(10*max\_lp\_iter, 2000)}$=5\,000$
+（\file{bc\_solver\_dispatch.hpp:79--81,211--212}）；随后 vendored 层
+再乘以十（$\to 50\,000$，
+\file{dual\_simplex.cpp:1363--1364}），而直接根路径使用
+\code{max\_lp\_iter*50}（$\to 25\,000$，\file{bc\_relaxation.cpp:1306--1307}）
+——跨层存在三套互不一致的迭代上限约定。节点
+可行性接受容差 \code{kNodeFeasibilityTol}$=10^{-6}$
+（\file{bc\_utils.hpp:73}）；现任解剪枝容差
+\code{kIncumbentPruneTol}$=10^{-12}$（\file{bc\_utils.hpp:70}）；节点剪枝使用
+$\max(10^{-9}, \code{lp\_tol})$（\file{bac.cpp:34230}）。Ruiz 缩放
+只对 \code{tree\_base\_sf} 施加一次（\file{bac.cpp:23693}）；HiGHS 内部缩放为
+\code{simplex\_scale\_strategy=2}（\file{dual\_simplex.cpp:1361}）。每个节点 LP
+还要在 HiGHS 自身的 KKT 检查之上跑两份重复的 $O(\nnz)$ 残差审计
+（\code{audit\_vendored\_highs\_sf\_result}，\file{dual\_simplex.cpp:682--705}，
+以及 \code{sf\_solution\_residual\_acceptable}，
+\file{dual\_simplex.cpp:2431--2499}）。
+
+\subsection{失败处理与回退层级}
+\label{sec:fallback}
+结果分类（\code{classify\_lp\_result}，
+\file{bc\_fallback.hpp:70--105}）部分依赖于\textbf{对人类可读状态字符串的
+子串匹配}（``Objective cutoff''、``unbounded''、
+``max\_iter''——:78,88--97）：内核消息一变就会脆断。
+回退层级（\file{bc\_fallback.hpp:248--320}；\code{enable\_lp\_fallback\{true\}}，
+\file{options.hpp:339}）：\textbf{L5} 仅在 Farkas 证书确认的
+不可行/无界时剪枝；\textbf{L1} 至多 3 次重试，每次深拷贝
+整个 SF 并将整个右端项抖动 $10^{-7}$（\code{perturbed\_sf = sf;}，
+:274,324--332）——而且\emph{扰动后 LP 的最优解被直接接受为节点
+结果，不与未扰动模型做任何核对}；\textbf{L2} 冷启动
+重解，迭代数 $2\times$；\textbf{L3} 2 次重试，容差放宽至
+$10\times/20\times$、迭代数 $3\times$；\textbf{L4} 推迟该节点（重新入队，
+绝不丢弃）。最坏情形：一个失败节点额外付出六次完整 LP 求解，
+每次都在全新的 HiGHS 上。搜索树在剪枝前还会用一次含 Farkas 复核的
+完整 IPM 求解对失败做交叉验证
+（\file{bac.cpp:30938--30969}）。
+
+%=====================================================================
+\section{割生成}
+\label{sec:cuts}
+%=====================================================================
+
+\subsection{派发与 \code{All} 套件}
+唯一的派发点是 \code{add\_cuts()}
+（\file{bc\_cuts.cpp:8124--8335}）；默认为 \code{cuts\{CutType::All\}}
+（\file{options.hpp:108}）。\code{All} 套件按如下顺序触发
+（\file{bc\_cuts.cpp:8251--8334}）：(1) 变换单纯形表 cMIR（``Gomory''，
+占全部剩余预算，需要单纯形基）；(2) ``basis MIR''，预算
+按规模为 4/2/0；(3) 行 MIR，5/3/2；(4) 背包覆盖，5/3/2；(5) 来自
+持久团表的团割，5/3/2（仅当 $n \le 10\,000$ 时才有即时回退）；
+(6) 隐含界，3/2/1；(7) 零半割，5，仅当 $n \le 10\,000$。
+预算通过 \code{spend\_tracked}（\file{bc\_cuts.cpp:8173--8200}）共享，
+后者喂给自适应割平面族门控（\S\ref{sec:cut-selection}）。规模
+阈值：\code{large}$=n>10^4$，\code{xlarge}$=n>2\cdot 10^4$
+（\file{bc\_cuts.cpp:8257--8258}）。\textbf{流覆盖被有意排除在
+\code{All} 之外}：
+\begin{lstlisting}[style=code]
+// Flow-cover separation is intentionally not part of the generic All bundle.
+// The legacy implementation only infers capacity structure from signed row
+// coefficients; on presolved/ranged rows this can produce rows that cut off
+// the true integer frontier.           bc_cuts.cpp:8328-8332 (verbatim comment)
+\end{lstlisting}
+即作者自己标出了一处\emph{有效性}缺口，并让该割平面族仅作诊断用途。
+另外两个割实现是死的：经典的互补单纯形表 MIR 被编译期剔除
+（\file{bc\_cuts.cpp:303}：\code{\#if 0\ // MIR cuts disabled: correct but hurt
+tree search performance.}），而经典的 GMI 路径
+（\code{build\_bounded\_form\_gmi\_cut}，:120--301；
+\code{add\_basis\_gomory\_cuts}，:6193--6350）没有调用者——实际在用的
+``Gomory'' 是下文那种 HiGHS 风格的变换 cMIR。
+
+\subsection{变换单纯形表 cMIR（``Gomory'' 路径）}
+\label{sec:cmir}
+\code{add\_transformed\_tableau\_cuts}（\file{bc\_cuts.cpp:6352--6881}）。
+\textbf{来源：}对每个分数取值的整数基变量，用 BTRAN 恢复单纯形表行，
+$y^\top = e_i^\top B^{-1}$（:6536--6555；经 vendored-HiGHS
+\code{BasisOps} 走稀疏路径，稠密回退为
+\code{simplex.basis\_inverse.row(i)}，位于 :6551），模型行按权重
+$w_r = y_r \cdot \mathrm{btran\_scale} \cdot \mathrm{row\_scale}$
+在稠密 $n{+}m$ 向量上以扩展精度累加器聚合
+（\code{XTabLpAggregator}，:4232--4335）；行端通过带界的显式松弛
+列进入，故聚合不等式的右端恒为 $0$
+（:4274--4292）。行选择按
+$\mathrm{score} = f(1-f)/\lVert w \rVert^2$（:6606）打分，并做相对权重
+过滤；若 $\max_r w_r / \min_r w_r > 10^4$ 或条目数 $\le 1$
+则拒绝该行；候选数上限为
+$\min(5000,\ 200 + 0.1\min(m, n_I))$（:6496--6507）；当得分跌破最佳值的
+$0.0025\times$ 时提前停止（接受 50 条割后为 $0.01$，
+:6703--6709）。
+
+\textbf{割推导}（\code{xtab\_generate\_cut\_from\_base\_row}，
+:3992--4222）：(i) \emph{界变换}——每一项都相对其最近的界来表达，
+包括\emph{变量界} $x \ge c + \alpha y$ /
+$x \le c + \alpha y$，其二元触发变量选自蕴涵
+图/VLB 表（:2704--3184）；(ii) \emph{预处理}——二的幂
+预缩放、连续项消去、行长上限
+$100 + 0.15\,n$（:3186--3307）；(iii) 先试一条提升覆盖割，记录其
+效能 $e_c$，再以抬高的门槛 $\mathrm{min\_efficacy} + e_c$
+运行 cMIR 并保留较优者（:3535--3625）；(iv) \emph{cMIR}
+（:3309--3533）：对候选缩放 $\delta$（整数项的互异 $|a_j|$
+外加细化值），计算
+\begin{equation}
+\bar a_j(\delta) \;=\; \Big\lfloor \frac{a_j}{\delta} \Big\rfloor
++ \max\!\Big(0,\ \frac{f_j - f_0}{1 - f_0}\Big),\qquad
+f_0 = \Big\{\frac{\mathrm{rhs}}{\delta}\Big\},
+\label{eq:cmir}
+\end{equation}
+效能 $=$ 违反量$/\sqrt{\mathrm{norm}^2}$，接受最优的 $\delta$，然后
+尝试 $2\delta, 4\delta, 8\delta$ 以及逐项的互补翻转
+（:3440--3492）；守卫条件 $f_0 \in [0.005, 0.995]$、$(1-f_0)^{-1} \le 10^6$
+（:3318--3320）；(v) 经由精确的标准形系数做\emph{逆变换}
+（:3627--3762），再后处理（小系数消入右端、经
+\code{HighsIntegers::integralScale} 做整数缩放、右端向下取整、
+对类整数列做系数收紧 $|a_j| \le \mathrm{maxact} - \mathrm{rhs}$，
+:3778--3990）。最终准入要求违反量
+$> 10\cdot\mathrm{feastol}$（:4208）。每条聚合行的两种符号
+都会尝试（:6743）。
+
+\subsection{路径聚合、路径混合与模 \emph{k} 割}
+\code{add\_transformed\_path\_cuts}（\file{bc\_cuts.cpp:6883--7738}）是
+HiGHS \code{HighsPathSeparator} 的对应物：行按活跃度被分类为
+Eq/Leq/Geq/Unusable；恰有一个远离界的连续列的等式行成为替换弧；
+从每个可用起始行出发，分离器扩展出一条长度
+$\le$\code{kMaxPathLen}$=6$ 行的路径（:7426），通过
+$w = -\mathrm{val}/\mathrm{arc.coeff} \in [\mathrm{feastol},
+1/\mathrm{feastol}]$（:7427--7431）消去离界最远的连续列；
+每个前缀都以两种符号走一遍 cMIR 管线。\emph{路径混合}
+（\code{xtab\_generate\_path\_mixing\_cut}，:4343--4712）收集右端严格递减的
+取负前缀聚合，要求路径行间逐列的界类型一致，取
+$\delta = 2^{\lceil \log_2(\max_j |a_j| + 1)\rceil}$，并增量地构建混合割，
+在第一个违反量 $> 10\cdot\mathrm{feastol}$ 的前缀处产出。
+\emph{模 $k$ 割}
+（\code{add\_transformed\_modk\_cuts\_impl}，:4767--5244）：活跃行被
+缩放为整数（缩放为 $0$ 或 $>10^6$ 则拒绝），组装成 $\Z$ 上的
+CSC 方程组，并依次在 GF(2)、GF(3)、GF(5)、GF(7) 上经
+\code{HighsGFkSolve} 求解（:4745--4765），在第一个产出行被接受的模数处
+停止；每个解权重向量生成两条聚合行
+（$w/k$ 与 $(w(k-1)\bmod k)/k$），送入 cMIR 管线。
+
+\subsection{模型行割平面族}
+\label{sec:model-row-cuts}
+\begin{itemize}[nosep]
+\item \textbf{背包覆盖}（\code{add\_cover\_cuts}，:5307--5456）：取
+  $b_r>0$、系数全正、支撑全为二元变量的行；按系数递减贪心构造覆盖，
+  直至 $\sum w_j > b_r + 10^{-9}$；割为
+  $\sum_{j\in C} x_j \le |C| - 1$（:5390--5392）；对非覆盖变量做序贯
+  上升提升（仅限候选数 $\le 40$ 的行），使用
+  \textbf{离散化背包 DP，\code{N\_BINS}$=512$ 个桶}
+  （:5410--5439），$\alpha_k = \mathrm{rhs} - z^*$；准入违反量
+  $>10^{-7}$。\emph{该族没有密度/效能/平行度过滤。}
+  见发现~\ref{find:cover-dp}。
+\item \textbf{cMIR 管线内部的提升覆盖}（:1478--1941）：经注水式
+  \code{abar} 循环构造精确的超可加提升函数
+  （:1566--1585），带半整数检测；经部分覆盖和上的分段线性
+  $\phi(a)$ 做混合二元提升；经双侧超可加的
+  $\phi_l/\gamma_l$ 做混合整数提升（:1842--1915）。这是
+  精确的机制——但\emph{仅}在单纯形表管线内部使用，不用于
+  模型行覆盖。
+\item \textbf{流覆盖}（\code{add\_flow\_cover\_cuts}，:5662--5795）：对
+  含负二元系数的二元+连续混合行，
+  $\lambda = b_r + \sum_{N^-}|a_j|$；按 $|a_j|(1-x_j^*)$
+  贪心构造覆盖 $C\subseteq N^-$，直至 $\sum_C |a_j| > \lambda + 10^{-9}$；
+  不等式在 $N^+$ 上取 $\min(a_j,\lambda)$，在覆盖上取
+  $\max(0,|a_j|-\mathrm{excess})$（:5740--5768）。这是一条
+  简化的单覆盖不等式：无序列无关提升，无
+  Gu--Nemhauser--Savelsbergh 式的 $L^{--}$ 处理，
+  并因上文引述的有效性理由被排除在 \code{All} 之外。
+\item \textbf{隐含界}（\code{add\_implied\_bound\_cuts}，:5956--6056）：
+  见发现~\ref{find:implied-bound}。
+\item \textbf{行 MIR / ``basis MIR''}（\code{add\_row\_mir\_cuts} :6060--6171，
+  \code{add\_basis\_mir\_cuts} :5458--5655）：两者都作用于\emph{模型行}
+  而非单纯形表；``basis'' 变体把它的 \code{simplex}/\code{sbasis}
+  参数标记为 \code{[[maybe\_unused]]}（:5460--5463）——名称属于误称，
+  这两个几乎相同的实现在同一轮 \code{All} 中以不同过滤器运行。
+  算法：对 $x_j > (\ell_j+u_j)/2$ 的整数变量取互补，
+  要求 $f_0 = \{b'\} \in (10^{-8}, 1-10^{-8})$，整数项的 MIR
+  系数在 $f_j \le f_0$ 时为 $\lfloor a_j \rfloor$，否则为
+  $\lfloor a_j \rfloor + (f_j - f_0)/(1-f_0)$；
+  负的连续 $a_j$ 取 $a_j/(1-f_0)$（:5538--5558，:6109--6119）。
+  只有 ``basis'' 变体带效能下限（$5\cdot10^{-4}$）、密度
+  上限（按 $n$ 为 $0.60/0.30/0.10$）和一个 $O(k^2)$ 的
+  $|\cos|>0.90$ 平行度过滤器（:5636--5643）；行变体\emph{完全没有}过滤
+  （:6156--6170）。
+\item \textbf{零半割}（\code{add\_zero\_half\_cuts}，:7928--8122）：
+  Caprara--Fischetti $\{0,\tfrac12\}$-割，限于奇支撑相同的\emph{行对}
+  （mod-2 签名 + FNV-1a 指纹分组，
+  每组 $\le 30$ 行 $\Rightarrow \le 435$ 对，:7988--8032），松弛
+  窗口 $-10^{-6} \le s \le 0.99$，违反量估计
+  $0.5 - 0.5(s_1+s_2) \ge 10^{-4}$；割为
+  $\tfrac{1}{2}(a_{r_1}{+}a_{r_2})^\top x \le \lfloor (b_1{+}b_2)/2\rfloor$，
+  整数变量系数经取整（:8073--8091）；对已产出割做平行度过滤
+  $|d| > 0.90\,\|c\|\,\|c_i\|$（:8098--8110）。通用的 GF($k$)
+  机制就在同一文件中，但此处未复用。
+\item \textbf{团割}（\S\ref{sec:clique}）。
+\end{itemize}
+
+\begin{finding}[隐含界“割”与其源行在代数上完全相同]
+\label{find:implied-bound}
+对一个二非零行 $c\,x + d\,y \le b$（$c>0$，$y$ 为二元变量），分离器
+计算 $u_0 = b/c$、$u_1 = (b-d)/c$（\file{bc\_cuts.cpp:6007--6010}，
+\textbf{V}）并产出
+\begin{equation}
+x - (u_1 - u_0)\,y \;\le\; u_0
+\qquad (\text{\file{bc\_cuts.cpp:6024--6030}}).
+\label{eq:implied-bound-cut}
+\end{equation}
+代入定义：$x - \big(\frac{b-d}{c} - \frac{b}{c}\big) y \le
+\frac{b}{c} \iff x + \frac{d}{c} y \le \frac{b}{c} \iff c\,x + d\,y \le b$——
+\emph{恰好就是源行除以 $c$}。在任何 LP 可行的 $x^*$ 处，其
+违反量至多为 LP 可行性容差，故 $>10^{-7}$ 的准入
+测试（:6032--6033）只能靠数值噪声通过——而一旦
+通过，LP 就多了一条经缩放的、\textbf{与现有模型行重复}的行。
+该割平面族在 \code{All} 套件的每一轮根节点割中都运行
+（\file{bc\_cuts.cpp:8314--8316}）。
+\end{finding}
+
+\begin{finding}[覆盖 DP 提升悄无声息地近似了提升系数]
+\label{find:cover-dp}
+模型行覆盖提升按
+$\lfloor w \cdot 512 / \mathrm{cap} \rfloor$（\file{bc\_cuts.cpp:5415--5430}）
+离散化权重：离散化权重为 0 的物品以\emph{零容量代价}
+进入背包（:5423），这会高估 $z^*$，从而使
+$\alpha_k = \mathrm{rhs} - z^*$ 低于真实提升系数——一个
+弱于有效值的系数（离散化方向向下意味着割仍然有效，
+但可能任意弱）。尽管同一文件中就有精确的超可加提升
+机制（:1552--1641），这里却没有精确 DP。候选数 $>40$ 的行
+完全跳过提升（:5397）。
+\end{finding}
+
+\subsection{团割与持久团表}
+\label{sec:clique}
+即时分离（\code{add\_clique\_cuts}，:7747--7915）：$m > 15\,000$ 时跳过；
+冲突边来自二元变量数 $\le 200$ 的纯二元 $\le$ 行，
+$a_i + a_j > b + 10^{-9}$——对每行做一次 $O(\sum_r k_r^2)$ 的两两扫描
+（:7785--7795）；邻接结构为 \code{std::vector<std::vector<int>}>；取 $\le 200$
+个满足 $0.1 < x_j^* < 0.9$ 的种子；按 $x$ 最大的候选做贪心极大团扩展；
+若违反量 $>10^{-7}$ 则产出割 $\sum_{j \in C} x_j \le 1$。
+持久 \code{CliqueTable}（\file{bc\_clique\_table.cpp}）在根节点构建一次
+（\file{bac.cpp:6823}，\code{max\_row\_nnz}$=256$）：扫描 $A$
+与 $A^{eq}$ 行的两侧，界平移后转换为正的文字系数，
+当两个最大系数超过剩余容量时发出一条文字边（最坏情形每行
+$\binom{256}{2} \approx 32\,640$ 次成对测试，:184--199）。存储为双 CSR：
+$2n$ 个节点上的一个变量图和一个文字
+图（\file{bc\_clique\_table.hpp:213--218}）。根节点各轮查询
+\code{find\_violated\_cliques}（xlarge 时 $\le 128$，否则 512，
+\file{bc\_cuts.cpp:8266}），在 CSR 上贪心扩展并以二分查找
+判定成员关系（:897--997）。
+
+\begin{finding}[团表增量更新每次调用都从零重建两张 CSR 图]
+\code{add\_edges}/\code{add\_literal\_edges} 把完整 CSR 分解为
+\code{std::vector<std::vector<int>}>，追加后对每个顶点
+列表重新排序/去重，再重建两张 CSR（\file{bc\_clique\_table.cpp:311--446}）——
+每次调用 $O(V{+}E)$ 的分配，而且这\emph{每被接纳一条割行}
+就运行一次（\file{bac.cpp:10618,15433}）。HiGHS 的团表以
+逐顶点归并插入的方式追加进分块 CSR，每条边 $O(\mathrm{degree})$。
+\end{finding}
+
+\subsection{CGLP 提升-投影}
+\label{sec:cglp}
+默认\textbf{关闭}（\code{enable\_cglp\_cuts\{false\}}，
+\file{options.hpp:503}）。析取：单个二元变量
+$x_j \le 0 \lor x_j \ge 1$（\file{bc\_cglp.hpp:17--20}）。主 LP
+（\code{build\_cglp\_lp}，\file{bc\_cglp\_model.cpp:89--212}）把
+源 LP 规范化为 $Mx \le d$，共 $R = m_{\mathrm{ineq}} + 2 m_{\mathrm{eq}} +
+\#\{\text{finite bounds}\}$ 行；变量为
+$(\alpha \in \R^n, \beta, \lambda^0 \in \R_+^R, \gamma_0, \lambda^1 \in
+\R_+^R, \gamma_1)$，$n_{\mathrm{vars}} = n + 2R + 3$；约束为
+$\alpha + M^\top \lambda^0 + e_j \gamma_0 = 0$、
+$\alpha + M^\top \lambda^1 - e_j \gamma_1 = 0$、
+$\beta + d^\top \lambda^0 \le 0$、
+$\beta + d^\top \lambda^1 - \gamma_1 \le 0$，以及乘子求和
+规范化 $\sum \lambda^0 + \gamma_0 + \sum \lambda^1 + \gamma_1 = 1$
+（硬编码；\code{cglp\_normalization\{0\}} 存在但未使用，:171--179）；
+目标 $\min \alpha^\top x^* - \beta$（:119--123）。每轮对至多
+\code{cglp\_max\_candidates\{5\}} 个最分数的二元变量，
+各由内部单纯形\emph{冷启动}求解一次，\code{max\_iter}$=40\,000$
+（\file{bc\_cglp.cpp:263--274}）。
+插值回退每个候选最多花费 32 个辅助冷启动 LP
+（8 个变量 $\times$ 4 个侧向 LP，:49--109），外加强化阶段的
+验证 LP（:158--220）。代码自己记录了这场膨胀：
+\emph{``costs >4\,s/candidate and blows the time budget''}
+（\file{bc\_cglp.cpp:292--294}）。仅靠默认关闭的开关和
+2\,s 的轮次限制来缓解（\code{cglp\_time\_limit\_sec\{2.0\}}，\file{options.hpp:513}）。
+
+\subsection{割选择与过滤}
+\label{sec:cut-selection}
+\begin{itemize}[nosep]
+\item \textbf{效能}处处为 $= \mathrm{violation}/\|a\|_2$；
+  阈值：GMI \code{gmi\_min\_efficacy}$=10^{-3}$
+  （\file{options.hpp:102}；在类 SCUC 根节点上自动放宽至 $10^{-4}$，
+  \file{bac.cpp:14079}），basis-MIR $5\cdot10^{-4}$，cMIR 内部门槛
+  $10\cdot\mathrm{feastol}$；模型行各族按\emph{未归一化}
+  违反量 $>10^{-7}$ 准入（覆盖 :5443，流覆盖 :5772，隐含界 :6033，
+  行 MIR :6135，团 :7888）——这一不一致让缩放糟糕的行
+  占据主导；SCIP 则完全按效能过滤。
+\item \textbf{平行度}：$|\cos| = |a^\top b|/(\|a\|\|b\|)$
+  （\code{abs\_cosine\_similarity}，:478--487），在
+  单纯形表/路径/零半/basis-MIR 的选择中，
+  $\ge$ \code{gmi\_max\_parallelism}$=0.90$（\file{options.hpp:104}）即拒绝；
+  覆盖、流覆盖、隐含界、行 MIR 与团割各族\textbf{没有}跨割
+  正交性过滤。
+\item \textbf{密度}：$\nnz \le \lceil 0.35\,n \rceil$
+  （\code{gmi\_max\_density}，\file{options.hpp:103}），在 very-large/large
+  根节点上自动收紧至 $0.10/0.15$（\file{bac.cpp:14028,14034}），
+  在类 SCUC 上放宽至 $0.50$（:14080）。
+\item \textbf{GMI 排序得分} $= \mathrm{efficacy}\cdot(1 +
+  \code{gmi\_activity\_weight}\cdot\mathrm{activity})$，
+  \code{gmi\_activity\_weight}$=0.5$（\file{options.hpp:107}；
+  \file{bc\_cuts.cpp:6773--6774}）。
+\item \textbf{自适应割平面族门控}：对每族在 5 轮循环缓冲上的
+  逐轮效能做滑动平均；一旦轮数 $\ge 5$ 且滑动均值 $< 10^{-3}$，
+  该族即被\emph{永久}禁用
+  （\code{CutFamilyStats}，\file{bc\_types.hpp:655--705}）。这是单向开关：
+  一个不走运的根节点阶段（例如无基的 IPM）会让 MIR/覆盖
+  在整个求解中被禁用；所度量的效能是重解前那一点的
+  违反量——正是这些割被设计要切掉的那一点——而非界改进，
+  因此该门控奖励的是自我印证的割平面族。
+\end{itemize}
+
+\subsection{割池机制}
+\label{sec:cut-pool}
+\code{PoolCut}（\file{bc\_types.hpp:317--327}）：一个拥有所有权的
+\code{Eigen::SparseVector<double>}（私有堆缓冲）、\code{rhs}、
+\code{age}、\code{best\_efficacy}（\textbf{声明时无初始化器}，
+:321——潜在的不确定值缺陷；目前所有聚合初始化点都给它赋了值，
+故暂时蛰伏）、\code{norm}、\code{hash} 及标志位。
+\code{CutPool}（\file{bc\_pools.hpp:569--1002}）：容量
+\code{cut\_pool\_max\_size\{2000\}}，\code{cut\_pool\_max\_age\{50\}}
+（\file{options.hpp:206--207}）。
+
+\begin{finding}[割池：哈希计算了却从未使用；老化机制是死的；FIFO 驱逐]
+\label{find:cut-pool}
+\code{add()} 计算 \code{sparse\_cut\_hash}（\file{bc\_pools.hpp:622}，
+\textbf{V}），随后却以\textbf{全池线性扫描}来去重：对每个候选
+测试支撑集相等外加一次稀疏点积（:624--654）——
+每次插入 $O(P \cdot \nnz)$，$P$ 可达 $2\,000$，而存储的哈希
+早已为 $O(1)$ 桶索引付过代价。\code{age\_and\_purge}（:976--994）
+\textbf{没有任何调用点}（经 grep 在 \file{src/} 上验证）；每条割
+出生即 \code{initial\_cut\_age() = max(0, 50-5) = 45}（:595）——
+出生时已过期 90\%——而且由于年龄从不变化，池满时总是经
+\code{max\_element}（:656--665）驱逐最早\emph{插入}的割，
+即盲目的 FIFO，毫无基于效能的保留。\code{find\_violated}
+是每节点一次无索引全扫描（:955--973）。SCIP/HiGHS 使用
+哈希索引的池，并按年龄/效能驱逐。
+\end{finding}
+
+该池还兼任传播引擎（\code{propagate\_with\_reasons}，
+\file{bc\_pools.hpp:687--951}）；其热循环对每条活跃割每轮做两次完整的
+稠密 $O(n)$ 拷贝（:806--807），并为构造原因对每个被收紧的
+列重新遍历整行（最坏情形每条割 $O(\nnz^2)$，
+:832--848），每轮重扫整个池（:923--948；由一个可选的
+\code{pending\_cols} 过滤器缓解，:724--741）。
+
+\subsection{根节点与树内割策略}
+\label{sec:root-tree-cuts}
+根节点：至多 \code{root\_cut\_rounds\{10\}} 轮
+（\file{options.hpp:99}），按规模缩减（$m>35\,000$ 时为 0，
+$m>15\,000$ 或 $m>12\,000$ 时 $\le 3$，$m>2\,000$ 时 $\le 6$，
+\file{bac.cpp:14017--14040}，\file{options.hpp:840--843}）；每轮预算
+\code{cuts\_per\_round\{20\}}（\file{options.hpp:100}）——按规模分层的
+每轮上限（\code{cuts\_per\_round\_medium/large/very\_large}$=60/40/30$，
+\file{options.hpp:844--846}）\textbf{在默认值下形同虚设}
+（$\min(20,30)=20$）；只有轮数真正有约束力。停滞退出：
+连续 \code{root\_cut\_max\_stalls\{2\}} 轮
+改进量$/\mathrm{denom} < $ \code{root\_cut\_stall\_tol\{1e-4\}}
+（\file{bac.cpp:14788--14795}）。在
+\code{root\_cut\_reject\_nonmoving\_rows\{true\}}（\file{options.hpp:382}）下，
+界提升 $\le$ \code{root\_cut\_min\_bound\_lift\{1e-6\}} 的一轮会被
+\emph{整体回滚}（\code{truncate\_ineq\_rows}）并跳出循环
+（\file{bac.cpp:14398--14430, 14740--14756}）；各行会被审计
+有效性/是否切掉现任解（\code{root\_cut\_audit\_validate\_rows\{true\}}）。
+每轮还要为界传播收紧检查制作\textbf{两份 $A$ 与 $A^{eq}$ 的
+完整行主序拷贝}（\file{bac.cpp:14398--14405}）。
+每轮重解：以手工扩展的基热启动单纯形（割松弛
+插入在 ineq/eq 边界处，:14536--14634），大根节点则用 IPM。
+
+树内：节点割生成要求 \code{child.depth <= max\_cut\_depth}，而
+\code{max\_cut\_depth\{0\}}（\file{options.hpp:101}；
+\file{bac.cpp:33259}）——\textbf{树内分离默认是关闭的}
+（根节点的子节点深度 $\ge 1$）。节点上的割池再分离被硬性门控在
+$A.\mathrm{rows} \le$ \code{pool\_cut\_row\_threshold\{500\}} 且深度
+$\le$ \code{pool\_cut\_depth\_limit\{3\}}（\file{bac.cpp:33179}，
+\file{options.hpp:550--551}）。既没有 SCIP/HiGHS 那种基于频率的分离
+（每 $k$ 个节点一次），也没有效能触发的节点分离；出于同一原因，
+割工作线程默认也是死的
+（\code{use\_cut\_worker = ... \&\& opt.max\_cut\_depth > 0}，
+\file{bac.cpp:18096}）。
+
+%=====================================================================
+\section{分支、节点选择与原始启发式}
+%=====================================================================
+
+\subsection{伪成本模型与分支规则}
+\label{sec:branching}
+默认 \code{BranchingStrategy::Pseudocost}（\file{options.hpp:113}；
+备选为 MostInfeasible、FirstFractional，\file{enums.hpp:12--16}）。
+对每个变量与每个方向，\code{PseudoCost}（\file{bc\_types.hpp:392--521}）
+跟踪和、平方和、计数、推断计数、截断计数与冲突分数。观测值为
+B\'enichou 归一化的单位增益
+\begin{equation}
+\psi^\pm_j \;=\; \frac{\Delta \mathrm{obj}}{\max(10^{-9},\ |\mathrm{frac}\_\mathrm{dist}|)}
+\qquad (\code{normalized\_pseudocost\_gain},\ \file{bc\_types.hpp:525--528}),
+\end{equation}
+由强分支探测与已实现的子节点 LP 共同更新
+（\code{update\_pseudocost\_from\_branch\_evidence}，
+\file{bc\_branching.cpp:296--318}）。选择时的估计为 95\% 下置信界
+\begin{equation}
+\mathrm{LCB} = \max\!\big(10^{-6},\ \bar\psi - 1.96\,\sigma/\sqrt{\mathrm{cnt}}\big)
+\qquad (\file{bc\_types.hpp:430--444}),
+\end{equation}
+未观测时取 $\bar\psi \equiv 1.0$（:409--411），历史乘子为
+$1 + 0.05\ln(1+\mathrm{inference}) + 0.25\cdot\mathrm{cutoff} +
+0.05\ln(1+\mathrm{conflict})$（:471--477）。方向得分：
+$|\mathrm{dist}| \cdot \max(\mathrm{LCB} + \mathrm{offset}, 10^{-6}) \cdot
+\mathrm{history}$（\file{bc\_branching.cpp:159--187}）；变量得分为
+\textbf{乘积} $s_j = s_j^- \cdot s_j^+$
+（\code{compute\_branch\_product\_score}，:189--199）；候选按
+$\ln(1 + \max(0, s_j))$ 排序，并叠加一层软分支先验（:483--484）。
+方差采用教科书中已知不稳定的 $E[x^2] - E[x]^2$ 公式
+（\file{bc\_types.hpp:414--426}，在 0 处截断）——尽管 :391 处有
+“Welford 风格”的注释，对大规模累加和仍存在数值风险。
+
+\paragraph{可靠性分支/强分支（实际的默认行为）。}
+在 \code{Pseudocost} 下，当候选预算非零时，搜索树在
+$\mathrm{depth} \le 6$ 处执行带强分支探测的可靠性分支
+（\file{bac.cpp:34906}）：一个变量在每个方向都累计
+$\ge$ \code{probe\_reliability\{2\}} 次观测之前被视为“不可靠”
+（一旦两个方向都 $\ge 1$，则减半至 $\max(2, r/2)$，:34910--34913）；
+最多探测 $\min(\code{probe\_max}, |\mathrm{unreliable}|)$ 个候选
+（根节点处 $\le 3$，树内 $\le 1$--$2$，:34926--34928；
+\code{probe\_reliability\{2\}}、\code{probe\_max\_candidates\{3\}}，
+\file{options.hpp:537--538}）。\textbf{每次探测都是对 \code{tree\_base\_sf}
+的深拷贝做两次完整的单纯形求解}（\file{bac.cpp:35017--35029}），且没有
+探测专属的迭代上限——HiGHS/SCIP 则是在\emph{现役} LP 上进行强分支，
+并设置较小的迭代限制与对偶界截断。被选中子节点的探测 LP 会被保留并
+直接用作实际的子节点 LP（\file{bac.cpp:30902--30909}，
+\code{strong\_branch\_cache\_exact\_hits}）；其余探测结果仅用于填充
+伪成本。探测还可能附带产生现任解（:34958--34989）。
+
+\paragraph{方向与估计。}
+\code{choose\_up\_branch\_first}（\file{bc\_branching.cpp:201--227}）：
+当存在现任解且恰好有一个方向已被证明截断时，最后才分支到截断一侧；
+无现任解时，下降到预测得分较小的一侧。节点估计
+（\code{compute\_node\_estimate}，:969--1005）：
+\begin{equation}
+\mathrm{est} = \mathrm{bound} + \sum_{j\ \mathrm{fractional}} \min(s_j^-, s_j^+)
+\quad (\code{Sum}\ \text{aggregation, default};\ \code{Maximum}\ \text{takes the max}).
+\end{equation}
+
+\subsection{节点选择}
+\label{sec:node-selection}
+默认 \code{NodeSelection::Hybrid}（\file{options.hpp:114}）：在获得首个
+现任解之前采用 DFS，之后转为估计引导的最佳优先（\file{enums.hpp:19--23}）。
+优先级键（\file{bc\_utils.hpp:76--84}，\textbf{V}）：
+\begin{equation}
+\mathrm{key}(\nu) \;=\; \tfrac12\big(\mathrm{bound}_\nu +
+\max(\mathrm{bound}_\nu, \mathrm{est}_\nu)\big),
+\label{eq:priority}
+\end{equation}
+若下界节点近期未被弹出，则每 \code{kHybridBestBoundPeriod}$=10$ 个叶子
+强制弹出一次最佳界节点（\file{bc\_utils.hpp:314--317,1865}）。一旦存在
+证明有效的现任解（“证明尾部模式”），弹出策略切换为纯最佳界
+（\file{bac.cpp:34199--34201, 23468--23477}）。
+
+\begin{finding}[开放节点队列：一个哈希映射加三个红黑树索引再加一个 vector，全靠手工保持一致]
+\label{find:queue}
+顺序版 \code{NodeQueue} 将每个 \code{Node} \emph{按值}存储在
+\code{std::unordered\_map<int64\_t, Node>} 中，外加\textbf{三个}
+\code{std::multiset<pair<double,int64\_t>>} 索引（\code{priority\_}、
+\code{bounds\_}、\code{dfs\_bounds\_}）以及一个 \code{std::vector<int64\_t>
+dfs\_}（\file{bc\_utils.hpp:1850--1854}，\textbf{V}）。每次弹出/删除都要
+\emph{为每个索引}支付 $O(\log N)$，而 DFS 侧的删除执行
+\code{dfs\_.erase(std::remove(...))}——即每次队列变更都要做一次
+$O(|\mathrm{dfs}|)$ 线性扫描（\file{bc\_utils.hpp:372}，\textbf{V}；
+线程安全队列中亦如此，\file{bc\_threading.hpp:772,884}）。
+\code{std::multiset} 为每个索引中的每个条目分配一个树节点——在二叉堆
+本已足够之处做指针追逐（\file{bc\_utils.cpp:1306--1354} 中遗留的
+\code{std::priority\_queue} 渐近性能更优，且仍然存在）。每次压入还要
+额外构建一个 $O(\#\mathrm{branchable})$ 的\textbf{\code{std::string} 域签名}
+用于去重（\file{bc\_utils.hpp:1945--1986}；线程安全孪生版见
+\file{bc\_threading.hpp:709--750}）——每个可分支列 $\approx$18 字节，
+并在每次节点插入时被哈希进另外两个哈希映射。并行版
+\code{ThreadSafeNodeQueue} 在\textbf{单一全局互斥锁加条件变量}之下
+复制了同样的四索引设计（\file{bc\_threading.hpp:646--1141}），其
+\code{count\_clause\_hits} 还会\emph{在持有队列锁的同时}对每个排队节点的
+稠密界数组执行一次 $O(N \cdot L)$ 扫描（:1105--1134）。
+\end{finding}
+
+\subsection{原始启发式}
+\label{sec:heuristics}
+根节点启发式（由 \code{!root\_gap\_closed()} 及规模/现任解跳过标志门控；
+顺序依据 \file{bac.cpp:17984--17991} 处的泵窗口轨迹）：
+\begin{enumerate}[nosep]
+\item \textbf{可行性跳跃}（:16980--17085；\code{enable\_feasibility\_jump\{true\}}，
+  $\le 512$ 次翻转，3 次修复尝试，\file{options.hpp:195--197}）：通过二元
+  翻转降低行不可行性，并辅以固定整数 LP 修复。
+\item \textbf{快速取整}（:17100--17243）：具备 UC 意识的承诺取整加
+  锁定计数偏置（已关闭），随后运行固定整数修复 LP；若时间预算已消耗
+  $>25\%$ 则跳过。
+\item \textbf{线搜索中心取整}（:17246+；默认关闭）：
+  HiGHS 风格的 tryRoundedPoint，以解析中心为锚点。
+\item \textbf{固定整数可行性泵}（:17373--17458；
+  \code{use\_feasibility\_pump\{true\}}，$\le$
+  \code{feasibility\_pump\_iters\{5\}} 次迭代，\file{options.hpp:359}）：
+  每次迭代求解一个固定整数 LP。
+\item \textbf{目标可行性泵}（:17461--17970）：面向 $m > 10^4$ 的
+  Fischetti--Glover / Achterberg--Berthold 风格；在热启动的原始单纯形基上
+  切换 L1 距离目标；基于 Zobrist 哈希、历史长度为 3 的循环检测；
+  $\alpha$ 重启；阶段 3 的重启上限。
+\item \textbf{阶段 3 子 MIP}（:17840--17970）：在固定受限模型上以
+  \code{\_is\_stage3\_submip} 递归调用 \code{branch\_and\_cut\_lp}，
+  预算 0.25--2.0\,s。
+\item \textbf{LP 潜泳}（:19360--20280；\code{max\_dive\_lps\{60\}}，
+  \file{options.hpp:360}）：以约化成本引导的贪婪固定，采用热启动对偶
+  单纯形；大规模/超大规模根节点获得\emph{零个}潜泳 LP，除非低分数性
+  救援条件成立（:19403--19419）。潜泳循环每一步都重建并重新排序完整的
+  分数候选向量（:19482--19500）——最多 500 步时复杂度为
+  $O(n \cdot \mathrm{steps})$。
+\item \textbf{渐进取整}（:18190--19245；
+  \code{use\_progressive\_rounding\{true\}}）：结合约束传播的批量固定、
+  自适应批量大小与成组翻转打磨。
+\item \textbf{根节点 LNS}（:20300--20460；\code{enable\_lns\{true\}}）：将前
+  \code{lns\_fix\_ratio\{0.80\}} 比例的分数变量固定在现任解取值处，
+  求解受限子 MIP（\code{lns\_node\_limit\{500\}}、
+  \code{lns\_time\_limit\{5.0\}}，$\le$ \code{lns\_max\_iters\{3\}}）——
+  且受限模型是\textbf{每次迭代一份完整 LP 拷贝}
+  （\code{restricted.linear\_part = base\_lp;}，:20381）。
+\item \textbf{内嵌 HiGHS 根子 MIP / RENS}（:20809--20960）以及
+  残差 RENS 前沿子 MIP（:21251--21760）。
+\end{enumerate}
+树内启发式：逐子节点的取整检查与带预算的取整 LP 修复（按深度分级的
+迭代上限 50/150/500）；每 \code{crossover\_heuristic\_freq\{100\}} 个节点
+执行一次\textbf{交叉}，组合解池中最好的两个解；每
+\code{rins\_frequency\{200\}} 个节点执行一次\textbf{廉价 RINS}——仅做
+LP/现任解一致取整；\file{bac.cpp:35549} 处的注释为一个近终止门控
+保留了“完整 RINS 子 MIP”，而该门控在树阶段\textbf{并不存在}
+（:35549 与循环结束 :35645 之间没有此类代码）。现任解局部分支打磨
+默认关闭，仅在 $\sim 3\times$\code{gap\_tol} 范围内作为终止打磨运行
+（:29285--29400）。
+
+%=====================================================================
+\section{域传播、冲突学习与目标传播}
+%=====================================================================
+
+\subsection{BCDomain：增量传播器}
+\code{BCDomain}（\file{bc\_domain.hpp}）是真正意义上的 HiGHS
+\code{HighsDomain} 对应物：稠密的 \code{lb\_/ub\_}、带无穷计数器的
+逐行缓存活动度、由 $(j, \ell^{\mathrm{old}}, u^{\mathrm{old}},
+\ell^{\mathrm{new}}, u^{\mathrm{new}})$ 构成的轨迹，以及标记行工作列表。
+\code{change\_bound} 执行 $O(\nnz_j)$ 的增量活动度更新
+（:154--186）——渐近复杂度正确。它用于修复 LP 流水线，但\textbf{不}
+用于树节点域（树节点域是 \code{Node} 内部的完整拷贝）。
+
+\begin{finding}[BCDomain 在回溯时破坏了自身的增量性，并可能静默截断不动点]
+\code{restore()} 回滚轨迹后\textbf{重新标记所有行}
+（\file{bc\_domain.hpp:139--143}，\textbf{V}），因此下一次
+\code{propagate()} 实际上会重扫几乎所有行；\code{mark\_propagate} 的
+可收紧性测试被硬编码为 \code{true}（:335--342：
+\code{||\ /*tightenable*/\ true}），因此几乎每个有限界行在每次触碰时
+都有资格参与。而 \code{propagate()} 在访问 \code{max(64,\ 8*m)} 行后
+停止（:194，\textbf{V}），\emph{在仍有行排队的情况下返回成功}——
+传播被静默地截断，调用方无法察觉。HiGHS 则循环直至队列排空。
+\end{finding}
+
+\subsection{带理由跟踪的逐节点传播}
+\code{propagate\_node\_domain}（\file{bc\_utils.cpp:6302--6350}，实现位于
+:5764--6298）是逐节点不动点引擎（“每次节点 LP 求解前都要经过的热路径”，
+\file{bc\_utils.hpp:3229--3233}）：调用方构建的
+\code{RowPropagationIndex}（良好设计）、冲突池重放、按变更变量触发的
+团/蕴含弧、\code{max\_passes = 2*rounds + 4}（默认
+\code{bound\_propagation\_rounds\{3\}} $\Rightarrow$ 10 趟）。
+
+\begin{finding}[每个节点都要支付的 $O(\nnz_{\mathrm{row}}^2)$ 理由 id 收集与无界 arena 增长]
+\label{find:reason-arena}
+对于被访问行的\emph{每个非零元 $j$}，传播器都会重扫\emph{整行}以收集
+理由 id（\file{bc\_utils.cpp:6134--6141} 为不等式路径；:6199--6208 与
+:6235--6244 为等式路径，后者还在逐非零元循环\emph{内部}声明
+\code{std::vector<int> ids;}，每个非零元一次堆分配，与该文件自己在
+:6123--6125 所做的提升修复相矛盾），随后 \code{ReasonArena::merge\_ids}
+对合并后的文字排序/去重，并\textbf{每次追加一个全新的堆分配子句}
+（:5654--5672），完全没有复用/去重——每行访问、每个非零元产生一个
+新子句。这一切\emph{即使在理由从不被消费时}也会运行
+（\code{reason\_bounds\_out == nullptr}；只有最后的压入被门控，:5885）。
+随后 \code{apply\_bound} 在每次收紧时拷贝合并后的子句
+（\code{auto reason = arena.get(...)}，:5886,5926——是 \code{auto} 而非
+\code{auto\&}）。SCIP/HiGHS 在域轨迹中仅为每个界存储一个理由\emph{指针}。
+每次调用传播器还会分配 $\sim$7 个大小为 $n$/$m$ 的 vector 与 deque
+（:5786--5794），并支付 2 次时钟读取加 8 个原子 RMW 性能计数器，且
+始终开启（:35--44、:5784、:5860--5866）。
+\end{finding}
+
+\subsection{冲突池：没有监视文字}
+\begin{finding}[冲突传播将整组子句重扫至不动点；去重忽略了已存储的哈希]
+\label{find:conflict-pool}
+\code{ConflictPool::propagate\_impl}（\file{bc\_pools.hpp:443--541}，
+\textbf{V}：:452--458）以 \code{while(changed)} 循环遍历\emph{所有}
+子句——每个不动点轮次都是一次 $O(P \cdot L)$ 扫描，且每次扫描都为
+每个子句堆分配一个 \code{reason} 向量；\code{has\_conflict} 是每个节点
+一次的完整 $O(P \cdot L)$ 扫描（:402--419）。\code{add()} 先做规范化
+（$O(L \log L)$），再针对最近 \code{max\_scan}$=512$ 个子句运行有界
+冗余检查（良好的缓解措施：\code{scan\_begin}，:187--190），随后对
+\emph{整个}池做\emph{无界}的精确重复扫描，逐元素比较哈希与文字向量
+（:295--308），然后进行 FIFO 驱逐
+\code{clauses\_.erase(clauses\_.begin())}（:317）——这是对拥有堆内存的
+子句的一次 $O(P)$ memmove，且\textbf{没有基于活跃度/LBD 的子句老化机制}
+（自 MiniSat 以来的 SAT 求解器标准做法）。没有变量$\to$子句索引，
+没有监视文字：最先进的冲突分析在每次界变更时只需
+$O(\text{touched clauses})$。并行版 \code{SharedConflictPool} 增加了一个
+无锁的 16\,384 位、$k{=}3$ 的 Bloom 预过滤器
+（\file{bc\_threading.hpp:368--491}）——好主意——\textbf{但子句驱逐时
+该过滤器从不清空}，因此假阳性率单调增长，并会静默丢弃真正新颖的子句
+（:436--439 注释中的 $\sim$0.5\% 假阳性数字是\emph{干净过滤器}下的估计）。
+\end{finding}
+
+\subsection{蕴含图与变量界表}
+\code{BinaryImplicationGraph}：以
+\code{std::vector<std::vector<Implication>}> 表示 $2n$ 个文字上的邻接表
+（\file{bc\_utils.hpp:3001}）；\code{add\_implication} 通过在触发桶内
+线性扫描来去重（\file{bc\_utils.cpp:5299--5304}）——在 250\,000 条蕴含的
+上限下存在 $O(E^2)$ 最坏情况构建风险
+（\file{bc\_implied\_bounds.hpp:131--133}）；\code{propagate} 是每次文字
+最多触发一次的 BFS，但会分配两个大小为 $n$ 的 seen 数组，且每次调用
+都通过扫描\emph{全部 $n$ 个变量}来播种（:5319--5344），而它在
+\code{NodeQueue::prune\_by\_implications} 中对每个排队节点都会被调用
+（\file{bc\_utils.hpp:3140}）——复杂度为
+$O(\#\mathrm{nodes} \cdot (n{+}E))$，且没有基于实际界变更的增量播种。
+\code{VariableBoundTable}：逐列条目列表，对整数目标做互补 MIR 强化
+（$f_0 \in [0.005, 0.995]$，\file{bc\_utils.cpp:5412--5433}）并支持按
+触发替换（:5459--5468）。隐含整数检测运行 $\le 8$ 趟的不动点
+（\file{bc\_implied\_bounds.cpp:56}）；隐含列界运行 $\le$ \textbf{16 趟
+对所有行的完整扫描}，且没有工作列表（:554--568，跳过非零元数 $>512$
+的行）；逐条目的活动度移除为每行 $O(k^2)$（:514--548）。
+
+\subsection{目标传播}
+纯头文件实现（\file{bc\_objective\_propagation.hpp}，2\,368 行）：
+项（term）即带成本的变量；由 $\le$ 行与团表构造“至少一个有利”的
+团划分；由行得到隐含贡献事件（上限：\code{kMaxRowNnz}$=32$、
+\code{kMaxRowLiterals}$=24$、\code{kMaxEvents}$=100\,000$，:558--560），
+其中每个目标的成对事件为 $O(L^2)$（:764--772）；单文字事件获得互补
+MIR 强化。\code{compute\_activity}：按符号取
+$\underline{\mathrm{act}} = \sum_j c_j \cdot
+(\ell_j\ \mathrm{or}\ u_j)$，并施加团划分修正
+$\mathrm{nonfav\_sum} - \max(0, \mathrm{best\_replacement\_delta})$
+（:1035--1037）。\code{propagate}：最多\textbf{4 轮}，每轮重新计算
+完整活动度并\emph{线性扫描所有事件}（:1792--1833）；若
+$\underline{\mathrm{act}} > \mathrm{cutoff}$ 则剪枝（:1847）；逐项
+截断收紧 $x_j \le (\mathrm{cutoff} - (\underline{\mathrm{act}} -
+\mathrm{contrib}_j))/c_j$（:2229--2287）。
+\code{implied\_events\_by\_literal} 索引被构建（:757,893）但\textbf{从未被
+propagate() 使用}——它恰好只在一个专门位置被引用
+（\file{bac.cpp:32071--32115}）；事件驱动的触发本可将复杂度降为
+$O(\text{touched events})$。
+
+%=====================================================================
+\section{并行化}
+\label{sec:parallel}
+%=====================================================================
+
+\subsection{设计}
+状态包 \code{ConcurrentTreeState}
+（\file{bc\_concurrent\_tree\_state.hpp:22--78}）：\code{SharedCutPool}
+（shared\_mutex）、\code{SharedConflictPool}（shared\_mutex 加 Bloom
+过滤器）、\code{SharedSolutionPool}、\code{SharedIncumbent}、
+\code{ThreadSafeNodeQueue}、\code{CutRequestQueue}（容量
+\code{cut\_worker\_queue\_size\{64\}}）、\code{AtomicBCStats}（热点计数器
+正确地做了缓存行隔离，\file{bc\_threading.hpp:1148--1151}）、
+\code{WorkStealingPool}（按工作线程的互斥锁保护双端队列，容量
+\code{work\_steal\_deque\_size\{256\}}）、\code{SharedImplicationGraph}
+（仅追加的弧向量加代际计数器，带无锁读快路径——干净的设计——但
+\code{publish} 存储批次时不去重也不驱逐，:1222--1227：无界增长），
+以及一个 \code{DeterministicTurnToken}。
+
+\textbf{角色}（\file{bc\_threading.hpp:240--244}）：Diver（DFS 加启发式）、
+Prover（最佳界加深度 $\le$ \code{max\_plunge\_depth\{10\}} 处的可靠性
+分支）、IPMDiver（当 $m > $ \code{hybrid\_ipm\_threshold\{15000\}} 时用
+内点法（IPM）求解节点 LP）。分配方式：混合模式下 tid 0 为 IPMDiver，
+最后一个线程为 Prover，其余均为 Diver（\file{bac.cpp:35717--35720}）。
+
+\textbf{爬坡启动：没有。}根 LP、割平面与所有根启发式均串行运行；线程
+仅在进入搜索树时启动（\file{bac.cpp:35655--35750}），此时共享队列中只有
+一个根节点；提前启动的重叠被硬性禁用
+（\code{const bool allow\_concurrent\_tree = false;}，:18025--18026）。
+启动时，$n-1$ 个探索线程以 10\,ms 的条件变量超时对单节点队列空转轮询，
+直到首次分支产生子节点；每次弹出失败时，任何解池规模 $\ge 2$ 的探索
+线程都会运行一个\emph{不受限流}的 $O(\nnz)$ 交叉启发式
+（\file{bc\_parallel.cpp:1086--1113}）——在工作饥饿状态下，$k$ 个线程以
+100\,Hz 空转并执行完整 LP 检查。
+
+\textbf{工作分配}：Diver 将优选子节点压入本地双端队列，并把兄弟节点
+溢出到全局队列（\file{bc\_parallel.cpp:1505--1517}）；窃取时从随机受害者
+处取走最旧的（队首）节点；获得现任解后，本地双端队列\emph{在每次循环
+迭代}都被排空到全局最佳界前沿
+（\code{drain\_local\_dfs\_to\_proof\_frontier}，:1021--1048）。
+
+\begin{finding}[每个工作线程每次迭代都在全局互斥锁下进行 $O(Q)$ 队列扫描]
+\label{find:queue-sweeps}
+获得现任解后，\code{drain\_local\_dfs\_to\_proof\_frontier} 调用
+\code{node\_queue.prune\_by\_incumbent(...)}——在全局锁下做一次完整的
+$O(Q)$ 扫描，并对每个被剪节点从四个索引结构中逐一删除
+（\file{bc\_threading.hpp:1038--1057}）——这发生在\emph{每次}探索循环
+迭代（\file{bc\_parallel.cpp:1048}），并在每次子节点求解后再次发生
+（:1427）。再叠加每次弹出的 $O(|\mathrm{dfs}|)$ 删除
+（发现~\ref{find:queue}），一次求解过程中的队列维护总开销为 $O(Q^2)$，
+且全部串行化在那把每个工作线程执行 push/pop/lower\_bound 都要经过的
+互斥锁上。最先进的设计在弹出时惰性剪枝（该代码\emph{同样}做了惰性剪枝，
+\file{bc\_parallel.cpp:1116}——这次扫描与其自身的惰性检查是冗余的）。
+1\,ms 监控线程对同一批锁持续施压（\file{bac.cpp:35766--35796}：每趟都要
+锁全局队列、\emph{每个}工作窃取双端队列以及活跃界互斥锁）。
+\end{finding}
+
+\textbf{现任解广播}：先对目标值做 CAS，再在互斥锁保护下拷贝 $x$
+（\code{SharedIncumbent::try\_update}，\file{bc\_threading.hpp:540--551}）；
+读取方使用避免撕裂读的 \code{snapshot()}（:577--584）。
+
+\begin{finding}[SharedIncumbent 先发布目标值再发布解向量]
+对 \code{obj} 的 CAS 先于互斥锁保护下的 \code{x = new\_x}
+（\file{bc\_threading.hpp:541--548}）：两个并发更新者可能交错执行，
+使得存储的 $x$ 与存储的 \code{obj} 分属不同的目标值——解池随后会
+保存不匹配的 $(x, \mathrm{obj})$ 对（\file{bc\_parallel.cpp:1107--1109}）。
+仅限启发式一侧（对证明的正确性没有影响），但这确实是一个发生在
+其注释声称保持一致性的结构中的真实竞态。
+\end{finding}
+
+\textbf{伪成本同步}：一把全局 \code{pc\_mtx} 守护一个稠密的全列
+\code{std::vector<PseudoCost>}
+（\file{bc\_concurrent\_tree\_state.hpp:34--35}）——紧凑的仅含可分支列的
+表是存在的（\code{CompactPseudoCostTable}，\file{bc\_types.hpp:578--628}），
+但只在遗留的顺序路径中使用。Prover 每个节点都在锁下深拷贝\emph{整个}
+表，在本地探测，然后在同一把锁下按所有可分支索引合并回去
+（\file{bc\_parallel.cpp:1198--1269}）——形成了一种设计内生的护送
+（convoy）效应：Diver 为读取分数值（:1276--1280）和进行逐节点
+PCUpdate 合并（:1454--1461）也要获取同一把互斥锁。
+
+\textbf{割平面共享}：探索线程把 \code{CutRequest} 发送给唯一的割平面
+工作线程（\file{bc\_parallel.cpp:966--979}）；该工作线程仅为深度 0 的
+请求生成单纯形表割，且只把根割导出到共享池（节点受限的 Gomory 割
+“在共享池中将是不健全的”，:1595--1640）——默认仅有根节点流量。
+每个 \code{CutRequest} 都要移动一整个 \code{SimplexResult}——CSC+CSR
+矩阵\emph{以及}稠密的 \code{Eigen::MatrixXd basis\_inverse}
+（\file{dual\_simplex.hpp:315--327}；在 $m \le 4096$ 时物化，
+\file{dual\_simplex.cpp:1603--1617}）——外加三个稠密向量，而拷贝发生在
+队列容量检查\emph{之前}，该检查又经常丢弃请求
+（\file{bc\_parallel.cpp:968--978}，\code{cut\_requests\_dropped} 计数器）。
+
+\textbf{冲突/蕴含共享}：总开关
+\code{share\_conflict\_learning\_across\_threads\{false\}}——刻意关闭
+（\file{options.hpp:228}，注释警告存在跨线程作用域错误）；蕴含共享开启
+（\code{share\_implications\_across\_threads\{true\}}，批量 8）。
+
+\textbf{确定性}：默认 \code{deterministic\_parallel\{false\}}
+（\file{options.hpp:334}）；即使开启，弹出与压入之间的 LP 求解仍存在
+竞态，因此现任解发现的时机——以及随之而来的剪枝、伪成本合并顺序
+（浮点加法不具结合律）与搜索树形状——都不是完全确定的。
+
+%=====================================================================
+\section{终止与间隙处理}
+%=====================================================================
+\label{sec:termination}
+
+相对间隙：$(z_{\mathrm{inc}} - z_{\mathrm{lb}})/\max(1,
+|z_{\mathrm{inc}}|)$（\file{bac.cpp:33956--33957}）。关键的默认值是
+\code{require\_tree\_exhaustion\_certificate\{true\}}
+（\file{options.hpp:253--258}）：每个 \code{rel\_gap <= gap\_tol} 出口
+都被 \code{!opt.require\_tree\_exhaustion\_certificate} 门控
+（\textbf{V}：\file{bac.cpp:33970--33973}；相同的守卫还出现在
+:34209--34213 与 :35600--35605），使得 \code{rel\_gap <= 1e-9} 成为
+唯一基于间隙的停止条件（:33968--33969）：
+\begin{lstlisting}[style=code]
+const bool proven_optimal_exact = incumbent_proof_valid && rel_gap <= 1e-9;
+if (proven_optimal_exact ||
+    (root_gap_certificate_ready && incumbent_proof_valid &&
+     !opt.require_tree_exhaustion_certificate &&
+     rel_gap <= opt.gap_tol)) { ... }        // bac.cpp:33968-33973
+\end{lstlisting}
+\textbf{默认情况下，求解器实际上必须耗尽整棵树（或证明界已与现任解
+吻合至 $10^{-9}$）；面向用户的 \code{gap\_tol} 几乎是失效的}——
+Gurobi/SCIP/HiGHS 都会在 MIP 间隙处停止。相关：
+\code{incumbent\_quality\_reject\_factor\{1e6\}}
+（\file{options.hpp:169--175}）允许接受劣化至对偶界 $10^6\times$ 的
+启发式现任解，而证明尾部模式（纯最佳界排空）由\emph{任何}证明有效的
+现任解触发（\file{bac.cpp:23468--23477}）。\textbf{树重启：没有}——
+节点循环中任何地方都不存在重启机制；重启热启动状态会显式抛出异常
+（“割池与继承界的重启状态尚未实现”，\file{bac.cpp:36788--36796}）。
+从现任解出发、带着学到的割平面/伪成本重启，是 SCIP/HiGHS 中将树规模
+缩小 1.5--2$\times$ 的标准手段。间隙停滞停止条件存在但被禁用
+（\code{stall\_node\_window\{0\}}，\file{options.hpp:560--564}）。
+
+%=====================================================================
+\section{综合严苛审计}
+%=====================================================================
+
+本节对结构性发现进行分级排序。所引用的各节包含证据；严重度反映其对大规模实例性能以及结果可信度的影响。
+
+\subsection{严重度 1 —— 与最先进水平的结构性性能差距}
+
+\begin{finding}[每节点完整稠密域副本；基于差分的节点设计已存在，却是死代码]
+\label{find:node-memory}
+\code{Node}（\file{bc\_types.hpp:330--388}，\textbf{V}）拥有四个稠密
+$n$ 向量（\code{lb}、\code{ub}、\code{x\_relax}、\code{x\_seed}），外加十个
+\code{std::vector} 载荷（域轨迹、原因界、各自持有一个稀疏向量的局部割、以“向量之向量”表示的局部冲突子句，\dots）。
+\code{branch\_child()}（:360--387，\textbf{V}）复制 \code{lb}/\code{ub}
+（每个均为 $O(n)$ 稠密），\emph{并深拷贝全部十个载荷}——包括持有堆内存
+\code{Eigen::SparseVector} 的 \code{local\_cuts}——每次分支执行两次
+（\file{bac.cpp:21208--21231, 35222--35231}；
+\file{bc\_parallel.cpp:1339}）。（它\emph{并不}复制 \code{x\_relax}/
+\code{x\_seed}——:359 处的注释写明了这一点；载荷复制才是问题所在。）不计载荷，开放节点集的内存即为 $\Theta(N_{\mathrm{open}} \cdot n)$：当 $n = 10^4$ 时，仅 \code{lb+ub} 每个节点就耗费 $\approx$160\,KB——
+$10^4$ 个开放节点即 $\sim$1.6\,GB。SCIP（自 3.0 起）与 HiGHS 每个节点仅存储
+$O(\mathrm{depth})$ 个界变更\emph{差分}，并通过沿路径回溯重新推导域。\textbf{本仓库包含的恰恰就是这种设计}——
+\code{TreeNode} + \code{TreeDomainManager} + \code{TreeNodeArena}
+（\file{bc\_types.hpp:147--314}）——而全仓库范围的 grep 显示\textbf{零
+使用}（\textbf{V}）。代码用如下注释绕开了它自己的设计：
+\emph{“The popped parent is dead after branching. Move its O(n) domain and
+proof state into one sibling instead of copying both lb and ub again”}
+（\file{bac.cpp:35227--35228}）。
+\end{finding}
+
+\begin{finding}[每个节点 LP 都新建 \code{Highs}、完整序列化并冷因子分解]
+发现~\ref{find:persistent-lp}：每个节点的 $O(n{+}m{+}\nnz)$ 序列化、HighsLp
+构造以及完整 INVERT——这正是 SCIP/SoPlex、
+HiGHS-MIP 与 Gurobi 用一个持久 LP 对象（在保留的因子分解上接收增量界变更）所消除的成本。增量
+机制已经建成（\code{resolve\_same\_structure}、
+\code{update\_standard\_form\_bounds}、根节点实时追加），却在每个搜索树调用点被关闭（\file{bc\_legacy\_helpers.cpp:203--205}）。每次求解
+还有额外开销：$O(m^3)$ 的稠密基求逆、向每个 \code{SimplexResult}
+复制完整标准形的 \code{out.form = sf}
+（\file{dual\_simplex.cpp:1406}）、为证明再复制一份标准形
+（\file{bac.cpp:31105--31106}），以及重复的 $O(\nnz)$ 残差审计。峰值时，
+约束矩阵同时以 LPModel-CSC + HiGHS-CSR 镜像 + SF-CSC +
+SF-CSR（$\times T$ 个线程工作区，\file{bc\_types.hpp:782--784}）+
+\code{BCDomain} 行主序副本（\file{bc\_domain.hpp:93--94}）+ HiGHS
+内部结构 + \code{A\_owned\_}（\file{bc\_relaxation.cpp:289}）的形式存在——
+$\nnz$ 的 $\gtrsim (4 + 2T)$ 份活跃副本。
+\end{finding}
+
+\begin{finding}[尽管已知变更 API 沦为死代码，LP 热路径上每个子节点仍做 $O(n)$ 簿记]
+\code{update\_standard\_form\_bounds} 为检测变更而扫描全部 $n$ 列，
+并在每个子节点、每次探测时重写全部 $n$ 个 \code{var\_ub} 条目
+（\file{dual\_simplex\_api.cpp:873--959}；调用于 \file{bac.cpp:30719,
+35020}）；接收已知变更的变体
+（\code{update\_standard\_form\_bounds\_incremental}，:976）\textbf{调用点
+为零}（\textbf{V}）。在 $5\cdot10^4$ 个节点 $\times\, n = 10^5$ 下，这相当于
+$\sim 10^{10}$ 次纯簿记的标量操作。
+\end{finding}
+
+\begin{finding}[冲突学习无监视文字；割池无哈希]
+发现~\ref{find:conflict-pool} 与~\ref{find:cut-pool}：每个不动点轮次做
+$O(P{\cdot}L)$ 全扫描单元传播，每次去重做全池扫描，
+FIFO 淘汰，失效的老化机制，以及一个误报率单调增长的 Bloom 过滤器。这些都位于每节点路径上（每次弹出节点都做冲突检查，
+\file{bac.cpp:34219--34222}）。
+\end{finding}
+
+\begin{finding}[默认终止条件要求近乎精确地穷尽搜索树；\code{gap\_tol} 形同虚设]
+节~\ref{sec:termination}。对 MILP 求解器而言，这是一阶的
+可用性/性能缺陷：在那些间隙的最后 0.01\% 要耗费 90\% 搜索树的实例上
+（常见情形），任何竞品都会在 \code{gap\_tol} 处停止，而默认配置却会一路磨到时间/节点上限。
+\end{finding}
+
+\subsection{严重度 2 —— 热路径上的算法性浪费}
+
+\begin{finding}[强分支：每次探测都复制完整标准形并运行完整单纯形求解]
+\code{probe\_sf = tree\_base\_sf;}（\file{bac.cpp:35019}，\textbf{V}）复制
+两种方向的矩阵布局；随后每个方向都在一个全新的 HiGHS 上运行一次完整单纯形求解
+（\file{bac.cpp:35027--35029}）（\S\ref{sec:node-solve}），
+既没有针对探测的迭代上限，也没有对偶界截断。被丢弃的探测只换来
+伪成本样本。每次可靠性决策的成本：$O(\text{candidates} \times
+(\nnz + \text{serialization} + \text{cold factorization}))$。
+\end{finding}
+
+\begin{finding}[每节点重复的 $O(\#\mathrm{integers})$ 分数性扫描]
+\code{fractional\_branchable\_indices} 在弹出节点时运行
+（\file{bac.cpp:34410}），每个子节点运行（:30794），在预队列刷新中运行（:33785）；
+\code{compute\_node\_estimate} 每个子节点还要再扫描所有可分支变量两次
+（:35472--35480）；RINS/交叉检查各自再增加三次 $O(n)$ 遍历
+（:35524--35566）。代码并未维护增量分数集合（HiGHS 在其域中增量维护
+\code{fractionalints}）。
+\end{finding}
+
+\begin{finding}[根探测对同一固定值重复传播两次，并付出 $O(n_{\mathrm{bin}} \cdot (\nnz + n))$ 的代价]
+对多达 1\,000 个未固定二元变量中的每一个：先对 $x{=}0$ 做完整传播
+（\file{bac.cpp:22233}），再对 $x{=}1$ 做完整传播（:22248），\emph{然后在一份全新副本上再次对 $x{=}0$ 传播}
+（:22275--22278），每次传播后都跟一次 $O(n)$ 的蕴含提取扫描
+（:22260--22292）。SCIP/HiGHS 会存储第一遍探测的结果。
+\end{finding}
+
+\begin{finding}[所有模型行分离器对每行分配稠密 $O(n)$ 向量]
+\code{add\_basis\_mir\_cuts} \emph{每行}分配四个零初始化的稠密 $n$ 向量
+（\file{bc\_cuts.cpp:5495,5511,5534,5563}）；
+\code{add\_row\_mir\_cuts} 再分配四个（:6079,6090,6106,6123）；cover、flow-cover、
+implied-bound、zero-half、clique 各自为每个候选构建稠密 $n$ 向量——
+每个割平面族每轮产生 $O(m \cdot n)$ 的 memset 流量（在 $m=12\,000$、$n=14\,000$ 时每轮即达
+数 GB 的零写入），而这发生在任何实际工作之前；此外还有按族完整的
+行主序矩阵拷贝（:5321,5490--5491,5676,5810,5845,5970,6075--6076,
+7770,7936）——每轮 \code{All} 至少 $\ge 6$ 次完整 $O(\nnz)$ 转换，
+这还不包括 \code{add\_rows\_to\_lp} 按族批次对整个矩阵的 triplet 重建
+（\S\ref{sec:cut-pool}）。最先进的分离器严格在稀疏行表示上操作。
+\end{finding}
+
+\begin{finding}[传播原因追踪存在平方级过度工程，且始终开启]
+发现~\ref{find:reason-arena}：$O(\nnz_{\mathrm{row}}^2)$ 的 id 收集、
+按非零元的子句物化、eq 路径上按非零元的堆分配，
+以及无界的 arena 增长——即使从未请求过原因。
+\end{finding}
+
+\begin{finding}[传播热路径上易相消的活动度算术]
+无处不在的模式 \code{residual = rhs - (min\_activity - contrib)}
+（\file{bc\_utils.cpp:5032,6131,6198,6234}；预求解
+\file{milp\_presolve.cpp:134,181,201,454}）每次访问都从零重算行活动度，
+\emph{并且}在行活动度较大时减去两个几乎相等的量——这是数值上最弱的表述形式，却位于最热的
+数值路径上。SCIP 维护增量活动度，并以受控方式
+重算。代码通篇使用未经缩放的固定绝对容差（$10^{-9}$ 的界改进
+阈值、$10^{-15}$ 的系数截断、\code{bounds\_consistent} 中的 $10^{-12}$）。
+\end{finding}
+
+\begin{finding}[每个获得现任解后的节点 LP 都默认开启对偶证明构造]
+\code{enable\_reduced\_cost\_proof\_cut\_resolve\{true\}}
+（\file{options.hpp:311}）使每个获得现任解后的节点都运行
+\code{build\_full\_dual\_proof\_row} + \code{build\_reduced\_cost\_mass\_dual\_proof\_row}
+（\file{bac.cpp:31025,31063}）：$\approx$3 次完整稀疏矩阵向量乘、两次手工实现的
+$O(\nnz)$ $A^\top y$ 遍历（\file{bc\_utils.cpp:1775--1790,1850--1867}）、一次
+BTRAN，以及 $\sim$6 个稠密 $O(n)$ 临时量——证书机制位于
+关键路径上，而商业求解器仅在真正分析冲突时才惰性运行它。这些解析例程
+每次审计还增加 $O(T^2)$ 的轨迹重放不动点闭包
+（:2414--2439, 3454--3477），以及按候选复制并
+重新规范化整个子句的贪心选择循环（:4573--4684）。
+\end{finding}
+
+\begin{finding}[监视循环与队列扫描使并行证明阶段串行化]
+发现~\ref{find:queue-sweeps}；此外还有一个不使用条件变量的 1\,ms 轮询
+监视器（\file{bac.cpp:35766--35767}），它白白烧掉一个核，并为每个终止事件增加至多
+1\,ms 的延迟。
+\end{finding}
+
+\subsection{严重度 3 —— 正确性边缘问题与有效性缺口}
+
+\begin{finding}[隐含界割平面族要么空泛要么重复]
+发现~\ref{find:implied-bound}（代数过程已验证）。当
+$10^{-7}$ 准入检验拒绝它时无害；当噪声使其通过时，则成为一经过缩放的重复行。
+\end{finding}
+
+\begin{finding}[Flow-cover 存在已被承认的有效性缺口，仅保留为诊断用途]
+该族自己的注释（\file{bc\_cuts.cpp:8328--8332}）声称它在预求解或
+ranged（双边）行上“can
+produce rows that cut off the true integer frontier”。它仍可通过 \code{CutType::FlowCover} 到达——对任何期望生产行为而选择它的
+调用者而言，这是一个陷阱。
+\end{finding}
+
+\begin{finding}[受扰 LP 的最优解被接受为节点结果；基于字符串匹配的失败分类法]
+L1 回退在不做任何对账的情况下接受右端项受扰 LP 的最优解作为有效节点界
+（\file{bc\_fallback.hpp:273--284}）；失败
+分类依赖对人类可读状态字符串的子串匹配
+（:78--97）。来自受扰 LP 的节点界\emph{并不是}未受扰节点的认证界——这与除此之外严格的
+Farkas 证书纪律相抵触（\S\ref{sec:fallback}）。
+\end{finding}
+
+\begin{finding}[预求解可能静默丢弃已证明的不可行性]
+节~\ref{sec:presolve-reductions}：双重不可行探测与
+不可行空行都不产生任何状态；\code{PresolveStats} 没有
+不可行标志。一个可证明不可行的实例仍会进入 LP/B\&C。
+\end{finding}
+
+\begin{finding}[无界一般整数变量未经检查即进入搜索树]
+节~\ref{sec:dual-integrality}：直接进入路径上没有对自由整数的界健全性检查；对自由整数
+分支会产生无穷的子节点域，并可能静默地永不终止（只有全局限制能阻止
+运行）。
+\end{finding}
+
+\begin{finding}[哈希量化冲突静默合并不同的割/文字]
+割签名将系数量化到 $10^{-4}$、将文字值量化到
+$10^{-6}$（\file{bc\_pools.hpp:30--35,92--100}）；域签名将界
+量化为字节串（\file{bc\_utils.hpp:1945--1986}）。冲突被
+当作重复处理——去重逻辑中一条（低概率的）静默错误结果通道。
+\end{finding}
+
+\subsection{严重度 4 —— 如今已损耗性能或信任的工程债}
+
+\begin{finding}[一个 35\,000 行的单一函数就是整个引擎]
+节~\ref{sec:topology}：$\sim$60 个按引用捕获的 lambda 共享
+数百个可变局部变量；正确性不变量（例如“keeps the old
+basis/x\_relax from being used with a stronger domain than the LP that
+produced it”，\file{bac.cpp:34247--34249}）靠跨纪元标志
+（\code{domain\_learning\_epoch} 等，\file{bc\_types.hpp:351--354}）的约定来维护。
+这正是上文编目的防御性重扫描与重复制的
+根本原因：没有任何组件可以被孤立地测试、复用或推理。
+\end{finding}
+
+\begin{finding}[大规模的死代码与分叉代码]
+已验证为死代码：\file{search/} + \file{parallel/} + \file{root/} 模块
+（$\sim$1\,400 行，参与编译，调用者为零）；\code{TreeNode}/
+\code{TreeDomainManager} 差分域设计（\file{bc\_types.hpp:147--314}）；
+经典 GMI 分离器与一个 MIR 变体（$\sim$600 行，
+\file{bc\_cuts.cpp:120--301,303--466,6193--6350}）；
+\code{detail::milp\_presolve}（$\sim$620 行，\file{bc\_utils.cpp:97--716}）；
+\code{presolve\_inplace}（\file{milp\_presolve.cpp:1499--1667}）；
+\code{node\_bound\_propagation\_tracked}（仅测试使用）；
+\code{update\_standard\_form\_bounds\_incremental}；\code{age\_and\_purge}；
+被宣传的树 RINS 子 MIP（注释与现实不符，
+\file{bac.cpp:35549--35551}）；默认选项下的割工作线程；
+孤儿头文件 \file{bc/cuts/cut\_types.hpp} 与
+\file{bc/branching/pseudocost.hpp}——前者\emph{在同一命名空间}中定义了一个
+11 族的 \code{CutFamily} 枚举和一个 2 字段 \code{PoolCut}，与现役的
+7 族枚举和 9 字段 \code{PoolCut}
+（\file{bc\_types.hpp:641--650,317--327}）冲突，首次被包含即构成 ODR 违反。
+这里的死代码并非无害：它已经分叉（角色分配、
+可靠性规则、\code{PCUpdate} 字段名），并会误导任何读者对
+求解器实际行为的理解。
+\end{finding}
+
+\begin{finding}[\code{BCOptions} 是无法管理的扁平团块，含 $\sim$230 个公共字段]
+\file{options.hpp:86--870}：分节仅以注释形式存在；它暴露了
+内部递归标志（\code{\_is\_stage3\_submip}，:784）、提交信息式的
+调参理由（“P7.6: Raised from 5000$\to$15000”，:350--353）、作为\emph{通用 MILP
+求解器默认值}硬编码的 UC/SCUC
+实例类别阈值（\code{scuc\_min\_binaries\{500\}} 等，:824--837），以及 $\ge$30
+个仅转发给内嵌 HiGHS 的旋钮。最先进的求解器只公开其中
+一小部分，并将实例类别调参与公共契约隔离。
+一个隐藏的环境变量通道（“200+ environment variables”，
+\file{bc\_env\_options.hpp:7--9}；以及零散的 \code{std::getenv}，如
+\file{bc\_legacy\_helpers.cpp:42--67}、\file{bac.cpp:1708,2407--2410}）使
+运行结果无法仅凭 \code{BCOptions} 复现；像
+\code{MIPSOLVERS\_ROOT\_SEPARATION\_ONLY} 这样影响算法的开关会不可见地改变行为。
+\end{finding}
+
+\begin{finding}[默认非确定性]
+\code{num\_threads\{-1\}} $\to$ 硬件并发，配合工作窃取，且
+\code{deterministic\_parallel\{false\}}；该选项自己的注释称弹出
+顺序随后取决于“OS scheduling jitter”，并且撕裂的现任解读取
+可能导致“different prune/keep decisions”（\file{options.hpp:314--334}）。
+位级可复现性需要手动显式启用——即便如此也未完全
+实现（\S\ref{sec:parallel}）。
+\end{finding}
+
+\subsection{做得好的地方（为平衡起见）}
+\label{sec:good}
+缓存行隔离的热原子操作（\file{bc\_threading.hpp:1148--1151}）；经由
+\code{try\_share\_indices\_from} 的基下标共享
+（\file{dual\_simplex.hpp:258--270}）；标准形层的增量界更新
+（\file{dual\_simplex\_api.cpp:899--920}）与根节点实时追加事务
+（\file{bc\_relaxation.cpp:1121--1274}）——结构上正确的机制，
+只是没有用在每节点路径上；对超线性
+割池扫描施加的扫描后缀上界（\file{bc\_pools.hpp:187--190}）；
+\code{SharedImplicationGraph} 中基于世代计数器的无锁读取路径
+（\file{bc\_threading.hpp:1233--1253}）；以 Farkas 证书为门槛的剪枝，
+数值失败时\emph{绝不}剪枝（\file{bc\_fallback.hpp:82--84,232}）；
+按族以滑动平均进行的割效能门控
+（\file{bc\_types.hpp:655--705}）；cMIR
+流水线中的扩展精度聚合（\file{bc\_cuts.cpp:4232--4335}）；强分支探测 LP
+复用为子节点 LP（\file{bac.cpp:30902--30909}）；基于域签名的重复节点
+抑制（代价昂贵，但确是真正的算法思想）；割/启发式武器库的整体广度，
+其覆盖范围确实接近 HiGHS。
+
+%=====================================================================
+\section{占位符与虚假复杂性普查}
+%=====================================================================
+\label{sec:placeholders}
+
+审阅此代码库的人会注意到，其中相当一部分\emph{看起来}像求解器机制，
+却什么都不做。本节用可复现的普查量化这种
+印象，然后对定性发现进行分类。以下一切内容均可用
+所给出的 grep 独立核验。
+
+\subsection{普查方法（可复现）}
+\label{sec:census-method}
+\begin{itemize}[nosep]
+\item \textbf{普查 A（选项）：}对 \file{options.hpp} 中可通过声明模式 grep 提取的全部 230
+  个字段声明，按\emph{成员访问读取}——即
+  \code{.<field>} 或 \code{-><field>} 的匹配——在
+  \file{src/}、\file{include/}、\file{benchmark/} 与
+  \file{tests/} 范围内计数。
+\item \textbf{普查 B（统计）：}对 \code{BCStats}（\file{bc/stats.hpp}）的 370
+  个字段声明做同样的统计。
+\item \textbf{普查 C（隐藏配置）：}原生 MILP 代码树中传给
+  \code{getenv(...)} 的不同字符串字面量，及其调用点计数。
+\item \textbf{普查 D（自我标记）：}针对
+  \code{TODO}/\code{FIXME}/\code{HACK}/\code{XXX}、\code{scaffold} 以及
+  \code{not implemented} 式自我承认的 grep。
+\end{itemize}
+
+\subsection{定量结果}
+\begin{finding}[230 个公共选项字段中有 9 个从未在任何地方被读取]
+\label{find:dead-options}
+普查 A 对 230 个字段中的恰好 9 个返回\textbf{零读取}
+（生产代码、基准与测试皆然）（\textbf{V}）：
+\code{highs\_style\_root\_separation}、
+\code{highs\_style\_branch\_scoring}、
+\code{highs\_style\_reliability\_probing}
+（\file{options.hpp:449,451,453}——三个被宣传的“HiGHS 对齐
+基准模式”，却不切换任何行为）、
+\code{cglp\_normalization}（:518——CGLP 构建器硬编码了单一
+规范化方式，\file{bc\_cglp\_model.cpp:171--179}）、
+\code{cglp\_register\_in\_cut\_pool}（:532——其自己的注释承认
+\emph{“[Scaffold --- Phase 4 global dedup, NOT YET IMPLEMENTED]”}，:519）、
+\code{huge\_problem\_n\_threshold}（:817）、
+\code{large\_uc\_force\_ipm\_row\_threshold} 与
+\code{large\_uc\_force\_ipm\_bin\_threshold}（:826--827），以及
+\code{simplex\_tol\_floor}（:861）。
+此外，\textbf{230 个字段中有 71 个恰好仅被读取一次}。每一个
+从未被读取的旋钮都是对用户的虚假承诺：设置它改变不了任何事。
+\end{finding}
+
+\begin{finding}[370 个统计字段中有 19 个从未被引用；一整个遥测族处于惰性]
+\label{find:dead-stats}
+普查 B 对 370 个 \code{BCStats} 字段中的 19 个返回零引用
+（\textbf{V}），包括整个 8 字段的 \code{rowdual\_cmir\_*} 簇
+（\code{...\_added}、\code{...\_bound\_moves}、\code{...\_candidates}、
+\code{...\_lift\_max}、\code{...\_lift\_sum}、\code{...\_rejected}、
+\code{...\_target\_coeff}、\code{...\_violated}）以及 \code{sub\_root\_*}
+镜像簇——为从不写入任何内容的功能所声明的遥测。
+75 个字段至多被引用一次。再结合
+\code{BCStats} 被按值复制进每个结果这一发现，统计界面
+实质上是一场只写的审计表演。
+\end{finding}
+
+\begin{finding}[由 $\ge$51 个环境变量构成的隐藏配置通道，且零自我标记]
+\label{find:env-vars}
+普查 C 发现原生 MILP 代码树中有 \textbf{51 个不同的环境变量}
+通过直接的 \code{getenv("...")} 字面量被读取（\textbf{V}），
+\textbf{仅 \file{bac.cpp} 一个文件就有 125 个 \code{getenv(} 调用点}（\textbf{V}）；
+其自身的基础设施注释声称有“200+ environment variables”
+（\file{bc\_env\_options.hpp:7--9}——可用 grep 核验的数量是
+51；该声称按原文无法核验）。普查 D 在整个原生
+MILP 代码树中发现\textbf{零}个
+\code{TODO}/\code{FIXME}/\code{HACK}/\code{XXX} 标记
+（\textbf{V}）——本文记录的占位符没有一个带有任何自我承认——
+同时还有 17 个 \code{P-x.y} 调参计划标记
+（P2.1\,\dots\,P9.2）与 \code{Phase 1--4} 脚手架注释，以及
+36 处 \code{[[maybe\_unused]]}。
+\end{finding}
+
+\subsection{占位符层的定性分类}
+
+\begin{finding}[形同陷阱的公共 API]
+\label{find:trap-api}
+公开声明并写有文档、却无条件抛异常的入口点：
+\code{BCCallbacks::node\_selector} 与 \code{cut\_selector}
+（\file{ml\_hooks.hpp:77--94}；抛异常位于 \file{bac.cpp:36850--36853}）；
+\code{BCWarmStart} 的 dual-row/dual-col/basis/cut-pool/inherited-bound
+字段——“reserved for a future restart format”
+（\file{warmstart.hpp:9--11}；抛异常位于 \file{bac.cpp:36788--36797}）——
+包括定义完整却无法使用的类型 \code{BCSimplexBasis} 与
+\code{BCCutRecord}（\file{warmstart.hpp:33--53}）；
+\code{StrategyDispatcher::analyze} 返回一个全零的
+\code{ProblemCharacteristics}，并带有一个“Phase 3b”TODO
+（\file{dispatcher.cpp:226--236}），使求解器“选择”沦为硬编码的
+名字列表（\file{dispatcher.cpp:66--86}）。
+\end{finding}
+
+\begin{finding}[宣传了却不存在的能力与虚假文档]
+\label{find:false-docs}
+孤儿头文件 \file{bc/cuts/cut\_types.hpp}（无任何地方包含）
+宣传了 11 个割平面族——包括 \code{StrongCG}、\code{Knapsack}、
+\code{GCD}、\code{DisjunctiveCuts}——\emph{它们在实现中无一存在}，
+且其定义会与现役定义发生 ODR
+冲突（\S\ref{sec:cuts}）。孤儿头文件
+\file{bc/branching/pseudocost.hpp:18} 声明了第二个
+\code{detail::PseudoCost}，其方法 \code{down\_lcb()}、
+\code{up\_lcb()}、\code{combined\_score()} \textbf{只有声明、
+从未在任何地方定义}（:62--69）——调用其中任何一个都是链接错误。
+与代码矛盾的文档：\file{bc/api.hpp:16--17} 声称
+原生对偶单纯形是默认 LP 引擎（默认实为内嵌
+HiGHS 内核，\file{options.hpp:135--137}）；\file{milp\_presolve.hpp:16--17}
+宣传了并不存在的“row/column nonzero
+counts for O(1) singleton detection”（\file{milp\_presolve.cpp:309--318,382--391}
+为重新扫描）；双元素行替换的注释称
+“prefer the one with more constraint
+appearances”，而代码实际偏好出现次数更少者
+（\file{milp\_presolve.cpp:501--502} 对比 :517--527）；名为
+\code{StrictHiGHS} 的适配器并不运行 HiGHS 的 MIP 求解器
+（\S\ref{sec:defaultpath}）；注释中所谓保留“the full RINS sub-MIP
+for the near-termination gate”描述的是不存在的代码
+（\file{bac.cpp:35549--35551}）。
+\end{finding}
+
+\begin{finding}[会执行却不计算任何结果的机制]
+\label{find:phantom-work}
+按构造就在热路径上运行、却不产生任何效果的代码：
+隐含界割平面族重新推导出它自己的源行，且仅靠
+数值噪声才能将其准入（发现~\ref{find:implied-bound}）；
+\code{augment\_variable\_bound\_table\_from\_cut\_rows} 为每条割行的每个整数
+元素计算 floor/ceil 域收紧，然后\emph{只是递增一个统计量}
+——收紧后的值从未被应用
+（\file{bc\_implied\_bounds.cpp:849--865}，:1012--1028 处完全相同）；
+\code{implied\_events\_by\_literal} 索引被构建
+（\file{bc\_objective\_propagation.hpp:757,893}），却从未被
+\code{propagate()} 使用，后者改为扫描全部事件（:1795）；
+割池“老化”：每个割出生时年龄即为 45/50
+（\file{bc\_pools.hpp:595}），而 \code{age\_and\_purge} 从未被调用
+（\S\ref{sec:cut-pool}），于是精巧的年龄/淘汰机制退化
+为盲目 FIFO；
+\code{incumbent\_quality\_reject\_factor\{1e6\}}（\file{options.hpp:169--175}）
+是一道“质量门”，它接受目标值高达对偶界 $10^6\times$ 的
+现任解——一道什么也拦不住的门。
+\end{finding}
+
+\begin{finding}[完全建成却在最后一寸被关闭的机制]
+\label{find:neutralized}
+“实现了、接好了、然后被废掉”的模式反复出现：
+持久 LP 节点求解（发现~\ref{find:persistent-lp}）；
+\code{update\_standard\_form\_bounds\_incremental}（调用点为零，
+\S\ref{sec:bound-updates}）；
+早期并发树启动（\code{allow\_concurrent\_tree = false}
+硬编码，\file{bac.cpp:18025--18026}）；
+割工作线程（\code{use\_cut\_worker = ... \&\& max\_cut\_depth > 0}
+而 \code{max\_cut\_depth\{0\}}，\file{bac.cpp:18096}，
+\file{options.hpp:101}）；
+\code{deterministic\_parallel} 即使启用也不能使运行确定
+（\S\ref{sec:parallel}）；
+\code{RootSolvePhase}（\file{root/root\_solve.cpp}）——死代码，且若真被
+复活，将以 \code{simplex = nullptr} 运行一条降级的根流水线
+（\file{root\_solve.cpp:122--128}）。
+\end{finding}
+
+\begin{finding}[内部已深度腐烂的死模块]
+\label{find:dead-modules}
+编译了却不可达的 \file{search/}/\file{parallel/}/\file{root/}
+栈（\S\ref{sec:topology}）不仅仅是死代码——它的内部
+不一致恰恰证明它从未被执行或测试过：
+\code{SequentialSearchDriver} 从不应用 \code{NodeEvaluator} 构建的
+\code{PCUpdate}（所有截断/推理观测都被静默
+丢弃）；\code{BCSolveContext::update\_dual\_bound} 从未被调用，因此
+\code{gap()} 永久为无穷，驱动器的间隙终止检查
+永远无法触发（\file{parallel/shared\_state.cpp:56--63}，
+\file{search/sequential\_search.cpp:243--246}）；\emph{串行}驱动器
+却持有一把 \code{pseudocost\_mutex}（\file{search/sequential\_search.cpp:80--83}）
+——虚假的线程安全；渐进舍入构建了 \code{round\_opt}，
+随即用 \code{(void)round\_opt} 将其丢弃，改用
+默认构造的 \code{BCOptions\{\}} 求解
+（\file{search/node\_evaluator.cpp:367--378}）；已死的角色调度器
+（\file{parallel/parallel\_search.cpp:287--305}）已与
+现役实现分叉（\file{bac.cpp:35717--35720}）。
+\end{finding}
+
+\subsection{占位符层为何重要}
+普查用计数坐实了“看起来复杂、实则虚假”的印象：
+经直接测量，公共选项界面的 $\approx$4\% 与统计界面的
+$\approx$5\% 处于惰性，整个子系统被编译却不可达，
+若干公共契约是陷阱。其代价是具体的，而非审美问题：
+\textbf{(i) 错误归因}——文档与适配器名称描述的是一个并非实际运行的
+求解器（对“StrictHiGHS”做基准测试的用户，实际测的是
+运行在 HiGHS LP 内核之上的原生搜索树）；
+\textbf{(ii) 陷阱界面}——调用者可能选中惰性、抛异常或
+公认不可靠的选项、回调、热启动以及一个割平面族
+（\code{FlowCover}）；\textbf{(iii) 被误导的投入}——调参与评审
+时间被花在从不执行的机制上，而分叉的死代码副本
+向每一位新读者传授错误的算法。为平衡起见：\S\ref{sec:pipeline}
+的\emph{现役}流水线是真正可用的——占位符层在很大程度上
+是包裹在可工作核心之外的\emph{附加}复杂性，
+而这恰恰是它误导人的原因：它从可工作的部分借来了
+可信度。
+
+%=====================================================================
+\section{优先级排序的建议}
+%=====================================================================
+\label{sec:recommendations}
+
+按“每单位工程风险所带来的预期影响”排序：
+\begin{enumerate}[nosep]
+\item \textbf{首先清除占位符层}
+  （\S\ref{sec:placeholders}）：删除或接通 9 个从未读取的选项与 19
+  个从未被引用的统计字段；移除死代码
+  \file{search/}/\file{parallel/}/\file{root/} 模块、孤儿头文件，
+  以及被 \code{\#if 0} 禁用的分离器；使每个剩余的公开选项要么真正生效、
+  要么不复存在；把所有环境变量统一经由
+  \code{bc\_env\_options()} 路由，并在 \code{BCResult} 中记录生效的集合。
+  这是零风险、纯删除的工作，且是信任任何后续测量的前提。
+\item \textbf{翻转终止默认值}：遵从 \code{gap\_tol}
+  （\code{require\_tree\_exhaustion\_certificate\{false\}} 或两级停止）。
+  零风险、首要的可用性修复。
+\item \textbf{重新启用逐节点的持久 LP 路径}（或移除
+  \code{cached\_sparse\_basis.reset()}，并将全部十一处基相关调用点
+  经由 \code{resolve\_same\_structure} 以安全重绑定的方式路由）：消除
+  逐节点的序列化 + 冷因子分解——很可能是单项最大的墙钟收益。
+  需要一次仔细的兄弟别名（sibling-aliasing）分析（reset 注释暗示曾经
+  做过一次；无论结论如何都应将其记录在案）。
+\item \textbf{差分域节点}：按节点存储界变更差分（死代码
+  \code{TreeNode}/\code{TreeDomainManager} 可作为起点）；使
+  \code{branch\_child()} 达到 $O(\text{changes})$；把逐节点的 \code{x\_relax}/
+  载荷向量改为指向共享结构的引用。
+\item \textbf{砍掉隐含界割平面族，或改为从\emph{其他}行推导}
+  （它目前只是重发其来源行）；把覆盖 DP 提升置于精确算术的门控之后
+  （精确超加性提升器已存在于同一文件中）；修复或移除 flow-cover，
+  而不是让一个已知不健全的割平面族保持可选。
+\item \textbf{为割池建立哈希索引}；用已存储的哈希做去重分桶；
+  让淘汰感知效能；要么接通 \code{age\_and\_purge}，
+  要么删除整套老化机制。
+\item \textbf{为冲突池引入监视文字（或变量$\to$子句索引）}；
+  基于 LBD/活跃度的子句老化；在淘汰时清空 Bloom 过滤器或为其打上
+  纪元（epoch）标签。
+\item \textbf{让节点传播的成因惰性化}：仅当
+  \code{reason\_bounds\_out != nullptr} 时才计算 \code{ReasonArena} 合并；
+  将等式路径的 \code{ids} 缓冲区外提（与 :6123--6125 相呼应的一行修复）；
+  存储成因\emph{指针}，而非子句副本。
+\item \textbf{在树中使用已知变更的界 API}
+  （\code{update\_standard\_form\_bounds\_incremental}）——分支知道
+  被改变的列；$O(n)$ 扫描与 \code{var\_ub} 全量重写在今天就可避免。
+\item \textbf{纯稀疏分离器}：移除逐行的稠密 $n$ 向量与逐族的
+  行主序矩阵副本；跨族、跨轮共享同一个行主序工作区；通过增量式
+  \code{addRows} 风格的路径插入割，而非三元组重建。
+\item \textbf{在活跃 LP 上做强分支}，带迭代上限与对偶界截断
+  （SCIP 风格），复用节点 LP 对象，而非复制标准形。
+\item \textbf{队列重设计}：一个带索引的二叉堆（以界与估计值为键）
+  或 HiGHS 风格的配对堆；去掉 DFS 向量擦除、字符串域签名
+  （改用 64 位滚动哈希或界变更 trie），以及全队列范围的
+  \code{prune\_by\_incumbent} 扫描（弹出时的惰性剪除已经存在）。
+\item \textbf{让预求解带状态}：把不可行性传播到
+  \code{PresolveStats} 并提前中止求解；重建时保留区间行；
+  增量维护活动度（复用 \code{BCDomain}）；保留由探测导出的蕴涵。
+\item \textbf{沿已以 lambda 形式存在的接缝分解 \code{branch\_and\_cut\_lp}}
+  （\code{process\_single\_child}、根割循环、启发式），在同一轮中
+  删除死代码 \file{search/}/\file{parallel/}/\file{root/}
+  栈与孤儿头文件；在此之前，停止编译这些死模块以免混淆。
+\item \textbf{可复现性}：把所有环境读取缓存在
+  \code{bc\_env\_options()} 之后；在 \code{BCResult} 中记录生效选项；
+  提供一个确定性预设（固定线程数、禁止工作窃取、
+  \code{deterministic\_parallel\{true\}}），并书面记录其限制。
+\end{enumerate}
+
+%=====================================================================
+\appendix
+\section{默认参数表（经代码核实）}
+%=====================================================================
+\label{app:params}
+
+{\footnotesize
+\begin{longtable}{@{}>{\raggedright\arraybackslash}p{7.4cm}>{\raggedright\arraybackslash}p{4.0cm}>{\raggedright\arraybackslash}p{3.3cm}@{}}
+\toprule
+参数 & 默认值 & 位置（未注明者均为 \file{options.hpp}） \\
+\midrule
+\endhead
+\code{max\_nodes} & 50\,000 & :89 \\
+\code{max\_lp\_iter} & 500 & :90 \\
+\code{time\_limit\_sec} & 120.0 & :91 \\
+\code{int\_tol} / \code{gap\_tol} / \code{lp\_tol} & $10^{-5}$ / $10^{-4}$ / $10^{-6}$ & :92--94 \\
+\code{root\_cut\_rounds} / \code{cuts\_per\_round} & 10 / 20 & :99--100 \\
+\code{max\_cut\_depth} & 0（仅根节点割） & :101 \\
+\code{gmi\_min\_efficacy} / \code{gmi\_max\_density} / \code{gmi\_max\_parallelism} & $10^{-3}$ / 0.35 / 0.90 & :102--104 \\
+\code{gmi\_activity\_weight} & 0.5 & :107 \\
+\code{cuts} & \code{CutType::All} & :108 \\
+\code{branching} & \code{Pseudocost} & :113 \\
+\code{node\_sel} & \code{Hybrid} & :114 \\
+\code{node\_estimate\_aggregation} & \code{Sum} & :115--116 \\
+\code{use\_simplex\_lp\_nodes} / \code{use\_ipm\_root} / \code{use\_ipm\_nodes} & true / false / false & :121--123 \\
+\code{ipm\_root\_probe}（+迭代数/时间） & true（20 / 5.0\,s） & :132--134 \\
+\code{lp\_kernel\_backend} & \code{LpKernelBackend::HiGHS} & :135--137 \\
+\code{strict\_highs\_mip\_contract} & false & :141 \\
+\code{use\_feasibility\_pump} / \code{use\_progressive\_rounding} & true / true & :160--161 \\
+\code{use\_papilo\_presolve} / \code{papilo\_aggressive} & true / false & :162--163 \\
+\code{incumbent\_quality\_reject\_factor} & $10^{6}$ & :169--175 \\
+\code{enable\_feasibility\_jump}（翻转/修复） & true（512 / 3） & :195--197 \\
+\code{enable\_domain\_heuristics} & false & :198--201 \\
+\code{cut\_pool\_max\_size} / \code{cut\_pool\_max\_age} & 2000 / 50 & :206--207 \\
+\code{solution\_pool\_size} & 10 & :208 \\
+\code{num\_threads} & $-1$（自动 $\to$ 硬件） & :213 \\
+\code{cut\_worker\_queue\_size} / 超时 & 64 / 50\,ms & :214--215 \\
+\code{max\_plunge\_depth} & 10 & :216 \\
+\code{share\_conflict\_learning\_across\_threads} & false & :228 \\
+\code{share\_implications\_across\_threads}（批量） & true（8） & :234 \\
+\code{parallel\_delay\_until\_incumbent} & true & :243 \\
+\code{parallel\_serial\_on\_low\_fractionality\_root} & true & :247 \\
+\code{require\_tree\_exhaustion\_certificate} & true & :253--258 \\
+\code{enable\_reduced\_cost\_fixing} & true & :270 \\
+\code{enable\_reduced\_cost\_proof\_cut\_resolve} & true（$\le 4$ 个 LP） & :311 \\
+\code{deterministic\_parallel} & false & :334 \\
+\code{enable\_lp\_fallback}（L1/L3 重试） & true（3 / 2） & :339--343 \\
+\code{feasibility\_pump\_iters} / \code{max\_dive\_lps} & 5 / 60 & :359--360 \\
+\code{max\_probe\_vars} / \code{bound\_propagation\_rounds} & 50 / 3 & :361--362 \\
+\code{root\_cut\_stall\_tol} / \code{root\_cut\_max\_stalls} & $10^{-4}$ / 2 & :367--368 \\
+\code{root\_cut\_reject\_nonmoving\_rows}（+最小提升量） & true（$10^{-6}$） & :382--385 \\
+\code{enable\_cglp\_cuts}（候选数/效能/时间） & false（5 / $10^{-4}$ / 2\,s） & :503--513 \\
+\code{probe\_reliability} / \code{probe\_max\_candidates} & 2 / 3 & :537--538 \\
+\code{pool\_cut\_row\_threshold} / \code{pool\_cut\_depth\_limit} & 500 / 3 & :550--551 \\
+\code{stall\_node\_window} & 0（关闭） & :560--564 \\
+\code{crossover\_heuristic\_freq} / \code{rins\_frequency} & 100 / 200 & :458--459 \\
+\code{enable\_lns}（比例/节点数/时间/迭代数） & true（0.80 / 500 / 5\,s / 3） & :464--470 \\
+\code{enable\_work\_stealing}（双端队列容量） & true（256） & :482--483 \\
+\code{random\_seed} & \code{0x9E3779B97F4A7C15} & :491 \\
+\code{PresolveOptions.max\_rounds} & 20 & \file{milp\_presolve.hpp:53} \\
+\code{PresolveOptions.max\_probing\_candidates} / 深度 & 500 / 3 & \file{milp\_presolve.hpp:64--65} \\
+\code{PresolveOptions.zero\_tol} / \code{bound\_tol} & $10^{-10}$ / $10^{-9}$ & \file{milp\_presolve.hpp:70--71} \\
+\code{BCDomain} 可行容差 / 界 eps / 安全上限 & $10^{-7}$ / $10^{-9}$ / $8m$ & \file{bc\_domain.hpp:51--52,194} \\
+\code{kNodeFeasibilityTol} / \code{kIncumbentPruneTol} & $10^{-6}$ / $10^{-12}$ & \file{bc\_utils.hpp:70--73} \\
+\code{kHybridBestBoundPeriod} & 10 & \file{bc\_utils.hpp:1865} \\
+\code{ConflictPool} 容量 / 文字数 / 扫描上限 & 1024 / 64 / 512 & \file{bc\_pools.hpp:266--267} \\
+\code{CutFamilyStats} 历史长度 / 最小效能 & 5 / $10^{-3}$ & \file{bc\_types.hpp:656--657} \\
+\bottomrule
+\end{longtable}
+} % footnotesize 结束
+
+\section{记号}
+\begin{itemize}[nosep]
+\item $n$：变量数；$m = m_1 + m_2$：约束数；$\nnz$：约束矩阵的
+  非零元数；$n_I$：整数变量数。
+\item $N$（或 $Q$）：开放节点数；$P$：池规模（割或子句）；$L$：子句
+  长度；$T$：工作线程数；$k$：行长度。
+\item $\{v\} = v - \lfloor v \rfloor$：小数部分。
+\item “文件:行”形式的引用遵循 \S\ref{sec:inventory} 的简写约定；
+  所有行号均指报告日期当日的工作树。
+\end{itemize}
+
+\section{核实声明}
+各节在关键论断处标注 \textbf{(V)} 者，均在报告撰写期间通过直接阅读
+所引用行完成核实（包括：\code{MIPModel}/\code{LPModel} 的定义；
+\code{api.cpp} 的路由；\code{branch\_and\_cut\_lp} 的跨度；
+\code{Node} 结构体与 \code{branch\_child()}；针对 \file{search/}、
+\file{parallel/}、\file{root/} 模块、\code{TreeDomainManager}、
+\code{age\_and\_purge} 与
+\code{update\_standard\_form\_bounds\_incremental} 的死代码 grep 检索；
+核心 \code{BCOptions} 默认值；vendored 版 HiGHS 的逐节点求解与
+\code{cached\_sparse\_basis} 重置；\code{CutPool::add} 去重循环；
+\code{NodeQueue} 存储与 \code{pop\_bestbound}；间隙早停守卫；
+flow-cover 排除注释；隐含界割的代数推导；\code{\#if 0} 的
+MIR 注释；\code{ConflictPool::propagate\_impl}；\code{StandardFormLP}
+布局；\code{BCDomain::restore}/\code{propagate}；分派器优先级
+列表；预求解默认值；十一处基持久化调用点）。\S\ref{sec:placeholders}
+的普查计数是通过对工作树执行 \S\ref{sec:census-method} 所述的
+成员访问与字面量 grep 得出的（计数：230 个选项字段 $\to$ 9 个
+零读取、71 个单读取；370 个统计字段 $\to$ 19 个零引用、75 个
+单引用；\file{bac.cpp} 中 51 个不同的 \code{getenv} 字面量与 125 处
+\code{getenv(} 调用点；零个 \code{TODO}/\code{FIXME} 标记；9 个
+零读取选项声明已在所引用行逐一重读）。
+代码意图含糊的论断在陈述处标注 \textbf{(U)}
+（例如发现~\ref{find:persistent-lp}）。
+\end{document}

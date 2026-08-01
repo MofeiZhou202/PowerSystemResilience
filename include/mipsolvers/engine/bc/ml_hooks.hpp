@@ -3,8 +3,8 @@
 /// \brief Callback surface for machine-learning-driven tuning & policies.
 ///
 /// This header defines the integration surface between the B&C engine and
-/// an external ML policy (for example, a learned branching agent, a cut
-/// selector, or a Bayesian hyper-parameter optimizer). All hooks are
+/// an external policy (for example, a learned branching agent, a dynamic-cut
+/// generator, or a Bayesian hyper-parameter optimizer). All hooks are
 /// optional — the engine falls back to its built-in heuristics whenever
 /// a hook is not attached.
 ///
@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -35,9 +36,10 @@ struct BCStats;       // fwd (stats.hpp)
 struct BCWarmStart;   // fwd (warmstart.hpp)
 
 // ─── Instance features (input to ML policies) ─────────────────────────────
-/// Feature vector computed from the presolved model. Supplied to policy
-/// hooks that want a compact problem description (without re-walking the
-/// LP matrix).
+/// Feature vector computed from the model presented to the public solve entry
+/// point. Supplied to policy hooks that want a compact problem description.
+/// Fields that do not apply to a problem class, such as RHS ranges for MINLP,
+/// are zero by contract rather than fabricated estimates.
 struct BCInstanceFeatures {
   int    n_vars{0};
   int    n_bin{0};
@@ -51,7 +53,9 @@ struct BCInstanceFeatures {
   double rhs_range_ratio{0.0};
   double coeff_range_ratio{0.0};
   int    num_binary_blocks{0};    ///< SCUC-like structural heuristic
-  int    max_clique_size{0};      ///< max clique in conflict graph (0 = not computed)
+  /// Maximum clique size when a conflict graph collector has actually run.
+  /// `nullopt` means unavailable; it is not encoded as a fabricated zero.
+  std::optional<int> max_clique_size;
   std::vector<double> extra;      ///< caller-defined problem-family tags
 };
 
@@ -64,33 +68,6 @@ using BCHyperparamTunerFn =
     std::function<BCOptions(const BCInstanceFeatures& feat,
                             const BCOptions& base,
                             const BCStats*   prev_stats /*nullable*/)>;
-
-/// Node-selection advisor: given an open-node summary (lb, depth, estimate),
-/// return a reordering permutation. Called at most every N nodes.
-struct BCNodeSummary {
-  int    node_id{0};
-  int    depth{0};
-  double lb{0.0};
-  double estimate{0.0};
-};
-using BCNodeSelectorFn =
-    std::function<void(const std::vector<BCNodeSummary>& open,
-                       std::vector<int>& out_permutation)>;
-
-/// Cut selector: given the list of candidate cuts and a caller-supplied
-/// scoring budget, pick an accept/reject mask (same length as `candidates`).
-struct BCCutCandidate {
-  double efficacy{0.0};
-  double density{0.0};
-  double parallelism_max{0.0};  ///< max |cos(θ)| with existing cuts
-  int    support_binary{0};
-  int    support_total{0};
-  double lp_violation{0.0};
-  const char* family{""};       ///< "GMI" | "MIR" | "Cover" | ...
-};
-using BCCutSelectorFn =
-    std::function<void(const std::vector<BCCutCandidate>& candidates,
-                       std::vector<bool>& out_accept)>;
 
 /// Dynamic node cut request used by the strict HiGHS lifecycle callback.
 /// The row is interpreted as lower <= sum(values[k] * x[indices[k]]) <= upper.
@@ -155,8 +132,6 @@ using BCPostSolveFn =
 /// entirely) to disable all hooks.
 struct BCCallbacks {
   BCBranchingPriorFn   branching_prior;
-  BCNodeSelectorFn     node_selector;
-  BCCutSelectorFn      cut_selector;
   BCDynamicNodeCutFn   dynamic_node_cut;
   BCHyperparamTunerFn  hyperparam_tuner;
   BCPostSolveFn        post_solve;
@@ -166,8 +141,8 @@ struct BCCallbacks {
 
   /// True when all hooks are empty (fast path).
   bool empty() const {
-    return !branching_prior && !node_selector && !cut_selector
-        && !dynamic_node_cut && !hyperparam_tuner && !post_solve;
+    return !branching_prior && !dynamic_node_cut && !hyperparam_tuner
+        && !post_solve;
   }
 };
 

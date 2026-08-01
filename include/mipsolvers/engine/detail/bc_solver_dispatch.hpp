@@ -17,6 +17,8 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
+#include <cmath>
 #include <memory>
 
 #include <Eigen/Core>
@@ -67,6 +69,8 @@ struct DispatcherConfig {
   bool disable_partial_pricing_for_conformance{false};
   bool allow_persistent_lp_state{false};
   LpKernelBackend lp_kernel_backend{LpKernelBackend::HiGHS};
+  double time_limit_sec{0.0};
+  bool* time_limit_hit{nullptr};
 
   static DispatcherConfig from_bc_options(const BCOptions& opt) {
     DispatcherConfig c;
@@ -115,6 +119,14 @@ class SolverDispatcher {
 
   void set_root_basis(std::shared_ptr<const SimplexBasis> rb) { root_basis_ = std::move(rb); }
 
+  /// Apply the caller's current wall-clock budget to the next dispatched LP.
+  /// The shared hit flag prevents fallback stages from restarting after the
+  /// global deadline has already interrupted the primary solve.
+  void set_time_limit(double time_limit_sec, bool* time_limit_hit) {
+    config_.time_limit_sec = time_limit_sec;
+    config_.time_limit_hit = time_limit_hit;
+  }
+
   /// @brief Solve an LP at a B&C node.
   /// @param sf Pre-built standard-form LP (bounds already updated).
   /// @param basis_hint Warm-start basis from parent (nullptr for cold-start).
@@ -132,21 +144,34 @@ class SolverDispatcher {
                       bool& deferred) {
     deferred = false;
     SimplexOptions opts = make_options(context);
+    SimplexBasis effective_basis;
+    const SimplexBasis* effective_basis_hint = prepare_basis_hint(
+        sf, basis_hint, context, effective_basis);
 
-    auto result = solve_lp_from_sf(sf, opts, basis_hint);
+    const auto solve_start = std::chrono::steady_clock::now();
+    auto result = solve_lp_from_sf(sf, opts, effective_basis_hint);
     auto failure_type = classify_lp_result(result, expected_n);
 
     if (failure_type == LPFailureType::Success ||
         failure_type == LPFailureType::ObjectiveCutoff ||
         failure_type == LPFailureType::Infeasible) {
+      retain_persistent_owner(sf, context, result);
+      return result;
+    }
+    if (lp_wall_time_limit_reached(result) || time_limit_hit(opts)) {
       return result;
     }
 
     // Attempt fallback recovery if enabled.
     if (fallback_ && config_.enable_fallback) {
-      return fallback_->handle_failure(sf, basis_hint, failure_type,
-                                       node_id, node_depth, expected_n,
-                                       deferred);
+      if (!deduct_elapsed_time(opts, solve_start)) {
+        return mark_time_limit(std::move(result));
+      }
+      auto recovered = fallback_->handle_failure(
+          sf, effective_basis_hint, failure_type, node_id, node_depth,
+          expected_n, deferred, &opts);
+      retain_persistent_owner(sf, context, recovered);
+      return recovered;
     }
 
     return result;  // No fallback — return failed result
@@ -157,7 +182,12 @@ class SolverDispatcher {
                                   const SimplexBasis* basis_hint,
                                   SolveContext context) {
     SimplexOptions opts = make_options(context);
-    return solve_lp_from_sf(sf, opts, basis_hint);
+    SimplexBasis effective_basis;
+    const SimplexBasis* effective_basis_hint = prepare_basis_hint(
+        sf, basis_hint, context, effective_basis);
+    auto result = solve_lp_from_sf(sf, opts, effective_basis_hint);
+    retain_persistent_owner(sf, context, result);
+    return result;
   }
 
   /// @brief Solve with caller-provided options and fallback recovery.
@@ -170,15 +200,25 @@ class SolverDispatcher {
                                    int expected_n,
                                    bool& deferred) {
     deferred = false;
-    auto result = solve_lp_from_sf(sf, opts, basis_hint);
+    SimplexOptions effective_opts = opts;
+    effective_opts.time_limit_sec = config_.time_limit_sec;
+    effective_opts.time_limit_hit = config_.time_limit_hit;
+    const auto solve_start = std::chrono::steady_clock::now();
+    auto result = solve_lp_from_sf(sf, effective_opts, basis_hint);
     auto failure_type = classify_lp_result(result, expected_n);
     if (failure_type == LPFailureType::Success ||
       failure_type == LPFailureType::ObjectiveCutoff ||
       failure_type == LPFailureType::Infeasible) return result;
+    if (lp_wall_time_limit_reached(result) || time_limit_hit(effective_opts)) {
+      return result;
+    }
     if (fallback_ && config_.enable_fallback) {
+      if (!deduct_elapsed_time(effective_opts, solve_start)) {
+        return mark_time_limit(std::move(result));
+      }
       return fallback_->handle_failure(sf, basis_hint, failure_type,
                                        node_id, node_depth, expected_n,
-                                       deferred);
+                                       deferred, &effective_opts);
     }
     return result;
   }
@@ -197,6 +237,8 @@ class SolverDispatcher {
         config_.suppress_degenerate_frontier_remap;
     opts.lp_kernel_backend = config_.lp_kernel_backend;
     opts.allow_persistent_lp_state = config_.allow_persistent_lp_state;
+    opts.time_limit_sec = config_.time_limit_sec;
+    opts.time_limit_hit = config_.time_limit_hit;
     if (config_.disable_partial_pricing_for_conformance) {
       opts.use_partial_pricing = false;
       opts.perturb_degenerate_primal = false;
@@ -241,9 +283,74 @@ class SolverDispatcher {
   }
 
  private:
+  const SimplexBasis* prepare_basis_hint(
+      const StandardFormLP& sf,
+      const SimplexBasis* basis_hint,
+      SolveContext context,
+      SimplexBasis& effective_basis) const {
+    if (basis_hint == nullptr || context != SolveContext::NodeLP ||
+        !config_.allow_persistent_lp_state) {
+      return basis_hint;
+    }
+    effective_basis = *basis_hint;
+    effective_basis.cached_sparse_basis.reset();
+    if (persistent_lp_owner_ && persistent_structure_id_ == sf.structure_id) {
+      effective_basis.cached_sparse_basis = persistent_lp_owner_;
+    }
+    return &effective_basis;
+  }
+
+  void retain_persistent_owner(const StandardFormLP& sf,
+                               SolveContext context,
+                               SimplexResult& result) {
+    if (context != SolveContext::NodeLP ||
+        !config_.allow_persistent_lp_state ||
+        !result.basis.cached_sparse_basis) {
+      return;
+    }
+    // Keep one structure-stable owner per dispatcher. Local-cut LPs may have
+    // different matrices; they must not evict the main node LP owner.
+    if (!persistent_lp_owner_ || persistent_structure_id_ == sf.structure_id) {
+      persistent_lp_owner_ = result.basis.cached_sparse_basis;
+      persistent_structure_id_ = sf.structure_id;
+    }
+    // Nodes may be shared by siblings or queues. Never publish the mutable LP
+    // owner through their basis snapshots.
+    result.basis.cached_sparse_basis.reset();
+    result.basis.persist_eta_count = 0;
+  }
+
+  static bool time_limit_hit(const SimplexOptions& opts) {
+    return opts.time_limit_hit != nullptr && *opts.time_limit_hit;
+  }
+
+  static bool deduct_elapsed_time(
+      SimplexOptions& opts,
+      const std::chrono::steady_clock::time_point& start) {
+    if (!(opts.time_limit_sec > 0.0) ||
+        !std::isfinite(opts.time_limit_sec)) {
+      return true;
+    }
+    const double elapsed = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - start).count();
+    opts.time_limit_sec -= elapsed;
+    if (opts.time_limit_sec > 0.0) return true;
+    if (opts.time_limit_hit != nullptr) *opts.time_limit_hit = true;
+    return false;
+  }
+
+  static SimplexResult mark_time_limit(SimplexResult result) {
+    result.result.stats.success = false;
+    result.result.stats.status =
+        "Time limit: LP dispatcher budget exhausted";
+    return result;
+  }
+
   DispatcherConfig config_;
   FallbackManager* fallback_;
   std::shared_ptr<const SimplexBasis> root_basis_;
+  std::shared_ptr<BasisOps> persistent_lp_owner_;
+  std::uint64_t persistent_structure_id_{0};
 };
 
 }  // namespace mipsolvers::engine::detail

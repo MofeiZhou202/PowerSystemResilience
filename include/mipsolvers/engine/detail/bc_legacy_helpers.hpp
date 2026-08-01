@@ -27,6 +27,16 @@ bool bc_first_class_lp_state_conformance_enabled();
 bool bc_vendored_highs_lp_kernel_enabled(const BCOptions& opt);
 bool bc_vendored_highs_root_frontier_enabled(const BCOptions& opt);
 
+/// Allocate the root-LP share of the remaining global wall-clock budget.
+/// A fallback reserve is meaningful only when the reserved minimum can still
+/// be reached; otherwise the root owns the full remaining budget.
+double bc_root_lp_budget_sec(double remaining_sec,
+                             double total_limit_sec,
+                             double fallback_min_remaining_sec,
+                             double fallback_budget_fraction,
+                             bool fallback_available,
+                             bool short_budget_ipm_root);
+
 void apply_bc_first_class_simplex_state(SimplexOptions& opt,
                                         bool allow_frontier_remap);
 

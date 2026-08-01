@@ -7,10 +7,8 @@
 // surface of `mipsolvers::engine::SparseLUFactor` so it can be plugged into the
 // dual-simplex driver as a drop-in alternative LU backend.
 //
-// Phase 2 of U.7.118: this header + its implementation must compile and
-// provide a usable API but NO call site in the rest of mipsolvers is required
-// to use it yet.  Phase 3 wires it into `SparseBasis` behind a new
-// `FactorBackendKind::HFactorPort` enum value.
+// The experimental native dual-simplex kernel uses this backend for basis
+// factorization, rank repair, triangular solves, and captured FT updates.
 // ═══════════════════════════════════════════════════════════════════════════
 
 #include <cstdint>

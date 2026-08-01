@@ -15,6 +15,7 @@
 ///  11. Binary probing with bound intersection
 
 #include "mipsolvers/engine/solver/native/milp/bc/milp_presolve.hpp"
+#include "mipsolvers/engine/detail/bc_env_options.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -151,6 +152,39 @@ void MILPPresolve::update_activity(int row) {
   }
 }
 
+void MILPPresolve::mark_infeasible(std::string reason) {
+  if (stats_.infeasible) return;
+  stats_.infeasible = true;
+  stats_.infeasibility_reason = std::move(reason);
+}
+
+bool MILPPresolve::detect_infeasibility(const char* phase) {
+  for (int j = 0; j < n_orig_; ++j) {
+    if (col_deleted_[j]) continue;
+    if (col_lb_[j] > col_ub_[j] + opts_.bound_tol) {
+      mark_infeasible(std::string("inconsistent column bounds after ") + phase);
+      return true;
+    }
+  }
+
+  for (int r = 0; r < m_orig_; ++r) {
+    if (row_deleted_[r]) continue;
+    update_activity(r);
+    const auto& ac = row_activity_[r];
+    const bool violates_upper =
+        row_ub_[r] < kInf - 1 && ac.n_inf_min == 0 &&
+        ac.min_act > row_ub_[r] + opts_.bound_tol;
+    const bool violates_lower =
+        row_lb_[r] > -kInf + 1 && ac.n_inf_max == 0 &&
+        ac.max_act < row_lb_[r] - opts_.bound_tol;
+    if (violates_upper || violates_lower) {
+      mark_infeasible(std::string("infeasible row activity after ") + phase);
+      return true;
+    }
+  }
+  return false;
+}
+
 // ============================================================================
 // Helper: get number of active (non-deleted) entries in a row
 // ============================================================================
@@ -260,8 +294,8 @@ int MILPPresolve::remove_empty_rows_and_cols() {
     if (row_nnz(rows_[r], col_deleted_) == 0) {
       // Check feasibility: 0 must be within [row_lb, row_ub]
       if (row_lb_[r] > opts_.bound_tol || row_ub_[r] < -opts_.bound_tol) {
-        // Infeasible — we can't do anything, let LP detect it
-        continue;
+        mark_infeasible("infeasible empty row");
+        return count;
       }
       delete_row(r);
       ++count;
@@ -1130,7 +1164,7 @@ int MILPPresolve::run_probing() {
 
     // Apply results
     if (infeas_at_0 && infeas_at_1) {
-      // Both infeasible — problem is infeasible, abort
+      mark_infeasible("both binary probing branches are infeasible");
       return count;
     }
     if (infeas_at_0) {
@@ -1308,7 +1342,7 @@ Eigen::VectorXd MILPPresolve::postsolve(const Eigen::VectorXd& x_reduced) const 
   // after each record check the restored x against the pre-presolve bounds.
   // Gated by HACDCPF_PRESOLVE_POSTSOLVE_DEBUG. Logs the first record that
   // pushes any variable out of [col_lb_orig_, col_ub_orig_].
-  const char* debug_env = std::getenv("HACDCPF_PRESOLVE_POSTSOLVE_DEBUG");
+  const char* debug_env = bc_env_options().value("HACDCPF_PRESOLVE_POSTSOLVE_DEBUG");
   const bool debug_on = debug_env && debug_env[0] != '\0' && debug_env[0] != '0';
   const double debug_tol = 1e-6;
   auto check_var_bounds = [&](int col) -> double {
@@ -1419,43 +1453,79 @@ PresolveStats MILPPresolve::run(LPModel& lp,
 
   init_from_lp(lp);
 
-  for (int round = 0; round < opts_.max_rounds; ++round) {
+  if (detect_infeasibility("initialization")) {
+    stats_.final_rows = stats_.orig_rows;
+    stats_.final_cols = stats_.orig_cols;
+    stats_.final_nnz = stats_.orig_nnz;
+  }
+
+  for (int round = 0; !stats_.infeasible && round < opts_.max_rounds; ++round) {
     int changes = 0;
 
-    changes += remove_fixed_variables();
-    changes += remove_empty_rows_and_cols();
-    if (opts_.do_singleton_rows) changes += process_singleton_rows();
-    changes += process_singleton_columns();
-    changes += tighten_bounds();
-    changes += remove_fixed_variables();  // new fixings from tightening
-    if (opts_.do_forcing_rows) changes += detect_forcing_rows();
-    changes += remove_fixed_variables();
-    changes += remove_empty_rows_and_cols();
+    auto run_reduction = [&](auto&& reduction, const char* phase) {
+      changes += reduction();
+      return !stats_.infeasible && !detect_infeasibility(phase);
+    };
 
-    if (opts_.do_doubleton)
-      changes += process_doubleton_equations();
+    if (!run_reduction([&] { return remove_fixed_variables(); },
+                       "fixed-variable removal")) break;
+    if (!run_reduction([&] { return remove_empty_rows_and_cols(); },
+                       "empty-row/column removal")) break;
+    if (opts_.do_singleton_rows &&
+        !run_reduction([&] { return process_singleton_rows(); },
+                       "singleton-row processing")) break;
+    if (!run_reduction([&] { return process_singleton_columns(); },
+                       "singleton-column processing")) break;
+    if (!run_reduction([&] { return tighten_bounds(); },
+                       "bound tightening")) break;
+    if (!run_reduction([&] { return remove_fixed_variables(); },
+                       "post-tightening fixed-variable removal")) break;
+    if (opts_.do_forcing_rows &&
+        !run_reduction([&] { return detect_forcing_rows(); },
+                       "forcing-row processing")) break;
+    if (!run_reduction([&] { return remove_fixed_variables(); },
+                       "post-forcing fixed-variable removal")) break;
+    if (!run_reduction([&] { return remove_empty_rows_and_cols(); },
+                       "post-forcing empty-row/column removal")) break;
 
-    if (opts_.do_dominated)
-      changes += detect_dominated_columns();
+    if (opts_.do_doubleton &&
+        !run_reduction([&] { return process_doubleton_equations(); },
+                       "doubleton processing")) break;
 
-    if (opts_.do_parallel_rows && round < 3)  // only first few rounds
-      changes += detect_parallel_rows();
+    if (opts_.do_dominated &&
+        !run_reduction([&] { return detect_dominated_columns(); },
+                       "dominated-column processing")) break;
 
-    if (opts_.do_coefficient_strengthen)
-      changes += strengthen_coefficients();
+    if (opts_.do_parallel_rows && round < 3 &&
+        !run_reduction([&] { return detect_parallel_rows(); },
+                       "parallel-row processing")) break;
+
+    if (opts_.do_coefficient_strengthen &&
+        !run_reduction([&] { return strengthen_coefficients(); },
+                       "coefficient strengthening")) break;
 
     // Probing is expensive — only in later rounds after other reductions stabilize
-    if (opts_.do_probing && round >= 1)
-      changes += run_probing();
+    if (opts_.do_probing && round >= 1 &&
+        !run_reduction([&] { return run_probing(); },
+                       "binary probing")) break;
 
-    changes += remove_fixed_variables();
-    changes += remove_empty_rows_and_cols();
+    if (!run_reduction([&] { return remove_fixed_variables(); },
+                       "final fixed-variable removal")) break;
+    if (!run_reduction([&] { return remove_empty_rows_and_cols(); },
+                       "final empty-row/column removal")) break;
 
     stats_.rounds = round + 1;
     if (changes == 0) break;
   }
 
-  rebuild_model(lp, binary_idx, integer_idx);
+  if (!stats_.infeasible) {
+    rebuild_model(lp, binary_idx, integer_idx);
+  } else {
+    // No reduced model is published on an infeasibility certificate.
+    stats_.final_rows = stats_.orig_rows;
+    stats_.final_cols = stats_.orig_cols;
+    stats_.final_nnz = stats_.orig_nnz;
+  }
 
   auto t1 = std::chrono::steady_clock::now();
   stats_.presolve_time_sec =
@@ -1465,7 +1535,7 @@ PresolveStats MILPPresolve::run(LPModel& lp,
     fprintf(stderr,
       "[PRESOLVE] %d rounds in %.1fms: rows %d→%d cols %d→%d nnz %d→%d "
       "(fixed=%d singleton=%d doubleton=%d forcing=%d dominated=%d "
-      "parallel=%d strengthen=%d probing=%d)\n",
+      "parallel=%d strengthen=%d probing=%d infeasible=%d)\n",
       stats_.rounds,
       stats_.presolve_time_sec * 1000.0,
       stats_.orig_rows, stats_.final_rows,
@@ -1478,7 +1548,8 @@ PresolveStats MILPPresolve::run(LPModel& lp,
       stats_.dominated_cols,
       stats_.parallel_rows,
       stats_.coefficients_strengthened,
-      stats_.probing_fixings);
+      stats_.probing_fixings,
+      stats_.infeasible ? 1 : 0);
   }
 
   return stats_;
@@ -1504,7 +1575,7 @@ PresolveStats presolve_inplace(LPModel& lp, const PresolveOptions& opts) {
 
   // Create a working copy to run full presolve
   MILPPresolve worker(opts);
-  // Use a dummy run with binary/integer idx
+  // Build the reduction mapping using the supplied integrality indices.
   std::vector<int> bin_idx, int_idx;
   for (int j = 0; j < static_cast<int>(lp.vars.size()); ++j) {
     if (lp.vars[j].type == VarType::Binary) bin_idx.push_back(j);

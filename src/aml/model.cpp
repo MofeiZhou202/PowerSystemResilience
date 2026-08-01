@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -942,7 +944,8 @@ class ModelImpl {
   }
 
   SolveResult build_result(const engine::api::Result& r,
-                            bool milp_mode) const {
+                            bool milp_mode,
+                            double objective_offset = 0.0) const {
     SolveResult sr;
     sr.solve_time_sec = r.stats.runtime_sec;
     sr.solver_used    = r.stats.solver_name;
@@ -1037,6 +1040,10 @@ class ModelImpl {
         }
       }
     }
+    if (objective_offset != 0.0 && sr.has_primal()) {
+      sr.objective_value += objective_offset;
+      if (r.stats.success) sr.objective_bound += objective_offset;
+    }
     return sr;
   }
 
@@ -1057,6 +1064,10 @@ class ModelImpl {
     if (sense == engine::Sense::Maximize) {
       sr.objective_value = -sr.objective_value;
       sr.objective_bound = -sr.objective_bound;
+    }
+    if (obj_expr.constant != 0.0 && sr.has_primal()) {
+      sr.objective_value += obj_expr.constant;
+      if (r.stats.success) sr.objective_bound += obj_expr.constant;
     }
 
     const engine::ConeDims dims = conic_dims();
@@ -1374,7 +1385,21 @@ ConstraintRef Model::add_psd_constraint(
 SolveResult Model::solve(const SolveOptions& opts) const {
   bool milp = impl_->is_milp();
   bool qp   = impl_->has_quad_obj;
-  bool nlp  = impl_->has_nl_obj;
+  bool nlp  = impl_->has_nl_obj || !impl_->nl_rows_.empty();
+
+  if (milp && qp) {
+    throw std::invalid_argument(
+        "Model '" + impl_->model_name +
+        "': MIQP is not supported by the AML solve contract; integer "
+        "variables would otherwise be solved with the quadratic objective "
+        "discarded.");
+  }
+  if (milp && nlp) {
+    throw std::invalid_argument(
+        "Model '" + impl_->model_name +
+        "': MINLP is not supported by the AML solve contract; integer "
+        "variables would otherwise be relaxed silently by the NLP path.");
+  }
 
   engine::SolveOptions eng_opts;
   eng_opts.preferred_solver = opts.solver_name;
@@ -1398,7 +1423,8 @@ SolveResult Model::solve(const SolveOptions& opts) const {
     // Pure QP (convex): dispatch to solve_qp
     engine::QPModel qpm = impl_->compile_qp();
     auto result = engine.solve_qp(qpm, eng_opts);
-    return impl_->build_result(result, /*milp=*/false);
+    return impl_->build_result(result, /*milp=*/false,
+                               impl_->obj_expr.constant);
   } else if (milp) {
     engine::LPModel lp  = impl_->compile_lp();
     engine::MIPModel mp;
@@ -1409,11 +1435,13 @@ SolveResult Model::solve(const SolveOptions& opts) const {
       if (m.type == VarType::Binary)  mp.binary_idx.push_back(i);
     }
     auto result = engine.solve_milp(mp, eng_opts);
-    return impl_->build_result(result, /*milp=*/true);
+    return impl_->build_result(result, /*milp=*/true,
+                               impl_->obj_expr.constant);
   } else {
     engine::LPModel lp = impl_->compile_lp();
     auto result = engine.solve_lp(lp, eng_opts);
-    return impl_->build_result(result, /*milp=*/false);
+    return impl_->build_result(result, /*milp=*/false,
+                               impl_->obj_expr.constant);
   }
 }
 
@@ -1440,18 +1468,241 @@ void Model::check_bounds() const {
 }
 
 void Model::check_missing_params() const {
-  // Nothing to check unless users explicitly register domain keys with params.
-  // This is a no-op stub; full checking is domain-builder responsibility.
+  std::vector<std::string> problems;
+  for (const auto& param : impl_->params) {
+    if (param->dimension() == 0) {
+      if (!param->contains(Key{{}})) {
+        problems.push_back("scalar parameter '" + param->name() +
+                           "' has no value");
+      }
+    } else if (param->size() == 0) {
+      problems.push_back("indexed parameter '" + param->name() +
+                         "' has no entries");
+    }
+    for (const auto& [key, value] : param->to_map()) {
+      (void)key;
+      if (!std::isfinite(value)) {
+        problems.push_back("parameter '" + param->name() +
+                           "' contains a non-finite value");
+        break;
+      }
+    }
+  }
+  if (!problems.empty()) {
+    std::string message = "Model '" + impl_->model_name +
+                          "': parameter validation failed";
+    for (const auto& problem : problems) message += "; " + problem;
+    throw std::domain_error(message);
+  }
 }
 
-void Model::write_lp(const std::string& path) const {
-  // Minimal stub — LP file export is handled by engine adapters in the future.
-  (void)path;
-  throw std::logic_error("Model::write_lp: not yet implemented");
+namespace {
+
+constexpr double kAmlExportInfinity = 1e19;
+
+bool finite_export_bound(double value) {
+  return std::isfinite(value) && std::abs(value) < kAmlExportInfinity;
 }
+
+std::string export_col_name(int column) {
+  return "X" + std::to_string(column + 1);
+}
+
+void write_lp_term(std::ostream& out, double coefficient,
+                   const std::string& name, bool& wrote_term) {
+  if (coefficient == 0.0) return;
+  out << (coefficient < 0.0 ? " - " : " + ") << std::abs(coefficient)
+      << ' ' << name;
+  wrote_term = true;
+}
+
+void require_linear_export_model(const ModelImpl& model) {
+  if (model.has_quad_obj || model.has_nl_obj || !model.nl_rows_.empty() ||
+      model.has_conic()) {
+    throw std::invalid_argument(
+        "AML LP/MPS export supports linear LP and MILP models only; "
+        "quadratic, nonlinear and conic structure cannot be represented by "
+        "this exporter");
+  }
+}
+
+}  // namespace
+
+void Model::write_lp(const std::string& path) const {
+  require_linear_export_model(*impl_);
+  if (path.empty()) throw std::invalid_argument("Model::write_lp: empty path");
+
+  const engine::LPModel lp = impl_->compile_lp();
+  const Eigen::SparseMatrix<double, Eigen::RowMajor> a_row(lp.A);
+  const Eigen::SparseMatrix<double, Eigen::RowMajor> aeq_row(lp.Aeq);
+  std::ofstream out(path);
+  if (!out) throw std::runtime_error("Model::write_lp: cannot open " + path);
+  out << std::setprecision(std::numeric_limits<double>::max_digits10);
+  out << "\\ AML model: " << impl_->model_name << '\n';
+  out << (lp.sense == engine::Sense::Minimize ? "Minimize\n" : "Maximize\n");
+  out << " obj:";
+  bool wrote_term = false;
+  for (int j = 0; j < lp.c.size(); ++j) {
+    write_lp_term(out, lp.c[j], export_col_name(j), wrote_term);
+  }
+  if (impl_->obj_expr.constant != 0.0) {
+    out << (impl_->obj_expr.constant < 0.0 ? " - " : " + ")
+        << std::abs(impl_->obj_expr.constant);
+    wrote_term = true;
+  }
+  if (!wrote_term) out << " 0";
+  out << "\nSubject To\n";
+  for (int i = 0; i < a_row.rows(); ++i) {
+    out << " c" << (i + 1) << ':';
+    bool wrote_row = false;
+    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(a_row, i);
+         it; ++it) {
+      write_lp_term(out, it.value(), export_col_name(it.col()), wrote_row);
+    }
+    if (!wrote_row) out << " 0";
+    out << " <= " << lp.b[i] << '\n';
+  }
+  for (int i = 0; i < aeq_row.rows(); ++i) {
+    out << " e" << (i + 1) << ':';
+    bool wrote_row = false;
+    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(aeq_row, i);
+         it; ++it) {
+      write_lp_term(out, it.value(), export_col_name(it.col()), wrote_row);
+    }
+    if (!wrote_row) out << " 0";
+    out << " = " << lp.beq[i] << '\n';
+  }
+
+  out << "Bounds\n";
+  for (int j = 0; j < static_cast<int>(lp.vars.size()); ++j) {
+    const auto& var = lp.vars[static_cast<std::size_t>(j)];
+    const std::string name = export_col_name(j);
+    const bool has_lb = finite_export_bound(var.lb);
+    const bool has_ub = finite_export_bound(var.ub);
+    if (!has_lb && !has_ub) {
+      out << ' ' << name << " free\n";
+    } else if (has_lb && has_ub && var.lb == var.ub) {
+      out << ' ' << name << " = " << var.lb << '\n';
+    } else if (has_lb && has_ub) {
+      out << ' ' << var.lb << " <= " << name << " <= " << var.ub << '\n';
+    } else if (has_lb) {
+      out << ' ' << var.lb << " <= " << name << '\n';
+    } else {
+      out << ' ' << name << " <= " << var.ub << '\n';
+    }
+  }
+
+  bool wrote_binary = false;
+  for (const auto& var : lp.vars) {
+    if (var.type == engine::VarType::Binary) wrote_binary = true;
+  }
+  if (wrote_binary) {
+    out << "Binaries\n";
+    for (int j = 0; j < static_cast<int>(lp.vars.size()); ++j) {
+      if (lp.vars[static_cast<std::size_t>(j)].type == engine::VarType::Binary)
+        out << ' ' << export_col_name(j) << '\n';
+    }
+  }
+  bool wrote_integer = false;
+  for (const auto& var : lp.vars) {
+    if (var.type == engine::VarType::Integer) wrote_integer = true;
+  }
+  if (wrote_integer) {
+    out << "Generals\n";
+    for (int j = 0; j < static_cast<int>(lp.vars.size()); ++j) {
+      if (lp.vars[static_cast<std::size_t>(j)].type == engine::VarType::Integer)
+        out << ' ' << export_col_name(j) << '\n';
+    }
+  }
+  out << "End\n";
+  if (!out) throw std::runtime_error("Model::write_lp: write failed for " + path);
+}
+
 void Model::write_mps(const std::string& path) const {
-  (void)path;
-  throw std::logic_error("Model::write_mps: not yet implemented");
+  require_linear_export_model(*impl_);
+  if (path.empty()) throw std::invalid_argument("Model::write_mps: empty path");
+
+  const engine::LPModel lp = impl_->compile_lp();
+  const Eigen::SparseMatrix<double, Eigen::ColMajor> a_col(lp.A);
+  const Eigen::SparseMatrix<double, Eigen::ColMajor> aeq_col(lp.Aeq);
+  std::ofstream out(path);
+  if (!out) throw std::runtime_error("Model::write_mps: cannot open " + path);
+  out << std::setprecision(std::numeric_limits<double>::max_digits10);
+  out << "NAME          AMLMODEL\n";
+  out << "OBJSENSE\n  "
+      << (lp.sense == engine::Sense::Minimize ? "MIN\n" : "MAX\n");
+  out << "ROWS\n N  OBJ\n";
+  for (int i = 0; i < lp.A.rows(); ++i) out << " L  C" << (i + 1) << '\n';
+  for (int i = 0; i < lp.Aeq.rows(); ++i) out << " E  E" << (i + 1) << '\n';
+
+  out << "COLUMNS\n";
+  bool in_integer_section = false;
+  int marker = 0;
+  for (int j = 0; j < lp.c.size(); ++j) {
+    const bool is_integer = lp.vars[static_cast<std::size_t>(j)].type !=
+                            engine::VarType::Continuous;
+    if (is_integer != in_integer_section) {
+      out << "    MARK" << std::setw(4) << std::setfill('0') << marker++
+          << std::setfill(' ') << "  'MARKER'                 '"
+          << (is_integer ? "INTORG" : "INTEND") << "'\n";
+      in_integer_section = is_integer;
+    }
+    const std::string name = export_col_name(j);
+    bool wrote_column = false;
+    if (lp.c[j] != 0.0) {
+      out << "    " << name << "  OBJ  " << lp.c[j] << '\n';
+      wrote_column = true;
+    }
+    for (Eigen::SparseMatrix<double, Eigen::ColMajor>::InnerIterator it(a_col, j);
+         it; ++it) {
+      out << "    " << name << "  C" << (it.row() + 1) << "  "
+          << it.value() << '\n';
+      wrote_column = true;
+    }
+    for (Eigen::SparseMatrix<double, Eigen::ColMajor>::InnerIterator it(aeq_col, j);
+         it; ++it) {
+      out << "    " << name << "  E" << (it.row() + 1) << "  "
+          << it.value() << '\n';
+      wrote_column = true;
+    }
+    if (!wrote_column) out << "    " << name << "  OBJ  0\n";
+  }
+  if (in_integer_section) {
+    out << "    MARK" << std::setw(4) << std::setfill('0') << marker
+        << std::setfill(' ') << "  'MARKER'                 'INTEND'\n";
+  }
+
+  out << "RHS\n";
+  if (impl_->obj_expr.constant != 0.0) {
+    out << "    RHS1  OBJ  " << -impl_->obj_expr.constant << '\n';
+  }
+  for (int i = 0; i < lp.b.size(); ++i)
+    out << "    RHS1  C" << (i + 1) << "  " << lp.b[i] << '\n';
+  for (int i = 0; i < lp.beq.size(); ++i)
+    out << "    RHS1  E" << (i + 1) << "  " << lp.beq[i] << '\n';
+
+  out << "BOUNDS\n";
+  for (int j = 0; j < static_cast<int>(lp.vars.size()); ++j) {
+    const auto& var = lp.vars[static_cast<std::size_t>(j)];
+    const std::string name = export_col_name(j);
+    if (var.type == engine::VarType::Binary) {
+      out << " BV BND1  " << name << '\n';
+      continue;
+    }
+    const bool has_lb = finite_export_bound(var.lb);
+    const bool has_ub = finite_export_bound(var.ub);
+    if (!has_lb && !has_ub) {
+      out << " FR BND1  " << name << '\n';
+    } else if (has_lb && has_ub && var.lb == var.ub) {
+      out << " FX BND1  " << name << "  " << var.lb << '\n';
+    } else {
+      if (has_lb) out << " LO BND1  " << name << "  " << var.lb << '\n';
+      else out << " MI BND1  " << name << '\n';
+      if (has_ub) out << " UP BND1  " << name << "  " << var.ub << '\n';
+    }
+  }
+  out << "ENDATA\n";
+  if (!out) throw std::runtime_error("Model::write_mps: write failed for " + path);
 }
 
 // ── JSON export (Beta milestone) ─────────────────────────────────────────

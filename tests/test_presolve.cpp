@@ -10,10 +10,53 @@
 #include "mipsolvers/engine/strategy/postsolve_manager.hpp"
 #include "mipsolvers/engine/api/options.hpp"
 #include "mipsolvers/engine/problem_types.hpp"
+#include "mipsolvers/engine/solver/native/milp/bc/milp_presolve.hpp"
 
 using namespace mipsolvers::engine;
 using namespace mipsolvers::engine::strategy;
 using Catch::Approx;
+
+TEST_CASE("Native MILP presolve reports infeasible empty rows",
+          "[presolve][milp][infeasible]") {
+  LPModel lp;
+  lp.c = Eigen::VectorXd::Zero(1);
+  lp.A.resize(0, 1);
+  lp.b.resize(0);
+  lp.Aeq.resize(1, 1);
+  lp.beq = Eigen::VectorXd::Ones(1);
+  lp.vars.push_back({VarType::Binary, 0.0, 1.0});
+
+  std::vector<int> binary{0};
+  std::vector<int> integer;
+  MILPPresolve presolve;
+  const PresolveStats stats = presolve.run(lp, binary, integer);
+
+  CHECK(stats.infeasible);
+  CHECK_FALSE(stats.infeasibility_reason.empty());
+}
+
+TEST_CASE("Native MILP presolve propagates contradictory tightened bounds",
+          "[presolve][milp][infeasible]") {
+  LPModel lp;
+  lp.c = Eigen::VectorXd::Zero(1);
+  lp.A.resize(2, 1);
+  lp.A.insert(0, 0) = 1.0;
+  lp.A.insert(1, 0) = -1.0;
+  lp.A.makeCompressed();
+  lp.b.resize(2);
+  lp.b << 0.0, -1.0;
+  lp.Aeq.resize(0, 1);
+  lp.beq.resize(0);
+  lp.vars.push_back({VarType::Binary, 0.0, 1.0});
+
+  std::vector<int> binary{0};
+  std::vector<int> integer;
+  MILPPresolve presolve;
+  const PresolveStats stats = presolve.run(lp, binary, integer);
+
+  CHECK(stats.infeasible);
+  CHECK(stats.infeasibility_reason.find("bounds") != std::string::npos);
+}
 
 // ─── Presolve of a simple LP ────────────────────────────────────────────────
 // min -x  s.t. x<=5, x<=10, x>=0
@@ -40,7 +83,12 @@ TEST_CASE("Presolve: LP with redundant constraint", "[presolve][lp]") {
     const auto& lp2 = std::get<LPModel>(presolved.presolved);
     CHECK(lp2.c.size() == 1);
   }
-  SUCCEED();
+  CHECK_FALSE(presolved.is_presolved());
+  const auto stats = ps.last_stats();
+  CHECK(stats.original_rows == 2);
+  CHECK(stats.presolved_rows == 2);
+  CHECK(stats.original_cols == 1);
+  CHECK(stats.presolved_cols == 1);
 }
 
 // ─── Fixed variable elimination ────────────────────────────────────────────
@@ -105,6 +153,30 @@ TEST_CASE("Postsolve: identity mapping preserves solution", "[presolve][postsolv
   REQUIRE(final_res.stats.success);
   CHECK(final_res.x.size() == 2);
   CHECK(final_res.stats.objective == Approx(5.0).margin(1e-6));
+  CHECK(post.validate(final_res, presolved_res));
+}
+
+TEST_CASE("Postsolve: fixed variables require and use a complete mapping",
+          "[presolve][postsolve]") {
+  SolveResult reduced;
+  reduced.stats.success = true;
+  reduced.stats.objective = 7.0;
+  reduced.x.resize(2);
+  reduced.x << 1.0, 2.0;
+
+  PresolveMapping mapping;
+  mapping.col_mapping = {0, 2};
+  mapping.fixed_variables.emplace(1, 5.0);
+
+  PostsolveManager post;
+  const SolveResult restored = post.postsolve(reduced, mapping);
+  REQUIRE(restored.x.size() == 3);
+  CHECK(restored.x[0] == Approx(1.0));
+  CHECK(restored.x[1] == Approx(5.0));
+  CHECK(restored.x[2] == Approx(2.0));
+
+  mapping.col_mapping.clear();
+  CHECK_THROWS_AS(post.postsolve(reduced, mapping), std::invalid_argument);
 }
 
 // ─── should_presolve heuristic ────────────────────────────────────────────
@@ -117,8 +189,9 @@ TEST_CASE("Presolve: should_presolve runs without crash", "[presolve]") {
 
   PresolveManager ps;
   SolveOptions opts;
-  (void)ps.should_presolve(tiny, opts);
-  SUCCEED();
+  CHECK_FALSE(ps.should_presolve(tiny, opts));
+  CHECK_THROWS_AS(ps.scale(tiny, "ruiz"), std::logic_error);
+  CHECK_FALSE(ps.scale(tiny, "identity").is_presolved());
 }
 
 // ─── Matrix scaling statistics (P0(b) presolve-hardening diagnostics) ───────

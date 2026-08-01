@@ -675,8 +675,7 @@ struct HighsOptionsStruct {
 // For now, but later change so HiGHS properties are string based so that new
 // options (for debug and testing too) can be added easily. The options below
 // are just what has been used to parse options from argv.
-// todo: when creating the new options don't forget underscores for class
-// variables but no underscores for struct
+// New class variables use trailing underscores; struct fields do not.
 class HighsOptions : public HighsOptionsStruct {
  public:
   HighsOptions() {

@@ -6,6 +6,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <vector>
 #include <Eigen/Core>
 
 #include "mipsolvers/engine/bc/options.hpp"
@@ -15,30 +16,27 @@ namespace mipsolvers::engine {
 
 /// Detailed statistics accumulated during the B&C run.
 struct BCStats {
+  /// Provenance and availability for fields whose collectors are specific to
+  /// the native tree. A zero counter means an observed zero only when the
+  /// corresponding availability flag is true.
+  std::string collection_scope{"native_full"};
+  bool lp_solve_count_available{true};
+  bool incumbent_timeline_available{true};
+  bool cut_diagnostics_available{true};
+  bool native_diagnostics_available{true};
+
   // ── Basic progress ─────────────────────────────────────────────────────
   int    nodes_explored{0};
   int    lp_solves{0};
   int    cuts_added{0};
   int    root_cuts_added{0};
   int    tree_cuts_added{0};
-  int    subsolve_calls{0};
-  int    sub_cuts_added{0};
-  int    sub_root_cuts_added{0};
-  int    sub_tree_cuts_added{0};
   int    root_gomory_cuts{0};
   int    root_mir_cuts{0};
   int    root_cover_cuts{0};
   int    root_clique_cuts{0};
   int    root_zerohalf_cuts{0};
-  int    root_flowcover_cuts{0};
   int    root_impliedbound_cuts{0};
-  int    sub_root_gomory_cuts{0};
-  int    sub_root_mir_cuts{0};
-  int    sub_root_cover_cuts{0};
-  int    sub_root_clique_cuts{0};
-  int    sub_root_zerohalf_cuts{0};
-  int    sub_root_flowcover_cuts{0};
-  int    sub_root_impliedbound_cuts{0};
   int    root_presolved_rows{0};
   int    root_presolved_cols{0};
   int    root_presolved_compact_rows{0};
@@ -116,6 +114,35 @@ struct BCStats {
   std::uint64_t reliability_branch_nodes{0};
   std::uint64_t strong_branch_candidates{0};
   std::uint64_t strong_branch_lp_solves{0};
+  std::uint64_t strong_complete_probe_pairs{0};
+  std::uint64_t strong_selected_exact{0};
+  std::uint64_t strong_selected_unprobed{0};
+  std::uint64_t strong_winner_changed_by_exact{0};
+  std::uint64_t strong_probe_unknown_failures{0};
+  std::uint64_t strong_probe_lp_iterations{0};
+  double strong_probe_time_ms{0.0};
+  std::uint64_t branch_direction_preferred_down{0};
+  std::uint64_t branch_direction_preferred_up{0};
+  std::uint64_t branch_direction_first_down{0};
+  std::uint64_t branch_direction_first_up{0};
+  std::uint64_t branch_first_child_incumbent_updates{0};
+  std::uint64_t branch_first_child_cutoffs{0};
+  std::uint64_t branch_second_child_cutoffs{0};
+  std::uint64_t node_estimate_calibration_samples{0};
+  double node_estimate_predicted_lift_sum{0.0};
+  double node_estimate_realized_lift_sum{0.0};
+  double node_estimate_abs_error_sum{0.0};
+  double node_estimate_squared_error_sum{0.0};
+  double node_estimate_predicted_sq_sum{0.0};
+  double node_estimate_realized_sq_sum{0.0};
+  double node_estimate_cross_sum{0.0};
+  std::uint64_t directional_calibration_samples{0};
+  double directional_predicted_gain_sum{0.0};
+  double directional_realized_gain_sum{0.0};
+  double directional_abs_error_sum{0.0};
+  double directional_squared_error_sum{0.0};
+  std::uint64_t directional_rank_samples{0};
+  std::uint64_t directional_rank_concordant{0};
   std::uint64_t strong_branch_cache_exact_hits{0};
   std::uint64_t strong_branch_cache_warm_hits{0};
   std::uint64_t strong_branch_duplicate_lp_avoided{0};
@@ -245,7 +272,6 @@ struct BCStats {
   std::uint64_t variable_bound_cut_mixed_rows{0};
   std::uint64_t variable_bound_cut_vub_candidates{0};
   std::uint64_t variable_bound_cut_vlb_candidates{0};
-  std::uint64_t variable_bound_cut_domain_tightenings{0};
   std::uint64_t variable_bound_cut_exported_implications{0};
   std::uint64_t objective_implied_event_published_implications{0};
   std::uint64_t objective_implied_event_published_clique_edges{0};
@@ -259,14 +285,6 @@ struct BCStats {
   std::uint64_t objective_domain_bound_lift_nodes{0};
   double objective_domain_bound_lift_sum{0.0};
   double objective_domain_bound_lift_max{0.0};
-  std::uint64_t rowdual_cmir_candidates{0};
-  std::uint64_t rowdual_cmir_violated{0};
-  std::uint64_t rowdual_cmir_target_coeff{0};
-  std::uint64_t rowdual_cmir_added{0};
-  std::uint64_t rowdual_cmir_rejected{0};
-  std::uint64_t rowdual_cmir_bound_moves{0};
-  double rowdual_cmir_lift_sum{0.0};
-  double rowdual_cmir_lift_max{0.0};
   std::uint64_t termination_effective_candidates{0};
   std::uint64_t termination_effective_admitted{0};
   std::uint64_t termination_effective_skip_no_lp_or_queue_hit{0};
@@ -391,6 +409,9 @@ struct BCResult {
   Eigen::VectorXd x;
   SolveStats      stats;     ///< Standard SolveStats (compatible with SolverAdapter)
   BCStats         bc_stats;  ///< Additional B&C diagnostics
+  /// Non-empty solver-owned environment settings captured at solve entry.
+  /// Nested solves and worker threads use this same immutable snapshot.
+  std::vector<std::string> effective_environment;
   /// Root cuts extracted from this solve (HiGHS StrictHiGHS path only).
   /// Pass as BCOptions::highs_root_cut_warm_start on the next solve of the
   /// same problem to skip the ~40 s root cutting loop.

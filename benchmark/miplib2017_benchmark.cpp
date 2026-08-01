@@ -11,7 +11,9 @@
 /// objective offset, row ranges, variable bounds, and integrality.
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
+#include <csignal>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -27,9 +29,16 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#ifndef _WIN32
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 #include <Eigen/Core>
 #include <Eigen/Sparse>
@@ -71,7 +80,18 @@ struct Config {
   int max_nodes{50000};
   int seed{0};
   double time_limit_sec{60.0};
+  double hard_timeout_grace_sec{5.0};
   double gap{1e-4};
+  std::string native_node_estimate{"sum"};
+  bool native_verbose{false};
+  bool native_presolve{true};
+  bool native_cuts{true};
+  bool native_objective_propagation{true};
+  bool native_reduced_cost_fixing{true};
+  bool native_row_propagation{true};
+  fs::path worker_instance;
+  fs::path worker_output;
+  std::string worker_solver;
 };
 
 struct Reference {
@@ -112,6 +132,7 @@ struct Audit {
 struct Result {
   std::string instance;
   std::string solver;
+  std::string collection_scope{"unavailable"};
   int repeat{0};
   int rows{0};
   int columns{0};
@@ -123,7 +144,14 @@ struct Result {
   bool optimal{false};
   bool proven{false};
   bool timed_out{false};
+  bool hard_timeout{false};
   bool reference_match{false};
+  bool node_count_available{false};
+  bool lp_solve_count_available{false};
+  bool lp_iteration_count_available{false};
+  bool cut_count_available{false};
+  bool incumbent_timeline_available{false};
+  bool native_diagnostics_available{false};
   double read_ms{0.0};
   double shared_decompress_ms{0.0};
   double solve_ms{0.0};
@@ -148,6 +176,21 @@ struct Result {
   std::uint64_t strong_branch_regret_samples{0};
   double strong_branch_regret_sum{0.0};
   double strong_branch_regret_max{0.0};
+  std::uint64_t node_estimate_calibration_samples{0};
+  double node_estimate_predicted_lift_sum{0.0};
+  double node_estimate_realized_lift_sum{0.0};
+  double node_estimate_abs_error_sum{0.0};
+  double node_estimate_squared_error_sum{0.0};
+  double node_estimate_predicted_sq_sum{0.0};
+  double node_estimate_realized_sq_sum{0.0};
+  double node_estimate_cross_sum{0.0};
+  std::uint64_t directional_calibration_samples{0};
+  double directional_predicted_gain_sum{0.0};
+  double directional_realized_gain_sum{0.0};
+  double directional_abs_error_sum{0.0};
+  double directional_squared_error_sum{0.0};
+  std::uint64_t directional_rank_samples{0};
+  std::uint64_t directional_rank_concordant{0};
   int fallback_events{-1};
   int fallback_recoveries{-1};
   double reference_objective{std::numeric_limits<double>::quiet_NaN()};
@@ -244,9 +287,36 @@ bool parse_args(int argc, char** argv, Config& cfg) {
     } else if (arg == "--time-limit") {
       const char* v = value("--time-limit"); if (!v) return false;
       cfg.time_limit_sec = std::max(0.01, std::atof(v));
+    } else if (arg == "--hard-timeout-grace") {
+      const char* v = value("--hard-timeout-grace"); if (!v) return false;
+      cfg.hard_timeout_grace_sec = std::max(0.0, std::atof(v));
     } else if (arg == "--gap") {
       const char* v = value("--gap"); if (!v) return false;
       cfg.gap = std::max(0.0, std::atof(v));
+    } else if (arg == "--native-node-estimate") {
+      const char* v = value("--native-node-estimate"); if (!v) return false;
+      cfg.native_node_estimate = v;
+    } else if (arg == "--native-verbose") {
+      cfg.native_verbose = true;
+    } else if (arg == "--native-no-presolve") {
+      cfg.native_presolve = false;
+    } else if (arg == "--native-no-cuts") {
+      cfg.native_cuts = false;
+    } else if (arg == "--native-no-objective-propagation") {
+      cfg.native_objective_propagation = false;
+    } else if (arg == "--native-no-reduced-cost-fixing") {
+      cfg.native_reduced_cost_fixing = false;
+    } else if (arg == "--native-no-row-propagation") {
+      cfg.native_row_propagation = false;
+    } else if (arg == "--worker-instance") {
+      const char* v = value("--worker-instance"); if (!v) return false;
+      cfg.worker_instance = v;
+    } else if (arg == "--worker-output") {
+      const char* v = value("--worker-output"); if (!v) return false;
+      cfg.worker_output = v;
+    } else if (arg == "--worker-solver") {
+      const char* v = value("--worker-solver"); if (!v) return false;
+      cfg.worker_solver = v;
     } else if (arg == "--help" || arg == "-h") {
       std::cout
           << "Usage: miplib2017_benchmark [options]\n"
@@ -258,6 +328,14 @@ bool parse_args(int argc, char** argv, Config& cfg) {
           << "  --sample N           evenly sample N names after filtering (0 = all)\n"
           << "  --repeat N           repetitions per solver/instance\n"
           << "  --time-limit SEC     per-solve wall limit\n"
+          << "  --hard-timeout-grace SEC  process watchdog grace after the solve limit\n"
+          << "  --native-node-estimate MODE  sum or maximum\n"
+          << "  --native-verbose      enable native B&C diagnostic logging\n"
+          << "  --native-no-presolve disable PaPILO in native audit runs\n"
+          << "  --native-no-cuts     disable native cut generation in audit runs\n"
+          << "  --native-no-objective-propagation  disable incumbent-cutoff rows/domain fixing\n"
+          << "  --native-no-reduced-cost-fixing    disable reduced-cost domain fixing/learning\n"
+          << "  --native-no-row-propagation        disable model/cut row domain propagation\n"
           << "  --gap VALUE          relative MIP gap (default 1e-4)\n"
           << "  --max-nodes N        native B&C node limit\n"
           << "  --seed N             deterministic backend seed\n"
@@ -616,6 +694,7 @@ Result run_highs(const Instance& instance, const Config& cfg) {
   Result result;
   set_dimensions(instance, result);
   result.solver = "highs-mip";
+  result.collection_scope = "highs_summary";
 
   Highs::resetGlobalScheduler(true);
   Highs highs;
@@ -654,6 +733,8 @@ Result run_highs(const Instance& instance, const Config& cfg) {
   }
 
   const HighsInfo& info = highs.getInfo();
+  result.node_count_available = true;
+  result.lp_iteration_count_available = true;
   result.objective = info.objective_function_value;
   result.best_bound = info.mip_dual_bound;
   result.gap = info.mip_gap;
@@ -697,6 +778,7 @@ Result run_scip(const Instance& instance, const Config& cfg) {
   result.status = "SCIP library not compiled";
   return result;
 #else
+  result.collection_scope = "scip_summary";
   SCIP* scip = nullptr;
   if (SCIPcreate(&scip) != SCIP_OKAY || scip == nullptr) {
     result.status = "SCIPcreate failed";
@@ -733,6 +815,10 @@ Result run_scip(const Instance& instance, const Config& cfg) {
   result.proven = result.optimal || status == SCIP_STATUS_INFEASIBLE ||
                   status == SCIP_STATUS_UNBOUNDED || status == SCIP_STATUS_INFORUNBD;
   result.timed_out = status == SCIP_STATUS_TIMELIMIT;
+  result.node_count_available = true;
+  result.lp_solve_count_available = true;
+  result.lp_iteration_count_available = true;
+  result.cut_count_available = true;
   result.nodes = static_cast<std::int64_t>(SCIPgetNNodes(scip));
   result.lp_solves = static_cast<std::int64_t>(SCIPgetNLPs(scip));
   result.lp_iterations = static_cast<std::int64_t>(SCIPgetNLPIterations(scip));
@@ -796,8 +882,43 @@ Result run_native(const Instance& instance, const Config& cfg,
   options.gap_tol = cfg.gap;
   options.max_nodes = cfg.max_nodes;
   options.num_threads = 1;
-  options.verbose = false;
+  options.verbose = cfg.native_verbose;
   options.enable_domain_heuristics = false;
+  options.use_papilo_presolve = cfg.native_presolve;
+  if (!cfg.native_cuts) {
+    options.cuts = eng::CutType::None;
+    options.root_cut_rounds = 0;
+    options.max_cut_depth = -1;
+    options.enable_objective_cutoff_conflict_cuts = false;
+    options.enable_objective_cutoff_weighted_event_cuts = false;
+    options.enable_objective_cutoff_domain_fixing = false;
+    options.enable_nonviolated_cutoff_conflict_covers = false;
+    options.enable_graph_implied_bound_cuts = false;
+    options.enable_dynamic_implied_bound_probing = false;
+    options.enable_cglp_cuts = false;
+  }
+  if (!cfg.native_objective_propagation) {
+    options.enable_objective_cutoff_conflict_cuts = false;
+    options.enable_objective_cutoff_weighted_event_cuts = false;
+    options.enable_objective_cutoff_domain_fixing = false;
+    options.enable_nonviolated_cutoff_conflict_covers = false;
+  }
+  if (!cfg.native_reduced_cost_fixing) {
+    options.rc_fixing_followup_propagation = false;
+    options.enable_reduced_cost_conflict_learning = false;
+    options.enable_reduced_cost_fixing = false;
+    options.enable_reduced_cost_proof_conflict_minimization = false;
+    options.enable_verified_reduced_cost_conflict_minimization = false;
+    options.enable_reduced_cost_fixing_resolve = false;
+    options.enable_reduced_cost_proof_cut_resolve = false;
+  }
+  if (!cfg.native_row_propagation) {
+    options.bound_propagation_rounds = 0;
+  }
+  options.node_estimate_aggregation =
+      cfg.native_node_estimate == "maximum"
+          ? eng::NodeEstimateAggregation::Maximum
+          : eng::NodeEstimateAggregation::Sum;
 
   const auto solve_start = std::chrono::steady_clock::now();
   const eng::BCResult native = eng::solve_milp_bc(instance.mip, options);
@@ -806,12 +927,25 @@ Result run_native(const Instance& instance, const Config& cfg,
       std::chrono::duration<double, std::milli>(solve_end - solve_start).count();
   result.status = native.bc_stats.status.empty() ? native.stats.status
                                                   : native.bc_stats.status;
+  result.collection_scope = native.bc_stats.collection_scope;
+  result.node_count_available = true;
+  result.lp_solve_count_available = native.bc_stats.lp_solve_count_available;
+  result.cut_count_available = native.bc_stats.cut_diagnostics_available;
+  result.incumbent_timeline_available =
+      native.bc_stats.incumbent_timeline_available;
+  result.native_diagnostics_available =
+      native.bc_stats.native_diagnostics_available;
   result.has_solution = native.stats.success && native.x.size() == instance.columns;
   result.nodes = native.bc_stats.nodes_explored;
-  result.lp_solves = native.bc_stats.lp_solves;
-  result.cuts = native.bc_stats.cuts_added;
-  result.first_incumbent_node = native.bc_stats.first_incumbent_node;
-  result.first_incumbent_lp_solves = native.bc_stats.first_incumbent_lp_solves;
+  result.lp_solves = native.bc_stats.lp_solve_count_available
+      ? native.bc_stats.lp_solves : -1;
+  result.cuts = native.bc_stats.cut_diagnostics_available
+      ? native.bc_stats.cuts_added : -1;
+  result.first_incumbent_node = native.bc_stats.incumbent_timeline_available
+      ? native.bc_stats.first_incumbent_node : -1;
+  result.first_incumbent_lp_solves =
+      native.bc_stats.incumbent_timeline_available
+          ? native.bc_stats.first_incumbent_lp_solves : -1;
   result.reliability_branch_nodes = native.bc_stats.reliability_branch_nodes;
   result.strong_branch_candidates = native.bc_stats.strong_branch_candidates;
   result.strong_branch_lp_solves = native.bc_stats.strong_branch_lp_solves;
@@ -828,6 +962,34 @@ Result run_native(const Instance& instance, const Config& cfg,
       native.bc_stats.strong_branch_regret_samples;
   result.strong_branch_regret_sum = native.bc_stats.strong_branch_regret_sum;
   result.strong_branch_regret_max = native.bc_stats.strong_branch_regret_max;
+  result.node_estimate_calibration_samples =
+      native.bc_stats.node_estimate_calibration_samples;
+  result.node_estimate_predicted_lift_sum =
+      native.bc_stats.node_estimate_predicted_lift_sum;
+  result.node_estimate_realized_lift_sum =
+      native.bc_stats.node_estimate_realized_lift_sum;
+  result.node_estimate_abs_error_sum =
+      native.bc_stats.node_estimate_abs_error_sum;
+  result.node_estimate_squared_error_sum =
+      native.bc_stats.node_estimate_squared_error_sum;
+  result.node_estimate_predicted_sq_sum =
+      native.bc_stats.node_estimate_predicted_sq_sum;
+  result.node_estimate_realized_sq_sum =
+      native.bc_stats.node_estimate_realized_sq_sum;
+  result.node_estimate_cross_sum = native.bc_stats.node_estimate_cross_sum;
+  result.directional_calibration_samples =
+      native.bc_stats.directional_calibration_samples;
+  result.directional_predicted_gain_sum =
+      native.bc_stats.directional_predicted_gain_sum;
+  result.directional_realized_gain_sum =
+      native.bc_stats.directional_realized_gain_sum;
+  result.directional_abs_error_sum =
+      native.bc_stats.directional_abs_error_sum;
+  result.directional_squared_error_sum =
+      native.bc_stats.directional_squared_error_sum;
+  result.directional_rank_samples = native.bc_stats.directional_rank_samples;
+  result.directional_rank_concordant =
+      native.bc_stats.directional_rank_concordant;
   result.fallback_events = native.bc_stats.fallback_events;
   result.fallback_recoveries = native.bc_stats.fallback_recoveries;
   result.gap = native.bc_stats.gap;
@@ -878,6 +1040,11 @@ void attach_validation(const Instance& instance, const Reference* reference,
     const double rel_error = std::abs(result.objective - reference->objective) /
                              std::max(1.0, std::abs(reference->objective));
     result.reference_match = rel_error <= kAuditTolerance;
+    if (!result.reference_match) {
+      result.status = "Reference audit rejected optimal claim: " + result.status;
+      result.optimal = false;
+      result.proven = false;
+    }
   } else if (result.proven && !result.has_solution &&
              reference->status.find("inf") != std::string::npos &&
              (result.status.find("infeasible") != std::string::npos ||
@@ -893,13 +1060,25 @@ std::string csv_escape(const std::string& text) {
   return out + "\"";
 }
 
+std::string csv_number(double value) {
+  if (!std::isfinite(value)) return {};
+  std::ostringstream out;
+  out << std::setprecision(std::numeric_limits<double>::max_digits10) << value;
+  return out.str();
+}
+
+template <typename Integer>
+std::string csv_count(Integer value, bool available) {
+  return available ? std::to_string(value) : std::string{};
+}
+
 void write_csv(const fs::path& path, const std::vector<Result>& results) {
   if (path.empty()) return;
   if (!path.parent_path().empty()) fs::create_directories(path.parent_path());
   std::ofstream out(path);
   if (!out) throw std::runtime_error("cannot write " + path.string());
   out << "instance,solver,repeat,rows,columns,nonzeros,integers,binaries,available,"
-         "has_solution,optimal,proven,timed_out,audit_passed,reference_match,read_ms,"
+         "has_solution,optimal,proven,timed_out,hard_timeout,audit_passed,reference_match,read_ms,"
          "shared_decompress_ms,solve_ms,objective,best_bound,gap,nodes,lp_solves,lp_iterations,cuts,"
          "fallback_events,fallback_recoveries,max_row_violation,max_bound_violation,"
          "max_integrality_violation,objective_disagreement,reference_status,"
@@ -909,15 +1088,24 @@ void write_csv(const fs::path& path, const std::vector<Result>& results) {
     out << csv_escape(r.instance) << ',' << csv_escape(r.solver) << ',' << r.repeat << ','
         << r.rows << ',' << r.columns << ',' << r.nonzeros << ',' << r.integers << ','
         << r.binaries << ',' << r.available << ',' << r.has_solution << ',' << r.optimal
-        << ',' << r.proven << ',' << r.timed_out << ',' << r.audit.passed << ','
+        << ',' << r.proven << ',' << r.timed_out << ',' << r.hard_timeout << ','
+        << r.audit.passed << ','
         << r.reference_match << ',' << r.read_ms << ',' << r.shared_decompress_ms << ','
         << r.solve_ms << ','
-        << r.objective << ',' << r.best_bound << ',' << r.gap << ',' << r.nodes << ','
-        << r.lp_solves << ',' << r.lp_iterations << ',' << r.cuts << ','
-        << r.fallback_events << ',' << r.fallback_recoveries << ','
-        << r.audit.max_row_violation << ',' << r.audit.max_bound_violation << ','
-        << r.audit.max_integrality_violation << ',' << r.audit.objective_disagreement
-        << ',' << csv_escape(r.reference_status) << ',' << r.reference_objective << ','
+        << csv_number(r.objective) << ',' << csv_number(r.best_bound) << ','
+        << csv_number(r.gap) << ','
+        << csv_count(r.nodes, r.node_count_available) << ','
+        << csv_count(r.lp_solves, r.lp_solve_count_available) << ','
+        << csv_count(r.lp_iterations, r.lp_iteration_count_available) << ','
+        << csv_count(r.cuts, r.cut_count_available) << ','
+        << csv_count(r.fallback_events, r.native_diagnostics_available) << ','
+        << csv_count(r.fallback_recoveries, r.native_diagnostics_available) << ','
+        << csv_number(r.audit.max_row_violation) << ','
+        << csv_number(r.audit.max_bound_violation) << ','
+        << csv_number(r.audit.max_integrality_violation) << ','
+        << csv_number(r.audit.objective_disagreement)
+        << ',' << csv_escape(r.reference_status) << ','
+        << csv_number(r.reference_objective) << ','
         << csv_escape(r.status) << '\n';
   }
 }
@@ -929,19 +1117,36 @@ json json_number(double value) {
 json result_json(const Result& r) {
   return {
       {"instance", r.instance}, {"solver", r.solver}, {"repeat", r.repeat},
+      {"collection_scope", r.collection_scope},
+      {"statistics_available", {
+          {"nodes", r.node_count_available},
+          {"lp_solves", r.lp_solve_count_available},
+          {"lp_iterations", r.lp_iteration_count_available},
+          {"cuts", r.cut_count_available},
+          {"incumbent_timeline", r.incumbent_timeline_available},
+          {"native_diagnostics", r.native_diagnostics_available}}},
       {"rows", r.rows}, {"columns", r.columns}, {"nonzeros", r.nonzeros},
       {"integers", r.integers}, {"binaries", r.binaries},
       {"available", r.available}, {"has_solution", r.has_solution},
       {"optimal", r.optimal}, {"proven", r.proven}, {"timed_out", r.timed_out},
+      {"hard_timeout", r.hard_timeout},
       {"read_ms", r.read_ms}, {"shared_decompress_ms", r.shared_decompress_ms},
       {"solve_ms", r.solve_ms},
       {"objective", json_number(r.objective)},
       {"best_bound", json_number(r.best_bound)}, {"gap", json_number(r.gap)},
-      {"nodes", r.nodes}, {"lp_solves", r.lp_solves},
-      {"lp_iterations", r.lp_iterations}, {"cuts", r.cuts},
-      {"first_incumbent_node", r.first_incumbent_node},
-      {"first_incumbent_lp_solves", r.first_incumbent_lp_solves},
-      {"branching", {
+      {"nodes", r.node_count_available ? json(r.nodes) : json(nullptr)},
+      {"lp_solves", r.lp_solve_count_available ? json(r.lp_solves) : json(nullptr)},
+      {"lp_iterations", r.lp_iteration_count_available
+                            ? json(r.lp_iterations) : json(nullptr)},
+      {"cuts", r.cut_count_available ? json(r.cuts) : json(nullptr)},
+      {"first_incumbent_node", r.incumbent_timeline_available &&
+                                    r.first_incumbent_node >= 0
+                                    ? json(r.first_incumbent_node) : json(nullptr)},
+      {"first_incumbent_lp_solves", r.incumbent_timeline_available &&
+                                        r.first_incumbent_lp_solves >= 0
+                                        ? json(r.first_incumbent_lp_solves)
+                                        : json(nullptr)},
+      {"branching", r.native_diagnostics_available ? json{
           {"reliability_nodes", r.reliability_branch_nodes},
           {"strong_candidates", r.strong_branch_candidates},
           {"strong_lp_solves", r.strong_branch_lp_solves},
@@ -953,9 +1158,29 @@ json result_json(const Result& r) {
           {"regret_max", r.branching_regret_max},
           {"strong_regret_samples", r.strong_branch_regret_samples},
           {"strong_regret_sum", r.strong_branch_regret_sum},
-          {"strong_regret_max", r.strong_branch_regret_max}}},
-      {"fallback_events", r.fallback_events},
-      {"fallback_recoveries", r.fallback_recoveries},
+          {"strong_regret_max", r.strong_branch_regret_max}}
+          : json(nullptr)},
+      {"estimator_calibration", r.native_diagnostics_available ? json{
+          {"node_samples", r.node_estimate_calibration_samples},
+          {"node_predicted_lift_sum", r.node_estimate_predicted_lift_sum},
+          {"node_realized_lift_sum", r.node_estimate_realized_lift_sum},
+          {"node_abs_error_sum", r.node_estimate_abs_error_sum},
+          {"node_squared_error_sum", r.node_estimate_squared_error_sum},
+          {"node_predicted_sq_sum", r.node_estimate_predicted_sq_sum},
+          {"node_realized_sq_sum", r.node_estimate_realized_sq_sum},
+          {"node_cross_sum", r.node_estimate_cross_sum},
+          {"directional_samples", r.directional_calibration_samples},
+          {"directional_predicted_gain_sum", r.directional_predicted_gain_sum},
+          {"directional_realized_gain_sum", r.directional_realized_gain_sum},
+          {"directional_abs_error_sum", r.directional_abs_error_sum},
+          {"directional_squared_error_sum", r.directional_squared_error_sum},
+          {"directional_rank_samples", r.directional_rank_samples},
+          {"directional_rank_concordant", r.directional_rank_concordant}}
+          : json(nullptr)},
+      {"fallback_events", r.native_diagnostics_available
+                              ? json(r.fallback_events) : json(nullptr)},
+      {"fallback_recoveries", r.native_diagnostics_available
+                                  ? json(r.fallback_recoveries) : json(nullptr)},
       {"reference_status", r.reference_status},
       {"reference_objective", json_number(r.reference_objective)},
       {"reference_match", r.reference_match},
@@ -967,6 +1192,275 @@ json result_json(const Result& r) {
           {"max_bound_violation", json_number(r.audit.max_bound_violation)},
           {"max_integrality_violation", json_number(r.audit.max_integrality_violation)}}},
       {"status", r.status}};
+}
+
+double optional_json_number(const json& object, const char* key,
+                            double fallback) {
+  const auto it = object.find(key);
+  return it != object.end() && it->is_number() ? it->get<double>() : fallback;
+}
+
+template <typename Integer>
+Integer optional_json_integer(const json& object, const char* key,
+                              Integer fallback) {
+  const auto it = object.find(key);
+  return it != object.end() && it->is_number_integer()
+      ? it->get<Integer>() : fallback;
+}
+
+json worker_result_json(const Result& result) {
+  json out = result_json(result);
+  out["x"] = json::array();
+  for (int i = 0; i < result.x.size(); ++i) out["x"].push_back(result.x[i]);
+  return out;
+}
+
+Result worker_result_from_json(const json& input) {
+  Result result;
+  result.instance = input.value("instance", "");
+  result.solver = input.value("solver", "");
+  result.collection_scope = input.value("collection_scope", "unavailable");
+  const json availability = input.value("statistics_available", json::object());
+  result.node_count_available = availability.value("nodes", false);
+  result.lp_solve_count_available = availability.value("lp_solves", false);
+  result.lp_iteration_count_available = availability.value("lp_iterations", false);
+  result.cut_count_available = availability.value("cuts", false);
+  result.incumbent_timeline_available =
+      availability.value("incumbent_timeline", false);
+  result.native_diagnostics_available =
+      availability.value("native_diagnostics", false);
+  result.rows = input.value("rows", 0);
+  result.columns = input.value("columns", 0);
+  result.nonzeros = input.value("nonzeros", std::int64_t{0});
+  result.integers = input.value("integers", 0);
+  result.binaries = input.value("binaries", 0);
+  result.available = input.value("available", true);
+  result.has_solution = input.value("has_solution", false);
+  result.optimal = input.value("optimal", false);
+  result.proven = input.value("proven", false);
+  result.timed_out = input.value("timed_out", false);
+  result.hard_timeout = input.value("hard_timeout", false);
+  result.read_ms = optional_json_number(input, "read_ms", 0.0);
+  result.shared_decompress_ms =
+      optional_json_number(input, "shared_decompress_ms", 0.0);
+  result.solve_ms = optional_json_number(input, "solve_ms", 0.0);
+  result.objective = optional_json_number(
+      input, "objective", std::numeric_limits<double>::quiet_NaN());
+  result.best_bound = optional_json_number(
+      input, "best_bound", std::numeric_limits<double>::quiet_NaN());
+  result.gap = optional_json_number(
+      input, "gap", std::numeric_limits<double>::infinity());
+  result.nodes = optional_json_integer(input, "nodes", std::int64_t{-1});
+  result.lp_solves = optional_json_integer(input, "lp_solves", std::int64_t{-1});
+  result.lp_iterations =
+      optional_json_integer(input, "lp_iterations", std::int64_t{-1});
+  result.cuts = optional_json_integer(input, "cuts", -1);
+  result.first_incumbent_node =
+      optional_json_integer(input, "first_incumbent_node", -1);
+  result.first_incumbent_lp_solves =
+      optional_json_integer(input, "first_incumbent_lp_solves", -1);
+
+  const json branching = input.contains("branching") && input["branching"].is_object()
+      ? input["branching"] : json::object();
+  result.reliability_branch_nodes = branching.value("reliability_nodes", std::uint64_t{0});
+  result.strong_branch_candidates = branching.value("strong_candidates", std::uint64_t{0});
+  result.strong_branch_lp_solves = branching.value("strong_lp_solves", std::uint64_t{0});
+  result.strong_branch_cache_exact_hits = branching.value("cache_exact_hits", std::uint64_t{0});
+  result.strong_branch_cache_warm_hits = branching.value("cache_warm_hits", std::uint64_t{0});
+  result.strong_branch_duplicate_lp_avoided =
+      branching.value("duplicate_lp_avoided", std::uint64_t{0});
+  result.branching_regret_samples = branching.value("regret_samples", std::uint64_t{0});
+  result.branching_regret_sum = optional_json_number(branching, "regret_sum", 0.0);
+  result.branching_regret_max = optional_json_number(branching, "regret_max", 0.0);
+  result.strong_branch_regret_samples =
+      branching.value("strong_regret_samples", std::uint64_t{0});
+  result.strong_branch_regret_sum =
+      optional_json_number(branching, "strong_regret_sum", 0.0);
+  result.strong_branch_regret_max =
+      optional_json_number(branching, "strong_regret_max", 0.0);
+
+  const json calibration = input.contains("estimator_calibration") &&
+                                   input["estimator_calibration"].is_object()
+      ? input["estimator_calibration"] : json::object();
+  result.node_estimate_calibration_samples =
+      calibration.value("node_samples", std::uint64_t{0});
+  result.node_estimate_predicted_lift_sum =
+      optional_json_number(calibration, "node_predicted_lift_sum", 0.0);
+  result.node_estimate_realized_lift_sum =
+      optional_json_number(calibration, "node_realized_lift_sum", 0.0);
+  result.node_estimate_abs_error_sum =
+      optional_json_number(calibration, "node_abs_error_sum", 0.0);
+  result.node_estimate_squared_error_sum =
+      optional_json_number(calibration, "node_squared_error_sum", 0.0);
+  result.node_estimate_predicted_sq_sum =
+      optional_json_number(calibration, "node_predicted_sq_sum", 0.0);
+  result.node_estimate_realized_sq_sum =
+      optional_json_number(calibration, "node_realized_sq_sum", 0.0);
+  result.node_estimate_cross_sum =
+      optional_json_number(calibration, "node_cross_sum", 0.0);
+  result.directional_calibration_samples =
+      calibration.value("directional_samples", std::uint64_t{0});
+  result.directional_predicted_gain_sum =
+      optional_json_number(calibration, "directional_predicted_gain_sum", 0.0);
+  result.directional_realized_gain_sum =
+      optional_json_number(calibration, "directional_realized_gain_sum", 0.0);
+  result.directional_abs_error_sum =
+      optional_json_number(calibration, "directional_abs_error_sum", 0.0);
+  result.directional_squared_error_sum =
+      optional_json_number(calibration, "directional_squared_error_sum", 0.0);
+  result.directional_rank_samples =
+      calibration.value("directional_rank_samples", std::uint64_t{0});
+  result.directional_rank_concordant =
+      calibration.value("directional_rank_concordant", std::uint64_t{0});
+  result.fallback_events = optional_json_integer(input, "fallback_events", -1);
+  result.fallback_recoveries =
+      optional_json_integer(input, "fallback_recoveries", -1);
+  result.status = input.value("status", "worker result missing status");
+
+  const auto x_it = input.find("x");
+  if (x_it != input.end() && x_it->is_array()) {
+    result.x.resize(static_cast<Eigen::Index>(x_it->size()));
+    for (std::size_t i = 0; i < x_it->size(); ++i) {
+      result.x[static_cast<Eigen::Index>(i)] = (*x_it)[i].get<double>();
+    }
+  }
+  return result;
+}
+
+std::string precise_number(double value) {
+  std::ostringstream out;
+  out << std::setprecision(std::numeric_limits<double>::max_digits10) << value;
+  return out.str();
+}
+
+Result run_solver_isolated(const Instance& instance, const Config& cfg,
+                           const std::string& solver,
+                           const fs::path& executable) {
+#ifdef _WIN32
+  // Windows needs a CreateProcess implementation before this benchmark can
+  // claim a hard deadline there. Keep the platform limitation explicit.
+  return run_solver(instance, cfg, solver);
+#else
+  Result fallback;
+  set_dimensions(instance, fallback);
+  fallback.solver = solver;
+
+  const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+  const fs::path output_path = fs::temp_directory_path() /
+      ("miplib_worker_" + std::to_string(static_cast<long long>(getpid())) +
+       "_" + std::to_string(stamp) + ".json");
+  std::vector<std::string> arguments{
+      executable.string(),
+      "--worker-instance", instance.solver_path.string(),
+      "--worker-output", output_path.string(),
+      "--worker-solver", solver,
+      "--time-limit", precise_number(cfg.time_limit_sec),
+      "--gap", precise_number(cfg.gap),
+      "--max-nodes", std::to_string(cfg.max_nodes),
+      "--seed", std::to_string(cfg.seed),
+      "--native-node-estimate", cfg.native_node_estimate};
+  if (cfg.native_verbose) arguments.push_back("--native-verbose");
+  if (!cfg.native_presolve) arguments.push_back("--native-no-presolve");
+  if (!cfg.native_cuts) arguments.push_back("--native-no-cuts");
+  if (!cfg.native_objective_propagation) {
+    arguments.push_back("--native-no-objective-propagation");
+  }
+  if (!cfg.native_reduced_cost_fixing) {
+    arguments.push_back("--native-no-reduced-cost-fixing");
+  }
+  if (!cfg.native_row_propagation) {
+    arguments.push_back("--native-no-row-propagation");
+  }
+
+  const auto process_start = std::chrono::steady_clock::now();
+  const pid_t child = fork();
+  if (child == 0) {
+    std::vector<char*> argv;
+    argv.reserve(arguments.size() + 1);
+    for (const std::string& argument : arguments) {
+      argv.push_back(const_cast<char*>(argument.c_str()));
+    }
+    argv.push_back(nullptr);
+    execv(executable.c_str(), argv.data());
+    _exit(127);
+  }
+  if (child < 0) {
+    fallback.status = "worker fork failed: errno=" + std::to_string(errno);
+    return fallback;
+  }
+
+  int child_status = 0;
+  auto terminate_and_reap = [&](int signal) {
+    kill(child, signal);
+    while (waitpid(child, &child_status, 0) < 0 && errno == EINTR) {
+    }
+  };
+
+  bool completed = false;
+  const double hard_limit_sec = cfg.time_limit_sec + cfg.hard_timeout_grace_sec;
+  while (!completed) {
+    const pid_t waited = waitpid(child, &child_status, WNOHANG);
+    if (waited == child) {
+      completed = true;
+      break;
+    }
+    if (waited < 0 && errno != EINTR) {
+      fallback.status = "worker wait failed: errno=" + std::to_string(errno);
+      terminate_and_reap(SIGKILL);
+      break;
+    }
+    const double elapsed = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - process_start).count();
+    if (elapsed >= hard_limit_sec) {
+      kill(child, SIGTERM);
+      for (int retry = 0; retry < 10; ++retry) {
+        if (waitpid(child, &child_status, WNOHANG) == child) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      if (waitpid(child, &child_status, WNOHANG) == 0) {
+        terminate_and_reap(SIGKILL);
+      }
+      fallback.solve_ms = std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - process_start).count();
+      fallback.timed_out = true;
+      fallback.hard_timeout = true;
+      fallback.status = "Hard process timeout";
+      std::error_code error;
+      fs::remove(output_path, error);
+      return fallback;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
+  if (!completed || !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0) {
+    if (fallback.status.empty()) {
+      fallback.status = WIFSIGNALED(child_status)
+          ? "worker terminated by signal " + std::to_string(WTERMSIG(child_status))
+          : "worker exit " + std::to_string(WEXITSTATUS(child_status));
+    }
+    std::error_code error;
+    fs::remove(output_path, error);
+    return fallback;
+  }
+
+  try {
+    std::ifstream input(output_path);
+    if (!input) throw std::runtime_error("worker output is missing");
+    json payload;
+    input >> payload;
+    Result result = worker_result_from_json(payload);
+    result.instance = instance.name;
+    result.shared_decompress_ms = instance.decompress_ms;
+    std::error_code error;
+    fs::remove(output_path, error);
+    return result;
+  } catch (const std::exception& error) {
+    fallback.status = std::string("worker result error: ") + error.what();
+    std::error_code remove_error;
+    fs::remove(output_path, remove_error);
+    return fallback;
+  }
+#endif
 }
 
 std::vector<Summary> summarize(const Config& cfg,
@@ -989,7 +1483,8 @@ std::vector<Summary> summarize(const Config& cfg,
       if (result.reference_match) ++summary.reference_matches;
       if (result.timed_out) ++summary.timeouts;
       const bool benchmark_solved =
-          (result.proven && result.audit.passed) ||
+          (result.proven && result.audit.passed &&
+           (result.reference_status.empty() || result.reference_match)) ||
           (result.proven && !result.has_solution && result.reference_match);
       if (benchmark_solved) {
         solved_times.push_back(result.solve_ms);
@@ -1036,10 +1531,23 @@ void write_json(const fs::path& path, const Config& cfg,
   out["data_dir"] = cfg.data_dir.string();
   out["solution_file"] = cfg.solution_file.string();
   out["time_limit_sec"] = cfg.time_limit_sec;
+  out["hard_timeout_grace_sec"] = cfg.hard_timeout_grace_sec;
+#ifdef _WIN32
+  out["hard_deadline_enforced"] = false;
+#else
+  out["hard_deadline_enforced"] = true;
+#endif
   out["gap"] = cfg.gap;
   out["threads"] = 1;
   out["seed"] = cfg.seed;
   out["max_nodes_native"] = cfg.max_nodes;
+  out["native_node_estimate"] = cfg.native_node_estimate;
+  out["native_presolve"] = cfg.native_presolve;
+  out["native_cuts"] = cfg.native_cuts;
+  out["native_objective_propagation"] =
+      cfg.native_cuts && cfg.native_objective_propagation;
+  out["native_reduced_cost_fixing"] = cfg.native_reduced_cost_fixing;
+  out["native_row_propagation"] = cfg.native_row_propagation;
   out["summary_policy"] = {
       {"solved", "proven and independently audited incumbent"},
       {"timeout_penalty", "PAR-10"}, {"shift_ms", kSummaryShiftMs}};
@@ -1076,8 +1584,51 @@ void print_summary(const std::vector<Summary>& summaries) {
 int main(int argc, char** argv) {
   Config cfg;
   if (!parse_args(argc, argv, cfg)) return argc > 1 ? 1 : 0;
+  if (cfg.native_node_estimate != "sum" &&
+      cfg.native_node_estimate != "maximum") {
+    std::cerr << "Unknown native node estimate: "
+              << cfg.native_node_estimate << "\n";
+    return 2;
+  }
   const std::set<std::string> valid_solvers{
       "highs-mip", "scip-mip", "native-highs-lp", "native-native-lp"};
+
+  const bool any_worker_option = !cfg.worker_instance.empty() ||
+                                 !cfg.worker_output.empty() ||
+                                 !cfg.worker_solver.empty();
+  if (any_worker_option) {
+    if (cfg.worker_instance.empty() || cfg.worker_output.empty() ||
+        cfg.worker_solver.empty()) {
+      std::cerr << "Worker mode requires --worker-instance, --worker-output, "
+                   "and --worker-solver\n";
+      return 2;
+    }
+    if (!valid_solvers.count(cfg.worker_solver)) {
+      std::cerr << "Unknown worker solver: " << cfg.worker_solver << "\n";
+      return 2;
+    }
+    Instance instance = load_instance(cfg.worker_instance);
+    if (!instance.error.empty()) {
+      std::cerr << "Worker model load failed: " << instance.error << "\n";
+      return 3;
+    }
+    Result result = run_solver(instance, cfg, cfg.worker_solver);
+    try {
+      if (!cfg.worker_output.parent_path().empty()) {
+        fs::create_directories(cfg.worker_output.parent_path());
+      }
+      std::ofstream output(cfg.worker_output);
+      if (!output) {
+        throw std::runtime_error("cannot write " + cfg.worker_output.string());
+      }
+      output << std::setw(2) << worker_result_json(result) << '\n';
+    } catch (const std::exception& error) {
+      std::cerr << error.what() << "\n";
+      return 3;
+    }
+    return 0;
+  }
+
   for (const std::string& solver : cfg.solvers) {
     if (!valid_solvers.count(solver)) {
       std::cerr << "Unknown solver: " << solver << "\n";
@@ -1113,6 +1664,13 @@ int main(int argc, char** argv) {
               "RowViol", "Status");
   std::printf("%s\n", std::string(125, '-').c_str());
 
+  std::error_code executable_error;
+  fs::path executable = fs::weakly_canonical(fs::absolute(argv[0]),
+                                             executable_error);
+  if (executable_error || executable.empty()) {
+    executable = fs::absolute(argv[0]);
+  }
+
   std::vector<Result> results;
   for (const fs::path& path : paths) {
     Instance instance = load_instance(path);
@@ -1141,7 +1699,7 @@ int main(int argc, char** argv) {
     const Reference* reference = ref_it == references.end() ? nullptr : &ref_it->second;
     for (int repeat = 0; repeat < cfg.repeats; ++repeat) {
       for (const std::string& solver : cfg.solvers) {
-        Result result = run_solver(instance, cfg, solver);
+        Result result = run_solver_isolated(instance, cfg, solver, executable);
         result.repeat = repeat;
         attach_validation(instance, reference, result);
         print_result(result);

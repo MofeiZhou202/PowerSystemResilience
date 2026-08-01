@@ -223,34 +223,4 @@ SolveResult StrategyDispatcher::solve(const AdapterRegistry& registry,
   return unsupported("No viable adapter for class " + api::problem_class_name(cls));
 }
 
-ProblemCharacteristics StrategyDispatcher::analyze(const api::ProblemVariant& /* problem */) const {
-  ProblemCharacteristics chars;
-
-  // For now, return empty characteristics
-  // In Phase 3b, extract real data from problem variants:
-  // - For LP/QP/MILP: get matrix sparsity, density
-  // - For NLP: count variables, constraints, nonlinear terms
-  // - Estimate conditioning from matrix properties
-
-  return chars;
-}
-
-std::string StrategyDispatcher::estimate_best_solver(
-    ProblemClass cls,
-    const ProblemCharacteristics& /* characteristics */,
-    const AdapterRegistry& registry) const {
-  // Heuristic-based solver selection based on problem characteristics
-  // This will be expanded in Phase 3b with more sophisticated rules
-
-  auto candidates = default_priority_for(cls);
-  for (const auto& name : candidates) {
-    auto adapter = registry.find_by_name(name);
-    if (adapter && adapter->supports(cls)) {
-      return name;
-    }
-  }
-
-  return "Unknown";
-}
-
 }  // namespace mipsolvers::engine::strategy

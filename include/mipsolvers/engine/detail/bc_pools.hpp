@@ -7,9 +7,13 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <deque>
 #include <functional>
 #include <limits>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <Eigen/Core>
@@ -31,6 +35,16 @@ inline std::size_t sparse_cut_hash(const Eigen::SparseVector<double>& v) {
     int64_t qval = static_cast<int64_t>(it.value() * 1e4);
     std::size_t val_hash = std::hash<int64_t>{}(qval);
     h ^= (idx_hash * kPrime + val_hash) + kPrime + (h << 6) + (h >> 2);
+  }
+  return h;
+}
+
+inline std::size_t sparse_cut_support_hash(
+    const Eigen::SparseVector<double>& v) {
+  std::size_t h = std::hash<Eigen::Index>{}(v.size());
+  for (Eigen::SparseVector<double>::InnerIterator it(v); it; ++it) {
+    const std::size_t index_hash = std::hash<int>{}(it.index());
+    h ^= index_hash + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
   }
   return h;
 }
@@ -88,6 +102,26 @@ inline bool sparse_same_support(const Eigen::SparseVector<double>& a,
   return !ia && !ib;
 }
 
+/// Exact row identity used after a hash-bucket lookup. Hash equality alone is
+/// never sufficient for rejecting a generated row.
+inline bool sparse_cut_identical(const Eigen::SparseVector<double>& a,
+                                 double rhs_a,
+                                 const Eigen::SparseVector<double>& b,
+                                 double rhs_b) {
+  if (a.size() != b.size() || a.nonZeros() != b.nonZeros() ||
+      rhs_a != rhs_b) {
+    return false;
+  }
+  Eigen::SparseVector<double>::InnerIterator ia(a);
+  Eigen::SparseVector<double>::InnerIterator ib(b);
+  while (ia && ib) {
+    if (ia.index() != ib.index() || ia.value() != ib.value()) return false;
+    ++ia;
+    ++ib;
+  }
+  return !ia && !ib;
+}
+
 /// @brief Structural hash for a branch-domain literal.
 inline std::size_t branch_literal_hash(const BranchDomainLiteral& literal) {
   std::size_t h = std::hash<int>{}(literal.var_idx);
@@ -139,6 +173,133 @@ inline std::size_t conflict_clause_hash(const std::vector<BranchDomainLiteral>& 
   return h;
 }
 
+inline bool branch_literal_lists_equal(
+    const std::vector<BranchDomainLiteral>& lhs,
+    const std::vector<BranchDomainLiteral>& rhs,
+    double tol = 1e-9) {
+  if (lhs.size() != rhs.size()) return false;
+  for (std::size_t i = 0; i < lhs.size(); ++i) {
+    if (lhs[i].var_idx != rhs[i].var_idx ||
+        lhs[i].is_lb != rhs[i].is_lb ||
+        std::abs(lhs[i].value - rhs[i].value) > tol) {
+      return false;
+    }
+  }
+  return true;
+}
+
+inline bool branch_literals_equal(const BranchDomainLiteral& lhs,
+                                  const BranchDomainLiteral& rhs,
+                                  double tol = 1e-9) {
+  return lhs.var_idx == rhs.var_idx && lhs.is_lb == rhs.is_lb &&
+         std::abs(lhs.value - rhs.value) <= tol;
+}
+
+inline bool domain_reason_bounds_equal(const DomainReasonBound& lhs,
+                                       const DomainReasonBound& rhs,
+                                       double tol = 1e-9) {
+  return branch_literals_equal(lhs.bound, rhs.bound, tol) &&
+         branch_literal_lists_equal(lhs.reason, rhs.reason, tol);
+}
+
+/// Hash-bucketed exact set for canonical branch-literal lists. The hash is
+/// only an index; equality is always checked against the stored literals.
+class BranchLiteralListSet {
+ public:
+  bool insert(const std::vector<BranchDomainLiteral>& literals) {
+    const std::size_t hash = conflict_clause_hash(literals);
+    auto& bucket = buckets_[hash];
+    for (const auto& existing : bucket) {
+      if (branch_literal_lists_equal(existing, literals)) return false;
+    }
+    bucket.push_back(literals);
+    return true;
+  }
+
+ private:
+  std::unordered_map<
+      std::size_t,
+      std::vector<std::vector<BranchDomainLiteral>>> buckets_;
+};
+
+/// Generic hash-bucketed set for state machines whose exact state type is
+/// local to an algorithm. Hash collisions are resolved by Equal.
+template <class State, class Hash, class Equal>
+class HashBucketExactSet {
+ public:
+  HashBucketExactSet(Hash hash, Equal equal)
+      : hash_(std::move(hash)), equal_(std::move(equal)) {}
+
+  bool insert(const State& state) {
+    auto& bucket = buckets_[hash_(state)];
+    for (const State& existing : bucket) {
+      if (equal_(existing, state)) return false;
+    }
+    bucket.push_back(state);
+    return true;
+  }
+
+ private:
+  Hash hash_;
+  Equal equal_;
+  std::unordered_map<std::size_t, std::vector<State>> buckets_;
+};
+
+/// Hash-bucketed exact set for sparse inequality rows.
+class SparseCutSet {
+ public:
+  bool insert(const Eigen::SparseVector<double>& row, double rhs) {
+    const std::size_t hash = sparse_cut_hash(row);
+    auto& bucket = buckets_[hash];
+    for (const Entry& existing : bucket) {
+      if (sparse_cut_identical(existing.row, existing.rhs, row, rhs)) {
+        return false;
+      }
+    }
+    bucket.push_back(Entry{row, rhs});
+    return true;
+  }
+
+ private:
+  struct Entry {
+    Eigen::SparseVector<double> row;
+    double rhs{0.0};
+  };
+  std::unordered_map<std::size_t, std::vector<Entry>> buckets_;
+};
+
+inline bool local_binary_implications_equal(
+    const LocalBinaryImplication& lhs,
+    const LocalBinaryImplication& rhs,
+    double tol = 1e-9) {
+  return lhs.trigger_var == rhs.trigger_var &&
+         lhs.trigger_value_one == rhs.trigger_value_one &&
+         lhs.implied_var == rhs.implied_var &&
+         lhs.implied_is_lb == rhs.implied_is_lb &&
+         std::abs(lhs.implied_value - rhs.implied_value) <= tol;
+}
+
+inline bool scoped_conflict_clauses_equal(
+    const ScopedConflictClause& lhs,
+    const ScopedConflictClause& rhs,
+    double tol = 1e-9) {
+  if (!branch_literal_lists_equal(lhs.scope_literals, rhs.scope_literals,
+                                  tol) ||
+      !branch_literal_lists_equal(lhs.residual_literals,
+                                  rhs.residual_literals, tol) ||
+      lhs.has_target_bound != rhs.has_target_bound ||
+      lhs.has_source_conflict_literal != rhs.has_source_conflict_literal) {
+    return false;
+  }
+  if (lhs.has_target_bound &&
+      !branch_literals_equal(lhs.target_bound, rhs.target_bound, tol)) {
+    return false;
+  }
+  return !lhs.has_source_conflict_literal ||
+         branch_literals_equal(lhs.source_conflict_literal,
+                               rhs.source_conflict_literal, tol);
+}
+
 /// @brief True when the first literal is at least as strong as the second.
 inline bool branch_literal_stronger_or_equal(const BranchDomainLiteral& lhs,
                                              const BranchDomainLiteral& rhs,
@@ -173,7 +334,16 @@ inline bool conflict_clause_implies(const std::vector<BranchDomainLiteral>& lhs,
 
 /// @brief Stores learned branch-domain conflicts for pruning and bound propagation.
 class ConflictPool {
+  struct ClauseOccurrence {
+    double value{0.0};
+    int clause_index{-1};
+  };
+
   std::vector<ConflictClause> clauses_;
+  std::vector<std::vector<ClauseOccurrence>> lower_occurrences_by_var_;
+  std::vector<std::vector<ClauseOccurrence>> upper_occurrences_by_var_;
+  std::vector<int> unary_clause_indices_;
+  mutable std::atomic<int> last_propagation_clauses_scanned_{0};
   int max_pool_size_;
   int max_literals_;
   bool minimize_enabled_;
@@ -187,6 +357,44 @@ class ConflictPool {
   int scan_begin() const {
     const int n = static_cast<int>(clauses_.size());
     return (max_scan_ > 0 && n > max_scan_) ? n - max_scan_ : 0;
+  }
+
+  void rebuild_propagation_index() {
+    int n_vars = 0;
+    for (const ConflictClause& clause : clauses_) {
+      for (const BranchDomainLiteral& literal : clause.literals) {
+        n_vars = std::max(n_vars, literal.var_idx + 1);
+      }
+    }
+    lower_occurrences_by_var_.assign(static_cast<std::size_t>(n_vars), {});
+    upper_occurrences_by_var_.assign(static_cast<std::size_t>(n_vars), {});
+    unary_clause_indices_.clear();
+    for (int ci = 0; ci < static_cast<int>(clauses_.size()); ++ci) {
+      const ConflictClause& clause = clauses_[static_cast<std::size_t>(ci)];
+      if (clause.literals.size() == 1) unary_clause_indices_.push_back(ci);
+      for (const BranchDomainLiteral& literal : clause.literals) {
+        if (literal.var_idx < 0 || literal.var_idx >= n_vars) continue;
+        auto& occurrences =
+            literal.is_lb
+                ? lower_occurrences_by_var_[
+                      static_cast<std::size_t>(literal.var_idx)]
+                : upper_occurrences_by_var_[
+                      static_cast<std::size_t>(literal.var_idx)];
+        occurrences.push_back({literal.value, ci});
+      }
+    }
+    for (auto& occurrences : lower_occurrences_by_var_) {
+      std::sort(occurrences.begin(), occurrences.end(),
+                [](const ClauseOccurrence& lhs, const ClauseOccurrence& rhs) {
+                  return lhs.value < rhs.value;
+                });
+    }
+    for (auto& occurrences : upper_occurrences_by_var_) {
+      std::sort(occurrences.begin(), occurrences.end(),
+                [](const ClauseOccurrence& lhs, const ClauseOccurrence& rhs) {
+                  return lhs.value > rhs.value;
+                });
+    }
   }
 
   bool redundant_given_pool(const std::vector<BranchDomainLiteral>& literals,
@@ -286,6 +494,9 @@ class ConflictPool {
     if (literals.empty() || static_cast<int>(literals.size()) > max_literals_) {
       return false;
     }
+    for (const BranchDomainLiteral& literal : literals) {
+      if (literal.var_idx < 0 || !std::isfinite(literal.value)) return false;
+    }
 
     if (redundant_given_pool(literals)) {
       return false;
@@ -294,17 +505,7 @@ class ConflictPool {
     const std::size_t h = conflict_clause_hash(literals);
     for (const auto& clause : clauses_) {
       if (clause.hash != h || clause.literals.size() != literals.size()) continue;
-      bool same = true;
-      for (std::size_t i = 0; i < literals.size(); ++i) {
-        const auto& a = clause.literals[i];
-        const auto& b = literals[i];
-        if (a.var_idx != b.var_idx || a.is_lb != b.is_lb ||
-            std::abs(a.value - b.value) > 1e-9) {
-          same = false;
-          break;
-        }
-      }
-      if (same) return false;
+      if (branch_literal_lists_equal(clause.literals, literals)) return false;
     }
 
     clauses_.erase(std::remove_if(clauses_.begin() + scan_begin(), clauses_.end(),
@@ -317,6 +518,7 @@ class ConflictPool {
       clauses_.erase(clauses_.begin());
     }
     clauses_.push_back(ConflictClause{std::move(literals), h});
+    rebuild_propagation_index();
     return true;
   }
 
@@ -402,12 +604,40 @@ class ConflictPool {
   bool has_conflict(const Eigen::VectorXd& node_lb,
                     const Eigen::VectorXd& node_ub,
                     double tol = 1e-9) const {
-    for (const auto& clause : clauses_) {
+    std::vector<char> candidate(static_cast<std::size_t>(clauses_.size()), 0);
+    for (int ci : unary_clause_indices_) {
+      if (ci >= 0 && ci < static_cast<int>(candidate.size())) {
+        candidate[static_cast<std::size_t>(ci)] = 1;
+      }
+    }
+    const int n = std::min(
+        {static_cast<int>(node_lb.size()), static_cast<int>(node_ub.size()),
+         static_cast<int>(lower_occurrences_by_var_.size())});
+    for (int j = 0; j < n; ++j) {
+      for (const ClauseOccurrence& occurrence :
+           lower_occurrences_by_var_[static_cast<std::size_t>(j)]) {
+        if (occurrence.value > node_lb[j] + tol) break;
+        candidate[static_cast<std::size_t>(occurrence.clause_index)] = 1;
+      }
+      for (const ClauseOccurrence& occurrence :
+           upper_occurrences_by_var_[static_cast<std::size_t>(j)]) {
+        if (occurrence.value < node_ub[j] - tol) break;
+        candidate[static_cast<std::size_t>(occurrence.clause_index)] = 1;
+      }
+    }
+    for (int ci = 0; ci < static_cast<int>(clauses_.size()); ++ci) {
+      if (!candidate[static_cast<std::size_t>(ci)]) continue;
+      const auto& clause = clauses_[static_cast<std::size_t>(ci)];
       bool all_satisfied = true;
       for (const auto& literal : clause.literals) {
-        const bool satisfied = literal.is_lb
-            ? (node_lb[literal.var_idx] >= literal.value - tol)
-            : (node_ub[literal.var_idx] <= literal.value + tol);
+        const bool valid_var =
+            literal.var_idx >= 0 && literal.var_idx < node_lb.size() &&
+            literal.var_idx < node_ub.size();
+        const bool satisfied =
+            valid_var &&
+            (literal.is_lb
+                 ? (node_lb[literal.var_idx] >= literal.value - tol)
+                 : (node_ub[literal.var_idx] <= literal.value + tol));
         if (!satisfied) {
           all_satisfied = false;
           break;
@@ -448,100 +678,162 @@ class ConflictPool {
                       std::vector<DomainReasonBound>* reason_bounds_out,
                       double tol) const {
     int local_tightened = 0;
-    bool changed = true;
-    while (changed) {
-      changed = false;
-      for (const auto& clause : clauses_) {
-        int unsatisfied_count = 0;
-        const BranchDomainLiteral* remaining = nullptr;
-        std::vector<BranchDomainLiteral> reason;
-        reason.reserve(clause.literals.size());
-        for (const auto& literal : clause.literals) {
-          const bool satisfied = literal.is_lb
-              ? (node_lb[literal.var_idx] >= literal.value - tol)
-              : (node_ub[literal.var_idx] <= literal.value + tol);
-          if (!satisfied) {
-            ++unsatisfied_count;
-            remaining = &literal;
-            if (unsatisfied_count > 1) break;
-          } else {
-            reason.push_back(literal);
-          }
-        }
-
-        if (unsatisfied_count == 0) {
-          if (tightened) *tightened += local_tightened;
-          return false;
-        }
-        if (unsatisfied_count != 1 || remaining == nullptr) {
-          continue;
-        }
-
-        const int j = remaining->var_idx;
-        if (j < 0 || j >= static_cast<int>(vars.size())) {
-          continue;
-        }
-        const bool integer_var = is_integer_type(vars[static_cast<std::size_t>(j)]);
-
-        if (remaining->is_lb) {
-          const double new_ub = integer_var
-              ? std::ceil(remaining->value - tol) - 1.0
-              : remaining->value - std::max(1e-7, 10.0 * tol);
-          if (new_ub < node_ub[j] - tol) {
-            if (changes_out != nullptr) {
-              changes_out->push_back({j, new_ub - node_ub[j], false});
-            }
-            node_ub[j] = new_ub;
-            if (reason_bounds_out != nullptr) {
-              DomainReasonBound rb;
-              rb.bound = BranchDomainLiteral{j, new_ub, false};
-              rb.reason = reason;
-              rb.source_conflict_literal = *remaining;
-              rb.has_source_conflict_literal = true;
-              rb.source_conflict_clause = clause.literals;
-              rb.has_source_conflict_clause = true;
-              reason_bounds_out->push_back(std::move(rb));
-            }
-            ++local_tightened;
-            changed = true;
-          }
-        } else {
-          const double new_lb = integer_var
-              ? std::floor(remaining->value + tol) + 1.0
-              : remaining->value + std::max(1e-7, 10.0 * tol);
-          if (new_lb > node_lb[j] + tol) {
-            if (changes_out != nullptr) {
-              changes_out->push_back({j, new_lb - node_lb[j], true});
-            }
-            node_lb[j] = new_lb;
-            if (reason_bounds_out != nullptr) {
-              DomainReasonBound rb;
-              rb.bound = BranchDomainLiteral{j, new_lb, true};
-              rb.reason = reason;
-              rb.source_conflict_literal = *remaining;
-              rb.has_source_conflict_literal = true;
-              rb.source_conflict_clause = clause.literals;
-              rb.has_source_conflict_clause = true;
-              reason_bounds_out->push_back(std::move(rb));
-            }
-            ++local_tightened;
-            changed = true;
-          }
-        }
-
-        if (node_lb[j] > node_ub[j] + tol) {
-          if (tightened) *tightened += local_tightened;
-          return false;
-        }
+    int clauses_scanned = 0;
+    std::deque<int> pending_clauses;
+    std::vector<char> queued(static_cast<std::size_t>(clauses_.size()), 0);
+    auto enqueue_clause = [&](int clause_index) {
+      if (clause_index < 0 ||
+          clause_index >= static_cast<int>(clauses_.size()) ||
+          queued[static_cast<std::size_t>(clause_index)]) {
+        return;
       }
+      queued[static_cast<std::size_t>(clause_index)] = 1;
+      pending_clauses.push_back(clause_index);
+    };
+    auto enqueue_satisfied_occurrences = [&](int j) {
+      if (j < 0 ||
+          j >= static_cast<int>(lower_occurrences_by_var_.size()) ||
+          j >= node_lb.size() || j >= node_ub.size()) {
+        return;
+      }
+      for (const ClauseOccurrence& occurrence :
+           lower_occurrences_by_var_[static_cast<std::size_t>(j)]) {
+        if (occurrence.value > node_lb[j] + tol) break;
+        enqueue_clause(occurrence.clause_index);
+      }
+      for (const ClauseOccurrence& occurrence :
+           upper_occurrences_by_var_[static_cast<std::size_t>(j)]) {
+        if (occurrence.value < node_ub[j] - tol) break;
+        enqueue_clause(occurrence.clause_index);
+      }
+    };
+
+    for (int clause_index : unary_clause_indices_) {
+      enqueue_clause(clause_index);
+    }
+    const int indexed_vars = std::min(
+        {static_cast<int>(vars.size()), static_cast<int>(node_lb.size()),
+         static_cast<int>(node_ub.size()),
+         static_cast<int>(lower_occurrences_by_var_.size())});
+    for (int j = 0; j < indexed_vars; ++j) {
+      enqueue_satisfied_occurrences(j);
     }
 
+    while (!pending_clauses.empty()) {
+      const int clause_index = pending_clauses.front();
+      pending_clauses.pop_front();
+      queued[static_cast<std::size_t>(clause_index)] = 0;
+      ++clauses_scanned;
+      const auto& clause = clauses_[static_cast<std::size_t>(clause_index)];
+      int unsatisfied_count = 0;
+      const BranchDomainLiteral* remaining = nullptr;
+      std::vector<BranchDomainLiteral> reason;
+      if (reason_bounds_out != nullptr) reason.reserve(clause.literals.size());
+      for (const auto& literal : clause.literals) {
+        const int literal_var = literal.var_idx;
+        const bool valid_var =
+            literal_var >= 0 && literal_var < node_lb.size() &&
+            literal_var < node_ub.size();
+        const bool satisfied =
+            valid_var &&
+            (literal.is_lb
+                 ? (node_lb[literal_var] >= literal.value - tol)
+                 : (node_ub[literal_var] <= literal.value + tol));
+        if (!satisfied) {
+          ++unsatisfied_count;
+          remaining = &literal;
+          if (unsatisfied_count > 1) break;
+        } else if (reason_bounds_out != nullptr) {
+          reason.push_back(literal);
+        }
+      }
+
+      if (unsatisfied_count == 0) {
+        last_propagation_clauses_scanned_.store(clauses_scanned,
+                                                std::memory_order_relaxed);
+        if (tightened) *tightened += local_tightened;
+        return false;
+      }
+      if (unsatisfied_count != 1 || remaining == nullptr) continue;
+
+      const int j = remaining->var_idx;
+      if (j < 0 || j >= static_cast<int>(vars.size()) ||
+          j >= node_lb.size() || j >= node_ub.size()) {
+        continue;
+      }
+      const bool integer_var =
+          is_integer_type(vars[static_cast<std::size_t>(j)]);
+      bool bound_changed = false;
+
+      if (remaining->is_lb) {
+        const double new_ub = integer_var
+            ? std::ceil(remaining->value - tol) - 1.0
+            : remaining->value - std::max(1e-7, 10.0 * tol);
+        if (new_ub < node_ub[j] - tol) {
+          if (changes_out != nullptr) {
+            changes_out->push_back(
+                {j, new_ub - node_ub[j], false, node_ub[j], new_ub});
+          }
+          node_ub[j] = new_ub;
+          if (reason_bounds_out != nullptr) {
+            DomainReasonBound rb;
+            rb.bound = BranchDomainLiteral{j, new_ub, false};
+            rb.reason = std::move(reason);
+            rb.source_conflict_literal = *remaining;
+            rb.has_source_conflict_literal = true;
+            rb.source_conflict_clause = clause.literals;
+            rb.has_source_conflict_clause = true;
+            reason_bounds_out->push_back(std::move(rb));
+          }
+          ++local_tightened;
+          bound_changed = true;
+        }
+      } else {
+        const double new_lb = integer_var
+            ? std::floor(remaining->value + tol) + 1.0
+            : remaining->value + std::max(1e-7, 10.0 * tol);
+        if (new_lb > node_lb[j] + tol) {
+          if (changes_out != nullptr) {
+            changes_out->push_back(
+                {j, new_lb - node_lb[j], true, node_lb[j], new_lb});
+          }
+          node_lb[j] = new_lb;
+          if (reason_bounds_out != nullptr) {
+            DomainReasonBound rb;
+            rb.bound = BranchDomainLiteral{j, new_lb, true};
+            rb.reason = std::move(reason);
+            rb.source_conflict_literal = *remaining;
+            rb.has_source_conflict_literal = true;
+            rb.source_conflict_clause = clause.literals;
+            rb.has_source_conflict_clause = true;
+            reason_bounds_out->push_back(std::move(rb));
+          }
+          ++local_tightened;
+          bound_changed = true;
+        }
+      }
+
+      if (node_lb[j] > node_ub[j] + tol) {
+        last_propagation_clauses_scanned_.store(clauses_scanned,
+                                                std::memory_order_relaxed);
+        if (tightened) *tightened += local_tightened;
+        return false;
+      }
+      if (bound_changed) enqueue_satisfied_occurrences(j);
+    }
+
+    last_propagation_clauses_scanned_.store(clauses_scanned,
+                                            std::memory_order_relaxed);
     if (tightened) *tightened += local_tightened;
     return true;
   }
 
  public:
   int size() const { return static_cast<int>(clauses_.size()); }
+
+  int last_propagation_clauses_scanned() const {
+    return last_propagation_clauses_scanned_.load(std::memory_order_relaxed);
+  }
 
   const ConflictClause& operator[](int i) const { return clauses_[i]; }
 };
@@ -568,6 +860,7 @@ struct CutPoolPropagationStats {
 /// parallel in the same direction.
 class CutPool {
   std::vector<PoolCut> cuts_;
+  std::unordered_map<std::size_t, std::vector<int>> support_buckets_;
   int max_pool_size_;
   int max_age_;
   int expected_size_;
@@ -592,7 +885,15 @@ class CutPool {
     return true;
   }
 
-  int initial_cut_age() const { return std::max(0, max_age_ - 5); }
+  void rebuild_support_buckets() {
+    support_buckets_.clear();
+    support_buckets_.reserve(cuts_.size());
+    for (int i = 0; i < static_cast<int>(cuts_.size()); ++i) {
+      support_buckets_[sparse_cut_support_hash(cuts_[i].coeff)].push_back(i);
+    }
+  }
+
+  static constexpr int initial_cut_age() { return 0; }
 
 public:
   /// @brief Construct a cut pool with given capacity and age limit.
@@ -620,36 +921,46 @@ public:
     if (!valid_cut_input(coeff, rhs, &norm)) return false;
 
     const std::size_t h = sparse_cut_hash(coeff);
+    const std::size_t support_hash = sparse_cut_support_hash(coeff);
+    const auto bucket_it = support_buckets_.find(support_hash);
+    const std::vector<int>* candidate_indices =
+        bucket_it == support_buckets_.end() ? nullptr : &bucket_it->second;
 
-    for (auto& pc : cuts_) {
-      if (!sparse_same_support(pc.coeff, coeff)) continue;
-      const double dot = sparse_sparse_dot(pc.coeff, coeff);
-      const double denom = pc.norm * norm;
-      if (!(denom > 0.0) || !std::isfinite(dot) || !std::isfinite(denom)) {
-        continue;
-      }
-      const double parallelism = dot / denom;
-      if (parallelism >= 1.0 - 1e-6) {
-        const double scale = dot / (pc.norm * pc.norm);
-        const double rhs_on_existing_scale =
-            scale > 1e-12 ? rhs / scale : rhs;
-        const double rhs_tol =
-            1e-9 * std::max({1.0, std::abs(rhs_on_existing_scale),
-                              std::abs(pc.rhs)});
-        const bool tighter_rhs = rhs_on_existing_scale < pc.rhs - rhs_tol;
-        const bool upgrades_lp_visibility = pc.domain_only && !domain_only;
-        if (!tighter_rhs && !upgrades_lp_visibility) {
-          return false;
+    if (candidate_indices != nullptr) {
+      for (int cut_index : *candidate_indices) {
+        if (cut_index < 0 || cut_index >= static_cast<int>(cuts_.size())) {
+          continue;
         }
-        const bool merged_domain_only = pc.domain_only && domain_only;
-        if (tighter_rhs) {
-          pc = PoolCut{std::move(coeff), rhs, initial_cut_age(), 0.0, norm, h,
-                       merged_domain_only, 0, validity_scope};
-          if (new_domain_source != nullptr) *new_domain_source = true;
-        } else {
-          pc.domain_only = merged_domain_only;
+        auto& pc = cuts_[static_cast<std::size_t>(cut_index)];
+        if (!sparse_same_support(pc.coeff, coeff)) continue;
+        const double dot = sparse_sparse_dot(pc.coeff, coeff);
+        const double denom = pc.norm * norm;
+        if (!(denom > 0.0) || !std::isfinite(dot) || !std::isfinite(denom)) {
+          continue;
         }
-        return true;
+        const double parallelism = dot / denom;
+        if (parallelism >= 1.0 - 1e-6) {
+          const double scale = dot / (pc.norm * pc.norm);
+          const double rhs_on_existing_scale =
+              scale > 1e-12 ? rhs / scale : rhs;
+          const double rhs_tol =
+              1e-9 * std::max({1.0, std::abs(rhs_on_existing_scale),
+                                std::abs(pc.rhs)});
+          const bool tighter_rhs = rhs_on_existing_scale < pc.rhs - rhs_tol;
+          const bool upgrades_lp_visibility = pc.domain_only && !domain_only;
+          if (!tighter_rhs && !upgrades_lp_visibility) {
+            return false;
+          }
+          const bool merged_domain_only = pc.domain_only && domain_only;
+          if (tighter_rhs) {
+            pc = PoolCut{std::move(coeff), rhs, initial_cut_age(), 0.0, norm, h,
+                         merged_domain_only, 0, validity_scope};
+            if (new_domain_source != nullptr) *new_domain_source = true;
+          } else {
+            pc.domain_only = merged_domain_only;
+          }
+          return true;
+        }
       }
     }
 
@@ -659,6 +970,7 @@ public:
       if (worst != cuts_.end()) {
         *worst = PoolCut{std::move(coeff), rhs, initial_cut_age(), 0.0, norm, h,
                          domain_only, 0, validity_scope};
+        rebuild_support_buckets();
         if (new_domain_source != nullptr) *new_domain_source = true;
         return true;
       }
@@ -666,6 +978,8 @@ public:
 
     cuts_.push_back(PoolCut{std::move(coeff), rhs, initial_cut_age(), 0.0,
                             norm, h, domain_only, 0, validity_scope});
+    support_buckets_[support_hash].push_back(
+        static_cast<int>(cuts_.size()) - 1);
     if (new_domain_source != nullptr) *new_domain_source = true;
     return true;
   }
@@ -878,7 +1192,8 @@ public:
                                 : new_ub + std::max(1e-7, 10.0 * tol),
                             true});
             if (changes_out != nullptr) {
-              changes_out->push_back({j, new_ub - node_ub[j], false});
+              changes_out->push_back(
+                  {j, new_ub - node_ub[j], false, node_ub[j], new_ub});
             }
             node_ub[j] = new_ub;
             mark_next_pending(j);
@@ -900,7 +1215,8 @@ public:
                                 : new_lb - std::max(1e-7, 10.0 * tol),
                             false});
             if (changes_out != nullptr) {
-              changes_out->push_back({j, new_lb - node_lb[j], true});
+              changes_out->push_back(
+                  {j, new_lb - node_lb[j], true, node_lb[j], new_lb});
             }
             node_lb[j] = new_lb;
             mark_next_pending(j);
@@ -972,25 +1288,38 @@ public:
     return result;
   }
 
-  /// @brief Age all cuts by 1. Reset age for violated ones. Purge old cuts.
-  void age_and_purge(const std::vector<int>& violated_indices) {
+  /// Select violated cuts by value, then age and purge the pool. Returning
+  /// copies keeps callers independent of index invalidation during purge.
+  std::vector<PoolCut> select_violated_and_age(
+      const Eigen::VectorXd& x, double min_viol = 1e-4,
+      int max_selected = std::numeric_limits<int>::max()) {
+    const std::vector<int> violated_indices = find_violated(x, min_viol);
+    const int selected_count = std::min(
+        static_cast<int>(violated_indices.size()), std::max(0, max_selected));
+    std::vector<PoolCut> selected;
+    selected.reserve(static_cast<std::size_t>(selected_count));
+    for (int i = 0; i < selected_count; ++i) {
+      selected.push_back(cuts_[static_cast<std::size_t>(
+          violated_indices[static_cast<std::size_t>(i)])]);
+    }
+
+    std::vector<char> violated(cuts_.size(), 0);
     for (int idx : violated_indices) {
       if (idx >= 0 && idx < static_cast<int>(cuts_.size())) {
         cuts_[idx].age = 0;
+        violated[static_cast<std::size_t>(idx)] = 1;
       }
     }
     for (int i = 0; i < static_cast<int>(cuts_.size()); ++i) {
-      bool was_violated = false;
-      for (int idx : violated_indices) {
-        if (idx == i) { was_violated = true; break; }
-      }
-      if (!was_violated) {
+      if (violated[static_cast<std::size_t>(i)] == 0) {
         ++cuts_[i].age;
       }
     }
     cuts_.erase(std::remove_if(cuts_.begin(), cuts_.end(),
         [this](const PoolCut& c) { return c.age > max_age_; }),
         cuts_.end());
+    rebuild_support_buckets();
+    return selected;
   }
 
   /// @brief Access a pool cut by index.

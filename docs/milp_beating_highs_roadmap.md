@@ -8,7 +8,7 @@
 
 ## 0. TL;DR
 
-1. **The B&C machinery is not the problem.** The native branch-and-cut (GMI + transformed-tableau cMIR + lifted covers + flow covers + implied bounds + mod-k + path-mixing cuts, clique table, domain propagation with conflict learning, pseudocost branching with confidence bounds, RENS/RINS/feasibility-pump/local-branching/diving heuristics, PaPILO presolve, parallel search) **already beats raw HiGHS on 118-bus SCUC when it runs on the HiGHS LP kernel** (gap 5.9% vs 19.1% @120 s). The measured, decisive gap is underneath: the native LP kernel.
+1. **Historical result, not a general conclusion.** One 118-bus SCUC run reported a smaller final gap for native branch-and-cut on the HiGHS LP kernel than for the selected HiGHS configuration. That single-domain observation does not establish a general advantage, and the native flow-cover family formerly listed here was removed because its validity conditions were not enforced.
 2. **The decisive battle is the simplex kernel.** Native per-pivot cost is ~3 ms at 27–35k rows vs HiGHS ~µs (**~100–1000× per node-LP**); 8/10 warm starts die in UMFPACK-singular warm-drifted bases; Phase I fails on the presolved 118-bus root. No amount of cut/branching tuning can amortize a 100× slower node LP: with ~50–80% of B&C time in LP re-solves, the kernel bounds everything (§1).
 3. **The fundamental fixes are algorithmic, not tuning:** (a) a simplex-native factorization with rank-repair and Forrest–Tomlin-class updates instead of general-purpose UMFPACK+eta (§2.2, §4-P1); (b) hyper-sparse FTRAN/BTRAN — SCUC LPs are precisely the hyper-sparse family HiGHS was built for (§2.2.4); (c) bound-flipping dual ratio test + dual steepest edge done with stability guards (§2.1); (d) anti-degeneracy machinery (perturbation + EXPAND) because SCUC is maximally degenerate (§2.3); (e) a numerics contract — one tolerance architecture with dominance invariants, safe cut generation, and audits at every trust boundary (§5).
 4. **Realistic win conditions are staged** (§6): first beat HiGHS end-to-end natively on the SCUC family (achievable: the orchestration already wins when the kernel is borrowed), then reach ≤1.3× shifted-geometric-mean on a MIPLIB-2017 subset, then attack parity/beyond with the asymmetric weapons HiGHS lacks: structure-aware SCUC cuts/branching, L2O-guided configuration (the `l2o/` framework), a concurrent root portfolio (simplex ∥ IPM ∥ PDLP), and safe-numerics honesty as a feature (native already rejects the false optima HiGHS silently returns at 10⁶ scaling).
@@ -190,7 +190,7 @@ An interior optimum $x^\mu$ must become a *basic* optimum to warm-start the tree
 
 ### 2.5 Cutting planes: derivations, quality, and floating-point validity
 
-The repo's separator suite is already broad (GMI, transformed-tableau cMIR, lifted knapsack/mixed covers, flow covers, implied bounds, mod-k, path-mixing, CGLP, conflict cuts). The theory below serves two purposes: make the *validity conditions* explicit (that is where numerical bugs live), and justify the *selection* discipline (the eval doc's "MIR cuts correct but hurt performance" is a selection problem, not a generation problem).
+The repo's separator suite includes GMI, transformed-tableau cMIR, lifted knapsack/mixed covers, implied bounds, mod-k, path-mixing, CGLP, and conflict cuts. Breadth is not evidence of correctness or speed: each family requires an explicit validity contract and independent frontier audit before it can participate in production solves.
 
 #### 2.5.1 The simple MIR inequality (base lemma, with proof)
 
@@ -495,4 +495,3 @@ The cold controller runs an artificial-objective **primal** Phase I (`native_dua
 - **C3. Re-test the presolved-118-bus cliff after A1** — its "structural density" hardness (eval §6.1) was measured on dense solves; hyper-sparse solves change the calculus for denser-but-smaller matrices.
 
 **Execution order:** A1 → A2 (independent, biggest product) → B1 re-measurement → A3/A4 → C2 → B2/B3 tuning — each step gated on the parity probe + `native_kernel_comparison --check` staying green.
-

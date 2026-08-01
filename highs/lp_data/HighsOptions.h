@@ -506,6 +506,9 @@ struct HighsOptionsStruct {
   HighsInt mip_lifting_for_probing;
   bool mip_allow_cut_separation_at_nodes;
   HighsInt hacdcpf_max_root_sepa_rounds;
+  bool hacdcpf_retain_root_lp_relaxation;
+  bool hacdcpf_root_oracle_stop_after_evaluate_root;
+  bool hacdcpf_root_oracle_stop_after_root_round;
 
   // Logging callback identifiers
   HighsLogOptions log_options;
@@ -670,7 +673,10 @@ struct HighsOptionsStruct {
         mip_lifting_for_probing(-1),
         // clang-format off
         mip_allow_cut_separation_at_nodes(true),
-        hacdcpf_max_root_sepa_rounds(kHighsIInf) {};
+        hacdcpf_max_root_sepa_rounds(kHighsIInf),
+        hacdcpf_retain_root_lp_relaxation(false),
+        hacdcpf_root_oracle_stop_after_evaluate_root(false),
+        hacdcpf_root_oracle_stop_after_root_round(false) {};
   // clang-format on
 };
 
@@ -1254,6 +1260,24 @@ class HighsOptions : public HighsOptionsStruct {
         "Maximum number of root-node cut separation rounds (0 = no limit)",
         advanced, &hacdcpf_max_root_sepa_rounds, 0, kHighsIInf, kHighsIInf);
     records.push_back(record_int);
+
+    record_bool = new OptionRecordBool(
+        "hacdcpf_retain_root_lp_relaxation",
+        "Retain the root LP relaxation after a MIP run", advanced,
+        &hacdcpf_retain_root_lp_relaxation, false);
+    records.push_back(record_bool);
+
+    record_bool = new OptionRecordBool(
+        "hacdcpf_root_oracle_stop_after_evaluate_root",
+        "Stop a root-oracle run after evaluateRootNode", advanced,
+        &hacdcpf_root_oracle_stop_after_evaluate_root, false);
+    records.push_back(record_bool);
+
+    record_bool = new OptionRecordBool(
+        "hacdcpf_root_oracle_stop_after_root_round",
+        "Stop a root-oracle run after one root separation round", advanced,
+        &hacdcpf_root_oracle_stop_after_root_round, false);
+    records.push_back(record_bool);
 
     record_double = new OptionRecordDouble(
         "mip_rel_gap",

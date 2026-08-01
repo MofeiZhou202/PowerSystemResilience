@@ -342,8 +342,7 @@ struct Node {
   std::vector<DomainReasonBound> domain_reason_bounds;
   std::vector<LocalDomainTrailEntry> local_domain_trail;
   std::vector<int> local_branch_positions;
-  std::vector<std::size_t> local_proof_row_hashes;
-  std::vector<std::size_t> dynamic_probe_literal_hashes;
+  std::vector<std::uint64_t> dynamic_probe_literal_keys;
   std::vector<LocalBinaryImplication> local_binary_implications;
   std::vector<std::vector<BranchDomainLiteral>> local_conflict_clauses;
   std::vector<ScopedConflictClause> scoped_conflict_clauses;
@@ -370,8 +369,7 @@ struct Node {
     c.domain_reason_bounds = domain_reason_bounds;
     c.local_domain_trail = local_domain_trail;
     c.local_branch_positions = local_branch_positions;
-    c.local_proof_row_hashes = local_proof_row_hashes;
-    c.dynamic_probe_literal_hashes = dynamic_probe_literal_hashes;
+    c.dynamic_probe_literal_keys = dynamic_probe_literal_keys;
     c.local_binary_implications = local_binary_implications;
     c.local_conflict_clauses = local_conflict_clauses;
     c.scoped_conflict_clauses = scoped_conflict_clauses;
@@ -527,6 +525,51 @@ inline double normalized_pseudocost_gain(double gain, double distance) {
   return gain / std::max(1e-9, std::abs(distance));
 }
 
+/// Evidence available for one branch direction at the current node.
+/// Proof states stay discrete so failures and cutoffs cannot contaminate the
+/// global pseudocost distribution with scale-dependent sentinel gains.
+enum class BranchEvidenceState {
+  Predicted,
+  Measured,
+  ExactOptimal,
+  ProvenCutoff,
+  UnknownFailure,
+};
+
+struct BranchDirectionalObservation {
+  int var{-1};
+  bool is_up{false};
+  BranchEvidenceState state{BranchEvidenceState::Predicted};
+  double gain{0.0};
+};
+
+/// One parent expansion's estimator calibration aggregates. Directional
+/// entries compare history-only predictions with solved child bounds; node
+/// entries compare the queued node estimate with the best realized child.
+struct BranchEstimatorCalibration {
+  std::uint64_t node_samples{0};
+  double node_predicted_lift_sum{0.0};
+  double node_realized_lift_sum{0.0};
+  double node_abs_error_sum{0.0};
+  double node_squared_error_sum{0.0};
+  double node_predicted_sq_sum{0.0};
+  double node_realized_sq_sum{0.0};
+  double node_cross_sum{0.0};
+  std::uint64_t directional_samples{0};
+  double directional_predicted_gain_sum{0.0};
+  double directional_realized_gain_sum{0.0};
+  double directional_abs_error_sum{0.0};
+  double directional_squared_error_sum{0.0};
+  std::uint64_t directional_rank_samples{0};
+  std::uint64_t directional_rank_concordant{0};
+};
+
+enum class BranchProbeReuseKind {
+  None,
+  Warm,
+  Exact,
+};
+
 /// Dense global-column lookup backed by statistics for branchable columns only.
 /// Slot zero is a harmless sentinel for non-branchable columns, allowing legacy
 /// pc[col] call sites to retain their global indexing contract.
@@ -599,9 +642,7 @@ enum class CutFamily : int {
   Cover = 2,
   Clique = 3,
   ZeroHalf = 4,
-  FlowCover = 5,
-  ImpliedBound = 6,
-  Count = 7  // sentinel for array sizing
+  Count = 5  // sentinel for array sizing
 };
 
 /// @brief Per-family cut statistics for adaptive generation (P2.1).
@@ -693,13 +734,14 @@ struct PCUpdate {
   double branch_distance{1.0};
   bool has_gain{false};
   double gain{0.0};
+  bool suppress_gain_update{false};
   bool has_inference{false};
   double inference_count{0.0};
   int cutoff_count{0};
   double conflict_score{0.0};
 
   void apply(PseudoCost& pseudocost) const {
-    if (has_gain) {
+    if (has_gain && !suppress_gain_update) {
       const double unit_gain =
           normalized_pseudocost_gain(gain, branch_distance);
       if (is_up) pseudocost.add_up(unit_gain);

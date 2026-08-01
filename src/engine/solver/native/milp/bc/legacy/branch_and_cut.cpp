@@ -33,6 +33,7 @@
 #include <random>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <unordered_set>
 #include <unordered_map>
 #include <utility>
@@ -120,7 +121,7 @@ int strict_scuc_uc_col(const std::vector<int>& cols,
 }
 
 int strict_scuc_env_int(const char* name, int fallback, int lo, int hi) {
-  const char* raw = std::getenv(name);
+  const char* raw = bc_env_options().value(name);
   if (raw == nullptr || *raw == '\0') return fallback;
   char* end = nullptr;
   const long parsed = std::strtol(raw, &end, 10);
@@ -130,7 +131,7 @@ int strict_scuc_env_int(const char* name, int fallback, int lo, int hi) {
 
 double strict_scuc_env_double(const char* name, double fallback,
                               double lo, double hi) {
-  const char* raw = std::getenv(name);
+  const char* raw = bc_env_options().value(name);
   if (raw == nullptr || *raw == '\0') return fallback;
   char* end = nullptr;
   const double parsed = std::strtod(raw, &end);
@@ -454,7 +455,7 @@ void append_strict_scuc_dynamic_cuts(const MIPModel::UCGenHint& uc,
     selected.push_back(&cand);
   }
 
-  if (const char* trace_env = std::getenv("MIPSOLVERS_SCUC_DYNAMIC_SCORE_TRACE")) {
+  if (const char* trace_env = bc_env_options().value("MIPSOLVERS_SCUC_DYNAMIC_SCORE_TRACE")) {
     int trace_limit = 16;
     if (std::string(trace_env) == "all") {
       trace_limit = std::numeric_limits<int>::max();
@@ -598,52 +599,6 @@ class RootHighsOracleBasisOps : public BasisOps {
   int m_{0};
   int n_{0};
   Eigen::SparseMatrix<double> A_owned_;
-};
-
-class ScopedEnvVar {
- public:
-  ScopedEnvVar(const char* name, const char* value) : name_(name) {
-    if (const char* old = std::getenv(name)) {
-      had_old_ = true;
-      old_value_ = old;
-    }
-    set_env(name_.c_str(), value);
-  }
-
-  ~ScopedEnvVar() {
-    if (had_old_) {
-      set_env(name_.c_str(), old_value_.c_str());
-    } else {
-      unset_env(name_.c_str());
-    }
-  }
-
- private:
-  // Cross-platform environment-variable helpers. POSIX uses setenv/unsetenv;
-  // MSVC/Windows provides _putenv_s, where passing an empty value removes the
-  // variable. Wrapping here lets the engine build cleanly on Windows.
-  static void set_env(const char* name, const char* value) {
-#if defined(_WIN32)
-    _putenv_s(name, value != nullptr ? value : "");
-#else
-    if (value != nullptr) {
-      ::setenv(name, value, 1);
-    } else {
-      ::unsetenv(name);
-    }
-#endif
-  }
-  static void unset_env(const char* name) {
-#if defined(_WIN32)
-    _putenv_s(name, "");
-#else
-    ::unsetenv(name);
-#endif
-  }
-
-  std::string name_;
-  bool had_old_{false};
-  std::string old_value_;
 };
 
 struct RootXpoolStateSignature {
@@ -1566,7 +1521,11 @@ struct RootRedcostLurkingBounds {
 
 BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                            const BCCallbacks* callbacks = nullptr) {
+  auto solve_environment = current_bc_env_options();
+  if (!solve_environment) solve_environment = capture_bc_env_options();
+  ScopedBcEnvOptions environment_scope(solve_environment);
   BCResult out;
+  out.effective_environment = solve_environment->active_settings();
   out.stats.solver_name = "NativeBranchAndCut";
   out.stats.status = bc_status::kNotStarted;
   const auto highs_contract = apply_bc_strict_highs_contract(opt);
@@ -1630,6 +1589,16 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   };
 
   auto return_with_profile = [&]() {
+    // A successful solve may terminate before the native tree is entered. In
+    // that case imported pseudocosts are still the current learned state and
+    // must not disappear from the round-trip API.
+    if (out.stats.success && !out.highs_pseudocost_init &&
+        opt.highs_pseudocost_warm_start &&
+        opt.highs_pseudocost_warm_start->n_orig_cols ==
+            prob.linear_part.c.size()) {
+      out.highs_pseudocost_init = std::make_shared<BCPseudocostInit>(
+          *opt.highs_pseudocost_warm_start);
+    }
     finalize_reported_stats_hygiene();
     sync_propagation_profile();
     --propagation_profile_scope_depth;
@@ -1687,12 +1656,55 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   LPModel base_lp = prob.linear_part;
   const int orig_n = static_cast<int>(base_lp.vars.size());
 
+  std::vector<char> integer_index_seen(static_cast<std::size_t>(orig_n), 0);
+  std::vector<char> binary_index_seen(static_cast<std::size_t>(orig_n), 0);
+  for (int idx : prob.integer_idx) {
+    if (idx < 0 || idx >= orig_n) {
+      out.stats.status = bc_status::kInvalidIntegralityIndex;
+      return return_with_profile();
+    }
+    if (integer_index_seen[static_cast<std::size_t>(idx)] != 0) {
+      out.stats.status = bc_status::kConflictingIntegralityDeclaration;
+      return return_with_profile();
+    }
+    integer_index_seen[static_cast<std::size_t>(idx)] = 1;
+  }
+  for (int idx : prob.binary_idx) {
+    if (idx < 0 || idx >= orig_n) {
+      out.stats.status = bc_status::kInvalidIntegralityIndex;
+      return return_with_profile();
+    }
+    if (binary_index_seen[static_cast<std::size_t>(idx)] != 0 ||
+        integer_index_seen[static_cast<std::size_t>(idx)] != 0) {
+      out.stats.status = bc_status::kConflictingIntegralityDeclaration;
+      return return_with_profile();
+    }
+    binary_index_seen[static_cast<std::size_t>(idx)] = 1;
+  }
+
   const auto declared_integrality =
       normalize_declared_integrality(prob, base_lp);
   const auto& original_declared_integer_cols =
       declared_integrality.integer_cols;
   const auto& original_declared_binary_cols =
       declared_integrality.binary_cols;
+  if (!strict_highs_root_fixed_point) {
+    constexpr double kModelInfinityThreshold = 1e19;
+    for (int j = 0; j < orig_n; ++j) {
+      if (original_declared_integer_cols[static_cast<std::size_t>(j)] == 0) {
+        continue;
+      }
+      const auto& var = base_lp.vars[static_cast<std::size_t>(j)];
+      const bool lower_unbounded =
+          !std::isfinite(var.lb) || var.lb <= -kModelInfinityThreshold;
+      const bool upper_unbounded =
+          !std::isfinite(var.ub) || var.ub >= kModelInfinityThreshold;
+      if (lower_unbounded && upper_unbounded) {
+        out.stats.status = bc_status::kUnsupportedFreeIntegerVariable;
+        return return_with_profile();
+      }
+    }
+  }
   // Deep-copied only in strict-HiGHS mode: every use below is guarded by
   // strict_highs_root_fixed_point (directly or via
   // strict_highs_evaluate_root_enabled), so non-strict runs skip the copy.
@@ -1701,6 +1713,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 
   if (strict_highs_root_fixed_point &&
       !bc_env_options().root_separation_only) {
+    out.bc_stats.collection_scope = "strict_highs_summary";
+    out.bc_stats.lp_solve_count_available = false;
+    out.bc_stats.incumbent_timeline_available = false;
+    out.bc_stats.cut_diagnostics_available = false;
+    out.bc_stats.native_diagnostics_available = false;
 #ifdef MIPSOLVERS_HAVE_HIGHS_LIB
     const auto t_highs_full0 = std::chrono::steady_clock::now();
     Highs highs;
@@ -2130,9 +2147,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
               cutset->ARstart_.clear();
               cutset->ARstart_.push_back(0);
               const bool callback_cut_log =
-                  std::getenv("MIPSOLVERS_BENCH_DYNAMIC_MARKET_CUT_LOG") != nullptr ||
-                  std::getenv("MIPSOLVERS_HIGHS_USERCUT_LEDGER") != nullptr ||
-                  std::getenv("MIPSOLVERS_USERCUT_LEDGER") != nullptr;
+                  bc_env_options().value("MIPSOLVERS_BENCH_DYNAMIC_MARKET_CUT_LOG") != nullptr ||
+                  bc_env_options().value("MIPSOLVERS_HIGHS_USERCUT_LEDGER") != nullptr ||
+                  bc_env_options().value("MIPSOLVERS_USERCUT_LEDGER") != nullptr;
               auto dynamic_cut_row_hash =
                   [&](const std::vector<HighsInt>& indices,
                       const std::vector<double>& values, double upper) {
@@ -2403,10 +2420,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         highs.hacdcpfSetNodeCutCallback(nullptr, nullptr);
       }
 
-      std::optional<ScopedEnvVar> retain_root_lp_env;
-      if (bc_env_options().strict_full_retain_root_lp) {
-        retain_root_lp_env.emplace("MIPSOLVERS_RETAIN_ROOT_LP_RELAXATION", "1");
-      }
+      (void)highs.setOptionValue(
+          "hacdcpf_retain_root_lp_relaxation",
+          bc_env_options().strict_full_retain_root_lp);
       // [K7] Inject pseudocost warm-start (original → presolved space mapping
       // is handled inside HighsPseudocost constructor using postSolveStack).
       if (opt.highs_pseudocost_warm_start &&
@@ -2594,23 +2610,20 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       out.bc_stats.runtime_sec = runtime;
       out.bc_stats.nodes_explored = static_cast<int>(std::min<int64_t>(
           info.mip_node_count, std::numeric_limits<int>::max()));
-      out.bc_stats.lp_solves = std::max(1, out.bc_stats.nodes_explored + 1);
+      // HiGHS 1.14 exposes simplex iterations and MIP nodes, but not the
+      // number of node-LP solves. nodes+1 is not an equivalent statistic.
+      out.bc_stats.lp_solves = 0;
       out.bc_stats.best_bound = std::isfinite(user_facing_bound) ? user_facing_bound : -kInf;
       out.bc_stats.best_obj = std::isfinite(user_facing_obj) ? user_facing_obj : kInf;
       out.bc_stats.gap = out.stats.mip_gap;
       out.bc_stats.status = out.stats.status;
       out.bc_stats.parallel_requested_threads =
           static_cast<int>(strict_highs_threads);
-      out.bc_stats.parallel_effective_threads = out.bc_stats.parallel_requested_threads;
+      // Vendored HiGHS 1.14 has a serial MIP tree. Its `threads` option may
+      // affect LP internals, but cannot be reported as parallel MIP workers.
+      out.bc_stats.parallel_effective_threads = 1;
       out.bc_stats.parallel_explorer_threads = 0;
-      if (has_solution) {
-        out.bc_stats.incumbent_updates = 1;
-        out.bc_stats.first_incumbent_node = 0;
-        out.bc_stats.last_incumbent_node = out.bc_stats.nodes_explored;
-        out.bc_stats.first_incumbent_lp_solves = 1;
-        out.bc_stats.last_incumbent_lp_solves = out.bc_stats.lp_solves;
-        out.bc_stats.best_bound_at_last_incumbent = out.bc_stats.best_bound;
-      }
+      out.bc_stats.parallel_schedule_reason = "strict_highs_1_14_serial_mip";
 
       if (opt.verbose || bc_env_flag_enabled("MIPSOLVERS_BC_TIMELINE")) {
         fmt::print(stderr,
@@ -2688,7 +2701,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
               std::chrono::duration<double>(t1 - t0).count();
 
           out.x = cert.x;
-          out.stats.objective = obj_out;
+          out.stats.objective = base_lp.c.dot(out.x);
           out.stats.primal_feas = 0.0;
           out.stats.residual_inf = 0.0;
           out.stats.mip_gap = gap_out;
@@ -2914,8 +2927,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       }
       out.x = heuristic_x_orig;
       out.stats.success = true;
-      out.stats.objective = objective_value(prob.linear_part.c, out.x,
-                                            prob.linear_part.sense);
+      // SolveStats is public and always reports the model's original objective
+      // direction. heuristic_obj uses the internal minimization convention.
+      out.stats.objective = prob.linear_part.c.dot(out.x);
       out.stats.primal_feas = 0.0;
       out.stats.residual_inf = 0.0;
       out.bc_stats.best_obj = heuristic_obj;
@@ -2952,7 +2966,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                                          original_vb_table, nullptr, 512);
     original_presolve_vb_sources =
         collect_variable_bound_sources(original_vb_table);
-    if ((opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr) &&
+    if ((opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr) &&
         !original_presolve_vb_sources.empty()) {
       fmt::print(stderr,
                  "[B&C-PRESOLVE-VB-SIDE] original_sources={} vars={} rows={}\n",
@@ -3032,6 +3046,14 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     // false keeps the original model authoritative and correct).
     LPModel presolved_lp = base_lp;
     const PresolveStats nps_stats = native_ps.run(presolved_lp, nps_bin, nps_int);
+    if (nps_stats.infeasible) {
+      out.stats.status = bc_status::kInfeasibleNativePresolve;
+      if (opt.verbose) {
+        fmt::print(stderr, "[NATIVE-PRESOLVE] infeasible: {}\n",
+                   nps_stats.infeasibility_reason);
+      }
+      return return_with_profile();
+    }
     if (nps_stats.final_cols > 0 &&
         (nps_stats.cols_removed > 0 || nps_stats.rows_removed > 0)) {
       base_lp = std::move(presolved_lp);
@@ -3077,8 +3099,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         strict_highs_presolved_working_space = true;
         strict_highs_presolved_objective_offset =
             highs_presolve_side_state.presolved_objective_offset;
-        if (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr ||
-            std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr) {
+        if (opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr ||
+            bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr) {
           fmt::print(stderr,
                      "[B&C-HIGHS-PRESOLVED-WORKING-LP] enabled=1 "
                      "cache={} status={} rows={} cols={} nnz={} "
@@ -3096,8 +3118,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                      strict_highs_presolved_objective_offset);
         }
       } else {
-        if (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr ||
-            std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr) {
+        if (opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr ||
+            bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr) {
           fmt::print(stderr,
                      "[B&C-HIGHS-PRESOLVED-WORKING-LP] enabled=0 "
                      "cache={} available={} pass={} presolve={} "
@@ -3114,8 +3136,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         }
       }
     }
-    if (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr ||
-        std::getenv("MIPSOLVERS_HIGHS_PRESOLVE_STATS") != nullptr) {
+    if (opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr ||
+        bc_env_options().value("MIPSOLVERS_HIGHS_PRESOLVE_STATS") != nullptr) {
       fmt::print(stderr,
                  "[B&C-HIGHS-VB-SIDE] available={} pass={} presolve={} "
                  "side={} cache={} status={} rows={} cols={} nnz={} ranged={} "
@@ -3161,8 +3183,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   }
   if (strict_highs_root_fixed_point && !strict_highs_presolved_working_space) {
     out.stats.status = bc_status::kHighsPresolvedWorkingLpUnavailable;
-    if (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr ||
-        std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr) {
+    if (opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr ||
+        bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr) {
       fmt::print(stderr,
                  "[B&C-HIGHS-PRESOLVED-WORKING-LP] fatal=1 "
                  "reason=required_for_strict_root status={} rows={} cols={} "
@@ -3289,7 +3311,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       x[j] = std::min(ub[j], std::max(lb[j], std::round(x[j])));
     }
   };
-  if (opt.verbose || std::getenv("MIPSOLVERS_BC_TIMELINE") != nullptr) {
+  if (opt.verbose || bc_env_options().value("MIPSOLVERS_BC_TIMELINE") != nullptr) {
     const int model_integer_cols = static_cast<int>(std::count_if(
         base_lp.vars.begin(), base_lp.vars.end(),
         [](const VariableMeta& v) { return is_integer_type(v); }));
@@ -3516,29 +3538,52 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     }
   }
 
-  // ── Build reduced-space branching priority vector ──
-  // Map prob.branching_priority through PaPILO.
+  // ── Build final working-space to original-space branching metadata ──
+  std::vector<int> branch_original_cols(static_cast<std::size_t>(n), -1);
+  for (int j = 0; j < n; ++j) {
+    int original = j;
+    if (strict_highs_presolved_working_space) {
+      if (original < 0 ||
+          original >= static_cast<int>(
+                          highs_presolve_side_state.presolved_col_orig.size())) {
+        continue;
+      }
+      original = highs_presolve_side_state
+                     .presolved_col_orig[static_cast<std::size_t>(original)];
+    }
+    if (native_model_reduced) {
+      const auto& reduced_to_input = native_ps.reduced_to_orig_col();
+      if (original < 0 ||
+          original >= static_cast<int>(reduced_to_input.size())) {
+        continue;
+      }
+      original = reduced_to_input[static_cast<std::size_t>(original)];
+    }
+#ifdef MIPSOLVERS_HAVE_PAPILO
+    if (papilo_ps.success && !papilo_ps.reduced_to_orig_col.empty()) {
+      if (original < 0 ||
+          original >= static_cast<int>(papilo_ps.reduced_to_orig_col.size())) {
+        continue;
+      }
+      original =
+          papilo_ps.reduced_to_orig_col[static_cast<std::size_t>(original)];
+    }
+#endif
+    if (original >= 0 && original < orig_n) {
+      branch_original_cols[static_cast<std::size_t>(j)] = original;
+    }
+  }
+
   std::vector<int> branch_priority;
   if (!prob.branching_priority.empty()) {
     branch_priority.resize(static_cast<size_t>(n), 0);
-    for (int orig_j = 0; orig_j < static_cast<int>(prob.branching_priority.size()); ++orig_j) {
-      int j = orig_j;
-#ifdef MIPSOLVERS_HAVE_PAPILO
-      if (papilo_ps.success && !papilo_ps.orig_to_reduced_col.empty()) {
-        if (j < 0 || j >= static_cast<int>(papilo_ps.orig_to_reduced_col.size()))
-          continue;
-        j = papilo_ps.orig_to_reduced_col[j];
-        if (j < 0) continue;
+    for (int j = 0; j < n; ++j) {
+      const int original = branch_original_cols[static_cast<std::size_t>(j)];
+      if (original >= 0 &&
+          original < static_cast<int>(prob.branching_priority.size())) {
+        branch_priority[static_cast<std::size_t>(j)] =
+            prob.branching_priority[static_cast<std::size_t>(original)];
       }
-#endif
-      if (native_model_reduced) {
-        const auto& o2r = native_ps.orig_to_reduced_col();
-        if (j < 0 || j >= static_cast<int>(o2r.size())) continue;
-        j = o2r[static_cast<std::size_t>(j)];
-        if (j < 0) continue;
-      }
-      if (j >= 0 && j < n)
-        branch_priority[static_cast<size_t>(j)] = prob.branching_priority[static_cast<size_t>(orig_j)];
     }
   }
   auto ensure_branch_priority = [&]() -> std::vector<int>& {
@@ -3547,6 +3592,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     }
     return branch_priority;
   };
+  const std::vector<int> parallel_branch_priority = branch_priority;
 
     auto build_prog_round_focus_trace = [&](const Eigen::VectorXd& x_relax,
                                             const Eigen::VectorXd& lb,
@@ -3925,8 +3971,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           root_highs_presolved_col_identity;
       const bool root_highs_presolved_side_state_first_class =
           !strict_highs_root_fixed_point || root_highs_presolved_space_exact;
-      if ((opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr ||
-           std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr) &&
+      if ((opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr ||
+           bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr) &&
           strict_highs_root_fixed_point &&
           highs_presolve_side_state.side_state_available) {
         fmt::print(stderr,
@@ -3953,8 +3999,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       }
       if (strict_highs_root_fixed_point && !root_highs_presolved_space_exact) {
         out.stats.status = bc_status::kHighsPresolvedWorkingLpMismatch;
-        if (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr ||
-            std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr) {
+        if (opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr ||
+            bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr) {
           fmt::print(stderr,
                      "[B&C-HIGHS-SPACE-MISMATCH] fatal=1 "
                      "reason=required_for_strict_root native_cols={} "
@@ -4033,8 +4079,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	        root_implied_integer_cols[static_cast<std::size_t>(j)] =
 	            highs_impl ? 1 : 0;
 	      }
-	      if (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr ||
-	          std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr) {
+	      if (opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr ||
+	          bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr) {
 	        fmt::print(stderr,
 	                   "[B&C-HIGHS-IMPL-MASK] source=presolved_col_type "
 	                   "mapped={} native_removed={} native_added={} "
@@ -4044,8 +4090,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	                   highs_presolve_side_state.cols);
 	      }
 	    }
-	    if ((opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr ||
-	         std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr) &&
+	    if ((opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr ||
+	         bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr) &&
 	        root_highs_presolved_integral_mask_valid) {
 	      fmt::print(stderr,
 	                 "[B&C-HIGHS-INTEGRAL-MASK] source=presolved_col_type "
@@ -4868,8 +4914,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                                                                 max_rounds);
         return tightened;
       };
-      if ((opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr ||
-           std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr) &&
+      if ((opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr ||
+           bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr) &&
           strict_highs_root_fixed_point) {
         fmt::print(stderr,
                    "[B&C-HIGHS-DOMAIN] mappedRows={} droppedRows={} "
@@ -4925,7 +4971,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     publish_verified_warm_start_time_limit();
     return return_with_profile();
   }
-  root_solve_opt.time_limit_sec = std::max(0.001, bc_remaining_sec());
+  const double root_remaining_before_reserve = bc_remaining_sec();
+  root_solve_opt.time_limit_sec =
+      std::max(0.001, root_remaining_before_reserve);
   // P0(a) budget reserve: when the unpresolved-root fallback is available,
   // cap the presolved root LP so a hard root cannot burn the whole limit
   // before the retry gets a chance (the presolved 118-bus root otherwise
@@ -4936,21 +4984,21 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       opt.time_limit_sec <= 10.0;
   const bool short_budget_root =
       opt.time_limit_sec > 0.0 && opt.time_limit_sec <= 10.0;
-  if (papilo_model_reduced && opt.root_presolve_fallback &&
-      !short_budget_ipm_root &&
-      opt.time_limit_sec > 0.0 &&
-      opt.root_presolve_fallback_budget_fraction > 0.0) {
-    const double reserve = std::max(
-        opt.root_presolve_fallback_min_remaining_sec,
-        opt.root_presolve_fallback_budget_fraction * opt.time_limit_sec);
-    root_solve_opt.time_limit_sec =
-        std::max(0.001, root_solve_opt.time_limit_sec - reserve);
-  } else if (papilo_model_reduced && opt.root_presolve_fallback &&
-             short_budget_ipm_root && opt.verbose) {
+  const bool root_fallback_available =
+      papilo_model_reduced && opt.root_presolve_fallback;
+  root_solve_opt.time_limit_sec = bc_root_lp_budget_sec(
+      root_remaining_before_reserve, opt.time_limit_sec,
+      opt.root_presolve_fallback_min_remaining_sec,
+      opt.root_presolve_fallback_budget_fraction,
+      root_fallback_available, short_budget_ipm_root);
+  if (opt.verbose && root_fallback_available) {
     fmt::print(stderr,
-               "[B&C] short-budget IPM root keeps {:.3f}s remaining; "
-               "unpresolved fallback reserve disabled\n",
-               root_solve_opt.time_limit_sec);
+               "[B&C-ROOT-BUDGET] remaining={:.6f}s root={:.6f}s "
+               "fallback_min={:.6f}s fraction={:.3f} ipm_short={}\n",
+               root_remaining_before_reserve, root_solve_opt.time_limit_sec,
+               opt.root_presolve_fallback_min_remaining_sec,
+               opt.root_presolve_fallback_budget_fraction,
+               short_budget_ipm_root ? 1 : 0);
   }
 
   // ── P8.1: Background analytic-centre thread ─────────────────────────────
@@ -4985,7 +5033,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       const int ac_n = n;
       ac_thread_ptr = std::make_unique<std::thread>(
           [ac_lp = std::move(ac_lp_copy), &analytic_centre, ac_iter, ac_n,
-           remaining_before_root]() mutable {
+           remaining_before_root, solve_environment]() mutable {
+            ScopedBcEnvOptions environment_scope(solve_environment);
             IPMLPOptions ac_opt;
             ac_opt.max_iter   = ac_iter;
             ac_opt.time_limit_sec = std::max(0.001, 0.5 * remaining_before_root);
@@ -5037,7 +5086,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     root_relax.primal.stats.status = "Forced root failure (test seam)";
   }
   if (!root_relax.primal.stats.success || root_relax.primal.x.size() != n) {
-    out.stats.status = root_relax.primal.stats.status == "Time limit"
+    out.stats.status = root_relax.primal.stats.status.starts_with("Time limit")
                            ? bc_status::kTimeLimitReached
                            : bc_status::kRootRelaxationFailed;
     // Keep bc_stats.status in sync: callers reading BCResult::bc_stats.status
@@ -5283,7 +5332,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	        root.basis_hint->cached_col_scale.get(),
 	        root.basis_hint->basis_indices(),
 	        root.lb, root.ub, root.bound, opt.int_tol);
-      if (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr) {
+      if (opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr) {
 	      fmt::print(stderr,
 	                 "[B&C ROOT-RC-LURK] phase={} cols={} added={} total={} "
 	                 "sideReject={} lpobj={:.10g}\n",
@@ -5397,7 +5446,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   }
 
   root.estimate = compute_node_estimate(declared_branchable_indices, root.x_relax, pc,
-                                        opt.int_tol, root.bound);
+                                        opt.int_tol, root.bound,
+                                        opt.node_estimate_aggregation);
 
   // Count fractional binaries at root
   if (opt.verbose) {
@@ -5934,7 +5984,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       std::unordered_set<std::string> root_probe_varbound_source_keys;
       std::vector<unsigned char> root_implied_bound_probe_cache(
           static_cast<std::size_t>(std::max(0, n)), 0);
-      std::unordered_set<std::size_t> root_implied_bound_cut_hashes;
+      SparseCutSet root_implied_bound_cuts;
       std::vector<PoolCut> root_deferred_implied_bound_cutpool_rows;
       const int root_cut_varbound_source_start_row =
           static_cast<int>(root_lp.A.rows());
@@ -6078,8 +6128,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	              ++highs_vlb_kept;
 	          }
 	        }
-        if (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr ||
-            std::getenv("MIPSOLVERS_HIGHS_PRESOLVE_STATS") != nullptr) {
+        if (opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr ||
+            bc_env_options().value("MIPSOLVERS_HIGHS_PRESOLVE_STATS") != nullptr) {
           fmt::print(stderr,
                      "[B&C-HIGHS-VB-MAP] mode={} side_match={} "
                      "first_class={} hs_cols={} native_cols={} hs_vub={} hs_vlb={} "
@@ -6109,8 +6159,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                      highs_presolve_side_state.vlb_attempts,
                      highs_presolve_side_state.vlb_replaced);
         }
-      } else if (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr ||
-                 std::getenv("MIPSOLVERS_HIGHS_PRESOLVE_STATS") != nullptr) {
+      } else if (opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr ||
+                 bc_env_options().value("MIPSOLVERS_HIGHS_PRESOLVE_STATS") != nullptr) {
 	          fmt::print(stderr,
 	                   "[B&C-HIGHS-VB-MAP] mode=disabled side_match=0 "
 	                   "first_class={} hs_cols={} native_cols={} hs_vub={} hs_vlb={} "
@@ -6251,7 +6301,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                                            constant});
           ++presolve_map_kept;
         }
-        if (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr) {
+        if (opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr) {
           fmt::print(stderr,
                      "[B&C-PRESOLVE-VB-MAP] seen={} kept={} elim_col={} "
                      "elim_trigger={} bad_col={} bad_trigger={} nonbin={} "
@@ -6300,8 +6350,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                       implication_graph);
         variable_bound_source_stats.presolve_exported_implications += exported;
         variable_bound_source_stats.exported_implications += exported;
-        if (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr ||
-            std::getenv("MIPSOLVERS_HIGHS_PRESOLVE_STATS") != nullptr) {
+        if (opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr ||
+            bc_env_options().value("MIPSOLVERS_HIGHS_PRESOLVE_STATS") != nullptr) {
           fmt::print(stderr,
                      "[B&C-VB-REPLAY] tag={} sources={} vub={} vlb={} "
                      "accepted={} table={} exported={} graph={}\n",
@@ -6373,8 +6423,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	        variable_bound_source_stats.cut_vub_candidates;
 	    out.bc_stats.variable_bound_cut_vlb_candidates =
 	        variable_bound_source_stats.cut_vlb_candidates;
-	    out.bc_stats.variable_bound_cut_domain_tightenings =
-	        variable_bound_source_stats.cut_domain_tightenings;
 	    out.bc_stats.variable_bound_cut_exported_implications =
 	        variable_bound_source_stats.cut_exported_implications;
 	  };
@@ -6412,11 +6460,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         replay_root_presolve_varbound_sources();
         replay_root_probe_varbound_sources();
 		    sync_variable_bound_stats();
-		    if (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr) {
+		    if (opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr) {
 		      fmt::print(stderr,
 	                 "[B&C-VB-SRC] phase={} old={} new={} rows={} single={} "
-		                 "cand={} cutRows={} cutMixed={} cutVUB={} cutVLB={} "
-		                 "cutTight={} preVUB={} preVLB={} preReplay={} "
+	                 "cand={} cutRows={} cutMixed={} cutVUB={} cutVLB={} "
+	                 "preVUB={} preVLB={} preReplay={} "
                          "implBnd={}p/{}/{} "
                          "probeVUB={} probeVLB={} probeReplay={} "
                          "probeTight={} vub={}/{} vlb={}/{} exp={} cutExp={} "
@@ -6429,8 +6477,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	                 variable_bound_source_stats.cut_rows_scanned,
 	                 variable_bound_source_stats.cut_mixed_rows,
 		                 variable_bound_source_stats.cut_vub_candidates,
-		                 variable_bound_source_stats.cut_vlb_candidates,
-		                 variable_bound_source_stats.cut_domain_tightenings,
+	                 variable_bound_source_stats.cut_vlb_candidates,
                          variable_bound_source_stats.presolve_vub_candidates,
                          variable_bound_source_stats.presolve_vlb_candidates,
                          variable_bound_source_stats.presolve_varbounds_replayed,
@@ -6771,7 +6818,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 		  auto audit_variable_bound_cutpool_row_range =
 		      [&](const LPModel& with_rows, int first_row, int last_row,
 		          const char* phase) {
-	    if (std::getenv("MIPSOLVERS_BC_CONF") == nullptr) return;
+	    if (bc_env_options().value("MIPSOLVERS_BC_CONF") == nullptr) return;
 	    VariableBoundTable scratch_table = variable_bound_table;
 	    BinaryImplicationGraph scratch_graph = implication_graph;
 	    NativeVariableBoundSourceStats audit_stats =
@@ -6780,13 +6827,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	            scratch_table, &scratch_graph, 100, std::max(1e-9, opt.lp_tol));
 	    fmt::print(stderr,
 	               "[B&C-VB-SRC-AUDIT] phase={} rows={} mixed={} cutVUB={} "
-	               "cutVLB={} cutTight={} liveVarbounds={} auditVarbounds={} "
+	               "cutVLB={} liveVarbounds={} auditVarbounds={} "
 	               "auditImplArcs={}\n",
 	               phase != nullptr ? phase : "cutpool_audit",
 	               audit_stats.cut_rows_scanned, audit_stats.cut_mixed_rows,
 	               audit_stats.cut_vub_candidates,
 	               audit_stats.cut_vlb_candidates,
-	               audit_stats.cut_domain_tightenings,
 	               variable_bound_table.size(), scratch_table.size(),
 	               scratch_graph.size());
 	  };
@@ -6827,7 +6873,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                                     objective_propagation_build_policy());
       }
     }
-    if (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr) {
+    if (opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr) {
       auto t_cq1 = std::chrono::steady_clock::now();
       fmt::print(stderr,
                  "[B&C CLIQUE] n_cols={} n_edges={} lit_edges={} base_edges={} "
@@ -6989,7 +7035,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	                                    objective_propagation_build_policy());
 	      }
 	    }
-	    if (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr ||
+	    if (opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr ||
 	        extracted > 0) {
 	      fmt::print(stderr,
 	                 "[B&C ROOT-CUTOFF-SOURCE] source={} cap={:.6g} "
@@ -7063,8 +7109,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	      variable_bound_source_stats.cut_vub_candidates;
 	  out.bc_stats.variable_bound_cut_vlb_candidates =
 	      variable_bound_source_stats.cut_vlb_candidates;
-	  out.bc_stats.variable_bound_cut_domain_tightenings =
-	      variable_bound_source_stats.cut_domain_tightenings;
 	  out.bc_stats.variable_bound_cut_exported_implications =
 	      variable_bound_source_stats.cut_exported_implications;
 
@@ -7204,7 +7248,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   };
 
   auto bc_conf_diag_enabled = [&]() -> bool {
-    return opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr;
+    return opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr;
   };
 
   auto record_conformance_source = [&](const char* phase) -> std::uint64_t {
@@ -7332,8 +7376,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   };
 
   const bool conformance_diag_enabled =
-      opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr ||
-      std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr;
+      opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr ||
+      bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr;
 
   auto record_objective_capacity_conformance =
       [&](const char* phase,
@@ -7777,7 +7821,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
               std::chrono::duration<double>(t1 - t0).count();
 
           out.x = std::move(x_out);
-          out.stats.objective = obj_out;
+          out.stats.objective = prob.linear_part.c.dot(out.x);
           out.stats.primal_feas = 0.0;
           out.stats.residual_inf = 0.0;
           out.stats.mip_gap = gap_out;
@@ -8340,7 +8384,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           variable_bound_source_stats.probe_exported_implications += exported;
           variable_bound_source_stats.exported_implications += exported;
           sync_variable_bound_stats();
-          if (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr) {
+          if (opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr) {
             fmt::print(stderr,
                        "[B&C-VB-SRC] phase=after_root_probe_sources "
                        "varbounds={} probeVUB={} probeVLB={} accepted={} "
@@ -8389,11 +8433,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       unique_rows.reserve(rows.size());
       unique_rhs.reserve(rhs.size());
       for (std::size_t i = 0; i < rows.size(); ++i) {
-        const std::size_t h = sparse_cut_hash(rows[i]) ^
-                              (std::hash<long long>{}(static_cast<long long>(
-                                   std::llround(rhs[i] * 1e9))) +
-                               0x9e3779b97f4a7c15ULL);
-        if (!root_implied_bound_cut_hashes.insert(h).second) {
+        if (!root_implied_bound_cuts.insert(rows[i], rhs[i])) {
           continue;
         }
         unique_rows.push_back(std::move(rows[i]));
@@ -8432,7 +8472,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
             PoolCut{std::move(rows[i]), rhs[i], 0, 0.0, norm, hash});
         ++deferred_rows;
       }
-      if (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr) {
+      if (opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr) {
         fmt::print(stderr,
                    "[B&C ROOT-IB-PROP] deferred cutpool rows={} probes={} "
                    "infeas={} impl={} obj_rows={} clique_rows={} "
@@ -9764,7 +9804,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           const int new_cut_index =
               static_cast<int>(root_transformed_cutpool.size()) - 1;
         if (const char* add_trace_env =
-                std::getenv("MIPSOLVERS_XPOOL_ADD_TRACE")) {
+                bc_env_options().value("MIPSOLVERS_XPOOL_ADD_TRACE")) {
           const std::string add_trace_value(add_trace_env);
           if (add_trace_value == "all" || add_trace_value == "rows") {
             auto trace_mix = [](std::uint64_t h,
@@ -9787,7 +9827,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
             row_sig = trace_mix(row_sig, static_cast<std::uint64_t>(len));
             int trace_terms = 0;
             if (const char* terms_env =
-                    std::getenv("MIPSOLVERS_XPOOL_ADD_TRACE_TERMS")) {
+                    bc_env_options().value("MIPSOLVERS_XPOOL_ADD_TRACE_TERMS")) {
               char* end = nullptr;
               const long parsed = std::strtol(terms_env, &end, 10);
               if (end != terms_env && parsed > 0) {
@@ -9859,7 +9899,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	      if (appended_cutpool_prop_row) ++live_prop_rows;
 	      ++added;
 	    }
-	    if (std::getenv("MIPSOLVERS_XPOOL_ADD_TRACE") != nullptr) {
+	    if (bc_env_options().value("MIPSOLVERS_XPOOL_ADD_TRACE") != nullptr) {
 		      fmt::print(stderr,
 		                 "[B&C ROOT-XPOOL-ADD] family={} generated={} added={} "
 		                 "duplicate={} srcRows={} liveProp={} pendingProp={} "
@@ -10273,7 +10313,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	          if (v) ++delete_count;
 	        }
 	        if (delete_count <= 0) {
-	          if (std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr) {
+	          if (bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr) {
 	            fmt::print(stderr,
 	                       "[B&C ROOT-XPOOL-AGING] phase={} epoch={} "
 	                       "basic={} dualReset={} delete=0 rows={}\n",
@@ -10300,7 +10340,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	            !root_relax.simplex->basis.cached_sparse_basis ||
 	            root_relax.simplex->basis.cached_sparse_basis->kind() !=
 	                BasisOpsKind::VendoredHighs) {
-	          if (std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr || opt.verbose) {
+	          if (bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr || opt.verbose) {
 	            fmt::print(stderr,
 	                       "[B&C ROOT-XPOOL-AGING] phase={} delete={} "
 	                       "rejected_no_vendored_live_basis\n",
@@ -10331,7 +10371,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	        if (!build_compacted_scaled_sf_from_root_state(
 	                root_relax.simplex->form, sf_row_map, sf_col_map,
 	                deleted_sf_rows, deleted_sf_cols, compact_sf)) {
-	          if (std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr || opt.verbose) {
+	          if (bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr || opt.verbose) {
 	            fmt::print(stderr,
 	                       "[B&C ROOT-XPOOL-AGING] phase={} delete={} "
 	                       "rejected_compact_scaled_sf\n",
@@ -10387,7 +10427,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	              compact_relax.basis_hint->cached_sparse_basis =
 	                  sf_res->basis.cached_sparse_basis;
 	            }
-	          } else if (std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr ||
+	          } else if (bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr ||
 	                     opt.verbose) {
 	            fmt::print(stderr,
 	                       "[B&C ROOT-XPOOL-AGING] phase={} delete={} "
@@ -10403,7 +10443,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	          // cut rows and then re-optimizes.  A failed native incremental
 	          // delete/warm-start path must therefore fall back to the ordinary
 	          // LP solve, not skip the deletion lifecycle.
-	          if (std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr || opt.verbose) {
+	          if (bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr || opt.verbose) {
 	            fmt::print(stderr,
 	                       "[B&C ROOT-XPOOL-AGING] phase={} delete={} "
 	                       "fallback_full_resolve hint={}\n",
@@ -10423,7 +10463,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	                old_bound -
 	                    std::max(1e-6,
 	                             1e-9 * std::max(1.0, std::abs(old_bound)))) {
-	          if (std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr || opt.verbose) {
+	          if (bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr || opt.verbose) {
 	            fmt::print(stderr,
 	                       "[B&C ROOT-XPOOL-AGING] phase={} delete={} "
 	                       "rejected oldBound={:.12g} newBound={:.12g} status={}\n",
@@ -10469,7 +10509,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	        root_xpool_noop_epoch = 0;
 	        root_xpool_noop_pool_size =
 	            std::numeric_limits<std::size_t>::max();
-	        if (std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr || opt.verbose) {
+	        if (bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr || opt.verbose) {
 	          fmt::print(stderr,
 	                     "[B&C ROOT-XPOOL-AGING] phase={} epoch={} "
 	                     "basic={} dualReset={} deleted={} bound={:.12g}->{:.12g} "
@@ -10488,7 +10528,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         const int pending = root_transformed_cutpool_pending_source_rows;
         if (strict_highs_root_fixed_point) {
           root_transformed_cutpool_pending_source_rows = 0;
-          if (std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr) {
+          if (bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr) {
             fmt::print(stderr,
                        "[B&C ROOT-XPOOL-VB] phase={} mode=sealed_highs "
                        "pendingSrc={} cutpoolRows=0 cutMixed=0 cutVUB=0 "
@@ -10540,7 +10580,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           }
         }
         root_transformed_cutpool_pending_source_rows = 0;
-        if (std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr) {
+        if (bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr) {
           fmt::print(stderr,
                      "[B&C ROOT-XPOOL-VB] phase={} mode={} pendingSrc={} "
                      "cutpoolRows={} cutMixed={} cutVUB={} cutVLB={} "
@@ -10624,8 +10664,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
             }
           }
         }
-        if ((opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr ||
-             std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr) &&
+        if ((opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr ||
+             bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr) &&
             rows_scanned > 0) {
           fmt::print(stderr,
                      "[B&C ROOT-CUTPOOL-SRC] source={} scan={} litRows={} "
@@ -10685,9 +10725,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           const std::size_t reason_hash = conflict_clause_hash(rb.reason);
           const double tol = std::max(1e-9, opt.int_tol);
           for (const auto& existing : root.domain_reason_bounds) {
-            if (branch_literal_stronger_or_equal(existing.bound, rb.bound, tol) &&
-                branch_literal_stronger_or_equal(rb.bound, existing.bound, tol) &&
-                conflict_clause_hash(existing.reason) == reason_hash) {
+            if (conflict_clause_hash(existing.reason) == reason_hash &&
+                domain_reason_bounds_equal(existing, rb, tol)) {
               return true;
             }
           }
@@ -10952,7 +10991,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	        }
 
         if (strict_highs_root_fixed_point &&
-            (std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr || opt.verbose ||
+            (bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr || opt.verbose ||
              strict_model_pending_scans > 0 || strict_cut_pending_rows > 0 ||
              cutpool_tightened > 0 || row_tightened > 0)) {
           fmt::print(stderr,
@@ -10977,7 +11016,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           root.bound = has_root_cutoff_for_propagation
               ? root_cutoff_for_propagation
               : kInf;
-          if (std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr ||
+          if (bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr ||
               opt.verbose) {
             fmt::print(stderr,
                        "[B&C ROOT-DOM-CLOSURE] pruned pass={} obj={} "
@@ -11011,7 +11050,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           if (source_changed) {
             ++root_source_epoch;
           }
-          if (std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr ||
+          if (bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr ||
               opt.verbose || source_changed) {
             fmt::print(stderr,
                        "[B&C ROOT-DOM-CLOSURE] pass={} tight=0 "
@@ -11097,7 +11136,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                         clique_tightened, row_tightened, cutpool_tightened,
                         redcost_tightened, redcost_active, reasons_added,
                         source_learned, objective_pruned, redcost_pruned));
-        if (std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr || opt.verbose) {
+        if (bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr || opt.verbose) {
           fmt::print(stderr,
                      "[B&C ROOT-DOM-CLOSURE] pass={} tight={} obj={} "
                      "conflict={} impl={} clique={} row={} cutpool={} "
@@ -11308,11 +11347,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 		    }
 
             if (const char* score_trace_env =
-                    std::getenv("MIPSOLVERS_XPOOL_SCORE_TRACE")) {
+                    bc_env_options().value("MIPSOLVERS_XPOOL_SCORE_TRACE")) {
               int trace_limit = 32;
               int trace_terms = 0;
               if (const char* terms_env =
-                      std::getenv("MIPSOLVERS_XPOOL_SCORE_TRACE_TERMS")) {
+                      bc_env_options().value("MIPSOLVERS_XPOOL_SCORE_TRACE_TERMS")) {
                 char* end = nullptr;
                 const long parsed = std::strtol(terms_env, &end, 10);
                 if (end != terms_env && parsed > 0) {
@@ -11398,7 +11437,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 		    }
 		    stats.selected = static_cast<int>(selected.size());
         stats.num_lp_cuts += stats.selected;
-        if (const char* trace_env = std::getenv("MIPSOLVERS_XPOOL_SELECT_TRACE")) {
+        if (const char* trace_env = bc_env_options().value("MIPSOLVERS_XPOOL_SELECT_TRACE")) {
           int trace_limit = 16;
           if (std::string(trace_env) == "all") {
             trace_limit = std::numeric_limits<int>::max();
@@ -11510,7 +11549,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         if (root_tableau_generated_signature.same_as(source_sig)) {
           root_source_trace.tableau_ms +=
               root_source_elapsed_ms(t_tableau0);
-	          if (std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr) {
+	          if (bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr) {
 	            fmt::print(stderr,
 	                       "[B&C ROOT-XTAB-SRC] reuse sig={:016x}/{:016x} "
 	                       "frac={} frontier={} srcFrontier={} "
@@ -11590,7 +11629,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         root_tableau_generated_signature = source_sig;
         root_source_trace.tableau_pool_add_ms +=
             root_source_elapsed_ms(t_add0);
-	    if (opt.verbose || std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr) {
+	    if (opt.verbose || bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr) {
 	      fmt::print(stderr,
 	                 "[B&C ROOT-XTAB-SRC] implied_int={} generated={} "
 	                 "pool_added={} pool={} sig={:016x}/{:016x} "
@@ -11625,7 +11664,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	        const RootSourceSignature source_sig = compute_root_source_signature();
         if (root_path_generated_signature.same_as(source_sig)) {
           root_source_trace.path_ms += root_source_elapsed_ms(t_path0);
-	          if (std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr) {
+	          if (bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr) {
 	            fmt::print(stderr,
 	                       "[B&C ROOT-XPATH-SRC] reuse sig={:016x}/{:016x} "
 	                       "frac={} frontier={} srcFrontier={} "
@@ -11688,7 +11727,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                 : add_root_transformed_cutpool_rows(generated_rows, "path");
         root_path_generated_signature = source_sig;
         root_source_trace.path_pool_add_ms += root_source_elapsed_ms(t_add0);
-	    if (opt.verbose || std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr) {
+	    if (opt.verbose || bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr) {
 	      fmt::print(stderr,
 	                 "[B&C ROOT-XPATH-SRC] implied_int={} generated={} "
 	                 "pool_added={} pool={} sig={:016x}/{:016x} "
@@ -11754,7 +11793,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                 ? generated
                 : add_root_transformed_cutpool_rows(generated_rows, "modk");
         root_source_trace.modk_pool_add_ms += root_source_elapsed_ms(t_add0);
-        if (opt.verbose || std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr) {
+        if (opt.verbose || bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr) {
           fmt::print(stderr,
                      "[B&C ROOT-XMODK-SRC] implied_int={} generated={} "
                      "pool_added={} pool={} sig={:016x}/{:016x} "
@@ -11804,9 +11843,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
             root_source_elapsed_ms(t_select0);
 	        root_source_trace.xpool_selected += static_cast<int>(selected.size());
 	        auto xpool_ledger_enabled = []() {
-	          const char* env = std::getenv("MIPSOLVERS_XPOOL_LEDGER");
+	          const char* env = bc_env_options().value("MIPSOLVERS_XPOOL_LEDGER");
 	          if (env != nullptr && env[0] != '\0' && env[0] != '0') return true;
-	          env = std::getenv("MIPSOLVERS_XTAB_DIAG");
+	          env = bc_env_options().value("MIPSOLVERS_XTAB_DIAG");
 	          return env != nullptr && env[0] != '\0' && env[0] != '0';
 	        };
 	        auto xpool_ledger_mix = [](std::uint64_t h,
@@ -11824,11 +11863,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 		              HighsHashHelpers::double_hash_code(value));
 		        };
 		        auto xpool_state_trace_enabled = []() {
-		          const char* env = std::getenv("MIPSOLVERS_XPOOL_STATE_TRACE");
+		          const char* env = bc_env_options().value("MIPSOLVERS_XPOOL_STATE_TRACE");
 		          return env != nullptr && env[0] != '\0' && env[0] != '0';
 		        };
 		        auto xpool_state_trace_terms = []() {
-		          const char* env = std::getenv("MIPSOLVERS_XPOOL_STATE_TRACE_TERMS");
+		          const char* env = bc_env_options().value("MIPSOLVERS_XPOOL_STATE_TRACE_TERMS");
 		          if (env == nullptr || env[0] == '\0') return 24;
 		          char* end = nullptr;
 		          const long parsed = std::strtol(env, &end, 10);
@@ -12180,7 +12219,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 		            }
 		          }
 		        };
-			    if (std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr) {
+			    if (bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr) {
 			      fmt::print(stderr,
 			                 "[B&C ROOT-XPOOL] pool={} avail={} violated={} active={} "
 		                 "efficacious={} selected={} parallel={} agedDeleted={} "
@@ -12322,27 +12361,27 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         if (use_direct_sf_warm) {
           const auto t_sf0 = std::chrono::steady_clock::now();
           static const bool xpool_break_diag =
-              std::getenv("MIPSOLVERS_XPOOL_BREAK") != nullptr;
+              bc_env_options().value("MIPSOLVERS_XPOOL_BREAK") != nullptr;
           static const bool xpool_conformance =
-              std::getenv("MIPSOLVERS_XPOOL_CONFORM") != nullptr;
+              bc_env_options().value("MIPSOLVERS_XPOOL_CONFORM") != nullptr;
           static const bool xpool_incremental_safe =
               xpool_conformance &&
-              std::getenv("MIPSOLVERS_XPOOL_INCREMENTAL_SAFE") != nullptr;
+              bc_env_options().value("MIPSOLVERS_XPOOL_INCREMENTAL_SAFE") != nullptr;
 	          static const bool xpool_incremental_diag =
 	              xpool_conformance &&
-	              (std::getenv("MIPSOLVERS_XPOOL_INCREMENTAL") != nullptr ||
+	              (bc_env_options().value("MIPSOLVERS_XPOOL_INCREMENTAL") != nullptr ||
 	               xpool_incremental_safe);
           static const bool xpool_append_parent_factor =
-              std::getenv("MIPSOLVERS_XPOOL_APPEND_PARENT_FACTOR") != nullptr;
+              bc_env_options().value("MIPSOLVERS_XPOOL_APPEND_PARENT_FACTOR") != nullptr;
           static const bool xpool_append_parent_factor_consume =
-              std::getenv("MIPSOLVERS_XPOOL_APPEND_PARENT_FACTOR_CONSUME") != nullptr;
+              bc_env_options().value("MIPSOLVERS_XPOOL_APPEND_PARENT_FACTOR_CONSUME") != nullptr;
           static const bool xpool_parent_state_diff =
-              std::getenv("MIPSOLVERS_XPOOL_PARENT_STATE_DIFF") != nullptr;
+              bc_env_options().value("MIPSOLVERS_XPOOL_PARENT_STATE_DIFF") != nullptr;
           static const bool xpool_exact_dse =
-              std::getenv("MIPSOLVERS_XPOOL_EXACT_DSE") != nullptr ||
-              std::getenv("MIPSOLVERS_XPOOL_PARENT_EXACT_DSE") != nullptr;
+              bc_env_options().value("MIPSOLVERS_XPOOL_EXACT_DSE") != nullptr ||
+              bc_env_options().value("MIPSOLVERS_XPOOL_PARENT_EXACT_DSE") != nullptr;
           static const bool xpool_sf_diff_diag =
-              std::getenv("MIPSOLVERS_XPOOL_SF_DIFF") != nullptr;
+              bc_env_options().value("MIPSOLVERS_XPOOL_SF_DIFF") != nullptr;
           SimplexOptions sf_opt;
           sf_opt.max_iter = std::max(root_solve_opt.max_lp_iter * 10, 2000);
           sf_opt.feasibility_tol = std::max(1e-10, root_solve_opt.lp_tol * 0.1);
@@ -13037,7 +13076,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	        if (strict_highs_root_fixed_point &&
 	            std::strcmp(xpool_resolve_path,
 	                        "vendored_highs_live_append") != 0) {
-	          if (opt.verbose || std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr) {
+	          if (opt.verbose || bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr) {
 	            fmt::print(stderr,
 	                       "[B&C ROOT-XPOOL] rejected selected={} rows={} "
 	                       "reason=strict_non_live_append_resolve path={}\n",
@@ -13057,7 +13096,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	        !std::isfinite(pool_relax.dual_bound) ||
 	        pool_relax.dual_bound < old_bound -
 	            std::max(1e-6, 1e-9 * std::max(1.0, std::abs(old_bound)))) {
-	      if (opt.verbose || std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr) {
+	      if (opt.verbose || bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr) {
 	        fmt::print(stderr,
 	                   "[B&C ROOT-XPOOL] rejected selected={} rows={} "
 	                   "old_bound={:.2f} status={}\n",
@@ -13086,7 +13125,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           out.bc_stats.root_cut_rows_rejected_nonmoving +=
               static_cast<std::uint64_t>(trial_lp.A.rows() - prev_rows);
           ++out.bc_stats.root_cut_rounds_rejected_nonmoving;
-          if (opt.verbose || std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr) {
+          if (opt.verbose || bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr) {
             fmt::print(stderr,
                        "[B&C ROOT-XPOOL] rejected nonmoving selected={} rows={} "
                        "bound={:.2f}->{:.2f} lift={:.3e} pool={} avail={} "
@@ -13184,8 +13223,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 			  };
 
   const bool trace_root_source_loop =
-      opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr ||
-      std::getenv("MIPSOLVERS_BC_TIMELINE") != nullptr;
+      opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr ||
+      bc_env_options().value("MIPSOLVERS_BC_TIMELINE") != nullptr;
 
 	  bool strict_highs_evaluate_root_imported = false;
 	  const bool strict_highs_evaluate_root_enabled =
@@ -13382,19 +13421,15 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	                 static_cast<int>(root_lp.vars.size()),
 	                 static_cast<int>(root_lp.A.nonZeros()) +
 	                     static_cast<int>(root_lp.Aeq.nonZeros()));
-	      const ScopedEnvVar retain_root_lp_env(
-	          "MIPSOLVERS_RETAIN_ROOT_LP_RELAXATION", "1");
-	      const ScopedEnvVar stop_after_root_env(
-	          "MIPSOLVERS_ROOT_ORACLE_STOP_AFTER_EVALUATE_ROOT", "1");
+	      (void)highs_root_owner->setOptionValue(
+	          "hacdcpf_retain_root_lp_relaxation", true);
+	      (void)highs_root_owner->setOptionValue(
+	          "hacdcpf_root_oracle_stop_after_evaluate_root", true);
 	      const bool stop_after_root_round =
 	          bc_env_options().strict_root_stop_after_round;
-	      std::optional<ScopedEnvVar> stop_after_round_env;
-	      if (stop_after_root_round) {
-	        stop_after_round_env.emplace(
-	            "MIPSOLVERS_ROOT_ORACLE_STOP_AFTER_ROOT_ROUND", "1");
-	      }
-	      const ScopedEnvVar root_ledger_env("MIPSOLVERS_XPOOL_ROOT_LEDGER_ONLY",
-	                                         "1");
+	      (void)highs_root_owner->setOptionValue(
+	          "hacdcpf_root_oracle_stop_after_root_round",
+	          stop_after_root_round);
 	      const HighsStatus run_status = highs_root_owner->run();
 	      root_xpool_authority_lpsolver =
 	          highs_root_owner->hacdcpfRootLpSolver();
@@ -13519,8 +13554,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           opt.cuts != CutType::None && strict_highs_root_fixed_point &&
           root_highs_presolved_side_state_first_class &&
           !strict_highs_evaluate_root_imported &&
-          (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr ||
-           std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr)) {
+          (opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr ||
+           bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr)) {
         fmt::print(stderr,
                    "[B&C ROOT-SOURCE-SKIP] "
                    "reason=strict_requires_direct_evaluateRootNode "
@@ -13530,8 +13565,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       if (!run_highs_style_root_source_loop && opt.auto_highs_root_pipeline &&
           opt.cuts != CutType::None && strict_highs_root_fixed_point &&
           !root_highs_presolved_side_state_first_class &&
-          (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr ||
-           std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr)) {
+          (opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr ||
+           bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr)) {
         fmt::print(stderr,
                    "[B&C ROOT-SOURCE-SKIP] reason=highs_space_mismatch "
                    "native_cols={} native_rows={} highs_cols={} highs_rows={} "
@@ -13917,7 +13952,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       static_cast<std::uint64_t>(implication_graph.size());
 
   root.estimate = compute_node_estimate(declared_branchable_indices, root.x_relax, pc,
-                                        opt.int_tol, root.bound);
+                                        opt.int_tol, root.bound,
+                                        opt.node_estimate_aggregation);
 
   const LPModel pre_cut_root_lp = root_lp;
   const auto pre_cut_basis_hint = root.basis_hint;
@@ -13953,7 +13989,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       const double runtime = std::chrono::duration<double>(t1 - t0).count();
 
       out.x = heuristic_x_orig;
-      out.stats.objective = objective_value(prob.linear_part.c, out.x, prob.linear_part.sense);
+      // root.bound and heuristic_obj use the internal minimization convention;
+      // the public result must retain the caller's objective direction.
+      out.stats.objective = prob.linear_part.c.dot(out.x);
       out.stats.primal_feas = 0.0;
       out.stats.residual_inf = 0.0;
       out.stats.mip_gap = heuristic_gap;
@@ -14297,9 +14335,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         cut_simplex = implied_integer_simplex.get();
       }
       const int added = add_cuts(root_lp, root.x_relax, cut_simplex, opt, effective_cuts_per_round, cut_sbasis, &cut_family_tracker, &clique_table);
-      // Phase 1 CGLP: gated, stub only — never adds rows yet.
-      // See include/mipsolvers/engine/detail/bc_cglp.hpp for the roadmap and
-      // BCOptions::enable_cglp_cuts for the feature flag.
+      // Experimental root CGLP pass. It may add audited rows when explicitly
+      // enabled; the production default stays off pending cohort evidence.
       detail::CGLPPassStats cglp_pass;
       const int cglp_added = detail::add_cglp_cuts_root(root_lp, root.x_relax, opt, &cglp_pass);
       out.bc_stats.cglp_candidates   += cglp_pass.n_candidates;
@@ -14490,7 +14527,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         root.x_relax = clamp_to_bounds(ipm_res.x, root.lb, root.ub);
         root.bound = ipm_res.stats.objective;
         // No simplex basis from IPM → Gomory won't fire in subsequent rounds.
-        // Basis-free cuts (MIR, cover, clique, flow cover, implied bound) still work.
+        // Basis-free cuts (MIR, cover, clique) still work.
         root_relax.simplex.reset();
         root_relax.primal = ipm_res;
         root_relax.dual_bound = ipm_res.stats.objective;
@@ -14792,7 +14829,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 
   // Per-family cut diagnostic.
   if (opt.verbose) {
-    const char* family_names[] = {"Gomory", "MIR", "Cover", "Clique", "ZeroHalf", "FlowCover", "ImpliedBound"};
+    const char* family_names[] = {"Gomory", "MIR", "Cover", "Clique", "ZeroHalf"};
     bool any = false;
     for (int f = 0; f < static_cast<int>(CutFamily::Count); ++f) {
       if (cut_family_tracker.families[f].cuts_total > 0) { any = true; break; }
@@ -15024,7 +15061,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	    last_objective_source_refresh_ineq_rows = base_lp.A.rows();
 	    last_objective_source_refresh_eq_rows = base_lp.Aeq.rows();
 
-	    if (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr) {
+	    if (opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr) {
 	      fmt::print(stderr,
 	                 "[B&C-OBJ-SRC-REFRESH] source={} setup={} pub={}/{} "
 	                 "domainEpoch={} objectiveEpoch={} objParts={} objEvents={} "
@@ -15417,7 +15454,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     }
     last_cutpool_clique_scan_size = cuts.size();
     if (edges_added_total == 0) {
-      if ((opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr) &&
+      if ((opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr) &&
           rows_scanned > 0) {
         fmt::print(stderr,
                    "[B&C-CUTPOOL-CLIQUE] source={} scan={} litRows={} "
@@ -15437,8 +15474,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	        refresh_objective_domain_sources(source, /*force=*/true);
 	    const std::uint64_t published_total =
 	        refresh_stats.total_published();
-	    if (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr ||
-	        edges_added_total > 0) {
+	    if (opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr) {
 	      fmt::print(stderr,
 	                 "[B&C-CUTPOOL-CLIQUE] source={} scan={} litRows={} "
 	                 "pairRows={} genEdges={} added={} pub={}/{} "
@@ -15542,8 +15578,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	      (void)refresh_objective_domain_sources(
 	          "root_transformed_cutpool_seed", /*force=*/true);
 	    }
-	    if (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr ||
-	        std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr) {
+	    if (opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr ||
+	        bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr) {
 	      fmt::print(stderr,
 	                 "[B&C-CUTPOOL-DOMAIN] source=root_transformed_cutpool_seed "
 	                 "poolRows={} added={} dup={} domain_only={} lp_visible={} "
@@ -15870,7 +15906,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	    root_gap_certificate_ready = true;
 	    root_gap_certificate_pending_source.clear();
 	    if (log_transition &&
-	        (trace_bc_timeline || std::getenv("MIPSOLVERS_BC_CONF") != nullptr ||
+	        (trace_bc_timeline || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr ||
 	         opt.verbose)) {
 	      fmt::print(stderr,
 	                 "[B&C ROOT-CERT] certified source=root_lp_bound "
@@ -15887,7 +15923,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	    }
 	    root_gap_certificate_ready = false;
 	    root_gap_certificate_pending_source = source != nullptr ? source : "root_local_frontier";
-    if (trace_bc_timeline || std::getenv("MIPSOLVERS_BC_CONF") != nullptr ||
+    if (trace_bc_timeline || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr ||
         opt.verbose) {
       fmt::print(stderr,
                  "[B&C ROOT-CERT] pending source={} incumbent={:.10g} "
@@ -15908,7 +15944,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	    }
     if (certified_obj <= incumbent_obj + root_incumbent_match_tol()) {
       root_gap_certificate_ready = true;
-      if (trace_bc_timeline || std::getenv("MIPSOLVERS_BC_CONF") != nullptr ||
+      if (trace_bc_timeline || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr ||
           opt.verbose) {
         fmt::print(stderr,
                    "[B&C ROOT-CERT] certified source={} pending={} "
@@ -15995,7 +16031,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 
   auto trace_root_primal_gate =
       [&](const char* phase, const char* decision, const char* detail = "") {
-    if (!trace_bc_timeline && std::getenv("MIPSOLVERS_BC_CONF") == nullptr &&
+    if (!trace_bc_timeline && bc_env_options().value("MIPSOLVERS_BC_CONF") == nullptr &&
         !opt.verbose) {
       return;
     }
@@ -16074,7 +16110,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 		    consume_objective_cutoff_artifacts(reason);
     if (!root_cutoff_domain_commit_allowed) {
       if (opt.verbose || trace_bc_timeline ||
-          std::getenv("MIPSOLVERS_BC_CONF") != nullptr) {
+          bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr) {
         fmt::print(stderr,
                    "[B&C ROOT-INC-PROP] {} scoped-only cutoff closure; "
                    "root LP domain unchanged inc={:.10g} bound={:.10g}\n",
@@ -16117,9 +16153,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       const std::size_t reason_hash = conflict_clause_hash(rb.reason);
       const double tol = std::max(1e-9, opt.int_tol);
       for (const auto& existing : root.domain_reason_bounds) {
-        if (branch_literal_stronger_or_equal(existing.bound, rb.bound, tol) &&
-            branch_literal_stronger_or_equal(rb.bound, existing.bound, tol) &&
-            conflict_clause_hash(existing.reason) == reason_hash) {
+        if (conflict_clause_hash(existing.reason) == reason_hash &&
+            domain_reason_bounds_equal(existing, rb, tol)) {
           return true;
         }
       }
@@ -17472,7 +17507,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           hint_cols == pump_sf_cols) {
         pump_basis = std::make_shared<SimplexBasis>(*base_hint_for_pump);
       }
-      if (opt.verbose || std::getenv("MIPSOLVERS_PUMP_DIAG")) {
+      if (opt.verbose || bc_env_options().value("MIPSOLVERS_PUMP_DIAG")) {
         fmt::print(stderr,
                    "[OBJ-PUMP-DIAG] pump_sf={}x{} base_hint={}x{} (cut={}x{}) "
                    "warm={}\n",
@@ -17951,7 +17986,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
             std::chrono::duration<double, std::milli>(t_pump_done - t_cuts_done).count(),
             has_incumbent ? 1 : 0);
   }
-  if (std::getenv("MIPSOLVERS_PUMP_DIAG") != nullptr) {
+  if (bc_env_options().value("MIPSOLVERS_PUMP_DIAG") != nullptr) {
     auto ms = [](auto a, auto b) {
       return std::chrono::duration<double, std::milli>(b - a).count();
     };
@@ -18106,7 +18141,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         role = WorkerRole::Diver;
       }
       cts->explorers.emplace_back(explorer_thread,
-          tid, role,
+          solve_environment, tid, role,
           std::ref(cts->shared_queue),
           std::ref(cts->cut_req_queue),
           std::ref(cts->shared_cp),
@@ -18117,6 +18152,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	          std::cref(pre_cut_root_lp),
 	          std::cref(ensure_base_sf()),
 	          std::cref(declared_branchable_cols),
+	          std::cref(parallel_branch_priority),
+	          std::cref(branch_original_cols), orig_n,
+	          callbacks && callbacks->branching_prior
+	              ? &callbacks->branching_prior
+	              : nullptr,
 	          std::cref(clique_table),
 	          std::cref(implication_graph),
           std::cref(cts->par_simplex_opt),
@@ -18125,6 +18165,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           std::ref(cts->pc_mtx),
           std::ref(cts->atomic_stats),
           std::ref(cts->should_stop),
+          std::ref(cts->progress_event),
           std::ref(cts->active_explorers),
           std::ref(cts->active_bounds),
           std::ref(cts->fallback_logger),
@@ -18138,7 +18179,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     // Launch cut worker.
     if (cts->use_cut_worker) {
       cts->cut_worker = std::thread(cut_worker_thread,
-          std::ref(cts->cut_req_queue),
+          solve_environment, std::ref(cts->cut_req_queue),
           std::ref(cts->shared_cp),
           std::ref(cts->shared_sp),
           std::ref(cts->shared_inc),
@@ -21021,7 +21062,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 		          failure_type = fresh_type;
 		          sub_out.last_lp_status =
 		              fmt::format("fresh_after_cached_{}", cached_status);
-		        } else if (std::getenv("MIPSOLVERS_BC_CONF") != nullptr) {
+		        } else if (bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr) {
 		          sub_out.last_lp_status =
 		              fmt::format("cached_{} fresh_{}",
 		                          cached_status, fresh_res.result.stats.status);
@@ -21248,7 +21289,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       [&](const char* reason, bool center_on_incumbent) -> bool {
     if (requested_vendored_highs_lp && !opt.enable_incumbent_local_branching) {
       if (opt.verbose || trace_bc_timeline ||
-          std::getenv("MIPSOLVERS_BC_CONF") != nullptr) {
+          bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr) {
         fmt::print(stderr,
                    "[B&C-ROOT-LB-POLISH] source={} skipped="
                    "proof_contract_local_branching_not_certificate\n",
@@ -21451,7 +21492,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     note_root_subsolve(reason, lb_ms, valid_candidate, improved,
                        sub_res.bc_stats.lp_solves);
     if (opt.verbose || improved || trace_bc_timeline ||
-        std::getenv("MIPSOLVERS_BC_CONF") != nullptr) {
+        bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr) {
       const double rel_gap = incumbent_root_rel_gap();
       const double gap_limit_incumbent =
           root.bound / std::max(1e-12, 1.0 - std::max(0.0, opt.gap_tol));
@@ -21702,7 +21743,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 			            }
 			          }
 	          if (opt.verbose || improved || trace_bc_timeline ||
-	              std::getenv("MIPSOLVERS_BC_CONF") != nullptr) {
+	              bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr) {
 	            fmt::print(stderr,
 	                       "[B&C RESIDUAL-RENS] phase={} free={} fixed={} obj={:.2f} "
 	                       "improved={} nodes={} lps={} leaves={} exhausted={} "
@@ -21723,7 +21764,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       if (!rr_ok) {
         note_root_subsolve(label, rr_ms, false, false, rr_res.lp_solves);
         if (opt.verbose || trace_bc_timeline ||
-            std::getenv("MIPSOLVERS_BC_CONF") != nullptr) {
+            bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr) {
           fmt::print(stderr,
                      "[B&C RESIDUAL-RENS] phase={} no incumbent free={} fixed={} "
                      "nodes={} lps={} leaves={} boundPrune={} domPrune={} "
@@ -21816,7 +21857,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       double attempt_target_fixing_rate = initial_target_fixing_rate;
       const bool trace_rens =
           opt.verbose || trace_bc_timeline ||
-          std::getenv("MIPSOLVERS_BC_CONF") != nullptr;
+          bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr;
       for (int rens_attempt = 0; rens_attempt < 3; ++rens_attempt) {
       bool rens_attempt_had_candidate = false;
       std::vector<int> eligible_ints;
@@ -22804,7 +22845,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           out.bc_stats.root_cut_rows_rejected_nonmoving +=
               static_cast<std::uint64_t>(std::max(0, ib_added));
           ++out.bc_stats.root_cut_rounds_rejected_nonmoving;
-          if (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr) {
+          if (opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr) {
             fmt::print(stderr,
                        "[B&C IMPLIED-BOUND] graph_arcs={} cuts={} "
                        "deferred={} kept=0 domain_tight=0 "
@@ -22900,7 +22941,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           ++out.bc_stats.root_cut_rounds_rejected_nonmoving;
         }
 
-        if (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr) {
+        if (opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr) {
           fmt::print(stderr,
                      "[B&C IMPLIED-BOUND] graph_arcs={} cuts={} root_lb={:.2f} "
                      "kept={} domain_tight={}\n",
@@ -23334,7 +23375,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           rc_accept = rc_accept_relax.primal.stats.success &&
                       rc_accept_relax.primal.x.size() == n &&
                       std::isfinite(rc_accept_relax.dual_bound);
-          if (opt.verbose || root_fixed > 0) {
+          if (opt.verbose ||
+              bc_env_flag_enabled("MIPSOLVERS_BC_ROOT_RC_TRACE")) {
             fmt::print(stderr,
                        "[B&C ROOT-RC] warm re-solve failed status={}; "
                        "fallback status={} ok={}\n",
@@ -23342,7 +23384,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                        rc_accept_relax.primal.stats.status,
                        rc_accept ? 1 : 0);
           }
-        } else if (opt.verbose || root_fixed > 0) {
+        } else if (opt.verbose ||
+                   bc_env_flag_enabled("MIPSOLVERS_BC_ROOT_RC_TRACE")) {
           fmt::print(stderr,
                      "[B&C ROOT-RC] warm re-solve failed status={}; "
                      "fallback disabled without vendored LP\n",
@@ -23367,7 +23410,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                   std::max(1e-7, opt.root_cut_min_bound_lift)) {
             ++out.bc_stats.rc_fixing_resolve_bound_improvements;
           }
-          if (opt.verbose || root_fixed > 0) {
+          if (opt.verbose ||
+              bc_env_flag_enabled("MIPSOLVERS_BC_ROOT_RC_TRACE")) {
             fmt::print(stderr,
                        "[B&C ROOT-RC] fixed={} bound={:.2f}->{:.2f} "
                        "resolve_status={}\n",
@@ -23392,7 +23436,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                   ? out.bc_stats.root_cut_domain_tightenings -
                         static_cast<std::uint64_t>(root_fixed)
                   : 0;
-          if (opt.verbose || root_fixed > 0) {
+          if (opt.verbose ||
+              bc_env_flag_enabled("MIPSOLVERS_BC_ROOT_RC_TRACE")) {
             fmt::print(stderr,
                        "[B&C ROOT-RC] re-solve failed after fixed={}; "
                        "reverted root reduced-cost fixing\n",
@@ -23608,7 +23653,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     for (const auto& existing : node.local_cuts) {
       const std::size_t eh =
           existing.hash != 0 ? existing.hash : sparse_cut_hash(existing.coeff);
-      if (eh == h) return false;
+      if (eh == h && sparse_cut_identical(existing.coeff, existing.rhs,
+                                          cut.coeff, cut.rhs)) {
+        return false;
+      }
     }
     cut.hash = h;
     node.local_cuts.push_back(std::move(cut));
@@ -23628,6 +23676,24 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     cuts.clear();
     return added;
   };
+
+  auto contains_identical_local_cut =
+      [&](const Node& node, const std::vector<PoolCut>& pending,
+          const Eigen::SparseVector<double>& row, double rhs) {
+        const std::size_t hash = sparse_cut_hash(row);
+        const auto contains = [&](const std::vector<PoolCut>& cuts) {
+          for (const PoolCut& cut : cuts) {
+            const std::size_t cut_hash =
+                cut.hash != 0 ? cut.hash : sparse_cut_hash(cut.coeff);
+            if (cut_hash == hash &&
+                sparse_cut_identical(cut.coeff, cut.rhs, row, rhs)) {
+              return true;
+            }
+          }
+          return false;
+        };
+        return contains(node.local_cuts) || contains(pending);
+      };
 
   auto build_node_lp_with_local_cuts = [&](const Node& node) -> LPModel {
     LPModel node_lp = base_lp;
@@ -23743,6 +23809,21 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   simplex_opt.factor_backend = simplex_factor_backend_from_id(opt.simplex_factor_backend);
   simplex_opt.lp_kernel_backend = opt.lp_kernel_backend;
   apply_bc_first_class_simplex_state(simplex_opt, /*allow_frontier_remap=*/true);
+  bool simplex_node_deadline_hit = false;
+  auto solve_tree_lp = [&](const StandardFormLP& sf,
+                           SimplexOptions solve_opt,
+                           const SimplexBasis* basis_hint) {
+    const double remaining =
+        bc_remaining_sec() - bc_post_root_finalize_reserve_sec;
+    if (remaining <= 0.001) simplex_node_deadline_hit = true;
+    solve_opt.time_limit_sec = std::max(0.001, remaining);
+    solve_opt.time_limit_hit = &simplex_node_deadline_hit;
+    SimplexResult result = solve_lp_from_sf(sf, solve_opt, basis_hint);
+    if (lp_wall_time_limit_reached(result)) {
+      simplex_node_deadline_hit = true;
+    }
+    return result;
+  };
 
   // Pre-compute row-major sparse matrices for bound propagation (avoids
   // O(nnz) format conversion at every node).
@@ -23936,11 +24017,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	    auto append_objective_state_reason = [&](DomainReasonBound rb) {
 	      const std::size_t reason_hash = conflict_clause_hash(rb.reason);
 	      for (const auto& existing : node.domain_reason_bounds) {
-	        if (branch_literal_stronger_or_equal(existing.bound, rb.bound,
-	                                             std::max(1e-9, opt.int_tol)) &&
-	            branch_literal_stronger_or_equal(rb.bound, existing.bound,
-	                                             std::max(1e-9, opt.int_tol)) &&
-	            conflict_clause_hash(existing.reason) == reason_hash) {
+	        if (conflict_clause_hash(existing.reason) == reason_hash &&
+	            domain_reason_bounds_equal(existing, rb,
+	                                       std::max(1e-9, opt.int_tol))) {
 	          return false;
 	        }
 	      }
@@ -24358,7 +24437,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     std::vector<FrontierCandidate> candidates;
     candidates.reserve(static_cast<std::size_t>(
         std::min<int>(reason_bounds.size(), max_frontier_clauses * 4)));
-    std::unordered_set<std::size_t> seen;
+    BranchLiteralListSet seen;
 
     auto literal_pos = [&](const BranchDomainLiteral& lit) -> int {
       int best_pos = -1;
@@ -24395,10 +24474,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         [&](std::vector<BranchDomainLiteral> frontier,
             int target_pos) {
       canonicalize_branch_literals(frontier);
-      std::unordered_set<std::size_t> visited_frontiers;
+      BranchLiteralListSet visited_frontiers;
       for (int iter = 0; iter < 16; ++iter) {
-        const std::size_t fh = conflict_clause_hash(frontier);
-        if (!visited_frontiers.insert(fh).second) break;
+        if (!visited_frontiers.insert(frontier)) break;
 
         int best_idx = -1;
         int best_pos = -1;
@@ -24540,6 +24618,19 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       }
       return h;
     };
+    auto trail_frontiers_equal =
+        [](const std::vector<TrailFrontierEntry>& lhs,
+           const std::vector<TrailFrontierEntry>& rhs) {
+          if (lhs.size() != rhs.size()) return false;
+          for (std::size_t i = 0; i < lhs.size(); ++i) {
+            if (lhs[i].trail_pos != rhs[i].trail_pos ||
+                lhs[i].is_branch != rhs[i].is_branch ||
+                !branch_literals_equal(lhs[i].lit, rhs[i].lit, 0.0)) {
+              return false;
+            }
+          }
+          return true;
+        };
 
     auto trail_frontier_literals =
         [&](const std::vector<TrailFrontierEntry>& frontier) {
@@ -24607,10 +24698,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       const int max_resolves = std::min<int>(
           4096, static_cast<int>(scoped_trail->size()) +
                     4 * std::max(1, max_literals));
-      std::unordered_set<std::size_t> seen_states;
+      HashBucketExactSet<std::vector<TrailFrontierEntry>,
+                         decltype(trail_frontier_hash),
+                         decltype(trail_frontiers_equal)>
+          seen_states(trail_frontier_hash, trail_frontiers_equal);
       for (int iter = 0; iter < max_resolves; ++iter) {
-        const std::size_t state_hash = trail_frontier_hash(frontier);
-        if (!seen_states.insert(state_hash).second) break;
+        if (!seen_states.insert(frontier)) break;
         int latest_idx = -1;
         int latest_pos = -1;
         for (int i = 0; i < static_cast<int>(frontier.size()); ++i) {
@@ -24768,8 +24861,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	      if (clause.empty() || static_cast<int>(clause.size()) > max_literals) {
 	        continue;
 	      }
-      const std::size_t h = conflict_clause_hash(clause);
-      if (!seen.insert(h).second) continue;
+      if (!seen.insert(clause)) continue;
       const double cut_viol = local_binary_cut_violation(clause);
       const int short_limit = std::min(8, max_literals);
 	      const int queue_hits =
@@ -25240,7 +25332,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	        std::min<int>(targets.size(), std::max(4, 3 * max_to_learn));
     int learned = 0;
     int local_rows_added = 0;
-	    std::unordered_set<std::size_t> seen;
+	    BranchLiteralListSet seen;
 	    for (int t = 0; t < max_attempts && learned < max_to_learn; ++t) {
 	      if (bc_time_limit_expired()) break;
 		      const DomainReasonBound& rb = *targets[static_cast<std::size_t>(t)].rb;
@@ -25414,8 +25506,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	      if (clause.empty() || static_cast<int>(clause.size()) > max_pool_literals) {
 	        continue;
 	      }
-	      const std::size_t h = conflict_clause_hash(clause);
-	      if (!seen.insert(h).second) continue;
+	      if (!seen.insert(clause)) continue;
 		      bool target_binary_impl_added = false;
       if (explanation.valid && !explanation.cutoff_conflict &&
           explanation.resolved_frontier.size() == 1 && clause.size() == 2) {
@@ -25629,7 +25720,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	  };
 
 	  std::vector<BoundLiftingCertificate> global_bound_lifting_certificates;
-	  std::unordered_set<std::size_t> global_bound_lifting_certificate_hashes;
 	  publish_bound_lifting_certificate =
 	      [&](const DomainReasonBound& rb,
 	          const std::vector<BranchDomainLiteral>* extra_scope,
@@ -25713,8 +25803,24 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	    }
 	    canonicalize_branch_literals(sig);
 	    const std::size_t cert_hash = conflict_clause_hash(sig);
+		    bool duplicate_certificate = false;
+		    for (const auto& existing : global_bound_lifting_certificates) {
+		      if (existing.hash != cert_hash ||
+		          !branch_literal_lists_equal(existing.frontier_literals,
+		                                      frontier) ||
+		          !branch_literals_equal(existing.target_bound, rb.bound) ||
+		          existing.has_source_conflict_literal !=
+		              rb.has_source_conflict_literal ||
+		          (rb.has_source_conflict_literal &&
+		           !branch_literals_equal(existing.source_conflict_literal,
+		                                  rb.source_conflict_literal))) {
+		        continue;
+		      }
+		      duplicate_certificate = true;
+		      break;
+		    }
 		    int published = 0;
-		    if (global_bound_lifting_certificate_hashes.insert(cert_hash).second) {
+		    if (!duplicate_certificate) {
 		      BoundLiftingCertificate cert;
 		      cert.frontier_literals = frontier;
 		      cert.target_bound = rb.bound;
@@ -25792,7 +25898,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	            ? &priority_proof->coeff
 	            : nullptr;
 	    int published = 0;
-	    std::unordered_set<std::size_t> seen_targets;
+	    BranchLiteralListSet seen_targets;
 	    for (const auto& rb : node.domain_reason_bounds) {
 	      if (rb.bound.var_idx < 0 || rb.bound.var_idx >= n ||
 	          !std::isfinite(rb.bound.value)) {
@@ -25825,7 +25931,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	        sig.push_back(rb.source_conflict_literal);
 	      }
 	      canonicalize_branch_literals(sig);
-	      if (!seen_targets.insert(conflict_clause_hash(sig)).second) {
+	      if (!seen_targets.insert(sig)) {
 	        continue;
 	      }
     	      DualProofTrailResolution resolution;
@@ -26035,12 +26141,14 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     const std::size_t h =
         local_implication_hash(trigger, trigger_one, implied, implied_is_lb,
                                implied_value);
+    const LocalBinaryImplication candidate{
+        trigger, trigger_one, implied, implied_is_lb, implied_value, h};
     for (const auto& arc : node.local_binary_implications) {
-      if (arc.hash == h) return false;
+      if (arc.hash == h && local_binary_implications_equal(arc, candidate)) {
+        return false;
+      }
     }
-    node.local_binary_implications.push_back(
-        LocalBinaryImplication{trigger, trigger_one, implied, implied_is_lb,
-                               implied_value, h});
+    node.local_binary_implications.push_back(candidate);
     ++out.bc_stats.local_implications_learned;
     return true;
   };
@@ -26185,14 +26293,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       }
     }
     canonicalize_branch_literals(sig);
-    const std::size_t h = conflict_clause_hash(sig);
-    for (const auto& obj : node.scoped_conflict_clauses) {
-      if (obj.hash == h) return published_global > 0;
-    }
     ScopedConflictClause obj;
     obj.scope_literals = std::move(scope);
     obj.residual_literals = std::move(residual);
-    obj.hash = h;
     obj.depth = node.depth;
 	    if (target_bound != nullptr &&
 	        target_bound->bound.var_idx >= 0 &&
@@ -26210,6 +26313,13 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	      obj.proof_required_activity =
 	          target_bound->proof_required_activity;
 	    }
+    const std::size_t h = conflict_clause_hash(sig);
+    obj.hash = h;
+    for (const auto& existing : node.scoped_conflict_clauses) {
+      if (existing.hash == h && scoped_conflict_clauses_equal(existing, obj)) {
+        return published_global > 0;
+      }
+    }
     node.scoped_conflict_clauses.push_back(
         std::move(obj));
     ++out.bc_stats.scoped_conflict_objects_learned;
@@ -26245,14 +26355,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       sig.push_back(target_bound.source_conflict_literal);
     }
     canonicalize_branch_literals(sig);
-    const std::size_t h = conflict_clause_hash(sig);
-	    for (const auto& obj : node.scoped_conflict_clauses) {
-	      if (obj.hash == h) return false;
-	    }
     ScopedConflictClause obj;
     obj.scope_literals = std::move(scope);
     obj.residual_literals = std::move(residual);
-    obj.hash = h;
     obj.depth = node.depth;
 	    obj.has_target_bound = true;
 	    obj.target_bound = target_bound.bound;
@@ -26265,6 +26370,13 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	    obj.proof_activity = target_bound.proof_activity;
 	    obj.proof_required_activity =
 	        target_bound.proof_required_activity;
+    const std::size_t h = conflict_clause_hash(sig);
+    obj.hash = h;
+	    for (const auto& existing : node.scoped_conflict_clauses) {
+	      if (existing.hash == h && scoped_conflict_clauses_equal(existing, obj)) {
+	        return false;
+	      }
+	    }
 	    node.scoped_conflict_clauses.push_back(std::move(obj));
 	    ++out.bc_stats.scoped_conflict_objects_learned;
 			    return true;
@@ -26312,7 +26424,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 			      root.objective_artifact_epoch = current_objective_artifact_epoch();
 			      root.domain_closure_epoch = current_domain_closure_epoch();
 			    }
-			    if (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr) {
+			    if (opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr) {
 			      fmt::print(stderr,
 			                 "[B&C ROOT-CERT-PUBLISH] source={} range={}:{} "
 			                 "candidates={} rejected={} published={} totalCert={}\n",
@@ -26368,9 +26480,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	    auto duplicate_reason = [&](const DomainReasonBound& rb) -> bool {
 	      const std::size_t reason_hash = conflict_clause_hash(rb.reason);
 	      for (const auto& existing : node.domain_reason_bounds) {
-	        if (branch_literal_stronger_or_equal(existing.bound, rb.bound, tol) &&
-	            branch_literal_stronger_or_equal(rb.bound, existing.bound, tol) &&
-	            conflict_clause_hash(existing.reason) == reason_hash) {
+	        if (conflict_clause_hash(existing.reason) == reason_hash &&
+	            domain_reason_bounds_equal(existing, rb, tol)) {
 	          return true;
 	        }
 	      }
@@ -26464,7 +26575,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 		          if (implied.value > node.lb[j] + tol) {
 		            const double old = node.lb[j];
 		            node.lb[j] = implied.value;
-		            changes_out.push_back({j, implied.value - old, true});
+		            changes_out.push_back(
+		                {j, implied.value - old, true, old, implied.value});
 		            ++out.bc_stats.scoped_conflict_tightenings;
 		            ++out.bc_stats.certificate_domain_fixings;
 		            bound_changed = true;
@@ -26478,7 +26590,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 		          if (implied.value < node.ub[j] - tol) {
 		            const double old = node.ub[j];
 		            node.ub[j] = implied.value;
-		            changes_out.push_back({j, implied.value - old, false});
+		            changes_out.push_back(
+		                {j, implied.value - old, false, old, implied.value});
 		            ++out.bc_stats.scoped_conflict_tightenings;
 		            ++out.bc_stats.certificate_domain_fixings;
 		            bound_changed = true;
@@ -26571,9 +26684,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 		      rb.proof_required_activity = proof_required_activity;
 			      const std::size_t reason_hash = conflict_clause_hash(rb.reason);
 	      for (const auto& existing : node.domain_reason_bounds) {
-	        if (branch_literal_stronger_or_equal(existing.bound, rb.bound, tol) &&
-	            branch_literal_stronger_or_equal(rb.bound, existing.bound, tol) &&
-	            conflict_clause_hash(existing.reason) == reason_hash) {
+	        if (conflict_clause_hash(existing.reason) == reason_hash &&
+	            domain_reason_bounds_equal(existing, rb, tol)) {
           return;
         }
 	      }
@@ -26739,7 +26851,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	              if (implied.value > node.lb[j] + tol) {
 	                const double old = node.lb[j];
 	                node.lb[j] = implied.value;
-	                changes_out.push_back({j, implied.value - old, true});
+	                changes_out.push_back(
+	                    {j, implied.value - old, true, old, implied.value});
 	                ++out.bc_stats.scoped_conflict_tightenings;
 	                target_changed = true;
 	                changed = true;
@@ -26758,7 +26871,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	              if (implied.value < node.ub[j] - tol) {
 	                const double old = node.ub[j];
 	                node.ub[j] = implied.value;
-	                changes_out.push_back({j, implied.value - old, false});
+	                changes_out.push_back(
+	                    {j, implied.value - old, false, old, implied.value});
 	                ++out.bc_stats.scoped_conflict_tightenings;
 	                target_changed = true;
 	                changed = true;
@@ -26799,7 +26913,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
             if (obj.target_bound.value > node.lb[j] + tol) {
               const double old = node.lb[j];
               node.lb[j] = obj.target_bound.value;
-              changes_out.push_back({j, obj.target_bound.value - old, true});
+              changes_out.push_back(
+                  {j, obj.target_bound.value - old, true, old,
+                   obj.target_bound.value});
 	              ++out.bc_stats.scoped_conflict_tightenings;
 	              target_changed = true;
 	              changed = true;
@@ -26813,7 +26929,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
             if (obj.target_bound.value < node.ub[j] - tol) {
               const double old = node.ub[j];
               node.ub[j] = obj.target_bound.value;
-              changes_out.push_back({j, obj.target_bound.value - old, false});
+              changes_out.push_back(
+                  {j, obj.target_bound.value - old, false, old,
+                   obj.target_bound.value});
 	              ++out.bc_stats.scoped_conflict_tightenings;
 	              target_changed = true;
 	              changed = true;
@@ -26856,7 +26974,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           if (new_ub < node.ub[j] - tol) {
             const double old = node.ub[j];
             node.ub[j] = new_ub;
-            changes_out.push_back({j, new_ub - old, false});
+            changes_out.push_back({j, new_ub - old, false, old, new_ub});
             ++out.bc_stats.scoped_conflict_tightenings;
             changed = true;
           }
@@ -26871,7 +26989,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           if (new_lb > node.lb[j] + tol) {
             const double old = node.lb[j];
             node.lb[j] = new_lb;
-            changes_out.push_back({j, new_lb - old, true});
+            changes_out.push_back({j, new_lb - old, true, old, new_lb});
             ++out.bc_stats.scoped_conflict_tightenings;
             changed = true;
           }
@@ -26914,7 +27032,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	        if (rb.bound.value > node.lb[j] + tol) {
 	          const double old = node.lb[j];
 	          node.lb[j] = rb.bound.value;
-	          changes_out.push_back({j, rb.bound.value - old, true});
+	          changes_out.push_back(
+	              {j, rb.bound.value - old, true, old, rb.bound.value});
 	          ++out.bc_stats.scoped_conflict_tightenings;
 	          if (rb.reason.size() == 1) {
 	            const auto& trig = rb.reason.front();
@@ -26942,7 +27061,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	        if (rb.bound.value < node.ub[j] - tol) {
 	          const double old = node.ub[j];
 	          node.ub[j] = rb.bound.value;
-	          changes_out.push_back({j, rb.bound.value - old, false});
+	          changes_out.push_back(
+	              {j, rb.bound.value - old, false, old, rb.bound.value});
 	          ++out.bc_stats.scoped_conflict_tightenings;
 	          if (rb.reason.size() == 1) {
 	            const auto& trig = rb.reason.front();
@@ -26968,9 +27088,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 		    auto duplicate_reason_bound = [&](const DomainReasonBound& rb) {
 		      const std::size_t reason_hash = conflict_clause_hash(rb.reason);
 		      for (const auto& existing : node.domain_reason_bounds) {
-		        if (branch_literal_stronger_or_equal(existing.bound, rb.bound, tol) &&
-		            branch_literal_stronger_or_equal(rb.bound, existing.bound, tol) &&
-		            conflict_clause_hash(existing.reason) == reason_hash) {
+	        if (conflict_clause_hash(existing.reason) == reason_hash &&
+	            domain_reason_bounds_equal(existing, rb, tol)) {
 		          return true;
 		        }
 		      }
@@ -27110,11 +27229,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	      return lit.is_lb ? (node.lb[lit.var_idx] >= lit.value - tol)
 	                       : (node.ub[lit.var_idx] <= lit.value + tol);
 	    };
-	    std::unordered_set<std::size_t> seen(node.local_proof_row_hashes.begin(),
-	                                         node.local_proof_row_hashes.end());
-	    for (const auto& cut : local_proof_cuts) {
-	      seen.insert(sparse_cut_hash(cut.coeff));
-	    }
 	    int rows = 0;
 	    for (const auto& obj : node.scoped_conflict_clauses) {
 	      bool scope_active = true;
@@ -27138,8 +27252,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	      const double viol = sparse_dot(local_cut.coeff, x_relax) - local_cut.rhs;
 	      if (viol <= 1e-7) continue;
 	      const std::size_t h = sparse_cut_hash(local_cut.coeff);
-	      if (!seen.insert(h).second) continue;
-	      node.local_proof_row_hashes.push_back(h);
+	      if (contains_identical_local_cut(node, local_proof_cuts,
+	                                       local_cut.coeff, local_cut.rhs)) {
+	        continue;
+	      }
+	      local_cut.hash = h;
 	      ++out.bc_stats.local_node_cuts_generated;
 	      local_proof_cuts.push_back(
 	          make_local_node_cut(std::move(local_cut)));
@@ -27192,7 +27309,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           if (new_ub < node.ub[j] - tol) {
             const double old = node.ub[j];
             node.ub[j] = new_ub;
-            changes_out.push_back({j, new_ub - old, false});
+            changes_out.push_back({j, new_ub - old, false, old, new_ub});
             ++out.bc_stats.local_conflict_clause_tightenings;
             changed = true;
           }
@@ -27207,7 +27324,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           if (new_lb > node.lb[j] + tol) {
             const double old = node.lb[j];
             node.lb[j] = new_lb;
-            changes_out.push_back({j, new_lb - old, true});
+            changes_out.push_back({j, new_lb - old, true, old, new_lb});
             ++out.bc_stats.local_conflict_clause_tightenings;
             changed = true;
           }
@@ -27270,7 +27387,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           if (implied_value > node.lb[j] + tol) {
             const double old = node.lb[j];
             node.lb[j] = implied_value;
-            changes_out.push_back({j, implied_value - old, true});
+            changes_out.push_back(
+                {j, implied_value - old, true, old, implied_value});
             ++out.bc_stats.local_implications_applied;
             if (base_lp.vars[static_cast<std::size_t>(j)].type ==
                     VarType::Binary &&
@@ -27286,7 +27404,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           if (implied_value < node.ub[j] - tol) {
             const double old = node.ub[j];
             node.ub[j] = implied_value;
-            changes_out.push_back({j, implied_value - old, false});
+            changes_out.push_back(
+                {j, implied_value - old, false, old, implied_value});
             ++out.bc_stats.local_implications_applied;
             if (base_lp.vars[static_cast<std::size_t>(j)].type ==
                     VarType::Binary &&
@@ -27381,14 +27500,16 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 		            node.lb[col] < root.lb[col] - tol) {
 		          const double old = node.lb[col];
 		          node.lb[col] = root.lb[col];
-		          changes_out.push_back({col, node.lb[col] - old, true});
+		          changes_out.push_back(
+		              {col, node.lb[col] - old, true, old, node.lb[col]});
 		          inherited_root_domain = true;
 		        }
 		        if (std::isfinite(root.ub[col]) &&
 		            node.ub[col] > root.ub[col] + tol) {
 		          const double old = node.ub[col];
 		          node.ub[col] = root.ub[col];
-		          changes_out.push_back({col, node.ub[col] - old, false});
+		          changes_out.push_back(
+		              {col, node.ub[col] - old, false, old, node.ub[col]});
 		          inherited_root_domain = true;
 		        }
 		      }
@@ -27422,9 +27543,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	    auto duplicate_reason_bound = [&](const DomainReasonBound& rb) -> bool {
 	      const std::size_t reason_hash = conflict_clause_hash(rb.reason);
 	      for (const auto& existing : node.domain_reason_bounds) {
-        if (branch_literal_stronger_or_equal(existing.bound, rb.bound, tol) &&
-            branch_literal_stronger_or_equal(rb.bound, existing.bound, tol) &&
-            conflict_clause_hash(existing.reason) == reason_hash) {
+        if (conflict_clause_hash(existing.reason) == reason_hash &&
+            domain_reason_bounds_equal(existing, rb, tol)) {
           return true;
         }
       }
@@ -27445,7 +27565,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           if (rb.bound.value > node.lb[j] + tol) {
             const double old = node.lb[j];
             node.lb[j] = rb.bound.value;
-            changes_out.push_back({j, rb.bound.value - old, true});
+            changes_out.push_back(
+                {j, rb.bound.value - old, true, old, rb.bound.value});
             bound_changed = true;
           }
         } else {
@@ -27453,7 +27574,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           if (rb.bound.value < node.ub[j] - tol) {
             const double old = node.ub[j];
             node.ub[j] = rb.bound.value;
-            changes_out.push_back({j, rb.bound.value - old, false});
+            changes_out.push_back(
+                {j, rb.bound.value - old, false, old, rb.bound.value});
             bound_changed = true;
           }
         }
@@ -27810,10 +27932,14 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
               std::max(0, cutpool_stats.tightened));
           for (int col = 0; col < n; ++col) {
             if (node.lb[col] > old_lb[col] + tol) {
-              changes_out.push_back({col, node.lb[col] - old_lb[col], true});
+              changes_out.push_back(
+                  {col, node.lb[col] - old_lb[col], true, old_lb[col],
+                   node.lb[col]});
             }
             if (node.ub[col] < old_ub[col] - tol) {
-              changes_out.push_back({col, node.ub[col] - old_ub[col], false});
+              changes_out.push_back(
+                  {col, node.ub[col] - old_ub[col], false, old_ub[col],
+                   node.ub[col]});
             }
 	          }
 	          for (auto& rb : cutpool_reason_bounds) {
@@ -28009,7 +28135,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         node.lp_refresh_needed = true;
       }
     }
-	    if ((opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr) &&
+	    if ((opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr) &&
 		        (st.tightened > 0 || st.reasons_added > 0 || st.cutpool_tightened > 0 ||
 		         st.objective_tightened > 0 || st.redcost_tightened > 0 ||
 		         st.conflict_tightened > 0 || st.row_tightened > 0 ||
@@ -28212,7 +28338,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	                                         ? source
 	                                         : "root_domain_inherit",
 	                                     qlb_before, node_queue.lower_bound());
-	      if (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr) {
+	      if (opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr) {
 	        fmt::print(stderr,
 	                   "[B&C-QUEUE-ROOT-DOMAIN] source={} tight={} "
 	                   "refresh={} pruned={} lift_nodes={} "
@@ -28248,7 +28374,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     if (pruned > 0) {
       out.bc_stats.incumbent_queue_prunes +=
           static_cast<std::uint64_t>(pruned);
-      if (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr) {
+      if (opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr) {
         fmt::print(stderr,
                    "[B&C-QUEUE-BOUND] upper_limit={:.10g} incumbent={:.10g} "
                    "pruned={} qsize={}\n",
@@ -28430,7 +28556,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       SimplexOptions refresh_opt = simplex_opt;
       refresh_opt.allow_cold_start = true;
       auto refresh_res =
-          solve_lp_from_sf(node_sf, refresh_opt, qnode.basis_hint.get());
+          solve_tree_lp(node_sf, refresh_opt, qnode.basis_hint.get());
       if (rc_fixing_resolve_lps_left > 0) {
         --rc_fixing_resolve_lps_left;
       }
@@ -28557,7 +28683,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         SimplexOptions rc_refresh_opt = simplex_opt;
         rc_refresh_opt.allow_cold_start = true;
         auto rc_refresh_res =
-            solve_lp_from_sf(node_sf, rc_refresh_opt, qnode.basis_hint.get());
+            solve_tree_lp(node_sf, rc_refresh_opt, qnode.basis_hint.get());
         if (rc_fixing_resolve_lps_left > 0) {
           --rc_fixing_resolve_lps_left;
         }
@@ -28628,7 +28754,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         qnode.lp_refresh_needed = false;
       }
       if (queue_rc_fixed > 0 &&
-          (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr)) {
+          (opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr)) {
         fmt::print(stderr,
                    "[B&C-RC-FIXPOINT] phase=queue_refresh depth={} pass={} "
                    "fix={} bound={:.10g} deferred={}\n",
@@ -29260,7 +29386,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     }
     if (requested_vendored_highs_lp && !opt.enable_incumbent_local_branching) {
       if (opt.verbose || trace_bc_timeline ||
-          std::getenv("MIPSOLVERS_BC_CONF") != nullptr) {
+          bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr) {
         fmt::print(stderr,
                    "[B&C-LB-POLISH] depth={} skipped="
                    "proof_contract_local_branching_not_certificate\n",
@@ -30022,7 +30148,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	    const int rerun_depth = tree_incumbent_domain_closure_depth;
 	    tree_incumbent_domain_closure_pending = false;
 	    tree_incumbent_domain_closure_active = false;
-	    if (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr) {
+	    if (opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr) {
 	      fmt::print(stderr,
 	                 "[B&C-POSTINC-CLOSURE] source={} depth={} root_delta={}/{} "
 	                 "root_bound={:.10g}->{:.10g} pruned={} qsize={} "
@@ -30098,20 +30224,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         std::max(0, opt.dynamic_implied_bound_probing_max_rows);
     int rows_added = 0;
     std::unordered_set<std::string> seen_rows;
-    std::unordered_set<std::size_t> seen_cut_hashes(
-        child.local_proof_row_hashes.begin(),
-        child.local_proof_row_hashes.end());
-    for (const auto& cut : local_proof_cuts) {
-      seen_cut_hashes.insert(sparse_cut_hash(cut.coeff));
-    }
-    std::unordered_set<std::size_t> seen_probe_literals(
-        child.dynamic_probe_literal_hashes.begin(),
-        child.dynamic_probe_literal_hashes.end());
-    auto probe_literal_hash = [](int var, bool value_one) -> std::size_t {
-      std::size_t h = std::hash<int>{}(var);
-      h ^= std::hash<bool>{}(value_one) + 0x9e3779b97f4a7c15ULL +
-           (h << 6) + (h >> 2);
-      return h;
+    std::unordered_set<std::uint64_t> seen_probe_literals(
+        child.dynamic_probe_literal_keys.begin(),
+        child.dynamic_probe_literal_keys.end());
+    auto probe_literal_key = [](int var, bool value_one) -> std::uint64_t {
+      return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(var)) << 1) |
+             static_cast<std::uint64_t>(value_one);
     };
 
     auto add_single_bound_cut = [&](int trigger, bool forbid_one) {
@@ -30137,7 +30255,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           fmt::format("single:{}:{}", trigger, forbid_one ? 1 : 0);
       if (!seen_rows.insert(key).second) return;
       const std::size_t h = sparse_cut_hash(row);
-      if (!seen_cut_hashes.insert(h).second) {
+      if (contains_identical_local_cut(child, local_proof_cuts, row, rhs)) {
         ++out.bc_stats.dynamic_implied_bound_rows_rejected;
         ++out.bc_stats.dynamic_implied_bound_rows_skip_not_active;
         return;
@@ -30147,7 +30265,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       ++out.bc_stats.dynamic_implied_bound_rows_active_implication;
       ++out.bc_stats.dynamic_implied_bound_rows_bound_move;
       ++out.bc_stats.local_node_cuts_generated;
-      child.local_proof_row_hashes.push_back(h);
       PoolCut cut{std::move(row), rhs, 0, viol, 1.0, h};
       local_proof_cuts.push_back(make_local_node_cut(std::move(cut)));
       ++rows_added;
@@ -30158,11 +30275,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       const int trigger = candidates[static_cast<std::size_t>(ci)].var;
       for (bool value_one : {false, true}) {
         if (rows_added >= row_budget) break;
-        const std::size_t probe_hash = probe_literal_hash(trigger, value_one);
-        if (!seen_probe_literals.insert(probe_hash).second) {
+        const std::uint64_t probe_key = probe_literal_key(trigger, value_one);
+        if (!seen_probe_literals.insert(probe_key).second) {
           continue;
         }
-        child.dynamic_probe_literal_hashes.push_back(probe_hash);
+        child.dynamic_probe_literal_keys.push_back(probe_key);
         Eigen::VectorXd probe_lb = child.lb;
         Eigen::VectorXd probe_ub = child.ub;
         if (value_one) {
@@ -30240,7 +30357,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           continue;
         }
         const std::size_t h = sparse_cut_hash(row);
-        if (!seen_cut_hashes.insert(h).second) {
+        if (contains_identical_local_cut(child, local_proof_cuts, row, rhs)) {
           ++out.bc_stats.dynamic_implied_bound_rows_rejected;
           ++out.bc_stats.dynamic_implied_bound_rows_skip_not_active;
           continue;
@@ -30252,7 +30369,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         ++out.bc_stats.dynamic_implied_bound_rows_active_implication;
         ++out.bc_stats.dynamic_implied_bound_rows_bound_move;
         ++out.bc_stats.local_node_cuts_generated;
-        child.local_proof_row_hashes.push_back(h);
         PoolCut cut{std::move(row), rhs, 0,
                     viol / std::max(1.0, norm), norm, h};
         local_proof_cuts.push_back(
@@ -30297,12 +30413,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     if (frontier_cols == 0) return 0;
 
     ++out.bc_stats.transformed_frontier_source_attempts;
-    std::unordered_set<std::size_t> seen_cut_hashes(
-        child.local_proof_row_hashes.begin(),
-        child.local_proof_row_hashes.end());
-    for (const auto& cut : local_proof_cuts) {
-      seen_cut_hashes.insert(sparse_cut_hash(cut.coeff));
-    }
 
     int rows_added = 0;
 
@@ -30354,7 +30464,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         out.bc_stats.transformed_frontier_max_violation =
             std::max(out.bc_stats.transformed_frontier_max_violation, viol);
         const std::size_t h = sparse_cut_hash(row);
-        if (!seen_cut_hashes.insert(h).second) {
+        if (contains_identical_local_cut(child, local_proof_cuts, row, rhs)) {
           ++out.bc_stats.transformed_frontier_rejected_rows;
           continue;
         }
@@ -30371,7 +30481,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           continue;
         }
         ++out.bc_stats.local_node_cuts_generated;
-        child.local_proof_row_hashes.push_back(h);
         local_proof_cuts.push_back(make_local_node_cut(std::move(cut)));
         ++out.bc_stats.transformed_frontier_admitted_rows;
         ++accepted;
@@ -30384,7 +30493,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     apply_node_bounds(trial_lp.vars, child.lb, child.ub);
     int remaining = max_rows - rows_added;
     const int tableau_budget = std::max(0, remaining);
-    if (std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr) {
+    if (bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr) {
 	      fmt::print(stderr,
 	                 "[B&C-XFRONT-SRC] depth={} maxRows={} remaining={} "
 	                 "tableauBudget={} exact={} xSize={} sfOrig={} localCuts={}\n",
@@ -30442,14 +30551,18 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	    bool available{false};
 	    bool consumed{false};
 	    bool from_ipm{false};
-	    int var{-1};
-	    bool is_up{false};
-	    LPFailureType failure_type{LPFailureType::Unknown};
+		    int var{-1};
+		    bool is_up{false};
+		    LPFailureType failure_type{LPFailureType::Unknown};
+		    BranchEvidenceState evidence_state{BranchEvidenceState::UnknownFailure};
+		    double observed_gain{0.0};
 	    SimplexResult simplex;
 	    SolveResult ipm_result;
 	    Eigen::VectorXd lb;
 	    Eigen::VectorXd ub;
-	    std::size_t local_cut_count{0};
+	    std::uint64_t local_row_signature{0};
+	    std::uint64_t model_epoch{0};
+	    std::uint64_t objective_epoch{0};
 		    bool deferred{false};
 		  };
 
@@ -30503,7 +30616,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	                                   double branch_distance,
 	                                   double parent_bound,
 	                                   StandardFormLP& node_sf_ref,
-	                                   const CutPool& cp_ref,
+	                                   CutPool& cp_ref,
 	                                   double inc_obj_snapshot,
 	                                   bool has_inc_snapshot,
 	                                   StrongBranchProbeResult* probe_lp_state = nullptr) -> std::tuple<bool, std::vector<PCUpdate>,
@@ -30591,50 +30704,67 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	                               conflict_tightenings > 0;
 	    auto _t1 = std::chrono::steady_clock::now();
 
-		    const bool probe_lp_matches_child =
+		    const bool probe_matches_direction =
 		        probe_lp_state != nullptr && probe_lp_state->available &&
 		        !probe_lp_state->consumed && probe_lp_state->var == branch_var &&
-		        probe_lp_state->is_up == is_up_branch &&
-		        probe_lp_state->local_cut_count == child.local_cuts.size();
-		    const bool probe_same_domain =
-		        probe_lp_matches_child &&
-		        same_domain_bounds_for_probe(child.lb, child.ub,
-		                                     probe_lp_state->lb,
-		                                     probe_lp_state->ub);
-		    const bool probe_success_matches_domain =
-		        probe_same_domain &&
-		        probe_lp_state->failure_type == LPFailureType::Success &&
-		        (probe_lp_state->from_ipm || !strict_highs_lp_contract ||
-		         probe_lp_state->simplex.exact_optimal);
-		    const bool probe_cutoff_valid_for_domain =
-		        probe_same_domain && !probe_lp_state->from_ipm &&
-		        (probe_lp_state->failure_type == LPFailureType::Infeasible ||
-		         probe_lp_state->failure_type == LPFailureType::ObjectiveCutoff);
+		        probe_lp_state->is_up == is_up_branch;
+		    const bool probe_success =
+		        probe_matches_direction &&
+		        probe_lp_state->failure_type == LPFailureType::Success;
+		    const bool probe_proof_usable =
+		        probe_matches_direction &&
+		        ((probe_lp_state->evidence_state ==
+		              BranchEvidenceState::ExactOptimal &&
+		          !probe_lp_state->from_ipm &&
+		          probe_lp_state->simplex.exact_optimal) ||
+		         (probe_lp_state->evidence_state ==
+		              BranchEvidenceState::ProvenCutoff &&
+		          !probe_lp_state->from_ipm));
+		    const bool probe_warm_state_usable =
+		        probe_success &&
+		        (probe_lp_state->from_ipm
+		             ? probe_lp_state->ipm_result.x.size() == n
+		             : probe_lp_state->simplex.result.x.size() == n);
+		    const auto probe_reuse = classify_branch_probe_reuse(
+		        probe_lp_state != nullptr && probe_lp_state->available,
+		        probe_lp_state != nullptr && probe_lp_state->consumed,
+		        probe_lp_state != nullptr ? probe_lp_state->var : -1,
+		        probe_lp_state != nullptr && probe_lp_state->is_up, branch_var,
+		        is_up_branch,
+		        probe_lp_state != nullptr ? probe_lp_state->lb : Eigen::VectorXd{},
+		        probe_lp_state != nullptr ? probe_lp_state->ub : Eigen::VectorXd{},
+		        child.lb, child.ub,
+		        probe_lp_state != nullptr ? probe_lp_state->local_row_signature : 0,
+		        ordered_local_cut_signature(child.local_cuts),
+		        probe_lp_state != nullptr ? probe_lp_state->model_epoch : 0,
+		        current_domain_closure_epoch(),
+		        probe_lp_state != nullptr ? probe_lp_state->objective_epoch : 0,
+		        current_objective_artifact_epoch(), probe_proof_usable,
+		        probe_warm_state_usable,
+		        std::max(1e-12, 10.0 * std::max(opt.lp_tol, opt.int_tol)));
 		    const bool consume_probe_lp =
-		        probe_success_matches_domain || probe_cutoff_valid_for_domain;
-		    if ((opt.verbose || trace_bc_timeline) && probe_lp_matches_child &&
-		        !consume_probe_lp) {
+		        probe_reuse == BranchProbeReuseKind::Exact;
+		    branch_obs.suppress_gain_update = consume_probe_lp;
+		    if ((opt.verbose || trace_bc_timeline) && probe_matches_direction &&
+		        probe_reuse == BranchProbeReuseKind::None) {
 		      fmt::print(stderr,
 		                 "[B&C-SB-SKIP] depth={} var={} up={} type={} "
-		                 "same_domain={} exact={}\n",
+		                 "row_sig={} model_epoch={} objective_epoch={}\n",
 		                 child.depth, branch_var, is_up_branch ? 1 : 0,
 		                 lp_failure_type_str(probe_lp_state->failure_type),
-		                 probe_same_domain ? 1 : 0,
-		                 probe_lp_state->from_ipm ||
-		                         probe_lp_state->simplex.exact_optimal
-		                     ? 1
-		                     : 0);
+		                 probe_lp_state->local_row_signature,
+		                 probe_lp_state->model_epoch,
+		                 probe_lp_state->objective_epoch);
 		    }
-        if (probe_lp_matches_child && !consume_probe_lp &&
-            probe_lp_state->from_ipm &&
-            probe_lp_state->failure_type == LPFailureType::Success &&
-            probe_lp_state->ipm_result.x.size() == n) {
+        if (probe_reuse == BranchProbeReuseKind::Warm &&
+            probe_lp_state->from_ipm) {
           // Domain closure may add bounds after a structure-only probe. The
           // old objective is not a valid child bound, but its primal remains
           // a useful starting point once clamped into the closed domain.
           child.x_seed = clamp_to_bounds(probe_lp_state->ipm_result.x,
                                          child.lb, child.ub);
           ++out.bc_stats.strong_branch_cache_warm_hits;
+          probe_lp_state->consumed = true;
           if (opt.verbose || trace_bc_timeline) {
             fmt::print(stderr,
                        "[B&C-SB-SEED] depth={} var={} up={} "
@@ -30642,10 +30772,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                        child.depth, branch_var, is_up_branch ? 1 : 0);
           }
         }
-        if (probe_lp_matches_child && !consume_probe_lp &&
-            !probe_lp_state->from_ipm &&
-            probe_lp_state->failure_type == LPFailureType::Success &&
-            probe_lp_state->simplex.result.x.size() == n) {
+        if (probe_reuse == BranchProbeReuseKind::Warm &&
+            !probe_lp_state->from_ipm) {
           child.x_seed = clamp_to_bounds(probe_lp_state->simplex.result.x,
                                          child.lb, child.ub);
           const auto& live_basis =
@@ -30659,6 +30787,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
             child.basis_hint = std::move(warm_basis);
           }
           ++out.bc_stats.strong_branch_cache_warm_hits;
+          probe_lp_state->consumed = true;
         }
 
 	    // Update standard form with child's bounds. When a child already carries
@@ -30817,7 +30946,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       }
       node_lp_success = node_result.stats.success &&
                         node_result.x.size() == n;
-      if (!node_lp_success && node_result.stats.status == "Time limit") {
+      if (!node_lp_success &&
+          node_result.stats.status.starts_with("Time limit")) {
         ipm_node_deadline_hit = true;
       }
       if (node_lp_success) {
@@ -30865,20 +30995,32 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	                       simplex_res.result.stats.objective);
 	          }
 	        } else {
+	          const double node_lp_remaining =
+	              bc_remaining_sec() - bc_post_root_finalize_reserve_sec;
+	          if (node_lp_remaining <= 0.001) {
+	            simplex_node_deadline_hit = true;
+	          }
+	          seq_dispatcher.set_time_limit(
+	              std::max(0.001, node_lp_remaining),
+	              &simplex_node_deadline_hit);
 	          simplex_res = seq_dispatcher.solve(
 	            node_sf_ref, child.basis_hint.get(), SolveContext::NodeLP,
 	            node_id, child.depth, n, deferred);
 	          ++lp_count;
 	          failure_type = classify_lp_result(simplex_res, n);
+	          if (lp_wall_time_limit_reached(simplex_res)) {
+	            simplex_node_deadline_hit = true;
+	          }
 	        }
 
 	      if (failure_type != LPFailureType::Success) {
 	        if (failure_type == LPFailureType::ObjectiveCutoff) {
 	          child.bound = std::max(parent_bound, simplex_res.result.stats.objective);
-          branch_obs.has_gain = true;
-          branch_obs.gain = std::max(0.0, child.bound - parent_bound);
           branch_obs.cutoff_count = 1;
           pc_upd.push_back(branch_obs);
+          return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
+        }
+        if (simplex_node_deadline_hit) {
           return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
         }
         const bool has_farkas = simplex_res.result.stats.has_farkas_certificate;
@@ -30899,7 +31041,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           }
           ++lp_count;
           if (!ipm_res.stats.success &&
-              ipm_res.stats.status == "Time limit") {
+              ipm_res.stats.status.starts_with("Time limit")) {
             ipm_node_deadline_hit = true;
           }
           if (ipm_res.stats.success && ipm_res.x.size() == n) {
@@ -31175,8 +31317,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         SimplexOptions rc_fp_resolve_opt = simplex_opt;
         rc_fp_resolve_opt.allow_cold_start = true;
         auto rc_fp_res =
-            solve_lp_from_sf(node_sf_ref, rc_fp_resolve_opt,
-                             child.basis_hint.get());
+            solve_tree_lp(node_sf_ref, rc_fp_resolve_opt,
+                          child.basis_hint.get());
         ++lp_count;
         ++out.bc_stats.rc_fixing_resolve_lps;
         const auto rc_fp_type = classify_lp_result(rc_fp_res, n);
@@ -31217,7 +31359,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	        child.objective_artifact_epoch = current_objective_artifact_epoch();
 	        child.domain_closure_epoch = current_domain_closure_epoch();
 	      }
-      if ((opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr) &&
+      if ((opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr) &&
           rc_fixed_preproof > 0) {
         fmt::print(stderr,
                    "[B&C-RC-FIXPOINT] phase=child_post_lp depth={} pass={} "
@@ -31582,11 +31724,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	          const std::size_t reason_hash =
 	              conflict_clause_hash(explained.reason);
 	          for (const auto& existing : child.domain_reason_bounds) {
-	            if (branch_literal_stronger_or_equal(existing.bound,
-	                                                 explained.bound) &&
-	                branch_literal_stronger_or_equal(explained.bound,
-	                                                 existing.bound) &&
-	                conflict_clause_hash(existing.reason) == reason_hash) {
+	            if (conflict_clause_hash(existing.reason) == reason_hash &&
+	                domain_reason_bounds_equal(existing, explained)) {
 	              duplicate = true;
 	              break;
 	            }
@@ -31671,7 +31810,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         node_sf_cuts_augmented = true;
 	        SimplexOptions proof_domain_resolve_opt = simplex_opt;
 	        proof_domain_resolve_opt.allow_cold_start = true;
-	        auto proof_domain_res = solve_lp_from_sf(
+	        auto proof_domain_res = solve_tree_lp(
 	            node_sf_ref, proof_domain_resolve_opt, child.basis_hint.get());
 	        --rc_proof_cut_resolve_lps_left;
 	        ++lp_count;
@@ -31910,11 +32049,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	          return BranchDomainLiteral{lit.col, lit.value_one ? 1.0 : 0.0,
 	                                     lit.value_one};
 	        };
-	        auto same_bound = [](const BranchDomainLiteral& a,
-	                             const BranchDomainLiteral& b) {
-	          return a.var_idx == b.var_idx && a.is_lb == b.is_lb &&
-	                 std::abs(a.value - b.value) <= 1e-9;
-	        };
 			        struct Candidate {
 			          DomainReasonBound rb;
 			          double score{0.0};
@@ -31926,16 +32060,18 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 		          const std::size_t reason_hash =
 		              conflict_clause_hash(raw_target.reason);
 		          for (const auto& existing : proof_target_bounds) {
-		            if (same_bound(existing.bound, raw_target.bound) &&
-		                conflict_clause_hash(existing.reason) == reason_hash) {
+	            if (conflict_clause_hash(existing.reason) == reason_hash &&
+	                domain_reason_bounds_equal(existing, raw_target,
+	                                           std::max(1e-9, opt.int_tol))) {
 		              duplicate = true;
 		              break;
 		            }
 		          }
 		          if (!duplicate) {
 		            for (const auto& existing : target_candidates) {
-		              if (same_bound(existing.rb.bound, raw_target.bound) &&
-		                  conflict_clause_hash(existing.rb.reason) == reason_hash) {
+	              if (conflict_clause_hash(existing.rb.reason) == reason_hash &&
+	                  domain_reason_bounds_equal(existing.rb, raw_target,
+	                                             std::max(1e-9, opt.int_tol))) {
 		                duplicate = true;
 		                break;
 		              }
@@ -31995,14 +32131,16 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 		          const std::size_t reason_hash =
 		              conflict_clause_hash(raw_target.reason);
 		          for (const auto& existing : proof_target_bounds) {
-		            if (same_bound(existing.bound, raw_target.bound) &&
-		                conflict_clause_hash(existing.reason) == reason_hash) {
+	            if (conflict_clause_hash(existing.reason) == reason_hash &&
+	                domain_reason_bounds_equal(existing, raw_target,
+	                                           std::max(1e-9, opt.int_tol))) {
 		              return true;
 		            }
 		          }
 		          for (const auto& existing : target_candidates) {
-		            if (same_bound(existing.rb.bound, raw_target.bound) &&
-		                conflict_clause_hash(existing.rb.reason) == reason_hash) {
+	            if (conflict_clause_hash(existing.rb.reason) == reason_hash &&
+	                domain_reason_bounds_equal(existing.rb, raw_target,
+	                                           std::max(1e-9, opt.int_tol))) {
 		              return true;
 		            }
 		          }
@@ -32358,10 +32496,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	        };
 		        auto remember_explained_bound = [&](const DomainReasonBound& rb) {
 		          for (const auto& existing : child.domain_reason_bounds) {
-		            if (branch_literal_stronger_or_equal(existing.bound, rb.bound) &&
-		                branch_literal_stronger_or_equal(rb.bound, existing.bound) &&
-		                conflict_clause_hash(existing.reason) ==
-		                    conflict_clause_hash(rb.reason)) {
+		            if (conflict_clause_hash(existing.reason) ==
+		                    conflict_clause_hash(rb.reason) &&
+		                domain_reason_bounds_equal(existing, rb)) {
 		              return;
 		            }
 		          }
@@ -32463,8 +32600,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         node_sf_cuts_augmented = true;
 	          SimplexOptions target_resolve_opt = simplex_opt;
 	          target_resolve_opt.allow_cold_start = true;
-	          auto target_res = solve_lp_from_sf(node_sf_ref, target_resolve_opt,
-	                                             child.basis_hint.get());
+	          auto target_res = solve_tree_lp(node_sf_ref, target_resolve_opt,
+	                                          child.basis_hint.get());
 	          --rc_proof_cut_resolve_lps_left;
 	          ++lp_count;
 	          ++out.bc_stats.rc_fixing_resolve_lps;
@@ -32578,8 +32715,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         node_sf_cuts_augmented = true;
 	          SimplexOptions scoped_resolve_opt = simplex_opt;
 	          scoped_resolve_opt.allow_cold_start = true;
-	          auto scoped_res = solve_lp_from_sf(node_sf_ref, scoped_resolve_opt,
-	                                             child.basis_hint.get());
+	          auto scoped_res = solve_tree_lp(node_sf_ref, scoped_resolve_opt,
+	                                          child.basis_hint.get());
 	          --rc_proof_cut_resolve_lps_left;
 	          ++lp_count;
 	          ++out.bc_stats.rc_fixing_resolve_lps;
@@ -32673,17 +32810,13 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       const int ib_added = append_graph_implied_bound_cuts(
           base_lp, child.x_relax, child.lb, child.ub, implication_graph,
           ib_budget, ib_rows, ib_rhs);
-      std::unordered_set<std::size_t> seen_graph_rows(
-          child.local_proof_row_hashes.begin(),
-          child.local_proof_row_hashes.end());
-      for (const auto& cut : local_proof_cuts) {
-        seen_graph_rows.insert(sparse_cut_hash(cut.coeff));
-      }
       for (int i = 0; i < ib_added; ++i) {
         const std::size_t h = sparse_cut_hash(ib_rows[i]);
-        if (!seen_graph_rows.insert(h).second) continue;
+        if (contains_identical_local_cut(child, local_proof_cuts, ib_rows[i],
+                                         ib_rhs[i])) {
+          continue;
+        }
         const double norm = std::sqrt(std::max(0.0, ib_rows[i].squaredNorm()));
-        child.local_proof_row_hashes.push_back(h);
         ++out.bc_stats.local_node_cuts_generated;
         PoolCut cut{std::move(ib_rows[i]), ib_rhs[i], 0, 0.0, norm, h};
         local_proof_cuts.push_back(
@@ -32810,7 +32943,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
             SimplexOptions verify_opt = simplex_opt;
             verify_opt.allow_cold_start = true;
             verify_opt.max_iter = std::max(1000, opt.max_lp_iter);
-            auto verify_res = solve_lp_from_sf(
+            auto verify_res = solve_tree_lp(
                 verify_sf, verify_opt,
                 (root.basis_hint && root.basis_hint->rows == verify_sf.A.rows() &&
                  root.basis_hint->cols == verify_sf.A.cols())
@@ -33073,8 +33206,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         node_sf_cuts_augmented = true;
         SimplexOptions rc_resolve_opt = simplex_opt;
         rc_resolve_opt.allow_cold_start = true;
-        auto rc_res = solve_lp_from_sf(node_sf_ref, rc_resolve_opt,
-                                       child.basis_hint.get());
+        auto rc_res = solve_tree_lp(node_sf_ref, rc_resolve_opt,
+                                    child.basis_hint.get());
         --rc_fixing_resolve_lps_left;
         ++lp_count;
         ++out.bc_stats.rc_fixing_resolve_lps;
@@ -33128,16 +33261,18 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     // Root cuts are already in base_lp; pool cuts at deep nodes provide
     // diminishing returns relative to the per-node rebuild cost.
     if (static_cast<int>(base_lp.A.rows()) <= opt.pool_cut_row_threshold && child.depth <= opt.pool_cut_depth_limit) {
-      auto violated = cp_ref.find_violated(child.x_relax, 1e-4);
-      if (!violated.empty()) {
-        const int pool_budget = std::min(static_cast<int>(violated.size()), opt.cuts_per_round);
+      auto violated_cuts = cp_ref.select_violated_and_age(
+          child.x_relax, 1e-4, opt.cuts_per_round);
+      if (!violated_cuts.empty()) {
+        const int pool_budget = static_cast<int>(violated_cuts.size());
         std::vector<Eigen::SparseVector<double>> pool_rows;
         std::vector<double> pool_rhs_vec;
         pool_rows.reserve(pool_budget);
         pool_rhs_vec.reserve(pool_budget);
         for (int pi = 0; pi < pool_budget; ++pi) {
-          pool_rows.push_back(cp_ref[violated[pi]].coeff);
-          pool_rhs_vec.push_back(cp_ref[violated[pi]].rhs);
+          PoolCut& cut = violated_cuts[static_cast<std::size_t>(pi)];
+          pool_rows.push_back(std::move(cut.coeff));
+          pool_rhs_vec.push_back(cut.rhs);
         }
         LPModel pool_lp = build_node_lp_with_local_cuts(child);
         add_sparse_rows_to_lp(pool_lp, pool_rows, pool_rhs_vec);
@@ -33210,7 +33345,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     if (opt.cuts != CutType::None && child.depth <= opt.max_cut_depth && !skip_node_cuts) {
       LPModel node_lp = build_node_lp_with_local_cuts(child);
       // For cut generation, pass nullptr for simplex result in IPM mode
-      // (basis-free cuts: MIR, cover, flow cover, implied bound still work).
+      // (basis-free cuts: MIR and cover still work).
       // P2.1: Pass tracker for per-family efficacy tracking.
       const int added = add_cuts(node_lp, child.x_relax, nullptr, opt, opt.cuts_per_round, nullptr, &cut_family_tracker, &clique_table);
       if (added > 0) {
@@ -33589,7 +33724,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	    SimplexOptions refresh_opt = simplex_opt;
 	    refresh_opt.allow_cold_start = true;
 	    auto refresh_res =
-	        solve_lp_from_sf(refresh_sf, refresh_opt, child.basis_hint.get());
+	        solve_tree_lp(refresh_sf, refresh_opt, child.basis_hint.get());
 	    ++out.bc_stats.lp_solves;
 	    ++out.bc_stats.certificate_domain_resolve_lps;
 	    const auto refresh_type = classify_lp_result(refresh_res, n);
@@ -33682,7 +33817,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           }
           refresh_sf = build_node_sf_with_local_cuts(child);
           auto rc_res =
-              solve_lp_from_sf(refresh_sf, refresh_opt, child.basis_hint.get());
+              solve_tree_lp(refresh_sf, refresh_opt, child.basis_hint.get());
           ++out.bc_stats.lp_solves;
           ++out.bc_stats.certificate_domain_resolve_lps;
           const auto rc_type = classify_lp_result(rc_res, n);
@@ -33722,7 +33857,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           child.objective_artifact_epoch = current_objective_artifact_epoch();
           child.domain_closure_epoch = current_domain_closure_epoch();
         }
-        if ((opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr) &&
+        if ((opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr) &&
             rc_fixed_total > 0) {
           fmt::print(stderr,
                      "[B&C-RC-FIXPOINT] phase=prequeue_refresh depth={} "
@@ -33825,7 +33960,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	        }
 	        refresh_queue_lower_bound();
 			      if (opt.verbose ||
-			          std::getenv("MIPSOLVERS_BC_CONF") != nullptr) {
+			          bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr) {
 			        fmt::print(stderr,
 			                   "[B&C ROOT-CERT-CLOSURE] published={} "
 			                   "pruned={} qsize={} qlb={:.10g}\n",
@@ -33961,6 +34096,50 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           cts->atomic_stats.gap_suboptimal_queue_prune_passes.load();
       out.bc_stats.gap_suboptimal_queue_prunes +=
           cts->atomic_stats.gap_suboptimal_queue_prunes.load();
+      out.bc_stats.branch_direction_preferred_down +=
+          cts->atomic_stats.branch_direction_preferred_down.load();
+      out.bc_stats.branch_direction_preferred_up +=
+          cts->atomic_stats.branch_direction_preferred_up.load();
+      out.bc_stats.branch_direction_first_down +=
+          cts->atomic_stats.branch_direction_first_down.load();
+      out.bc_stats.branch_direction_first_up +=
+          cts->atomic_stats.branch_direction_first_up.load();
+      out.bc_stats.branch_first_child_incumbent_updates +=
+          cts->atomic_stats.branch_first_child_incumbent_updates.load();
+      out.bc_stats.branch_first_child_cutoffs +=
+          cts->atomic_stats.branch_first_child_cutoffs.load();
+      out.bc_stats.branch_second_child_cutoffs +=
+          cts->atomic_stats.branch_second_child_cutoffs.load();
+      out.bc_stats.node_estimate_calibration_samples +=
+          cts->atomic_stats.node_estimate_calibration_samples.load();
+      out.bc_stats.node_estimate_predicted_lift_sum +=
+          cts->atomic_stats.node_estimate_predicted_lift_sum.load();
+      out.bc_stats.node_estimate_realized_lift_sum +=
+          cts->atomic_stats.node_estimate_realized_lift_sum.load();
+      out.bc_stats.node_estimate_abs_error_sum +=
+          cts->atomic_stats.node_estimate_abs_error_sum.load();
+      out.bc_stats.node_estimate_squared_error_sum +=
+          cts->atomic_stats.node_estimate_squared_error_sum.load();
+      out.bc_stats.node_estimate_predicted_sq_sum +=
+          cts->atomic_stats.node_estimate_predicted_sq_sum.load();
+      out.bc_stats.node_estimate_realized_sq_sum +=
+          cts->atomic_stats.node_estimate_realized_sq_sum.load();
+      out.bc_stats.node_estimate_cross_sum +=
+          cts->atomic_stats.node_estimate_cross_sum.load();
+      out.bc_stats.directional_calibration_samples +=
+          cts->atomic_stats.directional_calibration_samples.load();
+      out.bc_stats.directional_predicted_gain_sum +=
+          cts->atomic_stats.directional_predicted_gain_sum.load();
+      out.bc_stats.directional_realized_gain_sum +=
+          cts->atomic_stats.directional_realized_gain_sum.load();
+      out.bc_stats.directional_abs_error_sum +=
+          cts->atomic_stats.directional_abs_error_sum.load();
+      out.bc_stats.directional_squared_error_sum +=
+          cts->atomic_stats.directional_squared_error_sum.load();
+      out.bc_stats.directional_rank_samples +=
+          cts->atomic_stats.directional_rank_samples.load();
+      out.bc_stats.directional_rank_concordant +=
+          cts->atomic_stats.directional_rank_concordant.load();
       if (cts->steal_pool) {
         out.bc_stats.work_steals = cts->steal_pool->get_total_steals();
         out.bc_stats.steal_attempts = cts->steal_pool->get_total_steals() + cts->steal_pool->get_failed_steals();
@@ -34193,7 +34372,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         node_sf_cuts_augmented = true;
 	        SimplexOptions late_opt = simplex_opt;
 	        late_opt.allow_cold_start = true;
-	        auto late_res = solve_lp_from_sf(node_sf, late_opt, cur.basis_hint.get());
+	        auto late_res = solve_tree_lp(node_sf, late_opt, cur.basis_hint.get());
 	        if (rc_proof_cut_resolve_lps_left > 0) {
 	          --rc_proof_cut_resolve_lps_left;
 	        }
@@ -34256,18 +34435,18 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     if (allow_native_proof_cut_rows &&
         rc_proof_cut_resolve_lps_left > 0 &&
         cut_pool.size() > 0) {
-      auto violated = cut_pool.find_violated(cur.x_relax, 1e-4);
-      if (!violated.empty()) {
-        const int pool_budget =
-            std::min(static_cast<int>(violated.size()), opt.cuts_per_round);
+      auto violated_cuts = cut_pool.select_violated_and_age(
+          cur.x_relax, 1e-4, opt.cuts_per_round);
+      if (!violated_cuts.empty()) {
+        const int pool_budget = static_cast<int>(violated_cuts.size());
         LPModel pool_lp = build_node_lp_with_local_cuts(cur);
         std::vector<Eigen::SparseVector<double>> pool_rows;
         std::vector<double> pool_rhs_vec;
         pool_rows.reserve(pool_budget);
         pool_rhs_vec.reserve(pool_budget);
         for (int pi = 0; pi < pool_budget; ++pi) {
-          const PoolCut& pc_cut = cut_pool[violated[pi]];
-          pool_rows.push_back(pc_cut.coeff);
+          PoolCut& pc_cut = violated_cuts[static_cast<std::size_t>(pi)];
+          pool_rows.push_back(std::move(pc_cut.coeff));
           pool_rhs_vec.push_back(pc_cut.rhs);
         }
         add_sparse_rows_to_lp(pool_lp, pool_rows, pool_rhs_vec);
@@ -34417,23 +34596,98 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 		    {
 		      int local_lp_solves = 0;
 		      int local_strong_branch_candidates = 0;
+		      std::uint64_t local_probe_lp_iterations = 0;
+		      int initial_probe_winner = -1;
+		      const auto strong_probe_start = std::chrono::steady_clock::now();
 		      bool incumbent_changed_by_probe = false;
+		      auto observations_from_probes =
+		          [](const std::vector<StrongBranchProbeResult>& probes) {
+		        std::vector<BranchDirectionalObservation> observations;
+		        observations.reserve(probes.size());
+		        for (const auto& probe : probes) {
+		          if (!probe.available) continue;
+		          observations.push_back({probe.var, probe.is_up,
+		                                  probe.evidence_state,
+		                                  probe.observed_gain});
+		        }
+		        return observations;
+		      };
+		      auto choose_with_probe_overlay =
+		          [&](const std::vector<int>& candidates,
+		              const std::vector<StrongBranchProbeResult>& probes) {
+		        const auto observations = observations_from_probes(probes);
+		        if (callbacks && callbacks->branching_prior) {
+		          auto branch_context = make_branch_context(candidates);
+		          return choose_branch_var_pseudocost_with_overlay(
+		              candidates, cur.x_relax, pc, branch_priority, observations,
+		              callbacks->branching_prior, branch_context.ctx);
+		        }
+		        return choose_branch_var_pseudocost_with_overlay(
+		            candidates, cur.x_relax, pc, branch_priority, observations);
+		      };
+		      auto record_probe_selection_telemetry =
+		          [&](const std::vector<StrongBranchProbeResult>& probes,
+		              int selected) {
+		        for (const auto& down : probes) {
+		          if (!down.available || down.is_up) continue;
+		          const auto up = std::find_if(
+		              probes.begin(), probes.end(), [&](const auto& probe) {
+		                return probe.available && probe.is_up &&
+		                       probe.var == down.var;
+		              });
+		          if (up == probes.end()) continue;
+		          const auto complete = [](BranchEvidenceState state) {
+		            return state != BranchEvidenceState::Predicted &&
+		                   state != BranchEvidenceState::UnknownFailure;
+		          };
+		          if (complete(down.evidence_state) &&
+		              complete(up->evidence_state)) {
+		            ++out.bc_stats.strong_complete_probe_pairs;
+		          }
+		        }
+		        out.bc_stats.strong_probe_unknown_failures +=
+		            static_cast<std::uint64_t>(std::count_if(
+		                probes.begin(), probes.end(), [](const auto& probe) {
+		                  return probe.evidence_state ==
+		                         BranchEvidenceState::UnknownFailure;
+		                }));
+		        const auto selected_down = std::find_if(
+		            probes.begin(), probes.end(), [&](const auto& probe) {
+		              return probe.available && !probe.is_up &&
+		                     probe.var == selected;
+		            });
+		        const auto selected_up = std::find_if(
+		            probes.begin(), probes.end(), [&](const auto& probe) {
+		              return probe.available && probe.is_up &&
+		                     probe.var == selected;
+		            });
+		        if (!probes.empty() && selected_down == probes.end() &&
+		            selected_up == probes.end()) {
+		          ++out.bc_stats.strong_selected_unprobed;
+		          return;
+		        }
+		        const bool selected_exact =
+		            selected_down != probes.end() && selected_up != probes.end() &&
+		            selected_down->evidence_state ==
+		                BranchEvidenceState::ExactOptimal &&
+		            selected_up->evidence_state ==
+		                BranchEvidenceState::ExactOptimal;
+		        if (selected_exact) ++out.bc_stats.strong_selected_exact;
+		        const auto usable = [](BranchEvidenceState state) {
+		          return state == BranchEvidenceState::Measured ||
+		                 state == BranchEvidenceState::ExactOptimal;
+		        };
+		        if (initial_probe_winner >= 0 && selected != initial_probe_winner &&
+		            selected_down != probes.end() && selected_up != probes.end() &&
+		            usable(selected_down->evidence_state) &&
+		            usable(selected_up->evidence_state)) {
+		          ++out.bc_stats.strong_winner_changed_by_exact;
+		        }
+		      };
 		      auto record_strong_branch_regret =
 		          [&](const std::vector<StrongBranchProbeResult>& probes,
 		              int selected) {
-		        auto gain = [&](const StrongBranchProbeResult& pr) {
-		          if (pr.failure_type == LPFailureType::Infeasible ||
-		              pr.failure_type == LPFailureType::ObjectiveCutoff) {
-		            return 1e6;
-		          }
-		          if (pr.failure_type != LPFailureType::Success) return -1.0;
-		          const double objective = pr.from_ipm
-		                                       ? pr.ipm_result.stats.objective
-		                                       : pr.simplex.result.stats.objective;
-		          return std::isfinite(objective)
-		                     ? std::max(0.0, objective - cur.bound)
-		                     : -1.0;
-		        };
+		        const auto observations = observations_from_probes(probes);
 		        double best = -1.0;
 		        double chosen = -1.0;
 		        for (const auto& down : probes) {
@@ -34443,10 +34697,15 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 		                return pr.available && pr.is_up && pr.var == down.var;
 		              });
 		          if (up == probes.end()) continue;
-		          const double gd = gain(down);
-		          const double gu = gain(*up);
-		          if (gd < 0.0 || gu < 0.0) continue;
-		          const double score = std::max(1e-6, gd) * std::max(1e-6, gu);
+		          const bool down_usable =
+		              down.evidence_state == BranchEvidenceState::Measured ||
+		              down.evidence_state == BranchEvidenceState::ExactOptimal;
+		          const bool up_usable =
+		              up->evidence_state == BranchEvidenceState::Measured ||
+		              up->evidence_state == BranchEvidenceState::ExactOptimal;
+		          if (!down_usable || !up_usable) continue;
+		          const double score = compute_branch_var_score_with_overlay(
+		              down.var, cur.x_relax, pc, observations);
 		          best = std::max(best, score);
 		          if (down.var == selected) chosen = score;
 		        }
@@ -34502,27 +34761,13 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
             }
           }
           const int provisional = choose_pseudocost_branch_var_for_node(frac);
+          initial_probe_winner = provisional;
           if (std::find(unreliable.begin(), unreliable.end(), provisional) ==
               unreliable.end()) {
             unreliable.clear();
           }
           if (!unreliable.empty()) {
-            std::sort(unreliable.begin(), unreliable.end(), [&](int a, int b) {
-              const int pa = a < static_cast<int>(branch_priority.size())
-                                 ? branch_priority[static_cast<std::size_t>(a)]
-                                 : 0;
-              const int pb = b < static_cast<int>(branch_priority.size())
-                                 ? branch_priority[static_cast<std::size_t>(b)]
-                                 : 0;
-              if (pa != pb) return pa > pb;
-              return compute_branch_var_score(a, cur.x_relax, pc) >
-                     compute_branch_var_score(b, cur.x_relax, pc);
-            });
-            std::iter_swap(
-                unreliable.begin(),
-                std::find(unreliable.begin(), unreliable.end(), provisional));
             const int probes = std::min(eff_max, static_cast<int>(unreliable.size()));
-            local_strong_branch_candidates += probes;
             ipm_probe_results.reserve(static_cast<std::size_t>(2 * probes));
             auto classify_ipm_probe = [&](const SolveResult& res) {
               if (res.stats.success && res.x.size() == n &&
@@ -34551,7 +34796,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
               pr.from_ipm = true;
               pr.var = jj;
               pr.is_up = is_up;
-              pr.local_cut_count = cur.local_cuts.size();
+              pr.local_row_signature =
+                  ordered_local_cut_signature(cur.local_cuts);
+              pr.model_epoch = current_domain_closure_epoch();
+              pr.objective_epoch = current_objective_artifact_epoch();
               if (!materialize_domain) return pr;
               pr.lb = cur.lb;
               pr.ub = cur.ub;
@@ -34564,42 +34812,52 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
               return pr;
             };
             auto record_ipm_probe = [&](StrongBranchProbeResult pr) {
+              local_probe_lp_iterations += static_cast<std::uint64_t>(
+                  std::max(0, pr.ipm_result.stats.iterations));
+              const double frac_j =
+                  cur.x_relax[pr.var] - std::floor(cur.x_relax[pr.var]);
+              const double distance = pr.is_up ? 1.0 - frac_j : frac_j;
               if (pr.failure_type == LPFailureType::Success) {
-                const double gain = std::max(
+                pr.evidence_state = BranchEvidenceState::Measured;
+                pr.observed_gain = std::max(
                     0.0, pr.ipm_result.stats.objective - cur.bound);
-                const double frac_j =
-                    cur.x_relax[pr.var] - std::floor(cur.x_relax[pr.var]);
-                const double distance = pr.is_up ? 1.0 - frac_j : frac_j;
-                if (pr.is_up)
-                  pc[pr.var].add_up(
-                      normalized_pseudocost_gain(gain, distance));
-                else
-                  pc[pr.var].add_down(
-                      normalized_pseudocost_gain(gain, distance));
               } else if (pr.failure_type == LPFailureType::Infeasible) {
-                const double frac_j =
-                    cur.x_relax[pr.var] - std::floor(cur.x_relax[pr.var]);
-                if (pr.is_up) {
-                  pc[pr.var].add_up_cutoff();
-                  pc[pr.var].add_up(
-                      normalized_pseudocost_gain(1e6, 1.0 - frac_j));
-                } else {
-                  pc[pr.var].add_down_cutoff();
-                  pc[pr.var].add_down(
-                      normalized_pseudocost_gain(1e6, frac_j));
-                }
+                pr.evidence_state = BranchEvidenceState::ProvenCutoff;
+              } else {
+                pr.evidence_state = BranchEvidenceState::UnknownFailure;
               }
+              update_pseudocost_from_branch_evidence(
+                  pc[pr.var], pr.is_up, pr.evidence_state, pr.observed_gain,
+                  distance,
+                  pr.failure_type == LPFailureType::Infeasible &&
+                      pr.ipm_result.stats.has_farkas_certificate);
               ipm_probe_results.push_back(std::move(pr));
             };
+
+            int candidates_probed = 0;
+            while (candidates_probed < probes) {
+              const int jj = choose_with_probe_overlay(frac, ipm_probe_results);
+              if (jj < 0) break;
+              const auto already_observed = [&](bool is_up) {
+                return std::any_of(
+                    ipm_probe_results.begin(), ipm_probe_results.end(),
+                    [&](const auto& result) {
+                      return result.var == jj && result.is_up == is_up;
+                    });
+              };
+              const bool need_down =
+                  pc[jj].down_cnt < eff_rel && !already_observed(false);
+              const bool need_up =
+                  pc[jj].up_cnt < eff_rel && !already_observed(true);
+              if (!need_down && !need_up) break;
 
             if (cur.local_cuts.empty()) {
               std::vector<StrongBranchProbeResult> pending;
               std::vector<IPMNodeBoundChange> changes;
-              pending.reserve(static_cast<std::size_t>(2 * probes));
-              changes.reserve(static_cast<std::size_t>(2 * probes));
-              for (int k = 0; k < probes; ++k) {
-                const int jj = unreliable[static_cast<std::size_t>(k)];
-                for (bool is_up : {false, true}) {
+              pending.reserve(2);
+              changes.reserve(2);
+              for (bool is_up : {false, true}) {
+                  if ((is_up && !need_up) || (!is_up && !need_down)) continue;
                   auto pr = make_ipm_probe(jj, is_up,
                                            /*materialize_domain=*/false);
                   const double xjj = cur.x_relax[jj];
@@ -34621,7 +34879,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                   }
                   pending.push_back(std::move(pr));
                   changes.push_back(change);
-                }
               }
 
               const double batch_budget =
@@ -34666,10 +34923,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                 }
               }
             } else {
-              int remaining_probe_solves = 2 * probes;
-              for (int k = 0; k < probes; ++k) {
-                const int jj = unreliable[static_cast<std::size_t>(k)];
-                for (bool is_up : {false, true}) {
+              int remaining_probe_solves =
+                  static_cast<int>(need_down) + static_cast<int>(need_up);
+              for (bool is_up : {false, true}) {
+                  if ((is_up && !need_up) || (!is_up && !need_down)) continue;
                   auto pr = make_ipm_probe(jj, is_up,
                                            /*materialize_domain=*/true);
                   if (!bounds_consistent(pr.lb, pr.ub)) {
@@ -34697,12 +34954,15 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                   }
                   --remaining_probe_solves;
                   record_ipm_probe(std::move(pr));
-                }
               }
             }
+              ++candidates_probed;
+              ++local_strong_branch_candidates;
+            }
           }
-	          j = choose_branch_var_for_node(frac);
+	          j = choose_with_probe_overlay(frac, ipm_probe_results);
 	          record_strong_branch_regret(ipm_probe_results, j);
+          record_probe_selection_telemetry(ipm_probe_results, j);
           for (auto& pr : ipm_probe_results) {
             if (pr.var != j) continue;
             if (pr.from_ipm && pr.lb.size() != n) {
@@ -34743,71 +35003,42 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	            }
 	            const int provisional =
 	                choose_pseudocost_branch_var_for_node(frac);
+	            initial_probe_winner = provisional;
 	            if (std::find(unreliable.begin(), unreliable.end(), provisional) ==
 	                unreliable.end()) {
 	              unreliable.clear();
 	            }
 	            if (!unreliable.empty()) {
-	              std::sort(unreliable.begin(), unreliable.end(),
-	                        [&](int a, int b) {
-	                          const int pa =
-	                              a < static_cast<int>(branch_priority.size())
-	                                  ? branch_priority[static_cast<std::size_t>(a)]
-	                                  : 0;
-	                          const int pb =
-	                              b < static_cast<int>(branch_priority.size())
-	                                  ? branch_priority[static_cast<std::size_t>(b)]
-	                                  : 0;
-	                          if (pa != pb) return pa > pb;
-	                          return compute_branch_var_score(a, cur.x_relax, pc) >
-	                                 compute_branch_var_score(b, cur.x_relax, pc);
-	                        });
-	              std::iter_swap(
-	                  unreliable.begin(),
-	                  std::find(unreliable.begin(), unreliable.end(), provisional));
 	              const int probes =
 	                  std::min(cur.depth == 0 ? eff_max : std::max(2, eff_max / 2),
 	                           static_cast<int>(unreliable.size()));
-	              local_strong_branch_candidates += probes;
 	              probe_results.reserve(static_cast<std::size_t>(2 * probes));
 
 	              auto update_pc_from_probe =
-	                  [&](const StrongBranchProbeResult& pr) {
+	                  [&](StrongBranchProbeResult& pr) {
 	                if (pr.var < 0 || pr.var >= static_cast<int>(pc.size())) return;
+	                const double frac_j = cur.x_relax[pr.var] -
+	                                      std::floor(cur.x_relax[pr.var]);
+	                const double distance = pr.is_up ? 1.0 - frac_j : frac_j;
 	                if (pr.failure_type == LPFailureType::Success) {
-	                  const double gain =
-	                      std::max(0.0,
-	                               pr.simplex.result.stats.objective - cur.bound);
-	                  const double frac_j = cur.x_relax[pr.var] -
-	                                        std::floor(cur.x_relax[pr.var]);
-	                  const double distance = pr.is_up ? 1.0 - frac_j : frac_j;
-	                  if (pr.is_up)
-	                    pc[pr.var].add_up(
-	                        normalized_pseudocost_gain(gain, distance));
-	                  else
-	                    pc[pr.var].add_down(
-	                        normalized_pseudocost_gain(gain, distance));
+	                  pr.evidence_state = pr.simplex.exact_optimal
+	                                          ? BranchEvidenceState::ExactOptimal
+	                                          : BranchEvidenceState::Measured;
+	                  pr.observed_gain = std::max(
+	                      0.0, pr.simplex.result.stats.objective - cur.bound);
+	                } else if (pr.failure_type == LPFailureType::ObjectiveCutoff ||
+	                           (pr.failure_type == LPFailureType::Infeasible &&
+	                            (pr.simplex.result.stats.has_farkas_certificate ||
+	                             !bounds_consistent(pr.lb, pr.ub)))) {
+	                  pr.evidence_state = BranchEvidenceState::ProvenCutoff;
 	                } else {
-	                  if (pr.failure_type == LPFailureType::Infeasible ||
-	                      pr.failure_type == LPFailureType::ObjectiveCutoff) {
-	                    if (pr.is_up) pc[pr.var].add_up_cutoff();
-	                    else pc[pr.var].add_down_cutoff();
-	                    if (pr.failure_type == LPFailureType::Infeasible &&
-	                        pr.simplex.result.stats.has_farkas_certificate) {
-	                      if (pr.is_up) pc[pr.var].add_up_conflict();
-	                      else pc[pr.var].add_down_conflict();
-	                    }
-	                  }
-	                  const double frac_j = cur.x_relax[pr.var] -
-	                                        std::floor(cur.x_relax[pr.var]);
-	                  const double distance = pr.is_up ? 1.0 - frac_j : frac_j;
-	                  if (pr.is_up)
-	                    pc[pr.var].add_up(
-	                        normalized_pseudocost_gain(1e6, distance));
-	                  else
-	                    pc[pr.var].add_down(
-	                        normalized_pseudocost_gain(1e6, distance));
+	                  pr.evidence_state = BranchEvidenceState::UnknownFailure;
 	                }
+	                update_pseudocost_from_branch_evidence(
+	                    pc[pr.var], pr.is_up, pr.evidence_state,
+	                    pr.observed_gain, distance,
+	                    pr.failure_type == LPFailureType::Infeasible &&
+	                        pr.simplex.result.stats.has_farkas_certificate);
 	              };
 
 	              auto collect_probe_integral_candidate =
@@ -34843,6 +35074,13 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	                }
 	              };
 
+	              std::optional<StandardFormLP> active_probe_base_sf;
+	              if (cur.local_cuts.empty()) {
+	                active_probe_base_sf = tree_base_sf;
+	                update_standard_form_bounds(*active_probe_base_sf, base_lp,
+	                                            cur.lb, cur.ub);
+	              }
+
 	              auto run_probe = [&](int jj, bool is_up) {
 	                const double xjj = cur.x_relax[jj];
 	                Eigen::VectorXd plb = cur.lb;
@@ -34856,7 +35094,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 		                pr.available = true;
 		                pr.var = jj;
 		                pr.is_up = is_up;
-		                pr.local_cut_count = cur.local_cuts.size();
+		                pr.local_row_signature =
+		                    ordered_local_cut_signature(cur.local_cuts);
+		                pr.model_epoch = current_domain_closure_epoch();
+		                pr.objective_epoch =
+		                    current_objective_artifact_epoch();
 	                pr.lb = plb;
 	                pr.ub = pub;
 	                if (!bounds_consistent(plb, pub)) {
@@ -34865,36 +35107,86 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	                  probe_results.push_back(std::move(pr));
 	                  return;
 	                }
+	                const double probe_remaining =
+	                    bc_remaining_sec() - bc_post_root_finalize_reserve_sec;
+	                if (probe_remaining <= 0.001) {
+	                  simplex_node_deadline_hit = true;
+	                  pr.failure_type = LPFailureType::Timeout;
+	                  update_pc_from_probe(pr);
+	                  probe_results.push_back(std::move(pr));
+	                  return;
+	                }
 			                StandardFormLP probe_sf;
-			                if (cur.local_cuts.empty()) {
-			                  probe_sf = tree_base_sf;
-			                  update_standard_form_bounds(probe_sf, base_lp, plb, pub);
+			                if (active_probe_base_sf.has_value()) {
+			                  probe_sf = *active_probe_base_sf;
+			                  const double old_value =
+			                      is_up ? cur.lb[jj] : cur.ub[jj];
+			                  const double new_value =
+			                      is_up ? plb[jj] : pub[jj];
+			                  const std::vector<BoundChangeInfo> branch_change{
+			                      {jj, 0.0, is_up, old_value, new_value}};
+			                  if (!update_standard_form_bounds_incremental(
+			                          probe_sf, base_lp, branch_change)) {
+			                    update_standard_form_bounds(probe_sf, base_lp, plb,
+			                                                pub);
+			                  }
 			                } else {
 			                  Node probe_node = cur;
 			                  probe_node.lb = plb;
 			                  probe_node.ub = pub;
 			                  probe_sf = build_node_sf_with_local_cuts(probe_node);
 			                }
-		                pr.simplex = seq_dispatcher.solve(
+	                seq_dispatcher.set_time_limit(
+	                    probe_remaining, &simplex_node_deadline_hit);
+	                pr.simplex = seq_dispatcher.solve(
 		                    probe_sf, cur.basis_hint.get(), SolveContext::Probing,
 		                    seq_node_id++, cur.depth + 1, n, pr.deferred);
 		                ++local_lp_solves;
-		                pr.failure_type = classify_lp_result(pr.simplex, n);
+	                pr.failure_type = classify_lp_result(pr.simplex, n);
+	                if (lp_wall_time_limit_reached(pr.simplex)) {
+	                  simplex_node_deadline_hit = true;
+	                }
+		                local_probe_lp_iterations += static_cast<std::uint64_t>(
+		                    std::max(0, pr.simplex.result.stats.iterations));
 		                detach_probe_transient_basis_state(pr.simplex);
 		                update_pc_from_probe(pr);
 		                collect_probe_integral_candidate(pr);
 		                probe_results.push_back(std::move(pr));
 	              };
 
-	              for (int k = 0; k < probes; ++k) {
-	                const int jj = unreliable[static_cast<std::size_t>(k)];
-	                run_probe(jj, /*is_up=*/false);
-	                run_probe(jj, /*is_up=*/true);
+	              int candidates_probed = 0;
+	              while (candidates_probed < probes) {
+	                const int jj = choose_with_probe_overlay(frac, probe_results);
+	                if (jj < 0) break;
+	                const int limit =
+	                    (pc[jj].down_cnt >= 1 && pc[jj].up_cnt >= 1)
+	                        ? std::max(2, eff_reliability / 2)
+	                        : eff_reliability;
+	                const auto already_observed = [&](bool is_up) {
+	                  return std::any_of(
+	                      probe_results.begin(), probe_results.end(),
+	                      [&](const auto& result) {
+	                        return result.var == jj && result.is_up == is_up;
+	                      });
+	                };
+	                const bool need_down =
+	                    pc[jj].down_cnt < limit && !already_observed(false);
+	                const bool need_up =
+	                    pc[jj].up_cnt < limit && !already_observed(true);
+	                if (!need_down && !need_up) break;
+	                if (need_down) run_probe(jj, /*is_up=*/false);
+	                if (need_up && !simplex_node_deadline_hit) {
+	                  run_probe(jj, /*is_up=*/true);
+	                }
+	                ++candidates_probed;
+	                ++local_strong_branch_candidates;
+	                if (simplex_node_deadline_hit) break;
 	              }
 	            }
 	          }
-	                j = choose_pseudocost_branch_var_for_node(frac);
+	                j = choose_with_probe_overlay(frac, probe_results);
 	                record_strong_branch_regret(probe_results, j);
+	                record_probe_selection_telemetry(probe_results, j);
 		          if (j >= 0) {
 		            for (auto& pr : probe_results) {
 		              if (pr.var != j) continue;
@@ -34927,6 +35219,14 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	      }
 		      out.bc_stats.lp_solves += local_lp_solves;
 		      out.bc_stats.strong_branch_lp_solves += local_lp_solves;
+		      out.bc_stats.strong_probe_lp_iterations +=
+		          local_probe_lp_iterations;
+		      if (local_lp_solves > 0) {
+		        out.bc_stats.strong_probe_time_ms +=
+		            std::chrono::duration<double, std::milli>(
+		                std::chrono::steady_clock::now() - strong_probe_start)
+		                .count();
+		      }
 		      out.bc_stats.strong_branch_candidates +=
 		          local_strong_branch_candidates;
 		      if (local_strong_branch_candidates > 0) {
@@ -34936,7 +35236,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         fmt::print(stderr, "[B&C] node={} depth={} probing_lps={}\n",
                    out.bc_stats.nodes_explored, cur.depth, local_lp_solves);
 	      }
-    }
+	      }
+	      if (ipm_node_deadline_hit || simplex_node_deadline_hit) {
+	        out.stats.status = bc_status::kTimeLimitReached;
+	        break;
+	      }
     if (j < 0) continue;
     {
       const int selected_priority =
@@ -34992,7 +35296,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       SimplexOptions audit_opt = simplex_opt;
       audit_opt.allow_cold_start = true;
       audit_opt.incumbent_bound = nullptr;
-      auto audit_res = solve_lp_from_sf(audit_sf, audit_opt, cur.basis_hint.get());
+      auto audit_res = solve_tree_lp(audit_sf, audit_opt, cur.basis_hint.get());
       if (audit_res.result.stats.success &&
           audit_res.result.x.size() == cur.x_relax.size()) {
         double best_score = -1.0;
@@ -35026,6 +35330,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 
     const double xj = cur.x_relax[j];
     const double parent_bound = cur.bound;
+    const double parent_estimate = cur.estimate;
     const int parent_depth = cur.depth;
     const bool run_crossover_this_node =
         solution_pool.size() >= 2 && opt.crossover_heuristic_freq > 0 &&
@@ -35064,101 +35369,155 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       first_branch_ipm_solve_slots = 2;
     }
 
-		    bool down_valid, up_valid;
-		    bool incumbent_changed_this_node = false;
-		    bool child_domain_source_added = false;
-			    {
-				      // Shared node-SF workspace: restore the pristine tree base only when the
-// previous solve left it cuts-augmented; bounds are re-applied inside.
-if (node_sf_cuts_augmented) { node_sf = tree_base_sf; node_sf_cuts_augmented = false; }
-				      auto [valid, pcu, sols, ncuts, lps, ca, ps] =
-		          process_single_child(child_down, false, j,
-		                                xj - std::floor(xj), parent_bound,
-		                                node_sf, cut_pool, incumbent_obj, has_incumbent,
-		                                &retained_down_probe);
-      down_valid = valid;
-      if (trace_bc_timeline) {
-        fmt::print(stderr,
-                   "[B&C-CHILD] dir=down depth={} var={} x={:.10g} "
-                   "valid={} bound={:.10g} sols={} lps={} lb={:.10g} "
-                   "ub={:.10g}\n",
-                   child_down.depth, j, xj, down_valid ? 1 : 0,
-                   child_down.bound, sols.size(), lps, child_down.lb[j],
-                   child_down.ub[j]);
-      }
-      out.bc_stats.lp_solves += lps;
-      out.bc_stats.cuts_added += ca;
-      out.bc_stats.pool_cuts_separated += ps;
-      for (const auto& p : pcu) {
-        p.apply(pc[p.var]);
-      }
-	      for (const auto& s : sols) {
-	        if (adopt_tree_incumbent("down_child_solution", s.x, s.obj,
-	                                 child_down.depth, global_lb)) {
-	          if (opt.verbose && !has_incumbent)
-	            fprintf(stderr, "[B&C] first incumbent at node=%d (down child) obj=%.2f\n",
-	                    static_cast<int>(out.bc_stats.nodes_explored), s.obj);
-	          incumbent_changed_this_node = true;
-	        }
-	      }
-	      for (auto& c : ncuts) {
-	        if (valid_pool_cut(c, nullptr, "down_child_new_cut")) {
-		          child_domain_source_added =
-		              add_cut_to_global_domain_pool(std::move(c.coeff), c.rhs,
-		                                            "down_child_new_cut",
-		                                            c.domain_only,
-		                                            c.validity_scope) ||
-		              child_domain_source_added;
-	        }
-	      }
+    BranchDirectionalObservation down_direction_observation;
+    BranchDirectionalObservation up_direction_observation;
+    const BranchDirectionalObservation* down_direction_ptr = nullptr;
+    const BranchDirectionalObservation* up_direction_ptr = nullptr;
+    if (retained_down_probe.available) {
+      down_direction_observation = {
+          j, false, retained_down_probe.evidence_state,
+          retained_down_probe.observed_gain};
+      down_direction_ptr = &down_direction_observation;
+    }
+    if (retained_up_probe.available) {
+      up_direction_observation = {
+          j, true, retained_up_probe.evidence_state,
+          retained_up_probe.observed_gain};
+      up_direction_ptr = &up_direction_observation;
+    }
+    const double branch_fractionality = xj - std::floor(xj);
+    const auto history_prediction_usable =
+        [](const BranchDirectionalObservation* observation) {
+          return observation == nullptr ||
+                 observation->state == BranchEvidenceState::Predicted ||
+                 observation->state == BranchEvidenceState::UnknownFailure;
+        };
+    const bool down_prediction_available =
+        history_prediction_usable(down_direction_ptr);
+    const bool up_prediction_available =
+        history_prediction_usable(up_direction_ptr);
+    const double predicted_down_gain = compute_directional_branch_score(
+        pc[j], branch_fractionality, false, nullptr);
+    const double predicted_up_gain = compute_directional_branch_score(
+        pc[j], 1.0 - branch_fractionality, true, nullptr);
+    const bool prefer_up = choose_up_branch_first(
+        pc[j], branch_fractionality, down_direction_ptr, up_direction_ptr,
+        has_incumbent);
+    if (prefer_up) {
+      ++out.bc_stats.branch_direction_preferred_up;
+      ++out.bc_stats.branch_direction_first_up;
+    } else {
+      ++out.bc_stats.branch_direction_preferred_down;
+      ++out.bc_stats.branch_direction_first_down;
     }
 
-    {
-		      // Shared node-SF workspace: restore the pristine tree base only when the
-// previous solve left it cuts-augmented; bounds are re-applied inside.
-if (node_sf_cuts_augmented) { node_sf = tree_base_sf; node_sf_cuts_augmented = false; }
-		      auto [valid, pcu, sols, ncuts, lps, ca, ps] =
-	          process_single_child(child_up, true, j,
-	                                std::ceil(xj) - xj, parent_bound,
-		                                node_sf, cut_pool, incumbent_obj, has_incumbent,
-		                                &retained_up_probe);
-      up_valid = valid;
+    bool down_valid = false;
+    bool up_valid = false;
+    bool incumbent_changed_this_node = false;
+    bool child_domain_source_added = false;
+    auto process_direction = [&](bool is_up, int ordinal) {
+      Node& child = is_up ? child_up : child_down;
+      bool& child_valid = is_up ? up_valid : down_valid;
+      StrongBranchProbeResult* retained_probe =
+          is_up ? &retained_up_probe : &retained_down_probe;
+      const double branch_distance =
+          is_up ? std::ceil(xj) - xj : xj - std::floor(xj);
+      const char* direction = is_up ? "up" : "down";
+      const char* solution_source =
+          is_up ? "up_child_solution" : "down_child_solution";
+      const char* cut_source =
+          is_up ? "up_child_new_cut" : "down_child_new_cut";
+
+      // Each direction reuses one workspace but starts from pristine rows.
+      if (node_sf_cuts_augmented) {
+        node_sf = tree_base_sf;
+        node_sf_cuts_augmented = false;
+      }
+      auto [valid, pcu, sols, ncuts, lps, ca, ps] = process_single_child(
+          child, is_up, j, branch_distance, parent_bound, node_sf, cut_pool,
+          incumbent_obj, has_incumbent, retained_probe);
+      child_valid = valid;
       if (trace_bc_timeline) {
         fmt::print(stderr,
-                   "[B&C-CHILD] dir=up depth={} var={} x={:.10g} "
+                   "[B&C-CHILD] dir={} ordinal={} depth={} var={} x={:.10g} "
                    "valid={} bound={:.10g} sols={} lps={} lb={:.10g} "
                    "ub={:.10g}\n",
-                   child_up.depth, j, xj, up_valid ? 1 : 0,
-                   child_up.bound, sols.size(), lps, child_up.lb[j],
-                   child_up.ub[j]);
+                   direction, ordinal, child.depth, j, xj,
+                   child_valid ? 1 : 0, child.bound, sols.size(), lps,
+                   child.lb[j], child.ub[j]);
       }
       out.bc_stats.lp_solves += lps;
       out.bc_stats.cuts_added += ca;
       out.bc_stats.pool_cuts_separated += ps;
-      for (const auto& p : pcu) {
-        p.apply(pc[p.var]);
+      const bool cutoff = std::any_of(
+          pcu.begin(), pcu.end(),
+          [](const PCUpdate& update) { return update.cutoff_count > 0; });
+      if (cutoff) {
+        if (ordinal == 0) ++out.bc_stats.branch_first_child_cutoffs;
+        else ++out.bc_stats.branch_second_child_cutoffs;
       }
-	      for (const auto& s : sols) {
-	        if (adopt_tree_incumbent("up_child_solution", s.x, s.obj,
-	                                 child_up.depth, global_lb)) {
-	          if (opt.verbose && !has_incumbent)
-	            fprintf(stderr, "[B&C] first incumbent at node=%d (up child) obj=%.2f\n",
-	                    static_cast<int>(out.bc_stats.nodes_explored), s.obj);
-	          incumbent_changed_this_node = true;
-	        }
-	      }
-		      for (auto& c : ncuts) {
-		        if (valid_pool_cut(c, nullptr, "up_child_new_cut")) {
-			          child_domain_source_added =
-			              add_cut_to_global_domain_pool(std::move(c.coeff), c.rhs,
-			                                            "up_child_new_cut",
-			                                            c.domain_only,
-			                                            c.validity_scope) ||
-			              child_domain_source_added;
-		        }
-		      }
-		    }
-		    const auto loop_t3 = std::chrono::steady_clock::now();
+      for (const auto& update : pcu) update.apply(pc[update.var]);
+
+      bool incumbent_changed_in_direction = false;
+      for (const auto& solution : sols) {
+        if (adopt_tree_incumbent(solution_source, solution.x, solution.obj,
+                                 child.depth, global_lb)) {
+          incumbent_changed_in_direction = true;
+          incumbent_changed_this_node = true;
+        }
+      }
+      if (ordinal == 0 && incumbent_changed_in_direction) {
+        ++out.bc_stats.branch_first_child_incumbent_updates;
+      }
+      for (auto& cut : ncuts) {
+        if (valid_pool_cut(cut, nullptr, cut_source)) {
+          child_domain_source_added =
+              add_cut_to_global_domain_pool(
+                  std::move(cut.coeff), cut.rhs, cut_source, cut.domain_only,
+                  cut.validity_scope) ||
+              child_domain_source_added;
+        }
+      }
+    };
+    const std::array<bool, 2> direction_order{prefer_up, !prefer_up};
+    for (int ordinal = 0; ordinal < 2; ++ordinal) {
+      if (ipm_node_deadline_hit || simplex_node_deadline_hit) break;
+      process_direction(direction_order[static_cast<std::size_t>(ordinal)],
+                        ordinal);
+    }
+    const auto calibration = compute_branch_estimator_calibration(
+        parent_bound, parent_estimate, down_prediction_available,
+        predicted_down_gain, up_prediction_available, predicted_up_gain,
+        down_valid, child_down.bound, up_valid, child_up.bound);
+    out.bc_stats.node_estimate_calibration_samples += calibration.node_samples;
+    out.bc_stats.node_estimate_predicted_lift_sum +=
+        calibration.node_predicted_lift_sum;
+    out.bc_stats.node_estimate_realized_lift_sum +=
+        calibration.node_realized_lift_sum;
+    out.bc_stats.node_estimate_abs_error_sum +=
+        calibration.node_abs_error_sum;
+    out.bc_stats.node_estimate_squared_error_sum +=
+        calibration.node_squared_error_sum;
+    out.bc_stats.node_estimate_predicted_sq_sum +=
+        calibration.node_predicted_sq_sum;
+    out.bc_stats.node_estimate_realized_sq_sum +=
+        calibration.node_realized_sq_sum;
+    out.bc_stats.node_estimate_cross_sum += calibration.node_cross_sum;
+    out.bc_stats.directional_calibration_samples +=
+        calibration.directional_samples;
+    out.bc_stats.directional_predicted_gain_sum +=
+        calibration.directional_predicted_gain_sum;
+    out.bc_stats.directional_realized_gain_sum +=
+        calibration.directional_realized_gain_sum;
+    out.bc_stats.directional_abs_error_sum +=
+        calibration.directional_abs_error_sum;
+    out.bc_stats.directional_squared_error_sum +=
+        calibration.directional_squared_error_sum;
+    out.bc_stats.directional_rank_samples +=
+        calibration.directional_rank_samples;
+    out.bc_stats.directional_rank_concordant +=
+        calibration.directional_rank_concordant;
+			    const auto loop_t3 = std::chrono::steady_clock::now();
     first_branch_ipm_solve_slots = 0;
 
 			    // HiGHS treats newly learned conflict/cutpool rows as live
@@ -35236,11 +35595,13 @@ if (node_sf_cuts_augmented) { node_sf = tree_base_sf; node_sf_cuts_augmented = f
 
     if (down_valid) {
       child_down.estimate = compute_node_estimate(declared_branchable_indices, child_down.x_relax,
-                                                  pc, opt.int_tol, child_down.bound);
+                                                  pc, opt.int_tol, child_down.bound,
+                                                  opt.node_estimate_aggregation);
     }
     if (up_valid) {
       child_up.estimate = compute_node_estimate(declared_branchable_indices, child_up.x_relax,
-                                                pc, opt.int_tol, child_up.bound);
+                                                pc, opt.int_tol, child_up.bound,
+                                                opt.node_estimate_aggregation);
     }
 
     // The next branch reconstructs a seed from x_relax. Do not retain a second
@@ -35251,10 +35612,10 @@ if (node_sf_cuts_augmented) { node_sf = tree_base_sf; node_sf_cuts_augmented = f
 	    if (down_valid && up_valid) {
 	      const bool push_proof_queue_mode = hybrid_queue_mode_active();
 	      const bool proof_tail_queue_mode = proof_tail_queue_mode_active();
-	      if (proof_tail_queue_mode) {
+      if (proof_tail_queue_mode) {
 	        node_queue.push(std::move(child_down), true);
 	        node_queue.push(std::move(child_up), true);
-      } else if (child_down.bound <= child_up.bound) {
+      } else if (!prefer_up) {
         node_queue.push(std::move(child_up), push_proof_queue_mode);
         node_queue.push_dfs(std::move(child_down));
       } else {
@@ -35275,7 +35636,7 @@ if (node_sf_cuts_augmented) { node_sf = tree_base_sf; node_sf_cuts_augmented = f
       }
     }
 
-    if (ipm_node_deadline_hit) {
+    if (ipm_node_deadline_hit || simplex_node_deadline_hit) {
       out.stats.status = bc_status::kTimeLimitReached;
       break;
     }
@@ -35310,9 +35671,8 @@ if (node_sf_cuts_augmented) { node_sf = tree_base_sf; node_sf_cuts_augmented = f
       }
     }
 
-    // Cheap RINS-like rounded-point check.  The full RINS sub-MIP is reserved
-    // for the near-termination gate below, where improving the incumbent can
-    // immediately change the proof/queue termination inequality.
+    // Cheap RINS-like rounded-point check. This path does not solve a RINS
+    // sub-MIP; it only rounds variables using LP/incumbent agreement.
     if (run_rins_this_node) {
       Eigen::VectorXd xr = cur.x_relax;
       for (int i = 0; i < n; ++i) {
@@ -35483,16 +35843,22 @@ if (node_sf_cuts_augmented) { node_sf = tree_base_sf; node_sf_cuts_augmented = f
       if (use_hybrid_ipm && tid == 0) role = WorkerRole::IPMDiver;
       else if (tid == n_exp - 1 && n_exp >= 2) role = WorkerRole::Prover;
       cts->explorers.emplace_back(explorer_thread,
-          tid, role,
+          solve_environment, tid, role,
           std::ref(cts->shared_queue), std::ref(cts->cut_req_queue),
           std::ref(cts->shared_cp), std::ref(cts->shared_conflicts),
 	          std::ref(cts->shared_sp), std::ref(cts->shared_inc),
 	          std::cref(base_lp), std::cref(pre_cut_root_lp), std::cref(ensure_base_sf()),
 	          std::cref(declared_branchable_cols),
+	          std::cref(parallel_branch_priority),
+	          std::cref(branch_original_cols), orig_n,
+	          callbacks && callbacks->branching_prior
+	              ? &callbacks->branching_prior
+	              : nullptr,
 	          std::cref(clique_table), std::cref(implication_graph),
           std::cref(cts->par_simplex_opt), std::cref(opt),
 	          std::ref(cts->pseudocosts), std::ref(cts->pc_mtx),
           std::ref(cts->atomic_stats), std::ref(cts->should_stop),
+          std::ref(cts->progress_event),
           std::ref(cts->active_explorers), std::ref(cts->active_bounds),
           std::ref(cts->fallback_logger),
           root.basis_hint, cts->steal_pool.get(),
@@ -35501,7 +35867,8 @@ if (node_sf_cuts_augmented) { node_sf = tree_base_sf; node_sf_cuts_augmented = f
     }
     if (cts->use_cut_worker) {
       cts->cut_worker = std::thread(cut_worker_thread,
-          std::ref(cts->cut_req_queue), std::ref(cts->shared_cp),
+          solve_environment, std::ref(cts->cut_req_queue),
+          std::ref(cts->shared_cp),
           std::ref(cts->shared_sp), std::ref(cts->shared_inc),
           std::cref(base_lp), std::cref(opt),
           std::ref(cts->atomic_stats), std::ref(cts->should_stop));
@@ -35521,10 +35888,9 @@ if (node_sf_cuts_augmented) { node_sf = tree_base_sf; node_sf_cuts_augmented = f
   double par_gap_at_stop = kInf;
   const bool trace_parallel_tail =
       trace_bc_timeline || bc_env_flag_enabled("MIPSOLVERS_BC_PAR_TRACE");
+  std::uint64_t par_progress_generation = cts->progress_event.generation();
 
   while (!cts->should_stop.load(std::memory_order_relaxed)) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-
     const auto now = std::chrono::steady_clock::now();
     const double elapsed = std::chrono::duration<double>(now - t0).count();
     const int nodes = cts->atomic_stats.nodes_explored.load(std::memory_order_relaxed);
@@ -35595,13 +35961,19 @@ if (node_sf_cuts_augmented) { node_sf = tree_base_sf; node_sf_cuts_augmented = f
       }
     }
 
+    const std::uint64_t empty_check_generation =
+        cts->progress_event.generation();
     const int deque_nodes = cts->steal_pool ? cts->steal_pool->total_size() : 0;
     if (cts->shared_queue.empty() && deque_nodes == 0 &&
         cts->active_explorers.load(std::memory_order_acquire) == 0) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(5));
       const int deque_nodes2 = cts->steal_pool ? cts->steal_pool->total_size() : 0;
-      if (cts->shared_queue.empty() && deque_nodes2 == 0 &&
-          cts->active_explorers.load(std::memory_order_acquire) == 0) {
+      const bool queue_still_empty = cts->shared_queue.empty();
+      const bool explorers_still_idle =
+          cts->active_explorers.load(std::memory_order_acquire) == 0;
+      const bool no_intervening_progress =
+          cts->progress_event.generation() == empty_check_generation;
+      if (queue_still_empty && deque_nodes2 == 0 && explorers_still_idle &&
+          no_intervening_progress) {
         out.stats.status = bc_status::kSearchQueueExhausted;
         cts->should_stop.store(true, std::memory_order_release);
         if (trace_parallel_tail) {
@@ -35630,6 +36002,18 @@ if (node_sf_cuts_augmented) { node_sf = tree_base_sf; node_sf_cuts_augmented = f
               cts->atomic_stats.cut_requests_dropped.load(std::memory_order_relaxed),
               cts->atomic_stats.cut_worker_cuts.load(std::memory_order_relaxed));
     }
+
+    auto wake_deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
+    if (std::isfinite(opt.time_limit_sec)) {
+      const auto time_deadline =
+          t0 + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                   std::chrono::duration<double>(
+                       std::max(0.0, opt.time_limit_sec)));
+      wake_deadline = std::min(wake_deadline, time_deadline);
+    }
+    (void)cts->progress_event.wait_until_change(par_progress_generation,
+                                                 wake_deadline);
   }
 
   // Shutdown and join threads.
@@ -35681,6 +36065,50 @@ if (node_sf_cuts_augmented) { node_sf = tree_base_sf; node_sf_cuts_augmented = f
       cts->atomic_stats.gap_suboptimal_queue_prune_passes.load();
   out.bc_stats.gap_suboptimal_queue_prunes +=
       cts->atomic_stats.gap_suboptimal_queue_prunes.load();
+  out.bc_stats.branch_direction_preferred_down +=
+      cts->atomic_stats.branch_direction_preferred_down.load();
+  out.bc_stats.branch_direction_preferred_up +=
+      cts->atomic_stats.branch_direction_preferred_up.load();
+  out.bc_stats.branch_direction_first_down +=
+      cts->atomic_stats.branch_direction_first_down.load();
+  out.bc_stats.branch_direction_first_up +=
+      cts->atomic_stats.branch_direction_first_up.load();
+  out.bc_stats.branch_first_child_incumbent_updates +=
+      cts->atomic_stats.branch_first_child_incumbent_updates.load();
+  out.bc_stats.branch_first_child_cutoffs +=
+      cts->atomic_stats.branch_first_child_cutoffs.load();
+  out.bc_stats.branch_second_child_cutoffs +=
+      cts->atomic_stats.branch_second_child_cutoffs.load();
+  out.bc_stats.node_estimate_calibration_samples +=
+      cts->atomic_stats.node_estimate_calibration_samples.load();
+  out.bc_stats.node_estimate_predicted_lift_sum +=
+      cts->atomic_stats.node_estimate_predicted_lift_sum.load();
+  out.bc_stats.node_estimate_realized_lift_sum +=
+      cts->atomic_stats.node_estimate_realized_lift_sum.load();
+  out.bc_stats.node_estimate_abs_error_sum +=
+      cts->atomic_stats.node_estimate_abs_error_sum.load();
+  out.bc_stats.node_estimate_squared_error_sum +=
+      cts->atomic_stats.node_estimate_squared_error_sum.load();
+  out.bc_stats.node_estimate_predicted_sq_sum +=
+      cts->atomic_stats.node_estimate_predicted_sq_sum.load();
+  out.bc_stats.node_estimate_realized_sq_sum +=
+      cts->atomic_stats.node_estimate_realized_sq_sum.load();
+  out.bc_stats.node_estimate_cross_sum +=
+      cts->atomic_stats.node_estimate_cross_sum.load();
+  out.bc_stats.directional_calibration_samples +=
+      cts->atomic_stats.directional_calibration_samples.load();
+  out.bc_stats.directional_predicted_gain_sum +=
+      cts->atomic_stats.directional_predicted_gain_sum.load();
+  out.bc_stats.directional_realized_gain_sum +=
+      cts->atomic_stats.directional_realized_gain_sum.load();
+  out.bc_stats.directional_abs_error_sum +=
+      cts->atomic_stats.directional_abs_error_sum.load();
+  out.bc_stats.directional_squared_error_sum +=
+      cts->atomic_stats.directional_squared_error_sum.load();
+  out.bc_stats.directional_rank_samples +=
+      cts->atomic_stats.directional_rank_samples.load();
+  out.bc_stats.directional_rank_concordant +=
+      cts->atomic_stats.directional_rank_concordant.load();
 
   if (cts->steal_pool) {
     out.bc_stats.work_steals = cts->steal_pool->get_total_steals();
@@ -36025,7 +36453,8 @@ if (node_sf_cuts_augmented) { node_sf = tree_base_sf; node_sf_cuts_augmented = f
   }
 
   if (out.bc_stats.propagation_calls > 0 &&
-      (opt.verbose || n >= 1000 || presolved_m >= 1000)) {
+      (opt.verbose ||
+       bc_env_flag_enabled("MIPSOLVERS_BC_PROPAGATION_PROFILE"))) {
     const std::uint64_t actual_rows = out.bc_stats.propagation_ineq_rows_visited +
                                       out.bc_stats.propagation_eq_rows_visited;
     const double visit_ratio = out.bc_stats.propagation_baseline_full_scan_rows > 0
@@ -36236,7 +36665,7 @@ if (node_sf_cuts_augmented) { node_sf = tree_base_sf; node_sf_cuts_augmented = f
       obj_val += orig_lp.c[j] * out.x[j];
     // The reduced model folds constants out of the objective (presolve
     // reductions), so the internal-space best_obj/best_bound diverge from
-    // the original-space objective by that constant — showing up as a fake
+    // the original-space objective by that constant — showing up as a spurious
     // 7-21% "gap" on proven-optimal solves.  Shift the reported bookkeeping
     // by the same delta to keep all three in one (original) space.
     const double obj_delta = obj_val - out.stats.objective;
@@ -36357,18 +36786,78 @@ BCResult detail::solve_minlp_bc_legacy_core(const MINLPModel& prob, const BCOpti
 }
 
 // ─── Extended (warm-start + callbacks) overloads ─────────────────────────
-//
-// These entry points accept a BCWarmStart payload and a BCCallbacks record
-// for machine-learning / policy integration. The current implementation
-// honours the post-solve event hook and the hyperparameter-tuner hook;
-// branching-prior, node-selector, and cut-selector hooks are wired to the
-// engine in incremental phases — when not yet honoured internally they are
-// stored on the options stream and silently ignored (no behaviour change).
-//
-// The warm-start payload is validated for size consistency against the
-// presolved model; mismatches are logged and discarded, not raised.
 
 namespace {
+
+double finite_nonzero_range(const Eigen::VectorXd& values) {
+  double smallest = std::numeric_limits<double>::infinity();
+  double largest = 0.0;
+  for (int i = 0; i < values.size(); ++i) {
+    const double value = std::abs(values[i]);
+    if (!std::isfinite(value) || value == 0.0) continue;
+    smallest = std::min(smallest, value);
+    largest = std::max(largest, value);
+  }
+  return std::isfinite(smallest) ? largest / smallest : 0.0;
+}
+
+double combined_matrix_range(const Eigen::SparseMatrix<double>& first,
+                             const Eigen::SparseMatrix<double>& second) {
+  double smallest = std::numeric_limits<double>::infinity();
+  double largest = 0.0;
+  auto scan = [&](const Eigen::SparseMatrix<double>& matrix) {
+    for (int col = 0; col < matrix.outerSize(); ++col) {
+      for (Eigen::SparseMatrix<double>::InnerIterator it(matrix, col); it;
+           ++it) {
+        const double value = std::abs(it.value());
+        if (!std::isfinite(value) || value == 0.0) continue;
+        smallest = std::min(smallest, value);
+        largest = std::max(largest, value);
+      }
+    }
+  };
+  scan(first);
+  scan(second);
+  return std::isfinite(smallest) ? largest / smallest : 0.0;
+}
+
+double median_row_nnz(const Eigen::SparseMatrix<double>& first,
+                      const Eigen::SparseMatrix<double>& second) {
+  const int first_rows = static_cast<int>(first.rows());
+  const int rows = first_rows + static_cast<int>(second.rows());
+  if (rows == 0) return 0.0;
+  std::vector<int> counts(static_cast<std::size_t>(rows), 0);
+  auto scan = [&](const Eigen::SparseMatrix<double>& matrix, int offset) {
+    for (int col = 0; col < matrix.outerSize(); ++col) {
+      for (Eigen::SparseMatrix<double>::InnerIterator it(matrix, col); it;
+           ++it) {
+        if (it.value() != 0.0) {
+          ++counts[static_cast<std::size_t>(offset + it.row())];
+        }
+      }
+    }
+  };
+  scan(first, 0);
+  scan(second, first_rows);
+  std::sort(counts.begin(), counts.end());
+  const std::size_t middle = counts.size() / 2;
+  if (counts.size() % 2 != 0) return counts[middle];
+  return 0.5 * static_cast<double>(counts[middle - 1] + counts[middle]);
+}
+
+double lp_rhs_range(const LPModel& lp) {
+  std::vector<double> values;
+  values.reserve(static_cast<std::size_t>(lp.b.size() + lp.beq.size() +
+                                          lp.row_lhs.size()));
+  for (int i = 0; i < lp.b.size(); ++i) values.push_back(lp.b[i]);
+  for (int i = 0; i < lp.beq.size(); ++i) values.push_back(lp.beq[i]);
+  for (int i = 0; i < lp.row_lhs.size(); ++i) {
+    if (std::isfinite(lp.row_lhs[i])) values.push_back(lp.row_lhs[i]);
+  }
+  if (values.empty()) return 0.0;
+  Eigen::Map<const Eigen::VectorXd> mapped(values.data(), values.size());
+  return finite_nonzero_range(mapped);
+}
 
 BCInstanceFeatures compute_instance_features(const MIPModel& prob) {
   const LPModel& lp = prob.linear_part;
@@ -36394,7 +36883,119 @@ BCInstanceFeatures compute_instance_features(const MIPModel& prob) {
     for (int i = 0; i < lp.c.size(); ++i) if (lp.c[i] != 0.0) ++cnnz;
     f.obj_density = static_cast<double>(cnnz) / static_cast<double>(f.n_vars);
   }
+  f.row_density_median = median_row_nnz(lp.A, lp.Aeq);
+  f.obj_range_ratio = finite_nonzero_range(lp.c);
+  f.rhs_range_ratio = lp_rhs_range(lp);
+  f.coeff_range_ratio = combined_matrix_range(lp.A, lp.Aeq);
   return f;
+}
+
+BCInstanceFeatures compute_instance_features(const MINLPModel& prob) {
+  const NLPModel& nlp = prob.nonlinear_part;
+  BCInstanceFeatures f;
+  f.n_vars = static_cast<int>(nlp.vars.size());
+  f.n_bin = static_cast<int>(prob.binary_idx.size());
+  f.n_int = static_cast<int>(prob.integer_idx.size());
+
+  Eigen::VectorXd x = nlp.x0;
+  if (x.size() != f.n_vars) x = Eigen::VectorXd::Zero(f.n_vars);
+  Eigen::VectorXd inequalities;
+  Eigen::VectorXd equalities;
+  if (nlp.g) nlp.g(x, inequalities);
+  if (nlp.h) nlp.h(x, equalities);
+  f.n_rows = static_cast<int>(inequalities.size() + equalities.size());
+  f.n_eq = static_cast<int>(equalities.size());
+
+  Eigen::SparseMatrix<double> jac_g(inequalities.size(), f.n_vars);
+  Eigen::SparseMatrix<double> jac_h(equalities.size(), f.n_vars);
+  if (nlp.jac_g) nlp.jac_g(x, jac_g);
+  if (nlp.jac_h) nlp.jac_h(x, jac_h);
+  f.n_nnz = static_cast<int>(jac_g.nonZeros() + jac_h.nonZeros());
+  f.row_density_median = median_row_nnz(jac_g, jac_h);
+  f.coeff_range_ratio = combined_matrix_range(jac_g, jac_h);
+
+  if (nlp.grad && f.n_vars > 0) {
+    Eigen::VectorXd gradient = Eigen::VectorXd::Zero(f.n_vars);
+    nlp.grad(x, gradient);
+    if (gradient.size() == f.n_vars) {
+      int nonzeros = 0;
+      for (int i = 0; i < gradient.size(); ++i) {
+        if (gradient[i] != 0.0) ++nonzeros;
+      }
+      f.obj_density = static_cast<double>(nonzeros) / f.n_vars;
+      f.obj_range_ratio = finite_nonzero_range(gradient);
+    }
+  }
+  return f;
+}
+
+MIPModel install_primal_warm_start(const MIPModel& prob,
+                                   const BCWarmStart& ws) {
+  MIPModel solve_prob = prob;
+  if (ws.primal_hints.empty()) return solve_prob;
+
+  const int n = static_cast<int>(prob.linear_part.c.size());
+  bool selected = false;
+  double selected_obj = prob.linear_part.sense == Sense::Minimize
+                            ? std::numeric_limits<double>::infinity()
+                            : -std::numeric_limits<double>::infinity();
+  for (const BCPrimalHint& hint : ws.primal_hints) {
+    if (hint.x.size() != n || !hint.x.allFinite()) {
+      throw std::invalid_argument(
+          "BCWarmStart primal hint must be finite and match the original "
+          "MILP column count");
+    }
+    const double objective = prob.linear_part.c.dot(hint.x);
+    const bool better = !selected ||
+        (prob.linear_part.sense == Sense::Minimize
+             ? objective < selected_obj
+             : objective > selected_obj);
+    if (better) {
+      solve_prob.initial_solution = hint.x;
+      selected_obj = objective;
+      selected = true;
+    }
+  }
+  return solve_prob;
+}
+
+MINLPModel install_primal_warm_start(const MINLPModel& prob,
+                                     const BCWarmStart& ws) {
+  MINLPModel solve_prob = prob;
+  if (ws.primal_hints.empty()) return solve_prob;
+
+  const int n = static_cast<int>(prob.nonlinear_part.vars.size());
+  for (const BCPrimalHint& hint : ws.primal_hints) {
+    if (hint.x.size() != n || !hint.x.allFinite()) {
+      throw std::invalid_argument(
+          "BCWarmStart primal hint must be finite and match the original "
+          "MINLP variable count");
+    }
+  }
+  solve_prob.nonlinear_part.x0 = ws.primal_hints.front().x;
+  return solve_prob;
+}
+
+void validate_milp_callbacks(const BCCallbacks& cbs,
+                             const BCOptions& opt) {
+  if (cbs.branching_prior && opt.strict_highs_mip_contract) {
+    throw std::invalid_argument(
+        "BC branching_prior cannot control the strict HiGHS MIP tree; "
+        "install static MIP branching priorities instead");
+  }
+  if (cbs.dynamic_node_cut && !opt.strict_highs_mip_contract) {
+    throw std::invalid_argument(
+        "BC dynamic_node_cut is supported only by the strict HiGHS MIP "
+        "node lifecycle");
+  }
+}
+
+void validate_minlp_callbacks(const BCCallbacks& cbs) {
+  if (cbs.branching_prior || cbs.dynamic_node_cut) {
+    throw std::invalid_argument(
+        "MINLP currently supports hyperparam_tuner and post_solve callbacks "
+        "only");
+  }
 }
 
 }  // namespace
@@ -36404,20 +37005,18 @@ BCResult detail::solve_milp_bc_legacy_core(const MIPModel&    prob,
                                            const BCWarmStart& ws,
                                            const BCCallbacks& cbs) {
   BCOptions opt = opt_in;
+  MIPModel solve_prob = install_primal_warm_start(prob, ws);
   BCInstanceFeatures feat;
   bool have_feat = false;
   if (cbs.hyperparam_tuner) {
-    feat = compute_instance_features(prob);
+    feat = compute_instance_features(solve_prob);
     have_feat = true;
     opt = cbs.hyperparam_tuner(feat, opt, /*prev_stats=*/nullptr);
   }
-  // Warm-start payload and branching-prior / cut-selector / node-selector
-  // hooks are not yet consumed by the inner engine. Dynamic node cuts are
-  // consumed only by the strict in-process HiGHS node-LP lifecycle.
-  (void)ws;
-  BCResult out = branch_and_cut_lp(prob, opt, &cbs);
+  validate_milp_callbacks(cbs, opt);
+  BCResult out = branch_and_cut_lp(solve_prob, opt, &cbs);
   if (cbs.post_solve) {
-    if (!have_feat) feat = compute_instance_features(prob);
+    if (!have_feat) feat = compute_instance_features(solve_prob);
     cbs.post_solve(feat, opt, out.bc_stats);
   }
   return out;
@@ -36428,11 +37027,18 @@ BCResult detail::solve_minlp_bc_legacy_core(const MINLPModel&  prob,
                                             const BCWarmStart& ws,
                                             const BCCallbacks& cbs) {
   BCOptions opt = opt_in;
-  (void)ws;
-  (void)cbs;  // MINLP path does not yet consume hooks; forward-compat only.
-  BCResult out = branch_and_cut_nlp(prob, opt);
+  validate_minlp_callbacks(cbs);
+  MINLPModel solve_prob = install_primal_warm_start(prob, ws);
+  BCInstanceFeatures feat;
+  bool have_feat = false;
+  if (cbs.hyperparam_tuner) {
+    feat = compute_instance_features(solve_prob);
+    have_feat = true;
+    opt = cbs.hyperparam_tuner(feat, opt, /*prev_stats=*/nullptr);
+  }
+  BCResult out = branch_and_cut_nlp(solve_prob, opt);
   if (cbs.post_solve) {
-    BCInstanceFeatures feat;  // MINLP feature extraction TBD
+    if (!have_feat) feat = compute_instance_features(solve_prob);
     cbs.post_solve(feat, opt, out.bc_stats);
   }
   return out;

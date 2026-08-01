@@ -112,6 +112,8 @@ struct BCOptions {
   // ═══════════════════════════════════════════════════════════════════════
   BranchingStrategy branching{BranchingStrategy::Pseudocost};
   NodeSelection     node_sel{NodeSelection::Hybrid};
+  NodeEstimateAggregation node_estimate_aggregation{
+      NodeEstimateAggregation::Sum};
 
   // ═══════════════════════════════════════════════════════════════════════
   // LP solver selection
@@ -250,10 +252,9 @@ struct BCOptions {
   bool parallel_proof_on_incumbent_gap{true};
   /// Require an explicit live-tree certificate instead of pruning queued nodes
   /// solely because their lower bound is within the requested relative MIP gap.
-  /// Benchmark conformance keeps this enabled so objective audits compare the
-  /// same integer frontier as HiGHS/Gurobi rather than a tolerance-admissible
-  /// incumbent.
-  bool require_tree_exhaustion_certificate{true};
+  /// This proof mode is opt-in; normal solves honor gap_tol like HiGHS, SCIP,
+  /// and Gurobi.
+  bool require_tree_exhaustion_certificate{false};
   /// @brief Experimental: after reduced-cost fixing, run one additional
   /// generic propagation pass on the tightened node domain. Disabled by
   /// default because the current legacy path would need an immediate LP
@@ -441,16 +442,6 @@ struct BCOptions {
   bool enable_implied_integer_cut_strengthening{false};
 
   // ═══════════════════════════════════════════════════════════════════════
-  // HiGHS-alignment controlled benchmark modes
-  // ═══════════════════════════════════════════════════════════════════════
-  /// Use implied-bound-first / clique-first separation ordering (HiGHS style).
-  bool highs_style_root_separation{false};
-  /// Use HiGHS-style pseudocost scoring (HighsPseudoCostState).
-  bool highs_style_branch_scoring{false};
-  /// Use HiGHS-style reliability probing schedule.
-  bool highs_style_reliability_probing{false};
-
-  // ═══════════════════════════════════════════════════════════════════════
   // Heuristic frequencies (sequential tree)
   // ═══════════════════════════════════════════════════════════════════════
   int crossover_heuristic_freq{100};
@@ -491,24 +482,13 @@ struct BCOptions {
   // ═══════════════════════════════════════════════════════════════════════
   // Lift-and-project disjunctive cuts (CGLP)
   //
-  // Scope (multi-phase rollout; see
-  // /memories/repo/cglp-disjunctive-cuts-roadmap.md for the full plan):
-  //
-  //   Phase 1 (current): API + options + pipeline gate; stub implementation
-  //                      that always returns "no cut generated".
-  //   Phase 2: CGLP LP model building (constraint matrices for both sides
-  //            of the 0-1 disjunction + normalization row).
-  //   Phase 3: LP solve via dual simplex + cut extraction (α, β) with
-  //            sign/efficacy validation.
-  //   Phase 4: Cut strengthening (lifting, canonicalization, duplicate
-  //            rejection) and integration into the global cut pool.
-  //   Phase 5: Parallel CGLP generation across top-k fractional binaries;
-  //            deployment beyond the root node if warranted.
-  //
-  // Default OFF — do not flip without finishing Phase 3 and re-validating
-  // the unexpected-fault resilience benchmark against Gurobi.
+  // Implemented scope: root-node binary disjunctions, explicit CGLP solve,
+  // fallback branch validation, efficacy filtering, and row deduplication.
+  // Default OFF because no fixed-cohort experiment has yet demonstrated a
+  // net wall-time or final-gap improvement. Tree separation and parallel
+  // candidate solves are not part of this option's contract.
   // ═══════════════════════════════════════════════════════════════════════
-  /// Master switch. When false, the CGLP entry point is not invoked at all.
+  /// Experimental master switch. False unless explicitly requested.
   bool enable_cglp_cuts{false};
   /// Maximum fractional binary variables to run CGLP on per root pass.
   int cglp_max_candidates{5};
@@ -520,26 +500,6 @@ struct BCOptions {
   double cglp_min_efficacy{1e-4};
   /// Time budget (seconds) for the entire CGLP pass in one root cut round.
   double cglp_time_limit_sec{2.0};
-  /// Normalization choice for the CGLP master problem.
-  /// 0 = standard (||multiplier vector||_1 = 1),
-  /// 1 = alpha-normalized (||α||_1 + |β| = 1),
-  /// 2 = trust-region around the incumbent fractional point.
-  int cglp_normalization{0};
-  /// [Scaffold — Phase 4 global dedup, NOT YET IMPLEMENTED]
-  ///
-  /// When true, admitted CGLP cuts will also be registered in the shared
-  /// CutPool so they survive across root cut rounds and are re-separated at
-  /// tree nodes (aligned with the SharedCutPool discipline in bc_parallel.cpp).
-  ///
-  /// Prerequisites before enabling:
-  ///   1. A/B experiment on resilience benchmark confirms CGLP cuts close gap.
-  ///   2. Add `add_sparse_rows_to_lp` + `CutPool::add()` calls in
-  ///      `add_cglp_cuts_root()` guarded by this flag.
-  ///   3. Regression suite passes with new parallel dedup paths.
-  ///
-  /// Keep FALSE until all three prerequisites are met.
-  bool cglp_register_in_cut_pool{false};
-
   // ═══════════════════════════════════════════════════════════════════════
   // Probing
   // ═══════════════════════════════════════════════════════════════════════
@@ -823,7 +783,6 @@ struct BCOptions {
   // High-performance auto-tuning knobs (2026-Q2)
   // ═══════════════════════════════════════════════════════════════════════
   // Problem classification thresholds
-  int huge_problem_n_threshold{90000};
   /// P7.7: Lowered from 10000→8000 and binary threshold from 2000→500 to
   /// include the 118-bus SCUC (m=10524, n_bin=1296) in the UC-like bypass
   /// that skips feasibility pump and progressive rounding.  Analysis shows
@@ -832,8 +791,6 @@ struct BCOptions {
   /// produces an infeasible dispatch subproblem, so pump iterations are wasted.
   int large_uc_row_threshold{8000};
   int large_uc_binary_threshold{500};
-  int large_uc_force_ipm_row_threshold{25000};
-  int large_uc_force_ipm_bin_threshold{1000};
   int near_integral_n_threshold{10000};
   int near_integral_max_frac_bins{32};
 
@@ -867,7 +824,6 @@ struct BCOptions {
 
   // Uniform numerical tolerances
   double heuristic_feasibility_tol{1e-6};
-  double simplex_tol_floor{1e-10};
 
   // Pump/repair wall budgets (large UC-like)
   double pump_wall_budget_cap_large{2.5};

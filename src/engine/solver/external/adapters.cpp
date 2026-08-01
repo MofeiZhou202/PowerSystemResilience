@@ -3411,7 +3411,7 @@ SolveResult GurobiAdapter::solve_lp(const LPModel& prob) const {
   SolveResult out;
   out.stats.solver_name = name();
 #ifndef HACDCPF_HAVE_GUROBI
-  (void)prob;  // Gurobi disabled at compile time; param unused in stub
+  (void)prob;  // Gurobi disabled at compile time; parameter is unavailable.
 #endif
 #ifdef HACDCPF_HAVE_GUROBI
   const auto t0 = std::chrono::steady_clock::now();

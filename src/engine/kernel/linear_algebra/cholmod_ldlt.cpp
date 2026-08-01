@@ -1,8 +1,9 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // CholmodLDLT — implementation (SuiteSparse CHOLMOD, int64 cholmod_l_* API).
 //
-// Only compiled when MIPSOLVERS_HAVE_CHOLMOD is defined; the class is a
-// no-op stub otherwise so call sites can be written unconditionally.
+// Only compiled when MIPSOLVERS_HAVE_CHOLMOD is defined; without CHOLMOD the
+// capability probe and all operations return false so callers select another
+// factorization backend.
 // ═══════════════════════════════════════════════════════════════════════════
 
 #include "mipsolvers/engine/kernel/linear_algebra/cholmod_ldlt.hpp"

@@ -28,6 +28,7 @@ struct ConcurrentTreeState {
   CutRequestQueue cut_req_queue;
   AtomicBCStats atomic_stats;
   std::atomic<bool> should_stop{false};
+  ParallelProgressEvent progress_event;
   std::atomic<double> optimality_limit{kInf};
   std::atomic<int> active_explorers{0};
   ActiveNodeBounds active_bounds;
@@ -68,6 +69,7 @@ struct ConcurrentTreeState {
 
   void shutdown_and_join() {
     should_stop.store(true, std::memory_order_release);
+    progress_event.notify();
     shared_queue.request_shutdown();
     cut_req_queue.request_shutdown();
     for (auto& t : explorers) {

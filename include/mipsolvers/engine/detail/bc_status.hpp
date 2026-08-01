@@ -8,7 +8,13 @@ namespace mipsolvers::engine::detail::bc_status {
 inline constexpr char kNotStarted[] = "Not started";
 inline constexpr char kEmptyMilpModel[] = "Empty MILP model";
 inline constexpr char kEmptyMinlpModel[] = "Empty MINLP model";
+inline constexpr char kInvalidIntegralityIndex[] = "Invalid MILP integrality index";
+inline constexpr char kConflictingIntegralityDeclaration[] =
+    "Conflicting MILP integrality declaration";
+inline constexpr char kUnsupportedFreeIntegerVariable[] =
+    "Unsupported free integer variable in native B&C";
 inline constexpr char kInfeasiblePapiloPresolve[] = "Infeasible (PaPILO presolve)";
+inline constexpr char kInfeasibleNativePresolve[] = "Infeasible (native presolve)";
 inline constexpr char kInvalidReducedIncumbent[] = "Invalid reduced-space incumbent";
 inline constexpr char kInvalidPapiloPostsolveIncumbent[] = "Invalid incumbent after PaPILO postsolve";
 inline constexpr char kInfeasibleVariableBounds[] = "Infeasible variable bounds";

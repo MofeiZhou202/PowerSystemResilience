@@ -2,6 +2,7 @@
 /// @brief Legacy MINLP branch-and-cut implementation.
 
 #include "mipsolvers/engine/detail/bc_minlp_legacy.hpp"
+#include "mipsolvers/engine/detail/bc_env_options.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -227,7 +228,11 @@ int choose_minlp_branch_var(const BCOptions& opt,
 // ════════════════════════════════════════════════════════════════════════════
 
 BCResult branch_and_cut_nlp_impl(const MINLPModel& prob, const BCOptions& opt) {
+  auto solve_environment = current_bc_env_options();
+  if (!solve_environment) solve_environment = capture_bc_env_options();
+  ScopedBcEnvOptions environment_scope(solve_environment);
   BCResult out;
+  out.effective_environment = solve_environment->active_settings();
   out.stats.solver_name = "NativeBranchAndCutMINLP";
 
   const auto t0 = std::chrono::steady_clock::now();

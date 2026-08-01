@@ -160,15 +160,23 @@ nlohmann::json options_to_json(const engine::BCOptions& options) {
 nlohmann::json stats_to_json(const engine::BCStats& stats) {
   return nlohmann::json{
       {"status", stats.status},
+      {"collection_scope", stats.collection_scope},
+      {"lp_solve_count_available", stats.lp_solve_count_available},
+      {"incumbent_timeline_available", stats.incumbent_timeline_available},
+      {"cut_diagnostics_available", stats.cut_diagnostics_available},
       {"nodes_explored", stats.nodes_explored},
-      {"lp_solves", stats.lp_solves},
-      {"cuts_added", stats.cuts_added},
-      {"root_cuts_added", stats.root_cuts_added},
+      {"lp_solves", stats.lp_solve_count_available
+                        ? nlohmann::json(stats.lp_solves) : nlohmann::json(nullptr)},
+      {"cuts_added", stats.cut_diagnostics_available
+                        ? nlohmann::json(stats.cuts_added) : nlohmann::json(nullptr)},
+      {"root_cuts_added", stats.cut_diagnostics_available
+                             ? nlohmann::json(stats.root_cuts_added) : nlohmann::json(nullptr)},
       {"best_bound", stats.best_bound},
       {"best_obj", stats.best_obj},
       {"gap", stats.gap},
       {"runtime_sec", stats.runtime_sec},
-      {"incumbent_updates", stats.incumbent_updates},
+      {"incumbent_updates", stats.incumbent_timeline_available
+                                ? nlohmann::json(stats.incumbent_updates) : nlohmann::json(nullptr)},
       {"parallel_effective_threads", stats.parallel_effective_threads}};
 }
 

@@ -366,8 +366,7 @@ class HighsTimer {
   using wall_clock = std::chrono::high_resolution_clock;
   using time_point = wall_clock::time_point;
 
-  // Dummy positive start time for clocks - so they can be checked as
-  // having been stopped
+  // Positive sentinel start time lets callers distinguish stopped clocks.
   const double initial_clock_start = 1.0;
 
   HighsInt num_clock = 0;

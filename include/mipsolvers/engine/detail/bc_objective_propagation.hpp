@@ -1789,10 +1789,62 @@ struct ObjectivePropagationState {
 	      return reason;
 	    };
 
+    std::vector<int> active_event_ids;
+    active_event_ids.reserve(
+        std::min<std::size_t>(implied_events.size(), 256));
+    std::vector<std::uint32_t> event_stamps(implied_events.size(), 0);
+    std::uint32_t event_stamp = 0;
+    auto collect_active_event_ids = [&]() {
+      active_event_ids.clear();
+      const std::size_t expected_literal_buckets =
+          static_cast<std::size_t>(2 * n);
+      bool index_valid =
+          implied_events_by_literal.size() == expected_literal_buckets;
+      if (index_valid) {
+        ++event_stamp;
+        if (event_stamp == 0) {
+          std::fill(event_stamps.begin(), event_stamps.end(), 0);
+          event_stamp = 1;
+        }
+        auto append_bucket = [&](std::size_t key) {
+          for (int event_id : implied_events_by_literal[key]) {
+            if (event_id < 0 ||
+                event_id >= static_cast<int>(implied_events.size())) {
+              index_valid = false;
+              return;
+            }
+            auto& stamp = event_stamps[static_cast<std::size_t>(event_id)];
+            if (stamp == event_stamp) continue;
+            stamp = event_stamp;
+            active_event_ids.push_back(event_id);
+          }
+        };
+        for (int col = 0; col < n && index_valid; ++col) {
+          if (ub[col] <= tol) {
+            append_bucket(static_cast<std::size_t>(2 * col));
+          }
+          if (index_valid && lb[col] >= 1.0 - tol) {
+            append_bucket(static_cast<std::size_t>(2 * col + 1));
+          }
+        }
+      }
+      if (!index_valid) {
+        active_event_ids.clear();
+        active_event_ids.reserve(implied_events.size());
+        for (int event_id = 0;
+             event_id < static_cast<int>(implied_events.size()); ++event_id) {
+          active_event_ids.push_back(event_id);
+        }
+      }
+    };
+
 	    for (int round = 0; round < 4; ++round) {
       Activity act = compute_activity(lb, ub, n);
       int round_tightened = 0;
-      for (const ImpliedContributionEvent& event : implied_events) {
+      collect_active_event_ids();
+      for (int event_id : active_event_ids) {
+        const ImpliedContributionEvent& event =
+            implied_events[static_cast<std::size_t>(event_id)];
         bool all_active = true;
         std::vector<BranchDomainLiteral> reason;
         reason.reserve(event.literals.size());

@@ -10,6 +10,7 @@
 
 #include "mipsolvers/engine/branch_and_cut.hpp"
 #include "mipsolvers/engine/detail/bc_types.hpp"
+#include "mipsolvers/engine/detail/bc_env_options.hpp"
 #include "mipsolvers/engine/detail/bc_threading.hpp"
 #include "mipsolvers/engine/detail/bc_fallback.hpp"
 #include "mipsolvers/engine/detail/bc_solver_dispatch.hpp"
@@ -20,6 +21,7 @@ namespace mipsolvers::engine::detail {
 
 /// @brief Explorer thread: pops nodes, solves LP relaxations, branches.
 void explorer_thread(
+    std::shared_ptr<const BcEnvOptions> environment,
     int thread_id,
     WorkerRole role,
     ThreadSafeNodeQueue& node_queue,
@@ -32,6 +34,10 @@ void explorer_thread(
 	    const LPModel& pre_cut_lp,
 	    const StandardFormLP& base_sf,
 	    const std::vector<char>& branchable_cols,
+	    const std::vector<int>& branch_priority,
+	    const std::vector<int>& branch_original_cols,
+	    int original_col_count,
+	    const BCBranchingPriorFn* dynamic_branching_prior,
 	    const CliqueTable& clique_table,
     const BinaryImplicationGraph& implication_graph,
     const SimplexOptions& simplex_opt,
@@ -40,6 +46,7 @@ void explorer_thread(
     std::mutex& pc_mtx,
     AtomicBCStats& stats,
     std::atomic<bool>& should_stop,
+    ParallelProgressEvent& progress_event,
     std::atomic<int>& active_explorers,
     ActiveNodeBounds& active_bounds,
     FallbackLogger& fallback_logger,
@@ -51,6 +58,7 @@ void explorer_thread(
 
 /// @brief Cut worker thread: generates GMI cuts from LP results.
 void cut_worker_thread(
+    std::shared_ptr<const BcEnvOptions> environment,
     CutRequestQueue& cut_queue,
     SharedCutPool& shared_cp,
     SharedSolutionPool& shared_sp,

@@ -11,8 +11,9 @@ namespace mipsolvers::engine::strategy {
 /**
  * @brief Maps solutions from presolved space back to original problem space
  *
- * Reverses the transformations applied by PresolveManager to produce
- * a solution for the original problem.
+ * Reverses an explicit `PresolveMapping`. Invalid, incomplete, or
+ * dimensionally inconsistent mappings raise `std::invalid_argument` instead
+ * of returning a partially reconstructed solution.
  */
 class PostsolveManager {
  public:
@@ -45,7 +46,11 @@ class PostsolveManager {
                const PresolveMapping& mapping) const;
 
   /**
-   * @brief Validate that postsolve maintains feasibility
+   * @brief Validate result-level postsolve invariants
+   *
+   * This checks success state, vector dimensions/finiteness, and objective
+   * agreement. Constraint feasibility requires the original model and is
+   * therefore audited by the solver-specific postsolve path.
    */
   bool validate(const SolveResult& original_result,
                 const SolveResult& presolved_result,

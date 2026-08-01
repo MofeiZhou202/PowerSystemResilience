@@ -27,13 +27,6 @@
 
 using std::fabs;
 
-namespace {
-bool hacdcpfRootOracleStopAfterEvaluateRoot() {
-  const char* env = std::getenv("HACDCPF_ROOT_ORACLE_STOP_AFTER_EVALUATE_ROOT");
-  return env != nullptr && env[0] != '\0' && env[0] != '0';
-}
-}
-
 HighsMipSolver::HighsMipSolver(HighsCallback& callback,
                                const HighsOptions& options, const HighsLp& lp,
                                const HighsSolution& solution, bool submip,
@@ -210,7 +203,8 @@ restart:
       highsLogUser(options_mip_->log_options, HighsLogType::kInfo,
                    "MIP-Timing: %11.2g - completed evaluate root node\n",
                    timer_.read());
-    if (!submip && hacdcpfRootOracleStopAfterEvaluateRoot()) {
+    if (!submip &&
+        options_mip_->hacdcpf_root_oracle_stop_after_evaluate_root) {
       if (modelstatus_ == HighsModelStatus::kNotset)
         modelstatus_ = HighsModelStatus::kTimeLimit;
       return;

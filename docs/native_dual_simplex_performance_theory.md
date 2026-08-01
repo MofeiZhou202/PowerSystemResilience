@@ -430,6 +430,12 @@ and after. Raw results are
 
 ## 11. Reliability branching and reusable strong-branch states
 
+The complete derivation, failure-state algebra, candidate loop, reuse
+contracts, test matrix, implementation phases, and acceptance gates are now
+recorded in
+`docs/native_milp_reliability_branching_theory_and_plan.md`. The remainder of
+this section is the shorter historical summary of the first implementation.
+
 Let the parent relaxation value be \(z\), let \(x_j=k+f\), and let the two
 child relaxation values be \(z^-\) and \(z^+\). A pseudocost observation is a
 cost per unit displacement, not the complete child gain:

@@ -391,14 +391,17 @@ SimplexResult solve_lp_with_basis(const LPModel& lp,
 
 /// Describes a bound change for incremental warm-start in B&C.
 struct BoundChangeInfo {
-  int var_idx;       ///< Original variable index
-  double delta;      ///< Change in bound value (new - old)
-  bool is_lb;        ///< true = lower bound changed, false = upper bound changed
+  int var_idx{-1};   ///< Original variable index
+  double delta{0.0}; ///< Legacy diagnostic delta (new - old when finite)
+  bool is_lb{false}; ///< true = lower bound changed, false = upper bound changed
+  double old_value{std::numeric_limits<double>::quiet_NaN()};
+  double new_value{std::numeric_limits<double>::quiet_NaN()};
 };
 
 // Fast-path incremental update when exact bound changes are known.
-// Avoids the O(n) scan to detect which bounds changed.
-void update_standard_form_bounds_incremental(
+// Avoids the O(n) scan to detect which bounds changed. Returns false without
+// modifying sf if a change lacks exact old/new values or does not match sf.
+bool update_standard_form_bounds_incremental(
     StandardFormLP& sf,
     const LPModel& lp,
     const std::vector<BoundChangeInfo>& changes);

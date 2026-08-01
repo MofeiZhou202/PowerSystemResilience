@@ -314,18 +314,32 @@ nlohmann::json solve_stats_to_json(const Stats& stats) {
 nlohmann::json bc_stats_to_json(const mipsolvers::engine::BCStats& stats) {
   return nlohmann::json{
       {"status", stats.status},
+      {"collection_scope", stats.collection_scope},
+      {"lp_solve_count_available", stats.lp_solve_count_available},
+      {"incumbent_timeline_available", stats.incumbent_timeline_available},
+      {"cut_diagnostics_available", stats.cut_diagnostics_available},
+      {"native_diagnostics_available", stats.native_diagnostics_available},
       {"nodes_explored", stats.nodes_explored},
-      {"lp_solves", stats.lp_solves},
-      {"cuts_added", stats.cuts_added},
-      {"root_cuts_added", stats.root_cuts_added},
-      {"tree_cuts_added", stats.tree_cuts_added},
-      {"root_gomory_cuts", stats.root_gomory_cuts},
-      {"root_mir_cuts", stats.root_mir_cuts},
-      {"root_cover_cuts", stats.root_cover_cuts},
-      {"root_clique_cuts", stats.root_clique_cuts},
-      {"root_zerohalf_cuts", stats.root_zerohalf_cuts},
-      {"root_flowcover_cuts", stats.root_flowcover_cuts},
-      {"root_impliedbound_cuts", stats.root_impliedbound_cuts},
+      {"lp_solves", stats.lp_solve_count_available
+                        ? nlohmann::json(stats.lp_solves) : nlohmann::json(nullptr)},
+      {"cuts_added", stats.cut_diagnostics_available
+                        ? nlohmann::json(stats.cuts_added) : nlohmann::json(nullptr)},
+      {"root_cuts_added", stats.cut_diagnostics_available
+                             ? nlohmann::json(stats.root_cuts_added) : nlohmann::json(nullptr)},
+      {"tree_cuts_added", stats.cut_diagnostics_available
+                             ? nlohmann::json(stats.tree_cuts_added) : nlohmann::json(nullptr)},
+      {"root_gomory_cuts", stats.cut_diagnostics_available
+                              ? nlohmann::json(stats.root_gomory_cuts) : nlohmann::json(nullptr)},
+      {"root_mir_cuts", stats.cut_diagnostics_available
+                           ? nlohmann::json(stats.root_mir_cuts) : nlohmann::json(nullptr)},
+      {"root_cover_cuts", stats.cut_diagnostics_available
+                             ? nlohmann::json(stats.root_cover_cuts) : nlohmann::json(nullptr)},
+      {"root_clique_cuts", stats.cut_diagnostics_available
+                              ? nlohmann::json(stats.root_clique_cuts) : nlohmann::json(nullptr)},
+      {"root_zerohalf_cuts", stats.cut_diagnostics_available
+                                ? nlohmann::json(stats.root_zerohalf_cuts) : nlohmann::json(nullptr)},
+      {"root_impliedbound_cuts", stats.cut_diagnostics_available
+                                    ? nlohmann::json(stats.root_impliedbound_cuts) : nlohmann::json(nullptr)},
       {"root_presolved_rows", stats.root_presolved_rows},
       {"root_presolved_cols", stats.root_presolved_cols},
       {"root_cut_bound_lift", stats.root_cut_bound_lift},
@@ -334,19 +348,65 @@ nlohmann::json bc_stats_to_json(const mipsolvers::engine::BCStats& stats) {
       {"gap", stats.gap},
       {"root_only_bound", stats.root_only_bound},
       {"runtime_sec", stats.runtime_sec},
-      {"incumbent_updates", stats.incumbent_updates},
-      {"first_incumbent_node", stats.first_incumbent_node},
-      {"last_incumbent_node", stats.last_incumbent_node},
-      {"first_incumbent_lp_solves", stats.first_incumbent_lp_solves},
-      {"last_incumbent_lp_solves", stats.last_incumbent_lp_solves},
-      {"best_bound_at_last_incumbent", stats.best_bound_at_last_incumbent},
-      {"best_bound_lift_after_last_incumbent", stats.best_bound_lift_after_last_incumbent},
+      {"incumbent_updates", stats.incumbent_timeline_available
+                                ? nlohmann::json(stats.incumbent_updates) : nlohmann::json(nullptr)},
+      {"first_incumbent_node", stats.incumbent_timeline_available
+                                   ? nlohmann::json(stats.first_incumbent_node) : nlohmann::json(nullptr)},
+      {"last_incumbent_node", stats.incumbent_timeline_available
+                                  ? nlohmann::json(stats.last_incumbent_node) : nlohmann::json(nullptr)},
+      {"first_incumbent_lp_solves", stats.incumbent_timeline_available
+                                        ? nlohmann::json(stats.first_incumbent_lp_solves) : nlohmann::json(nullptr)},
+      {"last_incumbent_lp_solves", stats.incumbent_timeline_available
+                                       ? nlohmann::json(stats.last_incumbent_lp_solves) : nlohmann::json(nullptr)},
+      {"best_bound_at_last_incumbent", stats.incumbent_timeline_available
+                                            ? nlohmann::json(stats.best_bound_at_last_incumbent) : nlohmann::json(nullptr)},
+      {"best_bound_lift_after_last_incumbent", stats.incumbent_timeline_available
+                                                  ? nlohmann::json(stats.best_bound_lift_after_last_incumbent) : nlohmann::json(nullptr)},
       {"incumbent_repair_lp_attempts", stats.incumbent_repair_lp_attempts},
       {"incumbent_repair_improvements", stats.incumbent_repair_improvements},
       {"incumbent_repair_time_ms", stats.incumbent_repair_time_ms},
       {"reliability_branch_nodes", stats.reliability_branch_nodes},
       {"strong_branch_candidates", stats.strong_branch_candidates},
       {"strong_branch_lp_solves", stats.strong_branch_lp_solves},
+      {"strong_complete_probe_pairs", stats.strong_complete_probe_pairs},
+      {"strong_selected_exact", stats.strong_selected_exact},
+      {"strong_selected_unprobed", stats.strong_selected_unprobed},
+      {"strong_winner_changed_by_exact", stats.strong_winner_changed_by_exact},
+      {"strong_probe_unknown_failures", stats.strong_probe_unknown_failures},
+      {"strong_probe_lp_iterations", stats.strong_probe_lp_iterations},
+      {"strong_probe_time_ms", stats.strong_probe_time_ms},
+      {"branch_direction_preferred_down", stats.branch_direction_preferred_down},
+      {"branch_direction_preferred_up", stats.branch_direction_preferred_up},
+      {"branch_direction_first_down", stats.branch_direction_first_down},
+      {"branch_direction_first_up", stats.branch_direction_first_up},
+      {"branch_first_child_incumbent_updates",
+       stats.branch_first_child_incumbent_updates},
+      {"branch_first_child_cutoffs", stats.branch_first_child_cutoffs},
+      {"branch_second_child_cutoffs", stats.branch_second_child_cutoffs},
+      {"node_estimate_calibration_samples",
+       stats.node_estimate_calibration_samples},
+      {"node_estimate_predicted_lift_sum",
+       stats.node_estimate_predicted_lift_sum},
+      {"node_estimate_realized_lift_sum",
+       stats.node_estimate_realized_lift_sum},
+      {"node_estimate_abs_error_sum", stats.node_estimate_abs_error_sum},
+      {"node_estimate_squared_error_sum",
+       stats.node_estimate_squared_error_sum},
+      {"node_estimate_predicted_sq_sum",
+       stats.node_estimate_predicted_sq_sum},
+      {"node_estimate_realized_sq_sum", stats.node_estimate_realized_sq_sum},
+      {"node_estimate_cross_sum", stats.node_estimate_cross_sum},
+      {"directional_calibration_samples",
+       stats.directional_calibration_samples},
+      {"directional_predicted_gain_sum",
+       stats.directional_predicted_gain_sum},
+      {"directional_realized_gain_sum",
+       stats.directional_realized_gain_sum},
+      {"directional_abs_error_sum", stats.directional_abs_error_sum},
+      {"directional_squared_error_sum",
+       stats.directional_squared_error_sum},
+      {"directional_rank_samples", stats.directional_rank_samples},
+      {"directional_rank_concordant", stats.directional_rank_concordant},
       {"strong_branch_cache_exact_hits", stats.strong_branch_cache_exact_hits},
       {"strong_branch_cache_warm_hits", stats.strong_branch_cache_warm_hits},
       {"strong_branch_duplicate_lp_avoided", stats.strong_branch_duplicate_lp_avoided},
@@ -1264,8 +1324,6 @@ Quick start
     .value("MIR", mipsolvers::engine::CutType::MIR)
     .value("Gomory", mipsolvers::engine::CutType::Gomory)
     .value("Cover", mipsolvers::engine::CutType::Cover)
-    .value("FlowCover", mipsolvers::engine::CutType::FlowCover)
-    .value("ImpliedBound", mipsolvers::engine::CutType::ImpliedBound)
     .value("All", mipsolvers::engine::CutType::All);
 
   py::enum_<mipsolvers::engine::LpKernelBackend>(m_eng, "LpKernelBackend")
@@ -2045,13 +2103,14 @@ update_artifacts is true.
           mip, score_matrix, policy_options);
       auto callbacks = mipsolvers::l2o::make_scuc_branching_callbacks(
           mip, score_matrix, policy_options, "l2o-phase5-branching");
-      report.installed_dynamic_prior = static_cast<bool>(callbacks.branching_prior);
+      report.installed_dynamic_prior =
+          !strict_highs && static_cast<bool>(callbacks.branching_prior);
 
       auto opt = options;
       if (strict_highs) opt = mipsolvers::engine::make_strict_highs_problem_options(mip, opt);
 
       py::gil_scoped_release rel;
-      auto result = callbacks.branching_prior
+      auto result = report.installed_dynamic_prior
                         ? mipsolvers::engine::solve_milp_bc(
                               mip, opt, mipsolvers::engine::BCWarmStart{}, callbacks)
                         : mipsolvers::engine::solve_milp_bc(mip, opt);
@@ -2072,9 +2131,9 @@ update_artifacts is true.
     py::arg("include_artifact_vectors") = false,
     R"doc(
 Solve an SCUC MIP with Phase 5 learned branching priorities. The static
-priority vector is installed directly on the C++ MIP model; the dynamic prior is
-passed as an advisory branch-and-cut callback and ignored safely by solver paths
-that do not request branch-callback scores.
+priority vector is installed directly on the C++ MIP model. The dynamic prior is
+used only by the Native tree; strict HiGHS runs use the static priorities because
+HiGHS does not expose its internal branch-candidate scorer through this API.
 )doc");
 
   m_l2o.def("solve_scuc_mip_with_warm_start",

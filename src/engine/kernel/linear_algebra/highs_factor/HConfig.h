@@ -1,4 +1,4 @@
-// Vendored HConfig stub for HFactor port (U.7.118 Phase 1).
+// Standalone compatibility configuration for the vendored HFactor port.
 // Mirrors HiGHS/build/HConfig.h but excludes integration-specific defines
 // we don't need (FAST_BUILD, ZLIB_FOUND, CUPDLP_*, HIPO, CMAKE_BUILD_TYPE).
 #ifndef HCONFIG_H_

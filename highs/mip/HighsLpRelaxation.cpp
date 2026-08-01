@@ -51,7 +51,7 @@ bool hacdcpfRootLpCallbackEnabled(const HighsMipSolver& mipsolver,
       !mipsolver.callback_->hacdcpf_root_lp_callback) {
     return false;
   }
-  return !hacdcpfXpoolRootLedgerOnly() || lp.getHacdcpfRootLedgerScope();
+  return lp.getHacdcpfRootLedgerScope();
 }
 
 

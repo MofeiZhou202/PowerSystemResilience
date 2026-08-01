@@ -15,6 +15,7 @@
 #include <fmt/format.h>
 
 #include "mipsolvers/engine/detail/bc_clique_table.hpp"
+#include "mipsolvers/engine/detail/bc_env_options.hpp"
 #include "mipsolvers/engine/detail/bc_legacy_helpers.hpp"
 #include "mipsolvers/engine/detail/bc_utils.hpp"
 #include "mipsolvers/engine/strategy/highs_presolve_side_state.hpp"
@@ -241,7 +242,6 @@ void accumulate_variable_bound_source_stats(
   dst.cut_mixed_rows += src.cut_mixed_rows;
   dst.cut_vub_candidates += src.cut_vub_candidates;
   dst.cut_vlb_candidates += src.cut_vlb_candidates;
-  dst.cut_domain_tightenings += src.cut_domain_tightenings;
   dst.cut_exported_implications += src.cut_exported_implications;
   dst.presolve_vub_candidates += src.presolve_vub_candidates;
   dst.presolve_vlb_candidates += src.presolve_vlb_candidates;
@@ -291,7 +291,7 @@ void trace_highs_native_varbound_diff(
     const VariableBoundTable& table,
     int max_samples) {
   if (!bc_frontier_conformance_enabled() &&
-      std::getenv("HACDCPF_HIGHS_PRESOLVE_STATS") == nullptr) {
+      bc_env_options().value("HACDCPF_HIGHS_PRESOLVE_STATS") == nullptr) {
     return;
   }
   if (!highs_state.side_state_available || highs_state.var_bounds.empty()) return;
@@ -846,24 +846,6 @@ NativeVariableBoundSourceStats augment_variable_bound_table_from_cut_rows(
     ++stats.cut_rows_scanned;
     if (lp.b[r] - min_activity < 0.0) min_activity = lp.b[r];
 
-    for (const RowEntry& entry : entries) {
-      if (!is_integral_or_implied(entry.col)) continue;
-      const auto& var = lp.vars[static_cast<std::size_t>(entry.col)];
-      if (entry.val > 0.0) {
-        const double bound_val =
-            std::floor((lp.b[r] - min_activity) / entry.val + var.lb + feastol);
-        if (std::isfinite(bound_val) && bound_val < var.ub - feastol) {
-          ++stats.cut_domain_tightenings;
-        }
-      } else if (entry.val < 0.0) {
-        const double bound_val =
-            std::ceil((lp.b[r] - min_activity) / entry.val + var.ub - feastol);
-        if (std::isfinite(bound_val) && bound_val > var.lb + feastol) {
-          ++stats.cut_domain_tightenings;
-        }
-      }
-    }
-
     if (nbin <= 1 || nbin >= static_cast<int>(entries.size())) continue;
     ++stats.cut_mixed_rows;
 
@@ -1008,24 +990,6 @@ NativeVariableBoundSourceStats augment_variable_bound_table_from_sparse_cut_rows
     if (!finite_activity || entries.size() <= 1) continue;
     ++stats.cut_rows_scanned;
     if (rhs - min_activity < 0.0) min_activity = rhs;
-
-    for (const RowEntry& entry : entries) {
-      if (!is_integral_or_implied(entry.col)) continue;
-      const auto& var = domain_lp.vars[static_cast<std::size_t>(entry.col)];
-      if (entry.val > 0.0) {
-        const double bound_val =
-            std::floor((rhs - min_activity) / entry.val + var.lb + feastol);
-        if (std::isfinite(bound_val) && bound_val < var.ub - feastol) {
-          ++stats.cut_domain_tightenings;
-        }
-      } else if (entry.val < 0.0) {
-        const double bound_val =
-            std::ceil((rhs - min_activity) / entry.val + var.ub - feastol);
-        if (std::isfinite(bound_val) && bound_val > var.lb + feastol) {
-          ++stats.cut_domain_tightenings;
-        }
-      }
-    }
 
     if (nbin <= 1 || nbin >= static_cast<int>(entries.size())) continue;
     ++stats.cut_mixed_rows;

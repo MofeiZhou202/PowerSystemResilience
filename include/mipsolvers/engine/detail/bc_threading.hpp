@@ -32,6 +32,42 @@
 
 namespace mipsolvers::engine::detail {
 
+/// Wakes the parallel-tree monitor when search state changes.
+///
+/// The generation counter makes notifications durable: a state change that
+/// happens just before the monitor starts waiting is still observed.
+class ParallelProgressEvent {
+ public:
+  std::uint64_t generation() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return generation_;
+  }
+
+  void notify() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      ++generation_;
+    }
+    condition_.notify_one();
+  }
+
+  bool wait_until_change(
+      std::uint64_t& observed_generation,
+      std::chrono::steady_clock::time_point deadline) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    const bool changed = condition_.wait_until(lock, deadline, [&] {
+      return generation_ != observed_generation;
+    });
+    observed_generation = generation_;
+    return changed;
+  }
+
+ private:
+  mutable std::mutex mutex_;
+  std::condition_variable condition_;
+  std::uint64_t generation_{0};
+};
+
 /// @brief P5.1 Work-Stealing Deque for per-worker local node storage.
 /// Owner thread pushes/pops from the top (LIFO), thieves steal from the bottom.
 /// Uses a simple mutex-based implementation (Chase-Lev deque is overkill for B&C
@@ -322,22 +358,12 @@ public:
     return pool_.add(coeff, rhs, domain_only, nullptr, validity_scope);
   }
 
-  /// @brief Find violated cuts (shared lock).
-  std::vector<int> find_violated(const Eigen::VectorXd& x, double min_viol = 1e-4) const {
-    std::shared_lock<std::shared_mutex> lk(mtx_);
-    return pool_.find_violated(x, min_viol);
-  }
-
-  /// @brief Get a copy of a pool cut (shared lock).
-  PoolCut get(int i) const {
-    std::shared_lock<std::shared_mutex> lk(mtx_);
-    return pool_[i];
-  }
-
-  /// @brief Age and purge cuts (exclusive lock).
-  void age_and_purge(const std::vector<int>& violated) {
+  /// Select, copy, age, and purge under one lock so returned indices cannot be
+  /// invalidated by another worker.
+  std::vector<PoolCut> select_violated_and_age(
+      const Eigen::VectorXd& x, double min_viol, int max_selected) {
     std::unique_lock<std::shared_mutex> lk(mtx_);
-    pool_.age_and_purge(violated);
+    return pool_.select_violated_and_age(x, min_viol, max_selected);
   }
 
   /// @brief Current pool size (shared lock).
@@ -356,94 +382,19 @@ public:
 };
 
 /// @brief Thread-safe wrapper around ConflictPool using reader-writer lock.
-///
-/// Augmented with a lock-free **atomic Bloom filter** (2026-Q2) that rejects
-/// duplicate `add(...)` calls without acquiring the exclusive writer lock.
-/// The filter is sized at 16 384 bits (256 `uint64_t`) with k=3 hash
-/// functions derived from the canonicalized-clause hash. For the default
-/// `max_pool_size_=2000` this yields a false-positive rate of roughly 0.5 %:
-/// that fraction of genuinely-novel clauses may be silently skipped, but
-/// correctness is preserved (the pool is monotone-valid at all times and the
-/// lost learning is an optimization trade-off, not a soundness issue).
 class SharedConflictPool {
   mutable std::shared_mutex mtx_;
   ConflictPool pool_;
 
-  static constexpr std::size_t kBloomWords = 256;  // 256 * 64 = 16384 bits
-  static constexpr std::size_t kBloomBits = kBloomWords * 64;
-  std::array<std::atomic<std::uint64_t>, kBloomWords> bloom_{};
-
-  static inline std::uint64_t splitmix64(std::uint64_t x) {
-    x += 0x9E3779B97F4A7C15ULL;
-    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
-    x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
-    return x ^ (x >> 31);
-  }
-
-  /// @brief Three bit positions derived from a canonicalized-clause hash.
-  static inline void bloom_bit_positions(std::size_t h,
-                                          std::size_t& b0,
-                                          std::size_t& b1,
-                                          std::size_t& b2) {
-    const std::uint64_t h0 = splitmix64(static_cast<std::uint64_t>(h));
-    const std::uint64_t h1 = splitmix64(h0 ^ 0xC3A5C85C97CB3127ULL);
-    const std::uint64_t h2 = splitmix64(h1 ^ 0xB492B66FBE98F273ULL);
-    b0 = static_cast<std::size_t>(h0 % kBloomBits);
-    b1 = static_cast<std::size_t>(h1 % kBloomBits);
-    b2 = static_cast<std::size_t>(h2 % kBloomBits);
-  }
-
-  /// @brief Lock-free check: true iff all three bits are set.
-  bool bloom_probably_contains(std::size_t h) const {
-    std::size_t b0, b1, b2;
-    bloom_bit_positions(h, b0, b1, b2);
-    const std::uint64_t m0 = 1ULL << (b0 & 63);
-    const std::uint64_t m1 = 1ULL << (b1 & 63);
-    const std::uint64_t m2 = 1ULL << (b2 & 63);
-    return ((bloom_[b0 >> 6].load(std::memory_order_acquire) & m0) != 0) &&
-           ((bloom_[b1 >> 6].load(std::memory_order_acquire) & m1) != 0) &&
-           ((bloom_[b2 >> 6].load(std::memory_order_acquire) & m2) != 0);
-  }
-
-  /// @brief Lock-free insertion of three bits (atomic OR).
-  void bloom_insert(std::size_t h) {
-    std::size_t b0, b1, b2;
-    bloom_bit_positions(h, b0, b1, b2);
-    bloom_[b0 >> 6].fetch_or(1ULL << (b0 & 63), std::memory_order_release);
-    bloom_[b1 >> 6].fetch_or(1ULL << (b1 & 63), std::memory_order_release);
-    bloom_[b2 >> 6].fetch_or(1ULL << (b2 & 63), std::memory_order_release);
-  }
-
  public:
   explicit SharedConflictPool(int max_size = 1024, int max_literals = 64,
                               bool minimize = false)
-      : pool_(max_size, max_literals, minimize) {
-    // std::atomic default-construction leaves the value unspecified in C++17;
-    // explicitly zero the Bloom filter so early has_conflict/add see clean bits.
-    for (auto& w : bloom_) w.store(0, std::memory_order_relaxed);
-  }
+      : pool_(max_size, max_literals, minimize) {}
 
-  /// @brief Add a clause, rejecting likely duplicates lock-free via Bloom.
+  /// @brief Add a clause. Exact deduplication happens inside ConflictPool.
   bool add(std::vector<BranchDomainLiteral> literals) {
-    // Canonicalize a cheap copy to compute the order-independent hash
-    // without mutating the caller's vector; the pool re-canonicalizes
-    // internally under the write lock.
-    {
-      std::vector<BranchDomainLiteral> sig_copy = literals;
-      canonicalize_branch_literals(sig_copy);
-      if (sig_copy.empty()) return false;
-      const std::size_t h = conflict_clause_hash(sig_copy);
-      if (bloom_probably_contains(h)) {
-        // Lock-free fast reject. Any FP here silently drops ≤0.5 % of
-        // novel clauses — acceptable relative to saved lock acquisitions.
-        bloom_dedup_hits_.fetch_add(1, std::memory_order_relaxed);
-        return false;
-      }
-      std::unique_lock<std::shared_mutex> lk(mtx_);
-      const bool added = pool_.add(std::move(literals));
-      if (added) bloom_insert(h);
-      return added;
-    }
+    std::unique_lock<std::shared_mutex> lk(mtx_);
+    return pool_.add(std::move(literals));
   }
 
   bool has_conflict(const Eigen::VectorXd& node_lb,
@@ -481,13 +432,6 @@ class SharedConflictPool {
     return pool_.size();
   }
 
-  /// @brief Number of lock-free add() rejections via the Bloom filter.
-  std::uint64_t bloom_dedup_hits() const {
-    return bloom_dedup_hits_.load(std::memory_order_relaxed);
-  }
-
- private:
-  std::atomic<std::uint64_t> bloom_dedup_hits_{0};
 };
 
 /// @brief Thread-safe wrapper around SolutionPool using mutex.
@@ -528,26 +472,28 @@ public:
   }
 };
 
-/// @brief Lock-free incumbent sharing via atomic objective + mutex-protected solution.
+/// @brief Incumbent sharing with atomic rejection and transactional publication.
 struct SharedIncumbent {
   std::atomic<double> obj{kInf};
   std::atomic<bool> has_incumbent{false};
   mutable std::mutex x_mtx;
   Eigen::VectorXd x;
 
-  /// @brief Try to update incumbent. Uses CAS on atomic obj for fast-path rejection.
+  /// @brief Try to update incumbent.
+  ///
+  /// The unlocked objective read is only a rejection fast path. The candidate
+  /// is rechecked while holding `x_mtx`, then the solution is installed before
+  /// the objective is release-published. Readers can therefore never prune on
+  /// a newly published objective while the matching solution is still absent.
   /// @return true if incumbent was updated.
   bool try_update(const Eigen::VectorXd& new_x, double new_obj) {
-    double cur = obj.load(std::memory_order_relaxed);
-    while (new_obj < cur) {
-      if (obj.compare_exchange_weak(cur, new_obj, std::memory_order_release, std::memory_order_relaxed)) {
-        std::lock_guard<std::mutex> lk(x_mtx);
-        x = new_x;
-        has_incumbent.store(true, std::memory_order_release);
-        return true;
-      }
-    }
-    return false;
+    if (!(new_obj < obj.load(std::memory_order_acquire))) return false;
+    std::lock_guard<std::mutex> lk(x_mtx);
+    if (!(new_obj < obj.load(std::memory_order_relaxed))) return false;
+    x = new_x;
+    obj.store(new_obj, std::memory_order_release);
+    has_incumbent.store(true, std::memory_order_release);
+    return true;
   }
 
   /// @brief Get current incumbent objective (atomic load).
@@ -562,10 +508,9 @@ struct SharedIncumbent {
 
   /// @brief Atomic snapshot of (has_incumbent, obj) for a single iteration.
   ///
-  /// `try_update` publishes `obj` via CAS *before* setting `has_incumbent`,
-  /// so reading `obj` first then `has_incumbent` can never observe the
-  /// pathological state `(has=true, obj=+Inf)`.  In the other direction we
-  /// may see `(has=false, obj<Inf)` briefly — treat that as "no incumbent".
+  /// `try_update` installs the solution before release-publishing `obj` and
+  /// `has_incumbent`, so an acquired finite objective always has a matching
+  /// solution available through `get_x()`.
   /// Callers should use this snapshot throughout one outer iteration
   /// instead of calling `has()` and `get_obj()` at separate sites, which
   /// can witness inconsistent views and make two explorer threads reach
@@ -658,7 +603,6 @@ class ThreadSafeNodeQueue {
   NodeSelection mode_;
   std::atomic<bool> shutdown_{false};
   bool domain_signature_enabled_{false};
-  double domain_signature_tol_{1e-9};
   std::vector<int> domain_signature_cols_;
   Eigen::VectorXd domain_signature_root_lb_;
   Eigen::VectorXd domain_signature_root_ub_;
@@ -679,28 +623,6 @@ class ThreadSafeNodeQueue {
     return std::max(1e-9, 1e-12 * std::max(1.0, std::abs(bound)));
   }
 
-  static std::int64_t quantize_lower_bound(double value, double tol) {
-    if (!std::isfinite(value)) return std::numeric_limits<std::int64_t>::min();
-    const long double q = std::ceil(static_cast<long double>(value) -
-                                    static_cast<long double>(tol));
-    const long double lo = static_cast<long double>(
-        std::numeric_limits<std::int64_t>::min() + 1);
-    const long double hi = static_cast<long double>(
-        std::numeric_limits<std::int64_t>::max() - 1);
-    return static_cast<std::int64_t>(std::max(lo, std::min(hi, q)));
-  }
-
-  static std::int64_t quantize_upper_bound(double value, double tol) {
-    if (!std::isfinite(value)) return std::numeric_limits<std::int64_t>::max();
-    const long double q = std::floor(static_cast<long double>(value) +
-                                     static_cast<long double>(tol));
-    const long double lo = static_cast<long double>(
-        std::numeric_limits<std::int64_t>::min() + 1);
-    const long double hi = static_cast<long double>(
-        std::numeric_limits<std::int64_t>::max() - 1);
-    return static_cast<std::int64_t>(std::max(lo, std::min(hi, q)));
-  }
-
   template <typename T>
   static void append_signature_bytes(std::string& sig, const T& value) {
     sig.append(reinterpret_cast<const char*>(&value), sizeof(T));
@@ -714,37 +636,20 @@ class ThreadSafeNodeQueue {
       return std::nullopt;
     }
     std::string sig;
-    sig.reserve(domain_signature_cols_.size() * 18);
+    sig.reserve(domain_signature_cols_.size() * 26);
     constexpr char lower_tag = 'L';
     constexpr char upper_tag = 'U';
     for (int j : domain_signature_cols_) {
       if (j < 0 || j >= node.lb.size()) continue;
-      const double root_lb = domain_signature_root_lb_[j];
-      const double root_ub = domain_signature_root_ub_[j];
-      const double lb = node.lb[j];
-      const double ub = node.ub[j];
-      const bool lower_active =
-          std::isfinite(lb) &&
-          (!std::isfinite(root_lb) || lb > root_lb + domain_signature_tol_);
-      if (lower_active) {
-        const std::int32_t col = static_cast<std::int32_t>(j);
-        const std::int64_t val =
-            quantize_lower_bound(lb, domain_signature_tol_);
-        append_signature_bytes(sig, col);
-        sig.push_back(lower_tag);
-        append_signature_bytes(sig, val);
-      }
-      const bool upper_active =
-          std::isfinite(ub) &&
-          (!std::isfinite(root_ub) || ub < root_ub - domain_signature_tol_);
-      if (upper_active) {
-        const std::int32_t col = static_cast<std::int32_t>(j);
-        const std::int64_t val =
-            quantize_upper_bound(ub, domain_signature_tol_);
-        append_signature_bytes(sig, col);
-        sig.push_back(upper_tag);
-        append_signature_bytes(sig, val);
-      }
+      const std::int32_t col = static_cast<std::int32_t>(j);
+      const double lb = node.lb[j] == 0.0 ? 0.0 : node.lb[j];
+      const double ub = node.ub[j] == 0.0 ? 0.0 : node.ub[j];
+      append_signature_bytes(sig, col);
+      sig.push_back(lower_tag);
+      append_signature_bytes(sig, lb);
+      append_signature_bytes(sig, col);
+      sig.push_back(upper_tag);
+      append_signature_bytes(sig, ub);
     }
     return sig;
   }
@@ -927,7 +832,7 @@ public:
     }
     domain_signature_root_lb_ = root_lb;
     domain_signature_root_ub_ = root_ub;
-    domain_signature_tol_ = std::max(1e-12, tol);
+    (void)tol;
     domain_signature_enabled_ =
         !domain_signature_cols_.empty() &&
         root_lb.size() == root_ub.size();
@@ -1174,6 +1079,28 @@ struct AtomicBCStats {
   std::atomic<std::uint64_t> rc_verified_conflict_clauses_learned{0};
   std::atomic<std::uint64_t> gap_suboptimal_queue_prune_passes{0};
   std::atomic<std::uint64_t> gap_suboptimal_queue_prunes{0};
+  std::atomic<std::uint64_t> branch_direction_preferred_down{0};
+  std::atomic<std::uint64_t> branch_direction_preferred_up{0};
+  std::atomic<std::uint64_t> branch_direction_first_down{0};
+  std::atomic<std::uint64_t> branch_direction_first_up{0};
+  std::atomic<std::uint64_t> branch_first_child_incumbent_updates{0};
+  std::atomic<std::uint64_t> branch_first_child_cutoffs{0};
+  std::atomic<std::uint64_t> branch_second_child_cutoffs{0};
+  std::atomic<std::uint64_t> node_estimate_calibration_samples{0};
+  std::atomic<double> node_estimate_predicted_lift_sum{0.0};
+  std::atomic<double> node_estimate_realized_lift_sum{0.0};
+  std::atomic<double> node_estimate_abs_error_sum{0.0};
+  std::atomic<double> node_estimate_squared_error_sum{0.0};
+  std::atomic<double> node_estimate_predicted_sq_sum{0.0};
+  std::atomic<double> node_estimate_realized_sq_sum{0.0};
+  std::atomic<double> node_estimate_cross_sum{0.0};
+  std::atomic<std::uint64_t> directional_calibration_samples{0};
+  std::atomic<double> directional_predicted_gain_sum{0.0};
+  std::atomic<double> directional_realized_gain_sum{0.0};
+  std::atomic<double> directional_abs_error_sum{0.0};
+  std::atomic<double> directional_squared_error_sum{0.0};
+  std::atomic<std::uint64_t> directional_rank_samples{0};
+  std::atomic<std::uint64_t> directional_rank_concordant{0};
 };
 
 /// @brief Append-only thread-safe store of binary implications learned across

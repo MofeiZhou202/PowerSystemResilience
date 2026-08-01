@@ -721,7 +721,7 @@ CliqueTable::extract_literal_edges_from_cut(
 
   // Multiple implied-bound substitutions can contribute to the same trigger
   // literal.  Treat them as one literal mass before testing pair excess; using
-  // two copies of the same trigger would create a fake pair that cannot become
+  // two copies of the same trigger would create a spurious pair that cannot become
   // a conflict edge.
   std::sort(terms.begin(), terms.end(),
             [](const LiteralTerm& a, const LiteralTerm& b) {
@@ -852,14 +852,19 @@ int CliqueTable::propagate(Eigen::VectorXd& lb,
         if (j < 0 || j >= nx) continue;
         if (forbidden_one) {
           if (ub[j] > 0.5) {
-            if (changes_out != nullptr) changes_out->push_back({j, -ub[j], false});
+            if (changes_out != nullptr) {
+              changes_out->push_back({j, -ub[j], false, ub[j], 0.0});
+            }
             ub[j] = 0.0;
             ++tightened;
             enqueue_literal(j, false);
           }
         } else {
           if (lb[j] < 0.5) {
-            if (changes_out != nullptr) changes_out->push_back({j, 1.0 - lb[j], true});
+            if (changes_out != nullptr) {
+              changes_out->push_back(
+                  {j, 1.0 - lb[j], true, lb[j], 1.0});
+            }
             lb[j] = 1.0;
             ++tightened;
             enqueue_literal(j, true);
@@ -880,7 +885,7 @@ int CliqueTable::propagate(Eigen::VectorXd& lb,
       if (j >= ub.size()) continue;
       if (ub[j] > 0.5) {
         if (changes_out != nullptr) {
-          changes_out->push_back({j, -ub[j], false});
+          changes_out->push_back({j, -ub[j], false, ub[j], 0.0});
         }
         ub[j] = 0.0;
         ++tightened;

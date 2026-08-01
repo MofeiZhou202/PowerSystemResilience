@@ -13,9 +13,9 @@
 ///   9. Probing on binary variables with implication propagation
 ///
 /// All reductions operate in-place on the LPModel via a unified sparse
-/// representation that tracks row/column nonzero counts for O(1) singleton
-/// detection.  Redundant rows and fixed variables are physically removed
-/// when rebuild_model() constructs the reduced LPModel.
+/// representation with row and column adjacency lists. Redundant rows and
+/// fixed variables are physically removed when rebuild_model() constructs the
+/// reduced LPModel.
 
 #pragma once
 
@@ -31,6 +31,8 @@ namespace mipsolvers::engine {
 
 /// Statistics from presolve reductions.
 struct PresolveStats {
+  bool infeasible{false};
+  std::string infeasibility_reason;
   int rows_removed{0};
   int cols_removed{0};
   int bounds_tightened{0};
@@ -178,6 +180,8 @@ class MILPPresolve {
                      std::vector<int>& integer_idx);
   void compute_all_activities();
   void update_activity(int row);
+  bool detect_infeasibility(const char* phase);
+  void mark_infeasible(std::string reason);
 
   // ── Reductions (each returns number of changes) ──
   int remove_fixed_variables();

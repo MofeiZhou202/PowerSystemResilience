@@ -394,6 +394,9 @@ NativeBranchAndCutAdapter::NativeBranchAndCutAdapter(BCOptions opt) : opt_(std::
 
 BCOptions make_strict_highs_production_options(BCOptions opt) {
   opt.lp_kernel_backend = LpKernelBackend::HiGHS;
+  // The public adapter is named StrictHiGHS, so its contract must execute the
+  // HiGHS MIP state machine rather than the native tree with a HiGHS LP kernel.
+  opt.strict_highs_mip_contract = true;
   opt.auto_highs_root_pipeline = true;
   opt.enable_domain_heuristics = false;
   opt.accept_verified_warm_start_incumbent = true;

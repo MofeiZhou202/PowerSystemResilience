@@ -1,10 +1,11 @@
-# Vendored HiGHS HFactor (Phase 1 of U.7.118)
+# Vendored HiGHS HFactor
 
-This directory contains a **read-only vendored copy** of the HiGHS sparse-LU
+This directory contains a vendored copy of the HiGHS sparse-LU
 basis factorization code (`HFactor`) plus the minimal transitive headers it
-depends on. The goal is to build `HFactor` as a standalone static library
-without modifying any HiGHS source file, so future HiGHS upstream merges
-remain trivial (re-`cp` the files).
+depends on. It builds as a standalone static library and is wrapped by
+`mipsolvers::engine::HFactorBackend`. Local safety and integration changes are
+kept small and visible in version control; this directory is not a pristine
+upstream mirror.
 
 ## Source vintage
 Vendored from the bundled HiGHS at `HiGHS/highs/` (HiGHS git
@@ -16,7 +17,7 @@ style includes work without modification:
 
 ```
 highs_factor/
-  HConfig.h             # vendored stub of build-generated HConfig
+  HConfig.h             # checked-in standalone configuration
   extern/pdqsort/       # third-party sort used by HighsHash
   io/                   # HighsIO (logging)
   lp_data/              # HConst, HStruct, HighsAnalysis, HighsCallback*,
@@ -28,16 +29,12 @@ highs_factor/
                         # HighsSparseVectorSum, FactorTimer
 ```
 
-## Phase 1 contract (this turn)
-- No integration with our LP kernel.
-- No source modifications.
-- Builds as static library `hacdcpf_hfactor`.
+## Current contract
+- Builds as static library `mipsolvers_hfactor`.
+- `HFactorBackend` exposes factorization, FTRAN, BTRAN, rank repair, and
+  captured FT-update operations to the experimental native dual-simplex
+  kernel.
+- It is an experimental backend, not the production default and not evidence
+  of parity with the complete HiGHS simplex implementation.
 - Header-search root for HFactor sources is *this* directory, so they
   see `HConfig.h`, `util/...`, `io/...`, etc. as they would inside HiGHS.
-
-## Future phases
-- Phase 2: thin wrapper `HFactorBackend` mirroring `SparseLUFactor` API.
-- Phase 3: integrate as `FactorBackendKind::HFactor` in dual_simplex.cpp.
-- Phase 4: validate + bench + flip default ON for `B&C[Simplex]/FA`.
-
-See `/memories/repo/u7-118-hfactor-port-plan.md` for full plan.

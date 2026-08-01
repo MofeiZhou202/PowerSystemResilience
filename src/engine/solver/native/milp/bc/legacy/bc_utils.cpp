@@ -30,6 +30,7 @@ std::atomic<std::uint64_t> g_prop_ineq_rows_visited{0};
 std::atomic<std::uint64_t> g_prop_eq_rows_visited{0};
 std::atomic<std::uint64_t> g_prop_baseline_full_scan_rows{0};
 std::atomic<std::uint64_t> g_prop_bound_tightenings{0};
+std::atomic<std::uint64_t> g_prop_reason_clauses_materialized{0};
 std::atomic<std::uint64_t> g_prop_wall_ns{0};
 
 void accumulate_propagation_profile(const PropagationProfile& profile) {
@@ -40,6 +41,8 @@ void accumulate_propagation_profile(const PropagationProfile& profile) {
   g_prop_eq_rows_visited.fetch_add(profile.eq_rows_visited, std::memory_order_relaxed);
   g_prop_baseline_full_scan_rows.fetch_add(profile.baseline_full_scan_rows, std::memory_order_relaxed);
   g_prop_bound_tightenings.fetch_add(profile.bound_tightenings, std::memory_order_relaxed);
+  g_prop_reason_clauses_materialized.fetch_add(
+      profile.reason_clauses_materialized, std::memory_order_relaxed);
   g_prop_wall_ns.fetch_add(profile.wall_ns, std::memory_order_relaxed);
 }
 
@@ -53,6 +56,7 @@ void reset_propagation_profile() {
   g_prop_eq_rows_visited.store(0, std::memory_order_relaxed);
   g_prop_baseline_full_scan_rows.store(0, std::memory_order_relaxed);
   g_prop_bound_tightenings.store(0, std::memory_order_relaxed);
+  g_prop_reason_clauses_materialized.store(0, std::memory_order_relaxed);
   g_prop_wall_ns.store(0, std::memory_order_relaxed);
 }
 
@@ -65,6 +69,8 @@ PropagationProfile get_propagation_profile() {
   profile.eq_rows_visited = g_prop_eq_rows_visited.load(std::memory_order_relaxed);
   profile.baseline_full_scan_rows = g_prop_baseline_full_scan_rows.load(std::memory_order_relaxed);
   profile.bound_tightenings = g_prop_bound_tightenings.load(std::memory_order_relaxed);
+  profile.reason_clauses_materialized =
+      g_prop_reason_clauses_materialized.load(std::memory_order_relaxed);
   profile.wall_ns = g_prop_wall_ns.load(std::memory_order_relaxed);
   return profile;
 }
@@ -1417,12 +1423,11 @@ int reduced_cost_fixing(const std::vector<VariableMeta>& vars,
                         const std::vector<BranchDomainLiteral>* reason_frontier,
                         int reason_depth,
                         int reason_trail_offset) {
-  (void)x_relax;
   const double gap = incumbent_obj - node_bound;
   if (gap <= 1e-12) return 0;
 
   const int n = static_cast<int>(vars.size());
-  if (reduced_costs.size() < n) return 0;
+  if (x_relax.size() < n || reduced_costs.size() < n) return 0;
 
   // Build a hash set of basic variable indices (size = #rows, not #vars).
   // This avoids allocating an O(n) vector when only O(m) entries are basic.
@@ -1454,8 +1459,19 @@ int reduced_cost_fixing(const std::vector<VariableMeta>& vars,
 
     const double width = node_ub[j] - node_lb[j];
     if (!std::isfinite(width) || width <= int_tol) continue;
+    // A reduced-cost implication is directional: a positive minimization
+    // column dual is valid from the active lower side, while a negative one is
+    // valid from the active upper side. Basis membership alone is insufficient
+    // after standard-form remapping or a degenerate/stale warm basis. Requiring
+    // primal-side agreement prevents applying the correct formula to the wrong
+    // bound.
+    const double side_tol = std::max(
+        10.0 * int_tol,
+        1e-9 * std::max({1.0, std::abs(node_lb[j]), std::abs(node_ub[j])}));
+    const bool at_lower = std::abs(x_relax[j] - node_lb[j]) <= side_tol;
+    const bool at_upper = std::abs(x_relax[j] - node_ub[j]) <= side_tol;
     const double max_increase = lpredcost * width;
-    if (max_increase > gap) {
+    if (max_increase > gap && at_lower) {
       if (!std::isfinite(node_lb[j])) continue;
       const double old_ub = node_ub[j];
       double new_ub = std::floor(gap / lpredcost + node_lb[j] + int_tol);
@@ -1489,7 +1505,7 @@ int reduced_cost_fixing(const std::vector<VariableMeta>& vars,
       }
       node_ub[j] = new_ub;
       ++fixed;
-    } else if (max_increase < -gap) {
+    } else if (max_increase < -gap && at_upper) {
       if (!std::isfinite(node_ub[j])) continue;
       const double old_lb = node_lb[j];
       double new_lb = std::ceil(gap / lpredcost + node_ub[j] - int_tol);
@@ -2146,7 +2162,8 @@ int apply_dual_proof_domain_fixing(
         const double old = node_ub[j];
         node_ub[j] = new_ub;
         if (changes_out != nullptr) {
-          changes_out->push_back(BoundChangeInfo{j, new_ub - old, false});
+          changes_out->push_back(
+              BoundChangeInfo{j, new_ub - old, false, old, new_ub});
         }
         ++tightened;
       }
@@ -2163,7 +2180,8 @@ int apply_dual_proof_domain_fixing(
         const double old = node_lb[j];
         node_lb[j] = new_lb;
         if (changes_out != nullptr) {
-          changes_out->push_back(BoundChangeInfo{j, new_lb - old, true});
+          changes_out->push_back(
+              BoundChangeInfo{j, new_lb - old, true, old, new_lb});
         }
         ++tightened;
       }
@@ -2836,18 +2854,6 @@ DualProofResolutionStatus resolve_dual_proof_target_bound_from_local_trail(
               });
   };
 
-  auto reason_frontier_hash =
-      [&](const std::vector<ReasonFrontierEntry>& frontier) {
-    std::size_t h = 0;
-    for (const auto& entry : frontier) {
-      std::size_t eh = branch_literal_hash(entry.lit);
-      eh ^= std::hash<int>{}(entry.trail_pos) + 0x9e3779b97f4a7c15ULL +
-            (eh << 6) + (eh >> 2);
-      h ^= eh + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
-    }
-    return h;
-  };
-
   auto reason_frontier_literals =
       [&](const std::vector<ReasonFrontierEntry>& frontier) {
     std::vector<BranchDomainLiteral> lits;
@@ -3023,16 +3029,53 @@ DualProofResolutionStatus resolve_dual_proof_target_bound_from_local_trail(
     const int max_resolves = std::min<int>(
         4096, static_cast<int>(local_domain_trail->size()) +
                   4 * std::max(1, max_literals));
-	    std::unordered_set<std::size_t> seen;
 	    std::unordered_set<int> skipped_positions;
+	    struct ResolutionState {
+	      std::vector<BranchDomainLiteral> literals;
+	      std::vector<int> trail_positions;
+	      std::vector<int> skipped_positions;
+	    };
+	    auto state_hash = [](const ResolutionState& state) {
+	      std::size_t hash = conflict_clause_hash(state.literals);
+	      for (int pos : state.trail_positions) {
+	        hash ^= std::hash<int>{}(pos) + 0x9e3779b97f4a7c15ULL +
+	                (hash << 6) + (hash >> 2);
+	      }
+	      for (int pos : state.skipped_positions) {
+	        hash ^= std::hash<int>{}(pos) + 0x9e3779b97f4a7c15ULL +
+	                (hash << 6) + (hash >> 2);
+	      }
+	      return hash;
+	    };
+	    auto states_equal = [](const ResolutionState& lhs,
+	                           const ResolutionState& rhs) {
+	      if (!branch_literal_lists_equal(lhs.literals, rhs.literals, 0.0) ||
+	          lhs.trail_positions != rhs.trail_positions ||
+	          lhs.skipped_positions != rhs.skipped_positions) {
+	        return false;
+	      }
+	      return true;
+	    };
+	    HashBucketExactSet<ResolutionState, decltype(state_hash),
+	                       decltype(states_equal)>
+	        seen(state_hash, states_equal);
+	    auto current_state = [&]() {
+	      ResolutionState state;
+	      state.literals.reserve(frontier.size());
+	      state.trail_positions.reserve(frontier.size());
+	      for (const auto& entry : frontier) {
+	        state.literals.push_back(entry.lit);
+	        state.trail_positions.push_back(entry.trail_pos);
+	      }
+	      state.skipped_positions.assign(skipped_positions.begin(),
+	                                     skipped_positions.end());
+	      std::sort(state.skipped_positions.begin(),
+	                state.skipped_positions.end());
+	      return state;
+	    };
 	    int resolved = 0;
 	    for (int iter = 0; iter < max_resolves; ++iter) {
-	      std::size_t h = reason_frontier_hash(frontier);
-	      for (int pos : skipped_positions) {
-	        h ^= std::hash<int>{}(pos) + 0x9e3779b97f4a7c15ULL +
-	             (h << 6) + (h >> 2);
-	      }
-	      if (!seen.insert(h).second) break;
+	      if (!seen.insert(current_state())) break;
 
 	      int latest_idx = -1;
       int latest_pos = -1;
@@ -3233,7 +3276,8 @@ DualProofResolutionStatus resolve_dual_proof_target_bound_from_local_trail(
     bool duplicate = false;
     const std::size_t h = conflict_clause_hash(reconv);
     for (const auto& existing : reconvergence_clauses) {
-      if (conflict_clause_hash(existing) == h) {
+      if (conflict_clause_hash(existing) == h &&
+          branch_literal_lists_equal(existing, reconv)) {
         duplicate = true;
         break;
       }
@@ -3915,17 +3959,51 @@ DualProofResolutionStatus resolve_dual_proof_conflict_from_local_trail(
         4096, static_cast<int>(local_domain_trail->size()) +
                   4 * std::max(1, max_literals));
     std::vector<BranchDomainLiteral> best = frontier_literals(frontier);
-	    std::unordered_set<std::size_t> seen;
 	    std::unordered_set<int> skipped_positions;
+	    struct ResolutionState {
+	      std::vector<BranchDomainLiteral> literals;
+	      std::vector<int> trail_positions;
+	      std::vector<int> skipped_positions;
+	    };
+	    auto state_hash = [](const ResolutionState& state) {
+	      std::size_t hash = conflict_clause_hash(state.literals);
+	      for (int pos : state.trail_positions) {
+	        hash ^= std::hash<int>{}(pos) + 0x9e3779b97f4a7c15ULL +
+	                (hash << 6) + (hash >> 2);
+	      }
+	      for (int pos : state.skipped_positions) {
+	        hash ^= std::hash<int>{}(pos) + 0x9e3779b97f4a7c15ULL +
+	                (hash << 6) + (hash >> 2);
+	      }
+	      return hash;
+	    };
+	    auto states_equal = [](const ResolutionState& lhs,
+	                           const ResolutionState& rhs) {
+	      return branch_literal_lists_equal(lhs.literals, rhs.literals, 0.0) &&
+	             lhs.trail_positions == rhs.trail_positions &&
+	             lhs.skipped_positions == rhs.skipped_positions;
+	    };
+	    HashBucketExactSet<ResolutionState, decltype(state_hash),
+	                       decltype(states_equal)>
+	        seen(state_hash, states_equal);
+	    auto current_state = [&]() {
+	      ResolutionState state;
+	      state.literals.reserve(frontier.size());
+	      state.trail_positions.reserve(frontier.size());
+	      for (const auto& entry : frontier) {
+	        state.literals.push_back(entry.lit);
+	        state.trail_positions.push_back(entry.trail_pos);
+	      }
+	      state.skipped_positions.assign(skipped_positions.begin(),
+	                                     skipped_positions.end());
+	      std::sort(state.skipped_positions.begin(),
+	                state.skipped_positions.end());
+	      return state;
+	    };
 	    int resolved = 0;
 	    for (int iter = 0; iter < max_resolves; ++iter) {
 	      std::vector<BranchDomainLiteral> sig = frontier_literals(frontier);
-	      std::size_t h = conflict_clause_hash(sig);
-	      for (int pos : skipped_positions) {
-	        h ^= std::hash<int>{}(pos) + 0x9e3779b97f4a7c15ULL +
-	             (h << 6) + (h >> 2);
-	      }
-	      if (!seen.insert(h).second) break;
+	      if (!seen.insert(current_state())) break;
 	      if (!sig.empty() && static_cast<int>(sig.size()) <= max_literals &&
 	          (best.empty() || sig.size() < best.size())) {
         best = sig;
@@ -4067,14 +4145,13 @@ DualProofResolutionStatus resolve_dual_proof_conflict_from_local_trail(
     return true;
   };
 
-  std::unordered_set<std::size_t> seen_clauses;
+  BranchLiteralListSet seen_clauses;
   auto add_clause = [&](std::vector<BranchDomainLiteral> clause) {
     canonicalize_branch_literals(clause);
     if (clause.empty() || static_cast<int>(clause.size()) > max_literals) {
       return;
     }
-    const std::size_t h = conflict_clause_hash(clause);
-    if (!seen_clauses.insert(h).second) return;
+    if (!seen_clauses.insert(clause)) return;
     out.conflict_clauses.push_back(std::move(clause));
   };
 
@@ -4099,8 +4176,7 @@ DualProofResolutionStatus resolve_dual_proof_conflict_from_local_trail(
 
   if (out.conflict_clauses.empty()) {
     add_clause(resolved_frontier);
-    if (conflict_clause_hash(proof_frontier) !=
-        conflict_clause_hash(resolved_frontier)) {
+    if (!branch_literal_lists_equal(proof_frontier, resolved_frontier)) {
       add_clause(proof_frontier);
     }
   }
@@ -5182,7 +5258,8 @@ int node_bound_propagation_tracked(
           double new_ub = residual / a;
           if (is_integer_type(lp.vars[j])) new_ub = std::floor(new_ub + 1e-9);
           if (new_ub < node_ub[j] - 1e-9) {
-            changes_out.push_back({j, new_ub - node_ub[j], false});
+            changes_out.push_back(
+                {j, new_ub - node_ub[j], false, node_ub[j], new_ub});
             node_ub[j] = new_ub;
             ++round_tightened;
           }
@@ -5190,7 +5267,8 @@ int node_bound_propagation_tracked(
           double new_lb = residual / a;
           if (is_integer_type(lp.vars[j])) new_lb = std::ceil(new_lb - 1e-9);
           if (new_lb > node_lb[j] + 1e-9) {
-            changes_out.push_back({j, new_lb - node_lb[j], true});
+            changes_out.push_back(
+                {j, new_lb - node_lb[j], true, node_lb[j], new_lb});
             node_lb[j] = new_lb;
             ++round_tightened;
           }
@@ -5229,7 +5307,8 @@ int node_bound_propagation_tracked(
             double new_ub = residual / a;
             if (is_integer_type(lp.vars[j])) new_ub = std::floor(new_ub + 1e-9);
             if (new_ub < node_ub[j] - 1e-9) {
-              changes_out.push_back({j, new_ub - node_ub[j], false});
+              changes_out.push_back(
+                  {j, new_ub - node_ub[j], false, node_ub[j], new_ub});
               node_ub[j] = new_ub;
               ++round_tightened;
             }
@@ -5237,7 +5316,8 @@ int node_bound_propagation_tracked(
             double new_lb = residual / a;
             if (is_integer_type(lp.vars[j])) new_lb = std::ceil(new_lb - 1e-9);
             if (new_lb > node_lb[j] + 1e-9) {
-              changes_out.push_back({j, new_lb - node_lb[j], true});
+              changes_out.push_back(
+                  {j, new_lb - node_lb[j], true, node_lb[j], new_lb});
               node_lb[j] = new_lb;
               ++round_tightened;
             }
@@ -5255,7 +5335,8 @@ int node_bound_propagation_tracked(
             double new_lb = residual / a;
             if (is_integer_type(lp.vars[j])) new_lb = std::ceil(new_lb - 1e-9);
             if (new_lb > node_lb[j] + 1e-9) {
-              changes_out.push_back({j, new_lb - node_lb[j], true});
+              changes_out.push_back(
+                  {j, new_lb - node_lb[j], true, node_lb[j], new_lb});
               node_lb[j] = new_lb;
               ++round_tightened;
             }
@@ -5263,7 +5344,8 @@ int node_bound_propagation_tracked(
             double new_ub = residual / a;
             if (is_integer_type(lp.vars[j])) new_ub = std::floor(new_ub + 1e-9);
             if (new_ub < node_ub[j] - 1e-9) {
-              changes_out.push_back({j, new_ub - node_ub[j], false});
+              changes_out.push_back(
+                  {j, new_ub - node_ub[j], false, node_ub[j], new_ub});
               node_ub[j] = new_ub;
               ++round_tightened;
             }
@@ -5357,7 +5439,8 @@ int BinaryImplicationGraph::propagate(const std::vector<VariableMeta>& vars,
         }
         if (new_lb > lb[j] + tol) {
           if (changes_out != nullptr) {
-            changes_out->push_back({j, new_lb - lb[j], true});
+            changes_out->push_back(
+                {j, new_lb - lb[j], true, lb[j], new_lb});
           }
           lb[j] = new_lb;
           ++tightened;
@@ -5372,7 +5455,8 @@ int BinaryImplicationGraph::propagate(const std::vector<VariableMeta>& vars,
         }
         if (new_ub < ub[j] - tol) {
           if (changes_out != nullptr) {
-            changes_out->push_back({j, new_ub - ub[j], false});
+            changes_out->push_back(
+                {j, new_ub - ub[j], false, ub[j], new_ub});
           }
           ub[j] = new_ub;
           ++tightened;
@@ -5705,10 +5789,11 @@ bool clause_propagation_step(const ConflictPoolT* conflict_pool,
                              int* tightened,
                              std::vector<DomainReasonBound>* reason_bounds_out) {
   if (conflict_pool == nullptr) return true;
+  const bool track_reasons = !lb_reason.empty();
   std::vector<BoundChangeInfo> clause_changes;
   int local_tightened = 0;
   std::vector<DomainReasonBound> clause_reason_bounds;
-  const bool ok = reason_bounds_out != nullptr
+  const bool ok = track_reasons
       ? conflict_pool->propagate_with_reasons(
             vars, node_lb, node_ub, &local_tightened, &clause_changes,
             &clause_reason_bounds)
@@ -5783,9 +5868,13 @@ bool propagate_node_domain_impl(
   profile.calls = 1;
   const auto _prop_t0 = std::chrono::steady_clock::now();
   const int n = static_cast<int>(lp.vars.size());
+  const bool track_reasons =
+      reason_bounds_out != nullptr || learned_conflict != nullptr;
   ReasonArena arena;
-  std::vector<int> lb_reason(static_cast<std::size_t>(n), 0);
-  std::vector<int> ub_reason(static_cast<std::size_t>(n), 0);
+  std::vector<int> lb_reason(
+      track_reasons ? static_cast<std::size_t>(n) : 0, 0);
+  std::vector<int> ub_reason(
+      track_reasons ? static_cast<std::size_t>(n) : 0, 0);
   std::deque<int> changed_vars;
   std::vector<char> queued_vars(static_cast<std::size_t>(n), 0);
   std::deque<int> pending_ineq_rows;
@@ -5802,10 +5891,12 @@ bool propagate_node_domain_impl(
   };
 
   for (const auto& lit : branch_reasons) {
-    const int rid = arena.singleton(lit);
+    const int rid = track_reasons ? arena.singleton(lit) : 0;
     if (lit.var_idx >= 0 && lit.var_idx < n) {
-      if (lit.is_lb) lb_reason[static_cast<std::size_t>(lit.var_idx)] = rid;
-      else ub_reason[static_cast<std::size_t>(lit.var_idx)] = rid;
+      if (track_reasons) {
+        if (lit.is_lb) lb_reason[static_cast<std::size_t>(lit.var_idx)] = rid;
+        else ub_reason[static_cast<std::size_t>(lit.var_idx)] = rid;
+      }
       enqueue_var(lit.var_idx);
     }
   }
@@ -5817,16 +5908,18 @@ bool propagate_node_domain_impl(
           ? (node_lb[j] >= rb.bound.value - 1e-9)
           : (node_ub[j] <= rb.bound.value + 1e-9);
       if (!active) continue;
-      const int rid = !rb.reason.empty() ? arena.add_clause(rb.reason) : 0;
-      if (rb.bound.is_lb) {
-        const int old = lb_reason[static_cast<std::size_t>(j)];
-        if (old <= 0 || rb.bound.value >= node_lb[j] - 1e-9) {
-          lb_reason[static_cast<std::size_t>(j)] = rid;
-        }
-      } else {
-        const int old = ub_reason[static_cast<std::size_t>(j)];
-        if (old <= 0 || rb.bound.value <= node_ub[j] + 1e-9) {
-          ub_reason[static_cast<std::size_t>(j)] = rid;
+      if (track_reasons) {
+        const int rid = !rb.reason.empty() ? arena.add_clause(rb.reason) : 0;
+        if (rb.bound.is_lb) {
+          const int old = lb_reason[static_cast<std::size_t>(j)];
+          if (old <= 0 || rb.bound.value >= node_lb[j] - 1e-9) {
+            lb_reason[static_cast<std::size_t>(j)] = rid;
+          }
+        } else {
+          const int old = ub_reason[static_cast<std::size_t>(j)];
+          if (old <= 0 || rb.bound.value <= node_ub[j] + 1e-9) {
+            ub_reason[static_cast<std::size_t>(j)] = rid;
+          }
         }
       }
       enqueue_var(j);
@@ -5836,15 +5929,17 @@ bool propagate_node_domain_impl(
   for (std::size_t ci = 0; ci < input_change_count; ++ci) {
     const int j = changes_out[ci].var_idx;
     if (j >= 0 && j < n) {
-      if (changes_out[ci].is_lb) {
-        int& rid = lb_reason[static_cast<std::size_t>(j)];
-        if (rid <= 0) {
-          rid = arena.singleton(BranchDomainLiteral{j, node_lb[j], true});
-        }
-      } else {
-        int& rid = ub_reason[static_cast<std::size_t>(j)];
-        if (rid <= 0) {
-          rid = arena.singleton(BranchDomainLiteral{j, node_ub[j], false});
+      if (track_reasons) {
+        if (changes_out[ci].is_lb) {
+          int& rid = lb_reason[static_cast<std::size_t>(j)];
+          if (rid <= 0) {
+            rid = arena.singleton(BranchDomainLiteral{j, node_lb[j], true});
+          }
+        } else {
+          int& rid = ub_reason[static_cast<std::size_t>(j)];
+          if (rid <= 0) {
+            rid = arena.singleton(BranchDomainLiteral{j, node_ub[j], false});
+          }
         }
       }
       enqueue_var(j);
@@ -5859,6 +5954,10 @@ bool propagate_node_domain_impl(
 
   auto finalize_profile = [&]() {
     profile.bound_tightenings = static_cast<std::uint64_t>(std::max(0, local_tightened));
+    profile.reason_clauses_materialized =
+        track_reasons && !arena.clauses.empty()
+            ? static_cast<std::uint64_t>(arena.clauses.size() - 1)
+            : 0;
     const auto _prop_t1 = std::chrono::steady_clock::now();
     profile.wall_ns = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(_prop_t1 - _prop_t0).count());
@@ -5879,7 +5978,8 @@ bool propagate_node_domain_impl(
     }
     if (is_lb) {
       if (new_val > node_lb[j] + 1e-9) {
-        changes_out.push_back({j, new_val - node_lb[j], true});
+        changes_out.push_back(
+            {j, new_val - node_lb[j], true, node_lb[j], new_val});
         node_lb[j] = new_val;
         const BranchDomainLiteral bound_lit{j, new_val, true};
         if (reason_bounds_out != nullptr) {
@@ -5913,13 +6013,16 @@ bool propagate_node_domain_impl(
           }
           reason_bounds_out->push_back(std::move(rb));
         }
-        lb_reason[static_cast<std::size_t>(j)] = reason_id;
+        if (track_reasons) {
+          lb_reason[static_cast<std::size_t>(j)] = reason_id;
+        }
         ++local_tightened;
         enqueue_var(j);
       }
     } else {
       if (new_val < node_ub[j] - 1e-9) {
-        changes_out.push_back({j, new_val - node_ub[j], false});
+        changes_out.push_back(
+            {j, new_val - node_ub[j], false, node_ub[j], new_val});
         node_ub[j] = new_val;
         const BranchDomainLiteral bound_lit{j, new_val, false};
         if (reason_bounds_out != nullptr) {
@@ -5953,7 +6056,9 @@ bool propagate_node_domain_impl(
           }
           reason_bounds_out->push_back(std::move(rb));
         }
-        ub_reason[static_cast<std::size_t>(j)] = reason_id;
+        if (track_reasons) {
+          ub_reason[static_cast<std::size_t>(j)] = reason_id;
+        }
         ++local_tightened;
         enqueue_var(j);
       }
@@ -6031,15 +6136,18 @@ bool propagate_node_domain_impl(
           const bool active = value_one ? (node_lb[j] >= 1.0 - 1e-9)
                                         : (node_ub[j] <= 1e-9);
           if (!active) continue;
-          const int trigger_rid = value_one ? lb_reason[static_cast<std::size_t>(j)]
-                                            : ub_reason[static_cast<std::size_t>(j)];
+          const int trigger_rid =
+              track_reasons
+                  ? (value_one ? lb_reason[static_cast<std::size_t>(j)]
+                               : ub_reason[static_cast<std::size_t>(j)])
+                  : 0;
           auto lit_rng = clique_table->literal_neighbours(j, value_one);
           for (const int* p = lit_rng.first; p != lit_rng.second; ++p) {
             const int forbidden = *p;
             const int implied_col = forbidden / 2;
             const bool forbidden_one = (forbidden % 2) != 0;
-            std::vector<int> ids{trigger_rid};
-            const int rid = arena.merge_ids(ids);
+            const int rid =
+                track_reasons ? arena.merge_ids({trigger_rid}) : 0;
             if (forbidden_one) {
               if (!apply_bound(implied_col, false, 0.0, rid)) break;
             } else {
@@ -6051,8 +6159,8 @@ bool propagate_node_domain_impl(
           if (value_one) {
             auto rng = clique_table->neighbours(j);
             for (const int* p = rng.first; p != rng.second; ++p) {
-              std::vector<int> ids{trigger_rid};
-              const int rid = arena.merge_ids(ids);
+              const int rid =
+                  track_reasons ? arena.merge_ids({trigger_rid}) : 0;
               if (!apply_bound(*p, false, 0.0, rid)) break;
             }
           }
@@ -6069,11 +6177,14 @@ bool propagate_node_domain_impl(
                                         : (node_ub[j] <= 1e-9);
           if (!active) continue;
           auto rng = implication_graph->implications(j, value_one);
-          const int trigger_rid = value_one ? lb_reason[static_cast<std::size_t>(j)]
-                                            : ub_reason[static_cast<std::size_t>(j)];
+          const int trigger_rid =
+              track_reasons
+                  ? (value_one ? lb_reason[static_cast<std::size_t>(j)]
+                               : ub_reason[static_cast<std::size_t>(j)])
+                  : 0;
           for (const auto* arc = rng.first; arc != rng.second; ++arc) {
-            std::vector<int> ids{trigger_rid};
-            const int rid = arena.merge_ids(ids);
+            const int rid =
+                track_reasons ? arena.merge_ids({trigger_rid}) : 0;
             if (!apply_bound(arc->var_idx, arc->is_lb, arc->value, rid)) break;
           }
           if (conflict_var >= 0) break;
@@ -6129,17 +6240,22 @@ bool propagate_node_domain_impl(
           if (std::abs(a) <= 1e-15) continue;
           const double contrib = (a > 0.0) ? a * node_lb[j] : a * node_ub[j];
           const double residual = rhs - (min_activity - contrib);
-          // Reuse the ids buffer (clear, no deallocation).
-          ids.clear();
-          for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator jt(A_row, r); jt; ++jt) {
-            const int k = static_cast<int>(jt.col());
-            const double ak = row_sign * jt.value();
-            if (k == j || std::abs(ak) <= 1e-15) continue;
-            const int rid = (ak > 0.0) ? lb_reason[static_cast<std::size_t>(k)]
-                                       : ub_reason[static_cast<std::size_t>(k)];
-            if (rid > 0) ids.push_back(rid);
+          int rid = 0;
+          if (track_reasons) {
+            ids.clear();
+            for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator jt(
+                     A_row, r);
+                 jt; ++jt) {
+              const int k = static_cast<int>(jt.col());
+              const double ak = row_sign * jt.value();
+              if (k == j || std::abs(ak) <= 1e-15) continue;
+              const int source_reason =
+                  (ak > 0.0) ? lb_reason[static_cast<std::size_t>(k)]
+                             : ub_reason[static_cast<std::size_t>(k)];
+              if (source_reason > 0) ids.push_back(source_reason);
+            }
+            rid = arena.merge_ids(ids);
           }
-          const int rid = arena.merge_ids(ids);
           if (a > 0.0) {
             const double new_ub = normalized_bound_value(j, false, residual / a);
             const BranchDomainLiteral source =
@@ -6190,22 +6306,29 @@ bool propagate_node_domain_impl(
       }
 
       if (!has_inf_min) {
+        std::vector<int> ids;
         for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Aeq_row, r); it; ++it) {
           const int j = static_cast<int>(it.col());
           const double a = it.value();
           if (std::abs(a) <= 1e-15) continue;
           const double contrib = (a > 0.0) ? a * node_lb[j] : a * node_ub[j];
           const double residual = lp.beq[r] - (min_activity - contrib);
-          std::vector<int> ids;
-          for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator jt(Aeq_row, r); jt; ++jt) {
-            const int k = static_cast<int>(jt.col());
-            const double ak = jt.value();
-            if (k == j || std::abs(ak) <= 1e-15) continue;
-            const int rid = (ak > 0.0) ? lb_reason[static_cast<std::size_t>(k)]
-                                       : ub_reason[static_cast<std::size_t>(k)];
-            if (rid > 0) ids.push_back(rid);
+          int rid = 0;
+          if (track_reasons) {
+            ids.clear();
+            for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator jt(
+                     Aeq_row, r);
+                 jt; ++jt) {
+              const int k = static_cast<int>(jt.col());
+              const double ak = jt.value();
+              if (k == j || std::abs(ak) <= 1e-15) continue;
+              const int source_reason =
+                  (ak > 0.0) ? lb_reason[static_cast<std::size_t>(k)]
+                             : ub_reason[static_cast<std::size_t>(k)];
+              if (source_reason > 0) ids.push_back(source_reason);
+            }
+            rid = arena.merge_ids(ids);
           }
-          const int rid = arena.merge_ids(ids);
           if (a > 0.0) {
             const double new_ub = normalized_bound_value(j, false, residual / a);
             const BranchDomainLiteral source =
@@ -6226,22 +6349,29 @@ bool propagate_node_domain_impl(
       if (conflict_var >= 0) break;
 
       if (!has_inf_max) {
+        std::vector<int> ids;
         for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Aeq_row, r); it; ++it) {
           const int j = static_cast<int>(it.col());
           const double a = it.value();
           if (std::abs(a) <= 1e-15) continue;
           const double contrib = (a > 0.0) ? a * node_ub[j] : a * node_lb[j];
           const double residual = lp.beq[r] - (max_activity - contrib);
-          std::vector<int> ids;
-          for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator jt(Aeq_row, r); jt; ++jt) {
-            const int k = static_cast<int>(jt.col());
-            const double ak = jt.value();
-            if (k == j || std::abs(ak) <= 1e-15) continue;
-            const int rid = (ak > 0.0) ? ub_reason[static_cast<std::size_t>(k)]
-                                       : lb_reason[static_cast<std::size_t>(k)];
-            if (rid > 0) ids.push_back(rid);
+          int rid = 0;
+          if (track_reasons) {
+            ids.clear();
+            for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator jt(
+                     Aeq_row, r);
+                 jt; ++jt) {
+              const int k = static_cast<int>(jt.col());
+              const double ak = jt.value();
+              if (k == j || std::abs(ak) <= 1e-15) continue;
+              const int source_reason =
+                  (ak > 0.0) ? ub_reason[static_cast<std::size_t>(k)]
+                             : lb_reason[static_cast<std::size_t>(k)];
+              if (source_reason > 0) ids.push_back(source_reason);
+            }
+            rid = arena.merge_ids(ids);
           }
-          const int rid = arena.merge_ids(ids);
           if (a > 0.0) {
             const double new_lb = normalized_bound_value(j, true, residual / a);
             const BranchDomainLiteral source =

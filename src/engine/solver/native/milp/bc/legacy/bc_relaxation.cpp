@@ -21,6 +21,7 @@
 #include "mipsolvers/engine/kernel/ipm/ipm_lp_solver.hpp"
 #include "mipsolvers/engine/kernel/ipm/ipm_solver.hpp"
 #include "mipsolvers/engine/kernel/linear_algebra/hfactor_backend.hpp"
+#include "mipsolvers/engine/detail/bc_env_options.hpp"
 
 #ifdef MIPSOLVERS_HAVE_HIGHS_LIB
 #include "Highs.h"
@@ -35,15 +36,15 @@ constexpr double kHighsDefaultKktTolerance = 1e-7;
 constexpr double kHighsDefaultMipTolerance = 1e-6;
 
 bool lp_basis_trace_enabled() {
-  return std::getenv("MIPSOLVERS_LP_BASIS_TRACE") != nullptr;
+  return bc_env_options().value("MIPSOLVERS_LP_BASIS_TRACE") != nullptr;
 }
 
 bool root_simplex_conformance_enabled() {
-  return std::getenv("MIPSOLVERS_ROOT_COLDSTATE_DIAG") != nullptr ||
-         std::getenv("MIPSOLVERS_LPSTATE_CONFORM") != nullptr ||
-         std::getenv("MIPSOLVERS_FRONTIER_CONFORM") != nullptr ||
-         std::getenv("MIPSOLVERS_XPOOL_EXACT_DSE") != nullptr ||
-         std::getenv("MIPSOLVERS_XPOOL_PARENT_EXACT_DSE") != nullptr;
+  return bc_env_options().value("MIPSOLVERS_ROOT_COLDSTATE_DIAG") != nullptr ||
+         bc_env_options().value("MIPSOLVERS_LPSTATE_CONFORM") != nullptr ||
+         bc_env_options().value("MIPSOLVERS_FRONTIER_CONFORM") != nullptr ||
+         bc_env_options().value("MIPSOLVERS_XPOOL_EXACT_DSE") != nullptr ||
+         bc_env_options().value("MIPSOLVERS_XPOOL_PARENT_EXACT_DSE") != nullptr;
 }
 
 bool vendored_highs_lp_kernel_enabled(const BCOptions& opt) {
@@ -60,7 +61,7 @@ void apply_root_simplex_conformance_options(SimplexOptions& opt,
 }
 
 int lp_basis_trace_terms() {
-  const char* env = std::getenv("MIPSOLVERS_LP_BASIS_TRACE_TERMS");
+  const char* env = bc_env_options().value("MIPSOLVERS_LP_BASIS_TRACE_TERMS");
   if (env == nullptr) return 8;
   char* end = nullptr;
   long val = std::strtol(env, &end, 10);
@@ -172,7 +173,7 @@ bool lp_solution_feasible(const LPModel& lp, const SolveResult& res, double tol)
 }
 
 bool ipm_handoff_audit_enabled(const BCOptions& opt) {
-  return opt.verbose || std::getenv("MIPSOLVERS_IPM_HANDOFF_AUDIT") != nullptr;
+  return opt.verbose || bc_env_options().value("MIPSOLVERS_IPM_HANDOFF_AUDIT") != nullptr;
 }
 
 struct PrimalAuditMetrics {
@@ -835,7 +836,7 @@ bool finish_vendored_highs_relaxation(const LPModel& lp,
   const auto import_t0 = std::chrono::steady_clock::now();
   if (!build_native_simplex_state_from_highs(lp, highs, primal, *simplex)) {
     if (opt.verbose ||
-        std::getenv("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
+        bc_env_options().value("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
       std::fprintf(stderr,
                    "[BC_RELAX] VendoredHiGHS %s solved but basis import "
                    "failed\n",
@@ -858,7 +859,7 @@ bool finish_vendored_highs_relaxation(const LPModel& lp,
   out.row_duals = out.primal.constraint_duals;
   out.basis_hint = make_first_class_basis_hint_from_simplex(*simplex);
   if (opt.verbose ||
-      std::getenv("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
+      bc_env_options().value("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
     std::fprintf(stderr,
                  "[BC_RELAX] VendoredHiGHS %s: success=1 iter=%d "
                  "obj=%.12g rows=%d cols=%d basisRows=%d time=%.3fms "
@@ -1145,8 +1146,8 @@ bool solve_lp_relaxation_with_vendored_highs(const LPModel& lp,
       live_append_reject = "basis column count changed";
     } else {
       const bool live_perf_trace =
-          std::getenv("MIPSOLVERS_XPOOL_LEDGER") != nullptr ||
-          std::getenv("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr;
+          bc_env_options().value("MIPSOLVERS_XPOOL_LEDGER") != nullptr ||
+          bc_env_options().value("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr;
       const int old_rows = basis_hint->rows;
       const int new_rows = m - old_rows;
       const auto pack_t0 = std::chrono::steady_clock::now();
@@ -1262,7 +1263,7 @@ bool solve_lp_relaxation_with_vendored_highs(const LPModel& lp,
     }
     if (require_live_append) {
       if (opt.verbose ||
-          std::getenv("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
+          bc_env_options().value("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
         std::fprintf(stderr,
                      "[BC_RELAX] VendoredHiGHS live append required but "
                      "unavailable: %s\n",
@@ -1275,7 +1276,7 @@ bool solve_lp_relaxation_with_vendored_highs(const LPModel& lp,
   const bool use_direct_highs_lp =
       opt.auto_highs_root_pipeline ||
       (basis_hint == nullptr &&
-       std::getenv("MIPSOLVERS_BC_NO_DIRECT_HIGHS_LP") == nullptr);
+       bc_env_options().value("MIPSOLVERS_BC_NO_DIRECT_HIGHS_LP") == nullptr);
   if (use_direct_highs_lp) {
     auto highs = std::make_shared<Highs>();
     highs->setOptionValue("output_flag", false);
@@ -1290,7 +1291,7 @@ bool solve_lp_relaxation_with_vendored_highs(const LPModel& lp,
     const bool cold_root_solve = (basis_hint == nullptr);
     const bool cold_root_presolve =
         cold_root_solve &&
-        std::getenv("MIPSOLVERS_BC_NO_COLD_ROOT_PRESOLVE") == nullptr;
+        bc_env_options().value("MIPSOLVERS_BC_NO_COLD_ROOT_PRESOLVE") == nullptr;
     highs->setOptionValue("presolve", cold_root_presolve ? "on" : "off");
     highs->setOptionValue("parallel", "off");
     highs->setOptionValue("solver", "simplex");
@@ -1308,7 +1309,7 @@ bool solve_lp_relaxation_with_vendored_highs(const LPModel& lp,
 
     if (!highs_pass_lp_model(*highs, lp)) {
       if (opt.verbose ||
-          std::getenv("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
+          bc_env_options().value("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
         std::fprintf(stderr,
                      "[BC_RELAX] VendoredHiGHS direct LP failed: pass_model\n");
       }
@@ -1348,7 +1349,7 @@ bool solve_lp_relaxation_with_vendored_highs(const LPModel& lp,
     }
     if (!primal.stats.success) {
       if (opt.verbose ||
-          std::getenv("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
+          bc_env_options().value("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
         std::fprintf(stderr,
                      "[BC_RELAX] VendoredHiGHS direct LP rejected: run=%d "
                      "status=%s iter=%d\n",
@@ -1389,7 +1390,7 @@ bool solve_lp_relaxation_with_vendored_highs(const LPModel& lp,
     auto simplex = std::make_shared<SimplexResult>();
     if (!build_native_simplex_state_from_highs(lp, highs, primal, *simplex)) {
       if (opt.verbose ||
-          std::getenv("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
+          bc_env_options().value("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
         std::fprintf(stderr,
                      "[BC_RELAX] VendoredHiGHS direct LP solved but basis "
                      "import failed\n");
@@ -1403,7 +1404,7 @@ bool solve_lp_relaxation_with_vendored_highs(const LPModel& lp,
     out.row_duals = out.primal.constraint_duals;
     out.basis_hint = make_first_class_basis_hint_from_simplex(*simplex);
     if (opt.verbose ||
-        std::getenv("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
+        bc_env_options().value("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
       std::fprintf(stderr,
                    "[BC_RELAX] VendoredHiGHS direct LP: success=1 iter=%d "
                    "obj=%.12g rows=%d cols=%d basisRows=%d time=%.3fms\n",
@@ -1446,7 +1447,7 @@ bool solve_lp_relaxation_with_vendored_highs(const LPModel& lp,
     out.dual_bound = out.primal.stats.objective;
     out.row_duals = out.primal.constraint_duals;
     out.basis_hint = make_first_class_basis_hint_from_simplex(*simplex);
-    if (opt.verbose || std::getenv("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
+    if (opt.verbose || bc_env_options().value("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
       std::fprintf(stderr,
                    "[BC_RELAX] VendoredHiGHS SF LP: success=1 iter=%d obj=%.12g "
                    "rows=%d cols=%d basisRows=%d time=%.3fms\n",
@@ -1459,7 +1460,7 @@ bool solve_lp_relaxation_with_vendored_highs(const LPModel& lp,
     return true;
   }
 
-  if (opt.verbose || std::getenv("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
+  if (opt.verbose || bc_env_options().value("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
     std::fprintf(stderr,
                  "[BC_RELAX] VendoredHiGHS SF LP failed: status=%s rows=%d cols=%d\n",
                  simplex->result.stats.status.c_str(),
@@ -2163,7 +2164,7 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
     if (solve_lp_relaxation_with_vendored_highs(lp, basis_hint, opt, out)) {
       return out;
     }
-    if (opt.verbose || std::getenv("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
+    if (opt.verbose || bc_env_options().value("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
       std::fprintf(stderr,
                    "[BC_RELAX] VendoredHiGHS LP unavailable/failed; "
                    "strict HiGHS LP contract rejects native fallback\n");
@@ -2328,7 +2329,7 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
     SolveResult ipm_res = ipm_probe_seed.size() == n_lp
                               ? ipm_solver.solve_lp(lp, ipm_probe_seed)
                               : ipm_solver.solve_lp(lp);
-    if (ipm_res.stats.status == "Time limit") {
+    if (ipm_res.stats.status.starts_with("Time limit")) {
       out.primal = std::move(ipm_res);
       out.dual_bound = out.primal.stats.objective;
       return out;
@@ -2787,7 +2788,7 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
         apply_simplex_budget(sx_opt);
         apply_root_simplex_conformance_options(sx_opt, require_simplex_crossover);
         if (lp_basis_trace_enabled() ||
-            std::getenv("MIPSOLVERS_IPM_RECOVERY_TRACE") != nullptr) {
+            bc_env_options().value("MIPSOLVERS_IPM_RECOVERY_TRACE") != nullptr) {
           std::fprintf(stderr,
                        "[B&C-LPBASIS-RECOVER] stage=ipm_sparse_recovery "
                        "m=%d n=%d nOrig=%d nSlack=%d candRows=%d edges=%d "
@@ -2980,18 +2981,6 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
                              ? std::max(out.dual_bound, ipm_root_dual_bound)
                              : ipm_root_dual_bound;
       }
-      if (lp_wall_budget > 0.0 && lp_wall_budget <= 10.0) {
-        out.primal.stats.success = false;
-        out.primal.stats.status = "Time limit";
-        if (!std::isfinite(certified_bound) &&
-            !std::isfinite(ipm_root_dual_bound)) {
-          // Legacy behavior for kernels without certification (vendored
-          // HiGHS): publish the working objective as a best-effort bound.
-          // Skipped when a converged IPM root bound is already in hand.
-          out.dual_bound = out.primal.stats.objective;
-        }
-        return out;
-      }
       if (lp_budget_exhausted()) {
         out.primal.stats.status = "Time limit";
         return out;
@@ -3024,7 +3013,7 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
       apply_ipm_budget(ipm_fb);
       NativeIPMLPAdapter ipm_fb_solver(ipm_fb);
       SolveResult ipm_fb_res = ipm_fb_solver.solve_lp(lp);
-      if (ipm_fb_res.stats.status == "Time limit") {
+      if (ipm_fb_res.stats.status.starts_with("Time limit")) {
         out.primal = std::move(ipm_fb_res);
         out.dual_bound = out.primal.stats.objective;
         return out;

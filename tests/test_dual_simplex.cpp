@@ -7,6 +7,7 @@
 #include <Eigen/LU>
 #include <Eigen/Sparse>
 
+#include <chrono>
 #include <cstdlib>
 #include <limits>
 #include <string>
@@ -14,6 +15,7 @@
 #include "Highs.h"
 
 #include "mipsolvers/engine/detail/bc_utils.hpp"
+#include "mipsolvers/engine/detail/bc_solver_dispatch.hpp"
 #include "mipsolvers/engine/kernel/lp_kernel/dual_simplex.hpp"
 #include "mipsolvers/engine/kernel/linear_algebra/hfactor_backend.hpp"
 #include "../src/engine/kernel/lp_kernel/native_dual_core.hpp"
@@ -160,6 +162,38 @@ TEST_CASE("LP kernel defaults to HiGHS", "[dual_simplex][dispatch]") {
   CHECK(result.result.stats.objective == Approx(2.0));
 }
 
+TEST_CASE("Short LP budgets do not relabel immediate failures as timeouts",
+          "[dual_simplex][status][regression]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Zero(1);
+  lp.A.resize(2, 1);
+  lp.A.insert(0, 0) = 1.0;
+  lp.A.insert(1, 0) = -1.0;
+  lp.A.makeCompressed();
+  lp.b.resize(2);
+  lp.b << 0.0, -1.0;
+  lp.Aeq.resize(0, 1);
+  lp.beq.resize(0);
+  lp.vars.push_back({VarType::Continuous, -10.0, 10.0});
+
+  BCOptions options;
+  options.lp_kernel_backend = LpKernelBackend::ExperimentalNative;
+  options.use_ipm_root = false;
+  options.use_simplex_lp_nodes = true;
+  options.time_limit_sec = 3.0;
+
+  const auto start = std::chrono::steady_clock::now();
+  const auto result =
+      detail::solve_lp_relaxation(lp, nullptr, nullptr, options);
+  const double elapsed = std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - start).count();
+
+  CHECK_FALSE(result.primal.stats.success);
+  CHECK(result.primal.stats.status != "Time limit");
+  CHECK(elapsed < 1.0);
+}
+
 TEST_CASE("HiGHS infeasibility never falls through to native dual",
           "[dual_simplex][dispatch]") {
   LPModel lp;
@@ -198,6 +232,11 @@ TEST_CASE("HiGHS persistent LP state reuses the model and rolls back failure",
   auto root = solve_lp_from_sf(root_sf, options);
   REQUIRE(root.result.stats.success);
   REQUIRE(root.basis.cached_sparse_basis);
+  CHECK(root.basis_inverse.size() == 0);
+  Eigen::VectorXd inverse_row;
+  REQUIRE(root.basis.cached_sparse_basis->basis_inverse_row(0, inverse_row));
+  REQUIRE(inverse_row.size() == root_sf.A.rows());
+  CHECK(inverse_row.allFinite());
   auto root_handle = root.basis.cached_sparse_basis->highs_handle();
   REQUIRE(root_handle);
 
@@ -235,6 +274,93 @@ TEST_CASE("HiGHS persistent LP state reuses the model and rolls back failure",
   REQUIRE(next.result.stats.success);
   CHECK(next.result.stats.objective == Approx(-7.0).margin(1e-9));
   CHECK(next.basis.cached_sparse_basis->highs_handle() == root_handle);
+}
+
+TEST_CASE("Node LP dispatcher owns persistent state instead of queue nodes",
+          "[dual_simplex][persistent][dispatcher][ownership]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Constant(1, -1.0);
+  lp.A.resize(1, 1);
+  lp.A.insert(0, 0) = 1.0;
+  lp.A.makeCompressed();
+  lp.b = Eigen::VectorXd::Constant(1, 10.0);
+  lp.Aeq.resize(0, 1);
+  lp.beq.resize(0);
+  lp.vars.push_back({VarType::Continuous, 0.0, 10.0});
+
+  detail::DispatcherConfig config;
+  config.lp_kernel_backend = LpKernelBackend::HiGHS;
+  config.allow_persistent_lp_state = true;
+  detail::SolverDispatcher dispatcher(config, nullptr);
+
+  StandardFormLP first_sf = build_standard_form_lp(lp);
+  auto first = dispatcher.solve_no_fallback(
+      first_sf, nullptr, detail::SolveContext::NodeLP);
+  REQUIRE(first.result.stats.success);
+  CHECK_FALSE(first.basis.cached_sparse_basis);
+
+  Eigen::VectorXd lb = Eigen::VectorXd::Constant(1, 0.0);
+  Eigen::VectorXd ub = Eigen::VectorXd::Constant(1, 4.0);
+  StandardFormLP child_sf = first_sf;
+  update_standard_form_bounds(child_sf, lp, lb, ub);
+  auto child = dispatcher.solve_no_fallback(
+      child_sf, &first.basis, detail::SolveContext::NodeLP);
+  REQUIRE(child.result.stats.success);
+  CHECK(child.result.stats.solver_name == "VendoredHighsPersistentLpKernel");
+  CHECK(child.result.stats.objective == Approx(-4.0).margin(1e-9));
+  CHECK_FALSE(child.basis.cached_sparse_basis);
+
+  ub[0] = 7.0;
+  StandardFormLP sibling_sf = first_sf;
+  update_standard_form_bounds(sibling_sf, lp, lb, ub);
+  auto sibling = dispatcher.solve_no_fallback(
+      sibling_sf, &first.basis, detail::SolveContext::NodeLP);
+  REQUIRE(sibling.result.stats.success);
+  CHECK(sibling.result.stats.solver_name == "VendoredHighsPersistentLpKernel");
+  CHECK(sibling.result.stats.objective == Approx(-7.0).margin(1e-9));
+  CHECK_FALSE(sibling.basis.cached_sparse_basis);
+}
+
+TEST_CASE("Incremental standard-form bounds handle infinite transitions",
+          "[dual_simplex][bounds][incremental]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Constant(1, 2.0);
+  lp.A.resize(0, 1);
+  lp.b.resize(0);
+  lp.Aeq.resize(0, 1);
+  lp.beq.resize(0);
+  lp.vars = {{VarType::Continuous,
+              -std::numeric_limits<double>::infinity(),
+              std::numeric_limits<double>::infinity()}};
+
+  StandardFormLP sf = build_standard_form_lp(lp);
+  const double inf = std::numeric_limits<double>::infinity();
+  std::vector<BoundChangeInfo> tighten{
+      {0, 0.0, true, -inf, -2.0},
+      {0, 0.0, false, inf, 5.0},
+  };
+  REQUIRE(update_standard_form_bounds_incremental(sf, lp, tighten));
+  CHECK(sf.lb_shift[0] == Approx(-2.0));
+  CHECK(sf.var_ub[0] == Approx(7.0));
+  CHECK(sf.objective_const == Approx(-4.0));
+
+  const StandardFormLP before_reject = sf;
+  const std::vector<BoundChangeInfo> stale{{0, 0.0, false, inf, 4.0}};
+  CHECK_FALSE(update_standard_form_bounds_incremental(sf, lp, stale));
+  CHECK(sf.lb_shift.isApprox(before_reject.lb_shift));
+  CHECK(sf.var_ub.isApprox(before_reject.var_ub));
+  CHECK(sf.objective_const == Approx(before_reject.objective_const));
+
+  std::vector<BoundChangeInfo> relax{
+      {0, 0.0, true, -2.0, -inf},
+      {0, 0.0, false, 5.0, inf},
+  };
+  REQUIRE(update_standard_form_bounds_incremental(sf, lp, relax));
+  CHECK(sf.lb_shift[0] == Approx(0.0));
+  CHECK(std::isinf(sf.var_ub[0]));
+  CHECK(sf.objective_const == Approx(0.0));
 }
 
 TEST_CASE("Direct HiGHS cut rows commit or roll back atomically",

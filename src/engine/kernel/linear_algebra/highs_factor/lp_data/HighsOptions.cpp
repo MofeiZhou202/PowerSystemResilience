@@ -1118,7 +1118,6 @@ void reportOption(FILE* file, const HighsLogOptions& log_options,
   // Don't report for the options file if writing to an options file
   // Don't report options that can only be passed via the command line
   if (option.name == kOptionsFileString) return;
-  // ToDo: are there others?
 
   if (!report_only_deviations || option.default_value != *option.value) {
     if (file_type == HighsFileType::kMd) {

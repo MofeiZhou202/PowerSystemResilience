@@ -81,9 +81,11 @@ static void solveHyper(const HighsInt h_size, const HighsInt* h_lookup,
 
   for (HighsInt i = 0; i < rhs_count; i++) {
     // Skip touched index
-    HighsInt i_trans =
-        h_lookup[rhs_index[i]];  // XXX: this contains a bug iTran
-    if (list_mark[i_trans])      // XXX bug here
+    // Upstream HiGHS marks this hyper-sparse lookup path as potentially
+    // incorrect. Keep the warning explicit until a targeted iTran regression
+    // test establishes the intended mapping.
+    HighsInt i_trans = h_lookup[rhs_index[i]];
+    if (list_mark[i_trans])
       continue;
 
     HighsInt Hi = i_trans;      // H matrix pivot index
@@ -888,9 +890,9 @@ void HFactor::buildSimple() {
 HighsInt HFactor::buildKernel() {
   // Deal with the kernel part by 'n-work' pivoting
 
-  double fake_search = 0;
-  double fake_fill = 0;
-  double fake_eliminate = 0;
+  double estimated_search_work = 0;
+  double estimated_fill_work = 0;
+  double estimated_eliminate_work = 0;
 
   const bool progress_report = false;  // num_basic != num_row;
   const HighsInt progress_frequency = 10000;
@@ -1016,7 +1018,7 @@ HighsInt HFactor::buildKernel() {
             foundPivot = true;
           if (foundPivot) break;
 
-          fake_search += count;
+          estimated_search_work += count;
         }
       }
 
@@ -1050,7 +1052,7 @@ HighsInt HFactor::buildKernel() {
           if (foundPivot) break;
         }
 
-        fake_search += count;
+        estimated_search_work += count;
       }
     }
     // 1.4. If we found nothing: tell singular
@@ -1141,7 +1143,7 @@ HighsInt HFactor::buildKernel() {
       rowDelete(jColPivot, (int)iRow);
     }
     l_start.push_back(l_index.size());
-    fake_fill += 2 * mc_count_a[jColPivot];
+    estimated_fill_work += 2 * mc_count_a[jColPivot];
 
     // 2.3. Store non active pivot column to U
     HighsInt end_N = start_A + mc_space[jColPivot];
@@ -1153,7 +1155,7 @@ HighsInt HFactor::buildKernel() {
     u_pivot_index.push_back(iRowPivot);
     u_pivot_value.push_back(pivot_multiplier);
     u_start.push_back(u_index.size());
-    fake_fill += end_N - start_N;
+    estimated_fill_work += end_N - start_N;
 
     // 2.4. Loop over pivot row to eliminate other column
     const HighsInt row_start = mr_start[iRowPivot];
@@ -1184,8 +1186,8 @@ HighsInt HFactor::buildKernel() {
           mc_value[my_k] = value;
         }
       }
-      fake_eliminate += mwz_column_count;
-      fake_eliminate += nFillin * 2;
+      estimated_eliminate_work += mwz_column_count;
+      estimated_eliminate_work += nFillin * 2;
 
       // 2.4.3. Remove cancellation gaps
       if (nCancel > 0) {
@@ -1272,7 +1274,8 @@ HighsInt HFactor::buildKernel() {
     }
   }
   build_synthetic_tick +=
-      fake_search * 20 + fake_fill * 160 + fake_eliminate * 80;
+      estimated_search_work * 20 + estimated_fill_work * 160 +
+      estimated_eliminate_work * 80;
   rank_deficiency = 0;
   return rank_deficiency;
 }
@@ -1309,7 +1312,7 @@ void HFactor::buildHandleRankDeficiency() {
     // so resize it
     iwork.resize(num_basic);
   }
-  // ToDo: surely this is neater as iwork.assign(num_row, -1);
+  // Preserve the larger num_basic allocation while resetting row entries.
   for (HighsInt i = 0; i < num_row; i++) iwork[i] = -1;
   for (HighsInt i = 0; i < num_basic; i++) {
     HighsInt perm_i = permute[i];

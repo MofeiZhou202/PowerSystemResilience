@@ -1,36 +1,65 @@
 #pragma once
 
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
 namespace mipsolvers::engine {
 
-/// Algorithm-affecting environment toggles for the legacy B&C stack.
+/// Immutable environment snapshot used by one top-level B&C solve.
 ///
-/// The legacy branch-and-cut historically reads 200+ environment variables
-/// scattered through a 33k-line function, making runs environment-dependent
-/// and un-CI-able.  This struct is the first governance step: the genuinely
-/// algorithm-affecting toggles are parsed ONCE here, and call sites migrate
-/// from ad-hoc `std::getenv`/`bc_env_flag_enabled(name)` to fields.
-///
-/// Debug/trace flags (MIPSOLVERS_*_DIAG, *_TIMELINE, *_CONFORM, *_TRACE,
-/// *_STATS, HACDCPF_*) are intentionally NOT captured — they are diagnostics,
-/// not algorithm choices, and stay env-driven until the tree split lands.
+/// Only solver-owned MIPSOLVERS_* and HACDCPF_* variables are captured. The
+/// generic value/flag accessors serve diagnostics; algorithm-affecting values
+/// are parsed into named fields below. Nested solves and worker threads bind
+/// the same shared snapshot, so the process environment cannot change a run
+/// after it starts.
 struct BcEnvOptions {
-  // StrictHiGHS diagnostics and root-pipeline experiments.
-  bool require_strict_tree_exhaustion{false};     ///< MIPSOLVERS_REQUIRE_STRICT_TREE_EXHAUSTION
-  bool root_separation_only{false};               ///< MIPSOLVERS_ROOT_SEPARATION_ONLY
-  bool strict_full_retain_root_lp{false};         ///< MIPSOLVERS_STRICT_FULL_RETAIN_ROOT_LP
-  bool strict_root_disable_highs_evaluate_root{false};  ///< MIPSOLVERS_STRICT_ROOT_DISABLE_HIGHS_EVALUATE_ROOT
-  bool strict_root_stop_after_round{false};       ///< MIPSOLVERS_STRICT_ROOT_STOP_AFTER_ROUND
-  bool root_oracle_stop_after_root_round{false};  ///< MIPSOLVERS_ROOT_ORACLE_STOP_AFTER_ROOT_ROUND
+  bool require_strict_tree_exhaustion{false};
+  bool root_separation_only{false};
+  bool strict_full_retain_root_lp{false};
+  bool strict_root_disable_highs_evaluate_root{false};
+  bool strict_root_stop_after_round{false};
+  bool root_oracle_stop_after_root_round{false};
 
-  // SCUC dynamic-cut feature toggles.
-  bool scuc_dynamic_cuts_enabled{false};          ///< MIPSOLVERS_ENABLE_SCUC_DYNAMIC_CUTS
-  bool scuc_dynamic_cuts_disabled{false};         ///< MIPSOLVERS_DISABLE_SCUC_DYNAMIC_CUTS
-  bool scuc_dynamic_unit_ramp_cuts{false};        ///< MIPSOLVERS_SCUC_DYNAMIC_UNIT_RAMP_CUTS
+  bool scuc_dynamic_cuts_enabled{false};
+  bool scuc_dynamic_cuts_disabled{false};
+  bool scuc_dynamic_unit_ramp_cuts{false};
+
+  /// Return the captured value, or nullptr when the variable was absent.
+  const char* value(const char* name) const;
+  bool flag(const char* name) const;
+
+  /// Sorted NAME=VALUE records suitable for BCResult provenance.
+  std::vector<std::string> active_settings() const;
+
+ private:
+  friend std::shared_ptr<const BcEnvOptions> capture_bc_env_options();
+  std::unordered_map<std::string, std::string> settings_;
 };
 
-/// Parsed-once accessor.  The environment is read at first call and frozen;
-/// getenv is not re-read, so behavior is reproducible for the process
-/// lifetime (and unit tests get a single consistent snapshot).
+/// Capture the current process environment for a new top-level solve.
+std::shared_ptr<const BcEnvOptions> capture_bc_env_options();
+
+/// Snapshot currently bound to this thread, or nullptr outside a solve.
+std::shared_ptr<const BcEnvOptions> current_bc_env_options();
+
+/// Bind a solve snapshot to the current thread. Nested scopes restore the
+/// previous binding; parallel workers receive the same shared snapshot.
+class ScopedBcEnvOptions {
+ public:
+  explicit ScopedBcEnvOptions(std::shared_ptr<const BcEnvOptions> options);
+  ~ScopedBcEnvOptions();
+
+  ScopedBcEnvOptions(const ScopedBcEnvOptions&) = delete;
+  ScopedBcEnvOptions& operator=(const ScopedBcEnvOptions&) = delete;
+
+ private:
+  std::shared_ptr<const BcEnvOptions> previous_;
+};
+
+/// Access the bound snapshot. Outside a solve, the first access on a thread
+/// captures a fallback snapshot for direct helper tests.
 const BcEnvOptions& bc_env_options();
 
 }  // namespace mipsolvers::engine

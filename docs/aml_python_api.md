@@ -402,11 +402,14 @@ m.set_nlp_x0(x0: list[float])   # initial guess for NLP solver
 
 ```python
 m.print_summary()
-m.check_bounds()          # warns if lb > ub
-m.check_missing_params()  # warns if any Parameter has unset entries
+m.check_bounds()          # raises if any lb > ub
+# Raises when a scalar is unset, an indexed table is empty, or a stored value
+# is non-finite. Parameter declarations have dimensions but no Set, so this
+# cannot prove full indexed-domain coverage.
+m.check_missing_params()
 
-m.write_lp(path)
-m.write_mps(path)
+m.write_lp(path)     # linear LP/MILP only; unsupported model classes raise
+m.write_mps(path)    # free MPS, including integrality and objective offset
 m.write_json(path)   # Beta
 ```
 

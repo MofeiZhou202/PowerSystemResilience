@@ -11,26 +11,11 @@
 namespace mipsolvers::engine::strategy {
 
 /**
- * @brief Problem characteristics for heuristic-based solver selection
- */
-struct ProblemCharacteristics {
-  int num_vars{0};
-  int num_constraints{0};
-  int num_nonzeros{0};
-  double density{0.0};  // nonzeros / (num_vars * num_constraints)
-  bool is_sparse{false};
-  bool is_large{false};
-  bool is_dense{false};
-  int condition_estimate{0};  // 0=unknown, 1=well-conditioned, 2=ill-conditioned
-};
-
-/**
- * @brief Routes problems to solvers based on problem class and characteristics
+ * @brief Routes problems to solvers based on explicit policy and availability
  *
  * Uses a combination of:
  * - Problem class (LP, QP, NLP, MILP, MINLP, etc.)
  * - Solver preferences (user-specified, per-class policies)
- * - Problem characteristics (size, sparsity, structure)
  * - Availability (which solvers are linked)
  * - Fallback strategies (if primary solver fails)
  */
@@ -49,18 +34,6 @@ class StrategyDispatcher {
                     bool allow_fallback,
                     StrategyPolicy default_policy,
                     const std::map<ProblemClass, StrategyPolicy>& class_policy) const;
-
-  /**
-   * @brief Extract problem characteristics for heuristic-based selection
-   */
-  ProblemCharacteristics analyze(const api::ProblemVariant& problem) const;
-
-  /**
-   * @brief Estimate which solver will likely perform best based on problem characteristics
-   */
-  std::string estimate_best_solver(ProblemClass cls,
-                                   const ProblemCharacteristics& characteristics,
-                                   const AdapterRegistry& registry) const;
 
  private:
   std::vector<SolverAdapterPtr> candidate_adapters(const AdapterRegistry& registry,

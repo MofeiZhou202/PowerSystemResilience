@@ -8,6 +8,7 @@
 #include "mipsolvers/engine/detail/bc_parallel.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -33,9 +34,18 @@ double gap_optimality_prune_tol_parallel(double limit, double lp_tol) {
   return std::max({1e-7, 10.0 * std::max(0.0, lp_tol),
                    1e-9 * std::max(1.0, std::abs(limit))});
 }
+
+void atomic_add_relaxed(std::atomic<double>& target, double value) {
+  double current = target.load(std::memory_order_relaxed);
+  while (!target.compare_exchange_weak(current, current + value,
+                                       std::memory_order_relaxed,
+                                       std::memory_order_relaxed)) {
+  }
+}
 }  // namespace
 
 void detail::explorer_thread(
+    std::shared_ptr<const BcEnvOptions> environment,
     int thread_id,
     WorkerRole role,
     ThreadSafeNodeQueue& node_queue,
@@ -48,6 +58,10 @@ void detail::explorer_thread(
 	    const LPModel& pre_cut_lp,
 	    const StandardFormLP& base_sf,
 	    const std::vector<char>& branchable_cols,
+	    const std::vector<int>& branch_priority,
+	    const std::vector<int>& branch_original_cols,
+	    int original_col_count,
+	    const BCBranchingPriorFn* dynamic_branching_prior,
 	    const CliqueTable& clique_table,
     const BinaryImplicationGraph& implication_graph,
     const SimplexOptions& simplex_opt,
@@ -56,6 +70,7 @@ void detail::explorer_thread(
     std::mutex& pc_mtx,
     AtomicBCStats& stats,
     std::atomic<bool>& should_stop,
+    ParallelProgressEvent& progress_event,
     std::atomic<int>& active_explorers,
     ActiveNodeBounds& active_bounds,
     FallbackLogger& fallback_logger,
@@ -64,6 +79,7 @@ void detail::explorer_thread(
     SharedImplicationGraph* shared_impl_graph,
     DeterministicTurnToken* det_token,
     const std::atomic<double>* optimality_limit) {
+  ScopedBcEnvOptions environment_scope(std::move(environment));
 
 	  const int n = static_cast<int>(base_lp.vars.size());
 	  const bool strict_highs_lp_contract =
@@ -142,18 +158,21 @@ void detail::explorer_thread(
   struct ActiveNodeGuard {
     ActiveNodeBounds& bounds;
     std::atomic<int>& active;
+    ParallelProgressEvent& progress;
     int worker;
     bool armed{false};
-    ActiveNodeGuard(ActiveNodeBounds& b, std::atomic<int>& a, int w,
-                    double bound)
-        : bounds(b), active(a), worker(w), armed(true) {
+    ActiveNodeGuard(ActiveNodeBounds& b, std::atomic<int>& a,
+                    ParallelProgressEvent& p, int w, double bound)
+        : bounds(b), active(a), progress(p), worker(w), armed(true) {
       bounds.enter(worker, bound);
       active.fetch_add(1, std::memory_order_acq_rel);
+      progress.notify();
     }
     ~ActiveNodeGuard() {
       if (armed) {
         bounds.leave(worker);
         active.fetch_sub(1, std::memory_order_acq_rel);
+        progress.notify();
       }
     }
     ActiveNodeGuard(const ActiveNodeGuard&) = delete;
@@ -265,6 +284,7 @@ void detail::explorer_thread(
 
   // Per-thread SolverDispatcher routes LP solves through unified path.
   DispatcherConfig par_disp_config = DispatcherConfig::from_bc_options(opt);
+  par_disp_config.allow_persistent_lp_state = true;
   SolverDispatcher par_dispatcher(par_disp_config, &fallback_mgr, &shared_inc.obj);
   if (root_basis) {
     par_dispatcher.set_root_basis(root_basis);
@@ -279,6 +299,10 @@ void detail::explorer_thread(
   // process_child path.
   std::vector<PCUpdate> pc_updates_buffer;
   pc_updates_buffer.reserve(8);
+  auto record_node_explored = [&] {
+    stats.nodes_explored.fetch_add(1, std::memory_order_relaxed);
+    progress_event.notify();
+  };
 
   // ── Helper lambda: process a single child node ──
   // branch_var is passed explicitly so the lambda doesn't capture a changing 'j'.
@@ -361,7 +385,7 @@ void detail::explorer_thread(
       std::vector<FrontierCandidate> candidates;
       candidates.reserve(static_cast<std::size_t>(
           std::min<int>(reason_bounds.size(), max_frontier_clauses * 4)));
-      std::unordered_set<std::size_t> seen;
+      BranchLiteralListSet seen;
 
       auto literal_pos = [&](const BranchDomainLiteral& lit) -> int {
         int best_pos = -1;
@@ -398,10 +422,9 @@ void detail::explorer_thread(
           [&](std::vector<BranchDomainLiteral> frontier,
               int target_pos) {
         canonicalize_branch_literals(frontier);
-        std::unordered_set<std::size_t> visited_frontiers;
+        BranchLiteralListSet visited_frontiers;
         for (int iter = 0; iter < 16; ++iter) {
-          const std::size_t fh = conflict_clause_hash(frontier);
-          if (!visited_frontiers.insert(fh).second) break;
+          if (!visited_frontiers.insert(frontier)) break;
           int best_idx = -1;
           int best_pos = -1;
           int resolvable_at_depth = 0;
@@ -477,8 +500,7 @@ void detail::explorer_thread(
         if (clause.empty() || static_cast<int>(clause.size()) > max_literals) {
           continue;
         }
-        const std::size_t h = conflict_clause_hash(clause);
-        if (!seen.insert(h).second) continue;
+        if (!seen.insert(clause)) continue;
         const int short_limit = std::min(8, max_literals);
         const int queue_hits =
             static_cast<int>(clause.size()) <= short_limit
@@ -883,9 +905,10 @@ void detail::explorer_thread(
     const bool do_pool_scan = (node_id_gen % scan_interval == 0);
     if (!is_ipm_diver && do_pool_scan
         && static_cast<int>(base_lp.A.rows()) <= opt.pool_cut_row_threshold) {
-      auto violated = shared_cp.find_violated(child.x_relax, 1e-4);
-      if (!violated.empty()) {
-        const int pool_budget = std::min(static_cast<int>(violated.size()), opt.cuts_per_round);
+      auto violated_cuts = shared_cp.select_violated_and_age(
+          child.x_relax, 1e-4, opt.cuts_per_round);
+      if (!violated_cuts.empty()) {
+        const int pool_budget = static_cast<int>(violated_cuts.size());
         LPModel pool_lp = base_lp;
         apply_node_bounds(pool_lp.vars, child.lb, child.ub);
         std::vector<Eigen::SparseVector<double>> pool_rows;
@@ -893,7 +916,7 @@ void detail::explorer_thread(
         pool_rows.reserve(pool_budget);
         pool_rhs_vec.reserve(pool_budget);
         for (int pi = 0; pi < pool_budget; ++pi) {
-          PoolCut pc_cut = shared_cp.get(violated[pi]);
+          PoolCut pc_cut = std::move(violated_cuts[static_cast<std::size_t>(pi)]);
           pool_rows.push_back(std::move(pc_cut.coeff));
           pool_rhs_vec.push_back(pc_cut.rhs);
         }
@@ -1017,6 +1040,7 @@ void detail::explorer_thread(
           local_dfs_fallback.pop_back();
         }
 	      }
+	      const bool changed_frontier = !frontier_drain_buffer.empty();
 	      for (Node& node : frontier_drain_buffer) {
 	        if (node_exceeds_optimality_limit(node.bound)) {
 	          stats.gap_suboptimal_queue_prunes.fetch_add(
@@ -1026,8 +1050,9 @@ void detail::explorer_thread(
 	        if (!incumbent_prunes_node(true, inc_snap.obj, node.bound)) {
 	          node_queue.push_pq(std::move(node));
 	        }
-	      }
+      }
       frontier_drain_buffer.clear();
+      if (changed_frontier) progress_event.notify();
       node_queue.prune_by_incumbent(true, inc_snap.obj,
                                     std::max(1e-9, kIncumbentPruneTol *
                                                         std::max(1.0, std::abs(inc_snap.obj))));
@@ -1100,6 +1125,9 @@ void detail::explorer_thread(
       continue;
     }
 
+    ActiveNodeGuard active_guard(active_bounds, active_explorers,
+                                 progress_event, thread_id, cur.bound);
+
 	    if (incumbent_prunes_node(inc_snap.has, inc_snap.obj, cur.bound)) {
 	      continue;
 	    }
@@ -1111,10 +1139,6 @@ void detail::explorer_thread(
 	      if (use_shared_conflicts && shared_conflicts.has_conflict(cur.lb, cur.ub)) {
 	        continue;
 	      }
-
-    ActiveNodeGuard active_guard(active_bounds, active_explorers, thread_id,
-                                 cur.bound);
-
     std::vector<int> frac;
 		    if (!fractional_branchable_indices(cur.x_relax, cur.lb, cur.ub,
 		                                       opt.int_tol, frac)) {
@@ -1123,11 +1147,58 @@ void detail::explorer_thread(
         shared_inc.try_update(cur.x_relax, obj);
         shared_sp.add(cur.x_relax, obj);
       }
-      stats.nodes_explored.fetch_add(1, std::memory_order_relaxed);
+      record_node_explored();
       continue;
     }
 
+    BCBranchContext branch_context;
+    branch_context.depth = cur.depth;
+    branch_context.node_lb = cur.bound;
+    branch_context.best_obj =
+        inc_snap.has ? inc_snap.obj : std::numeric_limits<double>::infinity();
+    branch_context.candidates = &frac;
+    branch_context.lp_x = cur.x_relax.data();
+    branch_context.lp_x_size = static_cast<std::size_t>(cur.x_relax.size());
+    std::vector<int> original_candidates;
+    Eigen::VectorXd original_lp_x;
+    if (original_col_count > 0 &&
+        branch_original_cols.size() == static_cast<std::size_t>(n)) {
+      bool mapping_valid = true;
+      original_candidates.reserve(frac.size());
+      for (int candidate : frac) {
+        if (candidate < 0 || candidate >= n) {
+          mapping_valid = false;
+          break;
+        }
+        const int original =
+            branch_original_cols[static_cast<std::size_t>(candidate)];
+        if (original < 0 || original >= original_col_count) {
+          mapping_valid = false;
+          break;
+        }
+        original_candidates.push_back(original);
+      }
+      if (mapping_valid) {
+        original_lp_x = Eigen::VectorXd::Zero(original_col_count);
+        for (int col = 0; col < n; ++col) {
+          const int original =
+              branch_original_cols[static_cast<std::size_t>(col)];
+          if (original >= 0 && original < original_col_count) {
+            original_lp_x[original] = cur.x_relax[col];
+          }
+        }
+        branch_context.candidates = &original_candidates;
+        branch_context.lp_x = original_lp_x.data();
+        branch_context.lp_x_size =
+            static_cast<std::size_t>(original_lp_x.size());
+      }
+    }
+    const bool has_dynamic_prior =
+        dynamic_branching_prior != nullptr &&
+        static_cast<bool>(*dynamic_branching_prior);
+
     int j = -1;
+    std::vector<BranchDirectionalObservation> selected_direction_observations;
     const bool compact_pc_path = n >= 100000;
     if (role == WorkerRole::Prover && cur.depth <= opt.max_plunge_depth &&
         !compact_pc_path) {
@@ -1147,7 +1218,9 @@ void detail::explorer_thread(
           cur.lb, cur.ub, cur.basis_hint.get(), simplex_opt,
           cur.bound, relia_lp, cur.depth,
           /*reliability_limit=*/par_probe_reliability,
-          /*max_probes=*/par_probe_max);
+          /*max_probes=*/par_probe_max, branch_priority,
+          has_dynamic_prior ? *dynamic_branching_prior : BCBranchingPriorFn{},
+          branch_context, &selected_direction_observations);
       stats.lp_solves.fetch_add(relia_lp, std::memory_order_relaxed);
       // Merge probing results back to shared PCs.
       if (opt.pseudocost_delta_merge) {
@@ -1216,35 +1289,63 @@ void detail::explorer_thread(
         for (size_t fi = 0; fi < frac.size(); ++fi)
           frac_pc[fi] = pc[frac[fi]];
       }
-      double best_score = -1.0;
-      for (std::size_t fi = 0; fi < frac.size(); ++fi) {
-        const int cand = frac[fi];
-        const double frac_part = cur.x_relax[cand] - std::floor(cur.x_relax[cand]);
-        const double qd = std::max(
-            frac_part * std::max(frac_pc[fi].down_lcb(), 1e-6) *
-                frac_pc[fi].down_history_multiplier(),
-            1e-6);
-        const double qu = std::max(
-            (1.0 - frac_part) * std::max(frac_pc[fi].up_lcb(), 1e-6) *
-                frac_pc[fi].up_history_multiplier(),
-            1e-6);
-        const double score = qd * qu;
-        if (score > best_score) {
-          best_score = score;
-          j = cand;
-        }
-      }
+      j = choose_branch_var_pseudocost_candidates(
+          frac, cur.x_relax, frac_pc, branch_priority,
+          has_dynamic_prior ? *dynamic_branching_prior : BCBranchingPriorFn{},
+          branch_context);
     }
     if (j < 0) {
-      stats.nodes_explored.fetch_add(1, std::memory_order_relaxed);
+      record_node_explored();
       continue;
     }
 
     const double xj = cur.x_relax[j];
     const double parent_bound = cur.bound;
+    const double parent_estimate = cur.estimate;
     const int parent_depth = cur.depth;
     Eigen::VectorXd parent_x_relax = std::move(cur.x_relax);
     pc_updates_buffer.clear();
+
+    PseudoCost direction_pc;
+    {
+      std::lock_guard<std::mutex> lk(pc_mtx);
+      direction_pc = pc[static_cast<std::size_t>(j)];
+    }
+    const double branch_fractionality = xj - std::floor(xj);
+    const BranchDirectionalObservation* down_direction_observation = nullptr;
+    const BranchDirectionalObservation* up_direction_observation = nullptr;
+    for (const auto& observation : selected_direction_observations) {
+      if (observation.var != j) continue;
+      if (observation.is_up) up_direction_observation = &observation;
+      else down_direction_observation = &observation;
+    }
+    const auto history_prediction_usable =
+        [](const BranchDirectionalObservation* observation) {
+          return observation == nullptr ||
+                 observation->state == BranchEvidenceState::Predicted ||
+                 observation->state == BranchEvidenceState::UnknownFailure;
+        };
+    const bool down_prediction_available =
+        history_prediction_usable(down_direction_observation);
+    const bool up_prediction_available =
+        history_prediction_usable(up_direction_observation);
+    const double predicted_down_gain = compute_directional_branch_score(
+        direction_pc, branch_fractionality, false, nullptr);
+    const double predicted_up_gain = compute_directional_branch_score(
+        direction_pc, 1.0 - branch_fractionality, true, nullptr);
+    const bool prefer_up = choose_up_branch_first(
+        direction_pc, branch_fractionality, down_direction_observation,
+        up_direction_observation, inc_snap.has);
+    if (prefer_up) {
+      stats.branch_direction_preferred_up.fetch_add(1,
+                                                    std::memory_order_relaxed);
+      stats.branch_direction_first_up.fetch_add(1, std::memory_order_relaxed);
+    } else {
+      stats.branch_direction_preferred_down.fetch_add(
+          1, std::memory_order_relaxed);
+      stats.branch_direction_first_down.fetch_add(1,
+                                                  std::memory_order_relaxed);
+    }
 
     Node child_down = cur.branch_child();
     child_down.ub[j] = std::min(child_down.ub[j], std::floor(xj));
@@ -1259,8 +1360,74 @@ void detail::explorer_thread(
     child_up.lb[j] = std::max(child_up.lb[j], std::ceil(xj));
       append_branch_reason(child_up, j, true, child_up.lb[j]);
 
-    bool down_valid = process_child(child_down, false, j, parent_bound, parent_x_relax);
-    bool up_valid = process_child(child_up, true, j, parent_bound, parent_x_relax);
+    bool down_valid = false;
+    bool up_valid = false;
+    auto process_direction = [&](bool is_up, int ordinal) {
+      Node& child = is_up ? child_up : child_down;
+      bool& valid = is_up ? up_valid : down_valid;
+      const std::size_t update_start = pc_updates_buffer.size();
+      const auto incumbent_before = shared_inc.snapshot();
+      valid = process_child(child, is_up, j, parent_bound, parent_x_relax);
+      const auto incumbent_after = shared_inc.snapshot();
+      const bool cutoff = std::any_of(
+          pc_updates_buffer.begin() +
+              static_cast<std::ptrdiff_t>(update_start),
+          pc_updates_buffer.end(),
+          [](const PCUpdate& update) { return update.cutoff_count > 0; });
+      if (cutoff) {
+        if (ordinal == 0) {
+          stats.branch_first_child_cutoffs.fetch_add(
+              1, std::memory_order_relaxed);
+        } else {
+          stats.branch_second_child_cutoffs.fetch_add(
+              1, std::memory_order_relaxed);
+        }
+      }
+      if (ordinal == 0 && incumbent_after.has &&
+          (!incumbent_before.has || incumbent_after.obj < incumbent_before.obj)) {
+        stats.branch_first_child_incumbent_updates.fetch_add(
+            1, std::memory_order_relaxed);
+      }
+    };
+    const std::array<bool, 2> direction_order{prefer_up, !prefer_up};
+    for (int ordinal = 0; ordinal < 2; ++ordinal) {
+      process_direction(direction_order[static_cast<std::size_t>(ordinal)],
+                        ordinal);
+    }
+    const auto calibration = compute_branch_estimator_calibration(
+        parent_bound, parent_estimate, down_prediction_available,
+        predicted_down_gain, up_prediction_available, predicted_up_gain,
+        down_valid, child_down.bound, up_valid, child_up.bound);
+    stats.node_estimate_calibration_samples.fetch_add(
+        calibration.node_samples, std::memory_order_relaxed);
+    atomic_add_relaxed(stats.node_estimate_predicted_lift_sum,
+                       calibration.node_predicted_lift_sum);
+    atomic_add_relaxed(stats.node_estimate_realized_lift_sum,
+                       calibration.node_realized_lift_sum);
+    atomic_add_relaxed(stats.node_estimate_abs_error_sum,
+                       calibration.node_abs_error_sum);
+    atomic_add_relaxed(stats.node_estimate_squared_error_sum,
+                       calibration.node_squared_error_sum);
+    atomic_add_relaxed(stats.node_estimate_predicted_sq_sum,
+                       calibration.node_predicted_sq_sum);
+    atomic_add_relaxed(stats.node_estimate_realized_sq_sum,
+                       calibration.node_realized_sq_sum);
+    atomic_add_relaxed(stats.node_estimate_cross_sum,
+                       calibration.node_cross_sum);
+    stats.directional_calibration_samples.fetch_add(
+        calibration.directional_samples, std::memory_order_relaxed);
+    atomic_add_relaxed(stats.directional_predicted_gain_sum,
+                       calibration.directional_predicted_gain_sum);
+    atomic_add_relaxed(stats.directional_realized_gain_sum,
+                       calibration.directional_realized_gain_sum);
+    atomic_add_relaxed(stats.directional_abs_error_sum,
+                       calibration.directional_abs_error_sum);
+    atomic_add_relaxed(stats.directional_squared_error_sum,
+                       calibration.directional_squared_error_sum);
+    stats.directional_rank_samples.fetch_add(
+        calibration.directional_rank_samples, std::memory_order_relaxed);
+    stats.directional_rank_concordant.fetch_add(
+        calibration.directional_rank_concordant, std::memory_order_relaxed);
 
     // Refresh incumbent snapshot: the LP solves above may have published
     // a better incumbent, and using the fresh value here tightens the
@@ -1305,11 +1472,13 @@ void detail::explorer_thread(
       pc_updates_buffer.clear();
       if (down_valid) {
         child_down.estimate = compute_node_estimate(branchable_indices, child_down.x_relax,
-                                                    pc, opt.int_tol, child_down.bound);
+                                                    pc, opt.int_tol, child_down.bound,
+                                                    opt.node_estimate_aggregation);
       }
       if (up_valid) {
         child_up.estimate = compute_node_estimate(branchable_indices, child_up.x_relax,
-                                                  pc, opt.int_tol, child_up.bound);
+                                                  pc, opt.int_tol, child_up.bound,
+                                                  opt.node_estimate_aggregation);
       }
     }
 
@@ -1345,7 +1514,7 @@ void detail::explorer_thread(
       };
 
       if (down_valid && up_valid) {
-        if (child_down.bound <= child_up.bound) {
+        if (!prefer_up) {
           node_queue.push_pq(std::move(child_up));
           push_local(std::move(child_down));
         } else {
@@ -1372,7 +1541,7 @@ void detail::explorer_thread(
     // Release push-phase turn.
     if (det_token) det_token->advance();
 
-    stats.nodes_explored.fetch_add(1, std::memory_order_relaxed);
+    record_node_explored();
   }
 
   // Flush any remaining locally-learned implications before this worker exits,
@@ -1384,9 +1553,11 @@ void detail::explorer_thread(
   // skips us in its rotation and sibling threads do not block waiting
   // for a turn we will never take.
   if (det_token) det_token->mark_done(thread_id);
+  progress_event.notify();
 }
 
 void detail::cut_worker_thread(
+    std::shared_ptr<const BcEnvOptions> environment,
     CutRequestQueue& cut_queue,
     SharedCutPool& shared_cp,
     SharedSolutionPool& shared_sp,
@@ -1395,6 +1566,7 @@ void detail::cut_worker_thread(
     const BCOptions& opt,
     AtomicBCStats& stats,
     std::atomic<bool>& should_stop) {
+  ScopedBcEnvOptions environment_scope(std::move(environment));
 
   const int n = static_cast<int>(base_lp.vars.size());
 

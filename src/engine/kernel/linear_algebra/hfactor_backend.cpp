@@ -4,9 +4,6 @@
 // Wraps the vendored HiGHS HFactor (see
 // src/engine/kernel/linear_algebra/highs_factor/) in an API that mirrors
 // `mipsolvers::engine::SparseLUFactor`.
-//
-// Phase 2 of U.7.118.  Phase 3 will plug this into the dual-simplex driver
-// behind a new `FactorBackendKind::HFactorPort` enum value.
 // ═══════════════════════════════════════════════════════════════════════════
 
 #include "mipsolvers/engine/kernel/linear_algebra/hfactor_backend.hpp"

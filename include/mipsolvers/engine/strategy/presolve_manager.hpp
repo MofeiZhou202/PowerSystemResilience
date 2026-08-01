@@ -37,7 +37,9 @@ struct PresolveMapping {
 
   // Whether any transformations were applied
   bool was_modified() const {
-    return !col_mapping.empty() || !row_mapping.empty() || !fixed_variables.empty();
+    return !col_mapping.empty() || !row_mapping.empty() ||
+           !fixed_variables.empty() || !variable_shifts.empty() ||
+           !row_scales.empty() || !col_scales.empty();
   }
 };
 
@@ -54,12 +56,14 @@ struct PresolvedProblem {
 /**
  * @brief Manages presolve transformations
  *
- * Applies multiple presolve techniques in sequence:
- * 1. Native presolve (empty row/column detection, fixed variable elimination)
- * 2. PaPILO presolve (if available)
- * 3. Scaling (Ruiz equilibration for numerical stability)
+ * Compatibility facade for the generic strategy API. This class currently
+ * performs an explicit identity transformation only. Production MILP
+ * presolve/postsolve is implemented by `papilo_presolve_mip()` and its paired
+ * postsolve stack; solver kernels own their numerical scaling.
  *
- * Produces a smaller, better-conditioned problem that solves faster.
+ * The identity contract is intentional and observable: `should_presolve()` is
+ * false, statistics report unchanged dimensions, and unsupported scaling
+ * requests throw instead of pretending that a transformation occurred.
  */
 class PresolveManager {
  public:
@@ -74,12 +78,12 @@ class PresolveManager {
                             const SolveOptions& options) const;
 
   /**
-   * @brief Apply native presolve only (without PaPILO)
+   * @brief Return an explicitly identity-presolved problem
    */
   PresolvedProblem native_presolve(const api::ProblemVariant& problem) const;
 
   /**
-   * @brief Apply scaling to improve numerical conditioning
+   * @brief Return identity for "none"/"identity" or reject other methods
    */
   PresolvedProblem scale(const api::ProblemVariant& problem,
                          const std::string& scaling_method = "ruiz") const;
@@ -87,7 +91,7 @@ class PresolveManager {
   /**
    * @brief Check if presolve would likely help
    *
-   * Returns true if problem is large or has poor numerical properties
+   * Returns false while this generic facade has no transformation backend.
    */
   bool should_presolve(const api::ProblemVariant& problem,
                        const SolveOptions& options) const;

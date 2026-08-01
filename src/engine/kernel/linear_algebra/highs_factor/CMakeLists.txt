@@ -1,13 +1,11 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # mipsolvers_hfactor — vendored HiGHS HFactor as a standalone static library
-# Part of U.7.118 Phase 1 (port HiGHS HFactor as faster basis-LU backend).
 #
-# This target compiles the vendored HFactor sources WITHOUT any modification.
+# This target compiles the vendored HFactor sources with the small local
+# integration and safety changes documented in this directory.
 # The header search path is set to THIS directory so the vendored files see
 # their includes (`#include "util/HFactor.h"`, `"io/HighsIO.h"`, `"HConfig.h"`)
 # as they would inside the HiGHS source tree.
-#
-# Phase 1 = compile only. No integration with mipsolvers yet.
 # ─────────────────────────────────────────────────────────────────────────────
 
 set(HFACTOR_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -53,6 +51,5 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   )
 endif()
 
-# Position-independent code so we can later link this into mipsolvers (a shared
-# or large static lib).
+# Position-independent code supports linking into shared or static builds.
 set_target_properties(mipsolvers_hfactor PROPERTIES POSITION_INDEPENDENT_CODE ON)

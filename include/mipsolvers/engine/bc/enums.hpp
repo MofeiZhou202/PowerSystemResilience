@@ -22,6 +22,11 @@ enum class NodeSelection {
   Hybrid,      ///< DFS until first incumbent, then estimate-guided best-first
 };
 
+enum class NodeEstimateAggregation {
+  Sum,      ///< Sum each fractional variable's cheaper directional lift
+  Maximum,  ///< Use only the largest cheaper directional lift
+};
+
 /// Families of cutting planes the engine can generate.
 enum class CutType {
   None,
@@ -29,8 +34,6 @@ enum class CutType {
   MIR,
   Gomory,
   Cover,
-  FlowCover,
-  ImpliedBound,
   All,
 };
 

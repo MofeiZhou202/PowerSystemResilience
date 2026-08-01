@@ -1,0 +1,425 @@
+% !TeX program = xelatex
+\documentclass[11pt,a4paper]{ctexart}
+
+\usepackage{amsmath,amssymb,bm}
+\usepackage{booktabs,longtable,array,multirow}
+\usepackage{geometry}
+\geometry{margin=2.4cm}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{enumitem}
+\usepackage[colorlinks=true,linkcolor=blue!60!black,urlcolor=blue!60!black]{hyperref}
+
+\lstdefinestyle{code}{basicstyle=\ttfamily\footnotesize,frame=single,framerule=0.3pt,
+  rulecolor=\color{black!40},backgroundcolor=\color{black!4},breaklines=true,
+  columns=fullflexible,keepspaces=true,showstringspaces=false}
+\lstset{style=code}
+
+\newcommand{\file}[1]{\texttt{#1}}
+\newcommand{\func}[1]{\texttt{#1}}
+\newcommand{\opt}[1]{\texttt{#1}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\evid}[1]{{\footnotesize\color{black!70}（证据：#1）}}
+
+\title{\textbf{MIPSolvers 原生内点法（Native IPM）求解器\\数学模型与最严苛代码审计报告}}
+\author{代码审计（以实现为准，不以注释为准）}
+\date{2026 年 8 月 1 日}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent 本报告对 MIPSolvers 仓库中原生内点法求解器族（NLP-IPM、LP-IPM、LCQP-IPM、锥 IPM 及其 KKT/线性代数支撑层）做两件事：（i）以\textbf{代码实际行为}为准，系统重建其数学模型；（ii）从通用 NLP 求解器（Ipopt / Wächter--Biegler 框架）与主流 LP/锥 IPM 工程标准出发，对数据结构与算法效率做最严苛评估，并逐条登记占位符、虚假实现与死代码。审计结论是双面的：\textbf{锥 IPM 与 LP-IPM 内核大体真实且工程质量不低；而 NLP-IPM（\file{ipm\_solver.cpp}）存在若干影响收敛语义与结果真实性的严重问题}——包括可将仅原始可行、对偶不可行的点报告为``收敛''的容差后门、被旁路的 filter 线搜索、冻结的有限差分 Hessian 伴随每迭代死计算、以及失败时静默委托外部 Ipopt 的回退链；另有一批声明了却从未接线的选项（\opt{use\_inertia\_correction}、\opt{crossover}、\opt{max\_correctors}、\opt{presolve} 等）与文档虚标（LCQP 自称 Mehrotra 预测-校正，实为单步中心法）。所有实质性结论均给出文件：行号证据。
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{审计范围、方法与证据标准}
+
+\subsection{范围}
+本次审计覆盖 \file{src/engine/kernel/ipm/}、\file{src/engine/kernel/kkt/}、\file{src/engine/kernel/linear\_algebra/}（除 HiGHS 引入的 \file{highs\_factor/} 外）的全部源文件与对应头文件，以及 \file{src/engine/api/solver.cpp}、\file{src/engine/strategy/dispatcher.cpp} 中的适配器注册/分派链、\file{tests/test\_ipm\_solver.cpp}、\file{tests/test\_conic\_ipm.cpp} 与 \file{docs/} 内相关声明。B\&C（MILP）侧不在本次范围内；但 \file{bc/parallel/}、\file{bc/root/}、\file{bc/search/} 三个目录为空（仅有目录结构、零源文件）这一事实顺带记录，供后续 MILP 审计参考。
+
+\subsection{方法与证据标准}
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{不信任注释}。任何``声称实现了 X''的注释/docstring 只有在代码中定位到对应控制流才被接受；注释与实现冲突时以实现为准，并将该注释登记为``虚标''。
+  \item \textbf{全文件逐行通读}核心模块：\file{ipm\_solver.cpp}（2624 行）、\file{kkt\_system.cpp}/\file{kkt\_system.hpp}（1105 行）、\file{linear\_solver.cpp}/\file{.hpp}、\file{cholmod\_ldlt.cpp}、\file{ipm\_filter.cpp}、\file{ipm\_restoration.cpp}、\file{ipm\_scaling.cpp}、\file{lcqp\_solver.cpp}（693 行）、\file{cones.cpp}（547 行）、\file{conic\_ipm\_solver.cpp} 主循环与 KKT 后端、\file{ipm\_lp\_solver.cpp} 主迭代段（含预测/校正、收敛判据、步长）。
+  \item \textbf{接线普查}：对 \opt{IPMOptions}/\opt{IPMLPOptions}/\opt{NLPSolverOptions} 的每个字段全库 grep，区分``真实接线（影响控制流）/ 只读不用 / 未接线''。
+  \item 每条实质性指控给出 \file{文件:行号}；个别难以 100\% 确证之处明确标注``不确定''及已核查的程度。
+\end{enumerate}
+
+\subsection{模块地图}
+\begin{center}\footnotesize
+\begin{tabular}{@{}lrl@{}}
+\toprule
+文件 & 行数 & 角色 \\
+\midrule
+\file{src/engine/kernel/ipm/ipm\_solver.cpp} & 2624 & NLP-IPM 双驱动（Filter/Merit）+ 回退链 \\
+\file{src/engine/kernel/ipm/ipm\_filter.cpp} & 56 & Wächter--Biegler filter 数据结构 \\
+\file{src/engine/kernel/ipm/ipm\_restoration.cpp} & 248 & 可行性恢复 NLP 构建 \\
+\file{src/engine/kernel/ipm/ipm\_scaling.cpp} & 200 & 梯度行缩放（无列缩放） \\
+\file{src/engine/kernel/ipm/ipm\_lp\_solver.cpp} & 3497 & LP 专用 Mehrotra IPM + 节点缓存 \\
+\file{src/engine/kernel/ipm/lcqp\_solver.cpp} & 693 & 界约束 QP 原始-对偶 IPM \\
+\file{src/engine/kernel/ipm/conic\_ipm\_solver.cpp} & 1159 & 锥 IPM（cvxopt 标准型，NT 缩放） \\
+\file{src/engine/kernel/ipm/cones.cpp} & 547 & 锥代数：svec/SOC Jordan/NT 缩放/步长 \\
+\file{src/engine/kernel/ipm/chordal\_decomposition.cpp} & 432 & 稀疏 SDP 弦分解（团树骨架） \\
+\file{src/engine/kernel/kkt/kkt\_system.cpp}/\file{.hpp} & 1105 & KKT 组装、惯性``认证''、回代 \\
+\file{src/engine/kernel/linear\_algebra/linear\_solver.cpp} & 423 & 分解后端分派（LU/KLU/UMFPACK/MUMPS） \\
+\file{src/engine/kernel/linear\_algebra/cholmod\_ldlt.cpp} & 184 & CHOLMOD SPD 封装（锥 KKT 用） \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+适配器注册（\file{src/engine/api/solver.cpp:162--166}）：\func{NativeIPMLPAdapter}（LP）、\func{NativeIPMAdapter}（NLP，即 \func{NativeIPM}）、\func{NativeNLPAdapter} 等。NLP 分派顺序为 Ipopt $\to$ NativeIPM $\to$ NativeNLP（\file{src/engine/strategy/dispatcher.cpp:77}），即 \textbf{native IPM 不是 NLP 的默认首选}，外部 Ipopt 在前。
+
+\section{数学模型（以代码实际实现为准）}
+
+本章每个公式都给出实现锚点。记号：$n$ 为变量数，$m_{\mathrm{eq}}=|g|$，$m_{\mathrm{nl}}=|h|$。
+
+\subsection{NLP-IPM：问题形式与内部不等式化}
+求解器接受 \func{NLPModel}（\file{problem\_types.hpp:235}）：
+\begin{equation}
+\min_{x}\; f(x)\quad \text{s.t.}\quad g(x)=0,\;\; h(x)\le 0,\;\; \ell \le x \le u ,
+\end{equation}
+通过回调 \opt{f,grad,hess}、\opt{g,jac\_g}、\opt{h,jac\_h} 取值；\opt{sense=Maximize} 时在梯度/Hessian 上取负（\file{ipm\_solver.cpp:61--63,301--303}）。
+
+\textbf{界约束不单独处理}，而是拆成两类线性不等式并入 $h$：对每个有限下界列生成行 $\ell_j - x_j \le 0$（Jacobian 元 $-1$），每个有限上界列生成行 $x_j - u_j \le 0$（$+1$）\evid{\file{ipm\_solver.cpp:420--430}；同构实现 \file{kkt\_system.cpp:816--871}}。合并后不等式维数
+\begin{equation}
+m = m_{\mathrm{nl}} + |\mathrm{lb\_cols}| + |\mathrm{ub\_cols}|,
+\end{equation}
+引入松弛 $s>0$ 与乘子 $\mu>0$，约束变为 $h(x)+s=0$。\textbf{评注}：主流 NLP 求解器（Ipopt）对界使用专属乘子 $z^L,z^U$ 与对角结构，不扩大 $m$；此处对全界问题不等式数直接加 $2n$，增广 KKT 维数随之增加（见 \S\ref{sec:eff}）。
+
+\subsection{障碍子问题与 KKT 残差}
+障碍参数记 $\bar\mu$（初值 $\max(\mu_{\min}^{\mathrm{eff}}, \opt{mu\_init}{=}0.1)$，\file{ipm\_solver.cpp:1042--1044}）。障碍子问题的价值函数
+\begin{equation}
+\varphi_{\bar\mu}(x,s) = f(x) - \bar\mu \sum_{i=1}^{m} \log s_i
+\evid{\file{ipm\_solver.cpp:971--979}}
+\end{equation}
+KKT 残差（绝对尺度）：
+\begin{align}
+r_d &= \nabla f(x) + J_g^{\top}\lambda + J_h^{\top}\mu, &
+r_{eq} &= g(x), &
+r_{ineq} &= h(x)+s, &
+r_{comp} &= s\circ\mu - \bar\mu\,\mathbf{1},
+\end{align}
+\evid{\file{ipm\_solver.cpp:1163--1170}}。外层收敛判据为\textbf{绝对}残差
+\begin{equation}
+\max(\|r_{eq}\|_\infty,\|r_{ineq}\|_\infty)\le \opt{tol\_primal},\quad
+\|r_d\|_\infty \le \opt{tol\_dual},\quad
+\|s\circ\mu\|_\infty \le \opt{tol\_complementarity},
+\end{equation}
+默认均为 $10^{-6}$\evid{\file{ipm\_solver.cpp:1195--1200}，默认见 \file{ipm\_solver.hpp:25--28}}。代码另算一个缩放 merit $\max$（缩放原始/对偶/互补）\textbf{仅用于 best-iterate 排序与线搜索}，不用于终止\evid{\file{ipm\_solver.cpp:930--954}}——即\textbf{没有 Ipopt 式 $s_D,s_c$ 尺度化终止判据}。
+
+\subsection{Newton 系统：凝聚与增广两种形式}
+\textbf{凝聚路径（默认）}。消去 $ds,d\mu$ 后求解
+\begin{equation}
+\underbrace{\begin{bmatrix} W & J_g^{\top} \\ J_g & 0 \end{bmatrix}}_{K}
+\begin{bmatrix} dx \\ d\lambda \end{bmatrix}
+=
+\begin{bmatrix} r_x \\ -r_{eq} \end{bmatrix},\qquad
+W = H + J_h^{\top} S^{-1} M J_h ,
+\end{equation}
+其中 $S=\mathrm{diag}(s)$, $M=\mathrm{diag}(\mu)$, $H$ 为 Lagrangian Hessian（\S\ref{sec:hess}），右端
+\begin{equation}
+r_x = -r_d - J_h^{\top} S^{-1}\big(M r_{ineq} + \bar\mu\,\mathbf{1} - S\mu\big),
+\end{equation}
+方向恢复 $ds = -r_{ineq} - J_h dx$，$d\mu = S^{-1}(\bar\mu\,\mathbf{1} - S\mu - M\,ds)$\evid{组装 \file{ipm\_solver.cpp:1260--1267}，右端 1286--1297，恢复 1343--1349}。$J_h^{\top}(M/S)J_h$ 通过逐行缩放后稀疏转置乘得到\evid{\file{ipm\_solver.cpp:458--468,1262--1266}}。
+
+\textbf{增广路径}（\opt{use\_augmented\_newton}，默认 \textbf{false}）求解未凝聚系统
+\begin{equation}
+\begin{bmatrix} H+\delta_W I & J_g^{\top} & J_h^{\top} \\
+J_g & -\delta_C I & 0 \\
+J_h & 0 & -S M^{-1} \end{bmatrix}
+\begin{bmatrix} dx\\ d\lambda\\ d\mu \end{bmatrix}
+=
+\begin{bmatrix} -r_d \\ -r_{eq} \\ -r_{ineq} - M^{-1}(\bar\mu\,\mathbf{1}-S\mu) \end{bmatrix},
+\end{equation}
+并附 $\le 2$ 步迭代精化\evid{组装 \file{ipm\_solver.cpp:623--657}，右端 1232--1238，精化 661--683}。两条路径都使用``结构指纹 + scatter map''的 analyze-once/fill-$O(\mathrm{nnz})$ 装配缓存\evid{\file{ipm\_solver.cpp:498--657}；\file{kkt\_system.cpp:93--198}}——\textbf{这是本代码库中工程水准较高的部分}。
+
+\subsection{Hessian 的来源与真实含义}\label{sec:hess}
+\func{build\_lagrangian\_hessian}（\file{ipm\_solver.cpp:279--315}）按优先级取：
+\begin{enumerate}[leftmargin=2em]
+  \item \opt{lagrangian\_hess} 回调：$\nabla^2 f + \sum_i \lambda_i \nabla^2 g_i + \sum_{i\le m_{\mathrm{nl}}} \mu_i \nabla^2 h_i$（唯一含约束曲率的来源）；
+  \item 否则 \opt{hess} 回调：\textbf{仅} $\nabla^2 f$（约束曲率静默缺失，无任何检查或警告）\evid{\file{ipm\_solver.cpp:294--303}}；
+  \item 否则拟牛顿态：若已有 \opt{fd\_hess} 则\textbf{永远}取它，否则取对角+低秩块矩阵，最后退化为 $I$\evid{\file{ipm\_solver.cpp:304--313}}。
+\end{enumerate}
+其中 \opt{fd\_hess} 是在\textbf{初始点 $x_0$} 对 \opt{grad} 做逐列有限差分（$n$ 次梯度评估，$n\le 2000$ 门控）得到的\textbf{目标函数} Hessian，此后在 Filter 路径全程冻结不再刷新\evid{FD 构建 \file{ipm\_solver.cpp:186--228}；启动时一次性刷新 1079--1082；Filter 路径仅在 \opt{has\_fd\_hess} 为假时刷新 1136--1141}。该设计的后果见 \S\ref{sec:placeholders}--\ref{sec:eff}。
+
+\subsection{Filter 线搜索（Wächter--Biegler 框架）}
+违反度与方向导数
+\begin{equation}
+\theta(x,s) = \|g(x)\|_1 + \|h(x)+s\|_1,\qquad
+\nabla\varphi_{\bar\mu}^{\top} d = \nabla f^{\top} dx - \bar\mu \sum_i \frac{ds_i}{s_i},
+\end{equation}
+\evid{\file{ipm\_solver.cpp:960--992}}。filter 本身的接受语义（对已有条目施加 $(1-\gamma_\theta)\theta_k$、$\varphi_k-\gamma_\varphi\theta_k$ 边际，禁止域判定、支配剪枝、$\theta$ 上界初始化）\textbf{与 Wächter--Biegler 一致，实现正确}\evid{\file{ipm\_filter.cpp:9--52}}。接受逻辑（\file{ipm\_solver.cpp:1490--1512}）：
+\begin{itemize}[leftmargin=2em]
+  \item 切换条件（switching）与 Armijo：$\varphi^{try} \le \varphi_k + \eta_\varphi\, \alpha\, \mathrm{slope}$（f-type）；
+  \item 否则 h-type：$\theta^{try}\le(1-\gamma_\theta)\theta_k$ 或 $\varphi^{try}\le\varphi_k-\gamma_\varphi\theta_k$；
+  \item 非 f-type 接受后将 $(\theta_k,\varphi_k)$ 加入 filter\evid{\file{ipm\_solver.cpp:1712--1716}}；
+  \item 二阶修正（SOC）：首次拒绝且 $\theta^{try}>\theta_k$ 时以 $c_{soc}=\alpha r_{eq}+g(x{+}\alpha dx)$ 重解同一分解一次，仅一次\evid{\file{ipm\_solver.cpp:1564--1668}}。
+\end{itemize}
+但与论文存在四处\textbf{实质偏离}（详见 \S\ref{sec:placeholders}）：(i) 存在可绕过 filter 的 direct-accept 后门；(ii) 切换条件含恒真子句；(iii) SOC 仅在 $m_{eq}>0$ 时触发；(iv) 对偶步长随原始 $\alpha$ 同步收缩（Ipopt 中 $\alpha_{dual}$ 在回退中固定）。另：$\mu$ 下调时 \func{filter.clear()}\evid{\file{ipm\_solver.cpp:1731}}。
+
+\subsection{$\bar\mu$ 调度与内外层结构}
+Fiacco--McCormick 单调框架：内层收敛 $E_{\bar\mu}=\max(\|r_d\|_\infty,\|r_{eq}\|_\infty,\|r_{ineq}\|_\infty,\|r_{comp}\|_\infty)\le \kappa_\varepsilon \bar\mu$（$\kappa_\varepsilon{=}10$）后，
+\begin{equation}
+\bar\mu \leftarrow \max\big(\mu_{\min}^{\mathrm{eff}},\ \min(\kappa_\mu \bar\mu,\ \bar\mu^{\theta_\mu})\big),\qquad \kappa_\mu{=}0.2,\ \theta_\mu{=}1.5,
+\end{equation}
+外层上限 60 次，总迭代上限 \opt{max\_iter}${=}400$\evid{\file{ipm\_solver.cpp:1092--1093,1203--1208,1721--1731}}。\textbf{没有 Ipopt 的自适应 $\mu$（probing/quality-function）策略}。
+
+\subsection{Merit 驱动（备选/回退路径）}
+\opt{globalization=Merit} 或 Filter 失败后的回退驱动（\file{ipm\_solver.cpp:2115--2622}）：Mehrotra 式预测-校正——仿射方向（$\sigma{=}0$）+ 逐分量中心化目标
+\begin{equation}
+\sigma_i = \mathrm{clamp}\Big(\big(\tfrac{(s+\alpha_p^{aff} ds^{aff})_i(\mu+\alpha_d^{aff} d\mu^{aff})_i}{\max(s_i\mu_i,10^{-12})}\big)^3,\,0,\,1\Big),\qquad
+\mathrm{target}_i = \sigma_i\, s_i\mu_i ,
+\end{equation}
+校正右端含二阶项 $ds^{aff}\circ d\mu^{aff}$，另有 $\le 2$ 次 Gondzio 式附加修正（$\beta{=}0.1$）\evid{目标函数 \file{ipm\_solver.cpp:317--341}；主流程 2306--2431}。线搜索为自造准则 \func{sufficient\_primal\_dual\_progress}（缩放残差充分下降或四项中两项改善，\textbf{非} Armijo/ penalty merit）\evid{\file{ipm\_solver.cpp:886--911,2464--2475}}；停滞 6 次则重置松弛/乘子（recenter）\evid{2290--2294}。\textbf{该路径无 restoration、无 $\bar\mu$ 调度、无 inertia 处理}，KKT 用盲 Tikhonov 正则（$10^{-9}\to10^{-2}$ 十倍递增）\evid{\file{ipm\_solver.cpp:470--480}}。
+
+\subsection{可行性恢复（restoration）}
+触发于 Filter 失败且 \opt{use\_restoration\_phase}（默认开）\textbf{且} \opt{prob.g} 存在（仅等式问题）\evid{\file{ipm\_solver.cpp:1877--1931}}。构建恢复 NLP
+\begin{equation}
+\min_{x,p,n}\; \sum_{i=1}^{m_{eq}}(p_i+n_i) + \frac{\zeta}{2}\, \|D_R(x-x_R)\|^2
+\quad\text{s.t.}\quad g(x)+p-n=0,\;\; h(x)\le 0,\;\; p,n\ge 0,
+\end{equation}
+$\zeta=10^{-4}$，$D_R=\mathrm{diag}(\min(1,1/\max(1,|x_{R,i}|)))$\evid{\file{ipm\_restoration.cpp:10--17,66--192}}。与 Wächter--Biegler \S3.3 形式一致（但只松弛等式）；解出 $x_{new}$ 后\textbf{从头重解原问题}（一次性），而非在同一运行内继续\evid{\file{ipm\_solver.cpp:1900--1929}}。
+
+\subsection{缩放}
+梯度行缩放：$s_f = g_{\max}/\|\nabla f(x_0)\|_\infty$（仅当超过 $g_{\max}{=}100$），$s_{g,i},s_{h,i}$ 取 Jacobian 行 $\infty$ 范数同理；在 $x_0$ 计算一次；\textbf{无列（变量）缩放}\evid{\file{ipm\_scaling.cpp:31--77}}。缩放模型通过 lambda 包装器透明还原乘子（$\lambda_{orig} = (s_g/s_f)\lambda_s$），实现正确\evid{\file{ipm\_scaling.cpp:79--198}}。
+
+\subsection{LP-IPM（\func{NativeIPMLPAdapter}）}
+问题 $\min c^{\top}x$ s.t. $Ax\le b,\ A_{eq}x=b_{eq},\ \ell\le x\le u$；内部转标准形（不等式加松弛并入 $A_e$），Ruiz 均衡（默认 10 轮，失败重试 0/4$\times$ 轮）\evid{\file{ipm\_lp\_solver.cpp:305--368,395--405}}。原始-对偶系统：
+\begin{align}
+r_p &= b - A_e x, & r_d &= c - A_e^{\top} y - z_l + z_u, &
+\mu &= \tfrac{1}{n_{compl}}\sum_j\big(g^l_j z^l_j + g^u_j z^u_j\big),
+\end{align}
+其中 $g^l=x-\ell$, $g^u=u-x$ 为界间隙\evid{\file{ipm\_lp\_solver.cpp:1717--1735}}。每迭代构造 $\Theta = \mathrm{diag}(z/g+\mathrm{reg})$，解正规方程 $N = A_e\Theta A_e^{\top}$（稀疏/带状/稠密三后端，含稠密列防护）或增广 KKT（稠密耦合模型）\evid{后端分派注释与实现 \file{ipm\_lp\_solver.cpp:723--750,1557--1701}}。方向为\textbf{教科书 Mehrotra 预测-校正}：
+\begin{equation}
+\sigma = \min\big((\mu_{aff}/\mu)^3,\ 0.5\big),\qquad
+\text{校正右端} = \text{中心化} + ds^{aff}\circ dz^{aff}\ \text{二阶项},
+\end{equation}
+\evid{预测 1885--1920，$\sigma$ 1922--1934，校正 1952--1990}；步长为 $\tau{=}0.9995$ 的 fraction-to-boundary\evid{\file{ipm\_lp\_solver.cpp:90,1900--1920}}；正则 $\mathrm{reg}=\mathrm{clamp}(10^{-6}\mu,\,\mathrm{floor},\,10^{-2})$\evid{1760}。收敛判据（\textbf{绝对}）$\mathrm{pfeas}{<}10^{-8},\mathrm{dfeas}{<}10^{-8},\mu{<}10^{-8}$\evid{1740--1748}。工程亮点：\func{prepare\_for\_node\_solves}/\func{solve\_cached\_node\_lp}/\func{solve\_cached\_bound\_change\_batch} 为 B\&C 节点 LP 提供结构缓存（CSR、scatter map、符号分解复用）\evid{\file{ipm\_lp\_solver.cpp:2120--3497}。死选项见 \S\ref{sec:placeholders}}。
+
+\subsection{LCQP-IPM（\func{NativeLCQPAdapter}）}
+问题 $\min \tfrac12 x^{\top}Qx + c^{\top}x$ s.t. $A_{eq}x=b_{eq},\ \ell\le x\le u$（一般不等式 $Ax\le b$ 经松弛转等式后递归）。原始-对偶 KKT：
+\begin{equation}
+\begin{bmatrix} Q_s + D + \rho I & A_{eq,s}^{\top} \\ A_{eq,s} & -\rho I \end{bmatrix}
+\begin{bmatrix} dx \\ dy \end{bmatrix} = -\begin{bmatrix} r_{dual}' \\ r_{eq} \end{bmatrix},\qquad
+D = z_{lb}/s_{lb} + z_{ub}/s_{ub},
+\end{equation}
+$\rho{=}10^{-8}$ 固定；符号分解一次、每迭代仅更新对角\evid{\file{lcqp\_solver.cpp:413--453,593--613}}。Ruiz 均衡真实实现\evid{49--97}。\textbf{但方向不是 Mehrotra 预测-校正}：每迭代仅一次中心步，中心参数 $\sigma = \min(0.3,\ 100\mu)$，无仿射方向、无 $\mu_{aff}$、无二阶修正\evid{\file{lcqp\_solver.cpp:615--680}}——与文件头``Mehrotra Predictor-Corrector''（第 377 行注释）直接矛盾（见 \S\ref{sec:placeholders}）。收敛判据之外另有``Optimal (near)''与``stall-accept''两个\textbf{不要求对偶可行}的收敛出口\evid{533--544,567--579}。
+
+\subsection{锥 IPM（\func{ConicIPMSolver}）}
+cvxopt 标准型
+\begin{equation}
+\text{(P)}\ \min c^{\top}x\ \text{s.t.}\ Gx+s=h,\ Ax=b,\ s\in\mathcal K;\qquad
+\text{(D)}\ \max -h^{\top}z - b^{\top}y\ \text{s.t.}\ G^{\top}z + A^{\top}y + c = 0,\ z\in\mathcal K,
+\end{equation}
+$\mathcal K = \R^l_+ \times \prod_i \mathcal Q^{q_i} \times \prod_j \mathcal S^{s_j}_+$（svec 约定）\evid{\file{problem\_types.hpp:176--213}}。每迭代计算 Nesterov--Todd 缩放：象限 $d=\sqrt{s/z}$；SOC 用 $(\bar s,\bar z)\to(\bar w,\gamma,\beta)$ 闭式与 $v=\bar w^{1/2}$（Jordan 平方根）\evid{\file{cones.cpp:341--361}}；SDP 用 $L_z^{\top}L_s$ 的 SVD 构造 $R$ 因子\evid{\file{cones.cpp:370--402}}。方向为 CVXOPT \func{conelp} 式：先仿射（$r_l=-\lambda$），$\sigma=\mathrm{clamp}((\mu_{aff}/\mu)^3,0,1)$，再组合（校正+中心化）方向，Schur KKT $K=[G^{\top}H^{-1}G+\delta I,\ A^{\top};\ A,\ -\delta I]$ 以 CHOLMOD（SPD）分解、失败回退 MUMPS 对称不定\evid{\file{conic\_ipm\_solver.cpp:602--724,1102--1132}}。步长取 $\lambda$ 空间锥边界步长的 $0.99$ 倍\evid{59,1135--1136}。终止：相对尺度残差 $\le$ feastol 且（gap $\le$ abstol 或 relgap $\le$ reltol）；另有\textbf{真实的}原始/对偶不可行证书与 3$\times$3 KKT 迭代精化\evid{976--1032,1074--1098}。稀疏 SDP 可走弦分解（分解$\to$求解$\to$对偶恢复$\to$原始残差再验证）\evid{866--932；\file{chordal\_decomposition.cpp} 含最小度式消去序与极大团过滤骨架，本报告未逐行验证其数值正确性——标注为``不确定''}。该模块与 \file{docs/conic\_sdp.md} 的设计文档一致性高。
+
+\section{与 Ipopt（Wächter--Biegler 2006）逐组件对照}
+
+\begin{center}\footnotesize
+\begin{longtable}{@{}p{4.6cm}p{4.2cm}p{5.6cm}@{}}
+\toprule
+组件 & Ipopt 标准 & 本实现（判定） \\
+\midrule
+\endhead
+障碍子问题/原始-对偶 Newton & 一致 & 一致（凝聚与增广两式均正确）\textbf{[真实]} \\
+filter 数据结构 & WB (2.9)--(2.10) & 语义正确\textbf{[真实]}（\file{ipm\_filter.cpp}） \\
+switching 条件 & WB (2.11)，含 $\theta\le\theta_{\min}$ 门控 & 含恒真子句，门控失效\textbf{[偏离]}（\file{ipm\_solver.cpp:1494--1498}） \\
+Armijo（f-type）/ h-type & WB (2.12)/(2.13) & 实现一致，但可被 direct-accept 旁路\textbf{[偏离]}（1514--1523） \\
+二阶修正 SOC & 对等式+不等式 & 仅 $m_{eq}>0$ 触发\textbf{[部分]}（1564--1565） \\
+可行性恢复 & 松弛全部约束，同运行内继续 & 仅等式；另起完整重解\textbf{[部分]}（1877--1931） \\
+$\mu$ 策略 & 自适应（probing）+ 单调兜底 & 仅单调\textbf{[简化]}（1721--1731） \\
+inertia 校正 & 分解惯性计数（MA57 INFOG）$\Rightarrow \delta_W$ & 无分解惯性；$Z^{\top}WZ$ 稠密证书（nullity$\le$128）或全空间 SimplicialLDLT\textbf{[偏离]}（\file{kkt\_system.cpp:562--772}） \\
+KKT 后端 & MA27/57/86/97、Pardiso（对称不定 LDL$^{\top}$） & 默认非对称 LU（KLU/UMFPACK/EigenSparseLU）；MUMPS 存在但非默认\textbf{[偏离]}（\file{linear\_solver.cpp:404--421}） \\
+线搜索导数评估 & 每试点仅 $f$ 与约束值 & 每试点重算全部 Jacobian\textbf{[低效]}（\file{ipm\_solver.cpp:849--884}） \\
+尺度化终止判据 & $s_D,s_c$ 尺度化 KKT 误差 & 绝对残差；缩放仅用于排序\textbf{[偏离]}（930--954,1195--1200） \\
+acceptable 级别 & 对偶+原始+互补均需 acceptable & 仅原始 $\le 10^{-2}$ 即收敛、对偶置零\textbf{[严重偏离]}（2513--2545） \\
+不可行证书 & restoration 收敛即判不可行迹象 & 无\textbf{[缺失]} \\
+导数检查器 & 有（derivative\_checker） & 无（全库 grep 无对应实现）\textbf{[缺失]} \\
+列缩放 & 有 & 无（仅行缩放）\textbf{[缺失]}（\file{ipm\_scaling.cpp}） \\
+warm start & 有（含固定变量处理） & 有（三向量暖启动 + Ipopt 态精化）\textbf{[真实]}（1052--1066,2035--2052） \\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\section{占位符、虚假实现与死代码清单}\label{sec:placeholders}
+
+按严重程度分级。每条给出证据与影响。
+
+\subsection{严重（影响结果正确性/真实性）}
+
+\paragraph{P1. ``仅原始可行即收敛''的容差后门（Merit 路径）}
+当严格容差未达且 \opt{tol\_accept}${>}0$（默认 $10^{-2}$）时，只要 best iterate 的\textbf{原始}残差 $\le 10^{-2}$ 即置 \opt{converged=true}、状态``Converged (acceptable tolerance)''，并且\textbf{对偶全部置零}输出\evid{\file{ipm\_solver.cpp:2513--2545}，注释自承``dual infeasibility is tolerated''}。对照 Ipopt：acceptable 级别要求原始、对偶、互补\textbf{同时}低于 acceptable 容差。由于默认 Filter 失败链会落入 Merit 驱动（2001--2012），\textbf{默认配置下此后门可达}：一个仅近似可行、离最优任意远的点可被报告为``收敛''。
+
+\paragraph{P2. 冻结的有限差分 Hessian + 每迭代 QN 死计算}
+无 Hessian 回调且 $n\le 2000$ 时：启动期花 $n$ 次梯度评估构建 $x_0$ 处 FD Hessian（仅目标曲率）；之后每迭代执行 \func{update\_quasi\_newton\_state} 更新对角+低秩块，但 \func{build\_lagrangian\_hessian} 因 \opt{has\_fd\_hess} 恒真而\textbf{永远丢弃这些更新}，取冻结 FD 矩阵\evid{更新调用 \file{ipm\_solver.cpp:1136--1141}；选择逻辑 304--313}。后果双料：(i) 所谓``Newton 法''对无 Hessian 的问题实为\textbf{固定初始 Hessian 的不精确法}，且不含任何约束曲率；(ii) 每迭代的 QN 更新是纯死计算（$O(n)$ 以上开销）。仅当 $n>2000$（FD 被门控）时，对角+块 QN 才真正进入 KKT。
+
+\paragraph{P3. 约束曲率静默缺失}
+用户只提供 \opt{hess}（目标 Hessian）而未提供 \opt{lagrangian\_hess} 时，$W$ 直接取 $\nabla^2 f$，\textbf{无}``约束是否线性''检查，无任何警告；对非线性约束问题这不再是牛顿法，收敛性质改变且用户无从知晓\evid{\file{ipm\_solver.cpp:294--303}}。
+
+\paragraph{P4. filter 被 direct-accept 后门旁路}
+常规接受之外，\func{sufficient\_primal\_dual\_progress}（自造准则）与 \opt{aggressive\_direct}（$\alpha\ge 0.8\alpha_0$ 且缩放 merit 降 5\%）可在 \opt{filter\_ok=false} 时接受试点\evid{\file{ipm\_solver.cpp:1514--1523}；SOC 分支同构 1646--1653}。这破坏了 filter 方法的全局收敛构造（接受 filter 明确禁止的点），``Wächter--Biegler filter line search''的名实不符——实际是一个 filter/merit 混合启发。
+
+\paragraph{P5. switching 条件含恒真子句（死代码 + 语义改变）}
+\begin{lstlisting}
+const bool switching =
+    (slope_k < 0.0) &&
+    (alpha * std::pow(-slope_k, opt.filter_s_phi) >
+     opt.filter_delta * std::pow(theta_k, opt.filter_s_theta)) &&
+    (theta_k <= theta_min || opt.filter_s_phi > 0.0);
+\end{lstlisting}
+\evid{\file{ipm\_solver.cpp:1494--1498}}。默认 \opt{filter\_s\_phi}${=}2.3>0$，第三子句\textbf{恒真}：$\theta_{\min}$ 门控失效（\opt{filter\_theta\_min\_scale} 成为只读不用选项），且这是典型的``看起来严谨实则空转''代码。
+
+\paragraph{P6. LCQP 自称 Mehrotra 预测-校正，实为单步中心法}
+文件头与迭代注释均称``Primal-Dual IPM with Mehrotra Predictor-Corrector''，实现为每迭代一次中心步 $\sigma=\min(0.3,100\mu)$，无预测器/校正器结构\evid{注释 \file{lcqp\_solver.cpp:377}；实现 615--680}。同属虚标：``Optimal (near)''（$\mu<10^3\!\cdot\!\opt{tol\_gap}$ 且目标稳定 3 步即成功，不问对偶）与``stall-accept''（$|\mu|<10^{-3}$ 即成功）\evid{533--544,567--579}。另：无 $Q\succeq 0$ 凸性检查，非凸 QP 无任何检测\evid{全文件无 PSD 判定}。
+
+\paragraph{P7. LP-IPM 三个死选项 + 头文件虚标}
+\opt{IPMLPOptions}（\file{ipm\_lp\_solver.hpp:30--48}）中：
+\begin{itemize}[leftmargin=2em]
+  \item \opt{crossover}：头文件声称``Crossover to basic feasible solution for MILP warm-starting''；全 cpp 中\textbf{零消费、零实现}（grep 无 \opt{opt\_.crossover}）；
+  \item \opt{max\_correctors}：声称``Max Gondzio centering correctors per iteration (默认 3)''；cpp 零消费——实际每迭代\textbf{单校正}（另有 skip 启发），无多重 Gondzio 修正；
+  \item \opt{presolve}：声称``Enable presolve (fixed vars, singleton rows, etc.)''；cpp 零消费——不存在内部 presolve（仅有可选的 HiGHS presolve，且由另一选项 \opt{use\_highs\_presolve} 控制）。
+\end{itemize}
+
+\paragraph{P8. \opt{use\_inertia\_correction} 选项未接线}
+\file{ipm\_solver.hpp:18--19} 注释明确``Filter must be combined with \opt{use\_inertia\_correction=true}''，第 49 行声明默认 true；\textbf{全库（src/include/tests/docs）仅此两处出现，零消费点}。惯性校正实际上无条件进行（\func{factor\_kkt\_inertia\_corrected\_sparse}），该开关是占位符。
+
+\paragraph{P9. NLP IPM 完全无视 \opt{NLPSolverOptions}}
+\func{NLPModel::solver\_options}（8 个字段：\opt{max\_iterations}、\opt{tolerance}、\opt{acceptable\_tolerance}、\opt{dual\_/constraint\_/complementarity\_tolerance} 等，\file{problem\_types.hpp:220--233}）在 native IPM 路径\textbf{零消费}（grep \opt{solver\_options} 于 \file{kernel/ipm/}、\file{solver/native/} 无结果）。用户经通用接口设置的容差静默无效。
+
+\paragraph{P10. 恢复触发的死分支}
+触发条件之一匹配状态串 \texttt{"Filter: line-search step too small"}\evid{\file{ipm\_solver.cpp:1879}}，但全库无任何位置产生该串（grep 仅此一处引用）——该触发分支永不成立（其余三个触发串真实可达，故恢复机制本身仍可触发）。
+
+\paragraph{P11. 无不可行诊断 + 失败静默委托外部 Ipopt}
+NLP-IPM 全文件无 infeasibility 证书（grep 无对应输出路径）；失败链为 restoration $\to$ Merit $\to$ Ipopt 暖态精化 $\to$ \func{try\_ipopt\_fallback} 整体重解\evid{\file{ipm\_solver.cpp:1749--1821,1996--2108}}。兜底结果标注为 \texttt{NativeIPM[IpoptFallback]}（诚实），但意味着：\textbf{任何以 NativeIPM 名义产出的基准结果，若走了兜底，实际是 Ipopt 解的}；中间档 \texttt{NativeIPM[IpoptWarmStart]} 也是 Ipopt 提供迭代点、native 仅做认证。
+
+\paragraph{P12. Merit 路径互补容差被静默放宽}
+\opt{comp\_tol = max(tol\_complementarity, 10\,tol\_primal)}：用户设 \opt{tol\_primal}${=}10^{-6}$ 时互补容差被强制放宽到 $10^{-5}$，无论 \opt{tol\_complementarity} 设多小\evid{\file{ipm\_solver.cpp:2223}}。
+
+\subsection{中等（语义偏离/鲁棒性）}
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{SOC 仅覆盖等式}：触发条件含 \opt{r\_eq.size()>0}；纯不等式问题永不触发\evid{\file{ipm\_solver.cpp:1564--1565}}。
+  \item \textbf{restoration 仅覆盖等式}：纯不等式问题无恢复阶段（门控 \opt{prob.g}）\evid{1885}。
+  \item \textbf{对偶步长随原始 $\alpha$ 同步回退}：$\alpha_{dual}=\min(\alpha,\alpha_{dual}^{\max})$ 在回退循环内逐次缩小\evid{1461}；Ipopt 中 $\alpha_{dual}$ 由 fraction-to-boundary 一次确定，不在回退中收缩。
+  \item \textbf{$\mu$ 下调时清空 filter}\evid{1731}：丢失历史禁止域（Ipopt 不清空）。
+  \item \textbf{``惯性''并非分解惯性}：无后端提供负主元计数（MUMPS 的 \func{negative\_eigenvalues()} 存在但因 MUMPS 非默认而不可及）；证书为 $Z^{\top}WZ$ 稠密广义特征解（nullity$\le 128$ 门控）或更强的全空间 $W+\delta I\succ 0$（Eigen SimplicialLDLT 无主元 LDL$^{\top}$，对不定矩阵的 $D$ 符号判定理论上不可靠；且 $H\succ 0$ 远强于惯性 $(n,m,0)$，等于对非凸问题逐步凸化）\evid{\file{kkt\_system.cpp:384--407,562--772}；后端能力 \file{linear\_solver.cpp:404--421}}。
+  \item \textbf{增广 Newton 路径自承无惯性证书}：注释明言``no formal inertia certificate on this path yet''\evid{\file{ipm\_solver.cpp:686--687}}。
+  \item \textbf{Merit 路径无 restoration、无 $\bar\mu$ 调度、盲正则}：停滞后 recenter 重置松弛/乘子，属非标准重启\evid{2290--2294,470--480}。
+  \item \textbf{max\_outer=60 硬编码}（1092）；LCQP 将 \opt{max\_iter} 静默截断到 500（\file{lcqp\_solver.cpp:472}）。
+\end{itemize}
+
+\subsection{轻微}
+\begin{itemize}[leftmargin=2em]
+  \item \func{nonlinear\_inequality\_multipliers} 对维度不一致静默取 \texttt{min} 截断\evid{\file{ipm\_solver.cpp:67--74}}。
+  \item 缩放模型未拷贝 \opt{solver\_options}（P9 的连带项）\evid{\file{ipm\_scaling.cpp:79--98}}。
+  \item $\tau$ 恒为 \opt{alpha\_max}${=}0.95$（$\max(0.5,\min(0.95,1-0.01\bar\mu))$），无 Ipopt 的渐进 $\tau\to 1$ 调度\evid{1353--1354}。
+  \item 测试中的``边界即无限''阈值不一致：NLP 用 $10^{19}$（27 行）而 \func{VariableMeta} 默认界为 $\pm 10^{20}$（语义上兼容，但属脆弱约定）。
+\end{itemize}
+
+\section{数据结构与算法效率评估（通用 NLP 求解器视角）}\label{sec:eff}
+
+\subsection{每迭代成本链（Filter 驱动，默认路径）}
+一次主迭代的实际开销（$n$ 变量、$m_{eq}$ 等式、$m$ 合并不等式、$\mathrm{nnz}$ 为相应 Jacobian/Hessian 非零数）：
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{导数评估}：\opt{grad}+\opt{g}+\opt{jac\_g}+\opt{h}+\opt{jac\_h} 各一次（\func{evaluate\_nlp\_state}），Hessian 一次——正常；
+  \item \textbf{凝聚矩阵} $W = H + J_h^{\top}(M/S)J_h$：稀疏转置乘，fill 最坏 $O(m\cdot \mathrm{nnz}(J_h))$；增广路径免此积——正常折中；
+  \item \textbf{KKT 装配}：scatter map $O(\mathrm{nnz})$ 复用，符号分解缓存——\textbf{优}\evid{\file{kkt\_system.cpp:93--242}}；
+  \item \textbf{分解}：默认\textbf{非对称 LU} 作用于对称不定 $K$——fill/flops 约为对称不定 LDL$^{\top}$ 的 2 倍，且无惯性输出；\textbf{这是与 Ipopt(MA57/Pardiso) 最大的单项效率与能力差距}\evid{\file{linear\_solver.cpp:404--421}}；
+  \item \textbf{惯性``认证''}：nullity$\le 128$ 时构建显式零空间基（每自由列一次 $m_{eq}\times m_{eq}$ 回代）+ 稠密广义特征解 $O(\mathrm{nullity}^3)$；否则全空间 SimplicialLDLT——小问题就是创新点，大问题退化为强凸化；
+  \item \textbf{线搜索}：\textbf{每次回退重算全部 Jacobian}\evid{\func{evaluate\_trial\_point} $\to$ \func{evaluate\_nlp\_state}，\file{ipm\_solver.cpp:849--884,736--753}}。Ipopt 在线搜索中只评 $f$ 与约束函数值（$g,h$），Jacobian 每迭代只评一次。对 Jacobian 昂贵的模型（自动微分/有限差分成本 $O(n)$ 每列），回退 10 次的成本可达整步 Newton 的数倍——\textbf{本审计认定的第一效率 red flag}；
+  \item \textbf{IR}：$\le 2$ 步迭代精化，残差用 \opt{kkt\_orig}（每次分解整矩阵拷贝 $O(\mathrm{nnz})$）——可接受\evid{\file{kkt\_system.cpp:209,266--277}}。
+\end{enumerate}
+
+\subsection{结构性 red flags}
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{界拆双行}：全界问题 $m = m_{nl} + 2n$；增广 KKT 维数 $n + m_{eq} + m$ 对界主导问题约为 $3n$，而 Ipopt 界处理不增维。凝聚路径下 $J_h^{\top}(M/S)J_h$ 虽只贡献对角，但 $s,\mu$ 存储与逐分量运算翻倍。
+  \item \textbf{Merit 路径 reduced-KKT 重复分解}：\func{solve\_kkt\_reduced\_sparse} 每次调用新建分解器并对 $W$ 重新 analyze+factorize\evid{\file{kkt\_system.cpp:283--354}}；每迭代 affine + corrector + $\le 2$ Gondzio 共 \textbf{$\le 4$ 次全量分解}（同一 $W$）\evid{\file{ipm\_solver.cpp:2317,2357,2408}}。非 reduced 路径（$m_{eq}>8$）才有分解复用。
+  \item \textbf{失败路径的乘法成本}：最坏情况 = Filter 全预算 + restoration NLP（$\le 200$ 迭代）+ 原问题重解（全预算）+ Merit（全预算）+ Ipopt——可达单次的约 5 倍挂钟\evid{1877--2108}。
+  \item \textbf{QN 死计算}（P2）：$n\le 2000$ 时每迭代白白更新对角+块。
+  \item \textbf{无列缩放}（P/\S2.8）与\textbf{绝对容差终止}：对尺度不良问题，既少一层预处理又多一分误判风险。
+\end{itemize}
+
+\subsection{各内核效率小结}
+\begin{center}\footnotesize
+\begin{tabular}{@{}p{2.6cm}p{11.8cm}@{}}
+\toprule
+模块 & 效率评价 \\
+\midrule
+LP-IPM & 真实 Mehrotra；正规方程稀疏/带状/稠密三后端 + 稠密列防护 + $\mu$ 自适应正则；节点 LP 结构缓存（scatter/符号分解/CSR 复用）是真工程。缺陷：无多重 Gondzio（选项死）、无 crossover（选项死）、绝对容差、单校正。 \\
+LCQP-IPM & 符号分解复用 + 对角增量更新，方向却是单步中心法；固定 $\rho{=}10^{-8}$、无 IR；两个无对偶约束的``收敛''出口使迭代预算语义失真。 \\
+锥 IPM & \textbf{全套真实实现}：NT 缩放（SOC 闭式/SDP SVD）、ECOS 式相对终止、不可行证书、IR、CHOLMOD$\to$MUMPS 回退、Schur 装配 OpenMP 并行、弦分解通道；每迭代成本 $O(\mathrm{nnz}(K){+}\sum p_j^3)$，与 CVXOPT/ECOS 同阶。 \\
+KKT/线代 & scatter-map 装配与符号分解缓存是亮点；默认非对称 LU 解对称不定系统是最大短板；惯性缺真实来源。 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{测试覆盖与文档一致性}
+\begin{itemize}[leftmargin=2em]
+  \item \file{tests/test\_ipm\_solver.cpp}（10 个用例/小节）与 \file{tests/test\_conic\_ipm.cpp}（17 个）断言是\textbf{真实的}（目标值近似、KKT 因子复用计数、证书存在性），但全部为小规模良性算例；无大规模/非凸/病态/无 Hessian 回调的用例——P1--P6 所列问题均不在测试射程内。
+  \item \file{docs/conic\_sdp.md} 与锥 IPM 实现一致性高（NT/Mehrotra/后端回退均属实）。
+  \item \file{docs/code\_quality\_evaluation.md} 已自知两点（LP IPM 曾缺不可行检测、NLP IPM 无原生不可行证书），与本报告 P11 一致；但该文档未覆盖 P1--P8。
+  \item \file{ipm\_lp\_solver.hpp} 与 \file{lcqp\_solver.cpp} 头注释存在虚标（P6、P7）；\file{ipm\_solver.hpp} 的 \opt{use\_inertia\_correction} 注释（P8）同理。
+\end{itemize}
+
+\section{结论与整改优先级}
+\textbf{真实性总评}：锥 IPM 与 LP-IPM 是真实、可用、工程水准中上的实现；NLP-IPM 的框架部件（filter 数据结构、restoration、缩放、KKT 装配缓存、SOC 骨架）是真实的，但\textbf{收敛语义被 P1/P4/P5 破坏、Hessian 供应链被 P2/P3 削弱、兜底链 P11 使``native''结果的真实性依赖外部 Ipopt}；LCQP 的头注释名实不符（P6）。用户关于``大量占位符''的判断在\textbf{选项层}完全成立（P7--P10：声明即文档、消费为零），在\textbf{算法层}部分成立（P4--P6：名实不符），但不适用于锥/LP 内核主体。
+
+\textbf{整改优先级}：
+\begin{enumerate}[leftmargin=2em]
+  \item P1：acceptable 级别必须同时约束对偶与互补（或删除该后门并显式失败）；
+  \item P11：benchmark/报表中区分 native 收敛与 Ipopt 兜底；补不可行证书；
+  \item P4/P5：移除 direct-accept 旁路（或改文档为``filter/merit 混合''），修复恒真子句；
+  \item P2/P3：QN 路径要么真正消费对角+块更新，要么删除；对仅提供 \opt{hess} 的非线性约束问题显式警告；
+  \item P6/P7/P8/P9/P10：删除或实现死选项，修正头文件虚标；
+  \item 效率：线搜索试点只评函数值；Merit 路径分解复用；接入对称不定后端（MUMPS 设为可选默认）并用真实惯性替代证书启发。
+\end{enumerate}
+
+\appendix
+\section{选项接线普查表}
+统计口径：全库 grep 字段名，人工判定消费点是否影响控制流（声明处/头文件注释不计）。
+\begin{center}\footnotesize
+\begin{longtable}{@{}lll@{}}
+\toprule
+选项 & 状态 & 消费点/说明 \\
+\midrule
+\endhead
+\multicolumn{3}{@{}l}{\textbf{\opt{IPMOptions}}（\file{ipm\_solver.hpp}）}\\
+\opt{max\_iter}/\opt{tol\_primal}/\opt{tol\_dual}/\opt{tol\_complementarity} & 接线 & 主循环与收敛判据 \\
+\opt{tol\_accept} & 接线（负面） & P1 后门，\file{ipm\_solver.cpp:2514} \\
+\opt{alpha\_max} & 接线 & fraction-to-boundary \\
+\opt{reduced\_kkt\_max\_eq} & 接线 & \file{ipm\_solver.cpp:2318} 等 \\
+\opt{qn\_sparse\_block\_size}/\opt{qn\_max\_blocks} & 半接线 & 进入 QN 态，但 $n\le2000$ 时输出被丢弃（P2） \\
+\opt{verbose} & 接线 & 日志 \\
+\opt{equality\_dual\_start}/\opt{inequality\_dual\_start}/\opt{slack\_start} & 接线 & 1052--1066 \\
+\opt{globalization} & 接线 & 1856 \\
+\opt{use\_inertia\_correction} & \textbf{未接线} & P8，全库零消费 \\
+\opt{use\_augmented\_newton} & 接线 & 1222 \\
+\opt{use\_second\_order\_correction}/\opt{use\_restoration\_phase} & 接线 & 1564,1877 \\
+\opt{scale\_problem}/\opt{scaling\_g\_max} & 接线 & 1863--1872 \\
+\opt{restoration\_zeta} & 接线 & 1892 \\
+\opt{mu\_init}/\opt{mu\_min}/\opt{kappa\_mu}/\opt{theta\_mu}/\opt{kappa\_epsilon} & 接线 & 1042--1044,1119,1721--1724 \\
+\opt{filter\_gamma\_theta}/\opt{filter\_gamma\_phi} & 接线 & 1490--1492 等 \\
+\opt{filter\_s\_theta}/\opt{filter\_s\_phi}/\opt{filter\_delta}/\opt{filter\_eta\_phi}/\opt{filter\_alpha\_min} & 接线 & 1494--1504,1460 \\
+\opt{filter\_theta\_min\_scale} & \textbf{只读不用} & P5：进入恒真子句 \\
+\midrule
+\multicolumn{3}{@{}l}{\textbf{\opt{IPMLPOptions}}（\file{ipm\_lp\_solver.hpp}）}\\
+\opt{max\_iter}/\opt{time\_limit\_sec}/\opt{tol\_*} & 接线 & 主循环 \\
+\opt{ruiz\_rounds} & 接线 & 395--405,520 \\
+\opt{max\_correctors} & \textbf{未接线} & P7 \\
+\opt{presolve} & \textbf{未接线} & P7 \\
+\opt{crossover} & \textbf{未接线} & P7 \\
+\opt{verbose} & 接线 & 1737 \\
+\opt{use\_highs\_presolve} & 接线 & 419 \\
+\midrule
+\multicolumn{3}{@{}l}{\textbf{\opt{NLPSolverOptions}}（\file{problem\_types.hpp:220--233}，8 字段）}\\
+全部 8 字段 & \textbf{native 未接线} & P9（外部 Ipopt 适配器消费）\\
+\midrule
+\multicolumn{3}{@{}l}{\textbf{\opt{ConicIPMOptions}}（\file{conic\_ipm\_solver.hpp}）}\\
+全部字段（含 \opt{chordal\_*}） & 接线 & \file{conic\_ipm\_solver.cpp:866--876} 等 \\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\end{document}

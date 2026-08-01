@@ -197,7 +197,7 @@ struct SolverConfig {
     engine::CutType cut_type{engine::CutType::All}; ///< cut family selector (default: all families)
 };
 
-/// Seven solver configurations:
+/// Six solver configurations:
 ///   Baseline[S]   — simplex root LP (mip_lp_solver="choose"; all HiGHS cuts; 50k iter cap via inline cold run)
 ///   I[IPM+xov]    — IPM + crossover at root (reference for crossover cost)
 ///   I+A/B[-xov]   — pure IPM, no crossover + warm-start incumbent injection
@@ -205,8 +205,6 @@ struct SolverConfig {
 ///   Seed+A/B[S]   — NativeSeed[S] plus warm-start incumbent injection
 ///   NoCuts[S]     — simplex root, 50k iter cap, hacdcpf_max_root_sepa_rounds=0 (no HiGHS cuts);
 ///                   fair ablation vs Baseline[S]: same iteration budget, only cuts differ
-///   FCOnly[S]     — simplex root, 50k iter cap, full HiGHS cut suite (same as Baseline[S] path);
-///                   NOTE: in StrictHiGHS, CutType::FlowCover only affects native B&C (not HiGHS separators)
 static const SolverConfig kConfigs[] = {
     //                  label             wm  stall  lp        xov    seed   cap   sepa  cuts
     { "Baseline[S]",    false, 0, "choose", "",    false, 0,     0, engine::CutType::All },
@@ -215,7 +213,6 @@ static const SolverConfig kConfigs[] = {
     { "NativeSeed[S]",  false, 0, "choose", "",    true,  0,     0, engine::CutType::All },
     { "Seed+A/B[S]",    true,  0, "choose", "",    true,  0,     0, engine::CutType::All },
     { "NoCuts[S]",      false, 0, "choose", "",    false, 50000, -1, engine::CutType::None },
-    { "FCOnly[S]",      false, 0, "choose", "",    false, 50000,  0, engine::CutType::FlowCover },
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1566,9 +1563,9 @@ int main(int argc, char** argv)
             tc, time_limit, "choose", "", "HiGHS[direct]");
         print_record(direct_highs);
         std::printf("  status: %s\n", direct_highs.status.c_str());
-        // HiGHS[noFC]: same but with our FlowCover separator disabled via env var.
-        // Comparing against HiGHS[direct] isolates the contribution of
-        // HighsFlowCoverSeparator to HiGHS B&B solving performance.
+        // HiGHS[noFC]: same but with HiGHS' own flow-cover separator disabled.
+        // This comparison concerns the independently implemented and validated
+        // HiGHS separator, not a native MIPSolver cut family.
         set_env_var("HIGHS_NO_FLOWCOVER", "1");
         RunRecord direct_highs_nofc = run_direct_highs_reference(
             tc, time_limit, "choose", "", "HiGHS[noFC]");
@@ -1635,15 +1632,7 @@ int main(int argc, char** argv)
         all_records.push_back(no_cuts);
         if (no_cuts.success) ++solved;
 
-        // Step 1b: FCOnly[S] — FlowCover cuts only.  Isolates the contribution of
-        //          the native flow-cover cut family relative to NoCuts[S] and
-        //          Baseline[S] (which uses all cut families except FlowCover).
-        RunRecord fc_only = run_config(tc, kConfigs[6], nullptr, time_limit);
-        print_record(fc_only);
-        all_records.push_back(fc_only);
-        if (fc_only.success) ++solved;
-
-        // Step 1c: Baseline+Cuts[S] — same as Step 1 but with root cuts AND the
+        // Step 1b: Baseline+Cuts[S] — same as Step 1 but with root cuts AND the
         //          warm incumbent from that solve injected.
         //          Cuts (Improvement 6): cap sepa rounds to 50, freeing ~57s for B&B.
         //          Warm incumbent (Improvement A/B): sets upper_limit early, skipping
@@ -1766,38 +1755,36 @@ int main(int argc, char** argv)
                 solved, total);
 
     // Timing summary:
-    //   Stride 8 per case:
-    //     [0] Baseline[S]      — all cuts (excl. FlowCover) / simplex root
+    //   Stride 7 per case:
+    //     [0] Baseline[S]      — all valid native cuts / simplex root
     //     [1] NoCuts[S]        — no cuts: pure B&B lower-bound reference
-    //     [2] FCOnly[S]        — FlowCover cuts only (native engine)
-    //     [3] Baseline+Cuts[S] — all cuts + HiGHS root-cut warm-start
-    //     [4] I[IPM+xov]       — IPM+crossover at root
-    //     [5] I+A/B[-xov]      — pure IPM + warm-start incumbent
-    //     [6] NativeSeed[S]    — native crash-basis seed + simplex
-    //     [7] Seed+A/B[S]      — NativeSeed + warm-start incumbent
-    std::printf("\nTiming summary (S=simplex; +xov=IPM+crossover; +AB=warm-start incumbent; Seed=HiGHS-IPM native basis; +Cuts=cut warm-start; FC=FlowCover):\n");
-    std::printf("%-22s  %10s  %10s  %9s  %12s  %10s  %12s  %10s  %10s  %6s  %6s  %6s\n",
+    //     [2] Baseline+Cuts[S] — all cuts + HiGHS root-cut warm-start
+    //     [3] I[IPM+xov]       — IPM+crossover at root
+    //     [4] I+A/B[-xov]      — pure IPM + warm-start incumbent
+    //     [5] NativeSeed[S]    — native crash-basis seed + simplex
+    //     [6] Seed+A/B[S]      — NativeSeed + warm-start incumbent
+    std::printf("\nTiming summary (S=simplex; +xov=IPM+crossover; +AB=warm-start incumbent; Seed=HiGHS-IPM native basis; +Cuts=cut warm-start):\n");
+    std::printf("%-22s  %10s  %10s  %12s  %10s  %12s  %10s  %10s  %6s  %6s\n",
                 "Case",
-                "Base[S]_ms", "NoCuts_ms", "FC_ms", "+Cuts[S]_ms",
+                "Base[S]_ms", "NoCuts_ms", "+Cuts[S]_ms",
                 "IPM+xov_ms", "IPM+xov+ABms",
                 "Seed[S]_ms", "Seed+AB_ms",
-                "Base_N", "FC_N", "Cuts_N");
-    std::printf("%s\n", std::string(142, '-').c_str());
-    for (std::size_t i = 0; i + 7 < all_records.size(); i += 8) {
+                "Base_N", "Cuts_N");
+    std::printf("%s\n", std::string(126, '-').c_str());
+    for (std::size_t i = 0; i + 6 < all_records.size(); i += 7) {
         const auto& base   = all_records[i];
         const auto& nocuts = all_records[i + 1];
-        const auto& fconly = all_records[i + 2];
-        const auto& cuts   = all_records[i + 3];
-        const auto& ipmx   = all_records[i + 4];
-        const auto& ipmab  = all_records[i + 5];
-        const auto& seed   = all_records[i + 6];
-        const auto& seedab = all_records[i + 7];
-        std::printf("%-22s  %10.1f  %10.1f  %9.1f  %12.1f  %10.1f  %12.1f  %10.1f  %10.1f  %6d  %6d  %6d\n",
+        const auto& cuts   = all_records[i + 2];
+        const auto& ipmx   = all_records[i + 3];
+        const auto& ipmab  = all_records[i + 4];
+        const auto& seed   = all_records[i + 5];
+        const auto& seedab = all_records[i + 6];
+        std::printf("%-22s  %10.1f  %10.1f  %12.1f  %10.1f  %12.1f  %10.1f  %10.1f  %6d  %6d\n",
                     base.case_name.c_str(),
-                    base.runtime_ms, nocuts.runtime_ms, fconly.runtime_ms, cuts.runtime_ms,
+                    base.runtime_ms, nocuts.runtime_ms, cuts.runtime_ms,
                     ipmx.runtime_ms, ipmab.runtime_ms,
                     seed.runtime_ms, seedab.runtime_ms,
-                    base.nodes, fconly.nodes, cuts.nodes);
+                    base.nodes, cuts.nodes);
     }
 
     // ── JSON output ───────────────────────────────────────────────────────────

@@ -51,7 +51,6 @@ struct NativeVariableBoundSourceStats {
   std::uint64_t cut_mixed_rows{0};
   std::uint64_t cut_vub_candidates{0};
   std::uint64_t cut_vlb_candidates{0};
-  std::uint64_t cut_domain_tightenings{0};
   std::uint64_t cut_exported_implications{0};
   std::uint64_t presolve_vub_candidates{0};
   std::uint64_t presolve_vlb_candidates{0};

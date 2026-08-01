@@ -1461,10 +1461,8 @@ void HighsSparseMatrix::priceByRowWithSwitch(
     const double switch_density, const HighsInt debug_report) const {
   assert(this->isRowwise());
   HighsSparseVectorSum sum;
-  // todo @Julian: Setting up the sparse vector sum is equivalent to calling
-  // HVector::setup() I think there should instead be overloads where the result
-  // vector is of type HVectorQuad for the future and not the boolean parameter
-  // quad_precision. Then the buffer can be maintained similar to row_ap.
+  // Quad precision owns a separate sparse accumulator because the result type
+  // differs from the standard HVector storage.
   if (quad_precision) sum.setDimension(num_col_);
   if (debug_report >= kDebugReportAll)
     printf("\nHighsSparseMatrix::priceByRowWithSwitch\n");
@@ -1579,10 +1577,11 @@ void HighsSparseMatrix::update(const HighsInt var_in, const HighsInt var_out,
          iEl++) {
       HighsInt iRow = matrix.index_[iEl];
       HighsInt iFind = this->start_[iRow];
+      const HighsInt row_end = this->start_[iRow + 1];
+      while (iFind < row_end && this->index_[iFind] != var_in) iFind++;
+      assert(iFind < row_end);
+      if (iFind >= row_end) continue;
       HighsInt iSwap = --this->p_end_[iRow];
-      while (this->index_[iFind] != var_in) iFind++;
-      // todo @ Julian : this assert can fail
-      assert(iFind >= 0 && iFind < int(this->index_.size()));
       assert(iSwap >= 0 && iSwap < int(this->value_.size()));
       swap(this->index_[iFind], this->index_[iSwap]);
       swap(this->value_[iFind], this->value_[iSwap]);
@@ -1594,8 +1593,11 @@ void HighsSparseMatrix::update(const HighsInt var_in, const HighsInt var_out,
          iEl < matrix.start_[var_out + 1]; iEl++) {
       HighsInt iRow = matrix.index_[iEl];
       HighsInt iFind = this->p_end_[iRow];
+      const HighsInt row_end = this->start_[iRow + 1];
+      while (iFind < row_end && this->index_[iFind] != var_out) iFind++;
+      assert(iFind < row_end);
+      if (iFind >= row_end) continue;
       HighsInt iSwap = this->p_end_[iRow]++;
-      while (this->index_[iFind] != var_out) iFind++;
       swap(this->index_[iFind], this->index_[iSwap]);
       swap(this->value_[iFind], this->value_[iSwap]);
     }

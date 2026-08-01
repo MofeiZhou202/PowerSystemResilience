@@ -1600,22 +1600,6 @@ bool solve_standard_form_with_vendored_highs(const StandardFormLP& sf,
   }
 
   out.basis_inverse.resize(0, 0);
-  if (m <= 4096) {
-    out.basis_inverse = Eigen::MatrixXd::Zero(m, m);
-    std::vector<double> row_vec(static_cast<std::size_t>(m), 0.0);
-    for (int row = 0; row < m; ++row) {
-      std::fill(row_vec.begin(), row_vec.end(), 0.0);
-      if (highs->getBasisInverseRow(static_cast<HighsInt>(row),
-                                   row_vec.data()) != HighsStatus::kOk) {
-        out.basis_inverse.resize(0, 0);
-        break;
-      }
-      for (int col = 0; col < m; ++col) {
-        out.basis_inverse(row, col) =
-            row_vec[static_cast<std::size_t>(col)];
-      }
-    }
-  }
 
   out.max_objective = info.objective_function_value;
   out.result.stats.success = true;

@@ -1,9 +1,11 @@
 /// @file bc_cglp.hpp
 /// @brief Lift-and-project disjunctive cut generation (CGLP).
 ///
-/// Phase 1 scaffolding: interface, option plumbing, and a stub
-/// implementation that never generates a cut. The full multi-phase rollout
-/// is tracked in /memories/repo/cglp-disjunctive-cuts-roadmap.md.
+/// The implementation builds and solves the disjunctive CGLP, validates
+/// fallback cuts on both sides of the binary disjunction, applies efficacy
+/// filtering, and deduplicates admitted root cuts. It remains experimental
+/// and disabled by default because it has not passed the end-to-end MIPLIB
+/// performance gate.
 ///
 /// Theory (Balas, Ceria, Cornuéjols 1993):
 ///   Given the LP relaxation P = {x : Ax ≤ b, 0 ≤ x ≤ 1} and a fractional
@@ -133,7 +135,7 @@ std::vector<int> select_cglp_candidates(const CGLPContext& ctx);
 /// @brief Solve the CGLP for a single 0-1 disjunction on variable `j` and
 /// return at most one cut.
 ///
-/// Contract (to be honored once implemented):
+/// Contract:
 ///   * If `generated` is true, then `α^T x* < β - opt.cglp_min_efficacy * ‖α‖₂`
 ///     at the provided `ctx.x_star`.
 ///   * The cut is valid for the original LP's integer hull,

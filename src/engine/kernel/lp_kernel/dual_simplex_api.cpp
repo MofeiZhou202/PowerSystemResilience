@@ -973,59 +973,108 @@ void update_standard_form_bounds(StandardFormLP& sf,
 // Fast-path update when the exact bound changes are known (avoids scanning
 // all n variables to detect which changed).  Typical for B&C branching:
 // 1-2 changes per node, plus a few more from bound propagation.
-void update_standard_form_bounds_incremental(
+bool update_standard_form_bounds_incremental(
     StandardFormLP& sf,
     const LPModel& lp,
     const std::vector<BoundChangeInfo>& changes) {
-  if (changes.empty()) return;
+  if (changes.empty()) return true;
   const int n = sf.n_original;
   const int m_ineq = static_cast<int>(lp.A.rows());
   const double sign = (lp.sense == Sense::Minimize) ? 1.0 : -1.0;
-
   const bool scaled = sf.row_scale.size() > 0;
+
+  struct StagedBounds {
+    int var_idx{-1};
+    double lower_shift{0.0};
+    double upper{kInf};
+  };
+  std::vector<StagedBounds> staged;
+  staged.reserve(changes.size());
+
+  auto column_scale = [&](int j) {
+    return scaled ? sf.col_scale[j] : 1.0;
+  };
+  auto canonical_lower_shift = [](double value) {
+    return has_finite_lower_bound(value) ? value : 0.0;
+  };
+  auto canonical_upper = [](double value) {
+    return has_finite_upper_bound(value) ? value : kInf;
+  };
+  auto bounds_match = [](double lhs, double rhs) {
+    if (std::isinf(lhs) || std::isinf(rhs)) return lhs == rhs;
+    if (!std::isfinite(lhs) || !std::isfinite(rhs)) return false;
+    return std::abs(lhs - rhs) <=
+           1e-12 * std::max({1.0, std::abs(lhs), std::abs(rhs)});
+  };
+  auto staged_for = [&](int j) -> StagedBounds& {
+    for (StagedBounds& state : staged) {
+      if (state.var_idx == j) return state;
+    }
+    const double cs = column_scale(j);
+    const double upper =
+        has_finite_upper_bound(sf.var_ub[j])
+            ? sf.var_ub[j] * cs + sf.lb_shift[j]
+            : kInf;
+    staged.push_back({j, sf.lb_shift[j], upper});
+    return staged.back();
+  };
+
+  // Validate the complete change sequence before mutating sf. This prevents a
+  // stale sibling-domain delta from partially corrupting the active LP state.
+  for (const BoundChangeInfo& bc : changes) {
+    const int j = bc.var_idx;
+    if (j < 0 || j >= n || std::isnan(bc.old_value) ||
+        std::isnan(bc.new_value)) {
+      return false;
+    }
+    StagedBounds& state = staged_for(j);
+    if (bc.is_lb) {
+      const double expected = canonical_lower_shift(bc.old_value);
+      if (!bounds_match(state.lower_shift, expected)) return false;
+      state.lower_shift = canonical_lower_shift(bc.new_value);
+    } else {
+      const double expected = canonical_upper(bc.old_value);
+      if (!bounds_match(state.upper, expected)) return false;
+      state.upper = canonical_upper(bc.new_value);
+    }
+  }
 
   for (const auto& bc : changes) {
     const int j = bc.var_idx;
-    if (j < 0 || j >= n) continue;
+    const double cs = column_scale(j);
 
     if (bc.is_lb) {
-      // Lower bound changed: update lb_shift and b.
       const double old_shift = sf.lb_shift[j];
-      const double new_shift = std::isfinite(old_shift + bc.delta) ? (old_shift + bc.delta) : old_shift;
+      const double old_upper =
+          has_finite_upper_bound(sf.var_ub[j])
+              ? sf.var_ub[j] * cs + old_shift
+              : kInf;
+      const double new_shift = canonical_lower_shift(bc.new_value);
       const double d = new_shift - old_shift;
-      if (std::abs(d) < 1e-15) continue;
-      sf.lb_shift[j] = new_shift;
-
-      // Update b for inequality rows: b[i] -= row_scale[i] * row_sign[i] * A(i,j) * d
-      for (Eigen::SparseMatrix<double>::InnerIterator it(lp.A, j); it; ++it) {
-        const double rs = scaled ? sf.row_scale[it.row()] : 1.0;
-        sf.b[it.row()] -= rs * sf.row_sign[it.row()] * it.value() * d;
+      if (std::abs(d) >= 1e-15) {
+        sf.lb_shift[j] = new_shift;
+        for (Eigen::SparseMatrix<double>::InnerIterator it(lp.A, j); it; ++it) {
+          const double rs = scaled ? sf.row_scale[it.row()] : 1.0;
+          sf.b[it.row()] -= rs * sf.row_sign[it.row()] * it.value() * d;
+        }
+        for (Eigen::SparseMatrix<double>::InnerIterator it(lp.Aeq, j); it; ++it) {
+          const int row = m_ineq + static_cast<int>(it.row());
+          const double rs = scaled ? sf.row_scale[row] : 1.0;
+          sf.b[row] -= rs * sf.row_sign[row] * it.value() * d;
+        }
+        sf.objective_const += sign * lp.c[j] * d;
       }
-      // Update b for equality rows.
-      for (Eigen::SparseMatrix<double>::InnerIterator it(lp.Aeq, j); it; ++it) {
-        const int row = m_ineq + static_cast<int>(it.row());
-        const double rs = scaled ? sf.row_scale[row] : 1.0;
-        sf.b[row] -= rs * sf.row_sign[row] * it.value() * d;
-      }
-
-      // Update var_ub[j] (in scaled space): delta in original space / col_scale.
-      if (std::isfinite(sf.var_ub[j]) && sf.var_ub[j] != kInf) {
-        const double cs = scaled ? sf.col_scale[j] : 1.0;
-        sf.var_ub[j] -= d / cs;
-      }
-
-      // Update objective constant.
-      sf.objective_const += sign * lp.c[j] * d;
+      sf.var_ub[j] = has_finite_upper_bound(old_upper)
+                         ? (old_upper - new_shift) / cs
+                         : kInf;
     } else {
-      // Upper bound changed: only var_ub needs updating.
-      if (std::isfinite(sf.var_ub[j]) || std::isfinite(bc.delta)) {
-        const double cs = scaled ? sf.col_scale[j] : 1.0;
-        const double old_ub = sf.var_ub[j] * cs + sf.lb_shift[j];
-        const double new_ub = old_ub + bc.delta;
-        sf.var_ub[j] = std::isfinite(new_ub) ? ((new_ub - sf.lb_shift[j]) / cs) : kInf;
-      }
+      const double new_upper = canonical_upper(bc.new_value);
+      sf.var_ub[j] = has_finite_upper_bound(new_upper)
+                         ? (new_upper - sf.lb_shift[j]) / cs
+                         : kInf;
     }
   }
+  return true;
 }
 
 

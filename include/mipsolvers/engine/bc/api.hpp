@@ -13,8 +13,9 @@ namespace mipsolvers::engine {
 // ─── Simple (legacy) entry points ─────────────────────────────────────────
 
 /// Solve a MILP via branch-and-cut.
-/// LP relaxations at each node are solved by the native dual simplex (default)
-/// or the Mehrotra predictor-corrector IPM (when configured).
+/// LP relaxations use the vendored HiGHS dual simplex by default. The native
+/// dual simplex remains an explicitly selected experimental backend; IPM can
+/// be configured for root or node relaxations.
 BCResult solve_milp_bc(const MIPModel& prob, const BCOptions& opt = {});
 
 /// Solve a MINLP via spatial branch-and-bound.
@@ -23,18 +24,21 @@ BCResult solve_minlp_bc(const MINLPModel& prob, const BCOptions& opt = {});
 
 // ─── Extended entry points (warm-start + ML callbacks) ────────────────────
 
-/// Solve a MILP with an optional warm-start payload and ML hooks.
+/// Solve a MILP with an optional primal warm start and policy hooks.
 ///
 /// Equivalent to `solve_milp_bc(prob, opt)` when both `ws` and `cbs` are
-/// empty. Supplied callbacks are invoked by the engine internally;
-/// the caller owns the std::function targets and is responsible for
-/// making them thread-safe if `opt.num_threads > 1`.
+/// empty. Primal hints, hyperparameter tuning, post-solve reporting, and the
+/// callback modes documented in `ml_hooks.hpp` are validated before solving.
+/// Unsupported callback/solver combinations raise `std::invalid_argument`
+/// instead of being ignored. The caller owns callback
+/// targets and is responsible for thread safety when `opt.num_threads > 1`.
 BCResult solve_milp_bc(const MIPModel&    prob,
                        const BCOptions&   opt,
                        const BCWarmStart& ws,
                        const BCCallbacks& cbs);
 
-/// Same as above for MINLP.
+/// MINLP supports primal initial points plus hyperparameter and post-solve
+/// callbacks. Other callback modes raise `std::invalid_argument`.
 BCResult solve_minlp_bc(const MINLPModel&  prob,
                         const BCOptions&   opt,
                         const BCWarmStart& ws,

@@ -425,7 +425,8 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
     }
   }
 
-  // D + regularization on diagonal (placeholder values)
+  // Initial diagonal regularization. The barrier terms overwrite these
+  // entries numerically on every iteration while preserving the KKT pattern.
   for (int i = 0; i < n; ++i) {
     trips.emplace_back(i, i, reg);
   }

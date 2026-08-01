@@ -499,3 +499,23 @@ the audited incumbent 6195.589992 and roughly the prior 50% gap while
 processing 380 nodes and 868 LP solves; this short timed run demonstrates
 correct active use but is not evidence that Native is yet competitive with
 HiGHS-MIP.
+
+## 2026-08-01: reliability-branching design consolidation
+
+No solver behavior changed in this documentation-only step. The complete
+theory and implementation order were consolidated in
+`docs/native_milp_reliability_branching_theory_and_plan.md` before further
+branching edits. The specification identifies the update-then-select
+information loss, replaces scale-dependent fake failure gains with typed proof
+states, defines a candidate-driven node-local exact-score overlay, separates
+branch-ranking observations from publishable child bounds, requires
+one-solve/one-pseudocost-sample accounting, and makes serial/parallel parity a
+contract.
+
+Implementation is divided into independently attributable phases: failure
+semantics and tests; node-local overlay; selected-state reuse and sample
+deduplication; parallel parity; child-direction scheduling; and only then
+pseudocost shrinkage or node-estimate work. Each phase has mathematical,
+mechanism, search-quality, and paired wall-time acceptance gates. No probe
+count, reliability threshold, score weight, model-size threshold, or
+instance-specific parameter was changed.

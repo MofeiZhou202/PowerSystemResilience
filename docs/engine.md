@@ -576,6 +576,7 @@ BCResult result = solve_milp_bc(mip, opt, ws, cbs);
 | `time_limit_sec` | 120.0 | Wall-clock time limit (seconds) |
 | `int_tol` | 1e-5 | Integrality tolerance |
 | `gap_tol` | 1e-4 | Relative primal-dual gap tolerance |
+| `require_tree_exhaustion_certificate` | `false` | Ignore `gap_tol` and require exact tree exhaustion |
 | `lp_tol` | 1e-6 | LP relaxation convergence tolerance |
 
 #### LP solver at nodes
@@ -714,7 +715,6 @@ Enabled cut families are selected through `BCOptions::cuts`:
 enum class CutType {
   None,
   IntRounding, MIR, Gomory, Cover,
-  FlowCover, ImpliedBound,
   All,          // all of the above (default)
 };
 ```
@@ -735,22 +735,16 @@ Cut-quality filters:
 ```cpp
 struct BCWarmStart {
   std::vector<BCPrimalHint> primal_hints;  // incumbent(s) to seed B&B
-  Eigen::VectorXd           dual_row;      // row duals for LP warm-start
-  Eigen::VectorXd           dual_col;      // reduced-cost / bound duals
-  BCSimplexBasis            basis;         // simplex basis descriptor
-  std::vector<BCCutRecord>  cut_pool;      // cut pool snapshot to reseed
-  double                    best_bound;    // inherited lower bound
 };
 
 struct BCPrimalHint {
   Eigen::VectorXd x;
-  double          obj{0.0};
-  bool            verified{false};  // set true if caller checked feasibility
 };
 ```
 
-A primal hint with `verified = false` undergoes an internal LP feasibility
-check before being accepted as an incumbent.
+Every primal hint undergoes the solver's normal feasibility checks before it
+can be accepted as an incumbent. Dual/basis/tree-restart payloads are not part
+of the public API because the engine does not implement them.
 
 ### 7.5 Cut Validity Scope
 
@@ -824,13 +818,10 @@ Return value is the number of cuts generated; return 0 to signal no violation.
 
 | Hook | Signature | Description |
 |---|---|---|
-| `hyper_tuner` | `BCOptions(feat, base, prev_stats)` | Override BCOptions before the run |
-| `node_selector` | `void(open_nodes, out_permutation)` | Reorder the open-node list |
-| `cut_selector` | `void(candidates, budget, out_mask)` | Accept/reject cut candidates |
-| `branching_advisor` | `BCBranchingPrior(node_id, fracs, features)` | Suggest branching variable |
-| `incumbent_callback` | `void(x, obj, stats)` | Called each time a better incumbent is found |
-| `termination_check` | `bool(stats)` | Custom early-termination condition |
-| `dynamic_node_cut` | `int(ctx, out_cuts)` | Inject user cuts at integer feasible nodes |
+| `hyperparam_tuner` | `BCOptions(feat, base, prev_stats)` | Override `BCOptions` before the run |
+| `branching_prior` | `void(context, out_scores)` | Add native-tree branching scores |
+| `dynamic_node_cut` | `void(context, out_cuts)` | Inject cuts in the strict HiGHS node lifecycle |
+| `post_solve` | `void(features, options, stats)` | Observe the completed run |
 
 ---
 

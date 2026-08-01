@@ -94,7 +94,9 @@ class Model {
   void maximize(const LinearExpr& obj);
 
   /// Set a quadratic objective (Beta milestone).
-  /// The model is then treated as QP (or MIQP if integer vars are present).
+  /// Continuous models are treated as QPs. Integer variables combined with a
+  /// quadratic objective are rejected at solve/export time because AML has no
+  /// MIQP backend contract yet.
   void minimize(const QuadExpr& obj);
   void maximize(const QuadExpr& obj);
 
@@ -213,10 +215,17 @@ class Model {
 
   void print_summary()        const;
   void check_bounds()         const;  ///< error if any lb > ub
-  void check_missing_params() const;  ///< warn on unset domain keys
+  /// Validate registered parameter storage. Scalar parameters must be set,
+  /// indexed parameter tables must contain at least one entry, and all stored
+  /// values must be finite. Full domain coverage cannot be inferred because
+  /// parameters are currently declared by dimension, not by a Set.
+  void check_missing_params() const;
 
   // ── Export ────────────────────────────────────────────────────────────
+  /// Export a linear LP or MILP. QP, NLP, MINLP and conic models are rejected.
   void write_lp  (const std::string& path) const;
+  /// Export a linear LP or MILP in free MPS format. Unsupported nonlinear and
+  /// quadratic model classes are rejected instead of being silently reduced.
   void write_mps (const std::string& path) const;
   void write_json(const std::string& path) const;  ///< Beta: JSON model export
 

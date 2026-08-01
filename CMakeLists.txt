@@ -201,12 +201,7 @@ if(MIPSOLVERS_HAVE_HIGHS_LIB)
     src/engine/solver/native/milp/bc/legacy/bc_uc_trace.cpp
     src/engine/solver/native/milp/bc/legacy/bc_validation.cpp
     src/engine/solver/native/milp/bc/milp_presolve.cpp
-    src/engine/solver/native/milp/bc/parallel/shared_state.cpp
-    src/engine/solver/native/milp/bc/parallel/parallel_search.cpp
     src/engine/solver/native/milp/bc/api.cpp
-    src/engine/solver/native/milp/bc/search/node_evaluator.cpp
-    src/engine/solver/native/milp/bc/root/root_solve.cpp
-    src/engine/solver/native/milp/bc/search/sequential_search.cpp
   )
   target_compile_definitions(mipsolvers PUBLIC
     MIPSOLVERS_NATIVE_BC_STRICT_HIGHS=1
@@ -696,6 +691,7 @@ if(MIPSOLVERS_BUILD_TESTS)
   mipsolvers_add_test(test_ipm_solver          TIER unit)
   mipsolvers_add_test(test_conic_ipm           TIER unit)
   mipsolvers_add_test(test_aml_conic           TIER unit)
+  mipsolvers_add_test(test_aml_model            TIER unit)
   # The OpenMP guard macro is PRIVATE to the library; expose it to the conic
   # test so its OpenMP-only sections (parallel determinism) are compiled.
   if(TARGET test_conic_ipm AND OpenMP_CXX_FOUND)

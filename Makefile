@@ -458,6 +458,19 @@ test_aml_conic/fast:
 .PHONY : test_aml_conic/fast
 
 #=============================================================================
+# Target rules for targets named test_aml_model
+
+# Build rule for target.
+test_aml_model: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_aml_model
+.PHONY : test_aml_model
+
+# fast build rule for target.
+test_aml_model/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_aml_model.dir/build.make CMakeFiles/test_aml_model.dir/build
+.PHONY : test_aml_model/fast
+
+#=============================================================================
 # Target rules for targets named test_dual_simplex
 
 # Build rule for target.
@@ -8937,126 +8950,6 @@ src/engine/solver/native/milp/bc/milp_presolve.s: src/engine/solver/native/milp/
 src/engine/solver/native/milp/bc/milp_presolve.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/milp_presolve.cpp.s
 .PHONY : src/engine/solver/native/milp/bc/milp_presolve.cpp.s
-
-src/engine/solver/native/milp/bc/parallel/parallel_search.o: src/engine/solver/native/milp/bc/parallel/parallel_search.cpp.o
-.PHONY : src/engine/solver/native/milp/bc/parallel/parallel_search.o
-
-# target to build an object file
-src/engine/solver/native/milp/bc/parallel/parallel_search.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/parallel/parallel_search.cpp.o
-.PHONY : src/engine/solver/native/milp/bc/parallel/parallel_search.cpp.o
-
-src/engine/solver/native/milp/bc/parallel/parallel_search.i: src/engine/solver/native/milp/bc/parallel/parallel_search.cpp.i
-.PHONY : src/engine/solver/native/milp/bc/parallel/parallel_search.i
-
-# target to preprocess a source file
-src/engine/solver/native/milp/bc/parallel/parallel_search.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/parallel/parallel_search.cpp.i
-.PHONY : src/engine/solver/native/milp/bc/parallel/parallel_search.cpp.i
-
-src/engine/solver/native/milp/bc/parallel/parallel_search.s: src/engine/solver/native/milp/bc/parallel/parallel_search.cpp.s
-.PHONY : src/engine/solver/native/milp/bc/parallel/parallel_search.s
-
-# target to generate assembly for a file
-src/engine/solver/native/milp/bc/parallel/parallel_search.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/parallel/parallel_search.cpp.s
-.PHONY : src/engine/solver/native/milp/bc/parallel/parallel_search.cpp.s
-
-src/engine/solver/native/milp/bc/parallel/shared_state.o: src/engine/solver/native/milp/bc/parallel/shared_state.cpp.o
-.PHONY : src/engine/solver/native/milp/bc/parallel/shared_state.o
-
-# target to build an object file
-src/engine/solver/native/milp/bc/parallel/shared_state.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/parallel/shared_state.cpp.o
-.PHONY : src/engine/solver/native/milp/bc/parallel/shared_state.cpp.o
-
-src/engine/solver/native/milp/bc/parallel/shared_state.i: src/engine/solver/native/milp/bc/parallel/shared_state.cpp.i
-.PHONY : src/engine/solver/native/milp/bc/parallel/shared_state.i
-
-# target to preprocess a source file
-src/engine/solver/native/milp/bc/parallel/shared_state.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/parallel/shared_state.cpp.i
-.PHONY : src/engine/solver/native/milp/bc/parallel/shared_state.cpp.i
-
-src/engine/solver/native/milp/bc/parallel/shared_state.s: src/engine/solver/native/milp/bc/parallel/shared_state.cpp.s
-.PHONY : src/engine/solver/native/milp/bc/parallel/shared_state.s
-
-# target to generate assembly for a file
-src/engine/solver/native/milp/bc/parallel/shared_state.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/parallel/shared_state.cpp.s
-.PHONY : src/engine/solver/native/milp/bc/parallel/shared_state.cpp.s
-
-src/engine/solver/native/milp/bc/root/root_solve.o: src/engine/solver/native/milp/bc/root/root_solve.cpp.o
-.PHONY : src/engine/solver/native/milp/bc/root/root_solve.o
-
-# target to build an object file
-src/engine/solver/native/milp/bc/root/root_solve.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/root/root_solve.cpp.o
-.PHONY : src/engine/solver/native/milp/bc/root/root_solve.cpp.o
-
-src/engine/solver/native/milp/bc/root/root_solve.i: src/engine/solver/native/milp/bc/root/root_solve.cpp.i
-.PHONY : src/engine/solver/native/milp/bc/root/root_solve.i
-
-# target to preprocess a source file
-src/engine/solver/native/milp/bc/root/root_solve.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/root/root_solve.cpp.i
-.PHONY : src/engine/solver/native/milp/bc/root/root_solve.cpp.i
-
-src/engine/solver/native/milp/bc/root/root_solve.s: src/engine/solver/native/milp/bc/root/root_solve.cpp.s
-.PHONY : src/engine/solver/native/milp/bc/root/root_solve.s
-
-# target to generate assembly for a file
-src/engine/solver/native/milp/bc/root/root_solve.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/root/root_solve.cpp.s
-.PHONY : src/engine/solver/native/milp/bc/root/root_solve.cpp.s
-
-src/engine/solver/native/milp/bc/search/node_evaluator.o: src/engine/solver/native/milp/bc/search/node_evaluator.cpp.o
-.PHONY : src/engine/solver/native/milp/bc/search/node_evaluator.o
-
-# target to build an object file
-src/engine/solver/native/milp/bc/search/node_evaluator.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/search/node_evaluator.cpp.o
-.PHONY : src/engine/solver/native/milp/bc/search/node_evaluator.cpp.o
-
-src/engine/solver/native/milp/bc/search/node_evaluator.i: src/engine/solver/native/milp/bc/search/node_evaluator.cpp.i
-.PHONY : src/engine/solver/native/milp/bc/search/node_evaluator.i
-
-# target to preprocess a source file
-src/engine/solver/native/milp/bc/search/node_evaluator.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/search/node_evaluator.cpp.i
-.PHONY : src/engine/solver/native/milp/bc/search/node_evaluator.cpp.i
-
-src/engine/solver/native/milp/bc/search/node_evaluator.s: src/engine/solver/native/milp/bc/search/node_evaluator.cpp.s
-.PHONY : src/engine/solver/native/milp/bc/search/node_evaluator.s
-
-# target to generate assembly for a file
-src/engine/solver/native/milp/bc/search/node_evaluator.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/search/node_evaluator.cpp.s
-.PHONY : src/engine/solver/native/milp/bc/search/node_evaluator.cpp.s
-
-src/engine/solver/native/milp/bc/search/sequential_search.o: src/engine/solver/native/milp/bc/search/sequential_search.cpp.o
-.PHONY : src/engine/solver/native/milp/bc/search/sequential_search.o
-
-# target to build an object file
-src/engine/solver/native/milp/bc/search/sequential_search.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/search/sequential_search.cpp.o
-.PHONY : src/engine/solver/native/milp/bc/search/sequential_search.cpp.o
-
-src/engine/solver/native/milp/bc/search/sequential_search.i: src/engine/solver/native/milp/bc/search/sequential_search.cpp.i
-.PHONY : src/engine/solver/native/milp/bc/search/sequential_search.i
-
-# target to preprocess a source file
-src/engine/solver/native/milp/bc/search/sequential_search.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/search/sequential_search.cpp.i
-.PHONY : src/engine/solver/native/milp/bc/search/sequential_search.cpp.i
-
-src/engine/solver/native/milp/bc/search/sequential_search.s: src/engine/solver/native/milp/bc/search/sequential_search.cpp.s
-.PHONY : src/engine/solver/native/milp/bc/search/sequential_search.s
-
-# target to generate assembly for a file
-src/engine/solver/native/milp/bc/search/sequential_search.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/search/sequential_search.cpp.s
-.PHONY : src/engine/solver/native/milp/bc/search/sequential_search.cpp.s
 
 src/engine/solver/native/native_adapters.o: src/engine/solver/native/native_adapters.cpp.o
 .PHONY : src/engine/solver/native/native_adapters.o
@@ -24976,6 +24869,30 @@ tests/test_aml_conic.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_aml_conic.dir/build.make CMakeFiles/test_aml_conic.dir/tests/test_aml_conic.cpp.s
 .PHONY : tests/test_aml_conic.cpp.s
 
+tests/test_aml_model.o: tests/test_aml_model.cpp.o
+.PHONY : tests/test_aml_model.o
+
+# target to build an object file
+tests/test_aml_model.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_aml_model.dir/build.make CMakeFiles/test_aml_model.dir/tests/test_aml_model.cpp.o
+.PHONY : tests/test_aml_model.cpp.o
+
+tests/test_aml_model.i: tests/test_aml_model.cpp.i
+.PHONY : tests/test_aml_model.i
+
+# target to preprocess a source file
+tests/test_aml_model.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_aml_model.dir/build.make CMakeFiles/test_aml_model.dir/tests/test_aml_model.cpp.i
+.PHONY : tests/test_aml_model.cpp.i
+
+tests/test_aml_model.s: tests/test_aml_model.cpp.s
+.PHONY : tests/test_aml_model.s
+
+# target to generate assembly for a file
+tests/test_aml_model.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_aml_model.dir/build.make CMakeFiles/test_aml_model.dir/tests/test_aml_model.cpp.s
+.PHONY : tests/test_aml_model.cpp.s
+
 tests/test_branch_and_cut.o: tests/test_branch_and_cut.cpp.o
 .PHONY : tests/test_branch_and_cut.o
 
@@ -25403,6 +25320,7 @@ help:
 	@echo "... solver_comparison"
 	@echo "... test_adapter_registry"
 	@echo "... test_aml_conic"
+	@echo "... test_aml_model"
 	@echo "... test_branch_and_cut"
 	@echo "... test_conic_ipm"
 	@echo "... test_dual_simplex"
@@ -26445,21 +26363,6 @@ help:
 	@echo "... src/engine/solver/native/milp/bc/milp_presolve.o"
 	@echo "... src/engine/solver/native/milp/bc/milp_presolve.i"
 	@echo "... src/engine/solver/native/milp/bc/milp_presolve.s"
-	@echo "... src/engine/solver/native/milp/bc/parallel/parallel_search.o"
-	@echo "... src/engine/solver/native/milp/bc/parallel/parallel_search.i"
-	@echo "... src/engine/solver/native/milp/bc/parallel/parallel_search.s"
-	@echo "... src/engine/solver/native/milp/bc/parallel/shared_state.o"
-	@echo "... src/engine/solver/native/milp/bc/parallel/shared_state.i"
-	@echo "... src/engine/solver/native/milp/bc/parallel/shared_state.s"
-	@echo "... src/engine/solver/native/milp/bc/root/root_solve.o"
-	@echo "... src/engine/solver/native/milp/bc/root/root_solve.i"
-	@echo "... src/engine/solver/native/milp/bc/root/root_solve.s"
-	@echo "... src/engine/solver/native/milp/bc/search/node_evaluator.o"
-	@echo "... src/engine/solver/native/milp/bc/search/node_evaluator.i"
-	@echo "... src/engine/solver/native/milp/bc/search/node_evaluator.s"
-	@echo "... src/engine/solver/native/milp/bc/search/sequential_search.o"
-	@echo "... src/engine/solver/native/milp/bc/search/sequential_search.i"
-	@echo "... src/engine/solver/native/milp/bc/search/sequential_search.s"
 	@echo "... src/engine/solver/native/native_adapters.o"
 	@echo "... src/engine/solver/native/native_adapters.i"
 	@echo "... src/engine/solver/native/native_adapters.s"
@@ -28446,6 +28349,9 @@ help:
 	@echo "... tests/test_aml_conic.o"
 	@echo "... tests/test_aml_conic.i"
 	@echo "... tests/test_aml_conic.s"
+	@echo "... tests/test_aml_model.o"
+	@echo "... tests/test_aml_model.i"
+	@echo "... tests/test_aml_model.s"
 	@echo "... tests/test_branch_and_cut.o"
 	@echo "... tests/test_branch_and_cut.i"
 	@echo "... tests/test_branch_and_cut.s"

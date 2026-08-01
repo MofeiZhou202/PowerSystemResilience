@@ -2,11 +2,12 @@
 /// @brief Cut generation routines for the B&C solver.
 ///
 /// Implements GMI (Gomory Mixed-Integer) cuts, single-row complemented MIR cuts,
-/// cover cuts, flow cover cuts, implied bound cuts,
+/// cover cuts, implied bound cuts,
 /// and the unified add_cuts dispatch. Includes scoring helpers for cut selection.
 
 #include "mipsolvers/engine/detail/bc_utils.hpp"
 #include "mipsolvers/engine/detail/bc_clique_table.hpp"
+#include "mipsolvers/engine/detail/bc_env_options.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -299,171 +300,6 @@ bool build_bounded_form_gmi_cut(const SimplexResult& simplex,
   }
   return true;
 }
-
-#if 0  // MIR cuts disabled: correct but hurt tree search performance.
-/// Build a tableau-row MIR cut with strategic complementation.
-///
-/// Unlike Gomory which takes the tableau row as-is, MIR complements bounded
-/// integer non-basics at lower bound when frac(a_j) >= 1-f0 to move them
-/// into the "good" coefficient set. This can produce strictly tighter cuts.
-/// Returns false if no complementation candidates exist (Gomory already covers).
-bool build_bounded_form_mir_cut(const SimplexResult& simplex,
-                                int row,
-                                [[maybe_unused]] const Eigen::VectorXd& x_lp,
-                                Eigen::VectorXd& cut_le,
-                                double& rhs_le,
-                                const std::shared_ptr<BasisOps>& sbasis,
-                                const std::vector<char>* is_basic_hint = nullptr) {
-  const int n_std = static_cast<int>(simplex.form.A.cols());
-  const int n_orig = simplex.form.n_original;
-  const int m = static_cast<int>(simplex.basis.indices.size());
-  if (row < 0 || row >= m) return false;
-  if (!sbasis && row >= static_cast<int>(simplex.basis_inverse.rows())) return false;
-
-  const int basic_col = simplex.basis.indices[static_cast<size_t>(row)];
-  if (!transformed_original_var_is_integer(simplex, basic_col)) return false;
-
-  // beta already accounts for at-upper positions — no adjustment needed.
-  const double beta = simplex.x_basic[row];
-  const double f0_raw = frac_part(beta);
-  if (f0_raw <= 1e-8 || f0_raw >= 1.0 - 1e-8) return false;
-
-  // Compute tableau row via BTRAN (same as Gomory).
-  Eigen::RowVectorXd tableau_row;
-  if (sbasis) {
-    if (!sparse_basis_tableau_row(sbasis, row, tableau_row)) return false;
-  } else {
-    tableau_row = simplex.basis_inverse.row(row) * simplex.form.A;
-  }
-  if (!tableau_row.allFinite()) return false;
-
-  // Identify basic/nonbasic status — reuse pre-built hint when available.
-  std::vector<char> is_basic_local;
-  if (!is_basic_hint || static_cast<int>(is_basic_hint->size()) != n_std) {
-    is_basic_local.assign(static_cast<size_t>(n_std), 0);
-    for (int idx : simplex.basis.indices) {
-      if (idx >= 0 && idx < n_std) is_basic_local[static_cast<size_t>(idx)] = 1;
-    }
-    is_basic_hint = &is_basic_local;
-  }
-  const std::vector<char>& is_basic = *is_basic_hint;
-
-  const bool has_at_upper = !simplex.basis.at_upper.empty();
-  const bool has_var_ub = simplex.form.var_ub.size() == n_std;
-
-  // Strategic complementation: complement at-lower bounded integer non-basics
-  // where frac(a_j) >= 1-f0 to move them into the "good" coefficient set.
-  // Complementation: x_j = ub_j - x'_j changes coefficient a_j → -a_j and
-  // adjusts RHS by -a_j * ub_j.
-  std::vector<char> complemented(static_cast<size_t>(n_std), 0);
-  double beta_comp = beta;
-  int n_complemented = 0;
-
-  for (int j = 0; j < n_std; ++j) {
-    if (is_basic[static_cast<size_t>(j)]) continue;
-    if (j >= n_orig || !transformed_original_var_is_integer(simplex, j)) continue;
-    const bool j_at_upper = has_at_upper && simplex.basis.at_upper[static_cast<size_t>(j)];
-    if (j_at_upper) continue;  // Already handled by at-upper substitution.
-    if (!has_var_ub || !std::isfinite(simplex.form.var_ub[j])) continue;
-
-    const double a_j = tableau_row[j];
-    const double fj = frac_part(a_j);
-    // Complement if f_j > f0 and complementing moves to "good" set (1-f_j ≤ f0).
-    if (fj > f0_raw + 1e-10 && fj >= 1.0 - f0_raw - 1e-10) {
-      complemented[static_cast<size_t>(j)] = 1;
-      beta_comp -= a_j * simplex.form.var_ub[j];
-      ++n_complemented;
-    }
-  }
-
-  // Only generate MIR cut if we're actually complementing something.
-  // Without complementation, the cut is identical to Gomory (already generated).
-  if (n_complemented == 0) return false;
-
-  const double f0 = frac_part(beta_comp);
-  if (f0 <= 1e-8 || f0 >= 1.0 - 1e-8) return false;
-
-  // Apply MIR rounding to the (complemented + at-upper-substituted) tableau row.
-  Eigen::VectorXd std_cut = Eigen::VectorXd::Zero(n_std);
-  bool has_term = false;
-  double rhs_adjustment = 0.0;
-
-  for (int j = 0; j < n_std; ++j) {
-    if (is_basic[static_cast<size_t>(j)]) continue;  // NOLINT(readability)
-
-    const bool j_at_upper = has_at_upper && simplex.basis.at_upper[static_cast<size_t>(j)];
-    const bool j_comp = complemented[static_cast<size_t>(j)] != 0;
-    // Effective coefficient: at-upper or complemented → sign flip.
-    const double a_j = (j_at_upper || j_comp) ? (-tableau_row[j]) : tableau_row[j];
-
-    double coeff = 0.0;
-    if (j < n_orig && transformed_original_var_is_integer(simplex, j)) {
-      // Integer variable: MIR rounding.
-      const double fj = frac_part(a_j);
-      if (fj <= f0 + 1e-10) {
-        coeff = std::floor(a_j);
-      } else {
-        coeff = std::floor(a_j) + (fj - f0) / (1.0 - f0);
-      }
-    } else {
-      // Continuous (or slack/surplus): MIR strengthening.
-      if (a_j < -1e-12) {
-        coeff = a_j / (1.0 - f0);
-      } else {
-        coeff = 0.0;
-      }
-    }
-
-    if (std::abs(coeff) <= 1e-12) continue;
-
-    // Un-substitute: at-upper and complemented variables both need
-    // coeff * x'_j = coeff * (ub_j - x_j) → -coeff*x_j, rhs += coeff*ub_j.
-    if (j_at_upper || j_comp) {
-      std_cut[j] = -coeff;
-      if (has_var_ub && std::isfinite(simplex.form.var_ub[j])) {
-        rhs_adjustment += coeff * simplex.form.var_ub[j];
-      }
-    } else {
-      std_cut[j] = coeff;
-    }
-    has_term = true;
-  }
-
-  if (!has_term) return false;
-
-  // Convert from standard-form to original-variable space.
-  Eigen::VectorXd coeff_y = std_cut.head(n_orig);
-  double rhs_ge = std::floor(beta_comp) - rhs_adjustment;
-
-  for (int r = 0; r < static_cast<int>(simplex.form.row_to_slack_col.size()); ++r) {
-    const int slack_col = simplex.form.row_to_slack_col[static_cast<size_t>(r)];
-    if (slack_col >= 0 && std::abs(std_cut[slack_col]) > 1e-12) {
-      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(simplex.form.A_row, r); it; ++it) {
-        if (it.col() < n_orig) {
-          coeff_y[it.col()] -= std_cut[slack_col] * it.value();
-        }
-      }
-      rhs_ge -= std_cut[slack_col] * simplex.form.b[r];
-    }
-    const int surplus_col = simplex.form.row_to_surplus_col[static_cast<size_t>(r)];
-    if (surplus_col >= 0 && std::abs(std_cut[surplus_col]) > 1e-12) {
-      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(simplex.form.A_row, r); it; ++it) {
-        if (it.col() < n_orig) {
-          coeff_y[it.col()] += std_cut[surplus_col] * it.value();
-        }
-      }
-      rhs_ge += std_cut[surplus_col] * simplex.form.b[r];
-    }
-  }
-
-  const double rhs_x_ge = rhs_ge + coeff_y.dot(simplex.form.lb_shift);
-  cut_le = -coeff_y;
-  rhs_le = -rhs_x_ge;
-
-  if (cut_le.norm() <= 1e-12 || !std::isfinite(rhs_le) || !cut_le.allFinite()) return false;
-  return true;
-}
-#endif  // MIR cuts disabled
 
 int count_nonzeros(const Eigen::VectorXd& v, double tol = 1e-12) {
   int nnz = 0;
@@ -886,7 +722,7 @@ double xtab_source_row_side(const StandardFormLP& sf, int row) {
 }
 
 int xtab_row_trace_limit() {
-  const char* env = std::getenv("MIPSOLVERS_XTAB_ROW_TRACE");
+  const char* env = bc_env_options().value("MIPSOLVERS_XTAB_ROW_TRACE");
   if (env == nullptr) return 0;
   if (env[0] == '\0') return 20;
   if (std::string(env) == "all") return -1;
@@ -898,7 +734,7 @@ int xtab_row_trace_limit() {
 }
 
 int xtab_row_trace_terms() {
-  const char* env = std::getenv("MIPSOLVERS_XTAB_ROW_TRACE_TERMS");
+  const char* env = bc_env_options().value("MIPSOLVERS_XTAB_ROW_TRACE_TERMS");
   if (env == nullptr || env[0] == '\0') return 12;
   char* end = nullptr;
   const long value = std::strtol(env, &end, 10);
@@ -908,7 +744,7 @@ int xtab_row_trace_terms() {
 
 std::uint64_t xtab_row_trace_id_bound(const char* name,
                                       std::uint64_t default_value) {
-  const char* env = std::getenv(name);
+  const char* env = bc_env_options().value(name);
   if (env == nullptr || env[0] == '\0') return default_value;
   char* end = nullptr;
   const unsigned long long value = std::strtoull(env, &end, 10);
@@ -917,7 +753,7 @@ std::uint64_t xtab_row_trace_id_bound(const char* name,
 }
 
 int xtab_transform_trace_col() {
-  const char* env = std::getenv("MIPSOLVERS_XTAB_TRANSFORM_TRACE_COL");
+  const char* env = bc_env_options().value("MIPSOLVERS_XTAB_TRANSFORM_TRACE_COL");
   if (env == nullptr || env[0] == '\0') return -1;
   char* end = nullptr;
   const long value = std::strtol(env, &end, 10);
@@ -926,7 +762,7 @@ int xtab_transform_trace_col() {
 }
 
 int xtab_varbound_trace_col() {
-  const char* env = std::getenv("MIPSOLVERS_XTAB_VB_TRACE_COL");
+  const char* env = bc_env_options().value("MIPSOLVERS_XTAB_VB_TRACE_COL");
   if (env == nullptr || env[0] == '\0') return -1;
   char* end = nullptr;
   const long value = std::strtol(env, &end, 10);
@@ -935,7 +771,7 @@ int xtab_varbound_trace_col() {
 }
 
 int xtab_modk_system_trace_limit() {
-  const char* env = std::getenv("MIPSOLVERS_XMODK_SYSTEM_TRACE");
+  const char* env = bc_env_options().value("MIPSOLVERS_XMODK_SYSTEM_TRACE");
   if (env == nullptr || env[0] == '\0') return 0;
   if (std::string(env) == "all") return 1000000000;
   char* end = nullptr;
@@ -945,7 +781,7 @@ int xtab_modk_system_trace_limit() {
 }
 
 int xtab_modk_system_trace_terms() {
-  const char* env = std::getenv("MIPSOLVERS_XMODK_SYSTEM_TRACE_TERMS");
+  const char* env = bc_env_options().value("MIPSOLVERS_XMODK_SYSTEM_TRACE_TERMS");
   if (env == nullptr || env[0] == '\0') return 16;
   char* end = nullptr;
   const long value = std::strtol(env, &end, 10);
@@ -954,7 +790,7 @@ int xtab_modk_system_trace_terms() {
 }
 
 int xtab_modk_transform_trace_row() {
-  const char* env = std::getenv("MIPSOLVERS_XMODK_TRANSFORM_ROW");
+  const char* env = bc_env_options().value("MIPSOLVERS_XMODK_TRANSFORM_ROW");
   if (env == nullptr || env[0] == '\0') return -1;
   char* end = nullptr;
   const long value = std::strtol(env, &end, 10);
@@ -963,7 +799,7 @@ int xtab_modk_transform_trace_row() {
 }
 
 bool xtab_row_trace_family_enabled(const char* family) {
-  const char* env = std::getenv("MIPSOLVERS_XTAB_ROW_TRACE_FAMILY");
+  const char* env = bc_env_options().value("MIPSOLVERS_XTAB_ROW_TRACE_FAMILY");
   if (env == nullptr || env[0] == '\0' || std::string(env) == "all") {
     return true;
   }
@@ -971,13 +807,13 @@ bool xtab_row_trace_family_enabled(const char* family) {
 }
 
 bool xtab_row_trace_meta_enabled() {
-  const char* env = std::getenv("MIPSOLVERS_XTAB_ROW_TRACE_META");
+  const char* env = bc_env_options().value("MIPSOLVERS_XTAB_ROW_TRACE_META");
   if (env == nullptr) return false;
   return env[0] != '\0' && std::string(env) != "0";
 }
 
 bool xtab_row_trace_basis_enabled() {
-  const char* env = std::getenv("MIPSOLVERS_XTAB_ROW_TRACE_BASIS");
+  const char* env = bc_env_options().value("MIPSOLVERS_XTAB_ROW_TRACE_BASIS");
   if (env == nullptr) return false;
   return env[0] != '\0' && std::string(env) != "0";
 }
@@ -1293,7 +1129,7 @@ void xtab_trace_original_row(std::uint64_t id,
 }
 
 bool xtab_cmir_delta_trace_enabled() {
-  const char* env = std::getenv("MIPSOLVERS_XTAB_CMIR_DELTA_TRACE");
+  const char* env = bc_env_options().value("MIPSOLVERS_XTAB_CMIR_DELTA_TRACE");
   return env != nullptr && env[0] != '\0' && std::string(env) != "0";
 }
 
@@ -1393,7 +1229,7 @@ void xtab_record_reject(XTabSourceDiag* diag, XTabRejectReason reason) {
 }
 
 void maybe_print_xtab_diag(const char* family, const XTabSourceDiag& diag) {
-  if (std::getenv("MIPSOLVERS_XTAB_DIAG") == nullptr) return;
+  if (bc_env_options().value("MIPSOLVERS_XTAB_DIAG") == nullptr) return;
   fmt::print(stderr,
              "[B&C-XTAB-DIAG] family={} basis={} intOrig={} intAux={} "
              "fracOrig={} fracAux={} btran={} rowEp={} agg={} "
@@ -4826,8 +4662,8 @@ int add_transformed_modk_cuts_impl(
   ledger.src_dim = source_context.dim;
 
   auto print_modk_ledger = [&](const char* stage, int accepted) {
-    if (std::getenv("MIPSOLVERS_XPATH_LEDGER") == nullptr &&
-        std::getenv("MIPSOLVERS_XTAB_DIAG") == nullptr) {
+    if (bc_env_options().value("MIPSOLVERS_XPATH_LEDGER") == nullptr &&
+        bc_env_options().value("MIPSOLVERS_XTAB_DIAG") == nullptr) {
       return;
     }
     fmt::print(
@@ -5364,13 +5200,6 @@ int add_cover_cuts(LPModel& lp,
     cand = sorted_cand;
     cand_coeff = sorted_coeff;
 
-    // Build a coefficient lookup map for this row (for the knapsack lifting phase).
-    std::unordered_map<int, double> row_coeffs;
-    row_coeffs.reserve(cand.size());
-    for (int i = 0; i < static_cast<int>(cand.size()); ++i) {
-      row_coeffs[cand[i]] = cand_coeff[i];
-    }
-
     std::vector<int> cover;
     cover.reserve(cand.size());
     double sum_w = 0.0;
@@ -5390,54 +5219,6 @@ int add_cover_cuts(LPModel& lp,
     Eigen::VectorXd cut = Eigen::VectorXd::Zero(n);
     for (int j : cover) cut[j] = 1.0;
     double rhs = static_cast<double>(cover_size) - 1.0;
-
-    // Sequential up-lifting of non-cover variables for small rows.
-    // For each non-cover variable k (decreasing weight), solve DP knapsack
-    // to compute the tightest valid lifting coefficient.
-    if (cand.size() <= 40 && cand.size() > cover.size()) {
-      const double b_row = lp.b[r];
-      std::vector<bool> in_cover(n, false);
-      for (int j : cover) in_cover[j] = true;
-
-      std::vector<int> non_cover;
-      for (int k : cand) {
-        if (!in_cover[k]) non_cover.push_back(k);
-      }
-      std::sort(non_cover.begin(), non_cover.end(), [&](int a, int b_) {
-        return row_coeffs.at(a) > row_coeffs.at(b_);
-      });
-
-      struct KSItem { double weight; double coeff; };
-      std::vector<KSItem> items;
-      items.reserve(cand.size());
-      for (int j : cover) items.push_back({row_coeffs.at(j), 1.0});
-
-      constexpr int N_BINS = 512;  // Smaller table for speed
-      std::vector<double> dp(N_BINS + 1);
-      auto solve_ks = [&](const std::vector<KSItem>& its, double cap) -> double {
-        if (cap < -1e-9 || its.empty()) return 0.0;
-        double scale = (cap > 1e-12) ? static_cast<double>(N_BINS) / cap : 0.0;
-        std::fill(dp.begin(), dp.end(), 0.0);
-        for (const auto& item : its) {
-          int w_disc = static_cast<int>(std::floor(item.weight * scale));
-          if (w_disc <= 0) { for (int w = 0; w <= N_BINS; ++w) dp[w] += item.coeff; continue; }
-          for (int w = N_BINS; w >= w_disc; --w) {
-            double c = dp[w - w_disc] + item.coeff;
-            if (c > dp[w]) dp[w] = c;
-          }
-        }
-        return dp[N_BINS];
-      };
-
-      for (int k : non_cover) {
-        double a_k = row_coeffs.at(k);
-        double cap = b_row - a_k;
-        double z_star = (cap < -1e-9) ? 0.0 : solve_ks(items, cap);
-        double alpha_k = rhs - z_star;
-        if (alpha_k > 1e-9) cut[k] = alpha_k;
-        items.push_back({a_k, std::max(alpha_k, 0.0)});
-      }
-    }
 
     const double viol = cut.dot(x) - rhs;
     if (viol <= 1e-7) {
@@ -5654,146 +5435,6 @@ int add_basis_mir_cuts(LPModel& lp,
   return added;
 }
 
-/// Flow cover cuts for constraints of the form:
-///   sum_j (a_j * x_j) + sum_k (d_k * y_k) <= b
-/// where y_k are binary and x_j continuous with variable upper bounds x_j <= u_j * y_k.
-/// These are very effective for SCUC problems where continuous generation
-/// is linked to binary commitment decisions.
-int add_flow_cover_cuts(LPModel& lp, const Eigen::VectorXd& x, int max_cuts) {
-  if (max_cuts <= 0) return 0;
-
-  const int n = static_cast<int>(lp.vars.size());
-  const int m = static_cast<int>(lp.A.rows());
-
-  struct FlowCoverCut {
-    Eigen::VectorXd coeff;
-    double rhs;
-    double violation;
-  };
-  std::vector<FlowCoverCut> candidates;
-
-  // Build RowMajor view once to avoid O(n log nnz) coeff() lookups per row.
-  Eigen::SparseMatrix<double, Eigen::RowMajor> A_flow_row = lp.A;
-
-  for (int r = 0; r < m; ++r) {
-    // Identify rows with mixed binary+continuous structure.
-    // Cache (col, val) pairs to avoid repeated O(log nnz) coeff() lookups below.
-    struct ColCoeff { int col; double val; };
-    std::vector<ColCoeff> bin_entries, cont_entries;
-    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_flow_row, r);
-         it; ++it) {
-      const int j = static_cast<int>(it.col());
-      const double val = it.value();
-      if (j < 0 || j >= n || std::abs(val) <= 1e-12) continue;
-      if (lp.vars[j].type == VarType::Binary) {
-        bin_entries.push_back({j, val});
-      } else if (lp.vars[j].type == VarType::Continuous) {
-        cont_entries.push_back({j, val});
-      }
-    }
-    if (bin_entries.empty() || cont_entries.empty()) continue;
-
-    // Identify N+ (positive coeff binary) and N- (negative coeff binary)
-    std::vector<ColCoeff> Nplus_entries, Nminus_entries;
-    for (const auto& e : bin_entries) {
-      if (e.val > 1e-12) Nplus_entries.push_back(e);
-      else if (e.val < -1e-12) Nminus_entries.push_back(e);
-    }
-
-    if (Nminus_entries.empty()) continue;  // Need negative binary coefficients for flow cover
-
-    // Compute: lambda = b + sum_{j in N-} |a_j| (capacity when all N- = 1)
-    double lambda = lp.b[r];
-    for (const auto& e : Nminus_entries) {
-      lambda += std::abs(e.val);
-    }
-    if (lambda <= 1e-9) continue;
-
-    // Find a cover C subset of N- such that:
-    //   sum_{j in C} |a_j| > lambda  (exceeds total capacity)
-    // Greedy: sort by |a_j * (1 - x_j)| descending (most violated first)
-    struct BinInfo {
-      int col;
-      double abs_coeff;
-      double viol_score;
-    };
-    std::vector<BinInfo> nminus_info;
-    nminus_info.reserve(Nminus_entries.size());
-    for (const auto& e : Nminus_entries) {
-      double ac = std::abs(e.val);
-      nminus_info.push_back({e.col, ac, ac * (1.0 - x[e.col])});
-    }
-    std::sort(nminus_info.begin(), nminus_info.end(),
-              [](const BinInfo& a, const BinInfo& b) { return a.viol_score > b.viol_score; });
-
-    std::vector<int> cover;
-    std::vector<double> cover_abs;  // parallel absolute coefficients
-    double cover_sum = 0.0;
-    for (const auto& bi : nminus_info) {
-      cover.push_back(bi.col);
-      cover_abs.push_back(bi.abs_coeff);
-      cover_sum += bi.abs_coeff;
-      if (cover_sum > lambda + 1e-9) break;
-    }
-    if (cover_sum <= lambda + 1e-9) continue;  // No cover found
-
-    // Flow cover inequality:
-    //   sum_{j in cont with a_j > 0} a_j * x_j
-    //   + sum_{j in N+ with a_j > 0} min(a_j, lambda) * y_j
-    //   - sum_{j in C} max(0, |a_j| - (cover_sum - lambda)) * y_j
-    //   <= lambda - sum_{j in C} max(0, |a_j| - (cover_sum - lambda))
-    double excess = cover_sum - lambda;
-
-    Eigen::VectorXd cut = Eigen::VectorXd::Zero(n);
-    double cut_rhs = lambda;
-
-    // Continuous variables with positive coefficients (use cached values)
-    for (const auto& e : cont_entries) {
-      if (e.val > 1e-12) {
-        cut[e.col] = e.val;
-      }
-    }
-
-    // Positive binary variables: coefficient = min(a_j, lambda) (use cached values)
-    for (const auto& e : Nplus_entries) {
-      cut[e.col] = std::min(e.val, lambda);
-    }
-
-    // Cover variables: subtract lifting coefficient (use parallel cover_abs)
-    for (int ci = 0; ci < static_cast<int>(cover.size()); ++ci) {
-      double aj = cover_abs[static_cast<std::size_t>(ci)];
-      double lift = std::max(0.0, aj - excess);
-      cut[cover[static_cast<std::size_t>(ci)]] = -lift;
-      cut_rhs -= lift;
-    }
-
-    // Check violation
-    double viol = cut.dot(x) - cut_rhs;
-    if (viol <= 1e-7) continue;
-
-    candidates.push_back({std::move(cut), cut_rhs, viol});
-  }
-
-  if (candidates.empty()) return 0;
-
-  std::sort(candidates.begin(), candidates.end(),
-            [](const FlowCoverCut& a, const FlowCoverCut& b) { return a.violation > b.violation; });
-
-  int added = 0;
-  std::vector<Eigen::VectorXd> cut_rows;
-  std::vector<double> cut_rhs_vec;
-  for (const auto& c : candidates) {
-    if (added >= max_cuts) break;
-    cut_rows.push_back(c.coeff);
-    cut_rhs_vec.push_back(c.rhs);
-    ++added;
-  }
-  if (!cut_rows.empty()) {
-    add_rows_to_lp(lp, cut_rows, cut_rhs_vec);
-  }
-  return added;
-}
-
 int add_projected_capacity_cover_cuts(LPModel& lp,
                                       const Eigen::VectorXd& x,
                                       int max_cuts) {
@@ -5947,112 +5588,6 @@ int add_projected_capacity_cover_cuts(LPModel& lp,
     add_rows_to_lp(lp, rows, rhs);
   }
   return static_cast<int>(rows.size());
-}
-
-/// Implied bound cuts from variable-bound constraints.
-/// Detects constraints of the form: x_j <= M * y_k + c (or >= form)
-/// where y_k is binary and x_j is continuous/integer.
-/// Generates tighter bounds when LP solution is fractional.
-int add_implied_bound_cuts(LPModel& lp, const Eigen::VectorXd& x, int max_cuts) {
-  if (max_cuts <= 0) return 0;
-
-  const int n = static_cast<int>(lp.vars.size());
-  const int m = static_cast<int>(lp.A.rows());
-
-  struct IBCut {
-    Eigen::VectorXd coeff;
-    double rhs;
-    double violation;
-  };
-  std::vector<IBCut> candidates;
-
-  // Build a row-major view once to avoid O(nnz) per column access in the inner loop.
-  Eigen::SparseMatrix<double, Eigen::RowMajor> A_row = lp.A;
-
-  // Scan for variable bound rows: exactly one continuous and one binary variable
-  for (int r = 0; r < m; ++r) {
-    int cont_col = -1, bin_col = -1;
-    double cont_coeff = 0.0, bin_coeff = 0.0;
-    int nnz = 0;
-    bool valid = true;
-    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_row, r); it; ++it) {
-      const double val = it.value();
-      if (std::abs(val) <= 1e-12) continue;
-      const int j = static_cast<int>(it.col());
-      if (j < 0 || j >= n) { valid = false; break; }
-      ++nnz;
-      if (nnz > 2) { valid = false; break; }
-      if (lp.vars[j].type == VarType::Binary) {
-        if (bin_col >= 0) { valid = false; break; }
-        bin_col = j; bin_coeff = val;
-      } else {
-        if (cont_col >= 0) { valid = false; break; }
-        cont_col = j; cont_coeff = val;
-      }
-    }
-    if (!valid || nnz != 2 || cont_col < 0 || bin_col < 0) continue;
-
-    // Row: cont_coeff * x_cont + bin_coeff * y_bin <= b
-    // Case 1: cont_coeff > 0, bin_coeff < 0 → x <= (b - bin_coeff*y) / cont_coeff
-    //   When y=1: x <= (b - bin_coeff) / cont_coeff = tighter UB
-    //   When y=0: x <= b / cont_coeff
-    // Generate implied bound cut from other rows that use these variables
-
-    // For each other row containing cont_col, try coefficient strengthening
-    double y_val = x[bin_col];
-    [[maybe_unused]] double x_val = x[cont_col];
-    if (y_val < 1e-6 || y_val > 1.0 - 1e-6) continue;  // Binary already nearly integral
-
-    // Upper bound on x when y=0 and y=1
-    double ub_y0, ub_y1;
-    if (cont_coeff > 1e-12) {
-      ub_y0 = lp.b[r] / cont_coeff;
-      ub_y1 = (lp.b[r] - bin_coeff) / cont_coeff;
-    } else if (cont_coeff < -1e-12) {
-      // Negative continuous coeff: it's a lower bound constraint
-      // -|c| * x + d * y <= b → x >= (d*y - b)/|c|
-      ub_y0 = std::numeric_limits<double>::infinity();
-      ub_y1 = std::numeric_limits<double>::infinity();
-      continue;
-    } else {
-      continue;
-    }
-
-    if (!std::isfinite(ub_y0) || !std::isfinite(ub_y1)) continue;
-    if (ub_y1 >= ub_y0 - 1e-9) continue;  // No strengthening possible
-
-    // Generate the well-known "VUB" cut: x <= ub_y1 * y + ub_y0 * (1-y)
-    //   x <= ub_y0 + (ub_y1 - ub_y0) * y
-    //   x - (ub_y1 - ub_y0) * y <= ub_y0
-    Eigen::VectorXd cut = Eigen::VectorXd::Zero(n);
-    cut[cont_col] = 1.0;
-    cut[bin_col] = -(ub_y1 - ub_y0);  // Note: ub_y1 < ub_y0, so this is positive
-    double cut_rhs = ub_y0;
-
-    double viol = cut.dot(x) - cut_rhs;
-    if (viol <= 1e-7) continue;
-
-    candidates.push_back({std::move(cut), cut_rhs, viol});
-  }
-
-  if (candidates.empty()) return 0;
-
-  std::sort(candidates.begin(), candidates.end(),
-            [](const IBCut& a, const IBCut& b) { return a.violation > b.violation; });
-
-  int added = 0;
-  std::vector<Eigen::VectorXd> cut_rows;
-  std::vector<double> cut_rhs_vec;
-  for (const auto& c : candidates) {
-    if (added >= max_cuts) break;
-    cut_rows.push_back(c.coeff);
-    cut_rhs_vec.push_back(c.rhs);
-    ++added;
-  }
-  if (!cut_rows.empty()) {
-    add_rows_to_lp(lp, cut_rows, cut_rhs_vec);
-  }
-  return added;
 }
 
 /// Basis-free MIR cuts that work without simplex basis (e.g., after IPM root).
@@ -6301,33 +5836,6 @@ int add_basis_gomory_cuts(LPModel& lp,
     const double score = efficacy * (1.0 + activity_weight * activity);
     candidates.push_back(CandidateCut{cut, rhs, score, efficacy, activity, norm, nnz});
 
-    // Tableau-row MIR cut with strategic complementation.
-    // Currently disabled: while mathematically correct, MIR cuts are changing
-    // the root LP landscape in ways that hurt tree search performance
-    // (triggering cold simplex restarts). Net effect is negative.
-    // TODO: Re-enable with tighter candidate filtering.
-#if 0
-    Eigen::VectorXd mir_cut;
-    double mir_rhs = 0.0;
-    if (build_bounded_form_mir_cut(simplex, fr.row, x, mir_cut, mir_rhs, sbasis)) {
-      const double mir_viol = mir_cut.dot(x) - mir_rhs;
-      if (mir_viol > 1e-7) {
-        const int mir_nnz = count_nonzeros(mir_cut);
-        if (mir_nnz <= max_nnz) {
-          const double mir_norm = std::max(1e-12, mir_cut.norm());
-          const double mir_eff = mir_viol / mir_norm;
-          if (mir_eff > min_efficacy) {
-            const double mir_act = gmi_binary_activity_score(simplex, x, mir_cut);
-            const double mir_bs = gmi_binary_support_ratio(simplex, mir_cut);
-            if (mir_act >= min_activity && mir_bs >= min_binary_support) {
-              const double mir_score = mir_eff * (1.0 + activity_weight * mir_act);
-              candidates.push_back(CandidateCut{mir_cut, mir_rhs, mir_score, mir_eff, mir_act, mir_norm, mir_nnz});
-            }
-          }
-        }
-      }
-    }
-#endif
   }
 
   std::sort(candidates.begin(), candidates.end(), [](const CandidateCut& a, const CandidateCut& b) {
@@ -6421,7 +5929,7 @@ int add_transformed_tableau_cuts(
     maybe_print_xtab_diag("tableau", diag);
     return 0;
   }
-  if (std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr) {
+  if (bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr) {
     fmt::print(stderr,
                "[B&C-XTAB-CTX] family=tableau srcDim={} srcRows={} vlb={} "
                "vub={} intVlb={} intVub={}\n",
@@ -6960,8 +6468,8 @@ int add_transformed_path_cuts(
   auto print_path_ledger = [&](const char* stage,
                                int accepted_cutpool_rows,
                                std::size_t candidates_size) {
-    if (std::getenv("MIPSOLVERS_XPATH_LEDGER") == nullptr &&
-        std::getenv("MIPSOLVERS_XTAB_DIAG") == nullptr) {
+    if (bc_env_options().value("MIPSOLVERS_XPATH_LEDGER") == nullptr &&
+        bc_env_options().value("MIPSOLVERS_XTAB_DIAG") == nullptr) {
       return;
     }
     path_ledger.candidate_rows = static_cast<std::uint64_t>(candidates_size);
@@ -7006,7 +6514,7 @@ int add_transformed_path_cuts(
     print_path_ledger("invalid_context", 0, 0);
     return 0;
   }
-  if (std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr) {
+  if (bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr) {
     fmt::print(stderr,
                "[B&C-XTAB-CTX] family=path srcDim={} srcRows={} vlb={} "
                "vub={} intVlb={} intVub={}\n",
@@ -7283,7 +6791,7 @@ int add_transformed_path_cuts(
     print_path_ledger("no_start_rows", 0, 0);
     return 0;
   }
-  if (std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr) {
+  if (bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr) {
     if (direct_cutpool_mode) {
       fmt::print(stderr,
                  "[B&C-XTAB-PATH-SCHED] mode=highs_row_order rows={} "
@@ -8266,14 +7774,6 @@ int add_cuts(LPModel& lp,
     }
     return total;
   }
-  if (opt.cuts == CutType::FlowCover) {
-    spend_tracked(CutFamily::FlowCover, [&](int b) { return add_flow_cover_cuts(lp, x, b); }, budget);
-    return total;
-  }
-  if (opt.cuts == CutType::ImpliedBound) {
-    spend_tracked(CutFamily::ImpliedBound, [&](int b) { return add_implied_bound_cuts(lp, x, b); }, budget);
-    return total;
-  }
 
   // CutType::All — generate all applicable cut families.
   // Gomory gets full budget first (strongest cuts). Supplementary cuts
@@ -8322,7 +7822,7 @@ int add_cuts(LPModel& lp,
   }
   // 3. Row-based MIR cuts (works without basis, complementary to Gomory)
   spend_tracked(CutFamily::MIR, [&](int b) { return add_row_mir_cuts(lp, x, b); }, xlarge ? 2 : (large ? 3 : 5));
-  // 3. Cover cuts (with sequential up-lifting)
+  // 3. Unlifted knapsack cover cuts
   if (opt.enable_projected_capacity_cuts) {
     spend_tracked(CutFamily::Cover,
                   [&](int b) { return add_projected_capacity_cover_cuts(lp, x, b); },
@@ -8336,12 +7836,6 @@ int add_cuts(LPModel& lp,
     spend_tracked(CutFamily::Clique, add_clique_cuts_from_table,
                   xlarge ? 2 : (large ? 3 : 5));
   }
-  // Implied-bound cuts: enable even on large problems with tight budget.
-  // Per-row scan is O(m) with constant work per row; cheap at all sizes.
-  spend_tracked(CutFamily::ImpliedBound,
-                [&](int b) { return add_implied_bound_cuts(lp, x, b); },
-                xlarge ? 1 : (large ? 2 : 3));
-
   // Remaining expensive supplementary families only on smaller problems.
   if (!large) {
     // Fallback clique cuts (on-the-fly conflict graph) when no table present.
@@ -8352,11 +7846,6 @@ int add_cuts(LPModel& lp,
     if (!xlarge) {
       spend_tracked(CutFamily::ZeroHalf, [&](int b) { return add_zero_half_cuts(lp, x, b); }, 5);
     }
-    // Flow-cover separation is intentionally not part of the generic All
-    // bundle.  The legacy implementation only infers capacity structure from
-    // signed row coefficients; on presolved/ranged rows this can produce rows
-    // that cut off the true integer frontier.  Keep it available only when a
-    // caller explicitly requests CutType::FlowCover for diagnostics.
   }
   return total;
 }

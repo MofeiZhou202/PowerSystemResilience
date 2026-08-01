@@ -937,16 +937,14 @@ class NodeQueue {
                     const DomainReasonBound& rb) {
                 const std::size_t reason_hash = conflict_clause_hash(rb.reason);
                 for (const auto& existing : node.domain_reason_bounds) {
-                    if (branch_literal_stronger_or_equal(existing.bound, rb.bound) &&
-                        branch_literal_stronger_or_equal(rb.bound, existing.bound) &&
-                        conflict_clause_hash(existing.reason) == reason_hash) {
+                    if (conflict_clause_hash(existing.reason) == reason_hash &&
+                        domain_reason_bounds_equal(existing, rb)) {
                         return true;
                     }
                 }
                 for (const auto& existing : pending) {
-                    if (branch_literal_stronger_or_equal(existing.bound, rb.bound) &&
-                        branch_literal_stronger_or_equal(rb.bound, existing.bound) &&
-                        conflict_clause_hash(existing.reason) == reason_hash) {
+                    if (conflict_clause_hash(existing.reason) == reason_hash &&
+                        domain_reason_bounds_equal(existing, rb)) {
                         return true;
                     }
 	                }
@@ -1200,9 +1198,8 @@ class NodeQueue {
                     bool duplicate = false;
                     const std::size_t reason_hash = conflict_clause_hash(rb.reason);
                     for (const auto& existing : node.domain_reason_bounds) {
-                        if (branch_literal_stronger_or_equal(existing.bound, rb.bound) &&
-                            branch_literal_stronger_or_equal(rb.bound, existing.bound) &&
-                            conflict_clause_hash(existing.reason) == reason_hash) {
+                        if (conflict_clause_hash(existing.reason) == reason_hash &&
+                            domain_reason_bounds_equal(existing, rb)) {
                             duplicate = true;
                             break;
                         }
@@ -1589,10 +1586,9 @@ class NodeQueue {
 		            for (DomainReasonBound& rb : upd.reasons) {
 		                bool duplicate = false;
 		                for (const auto& existing : node.domain_reason_bounds) {
-		                    if (branch_literal_stronger_or_equal(existing.bound, rb.bound) &&
-		                        branch_literal_stronger_or_equal(rb.bound, existing.bound) &&
-	                        conflict_clause_hash(existing.reason) ==
-	                            conflict_clause_hash(rb.reason)) {
+		                    if (conflict_clause_hash(existing.reason) ==
+		                            conflict_clause_hash(rb.reason) &&
+		                        domain_reason_bounds_equal(existing, rb)) {
 	                        duplicate = true;
 	                        break;
 		                    }
@@ -2234,7 +2230,9 @@ double compute_node_estimate(const std::vector<VariableMeta>& vars,
                              const Eigen::VectorXd& x,
                              const std::vector<PseudoCost>& pc,
                              double int_tol,
-                             double node_bound);
+                             double node_bound,
+                             NodeEstimateAggregation aggregation =
+                                 NodeEstimateAggregation::Sum);
 
 /// Compute a node estimate by scanning only precomputed branchable columns.
 /// This avoids an O(number-of-all-columns) pass at every B&B node when a large
@@ -2243,13 +2241,17 @@ double compute_node_estimate(const std::vector<int>& branchable_cols,
                              const Eigen::VectorXd& x,
                              const std::vector<PseudoCost>& pc,
                              double int_tol,
-                             double node_bound);
+                             double node_bound,
+                             NodeEstimateAggregation aggregation =
+                                 NodeEstimateAggregation::Sum);
 
 double compute_node_estimate(const std::vector<int>& branchable_cols,
                              const Eigen::VectorXd& x,
                              const CompactPseudoCostTable& pc,
                              double int_tol,
-                             double node_bound);
+                             double node_bound,
+                             NodeEstimateAggregation aggregation =
+                                 NodeEstimateAggregation::Sum);
 
 /// @brief Append or strengthen a branch-domain reason on a node.
 void append_branch_reason(Node& node,
@@ -2339,6 +2341,124 @@ double compute_branch_var_score(int j,
                                 const CompactPseudoCostTable& pc,
                                 const std::vector<int>* priority = nullptr);
 
+/// Score one direction using current-node evidence when it is usable, falling
+/// back to the directional pseudocost prediction for absent/failed evidence.
+double compute_directional_branch_score(
+    const PseudoCost& pseudocost,
+    double branch_distance,
+    bool is_up,
+    const BranchDirectionalObservation* observation = nullptr,
+    double prediction_offset = 0.0);
+
+/// Product score shared by dense, compact, sequential, and parallel selectors.
+double compute_branch_product_score(
+    const PseudoCost& pseudocost,
+    double fractionality,
+    const BranchDirectionalObservation* down_observation = nullptr,
+    const BranchDirectionalObservation* up_observation = nullptr);
+
+/// Choose which child direction to evaluate first. Without an incumbent the
+/// smaller predicted/observed child-bound lift is primal-oriented; with an
+/// incumbent a uniquely proven cutoff takes precedence.
+bool choose_up_branch_first(
+    const PseudoCost& pseudocost,
+    double fractionality,
+    const BranchDirectionalObservation* down_observation,
+    const BranchDirectionalObservation* up_observation,
+    bool has_incumbent,
+    bool existing_prefer_up = false,
+    int advisory_direction = 0);
+
+BranchEstimatorCalibration compute_branch_estimator_calibration(
+    double parent_bound,
+    double parent_estimate,
+    bool down_prediction_available,
+    double predicted_down_gain,
+    bool up_prediction_available,
+    double predicted_up_gain,
+    bool down_bound_available,
+    double down_bound,
+    bool up_bound_available,
+    double up_bound);
+
+/// Apply one physical probe result to global history at most once. Unknown
+/// failures make no update; certified cutoffs update only discrete history.
+void update_pseudocost_from_branch_evidence(
+    PseudoCost& pseudocost,
+    bool is_up,
+    BranchEvidenceState state,
+    double gain,
+    double branch_distance,
+    bool certified_conflict = false);
+
+/// Ordered signature of the active local-cut rows. Coefficients, right-hand
+/// sides, order, and row-relevant flags all contribute to the signature.
+std::uint64_t ordered_local_cut_signature(const std::vector<PoolCut>& cuts);
+
+/// Classify whether a probe can replace the child LP solve, can only seed a
+/// re-solve, or is structurally incompatible with the closed child state.
+BranchProbeReuseKind classify_branch_probe_reuse(
+    bool available,
+    bool consumed,
+    int probe_var,
+    bool probe_is_up,
+    int branch_var,
+    bool child_is_up,
+    const Eigen::VectorXd& probe_lb,
+    const Eigen::VectorXd& probe_ub,
+    const Eigen::VectorXd& child_lb,
+    const Eigen::VectorXd& child_ub,
+    std::uint64_t probe_row_signature,
+    std::uint64_t child_row_signature,
+    std::uint64_t probe_model_epoch,
+    std::uint64_t child_model_epoch,
+    std::uint64_t probe_objective_epoch,
+    std::uint64_t child_objective_epoch,
+    bool proof_usable,
+    bool warm_state_usable,
+    double tolerance = 1e-9);
+
+double compute_branch_var_score_with_overlay(
+    int j,
+    const Eigen::VectorXd& x,
+    const std::vector<PseudoCost>& pc,
+    const std::vector<BranchDirectionalObservation>& observations);
+
+double compute_branch_var_score_with_overlay(
+    int j,
+    const Eigen::VectorXd& x,
+    const CompactPseudoCostTable& pc,
+    const std::vector<BranchDirectionalObservation>& observations);
+
+int choose_branch_var_pseudocost_with_overlay(
+    const std::vector<int>& cand,
+    const Eigen::VectorXd& x,
+    const std::vector<PseudoCost>& pc,
+    const std::vector<int>& priority,
+    const std::vector<BranchDirectionalObservation>& observations,
+    const BCBranchingPriorFn& dynamic_prior = {},
+    const BCBranchContext& context = {});
+
+/// Select from a candidate-aligned pseudocost snapshot. This avoids copying a
+/// full model-sized table in parallel workers that only read fractional cols.
+int choose_branch_var_pseudocost_candidates(
+    const std::vector<int>& cand,
+    const Eigen::VectorXd& x,
+    const std::vector<PseudoCost>& candidate_pc,
+    const std::vector<int>& priority,
+    const BCBranchingPriorFn& dynamic_prior = {},
+    const BCBranchContext& context = {},
+    const std::vector<BranchDirectionalObservation>& observations = {});
+
+int choose_branch_var_pseudocost_with_overlay(
+    const std::vector<int>& cand,
+    const Eigen::VectorXd& x,
+    const CompactPseudoCostTable& pc,
+    const std::vector<int>& priority,
+    const std::vector<BranchDirectionalObservation>& observations,
+    const BCBranchingPriorFn& dynamic_prior = {},
+    const BCBranchContext& context = {});
+
 /// @brief Select branch variable using the configured strategy.
 int choose_branch_var(const BCOptions& opt,
                       const std::vector<int>& cand,
@@ -2412,7 +2532,11 @@ int choose_branch_var_reliability(
     int& lp_solves,
     int node_depth,
     int reliability_limit = 1,
-    int max_probes = 4);
+    int max_probes = 4,
+    const std::vector<int>& priority = {},
+    const BCBranchingPriorFn& dynamic_prior = {},
+    const BCBranchContext& context = {},
+    std::vector<BranchDirectionalObservation>* selected_observations = nullptr);
 
 int choose_branch_var_reliability(
     const std::vector<int>& cand,
@@ -2428,7 +2552,11 @@ int choose_branch_var_reliability(
     int& lp_solves,
     int node_depth,
     int reliability_limit = 1,
-    int max_probes = 4);
+    int max_probes = 4,
+    const std::vector<int>& priority = {},
+    const BCBranchingPriorFn& dynamic_prior = {},
+    const BCBranchContext& context = {},
+    std::vector<BranchDirectionalObservation>* selected_observations = nullptr);
 
 // ── Cut generation functions (bc_cuts.cpp) ───────────────────────────────
 
@@ -2589,6 +2717,8 @@ bool satisfies_with_bounds(const LPModel& lp,
 /// @details After solving LP at a node, for each non-basic integer variable j:
 ///   If j is at lower bound and rc[j] >= gap: fix j at lb (ub[j] = lb[j])
 ///   If j is at upper bound and |rc[j]| >= gap: fix j at ub (lb[j] = ub[j])
+/// Variables whose primal value is not on the reduced-cost-implied bound side
+/// are skipped; basis membership alone is not a sufficient side certificate.
 /// @return Number of variables fixed.
 int reduced_cost_fixing(const std::vector<VariableMeta>& vars,
                         const Eigen::VectorXd& x_relax,
@@ -3078,6 +3208,7 @@ struct PropagationProfile {
     std::uint64_t eq_rows_visited{0};
     std::uint64_t baseline_full_scan_rows{0};
     std::uint64_t bound_tightenings{0};
+    std::uint64_t reason_clauses_materialized{0};
     /// Cumulative wall-time spent in propagation (nanoseconds).
     std::uint64_t wall_ns{0};
 };

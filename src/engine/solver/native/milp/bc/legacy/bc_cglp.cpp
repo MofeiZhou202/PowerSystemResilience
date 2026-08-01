@@ -14,7 +14,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
-#include <unordered_set>
+#include <unordered_map>
 #include <algorithm>
 #include <utility>
 #include <vector>
@@ -379,10 +379,14 @@ int add_cglp_cuts_root(LPModel& lp,
   std::vector<double> new_rhs;
   int generated = 0;
 
-  // Phase 4 dedupe: hash existing rows once, and also dedupe within this pass.
-  std::unordered_set<std::size_t> seen_hashes;
+  // Hashes only select candidate buckets; row and RHS identity decide dedup.
+  struct SeenRow {
+    Eigen::SparseVector<double> coeff;
+    double rhs{0.0};
+  };
+  std::unordered_map<std::size_t, std::vector<SeenRow>> seen_rows;
   const int approx_cap = std::max(64, static_cast<int>(lp.A.rows()) + 32);
-  seen_hashes.reserve(static_cast<std::size_t>(approx_cap));
+  seen_rows.reserve(static_cast<std::size_t>(approx_cap));
   {
     Eigen::SparseMatrix<double, Eigen::RowMajor> A_row = lp.A;
     for (int r = 0; r < A_row.rows(); ++r) {
@@ -395,7 +399,8 @@ int add_cglp_cuts_root(LPModel& lp,
       for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_row, r); it; ++it) {
         if (std::abs(it.value()) > 1e-12) row.insertBack(it.col()) = it.value();
       }
-      seen_hashes.insert(sparse_cut_hash(row));
+      const std::size_t h = sparse_cut_hash(row);
+      seen_rows[h].push_back(SeenRow{std::move(row), lp.b[r]});
     }
   }
 
@@ -429,13 +434,24 @@ int add_cglp_cuts_root(LPModel& lp,
       cut.insertBack(it.index()) = -it.value();
     }
     const std::size_t h = sparse_cut_hash(cut);
-    if (seen_hashes.find(h) != seen_hashes.end()) {
+    const double cut_rhs = -res.beta;
+    bool duplicate = false;
+    const auto bucket = seen_rows.find(h);
+    if (bucket != seen_rows.end()) {
+      for (const SeenRow& seen : bucket->second) {
+        if (sparse_cut_identical(seen.coeff, seen.rhs, cut, cut_rhs)) {
+          duplicate = true;
+          break;
+        }
+      }
+    }
+    if (duplicate) {
       ++pass.n_dedup_rejected;
       continue;
     }
-    seen_hashes.insert(h);
+    seen_rows[h].push_back(SeenRow{cut, cut_rhs});
     new_rows.push_back(std::move(cut));
-    new_rhs.push_back(-res.beta);
+    new_rhs.push_back(cut_rhs);
     ++pass.n_accepted;
     ++generated;
   }

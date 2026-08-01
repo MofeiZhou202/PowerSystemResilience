@@ -240,7 +240,8 @@ class Highs {
 
   /**
    * @brief Return the exact root HighsLpRelaxation::lpsolver object retained
-   * from the last MIP run when HACDCPF_RETAIN_ROOT_LP_RELAXATION=1.
+   * from the last MIP run when the `hacdcpf_retain_root_lp_relaxation`
+   * option is enabled.
    */
   Highs* hacdcpfRootLpSolver();
   const Highs* hacdcpfRootLpSolver() const;

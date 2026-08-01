@@ -3,7 +3,7 @@
 ///
 /// Provides structured LP failure handling to prevent silent subtree pruning
 /// on numerical failures. Implements a multi-level fallback hierarchy:
-///   L1: Perturbation retry (small RHS/bound jitter)
+///   L1: Perturbation-assisted retry, certified again on the original LP
 ///   L2: Solver switch (warm-start → cold-start simplex)
 ///   L3: Re-scale and retry (rebuild StandardFormLP with tighter tolerances)
 ///   L4: Node deferral (re-queue with lower priority)
@@ -102,6 +102,14 @@ inline LPFailureType classify_lp_result(const SimplexResult& res, int expected_n
     return LPFailureType::NumericalFailure;
   }
   return LPFailureType::Unknown;
+}
+
+/// Whether the LP kernel reports an actual wall-clock deadline.  Do not infer
+/// this from LPFailureType::Timeout: that category intentionally also contains
+/// per-solve iteration limits, which are recoverable by the fallback chain and
+/// must not terminate the complete branch-and-bound search.
+inline bool lp_wall_time_limit_reached(const SimplexResult& res) {
+  return res.result.stats.status.starts_with("Time limit");
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -223,7 +231,8 @@ struct FallbackConfig {
 /// @brief Manages LP fallback recovery for B&C nodes.
 ///
 /// Implements the fallback hierarchy:
-///   L1: Perturbation retry — jitter RHS/bounds and re-solve
+///   L1: Perturbation-assisted retry — use the perturbed basis only to
+///       re-solve the original LP
 ///   L2: Solver switch — cold-start simplex (no warm-start)
 ///   L3: Re-scale & retry — rebuild SF with relaxed tolerances
 ///   L4: Node deferral — re-queue node (not discarded)
@@ -250,8 +259,50 @@ class FallbackManager {
                                LPFailureType failure_type,
                                int node_id, int node_depth,
                                int expected_n,
-                               bool& deferred) {
+                               bool& deferred,
+                               const SimplexOptions* invocation_opt = nullptr) {
     deferred = false;
+
+    const SimplexOptions retry_base =
+        invocation_opt != nullptr ? *invocation_opt : base_simplex_opt_;
+    const auto retry_start = std::chrono::steady_clock::now();
+    auto deadline_result = [&]() {
+      if (retry_base.time_limit_hit != nullptr) {
+        *retry_base.time_limit_hit = true;
+      }
+      SimplexResult result;
+      result.result.stats.success = false;
+      result.result.stats.status =
+          "Time limit: LP fallback budget exhausted";
+      return result;
+    };
+    auto prepare_retry = [&](SimplexOptions& opts) {
+      if (retry_base.time_limit_hit != nullptr &&
+          *retry_base.time_limit_hit) {
+        return false;
+      }
+      if (!(retry_base.time_limit_sec > 0.0) ||
+          !std::isfinite(retry_base.time_limit_sec)) {
+        return true;
+      }
+      const double elapsed = std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - retry_start).count();
+      const double remaining = retry_base.time_limit_sec - elapsed;
+      if (remaining <= 0.0) return false;
+      opts.time_limit_sec = remaining;
+      opts.time_limit_hit = retry_base.time_limit_hit;
+      return true;
+    };
+    auto wall_limit_reached = [&](const SimplexResult& result) {
+      if (lp_wall_time_limit_reached(result)) {
+        if (retry_base.time_limit_hit != nullptr) {
+          *retry_base.time_limit_hit = true;
+        }
+        return true;
+      }
+      return retry_base.time_limit_hit != nullptr &&
+             *retry_base.time_limit_hit;
+    };
 
     // L5: Only safe prune — confirmed infeasible.
     if (failure_type == LPFailureType::Infeasible) {
@@ -269,26 +320,40 @@ class FallbackManager {
     // Try recovery levels L1–L3 before deferring at L4.
     // CRITICAL: Never prune on numerical failure.
 
-    // L1: Perturbation retry
+    // L1: A perturbed LP can supply a useful basis, but its primal objective
+    // and dual bound are not valid for the original node. Accept this level
+    // only after that basis solves the unmodified LP successfully.
     for (int retry = 0; retry < config_.l1_max_retries; ++retry) {
       StandardFormLP perturbed_sf = sf;
       perturb_rhs(perturbed_sf, config_.l1_perturbation * (retry + 1));
 
-      SimplexOptions opts = base_simplex_opt_;
+      SimplexOptions opts = retry_base;
+      if (!prepare_retry(opts)) return deadline_result();
       auto result = solve_lp_from_sf(perturbed_sf, opts, basis_hint);
+      if (wall_limit_reached(result)) return result;
       auto ft = classify_lp_result(result, expected_n);
       if (ft == LPFailureType::Success) {
-        logger_.log(node_id, node_depth, failure_type, 1, "success");
-        return result;
+        SimplexOptions verify_opts = retry_base;
+        verify_opts.allow_cold_start = true;
+        if (!prepare_retry(verify_opts)) return deadline_result();
+        auto verified = solve_lp_from_sf(sf, verify_opts, &result.basis);
+        if (wall_limit_reached(verified)) return verified;
+        if (classify_lp_result(verified, expected_n) ==
+            LPFailureType::Success) {
+          logger_.log(node_id, node_depth, failure_type, 1, "success");
+          return verified;
+        }
       }
     }
 
     // L2: Solver switch — cold-start simplex (no warm-start basis)
     {
-      SimplexOptions cold_opts = base_simplex_opt_;
+      SimplexOptions cold_opts = retry_base;
       cold_opts.allow_cold_start = true;
-      cold_opts.max_iter = base_simplex_opt_.max_iter * 2;
+      cold_opts.max_iter = retry_base.max_iter * 2;
+      if (!prepare_retry(cold_opts)) return deadline_result();
       auto result = solve_lp_from_sf(sf, cold_opts, nullptr);
+      if (wall_limit_reached(result)) return result;
       auto ft = classify_lp_result(result, expected_n);
       if (ft == LPFailureType::Success) {
         logger_.log(node_id, node_depth, failure_type, 2, "success");
@@ -298,14 +363,16 @@ class FallbackManager {
 
     // L3: Re-scale and retry — rebuild with relaxed tolerances
     for (int retry = 0; retry < config_.l3_max_retries; ++retry) {
-      SimplexOptions relaxed_opts = base_simplex_opt_;
+      SimplexOptions relaxed_opts = retry_base;
       const double multiplier = config_.l3_tol_multiplier * (retry + 1);
-      relaxed_opts.feasibility_tol = base_simplex_opt_.feasibility_tol * multiplier;
-      relaxed_opts.optimality_tol = base_simplex_opt_.optimality_tol * multiplier;
+      relaxed_opts.feasibility_tol = retry_base.feasibility_tol * multiplier;
+      relaxed_opts.optimality_tol = retry_base.optimality_tol * multiplier;
       relaxed_opts.allow_cold_start = true;
-      relaxed_opts.max_iter = base_simplex_opt_.max_iter * 3;
+      relaxed_opts.max_iter = retry_base.max_iter * 3;
 
+      if (!prepare_retry(relaxed_opts)) return deadline_result();
       auto result = solve_lp_from_sf(sf, relaxed_opts, nullptr);
+      if (wall_limit_reached(result)) return result;
       auto ft = classify_lp_result(result, expected_n);
       if (ft == LPFailureType::Success) {
         logger_.log(node_id, node_depth, failure_type, 3, "success");

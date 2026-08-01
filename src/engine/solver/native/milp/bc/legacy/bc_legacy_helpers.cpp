@@ -40,12 +40,12 @@ int resolve_num_threads(const BCOptions& opt) {
 namespace mipsolvers::engine::detail {
 
 bool bc_env_flag_enabled(const char* name) {
-  const char* env = std::getenv(name);
+  const char* env = bc_env_options().value(name);
   return env != nullptr && env[0] != '\0' && env[0] != '0';
 }
 
 int bc_conformance_trace_terms(const char* env_name, int default_value) {
-  const char* env = std::getenv(env_name);
+  const char* env = bc_env_options().value(env_name);
   if (env == nullptr || env[0] == '\0') return default_value;
   char* end = nullptr;
   const long parsed = std::strtol(env, &end, 10);
@@ -72,6 +72,35 @@ bool bc_vendored_highs_lp_kernel_enabled(const BCOptions& opt) {
 
 bool bc_vendored_highs_root_frontier_enabled(const BCOptions& opt) {
   return !opt.suppress_vendored_highs_root_frontier;
+}
+
+double bc_root_lp_budget_sec(double remaining_sec,
+                             double total_limit_sec,
+                             double fallback_min_remaining_sec,
+                             double fallback_budget_fraction,
+                             bool fallback_available,
+                             bool short_budget_ipm_root) {
+  constexpr double kMinimumStageBudgetSec = 0.001;
+  if (!(remaining_sec > 0.0) || !std::isfinite(remaining_sec)) {
+    return kMinimumStageBudgetSec;
+  }
+  if (!fallback_available || short_budget_ipm_root ||
+      !(total_limit_sec > 0.0) || !(fallback_budget_fraction > 0.0)) {
+    return std::max(kMinimumStageBudgetSec, remaining_sec);
+  }
+
+  const double minimum_fallback =
+      std::max(0.0, fallback_min_remaining_sec);
+  // Reserving time when the fallback eligibility threshold cannot be met
+  // only starves the root. This previously turned a 3 s solve into a 1 ms
+  // root attempt when the default fallback minimum was 5 s.
+  if (remaining_sec <= minimum_fallback + kMinimumStageBudgetSec) {
+    return std::max(kMinimumStageBudgetSec, remaining_sec);
+  }
+
+  const double reserve = std::max(
+      minimum_fallback, fallback_budget_fraction * total_limit_sec);
+  return std::max(kMinimumStageBudgetSec, remaining_sec - reserve);
 }
 
 BcStrictHighsContractState apply_bc_strict_highs_contract(BCOptions& opt) {

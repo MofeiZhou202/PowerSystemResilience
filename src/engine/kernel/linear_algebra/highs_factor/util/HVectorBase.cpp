@@ -255,17 +255,3 @@ template void HVectorBase<HighsCDouble>::saxpy(const HighsCDouble,
                                                const HVectorBase<double>*);
 template void HVectorBase<HighsCDouble>::saxpy(
     const HighsCDouble, const HVectorBase<HighsCDouble>*);
-
-#if 0
-// Todo: Additionally we could add the two specializations to allow pivotX as
-// int so that integer constants can be used, but I think we can avoid the
-// additional code bloat and I changed the single place where this is used to
-// call with 1.0 instead of 1
-template void HVectorBase<HighsCDouble>::saxpy(const int,
-                                               const HVectorBase<double>*);
-template void HVectorBase<HighsCDouble>::saxpy(
-    const int, const HVectorBase<HighsCDouble>*);
-template void HVectorBase<double>::saxpy(const int, const HVectorBase<double>*);
-template void HVectorBase<double>::saxpy(const int,
-                                         const HVectorBase<HighsCDouble>*);
-#endif
