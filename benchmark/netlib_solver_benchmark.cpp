@@ -435,9 +435,55 @@ RunResult run_highs(const CaseInfo& kase, const std::string& algorithm,
   highs.setOptionValue("time_limit", time_limit_sec);
   highs.setOptionValue("solver", algorithm);
   if (algorithm == "ipm") highs.setOptionValue("run_crossover", "off");
-  if (highs.readModel(kase.path.string()) == HighsStatus::kError) {
+  const eng::LPModel& lp = kase.lp;
+  const int ncols = static_cast<int>(lp.vars.size());
+  const int nineq = lp.A.rows();
+  const int nrows = nineq + lp.Aeq.rows();
+  std::vector<double> col_cost(static_cast<std::size_t>(ncols));
+  std::vector<double> col_lower(static_cast<std::size_t>(ncols));
+  std::vector<double> col_upper(static_cast<std::size_t>(ncols));
+  for (int j = 0; j < ncols; ++j) {
+    col_cost[static_cast<std::size_t>(j)] = lp.c[j];
+    col_lower[static_cast<std::size_t>(j)] = lp.vars[static_cast<std::size_t>(j)].lb;
+    col_upper[static_cast<std::size_t>(j)] = lp.vars[static_cast<std::size_t>(j)].ub;
+  }
+  std::vector<double> row_lower(static_cast<std::size_t>(nrows), -kHighsInf);
+  std::vector<double> row_upper(static_cast<std::size_t>(nrows), kHighsInf);
+  for (int i = 0; i < nineq; ++i) {
+    row_lower[static_cast<std::size_t>(i)] = eng::lp_row_lhs_or_neg_inf(lp, i);
+    row_upper[static_cast<std::size_t>(i)] = lp.b[i];
+  }
+  for (int i = 0; i < lp.Aeq.rows(); ++i) {
+    row_lower[static_cast<std::size_t>(nineq + i)] = lp.beq[i];
+    row_upper[static_cast<std::size_t>(nineq + i)] = lp.beq[i];
+  }
+  std::vector<HighsInt> start(static_cast<std::size_t>(ncols + 1), 0);
+  std::vector<HighsInt> index;
+  std::vector<double> value;
+  index.reserve(static_cast<std::size_t>(lp.A.nonZeros() + lp.Aeq.nonZeros()));
+  value.reserve(index.capacity());
+  for (int j = 0; j < ncols; ++j) {
+    start[static_cast<std::size_t>(j)] = static_cast<HighsInt>(index.size());
+    for (Eigen::SparseMatrix<double>::InnerIterator it(lp.A, j); it; ++it) {
+      index.push_back(static_cast<HighsInt>(it.row()));
+      value.push_back(it.value());
+    }
+    for (Eigen::SparseMatrix<double>::InnerIterator it(lp.Aeq, j); it; ++it) {
+      index.push_back(static_cast<HighsInt>(nineq + it.row()));
+      value.push_back(it.value());
+    }
+  }
+  start[static_cast<std::size_t>(ncols)] = static_cast<HighsInt>(index.size());
+  const HighsStatus pass_status = highs.passModel(
+      ncols, nrows, static_cast<HighsInt>(index.size()),
+      static_cast<HighsInt>(MatrixFormat::kColwise),
+      static_cast<HighsInt>(lp.sense == eng::Sense::Maximize
+                                ? ObjSense::kMaximize : ObjSense::kMinimize),
+      0.0, col_cost.data(), col_lower.data(), col_upper.data(), row_lower.data(),
+      row_upper.data(), start.data(), index.data(), value.data(), nullptr);
+  if (pass_status == HighsStatus::kError) {
     row.success = false;
-    row.status = "readModel failed";
+    row.status = "passModel failed";
   } else {
     const HighsStatus run_status = highs.run();
     const HighsModelStatus status = highs.getModelStatus();

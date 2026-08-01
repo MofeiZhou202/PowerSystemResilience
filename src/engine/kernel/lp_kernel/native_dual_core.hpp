@@ -35,6 +35,22 @@ struct Statistics {
   int pivot_identity_refinements{0};
   int cost_shifts{0};
   int cleanup_passes{0};
+  int dual_phase_one_iterations{0};
+  int dual_phase_two_iterations{0};
+  int primal_cleanup_iterations{0};
+  int phase_transitions{0};
+  int cleanup_required{0};
+  int cleanup_avoided{0};
+  int transition_dual_infeasibility_count{0};
+  // 0: not terminated in dual Phase I, 1: CHUZR found no leaving row,
+  // 2: CHUZC found no entering column after a fresh rebuild,
+  // 3: the original-bound dual defect reached zero and was rebuilt/audited.
+  int dual_phase_one_terminal_reason{0};
+  int dual_phase_one_terminal_leaving_row{-1};
+  int dual_phase_one_terminal_leaving_side{0};
+  int dual_phase_one_positive_candidates{0};
+  int dual_phase_one_certified_candidates{0};
+  int dual_phase_one_stable_candidates{0};
   int dse_reselections{0};
   int dse_initialization_solves{0};
   int dse_initialization_refinements{0};
@@ -62,6 +78,18 @@ struct Statistics {
   double max_objective_drift{0.0};
   double max_cost_perturbation{0.0};
   double max_cost_shift{0.0};
+  double dual_phase_one_time_sec{0.0};
+  double dual_phase_two_time_sec{0.0};
+  double cleanup_time_sec{0.0};
+  double primal_cleanup_time_sec{0.0};
+  double dual_phase_one_initial_objective{0.0};
+  double dual_phase_one_final_objective{0.0};
+  double transition_max_dual_infeasibility{0.0};
+  double dual_phase_one_terminal_violation{0.0};
+  double dual_phase_one_positive_capacity{0.0};
+  double dual_phase_one_certified_capacity{0.0};
+  double dual_phase_one_stable_capacity{0.0};
+  double dual_phase_one_stable_capacity_error{0.0};
 };
 
 struct Result {

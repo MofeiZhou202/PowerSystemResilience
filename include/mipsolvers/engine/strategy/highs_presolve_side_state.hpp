@@ -165,7 +165,7 @@ struct HighsLpPresolveConfig {
   long nnz_floor{5000};     ///< Skip presolve when the original nnz is below this
                             ///< (overhead not worth it for tiny models).
   long nnz_cap{300000};     ///< Skip presolve when the original nnz exceeds this.
-  double min_shrink{0.85};  ///< Use the reduced LP only when
+  double min_shrink{1.0};   ///< Use the reduced LP whenever
                             ///< reduced_nnz < min_shrink * original_nnz.
   bool verbose{false};      ///< Emit a one-line [HIGHS-PRESOLVE] summary.
 };

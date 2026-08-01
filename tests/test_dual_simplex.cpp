@@ -16,6 +16,8 @@
 #include "mipsolvers/engine/kernel/linear_algebra/hfactor_backend.hpp"
 #include "../src/engine/kernel/lp_kernel/native_dual_core.hpp"
 #include "../src/engine/kernel/lp_kernel/native_dual/factor.hpp"
+#include "../src/engine/kernel/lp_kernel/native_dual/pricing.hpp"
+#include "../src/engine/kernel/lp_kernel/native_dual/primal_pricing.hpp"
 #include "../src/engine/kernel/lp_kernel/native_dual/state.hpp"
 
 using namespace mipsolvers::engine;
@@ -179,6 +181,281 @@ TEST_CASE("DualSimplex: 2-variable LP", "[dual_simplex]") {
   CHECK(res.result.stats.objective == Approx(-12.0).margin(1e-5));
   CHECK(res.result.x[0] == Approx(4.0).margin(1e-5));
   CHECK(res.result.x[1] == Approx(0.0).margin(1e-5));
+}
+
+TEST_CASE("DualSimplex: cost-shift crash certifies a cold dual start",
+          "[dual_simplex][dual_crash]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Constant(1, -1.0);
+  lp.A.resize(1, 1);
+  lp.A.insert(0, 0) = 1.0;
+  lp.A.makeCompressed();
+  lp.b = Eigen::VectorXd::Constant(1, 1.0);
+  lp.Aeq.resize(0, 1);
+  lp.beq.resize(0);
+  lp.vars.push_back({VarType::Continuous, 0.0,
+                     std::numeric_limits<double>::infinity()});
+
+  const StandardFormLP sf = build_standard_form_lp(lp);
+  const SimplexOptions options = native_simplex_options();
+  native_dual::Statistics statistics;
+  native_dual::detail::State state;
+  std::string failure;
+  REQUIRE(native_dual::detail::initialize(
+      state, sf, options, native_dual::detail::Phase::Two, nullptr,
+      statistics, failure));
+
+  CHECK_FALSE(native_dual::detail::normalize_nonbasic_moves(state, failure));
+  REQUIRE(native_dual::detail::initialize_cost_shifted_dual_start(
+      state, statistics, failure));
+  const auto audit = native_dual::detail::audit(state, false, true, false);
+  CHECK(audit.ok);
+  CHECK(state.costs_shifted);
+  CHECK(statistics.cost_shifts == 1);
+  CHECK(state.original_cost[0] == Approx(1.0));
+  CHECK(state.reduced_costs[0] == Approx(0.0).margin(1e-12));
+}
+
+TEST_CASE("DualSimplex: dual Phase-I bounds are the translated HiGHS bounds",
+          "[dual_simplex][dual_phase_one][contract]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c.resize(2);
+  lp.c << -2.0, -3.0;
+  lp.A.resize(2, 2);
+  lp.A.insert(0, 0) = 1.0;
+  lp.A.insert(0, 1) = 1.0;
+  lp.A.insert(1, 0) = 1.0;
+  lp.A.makeCompressed();
+  lp.b.resize(2);
+  lp.b << 3.0, 10.0;
+  lp.Aeq.resize(0, 2);
+  lp.beq.resize(0);
+  lp.vars.push_back({VarType::Continuous, 0.0,
+                     std::numeric_limits<double>::infinity()});
+  lp.vars.push_back({VarType::Continuous, 0.0, 4.0});
+
+  const StandardFormLP sf = build_standard_form_lp(lp);
+  const Eigen::VectorXd anchor =
+      native_dual::detail::make_dual_phase_one_anchor(sf);
+  REQUIRE(anchor.size() == sf.A.cols());
+  CHECK((sf.A * anchor - sf.b).lpNorm<Eigen::Infinity>() <= 1e-12);
+
+  const auto bounds =
+      native_dual::detail::make_dual_phase_one_bounds(sf, anchor);
+  const int slack = sf.row_to_slack_col[0];
+  REQUIRE(slack >= 0);
+  CHECK(bounds.lower[0] == Approx(anchor[0]));
+  CHECK(bounds.upper[0] == Approx(anchor[0] + 1.0));
+  CHECK(bounds.enterable[0] == 1);
+  CHECK(bounds.lower[1] == Approx(anchor[1]));
+  CHECK(bounds.upper[1] == Approx(anchor[1]));
+  CHECK(bounds.enterable[1] == 0);
+  CHECK(bounds.lower[slack] == Approx(anchor[slack]));
+  CHECK(bounds.upper[slack] == Approx(anchor[slack] + 1.0));
+  CHECK(anchor[slack] == Approx(3.0));
+}
+
+TEST_CASE("DualSimplex: dual Phase-I anchor honors a scaled logical column",
+          "[dual_simplex][dual_phase_one][contract]") {
+  StandardFormLP sf;
+  sf.A.resize(1, 2);
+  sf.A.insert(0, 0) = 4.0;
+  sf.A.insert(0, 1) = 2.0;
+  sf.A.makeCompressed();
+  sf.A_row = sf.A;
+  sf.b = Eigen::VectorXd::Constant(1, 6.0);
+  sf.c_max = Eigen::VectorXd::Zero(2);
+  sf.var_ub = Eigen::VectorXd::Constant(
+      2, std::numeric_limits<double>::infinity());
+  sf.n_original = 1;
+  sf.row_to_slack_col = {1};
+  sf.row_to_surplus_col = {-1};
+  sf.row_to_artificial_col = {-1};
+
+  const Eigen::VectorXd anchor =
+      native_dual::detail::make_dual_phase_one_anchor(sf);
+  REQUIRE(anchor.size() == 2);
+  CHECK(anchor[0] == Approx(0.0));
+  CHECK(anchor[1] == Approx(3.0));
+  CHECK((sf.A * anchor - sf.b).lpNorm<Eigen::Infinity>() <= 1e-12);
+}
+
+TEST_CASE("DualSimplex: dual Phase-I reconstruction uses anchor displacements",
+          "[dual_simplex][dual_phase_one][contract]") {
+  StandardFormLP sf;
+  sf.A.resize(1, 2);
+  sf.A.insert(0, 0) = 1.0;
+  sf.A.insert(0, 1) = 0.1;
+  sf.A.makeCompressed();
+  sf.A_row = sf.A;
+  sf.b = Eigen::VectorXd::Constant(1, 1e12 + 0.03);
+  sf.c_max.resize(2);
+  sf.c_max << 0.0, 1.0;
+  sf.var_ub = Eigen::VectorXd::Constant(
+      2, std::numeric_limits<double>::infinity());
+  sf.n_original = 1;
+  sf.row_to_slack_col = {1};
+  sf.row_to_surplus_col = {-1};
+  sf.row_to_artificial_col = {-1};
+
+  mipsolvers::engine::SimplexBasis hint;
+  hint.rows = 1;
+  hint.cols = 2;
+  hint.indices = {0};
+  hint.at_upper = {0, 0};
+
+  const SimplexOptions options = native_simplex_options();
+  native_dual::Statistics statistics;
+  native_dual::detail::State state;
+  std::string failure;
+  REQUIRE(native_dual::detail::initialize(
+      state, sf, options, native_dual::detail::Phase::Two, &hint, statistics,
+      failure));
+  REQUIRE(native_dual::detail::initialize_dual_phase_one(state, failure));
+  REQUIRE(state.move[1] == native_dual::detail::Move::Down);
+  CHECK(state.x_basic[0] == Approx(-0.1).margin(1e-14));
+  CHECK((sf.A * native_dual::detail::full_primal(state) - sf.b)
+            .lpNorm<Eigen::Infinity>() <= options.feasibility_tol * sf.b[0]);
+}
+
+TEST_CASE("DualSimplex: dual Phase-I objective is the Native dual defect",
+          "[dual_simplex][dual_phase_one][contract]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c.resize(2);
+  lp.c << -2.0, -3.0;
+  lp.A.resize(1, 2);
+  lp.A.insert(0, 0) = 1.0;
+  lp.A.insert(0, 1) = 1.0;
+  lp.A.makeCompressed();
+  lp.b = Eigen::VectorXd::Constant(1, 3.0);
+  lp.Aeq.resize(0, 2);
+  lp.beq.resize(0);
+  lp.vars.push_back({VarType::Continuous, 0.0,
+                     std::numeric_limits<double>::infinity()});
+  lp.vars.push_back({VarType::Continuous, 0.0, 4.0});
+
+  const StandardFormLP sf = build_standard_form_lp(lp);
+  const SimplexOptions options = native_simplex_options();
+  native_dual::Statistics statistics;
+  native_dual::detail::State state;
+  std::string failure;
+  REQUIRE(native_dual::detail::initialize(
+      state, sf, options, native_dual::detail::Phase::Two, nullptr,
+      statistics, failure));
+  REQUIRE(native_dual::detail::initialize_dual_phase_one(state, failure));
+
+  const auto audit = native_dual::detail::audit(state, false, true, false);
+  INFO(failure);
+  REQUIRE(audit.ok);
+  const auto defect =
+      native_dual::detail::original_dual_infeasibility_summary(state);
+  CHECK(defect.count == 1);
+  CHECK(defect.max == Approx(2.0));
+  CHECK(defect.sum == Approx(2.0));
+  CHECK(native_dual::detail::dual_phase_one_objective(state) ==
+        Approx(defect.sum).epsilon(1e-12));
+  CHECK(state.move[0] == native_dual::detail::Move::Down);
+  CHECK(state.move[1] == native_dual::detail::Move::Fixed);
+  CHECK((sf.A * native_dual::detail::full_primal(state) - sf.b)
+            .lpNorm<Eigen::Infinity>() <= 1e-12);
+}
+
+TEST_CASE("DualSimplex: zero dual Phase-I defect transitions without a basis change",
+          "[dual_simplex][dual_phase_one][contract]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c.resize(2);
+  lp.c << 1.0, -2.0;
+  lp.A.resize(1, 2);
+  lp.A.insert(0, 0) = 1.0;
+  lp.A.insert(0, 1) = 1.0;
+  lp.A.makeCompressed();
+  lp.b = Eigen::VectorXd::Constant(1, 3.0);
+  lp.Aeq.resize(0, 2);
+  lp.beq.resize(0);
+  lp.vars.push_back({VarType::Continuous, 0.0,
+                     std::numeric_limits<double>::infinity()});
+  lp.vars.push_back({VarType::Continuous, 0.0, 2.0});
+
+  const StandardFormLP sf = build_standard_form_lp(lp);
+  const SimplexOptions options = native_simplex_options();
+  native_dual::Statistics statistics;
+  native_dual::detail::State state;
+  std::string failure;
+  REQUIRE(native_dual::detail::initialize(
+      state, sf, options, native_dual::detail::Phase::Two, nullptr,
+      statistics, failure));
+  REQUIRE(native_dual::detail::initialize_dual_phase_one(state, failure));
+  CHECK(native_dual::detail::dual_phase_one_objective(state) ==
+        Approx(0.0).margin(1e-14));
+  CHECK(native_dual::detail::original_dual_infeasibility_summary(state).count ==
+        0);
+
+  const std::vector<int> basis_before = state.basis;
+  native_dual::detail::DualInfeasibilitySummary transition;
+  REQUIRE(native_dual::detail::transition_dual_phase_one_to_two(
+      state, transition, failure));
+  CHECK(state.phase == native_dual::detail::Phase::Two);
+  CHECK(state.basis == basis_before);
+  CHECK(transition.count == 0);
+  CHECK(transition.max == Approx(0.0));
+  const auto transitioned_audit =
+      native_dual::detail::audit(state, false, true, false);
+  INFO(transitioned_audit.failure);
+  CHECK(transitioned_audit.ok);
+  CHECK((sf.A * native_dual::detail::full_primal(state) - sf.b)
+            .lpNorm<Eigen::Infinity>() <= 1e-12);
+}
+
+TEST_CASE("DualSimplex: cold solve uses dual Phase I before Phase II",
+          "[dual_simplex][dual_phase_one][telemetry]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c.resize(2);
+  lp.c << -3.0, -2.0;
+  lp.A.resize(2, 2);
+  lp.A.insert(0, 0) = 1.0;
+  lp.A.insert(0, 1) = 1.0;
+  lp.A.insert(1, 0) = 1.0;
+  lp.A.makeCompressed();
+  lp.b.resize(2);
+  lp.b << 3.0, 10.0;
+  lp.Aeq.resize(0, 2);
+  lp.beq.resize(0);
+  lp.vars.push_back({VarType::Continuous, 0.0,
+                     std::numeric_limits<double>::infinity()});
+  lp.vars.push_back({VarType::Continuous, 0.0, 4.0});
+
+  const StandardFormLP sf = build_standard_form_lp(lp);
+  auto options = native_simplex_options();
+  const native_dual::Result result = native_dual::solve(sf, options, nullptr);
+  INFO(result.message);
+  REQUIRE(result.status == native_dual::Status::Optimal);
+  CHECK(sf.objective_const - result.max_objective ==
+        Approx(solve_with_highs(lp)).margin(1e-9));
+  CHECK(result.statistics.dual_phase_one_iterations >= 1);
+  CHECK(result.statistics.phase_transitions == 1);
+  CHECK(result.statistics.dual_phase_one_initial_objective == Approx(1.0));
+  CHECK(result.statistics.dual_phase_one_final_objective ==
+        Approx(0.0).margin(1e-10));
+  CHECK(result.statistics.transition_dual_infeasibility_count == 0);
+  CHECK(result.statistics.transition_max_dual_infeasibility <=
+        options.optimality_tol);
+  CHECK(result.statistics.dual_phase_one_terminal_reason == 3);
+  CHECK(result.statistics.cost_shifts == 0);
+  CHECK(result.statistics.dual_phase_one_time_sec >= 0.0);
+  CHECK(result.statistics.dual_phase_two_time_sec >= 0.0);
+  CHECK(result.statistics.dual_phase_two_iterations == 0);
+  CHECK(result.statistics.primal_cleanup_iterations == 0);
+  CHECK(result.statistics.cleanup_required == 0);
+  CHECK(result.statistics.cleanup_avoided == 1);
+  CHECK(result.statistics.dual_phase_one_iterations +
+            result.statistics.dual_phase_two_iterations +
+            result.statistics.primal_cleanup_iterations ==
+        result.statistics.iterations);
 }
 
 TEST_CASE("IPM crossover basis can enter warm primal Phase I",
@@ -394,6 +671,110 @@ TEST_CASE("DualSimplex: exact-breakpoint BFRT flips a complete prefix",
   CHECK(solved.result.stats.objective == Approx(4.5).margin(1e-10));
 }
 
+TEST_CASE("DualSimplex: BFRT EXPAND accepts a near-exact capacity cover",
+          "[dual_simplex][bfrt][contract]") {
+  using namespace native_dual::detail;
+  constexpr double alpha = 0.36289630446775362;
+
+  StandardFormLP sf;
+  sf.A.resize(1, 2);
+  sf.A.insert(0, 0) = 1.0;
+  sf.A.insert(0, 1) = alpha;
+  sf.A.makeCompressed();
+
+  State state;
+  const SimplexOptions options = native_simplex_options();
+  state.sf = &sf;
+  state.options = &options;
+  state.m = 1;
+  state.n = 2;
+  state.basis = {0};
+  state.basic = {1, 0};
+  state.move = {Move::Fixed, Move::Up};
+  state.bounds.lower = Eigen::VectorXd::Zero(2);
+  state.bounds.upper = Eigen::VectorXd::Ones(2);
+  state.bounds.enterable = {0, 1};
+  state.reduced_costs.resize(2);
+  state.reduced_costs << 0.0, -alpha;
+
+  Leaving leaving;
+  leaving.row = 0;
+  leaving.side = 1;
+  leaving.violation = 0.36289630446775378;
+  leaving.row_ep.dimension = 1;
+  leaving.row_ep.index = {0};
+  leaving.row_ep.value = {1.0};
+
+  IndexedVector pivot_row;
+  pivot_row.dimension = 2;
+  pivot_row.index = {0, 1};
+  pivot_row.value = {1.0, alpha};
+
+  PivotTransaction transaction;
+  std::string failure;
+  REQUIRE(choose_entering_bfrt(state, leaving, pivot_row, transaction,
+                               failure));
+  INFO(failure);
+  CHECK(transaction.positive_capacity < leaving.violation);
+  CHECK(leaving.violation - transaction.positive_capacity < 1e-12);
+  CHECK(transaction.entering.col == 1);
+  CHECK(transaction.entering.alpha == Approx(alpha));
+  CHECK(transaction.entering.theta == Approx(1.0));
+}
+
+TEST_CASE("DualSimplex: Phase-I BFRT certifies capacity by residual projection",
+          "[dual_simplex][dual_phase_one][bfrt][contract]") {
+  using namespace native_dual::detail;
+  constexpr double alpha = 0.4;
+  constexpr double shortage = 2e-11;
+
+  StandardFormLP sf;
+  sf.A.resize(1, 2);
+  sf.A.insert(0, 0) = 1.0;
+  sf.A.insert(0, 1) = alpha;
+  sf.A.makeCompressed();
+  sf.b = Eigen::VectorXd::Zero(1);
+
+  const SimplexOptions options = native_simplex_options();
+  State state;
+  state.sf = &sf;
+  state.options = &options;
+  state.phase = Phase::DualOne;
+  state.m = 1;
+  state.n = 2;
+  state.basis = {0};
+  state.basic = {1, 0};
+  state.move = {Move::Fixed, Move::Down};
+  state.bounds.lower = Eigen::VectorXd::Zero(2);
+  state.bounds.upper = Eigen::VectorXd::Ones(2);
+  state.bounds.enterable = {0, 1};
+  state.dual_phase_one_anchor = Eigen::VectorXd::Zero(2);
+  state.x_basic = Eigen::VectorXd::Constant(1, -(alpha + shortage));
+  state.reduced_costs.resize(2);
+  state.reduced_costs << 0.0, alpha;
+
+  Leaving leaving;
+  leaving.row = 0;
+  leaving.side = -1;
+  leaving.violation = alpha + shortage;
+  leaving.row_ep.dimension = 1;
+  leaving.row_ep.index = {0};
+  leaving.row_ep.value = {1.0};
+
+  IndexedVector pivot_row;
+  pivot_row.dimension = 2;
+  pivot_row.index = {0, 1};
+  pivot_row.value = {1.0, alpha};
+
+  PivotTransaction transaction;
+  std::string failure;
+  REQUIRE(choose_entering_bfrt(state, leaving, pivot_row, transaction,
+                               failure));
+  INFO(failure);
+  CHECK(transaction.stable_capacity == Approx(alpha));
+  CHECK(transaction.entering.col == 1);
+}
+
 TEST_CASE("DualSimplex: stabilized warm solve rebuilds and cleans original cost",
           "[dual_simplex][stabilization][cleanup]") {
   LPModel lp;
@@ -431,6 +812,17 @@ TEST_CASE("DualSimplex: stabilized warm solve rebuilds and cleans original cost"
   CHECK(result.statistics.dse_initialization_solves == 0);
   CHECK(result.statistics.harris_second_pass_candidates >= 1);
   CHECK(result.statistics.cleanup_passes == 1);
+  CHECK(result.statistics.dual_phase_one_iterations == 0);
+  CHECK(result.statistics.dual_phase_two_iterations == 1);
+  CHECK(result.statistics.primal_cleanup_iterations == 0);
+  CHECK(result.statistics.cleanup_required == 1);
+  CHECK(result.statistics.cleanup_avoided == 0);
+  CHECK(result.statistics.cleanup_time_sec >=
+        result.statistics.primal_cleanup_time_sec);
+  CHECK(result.statistics.dual_phase_one_iterations +
+            result.statistics.dual_phase_two_iterations +
+            result.statistics.primal_cleanup_iterations ==
+        result.statistics.iterations);
   CHECK(result.max_objective == Approx(-4.5).margin(1e-10));
 }
 
@@ -465,6 +857,173 @@ TEST_CASE("DualSimplex: batched DSE uses one existing INVERT",
     CHECK(evidence.weights[static_cast<std::size_t>(row)] ==
           Approx(inverse.row(row).squaredNorm()).epsilon(2e-12));
   }
+}
+
+TEST_CASE("Primal PSE recurrence matches an explicit basis exchange",
+          "[dual_simplex][primal][pricing][pse]") {
+  using namespace mipsolvers::engine::native_dual::detail;
+
+  Eigen::Matrix3d B;
+  B << 2.0, 1.0, 0.0,
+       0.0, 1.0, 1.0,
+       1.0, 0.0, 1.0;
+  const Eigen::Vector3d aq(1.0, 3.0, 2.0);
+  const Eigen::Vector3d aj(4.0, -1.0, 2.0);
+  const int pivot_row = 1;
+  const Eigen::Vector3d hq = B.fullPivLu().solve(aq);
+  const Eigen::Vector3d hj = B.fullPivLu().solve(aj);
+  const double pivot = hq[pivot_row];
+  REQUIRE(std::abs(pivot) > 1e-12);
+
+  Eigen::Matrix3d next_B = B;
+  next_B.col(pivot_row) = aq;
+  const Eigen::Vector3d next_hj = next_B.fullPivLu().solve(aj);
+  const double lambda = hj[pivot_row] / pivot;
+  const double mu = hq.dot(hj);
+  const double updated = primal_pse_updated_weight(
+      1.0 + hj.squaredNorm(), lambda, mu, hq.squaredNorm());
+  CHECK(updated == Approx(1.0 + next_hj.squaredNorm()).epsilon(1e-12));
+
+  const Eigen::Vector3d leaving_column = B.col(pivot_row);
+  const Eigen::Vector3d next_leaving =
+      next_B.fullPivLu().solve(leaving_column);
+  CHECK(primal_pse_leaving_weight(hq.squaredNorm(), pivot) ==
+        Approx(1.0 + next_leaving.squaredNorm()).epsilon(1e-12));
+}
+
+TEST_CASE("Primal PSE recurrence stays exact across consecutive exchanges",
+          "[dual_simplex][primal][pricing][pse]") {
+  using namespace mipsolvers::engine::native_dual::detail;
+
+  Eigen::Matrix<double, 3, 6> A;
+  A << 2.0, 1.0, 0.0, 1.0, 4.0, -2.0,
+       0.0, 1.0, 1.0, 3.0, -1.0, 1.0,
+       1.0, 0.0, 1.0, 2.0, 2.0, 3.0;
+  std::vector<int> basis{0, 1, 2};
+  std::vector<char> basic{1, 1, 1, 0, 0, 0};
+  Eigen::Matrix3d B = A.leftCols<3>();
+  std::vector<double> weight(6, 1.0);
+  for (int col = 3; col < 6; ++col) {
+    weight[static_cast<std::size_t>(col)] =
+        1.0 + B.fullPivLu().solve(A.col(col)).squaredNorm();
+  }
+
+  const std::vector<int> entering_sequence{3, 4};
+  const std::vector<int> leaving_rows{1, 0};
+  for (std::size_t step = 0; step < entering_sequence.size(); ++step) {
+    const int entering = entering_sequence[step];
+    const int pivot_row = leaving_rows[step];
+    const int leaving = basis[static_cast<std::size_t>(pivot_row)];
+    const Eigen::Vector3d h = B.fullPivLu().solve(A.col(entering));
+    REQUIRE(std::abs(h[pivot_row]) > 1e-12);
+    const Eigen::Vector3d row_ep =
+        B.transpose().fullPivLu().solve(Eigen::Vector3d::Unit(pivot_row));
+    const Eigen::Vector3d z = B.transpose().fullPivLu().solve(h);
+    const Eigen::RowVector<double, 6> rho = row_ep.transpose() * A;
+    const Eigen::RowVector<double, 6> mu = z.transpose() * A;
+
+    IndexedVector tableau_row;
+    IndexedVector cross_products;
+    tableau_row.dimension = 6;
+    cross_products.dimension = 6;
+    for (int col = 0; col < 6; ++col) {
+      tableau_row.index.push_back(col);
+      tableau_row.value.push_back(rho[col]);
+      cross_products.index.push_back(col);
+      cross_products.value.push_back(mu[col]);
+    }
+    std::vector<PrimalWeightChange> changes;
+    REQUIRE(prepare_primal_pse_update(
+        weight, entering, leaving, h[pivot_row], h.squaredNorm(), tableau_row,
+        cross_products, changes));
+    for (const PrimalWeightChange& change : changes) {
+      weight[static_cast<std::size_t>(change.col)] = change.value;
+    }
+
+    B.col(pivot_row) = A.col(entering);
+    basis[static_cast<std::size_t>(pivot_row)] = entering;
+    basic[static_cast<std::size_t>(leaving)] = 0;
+    basic[static_cast<std::size_t>(entering)] = 1;
+    for (int col = 0; col < 6; ++col) {
+      if (basic[static_cast<std::size_t>(col)]) continue;
+      const double exact = 1.0 + B.fullPivLu().solve(A.col(col)).squaredNorm();
+      CHECK(weight[static_cast<std::size_t>(col)] ==
+            Approx(exact).epsilon(1e-11));
+    }
+  }
+}
+
+TEST_CASE("Primal Devex reference update matches direct projected edges",
+          "[dual_simplex][primal][pricing][devex]") {
+  using namespace mipsolvers::engine::native_dual::detail;
+
+  // B is the first three columns, so the initial Devex reference set is
+  // exactly columns 3 and 4. Exchange column 3 into basis position 1.
+  Eigen::Matrix<double, 3, 5> A;
+  A << 2.0, 1.0, 0.0, 1.0, 4.0,
+       0.0, 1.0, 1.0, 3.0, -1.0,
+       1.0, 0.0, 1.0, 2.0, 2.0;
+  Eigen::Matrix3d B = A.leftCols<3>();
+  std::vector<int> basis{0, 1, 2};
+  std::vector<char> basic{1, 1, 1, 0, 0};
+  PrimalDevexFramework framework;
+  initialize_primal_devex(5, basic, framework);
+
+  const int entering = 3;
+  const int pivot_row = 1;
+  const int leaving = basis[static_cast<std::size_t>(pivot_row)];
+  const Eigen::Vector3d h = B.fullPivLu().solve(A.col(entering));
+  IndexedVector direction;
+  direction.dimension = 3;
+  direction.index = {0, 1, 2};
+  direction.value = {h[0], h[1], h[2]};
+  const double pivot_weight = primal_devex_pivot_reference_weight(
+      framework, basis, entering, direction);
+  CHECK(pivot_weight == Approx(1.0));
+
+  const Eigen::Vector3d row_ep =
+      B.transpose().fullPivLu().solve(Eigen::Vector3d::Unit(pivot_row));
+  const Eigen::RowVector<double, 5> rho = row_ep.transpose() * A;
+  IndexedVector tableau_row;
+  tableau_row.dimension = 5;
+  tableau_row.index = {0, 1, 2, 3, 4};
+  tableau_row.value = {rho[0], rho[1], rho[2], rho[3], rho[4]};
+  std::vector<PrimalWeightChange> changes;
+  REQUIRE(prepare_primal_devex_update(framework, entering, leaving,
+                                      h[pivot_row], pivot_weight, tableau_row,
+                                      changes));
+  commit_primal_weight_changes(framework, changes);
+
+  Eigen::Matrix3d next_B = B;
+  next_B.col(pivot_row) = A.col(entering);
+  const Eigen::Vector3d next_h4 = next_B.fullPivLu().solve(A.col(4));
+  // Reference variables after the exchange are nonbasic column 4 and basic
+  // entering column 3 at basis position 1.
+  const double direct_col4_reference_norm =
+      1.0 + next_h4[pivot_row] * next_h4[pivot_row];
+  CHECK(framework.weight[4] ==
+        Approx(direct_col4_reference_norm).epsilon(1e-12));
+
+  const Eigen::Vector3d next_leaving = next_B.fullPivLu().solve(A.col(leaving));
+  const double direct_leaving_reference_norm =
+      next_leaving[pivot_row] * next_leaving[pivot_row];
+  CHECK(framework.weight[static_cast<std::size_t>(leaving)] ==
+        Approx(std::max(1.0, direct_leaving_reference_norm)).epsilon(1e-12));
+  CHECK(framework.weight[static_cast<std::size_t>(entering)] == Approx(1.0));
+}
+
+TEST_CASE("Primal relative pivot is scale-relative",
+          "[dual_simplex][primal][pricing][stability]") {
+  using namespace mipsolvers::engine::native_dual::detail;
+  IndexedVector direction;
+  direction.dimension = 2;
+  direction.index = {0, 1};
+  direction.value = {1e12, 1.0};
+  CHECK_FALSE(primal_relative_pivot_acceptable(1.0, direction));
+  direction.value = {2.0, 1.0};
+  CHECK(primal_relative_pivot_acceptable(1.0, direction));
+  CHECK(primal_pivot_identity_acceptable(1.0, 1.0 + 1e-9));
+  CHECK_FALSE(primal_pivot_identity_acceptable(1.0, 1.0 + 1e-6));
 }
 
 TEST_CASE("DualSimplex: reconstruction corrects canonical primal residual",

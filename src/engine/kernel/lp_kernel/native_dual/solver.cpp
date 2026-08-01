@@ -51,6 +51,49 @@ void update_statistics(const Audit& audit, Statistics& statistics) {
   statistics.max_dual_infeasibility = audit.max_dual_infeasibility;
 }
 
+void sync_phase_telemetry(const Statistics& source, Statistics& target) {
+  target.dual_phase_one_iterations = source.dual_phase_one_iterations;
+  target.dual_phase_two_iterations = source.dual_phase_two_iterations;
+  target.primal_cleanup_iterations = source.primal_cleanup_iterations;
+  target.phase_transitions = source.phase_transitions;
+  target.cleanup_required = source.cleanup_required;
+  target.cleanup_avoided = source.cleanup_avoided;
+  target.transition_dual_infeasibility_count =
+      source.transition_dual_infeasibility_count;
+  target.dual_phase_one_terminal_reason =
+      source.dual_phase_one_terminal_reason;
+  target.dual_phase_one_terminal_leaving_row =
+      source.dual_phase_one_terminal_leaving_row;
+  target.dual_phase_one_terminal_leaving_side =
+      source.dual_phase_one_terminal_leaving_side;
+  target.dual_phase_one_positive_candidates =
+      source.dual_phase_one_positive_candidates;
+  target.dual_phase_one_certified_candidates =
+      source.dual_phase_one_certified_candidates;
+  target.dual_phase_one_stable_candidates =
+      source.dual_phase_one_stable_candidates;
+  target.dual_phase_one_time_sec = source.dual_phase_one_time_sec;
+  target.dual_phase_two_time_sec = source.dual_phase_two_time_sec;
+  target.cleanup_time_sec = source.cleanup_time_sec;
+  target.primal_cleanup_time_sec = source.primal_cleanup_time_sec;
+  target.dual_phase_one_initial_objective =
+      source.dual_phase_one_initial_objective;
+  target.dual_phase_one_final_objective =
+      source.dual_phase_one_final_objective;
+  target.transition_max_dual_infeasibility =
+      source.transition_max_dual_infeasibility;
+  target.dual_phase_one_terminal_violation =
+      source.dual_phase_one_terminal_violation;
+  target.dual_phase_one_positive_capacity =
+      source.dual_phase_one_positive_capacity;
+  target.dual_phase_one_certified_capacity =
+      source.dual_phase_one_certified_capacity;
+  target.dual_phase_one_stable_capacity =
+      source.dual_phase_one_stable_capacity;
+  target.dual_phase_one_stable_capacity_error =
+      source.dual_phase_one_stable_capacity_error;
+}
+
 void attach_farkas_certificate(const detail::Certificate& certificate,
                                Result& result) {
   result.has_farkas_certificate = certificate.valid;
@@ -90,8 +133,13 @@ struct DSProfile {
   double leaving = 0.0, price = 0.0, entering = 0.0, ftran = 0.0, dse = 0.0,
          rebuild = 0.0, minor_total = 0.0, primal = 0.0, edge_init = 0.0,
          postcond = 0.0, rc_update = 0.0, valid = 0.0, lu_update = 0.0,
-         cycle = 0.0;
+         cycle = 0.0, bfrt_sort = 0.0, bfrt_order = 0.0;
   long pivots = 0, rebuilds = 0;
+  long bfrt_calls = 0, bfrt_candidates = 0, bfrt_groups = 0,
+       bfrt_selected_group = 0, bfrt_flips = 0,
+       bfrt_stability_prefiltered = 0;
+  int bfrt_max_candidates = 0, bfrt_max_groups = 0,
+      bfrt_max_selected_group = 0, bfrt_max_flips = 0;
   int model_m = 0, model_n = 0;
   // Average structural support of the two hot simplex vectors.
   double sum_rowep_nnz = 0.0, sum_pivotrow_nnz = 0.0;
@@ -99,10 +147,15 @@ struct DSProfile {
   void reset() {
     enabled = std::getenv("MIPSOLVERS_DS_PROFILE") != nullptr;
     leaving = price = entering = ftran = dse = rebuild = minor_total = primal =
-        edge_init = postcond = rc_update = valid = lu_update = cycle = 0.0;
+        edge_init = postcond = rc_update = valid = lu_update = cycle =
+            bfrt_sort = bfrt_order = 0.0;
     sum_rowep_nnz = sum_pivotrow_nnz = 0.0;
     density_samples = 0;
     pivots = rebuilds = 0;
+    bfrt_calls = bfrt_candidates = bfrt_groups = bfrt_selected_group =
+        bfrt_flips = bfrt_stability_prefiltered = 0;
+    bfrt_max_candidates = bfrt_max_groups = bfrt_max_selected_group =
+        bfrt_max_flips = 0;
     model_m = model_n = 0;
     start_clock = enabled ? std::chrono::duration<double>(
                                 std::chrono::steady_clock::now()
@@ -110,7 +163,7 @@ struct DSProfile {
                                 .count()
                           : 0.0;
   }
-  void report(int m, int n) const {
+  void report(int m, int n, const Statistics& statistics) const {
     if (!enabled) return;
     const double wall =
         std::chrono::duration<double>(
@@ -142,6 +195,58 @@ struct DSProfile {
                    m > 0 ? 100.0 * avg_rowep / m : 0.0, m, avg_pivotrow,
                    n > 0 ? 100.0 * avg_pivotrow / n : 0.0, n);
     }
+    if (bfrt_calls > 0) {
+      const double calls = static_cast<double>(bfrt_calls);
+      std::fprintf(
+          stderr,
+          "[DS-BFRT] calls=%ld candidates=%.1f/%d order=%.6fs sort=%.6fs "
+          "groups=%.1f/%d "
+          "selectedGroup=%.2f/%d flips=%.2f/%d stabilityPrefiltered=%ld\n",
+          bfrt_calls, bfrt_candidates / calls, bfrt_max_candidates,
+          bfrt_order, bfrt_sort, bfrt_groups / calls, bfrt_max_groups,
+          bfrt_selected_group / calls, bfrt_max_selected_group,
+          bfrt_flips / calls, bfrt_max_flips,
+          bfrt_stability_prefiltered);
+    }
+    std::fprintf(
+        stderr,
+        "[DS-PHASES] dualI=%.6fs/%d dualII=%.6fs/%d cleanup=%.6fs "
+        "primalCleanup=%.6fs/%d transitions=%d phaseIObjective=%.17g->%.17g "
+        "transitionDualInfeas=%d/%.3e cleanupRequired=%d cleanupAvoided=%d\n",
+        statistics.dual_phase_one_time_sec,
+        statistics.dual_phase_one_iterations,
+        statistics.dual_phase_two_time_sec,
+        statistics.dual_phase_two_iterations, statistics.cleanup_time_sec,
+        statistics.primal_cleanup_time_sec,
+        statistics.primal_cleanup_iterations, statistics.phase_transitions,
+        statistics.dual_phase_one_initial_objective,
+        statistics.dual_phase_one_final_objective,
+        statistics.transition_dual_infeasibility_count,
+        statistics.transition_max_dual_infeasibility,
+        statistics.cleanup_required, statistics.cleanup_avoided);
+    const char* terminal =
+        statistics.dual_phase_one_terminal_reason == 1
+            ? "no-leaving"
+            : (statistics.dual_phase_one_terminal_reason == 2
+                   ? "no-entering"
+                   : (statistics.dual_phase_one_terminal_reason == 3
+                          ? "dual-feasible"
+                          : "none"));
+    std::fprintf(
+        stderr,
+        "[DS-PHASE-I-TERMINAL] kind=%s row=%d side=%d violation=%.17g "
+        "candidates=%d/%d/%d capacity=%.17g/%.17g/%.17g "
+        "stableCapacityError=%.3e\n",
+        terminal, statistics.dual_phase_one_terminal_leaving_row,
+        statistics.dual_phase_one_terminal_leaving_side,
+        statistics.dual_phase_one_terminal_violation,
+        statistics.dual_phase_one_positive_candidates,
+        statistics.dual_phase_one_certified_candidates,
+        statistics.dual_phase_one_stable_candidates,
+        statistics.dual_phase_one_positive_capacity,
+        statistics.dual_phase_one_certified_capacity,
+        statistics.dual_phase_one_stable_capacity,
+        statistics.dual_phase_one_stable_capacity_error);
   }
 };
 thread_local DSProfile g_ds_profile;
@@ -152,8 +257,17 @@ inline double ds_clock() {
 }
 
 struct MinorScratch {
+  detail::IndexedVector entering_column;
   std::vector<std::pair<int, double>> primal_changes;
+  std::vector<double> primal_delta;
+  std::vector<unsigned int> primal_stamp;
+  std::vector<int> primal_touched;
+  unsigned int primal_epoch{0};
   std::vector<detail::EdgeWeightChange> edge_weight_changes;
+  std::vector<unsigned int> flipped_stamp;
+  std::vector<unsigned int> shifted_stamp;
+  std::vector<double> shift_delta;
+  unsigned int transaction_epoch{0};
 };
 thread_local MinorScratch g_ds_scratch;
 
@@ -218,6 +332,9 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
   }
   if (leaving.row_ep_refined) ++statistics.iterative_refinements;
   if (leaving.row < 0) {
+    if (state.phase == Phase::DualOne) {
+      statistics.dual_phase_one_terminal_reason = 1;
+    }
     MinorOutcome outcome;
     outcome.kind = MinorKind::PossiblyOptimal;
     return outcome;
@@ -246,6 +363,28 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
   const bool _en_ok = detail::choose_entering_bfrt(
       state, leaving, pivot_row, transaction, failure);
   if (g_ds_profile.enabled) g_ds_profile.entering += ds_clock() - _t_en;
+  if (g_ds_profile.enabled && transaction.bfrt_candidate_count > 0) {
+    ++g_ds_profile.bfrt_calls;
+    g_ds_profile.bfrt_candidates += transaction.bfrt_candidate_count;
+    g_ds_profile.bfrt_groups += transaction.bfrt_group_count;
+    g_ds_profile.bfrt_selected_group +=
+        transaction.bfrt_selected_group_size;
+    g_ds_profile.bfrt_flips += static_cast<long>(transaction.flips.size());
+    g_ds_profile.bfrt_sort += transaction.bfrt_sort_time_sec;
+    g_ds_profile.bfrt_order += transaction.bfrt_order_time_sec;
+    g_ds_profile.bfrt_stability_prefiltered +=
+        transaction.bfrt_stability_prefiltered;
+    g_ds_profile.bfrt_max_candidates = std::max(
+        g_ds_profile.bfrt_max_candidates, transaction.bfrt_candidate_count);
+    g_ds_profile.bfrt_max_groups =
+        std::max(g_ds_profile.bfrt_max_groups, transaction.bfrt_group_count);
+    g_ds_profile.bfrt_max_selected_group =
+        std::max(g_ds_profile.bfrt_max_selected_group,
+                 transaction.bfrt_selected_group_size);
+    g_ds_profile.bfrt_max_flips = std::max(
+        g_ds_profile.bfrt_max_flips,
+        static_cast<int>(transaction.flips.size()));
+  }
   if (!_en_ok) {
     return numerical_trouble(std::move(failure));
   }
@@ -272,13 +411,33 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
       return outcome;
     }
     MinorOutcome outcome;
+    if (state.phase == Phase::DualOne) {
+      statistics.dual_phase_one_terminal_reason = 2;
+      statistics.dual_phase_one_terminal_leaving_row = leaving.row;
+      statistics.dual_phase_one_terminal_leaving_side = leaving.side;
+      statistics.dual_phase_one_terminal_violation = leaving.violation;
+      statistics.dual_phase_one_positive_candidates =
+          transaction.positive_candidate_count;
+      statistics.dual_phase_one_certified_candidates =
+          transaction.certified_candidate_count;
+      statistics.dual_phase_one_stable_candidates =
+          transaction.stable_candidate_count;
+      statistics.dual_phase_one_positive_capacity =
+          transaction.positive_capacity;
+      statistics.dual_phase_one_certified_capacity =
+          transaction.certified_capacity;
+      statistics.dual_phase_one_stable_capacity =
+          transaction.stable_capacity;
+      statistics.dual_phase_one_stable_capacity_error =
+          transaction.stable_capacity_error;
+    }
     outcome.kind = MinorKind::PossiblyPrimalInfeasible;
     outcome.leaving = std::move(leaving);
     return outcome;
   }
 
-    detail::IndexedVector column;
-    column.dimension = state.m;
+    detail::IndexedVector& column = g_ds_scratch.entering_column;
+    column.clear(state.m);
     for (Eigen::SparseMatrix<double>::InnerIterator it(state.sf->A,
                                                         entering.col);
          it; ++it) {
@@ -300,11 +459,25 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
 
     const bool has_flips = !transaction.flips.empty();
     const bool has_shifts = !transaction.cost_shifts.empty();
+    if (g_ds_scratch.flipped_stamp.size() !=
+        static_cast<std::size_t>(state.n)) {
+      g_ds_scratch.flipped_stamp.assign(static_cast<std::size_t>(state.n), 0);
+      g_ds_scratch.shifted_stamp.assign(static_cast<std::size_t>(state.n), 0);
+      g_ds_scratch.shift_delta.assign(static_cast<std::size_t>(state.n), 0.0);
+      g_ds_scratch.transaction_epoch = 0;
+    }
+    if (++g_ds_scratch.transaction_epoch == 0) {
+      std::fill(g_ds_scratch.flipped_stamp.begin(),
+                g_ds_scratch.flipped_stamp.end(), 0);
+      std::fill(g_ds_scratch.shifted_stamp.begin(),
+                g_ds_scratch.shifted_stamp.end(), 0);
+      ++g_ds_scratch.transaction_epoch;
+    }
+    const unsigned int transaction_epoch =
+        g_ds_scratch.transaction_epoch;
     auto is_flipped = [&](int col) {
-      return std::any_of(transaction.flips.begin(), transaction.flips.end(),
-                         [col](const BoundFlip& flip) {
-                           return flip.col == col;
-                         });
+      return g_ds_scratch.flipped_stamp[static_cast<std::size_t>(col)] ==
+             transaction_epoch;
     };
     for (std::size_t k = 0; k < transaction.flips.size(); ++k) {
       const BoundFlip& flip = transaction.flips[k];
@@ -313,53 +486,45 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
           flip.col == entering.col ||
           state.move[static_cast<std::size_t>(flip.col)] != flip.old_move ||
           !(flip.range > 0.0) || !std::isfinite(flip.range) ||
-          std::any_of(transaction.flips.begin(),
-                      transaction.flips.begin() +
-                          static_cast<std::ptrdiff_t>(k),
-                      [&](const BoundFlip& prior) {
-                        return prior.col == flip.col;
-                      })) {
+          is_flipped(flip.col)) {
         return numerical_trouble(
             "BFRT transaction contains an invalid bound flip");
       }
+      g_ds_scratch.flipped_stamp[static_cast<std::size_t>(flip.col)] =
+          transaction_epoch;
     }
+    auto is_shifted = [&](int col) {
+      return g_ds_scratch.shifted_stamp[static_cast<std::size_t>(col)] ==
+             transaction_epoch;
+    };
     for (std::size_t k = 0; k < transaction.cost_shifts.size(); ++k) {
       const detail::WorkingCostShift& shift = transaction.cost_shifts[k];
       if (shift.col < 0 || shift.col >= state.n ||
           state.basic[static_cast<std::size_t>(shift.col)] ||
           shift.col == entering.col || is_flipped(shift.col) ||
-          !std::isfinite(shift.delta) ||
-          std::any_of(transaction.cost_shifts.begin(),
-                      transaction.cost_shifts.begin() +
-                          static_cast<std::ptrdiff_t>(k),
-                      [&](const detail::WorkingCostShift& prior) {
-                        return prior.col == shift.col;
-                      })) {
+          !std::isfinite(shift.delta) || is_shifted(shift.col)) {
         return numerical_trouble(
             "BFRT transaction contains an invalid working-cost shift");
       }
+      g_ds_scratch.shifted_stamp[static_cast<std::size_t>(shift.col)] =
+          transaction_epoch;
+      g_ds_scratch.shift_delta[static_cast<std::size_t>(shift.col)] =
+          shift.delta;
     }
     auto cost_shift_at = [&](int col) {
-      for (const detail::WorkingCostShift& shift : transaction.cost_shifts) {
-        if (shift.col == col) return shift.delta;
-      }
-      return 0.0;
+      return is_shifted(col)
+                 ? g_ds_scratch.shift_delta[static_cast<std::size_t>(col)]
+                 : 0.0;
     };
     const int leaving_col =
         state.basis[static_cast<std::size_t>(leaving.row)];
     const double dual_step = leaving.side * entering.theta;
-    std::vector<int> reduced_cost_support = pivot_row.index;
-    reduced_cost_support.reserve(pivot_row.index.size() +
-                                 transaction.cost_shifts.size());
-    for (const detail::WorkingCostShift& shift : transaction.cost_shifts) {
-      reduced_cost_support.push_back(shift.col);
-    }
-    std::sort(reduced_cost_support.begin(), reduced_cost_support.end());
-    reduced_cost_support.erase(
-        std::unique(reduced_cost_support.begin(), reduced_cost_support.end()),
-        reduced_cost_support.end());
+    // Cost shifts are created only while scanning pivot_row, whose stamped
+    // accumulator already guarantees unique columns. Reuse its packed support
+    // directly instead of copying and sorting it on every pivot.
     const double _t_pc = g_ds_profile.enabled ? ds_clock() : 0.0;
-    for (int j : reduced_cost_support) {
+    for (std::size_t k = 0; k < pivot_row.index.size(); ++k) {
+      const int j = pivot_row.index[k];
       if ((state.basic[static_cast<std::size_t>(j)] && j != leaving_col) ||
           j == entering.col) {
         continue;
@@ -374,7 +539,7 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
       if (j != leaving_col && is_flipped(j)) move = -move;
       if (move == 0) continue;
       const double updated_reduced_cost =
-          state.reduced_costs[j] + dual_step * pivot_row.at(j) +
+          state.reduced_costs[j] + dual_step * pivot_row.value[k] +
           cost_shift_at(j);
       if (!std::isfinite(updated_reduced_cost)) {
         return numerical_trouble(
@@ -462,44 +627,55 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
     std::vector<std::pair<int, double>>& primal_changes =
         g_ds_scratch.primal_changes;
     primal_changes.clear();
-    primal_changes.reserve(bfrt_delta.index.size() + direction.index.size() +
-                           1);
-    for (std::size_t k = 0; k < bfrt_delta.index.size(); ++k) {
-      primal_changes.emplace_back(bfrt_delta.index[k], -bfrt_delta.value[k]);
+    if (g_ds_scratch.primal_delta.size() !=
+        static_cast<std::size_t>(state.m)) {
+      g_ds_scratch.primal_delta.assign(static_cast<std::size_t>(state.m), 0.0);
+      g_ds_scratch.primal_stamp.assign(static_cast<std::size_t>(state.m), 0);
+      g_ds_scratch.primal_epoch = 0;
     }
-    for (std::size_t k = 0; k < direction.index.size(); ++k) {
-      primal_changes.emplace_back(direction.index[k],
-                                  -direction.value[k] * primal_step);
+    if (++g_ds_scratch.primal_epoch == 0) {
+      std::fill(g_ds_scratch.primal_stamp.begin(),
+                g_ds_scratch.primal_stamp.end(), 0);
+      ++g_ds_scratch.primal_epoch;
     }
-    std::sort(primal_changes.begin(), primal_changes.end(),
-              [](const auto& lhs, const auto& rhs) {
-                return lhs.first < rhs.first;
-              });
-    std::size_t output = 0;
-    for (std::size_t begin = 0; begin < primal_changes.size();) {
-      const int row = primal_changes[begin].first;
-      double delta = 0.0;
-      std::size_t end = begin;
-      while (end < primal_changes.size() &&
-             primal_changes[end].first == row) {
-        delta += primal_changes[end].second;
-        ++end;
+    g_ds_scratch.primal_touched.clear();
+    auto add_primal_delta = [&](int row, double delta) {
+      if (row < 0 || row >= state.m) return false;
+      const std::size_t index = static_cast<std::size_t>(row);
+      if (g_ds_scratch.primal_stamp[index] != g_ds_scratch.primal_epoch) {
+        g_ds_scratch.primal_stamp[index] = g_ds_scratch.primal_epoch;
+        g_ds_scratch.primal_delta[index] = 0.0;
+        g_ds_scratch.primal_touched.push_back(row);
       }
-      if (row < 0 || row >= state.m) {
+      g_ds_scratch.primal_delta[index] += delta;
+      return true;
+    };
+    for (std::size_t k = 0; k < bfrt_delta.index.size(); ++k) {
+      if (!add_primal_delta(bfrt_delta.index[k], -bfrt_delta.value[k])) {
         return numerical_trouble(
             "packed primal transaction contains an invalid row");
       }
+    }
+    for (std::size_t k = 0; k < direction.index.size(); ++k) {
+      if (!add_primal_delta(direction.index[k],
+                            -direction.value[k] * primal_step)) {
+        return numerical_trouble(
+            "packed primal transaction contains an invalid row");
+      }
+    }
+    primal_changes.reserve(g_ds_scratch.primal_touched.size() + 1);
+    for (const int row : g_ds_scratch.primal_touched) {
+      const double delta =
+          g_ds_scratch.primal_delta[static_cast<std::size_t>(row)];
       if (row != leaving.row && delta != 0.0) {
         const double value = state.x_basic[row] + delta;
         if (!std::isfinite(value)) {
           return numerical_trouble(
               "packed primal transaction is non-finite");
         }
-        primal_changes[output++] = {row, value};
+        primal_changes.emplace_back(row, value);
       }
-      begin = end;
     }
-    primal_changes.resize(output);
     const double leaving_value = entering_bound + primal_step;
     if (!std::isfinite(leaving_value)) {
       return numerical_trouble("packed primal transaction is non-finite");
@@ -553,13 +729,14 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
     }
     detail::refresh_leaving_heap(state, &changed_primal_rows, leaving.row);
     const double _t_rc = g_ds_profile.enabled ? ds_clock() : 0.0;
-    for (int j : reduced_cost_support) {
+    for (std::size_t k = 0; k < pivot_row.index.size(); ++k) {
+      const int j = pivot_row.index[k];
       if (j != leaving_col && j != entering.col &&
           state.basic[static_cast<std::size_t>(j)]) {
         state.reduced_costs[j] = 0.0;
       } else {
         state.reduced_costs[j] +=
-            dual_step * pivot_row.at(j) + cost_shift_at(j);
+            dual_step * pivot_row.value[k] + cost_shift_at(j);
       }
     }
     state.reduced_costs[entering.col] = 0.0;
@@ -589,6 +766,11 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
     if (std::abs(entering.theta) < 1e-9) ++statistics.degenerate_dual_steps;
     if (std::abs(primal_step) < 1e-9) ++statistics.degenerate_primal_steps;
     ++statistics.iterations;
+    if (state.phase == Phase::DualOne) {
+      ++statistics.dual_phase_one_iterations;
+    } else {
+      ++statistics.dual_phase_two_iterations;
+    }
     if (g_ds_profile.enabled) ++g_ds_profile.pivots;
     ++state.updates_since_rebuild;
     state.fresh_rebuild = false;
@@ -631,6 +813,41 @@ Result run_phase(State& state, Statistics& statistics,
 
   detail::RebuildReason rebuild_reason = detail::RebuildReason::Initial;
   std::string first_fresh_numerical_failure;
+  auto finish_dual_phase_one = [&](bool require_primal) -> Result {
+    if (!detail::working_cost_is_original(state)) {
+      return detail::make_result(
+          state, Status::NumericalFailure,
+          "dual Phase I changed the original objective", statistics);
+    }
+    const Audit phase_one_audit =
+        detail::audit(state, require_primal, true, false);
+    update_statistics(phase_one_audit, statistics);
+    if (!phase_one_audit.ok) {
+      return detail::make_result(
+          state, Status::NumericalFailure,
+          "dual Phase-I terminal invariant failed: " +
+              phase_one_audit.failure,
+          statistics);
+    }
+    const double objective = detail::dual_phase_one_objective(state);
+    if (!std::isfinite(objective)) {
+      return detail::make_result(state, Status::NumericalFailure,
+                                 "dual Phase-I objective is non-finite",
+                                 statistics);
+    }
+    statistics.dual_phase_one_final_objective = objective;
+    const detail::DualInfeasibilitySummary summary =
+        detail::original_dual_infeasibility_summary(state);
+    if (summary.count != 0) {
+      return detail::make_result(
+          state, Status::DualInfeasibleStart,
+          "dual Phase I cannot produce an original-bound dual-feasible "
+          "basis",
+          statistics);
+    }
+    return detail::make_result(state, Status::Optimal,
+                               "dual Phase I complete", statistics);
+  };
   for (;;) {
     const bool reinvert = rebuild_reason != detail::RebuildReason::Initial;
     const double _t_rb = g_ds_profile.enabled ? ds_clock() : 0.0;
@@ -643,6 +860,11 @@ Result run_phase(State& state, Statistics& statistics,
     if (!_rb_ok) {
       return detail::make_result(state, Status::NumericalFailure,
                                  std::move(failure), statistics);
+    }
+    if (state.phase == Phase::DualOne &&
+        detail::original_dual_infeasibility_summary(state).count == 0) {
+      statistics.dual_phase_one_terminal_reason = 3;
+      return finish_dual_phase_one(false);
     }
 
     for (;;) {
@@ -701,7 +923,8 @@ Result run_phase(State& state, Statistics& statistics,
         result.dual_bound_certified = bound_certified;
         return result;
       }
-      if (state.options->incumbent_bound != nullptr &&
+      if (state.phase == Phase::Two &&
+          state.options->incumbent_bound != nullptr &&
           statistics.iterations %
                   std::max(1, state.options->incumbent_check_interval) ==
               0) {
@@ -721,6 +944,14 @@ Result run_phase(State& state, Statistics& statistics,
       if (outcome.kind == MinorKind::CycleBlocked) continue;
       if (outcome.kind == MinorKind::Pivoted) {
         first_fresh_numerical_failure.clear();
+        if (state.phase == Phase::DualOne &&
+            detail::original_dual_infeasibility_summary(state).count == 0) {
+          // Phase I exists only to obtain an original-bound dual-feasible
+          // basis. Rebuild before accepting the transition so the zero defect
+          // is certified from freshly reconstructed reduced costs.
+          rebuild_reason = detail::RebuildReason::PossiblyOptimal;
+          break;
+        }
         if (state.reinvert_after_pivot) {
           state.reinvert_after_pivot = false;
           rebuild_reason = detail::RebuildReason::NumericalTrouble;
@@ -761,6 +992,9 @@ Result run_phase(State& state, Statistics& statistics,
           rebuild_reason = detail::RebuildReason::PossiblyPrimalInfeasible;
           break;
         }
+        if (state.phase == Phase::DualOne) {
+          return finish_dual_phase_one(false);
+        }
         const detail::Certificate certificate =
             detail::primal_infeasibility_certificate(state, outcome.leaving);
         if (!certificate.valid) {
@@ -783,10 +1017,20 @@ Result run_phase(State& state, Statistics& statistics,
         break;
       }
 
+      if (state.phase == Phase::DualOne) {
+        return finish_dual_phase_one(true);
+      }
+
       if (!detail::working_cost_is_original(state)) {
+        ++statistics.cleanup_required;
+        const auto cleanup_start = std::chrono::steady_clock::now();
         detail::restore_original_cost(state);
         ++statistics.cleanup_passes;
         if (!detail::reconstruct(state, failure)) {
+          statistics.cleanup_time_sec +=
+              std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                            cleanup_start)
+                  .count();
           return detail::make_result(
               state, Status::NumericalFailure,
               "cleanup reconstruction failed: " + failure, statistics);
@@ -798,19 +1042,42 @@ Result run_phase(State& state, Statistics& statistics,
           const Audit primal_audit = detail::audit(
               state, true, false, state.phase == Phase::Two);
           if (!primal_audit.ok) {
+            statistics.cleanup_time_sec +=
+                std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - cleanup_start)
+                    .count();
             return detail::make_result(
                 state, Status::NumericalFailure,
                 "cleanup lost primal feasibility: " + primal_audit.failure,
                 statistics);
           }
+          const int primal_cleanup_iteration_start = statistics.iterations;
+          const auto primal_cleanup_start = std::chrono::steady_clock::now();
           Result cleanup = detail::run_primal_phase(state, statistics, start);
+          statistics.primal_cleanup_iterations +=
+              statistics.iterations - primal_cleanup_iteration_start;
+          statistics.primal_cleanup_time_sec +=
+              std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                            primal_cleanup_start)
+                  .count();
           if (cleanup.status == Status::Optimal) {
             cleanup.message = "optimal after unperturbed primal cleanup";
           } else {
             cleanup.message = "unperturbed primal cleanup: " + cleanup.message;
           }
+          statistics.cleanup_time_sec +=
+              std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                            cleanup_start)
+                  .count();
+          sync_phase_telemetry(statistics, cleanup.statistics);
           return cleanup;
         }
+        statistics.cleanup_time_sec +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                          cleanup_start)
+                .count();
+      } else {
+        ++statistics.cleanup_avoided;
       }
 
       const Audit final = detail::audit(
@@ -840,6 +1107,26 @@ Result solve_impl(const StandardFormLP& sf, const SimplexOptions& options,
   }
   g_ds_profile.model_m = state.m;
   g_ds_profile.model_n = state.n;
+
+  auto run_dual_phase = [&]() -> Result {
+    const Phase phase = state.phase;
+    const double cleanup_before = statistics.cleanup_time_sec;
+    const auto phase_start = std::chrono::steady_clock::now();
+    Result result = run_phase(state, statistics, start);
+    const double elapsed =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                      phase_start)
+            .count();
+    if (phase == Phase::DualOne) {
+      statistics.dual_phase_one_time_sec += elapsed;
+    } else {
+      statistics.dual_phase_two_time_sec +=
+          std::max(0.0, elapsed -
+                            (statistics.cleanup_time_sec - cleanup_before));
+    }
+    sync_phase_telemetry(statistics, result.statistics);
+    return result;
+  };
 
   auto run_primal_phase_one_from_current_basis = [&]() -> Result {
     state.phase = Phase::One;
@@ -897,9 +1184,10 @@ Result solve_impl(const StandardFormLP& sf, const SimplexOptions& options,
     return detail::run_primal_phase(state, statistics, start);
   };
 
-  // A cold logical basis is initialized by the standard artificial-objective
-  // primal Phase I. This is the direct simplex strategy for a basis that has
-  // no inherited dual-feasibility contract; it is not a retry or fallback.
+  // A cold basis that cannot select original-bound dual-feasible endpoints
+  // enters a genuine dual Phase I. The logical anchor x0 satisfies Ax0=b, so
+  // the auxiliary bounds act on z=x-x0 and the dual Phase-I objective is the
+  // signed sum of unavoidable original dual infeasibilities.
   if (basis_hint == nullptr) {
     const int crash_replacements =
         detail::apply_certified_singleton_crash(sf, state.basis);
@@ -919,13 +1207,9 @@ Result solve_impl(const StandardFormLP& sf, const SimplexOptions& options,
       ++statistics.reinversions;
     }
 
-    // For this fixed cold basis, endpoint selection is an exact feasibility
-    // classification, not a solve attempt: every boxed nonbasic can choose
-    // the reduced-cost-compatible side, while a lower-only column with
-    // positive reduced cost proves that no such side assignment exists.
-    // Enter revised dual directly when the necessary-and-sufficient test
-    // succeeds. A later dual failure is terminal and never falls through to
-    // primal Phase I.
+    // For this fixed cold basis, original-bound endpoint selection is an exact
+    // dual-feasibility classification. Enter Phase II directly when it
+    // succeeds; otherwise Dual Phase I changes bounds, never costs.
     std::string dual_start_failure;
     if (detail::normalize_nonbasic_moves(state, dual_start_failure)) {
       const Audit initial = detail::audit(state, false, true, false);
@@ -936,9 +1220,81 @@ Result solve_impl(const StandardFormLP& sf, const SimplexOptions& options,
             "cold dual-start invariant failed: " + initial.failure,
             statistics);
       }
-      return run_phase(state, statistics, start);
+      return run_dual_phase();
     }
 
+    const std::vector<int> pre_phase_one_basis = state.basis;
+    auto restore_pre_phase_one_basis = [&]() -> bool {
+      state.basis = pre_phase_one_basis;
+      if (!state.factor->rebuild(state.basis, statistics.rank_repairs,
+                                 dual_start_failure)) {
+        return false;
+      }
+      ++statistics.reinversions;
+      state.updates_since_rebuild = 0;
+      state.fresh_rebuild = true;
+      return true;
+    };
+
+    if (!detail::initialize_dual_phase_one(state, dual_start_failure)) {
+      if (std::getenv("MIPSOLVERS_DS_VERBOSE") != nullptr) {
+        std::fprintf(stderr, "[DUAL-PHASE-I] initialization failed: %s\n",
+                     dual_start_failure.c_str());
+      }
+      if (!restore_pre_phase_one_basis()) {
+        return detail::make_result(
+            state, Status::NumericalFailure,
+            "cannot restore the pre-dual-Phase-I basis: " +
+                dual_start_failure,
+            statistics);
+      }
+      return run_primal_phase_one_from_current_basis();
+    }
+    statistics.dual_phase_one_initial_objective =
+        detail::dual_phase_one_objective(state);
+    Result phase_one = run_dual_phase();
+    if (phase_one.status != Status::Optimal) {
+      if (phase_one.status == Status::DualInfeasibleStart) {
+        if (!restore_pre_phase_one_basis()) {
+          return detail::make_result(
+              state, Status::NumericalFailure,
+              "cannot restore the pre-dual-Phase-I basis: " +
+                  dual_start_failure,
+              statistics);
+        }
+        return run_primal_phase_one_from_current_basis();
+      }
+      phase_one.message = "dual Phase I: " + phase_one.message;
+      return phase_one;
+    }
+
+    detail::DualInfeasibilitySummary transition_summary;
+    if (!detail::transition_dual_phase_one_to_two(
+            state, transition_summary, dual_start_failure)) {
+      return detail::make_result(
+          state, Status::NumericalFailure,
+          "dual Phase-I transition failed: " + dual_start_failure,
+          statistics);
+    }
+    ++statistics.phase_transitions;
+    statistics.transition_dual_infeasibility_count =
+        transition_summary.count;
+    statistics.transition_max_dual_infeasibility = transition_summary.max;
+    Result phase_two = run_dual_phase();
+    if (phase_two.status != Status::NumericalFailure) return phase_two;
+    if (std::getenv("MIPSOLVERS_DS_VERBOSE") != nullptr) {
+      std::fprintf(stderr,
+                   "[DUAL-PHASE-II] numerical failure after dual Phase I; "
+                   "restoring the cold basis: %s\n",
+                   phase_two.message.c_str());
+    }
+    if (!restore_pre_phase_one_basis()) {
+      return detail::make_result(
+          state, Status::NumericalFailure,
+          "cannot restore the pre-dual-Phase-I basis after Phase-II failure: " +
+              dual_start_failure,
+          statistics);
+    }
     return run_primal_phase_one_from_current_basis();
   }
 
@@ -951,7 +1307,7 @@ Result solve_impl(const StandardFormLP& sf, const SimplexOptions& options,
           "initial Phase-II invariant failed: " + initial.failure,
           statistics);
     }
-    return run_phase(state, statistics, start);
+    return run_dual_phase();
   }
   if (!allow_phase_one) {
     return detail::make_result(state, Status::DualInfeasibleStart,
@@ -996,14 +1352,16 @@ const char* status_name(Status status) {
 Result solve_phase2(const StandardFormLP& sf, const SimplexOptions& options,
                     const SimplexBasis& basis_hint) {
   Result result = solve_impl(sf, options, &basis_hint, false);
-  g_ds_profile.report(g_ds_profile.model_m, g_ds_profile.model_n);
+  g_ds_profile.report(g_ds_profile.model_m, g_ds_profile.model_n,
+                      result.statistics);
   return result;
 }
 
 Result solve(const StandardFormLP& sf, const SimplexOptions& options,
              const SimplexBasis* basis_hint) {
   Result result = solve_impl(sf, options, basis_hint, true);
-  g_ds_profile.report(g_ds_profile.model_m, g_ds_profile.model_n);
+  g_ds_profile.report(g_ds_profile.model_m, g_ds_profile.model_n,
+                      result.statistics);
   if (std::getenv("MIPSOLVERS_DS_VERBOSE") != nullptr) {
     const Statistics& s = result.statistics;
     std::fprintf(

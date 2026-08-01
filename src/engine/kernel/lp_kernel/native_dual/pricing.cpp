@@ -1,6 +1,7 @@
 #include "pricing.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <iomanip>
@@ -82,12 +83,16 @@ void remove_stale_leaving_entries(State& state) {
 }
 
 double dot_error_bound(const State& state, const IndexedVector& row_ep,
-                       int col) {
+                       int col, const std::vector<double>* dense_row_ep = nullptr) {
   double absolute_dot = 0.0;
   int terms = 0;
   for (Eigen::SparseMatrix<double>::InnerIterator it(state.sf->A, col); it;
        ++it) {
-    absolute_dot += std::abs(row_ep.at(it.row()) * it.value());
+    const double multiplier =
+        dense_row_ep != nullptr
+            ? (*dense_row_ep)[static_cast<std::size_t>(it.row())]
+            : row_ep.at(it.row());
+    absolute_dot += std::abs(multiplier * it.value());
     ++terms;
   }
   const double eps = std::numeric_limits<double>::epsilon();
@@ -104,8 +109,24 @@ IndexedVector multiply_AT_indexed(
     const IndexedVector& y) {
   IndexedVector result;
   result.dimension = static_cast<int>(A_row.cols());
-  static thread_local std::vector<std::pair<int, double>> terms;
-  terms.clear();
+  struct Accumulator {
+    std::vector<double> value;
+    std::vector<unsigned int> stamp;
+    std::vector<int> touched;
+    unsigned int epoch{0};
+  };
+  static thread_local Accumulator accumulator;
+  const std::size_t columns = static_cast<std::size_t>(A_row.cols());
+  if (accumulator.value.size() != columns) {
+    accumulator.value.assign(columns, 0.0);
+    accumulator.stamp.assign(columns, 0);
+    accumulator.epoch = 0;
+  }
+  if (++accumulator.epoch == 0) {
+    std::fill(accumulator.stamp.begin(), accumulator.stamp.end(), 0);
+    ++accumulator.epoch;
+  }
+  accumulator.touched.clear();
   for (std::size_t k = 0; k < y.index.size(); ++k) {
     const int row = y.index[k];
     const double multiplier = y.value[k];
@@ -113,24 +134,24 @@ IndexedVector multiply_AT_indexed(
     for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_row,
                                                                         row);
          it; ++it) {
-      terms.emplace_back(static_cast<int>(it.col()), multiplier * it.value());
+      const int col = static_cast<int>(it.col());
+      const std::size_t index = static_cast<std::size_t>(col);
+      if (accumulator.stamp[index] != accumulator.epoch) {
+        accumulator.stamp[index] = accumulator.epoch;
+        accumulator.value[index] = 0.0;
+        accumulator.touched.push_back(col);
+      }
+      accumulator.value[index] += multiplier * it.value();
     }
   }
-  std::sort(terms.begin(), terms.end(),
-            [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
-  for (std::size_t begin = 0; begin < terms.size();) {
-    const int col = terms[begin].first;
-    double value = 0.0;
-    std::size_t end = begin;
-    while (end < terms.size() && terms[end].first == col) {
-      value += terms[end].second;
-      ++end;
-    }
+  result.index.reserve(accumulator.touched.size());
+  result.value.reserve(accumulator.touched.size());
+  for (const int col : accumulator.touched) {
+    const double value = accumulator.value[static_cast<std::size_t>(col)];
     if (value != 0.0) {
       result.index.push_back(col);
       result.value.push_back(value);
     }
-    begin = end;
   }
   return result;
 }
@@ -282,6 +303,19 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
       state.updates_since_rebuild < 10
           ? 1e-9
           : (state.updates_since_rebuild < 20 ? 3e-8 : 1e-6);
+  auto add_capacity = [](double alpha, double range, double& capacity) {
+    if (!std::isfinite(range)) {
+      capacity = std::numeric_limits<double>::infinity();
+    } else if (std::isfinite(capacity)) {
+      capacity += alpha * range;
+    }
+  };
+  static thread_local std::vector<double> dense_row_ep;
+  dense_row_ep.assign(static_cast<std::size_t>(state.m), 0.0);
+  for (std::size_t k = 0; k < leaving.row_ep.index.size(); ++k) {
+    const double value = leaving.row_ep.value[k];
+    dense_row_ep[static_cast<std::size_t>(leaving.row_ep.index[k])] = value;
+  }
   for (int s = 0; s < scan_count; ++s) {
     const int j = scan_col(s);
     if (state.basic[static_cast<std::size_t>(j)]) continue;
@@ -289,7 +323,26 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
     if (direction == 0) continue;
     const double pivot = pivot_row.value[static_cast<std::size_t>(s)];
     const double signed_alpha = leaving.side * direction * pivot;
-    const double error = dot_error_bound(state, leaving.row_ep, j);
+    const double range = state.bounds.upper[j] - state.bounds.lower[j];
+    if (signed_alpha > 0.0) {
+      ++transaction.positive_candidate_count;
+      add_capacity(signed_alpha, range, transaction.positive_capacity);
+    }
+    // In Phase II, CHUZC can only pivot on alpha > Ta. Hence alpha <= Ta is
+    // outside the basis-update domain regardless of whether the tighter
+    // dot-product certificate alpha > error holds. Reject it before the
+    // column-wise absolute-dot traversal. Dual Phase I keeps the original
+    // ordering because its nested candidate/capacity evidence is part of the
+    // terminal exact-cover contract.
+    if (state.phase == Phase::Two && signed_alpha > 0.0 &&
+        !(signed_alpha > stable_pivot_tolerance)) {
+      transaction.stability_blocked = true;
+      ++transaction.unstable_pivot_rejections;
+      ++transaction.bfrt_stability_prefiltered;
+      continue;
+    }
+    const double error =
+        dot_error_bound(state, leaving.row_ep, j, &dense_row_ep);
     if (!(signed_alpha > error)) {
       if (signed_alpha + error > 0.0) {
         transaction.stability_blocked = true;
@@ -297,11 +350,16 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
       }
       continue;
     }
+    ++transaction.certified_candidate_count;
+    add_capacity(signed_alpha, range, transaction.certified_capacity);
     if (!(signed_alpha > stable_pivot_tolerance)) {
       transaction.stability_blocked = true;
       ++transaction.unstable_pivot_rejections;
       continue;
     }
+    ++transaction.stable_candidate_count;
+    add_capacity(signed_alpha, range, transaction.stable_capacity);
+    add_capacity(error, range, transaction.stable_capacity_error);
     const double margin =
         std::max(0.0, -direction * state.reduced_costs[j]);
     const long double breakpoint =
@@ -311,7 +369,6 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
       failure = "BFRT breakpoint is not finite";
       return false;
     }
-    const double range = state.bounds.upper[j] - state.bounds.lower[j];
     int taboo_expiry = -1;
     const int leaving_col =
         state.basis[static_cast<std::size_t>(leaving.row)];
@@ -322,28 +379,74 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
   }
   if (candidates.empty()) return true;
 
-  std::sort(candidates.begin(), candidates.end(),
-            [](const Candidate& lhs, const Candidate& rhs) {
-              if (lhs.breakpoint != rhs.breakpoint)
-                return lhs.breakpoint < rhs.breakpoint;
-              return lhs.col < rhs.col;
-            });
-
+  transaction.bfrt_candidate_count = static_cast<int>(candidates.size());
   std::size_t selected_begin = 0;
   std::size_t selected_end = 0;
-  long double covered = 0.0;
+  // HiGHS' BFRT uses the same 1e-12 initial total-change budget. It is an
+  // EXPAND allowance for the independently reconstructed leaving violation
+  // and pivotal-row capacity, five orders below the default primal tolerance.
+  constexpr long double kInitialTotalChange = 1e-12L;
+  long double covered = kInitialTotalChange;
+  std::size_t last_group_begin = 0;
+  std::size_t last_group_end = 0;
+  bool remaining_sorted = false;
+  constexpr int kPartialGroupLimit = 8;
+  const auto order_start = std::chrono::steady_clock::now();
   for (std::size_t begin = 0; begin < candidates.size();) {
-    std::size_t end = begin + 1;
-    while (end < candidates.size() &&
-           candidates[end].breakpoint == candidates[begin].breakpoint) {
-      ++end;
+    std::size_t end = begin;
+    if (!remaining_sorted &&
+        transaction.bfrt_group_count < kPartialGroupLimit) {
+      long double minimum_breakpoint = candidates[begin].breakpoint;
+      for (std::size_t i = begin + 1; i < candidates.size(); ++i) {
+        minimum_breakpoint =
+            std::min(minimum_breakpoint, candidates[i].breakpoint);
+      }
+      for (std::size_t i = begin; i < candidates.size(); ++i) {
+        if (candidates[i].breakpoint == minimum_breakpoint) {
+          std::swap(candidates[end], candidates[i]);
+          ++end;
+        }
+      }
+      // The former full sort used the column as its deterministic tie-break.
+      // Preserve that exact summation and transaction order within a group.
+      std::sort(candidates.begin() + static_cast<std::ptrdiff_t>(begin),
+                candidates.begin() + static_cast<std::ptrdiff_t>(end),
+                [](const Candidate& lhs, const Candidate& rhs) {
+                  return lhs.col < rhs.col;
+                });
+    } else {
+      if (!remaining_sorted) {
+        const auto sort_start = std::chrono::steady_clock::now();
+        std::sort(candidates.begin() + static_cast<std::ptrdiff_t>(begin),
+                  candidates.end(),
+                  [](const Candidate& lhs, const Candidate& rhs) {
+                    if (lhs.breakpoint != rhs.breakpoint)
+                      return lhs.breakpoint < rhs.breakpoint;
+                    return lhs.col < rhs.col;
+                  });
+        transaction.bfrt_sort_time_sec +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                          sort_start)
+                .count();
+        remaining_sorted = true;
+      }
+      end = begin + 1;
+      while (end < candidates.size() &&
+             candidates[end].breakpoint == candidates[begin].breakpoint) {
+        ++end;
+      }
     }
+    ++transaction.bfrt_group_count;
+    last_group_begin = begin;
+    last_group_end = end;
     long double group_change = 0.0;
     bool group_has_unbounded_range = false;
     for (std::size_t i = begin; i < end; ++i) {
       if (std::isfinite(candidates[i].range)) {
-        group_change += static_cast<long double>(candidates[i].alpha) *
-                        static_cast<long double>(candidates[i].range);
+        const long double change =
+            static_cast<long double>(candidates[i].alpha) *
+            static_cast<long double>(candidates[i].range);
+        group_change += change;
       } else {
         group_has_unbounded_range = true;
       }
@@ -358,10 +461,75 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
     covered += group_change;
     begin = end;
   }
+  transaction.bfrt_order_time_sec =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                    order_start)
+          .count();
+
+  if (selected_end <= selected_begin && state.phase == Phase::DualOne &&
+      last_group_end > last_group_begin) {
+    // In exact arithmetic z=0 is feasible, so a Phase-I pivotal row cannot
+    // have insufficient signed capacity. On a freshly reconstructed floating
+    // iterate the apparent shortage is bounded by pi^T(b-Ax), where
+    // pi=B^{-T}e_p is the already certified pivotal row. Use that computed
+    // residual projection as a local proof, not a feasibility-tolerance
+    // relaxation, before accepting the final exact-cover group.
+    const Eigen::VectorXd equation_residual =
+        state.sf->b - state.sf->A * full_primal(state);
+    long double projected_residual = 0.0L;
+    long double projected_residual_abs = 0.0L;
+    for (std::size_t k = 0; k < leaving.row_ep.index.size(); ++k) {
+      const int row = leaving.row_ep.index[k];
+      const long double term =
+          static_cast<long double>(leaving.row_ep.value[k]) *
+          static_cast<long double>(equation_residual[row]);
+      projected_residual += term;
+      projected_residual_abs += std::abs(term);
+    }
+    long double btran_witness_error = 0.0L;
+    long double btran_witness_error_abs = 0.0L;
+    for (int basis_row = 0; basis_row < state.m; ++basis_row) {
+      const int basis_col =
+          state.basis[static_cast<std::size_t>(basis_row)];
+      long double bt_pi = 0.0L;
+      for (Eigen::SparseMatrix<double>::InnerIterator it(state.sf->A,
+                                                          basis_col);
+           it; ++it) {
+        bt_pi += static_cast<long double>(leaving.row_ep.at(it.row())) *
+                 static_cast<long double>(it.value());
+      }
+      const long double btran_residual =
+          (basis_row == leaving.row ? 1.0L : 0.0L) - bt_pi;
+      const long double basis_displacement =
+          static_cast<long double>(state.x_basic[basis_row]) -
+          static_cast<long double>(state.dual_phase_one_anchor[basis_col]);
+      const long double term = btran_residual * basis_displacement;
+      btran_witness_error += term;
+      btran_witness_error_abs += std::abs(term);
+    }
+    const long double projection_roundoff =
+        (static_cast<long double>(leaving.row_ep.index.size() + state.m) +
+         256.0L) *
+        static_cast<long double>(std::numeric_limits<double>::epsilon()) *
+        std::max({projected_residual_abs, btran_witness_error_abs,
+                  static_cast<long double>(leaving.violation), 1.0L});
+    const long double shortage =
+        static_cast<long double>(leaving.violation) - covered;
+    if (equation_residual.allFinite() && shortage > 0.0L &&
+        shortage <= std::abs(projected_residual) +
+                        std::abs(btran_witness_error) + projection_roundoff +
+                        static_cast<long double>(
+                            transaction.stable_capacity_error)) {
+      selected_begin = last_group_begin;
+      selected_end = last_group_end;
+    }
+  }
 
   // Finite bound ranges cannot span the leaving violation. Leave the
   // transaction empty so the caller can require a checked row certificate.
   if (selected_end <= selected_begin) return true;
+  transaction.bfrt_selected_group_size =
+      static_cast<int>(selected_end - selected_begin);
 
   // Harris pass 1 uses the same numerically certified pivot domain as pass 2.
   // A raw tableau coefficient whose sign is inside its dot-product error bound
@@ -431,6 +599,22 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
   int step_upper_col = -1;
   long double step_upper_alpha = 0.0L;
   long double step_upper_signed_reduced_cost = 0.0L;
+  struct TransactionMarks {
+    std::vector<unsigned int> flipped;
+    std::vector<unsigned int> shifted;
+    unsigned int epoch{0};
+  };
+  static thread_local TransactionMarks marks;
+  if (marks.flipped.size() != static_cast<std::size_t>(state.n)) {
+    marks.flipped.assign(static_cast<std::size_t>(state.n), 0);
+    marks.shifted.assign(static_cast<std::size_t>(state.n), 0);
+    marks.epoch = 0;
+  }
+  if (++marks.epoch == 0) {
+    std::fill(marks.flipped.begin(), marks.flipped.end(), 0);
+    std::fill(marks.shifted.begin(), marks.shifted.end(), 0);
+    ++marks.epoch;
+  }
   for (std::size_t i = 0; i < candidates.size(); ++i) {
     const Candidate& candidate = candidates[i];
     const bool flip = i < selected_begin && std::isfinite(candidate.range);
@@ -439,12 +623,12 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
           {candidate.col,
            state.move[static_cast<std::size_t>(candidate.col)],
            candidate.range});
+      marks.flipped[static_cast<std::size_t>(candidate.col)] = marks.epoch;
     }
   }
 
   auto is_flipped = [&](int col) {
-    return std::any_of(transaction.flips.begin(), transaction.flips.end(),
-                       [=](const BoundFlip& flip) { return flip.col == col; });
+    return marks.flipped[static_cast<std::size_t>(col)] == marks.epoch;
   };
 
   // A coefficient whose sign is inside its dot-product error bound cannot be
@@ -461,7 +645,8 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
     const int direction = sign(state.move[static_cast<std::size_t>(col)]);
     if (direction == 0) continue;
     const long double alpha =
-        static_cast<long double>(leaving.side) * direction * pivot_row.at(col);
+        static_cast<long double>(leaving.side) * direction *
+        pivot_row.value[static_cast<std::size_t>(s)];
     const long double signed_reduced_cost =
         static_cast<long double>(direction) * state.reduced_costs[col];
     const long double updated_signed_reduced_cost =
@@ -472,23 +657,24 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
     if (std::isfinite(range) && range > 0.0) {
       transaction.flips.push_back(
           {col, state.move[static_cast<std::size_t>(col)], range});
+      marks.flipped[static_cast<std::size_t>(col)] = marks.epoch;
       continue;
     }
 
     const double updated_reduced_cost =
         state.reduced_costs[col] +
-        leaving.side * static_cast<double>(theta) * pivot_row.at(col);
+        leaving.side * static_cast<double>(theta) *
+            pivot_row.value[static_cast<std::size_t>(s)];
     if (!std::isfinite(updated_reduced_cost)) {
       failure = "Harris BFRT requires a non-finite working-cost shift";
       return false;
     }
     transaction.cost_shifts.push_back({col, -updated_reduced_cost});
+    marks.shifted[static_cast<std::size_t>(col)] = marks.epoch;
   }
 
   auto is_shifted = [&](int col) {
-    return std::any_of(
-        transaction.cost_shifts.begin(), transaction.cost_shifts.end(),
-        [=](const WorkingCostShift& shift) { return shift.col == col; });
+    return marks.shifted[static_cast<std::size_t>(col)] == marks.epoch;
   };
 
   for (int s = 0; s < scan_count; ++s) {
@@ -500,7 +686,8 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
     const int direction = sign(state.move[static_cast<std::size_t>(col)]);
     if (direction == 0) continue;
     const long double alpha =
-        static_cast<long double>(leaving.side) * direction * pivot_row.at(col);
+        static_cast<long double>(leaving.side) * direction *
+        pivot_row.value[static_cast<std::size_t>(s)];
     if (!(alpha > 0.0L)) continue;
     const long double signed_reduced_cost =
         static_cast<long double>(direction) * state.reduced_costs[col];
@@ -543,7 +730,8 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
   transaction.dual_step_lower = static_cast<double>(step_lower);
   transaction.dual_step_upper = static_cast<double>(step_upper);
 
-  std::vector<std::pair<int, double>> rhs_terms;
+  static thread_local std::vector<std::pair<int, double>> rhs_terms;
+  rhs_terms.clear();
   for (const BoundFlip& flip : transaction.flips) {
     const double delta = sign(flip.old_move) * flip.range;
     for (Eigen::SparseMatrix<double>::InnerIterator it(state.sf->A, flip.col);
@@ -686,6 +874,16 @@ bool compute_dse_weights(const State& state, const Leaving& leaving,
     failure = "DSE packed FTRAN failed";
     return false;
   }
+  static thread_local std::vector<double> dense_rho;
+  dense_rho.assign(static_cast<std::size_t>(state.m), 0.0);
+  for (std::size_t k = 0; k < rho.index.size(); ++k) {
+    const int row = rho.index[k];
+    if (row < 0 || row >= state.m) {
+      failure = "DSE auxiliary FTRAN pattern contains an invalid row";
+      return false;
+    }
+    dense_rho[static_cast<std::size_t>(row)] = rho.value[k];
+  }
   const double old_pivotal_weight =
       state.edge_weight[static_cast<std::size_t>(leaving.row)];
   const double inv_pivot = 1.0 / pivot;
@@ -700,7 +898,7 @@ bool compute_dse_weights(const State& state, const Leaving& leaving,
     if (row == leaving.row) continue;
     const double ratio =
         direction.value[static_cast<std::size_t>(position)] * inv_pivot;
-    const double rho_value = rho.at(row);
+    const double rho_value = dense_rho[static_cast<std::size_t>(row)];
     const long double ratio_ld = static_cast<long double>(ratio);
     const long double value_ld =
         static_cast<long double>(

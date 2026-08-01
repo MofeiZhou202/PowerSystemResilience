@@ -1,5 +1,6 @@
 #include "primal.hpp"
 #include "pricing.hpp"
+#include "primal_pricing.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -12,6 +13,8 @@ namespace mipsolvers::engine::native_dual::detail {
 namespace {
 
 constexpr int kPrimalRebuildInterval = 256;
+constexpr double kPrimalDevexBadWeightFactor = 3.0;
+constexpr int kPrimalDevexBadWeightLimit = 3;
 
 double primal_clock() {
   return std::chrono::duration<double>(
@@ -38,6 +41,9 @@ struct PrimalProfile {
   long long ftran_rhs_nnz{0};
   long long ftran_result_nnz{0};
   long long btran_result_nnz{0};
+  long devex_choices{0};
+  long devex_disagreements{0};
+  long devex_restarts{0};
   static constexpr int kAgeBuckets = 8;
   double ftran_age_time[kAgeBuckets]{};
   long ftran_age_calls[kAgeBuckets]{};
@@ -82,8 +88,32 @@ struct PrimalProfile {
                    static_cast<double>(ftran_age_result_nnz[bucket]) / calls);
     }
     std::fprintf(stderr, "\n");
+    if (devex_choices > 0) {
+      std::fprintf(stderr,
+                   "[PRIMAL-DEVEX-SHADOW] phase=%s choices=%ld "
+                   "disagreements=%ld rate=%.2f%%\n",
+                   phase == Phase::One ? "I" : "II", devex_choices,
+                   devex_disagreements,
+                   100.0 * devex_disagreements / devex_choices);
+    }
+    if (devex_restarts > 0) {
+      std::fprintf(stderr, "[PRIMAL-DEVEX] phase=%s restarts=%ld\n",
+                   phase == Phase::One ? "I" : "II", devex_restarts);
+    }
   }
 };
+
+enum class PrimalDevexMode { Off, Shadow, On, Pse };
+
+PrimalDevexMode primal_devex_mode() {
+  const char* value = std::getenv("MIPSOLVERS_PRIMAL_DEVEX");
+  if (value == nullptr) return PrimalDevexMode::On;
+  const std::string mode(value);
+  if (mode == "1" || mode == "on") return PrimalDevexMode::On;
+  if (mode == "shadow") return PrimalDevexMode::Shadow;
+  if (mode == "pse") return PrimalDevexMode::Pse;
+  return PrimalDevexMode::Off;
+}
 
 bool wall_time_hit(const SimplexOptions& options,
                    const std::chrono::steady_clock::time_point& start) {
@@ -121,6 +151,7 @@ struct PrimalLeaving {
 struct PrimalPricingHeap {
   struct Entry {
     double gain{0.0};
+    double measure{0.0};
     int col{-1};
   };
   std::vector<Entry> entries;
@@ -129,7 +160,7 @@ struct PrimalPricingHeap {
 
 bool lower_entering_priority(const PrimalPricingHeap::Entry& lhs,
                              const PrimalPricingHeap::Entry& rhs) {
-  if (lhs.gain != rhs.gain) return lhs.gain < rhs.gain;
+  if (lhs.measure != rhs.measure) return lhs.measure < rhs.measure;
   return lhs.col > rhs.col;
 }
 
@@ -195,7 +226,8 @@ void remove_entering_column(PrimalPricingHeap& heap, int col) {
 }
 
 void refresh_entering_column(const State& state, PrimalPricingHeap& heap,
-                             int col) {
+                             const PrimalDevexFramework& devex,
+                             PrimalDevexMode devex_mode, int col) {
   if (col < 0 || col >= state.n) return;
   remove_entering_column(heap, col);
   if (state.basic[static_cast<std::size_t>(col)]) return;
@@ -203,21 +235,57 @@ void refresh_entering_column(const State& state, PrimalPricingHeap& heap,
   if (move == 0) return;
   const double gain = move * state.reduced_costs[col];
   if (gain <= state.options->optimality_tol) return;
+  double measure = gain;
+  if (devex_mode == PrimalDevexMode::On ||
+      devex_mode == PrimalDevexMode::Pse) {
+    if (col >= static_cast<int>(devex.weight.size())) return;
+    measure = primal_pricing_measure(
+        gain, devex.weight[static_cast<std::size_t>(col)]);
+    if (!(measure > 0.0)) return;
+  }
   const int position = static_cast<int>(heap.entries.size());
-  heap.entries.push_back({gain, col});
+  heap.entries.push_back({gain, measure, col});
   heap.position[static_cast<std::size_t>(col)] = position;
   sift_entering_up(heap, position);
 }
 
-void initialize_entering_heap(const State& state, PrimalPricingHeap& heap) {
+bool initialize_primal_pse(const State& state,
+                           PrimalDevexFramework& framework) {
+  framework.weight.assign(static_cast<std::size_t>(state.n), 1.0);
+  framework.reference.clear();
+  framework.bad_weight_count = 0;
+  framework.iterations = 0;
+  for (int col = 0; col < state.n; ++col) {
+    if (state.basic[static_cast<std::size_t>(col)]) continue;
+    IndexedVector column;
+    column.dimension = state.m;
+    for (Eigen::SparseMatrix<double>::InnerIterator it(state.sf->A, col); it;
+         ++it) {
+      column.index.push_back(it.row());
+      column.value.push_back(it.value());
+    }
+    const IndexedSolveEvidence solve = state.factor->indexed_ftran(column);
+    if (!solve.accepted) return false;
+    const double weight = primal_exact_edge_weight(solve.solution);
+    if (!std::isfinite(weight)) return false;
+    framework.weight[static_cast<std::size_t>(col)] = weight;
+  }
+  return true;
+}
+
+void initialize_entering_heap(const State& state, PrimalPricingHeap& heap,
+                              const PrimalDevexFramework& devex,
+                              PrimalDevexMode devex_mode) {
   heap.entries.clear();
   heap.position.assign(static_cast<std::size_t>(state.n), -1);
   heap.entries.reserve(static_cast<std::size_t>(state.n));
   for (int col = 0; col < state.n; ++col)
-    refresh_entering_column(state, heap, col);
+    refresh_entering_column(state, heap, devex, devex_mode, col);
 }
 
 bool rebuild_primal_state(State& state, Statistics& statistics,
+                          PrimalDevexMode devex_mode,
+                          PrimalDevexFramework& devex,
                           std::string& failure) {
   const Eigen::VectorXd previous_x = state.x_basic;
   const Eigen::VectorXd previous_reduced_costs = state.reduced_costs;
@@ -255,22 +323,54 @@ bool rebuild_primal_state(State& state, Statistics& statistics,
   ++statistics.rebuild_numerical_trouble;
   state.updates_since_rebuild = 0;
   state.fresh_rebuild = true;
+  if (devex_mode == PrimalDevexMode::Pse &&
+      !initialize_primal_pse(state, devex)) {
+    failure = "primal PSE reinitialization after INVERT failed";
+    return false;
+  }
   return true;
 }
 
 bool choose_entering(const State& state, PrimalPricingHeap& heap,
+                     const PrimalDevexFramework& devex,
+                     PrimalDevexMode devex_mode, PrimalProfile& profile,
                      PrimalEntering& entering) {
   if (heap.entries.empty()) return false;
   const PrimalPricingHeap::Entry& top = heap.entries.front();
   entering.col = top.col;
   entering.move = sign(state.move[static_cast<std::size_t>(top.col)]);
   entering.gain = top.gain;
+  if (devex_mode == PrimalDevexMode::Shadow) {
+    int devex_col = -1;
+    double best_measure = 0.0;
+    for (const PrimalPricingHeap::Entry& candidate : heap.entries) {
+      if (candidate.col >= static_cast<int>(devex.weight.size())) continue;
+      const double measure = primal_pricing_measure(
+          candidate.gain,
+          devex.weight[static_cast<std::size_t>(candidate.col)]);
+      if (measure > best_measure ||
+          (measure == best_measure &&
+           (devex_col < 0 || candidate.col < devex_col))) {
+        best_measure = measure;
+        devex_col = candidate.col;
+      }
+    }
+    ++profile.devex_choices;
+    if (devex_col != entering.col) ++profile.devex_disagreements;
+  }
   return true;
 }
 
 bool choose_leaving_harris(const State& state, const PrimalEntering& entering,
                            PrimalLeaving& leaving) {
   const double feasibility = state.options->feasibility_tol;
+  double direction_norm_inf = 0.0;
+  for (double value : entering.direction.value) {
+    direction_norm_inf = std::max(direction_norm_inf, std::abs(value));
+  }
+  const double minimum_pivot =
+      std::sqrt(std::numeric_limits<double>::epsilon()) *
+      std::max(1.0, direction_norm_inf);
   double relaxed_step = std::numeric_limits<double>::infinity();
   const double lower_q = state.bounds.lower[entering.col];
   const double upper_q = state.bounds.upper[entering.col];
@@ -279,6 +379,7 @@ bool choose_leaving_harris(const State& state, const PrimalEntering& entering,
   }
   for (std::size_t k = 0; k < entering.direction.index.size(); ++k) {
     const int row = entering.direction.index[k];
+    if (std::abs(entering.direction.value[k]) <= minimum_pivot) continue;
     const double change = -entering.move * entering.direction.value[k];
     const int basic_col = state.basis[static_cast<std::size_t>(row)];
     if (change > 0.0 && std::isfinite(state.bounds.upper[basic_col])) {
@@ -297,6 +398,7 @@ bool choose_leaving_harris(const State& state, const PrimalEntering& entering,
   for (std::size_t k = 0; k < entering.direction.index.size(); ++k) {
     const int row = entering.direction.index[k];
     const double direction = entering.direction.value[k];
+    if (std::abs(direction) <= minimum_pivot) continue;
     const double change = -entering.move * direction;
     const int basic_col = state.basis[static_cast<std::size_t>(row)];
     double exact_step = std::numeric_limits<double>::infinity();
@@ -330,9 +432,19 @@ Result run_primal_phase(
     State& state, Statistics& statistics,
     const std::chrono::steady_clock::time_point& solve_start) {
   PrimalProfile profile(state.phase);
+  PrimalDevexMode devex_mode = primal_devex_mode();
+  PrimalDevexFramework devex;
+  if (devex_mode == PrimalDevexMode::Pse) {
+    if (!initialize_primal_pse(state, devex)) {
+      return make_result(state, Status::NumericalFailure,
+                         "primal PSE exact initialization failed", statistics);
+    }
+  } else if (devex_mode != PrimalDevexMode::Off) {
+    initialize_primal_devex(state.n, state.basic, devex);
+  }
   PrimalPricingHeap pricing_heap;
   const double heap_start = profile.enabled ? primal_clock() : 0.0;
-  initialize_entering_heap(state, pricing_heap);
+  initialize_entering_heap(state, pricing_heap, devex, devex_mode);
   if (profile.enabled) profile.heap += primal_clock() - heap_start;
   while (statistics.iterations < state.options->max_iter) {
     if (wall_time_hit(*state.options, solve_start)) {
@@ -341,15 +453,17 @@ Result run_primal_phase(
     }
     PrimalEntering entering;
     const double choose_start = profile.enabled ? primal_clock() : 0.0;
-    if (!choose_entering(state, pricing_heap, entering)) {
+    if (!choose_entering(state, pricing_heap, devex, devex_mode, profile,
+                         entering)) {
       if (profile.enabled) profile.choose += primal_clock() - choose_start;
       if (state.updates_since_rebuild > 0) {
         std::string failure;
-        if (!rebuild_primal_state(state, statistics, failure)) {
+        if (!rebuild_primal_state(state, statistics, devex_mode, devex,
+                                  failure)) {
           return make_result(state, Status::NumericalFailure,
                              std::move(failure), statistics);
         }
-        initialize_entering_heap(state, pricing_heap);
+        initialize_entering_heap(state, pricing_heap, devex, devex_mode);
         continue;
       }
       const Audit final = audit(state, true, true, false);
@@ -392,11 +506,12 @@ Result run_primal_phase(
     if (!direction_solve.accepted) {
       if (state.updates_since_rebuild > 0) {
         std::string failure;
-        if (!rebuild_primal_state(state, statistics, failure)) {
+        if (!rebuild_primal_state(state, statistics, devex_mode, devex,
+                                  failure)) {
           return make_result(state, Status::NumericalFailure,
                              std::move(failure), statistics);
         }
-        initialize_entering_heap(state, pricing_heap);
+        initialize_entering_heap(state, pricing_heap, devex, devex_mode);
         continue;
       }
       return make_result(state, Status::NumericalFailure,
@@ -410,11 +525,12 @@ Result run_primal_phase(
     if (!choose_leaving_harris(state, entering, leaving)) {
       if (state.updates_since_rebuild > 0) {
         std::string failure;
-        if (!rebuild_primal_state(state, statistics, failure)) {
+        if (!rebuild_primal_state(state, statistics, devex_mode, devex,
+                                  failure)) {
           return make_result(state, Status::NumericalFailure,
                              std::move(failure), statistics);
         }
-        initialize_entering_heap(state, pricing_heap);
+        initialize_entering_heap(state, pricing_heap, devex, devex_mode);
         continue;
       }
       return make_result(
@@ -444,7 +560,8 @@ Result run_primal_phase(
       state.objective += state.reduced_costs[entering.col] * primal_delta;
       state.move[static_cast<std::size_t>(entering.col)] =
           entering.move > 0 ? Move::Down : Move::Up;
-      refresh_entering_column(state, pricing_heap, entering.col);
+      refresh_entering_column(state, pricing_heap, devex, devex_mode,
+                              entering.col);
       ++statistics.bound_flips;
       ++statistics.iterations;
       ++profile.pivots;
@@ -474,11 +591,12 @@ Result run_primal_phase(
     std::string failure;
     if (!row_solve.accepted) {
       if (state.updates_since_rebuild > 0) {
-        if (!rebuild_primal_state(state, statistics, failure)) {
+        if (!rebuild_primal_state(state, statistics, devex_mode, devex,
+                                  failure)) {
           return make_result(state, Status::NumericalFailure,
                              std::move(failure), statistics);
         }
-        initialize_entering_heap(state, pricing_heap);
+        initialize_entering_heap(state, pricing_heap, devex, devex_mode);
         continue;
       }
       return make_result(state, Status::NumericalFailure,
@@ -532,14 +650,30 @@ Result run_primal_phase(
                          "packed primal pivotal-row pricing failed", statistics);
     }
     const double pivot = leaving.direction_value;
-    const double dual_step = state.reduced_costs[entering.col] / pivot;
-    if (!std::isfinite(dual_step)) {
+    const double row_pivot = pivot_row.at(entering.col);
+    if (!primal_pivot_identity_acceptable(pivot, row_pivot)) {
       if (state.updates_since_rebuild > 0) {
-        if (!rebuild_primal_state(state, statistics, failure)) {
+        if (!rebuild_primal_state(state, statistics, devex_mode, devex,
+                                  failure)) {
           return make_result(state, Status::NumericalFailure,
                              std::move(failure), statistics);
         }
-        initialize_entering_heap(state, pricing_heap);
+        initialize_entering_heap(state, pricing_heap, devex, devex_mode);
+        continue;
+      }
+      return make_result(state, Status::NumericalFailure,
+                         "fresh primal row/column pivot identity failed",
+                         statistics);
+    }
+    const double dual_step = state.reduced_costs[entering.col] / pivot;
+    if (!std::isfinite(dual_step)) {
+      if (state.updates_since_rebuild > 0) {
+        if (!rebuild_primal_state(state, statistics, devex_mode, devex,
+                                  failure)) {
+          return make_result(state, Status::NumericalFailure,
+                             std::move(failure), statistics);
+        }
+        initialize_entering_heap(state, pricing_heap, devex, devex_mode);
         continue;
       }
       return make_result(state, Status::NumericalFailure,
@@ -557,11 +691,12 @@ Result run_primal_phase(
     }
     if (!reduced_cost_update_finite) {
       if (state.updates_since_rebuild > 0) {
-        if (!rebuild_primal_state(state, statistics, failure)) {
+        if (!rebuild_primal_state(state, statistics, devex_mode, devex,
+                                  failure)) {
           return make_result(state, Status::NumericalFailure,
                              std::move(failure), statistics);
         }
-        initialize_entering_heap(state, pricing_heap);
+        initialize_entering_heap(state, pricing_heap, devex, devex_mode);
         continue;
       }
       return make_result(state, Status::NumericalFailure,
@@ -572,16 +707,69 @@ Result run_primal_phase(
         state.objective + state.reduced_costs[entering.col] * primal_delta;
     if (!std::isfinite(candidate_objective)) {
       if (state.updates_since_rebuild > 0) {
-        if (!rebuild_primal_state(state, statistics, failure)) {
+        if (!rebuild_primal_state(state, statistics, devex_mode, devex,
+                                  failure)) {
           return make_result(state, Status::NumericalFailure,
                              std::move(failure), statistics);
         }
-        initialize_entering_heap(state, pricing_heap);
+        initialize_entering_heap(state, pricing_heap, devex, devex_mode);
         continue;
       }
       return make_result(state, Status::NumericalFailure,
                          "fresh primal objective update is non-finite",
                          statistics);
+    }
+    static thread_local std::vector<PrimalWeightChange> weight_changes;
+    weight_changes.clear();
+    bool restart_devex_after_pivot = false;
+    if (devex_mode == PrimalDevexMode::Pse) {
+      const double pse_btran_start = profile.enabled ? primal_clock() : 0.0;
+      const IndexedSolveEvidence pse_solve =
+          state.factor->indexed_btran(entering.direction);
+      if (profile.enabled) profile.btran += primal_clock() - pse_btran_start;
+      if (!pse_solve.accepted) {
+        return make_result(state, Status::NumericalFailure,
+                           "primal PSE cross-product BTRAN failed", statistics);
+      }
+      const double pse_price_start = profile.enabled ? primal_clock() : 0.0;
+      const IndexedVector cross_products =
+          multiply_AT_indexed(state.sf->A_row, pse_solve.solution);
+      if (profile.enabled) profile.price += primal_clock() - pse_price_start;
+      long double direction_squared_norm = 0.0L;
+      for (double value : entering.direction.value) {
+        direction_squared_norm += static_cast<long double>(value) * value;
+      }
+      if (!cross_products.finite() ||
+          direction_squared_norm > std::numeric_limits<double>::max() ||
+          !prepare_primal_pse_update(
+              devex.weight, entering.col, leaving_col, pivot,
+              static_cast<double>(direction_squared_norm), pivot_row,
+              cross_products, weight_changes)) {
+        return make_result(state, Status::NumericalFailure,
+                           "primal PSE weight transaction is invalid",
+                           statistics);
+      }
+    } else if (devex_mode != PrimalDevexMode::Off) {
+      const double pivot_reference_weight =
+          primal_devex_pivot_reference_weight(devex, state.basis, entering.col,
+                                              entering.direction);
+      if (devex.weight[static_cast<std::size_t>(entering.col)] >
+          kPrimalDevexBadWeightFactor * pivot_reference_weight) {
+        ++devex.bad_weight_count;
+        restart_devex_after_pivot =
+            devex.bad_weight_count > kPrimalDevexBadWeightLimit;
+      }
+      if (!prepare_primal_devex_update(
+              devex, entering.col, leaving_col, pivot,
+              pivot_reference_weight, pivot_row, weight_changes)) {
+        if (devex_mode == PrimalDevexMode::On) {
+          return make_result(state, Status::NumericalFailure,
+                             "primal Devex weight transaction is invalid",
+                             statistics);
+        }
+        devex_mode = PrimalDevexMode::Off;
+        weight_changes.clear();
+      }
     }
     const double update_start = profile.enabled ? primal_clock() : 0.0;
     if (!state.factor->update_indexed(leaving.row, entering.col, failure)) {
@@ -599,6 +787,10 @@ Result run_primal_phase(
     state.basis[static_cast<std::size_t>(leaving.row)] = entering.col;
     state.basic[static_cast<std::size_t>(leaving_col)] = 0;
     state.basic[static_cast<std::size_t>(entering.col)] = 1;
+    if (devex_mode != PrimalDevexMode::Off &&
+        !restart_devex_after_pivot) {
+      commit_primal_weight_changes(devex, weight_changes);
+    }
     for (const auto& [row, value] : primal_changes) state.x_basic[row] = value;
     for (std::size_t k = 0; k < pivot_row.index.size(); ++k) {
       const int col = pivot_row.index[k];
@@ -608,11 +800,23 @@ Result run_primal_phase(
       } else {
         state.reduced_costs[col] -= dual_step * pivot_row.value[k];
       }
-      refresh_entering_column(state, pricing_heap, col);
     }
     state.reduced_costs[entering.col] = 0.0;
-    refresh_entering_column(state, pricing_heap, entering.col);
-    refresh_entering_column(state, pricing_heap, leaving_col);
+    if ((devex_mode == PrimalDevexMode::On ||
+         devex_mode == PrimalDevexMode::Shadow) &&
+        restart_devex_after_pivot) {
+      initialize_primal_devex(state.n, state.basic, devex);
+      initialize_entering_heap(state, pricing_heap, devex, devex_mode);
+      ++profile.devex_restarts;
+    } else {
+      for (int col : pivot_row.index) {
+        refresh_entering_column(state, pricing_heap, devex, devex_mode, col);
+      }
+      refresh_entering_column(state, pricing_heap, devex, devex_mode,
+                              entering.col);
+      refresh_entering_column(state, pricing_heap, devex, devex_mode,
+                              leaving_col);
+    }
     state.objective = candidate_objective;
     ++statistics.iterations;
     ++profile.pivots;
@@ -620,11 +824,12 @@ Result run_primal_phase(
     state.fresh_rebuild = false;
     if (state.factor->needs_rebuild() ||
         state.updates_since_rebuild >= kPrimalRebuildInterval) {
-      if (!rebuild_primal_state(state, statistics, failure)) {
+      if (!rebuild_primal_state(state, statistics, devex_mode, devex,
+                                failure)) {
         return make_result(state, Status::NumericalFailure,
                            std::move(failure), statistics);
       }
-      initialize_entering_heap(state, pricing_heap);
+      initialize_entering_heap(state, pricing_heap, devex, devex_mode);
     }
   }
   return make_result(state, Status::IterationLimit,

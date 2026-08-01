@@ -194,6 +194,53 @@ Bounds make_phase_two_bounds(const StandardFormLP& sf) {
   return bounds;
 }
 
+Eigen::VectorXd make_dual_phase_one_anchor(const StandardFormLP& sf) {
+  Eigen::VectorXd anchor = Eigen::VectorXd::Zero(sf.A.cols());
+  const std::vector<int> logical = logical_columns(sf);
+  if (static_cast<int>(logical.size()) != sf.A.rows() ||
+      sf.b.size() != sf.A.rows()) {
+    return {};
+  }
+  for (int row = 0; row < sf.A.rows(); ++row) {
+    const int col = logical[static_cast<std::size_t>(row)];
+    if (col < 0 || col >= sf.A.cols()) return {};
+    double pivot = 0.0;
+    int nonzeros = 0;
+    for (Eigen::SparseMatrix<double>::InnerIterator it(sf.A, col); it; ++it) {
+      if (it.value() == 0.0) continue;
+      ++nonzeros;
+      if (it.row() == row) pivot = it.value();
+    }
+    if (nonzeros != 1 || pivot == 0.0 || !std::isfinite(pivot)) return {};
+    anchor[col] = sf.b[row] / pivot;
+  }
+  return anchor;
+}
+
+Bounds make_dual_phase_one_bounds(const StandardFormLP& sf,
+                                  const Eigen::VectorXd& anchor) {
+  const int n = static_cast<int>(sf.A.cols());
+  Bounds bounds;
+  bounds.lower = anchor;
+  bounds.upper = anchor;
+  bounds.enterable.assign(static_cast<std::size_t>(n), 0);
+  if (anchor.size() != n) return bounds;
+
+  const Bounds phase_two = make_phase_two_bounds(sf);
+  for (int j = 0; j < n; ++j) {
+    // In homogeneous coordinates z=x-x0, every Native column has a finite
+    // lower bound. HiGHS' dual Phase-I map is therefore [0,1] for a
+    // lower-only column and [0,0] for a boxed/fixed column. Translate those
+    // bounds back to x coordinates before giving them to the existing kernel.
+    if (phase_two.enterable[static_cast<std::size_t>(j)] &&
+        !std::isfinite(phase_two.upper[j])) {
+      bounds.upper[j] = anchor[j] + 1.0;
+      bounds.enterable[static_cast<std::size_t>(j)] = 1;
+    }
+  }
+  return bounds;
+}
+
 Bounds make_primal_phase_one_bounds(const StandardFormLP& sf) {
   Bounds bounds = make_phase_two_bounds(sf);
   for (int col : sf.row_to_artificial_col) {
@@ -211,6 +258,123 @@ Eigen::VectorXd make_primal_phase_one_cost(const StandardFormLP& sf) {
     if (col >= 0 && col < sf.A.cols()) cost[col] = -1.0;
   }
   return cost;
+}
+
+bool initialize_dual_phase_one(State& state, std::string& failure) {
+  state.phase = Phase::DualOne;
+  state.cost = state.sf->c_max;
+  state.original_cost = state.sf->c_max;
+  state.cost_perturbation = Eigen::VectorXd::Zero(state.n);
+  state.cost_shift = Eigen::VectorXd::Zero(state.n);
+  state.costs_perturbed = false;
+  state.costs_shifted = false;
+  state.perturbation_disabled = false;
+  state.dual_phase_one_anchor = make_dual_phase_one_anchor(*state.sf);
+  if (state.dual_phase_one_anchor.size() != state.n ||
+      !state.dual_phase_one_anchor.allFinite()) {
+    failure = "dual Phase-I anchor is invalid";
+    return false;
+  }
+  const double anchor_residual = equation_residual_inf(
+      state.sf->A, state.dual_phase_one_anchor, state.sf->b);
+  const double residual_limit =
+      state.options->feasibility_tol *
+      std::max(1.0, state.sf->b.lpNorm<Eigen::Infinity>());
+  if (!(anchor_residual <= residual_limit)) {
+    failure = "dual Phase-I anchor does not satisfy Ax0=b";
+    return false;
+  }
+
+  state.bounds =
+      make_dual_phase_one_bounds(*state.sf, state.dual_phase_one_anchor);
+  for (int j = 0; j < state.n; ++j) {
+    if (state.basic[static_cast<std::size_t>(j)] ||
+        !state.bounds.enterable[static_cast<std::size_t>(j)]) {
+      state.move[static_cast<std::size_t>(j)] = Move::Fixed;
+      continue;
+    }
+    if (!(state.bounds.upper[j] > state.bounds.lower[j])) {
+      failure = "dual Phase-I unit interval is not representable";
+      return false;
+    }
+    state.move[static_cast<std::size_t>(j)] =
+        state.reduced_costs[j] > 0.0 ? Move::Down : Move::Up;
+  }
+  if (!reconstruct(state, failure)) {
+    failure = "dual Phase-I reconstruction failed: " + failure;
+    return false;
+  }
+  const Audit initial = audit(state, false, true, false);
+  if (!initial.ok) {
+    failure = "dual Phase-I initial invariant failed: " + initial.failure;
+    return false;
+  }
+  return true;
+}
+
+double dual_phase_one_objective(const State& state) {
+  if (state.phase != Phase::DualOne ||
+      state.dual_phase_one_anchor.size() != state.n) {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+  long double objective = 0.0L;
+  for (int j = 0; j < state.n; ++j) {
+    if (state.basic[static_cast<std::size_t>(j)]) continue;
+    const double value = state.move[static_cast<std::size_t>(j)] == Move::Down
+                             ? state.bounds.upper[j]
+                             : state.bounds.lower[j];
+    objective += static_cast<long double>(value - state.dual_phase_one_anchor[j]) *
+                 static_cast<long double>(state.reduced_costs[j]);
+  }
+  return static_cast<double>(objective);
+}
+
+DualInfeasibilitySummary original_dual_infeasibility_summary(
+    const State& state) {
+  DualInfeasibilitySummary summary;
+  const Bounds original = make_phase_two_bounds(*state.sf);
+  const double tolerance = state.options->optimality_tol;
+  for (int j = 0; j < state.n; ++j) {
+    if (state.basic[static_cast<std::size_t>(j)] ||
+        !original.enterable[static_cast<std::size_t>(j)] ||
+        std::isfinite(original.upper[j])) {
+      continue;
+    }
+    const double infeasibility = std::max(0.0, state.reduced_costs[j]);
+    summary.sum += infeasibility;
+    summary.max = std::max(summary.max, infeasibility);
+    if (infeasibility > tolerance) ++summary.count;
+  }
+  return summary;
+}
+
+bool transition_dual_phase_one_to_two(State& state,
+                                      DualInfeasibilitySummary& summary,
+                                      std::string& failure) {
+  if (state.phase != Phase::DualOne) {
+    failure = "dual Phase-I transition requested from the wrong phase";
+    return false;
+  }
+  summary = original_dual_infeasibility_summary(state);
+  if (summary.count != 0) {
+    failure = "dual Phase I ended with original-bound dual infeasibilities";
+    return false;
+  }
+
+  state.phase = Phase::Two;
+  state.bounds = make_phase_two_bounds(*state.sf);
+  state.dual_phase_one_anchor.resize(0);
+  if (!normalize_nonbasic_moves(state, failure)) {
+    failure = "dual Phase-I transition reconstruction failed: " + failure;
+    return false;
+  }
+  const Audit transitioned = audit(state, false, true, false);
+  if (!transitioned.ok) {
+    failure = "dual Phase-I transition invariant failed: " +
+              transitioned.failure;
+    return false;
+  }
+  return true;
 }
 
 bool build_logical_basis(const StandardFormLP& sf, std::vector<int>& basis,
@@ -355,7 +519,12 @@ bool correct_canonical_primal_residual(State& state, std::string& failure) {
 bool reconstruct(State& state, std::string& failure) {
   state.leaving_heap_valid = false;
   if (!rebuild_membership(state, failure)) return false;
-  Eigen::VectorXd rhs = state.sf->b;
+  const bool anchored_dual_phase_one =
+      state.phase == Phase::DualOne &&
+      state.dual_phase_one_anchor.size() == state.n;
+  Eigen::VectorXd rhs = anchored_dual_phase_one
+                            ? Eigen::VectorXd::Zero(state.m)
+                            : state.sf->b;
   for (int j = 0; j < state.n; ++j) {
     if (state.basic[static_cast<std::size_t>(j)]) continue;
     double value = state.bounds.lower[j];
@@ -365,6 +534,9 @@ bool reconstruct(State& state, std::string& failure) {
         failure = "nonbasic variable is at an infinite upper bound";
         return false;
       }
+    }
+    if (anchored_dual_phase_one) {
+      value -= state.dual_phase_one_anchor[j];
     }
     if (value == 0.0) continue;
     for (Eigen::SparseMatrix<double>::InnerIterator it(state.sf->A, j); it;
@@ -379,6 +551,12 @@ bool reconstruct(State& state, std::string& failure) {
     failure = "FTRAN failed backward-error validation: " +
               state.factor->last_solve_diagnostics();
     return false;
+  }
+  if (anchored_dual_phase_one) {
+    for (int row = 0; row < state.m; ++row) {
+      state.x_basic[row] += state.dual_phase_one_anchor[
+          state.basis[static_cast<std::size_t>(row)]];
+    }
   }
   if (!correct_canonical_primal_residual(state, failure)) return false;
 
@@ -428,6 +606,60 @@ bool normalize_nonbasic_moves(State& state, std::string& failure) {
     }
   }
   return reconstruct(state, failure);
+}
+
+bool initialize_cost_shifted_dual_start(State& state, Statistics& statistics,
+                                        std::string& failure) {
+  state.original_cost = state.cost;
+  state.cost_perturbation = Eigen::VectorXd::Zero(state.n);
+  state.cost_shift = Eigen::VectorXd::Zero(state.n);
+  state.costs_perturbed = false;
+  state.costs_shifted = false;
+  state.perturbation_disabled = false;
+
+  const double tolerance = state.options->optimality_tol;
+  for (int j = 0; j < state.n; ++j) {
+    if (state.basic[static_cast<std::size_t>(j)] ||
+        !state.bounds.enterable[static_cast<std::size_t>(j)]) {
+      state.move[static_cast<std::size_t>(j)] = Move::Fixed;
+      continue;
+    }
+    if (state.reduced_costs[j] <= tolerance) {
+      state.move[static_cast<std::size_t>(j)] = Move::Up;
+      continue;
+    }
+    if (std::isfinite(state.bounds.upper[j])) {
+      state.move[static_cast<std::size_t>(j)] = Move::Down;
+      continue;
+    }
+
+    const double shift = -state.reduced_costs[j];
+    if (!std::isfinite(shift)) {
+      failure = "dual-start cost shift is non-finite";
+      return false;
+    }
+    state.cost[j] += shift;
+    state.cost_shift[j] = shift;
+    state.reduced_costs[j] = 0.0;
+    state.move[static_cast<std::size_t>(j)] = Move::Up;
+    state.costs_shifted = true;
+    ++statistics.cost_shifts;
+    statistics.max_cost_shift =
+        std::max(statistics.max_cost_shift, std::abs(shift));
+  }
+
+  if (!reconstruct(state, failure)) {
+    failure = "cost-shifted dual-start reconstruction failed: " + failure;
+    return false;
+  }
+  const Audit initial = audit(state, false, true, false);
+  if (!initial.ok) {
+    failure = "cost-shifted dual-start invariant failed: " + initial.failure;
+    return false;
+  }
+  statistics.max_primal_infeasibility = initial.max_primal_infeasibility;
+  statistics.max_dual_infeasibility = initial.max_dual_infeasibility;
+  return true;
 }
 
 bool initialize_exact_edge_weights(State& state, Statistics& statistics,
@@ -491,11 +723,12 @@ void initialize_devex_framework(State& state, Statistics& statistics) {
 
 bool initialize_stabilized_cost(State& state, Statistics& statistics,
                                 std::string& failure) {
-  state.original_cost = state.cost;
+  if (!state.costs_shifted) {
+    state.original_cost = state.cost;
+    state.cost_shift = Eigen::VectorXd::Zero(state.n);
+  }
   state.cost_perturbation = Eigen::VectorXd::Zero(state.n);
-  state.cost_shift = Eigen::VectorXd::Zero(state.n);
   state.costs_perturbed = false;
-  state.costs_shifted = false;
   state.perturbation_disabled = false;
   if (state.phase != Phase::Two) return true;
 

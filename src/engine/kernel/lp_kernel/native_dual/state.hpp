@@ -5,8 +5,25 @@
 namespace mipsolvers::engine::native_dual::detail {
 
 Bounds make_phase_two_bounds(const StandardFormLP& sf);
+Eigen::VectorXd make_dual_phase_one_anchor(const StandardFormLP& sf);
+Bounds make_dual_phase_one_bounds(const StandardFormLP& sf,
+                                  const Eigen::VectorXd& anchor);
 Bounds make_primal_phase_one_bounds(const StandardFormLP& sf);
 Eigen::VectorXd make_primal_phase_one_cost(const StandardFormLP& sf);
+
+struct DualInfeasibilitySummary {
+  int count{0};
+  double max{0.0};
+  double sum{0.0};
+};
+
+bool initialize_dual_phase_one(State& state, std::string& failure);
+double dual_phase_one_objective(const State& state);
+DualInfeasibilitySummary original_dual_infeasibility_summary(
+    const State& state);
+bool transition_dual_phase_one_to_two(State& state,
+                                      DualInfeasibilitySummary& summary,
+                                      std::string& failure);
 bool is_artificial(const StandardFormLP& sf, int col);
 bool build_logical_basis(const StandardFormLP& sf, std::vector<int>& basis,
                          std::string& failure);
@@ -21,6 +38,8 @@ bool rebuild_membership(State& state, std::string& failure);
 bool reconstruct(State& state, std::string& failure);
 bool correct_canonical_primal_residual(State& state, std::string& failure);
 bool normalize_nonbasic_moves(State& state, std::string& failure);
+bool initialize_cost_shifted_dual_start(State& state, Statistics& statistics,
+                                        std::string& failure);
 bool initialize_exact_edge_weights(State& state, Statistics& statistics,
                                    std::string& failure);
 void initialize_devex_framework(State& state, Statistics& statistics);

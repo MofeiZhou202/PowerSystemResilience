@@ -15,7 +15,7 @@
 
 namespace mipsolvers::engine::native_dual::detail {
 
-enum class Phase { One, Two };
+enum class Phase { One, DualOne, Two };
 
 enum class EdgeWeightMode { SteepestEdge, Devex };
 
@@ -65,6 +65,9 @@ struct State {
   Eigen::VectorXd original_cost;
   Eigen::VectorXd cost_perturbation;
   Eigen::VectorXd cost_shift;
+  // Feasible anchor Ax0=b used to express dual Phase I in the homogeneous
+  // coordinates z=x-x0. Empty outside dual Phase I.
+  Eigen::VectorXd dual_phase_one_anchor;
   Eigen::VectorXd x_basic;
   Eigen::VectorXd reduced_costs;
   std::vector<double> edge_weight;
@@ -221,6 +224,24 @@ struct PivotTransaction {
   bool stability_blocked{false};
   int unstable_pivot_rejections{0};
   int harris_second_pass_candidates{0};
+  // CHUZC terminal evidence. The three nested candidate domains distinguish
+  // the mathematical sign condition from the dot-product certification and
+  // the stronger pivot-stability threshold used for an actual basis update.
+  int positive_candidate_count{0};
+  int certified_candidate_count{0};
+  int stable_candidate_count{0};
+  double positive_capacity{0.0};
+  double certified_capacity{0.0};
+  double stable_capacity{0.0};
+  double stable_capacity_error{0.0};
+  // BFRT profiling evidence. These counters describe the exact candidate
+  // ordering used by this transaction and do not participate in the pivot.
+  int bfrt_candidate_count{0};
+  int bfrt_group_count{0};
+  int bfrt_selected_group_size{0};
+  int bfrt_stability_prefiltered{0};
+  double bfrt_sort_time_sec{0.0};
+  double bfrt_order_time_sec{0.0};
 };
 
 struct Certificate {
