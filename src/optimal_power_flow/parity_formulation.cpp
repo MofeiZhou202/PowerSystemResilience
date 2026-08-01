@@ -10,6 +10,7 @@
 
 #include <Eigen/Dense>
 #include <Eigen/SparseLU>
+#include <Eigen/SparseQR>
 
 #include "hacdcpf/assembly/solver_data.hpp"
 #include "hacdcpf/model/device_control_role.hpp"
@@ -546,19 +547,17 @@ Problem build_problem(const HybridPowerSystem& sys, const ParityOptions& opt) {
     prob.b_diag[i] = yii.imag();
   }
 
-  prob.gdc_dense = Eigen::MatrixXd(prob.data.gdc);
-
   // DC buses with no conductive branch are voltage-unobservable (they connect to
   // the rest of the network only through converters whose injections do not
   // depend on the bus's own voltage).  Anchor them softly to vm_pu.
   prob.dc_volt_anchor.clear();
-  for (int k = 0; k < ndc; ++k) {
-    bool has_branch = false;
-    for (int m = 0; m < ndc; ++m) {
-      if (m != k && std::abs(prob.gdc_dense(k, m)) > 0.0) { has_branch = true; break; }
-    }
-    if (!has_branch) prob.dc_volt_anchor.push_back(k);
+  std::vector<unsigned char> dc_observable(static_cast<size_t>(ndc), 0);
+  for (int col = 0; col < prob.data.gdc.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(prob.data.gdc, col); it; ++it)
+      if (it.row() != it.col()) dc_observable[static_cast<size_t>(it.row())] = 1;
   }
+  for (int k = 0; k < ndc; ++k)
+    if (dc_observable[static_cast<size_t>(k)] == 0) prob.dc_volt_anchor.push_back(k);
 
   // --- Compute fixed DER injections (non-variable components) ---
   prob.p_fixed_inj = Eigen::VectorXd::Zero(nb);
@@ -1160,34 +1159,53 @@ void build_initial_point(const Problem& prob,
     }
   }
 
-  // Least-squares feasibility correction: solve Jg'·(Jg·Jg')^{-1}·(-g)
-  // to minimally adjust x0 so equality constraints are nearly satisfied.
-  {
-    EvalWorkspace ws_init;
-    Eigen::VectorXd g_init;
-    Eigen::SparseMatrix<double> jg_init;
-    Eigen::VectorXd x_tmp = x0;
-    // Clamp before evaluating (needed for valid Jacobian)
-    for (int i = 0; i < idx.n_total; ++i) {
-      x_tmp[i] = clamp_interior(x_tmp[i], xmin[i], xmax[i]);
-    }
-    equality_constraints(prob, x_tmp, ws_init, g_init);
-    equality_jacobian(prob, x_tmp, ws_init, jg_init);
-    // Sparse normal equations: (Jg·Jg')·v = -g, then dx = Jg'·v
-    const Eigen::SparseMatrix<double> JJt_sparse = jg_init * jg_init.transpose();
-    Eigen::SparseLU<Eigen::SparseMatrix<double>> splu;
-    splu.compute(JJt_sparse);
-    if (splu.info() == Eigen::Success) {
-      const Eigen::VectorXd v = splu.solve(-g_init);
-      if (v.allFinite()) {
-        const Eigen::VectorXd dx = jg_init.transpose() * v;
-        constexpr double kDamp = 0.8;
-        x0 = x_tmp + kDamp * dx;
-      } else {
-        x0 = x_tmp;
+  // Large hybrid models start directly from the physical seed.  Smaller
+  // systems use a sparse augmented solve without forming the Jg*Jg' normal matrix.
+  if ((idx.n_vdc == 0 && idx.n_total <= 20000) || idx.n_total <= 5000) {
+    for (int i = 0; i < idx.n_total; ++i)
+      x0[i] = clamp_interior(x0[i], xmin[i], xmax[i]);
+    EvalWorkspace ws;
+    Eigen::VectorXd g;
+    Eigen::SparseMatrix<double> jg;
+    equality_constraints(prob, x0, ws, g);
+    equality_jacobian(prob, x0, ws, jg);
+    const int n = idx.n_total, m = static_cast<int>(g.size());
+    if (idx.n_vdc == 0) {
+      std::vector<Eigen::Triplet<double>> t;
+      t.reserve(static_cast<size_t>(n + 2 * jg.nonZeros()));
+      for (int col = 0; col < jg.outerSize(); ++col) {
+        t.emplace_back(col, col, 1.0);
+        for (Eigen::SparseMatrix<double>::InnerIterator it(jg, col); it; ++it) {
+          t.emplace_back(col, n + it.row(), it.value());
+          t.emplace_back(n + it.row(), col, it.value());
+        }
+      }
+      Eigen::SparseMatrix<double> kkt(n + m, n + m);
+      kkt.setFromTriplets(t.begin(), t.end());
+      Eigen::SparseLU<Eigen::SparseMatrix<double>> lu;
+      lu.compute(kkt);
+      if (lu.info() == Eigen::Success) {
+        Eigen::VectorXd rhs = Eigen::VectorXd::Zero(n + m);
+        rhs.tail(m) = -g;
+        const Eigen::VectorXd step = lu.solve(rhs);
+        if (step.allFinite()) x0 += 0.8 * step.head(n);
       }
     } else {
-      x0 = x_tmp;
+      using Sparse = Eigen::SparseMatrix<double>;
+      Eigen::SparseQR<Sparse, Eigen::COLAMDOrdering<int>> qr;
+      qr.compute(Sparse(jg.transpose()));
+      if (qr.info() == Eigen::Success && qr.rank() == m) {
+        Sparse rt = Sparse(qr.matrixR()).topLeftCorner(m, m).transpose();
+        Eigen::SparseLU<Sparse> lu;
+        lu.compute(rt);
+        if (lu.info() == Eigen::Success) {
+          const Eigen::VectorXd y = lu.solve(qr.colsPermutation().transpose() * -g);
+          Eigen::VectorXd qy = Eigen::VectorXd::Zero(n);
+          qy.head(m) = y;
+          const Eigen::VectorXd dx = qr.matrixQ() * qy;
+          if (dx.allFinite()) x0 += 0.8 * dx;
+        }
+      }
     }
   }
 
@@ -1506,16 +1524,10 @@ void equality_constraints(const Problem& prob,
     g[cidx.i_qbal_ac + i] *= prob.scale_q;
   }
 
+  ws.p_dc_flow.noalias() = prob.data.gdc * vdc;
   for (int k = 0; k < ndc; ++k) {
-    // Match the PF definition exactly: Pcalc_k = Vk * (Gdc * V)_k.
-    // Gdc has positive diagonal and negative off-diagonal entries, so a
-    // sending bus at higher voltage has positive network injection.
-    double current_pu = 0.0;
-    for (int m = 0; m < ndc; ++m) {
-      const double gkm = prob.gdc_dense(k, m);
-      if (gkm != 0.0) current_pu += gkm * vdc[m];
-    }
-    const double pflow = vdc[k] * current_pu;
+    // Match PF exactly: Pcalc_k = Vk * (Gdc * V)_k.
+    const double pflow = vdc[k] * ws.p_dc_flow[k];
     const double bus_demand =
         prob.data.dc_buses[static_cast<size_t>(k)].pd_mw / prob.data.base_mva;
     g[cidx.i_pbal_dc + k] = bus_demand + pflow - ws.p_conv_dc[k];
@@ -1680,8 +1692,8 @@ void equality_jacobian(const Problem& prob,
   const Eigen::Map<const Eigen::VectorXd> qac(x.data() + idx.i_qac, idx.n_qac);
 
   std::vector<Eigen::Triplet<double>> t;
-  t.reserve(static_cast<size_t>(12 * nb + 24 * prob.data.ybus.nonZeros() + 20 * idx.n_pac +
-                                std::max(1, ndc * std::max(1, ndc))));
+  t.reserve(static_cast<size_t>(12 * nb + 24 * prob.data.ybus.nonZeros() +
+                                20 * idx.n_pac + 2 * prob.data.gdc.nonZeros()));
 
   for (int i = 0; i < nb; ++i) {
     const int rp = cidx.i_pbal_ac + i;
@@ -1749,14 +1761,12 @@ void equality_jacobian(const Problem& prob,
     }
   }
 
-  for (int k = 0; k < ndc; ++k) {
-    const int row = cidx.i_pbal_dc + k;
-    for (int m = 0; m < ndc; ++m) {
-      double v = vdc[k] * prob.gdc_dense(k, m);
-      if (m == k) v += prob.gdc_dense.row(k).dot(vdc);
-      if (v != 0.0) {
-        t.emplace_back(row, idx.i_vdc + m, v);
-      }
+  for (int col = 0; col < prob.data.gdc.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(prob.data.gdc, col); it; ++it) {
+      const int row = static_cast<int>(it.row());
+      t.emplace_back(cidx.i_pbal_dc + row, idx.i_vdc + col,
+                     vdc[row] * it.value() +
+                         (row == col ? ws.p_dc_flow[row] : 0.0));
     }
   }
 
@@ -2374,22 +2384,15 @@ void lagrangian_hessian(const Problem& prob,
   }
 
   // ── DC Bus Hessian ──
-  for (int k = 0; k < ndc; ++k) {
-    const double lambda_k = lambda_eq[cidx.i_pbal_dc + k];
-    if (std::abs(lambda_k) < 1e-14) {
-      continue;
-    }
-    const int row = idx.i_vdc + k;
-    add(row, row, lambda_k * 2.0 * prob.gdc_dense(k, k));
-    for (int m = 0; m < ndc; ++m) {
-      if (m == k) {
-        continue;
-      }
-      const double gkm = prob.gdc_dense(k, m);
-      if (gkm == 0.0) {
-        continue;
-      }
-      add_sym_trip(row, idx.i_vdc + m, lambda_k * gkm);
+  for (int col = 0; col < prob.data.gdc.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(prob.data.gdc, col); it; ++it) {
+      const int row = static_cast<int>(it.row());
+      const double lambda_k = lambda_eq[cidx.i_pbal_dc + row];
+      if (std::abs(lambda_k) < 1e-14) continue;
+      if (row == col)
+        add(idx.i_vdc + row, idx.i_vdc + row, 2.0 * lambda_k * it.value());
+      else
+        add_sym_trip(idx.i_vdc + row, idx.i_vdc + col, lambda_k * it.value());
     }
   }
 

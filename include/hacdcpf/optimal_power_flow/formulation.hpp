@@ -203,7 +203,6 @@ struct Problem {
   Eigen::VectorXd q_fixed_inj;
   Eigen::VectorXd g_diag;
   Eigen::VectorXd b_diag;
-  Eigen::MatrixXd gdc_dense;
 };
 
 /// Reusable buffers for equality and Jacobian evaluation.

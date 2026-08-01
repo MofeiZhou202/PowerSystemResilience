@@ -946,6 +946,48 @@ TEST_CASE("case2000 AC/DC Ipopt bounded performance benchmark",
   CHECK(std::isfinite(r.max_stationarity));
 }
 
+TEST_CASE("Parity derivatives stay sparse at 70000 DC buses",
+          "[.performance][opf][acdc][scale][case70000]") {
+  constexpr int n = 70000;
+  HybridPowerSystem sys = io::build_case300_acdc();
+  sys.dc.buses.resize(n);
+  sys.dc.branches.resize(n - 1);
+  for (int i = 0; i < n; ++i) {
+    sys.dc.buses[i].index = i + 1;
+    sys.dc.buses[i].bus_type = i == 0 ? DCBusType::DC_V : DCBusType::DC_P;
+    if (i + 1 < n) {
+      sys.dc.branches[i].index = i + 1;
+      sys.dc.branches[i].from_bus = i + 1;
+      sys.dc.branches[i].to_bus = i + 2;
+      sys.dc.branches[i].r_pu = 0.005;
+    }
+  }
+  const opf::parity::Problem prob = opf::parity::build_problem(sys);
+  Eigen::VectorXd x = Eigen::VectorXd::Zero(prob.vidx.n_total);
+  x.segment(prob.vidx.i_vm, prob.vidx.n_vm).setOnes();
+  x.segment(prob.vidx.i_vdc, prob.vidx.n_vdc).setOnes();
+  opf::parity::EvalWorkspace ws;
+  Eigen::VectorXd g;
+  Eigen::SparseMatrix<double> jg, hess;
+  opf::parity::equality_constraints(prob, x, ws, g);
+  opf::parity::equality_jacobian(prob, x, ws, jg);
+  opf::parity::lagrangian_hessian(
+      prob, x, Eigen::VectorXd::Ones(prob.cidx.n_eq_total), nullptr, hess);
+  CHECK(prob.vidx.n_vdc == n);
+  CHECK(prob.data.gdc.nonZeros() < 3 * n);
+  CHECK(std::max(jg.nonZeros(), hess.nonZeros()) < 6 * n);
+  CHECK(g.allFinite());
+  opf::ACOPFOptions opt;
+  opt.ac_solver_backend = opf::ACOPFSolverBackend::Ipopt;
+  opt.max_inner_iterations = 200;
+  opt.max_outer_iterations = 1;
+  opt.allow_fallback = false;
+  opt.stationarity_tol = 1e-3;
+  const opf::ACOPFResult result = opf::solve_ac_opf(sys, opt);
+  CHECK(result.converged);
+  CHECK(result.max_constraint_violation < 1e-6);
+}
+
 TEST_CASE("Ipopt OPF parameter stability matrix",
           "[.performance][opf][ipopt][parameter-matrix]") {
   struct MatrixConfig {
