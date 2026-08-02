@@ -1497,8 +1497,12 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
                                                          : bc_res.stats.mip_gap;
     };
 
-    engine::HighsAdapter highs;
-    if (highs.available()) {
+    engine::BCOptions highs_options;
+    highs_options.max_nodes = 2048;
+    highs_options.time_limit_sec = 30.0;
+    highs_options.gap_tol = kGapTol;
+    engine::StrictHighsBranchAndCutAdapter highs(highs_options);
+    {
       auto highs_res = highs.solve_milp(mip);
       res_x        = highs_res.x;
       res_success  = highs_res.stats.success;
@@ -1512,8 +1516,6 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
         }
         solve_with_native_bc(reason);
       }
-    } else {
-      solve_with_native_bc("");
     }
   }
 

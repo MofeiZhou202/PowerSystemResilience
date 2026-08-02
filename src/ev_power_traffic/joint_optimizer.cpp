@@ -1406,8 +1406,12 @@ static JointOptimizerResult solve_certified_dynamic_mpec_milp(
         : bc_res.stats.mip_gap;
   };
 
-  engine::HighsAdapter highs;
-  if (highs.available()) {
+  engine::BCOptions highs_options;
+  highs_options.max_nodes = std::max(1, opts.max_nodes);
+  highs_options.time_limit_sec = std::max(0.0, opts.time_limit_sec);
+  highs_options.gap_tol = std::max(0.0, opts.mip_gap);
+  engine::StrictHighsBranchAndCutAdapter highs(highs_options);
+  {
     auto hr = highs.solve_milp(mip);
     x_sol = hr.x;
     solved = hr.stats.success;
@@ -1423,8 +1427,6 @@ static JointOptimizerResult solve_certified_dynamic_mpec_milp(
           result.solver_status.empty() ? "unsuccessful" : result.solver_status;
       solve_native_bc(reason);
     }
-  } else {
-    solve_native_bc("");
   }
 
   result.solve_time_sec =
@@ -2447,8 +2449,12 @@ JointOptimizerResult solve_joint_optimizer(
                               result.mip_gap <= opts.mip_gap + 1e-9;
     };
 
-    engine::HighsAdapter highs;
-    if (highs.available()) {
+    engine::BCOptions highs_options;
+    highs_options.max_nodes = std::max(1, opts.max_nodes);
+    highs_options.time_limit_sec = std::max(0.0, opts.time_limit_sec);
+    highs_options.gap_tol = std::max(0.0, opts.mip_gap);
+    engine::StrictHighsBranchAndCutAdapter highs(highs_options);
+    {
       auto hr = highs.solve_milp(mip);
       x_sol  = hr.x;
       solved = hr.stats.success;
@@ -2468,8 +2474,6 @@ JointOptimizerResult solve_joint_optimizer(
             result.solver_status.empty() ? "unsuccessful" : result.solver_status;
         solve_native_bc(reason);
       }
-    } else {
-      solve_native_bc("");
     }
   }
 

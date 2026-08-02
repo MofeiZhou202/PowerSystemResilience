@@ -3,6 +3,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/projection/result_attribution.hpp"
 
 using Catch::Matchers::WithinAbs;
@@ -177,4 +178,69 @@ TEST_CASE("SPPT attribution is total and keyed by rich identity",
   const auto& attributed_breaker =
       require_row(result, "circuit_breaker", "AC", 34);
   CHECK(attributed_breaker.component_index == 34);
+}
+
+TEST_CASE("SPPT attribution restores charging from a merged self-loop line",
+          "[projection][attribution][self-loop][charging]") {
+  HybridPowerSystem rich;
+  rich.base_mva = rich.ac.base_mva = 100.0;
+  ACBus slack;
+  slack.index = 1;
+  slack.bus_type = BusType::SLACK;
+  ACBus pq;
+  pq.index = 2;
+  pq.bus_type = BusType::PQ;
+  rich.ac.buses = {slack, pq};
+
+  ExternalGrid grid;
+  grid.index = 1;
+  grid.bus = 1;
+  rich.ac.external_grids = {grid};
+
+  ACBranch line;
+  line.index = 7;
+  line.from_bus = 1;
+  line.to_bus = 2;
+  line.r_pu = 0.01;
+  line.x_pu = 0.05;
+  line.b_pu = 0.02;
+  rich.ac.branches = {line};
+
+  Switch bypass;
+  bypass.index = 3;
+  bypass.bus_from = 1;
+  bypass.bus_to = 2;
+  bypass.in_service = true;
+  bypass.closed = true;
+  rich.ac.switches = {bypass};
+
+  const auto projection = RichToCanonicalOperator::apply(rich);
+  REQUIRE(projection.canonical.bus_merge_map.has_value());
+  REQUIRE(projection.canonical.ac.branches.empty());
+  CHECK_THAT(projection.canonical.ac.buses.front().bs_mvar,
+             WithinAbs(2.0, 1e-12));
+
+  PowerFlowResult canonical_pf;
+  canonical_pf.converged = true;
+  canonical_pf.vm = {1.0};
+  canonical_pf.va = {0.0};
+  PowerFlowResult rich_pf;
+  rich_pf.converged = true;
+  rich_pf.vm = {1.0, 1.0};
+  rich_pf.va = {0.0, 0.0};
+  rich_pf.branch_flows.resize(1);
+
+  const auto solved_pf = solve_power_flow(rich);
+  REQUIRE(solved_pf.converged);
+  REQUIRE(solved_pf.branch_flows.size() == 1);
+  CHECK_THAT(solved_pf.branch_flows[0].qf_mvar, WithinAbs(-1.0, 1e-12));
+  CHECK_THAT(solved_pf.branch_flows[0].qt_mvar, WithinAbs(-1.0, 1e-12));
+
+  const auto result = CanonicalToRichOperator::apply(
+      rich, projection, nullptr, &canonical_pf, &rich_pf);
+  const auto& attributed_line = require_row(result, "ac_branch", "AC", 7);
+  REQUIRE(attributed_line.terminals.size() == 2);
+  CHECK_THAT(attributed_line.terminals[0].q_mvar, WithinAbs(-1.0, 1e-12));
+  CHECK_THAT(attributed_line.terminals[1].q_mvar, WithinAbs(-1.0, 1e-12));
+  CHECK(attributed_line.recovery == RecoveryClass::AuditOnly);
 }

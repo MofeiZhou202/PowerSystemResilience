@@ -324,12 +324,28 @@ RichResultAttribution CanonicalToRichOperator::apply(
 
   add_collection(out, rich.ac.loads, "load", "AC", "Load",
                  [&](auto& row, const auto& load) {
-                   set_value(row, "p_mw", load.in_service ? load.p_mw * load.scaling : 0.0, "MW");
-                   set_value(row, "q_mvar", load.in_service ? load.q_mvar * load.scaling : 0.0, "MVar");
+                   const double p =
+                       load.in_service ? load.p_mw * load.scaling : 0.0;
+                   const double q =
+                       load.in_service ? load.q_mvar * load.scaling : 0.0;
+                   set_value(row, "p_mw", p, "MW");
+                   set_value(row, "q_mvar", q, "MVar");
+                   set_terminal(row, "ac", load.bus, false, -p, -q,
+                                bus_voltage(rich, rich_pf, load.bus, false),
+                                true, true, true);
+                   row.recovery = RecoveryClass::Strong;
+                   row.recovery_reason = "authored load identity and time-step demand";
                  });
   add_collection(out, rich.dc.loads, "dc_load", "DC", "DC Load",
                  [&](auto& row, const auto& load) {
-                   set_value(row, "p_mw", load.in_service ? load.p_mw * load.scaling : 0.0, "MW");
+                   const double p =
+                       load.in_service ? load.p_mw * load.scaling : 0.0;
+                   set_value(row, "p_mw", p, "MW");
+                   set_terminal(row, "dc", load.bus, true, -p, 0.0,
+                                bus_voltage(rich, rich_pf, load.bus, true),
+                                true, false, true);
+                   row.recovery = RecoveryClass::Strong;
+                   row.recovery_reason = "authored DC load identity and time-step demand";
                  });
   add_collection(out, rich.ac.static_generators, "static_generator", "AC",
                  "Static Generator", [&](auto& row, const auto& source) {
@@ -360,6 +376,9 @@ RichResultAttribution CanonicalToRichOperator::apply(
                                 true, true, true);
                    row.canonical_sources.push_back(
                        {"Storage", storage.index, 1.0});
+                   row.recovery = RecoveryClass::Strong;
+                   row.recovery_reason =
+                       "stable AC storage identity and time-step dispatch";
                  });
   add_collection(out, rich.dc.storage, "storage", "DC", "DC ESS",
                  [&](auto& row, const auto& storage) {
@@ -371,6 +390,9 @@ RichResultAttribution CanonicalToRichOperator::apply(
                                 true, false, true);
                    row.canonical_sources.push_back(
                        {"DCStorage", storage.index, 1.0});
+                   row.recovery = RecoveryClass::Strong;
+                   row.recovery_reason =
+                       "stable DC storage identity and time-step dispatch";
                  });
   add_collection(out, rich.dc.dc_storage, "dc_storage", "DC", "DC ESS",
                  [&](auto& row, const auto& storage) {
@@ -382,6 +404,9 @@ RichResultAttribution CanonicalToRichOperator::apply(
                                 true, false, true);
                    row.canonical_sources.push_back(
                        {"DCStorage", storage.index, 1.0});
+                   row.recovery = RecoveryClass::Strong;
+                   row.recovery_reason =
+                       "stable native DC storage identity and time-step dispatch";
                  });
 
   add_collection(out, rich.ac.renewable_gens, "renewable_generator", "AC",
@@ -581,6 +606,46 @@ RichResultAttribution CanonicalToRichOperator::apply(
       }
       row->recovery = electrical;
       row->recovery_reason = "BranchExpandMap terminal attribution";
+    }
+  }
+
+  // An authored line can become a self-loop when a parallel ideal device
+  // merges its endpoint buses. Projection transfers the line's total charging
+  // susceptance to the merged bus, so recover that observable at the original
+  // terminals even though the series circulating flow is not identifiable.
+  if (rich_pf && projection.canonical.bus_merge_map) {
+    const auto& map = *projection.canonical.bus_merge_map;
+    const double base_mva = rich.base_mva > 0.0
+                                ? rich.base_mva
+                                : (rich.ac.base_mva > 0.0 ? rich.ac.base_mva
+                                                         : 100.0);
+    for (size_t pos = 0; pos < rich.ac.branches.size(); ++pos) {
+      const auto projected = map.branch_orig_to_proj.find(static_cast<int>(pos));
+      if (projected == map.branch_orig_to_proj.end() || projected->second >= 0) {
+        continue;
+      }
+      const auto& branch = rich.ac.branches[pos];
+      const auto from = map.ext_to_int.find(branch.from_bus);
+      const auto to = map.ext_to_int.find(branch.to_bus);
+      if (!branch.in_service || from == map.ext_to_int.end() ||
+          to == map.ext_to_int.end() || from->second != to->second) {
+        continue;
+      }
+      RichComponentResult* row =
+          find_row(out, "ac_branch", "AC", branch.index);
+      if (!row) continue;
+      const double vf = bus_voltage(rich, rich_pf, branch.from_bus, false);
+      const double vt = bus_voltage(rich, rich_pf, branch.to_bus, false);
+      const double qf = -0.5 * branch.b_pu * base_mva * vf * vf;
+      const double qt = -0.5 * branch.b_pu * base_mva * vt * vt;
+      set_terminal(*row, "from", branch.from_bus, false, 0.0, qf, vf,
+                   true, true, true);
+      set_terminal(*row, "to", branch.to_bus, false, 0.0, qt, vt,
+                   true, true, true);
+      set_value(*row, "loss_mw", 0.0, "MW");
+      row->recovery = RecoveryClass::AuditOnly;
+      row->recovery_reason =
+          "merged self-loop charging attribution; series flow is unidentifiable";
     }
   }
 

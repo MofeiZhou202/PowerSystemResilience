@@ -623,7 +623,7 @@ def main() -> int:
             "design_handbook_gbt3956_distribution_standards" and
             completed_branch.get("parameters_inferred") is True and
             abs(float(completed_branch.get("r_ohm_per_km", 0.0)) -
-                0.09614254) < 1e-8 and
+                0.0754) < 1e-12 and
             abs(float(completed_branch.get("x_ohm_per_km", 0.0)) - 0.08) < 1e-12,
             "handbook apply persists completed R/X values and provenance",
         )
@@ -647,7 +647,8 @@ def main() -> int:
             comprehensive_balance.get("ordinary") == [],
             "comprehensive hybrid PF balance -> "
             f"converged={comprehensive_pf.get('converged')} "
-            f"ordinary={comprehensive_balance.get('ordinary_bad_count')}",
+            f"ordinary={comprehensive_balance.get('ordinary_bad_count')} "
+            f"rows={comprehensive_balance.get('ordinary')}",
         )
 
         print("2c. Level-1 cyber-physical reliability interface matrix")

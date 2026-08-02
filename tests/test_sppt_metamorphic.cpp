@@ -178,11 +178,13 @@ HybridPowerSystem make_rich_idempotence_case() {
   EnergyRouterPort p1;
   p1.index = 1;
   p1.bus = 1;
+  p1.side = 0;
   p1.port_type = ERPortType::AC;
   p1.p_set_mw = -0.5;
   EnergyRouterPort p2 = p1;
   p2.index = 2;
   p2.bus = 3;
+  p2.side = 1;
   p2.p_set_mw = 0.49;
   er.ports = {p1, p2};
   sys.energy_routers = {er};

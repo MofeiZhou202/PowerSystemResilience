@@ -15,13 +15,11 @@
 #include <Eigen/Sparse>
 
 #include "hacdcpf/api/hacdcpf.hpp"
-#include "hacdcpf/assembly/solver_data.hpp"
 #include "hacdcpf/detail/logging.hpp"
 #include "hacdcpf/model/effective_capacity.hpp"
 #include "hacdcpf/model/enums/grid_enums.hpp"
 #include "hacdcpf/model/enums/storage_enums.hpp"
 #include "hacdcpf/model/hybrid_power_system.hpp"
-#include "hacdcpf/power_flow/assembly/branch_flow.hpp"
 #include "hacdcpf/power_flow/pv_power_curve.hpp"
 #include "hacdcpf/projection/result_attribution.hpp"
 
@@ -276,10 +274,11 @@ CanonicalCarbonInput build_canonical_carbon_input(
 
   input.power_flow.vdc.resize(input.system.dc.buses.size(), 1.0);
 
-  HybridPowerSystem branch_model = input.system;
-  auto solver_data = powerflow::make_solver_data_projected(std::move(branch_model));
-  input.power_flow.branch_flows = powerflow::compute_branch_flows(
-      solver_data, input.power_flow.vm, input.power_flow.va);
+  input.power_flow.branch_flows.assign(input.system.ac.branches.size(), {});
+  if (original_pf.canonical_branch_flows.size() ==
+      input.system.ac.branches.size()) {
+    input.power_flow.branch_flows = original_pf.canonical_branch_flows;
+  }
 
   input.original_branch_to_canonical.assign(original.ac.branches.size(), -1);
   for (size_t original_pos = 0; original_pos < original.ac.branches.size(); ++original_pos) {

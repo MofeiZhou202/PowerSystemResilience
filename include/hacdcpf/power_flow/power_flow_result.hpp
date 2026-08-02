@@ -254,6 +254,10 @@ struct PowerFlowResult {
   SolverProfiling profiling;
   SolverDiagnostics diagnostics;
   std::vector<BranchFlow> branch_flows;
+  // Solver-native canonical branch space, retained before public results are
+  // mapped back to authored branches. Downstream supplied-PF analyses consume
+  // this snapshot without rebuilding the network or recomputing branch flows.
+  std::vector<BranchFlow> canonical_branch_flows;
   std::vector<VSCTransfer> vsc_transfers;
   std::vector<LCCTransfer> lcc_transfers;
   std::vector<DCDCTransfer> dcdc_transfers;

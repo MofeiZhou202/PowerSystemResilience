@@ -828,7 +828,8 @@ engine::SolverAdapterPtr create_market_milp_adapter(
           market_scuc_bc_options(market_options));
 #endif
     }
-    return std::make_shared<HighsAdapter>();
+    return std::make_shared<StrictHighsBranchAndCutAdapter>(
+        market_scuc_bc_options(market_options));
   };
   if (choice == UCSolverChoice::Native) return native();
   if (choice == UCSolverChoice::HiGHS) return highs();

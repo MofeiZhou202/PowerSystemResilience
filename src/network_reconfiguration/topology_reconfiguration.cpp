@@ -1625,8 +1625,9 @@ TopoReconfResult run_topology_reconfiguration(
     };
 
     std::string external_failure;
-    auto try_external = [&](auto& adapter, const char* label) -> bool {
-      if (!adapter.available()) {
+    auto try_external = [&](auto& adapter, const char* label,
+                            bool available) -> bool {
+      if (!available) {
         external_failure = std::string(label) + " unavailable";
         return false;
       }
@@ -1647,23 +1648,23 @@ TopoReconfResult run_topology_reconfiguration(
       solved_ok = try_native_bc("");
     } else if (opt.solver == "scip") {
       engine::ScipAdapter scip;
-      solved_ok = try_external(scip, "SCIP");
+      solved_ok = try_external(scip, "SCIP", scip.available());
     } else if (opt.solver == "highs") {
-      engine::HighsAdapter highs;
-      solved_ok = try_external(highs, "HiGHS");
+      engine::StrictHighsBranchAndCutAdapter highs(bc_opt);
+      solved_ok = try_external(highs, "HiGHS", true);
       const std::string highs_failure = external_failure;
       if (!solved_ok) {
         engine::ScipAdapter scip;
-        solved_ok = try_external(scip, "SCIP");
+        solved_ok = try_external(scip, "SCIP", scip.available());
         if (!solved_ok) external_failure = highs_failure + "; " + external_failure;
       }
     } else {  // auto: HiGHS -> SCIP
-      engine::HighsAdapter highs;
-      solved_ok = try_external(highs, "HiGHS");
+      engine::StrictHighsBranchAndCutAdapter highs(bc_opt);
+      solved_ok = try_external(highs, "HiGHS", true);
       const std::string highs_failure = external_failure;
       if (!solved_ok) {
         engine::ScipAdapter scip;
-        solved_ok = try_external(scip, "SCIP");
+        solved_ok = try_external(scip, "SCIP", scip.available());
         if (!solved_ok) external_failure = highs_failure + "; " + external_failure;
       }
     }

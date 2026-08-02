@@ -289,8 +289,13 @@ void solve_system_optimal_assignment(
           cert.mip_gap <= options.system_optimal_mip_gap + 1e-9;
     };
 
-    engine::HighsAdapter highs;
-    if (highs.available()) {
+    engine::BCOptions highs_options;
+    highs_options.max_nodes = std::max(1, options.system_optimal_max_nodes);
+    highs_options.time_limit_sec =
+        std::max(0.0, options.system_optimal_time_limit_sec);
+    highs_options.gap_tol = std::max(0.0, options.system_optimal_mip_gap);
+    engine::StrictHighsBranchAndCutAdapter highs(highs_options);
+    {
       auto highs_res = highs.solve_milp(mip);
       cert.x = highs_res.x;
       cert.solved = highs_res.stats.success;
@@ -311,8 +316,6 @@ void solve_system_optimal_assignment(
         }
         solve_with_native_bc(reason);
       }
-    } else {
-      solve_with_native_bc("");
     }
   }
 

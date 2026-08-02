@@ -15,6 +15,7 @@
 #include "hacdcpf/dynamics/DynamicModelBuilder.hpp"
 #include "hacdcpf/dynamics/DynamicSolver.hpp"
 #include "hacdcpf/dynamics/DynamicSystem.hpp"
+#include "hacdcpf/engine/engine.hpp"
 #include "hacdcpf/engine/solver/external/adapters.hpp"
 
 namespace hacdcpf::analysis {
@@ -871,7 +872,9 @@ MasterSelection solve_master(
       });
   model.initial_solution[warm_index] = 1.0;
 
-  engine::HighsAdapter adapter;
+  engine::BCOptions options;
+  options.gap_tol = 1.0e-9;
+  engine::StrictHighsBranchAndCutAdapter adapter(options);
   const engine::SolveResult solved = adapter.solve_milp(model);
 
   MasterSelection result;

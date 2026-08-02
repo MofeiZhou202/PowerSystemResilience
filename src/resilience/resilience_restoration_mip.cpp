@@ -1591,7 +1591,7 @@ DistributionResilienceResult run_distribution_resilience_mip_assessment(
       break;
     }
     case DistributionResilienceMIPSolver::HiGHS: {
-      engine::HighsAdapter adapter;
+      engine::StrictHighsBranchAndCutAdapter adapter(bc_opts);
       solve_result = adapter.solve_milp(built.model);
       break;
     }

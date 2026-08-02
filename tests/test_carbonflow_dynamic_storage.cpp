@@ -150,6 +150,9 @@ TEST_CASE("time-series PF replays a precomputed UC schedule without resolving UC
   REQUIRE(result.rich_results.size() == 2);
   for (const auto& rich_result : result.rich_results) {
     CHECK(rich_result.coverage.total());
+    CHECK(rich_result.coverage.strong_components ==
+          rich_result.coverage.rich_components);
+    CHECK(rich_result.coverage.unsupported_components == 0);
   }
 }
 

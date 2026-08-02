@@ -752,7 +752,9 @@ CampusIESResult solve_campus_ies(const CampusIESData& raw_data,
 
   CampusIESResult result;
   result.feasible = sr.has_primal();
-  result.optimal = sr.is_optimal();
+  result.optimal = sr.is_optimal() &&
+                   std::isfinite(sr.optimality_gap) &&
+                   sr.optimality_gap <= options.mip_gap_tol + 1e-12;
   result.solver_name = sr.solver_used;
   result.status = termination_status_to_string(sr.termination_status);
   result.objective = sr.objective_value;

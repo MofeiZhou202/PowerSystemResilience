@@ -425,6 +425,7 @@ static HybridPowerSystem build_all29_system() {
     EnergyRouterPort p1;
     p1.index        = 0;
     p1.bus          = 4;
+    p1.side         = 0;
     p1.port_type    = ERPortType::AC;
     p1.in_service   = true;
     p1.p_mw         = -0.8;   // negative = consuming from bus4 (p_mw is the active field)
@@ -437,6 +438,7 @@ static HybridPowerSystem build_all29_system() {
     EnergyRouterPort p2;
     p2.index        = 1;
     p2.bus          = 5;
+    p2.side         = 1;
     p2.port_type    = ERPortType::AC;
     p2.in_service   = true;
     p2.p_mw         = +0.7;   // positive = injecting into bus5

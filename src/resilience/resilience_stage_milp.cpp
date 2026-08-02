@@ -910,7 +910,7 @@ StageSolution solve_stage_milp(const StageData& data,
       break;
     }
     case DistributionResilienceMIPSolver::HiGHS: {
-      engine::HighsAdapter adapter;
+      engine::StrictHighsBranchAndCutAdapter adapter(bc_opts);
       solve_result = adapter.solve_milp(mb.model);
       break;
     }
@@ -1228,7 +1228,7 @@ engine::SolveResult solve_stage_mess_model(const engine::MIPModel& model,
       return adapter.solve_milp(model);
     }
     case DistributionResilienceMIPSolver::HiGHS: {
-      engine::HighsAdapter adapter;
+      engine::StrictHighsBranchAndCutAdapter adapter(bc_opts);
       return adapter.solve_milp(model);
     }
     case DistributionResilienceMIPSolver::Gurobi: {

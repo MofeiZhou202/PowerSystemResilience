@@ -24,15 +24,17 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
       "Build type (Debug, Release, RelWithDebInfo)" FORCE)
 endif()
 
-if(MINGW)
-  set(_HACDCPF_ENABLE_IPO_DEFAULT OFF)
-else()
-  set(_HACDCPF_ENABLE_IPO_DEFAULT ON)
-endif()
+option(HACDCPF_BUILD_TESTS    "Build unit/integration tests"               ON)
 option(HACDCPF_ENABLE_IPO
-       "Enable interprocedural optimization when supported"
-       ${_HACDCPF_ENABLE_IPO_DEFAULT})
-unset(_HACDCPF_ENABLE_IPO_DEFAULT)
+       "Enable IPO for a dedicated production build without tests"        OFF)
+if(HACDCPF_ENABLE_IPO AND HACDCPF_BUILD_TESTS)
+  message(FATAL_ERROR
+    "HACDCPF_ENABLE_IPO=ON cannot be combined with HACDCPF_BUILD_TESTS=ON. "
+    "hacdcpf is a large static library linked into more than 100 test "
+    "executables; IPO would repeat the LTO link for every test target. "
+    "Disable IPO for test builds, or configure a separate production build "
+    "with HACDCPF_BUILD_TESTS=OFF.")
+endif()
 if(HACDCPF_ENABLE_IPO)
   include(CheckIPOSupported)
   check_ipo_supported(RESULT _ipo_ok OUTPUT _ipo_out)
@@ -40,16 +42,22 @@ if(HACDCPF_ENABLE_IPO)
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON)
   endif()
-elseif(MINGW)
-  foreach(_hacdcpf_ipo_lang C CXX)
-    set(CMAKE_${_hacdcpf_ipo_lang}_COMPILE_OPTIONS_IPO "")
-    set(CMAKE_${_hacdcpf_ipo_lang}_LINK_OPTIONS_IPO "")
-  endforeach()
-  unset(_hacdcpf_ipo_lang)
+else()
+  # Set an explicit directory default so every dependency and test target
+  # created below inherits IPO=OFF, even after reconfiguring an old LTO build.
+  set(CMAKE_INTERPROCEDURAL_OPTIMIZATION OFF)
+  set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE OFF)
+  set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO OFF)
+  if(MINGW)
+    foreach(_hacdcpf_ipo_lang C CXX)
+      set(CMAKE_${_hacdcpf_ipo_lang}_COMPILE_OPTIONS_IPO "")
+      set(CMAKE_${_hacdcpf_ipo_lang}_LINK_OPTIONS_IPO "")
+    endforeach()
+    unset(_hacdcpf_ipo_lang)
+  endif()
 endif()
 
 # ── Options ───────────────────────────────────────────────────────────────────
-option(HACDCPF_BUILD_TESTS    "Build unit/integration tests"               ON)
 option(HACDCPF_ENABLE_WERROR  "Treat warnings as errors for core library"  OFF)
 option(HACDCPF_ENABLE_NATIVE_ARCH
        "Enable -march=native for host-specific builds"                     OFF)
@@ -151,6 +159,10 @@ endif()
 
 set(MIPSOLVERS_BUILD_TESTS ${_hacdcpf_build_mipsolvers_tests} CACHE BOOL
     "Build MIPSolvers tests when used as a dependency" FORCE)
+set(MIPSOLVERS_ENABLE_IPO ${HACDCPF_ENABLE_IPO} CACHE BOOL
+    "Keep MIPSolvers IPO consistent with the parent build" FORCE)
+set(OPENXLSX_ENABLE_LTO ${HACDCPF_ENABLE_IPO} CACHE BOOL
+    "Keep OpenXLSX LTO consistent with the parent build" FORCE)
 set(MIPSOLVERS_BUILD_SCUC ${_hacdcpf_build_mipsolvers_scuc} CACHE BOOL
     "Build MIPSolvers SCUC CLI when used as a dependency" FORCE)
 set(MIPSOLVERS_BUILD_SCUC_CASE_BUILDER

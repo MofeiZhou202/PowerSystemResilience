@@ -648,6 +648,15 @@ TEST_CASE("Dynamic profiles survive rich-to-canonical projection",
   port.dynamic_model.components.push_back(
       {"pll", "ReducedOrderPLL", "PSD", "", {{"kp_pll", 0.02}}});
   er.ports.push_back(port);
+
+  hacdcpf::EnergyRouterPort peer_port;
+  peer_port.index = 2;
+  peer_port.bus = 2;
+  peer_port.side = 1;
+  peer_port.port_type = hacdcpf::ERPortType::AC;
+  peer_port.control_mode = hacdcpf::ERControlMode::PQ;
+  peer_port.p_set_mw = -0.1;
+  er.ports.push_back(peer_port);
   sys.energy_routers.push_back(er);
 
   const auto projected = hacdcpf::project_to_canonical_models(sys, false);
