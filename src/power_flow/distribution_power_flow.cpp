@@ -3932,9 +3932,12 @@ ThreePhaseACSystem load_three_phase_system_from_opendss(
         dss_get_double_value(api, ctx_Loads_Get_Rneut, "ctx_Loads_Get_Rneut");
     const double load_xneut =
         dss_get_double_value(api, ctx_Loads_Get_Xneut, "ctx_Loads_Get_Xneut");
+    // A single-phase OpenDSS load retains a return conductor even when its
+    // bus specification names only the energized phase.
     load.grounded =
         (load.connection == "delta") ||
         terminal.has_ground_reference ||
+        terminal.phase_mask.count() == 1 ||
         load_rneut >= 0.0;
     load.r_neut_ohm = std::max(
         0.0,
@@ -4281,10 +4284,16 @@ ThreePhaseACSystem load_three_phase_system_from_opendss(
           (winding == 1) ? hv_terminal.has_ground_reference : lv_terminal.has_ground_reference;
       const double winding_rneut =
           dss_get_double_value(api, ctx_Transformers_Get_Rneut, "ctx_Transformers_Get_Rneut");
+      const double winding_xneut =
+          dss_get_double_value(api, ctx_Transformers_Get_Xneut, "ctx_Transformers_Get_Xneut");
+      // BusNames omits OpenDSS's implicit neutral conductor. Preserve it in
+      // the reduced phase model unless both neutral impedance fields mark an
+      // explicitly floating winding; otherwise compact Yvv gains a spurious
+      // exact common-mode nullspace.
       grounded_wye[static_cast<std::size_t>(winding - 1)] =
           is_delta[static_cast<std::size_t>(winding - 1)] ||
           explicit_ground_reference ||
-          winding_rneut >= 0.0;
+          !(winding_rneut < 0.0 && winding_xneut < 0.0);
       kvs[static_cast<std::size_t>(winding - 1)] =
           dss_get_double_value(api, ctx_Transformers_Get_kV, "ctx_Transformers_Get_kV");
       kvas[static_cast<std::size_t>(winding - 1)] =

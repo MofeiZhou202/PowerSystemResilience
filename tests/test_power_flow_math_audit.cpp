@@ -671,6 +671,153 @@ TEST_CASE("Audit B18: DC factory solves AC B-theta and does not fabricate voltag
         "ac-only-linearized-dc:not-applicable-to-hybrid");
 }
 
+TEST_CASE("Audit B1: ZIP voltage derivatives match centered finite differences",
+          "[power_flow][math_audit][B1]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  ACBus slack;
+  slack.index = 1;
+  slack.bus_type = BusType::SLACK;
+  slack.in_service = true;
+  ACBus load;
+  load.index = 2;
+  load.bus_type = BusType::PQ;
+  load.pd_mw = 40.0;
+  load.qd_mvar = 20.0;
+  load.in_service = true;
+  sys.ac.buses = {slack, load};
+  ACBranch line;
+  line.index = 1;
+  line.from_bus = 1;
+  line.to_bus = 2;
+  line.r_pu = 0.02;
+  line.x_pu = 0.15;
+  line.in_service = true;
+  sys.ac.branches = {line};
+
+  auto data = hacdcpf::powerflow::make_solver_data(sys);
+  data.zip_pw[0] = 0.2;
+  data.zip_pw[1] = 0.3;
+  data.zip_pw[2] = 0.5;
+  data.zip_qw[0] = 0.1;
+  data.zip_qw[1] = 0.6;
+  data.zip_qw[2] = 0.3;
+
+  hacdcpf::powerflow::JacobianContext context;
+  context.n = 2;
+  context.np = 1;
+  context.nq = 1;
+  context.nvar = 2;
+  context.non_slack = {1};
+  context.pq = {1};
+  context.p_row = {-1, 0};
+  context.q_row = {-1, 1};
+  context.va_col = {-1, 0};
+  context.vm_col = {-1, 1};
+  auto pattern = hacdcpf::powerflow::build_jacobian_pattern(data, context);
+
+  Eigen::VectorXd vm(2);
+  Eigen::VectorXd va(2);
+  vm << 1.0, 0.93;
+  va << 0.0, -0.04;
+  const Eigen::VectorXd vdc;
+  Eigen::VectorXd pcalc(2), qcalc(2), p_spec(2), q_spec(2);
+  Eigen::VectorXd pdc_linear, pdc_calc, pdc_spec;
+  Eigen::VectorXd mismatch(2);
+  hacdcpf::powerflow::evaluate_residual_and_jacobian(
+      data, context, data.ac_buses, data.converters, data.pg, data.qg,
+      vm, va, vdc, pcalc, qcalc, p_spec, q_spec, pdc_linear, pdc_calc,
+      pdc_spec, mismatch, pattern, 1);
+
+  auto residual_at = [&](double load_vm) {
+    Eigen::VectorXd trial_vm = vm;
+    trial_vm[1] = load_vm;
+    Eigen::VectorXd pc(2), qc(2), ps(2), qs(2), pl, pdc, pds, mm(2);
+    hacdcpf::powerflow::evaluate_residual_only(
+        data, context, data.ac_buses, data.converters, data.pg, data.qg,
+        trial_vm, va, vdc, pc, qc, ps, qs, pl, pdc, pds, mm, pattern, 1);
+    return mm;
+  };
+  constexpr double step = 1e-6;
+  const Eigen::VectorXd fd =
+      (residual_at(vm[1] + step) - residual_at(vm[1] - step)) /
+      (2.0 * step);
+  CHECK(pattern.matrix.coeff(0, 1) == Approx(-fd[0]).margin(2e-8));
+  CHECK(pattern.matrix.coeff(1, 1) == Approx(-fd[1]).margin(2e-8));
+}
+
+TEST_CASE("Audit C1: PV-to-PQ switching does not hide a sub-hysteresis Q violation",
+          "[power_flow][math_audit][C1]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  ACBus slack;
+  slack.index = 1;
+  slack.bus_type = BusType::SLACK;
+  slack.in_service = true;
+  ACBus pv;
+  pv.index = 2;
+  pv.bus_type = BusType::PV;
+  pv.pd_mw = 45.0;
+  pv.qd_mvar = 20.0;
+  pv.in_service = true;
+  sys.ac.buses = {slack, pv};
+  ACBranch line;
+  line.index = 1;
+  line.from_bus = 1;
+  line.to_bus = 2;
+  line.r_pu = 0.01;
+  line.x_pu = 0.15;
+  line.in_service = true;
+  sys.ac.branches = {line};
+  Generator reference;
+  reference.index = 1;
+  reference.bus = 1;
+  reference.is_slack = true;
+  reference.qmin_mvar = -500.0;
+  reference.qmax_mvar = 500.0;
+  reference.in_service = true;
+  Generator controlled;
+  controlled.index = 2;
+  controlled.bus = 2;
+  controlled.pg_mw = 45.0;
+  controlled.vg_pu = 1.04;
+  controlled.qmin_mvar = -500.0;
+  controlled.qmax_mvar = 500.0;
+  controlled.in_service = true;
+  sys.ac.generators = {reference, controlled};
+
+  PowerFlowOptions unconstrained_options;
+  unconstrained_options.enable_pv_pq_conversion = false;
+  const auto unconstrained = solve_power_flow(sys, unconstrained_options);
+  REQUIRE(unconstrained.converged);
+  const auto unconstrained_data =
+      hacdcpf::powerflow::make_solver_data(sys);
+  Eigen::VectorXcd voltage(2);
+  for (int index = 0; index < 2; ++index) {
+    voltage[index] = std::polar(unconstrained.vm[static_cast<size_t>(index)],
+                               unconstrained.va[static_cast<size_t>(index)]);
+  }
+  const Eigen::VectorXcd current = unconstrained_data.ybus * voltage;
+  const double qg_required_mvar =
+      (voltage[1] * std::conj(current[1])).imag() * sys.base_mva +
+      pv.qd_mvar;
+  sys.ac.generators[1].qmax_mvar = qg_required_mvar - 0.5;
+
+  PowerFlowOptions limited_options;
+  limited_options.enable_solver_profiling = true;
+  const auto limited = solve_power_flow(sys, limited_options);
+  REQUIRE(limited.converged);
+  CHECK(qg_required_mvar - sys.ac.generators[1].qmax_mvar ==
+        Approx(0.5).margin(1e-10));
+  CHECK((qg_required_mvar - sys.ac.generators[1].qmax_mvar) /
+            sys.base_mva <
+        limited_options.pv_q_hysteresis_pu);
+  CHECK(limited.profiling.pv_to_pq_switches >= 1);
+  CHECK(limited.vm[1] < controlled.vg_pu);
+}
+
 TEST_CASE("Audit C2: DC-DC droop is negative feedback and its Jacobian matches FD",
           "[power_flow][math_audit][C2]") {
   DCDCConverter converter;
