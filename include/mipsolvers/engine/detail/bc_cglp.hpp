@@ -14,10 +14,10 @@
 ///   ∪ conv(P ∩ {x_j = 1}). The CGLP is the LP that produces the most
 ///   violated such inequality at x*.
 ///
-/// Scoping decisions for this rollout:
+/// Implemented scope:
 ///   * Single-variable 0-1 disjunction only (no general split disjunctions).
-///   * Binary variables only in Phase 1-3; integer lift comes in Phase 4+.
-///   * Root-node generation only in Phase 1-4; tree-stage in Phase 5+.
+///   * Binary variables only; no general-integer lift.
+///   * Root-node generation only; no tree-stage separation.
 ///   * Default OFF via BCOptions::enable_cglp_cuts.
 
 #pragma once
@@ -44,12 +44,14 @@ struct CGLPResult {
   ///     violation = β − α^T x*   (must be > 0 for a real cut).
   double violation{0.0};
   /// Violation divided by ‖α‖₂; used as the efficacy filter threshold.
-  double efficacy{0.0};  /// True iff the CGLP master LP solved successfully and produced the alpha
+  double efficacy{0.0};
+  /// True iff the CGLP master LP solved successfully and produced the alpha
   /// vector (as opposed to falling back to the interpolation separator).
   bool cglp_lp_solved{false};
   /// True iff the interpolation fallback separator was invoked (the CGLP LP
   /// failed, produced degenerate alpha, or gave weak efficacy).
-  bool used_fallback{false};  /// One-line diagnostic; populated on both success and failure paths.
+  bool used_fallback{false};
+  /// One-line diagnostic; populated on both success and failure paths.
   const char* reason{""};
 };
 
@@ -118,9 +120,8 @@ struct CGLPModel {
 /// @brief Build a CGLP master LP for the binary disjunction
 /// `x_j <= 0 OR x_j >= 1` around the fractional point in ctx.
 ///
-/// Phase 2 deliverable: this function fully constructs the matrix blocks
-/// (two side constraints + beta-link rows + normalization row). Solving
-/// and cut extraction are handled by generate_cglp_cut() in Phase 3.
+/// This function constructs both side blocks, beta-link rows, and the
+/// normalization row. `generate_cglp_cut()` owns solving and cut extraction.
 ///
 /// @return `true` on successful model construction.
 /// @return `false` if `j` is out of range, non-binary, or ctx dimensions

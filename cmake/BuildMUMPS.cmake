@@ -56,10 +56,12 @@ unset(_ms_mumps_int_def)
 unset(_ms_write_mumps_int_def)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MUMPS is built from the vendored in-tree sources (mumps/) by default — the
-# deployment environment has no network and no Homebrew, so the from-source
-# build is the only supported path.  A system/Homebrew MUMPS is used only when
-# explicitly opted back in via -DMIPSOLVERS_FORCE_BUILD_MUMPS=OFF.
+# MUMPS is built from the vendored in-tree sources (mumps/) by default. The C
+# interface is not ABI-stable across MUMPS releases: DMUMPS_STRUC_C changes
+# layout as fields are added. Homebrew's Ipopt formula installs private MUMPS
+# dylibs but no matching dmumps_c.h, so pairing those dylibs with this tree's
+# 5.7.3 header can silently corrupt the control block. In particular, JOB=3
+# has been observed to report success while leaving the RHS untouched.
 #
 # Note: the from-source static libdmumps.a previously exhibited *unresolvable*
 # Fortran symbols when linked into an executable on arm64 macOS; that trace is
@@ -69,82 +71,16 @@ unset(_ms_write_mumps_int_def)
 option(MIPSOLVERS_FORCE_BUILD_MUMPS
   "Build MUMPS from the vendored in-tree sources (offline default)" ON)
 
-# Records (for the installed mipsolversConfig.cmake) whether the MUMPS runtime
-# came from the Homebrew ipopt cellar — only then may the consumer config
-# append those /opt/homebrew paths.
+# Retained for installed-config compatibility. Unsupported private Homebrew
+# MUMPS libraries are never exported.
 set(MIPSOLVERS_CONSUMER_NEEDS_BREW_MUMPS OFF)
 
-set(_ms_use_brew_mumps OFF)
-if(APPLE AND NOT MIPSOLVERS_FORCE_BUILD_MUMPS)
-  set(_ms_brew_mumps_dir "/opt/homebrew/opt/ipopt/lib")
-  set(_ms_brew_mumps_libs "")
-  set(_ms_brew_mumps_ok TRUE)
-  foreach(_ml dmumps mumps_common mpiseq pord)
-    find_library(_ms_brew_lib_${_ml}
-      NAMES ${_ml}
-      PATHS "${_ms_brew_mumps_dir}"
-      NO_DEFAULT_PATH)
-    if(_ms_brew_lib_${_ml})
-      list(APPEND _ms_brew_mumps_libs "${_ms_brew_lib_${_ml}}")
-    else()
-      set(_ms_brew_mumps_ok FALSE)
-    endif()
-  endforeach()
-  set(_ms_use_brew_mumps ${_ms_brew_mumps_ok})
-endif()
-
-if(_ms_use_brew_mumps)
-  # dmumps as an INTERFACE target: vendored headers for build-time includes,
-  # Homebrew dylibs for linking.  No MUMPS sources are compiled.
-  add_library(dmumps INTERFACE)
-  target_include_directories(dmumps INTERFACE
-    "$<BUILD_INTERFACE:${_M}/include>"
-    "$<BUILD_INTERFACE:${_M}/libseq>")
-
-  # The Homebrew MUMPS dylibs need the gfortran/quadmath runtime.  A from-source
-  # build pulls these in automatically via the enabled Fortran language; an
-  # INTERFACE target must add them explicitly so the final executable link
-  # resolves Fortran runtime symbols (e.g. __gfortran_generate_error).
-  set(_ms_fortran_runtime "")
-  foreach(_fl gfortran quadmath)
-    find_library(_ms_fortran_${_fl}
-      NAMES ${_fl}
-      PATHS /opt/homebrew/opt/gcc/lib/gcc/current
-            /opt/homebrew/lib/gcc/current
-      NO_DEFAULT_PATH)
-    if(_ms_fortran_${_fl})
-      list(APPEND _ms_fortran_runtime "${_ms_fortran_${_fl}}")
-    endif()
-  endforeach()
-
-  target_link_libraries(dmumps INTERFACE
-    ${_ms_brew_mumps_libs}
-    ${_ms_fortran_runtime}
-    "$<$<PLATFORM_ID:Darwin>:-framework Accelerate>")
-
-  if(NOT TARGET MUMPS)
-    add_library(MUMPS INTERFACE)
-    target_link_libraries(MUMPS INTERFACE dmumps)
-    add_library(MUMPS::MUMPS ALIAS MUMPS)
-  endif()
-
-  install(TARGETS dmumps MUMPS
-    EXPORT  ${MIPSOLVERS_THIRD_PARTY_EXPORT_SET}
-    ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
-    LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
-    RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
-
-  set(MIPSOLVERS_CONSUMER_NEEDS_BREW_MUMPS ON)
-  message(WARNING
-    "mipsolvers: using Homebrew MUMPS at ${_ms_brew_mumps_dir}. This is "
-    "NON-HERMETIC (depends on Homebrew dylibs and the gcc Fortran runtime) "
-    "and intended for local debugging only — do not use for deployable "
-    "builds. Use -DMIPSOLVERS_FORCE_BUILD_MUMPS=ON (the default) for the "
-    "vendored, offline MUMPS build.")
-  message(STATUS
-    "mipsolvers: using Homebrew MUMPS at ${_ms_brew_mumps_dir} "
-    "(from-source build skipped; -DMIPSOLVERS_FORCE_BUILD_MUMPS=ON to override)")
-  return()
+if(NOT MIPSOLVERS_FORCE_BUILD_MUMPS)
+  message(FATAL_ERROR
+    "MIPSOLVERS_FORCE_BUILD_MUMPS=OFF is unsupported because no ABI-matched "
+    "system dmumps_c.h is configured. Homebrew Ipopt's private MUMPS dylibs "
+    "must not be used with the vendored 5.7.3 header. Configure with "
+    "-DMIPSOLVERS_FORCE_BUILD_MUMPS=ON.")
 endif()
 
 # ─────────────────────────────────────────────────────────────────────────────

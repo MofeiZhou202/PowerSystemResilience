@@ -8,55 +8,73 @@
 #include <cmath>
 #include <deque>
 #include <limits>
-#include <unordered_set>
 #include <utility>
 
 namespace mipsolvers::engine::detail {
 
+namespace {
+
+std::size_t merge_undirected_edge_batch(
+    std::vector<std::vector<int>>& adjacency,
+    std::vector<std::pair<int, int>> edges) {
+  const int n = static_cast<int>(adjacency.size());
+  edges.erase(
+      std::remove_if(edges.begin(), edges.end(), [n](auto edge) {
+        return edge.first < 0 || edge.second < 0 || edge.first >= n ||
+               edge.second >= n || edge.first == edge.second;
+      }),
+      edges.end());
+  for (auto& edge : edges) {
+    if (edge.first > edge.second) std::swap(edge.first, edge.second);
+  }
+  std::sort(edges.begin(), edges.end());
+  edges.erase(std::unique(edges.begin(), edges.end()), edges.end());
+
+  std::size_t new_edges = 0;
+  std::vector<std::pair<int, int>> directed;
+  directed.reserve(2 * edges.size());
+  for (const auto [a, b] : edges) {
+    const auto& row_a = adjacency[static_cast<std::size_t>(a)];
+    const auto& row_b = adjacency[static_cast<std::size_t>(b)];
+    const bool present_a = std::binary_search(row_a.begin(), row_a.end(), b);
+    const bool present_b = std::binary_search(row_b.begin(), row_b.end(), a);
+    if (!present_a || !present_b) ++new_edges;
+    directed.emplace_back(a, b);
+    directed.emplace_back(b, a);
+  }
+  std::sort(directed.begin(), directed.end());
+
+  std::size_t begin = 0;
+  while (begin < directed.size()) {
+    std::size_t end = begin + 1;
+    const int endpoint = directed[begin].first;
+    while (end < directed.size() && directed[end].first == endpoint) ++end;
+
+    auto& row = adjacency[static_cast<std::size_t>(endpoint)];
+    const std::size_t old_size = row.size();
+    row.reserve(old_size + end - begin);
+    for (std::size_t k = begin; k < end; ++k) {
+      row.push_back(directed[k].second);
+    }
+    std::inplace_merge(row.begin(), row.begin() + old_size, row.end());
+    row.erase(std::unique(row.begin(), row.end()), row.end());
+    begin = end;
+  }
+  return new_edges;
+}
+
+}  // namespace
+
 void CliqueTable::ensure_storage(int n) {
-  if (n_ == n && !offsets_.empty() && !lit_offsets_.empty()) return;
+  if (n_ == n && adjacency_.size() == static_cast<std::size_t>(n_) &&
+      literal_adjacency_.size() == static_cast<std::size_t>(2 * n_)) {
+    return;
+  }
   n_ = std::max(0, n);
   n_edges_ = 0;
   n_literal_edges_ = 0;
-  offsets_.assign(static_cast<std::size_t>(n_) + 1, 0);
-  adj_.clear();
-  lit_offsets_.assign(static_cast<std::size_t>(2 * n_) + 1, 0);
-  lit_adj_.clear();
-}
-
-void CliqueTable::rebuild_variable_csr(
-    const std::vector<std::vector<int>>& adj) {
-  std::size_t total = 0;
-  for (int j = 0; j < n_; ++j) total += adj[static_cast<std::size_t>(j)].size();
-
-  adj_.resize(total);
-  offsets_.assign(static_cast<std::size_t>(n_) + 1, 0);
-  offsets_[0] = 0;
-  for (int j = 0; j < n_; ++j) {
-    const auto& v = adj[static_cast<std::size_t>(j)];
-    std::size_t off = offsets_[static_cast<std::size_t>(j)];
-    for (int nb : v) adj_[off++] = nb;
-    offsets_[static_cast<std::size_t>(j) + 1] = off;
-  }
-  n_edges_ = total / 2;
-}
-
-void CliqueTable::rebuild_literal_csr(
-    const std::vector<std::vector<int>>& adj) {
-  const int nlits = 2 * n_;
-  std::size_t total = 0;
-  for (int j = 0; j < nlits; ++j) total += adj[static_cast<std::size_t>(j)].size();
-
-  lit_adj_.resize(total);
-  lit_offsets_.assign(static_cast<std::size_t>(nlits) + 1, 0);
-  lit_offsets_[0] = 0;
-  for (int j = 0; j < nlits; ++j) {
-    const auto& v = adj[static_cast<std::size_t>(j)];
-    std::size_t off = lit_offsets_[static_cast<std::size_t>(j)];
-    for (int nb : v) lit_adj_[off++] = nb;
-    lit_offsets_[static_cast<std::size_t>(j) + 1] = off;
-  }
-  n_literal_edges_ = total / 2;
+  adjacency_.assign(static_cast<std::size_t>(n_), {});
+  literal_adjacency_.assign(static_cast<std::size_t>(2 * n_), {});
 }
 
 std::size_t CliqueTable::build(const LPModel& lp,
@@ -65,10 +83,8 @@ std::size_t CliqueTable::build(const LPModel& lp,
   ensure_storage(static_cast<int>(lp.vars.size()));
   n_edges_ = 0;
   n_literal_edges_ = 0;
-  offsets_.assign(static_cast<std::size_t>(n_) + 1, 0);
-  adj_.clear();
-  lit_offsets_.assign(static_cast<std::size_t>(2 * n_) + 1, 0);
-  lit_adj_.clear();
+  adjacency_.assign(static_cast<std::size_t>(n_), {});
+  literal_adjacency_.assign(static_cast<std::size_t>(2 * n_), {});
 
   if (n_ <= 0) return 0;
 
@@ -77,8 +93,7 @@ std::size_t CliqueTable::build(const LPModel& lp,
   Eigen::SparseMatrix<double, Eigen::RowMajor> Aeq_row = lp.Aeq;
   const int m = static_cast<int>(A_row.rows());
 
-  // Collect conflict pairs deduplicated with a per-variable sorted insert.
-  // Use adjacency lists in std::vector, then compact to CSR at the end.
+  // Collect conflict pairs in adjacency lists, then sort and deduplicate once.
   std::vector<std::vector<int>> adj(static_cast<std::size_t>(n_));
   std::vector<std::vector<int>> lit_adj(static_cast<std::size_t>(2 * n_));
 
@@ -303,8 +318,14 @@ std::size_t CliqueTable::build(const LPModel& lp,
     std::sort(v.begin(), v.end());
     v.erase(std::unique(v.begin(), v.end()), v.end());
   }
-  rebuild_variable_csr(adj);
-  rebuild_literal_csr(lit_adj);
+  std::size_t variable_entries = 0;
+  for (const auto& row : adj) variable_entries += row.size();
+  std::size_t literal_entries = 0;
+  for (const auto& row : lit_adj) literal_entries += row.size();
+  adjacency_ = std::move(adj);
+  literal_adjacency_ = std::move(lit_adj);
+  n_edges_ = variable_entries / 2;
+  n_literal_edges_ = literal_entries / 2;
   return n_edges_;
 }
 
@@ -314,27 +335,7 @@ std::size_t CliqueTable::add_edges(
   const int n = static_cast<int>(lp.vars.size());
   if (n <= 0) return 0;
   ensure_storage(n);
-
-  std::vector<std::vector<int>> adj(static_cast<std::size_t>(n_));
-  for (int j = 0; j < n_; ++j) {
-    auto rng = neighbours(j);
-    for (const int* p = rng.first; p != rng.second; ++p) {
-      adj[static_cast<std::size_t>(j)].push_back(*p);
-    }
-  }
-  std::vector<std::vector<int>> lit_adj(static_cast<std::size_t>(2 * n_));
-  for (int lit = 0; lit < 2 * n_; ++lit) {
-    if (static_cast<std::size_t>(lit + 1) >= lit_offsets_.size()) break;
-    const int* base = lit_adj_.data();
-    const auto begin = lit_offsets_[static_cast<std::size_t>(lit)];
-    const auto end = lit_offsets_[static_cast<std::size_t>(lit) + 1];
-    for (std::size_t p = begin; p < end; ++p) {
-      lit_adj[static_cast<std::size_t>(lit)].push_back(base[p]);
-    }
-  }
-
-  std::size_t before = 0;
-  for (auto& v : adj) before += v.size();
+  const std::size_t before = n_edges_;
 
   auto binary_like = [&](int j) {
     if (j < 0 || j >= n_) return false;
@@ -344,32 +345,24 @@ std::size_t CliqueTable::add_edges(
            var.lb >= -1e-9 && var.ub <= 1.0 + 1e-9;
   };
 
+  std::vector<std::pair<int, int>> variable_edges;
+  variable_edges.reserve(edges.size());
   for (auto [a, b] : edges) {
     if (a < 0 || b < 0 || a >= n_ || b >= n_ || a == b) continue;
     if (!binary_like(a) || !binary_like(b)) continue;
-    adj[static_cast<std::size_t>(a)].push_back(b);
-    adj[static_cast<std::size_t>(b)].push_back(a);
+    variable_edges.emplace_back(a, b);
+  }
+  std::vector<std::pair<int, int>> literal_edges;
+  literal_edges.reserve(variable_edges.size());
+  for (const auto [a, b] : variable_edges) {
     const int la = literal_index(a, true);
     const int lb = literal_index(b, true);
-    lit_adj[static_cast<std::size_t>(la)].push_back(lb);
-    lit_adj[static_cast<std::size_t>(lb)].push_back(la);
+    literal_edges.emplace_back(la, lb);
   }
-
-  for (int j = 0; j < n_; ++j) {
-    auto& v = adj[static_cast<std::size_t>(j)];
-    std::sort(v.begin(), v.end());
-    v.erase(std::unique(v.begin(), v.end()), v.end());
-  }
-  for (int lit = 0; lit < 2 * n_; ++lit) {
-    auto& v = lit_adj[static_cast<std::size_t>(lit)];
-    std::sort(v.begin(), v.end());
-    v.erase(std::unique(v.begin(), v.end()), v.end());
-  }
-  std::size_t total = 0;
-  for (const auto& v : adj) total += v.size();
-  rebuild_variable_csr(adj);
-  rebuild_literal_csr(lit_adj);
-  return total > before ? (total - before) / 2 : 0;
+  n_edges_ += merge_undirected_edge_batch(adjacency_, variable_edges);
+  n_literal_edges_ +=
+      merge_undirected_edge_batch(literal_adjacency_, literal_edges);
+  return n_edges_ - before;
 }
 
 std::size_t CliqueTable::add_literal_edges(
@@ -379,28 +372,7 @@ std::size_t CliqueTable::add_literal_edges(
   const int n = static_cast<int>(lp.vars.size());
   if (n <= 0) return 0;
   ensure_storage(n);
-
-  std::vector<std::vector<int>> adj(static_cast<std::size_t>(n_));
-  for (int j = 0; j < n_; ++j) {
-    auto rng = neighbours(j);
-    for (const int* p = rng.first; p != rng.second; ++p) {
-      adj[static_cast<std::size_t>(j)].push_back(*p);
-    }
-  }
-
-  std::vector<std::vector<int>> lit_adj(static_cast<std::size_t>(2 * n_));
-  for (int lit = 0; lit < 2 * n_; ++lit) {
-    if (static_cast<std::size_t>(lit + 1) >= lit_offsets_.size()) break;
-    const int* base = lit_adj_.data();
-    const auto begin = lit_offsets_[static_cast<std::size_t>(lit)];
-    const auto end = lit_offsets_[static_cast<std::size_t>(lit) + 1];
-    for (std::size_t p = begin; p < end; ++p) {
-      lit_adj[static_cast<std::size_t>(lit)].push_back(base[p]);
-    }
-  }
-
-  std::size_t before = 0;
-  for (auto& v : lit_adj) before += v.size();
+  const std::size_t before = n_literal_edges_;
 
   auto binary_like = [&](int j) {
     if (j < 0 || j >= n_) return false;
@@ -410,6 +382,10 @@ std::size_t CliqueTable::add_literal_edges(
            var.lb >= -1e-9 && var.ub <= 1.0 + 1e-9;
   };
 
+  std::vector<std::pair<int, int>> literal_edges;
+  std::vector<std::pair<int, int>> variable_edges;
+  literal_edges.reserve(edges.size());
+  variable_edges.reserve(edges.size());
   for (const auto& edge : edges) {
     const Literal a = edge.first;
     const Literal b = edge.second;
@@ -420,29 +396,15 @@ std::size_t CliqueTable::add_literal_edges(
     const int ia = literal_index(a.col, a.value_one);
     const int ib = literal_index(b.col, b.value_one);
     if (ia < 0 || ib < 0 || ia == ib) continue;
-    lit_adj[static_cast<std::size_t>(ia)].push_back(ib);
-    lit_adj[static_cast<std::size_t>(ib)].push_back(ia);
+    literal_edges.emplace_back(ia, ib);
     if (a.value_one && b.value_one) {
-      adj[static_cast<std::size_t>(a.col)].push_back(b.col);
-      adj[static_cast<std::size_t>(b.col)].push_back(a.col);
+      variable_edges.emplace_back(a.col, b.col);
     }
   }
-
-  for (int j = 0; j < n_; ++j) {
-    auto& v = adj[static_cast<std::size_t>(j)];
-    std::sort(v.begin(), v.end());
-    v.erase(std::unique(v.begin(), v.end()), v.end());
-  }
-  for (int lit = 0; lit < 2 * n_; ++lit) {
-    auto& v = lit_adj[static_cast<std::size_t>(lit)];
-    std::sort(v.begin(), v.end());
-    v.erase(std::unique(v.begin(), v.end()), v.end());
-  }
-  std::size_t total = 0;
-  for (const auto& v : lit_adj) total += v.size();
-  rebuild_variable_csr(adj);
-  rebuild_literal_csr(lit_adj);
-  return total > before ? (total - before) / 2 : 0;
+  n_literal_edges_ +=
+      merge_undirected_edge_batch(literal_adjacency_, literal_edges);
+  n_edges_ += merge_undirected_edge_batch(adjacency_, variable_edges);
+  return n_literal_edges_ - before;
 }
 
 std::vector<std::pair<CliqueTable::Literal, CliqueTable::Literal>>
@@ -841,12 +803,9 @@ int CliqueTable::propagate(Eigen::VectorXd& lb,
     while (!queue.empty()) {
       const int lit = queue.front();
       queue.pop_front();
-      if (static_cast<std::size_t>(lit + 1) >= lit_offsets_.size()) continue;
-      const int* base = lit_adj_.data();
-      const auto begin = lit_offsets_[static_cast<std::size_t>(lit)];
-      const auto end = lit_offsets_[static_cast<std::size_t>(lit) + 1];
-      for (std::size_t p = begin; p < end; ++p) {
-        const int forbidden = base[p];
+      if (static_cast<std::size_t>(lit) >= literal_adjacency_.size()) continue;
+      for (const int forbidden :
+           literal_adjacency_[static_cast<std::size_t>(lit)]) {
         const int j = forbidden / 2;
         const bool forbidden_one = (forbidden % 2) != 0;
         if (j < 0 || j >= nx) continue;

@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <iomanip>
 #include <sstream>
+#include <thread>
 #include <utility>
 
 namespace mipsolvers::engine::native_dual::detail {
@@ -35,6 +36,59 @@ std::uint64_t cycle_mix(std::uint64_t value) {
   value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
   value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
   return value ^ (value >> 31);
+}
+
+int taboo_lifetime(int rows) noexcept {
+  const int bounded_rows = std::max(1, rows);
+  if (bounded_rows > (kMaxTabooLifetime - 1) / 2) {
+    return kMaxTabooLifetime;
+  }
+  return 2 * bounded_rows + 1;
+}
+
+int lp_kernel_threads(const SimplexOptions& options) {
+  int requested = options.lp_kernel_threads;
+  if (const char* environment =
+          std::getenv("MIPSOLVERS_LP_KERNEL_THREADS")) {
+    char* end = nullptr;
+    const long parsed = std::strtol(environment, &end, 10);
+    if (end != environment && *end == '\0' && parsed >= 0 && parsed <= 256) {
+      requested = static_cast<int>(parsed);
+    }
+  }
+  if (requested == 1) return 1;
+  const unsigned int hardware = std::thread::hardware_concurrency();
+  const int available = hardware == 0 ? 1 : static_cast<int>(hardware);
+  if (requested <= 0) return std::max(1, std::min(4, available));
+  return std::max(1, std::min(requested, available));
+}
+
+template <typename Map, typename Queue>
+void enforce_taboo_capacity(Map& taboo, Queue& fifo) {
+  // Released entries leave ticketed FIFO records behind. Compact
+  // periodically so repeated erase/reinsert churn cannot grow the queue while
+  // the live hash table itself remains small.
+  if (fifo.size() > kTabooCapacity) {
+    Queue compacted;
+    for (const auto& queued : fifo) {
+      const auto current = taboo.find(queued.first);
+      if (current != taboo.end() &&
+          current->second.ticket == queued.second) {
+        compacted.push_back(queued);
+      }
+    }
+    fifo.swap(compacted);
+  }
+
+  while (taboo.size() > kTabooCapacity && !fifo.empty()) {
+    const auto [old_key, ticket] = fifo.front();
+    fifo.pop_front();
+    const auto old = taboo.find(old_key);
+    if (old != taboo.end() && old->second.ticket == ticket) {
+      taboo.erase(old);
+    }
+  }
+  while (taboo.size() > kTabooCapacity) taboo.erase(taboo.begin());
 }
 
 // The cycle signature is a Zobrist-style set hash of (basis assignment,
@@ -105,14 +159,14 @@ void cycle_signature_apply_move_toggle(State& state, int col, int move_sign) {
   state.cycle_signature_live_b ^= cycle_mix(token ^ kCycleMoveSaltB);
 }
 
-Eigen::VectorXd multiply_A(const Eigen::SparseMatrix<double>& A,
+Eigen::VectorXd multiply_A(const StandardColumnMatrix& A,
                            const Eigen::VectorXd& x) {
   if (x.size() != A.cols()) return {};
   Eigen::VectorXd result = Eigen::VectorXd::Zero(A.rows());
   for (int col = 0; col < A.cols(); ++col) {
     const double value = x[col];
     if (value == 0.0) continue;
-    for (Eigen::SparseMatrix<double>::InnerIterator it(A, col); it; ++it) {
+    for (StandardColumnMatrix::InnerIterator it(A, col); it; ++it) {
       result[it.row()] += it.value() * value;
     }
   }
@@ -120,11 +174,22 @@ Eigen::VectorXd multiply_A(const Eigen::SparseMatrix<double>& A,
 }
 
 Eigen::VectorXd equation_residual_vector(
-    const Eigen::SparseMatrix<double>& A, const Eigen::VectorXd& x,
-    const Eigen::VectorXd& rhs) {
+    const StandardColumnMatrix& A, const Eigen::VectorXd& x,
+    const Eigen::VectorXd& rhs, bool exact) {
   if (x.size() != A.cols() || rhs.size() != A.rows() || !x.allFinite() ||
       !rhs.allFinite()) {
     return {};
+  }
+  if (!exact) {
+    Eigen::VectorXd residual = rhs;
+    for (int col = 0; col < A.cols(); ++col) {
+      const double value = x[col];
+      if (value == 0.0) continue;
+      for (StandardColumnMatrix::InnerIterator it(A, col); it; ++it) {
+        residual[it.row()] -= it.value() * value;
+      }
+    }
+    return residual;
   }
   std::vector<long double> residual(static_cast<std::size_t>(A.rows()));
   for (int row = 0; row < A.rows(); ++row) {
@@ -134,7 +199,7 @@ Eigen::VectorXd equation_residual_vector(
   for (int col = 0; col < A.cols(); ++col) {
     const long double value = static_cast<long double>(x[col]);
     if (value == 0.0L) continue;
-    for (Eigen::SparseMatrix<double>::InnerIterator it(A, col); it; ++it) {
+    for (StandardColumnMatrix::InnerIterator it(A, col); it; ++it) {
       residual[static_cast<std::size_t>(it.row())] -=
           static_cast<long double>(it.value()) * value;
     }
@@ -146,13 +211,13 @@ Eigen::VectorXd equation_residual_vector(
   return result;
 }
 
-Eigen::VectorXd multiply_AT(const Eigen::SparseMatrix<double>& A,
+Eigen::VectorXd multiply_AT(const StandardColumnMatrix& A,
                             const Eigen::VectorXd& y) {
   if (y.size() != A.rows()) return {};
   Eigen::VectorXd result = Eigen::VectorXd::Zero(A.cols());
   for (int col = 0; col < A.cols(); ++col) {
     double value = 0.0;
-    for (Eigen::SparseMatrix<double>::InnerIterator it(A, col); it; ++it) {
+    for (StandardColumnMatrix::InnerIterator it(A, col); it; ++it) {
       value += it.value() * y[it.row()];
     }
     result[col] = value;
@@ -160,21 +225,42 @@ Eigen::VectorXd multiply_AT(const Eigen::SparseMatrix<double>& A,
   return result;
 }
 
-double equation_residual_inf(const Eigen::SparseMatrix<double>& A,
+static void reconstruct_reduced_costs(State& state, const Eigen::VectorXd& y) {
+  state.reduced_costs.resize(state.n);
+  for (int col = 0; col < state.n; ++col) {
+    double dual_product = 0.0;
+    for (StandardColumnMatrix::InnerIterator it(state.sf->A, col); it; ++it) {
+      dual_product += it.value() * y[it.row()];
+    }
+    state.reduced_costs[col] = state.cost[col] - dual_product;
+  }
+}
+
+static double reconstruct_objective(const State& state) {
+  double objective = state.cost.dot(state.bounds.lower);
+  for (int col = 0; col < state.n; ++col) {
+    if (!state.basic[static_cast<std::size_t>(col)] &&
+        state.move[static_cast<std::size_t>(col)] == Move::Down) {
+      objective += state.cost[col] *
+                   (state.bounds.upper[col] - state.bounds.lower[col]);
+    }
+  }
+  for (int row = 0; row < state.m; ++row) {
+    const int col = state.basis[static_cast<std::size_t>(row)];
+    objective +=
+        state.cost[col] * (state.x_basic[row] - state.bounds.lower[col]);
+  }
+  return objective;
+}
+
+double equation_residual_inf(const StandardColumnMatrix& A,
                              const Eigen::VectorXd& x,
                              const Eigen::VectorXd& rhs) {
-  const Eigen::VectorXd residual = equation_residual_vector(A, x, rhs);
+  const Eigen::VectorXd residual = equation_residual_vector(A, x, rhs, true);
   if (residual.size() != rhs.size() || !residual.allFinite()) {
     return std::numeric_limits<double>::infinity();
   }
   return residual.lpNorm<Eigen::Infinity>();
-}
-
-bool is_artificial(const StandardFormLP& sf, int col) {
-  for (int artificial : sf.row_to_artificial_col) {
-    if (artificial == col) return true;
-  }
-  return false;
 }
 
 Bounds make_phase_two_bounds(const StandardFormLP& sf) {
@@ -206,7 +292,7 @@ Eigen::VectorXd make_dual_phase_one_anchor(const StandardFormLP& sf) {
     if (col < 0 || col >= sf.A.cols()) return {};
     double pivot = 0.0;
     int nonzeros = 0;
-    for (Eigen::SparseMatrix<double>::InnerIterator it(sf.A, col); it; ++it) {
+    for (StandardColumnMatrix::InnerIterator it(sf.A, col); it; ++it) {
       if (it.value() == 0.0) continue;
       ++nonzeros;
       if (it.row() == row) pivot = it.value();
@@ -264,8 +350,8 @@ bool initialize_dual_phase_one(State& state, std::string& failure) {
   state.phase = Phase::DualOne;
   state.cost = state.sf->c_max;
   state.original_cost = state.sf->c_max;
-  state.cost_perturbation = Eigen::VectorXd::Zero(state.n);
-  state.cost_shift = Eigen::VectorXd::Zero(state.n);
+  state.cost_perturbation.reset(state.n);
+  state.cost_shift.reset(state.n);
   state.costs_perturbed = false;
   state.costs_shifted = false;
   state.perturbation_disabled = false;
@@ -407,7 +493,7 @@ int apply_certified_singleton_crash(const StandardFormLP& sf,
     int row = -1;
     double coefficient = 0.0;
     int count = 0;
-    for (Eigen::SparseMatrix<double>::InnerIterator it(sf.A, col); it; ++it) {
+    for (StandardColumnMatrix::InnerIterator it(sf.A, col); it; ++it) {
       if (it.value() == 0.0) continue;
       row = it.row();
       coefficient = it.value();
@@ -463,14 +549,15 @@ bool rebuild_membership(State& state, std::string& failure) {
   return true;
 }
 
-bool correct_canonical_primal_residual(State& state, std::string& failure) {
+bool correct_canonical_primal_residual(State& state, std::string& failure,
+                                       bool exact_residual) {
   state.leaving_heap_valid = false;
   const double equation_limit =
       state.options->feasibility_tol *
       std::max(1.0, state.sf->b.lpNorm<Eigen::Infinity>());
   Eigen::VectorXd x = full_primal(state);
   Eigen::VectorXd residual =
-      equation_residual_vector(state.sf->A, x, state.sf->b);
+      equation_residual_vector(state.sf->A, x, state.sf->b, exact_residual);
   if (residual.size() != state.m || !residual.allFinite()) {
     failure = "canonical primal residual is dimensionally invalid or non-finite";
     return false;
@@ -496,7 +583,8 @@ bool correct_canonical_primal_residual(State& state, std::string& failure) {
     state.x_basic += correction.solution;
     ++state.canonical_primal_corrections;
     x = full_primal(state);
-    residual = equation_residual_vector(state.sf->A, x, state.sf->b);
+    residual = equation_residual_vector(state.sf->A, x, state.sf->b,
+                                        exact_residual);
     if (residual.size() != state.m || !residual.allFinite()) {
       failure = "corrected canonical primal residual is invalid or non-finite";
       return false;
@@ -516,7 +604,8 @@ bool correct_canonical_primal_residual(State& state, std::string& failure) {
   return true;
 }
 
-bool reconstruct(State& state, std::string& failure, bool primal, bool dual) {
+bool reconstruct(State& state, std::string& failure, bool primal, bool dual,
+                 bool exact_residual) {
   state.leaving_heap_valid = false;
   if (!rebuild_membership(state, failure)) return false;
   if (primal) {
@@ -540,7 +629,7 @@ bool reconstruct(State& state, std::string& failure, bool primal, bool dual) {
         value -= state.dual_phase_one_anchor[j];
       }
       if (value == 0.0) continue;
-      for (Eigen::SparseMatrix<double>::InnerIterator it(state.sf->A, j); it;
+      for (StandardColumnMatrix::InnerIterator it(state.sf->A, j); it;
            ++it) {
         rhs[it.row()] -= it.value() * value;
       }
@@ -559,7 +648,20 @@ bool reconstruct(State& state, std::string& failure, bool primal, bool dual) {
             state.basis[static_cast<std::size_t>(row)]];
       }
     }
-    if (!correct_canonical_primal_residual(state, failure)) return false;
+    const int rebuild_count = state.factor->rebuild_count();
+    const int interval = state.options->intermediate_audit_interval;
+    const bool periodic_audit =
+        rebuild_count <= 1 ||
+        (interval > 0 && rebuild_count % interval == 0);
+    const bool already_audited =
+        !exact_residual &&
+        state.last_canonical_residual_audit_rebuild == rebuild_count;
+    if ((exact_residual || periodic_audit) && !already_audited) {
+      if (!correct_canonical_primal_residual(state, failure, exact_residual))
+        return false;
+      ++state.canonical_residual_audits;
+      state.last_canonical_residual_audit_rebuild = rebuild_count;
+    }
   }
 
   if (dual) {
@@ -573,7 +675,7 @@ bool reconstruct(State& state, std::string& failure, bool primal, bool dual) {
       failure = "BTRAN failed backward-error validation";
       return false;
     }
-    state.reduced_costs = state.cost - multiply_AT(state.sf->A, y);
+    reconstruct_reduced_costs(state, y);
     if (!state.reduced_costs.allFinite()) {
       failure = "reduced-cost reconstruction is non-finite";
       return false;
@@ -581,8 +683,7 @@ bool reconstruct(State& state, std::string& failure, bool primal, bool dual) {
     for (int col : state.basis) state.reduced_costs[col] = 0.0;
   }
 
-  const Eigen::VectorXd x = full_primal(state);
-  state.objective = state.cost.dot(x);
+  state.objective = reconstruct_objective(state);
   if (!std::isfinite(state.objective)) {
     failure = "objective reconstruction is non-finite";
     return false;
@@ -612,11 +713,53 @@ bool normalize_nonbasic_moves(State& state, std::string& failure) {
   return reconstruct(state, failure);
 }
 
+DualShiftStartDecision decide_cost_shifted_dual_start(
+    const State& state, const char* environment_policy) {
+  if (environment_policy != nullptr) {
+    const std::string policy(environment_policy);
+    if (policy == "on") return {true, 0, 0, false};
+    if (policy == "off") return {false, 0, 0, false};
+  }
+
+  const int count_threshold =
+      std::max(1, state.options->dual_shift_start_max_count);
+  const double configured_fraction =
+      state.options->dual_shift_start_max_fraction;
+  const double fraction =
+      std::isfinite(configured_fraction) && configured_fraction > 0.0
+          ? configured_fraction
+          : 0.0;
+  const long double scaled_threshold = std::ceil(
+      static_cast<long double>(fraction) * std::max(0, state.n));
+  constexpr int kIntMax = (std::numeric_limits<int>::max)();
+  const int fraction_threshold =
+      scaled_threshold >= static_cast<long double>(kIntMax)
+          ? kIntMax
+          : static_cast<int>(scaled_threshold);
+  const int threshold = std::max(count_threshold, fraction_threshold);
+
+  int required_shifts = 0;
+  const double tolerance = state.options->optimality_tol;
+  for (int j = 0; j < state.n; ++j) {
+    if (state.basic[static_cast<std::size_t>(j)] ||
+        !state.bounds.enterable[static_cast<std::size_t>(j)] ||
+        state.reduced_costs[j] <= tolerance ||
+        std::isfinite(state.bounds.upper[j])) {
+      continue;
+    }
+    ++required_shifts;
+    if (required_shifts >= threshold) {
+      return {false, required_shifts, threshold, true};
+    }
+  }
+  return {true, required_shifts, threshold, false};
+}
+
 bool initialize_cost_shifted_dual_start(State& state, Statistics& statistics,
                                         std::string& failure) {
   state.original_cost = state.cost;
-  state.cost_perturbation = Eigen::VectorXd::Zero(state.n);
-  state.cost_shift = Eigen::VectorXd::Zero(state.n);
+  state.cost_perturbation.reset(state.n);
+  state.cost_shift.reset(state.n);
   state.costs_perturbed = false;
   state.costs_shifted = false;
   state.perturbation_disabled = false;
@@ -647,7 +790,7 @@ bool initialize_cost_shifted_dual_start(State& state, Statistics& statistics,
       return false;
     }
     state.cost[j] += shift;
-    state.cost_shift[j] = shift;
+    state.cost_shift.set(j, shift);
     state.reduced_costs[j] = 0.0;
     state.move[static_cast<std::size_t>(j)] = Move::Up;
     state.costs_shifted = true;
@@ -685,7 +828,7 @@ bool initialize_exact_edge_weights(State& state, Statistics& statistics,
     const int col = state.basis[static_cast<std::size_t>(row)];
     double diagonal = 0.0;
     int nonzeros = 0;
-    for (Eigen::SparseMatrix<double>::InnerIterator it(state.sf->A, col); it;
+    for (StandardColumnMatrix::InnerIterator it(state.sf->A, col); it;
          ++it) {
       if (it.value() == 0.0) continue;
       ++nonzeros;
@@ -736,9 +879,9 @@ bool initialize_stabilized_cost(State& state, Statistics& statistics,
                                 std::string& failure) {
   if (!state.costs_shifted) {
     state.original_cost = state.cost;
-    state.cost_shift = Eigen::VectorXd::Zero(state.n);
+    state.cost_shift.reset(state.n);
   }
-  state.cost_perturbation = Eigen::VectorXd::Zero(state.n);
+  state.cost_perturbation.reset(state.n);
   state.costs_perturbed = false;
   state.perturbation_disabled = false;
   if (state.phase != Phase::Two) return true;
@@ -780,12 +923,12 @@ bool initialize_stabilized_cost(State& state, Statistics& statistics,
     } else {
       perturbation = (0.5 - fraction) * logical_base;
     }
-    state.cost_perturbation[j] = perturbation;
+    state.cost_perturbation.set(j, perturbation);
     state.cost[j] += perturbation;
     statistics.max_cost_perturbation =
         std::max(statistics.max_cost_perturbation, std::abs(perturbation));
   }
-  state.costs_perturbed = state.cost_perturbation.cwiseAbs().maxCoeff() > 0.0;
+  state.costs_perturbed = state.cost_perturbation.max_abs() > 0.0;
   return reconstruct(state, failure);
 }
 
@@ -860,7 +1003,7 @@ bool major_rebuild(State& state, RebuildReason reason, bool reinvert,
     }
     const double shift = -state.reduced_costs[j];
     state.cost[j] += shift;
-    state.cost_shift[j] += shift;
+    state.cost_shift.add(j, shift);
     state.reduced_costs[j] = 0.0;
     state.costs_shifted = true;
     ++statistics.cost_shifts;
@@ -915,8 +1058,8 @@ bool major_rebuild(State& state, RebuildReason reason, bool reinvert,
 
 void restore_original_cost(State& state) {
   if (state.original_cost.size() == state.n) state.cost = state.original_cost;
-  state.cost_perturbation = Eigen::VectorXd::Zero(state.n);
-  state.cost_shift = Eigen::VectorXd::Zero(state.n);
+  state.cost_perturbation.reset(state.n);
+  state.cost_shift.reset(state.n);
   state.costs_perturbed = false;
   state.costs_shifted = false;
   state.perturbation_disabled = true;
@@ -933,6 +1076,17 @@ void initialize_cycle_guard(State& state) {
   state.cycle_history.clear();
   state.taboo_changes.clear();
   state.taboo_rows.clear();
+  state.cycle_history_fifo.clear();
+  state.taboo_changes_fifo.clear();
+  state.taboo_rows_fifo.clear();
+  state.taboo_ticket = 0;
+  const std::size_t expected_guard_entries = std::min<std::size_t>(
+      kCycleHistoryCapacity,
+      std::max<std::size_t>(64, 4 * static_cast<std::size_t>(std::max(1, state.m))));
+  state.cycle_history.reserve(expected_guard_entries);
+  state.taboo_changes.reserve(
+      std::min(expected_guard_entries, kTabooCapacity));
+  state.taboo_rows.reserve(std::min(expected_guard_entries, kTabooCapacity));
   state.pivot_sequence = 0;
   state.pricing_epoch = 0;
   resync_cycle_signature(state);
@@ -943,7 +1097,9 @@ void initialize_cycle_guard(State& state) {
   State::CycleRecord record;
   record.signature_a = a;
   record.signature_b = b;
-  state.cycle_history.emplace(std::make_pair(a, b), record);
+  const CycleKey key = std::make_pair(a, b);
+  state.cycle_history.emplace(key, record);
+  state.cycle_history_fifo.push_back(key);
 }
 
 bool is_taboo_change(const State& state, int leaving_col, int entering_col,
@@ -953,10 +1109,10 @@ bool is_taboo_change(const State& state, int leaving_col, int entering_col,
                                    entering_col);
   const auto found = state.taboo_changes.find(key);
   if (found == state.taboo_changes.end() ||
-      found->second < state.pricing_epoch) {
+      found->second.expiry < state.pricing_epoch) {
     return false;
   }
-  if (expires_after != nullptr) *expires_after = found->second;
+  if (expires_after != nullptr) *expires_after = found->second.expiry;
   return true;
 }
 
@@ -965,20 +1121,24 @@ bool is_taboo_row(const State& state, int leaving_col, int* expires_after) {
                                    state.cycle_signature_b, leaving_col);
   const auto found = state.taboo_rows.find(key);
   if (found == state.taboo_rows.end() ||
-      found->second < state.pricing_epoch) {
+      found->second.expiry < state.pricing_epoch) {
     return false;
   }
-  if (expires_after != nullptr) *expires_after = found->second;
+  if (expires_after != nullptr) *expires_after = found->second.expiry;
   return true;
 }
 
 void add_taboo_row(State& state, int leaving_col, Statistics& statistics) {
-  const int lifetime = 2 * std::max(1, state.m) + 1;
+  const int lifetime = taboo_lifetime(state.m);
   const auto key = std::make_tuple(state.cycle_signature_a,
                                    state.cycle_signature_b, leaving_col);
-  auto [position, inserted] = state.taboo_rows.insert_or_assign(
-      key, state.pricing_epoch + lifetime);
-  (void)position;
+  auto [position, inserted] = state.taboo_rows.try_emplace(key);
+  position->second.expiry = state.pricing_epoch + lifetime;
+  if (inserted) {
+    position->second.ticket = ++state.taboo_ticket;
+    state.taboo_rows_fifo.emplace_back(key, position->second.ticket);
+  }
+  enforce_taboo_capacity(state.taboo_rows, state.taboo_rows_fifo);
   if (inserted) ++statistics.taboo_rows;
 }
 
@@ -991,7 +1151,8 @@ void release_taboo_row(State& state, int leaving_col,
   // Aspiration: if CHUZR has exhausted every non-taboo row, advance the
   // pricing clock beyond the earliest available row tenure. Edge taboos use
   // the same clock, so no blocked state can livelock without a basis change.
-  state.pricing_epoch = std::max(state.pricing_epoch, found->second + 1);
+  state.pricing_epoch =
+      std::max(state.pricing_epoch, found->second.expiry + 1);
   state.taboo_rows.erase(found);
   ++statistics.taboo_row_releases;
 }
@@ -1004,6 +1165,12 @@ void record_cycle_departure(State& state, int leaving_col, int entering_col) {
   if (inserted) {
     record.signature_a = key.first;
     record.signature_b = key.second;
+    state.cycle_history_fifo.push_back(key);
+    while (state.cycle_history.size() > kCycleHistoryCapacity) {
+      const CycleKey old_key = state.cycle_history_fifo.front();
+      state.cycle_history_fifo.pop_front();
+      state.cycle_history.erase(old_key);
+    }
   }
   record.leaving_col = leaving_col;
   record.entering_col = entering_col;
@@ -1045,18 +1212,29 @@ bool record_cycle_arrival(State& state, Statistics& statistics) {
     record.signature_a = a;
     record.signature_b = b;
     record.last_seen = state.pivot_sequence;
+    state.cycle_history_fifo.push_back(key);
+    while (state.cycle_history.size() > kCycleHistoryCapacity) {
+      const CycleKey old_key = state.cycle_history_fifo.front();
+      state.cycle_history_fifo.pop_front();
+      state.cycle_history.erase(old_key);
+    }
     return false;
   }
 
   ++statistics.cycles_detected;
   if (record.leaving_col >= 0 && record.entering_col >= 0) {
-    const int lifetime = 2 * std::max(1, state.m) + 1;
+    const int lifetime = taboo_lifetime(state.m);
     const auto taboo_key =
         std::make_tuple(a, b, record.leaving_col, record.entering_col);
     const int expiry = state.pricing_epoch + lifetime;
     auto [taboo, taboo_inserted] =
-        state.taboo_changes.insert_or_assign(taboo_key, expiry);
-    (void)taboo;
+        state.taboo_changes.try_emplace(taboo_key);
+    taboo->second.expiry = expiry;
+    if (taboo_inserted) {
+      taboo->second.ticket = ++state.taboo_ticket;
+      state.taboo_changes_fifo.emplace_back(taboo_key, taboo->second.ticket);
+    }
+    enforce_taboo_capacity(state.taboo_changes, state.taboo_changes_fifo);
     if (taboo_inserted) ++statistics.taboo_changes;
   }
   record.last_seen = state.pivot_sequence;
@@ -1072,6 +1250,7 @@ bool initialize(State& state, const StandardFormLP& sf,
   state.phase = phase;
   state.m = static_cast<int>(sf.A.rows());
   state.n = static_cast<int>(sf.A.cols());
+  state.kernel_threads = lp_kernel_threads(options);
   if (state.m <= 0 || state.n <= 0 || sf.b.size() != state.m ||
       sf.c_max.size() != state.n || sf.var_ub.size() != state.n) {
     failure = "standard-form dimensions are invalid";
@@ -1080,8 +1259,8 @@ bool initialize(State& state, const StandardFormLP& sf,
   state.bounds = make_phase_two_bounds(sf);
   state.cost = sf.c_max;
   state.original_cost = sf.c_max;
-  state.cost_perturbation = Eigen::VectorXd::Zero(state.n);
-  state.cost_shift = Eigen::VectorXd::Zero(state.n);
+  state.cost_perturbation.reset(state.n);
+  state.cost_shift.reset(state.n);
   state.move.assign(static_cast<std::size_t>(state.n), Move::Up);
   // Dominating coefficient for the BFRT dot-product error bound. For column
   // j with k stored entries, dot_error_bound computes
@@ -1094,7 +1273,7 @@ bool initialize(State& state, const StandardFormLP& sf,
   for (int j = 0; j < state.n; ++j) {
     double norm1 = 0.0;
     int terms = 0;
-    for (Eigen::SparseMatrix<double>::InnerIterator it(sf.A, j); it; ++it) {
+    for (StandardColumnMatrix::InnerIterator it(sf.A, j); it; ++it) {
       norm1 += std::abs(it.value());
       ++terms;
     }
@@ -1148,16 +1327,11 @@ bool initialize(State& state, const StandardFormLP& sf,
 
 bool initialize_cold_edge_weights(State& state, Statistics& statistics,
                                   std::string& failure) {
-  // Diagnostic/experimental selection of the cold-start dual pricing weights,
-  // mirroring MIPSOLVERS_PRIMAL_DEVEX for the primal cleanup. Unset keeps the
-  // production policy.
-  if (const char* pricing = std::getenv("MIPSOLVERS_DUAL_PRICING")) {
-    if (std::string(pricing) == "devex") {
-      initialize_devex_framework(state, statistics);
-      return true;
-    }
+  if (state.options != nullptr && state.options->exact_dse_initialization) {
+    return initialize_exact_edge_weights(state, statistics, failure);
   }
-  return initialize_exact_edge_weights(state, statistics, failure);
+  initialize_devex_framework(state, statistics);
+  return true;
 }
 
 Eigen::VectorXd full_primal(const State& state) {
@@ -1197,7 +1371,7 @@ double dual_infeasibility(const State& state, int col) {
 }
 
 Audit audit(const State& state, bool require_primal, bool require_dual,
-            bool require_artificial_zero) {
+            bool require_artificial_zero, bool exact_residual) {
   Audit result;
   if (state.x_basic.size() != state.m ||
       state.reduced_costs.size() != state.n || !state.x_basic.allFinite() ||
@@ -1225,8 +1399,12 @@ Audit audit(const State& state, bool require_primal, bool require_dual,
     }
   }
   const Eigen::VectorXd x = full_primal(state);
+  const Eigen::VectorXd equation_residual = equation_residual_vector(
+      state.sf->A, x, state.sf->b, exact_residual);
   result.equation_residual =
-      equation_residual_inf(state.sf->A, x, state.sf->b);
+      equation_residual.size() == state.m && equation_residual.allFinite()
+          ? equation_residual.lpNorm<Eigen::Infinity>()
+          : std::numeric_limits<double>::infinity();
   const double equation_limit =
       state.options->feasibility_tol *
       std::max(1.0, state.sf->b.lpNorm<Eigen::Infinity>());

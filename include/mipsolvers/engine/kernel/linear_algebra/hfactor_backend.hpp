@@ -23,6 +23,11 @@ class HFactor;
 
 namespace mipsolvers::engine {
 
+class StandardColumnMatrix;
+
+using HFactorSparseMatrix64 =
+    Eigen::SparseMatrix<double, Eigen::ColMajor, std::int64_t>;
+
 class HFactorBackend {
  public:
   HFactorBackend();
@@ -43,6 +48,12 @@ class HFactorBackend {
   int n_updates = 0;
   // Rank deficiency reported by the last factorize().  0 on success.
   int rank_deficiency = 0;
+
+  // Number of times the immutable Eigen CSC was converted into HFactor's
+  // HighsInt storage. Repeated INVERTs on the same matrix reuse that storage.
+  std::uint64_t matrix_copy_count() const noexcept;
+  std::uint64_t dense_solve_count() const noexcept;
+  std::uint64_t indexed_solve_count() const noexcept;
 
   // Rows that received no pivot in the last failed build (HiGHS-style
   // basis repair input): replace each such row's basic column with the
@@ -68,6 +79,12 @@ class HFactorBackend {
   bool factorize(const Eigen::SparseMatrix<double>& A,
                  const int* basic_index,
                  int n_basic);
+  bool factorize(const HFactorSparseMatrix64& A,
+                 const int* basic_index,
+                 int n_basic);
+  bool factorize(const StandardColumnMatrix& A,
+                 const int* basic_index,
+                 int n_basic);
 
   // Factorize a standard-form basis while representing one +1 unit column
   // per row as HFactor's implicit logical variable.  This is the same model
@@ -82,6 +99,18 @@ class HFactorBackend {
   // `rank_deficiency` records how many columns were repaired.
   bool factorize_with_logicals(
       const Eigen::SparseMatrix<double>& A,
+      const int* basic_index,
+      int n_basic,
+      const std::vector<int>& logical_col_by_row,
+      std::vector<int>& repaired_basis);
+  bool factorize_with_logicals(
+      const HFactorSparseMatrix64& A,
+      const int* basic_index,
+      int n_basic,
+      const std::vector<int>& logical_col_by_row,
+      std::vector<int>& repaired_basis);
+  bool factorize_with_logicals(
+      const StandardColumnMatrix& A,
       const int* basic_index,
       int n_basic,
       const std::vector<int>& logical_col_by_row,
@@ -149,6 +178,14 @@ class HFactorBackend {
   void reset_update_tracking() noexcept;
 
  private:
+  template <typename SparseMatrix>
+  bool factorize_impl(const SparseMatrix& A, const int* basic_index,
+                      int n_basic);
+  template <typename SparseMatrix>
+  bool factorize_with_logicals_impl(
+      const SparseMatrix& A, const int* basic_index, int n_basic,
+      const std::vector<int>& logical_col_by_row,
+      std::vector<int>& repaired_basis);
   struct Impl;
   std::unique_ptr<Impl> p_;
   std::vector<int> no_pivot_rows_;

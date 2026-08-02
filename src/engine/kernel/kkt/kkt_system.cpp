@@ -355,6 +355,7 @@ bool solve_kkt_reduced_sparse(const Eigen::SparseMatrix<double>& w,
 
 namespace {
 
+#ifndef HACDCPF_HAVE_MUMPS
 Eigen::SparseMatrix<double> add_scaled_identity(
     const Eigen::SparseMatrix<double>& a, double delta) {
   const int n = static_cast<int>(a.rows());
@@ -367,6 +368,7 @@ Eigen::SparseMatrix<double> add_scaled_identity(
   out.makeCompressed();
   return out;
 }
+#endif
 
 double increased_primal_regularization(double delta_w,
                                        bool& delta_w_was_zero,
@@ -381,6 +383,7 @@ double increased_primal_regularization(double delta_w,
   return std::max(delta_w * multiplier, settings.delta_w_0);
 }
 
+#ifndef HACDCPF_HAVE_MUMPS
 bool certify_primal_positive_definite(
     const Eigen::SparseMatrix<double>& h_delta,
     SparseInertiaKKTCache& cache) {
@@ -405,6 +408,7 @@ bool certify_primal_positive_definite(
   const Eigen::VectorXd diagonal = cache.primal_ldlt.vectorD();
   return (diagonal.array() > 0.0).all();
 }
+#endif
 
 void remember_tangent_partition_pattern(
     const Eigen::SparseMatrix<double>& jg,
@@ -651,6 +655,78 @@ bool build_reduced_space_certificate(
   return true;
 }
 
+#ifdef HACDCPF_HAVE_MUMPS
+void ensure_mumps_augmented_solver(SparseKKTCache& augmented) {
+  if (dynamic_cast<MumpsSolver*>(augmented.solver.get()) != nullptr) return;
+  augmented.solver = std::make_unique<MumpsSolver>();
+  augmented.pattern_analyzed = false;
+  augmented.pattern_outer.clear();
+  augmented.pattern_inner.clear();
+}
+
+bool factor_with_direct_mumps_inertia(
+    const Eigen::SparseMatrix<double>& w,
+    const Eigen::SparseMatrix<double>& jg,
+    const InertiaSettings& settings,
+    double& delta_w_last,
+    SparseInertiaKKTCache& cache,
+    InertiaStatus& status) {
+  const int n = static_cast<int>(w.rows());
+  const int meq = static_cast<int>(jg.rows());
+  const int dim = n + meq;
+
+  ensure_mumps_augmented_solver(cache.augmented);
+  status.direct_factor_inertia = true;
+
+  double delta_w = std::max(0.0, delta_w_last);
+  bool delta_w_was_zero = (delta_w == 0.0);
+  const double delta_c_repair = settings.delta_c_stripe *
+      std::pow(std::max(settings.mu, 1e-20), 0.25);
+  bool last_factor_succeeded = false;
+
+  auto factor_and_check = [&](double delta_c) {
+    assemble_augmented_kkt_cached(cache.augmented, w, jg, delta_w, delta_c);
+    ++status.factorization_attempts;
+    const bool factored = factor_current_kkt(cache.augmented, n, meq);
+    last_factor_succeeded = factored;
+    const int deficiency = cache.augmented.solver->estimated_deficiency();
+    const int negative = cache.augmented.solver->negative_eigenvalues();
+    status.n_zero = std::max(0, deficiency);
+    status.n_neg = std::max(0, negative);
+    status.n_pos = (negative >= 0 && deficiency >= 0)
+        ? std::max(0, dim - negative - deficiency) : 0;
+    status.delta_w_used = delta_w;
+    status.delta_c_used = delta_c;
+    return factored && deficiency == 0 && negative == meq;
+  };
+
+  while (status.factorization_attempts < 60) {
+    if (factor_and_check(0.0) ||
+        ((status.n_zero > 0 || !last_factor_succeeded) &&
+         factor_and_check(delta_c_repair))) {
+      cache.factored = true;
+      status.correct = true;
+      status.n_pos = n;
+      status.n_neg = meq;
+      status.n_zero = 0;
+      delta_w_last = std::max(
+          settings.delta_w_min, delta_w * settings.kappa_w_minus);
+      return true;
+    }
+
+    cache.factored = false;
+    cache.augmented.factored = false;
+    delta_w = increased_primal_regularization(
+        delta_w, delta_w_was_zero, settings);
+    if (delta_w > settings.delta_w_max) {
+      status.delta_w_used = delta_w;
+      return false;
+    }
+  }
+  return false;
+}
+#endif
+
 }  // namespace
 
 bool factor_kkt_inertia_corrected_sparse(
@@ -666,6 +742,14 @@ bool factor_kkt_inertia_corrected_sparse(
   cache.factored = false;
   if (w.cols() != n || jg.cols() != n) return false;
 
+#ifdef HACDCPF_HAVE_MUMPS
+  // The inertia-corrected path is symmetric by construction. Use the
+  // symmetric-indefinite LDLT backend even when a small reduced-space
+  // certificate supplies the regularization threshold; generic KLU/UMFPACK
+  // would discard symmetry and roughly double fill/flops.
+  ensure_mumps_augmented_solver(cache.augmented);
+#endif
+
   // For full-row-rank Jg, the bordered-Hessian identity gives
   // inertia(K) = (meq, meq, 0) + inertia(Z' (W + delta_W I) Z).
   // The generalized eigenvalues of (Z'WZ, Z'Z) therefore provide the exact
@@ -679,15 +763,35 @@ bool factor_kkt_inertia_corrected_sparse(
     status.min_reduced_curvature = reduced_certificate.min_curvature;
     status.reduced_curvature_margin = reduced_certificate.margin;
     status.nullspace_residual = reduced_certificate.nullspace_residual;
-    double delta_w = std::max(
+    const double required_shift = std::max(
         0.0, reduced_certificate.margin - reduced_certificate.min_curvature);
+    // A mathematically positive O(eps) pivot is still a numerical null pivot
+    // to a sparse threshold factorization. When a shift is required, place it
+    // safely inside the positive half-line at sqrt(eps) relative scale so the
+    // direct inertia check does not trigger an 8x regularization jump.
+    const double factor_margin = required_shift > 0.0
+        ? 64.0 * std::sqrt(std::numeric_limits<double>::epsilon()) *
+              std::max(1.0, std::abs(reduced_certificate.min_curvature))
+        : 0.0;
+    double delta_w = required_shift + factor_margin;
     bool delta_w_was_zero = (delta_w == 0.0);
     for (; status.factorization_attempts < 8;
          ++status.factorization_attempts) {
       assemble_augmented_kkt_cached(cache.augmented, w, jg, delta_w, 0.0);
-      if (factor_current_kkt(cache.augmented, n, meq)) {
+      const bool factored = factor_current_kkt(cache.augmented, n, meq);
+      const int factor_negative =
+          cache.augmented.solver->negative_eigenvalues();
+      const int factor_deficiency =
+          cache.augmented.solver->estimated_deficiency();
+      const bool factor_inertia_available =
+          factor_negative >= 0 && factor_deficiency >= 0;
+      const bool factor_inertia_matches =
+          !factor_inertia_available ||
+          (factor_negative == meq && factor_deficiency == 0);
+      if (factored && factor_inertia_matches) {
         cache.factored = true;
         status.correct = true;
+        status.direct_factor_inertia = factor_inertia_available;
         status.n_pos = n;
         status.n_neg = meq;
         status.delta_w_used = delta_w;
@@ -705,6 +809,14 @@ bool factor_kkt_inertia_corrected_sparse(
     }
     status.reduced_space_certificate = false;
   }
+
+#ifdef HACDCPF_HAVE_MUMPS
+  // The explicit null-space eigensolve is deliberately capped. Beyond that
+  // cap, use the negative-pivot count of the symmetric-indefinite factor
+  // instead of forcing the entire primal block to be positive definite.
+  return factor_with_direct_mumps_inertia(
+      w, jg, settings, delta_w_last, cache, status);
+#else
 
   // Wächter-Biegler δ_W schedule: start from last successful δ_W; on failure,
   // if δ_W was zero → jump to δ_w_0; else multiply by κ_W⁺_first (first
@@ -753,7 +865,7 @@ bool factor_kkt_inertia_corrected_sparse(
     if (factor_current_kkt(cache.augmented, n, meq)) {
       cache.factored = true;
       status.correct = true;
-      status.n_zero = meq;
+      status.n_zero = 0;
       status.delta_w_used = delta_w;
       status.delta_c_used = delta_c;
       delta_w_last = std::max(
@@ -770,6 +882,7 @@ bool factor_kkt_inertia_corrected_sparse(
     }
   }
   return false;
+#endif
 }
 
 bool solve_kkt_inertia_corrected_sparse(

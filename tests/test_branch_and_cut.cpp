@@ -8,15 +8,19 @@
 #include <Eigen/Sparse>
 #include <cstdlib>
 #include <algorithm>
+#include <limits>
 #include <optional>
 #include <string>
 #include <thread>
 
 #include "mipsolvers/engine/bc/api.hpp"
 #include "mipsolvers/engine/detail/bc_conformance_trace.hpp"
+#include "mipsolvers/engine/detail/bc_clique_table.hpp"
+#include "mipsolvers/engine/detail/bc_domain.hpp"
 #include "mipsolvers/engine/detail/bc_env_options.hpp"
 #include "mipsolvers/engine/detail/bc_fallback.hpp"
 #include "mipsolvers/engine/detail/bc_legacy_helpers.hpp"
+#include "mipsolvers/engine/detail/bc_numerics.hpp"
 #include "mipsolvers/engine/detail/bc_objective_propagation.hpp"
 #include "mipsolvers/engine/detail/bc_utils.hpp"
 #include "mipsolvers/engine/problem_types.hpp"
@@ -76,6 +80,248 @@ MIPModel make_knapsack_10() {
 
 }  // namespace
 
+TEST_CASE("B&C: explicit-bound feasibility rejects malformed vectors",
+          "[bc][feasibility][dimensions]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Zero(1);
+  lp.A.resize(0, 1);
+  lp.b.resize(0);
+  lp.Aeq.resize(0, 1);
+  lp.beq.resize(0);
+  lp.vars = {{VarType::Continuous, 0.0, 1.0}};
+
+  const Eigen::VectorXd bounds_lb = Eigen::VectorXd::Zero(1);
+  const Eigen::VectorXd bounds_ub = Eigen::VectorXd::Ones(1);
+  Eigen::VectorXd x = Eigen::VectorXd::Constant(1, 0.5);
+  CHECK(detail::satisfies_with_bounds(lp, x, bounds_lb, bounds_ub, 1e-6));
+  CHECK_FALSE(detail::satisfies_with_bounds(
+      lp, Eigen::VectorXd{}, bounds_lb, bounds_ub, 1e-6));
+  CHECK_FALSE(detail::satisfies_with_bounds(
+      lp, x, Eigen::VectorXd{}, bounds_ub, 1e-6));
+  x[0] = std::numeric_limits<double>::quiet_NaN();
+  CHECK_FALSE(detail::satisfies_with_bounds(lp, x, bounds_lb, bounds_ub,
+                                             1e-6));
+}
+
+TEST_CASE("B&C: sparse cut rows append without rebuilding prior entries",
+          "[bc][cuts][matrix_append]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Zero(4);
+  lp.A.resize(2, 4);
+  lp.A.insert(0, 0) = 2.0;
+  lp.A.insert(0, 3) = -1.0;
+  lp.A.insert(1, 1) = 3.0;
+  lp.A.makeCompressed();
+  lp.b.resize(2);
+  lp.b << 5.0, 7.0;
+  lp.row_lhs.resize(2);
+  lp.row_lhs << -2.0, 1.0;
+  lp.Aeq.resize(0, 4);
+  lp.beq.resize(0);
+  lp.vars.assign(4, VariableMeta{VarType::Continuous, 0.0, 10.0});
+
+  auto sparse_row = [](int size,
+                       std::initializer_list<std::pair<int, double>> terms) {
+    Eigen::SparseVector<double> row(size);
+    row.reserve(static_cast<int>(terms.size()));
+    for (const auto& [col, value] : terms) row.insertBack(col) = value;
+    return row;
+  };
+
+  std::vector<Eigen::SparseVector<double>> first_rows;
+  first_rows.push_back(sparse_row(4, {{0, 4.0}, {2, -2.0}}));
+  first_rows.push_back(sparse_row(3, {{0, 1.0}}));
+  first_rows.push_back(sparse_row(4, {{1, 1.0}}));
+  first_rows.push_back(sparse_row(4, {}));
+  first_rows.push_back(sparse_row(
+      4, {{3, std::numeric_limits<double>::infinity()}}));
+  const std::vector<double> first_rhs = {
+      11.0, 12.0, std::numeric_limits<double>::quiet_NaN(), 13.0, 14.0};
+
+  detail::SeparatorStorageStats storage;
+  detail::add_sparse_rows_to_lp(lp, first_rows, first_rhs, &storage);
+
+  REQUIRE(lp.A.rows() == 3);
+  CHECK_FALSE(lp.A.isCompressed());
+  CHECK(lp.A.coeff(0, 0) == Approx(2.0));
+  CHECK(lp.A.coeff(0, 3) == Approx(-1.0));
+  CHECK(lp.A.coeff(1, 1) == Approx(3.0));
+  CHECK(lp.A.coeff(2, 0) == Approx(4.0));
+  CHECK(lp.A.coeff(2, 2) == Approx(-2.0));
+  CHECK(lp.b[0] == Approx(5.0));
+  CHECK(lp.b[1] == Approx(7.0));
+  CHECK(lp.b[2] == Approx(11.0));
+  CHECK(lp.row_lhs[0] == Approx(-2.0));
+  CHECK(lp.row_lhs[1] == Approx(1.0));
+  CHECK(std::isinf(lp.row_lhs[2]));
+  CHECK(lp.row_lhs[2] < 0.0);
+  CHECK(storage.matrix_append_calls == 1);
+  CHECK(storage.matrix_appended_rows == 1);
+  CHECK(storage.matrix_appended_entries == 2);
+  CHECK(storage.matrix_prior_entries_bypassing_triplet_rebuild == 3);
+
+  constexpr int kRepeatedAppends = 32;
+  std::uint64_t expected_prior_entries = 3;
+  int expected_entries = 5;
+  for (int i = 0; i < kRepeatedAppends; ++i) {
+    const int col = i % 4;
+    const double value = 20.0 + static_cast<double>(i);
+    const std::vector<Eigen::SparseVector<double>> rows = {
+        sparse_row(4, {{col, value}})};
+    const std::vector<double> rhs = {100.0 + static_cast<double>(i)};
+    expected_prior_entries += static_cast<std::uint64_t>(expected_entries);
+    detail::add_sparse_rows_to_lp(lp, rows, rhs, &storage);
+    ++expected_entries;
+    CHECK(lp.A.coeff(3 + i, col) == Approx(value));
+    CHECK(lp.b[3 + i] == Approx(rhs[0]));
+    CHECK(std::isinf(lp.row_lhs[3 + i]));
+    CHECK(lp.row_lhs[3 + i] < 0.0);
+  }
+
+  CHECK(lp.A.rows() == 3 + kRepeatedAppends);
+  CHECK(lp.A.nonZeros() == expected_entries);
+  CHECK(storage.matrix_append_calls == 1 + kRepeatedAppends);
+  CHECK(storage.matrix_appended_rows == 1 + kRepeatedAppends);
+  CHECK(storage.matrix_appended_entries == 2 + kRepeatedAppends);
+  CHECK(storage.matrix_prior_entries_bypassing_triplet_rebuild ==
+        expected_prior_entries);
+  CHECK(storage.matrix_storage_reallocations < storage.matrix_append_calls);
+  CHECK(storage.matrix_peak_spare_entries > 0);
+}
+
+TEST_CASE("B&C: clique-table insertions touch only endpoint adjacency",
+          "[bc][clique_table][incremental]") {
+  LPModel lp;
+  constexpr int kCols = 2048;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Zero(kCols);
+  lp.A.resize(0, kCols);
+  lp.b.resize(0);
+  lp.Aeq.resize(0, kCols);
+  lp.beq.resize(0);
+  lp.vars.assign(kCols, {VarType::Binary, 0.0, 1.0});
+
+  detail::CliqueTable table;
+  CHECK(table.build(lp) == 0);
+  CHECK(table.add_edges(lp, {{0, 1}}) == 1);
+  CHECK(table.n_edges() == 1);
+  CHECK(table.n_literal_edges() == 1);
+  CHECK(table.has_edge(0, 1));
+  CHECK(table.has_literal_edge(0, true, 1, true));
+
+  const auto untouched_variable_range = table.neighbours(0);
+  const auto untouched_literal_range = table.literal_neighbours(0, true);
+  REQUIRE(untouched_variable_range.first != nullptr);
+  REQUIRE(untouched_literal_range.first != nullptr);
+
+  CHECK(table.add_literal_edges(
+            lp, {{{2, false}, {3, true}}, {{4, true}, {5, true}}}) == 2);
+  CHECK(table.n_edges() == 2);
+  CHECK(table.n_literal_edges() == 3);
+  CHECK(table.has_literal_edge(2, false, 3, true));
+  CHECK(table.has_edge(4, 5));
+
+  // Updating unrelated endpoints must not rebuild every adjacency list.
+  CHECK(table.neighbours(0).first == untouched_variable_range.first);
+  CHECK(table.literal_neighbours(0, true).first ==
+        untouched_literal_range.first);
+
+  CHECK(table.add_edges(lp, {{1, 0}, {0, 1}}) == 0);
+  CHECK(table.add_literal_edges(lp, {{{3, true}, {2, false}}}) == 0);
+  CHECK(table.n_edges() == 2);
+  CHECK(table.n_literal_edges() == 3);
+
+  std::vector<std::pair<int, int>> batch;
+  batch.reserve(4 * (kCols - 6));
+  for (int j = 6; j < kCols; ++j) {
+    batch.emplace_back(2, j);
+    batch.emplace_back(j, 2);
+    batch.emplace_back(2, j);
+    batch.emplace_back(j, 2);
+  }
+  CHECK(table.add_edges(lp, batch) == static_cast<std::size_t>(kCols - 6));
+  CHECK(table.degree(2) == kCols - 6);
+  CHECK(table.degree(kCols - 1) == 1);
+  CHECK(table.has_edge(2, kCols - 1));
+  CHECK(table.has_literal_edge(2, true, kCols - 1, true));
+  CHECK(table.add_edges(lp, batch) == 0);
+}
+
+TEST_CASE("B&C: domain restore rolls back infeasible activity deltas",
+          "[bc][domain][restore]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Zero(2);
+  lp.A.resize(1, 2);
+  lp.A.insert(0, 0) = 1.0;
+  lp.A.insert(0, 1) = 1.0;
+  lp.A.makeCompressed();
+  lp.b = Eigen::VectorXd::Ones(1);
+  lp.Aeq.resize(0, 2);
+  lp.beq.resize(0);
+  lp.vars = {{VarType::Binary, 0.0, 1.0},
+             {VarType::Binary, 0.0, 1.0}};
+
+  detail::BCDomain domain;
+  const Eigen::VectorXd lb = Eigen::VectorXd::Zero(2);
+  const Eigen::VectorXd ub = Eigen::VectorXd::Ones(2);
+  domain.init(lp, lb, ub);
+  REQUIRE(domain.propagate());
+  CHECK(domain.propagation_complete());
+
+  const detail::BCDomain::Savepoint sp = domain.savepoint();
+  REQUIRE(domain.fix_col(0, 1.0));
+  CHECK_FALSE(domain.fix_col(1, 1.0));
+  CHECK(domain.infeasible());
+
+  domain.restore(sp);
+  CHECK_FALSE(domain.infeasible());
+  CHECK(domain.lb()[0] == Approx(0.0));
+  CHECK(domain.lb()[1] == Approx(0.0));
+  REQUIRE(domain.propagate());
+  CHECK(domain.propagation_complete());
+
+  REQUIRE(domain.fix_col(0, 1.0));
+  REQUIRE(domain.propagate());
+  CHECK(domain.ub()[1] == Approx(0.0));
+}
+
+TEST_CASE("B&C: compensated row activity survives catastrophic cancellation",
+          "[bc][domain][numerics]") {
+  detail::StableActivitySum activity;
+  activity.add_product(1e16, 1.0);
+  activity.add_product(1.0, 1.0);
+  activity.add_product(-1e16, 1.0);
+  CHECK(activity.value() == Approx(1.0));
+
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Zero(4);
+  lp.A.resize(1, 4);
+  lp.A.insert(0, 0) = 1e16;
+  lp.A.insert(0, 1) = 1.0;
+  lp.A.insert(0, 2) = -1e16;
+  lp.A.insert(0, 3) = 1.0;
+  lp.A.makeCompressed();
+  lp.b = Eigen::VectorXd::Ones(1);
+  lp.Aeq.resize(0, 4);
+  lp.beq.resize(0);
+  lp.vars = {{VarType::Continuous, 1.0, 1.0},
+             {VarType::Continuous, 1.0, 1.0},
+             {VarType::Continuous, 1.0, 1.0},
+             {VarType::Binary, 0.0, 1.0}};
+
+  Eigen::VectorXd lb(4), ub(4);
+  lb << 1.0, 1.0, 1.0, 0.0;
+  ub << 1.0, 1.0, 1.0, 1.0;
+  detail::BCDomain domain;
+  domain.init(lp, lb, ub);
+  REQUIRE(domain.propagate());
+  CHECK(domain.ub()[3] == Approx(0.0));
+}
+
 TEST_CASE("B&C: environment snapshot is immutable and shared across workers",
           "[bc][environment][reproducibility]") {
   EnvVarGuard guard("MIPSOLVERS_TEST_SNAPSHOT_VALUE", "before");
@@ -120,6 +366,41 @@ TEST_CASE("B&C: result records the effective solve environment",
                   next_result.effective_environment.end(),
                   "MIPSOLVERS_TEST_SNAPSHOT_VALUE=next-solve") !=
         next_result.effective_environment.end());
+}
+
+TEST_CASE("B&C: bound events retain audited user-space incumbents",
+          "[bc][progress][audit]") {
+  const MIPModel mip = make_knapsack_10();
+  BCOptions opt;
+  opt.num_threads = 1;
+  opt.enable_lns = false;
+  const BCResult result = solve_milp_bc(mip, opt);
+
+  REQUIRE(result.stats.success);
+  REQUIRE(result.bc_stats.bound_event_stream_available);
+  REQUIRE_FALSE(result.bc_stats.bound_events.empty());
+
+  double previous_time = 0.0;
+  int primal_events = 0;
+  Eigen::VectorXd lb(mip.linear_part.vars.size());
+  Eigen::VectorXd ub(mip.linear_part.vars.size());
+  for (int j = 0; j < lb.size(); ++j) {
+    lb[j] = mip.linear_part.vars[static_cast<std::size_t>(j)].lb;
+    ub[j] = mip.linear_part.vars[static_cast<std::size_t>(j)].ub;
+  }
+  for (const auto& event : result.bc_stats.bound_events) {
+    CHECK(event.time_sec >= previous_time);
+    CHECK(event.time_sec <= result.bc_stats.runtime_sec + 1e-9);
+    previous_time = event.time_sec;
+    if (!std::isfinite(event.primal_bound)) continue;
+    ++primal_events;
+    REQUIRE(event.incumbent.size() == mip.linear_part.c.size());
+    CHECK(detail::satisfies_with_bounds(
+        mip.linear_part, event.incumbent, lb, ub, 1e-6));
+    CHECK(event.primal_bound ==
+          Approx(mip.linear_part.c.dot(event.incumbent)).margin(1e-8));
+  }
+  CHECK(primal_events >= 1);
 }
 
 TEST_CASE("B&C: perturbed fallback cannot certify the original node",
@@ -306,6 +587,30 @@ TEST_CASE("B&C: short global limits do not collapse the root budget",
         Approx(3.0));
 }
 
+TEST_CASE("B&C: optional subsolves cannot consume the outer deadline reserve",
+          "[bc][deadline][subsolve]") {
+  // A 3 s outer solve with 0.3 s reserved for finalization cannot give a
+  // nominally 5 s LNS child more than 2.7 s.
+  CHECK(detail::bc_optional_subsolve_budget_sec(
+            5.0, 3.0, 0.3, 15.0) == Approx(2.7));
+
+  // The LNS stage allowance can be tighter than both local and global limits.
+  CHECK(detail::bc_optional_subsolve_budget_sec(
+            5.0, 20.0, 1.0, 0.75) == Approx(0.75));
+
+  // No nested solve is started once the finalization reserve or the minimum
+  // useful child budget has been consumed.
+  CHECK(detail::bc_optional_subsolve_budget_sec(
+            5.0, 0.3, 0.3, 15.0) == Approx(0.0));
+  CHECK(detail::bc_optional_subsolve_budget_sec(
+            5.0, 0.3005, 0.3, 15.0) == Approx(0.0));
+
+  // An unlimited outer solve still respects the per-call and stage caps.
+  CHECK(detail::bc_optional_subsolve_budget_sec(
+            5.0, std::numeric_limits<double>::infinity(), 0.0, 15.0) ==
+        Approx(5.0));
+}
+
 TEST_CASE("B&C: iteration limits are not global wall-clock deadlines",
           "[bc][deadline][regression]") {
   SimplexResult iteration_limit;
@@ -375,4 +680,108 @@ TEST_CASE("B&C: reduced-cost fixing requires the matching active bound side",
             lb, ub) == 2);
   CHECK(ub[0] == Approx(0.0));
   CHECK(lb[1] == Approx(1.0));
+}
+
+TEST_CASE("B&C: cover separator stores the exact cut sparsely",
+          "[bc][cuts][separator_storage]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Zero(3);
+  lp.A.resize(1, 3);
+  lp.A.insert(0, 0) = 2.0;
+  lp.A.insert(0, 1) = 2.0;
+  lp.A.insert(0, 2) = 1.0;
+  lp.A.makeCompressed();
+  lp.b = Eigen::VectorXd::Constant(1, 3.0);
+  lp.Aeq.resize(0, 3);
+  lp.beq.resize(0);
+  lp.vars.assign(3, VariableMeta{VarType::Binary, 0.0, 1.0});
+
+  Eigen::VectorXd x(3);
+  x << 0.8, 0.8, 0.0;
+  BCOptions options;
+  options.cuts = CutType::Cover;
+  options.enable_projected_capacity_cuts = false;
+  detail::SeparatorStorageStats storage;
+
+  REQUIRE(detail::add_cuts(lp, x, nullptr, options, 1, nullptr, nullptr,
+                           nullptr, &storage) == 1);
+  REQUIRE(lp.A.rows() == 2);
+  Eigen::SparseMatrix<double, Eigen::RowMajor> rows = lp.A;
+  std::vector<std::pair<int, double>> terms;
+  for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(rows, 1);
+       it; ++it) {
+    terms.emplace_back(static_cast<int>(it.col()), it.value());
+  }
+  REQUIRE(terms.size() == 2);
+  CHECK(terms[0].first == 0);
+  CHECK(terms[0].second == Approx(1.0));
+  CHECK(terms[1].first == 1);
+  CHECK(terms[1].second == Approx(1.0));
+  CHECK(lp.b[1] == Approx(1.0));
+  CHECK(storage.sparse_candidates_created == 1);
+  CHECK(storage.sparse_candidate_entries_created == 2);
+  CHECK(storage.peak_live_sparse_candidates == 1);
+  CHECK(storage.peak_live_sparse_entries == 2);
+  CHECK(storage.dense_workspace_materializations == 0);
+  CHECK(storage.matrix_append_calls == 1);
+  CHECK(storage.matrix_appended_rows == 1);
+  CHECK(storage.matrix_appended_entries == 2);
+  CHECK(storage.matrix_prior_entries_bypassing_triplet_rebuild == 3);
+
+  for (int mask = 0; mask < 8; ++mask) {
+    Eigen::VectorXd integer_x(3);
+    for (int j = 0; j < 3; ++j) integer_x[j] = (mask >> j) & 1;
+    const double source_activity =
+        2.0 * integer_x[0] + 2.0 * integer_x[1] + integer_x[2];
+    if (source_activity <= 3.0 + 1e-12) {
+      CHECK(integer_x[0] + integer_x[1] <= lp.b[1] + 1e-12);
+    }
+  }
+}
+
+TEST_CASE("B&C: row MIR separator preserves coefficients without dense candidates",
+          "[bc][cuts][separator_storage]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Zero(2);
+  lp.A.resize(1, 2);
+  lp.A.insert(0, 0) = 0.8;
+  lp.A.insert(0, 1) = -0.5;
+  lp.A.makeCompressed();
+  lp.b = Eigen::VectorXd::Constant(1, 0.5);
+  lp.Aeq.resize(0, 2);
+  lp.beq.resize(0);
+  lp.vars = {{VarType::Integer, 0.0, 2.0},
+             {VarType::Continuous, 0.0, 10.0}};
+
+  Eigen::VectorXd x(2);
+  x << 0.8, 0.3;
+  BCOptions options;
+  options.cuts = CutType::MIR;
+  detail::SeparatorStorageStats storage;
+
+  REQUIRE(detail::add_cuts(lp, x, nullptr, options, 1, nullptr, nullptr,
+                           nullptr, &storage) == 1);
+  REQUIRE(lp.A.rows() == 2);
+  Eigen::SparseMatrix<double, Eigen::RowMajor> rows = lp.A;
+  std::vector<std::pair<int, double>> terms;
+  for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(rows, 1);
+       it; ++it) {
+    terms.emplace_back(static_cast<int>(it.col()), it.value());
+  }
+  REQUIRE(terms.size() == 2);
+  CHECK(terms[0].first == 0);
+  CHECK(terms[0].second == Approx(0.6).margin(1e-12));
+  CHECK(terms[1].first == 1);
+  CHECK(terms[1].second == Approx(-1.0).margin(1e-12));
+  CHECK(lp.b[1] == Approx(0.0).margin(1e-12));
+  CHECK(storage.sparse_candidates_created == 1);
+  CHECK(storage.sparse_candidate_entries_created == 2);
+  CHECK(storage.dense_workspace_materializations == 0);
+
+  for (int integer_x = 0; integer_x <= 2; ++integer_x) {
+    const double minimum_y = std::max(0.0, 1.6 * integer_x - 1.0);
+    CHECK(0.6 * integer_x - minimum_y <= lp.b[1] + 1e-12);
+  }
 }

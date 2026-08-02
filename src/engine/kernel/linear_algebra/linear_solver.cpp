@@ -1,5 +1,9 @@
 #include "mipsolvers/engine/kernel/linear_algebra/linear_solver.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <vector>
+
 #ifdef HACDCPF_HAVE_UMFPACK
 #include <Eigen/UmfPackSupport>
 #endif
@@ -278,7 +282,10 @@ class MumpsSolver::Impl {
   std::vector<MUMPS_INT> irn, jcn;  // 1-based, lower triangle (row >= col)
   std::vector<double> a_vals;       // lower-triangle values in (irn,jcn) order
   std::vector<double> rhs_buf;
+  double matrix_inf_norm{0.0};
   bool analyzed{false};
+  bool numeric_attempted{false};
+  bool factorized{false};
 
   ~Impl() {
     if (analyzed) {
@@ -303,6 +310,15 @@ void MumpsSolver::analyze_pattern(const Eigen::SparseMatrix<double>& a) {
   ensure_mpi_initialized();
   if (!impl_) impl_ = std::make_unique<Impl>();
   auto& p = *impl_;
+
+  if (p.analyzed) {
+    p.par.job = -2;
+    dmumps_c(&p.par);
+    p.par = DMUMPS_STRUC_C{};
+    p.analyzed = false;
+    p.numeric_attempted = false;
+    p.factorized = false;
+  }
 
   // Extract the lower triangle (row >= col) in column-major order — this is
   // the deterministic value order refilled by factorize().
@@ -337,6 +353,9 @@ void MumpsSolver::analyze_pattern(const Eigen::SparseMatrix<double>& a) {
   p.par.icntl[3] = 0;
   p.par.icntl[6] = 7;   // ICNTL(7) ordering: auto (METIS/PORD nested dissection)
   p.par.icntl[7] = 0;   // ICNTL(8) scaling: none (caller equilibrates already)
+  p.par.icntl[19] = 0;  // ICNTL(20): centralized dense RHS
+  p.par.icntl[20] = 0;  // ICNTL(21): centralized solution
+  p.par.icntl[23] = 1;  // ICNTL(24): detect numerical null pivots
   p.par.cntl[0] = 0.01; // CNTL(1) pivot threshold for indefinite systems
 
   p.par.n = p.n;
@@ -347,6 +366,8 @@ void MumpsSolver::analyze_pattern(const Eigen::SparseMatrix<double>& a) {
   p.par.job = 1;  // JOB_ANALYZE (symbolic analysis, once per pattern)
   dmumps_c(&p.par);
   p.analyzed = (p.par.infog[0] == 0);
+  p.numeric_attempted = false;
+  p.factorized = false;
 }
 
 bool MumpsSolver::factorize(const Eigen::SparseMatrix<double>& a) {
@@ -358,20 +379,41 @@ bool MumpsSolver::factorize(const Eigen::SparseMatrix<double>& a) {
     if (!impl_ || !impl_->analyzed) return false;
   }
   auto& p = *impl_;
+  if (a.rows() != p.n || a.cols() != p.n) return false;
+  p.factorized = false;
   // Refill the lower-triangle values in the same column-major order used at
   // analysis time (the pattern is unchanged).
   MUMPS_INT k = 0;
   for (int col = 0; col < a.outerSize(); ++col) {
     for (Eigen::SparseMatrix<double>::InnerIterator it(a, col); it; ++it) {
       if (it.row() >= it.col()) {
+        if (k >= p.nnz_lower ||
+            p.irn[static_cast<size_t>(k)] != it.row() + 1 ||
+            p.jcn[static_cast<size_t>(k)] != it.col() + 1) {
+          return false;
+        }
         p.a_vals[static_cast<size_t>(k++)] = it.value();
       }
     }
   }
+  if (k != p.nnz_lower) return false;
+
+  std::vector<double> row_sums(static_cast<size_t>(p.n), 0.0);
+  for (MUMPS_INT entry = 0; entry < p.nnz_lower; ++entry) {
+    const int row = p.irn[static_cast<size_t>(entry)] - 1;
+    const int col = p.jcn[static_cast<size_t>(entry)] - 1;
+    const double abs_value = std::abs(p.a_vals[static_cast<size_t>(entry)]);
+    row_sums[static_cast<size_t>(row)] += abs_value;
+    if (row != col) row_sums[static_cast<size_t>(col)] += abs_value;
+  }
+  p.matrix_inf_norm = row_sums.empty()
+      ? 0.0 : *std::max_element(row_sums.begin(), row_sums.end());
   p.par.a = p.a_vals.data();
   p.par.job = 2;  // JOB_FACTOR (numeric factorization)
   dmumps_c(&p.par);
-  return p.par.infog[0] >= 0;  // >= 0: success or handled warning (e.g. null pivot)
+  p.numeric_attempted = true;
+  p.factorized = p.par.infog[0] == 0 && p.par.infog[27] == 0;
+  return p.factorized;
 }
 
 bool MumpsSolver::solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) {
@@ -381,23 +423,43 @@ bool MumpsSolver::solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) {
     x.resize(0);
     return true;
   }
-  if (!impl_ || !impl_->analyzed) return false;
+  if (!impl_ || !impl_->analyzed || !impl_->factorized) return false;
   auto& p = *impl_;
+  if (rhs.size() != p.n || !rhs.allFinite()) return false;
   p.rhs_buf.assign(rhs.data(), rhs.data() + rhs.size());
   p.par.rhs = p.rhs_buf.data();
   p.par.nrhs = 1;
   p.par.lrhs = p.n;
   p.par.job = 3;  // JOB_SOLVE
   dmumps_c(&p.par);
-  if (p.par.infog[0] < 0) return false;
+  if (p.par.infog[0] != 0) return false;
   x = Eigen::VectorXd::Map(p.rhs_buf.data(), p.n);
-  return true;
+  if (!x.allFinite()) return false;
+
+  Eigen::VectorXd residual = -rhs;
+  for (MUMPS_INT entry = 0; entry < p.nnz_lower; ++entry) {
+    const int row = p.irn[static_cast<size_t>(entry)] - 1;
+    const int col = p.jcn[static_cast<size_t>(entry)] - 1;
+    const double value = p.a_vals[static_cast<size_t>(entry)];
+    residual[row] += value * x[col];
+    if (row != col) residual[col] += value * x[row];
+  }
+  const double scale = std::max(
+      1.0, rhs.lpNorm<Eigen::Infinity>() +
+               p.matrix_inf_norm * x.lpNorm<Eigen::Infinity>());
+  return residual.lpNorm<Eigen::Infinity>() <= 1e-9 * scale;
 }
 
 int MumpsSolver::negative_eigenvalues() const {
-  if (empty_system_ || !impl_ || !impl_->analyzed) return -1;
+  if (empty_system_ || !impl_ || !impl_->factorized) return -1;
   // INFOG(12): number of negative pivots in the LDLᵀ factorization.
   return static_cast<int>(impl_->par.infog[11]);
+}
+
+int MumpsSolver::estimated_deficiency() const {
+  if (empty_system_ || !impl_ || !impl_->numeric_attempted) return -1;
+  // INFOG(28): estimated deficiency when ICNTL(24)=1.
+  return static_cast<int>(impl_->par.infog[27]);
 }
 #endif
 

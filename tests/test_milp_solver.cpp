@@ -7,6 +7,8 @@
 #include <Eigen/Sparse>
 #include <algorithm>
 #include <chrono>
+#include <limits>
+#include <random>
 #include <string>
 
 #include "mipsolvers/engine/api/solver.hpp"
@@ -15,12 +17,46 @@
 #include "mipsolvers/engine/problem_types.hpp"
 #include "mipsolvers/engine/solver/native/native_adapters.hpp"
 #include "mipsolvers/engine/detail/bc_legacy_helpers.hpp"
+#include "mipsolvers/engine/detail/bc_restart.hpp"
 #include "mipsolvers/engine/detail/bc_status.hpp"
 #include "mipsolvers/engine/detail/bc_threading.hpp"
 #include "mipsolvers/engine/detail/bc_utils.hpp"
 
 using namespace mipsolvers::engine;
 using Catch::Approx;
+
+TEST_CASE("MILP: incumbent restart controller enforces every trigger gate",
+          "[milp][restart][policy]") {
+  BCTreeRestartOptions policy;
+  policy.enabled = true;
+  policy.max_restarts = 2;
+  policy.min_nodes_since_restart = 10;
+  policy.min_open_nodes = 3;
+  policy.min_relative_incumbent_improvement = 0.01;
+  policy.min_remaining_time_sec = 0.5;
+  detail::IncumbentTreeRestartController controller(policy);
+
+  controller.note_incumbent(100.0, 4, "first");
+  CHECK(controller.pending());
+  CHECK_FALSE(controller.ready(9, 3, true, 1.0));
+  CHECK_FALSE(controller.ready(10, 2, true, 1.0));
+  CHECK_FALSE(controller.ready(10, 3, false, 1.0));
+  CHECK_FALSE(controller.ready(10, 3, true, 0.49));
+  REQUIRE(controller.ready(10, 3, true, 1.0));
+  controller.commit(10);
+  CHECK(controller.restart_count() == 1);
+
+  controller.note_incumbent(99.5, 12, "too_small");
+  CHECK_FALSE(controller.ready(20, 3, true, 1.0));
+  controller.note_incumbent(98.0, 14, "cumulative");
+  REQUIRE(controller.ready(20, 3, true, 1.0));
+  CHECK(controller.pending_source() == "cumulative");
+  controller.commit(20);
+  CHECK(controller.restart_count() == 2);
+
+  controller.note_incumbent(90.0, 30, "over_limit");
+  CHECK_FALSE(controller.ready(40, 3, true, 1.0));
+}
 
 // Return SolveOptions that hard-pins a specific solver.
 static SolveOptions solver_opts(const std::string& name) {
@@ -120,6 +156,32 @@ TEST_CASE("MILP: quantized hashes never decide exact deduplication",
   CHECK(sparse_rows.insert(row_b, 1.0));
 }
 
+TEST_CASE("MILP: conflict propagation wakes indexed clauses only",
+          "[milp][conflict][propagation][index]") {
+  constexpr int n = 128;
+  std::vector<VariableMeta> vars(
+      n, VariableMeta{VarType::Binary, 0.0, 1.0});
+  detail::ConflictPool pool(/*max_size=*/256, /*max_literals=*/8);
+
+  REQUIRE(pool.add({{0, 1.0, true}, {1, 1.0, true}}));
+  REQUIRE(pool.add({{1, 0.0, false}, {2, 1.0, true}}));
+  for (int j = 3; j < 120; ++j) {
+    REQUIRE(pool.add({{j, 1.0, true}, {127, 1.0, true}}));
+  }
+
+  Eigen::VectorXd lb = Eigen::VectorXd::Zero(n);
+  Eigen::VectorXd ub = Eigen::VectorXd::Ones(n);
+  lb[0] = 1.0;
+  int tightened = 0;
+  std::vector<BoundChangeInfo> changes;
+  REQUIRE(pool.propagate(vars, lb, ub, &tightened, &changes));
+
+  CHECK(ub[1] == Approx(0.0));
+  CHECK(ub[2] == Approx(0.0));
+  CHECK(tightened == 2);
+  CHECK(pool.last_propagation_clauses_scanned() < pool.size() / 4);
+}
+
 TEST_CASE("MILP: queued node domains use exact bounds for deduplication",
           "[milp][dedup][domain]") {
   detail::ThreadSafeNodeQueue queue{NodeSelection::BestFirst};
@@ -139,6 +201,264 @@ TEST_CASE("MILP: queued node domains use exact bounds for deduplication",
   queue.push(std::move(first), true);
   queue.push(std::move(second), true);
   CHECK(queue.size() == 2);
+}
+
+TEST_CASE("MILP: serial queued domains are sparse at rest and exact on pop",
+          "[milp][queue][domain_storage]") {
+  detail::NodeQueue queue{NodeSelection::BestFirst};
+  Eigen::VectorXd root_lb(4), root_ub(4);
+  root_lb << 0.0, -detail::kInf, 0.0, -5.0;
+  root_ub << 1.0, detail::kInf, 10.0, 5.0;
+  queue.configure_domain_signature({1, 1, 1, 1}, root_lb, root_ub);
+
+  detail::Node node;
+  node.lb = root_lb;
+  node.ub = root_ub;
+  node.lb[1] = -3.0;
+  node.ub[2] = 7.0;
+  node.bound = 2.0;
+  node.estimate = 2.5;
+  queue.push_priority(node);
+
+  auto storage = queue.domain_storage_stats();
+  CHECK(storage.current_compact_nodes == 1);
+  CHECK(storage.current_compact_entries == 2);
+  CHECK(storage.dense_bound_values_released == 8);
+  CHECK(storage.compaction_failures == 0);
+
+  detail::Node out;
+  REQUIRE(queue.pop(out, true));
+  CHECK(out.lb.size() == 4);
+  CHECK(out.ub.size() == 4);
+  CHECK(out.lb[0] == Approx(0.0));
+  CHECK(out.ub[0] == Approx(1.0));
+  CHECK(out.lb[1] == Approx(-3.0));
+  CHECK(std::isinf(out.ub[1]));
+  CHECK(out.ub[2] == Approx(7.0));
+  CHECK(out.lb[3] == Approx(-5.0));
+  CHECK(out.compact_domain.empty());
+  storage = queue.domain_storage_stats();
+  CHECK(storage.current_compact_nodes == 0);
+  CHECK(storage.current_compact_entries == 0);
+  CHECK(storage.materializations == 1);
+  CHECK(storage.materialization_failures == 0);
+}
+
+TEST_CASE("MILP: restart queue transaction discards every index and compact domain",
+          "[milp][restart][queue]") {
+  detail::NodeQueue queue{NodeSelection::Hybrid};
+  Eigen::VectorXd root_lb = Eigen::VectorXd::Zero(3);
+  Eigen::VectorXd root_ub = Eigen::VectorXd::Constant(3, 10.0);
+  queue.configure_domain_signature({1, 1, 1}, root_lb, root_ub);
+
+  detail::Node first;
+  first.lb = root_lb;
+  first.ub = root_ub;
+  first.lb[0] = 2.0;
+  first.bound = 1.0;
+  first.estimate = 1.5;
+  queue.push_dfs(first);
+
+  detail::Node second = first;
+  second.lb = root_lb;
+  second.ub = root_ub;
+  second.ub[2] = 7.0;
+  second.bound = 2.0;
+  second.estimate = 2.5;
+  queue.push_priority(second);
+  REQUIRE(queue.size() == 2);
+  REQUIRE(queue.domain_storage_stats().current_compact_nodes == 2);
+
+  CHECK(queue.discard_all() == 2);
+  CHECK(queue.empty());
+  CHECK(queue.size() == 0);
+  CHECK(queue.priority_size() == 0);
+  CHECK(queue.dfs_size() == 0);
+  CHECK(queue.domain_storage_stats().current_compact_nodes == 0);
+  CHECK(queue.domain_storage_stats().current_compact_entries == 0);
+
+  detail::Node restart_root;
+  restart_root.lb = root_lb;
+  restart_root.ub = root_ub;
+  restart_root.bound = 0.5;
+  restart_root.estimate = 0.5;
+  restart_root.lp_refresh_needed = true;
+  queue.push_priority(std::move(restart_root));
+  detail::Node out;
+  REQUIRE(queue.pop(out, true));
+  CHECK(out.lb == root_lb);
+  CHECK(out.ub == root_ub);
+  CHECK(out.lp_refresh_needed);
+}
+
+TEST_CASE("MILP: queued domains rebase after root tightening and recompact",
+          "[milp][queue][domain_storage][root_domain]") {
+  detail::NodeQueue queue{NodeSelection::DepthFirst};
+  Eigen::VectorXd root_lb(2), root_ub(2);
+  root_lb << 0.0, 0.0;
+  root_ub << 10.0, 10.0;
+  queue.configure_domain_signature({1, 1}, root_lb, root_ub);
+
+  detail::Node node;
+  node.lb = root_lb;
+  node.ub = root_ub;
+  node.lb[0] = 2.0;
+  node.ub[1] = 8.0;
+  node.bound = 0.0;
+  queue.push_dfs(std::move(node));
+
+  Eigen::VectorXd tightened_root_lb = root_lb;
+  Eigen::VectorXd tightened_root_ub = root_ub;
+  tightened_root_lb[0] = 1.0;
+  tightened_root_ub[1] = 9.0;
+  CHECK(queue.inherit_root_domain(tightened_root_lb, tightened_root_ub) == 0);
+  const auto storage = queue.domain_storage_stats();
+  CHECK(storage.current_compact_nodes == 1);
+  CHECK(storage.current_compact_entries == 2);
+  CHECK(storage.compactions >= 2);
+  CHECK(storage.materializations >= 1);
+
+  detail::Node out;
+  REQUIRE(queue.pop(out, false));
+  CHECK(out.lb[0] == Approx(2.0));
+  CHECK(out.ub[1] == Approx(8.0));
+  CHECK(out.lb[1] == Approx(0.0));
+  CHECK(out.ub[0] == Approx(10.0));
+}
+
+TEST_CASE("MILP: parallel queued domains use the same sparse storage contract",
+          "[milp][parallel][queue][domain_storage]") {
+  detail::ThreadSafeNodeQueue queue{NodeSelection::BestFirst};
+  Eigen::VectorXd root_lb = Eigen::VectorXd::Zero(3);
+  Eigen::VectorXd root_ub = Eigen::VectorXd::Constant(3, 10.0);
+  queue.configure_domain_signature({1, 1, 1}, root_lb, root_ub);
+
+  detail::Node node;
+  node.lb = root_lb;
+  node.ub = root_ub;
+  node.lb[2] = 4.0;
+  node.bound = 1.0;
+  node.estimate = 1.0;
+  queue.push(std::move(node), true);
+  auto storage = queue.domain_storage_stats();
+  CHECK(storage.current_compact_nodes == 1);
+  CHECK(storage.current_compact_entries == 1);
+
+  detail::Node out;
+  REQUIRE(queue.pop(out, true, std::chrono::milliseconds(1)));
+  CHECK(out.lb[2] == Approx(4.0));
+  CHECK(out.ub[2] == Approx(10.0));
+  CHECK(out.compact_domain.empty());
+  storage = queue.domain_storage_stats();
+  CHECK(storage.current_compact_nodes == 0);
+  CHECK(storage.materializations == 1);
+}
+
+TEST_CASE("MILP: zero is a replayable work-stealing seed",
+          "[milp][parallel][determinism]") {
+  detail::WorkStealingPool first(3, 16, 0);
+  detail::WorkStealingPool second(3, 16, 0);
+  for (int worker = 1; worker <= 2; ++worker) {
+    for (int i = 0; i < 6; ++i) {
+      detail::Node a;
+      a.bound = 100.0 * worker + i;
+      detail::Node b = a;
+      REQUIRE(first.get(worker).push(std::move(a)));
+      REQUIRE(second.get(worker).push(std::move(b)));
+    }
+  }
+
+  for (int i = 0; i < 12; ++i) {
+    detail::Node a;
+    detail::Node b;
+    REQUIRE(first.try_steal(0, a));
+    REQUIRE(second.try_steal(0, b));
+    CHECK(a.bound == b.bound);
+  }
+}
+
+TEST_CASE("MILP: queued-domain propagation restores sparse-at-rest storage",
+          "[milp][queue][domain_storage][propagation]") {
+  detail::NodeQueue queue{NodeSelection::DepthFirst};
+  Eigen::VectorXd root_lb = Eigen::VectorXd::Zero(2);
+  Eigen::VectorXd root_ub = Eigen::VectorXd::Constant(2, 10.0);
+  queue.configure_domain_signature({1, 1}, root_lb, root_ub);
+
+  detail::Node node;
+  node.lb = root_lb;
+  node.ub = root_ub;
+  node.lb[0] = 1.0;
+  node.bound = 0.0;
+  queue.push_dfs(std::move(node));
+
+  std::uint64_t tightened = 0;
+  CHECK(queue.propagate_by_domain_object(
+            [](const detail::Node&, Eigen::VectorXd& lb,
+               Eigen::VectorXd&, int& local_tightened, int& local_pruned) {
+              lb[1] = 2.0;
+              local_tightened = 1;
+              local_pruned = 0;
+              return true;
+            },
+            false, detail::kInf, 1e-9, &tightened) == 0);
+  CHECK(tightened == 1);
+  auto storage = queue.domain_storage_stats();
+  CHECK(storage.materializations == 1);
+  CHECK(storage.compactions == 2);
+  CHECK(storage.current_compact_nodes == 1);
+  CHECK(storage.current_compact_entries == 2);
+
+  CHECK(queue.propagate_by_domain_object(
+            [](const detail::Node&, Eigen::VectorXd&, Eigen::VectorXd&,
+               int& local_tightened, int& local_pruned) {
+              local_tightened = 0;
+              local_pruned = 1;
+              return false;
+            }) == 1);
+  storage = queue.domain_storage_stats();
+  CHECK(queue.empty());
+  CHECK(storage.materializations == 2);
+  CHECK(storage.current_compact_nodes == 0);
+  CHECK(storage.current_compact_entries == 0);
+  CHECK(storage.compaction_failures == 0);
+  CHECK(storage.materialization_failures == 0);
+}
+
+TEST_CASE("MILP: branch payloads detach only when a child mutates them",
+          "[milp][branch][memory][cow]") {
+  detail::Node parent;
+  parent.lb = Eigen::VectorXd::Zero(1);
+  parent.ub = Eigen::VectorXd::Ones(1);
+  parent.branch_reasons.push_back({0, 0.0, true});
+  detail::PoolCut cut;
+  cut.coeff.resize(1);
+  cut.coeff.insert(0) = 1.0;
+  cut.rhs = 1.0;
+  parent.local_cuts.push_back(cut);
+
+  detail::NodePayloadSharingStats sharing;
+  detail::Node child = parent.branch_child(&sharing);
+  CHECK(sharing.child_creations == 1);
+  CHECK(sharing.shared_payload_vectors == 2);
+  CHECK(sharing.shared_payload_elements == 2);
+  REQUIRE(parent.branch_reasons.shares_storage_with(child.branch_reasons));
+  REQUIRE(parent.local_cuts.shares_storage_with(child.local_cuts));
+  CHECK(parent.branch_reasons.storage_use_count() == 2);
+  CHECK(parent.local_cuts.storage_use_count() == 2);
+
+  child.branch_reasons.push_back({0, 1.0, true});
+  detail::PoolCut child_cut = cut;
+  child_cut.rhs = 0.5;
+  child.local_cuts.push_back(std::move(child_cut));
+
+  CHECK_FALSE(parent.branch_reasons.shares_storage_with(child.branch_reasons));
+  CHECK_FALSE(parent.local_cuts.shares_storage_with(child.local_cuts));
+  CHECK(parent.branch_reasons.size() == 1);
+  CHECK(child.branch_reasons.size() == 2);
+  CHECK(parent.local_cuts.size() == 1);
+  CHECK(child.local_cuts.size() == 2);
+  CHECK(parent.local_cuts[0].rhs == Approx(1.0));
+  CHECK(child.local_cuts[1].rhs == Approx(0.5));
 }
 
 TEST_CASE("MILP: parallel progress notifications survive a late wait",
@@ -452,6 +772,46 @@ TEST_CASE("MILP: probe failures never create pseudocost gain samples",
   CHECK(pc.down_conflict_score == Approx(1.0));
 }
 
+TEST_CASE("MILP: reliability probes reuse one transactional standard form",
+          "[milp][branching][reliability][transaction]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Zero(1);
+  lp.A.resize(1, 1);
+  lp.A.insert(0, 0) = 1.0;
+  lp.A.makeCompressed();
+  lp.b = Eigen::VectorXd::Ones(1);
+  lp.Aeq.resize(0, 1);
+  lp.beq.resize(0);
+  lp.vars = {{VarType::Binary, 0.0, 1.0}};
+
+  StandardFormLP sf = build_standard_form_lp(lp);
+  ruiz_scale_standard_form(sf);
+  const Eigen::VectorXd lb = Eigen::VectorXd::Zero(1);
+  const Eigen::VectorXd ub = Eigen::VectorXd::Ones(1);
+  const Eigen::VectorXd x = Eigen::VectorXd::Constant(1, 0.5);
+  std::vector<detail::PseudoCost> pc(1);
+  SimplexOptions simplex_options;
+  simplex_options.max_iter = 100;
+  int lp_solves = 0;
+  detail::StrongBranchProbeStorageStats storage;
+  std::vector<detail::BranchDirectionalObservation> observations;
+
+  const int selected = detail::choose_branch_var_reliability(
+      {0}, x, pc, lp, sf, lb, ub, nullptr, simplex_options, 0.0,
+      lp_solves, 0, 1, 1, {}, {}, {}, &observations, &storage);
+  CHECK(selected == 0);
+  CHECK(lp_solves == 2);
+  CHECK(storage.base_sf_materializations == 1);
+  CHECK(storage.bound_transactions == 2);
+  CHECK(storage.transaction_rollbacks == 2);
+  CHECK(storage.transaction_failures == 0);
+  CHECK(storage.transaction_snapshot_values >= 6);
+  CHECK(storage.backend_cold_solves == 1);
+  CHECK(storage.backend_persistent_resolves == 1);
+  CHECK(observations.size() == 2);
+}
+
 TEST_CASE("MILP: consumed probe result is not sampled twice",
           "[milp][branching][reliability]") {
   detail::PseudoCost pc;
@@ -716,6 +1076,7 @@ TEST_CASE("MILP LP backend selection is independent of StrictHiGHS policy",
   REQUIRE(opt.lp_kernel_backend == LpKernelBackend::HiGHS);
   REQUIRE_FALSE(opt.strict_highs_mip_contract);
   REQUIRE_FALSE(opt.require_tree_exhaustion_certificate);
+  REQUIRE_FALSE(opt.enable_reduced_cost_proof_cut_resolve);
 
   opt.use_papilo_presolve = true;
   opt.use_feasibility_pump = true;
@@ -760,6 +1121,67 @@ TEST_CASE("MILP row propagation treats 1e20 bounds as infinity",
   CHECK(detail::node_bound_propagation_tracked(
             lp, a_row, aeq_row, lb, ub, 4, changes) == 0);
   CHECK(changes.empty());
+}
+
+TEST_CASE("MILP row propagators preserve small terms across cancellation",
+          "[milp][propagation][numerics]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Zero(4);
+  lp.A.resize(1, 4);
+  lp.A.insert(0, 0) = 1e16;
+  lp.A.insert(0, 1) = 1.0;
+  lp.A.insert(0, 2) = -1e16;
+  lp.A.insert(0, 3) = 1.0;
+  lp.A.makeCompressed();
+  lp.b = Eigen::VectorXd::Ones(1);
+  lp.Aeq.resize(0, 4);
+  lp.beq.resize(0);
+  lp.vars = {{VarType::Continuous, 1.0, 1.0},
+             {VarType::Continuous, 1.0, 1.0},
+             {VarType::Continuous, 1.0, 1.0},
+             {VarType::Binary, 0.0, 1.0}};
+
+  auto initial_lb = [] {
+    Eigen::VectorXd lb(4);
+    lb << 1.0, 1.0, 1.0, 0.0;
+    return lb;
+  };
+  auto initial_ub = [] {
+    Eigen::VectorXd ub(4);
+    ub << 1.0, 1.0, 1.0, 1.0;
+    return ub;
+  };
+
+  Eigen::VectorXd lb = initial_lb();
+  Eigen::VectorXd ub = initial_ub();
+  CHECK(detail::node_bound_propagation(lp, lb, ub, 2) >= 1);
+  CHECK(ub[3] == Approx(0.0));
+
+  Eigen::SparseMatrix<double, Eigen::RowMajor> a_row = lp.A;
+  Eigen::SparseMatrix<double, Eigen::RowMajor> aeq_row = lp.Aeq;
+  lb = initial_lb();
+  ub = initial_ub();
+  std::vector<BoundChangeInfo> tracked_changes;
+  CHECK(detail::node_bound_propagation_tracked(
+            lp, a_row, aeq_row, lb, ub, 2, tracked_changes) >= 1);
+  CHECK(ub[3] == Approx(0.0));
+  CHECK_FALSE(tracked_changes.empty());
+
+  detail::RowPropagationIndex row_index;
+  row_index.build(4, a_row, aeq_row);
+  lb = initial_lb();
+  ub = initial_ub();
+  std::vector<BoundChangeInfo> domain_changes;
+  const std::vector<detail::BranchDomainLiteral> branch_reasons{
+      {0, 1.0, true}};
+  int tightened = 0;
+  REQUIRE(detail::propagate_node_domain(
+      lp, a_row, aeq_row, row_index, lb, ub, 2,
+      static_cast<const detail::ConflictPool*>(nullptr), nullptr, nullptr,
+      domain_changes, branch_reasons, nullptr, &tightened, nullptr));
+  CHECK(tightened >= 1);
+  CHECK(ub[3] == Approx(0.0));
 }
 
 TEST_CASE("MILP domain propagation materializes reasons only on request",
@@ -807,6 +1229,135 @@ TEST_CASE("MILP domain propagation materializes reasons only on request",
   run(&reasons);
   CHECK_FALSE(reasons.empty());
   CHECK(detail::get_propagation_profile().reason_clauses_materialized > 0);
+}
+
+TEST_CASE("MILP row propagation honors a zero round budget",
+          "[milp][propagation][round-budget]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Zero(2);
+  lp.A.resize(0, 2);
+  lp.b.resize(0);
+  lp.Aeq.resize(1, 2);
+  lp.Aeq.insert(0, 0) = 1.0;
+  lp.Aeq.insert(0, 1) = 1.0;
+  lp.Aeq.makeCompressed();
+  lp.beq = Eigen::VectorXd::Constant(1, 1.0);
+  lp.vars = {{VarType::Binary, 0.0, 1.0},
+             {VarType::Binary, 0.0, 1.0}};
+
+  Eigen::SparseMatrix<double, Eigen::RowMajor> a_row = lp.A;
+  Eigen::SparseMatrix<double, Eigen::RowMajor> aeq_row = lp.Aeq;
+  detail::RowPropagationIndex row_index;
+  row_index.build(2, a_row, aeq_row);
+  const std::vector<detail::BranchDomainLiteral> branch_reasons{
+      {0, 0.0, false}};
+
+  Eigen::VectorXd lb(2), ub(2);
+  lb << 0.0, 0.0;
+  ub << 0.0, 1.0;
+  std::vector<BoundChangeInfo> changes;
+  std::vector<detail::DomainPropagationEvent> events;
+  detail::reset_propagation_profile();
+  REQUIRE(detail::propagate_node_domain(
+      lp, a_row, aeq_row, row_index, lb, ub, 0,
+      static_cast<const detail::ConflictPool*>(nullptr), nullptr, nullptr,
+      changes, branch_reasons, nullptr, nullptr, nullptr, nullptr, &events));
+  CHECK(lb[1] == Approx(0.0));
+  CHECK(detail::get_propagation_profile().eq_rows_visited == 0);
+  CHECK(events.empty());
+
+  detail::BinaryImplicationGraph implications(2);
+  REQUIRE(implications.add_implication(0, false, 1, true, 1.0));
+  lb << 0.0, 0.0;
+  ub << 0.0, 1.0;
+  changes.clear();
+  events.clear();
+  REQUIRE(detail::propagate_node_domain(
+      lp, a_row, aeq_row, row_index, lb, ub, 0,
+      static_cast<const detail::ConflictPool*>(nullptr), nullptr,
+      &implications, changes, branch_reasons, nullptr, nullptr, nullptr,
+      nullptr, &events));
+  CHECK(lb[1] == Approx(1.0));
+  REQUIRE(events.size() == 1);
+  CHECK(events.front().source ==
+        detail::DomainPropagationSource::Implication);
+}
+
+TEST_CASE("MILP propagation reasons survive into child conflict analysis",
+          "[milp][propagation][reasons][regression]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Zero(3);
+  lp.A.resize(0, 3);
+  lp.b.resize(0);
+  lp.Aeq.resize(2, 3);
+  lp.Aeq.insert(0, 0) = 1.0;
+  lp.Aeq.insert(0, 1) = 1.0;
+  lp.Aeq.insert(1, 1) = 1.0;
+  lp.Aeq.insert(1, 2) = 1.0;
+  lp.Aeq.makeCompressed();
+  lp.beq = Eigen::VectorXd::Ones(2);
+  lp.vars = {{VarType::Binary, 0.0, 1.0},
+             {VarType::Binary, 0.0, 1.0},
+             {VarType::Binary, 0.0, 1.0}};
+
+  Eigen::SparseMatrix<double, Eigen::RowMajor> a_row = lp.A;
+  Eigen::SparseMatrix<double, Eigen::RowMajor> aeq_row = lp.Aeq;
+  detail::RowPropagationIndex row_index;
+  row_index.build(3, a_row, aeq_row);
+
+  Eigen::VectorXd parent_lb(3), parent_ub(3);
+  parent_lb << 0.0, 0.0, 0.0;
+  parent_ub << 0.0, 1.0, 1.0;
+  const std::vector<detail::BranchDomainLiteral> parent_branches{
+      {0, 0.0, false}};
+  std::vector<BoundChangeInfo> parent_changes;
+  std::vector<detail::DomainReasonBound> parent_reasons;
+  REQUIRE(detail::propagate_node_domain(
+      lp, a_row, aeq_row, row_index, parent_lb, parent_ub, 1,
+      static_cast<const detail::ConflictPool*>(nullptr), nullptr, nullptr,
+      parent_changes, parent_branches, nullptr, nullptr, &parent_reasons));
+  CHECK(parent_lb[1] == Approx(1.0));
+  CHECK(parent_lb[2] == Approx(0.0));
+  REQUIRE_FALSE(parent_reasons.empty());
+
+  Eigen::VectorXd child_lb = parent_lb;
+  Eigen::VectorXd child_ub = parent_ub;
+  child_lb[2] = 1.0;
+  const std::vector<detail::BranchDomainLiteral> child_branches{
+      {0, 0.0, false}, {2, 1.0, true}};
+  std::vector<BoundChangeInfo> child_changes{
+      {2, 1.0, true, 0.0, 1.0}};
+  std::vector<detail::BranchDomainLiteral> learned_conflict;
+  std::vector<detail::DomainReasonBound> child_reasons;
+  CHECK_FALSE(detail::propagate_node_domain(
+      lp, a_row, aeq_row, row_index, child_lb, child_ub, 1,
+      static_cast<const detail::ConflictPool*>(nullptr), nullptr, nullptr,
+      child_changes, child_branches, &learned_conflict, nullptr,
+      &child_reasons, &parent_reasons));
+
+  const auto contains_literal =
+      [&](int variable, bool is_lb, double value) {
+        return std::any_of(
+            learned_conflict.begin(), learned_conflict.end(),
+            [&](const detail::BranchDomainLiteral& literal) {
+              return literal.var_idx == variable && literal.is_lb == is_lb &&
+                     literal.value == Approx(value);
+            });
+      };
+  CHECK(contains_literal(0, false, 0.0));
+  CHECK(contains_literal(2, true, 1.0));
+
+  const Eigen::Vector3d feasible_witness(1.0, 0.0, 1.0);
+  const bool learned_clause_hits_witness = std::all_of(
+      learned_conflict.begin(), learned_conflict.end(),
+      [&](const detail::BranchDomainLiteral& literal) {
+        return literal.is_lb
+            ? feasible_witness[literal.var_idx] >= literal.value - 1e-9
+            : feasible_witness[literal.var_idx] <= literal.value + 1e-9;
+      });
+  CHECK_FALSE(learned_clause_hits_witness);
 }
 
 TEST_CASE("StrictHiGHS MIP policy explicitly normalizes the LP backend",
@@ -864,6 +1415,362 @@ static MIPModel make_knapsack_10() {
   for (int i = 0; i < N; ++i) mip.binary_idx.push_back(i);
 
   return mip;
+}
+
+static MIPModel make_complete_graph_vertex_cover_8() {
+  constexpr int kVertices = 8;
+  constexpr int kEdges = kVertices * (kVertices - 1) / 2;
+  MIPModel mip;
+  mip.linear_part.sense = Sense::Minimize;
+  mip.linear_part.c = Eigen::VectorXd::Ones(kVertices);
+  mip.linear_part.A.resize(kEdges, kVertices);
+  mip.linear_part.b = Eigen::VectorXd::Constant(kEdges, -1.0);
+  int row = 0;
+  for (int i = 0; i < kVertices; ++i) {
+    for (int j = i + 1; j < kVertices; ++j) {
+      mip.linear_part.A.insert(row, i) = -1.0;
+      mip.linear_part.A.insert(row, j) = -1.0;
+      ++row;
+    }
+  }
+  mip.linear_part.A.makeCompressed();
+  mip.linear_part.Aeq.resize(0, kVertices);
+  mip.linear_part.beq.resize(0);
+  mip.linear_part.vars.assign(
+      kVertices, VariableMeta{VarType::Binary, 0.0, 1.0});
+  for (int i = 0; i < kVertices; ++i) mip.binary_idx.push_back(i);
+  return mip;
+}
+
+TEST_CASE("MILP: objective clique events are not counted twice",
+          "[milp][objective_propagation][correctness]") {
+  constexpr int kVertices = 8;
+  const MIPModel mip = make_complete_graph_vertex_cover_8();
+
+  BCOptions options;
+  options.lp_kernel_backend = LpKernelBackend::HiGHS;
+  options.num_threads = 1;
+  options.use_papilo_presolve = false;
+  options.root_cut_rounds = 0;
+  options.cuts = CutType::None;
+  options.use_feasibility_pump = false;
+  options.use_progressive_rounding = false;
+  options.enable_feasibility_jump = false;
+  options.max_dive_lps = 0;
+  options.max_probe_vars = 0;
+  options.root_split_bound_probing = false;
+  options.enable_lns = false;
+  options.enable_incumbent_local_branching = false;
+  options.enable_root_low_fractionality_rens = false;
+  options.incumbent_quality_reject_factor = 0.0;
+  options.require_tree_exhaustion_certificate = true;
+
+  const BCResult result = solve_milp_bc(mip, options);
+  REQUIRE(result.stats.success);
+  CHECK(result.stats.objective == Approx(7.0).margin(1e-7));
+  REQUIRE(result.x.size() == kVertices);
+  Eigen::VectorXd lower = Eigen::VectorXd::Zero(kVertices);
+  Eigen::VectorXd upper = Eigen::VectorXd::Ones(kVertices);
+  CHECK(detail::satisfies_with_bounds(
+      mip.linear_part, result.x, lower, upper, 1e-7));
+}
+
+TEST_CASE("MILP: production optimum matches exhaustive binary oracle",
+          "[milp][differential][correctness]") {
+  constexpr int kVariables = 6;
+  constexpr int kRows = 5;
+  constexpr int kCases = 128;
+  std::mt19937_64 rng(0x8f3d9b71ULL);
+  std::uniform_int_distribution<int> bit(0, 1);
+  std::uniform_int_distribution<int> coeff(-4, 4);
+  std::uniform_int_distribution<int> objective_coeff(-5, 5);
+  std::uniform_int_distribution<int> slack(0, 3);
+
+  for (int case_index = 0; case_index < kCases; ++case_index) {
+    INFO("differential case=" << case_index);
+    Eigen::VectorXd witness(kVariables);
+    for (int j = 0; j < kVariables; ++j) witness[j] = bit(rng);
+
+    MIPModel mip;
+    LPModel& lp = mip.linear_part;
+    lp.sense = case_index % 2 == 0 ? Sense::Minimize : Sense::Maximize;
+    lp.c.resize(kVariables);
+    bool nonzero_objective = false;
+    for (int j = 0; j < kVariables; ++j) {
+      const int value = objective_coeff(rng);
+      lp.c[j] = value;
+      nonzero_objective = nonzero_objective || value != 0;
+    }
+    if (!nonzero_objective) lp.c[0] = 1.0;
+
+    std::vector<Eigen::Triplet<double>> rows;
+    Eigen::MatrixXd dense_rows = Eigen::MatrixXd::Zero(kRows, kVariables);
+    lp.row_lhs.resize(kRows);
+    lp.b.resize(kRows);
+    for (int i = 0; i < kRows; ++i) {
+      bool nonzero_row = false;
+      for (int j = 0; j < kVariables; ++j) {
+        const int value = coeff(rng);
+        if (value == 0) continue;
+        dense_rows(i, j) = value;
+        rows.emplace_back(i, j, value);
+        nonzero_row = true;
+      }
+      if (!nonzero_row) {
+        dense_rows(i, i % kVariables) = 1.0;
+        rows.emplace_back(i, i % kVariables, 1.0);
+      }
+      const double activity = dense_rows.row(i).dot(witness);
+      if (i % 3 == 0) {
+        lp.row_lhs[i] = -std::numeric_limits<double>::infinity();
+        lp.b[i] = activity + slack(rng);
+      } else if (i % 3 == 1) {
+        lp.row_lhs[i] = activity - slack(rng);
+        lp.b[i] = std::numeric_limits<double>::infinity();
+      } else {
+        lp.row_lhs[i] = activity - slack(rng);
+        lp.b[i] = activity + slack(rng);
+      }
+    }
+    lp.A.resize(kRows, kVariables);
+    lp.A.setFromTriplets(rows.begin(), rows.end());
+    lp.A.makeCompressed();
+
+    if (case_index % 3 == 0) {
+      std::vector<Eigen::Triplet<double>> equality;
+      Eigen::VectorXd dense_equality = Eigen::VectorXd::Zero(kVariables);
+      for (int j = 0; j < kVariables; ++j) {
+        if (!bit(rng)) continue;
+        const int value = coeff(rng);
+        if (value == 0) continue;
+        dense_equality[j] = value;
+        equality.emplace_back(0, j, value);
+      }
+      if (equality.empty()) {
+        dense_equality[case_index % kVariables] = 1.0;
+        equality.emplace_back(0, case_index % kVariables, 1.0);
+      }
+      lp.Aeq.resize(1, kVariables);
+      lp.Aeq.setFromTriplets(equality.begin(), equality.end());
+      lp.Aeq.makeCompressed();
+      lp.beq = Eigen::VectorXd::Constant(1, dense_equality.dot(witness));
+    } else {
+      lp.Aeq.resize(0, kVariables);
+      lp.beq.resize(0);
+    }
+    lp.vars.assign(
+        kVariables, VariableMeta{VarType::Binary, 0.0, 1.0});
+    for (int j = 0; j < kVariables; ++j) mip.binary_idx.push_back(j);
+
+    double oracle = lp.sense == Sense::Minimize
+                        ? std::numeric_limits<double>::infinity()
+                        : -std::numeric_limits<double>::infinity();
+    for (int assignment = 0; assignment < (1 << kVariables); ++assignment) {
+      Eigen::VectorXd x(kVariables);
+      for (int j = 0; j < kVariables; ++j) {
+        x[j] = (assignment >> j) & 1;
+      }
+      bool feasible = true;
+      for (int i = 0; i < kRows && feasible; ++i) {
+        const double activity = dense_rows.row(i).dot(x);
+        feasible = activity >= lp.row_lhs[i] - 1e-9 &&
+                   activity <= lp.b[i] + 1e-9;
+      }
+      if (feasible && lp.Aeq.rows() == 1) {
+        feasible = std::abs(lp.Aeq.row(0).dot(x) - lp.beq[0]) <= 1e-9;
+      }
+      if (!feasible) continue;
+      const double value = lp.c.dot(x);
+      oracle = lp.sense == Sense::Minimize ? std::min(oracle, value)
+                                           : std::max(oracle, value);
+    }
+    REQUIRE(std::isfinite(oracle));
+
+    BCOptions options;
+    options.lp_kernel_backend = LpKernelBackend::HiGHS;
+    options.num_threads = 1;
+    options.use_papilo_presolve = case_index % 2 == 0;
+    options.require_tree_exhaustion_certificate = true;
+    options.random_seed = 0;
+    INFO("sense=" << (lp.sense == Sense::Minimize ? "min" : "max"));
+    INFO("objective=" << lp.c.transpose());
+    INFO("witness=" << witness.transpose());
+    INFO("rows=\n" << dense_rows);
+    INFO("row_lhs=" << lp.row_lhs.transpose());
+    INFO("row_rhs=" << lp.b.transpose());
+    INFO("equality_rows=" << lp.Aeq.rows());
+    if (lp.Aeq.rows() == 1) {
+      UNSCOPED_INFO("equality=" << Eigen::MatrixXd(lp.Aeq));
+      UNSCOPED_INFO("equality_rhs=" << lp.beq.transpose());
+    }
+    const BCResult result = solve_milp_bc(mip, options);
+
+    INFO("status=" << result.stats.status << " oracle=" << oracle);
+    REQUIRE(result.stats.success);
+    CHECK(result.stats.objective == Approx(oracle).margin(1e-7));
+    if (case_index == 112) {
+      INFO("regression: direct and implied-event objective contributions share "
+           "target x3");
+      CHECK(oracle == Approx(-6.0).margin(1e-9));
+      CHECK(result.stats.objective == Approx(-6.0).margin(1e-7));
+    }
+    REQUIRE(result.x.size() == kVariables);
+    const Eigen::VectorXd lower = Eigen::VectorXd::Zero(kVariables);
+    const Eigen::VectorXd upper = Eigen::VectorXd::Ones(kVariables);
+    CHECK(detail::satisfies_with_bounds(lp, result.x, lower, upper, 1e-7));
+    for (int j = 0; j < kVariables; ++j) {
+      CHECK(result.x[j] == Approx(std::round(result.x[j])).margin(1e-7));
+    }
+  }
+}
+
+TEST_CASE("MILP: production tree restart rebuilds the root and preserves the answer",
+          "[milp][restart][integration]") {
+  constexpr int kVertices = 8;
+  const MIPModel mip = make_complete_graph_vertex_cover_8();
+
+  BCOptions baseline;
+  baseline.lp_kernel_backend = LpKernelBackend::HiGHS;
+  baseline.num_threads = 1;
+  baseline.use_papilo_presolve = false;
+  baseline.root_cut_rounds = 0;
+  baseline.cuts = CutType::None;
+  baseline.use_feasibility_pump = false;
+  baseline.use_progressive_rounding = false;
+  baseline.enable_feasibility_jump = false;
+  baseline.max_dive_lps = 0;
+  baseline.max_probe_vars = 0;
+  baseline.root_split_bound_probing = false;
+  baseline.enable_lns = false;
+  baseline.enable_incumbent_local_branching = false;
+  baseline.enable_root_low_fractionality_rens = false;
+  baseline.incumbent_quality_reject_factor = 0.0;
+  baseline.require_tree_exhaustion_certificate = true;
+  // This test needs an incumbent improvement while the frontier remains open.
+  // Objective propagation proves the K8 lower bound at the root, so disable
+  // that independent feature to exercise the production restart transaction.
+  baseline.enable_objective_cutoff_conflict_cuts = false;
+  baseline.enable_objective_cutoff_weighted_event_cuts = false;
+  baseline.enable_objective_cutoff_domain_fixing = false;
+  baseline.enable_reduced_cost_proof_conflict_minimization = false;
+  baseline.enable_nonviolated_cutoff_conflict_covers = false;
+
+  const BCResult without_restart = solve_milp_bc(mip, baseline);
+  REQUIRE(without_restart.stats.success);
+  CHECK(without_restart.stats.objective == Approx(7.0).margin(1e-7));
+  CHECK(without_restart.bc_stats.tree_restarts == 0);
+
+  BCOptions restarted_options = baseline;
+  restarted_options.tree_restart.enabled = true;
+  restarted_options.tree_restart.max_restarts = 1;
+  restarted_options.tree_restart.min_nodes_since_restart = 0;
+  restarted_options.tree_restart.min_open_nodes = 1;
+  restarted_options.tree_restart.min_relative_incumbent_improvement = 0.0;
+  restarted_options.tree_restart.min_remaining_time_sec = 0.0;
+  const BCResult restarted = solve_milp_bc(mip, restarted_options);
+
+  REQUIRE(restarted.stats.success);
+  CHECK(restarted.stats.objective ==
+        Approx(without_restart.stats.objective).margin(1e-7));
+  REQUIRE(restarted.x.size() == kVertices);
+  Eigen::VectorXd lower = Eigen::VectorXd::Zero(kVertices);
+  Eigen::VectorXd upper = Eigen::VectorXd::Ones(kVertices);
+  CHECK(detail::satisfies_with_bounds(
+      mip.linear_part, restarted.x, lower, upper, 1e-7));
+  CHECK(restarted.bc_stats.tree_restarts == 1);
+  CHECK(restarted.bc_stats.tree_restart_nodes_discarded > 0);
+  CHECK(restarted.bc_stats.tree_restart_root_requeues == 1);
+  CHECK(restarted.bc_stats.tree_restart_last_node >= 0);
+  CHECK_FALSE(restarted.bc_stats.tree_restart_last_source.empty());
+}
+
+TEST_CASE("MILP: production solve publishes queued-domain and COW telemetry",
+          "[milp][native][memory][telemetry]") {
+  BCOptions opt;
+  opt.lp_kernel_backend = LpKernelBackend::ExperimentalNative;
+  opt.use_papilo_presolve = false;
+  opt.root_cut_rounds = 0;
+  opt.use_feasibility_pump = false;
+  opt.use_progressive_rounding = false;
+  opt.enable_feasibility_jump = false;
+
+  MIPModel mip;
+  mip.linear_part.sense = Sense::Maximize;
+  mip.linear_part.c.resize(3);
+  mip.linear_part.c << 1.0, 1.1, 1.2;
+  mip.linear_part.A.resize(3, 3);
+  mip.linear_part.A.insert(0, 0) = 1.0;
+  mip.linear_part.A.insert(0, 1) = 1.0;
+  mip.linear_part.A.insert(1, 1) = 1.0;
+  mip.linear_part.A.insert(1, 2) = 1.0;
+  mip.linear_part.A.insert(2, 0) = 1.0;
+  mip.linear_part.A.insert(2, 2) = 1.0;
+  mip.linear_part.A.makeCompressed();
+  mip.linear_part.b = Eigen::VectorXd::Ones(3);
+  mip.linear_part.Aeq.resize(0, 3);
+  mip.linear_part.beq.resize(0);
+  mip.linear_part.vars.assign(
+      3, VariableMeta{VarType::Binary, 0.0, 1.0});
+  mip.binary_idx = {0, 1, 2};
+
+  const auto result = solve_milp_bc(mip, opt);
+  REQUIRE(result.stats.success);
+  CHECK(result.stats.objective == Approx(1.2).margin(1e-7));
+  CHECK(result.bc_stats.node_queue_domain_compactions > 0);
+  CHECK(result.bc_stats.node_queue_domain_materializations > 0);
+  CHECK(result.bc_stats.node_queue_dense_bound_values_released > 0);
+  CHECK(result.bc_stats.node_queue_domain_compactions ==
+        result.bc_stats.node_queue_serial_compactions +
+            result.bc_stats.node_queue_parallel_compactions +
+            result.bc_stats.node_queue_submip_compactions);
+  CHECK(result.bc_stats.node_queue_domain_compaction_failures == 0);
+  CHECK(result.bc_stats.node_queue_domain_materialization_failures == 0);
+  CHECK(result.bc_stats.branch_payload_child_creations > 0);
+  CHECK(result.bc_stats.branch_payload_shared_vectors <=
+        9 * result.bc_stats.branch_payload_child_creations);
+  CHECK(result.bc_stats.branch_domain_dense_copies > 0);
+  CHECK(result.bc_stats.branch_domain_dense_values_copied >=
+        2 * result.bc_stats.branch_domain_dense_copies);
+  CHECK(result.bc_stats.branch_domain_moves > 0);
+
+  BCOptions probe_opt = opt;
+  probe_opt.lp_kernel_backend = LpKernelBackend::HiGHS;
+  probe_opt.ipm_root_probe = false;
+  probe_opt.probe_reliability = 4;
+  probe_opt.probe_max_candidates = 3;
+  probe_opt.require_tree_exhaustion_certificate = true;
+  probe_opt.enable_objective_cutoff_conflict_cuts = false;
+  probe_opt.enable_objective_cutoff_weighted_event_cuts = false;
+  probe_opt.enable_objective_cutoff_domain_fixing = false;
+  probe_opt.enable_reduced_cost_proof_conflict_minimization = false;
+  probe_opt.enable_nonviolated_cutoff_conflict_covers = false;
+  MIPModel probe_mip;
+  probe_mip.linear_part.sense = Sense::Minimize;
+  probe_mip.linear_part.c = Eigen::VectorXd::Zero(5);
+  probe_mip.linear_part.A.resize(0, 5);
+  probe_mip.linear_part.b.resize(0);
+  probe_mip.linear_part.Aeq.resize(1, 5);
+  for (int col = 0; col < 5; ++col) {
+    probe_mip.linear_part.Aeq.insert(0, col) = 1.0;
+  }
+  probe_mip.linear_part.Aeq.makeCompressed();
+  probe_mip.linear_part.beq = Eigen::VectorXd::Constant(1, 2.5);
+  probe_mip.linear_part.vars.assign(
+      5, VariableMeta{VarType::Binary, 0.0, 1.0});
+  probe_mip.binary_idx = {0, 1, 2, 3, 4};
+  const auto probe_result = solve_milp_bc(probe_mip, probe_opt);
+  CHECK_FALSE(probe_result.stats.success);
+  CHECK(probe_result.bc_stats.strong_probe_bound_transactions > 0);
+  CHECK(probe_result.bc_stats.strong_probe_bound_transactions ==
+        probe_result.bc_stats.strong_probe_transaction_rollbacks);
+  CHECK(probe_result.bc_stats.strong_probe_transaction_failures == 0);
+  CHECK(probe_result.bc_stats.strong_probe_transaction_snapshot_values >=
+        3 * probe_result.bc_stats.strong_probe_bound_transactions);
+  CHECK(probe_result.bc_stats.strong_probe_backend_cold_solves >= 1);
+  CHECK(probe_result.bc_stats.strong_probe_backend_persistent_resolves >= 1);
+  CHECK(probe_result.bc_stats.strong_probe_backend_cold_solves +
+            probe_result.bc_stats.strong_probe_backend_persistent_resolves ==
+        probe_result.bc_stats.strong_branch_lp_solves);
 }
 
 TEST_CASE("MILP: StrictHiGHS [D] mip_detect_symmetry=false preserves correctness",

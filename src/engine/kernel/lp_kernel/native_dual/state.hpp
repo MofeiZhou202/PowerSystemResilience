@@ -24,7 +24,6 @@ DualInfeasibilitySummary original_dual_infeasibility_summary(
 bool transition_dual_phase_one_to_two(State& state,
                                       DualInfeasibilitySummary& summary,
                                       std::string& failure);
-bool is_artificial(const StandardFormLP& sf, int col);
 bool build_logical_basis(const StandardFormLP& sf, std::vector<int>& basis,
                          std::string& failure);
 int apply_certified_singleton_crash(const StandardFormLP& sf,
@@ -36,15 +35,31 @@ bool initialize(State& state, const StandardFormLP& sf,
                 std::string& failure);
 bool rebuild_membership(State& state, std::string& failure);
 bool reconstruct(State& state, std::string& failure,
-                 bool primal = true, bool dual = true);
-bool correct_canonical_primal_residual(State& state, std::string& failure);
+                 bool primal = true, bool dual = true,
+                 bool exact_residual = false);
+bool correct_canonical_primal_residual(State& state, std::string& failure,
+                                       bool exact_residual = false);
 bool normalize_nonbasic_moves(State& state, std::string& failure);
+
+struct DualShiftStartDecision {
+  bool try_shift_start{false};
+  // Exact when shift-start is accepted. On adaptive rejection the scan stops
+  // at the threshold, so this is only a lower bound on the total defect count.
+  int required_shift_lower_bound{0};
+  int shift_threshold{0};
+  bool adaptive_rejection{false};
+};
+
+// MIPSOLVERS_DUAL_SHIFT_START=on/off forces the corresponding path. An unset
+// or unrecognized value uses the bounded-cleanup adaptive policy.
+DualShiftStartDecision decide_cost_shifted_dual_start(
+    const State& state, const char* environment_policy);
 bool initialize_cost_shifted_dual_start(State& state, Statistics& statistics,
                                         std::string& failure);
 bool initialize_exact_edge_weights(State& state, Statistics& statistics,
                                    std::string& failure);
-// Cold-start dual pricing-weight policy: exact DSE unless overridden by the
-// MIPSOLVERS_DUAL_PRICING diagnostic environment selection.
+// Cold-start dual pricing-weight policy: scalable Devex by default, with exact
+// DSE available only through SimplexOptions::exact_dse_initialization.
 bool initialize_cold_edge_weights(State& state, Statistics& statistics,
                                   std::string& failure);
 void initialize_devex_framework(State& state, Statistics& statistics);
@@ -72,11 +87,11 @@ void cycle_signature_apply_basis_swap(State& state, int row, int old_col,
 // removes it when present.  A move-side change is two toggles.
 void cycle_signature_apply_move_toggle(State& state, int col, int move_sign);
 
-Eigen::VectorXd multiply_A(const Eigen::SparseMatrix<double>& A,
+Eigen::VectorXd multiply_A(const StandardColumnMatrix& A,
                            const Eigen::VectorXd& x);
-Eigen::VectorXd multiply_AT(const Eigen::SparseMatrix<double>& A,
+Eigen::VectorXd multiply_AT(const StandardColumnMatrix& A,
                             const Eigen::VectorXd& y);
-double equation_residual_inf(const Eigen::SparseMatrix<double>& A,
+double equation_residual_inf(const StandardColumnMatrix& A,
                              const Eigen::VectorXd& x,
                              const Eigen::VectorXd& rhs);
 
@@ -84,7 +99,7 @@ Eigen::VectorXd full_primal(const State& state);
 double primal_infeasibility(const State& state, int row, int& side);
 double dual_infeasibility(const State& state, int col);
 Audit audit(const State& state, bool require_primal, bool require_dual,
-            bool require_artificial_zero);
+            bool require_artificial_zero, bool exact_residual = false);
 
 SimplexBasis export_basis(const State& state);
 Result make_result(const State& state, Status status, std::string message,

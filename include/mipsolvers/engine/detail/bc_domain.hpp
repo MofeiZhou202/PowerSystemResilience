@@ -35,6 +35,7 @@
 #include <Eigen/Sparse>
 
 #include "mipsolvers/engine/problem_types.hpp"
+#include "mipsolvers/engine/detail/bc_numerics.hpp"
 
 namespace mipsolvers::engine::detail {
 
@@ -46,6 +47,13 @@ class BCDomain {
     double old_ub;
     bool changed_lb;
     bool changed_ub;
+  };
+
+  struct Savepoint {
+    std::size_t trail_size{0};
+    std::vector<int> pending_rows;
+    bool infeasible{false};
+    bool propagation_complete{true};
   };
 
   static constexpr double kFeasTol = 1e-7;
@@ -69,8 +77,8 @@ class BCDomain {
     lb_.conservativeResize(n_);
     ub_.conservativeResize(n_);
 
-    act_min_.assign(static_cast<size_t>(m_total_), 0.0);
-    act_max_.assign(static_cast<size_t>(m_total_), 0.0);
+    act_min_.assign(static_cast<size_t>(m_total_), StableActivitySum{});
+    act_max_.assign(static_cast<size_t>(m_total_), StableActivitySum{});
     act_inf_min_.assign(static_cast<size_t>(m_total_), 0);
     act_inf_max_.assign(static_cast<size_t>(m_total_), 0);
     prop_flag_.assign(static_cast<size_t>(m_total_), 0);
@@ -103,18 +111,27 @@ class BCDomain {
   }
 
   bool infeasible() const { return infeasible_; }
+  bool propagation_complete() const { return propagation_complete_; }
   const Eigen::VectorXd& lb() const { return lb_; }
   const Eigen::VectorXd& ub() const { return ub_; }
   int num_vars() const { return n_; }
   int num_rows() const { return m_total_; }
 
   /// Push a savepoint that `restore()` can later roll back to.
-  std::size_t savepoint() const { return trail_.size(); }
+  Savepoint savepoint() const {
+    return Savepoint{trail_.size(), prop_inds_, infeasible_,
+                     propagation_complete_};
+  }
 
   /// Roll back every bound change (and its activity-delta side effects)
   /// performed after `sp`, in LIFO order. Clears the infeasible flag.
-  void restore(std::size_t sp) {
-    while (trail_.size() > sp) {
+  void restore(const Savepoint& sp) {
+    // Rollback weakens bounds, so it cannot create a new row infeasibility.
+    // Clear the failed probe state before applying reverse activity deltas;
+    // otherwise the delta helpers deliberately short-circuit and leave cached
+    // activities from the discarded probe behind.
+    infeasible_ = false;
+    while (trail_.size() > sp.trail_size) {
       const TrailEntry e = trail_.back();
       trail_.pop_back();
       // Reverse-update activities. We undo lb/ub one at a time using delta logic.
@@ -131,16 +148,19 @@ class BCDomain {
         ub_[e.col] = new_ub;
       }
     }
-    // Clearing infeasibility & propagation queue is the same pattern as
-    // HiGHS::backtrack(): once we're back inside a feasible savepoint, any
-    // pending propagations queued past it must be discarded too because the
-    // activity changes that requested them have been rolled back.
-    infeasible_ = false;
-    prop_inds_.clear();
-    std::fill(prop_flag_.begin(), prop_flag_.end(), static_cast<char>(0));
-    // Re-mark rows that might still need attention given the *current* lb/ub.
-    // Cheap: iterate marker function once.
-    for (int rr = 0; rr < m_total_; ++rr) mark_propagate(rr);
+    for (const int rr : prop_inds_) {
+      if (rr >= 0 && rr < m_total_) {
+        prop_flag_[static_cast<std::size_t>(rr)] = 0;
+      }
+    }
+    prop_inds_ = sp.pending_rows;
+    for (const int rr : prop_inds_) {
+      if (rr >= 0 && rr < m_total_) {
+        prop_flag_[static_cast<std::size_t>(rr)] = 1;
+      }
+    }
+    infeasible_ = sp.infeasible;
+    propagation_complete_ = sp.propagation_complete;
   }
 
   /// Fix `col` to a value (lb=ub=v). Returns `false` and sets `infeasible()`
@@ -158,7 +178,7 @@ class BCDomain {
     const double cur_ub = ub_[col];
     if (new_lb < cur_lb) new_lb = cur_lb;
     if (new_ub > cur_ub) new_ub = cur_ub;
-    if (is_integer_type(lp_->vars[col])) {
+    if (is_integer_var(lp_->vars[col])) {
       new_lb = std::ceil(new_lb - kBoundEps);
       new_ub = std::floor(new_ub + kBoundEps);
     }
@@ -168,8 +188,14 @@ class BCDomain {
     }
     bool changed_lb = false;
     bool changed_ub = false;
-    if (new_lb > cur_lb + kBoundEps) changed_lb = true;
-    if (new_ub < cur_ub - kBoundEps) changed_ub = true;
+    if (new_lb > cur_lb +
+                     bound_improvement_tolerance(kBoundEps, cur_lb, new_lb)) {
+      changed_lb = true;
+    }
+    if (new_ub < cur_ub -
+                     bound_improvement_tolerance(kBoundEps, cur_ub, new_ub)) {
+      changed_ub = true;
+    }
     if (!changed_lb && !changed_ub) return true;
 
     trail_.push_back({col, cur_lb, cur_ub, changed_lb, changed_ub});
@@ -190,36 +216,45 @@ class BCDomain {
   /// or past a row bound after a `change_bound` are visited; further bound
   /// tightenings recurse via `change_bound` and may mark additional rows.
   bool propagate() {
-    if (infeasible_) return false;
+    if (infeasible_) {
+      propagation_complete_ = true;
+      return false;
+    }
     int safety = std::max(64, 8 * m_total_);
     while (!prop_inds_.empty() && safety-- > 0) {
       const int rr = prop_inds_.back();
       prop_inds_.pop_back();
       prop_flag_[static_cast<size_t>(rr)] = 0;
-      if (!propagate_row(rr)) return false;
+      if (!propagate_row(rr)) {
+        propagation_complete_ = true;
+        return false;
+      }
     }
-    return !infeasible_;
+    propagation_complete_ = prop_inds_.empty();
+    return !infeasible_ && propagation_complete_;
   }
 
  private:
   static constexpr double kInfBig = std::numeric_limits<double>::infinity();
 
+  static bool is_integer_var(const VariableMeta& var) {
+    return var.type == VarType::Integer || var.type == VarType::Binary;
+  }
+
   // --------------------------------------------------------------- helpers
 
-  // Activity delta (HighsDomain::computeDelta analog).
-  // sentinel == +inf for ub-style activity, -inf for lb-style; uses the
-  // appropriate counter to track how many infinite contributions remain.
-  static double compute_delta(double a, double oldbound, double newbound,
-                              double sentinel, int& numinf) {
+  static void replace_activity_bound(StableActivitySum& activity, double a,
+                                     double oldbound, double newbound,
+                                     double sentinel, int& numinf) {
     if (oldbound == sentinel) {
       --numinf;
-      return newbound * a;
-    }
-    if (newbound == sentinel) {
+      if (newbound != sentinel) activity.add_product(a, newbound);
+    } else if (newbound == sentinel) {
       ++numinf;
-      return -oldbound * a;
+      activity.remove_product(a, oldbound);
+    } else {
+      activity.replace_product(a, oldbound, newbound);
     }
-    return (newbound - oldbound) * a;
   }
 
   // Iterate column j's nonzeros in either A (offset=0) or Aeq (offset=m_ineq_).
@@ -242,18 +277,18 @@ class BCDomain {
                                     const Eigen::SparseMatrix<double, Eigen::RowMajor>& M,
                                     int row_offset) {
     const int rr = row_offset + row_in_block;
-    double amin = 0.0, amax = 0.0;
+    StableActivitySum amin, amax;
     int infmin = 0, infmax = 0;
     for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(M, row_in_block); it; ++it) {
       const int j = static_cast<int>(it.col());
       const double a = it.value();
       if (std::abs(a) <= 1e-15) continue;
       if (a > 0.0) {
-        if (!std::isfinite(lb_[j])) ++infmin; else amin += a * lb_[j];
-        if (!std::isfinite(ub_[j])) ++infmax; else amax += a * ub_[j];
+        if (!std::isfinite(lb_[j])) ++infmin; else amin.add_product(a, lb_[j]);
+        if (!std::isfinite(ub_[j])) ++infmax; else amax.add_product(a, ub_[j]);
       } else {
-        if (!std::isfinite(ub_[j])) ++infmin; else amin += a * ub_[j];
-        if (!std::isfinite(lb_[j])) ++infmax; else amax += a * lb_[j];
+        if (!std::isfinite(ub_[j])) ++infmin; else amin.add_product(a, ub_[j]);
+        if (!std::isfinite(lb_[j])) ++infmax; else amax.add_product(a, lb_[j]);
       }
     }
     act_min_[static_cast<size_t>(rr)] = amin;
@@ -269,22 +304,22 @@ class BCDomain {
     for_each_nz_in_col(col, [&](int rr, double a) {
       if (infeasible_) return;
       if (a > 0.0) {
-        const double d = compute_delta(a, oldbound, newbound, -kInfBig,
-                                       act_inf_min_[static_cast<size_t>(rr)]);
-        act_min_[static_cast<size_t>(rr)] += d;
+        replace_activity_bound(act_min_[static_cast<size_t>(rr)], a, oldbound,
+                               newbound, -kInfBig,
+                               act_inf_min_[static_cast<size_t>(rr)]);
         if (act_inf_min_[static_cast<size_t>(rr)] == 0 &&
-            act_min_[static_cast<size_t>(rr)] >
-                row_hi_[static_cast<size_t>(rr)] + kFeasTol) {
+            act_min_[static_cast<size_t>(rr)].violates_upper(
+                row_hi_[static_cast<size_t>(rr)], kFeasTol)) {
           infeasible_ = true; return;
         }
         if (touch_marks) mark_propagate(rr);
       } else {
-        const double d = compute_delta(a, oldbound, newbound, -kInfBig,
-                                       act_inf_max_[static_cast<size_t>(rr)]);
-        act_max_[static_cast<size_t>(rr)] += d;
+        replace_activity_bound(act_max_[static_cast<size_t>(rr)], a, oldbound,
+                               newbound, -kInfBig,
+                               act_inf_max_[static_cast<size_t>(rr)]);
         if (act_inf_max_[static_cast<size_t>(rr)] == 0 &&
-            act_max_[static_cast<size_t>(rr)] <
-                row_lo_[static_cast<size_t>(rr)] - kFeasTol) {
+            act_max_[static_cast<size_t>(rr)].violates_lower(
+                row_lo_[static_cast<size_t>(rr)], kFeasTol)) {
           infeasible_ = true; return;
         }
         if (touch_marks) mark_propagate(rr);
@@ -298,22 +333,22 @@ class BCDomain {
     for_each_nz_in_col(col, [&](int rr, double a) {
       if (infeasible_) return;
       if (a > 0.0) {
-        const double d = compute_delta(a, oldbound, newbound, kInfBig,
-                                       act_inf_max_[static_cast<size_t>(rr)]);
-        act_max_[static_cast<size_t>(rr)] += d;
+        replace_activity_bound(act_max_[static_cast<size_t>(rr)], a, oldbound,
+                               newbound, kInfBig,
+                               act_inf_max_[static_cast<size_t>(rr)]);
         if (act_inf_max_[static_cast<size_t>(rr)] == 0 &&
-            act_max_[static_cast<size_t>(rr)] <
-                row_lo_[static_cast<size_t>(rr)] - kFeasTol) {
+            act_max_[static_cast<size_t>(rr)].violates_lower(
+                row_lo_[static_cast<size_t>(rr)], kFeasTol)) {
           infeasible_ = true; return;
         }
         if (touch_marks) mark_propagate(rr);
       } else {
-        const double d = compute_delta(a, oldbound, newbound, kInfBig,
-                                       act_inf_min_[static_cast<size_t>(rr)]);
-        act_min_[static_cast<size_t>(rr)] += d;
+        replace_activity_bound(act_min_[static_cast<size_t>(rr)], a, oldbound,
+                               newbound, kInfBig,
+                               act_inf_min_[static_cast<size_t>(rr)]);
         if (act_inf_min_[static_cast<size_t>(rr)] == 0 &&
-            act_min_[static_cast<size_t>(rr)] >
-                row_hi_[static_cast<size_t>(rr)] + kFeasTol) {
+            act_min_[static_cast<size_t>(rr)].violates_upper(
+                row_hi_[static_cast<size_t>(rr)], kFeasTol)) {
           infeasible_ = true; return;
         }
         if (touch_marks) mark_propagate(rr);
@@ -332,14 +367,8 @@ class BCDomain {
     const int infmin = act_inf_min_[static_cast<size_t>(rr)];
     const int infmax = act_inf_max_[static_cast<size_t>(rr)];
 
-    bool prop_upper = std::isfinite(hi) &&
-                      (infmin != 0 ||
-                       act_min_[static_cast<size_t>(rr)] > hi + kFeasTol ||
-                       /*tightenable*/ true);
-    bool prop_lower = std::isfinite(lo) &&
-                      (infmax != 0 ||
-                       act_max_[static_cast<size_t>(rr)] < lo - kFeasTol ||
-                       /*tightenable*/ true);
+    bool prop_upper = std::isfinite(hi);
+    bool prop_lower = std::isfinite(lo);
     // The HiGHS guard skips rows with >1 missing-finite-bound columns, since
     // those cannot deduce any tightening on a single column.
     if (infmin > 1) prop_upper = false;
@@ -348,6 +377,7 @@ class BCDomain {
     if (prop_upper || prop_lower) {
       prop_flag_[static_cast<size_t>(rr)] = 1;
       prop_inds_.push_back(rr);
+      propagation_complete_ = false;
     }
   }
 
@@ -356,16 +386,18 @@ class BCDomain {
   bool propagate_row(int rr) {
     const double lo = row_lo_[static_cast<size_t>(rr)];
     const double hi = row_hi_[static_cast<size_t>(rr)];
-    const double amin = act_min_[static_cast<size_t>(rr)];
-    const double amax = act_max_[static_cast<size_t>(rr)];
+    const StableActivitySum& amin = act_min_[static_cast<size_t>(rr)];
+    const StableActivitySum& amax = act_max_[static_cast<size_t>(rr)];
     const int infmin = act_inf_min_[static_cast<size_t>(rr)];
     const int infmax = act_inf_max_[static_cast<size_t>(rr)];
 
     // Quick infeasibility re-check (cheap; HighsDomain does the same).
-    if (infmin == 0 && std::isfinite(hi) && amin > hi + kFeasTol) {
+    if (infmin == 0 && std::isfinite(hi) &&
+        amin.violates_upper(hi, kFeasTol)) {
       infeasible_ = true; return false;
     }
-    if (infmax == 0 && std::isfinite(lo) && amax < lo - kFeasTol) {
+    if (infmax == 0 && std::isfinite(lo) &&
+        amax.violates_lower(lo, kFeasTol)) {
       infeasible_ = true; return false;
     }
 
@@ -393,24 +425,28 @@ class BCDomain {
               contrib = a * ub_[j];
             }
           }
-          double minres;
+          double residual;
           if (infmin == 1) {
             if (contrib != -kInfBig) continue;
-            minres = amin;
+            residual = (hi - amin.value()) +
+                       amin.comparison_tolerance(hi, kFeasTol);
           } else {
-            minres = amin - contrib;
+            const double bound = a > 0.0 ? lb_[j] : ub_[j];
+            residual = amin.upper_residual(hi, a, bound, kFeasTol);
           }
-          const double bound_val = (hi - minres) / a;
+          const double bound_val = residual / a;
           if (a > 0.0) {
             double new_ub = bound_val;
-            if (is_integer_type(lp_->vars[j])) new_ub = std::floor(new_ub + kBoundEps);
-            if (new_ub < ub_[j] - kBoundEps) {
+            if (is_integer_var(lp_->vars[j])) new_ub = std::floor(new_ub + kBoundEps);
+            if (new_ub < ub_[j] - bound_improvement_tolerance(
+                                         kBoundEps, ub_[j], new_ub)) {
               if (!change_bound(j, lb_[j], new_ub)) return;
             }
           } else {
             double new_lb = bound_val;
-            if (is_integer_type(lp_->vars[j])) new_lb = std::ceil(new_lb - kBoundEps);
-            if (new_lb > lb_[j] + kBoundEps) {
+            if (is_integer_var(lp_->vars[j])) new_lb = std::ceil(new_lb - kBoundEps);
+            if (new_lb > lb_[j] + bound_improvement_tolerance(
+                                         kBoundEps, lb_[j], new_lb)) {
               if (!change_bound(j, new_lb, ub_[j])) return;
             }
           }
@@ -439,24 +475,28 @@ class BCDomain {
               contrib = a * lb_[j];
             }
           }
-          double maxres;
+          double residual;
           if (infmax == 1) {
             if (contrib != kInfBig) continue;
-            maxres = amax;
+            residual = (lo - amax.value()) -
+                       amax.comparison_tolerance(lo, kFeasTol);
           } else {
-            maxres = amax - contrib;
+            const double bound = a > 0.0 ? ub_[j] : lb_[j];
+            residual = amax.lower_residual(lo, a, bound, kFeasTol);
           }
-          const double bound_val = (lo - maxres) / a;
+          const double bound_val = residual / a;
           if (a > 0.0) {
             double new_lb = bound_val;
-            if (is_integer_type(lp_->vars[j])) new_lb = std::ceil(new_lb - kBoundEps);
-            if (new_lb > lb_[j] + kBoundEps) {
+            if (is_integer_var(lp_->vars[j])) new_lb = std::ceil(new_lb - kBoundEps);
+            if (new_lb > lb_[j] + bound_improvement_tolerance(
+                                         kBoundEps, lb_[j], new_lb)) {
               if (!change_bound(j, new_lb, ub_[j])) return;
             }
           } else {
             double new_ub = bound_val;
-            if (is_integer_type(lp_->vars[j])) new_ub = std::floor(new_ub + kBoundEps);
-            if (new_ub < ub_[j] - kBoundEps) {
+            if (is_integer_var(lp_->vars[j])) new_ub = std::floor(new_ub + kBoundEps);
+            if (new_ub < ub_[j] - bound_improvement_tolerance(
+                                         kBoundEps, ub_[j], new_ub)) {
               if (!change_bound(j, lb_[j], new_ub)) return;
             }
           }
@@ -495,8 +535,8 @@ class BCDomain {
   Eigen::SparseMatrix<double, Eigen::RowMajor> Aeq_row_;
 
   // Per-row activity state.
-  std::vector<double> act_min_;
-  std::vector<double> act_max_;
+  std::vector<StableActivitySum> act_min_;
+  std::vector<StableActivitySum> act_max_;
   std::vector<int> act_inf_min_;
   std::vector<int> act_inf_max_;
   std::vector<double> row_lo_;
@@ -507,6 +547,7 @@ class BCDomain {
 
   std::vector<TrailEntry> trail_;
   bool infeasible_{false};
+  bool propagation_complete_{true};
 };
 
 }  // namespace mipsolvers::engine::detail

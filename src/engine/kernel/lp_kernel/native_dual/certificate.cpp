@@ -21,7 +21,7 @@ Certificate certificate_from_multiplier(const State& state,
   const Bounds original = make_phase_two_bounds(*state.sf);
   for (int j = 0; j < state.n; ++j) {
     double coefficient = 0.0;
-    for (Eigen::SparseMatrix<double>::InnerIterator it(state.sf->A, j); it;
+    for (StandardColumnMatrix::InnerIterator it(state.sf->A, j); it;
          ++it) {
       coefficient += certificate.multiplier[it.row()] * it.value();
     }

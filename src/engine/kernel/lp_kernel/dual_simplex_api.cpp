@@ -159,50 +159,60 @@ StandardFormLP build_standard_form_lp(const LPModel& lp) {
 
   const int cols = n + n_slack + n_surplus + n_artificial;
 
-  // Build sparse A using triplets (no upper-bound rows).
-  std::vector<Eigen::Triplet<double>> triplets;
-  triplets.reserve(static_cast<size_t>(lp.A.nonZeros() + lp.Aeq.nonZeros() + m));
-
-  // Inequality rows from lp.A (sparse).
-  for (int col = 0; col < lp.A.outerSize(); ++col) {
-    for (Eigen::SparseMatrix<double>::InnerIterator it(lp.A, col); it; ++it) {
-      const int r = static_cast<int>(it.row());
-      const double v = rows[r].sign * it.value();
-      if (std::abs(v) > 1e-15) {
-        triplets.emplace_back(r, col, v);
-      }
-    }
-  }
-
-  // Equality rows from lp.Aeq (sparse).
-  for (int col = 0; col < lp.Aeq.outerSize(); ++col) {
-    for (Eigen::SparseMatrix<double>::InnerIterator it(lp.Aeq, col); it; ++it) {
-      const int r = m_ineq + static_cast<int>(it.row());
-      const double v = rows[r].sign * it.value();
-      if (std::abs(v) > 1e-15) {
-        triplets.emplace_back(r, col, v);
-      }
-    }
-  }
-
-  // Slack, surplus, artificial columns.
-  for (int i = 0; i < m; ++i) {
-    if (sf.row_to_slack_col[i] >= 0) {
-      triplets.emplace_back(i, sf.row_to_slack_col[i], 1.0);
-    }
-    if (sf.row_to_surplus_col[i] >= 0) {
-      triplets.emplace_back(i, sf.row_to_surplus_col[i], -1.0);
-    }
-    if (sf.row_to_artificial_col[i] >= 0) {
-      triplets.emplace_back(i, sf.row_to_artificial_col[i], 1.0);
-    }
-  }
-
+  // The source matrices are already column-major and their row indices are
+  // sorted. Build the standard-form CSC directly in final column order rather
+  // than materializing and sorting a second O(nnz) Triplet array.
   sf.A.resize(m, cols);
-  sf.A.setFromTriplets(triplets.begin(), triplets.end());
-  sf.A.makeCompressed();
+  const std::size_t reserve_nnz =
+      static_cast<std::size_t>(lp.A.nonZeros()) +
+      static_cast<std::size_t>(lp.Aeq.nonZeros()) +
+      static_cast<std::size_t>(n_slack) +
+      static_cast<std::size_t>(n_surplus) +
+      static_cast<std::size_t>(n_artificial);
+  sf.A.reserve(static_cast<StandardFormIndex>(reserve_nnz));
+  for (int col = 0; col < n; ++col) {
+    sf.A.startVec(col);
+    if (col < lp.A.outerSize()) {
+      for (Eigen::SparseMatrix<double>::InnerIterator it(lp.A, col); it; ++it) {
+        const int r = static_cast<int>(it.row());
+        const double v = rows[static_cast<std::size_t>(r)].sign * it.value();
+        if (std::abs(v) > 1e-15) {
+          sf.A.insertBackByOuterInner(col, r) = v;
+        }
+      }
+    }
+    if (col < lp.Aeq.outerSize()) {
+      for (Eigen::SparseMatrix<double>::InnerIterator it(lp.Aeq, col); it;
+           ++it) {
+        const int r = m_ineq + static_cast<int>(it.row());
+        const double v = rows[static_cast<std::size_t>(r)].sign * it.value();
+        if (std::abs(v) > 1e-15) {
+          sf.A.insertBackByOuterInner(col, r) = v;
+        }
+      }
+    }
+  }
+  for (int row = 0; row < m; ++row) {
+    const int col = sf.row_to_slack_col[static_cast<std::size_t>(row)];
+    if (col < 0) continue;
+    sf.A.startVec(col);
+    sf.A.insertBackByOuterInner(col, row) = 1.0;
+  }
+  for (int row = 0; row < m; ++row) {
+    const int col = sf.row_to_surplus_col[static_cast<std::size_t>(row)];
+    if (col < 0) continue;
+    sf.A.startVec(col);
+    sf.A.insertBackByOuterInner(col, row) = -1.0;
+  }
+  for (int row = 0; row < m; ++row) {
+    const int col = sf.row_to_artificial_col[static_cast<std::size_t>(row)];
+    if (col < 0) continue;
+    sf.A.startVec(col);
+    sf.A.insertBackByOuterInner(col, row) = 1.0;
+  }
+  sf.A.finalize();
 
-  // Build row-major copy for efficient row access (used by GMI cuts).
+  // Build the shared-value CSR row view used by GMI cuts.
   sf.A_row = sf.A;
 
   // Store row signs (no upper-bound rows).
@@ -413,17 +423,18 @@ bool append_leq_rows_to_standard_form(
   }
 
   std::vector<Eigen::Triplet<double>> triplets;
-  triplets.reserve(static_cast<std::size_t>(
-      base_sf.A.nonZeros() + n_new_rows +
-      std::accumulate(rows.begin(), rows.end(), 0,
-                      [](int acc, const Eigen::SparseVector<double>& v) {
-                        return acc + static_cast<int>(v.nonZeros());
-                      })));
+  const std::size_t appended_nnz = std::accumulate(
+      rows.begin(), rows.end(), std::size_t{0},
+      [](std::size_t acc, const Eigen::SparseVector<double>& v) {
+        return acc + static_cast<std::size_t>(v.nonZeros());
+      });
+  triplets.reserve(static_cast<std::size_t>(base_sf.A.nonZeros()) +
+                   static_cast<std::size_t>(n_new_rows) + appended_nnz);
 
   for (int c = 0; c < base_sf.A.outerSize(); ++c) {
     const int nc = map_old_col(c);
     if (nc < 0) return false;
-    for (Eigen::SparseMatrix<double>::InnerIterator it(base_sf.A, c); it;
+    for (StandardColumnMatrix::InnerIterator it(base_sf.A, c); it;
          ++it) {
       triplets.emplace_back(map_old_row(static_cast<int>(it.row())), nc,
                             it.value());
@@ -649,19 +660,20 @@ bool append_leq_rows_to_canonical_standard_form(
   }
 
   std::vector<Eigen::Triplet<double>> triplets;
-  triplets.reserve(static_cast<std::size_t>(
-      base_sf.A.nonZeros() + n_new_rows * 2 +
-      std::accumulate(rows.begin(), rows.end(), 0,
-                      [](int acc, const Eigen::SparseVector<double>& v) {
-                        return acc + static_cast<int>(v.nonZeros());
-                      })));
+  const std::size_t appended_nnz = std::accumulate(
+      rows.begin(), rows.end(), std::size_t{0},
+      [](std::size_t acc, const Eigen::SparseVector<double>& v) {
+        return acc + static_cast<std::size_t>(v.nonZeros());
+      });
+  triplets.reserve(static_cast<std::size_t>(base_sf.A.nonZeros()) +
+                   2 * static_cast<std::size_t>(n_new_rows) + appended_nnz);
 
   for (int c = 0; c < base_sf.A.outerSize(); ++c) {
     const int nc = map_old_col(c);
     if (nc < 0) return false;
     const double old_cs =
         base_sf.col_scale.size() == old_n ? base_sf.col_scale[c] : 1.0;
-    for (Eigen::SparseMatrix<double>::InnerIterator it(base_sf.A, c); it;
+    for (StandardColumnMatrix::InnerIterator it(base_sf.A, c); it;
          ++it) {
       const int old_r = static_cast<int>(it.row());
       const double old_rs =
@@ -780,37 +792,41 @@ void ruiz_scale_standard_form(StandardFormLP& sf, int rounds) {
   // Initialize cumulative scale factors.
   sf.row_scale = Eigen::VectorXd::Ones(m);
   sf.col_scale = Eigen::VectorXd::Ones(n);
+  Eigen::VectorXd row_update(m);
+  Eigen::VectorXd col_update(n);
 
   for (int round = 0; round < rounds; ++round) {
-    // Compute row infinity norms of current A.
-    Eigen::VectorXd row_max = Eigen::VectorXd::Zero(m);
-    Eigen::VectorXd col_max = Eigen::VectorXd::Zero(n);
+    // Reuse the norm arrays as this round's scale factors. This keeps Ruiz
+    // scratch at two dense vectors instead of allocating four every round.
+    row_update.setZero();
+    col_update.setZero();
 
     for (int j = 0; j < sf.A.outerSize(); ++j) {
-      for (Eigen::SparseMatrix<double>::InnerIterator it(sf.A, j); it; ++it) {
+      for (StandardColumnMatrix::InnerIterator it(sf.A, j); it; ++it) {
         const double v = std::abs(it.value());
-        if (v > row_max[it.row()]) row_max[it.row()] = v;
-        if (v > col_max[j]) col_max[j] = v;
+        if (v > row_update[it.row()]) row_update[it.row()] = v;
+        if (v > col_update[j]) col_update[j] = v;
       }
     }
 
     // Compute per-round scale factors: D_r[i] = 1/sqrt(max_j |A[i,j]|).
     double max_deviation = 0.0;
-    Eigen::VectorXd dr(m), dc(n);
     for (int i = 0; i < m; ++i) {
-      if (row_max[i] > 1e-15) {
-        dr[i] = 1.0 / std::sqrt(row_max[i]);
-        max_deviation = std::max(max_deviation, std::abs(row_max[i] - 1.0));
+      const double maximum = row_update[i];
+      if (maximum > 1e-15) {
+        row_update[i] = 1.0 / std::sqrt(maximum);
+        max_deviation = std::max(max_deviation, std::abs(maximum - 1.0));
       } else {
-        dr[i] = 1.0;
+        row_update[i] = 1.0;
       }
     }
     for (int j = 0; j < n; ++j) {
-      if (col_max[j] > 1e-15) {
-        dc[j] = 1.0 / std::sqrt(col_max[j]);
-        max_deviation = std::max(max_deviation, std::abs(col_max[j] - 1.0));
+      const double maximum = col_update[j];
+      if (maximum > 1e-15) {
+        col_update[j] = 1.0 / std::sqrt(maximum);
+        max_deviation = std::max(max_deviation, std::abs(maximum - 1.0));
       } else {
-        dc[j] = 1.0;
+        col_update[j] = 1.0;
       }
     }
 
@@ -819,29 +835,25 @@ void ruiz_scale_standard_form(StandardFormLP& sf, int rounds) {
 
     // Apply D_r * A * D_c element-wise (column-major).
     for (int j = 0; j < sf.A.outerSize(); ++j) {
-      for (Eigen::SparseMatrix<double>::InnerIterator it(sf.A, j); it; ++it) {
-        it.valueRef() *= dr[it.row()] * dc[j];
+      for (StandardColumnMatrix::InnerIterator it(sf.A, j); it; ++it) {
+        it.valueRef() *= row_update[it.row()] * col_update[j];
       }
     }
-    // Apply to row-major copy.
-    for (int i = 0; i < sf.A_row.outerSize(); ++i) {
-      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sf.A_row, i); it; ++it) {
-        it.valueRef() *= dr[i] * dc[it.col()];
-      }
-    }
+    // A_row shares A's values, so the CSC update above is immediately visible
+    // through the row view and must not be applied a second time.
 
     // Scale b, c_max, var_ub.
-    sf.b.array() *= dr.array();
-    sf.c_max.array() *= dc.array();
+    sf.b.array() *= row_update.array();
+    sf.c_max.array() *= col_update.array();
     for (int j = 0; j < n; ++j) {
       if (std::isfinite(sf.var_ub[j])) {
-        sf.var_ub[j] /= dc[j];
+        sf.var_ub[j] /= col_update[j];
       }
     }
 
     // Accumulate.
-    sf.row_scale.array() *= dr.array();
-    sf.col_scale.array() *= dc.array();
+    sf.row_scale.array() *= row_update.array();
+    sf.col_scale.array() *= col_update.array();
   }
 }
 
@@ -1075,6 +1087,91 @@ bool update_standard_form_bounds_incremental(
     }
   }
   return true;
+}
+
+bool StandardFormBoundTransaction::apply(
+    const LPModel& lp,
+    const std::vector<BoundChangeInfo>& changes) {
+  if (used_ || sf_ == nullptr) return false;
+  used_ = true;
+  if (changes.empty()) return true;
+
+  const int n = sf_->n_original;
+  const int m_ineq = static_cast<int>(lp.A.rows());
+  const int m_eq = static_cast<int>(lp.Aeq.rows());
+  if (n < 0 || sf_->lb_shift.size() < n || sf_->var_ub.size() < n ||
+      sf_->b.size() < m_ineq + m_eq || lp.A.cols() < n ||
+      lp.Aeq.cols() < n) {
+    return false;
+  }
+
+  std::vector<int> columns;
+  std::vector<int> rows;
+  columns.reserve(changes.size());
+  for (const BoundChangeInfo& change : changes) {
+    if (change.var_idx < 0 || change.var_idx >= n) return false;
+    columns.push_back(change.var_idx);
+    if (!change.is_lb) continue;
+    for (Eigen::SparseMatrix<double>::InnerIterator it(lp.A, change.var_idx);
+         it; ++it) {
+      rows.push_back(static_cast<int>(it.row()));
+    }
+    for (Eigen::SparseMatrix<double>::InnerIterator it(lp.Aeq, change.var_idx);
+         it; ++it) {
+      rows.push_back(m_ineq + static_cast<int>(it.row()));
+    }
+  }
+  std::sort(columns.begin(), columns.end());
+  columns.erase(std::unique(columns.begin(), columns.end()), columns.end());
+  std::sort(rows.begin(), rows.end());
+  rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
+
+  variable_snapshots_.reserve(columns.size());
+  for (int column : columns) {
+    variable_snapshots_.push_back(
+        {column, sf_->lb_shift[column], sf_->var_ub[column]});
+  }
+  row_snapshots_.reserve(rows.size());
+  for (int row : rows) {
+    row_snapshots_.push_back({row, sf_->b[row]});
+  }
+  objective_const_ = sf_->objective_const;
+
+  if (!update_standard_form_bounds_incremental(*sf_, lp, changes)) {
+    variable_snapshots_.clear();
+    row_snapshots_.clear();
+    return false;
+  }
+  active_ = true;
+  return true;
+}
+
+bool StandardFormBoundTransaction::rollback() noexcept {
+  if (!active_) return true;
+  if (sf_ == nullptr) {
+    active_ = false;
+    return false;
+  }
+  bool restored = true;
+  for (const VariableSnapshot& snapshot : variable_snapshots_) {
+    if (snapshot.column < 0 || snapshot.column >= sf_->lb_shift.size() ||
+        snapshot.column >= sf_->var_ub.size()) {
+      restored = false;
+      continue;
+    }
+    sf_->lb_shift[snapshot.column] = snapshot.lower_shift;
+    sf_->var_ub[snapshot.column] = snapshot.upper;
+  }
+  for (const RowSnapshot& snapshot : row_snapshots_) {
+    if (snapshot.row < 0 || snapshot.row >= sf_->b.size()) {
+      restored = false;
+      continue;
+    }
+    sf_->b[snapshot.row] = snapshot.rhs;
+  }
+  sf_->objective_const = objective_const_;
+  active_ = false;
+  return restored;
 }
 
 

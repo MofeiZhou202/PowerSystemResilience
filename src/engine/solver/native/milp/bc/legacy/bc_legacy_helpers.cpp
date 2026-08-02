@@ -103,6 +103,27 @@ double bc_root_lp_budget_sec(double remaining_sec,
   return std::max(kMinimumStageBudgetSec, remaining_sec - reserve);
 }
 
+double bc_optional_subsolve_budget_sec(double per_call_limit_sec,
+                                       double global_remaining_sec,
+                                       double finalization_reserve_sec,
+                                       double stage_remaining_sec,
+                                       double minimum_useful_sec) {
+  const double minimum = std::max(0.0, minimum_useful_sec);
+  if (!(per_call_limit_sec > 0.0) || !(stage_remaining_sec > 0.0)) {
+    return 0.0;
+  }
+
+  double usable_global = global_remaining_sec;
+  if (std::isfinite(global_remaining_sec)) {
+    usable_global -= std::max(0.0, finalization_reserve_sec);
+    if (!(usable_global > 0.0)) return 0.0;
+  }
+
+  const double budget =
+      std::min({per_call_limit_sec, stage_remaining_sec, usable_global});
+  return std::isfinite(budget) && budget >= minimum ? budget : 0.0;
+}
+
 BcStrictHighsContractState apply_bc_strict_highs_contract(BCOptions& opt) {
   BcStrictHighsContractState state;
   state.domain_heuristics = opt.enable_domain_heuristics;
@@ -402,110 +423,6 @@ bool bc_pass_mip_model_to_highs(Highs& highs,
   return pass_status == HighsStatus::kOk;
 }
 
-VendoredHighsRootCertificateResult bc_try_vendored_highs_root_certificate(
-    const LPModel& lp,
-    const Eigen::VectorXd* lb_override,
-    const Eigen::VectorXd* ub_override,
-    const BCOptions& opt) {
-  VendoredHighsRootCertificateResult out;
-  out.attempted = true;
-  const auto h0 = std::chrono::steady_clock::now();
-
-  const int n = static_cast<int>(lp.vars.size());
-  if (n <= 0 || lp.c.size() != n) {
-    out.status = "invalid_model_size";
-    return out;
-  }
-  if (lp.sense != Sense::Minimize) {
-    out.status = "unsupported_sense";
-    return out;
-  }
-
-  Highs highs;
-  highs.setOptionValue("output_flag", false);
-  highs.setOptionValue("log_to_console", false);
-  highs.setOptionValue("threads", 1);
-  highs.setOptionValue("presolve", "choose");
-  highs.setOptionValue("solver", "choose");
-  highs.setOptionValue("mip_lp_solver", "choose");
-  highs.setOptionValue("mip_ipm_solver", "choose");
-  highs.setOptionValue("mip_rel_gap", opt.gap_tol);
-
-  if (!bc_pass_mip_model_to_highs(highs, lp, lb_override, ub_override)) {
-    out.status = "pass_error";
-    return out;
-  }
-
-  const HighsStatus run_status = highs.run();
-  const HighsModelStatus model_status = highs.getModelStatus();
-  const HighsInfo& info = highs.getInfo();
-  out.nodes = info.mip_node_count;
-  out.simplex_iterations = info.simplex_iteration_count;
-  out.dual_bound = info.mip_dual_bound;
-  out.status = fmt::format("{} run={} nodes={} iters={}",
-                           bc_highs_model_status_label(model_status),
-                           static_cast<int>(run_status), out.nodes,
-                           out.simplex_iterations);
-
-  const HighsSolution& sol = highs.getSolution();
-  if (run_status != HighsStatus::kOk ||
-      model_status != HighsModelStatus::kOptimal ||
-      out.nodes < 0 || out.nodes > 1 ||
-      static_cast<int>(sol.col_value.size()) < n ||
-      !std::isfinite(out.dual_bound)) {
-    out.runtime_sec =
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - h0)
-            .count();
-    return out;
-  }
-
-  Eigen::VectorXd x(n);
-  for (int j = 0; j < n; ++j) {
-    x[j] = sol.col_value[static_cast<std::size_t>(j)];
-  }
-
-  Eigen::VectorXd lb(n), ub(n);
-  if (lb_override != nullptr && lb_override->size() == n) {
-    lb = *lb_override;
-  } else {
-    for (int j = 0; j < n; ++j) lb[j] = lp.vars[static_cast<std::size_t>(j)].lb;
-  }
-  if (ub_override != nullptr && ub_override->size() == n) {
-    ub = *ub_override;
-  } else {
-    for (int j = 0; j < n; ++j) ub[j] = lp.vars[static_cast<std::size_t>(j)].ub;
-  }
-
-  if (!satisfies_with_bounds(lp, x, lb, ub, 1e-6)) {
-    out.status += " invalid_native_recheck";
-    out.runtime_sec =
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - h0)
-            .count();
-    return out;
-  }
-
-  out.primal_obj = objective_value(lp.c, x, lp.sense);
-  if (!std::isfinite(out.primal_obj)) {
-    out.status += " invalid_objective";
-    out.runtime_sec =
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - h0)
-            .count();
-    return out;
-  }
-  out.rel_gap = std::max(
-      0.0, (out.primal_obj - out.dual_bound) /
-               std::max(1.0, std::abs(out.primal_obj)));
-  if (out.rel_gap <= opt.gap_tol + 1e-12) {
-    out.x = std::move(x);
-    out.accepted = true;
-  } else {
-    out.status += fmt::format(" gap_reject={:.6g}", out.rel_gap);
-  }
-  out.runtime_sec =
-      std::chrono::duration<double>(std::chrono::steady_clock::now() - h0)
-          .count();
-  return out;
-}
 #endif
 
 void apply_bc_first_class_simplex_state(SimplexOptions& opt,

@@ -8,10 +8,13 @@
 
 #include "mipsolvers/engine/kernel/linear_algebra/hfactor_backend.hpp"
 
+#include "mipsolvers/engine/kernel/lp_kernel/dual_simplex.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <type_traits>
 
 // HiGHS headers (vendored copies).
 #include "util/HFactor.h"
@@ -42,12 +45,84 @@ int hyper_sparse_min_rows() {
 struct HFactorBackend::Impl {
   HFactor f;
 
-  // CSC copy of the bound A matrix in HighsInt format (HFactor::setupGeneral
-  // takes `const HighsInt*` pointers and stores them by reference, so we keep
-  // ownership here).
+  // Fallback CSC index conversion for storage widths other than the native
+  // 32-bit and HighsInt paths. Values are always shared with the source.
   std::vector<HighsInt> a_start;
   std::vector<HighsInt> a_index;
-  std::vector<double>   a_value;
+
+  // Identity of the compressed Eigen buffers currently mirrored above.
+  // StandardFormLP matrices are immutable while a factor is live, so pointer
+  // identity is enough to avoid re-copying all nnz at every INVERT.
+  const void* source_outer = nullptr;
+  const void* source_inner = nullptr;
+  const double* source_value = nullptr;
+  std::size_t source_index_size = 0;
+  Eigen::Index source_rows = 0;
+  Eigen::Index source_cols = 0;
+  Eigen::Index source_nnz = 0;
+  std::uint64_t matrix_copies = 0;
+  const HighsInt* bound_start = nullptr;
+  const HighsInt* bound_index = nullptr;
+  const std::int32_t* bound_start32 = nullptr;
+  const std::int32_t* bound_index32 = nullptr;
+  const double* bound_value = nullptr;
+
+  template <typename SparseMatrix>
+  void bind_compressed_matrix(const SparseMatrix& A) {
+    using StorageIndex = typename SparseMatrix::StorageIndex;
+    const bool unchanged =
+        A.isCompressed() && source_outer == A.outerIndexPtr() &&
+        source_inner == A.innerIndexPtr() && source_value == A.valuePtr() &&
+        source_index_size == sizeof(StorageIndex) &&
+        source_rows == A.rows() && source_cols == A.cols() &&
+        source_nnz == A.nonZeros();
+    if (unchanged) return;
+
+    const HighsInt num_col = static_cast<HighsInt>(A.cols());
+    const HighsInt nnz = static_cast<HighsInt>(A.nonZeros());
+    if constexpr (std::is_same_v<StorageIndex, HighsInt>) {
+      a_start.clear();
+      a_index.clear();
+      bound_start = A.outerIndexPtr();
+      bound_index = A.innerIndexPtr();
+      bound_start32 = nullptr;
+      bound_index32 = nullptr;
+      bound_value = A.valuePtr();
+    } else if constexpr (std::is_same_v<StorageIndex, std::int32_t>) {
+      a_start.clear();
+      a_index.clear();
+      bound_start = nullptr;
+      bound_index = nullptr;
+      bound_start32 = A.outerIndexPtr();
+      bound_index32 = A.innerIndexPtr();
+      bound_value = A.valuePtr();
+    } else {
+      a_start.resize(static_cast<std::size_t>(num_col) + 1);
+      for (HighsInt j = 0; j <= num_col; ++j) {
+        a_start[static_cast<std::size_t>(j)] =
+            static_cast<HighsInt>(A.outerIndexPtr()[j]);
+      }
+      a_index.resize(static_cast<std::size_t>(nnz));
+      for (HighsInt k = 0; k < nnz; ++k) {
+        a_index[static_cast<std::size_t>(k)] =
+            static_cast<HighsInt>(A.innerIndexPtr()[k]);
+      }
+      bound_start = a_start.data();
+      bound_index = a_index.data();
+      bound_start32 = nullptr;
+      bound_index32 = nullptr;
+      bound_value = A.valuePtr();
+      ++matrix_copies;
+    }
+
+    source_outer = A.outerIndexPtr();
+    source_inner = A.innerIndexPtr();
+    source_value = A.valuePtr();
+    source_index_size = sizeof(StorageIndex);
+    source_rows = A.rows();
+    source_cols = A.cols();
+    source_nnz = A.nonZeros();
+  }
 
   // Mutable basic_index (HFactor permutes it during build()).
   std::vector<HighsInt> basic_index;
@@ -82,6 +157,8 @@ struct HFactorBackend::Impl {
   mutable std::uint64_t ep_capture_serial = 0;
   mutable bool aq_capture_valid = false;
   mutable bool ep_capture_valid = false;
+  mutable std::uint64_t dense_solves = 0;
+  mutable std::uint64_t indexed_solves = 0;
   std::uint64_t factor_serial = 0;
 };
 
@@ -91,12 +168,25 @@ HFactorBackend::~HFactorBackend() = default;
 HFactorBackend::HFactorBackend(HFactorBackend&&) noexcept = default;
 HFactorBackend& HFactorBackend::operator=(HFactorBackend&&) noexcept = default;
 
+std::uint64_t HFactorBackend::matrix_copy_count() const noexcept {
+  return p_->matrix_copies;
+}
+
+std::uint64_t HFactorBackend::dense_solve_count() const noexcept {
+  return p_->dense_solves;
+}
+
+std::uint64_t HFactorBackend::indexed_solve_count() const noexcept {
+  return p_->indexed_solves;
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // factorize
 // ────────────────────────────────────────────────────────────────────────────
-bool HFactorBackend::factorize(const Eigen::SparseMatrix<double>& A,
-                               const int* basic_index,
-                               int n_basic) {
+template <typename SparseMatrix>
+bool HFactorBackend::factorize_impl(const SparseMatrix& A,
+                                    const int* basic_index,
+                                    int n_basic) {
   valid = false;
   n_updates = 0;
   rank_deficiency = 0;
@@ -108,27 +198,20 @@ bool HFactorBackend::factorize(const Eigen::SparseMatrix<double>& A,
   if (n_basic <= 0 || basic_index == nullptr) return false;
   if (A.rows() <= 0 || A.cols() <= 0) return false;
 
-  // Eigen sparse must be column-major and compressed.
-  Eigen::SparseMatrix<double> Acm(A);
-  Acm.makeCompressed();
-
-  const HighsInt num_row = static_cast<HighsInt>(Acm.rows());
-  const HighsInt num_col = static_cast<HighsInt>(Acm.cols());
-  const HighsInt nnz     = static_cast<HighsInt>(Acm.nonZeros());
-
-  // Copy Eigen CSC (StorageIndex int) into HighsInt (== int on this build,
-  // but stay defensive in case HIGHSINT64 ever turns on).
-  p_->a_start.assign(num_col + 1, 0);
-  for (HighsInt j = 0; j <= num_col; ++j) {
-    p_->a_start[static_cast<size_t>(j)] =
-        static_cast<HighsInt>(Acm.outerIndexPtr()[j]);
+  // HFactor is built with 64-bit HighsInt while Eigen uses 32-bit storage
+  // indices. Convert once per immutable matrix, then reuse the converted CSC
+  // across basis rebuilds. The slow uncompressed case gets a local compressed
+  // copy and intentionally cannot hit the pointer-identity cache next time.
+  SparseMatrix compressed;
+  const SparseMatrix* matrix = &A;
+  if (!A.isCompressed()) {
+    compressed = A;
+    compressed.makeCompressed();
+    matrix = &compressed;
   }
-  p_->a_index.resize(static_cast<size_t>(nnz));
-  for (HighsInt k = 0; k < nnz; ++k) {
-    p_->a_index[static_cast<size_t>(k)] =
-        static_cast<HighsInt>(Acm.innerIndexPtr()[k]);
-  }
-  p_->a_value.assign(Acm.valuePtr(), Acm.valuePtr() + nnz);
+  const HighsInt num_row = static_cast<HighsInt>(matrix->rows());
+  const HighsInt num_col = static_cast<HighsInt>(matrix->cols());
+  p_->bind_compressed_matrix(*matrix);
 
   // basic_index is mutable for HFactor (it permutes during build).
   p_->basic_index.resize(static_cast<size_t>(n_basic));
@@ -154,20 +237,19 @@ bool HFactorBackend::factorize(const Eigen::SparseMatrix<double>& A,
     const double v = std::atof(e);
     if (v >= 0.0 && v <= 1.0) pivot_tol = v;
   }
-  p_->f.setupGeneral(
-      /*num_col*/ num_col,
-      /*num_row*/ num_row,
-      /*num_basic*/ static_cast<HighsInt>(n_basic),
-      p_->a_start.data(),
-      p_->a_index.data(),
-      p_->a_value.data(),
-      p_->basic_index.data(),
-      kDefaultPivotThreshold,
-      pivot_tol,
-      kHighsDebugLevelMin,
-      /*log_options*/ nullptr,
-      /*use_original_HFactor_logic*/ true,
-      /*update_method*/ update_method);
+  if (p_->bound_start32 != nullptr) {
+    p_->f.setupGeneral32(
+        num_col, num_row, static_cast<HighsInt>(n_basic), p_->bound_start32,
+        p_->bound_index32, p_->bound_value, p_->basic_index.data(),
+        kDefaultPivotThreshold, pivot_tol, kHighsDebugLevelMin, nullptr, true,
+        update_method);
+  } else {
+    p_->f.setupGeneral(
+        num_col, num_row, static_cast<HighsInt>(n_basic), p_->bound_start,
+        p_->bound_index, p_->bound_value, p_->basic_index.data(),
+        kDefaultPivotThreshold, pivot_tol, kHighsDebugLevelMin, nullptr, true,
+        update_method);
+  }
 
   p_->setup_done = true;
 
@@ -228,10 +310,9 @@ bool HFactorBackend::factorize(const Eigen::SparseMatrix<double>& A,
   return true;
 }
 
-bool HFactorBackend::factorize_with_logicals(
-    const Eigen::SparseMatrix<double>& A,
-    const int* basic_index,
-    int n_basic,
+template <typename SparseMatrix>
+bool HFactorBackend::factorize_with_logicals_impl(
+    const SparseMatrix& A, const int* basic_index, int n_basic,
     const std::vector<int>& logical_col_by_row,
     std::vector<int>& repaired_basis) {
   const int num_row = static_cast<int>(A.rows());
@@ -259,7 +340,7 @@ bool HFactorBackend::factorize_with_logicals(
   // factor. The implicit-logical diagnostic build below exists only to
   // identify repairable singular positions, so pay for it only after a
   // real-space build reports deficiency.
-  if (factorize(A, basic_index, n_basic)) {
+  if (factorize_impl(A, basic_index, n_basic)) {
     repaired_basis.assign(basic_index, basic_index + n_basic);
     return true;
   }
@@ -291,17 +372,7 @@ bool HFactorBackend::factorize_with_logicals(
   const HighsInt h_num_col = static_cast<HighsInt>(num_col);
   if (num_row <= 0 || num_col <= 0 || !A.isCompressed()) return false;
 
-  p_->a_start.resize(static_cast<std::size_t>(num_col) + 1);
-  p_->a_index.resize(static_cast<std::size_t>(A.nonZeros()));
-  p_->a_value.resize(static_cast<std::size_t>(A.nonZeros()));
-  for (int j = 0; j <= num_col; ++j)
-    p_->a_start[static_cast<std::size_t>(j)] =
-        static_cast<HighsInt>(A.outerIndexPtr()[j]);
-  for (Eigen::Index k = 0; k < A.nonZeros(); ++k) {
-    p_->a_index[static_cast<std::size_t>(k)] =
-        static_cast<HighsInt>(A.innerIndexPtr()[k]);
-    p_->a_value[static_cast<std::size_t>(k)] = A.valuePtr()[k];
-  }
+  p_->bind_compressed_matrix(A);
   p_->basic_index.resize(static_cast<std::size_t>(n_basic));
   for (int i = 0; i < n_basic; ++i)
     p_->basic_index[static_cast<std::size_t>(i)] =
@@ -310,11 +381,20 @@ bool HFactorBackend::factorize_with_logicals(
   p_->num_row = h_num_row;
   p_->num_col = h_num_col;
   const HighsInt update_method = kUpdateMethodFt;
-  p_->f.setupGeneral(h_num_col, h_num_row, static_cast<HighsInt>(n_basic),
-                     p_->a_start.data(), p_->a_index.data(),
-                     p_->a_value.data(), p_->basic_index.data(),
-                     kDefaultPivotThreshold, kDefaultPivotTolerance,
-                     kHighsDebugLevelMin, nullptr, true, update_method);
+  if (p_->bound_start32 != nullptr) {
+    p_->f.setupGeneral32(
+        h_num_col, h_num_row, static_cast<HighsInt>(n_basic),
+        p_->bound_start32, p_->bound_index32, p_->bound_value,
+        p_->basic_index.data(), kDefaultPivotThreshold,
+        kDefaultPivotTolerance, kHighsDebugLevelMin, nullptr, true,
+        update_method);
+  } else {
+    p_->f.setupGeneral(
+        h_num_col, h_num_row, static_cast<HighsInt>(n_basic), p_->bound_start,
+        p_->bound_index, p_->bound_value, p_->basic_index.data(),
+        kDefaultPivotThreshold, kDefaultPivotTolerance, kHighsDebugLevelMin,
+        nullptr, true, update_method);
+  }
   p_->setup_done = true;
 
   const HighsInt rd = p_->f.build(nullptr);
@@ -365,11 +445,57 @@ bool HFactorBackend::factorize_with_logicals(
   // The caller's logical columns may be Ruiz-scaled multiples of e_i, while
   // HFactor's implicit logical is exactly e_i.  They have identical rank but
   // different numerical values, so rebuild once in the real column space.
-  if (!factorize(A, repaired_basis.data(), n_basic)) return false;
+  if (!factorize_impl(A, repaired_basis.data(), n_basic)) return false;
   rank_deficiency = repair_count;
   no_pivot_rows_ = repair_rows;
   no_pivot_vars_ = repair_vars;
   return true;
+}
+
+bool HFactorBackend::factorize(const Eigen::SparseMatrix<double>& A,
+                               const int* basic_index, int n_basic) {
+  return factorize_impl(A, basic_index, n_basic);
+}
+
+bool HFactorBackend::factorize(const HFactorSparseMatrix64& A,
+                               const int* basic_index, int n_basic) {
+  return factorize_impl(A, basic_index, n_basic);
+}
+
+bool HFactorBackend::factorize(const StandardColumnMatrix& A,
+                               const int* basic_index, int n_basic) {
+  if (const auto* narrow = A.narrow_matrix()) {
+    return factorize_impl(*narrow, basic_index, n_basic);
+  }
+  return factorize_impl(*A.wide_matrix(), basic_index, n_basic);
+}
+
+bool HFactorBackend::factorize_with_logicals(
+    const Eigen::SparseMatrix<double>& A, const int* basic_index, int n_basic,
+    const std::vector<int>& logical_col_by_row,
+    std::vector<int>& repaired_basis) {
+  return factorize_with_logicals_impl(A, basic_index, n_basic,
+                                      logical_col_by_row, repaired_basis);
+}
+
+bool HFactorBackend::factorize_with_logicals(
+    const HFactorSparseMatrix64& A, const int* basic_index, int n_basic,
+    const std::vector<int>& logical_col_by_row,
+    std::vector<int>& repaired_basis) {
+  return factorize_with_logicals_impl(A, basic_index, n_basic,
+                                      logical_col_by_row, repaired_basis);
+}
+
+bool HFactorBackend::factorize_with_logicals(
+    const StandardColumnMatrix& A, const int* basic_index, int n_basic,
+    const std::vector<int>& logical_col_by_row,
+    std::vector<int>& repaired_basis) {
+  if (const auto* narrow = A.narrow_matrix()) {
+    return factorize_with_logicals_impl(*narrow, basic_index, n_basic,
+                                        logical_col_by_row, repaired_basis);
+  }
+  return factorize_with_logicals_impl(*A.wide_matrix(), basic_index, n_basic,
+                                      logical_col_by_row, repaired_basis);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -382,6 +508,7 @@ void HFactorBackend::ftran(const double* rhs, double* result,
                            std::vector<int>* result_pattern) const {
   if (result_pattern != nullptr) result_pattern->clear();
   if (!valid) return;
+  ++p_->dense_solves;
   HFactor& nc = const_cast<HFactor&>(p_->f);
   if (m < hyper_sparse_min_rows()) {
     // Small system: exact dense path (byte-identical to pre-hyper-sparse).
@@ -446,6 +573,7 @@ void HFactorBackend::ftran_for_update(
     std::vector<int>* result_pattern) const {
   if (result_pattern != nullptr) result_pattern->clear();
   if (!valid) return;
+  ++p_->dense_solves;
   HVector& vector = p_->update_vec_aq;
   vector.clear();
   vector.packFlag = true;
@@ -499,6 +627,7 @@ void HFactorBackend::btran(const double* rhs, double* result,
                            std::vector<int>* result_pattern) const {
   if (result_pattern != nullptr) result_pattern->clear();
   if (!valid) return;
+  ++p_->dense_solves;
   HFactor& nc = const_cast<HFactor&>(p_->f);
   if (m < hyper_sparse_min_rows()) {
     // Small system: exact dense path (byte-identical to pre-hyper-sparse).
@@ -564,6 +693,7 @@ void HFactorBackend::btran_for_update(
     std::vector<int>* result_pattern) const {
   if (result_pattern != nullptr) result_pattern->clear();
   if (!valid) return;
+  ++p_->dense_solves;
   HVector& vector = p_->update_vec_ep;
   vector.clear();
   vector.packFlag = true;
@@ -619,6 +749,7 @@ bool HFactorBackend::ftran_indexed(
   result_value.clear();
   result_lookup.clear();
   if (!valid || rhs_index.size() != rhs_value.size()) return false;
+  ++p_->indexed_solves;
   HVector& vector = capture_update ? p_->update_vec_aq : p_->solve_vec_ftran;
   vector.clear();
   vector.packFlag = capture_update;
@@ -671,6 +802,7 @@ bool HFactorBackend::btran_indexed(
   result_value.clear();
   result_lookup.clear();
   if (!valid || rhs_index.size() != rhs_value.size()) return false;
+  ++p_->indexed_solves;
   HVector& vector = capture_update ? p_->update_vec_ep : p_->solve_vec_btran;
   vector.clear();
   vector.packFlag = capture_update;

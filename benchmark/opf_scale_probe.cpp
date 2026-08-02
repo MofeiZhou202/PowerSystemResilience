@@ -1,15 +1,18 @@
-// Temporary scalability probe: OPF-structure nonconvex QP through the filter IPM.
+// Native IPM versus Ipopt scalability probe on an OPF-structure nonconvex QP.
 // Models the OPF KKT shape at scale: indefinite (nonconvex) Hessian on a grid
 // graph + power-balance-like equalities + line-limit-type inequalities.
 // Reports per-size: success, iterations, total ms, and (verbose) factor time.
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <string>
 #include <vector>
 
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 
 #include "mipsolvers/engine/kernel/ipm/ipm_solver.hpp"
+#include "mipsolvers/engine/solver/external/adapters.hpp"
 
 using namespace mipsolvers::engine;
 using T = Eigen::Triplet<double>;
@@ -23,7 +26,44 @@ int main(int argc, char** argv) {
   const int side = (argc > 1) ? atoi(argv[1]) : 40;   // side x side buses
   const int nb = side * side;
   const int n = 2 * nb;                                // v and theta per bus
-  const bool verbose = (argc > 2 && argv[2][0] == 'v');
+  const std::string mode = (argc > 2) ? argv[2] : "both";
+  bool verbose = false;
+  bool least_square_init_duals = false;
+  int repetitions = 1;
+  for (int arg = 3; arg < argc; ++arg) {
+    const std::string value = argv[arg];
+    if (value == "v" || value == "verbose") {
+      verbose = true;
+      continue;
+    }
+    if (value == "ls-duals") {
+      least_square_init_duals = true;
+      continue;
+    }
+    if (value == "no-ls-duals") {
+      least_square_init_duals = false;
+      continue;
+    }
+    char* end = nullptr;
+    const long parsed = std::strtol(value.c_str(), &end, 10);
+    if (end == value.c_str() || *end != '\0' || parsed < 1 || parsed > 10000) {
+      std::fprintf(
+          stderr,
+          "usage: %s [grid-side] [native|ipopt|both] [repetitions] [v] "
+          "[ls-duals|no-ls-duals]\n",
+          argv[0]);
+      return 2;
+    }
+    repetitions = static_cast<int>(parsed);
+  }
+  if (mode != "native" && mode != "ipopt" && mode != "both") {
+    std::fprintf(
+        stderr,
+        "usage: %s [grid-side] [native|ipopt|both] [repetitions] [v] "
+        "[ls-duals|no-ls-duals]\n",
+        argv[0]);
+    return 2;
+  }
 
   // Neighborhood: bus (r,c) connects to (r±1,c),(r,c±1).
   std::vector<std::pair<int,int>> edges;
@@ -66,11 +106,9 @@ int main(int argc, char** argv) {
     // P balance: v_k * (sum of neighbor v) - theta_k = Pd
     aeqt.emplace_back(k, k, 1.0);
     aeqt.emplace_back(k, nb + k, -1.0);
-    beq[k] = 0.05 * ((k * 13 % 7) - 3);
     // Q balance: v_k + theta_k + sum neighbor theta = Qd
     aeqt.emplace_back(nb + k, k, 1.0);
     aeqt.emplace_back(nb + k, nb + k, 1.0);
-    beq[nb + k] = 0.02 * ((k * 17 % 5) - 2);
   }
   // Neighbor couplings into balance rows.
   int er = 0;
@@ -84,6 +122,9 @@ int main(int argc, char** argv) {
   Eigen::SparseMatrix<double> Aeq(2 * nb, n);
   Aeq.setFromTriplets(aeqt.begin(), aeqt.end());
   Aeq.makeCompressed();
+  Eigen::VectorXd planted_x = Eigen::VectorXd::Zero(n);
+  planted_x.head(nb).setOnes();
+  beq = Aeq * planted_x;
 
   // Inequalities: line-limit (v_i - v_j) <= limit per edge.
   std::vector<T> ct3;
@@ -105,8 +146,7 @@ int main(int argc, char** argv) {
     // Feasible by construction: v≈1, θ free to absorb the balance rows.
     nlp.vars.push_back({VarType::Continuous, is_v ? 0.9 : -6.0, is_v ? 1.1 : 6.0});
   }
-  nlp.x0 = Eigen::VectorXd::Zero(n);
-  for (int j = 0; j < nb; ++j) nlp.x0[j] = 1.0;
+  nlp.x0 = planted_x;
 
   const auto Qc = Q;
   const auto Cc = c;
@@ -140,14 +180,70 @@ int main(int argc, char** argv) {
   IPMOptions opt;
   opt.verbose = verbose;
   opt.max_iter = 60;
-  NativeIPMAdapter solver(opt);
+  opt.tol_primal = 1e-6;
+  opt.tol_dual = 1e-6;
+  opt.tol_complementarity = 1e-6;
+  opt.tol_accept = 0.0;
+  opt.scale_problem = false;
+  opt.allow_external_fallback = false;
+  opt.least_square_init_duals = least_square_init_duals;
 
-  const auto t0 = std::chrono::steady_clock::now();
-  const auto [res, detail] = solver.solve_nlp_detail(nlp);
-  const double ms = std::chrono::duration<double, std::milli>(
-                        std::chrono::steady_clock::now() - t0).count();
-  printf("buses=%d n=%d meq=%d miq=%d | success=%d status=%s iters=%d obj=%.6g total=%.1fms\n",
-         nb, n, 2 * nb, ne, (int)res.stats.success, res.stats.status.c_str(),
-         res.stats.iterations, res.stats.objective, ms);
-  return res.stats.success ? 0 : 1;
+  nlp.solver_options.max_iterations = opt.max_iter;
+  nlp.solver_options.tolerance = 1e-6;
+  nlp.solver_options.acceptable_tolerance = 1e-6;
+  nlp.solver_options.dual_infeasibility_tolerance = 1e-6;
+  nlp.solver_options.constraint_violation_tolerance = 1e-6;
+  nlp.solver_options.complementarity_tolerance = 1e-6;
+  nlp.solver_options.acceptable_dual_infeasibility_tolerance = 1e-6;
+  nlp.solver_options.acceptable_constraint_violation_tolerance = 1e-6;
+  nlp.solver_options.acceptable_complementarity_tolerance = 1e-6;
+
+  const auto report = [&](const char* requested, int run, int order_position,
+                          const SolveResult& res, double elapsed_ms) {
+    std::printf(
+        "solver=%s actual=%s run=%d order_pos=%d ls_duals=%d buses=%d n=%d "
+        "meq=%d miq=%d success=%d "
+        "status=\"%s\" iters=%d obj=%.12g primal=%.3e dual=%.3e "
+        "compl=%.3e total_ms=%.3f\n",
+        requested, res.stats.solver_name.c_str(), run, order_position,
+        static_cast<int>(least_square_init_duals), nb, n, 2 * nb, ne,
+        static_cast<int>(res.stats.success), res.stats.status.c_str(),
+        res.stats.iterations, res.stats.objective, res.stats.primal_feas,
+        res.stats.dual_feas, res.stats.complementarity, elapsed_ms);
+  };
+
+  bool all_requested_succeeded = true;
+  const auto run_native = [&](int run, int order_position) {
+    NativeIPMAdapter solver(opt);
+    const auto t0 = std::chrono::steady_clock::now();
+    const SolveResult res = solver.solve_nlp(nlp);
+    const double ms = std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - t0).count();
+    report("native", run, order_position, res, ms);
+    all_requested_succeeded = all_requested_succeeded && res.stats.success;
+  };
+  const auto run_ipopt = [&](int run, int order_position) {
+    IpoptAdapter solver;
+    const auto t0 = std::chrono::steady_clock::now();
+    const SolveResult res = solver.solve_nlp(nlp);
+    const double ms = std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - t0).count();
+    report("ipopt", run, order_position, res, ms);
+    all_requested_succeeded = all_requested_succeeded && res.stats.success;
+  };
+
+  for (int run = 1; run <= repetitions; ++run) {
+    if (mode == "native") {
+      run_native(run, 1);
+    } else if (mode == "ipopt") {
+      run_ipopt(run, 1);
+    } else if ((run % 2) == 1) {
+      run_native(run, 1);
+      run_ipopt(run, 2);
+    } else {
+      run_ipopt(run, 1);
+      run_native(run, 2);
+    }
+  }
+  return all_requested_succeeded ? 0 : 1;
 }

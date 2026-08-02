@@ -28,6 +28,7 @@ struct InertiaStatus {
   double delta_w_used{0.0};       ///< primal regularization applied on success
   double delta_c_used{0.0};       ///< dual regularization applied on success
   int factorization_attempts{0};  ///< count of (δ_W, δ_C) retries, diagnostic
+  bool direct_factor_inertia{false}; ///< inertia read from the LDLT factor
   bool reduced_space_certificate{false}; ///< inertia certified on null(Jg)
   int tangent_dimension{0};       ///< n - rank(Jg) used by the certificate
   double min_reduced_curvature{0.0}; ///< min eig of (Z'WZ, Z'Z)
@@ -46,7 +47,7 @@ struct InertiaSettings {
   double kappa_w_minus{1.0 / 3.0}; ///< δ_W_last ← κ_W⁻ · δ_W after a successful solve.
   double delta_c_stripe{1e-8};     ///< δ_C = delta_c_stripe · μ^{1/4} when Jg rank-deficient.
   double mu{1.0};                  ///< Current barrier parameter (only used for δ_C).
-  int max_tangent_dimension{128};  ///< Explicit null-space certificate size cap.
+  int max_tangent_dimension{32};   ///< Dense null-space certificate size cap.
   double reduced_curvature_tolerance{1e-10}; ///< Absolute projected-eigenvalue margin floor.
   double nullspace_residual_tolerance{1e-8}; ///< Relative acceptance tolerance for Jg*Z.
 };
@@ -199,12 +200,11 @@ void split_inequalities(const NLPModel& prob,
 ///
 /// For modest equality nullity, the implementation constructs `Jg Z = 0` from
 /// a cached sparse state/control partition and certifies
-/// `Z' (H + δ_W I) Z > 0`. The bordered-Hessian inertia identity then gives
-/// augmented inertia (n_free, m_eq, 0) without requiring H to be positive in
-/// constrained normal directions. Otherwise it uses the stronger sparse-LDLT
-/// full-space certificate. In both cases it factors the sparse augmented matrix
-/// directly and never forms the generally dense Schur complement
-/// `Jg (H+δ_W I)⁻¹ Jgᵀ`.
+/// `Z' (H + δ_W I) Z > 0`. When that dense certificate is too large or cannot
+/// be built, a MUMPS build reads the negative-pivot count from the augmented
+/// LDLT factor directly. Builds without an inertia-capable factor use the
+/// stronger sparse-LDLT full-space certificate as a final fallback. No path
+/// forms the generally dense Schur complement `Jg (H+δ_W I)⁻¹ Jgᵀ`.
 ///
 /// `delta_w_last` is an in/out parameter used to warm-start the regularization
 /// from the previous successful value, following the IPOPT schedule.

@@ -12,13 +12,6 @@ namespace {
 
 constexpr double kBackwardErrorMultiplier = 256.0;
 
-long double gamma_n(std::size_t operations) {
-  const long double product =
-      static_cast<long double>(operations) *
-      std::numeric_limits<long double>::epsilon();
-  return product < 0.5L ? product / (1.0L - product) : 1.0L;
-}
-
 }  // namespace
 
 std::vector<int> logical_columns(const StandardFormLP& sf) {
@@ -99,25 +92,8 @@ bool BasisFactor::update(int pivot_row, int entering_col,
     failure = "Forrest-Tomlin basis update rejected a non-invertible exchange";
     return false;
   }
-  for (Eigen::SparseMatrix<double>::InnerIterator it(*A_, leaving_col); it;
-       ++it) {
-    row_abs_sum_[static_cast<std::size_t>(it.row())] -= std::abs(it.value());
-  }
-  double entering_col_sum = 0.0;
-  for (Eigen::SparseMatrix<double>::InnerIterator it(*A_, entering_col); it;
-       ++it) {
-    const double magnitude = std::abs(it.value());
-    row_abs_sum_[static_cast<std::size_t>(it.row())] += magnitude;
-    entering_col_sum += magnitude;
-  }
+  update_norms_after_exchange(pivot_row, leaving_col, entering_col);
   basis_[static_cast<std::size_t>(pivot_row)] = entering_col;
-  col_abs_sum_[static_cast<std::size_t>(pivot_row)] = entering_col_sum;
-  norm_B_inf_ = row_abs_sum_.empty()
-                    ? 0.0
-                    : *std::max_element(row_abs_sum_.begin(), row_abs_sum_.end());
-  norm_Bt_inf_ = col_abs_sum_.empty()
-                     ? 0.0
-                     : *std::max_element(col_abs_sum_.begin(), col_abs_sum_.end());
   ++generation_;
   return true;
 }
@@ -130,181 +106,11 @@ bool BasisFactor::update_indexed(int pivot_row, int entering_col,
     failure = "Forrest-Tomlin basis update rejected the packed exchange";
     return false;
   }
+  const int leaving_col = basis_[static_cast<std::size_t>(pivot_row)];
+  update_norms_after_exchange(pivot_row, leaving_col, entering_col);
   basis_[static_cast<std::size_t>(pivot_row)] = entering_col;
   ++generation_;
   return true;
-}
-
-PivotEvidence BasisFactor::pivot_evidence(
-    int pivot_row, int entering_col, const Eigen::VectorXd& direction,
-    const Eigen::VectorXd& row_ep) const {
-  PivotEvidence evidence;
-  if (A_ == nullptr || pivot_row < 0 || pivot_row >= A_->rows() ||
-      entering_col < 0 || entering_col >= A_->cols() ||
-      direction.size() != A_->rows() || row_ep.size() != A_->rows()) {
-    return evidence;
-  }
-
-  std::vector<long double> column_residual(
-      static_cast<std::size_t>(A_->rows()), 0.0L);
-  for (Eigen::SparseMatrix<double>::InnerIterator it(*A_, entering_col); it;
-       ++it) {
-    column_residual[static_cast<std::size_t>(it.row())] =
-        static_cast<long double>(it.value());
-  }
-  for (int position = 0; position < static_cast<int>(basis_.size());
-       ++position) {
-    const long double value =
-        static_cast<long double>(direction[position]);
-    for (Eigen::SparseMatrix<double>::InnerIterator it(
-             *A_, basis_[static_cast<std::size_t>(position)]);
-         it; ++it) {
-      column_residual[static_cast<std::size_t>(it.row())] -=
-          static_cast<long double>(it.value()) * value;
-    }
-  }
-  for (long double residual : column_residual) {
-    evidence.column_residual_inf =
-        std::max(evidence.column_residual_inf, std::abs(residual));
-  }
-
-  long double row_pivot = 0.0L;
-  long double residual_identity_bound = 0.0L;
-  for (Eigen::SparseMatrix<double>::InnerIterator it(*A_, entering_col); it;
-       ++it) {
-    row_pivot += static_cast<long double>(row_ep[it.row()]) *
-                 static_cast<long double>(it.value());
-  }
-  for (int row = 0; row < A_->rows(); ++row) {
-    residual_identity_bound +=
-        std::abs(static_cast<long double>(row_ep[row]) *
-                 column_residual[static_cast<std::size_t>(row)]);
-  }
-  for (int position = 0; position < static_cast<int>(basis_.size());
-       ++position) {
-    long double transpose_residual = position == pivot_row ? 1.0L : 0.0L;
-    for (Eigen::SparseMatrix<double>::InnerIterator it(
-             *A_, basis_[static_cast<std::size_t>(position)]);
-         it; ++it) {
-      transpose_residual -=
-          static_cast<long double>(it.value()) *
-          static_cast<long double>(row_ep[it.row()]);
-    }
-    residual_identity_bound +=
-        std::abs(transpose_residual *
-                 static_cast<long double>(direction[position]));
-    evidence.row_residual_inf =
-        std::max(evidence.row_residual_inf, std::abs(transpose_residual));
-  }
-
-  const long double column_pivot =
-      static_cast<long double>(direction[pivot_row]);
-  const long double arithmetic_guard =
-      64.0L * std::numeric_limits<long double>::epsilon() *
-      std::max({1.0L, std::abs(row_pivot), std::abs(column_pivot),
-                residual_identity_bound});
-  evidence.row_pivot = row_pivot;
-  evidence.column_pivot = column_pivot;
-  evidence.discrepancy = row_pivot - column_pivot;
-  evidence.residual_envelope = residual_identity_bound;
-  evidence.arithmetic_guard = arithmetic_guard;
-  evidence.accepted =
-      std::abs(evidence.discrepancy) <=
-          evidence.residual_envelope + evidence.arithmetic_guard &&
-      column_pivot != 0.0L;
-  return evidence;
-}
-
-bool BasisFactor::row_solve_consistent(
-    int pivot_row, const Eigen::VectorXd& rhs,
-    const Eigen::VectorXd& solution, const Eigen::VectorXd& row_ep,
-    long double& discrepancy, long double& residual_envelope) const {
-  discrepancy = std::numeric_limits<long double>::infinity();
-  residual_envelope = 0.0L;
-  if (A_ == nullptr || pivot_row < 0 || pivot_row >= A_->rows() ||
-      rhs.size() != A_->rows() || solution.size() != A_->rows() ||
-      row_ep.size() != A_->rows() || !rhs.allFinite() ||
-      !solution.allFinite() || !row_ep.allFinite()) {
-    return false;
-  }
-
-  std::vector<long double> primal_residual(static_cast<std::size_t>(A_->rows()));
-  std::vector<long double> primal_absolute_sum(
-      static_cast<std::size_t>(A_->rows()));
-  std::vector<std::size_t> primal_terms(static_cast<std::size_t>(A_->rows()), 1);
-  for (int row = 0; row < A_->rows(); ++row) {
-    primal_residual[static_cast<std::size_t>(row)] =
-        static_cast<long double>(rhs[row]);
-    primal_absolute_sum[static_cast<std::size_t>(row)] =
-        std::abs(static_cast<long double>(rhs[row]));
-  }
-  for (int position = 0; position < static_cast<int>(basis_.size());
-       ++position) {
-    const long double value = static_cast<long double>(solution[position]);
-    for (Eigen::SparseMatrix<double>::InnerIterator it(
-             *A_, basis_[static_cast<std::size_t>(position)]);
-         it; ++it) {
-      primal_residual[static_cast<std::size_t>(it.row())] -=
-          static_cast<long double>(it.value()) * value;
-      primal_absolute_sum[static_cast<std::size_t>(it.row())] +=
-          std::abs(static_cast<long double>(it.value()) * value);
-      primal_terms[static_cast<std::size_t>(it.row())] += 2;
-    }
-  }
-
-  long double projected_rhs = 0.0L;
-  long double projected_absolute_sum = 0.0L;
-  long double primal_dot_absolute_sum = 0.0L;
-  for (int row = 0; row < A_->rows(); ++row) {
-    projected_rhs += static_cast<long double>(row_ep[row]) *
-                     static_cast<long double>(rhs[row]);
-    projected_absolute_sum +=
-        std::abs(static_cast<long double>(row_ep[row]) *
-                 static_cast<long double>(rhs[row]));
-    const long double residual_bound =
-        std::abs(primal_residual[static_cast<std::size_t>(row)]) +
-        gamma_n(primal_terms[static_cast<std::size_t>(row)]) *
-            primal_absolute_sum[static_cast<std::size_t>(row)];
-    residual_envelope +=
-        std::abs(static_cast<long double>(row_ep[row])) * residual_bound;
-    primal_dot_absolute_sum +=
-        std::abs(static_cast<long double>(row_ep[row]) *
-                 primal_residual[static_cast<std::size_t>(row)]);
-  }
-  long double adjoint_dot_absolute_sum = 0.0L;
-  for (int position = 0; position < static_cast<int>(basis_.size());
-       ++position) {
-    long double residual = position == pivot_row ? 1.0L : 0.0L;
-    long double absolute_sum = position == pivot_row ? 1.0L : 0.0L;
-    std::size_t terms = 1;
-    for (Eigen::SparseMatrix<double>::InnerIterator it(
-             *A_, basis_[static_cast<std::size_t>(position)]);
-         it; ++it) {
-      residual -= static_cast<long double>(it.value()) *
-                  static_cast<long double>(row_ep[it.row()]);
-      absolute_sum +=
-          std::abs(static_cast<long double>(it.value()) *
-                   static_cast<long double>(row_ep[it.row()]));
-      terms += 2;
-    }
-    const long double residual_bound =
-        std::abs(residual) + gamma_n(terms) * absolute_sum;
-    residual_envelope +=
-        std::abs(static_cast<long double>(solution[position])) * residual_bound;
-    adjoint_dot_absolute_sum +=
-        std::abs(residual * static_cast<long double>(solution[position]));
-  }
-
-  discrepancy = projected_rhs - static_cast<long double>(solution[pivot_row]);
-  residual_envelope +=
-      gamma_n(2 * static_cast<std::size_t>(A_->rows())) *
-      (projected_absolute_sum + primal_dot_absolute_sum +
-       adjoint_dot_absolute_sum);
-  residual_envelope +=
-      gamma_n(1) *
-      (std::abs(projected_rhs) +
-       std::abs(static_cast<long double>(solution[pivot_row])));
-  return std::abs(discrepancy) <= residual_envelope;
 }
 
 double BasisFactor::residual_norm(const Eigen::VectorXd& rhs,
@@ -328,7 +134,7 @@ double BasisFactor::residual_norm(const Eigen::VectorXd& rhs,
   if (transpose) {
     for (int pos = 0; pos < static_cast<int>(basis_.size()); ++pos) {
       double product = 0.0;
-      for (Eigen::SparseMatrix<double>::InnerIterator it(
+      for (StandardColumnMatrix::InnerIterator it(
                *A_, basis_[static_cast<std::size_t>(pos)]);
            it; ++it) {
         product += it.value() * solution[it.row()];
@@ -339,7 +145,7 @@ double BasisFactor::residual_norm(const Eigen::VectorXd& rhs,
     for (int pos = 0; pos < static_cast<int>(basis_.size()); ++pos) {
       const double value = solution[pos];
       if (value == 0.0) continue;
-      for (Eigen::SparseMatrix<double>::InnerIterator it(
+      for (StandardColumnMatrix::InnerIterator it(
                *A_, basis_[static_cast<std::size_t>(pos)]);
            it; ++it) {
         residual[it.row()] -= it.value() * value;
@@ -367,7 +173,7 @@ Eigen::VectorXd BasisFactor::residual_vector(
     for (int position = 0; position < static_cast<int>(basis_.size());
          ++position) {
       long double value = static_cast<long double>(rhs[position]);
-      for (Eigen::SparseMatrix<double>::InnerIterator it(
+      for (StandardColumnMatrix::InnerIterator it(
                *A_, basis_[static_cast<std::size_t>(position)]);
            it; ++it) {
         value -= static_cast<long double>(it.value()) *
@@ -384,7 +190,7 @@ Eigen::VectorXd BasisFactor::residual_vector(
     for (int position = 0; position < static_cast<int>(basis_.size());
          ++position) {
       const long double x = static_cast<long double>(solution[position]);
-      for (Eigen::SparseMatrix<double>::InnerIterator it(
+      for (StandardColumnMatrix::InnerIterator it(
                *A_, basis_[static_cast<std::size_t>(position)]);
            it; ++it) {
         values[static_cast<std::size_t>(it.row())] -=
@@ -404,7 +210,7 @@ void BasisFactor::rebuild_norms() {
   col_abs_sum_.assign(basis_.size(), 0.0);
   for (int pos = 0; pos < static_cast<int>(basis_.size()); ++pos) {
     double col_sum = 0.0;
-    for (Eigen::SparseMatrix<double>::InnerIterator it(
+    for (StandardColumnMatrix::InnerIterator it(
              *A_, basis_[static_cast<std::size_t>(pos)]);
          it; ++it) {
       const double magnitude = std::abs(it.value());
@@ -419,6 +225,35 @@ void BasisFactor::rebuild_norms() {
   norm_Bt_inf_ = col_abs_sum_.empty()
                      ? 0.0
                      : *std::max_element(col_abs_sum_.begin(), col_abs_sum_.end());
+}
+
+void BasisFactor::update_norms_after_exchange(int pivot_row, int leaving_col,
+                                              int entering_col) {
+  if (A_ == nullptr || pivot_row < 0 ||
+      pivot_row >= static_cast<int>(col_abs_sum_.size()) ||
+      row_abs_sum_.size() != static_cast<std::size_t>(A_->rows())) {
+    return;
+  }
+  for (StandardColumnMatrix::InnerIterator it(*A_, leaving_col); it;
+       ++it) {
+    double& row_sum = row_abs_sum_[static_cast<std::size_t>(it.row())];
+    row_sum = std::max(0.0, row_sum - std::abs(it.value()));
+  }
+  double entering_col_sum = 0.0;
+  for (StandardColumnMatrix::InnerIterator it(*A_, entering_col); it;
+       ++it) {
+    const double magnitude = std::abs(it.value());
+    double& row_sum = row_abs_sum_[static_cast<std::size_t>(it.row())];
+    row_sum += magnitude;
+    norm_B_inf_ = std::max(norm_B_inf_, row_sum);
+    entering_col_sum += magnitude;
+  }
+  col_abs_sum_[static_cast<std::size_t>(pivot_row)] = entering_col_sum;
+  norm_Bt_inf_ = std::max(norm_Bt_inf_, entering_col_sum);
+  // Both norms deliberately remain conservative upper bounds until INVERT.
+  // Recomputing their exact maxima would add two O(m) scans to every pivot;
+  // retaining an old larger maximum only loosens the backward-error limit and
+  // can never recreate the stale-underestimate bug.
 }
 
 SolveEvidence BasisFactor::solve_checked(const Eigen::VectorXd& rhs,
@@ -620,11 +455,6 @@ IndexedSolveEvidence BasisFactor::indexed_btran(const IndexedVector& rhs,
   return evidence;
 }
 
-SolveEvidence BasisFactor::refine_ftran(
-    const Eigen::VectorXd& rhs, const Eigen::VectorXd& solution) const {
-  return refine_checked(rhs, solution, false);
-}
-
 EdgeWeightEvidence BasisFactor::compute_exact_edge_weights() const {
   EdgeWeightEvidence batch;
   if (A_ == nullptr || !rank_factor_.valid || A_->rows() <= 0) return batch;
@@ -657,28 +487,79 @@ EdgeWeightEvidence BasisFactor::compute_exact_edge_weights() const {
 }
 
 bool BasisFactor::basis_inverse_row(int row, Eigen::VectorXd& out) const {
-  if (A_ == nullptr || row < 0 || row >= A_->rows()) return false;
-  Eigen::VectorXd unit = Eigen::VectorXd::Zero(A_->rows());
-  unit[row] = 1.0;
-  out = btran(unit);
-  return out.size() == A_->rows();
+  std::vector<std::pair<int, double>> sparse;
+  if (!basis_inverse_row_sparse_entries(row, sparse) || A_ == nullptr) {
+    return false;
+  }
+  out = Eigen::VectorXd::Zero(A_->rows());
+  for (const auto& [index, value] : sparse) out[index] = value;
+  return true;
 }
 
 bool BasisFactor::basis_inverse_row_sparse_entries(
     int row, std::vector<std::pair<int, double>>& out) const {
-  Eigen::VectorXd dense;
-  if (!basis_inverse_row(row, dense)) return false;
   out.clear();
-  for (int i = 0; i < dense.size(); ++i) {
-    if (dense[i] != 0.0) out.emplace_back(i, dense[i]);
+  if (A_ == nullptr || row < 0 || row >= A_->rows() ||
+      static_cast<int>(basis_.size()) != A_->rows()) {
+    return false;
+  }
+  IndexedVector unit;
+  unit.clear(A_->rows());
+  unit.index.push_back(row);
+  unit.value.push_back(1.0);
+  const IndexedSolveEvidence solve = indexed_btran(unit);
+  if (!solve.accepted || !solve.solution.finite()) return false;
+
+  double residual = 0.0;
+  for (int position = 0; position < static_cast<int>(basis_.size());
+       ++position) {
+    double product = 0.0;
+    for (StandardColumnMatrix::InnerIterator it(
+             *A_, basis_[static_cast<std::size_t>(position)]);
+         it; ++it) {
+      product += it.value() * solve.solution.at(it.row());
+    }
+    residual = std::max(
+        residual, std::abs((position == row ? 1.0 : 0.0) - product));
+  }
+  double solution_norm = 0.0;
+  for (double value : solve.solution.value) {
+    solution_norm = std::max(solution_norm, std::abs(value));
+  }
+  const double limit =
+      kBackwardErrorMultiplier * std::numeric_limits<double>::epsilon() *
+      std::max(1.0, norm_Bt_inf_ * solution_norm + 1.0);
+  if (!std::isfinite(residual) || residual > limit) return false;
+
+  out.clear();
+  out.reserve(solve.solution.index.size());
+  for (std::size_t k = 0; k < solve.solution.index.size(); ++k) {
+    out.emplace_back(solve.solution.index[k], solve.solution.value[k]);
   }
   return true;
 }
 
 bool BasisFactor::tableau_row(int row, Eigen::RowVectorXd& out) const {
-  Eigen::VectorXd row_ep;
-  if (!basis_inverse_row(row, row_ep) || A_ == nullptr) return false;
-  out = row_ep.transpose() * *A_;
+  std::vector<std::pair<int, double>> sparse_row_ep;
+  if (!basis_inverse_row_sparse_entries(row, sparse_row_ep) || A_ == nullptr) {
+    return false;
+  }
+  IndexedVector row_ep;
+  row_ep.clear(A_->rows());
+  row_ep.index.reserve(sparse_row_ep.size());
+  row_ep.value.reserve(sparse_row_ep.size());
+  for (const auto& [index, value] : sparse_row_ep) {
+    row_ep.index.push_back(index);
+    row_ep.value.push_back(value);
+  }
+  out = Eigen::RowVectorXd::Zero(A_->cols());
+  for (int col = 0; col < A_->cols(); ++col) {
+    double value = 0.0;
+    for (StandardColumnMatrix::InnerIterator it(*A_, col); it; ++it) {
+      value += it.value() * row_ep.at(it.row());
+    }
+    out[col] = value;
+  }
   return out.allFinite();
 }
 
@@ -686,10 +567,13 @@ SparseFactorTelemetry BasisFactor::factor_telemetry() const {
   SparseFactorTelemetry telemetry;
   telemetry.ft_valid = false;
   telemetry.ft_updates = rank_factor_.n_updates;
+  telemetry.matrix_copies = rank_factor_.matrix_copy_count();
+  telemetry.dense_solves = rank_factor_.dense_solve_count();
+  telemetry.indexed_solves = rank_factor_.indexed_solve_count();
   return telemetry;
 }
 
-void BasisFactor::rebind_A(const Eigen::SparseMatrix<double>& A) {
+void BasisFactor::rebind_A(const StandardColumnMatrix& A) {
   A_ = &A;
   // Only treat the factor as usable if the stored basis is dimensionally
   // compatible with the newly bound matrix.  rebuild() enforces the same
@@ -711,7 +595,7 @@ void BasisFactor::rebind_A(const Eigen::SparseMatrix<double>& A) {
   rebuild_norms();
 }
 
-bool BasisFactor::bound_to_A(const Eigen::SparseMatrix<double>& A) const {
+bool BasisFactor::bound_to_A(const StandardColumnMatrix& A) const {
   return A_ == &A;
 }
 

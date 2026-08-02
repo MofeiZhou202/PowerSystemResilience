@@ -13,6 +13,7 @@ namespace mipsolvers::engine::native_dual {
 enum class Status {
   Optimal,
   PrimalInfeasible,
+  Unbounded,
   DualInfeasibleStart,
   IterationLimit,
   TimeLimit,
@@ -35,6 +36,9 @@ struct Statistics {
   int pivot_identity_refinements{0};
   int cost_shifts{0};
   int dual_start_cost_shifts{0};
+  int dual_start_required_cost_shift_lower_bound{0};
+  int dual_start_shift_threshold{0};
+  int dual_start_adaptive_rejections{0};
   int cleanup_passes{0};
   int dual_phase_one_iterations{0};
   int dual_phase_two_iterations{0};
@@ -110,6 +114,8 @@ struct Result {
   double farkas_margin{0.0};
   double farkas_error_bound{0.0};
   bool has_farkas_certificate{false};
+  Eigen::VectorXd primal_ray;
+  bool has_unbounded_certificate{false};
   double max_objective{0.0};
   // Set on TimeLimit / IterationLimit results when the interrupted state was
   // re-certified against the ORIGINAL cost (stabilization deltas removed,

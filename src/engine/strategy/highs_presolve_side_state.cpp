@@ -1030,7 +1030,7 @@ HiGHSRootLpStateStats highs_standard_form_lp_state_stats(
   value.reserve(index.capacity());
   for (int j = 0; j < nstd; ++j) {
     start[static_cast<std::size_t>(j)] = static_cast<HighsInt>(index.size());
-    for (Eigen::SparseMatrix<double>::InnerIterator it(sf.A, j); it; ++it) {
+    for (StandardColumnMatrix::InnerIterator it(sf.A, j); it; ++it) {
       if (it.value() == 0.0) continue;
       index.push_back(static_cast<HighsInt>(it.row()));
       value.push_back(it.value());
@@ -1374,35 +1374,7 @@ bool highs_presolve_recover_primal(const LPModel& lp,
   Eigen::VectorXd x = highs_postsolve_primal(ps, x_reduced);
   if (x.size() != static_cast<int>(lp.vars.size())) return false;
 
-  // Original-space feasibility audit (sentinel-aware), mirroring the native
-  // simplex publication audit: reject unless
-  //   max(row viol, bound viol) <= audit_tol * max(1, |b|_inf, |beq|_inf).
-  constexpr double kSideSentinel = 1e19;
-  double viol = 0.0;
-  double scale = 1.0;
-  const Eigen::VectorXd ax = lp.A * x;
-  for (int i = 0; i < ax.size(); ++i) {
-    if (std::abs(lp.b[i]) < kSideSentinel) {
-      viol = std::max(viol, ax[i] - lp.b[i]);
-      scale = std::max(scale, std::abs(lp.b[i]));
-    }
-    const double lhs = lp_row_lhs_or_neg_inf(lp, i);
-    if (std::isfinite(lhs) && std::abs(lhs) < kSideSentinel) {
-      viol = std::max(viol, lhs - ax[i]);
-      scale = std::max(scale, std::abs(lhs));
-    }
-  }
-  const Eigen::VectorXd aeqx = lp.Aeq * x;
-  for (int i = 0; i < aeqx.size(); ++i) {
-    viol = std::max(viol, std::abs(aeqx[i] - lp.beq[i]));
-    scale = std::max(scale, std::abs(lp.beq[i]));
-  }
-  for (int j = 0; j < x.size(); ++j) {
-    const auto& v = lp.vars[static_cast<std::size_t>(j)];
-    if (std::isfinite(v.lb)) viol = std::max(viol, v.lb - x[j]);
-    if (std::isfinite(v.ub)) viol = std::max(viol, x[j] - v.ub);
-  }
-  if (!(viol <= audit_tol * scale)) return false;
+  if (!lp_solution_residual_acceptable(lp, x, audit_tol)) return false;
 
   objective_out = lp.c.dot(x);
   x_orig_out = std::move(x);

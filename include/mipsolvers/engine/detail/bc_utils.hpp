@@ -15,8 +15,10 @@
 #include <optional>
 #include <queue>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -221,6 +223,20 @@ DualProofResolutionStatus resolve_dual_proof_conflict_from_local_trail(
 
 /// Lightweight sequential search queue with separate priority and lower-bound views.
 class NodeQueue {
+ private:
+    class DomainMaterializationGuard {
+     public:
+        explicit DomainMaterializationGuard(NodeQueue& owner);
+        ~DomainMaterializationGuard() noexcept;
+
+        DomainMaterializationGuard(const DomainMaterializationGuard&) = delete;
+        DomainMaterializationGuard& operator=(
+            const DomainMaterializationGuard&) = delete;
+
+     private:
+        NodeQueue& owner_;
+    };
+
  public:
     explicit NodeQueue(NodeSelection mode) : mode_(mode) {}
 
@@ -228,6 +244,11 @@ class NodeQueue {
                                     const Eigen::VectorXd& root_lb,
                                     const Eigen::VectorXd& root_ub,
                                     double tol = 1e-9) {
+        DomainMaterializationGuard domain_guard(*this);
+        root_domain_lb_ = root_lb;
+        root_domain_ub_ = root_ub;
+        domain_storage_enabled_ =
+            root_lb.size() > 0 && root_lb.size() == root_ub.size();
         domain_signature_cols_.clear();
         domain_signature_cols_.reserve(branchable_cols.size());
         for (std::size_t j = 0; j < branchable_cols.size(); ++j) {
@@ -235,36 +256,62 @@ class NodeQueue {
                 domain_signature_cols_.push_back(static_cast<int>(j));
             }
         }
-        domain_signature_root_lb_ = root_lb;
-        domain_signature_root_ub_ = root_ub;
-        domain_signature_tol_ = std::max(1e-12, tol);
+        domain_signature_size_ = root_lb.size();
+        (void)tol;
         domain_signature_enabled_ =
             !domain_signature_cols_.empty() &&
             root_lb.size() == root_ub.size();
-        signature_to_id_.clear();
-        id_to_signature_.clear();
+        signature_hash_to_ids_.clear();
+        id_to_signature_hash_.clear();
         if (!domain_signature_enabled_) return;
         std::vector<std::int64_t> doomed;
+        std::unordered_set<std::int64_t> doomed_set;
+        std::vector<std::int64_t> ids;
+        ids.reserve(nodes_.size());
         for (const auto& [id, node] : nodes_) {
-            auto sig = make_domain_signature(node);
-            if (!sig.has_value()) continue;
-            const auto existing = signature_to_id_.find(*sig);
-            if (existing == signature_to_id_.end()) {
-                signature_to_id_.emplace(*sig, id);
-                id_to_signature_.emplace(id, *sig);
+            (void)node;
+            ids.push_back(id);
+        }
+        std::sort(ids.begin(), ids.end());
+        for (std::int64_t id : ids) {
+            if (doomed_set.count(id) != 0) continue;
+            const auto node_it = nodes_.find(id);
+            if (node_it == nodes_.end()) continue;
+            const auto signature_hash =
+                make_domain_signature_hash(node_it->second);
+            if (!signature_hash.has_value()) continue;
+            auto& bucket = signature_hash_to_ids_[*signature_hash];
+            auto existing = std::find_if(
+                bucket.begin(), bucket.end(), [&](std::int64_t candidate_id) {
+                    const auto candidate = nodes_.find(candidate_id);
+                    return candidate != nodes_.end() &&
+                           same_domain(candidate->second, node_it->second);
+                });
+            if (existing == bucket.end()) {
+                bucket.push_back(id);
+                id_to_signature_hash_[id] = *signature_hash;
                 continue;
             }
-            const auto keep_it = nodes_.find(existing->second);
+            const auto keep_it = nodes_.find(*existing);
             if (keep_it != nodes_.end() &&
-                keep_it->second.bound <= node.bound + signature_bound_tol(node.bound)) {
+                keep_it->second.bound <=
+                    node_it->second.bound +
+                        signature_bound_tol(node_it->second.bound)) {
                 doomed.push_back(id);
+                doomed_set.insert(id);
             } else {
-                doomed.push_back(existing->second);
-                signature_to_id_[*sig] = id;
-                id_to_signature_[id] = *sig;
+                doomed.push_back(*existing);
+                doomed_set.insert(*existing);
+                id_to_signature_hash_.erase(*existing);
+                *existing = id;
+                id_to_signature_hash_[id] = *signature_hash;
             }
         }
         for (std::int64_t id : doomed) erase_id(id);
+    }
+
+    const NodeQueueDomainStorageStats& domain_storage_stats() const {
+        return domain_storage_stats_;
     }
 
     void push(Node node, bool has_incumbent) {
@@ -352,48 +399,9 @@ class NodeQueue {
 
         if (have_dfs_bound &&
             (!have_priority_bound || dfs_bounds_.begin()->first <= bounds_.begin()->first)) {
-            auto it = dfs_bounds_.begin();
-            const auto [bound, id] = *it;
-            dfs_bounds_.erase(it);
-
-            auto node_it = nodes_.find(id);
-            if (node_it == nodes_.end()) {
-                return false;
-            }
-
-            auto prio_it = priority_.find({node_selection_priority(node_it->second), id});
-            if (prio_it != priority_.end()) {
-                priority_.erase(prio_it);
-            }
-            auto bound_it = bounds_.find({bound, id});
-            if (bound_it != bounds_.end()) {
-                bounds_.erase(bound_it);
-            }
-            dfs_.erase(std::remove(dfs_.begin(), dfs_.end(), id), dfs_.end());
-
-            out = std::move(node_it->second);
-            nodes_.erase(node_it);
-            return true;
+            return take_id(dfs_bounds_.begin()->second, out);
         }
-
-        auto it = bounds_.begin();
-        const auto [bound, id] = *it;
-        bounds_.erase(it);
-
-        auto node_it = nodes_.find(id);
-        if (node_it == nodes_.end()) {
-            return false;
-        }
-
-        auto prio_it = priority_.find({node_selection_priority(node_it->second), id});
-        if (prio_it != priority_.end()) {
-            priority_.erase(prio_it);
-        }
-
-        out = std::move(node_it->second);
-        nodes_.erase(node_it);
-        (void)bound;
-        return true;
+        return take_id(bounds_.begin()->second, out);
     }
 
     double lower_bound() const {
@@ -460,7 +468,12 @@ class NodeQueue {
         if (domain_bound_lift_max_out != nullptr) {
             *domain_bound_lift_max_out = 0.0;
         }
-        if (nodes_.empty() || root_lb.size() != root_ub.size()) return 0;
+        if (root_lb.size() != root_ub.size()) return 0;
+        DomainMaterializationGuard domain_guard(*this);
+        root_domain_lb_ = root_lb;
+        root_domain_ub_ = root_ub;
+        domain_storage_enabled_ = root_lb.size() > 0;
+        if (nodes_.empty()) return 0;
 
         std::vector<std::int64_t> ids;
         ids.reserve(nodes_.size());
@@ -470,15 +483,11 @@ class NodeQueue {
         }
 
         if (domain_signature_enabled_) {
-            domain_signature_root_lb_ = root_lb;
-            domain_signature_root_ub_ = root_ub;
-            signature_to_id_.clear();
-            id_to_signature_.clear();
+            signature_hash_to_ids_.clear();
+            id_to_signature_hash_.clear();
         }
 
-        const double tol = domain_signature_enabled_
-                               ? std::max(1e-12, domain_signature_tol_)
-                               : 1e-9;
+        constexpr double tol = 1e-9;
         int pruned = 0;
         for (std::int64_t id : ids) {
             auto node_it = nodes_.find(id);
@@ -586,6 +595,28 @@ class NodeQueue {
         return static_cast<int>(dfs_.size());
     }
 
+    /// Discard the complete open frontier while retaining the configured root
+    /// domain and cumulative storage telemetry. This is the queue transaction
+    /// used by a proof-preserving root restart.
+    int discard_all() noexcept {
+        const int discarded = static_cast<int>(nodes_.size());
+        for (const auto& [id, node] : nodes_) {
+            (void)id;
+            release_compact_storage(node);
+        }
+        nodes_.clear();
+        priority_.clear();
+        bounds_.clear();
+        dfs_.clear();
+        dfs_bounds_.clear();
+        signature_hash_to_ids_.clear();
+        id_to_signature_hash_.clear();
+        hybrid_post_incumbent_active_ = false;
+        hybrid_queue_leaves_ = 0;
+        hybrid_last_lower_bound_leave_ = 0;
+        return discarded;
+    }
+
         int count_lp_refresh_needed_near_lower_bound(
             double bound_band = kInf,
             int max_scan = 4096) const {
@@ -662,6 +693,7 @@ class NodeQueue {
         }
 
 		    int prune_conflicts(const ConflictPool& conflict_pool) {
+		        DomainMaterializationGuard domain_guard(*this);
 		        std::vector<std::int64_t> doomed;
 		        doomed.reserve(nodes_.size());
 		        for (const auto& [id, node] : nodes_) {
@@ -738,14 +770,15 @@ class NodeQueue {
 	            int unsatisfied = 0;
 	            for (const auto& literal : literals) {
 	                if (literal.var_idx < 0 ||
-	                    literal.var_idx >= static_cast<int>(node.lb.size()) ||
-	                    literal.var_idx >= static_cast<int>(node.ub.size())) {
+	                    literal.var_idx >= queued_domain_size(node)) {
 	                    unsatisfied = 2;
 	                    break;
 	                }
 	                const bool active = literal.is_lb
-	                    ? (node.lb[literal.var_idx] >= literal.value - tol)
-	                    : (node.ub[literal.var_idx] <= literal.value + tol);
+	                    ? (queued_domain_lb(node, literal.var_idx) >=
+	                       literal.value - tol)
+	                    : (queued_domain_ub(node, literal.var_idx) <=
+	                       literal.value + tol);
 	                if (!active && ++unsatisfied > 1) break;
 	            }
 	            if (require_unit_or_conflict ? (unsatisfied <= 1)
@@ -778,14 +811,15 @@ class NodeQueue {
 	            int unsatisfied = 0;
 	            for (const auto& literal : literals) {
 	                if (literal.var_idx < 0 ||
-	                    literal.var_idx >= static_cast<int>(node.lb.size()) ||
-	                    literal.var_idx >= static_cast<int>(node.ub.size())) {
+	                    literal.var_idx >= queued_domain_size(node)) {
 	                    unsatisfied = 2;
 	                    break;
 	                }
 	                const bool active = literal.is_lb
-	                    ? (node.lb[literal.var_idx] >= literal.value - tol)
-	                    : (node.ub[literal.var_idx] <= literal.value + tol);
+	                    ? (queued_domain_lb(node, literal.var_idx) >=
+	                       literal.value - tol)
+	                    : (queued_domain_ub(node, literal.var_idx) <=
+	                       literal.value + tol);
 	                if (!active && ++unsatisfied > 1) break;
 	            }
 	            if (require_unit_or_conflict ? (unsatisfied <= 1)
@@ -847,6 +881,7 @@ class NodeQueue {
 
             const int n = static_cast<int>(vars.size());
             if (n <= 0) return 0;
+            DomainMaterializationGuard domain_guard(*this);
             const double tol = 1e-9;
             auto certificate_audit_ok =
                 [&](const BoundLiftingCertificate& cert) -> bool {
@@ -1317,9 +1352,10 @@ class NodeQueue {
             if (domain_bound_lift_max_out != nullptr) {
                 *domain_bound_lift_max_out = 0.0;
             }
-	        if (nodes_.empty()) return 0;
+		        if (nodes_.empty()) return 0;
+		        DomainMaterializationGuard domain_guard(*this);
 
-	        struct Update {
+		        struct Update {
 	            std::int64_t id{-1};
 	            Eigen::VectorXd lb;
 	            Eigen::VectorXd ub;
@@ -1481,9 +1517,10 @@ class NodeQueue {
             if (domain_bound_lift_max_out != nullptr) {
                 *domain_bound_lift_max_out = 0.0;
             }
-	        if (nodes_.empty()) return 0;
+		        if (nodes_.empty()) return 0;
+		        DomainMaterializationGuard domain_guard(*this);
 
-	        struct Update {
+		        struct Update {
 	            std::int64_t id{-1};
 	            Eigen::VectorXd lb;
 	            Eigen::VectorXd ub;
@@ -1716,9 +1753,10 @@ class NodeQueue {
 	        if (domain_bound_lift_max_out != nullptr) {
 	            *domain_bound_lift_max_out = 0.0;
 	        }
-	        if (nodes_.empty()) return 0;
+		        if (nodes_.empty()) return 0;
+		        DomainMaterializationGuard domain_guard(*this);
 
-	        std::vector<std::int64_t> candidate_ids;
+		        std::vector<std::int64_t> candidate_ids;
 	        if (std::isfinite(bound_band) || max_nodes > 0) {
 	            std::set<std::int64_t> seen_ids;
 	            const double queue_lb = lower_bound();
@@ -1849,16 +1887,131 @@ class NodeQueue {
     std::vector<std::int64_t> dfs_;
     std::multiset<QueueKey> dfs_bounds_;
     bool domain_signature_enabled_{false};
-    double domain_signature_tol_{1e-9};
     std::vector<int> domain_signature_cols_;
-    Eigen::VectorXd domain_signature_root_lb_;
-    Eigen::VectorXd domain_signature_root_ub_;
-    std::unordered_map<std::string, std::int64_t> signature_to_id_;
-    std::unordered_map<std::int64_t, std::string> id_to_signature_;
+    Eigen::Index domain_signature_size_{0};
+    Eigen::VectorXd root_domain_lb_;
+    Eigen::VectorXd root_domain_ub_;
+    bool domain_storage_enabled_{false};
+    NodeQueueDomainStorageStats domain_storage_stats_;
+    std::unordered_map<std::size_t, std::vector<std::int64_t>>
+        signature_hash_to_ids_;
+    std::unordered_map<std::int64_t, std::size_t> id_to_signature_hash_;
     bool hybrid_post_incumbent_active_{false};
     std::int64_t hybrid_queue_leaves_{0};
     std::int64_t hybrid_last_lower_bound_leave_{0};
     static constexpr std::int64_t kHybridBestBoundPeriod = 10;
+
+    Eigen::Index queued_domain_size(const Node& node) const {
+        if (node_domain_is_compact(node)) return node.compact_domain_size;
+        return node.lb.size() == node.ub.size() ? node.lb.size() : 0;
+    }
+
+    double queued_domain_lb(const Node& node, Eigen::Index col) const {
+        if (!node_domain_is_compact(node)) return node.lb[col];
+        const auto it = std::lower_bound(
+            node.compact_domain.begin(), node.compact_domain.end(), col,
+            [](const SparseNodeBound& bound, Eigen::Index index) {
+                return bound.var_idx < index;
+            });
+        return it != node.compact_domain.end() && it->var_idx == col
+                   ? it->lb
+                   : root_domain_lb_[col];
+    }
+
+    double queued_domain_ub(const Node& node, Eigen::Index col) const {
+        if (!node_domain_is_compact(node)) return node.ub[col];
+        const auto it = std::lower_bound(
+            node.compact_domain.begin(), node.compact_domain.end(), col,
+            [](const SparseNodeBound& bound, Eigen::Index index) {
+                return bound.var_idx < index;
+            });
+        return it != node.compact_domain.end() && it->var_idx == col
+                   ? it->ub
+                   : root_domain_ub_[col];
+    }
+
+    bool compact_stored_node(Node& node) noexcept {
+        if (!domain_storage_enabled_ || node_domain_is_compact(node)) return true;
+        const std::uint64_t released =
+            static_cast<std::uint64_t>(node.lb.size() + node.ub.size());
+        std::size_t entries = 0;
+        if (!compact_node_domain(node, root_domain_lb_, root_domain_ub_,
+                                 &entries)) {
+            ++domain_storage_stats_.compaction_failures;
+            return false;
+        }
+        ++domain_storage_stats_.compactions;
+        domain_storage_stats_.dense_bound_values_released += released;
+        domain_storage_stats_.compact_entries_created += entries;
+        ++domain_storage_stats_.current_compact_nodes;
+        domain_storage_stats_.current_compact_entries += entries;
+        domain_storage_stats_.peak_compact_nodes = std::max(
+            domain_storage_stats_.peak_compact_nodes,
+            domain_storage_stats_.current_compact_nodes);
+        domain_storage_stats_.peak_compact_entries = std::max(
+            domain_storage_stats_.peak_compact_entries,
+            domain_storage_stats_.current_compact_entries);
+        return true;
+    }
+
+    void release_compact_storage(const Node& node) noexcept {
+        if (!node_domain_is_compact(node)) return;
+        const auto entries =
+            static_cast<std::uint64_t>(node.compact_domain.size());
+        if (domain_storage_stats_.current_compact_nodes > 0) {
+            --domain_storage_stats_.current_compact_nodes;
+        }
+        domain_storage_stats_.current_compact_entries =
+            entries <= domain_storage_stats_.current_compact_entries
+                ? domain_storage_stats_.current_compact_entries - entries
+                : 0;
+    }
+
+    void materialize_stored_node(Node& node) {
+        if (!node_domain_is_compact(node)) return;
+        const auto entries =
+            static_cast<std::uint64_t>(node.compact_domain.size());
+        if (!materialize_node_domain(node, root_domain_lb_, root_domain_ub_)) {
+            ++domain_storage_stats_.materialization_failures;
+            throw std::logic_error(
+                "queued node domain cannot be materialized from the root domain");
+        }
+        ++domain_storage_stats_.materializations;
+        if (domain_storage_stats_.current_compact_nodes > 0) {
+            --domain_storage_stats_.current_compact_nodes;
+        }
+        domain_storage_stats_.current_compact_entries =
+            entries <= domain_storage_stats_.current_compact_entries
+                ? domain_storage_stats_.current_compact_entries - entries
+                : 0;
+    }
+
+    void materialize_all_domains() {
+        for (auto& [id, node] : nodes_) {
+            (void)id;
+            materialize_stored_node(node);
+        }
+    }
+
+    void compact_all_domains_noexcept() noexcept {
+        if (!domain_storage_enabled_) return;
+        for (auto& [id, node] : nodes_) {
+            (void)id;
+            if (!compact_stored_node(node)) {
+                domain_storage_enabled_ = false;
+                for (auto& [restore_id, restore_node] : nodes_) {
+                    (void)restore_id;
+                    if (!node_domain_is_compact(restore_node)) continue;
+                    try {
+                        materialize_stored_node(restore_node);
+                    } catch (...) {
+                        return;
+                    }
+                }
+                return;
+            }
+        }
+    }
 
     QueueIndexMembership detach_queue_indices(std::int64_t id,
                                                const Node& node) {
@@ -1904,6 +2057,7 @@ class NodeQueue {
         if (node_it == nodes_.end()) return;
         dfs_.erase(std::remove(dfs_.begin(), dfs_.end(), id), dfs_.end());
         forget_domain_signature(id);
+        release_compact_storage(node_it->second);
         nodes_.erase(node_it);
     }
 
@@ -1911,84 +2065,59 @@ class NodeQueue {
         return std::max(1e-9, 1e-12 * std::max(1.0, std::abs(bound)));
     }
 
-    static std::int64_t quantize_lower_bound(double value, double tol) {
-        if (!std::isfinite(value)) return std::numeric_limits<std::int64_t>::min();
-        const long double q = std::ceil(static_cast<long double>(value) -
-                                        static_cast<long double>(tol));
-        const long double lo = static_cast<long double>(
-            std::numeric_limits<std::int64_t>::min() + 1);
-        const long double hi = static_cast<long double>(
-            std::numeric_limits<std::int64_t>::max() - 1);
-        return static_cast<std::int64_t>(std::max(lo, std::min(hi, q)));
-    }
-
-    static std::int64_t quantize_upper_bound(double value, double tol) {
-        if (!std::isfinite(value)) return std::numeric_limits<std::int64_t>::max();
-        const long double q = std::floor(static_cast<long double>(value) +
-                                         static_cast<long double>(tol));
-        const long double lo = static_cast<long double>(
-            std::numeric_limits<std::int64_t>::min() + 1);
-        const long double hi = static_cast<long double>(
-            std::numeric_limits<std::int64_t>::max() - 1);
-        return static_cast<std::int64_t>(std::max(lo, std::min(hi, q)));
-    }
-
-    template <typename T>
-    static void append_signature_bytes(std::string& sig, const T& value) {
-        sig.append(reinterpret_cast<const char*>(&value), sizeof(T));
-    }
-
-    std::optional<std::string> make_domain_signature(const Node& node) const {
+    std::optional<std::size_t> make_domain_signature_hash(
+        const Node& node) const {
         if (!domain_signature_enabled_ ||
-            node.lb.size() != node.ub.size() ||
-            node.lb.size() != domain_signature_root_lb_.size() ||
-            node.ub.size() != domain_signature_root_ub_.size()) {
+            queued_domain_size(node) != domain_signature_size_) {
             return std::nullopt;
         }
-        std::string sig;
-        sig.reserve(domain_signature_cols_.size() * 18);
-        constexpr char lower_tag = 'L';
-        constexpr char upper_tag = 'U';
+        std::size_t hash = 0xcbf29ce484222325ULL;
+        auto combine = [&](std::size_t value) {
+            hash ^= value + 0x9e3779b97f4a7c15ULL + (hash << 6) +
+                    (hash >> 2);
+        };
         for (int j : domain_signature_cols_) {
-            if (j < 0 || j >= node.lb.size()) continue;
-            const double root_lb = domain_signature_root_lb_[j];
-            const double root_ub = domain_signature_root_ub_[j];
-            const double lb = node.lb[j];
-            const double ub = node.ub[j];
-            const bool lower_active =
-                std::isfinite(lb) &&
-                (!std::isfinite(root_lb) || lb > root_lb + domain_signature_tol_);
-            if (lower_active) {
-                const std::int32_t col = static_cast<std::int32_t>(j);
-                const std::int64_t val =
-                    quantize_lower_bound(lb, domain_signature_tol_);
-                append_signature_bytes(sig, col);
-                sig.push_back(lower_tag);
-                append_signature_bytes(sig, val);
-            }
-            const bool upper_active =
-                std::isfinite(ub) &&
-                (!std::isfinite(root_ub) || ub < root_ub - domain_signature_tol_);
-            if (upper_active) {
-                const std::int32_t col = static_cast<std::int32_t>(j);
-                const std::int64_t val =
-                    quantize_upper_bound(ub, domain_signature_tol_);
-                append_signature_bytes(sig, col);
-                sig.push_back(upper_tag);
-                append_signature_bytes(sig, val);
-            }
+            if (j < 0 || j >= queued_domain_size(node)) continue;
+            const double raw_lb = queued_domain_lb(node, j);
+            const double raw_ub = queued_domain_ub(node, j);
+            const double lb = raw_lb == 0.0 ? 0.0 : raw_lb;
+            const double ub = raw_ub == 0.0 ? 0.0 : raw_ub;
+            combine(std::hash<int>{}(j));
+            combine(std::hash<double>{}(lb));
+            combine(std::hash<double>{}(ub));
         }
-        return sig;
+        return hash;
+    }
+
+    bool same_domain(const Node& lhs, const Node& rhs) const {
+        if (queued_domain_size(lhs) != queued_domain_size(rhs)) {
+            return false;
+        }
+        for (int j : domain_signature_cols_) {
+            if (j < 0 || j >= queued_domain_size(lhs)) continue;
+            const double raw_lhs_lb = queued_domain_lb(lhs, j);
+            const double raw_rhs_lb = queued_domain_lb(rhs, j);
+            const double raw_lhs_ub = queued_domain_ub(lhs, j);
+            const double raw_rhs_ub = queued_domain_ub(rhs, j);
+            const double lhs_lb = raw_lhs_lb == 0.0 ? 0.0 : raw_lhs_lb;
+            const double rhs_lb = raw_rhs_lb == 0.0 ? 0.0 : raw_rhs_lb;
+            const double lhs_ub = raw_lhs_ub == 0.0 ? 0.0 : raw_lhs_ub;
+            const double rhs_ub = raw_rhs_ub == 0.0 ? 0.0 : raw_rhs_ub;
+            if (lhs_lb != rhs_lb || lhs_ub != rhs_ub) return false;
+        }
+        return true;
     }
 
     void forget_domain_signature(std::int64_t id) {
-        auto sig_it = id_to_signature_.find(id);
-        if (sig_it == id_to_signature_.end()) return;
-        auto owner_it = signature_to_id_.find(sig_it->second);
-        if (owner_it != signature_to_id_.end() && owner_it->second == id) {
-            signature_to_id_.erase(owner_it);
+        auto hash_it = id_to_signature_hash_.find(id);
+        if (hash_it == id_to_signature_hash_.end()) return;
+        auto bucket_it = signature_hash_to_ids_.find(hash_it->second);
+        if (bucket_it != signature_hash_to_ids_.end()) {
+            auto& ids = bucket_it->second;
+            ids.erase(std::remove(ids.begin(), ids.end(), id), ids.end());
+            if (ids.empty()) signature_hash_to_ids_.erase(bucket_it);
         }
-        id_to_signature_.erase(sig_it);
+        id_to_signature_hash_.erase(hash_it);
     }
 
     bool refresh_domain_signature_after_update(std::int64_t id) {
@@ -1996,31 +2125,37 @@ class NodeQueue {
         auto node_it = nodes_.find(id);
         if (node_it == nodes_.end()) return false;
         forget_domain_signature(id);
-        auto sig = make_domain_signature(node_it->second);
-        if (!sig.has_value()) return true;
-        auto existing = signature_to_id_.find(*sig);
-        if (existing != signature_to_id_.end() && existing->second != id) {
-            auto existing_node = nodes_.find(existing->second);
-            if (existing_node != nodes_.end()) {
+        auto signature_hash = make_domain_signature_hash(node_it->second);
+        if (!signature_hash.has_value()) return true;
+        auto bucket_it = signature_hash_to_ids_.find(*signature_hash);
+        if (bucket_it != signature_hash_to_ids_.end()) {
+            const std::vector<std::int64_t> candidates = bucket_it->second;
+            for (std::int64_t existing_id : candidates) {
+                if (existing_id == id) continue;
+                auto existing_node = nodes_.find(existing_id);
+                if (existing_node == nodes_.end() ||
+                    !same_domain(existing_node->second, node_it->second)) {
+                    continue;
+                }
                 if (existing_node->second.bound <=
-                    node_it->second.bound + signature_bound_tol(node_it->second.bound)) {
+                    node_it->second.bound +
+                        signature_bound_tol(node_it->second.bound)) {
                     erase_id(id);
                     return false;
                 }
-                erase_id(existing->second);
-            } else {
-                signature_to_id_.erase(existing);
+                erase_id(existing_id);
+                break;
             }
         }
-        signature_to_id_[*sig] = id;
-        id_to_signature_[id] = std::move(*sig);
+        signature_hash_to_ids_[*signature_hash].push_back(id);
+        id_to_signature_hash_[id] = *signature_hash;
         return true;
     }
 
     void rebuild_domain_signatures() {
         if (!domain_signature_enabled_) return;
-        signature_to_id_.clear();
-        id_to_signature_.clear();
+        signature_hash_to_ids_.clear();
+        id_to_signature_hash_.clear();
         std::vector<std::int64_t> ids;
         ids.reserve(nodes_.size());
         for (const auto& [id, node] : nodes_) {
@@ -2030,54 +2165,68 @@ class NodeQueue {
         for (std::int64_t id : ids) {
             auto node_it = nodes_.find(id);
             if (node_it == nodes_.end()) continue;
-            auto sig = make_domain_signature(node_it->second);
-            if (!sig.has_value()) continue;
-            auto existing = signature_to_id_.find(*sig);
-            if (existing == signature_to_id_.end()) {
-                signature_to_id_[*sig] = id;
-                id_to_signature_[id] = std::move(*sig);
+            auto signature_hash = make_domain_signature_hash(node_it->second);
+            if (!signature_hash.has_value()) continue;
+            auto& bucket = signature_hash_to_ids_[*signature_hash];
+            auto existing = std::find_if(
+                bucket.begin(), bucket.end(), [&](std::int64_t candidate_id) {
+                    const auto candidate = nodes_.find(candidate_id);
+                    return candidate != nodes_.end() &&
+                           same_domain(candidate->second, node_it->second);
+                });
+            if (existing == bucket.end()) {
+                bucket.push_back(id);
+                id_to_signature_hash_[id] = *signature_hash;
                 continue;
             }
-            auto existing_node = nodes_.find(existing->second);
+            auto existing_node = nodes_.find(*existing);
             if (existing_node != nodes_.end() &&
                 existing_node->second.bound <=
                     node_it->second.bound + signature_bound_tol(node_it->second.bound)) {
                 erase_id(id);
             } else {
                 if (existing_node != nodes_.end()) {
-                    erase_id(existing->second);
+                    erase_id(*existing);
                 }
-                signature_to_id_[*sig] = id;
-                id_to_signature_[id] = std::move(*sig);
+                signature_hash_to_ids_[*signature_hash].push_back(id);
+                id_to_signature_hash_[id] = *signature_hash;
             }
         }
     }
 
     std::int64_t store(Node node) {
-        std::optional<std::string> sig;
+        std::optional<std::size_t> signature_hash;
         if (domain_signature_enabled_) {
-            sig = make_domain_signature(node);
-            if (sig.has_value()) {
-                auto existing = signature_to_id_.find(*sig);
-                if (existing != signature_to_id_.end()) {
-                    auto existing_node = nodes_.find(existing->second);
-                    if (existing_node != nodes_.end()) {
+            signature_hash = make_domain_signature_hash(node);
+            if (signature_hash.has_value()) {
+                auto bucket_it = signature_hash_to_ids_.find(*signature_hash);
+                if (bucket_it != signature_hash_to_ids_.end()) {
+                    const std::vector<std::int64_t> candidates = bucket_it->second;
+                    for (std::int64_t existing_id : candidates) {
+                        auto existing_node = nodes_.find(existing_id);
+                        if (existing_node == nodes_.end() ||
+                            !same_domain(existing_node->second, node)) {
+                            continue;
+                        }
                         if (existing_node->second.bound <=
                             node.bound + signature_bound_tol(node.bound)) {
                             return -1;
                         }
-                        erase_id(existing->second);
-                    } else {
-                        signature_to_id_.erase(existing);
+                        erase_id(existing_id);
+                        break;
                     }
                 }
             }
         }
         const auto id = next_id_++;
+        if (domain_storage_enabled_ && !compact_stored_node(node)) {
+            throw std::invalid_argument(
+                "queued node domain does not match the configured root domain");
+        }
         nodes_.emplace(id, std::move(node));
-        if (sig.has_value()) {
-            signature_to_id_[*sig] = id;
-            id_to_signature_[id] = std::move(*sig);
+        if (signature_hash.has_value()) {
+            signature_hash_to_ids_[*signature_hash].push_back(id);
+            id_to_signature_hash_[id] = *signature_hash;
         }
         return id;
     }
@@ -2088,12 +2237,14 @@ class NodeQueue {
         }
 
         const auto id = dfs_.back();
-        dfs_.pop_back();
 
         auto node_it = nodes_.find(id);
         if (node_it == nodes_.end()) {
             return false;
         }
+
+        materialize_stored_node(node_it->second);
+        dfs_.pop_back();
 
         const double bound = node_it->second.bound;
         auto dfs_bound_it = dfs_bounds_.find({bound, id});
@@ -2114,12 +2265,14 @@ class NodeQueue {
 
         auto it = priority_.begin();
         const auto [priority, id] = *it;
-        priority_.erase(it);
 
         auto node_it = nodes_.find(id);
         if (node_it == nodes_.end()) {
             return false;
         }
+
+        materialize_stored_node(node_it->second);
+        priority_.erase(it);
 
         const double bound = node_it->second.bound;
         auto bound_it = bounds_.find({bound, id});
@@ -2154,6 +2307,7 @@ class NodeQueue {
 	        }
 	        dfs_.erase(std::remove(dfs_.begin(), dfs_.end(), id), dfs_.end());
             forget_domain_signature(id);
+	        release_compact_storage(node_it->second);
 	        nodes_.erase(node_it);
 	    }
 
@@ -2162,6 +2316,7 @@ class NodeQueue {
             if (node_it == nodes_.end()) {
                 return false;
             }
+            materialize_stored_node(node_it->second);
             const double bound = node_it->second.bound;
             auto prio_it =
                 priority_.find({node_selection_priority(node_it->second), id});
@@ -2182,7 +2337,18 @@ class NodeQueue {
             nodes_.erase(node_it);
             return true;
         }
-	};
+		};
+
+inline NodeQueue::DomainMaterializationGuard::DomainMaterializationGuard(
+    NodeQueue& owner)
+    : owner_(owner) {
+    owner_.materialize_all_domains();
+}
+
+inline NodeQueue::DomainMaterializationGuard::~DomainMaterializationGuard()
+    noexcept {
+    owner_.compact_all_domains_noexcept();
+}
 
 /// @brief Return true when the incumbent bound dominates the node bound.
 bool incumbent_prunes_node(bool has_incumbent,
@@ -2212,15 +2378,12 @@ void apply_node_bounds(std::vector<VariableMeta>& vars,
                        const Eigen::VectorXd& lb,
                        const Eigen::VectorXd& ub);
 
-/// @brief Add rows (cuts) to an LP model's inequality system.
-void add_rows_to_lp(LPModel& lp,
-                     const std::vector<Eigen::VectorXd>& rows,
-                     const std::vector<double>& rhs_vals);
-
 /// @brief Add sparse rows (cuts) to an LP model's inequality system.
+struct SeparatorStorageStats;
 void add_sparse_rows_to_lp(LPModel& lp,
                             const std::vector<Eigen::SparseVector<double>>& rows,
-                            const std::vector<double>& rhs_vals);
+                            const std::vector<double>& rhs_vals,
+                            SeparatorStorageStats* storage_stats = nullptr);
 
 /// @brief Check if x satisfies all constraints of lp within tolerance.
 bool satisfies_lp(const LPModel& lp, const Eigen::VectorXd& x, double tol);
@@ -2284,10 +2447,6 @@ bool pop_node(std::priority_queue<QueueItem, std::vector<QueueItem>, QueueItemMi
 /// @brief Compute the minimum lower bound across all live nodes.
 double live_node_lower_bound(const std::priority_queue<QueueItem, std::vector<QueueItem>, QueueItemMinKey>& pq,
                              const std::vector<Node>& dfs);
-
-/// @brief MILP presolve: bound tightening + variable fixing.
-/// @return Number of variables fixed.
-int milp_presolve(LPModel& lp, int max_rounds = 10);
 
 // ── Branching functions (bc_branching.cpp) ───────────────────────────────
 
@@ -2518,6 +2677,16 @@ int choose_branch_var(const BCOptions& opt,
 /// @param reliability_limit Minimum observations before trusting pseudo-costs.
 /// @param max_probes Maximum strong-branching probes per node.
 /// @return Index of selected branching variable.
+struct StrongBranchProbeStorageStats {
+  std::uint64_t base_sf_materializations{0};
+  std::uint64_t bound_transactions{0};
+  std::uint64_t transaction_snapshot_values{0};
+  std::uint64_t transaction_rollbacks{0};
+  std::uint64_t transaction_failures{0};
+  std::uint64_t backend_cold_solves{0};
+  std::uint64_t backend_persistent_resolves{0};
+};
+
 int choose_branch_var_reliability(
     const std::vector<int>& cand,
     const Eigen::VectorXd& x,
@@ -2536,7 +2705,8 @@ int choose_branch_var_reliability(
     const std::vector<int>& priority = {},
     const BCBranchingPriorFn& dynamic_prior = {},
     const BCBranchContext& context = {},
-    std::vector<BranchDirectionalObservation>* selected_observations = nullptr);
+    std::vector<BranchDirectionalObservation>* selected_observations = nullptr,
+    StrongBranchProbeStorageStats* storage_stats = nullptr);
 
 int choose_branch_var_reliability(
     const std::vector<int>& cand,
@@ -2556,9 +2726,51 @@ int choose_branch_var_reliability(
     const std::vector<int>& priority = {},
     const BCBranchingPriorFn& dynamic_prior = {},
     const BCBranchContext& context = {},
-    std::vector<BranchDirectionalObservation>* selected_observations = nullptr);
+    std::vector<BranchDirectionalObservation>* selected_observations = nullptr,
+    StrongBranchProbeStorageStats* storage_stats = nullptr);
 
 // ── Cut generation functions (bc_cuts.cpp) ───────────────────────────────
+
+struct SeparatorStorageStats {
+  std::uint64_t sparse_candidates_created{0};
+  std::uint64_t sparse_candidate_entries_created{0};
+  std::uint64_t peak_live_sparse_candidates{0};
+  std::uint64_t peak_live_sparse_entries{0};
+  std::uint64_t sparse_aggregation_snapshots{0};
+  std::uint64_t sparse_aggregation_entries{0};
+  std::uint64_t dense_workspace_materializations{0};
+  std::uint64_t dense_workspace_values{0};
+  std::uint64_t matrix_append_calls{0};
+  std::uint64_t matrix_appended_rows{0};
+  std::uint64_t matrix_appended_entries{0};
+  std::uint64_t matrix_prior_entries_bypassing_triplet_rebuild{0};
+  std::uint64_t matrix_storage_reallocations{0};
+  std::uint64_t matrix_peak_spare_entries{0};
+
+  void merge(const SeparatorStorageStats& other) {
+    sparse_candidates_created += other.sparse_candidates_created;
+    sparse_candidate_entries_created +=
+        other.sparse_candidate_entries_created;
+    peak_live_sparse_candidates =
+        std::max(peak_live_sparse_candidates,
+                 other.peak_live_sparse_candidates);
+    peak_live_sparse_entries =
+        std::max(peak_live_sparse_entries,
+                 other.peak_live_sparse_entries);
+    sparse_aggregation_snapshots += other.sparse_aggregation_snapshots;
+    sparse_aggregation_entries += other.sparse_aggregation_entries;
+    dense_workspace_materializations += other.dense_workspace_materializations;
+    dense_workspace_values += other.dense_workspace_values;
+    matrix_append_calls += other.matrix_append_calls;
+    matrix_appended_rows += other.matrix_appended_rows;
+    matrix_appended_entries += other.matrix_appended_entries;
+    matrix_prior_entries_bypassing_triplet_rebuild +=
+        other.matrix_prior_entries_bypassing_triplet_rebuild;
+    matrix_storage_reallocations += other.matrix_storage_reallocations;
+    matrix_peak_spare_entries =
+        std::max(matrix_peak_spare_entries, other.matrix_peak_spare_entries);
+  }
+};
 
 /// @brief Dispatch cut generation based on BCOptions::cuts.
 /// @details Calls the appropriate cut family (GMI, MIR, cover, or all) within
@@ -2569,7 +2781,7 @@ int choose_branch_var_reliability(
 /// @param opt B&C options controlling cut types and quality thresholds.
 /// @param max_cuts Maximum cuts to generate.
 /// @param sbasis Sparse basis factorization for BTRAN (optional, for GMI).
-/// @param tracker Optional per-family efficacy tracker for adaptive cut generation (P2.1).
+/// @param tracker Optional per-family efficacy tracker for adaptive cut generation.
 /// @return Number of cuts added to the LP.
 int add_cuts(LPModel& lp,
              const Eigen::VectorXd& x,
@@ -2578,7 +2790,8 @@ int add_cuts(LPModel& lp,
              int max_cuts,
              const std::shared_ptr<BasisOps>& sbasis = nullptr,
              CutFamilyTracker* tracker = nullptr,
-             const class CliqueTable* clique_table = nullptr);
+             const class CliqueTable* clique_table = nullptr,
+             SeparatorStorageStats* storage_stats = nullptr);
 
 /// @brief Generate Gomory Mixed-Integer cuts from the simplex basis.
 /// @details Constructs GMI cuts from the bounded-form simplex tableau for each
@@ -2596,7 +2809,8 @@ int add_basis_gomory_cuts(LPModel& lp,
                           const SimplexResult& simplex,
                           const BCOptions& opt,
                           int max_cuts,
-                          const std::shared_ptr<BasisOps>& sbasis = nullptr);
+                          const std::shared_ptr<BasisOps>& sbasis = nullptr,
+                          SeparatorStorageStats* storage_stats = nullptr);
 
 /// @brief Generate HiGHS-style transformed tableau CMIR cuts at the root.
 /// @details Aggregates LP rows with a basis-inverse row, converts the
@@ -2616,7 +2830,8 @@ int add_transformed_tableau_cuts(
 	    std::vector<PoolCut>* generated_cutpool_rows = nullptr,
 	    double cut_generation_feastol = 1e-8,
 	    const std::function<int(PoolCut&&)>* cutpool_acceptor = nullptr,
-	    std::optional<std::uint64_t> highs_cutgen_seed = std::nullopt);
+	    std::optional<std::uint64_t> highs_cutgen_seed = std::nullopt,
+        SeparatorStorageStats* storage_stats = nullptr);
 
 /// @brief Generate HiGHS-style transformed path aggregation CMIR cuts.
 /// @details Starts from active row sides, projects through short row paths that
@@ -2635,7 +2850,8 @@ int add_transformed_path_cuts(
 	    double cut_generation_feastol = 1e-8,
 	    const std::function<int(PoolCut&&)>* cutpool_acceptor = nullptr,
 	    std::optional<std::uint64_t> highs_cutgen_seed = std::nullopt,
-	    const std::function<int(int)>* highs_path_randint = nullptr);
+	    const std::function<int(int)>* highs_path_randint = nullptr,
+        SeparatorStorageStats* storage_stats = nullptr);
 
 /// @brief Generate HiGHS-style mod-k cuts from transformed active rows.
 /// @details Mirrors HighsModkSeparator: skip rows containing continuous
@@ -2652,7 +2868,8 @@ int add_transformed_modk_cuts(
     std::vector<PoolCut>* generated_cutpool_rows = nullptr,
     double cut_generation_feastol = 1e-8,
     const std::function<int(PoolCut&&)>* cutpool_acceptor = nullptr,
-    std::optional<std::uint64_t> highs_cutgen_seed = std::nullopt);
+    std::optional<std::uint64_t> highs_cutgen_seed = std::nullopt,
+    SeparatorStorageStats* storage_stats = nullptr);
 
 // ── Relaxation functions (bc_relaxation.cpp) ─────────────────────────────
 
@@ -3087,6 +3304,8 @@ inline int NodeQueue::prune_by_implications(
 	    const Eigen::VectorXd* root_ub) {
     if (tightened_out != nullptr) *tightened_out = 0;
     if (implication_graph.empty()) return 0;
+    if (nodes_.empty()) return 0;
+    DomainMaterializationGuard domain_guard(*this);
     std::vector<std::int64_t> doomed;
     doomed.reserve(nodes_.size());
 
@@ -3213,6 +3432,44 @@ struct PropagationProfile {
     std::uint64_t wall_ns{0};
 };
 
+/// Identifies the mechanism that produced a node-domain bound change.
+enum class DomainPropagationSource {
+    Unknown,
+    ConflictPool,
+    Clique,
+    Implication,
+    InequalityRow,
+    EqualityRow,
+};
+
+const char* domain_propagation_source_name(
+    DomainPropagationSource source) noexcept;
+
+/// Optional audit record for one bound change made by unified propagation.
+/// The production path does not materialize these records unless requested.
+struct DomainPropagationEvent {
+    DomainPropagationSource source{DomainPropagationSource::Unknown};
+    int variable{-1};
+    int row{-1};
+    int trigger_variable{-1};
+    bool trigger_value_one{false};
+    bool is_lb{false};
+    double old_value{0.0};
+    double new_value{0.0};
+    double coefficient{0.0};
+    double rhs{0.0};
+    double activity_bound{0.0};
+    std::vector<BranchDomainLiteral> source_clause;
+};
+
+/// Optional audit detail for the propagation event that made a domain
+/// inconsistent. A pool conflict with no final bound change may have no
+/// variable index.
+struct DomainPropagationFailure {
+    bool available{false};
+    DomainPropagationEvent event;
+};
+
 void reset_propagation_profile();
 PropagationProfile get_propagation_profile();
 
@@ -3246,7 +3503,9 @@ bool propagate_node_domain(
         std::vector<BranchDomainLiteral>* learned_conflict = nullptr,
         int* total_tightened = nullptr,
         std::vector<DomainReasonBound>* reason_bounds_out = nullptr,
-        const std::vector<DomainReasonBound>* existing_reason_bounds = nullptr);
+        const std::vector<DomainReasonBound>* existing_reason_bounds = nullptr,
+        std::vector<DomainPropagationEvent>* propagation_events = nullptr,
+        DomainPropagationFailure* propagation_failure = nullptr);
 
 bool propagate_node_domain(
         const LPModel& lp,
@@ -3264,6 +3523,8 @@ bool propagate_node_domain(
         std::vector<BranchDomainLiteral>* learned_conflict = nullptr,
         int* total_tightened = nullptr,
         std::vector<DomainReasonBound>* reason_bounds_out = nullptr,
-        const std::vector<DomainReasonBound>* existing_reason_bounds = nullptr);
+        const std::vector<DomainReasonBound>* existing_reason_bounds = nullptr,
+        std::vector<DomainPropagationEvent>* propagation_events = nullptr,
+        DomainPropagationFailure* propagation_failure = nullptr);
 
 }  // namespace mipsolvers::engine::detail

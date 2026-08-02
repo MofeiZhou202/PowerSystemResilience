@@ -731,7 +731,7 @@ int run_warm_probe(bool use_118) {
             hfb.ftran(sf.b.data(), x.data());
             r = -sf.b;
             for (int i = 0; i < m; ++i)
-                for (Eigen::SparseMatrix<double>::InnerIterator it(sf.A, basis[i]); it; ++it)
+                for (engine::StandardColumnMatrix::InnerIterator it(sf.A, basis[i]); it; ++it)
                     r[it.row()] += it.value() * x[i];
             std::printf("hfactor selftest: ftran residual inf-norm=%.3e\n",
                         r.cwiseAbs().maxCoeff());
@@ -739,7 +739,7 @@ int run_warm_probe(bool use_118) {
             Eigen::SparseMatrix<double> B(m, m);
             std::vector<Eigen::Triplet<double>> trips;
             for (int i = 0; i < m; ++i)
-                for (Eigen::SparseMatrix<double>::InnerIterator it(sf.A, basis[i]); it; ++it)
+                for (engine::StandardColumnMatrix::InnerIterator it(sf.A, basis[i]); it; ++it)
                     trips.emplace_back(it.row(), i, it.value());
             B.setFromTriplets(trips.begin(), trips.end());
             Eigen::SparseLU<Eigen::SparseMatrix<double>> lu;
@@ -777,7 +777,7 @@ int run_warm_probe(bool use_118) {
                     Eigen::SparseMatrix<double> B0(m, m);
                     std::vector<Eigen::Triplet<double>> tr0;
                     for (int i = 0; i < m; ++i)
-                        for (Eigen::SparseMatrix<double>::InnerIterator it(sf.A, basis[i]); it; ++it)
+                        for (engine::StandardColumnMatrix::InnerIterator it(sf.A, basis[i]); it; ++it)
                             tr0.emplace_back(it.row(), i, it.value());
                     B0.setFromTriplets(tr0.begin(), tr0.end());
                     lu_ref.analyzePattern(B0);
@@ -790,7 +790,7 @@ int run_warm_probe(bool use_118) {
                     const int q = nonbasic[static_cast<size_t>(t)];
                     // aq = B^{-1} a_q
                     Eigen::VectorXd col = Eigen::VectorXd::Zero(m);
-                    for (Eigen::SparseMatrix<double>::InnerIterator it(sf.A, q); it; ++it)
+                    for (engine::StandardColumnMatrix::InnerIterator it(sf.A, q); it; ++it)
                         col[it.row()] = it.value();
                     hfb.ftran_for_update(col.data(), aq.data());
                     // Verify the input aq against the reference factor BEFORE
@@ -835,7 +835,7 @@ int run_warm_probe(bool use_118) {
                         Eigen::SparseMatrix<double> B2(m, m);
                         std::vector<Eigen::Triplet<double>> tr2;
                         for (int i = 0; i < m; ++i)
-                            for (Eigen::SparseMatrix<double>::InnerIterator it(sf.A, basis[i]); it; ++it)
+                            for (engine::StandardColumnMatrix::InnerIterator it(sf.A, basis[i]); it; ++it)
                                 tr2.emplace_back(it.row(), i, it.value());
                         B2.setFromTriplets(tr2.begin(), tr2.end());
                         Eigen::SparseLU<Eigen::SparseMatrix<double>> lu2;

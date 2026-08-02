@@ -14,6 +14,18 @@
 
 namespace mipsolvers::engine {
 
+/// Auditable primal/dual progress snapshot. Incumbent vectors are retained so
+/// benchmark consumers can independently validate every reported primal event
+/// in original model space before computing trajectory metrics.
+struct BCBoundEvent {
+  double time_sec{0.0};
+  double primal_bound{std::numeric_limits<double>::quiet_NaN()};
+  double dual_bound{std::numeric_limits<double>::quiet_NaN()};
+  int nodes{0};
+  int lp_solves{0};
+  Eigen::VectorXd incumbent;
+};
+
 /// Detailed statistics accumulated during the B&C run.
 struct BCStats {
   /// Provenance and availability for fields whose collectors are specific to
@@ -22,20 +34,18 @@ struct BCStats {
   std::string collection_scope{"native_full"};
   bool lp_solve_count_available{true};
   bool incumbent_timeline_available{true};
+  bool bound_event_stream_available{true};
   bool cut_diagnostics_available{true};
   bool native_diagnostics_available{true};
+  std::vector<BCBoundEvent> bound_events;
+  std::uint64_t bound_events_dropped_uncertified_dual{0};
 
   // ── Basic progress ─────────────────────────────────────────────────────
   int    nodes_explored{0};
   int    lp_solves{0};
   int    cuts_added{0};
   int    root_cuts_added{0};
-  int    tree_cuts_added{0};
   int    root_gomory_cuts{0};
-  int    root_mir_cuts{0};
-  int    root_cover_cuts{0};
-  int    root_clique_cuts{0};
-  int    root_zerohalf_cuts{0};
   int    root_impliedbound_cuts{0};
   int    root_presolved_rows{0};
   int    root_presolved_cols{0};
@@ -45,6 +55,19 @@ struct BCStats {
   int    root_presolved_integer_cols{0};
   int    root_implied_integer_cols{0};
   int    root_presolved_continuous_cols{0};
+  bool native_presolve_attempted{false};
+  bool native_presolve_adopted{false};
+  int native_presolve_orig_rows{0};
+  int native_presolve_final_rows{0};
+  int native_presolve_orig_cols{0};
+  int native_presolve_final_cols{0};
+  double native_presolve_time_ms{0.0};
+  std::uint64_t native_presolve_probing_trail_pushes{0};
+  std::uint64_t native_presolve_probing_rows_processed{0};
+  std::uint64_t native_presolve_probing_implications_learned{0};
+  std::uint64_t native_presolve_probing_implications_imported{0};
+  std::uint64_t native_presolve_probing_max_touched_cols{0};
+  bool native_presolve_probing_truncated{false};
   std::uint64_t root_clique_edges{0};
   std::uint64_t root_implication_arcs{0};
   std::uint64_t root_cut_rows_rejected_nonmoving{0};
@@ -64,12 +87,6 @@ struct BCStats {
   double root_reduced_cost_gap{0.0};
   std::uint64_t root_objective_cutoff_domain_tightenings{0};
   std::uint64_t root_objective_cutoff_domain_prunes{0};
-  std::uint64_t vendored_root_certificate_attempts{0};
-  std::uint64_t vendored_root_certificate_accepted{0};
-  std::uint64_t vendored_root_certificate_rejected{0};
-  double vendored_root_certificate_time_ms{0.0};
-  std::int64_t vendored_root_certificate_nodes{-1};
-  std::int64_t vendored_root_certificate_simplex_iterations{-1};
   std::uint64_t root_split_bound_probe_candidates{0};
   std::uint64_t root_split_bound_probe_vars{0};
   std::uint64_t root_split_bound_probe_fixings{0};
@@ -105,6 +122,16 @@ struct BCStats {
   std::uint64_t gap_suboptimal_queue_prune_passes{0};
   std::uint64_t gap_suboptimal_queue_prunes{0};
   std::uint64_t incumbent_certificate_queue_consumptions{0};
+  std::uint64_t tree_restarts{0};
+  std::uint64_t tree_restart_nodes_discarded{0};
+  std::uint64_t tree_restart_root_requeues{0};
+  std::uint64_t tree_restart_cut_pool_rows_preserved{0};
+  std::uint64_t tree_restart_conflicts_preserved{0};
+  std::uint64_t tree_restart_implications_preserved{0};
+  std::uint64_t tree_restart_clique_edges_preserved{0};
+  std::uint64_t tree_restart_pseudocost_observations_preserved{0};
+  int tree_restart_last_node{-1};
+  std::string tree_restart_last_source;
   std::uint64_t incumbent_repair_lp_attempts{0};
   std::uint64_t incumbent_repair_improvements{0};
   double incumbent_repair_time_ms{0.0};
@@ -121,6 +148,13 @@ struct BCStats {
   std::uint64_t strong_probe_unknown_failures{0};
   std::uint64_t strong_probe_lp_iterations{0};
   double strong_probe_time_ms{0.0};
+  std::uint64_t strong_probe_base_sf_materializations{0};
+  std::uint64_t strong_probe_bound_transactions{0};
+  std::uint64_t strong_probe_transaction_snapshot_values{0};
+  std::uint64_t strong_probe_transaction_rollbacks{0};
+  std::uint64_t strong_probe_transaction_failures{0};
+  std::uint64_t strong_probe_backend_cold_solves{0};
+  std::uint64_t strong_probe_backend_persistent_resolves{0};
   std::uint64_t branch_direction_preferred_down{0};
   std::uint64_t branch_direction_preferred_up{0};
   std::uint64_t branch_direction_first_down{0};
@@ -157,6 +191,45 @@ struct BCStats {
   int parallel_explorer_threads{0};
   bool parallel_tree_launched{false};
   std::string parallel_schedule_reason{"single_thread"};
+
+  // Queued-node memory telemetry.  Dense bounds are used while a node is
+  // active; queued domains are sparse differences from a shared root domain.
+  std::uint64_t node_queue_domain_compactions{0};
+  std::uint64_t node_queue_domain_materializations{0};
+  std::uint64_t node_queue_dense_bound_values_released{0};
+  std::uint64_t node_queue_compact_entries_created{0};
+  std::uint64_t node_queue_terminal_compact_nodes{0};
+  std::uint64_t node_queue_terminal_compact_entries{0};
+  std::uint64_t node_queue_peak_compact_nodes{0};
+  std::uint64_t node_queue_peak_compact_entries{0};
+  std::uint64_t node_queue_domain_compaction_failures{0};
+  std::uint64_t node_queue_domain_materialization_failures{0};
+  std::uint64_t node_queue_serial_compactions{0};
+  std::uint64_t node_queue_parallel_compactions{0};
+  std::uint64_t node_queue_submip_compactions{0};
+  std::uint64_t branch_payload_child_creations{0};
+  std::uint64_t branch_payload_shared_vectors{0};
+  std::uint64_t branch_payload_shared_elements{0};
+  std::uint64_t branch_domain_dense_copies{0};
+  std::uint64_t branch_domain_dense_values_copied{0};
+  std::uint64_t branch_domain_moves{0};
+
+  // Separator candidate/workspace storage telemetry. Candidate pools retain
+  // sparse rows; dense values count only temporary mathematical workspaces.
+  std::uint64_t separator_sparse_candidates_created{0};
+  std::uint64_t separator_sparse_candidate_entries_created{0};
+  std::uint64_t separator_peak_live_sparse_candidates{0};
+  std::uint64_t separator_peak_live_sparse_entries{0};
+  std::uint64_t separator_sparse_aggregation_snapshots{0};
+  std::uint64_t separator_sparse_aggregation_entries{0};
+  std::uint64_t separator_dense_workspace_materializations{0};
+  std::uint64_t separator_dense_workspace_values{0};
+  std::uint64_t separator_matrix_append_calls{0};
+  std::uint64_t separator_matrix_appended_rows{0};
+  std::uint64_t separator_matrix_appended_entries{0};
+  std::uint64_t separator_matrix_prior_entries_bypassing_triplet_rebuild{0};
+  std::uint64_t separator_matrix_storage_reallocations{0};
+  std::uint64_t separator_matrix_peak_spare_entries{0};
 
   // ── Cut / heuristic diagnostics ────────────────────────────────────────
   int pool_cuts_separated{0};    ///< Cuts added from the global cut pool
@@ -234,14 +307,12 @@ struct BCStats {
   std::uint64_t dynamic_implied_bound_rows_bound_move{0};
   std::uint64_t dynamic_implied_bound_rows_rejected{0};
   std::uint64_t dynamic_implied_bound_rows_active_implication{0};
-  std::uint64_t dynamic_implied_bound_rows_queue_hit{0};
   std::uint64_t dynamic_implied_bound_rows_skip_not_active{0};
   std::uint64_t dynamic_implied_bound_rows_skip_small_move{0};
   std::uint64_t dynamic_implied_bound_rows_skip_no_violation{0};
   std::uint64_t local_node_cuts_generated{0};
   std::uint64_t local_node_cuts_added{0};
   std::uint64_t global_cutpool_scope_rejections{0};
-  std::uint64_t lazy_constraints_added{0};
   std::uint64_t late_replay_skipped_no_new_learning{0};
   std::uint64_t objective_clique_partitions{0};
   std::uint64_t objective_clique_terms{0};
@@ -251,7 +322,6 @@ struct BCStats {
   std::uint64_t objective_implied_events{0};
   std::uint64_t objective_implied_event_tightenings{0};
   std::uint64_t objective_implied_event_prunes{0};
-  std::uint64_t objective_implied_event_lp_slack_hits{0};
   std::uint64_t objective_implied_event_proof_candidates{0};
   std::uint64_t objective_implied_event_proof_fixings{0};
   std::uint64_t objective_implied_event_proof_skip_coeff{0};

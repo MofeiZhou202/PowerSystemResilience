@@ -38,6 +38,10 @@ struct SolveStats {
   Eigen::VectorXd farkas_ray_eq;      ///< Dual ray (y_eq for equality rows)
   bool has_farkas_certificate{false};
 
+  // Primal recession certificate for an unbounded minimization LP. The ray
+  // itself is stored on SolveResult::primal_ray in original variable units.
+  bool has_unbounded_certificate{false};
+
   /// Rigorous LP dual bound (minimize convention) certified at an interrupted
   /// solve (time / iteration limit): the exact original-cost dual objective of
   /// an audited dual-feasible point.  NaN when no certified bound exists.  Set
@@ -48,6 +52,7 @@ struct SolveStats {
 
 struct SolveResult {
   Eigen::VectorXd x;
+  Eigen::VectorXd primal_ray;
   SolveStats stats;
 
   // Constraint dual values (shadow prices) for LP solves, including simplex

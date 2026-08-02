@@ -92,6 +92,7 @@ inline LPFailureType classify_lp_result(const SimplexResult& res, int expected_n
   if (status.find("timeout") != std::string::npos ||
       status.find("Timeout") != std::string::npos ||
       status.find("iteration limit") != std::string::npos ||
+      status.find("Iteration limit") != std::string::npos ||
       status.find("max_iter") != std::string::npos) {
     return LPFailureType::Timeout;
   }

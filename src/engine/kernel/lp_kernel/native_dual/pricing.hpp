@@ -13,13 +13,18 @@ bool choose_leaving(State& state, Leaving& leaving, std::string& failure);
 void refresh_leaving_heap(State& state, const std::vector<int>* changed_rows,
                           int extra_row);
 IndexedVector multiply_AT_indexed(
-    const Eigen::SparseMatrix<double, Eigen::RowMajor>& A_row,
+    const StandardRowMatrix& A_row,
     const IndexedVector& y);
 // Same product written into a caller-owned vector so hot loops can reuse
 // its backing storage across pivots.
 void multiply_AT_indexed(
-    const Eigen::SparseMatrix<double, Eigen::RowMajor>& A_row,
+    const StandardRowMatrix& A_row,
     const IndexedVector& y, IndexedVector& result);
+// Adaptive PRICE: sparse pivotal rows use CSR scatter; sufficiently dense,
+// large products use deterministic CSC column partitions on a persistent pool.
+void multiply_AT_indexed(
+    const StandardColumnMatrix& A, const StandardRowMatrix& A_row,
+    const IndexedVector& y, IndexedVector& result, int thread_count);
 bool choose_entering_bfrt(const State& state, const Leaving& leaving,
                           const IndexedVector& pivot_row,
                           PivotTransaction& transaction,

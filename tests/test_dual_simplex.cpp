@@ -8,9 +8,11 @@
 #include <Eigen/Sparse>
 
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <limits>
 #include <string>
+#include <type_traits>
 
 #include "Highs.h"
 
@@ -298,7 +300,14 @@ TEST_CASE("Node LP dispatcher owns persistent state instead of queue nodes",
   auto first = dispatcher.solve_no_fallback(
       first_sf, nullptr, detail::SolveContext::NodeLP);
   REQUIRE(first.result.stats.success);
+  CHECK(first.form.A.rows() == first_sf.A.rows());
   CHECK_FALSE(first.basis.cached_sparse_basis);
+
+  auto probe = dispatcher.solve_no_fallback(
+      first_sf, &first.basis, detail::SolveContext::Probing);
+  REQUIRE(probe.result.stats.success);
+  CHECK(probe.form.A.rows() == 0);
+  CHECK(probe.form.A.cols() == 0);
 
   Eigen::VectorXd lb = Eigen::VectorXd::Constant(1, 0.0);
   Eigen::VectorXd ub = Eigen::VectorXd::Constant(1, 4.0);
@@ -320,6 +329,64 @@ TEST_CASE("Node LP dispatcher owns persistent state instead of queue nodes",
   CHECK(sibling.result.stats.solver_name == "VendoredHighsPersistentLpKernel");
   CHECK(sibling.result.stats.objective == Approx(-7.0).margin(1e-9));
   CHECK_FALSE(sibling.basis.cached_sparse_basis);
+}
+
+TEST_CASE("HiGHS persistent LP honors the caller iteration limit",
+          "[dual_simplex][persistent][iteration_limit]") {
+  constexpr int rows = 64;
+  constexpr int cols = 2 * rows;
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Zero(cols);
+  lp.A.resize(0, cols);
+  lp.b.resize(0);
+  lp.Aeq.resize(rows, cols);
+  lp.beq = Eigen::VectorXd::Ones(rows);
+  lp.vars.reserve(cols);
+  std::vector<Eigen::Triplet<double>> triplets;
+  triplets.reserve(cols);
+  for (int row = 0; row < rows; ++row) {
+    triplets.emplace_back(row, 2 * row, 1.0);
+    triplets.emplace_back(row, 2 * row + 1, 1.0);
+    lp.c[2 * row + 1] = 1.0;
+    lp.vars.push_back({VarType::Continuous, 0.0, 1.0});
+    lp.vars.push_back({VarType::Continuous, 0.0, 1.0});
+  }
+  lp.Aeq.setFromTriplets(triplets.begin(), triplets.end());
+  lp.Aeq.makeCompressed();
+
+  SimplexOptions root_options;
+  root_options.lp_kernel_backend = LpKernelBackend::HiGHS;
+  root_options.allow_persistent_lp_state = true;
+  root_options.max_iter = 1000;
+  StandardFormLP root_sf = build_standard_form_lp(lp);
+  auto root = solve_lp_from_sf(root_sf, root_options);
+  REQUIRE(root.result.stats.success);
+  REQUIRE(root.basis.cached_sparse_basis);
+  const auto root_handle = root.basis.cached_sparse_basis->highs_handle();
+  REQUIRE(root_handle);
+
+  Eigen::VectorXd child_lb = Eigen::VectorXd::Zero(cols);
+  Eigen::VectorXd child_ub = Eigen::VectorXd::Ones(cols);
+  for (int row = 0; row < rows; ++row) {
+    child_ub[2 * row] = 0.4;
+  }
+  StandardFormLP child_sf = root_sf;
+  update_standard_form_bounds(child_sf, lp, child_lb, child_ub);
+  SimplexOptions probe_options = root_options;
+  probe_options.max_iter = 3;
+  auto limited = solve_lp_from_sf(child_sf, probe_options, &root.basis);
+  CHECK_FALSE(limited.result.stats.success);
+  CHECK(limited.result.stats.solver_name ==
+        "VendoredHighsPersistentLpKernel");
+  CHECK(limited.result.stats.status.find("Iteration limit") !=
+        std::string::npos);
+  CHECK(limited.result.stats.iterations <= probe_options.max_iter);
+
+  auto completed = solve_lp_from_sf(child_sf, root_options, &root.basis);
+  REQUIRE(completed.result.stats.success);
+  REQUIRE(completed.basis.cached_sparse_basis);
+  CHECK(completed.basis.cached_sparse_basis->highs_handle() == root_handle);
 }
 
 TEST_CASE("Incremental standard-form bounds handle infinite transitions",
@@ -361,6 +428,149 @@ TEST_CASE("Incremental standard-form bounds handle infinite transitions",
   CHECK(sf.lb_shift[0] == Approx(0.0));
   CHECK(std::isinf(sf.var_ub[0]));
   CHECK(sf.objective_const == Approx(0.0));
+}
+
+TEST_CASE("Standard-form bound transactions restore sparse state exactly",
+          "[dual_simplex][bounds][transaction]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c.resize(2);
+  lp.c << 2.0, -3.0;
+  lp.A.resize(2, 2);
+  lp.A.insert(0, 0) = 4.0;
+  lp.A.insert(1, 1) = -2.0;
+  lp.A.makeCompressed();
+  lp.b.resize(2);
+  lp.b << 8.0, 1.0;
+  lp.Aeq.resize(1, 2);
+  lp.Aeq.insert(0, 0) = 3.0;
+  lp.Aeq.insert(0, 1) = 1.0;
+  lp.Aeq.makeCompressed();
+  lp.beq = Eigen::VectorXd::Constant(1, 2.0);
+  lp.vars = {{VarType::Continuous, 0.0, 5.0},
+             {VarType::Continuous, -1.0, 4.0}};
+
+  StandardFormLP sf = build_standard_form_lp(lp);
+  ruiz_scale_standard_form(sf);
+  const StandardFormLP original = sf;
+  const std::vector<BoundChangeInfo> changes{
+      {0, 1.0, true, 0.0, 1.0},
+      {1, -2.0, false, 4.0, 2.0},
+  };
+  {
+    StandardFormBoundTransaction transaction(sf);
+    REQUIRE(transaction.apply(lp, changes));
+    CHECK(transaction.active());
+    CHECK(transaction.snapshot_value_count() == 7);
+    CHECK(sf.lb_shift[0] != original.lb_shift[0]);
+    CHECK(sf.var_ub[1] != original.var_ub[1]);
+    REQUIRE(transaction.rollback());
+    CHECK_FALSE(transaction.active());
+  }
+  CHECK((sf.lb_shift.array() == original.lb_shift.array()).all());
+  CHECK((sf.var_ub.array() == original.var_ub.array()).all());
+  CHECK((sf.b.array() == original.b.array()).all());
+  CHECK(sf.objective_const == original.objective_const);
+
+  {
+    StandardFormBoundTransaction transaction(sf);
+    REQUIRE(transaction.apply(lp, changes));
+  }
+  CHECK((sf.lb_shift.array() == original.lb_shift.array()).all());
+  CHECK((sf.var_ub.array() == original.var_ub.array()).all());
+  CHECK((sf.b.array() == original.b.array()).all());
+  CHECK(sf.objective_const == original.objective_const);
+
+  StandardFormBoundTransaction rejected(sf);
+  const std::vector<BoundChangeInfo> stale{
+      {0, 0.0, true, 9.0, 2.0}};
+  CHECK_FALSE(rejected.apply(lp, stale));
+  CHECK_FALSE(rejected.active());
+  CHECK((sf.lb_shift.array() == original.lb_shift.array()).all());
+  CHECK((sf.var_ub.array() == original.var_ub.array()).all());
+  CHECK((sf.b.array() == original.b.array()).all());
+  CHECK(sf.objective_const == original.objective_const);
+}
+
+TEST_CASE("Standard-form bound transactions match full bound updates",
+          "[dual_simplex][bounds][transaction][differential]") {
+  LPModel lp;
+  lp.sense = Sense::Maximize;
+  lp.c.resize(4);
+  lp.c << 1.5, -2.0, 0.75, 4.0;
+  lp.A.resize(3, 4);
+  lp.A.insert(0, 0) = 1.0;
+  lp.A.insert(0, 1) = -3.0;
+  lp.A.insert(0, 3) = 2.0;
+  lp.A.insert(1, 0) = -2.0;
+  lp.A.insert(1, 2) = 5.0;
+  lp.A.insert(2, 1) = 4.0;
+  lp.A.insert(2, 2) = -1.0;
+  lp.A.insert(2, 3) = 0.5;
+  lp.A.makeCompressed();
+  lp.b.resize(3);
+  lp.b << 7.0, 11.0, -2.0;
+  lp.row_lhs.resize(3);
+  lp.row_lhs << -4.0, -std::numeric_limits<double>::infinity(), -8.0;
+  lp.Aeq.resize(2, 4);
+  lp.Aeq.insert(0, 0) = 3.0;
+  lp.Aeq.insert(0, 1) = 1.0;
+  lp.Aeq.insert(1, 1) = -2.0;
+  lp.Aeq.insert(1, 2) = 1.0;
+  lp.Aeq.insert(1, 3) = 6.0;
+  lp.Aeq.makeCompressed();
+  lp.beq.resize(2);
+  lp.beq << 5.0, -1.0;
+  const double inf = std::numeric_limits<double>::infinity();
+  lp.vars = {
+      {VarType::Continuous, 0.0, 10.0},
+      {VarType::Continuous, -inf, inf},
+      {VarType::Continuous, -5.0, 8.0},
+      {VarType::Continuous, 1.0, inf},
+  };
+
+  StandardFormLP actual = build_standard_form_lp(lp);
+  ruiz_scale_standard_form(actual);
+  const StandardFormLP original = actual;
+
+  Eigen::VectorXd target_lb(4);
+  target_lb << 2.0, -3.0, -5.0, 3.0;
+  Eigen::VectorXd target_ub(4);
+  target_ub << 9.0, 7.0, 4.0, inf;
+  StandardFormLP expected = original;
+  update_standard_form_bounds(expected, lp, target_lb, target_ub);
+
+  const std::vector<BoundChangeInfo> changes{
+      {0, 2.0, true, 0.0, 2.0},
+      {0, -1.0, false, 10.0, 9.0},
+      {1, 0.0, true, -inf, -3.0},
+      {1, 0.0, false, inf, 7.0},
+      {2, -4.0, false, 8.0, 4.0},
+      {3, 1.0, true, 1.0, 2.0},
+      {3, 1.0, true, 2.0, 3.0},
+  };
+  {
+    StandardFormBoundTransaction transaction(actual);
+    REQUIRE(transaction.apply(lp, changes));
+    CHECK(actual.lb_shift.isApprox(expected.lb_shift, 1e-13));
+    REQUIRE(actual.var_ub.size() == expected.var_ub.size());
+    for (int column = 0; column < actual.var_ub.size(); ++column) {
+      if (std::isfinite(expected.var_ub[column])) {
+        CHECK(actual.var_ub[column] ==
+              Approx(expected.var_ub[column]).epsilon(1e-13));
+      } else {
+        CHECK(actual.var_ub[column] == expected.var_ub[column]);
+      }
+    }
+    CHECK(actual.b.isApprox(expected.b, 1e-13));
+    CHECK(actual.objective_const ==
+          Approx(expected.objective_const).epsilon(1e-13));
+  }
+
+  CHECK((actual.lb_shift.array() == original.lb_shift.array()).all());
+  CHECK((actual.var_ub.array() == original.var_ub.array()).all());
+  CHECK((actual.b.array() == original.b.array()).all());
+  CHECK(actual.objective_const == original.objective_const);
 }
 
 TEST_CASE("Direct HiGHS cut rows commit or roll back atomically",
@@ -445,6 +655,66 @@ TEST_CASE("DualSimplex: 2-variable LP", "[dual_simplex]") {
   CHECK(res.result.x[1] == Approx(0.0).margin(1e-5));
 }
 
+TEST_CASE("DualSimplex: publishes an audited primal ray for an unbounded LP",
+          "[dual_simplex][unbounded][certificate]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c.resize(2);
+  lp.c << -1.0, -1.0;
+  lp.A.resize(0, 2);
+  lp.b.resize(0);
+  lp.Aeq.resize(1, 2);
+  lp.Aeq.insert(0, 0) = 1.0;
+  lp.Aeq.insert(0, 1) = -1.0;
+  lp.Aeq.makeCompressed();
+  lp.beq = Eigen::VectorXd::Zero(1);
+  lp.vars.push_back(
+      {VarType::Continuous, 0.0, std::numeric_limits<double>::infinity()});
+  lp.vars.push_back(
+      {VarType::Continuous, 0.0, std::numeric_limits<double>::infinity()});
+
+  auto options = native_simplex_options();
+  options.max_iter = 100;
+  const auto result = solve_lp_with_basis(lp, options);
+  INFO(result.result.stats.status);
+  REQUIRE_FALSE(result.result.stats.success);
+  REQUIRE(result.result.stats.status == "LP unbounded");
+  REQUIRE(result.result.stats.has_unbounded_certificate);
+  REQUIRE(result.result.primal_ray.size() == 2);
+  CHECK((lp.Aeq * result.result.primal_ray).lpNorm<Eigen::Infinity>() <= 1e-10);
+  CHECK(lp.c.dot(result.result.primal_ray) < -1e-8);
+  CHECK(result.result.primal_ray.minCoeff() >= -1e-10);
+}
+
+TEST_CASE("DualSimplex: solves or certifies a row-free LP exactly",
+          "[dual_simplex][unbounded][empty_rows]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c.resize(2);
+  lp.c << -2.0, 3.0;
+  lp.A.resize(0, 2);
+  lp.b.resize(0);
+  lp.Aeq.resize(0, 2);
+  lp.beq.resize(0);
+  lp.vars.push_back({VarType::Continuous, 0.0, 4.0});
+  lp.vars.push_back({VarType::Continuous, 0.0, 5.0});
+
+  auto options = native_simplex_options();
+  auto bounded = solve_lp_with_basis(lp, options);
+  REQUIRE(bounded.result.stats.success);
+  CHECK(bounded.result.stats.objective == Approx(-8.0));
+  CHECK(bounded.result.x[0] == Approx(4.0));
+  CHECK(bounded.result.x[1] == Approx(0.0));
+
+  lp.vars[0].ub = std::numeric_limits<double>::infinity();
+  auto unbounded = solve_lp_with_basis(lp, options);
+  REQUIRE_FALSE(unbounded.result.stats.success);
+  CHECK(unbounded.result.stats.status == "LP unbounded");
+  REQUIRE(unbounded.result.stats.has_unbounded_certificate);
+  CHECK(unbounded.result.primal_ray[0] == Approx(1.0));
+  CHECK(unbounded.result.primal_ray[1] == Approx(0.0));
+}
+
 TEST_CASE("DualSimplex: cost-shift crash certifies a cold dual start",
           "[dual_simplex][dual_crash]") {
   LPModel lp;
@@ -478,6 +748,55 @@ TEST_CASE("DualSimplex: cost-shift crash certifies a cold dual start",
   CHECK(statistics.dual_start_cost_shifts == 1);
   CHECK(state.original_cost[0] == Approx(1.0));
   CHECK(state.reduced_costs[0] == Approx(0.0).margin(1e-12));
+}
+
+TEST_CASE("DualSimplex: cold shift-start policy is bounded and overridable",
+          "[dual_simplex][dual_crash][policy]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Constant(1, -1.0);
+  lp.A.resize(1, 1);
+  lp.A.insert(0, 0) = 1.0;
+  lp.A.makeCompressed();
+  lp.b = Eigen::VectorXd::Constant(1, 1.0);
+  lp.Aeq.resize(0, 1);
+  lp.beq.resize(0);
+  lp.vars.push_back({VarType::Continuous, 0.0,
+                     std::numeric_limits<double>::infinity()});
+
+  const StandardFormLP sf = build_standard_form_lp(lp);
+  auto options = native_simplex_options();
+  native_dual::Statistics statistics;
+  native_dual::detail::State state;
+  std::string failure;
+  REQUIRE(native_dual::detail::initialize(
+      state, sf, options, native_dual::detail::Phase::Two, nullptr,
+      statistics, failure));
+
+  auto decision =
+      native_dual::detail::decide_cost_shifted_dual_start(state, nullptr);
+  CHECK(decision.try_shift_start);
+  CHECK(decision.required_shift_lower_bound == 1);
+  CHECK(decision.shift_threshold == 256);
+  CHECK_FALSE(decision.adaptive_rejection);
+
+  options.dual_shift_start_max_count = 1;
+  options.dual_shift_start_max_fraction = 0.0;
+  decision =
+      native_dual::detail::decide_cost_shifted_dual_start(state, nullptr);
+  CHECK_FALSE(decision.try_shift_start);
+  CHECK(decision.required_shift_lower_bound == 1);
+  CHECK(decision.shift_threshold == 1);
+  CHECK(decision.adaptive_rejection);
+
+  decision =
+      native_dual::detail::decide_cost_shifted_dual_start(state, "on");
+  CHECK(decision.try_shift_start);
+  CHECK_FALSE(decision.adaptive_rejection);
+  decision =
+      native_dual::detail::decide_cost_shifted_dual_start(state, "off");
+  CHECK_FALSE(decision.try_shift_start);
+  CHECK_FALSE(decision.adaptive_rejection);
 }
 
 TEST_CASE("DualSimplex: dual Phase-I bounds are the translated HiGHS bounds",
@@ -1131,6 +1450,391 @@ TEST_CASE("DualSimplex: batched DSE uses one existing INVERT",
   }
 }
 
+TEST_CASE("DualSimplex: cold pricing defaults to O(m+n) Devex",
+          "[dual_simplex][performance][dse]") {
+  using mipsolvers::engine::native_dual::Statistics;
+  using mipsolvers::engine::native_dual::detail::BasisFactor;
+  using mipsolvers::engine::native_dual::detail::State;
+
+  StandardFormLP sf;
+  Eigen::Matrix<double, 3, 6> dense;
+  dense << 2.0, 1.0, 0.0, 1.0, 0.0, 0.0,
+           0.0, 3.0, 1.0, 0.0, 1.0, 0.0,
+           1.0, 0.0, 4.0, 0.0, 0.0, 1.0;
+  sf.A = dense.sparseView();
+  sf.A.makeCompressed();
+
+  auto initialize_weights = [&](bool exact) {
+    auto options = native_simplex_options();
+    options.exact_dse_initialization = exact;
+    State state;
+    state.sf = &sf;
+    state.options = &options;
+    state.m = 3;
+    state.n = 6;
+    state.basis = {0, 1, 2};
+    state.factor = std::make_shared<BasisFactor>(sf, std::vector<int>{3, 4, 5});
+    int repairs = 0;
+    std::string failure;
+    REQUIRE(state.factor->rebuild(state.basis, repairs, failure));
+    Statistics statistics;
+    REQUIRE(mipsolvers::engine::native_dual::detail::initialize_cold_edge_weights(
+        state, statistics, failure));
+    return statistics;
+  };
+
+  const Statistics scalable = initialize_weights(false);
+  CHECK(scalable.devex_frameworks == 1);
+  CHECK(scalable.dse_initialization_solves == 0);
+
+  const Statistics exact = initialize_weights(true);
+  CHECK(exact.devex_frameworks == 0);
+  CHECK(exact.dse_initialization_solves == 3);
+}
+
+TEST_CASE("Standard form uses adaptive CSC and a shared-value row view",
+          "[dual_simplex][performance][matrix_storage]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Zero(3);
+  lp.A.resize(2, 3);
+  lp.A.insert(0, 0) = 2.0;
+  lp.A.insert(1, 0) = -1.0;
+  lp.A.insert(0, 2) = 4.0;
+  lp.A.makeCompressed();
+  lp.b = Eigen::VectorXd::Ones(2);
+  lp.Aeq.resize(0, 3);
+  lp.beq.resize(0);
+  for (int j = 0; j < 3; ++j) {
+    lp.vars.push_back({VarType::Continuous, 0.0, 10.0});
+  }
+
+  StandardFormLP sf = build_standard_form_lp(lp);
+  REQUIRE(sf.A.uses_32_bit_indices());
+  REQUIRE(sf.A_row.shares_values_with(sf.A));
+  CHECK(sf.A_row.uses_32_bit_row_offsets());
+
+  const StandardFormIndex first_wide_dimension =
+      static_cast<StandardFormIndex>((std::numeric_limits<int>::max)()) + 1;
+  StandardColumnMatrix wide_rows(first_wide_dimension, 1);
+  REQUIRE_FALSE(wide_rows.uses_32_bit_indices());
+  CHECK(wide_rows.rows() == first_wide_dimension);
+  CHECK(wide_rows.cols() == 1);
+
+  const std::size_t full_row_copy_bytes =
+      static_cast<std::size_t>(sf.A.rows() + 1) * sizeof(StandardFormIndex) +
+      static_cast<std::size_t>(sf.A.nonZeros()) *
+          (sizeof(StandardFormIndex) + sizeof(double));
+  CHECK(sf.A_row.index_memory_bytes() < full_row_copy_bytes);
+
+  StandardFormLP copied = sf;
+  REQUIRE(copied.A.valuePtr() != sf.A.valuePtr());
+  REQUIRE(copied.A_row.shares_values_with(copied.A));
+  const int col = 0;
+  const int row = static_cast<int>(
+      StandardColumnMatrix::InnerIterator(copied.A, 0).row());
+  const double source_value = sf.A.coeff(row, col);
+  copied.A.valuePtr()[0] += 3.0;
+  CHECK(copied.A_row.coeff(row, col) == Approx(source_value + 3.0));
+  CHECK(sf.A_row.coeff(row, col) == Approx(source_value));
+
+  SimplexOptions transient_options;
+  transient_options.lp_kernel_backend = LpKernelBackend::HiGHS;
+  const auto transient = solve_lp_from_sf(sf, transient_options);
+  REQUIRE(transient.result.stats.success);
+  CHECK(transient.form.A.rows() == 0);
+  transient_options.retain_standard_form = true;
+  const auto retained = solve_lp_from_sf(sf, transient_options);
+  REQUIRE(retained.result.stats.success);
+  CHECK(retained.form.A.rows() == sf.A.rows());
+  CHECK(retained.form.A_row.shares_values_with(retained.form.A));
+}
+
+TEST_CASE("Standard form row view scales to an explicitly requested order",
+          "[.lp_scale][matrix_storage]") {
+  const char* requested = std::getenv("MIPSOLVERS_LP_SCALE_ROWS");
+  if (requested == nullptr) SKIP("set MIPSOLVERS_LP_SCALE_ROWS to run");
+  const long long parsed = std::strtoll(requested, nullptr, 10);
+  REQUIRE(parsed > 0);
+  REQUIRE(parsed <= (std::numeric_limits<int>::max)());
+  const int dimension = static_cast<int>(parsed);
+
+  const auto start = std::chrono::steady_clock::now();
+  StandardColumnMatrix matrix(dimension, dimension);
+  matrix.reserve(static_cast<StandardFormIndex>(dimension));
+  for (int col = 0; col < dimension; ++col) {
+    matrix.startVec(col);
+    matrix.insertBackByOuterInner(col, col) = 1.0;
+  }
+  matrix.finalize();
+  REQUIRE(matrix.isCompressed());
+  REQUIRE(matrix.nonZeros() == dimension);
+
+  StandardRowMatrix row_view;
+  row_view = matrix;
+  const double elapsed = std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - start).count();
+  INFO("dimension=" << dimension << " elapsed_sec=" << elapsed
+                     << " row_index_bytes=" << row_view.index_memory_bytes());
+  REQUIRE(row_view.shares_values_with(matrix));
+  REQUIRE(row_view.uses_32_bit_row_offsets());
+  CHECK(row_view.nonZeros() == dimension);
+  CHECK(row_view.coeff(0, 0) == Approx(1.0));
+  CHECK(row_view.coeff(dimension - 1, dimension - 1) == Approx(1.0));
+  const std::size_t expected_max =
+      (static_cast<std::size_t>(dimension) + 1) *
+          sizeof(std::uint32_t) +
+      2 * static_cast<std::size_t>(dimension) * sizeof(std::uint32_t);
+  CHECK(row_view.index_memory_bytes() <= expected_max);
+}
+
+TEST_CASE("Cost journal stays sparse and deterministically densifies",
+          "[dual_simplex][performance][cost_journal]") {
+  using mipsolvers::engine::native_dual::detail::SparseCostJournal;
+
+  SparseCostJournal sparse;
+  sparse.reset(1024);
+  sparse.add(17, 1.5);
+  sparse.add(3, -2.0);
+  sparse.add(17, 0.25);
+  REQUIRE_FALSE(sparse.is_dense());
+  CHECK(sparse.size() == 2);
+  CHECK(sparse.at(17) == Approx(1.75));
+  CHECK(sparse.at(3) == Approx(-2.0));
+  CHECK(sparse.at(99) == Approx(0.0));
+  CHECK(sparse.max_abs() == Approx(2.0));
+  CHECK(sparse.memory_bytes() < 1024 * sizeof(double));
+  std::vector<int> touched;
+  sparse.for_each([&](int column, double) { touched.push_back(column); });
+  REQUIRE(touched.size() == 2);
+  CHECK(touched[0] == 17);
+  CHECK(touched[1] == 3);
+  sparse.add(17, -1.75);
+  CHECK(sparse.size() == 1);
+  sparse.set(3, 0.0);
+  CHECK(sparse.empty());
+  sparse.add(17, 2.5);
+  CHECK(sparse.size() == 1);
+  CHECK(sparse.at(17) == Approx(2.5));
+
+  SparseCostJournal adaptive;
+  adaptive.reset(64);
+  for (int column = 0; column < 8; ++column) {
+    adaptive.set(column, static_cast<double>(column + 1));
+  }
+  REQUIRE(adaptive.is_dense());
+  CHECK(adaptive.size() == 8);
+  CHECK(adaptive.at(7) == Approx(8.0));
+  adaptive.clear();
+  CHECK(adaptive.empty());
+  CHECK(adaptive.max_abs() == Approx(0.0));
+  adaptive.add(11, -4.0);
+  CHECK(adaptive.at(11) == Approx(-4.0));
+  adaptive.add(11, 4.0);
+  CHECK(adaptive.empty());
+}
+
+TEST_CASE("Dense parallel PRICE agrees with the serial sparse product",
+          "[dual_simplex][performance][parallel_price]") {
+  using namespace mipsolvers::engine::native_dual::detail;
+  constexpr int dimension = 4096;
+  constexpr int entries_per_column = 16;
+  StandardColumnMatrix A(dimension, dimension);
+  A.reserve(static_cast<StandardFormIndex>(dimension) * entries_per_column);
+  for (int column = 0; column < dimension; ++column) {
+    A.startVec(column);
+    for (int row = 0; row < entries_per_column; ++row) {
+      A.insertBackByOuterInner(column, row) =
+          0.25 + static_cast<double>((column + row) % 13) / 16.0;
+    }
+  }
+  A.finalize();
+  StandardRowMatrix A_row;
+  A_row = A;
+
+  IndexedVector y;
+  y.dimension = dimension;
+  y.index.reserve(dimension);
+  y.value.reserve(dimension);
+  for (int row = 0; row < dimension; ++row) {
+    y.index.push_back(row);
+    y.value.push_back(1.0 + static_cast<double>(row % 7) / 8.0);
+  }
+
+  IndexedVector serial;
+  IndexedVector parallel;
+  multiply_AT_indexed(A, A_row, y, serial, 1);
+  multiply_AT_indexed(A, A_row, y, parallel, 4);
+  REQUIRE(serial.index.size() == parallel.index.size());
+  REQUIRE(serial.index.size() == dimension);
+
+  if (const char* requested =
+          std::getenv("MIPSOLVERS_LP_KERNEL_BENCH_REPEATS")) {
+    const int repeats = std::max(1, std::atoi(requested));
+    const auto serial_start = std::chrono::steady_clock::now();
+    for (int repeat = 0; repeat < repeats; ++repeat) {
+      multiply_AT_indexed(A, A_row, y, serial, 1);
+    }
+    const double serial_sec = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - serial_start).count();
+    const auto parallel_start = std::chrono::steady_clock::now();
+    for (int repeat = 0; repeat < repeats; ++repeat) {
+      multiply_AT_indexed(A, A_row, y, parallel, 4);
+    }
+    const double parallel_sec = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - parallel_start).count();
+    std::fprintf(stderr,
+                 "[LP-KERNEL-BENCH] PRICE repeats=%d serial_sec=%.9f "
+                 "parallel_sec=%.9f speedup=%.6f\n",
+                 repeats, serial_sec, parallel_sec,
+                 serial_sec / parallel_sec);
+  }
+  for (int column = 0; column < dimension; ++column) {
+    CHECK(parallel.at(column) == serial.at(column));
+  }
+}
+
+TEST_CASE("Parallel BFRT merge is independent of worker count",
+          "[dual_simplex][performance][parallel_bfrt]") {
+  using namespace mipsolvers::engine::native_dual::detail;
+  constexpr int scan_count = 8192;
+  constexpr int columns = scan_count + 1;
+  StandardFormLP sf;
+  sf.A.resize(1, columns);
+  sf.A.makeCompressed();
+
+  SimplexOptions options = native_simplex_options();
+  State state;
+  state.sf = &sf;
+  state.options = &options;
+  state.phase = Phase::Two;
+  state.m = 1;
+  state.n = columns;
+  state.basis = {columns - 1};
+  state.basic.assign(columns, 0);
+  state.basic.back() = 1;
+  state.move.assign(columns, Move::Up);
+  state.move.back() = Move::Fixed;
+  state.bounds.lower = Eigen::VectorXd::Zero(columns);
+  state.bounds.upper = Eigen::VectorXd::Ones(columns);
+  state.bounds.enterable.assign(columns, 1);
+  state.reduced_costs = Eigen::VectorXd::Constant(columns, -1.0);
+  state.reduced_costs[columns - 1] = 0.0;
+  state.bfrt_error_coef.assign(columns, 0.0);
+
+  Leaving leaving;
+  leaving.row = 0;
+  leaving.side = 1;
+  leaving.violation = 0.5;
+  leaving.row_ep.dimension = 1;
+  leaving.row_ep.index = {0};
+  leaving.row_ep.value = {1.0};
+  IndexedVector pivot_row;
+  pivot_row.dimension = columns;
+  pivot_row.index.reserve(scan_count);
+  pivot_row.value.reserve(scan_count);
+  for (int column = 0; column < scan_count; ++column) {
+    pivot_row.index.push_back(column);
+    pivot_row.value.push_back(1.0);
+  }
+
+  PivotTransaction serial;
+  PivotTransaction parallel;
+  std::string failure;
+  state.kernel_threads = 1;
+  REQUIRE(choose_entering_bfrt(state, leaving, pivot_row, serial, failure));
+  INFO(failure);
+  state.kernel_threads = 4;
+  REQUIRE(choose_entering_bfrt(state, leaving, pivot_row, parallel, failure));
+  INFO(failure);
+
+  if (const char* requested =
+          std::getenv("MIPSOLVERS_LP_KERNEL_BENCH_REPEATS")) {
+    const int repeats = std::max(1, std::atoi(requested));
+    const auto measure = [&](int workers) {
+      state.kernel_threads = workers;
+      const auto start = std::chrono::steady_clock::now();
+      for (int repeat = 0; repeat < repeats; ++repeat) {
+        PivotTransaction measured;
+        REQUIRE(choose_entering_bfrt(state, leaving, pivot_row, measured,
+                                     failure));
+      }
+      return std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - start).count();
+    };
+    const double serial_sec = measure(1);
+    const double parallel_sec = measure(4);
+    std::fprintf(stderr,
+                 "[LP-KERNEL-BENCH] BFRT repeats=%d serial_sec=%.9f "
+                 "parallel_sec=%.9f speedup=%.6f\n",
+                 repeats, serial_sec, parallel_sec,
+                 serial_sec / parallel_sec);
+  }
+  CHECK(parallel.entering.col == serial.entering.col);
+  CHECK(parallel.entering.pivot == serial.entering.pivot);
+  CHECK(parallel.entering.alpha == serial.entering.alpha);
+  CHECK(parallel.entering.theta == serial.entering.theta);
+  CHECK(parallel.positive_candidate_count == serial.positive_candidate_count);
+  CHECK(parallel.certified_candidate_count ==
+        serial.certified_candidate_count);
+  CHECK(parallel.stable_candidate_count == serial.stable_candidate_count);
+  CHECK(parallel.positive_capacity == serial.positive_capacity);
+  CHECK(parallel.certified_capacity == serial.certified_capacity);
+  CHECK(parallel.stable_capacity == serial.stable_capacity);
+  CHECK(parallel.harris_second_pass_candidates ==
+        serial.harris_second_pass_candidates);
+  CHECK(parallel.flips.size() == serial.flips.size());
+  CHECK(parallel.cost_shifts.size() == serial.cost_shifts.size());
+}
+
+TEST_CASE("Intermediate canonical residual audits are rate limited",
+          "[dual_simplex][performance][audit]") {
+  using namespace mipsolvers::engine::native_dual::detail;
+  StandardFormLP sf;
+  Eigen::Matrix<double, 2, 4> dense;
+  dense << 2.0, 0.0, 1.0, 0.0,
+           0.0, 3.0, 0.0, 1.0;
+  sf.A = dense.sparseView();
+  sf.A.makeCompressed();
+  sf.A_row = sf.A;
+  sf.b = Eigen::VectorXd::Ones(2);
+  sf.c_max = Eigen::VectorXd::Zero(4);
+  sf.var_ub = Eigen::VectorXd::Constant(
+      4, std::numeric_limits<double>::infinity());
+
+  auto options = native_simplex_options();
+  options.intermediate_audit_interval = 32;
+  State state;
+  state.sf = &sf;
+  state.options = &options;
+  state.m = 2;
+  state.n = 4;
+  state.basis = {0, 1};
+  state.bounds.lower = Eigen::VectorXd::Zero(4);
+  state.bounds.upper = sf.var_ub;
+  state.bounds.enterable.assign(4, 1);
+  state.move.assign(4, Move::Up);
+  state.cost = sf.c_max;
+  state.original_cost = sf.c_max;
+  state.factor = std::make_shared<BasisFactor>(sf, std::vector<int>{2, 3});
+  int repairs = 0;
+  std::string failure;
+  REQUIRE(state.factor->rebuild(state.basis, repairs, failure));
+  REQUIRE(reconstruct(state, failure));
+  CHECK(state.canonical_residual_audits == 1);
+
+  for (int rebuild = 2; rebuild < 32; ++rebuild) {
+    REQUIRE(state.factor->rebuild(state.basis, repairs, failure));
+  }
+  REQUIRE(reconstruct(state, failure));
+  CHECK(state.canonical_residual_audits == 1);
+  REQUIRE(state.factor->rebuild(state.basis, repairs, failure));
+  REQUIRE(reconstruct(state, failure));
+  CHECK(state.canonical_residual_audits == 2);
+  REQUIRE(reconstruct(state, failure, true, true, true));
+  CHECK(state.canonical_residual_audits == 3);
+}
+
 TEST_CASE("Primal PSE recurrence matches an explicit basis exchange",
           "[dual_simplex][primal][pricing][pse]") {
   using namespace mipsolvers::engine::native_dual::detail;
@@ -1405,6 +2109,49 @@ TEST_CASE("DualSimplex: repeated basis state taboos its prior outgoing edge",
   CHECK_FALSE(mipsolvers::engine::native_dual::detail::is_taboo_row(state, 0));
 }
 
+TEST_CASE("DualSimplex: cycle history has a hard memory bound",
+          "[dual_simplex][performance][cycling]") {
+  using namespace mipsolvers::engine::native_dual;
+  using namespace mipsolvers::engine::native_dual::detail;
+  State state;
+  state.m = 10000000;
+  state.n = 1;
+  state.basis = {0};
+  state.basic = {1};
+  state.move = {Move::Fixed};
+  initialize_cycle_guard(state);
+  Statistics statistics;
+  bool repeated = false;
+  for (std::size_t i = 0; i < kCycleHistoryCapacity + 32; ++i) {
+    state.cycle_signature_live_a = static_cast<std::uint64_t>(i + 1);
+    state.cycle_signature_live_b = ~static_cast<std::uint64_t>(i + 1);
+    repeated = record_cycle_arrival(state, statistics) || repeated;
+  }
+  CHECK_FALSE(repeated);
+  CHECK(state.cycle_history.size() <= kCycleHistoryCapacity);
+  CHECK(state.cycle_history.storage_capacity() <=
+        2 * kCycleHistoryCapacity);
+
+  int expiry = -1;
+  add_taboo_row(state, 0, statistics);
+  REQUIRE(is_taboo_row(state, 0, &expiry));
+  CHECK(expiry - state.pricing_epoch <= kMaxTabooLifetime);
+
+  release_taboo_row(state, 0, statistics);
+  for (std::size_t i = 0; i < kTabooCapacity + 32; ++i) {
+    add_taboo_row(state, 0, statistics);
+    release_taboo_row(state, 0, statistics);
+  }
+  CHECK(state.taboo_rows.empty());
+  CHECK(state.taboo_rows_fifo.size() <= kTabooCapacity);
+  CHECK(state.taboo_rows.storage_capacity() <= 2 * kTabooCapacity);
+
+  state.m = std::numeric_limits<int>::max();
+  add_taboo_row(state, 0, statistics);
+  REQUIRE(is_taboo_row(state, 0, &expiry));
+  CHECK(expiry - state.pricing_epoch == kMaxTabooLifetime);
+}
+
 TEST_CASE("DualSimplex: large LPModel warm-start stays sparse",
           "[dual_simplex][warm_start]") {
   constexpr int rows = 256;
@@ -1632,6 +2379,62 @@ TEST_CASE("HFactor basis repair replaces only the column without a pivot",
   factor.ftran(rhs.data(), solution.data());
   CHECK((solution - Eigen::Vector2d(2.0, 2.0)).lpNorm<Eigen::Infinity>() ==
         Approx(0.0).margin(1e-12));
+}
+
+TEST_CASE("HFactor reuses immutable CSC storage across INVERTs",
+          "[dual_simplex][performance][hfactor]") {
+  Eigen::SparseMatrix<double> A(3, 6);
+  std::vector<Eigen::Triplet<double>> entries{
+      {0, 0, 2.0}, {2, 0, 1.0}, {0, 1, 1.0}, {1, 1, 3.0},
+      {1, 2, 1.0}, {2, 2, 4.0}, {0, 3, 1.0}, {1, 4, 1.0},
+      {2, 5, 1.0}};
+  A.setFromTriplets(entries.begin(), entries.end());
+  A.makeCompressed();
+  std::vector<int> structural{0, 1, 2};
+  std::vector<int> logical{3, 4, 5};
+
+  HFactorBackend factor;
+  REQUIRE(factor.factorize(A, structural.data(), 3));
+  REQUIRE(factor.matrix_copy_count() == 0);
+  REQUIRE(factor.factorize(A, logical.data(), 3));
+  CHECK(factor.matrix_copy_count() == 0);
+
+  Eigen::SparseMatrix<double> copied = A;
+  copied.makeCompressed();
+  REQUIRE(factor.factorize(copied, structural.data(), 3));
+  CHECK(factor.matrix_copy_count() == 0);
+
+  StandardColumnMatrix wide = A;
+  HFactorBackend direct;
+  REQUIRE(direct.factorize(wide, structural.data(), 3));
+  REQUIRE(direct.factorize(wide, logical.data(), 3));
+  CHECK(direct.matrix_copy_count() == 0);
+}
+
+TEST_CASE("Sparse basis inverse rows never use the dense solve API",
+          "[dual_simplex][performance][basis_row]") {
+  using mipsolvers::engine::native_dual::detail::BasisFactor;
+  StandardFormLP sf;
+  Eigen::Matrix<double, 3, 6> dense;
+  dense << 2.0, 1.0, 0.0, 1.0, 0.0, 0.0,
+           0.0, 3.0, 1.0, 0.0, 1.0, 0.0,
+           1.0, 0.0, 4.0, 0.0, 0.0, 1.0;
+  sf.A = dense.sparseView();
+  sf.A.makeCompressed();
+  sf.A_row = sf.A;
+  std::vector<int> basis{0, 1, 2};
+  BasisFactor factor(sf, std::vector<int>{3, 4, 5});
+  int repairs = 0;
+  std::string failure;
+  REQUIRE(factor.rebuild(basis, repairs, failure));
+  const SparseFactorTelemetry before = factor.factor_telemetry();
+  std::vector<std::pair<int, double>> row;
+  REQUIRE(factor.basis_inverse_row_sparse_entries(1, row));
+  REQUIRE_FALSE(row.empty());
+  const SparseFactorTelemetry after = factor.factor_telemetry();
+  CHECK(after.dense_solves == before.dense_solves);
+  CHECK(after.indexed_solves == before.indexed_solves + 1);
+  CHECK(after.matrix_copies == 0);
 }
 
 TEST_CASE("HFactor preserves caller basis positions and solve coordinates",
@@ -1887,6 +2690,7 @@ TEST_CASE("DualSimplex: BFRT warm sequence agrees with HiGHS",
   auto options = native_simplex_options();
   options.max_iter = 2000;
   options.escalation_max_level = 0;
+  options.exact_dse_initialization = true;
 
   auto native = solve_lp_with_basis(lp, options);
   REQUIRE(native.result.stats.success);

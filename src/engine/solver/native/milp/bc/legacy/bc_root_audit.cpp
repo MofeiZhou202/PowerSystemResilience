@@ -133,7 +133,8 @@ RootCutStandardFormAudit audit_root_cut_standard_form_rows(const LPModel& lp,
   }
 
   const Eigen::SparseMatrix<double, Eigen::RowMajor> lp_a_row = lp.A;
-  const Eigen::SparseMatrix<double, Eigen::RowMajor> sf_a_row = sf.A;
+  const Eigen::SparseMatrix<double, Eigen::RowMajor> sf_a_row =
+      sf.A.to_eigen<Eigen::RowMajor, int>();
   for (int r = first_new_row; r < m_ineq; ++r) {
     ++out.rows;
     const int sign = sf.row_sign[static_cast<std::size_t>(r)];

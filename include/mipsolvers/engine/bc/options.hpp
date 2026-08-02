@@ -77,6 +77,19 @@ struct BCPseudocostInit {
   bool empty() const { return pseudocostup.empty(); }
 };
 
+/// Policy for an incumbent-driven restart of the sequential search tree.
+/// A restart discards the open node frontier and requeues the current root
+/// domain for a fresh LP solve. Global cuts, conflicts, implications, clique
+/// information, and pseudocost observations remain owned by the solve.
+struct BCTreeRestartOptions {
+  bool enabled{false};
+  int max_restarts{2};
+  int min_nodes_since_restart{256};
+  int min_open_nodes{64};
+  double min_relative_incumbent_improvement{0.01};
+  double min_remaining_time_sec{0.25};
+};
+
 }  // namespace mipsolvers::engine
 
 namespace mipsolvers::engine {
@@ -101,7 +114,7 @@ struct BCOptions {
   int    max_cut_depth{0};          ///< Generate cuts at tree nodes up to this depth
   double gmi_min_efficacy{1e-3};    ///< Min normalized violation for GMI admission
   double gmi_max_density{0.35};     ///< Max nonzero ratio allowed for admitted GMI cuts
-  double gmi_max_parallelism{0.90}; ///< P2.2: Reject near-parallel cuts
+  double gmi_max_parallelism{0.90}; ///< Reject near-parallel cuts
   double gmi_min_activity{0.0};     ///< Min alignment with highly fractional binary support
   double gmi_min_binary_support{0.0}; ///< Min share of nonzeros on binary vars
   double gmi_activity_weight{0.5};  ///< Activity bonus weight in GMI ranking score
@@ -160,6 +173,7 @@ struct BCOptions {
   bool use_feasibility_pump{true};
   bool use_progressive_rounding{true};
   bool use_papilo_presolve{true};
+  bool native_presolve_probing{true};
   bool papilo_aggressive{false};
   bool verbose{false};
   /// Accept a caller-provided initial_solution once the fixed-integer
@@ -307,7 +321,7 @@ struct BCOptions {
   /// MILPs many proof-frontier rows are valid but degenerate, so unbounded
   /// local re-solves can cost more than they save until the separator learns a
   /// truly bound-moving proof.
-  bool enable_reduced_cost_proof_cut_resolve{true};
+  bool enable_reduced_cost_proof_cut_resolve{false};
   int  reduced_cost_proof_cut_resolve_max_lps{4};
 
   /// @brief Deterministic-parallel mode.
@@ -333,7 +347,7 @@ struct BCOptions {
   bool deterministic_parallel{false};
 
   // ═══════════════════════════════════════════════════════════════════════
-  // LP fallback recovery (Phase 1)
+  // LP fallback recovery
   // ═══════════════════════════════════════════════════════════════════════
   bool enable_lp_fallback{true};
   int fallback_l1_retries{3};
@@ -346,7 +360,7 @@ struct BCOptions {
   // ═══════════════════════════════════════════════════════════════════════
   int ipm_auto_threshold{8000};
   int large_problem_threshold{10000};
-  /// P7.6: Raised from 5000→15000.  For m≤15000 simplex warm-start re-optimises
+  /// For m <= 15000 simplex warm-start re-optimises
   /// in ≤30 pivots (~0.3 ms), while IPM Cholesky costs ≥1 ms.  IPMDiver is only
   /// beneficial when simplex cold-start would dominate (m>15000).
   int hybrid_ipm_threshold{15000};
@@ -447,8 +461,12 @@ struct BCOptions {
   int crossover_heuristic_freq{100};
   int rins_frequency{200};
 
+  // Incumbent-driven sequential-tree restart. Kept as a structured policy so
+  // trigger thresholds do not add another set of unrelated flat fields.
+  BCTreeRestartOptions tree_restart{};
+
   // ═══════════════════════════════════════════════════════════════════════
-  // P3.1: Large Neighborhood Search (LNS)
+  // Large Neighborhood Search (LNS)
   // ═══════════════════════════════════════════════════════════════════════
   bool   enable_lns{true};
   double lns_fix_ratio{0.80};
@@ -466,7 +484,7 @@ struct BCOptions {
   double incumbent_local_branching_time_limit{0.75};
 
   // ═══════════════════════════════════════════════════════════════════════
-  // P5.1: Work stealing (parallel only)
+  // Work stealing (parallel only)
   // ═══════════════════════════════════════════════════════════════════════
   bool enable_work_stealing{true};
   int  work_steal_deque_size{256};
@@ -475,8 +493,9 @@ struct BCOptions {
   // Determinism
   // ═══════════════════════════════════════════════════════════════════════
   /// Seed for parallel RNGs (work-stealing victim selection, etc.).
-  /// Deterministic default makes parallel runs reproducible across solves
-  /// inside the same process; set to 0 to request a random_device seed.
+  /// Every value, including zero, is a deterministic seed. Callers that want
+  /// nondeterminism must generate and record a seed before constructing the
+  /// options so the solve remains replayable.
   unsigned long long random_seed{0x9E3779B97F4A7C15ULL};
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -518,7 +537,7 @@ struct BCOptions {
   // ═══════════════════════════════════════════════════════════════════════
   int pool_cut_row_threshold{500};
   int pool_cut_depth_limit{3};
-  /// P7.4: Only scan the pool every N nodes (default 1 = every node).
+  /// Only scan the pool every N nodes (default 1 = every node).
   /// Set to 2 to halve violation-scan FLOPs with minimal impact on cut
   /// utilisation (cuts applied one iteration later at most).
   int pool_cut_scan_interval{1};
@@ -533,23 +552,23 @@ struct BCOptions {
   double stall_gap_min_improvement{0.05};
 
   // ═══════════════════════════════════════════════════════════════════════
-  // P8: Root phase enhancements (HiGHS-inspired)
+  // Root phase enhancements (HiGHS-inspired)
   // ═══════════════════════════════════════════════════════════════════════
-  /// P8.1: Spawn a background thread immediately before the root LP solve
+  /// Spawn a background thread immediately before the root LP solve
   /// that computes an approximate analytic centre of the LP polytope via
   /// IPM with zero cost and no crossover.  The result is joined before the
-  /// root heuristic phase and used by P8.2 linesearch rounding.
+  /// root heuristic phase and used by line-search rounding.
   /// Requires use_ipm_root = true.  Disabled by default.
   bool use_analytic_centre{false};
 
-  /// P8.2: After the root LP (and analytic-centre thread join), slide a
+  /// After the root LP (and analytic-centre thread join), slide a
   /// convex combination  x(α) = (1-α)*x_relax + α*x_centre  from α=0 to
   /// α=1, round integers at each step, and attempt feasibility repair.
   /// Falls back to plain linesearch between x_relax and rounded_x when no
   /// analytic centre is available.  Disabled by default.
   bool use_linesearch_rounding{false};
 
-  /// P8.4: Bias simple rounding using LP column lock counts (HiGHS-style):
+  /// Bias simple rounding using LP column lock counts (HiGHS-style):
   ///   uplocks[j]==0  → always ceil  (zero up-locks: can only go up freely)
   ///   downlocks[j]==0 → always floor (zero down-locks: can only go down freely)
   ///   else           → nearest integer  (unchanged from baseline)
@@ -715,13 +734,13 @@ struct BCOptions {
   /// the remaining wall time back to Highs::run().
   double highs_strict_seed_native_ipm_basis_time_limit_sec{5.0};
 
-  /// P8: Maximum IPM iterations for the analytic-centre sub-solve.
+  /// Maximum IPM iterations for the analytic-centre sub-solve.
   int analytic_centre_max_iter{200};
 
   // ═══════════════════════════════════════════════════════════════════════
-  // P9: Large-scale competitiveness (Forrest--Tomlin + symmetry breaking)
+  // Forrest--Tomlin updates and symmetry breaking
   // ═══════════════════════════════════════════════════════════════════════
-  /// P9.1: Enable Forrest--Tomlin incremental LU updates in the dual
+  /// Enable Forrest--Tomlin incremental LU updates in the dual
   /// simplex.  When true, sets simplex_factor_backend = 1
   /// (BackendB_HiGHSSafe) throughout cut LP / node LP / push / cleanup
   /// dispatches.  Requires CMake build flag
@@ -730,7 +749,7 @@ struct BCOptions {
   /// default because of measured drift in certain MIP paths.
   bool use_forrest_tomlin_updates{false};
 
-  /// P9.2: Orbit-based symmetry breaking.  At the root node, detect
+  /// Orbit-based symmetry breaking. At the root node, detect
   /// orbits of identical binary columns (matching cost, bounds, and full
   /// constraint-column vector) and append sum-lex ordering inequalities
   /// that preserve at least one optimum.  Disabled by default and additionally
@@ -738,11 +757,11 @@ struct BCOptions {
   /// production thresholds were tuned on UC/SCUC benchmarks.
   bool use_symmetry_breaking{false};
 
-  /// P9.2: Minimum orbit size to add lex cuts (must be >= 2; orbits of
+  /// Minimum orbit size to add lex cuts (must be >= 2; orbits of
   /// size 1 are trivially symmetric-free).
   int symmetry_min_orbit_size{2};
 
-  /// P9.2: Maximum orbits to break.  Bounds the detection cost on very
+  /// Maximum orbits to break. Bounds the detection cost on very
   /// large instances.  Orbits are sorted by descending size so the
   /// largest (highest-yield) orbits are broken first.
   int symmetry_max_orbits{64};
@@ -783,12 +802,8 @@ struct BCOptions {
   // High-performance auto-tuning knobs (2026-Q2)
   // ═══════════════════════════════════════════════════════════════════════
   // Problem classification thresholds
-  /// P7.7: Lowered from 10000→8000 and binary threshold from 2000→500 to
-  /// include the 118-bus SCUC (m=10524, n_bin=1296) in the UC-like bypass
-  /// that skips feasibility pump and progressive rounding.  Analysis shows
-  /// that for any UC instance with tight ramp constraints (m_presolved>8000,
-  /// n_bin>=500), rounding a fractional commitment schedule almost certainly
-  /// produces an infeasible dispatch subproblem, so pump iterations are wasted.
+  /// Row threshold for the UC-like heuristic bypass. Together with the binary
+  /// threshold, it skips rounding-heavy heuristics on large structured roots.
   int large_uc_row_threshold{8000};
   int large_uc_binary_threshold{500};
   int near_integral_n_threshold{10000};

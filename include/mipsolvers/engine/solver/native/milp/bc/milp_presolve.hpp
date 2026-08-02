@@ -19,12 +19,14 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 
+#include "mipsolvers/engine/detail/bc_numerics.hpp"
 #include "mipsolvers/engine/problem_types.hpp"
 
 namespace mipsolvers::engine {
@@ -36,13 +38,19 @@ struct PresolveStats {
   int rows_removed{0};
   int cols_removed{0};
   int bounds_tightened{0};
-  int coefficients_strengthened{0};
   int singletons_removed{0};
   int doubletons_removed{0};
   int forcing_rows{0};
   int dominated_cols{0};
   int parallel_rows{0};
   int probing_fixings{0};
+  std::uint64_t probing_trail_pushes{0};
+  std::uint64_t probing_rows_processed{0};
+  std::uint64_t probing_implications_learned{0};
+  std::uint64_t probing_max_touched_cols{0};
+  bool probing_truncated{false};
+  std::uint64_t activity_rows_recomputed{0};
+  std::uint64_t activity_delta_updates{0};
   int rounds{0};
   double presolve_time_sec{0.0};
 
@@ -53,22 +61,19 @@ struct PresolveStats {
 /// Options controlling presolve behavior.
 struct PresolveOptions {
   int max_rounds{20};
-  // singleton-row, forcing-row and probing reductions are sound.  They were
-  // previously disabled because they appeared to remove the integer optimum on
-  // SCUC MIPs; the real cause was a missing objective-cost transfer in
-  // process_singleton_columns() (an eliminated column-singleton's cost was not
-  // moved onto the remaining variables), which those reductions merely exposed
-  // by stripping a costed variable down to a singleton.  With that fixed they
-  // are validated exact via native_kernel_comparison --check.
-  bool do_singleton_rows{true};
-  bool do_forcing_rows{true};
+  bool do_singleton_rows{false};
+  bool do_singleton_columns{false};
+  bool do_forcing_rows{false};
   bool do_probing{true};
   int max_probing_candidates{500};
   int probing_depth{3};
-  bool do_coefficient_strengthen{true};
-  bool do_doubleton{true};
-  bool do_parallel_rows{true};
-  bool do_dominated{true};
+  std::uint64_t max_probing_row_visits{100000};
+  std::uint64_t max_probing_implications{20000};
+  // These reductions remain opt-in until each transformation has a complete
+  // postsolve/integrality proof and fixed-cohort validation.
+  bool do_doubleton{false};
+  bool do_parallel_rows{false};
+  bool do_dominated{false};
   double zero_tol{1e-10};
   double bound_tol{1e-9};
   bool verbose{false};
@@ -83,6 +88,14 @@ struct PresolveOptions {
 ///   Eigen::VectorXd x_orig = ps.postsolve(x_reduced);
 class MILPPresolve {
  public:
+  struct ProbingImplication {
+    int trigger_col{-1};
+    bool trigger_value_one{false};
+    int implied_col{-1};
+    bool implied_is_lb{false};
+    double implied_value{0.0};
+  };
+
   explicit MILPPresolve(PresolveOptions opts = {});
 
   /// Run presolve on an LP/MIP model.
@@ -98,6 +111,9 @@ class MILPPresolve {
   Eigen::VectorXd forward_map(const Eigen::VectorXd& x_input) const;
 
   const PresolveStats& stats() const { return stats_; }
+  const std::vector<ProbingImplication>& probing_implications() const {
+    return probing_implications_reduced_;
+  }
 
   /// Column mapping accessors (valid after run()).
   const std::vector<int>& orig_to_reduced_col() const { return orig_to_reduced_col_; }
@@ -143,7 +159,8 @@ class MILPPresolve {
 
   // Cached row activity bounds
   struct ActivityCache {
-    double min_act{0.0}, max_act{0.0};
+    detail::StableActivitySum min_act;
+    detail::StableActivitySum max_act;
     int n_inf_min{0}, n_inf_max{0};  // count of infinite contributors
   };
   std::vector<ActivityCache> row_activity_;
@@ -170,6 +187,8 @@ class MILPPresolve {
   std::vector<int> orig_to_reduced_col_;
   std::vector<int> reduced_to_orig_col_;
   std::vector<int> orig_to_reduced_row_;
+  std::vector<ProbingImplication> probing_implications_original_;
+  std::vector<ProbingImplication> probing_implications_reduced_;
 
   // How many ineq rows in the original model (first m_ineq entries = A, rest = Aeq)
   int m_ineq_orig_{0};
@@ -180,6 +199,9 @@ class MILPPresolve {
                      std::vector<int>& integer_idx);
   void compute_all_activities();
   void update_activity(int row);
+  bool set_col_lower_bound(int col, double value);
+  bool set_col_upper_bound(int col, double value);
+  void remove_col_from_activities(int col);
   bool detect_infeasibility(const char* phase);
   void mark_infeasible(std::string reason);
 
@@ -193,7 +215,6 @@ class MILPPresolve {
   int detect_forcing_rows();
   int detect_dominated_columns();
   int detect_parallel_rows();
-  int strengthen_coefficients();
   int run_probing();
 
   // ── Helpers ──
@@ -201,7 +222,11 @@ class MILPPresolve {
     return col_type_[col] == VarType::Binary || col_type_[col] == VarType::Integer;
   }
   bool is_fixed(int col) const {
-    return std::abs(col_ub_[col] - col_lb_[col]) < opts_.bound_tol;
+    // Eliminating a merely "near-fixed" continuous column is not sound: a
+    // tiny bound gap can still have a material row effect when multiplied by
+    // a large coefficient. Explicit fixing reductions set both endpoints to
+    // the same value, so only eliminate an actually collapsed interval here.
+    return col_lb_[col] == col_ub_[col];
   }
   void fix_variable(int col, double val);
   void delete_row(int row);

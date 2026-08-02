@@ -123,6 +123,29 @@ void detail::explorer_thread(
 	    }
 	    return !out.empty();
 	  };
+  auto refresh_node_fractional_branchables =
+      [&](Node& node, double int_tol) -> bool {
+    node.fractional_branchables_valid = true;
+    node.fractional_branchables_tol = int_tol;
+    return fractional_branchable_indices(
+        node.x_relax, node.lb, node.ub, int_tol,
+        node.fractional_branchables);
+  };
+  auto node_fractional_branchable_indices =
+      [&](Node& node, double int_tol, std::vector<int>& out) -> bool {
+    const double tol_scale =
+        std::max({1.0, std::abs(int_tol),
+                  std::abs(node.fractional_branchables_tol)});
+    const bool cache_matches =
+        node.fractional_branchables_valid && !node.lp_refresh_needed &&
+        std::abs(node.fractional_branchables_tol - int_tol) <=
+            1e-15 * tol_scale;
+    if (!cache_matches) {
+      refresh_node_fractional_branchables(node, int_tol);
+    }
+    out = node.fractional_branchables;
+    return !out.empty();
+  };
   Eigen::VectorXd root_lb(n);
   Eigen::VectorXd root_ub(n);
   for (int j = 0; j < n; ++j) {
@@ -294,7 +317,7 @@ void detail::explorer_thread(
   // polluted fallback-logging node IDs. The value is only used for fallback
   // diagnostics, so a fresh per-thread counter is sufficient.
   int node_id_gen = 0;
-  // P7.3: collect per-child pseudo-cost updates and merge once per expanded
+  // Collect per-child pseudo-cost updates and merge once per expanded
   // parent node (single lock acquisition) instead of locking inside each
   // process_child path.
   std::vector<PCUpdate> pc_updates_buffer;
@@ -579,7 +602,7 @@ void detail::explorer_thread(
                                &learned_conflict,
                                &inference_count,
                                opt.enable_reduced_cost_proof_conflict_minimization
-                                   ? &child.domain_reason_bounds
+                                   ? child.domain_reason_bounds.write_ptr()
                                    : nullptr)) {
       if (learned_conflict.empty()) learned_conflict = child.branch_reasons;
       if (!learned_conflict.empty()) {
@@ -900,7 +923,7 @@ void detail::explorer_thread(
     }
 
     // Pool cut separation (simplex roles only — IPM Cholesky can fail on augmented LPs).
-    // P7.4: gate by pool_cut_scan_interval to halve violation-scan FLOPs on large LPs.
+    // Gate by pool_cut_scan_interval to reduce violation scans on large LPs.
     const int scan_interval = std::max(1, opt.pool_cut_scan_interval);
     const bool do_pool_scan = (node_id_gen % scan_interval == 0);
     if (!is_ipm_diver && do_pool_scan
@@ -991,10 +1014,11 @@ void detail::explorer_thread(
 
     apply_branch_history(true, gain, 0);
 
+    refresh_node_fractional_branchables(child, opt.int_tol);
     return true;
   };
 
-  // P5.1: Per-worker local DFS stack with work stealing support.
+  // Per-worker local DFS stack with work-stealing support.
   // When work stealing is enabled, we use the WorkStealingPool; otherwise fallback
   // to a simple local vector (no stealing).
   WorkStealingDeque* my_deque = nullptr;
@@ -1067,7 +1091,7 @@ void detail::explorer_thread(
     } else if (role == WorkerRole::Diver || role == WorkerRole::IPMDiver) {
       // Diver/IPMDiver: prefer local DFS stack, then steal, then global queue.
       if (my_deque) {
-        // P5.1: Use work-stealing deque.
+        // Use the work-stealing deque when available.
         if (my_deque->pop(cur)) {
           got_node = true;
         } else if (steal_pool->try_steal(thread_id, cur)) {
@@ -1140,8 +1164,7 @@ void detail::explorer_thread(
 	        continue;
 	      }
     std::vector<int> frac;
-		    if (!fractional_branchable_indices(cur.x_relax, cur.lb, cur.ub,
-		                                       opt.int_tol, frac)) {
+		    if (!node_fractional_branchable_indices(cur, opt.int_tol, frac)) {
       if (satisfies_with_bounds(base_lp, cur.x_relax, cur.lb, cur.ub, kNodeFeasibilityTol)) {
         const double obj = objective_value(base_lp.c, cur.x_relax, base_lp.sense);
         shared_inc.try_update(cur.x_relax, obj);
@@ -1213,6 +1236,7 @@ void detail::explorer_thread(
         base_pc = local_pc;  // copy baseline for diffing after probing
       }
       int relia_lp = 0;
+      StrongBranchProbeStorageStats probe_storage;
       j = choose_branch_var_reliability(
           frac, cur.x_relax, local_pc, base_lp, base_sf,
           cur.lb, cur.ub, cur.basis_hint.get(), simplex_opt,
@@ -1220,8 +1244,24 @@ void detail::explorer_thread(
           /*reliability_limit=*/par_probe_reliability,
           /*max_probes=*/par_probe_max, branch_priority,
           has_dynamic_prior ? *dynamic_branching_prior : BCBranchingPriorFn{},
-          branch_context, &selected_direction_observations);
+          branch_context, &selected_direction_observations, &probe_storage);
       stats.lp_solves.fetch_add(relia_lp, std::memory_order_relaxed);
+      stats.strong_probe_base_sf_materializations.fetch_add(
+          probe_storage.base_sf_materializations, std::memory_order_relaxed);
+      stats.strong_probe_bound_transactions.fetch_add(
+          probe_storage.bound_transactions, std::memory_order_relaxed);
+      stats.strong_probe_transaction_snapshot_values.fetch_add(
+          probe_storage.transaction_snapshot_values,
+          std::memory_order_relaxed);
+      stats.strong_probe_transaction_rollbacks.fetch_add(
+          probe_storage.transaction_rollbacks, std::memory_order_relaxed);
+      stats.strong_probe_transaction_failures.fetch_add(
+          probe_storage.transaction_failures, std::memory_order_relaxed);
+      stats.strong_probe_backend_cold_solves.fetch_add(
+          probe_storage.backend_cold_solves, std::memory_order_relaxed);
+      stats.strong_probe_backend_persistent_resolves.fetch_add(
+          probe_storage.backend_persistent_resolves,
+          std::memory_order_relaxed);
       // Merge probing results back to shared PCs.
       if (opt.pseudocost_delta_merge) {
         // Delta-aggregate merge: publish only the *new* samples this thread
@@ -1347,16 +1387,31 @@ void detail::explorer_thread(
                                                   std::memory_order_relaxed);
     }
 
-    Node child_down = cur.branch_child();
+	    NodePayloadSharingStats payload_sharing;
+	    const std::uint64_t parent_domain_values =
+	        static_cast<std::uint64_t>(cur.lb.size() + cur.ub.size());
+	    Node child_down = cur.branch_child(&payload_sharing);
+	    stats.branch_domain_dense_copies.fetch_add(1,
+	                                                std::memory_order_relaxed);
+	    stats.branch_domain_dense_values_copied.fetch_add(
+	        parent_domain_values, std::memory_order_relaxed);
+    stats.branch_payload_child_creations.fetch_add(
+        payload_sharing.child_creations, std::memory_order_relaxed);
+    stats.branch_payload_shared_vectors.fetch_add(
+        payload_sharing.shared_payload_vectors, std::memory_order_relaxed);
+    stats.branch_payload_shared_elements.fetch_add(
+        payload_sharing.shared_payload_elements, std::memory_order_relaxed);
     child_down.ub[j] = std::min(child_down.ub[j], std::floor(xj));
       append_branch_reason(child_down, j, false, child_down.ub[j]);
 
-    Node child_up = std::move(cur);
+	    Node child_up = std::move(cur);
+	    stats.branch_domain_moves.fetch_add(1, std::memory_order_relaxed);
     child_up.x_relax.resize(0);
     child_up.x_seed.resize(0);
     child_up.ipm_iterations = 0;
     child_up.lp_refresh_needed = false;
     child_up.depth = parent_depth + 1;
+    child_up.fractional_branchables_valid = false;
     child_up.lb[j] = std::max(child_up.lb[j], std::ceil(xj));
       append_branch_reason(child_up, j, true, child_up.lb[j]);
 
@@ -1471,12 +1526,12 @@ void detail::explorer_thread(
       }
       pc_updates_buffer.clear();
       if (down_valid) {
-        child_down.estimate = compute_node_estimate(branchable_indices, child_down.x_relax,
+        child_down.estimate = compute_node_estimate(child_down.fractional_branchables, child_down.x_relax,
                                                     pc, opt.int_tol, child_down.bound,
                                                     opt.node_estimate_aggregation);
       }
       if (up_valid) {
-        child_up.estimate = compute_node_estimate(branchable_indices, child_up.x_relax,
+        child_up.estimate = compute_node_estimate(child_up.fractional_branchables, child_up.x_relax,
                                                   pc, opt.int_tol, child_up.bound,
                                                   opt.node_estimate_aggregation);
       }
@@ -1496,7 +1551,7 @@ void detail::explorer_thread(
       if (up_valid) node_queue.push_pq(std::move(child_up));
     } else if (role == WorkerRole::Diver || role == WorkerRole::IPMDiver) {
       // Diver/IPMDiver: push DFS-preferred child to local stack, other to global PQ.
-      // P5.1: Use work-stealing deque when available.
+      // Use the work-stealing deque when available.
       auto push_local = [&](Node&& node) {
         if (my_deque) {
           if (!my_deque->push(std::move(node))) {
@@ -1610,9 +1665,57 @@ void detail::cut_worker_thread(
       LPModel node_lp = base_lp;
       apply_node_bounds(node_lp.vars, req.node_lb, req.node_ub);
       std::shared_ptr<BasisOps> req_sbasis = req.simplex_result.basis.cached_sparse_basis;
+      SeparatorStorageStats separator_storage;
       const int added = add_transformed_tableau_cuts(
           node_lp, req.x_relax, req.simplex_result, opt, opt.cuts_per_round,
-          req_sbasis, nullptr, nullptr, nullptr);
+          req_sbasis, nullptr, nullptr, nullptr, nullptr, 1e-8, nullptr,
+          std::nullopt, &separator_storage);
+      stats.separator_sparse_candidates_created.fetch_add(
+          separator_storage.sparse_candidates_created,
+          std::memory_order_relaxed);
+      stats.separator_sparse_candidate_entries_created.fetch_add(
+          separator_storage.sparse_candidate_entries_created,
+          std::memory_order_relaxed);
+      stats.separator_sparse_aggregation_snapshots.fetch_add(
+          separator_storage.sparse_aggregation_snapshots,
+          std::memory_order_relaxed);
+      stats.separator_sparse_aggregation_entries.fetch_add(
+          separator_storage.sparse_aggregation_entries,
+          std::memory_order_relaxed);
+      stats.separator_dense_workspace_materializations.fetch_add(
+          separator_storage.dense_workspace_materializations,
+          std::memory_order_relaxed);
+      stats.separator_dense_workspace_values.fetch_add(
+          separator_storage.dense_workspace_values,
+          std::memory_order_relaxed);
+      stats.separator_matrix_append_calls.fetch_add(
+          separator_storage.matrix_append_calls, std::memory_order_relaxed);
+      stats.separator_matrix_appended_rows.fetch_add(
+          separator_storage.matrix_appended_rows, std::memory_order_relaxed);
+      stats.separator_matrix_appended_entries.fetch_add(
+          separator_storage.matrix_appended_entries,
+          std::memory_order_relaxed);
+      stats.separator_matrix_prior_entries_bypassing_triplet_rebuild.fetch_add(
+          separator_storage.matrix_prior_entries_bypassing_triplet_rebuild,
+          std::memory_order_relaxed);
+      stats.separator_matrix_storage_reallocations.fetch_add(
+          separator_storage.matrix_storage_reallocations,
+          std::memory_order_relaxed);
+      auto update_peak = [](std::atomic<std::uint64_t>& target,
+                            std::uint64_t value) {
+        std::uint64_t current = target.load(std::memory_order_relaxed);
+        while (current < value &&
+               !target.compare_exchange_weak(current, value,
+                                             std::memory_order_relaxed,
+                                             std::memory_order_relaxed)) {
+        }
+      };
+      update_peak(stats.separator_peak_live_sparse_candidates,
+                  separator_storage.peak_live_sparse_candidates);
+      update_peak(stats.separator_peak_live_sparse_entries,
+                  separator_storage.peak_live_sparse_entries);
+      update_peak(stats.separator_matrix_peak_spare_entries,
+                  separator_storage.matrix_peak_spare_entries);
       if (added > 0) {
         stats.cuts_added.fetch_add(added, std::memory_order_relaxed);
         stats.cut_worker_cuts.fetch_add(added, std::memory_order_relaxed);

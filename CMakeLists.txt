@@ -28,6 +28,11 @@ option(MIPSOLVERS_BUILD_HFACTOR   "Enable the HFactor basis backend"           O
 option(MIPSOLVERS_EIGEN_VECTORIZE "Enable Eigen vectorization intrinsics"      ON)
 option(MIPSOLVERS_ENABLE_NATIVE_ARCH
        "Enable -march=native for host-specific builds"                         OFF)
+set(MIPSOLVERS_PGO_MODE "OFF" CACHE STRING
+    "Profile-guided optimization mode: OFF, GENERATE, or USE")
+set_property(CACHE MIPSOLVERS_PGO_MODE PROPERTY STRINGS OFF GENERATE USE)
+set(MIPSOLVERS_PGO_PROFILE "" CACHE PATH
+    "Clang .profdata file or GCC profile directory used by PGO")
 option(MIPSOLVERS_BUILD_SCUC "Build scuc_solve command-line tool"              ON)
 option(MIPSOLVERS_BUILD_SCUC_CASE_BUILDER "Build scuc_case_builder tool"       ON)
 option(MIPSOLVERS_BUILD_PYTHON "Build Python (pybind11) bindings"              OFF)
@@ -123,6 +128,59 @@ add_library(mipsolvers STATIC
   src/aml/model.cpp
   src/aml/set.cpp
 )
+
+# ── Profile-guided optimization ─────────────────────────────────────────────
+# Instrument only the project core. The required link option is propagated to
+# executables through the static library, while large vendored dependencies
+# remain unchanged. PGO is opt-in because a mismatched workload can regress
+# performance even when the compiler accepts the profile.
+string(TOUPPER "${MIPSOLVERS_PGO_MODE}" _mipsolvers_pgo_mode)
+if(NOT _mipsolvers_pgo_mode MATCHES "^(OFF|GENERATE|USE)$")
+  message(FATAL_ERROR
+    "MIPSOLVERS_PGO_MODE must be OFF, GENERATE, or USE")
+endif()
+if(NOT _mipsolvers_pgo_mode STREQUAL "OFF")
+  if(MSVC)
+    message(FATAL_ERROR "MIPSOLVERS PGO is not yet supported with MSVC")
+  elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    if(_mipsolvers_pgo_mode STREQUAL "GENERATE")
+      set(_mipsolvers_pgo_flags -fprofile-instr-generate)
+    else()
+      if(NOT MIPSOLVERS_PGO_PROFILE OR
+         NOT EXISTS "${MIPSOLVERS_PGO_PROFILE}")
+        message(FATAL_ERROR
+          "PGO USE requires MIPSOLVERS_PGO_PROFILE to name an existing .profdata file")
+      endif()
+      set(_mipsolvers_pgo_flags
+          "-fprofile-instr-use=${MIPSOLVERS_PGO_PROFILE}")
+    endif()
+  elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    if(NOT MIPSOLVERS_PGO_PROFILE)
+      set(MIPSOLVERS_PGO_PROFILE "${CMAKE_BINARY_DIR}/pgo-data" CACHE PATH
+          "GCC profile directory used by PGO" FORCE)
+    endif()
+    if(_mipsolvers_pgo_mode STREQUAL "USE" AND
+       NOT EXISTS "${MIPSOLVERS_PGO_PROFILE}")
+      message(FATAL_ERROR
+        "PGO USE requires MIPSOLVERS_PGO_PROFILE to name an existing directory")
+    endif()
+    if(_mipsolvers_pgo_mode STREQUAL "GENERATE")
+      set(_mipsolvers_pgo_flags
+          "-fprofile-generate=${MIPSOLVERS_PGO_PROFILE}")
+    else()
+      set(_mipsolvers_pgo_flags
+          "-fprofile-use=${MIPSOLVERS_PGO_PROFILE}" -fprofile-correction)
+    endif()
+  else()
+    message(FATAL_ERROR
+      "MIPSOLVERS PGO requires Clang/AppleClang or GCC")
+  endif()
+  target_compile_options(mipsolvers PRIVATE ${_mipsolvers_pgo_flags})
+  target_link_options(mipsolvers INTERFACE ${_mipsolvers_pgo_flags})
+  message(STATUS "mipsolvers: PGO mode ${_mipsolvers_pgo_mode}")
+endif()
+unset(_mipsolvers_pgo_flags)
+unset(_mipsolvers_pgo_mode)
 
 # Public headers use C++20 language/library features.  Propagate that contract
 # to installed consumers instead of relying only on this project's global
@@ -708,6 +766,10 @@ if(MIPSOLVERS_BUILD_TESTS)
   mipsolvers_add_test(test_l2o_trace           TIER unit)
   mipsolvers_add_test(test_numerical_stability TIER unit)
   mipsolvers_add_test(test_netlib_regression   TIER integration)
+  if(TARGET test_netlib_regression)
+    set_tests_properties(test_netlib_regression PROPERTIES
+      WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+  endif()
 
   # Temporary OPF scalability probe (not a test; removed after use).
   if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/opf_scale_probe.cpp")

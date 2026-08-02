@@ -34,17 +34,6 @@ struct EdgeWeightEvidence {
   double max_error_limit{0.0};
 };
 
-struct PivotEvidence {
-  bool accepted{false};
-  long double row_pivot{0.0L};
-  long double column_pivot{0.0L};
-  long double discrepancy{0.0L};
-  long double residual_envelope{0.0L};
-  long double arithmetic_guard{0.0L};
-  long double column_residual_inf{0.0L};
-  long double row_residual_inf{0.0L};
-};
-
 class BasisFactor final : public BasisOps {
  public:
   BasisFactor(const StandardFormLP& sf, std::vector<int> logical_by_row);
@@ -55,14 +44,6 @@ class BasisFactor final : public BasisOps {
               const Eigen::VectorXd& direction,
               const Eigen::VectorXd& row_ep, std::string& failure);
   bool update_indexed(int pivot_row, int entering_col, std::string& failure);
-  PivotEvidence pivot_evidence(int pivot_row, int entering_col,
-                               const Eigen::VectorXd& direction,
-                               const Eigen::VectorXd& row_ep) const;
-  bool row_solve_consistent(int pivot_row, const Eigen::VectorXd& rhs,
-                            const Eigen::VectorXd& solution,
-                            const Eigen::VectorXd& row_ep,
-                            long double& discrepancy,
-                            long double& residual_envelope) const;
 
   BasisOpsKind kind() const override { return BasisOpsKind::NativeSparse; }
   Eigen::VectorXd ftran(const Eigen::VectorXd& rhs) const override;
@@ -81,8 +62,6 @@ class BasisFactor final : public BasisOps {
                                      bool capture_update = false) const;
   IndexedSolveEvidence indexed_btran(const IndexedVector& rhs,
                                      bool capture_update = false) const;
-  SolveEvidence refine_ftran(const Eigen::VectorXd& rhs,
-                             const Eigen::VectorXd& solution) const;
   EdgeWeightEvidence compute_exact_edge_weights() const;
   bool basis_inverse_row(int row, Eigen::VectorXd& out) const override;
   bool basis_inverse_row_sparse_entries(
@@ -90,8 +69,8 @@ class BasisFactor final : public BasisOps {
   bool tableau_row(int row, Eigen::RowVectorXd& out) const override;
   int generation() const override { return generation_; }
   SparseFactorTelemetry factor_telemetry() const override;
-  void rebind_A(const Eigen::SparseMatrix<double>& A) override;
-  bool bound_to_A(const Eigen::SparseMatrix<double>& A) const override;
+  void rebind_A(const StandardColumnMatrix& A) override;
+  bool bound_to_A(const StandardColumnMatrix& A) const override;
 
   const std::vector<int>& basis() const { return basis_; }
   std::string last_solve_diagnostics() const;
@@ -118,8 +97,10 @@ class BasisFactor final : public BasisOps {
                                   const Eigen::VectorXd& solution,
                                   bool transpose) const;
   void rebuild_norms();
+  void update_norms_after_exchange(int pivot_row, int leaving_col,
+                                   int entering_col);
 
-  const Eigen::SparseMatrix<double>* A_{nullptr};
+  const StandardColumnMatrix* A_{nullptr};
   std::vector<int> logical_by_row_;
   std::vector<int> basis_;
   std::vector<double> row_abs_sum_;

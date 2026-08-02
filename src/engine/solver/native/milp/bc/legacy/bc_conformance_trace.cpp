@@ -992,6 +992,7 @@ void trace_native_presolve_state_conformance(
   fmt::memory_buffer row_sample;
   int row_emit = 0;
   Eigen::SparseMatrix<double, Eigen::RowMajor> Arow = lp.A;
+  Arow.makeCompressed();
   for (int r = 0; r < Arow.rows(); ++r) {
     const double lhs = lp_row_lhs_or_neg_inf(lp, r);
     if (std::isfinite(lhs)) ++ranged_rows;

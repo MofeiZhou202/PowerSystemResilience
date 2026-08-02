@@ -13,9 +13,9 @@
 ///      conflict graph.
 ///   3. Presolve-time fixings when one variable's bound collapses.
 ///
-/// The representation uses a sorted CSR-like adjacency (`offsets[j]..offsets[j+1]`
-/// are the indices conflicting with `j`), making binary_search-based
-/// intersection cheap during greedy clique extension.
+/// The representation uses persistent sorted adjacency vectors. Incremental
+/// insertions touch only the endpoints of new edges, while binary-search-based
+/// intersection remains cheap during greedy clique extension.
 
 #pragma once
 
@@ -124,37 +124,38 @@ class CliqueTable {
   std::size_t n_literal_edges() const { return n_literal_edges_; }
 
   /// @brief Neighbours of variable `j` (sorted ascending).
+  /// @details The returned range remains valid until that variable's
+  /// neighbourhood is modified or the table is rebuilt.
   std::pair<const int*, const int*> neighbours(int j) const {
     if (j < 0 || j >= n_) return {nullptr, nullptr};
-    const int* base = adj_.data();
-    return {base + offsets_[static_cast<std::size_t>(j)],
-            base + offsets_[static_cast<std::size_t>(j) + 1]};
+    const auto& row = adjacency_[static_cast<std::size_t>(j)];
+    if (row.empty()) return {nullptr, nullptr};
+    return {row.data(), row.data() + row.size()};
   }
 
   /// @brief Size of the neighbourhood of `j`.
   int degree(int j) const {
     if (j < 0 || j >= n_) return 0;
-    return static_cast<int>(offsets_[static_cast<std::size_t>(j) + 1] -
-                            offsets_[static_cast<std::size_t>(j)]);
+    return static_cast<int>(adjacency_[static_cast<std::size_t>(j)].size());
   }
 
   /// @brief True iff (i, j) is a recorded conflict edge.
   bool has_edge(int i, int j) const {
     if (i < 0 || j < 0 || i >= n_ || j >= n_ || i == j) return false;
-    auto range = neighbours(i);
-    return std::binary_search(range.first, range.second, j);
+    const auto& row = adjacency_[static_cast<std::size_t>(i)];
+    return std::binary_search(row.begin(), row.end(), j);
   }
 
   /// @brief Neighbours of literal `(col,value)` in the literal conflict table.
   std::pair<const int*, const int*> literal_neighbours(int col,
                                                        bool value_one) const {
     const int idx = literal_index(col, value_one);
-    if (idx < 0 || static_cast<std::size_t>(idx + 1) >= lit_offsets_.size()) {
+    if (idx < 0 || static_cast<std::size_t>(idx) >= literal_adjacency_.size()) {
       return {nullptr, nullptr};
     }
-    const int* base = lit_adj_.data();
-    return {base + lit_offsets_[static_cast<std::size_t>(idx)],
-            base + lit_offsets_[static_cast<std::size_t>(idx) + 1]};
+    const auto& row = literal_adjacency_[static_cast<std::size_t>(idx)];
+    if (row.empty()) return {nullptr, nullptr};
+    return {row.data(), row.data() + row.size()};
   }
 
   /// @brief True iff two literals are mutually exclusive.
@@ -165,11 +166,11 @@ class CliqueTable {
     const int ia = literal_index(col_a, value_a_one);
     const int ib = literal_index(col_b, value_b_one);
     if (ia < 0 || ib < 0 || ia == ib ||
-        static_cast<std::size_t>(ia + 1) >= lit_offsets_.size()) {
+        static_cast<std::size_t>(ia) >= literal_adjacency_.size()) {
       return false;
     }
-    auto range = literal_neighbours(col_a, value_a_one);
-    return std::binary_search(range.first, range.second, ib);
+    const auto& row = literal_adjacency_[static_cast<std::size_t>(ia)];
+    return std::binary_search(row.begin(), row.end(), ib);
   }
 
   /// @brief Propagate clique table implications through bounds.
@@ -204,18 +205,13 @@ class CliqueTable {
   }
 
   void ensure_storage(int n);
-  void rebuild_variable_csr(const std::vector<std::vector<int>>& adj);
-  void rebuild_literal_csr(const std::vector<std::vector<int>>& adj);
 
   int n_{0};
   std::size_t n_edges_{0};
   std::size_t n_literal_edges_{0};
-  // CSR adjacency: neighbours of col j are adj_[offsets_[j]..offsets_[j+1]).
-  std::vector<std::size_t> offsets_;
-  std::vector<int> adj_;
-  // CSR adjacency on literal ids 2*col+value.
-  std::vector<std::size_t> lit_offsets_;
-  std::vector<int> lit_adj_;
+  std::vector<std::vector<int>> adjacency_;
+  // Adjacency on literal ids 2*col+value.
+  std::vector<std::vector<int>> literal_adjacency_;
 };
 
 }  // namespace mipsolvers::engine::detail

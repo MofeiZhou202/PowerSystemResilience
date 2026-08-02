@@ -10,8 +10,18 @@ This evaluation establishes a reproducible MIPLIB 2017 benchmark path for:
 - Native branch-and-cut with the experimental Native node-LP kernel.
 
 The machine was Apple ARM64 running Darwin 25.5.0. The project and benchmark
-were compiled in Release mode with Apple Clang 21.0.0. Every solve was pinned
-to one thread and seed 0, with relative MIP gap `1e-4`.
+were compiled in Release mode with Apple Clang 21.0.0. Every solve requested
+one thread, CLI seed 0, and relative MIP gap `1e-4`.
+
+> **Provenance correction (2026-08-02).** The pre-D10 benchmark passed seed 0
+> to HiGHS and SCIP, but did not copy `cfg.seed` into Native `BCOptions`.
+> Consequently, both Native configurations below used the Native default
+> `0x9E3779B97F4A7C15` for their heuristic RNG, not seed 0. A directly supplied
+> zero also had inconsistent semantics in the then-current parallel
+> work-stealing code. The historical JSON `"seed": 0` field records the CLI
+> request, not the effective Native configuration. The objective/feasibility
+> audits remain historical diagnostic evidence, but these reports do not
+> establish an effective-zero-seed or fully replayable Native experiment.
 
 The goal of the short runs below is diagnostic coverage, not a claim about the
 official MIPLIB ranking. A publication-quality comparison still requires all

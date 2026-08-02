@@ -161,6 +161,10 @@ class SolverDispatcher {
     if (lp_wall_time_limit_reached(result) || time_limit_hit(opts)) {
       return result;
     }
+    if (context == SolveContext::Probing &&
+        failure_type == LPFailureType::Timeout) {
+      return result;
+    }
 
     // Attempt fallback recovery if enabled.
     if (fallback_ && config_.enable_fallback) {
@@ -253,6 +257,7 @@ class SolverDispatcher {
       case SolveContext::NodeLP:
         opts.max_iter = config_.base_max_iter;
         opts.allow_cold_start = true;
+        opts.retain_standard_form = true;
         // Node LPs feed the branch-and-bound proof frontier.  Do not early
         // terminate on the incumbent here: the intermediate cutoff objective
         // is not a certified node lower bound and can falsely prune siblings.
@@ -263,20 +268,24 @@ class SolverDispatcher {
       case SolveContext::ChildCuts:
         opts.max_iter = config_.base_max_iter;
         opts.allow_cold_start = false;
+        opts.retain_standard_form = true;
         break;
       case SolveContext::FeasPump:
         opts.max_iter = std::max(config_.max_lp_iter * 5, 1000);
         opts.feasibility_tol = std::max(1e-7, config_.feas_tol);
         opts.optimality_tol = std::max(1e-7, config_.opt_tol);
         opts.allow_cold_start = true;
+        opts.retain_standard_form = false;
         break;
       case SolveContext::LPDive:
         opts.max_iter = std::max(config_.max_lp_iter * 5, 1000);
         opts.allow_cold_start = false;
+        opts.retain_standard_form = false;
         break;
       case SolveContext::Probing:
-        opts.max_iter = std::max(config_.max_lp_iter * 5, 1000);
+        opts.max_iter = std::clamp(config_.max_lp_iter, 50, 500);
         opts.allow_cold_start = false;
+        opts.retain_standard_form = false;
         break;
     }
     return opts;
@@ -288,14 +297,34 @@ class SolverDispatcher {
       const SimplexBasis* basis_hint,
       SolveContext context,
       SimplexBasis& effective_basis) const {
-    if (basis_hint == nullptr || context != SolveContext::NodeLP ||
-        !config_.allow_persistent_lp_state) {
+    if (!config_.allow_persistent_lp_state ||
+        (context != SolveContext::NodeLP &&
+         context != SolveContext::Probing)) {
       return basis_hint;
     }
-    effective_basis = *basis_hint;
+    const std::shared_ptr<BasisOps>* owner = nullptr;
+    const std::uint64_t* structure_id = nullptr;
+    const SimplexBasis* stored_probe_basis = nullptr;
+    if (context == SolveContext::NodeLP) {
+      owner = &persistent_lp_owner_;
+      structure_id = &persistent_structure_id_;
+    } else {
+      owner = &persistent_probe_lp_owner_;
+      structure_id = &persistent_probe_structure_id_;
+      stored_probe_basis = &persistent_probe_basis_;
+    }
+    if (basis_hint != nullptr) {
+      effective_basis = *basis_hint;
+    } else if (stored_probe_basis != nullptr &&
+               stored_probe_basis->rows == sf.A.rows() &&
+               stored_probe_basis->cols == sf.A.cols()) {
+      effective_basis = *stored_probe_basis;
+    } else {
+      return nullptr;
+    }
     effective_basis.cached_sparse_basis.reset();
-    if (persistent_lp_owner_ && persistent_structure_id_ == sf.structure_id) {
-      effective_basis.cached_sparse_basis = persistent_lp_owner_;
+    if (*owner && *structure_id == sf.structure_id) {
+      effective_basis.cached_sparse_basis = *owner;
     }
     return &effective_basis;
   }
@@ -303,16 +332,26 @@ class SolverDispatcher {
   void retain_persistent_owner(const StandardFormLP& sf,
                                SolveContext context,
                                SimplexResult& result) {
-    if (context != SolveContext::NodeLP ||
+    if ((context != SolveContext::NodeLP &&
+         context != SolveContext::Probing) ||
         !config_.allow_persistent_lp_state ||
         !result.basis.cached_sparse_basis) {
       return;
     }
-    // Keep one structure-stable owner per dispatcher. Local-cut LPs may have
-    // different matrices; they must not evict the main node LP owner.
-    if (!persistent_lp_owner_ || persistent_structure_id_ == sf.structure_id) {
-      persistent_lp_owner_ = result.basis.cached_sparse_basis;
-      persistent_structure_id_ = sf.structure_id;
+    if (context == SolveContext::NodeLP) {
+      // Keep one structure-stable owner per dispatcher. Local-cut LPs may have
+      // different matrices; they must not evict the main node LP owner.
+      if (!persistent_lp_owner_ || persistent_structure_id_ == sf.structure_id) {
+        persistent_lp_owner_ = result.basis.cached_sparse_basis;
+        persistent_structure_id_ = sf.structure_id;
+      }
+    } else {
+      // Probe state is mutable and direction-local. Keep it separate from the
+      // normal node LP owner and publish only immutable basis/status data.
+      persistent_probe_lp_owner_ = result.basis.cached_sparse_basis;
+      persistent_probe_structure_id_ = sf.structure_id;
+      persistent_probe_basis_ = result.basis;
+      persistent_probe_basis_.cached_sparse_basis.reset();
     }
     // Nodes may be shared by siblings or queues. Never publish the mutable LP
     // owner through their basis snapshots.
@@ -351,6 +390,9 @@ class SolverDispatcher {
   std::shared_ptr<const SimplexBasis> root_basis_;
   std::shared_ptr<BasisOps> persistent_lp_owner_;
   std::uint64_t persistent_structure_id_{0};
+  std::shared_ptr<BasisOps> persistent_probe_lp_owner_;
+  std::uint64_t persistent_probe_structure_id_{0};
+  SimplexBasis persistent_probe_basis_;
 };
 
 }  // namespace mipsolvers::engine::detail

@@ -1,12 +1,9 @@
 /// @file bc_cglp.cpp
-/// @brief Phase 2/3 implementation for lift-and-project disjunctive cuts (CGLP).
+/// @brief Lift-and-project disjunctive cut generation and validation.
 ///
-/// Phase summary:
-///   * Phase 2: build_cglp_lp() in bc_cglp_model.cpp constructs the full
-///     master LP (two side blocks + beta-links + normalization).
-///   * Phase 3 (this file): candidate selection, CGLP LP solve, alpha/beta
-///     extraction, efficacy filtering, and conservative branch-side validity
-///     checks before cut admission.
+/// `build_cglp_lp()` constructs the master LP. This file owns candidate
+/// selection, solving, extraction, efficacy filtering, and conservative
+/// branch-side validity checks before admission.
 
 #include "mipsolvers/engine/detail/bc_cglp.hpp"
 

@@ -96,7 +96,9 @@ struct DiagonalQNState {
   bool active{false};
   Eigen::VectorXd diag;
   Eigen::VectorXd prev_x;
-  Eigen::VectorXd prev_grad;
+  Eigen::VectorXd prev_objective_grad;
+  Eigen::SparseMatrix<double> prev_jg;
+  Eigen::SparseMatrix<double> prev_jh;
   struct SparseBlockUpdate {
     std::vector<int> index;
     Eigen::MatrixXd values;
@@ -104,8 +106,6 @@ struct DiagonalQNState {
   std::vector<SparseBlockUpdate> blocks;
   int sparse_block_size{8};
   int max_blocks{6};
-  Eigen::SparseMatrix<double> fd_hess;
-  bool has_fd_hess{false};
 };
 
 struct NLPState {
@@ -120,14 +120,72 @@ struct NLPState {
   int n_nonlinear_ineq{0};
 };
 
+bool initialize_equality_duals_least_squares(
+    const NLPState& state,
+    const Eigen::VectorXd& mu,
+    double multiplier_norm_limit,
+    Eigen::VectorXd& lambda) {
+  const int meq = static_cast<int>(state.jg.rows());
+  if (meq == 0 || state.jg.cols() != state.grad.size() ||
+      lambda.size() != meq || mu.size() != state.jh.rows() ||
+      !std::isfinite(multiplier_norm_limit) || multiplier_norm_limit <= 0.0) {
+    return false;
+  }
+
+  const Eigen::VectorXd stationarity_without_equalities =
+      state.grad + state.jh.transpose() * mu;
+  const Eigen::SparseMatrix<double> metric =
+      diagonal_sparse(Eigen::VectorXd::Ones(state.grad.size()));
+  SparseInertiaKKTCache cache;
+  InertiaSettings settings;
+  // This projection needs the factor solve, not a dense tangent-space
+  // certificate. In MUMPS builds this goes directly to symmetric LDLT and
+  // avoids the catastrophic cost of a large SparseQR cold start.
+  settings.max_tangent_dimension = -1;
+  settings.mu = 1.0;
+  InertiaStatus inertia;
+  double delta_w_last = 0.0;
+  if (!factor_kkt_inertia_corrected_sparse(
+          metric, state.jg, settings, delta_w_last, cache, inertia)) {
+    return false;
+  }
+
+  Eigen::VectorXd rhs(state.grad.size() + meq);
+  rhs.head(state.grad.size()) = -stationarity_without_equalities;
+  rhs.tail(meq).setZero();
+  Eigen::VectorXd stationarity_remainder;
+  Eigen::VectorXd candidate;
+  if (!solve_kkt_inertia_corrected_sparse(
+          cache, rhs, stationarity_remainder, candidate) ||
+      candidate.size() != meq ||
+      !candidate.allFinite() || inf_norm(candidate) > multiplier_norm_limit) {
+    return false;
+  }
+
+  const Eigen::SparseMatrix<double> jg_transpose = state.jg.transpose();
+  const double current_residual = inf_norm(
+      stationarity_without_equalities + jg_transpose * lambda);
+  const double candidate_residual = inf_norm(
+      stationarity_without_equalities + jg_transpose * candidate);
+  const double required_improvement =
+      32.0 * std::numeric_limits<double>::epsilon() *
+      std::max(1.0, current_residual);
+  if (candidate_residual + required_improvement >= current_residual) {
+    return false;
+  }
+
+  lambda = candidate;
+  return true;
+}
+
 void initialize_quasi_newton_state(int n, DiagonalQNState& state) {
   state.active = true;
   state.diag = Eigen::VectorXd::Ones(n);
   state.prev_x.resize(0);
-  state.prev_grad.resize(0);
+  state.prev_objective_grad.resize(0);
+  state.prev_jg.resize(0, n);
+  state.prev_jh.resize(0, n);
   state.blocks.clear();
-  state.fd_hess.resize(0, 0);
-  state.has_fd_hess = false;
 }
 
 Eigen::VectorXd apply_sparse_qn_blocks(const DiagonalQNState& state,
@@ -183,52 +241,12 @@ Eigen::SparseMatrix<double> sparse_qn_hessian_matrix(const DiagonalQNState& stat
   return out;
 }
 
-bool refresh_fd_hessian_from_gradient(const NLPModel& prob,
-                                      const Eigen::VectorXd& x,
-                                      const Eigen::VectorXd& base_grad,
-                                      DiagonalQNState& state,
-                                      std::string& status) {
-  const int n = static_cast<int>(x.size());
-  if (!state.active || n <= 0 || n > 2000) {
-    return false;
-  }
-
-  std::vector<Eigen::Triplet<double>> triplets;
-  triplets.reserve(static_cast<size_t>(8 * n));
-  for (int j = 0; j < n; ++j) {
-    Eigen::VectorXd x_fd = x;
-    const double step = 1e-6 * std::max(1.0, std::abs(x[j]));
-    x_fd[j] += step;
-    Eigen::VectorXd grad_fd;
-    prob.grad(x_fd, grad_fd);
-    if (grad_fd.size() != n || !grad_fd.allFinite()) {
-      status = "NLP finite-difference Hessian refresh failed";
-      return false;
-    }
-    const Eigen::VectorXd col = (grad_fd - base_grad) / step;
-    const double keep_tol = std::max(1e-10, 1e-6 * col.lpNorm<Eigen::Infinity>());
-    for (int i = 0; i < n; ++i) {
-      if (std::abs(col[i]) > keep_tol) {
-        triplets.emplace_back(i, j, col[i]);
-      }
-    }
-  }
-
-  Eigen::SparseMatrix<double> fd_hess(n, n);
-  fd_hess.setFromTriplets(triplets.begin(), triplets.end());
-  fd_hess = symmetrize_hessian(std::move(fd_hess));
-  state.fd_hess = std::move(fd_hess);
-  state.has_fd_hess = true;
-
-  if (state.fd_hess.rows() == n) {
-    Eigen::VectorXd diag = state.fd_hess.diagonal();
-    state.diag = diag.cwiseMax(Eigen::VectorXd::Constant(n, 1e-6));
-  }
-  return true;
-}
-
 void update_quasi_newton_state(const Eigen::VectorXd& x,
-                               const Eigen::VectorXd& grad,
+                               const Eigen::VectorXd& objective_grad,
+                               const Eigen::SparseMatrix<double>& jg,
+                               const Eigen::SparseMatrix<double>& jh,
+                               const Eigen::VectorXd& lambda,
+                               const Eigen::VectorXd& mu,
                                DiagonalQNState& state) {
   if (!state.active) {
     return;
@@ -236,9 +254,30 @@ void update_quasi_newton_state(const Eigen::VectorXd& x,
   if (state.diag.size() != x.size()) {
     state.diag = Eigen::VectorXd::Ones(x.size());
   }
-  if (state.prev_x.size() == x.size() && state.prev_grad.size() == x.size()) {
+  const bool multiplier_dimensions_match =
+      lambda.size() == jg.rows() && mu.size() == jh.rows();
+  const bool previous_dimensions_match =
+      state.prev_x.size() == x.size() &&
+      state.prev_objective_grad.size() == x.size() &&
+      state.prev_jg.cols() == x.size() &&
+      state.prev_jh.cols() == x.size() &&
+      state.prev_jg.rows() == lambda.size() &&
+      state.prev_jh.rows() == mu.size();
+  if (multiplier_dimensions_match && previous_dimensions_match) {
     const Eigen::VectorXd s = x - state.prev_x;
-    const Eigen::VectorXd y = grad - state.prev_grad;
+    // NLP secant vector with the new multipliers held fixed:
+    // y_k = grad_x L(x_{k+1}, lambda_{k+1}, mu_{k+1})
+    //     - grad_x L(x_k,     lambda_{k+1}, mu_{k+1}).
+    // This includes nonlinear constraint curvature without requiring a
+    // Lagrangian-Hessian callback and avoids contaminating y_k with the
+    // multiplier step itself.
+    const Eigen::VectorXd current_lagrangian_grad =
+        objective_grad + jg.transpose() * lambda + jh.transpose() * mu;
+    const Eigen::VectorXd previous_lagrangian_grad =
+        state.prev_objective_grad + state.prev_jg.transpose() * lambda +
+        state.prev_jh.transpose() * mu;
+    const Eigen::VectorXd y =
+        current_lagrangian_grad - previous_lagrangian_grad;
     const double sy = s.dot(y);
     const double ss = s.squaredNorm();
     const double fallback_curv = (sy > 1e-12 && ss > 1e-12)
@@ -257,15 +296,26 @@ void update_quasi_newton_state(const Eigen::VectorXd& x,
 
     const Eigen::VectorXd residual =
         y - state.diag.cwiseProduct(s) - apply_sparse_qn_blocks(state, s);
-    const double denom = residual.dot(s);
-    if (denom > 1e-10) {
-      const std::vector<int> support = select_top_abs_indices(residual, state.sparse_block_size);
-      if (!support.empty()) {
-        Eigen::VectorXd local = Eigen::VectorXd::Zero(static_cast<int>(support.size()));
-        for (int k = 0; k < static_cast<int>(support.size()); ++k) {
-          local[k] = residual[support[static_cast<size_t>(k)]];
-        }
-        state.blocks.push_back({support, (local * local.transpose()) / denom});
+    const std::vector<int> support =
+        select_top_abs_indices(residual, state.sparse_block_size);
+    if (!support.empty()) {
+      Eigen::VectorXd local_residual =
+          Eigen::VectorXd::Zero(static_cast<int>(support.size()));
+      Eigen::VectorXd local_step =
+          Eigen::VectorXd::Zero(static_cast<int>(support.size()));
+      for (int k = 0; k < static_cast<int>(support.size()); ++k) {
+        const int index = support[static_cast<size_t>(k)];
+        local_residual[k] = residual[index];
+        local_step[k] = s[index];
+      }
+      const double denom = local_residual.dot(local_step);
+      const double skip_threshold = 1e-8 *
+          local_residual.norm() * local_step.norm();
+      // Limited-memory SR1 skip condition. Negative denominators are retained
+      // so genuine nonconvex Lagrangian curvature reaches inertia correction.
+      if (std::abs(denom) > std::max(1e-14, skip_threshold)) {
+        state.blocks.push_back(
+            {support, (local_residual * local_residual.transpose()) / denom});
         if (static_cast<int>(state.blocks.size()) > state.max_blocks) {
           state.blocks.erase(state.blocks.begin());
         }
@@ -273,7 +323,9 @@ void update_quasi_newton_state(const Eigen::VectorXd& x,
     }
   }
   state.prev_x = x;
-  state.prev_grad = grad;
+  state.prev_objective_grad = objective_grad;
+  state.prev_jg = jg;
+  state.prev_jh = jh;
 }
 
 bool build_lagrangian_hessian(const NLPModel& prob,
@@ -302,10 +354,7 @@ bool build_lagrangian_hessian(const NLPModel& prob,
       hess *= -1.0;
     }
   } else {
-    if (qn_state && qn_state->active && qn_state->has_fd_hess &&
-        qn_state->fd_hess.rows() == n && qn_state->fd_hess.cols() == n) {
-      hess = qn_state->fd_hess;
-    } else if (qn_state && qn_state->active && qn_state->diag.size() == n) {
+    if (qn_state && qn_state->active && qn_state->diag.size() == n) {
       hess = sparse_qn_hessian_matrix(*qn_state);
     } else {
       hess = diagonal_sparse(Eigen::VectorXd::Ones(n));
@@ -752,6 +801,58 @@ bool evaluate_nlp_state(const NLPModel& prob,
   return true;
 }
 
+bool evaluate_nlp_values(const NLPModel& prob,
+                         const Eigen::VectorXd& x,
+                         const std::vector<int>& lb_cols,
+                         const std::vector<int>& ub_cols,
+                         NLPState& state,
+                         std::string& status) {
+  state.obj_orig = objective_value(prob, x);
+  state.obj_eff =
+      (prob.sense == Sense::Maximize) ? -state.obj_orig : state.obj_orig;
+  if (!std::isfinite(state.obj_orig) || !std::isfinite(state.obj_eff)) {
+    status = "NLP objective became non-finite";
+    return false;
+  }
+
+  if (prob.g) {
+    prob.g(x, state.g);
+    if (!state.g.allFinite()) {
+      status = "NLP equality callback returned non-finite values";
+      return false;
+    }
+  } else {
+    state.g = Eigen::VectorXd::Zero(0);
+  }
+
+  Eigen::VectorXd h_nonlinear = Eigen::VectorXd::Zero(0);
+  if (prob.h) {
+    prob.h(x, h_nonlinear);
+    if (!h_nonlinear.allFinite()) {
+      status = "NLP inequality callback returned non-finite values";
+      return false;
+    }
+  }
+  state.n_nonlinear_ineq = static_cast<int>(h_nonlinear.size());
+  state.h.resize(state.n_nonlinear_ineq +
+                 static_cast<int>(lb_cols.size() + ub_cols.size()));
+  if (state.n_nonlinear_ineq > 0) {
+    state.h.head(state.n_nonlinear_ineq) = h_nonlinear;
+  }
+  int row = state.n_nonlinear_ineq;
+  for (int col : lb_cols) {
+    state.h[row++] = prob.vars[static_cast<size_t>(col)].lb - x[col];
+  }
+  for (int col : ub_cols) {
+    state.h[row++] = x[col] - prob.vars[static_cast<size_t>(col)].ub;
+  }
+  if (!state.h.allFinite()) {
+    status = "Split inequality construction returned non-finite values";
+    return false;
+  }
+  return true;
+}
+
 void interiorize_initial_point(const std::vector<VariableMeta>& vars, Eigen::VectorXd& x);
 void initialize_barrier_state(const Eigen::VectorXd& h,
                               Eigen::VectorXd& s,
@@ -880,6 +981,39 @@ bool evaluate_trial_point(const NLPModel& prob,
   trial.residuals = summarize_residuals(
       r_dual_trial, r_eq_trial, r_ineq_trial,
       trial.x, trial.s, trial.lambda, trial.mu);
+  return true;
+}
+
+bool evaluate_filter_trial_values(const NLPModel& prob,
+                                  const std::vector<int>& lb_cols,
+                                  const std::vector<int>& ub_cols,
+                                  const Eigen::VectorXd& x_trial,
+                                  const Eigen::VectorXd& s_trial,
+                                  const Eigen::VectorXd& lambda_trial,
+                                  const Eigen::VectorXd& mu_trial,
+                                  std::string& status,
+                                  TrialPoint& trial) {
+  if ((s_trial.size() > 0 && (s_trial.array() <= kMinPositive).any()) ||
+      (mu_trial.size() > 0 && (mu_trial.array() <= kMinPositive).any())) {
+    return false;
+  }
+  NLPState trial_state;
+  if (!evaluate_nlp_values(prob, x_trial, lb_cols, ub_cols, trial_state,
+                           status)) {
+    return false;
+  }
+  if (trial_state.g.size() != lambda_trial.size() ||
+      trial_state.h.size() != s_trial.size() ||
+      trial_state.h.size() != mu_trial.size()) {
+    status = "NLP constraint callback changed dimension during line search";
+    return false;
+  }
+  trial.valid = true;
+  trial.x = x_trial;
+  trial.s = s_trial;
+  trial.lambda = lambda_trial;
+  trial.mu = mu_trial;
+  trial.state = std::move(trial_state);
   return true;
 }
 
@@ -1045,45 +1179,52 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
 
   // Primal–dual multiplier initialization.
   Eigen::VectorXd lambda = Eigen::VectorXd::Zero(state.g.size());
-  Eigen::VectorXd mu_ineq(state.h.size());
-  for (int i = 0; i < mu_ineq.size(); ++i) {
-    mu_ineq[i] = std::clamp(mu_bar / std::max(s[i], kMinPositive), 1e-4, 1e4);
-  }
-  if (opt.equality_dual_start.size() == lambda.size() &&
-      opt.equality_dual_start.allFinite()) {
-    lambda = opt.equality_dual_start;
-  }
+  const bool has_equality_dual_start =
+      opt.equality_dual_start.size() == lambda.size() &&
+      opt.equality_dual_start.allFinite();
+  const bool has_inequality_dual_start =
+      opt.inequality_dual_start.size() == state.h.size() &&
+      opt.inequality_dual_start.allFinite() &&
+      (opt.inequality_dual_start.array() > 0.0).all();
   if (opt.slack_start.size() == s.size() && opt.slack_start.allFinite() &&
       (opt.slack_start.array() > 0.0).all()) {
     s = opt.slack_start.cwiseMax(
         Eigen::VectorXd::Constant(s.size(), 2.0 * kMinPositive));
   }
-  if (opt.inequality_dual_start.size() == mu_ineq.size() &&
-      opt.inequality_dual_start.allFinite() &&
-      (opt.inequality_dual_start.array() > 0.0).all()) {
+  Eigen::VectorXd mu_ineq(state.h.size());
+  for (int i = 0; i < mu_ineq.size(); ++i) {
+    mu_ineq[i] = std::clamp(mu_bar / std::max(s[i], kMinPositive), 1e-4, 1e4);
+  }
+  if (has_inequality_dual_start) {
     mu_ineq = opt.inequality_dual_start.cwiseMax(
         Eigen::VectorXd::Constant(mu_ineq.size(), 2.0 * kMinPositive));
+  }
+  if (has_equality_dual_start) {
+    lambda = opt.equality_dual_start;
+  } else if (opt.least_square_init_duals &&
+             (prob.hess || prob.lagrangian_hess)) {
+    initialize_equality_duals_least_squares(
+        state, mu_ineq, opt.constr_mult_init_max, lambda);
   }
 
   Filter filter;
   const double theta0 = compute_theta(state.g, state.h, s);
   filter.reset_with_theta_upper_bound(1e4 * std::max(1.0, theta0));
 
-  // When no analytical Hessian is provided, use a quasi-Newton approximation
-  // (mirrors the Merit driver). The FD startup refresh is gated by n <= 2000.
+  // When no analytical Hessian is provided, use the evolving sparse
+  // quasi-Newton approximation instead of freezing a finite-difference
+  // Hessian at the initial point.
   DiagonalQNState filter_qn_state;
   if (!prob.hess && !prob.lagrangian_hess) {
     initialize_quasi_newton_state(n, filter_qn_state);
     filter_qn_state.sparse_block_size = std::max(2, opt.qn_sparse_block_size);
     filter_qn_state.max_blocks = std::max(1, opt.qn_max_blocks);
-    std::string qn_init_status;
-    refresh_fd_hessian_from_gradient(prob, x, state.grad, filter_qn_state,
-                                     qn_init_status);
   }
 
   double delta_w_last = 0.0;
   SparseInertiaKKTCache kkt_cache;
   kkt_cache.preferred_free_columns = prob.equality_free_columns;
+  SparseKKTCache regularized_kkt_cache;
   // Augmented (uncondensed) Newton path cache — persists across iterations
   // so the sparsity pattern/scatter map is built once per problem.
   AugmentedNewtonCache augmented_cache;
@@ -1099,6 +1240,8 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
   double best_kkt_merit = std::numeric_limits<double>::infinity();
   bool have_best = false;
   ResidualSummary best_residuals{};
+  std::string terminal_status =
+      "Filter: max iterations reached without convergence";
 
   auto snapshot_outcome = [&](bool converged, int iters,
                               const std::string& status,
@@ -1116,7 +1259,27 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
   };
 
   for (; outer_iters < max_outer && total_iters < max_total; ++outer_iters) {
-    const double inner_tol = opt.kappa_epsilon * mu_bar;
+    double inner_tol = opt.kappa_epsilon * mu_bar;
+    const bool at_minimum_barrier =
+        mu_bar <= effective_mu_min *
+                      (1.0 + 32.0 * std::numeric_limits<double>::epsilon());
+    if (at_minimum_barrier) {
+      // At the final barrier, E_mu uses the perturbed residual S*mu-mu_bar,
+      // while user convergence uses the unperturbed complementarity S*mu.
+      // The ordinary kappa_epsilon*mu threshold can therefore declare the
+      // inner problem solved just above the requested KKT tolerance and then
+      // leave no smaller barrier to advance to. Tighten the final inner solve
+      // enough to permit one last Newton refinement.
+      double requested_accuracy = std::min(opt.tol_primal, opt.tol_dual);
+      if (s.size() > 0) {
+        requested_accuracy =
+            std::min(requested_accuracy, opt.tol_complementarity);
+      }
+      if (requested_accuracy > 0.0 && std::isfinite(requested_accuracy)) {
+        inner_tol = std::min(inner_tol,
+                             0.1 * std::max(1e-16, requested_accuracy));
+      }
+    }
     bool inner_converged_at_mu = false;
 
     for (; total_iters < max_total; ++total_iters) {
@@ -1134,11 +1297,8 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
       const Eigen::VectorXd mu_nonlinear =
           nonlinear_inequality_multipliers(mu_ineq, state.n_nonlinear_ineq);
       if (filter_qn_state.active) {
-        update_quasi_newton_state(x, state.grad, filter_qn_state);
-        if (!filter_qn_state.has_fd_hess) {
-          refresh_fd_hessian_from_gradient(prob, x, state.grad, filter_qn_state,
-                                           eval_status);
-        }
+        update_quasi_newton_state(x, state.grad, state.jg, state.jh,
+                                  lambda, mu_ineq, filter_qn_state);
       }
       if (!build_lagrangian_hessian(prob, x, lambda, &mu_nonlinear, hess,
                                     eval_status,
@@ -1303,23 +1463,29 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
                   << " augmented KKT factor: start (dim="
                   << w.rows() + state.jg.rows() << ")\n" << std::flush;
       }
-      if (!factor_kkt_inertia_corrected_sparse(
-              w, state.jg, isettings, delta_w_last, kkt_cache, istatus) ||
-          !solve_kkt_inertia_corrected_sparse(
-              kkt_cache, rhs, dx, dlambda)) {
-        // Restoration would kick in here in PR3; for PR2 we declare failure
-        // and let solve_nlp_detail attempt the IPOPT fallback.
+      const bool kkt_ok = opt.use_inertia_correction
+          ? (factor_kkt_inertia_corrected_sparse(
+                 w, state.jg, isettings, delta_w_last, kkt_cache, istatus) &&
+             solve_kkt_inertia_corrected_sparse(
+                 kkt_cache, rhs, dx, dlambda))
+          : (factor_kkt_with_regularization(
+                 w, state.jg, regularized_kkt_cache) &&
+             solve_kkt_sparse(regularized_kkt_cache, rhs, dx, dlambda));
+      if (!kkt_ok) {
         snapshot_outcome(false, total_iters + 1,
-                         "Filter: KKT inertia correction cap exceeded", rs);
+                         opt.use_inertia_correction
+                             ? "Filter: KKT inertia correction cap exceeded"
+                             : "Filter: regularized KKT factorization failed",
+                         rs);
         return result;
       }
       if (opt.verbose) {
         std::cerr << "[NativeIPM] iter=" << total_iters
                   << " augmented KKT factor: done (nnz="
-                  << kkt_cache.augmented.nnz
-                  << ", symbolic=" << kkt_cache.augmented.symbolic_analyses
-                  << ", numeric=" << kkt_cache.augmented.numeric_factorizations
-                  << ", solves=" << kkt_cache.augmented.linear_solves
+                  << (opt.use_inertia_correction
+                          ? kkt_cache.augmented.nnz
+                          : regularized_kkt_cache.nnz)
+                  << ", inertia=" << opt.use_inertia_correction
                   << ", delta_w=" << istatus.delta_w_used
                   << ", delta_c=" << istatus.delta_c_used
                   << ", tangent_cert="
@@ -1398,8 +1564,11 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
                   eps_gc.cwiseQuotient(
                       s.cwiseMax(Eigen::VectorXd::Constant(s.size(), kMinPositive))));
             rhs_gc.tail(r_eq.size()).setZero();
-            gc_ok = solve_kkt_inertia_corrected_sparse(
-                kkt_cache, rhs_gc, dx_gc, dlambda_gc);
+            gc_ok = opt.use_inertia_correction
+                ? solve_kkt_inertia_corrected_sparse(
+                      kkt_cache, rhs_gc, dx_gc, dlambda_gc)
+                : solve_kkt_sparse(
+                      regularized_kkt_cache, rhs_gc, dx_gc, dlambda_gc);
             if (gc_ok) {
               const Eigen::VectorXd ds_gc0 = -state.jh * dx_gc;
               dmu_gc =
@@ -1429,22 +1598,15 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
           barrier_descent_slope(state.grad, dx, s, ds, mu_bar);
       const double theta_min =
           opt.filter_theta_min_scale * std::max(1.0, theta_k);
-      const ResidualSummary current_rs = rs;
 
       bool accepted = false;
       bool accepted_was_f_type = false;
       TrialPoint accepted_trial;
       double theta_trial = 0.0;
       double phi_trial = 0.0;
-      // Extra SOC composite terms (default zero); added to the normal
-      // `alpha * direction` updates when SOC accepts.
-      Eigen::VectorXd dx_soc_extra = Eigen::VectorXd::Zero(dx.size());
-      Eigen::VectorXd ds_soc_extra =
-          (s.size() == 0) ? Eigen::VectorXd() : Eigen::VectorXd::Zero(s.size());
-      Eigen::VectorXd dlambda_soc_extra =
-          Eigen::VectorXd::Zero(dlambda.size());
       bool soc_attempted = false;
       const double alpha0 = alpha;  // remember alpha_max for SOC gate
+      const double alpha_dual = std::min(1.0, alpha_max_dual);
       if (opt.verbose) {
         std::cerr << "[NativeIPM] iter=" << total_iters
                   << " direction: |dx|inf=" << inf_norm(dx)
@@ -1458,7 +1620,6 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
       }
 
       while (alpha > opt.filter_alpha_min) {
-        const double alpha_dual = std::min(alpha, alpha_max_dual);
         const Eigen::VectorXd x_trial = x + alpha * dx;
         Eigen::VectorXd s_trial =
           (s.size() == 0) ? Eigen::VectorXd() : Eigen::VectorXd(s + alpha * ds);
@@ -1477,15 +1638,65 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
         }
 
         TrialPoint trial;
-        if (!evaluate_trial_point(prob, lb_cols, ub_cols,
-                                  x_trial, s_trial, lambda_trial, mu_trial,
-                                  eval_status, trial)) {
+        if (!evaluate_filter_trial_values(prob, lb_cols, ub_cols,
+                                          x_trial, s_trial, lambda_trial,
+                                          mu_trial, eval_status, trial)) {
           alpha *= 0.5;
           continue;
         }
 
         theta_trial = compute_theta(trial.state.g, trial.state.h, s_trial);
         phi_trial = compute_barrier_phi(trial.state.obj_orig, mu_bar, s_trial);
+
+        // A filter only sees primal feasibility and barrier objective. At an
+        // already stationary primal point, a valid Newton step may update only
+        // lambda/mu, leaving both filter coordinates unchanged. Accept that
+        // special case only when the primal displacement is at roundoff scale
+        // and the independently recomputed KKT residuals prove componentwise
+        // non-worsening plus strict dual/complementarity progress.
+        const double relative_primal_step = std::max(
+            alpha * inf_norm(dx) / (1.0 + inf_norm(x)),
+            alpha * inf_norm(ds) / (1.0 + inf_norm(s)));
+        if (relative_primal_step <= 1e-12) {
+          const Eigen::VectorXd r_dual_trial =
+              state.grad + state.jg.transpose() * lambda_trial +
+              state.jh.transpose() * mu_trial;
+          const Eigen::VectorXd r_eq_trial = trial.state.g;
+          const Eigen::VectorXd r_ineq_trial = trial.state.h + s_trial;
+          trial.residuals = summarize_residuals(
+              r_dual_trial, r_eq_trial, r_ineq_trial, x_trial, s_trial,
+              lambda_trial, mu_trial);
+          const double primal_guard =
+              rs.primal_feas + 1e-10 * (1.0 + rs.primal_feas);
+          const double dual_guard =
+              rs.dual_feas + 1e-10 * (1.0 + rs.dual_feas);
+          const bool componentwise_safe =
+              trial.residuals.primal_feas <= primal_guard &&
+              trial.residuals.dual_feas <= dual_guard;
+          const bool complementarity_progress = s.size() > 0 &&
+              trial.residuals.complementarity <=
+                  rs.complementarity * (1.0 - 1e-4 * alpha_dual) + 1e-14;
+          const bool dual_progress =
+              trial.residuals.dual_feas <=
+                  rs.dual_feas * (1.0 - 1e-4 * alpha_dual) + 1e-14;
+          const bool merit_progress =
+              trial.residuals.merit + 1e-14 < rs.merit;
+          if (componentwise_safe && merit_progress &&
+              (complementarity_progress || dual_progress)) {
+            accepted = true;
+            accepted_was_f_type = true;  // no new primal filter entry
+            accepted_trial = std::move(trial);
+            if (opt.verbose) {
+              std::cerr << "[NativeIPM] iter=" << total_iters
+                        << " centrality step accepted: alpha=" << alpha
+                        << ", alpha_dual=" << alpha_dual
+                        << ", kkt_merit=" << rs.merit << " -> "
+                        << accepted_trial.residuals.merit << '\n'
+                        << std::flush;
+            }
+            break;
+          }
+        }
 
         bool filter_ok = filter.is_acceptable(theta_trial, phi_trial,
                                               opt.filter_gamma_theta,
@@ -1495,7 +1706,7 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
             (slope_k < 0.0) &&
             (alpha * std::pow(-slope_k, opt.filter_s_phi) >
              opt.filter_delta * std::pow(theta_k, opt.filter_s_theta)) &&
-            (theta_k <= theta_min || opt.filter_s_phi > 0.0);
+            (theta_k <= theta_min);
 
         bool accept = false;
         if (filter_ok) {
@@ -1511,17 +1722,6 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
           }
         }
 
-        const bool direct_accept =
-            sufficient_primal_dual_progress(current_rs, trial.residuals,
-                                            alpha, alpha_dual);
-        const bool aggressive_direct =
-            alpha >= 0.8 * alpha0 &&
-            trial.residuals.merit <= current_rs.merit * 0.95 + 1e-12;
-        if (!accept && direct_accept && (filter_ok || aggressive_direct)) {
-          accept = true;
-          accepted_was_f_type = false;
-        }
-
         if (accept) {
           accepted = true;
           accepted_trial = std::move(trial);
@@ -1531,12 +1731,6 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
                       << ", alpha_dual=" << alpha_dual
                       << ", theta_trial=" << theta_trial
                       << ", phi_trial=" << phi_trial
-                      << ", primal_trial="
-                      << accepted_trial.residuals.primal_feas
-                      << ", dual_trial="
-                      << accepted_trial.residuals.dual_feas
-                      << ", comp_trial="
-                      << accepted_trial.residuals.complementarity
                       << '\n' << std::flush;
           }
           break;
@@ -1546,13 +1740,8 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
           std::cerr << "[NativeIPM] iter=" << total_iters
                     << " full step rejected: filter_ok=" << filter_ok
                     << ", switching=" << switching
-                    << ", direct_accept=" << direct_accept
                     << ", theta_trial=" << theta_trial
                     << ", phi_trial=" << phi_trial
-                    << ", primal_trial=" << trial.residuals.primal_feas
-                    << ", dual_trial=" << trial.residuals.dual_feas
-                    << ", comp_trial="
-                    << trial.residuals.complementarity
                     << '\n' << std::flush;
         }
 
@@ -1580,8 +1769,11 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
             // Overwrite the equality block of the RHS with -c_soc; the primal
             // block (rhs_x) stays the same.
             rhs_soc.tail(r_eq.size()) = -c_soc;
-            soc_ok = solve_kkt_inertia_corrected_sparse(
-                kkt_cache, rhs_soc, dx_soc, dlambda_soc);
+            soc_ok = opt.use_inertia_correction
+                ? solve_kkt_inertia_corrected_sparse(
+                      kkt_cache, rhs_soc, dx_soc, dlambda_soc)
+                : solve_kkt_sparse(
+                      regularized_kkt_cache, rhs_soc, dx_soc, dlambda_soc);
           }
           if (soc_ok) {
             // Composite primal step; update slacks via linearized h.
@@ -1615,10 +1807,10 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
               const Eigen::VectorXd mu_soc_trial =
                   mu_ineq + alpha_dual * dmu_ineq + dmu_soc_extra;
               TrialPoint soc_trial;
-              if (evaluate_trial_point(prob, lb_cols, ub_cols,
-                                       x_soc_trial, s_soc_trial,
-                                       lambda_soc_trial, mu_soc_trial,
-                                       eval_status, soc_trial)) {
+              if (evaluate_filter_trial_values(prob, lb_cols, ub_cols,
+                                               x_soc_trial, s_soc_trial,
+                                               lambda_soc_trial, mu_soc_trial,
+                                               eval_status, soc_trial)) {
                 const double theta_soc = compute_theta(soc_trial.state.g,
                                                        soc_trial.state.h,
                                                        s_soc_trial);
@@ -1643,19 +1835,7 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
                   }
                 }
 
-                const bool soc_direct_accept =
-                    sufficient_primal_dual_progress(current_rs, soc_trial.residuals,
-                                                    alpha, alpha_dual);
-                if (!soc_accept && soc_direct_accept &&
-                    (soc_filter_ok || alpha >= 0.8 * alpha0)) {
-                  soc_accept = true;
-                  accepted_was_f_type = false;
-                }
-
                 if (soc_accept) {
-                  dx_soc_extra = dx_soc;
-                  if (s.size() > 0) ds_soc_extra = ds_soc_delta;
-                  dlambda_soc_extra = dlambda_soc;
                   theta_trial = theta_soc;
                   phi_trial = phi_soc;
                   accepted_trial = std::move(soc_trial);
@@ -1723,12 +1903,13 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
                                    std::min(opt.kappa_mu * mu_bar,
                                             std::pow(mu_bar, opt.theta_mu)));
     if (mu_new >= mu_bar) {  // cannot decrease further — μ clamped at μ_min
-      // We already failed the outer tolerance check above (otherwise we would
-      // have returned); treat as convergence at minimum barrier.
+      // We already failed the outer KKT check above (otherwise we would have
+      // returned), even after the tightened final-barrier inner solve.
+      terminal_status =
+          "Filter: minimum barrier reached without KKT convergence";
       break;
     }
     mu_bar = mu_new;
-    filter.clear();
   }
 
   // Exhausted outer iterations. Fall back to the best iterate seen so the
@@ -1740,9 +1921,7 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
     mu_ineq = best_mu_ineq;
   }
 
-  snapshot_outcome(false, total_iters,
-                   "Filter: max iterations reached without convergence",
-                   best_residuals);
+  snapshot_outcome(false, total_iters, terminal_status, best_residuals);
   return result;
 }
 
@@ -1938,9 +2117,11 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
         }
       }
       const int n_nl = fo.n_nonlinear_ineq;
-      if (fo.mu_ineq.size() >= n_nl && sf.s_h.size() >= n_nl) {
+      if (fo.mu_ineq.size() >= n_nl && fo.s.size() >= n_nl &&
+          sf.s_h.size() >= n_nl) {
         for (int i = 0; i < n_nl; ++i) {
           fo.mu_ineq[i] = fo.mu_ineq[i] * sf.s_h[i] / sf.s_f;
+          fo.s[i] = fo.s[i] / sf.s_h[i];
         }
       }
       // Box-slack multipliers (for lb_cols, ub_cols) have s_h = 1 (no scaling
@@ -1952,6 +2133,35 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
       // Recompute the objective in the original coordinates.
       if (fo.x.size() == n_f && prob.f) {
         fo.objective = prob.f(fo.x);
+      }
+
+      // Certify and report the returned iterate in the original model scale.
+      // Internal scaled residuals are useful for globalization, but exposing
+      // them beside unscaled multipliers/slacks would be inconsistent.
+      NLPState original_state;
+      std::string original_status;
+      if (fo.x.size() == n_f &&
+          evaluate_nlp_state(prob, fo.x, fo.lb_cols, fo.ub_cols,
+                             original_state, original_status)) {
+        const Eigen::VectorXd r_dual =
+            original_state.grad + original_state.jg.transpose() * fo.lambda +
+            original_state.jh.transpose() * fo.mu_ineq;
+        const Eigen::VectorXd r_ineq = original_state.h + fo.s;
+        fo.final_residuals = summarize_residuals(
+            r_dual, original_state.g, r_ineq, fo.x, fo.s, fo.lambda,
+            fo.mu_ineq);
+        if (fo.converged &&
+            (fo.final_residuals.primal_feas > opt_.tol_primal ||
+             fo.final_residuals.dual_feas > opt_.tol_dual ||
+             fo.final_residuals.complementarity >
+                 opt_.tol_complementarity)) {
+          fo.converged = false;
+          fo.status = "Scaled solve failed unscaled KKT certification";
+        }
+      } else if (fo.converged) {
+        fo.converged = false;
+        fo.status = "Scaled solve could not evaluate unscaled KKT: " +
+                    original_status;
       }
     }
 
@@ -1995,9 +2205,9 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
       detail.complementarity = fo.final_residuals.complementarity;
     } else {
       // Filter failed even after restoration; try the Merit-backed native
-      // driver before the IPOPT last-resort. Merit handles quasi-Newton-only
-      // NLPs (no Hessian) and badly-conditioned small problems more
-      // gracefully than the Filter prototype.
+      // driver before the optional Ipopt last-resort. Merit handles
+      // quasi-Newton-only NLPs (no Hessian) and badly-conditioned small
+      // problems more gracefully than the Filter prototype.
       IPMOptions merit_opt = opt_;
       merit_opt.globalization = Globalization::Merit;
       merit_opt.use_restoration_phase = false;
@@ -2006,6 +2216,12 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
       NativeIPMAdapter merit_solver(merit_opt);
       auto merit_pair = merit_solver.solve_nlp_detail(prob);
       if (merit_pair.first.stats.success) {
+        if (merit_pair.first.stats.solver_name == name()) {
+          merit_pair.first.stats.solver_name = "NativeIPM[MeritFallback]";
+          merit_pair.first.stats.status =
+              "Native Merit fallback after Filter failure: " + fo.status +
+              "; " + merit_pair.first.stats.status;
+        }
         merit_pair.first.stats.runtime_sec =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         return merit_pair;
@@ -2023,6 +2239,9 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
           std::to_string(fo.initial_residuals.dual_feas) + ", c=" +
           std::to_string(fo.initial_residuals.complementarity) + ")";
       const bool complete_candidate =
+          opt_.allow_external_fallback &&
+          candidate.stats.solver_name.find("IpoptFallback") !=
+              std::string::npos &&
           candidate.x.size() == n_f && candidate.x.allFinite() &&
           candidate_detail.lambda_eq.size() == fo.lambda.size() &&
           candidate_detail.mu_ineq.size() == fo.mu_ineq.size() &&
@@ -2100,7 +2319,8 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
                             std::to_string(candidate_detail.z_slack.size()) +
                             "/" + std::to_string(fo.s.size()) + ")";
       }
-      if (try_ipopt_fallback(prob, fallback_context, out, detail)) {
+      if (opt_.allow_external_fallback &&
+          try_ipopt_fallback(prob, fallback_context, out, detail)) {
         out.stats.runtime_sec =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         return {out, detail};
@@ -2143,7 +2363,8 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
 
   if (!evaluate_nlp_state(prob, x, lb_cols, ub_cols, current_state, status)) {
     out.stats.status = status;
-    if (try_ipopt_fallback(prob, out.stats.status, out, detail)) {
+    if (opt_.allow_external_fallback &&
+        try_ipopt_fallback(prob, out.stats.status, out, detail)) {
       out.stats.runtime_sec =
           std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     }
@@ -2155,49 +2376,36 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
   jg = current_state.jg;
   h = current_state.h;
   jh = current_state.jh;
-  if (qn_state.active && !qn_state.has_fd_hess) {
-    bool cache_hit = false;
-    {
-      std::lock_guard<std::mutex> lock(startup_cache_mutex_);
-      if (startup_cache_.valid && startup_cache_.x.size() == x.size() &&
-          startup_cache_.grad.size() == grad.size() &&
-          startup_cache_.hess.rows() == x.size() && startup_cache_.hess.cols() == x.size() &&
-          (startup_cache_.x - x).lpNorm<Eigen::Infinity>() <= 1e-12 &&
-          (startup_cache_.grad - grad).lpNorm<Eigen::Infinity>() <= 1e-10) {
-        qn_state.fd_hess = startup_cache_.hess;
-        qn_state.has_fd_hess = true;
-        qn_state.diag = startup_cache_.hess.diagonal().cwiseMax(
-            Eigen::VectorXd::Constant(x.size(), 1e-6));
-        cache_hit = true;
-      }
-    }
-    if (!cache_hit && refresh_fd_hessian_from_gradient(prob, x, grad, qn_state, status) &&
-        qn_state.has_fd_hess) {
-      std::lock_guard<std::mutex> lock(startup_cache_mutex_);
-      startup_cache_.valid = true;
-      startup_cache_.x = x;
-      startup_cache_.grad = grad;
-      startup_cache_.hess = qn_state.fd_hess;
-    }
-  }
   Eigen::VectorXd lambda = Eigen::VectorXd::Zero(g.size());
   Eigen::VectorXd s;
   Eigen::VectorXd mu;
   initialize_barrier_state(h, s, mu);
-  if (opt_.equality_dual_start.size() == lambda.size() &&
-      opt_.equality_dual_start.allFinite()) {
-    lambda = opt_.equality_dual_start;
-  }
+  const bool has_equality_dual_start =
+      opt_.equality_dual_start.size() == lambda.size() &&
+      opt_.equality_dual_start.allFinite();
+  const bool has_inequality_dual_start =
+      opt_.inequality_dual_start.size() == mu.size() &&
+      opt_.inequality_dual_start.allFinite() &&
+      (opt_.inequality_dual_start.array() > 0.0).all();
   if (opt_.slack_start.size() == s.size() && opt_.slack_start.allFinite() &&
       (opt_.slack_start.array() > 0.0).all()) {
     s = opt_.slack_start.cwiseMax(
         Eigen::VectorXd::Constant(s.size(), 2.0 * kMinPositive));
+    if (!has_inequality_dual_start) {
+      for (int i = 0; i < mu.size(); ++i) {
+        mu[i] = std::max(1.0 / s[i], 1e-2);
+      }
+    }
   }
-  if (opt_.inequality_dual_start.size() == mu.size() &&
-      opt_.inequality_dual_start.allFinite() &&
-      (opt_.inequality_dual_start.array() > 0.0).all()) {
+  if (has_inequality_dual_start) {
     mu = opt_.inequality_dual_start.cwiseMax(
         Eigen::VectorXd::Constant(mu.size(), 2.0 * kMinPositive));
+  }
+  if (has_equality_dual_start) {
+    lambda = opt_.equality_dual_start;
+  } else if (opt_.least_square_init_duals && !qn_state.active) {
+    initialize_equality_duals_least_squares(
+        current_state, mu, opt_.constr_mult_init_max, lambda);
   }
 
   const Eigen::VectorXd mu_nonlinear0 =
@@ -2205,7 +2413,8 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
   if (!build_lagrangian_hessian(prob, x, lambda, &mu_nonlinear0, hess, status,
                                 qn_state.active ? &qn_state : nullptr)) {
     out.stats.status = status;
-    if (try_ipopt_fallback(prob, out.stats.status, out, detail)) {
+    if (opt_.allow_external_fallback &&
+        try_ipopt_fallback(prob, out.stats.status, out, detail)) {
       out.stats.runtime_sec =
           std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     }
@@ -2220,7 +2429,7 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
   int stall_iters = 0;
   double best_merit = std::numeric_limits<double>::infinity();
   IterateSnapshot best_iterate;
-  const double comp_tol = std::max(opt_.tol_complementarity, opt_.tol_primal * 10.0);
+  const double comp_tol = opt_.tol_complementarity;
 
   for (int iter = 0; iter < opt_.max_iter; ++iter) {
     iter_done = iter + 1;
@@ -2236,12 +2445,7 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
     h = current_state.h;
     jh = current_state.jh;
     if (qn_state.active) {
-      update_quasi_newton_state(x, grad, qn_state);
-      if (!qn_state.has_fd_hess || stall_iters >= 2) {
-        if (!refresh_fd_hessian_from_gradient(prob, x, grad, qn_state, status)) {
-          qn_state.has_fd_hess = false;
-        }
-      }
+      update_quasi_newton_state(x, grad, jg, jh, lambda, mu, qn_state);
     }
     const Eigen::VectorXd mu_nonlinear =
         nonlinear_inequality_multipliers(mu, current_state.n_nonlinear_ineq);
@@ -2314,11 +2518,8 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
     Eigen::VectorXd dx_aff;
     Eigen::VectorXd dlambda_aff;
     SparseKKTCache kkt_cache;
-    const bool reduced_kkt_aff = solve_kkt_reduced_sparse(
-      w, jg, rhs_aff, dx_aff, dlambda_aff, opt_.reduced_kkt_max_eq, kMinReg, kMaxReg);
-    if (!reduced_kkt_aff &&
-      (!factor_kkt_with_regularization(w, jg, kkt_cache) ||
-       !solve_kkt_sparse(kkt_cache, rhs_aff, dx_aff, dlambda_aff))) {
+    if (!factor_kkt_with_regularization(w, jg, kkt_cache) ||
+        !solve_kkt_sparse(kkt_cache, rhs_aff, dx_aff, dlambda_aff)) {
       if (recovery_attempts < 2) {
         ++recovery_attempts;
         recenter_barrier_state(prob, h, x, s, mu, qn_state.active ? &qn_state : nullptr);
@@ -2354,10 +2555,7 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
 
     Eigen::VectorXd dx;
     Eigen::VectorXd dlambda;
-    if ((reduced_kkt_aff && !solve_kkt_reduced_sparse(
-                   w, jg, rhs, dx, dlambda, opt_.reduced_kkt_max_eq,
-                   kMinReg, kMaxReg)) ||
-        (!reduced_kkt_aff && !solve_kkt_sparse(kkt_cache, rhs, dx, dlambda))) {
+    if (!solve_kkt_sparse(kkt_cache, rhs, dx, dlambda)) {
       if (recovery_attempts < 2) {
         ++recovery_attempts;
         recenter_barrier_state(prob, h, x, s, mu, qn_state.active ? &qn_state : nullptr);
@@ -2405,12 +2603,7 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
         Eigen::VectorXd dx_gc;
         Eigen::VectorXd dlambda_gc;
         const bool gc_ok =
-            (reduced_kkt_aff && solve_kkt_reduced_sparse(
-                                    w, jg, rhs_gc, dx_gc, dlambda_gc,
-                                    opt_.reduced_kkt_max_eq,
-                                    kMinReg, kMaxReg)) ||
-            (!reduced_kkt_aff && solve_kkt_sparse(kkt_cache, rhs_gc,
-                                                  dx_gc, dlambda_gc));
+            solve_kkt_sparse(kkt_cache, rhs_gc, dx_gc, dlambda_gc);
         if (!gc_ok) {
           break;
         }
@@ -2506,44 +2699,30 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
     iter_done = best_iterate.iteration;
   }
 
-  // Ipopt-style "acceptable" convergence: accept a near-feasible best
-  // iterate when strict tolerances cannot be met within max_iter.
-  // Only requires primal feasibility; dual infeasibility is tolerated since
-  // the test/caller validates solution quality by evaluating the primal.
-  bool accepted_via_tol_accept = false;
+  // Acceptable convergence is still a KKT condition: all three components
+  // must meet the relaxed tolerance.
   if (!converged && best_iterate.valid && opt_.tol_accept > 0.0 &&
-      best_iterate.residuals.primal_feas <= opt_.tol_accept) {
+      best_iterate.residuals.primal_feas <= opt_.tol_accept &&
+      best_iterate.residuals.dual_feas <= opt_.tol_accept &&
+      best_iterate.residuals.complementarity <= opt_.tol_accept) {
     x = best_iterate.x;
     s = best_iterate.s;
     lambda = best_iterate.lambda;
     mu = best_iterate.mu;
     converged = true;
-    accepted_via_tol_accept = true;
     native_status = "Converged (acceptable tolerance)";
     iter_done = best_iterate.iteration;
   }
 
-  if (converged && accepted_via_tol_accept) {
-    // Fill output directly from best_iterate to avoid stale Jacobians.
-    out.x = x;
-    out.stats.success = true;
-    out.stats.status = native_status;
-    out.stats.iterations = iter_done;
-    out.stats.objective = objective_value(prob, x);
-    out.stats.primal_feas = best_iterate.residuals.primal_feas;
-    out.stats.dual_feas = best_iterate.residuals.dual_feas;
-    out.stats.complementarity = best_iterate.residuals.complementarity;
-    out.stats.residual_inf = std::max(out.stats.primal_feas, out.stats.dual_feas);
-    // Provide zero constraint duals (acceptable-tolerance doesn't guarantee
-    // accurate duals).
-    out.constraint_duals.setZero(static_cast<Eigen::Index>(mu.size() + lambda.size()));
-    out.box_dual_lb = Eigen::VectorXd::Zero(n);
-    out.box_dual_ub = Eigen::VectorXd::Zero(n);
-    detail.lambda_eq = lambda;
-    detail.mu_ineq = mu;
-    detail.z_slack = s;
-    detail.complementarity = best_iterate.residuals.complementarity;
-  } else if (converged) {
+  // A restored best iterate may not match current_state. Re-evaluate it before
+  // reporting residuals and multipliers.
+  if (converged &&
+      !evaluate_nlp_state(prob, x, lb_cols, ub_cols, current_state, status)) {
+    converged = false;
+    native_status = status;
+  }
+
+  if (converged) {
     grad = current_state.grad;
     g = current_state.g;
     jg = current_state.jg;
@@ -2609,7 +2788,8 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
     if (!best_iterate.valid) {
       out.stats.objective = current_state_valid ? current_state.obj_orig : objective_value(prob, x);
     }
-    if (try_ipopt_fallback(prob, native_status, out, detail)) {
+    if (opt_.allow_external_fallback &&
+        try_ipopt_fallback(prob, native_status, out, detail)) {
       out.stats.runtime_sec =
           std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
       return {out, detail};

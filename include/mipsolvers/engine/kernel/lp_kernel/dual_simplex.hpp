@@ -1,10 +1,15 @@
 #pragma once
 
 #include <atomic>
+#include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <string>
+#include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <Eigen/Core>
@@ -18,6 +23,541 @@
 class Highs;
 
 namespace mipsolvers::engine {
+
+using StandardFormIndex = std::int64_t;
+
+// Column-major standard-form matrix with adaptive Eigen storage. Models whose
+// dimensions and nnz fit signed 32-bit indices use compact CSC; the container
+// promotes to a 64-bit CSC before an operation that can exceed that range.
+// This preserves the audited large-model path without charging every ordinary
+// LP 8 bytes for each row index and column offset.
+class StandardColumnMatrix {
+ public:
+  using StorageIndex = StandardFormIndex;
+  using NarrowMatrix = Eigen::SparseMatrix<double, Eigen::ColMajor, int>;
+  using WideMatrix =
+      Eigen::SparseMatrix<double, Eigen::ColMajor, StandardFormIndex>;
+
+ private:
+  std::variant<NarrowMatrix, WideMatrix> storage_{NarrowMatrix{}};
+
+  template <typename Function>
+  decltype(auto) visit(Function&& function) {
+    return std::visit(std::forward<Function>(function), storage_);
+  }
+  template <typename Function>
+  decltype(auto) visit(Function&& function) const {
+    return std::visit(std::forward<Function>(function), storage_);
+  }
+
+ public:
+
+  class InnerIterator {
+   public:
+    InnerIterator(const StandardColumnMatrix& matrix, StandardFormIndex col)
+        : narrow_(matrix.uses_32_bit_indices()), col_(col) {
+      if (narrow_) {
+        narrow_it_.emplace(std::get<NarrowMatrix>(matrix.storage_),
+                           static_cast<int>(col));
+        position_ = static_cast<StandardFormIndex>(
+            std::get<NarrowMatrix>(matrix.storage_)
+                .outerIndexPtr()[static_cast<std::size_t>(col)]);
+      } else {
+        wide_it_.emplace(std::get<WideMatrix>(matrix.storage_), col);
+        position_ = std::get<WideMatrix>(matrix.storage_)
+                        .outerIndexPtr()[static_cast<std::size_t>(col)];
+      }
+    }
+    explicit operator bool() const {
+      return narrow_ ? static_cast<bool>(*narrow_it_)
+                     : static_cast<bool>(*wide_it_);
+    }
+    InnerIterator& operator++() {
+      if (narrow_) {
+        ++(*narrow_it_);
+      } else {
+        ++(*wide_it_);
+      }
+      ++position_;
+      return *this;
+    }
+    StandardFormIndex row() const {
+      return narrow_ ? static_cast<StandardFormIndex>(narrow_it_->row())
+                     : wide_it_->row();
+    }
+    StandardFormIndex col() const { return col_; }
+    StandardFormIndex index() const { return row(); }
+    StandardFormIndex position() const { return position_; }
+    double value() const {
+      return narrow_ ? narrow_it_->value() : wide_it_->value();
+    }
+    double& valueRef() {
+      return narrow_ ? narrow_it_->valueRef() : wide_it_->valueRef();
+    }
+
+   private:
+    bool narrow_{true};
+    StandardFormIndex col_{0};
+    StandardFormIndex position_{0};
+    std::optional<NarrowMatrix::InnerIterator> narrow_it_;
+    std::optional<WideMatrix::InnerIterator> wide_it_;
+  };
+
+  StandardColumnMatrix() = default;
+  StandardColumnMatrix(StandardFormIndex rows, StandardFormIndex cols) {
+    resize(rows, cols);
+  }
+
+  template <int Options, typename Index>
+  StandardColumnMatrix(
+      const Eigen::SparseMatrix<double, Options, Index>& matrix) {
+    assign_eigen(matrix);
+  }
+
+  template <typename Derived>
+  StandardColumnMatrix& operator=(
+      const Eigen::SparseMatrixBase<Derived>& matrix) {
+    WideMatrix evaluated = matrix.derived();
+    assign_eigen(evaluated);
+    return *this;
+  }
+
+  template <int Options, typename Index>
+  StandardColumnMatrix& operator=(
+      const Eigen::SparseMatrix<double, Options, Index>& matrix) {
+    assign_eigen(matrix);
+    return *this;
+  }
+
+  void resize(StandardFormIndex rows, StandardFormIndex cols) {
+    if (fits_narrow(rows) && fits_narrow(cols)) {
+      storage_.template emplace<NarrowMatrix>(static_cast<int>(rows),
+                                              static_cast<int>(cols));
+    } else {
+      storage_.template emplace<WideMatrix>(rows, cols);
+    }
+  }
+
+  void reserve(StandardFormIndex nnz) {
+    if (uses_32_bit_indices() && !fits_narrow(nnz)) promote_to_wide();
+    visit([&](auto& matrix) {
+      using Index = typename std::decay_t<decltype(matrix)>::StorageIndex;
+      matrix.reserve(static_cast<Index>(nnz));
+    });
+  }
+
+  void startVec(StandardFormIndex col) {
+    visit([&](auto& matrix) {
+      using Index = typename std::decay_t<decltype(matrix)>::StorageIndex;
+      matrix.startVec(static_cast<Index>(col));
+    });
+  }
+
+  double& insertBackByOuterInner(StandardFormIndex outer,
+                                 StandardFormIndex inner) {
+    return visit([&](auto& matrix) -> double& {
+      using Index = typename std::decay_t<decltype(matrix)>::StorageIndex;
+      return matrix.insertBackByOuterInner(static_cast<Index>(outer),
+                                           static_cast<Index>(inner));
+    });
+  }
+
+  double& insert(StandardFormIndex row, StandardFormIndex col) {
+    return visit([&](auto& matrix) -> double& {
+      using Index = typename std::decay_t<decltype(matrix)>::StorageIndex;
+      return matrix.insert(static_cast<Index>(row), static_cast<Index>(col));
+    });
+  }
+
+  template <typename InputIt>
+  void setFromTriplets(InputIt begin, InputIt end) {
+    visit([&](auto& matrix) { matrix.setFromTriplets(begin, end); });
+  }
+
+  void makeCompressed() { visit([](auto& matrix) { matrix.makeCompressed(); }); }
+  void finalize() { visit([](auto& matrix) { matrix.finalize(); }); }
+  bool isCompressed() const {
+    return visit([](const auto& matrix) { return matrix.isCompressed(); });
+  }
+  StandardFormIndex rows() const {
+    return visit([](const auto& matrix) {
+      return static_cast<StandardFormIndex>(matrix.rows());
+    });
+  }
+  StandardFormIndex cols() const {
+    return visit([](const auto& matrix) {
+      return static_cast<StandardFormIndex>(matrix.cols());
+    });
+  }
+  StandardFormIndex outerSize() const { return cols(); }
+  StandardFormIndex nonZeros() const {
+    return visit([](const auto& matrix) {
+      return static_cast<StandardFormIndex>(matrix.nonZeros());
+    });
+  }
+  double coeff(StandardFormIndex row, StandardFormIndex col) const {
+    return visit([&](const auto& matrix) {
+      using Index = typename std::decay_t<decltype(matrix)>::StorageIndex;
+      return matrix.coeff(static_cast<Index>(row), static_cast<Index>(col));
+    });
+  }
+  double* valuePtr() {
+    return visit([](auto& matrix) { return matrix.valuePtr(); });
+  }
+  const double* valuePtr() const {
+    return visit([](const auto& matrix) { return matrix.valuePtr(); });
+  }
+  bool uses_32_bit_indices() const noexcept {
+    return std::holds_alternative<NarrowMatrix>(storage_);
+  }
+  std::size_t index_memory_bytes() const noexcept {
+    return visit([](const auto& matrix) {
+      using Index = typename std::decay_t<decltype(matrix)>::StorageIndex;
+      return (static_cast<std::size_t>(matrix.outerSize()) + 1 +
+              static_cast<std::size_t>(matrix.nonZeros())) *
+             sizeof(Index);
+    });
+  }
+  const NarrowMatrix* narrow_matrix() const noexcept {
+    return std::get_if<NarrowMatrix>(&storage_);
+  }
+  const WideMatrix* wide_matrix() const noexcept {
+    return std::get_if<WideMatrix>(&storage_);
+  }
+
+  Eigen::VectorXd operator*(const Eigen::VectorXd& x) const {
+    if (x.size() != cols()) return {};
+    Eigen::VectorXd result = Eigen::VectorXd::Zero(rows());
+    for (StandardFormIndex col = 0; col < cols(); ++col) {
+      const double multiplier = x[col];
+      if (multiplier == 0.0) continue;
+      for (InnerIterator it(*this, col); it; ++it) {
+        result[it.row()] += it.value() * multiplier;
+      }
+    }
+    return result;
+  }
+
+  Eigen::VectorXd transpose_multiply(const Eigen::VectorXd& y) const {
+    if (y.size() != rows()) return {};
+    Eigen::VectorXd result = Eigen::VectorXd::Zero(cols());
+    for (StandardFormIndex col = 0; col < cols(); ++col) {
+      double value = 0.0;
+      for (InnerIterator it(*this, col); it; ++it) {
+        value += it.value() * y[it.row()];
+      }
+      result[col] = value;
+    }
+    return result;
+  }
+
+  class TransposeView {
+   public:
+    explicit TransposeView(const StandardColumnMatrix& matrix)
+        : matrix_(matrix) {}
+    Eigen::VectorXd operator*(const Eigen::VectorXd& y) const {
+      return matrix_.transpose_multiply(y);
+    }
+
+   private:
+    const StandardColumnMatrix& matrix_;
+  };
+  TransposeView transpose() const { return TransposeView(*this); }
+
+  template <int Options = Eigen::ColMajor, typename Index = int>
+  Eigen::SparseMatrix<double, Options, Index> to_eigen() const {
+    std::vector<Eigen::Triplet<double, Index>> entries;
+    entries.reserve(static_cast<std::size_t>(nonZeros()));
+    for (StandardFormIndex col = 0; col < cols(); ++col) {
+      for (InnerIterator it(*this, col); it; ++it) {
+        entries.emplace_back(static_cast<Index>(it.row()),
+                             static_cast<Index>(col), it.value());
+      }
+    }
+    Eigen::SparseMatrix<double, Options, Index> result(
+        static_cast<Index>(rows()), static_cast<Index>(cols()));
+    result.setFromTriplets(entries.begin(), entries.end());
+    result.makeCompressed();
+    return result;
+  }
+
+ private:
+  static bool fits_narrow(StandardFormIndex value) noexcept {
+    return value >= 0 &&
+           value <= static_cast<StandardFormIndex>(
+                        (std::numeric_limits<int>::max)());
+  }
+  void promote_to_wide() {
+    if (!uses_32_bit_indices()) return;
+    WideMatrix wide = std::get<NarrowMatrix>(storage_);
+    storage_ = std::move(wide);
+  }
+  template <int Options, typename Index>
+  void assign_eigen(const Eigen::SparseMatrix<double, Options, Index>& source) {
+    const bool narrow = fits_narrow(source.rows()) &&
+                        fits_narrow(source.cols()) &&
+                        fits_narrow(source.nonZeros());
+    if (narrow) {
+      NarrowMatrix matrix = source;
+      matrix.makeCompressed();
+      storage_ = std::move(matrix);
+    } else {
+      WideMatrix matrix = source;
+      matrix.makeCompressed();
+      storage_ = std::move(matrix);
+    }
+  }
+
+};
+
+// CSR row-access view over StandardColumnMatrix. It owns row pointers and an
+// adaptive-width (row-offset, column, CSC-position) indices, but shares the CSC
+// value array. At the audited 10^7-by-10^7 / 10^8-nnz scale all three indices
+// are 32-bit, so the row view costs 4 bytes/row + 8 bytes/nnz instead of
+// duplicating 8-byte values and 64-bit indices.
+class StandardRowMatrix {
+ public:
+  using StorageIndex = StandardFormIndex;
+
+  class InnerIterator {
+   public:
+    InnerIterator(const StandardRowMatrix& matrix, StandardFormIndex row)
+        : matrix_(&matrix), row_(row) {
+      if (row >= 0 && row < matrix.rows_) {
+        position_ = matrix.outer_at(row);
+        end_ = matrix.outer_at(row + 1);
+      }
+    }
+    explicit operator bool() const { return position_ < end_; }
+    InnerIterator& operator++() {
+      ++position_;
+      return *this;
+    }
+    StandardFormIndex row() const { return row_; }
+    StandardFormIndex col() const { return matrix_->inner_at(position_); }
+    StandardFormIndex index() const { return col(); }
+    double value() const { return matrix_->value_at(position_); }
+
+   private:
+    const StandardRowMatrix* matrix_{nullptr};
+    StandardFormIndex row_{-1};
+    StandardFormIndex position_{0};
+    StandardFormIndex end_{0};
+  };
+
+  StandardRowMatrix() = default;
+  StandardRowMatrix& operator=(const StandardColumnMatrix& matrix) {
+    rebuild(matrix);
+    return *this;
+  }
+
+  void rebuild(const StandardColumnMatrix& matrix) {
+    rows_ = matrix.rows();
+    cols_ = matrix.cols();
+    const StandardFormIndex nnz = matrix.nonZeros();
+    constexpr auto kUint32Max =
+        static_cast<StandardFormIndex>(
+            (std::numeric_limits<std::uint32_t>::max)());
+    wide_columns_ = cols_ > kUint32Max;
+    wide_positions_ = nnz > kUint32Max;
+    wide_outer_ = nnz > kUint32Max;
+    if (wide_outer_) {
+      outer64_.assign(static_cast<std::size_t>(rows_) + 1, 0);
+      outer32_.clear();
+    } else {
+      outer32_.assign(static_cast<std::size_t>(rows_) + 1, 0);
+      outer64_.clear();
+    }
+    for (StandardFormIndex col = 0; col < cols_; ++col) {
+      for (StandardColumnMatrix::InnerIterator it(matrix, col); it; ++it) {
+        increment_outer(it.row() + 1);
+      }
+    }
+    for (StandardFormIndex row = 0; row < rows_; ++row) {
+      set_outer(row + 1, outer_at(row + 1) + outer_at(row));
+    }
+    std::vector<std::uint32_t> cursor32;
+    std::vector<StandardFormIndex> cursor64;
+    if (wide_outer_) {
+      cursor64 = outer64_;
+    } else {
+      cursor32 = outer32_;
+    }
+    if (wide_columns_) {
+      inner64_.assign(static_cast<std::size_t>(nnz), 0);
+      inner32_.clear();
+    } else {
+      inner32_.assign(static_cast<std::size_t>(nnz), 0);
+      inner64_.clear();
+    }
+    if (wide_positions_) {
+      position64_.assign(static_cast<std::size_t>(nnz), 0);
+      position32_.clear();
+    } else {
+      position32_.assign(static_cast<std::size_t>(nnz), 0);
+      position64_.clear();
+    }
+    for (StandardFormIndex col = 0; col < cols_; ++col) {
+      for (StandardColumnMatrix::InnerIterator it(matrix, col); it; ++it) {
+        const StandardFormIndex row = it.row();
+        const StandardFormIndex target =
+            wide_outer_
+                ? cursor64[static_cast<std::size_t>(row)]++
+                : static_cast<StandardFormIndex>(
+                      cursor32[static_cast<std::size_t>(row)]++);
+        if (wide_columns_) {
+          inner64_[static_cast<std::size_t>(target)] = col;
+        } else {
+          inner32_[static_cast<std::size_t>(target)] =
+              static_cast<std::uint32_t>(col);
+        }
+        if (wide_positions_) {
+          position64_[static_cast<std::size_t>(target)] = it.position();
+        } else {
+          position32_[static_cast<std::size_t>(target)] =
+              static_cast<std::uint32_t>(it.position());
+        }
+      }
+    }
+    values_ = matrix.valuePtr();
+    source_nnz_ = nnz;
+  }
+
+  void rebind_values(const StandardColumnMatrix& matrix) noexcept {
+    if (matrix.rows() != rows_ || matrix.cols() != cols_ ||
+        matrix.nonZeros() != source_nnz_) {
+      values_ = nullptr;
+      return;
+    }
+    values_ = matrix.valuePtr();
+  }
+
+  StandardFormIndex rows() const noexcept { return rows_; }
+  StandardFormIndex cols() const noexcept { return cols_; }
+  StandardFormIndex outerSize() const noexcept { return rows_; }
+  StandardFormIndex nonZeros() const noexcept { return source_nnz_; }
+  StandardFormIndex row_start(StandardFormIndex row) const noexcept {
+    return outer_at(row);
+  }
+  StandardFormIndex row_end(StandardFormIndex row) const noexcept {
+    return outer_at(row + 1);
+  }
+  bool uses_32_bit_row_offsets() const noexcept { return !wide_outer_; }
+  bool shares_values_with(const StandardColumnMatrix& matrix) const noexcept {
+    return values_ == matrix.valuePtr() && rows_ == matrix.rows() &&
+           cols_ == matrix.cols() && source_nnz_ == matrix.nonZeros();
+  }
+  std::size_t index_memory_bytes() const noexcept {
+    return outer32_.capacity() * sizeof(std::uint32_t) +
+           outer64_.capacity() * sizeof(StandardFormIndex) +
+           inner32_.capacity() * sizeof(std::uint32_t) +
+           inner64_.capacity() * sizeof(StandardFormIndex) +
+           position32_.capacity() * sizeof(std::uint32_t) +
+           position64_.capacity() * sizeof(StandardFormIndex);
+  }
+  double coeff(StandardFormIndex row, StandardFormIndex col) const {
+    if (row < 0 || row >= rows_ || col < 0 || col >= cols_ ||
+        values_ == nullptr) {
+      return 0.0;
+    }
+    StandardFormIndex first = outer_at(row);
+    StandardFormIndex last = outer_at(row + 1);
+    while (first < last) {
+      const StandardFormIndex middle = first + (last - first) / 2;
+      const StandardFormIndex candidate = inner_at(middle);
+      if (candidate < col) {
+        first = middle + 1;
+      } else {
+        last = middle;
+      }
+    }
+    return first < outer_at(row + 1) &&
+                   inner_at(first) == col
+               ? value_at(first)
+               : 0.0;
+  }
+
+ private:
+  StandardFormIndex outer_at(StandardFormIndex row) const noexcept {
+    return wide_outer_
+               ? outer64_[static_cast<std::size_t>(row)]
+               : static_cast<StandardFormIndex>(
+                     outer32_[static_cast<std::size_t>(row)]);
+  }
+  void set_outer(StandardFormIndex row, StandardFormIndex value) noexcept {
+    if (wide_outer_) {
+      outer64_[static_cast<std::size_t>(row)] = value;
+    } else {
+      outer32_[static_cast<std::size_t>(row)] =
+          static_cast<std::uint32_t>(value);
+    }
+  }
+  void increment_outer(StandardFormIndex row) noexcept {
+    if (wide_outer_) {
+      ++outer64_[static_cast<std::size_t>(row)];
+    } else {
+      ++outer32_[static_cast<std::size_t>(row)];
+    }
+  }
+  StandardFormIndex inner_at(StandardFormIndex position) const {
+    return wide_columns_
+               ? inner64_[static_cast<std::size_t>(position)]
+               : static_cast<StandardFormIndex>(
+                     inner32_[static_cast<std::size_t>(position)]);
+  }
+  StandardFormIndex source_position(StandardFormIndex position) const {
+    return wide_positions_
+               ? position64_[static_cast<std::size_t>(position)]
+               : static_cast<StandardFormIndex>(
+                     position32_[static_cast<std::size_t>(position)]);
+  }
+  double value_at(StandardFormIndex position) const {
+    return values_ == nullptr ? 0.0 : values_[source_position(position)];
+  }
+
+  StandardFormIndex rows_{0};
+  StandardFormIndex cols_{0};
+  StandardFormIndex source_nnz_{0};
+  bool wide_columns_{false};
+  bool wide_positions_{false};
+  bool wide_outer_{false};
+  std::vector<std::uint32_t> outer32_;
+  std::vector<StandardFormIndex> outer64_;
+  std::vector<std::uint32_t> inner32_;
+  std::vector<StandardFormIndex> inner64_;
+  std::vector<std::uint32_t> position32_;
+  std::vector<StandardFormIndex> position64_;
+  const double* values_{nullptr};
+};
+
+struct StandardFormMatrixStorage {
+  StandardColumnMatrix A;
+  StandardRowMatrix A_row;
+
+  StandardFormMatrixStorage() = default;
+  StandardFormMatrixStorage(const StandardFormMatrixStorage& other)
+      : A(other.A), A_row(other.A_row) {
+    A_row.rebind_values(A);
+  }
+  StandardFormMatrixStorage(StandardFormMatrixStorage&& other) noexcept
+      : A(std::move(other.A)), A_row(std::move(other.A_row)) {
+    A_row.rebind_values(A);
+  }
+  StandardFormMatrixStorage& operator=(const StandardFormMatrixStorage& other) {
+    if (this == &other) return *this;
+    A = other.A;
+    A_row = other.A_row;
+    A_row.rebind_values(A);
+    return *this;
+  }
+  StandardFormMatrixStorage& operator=(StandardFormMatrixStorage&& other) noexcept {
+    if (this == &other) return *this;
+    A = std::move(other.A);
+    A_row = std::move(other.A_row);
+    A_row.rebind_values(A);
+    return *this;
+  }
+};
 
 struct SimplexBasis;  // forward declaration
 struct SimplexOptions;
@@ -55,8 +595,8 @@ struct BasisOps {
   virtual int eta_count() const { return 0; }
   virtual int generation() const { return -1; }
   virtual SparseFactorTelemetry factor_telemetry() const;
-  virtual void rebind_A(const Eigen::SparseMatrix<double>&) {}
-  virtual bool bound_to_A(const Eigen::SparseMatrix<double>&) const {
+  virtual void rebind_A(const StandardColumnMatrix&) {}
+  virtual bool bound_to_A(const StandardColumnMatrix&) const {
     return false;
   }
   // A transaction snapshots the mutable solver model and basis represented by
@@ -124,6 +664,9 @@ struct SparseFactorTelemetry {
   int ft_updates{0};
   double max_growth{1.0};
   double u_fill_ratio{1.0};
+  std::uint64_t matrix_copies{0};
+  std::uint64_t dense_solves{0};
+  std::uint64_t indexed_solves{0};
 };
 
 struct SimplexOptions {
@@ -152,9 +695,22 @@ struct SimplexOptions {
   // ABI compatibility only. The rewritten native kernel never retries a
   // different basis after a failed warm start.
   const SimplexBasis* fallback_basis{nullptr};
-  // Legacy ABI field. DSE state is reused only with an exact basis match;
-  // otherwise it is initialized exactly.
+  // Opt-in exact cold-start DSE initialization. The scalable default uses a
+  // unit-weight Devex framework and lets the pivot recurrence refine it;
+  // setting this true performs one checked BTRAN per basis row.
   bool exact_dse_initialization{false};
+  // Parallel PRICE/BFRT worker budget. 0 selects a bounded hardware-aware
+  // default, 1 forces deterministic serial execution, and values >1 cap the
+  // number of persistent thread-pool tasks. Small or sparse scans remain
+  // serial regardless. MIPSOLVERS_LP_KERNEL_THREADS overrides this value.
+  int lp_kernel_threads{0};
+  // A cold basis may become dual feasible by shifting the costs of one-sided
+  // nonbasic columns. This is cheap for sparse defects, but a dense set of
+  // shifts creates an expensive mandatory original-cost cleanup. The default
+  // therefore selects genuine dual Phase I once the number of required shifts
+  // reaches max(count, ceil(fraction * standard-form columns)).
+  int dual_shift_start_max_count{256};
+  double dual_shift_start_max_fraction{0.125};
   // Legacy ABI fields; post-optimal frontier remapping was removed.
   bool enable_degenerate_frontier_remap{false};
   bool suppress_degenerate_frontier_remap{false};
@@ -168,6 +724,16 @@ struct SimplexOptions {
   // one sequential workspace, so a cached HiGHS model may be mutated in place.
   // Parallel workers leave this false and retain thread-local solver state.
   bool allow_persistent_lp_state{false};
+  // Preserve a copy of the caller-owned StandardFormLP in solve_lp_from_sf()
+  // results for cut generation. Disable for transient auxiliary solves that
+  // consume only the primal/basis; this avoids duplicating both sparse matrix
+  // orientations in every retained result.
+  bool retain_standard_form{false};
+  // Full canonical A*x=b residual scans performed during non-terminal INVERT
+  // reconstruction. The first INVERT is always checked; subsequent scans run
+  // at this interval. Terminal publication always performs an exact scan.
+  // Values <= 0 disable periodic scans after the checked first INVERT.
+  int intermediate_audit_interval{32};
   // A HiGHS rejection is terminal; this field never describes a fallback
   // chain. ExperimentalNative is an explicit development-only selection.
   LpKernelBackend lp_kernel_backend{LpKernelBackend::HiGHS};
@@ -270,12 +836,10 @@ struct SimplexBasis {
   }
 };
 
-struct StandardFormLP {
+struct StandardFormLP : StandardFormMatrixStorage {
   // Immutable across copies and bound/cost updates; regenerated whenever the
   // matrix structure is rebuilt. Enables O(1) persistent-model validation.
   std::uint64_t structure_id{0};
-  Eigen::SparseMatrix<double> A;                        // column-major (fast col access)
-  Eigen::SparseMatrix<double, Eigen::RowMajor> A_row;   // row-major (fast row access for GMI)
   Eigen::VectorXd b;
   Eigen::VectorXd c_max;
   Eigen::VectorXd lb_shift;
@@ -316,6 +880,8 @@ struct SimplexResult {
   SolveResult result;
   StandardFormLP form;
   SimplexBasis basis;
+  // Deprecated compatibility field. Native and HiGHS paths leave it empty;
+  // use basis.cached_sparse_basis for on-demand basis solves.
   Eigen::MatrixXd basis_inverse;
   Eigen::VectorXd x_std;
   Eigen::VectorXd x_basic;
@@ -406,6 +972,50 @@ bool update_standard_form_bounds_incremental(
     const LPModel& lp,
     const std::vector<BoundChangeInfo>& changes);
 
+// Exact rollback guard for short-lived bound probes. Only the original-bound
+// scalars and RHS entries touched by lower-bound shifts are snapshotted; the
+// standard-form matrix and all unaffected vectors remain shared in place.
+class StandardFormBoundTransaction {
+ public:
+  explicit StandardFormBoundTransaction(StandardFormLP& sf) noexcept
+      : sf_(&sf) {}
+  ~StandardFormBoundTransaction() { (void)rollback(); }
+
+  StandardFormBoundTransaction(const StandardFormBoundTransaction&) = delete;
+  StandardFormBoundTransaction& operator=(
+      const StandardFormBoundTransaction&) = delete;
+  StandardFormBoundTransaction(StandardFormBoundTransaction&&) = delete;
+  StandardFormBoundTransaction& operator=(
+      StandardFormBoundTransaction&&) = delete;
+
+  bool apply(const LPModel& lp,
+             const std::vector<BoundChangeInfo>& changes);
+  bool rollback() noexcept;
+  bool active() const noexcept { return active_; }
+  std::size_t snapshot_value_count() const noexcept {
+    return variable_snapshots_.size() * 2 + row_snapshots_.size() +
+           (active_ ? 1 : 0);
+  }
+
+ private:
+  struct VariableSnapshot {
+    int column{-1};
+    double lower_shift{0.0};
+    double upper{0.0};
+  };
+  struct RowSnapshot {
+    int row{-1};
+    double rhs{0.0};
+  };
+
+  StandardFormLP* sf_{nullptr};
+  std::vector<VariableSnapshot> variable_snapshots_;
+  std::vector<RowSnapshot> row_snapshots_;
+  double objective_const_{0.0};
+  bool used_{false};
+  bool active_{false};
+};
+
 // Solve an LP from a pre-built StandardFormLP (avoids rebuilding from LPModel).
 SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
                                const SimplexOptions& opt = {},
@@ -484,11 +1094,11 @@ SparseFactorTelemetry get_sparse_basis_factor_telemetry(
 /// after solving from a stack-local StandardFormLP must rebind before carrying
 /// the factor into the next warm start.
 void rebind_sparse_basis_matrix(const std::shared_ptr<BasisOps>& sb,
-                                const Eigen::SparseMatrix<double>& A);
+                                const StandardColumnMatrix& A);
 
 /// Return true iff the cached SparseBasis is currently bound to this exact
 /// matrix object and has matching row dimension.
 bool sparse_basis_bound_to_matrix(const std::shared_ptr<BasisOps>& sb,
-                                  const Eigen::SparseMatrix<double>& A);
+                                  const StandardColumnMatrix& A);
 
 }  // namespace mipsolvers::engine

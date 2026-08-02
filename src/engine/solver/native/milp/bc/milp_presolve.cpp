@@ -70,18 +70,20 @@ void MILPPresolve::init_from_lp(const LPModel& lp) {
     col_ub_orig_[j] = lp.vars[j].ub;
   }
 
-  // Rows: first m_ineq rows are Ax <= b, last m_eq rows are Aeq*x = beq
+  // Rows: first m_ineq rows are row_lhs <= Ax <= b, last m_eq rows are
+  // Aeq*x = beq. row_lhs is optional for legacy upper-only models.
   rows_.resize(m);
   row_lb_.resize(m);
   row_ub_.resize(m);
   row_deleted_.assign(m, false);
   row_activity_.resize(m);
 
-  // Build row entries from inequality constraints (Ax <= b → -inf <= a^T x <= b)
+  // Build row entries from inequality/ranged constraints.
   {
     Eigen::SparseMatrix<double, Eigen::RowMajor> A_row = lp.A;
+    const bool has_row_lhs = lp.row_lhs.size() == m_ineq;
     for (int r = 0; r < m_ineq; ++r) {
-      row_lb_[r] = -kInf;
+      row_lb_[r] = has_row_lhs ? lp.row_lhs[r] : -kInf;
       row_ub_[r] = lp.b[r];
       for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_row, r); it; ++it) {
         const double v = it.value();
@@ -117,6 +119,7 @@ void MILPPresolve::init_from_lp(const LPModel& lp) {
   int nnz = 0;
   for (int r = 0; r < m; ++r) nnz += static_cast<int>(rows_[r].size());
   stats_.orig_nnz = nnz;
+  compute_all_activities();
 }
 
 // ============================================================================
@@ -131,24 +134,98 @@ void MILPPresolve::compute_all_activities() {
 }
 
 void MILPPresolve::update_activity(int row) {
+  ++stats_.activity_rows_recomputed;
   auto& ac = row_activity_[row];
-  ac.min_act = 0.0;
-  ac.max_act = 0.0;
+  ac.min_act.reset();
+  ac.max_act.reset();
   ac.n_inf_min = 0;
   ac.n_inf_max = 0;
   for (const auto& e : rows_[row]) {
     if (col_deleted_[e.col]) continue;
     if (e.val > 0) {
       if (col_lb_[e.col] <= -kInf + 1) ac.n_inf_min++;
-      else ac.min_act += e.val * col_lb_[e.col];
+      else ac.min_act.add_product(e.val, col_lb_[e.col]);
       if (col_ub_[e.col] >= kInf - 1) ac.n_inf_max++;
-      else ac.max_act += e.val * col_ub_[e.col];
+      else ac.max_act.add_product(e.val, col_ub_[e.col]);
     } else {
       if (col_ub_[e.col] >= kInf - 1) ac.n_inf_min++;
-      else ac.min_act += e.val * col_ub_[e.col];
+      else ac.min_act.add_product(e.val, col_ub_[e.col]);
       if (col_lb_[e.col] <= -kInf + 1) ac.n_inf_max++;
-      else ac.max_act += e.val * col_lb_[e.col];
+      else ac.max_act.add_product(e.val, col_lb_[e.col]);
     }
+  }
+}
+
+bool MILPPresolve::set_col_lower_bound(int col, double value) {
+  const double old = col_lb_[col];
+  if (value == old) return false;
+  const bool old_inf = old <= -kInf + 1;
+  const bool new_inf = value <= -kInf + 1;
+  for (const auto& ce : cols_[col]) {
+    if (row_deleted_[ce.row]) continue;
+    auto& ac = row_activity_[ce.row];
+    auto* activity = ce.val > 0.0 ? &ac.min_act : &ac.max_act;
+    int* n_inf = ce.val > 0.0 ? &ac.n_inf_min : &ac.n_inf_max;
+    if (old_inf) {
+      --(*n_inf);
+    } else {
+      activity->remove_product(ce.val, old);
+    }
+    if (new_inf) {
+      ++(*n_inf);
+    } else {
+      activity->add_product(ce.val, value);
+    }
+    ++stats_.activity_delta_updates;
+  }
+  col_lb_[col] = value;
+  return true;
+}
+
+bool MILPPresolve::set_col_upper_bound(int col, double value) {
+  const double old = col_ub_[col];
+  if (value == old) return false;
+  const bool old_inf = old >= kInf - 1;
+  const bool new_inf = value >= kInf - 1;
+  for (const auto& ce : cols_[col]) {
+    if (row_deleted_[ce.row]) continue;
+    auto& ac = row_activity_[ce.row];
+    auto* activity = ce.val > 0.0 ? &ac.max_act : &ac.min_act;
+    int* n_inf = ce.val > 0.0 ? &ac.n_inf_max : &ac.n_inf_min;
+    if (old_inf) {
+      --(*n_inf);
+    } else {
+      activity->remove_product(ce.val, old);
+    }
+    if (new_inf) {
+      ++(*n_inf);
+    } else {
+      activity->add_product(ce.val, value);
+    }
+    ++stats_.activity_delta_updates;
+  }
+  col_ub_[col] = value;
+  return true;
+}
+
+void MILPPresolve::remove_col_from_activities(int col) {
+  const double lb = col_lb_[col];
+  const double ub = col_ub_[col];
+  for (const auto& ce : cols_[col]) {
+    if (row_deleted_[ce.row]) continue;
+    auto& ac = row_activity_[ce.row];
+    if (ce.val > 0.0) {
+      if (lb <= -kInf + 1) --ac.n_inf_min;
+      else ac.min_act.remove_product(ce.val, lb);
+      if (ub >= kInf - 1) --ac.n_inf_max;
+      else ac.max_act.remove_product(ce.val, ub);
+    } else {
+      if (ub >= kInf - 1) --ac.n_inf_min;
+      else ac.min_act.remove_product(ce.val, ub);
+      if (lb <= -kInf + 1) --ac.n_inf_max;
+      else ac.max_act.remove_product(ce.val, lb);
+    }
+    ++stats_.activity_delta_updates;
   }
 }
 
@@ -169,14 +246,13 @@ bool MILPPresolve::detect_infeasibility(const char* phase) {
 
   for (int r = 0; r < m_orig_; ++r) {
     if (row_deleted_[r]) continue;
-    update_activity(r);
     const auto& ac = row_activity_[r];
     const bool violates_upper =
         row_ub_[r] < kInf - 1 && ac.n_inf_min == 0 &&
-        ac.min_act > row_ub_[r] + opts_.bound_tol;
+        ac.min_act.violates_upper(row_ub_[r], opts_.bound_tol);
     const bool violates_lower =
         row_lb_[r] > -kInf + 1 && ac.n_inf_max == 0 &&
-        ac.max_act < row_lb_[r] - opts_.bound_tol;
+        ac.max_act.violates_lower(row_lb_[r], opts_.bound_tol);
     if (violates_upper || violates_lower) {
       mark_infeasible(std::string("infeasible row activity after ") + phase);
       return true;
@@ -211,6 +287,7 @@ void MILPPresolve::fix_variable(int col, double val) {
   rec.value = val;
   undo_stack_.push_back(std::move(rec));
 
+  remove_col_from_activities(col);
   col_lb_[col] = val;
   col_ub_[col] = val;
 
@@ -252,11 +329,13 @@ void MILPPresolve::remove_entry(int row, int col) {
   auto& c = cols_[col];
   c.erase(std::remove_if(c.begin(), c.end(),
     [row](const CEntry& e) { return e.row == row; }), c.end());
+  if (!row_deleted_[row]) update_activity(row);
 }
 
 void MILPPresolve::add_entry(int row, int col, double val) {
   rows_[row].push_back({col, val});
   cols_[col].push_back({row, val});
+  if (!row_deleted_[row]) update_activity(row);
 }
 
 double MILPPresolve::get_entry(int row, int col) const {
@@ -361,7 +440,7 @@ int MILPPresolve::process_singleton_rows() {
         double new_lb = row_lb_[r] / singleton_val;
         if (is_integer_var(singleton_col)) new_lb = std::ceil(new_lb - opts_.bound_tol);
         if (new_lb > col_lb_[singleton_col] + opts_.bound_tol) {
-          col_lb_[singleton_col] = new_lb;
+          set_col_lower_bound(singleton_col, new_lb);
           changed = true;
         }
       }
@@ -369,7 +448,7 @@ int MILPPresolve::process_singleton_rows() {
         double new_ub = row_ub_[r] / singleton_val;
         if (is_integer_var(singleton_col)) new_ub = std::floor(new_ub + opts_.bound_tol);
         if (new_ub < col_ub_[singleton_col] - opts_.bound_tol) {
-          col_ub_[singleton_col] = new_ub;
+          set_col_upper_bound(singleton_col, new_ub);
           changed = true;
         }
       }
@@ -379,7 +458,7 @@ int MILPPresolve::process_singleton_rows() {
         double new_lb = row_ub_[r] / singleton_val;
         if (is_integer_var(singleton_col)) new_lb = std::ceil(new_lb - opts_.bound_tol);
         if (new_lb > col_lb_[singleton_col] + opts_.bound_tol) {
-          col_lb_[singleton_col] = new_lb;
+          set_col_lower_bound(singleton_col, new_lb);
           changed = true;
         }
       }
@@ -387,7 +466,7 @@ int MILPPresolve::process_singleton_rows() {
         double new_ub = row_lb_[r] / singleton_val;
         if (is_integer_var(singleton_col)) new_ub = std::floor(new_ub + opts_.bound_tol);
         if (new_ub < col_ub_[singleton_col] - opts_.bound_tol) {
-          col_ub_[singleton_col] = new_ub;
+          set_col_upper_bound(singleton_col, new_ub);
           changed = true;
         }
       }
@@ -432,6 +511,24 @@ int MILPPresolve::process_singleton_columns() {
     const bool is_eq = std::abs(row_lb_[singleton_row] - row_ub_[singleton_row]) < opts_.bound_tol;
 
     if (is_eq) {
+      if (is_integer_var(j)) {
+        const double scaled_rhs = row_ub_[singleton_row] / singleton_val;
+        if (std::abs(scaled_rhs - std::round(scaled_rhs)) >
+            opts_.bound_tol) {
+          continue;
+        }
+        bool preserves_integrality = true;
+        for (const auto& e : rows_[singleton_row]) {
+          if (e.col == j || col_deleted_[e.col]) continue;
+          const double ratio = e.val / singleton_val;
+          if (!is_integer_var(e.col) ||
+              std::abs(ratio - std::round(ratio)) > opts_.bound_tol) {
+            preserves_integrality = false;
+            break;
+          }
+        }
+        if (!preserves_integrality) continue;
+      }
       // Equality row: a_j * x_j + sum(a_k * x_k) = b
       // → x_j = (b - sum(a_k * x_k)) / a_j
       // Record for postsolve, then convert x_j bounds into a band constraint
@@ -564,9 +661,14 @@ int MILPPresolve::process_doubleton_equations() {
     // Cannot eliminate integer variable if the substitution introduces fractions
     if (is_integer_var(elim_col) && is_integer_var(keep_col)) {
       // x_elim = (rhs - keep_coeff * x_keep) / elim_coeff
-      // This preserves integrality only if keep_coeff / elim_coeff is integer
+      // This preserves integrality only when both the slope and intercept are
+      // integer. Checking the slope alone loses divisibility constraints.
       double ratio = keep_coeff / elim_coeff;
-      if (std::abs(ratio - std::round(ratio)) > opts_.bound_tol) continue;
+      double intercept = row_ub_[r] / elim_coeff;
+      if (std::abs(ratio - std::round(ratio)) > opts_.bound_tol ||
+          std::abs(intercept - std::round(intercept)) > opts_.bound_tol) {
+        continue;
+      }
     }
 
     const double rhs = row_ub_[r];
@@ -609,9 +711,9 @@ int MILPPresolve::process_doubleton_equations() {
           implied_ub = std::floor(implied_ub + opts_.bound_tol);
       }
       if (implied_lb > col_lb_[keep_col] + opts_.bound_tol)
-        col_lb_[keep_col] = implied_lb;
+        set_col_lower_bound(keep_col, implied_lb);
       if (implied_ub < col_ub_[keep_col] - opts_.bound_tol)
-        col_ub_[keep_col] = implied_ub;
+        set_col_upper_bound(keep_col, implied_ub);
     }
 
     // Substitute x_elim into all other rows that reference it.
@@ -652,6 +754,7 @@ int MILPPresolve::process_doubleton_equations() {
       if (std::abs(new_coeff) <= opts_.zero_tol) {
         remove_entry(ce.row, keep_col);
       }
+      update_activity(ce.row);
     }
 
     // Update objective: cost_keep += cost_elim * scale;  cost_offset += cost_elim * offset
@@ -672,7 +775,6 @@ int MILPPresolve::process_doubleton_equations() {
 
 int MILPPresolve::tighten_bounds() {
   int count = 0;
-  compute_all_activities();
 
   for (int r = 0; r < m_orig_; ++r) {
     if (row_deleted_[r]) continue;
@@ -684,22 +786,27 @@ int MILPPresolve::tighten_bounds() {
       // Upper bound tightening from row_ub: a^T x <= row_ub
       if (row_ub_[r] < kInf - 1 && ac.n_inf_min == 0) {
         // min_activity_excl = min_act - contribution of e.col
-        double contrib = (e.val > 0) ? e.val * col_lb_[e.col] : e.val * col_ub_[e.col];
-        double min_excl = ac.min_act - contrib;
-        double residual = row_ub_[r] - min_excl;
+        const double bound =
+            e.val > 0 ? col_lb_[e.col] : col_ub_[e.col];
+        const double residual = ac.min_act.upper_residual(
+            row_ub_[r], e.val, bound, opts_.bound_tol);
 
         if (e.val > opts_.zero_tol) {
           double new_ub = residual / e.val;
           if (is_integer_var(e.col)) new_ub = std::floor(new_ub + opts_.bound_tol);
-          if (new_ub < col_ub_[e.col] - opts_.bound_tol) {
-            col_ub_[e.col] = new_ub;
+          if (new_ub < col_ub_[e.col] - detail::bound_improvement_tolerance(
+                                                   opts_.bound_tol,
+                                                   col_ub_[e.col], new_ub)) {
+            set_col_upper_bound(e.col, new_ub);
             ++count;
           }
         } else if (e.val < -opts_.zero_tol) {
           double new_lb = residual / e.val;
           if (is_integer_var(e.col)) new_lb = std::ceil(new_lb - opts_.bound_tol);
-          if (new_lb > col_lb_[e.col] + opts_.bound_tol) {
-            col_lb_[e.col] = new_lb;
+          if (new_lb > col_lb_[e.col] + detail::bound_improvement_tolerance(
+                                                   opts_.bound_tol,
+                                                   col_lb_[e.col], new_lb)) {
+            set_col_lower_bound(e.col, new_lb);
             ++count;
           }
         }
@@ -707,22 +814,27 @@ int MILPPresolve::tighten_bounds() {
 
       // Lower bound tightening from row_lb: row_lb <= a^T x
       if (row_lb_[r] > -kInf + 1 && ac.n_inf_max == 0) {
-        double contrib = (e.val > 0) ? e.val * col_ub_[e.col] : e.val * col_lb_[e.col];
-        double max_excl = ac.max_act - contrib;
-        double residual = row_lb_[r] - max_excl;
+        const double bound =
+            e.val > 0 ? col_ub_[e.col] : col_lb_[e.col];
+        const double residual = ac.max_act.lower_residual(
+            row_lb_[r], e.val, bound, opts_.bound_tol);
 
         if (e.val > opts_.zero_tol) {
           double new_lb = residual / e.val;
           if (is_integer_var(e.col)) new_lb = std::ceil(new_lb - opts_.bound_tol);
-          if (new_lb > col_lb_[e.col] + opts_.bound_tol) {
-            col_lb_[e.col] = new_lb;
+          if (new_lb > col_lb_[e.col] + detail::bound_improvement_tolerance(
+                                                   opts_.bound_tol,
+                                                   col_lb_[e.col], new_lb)) {
+            set_col_lower_bound(e.col, new_lb);
             ++count;
           }
         } else if (e.val < -opts_.zero_tol) {
           double new_ub = residual / e.val;
           if (is_integer_var(e.col)) new_ub = std::floor(new_ub + opts_.bound_tol);
-          if (new_ub < col_ub_[e.col] - opts_.bound_tol) {
-            col_ub_[e.col] = new_ub;
+          if (new_ub < col_ub_[e.col] - detail::bound_improvement_tolerance(
+                                                   opts_.bound_tol,
+                                                   col_ub_[e.col], new_ub)) {
+            set_col_upper_bound(e.col, new_ub);
             ++count;
           }
         }
@@ -754,14 +866,14 @@ int MILPPresolve::tighten_bounds() {
               double new_ub = residual / e.val;
               if (is_integer_var(e.col)) new_ub = std::floor(new_ub + opts_.bound_tol);
               if (new_ub < col_ub_[e.col] - opts_.bound_tol || col_ub_[e.col] >= kInf - 1) {
-                col_ub_[e.col] = new_ub;
+                set_col_upper_bound(e.col, new_ub);
                 ++count;
               }
             } else if (e.val < -opts_.zero_tol) {
               double new_lb = residual / e.val;
               if (is_integer_var(e.col)) new_lb = std::ceil(new_lb - opts_.bound_tol);
               if (new_lb > col_lb_[e.col] + opts_.bound_tol || col_lb_[e.col] <= -kInf + 1) {
-                col_lb_[e.col] = new_lb;
+                set_col_lower_bound(e.col, new_lb);
                 ++count;
               }
             }
@@ -780,22 +892,16 @@ int MILPPresolve::tighten_bounds() {
 
 int MILPPresolve::detect_forcing_rows() {
   int count = 0;
-  compute_all_activities();
 
   for (int r = 0; r < m_orig_; ++r) {
     if (row_deleted_[r]) continue;
-    // Recompute this row's activity from current bounds/deletions.  Earlier
-    // forcing rows in this same pass call fix_variable(), which deletes columns
-    // and adjusts the bounds of every row sharing those columns — leaving the
-    // start-of-pass activities stale.  Using a stale min/max activity against an
-    // already-adjusted row bound fires spurious forcing/redundancy and cuts off
-    // the true optimum.  A per-row refresh keeps the two consistent.
-    update_activity(r);
     const auto& ac = row_activity_[r];
 
     // Redundant row: max_activity <= row_ub AND min_activity >= row_lb
-    bool max_below_ub = (ac.n_inf_max == 0 && ac.max_act <= row_ub_[r] + opts_.bound_tol);
-    bool min_above_lb = (ac.n_inf_min == 0 && ac.min_act >= row_lb_[r] - opts_.bound_tol);
+    const bool max_below_ub =
+        ac.n_inf_max == 0 && ac.max_act.within_upper(row_ub_[r], opts_.bound_tol);
+    const bool min_above_lb =
+        ac.n_inf_min == 0 && ac.min_act.within_lower(row_lb_[r], opts_.bound_tol);
 
     if (max_below_ub && (row_lb_[r] <= -kInf + 1 || min_above_lb)) {
       delete_row(r);
@@ -804,7 +910,8 @@ int MILPPresolve::detect_forcing_rows() {
     }
 
     // Forcing row at min: min_activity == row_ub → all vars at their contributing bound
-    if (ac.n_inf_min == 0 && ac.min_act >= row_ub_[r] - opts_.bound_tol) {
+    if (ac.n_inf_min == 0 &&
+        ac.min_act.within_lower(row_ub_[r], opts_.bound_tol)) {
       for (const auto& e : rows_[r]) {
         if (col_deleted_[e.col]) continue;
         if (e.val > opts_.zero_tol) {
@@ -822,7 +929,7 @@ int MILPPresolve::detect_forcing_rows() {
 
     // Forcing row at max: max_activity == row_lb → all vars at opposite bound
     if (ac.n_inf_max == 0 && row_lb_[r] > -kInf + 1 &&
-        ac.max_act <= row_lb_[r] + opts_.bound_tol) {
+        ac.max_act.within_upper(row_lb_[r], opts_.bound_tol)) {
       for (const auto& e : rows_[r]) {
         if (col_deleted_[e.col]) continue;
         if (e.val > opts_.zero_tol) {
@@ -974,18 +1081,19 @@ int MILPPresolve::detect_parallel_rows() {
 
         if (!parallel || !ratio_set) continue;
 
-        // Merge row2 into row1: keep the tighter constraint
-        // Scale row2's bounds by 1/ratio to match row1's scale.
-        // When ratio < 0, dividing flips the inequality direction, so
+        // Merge row2 into row1: keep the tighter constraint. Since
+        // ratio = a(row1) / a(row2), row2's bounds must be multiplied by
+        // ratio to match row1. When ratio < 0, multiplication flips the
+        // inequality direction, so
         // what was the lower bound becomes the upper and vice versa.
         double lb2_scaled, ub2_scaled;
         if (ratio > 0) {
-          lb2_scaled = (row_lb_[r2] > -kInf + 1) ? row_lb_[r2] / ratio : -kInf;
-          ub2_scaled = (row_ub_[r2] < kInf - 1)  ? row_ub_[r2] / ratio : kInf;
+          lb2_scaled = (row_lb_[r2] > -kInf + 1) ? row_lb_[r2] * ratio : -kInf;
+          ub2_scaled = (row_ub_[r2] < kInf - 1)  ? row_ub_[r2] * ratio : kInf;
         } else {
-          // ratio < 0: division flips direction
-          lb2_scaled = (row_ub_[r2] < kInf - 1)  ? row_ub_[r2] / ratio : -kInf;
-          ub2_scaled = (row_lb_[r2] > -kInf + 1) ? row_lb_[r2] / ratio : kInf;
+          // ratio < 0: scaling flips direction
+          lb2_scaled = (row_ub_[r2] < kInf - 1)  ? row_ub_[r2] * ratio : -kInf;
+          ub2_scaled = (row_lb_[r2] > -kInf + 1) ? row_lb_[r2] * ratio : kInf;
         }
 
         // Tighten row1's bounds
@@ -1002,199 +1110,398 @@ int MILPPresolve::detect_parallel_rows() {
 }
 
 // ============================================================================
-// 10. Coefficient strengthening for MIP
+// 10. Binary probing
 // ============================================================================
 
-int MILPPresolve::strengthen_coefficients() {
-  if (!opts_.do_coefficient_strengthen) return 0;
+int MILPPresolve::run_probing() {
   int count = 0;
-  compute_all_activities();
+  std::vector<int> candidates;
+  candidates.reserve(static_cast<std::size_t>(n_orig_));
+  for (int j = 0; j < n_orig_; ++j) {
+    if (!col_deleted_[j] && col_type_[j] == VarType::Binary &&
+        !is_fixed(j)) {
+      candidates.push_back(j);
+    }
+  }
 
-  // For each inequality row a^T x <= b with integer variable x_j:
-  // If x_j is binary with coefficient a_j > 0:
-  //   New coefficient: a_j' = min(a_j, b - min_activity_excl_j)
-  //   New RHS: b' = b - (a_j - a_j')
-  for (int r = 0; r < m_orig_; ++r) {
-    if (row_deleted_[r]) continue;
-    if (row_ub_[r] >= kInf - 1) continue;  // No upper bound
-    const auto& ac = row_activity_[r];
-    if (ac.n_inf_min != 0) continue;  // Need finite min activity
+  int max_probes =
+      std::min(opts_.max_probing_candidates,
+               static_cast<int>(candidates.size()));
+  if (m_orig_ > 2000) max_probes = std::min(max_probes, 100);
+  if (m_orig_ > 5000) max_probes = std::min(max_probes, 50);
 
-    for (auto& e : rows_[r]) {
-      if (col_deleted_[e.col]) continue;
-      if (col_type_[e.col] != VarType::Binary) continue;
-      if (e.val <= opts_.zero_tol) continue;  // Only positive coefficients
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(1);
 
-      double contrib = e.val * col_lb_[e.col];  // = 0 for binary
-      double min_excl = ac.min_act - contrib;
-      double max_coeff = row_ub_[r] - min_excl;
+  struct TrailEntry {
+    int col;
+    bool is_lb;
+    double old_value;
+  };
+  struct TouchedColumn {
+    int col;
+    double base_lb;
+    double base_ub;
+  };
+  struct WorldChange {
+    int col;
+    double base_lb;
+    double base_ub;
+    double lb;
+    double ub;
+  };
+  struct ProbeWorld {
+    bool infeasible{false};
+    bool complete{true};
+    std::vector<WorldChange> changes;
+  };
 
-      if (max_coeff < e.val - opts_.bound_tol && max_coeff > opts_.zero_tol) {
-        double reduction = e.val - max_coeff;
-        e.val = max_coeff;
-        // Update column entry too
-        for (auto& ce : cols_[e.col]) {
-          if (ce.row == r) { ce.val = max_coeff; break; }
+  std::vector<TrailEntry> trail;
+  std::vector<TouchedColumn> touched;
+  std::vector<unsigned char> touched_flag(
+      static_cast<std::size_t>(n_orig_), 0);
+  std::vector<unsigned char> row_queued(
+      static_cast<std::size_t>(m_orig_), 0);
+  std::vector<int> pending_rows;
+  std::vector<int> current_rows;
+
+  auto record_implication = [&](int trigger_col, bool trigger_value_one,
+                                int implied_col, bool implied_is_lb,
+                                double implied_value) {
+    if (trigger_col == implied_col || !std::isfinite(implied_value)) return;
+    if (probing_implications_original_.size() >=
+        opts_.max_probing_implications) {
+      stats_.probing_truncated = true;
+      return;
+    }
+    probing_implications_original_.push_back(
+        {trigger_col, trigger_value_one, implied_col, implied_is_lb,
+         implied_value});
+  };
+
+  auto normalize_implications = [&]() {
+    auto& implications = probing_implications_original_;
+    std::sort(implications.begin(), implications.end(),
+              [](const ProbingImplication& lhs,
+                 const ProbingImplication& rhs) {
+                if (lhs.trigger_col != rhs.trigger_col)
+                  return lhs.trigger_col < rhs.trigger_col;
+                if (lhs.trigger_value_one != rhs.trigger_value_one)
+                  return lhs.trigger_value_one < rhs.trigger_value_one;
+                if (lhs.implied_col != rhs.implied_col)
+                  return lhs.implied_col < rhs.implied_col;
+                if (lhs.implied_is_lb != rhs.implied_is_lb)
+                  return lhs.implied_is_lb < rhs.implied_is_lb;
+                return lhs.implied_is_lb
+                           ? lhs.implied_value > rhs.implied_value
+                           : lhs.implied_value < rhs.implied_value;
+              });
+    std::vector<ProbingImplication> unique;
+    unique.reserve(implications.size());
+    for (const auto& implication : implications) {
+      if (!unique.empty()) {
+        const auto& previous = unique.back();
+        if (previous.trigger_col == implication.trigger_col &&
+            previous.trigger_value_one == implication.trigger_value_one &&
+            previous.implied_col == implication.implied_col &&
+            previous.implied_is_lb == implication.implied_is_lb) {
+          continue;
         }
-        // Adjust RHS: b' = b - reduction * ub (ub=1 for binary)
-        row_ub_[r] -= reduction * col_ub_[e.col];
-        stats_.coefficients_strengthened++;
+      }
+      unique.push_back(implication);
+    }
+    implications.swap(unique);
+  };
+
+  auto run_world = [&](int trigger_col, double trigger_value) {
+    ProbeWorld world;
+    trail.clear();
+    touched.clear();
+    pending_rows.clear();
+    current_rows.clear();
+
+    auto touch_col = [&](int col) {
+      auto& flag = touched_flag[static_cast<std::size_t>(col)];
+      if (flag) return;
+      flag = 1;
+      touched.push_back({col, col_lb_[col], col_ub_[col]});
+    };
+
+    auto enqueue_col_rows = [&](int col) {
+      for (const auto& ce : cols_[col]) {
+        const int row = ce.row;
+        if (row_deleted_[row]) continue;
+        auto& queued = row_queued[static_cast<std::size_t>(row)];
+        if (!queued) {
+          queued = 1;
+          pending_rows.push_back(row);
+        }
+      }
+    };
+
+    auto tighten_bound = [&](int col, bool is_lb,
+                             double candidate) -> bool {
+      if (col_deleted_[col] || !std::isfinite(candidate)) return true;
+      if (is_integer_var(col)) {
+        candidate =
+            is_lb ? std::ceil(candidate - opts_.bound_tol)
+                  : std::floor(candidate + opts_.bound_tol);
+      }
+      const double current = is_lb ? col_lb_[col] : col_ub_[col];
+      const double improve_tol = detail::bound_improvement_tolerance(
+          opts_.bound_tol, current, candidate);
+      const bool improves =
+          is_lb ? candidate > current + improve_tol
+                : candidate < current - improve_tol;
+      if (!improves) return true;
+
+      const double opposite = is_lb ? col_ub_[col] : col_lb_[col];
+      const double consistency_tol = detail::bound_improvement_tolerance(
+          opts_.bound_tol, candidate, opposite);
+      if ((is_lb && candidate > opposite + consistency_tol) ||
+          (!is_lb && candidate < opposite - consistency_tol)) {
+        world.infeasible = true;
+        return false;
+      }
+
+      touch_col(col);
+      trail.push_back({col, is_lb, current});
+      ++stats_.probing_trail_pushes;
+      if (is_lb)
+        set_col_lower_bound(col, candidate);
+      else
+        set_col_upper_bound(col, candidate);
+      enqueue_col_rows(col);
+      return true;
+    };
+
+    tighten_bound(trigger_col, true, trigger_value);
+    if (!world.infeasible)
+      tighten_bound(trigger_col, false, trigger_value);
+
+    const int max_waves = std::max(1, opts_.probing_depth);
+    for (int wave = 0;
+         world.complete && !world.infeasible && wave < max_waves &&
+         !pending_rows.empty();
+         ++wave) {
+      if (std::chrono::steady_clock::now() >= deadline) {
+        world.complete = false;
+        break;
+      }
+      current_rows.clear();
+      current_rows.swap(pending_rows);
+      for (const int row : current_rows) {
+        if (stats_.probing_rows_processed >= opts_.max_probing_row_visits ||
+            std::chrono::steady_clock::now() >= deadline) {
+          world.complete = false;
+          stats_.probing_truncated = true;
+          break;
+        }
+        row_queued[static_cast<std::size_t>(row)] = 0;
+        if (row_deleted_[row]) continue;
+        ++stats_.probing_rows_processed;
+        const auto& activity = row_activity_[row];
+
+        if (row_ub_[row] < kInf - 1 && activity.n_inf_min == 0 &&
+            activity.min_act.violates_upper(row_ub_[row],
+                                            opts_.bound_tol)) {
+          world.infeasible = true;
+          break;
+        }
+        if (row_lb_[row] > -kInf + 1 && activity.n_inf_max == 0 &&
+            activity.max_act.violates_lower(row_lb_[row],
+                                            opts_.bound_tol)) {
+          world.infeasible = true;
+          break;
+        }
+
+        for (const auto& entry : rows_[row]) {
+          if (col_deleted_[entry.col]) continue;
+          if (row_ub_[row] < kInf - 1 && activity.n_inf_min == 0) {
+            const double activity_bound =
+                entry.val > 0.0 ? col_lb_[entry.col] : col_ub_[entry.col];
+            const double residual = activity.min_act.upper_residual(
+                row_ub_[row], entry.val, activity_bound, opts_.bound_tol);
+            if (!tighten_bound(entry.col, entry.val < 0.0,
+                               residual / entry.val)) {
+              break;
+            }
+          }
+          if (row_lb_[row] > -kInf + 1 && activity.n_inf_max == 0) {
+            const double activity_bound =
+                entry.val > 0.0 ? col_ub_[entry.col] : col_lb_[entry.col];
+            const double residual = activity.max_act.lower_residual(
+                row_lb_[row], entry.val, activity_bound, opts_.bound_tol);
+            if (!tighten_bound(entry.col, entry.val > 0.0,
+                               residual / entry.val)) {
+              break;
+            }
+          }
+        }
+        if (world.infeasible) break;
+      }
+    }
+
+    if (world.complete && !world.infeasible) {
+      world.changes.reserve(touched.size());
+      for (const auto& column : touched) {
+        world.changes.push_back(
+            {column.col, column.base_lb, column.base_ub,
+             col_lb_[column.col], col_ub_[column.col]});
+      }
+      std::sort(world.changes.begin(), world.changes.end(),
+                [](const WorldChange& lhs, const WorldChange& rhs) {
+                  return lhs.col < rhs.col;
+                });
+      stats_.probing_max_touched_cols =
+          std::max(stats_.probing_max_touched_cols,
+                   static_cast<std::uint64_t>(world.changes.size()));
+    }
+
+    for (auto it = trail.rbegin(); it != trail.rend(); ++it) {
+      if (it->is_lb)
+        set_col_lower_bound(it->col, it->old_value);
+      else
+        set_col_upper_bound(it->col, it->old_value);
+    }
+    for (const auto& column : touched)
+      touched_flag[static_cast<std::size_t>(column.col)] = 0;
+    for (const int row : pending_rows)
+      row_queued[static_cast<std::size_t>(row)] = 0;
+    for (const int row : current_rows)
+      row_queued[static_cast<std::size_t>(row)] = 0;
+
+    return world;
+  };
+
+  auto apply_world_unconditionally = [&](const ProbeWorld& world,
+                                         int trigger_col) {
+    for (const auto& change : world.changes) {
+      if (change.col == trigger_col || col_deleted_[change.col]) continue;
+      const double lb_tol = detail::bound_improvement_tolerance(
+          opts_.bound_tol, col_lb_[change.col], change.lb);
+      if (change.lb > col_lb_[change.col] + lb_tol) {
+        set_col_lower_bound(change.col, change.lb);
+        ++stats_.bounds_tightened;
+        ++count;
+      }
+      const double ub_tol = detail::bound_improvement_tolerance(
+          opts_.bound_tol, col_ub_[change.col], change.ub);
+      if (change.ub < col_ub_[change.col] - ub_tol) {
+        set_col_upper_bound(change.col, change.ub);
+        ++stats_.bounds_tightened;
+        ++count;
+      }
+    }
+  };
+
+  for (int probe = 0; probe < max_probes; ++probe) {
+    if (probing_implications_original_.size() >=
+            opts_.max_probing_implications ||
+        stats_.probing_rows_processed >= opts_.max_probing_row_visits ||
+        std::chrono::steady_clock::now() >= deadline) {
+      stats_.probing_truncated = true;
+      break;
+    }
+    const int trigger = candidates[static_cast<std::size_t>(probe)];
+    if (col_deleted_[trigger] || is_fixed(trigger)) continue;
+
+    const ProbeWorld zero = run_world(trigger, 0.0);
+    if (!zero.complete) break;
+    const ProbeWorld one = run_world(trigger, 1.0);
+    if (!one.complete) break;
+
+    if (zero.infeasible && one.infeasible) {
+      mark_infeasible("both binary probing branches are infeasible");
+      break;
+    }
+    if (zero.infeasible || one.infeasible) {
+      const bool fixed_one = zero.infeasible;
+      set_col_lower_bound(trigger, fixed_one ? 1.0 : 0.0);
+      set_col_upper_bound(trigger, fixed_one ? 1.0 : 0.0);
+      ++stats_.probing_fixings;
+      ++count;
+      apply_world_unconditionally(fixed_one ? one : zero, trigger);
+      continue;
+    }
+
+    for (const auto& change : zero.changes) {
+      if (change.col == trigger) continue;
+      const double lb_tol = detail::bound_improvement_tolerance(
+          opts_.bound_tol, change.base_lb, change.lb);
+      if (change.lb > change.base_lb + lb_tol)
+        record_implication(trigger, false, change.col, true, change.lb);
+      const double ub_tol = detail::bound_improvement_tolerance(
+          opts_.bound_tol, change.base_ub, change.ub);
+      if (change.ub < change.base_ub - ub_tol)
+        record_implication(trigger, false, change.col, false, change.ub);
+    }
+    for (const auto& change : one.changes) {
+      if (change.col == trigger) continue;
+      const double lb_tol = detail::bound_improvement_tolerance(
+          opts_.bound_tol, change.base_lb, change.lb);
+      if (change.lb > change.base_lb + lb_tol)
+        record_implication(trigger, true, change.col, true, change.lb);
+      const double ub_tol = detail::bound_improvement_tolerance(
+          opts_.bound_tol, change.base_ub, change.ub);
+      if (change.ub < change.base_ub - ub_tol)
+        record_implication(trigger, true, change.col, false, change.ub);
+    }
+
+    std::size_t zero_pos = 0;
+    std::size_t one_pos = 0;
+    while (zero_pos < zero.changes.size() ||
+           one_pos < one.changes.size()) {
+      const WorldChange* zero_change = nullptr;
+      const WorldChange* one_change = nullptr;
+      int col = -1;
+      if (one_pos >= one.changes.size() ||
+          (zero_pos < zero.changes.size() &&
+           zero.changes[zero_pos].col < one.changes[one_pos].col)) {
+        zero_change = &zero.changes[zero_pos++];
+        col = zero_change->col;
+      } else if (zero_pos >= zero.changes.size() ||
+                 one.changes[one_pos].col <
+                     zero.changes[zero_pos].col) {
+        one_change = &one.changes[one_pos++];
+        col = one_change->col;
+      } else {
+        zero_change = &zero.changes[zero_pos++];
+        one_change = &one.changes[one_pos++];
+        col = zero_change->col;
+      }
+      if (col == trigger || col_deleted_[col]) continue;
+      const double base_lb =
+          zero_change ? zero_change->base_lb : one_change->base_lb;
+      const double base_ub =
+          zero_change ? zero_change->base_ub : one_change->base_ub;
+      const double zero_lb = zero_change ? zero_change->lb : base_lb;
+      const double one_lb = one_change ? one_change->lb : base_lb;
+      const double zero_ub = zero_change ? zero_change->ub : base_ub;
+      const double one_ub = one_change ? one_change->ub : base_ub;
+      const double common_lb = std::min(zero_lb, one_lb);
+      const double common_ub = std::max(zero_ub, one_ub);
+
+      const double lb_tol = detail::bound_improvement_tolerance(
+          opts_.bound_tol, col_lb_[col], common_lb);
+      if (common_lb > col_lb_[col] + lb_tol) {
+        set_col_lower_bound(col, common_lb);
+        ++stats_.bounds_tightened;
+        ++count;
+      }
+      const double ub_tol = detail::bound_improvement_tolerance(
+          opts_.bound_tol, col_ub_[col], common_ub);
+      if (common_ub < col_ub_[col] - ub_tol) {
+        set_col_upper_bound(col, common_ub);
+        ++stats_.bounds_tightened;
         ++count;
       }
     }
   }
-  return count;
-}
 
-// ============================================================================
-// 11. Binary probing
-// ============================================================================
-
-int MILPPresolve::run_probing() {
-  if (!opts_.do_probing) return 0;
-  int count = 0;
-
-  // Collect unfixed binary variables
-  std::vector<int> candidates;
-  for (int j = 0; j < n_orig_; ++j) {
-    if (col_deleted_[j]) continue;
-    if (col_type_[j] != VarType::Binary) continue;
-    if (is_fixed(j)) continue;
-    candidates.push_back(j);
-  }
-
-  // Scale probing effort with problem size to avoid O(n^2 * m) blowup
-  int max_probes = std::min(opts_.max_probing_candidates,
-                             static_cast<int>(candidates.size()));
-  // For large problems, limit probing to avoid excessive time
-  if (m_orig_ > 2000) max_probes = std::min(max_probes, 100);
-  if (m_orig_ > 5000) max_probes = std::min(max_probes, 50);
-
-  const auto t_probe_start = std::chrono::steady_clock::now();
-  constexpr double kProbingTimeLimitSec = 1.0;  // Max 1 second for probing
-
-  for (int pi = 0; pi < max_probes; ++pi) {
-    // Time check every 10 probes
-    if (pi > 0 && (pi % 10) == 0) {
-      auto now = std::chrono::steady_clock::now();
-      double elapsed = std::chrono::duration<double>(now - t_probe_start).count();
-      if (elapsed > kProbingTimeLimitSec) break;
-    }
-    const int j = candidates[pi];
-    if (col_deleted_[j] || is_fixed(j)) continue;
-
-    // Save current bounds
-    std::vector<double> save_lb = col_lb_;
-    std::vector<double> save_ub = col_ub_;
-
-    bool infeas_at_0 = false, infeas_at_1 = false;
-    std::vector<double> lb_at_0, ub_at_0, lb_at_1, ub_at_1;
-
-    // Collect rows that contain variable j (only these need recomputation)
-    std::vector<int> affected_rows;
-    for (const auto& ce : cols_[j]) {
-      if (!row_deleted_[ce.row]) affected_rows.push_back(ce.row);
-    }
-
-    // Helper lambda: probe x_j = val, propagate bounds, return infeasible flag
-    auto probe_val = [&](double val, bool& infeas, std::vector<double>& out_lb,
-                         std::vector<double>& out_ub) {
-      col_lb_ = save_lb; col_ub_ = save_ub;
-      col_lb_[j] = val; col_ub_[j] = val;
-
-      for (int d = 0; d < opts_.probing_depth; ++d) {
-        // Only recompute activities for affected rows
-        for (int r : affected_rows) update_activity(r);
-        int changes = 0;
-
-        for (int r : affected_rows) {
-          const auto& ac = row_activity_[r];
-          for (const auto& e : rows_[r]) {
-            if (col_deleted_[e.col] || e.col == j) continue;
-
-            if (row_ub_[r] < kInf - 1 && ac.n_inf_min == 0) {
-              double contrib = (e.val > 0) ? e.val * col_lb_[e.col] : e.val * col_ub_[e.col];
-              double residual = row_ub_[r] - (ac.min_act - contrib);
-              if (e.val > opts_.zero_tol) {
-                double nb = residual / e.val;
-                if (is_integer_var(e.col)) nb = std::floor(nb + opts_.bound_tol);
-                if (nb < col_ub_[e.col] - opts_.bound_tol) { col_ub_[e.col] = nb; ++changes; }
-              } else if (e.val < -opts_.zero_tol) {
-                double nb = residual / e.val;
-                if (is_integer_var(e.col)) nb = std::ceil(nb - opts_.bound_tol);
-                if (nb > col_lb_[e.col] + opts_.bound_tol) { col_lb_[e.col] = nb; ++changes; }
-              }
-            }
-            if (row_lb_[r] > -kInf + 1 && ac.n_inf_max == 0) {
-              double contrib = (e.val > 0) ? e.val * col_ub_[e.col] : e.val * col_lb_[e.col];
-              double residual = row_lb_[r] - (ac.max_act - contrib);
-              if (e.val > opts_.zero_tol) {
-                double nb = residual / e.val;
-                if (is_integer_var(e.col)) nb = std::ceil(nb - opts_.bound_tol);
-                if (nb > col_lb_[e.col] + opts_.bound_tol) { col_lb_[e.col] = nb; ++changes; }
-              } else if (e.val < -opts_.zero_tol) {
-                double nb = residual / e.val;
-                if (is_integer_var(e.col)) nb = std::floor(nb + opts_.bound_tol);
-                if (nb < col_ub_[e.col] - opts_.bound_tol) { col_ub_[e.col] = nb; ++changes; }
-              }
-            }
-          }
-        }
-        // Check feasibility on affected variables
-        for (int r : affected_rows) {
-          for (const auto& e : rows_[r]) {
-            if (!col_deleted_[e.col] && col_lb_[e.col] > col_ub_[e.col] + opts_.bound_tol) {
-              infeas = true; break;
-            }
-          }
-          if (infeas) break;
-        }
-        if (infeas || changes == 0) break;
-      }
-      out_lb = col_lb_;
-      out_ub = col_ub_;
-    };
-
-    probe_val(0.0, infeas_at_0, lb_at_0, ub_at_0);
-    probe_val(1.0, infeas_at_1, lb_at_1, ub_at_1);
-
-    // Restore bounds
-    col_lb_ = save_lb;
-    col_ub_ = save_ub;
-
-    // Apply results
-    if (infeas_at_0 && infeas_at_1) {
-      mark_infeasible("both binary probing branches are infeasible");
-      return count;
-    }
-    if (infeas_at_0) {
-      col_lb_[j] = 1.0; col_ub_[j] = 1.0;
-      stats_.probing_fixings++;
-      ++count;
-    } else if (infeas_at_1) {
-      col_lb_[j] = 0.0; col_ub_[j] = 0.0;
-      stats_.probing_fixings++;
-      ++count;
-    } else {
-      // Apply intersection of bounds: valid bounds = union of both probe worlds
-      // lb = min(lb_at_0, lb_at_1), ub = max(ub_at_0, ub_at_1)
-      for (int k = 0; k < n_orig_; ++k) {
-        if (col_deleted_[k]) continue;
-        double best_lb = std::min(lb_at_0[k], lb_at_1[k]);
-        double best_ub = std::max(ub_at_0[k], ub_at_1[k]);
-        if (best_lb > col_lb_[k] + opts_.bound_tol) {
-          col_lb_[k] = best_lb;
-          stats_.bounds_tightened++;
-          ++count;
-        }
-        if (best_ub < col_ub_[k] - opts_.bound_tol) {
-          col_ub_[k] = best_ub;
-          stats_.bounds_tightened++;
-          ++count;
-        }
-      }
-    }
-  }
+  normalize_implications();
+  stats_.probing_implications_learned =
+      static_cast<std::uint64_t>(probing_implications_original_.size());
   return count;
 }
 
@@ -1297,6 +1604,10 @@ void MILPPresolve::rebuild_model(LPModel& lp, std::vector<int>& binary_idx,
   A.makeCompressed();
   lp.A = std::move(A);
   lp.b = std::move(new_b);
+  // Every finite lower side was emitted above as a negated <= row. Keeping
+  // the source model's row_lhs would attach stale lower bounds to unrelated
+  // reduced rows whenever the old and new row counts happen to match.
+  lp.row_lhs.resize(0);
 
   Eigen::SparseMatrix<double> Aeq(m_eq_reduced, n_reduced);
   Aeq.setFromTriplets(eq_trips.begin(), eq_trips.end());
@@ -1312,15 +1623,44 @@ void MILPPresolve::rebuild_model(LPModel& lp, std::vector<int>& binary_idx,
     else if (lp.vars[j].type == VarType::Integer) integer_idx.push_back(j);
   }
 
+  probing_implications_reduced_.clear();
+  probing_implications_reduced_.reserve(
+      probing_implications_original_.size());
+  for (const auto& implication : probing_implications_original_) {
+    if (implication.trigger_col < 0 || implication.trigger_col >= n_orig_ ||
+        implication.implied_col < 0 || implication.implied_col >= n_orig_) {
+      continue;
+    }
+    const int reduced_trigger =
+        orig_to_reduced_col_[implication.trigger_col];
+    const int reduced_implied =
+        orig_to_reduced_col_[implication.implied_col];
+    if (reduced_trigger < 0 || reduced_implied < 0 ||
+        reduced_trigger == reduced_implied) {
+      continue;
+    }
+    const double global_bound = implication.implied_is_lb
+                                    ? col_lb_[implication.implied_col]
+                                    : col_ub_[implication.implied_col];
+    const double tolerance = detail::bound_improvement_tolerance(
+        opts_.bound_tol, global_bound, implication.implied_value);
+    const bool globally_redundant =
+        implication.implied_is_lb
+            ? implication.implied_value <= global_bound + tolerance
+            : implication.implied_value >= global_bound - tolerance;
+    if (globally_redundant) continue;
+    probing_implications_reduced_.push_back(
+        {reduced_trigger, implication.trigger_value_one, reduced_implied,
+         implication.implied_is_lb, implication.implied_value});
+  }
+  stats_.probing_implications_learned =
+      static_cast<std::uint64_t>(probing_implications_reduced_.size());
+
   // Stats
   stats_.final_cols = n_reduced;
   stats_.final_rows = m_ineq_reduced + m_eq_reduced;
-  int final_nnz = 0;
-  for (int j = 0; j < n_reduced; ++j) {
-    final_nnz += static_cast<int>(lp.A.outerIndexPtr()[j+1] - lp.A.outerIndexPtr()[j]);
-    final_nnz += static_cast<int>(lp.Aeq.outerIndexPtr()[j+1] - lp.Aeq.outerIndexPtr()[j]);
-  }
-  stats_.final_nnz = final_nnz;
+  stats_.final_nnz =
+      static_cast<int>(lp.A.nonZeros() + lp.Aeq.nonZeros());
 }
 
 // ============================================================================
@@ -1450,6 +1790,8 @@ PresolveStats MILPPresolve::run(LPModel& lp,
   auto t0 = std::chrono::steady_clock::now();
   stats_ = PresolveStats{};
   undo_stack_.clear();
+  probing_implications_original_.clear();
+  probing_implications_reduced_.clear();
 
   init_from_lp(lp);
 
@@ -1474,7 +1816,8 @@ PresolveStats MILPPresolve::run(LPModel& lp,
     if (opts_.do_singleton_rows &&
         !run_reduction([&] { return process_singleton_rows(); },
                        "singleton-row processing")) break;
-    if (!run_reduction([&] { return process_singleton_columns(); },
+    if (opts_.do_singleton_columns &&
+        !run_reduction([&] { return process_singleton_columns(); },
                        "singleton-column processing")) break;
     if (!run_reduction([&] { return tighten_bounds(); },
                        "bound tightening")) break;
@@ -1500,12 +1843,7 @@ PresolveStats MILPPresolve::run(LPModel& lp,
         !run_reduction([&] { return detect_parallel_rows(); },
                        "parallel-row processing")) break;
 
-    if (opts_.do_coefficient_strengthen &&
-        !run_reduction([&] { return strengthen_coefficients(); },
-                       "coefficient strengthening")) break;
-
-    // Probing is expensive — only in later rounds after other reductions stabilize
-    if (opts_.do_probing && round >= 1 &&
+    if (opts_.do_probing &&
         !run_reduction([&] { return run_probing(); },
                        "binary probing")) break;
 
@@ -1535,7 +1873,7 @@ PresolveStats MILPPresolve::run(LPModel& lp,
     fprintf(stderr,
       "[PRESOLVE] %d rounds in %.1fms: rows %d→%d cols %d→%d nnz %d→%d "
       "(fixed=%d singleton=%d doubleton=%d forcing=%d dominated=%d "
-      "parallel=%d strengthen=%d probing=%d infeasible=%d)\n",
+      "parallel=%d probing=%d infeasible=%d)\n",
       stats_.rounds,
       stats_.presolve_time_sec * 1000.0,
       stats_.orig_rows, stats_.final_rows,
@@ -1547,7 +1885,6 @@ PresolveStats MILPPresolve::run(LPModel& lp,
       stats_.forcing_rows,
       stats_.dominated_cols,
       stats_.parallel_rows,
-      stats_.coefficients_strengthened,
       stats_.probing_fixings,
       stats_.infeasible ? 1 : 0);
   }

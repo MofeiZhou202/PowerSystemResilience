@@ -117,6 +117,8 @@ class HFactor {
         a_matrix_valid(false),
         a_start(nullptr),
         a_index(nullptr),
+        a_start32(nullptr),
+        a_index32(nullptr),
         a_value(nullptr),
         basic_index(nullptr),
         pivot_threshold(0.0),
@@ -185,6 +187,20 @@ class HFactor {
           kDefaultPivotThreshold,  //!< Pivoting threshold
       const double pivot_tolerance =
           kDefaultPivotTolerance,  //!< Min absolute pivot
+      const HighsInt highs_debug_level = kHighsDebugLevelMin,
+      const HighsLogOptions* log_options = NULL,
+      const bool use_original_HFactor_logic = true,
+      const HighsInt update_method = kUpdateMethodFt);
+
+  // Bind a compressed matrix whose column starts and row indices are 32-bit.
+  // Values and indices remain owned by the caller for the factor lifetime.
+  void setupGeneral32(
+      const HighsInt num_col, const HighsInt num_row,
+      const HighsInt num_basic, const std::int32_t* a_start,
+      const std::int32_t* a_index, const double* a_value,
+      HighsInt* basic_index,
+      const double pivot_threshold = kDefaultPivotThreshold,
+      const double pivot_tolerance = kDefaultPivotTolerance,
       const HighsInt highs_debug_level = kHighsDebugLevelMin,
       const HighsLogOptions* log_options = NULL,
       const bool use_original_HFactor_logic = true,
@@ -350,9 +366,28 @@ class HFactor {
   double inv_num_row;  // 1.0/num_row
 
  private:
+  void setupGeneralImpl(
+      HighsInt num_col, HighsInt num_row, HighsInt num_basic,
+      const HighsInt* a_start, const HighsInt* a_index,
+      const std::int32_t* a_start32, const std::int32_t* a_index32,
+      const double* a_value, HighsInt* basic_index, double pivot_threshold,
+      double pivot_tolerance, HighsInt highs_debug_level,
+      const HighsLogOptions* log_options, bool use_original_HFactor_logic,
+      HighsInt update_method);
+  HighsInt aStart(HighsInt position) const {
+    return a_start32 ? static_cast<HighsInt>(a_start32[position])
+                     : a_start[position];
+  }
+  HighsInt aIndex(HighsInt position) const {
+    return a_index32 ? static_cast<HighsInt>(a_index32[position])
+                     : a_index[position];
+  }
+
   bool a_matrix_valid;
   const HighsInt* a_start;
   const HighsInt* a_index;
+  const std::int32_t* a_start32;
+  const std::int32_t* a_index32;
   const double* a_value;
   HighsInt* basic_index;
   double pivot_threshold;

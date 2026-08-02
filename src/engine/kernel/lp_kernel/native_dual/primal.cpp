@@ -15,6 +15,7 @@ namespace {
 constexpr int kPrimalRebuildInterval = 256;
 constexpr double kPrimalDevexBadWeightFactor = 3.0;
 constexpr int kPrimalDevexBadWeightLimit = 3;
+constexpr int kPrimalPseMaxColumns = 50000;
 
 double primal_clock() {
   return std::chrono::duration<double>(
@@ -259,7 +260,7 @@ bool initialize_primal_pse(const State& state,
     if (state.basic[static_cast<std::size_t>(col)]) continue;
     IndexedVector column;
     column.dimension = state.m;
-    for (Eigen::SparseMatrix<double>::InnerIterator it(state.sf->A, col); it;
+    for (StandardColumnMatrix::InnerIterator it(state.sf->A, col); it;
          ++it) {
       column.index.push_back(it.row());
       column.value.push_back(it.value());
@@ -426,6 +427,89 @@ bool choose_leaving_harris(const State& state, const PrimalEntering& entering,
   return std::isfinite(relaxed_step);
 }
 
+bool certify_primal_unbounded_ray(const State& state,
+                                  const PrimalEntering& entering,
+                                  Eigen::VectorXd& ray,
+                                  std::string& failure) {
+  ray = Eigen::VectorXd::Zero(state.n);
+  if (state.phase != Phase::Two || state.sf == nullptr || state.options == nullptr ||
+      state.cost.size() != state.sf->c_max.size() ||
+      !(state.cost - state.sf->c_max).isZero(0.0) || entering.col < 0 ||
+      entering.col >= state.n || entering.move == 0 ||
+      entering.direction.dimension != state.m) {
+    failure = "unbounded direction does not belong to original-cost Phase II";
+    return false;
+  }
+
+  ray[entering.col] = static_cast<double>(entering.move);
+  for (std::size_t k = 0; k < entering.direction.index.size(); ++k) {
+    const int row = entering.direction.index[k];
+    if (row < 0 || row >= state.m) {
+      failure = "unbounded direction contains an invalid basis row";
+      return false;
+    }
+    const int basic_col = state.basis[static_cast<std::size_t>(row)];
+    ray[basic_col] = -static_cast<double>(entering.move) *
+                     entering.direction.value[k];
+  }
+  if (!ray.allFinite()) {
+    failure = "unbounded direction is non-finite";
+    return false;
+  }
+  const double ray_norm = ray.lpNorm<Eigen::Infinity>();
+  if (!(ray_norm > 0.0) || !std::isfinite(ray_norm)) {
+    failure = "unbounded direction is zero";
+    return false;
+  }
+  ray /= ray_norm;
+
+  const double bound_tolerance = state.options->feasibility_tol;
+  for (int col = 0; col < state.n; ++col) {
+    if (std::isfinite(state.bounds.lower[col]) && ray[col] < -bound_tolerance) {
+      failure = "unbounded direction violates a finite lower-bound recession cone";
+      return false;
+    }
+    if (std::isfinite(state.bounds.upper[col]) && ray[col] > bound_tolerance) {
+      failure = "unbounded direction violates a finite upper-bound recession cone";
+      return false;
+    }
+  }
+
+  std::vector<long double> absolute_activity(
+      static_cast<std::size_t>(state.m), 0.0L);
+  for (int col = 0; col < state.n; ++col) {
+    if (ray[col] == 0.0) continue;
+    for (StandardColumnMatrix::InnerIterator it(state.sf->A, col); it;
+         ++it) {
+      absolute_activity[static_cast<std::size_t>(it.row())] +=
+          std::abs(static_cast<long double>(it.value()) * ray[col]);
+    }
+  }
+  long double activity_scale = 1.0L;
+  for (long double activity : absolute_activity) {
+    activity_scale = std::max(activity_scale, activity);
+  }
+  const double equation_residual = equation_residual_inf(
+      state.sf->A, ray, Eigen::VectorXd::Zero(state.m));
+  const double equation_limit = state.options->feasibility_tol *
+                                static_cast<double>(activity_scale);
+  if (!std::isfinite(equation_residual) || equation_residual > equation_limit) {
+    failure = "unbounded direction fails the checked A*r=0 certificate";
+    return false;
+  }
+
+  const double gain = state.sf->c_max.dot(ray);
+  const double objective_scale = std::max(
+      1.0, state.sf->c_max.lpNorm<Eigen::Infinity>() *
+               ray.lpNorm<Eigen::Infinity>());
+  if (!std::isfinite(gain) ||
+      gain <= state.options->optimality_tol * objective_scale) {
+    failure = "unbounded direction does not strictly improve the original objective";
+    return false;
+  }
+  return true;
+}
+
 }  // namespace
 
 Result run_primal_phase(
@@ -433,6 +517,9 @@ Result run_primal_phase(
     const std::chrono::steady_clock::time_point& solve_start) {
   PrimalProfile profile(state.phase);
   PrimalDevexMode devex_mode = primal_devex_mode();
+  if (devex_mode == PrimalDevexMode::Pse && state.n > kPrimalPseMaxColumns) {
+    devex_mode = PrimalDevexMode::On;
+  }
   PrimalDevexFramework devex;
   if (devex_mode == PrimalDevexMode::Pse) {
     if (!initialize_primal_pse(state, devex)) {
@@ -466,7 +553,7 @@ Result run_primal_phase(
         initialize_entering_heap(state, pricing_heap, devex, devex_mode);
         continue;
       }
-      const Audit final = audit(state, true, true, false);
+      const Audit final = audit(state, true, true, false, true);
       update_statistics(final, statistics);
       if (!final.ok) {
         return make_result(state, Status::NumericalFailure,
@@ -480,7 +567,7 @@ Result run_primal_phase(
 
     IndexedVector column;
     column.dimension = state.m;
-    for (Eigen::SparseMatrix<double>::InnerIterator it(state.sf->A,
+    for (StandardColumnMatrix::InnerIterator it(state.sf->A,
                                                         entering.col);
          it; ++it) {
       column.index.push_back(it.row());
@@ -533,11 +620,22 @@ Result run_primal_phase(
         initialize_entering_heap(state, pricing_heap, devex, devex_mode);
         continue;
       }
-      return make_result(
-          state, Status::NumericalFailure,
-          "fresh primal ratio test has no finite limiting bound; an "
-          "unbounded certificate is required",
-          statistics);
+      Eigen::VectorXd primal_ray;
+      std::string certificate_failure;
+      if (certify_primal_unbounded_ray(state, entering, primal_ray,
+                                       certificate_failure)) {
+        Result result = make_result(
+            state, Status::Unbounded,
+            "checked primal recession ray proves the LP is unbounded",
+            statistics);
+        result.primal_ray = std::move(primal_ray);
+        result.has_unbounded_certificate = true;
+        return result;
+      }
+      return make_result(state, Status::NumericalFailure,
+                         "fresh primal ratio test has no finite limiting bound; " +
+                             certificate_failure,
+                         statistics);
     }
     if (profile.enabled) profile.ratio += primal_clock() - ratio_start;
 

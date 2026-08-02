@@ -37,6 +37,15 @@ double bc_root_lp_budget_sec(double remaining_sec,
                              bool fallback_available,
                              bool short_budget_ipm_root);
 
+/// Allocate one optional nested solve without violating either the outer
+/// wall-clock deadline or the stage-wide allowance. Returns zero when the
+/// remaining usable budget is too small to start another solve.
+double bc_optional_subsolve_budget_sec(double per_call_limit_sec,
+                                       double global_remaining_sec,
+                                       double finalization_reserve_sec,
+                                       double stage_remaining_sec,
+                                       double minimum_useful_sec = 0.001);
+
 void apply_bc_first_class_simplex_state(SimplexOptions& opt,
                                         bool allow_frontier_remap);
 
@@ -73,24 +82,6 @@ bool bc_pass_mip_model_to_highs(Highs& highs,
                                 const Eigen::VectorXd* lb_override,
                                 const Eigen::VectorXd* ub_override);
 
-struct VendoredHighsRootCertificateResult {
-  bool attempted{false};
-  bool accepted{false};
-  std::string status{"not_attempted"};
-  Eigen::VectorXd x;
-  double primal_obj{kInf};
-  double dual_bound{kInf};
-  double rel_gap{kInf};
-  std::int64_t nodes{-1};
-  std::int64_t simplex_iterations{-1};
-  double runtime_sec{0.0};
-};
-
-VendoredHighsRootCertificateResult bc_try_vendored_highs_root_certificate(
-    const LPModel& lp,
-    const Eigen::VectorXd* lb_override,
-    const Eigen::VectorXd* ub_override,
-    const BCOptions& opt);
 #endif
 
 }  // namespace mipsolvers::engine::detail

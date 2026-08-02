@@ -311,12 +311,38 @@ nlohmann::json solve_stats_to_json(const Stats& stats) {
       {"has_farkas_certificate", stats.has_farkas_certificate}};
 }
 
+nlohmann::json bc_bound_events_to_json(
+    const mipsolvers::engine::BCStats& stats) {
+  nlohmann::json events = nlohmann::json::array();
+  for (const auto& event : stats.bound_events) {
+    nlohmann::json incumbent = nlohmann::json::array();
+    for (Eigen::Index i = 0; i < event.incumbent.size(); ++i) {
+      incumbent.push_back(event.incumbent[i]);
+    }
+    events.push_back({
+        {"time_sec", event.time_sec},
+        {"primal_bound", event.primal_bound},
+        {"dual_bound", event.dual_bound},
+        {"nodes", event.nodes},
+        {"lp_solves", event.lp_solves},
+        {"incumbent", std::move(incumbent)},
+    });
+  }
+  return events;
+}
+
 nlohmann::json bc_stats_to_json(const mipsolvers::engine::BCStats& stats) {
   return nlohmann::json{
       {"status", stats.status},
       {"collection_scope", stats.collection_scope},
       {"lp_solve_count_available", stats.lp_solve_count_available},
       {"incumbent_timeline_available", stats.incumbent_timeline_available},
+      {"bound_event_stream_available", stats.bound_event_stream_available},
+      {"bound_events_dropped_uncertified_dual",
+       stats.bound_events_dropped_uncertified_dual},
+      {"bound_events", stats.bound_event_stream_available
+                           ? bc_bound_events_to_json(stats)
+                           : nlohmann::json(nullptr)},
       {"cut_diagnostics_available", stats.cut_diagnostics_available},
       {"native_diagnostics_available", stats.native_diagnostics_available},
       {"nodes_explored", stats.nodes_explored},
@@ -326,18 +352,8 @@ nlohmann::json bc_stats_to_json(const mipsolvers::engine::BCStats& stats) {
                         ? nlohmann::json(stats.cuts_added) : nlohmann::json(nullptr)},
       {"root_cuts_added", stats.cut_diagnostics_available
                              ? nlohmann::json(stats.root_cuts_added) : nlohmann::json(nullptr)},
-      {"tree_cuts_added", stats.cut_diagnostics_available
-                             ? nlohmann::json(stats.tree_cuts_added) : nlohmann::json(nullptr)},
       {"root_gomory_cuts", stats.cut_diagnostics_available
                               ? nlohmann::json(stats.root_gomory_cuts) : nlohmann::json(nullptr)},
-      {"root_mir_cuts", stats.cut_diagnostics_available
-                           ? nlohmann::json(stats.root_mir_cuts) : nlohmann::json(nullptr)},
-      {"root_cover_cuts", stats.cut_diagnostics_available
-                             ? nlohmann::json(stats.root_cover_cuts) : nlohmann::json(nullptr)},
-      {"root_clique_cuts", stats.cut_diagnostics_available
-                              ? nlohmann::json(stats.root_clique_cuts) : nlohmann::json(nullptr)},
-      {"root_zerohalf_cuts", stats.cut_diagnostics_available
-                                ? nlohmann::json(stats.root_zerohalf_cuts) : nlohmann::json(nullptr)},
       {"root_impliedbound_cuts", stats.cut_diagnostics_available
                                     ? nlohmann::json(stats.root_impliedbound_cuts) : nlohmann::json(nullptr)},
       {"root_presolved_rows", stats.root_presolved_rows},
@@ -350,6 +366,21 @@ nlohmann::json bc_stats_to_json(const mipsolvers::engine::BCStats& stats) {
       {"runtime_sec", stats.runtime_sec},
       {"incumbent_updates", stats.incumbent_timeline_available
                                 ? nlohmann::json(stats.incumbent_updates) : nlohmann::json(nullptr)},
+      {"tree_restarts", stats.tree_restarts},
+      {"tree_restart_nodes_discarded", stats.tree_restart_nodes_discarded},
+      {"tree_restart_root_requeues", stats.tree_restart_root_requeues},
+      {"tree_restart_cut_pool_rows_preserved",
+       stats.tree_restart_cut_pool_rows_preserved},
+      {"tree_restart_conflicts_preserved",
+       stats.tree_restart_conflicts_preserved},
+      {"tree_restart_implications_preserved",
+       stats.tree_restart_implications_preserved},
+      {"tree_restart_clique_edges_preserved",
+       stats.tree_restart_clique_edges_preserved},
+      {"tree_restart_pseudocost_observations_preserved",
+       stats.tree_restart_pseudocost_observations_preserved},
+      {"tree_restart_last_node", stats.tree_restart_last_node},
+      {"tree_restart_last_source", stats.tree_restart_last_source},
       {"first_incumbent_node", stats.incumbent_timeline_available
                                    ? nlohmann::json(stats.first_incumbent_node) : nlohmann::json(nullptr)},
       {"last_incumbent_node", stats.incumbent_timeline_available
@@ -432,7 +463,6 @@ nlohmann::json bc_stats_to_json(const mipsolvers::engine::BCStats& stats) {
       {"propagation_bound_tightenings", stats.propagation_bound_tightenings},
       {"local_node_cuts_generated", stats.local_node_cuts_generated},
       {"local_node_cuts_added", stats.local_node_cuts_added},
-      {"lazy_constraints_added", stats.lazy_constraints_added},
       {"invalid_cut_coefficients", stats.invalid_cut_coefficients}};
 }
 
@@ -1331,6 +1361,26 @@ Quick start
     .value("ExperimentalNative",
            mipsolvers::engine::LpKernelBackend::ExperimentalNative);
 
+  py::class_<mipsolvers::engine::BCTreeRestartOptions>(
+      m_eng, "BCTreeRestartOptions")
+      .def(py::init<>())
+      .def_readwrite("enabled",
+                     &mipsolvers::engine::BCTreeRestartOptions::enabled)
+      .def_readwrite("max_restarts",
+                     &mipsolvers::engine::BCTreeRestartOptions::max_restarts)
+      .def_readwrite(
+          "min_nodes_since_restart",
+          &mipsolvers::engine::BCTreeRestartOptions::min_nodes_since_restart)
+      .def_readwrite("min_open_nodes",
+                     &mipsolvers::engine::BCTreeRestartOptions::min_open_nodes)
+      .def_readwrite(
+          "min_relative_incumbent_improvement",
+          &mipsolvers::engine::BCTreeRestartOptions::
+              min_relative_incumbent_improvement)
+      .def_readwrite(
+          "min_remaining_time_sec",
+          &mipsolvers::engine::BCTreeRestartOptions::min_remaining_time_sec);
+
   py::class_<mipsolvers::engine::BCOptions>(m_eng, "BCOptions", R"doc(
 Focused branch-and-cut options for L2O experiments and policy evaluation.
 The production solver remains C++; Python only chooses safe public knobs.
@@ -1379,6 +1429,7 @@ The production solver remains C++; Python only chooses safe public knobs.
     .def_readwrite("feasibility_pump_iters", &mipsolvers::engine::BCOptions::feasibility_pump_iters)
     .def_readwrite("max_dive_lps", &mipsolvers::engine::BCOptions::max_dive_lps)
     .def_readwrite("max_probe_vars", &mipsolvers::engine::BCOptions::max_probe_vars)
+    .def_readwrite("tree_restart", &mipsolvers::engine::BCOptions::tree_restart)
     .def_readwrite("enable_lns", &mipsolvers::engine::BCOptions::enable_lns)
     .def_readwrite("lns_fix_ratio", &mipsolvers::engine::BCOptions::lns_fix_ratio)
     .def_readwrite("lns_node_limit", &mipsolvers::engine::BCOptions::lns_node_limit)

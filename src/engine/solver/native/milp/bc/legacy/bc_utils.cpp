@@ -17,6 +17,7 @@
 #include <Eigen/Sparse>
 
 #include "mipsolvers/engine/detail/bc_clique_table.hpp"
+#include "mipsolvers/engine/detail/bc_numerics.hpp"
 #include "mipsolvers/engine/detail/bc_threading.hpp"
 
 namespace mipsolvers::engine::detail {
@@ -100,627 +101,6 @@ Eigen::VectorXd project_integer_solution(const std::vector<VariableMeta>& vars,
   return projected;
 }
 
-int milp_presolve(LPModel& lp, int max_rounds) {
-  const int n = static_cast<int>(lp.vars.size());
-  int total_fixed = 0;
-
-  // Build row-major copies for efficient row iteration.
-  Eigen::SparseMatrix<double, Eigen::RowMajor> A_row = lp.A;
-  Eigen::SparseMatrix<double, Eigen::RowMajor> Aeq_row = lp.Aeq;
-
-  for (int round = 0; round < max_rounds; ++round) {
-    int round_fixed = 0;
-    // Recompute after possible redundant row removal in prior round.
-    const int m_ineq = static_cast<int>(lp.A.rows());
-    const int m_eq = static_cast<int>(lp.Aeq.rows());
-
-    // ── 1. Bound tightening on inequality rows: a^T x ≤ b ──
-    for (int r = 0; r < m_ineq; ++r) {
-      double min_activity = 0.0;
-      bool has_inf = false;
-      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_row, r); it; ++it) {
-        const int j = static_cast<int>(it.col());
-        const double a = it.value();
-        if (std::abs(a) <= 1e-15) continue;
-        if (a > 0.0) {
-          if (!std::isfinite(lp.vars[j].lb)) { has_inf = true; break; }
-          min_activity += a * lp.vars[j].lb;
-        } else {
-          if (!std::isfinite(lp.vars[j].ub)) { has_inf = true; break; }
-          min_activity += a * lp.vars[j].ub;
-        }
-      }
-      if (has_inf) continue;
-
-      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_row, r); it; ++it) {
-        const int j = static_cast<int>(it.col());
-        const double a = it.value();
-        if (std::abs(a) <= 1e-15) continue;
-        const double contrib = (a > 0.0) ? a * lp.vars[j].lb : a * lp.vars[j].ub;
-        const double residual = lp.b[r] - (min_activity - contrib);
-        if (a > 0.0) {
-          const double new_ub = residual / a;
-          if (new_ub < lp.vars[j].ub - 1e-9) {
-            lp.vars[j].ub = is_integer_type(lp.vars[j]) ? std::floor(new_ub + 1e-9) : new_ub;
-          }
-        } else {
-          const double new_lb = residual / a;
-          if (new_lb > lp.vars[j].lb + 1e-9) {
-            lp.vars[j].lb = is_integer_type(lp.vars[j]) ? std::ceil(new_lb - 1e-9) : new_lb;
-          }
-        }
-      }
-    }
-
-    // ── 2. Bound tightening on equality rows: a^T x = b_eq ──
-    // Equalities give both upper and lower bounds (2x stronger).
-    for (int r = 0; r < m_eq; ++r) {
-      double min_activity = 0.0, max_activity = 0.0;
-      bool has_inf_min = false, has_inf_max = false;
-      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Aeq_row, r); it; ++it) {
-        const int j = static_cast<int>(it.col());
-        const double a = it.value();
-        if (std::abs(a) <= 1e-15) continue;
-        if (a > 0.0) {
-          if (!std::isfinite(lp.vars[j].lb)) has_inf_min = true;
-          else min_activity += a * lp.vars[j].lb;
-          if (!std::isfinite(lp.vars[j].ub)) has_inf_max = true;
-          else max_activity += a * lp.vars[j].ub;
-        } else {
-          if (!std::isfinite(lp.vars[j].ub)) has_inf_min = true;
-          else min_activity += a * lp.vars[j].ub;
-          if (!std::isfinite(lp.vars[j].lb)) has_inf_max = true;
-          else max_activity += a * lp.vars[j].lb;
-        }
-      }
-
-      // From a^T x = beq, using min/max activity:
-      // For each variable j with coefficient a_j:
-      //   From below (min_activity side): tighten UB if a>0, LB if a<0
-      //   From above (max_activity side): tighten LB if a>0, UB if a<0
-      if (!has_inf_min) {
-        for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Aeq_row, r); it; ++it) {
-          const int j = static_cast<int>(it.col());
-          const double a = it.value();
-          if (std::abs(a) <= 1e-15) continue;
-          const double contrib = (a > 0.0) ? a * lp.vars[j].lb : a * lp.vars[j].ub;
-          const double residual = lp.beq[r] - (min_activity - contrib);
-          if (a > 0.0) {
-            const double new_ub = residual / a;
-            if (new_ub < lp.vars[j].ub - 1e-9) {
-              lp.vars[j].ub = is_integer_type(lp.vars[j]) ? std::floor(new_ub + 1e-9) : new_ub;
-            }
-          } else {
-            const double new_lb = residual / a;
-            if (new_lb > lp.vars[j].lb + 1e-9) {
-              lp.vars[j].lb = is_integer_type(lp.vars[j]) ? std::ceil(new_lb - 1e-9) : new_lb;
-            }
-          }
-        }
-      }
-      if (!has_inf_max) {
-        for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Aeq_row, r); it; ++it) {
-          const int j = static_cast<int>(it.col());
-          const double a = it.value();
-          if (std::abs(a) <= 1e-15) continue;
-          const double contrib = (a > 0.0) ? a * lp.vars[j].ub : a * lp.vars[j].lb;
-          const double residual = lp.beq[r] - (max_activity - contrib);
-          if (a > 0.0) {
-            const double new_lb = residual / a;
-            if (new_lb > lp.vars[j].lb + 1e-9) {
-              lp.vars[j].lb = is_integer_type(lp.vars[j]) ? std::ceil(new_lb - 1e-9) : new_lb;
-            }
-          } else {
-            const double new_ub = residual / a;
-            if (new_ub < lp.vars[j].ub - 1e-9) {
-              lp.vars[j].ub = is_integer_type(lp.vars[j]) ? std::floor(new_ub + 1e-9) : new_ub;
-            }
-          }
-        }
-      }
-    }
-
-    // ── 2b. Singleton row handling ──
-    // Inequality row with exactly 1 nonzero: a_j * x_j ≤ b → tighten bound.
-    // Equality row with exactly 1 nonzero: a_j * x_j = b → fix x_j = b/a_j.
-    {
-      // Mark inequality singleton rows for removal after tightening.
-      std::vector<bool> ineq_singleton(static_cast<size_t>(m_ineq), false);
-      for (int r = 0; r < m_ineq; ++r) {
-        int nnz = 0;
-        int col_j = -1;
-        double coeff = 0.0;
-        for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_row, r); it; ++it) {
-          if (std::abs(it.value()) > 1e-15) {
-            ++nnz;
-            col_j = static_cast<int>(it.col());
-            coeff = it.value();
-            if (nnz > 1) break;
-          }
-        }
-        if (nnz == 1 && col_j >= 0) {
-          // a * x_j ≤ b → x_j ≤ b/a (if a>0) or x_j ≥ b/a (if a<0)
-          const double bound = lp.b[r] / coeff;
-          if (coeff > 0.0) {
-            if (bound < lp.vars[col_j].ub - 1e-9) {
-              lp.vars[col_j].ub = is_integer_type(lp.vars[col_j])
-                  ? std::floor(bound + 1e-9) : bound;
-            }
-          } else {
-            if (bound > lp.vars[col_j].lb + 1e-9) {
-              lp.vars[col_j].lb = is_integer_type(lp.vars[col_j])
-                  ? std::ceil(bound - 1e-9) : bound;
-            }
-          }
-          ineq_singleton[static_cast<size_t>(r)] = true;
-        }
-      }
-
-      // Remove singleton inequality rows.
-      int singleton_ineq_count = 0;
-      for (auto b : ineq_singleton) { if (b) ++singleton_ineq_count; }
-      if (singleton_ineq_count > 0) {
-        const int new_m = m_ineq - singleton_ineq_count;
-        std::vector<Eigen::Triplet<double>> tri;
-        tri.reserve(static_cast<size_t>(lp.A.nonZeros()));
-        Eigen::VectorXd new_b(new_m);
-        int out_row = 0;
-        for (int r = 0; r < m_ineq; ++r) {
-          if (ineq_singleton[static_cast<size_t>(r)]) continue;
-          for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_row, r); it; ++it) {
-            tri.emplace_back(out_row, static_cast<int>(it.col()), it.value());
-          }
-          new_b[out_row] = lp.b[r];
-          ++out_row;
-        }
-        Eigen::SparseMatrix<double> Anew(new_m, n);
-        Anew.setFromTriplets(tri.begin(), tri.end());
-        Anew.makeCompressed();
-        lp.A = std::move(Anew);
-        lp.b = std::move(new_b);
-        A_row = lp.A;
-      }
-
-      // Equality singleton rows: a_j * x_j = b → fix x_j.
-      std::vector<bool> eq_singleton(static_cast<size_t>(m_eq), false);
-      for (int r = 0; r < m_eq; ++r) {
-        int nnz = 0;
-        int col_j = -1;
-        double coeff = 0.0;
-        for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Aeq_row, r); it; ++it) {
-          if (std::abs(it.value()) > 1e-15) {
-            ++nnz;
-            col_j = static_cast<int>(it.col());
-            coeff = it.value();
-            if (nnz > 1) break;
-          }
-        }
-        if (nnz == 1 && col_j >= 0) {
-          const double val = lp.beq[r] / coeff;
-          if (is_integer_type(lp.vars[col_j])) {
-            const double rval = std::round(val);
-            if (std::abs(rval - val) > 1e-6) continue;  // infeasible, skip
-            lp.vars[col_j].lb = rval;
-            lp.vars[col_j].ub = rval;
-          } else {
-            lp.vars[col_j].lb = val;
-            lp.vars[col_j].ub = val;
-          }
-          eq_singleton[static_cast<size_t>(r)] = true;
-          ++round_fixed;
-        }
-      }
-
-      // Remove singleton equality rows.
-      int singleton_eq_count = 0;
-      for (auto b : eq_singleton) { if (b) ++singleton_eq_count; }
-      if (singleton_eq_count > 0) {
-        const int new_m = m_eq - singleton_eq_count;
-        std::vector<Eigen::Triplet<double>> tri;
-        tri.reserve(static_cast<size_t>(lp.Aeq.nonZeros()));
-        Eigen::VectorXd new_beq(new_m);
-        int out_row = 0;
-        for (int r = 0; r < m_eq; ++r) {
-          if (eq_singleton[static_cast<size_t>(r)]) continue;
-          for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Aeq_row, r); it; ++it) {
-            tri.emplace_back(out_row, static_cast<int>(it.col()), it.value());
-          }
-          new_beq[out_row] = lp.beq[r];
-          ++out_row;
-        }
-        Eigen::SparseMatrix<double> Aeq_new(new_m, n);
-        Aeq_new.setFromTriplets(tri.begin(), tri.end());
-        Aeq_new.makeCompressed();
-        lp.Aeq = std::move(Aeq_new);
-        lp.beq = std::move(new_beq);
-        Aeq_row = lp.Aeq;
-      }
-    }
-
-    // Recompute m_ineq after possible singleton row removal.
-    const int m_ineq_updated = static_cast<int>(lp.A.rows());
-
-    // ── 3. Redundant inequality removal: if max_activity ≤ b, row is redundant ──
-    // Build a removal mask (we'll rebuild the matrix at the end).
-    std::vector<bool> ineq_redundant(static_cast<size_t>(m_ineq_updated), false);
-    int redundant_count = 0;
-    for (int r = 0; r < m_ineq_updated; ++r) {
-      double max_activity = 0.0;
-      bool has_inf = false;
-      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_row, r); it; ++it) {
-        const int j = static_cast<int>(it.col());
-        const double a = it.value();
-        if (std::abs(a) <= 1e-15) continue;
-        if (a > 0.0) {
-          if (!std::isfinite(lp.vars[j].ub)) { has_inf = true; break; }
-          max_activity += a * lp.vars[j].ub;
-        } else {
-          if (!std::isfinite(lp.vars[j].lb)) { has_inf = true; break; }
-          max_activity += a * lp.vars[j].lb;
-        }
-      }
-      if (!has_inf && max_activity <= lp.b[r] + 1e-9) {
-        ineq_redundant[static_cast<size_t>(r)] = true;
-        ++redundant_count;
-      }
-    }
-
-    // Remove redundant rows from A and b.
-    if (redundant_count > 0) {
-      const int new_m = m_ineq_updated - redundant_count;
-      std::vector<Eigen::Triplet<double>> tri;
-      tri.reserve(static_cast<size_t>(lp.A.nonZeros()));
-      Eigen::VectorXd new_b(new_m);
-      // Use row-major A_row for correct row iteration.
-      int out_row = 0;
-      for (int r = 0; r < m_ineq_updated; ++r) {
-        if (ineq_redundant[static_cast<size_t>(r)]) continue;
-        for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_row, r); it; ++it) {
-          tri.emplace_back(out_row, static_cast<int>(it.col()), it.value());
-        }
-        new_b[out_row] = lp.b[r];
-        ++out_row;
-      }
-      Eigen::SparseMatrix<double> Anew(new_m, n);
-      Anew.setFromTriplets(tri.begin(), tri.end());
-      Anew.makeCompressed();
-      lp.A = std::move(Anew);
-      lp.b = std::move(new_b);
-      // Rebuild row-major copy.
-      A_row = lp.A;
-    }
-
-    // ── 4. Fix variables whose bounds have collapsed ──
-    for (int j = 0; j < n; ++j) {
-      if (std::abs(lp.vars[j].ub - lp.vars[j].lb) < 1e-9 && std::isfinite(lp.vars[j].lb)) {
-        const double fixed_val = lp.vars[j].lb;
-        if (std::abs(lp.vars[j].ub - fixed_val) > 1e-15 || std::abs(lp.vars[j].lb - fixed_val) > 1e-15) {
-          lp.vars[j].lb = fixed_val;
-          lp.vars[j].ub = fixed_val;
-          ++round_fixed;
-        }
-      }
-    }
-
-    // ── 5. Binary probing: fix x_j=0, propagate; fix x_j=1, propagate ──
-    // If one direction is infeasible, the other must hold.
-    {
-      // Collect unfixed binary variables.
-      std::vector<int> probe_candidates;
-      for (int j = 0; j < n; ++j) {
-        if (lp.vars[j].type != VarType::Binary) continue;
-        if (std::abs(lp.vars[j].ub - lp.vars[j].lb) < 1e-9) continue; // already fixed
-        probe_candidates.push_back(j);
-      }
-      // Budget: limit probing to avoid expensive rounds on large problems.
-      const int max_probes = std::min(200, static_cast<int>(probe_candidates.size()));
-
-      for (int pi = 0; pi < max_probes; ++pi) {
-        const int j = probe_candidates[static_cast<size_t>(pi)];
-        if (std::abs(lp.vars[j].ub - lp.vars[j].lb) < 1e-9) continue; // fixed by earlier probe
-
-        // Save original bounds.
-        std::vector<double> orig_lb(static_cast<size_t>(n)), orig_ub(static_cast<size_t>(n));
-        for (int k = 0; k < n; ++k) {
-          orig_lb[static_cast<size_t>(k)] = lp.vars[k].lb;
-          orig_ub[static_cast<size_t>(k)] = lp.vars[k].ub;
-        }
-
-        bool infeas_at_0 = false, infeas_at_1 = false;
-        std::vector<double> lb_at_0(orig_lb), ub_at_0(orig_ub);
-        std::vector<double> lb_at_1(orig_lb), ub_at_1(orig_ub);
-
-        // Probe x_j = 0: fix bounds, propagate.
-        {
-          lb_at_0[static_cast<size_t>(j)] = 0.0;
-          ub_at_0[static_cast<size_t>(j)] = 0.0;
-          for (int prop_round = 0; prop_round < 3; ++prop_round) {
-            // Propagate through inequality rows containing j.
-            for (int r = 0; r < static_cast<int>(lp.A.rows()); ++r) {
-              double min_act = 0.0;
-              bool has_inf = false;
-              for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_row, r); it; ++it) {
-                const int k = static_cast<int>(it.col());
-                const double a = it.value();
-                if (std::abs(a) <= 1e-15) continue;
-                if (a > 0.0) {
-                  if (!std::isfinite(lb_at_0[static_cast<size_t>(k)])) { has_inf = true; break; }
-                  min_act += a * lb_at_0[static_cast<size_t>(k)];
-                } else {
-                  if (!std::isfinite(ub_at_0[static_cast<size_t>(k)])) { has_inf = true; break; }
-                  min_act += a * ub_at_0[static_cast<size_t>(k)];
-                }
-              }
-              if (has_inf) continue;
-              for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_row, r); it; ++it) {
-                const int k = static_cast<int>(it.col());
-                const double a = it.value();
-                if (std::abs(a) <= 1e-15) continue;
-                const double contrib = (a > 0.0) ? a * lb_at_0[static_cast<size_t>(k)] : a * ub_at_0[static_cast<size_t>(k)];
-                const double residual = lp.b[r] - (min_act - contrib);
-                if (a > 0.0) {
-                  const double nub = residual / a;
-                  if (nub < ub_at_0[static_cast<size_t>(k)] - 1e-9) {
-                    ub_at_0[static_cast<size_t>(k)] = is_integer_type(lp.vars[k]) ? std::floor(nub + 1e-9) : nub;
-                  }
-                } else {
-                  const double nlb = residual / a;
-                  if (nlb > lb_at_0[static_cast<size_t>(k)] + 1e-9) {
-                    lb_at_0[static_cast<size_t>(k)] = is_integer_type(lp.vars[k]) ? std::ceil(nlb - 1e-9) : nlb;
-                  }
-                }
-              }
-            }
-            // Also propagate through equalities.
-            for (int r = 0; r < m_eq; ++r) {
-              double min_act = 0.0;
-              bool has_inf = false;
-              for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Aeq_row, r); it; ++it) {
-                const int k = static_cast<int>(it.col());
-                const double a = it.value();
-                if (std::abs(a) <= 1e-15) continue;
-                if (a > 0.0) {
-                  if (!std::isfinite(lb_at_0[static_cast<size_t>(k)])) { has_inf = true; break; }
-                  min_act += a * lb_at_0[static_cast<size_t>(k)];
-                } else {
-                  if (!std::isfinite(ub_at_0[static_cast<size_t>(k)])) { has_inf = true; break; }
-                  min_act += a * ub_at_0[static_cast<size_t>(k)];
-                }
-              }
-              if (has_inf) continue;
-              for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Aeq_row, r); it; ++it) {
-                const int k = static_cast<int>(it.col());
-                const double a = it.value();
-                if (std::abs(a) <= 1e-15) continue;
-                const double contrib = (a > 0.0) ? a * lb_at_0[static_cast<size_t>(k)] : a * ub_at_0[static_cast<size_t>(k)];
-                const double residual = lp.beq[r] - (min_act - contrib);
-                if (a > 0.0) {
-                  const double nub = residual / a;
-                  if (nub < ub_at_0[static_cast<size_t>(k)] - 1e-9)
-                    ub_at_0[static_cast<size_t>(k)] = is_integer_type(lp.vars[k]) ? std::floor(nub + 1e-9) : nub;
-                } else {
-                  const double nlb = residual / a;
-                  if (nlb > lb_at_0[static_cast<size_t>(k)] + 1e-9)
-                    lb_at_0[static_cast<size_t>(k)] = is_integer_type(lp.vars[k]) ? std::ceil(nlb - 1e-9) : nlb;
-                }
-              }
-            }
-            // Check for infeasibility.
-            for (int k = 0; k < n; ++k) {
-              if (lb_at_0[static_cast<size_t>(k)] > ub_at_0[static_cast<size_t>(k)] + 1e-9) {
-                infeas_at_0 = true;
-                break;
-              }
-            }
-            if (infeas_at_0) break;
-          }
-        }
-
-        // Probe x_j = 1.
-        {
-          lb_at_1[static_cast<size_t>(j)] = 1.0;
-          ub_at_1[static_cast<size_t>(j)] = 1.0;
-          for (int prop_round = 0; prop_round < 3; ++prop_round) {
-            for (int r = 0; r < static_cast<int>(lp.A.rows()); ++r) {
-              double min_act = 0.0;
-              bool has_inf = false;
-              for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_row, r); it; ++it) {
-                const int k = static_cast<int>(it.col());
-                const double a = it.value();
-                if (std::abs(a) <= 1e-15) continue;
-                if (a > 0.0) {
-                  if (!std::isfinite(lb_at_1[static_cast<size_t>(k)])) { has_inf = true; break; }
-                  min_act += a * lb_at_1[static_cast<size_t>(k)];
-                } else {
-                  if (!std::isfinite(ub_at_1[static_cast<size_t>(k)])) { has_inf = true; break; }
-                  min_act += a * ub_at_1[static_cast<size_t>(k)];
-                }
-              }
-              if (has_inf) continue;
-              for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_row, r); it; ++it) {
-                const int k = static_cast<int>(it.col());
-                const double a = it.value();
-                if (std::abs(a) <= 1e-15) continue;
-                const double contrib = (a > 0.0) ? a * lb_at_1[static_cast<size_t>(k)] : a * ub_at_1[static_cast<size_t>(k)];
-                const double residual = lp.b[r] - (min_act - contrib);
-                if (a > 0.0) {
-                  const double nub = residual / a;
-                  if (nub < ub_at_1[static_cast<size_t>(k)] - 1e-9)
-                    ub_at_1[static_cast<size_t>(k)] = is_integer_type(lp.vars[k]) ? std::floor(nub + 1e-9) : nub;
-                } else {
-                  const double nlb = residual / a;
-                  if (nlb > lb_at_1[static_cast<size_t>(k)] + 1e-9)
-                    lb_at_1[static_cast<size_t>(k)] = is_integer_type(lp.vars[k]) ? std::ceil(nlb - 1e-9) : nlb;
-                }
-              }
-            }
-            for (int r = 0; r < m_eq; ++r) {
-              double min_act = 0.0;
-              bool has_inf = false;
-              for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Aeq_row, r); it; ++it) {
-                const int k = static_cast<int>(it.col());
-                const double a = it.value();
-                if (std::abs(a) <= 1e-15) continue;
-                if (a > 0.0) {
-                  if (!std::isfinite(lb_at_1[static_cast<size_t>(k)])) { has_inf = true; break; }
-                  min_act += a * lb_at_1[static_cast<size_t>(k)];
-                } else {
-                  if (!std::isfinite(ub_at_1[static_cast<size_t>(k)])) { has_inf = true; break; }
-                  min_act += a * ub_at_1[static_cast<size_t>(k)];
-                }
-              }
-              if (has_inf) continue;
-              for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Aeq_row, r); it; ++it) {
-                const int k = static_cast<int>(it.col());
-                const double a = it.value();
-                if (std::abs(a) <= 1e-15) continue;
-                const double contrib = (a > 0.0) ? a * lb_at_1[static_cast<size_t>(k)] : a * ub_at_1[static_cast<size_t>(k)];
-                const double residual = lp.beq[r] - (min_act - contrib);
-                if (a > 0.0) {
-                  const double nub = residual / a;
-                  if (nub < ub_at_1[static_cast<size_t>(k)] - 1e-9)
-                    ub_at_1[static_cast<size_t>(k)] = is_integer_type(lp.vars[k]) ? std::floor(nub + 1e-9) : nub;
-                } else {
-                  const double nlb = residual / a;
-                  if (nlb > lb_at_1[static_cast<size_t>(k)] + 1e-9)
-                    lb_at_1[static_cast<size_t>(k)] = is_integer_type(lp.vars[k]) ? std::ceil(nlb - 1e-9) : nlb;
-                }
-              }
-            }
-            for (int k = 0; k < n; ++k) {
-              if (lb_at_1[static_cast<size_t>(k)] > ub_at_1[static_cast<size_t>(k)] + 1e-9) {
-                infeas_at_1 = true;
-                break;
-              }
-            }
-            if (infeas_at_1) break;
-          }
-        }
-
-        // Apply probing results.
-        if (infeas_at_0 && infeas_at_1) {
-          // Both directions infeasible — problem is infeasible.
-          // Just return; B&C will detect via LP failure.
-          return total_fixed;
-        }
-        if (infeas_at_0) {
-          // x_j must be 1
-          lp.vars[j].lb = 1.0;
-          lp.vars[j].ub = 1.0;
-          ++round_fixed;
-        } else if (infeas_at_1) {
-          // x_j must be 0
-          lp.vars[j].lb = 0.0;
-          lp.vars[j].ub = 0.0;
-          ++round_fixed;
-        } else {
-          // Apply intersection of implied bounds from both probes.
-          // Since x_j is either 0 or 1, valid bounds are the union (convex hull):
-          // lb = min(lb_at_0, lb_at_1), ub = max(ub_at_0, ub_at_1).
-          for (int k = 0; k < n; ++k) {
-            const double best_lb = std::min(lb_at_0[static_cast<size_t>(k)], lb_at_1[static_cast<size_t>(k)]);
-            const double best_ub = std::max(ub_at_0[static_cast<size_t>(k)], ub_at_1[static_cast<size_t>(k)]);
-            if (best_lb > lp.vars[k].lb + 1e-9) {
-              lp.vars[k].lb = best_lb;
-            }
-            if (best_ub < lp.vars[k].ub - 1e-9) {
-              lp.vars[k].ub = best_ub;
-            }
-          }
-        }
-      }
-    }
-
-    // ── 6. Fix variables whose bounds have collapsed ──
-    for (int j = 0; j < n; ++j) {
-      if (std::abs(lp.vars[j].ub - lp.vars[j].lb) < 1e-9 && std::isfinite(lp.vars[j].lb)) {
-        const double fixed_val = lp.vars[j].lb;
-        if (std::abs(lp.vars[j].ub - fixed_val) > 1e-15 || std::abs(lp.vars[j].lb - fixed_val) > 1e-15) {
-          lp.vars[j].lb = fixed_val;
-          lp.vars[j].ub = fixed_val;
-          ++round_fixed;
-        }
-      }
-    }
-
-    total_fixed += round_fixed;
-    if (round_fixed == 0) break;
-  }
-
-  // ── Final pass: Substitute fixed variables out of constraint matrices ──
-  // For each variable with lb == ub, subtract its contribution from RHS
-  // and zero out its coefficients. This reduces effective LP sparsity and
-  // makes simplex solve faster without changing the problem.
-  {
-    std::vector<int> fixed_vars;
-    std::vector<double> fixed_vals;
-    for (int j = 0; j < n; ++j) {
-      if (std::abs(lp.vars[j].ub - lp.vars[j].lb) < 1e-9 && std::isfinite(lp.vars[j].lb)) {
-        fixed_vars.push_back(j);
-        fixed_vals.push_back(lp.vars[j].lb);
-      }
-    }
-
-    if (!fixed_vars.empty()) {
-      // Build column-major view for efficient column access.
-      // Subtract a_rj * x_j from b_r for each fixed variable j, then zero a_rj.
-      // Inequality constraints: A * x <= b → b_r -= sum_j(a_rj * fix_j)
-      for (size_t fi = 0; fi < fixed_vars.size(); ++fi) {
-        const int j = fixed_vars[fi];
-        const double fv = fixed_vals[fi];
-        if (std::abs(fv) < 1e-15) continue;  // fixed at zero — no RHS change needed
-        for (Eigen::SparseMatrix<double>::InnerIterator it(lp.A, j); it; ++it) {
-          lp.b[it.row()] -= it.value() * fv;
-        }
-        for (Eigen::SparseMatrix<double>::InnerIterator it(lp.Aeq, j); it; ++it) {
-          lp.beq[it.row()] -= it.value() * fv;
-        }
-      }
-
-      // Zero out columns of fixed variables.  Build new sparse matrices.
-      const int m_ineq_final = static_cast<int>(lp.A.rows());
-      const int m_eq_final = static_cast<int>(lp.Aeq.rows());
-
-      std::vector<char> is_fixed(static_cast<size_t>(n), 0);
-      for (int j : fixed_vars) is_fixed[static_cast<size_t>(j)] = 1;
-
-      // Rebuild A with fixed-variable columns zeroed out.
-      {
-        std::vector<Eigen::Triplet<double>> tri;
-        tri.reserve(static_cast<size_t>(lp.A.nonZeros()));
-        for (int j = 0; j < n; ++j) {
-          if (is_fixed[static_cast<size_t>(j)]) continue;
-          for (Eigen::SparseMatrix<double>::InnerIterator it(lp.A, j); it; ++it) {
-            tri.emplace_back(static_cast<int>(it.row()), j, it.value());
-          }
-        }
-        Eigen::SparseMatrix<double> Anew(m_ineq_final, n);
-        Anew.setFromTriplets(tri.begin(), tri.end());
-        Anew.makeCompressed();
-        lp.A = std::move(Anew);
-      }
-
-      // Rebuild Aeq with fixed-variable columns zeroed out.
-      {
-        std::vector<Eigen::Triplet<double>> tri;
-        tri.reserve(static_cast<size_t>(lp.Aeq.nonZeros()));
-        for (int j = 0; j < n; ++j) {
-          if (is_fixed[static_cast<size_t>(j)]) continue;
-          for (Eigen::SparseMatrix<double>::InnerIterator it(lp.Aeq, j); it; ++it) {
-            tri.emplace_back(static_cast<int>(it.row()), j, it.value());
-          }
-        }
-        Eigen::SparseMatrix<double> Aeq_new(m_eq_final, n);
-        Aeq_new.setFromTriplets(tri.begin(), tri.end());
-        Aeq_new.makeCompressed();
-        lp.Aeq = std::move(Aeq_new);
-      }
-    }
-  }
-
-  return total_fixed;
-}
-
 Eigen::VectorXd clamp_to_bounds(const Eigen::VectorXd& x,
                                 const Eigen::VectorXd& lb,
                                 const Eigen::VectorXd& ub) {
@@ -749,7 +129,8 @@ bool fractional_indices(const std::vector<VariableMeta>& vars,
 
 bool bounds_consistent(const Eigen::VectorXd& lb, const Eigen::VectorXd& ub) {
   for (Eigen::Index i = 0; i < lb.size(); ++i) {
-    if (lb[i] > ub[i] + 1e-12) {
+    if (lb[i] > ub[i] +
+                    bound_improvement_tolerance(1e-12, lb[i], ub[i])) {
       return false;
     }
   }
@@ -765,84 +146,10 @@ void apply_node_bounds(std::vector<VariableMeta>& vars,
   }
 }
 
-void add_rows_to_lp(LPModel& lp,
-                     const std::vector<Eigen::VectorXd>& rows,
-                     const std::vector<double>& rhs_vals) {
-  const int n = static_cast<int>(lp.A.cols());
-  const int raw_k = static_cast<int>(std::min(rows.size(), rhs_vals.size()));
-  std::vector<int> valid_rows;
-  valid_rows.reserve(static_cast<std::size_t>(raw_k));
-  for (int i = 0; i < raw_k; ++i) {
-    const auto& row = rows[static_cast<std::size_t>(i)];
-    if (row.size() != n || !std::isfinite(rhs_vals[static_cast<std::size_t>(i)])) {
-      continue;
-    }
-    bool finite = true;
-    bool nonzero = false;
-    for (int j = 0; j < n; ++j) {
-      const double a = row[j];
-      if (!std::isfinite(a)) {
-        finite = false;
-        break;
-      }
-      if (std::abs(a) > 1e-15) nonzero = true;
-    }
-    if (finite && nonzero) {
-      valid_rows.push_back(i);
-    }
-  }
-
-  const int k = static_cast<int>(valid_rows.size());
-  if (k == 0) {
-    return;
-  }
-  const int m = static_cast<int>(lp.A.rows());
-  const bool had_row_lhs = lp_has_row_lhs(lp);
-  Eigen::SparseMatrix<double> Anew(m + k, n);
-
-  std::vector<Eigen::Triplet<double>> tri;
-  tri.reserve(static_cast<size_t>(lp.A.nonZeros() + static_cast<size_t>(k) * 20));
-
-  for (int col = 0; col < lp.A.outerSize(); ++col) {
-    for (Eigen::SparseMatrix<double>::InnerIterator it(lp.A, col); it; ++it) {
-      tri.emplace_back(it.row(), it.col(), it.value());
-    }
-  }
-  for (int i = 0; i < k; ++i) {
-    const int src = valid_rows[static_cast<std::size_t>(i)];
-    for (int j = 0; j < n; ++j) {
-      const double a = rows[static_cast<size_t>(src)][j];
-      if (std::abs(a) > 1e-15) {
-        tri.emplace_back(m + i, j, a);
-      }
-    }
-  }
-
-  Anew.setFromTriplets(tri.begin(), tri.end());
-  Anew.makeCompressed();
-
-  Eigen::VectorXd bnew(m + k);
-  if (m > 0) {
-    bnew.head(m) = lp.b;
-  }
-  for (int i = 0; i < k; ++i) {
-    const int src = valid_rows[static_cast<std::size_t>(i)];
-    bnew[m + i] = rhs_vals[static_cast<size_t>(src)];
-  }
-
-  lp.A = std::move(Anew);
-  lp.b = std::move(bnew);
-  if (lp.row_lhs.size() > 0) {
-    Eigen::VectorXd lhs_new =
-        Eigen::VectorXd::Constant(m + k, -std::numeric_limits<double>::infinity());
-    if (had_row_lhs && m > 0) lhs_new.head(m) = lp.row_lhs;
-    lp.row_lhs = std::move(lhs_new);
-  }
-}
-
 void add_sparse_rows_to_lp(LPModel& lp,
                             const std::vector<Eigen::SparseVector<double>>& rows,
-                            const std::vector<double>& rhs_vals) {
+                            const std::vector<double>& rhs_vals,
+                            SeparatorStorageStats* storage_stats) {
   const int n = static_cast<int>(lp.A.cols());
   const int raw_k = static_cast<int>(std::min(rows.size(), rhs_vals.size()));
   std::vector<int> valid_rows;
@@ -868,42 +175,86 @@ void add_sparse_rows_to_lp(LPModel& lp,
   if (k == 0) return;
   const int m = static_cast<int>(lp.A.rows());
   const bool had_row_lhs = lp_has_row_lhs(lp);
-  Eigen::SparseMatrix<double> Anew(m + k, n);
-
-  std::vector<Eigen::Triplet<double>> tri;
-  tri.reserve(static_cast<size_t>(lp.A.nonZeros() + static_cast<size_t>(k) * 20));
-
-  for (int col = 0; col < lp.A.outerSize(); ++col) {
-    for (Eigen::SparseMatrix<double>::InnerIterator it(lp.A, col); it; ++it) {
-      tri.emplace_back(it.row(), it.col(), it.value());
-    }
-  }
+  const std::uint64_t prior_entries =
+      static_cast<std::uint64_t>(lp.A.nonZeros());
+  Eigen::VectorXi appended_per_col = Eigen::VectorXi::Zero(n);
+  std::uint64_t appended_entries = 0;
   for (int i = 0; i < k; ++i) {
     const int src = valid_rows[static_cast<std::size_t>(i)];
     for (Eigen::SparseVector<double>::InnerIterator it(rows[static_cast<size_t>(src)]); it; ++it) {
-      if (it.index() < n) {
-        tri.emplace_back(m + i, static_cast<int>(it.index()), it.value());
-      }
+      ++appended_per_col[static_cast<int>(it.index())];
+      ++appended_entries;
     }
   }
 
-  Anew.setFromTriplets(tri.begin(), tri.end());
-  Anew.makeCompressed();
+  const double* old_value_ptr = lp.A.valuePtr();
+  lp.A.conservativeResize(m + k, n);
 
-  Eigen::VectorXd bnew(m + k);
-  if (m > 0) bnew.head(m) = lp.b;
+  Eigen::VectorXi reserve_per_col = Eigen::VectorXi::Zero(n);
+  bool needs_capacity = false;
+  std::uint64_t spare_entries_before_append = 0;
+  for (int col = 0; col < n; ++col) {
+    const int appended = appended_per_col[col];
+    const int used = lp.A.isCompressed()
+                         ? lp.A.outerIndexPtr()[col + 1] -
+                               lp.A.outerIndexPtr()[col]
+                         : lp.A.innerNonZeroPtr()[col];
+    const int capacity = lp.A.outerIndexPtr()[col + 1] -
+                         lp.A.outerIndexPtr()[col];
+    const int spare = capacity - used;
+    int requested_spare = 0;
+    if (spare < appended) {
+      const int post_append_spare = std::max(4, (used + appended) / 2);
+      requested_spare = appended + post_append_spare;
+    }
+    if (requested_spare > spare) {
+      reserve_per_col[col] = requested_spare;
+      needs_capacity = true;
+    }
+    spare_entries_before_append +=
+        static_cast<std::uint64_t>(std::max(spare, requested_spare));
+  }
+  if (needs_capacity) lp.A.reserve(reserve_per_col);
+
   for (int i = 0; i < k; ++i) {
     const int src = valid_rows[static_cast<std::size_t>(i)];
-    bnew[m + i] = rhs_vals[static_cast<size_t>(src)];
+    for (Eigen::SparseVector<double>::InnerIterator it(
+             rows[static_cast<std::size_t>(src)]);
+         it; ++it) {
+      lp.A.insertBackUncompressed(m + i, static_cast<int>(it.index())) =
+          it.value();
+    }
   }
 
-  lp.A = std::move(Anew);
-  lp.b = std::move(bnew);
+  lp.b.conservativeResize(m + k);
+  for (int i = 0; i < k; ++i) {
+    const int src = valid_rows[static_cast<std::size_t>(i)];
+    lp.b[m + i] = rhs_vals[static_cast<size_t>(src)];
+  }
+
   if (lp.row_lhs.size() > 0) {
-    Eigen::VectorXd lhs_new =
-        Eigen::VectorXd::Constant(m + k, -std::numeric_limits<double>::infinity());
-    if (had_row_lhs && m > 0) lhs_new.head(m) = lp.row_lhs;
-    lp.row_lhs = std::move(lhs_new);
+    if (had_row_lhs) {
+      lp.row_lhs.conservativeResize(m + k);
+      lp.row_lhs.tail(k).setConstant(
+          -std::numeric_limits<double>::infinity());
+    } else {
+      lp.row_lhs = Eigen::VectorXd::Constant(
+          m + k, -std::numeric_limits<double>::infinity());
+    }
+  }
+
+  if (storage_stats != nullptr) {
+    ++storage_stats->matrix_append_calls;
+    storage_stats->matrix_appended_rows += static_cast<std::uint64_t>(k);
+    storage_stats->matrix_appended_entries += appended_entries;
+    storage_stats->matrix_prior_entries_bypassing_triplet_rebuild +=
+        prior_entries;
+    if (old_value_ptr != lp.A.valuePtr()) {
+      ++storage_stats->matrix_storage_reallocations;
+    }
+    storage_stats->matrix_peak_spare_entries = std::max(
+        storage_stats->matrix_peak_spare_entries,
+        spare_entries_before_append - appended_entries);
   }
 }
 
@@ -948,7 +299,7 @@ void append_branch_reason(Node& node,
   BranchDomainLiteral lit{var_idx, value, is_lb};
   const int n = node.lb.size() > 0 ? static_cast<int>(node.lb.size())
                                    : var_idx + 1;
-  for (auto& literal : node.branch_reasons) {
+  for (auto& literal : node.branch_reasons.write()) {
     if (literal.var_idx != var_idx || literal.is_lb != is_lb) continue;
     if (is_lb) literal.value = std::max(literal.value, value);
     else literal.value = std::min(literal.value, value);
@@ -1068,22 +419,23 @@ void rebuild_local_domain_trail(Node& node,
   };
 
   const int branch_count = static_cast<int>(node.branch_reasons.size());
+  auto& reason_bounds = node.domain_reason_bounds.write();
   std::vector<std::vector<int>> reason_by_depth(
       static_cast<std::size_t>(branch_count + 1));
-  for (int r = 0; r < static_cast<int>(node.domain_reason_bounds.size()); ++r) {
-    const int depth = std::clamp(node.domain_reason_bounds[static_cast<std::size_t>(r)].depth,
+  for (int r = 0; r < static_cast<int>(reason_bounds.size()); ++r) {
+    const int depth = std::clamp(reason_bounds[static_cast<std::size_t>(r)].depth,
                                  0, branch_count);
     reason_by_depth[static_cast<std::size_t>(depth)].push_back(r);
   }
 
   for (int r : reason_by_depth[0]) {
-    append_reason_bound(node.domain_reason_bounds[static_cast<std::size_t>(r)]);
+    append_reason_bound(reason_bounds[static_cast<std::size_t>(r)]);
   }
   for (int i = 0; i < branch_count; ++i) {
     const auto& lit = node.branch_reasons[static_cast<std::size_t>(i)];
     append_entry(lit, {lit}, i + 1, true, BranchDomainLiteral{}, false);
     for (int r : reason_by_depth[static_cast<std::size_t>(i + 1)]) {
-      append_reason_bound(node.domain_reason_bounds[static_cast<std::size_t>(r)]);
+      append_reason_bound(reason_bounds[static_cast<std::size_t>(r)]);
     }
   }
   for (int j = 0; j < n; ++j) {
@@ -1138,7 +490,7 @@ void append_domain_reason_bound(Node& node,
                            : static_cast<int>(node.ub.size());
   }
   node.domain_reason_bounds.push_back(std::move(rb));
-  DomainReasonBound& stored = node.domain_reason_bounds.back();
+  DomainReasonBound& stored = node.domain_reason_bounds.mutable_back();
   if (n <= 0 || stored.bound.var_idx < 0 || stored.bound.var_idx >= n ||
       !std::isfinite(stored.bound.value)) {
     return;
@@ -1174,7 +526,7 @@ void append_domain_reason_bound(Node& node,
         : node.ub[j] <= entry.bound.value + 1e-9;
   };
 
-  for (auto& entry : node.local_domain_trail) {
+  for (auto& entry : node.local_domain_trail.write()) {
     if (entry.bound.var_idx != stored.bound.var_idx ||
         entry.bound.is_lb != stored.bound.is_lb) {
       continue;
@@ -1375,8 +727,19 @@ bool satisfies_with_bounds(const LPModel& lp,
                            const Eigen::VectorXd& node_ub,
                            double tol) {
   const int n = static_cast<int>(lp.vars.size());
+  if (x.size() != n || node_lb.size() != n || node_ub.size() != n ||
+      lp.A.cols() != n || lp.Aeq.cols() != n ||
+      lp.b.size() != lp.A.rows() || lp.beq.size() != lp.Aeq.rows() ||
+      !std::isfinite(tol) || tol < 0.0) {
+    return false;
+  }
   // Check variable bounds (use tighter of node bounds and lp.vars bounds).
   for (int i = 0; i < n; ++i) {
+    if (!std::isfinite(x[i]) || std::isnan(node_lb[i]) ||
+        std::isnan(node_ub[i]) || std::isnan(lp.vars[i].lb) ||
+        std::isnan(lp.vars[i].ub)) {
+      return false;
+    }
     const double lb = std::max(lp.vars[i].lb, node_lb[i]);
     const double ub = std::min(lp.vars[i].ub, node_ub[i]);
     if (x[i] < lb - tol || x[i] > ub + tol) {
@@ -5084,7 +4447,7 @@ int node_bound_propagation(const LPModel& lp,
       if (!dirty_ineq[static_cast<size_t>(r)]) continue;
       auto propagate_upper_side = [&](double row_sign, double rhs) {
         if (!std::isfinite(rhs)) return;
-        double min_activity = 0.0;
+        StableActivitySum min_activity;
         bool has_inf = false;
         for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_row, r); it; ++it) {
           const int j = static_cast<int>(it.col());
@@ -5092,10 +4455,10 @@ int node_bound_propagation(const LPModel& lp,
           if (std::abs(a) <= 1e-15) continue;
           if (a > 0.0) {
             if (!finite_domain_bound(node_lb[j])) { has_inf = true; break; }
-            min_activity += a * node_lb[j];
+            min_activity.add_product(a, node_lb[j]);
           } else {
             if (!finite_domain_bound(node_ub[j])) { has_inf = true; break; }
-            min_activity += a * node_ub[j];
+            min_activity.add_product(a, node_ub[j]);
           }
         }
         if (has_inf) return;
@@ -5104,12 +4467,15 @@ int node_bound_propagation(const LPModel& lp,
           const int j = static_cast<int>(it.col());
           const double a = row_sign * it.value();
           if (std::abs(a) <= 1e-15) continue;
-          const double contrib = (a > 0.0) ? a * node_lb[j] : a * node_ub[j];
-          const double residual = rhs - (min_activity - contrib);
+          const double activity_bound =
+              (a > 0.0) ? node_lb[j] : node_ub[j];
+          const double residual = min_activity.upper_residual(
+              rhs, a, activity_bound, 1e-9);
           if (a > 0.0) {
             double new_ub = residual / a;
             if (is_integer_type(lp.vars[j])) new_ub = std::floor(new_ub + 1e-9);
-            if (new_ub < node_ub[j] - 1e-9) {
+            if (new_ub < node_ub[j] - bound_improvement_tolerance(
+                                             1e-9, node_ub[j], new_ub)) {
               node_ub[j] = new_ub;
               ++round_tightened;
               mark_col_dirty(j);
@@ -5117,7 +4483,8 @@ int node_bound_propagation(const LPModel& lp,
           } else {
             double new_lb = residual / a;
             if (is_integer_type(lp.vars[j])) new_lb = std::ceil(new_lb - 1e-9);
-            if (new_lb > node_lb[j] + 1e-9) {
+            if (new_lb > node_lb[j] + bound_improvement_tolerance(
+                                             1e-9, node_lb[j], new_lb)) {
               node_lb[j] = new_lb;
               ++round_tightened;
               mark_col_dirty(j);
@@ -5132,7 +4499,8 @@ int node_bound_propagation(const LPModel& lp,
 
     for (int r = 0; r < m_eq; ++r) {
       if (!dirty_eq[static_cast<size_t>(r)]) continue;
-      double min_activity = 0.0, max_activity = 0.0;
+      StableActivitySum min_activity;
+      StableActivitySum max_activity;
       bool has_inf_min = false, has_inf_max = false;
       for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Aeq_row, r); it; ++it) {
         const int j = static_cast<int>(it.col());
@@ -5140,14 +4508,14 @@ int node_bound_propagation(const LPModel& lp,
         if (std::abs(a) <= 1e-15) continue;
         if (a > 0.0) {
           if (!finite_domain_bound(node_lb[j])) has_inf_min = true;
-          else min_activity += a * node_lb[j];
+          else min_activity.add_product(a, node_lb[j]);
           if (!finite_domain_bound(node_ub[j])) has_inf_max = true;
-          else max_activity += a * node_ub[j];
+          else max_activity.add_product(a, node_ub[j]);
         } else {
           if (!finite_domain_bound(node_ub[j])) has_inf_min = true;
-          else min_activity += a * node_ub[j];
+          else min_activity.add_product(a, node_ub[j]);
           if (!finite_domain_bound(node_lb[j])) has_inf_max = true;
-          else max_activity += a * node_lb[j];
+          else max_activity.add_product(a, node_lb[j]);
         }
       }
 
@@ -5156,12 +4524,15 @@ int node_bound_propagation(const LPModel& lp,
           const int j = static_cast<int>(it.col());
           const double a = it.value();
           if (std::abs(a) <= 1e-15) continue;
-          const double contrib = (a > 0.0) ? a * node_lb[j] : a * node_ub[j];
-          const double residual = lp.beq[r] - (min_activity - contrib);
+          const double activity_bound =
+              (a > 0.0) ? node_lb[j] : node_ub[j];
+          const double residual = min_activity.upper_residual(
+              lp.beq[r], a, activity_bound, 1e-9);
           if (a > 0.0) {
             double new_ub = residual / a;
             if (is_integer_type(lp.vars[j])) new_ub = std::floor(new_ub + 1e-9);
-            if (new_ub < node_ub[j] - 1e-9) {
+            if (new_ub < node_ub[j] - bound_improvement_tolerance(
+                                             1e-9, node_ub[j], new_ub)) {
               node_ub[j] = new_ub;
               ++round_tightened;
               mark_col_dirty(j);
@@ -5169,7 +4540,8 @@ int node_bound_propagation(const LPModel& lp,
           } else {
             double new_lb = residual / a;
             if (is_integer_type(lp.vars[j])) new_lb = std::ceil(new_lb - 1e-9);
-            if (new_lb > node_lb[j] + 1e-9) {
+            if (new_lb > node_lb[j] + bound_improvement_tolerance(
+                                             1e-9, node_lb[j], new_lb)) {
               node_lb[j] = new_lb;
               ++round_tightened;
               mark_col_dirty(j);
@@ -5182,12 +4554,15 @@ int node_bound_propagation(const LPModel& lp,
           const int j = static_cast<int>(it.col());
           const double a = it.value();
           if (std::abs(a) <= 1e-15) continue;
-          const double contrib = (a > 0.0) ? a * node_ub[j] : a * node_lb[j];
-          const double residual = lp.beq[r] - (max_activity - contrib);
+          const double activity_bound =
+              (a > 0.0) ? node_ub[j] : node_lb[j];
+          const double residual = max_activity.lower_residual(
+              lp.beq[r], a, activity_bound, 1e-9);
           if (a > 0.0) {
             double new_lb = residual / a;
             if (is_integer_type(lp.vars[j])) new_lb = std::ceil(new_lb - 1e-9);
-            if (new_lb > node_lb[j] + 1e-9) {
+            if (new_lb > node_lb[j] + bound_improvement_tolerance(
+                                             1e-9, node_lb[j], new_lb)) {
               node_lb[j] = new_lb;
               ++round_tightened;
               mark_col_dirty(j);
@@ -5195,7 +4570,8 @@ int node_bound_propagation(const LPModel& lp,
           } else {
             double new_ub = residual / a;
             if (is_integer_type(lp.vars[j])) new_ub = std::floor(new_ub + 1e-9);
-            if (new_ub < node_ub[j] - 1e-9) {
+            if (new_ub < node_ub[j] - bound_improvement_tolerance(
+                                             1e-9, node_ub[j], new_ub)) {
               node_ub[j] = new_ub;
               ++round_tightened;
               mark_col_dirty(j);
@@ -5232,7 +4608,7 @@ int node_bound_propagation_tracked(
     int round_tightened = 0;
 
     for (int r = 0; r < m_ineq; ++r) {
-      double min_activity = 0.0;
+      StableActivitySum min_activity;
       bool has_inf = false;
       for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_row, r); it; ++it) {
         const int j = static_cast<int>(it.col());
@@ -5240,10 +4616,10 @@ int node_bound_propagation_tracked(
         if (std::abs(a) <= 1e-15) continue;
         if (a > 0.0) {
           if (!finite_domain_bound(node_lb[j])) { has_inf = true; break; }
-          min_activity += a * node_lb[j];
+          min_activity.add_product(a, node_lb[j]);
         } else {
           if (!finite_domain_bound(node_ub[j])) { has_inf = true; break; }
-          min_activity += a * node_ub[j];
+          min_activity.add_product(a, node_ub[j]);
         }
       }
       if (has_inf) continue;
@@ -5252,12 +4628,15 @@ int node_bound_propagation_tracked(
         const int j = static_cast<int>(it.col());
         const double a = it.value();
         if (std::abs(a) <= 1e-15) continue;
-        const double contrib = (a > 0.0) ? a * node_lb[j] : a * node_ub[j];
-        const double residual = lp.b[r] - (min_activity - contrib);
+        const double activity_bound =
+            (a > 0.0) ? node_lb[j] : node_ub[j];
+        const double residual = min_activity.upper_residual(
+            lp.b[r], a, activity_bound, 1e-9);
         if (a > 0.0) {
           double new_ub = residual / a;
           if (is_integer_type(lp.vars[j])) new_ub = std::floor(new_ub + 1e-9);
-          if (new_ub < node_ub[j] - 1e-9) {
+          if (new_ub < node_ub[j] - bound_improvement_tolerance(
+                                           1e-9, node_ub[j], new_ub)) {
             changes_out.push_back(
                 {j, new_ub - node_ub[j], false, node_ub[j], new_ub});
             node_ub[j] = new_ub;
@@ -5266,7 +4645,8 @@ int node_bound_propagation_tracked(
         } else {
           double new_lb = residual / a;
           if (is_integer_type(lp.vars[j])) new_lb = std::ceil(new_lb - 1e-9);
-          if (new_lb > node_lb[j] + 1e-9) {
+          if (new_lb > node_lb[j] + bound_improvement_tolerance(
+                                           1e-9, node_lb[j], new_lb)) {
             changes_out.push_back(
                 {j, new_lb - node_lb[j], true, node_lb[j], new_lb});
             node_lb[j] = new_lb;
@@ -5277,7 +4657,8 @@ int node_bound_propagation_tracked(
     }
 
     for (int r = 0; r < m_eq; ++r) {
-      double min_activity = 0.0, max_activity = 0.0;
+      StableActivitySum min_activity;
+      StableActivitySum max_activity;
       bool has_inf_min = false, has_inf_max = false;
       for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Aeq_row, r); it; ++it) {
         const int j = static_cast<int>(it.col());
@@ -5285,14 +4666,14 @@ int node_bound_propagation_tracked(
         if (std::abs(a) <= 1e-15) continue;
         if (a > 0.0) {
           if (!finite_domain_bound(node_lb[j])) has_inf_min = true;
-          else min_activity += a * node_lb[j];
+          else min_activity.add_product(a, node_lb[j]);
           if (!finite_domain_bound(node_ub[j])) has_inf_max = true;
-          else max_activity += a * node_ub[j];
+          else max_activity.add_product(a, node_ub[j]);
         } else {
           if (!finite_domain_bound(node_ub[j])) has_inf_min = true;
-          else min_activity += a * node_ub[j];
+          else min_activity.add_product(a, node_ub[j]);
           if (!finite_domain_bound(node_lb[j])) has_inf_max = true;
-          else max_activity += a * node_lb[j];
+          else max_activity.add_product(a, node_lb[j]);
         }
       }
 
@@ -5301,12 +4682,15 @@ int node_bound_propagation_tracked(
           const int j = static_cast<int>(it.col());
           const double a = it.value();
           if (std::abs(a) <= 1e-15) continue;
-          const double contrib = (a > 0.0) ? a * node_lb[j] : a * node_ub[j];
-          const double residual = lp.beq[r] - (min_activity - contrib);
+          const double activity_bound =
+              (a > 0.0) ? node_lb[j] : node_ub[j];
+          const double residual = min_activity.upper_residual(
+              lp.beq[r], a, activity_bound, 1e-9);
           if (a > 0.0) {
             double new_ub = residual / a;
             if (is_integer_type(lp.vars[j])) new_ub = std::floor(new_ub + 1e-9);
-            if (new_ub < node_ub[j] - 1e-9) {
+            if (new_ub < node_ub[j] - bound_improvement_tolerance(
+                                             1e-9, node_ub[j], new_ub)) {
               changes_out.push_back(
                   {j, new_ub - node_ub[j], false, node_ub[j], new_ub});
               node_ub[j] = new_ub;
@@ -5315,7 +4699,8 @@ int node_bound_propagation_tracked(
           } else {
             double new_lb = residual / a;
             if (is_integer_type(lp.vars[j])) new_lb = std::ceil(new_lb - 1e-9);
-            if (new_lb > node_lb[j] + 1e-9) {
+            if (new_lb > node_lb[j] + bound_improvement_tolerance(
+                                             1e-9, node_lb[j], new_lb)) {
               changes_out.push_back(
                   {j, new_lb - node_lb[j], true, node_lb[j], new_lb});
               node_lb[j] = new_lb;
@@ -5329,12 +4714,15 @@ int node_bound_propagation_tracked(
           const int j = static_cast<int>(it.col());
           const double a = it.value();
           if (std::abs(a) <= 1e-15) continue;
-          const double contrib = (a > 0.0) ? a * node_ub[j] : a * node_lb[j];
-          const double residual = lp.beq[r] - (max_activity - contrib);
+          const double activity_bound =
+              (a > 0.0) ? node_ub[j] : node_lb[j];
+          const double residual = max_activity.lower_residual(
+              lp.beq[r], a, activity_bound, 1e-9);
           if (a > 0.0) {
             double new_lb = residual / a;
             if (is_integer_type(lp.vars[j])) new_lb = std::ceil(new_lb - 1e-9);
-            if (new_lb > node_lb[j] + 1e-9) {
+            if (new_lb > node_lb[j] + bound_improvement_tolerance(
+                                             1e-9, node_lb[j], new_lb)) {
               changes_out.push_back(
                   {j, new_lb - node_lb[j], true, node_lb[j], new_lb});
               node_lb[j] = new_lb;
@@ -5343,7 +4731,8 @@ int node_bound_propagation_tracked(
           } else {
             double new_ub = residual / a;
             if (is_integer_type(lp.vars[j])) new_ub = std::floor(new_ub + 1e-9);
-            if (new_ub < node_ub[j] - 1e-9) {
+            if (new_ub < node_ub[j] - bound_improvement_tolerance(
+                                             1e-9, node_ub[j], new_ub)) {
               changes_out.push_back(
                   {j, new_ub - node_ub[j], false, node_ub[j], new_ub});
               node_ub[j] = new_ub;
@@ -5787,7 +5176,9 @@ bool clause_propagation_step(const ConflictPoolT* conflict_pool,
                              std::vector<char>& queued_vars,
                              int branch_reason_count,
                              int* tightened,
-                             std::vector<DomainReasonBound>* reason_bounds_out) {
+                             std::vector<DomainReasonBound>* reason_bounds_out,
+                             std::vector<DomainPropagationEvent>* events_out,
+                             DomainPropagationFailure* failure_out) {
   if (conflict_pool == nullptr) return true;
   const bool track_reasons = !lb_reason.empty();
   std::vector<BoundChangeInfo> clause_changes;
@@ -5828,12 +5219,65 @@ bool clause_propagation_step(const ConflictPoolT* conflict_pool,
     }
   }
   changes_out.insert(changes_out.end(), clause_changes.begin(), clause_changes.end());
+  if (events_out != nullptr) {
+    events_out->reserve(events_out->size() + clause_changes.size());
+    for (const auto& change : clause_changes) {
+      DomainPropagationEvent event{
+          DomainPropagationSource::ConflictPool,
+          change.var_idx,
+          -1,
+          -1,
+          false,
+          change.is_lb,
+          change.old_value,
+          change.new_value,
+          0.0,
+          0.0,
+          0.0,
+          {}};
+      for (const auto& reason_bound : clause_reason_bounds) {
+        if (reason_bound.bound.var_idx == change.var_idx &&
+            reason_bound.bound.is_lb == change.is_lb &&
+            std::abs(reason_bound.bound.value - change.new_value) <= 1e-9) {
+          event.source_clause = reason_bound.has_source_conflict_clause
+              ? reason_bound.source_conflict_clause
+              : reason_bound.reason;
+          break;
+        }
+      }
+      events_out->push_back(std::move(event));
+    }
+  }
   if (reason_bounds_out != nullptr) {
     reason_bounds_out->insert(reason_bounds_out->end(),
                               clause_reason_bounds.begin(),
                               clause_reason_bounds.end());
   }
   if (!ok) {
+    if (failure_out != nullptr) {
+      failure_out->available = true;
+      failure_out->event.source = DomainPropagationSource::ConflictPool;
+      for (auto it = clause_changes.rbegin(); it != clause_changes.rend(); ++it) {
+        const int j = it->var_idx;
+        if (j >= 0 && j < node_lb.size() &&
+            node_lb[j] > node_ub[j] + 1e-9) {
+          failure_out->event = DomainPropagationEvent{
+              DomainPropagationSource::ConflictPool,
+              j,
+              -1,
+              -1,
+              false,
+              it->is_lb,
+              it->old_value,
+              it->new_value,
+              0.0,
+              0.0,
+              0.0,
+              {}};
+          break;
+        }
+      }
+    }
     return false;
   }
   for (const auto& bc : clause_changes) {
@@ -5863,7 +5307,12 @@ bool propagate_node_domain_impl(
     std::vector<BranchDomainLiteral>* learned_conflict,
     int* total_tightened,
     std::vector<DomainReasonBound>* reason_bounds_out,
-    const std::vector<DomainReasonBound>* existing_reason_bounds) {
+    const std::vector<DomainReasonBound>* existing_reason_bounds,
+    std::vector<DomainPropagationEvent>* propagation_events,
+    DomainPropagationFailure* propagation_failure) {
+  if (propagation_failure != nullptr) {
+    *propagation_failure = DomainPropagationFailure{};
+  }
   PropagationProfile profile;
   profile.calls = 1;
   const auto _prop_t0 = std::chrono::steady_clock::now();
@@ -5948,7 +5397,9 @@ bool propagate_node_domain_impl(
 
   int local_tightened = 0;
   int conflict_var = -1;
-  const int max_passes = std::max(1, 2 * max_rounds + 4);
+  const int row_round_budget = std::max(0, max_rounds);
+  int row_rounds_used = 0;
+  const int max_passes = std::max(4, 2 * row_round_budget + 4);
   const std::uint64_t full_scan_rows =
       static_cast<std::uint64_t>(A_row.rows()) + static_cast<std::uint64_t>(Aeq_row.rows());
 
@@ -5971,16 +5422,28 @@ bool propagate_node_domain_impl(
   };
 
   auto apply_bound = [&](int j, bool is_lb, double new_val, int reason_id,
+                         DomainPropagationSource source, int source_row,
+                         int trigger_variable, bool trigger_value_one,
+                         double source_coefficient, double source_rhs,
+                         double source_activity_bound,
                          const LinearProofAudit* proof_audit = nullptr) -> bool {
     if (j < 0 || j >= n) return true;
     if (is_integer_type(lp.vars[static_cast<std::size_t>(j)])) {
       new_val = is_lb ? std::ceil(new_val - 1e-9) : std::floor(new_val + 1e-9);
     }
     if (is_lb) {
-      if (new_val > node_lb[j] + 1e-9) {
+      if (new_val > node_lb[j] + bound_improvement_tolerance(
+                                          1e-9, node_lb[j], new_val)) {
+        const double old_value = node_lb[j];
         changes_out.push_back(
             {j, new_val - node_lb[j], true, node_lb[j], new_val});
         node_lb[j] = new_val;
+        if (propagation_events != nullptr) {
+          propagation_events->push_back(DomainPropagationEvent{
+              source, j, source_row, trigger_variable, trigger_value_one,
+              true, old_value, new_val, source_coefficient, source_rhs,
+              source_activity_bound, {}});
+        }
         const BranchDomainLiteral bound_lit{j, new_val, true};
         if (reason_bounds_out != nullptr) {
           auto reason = arena.get(reason_id);
@@ -6020,10 +5483,18 @@ bool propagate_node_domain_impl(
         enqueue_var(j);
       }
     } else {
-      if (new_val < node_ub[j] - 1e-9) {
+      if (new_val < node_ub[j] - bound_improvement_tolerance(
+                                          1e-9, node_ub[j], new_val)) {
+        const double old_value = node_ub[j];
         changes_out.push_back(
             {j, new_val - node_ub[j], false, node_ub[j], new_val});
         node_ub[j] = new_val;
+        if (propagation_events != nullptr) {
+          propagation_events->push_back(DomainPropagationEvent{
+              source, j, source_row, trigger_variable, trigger_value_one,
+              false, old_value, new_val, source_coefficient, source_rhs,
+              source_activity_bound, {}});
+        }
         const BranchDomainLiteral bound_lit{j, new_val, false};
         if (reason_bounds_out != nullptr) {
           auto reason = arena.get(reason_id);
@@ -6063,8 +5534,20 @@ bool propagate_node_domain_impl(
         enqueue_var(j);
       }
     }
-    if (node_lb[j] > node_ub[j] + 1e-9) {
+    if (node_lb[j] > node_ub[j] + bound_improvement_tolerance(
+                                        1e-9, node_lb[j], node_ub[j])) {
       conflict_var = j;
+      if (propagation_failure != nullptr) {
+        propagation_failure->available = true;
+        propagation_failure->event = DomainPropagationEvent{
+            source, j, source_row, trigger_variable, trigger_value_one,
+            is_lb, is_lb ? node_lb[j] : node_ub[j], new_val,
+            source_coefficient, source_rhs, source_activity_bound, {}};
+        if (propagation_events != nullptr && !propagation_events->empty() &&
+            propagation_events->back().variable == j) {
+          propagation_failure->event = propagation_events->back();
+        }
+      }
       return false;
     }
     return true;
@@ -6109,7 +5592,8 @@ bool propagate_node_domain_impl(
                                arena, lb_reason, ub_reason,
                                changes_out, changed_vars, queued_vars,
                                static_cast<int>(branch_reasons.size()),
-                               &local_tightened, reason_bounds_out)) {
+                               &local_tightened, reason_bounds_out,
+                               propagation_events, propagation_failure)) {
     if (learned_conflict != nullptr) *learned_conflict = branch_reasons;
     if (total_tightened != nullptr) *total_tightened += local_tightened;
     finalize_profile();
@@ -6121,7 +5605,6 @@ bool propagate_node_domain_impl(
       break;
     }
     ++profile.active_passes;
-    profile.baseline_full_scan_rows += full_scan_rows;
 
     while (!changed_vars.empty()) {
       const int j = changed_vars.front();
@@ -6149,9 +5632,13 @@ bool propagate_node_domain_impl(
             const int rid =
                 track_reasons ? arena.merge_ids({trigger_rid}) : 0;
             if (forbidden_one) {
-              if (!apply_bound(implied_col, false, 0.0, rid)) break;
+              if (!apply_bound(implied_col, false, 0.0, rid,
+                               DomainPropagationSource::Clique, -1, j,
+                               value_one, 0.0, 0.0, 0.0)) break;
             } else {
-              if (!apply_bound(implied_col, true, 1.0, rid)) break;
+              if (!apply_bound(implied_col, true, 1.0, rid,
+                               DomainPropagationSource::Clique, -1, j,
+                               value_one, 0.0, 0.0, 0.0)) break;
             }
           }
           if (conflict_var >= 0) break;
@@ -6161,7 +5648,9 @@ bool propagate_node_domain_impl(
             for (const int* p = rng.first; p != rng.second; ++p) {
               const int rid =
                   track_reasons ? arena.merge_ids({trigger_rid}) : 0;
-              if (!apply_bound(*p, false, 0.0, rid)) break;
+              if (!apply_bound(*p, false, 0.0, rid,
+                               DomainPropagationSource::Clique, -1, j,
+                               value_one, 0.0, 0.0, 0.0)) break;
             }
           }
           if (conflict_var >= 0) break;
@@ -6185,27 +5674,39 @@ bool propagate_node_domain_impl(
           for (const auto* arc = rng.first; arc != rng.second; ++arc) {
             const int rid =
                 track_reasons ? arena.merge_ids({trigger_rid}) : 0;
-            if (!apply_bound(arc->var_idx, arc->is_lb, arc->value, rid)) break;
+            if (!apply_bound(arc->var_idx, arc->is_lb, arc->value, rid,
+                             DomainPropagationSource::Implication, -1, j,
+                             value_one, 0.0, 0.0, 0.0)) break;
           }
           if (conflict_var >= 0) break;
         }
         if (conflict_var >= 0) break;
       }
 
-      for (int r : row_index.ineq_rows_for(j)) {
-        if (!queued_ineq[static_cast<std::size_t>(r)]) {
-          queued_ineq[static_cast<std::size_t>(r)] = 1;
-          pending_ineq_rows.push_back(r);
+      if (row_rounds_used < row_round_budget) {
+        for (int r : row_index.ineq_rows_for(j)) {
+          if (!queued_ineq[static_cast<std::size_t>(r)]) {
+            queued_ineq[static_cast<std::size_t>(r)] = 1;
+            pending_ineq_rows.push_back(r);
+          }
         }
-      }
-      for (int r : row_index.eq_rows_for(j)) {
-        if (!queued_eq[static_cast<std::size_t>(r)]) {
-          queued_eq[static_cast<std::size_t>(r)] = 1;
-          pending_eq_rows.push_back(r);
+        for (int r : row_index.eq_rows_for(j)) {
+          if (!queued_eq[static_cast<std::size_t>(r)]) {
+            queued_eq[static_cast<std::size_t>(r)] = 1;
+            pending_eq_rows.push_back(r);
+          }
         }
       }
     }
     if (conflict_var >= 0) break;
+
+    const bool process_row_round =
+        row_rounds_used < row_round_budget &&
+        (!pending_ineq_rows.empty() || !pending_eq_rows.empty());
+    if (process_row_round) {
+      ++row_rounds_used;
+      profile.baseline_full_scan_rows += full_scan_rows;
+    }
 
     while (!pending_ineq_rows.empty()) {
       const int r = pending_ineq_rows.front();
@@ -6215,7 +5716,7 @@ bool propagate_node_domain_impl(
 
       auto propagate_upper_side = [&](double row_sign, double rhs) {
         if (!std::isfinite(rhs) || conflict_var >= 0) return;
-        double min_activity = 0.0;
+        StableActivitySum min_activity;
         bool has_inf = false;
         for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_row, r); it; ++it) {
           const int j = static_cast<int>(it.col());
@@ -6223,10 +5724,10 @@ bool propagate_node_domain_impl(
           if (std::abs(a) <= 1e-15) continue;
           if (a > 0.0) {
             if (!std::isfinite(node_lb[j])) { has_inf = true; break; }
-            min_activity += a * node_lb[j];
+            min_activity.add_product(a, node_lb[j]);
           } else {
             if (!std::isfinite(node_ub[j])) { has_inf = true; break; }
-            min_activity += a * node_ub[j];
+            min_activity.add_product(a, node_ub[j]);
           }
         }
         if (has_inf) return;
@@ -6238,8 +5739,10 @@ bool propagate_node_domain_impl(
           const int j = static_cast<int>(it.col());
           const double a = row_sign * it.value();
           if (std::abs(a) <= 1e-15) continue;
-          const double contrib = (a > 0.0) ? a * node_lb[j] : a * node_ub[j];
-          const double residual = rhs - (min_activity - contrib);
+          const double activity_bound =
+              (a > 0.0) ? node_lb[j] : node_ub[j];
+          const double residual = min_activity.upper_residual(
+              rhs, a, activity_bound, 1e-9);
           int rid = 0;
           if (track_reasons) {
             ids.clear();
@@ -6261,15 +5764,25 @@ bool propagate_node_domain_impl(
             const BranchDomainLiteral source =
                 opposite_source_literal(j, false, new_ub);
             const LinearProofAudit audit{
-                source, min_activity - contrib + a * source.value, rhs};
-            if (!apply_bound(j, false, new_ub, rid, &audit)) break;
+                source,
+                min_activity.replacing_product(
+                    a, activity_bound, source.value),
+                rhs};
+            if (!apply_bound(j, false, new_ub, rid,
+                             DomainPropagationSource::InequalityRow, r, -1,
+                             false, a, rhs, activity_bound, &audit)) break;
           } else {
             const double new_lb = normalized_bound_value(j, true, residual / a);
             const BranchDomainLiteral source =
                 opposite_source_literal(j, true, new_lb);
             const LinearProofAudit audit{
-                source, min_activity - contrib + a * source.value, rhs};
-            if (!apply_bound(j, true, new_lb, rid, &audit)) break;
+                source,
+                min_activity.replacing_product(
+                    a, activity_bound, source.value),
+                rhs};
+            if (!apply_bound(j, true, new_lb, rid,
+                             DomainPropagationSource::InequalityRow, r, -1,
+                             false, a, rhs, activity_bound, &audit)) break;
           }
         }
       };
@@ -6286,7 +5799,8 @@ bool propagate_node_domain_impl(
       queued_eq[static_cast<std::size_t>(r)] = 0;
       ++profile.eq_rows_visited;
 
-      double min_activity = 0.0, max_activity = 0.0;
+      StableActivitySum min_activity;
+      StableActivitySum max_activity;
       bool has_inf_min = false, has_inf_max = false;
       for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Aeq_row, r); it; ++it) {
         const int j = static_cast<int>(it.col());
@@ -6294,14 +5808,14 @@ bool propagate_node_domain_impl(
         if (std::abs(a) <= 1e-15) continue;
         if (a > 0.0) {
           if (!std::isfinite(node_lb[j])) has_inf_min = true;
-          else min_activity += a * node_lb[j];
+          else min_activity.add_product(a, node_lb[j]);
           if (!std::isfinite(node_ub[j])) has_inf_max = true;
-          else max_activity += a * node_ub[j];
+          else max_activity.add_product(a, node_ub[j]);
         } else {
           if (!std::isfinite(node_ub[j])) has_inf_min = true;
-          else min_activity += a * node_ub[j];
+          else min_activity.add_product(a, node_ub[j]);
           if (!std::isfinite(node_lb[j])) has_inf_max = true;
-          else max_activity += a * node_lb[j];
+          else max_activity.add_product(a, node_lb[j]);
         }
       }
 
@@ -6311,8 +5825,10 @@ bool propagate_node_domain_impl(
           const int j = static_cast<int>(it.col());
           const double a = it.value();
           if (std::abs(a) <= 1e-15) continue;
-          const double contrib = (a > 0.0) ? a * node_lb[j] : a * node_ub[j];
-          const double residual = lp.beq[r] - (min_activity - contrib);
+          const double activity_bound =
+              (a > 0.0) ? node_lb[j] : node_ub[j];
+          const double residual = min_activity.upper_residual(
+              lp.beq[r], a, activity_bound, 1e-9);
           int rid = 0;
           if (track_reasons) {
             ids.clear();
@@ -6334,15 +5850,25 @@ bool propagate_node_domain_impl(
             const BranchDomainLiteral source =
                 opposite_source_literal(j, false, new_ub);
             const LinearProofAudit audit{
-                source, min_activity - contrib + a * source.value, lp.beq[r]};
-            if (!apply_bound(j, false, new_ub, rid, &audit)) break;
+                source,
+                min_activity.replacing_product(
+                    a, activity_bound, source.value),
+                lp.beq[r]};
+            if (!apply_bound(j, false, new_ub, rid,
+                             DomainPropagationSource::EqualityRow, r, -1,
+                             false, a, lp.beq[r], activity_bound, &audit)) break;
           } else {
             const double new_lb = normalized_bound_value(j, true, residual / a);
             const BranchDomainLiteral source =
                 opposite_source_literal(j, true, new_lb);
             const LinearProofAudit audit{
-                source, min_activity - contrib + a * source.value, lp.beq[r]};
-            if (!apply_bound(j, true, new_lb, rid, &audit)) break;
+                source,
+                min_activity.replacing_product(
+                    a, activity_bound, source.value),
+                lp.beq[r]};
+            if (!apply_bound(j, true, new_lb, rid,
+                             DomainPropagationSource::EqualityRow, r, -1,
+                             false, a, lp.beq[r], activity_bound, &audit)) break;
           }
         }
       }
@@ -6354,8 +5880,10 @@ bool propagate_node_domain_impl(
           const int j = static_cast<int>(it.col());
           const double a = it.value();
           if (std::abs(a) <= 1e-15) continue;
-          const double contrib = (a > 0.0) ? a * node_ub[j] : a * node_lb[j];
-          const double residual = lp.beq[r] - (max_activity - contrib);
+          const double activity_bound =
+              (a > 0.0) ? node_ub[j] : node_lb[j];
+          const double residual = max_activity.lower_residual(
+              lp.beq[r], a, activity_bound, 1e-9);
           int rid = 0;
           if (track_reasons) {
             ids.clear();
@@ -6376,18 +5904,22 @@ bool propagate_node_domain_impl(
             const double new_lb = normalized_bound_value(j, true, residual / a);
             const BranchDomainLiteral source =
                 opposite_source_literal(j, true, new_lb);
-            const double source_activity =
-                max_activity - contrib + a * source.value;
+            const double source_activity = max_activity.replacing_product(
+                a, activity_bound, source.value);
             const LinearProofAudit audit{source, -source_activity, -lp.beq[r]};
-            if (!apply_bound(j, true, new_lb, rid, &audit)) break;
+            if (!apply_bound(j, true, new_lb, rid,
+                             DomainPropagationSource::EqualityRow, r, -1,
+                             false, a, lp.beq[r], activity_bound, &audit)) break;
           } else {
             const double new_ub = normalized_bound_value(j, false, residual / a);
             const BranchDomainLiteral source =
                 opposite_source_literal(j, false, new_ub);
-            const double source_activity =
-                max_activity - contrib + a * source.value;
+            const double source_activity = max_activity.replacing_product(
+                a, activity_bound, source.value);
             const LinearProofAudit audit{source, -source_activity, -lp.beq[r]};
-            if (!apply_bound(j, false, new_ub, rid, &audit)) break;
+            if (!apply_bound(j, false, new_ub, rid,
+                             DomainPropagationSource::EqualityRow, r, -1,
+                             false, a, lp.beq[r], activity_bound, &audit)) break;
           }
         }
       }
@@ -6399,7 +5931,8 @@ bool propagate_node_domain_impl(
                                  arena, lb_reason, ub_reason,
                                  changes_out, changed_vars, queued_vars,
                                  static_cast<int>(branch_reasons.size()),
-                                 &local_tightened, reason_bounds_out)) {
+                                 &local_tightened, reason_bounds_out,
+                                 propagation_events, propagation_failure)) {
       if (learned_conflict != nullptr) *learned_conflict = branch_reasons;
       if (total_tightened != nullptr) *total_tightened += local_tightened;
       finalize_profile();
@@ -6429,6 +5962,19 @@ bool propagate_node_domain_impl(
 
 }  // namespace
 
+const char* domain_propagation_source_name(
+    DomainPropagationSource source) noexcept {
+  switch (source) {
+    case DomainPropagationSource::ConflictPool: return "conflict_pool";
+    case DomainPropagationSource::Clique: return "clique";
+    case DomainPropagationSource::Implication: return "implication";
+    case DomainPropagationSource::InequalityRow: return "inequality_row";
+    case DomainPropagationSource::EqualityRow: return "equality_row";
+    case DomainPropagationSource::Unknown: return "unknown";
+  }
+  return "unknown";
+}
+
 bool propagate_node_domain(
     const LPModel& lp,
     const Eigen::SparseMatrix<double, Eigen::RowMajor>& A_row,
@@ -6445,13 +5991,16 @@ bool propagate_node_domain(
     std::vector<BranchDomainLiteral>* learned_conflict,
     int* total_tightened,
     std::vector<DomainReasonBound>* reason_bounds_out,
-    const std::vector<DomainReasonBound>* existing_reason_bounds) {
+    const std::vector<DomainReasonBound>* existing_reason_bounds,
+    std::vector<DomainPropagationEvent>* propagation_events,
+    DomainPropagationFailure* propagation_failure) {
   return propagate_node_domain_impl(lp, A_row, Aeq_row, row_index, node_lb, node_ub,
                                     max_rounds, conflict_pool, clique_table,
                                     implication_graph, changes_out,
                                     branch_reasons, learned_conflict,
                                     total_tightened, reason_bounds_out,
-                                    existing_reason_bounds);
+                                    existing_reason_bounds, propagation_events,
+                                    propagation_failure);
 }
 
 bool propagate_node_domain(
@@ -6470,13 +6019,16 @@ bool propagate_node_domain(
     std::vector<BranchDomainLiteral>* learned_conflict,
     int* total_tightened,
     std::vector<DomainReasonBound>* reason_bounds_out,
-    const std::vector<DomainReasonBound>* existing_reason_bounds) {
+    const std::vector<DomainReasonBound>* existing_reason_bounds,
+    std::vector<DomainPropagationEvent>* propagation_events,
+    DomainPropagationFailure* propagation_failure) {
   return propagate_node_domain_impl(lp, A_row, Aeq_row, row_index, node_lb, node_ub,
                                     max_rounds, conflict_pool, clique_table,
                                     implication_graph, changes_out,
                                     branch_reasons, learned_conflict,
                                     total_tightened, reason_bounds_out,
-                                    existing_reason_bounds);
+                                    existing_reason_bounds, propagation_events,
+                                    propagation_failure);
 }
 
 }  // namespace mipsolvers::engine::detail

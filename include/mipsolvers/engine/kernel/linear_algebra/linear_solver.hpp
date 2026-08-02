@@ -16,6 +16,9 @@ class SparseLinearSolver {
   virtual void analyze_pattern(const Eigen::SparseMatrix<double>& a) = 0;
   virtual bool factorize(const Eigen::SparseMatrix<double>& a) = 0;
   virtual bool solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) = 0;
+  /// Factor inertia when exposed by a symmetric-indefinite backend.
+  virtual int negative_eigenvalues() const { return -1; }
+  virtual int estimated_deficiency() const { return -1; }
 };
 
 class EigenSparseLUSolver final : public SparseLinearSolver {
@@ -121,7 +124,11 @@ class MumpsSolver final : public SparseLinearSolver {
   /// Free with the factorization; this is what the Wächter–Biegler δ_W
   /// inertia-correction loop queries each IPM iteration.  Returns -1 when no
   /// factorization has run yet.
-  int negative_eigenvalues() const;
+  int negative_eigenvalues() const override;
+
+  /// Estimated numerical rank deficiency from INFOG(28). Returns -1 before
+  /// numeric factorization. A trustworthy nonsingular factor has value zero.
+  int estimated_deficiency() const override;
 
  private:
   class Impl;

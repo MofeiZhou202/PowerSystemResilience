@@ -169,6 +169,12 @@ struct ObjectivePropagationState {
 
   bool empty() const { return terms.empty(); }
 
+  bool objective_partition_owns_col(int col) const {
+    return col >= 0 &&
+           col < static_cast<int>(partition_of_col.size()) &&
+           partition_of_col[static_cast<std::size_t>(col)] >= 0;
+  }
+
   static bool finite_model_bound(double value) {
     return std::isfinite(value) && std::abs(value) < 1e19;
   }
@@ -924,7 +930,10 @@ struct ObjectivePropagationState {
         const ImpliedContributionEvent& event =
             implied_events[static_cast<std::size_t>(event_id)];
         const int target = event.target_col;
-        if (target < 0 || target >= n) continue;
+        if (target < 0 || target >= n ||
+            objective_partition_owns_col(target)) {
+          continue;
+        }
         const auto& target_var = lp.vars[static_cast<std::size_t>(target)];
         const double contribution = event.target_is_lower_bound
             ? event.target_cost * (event.target_bound - target_var.lb)
@@ -1145,7 +1154,10 @@ struct ObjectivePropagationState {
 
     for (const ImpliedContributionEvent& event : implied_events) {
       const int target = event.target_col;
-      if (target < 0 || target >= n) continue;
+      if (target < 0 || target >= n ||
+          objective_partition_owns_col(target)) {
+        continue;
+      }
       const bool target_tightens = event.target_is_lower_bound
           ? (event.target_bound > lb[target] + tol)
           : (event.target_bound < ub[target] - tol);
@@ -1518,7 +1530,10 @@ struct ObjectivePropagationState {
 
       for (const ImpliedContributionEvent& event : implied_events) {
         const int target = event.target_col;
-        if (target < 0 || target >= n) continue;
+        if (target < 0 || target >= n ||
+            objective_partition_owns_col(target)) {
+          continue;
+        }
         const double a = ctx.proof_coeff->coeff(target);
         double proof_delta = 0.0;
         double objective_delta = 0.0;
@@ -1985,6 +2000,7 @@ struct ObjectivePropagationState {
         };
         for (const ImpliedContributionEvent& event : implied_events) {
           if (event.target_col < 0 || event.target_col >= n ||
+              objective_partition_owns_col(event.target_col) ||
               (event.target_is_lower_bound
                    ? event.target_bound <= lb[event.target_col] + tol
                    : event.target_bound >= ub[event.target_col] - tol)) {
@@ -2079,6 +2095,7 @@ struct ObjectivePropagationState {
 
         for (const ImpliedContributionEvent& event : implied_events) {
           if (event.target_col < 0 || event.target_col >= n ||
+              objective_partition_owns_col(event.target_col) ||
               (event.target_is_lower_bound
                    ? event.target_bound <= lb[event.target_col] + tol
                    : event.target_bound >= ub[event.target_col] - tol)) {

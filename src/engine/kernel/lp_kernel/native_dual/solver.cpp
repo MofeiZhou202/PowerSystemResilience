@@ -53,6 +53,11 @@ void update_statistics(const Audit& audit, Statistics& statistics) {
 
 void sync_phase_telemetry(const Statistics& source, Statistics& target) {
   target.dual_start_cost_shifts = source.dual_start_cost_shifts;
+  target.dual_start_required_cost_shift_lower_bound =
+      source.dual_start_required_cost_shift_lower_bound;
+  target.dual_start_shift_threshold = source.dual_start_shift_threshold;
+  target.dual_start_adaptive_rejections =
+      source.dual_start_adaptive_rejections;
   target.dual_phase_one_iterations = source.dual_phase_one_iterations;
   target.dual_phase_two_iterations = source.dual_phase_two_iterations;
   target.primal_phase_one_iterations = source.primal_phase_one_iterations;
@@ -360,8 +365,8 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
   // The priced row is consumed entirely within this pivot, so its backing
   // storage is reused across iterations.
   static thread_local detail::IndexedVector pivot_row_storage;
-  detail::multiply_AT_indexed(state.sf->A_row, leaving.row_ep,
-                              pivot_row_storage);
+  detail::multiply_AT_indexed(state.sf->A, state.sf->A_row, leaving.row_ep,
+                              pivot_row_storage, state.kernel_threads);
   const detail::IndexedVector& pivot_row = pivot_row_storage;
   if (!pivot_row.finite()) {
     return numerical_trouble("packed PRICE produced non-finite values");
@@ -454,7 +459,7 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
 
     detail::IndexedVector& column = g_ds_scratch.entering_column;
     column.clear(state.m);
-    for (Eigen::SparseMatrix<double>::InnerIterator it(state.sf->A,
+    for (StandardColumnMatrix::InnerIterator it(state.sf->A,
                                                         entering.col);
          it; ++it) {
       column.index.push_back(it.row());
@@ -761,7 +766,7 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
       state.costs_shifted = true;
       for (const detail::WorkingCostShift& shift : transaction.cost_shifts) {
         state.cost[shift.col] += shift.delta;
-        state.cost_shift[shift.col] += shift.delta;
+        state.cost_shift.add(shift.col, shift.delta);
         ++statistics.cost_shifts;
         statistics.max_cost_shift =
             std::max(statistics.max_cost_shift, std::abs(shift.delta));
@@ -812,9 +817,9 @@ bool certify_interrupted_dual_bound(State& state) {
   if (state.phase != Phase::Two) return false;
   std::string failure;
   detail::restore_original_cost(state);
-  if (!detail::reconstruct(state, failure)) return false;
+  if (!detail::reconstruct(state, failure, true, true, true)) return false;
   if (!detail::normalize_nonbasic_moves(state, failure)) return false;
-  const Audit certification = detail::audit(state, false, true, false);
+  const Audit certification = detail::audit(state, false, true, false, true);
   return certification.ok && std::isfinite(state.objective);
 }
 
@@ -1097,7 +1102,7 @@ Result run_phase(State& state, Statistics& statistics,
       }
 
       const Audit final = detail::audit(
-          state, true, true, state.phase == Phase::Two);
+          state, true, true, state.phase == Phase::Two, true);
       update_statistics(final, statistics);
       if (!final.ok) {
         return detail::make_result(
@@ -1259,13 +1264,21 @@ Result solve_impl(const StandardFormLP& sf, const SimplexOptions& options,
       return run_dual_phase();
     }
 
-    const char* shift_start_policy =
-        std::getenv("MIPSOLVERS_DUAL_SHIFT_START");
-    const bool try_shift_start =
-        shift_start_policy == nullptr || std::string(shift_start_policy) != "off";
-    if (try_shift_start) {
+    const detail::DualShiftStartDecision shift_start =
+        detail::decide_cost_shifted_dual_start(
+            state, std::getenv("MIPSOLVERS_DUAL_SHIFT_START"));
+    statistics.dual_start_required_cost_shift_lower_bound =
+        shift_start.required_shift_lower_bound;
+    statistics.dual_start_shift_threshold = shift_start.shift_threshold;
+    statistics.dual_start_adaptive_rejections =
+        shift_start.adaptive_rejection ? 1 : 0;
+    if (shift_start.try_shift_start) {
       if (detail::initialize_cost_shifted_dual_start(
               state, statistics, dual_start_failure)) {
+        if (statistics.dual_start_required_cost_shift_lower_bound == 0) {
+          statistics.dual_start_required_cost_shift_lower_bound =
+              statistics.dual_start_cost_shifts;
+        }
         return run_dual_phase();
       }
       if (std::getenv("MIPSOLVERS_DS_VERBOSE") != nullptr) {
@@ -1386,6 +1399,8 @@ const char* status_name(Status status) {
       return "Optimal";
     case Status::PrimalInfeasible:
       return "Primal infeasible";
+    case Status::Unbounded:
+      return "Unbounded";
     case Status::DualInfeasibleStart:
       return "Dual-infeasible start";
     case Status::IterationLimit:
@@ -1420,14 +1435,18 @@ Result solve(const StandardFormLP& sf, const SimplexOptions& options,
     std::fprintf(
         stderr,
         "DS %s: m=%d n=%d iters=%d degen_dual=%d degen_primal=%d "
-        "bound_flips=%d cost_shifts=%d start_shifts=%d devex_frameworks=%d "
+        "bound_flips=%d cost_shifts=%d start_shifts=%d required_shifts_lb=%d "
+        "shift_threshold=%d adaptive_phase1=%d devex_frameworks=%d "
         "devex_restarts=%d "
         "cycles=%d taboo_rej=%d taboo_row_rej=%d stab_blocked=%d "
         "major_rebuilds=%d reinversions=%d message='%s'\n",
         status_name(result.status), static_cast<int>(result.basis.size()),
         static_cast<int>(result.reduced_costs.size()), s.iterations,
         s.degenerate_dual_steps, s.degenerate_primal_steps, s.bound_flips,
-        s.cost_shifts, s.dual_start_cost_shifts, s.devex_frameworks,
+        s.cost_shifts, s.dual_start_cost_shifts,
+        s.dual_start_required_cost_shift_lower_bound,
+        s.dual_start_shift_threshold,
+        s.dual_start_adaptive_rejections, s.devex_frameworks,
         s.devex_restarts, s.cycles_detected, s.taboo_rejections,
         s.taboo_row_rejections, s.stability_blocked_rows, s.major_rebuilds,
         s.reinversions, result.message.c_str());

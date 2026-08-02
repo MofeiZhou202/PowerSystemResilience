@@ -3,7 +3,7 @@
 ///
 /// Provides SharedCutPool (reader-writer lock), SharedConflictPool (reader-writer lock), SharedSolutionPool (mutex),
 /// SharedIncumbent (lock-free CAS + mutex), ThreadSafeNodeQueue, CutRequestQueue,
-/// WorkStealingDeque (P5.1), and AtomicBCStats for the parallel B&C architecture.
+/// WorkStealingDeque, and AtomicBCStats for the parallel B&C architecture.
 
 #pragma once
 
@@ -20,7 +20,9 @@
 #include <random>
 #include <set>
 #include <shared_mutex>
+#include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -68,7 +70,7 @@ class ParallelProgressEvent {
   std::uint64_t generation_{0};
 };
 
-/// @brief P5.1 Work-Stealing Deque for per-worker local node storage.
+/// @brief Work-stealing deque for per-worker local node storage.
 /// Owner thread pushes/pops from the top (LIFO), thieves steal from the bottom.
 /// Uses a simple mutex-based implementation (Chase-Lev deque is overkill for B&C
 /// where node processing time >> deque operation time).
@@ -162,14 +164,11 @@ class WorkStealingPool {
   std::atomic<int> total_steals_{0};
   std::atomic<int> failed_steals_{0};
 public:
-  /// @param seed Deterministic seed for victim selection; pass 0 to request
-  ///             a non-deterministic (random_device-based) seed.
+  /// @param seed Deterministic seed for victim selection, including zero.
   explicit WorkStealingPool(int n_workers,
                              int max_deque_size = 256,
                              std::uint64_t seed = 0x9E3779B97F4A7C15ULL)
-      : rng_(seed != 0
-                 ? static_cast<std::mt19937::result_type>(seed)
-                 : static_cast<std::mt19937::result_type>(std::random_device{}())) {
+      : rng_(static_cast<std::mt19937::result_type>(seed)) {
     deques_.reserve(static_cast<size_t>(n_workers));
     for (int i = 0; i < n_workers; ++i) {
       deques_.push_back(std::make_unique<WorkStealingDeque>(max_deque_size));
@@ -604,10 +603,14 @@ class ThreadSafeNodeQueue {
   std::atomic<bool> shutdown_{false};
   bool domain_signature_enabled_{false};
   std::vector<int> domain_signature_cols_;
-  Eigen::VectorXd domain_signature_root_lb_;
-  Eigen::VectorXd domain_signature_root_ub_;
-  std::unordered_map<std::string, std::int64_t> signature_to_id_;
-  std::unordered_map<std::int64_t, std::string> id_to_signature_;
+  Eigen::Index domain_signature_size_{0};
+  Eigen::VectorXd root_domain_lb_;
+  Eigen::VectorXd root_domain_ub_;
+  bool domain_storage_enabled_{false};
+  NodeQueueDomainStorageStats domain_storage_stats_;
+  std::unordered_map<std::size_t, std::vector<std::int64_t>>
+      signature_hash_to_ids_;
+  std::unordered_map<std::int64_t, std::size_t> id_to_signature_hash_;
 
   static double priority_key(const Node& node) {
     if (!std::isfinite(node.bound)) {
@@ -623,45 +626,168 @@ class ThreadSafeNodeQueue {
     return std::max(1e-9, 1e-12 * std::max(1.0, std::abs(bound)));
   }
 
-  template <typename T>
-  static void append_signature_bytes(std::string& sig, const T& value) {
-    sig.append(reinterpret_cast<const char*>(&value), sizeof(T));
+  Eigen::Index queued_domain_size(const Node& node) const {
+    if (node_domain_is_compact(node)) return node.compact_domain_size;
+    return node.lb.size() == node.ub.size() ? node.lb.size() : 0;
   }
 
-  std::optional<std::string> make_domain_signature(const Node& node) const {
+  double queued_domain_lb(const Node& node, Eigen::Index col) const {
+    if (!node_domain_is_compact(node)) return node.lb[col];
+    const auto it = std::lower_bound(
+        node.compact_domain.begin(), node.compact_domain.end(), col,
+        [](const SparseNodeBound& bound, Eigen::Index index) {
+          return bound.var_idx < index;
+        });
+    return it != node.compact_domain.end() && it->var_idx == col
+               ? it->lb
+               : root_domain_lb_[col];
+  }
+
+  double queued_domain_ub(const Node& node, Eigen::Index col) const {
+    if (!node_domain_is_compact(node)) return node.ub[col];
+    const auto it = std::lower_bound(
+        node.compact_domain.begin(), node.compact_domain.end(), col,
+        [](const SparseNodeBound& bound, Eigen::Index index) {
+          return bound.var_idx < index;
+        });
+    return it != node.compact_domain.end() && it->var_idx == col
+               ? it->ub
+               : root_domain_ub_[col];
+  }
+
+  bool compact_node_locked(Node& node) noexcept {
+    if (!domain_storage_enabled_ || node_domain_is_compact(node)) return true;
+    const auto released =
+        static_cast<std::uint64_t>(node.lb.size() + node.ub.size());
+    std::size_t entries = 0;
+    if (!compact_node_domain(node, root_domain_lb_, root_domain_ub_,
+                             &entries)) {
+      ++domain_storage_stats_.compaction_failures;
+      return false;
+    }
+    ++domain_storage_stats_.compactions;
+    domain_storage_stats_.dense_bound_values_released += released;
+    domain_storage_stats_.compact_entries_created += entries;
+    ++domain_storage_stats_.current_compact_nodes;
+    domain_storage_stats_.current_compact_entries += entries;
+    domain_storage_stats_.peak_compact_nodes = std::max(
+        domain_storage_stats_.peak_compact_nodes,
+        domain_storage_stats_.current_compact_nodes);
+    domain_storage_stats_.peak_compact_entries = std::max(
+        domain_storage_stats_.peak_compact_entries,
+        domain_storage_stats_.current_compact_entries);
+    return true;
+  }
+
+  void release_compact_node_locked(const Node& node) noexcept {
+    if (!node_domain_is_compact(node)) return;
+    const auto entries =
+        static_cast<std::uint64_t>(node.compact_domain.size());
+    if (domain_storage_stats_.current_compact_nodes > 0) {
+      --domain_storage_stats_.current_compact_nodes;
+    }
+    domain_storage_stats_.current_compact_entries =
+        entries <= domain_storage_stats_.current_compact_entries
+            ? domain_storage_stats_.current_compact_entries - entries
+            : 0;
+  }
+
+  void materialize_node_locked(Node& node) {
+    if (!node_domain_is_compact(node)) return;
+    const auto entries =
+        static_cast<std::uint64_t>(node.compact_domain.size());
+    if (!materialize_node_domain(node, root_domain_lb_, root_domain_ub_)) {
+      ++domain_storage_stats_.materialization_failures;
+      throw std::logic_error(
+          "parallel queued node domain cannot be materialized from the root domain");
+    }
+    ++domain_storage_stats_.materializations;
+    if (domain_storage_stats_.current_compact_nodes > 0) {
+      --domain_storage_stats_.current_compact_nodes;
+    }
+    domain_storage_stats_.current_compact_entries =
+        entries <= domain_storage_stats_.current_compact_entries
+            ? domain_storage_stats_.current_compact_entries - entries
+            : 0;
+  }
+
+  void materialize_all_locked() {
+    for (auto& [id, node] : nodes_) {
+      (void)id;
+      materialize_node_locked(node);
+    }
+  }
+
+  void compact_all_locked() {
+    if (!domain_storage_enabled_) return;
+    for (auto& [id, node] : nodes_) {
+      (void)id;
+      if (!compact_node_locked(node)) {
+        domain_storage_enabled_ = false;
+        for (auto& [restore_id, restore_node] : nodes_) {
+          (void)restore_id;
+          if (node_domain_is_compact(restore_node)) {
+            materialize_node_locked(restore_node);
+          }
+        }
+        throw std::invalid_argument(
+            "parallel queued node domain does not match the configured root domain");
+      }
+    }
+  }
+
+  std::optional<std::size_t> make_domain_signature_hash(
+      const Node& node) const {
     if (!domain_signature_enabled_ ||
-        node.lb.size() != node.ub.size() ||
-        node.lb.size() != domain_signature_root_lb_.size() ||
-        node.ub.size() != domain_signature_root_ub_.size()) {
+        queued_domain_size(node) != domain_signature_size_) {
       return std::nullopt;
     }
-    std::string sig;
-    sig.reserve(domain_signature_cols_.size() * 26);
-    constexpr char lower_tag = 'L';
-    constexpr char upper_tag = 'U';
+    std::size_t hash = 0xcbf29ce484222325ULL;
+    auto combine = [&](std::size_t value) {
+      hash ^= value + 0x9e3779b97f4a7c15ULL + (hash << 6) + (hash >> 2);
+    };
     for (int j : domain_signature_cols_) {
-      if (j < 0 || j >= node.lb.size()) continue;
-      const std::int32_t col = static_cast<std::int32_t>(j);
-      const double lb = node.lb[j] == 0.0 ? 0.0 : node.lb[j];
-      const double ub = node.ub[j] == 0.0 ? 0.0 : node.ub[j];
-      append_signature_bytes(sig, col);
-      sig.push_back(lower_tag);
-      append_signature_bytes(sig, lb);
-      append_signature_bytes(sig, col);
-      sig.push_back(upper_tag);
-      append_signature_bytes(sig, ub);
+      if (j < 0 || j >= queued_domain_size(node)) continue;
+      const double raw_lb = queued_domain_lb(node, j);
+      const double raw_ub = queued_domain_ub(node, j);
+      const double lb = raw_lb == 0.0 ? 0.0 : raw_lb;
+      const double ub = raw_ub == 0.0 ? 0.0 : raw_ub;
+      combine(std::hash<int>{}(j));
+      combine(std::hash<double>{}(lb));
+      combine(std::hash<double>{}(ub));
     }
-    return sig;
+    return hash;
+  }
+
+  bool same_domain(const Node& lhs, const Node& rhs) const {
+    if (queued_domain_size(lhs) != queued_domain_size(rhs)) {
+      return false;
+    }
+    for (int j : domain_signature_cols_) {
+      if (j < 0 || j >= queued_domain_size(lhs)) continue;
+      const double raw_lhs_lb = queued_domain_lb(lhs, j);
+      const double raw_rhs_lb = queued_domain_lb(rhs, j);
+      const double raw_lhs_ub = queued_domain_ub(lhs, j);
+      const double raw_rhs_ub = queued_domain_ub(rhs, j);
+      const double lhs_lb = raw_lhs_lb == 0.0 ? 0.0 : raw_lhs_lb;
+      const double rhs_lb = raw_rhs_lb == 0.0 ? 0.0 : raw_rhs_lb;
+      const double lhs_ub = raw_lhs_ub == 0.0 ? 0.0 : raw_lhs_ub;
+      const double rhs_ub = raw_rhs_ub == 0.0 ? 0.0 : raw_rhs_ub;
+      if (lhs_lb != rhs_lb || lhs_ub != rhs_ub) return false;
+    }
+    return true;
   }
 
   void forget_domain_signature_locked(std::int64_t id) {
-    auto sig_it = id_to_signature_.find(id);
-    if (sig_it == id_to_signature_.end()) return;
-    auto owner_it = signature_to_id_.find(sig_it->second);
-    if (owner_it != signature_to_id_.end() && owner_it->second == id) {
-      signature_to_id_.erase(owner_it);
+    auto hash_it = id_to_signature_hash_.find(id);
+    if (hash_it == id_to_signature_hash_.end()) return;
+    auto bucket_it = signature_hash_to_ids_.find(hash_it->second);
+    if (bucket_it != signature_hash_to_ids_.end()) {
+      auto& ids = bucket_it->second;
+      ids.erase(std::remove(ids.begin(), ids.end(), id), ids.end());
+      if (ids.empty()) signature_hash_to_ids_.erase(bucket_it);
     }
-    id_to_signature_.erase(sig_it);
+    id_to_signature_hash_.erase(hash_it);
   }
 
   void erase_id_locked(std::int64_t id) {
@@ -676,88 +802,71 @@ class ThreadSafeNodeQueue {
     if (dfs_bound_it != dfs_bounds_.end()) dfs_bounds_.erase(dfs_bound_it);
     dfs_.erase(std::remove(dfs_.begin(), dfs_.end(), id), dfs_.end());
     forget_domain_signature_locked(id);
+    release_compact_node_locked(node_it->second);
     nodes_.erase(node_it);
   }
 
   std::int64_t store_locked(Node node) {
-    std::optional<std::string> sig;
+    std::optional<std::size_t> signature_hash;
     if (domain_signature_enabled_) {
-      sig = make_domain_signature(node);
-      if (sig.has_value()) {
-        auto existing = signature_to_id_.find(*sig);
-        if (existing != signature_to_id_.end()) {
-          auto existing_node = nodes_.find(existing->second);
-          if (existing_node != nodes_.end()) {
+      signature_hash = make_domain_signature_hash(node);
+      if (signature_hash.has_value()) {
+        const auto bucket_it = signature_hash_to_ids_.find(*signature_hash);
+        if (bucket_it != signature_hash_to_ids_.end()) {
+          const std::vector<std::int64_t> candidates = bucket_it->second;
+          for (std::int64_t existing_id : candidates) {
+            auto existing_node = nodes_.find(existing_id);
+            if (existing_node == nodes_.end() ||
+                !same_domain(existing_node->second, node)) {
+              continue;
+            }
             if (existing_node->second.bound <=
                 node.bound + signature_bound_tol(node.bound)) {
               return -1;
             }
-            erase_id_locked(existing->second);
-          } else {
-            signature_to_id_.erase(existing);
+            erase_id_locked(existing_id);
+            break;
           }
         }
       }
     }
     const auto id = next_id_++;
+    if (domain_storage_enabled_ && !compact_node_locked(node)) {
+      throw std::invalid_argument(
+          "parallel queued node domain does not match the configured root domain");
+    }
     nodes_.emplace(id, std::move(node));
-    if (sig.has_value()) {
-      signature_to_id_[*sig] = id;
-      id_to_signature_[id] = std::move(*sig);
+    if (signature_hash.has_value()) {
+      signature_hash_to_ids_[*signature_hash].push_back(id);
+      id_to_signature_hash_[id] = *signature_hash;
     }
     return id;
   }
 
-  bool pop_dfs_locked(Node& out) {
-    if (dfs_.empty()) {
-      return false;
-    }
-
-    const auto id = dfs_.back();
-    dfs_.pop_back();
-
+  bool take_id_locked(std::int64_t id, Node& out) {
     auto node_it = nodes_.find(id);
-    if (node_it == nodes_.end()) {
-      return false;
-    }
-
-    const double bound = node_it->second.bound;
-    auto dfs_bound_it = dfs_bounds_.find({bound, id});
-    if (dfs_bound_it != dfs_bounds_.end()) {
-      dfs_bounds_.erase(dfs_bound_it);
-    }
-
+    if (node_it == nodes_.end()) return false;
+    materialize_node_locked(node_it->second);
+    const Node& node = node_it->second;
+    auto priority_it = priority_.find({priority_key(node), id});
+    if (priority_it != priority_.end()) priority_.erase(priority_it);
+    auto bound_it = bounds_.find({node.bound, id});
+    if (bound_it != bounds_.end()) bounds_.erase(bound_it);
+    auto dfs_bound_it = dfs_bounds_.find({node.bound, id});
+    if (dfs_bound_it != dfs_bounds_.end()) dfs_bounds_.erase(dfs_bound_it);
+    dfs_.erase(std::remove(dfs_.begin(), dfs_.end(), id), dfs_.end());
     out = std::move(node_it->second);
     forget_domain_signature_locked(id);
     nodes_.erase(node_it);
     return true;
   }
 
+  bool pop_dfs_locked(Node& out) {
+    return !dfs_.empty() && take_id_locked(dfs_.back(), out);
+  }
+
   bool pop_priority_locked(Node& out) {
-    if (priority_.empty()) {
-      return false;
-    }
-
-    auto it = priority_.begin();
-    const auto [priority, id] = *it;
-    priority_.erase(it);
-
-    auto node_it = nodes_.find(id);
-    if (node_it == nodes_.end()) {
-      return false;
-    }
-
-    const double bound = node_it->second.bound;
-    auto bound_it = bounds_.find({bound, id});
-    if (bound_it != bounds_.end()) {
-      bounds_.erase(bound_it);
-    }
-
-    out = std::move(node_it->second);
-    forget_domain_signature_locked(id);
-    nodes_.erase(node_it);
-    (void)priority;
-    return true;
+    return !priority_.empty() && take_id_locked(priority_.begin()->second, out);
   }
 
   bool pop_bestbound_locked(Node& out) {
@@ -769,50 +878,9 @@ class ThreadSafeNodeQueue {
 
     if (have_dfs_bound &&
         (!have_priority_bound || dfs_bounds_.begin()->first <= bounds_.begin()->first)) {
-      auto it = dfs_bounds_.begin();
-      const auto [bound, id] = *it;
-      dfs_bounds_.erase(it);
-
-      auto node_it = nodes_.find(id);
-      if (node_it == nodes_.end()) {
-        return false;
-      }
-
-      auto prio_it = priority_.find({priority_key(node_it->second), id});
-      if (prio_it != priority_.end()) {
-        priority_.erase(prio_it);
-      }
-      auto bound_it = bounds_.find({bound, id});
-      if (bound_it != bounds_.end()) {
-        bounds_.erase(bound_it);
-      }
-      dfs_.erase(std::remove(dfs_.begin(), dfs_.end(), id), dfs_.end());
-
-      out = std::move(node_it->second);
-      forget_domain_signature_locked(id);
-      nodes_.erase(node_it);
-      return true;
+      return take_id_locked(dfs_bounds_.begin()->second, out);
     }
-
-    auto it = bounds_.begin();
-    const auto [bound, id] = *it;
-    bounds_.erase(it);
-
-    auto node_it = nodes_.find(id);
-    if (node_it == nodes_.end()) {
-      return false;
-    }
-
-    auto prio_it = priority_.find({priority_key(node_it->second), id});
-    if (prio_it != priority_.end()) {
-      priority_.erase(prio_it);
-    }
-
-    out = std::move(node_it->second);
-    forget_domain_signature_locked(id);
-    nodes_.erase(node_it);
-    (void)bound;
-    return true;
+    return take_id_locked(bounds_.begin()->second, out);
   }
 
 public:
@@ -823,6 +891,11 @@ public:
                                   const Eigen::VectorXd& root_ub,
                                   double tol = 1e-9) {
     std::lock_guard<std::mutex> lk(mtx_);
+    materialize_all_locked();
+    root_domain_lb_ = root_lb;
+    root_domain_ub_ = root_ub;
+    domain_storage_enabled_ =
+        root_lb.size() > 0 && root_lb.size() == root_ub.size();
     domain_signature_cols_.clear();
     domain_signature_cols_.reserve(branchable_cols.size());
     for (std::size_t j = 0; j < branchable_cols.size(); ++j) {
@@ -830,36 +903,62 @@ public:
         domain_signature_cols_.push_back(static_cast<int>(j));
       }
     }
-    domain_signature_root_lb_ = root_lb;
-    domain_signature_root_ub_ = root_ub;
+    domain_signature_size_ = root_lb.size();
     (void)tol;
     domain_signature_enabled_ =
         !domain_signature_cols_.empty() &&
         root_lb.size() == root_ub.size();
-    signature_to_id_.clear();
-    id_to_signature_.clear();
-    if (!domain_signature_enabled_) return;
+    signature_hash_to_ids_.clear();
+    id_to_signature_hash_.clear();
     std::vector<std::int64_t> doomed;
+    std::unordered_set<std::int64_t> doomed_set;
+    std::vector<std::int64_t> ids;
+    ids.reserve(nodes_.size());
     for (const auto& [id, node] : nodes_) {
-      auto sig = make_domain_signature(node);
-      if (!sig.has_value()) continue;
-      const auto existing = signature_to_id_.find(*sig);
-      if (existing == signature_to_id_.end()) {
-        signature_to_id_.emplace(*sig, id);
-        id_to_signature_.emplace(id, *sig);
+      (void)node;
+      ids.push_back(id);
+    }
+    std::sort(ids.begin(), ids.end());
+    for (std::int64_t id : ids) {
+      if (doomed_set.count(id) != 0) continue;
+      const auto node_it = nodes_.find(id);
+      if (node_it == nodes_.end()) continue;
+      const auto signature_hash = make_domain_signature_hash(node_it->second);
+      if (!signature_hash.has_value()) continue;
+      auto& bucket = signature_hash_to_ids_[*signature_hash];
+      auto existing = std::find_if(
+          bucket.begin(), bucket.end(), [&](std::int64_t candidate_id) {
+            const auto candidate = nodes_.find(candidate_id);
+            return candidate != nodes_.end() &&
+                   same_domain(candidate->second, node_it->second);
+          });
+      if (existing == bucket.end()) {
+        bucket.push_back(id);
+        id_to_signature_hash_[id] = *signature_hash;
         continue;
       }
-      const auto keep_it = nodes_.find(existing->second);
+      const auto keep_it = nodes_.find(*existing);
       if (keep_it != nodes_.end() &&
-          keep_it->second.bound <= node.bound + signature_bound_tol(node.bound)) {
+          keep_it->second.bound <=
+              node_it->second.bound +
+                  signature_bound_tol(node_it->second.bound)) {
         doomed.push_back(id);
+        doomed_set.insert(id);
       } else {
-        doomed.push_back(existing->second);
-        signature_to_id_[*sig] = id;
-        id_to_signature_[id] = *sig;
+        doomed.push_back(*existing);
+        doomed_set.insert(*existing);
+        id_to_signature_hash_.erase(*existing);
+        *existing = id;
+        id_to_signature_hash_[id] = *signature_hash;
       }
     }
     for (std::int64_t id : doomed) erase_id_locked(id);
+    compact_all_locked();
+  }
+
+  NodeQueueDomainStorageStats domain_storage_stats() const {
+    std::lock_guard<std::mutex> lk(mtx_);
+    return domain_storage_stats_;
   }
 
   /// @brief Pop a node (blocks briefly if empty).
@@ -1019,14 +1118,13 @@ public:
       int unsatisfied = 0;
       for (const auto& literal : literals) {
         if (literal.var_idx < 0 ||
-            literal.var_idx >= static_cast<int>(node.lb.size()) ||
-            literal.var_idx >= static_cast<int>(node.ub.size())) {
+            literal.var_idx >= queued_domain_size(node)) {
           unsatisfied = 2;
           break;
         }
         const bool active = literal.is_lb
-            ? (node.lb[literal.var_idx] >= literal.value - tol)
-            : (node.ub[literal.var_idx] <= literal.value + tol);
+            ? (queued_domain_lb(node, literal.var_idx) >= literal.value - tol)
+            : (queued_domain_ub(node, literal.var_idx) <= literal.value + tol);
         if (!active && ++unsatisfied > 1) break;
       }
       if (require_unit_or_conflict ? (unsatisfied <= 1)
@@ -1046,7 +1144,7 @@ public:
 };
 
 /// @brief Atomic statistics counters for the parallel B&C.
-/// P7.5: Each high-frequency counter occupies its own cache line (64 bytes)
+/// Each high-frequency counter occupies its own cache line (64 bytes)
 /// to eliminate false sharing between 8+ parallel workers.  The two hot
 /// counters (`nodes_explored`, `lp_solves`) get individual lines; the
 /// remaining counters share lines since they are updated infrequently.
@@ -1086,6 +1184,34 @@ struct AtomicBCStats {
   std::atomic<std::uint64_t> branch_first_child_incumbent_updates{0};
   std::atomic<std::uint64_t> branch_first_child_cutoffs{0};
   std::atomic<std::uint64_t> branch_second_child_cutoffs{0};
+  std::atomic<std::uint64_t> branch_payload_child_creations{0};
+  std::atomic<std::uint64_t> branch_payload_shared_vectors{0};
+  std::atomic<std::uint64_t> branch_payload_shared_elements{0};
+  std::atomic<std::uint64_t> branch_domain_dense_copies{0};
+  std::atomic<std::uint64_t> branch_domain_dense_values_copied{0};
+  std::atomic<std::uint64_t> branch_domain_moves{0};
+  std::atomic<std::uint64_t> strong_probe_base_sf_materializations{0};
+  std::atomic<std::uint64_t> strong_probe_bound_transactions{0};
+  std::atomic<std::uint64_t> strong_probe_transaction_snapshot_values{0};
+  std::atomic<std::uint64_t> strong_probe_transaction_rollbacks{0};
+  std::atomic<std::uint64_t> strong_probe_transaction_failures{0};
+  std::atomic<std::uint64_t> strong_probe_backend_cold_solves{0};
+  std::atomic<std::uint64_t> strong_probe_backend_persistent_resolves{0};
+  std::atomic<std::uint64_t> separator_sparse_candidates_created{0};
+  std::atomic<std::uint64_t> separator_sparse_candidate_entries_created{0};
+  std::atomic<std::uint64_t> separator_peak_live_sparse_candidates{0};
+  std::atomic<std::uint64_t> separator_peak_live_sparse_entries{0};
+  std::atomic<std::uint64_t> separator_sparse_aggregation_snapshots{0};
+  std::atomic<std::uint64_t> separator_sparse_aggregation_entries{0};
+  std::atomic<std::uint64_t> separator_dense_workspace_materializations{0};
+  std::atomic<std::uint64_t> separator_dense_workspace_values{0};
+  std::atomic<std::uint64_t> separator_matrix_append_calls{0};
+  std::atomic<std::uint64_t> separator_matrix_appended_rows{0};
+  std::atomic<std::uint64_t> separator_matrix_appended_entries{0};
+  std::atomic<std::uint64_t>
+      separator_matrix_prior_entries_bypassing_triplet_rebuild{0};
+  std::atomic<std::uint64_t> separator_matrix_storage_reallocations{0};
+  std::atomic<std::uint64_t> separator_matrix_peak_spare_entries{0};
   std::atomic<std::uint64_t> node_estimate_calibration_samples{0};
   std::atomic<double> node_estimate_predicted_lift_sum{0.0};
   std::atomic<double> node_estimate_realized_lift_sum{0.0};

@@ -173,8 +173,9 @@ bool build_bounded_form_gmi_cut(const SimplexResult& simplex,
       return false;
     }
   } else {
-    tableau_row =
-        simplex.basis_inverse.row(row) * simplex.form.A;
+    const Eigen::VectorXd inverse_row =
+        simplex.basis_inverse.row(row).transpose();
+    tableau_row = simplex.form.A.transpose_multiply(inverse_row).transpose();
   }
   if (!tableau_row.allFinite()) {
     return false;
@@ -250,7 +251,7 @@ bool build_bounded_form_gmi_cut(const SimplexResult& simplex,
         return false;
       }
       const double factor = std_cut[aux_col] / aux_coeff;
-      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(simplex.form.A_row, r); it; ++it) {
+      for (StandardRowMatrix::InnerIterator it(simplex.form.A_row, r); it; ++it) {
         if (it.col() < n_orig) {
           coeff_y[it.col()] -= factor * it.value();
         }
@@ -311,16 +312,157 @@ int count_nonzeros(const Eigen::VectorXd& v, double tol = 1e-12) {
   return nnz;
 }
 
-double abs_cosine_similarity(const Eigen::VectorXd& a,
-                             const Eigen::VectorXd& b,
+double abs_cosine_similarity(const Eigen::SparseVector<double>& a,
+                             const Eigen::SparseVector<double>& b,
                              double norm_a,
                              double norm_b) {
   if (norm_a <= 1e-12 || norm_b <= 1e-12) {
     return 1.0;
   }
-  const double cos = a.dot(b) / (norm_a * norm_b);
+  const double cos = sparse_sparse_dot(a, b) / (norm_a * norm_b);
   return std::abs(cos);
 }
+
+Eigen::SparseVector<double> sparse_indicator_cut(
+    int dimension,
+    std::vector<int> indices,
+    double value = 1.0) {
+  std::sort(indices.begin(), indices.end());
+  indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+  Eigen::SparseVector<double> cut(dimension);
+  cut.reserve(static_cast<int>(indices.size()));
+  for (int col : indices) {
+    if (col >= 0 && col < dimension && std::abs(value) > 1e-15) {
+      cut.insertBack(col) = value;
+    }
+  }
+  return cut;
+}
+
+class SeparatorCandidateStorageTracker {
+ public:
+  explicit SeparatorCandidateStorageTracker(SeparatorStorageStats* stats)
+      : stats_(stats) {}
+
+  void record(const Eigen::SparseVector<double>& cut,
+              std::size_t live_candidates) {
+    if (stats_ == nullptr) return;
+    const std::uint64_t entries =
+        static_cast<std::uint64_t>(cut.nonZeros());
+    live_entries_ += entries;
+    ++stats_->sparse_candidates_created;
+    stats_->sparse_candidate_entries_created += entries;
+    stats_->peak_live_sparse_candidates = std::max(
+        stats_->peak_live_sparse_candidates,
+        static_cast<std::uint64_t>(live_candidates));
+    stats_->peak_live_sparse_entries =
+        std::max(stats_->peak_live_sparse_entries, live_entries_);
+  }
+
+  void record_ephemeral(const Eigen::SparseVector<double>& cut) {
+    if (stats_ == nullptr) return;
+    const std::uint64_t entries =
+        static_cast<std::uint64_t>(cut.nonZeros());
+    ++stats_->sparse_candidates_created;
+    stats_->sparse_candidate_entries_created += entries;
+    stats_->peak_live_sparse_candidates =
+        std::max(stats_->peak_live_sparse_candidates, std::uint64_t{1});
+    stats_->peak_live_sparse_entries =
+        std::max(stats_->peak_live_sparse_entries, entries);
+  }
+
+ private:
+  SeparatorStorageStats* stats_{nullptr};
+  std::uint64_t live_entries_{0};
+};
+
+void record_dense_workspace(SeparatorStorageStats* stats,
+                            std::size_t values) {
+  if (stats == nullptr) return;
+  ++stats->dense_workspace_materializations;
+  stats->dense_workspace_values += static_cast<std::uint64_t>(values);
+}
+
+struct SeparatorRowWorkspace {
+  explicit SeparatorRowWorkspace(const LPModel& lp)
+      : inequalities(lp.A), equalities(lp.Aeq) {}
+
+  int inequality_rows() const {
+    return inequalities.rows() +
+           static_cast<int>(appended_inequalities.size());
+  }
+
+  int equality_rows() const { return equalities.rows(); }
+
+  template <typename Visitor>
+  void visit_inequality_row(int row, Visitor&& visitor) const {
+    if (row < 0 || row >= inequality_rows()) return;
+    if (row < inequalities.rows()) {
+      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(
+               inequalities, row);
+           it; ++it) {
+        visitor(static_cast<int>(it.col()), it.value());
+      }
+      return;
+    }
+    const auto& sparse = appended_inequalities[
+        static_cast<std::size_t>(row - inequalities.rows())];
+    for (Eigen::SparseVector<double>::InnerIterator it(sparse); it; ++it) {
+      visitor(static_cast<int>(it.index()), it.value());
+    }
+  }
+
+  template <typename Visitor>
+  void visit_equality_row(int row, Visitor&& visitor) const {
+    if (row < 0 || row >= equalities.rows()) return;
+    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(
+             equalities, row);
+         it; ++it) {
+      visitor(static_cast<int>(it.col()), it.value());
+    }
+  }
+
+  std::vector<std::pair<int, double>> inequality_row_terms(int row) const {
+    std::vector<std::pair<int, double>> terms;
+    visit_inequality_row(row, [&](int col, double value) {
+      terms.emplace_back(col, value);
+    });
+    return terms;
+  }
+
+  void append_inequalities(
+      const std::vector<Eigen::SparseVector<double>>& rows) {
+    for (const auto& row : rows) {
+      if (row.size() == inequalities.cols()) {
+        appended_inequalities.push_back(row);
+      }
+    }
+  }
+
+  void sync_inequalities(const LPModel& lp) {
+    const int known_rows = inequality_rows();
+    const int new_rows = static_cast<int>(lp.A.rows()) - known_rows;
+    if (new_rows <= 0 || lp.A.cols() != inequalities.cols()) return;
+    std::vector<Eigen::SparseVector<double>> rows;
+    rows.reserve(static_cast<std::size_t>(new_rows));
+    for (int i = 0; i < new_rows; ++i) {
+      rows.emplace_back(lp.A.cols());
+    }
+    for (int col = 0; col < lp.A.outerSize(); ++col) {
+      for (Eigen::SparseMatrix<double>::InnerIterator it(lp.A, col); it; ++it) {
+        const int row = static_cast<int>(it.row());
+        if (row < known_rows || row >= known_rows + new_rows) continue;
+        rows[static_cast<std::size_t>(row - known_rows)].insertBack(col) =
+            it.value();
+      }
+    }
+    append_inequalities(rows);
+  }
+
+  Eigen::SparseMatrix<double, Eigen::RowMajor> inequalities;
+  Eigen::SparseMatrix<double, Eigen::RowMajor> equalities;
+  std::vector<Eigen::SparseVector<double>> appended_inequalities;
+};
 
 double gmi_binary_activity_score(const SimplexResult& simplex,
                                  const Eigen::VectorXd& x,
@@ -412,7 +554,7 @@ bool transformed_col_is_integer_like(
     }
 
     bool has_structural_coeff = false;
-    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(
+    for (StandardRowMatrix::InnerIterator it(
              simplex.form.A_row, row);
          it; ++it) {
       const int j = static_cast<int>(it.col());
@@ -695,7 +837,7 @@ void xtab_visit_source_row_terms(const StandardFormLP& sf,
   }
 
   const double row_scale_inv = 1.0 / xtab_row_scale_or_one(sf, row);
-  for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sf.A_row,
+  for (StandardRowMatrix::InnerIterator it(sf.A_row,
                                                                       row);
        it; ++it) {
     const int col = static_cast<int>(it.col());
@@ -1251,7 +1393,22 @@ void maybe_print_xtab_diag(const char* family, const XTabSourceDiag& diag) {
 }
 
 struct XTabCandidateCut {
-  Eigen::VectorXd coeff;
+  XTabCandidateCut(Eigen::VectorXd dense_coeff,
+                   double rhs_value,
+                   double score_value,
+                   double efficacy_value,
+                   double norm_value,
+                   int nnz_value,
+                   std::uint64_t trace_id = 0)
+      : coeff(dense_to_sparse_cut(dense_coeff)),
+        rhs(rhs_value),
+        score(score_value),
+        efficacy(efficacy_value),
+        norm(norm_value),
+        nnz(nnz_value),
+        source_trace_id(trace_id) {}
+
+  Eigen::SparseVector<double> coeff;
   double rhs{0.0};
   double score{0.0};
   double efficacy{0.0};
@@ -1261,7 +1418,7 @@ struct XTabCandidateCut {
 };
 
 PoolCut xtab_candidate_to_pool_cut(const XTabCandidateCut& cand) {
-  Eigen::SparseVector<double> sparse = dense_to_sparse_cut(cand.coeff);
+  Eigen::SparseVector<double> sparse = cand.coeff;
   const std::size_t hash = sparse_cut_hash(sparse);
   PoolCut cut{std::move(sparse), cand.rhs, 0, cand.efficacy, cand.norm, hash};
   cut.source_trace_id = cand.source_trace_id;
@@ -4062,16 +4219,19 @@ bool aggregate_standard_rows(const SimplexResult& simplex,
                              const std::vector<std::pair<int, double>>& rows,
                              Eigen::VectorXd& coeff,
                              double& rhs,
-                             std::vector<int>* active_cols = nullptr);
+                             std::vector<int>* active_cols = nullptr,
+                             SeparatorStorageStats* storage_stats = nullptr);
 double standard_row_max_abs(const SimplexResult& simplex, int row);
 
 struct XTabLpAggregator {
   XTabLpAggregator(const SimplexResult& simplex,
-                   const XTabSourceContext& source_context)
+                   const XTabSourceContext& source_context,
+                   SeparatorStorageStats* storage_stats = nullptr)
       : sf(simplex.form),
         ctx(source_context),
         sum(static_cast<std::size_t>(source_context.dim)),
-        touched_flag(static_cast<std::size_t>(source_context.dim), 0) {}
+        touched_flag(static_cast<std::size_t>(source_context.dim), 0),
+        storage_stats(storage_stats) {}
 
   void add_value(int col, double value) {
     if (col < 0 || col >= ctx.dim || value == 0.0) return;
@@ -4096,7 +4256,7 @@ struct XTabLpAggregator {
       return false;
     }
     const double row_scale_inv = 1.0 / xtab_row_scale_or_one(sf, row);
-    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(
+    for (StandardRowMatrix::InnerIterator it(
              sf.A_row, row);
          it; ++it) {
       const int col = static_cast<int>(it.col());
@@ -4119,6 +4279,7 @@ struct XTabLpAggregator {
                                double& rhs,
                                bool negate,
                                std::vector<int>* active_cols = nullptr) {
+    record_dense_workspace(storage_stats, sum.size());
     if (coeff.size() != static_cast<Eigen::Index>(sum.size())) {
       coeff.resize(static_cast<int>(sum.size()));
     }
@@ -4155,6 +4316,49 @@ struct XTabLpAggregator {
     return std::isfinite(rhs);
   }
 
+  bool get_current_aggregation(Eigen::SparseVector<double>& coeff,
+                               double& rhs,
+                               bool negate,
+                               std::vector<int>* active_cols = nullptr) {
+    if (active_cols != nullptr) active_cols->clear();
+    const double sign = negate ? -1.0 : 1.0;
+    rhs = 0.0;
+    constexpr double droptol = 1e-12;
+    int num_nz = static_cast<int>(touched.size());
+    for (int i = num_nz - 1; i >= 0; --i) {
+      const int col = touched[static_cast<std::size_t>(i)];
+      const double val = double(sum[static_cast<std::size_t>(col)]);
+      if (!std::isfinite(val)) return false;
+      const bool drop = col < ctx.n_original ? std::abs(val) <= droptol
+                                             : val == 0.0;
+      if (drop) {
+        sum[static_cast<std::size_t>(col)] = 0.0;
+        touched_flag[static_cast<std::size_t>(col)] = 0;
+        --num_nz;
+        std::swap(touched[static_cast<std::size_t>(num_nz)],
+                  touched[static_cast<std::size_t>(i)]);
+      }
+    }
+    touched.resize(static_cast<std::size_t>(num_nz));
+
+    std::vector<int> sorted_cols = touched;
+    std::sort(sorted_cols.begin(), sorted_cols.end());
+    coeff.resize(ctx.dim);
+    coeff.setZero();
+    coeff.reserve(static_cast<int>(sorted_cols.size()));
+    for (int col : sorted_cols) {
+      coeff.insertBack(col) =
+          sign * double(sum[static_cast<std::size_t>(col)]);
+    }
+    if (active_cols != nullptr) *active_cols = std::move(sorted_cols);
+    if (storage_stats != nullptr) {
+      ++storage_stats->sparse_aggregation_snapshots;
+      storage_stats->sparse_aggregation_entries +=
+          static_cast<std::uint64_t>(coeff.nonZeros());
+    }
+    return std::isfinite(rhs);
+  }
+
   void clear() {
     for (int col : touched) {
       sum[static_cast<std::size_t>(col)] = 0.0;
@@ -4168,10 +4372,11 @@ struct XTabLpAggregator {
   std::vector<HighsCDouble> sum;
   std::vector<int> touched;
   std::vector<unsigned char> touched_flag;
+  SeparatorStorageStats* storage_stats{nullptr};
 };
 
 struct XTabAggregatedSourceRow {
-  Eigen::VectorXd coeff;
+  Eigen::SparseVector<double> coeff;
   double rhs{0.0};
   std::vector<int> active_cols;
 };
@@ -4190,7 +4395,8 @@ bool xtab_generate_path_mixing_cut(
     double& efficacy_out,
     double cut_generation_feastol,
     XTabRejectReason* reject_reason = nullptr,
-    const char* trace_family = "pathmix") {
+    const char* trace_family = "pathmix",
+    SeparatorStorageStats* storage_stats = nullptr) {
   if (reject_reason != nullptr) *reject_reason = XTabRejectReason::None;
   if (vb_substitutions_out != nullptr) *vb_substitutions_out = 0;
   if (vb_trigger_terms_out != nullptr) *vb_trigger_terms_out = 0;
@@ -4236,17 +4442,20 @@ bool xtab_generate_path_mixing_cut(
 
   int source_row_index = 0;
   for (const auto& source_row : aggregated_path) {
+    const Eigen::VectorXd source_coeff = Eigen::VectorXd(source_row.coeff);
+    record_dense_workspace(storage_stats,
+                           static_cast<std::size_t>(source_coeff.size()));
     if (trace_row) {
       const std::string stage = fmt::format("path_base_{}", source_row_index);
       xtab_trace_source_row(trace_id, trace_family, stage.c_str(),
-                            source_row.coeff, source_row.rhs,
+                            source_coeff, source_row.rhs,
                             &source_row.active_cols);
     }
     XTabRow row;
     std::uint64_t vb_substitutions = 0;
     std::uint64_t vb_trigger_terms = 0;
     bool integers_positive = true;
-    if (!xtab_transform_base_row(simplex, source_context, source_row.coeff,
+    if (!xtab_transform_base_row(simplex, source_context, source_coeff,
                                  source_row.rhs, &source_row.active_cols,
                                  implied_integer_cols, transform_context,
                                  &vb_substitutions, &vb_trigger_terms,
@@ -4550,7 +4759,7 @@ bool xtab_generate_path_mixing_cut(
 double standard_row_max_abs(const SimplexResult& simplex, int row) {
   double max_abs = 0.0;
   const double row_scale_inv = 1.0 / xtab_row_scale_or_one(simplex.form, row);
-  for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(
+  for (StandardRowMatrix::InnerIterator it(
            simplex.form.A_row, row);
        it; ++it) {
     const int col = static_cast<int>(it.col());
@@ -4568,8 +4777,9 @@ bool aggregate_standard_rows(const SimplexResult& simplex,
                              const std::vector<std::pair<int, double>>& rows,
                              Eigen::VectorXd& coeff,
                              double& rhs,
-                             std::vector<int>* active_cols) {
-  XTabLpAggregator aggregator(simplex, source_context);
+                             std::vector<int>* active_cols,
+                             SeparatorStorageStats* storage_stats) {
+  XTabLpAggregator aggregator(simplex, source_context, storage_stats);
   for (const auto& [r, w] : rows) {
     if (!aggregator.add_row(r, w)) {
       return false;
@@ -4611,7 +4821,8 @@ int add_transformed_modk_cuts_impl(
     std::vector<PoolCut>* generated_cutpool_rows,
     double cut_generation_feastol,
     const std::function<int(PoolCut&&)>* cutpool_acceptor,
-    std::optional<std::uint64_t> highs_cutgen_seed) {
+    std::optional<std::uint64_t> highs_cutgen_seed,
+    SeparatorStorageStats* storage_stats) {
   const bool direct_cutpool_mode = cutpool_acceptor != nullptr;
   (void)lp;
   (void)opt;
@@ -4727,7 +4938,7 @@ int add_transformed_modk_cuts_impl(
         bound_distance[static_cast<std::size_t>(col)] == 0.0) {
       continue;
     }
-    for (Eigen::SparseMatrix<double>::InnerIterator it(simplex.form.A, col);
+    for (StandardColumnMatrix::InnerIterator it(simplex.form.A, col);
          it; ++it) {
       const int row = static_cast<int>(it.row());
       if (row < 0 || row >= m ||
@@ -4937,7 +5148,8 @@ int add_transformed_modk_cuts_impl(
 
   int accepted_rows = 0;
   std::set<std::vector<std::pair<int, int>>> used_weights;
-  XTabLpAggregator aggregator(simplex, source_context);
+  XTabLpAggregator aggregator(simplex, source_context, storage_stats);
+  SeparatorCandidateStorageTracker storage_tracker(storage_stats);
 
   auto found_cut = [&](auto& weights, int rhs_index, int k) {
     (void)rhs_index;
@@ -4997,11 +5209,14 @@ int add_transformed_modk_cuts_impl(
         return;
       }
       const int nnz = count_nonzeros(cut);
+      record_dense_workspace(storage_stats,
+                             static_cast<std::size_t>(cut.size()));
       const double norm = std::max(1e-12, cut.norm());
       if (cutpool_acceptor != nullptr) {
-        PoolCut row_cut = xtab_candidate_to_pool_cut(
-            XTabCandidateCut{std::move(cut), cut_rhs, efficacy, efficacy,
-                             norm, nnz});
+        XTabCandidateCut candidate{std::move(cut), cut_rhs, efficacy,
+                                  efficacy, norm, nnz};
+        storage_tracker.record_ephemeral(candidate.coeff);
+        PoolCut row_cut = xtab_candidate_to_pool_cut(candidate);
         const int added = (*cutpool_acceptor)(std::move(row_cut));
         ++ledger.pool_calls;
         if (added > 0) {
@@ -5011,9 +5226,11 @@ int add_transformed_modk_cuts_impl(
           ++diag.generated;
         }
       } else if (generated_cutpool_rows != nullptr) {
-        generated_cutpool_rows->push_back(xtab_candidate_to_pool_cut(
-            XTabCandidateCut{std::move(cut), cut_rhs, efficacy, efficacy,
-                             norm, nnz}));
+        XTabCandidateCut candidate{std::move(cut), cut_rhs, efficacy,
+                                  efficacy, norm, nnz};
+        storage_tracker.record_ephemeral(candidate.coeff);
+        generated_cutpool_rows->push_back(
+            xtab_candidate_to_pool_cut(candidate));
         ++accepted_rows;
         ++ledger.cutgen_success;
         ++diag.generated;
@@ -5082,67 +5299,79 @@ int add_transformed_modk_cuts_impl(
 int add_mir_like_cuts(LPModel& lp,
                       const Eigen::VectorXd& x,
                       CutType type,
-                      int max_cuts) {
+                      int max_cuts,
+                      SeparatorRowWorkspace& row_workspace,
+                      SeparatorStorageStats* storage_stats) {
   int added = 0;
   const int n = static_cast<int>(lp.vars.size());
 
-  std::vector<Eigen::VectorXd> cut_rows;
+  std::vector<Eigen::SparseVector<double>> cut_rows;
   std::vector<double> cut_rhs;
-
-  for (int r = 0; r < lp.A.rows() && added < max_cuts; ++r) {
+  SeparatorCandidateStorageTracker storage_tracker(storage_stats);
+  for (int r = 0; r < row_workspace.inequality_rows() && added < max_cuts;
+       ++r) {
     const double frac_rhs = frac_part(lp.b[r]);
     if (frac_rhs <= 1e-8) {
       continue;
     }
 
-    Eigen::VectorXd cut = Eigen::VectorXd::Zero(n);
+    std::vector<std::pair<int, double>> terms;
     bool has_int = false;
-    for (int j = 0; j < n; ++j) {
-      const double a = lp.A.coeff(r, j);
+    double lhs = 0.0;
+    row_workspace.visit_inequality_row(r, [&](int j, double a) {
       if (std::abs(a) <= 1e-12 || !is_integer_type(lp.vars[j])) {
-        continue;
+        return;
       }
       has_int = true;
       const double fj = frac_part(a);
       if (fj <= 1e-12) {
-        continue;
+        return;
       }
+      double coeff = 0.0;
       if (type == CutType::IntRounding) {
-        cut[j] = -fj;
+        coeff = -fj;
       } else {
         const double lb = lp.vars[j].lb;
         const double ub = lp.vars[j].ub;
         if (std::isfinite(lb) && std::isfinite(ub) && ub > lb + 1e-9) {
-          cut[j] = -fj / (ub - lb);
+          coeff = -fj / (ub - lb);
         } else {
-          cut[j] = -fj;
+          coeff = -fj;
         }
       }
-    }
+      terms.emplace_back(j, coeff);
+      lhs += coeff * x[j];
+    });
 
-    if (!has_int) {
+    if (!has_int || terms.empty()) {
       continue;
     }
     const double rhs = -frac_rhs;
-    const double viol = cut.dot(x) - rhs;
+    const double viol = lhs - rhs;
     if (viol <= 1e-7) {
       continue;
     }
 
+    Eigen::SparseVector<double> cut(n);
+    cut.reserve(static_cast<int>(terms.size()));
+    for (const auto& [col, value] : terms) cut.insertBack(col) = value;
     cut_rows.push_back(std::move(cut));
+    storage_tracker.record(cut_rows.back(), cut_rows.size());
     cut_rhs.push_back(rhs);
     ++added;
   }
 
   if (!cut_rows.empty()) {
-    add_rows_to_lp(lp, cut_rows, cut_rhs);
+    add_sparse_rows_to_lp(lp, cut_rows, cut_rhs, storage_stats);
   }
   return added;
 }
 
 int add_cover_cuts(LPModel& lp,
                    const Eigen::VectorXd& x,
-                   int max_cuts) {
+                   int max_cuts,
+                   SeparatorRowWorkspace& row_workspace,
+                   SeparatorStorageStats* storage_stats) {
   if (max_cuts <= 0) {
     return 0;
   }
@@ -5150,13 +5379,12 @@ int add_cover_cuts(LPModel& lp,
   int added = 0;
   const int n = static_cast<int>(lp.vars.size());
 
-  std::vector<Eigen::VectorXd> cut_rows;
+  std::vector<Eigen::SparseVector<double>> cut_rows;
   std::vector<double> cut_rhs;
+  SeparatorCandidateStorageTracker storage_tracker(storage_stats);
 
-  // Build row-major view once to avoid O(nnz) per column access in scans.
-  Eigen::SparseMatrix<double, Eigen::RowMajor> A_row_cover = lp.A;
-
-  for (int r = 0; r < lp.A.rows() && added < max_cuts; ++r) {
+  for (int r = 0; r < row_workspace.inequality_rows() && added < max_cuts;
+       ++r) {
     if (lp.b[r] <= 0.0) {
       continue;
     }
@@ -5166,20 +5394,18 @@ int add_cover_cuts(LPModel& lp,
     std::vector<double> cand_coeff;  // parallel to cand, cached coefficients
     cand_coeff.reserve(static_cast<size_t>(n));
     bool valid_row = true;
-    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_row_cover, r); it; ++it) {
-      const double a = it.value();
+    row_workspace.visit_inequality_row(r, [&](int j, double a) {
       if (std::abs(a) <= 1e-12) {
-        continue;
+        return;
       }
-      const int j = static_cast<int>(it.col());
-      if (j < 0 || j >= n) { valid_row = false; break; }
+      if (j < 0 || j >= n) { valid_row = false; return; }
       if (a < 0.0 || lp.vars[j].type != VarType::Binary) {
         valid_row = false;
-        break;
+        return;
       }
       cand.push_back(j);
       cand_coeff.push_back(a);
-    }
+    });
 
     if (!valid_row || cand.size() < 2) {
       continue;
@@ -5216,24 +5442,116 @@ int add_cover_cuts(LPModel& lp,
     }
 
     const int cover_size = static_cast<int>(cover.size());
-    Eigen::VectorXd cut = Eigen::VectorXd::Zero(n);
-    for (int j : cover) cut[j] = 1.0;
     double rhs = static_cast<double>(cover_size) - 1.0;
 
-    const double viol = cut.dot(x) - rhs;
+    double lhs = 0.0;
+    for (int j : cover) lhs += x[j];
+    const double viol = lhs - rhs;
     if (viol <= 1e-7) {
       continue;
     }
 
-    cut_rows.push_back(std::move(cut));
+    cut_rows.push_back(sparse_indicator_cut(n, std::move(cover)));
+    storage_tracker.record(cut_rows.back(), cut_rows.size());
     cut_rhs.push_back(rhs);
     ++added;
   }
 
   if (!cut_rows.empty()) {
-    add_rows_to_lp(lp, cut_rows, cut_rhs);
+    add_sparse_rows_to_lp(lp, cut_rows, cut_rhs, storage_stats);
   }
   return added;
+}
+
+struct SparseMIRCandidate {
+  Eigen::SparseVector<double> coeff;
+  double rhs{0.0};
+  double violation{0.0};
+  double norm{0.0};
+};
+
+bool build_sparse_complemented_mir(
+    const std::vector<VariableMeta>& vars,
+    const Eigen::VectorXd& x,
+    const std::vector<std::pair<int, double>>& row_terms,
+    double row_rhs,
+    SparseMIRCandidate& candidate) {
+  const int n = static_cast<int>(vars.size());
+  if (x.size() < n || !std::isfinite(row_rhs)) return false;
+
+  bool has_integer = false;
+  double complemented_rhs = row_rhs;
+  std::vector<unsigned char> complemented(row_terms.size(), 0);
+  for (std::size_t k = 0; k < row_terms.size(); ++k) {
+    const int col = row_terms[k].first;
+    const double value = row_terms[k].second;
+    if (col < 0 || col >= n || !std::isfinite(value) ||
+        std::abs(value) <= 1e-12) {
+      continue;
+    }
+    if (!is_integer_type(vars[static_cast<std::size_t>(col)])) continue;
+    has_integer = true;
+    const double lb = vars[static_cast<std::size_t>(col)].lb;
+    const double ub = vars[static_cast<std::size_t>(col)].ub;
+    if (std::isfinite(lb) && std::isfinite(ub) &&
+        x[col] > 0.5 * (lb + ub)) {
+      complemented[k] = 1;
+      complemented_rhs -= value * ub;
+    }
+  }
+  if (!has_integer) return false;
+
+  const double f0 = frac_part(complemented_rhs);
+  if (f0 <= 1e-8 || f0 >= 1.0 - 1e-8) return false;
+
+  std::vector<std::pair<int, double>> cut_terms;
+  cut_terms.reserve(row_terms.size());
+  double rhs = std::floor(complemented_rhs);
+  double lhs = 0.0;
+  double norm_sq = 0.0;
+  for (std::size_t k = 0; k < row_terms.size(); ++k) {
+    const int col = row_terms[k].first;
+    if (col < 0 || col >= n) continue;
+    double value = row_terms[k].second;
+    if (!std::isfinite(value) || std::abs(value) <= 1e-12) continue;
+    if (complemented[k] != 0) value = -value;
+
+    double mir_value = 0.0;
+    if (is_integer_type(vars[static_cast<std::size_t>(col)])) {
+      const double fj = frac_part(value);
+      mir_value = fj <= f0 + 1e-10
+                      ? std::floor(value)
+                      : std::floor(value) + (fj - f0) / (1.0 - f0);
+    } else if (value < 0.0) {
+      mir_value = value / (1.0 - f0);
+    }
+    if (std::abs(mir_value) <= 1e-12) continue;
+
+    double original_value = mir_value;
+    if (complemented[k] != 0) {
+      original_value = -mir_value;
+      rhs -= mir_value * vars[static_cast<std::size_t>(col)].ub;
+    }
+    cut_terms.emplace_back(col, original_value);
+    lhs += original_value * x[col];
+    norm_sq += original_value * original_value;
+  }
+  if (cut_terms.empty() || norm_sq <= 1e-24) return false;
+
+  const double violation = lhs - rhs;
+  if (violation <= 1e-7 || !std::isfinite(violation) ||
+      !std::isfinite(rhs)) {
+    return false;
+  }
+
+  Eigen::SparseVector<double> cut(n);
+  cut.reserve(static_cast<int>(cut_terms.size()));
+  for (const auto& [col, value] : cut_terms) cut.insertBack(col) = value;
+  candidate.coeff = std::move(cut);
+  candidate.rhs = rhs;
+  candidate.violation = violation;
+  candidate.norm = std::sqrt(norm_sq);
+  return true;
 }
 
 int add_basis_mir_cuts(LPModel& lp,
@@ -5241,7 +5559,9 @@ int add_basis_mir_cuts(LPModel& lp,
                        [[maybe_unused]] const SimplexResult& simplex,
                        [[maybe_unused]] const BCOptions& opt,
                        int max_cuts,
-                       [[maybe_unused]] const std::shared_ptr<BasisOps>& sbasis) {
+                       [[maybe_unused]] const std::shared_ptr<BasisOps>& sbasis,
+                       SeparatorRowWorkspace& row_workspace,
+                       SeparatorStorageStats* storage_stats) {
   // True single-row complemented MIR cuts.
   // For each inequality row: sum_j a_j x_j <= b
   //   Separate integer vars I and continuous vars C.
@@ -5255,147 +5575,52 @@ int add_basis_mir_cuts(LPModel& lp,
   }
 
   const int n = static_cast<int>(lp.vars.size());
-  const int m_ineq = static_cast<int>(lp.A.rows());
-  const int m_eq = static_cast<int>(lp.Aeq.rows());
+  const int m_ineq = row_workspace.inequality_rows();
+  const int m_eq = row_workspace.equality_rows();
 
-  struct MIRCandidate {
-    Eigen::VectorXd coeff;
-    double rhs;
-    double violation;
-    double norm;
-  };
-  std::vector<MIRCandidate> candidates;
+  std::vector<SparseMIRCandidate> candidates;
+  SeparatorCandidateStorageTracker storage_tracker(storage_stats);
   candidates.reserve(static_cast<size_t>(std::min(m_ineq + m_eq, max_cuts * 4)));
 
-  // Build RowMajor views once to avoid O(n log nnz) coeff() lookups per row.
-  Eigen::SparseMatrix<double, Eigen::RowMajor> A_mir_row = lp.A;
-  Eigen::SparseMatrix<double, Eigen::RowMajor> Aeq_mir_row = lp.Aeq;
-
   auto try_mir_row = [&](auto&& visit_nonzeros, double b_val, int /*row_idx*/) {
-    // Collect row coefficients via RowMajor InnerIterator (O(nnz), not O(n log nnz)).
-    Eigen::VectorXd a = Eigen::VectorXd::Zero(n);
-    bool has_integer = false;
-    [[maybe_unused]] bool has_continuous = false;
+    std::vector<std::pair<int, double>> row_terms;
     visit_nonzeros([&](int j, double val) {
       if (j >= 0 && j < n && std::abs(val) > 1e-12) {
-        a[j] = val;
-        if (is_integer_type(lp.vars[j])) {
-          has_integer = true;
-        } else {
-          has_continuous = true;
-        }
+        row_terms.emplace_back(j, val);
       }
     });
-    if (!has_integer) return;  // pure continuous row - no MIR possible
-
-    // Try complementing integer vars near upper bound
-    Eigen::VectorXd a_comp = a;
-    double b_comp = b_val;
-    for (int j = 0; j < n; ++j) {
-      if (std::abs(a[j]) <= 1e-12 || !is_integer_type(lp.vars[j])) continue;
-      double ub = lp.vars[j].ub;
-      if (!std::isfinite(ub)) continue;
-      // Complement if x_j closer to ub than lb.
-      // Guard against infinite lb: if lb is -inf, always treat as closer to lb
-      // (no complementation), since the midpoint is undefined.
-      double lb = lp.vars[j].lb;
-      if (!std::isfinite(lb)) continue;
-      double mid = (lb + ub) * 0.5;
-      if (x[j] > mid) {
-        // Replace x_j with (ub - x'_j): a_j*x_j = a_j*ub - a_j*x'_j
-        a_comp[j] = -a[j];
-        b_comp -= a[j] * ub;
-      }
+    SparseMIRCandidate candidate;
+    if (!build_sparse_complemented_mir(lp.vars, x, row_terms, b_val,
+                                       candidate)) {
+      return;
     }
-
-    double f0 = frac_part(b_comp);
-    if (f0 <= 1e-8 || f0 >= 1.0 - 1e-8) return;
-
-    // Build MIR cut: sum mir_j * x'_j <= floor(b')
-    Eigen::VectorXd mir = Eigen::VectorXd::Zero(n);
-    double mir_rhs = std::floor(b_comp);
-    bool has_term = false;
-
-    for (int j = 0; j < n; ++j) {
-      double aj = a_comp[j];
-      if (std::abs(aj) <= 1e-12) continue;
-
-      if (is_integer_type(lp.vars[j])) {
-        double fj = frac_part(aj);
-        if (fj <= f0 + 1e-10) {
-          mir[j] = std::floor(aj);
-        } else {
-          mir[j] = std::floor(aj) + (fj - f0) / (1.0 - f0);
-        }
-      } else {
-        // Continuous: a_j > 0 → 0 (absorbed into slack),
-        //             a_j < 0 → a_j/(1-f0) (strengthened in MIR)
-        if (aj < 0) {
-          mir[j] = aj / (1.0 - f0);
-        } else {
-          mir[j] = 0.0;  // Absorbed into non-negative slack
-        }
-      }
-      if (std::abs(mir[j]) > 1e-12) has_term = true;
-    }
-    if (!has_term) return;
-
-    // Un-complement: convert back to original variables
-    Eigen::VectorXd cut_orig = Eigen::VectorXd::Zero(n);
-    double rhs_orig = mir_rhs;
-    for (int j = 0; j < n; ++j) {
-      if (std::abs(mir[j]) <= 1e-12) continue;
-      bool complemented = (is_integer_type(lp.vars[j]) &&
-                           std::isfinite(lp.vars[j].ub) &&
-                           std::isfinite(lp.vars[j].lb) &&
-                           x[j] > (lp.vars[j].lb + lp.vars[j].ub) * 0.5);
-      if (complemented) {
-        // mir_j * x'_j = mir_j * (ub - x_j) = -mir_j * x_j + mir_j * ub
-        cut_orig[j] = -mir[j];
-        rhs_orig -= mir[j] * lp.vars[j].ub;
-      } else {
-        cut_orig[j] = mir[j];
-      }
-    }
-
-    // Check violation of original (<=) form
-    double lhs = cut_orig.dot(x);
-    double violation = lhs - rhs_orig;
-    if (violation <= 1e-7) return;
-
-    double norm = cut_orig.norm();
-    if (norm < 1e-12) return;
-    double efficacy = violation / norm;
+    const double efficacy = candidate.violation / candidate.norm;
     if (efficacy < 5e-4) return;
 
-    // Density filter — P6.3: scale cap down for large problems
-    int nnz = 0;
-    for (int j = 0; j < n; ++j) {
-      if (std::abs(cut_orig[j]) > 1e-12) ++nnz;
-    }
+    // Scale the density cap down for large problems.
+    const int nnz = static_cast<int>(candidate.coeff.nonZeros());
     const double mir_density_cap = (n > 20000) ? 0.10 : (n > 10000) ? 0.30 : 0.60;
     if (n > 0 && static_cast<double>(nnz) / n > mir_density_cap) return;
 
-    candidates.push_back({std::move(cut_orig), rhs_orig, violation, norm});
+    candidates.push_back(std::move(candidate));
+    storage_tracker.record(candidates.back().coeff, candidates.size());
   };
 
   // Process inequality rows
   for (int r = 0; r < m_ineq; ++r) {
     try_mir_row([&](auto&& f) {
-      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_mir_row, r); it; ++it)
-        f(static_cast<int>(it.col()), it.value());
+      row_workspace.visit_inequality_row(r, f);
     }, lp.b[r], r);
   }
   // Process equality rows as two inequalities (relaxed as <=)
   for (int r = 0; r < m_eq; ++r) {
     try_mir_row([&](auto&& f) {
-      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Aeq_mir_row, r); it; ++it)
-        f(static_cast<int>(it.col()), it.value());
+      row_workspace.visit_equality_row(r, f);
     }, lp.beq[r], m_ineq + r);
     // Also try negated form
     try_mir_row([&](auto&& f) {
-      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Aeq_mir_row, r); it; ++it)
-        f(static_cast<int>(it.col()), -it.value());
+      row_workspace.visit_equality_row(
+          r, [&](int col, double value) { f(col, -value); });
     }, -lp.beq[r], m_ineq + m_eq + r);
   }
 
@@ -5403,42 +5628,49 @@ int add_basis_mir_cuts(LPModel& lp,
 
   // Sort by violation (efficacy) and select diverse cuts
   std::sort(candidates.begin(), candidates.end(),
-            [](const MIRCandidate& a, const MIRCandidate& b) {
+            [](const SparseMIRCandidate& a, const SparseMIRCandidate& b) {
               return a.violation > b.violation;
             });
 
   int added = 0;
-  std::vector<Eigen::VectorXd> cut_rows;
+  std::vector<Eigen::SparseVector<double>> cut_rows;
   std::vector<double> cut_rhs;
   std::vector<double> cut_norms;
 
   for (const auto& cand : candidates) {
     if (added >= max_cuts) break;
     // Parallelism filter against already selected
-    // P2.2: Use stricter threshold (0.9) for better orthogonality.
+    // Use the configured parallelism threshold to preserve orthogonality.
     bool parallel = false;
     for (size_t si = 0; si < cut_rows.size(); ++si) {
-      double cos_val = std::abs(cand.coeff.dot(cut_rows[si])) / (cand.norm * cut_norms[si]);
+      double cos_val =
+          std::abs(sparse_sparse_dot(cand.coeff, cut_rows[si])) /
+          (cand.norm * cut_norms[si]);
       if (cos_val > 0.90) { parallel = true; break; }
     }
     if (parallel) continue;
 
-    cut_norms.push_back(cand.coeff.norm());
+    cut_norms.push_back(cand.norm);
     cut_rows.push_back(cand.coeff);
     cut_rhs.push_back(cand.rhs);
     ++added;
   }
 
   if (!cut_rows.empty()) {
-    add_rows_to_lp(lp, cut_rows, cut_rhs);
+    add_sparse_rows_to_lp(lp, cut_rows, cut_rhs, storage_stats);
   }
   return added;
 }
 
 int add_projected_capacity_cover_cuts(LPModel& lp,
                                       const Eigen::VectorXd& x,
-                                      int max_cuts) {
-  if (max_cuts <= 0 || lp.Aeq.rows() == 0 || lp.A.rows() == 0) return 0;
+                                      int max_cuts,
+                                      SeparatorRowWorkspace& row_workspace,
+                                      SeparatorStorageStats* storage_stats) {
+  if (max_cuts <= 0 || row_workspace.equality_rows() == 0 ||
+      row_workspace.inequality_rows() == 0) {
+    return 0;
+  }
   const int n = static_cast<int>(lp.vars.size());
   if (x.size() < n) return 0;
 
@@ -5448,26 +5680,24 @@ int add_projected_capacity_cover_cuts(LPModel& lp,
   };
   std::vector<Link> vub(static_cast<std::size_t>(n));
 
-  Eigen::SparseMatrix<double, Eigen::RowMajor> A_row = lp.A;
-  for (int r = 0; r < A_row.rows(); ++r) {
+  for (int r = 0; r < row_workspace.inequality_rows(); ++r) {
     int cont = -1;
     int bin = -1;
     double a_cont = 0.0;
     double a_bin = 0.0;
     int nnz = 0;
-    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_row, r); it; ++it) {
-      if (std::abs(it.value()) <= 1e-12) continue;
+    row_workspace.visit_inequality_row(r, [&](int j, double value) {
+      if (std::abs(value) <= 1e-12) return;
       ++nnz;
-      const int j = static_cast<int>(it.col());
-      if (j < 0 || j >= n) continue;
-      if (!is_integer_type(lp.vars[j]) && it.value() > 0.0) {
+      if (j < 0 || j >= n) return;
+      if (!is_integer_type(lp.vars[j]) && value > 0.0) {
         cont = j;
-        a_cont = it.value();
-      } else if (lp.vars[j].type == VarType::Binary && it.value() < 0.0) {
+        a_cont = value;
+      } else if (lp.vars[j].type == VarType::Binary && value < 0.0) {
         bin = j;
-        a_bin = it.value();
+        a_bin = value;
       }
-    }
+    });
     if (nnz == 2 && cont >= 0 && bin >= 0 && a_cont > 1e-12 &&
         a_bin < -1e-12 && std::abs(lp.b[r]) <= 1e-8) {
       const double ub = -a_bin / a_cont;
@@ -5483,40 +5713,40 @@ int add_projected_capacity_cover_cuts(LPModel& lp,
     double value;
   };
 
-  Eigen::SparseMatrix<double, Eigen::RowMajor> Aeq_row = lp.Aeq;
-  std::vector<Eigen::VectorXd> rows;
+  std::vector<Eigen::SparseVector<double>> rows;
   std::vector<double> rhs;
+  SeparatorCandidateStorageTracker storage_tracker(storage_stats);
   rows.reserve(static_cast<std::size_t>(max_cuts));
   rhs.reserve(static_cast<std::size_t>(max_cuts));
 
-  for (int r = 0; r < Aeq_row.rows() && static_cast<int>(rows.size()) < max_cuts; ++r) {
+  for (int r = 0; r < row_workspace.equality_rows() &&
+                  static_cast<int>(rows.size()) < max_cuts;
+       ++r) {
     const double demand = lp.beq[r];
     if (!(demand > 1e-9) || !std::isfinite(demand)) continue;
 
     bool usable = true;
     std::vector<Item> items;
     double total_cap = 0.0;
-    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Aeq_row, r); it; ++it) {
-      const int j = static_cast<int>(it.col());
-      const double a = it.value();
-      if (j < 0 || j >= n || std::abs(a) <= 1e-12) continue;
+    row_workspace.visit_equality_row(r, [&](int j, double a) {
+      if (!usable || j < 0 || j >= n || std::abs(a) <= 1e-12) return;
       if (a <= 0.0 || is_integer_type(lp.vars[j])) {
         usable = false;
-        break;
+        return;
       }
       const Link link = vub[static_cast<std::size_t>(j)];
       if (link.bin < 0) {
         usable = false;
-        break;
+        return;
       }
       const double cap = a * link.ub;
       if (!(cap > 1e-9) || !std::isfinite(cap)) {
         usable = false;
-        break;
+        return;
       }
       items.push_back(Item{link.bin, cap, x[link.bin]});
       total_cap += cap;
-    }
+    });
     if (!usable || items.size() < 2 || total_cap <= demand + 1e-8) continue;
 
     {
@@ -5538,9 +5768,11 @@ int add_projected_capacity_cover_cuts(LPModel& lp,
       if (cap_prefix + 1e-8 >= demand && min_count > 0 &&
           activity < static_cast<double>(min_count) - 1e-7 &&
           static_cast<int>(rows.size()) < max_cuts) {
-        Eigen::VectorXd cut = Eigen::VectorXd::Zero(n);
-        for (const auto& item : items) cut[item.bin] = -1.0;
-        rows.push_back(std::move(cut));
+        std::vector<int> indices;
+        indices.reserve(items.size());
+        for (const auto& item : items) indices.push_back(item.bin);
+        rows.push_back(sparse_indicator_cut(n, std::move(indices), -1.0));
+        storage_tracker.record(rows.back(), rows.size());
         rhs.push_back(-static_cast<double>(min_count));
       }
     }
@@ -5577,123 +5809,73 @@ int add_projected_capacity_cover_cuts(LPModel& lp,
       cover_bins.erase(std::unique(cover_bins.begin(), cover_bins.end()), cover_bins.end());
       if (cover_bins.empty()) continue;
 
-      Eigen::VectorXd cut = Eigen::VectorXd::Zero(n);
-      for (int j : cover_bins) cut[j] = -1.0;
-      rows.push_back(std::move(cut));
+      rows.push_back(sparse_indicator_cut(n, std::move(cover_bins), -1.0));
+      storage_tracker.record(rows.back(), rows.size());
       rhs.push_back(-1.0);
     }
   }
 
   if (!rows.empty()) {
-    add_rows_to_lp(lp, rows, rhs);
+    add_sparse_rows_to_lp(lp, rows, rhs, storage_stats);
   }
   return static_cast<int>(rows.size());
 }
 
 /// Basis-free MIR cuts that work without simplex basis (e.g., after IPM root).
 /// Applies single-row complemented MIR directly to LP constraints.
-int add_row_mir_cuts(LPModel& lp, const Eigen::VectorXd& x, int max_cuts) {
+int add_row_mir_cuts(LPModel& lp,
+                     const Eigen::VectorXd& x,
+                     int max_cuts,
+                     SeparatorRowWorkspace& row_workspace,
+                     SeparatorStorageStats* storage_stats) {
   if (max_cuts <= 0) return 0;
 
   const int n = static_cast<int>(lp.vars.size());
-  const int m_ineq = static_cast<int>(lp.A.rows());
-  const int m_eq = static_cast<int>(lp.Aeq.rows());
+  const int m_ineq = row_workspace.inequality_rows();
+  const int m_eq = row_workspace.equality_rows();
 
-  struct MIRCand {
-    Eigen::VectorXd coeff;
-    double rhs;
-    double violation;
-  };
-  std::vector<MIRCand> candidates;
-
-  // Build RowMajor views once to avoid O(n log nnz) coeff() lookups per row.
-  Eigen::SparseMatrix<double, Eigen::RowMajor> A_row_mir = lp.A;
-  Eigen::SparseMatrix<double, Eigen::RowMajor> Aeq_row_mir = lp.Aeq;
+  std::vector<SparseMIRCandidate> candidates;
+  SeparatorCandidateStorageTracker storage_tracker(storage_stats);
 
   auto try_row = [&](auto&& visit_nonzeros, double b_val) {
-    Eigen::VectorXd a = Eigen::VectorXd::Zero(n);
-    bool has_int = false;
+    std::vector<std::pair<int, double>> row_terms;
     visit_nonzeros([&](int j, double val) {
       if (j >= 0 && j < n && std::abs(val) > 1e-12) {
-        a[j] = val;
-        if (is_integer_type(lp.vars[j])) has_int = true;
+        row_terms.emplace_back(j, val);
       }
     });
-    if (!has_int) return;
-
-    // Complement integer vars near upper bound
-    Eigen::VectorXd ac = a;
-    double bc = b_val;
-    for (int j = 0; j < n; ++j) {
-      if (std::abs(a[j]) <= 1e-12 || !is_integer_type(lp.vars[j])) continue;
-      double ub = lp.vars[j].ub;
-      if (!std::isfinite(ub)) continue;
-      if (!std::isfinite(lp.vars[j].lb)) continue;
-      if (x[j] > (lp.vars[j].lb + ub) * 0.5) {
-        ac[j] = -a[j];
-        bc -= a[j] * ub;
-      }
+    SparseMIRCandidate candidate;
+    if (build_sparse_complemented_mir(lp.vars, x, row_terms, b_val,
+                                      candidate)) {
+      candidates.push_back(std::move(candidate));
+      storage_tracker.record(candidates.back().coeff, candidates.size());
     }
-
-    double f0 = frac_part(bc);
-    if (f0 <= 1e-8 || f0 >= 1.0 - 1e-8) return;
-
-    Eigen::VectorXd mir = Eigen::VectorXd::Zero(n);
-    double mir_rhs = std::floor(bc);
-    bool has_term = false;
-    for (int j = 0; j < n; ++j) {
-      if (std::abs(ac[j]) <= 1e-12) continue;
-      if (is_integer_type(lp.vars[j])) {
-        double fj = frac_part(ac[j]);
-        mir[j] = (fj <= f0 + 1e-10) ? std::floor(ac[j]) : (std::floor(ac[j]) + (fj - f0) / (1.0 - f0));
-      } else {
-        // Continuous: a < 0 → a/(1-f0) (strengthened), a > 0 → 0 (absorbed into slack)
-        mir[j] = (ac[j] < 0) ? ac[j] / (1.0 - f0) : 0.0;
-      }
-      if (std::abs(mir[j]) > 1e-12) has_term = true;
-    }
-    if (!has_term) return;
-
-    // Un-complement
-    Eigen::VectorXd cut = Eigen::VectorXd::Zero(n);
-    double rhs = mir_rhs;
-    for (int j = 0; j < n; ++j) {
-      if (std::abs(mir[j]) <= 1e-12) continue;
-      bool comp = (is_integer_type(lp.vars[j]) && std::isfinite(lp.vars[j].ub) &&
-                   std::isfinite(lp.vars[j].lb) &&
-                   x[j] > (lp.vars[j].lb + lp.vars[j].ub) * 0.5);
-      if (comp) { cut[j] = -mir[j]; rhs -= mir[j] * lp.vars[j].ub; }
-      else { cut[j] = mir[j]; }
-    }
-
-    double viol = cut.dot(x) - rhs;
-    if (viol <= 1e-7 || cut.norm() < 1e-12) return;
-    candidates.push_back({std::move(cut), rhs, viol});
   };
 
   for (int r = 0; r < m_ineq; ++r) {
     try_row([&](auto&& f) {
-      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_row_mir, r); it; ++it)
-        f(static_cast<int>(it.col()), it.value());
+      row_workspace.visit_inequality_row(r, f);
     }, lp.b[r]);
   }
   for (int r = 0; r < m_eq; ++r) {
     try_row([&](auto&& f) {
-      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Aeq_row_mir, r); it; ++it)
-        f(static_cast<int>(it.col()), it.value());
+      row_workspace.visit_equality_row(r, f);
     }, lp.beq[r]);
     try_row([&](auto&& f) {
-      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Aeq_row_mir, r); it; ++it)
-        f(static_cast<int>(it.col()), -it.value());
+      row_workspace.visit_equality_row(
+          r, [&](int col, double value) { f(col, -value); });
     }, -lp.beq[r]);
   }
 
   if (candidates.empty()) return 0;
   std::sort(candidates.begin(), candidates.end(),
-            [](const MIRCand& a, const MIRCand& b) { return a.violation > b.violation; });
+            [](const SparseMIRCandidate& a,
+               const SparseMIRCandidate& b) {
+              return a.violation > b.violation;
+            });
 
   int added = 0;
-  std::vector<Eigen::VectorXd> rows;
+  std::vector<Eigen::SparseVector<double>> rows;
   std::vector<double> rhs_vec;
   for (const auto& c : candidates) {
     if (added >= max_cuts) break;
@@ -5701,7 +5883,9 @@ int add_row_mir_cuts(LPModel& lp, const Eigen::VectorXd& x, int max_cuts) {
     rhs_vec.push_back(c.rhs);
     ++added;
   }
-  if (!rows.empty()) add_rows_to_lp(lp, rows, rhs_vec);
+  if (!rows.empty()) {
+    add_sparse_rows_to_lp(lp, rows, rhs_vec, storage_stats);
+  }
   return added;
 }
 
@@ -5718,11 +5902,12 @@ int add_transformed_modk_cuts(
     std::vector<PoolCut>* generated_cutpool_rows,
     double cut_generation_feastol,
     const std::function<int(PoolCut&&)>* cutpool_acceptor,
-    std::optional<std::uint64_t> highs_cutgen_seed) {
+    std::optional<std::uint64_t> highs_cutgen_seed,
+    SeparatorStorageStats* storage_stats) {
   return add_transformed_modk_cuts_impl(
       lp, x, simplex, opt, implied_integer_cols, implication_graph,
       variable_bound_table, generated_cutpool_rows, cut_generation_feastol,
-      cutpool_acceptor, highs_cutgen_seed);
+      cutpool_acceptor, highs_cutgen_seed, storage_stats);
 }
 
 int add_basis_gomory_cuts(LPModel& lp,
@@ -5730,7 +5915,8 @@ int add_basis_gomory_cuts(LPModel& lp,
                           const SimplexResult& simplex,
                           const BCOptions& opt,
                           int max_cuts,
-                          const std::shared_ptr<BasisOps>& sbasis) {
+                          const std::shared_ptr<BasisOps>& sbasis,
+                          SeparatorStorageStats* storage_stats) {
   if (max_cuts <= 0 || !simplex.exact_optimal) {
     return 0;
   }
@@ -5744,7 +5930,7 @@ int add_basis_gomory_cuts(LPModel& lp,
   }
 
   struct CandidateCut {
-    Eigen::VectorXd coeff;
+    Eigen::SparseVector<double> coeff;
     double rhs{0.0};
     double score{0.0};
     double efficacy{0.0};
@@ -5762,6 +5948,7 @@ int add_basis_gomory_cuts(LPModel& lp,
   const double activity_weight = std::max(0.0, opt.gmi_activity_weight);
 
   std::vector<CandidateCut> candidates;
+  SeparatorCandidateStorageTracker storage_tracker(storage_stats);
   candidates.reserve(static_cast<size_t>(max_cuts * 3));
 
   // Pre-filter: identify fractional integer basis rows and sort by
@@ -5807,6 +5994,8 @@ int add_basis_gomory_cuts(LPModel& lp,
     if (!build_bounded_form_gmi_cut(simplex, fr.row, cut, rhs, sbasis, is_basic_ptr)) {
       continue;
     }
+    record_dense_workspace(storage_stats,
+                           static_cast<std::size_t>(cut.size()));
     const double viol = cut.dot(x) - rhs;
     if (viol <= 1e-7) {
       continue;
@@ -5834,7 +6023,9 @@ int add_basis_gomory_cuts(LPModel& lp,
     }
 
     const double score = efficacy * (1.0 + activity_weight * activity);
-    candidates.push_back(CandidateCut{cut, rhs, score, efficacy, activity, norm, nnz});
+    candidates.push_back(CandidateCut{dense_to_sparse_cut(cut), rhs, score,
+                                      efficacy, activity, norm, nnz});
+    storage_tracker.record(candidates.back().coeff, candidates.size());
 
   }
 
@@ -5870,7 +6061,7 @@ int add_basis_gomory_cuts(LPModel& lp,
   }
 
   if (!selected.empty()) {
-    std::vector<Eigen::VectorXd> cut_rows;
+    std::vector<Eigen::SparseVector<double>> cut_rows;
     std::vector<double> cut_rhs;
     cut_rows.reserve(selected.size());
     cut_rhs.reserve(selected.size());
@@ -5878,7 +6069,7 @@ int add_basis_gomory_cuts(LPModel& lp,
       cut_rows.push_back(s.coeff);
       cut_rhs.push_back(s.rhs);
     }
-    add_rows_to_lp(lp, cut_rows, cut_rhs);
+    add_sparse_rows_to_lp(lp, cut_rows, cut_rhs, storage_stats);
   }
 
   return added;
@@ -5897,7 +6088,8 @@ int add_transformed_tableau_cuts(
 	    std::vector<PoolCut>* generated_cutpool_rows,
 	    double cut_generation_feastol,
 	    const std::function<int(PoolCut&&)>* cutpool_acceptor,
-	    std::optional<std::uint64_t> highs_cutgen_seed) {
+	    std::optional<std::uint64_t> highs_cutgen_seed,
+        SeparatorStorageStats* storage_stats) {
   cut_generation_feastol = std::max(0.0, cut_generation_feastol);
   const double tableau_feastol = cut_generation_feastol;
   const double tableau_fractionality_tol = 1000.0 * tableau_feastol;
@@ -6162,6 +6354,7 @@ int add_transformed_tableau_cuts(
 
   std::vector<XTabCandidateCut> candidates;
   candidates.reserve(static_cast<std::size_t>(max_cuts * 2));
+  SeparatorCandidateStorageTracker storage_tracker(storage_stats);
 
   auto tableau_basis_trace_info = [&](const FractionalBasisRow& fr,
                                       int sign) -> std::string {
@@ -6250,7 +6443,7 @@ int add_transformed_tableau_cuts(
       std::vector<int> base_active_cols;
       if (!aggregate_standard_rows(simplex, source_context, row_ep_variant,
                                    base_coeff, base_rhs,
-                                   &base_active_cols)) {
+                                   &base_active_cols, storage_stats)) {
         continue;
       }
       ++diag.aggregate_ok;
@@ -6281,6 +6474,8 @@ int add_transformed_tableau_cuts(
         double efficacy = 0.0;
         const Eigen::VectorXd signed_coeff =
             (sign == 1) ? base_coeff : (-base_coeff);
+        record_dense_workspace(storage_stats,
+                               static_cast<std::size_t>(signed_coeff.size()));
         const double signed_rhs = (sign == 1) ? base_rhs : (-base_rhs);
         const std::string basis_info = tableau_basis_trace_info(fr, sign);
         XTabRejectReason reject_reason = XTabRejectReason::None;
@@ -6303,14 +6498,17 @@ int add_transformed_tableau_cuts(
           continue;
         }
 	        ++diag.generated;
+	        record_dense_workspace(storage_stats,
+	                               static_cast<std::size_t>(cut.size()));
 	        const int nnz = count_nonzeros(cut);
 	        const double norm = std::max(1e-12, cut.norm());
 	        const double activity = gmi_binary_activity_score(simplex, x, cut);
 	        const double score = efficacy * (1.0 + activity_weight * activity);
         if (cutpool_acceptor != nullptr) {
-          PoolCut row = xtab_candidate_to_pool_cut(
-              XTabCandidateCut{std::move(cut), rhs, score, efficacy, norm,
-                               nnz});
+          XTabCandidateCut candidate{std::move(cut), rhs, score, efficacy,
+                                    norm, nnz};
+          storage_tracker.record_ephemeral(candidate.coeff);
+          PoolCut row = xtab_candidate_to_pool_cut(candidate);
           const int added = (*cutpool_acceptor)(std::move(row));
           if (added > 0) {
             accepted_cutpool_rows += added;
@@ -6320,6 +6518,7 @@ int add_transformed_tableau_cuts(
 	        if (generated_cutpool_rows != nullptr) {
 	          candidates.push_back(
 	              XTabCandidateCut{std::move(cut), rhs, score, efficacy, norm, nnz});
+          storage_tracker.record(candidates.back().coeff, candidates.size());
           continue;
         }
         if (nnz > max_nnz) {
@@ -6341,6 +6540,7 @@ int add_transformed_tableau_cuts(
         }
 	        candidates.push_back(
 	            XTabCandidateCut{std::move(cut), rhs, score, efficacy, norm, nnz});
+        storage_tracker.record(candidates.back().coeff, candidates.size());
       }
     }
     if (best_score < 0.0 &&
@@ -6402,7 +6602,7 @@ int add_transformed_tableau_cuts(
     return 0;
   }
 
-  std::vector<Eigen::VectorXd> rows;
+  std::vector<Eigen::SparseVector<double>> rows;
   std::vector<double> rhs;
   rows.reserve(selected.size());
   rhs.reserve(selected.size());
@@ -6410,7 +6610,7 @@ int add_transformed_tableau_cuts(
     rows.push_back(s.coeff);
     rhs.push_back(s.rhs);
   }
-  add_rows_to_lp(lp, rows, rhs);
+  add_sparse_rows_to_lp(lp, rows, rhs, storage_stats);
   maybe_print_xtab_diag("tableau", diag);
   return static_cast<int>(selected.size());
 }
@@ -6428,7 +6628,8 @@ int add_transformed_path_cuts(
     double cut_generation_feastol,
     const std::function<int(PoolCut&&)>* cutpool_acceptor,
     std::optional<std::uint64_t> highs_cutgen_seed,
-    const std::function<int(int)>* highs_path_randint) {
+    const std::function<int(int)>* highs_path_randint,
+    SeparatorStorageStats* storage_stats) {
   const bool direct_cutpool_mode = cutpool_acceptor != nullptr;
   cut_generation_feastol = std::max(0.0, cut_generation_feastol);
   if ((!direct_cutpool_mode && max_cuts <= 0) || !simplex.exact_optimal ||
@@ -6662,7 +6863,7 @@ int add_transformed_path_cuts(
         col_bound_distance[static_cast<std::size_t>(col)] == 0.0) {
       continue;
     }
-    for (Eigen::SparseMatrix<double>::InnerIterator it(simplex.form.A, col);
+    for (StandardColumnMatrix::InnerIterator it(simplex.form.A, col);
          it; ++it) {
       const int row = static_cast<int>(it.row());
       if (row >= 0 && row < m) {
@@ -6685,7 +6886,7 @@ int add_transformed_path_cuts(
     }
     int subst_col = -1;
     double subst_val = 0.0;
-	    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(
+	    for (StandardRowMatrix::InnerIterator it(
 	             simplex.form.A_row, r);
 	         it; ++it) {
 	      const int col = static_cast<int>(it.col());
@@ -6730,7 +6931,7 @@ int add_transformed_path_cuts(
     if (type == PathRowType::Unusable) {
       continue;
     }
-    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(
+    for (StandardRowMatrix::InnerIterator it(
              simplex.form.A_row, r);
          it; ++it) {
       const int col = static_cast<int>(it.col());
@@ -6809,6 +7010,7 @@ int add_transformed_path_cuts(
   const int reserve_hint =
       direct_cutpool_mode ? 8 : std::max(8, max_cuts * 2);
   candidates.reserve(static_cast<std::size_t>(reserve_hint));
+  SeparatorCandidateStorageTracker storage_tracker(storage_stats);
   int accepted_cutpool_rows = 0;
 
   const double density_cap =
@@ -6824,7 +7026,7 @@ int add_transformed_path_cuts(
                        [&](const auto& p) { return p.first == row; });
   };
 
-  auto add_path_cuts_from_aggregation = [&](const Eigen::VectorXd& coeff,
+  auto add_path_cuts_from_aggregation = [&](const Eigen::SparseVector<double>& coeff,
                                             double rhs,
                                             const std::vector<int>& active_cols) {
     ++diag.aggregate_ok;
@@ -6834,7 +7036,10 @@ int add_transformed_path_cuts(
       Eigen::VectorXd cut;
       double cut_rhs = 0.0;
       double efficacy = 0.0;
-      const Eigen::VectorXd signed_coeff = sign == 1 ? coeff : (-coeff);
+      Eigen::VectorXd signed_coeff = Eigen::VectorXd(coeff);
+      if (sign == -1) signed_coeff *= -1.0;
+      record_dense_workspace(storage_stats,
+                             static_cast<std::size_t>(signed_coeff.size()));
           const double signed_rhs = sign == 1 ? rhs : (-rhs);
       XTabRejectReason reject_reason = XTabRejectReason::None;
         std::uint64_t source_trace_id = 0;
@@ -6856,12 +7061,15 @@ int add_transformed_path_cuts(
         continue;
       }
       const int nnz = count_nonzeros(cut);
+      record_dense_workspace(storage_stats,
+                             static_cast<std::size_t>(cut.size()));
       const double norm = std::max(1e-12, cut.norm());
       const double score = efficacy;
       if (cutpool_acceptor != nullptr) {
-        PoolCut row = xtab_candidate_to_pool_cut(
-            XTabCandidateCut{std::move(cut), cut_rhs, score, efficacy, norm,
-                   nnz, source_trace_id});
+        XTabCandidateCut candidate{std::move(cut), cut_rhs, score, efficacy,
+                                  norm, nnz, source_trace_id};
+        storage_tracker.record_ephemeral(candidate.coeff);
+        PoolCut row = xtab_candidate_to_pool_cut(candidate);
         const int added = (*cutpool_acceptor)(std::move(row));
         ++path_ledger.cutpool_calls;
         if (added > 0) {
@@ -6877,6 +7085,7 @@ int add_transformed_path_cuts(
         candidates.push_back(XTabCandidateCut{std::move(cut), cut_rhs, score,
                                               efficacy, norm, nnz,
                                               source_trace_id});
+        storage_tracker.record(candidates.back().coeff, candidates.size());
         ++path_ledger.cutgen_success;
         ++diag.generated;
         accepted_any = true;
@@ -6893,6 +7102,7 @@ int add_transformed_path_cuts(
       candidates.push_back(XTabCandidateCut{std::move(cut), cut_rhs, score,
                                             efficacy, norm, nnz,
                                             source_trace_id});
+      storage_tracker.record(candidates.back().coeff, candidates.size());
       ++path_ledger.cutgen_success;
       ++diag.generated;
       accepted_any = true;
@@ -6915,17 +7125,21 @@ int add_transformed_path_cuts(
                                        &diag.vb_substitutions,
                                        &diag.vb_trigger_terms, cut, cut_rhs,
 	                                       efficacy, cut_generation_feastol,
-	                                       &reject_reason)) {
+	                                       &reject_reason, "pathmix",
+                                       storage_stats)) {
       xtab_record_reject(&diag, reject_reason);
       return;
     }
     const int nnz = count_nonzeros(cut);
+    record_dense_workspace(storage_stats,
+                           static_cast<std::size_t>(cut.size()));
     const double norm = std::max(1e-12, cut.norm());
     const double score = efficacy;
     if (cutpool_acceptor != nullptr) {
-      PoolCut row = xtab_candidate_to_pool_cut(
-          XTabCandidateCut{std::move(cut), cut_rhs, score, efficacy, norm,
-                           nnz});
+      XTabCandidateCut candidate{std::move(cut), cut_rhs, score, efficacy,
+                                norm, nnz};
+      storage_tracker.record_ephemeral(candidate.coeff);
+      PoolCut row = xtab_candidate_to_pool_cut(candidate);
       const int added = (*cutpool_acceptor)(std::move(row));
       ++path_ledger.cutpool_calls;
       if (added > 0) {
@@ -6940,6 +7154,7 @@ int add_transformed_path_cuts(
     if (generated_cutpool_rows != nullptr) {
       candidates.push_back(
           XTabCandidateCut{std::move(cut), cut_rhs, score, efficacy, norm, nnz});
+      storage_tracker.record(candidates.back().coeff, candidates.size());
       ++path_ledger.mix_success;
       ++diag.generated;
       return;
@@ -6954,6 +7169,7 @@ int add_transformed_path_cuts(
     }
     candidates.push_back(
         XTabCandidateCut{std::move(cut), cut_rhs, score, efficacy, norm, nnz});
+    storage_tracker.record(candidates.back().coeff, candidates.size());
     ++path_ledger.mix_success;
     ++diag.generated;
   };
@@ -7039,7 +7255,7 @@ int add_transformed_path_cuts(
     return false;
   };
 
-  XTabLpAggregator path_aggregator(simplex, source_context);
+  XTabLpAggregator path_aggregator(simplex, source_context, storage_stats);
   for (int start_row = 0; start_row < m; ++start_row) {
       if (row_type[static_cast<std::size_t>(start_row)] ==
           PathRowType::Unusable) {
@@ -7071,7 +7287,7 @@ int add_transformed_path_cuts(
         path.emplace_back(start_row, start_scale);
 	        while (static_cast<int>(path.size()) < kMaxPathLen) {
           ++path_ledger.path_iterations;
-          Eigen::VectorXd coeff;
+          Eigen::SparseVector<double> coeff;
           double rhs = 0.0;
           std::vector<int> active_cols;
           if (!path_aggregator.get_current_aggregation(
@@ -7093,7 +7309,7 @@ int add_transformed_path_cuts(
             if (col < 0 || col >= n_orig) {
               continue;
             }
-            const double val = coeff[col];
+            const double val = coeff.coeff(col);
             if (std::abs(val) <= 1e-10 ||
                 col_bound_distance[static_cast<std::size_t>(col)] <= feastol ||
                 integer_like_orig[static_cast<std::size_t>(col)] != 0) {
@@ -7156,7 +7372,8 @@ int add_transformed_path_cuts(
               add_path_cuts_from_aggregation(coeff, rhs, active_cols);
           if (!path_aggs.empty() || best_out_col >= 0 || best_in_col >= 0) {
             XTabAggregatedSourceRow agg;
-            agg.coeff = -coeff;
+            agg.coeff = coeff;
+            agg.coeff *= -1.0;
             agg.rhs = -rhs;
             agg.active_cols = active_cols;
             path_aggs.push_back(std::move(agg));
@@ -7258,7 +7475,7 @@ int add_transformed_path_cuts(
                       candidates.size());
     return 0;
   }
-  std::vector<Eigen::VectorXd> rows;
+  std::vector<Eigen::SparseVector<double>> rows;
   std::vector<double> rhs;
   rows.reserve(selected.size());
   rhs.reserve(selected.size());
@@ -7266,7 +7483,7 @@ int add_transformed_path_cuts(
     rows.push_back(s.coeff);
     rhs.push_back(s.rhs);
   }
-  add_rows_to_lp(lp, rows, rhs);
+  add_sparse_rows_to_lp(lp, rows, rhs, storage_stats);
   maybe_print_xtab_diag("path", diag);
   print_path_ledger("selected", accepted_cutpool_rows, candidates.size());
   return static_cast<int>(selected.size());
@@ -7281,11 +7498,13 @@ int add_transformed_path_cuts(
 
 int add_clique_cuts(LPModel& lp,
                     const Eigen::VectorXd& x,
-                    int max_cuts) {
+                    int max_cuts,
+                    SeparatorRowWorkspace& row_workspace,
+                    SeparatorStorageStats* storage_stats) {
   if (max_cuts <= 0) return 0;
 
   const int n = static_cast<int>(lp.vars.size());
-  const int m = static_cast<int>(lp.A.rows());
+  const int m = row_workspace.inequality_rows();
 
   // Skip for very large problems: conflict graph construction is O(m * k^2)
   // and rebuilds each cut round. Raised from 8000→15000 to enable clique
@@ -7300,23 +7519,20 @@ int add_clique_cuts(LPModel& lp,
   // Limit to rows with at most 200 binary vars to avoid O(n^2) blowup.
   std::vector<std::vector<int>> conflicts(n);
 
-  // Build row-major view once to avoid O(nnz) per column access in the
-  // conflict-graph construction loop.
-  Eigen::SparseMatrix<double, Eigen::RowMajor> A_row_clique = lp.A;
-
   for (int r = 0; r < m; ++r) {
     if (lp.b[r] <= 0.0) continue;
 
     std::vector<std::pair<int,double>> bin_vars;
     bool valid = true;
-    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_row_clique, r); it; ++it) {
-      const double a = it.value();
-      if (std::abs(a) <= 1e-12) continue;
-      const int j = static_cast<int>(it.col());
-      if (j < 0 || j >= n) { valid = false; break; }
-      if (a < 0.0 || lp.vars[j].type != VarType::Binary) { valid = false; break; }
+    row_workspace.visit_inequality_row(r, [&](int j, double a) {
+      if (!valid || std::abs(a) <= 1e-12) return;
+      if (j < 0 || j >= n) { valid = false; return; }
+      if (a < 0.0 || lp.vars[j].type != VarType::Binary) {
+        valid = false;
+        return;
+      }
       bin_vars.push_back({j, a});
-    }
+    });
     if (!valid || bin_vars.size() < 2 || bin_vars.size() > 200) continue;
 
     const double b_r = lp.b[r];
@@ -7431,20 +7647,20 @@ int add_clique_cuts(LPModel& lp,
   });
 
   int added = 0;
-  std::vector<Eigen::VectorXd> cut_rows;
+  std::vector<Eigen::SparseVector<double>> cut_rows;
   std::vector<double> cut_rhs;
+  SeparatorCandidateStorageTracker storage_tracker(storage_stats);
 
   for (const auto& cand : candidates) {
     if (added >= max_cuts) break;
-    Eigen::VectorXd cut = Eigen::VectorXd::Zero(n);
-    for (int c : cand.clique) cut[c] = 1.0;
-    cut_rows.push_back(std::move(cut));
+    cut_rows.push_back(sparse_indicator_cut(n, cand.clique));
+    storage_tracker.record(cut_rows.back(), cut_rows.size());
     cut_rhs.push_back(1.0);
     ++added;
   }
 
   if (!cut_rows.empty()) {
-    add_rows_to_lp(lp, cut_rows, cut_rhs);
+    add_sparse_rows_to_lp(lp, cut_rows, cut_rhs, storage_stats);
   }
   return added;
 }
@@ -7460,15 +7676,16 @@ int add_clique_cuts(LPModel& lp,
 // We support mixed-integer rows by: (a) ensuring the continuous-variable
 // coefficients sum to integers after aggregation, OR (b) bounding the
 // continuous contribution via variable bounds and absorbing it into the RHS.
-int add_zero_half_cuts(LPModel& lp, const Eigen::VectorXd& x, int max_cuts) {
+int add_zero_half_cuts(LPModel& lp,
+                       const Eigen::VectorXd& x,
+                       int max_cuts,
+                       SeparatorRowWorkspace& row_workspace,
+                       SeparatorStorageStats* storage_stats) {
   if (max_cuts <= 0) return 0;
 
-  const int m = static_cast<int>(lp.A.rows());
+  const int m = row_workspace.inequality_rows();
   const int n = static_cast<int>(lp.vars.size());
   if (m < 2) return 0;
-
-  // Build row-major view for efficient row traversal.
-  const Eigen::SparseMatrix<double, Eigen::RowMajor> A_row = lp.A;
 
   // Step 1: For each row, build a "mod-2 signature" of integer variable
   // coefficients. Two rows can be combined for a zero-half cut if their
@@ -7492,10 +7709,8 @@ int add_zero_half_cuts(LPModel& lp, const Eigen::VectorXd& x, int max_cuts) {
     bool has_int_var = false;
     bool cont_ok = true;
 
-    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_row, r); it; ++it) {
-      const int j = static_cast<int>(it.col());
-      if (j >= n) continue;
-      const double a = it.value();
+    row_workspace.visit_inequality_row(r, [&](int j, double a) {
+      if (j < 0 || j >= n) return;
       activity += a * x[j];
 
       if (lp.vars[j].type == VarType::Integer || lp.vars[j].type == VarType::Binary) {
@@ -7508,7 +7723,7 @@ int add_zero_half_cuts(LPModel& lp, const Eigen::VectorXd& x, int max_cuts) {
         // Continuous variable: check if coefficient is near-integer
         if (std::abs(a - std::round(a)) > 1e-6) cont_ok = false;
       }
-    }
+    });
 
     if (!has_int_var || odd.empty()) continue;
 
@@ -7594,8 +7809,9 @@ int add_zero_half_cuts(LPModel& lp, const Eigen::VectorXd& x, int max_cuts) {
 
   // Step 4: Build and add the cuts.
   int added = 0;
-  std::vector<Eigen::VectorXd> cut_rows_out;
+  std::vector<Eigen::SparseVector<double>> cut_rows_out;
   std::vector<double> cut_rhs_out;
+  SeparatorCandidateStorageTracker storage_tracker(storage_stats);
   // Track norms for parallelism filtering.
   std::vector<double> cut_norms;
 
@@ -7605,38 +7821,56 @@ int add_zero_half_cuts(LPModel& lp, const Eigen::VectorXd& x, int max_cuts) {
     auto& ri = rows[cc.i1];
     auto& rj = rows[cc.i2];
 
-    // Build aggregated cut: (a_r1 + a_r2)/2
-    Eigen::VectorXd coeff = Eigen::VectorXd::Zero(n);
-    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_row, ri.row); it; ++it) {
-      if (it.col() < n) coeff[it.col()] += 0.5 * it.value();
-    }
-    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_row, rj.row); it; ++it) {
-      if (it.col() < n) coeff[it.col()] += 0.5 * it.value();
-    }
-
     // Floor RHS.
     double rhs = std::floor(0.5 * (lp.b[ri.row] + lp.b[rj.row]) + 1e-9);
 
-    // Round integer variable coefficients to nearest integer (should already
-    // be integer by the zero-half property, this just cleans up numerics).
-    for (int c = 0; c < n; ++c) {
-      if (lp.vars[c].type == VarType::Integer || lp.vars[c].type == VarType::Binary) {
-        coeff[c] = std::round(coeff[c]);
+    const auto terms_i = row_workspace.inequality_row_terms(ri.row);
+    const auto terms_j = row_workspace.inequality_row_terms(rj.row);
+    Eigen::SparseVector<double> coeff(n);
+    coeff.reserve(static_cast<int>(terms_i.size() + terms_j.size()));
+    std::size_t pos_i = 0;
+    std::size_t pos_j = 0;
+    double lhs = 0.0;
+    double norm_sq = 0.0;
+    while (pos_i < terms_i.size() || pos_j < terms_j.size()) {
+      const int col_i =
+          pos_i < terms_i.size() ? terms_i[pos_i].first : n;
+      const int col_j =
+          pos_j < terms_j.size() ? terms_j[pos_j].first : n;
+      const int col = std::min(col_i, col_j);
+      if (col < 0 || col >= n) {
+        if (col_i == col) ++pos_i;
+        if (col_j == col) ++pos_j;
+        continue;
       }
+      double value = 0.0;
+      if (col_i == col) {
+        value += 0.5 * terms_i[pos_i].second;
+        ++pos_i;
+      }
+      if (col_j == col) {
+        value += 0.5 * terms_j[pos_j].second;
+        ++pos_j;
+      }
+      if (is_integer_type(lp.vars[static_cast<std::size_t>(col)])) {
+        value = std::round(value);
+      }
+      if (std::abs(value) <= 1e-12) continue;
+      coeff.insertBack(col) = value;
+      lhs += value * x[col];
+      norm_sq += value * value;
     }
 
-    // Verify violation on actual built cut.
-    double lhs = coeff.dot(x);
     double actual_viol = lhs - rhs;
     if (actual_viol < 1e-4) continue;
 
     // Parallelism filter: reject if too similar to existing cuts.
-    // P2.2: Use stricter threshold (0.9) for better orthogonality.
-    double cnorm = coeff.norm();
+    // Use the configured parallelism threshold to preserve orthogonality.
+    double cnorm = std::sqrt(norm_sq);
     if (cnorm < 1e-12) continue;
     bool parallel = false;
     for (int ci = 0; ci < static_cast<int>(cut_norms.size()); ++ci) {
-      double dot = coeff.dot(cut_rows_out[ci]);
+      double dot = sparse_sparse_dot(coeff, cut_rows_out[ci]);
       if (std::abs(dot) > 0.90 * cnorm * cut_norms[ci]) {
         parallel = true;
         break;
@@ -7646,12 +7880,13 @@ int add_zero_half_cuts(LPModel& lp, const Eigen::VectorXd& x, int max_cuts) {
 
     cut_norms.push_back(cnorm);
     cut_rows_out.push_back(std::move(coeff));
+    storage_tracker.record(cut_rows_out.back(), cut_rows_out.size());
     cut_rhs_out.push_back(rhs);
     ++added;
   }
 
   if (!cut_rows_out.empty()) {
-    add_rows_to_lp(lp, cut_rows_out, cut_rhs_out);
+    add_sparse_rows_to_lp(lp, cut_rows_out, cut_rhs_out, storage_stats);
   }
   return added;
 }
@@ -7663,40 +7898,42 @@ int add_cuts(LPModel& lp,
              int max_cuts,
              const std::shared_ptr<BasisOps>& sbasis,
              CutFamilyTracker* tracker,
-             const CliqueTable* clique_table) {
+             const CliqueTable* clique_table,
+             SeparatorStorageStats* storage_stats) {
   if (opt.cuts == CutType::None || max_cuts <= 0) {
     return 0;
   }
 
   int budget = max_cuts;
   int total = 0;
-
-  // Build RowMajor view once so that compute_efficacy (called once per cut
-  // family) does not re-copy the full LP matrix each time.
-  Eigen::SparseMatrix<double, Eigen::RowMajor> efficacy_A_row = lp.A;
+  SeparatorRowWorkspace row_workspace(lp);
 
   // Helper to compute average efficacy of cuts added to LP rows [start_row, end_row).
   // Efficacy = violation / ||coeff|| where violation = coeff*x - rhs > 0.
   auto compute_efficacy = [&](int start_row, int end_row) -> double {
     if (end_row <= start_row) return 0.0;
     const int n = static_cast<int>(x.size());
-    // Use a fresh RowMajor view when new rows were added since the last call.
-    if (efficacy_A_row.rows() != lp.A.rows()) efficacy_A_row = lp.A;
-    const auto& A_row = efficacy_A_row;
+    const int num_rows = end_row - start_row;
+    Eigen::VectorXd lhs = Eigen::VectorXd::Zero(num_rows);
+    Eigen::VectorXd norm_sq = Eigen::VectorXd::Zero(num_rows);
+    for (int col = 0; col < lp.A.outerSize(); ++col) {
+      if (col >= n) break;
+      for (Eigen::SparseMatrix<double>::InnerIterator it(lp.A, col); it; ++it) {
+        const int row = static_cast<int>(it.row());
+        if (row < start_row || row >= end_row) continue;
+        const int local_row = row - start_row;
+        lhs[local_row] += it.value() * x[col];
+        norm_sq[local_row] += it.value() * it.value();
+      }
+    }
     double sum = 0.0;
     int count = 0;
     for (int i = start_row; i < end_row; ++i) {
-      double lhs = 0.0;
-      double norm_sq = 0.0;
-      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_row, i); it; ++it) {
-        if (it.col() < n) {
-          lhs += it.value() * x[it.col()];
-          norm_sq += it.value() * it.value();
-        }
-      }
-      if (norm_sq > 1e-12) {
-        double violation = lhs - lp.b[i];  // A*x <= b means violation = A*x - b > 0
-        double efficacy = std::max(0.0, violation) / std::sqrt(norm_sq);
+      const int local_row = i - start_row;
+      if (norm_sq[local_row] > 1e-12) {
+        double violation = lhs[local_row] - lp.b[i];
+        double efficacy =
+            std::max(0.0, violation) / std::sqrt(norm_sq[local_row]);
         sum += efficacy;
         ++count;
       }
@@ -7719,6 +7956,7 @@ int add_cuts(LPModel& lp,
       tracker->get(family).budget_total += actual_budget;
     }
     const int add = std::max(0, f(actual_budget));
+    row_workspace.sync_inequalities(lp);
     const int end_rows = static_cast<int>(lp.A.rows());
 
     if (tracker && add > 0) {
@@ -7739,20 +7977,29 @@ int add_cuts(LPModel& lp,
       return;
     }
     const int add = std::max(0, f(budget));
+    row_workspace.sync_inequalities(lp);
     total += add;
     budget -= add;
   };
 
   if (opt.cuts == CutType::IntRounding) {
-    spend([&](int b) { return add_mir_like_cuts(lp, x, CutType::IntRounding, b); });
+    spend([&](int b) {
+      return add_mir_like_cuts(lp, x, CutType::IntRounding, b,
+                               row_workspace, storage_stats);
+    });
     return total;
   }
   if (opt.cuts == CutType::MIR) {
     // True MIR: first try basis-based MIR, then row-based MIR
     if (simplex != nullptr) {
-      spend_tracked(CutFamily::MIR, [&](int b) { return add_basis_mir_cuts(lp, x, *simplex, opt, b, sbasis); }, budget);
+      spend_tracked(CutFamily::MIR, [&](int b) {
+        return add_basis_mir_cuts(lp, x, *simplex, opt, b, sbasis,
+                                  row_workspace, storage_stats);
+      }, budget);
     }
-    spend_tracked(CutFamily::MIR, [&](int b) { return add_row_mir_cuts(lp, x, b); }, budget);
+    spend_tracked(CutFamily::MIR, [&](int b) {
+      return add_row_mir_cuts(lp, x, b, row_workspace, storage_stats);
+    }, budget);
     return total;
   }
   if (opt.cuts == CutType::Gomory) {
@@ -7761,16 +8008,22 @@ int add_cuts(LPModel& lp,
                     [&](int b) {
 	                      return add_transformed_tableau_cuts(
 	                          lp, x, *simplex, opt, b, sbasis, nullptr, nullptr,
-	                          nullptr);
+	                          nullptr, nullptr, 1e-8, nullptr, std::nullopt,
+                              storage_stats);
                     },
                     budget);
     }
     return total;
   }
   if (opt.cuts == CutType::Cover) {
-    spend_tracked(CutFamily::Cover, [&](int b) { return add_cover_cuts(lp, x, b); }, budget);
+    spend_tracked(CutFamily::Cover, [&](int b) {
+      return add_cover_cuts(lp, x, b, row_workspace, storage_stats);
+    }, budget);
     if (opt.enable_projected_capacity_cuts) {
-      spend_tracked(CutFamily::Cover, [&](int b) { return add_projected_capacity_cover_cuts(lp, x, b); }, budget);
+      spend_tracked(CutFamily::Cover, [&](int b) {
+        return add_projected_capacity_cover_cuts(
+            lp, x, b, row_workspace, storage_stats);
+      }, budget);
     }
     return total;
   }
@@ -7778,8 +8031,8 @@ int add_cuts(LPModel& lp,
   // CutType::All — generate all applicable cut families.
   // Gomory gets full budget first (strongest cuts). Supplementary cuts
   // share the remaining budget to add complementary strength.
-  // P2.1: Skip families with low moving-average efficacy.
-  // P6.3: Reduce supplementary cut budgets and disable expensive families
+  // Skip families with low moving-average efficacy. Reduce supplementary cut
+  // budgets and disable expensive families
   //        on very large problems (n > 20000).
   const bool xlarge = (static_cast<int>(x.size()) > 20000);
   const bool large = (static_cast<int>(x.size()) > 10000);
@@ -7792,17 +8045,17 @@ int add_cuts(LPModel& lp,
     const int nx = static_cast<int>(x.size());
     auto cliques = clique_table->find_violated_cliques(x, b, 1e-7, xlarge ? 128 : 512);
     if (cliques.empty()) return 0;
-    std::vector<Eigen::VectorXd> rows;
+    std::vector<Eigen::SparseVector<double>> rows;
     std::vector<double> rhs;
+    SeparatorCandidateStorageTracker storage_tracker(storage_stats);
     rows.reserve(cliques.size());
     rhs.reserve(cliques.size());
     for (const auto& cq : cliques) {
-      Eigen::VectorXd cut = Eigen::VectorXd::Zero(nx);
-      for (int c : cq.members) if (c < nx) cut[c] = 1.0;
-      rows.push_back(std::move(cut));
+      rows.push_back(sparse_indicator_cut(nx, cq.members));
+      storage_tracker.record(rows.back(), rows.size());
       rhs.push_back(1.0);
     }
-    add_rows_to_lp(lp, rows, rhs);
+    add_sparse_rows_to_lp(lp, rows, rhs, storage_stats);
     return static_cast<int>(rows.size());
   };
 
@@ -7812,23 +8065,34 @@ int add_cuts(LPModel& lp,
                   [&](int b) {
 	                    return add_transformed_tableau_cuts(
 	                        lp, x, *simplex, opt, b, sbasis, nullptr, nullptr,
-	                        nullptr);
+	                        nullptr, nullptr, 1e-8, nullptr, std::nullopt,
+                            storage_stats);
                   },
                   budget);
   }
   // 2. Basis-MIR cuts (complemented single-row MIR, stronger than row-MIR, needs simplex basis)
   if (simplex != nullptr && !xlarge) {
-    spend_tracked(CutFamily::MIR, [&](int b) { return add_basis_mir_cuts(lp, x, *simplex, opt, b, sbasis); }, xlarge ? 0 : (large ? 2 : 4));
+    spend_tracked(CutFamily::MIR, [&](int b) {
+      return add_basis_mir_cuts(lp, x, *simplex, opt, b, sbasis,
+                                row_workspace, storage_stats);
+    }, xlarge ? 0 : (large ? 2 : 4));
   }
   // 3. Row-based MIR cuts (works without basis, complementary to Gomory)
-  spend_tracked(CutFamily::MIR, [&](int b) { return add_row_mir_cuts(lp, x, b); }, xlarge ? 2 : (large ? 3 : 5));
+  spend_tracked(CutFamily::MIR, [&](int b) {
+    return add_row_mir_cuts(lp, x, b, row_workspace, storage_stats);
+  }, xlarge ? 2 : (large ? 3 : 5));
   // 3. Unlifted knapsack cover cuts
   if (opt.enable_projected_capacity_cuts) {
     spend_tracked(CutFamily::Cover,
-                  [&](int b) { return add_projected_capacity_cover_cuts(lp, x, b); },
+                  [&](int b) {
+                    return add_projected_capacity_cover_cuts(
+                        lp, x, b, row_workspace, storage_stats);
+                  },
                   budget);
   }
-  spend_tracked(CutFamily::Cover, [&](int b) { return add_cover_cuts(lp, x, b); }, xlarge ? 2 : (large ? 3 : 5));
+  spend_tracked(CutFamily::Cover, [&](int b) {
+    return add_cover_cuts(lp, x, b, row_workspace, storage_stats);
+  }, xlarge ? 2 : (large ? 3 : 5));
 
   // Clique cuts: always attempt when the persistent table is available
   // (near-zero cost when table is empty; fast lookup otherwise).
@@ -7840,11 +8104,15 @@ int add_cuts(LPModel& lp,
   if (!large) {
     // Fallback clique cuts (on-the-fly conflict graph) when no table present.
     if (clique_table == nullptr) {
-      spend_tracked(CutFamily::Clique, [&](int b) { return add_clique_cuts(lp, x, b); }, 5);
+      spend_tracked(CutFamily::Clique, [&](int b) {
+        return add_clique_cuts(lp, x, b, row_workspace, storage_stats);
+      }, 5);
     }
     // Zero-half cuts (pairwise {0,1/2}-aggregation) — disable on very large
     if (!xlarge) {
-      spend_tracked(CutFamily::ZeroHalf, [&](int b) { return add_zero_half_cuts(lp, x, b); }, 5);
+      spend_tracked(CutFamily::ZeroHalf, [&](int b) {
+        return add_zero_half_cuts(lp, x, b, row_workspace, storage_stats);
+      }, 5);
     }
   }
   return total;

@@ -8,6 +8,7 @@
 #include <cstring>
 #include <iterator>
 #include <limits>
+#include <optional>
 #include <vector>
 
 #include <Eigen/Core>
@@ -807,7 +808,8 @@ int choose_branch_var_reliability_impl(
     const std::vector<int>& priority,
     const BCBranchingPriorFn& dynamic_prior,
     const BCBranchContext& context,
-    std::vector<BranchDirectionalObservation>* selected_observations) {
+    std::vector<BranchDirectionalObservation>* selected_observations,
+    StrongBranchProbeStorageStats* storage_stats) {
 
   if (selected_observations != nullptr) selected_observations->clear();
 
@@ -833,6 +835,10 @@ int choose_branch_var_reliability_impl(
 
   std::vector<BranchDirectionalObservation> observations;
   observations.reserve(static_cast<std::size_t>(2 * effective_probes));
+  std::optional<StandardFormLP> active_probe_sf;
+  std::optional<SimplexBasis> active_probe_basis;
+  SimplexOptions persistent_probe_opt = simplex_opt;
+  persistent_probe_opt.allow_persistent_lp_state = true;
 
   auto has_observation = [&](int var, bool is_up) {
     return find_observation(observations, var, is_up) != nullptr;
@@ -866,10 +872,60 @@ int choose_branch_var_reliability_impl(
       return;
     }
 
-    StandardFormLP probe_sf = base_sf;
-    update_standard_form_bounds(probe_sf, base_lp, probe_lb, probe_ub);
-    auto res = solve_lp_from_sf(probe_sf, simplex_opt, basis_hint);
+    if (!active_probe_sf.has_value()) {
+      active_probe_sf.emplace(base_sf);
+      update_standard_form_bounds(
+          *active_probe_sf, base_lp, node_lb, node_ub);
+      if (storage_stats != nullptr) {
+        ++storage_stats->base_sf_materializations;
+      }
+    }
+    const double old_value = is_up ? node_lb[var] : node_ub[var];
+    const double new_value = is_up ? probe_lb[var] : probe_ub[var];
+    const std::vector<BoundChangeInfo> branch_change{
+        {var, 0.0, is_up, old_value, new_value}};
+    StandardFormBoundTransaction transaction(*active_probe_sf);
+    if (!transaction.apply(base_lp, branch_change)) {
+      if (storage_stats != nullptr) {
+        ++storage_stats->transaction_failures;
+      }
+      observation.state = BranchEvidenceState::UnknownFailure;
+      update_pseudocost_from_branch_evidence(
+          pc[var], is_up, observation.state, 0.0, distance);
+      observations.push_back(observation);
+      return;
+    }
+    if (storage_stats != nullptr) {
+      ++storage_stats->bound_transactions;
+      storage_stats->transaction_snapshot_values +=
+          transaction.snapshot_value_count();
+    }
+    const SimplexBasis* effective_basis_hint =
+        active_probe_basis.has_value() ? &*active_probe_basis : basis_hint;
+    auto res = solve_lp_from_sf(
+        *active_probe_sf, persistent_probe_opt, effective_basis_hint);
     ++lp_solves;
+    if (storage_stats != nullptr) {
+      if (res.result.stats.solver_name ==
+          "VendoredHighsPersistentLpKernel") {
+        ++storage_stats->backend_persistent_resolves;
+      } else {
+        ++storage_stats->backend_cold_solves;
+      }
+    }
+    if (res.basis.cached_sparse_basis) {
+      active_probe_basis = res.basis;
+    }
+    if (transaction.rollback()) {
+      if (storage_stats != nullptr) {
+        ++storage_stats->transaction_rollbacks;
+      }
+    } else {
+      if (storage_stats != nullptr) {
+        ++storage_stats->transaction_failures;
+      }
+      active_probe_sf.reset();
+    }
     const auto failure =
         classify_lp_result(res, static_cast<int>(base_lp.vars.size()));
     if (failure == LPFailureType::Success) {
@@ -934,11 +990,13 @@ int choose_branch_var_reliability(
     const std::vector<int>& priority,
     const BCBranchingPriorFn& dynamic_prior,
     const BCBranchContext& context,
-    std::vector<BranchDirectionalObservation>* selected_observations) {
+    std::vector<BranchDirectionalObservation>* selected_observations,
+    StrongBranchProbeStorageStats* storage_stats) {
   return choose_branch_var_reliability_impl(
       cand, x, pc, base_lp, base_sf, node_lb, node_ub, basis_hint,
       simplex_opt, parent_bound, lp_solves, node_depth, reliability_limit,
-      max_probes, priority, dynamic_prior, context, selected_observations);
+      max_probes, priority, dynamic_prior, context, selected_observations,
+      storage_stats);
 }
 
 int choose_branch_var_reliability(
@@ -959,11 +1017,13 @@ int choose_branch_var_reliability(
     const std::vector<int>& priority,
     const BCBranchingPriorFn& dynamic_prior,
     const BCBranchContext& context,
-    std::vector<BranchDirectionalObservation>* selected_observations) {
+    std::vector<BranchDirectionalObservation>* selected_observations,
+    StrongBranchProbeStorageStats* storage_stats) {
   return choose_branch_var_reliability_impl(
       cand, x, pc, base_lp, base_sf, node_lb, node_ub, basis_hint,
       simplex_opt, parent_bound, lp_solves, node_depth, reliability_limit,
-      max_probes, priority, dynamic_prior, context, selected_observations);
+      max_probes, priority, dynamic_prior, context, selected_observations,
+      storage_stats);
 }
 
 double compute_node_estimate(const std::vector<VariableMeta>& vars,

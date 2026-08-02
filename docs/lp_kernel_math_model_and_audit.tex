@@ -1,0 +1,1020 @@
+% MIPSolvers 原生 LP 内核（lp_kernel）：数学模型与严苛的数据结构与算法效率审计
+% 编译：xelatex（两遍）或 latexmk -xelatex
+\documentclass[11pt]{ctexart}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage[colorlinks=true,linkcolor=blue!60!black,citecolor=blue!60!black,urlcolor=blue!60!black]{hyperref}
+
+\emergencystretch=3em
+\tolerance=2000
+
+\lstdefinestyle{code}{
+  basicstyle=\ttfamily\footnotesize,
+  breaklines=true,
+  frame=single,
+  framesep=2pt,
+  xleftmargin=6pt,
+  xrightmargin=2pt,
+  aboveskip=6pt,
+  belowskip=6pt,
+  columns=fullflexible,
+  keepspaces=true
+}
+
+\newtheorem{definition}{定义}
+\newtheorem{remark}{注记}
+\newtheorem{finding}{发现}
+
+% \file 以等宽字体排版路径，允许在 '/'、'_'、'.'、':'、'<' 后断行
+% \code 以等宽字体排版标识符，允许在 '_'、'.'、':'、'<' 后断行
+\ExplSyntaxOn
+\seq_new:N \l__audit_sa_seq
+\seq_new:N \l__audit_sb_seq
+\seq_new:N \l__audit_sc_seq
+\seq_new:N \l__audit_sd_seq
+\seq_new:N \l__audit_se_seq
+\seq_new:N \l__audit_sf_seq
+\seq_new:N \l__audit_sg_seq
+\cs_new:Nn \__audit_lt:n {
+  \seq_set_split:Nnn \l__audit_sf_seq {<} {#1}
+  \seq_use:Nn \l__audit_sf_seq {<\allowbreak}
+}
+\cs_new:Nn \__audit_colon:n {
+  \seq_set_split:Nnn \l__audit_se_seq {:} {#1}
+  \seq_set_map:NNn \l__audit_sg_seq \l__audit_se_seq { \__audit_lt:n {##1} }
+  \seq_use:Nn \l__audit_sg_seq {:\allowbreak}
+}
+\cs_new:Nn \__audit_dot:n {
+  \seq_set_split:Nnn \l__audit_sc_seq {.} {#1}
+  \seq_set_map:NNn \l__audit_sd_seq \l__audit_sc_seq { \__audit_colon:n {##1} }
+  \seq_use:Nn \l__audit_sd_seq {.\allowbreak}
+}
+\cs_new:Nn \__audit_us:n {
+  \seq_set_split:Nnn \l__audit_sa_seq {\_} {#1}
+  \seq_set_map:NNn \l__audit_sb_seq \l__audit_sa_seq { \__audit_dot:n {##1} }
+  \seq_use:Nn \l__audit_sb_seq {\_\allowbreak}
+}
+\NewDocumentCommand{\file}{m}{
+  \texttt{
+    \seq_set_split:Nnn \l__audit_sa_seq {/} {#1}
+    \seq_set_map:NNn \l__audit_sb_seq \l__audit_sa_seq { \__audit_us:n {##1} }
+    \seq_use:Nn \l__audit_sb_seq {/\allowbreak}
+  }
+}
+\NewDocumentCommand{\code}{m}{\texttt{\__audit_us:n {#1}}}
+\ExplSyntaxOff
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\Z}{\mathbb{Z}}
+\newcommand{\nnz}{\mathrm{nnz}}
+\DeclareMathOperator*{\argmax}{arg\,max}
+\DeclareMathOperator*{\argmin}{arg\,min}
+
+\title{\textbf{MIPSolvers 原生 LP 内核（\texttt{lp\_kernel}）}\\[6pt]
+\large 数学模型与面向千万维问题的严苛数据结构与算法效率审计}
+\author{代码级静态审计报告（所有论断附 file:line 引用）}
+\date{2026 年 8 月 1 日}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+本报告直接依据源代码，记录三方面内容：（i）MIPSolvers 仓库 LP 内核
+（\file{src/engine/kernel/lp\_kernel/} 及其线性代数后端
+\file{src/engine/kernel/linear\_algebra/} 中的 \code{HFactorBackend}）
+所求解的数学模型——标准形变换、Ruiz 平衡、修订对偶/原始单纯形的完整
+迭代数学、稳定化与反循环机制、不可行证书；（ii）以通用 LP 求解器须求解
+上千万维度（$m=n=10^{7}$、$\nnz(A)\approx 10^{8}$）问题为基准，对其数据
+结构与算法效率进行的刻意严苛的审计；（iii）对"占位符/伪实现"的系统性
+普查——被声明、被精心编写、看起来复杂，但实际上从未被调用、或在数学上
+不构成其所声称之物的代码。每项论断附 \texttt{file:line} 引用，行号对应
+报告日期当日的工作区状态。本审计为静态审计：未做运行时剖析，复杂度陈述
+均源自代码本身。
+
+\medskip
+\noindent\textbf{总体结论（先说结论）。} 与"大量占位符"的怀疑相反，
+\file{native\_dual/} 内核的\emph{热路径是真实的}：它是一个教科书规格的
+有界变量修订对偶单纯形——懒堆 CHUZR、超稀疏打包 FTRAN/BTRAN、Harris
+两遍 BFRT、Goldfarb--Reid DSE 权重、Forrest--Tomlin 更新、带秩修复的
+INVERT、区间算术 Farkas 证书。但代码中确实存在三类与用户怀疑相符的
+实质问题：（a）约 290 行长双精度"精确验证"机器（\code{pivot\_evidence}、
+\code{row\_solve\_consistent}、\code{refine\_ftran}）在全仓库\textbf{零
+调用}，是纯粹的死代码；（b）若干以"精确性"为名的验证趟（每次 INVERT
+3--4 趟 $O(\nnz(A))$ 长双精度残差、冷启动 $m$ 次带验证 BTRAN 的精确 DSE
+初始化）在 $10^{7}$ 维下各自单独即致命；（c）约束矩阵被完整存储三份、
+每次 LU 重构再全量拷贝一次，索引全部为 32 位 \code{int}。该内核是按
+$m\sim 10^{3}$--$10^{4}$（IEEE-118、NETLIB、MIPLIB 根节点 LP）设计与
+验证的；在当前形态下它无法生存于千万维问题，\S\ref{sec:scale} 给出逐条
+定量证据与改造清单。
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%=====================================================================
+\section{范围、方法与文件清单}
+%=====================================================================
+
+\subsection{范围}
+本次审计的组件是原生 LP 内核：
+\begin{center}
+\file{src/engine/kernel/lp\_kernel/}（对偶单纯形集成层 + \file{native\_dual/} 原生内核）\\
+\file{include/mipsolvers/engine/kernel/lp\_kernel/}（公共头文件）\\
+\file{src/engine/kernel/linear\_algebra/hfactor\_backend.cpp} 及其头文件（LU/FT 后端）
+\end{center}
+\file{native\_dual/} 调用的 vendored HiGHS \code{HFactor}
+（\file{src/engine/kernel/linear\_algebra/highs\_factor/util/HFactor.cpp}）
+作为黑箱 LU 库对待，仅审计其包装层。IPM 内核（\file{kernel/ipm/}）、
+PDLP（\file{solver/native/lp/pdlp\_solver.cpp}）、KKT（\file{kernel/kkt/}）
+不在本次范围内。
+
+\subsection{方法}
+对全部 14 个源文件（合计约 9\,700 行）逐行阅读；所有关键论断随后按所引
+用行号复核。死代码判定使用全仓库（\file{src/} 与 \file{tests/}）符号
+引用搜索确认。报告区分三类陈述：
+\textbf{(V)} 经直接阅读所引代码验证（占绝大多数）；
+\textbf{(I)} 由代码结构推断，并明示推断依据；
+\textbf{(U)} 代码意图不明——显式标注。
+
+\subsection{文件清单与角色}
+\label{sec:inventory}
+\begin{longtable}{@{}p{0.46\textwidth}r p{0.40\textwidth}@{}}
+\caption{LP 内核文件清单（行数为报告日工作区状态）}\label{tab:files}\\
+\toprule
+文件 & 行数 & 角色 \\
+\midrule
+\endfirsthead
+\toprule
+文件 & 行数 & 角色 \\
+\midrule
+\endhead
+\file{dual\_simplex.cpp} & 2\,486 & 公共集成层：HiGHS 委托路径、结果翻译、Farkas 导出、fail-closed 残差审计 \\
+\file{dual\_simplex\_api.cpp} & 1\,081 & 标准形构建、割行追加、Ruiz 缩放、界/成本增量更新 \\
+\file{native\_dual/solver.cpp} & 1\,443 & 对偶单纯形主驱动：minor 迭代、阶段控制、清理 \\
+\file{native\_dual/state.cpp} & 1\,315 & 状态重建、审计、稳定化成本、循环签名 \\
+\file{native\_dual/pricing.cpp} & 1\,003 & CHUZR 堆、BFRT/Harris、DSE/Devex 权重更新 \\
+\file{native\_dual/primal.cpp} & 839 & 原始单纯形阶段（Phase I/II、清理） \\
+\file{native\_dual/factor.cpp} & 718 & \code{BasisFactor}：带验证的求解证据、INVERT、FT 更新转发 \\
+\file{linear\_algebra/hfactor\_backend.cpp} & 773 & vendored HiGHS \code{HFactor} 的包装（LU、超稀疏求解、FT 更新） \\
+\file{native\_dual/model.hpp} & 262 & \code{State}/\code{IndexedVector}/事务结构 \\
+\file{native\_dual/primal\_pricing.hpp} & 228 & 原始 Devex/PSE 权重数学（inline） \\
+\file{native\_dual/factor.hpp} & 143 & \code{BasisFactor} 接口 \\
+\file{native\_dual/certificate.cpp/.hpp} & 111 & Farkas 乘子与区间证书 \\
+\file{native\_dual/state.hpp} & 93 & 状态函数声明 \\
+\file{native\_dual/pricing.hpp} & 33 & 定价函数声明 \\
+\file{native\_dual/primal.hpp} & 13 & 原始阶段入口声明 \\
+\file{native\_dual/certificate.hpp} & 11 & 证书入口声明 \\
+\file{native\_dual\_core.hpp} & 149 & 状态/统计/结果类型与入口 \\
+\bottomrule
+\end{longtable}
+
+一个塑造全篇报告的事实：\textbf{生产默认路径不是原生内核}。
+\code{SimplexOptions::lp\_kernel\_backend} 默认值为
+\code{LpKernelBackend::HiGHS}
+（\file{include/mipsolvers/engine/kernel/lp\_kernel/dual\_simplex.hpp:173}，
+枚举定义于 \file{include/mipsolvers/engine/kernel/lp\_kernel/backend.hpp:8-11}），
+此时 \file{dual\_simplex.cpp:1337-1694} 把标准形 LP 完整委托给 vendored
+HiGHS 求解。原生 \file{native\_dual/} 内核须经
+\code{ExperimentalNative} 显式选择——其注释自述
+"ExperimentalNative is an explicit development-only selection"
+（\file{dual\_simplex.hpp:172}）。两条路径本报告都评估。
+
+%=====================================================================
+\section{数学模型}
+\label{sec:math}
+%=====================================================================
+
+\subsection{原始 LP 与标准形变换}
+\label{sec:stdform}
+内核接受的公共模型（\code{LPModel}）为
+\begin{equation}
+\min_{x}\ c^{\top}x \quad
+\text{s.t.}\quad \mathrm{lhs}_i \le (A x)_i \le b_i\ (i=1,\dots,m_{\mathrm{ineq}}),\quad
+A_{\mathrm{eq}} x = b_{\mathrm{eq}},\quad
+\ell \le x \le u,
+\label{eq:orig}
+\end{equation}
+其中 $\mathrm{lhs}_i$ 可为 $-\infty$（单边行），$\pm 10^{20}$ 为公共
+"无界"哨兵，内核侧以 $10^{19}$ 为识别阈值
+（\file{dual\_simplex\_api.cpp:23,26-32}）。
+
+\code{build\_standard\_form\_lp}（\file{dual\_simplex\_api.cpp:35-255}）
+把 \eqref{eq:orig} 变为内核的\emph{最大化、非负右端、带界变量}标准形：
+\begin{enumerate}[label=(\roman*),leftmargin=2em]
+\item \textbf{下界平移}：$x = z + \bar\ell$，$\bar\ell_j = \ell_j$（有限时），
+否则 $0$（\file{dual\_simplex\_api.cpp:53-57}）。所有变量平移到下界为 $0$。
+\item \textbf{行定向}：每行乘以符号 $s_i\in\{+1,-1\}$ 使平移后右端
+$\hat b_i \ge 0$（\file{dual\_simplex\_api.cpp:115-126}）。
+\item \textbf{辅助列}：'L' 行加松弛列 $+e_i$（ranged 行取其宽度为上界，
+\file{dual\_simplex\_api.cpp:66-99,238-243}）；'G' 行加剩余列 $-e_i$
+\emph{和}人工列 $+e_i$；'E' 行加人工列 $+e_i$
+（\file{dual\_simplex\_api.cpp:134-158,189-199}）。
+\end{enumerate}
+得到标准形
+\begin{equation}
+\max_{z}\ c_{\max}^{\top} z \quad
+\text{s.t.}\quad \bar A z = \bar b,\quad 0 \le z \le \bar u,
+\qquad \bar u_j \in (0,+\infty],
+\label{eq:sf}
+\end{equation}
+其中 $\bar A = S\,A\,(\text{含辅助列})$，$c_{\max}=(-c_{\min},0)$，
+常数项 $\mathrm{obj\_const} = c_{\min}^{\top}\bar\ell$。
+原问题最优值由 $\min c^{\top}x = \mathrm{obj\_const} - \max c_{\max}^{\top}z$
+恢复（发布于 \file{dual\_simplex.cpp:2405,1041,1606}）。
+标准形列数 $n = n_{\mathrm{orig}} + n_{\mathrm{slack}} + n_{\mathrm{surplus}}
++ n_{\mathrm{artificial}}$；每个 'G'/'E' 行都有一个人工列，因此逻辑基
+（每行取其 slack/artificial 列）恒为单位矩阵——这是冷启动基
+（\file{native\_dual/factor.cpp:24-38} 的 \code{logical\_columns}）。
+
+\begin{remark}[数学上的两个设计决定]
+(a) 人工列不是单纯形算法内部的 Phase-I 装置，而是\emph{标准形的永久
+成员}；Phase II 通过令其上界有效为 $0$/不可进入而冻结它们
+（\code{make\_phase\_two\_bounds}，\file{native\_dual/state.cpp:180-195}：
+人工列根本不进入 \code{enterable}）。委托给 HiGHS 时则显式固定为 $0$
+（\file{dual\_simplex.cpp:640-644}）。
+(b) 目标恒为最大化；最小化问题取负成本。所有对偶符号约定（简约成本
+$d = c - A^{\top}y$ 在 max 形式下的符号、行对偶发布时的符号翻转）
+沿此展开（\file{dual\_simplex.cpp:501-504,1675-1683}）。
+\end{remark}
+
+\subsection{Ruiz 平衡缩放}
+\code{ruiz\_scale\_standard\_form}（\file{dual\_simplex\_api.cpp:775-846}）
+执行至多 \code{rounds} 轮（调用点固定为 10，
+\file{dual\_simplex.cpp:1792}）迭代平衡：每轮令
+$D_r = \mathrm{diag}(\|A_{i\cdot}\|_\infty)^{-1/2}$，
+$D_c = \mathrm{diag}(\|A_{\cdot j}\|_\infty)^{-1/2}$，
+并就地施加 $\bar A \leftarrow D_r \bar A D_c$、$\bar b \leftarrow D_r\bar b$、
+$c_{\max}\leftarrow D_c c_{\max}$、$\bar u \leftarrow D_c^{-1}\bar u$，
+累积因子记录于 \code{sf.row\_scale}/\code{sf.col\_scale}；第 2 轮后若最大
+偏差 $<10^{-2}$ 提前终止（\file{dual\_simplex\_api.cpp:818}）。
+每轮成本 $O(\nnz(\bar A))$，且\emph{对行主、列主两份矩阵各做一遍}
+（\file{dual\_simplex\_api.cpp:821-831}）——见 \S\ref{sec:ds} 的内存账目。
+
+\subsection{有界变量修订对偶单纯形（Phase II）}
+\label{sec:dualmath}
+记基指标集 $\beta$（$|\beta|=m$），$B = \bar A_{\cdot\beta}$。每个非基列
+$j$ 携带移动方向 $\mu_j\in\{\text{Down},\text{Fixed},\text{Up}\}$
+（\code{Move}，\file{native\_dual/model.hpp:32-38}），表示其贴在有效上界
+或下界（$0$）。对偶迭代维护：
+\begin{align}
+x_\beta &= B^{-1}\Big(\bar b - \sum_{j\notin\beta} \bar A_{\cdot j}\, z_j\Big),
+& z_j &=
+\begin{cases}0, & \mu_j=\text{Up},\\ \bar u_j, & \mu_j=\text{Down},\end{cases}
+\label{eq:primal}\\
+y &= B^{-\top} (c_{\max})_\beta,
+& d &= c_{\max} - \bar A^{\top} y .
+\label{eq:dual}
+\end{align}
+对偶可行条件（max 形式）：$\mu_j=\text{Up}\Rightarrow d_j\le \tau_D$，
+$\mu_j=\text{Down}\Rightarrow d_j\ge -\tau_D$（容差 $\tau_D$ 为
+\code{optimality\_tol}，判定见 \code{dual\_infeasibility}，
+\file{native\_dual/state.cpp:1192-1197}；$\mu_j$ 与 $d_j$ 同号违规的
+组合判定见 \code{normalize\_nonbasic\_moves}，
+\file{native\_dual/state.cpp:593-613}）。
+
+一次 minor 迭代（\code{minor\_iteration}，
+\file{native\_dual/solver.cpp:330-797}）的数学步骤：
+\begin{enumerate}[label=\textbf{S\arabic*.},leftmargin=3em]
+\item \textbf{CHUZR}（\code{choose\_leaving}，
+\file{native\_dual/pricing.cpp:213-305}）：在原始不可行基行
+（$x_{\beta p}$ 越出 $[0,\bar u_{\beta_p}]$ 超过 $\tau_P$，度量见
+\code{primal\_infeasibility}，\file{native\_dual/state.cpp:1177-1190}）
+中按 DSE 优度 $\mathrm{merit}_i = v_i^{2}/w_i$（$v_i$ 为违例量，$w_i$
+为边权重）用\emph{懒惰版本化二叉堆}选行 $p$；随即计算行对偶
+$\pi_p = B^{-\top} e_p$（打包 BTRAN）。
+\item \textbf{PRICE}（\code{multiply\_AT\_indexed}，
+\file{native\_dual/pricing.cpp:117-179}）：计算主行
+$\rho^{\top} = \pi_p^{\top} \bar A$（$\rho$ 为 $n$ 维稀疏向量），
+以邮戳（epoch-stamp）稠密累加器实现，丢弃 $|\cdot|\le 10^{-14}$ 的
+数值噪声项（\file{native\_dual/pricing.cpp:156-178}，可用
+\code{MIPSOLVERS\_PRICE\_TIGHT=off} 关闭）。
+\item \textbf{BFRT/CHUZC}（\code{choose\_entering\_bfrt}，
+\file{native\_dual/pricing.cpp:307-869}）：对每个非基 $j$ 计算带号主元
+$\alpha_j = \mathrm{side}\cdot\mathrm{sign}(\mu_j)\cdot\rho_j$，仅
+$\alpha_j > 0$ 且通过点积误差证书 $\alpha_j > E_j$ 者可为主元；$E_j$
+为 $\gamma_k$ 放大的绝对点积界
+（\code{dot\_error\_bound}，\file{native\_dual/pricing.cpp:87-105}），
+并有一个由 $\|\bar A_{\cdot j}\|_1$ 预计算的支配系数短路
+（\code{bfrt\_error\_coef}，\file{native\_dual/state.cpp:1086-1106}）。
+按 Harris 两遍法：第一遍按断点
+$\theta_j = \max(0,-\mathrm{sign}(\mu_j)d_j)/\alpha_j$ 分组展开，直到
+累计容量 $\sum \alpha_j (\bar u_j - 0)$ 覆盖离基违例 $v_p$（有界变量
+比测试 BFRT，\file{native\_dual/pricing.cpp:462-543}）；第二遍在松弛
+步长界内取最大 $\alpha_j$（\file{native\_dual/pricing.cpp:621-670}）。
+被跳过的组对应的列执行\textbf{界翻转}（bound flip），其右端补偿
+$\Delta\bar b$ 以稀疏事务形式物化并校验覆盖量
+（\file{native\_dual/pricing.cpp:803-868}）。
+\item \textbf{FTRAN 与更新}：$\delta = B^{-1}\bar A_{\cdot q}$（打包
+FTRAN，\file{native\_dual/solver.cpp:455-465}）；主元恒等性要求
+列主元 $\delta_p$ 与行主元 $\rho_q$ 一致；原始步长
+$t = (x_{\beta p} - \text{bound})/\delta_p$，对偶步长 $\theta$；
+就地更新 $x_\beta \leftarrow x_\beta - t\delta - \Delta_{\mathrm{BFRT}}$、
+$d \leftarrow d + \theta\,\mathrm{side}\cdot\rho$
+（\file{native\_dual/solver.cpp:642-758}）。
+\item \textbf{基更新}：Forrest--Tomlin 乘积形式更新
+$B \leftarrow B + (\bar A_{\cdot q} - B e_p)e_p^{\top}$，由
+\code{HFactorBackend::update\_captured} 转发 vendored \code{HFactor}
+（\file{linear\_algebra/hfactor\_backend.cpp:734-766}）。
+\item \textbf{DSE 权重}（\code{compute\_dse\_weights}，
+\file{native\_dual/pricing.cpp:871-1000}）：Goldfarb--Reid 精确递推
+\begin{equation}
+w_i \leftarrow w_i - 2\frac{\delta_i}{\delta_p}\,\varrho_i +
+\Big(\frac{\delta_i}{\delta_p}\Big)^{2} w_p,\qquad
+w_p \leftarrow \frac{w_p}{\delta_p^{2}},
+\label{eq:dse}
+\end{equation}
+其中 $\varrho = B^{-1}\pi_p$ 需\emph{额外一次打包 FTRAN}
+（\file{native\_dual/pricing.cpp:940-946}）；带 $1024\,\varepsilon$
+下界截断防负权重（\file{native\_dual/pricing.cpp:980-990}）。
+Devex 备选模式沿参考框架更新并在比值 $>9$ 时重启框架
+（\file{native\_dual/pricing.cpp:882-938}）。
+\end{enumerate}
+
+\textbf{INVERT 策略}：每 $\max(50,\min(200,\lfloor m/4\rfloor))$ 次更新、
+或 \code{HFactor} 填充提示、或数值困难时重构
+（\file{native\_dual/solver.cpp:976-986}）。重构 = 重因子化
+（带秩修复：缺主元行以其逻辑列替换，\file{factor.cpp:44-83}、
+\file{hfactor\_backend.cpp:231-373}）+ 全量状态重建
+（\code{reconstruct}，\file{native\_dual/state.cpp:519-591}）+ 界侧
+重分类 + 单边非基列的工作成本归零平移（HiGHS \code{HEkkDual} 同款，
+\file{native\_dual/state.cpp:828-873}）。
+
+\subsection{对偶 Phase I（齐次坐标）}
+若冷基无法选出原始界下对偶可行的端点，内核进入对偶 Phase I
+（\file{native\_dual/solver.cpp:1279-1336}）：构造锚点 $x^0$ 使
+$\bar A x^0 = \bar b$（逻辑基下逐行求解，
+\code{make\_dual\_phase\_one\_anchor}，\file{native\_dual/state.cpp:197-218}，
+并用长双精度残差验证，\file{native\_dual/state.cpp:278-286}），
+在齐次坐标 $z = x - x^0$ 中把单边列的有效区间设为 $[x^0_j, x^0_j+1]$、
+盒式列固定于 $x^0_j$（\code{make\_dual\_phase\_one\_bounds}，
+\file{native\_dual/state.cpp:220-242}）。Phase I 目标为剩余原始界对偶
+不可行度之和（\code{dual\_phase\_one\_objective}，
+\file{native\_dual/state.cpp:315-330}）；其降为零后经
+\code{transition\_dual\_phase\_one\_to\_two} 恢复原始界进入 Phase II
+（\file{native\_dual/state.cpp:351-378}）。这与 HiGHS 的对偶 Phase I
+同构（注释自述，\file{native\_dual/state.cpp:230-234}）。
+
+\subsection{原始单纯形阶段（Phase I/II 与清理）}
+\code{run\_primal\_phase}（\file{native\_dual/primal.cpp:431-837}）是完整
+的有界变量原始单纯形：进入列堆定价（优度 $g_j^2/w_j$，Devex 默认、
+PSE 可选，\file{native\_dual/primal.cpp:228-250,334-362}）、
+Harris 两遍原始比测试（\code{choose\_leaving\_harris}，
+\file{native\_dual/primal.cpp:364-427}）、盒式进入列的纯界翻转捷径
+（\file{native\_dual/primal.cpp:544-569}）、主元行/列恒等性校验
+（\file{native\_dual/primal.cpp:652-667}）、每 256 次更新的定期 INVERT
+（\file{native\_dual/primal.cpp:15,825-833}）。
+原始 Phase I 以人工变量和为目标（$c_w = -1$，
+\code{make\_primal\_phase\_one\_cost}，\file{native\_dual/state.cpp:255-261}），
+Phase I 最优值 $> \tau_P$ 时以 $\pi = B^{-\top}c_\beta$ 构造 Farkas
+证书判定原始不可行（\file{native\_dual/solver.cpp:1178-1200}）。
+其用途有三：对偶 Phase I 失败的兜底、暖启动基非对偶可行时的
+修复（\code{allow\_warm\_primal\_phase\_one}）、以及 Phase II 结束后
+去除成本扰动/平移后的\textbf{原始清理}
+（\file{native\_dual/solver.cpp:1040-1097}）。
+
+\subsection{稳定化：成本扰动与工作成本平移}
+两个 HiGHS 风格的退化处理机制：
+(a) \textbf{确定性成本扰动}（\code{initialize\_stabilized\_cost}，
+\file{native\_dual/state.cpp:735-790}）：仅当初始状态原始不可行时施加，
+幅度 $5\times10^{-7}\cdot\max(1,\|c\|_\infty)^{1/4}$（结构性列）与
+$10^{-12}$（逻辑列），扰动相位由 splitmix64 哈希确定性生成
+（\code{deterministic\_fraction}，\file{native\_dual/state.cpp:24-31}）；
+(b) \textbf{工作成本平移}（cost shift）：BFRT 大对偶步长会把单边非基列
+的简约成本带过零，内核不平移界而是把该列工作成本精确归零
+（\file{native\_dual/pricing.cpp:749-759}；INVERT 时的同类平移见
+\file{native\_dual/state.cpp:849-869}）。
+两者都累积在 \code{cost\_shift}/\code{cost\_perturbation} 中，终止前
+由强制的\textbf{原始成本清理}移除并重新审计
+（\code{restore\_original\_cost} + \code{reconstruct} + \code{audit}，
+\file{native\_dual/solver.cpp:1040-1106}）。
+
+\subsection{反循环：Zobrist 签名与塔布表}
+循环防护用双 64 位 Zobrist 集合哈希刻画
+$(\text{基分配}, \text{非基界侧})$ 状态
+（\code{compute\_cycle\_signature}，\file{native\_dual/state.cpp:62-82}），
+关键工程点是每次主元只做 $O(1)$ 的 XOR 增量维护
+（\code{cycle\_signature\_apply\_basis\_swap}/
+\code{\_move\_toggle}，\file{native\_dual/state.cpp:92-106}；
+全量重算曾占 IEEE-118 根 LP 求解时间的约 11\%，注释见
+\file{native\_dual/state.cpp:40-46}）。到达已见签名时，对该签名下
+上一次离开/进入列对施加塔布（寿命 $2m+1$ 个定价纪元，
+\file{native\_dual/state.cpp:1051-1061}）；CHUZR/CHUZC 拒绝塔布候选，
+全部候选皆塔布时把该行加入行塔布，行塔布在候选耗尽时以
+aspiration 方式提前释放（\file{native\_dual/pricing.cpp:236-270}、
+\file{native\_dual/state.cpp:985-997}）。这不是 Dantzig 反退化扰动的
+替代品，而是其上的第二道防线。
+
+\subsection{证书与 fail-closed 发布}
+\label{sec:cert}
+\begin{enumerate}[label=(\roman*),leftmargin=2em]
+\item \textbf{原始不可行（Farkas）证书}：CHUZC 在新鲜重构基上无候选时，
+以 $\pi = \pi_p$（离基行对偶）构造区间证书：计算
+$\pi^{\top}\bar b$ 与 $\pi^{\top}\bar A z$ 在 $z\in[0,\bar u]$ 上的
+可达区间 $[L,U]$，取间隔较大侧并要求
+$\mathrm{margin} > 1024\,\varepsilon\cdot\max(1,\text{绝对和})$
+（\code{certificate\_from\_multiplier}，
+\file{native\_dual/certificate.cpp:10-69}）。数学依据：若
+$\pi^{\top}\bar b > \max_{z}\pi^{\top}\bar A z$（或对称地小于下界），
+则 $\bar A z = \bar b$ 与界不可兼得。Phase I 人工目标版见
+\code{phase\_one\_farkas\_certificate}
+（\file{native\_dual/certificate.cpp:87-98}）。
+\item \textbf{中断对偶界认证}：时间/迭代限制触发时，内核恢复原始成本、
+重建状态、重做界侧分类并通过对偶可行审计；成功则发布的目标值是
+原始成本下的精确对偶目标，由弱对偶性给出 LP 最优值的严格界
+（\code{certify\_interrupted\_dual\_bound}，
+\file{native\_dual/solver.cpp:799-819}；导出见
+\file{dual\_simplex.cpp:2309-2315}）。
+\item \textbf{发布前残差审计}：每次成功求解都以原始单位重算
+$\|\bar A x - \bar b\|_\infty$、界违例与人工列活动度，超过
+\code{escalation\_residual\_tol}（默认 $10^{-6}$）乘以尺度则拒绝发布
+（\code{sf\_solution\_residual\_acceptable}，
+\file{dual\_simplex.cpp:2415-2470}；LPModel 空间版本
+\code{lp\_solution\_residual\_acceptable}，
+\file{dual\_simplex.cpp:1812-1846}，含 $10^{19}$ 哨兵污染防护）。
+HiGHS 委托路径同样被审计（\code{audit\_vendored\_highs\_sf\_result}，
+\file{dual\_simplex.cpp:682-754}）。
+\end{enumerate}
+
+\subsection{HiGHS 委托路径的数学角色}
+默认后端下，\eqref{eq:sf} 被翻译成 HiGHS 模型（人工列固定为 0），
+由 vendored HiGHS 的单纯形求解（presolve 关、单线程、对偶策略，
+\file{dual\_simplex.cpp:1354-1374}），结果（基、简约成本、目标）翻译回
+原生约定并做上节审计。基提示经 \code{native\_sf\_basis\_to\_highs}
+转换（\file{dual\_simplex.cpp:558-599}）；持久化路径
+\code{resolve\_same\_structure} 在结构不变（\code{structure\_id} 匹配）
+时只增量改界/右端并复用 HiGHS 实例
+（\file{dual\_simplex.cpp:1095-1210}）。Farkas 射线由 HiGHS
+\code{getDualRay} 取得并按公共约定归一化
+（\file{dual\_simplex.cpp:1420-1489}）。
+
+%=====================================================================
+\section{数据结构评估}
+\label{sec:ds}
+%=====================================================================
+
+本节逐项评估关键数据结构，并给出 $m=n=10^{7}$、$\nnz(\bar A)=10^{8}$
+（下称"\textbf{基准规模}"）下的内存账目。所有条目为 (V)。
+
+\subsection{标准形 \code{StandardFormLP}：矩阵存三份的源头}
+\code{StandardFormLP}（\file{include/mipsolvers/engine/kernel/lp\_kernel/dual\_simplex.hpp:273-313}）
+同时持有：
+\begin{itemize}[leftmargin=2em]
+\item \code{A}：列主 Eigen 稀疏矩阵（CSC），索引类型为 Eigen 默认
+\code{StorageIndex = int}（32 位）；
+\item \code{A\_row}：同一矩阵的行主副本（\file{dual\_simplex.hpp:278}，
+注释自述用途为"GMI 的行访问"；构建于 \file{dual\_simplex\_api.cpp:206,449,699}）；
+\item 此外，\code{HFactorBackend::factorize} 在\emph{每次 LU 重构时}把
+整个 $\bar A$ 再拷贝一份到 \code{a\_start/a\_index/a\_value}
+（\file{linear\_algebra/hfactor\_backend.cpp:112-131,48-50}），
+且先无条件构造 \code{Eigen::SparseMatrix<double> Acm(A)} 临时副本
+（\file{hfactor\_backend.cpp:112}）——重构瞬间矩阵共存在 \textbf{4 份}。
+\end{itemize}
+每项非零元在 CSC 中占 $8+4=12$ 字节（值 + 行索引）。基准规模下：
+$\nnz=10^{8} \Rightarrow$ 每份约 $1.24\,$GB（含列指针 $4(n{+}1)$），
+稳态三份约 $\mathbf{3.7\,\textbf{GB}}$，重构瞬间约 $4.9\,$GB。
+对比：HiGHS 内部矩阵只存一份（列主），行访问需求由按需构建的
+\code{AR\_matrix} 承担且可与列主共享值数组。
+
+\begin{finding}[D1：冗余矩阵存储（严重）]
+行主副本 \code{A\_row} 是持久成员而非按需视图；在 B\&C 中每个被保留的
+\code{SimplexResult} 还持有 \code{form} 的完整拷贝
+（\file{dual\_simplex.cpp:979,1406} 的 \code{out.form = sf}；
+\code{SimplexResult::form} 字段见 \file{dual\_simplex.hpp:317}）。
+$B$ 个存活节点结果 $\Rightarrow$ $2B$ 份额外矩阵拷贝。在基准规模下，
+仅 10 个存活结果即 $\approx 25\,$GB。这是数据结构层面最重的浪费。
+\end{finding}
+
+\begin{finding}[D2：32 位索引硬顶（严重）]
+全部索引为 32 位 \code{int}：\code{State} 的所有向量
+（\file{native\_dual/model.hpp:48-120}）、\code{HFactorBackend} 的
+\code{HighsInt}（其注释自述 "\code{== int on this build}"，
+\file{linear\_algebra/hfactor\_backend.cpp:119-120}）、Eigen 默认
+\code{StorageIndex}。列/行号 $10^{7}$ 本身可表示，但 $\nnz$ 经
+\code{int} 累加（\file{hfactor\_backend.cpp:117} 的
+\code{static\_cast<HighsInt>(Acm.nonZeros())}，以及
+\code{build\_standard\_form\_lp} 的 triplet 计数）在
+$\nnz > 2^{31}-1 \approx 2.1\times10^{9}$ 时溢出。基准规模（$10^{8}$）
+尚可，但平均行非零超过约 200 的 $10^{7}\times10^{7}$ 问题（LP 松弛
+加割后常见）即越界。维度本身 $> 2^{31}$ 则直接不可用。
+\end{finding}
+
+\subsection{迭代状态 \code{State}：稠密向量组（合理但有账目）}
+\code{State}（\file{native\_dual/model.hpp:48-120}）持有
+\code{bounds.lower/upper}、\code{cost}、\code{original\_cost}、
+\code{cost\_perturbation}、\code{cost\_shift}、
+\code{dual\_phase\_one\_anchor}（各 $n$）、\code{x\_basic}（$m$）、
+\code{reduced\_costs}（$n$）共 9 个稠密 \code{Eigen::VectorXd}，
+加 \code{edge\_weight}（$m$ 个 \code{double}）与若干 \code{char}
+数组。修订单纯形中稠密 $O(m+n)$ 状态是标准做法（HiGHS 同），
+账目为：$9\times 8\times 10^{7}\,\text{B} \approx 0.72\,$GB，
+可接受。但注意 \code{cost\_perturbation}/\code{cost\_shift} 与
+\code{original\_cost} 三个 $n$ 维向量仅为稳定化簿记，可用稀疏
+增量表替代（省约 $0.24\,$GB，非致命）。
+
+\subsection{稀疏向量 \code{IndexedVector} 与打包求解}
+\code{IndexedVector}（\file{native\_dual/model.hpp:133-188}）是
+(index, value) 打包稀疏向量，坐标查询用懒惰构建的开放寻址哈希
+（2 倍支持集大小的槽表，Fibonacci 散列，
+\file{native\_dual/model.hpp:148-180}）。热路径（CHUZR/PRICE/FTRAN/
+DSE）全程打包：\code{HFactorBackend::ftran\_indexed}/\code{btran\_indexed}
+（\file{hfactor\_backend.cpp:614-717}）直接驱动 \code{HFactor} 的
+超稀疏求解并只导出非零支持。这是合格的超稀疏设计，与 HiGHS 的
+\code{HVector} 同构。两点保留：
+(a) \code{multiply\_AT\_indexed} 的邮戳累加器是 \code{thread\_local}
+稠密数组（$8+4$ 字节/列，\file{native\_dual/pricing.cpp:121-138}），
+基准规模下每线程约 $120\,$MB，连同 \code{marks}、\code{primal\_delta}
+等同类缓冲（\file{native\_dual/pricing.cpp:682-697}、
+\file{native\_dual/solver.cpp:271-284,476-491,646-656}），
+每线程常驻约 $0.5\,$GB——线程数乘此数是并行 B\&C 的隐性内存税；
+(b) \code{dot\_error\_bound} 对候选列逐系数调用 \code{row\_ep.at()}
+哈希查询（\file{native\_dual/pricing.cpp:87-105}），缓存不友好；
+代码已用 \code{dense\_row\_ep} 散射缓解
+（\file{native\_dual/pricing.cpp:336-356}），属已知折中。
+
+\subsection{CHUZR 堆与原始定价堆：合格}
+对偶离基堆为懒惰版本化二叉堆（\file{native\_dual/model.hpp:49-53}、
+\file{native\_dual/pricing.cpp:27-85}）：过期条目到堆顶才丢弃，
+重建触发于稠密变更或条目数 $>4m$（\file{native\_dual/pricing.cpp:206-210}）。
+每次主元仅刷新实际改变的行（\code{refresh\_leaving\_heap}，
+\file{native\_dual/pricing.cpp:181-211}）。原始进入堆带位置索引，
+支持 $O(\log)$ 删除/刷新（\file{native\_dual/primal.cpp:151-250}）。
+两者都是正确的工程选择，无占位成分。
+
+\subsection{反循环表：\code{std::map} 的不当选择与无界增长}
+\code{cycle\_history}、\code{taboo\_changes}、\code{taboo\_rows}
+均为 \code{std::map}（红黑树，\file{native\_dual/model.hpp:116-119}）。
+三个问题：
+(a) 每次查询/插入 $O(\log)$ 且节点指针追逐、缓存行为差——键为
+128--192 位元组，应使用开放寻址扁平哈希；
+(b) \code{cycle\_history} \emph{从不删除条目}
+（\file{native\_dual/state.cpp:999-1064} 只有 \code{try\_emplace} 与
+\code{last\_seen} 更新），随不同签名数单调增长：每条约
+$\ge 80$ 字节（树节点开销 + 键 + 记录），$10^{6}$ 个不同签名即
+$\ge 80\,$MB，$10^{7}$ 次主元的退化问题可积累到 GB 级；
+(c) 塔布寿命 $2m+1$（\file{native\_dual/state.cpp:976,1053}）在
+$m=10^{7}$ 时等于"永不失效"，塔布表只增不减。
+这是真实实现，但数据结构选型与生命周期管理在基准规模下失效。
+
+\subsection{LU/FT 后端 \code{HFactorBackend}：真实但带全量拷贝}
+包装层（\file{linear\_algebra/hfactor\_backend.cpp}）是真实的：
+\code{factorize} 驱动 vendored \code{HFactor::build}（Markowitz 型
+LU + 阈值主元，\file{hfactor\_backend.cpp:144-174}）；
+\code{factorize\_with\_logicals} 实现 HiGHS 式秩修复
+（缺主元行换逻辑列后重因子化，\file{hfactor\_backend.cpp:231-373}）；
+FTRAN/BTRAN 支持超稀疏（$m\ge 2000$ 启用，可用环境变量调，
+\file{hfactor\_backend.cpp:29-39,386-428}）；FT 更新用捕获的
+\code{HVector} 打包数据（\code{update\_captured}，
+\file{hfactor\_backend.cpp:734-766}）。三点缺陷：
+(a) 前述每次 \code{factorize} 全量拷贝 $\bar A$（D1）；
+(b) 非打包 \code{ftran}/\code{btran} 每次求解做 $O(m)$ 的排列重映射与
+\code{memcpy} 导出（\file{hfactor\_backend.cpp:391-398,429-433,505-518,551-552}），
+这些稠密入口被 \code{reconstruct}、\code{basis\_inverse\_row}、
+\code{tableau\_row} 使用——每次 INVERT 的重建与每次割生成的行提取都是
+$O(m)$ 起步，无法利用解的稀疏性（打包入口无此问题，热路径用的正是
+打包入口）；
+(c) 打包/稠密两套求解路径并存（2000 行阈值切换），行为（含数值路径）
+依赖问题规模，注释自述小系统强制稠密是"数值更稳"
+（\file{hfactor\_backend.cpp:24-28}）——同一求解器在不同规模下走不同
+数值路径，是可复现性隐患。
+
+\subsection{遗留与冗余字段}
+\code{SimplexResult::basis\_inverse} 是稠密 \code{Eigen::MatrixXd}
+$m\times m$ 字段（\file{dual\_simplex.hpp:319}）。当前所有求解路径都将其
+置空（\file{dual\_simplex.cpp:1036,1602} 的 \code{resize(0,0)}；
+\file{src/engine/solver/native/milp/bc/legacy/bc\_relaxation.cpp:745}），
+即\textbf{从未被填充}。它是历史稠密实现的 ABI 残留：字段本身不占内存，
+但任何恢复填充它的改动在 $m=10^{7}$ 下意味着 $8\times10^{14}$ 字节
+（$800\,$TB）——必须在文档/类型层面明确废弃。
+\code{SimplexOptions} 亦含大量自述为 "Legacy ABI field" 的死参数
+（\code{use\_partial\_pricing}、\code{perturb\_degenerate\_primal}、
+\code{fallback\_basis}、\code{enable\_degenerate\_frontier\_remap}
+等，\file{dual\_simplex.hpp:148-160,178-189}）——设置它们不产生任何
+效果，属于 API 层面的占位符（见 \S\ref{sec:placeholders}）。
+
+\subsection{基准规模内存账目}
+\begin{longtable}{@{}p{0.52\textwidth}r r@{}}
+\caption{$m=n=10^{7}$、$\nnz=10^{8}$ 下的稳态内存估算（(I)：由数据结构
+定义推算，LU 填充按基非零 3--10 倍的经验区间）}\label{tab:mem}\\
+\toprule
+组件 & 渐近量 & 估算 \\
+\midrule
+\endfirsthead
+\toprule
+组件 & 渐近量 & 估算 \\
+\midrule
+\endhead
+\code{A}（CSC） & $12\,\nnz + 4n$ & $1.24\,$GB \\
+\code{A\_row}（行主副本） & $12\,\nnz + 4m$ & $1.24\,$GB \\
+\code{HFactorBackend} 的 $\bar A$ 拷贝 & $12\,\nnz + 4n$ & $1.24\,$GB \\
+\code{factorize} 临时副本 \code{Acm}（重构瞬间） & $12\,\nnz$ & $+1.24\,$GB（瞬时） \\
+\code{State} 稠密向量组 & $9\times 8(n{+}m)$ 量级 & $0.72\,$GB \\
+thread\_local 累加/邮戳缓冲（每线程） & $12n + 12m$ 量级 & $0.5\,$GB/线程 \\
+LU 因子 $L+U$（填充 $3$--$10\times$ 基非零） & 实例相关 & $0.4$--$4\,$GB \\
+\code{cycle\_history}（$10^{6}$ 签名） & $\ge 80\,$B/条 & $\ge 0.08\,$GB \\
+每个存活的 \code{SimplexResult.form} & $24\,\nnz$ & $+2.5\,$GB/个 \\
+\midrule
+\textbf{合计（单解、不含结果保留）} & & $\approx \mathbf{5}$--$\mathbf{9\,\textbf{GB}}$ \\
+\bottomrule
+\end{longtable}
+结论：单次求解在 $16\,$GB 机器上勉强可行，但内存效率约为理论下限
+（单份矩阵 + 迭代状态 + LU）的 $2.5$--$3$ 倍；任何"B\&C 节点保留
+LP 结果"的用法在基准规模下不可行（D1）。
+
+%=====================================================================
+\section{算法效率评估}
+\label{sec:algo}
+%=====================================================================
+
+记号：$s_\rho = |\mathrm{supp}(\rho)|$（主行支持），$s_\delta$（方向
+$\delta = B^{-1}\bar A_{\cdot q}$ 的支持），$s_\pi$（行对偶支持），
+$\bar\nu$（候选列平均非零数），$K$（两次 INVERT 间主元数，$\le 200$）。
+
+\subsection{对偶 Phase II 单次主元：真实的超稀疏实现}
+表~\ref{tab:iter} 逐项给出 \code{minor\_iteration}
+（\file{native\_dual/solver.cpp:330-797}）的成本。热路径\emph{没有}
+$O(m)$ 或 $O(n)$ 的隐式全扫描：所有工作都正比于涉及向量的支持集。
+这与 HiGHS 对偶单纯形的渐近轮廓一致。
+
+\begin{longtable}{@{}p{0.30\textwidth}p{0.34\textwidth}p{0.28\textwidth}@{}}
+\caption{单次对偶主元的成本分解（(V)）}\label{tab:iter}\\
+\toprule
+步骤 & 成本 & 代码位置 \\
+\midrule
+\endfirsthead
+\toprule
+步骤 & 成本 & 代码位置 \\
+\midrule
+\endhead
+CHUZR（堆 + 打包 BTRAN） & $O(\log m + \nnz(\text{BTRAN}))$ & \file{pricing.cpp:213-305} \\
+PRICE（$\rho = \bar A^{\top}\pi_p$） & $O\!\big(\sum_{i\in\mathrm{supp}(\pi_p)}\nnz(\bar A_{i\cdot})\big)$ & \file{pricing.cpp:117-179} \\
+BFRT 扫描 & $O(s_\rho)$，候选点积界最坏 $O(\bar\nu)$/列 & \file{pricing.cpp:307-869} \\
+FTRAN($\bar A_{\cdot q}$) & $O(\nnz(\text{FTRAN}))$ & \file{solver.cpp:455-465} \\
+BFRT 右端 FTRAN（有翻转时） & 额外一次打包 FTRAN & \file{solver.cpp:575-584} \\
+DSE 权重（Goldfarb--Reid） & 额外一次打包 FTRAN $+ O(s_\delta)$ & \file{pricing.cpp:940-999} \\
+FT 更新 & $O(\nnz(\eta))$ & \file{hfactor\_backend.cpp:734-766} \\
+状态增量（$x_\beta$、$d$、堆刷新、签名） & $O(s_\delta + s_\rho)$ & \file{solver.cpp:642-772} \\
+\midrule
+\textbf{合计} & \multicolumn{2}{l}{4 次稀疏三角求解 + 1 次稀疏 SpMV + 支持集级线性工作} \\
+\bottomrule
+\end{longtable}
+
+两点定量保留：
+(a) \textbf{每次主元 4 次三角求解}（BTRAN、FTRAN、BFRT-FTRAN、DSE-FTRAN）
+比 HiGHS 的典型 2--3 次多一次——精确 DSE 的 $\varrho = B^{-1}\pi_p$
+是固有代价（HiGHS 同样支付），但 BFRT 右端的额外 FTRAN
+（\file{solver.cpp:578-583}）在翻转频繁时使常数显著增大；
+(b) BFRT 候选的 \code{dot\_error\_bound} 对每个候选列遍历其全部非零
+（\file{pricing.cpp:87-105}），最坏 $O(s_\rho\cdot\bar\nu)$；支配系数
+短路（\file{pricing.cpp:396-401,411-424}）依赖 $\|\bar A_{\cdot j}\|_1$
+足够紧，对退化主行（$s_\rho$ 大）可能退化为全量遍历。
+
+\subsection{INVERT 与其"验证税"}
+\label{sec:invert}
+每次重构（\code{major\_rebuild}，\file{native\_dual/state.cpp:792-914}）
+的成本远超 LU 本身：
+\begin{enumerate}[label=(\roman*),leftmargin=2em]
+\item \code{HFactorBackend::factorize}：LU $O(\nnz(L{+}U))$ +
+\textbf{全量矩阵拷贝} $O(n + \nnz(\bar A))$（\file{hfactor\_backend.cpp:112-131}）；
+\item \code{reconstruct}：稠密 FTRAN + BTRAN + 全矩阵 $O(\nnz(\bar A))$
+的 $\bar A^{\top}y$（\file{native\_dual/state.cpp:519-591}；
+\code{multiply\_AT} 遍历全部 $n$ 列，\file{state.cpp:149-161}）；
+\item \code{correct\_canonical\_primal\_residual}（由
+\code{reconstruct} 调用）：构造完整原始点 $O(n)$ + \textbf{长双精度}残差
+$O(\nnz(\bar A))$，超标时再做一次校验 FTRAN 并重算一遍
+（\file{native\_dual/state.cpp:466-517}）——即\textbf{最多 2 趟}
+长双精度 SpMV；
+\item \code{major\_rebuild} 再调两次 \code{reconstruct}（界侧重分类与
+成本平移后，\file{state.cpp:806,843,870}）；
+\item 最终 \code{audit}：又构造完整原始点 + 一趟长双精度残差
+（\file{native\_dual/state.cpp:1227-1229,1199-1271}）。
+\end{enumerate}
+合计每次 INVERT：1 次 LU + 1 次全矩阵拷贝 + 2 次稠密求解 +
+约 \textbf{3--4 趟长双精度 $O(\nnz(\bar A))$ 残差}。长双精度
+（x87 80 位）FMA 吞吐约为双精度的 $1/4$--$1/8$，故仅验证趟就相当于
+$\approx 1$ 趟双精度 SpMV 的 $12$--$32$ 倍。以 $\nnz=10^{8}$、
+每次 INVERT 间隔 $K=200$ 主元计，验证税约为每次主元摊销
+$10^{8}\times 4 \times 4 / 200 \approx 8\times10^{6}$ 次双精度等效
+FLOP——与一个填充适中的三角求解同量级。这不是占位符（计算是真实
+且有数学目的的），但它是按"$m$ 小、INVERT 便宜"设计的：在基准规模下
+验证税与 LU 本身同为支配成本，\S\ref{sec:scale} 将其列为致命项 F2。
+
+\subsection{冷启动初始化：精确 DSE 是单独的灾难}
+\label{sec:dseinit}
+冷启动（无基提示）默认执行精确 DSE 权重初始化
+（\code{initialize\_cold\_edge\_weights} $\to$
+\code{initialize\_exact\_edge\_weights}，\file{native\_dual/state.cpp:1149-1161,676-719}）：
+对每个基行 $i$ 做一次带后向误差验证的 BTRAN（$B^{-\top}e_i$），
+共 $m$ 次（\code{compute\_exact\_edge\_weights}，
+\file{native\_dual/factor.cpp:628-657}）。每次求解经
+\code{checked\_btran} 附带 $O(\nnz(B))$ 的残差验证
+（\file{factor.cpp:424-477,310-350,526-542}）。总成本
+$\Omega\!\big(m\cdot(\text{BTRAN} + \nnz(B))\big)$。
+$m=10^{4}$ 时已是秒级--分钟级；$m=10^{7}$、即使每次 BTRAN 仅
+$10^{4}$ 非零，也是 $\ge 10^{11}$ 次运算的\textbf{天数级}开销，
+外加 $m$ 趟 $O(\nnz(B))$ 验证。HiGHS 在大问题上用单位权重 +
+递推修正近似初始化精确 DSE，正是为了避开 $m$ 次求解。
+环境变量 \code{MIPSOLVERS\_DUAL\_PRICING=devex} 可切换到 Devex 避开
+（\file{native\_dual/state.cpp:1154-1159}），但默认策略在基准规模下
+不可用。此为致命项 F1。
+
+\subsection{原始单纯形阶段的成本轮廓}
+\code{run\_primal\_phase} 每次主元：1 次打包 FTRAN + 1 次打包 BTRAN +
+1 次 PRICE + Harris 比测试 $O(s_\delta)$ + 堆刷新
+$O(s_\rho\log)$，轮廓合格。但 PSE 模式初始化对\emph{每个非基列}
+做一次 FTRAN（\code{initialize\_primal\_pse}，
+\file{native\_dual/primal.cpp:252-274}）：$O(n)$ 次求解，$n=10^{7}$
+下绝无可能；Devex（默认）无此问题。PSE 属于"实现了但仅小维可用"
+的模式（见 \S\ref{sec:placeholders} P4）。
+
+\subsection{标准形与边界的增量维护：合格}
+\code{update\_standard\_form\_bounds}（\file{dual\_simplex\_api.cpp:855-971}）
+对 $\le 50$ 个下界变化走逐列增量（$O(\sum \nnz(\text{变化列}))$），
+否则全量 SpMV；\code{update\_standard\_form\_bounds\_incremental}
+（\file{dual\_simplex\_api.cpp:976-1078}）先完整校验变更序列再应用，
+避免兄弟节点陈旧增量污染。\code{update\_standard\_form\_cost}
+（\file{dual\_simplex\_api.cpp:722-756}）$O(n)$ 保结构换成本。
+这些是 B\&C 节点 LP 的正确工程：每节点 $O(1)$--$O(\text{几列})$。
+
+\subsection{HiGHS 委托路径的成本}
+非持久化路径每次求解：完整遍历 $\bar A$ 构造 HiGHS CSC
+（\code{pass\_standard\_form\_to\_highs}，\file{dual\_simplex.cpp:627-680}，
+$O(n + \nnz)$ 拷贝与逐元素 \code{push\_back}）+ HiGHS 内部再持有一份
+——即求解前至少 2 趟全矩阵拷贝。持久化路径
+（\code{resolve\_same\_structure}）消除之，但要求
+\code{structure\_id} 匹配与逐元素成本相等校验（$O(n)$，
+\file{dual\_simplex.cpp:1130-1139}），并有失败时完整快照回滚再
+\code{run()} 一次的代价（\file{dual\_simplex.cpp:1208,1303-1323}）。
+结果回填阶段的 \code{import\_optimal\_result} 与
+\code{inject\_basic\_degenerate\_col\_duals\_from\_highs} 对每个基本
+整数/二进制列调用 \code{getReducedRow}（一次 BTRAN + $O(n)$ 扫描，
+\file{dual\_simplex.cpp:756-859}）——整数列占比高时是 $O(n)$ 次
+BTRAN 量级，在基准规模下同样是初始化级灾难，但该注入服务于 MIP
+传播的对偶质量，属于功能性代价而非错误。
+
+\subsection{复杂度小结}
+热路径（对偶 Phase II 主元）渐近合格；成本集中在三处\emph{结构性}
+开销：每次 INVERT 的全矩阵拷贝与长双精度审计（F2）、冷启动精确 DSE
+（F1）、矩阵三份存储带来的带宽压力（D1）。换言之，该内核的效率问题
+不在主循环算法，而在\emph{围绕}主循环的验证与初始化机器——这与
+"看起来复杂"的观感来源一致：复杂度集中在正确性证据的构造上，
+而非求解本身。
+
+%=====================================================================
+\section{占位符与缺陷清单}
+\label{sec:placeholders}
+%=====================================================================
+
+本节回答用户的核心怀疑："代码内有大量占位符，很多是虚假的，只是看起来
+复杂。"按证据强度分三类。\textbf{P 类}：字面意义的死代码/虚假参数——
+存在、精心编写、从不产生效果；\textbf{Q 类}：数学上不构成其所声称之物的
+实现缺口；\textbf{R 类}：真实实现但仅在小维有意义的"规模占位符"。
+每条附 (V)/(I) 标注。
+
+\subsection{P 类：死代码与虚假参数（证据确凿）}
+
+\begin{finding}[P1：约 290 行长双精度"精确验证"机器是零调用死代码（(V)，最严重）]
+\code{BasisFactor::pivot\_evidence}（\file{native\_dual/factor.cpp:138-216}）、
+\code{row\_solve\_consistent}（\file{native\_dual/factor.cpp:218-308}）、
+\code{refine\_ftran}（\file{native\_dual/factor.cpp:623-626}）三个函数
+以长双精度构造主元行/列恒等性的严格误差包络
+（$\gamma_n$ 放大、残差包络、算术守卫），约 290 行，读起来像是
+内核数值正确性的核心。全仓库（\file{src/} 与 \file{tests/}）符号
+搜索确认：\textbf{除自身定义与头文件声明外无任何调用点}。
+主元行/列一致性实际由两处轻量检查承担：对偶侧的 BFRT 后验条件
+（\file{native\_dual/solver.cpp:541-572}）与原始侧的
+\code{primal\_pivot\_identity\_acceptable}
+（\file{native\_dual/primal.cpp:652-667}、
+\file{native\_dual/primal\_pricing.hpp:219-226}）。
+这正是"只是看起来复杂"的典型：它们给人留下"每次主元都经严格
+验证"的印象，但真实热路径并不使用它们。
+（保留可能性：作为未来严格模式的预留。但按现状报告：死代码。）
+\end{finding}
+
+\begin{finding}[P2：\code{is\_artificial} 的 $O(m)$ 线性扫描（(V)）]
+\file{native\_dual/state.cpp:173-178}：每次调用线性扫描
+\code{row\_to\_artificial\_col}（长度 $m$）。同为零调用死代码
+（声明于 \file{state.hpp:27}，无调用点）。若被用于逐列判定将是
+$O(m)$/次的陷阱；正确结构是 \code{aux\_col\_to\_row} 反向表
+（已存在于 \code{StandardFormLP}，\file{dual\_simplex.hpp:298}）。
+\end{finding}
+
+\begin{finding}[P3：\code{SimplexOptions} 的遗留 ABI 参数字段（(V)）]
+以下字段设置后\textbf{无任何效果}，注释自述 "Legacy ABI field"：
+\code{allow\_cold\_start}、\code{use\_partial\_pricing}、
+\code{perturb\_degenerate\_primal}、\code{fallback\_basis}、
+\code{exact\_dse\_initialization}、\code{enable\_/suppress\_degenerate\_frontier\_remap}、
+\code{escalation\_max\_level}、\code{escalation\_umfpack\_pivot\_tolerance}、
+\code{escalation\_ruiz\_rounds}、\code{escalation\_start\_level}、
+\code{escalation\_max\_level\_sf}
+（\file{include/mipsolvers/engine/kernel/lp\_kernel/dual\_simplex.hpp:137-195}）。
+调用方若以为 \code{use\_partial\_pricing=true} 启用了部分定价、或
+\code{fallback\_basis} 提供了失败回退，得到的是静默无效。这是 API
+层面的占位符：保留编译兼容，但语义为空。另：
+\code{dump\_solve\_lp\_counters()} 是显式 no-op
+（\file{dual\_simplex.cpp:2000}）。
+\end{finding}
+
+\begin{finding}[P4：\code{SimplexResult::basis\_inverse} 稠密逆矩阵字段（(V)）]
+\code{Eigen::MatrixXd} 类型的 $m\times m$ 稠密字段
+（\file{dual\_simplex.hpp:319}），所有路径置空
+（\file{dual\_simplex.cpp:1036,1602}）。结构层面的"我们好像能提供
+$B^{-1}$"的假象；真实接口是 \code{BasisOps::basis\_inverse\_row}
+（按需单行）。见 \S\ref{sec:ds}。
+\end{finding}
+
+\subsection{Q 类：数学缺口（声称与实现不符）}
+
+\begin{finding}[Q1：无原始无界证书，无界被报为数值失败（(V)，功能缺陷）]
+\code{Status} 枚举没有 \code{Unbounded}
+（\file{native\_dual/native\_dual\_core.hpp:13-22}）。原始单纯形
+Harris 比测试得不到有限步长（数学上即发现无界射线
+$\delta = B^{-1}\bar A_{\cdot q}$，$\delta \le 0$ 且 $d_q > 0$）时，
+代码返回 \code{NumericalFailure} 并附言
+"an unbounded certificate is required"
+（\file{native\_dual/primal.cpp:525-541}）——即代码\emph{承认}此处
+需要无界证书但未实现。对偶侧同理：对偶 Phase I 以
+\code{DualInfeasibleStart} 结束时并不产出原始无界射线
+（\file{native\_dual/solver.cpp:855-863}）。对偶单纯形在 Phase II 中
+理论上不会遇到原始无界（对偶可行下目标有界），所以日常路径不触发；
+但作为通用 LP 求解器，无界判定只能依赖 HiGHS 委托路径
+（\code{kUnbounded} 标签，\file{dual\_simplex.cpp:541-543}）。
+原生内核的证书体系（\S\ref{sec:cert}）是\emph{单侧}的：只有
+不可行证书，没有无界证书。
+\end{finding}
+
+\begin{finding}[Q2：后向误差验证的范数在 FT 更新后陈旧（(V)，严格性缺口）]
+\code{backward\_error\_acceptable} 的误差限为
+$256\,\varepsilon\max(1,\|B\|_\infty\|x\|_\infty + \|r\|_\infty)$
+（\file{native\_dual/factor.cpp:526-542}），其中范数
+\code{norm\_B\_inf\_} 只在 \code{rebuild}/\code{rebind\_A} 时重算
+（\file{factor.cpp:79,401-422,711}）。稠密 \code{update} 路径有
+$O(m)$ 的 \code{max\_element} 范数维护（\file{factor.cpp:115-120}），
+但热路径走 \code{update\_indexed}（\file{factor.cpp:125-136}），
+它不更新范数。因此第 $k$ 次 FT 更新后的校验求解所用误差包络基于
+$k$ 步之前的基：$\|B^{(0)}\|_\infty$ 并不控制 $\|B^{(k)}\|_\infty$。
+缓解事实：打包求解（热路径）根本不做后向误差验证
+（\code{indexed\_ftran}/\code{indexed\_btran} 只查有限性，
+\file{factor.cpp:591-621}），且每次 INVERT 后范数重新同步——所以
+这不是"证书造假"，而是验证包络在两个 INVERT 之间逐渐失去严格性。
+报告因为它与代码注释自述的"每次求解都经后向误差验证"的形象不符。
+\end{finding}
+
+\begin{finding}[Q3：\code{update} 的 $O(m)$ 范数维护（(V)，潜在陷阱）]
+若任何未来调用方使用稠密 \code{BasisFactor::update}（当前无调用点，
+\file{factor.cpp:85-123}），每次主元将支付两次 $O(m)$ 的
+\code{max\_element}（\file{factor.cpp:115-120}）。当前无影响；
+列为陷阱。
+\end{finding}
+
+\subsection{R 类：真实但仅小维有意义的实现}
+
+\begin{finding}[R1：精确 DSE 初始化（(V)）]
+见 \S\ref{sec:dseinit}：$m$ 次带验证 BTRAN。数学真实，$m=10^{7}$
+不可用。
+\end{finding}
+
+\begin{finding}[R2：PSE 定价初始化（(V)）]
+\code{initialize\_primal\_pse} 对每个非基列一次 FTRAN
+（\file{native\_dual/primal.cpp:252-274}）：$O(n)$ 次求解。
+默认关闭（\code{MIPSOLVERS\_PRIMAL\_DEVEX} 默认 Devex，
+\file{native\_dual/primal.cpp:108-116}），但 PSE 模式在基准规模下
+是装饰性的。
+\end{finding}
+
+\begin{finding}[R3：每次 INVERT 的长双精度审计趟（(V)）]
+见 \S\ref{sec:invert}：3--4 趟 $O(\nnz(\bar A))$ 长双精度残差。
+数学真实且动机正当（fail-closed 发布），常数在基准规模下致命。
+\end{finding}
+
+\begin{finding}[R4：\code{compute\_exact\_edge\_weights} 的逐行单位向量
+BTRAN（(V)）]
+\file{native\_dual/factor.cpp:628-657}：$m$ 次独立 BTRAN 而非批量
+三角求解（无法利用共同的 $L/U$ 结构做块化处理）。真实但效率为
+理论下限的数倍。
+\end{finding}
+
+\begin{finding}[R5：\code{inject\_basic\_degenerate\_col\_duals\_from\_highs}
+（(V)）]
+HiGHS 路径下对每个基本整数列一次 \code{getReducedRow} + $O(n)$ 扫描
+（\file{dual\_simplex.cpp:756-859}）。功能真实（改善 MIP 传播对偶），
+全整数大模型下为 $O(n)$ 次 BTRAN。
+\end{finding}
+
+%=====================================================================
+\section{千万维可扩展性结论}
+\label{sec:scale}
+%=====================================================================
+
+\subsection{致命项排序}
+在 $m=n=10^{7}$、$\nnz(\bar A)=10^{8}$ 的通用 LP 上，按"是否单独即
+使求解不可行"排序：
+
+\begin{longtable}{@{}c p{0.42\textwidth} p{0.40\textwidth}@{}}
+\caption{致命项与定量理由}\label{tab:fatal}\\
+\toprule
+\# & 致命项 & 定量理由 \\
+\midrule
+\endfirsthead
+\toprule
+\# & 致命项 & 定量理由 \\
+\midrule
+\endhead
+F1 & 冷启动精确 DSE：$m$ 次带验证 BTRAN（\S\ref{sec:dseinit}） &
+$\ge 10^{11}$ 次运算（天数级），每次冷启动必付 \\
+F2 & 每次 INVERT 的 3--4 趟长双精度 $O(\nnz)$ 审计 + 全矩阵拷贝
+（\S\ref{sec:invert}） & 每 INVERT $\approx 4\times10^{8}$ 长双精度 FLOP
+$+1.2\,$GB 拷贝；$10^{4}$ 次 INVERT 即 $\approx 4\times10^{12}$
+等效双精度 FLOP \\
+F3 & 矩阵三份常驻 + 每次 INVERT 第四份瞬时拷贝（D1） &
+稳态 $3.7\,$GB、重构瞬间 $4.9\,$GB，仅为矩阵本身；叠加 LU 与状态
+后 $16\,$GB 机器无余量做 B\&C \\
+F4 & 32 位索引（D2） & $\nnz > 2.1\times10^{9}$ 或维度
+$>2^{31}$ 直接溢出；加割后的 $10^{7}$ 维问题可触及 \\
+F5 & \code{cycle\_history}/塔布 \code{std::map} 无界增长 &
+高退化 $10^{7}$ 维问题的 $10^{6}$--$10^{7}$ 次主元产生 GB 级
+红黑树，且塔布寿命 $2m+1$ 等于永久 \\
+F6 & 非打包 FTRAN/BTRAN 的 $O(m)$ 稠密导出 &
+每次 INVERT 重建与每次割行提取 $O(m)$ 起步；$10^{4}$ 次 INVERT
+即 $10^{11}$ 次内存访问 \\
+\bottomrule
+\end{longtable}
+
+此外有两个\emph{正确性边界}在基准规模下同样需要重审：FT 更新上限
+$K\le 200$（\file{solver.cpp:976-986}）意味着 $10^{6}$ 次主元需
+$5\times10^{3}$ 次 LU 重构，每次重构是 $10^{7}$ 阶 Markowitz LU——
+若基非零为 $5\times10^{7}$，单次重构在现有实现（含 F2 验证税）下
+为分钟级，总时间以周计；以及 Q2 的验证包络随更新次数失去严格性。
+
+\subsection{必须修改的清单（按投入产出排序）}
+\begin{enumerate}[label=M\arabic*.,leftmargin=3em]
+\item \textbf{用近似 DSE 初始化替换精确初始化}：单位权重 + 递推修正
+（HiGHS 默认策略），保留精确路径为选项。消除 F1。改动集中于
+\code{initialize\_cold\_edge\_weights}（\file{state.cpp:1149-1161}）。
+\item \textbf{审计趟降频与降精度}：长双精度残差改为双精度 + 仅每
+$k$ 次 INVERT 执行完整审计（保留 fail-closed 发布审计不动——
+那是结果正确性的最后防线）。缓解 F2。
+\item \textbf{矩阵单份化}：\code{A\_row} 改为按需构建/共享值数组的
+行视图；\code{HFactorBackend} 改为引用外部 CSC 缓冲而非拷贝；
+\code{SimplexResult} 不持有 \code{form}（或持共享指针）。消除 F3。
+\item \textbf{索引宽度参数化}：Eigen \code{StorageIndex} 与
+\code{HighsInt} 提升到 64 位（至少 \code{nnz} 计数与列指针）。
+消除 F4。
+\item \textbf{循环防护换扁平哈希 + 容量上限}：开放寻址表替换
+\code{std::map}，\code{cycle\_history} 加 LRU 上限，塔布寿命与
+$m$ 解耦。消除 F5。
+\item \textbf{删除或接线 P1 死代码}：要么把 \code{pivot\_evidence}/
+\code{row\_solve\_consistent} 接入严格验证模式（替代 Q2 的陈旧
+包络），要么删除——当前形态只产生虚假的安全感。
+\item \textbf{实现无界射线证书}：Harris 比测试无有限步长时输出
+$\delta$ 射线与 $d_q$（Q1），否则原生内核不能作为通用 LP 求解器
+独立发布无界结论。
+\item \textbf{API 清理}：删除或显式废弃 P3/P4 的遗留字段；
+\code{max\_iter} 默认 2\,000（\file{dual\_simplex.hpp:130}）对通用
+LP 过低，应由调用方按问题规模设定。
+\end{enumerate}
+
+\subsection{最终结论}
+\file{native\_dual/} 不是"虚假的复杂"：它是一次认真的、防御性极强的
+有界变量修订对偶单纯形实现，其数值机器（打包超稀疏求解、增量循环
+签名、懒惰堆、Farkas 区间证书、fail-closed 发布审计）在
+$m\lesssim 10^{4}$ 的 B\&C 节点 LP 上是合格的，部分设计
+（Zobrist 增量签名、版本化堆）达到先进实现水准。
+但用户的怀疑在三个可证实的意义上成立：
+（i）存在约 290 行精心编写却零调用的"严格验证"死代码（P1），
+它是"看起来复杂"的直接来源；
+（ii）API 表面保留了一打设置后无任何效果的遗留参数（P3/P4）；
+（iii）内核的成本重心不在求解而在验证与初始化——精确 DSE 初始化
+（F1）、每次 INVERT 的长双精度审计（F2）、三份矩阵存储（F3）
+每一项都真实地执行着在千万维下不可能完成的计算。
+当前形态下，该内核可用于中小规模 B\&C 节点 LP；作为面向
+$10^{7}$ 维通用 LP 的求解内核，需要完成 M1--M5 后才具备讨论资格。
+
+%=====================================================================
+\appendix
+\section{审计方法与可复核性}
+%=====================================================================
+本报告全部论断基于报告日工作区的静态阅读。复核方式：
+\begin{itemize}[leftmargin=2em]
+\item 死代码判定（P1/P2）：对 \code{pivot\_evidence}、
+\code{row\_solve\_consistent}、\code{refine\_ftran}、
+\code{is\_artificial} 在 \file{src/} 与 \file{tests/} 全树做符号
+引用搜索，除定义与声明外无命中。
+\item 默认后端判定：\code{SimplexOptions::lp\_kernel\_backend} 默认值
+见 \file{include/mipsolvers/engine/kernel/lp\_kernel/dual\_simplex.hpp:173}；
+原生内核的显式选择点见 \file{tests/test\_dual\_simplex.cpp:141}、
+\file{benchmark/native\_kernel\_comparison.cpp:308} 等。
+\item 复杂度陈述均可在所引行号的循环结构上直接验证。
+\end{itemize}
+本审计未执行运行时剖析；F1--F6 的定量估算为按数据结构定义与循环
+次数的下界推算（(I)），实际常数可能更差（缓存未命中、长双精度
+吞吐）但不会更好。
+
+\end{document}

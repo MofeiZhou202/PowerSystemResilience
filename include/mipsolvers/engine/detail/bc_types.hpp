@@ -9,7 +9,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <deque>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -26,18 +25,6 @@ namespace mipsolvers::engine::detail {
 
 /// @brief Positive infinity constant used throughout the B&C solver.
 constexpr double kInf = std::numeric_limits<double>::infinity();
-
-// ════════════════════════════════════════════════════════════════════════════
-// Diff-based Tree Management for Memory Efficiency and Numerical Stability
-// ════════════════════════════════════════════════════════════════════════════
-
-/// @brief Records a single bound modification (for undo/redo during tree traversal).
-struct BoundChange {
-  int var_idx;       ///< Variable index
-  double old_val;    ///< Value before change (for reverting)
-  double new_val;    ///< Value after change (for applying)
-  bool is_lb;        ///< true = lower bound, false = upper bound
-};
 
 /// @brief Explicit branch-domain literal used for conflict learning.
 struct BranchDomainLiteral {
@@ -142,177 +129,6 @@ struct BoundLiftingCertificate {
   double proof_required_activity{0.0};
 };
 
-/// @brief Tree node with parent pointer for LCA-based navigation.
-/// @details Stores only bound changes relative to parent, not full lb/ub arrays.
-struct TreeNode {
-  int id{-1};
-  int depth{0};
-  TreeNode* parent{nullptr};
-
-  /// Bound changes introduced at this node (usually just 1 from branching).
-  std::vector<BoundChange> bound_changes;
-
-  /// Inherited from parent; updated after solving this node's LP.
-  std::shared_ptr<SimplexBasis> basis_hint;
-
-  /// LP relaxation solution at this node.
-  Eigen::VectorXd x_relax;
-
-  /// Dual bound from LP relaxation.
-  double bound{kInf};
-
-  /// Whether this node has been solved (for incremental warm-start).
-  bool solved{false};
-};
-
-/// @brief Manages the global domain state and efficient tree traversal.
-/// @details Maintains current lb/ub arrays and handles node switching via LCA.
-class TreeDomainManager {
-public:
-  Eigen::VectorXd current_lb;
-  Eigen::VectorXd current_ub;
-  TreeNode* current_node{nullptr};
-
-  /// @brief Initialize with root bounds.
-  void initialize(const Eigen::VectorXd& lb, const Eigen::VectorXd& ub) {
-    current_lb = lb;
-    current_ub = ub;
-    current_node = nullptr;
-  }
-
-  /// @brief Switch domain state from current_node to target_node via LCA.
-  /// @return The number of bound changes applied.
-  int switch_to_node(TreeNode* target) {
-    if (current_node == target) return 0;
-
-    if (current_node == nullptr) {
-      std::vector<TreeNode*> path;
-      TreeNode* t = target;
-      while (t != nullptr) {
-        path.push_back(t);
-        t = t->parent;
-      }
-      int changes = 0;
-      for (auto it = path.rbegin(); it != path.rend(); ++it) {
-        changes += apply_changes(*it);
-      }
-      current_node = target;
-      return changes;
-    }
-
-    TreeNode* lca = find_lca(current_node, target);
-
-    int revert_count = 0;
-    TreeNode* temp = current_node;
-    while (temp != lca && temp != nullptr) {
-      revert_count += revert_changes(temp);
-      temp = temp->parent;
-    }
-
-    std::vector<TreeNode*> forward_path;
-    temp = target;
-    while (temp != lca && temp != nullptr) {
-      forward_path.push_back(temp);
-      temp = temp->parent;
-    }
-
-    int apply_count = 0;
-    for (auto it = forward_path.rbegin(); it != forward_path.rend(); ++it) {
-      apply_count += apply_changes(*it);
-    }
-
-    current_node = target;
-    return revert_count + apply_count;
-  }
-
-  /// @brief Get the bound changes needed to go from current to target.
-  std::vector<BoundChange> get_changes_to(TreeNode* target) const {
-    std::vector<BoundChange> result;
-    if (current_node == target) return result;
-
-    if (current_node == nullptr) {
-      std::vector<TreeNode*> path;
-      TreeNode* t = target;
-      while (t != nullptr) {
-        path.push_back(t);
-        t = t->parent;
-      }
-      for (auto it = path.rbegin(); it != path.rend(); ++it) {
-        for (const auto& bc : (*it)->bound_changes) {
-          result.push_back(bc);
-        }
-      }
-      return result;
-    }
-
-    TreeNode* lca = find_lca(current_node, target);
-
-    TreeNode* temp = current_node;
-    while (temp != lca && temp != nullptr) {
-      for (auto it = temp->bound_changes.rbegin(); it != temp->bound_changes.rend(); ++it) {
-        result.push_back({it->var_idx, it->new_val, it->old_val, it->is_lb});
-      }
-      temp = temp->parent;
-    }
-
-    std::vector<TreeNode*> forward_path;
-    temp = target;
-    while (temp != lca && temp != nullptr) {
-      forward_path.push_back(temp);
-      temp = temp->parent;
-    }
-    for (auto it = forward_path.rbegin(); it != forward_path.rend(); ++it) {
-      for (const auto& bc : (*it)->bound_changes) {
-        result.push_back(bc);
-      }
-    }
-
-    return result;
-  }
-
-private:
-  int apply_changes(TreeNode* node) {
-    for (const auto& bc : node->bound_changes) {
-      if (bc.is_lb) current_lb[bc.var_idx] = bc.new_val;
-      else          current_ub[bc.var_idx] = bc.new_val;
-    }
-    return static_cast<int>(node->bound_changes.size());
-  }
-
-  int revert_changes(TreeNode* node) {
-    for (auto it = node->bound_changes.rbegin(); it != node->bound_changes.rend(); ++it) {
-      if (it->is_lb) current_lb[it->var_idx] = it->old_val;
-      else          current_ub[it->var_idx] = it->old_val;
-    }
-    return static_cast<int>(node->bound_changes.size());
-  }
-
-  static TreeNode* find_lca(TreeNode* a, TreeNode* b) {
-    if (!a) return b;
-    if (!b) return a;
-    while (a->depth > b->depth && a->parent) a = a->parent;
-    while (b->depth > a->depth && b->parent) b = b->parent;
-    while (a != b && a && b) {
-      a = a->parent;
-      b = b->parent;
-    }
-    return a;
-  }
-};
-
-/// @brief Arena allocator for TreeNode objects (pointer-stable via deque).
-class TreeNodeArena {
-  std::deque<TreeNode> storage_;
-public:
-  /// @brief Allocate a new TreeNode with default-initialized fields.
-  TreeNode* alloc() {
-    storage_.emplace_back();
-    return &storage_.back();
-  }
-  /// @brief Number of allocated nodes.
-  std::size_t size() const { return storage_.size(); }
-};
-
 /// @brief Sparse cut row plus its validity scope.
 struct PoolCut {
   Eigen::SparseVector<double> coeff;  ///< Sparse inequality coeff*x <= rhs
@@ -326,27 +142,150 @@ struct PoolCut {
   ValidityScope validity_scope{ValidityScope::GlobalCut};
 };
 
-/// @brief Legacy Node structure (kept for compatibility during transition).
+/// Sparse queued-node domain relative to the queue's shared root domain.
+/// Active nodes use dense lb/ub work vectors; queued nodes release those
+/// vectors and retain one entry only for columns whose bound pair differs.
+struct SparseNodeBound {
+  int var_idx{-1};
+  double lb{0.0};
+  double ub{0.0};
+};
+
+struct NodeQueueDomainStorageStats {
+  std::uint64_t compactions{0};
+  std::uint64_t materializations{0};
+  std::uint64_t dense_bound_values_released{0};
+  std::uint64_t compact_entries_created{0};
+  std::uint64_t current_compact_entries{0};
+  std::uint64_t current_compact_nodes{0};
+  std::uint64_t peak_compact_entries{0};
+  std::uint64_t peak_compact_nodes{0};
+  std::uint64_t compaction_failures{0};
+  std::uint64_t materialization_failures{0};
+};
+
+/// Auditable counts for branch-child payload inheritance.  An inherited
+/// element is counted only when it remains in shared immutable storage at
+/// child construction; this deliberately does not estimate bytes or runtime.
+struct NodePayloadSharingStats {
+  std::uint64_t child_creations{0};
+  std::uint64_t shared_payload_vectors{0};
+  std::uint64_t shared_payload_elements{0};
+};
+
+/// Vector-like storage whose copies share immutable data until a mutation.
+/// Read-only iteration and indexing deliberately do not detach, even when the
+/// wrapper itself is non-const. Call write() for element-wise mutation.
+template <typename T>
+class CopyOnWriteVector {
+ public:
+  using value_type = T;
+  using size_type = typename std::vector<T>::size_type;
+  using const_iterator = typename std::vector<T>::const_iterator;
+
+  CopyOnWriteVector() = default;
+  CopyOnWriteVector(const CopyOnWriteVector&) = default;
+  CopyOnWriteVector(CopyOnWriteVector&&) noexcept = default;
+  CopyOnWriteVector& operator=(const CopyOnWriteVector&) = default;
+  CopyOnWriteVector& operator=(CopyOnWriteVector&&) noexcept = default;
+
+  explicit CopyOnWriteVector(std::vector<T> values)
+      : values_(std::make_shared<std::vector<T>>(std::move(values))) {}
+
+  CopyOnWriteVector& operator=(std::vector<T> values) {
+    values_ = values.empty()
+                  ? nullptr
+                  : std::make_shared<std::vector<T>>(std::move(values));
+    return *this;
+  }
+
+  bool empty() const noexcept { return !values_ || values_->empty(); }
+  size_type size() const noexcept { return values_ ? values_->size() : 0; }
+
+  const std::vector<T>& read() const noexcept {
+    static const std::vector<T> empty_values;
+    return values_ ? *values_ : empty_values;
+  }
+
+  std::vector<T>& write() {
+    if (!values_) {
+      values_ = std::make_shared<std::vector<T>>();
+    } else if (values_.use_count() != 1) {
+      values_ = std::make_shared<std::vector<T>>(*values_);
+    }
+    return *values_;
+  }
+
+  operator const std::vector<T>&() const noexcept { return read(); }
+  const std::vector<T>* read_ptr() const noexcept { return &read(); }
+  std::vector<T>* write_ptr() { return &write(); }
+
+  const_iterator begin() const noexcept { return read().begin(); }
+  const_iterator end() const noexcept { return read().end(); }
+  const T& operator[](size_type index) const { return read()[index]; }
+  const T& operator[](size_type index) { return read()[index]; }
+  const T& back() const { return read().back(); }
+  const T& back() { return read().back(); }
+  T& mutable_back() { return write().back(); }
+
+  void clear() {
+    if (!empty()) write().clear();
+  }
+
+  void reserve(size_type count) {
+    if (count > read().capacity()) write().reserve(count);
+  }
+
+  void resize(size_type count) {
+    if (count != size()) write().resize(count);
+  }
+
+  void push_back(const T& value) { write().push_back(value); }
+  void push_back(T&& value) { write().push_back(std::move(value)); }
+
+  template <typename... Args>
+  T& emplace_back(Args&&... args) {
+    return write().emplace_back(std::forward<Args>(args)...);
+  }
+
+  bool shares_storage_with(const CopyOnWriteVector& other) const noexcept {
+    return values_ && values_ == other.values_;
+  }
+
+  long storage_use_count() const noexcept {
+    return values_ ? values_.use_count() : 0;
+  }
+
+ private:
+  std::shared_ptr<std::vector<T>> values_;
+};
+
+/// @brief Node representation used by the serial and parallel native trees.
 struct Node {
   Eigen::VectorXd lb;
   Eigen::VectorXd ub;
+  std::vector<SparseNodeBound> compact_domain;
+  Eigen::Index compact_domain_size{0};
   Eigen::VectorXd x_relax;
   Eigen::VectorXd x_seed;
+  std::vector<int> fractional_branchables;
+  double fractional_branchables_tol{0.0};
+  bool fractional_branchables_valid{false};
   std::optional<Eigen::VectorXd> nlp_down_scores;
   std::optional<Eigen::VectorXd> nlp_up_scores;
   std::shared_ptr<SimplexBasis> basis_hint;
   bool has_live_factor_telemetry{false};
   SparseFactorTelemetry live_factor_telemetry{};
   int ipm_iterations{0};  ///< Number of IPM iterations for this node's LP solve
-  std::vector<BranchDomainLiteral> branch_reasons;
-  std::vector<DomainReasonBound> domain_reason_bounds;
-  std::vector<LocalDomainTrailEntry> local_domain_trail;
-  std::vector<int> local_branch_positions;
-  std::vector<std::uint64_t> dynamic_probe_literal_keys;
-  std::vector<LocalBinaryImplication> local_binary_implications;
-  std::vector<std::vector<BranchDomainLiteral>> local_conflict_clauses;
-  std::vector<ScopedConflictClause> scoped_conflict_clauses;
-  std::vector<PoolCut> local_cuts;
+  CopyOnWriteVector<BranchDomainLiteral> branch_reasons;
+  CopyOnWriteVector<DomainReasonBound> domain_reason_bounds;
+  CopyOnWriteVector<LocalDomainTrailEntry> local_domain_trail;
+  CopyOnWriteVector<int> local_branch_positions;
+  CopyOnWriteVector<std::uint64_t> dynamic_probe_literal_keys;
+  CopyOnWriteVector<LocalBinaryImplication> local_binary_implications;
+  CopyOnWriteVector<std::vector<BranchDomainLiteral>> local_conflict_clauses;
+  CopyOnWriteVector<ScopedConflictClause> scoped_conflict_clauses;
+  CopyOnWriteVector<PoolCut> local_cuts;
   std::uint64_t domain_learning_epoch{0};
   std::uint64_t objective_artifact_epoch{0};
   std::uint64_t domain_closure_epoch{0};
@@ -356,10 +295,13 @@ struct Node {
   int depth{0};
 
   /// Create a lightweight child node copying only lb/ub (skips x_relax/x_seed copy).
-  Node branch_child() const {
+  Node branch_child(NodePayloadSharingStats* sharing_stats = nullptr) const {
     Node c;
     c.lb = lb;
     c.ub = ub;
+    c.compact_domain = compact_domain;
+    c.compact_domain_size = compact_domain_size;
+    c.fractional_branchables_valid = false;
     c.nlp_down_scores = nlp_down_scores;
     c.nlp_up_scores = nlp_up_scores;
     c.basis_hint = basis_hint;
@@ -381,9 +323,96 @@ struct Node {
     c.bound = bound;
     c.estimate = estimate;
     c.depth = depth + 1;
+    if (sharing_stats != nullptr) {
+      ++sharing_stats->child_creations;
+      const auto count_shared = [&](const auto& parent_payload,
+                                    const auto& child_payload) {
+        if (!parent_payload.empty() &&
+            parent_payload.shares_storage_with(child_payload)) {
+          ++sharing_stats->shared_payload_vectors;
+          sharing_stats->shared_payload_elements +=
+              static_cast<std::uint64_t>(parent_payload.size());
+        }
+      };
+      count_shared(branch_reasons, c.branch_reasons);
+      count_shared(domain_reason_bounds, c.domain_reason_bounds);
+      count_shared(local_domain_trail, c.local_domain_trail);
+      count_shared(local_branch_positions, c.local_branch_positions);
+      count_shared(dynamic_probe_literal_keys, c.dynamic_probe_literal_keys);
+      count_shared(local_binary_implications, c.local_binary_implications);
+      count_shared(local_conflict_clauses, c.local_conflict_clauses);
+      count_shared(scoped_conflict_clauses, c.scoped_conflict_clauses);
+      count_shared(local_cuts, c.local_cuts);
+    }
     return c;
   }
 };
+
+inline bool node_domain_is_compact(const Node& node) {
+  return node.compact_domain_size > 0 && node.lb.size() == 0 &&
+         node.ub.size() == 0;
+}
+
+inline bool compact_node_domain(Node& node, const Eigen::VectorXd& root_lb,
+                                const Eigen::VectorXd& root_ub,
+                                std::size_t* entries_out = nullptr) {
+  if (entries_out != nullptr) *entries_out = 0;
+  if (node_domain_is_compact(node)) {
+    if (entries_out != nullptr) *entries_out = node.compact_domain.size();
+    return true;
+  }
+  if (root_lb.size() <= 0 || root_lb.size() != root_ub.size() ||
+      node.lb.size() != root_lb.size() || node.ub.size() != root_ub.size()) {
+    return false;
+  }
+
+  std::vector<SparseNodeBound> compact;
+  compact.reserve(node.local_domain_trail.size() + 2);
+  for (Eigen::Index j = 0; j < root_lb.size(); ++j) {
+    const double node_lb = node.lb[j] == 0.0 ? 0.0 : node.lb[j];
+    const double node_ub = node.ub[j] == 0.0 ? 0.0 : node.ub[j];
+    const double base_lb = root_lb[j] == 0.0 ? 0.0 : root_lb[j];
+    const double base_ub = root_ub[j] == 0.0 ? 0.0 : root_ub[j];
+    if (node_lb == base_lb && node_ub == base_ub) continue;
+    compact.push_back(
+        SparseNodeBound{static_cast<int>(j), node_lb, node_ub});
+  }
+
+  node.compact_domain = std::move(compact);
+  node.compact_domain_size = root_lb.size();
+  Eigen::VectorXd empty_lb;
+  Eigen::VectorXd empty_ub;
+  node.lb.swap(empty_lb);
+  node.ub.swap(empty_ub);
+  if (entries_out != nullptr) *entries_out = node.compact_domain.size();
+  return true;
+}
+
+inline bool materialize_node_domain(Node& node,
+                                    const Eigen::VectorXd& root_lb,
+                                    const Eigen::VectorXd& root_ub) {
+  if (!node_domain_is_compact(node)) {
+    return node.lb.size() == root_lb.size() &&
+           node.ub.size() == root_ub.size();
+  }
+  if (node.compact_domain_size != root_lb.size() ||
+      root_lb.size() != root_ub.size()) {
+    return false;
+  }
+
+  for (const auto& change : node.compact_domain) {
+    if (change.var_idx < 0 || change.var_idx >= root_lb.size()) return false;
+  }
+  node.lb = root_lb;
+  node.ub = root_ub;
+  for (const auto& change : node.compact_domain) {
+    node.lb[change.var_idx] = change.lb;
+    node.ub[change.var_idx] = change.ub;
+  }
+  node.compact_domain.clear();
+  node.compact_domain_size = 0;
+  return true;
+}
 
 /// @brief Pseudo-cost estimates for branching variable selection.
 /// Tracks sum, sum-of-squares, and count for Welford-style variance computation.
@@ -635,7 +664,7 @@ inline bool is_integral(double x, double tol) {
   return std::abs(x - std::round(x)) <= tol;
 }
 
-/// @brief Cut family identifiers for efficacy tracking (P2.1).
+/// @brief Cut family identifiers for efficacy tracking.
 enum class CutFamily : int {
   Gomory = 0,
   MIR = 1,
@@ -645,7 +674,7 @@ enum class CutFamily : int {
   Count = 5  // sentinel for array sizing
 };
 
-/// @brief Per-family cut statistics for adaptive generation (P2.1).
+/// @brief Per-family cut statistics for adaptive generation.
 /// Tracks moving average efficacy over the last N rounds and disables
 /// families that fall below min_family_efficacy (0.001).
 struct CutFamilyStats {

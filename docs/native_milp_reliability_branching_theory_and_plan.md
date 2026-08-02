@@ -577,9 +577,9 @@ branch-score weights remain unchanged.
 
 The fixed diagnostic cohort was `50v-10`, `enlight_hard`,
 `neos-3083819-nubu`, and `wachplan`. Both node-estimate modes used the same
-MIPLIB data, Native solver build, seed 0, one thread, 10 second limit,
-relative gap `1e-4`, and 50,000-node limit. Each final comparison used three
-repetitions. The reports are:
+MIPLIB data, Native solver build, one thread, 10 second limit, relative gap
+`1e-4`, and 50,000-node limit. The runner requested CLI seed 0. Each final
+comparison used three repetitions. The reports are:
 
 - `reports/miplib2017_reliability_phasef_sum_repeat3_2026-08-01.{json,csv}`;
 - `reports/miplib2017_reliability_phasef_maximum_repeat3_2026-08-01.{json,csv}`;
@@ -601,6 +601,18 @@ The repeated fixed-cohort command was:
 The `Maximum` run changed only the last argument to `maximum` and used a
 different output path. The deterministic 12-case check used `--sample 12`, a
 3 second limit, and one repetition.
+
+#### Seed-provenance correction (2026-08-02)
+
+The command and report JSON correctly record the requested CLI seed, but the
+pre-D10 benchmark did not assign `cfg.seed` to Native `BCOptions`. These runs
+therefore used the Native default `0x9E3779B97F4A7C15` for their heuristic RNG,
+not Native seed 0. The two modes still shared the same default configuration,
+so the results remain a diagnostic `Sum`/`Maximum` comparison, but they are not
+evidence for the previously claimed effective-zero-seed or fully replayable
+protocol. D10 subsequently wired the CLI seed into Native and made every seed,
+including zero, deterministic throughout the work-stealing path. Only reports
+created after D10 satisfy that corrected seed-provenance contract.
 
 ### 18.2 Fixed-cohort results
 

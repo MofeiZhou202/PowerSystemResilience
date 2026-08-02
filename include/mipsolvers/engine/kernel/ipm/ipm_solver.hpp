@@ -1,6 +1,5 @@
 #pragma once
 
-#include <mutex>
 #include <string>
 #include <utility>
 
@@ -12,11 +11,11 @@
 namespace mipsolvers::engine {
 
 /// Globalization strategy selector.
-/// Merit (default) preserves the historical Mehrotra + normalized-residual
-/// merit function backtracking line search. Filter enables the Wächter–Biegler
+/// Merit preserves the historical Mehrotra + normalized-residual merit
+/// backtracking line search. Filter (default) enables the Wächter–Biegler
 /// primal–dual filter line search with inertia-corrected Newton steps. Filter
 /// must be combined with `use_inertia_correction=true` to retain its
-/// nonconvex-robustness guarantee — the default configuration does so.
+/// nonconvex-robustness guarantee; the default configuration does so.
 enum class Globalization { Merit, Filter };
 
 /// Options for the Interior-Point Method driver. Filter-specific fields are
@@ -27,15 +26,17 @@ struct IPMOptions {
   double tol_dual{1e-6};
   double tol_complementarity{1e-6};
   /// "Acceptable" convergence level (Ipopt-style): if the best iterate
-  /// satisfies primal_feas ≤ tol_accept AND dual_feas ≤ tol_accept, it
-  /// is accepted as a near-optimal solution even when the strict tolerances
-  /// are not met.  Disabled when set to 0.
+  /// satisfies primal feasibility, dual feasibility, and complementarity at
+  /// tol_accept, it is accepted as a near-optimal solution even when the
+  /// strict tolerances are not met. Disabled when set to 0.
   double tol_accept{1e-2};
   double alpha_max{0.95};  // fraction-to-boundary τ
-  int reduced_kkt_max_eq{8};
   int qn_sparse_block_size{8};
   int qn_max_blocks{6};
   bool verbose{false};
+  // Keep native solver results native by default. When enabled, a failed
+  // native solve may call Ipopt and the solver_name will identify that path.
+  bool allow_external_fallback{false};
 
   // Optional primal-dual central-path warm start. Each vector is used only
   // when its dimension matches the assembled block and all entries are finite;
@@ -43,6 +44,15 @@ struct IPMOptions {
   Eigen::VectorXd equality_dual_start;
   Eigen::VectorXd inequality_dual_start;
   Eigen::VectorXd slack_start;
+
+  // Cold-start equality multipliers from
+  //   min_lambda ||grad f + Jh^T mu + Jg^T lambda||_2.
+  // The candidate is used only when it improves stationarity and its infinity
+  // norm does not exceed constr_mult_init_max. A valid user warm start takes
+  // precedence. Pure quasi-Newton models defer this initialization because
+  // their first Lagrangian secants depend on the multiplier trajectory.
+  bool least_square_init_duals{false};
+  double constr_mult_init_max{1000.0};
 
   // --- Filter-driver options (PR2+) -----------------------------------
   Globalization globalization{Globalization::Filter};
@@ -90,7 +100,8 @@ struct IPMDetail {
   double complementarity{0.0};
 };
 
-/// Native Mehrotra predictor-corrector IPM for NLP problems.
+/// Native primal-dual IPM for NLP problems, with a Wächter–Biegler filter
+/// driver and an optional Mehrotra-style merit driver.
 /// Operates on NLPModel via callbacks: f, grad, hess, g/jac_g, h/jac_h.
 /// Variable bounds are read from NLPModel::vars.
 class NativeIPMAdapter final : public SolverAdapter {
@@ -104,16 +115,7 @@ class NativeIPMAdapter final : public SolverAdapter {
   std::pair<SolveResult, IPMDetail> solve_nlp_detail(const NLPModel& prob) const;
 
  private:
-    struct StartupCurvatureCache {
-      bool valid{false};
-      Eigen::VectorXd x;
-      Eigen::VectorXd grad;
-      Eigen::SparseMatrix<double> hess;
-    };
-
   IPMOptions opt_;
-    mutable std::mutex startup_cache_mutex_;
-    mutable StartupCurvatureCache startup_cache_;
 };
 
 }  // namespace mipsolvers::engine

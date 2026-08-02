@@ -1,5 +1,5 @@
 /// @file bc_cglp_model.cpp
-/// @brief Phase 2 CGLP model builder.
+/// @brief CGLP master-model builder.
 
 #include "mipsolvers/engine/detail/bc_cglp.hpp"
 

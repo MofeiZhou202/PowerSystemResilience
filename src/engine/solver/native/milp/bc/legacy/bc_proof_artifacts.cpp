@@ -235,6 +235,7 @@ ObjectiveCutoffArtifactStats extract_objective_cutoff_artifacts(
     int col{-1};
     bool literal_one{false};
     double delta{0.0};
+    std::unordered_map<int, double> contribution_by_target;
   };
   auto candidate_literal = [](const Candidate& candidate) {
     return BranchDomainLiteral{candidate.col,
@@ -243,8 +244,37 @@ ObjectiveCutoffArtifactStats extract_objective_cutoff_artifacts(
   };
   std::vector<Candidate> candidates;
   candidates.reserve(static_cast<std::size_t>(n));
+  std::unordered_map<int, std::size_t> candidate_by_literal;
+  candidate_by_literal.reserve(static_cast<std::size_t>(n));
+  // Different proof sources may describe the same objective target. Charge
+  // each target once per literal, while retaining sums across distinct targets.
+  auto merge_candidate_contribution = [](Candidate& candidate, int target,
+                                         double contribution) {
+    auto [it, inserted] =
+        candidate.contribution_by_target.emplace(target, contribution);
+    if (inserted) {
+      candidate.delta += contribution;
+    } else if (contribution > it->second) {
+      candidate.delta += contribution - it->second;
+      it->second = contribution;
+    }
+  };
+  auto candidate_for_literal = [&](int col, bool literal_one) -> Candidate& {
+    const int key = 2 * col + (literal_one ? 1 : 0);
+    const auto [it, inserted] =
+        candidate_by_literal.emplace(key, candidates.size());
+    if (inserted) {
+      candidates.push_back(Candidate{col, literal_one, 0.0, {}});
+    }
+    return candidates[it->second];
+  };
+  auto add_candidate_contribution = [&](int col, bool literal_one, int target,
+                                        double contribution) {
+    Candidate& candidate = candidate_for_literal(col, literal_one);
+    merge_candidate_contribution(candidate, target, contribution);
+  };
 
-	  const double cutoff = upper_limit;
+  const double cutoff = upper_limit;
 
   std::vector<double> cutoff_coeff(static_cast<std::size_t>(n), 0.0);
   for (int j = 0; j < n; ++j) {
@@ -298,8 +328,7 @@ ObjectiveCutoffArtifactStats extract_objective_cutoff_artifacts(
       if (binary_like(j) && ub[j] >= 1.0 - int_tol) {
         const double delta = c * std::max(0.0, 1.0 - lb[j]);
         if (delta > 1e-9) {
-          candidates.push_back(Candidate{j, true, delta});
-          stats.max_delta = std::max(stats.max_delta, delta);
+          add_candidate_contribution(j, true, j, delta);
         }
       }
     } else {
@@ -311,8 +340,7 @@ ObjectiveCutoffArtifactStats extract_objective_cutoff_artifacts(
       if (binary_like(j) && lb[j] <= int_tol) {
         const double delta = (-c) * std::max(0.0, ub[j]);
         if (delta > 1e-9) {
-          candidates.push_back(Candidate{j, false, delta});
-          stats.max_delta = std::max(stats.max_delta, delta);
+          add_candidate_contribution(j, false, j, delta);
         }
       }
     }
@@ -386,7 +414,10 @@ ObjectiveCutoffArtifactStats extract_objective_cutoff_artifacts(
         static_cast<std::size_t>(1024)));
     for (const auto& event : objective_propagation->implied_events) {
       const int target = event.target_col;
-      if (target < 0 || target >= n) continue;
+      if (target < 0 || target >= n ||
+          objective_propagation->objective_partition_owns_col(target)) {
+        continue;
+      }
       const bool target_tightens = event.target_is_lower_bound
           ? (event.target_bound > lb[target] + tol)
           : (event.target_bound < ub[target] - tol);
@@ -417,7 +448,8 @@ ObjectiveCutoffArtifactStats extract_objective_cutoff_artifacts(
       if (impossible || missing_key < 0) continue;
 
       AggregateEvent& aggregate = implied_aggregates[missing_key];
-      auto [it, inserted] = aggregate.best_by_target.emplace(target, contribution);
+      auto [it, inserted] =
+          aggregate.best_by_target.emplace(target, contribution);
       if (inserted) {
         aggregate.contribution += contribution;
       } else if (contribution > it->second + 1e-9) {
@@ -434,30 +466,27 @@ ObjectiveCutoffArtifactStats extract_objective_cutoff_artifacts(
       const int col = key / 2;
       const bool value_one = (key % 2) != 0;
       if (!binary_like(col)) continue;
-      candidates.push_back(Candidate{col, value_one, aggregate.contribution});
+      Candidate& candidate = candidate_for_literal(col, value_one);
+      for (const auto& [target, contribution] : aggregate.best_by_target) {
+        merge_candidate_contribution(candidate, target, contribution);
+      }
       ++stats.implied_event_candidates;
-      stats.max_delta = std::max(stats.max_delta, aggregate.contribution);
     }
   }
 
   stats.candidates = static_cast<std::uint64_t>(candidates.size());
+  for (const Candidate& candidate : candidates) {
+    stats.max_delta = std::max(stats.max_delta, candidate.delta);
+  }
   if (inf_count != 0) return stats;
 
   stats.cutoff_capacity = cutoff_rhs - stats.raw_objective_lower;
   if (!std::isfinite(stats.cutoff_capacity)) return stats;
 
   const double tol = std::max(1e-9, int_tol);
-  if (objective_propagation != nullptr &&
-      !objective_propagation->implied_events.empty()) {
-    for (const auto& [key, aggregate] : implied_aggregates) {
-      if (!(aggregate.contribution > stats.cutoff_capacity + tol)) {
-        continue;
-      }
-      const int col = key / 2;
-      const bool value_one = (key % 2) != 0;
-      if (!binary_like(col)) continue;
-      const BranchDomainLiteral forbidden{col, value_one ? 1.0 : 0.0,
-                                          value_one};
+  for (const Candidate& candidate : candidates) {
+    if (candidate.delta > stats.cutoff_capacity + tol) {
+      const BranchDomainLiteral forbidden = candidate_literal(candidate);
       if (publish_conflict_clause(std::vector<BranchDomainLiteral>{forbidden})) {
         ++stats.unary_conflicts_added;
       }
@@ -468,7 +497,8 @@ ObjectiveCutoffArtifactStats extract_objective_cutoff_artifacts(
   std::sort(candidates.begin(), candidates.end(),
             [](const Candidate& a, const Candidate& b) {
               if (a.delta != b.delta) return a.delta > b.delta;
-              return a.col < b.col;
+              if (a.col != b.col) return a.col < b.col;
+              return a.literal_one > b.literal_one;
             });
   if (candidates[0].delta + candidates[1].delta <=
       stats.cutoff_capacity + 1e-9) {
@@ -478,6 +508,18 @@ ObjectiveCutoffArtifactStats extract_objective_cutoff_artifacts(
   std::vector<std::pair<CliqueTable::Literal, CliqueTable::Literal>>
       literal_edges;
   literal_edges.reserve(1024);
+  auto combined_delta = [](const Candidate& a, const Candidate& b) {
+    double delta = a.delta;
+    for (const auto& [target, contribution] : b.contribution_by_target) {
+      const auto it = a.contribution_by_target.find(target);
+      if (it == a.contribution_by_target.end()) {
+        delta += contribution;
+      } else if (contribution > it->second) {
+        delta += contribution - it->second;
+      }
+    }
+    return delta;
+  };
   for (int k = static_cast<int>(candidates.size()) - 1; k > 0; --k) {
     const Candidate& b = candidates[static_cast<std::size_t>(k)];
     const double threshold = stats.cutoff_capacity - b.delta + tol;
@@ -485,6 +527,7 @@ ObjectiveCutoffArtifactStats extract_objective_cutoff_artifacts(
       const Candidate& a = candidates[static_cast<std::size_t>(i)];
       if (a.delta <= threshold) break;
       if (a.col == b.col) continue;
+      if (combined_delta(a, b) <= stats.cutoff_capacity + tol) continue;
       const bool added = publish_pair_conflict(a, b);
       literal_edges.emplace_back(
           CliqueTable::Literal{a.col, a.literal_one},

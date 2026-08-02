@@ -283,11 +283,11 @@ class DirectHighsLpBasisOps : public BasisOps {
   DirectHighsLpBasisOps(std::shared_ptr<Highs> highs,
                         int rows,
                         int cols,
-                        const Eigen::SparseMatrix<double>* A)
+                        const StandardColumnMatrix* A)
       : highs_(std::move(highs)),
         m_(rows),
         n_(cols),
-        A_owned_(A != nullptr ? *A : Eigen::SparseMatrix<double>()) {}
+        A_owned_(A != nullptr ? *A : StandardColumnMatrix()) {}
 
   BasisOpsKind kind() const override { return BasisOpsKind::VendoredHighs; }
 
@@ -368,7 +368,7 @@ class DirectHighsLpBasisOps : public BasisOps {
     Eigen::VectorXd y;
     if (!basis_inverse_row(row, y)) return false;
     if (A_owned_.rows() != m_ || A_owned_.cols() != n_) return false;
-    out = y.transpose() * A_owned_;
+    out = A_owned_.transpose_multiply(y).transpose();
     return out.allFinite();
   }
 
@@ -378,9 +378,9 @@ class DirectHighsLpBasisOps : public BasisOps {
     return t;
   }
 
-  void rebind_A(const Eigen::SparseMatrix<double>& A) override { A_owned_ = A; }
+  void rebind_A(const StandardColumnMatrix& A) override { A_owned_ = A; }
 
-  bool bound_to_A(const Eigen::SparseMatrix<double>& A) const override {
+  bool bound_to_A(const StandardColumnMatrix& A) const override {
     return A.rows() == m_ && A.cols() == n_;
   }
 
@@ -466,12 +466,12 @@ class DirectHighsLpBasisOps : public BasisOps {
     std::vector<double> row_lower;
     std::vector<double> row_upper;
     HighsBasis basis;
-    Eigen::SparseMatrix<double> A;
+    StandardColumnMatrix A;
   };
   std::shared_ptr<Highs> highs_;
   int m_{0};
   int n_{0};
-  Eigen::SparseMatrix<double> A_owned_;
+  StandardColumnMatrix A_owned_;
   std::optional<Transaction> transaction_;
 };
 
@@ -788,7 +788,13 @@ bool finish_vendored_highs_relaxation(const LPModel& lp,
           ? "VendoredHighsLiveAppendLpKernel"
           : "VendoredHighsDirectLpKernel";
   primal.stats.iterations = static_cast<int>(info.simplex_iteration_count);
-  primal.stats.objective = info.objective_function_value;
+  // Every branch-and-cut bound and incumbent uses the internal minimization
+  // convention (objective_value() negates maximization objectives). HiGHS
+  // reports the model's declared objective direction, so normalize it at the
+  // LP-kernel boundary before the value can participate in pruning.
+  primal.stats.objective =
+      lp.sense == Sense::Minimize ? info.objective_function_value
+                                  : -info.objective_function_value;
   primal.stats.status = std::string("HiGHS ") +
                         highs_model_status_label(model_status);
   primal.stats.success = run_status == HighsStatus::kOk &&
@@ -1331,7 +1337,9 @@ bool solve_lp_relaxation_with_vendored_highs(const LPModel& lp,
     primal.stats.solver_name = "VendoredHighsDirectLpKernel";
     primal.stats.iterations =
         static_cast<int>(info.simplex_iteration_count);
-    primal.stats.objective = info.objective_function_value;
+    primal.stats.objective =
+        lp.sense == Sense::Minimize ? info.objective_function_value
+                                    : -info.objective_function_value;
       primal.stats.status =
         std::string("HiGHS ") + highs_model_status_label(model_status);
     primal.stats.success = run_status == HighsStatus::kOk &&
@@ -1679,7 +1687,7 @@ void trace_ipm_handoff_audit(const char* stage,
 }
 
 double row_col_coefficient(const StandardFormLP& sf, int row, int col) {
-  for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(
+  for (StandardRowMatrix::InnerIterator it(
            sf.A_row, row);
        it; ++it) {
     if (it.col() == col) return it.value();
@@ -1735,7 +1743,7 @@ CrashBasisRecoveryStats recover_primal_activity_basis_impl(const StandardFormLP&
   }
 
   for (int j = 0; j < sf.n_original; ++j) {
-    for (Eigen::SparseMatrix<double>::InnerIterator it(sf.A, j); it; ++it) {
+    for (StandardColumnMatrix::InnerIterator it(sf.A, j); it; ++it) {
       col_max_abs[static_cast<size_t>(j)] =
           std::max(col_max_abs[static_cast<size_t>(j)], std::abs(it.value()));
       ++col_nnz[static_cast<size_t>(j)];
@@ -1870,7 +1878,7 @@ CrashBasisRecoveryStats recover_primal_activity_basis_impl(const StandardFormLP&
               0.0, 0.0, 0.0, row, -1};
     }
     int row_candidates = 0;
-    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sf.A_row, row); it; ++it) {
+    for (StandardRowMatrix::InnerIterator it(sf.A_row, row); it; ++it) {
       const int col = it.col();
       if (col >= sf.n_original || col_used[static_cast<size_t>(col)]) continue;
       const double part_score = partition_score[static_cast<size_t>(col)];
@@ -1992,7 +2000,7 @@ CrashBasisRecoveryStats recover_primal_activity_basis_impl(const StandardFormLP&
     rhs_index.reserve(static_cast<size_t>(
         std::max(0, col_nnz[static_cast<size_t>(candidate.col)])));
     rhs_value.reserve(rhs_index.capacity());
-    for (Eigen::SparseMatrix<double>::InnerIterator it(sf.A, candidate.col);
+    for (StandardColumnMatrix::InnerIterator it(sf.A, candidate.col);
          it; ++it) {
       if (it.value() == 0.0) continue;
       rhs_index.push_back(it.row());
@@ -2259,7 +2267,7 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
     }
   }
 
-  // P2-short: IPM health probe.  The IPM-LP kernel hard-fails on degenerate
+  // A short IPM health probe detects hard failures on degenerate
   // and badly scaled instances (NumericalError / Cholesky failed /
   // ProblemTooLarge); a few relaxed-tolerance iterations on the exact LP the
   // IPM would see diagnose that for a fraction of a full doomed solve.  This
@@ -2417,13 +2425,12 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
 
       std::shared_ptr<SimplexResult> simplex;
 
-      // P6.1: Skip crossover entirely on very large problems — the 3-phase
-      // IPM→simplex crossover dominates root time (8-39s on 500-1000 gen UC).
-      // Return IPM result directly and use IPM for node solves.
+      // On very large problems, optional IPM-only mode skips crossover and
+      // returns the IPM result directly for subsequent IPM node solves.
       if (!require_simplex_crossover &&
           sf_m > opt.xlarge_ipm_only_threshold) {
         if (opt.verbose) {
-          fprintf(stderr, "[BC_RELAX] P6.1: sf_m=%d > %d — skipping crossover (IPM-only mode)\n",
+          fprintf(stderr, "[BC_RELAX] sf_m=%d > %d — skipping crossover (IPM-only mode)\n",
                   sf_m, opt.xlarge_ipm_only_threshold);
         }
         out.primal = ipm_res;

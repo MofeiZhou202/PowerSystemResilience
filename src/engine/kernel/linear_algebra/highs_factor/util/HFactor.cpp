@@ -209,6 +209,33 @@ void HFactor::setupGeneral(
     const double pivot_tolerance_, const HighsInt highs_debug_level_,
     const HighsLogOptions* log_options_, const bool use_original_HFactor_logic_,
     const HighsInt update_method_) {
+  setupGeneralImpl(num_col_, num_row_, num_basic_, a_start_, a_index_, nullptr,
+                   nullptr, a_value_, basic_index_, pivot_threshold_,
+                   pivot_tolerance_, highs_debug_level_, log_options_,
+                   use_original_HFactor_logic_, update_method_);
+}
+
+void HFactor::setupGeneral32(
+    const HighsInt num_col_, const HighsInt num_row_, HighsInt num_basic_,
+    const std::int32_t* a_start32_, const std::int32_t* a_index32_,
+    const double* a_value_, HighsInt* basic_index_,
+    const double pivot_threshold_, const double pivot_tolerance_,
+    const HighsInt highs_debug_level_, const HighsLogOptions* log_options_,
+    const bool use_original_HFactor_logic_, const HighsInt update_method_) {
+  setupGeneralImpl(num_col_, num_row_, num_basic_, nullptr, nullptr,
+                   a_start32_, a_index32_, a_value_, basic_index_,
+                   pivot_threshold_, pivot_tolerance_, highs_debug_level_,
+                   log_options_, use_original_HFactor_logic_, update_method_);
+}
+
+void HFactor::setupGeneralImpl(
+    const HighsInt num_col_, const HighsInt num_row_, HighsInt num_basic_,
+    const HighsInt* a_start_, const HighsInt* a_index_,
+    const std::int32_t* a_start32_, const std::int32_t* a_index32_,
+    const double* a_value_, HighsInt* basic_index_,
+    const double pivot_threshold_, const double pivot_tolerance_,
+    const HighsInt highs_debug_level_, const HighsLogOptions* log_options_,
+    const bool use_original_HFactor_logic_, const HighsInt update_method_) {
   // Copy Problem size and (pointer to) coefficient matrix
   num_row = num_row_;
   num_col = num_col_;
@@ -217,6 +244,8 @@ void HFactor::setupGeneral(
   this->a_matrix_valid = true;
   a_start = a_start_;
   a_index = a_index_;
+  a_start32 = a_start32_;
+  a_index32 = a_index32_;
   a_value = a_value_;
   basic_index = basic_index_;
   pivot_threshold =
@@ -253,7 +282,8 @@ void HFactor::setupGeneral(
   basis_matrix_limit_size = 0;
 
   iwork.assign(num_row + 1, 0);
-  for (HighsInt i = 0; i < num_col; i++) iwork[a_start[i + 1] - a_start[i]]++;
+  for (HighsInt i = 0; i < num_col; i++)
+    iwork[aStart(i + 1) - aStart(i)]++;
   const HighsInt b_max_dim = max(num_row, num_basic);
   for (HighsInt i = num_row, counted = 0; i >= 0 && counted < b_max_dim; i--)
     basis_matrix_limit_size += i * iwork[i], counted += iwork[i];
@@ -351,6 +381,8 @@ void HFactor::setupMatrix(const HighsInt* a_start_, const HighsInt* a_index_,
                           const double* a_value_) {
   a_start = a_start_;
   a_index = a_index_;
+  a_start32 = nullptr;
+  a_index32 = nullptr;
   a_value = a_value_;
   this->a_matrix_valid = true;
 }
@@ -646,8 +678,8 @@ void HFactor::buildSimple() {
       }
     } else {
       // 1.2 Structural column
-      HighsInt start = a_start[iMat];
-      HighsInt count = a_start[iMat + 1] - start;
+      HighsInt start = aStart(iMat);
+      HighsInt count = aStart(iMat + 1) - start;
       // If this column and all subsequent columns are zero (so count
       // is 0) then a_index[start] and a_value[start] are unassigned,
       // so determine a unit column in two stages
@@ -657,7 +689,7 @@ void HFactor::buildSimple() {
         // value is 1 and that there's not already a pivot
         // corresponding to this unit column
         ok_unit_col =
-            a_value[start] == 1 && mr_count_before[a_index[start]] >= 0;
+            a_value[start] == 1 && mr_count_before[aIndex(start)] >= 0;
       }
       if (ok_unit_col) {
         if (report_unit) printf("Stage %d: Unit\n", (int)(l_start.size() - 1));
@@ -665,12 +697,12 @@ void HFactor::buildSimple() {
         // re-factorized after scaling has been applied, making this
         // column non-unit.
         pivot_type = kPivotColSingleton;  //;kPivotUnit;//
-        iRow = a_index[start];
+        iRow = aIndex(start);
       } else {
         for (HighsInt k = start; k < start + count; k++) {
-          mr_count_before[a_index[k]]++;
+          mr_count_before[aIndex(k)]++;
           assert(BcountX < (HighsInt)b_index.size());
-          b_index[BcountX] = a_index[k];
+          b_index[BcountX] = aIndex(k);
           b_value[BcountX++] = a_value[k];
         }
         iwork[nwork++] = iCol;
@@ -1775,7 +1807,8 @@ void HFactor::ftranU(HVector& rhs, const double expected_density,
     factor_timer.start(use_clock, factor_timer_clock_pointer);
     const HighsInt* u_index = this->u_index.data();
     const double* u_value = this->u_value.data();
-    assert(!u_reach_index_valid || u_reach_index.size() == u_index.size());
+    assert(!u_reach_index_valid ||
+           u_reach_index.size() == this->u_index.size());
     solveHyper(num_row, u_pivot_lookup.data(), u_pivot_index.data(),
                u_pivot_value.data(), u_start.data(), u_last_p.data(),
                &u_index[0],
@@ -2533,9 +2566,9 @@ void HFactor::updateAPF(HVector* aq, HVector* ep, HighsInt iRow
     pf_index.push_back(variable_out - num_col);
     pf_value.push_back(-1);
   } else {
-    for (HighsInt k = a_start[variable_out]; k < a_start[variable_out + 1];
+    for (HighsInt k = aStart(variable_out); k < aStart(variable_out + 1);
          k++) {
-      pf_index.push_back(a_index[k]);
+      pf_index.push_back(aIndex(k));
       pf_value.push_back(-a_value[k]);
     }
   }

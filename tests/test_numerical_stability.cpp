@@ -440,6 +440,10 @@ TEST_CASE("MumpsSolver solves symmetric indefinite KKT systems",
   Eigen::VectorXd x;
   REQUIRE(solver.solve(b, x));
   CHECK((K * x - b).lpNorm<Eigen::Infinity>() < 1e-10);
+  CHECK(solver.negative_eigenvalues() == 1);
+  CHECK(solver.estimated_deficiency() == 0);
+  Eigen::VectorXd bad_dimension;
+  CHECK_FALSE(solver.solve(Eigen::VectorXd::Ones(2), bad_dimension));
 
   // New values, same pattern → reuse analysis (analyze-once contract).
   Eigen::SparseMatrix<double> K2 = K;
@@ -449,6 +453,7 @@ TEST_CASE("MumpsSolver solves symmetric indefinite KKT systems",
   REQUIRE(solver.factorize(K2));
   REQUIRE(solver.solve(b, x));
   CHECK((K2 * x - b).lpNorm<Eigen::Infinity>() < 1e-10);
+  CHECK(solver.negative_eigenvalues() == 1);
 #else
   SUCCEED("MUMPS not enabled in this build");
 #endif
@@ -599,6 +604,18 @@ TEST_CASE("Residual audit accepts true solutions and rejects corrupted ones",
 
   // Wrong-sized vector is rejected outright.
   CHECK_FALSE(lp_solution_residual_acceptable(lp, Eigen::VectorXd::Zero(1), 1e-8));
+
+  // Empty constraint families use Eigen's default 0x0 matrix shape.  The
+  // audit must treat them as absent rather than attempting a 0x0 by n product.
+  LPModel unconstrained;
+  unconstrained.c = Eigen::VectorXd::Zero(2);
+  unconstrained.vars.resize(2);
+  CHECK(lp_solution_residual_acceptable(
+      unconstrained, Eigen::VectorXd::Zero(2), 1e-8));
+
+  Eigen::VectorXd nonfinite = Eigen::VectorXd::Zero(2);
+  nonfinite[0] = std::numeric_limits<double>::quiet_NaN();
+  CHECK_FALSE(lp_solution_residual_acceptable(unconstrained, nonfinite, 1e-8));
 
   // A cold-start "Optimal" that fails the audit at every escalation level is
   // demoted to an honest failure, never returned as a false optimum (the
