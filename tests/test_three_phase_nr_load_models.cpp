@@ -331,6 +331,54 @@ TEST_CASE("Three-phase NR impedance-grounded wye includes neutral loss path",
   CHECK(impedance_result.bus_voltages[2].vm_a_pu < solid_result.bus_voltages[2].vm_a_pu);
 }
 
+TEST_CASE("Three-phase dynamic-load Jacobian matches centered finite differences",
+          "[integration][powerflow][three_phase_nr][load][audit][jacobian]") {
+  auto check = [](const ThreePhaseACSystem& sys) {
+    auto options = nr_options();
+    options.verify_jacobian = true;
+    const auto result = solve_three_phase_nr(sys, options);
+    INFO("max centered-FD Jacobian error=" << result.max_jacobian_fd_error);
+    REQUIRE(result.converged);
+    REQUIRE(result.jacobian_check_performed);
+    CHECK(result.max_jacobian_fd_error < 2e-6);
+  };
+
+  SECTION("solid-grounded wye current load") {
+    auto sys = build_wye_load_case();
+    auto load = make_load(1, 3, PhaseMask::abc(), "wye");
+    load.p_a_mw = 0.55; load.q_a_mvar = 0.22;
+    load.p_b_mw = 0.40; load.q_b_mvar = 0.16;
+    load.p_c_mw = 0.62; load.q_c_mvar = 0.25;
+    set_legacy_zip(load, 0.0, 100.0, 0.0);
+    sys.loads = {load};
+    check(sys);
+  }
+
+  SECTION("multi-branch impedance-grounded wye power load") {
+    auto sys = build_wye_load_case();
+    auto load = make_load(1, 3, PhaseMask::abc(), "wye");
+    load.p_a_mw = 0.55; load.q_a_mvar = 0.22;
+    load.p_b_mw = 0.31; load.q_b_mvar = 0.12;
+    load.p_c_mw = 0.47; load.q_c_mvar = 0.19;
+    load.r_neut_ohm = 5.0;
+    load.x_neut_ohm = 1.5;
+    set_legacy_zip(load, 0.0, 0.0, 100.0);
+    sys.loads = {load};
+    check(sys);
+  }
+
+  SECTION("delta current load") {
+    auto sys = build_delta_load_case();
+    auto load = make_load(1, 3, PhaseMask::abc(), "delta");
+    load.p_a_mw = 0.24; load.q_a_mvar = 0.10;
+    load.p_b_mw = 0.27; load.q_b_mvar = 0.11;
+    load.p_c_mw = 0.22; load.q_c_mvar = 0.09;
+    set_legacy_zip(load, 0.0, 100.0, 0.0);
+    sys.loads = {load};
+    check(sys);
+  }
+}
+
 TEST_CASE("Three-phase NR honors vmax high-voltage load window",
           "[integration][powerflow][three_phase_nr][load][vmax]") {
   auto capped_sys = build_wye_load_case();

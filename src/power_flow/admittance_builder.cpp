@@ -2,11 +2,28 @@
 
 #include <cmath>
 #include <functional>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "hacdcpf/assembly/solver_data.hpp"
 
 namespace hacdcpf::powerflow {
+
+namespace {
+
+constexpr double kMinSeriesImpedancePu = 1e-12;
+
+std::runtime_error unsafe_branch_parameter(
+    const std::string& domain,
+    int branch_index,
+    const std::string& parameter) {
+  return std::runtime_error(
+      domain + " branch " + std::to_string(branch_index) + " has " + parameter +
+      "; project/merge zero-impedance topology before power flow");
+}
+
+}  // namespace
 
 Eigen::SparseMatrix<std::complex<double>> build_admittance_matrix(const SolverData& data) {
   const int n = static_cast<int>(data.ac_buses.size());
@@ -31,19 +48,24 @@ Eigen::SparseMatrix<std::complex<double>> build_admittance_matrix(const SolverDa
     }
 
     const std::complex<double> z(br.r_pu, br.x_pu);
-    if (std::abs(z) == 0.0) {
-      continue;
+    if (!std::isfinite(z.real()) || !std::isfinite(z.imag()) ||
+        std::abs(z) <= kMinSeriesImpedancePu) {
+      throw unsafe_branch_parameter(
+          "AC", br.index, "zero or numerically unsafe series impedance");
     }
 
     const std::complex<double> ys = 1.0 / z;
     const std::complex<double> ytt = ys + std::complex<double>(0.0, br.b_pu / 2.0);
-    const double tap_mag = (std::abs(br.tap) < 1e-12) ? 1.0 : br.tap;
+    if (!std::isfinite(br.tap) || br.tap <= kMinSeriesImpedancePu) {
+      throw unsafe_branch_parameter("AC", br.index, "non-positive or non-finite tap");
+    }
+    const double tap_mag = br.tap;
     const double shift_rad = br.shift_deg * (std::acos(-1.0) / 180.0);
     const std::complex<double> tap = std::polar(tap_mag, shift_rad);
     const std::complex<double> tap_conj = std::conj(tap);
     const double tap_abs2 = std::norm(tap);
     if (tap_abs2 <= 0.0) {
-      continue;
+      throw unsafe_branch_parameter("AC", br.index, "singular complex tap");
     }
 
     const std::complex<double> yff = ytt / tap_abs2;
@@ -99,8 +121,14 @@ Eigen::SparseMatrix<double> build_dc_conductance(const SolverData& data) {
   triplets.reserve(static_cast<size_t>(n + 2 * data.dc_branches.size()));
 
   for (const auto& br : data.dc_branches) {
-    if (!br.in_service || br.r_pu == 0.0) {
+    if (!br.in_service) {
       continue;
+    }
+
+    if (!std::isfinite(br.r_pu) ||
+        std::abs(br.r_pu) <= kMinSeriesImpedancePu) {
+      throw unsafe_branch_parameter(
+          "DC", br.index, "zero or numerically unsafe series resistance");
     }
 
     const int i = br.from_bus - 1;
@@ -169,6 +197,16 @@ Eigen::SparseMatrix<double> build_susceptance_matrix(const SolverData& data,
     for (int i = 0; i < n; ++i) {
       diag[static_cast<size_t>(i)] +=
           -data.ac_buses[static_cast<size_t>(i)].bs_mvar / data.base_mva;
+    }
+    for (const auto& sh : data.shunts) {
+      if (!sh.in_service) continue;
+      const int i = sh.bus - 1;
+      if (i < 0 || i >= n) continue;
+      double bs = sh.bs_mvar;
+      if (sh.switchable && sh.n_steps > 0) {
+        bs = sh.bs_per_step * sh.current_step;
+      }
+      diag[static_cast<size_t>(i)] += -bs / data.base_mva;
     }
   }
 

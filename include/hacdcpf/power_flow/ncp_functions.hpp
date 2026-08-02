@@ -24,10 +24,10 @@ inline std::pair<double, double> fischer_burmeister_jacobian(double a, double b)
   return {a / r - 1.0, b / r - 1.0};
 }
 
-/// Complementarity equation for PV/PQ switching at a generator bus.
+/// Median complementarity equation for PV/PQ switching at a generator bus.
 ///
-/// All PV buses become PQ (Vm free).  The Q-equation is replaced with:
-///   F = FB(Qmax - Qg, Vm - Vm_set) + FB(Qg - Qmin, Vm_set - Vm)
+/// All PV buses become PQ (Vm free). The Q-equation is replaced with:
+///   F = median(Vm - Vm_set, Qg - Qmax, Qg - Qmin)
 ///
 /// When Qmin < Qg < Qmax: forces Vm = Vm_set (PV behavior).
 /// When Qg = Qmax: forces Vm ≤ Vm_set (PQ at upper limit).
@@ -40,8 +40,10 @@ inline std::pair<double, double> fischer_burmeister_jacobian(double a, double b)
 /// @param vm_set   Voltage setpoint (pu).
 /// @return         NCP residual value.
 inline double pv_pq_ncp(double qg, double qmin, double qmax, double vm, double vm_set) {
-  return fischer_burmeister(qmax - qg, vm - vm_set) +
-         fischer_burmeister(qg - qmin, vm_set - vm);
+  const double voltage_error = vm - vm_set;
+  const double upper_gap = qg - qmax;
+  const double lower_gap = qg - qmin;
+  return std::max(std::min(voltage_error, lower_gap), upper_gap);
 }
 
 /// Jacobian of PV/PQ NCP equation w.r.t. (Qg, Vm).
@@ -51,13 +53,28 @@ inline std::pair<double, double> pv_pq_ncp_jacobian(double qg,
                                                      double qmax,
                                                      double vm,
                                                      double vm_set) {
-  const auto [da1, db1] = fischer_burmeister_jacobian(qmax - qg, vm - vm_set);
-  const auto [da2, db2] = fischer_burmeister_jacobian(qg - qmin, vm_set - vm);
-  // dF/dQg = da1 * d(Qmax-Qg)/dQg + da2 * d(Qg-Qmin)/dQg = -da1 + da2
-  const double dF_dQg = -da1 + da2;
-  // dF/dVm = db1 * d(Vm-Vm_set)/dVm + db2 * d(Vm_set-Vm)/dVm = db1 - db2
-  const double dF_dVm = db1 - db2;
-  return {dF_dQg, dF_dVm};
+  const double voltage_error = vm - vm_set;
+  const double upper_gap = qg - qmax;
+  const double lower_gap = qg - qmin;
+  const double inner = std::min(voltage_error, lower_gap);
+
+  // A valid element of the Clarke generalized Jacobian is sufficient for the
+  // semismooth Newton step. At a tie, average the adjacent one-sided slopes.
+  constexpr double tie_tol = 1e-12;
+  double inner_dq = 0.0;
+  double inner_dv = 0.0;
+  if (voltage_error < lower_gap - tie_tol) {
+    inner_dv = 1.0;
+  } else if (lower_gap < voltage_error - tie_tol) {
+    inner_dq = 1.0;
+  } else {
+    inner_dq = 0.5;
+    inner_dv = 0.5;
+  }
+
+  if (inner > upper_gap + tie_tol) return {inner_dq, inner_dv};
+  if (upper_gap > inner + tie_tol) return {1.0, 0.0};
+  return {0.5 * (inner_dq + 1.0), 0.5 * inner_dv};
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -92,18 +109,16 @@ inline std::pair<double, double> smooth_fb_derivatives(double a, double b, doubl
   return {a / safe_r - 1.0, b / safe_r - 1.0};
 }
 
-/// Smooth PV/PQ NCP residual:
-///   F_μ = φ_μ(Qmax−Qg, Vm−Vm_set) + φ_μ(Qg−Qmin, Vm_set−Vm)
-///
-/// Reduces to pv_pq_ncp() when μ → 0.
+/// Semismooth median residual. The median formulation already has the required
+/// physical zero set for every iterate, so continuation does not perturb it.
 inline double pv_pq_smooth_ncp(double qg,
                                 double qmin,
                                 double qmax,
                                 double vm,
                                 double vm_set,
                                 double mu) {
-  return smooth_fb(qmax - qg, vm - vm_set, mu) +
-         smooth_fb(qg - qmin, vm_set - vm, mu);
+  (void)mu;
+  return pv_pq_ncp(qg, qmin, qmax, vm, vm_set);
 }
 
 /// Jacobian of smooth PV/PQ NCP w.r.t. (Qg, Vm).
@@ -114,12 +129,8 @@ inline std::pair<double, double> pv_pq_smooth_ncp_jacobian(double qg,
                                                              double vm,
                                                              double vm_set,
                                                              double mu) {
-  const auto [da1, db1] = smooth_fb_derivatives(qmax - qg, vm - vm_set, mu);
-  const auto [da2, db2] = smooth_fb_derivatives(qg - qmin, vm_set - vm, mu);
-  // Chain rule: same sign analysis as standard NCP.
-  const double dF_dQg = -da1 + da2;
-  const double dF_dVm = db1 - db2;
-  return {dF_dQg, dF_dVm};
+  (void)mu;
+  return pv_pq_ncp_jacobian(qg, qmin, qmax, vm, vm_set);
 }
 
 }  // namespace hacdcpf::powerflow

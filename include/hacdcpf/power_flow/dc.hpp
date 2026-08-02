@@ -6,7 +6,7 @@
 
 namespace hacdcpf::powerflow {
 
-// Solve DC power flow (linear approximation).
+// Solve the nonlinear resistive DC nodal equations V .* (Gdc*V) = pdc_spec(V).
 // Delegates to hacdcpf::solve_dc_power_flow().
 DCPowerFlowResult solve_dc(const HybridPowerSystem& sys,
                             const PowerFlowOptions& opt = {});

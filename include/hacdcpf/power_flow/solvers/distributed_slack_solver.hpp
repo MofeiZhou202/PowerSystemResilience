@@ -22,9 +22,13 @@ class DistributedSlackSolver {
                                           const DistributedSlack& slack_cfg,
                                           const PowerFlowOptions& opt) const;
 
-  DistributedSlackResult solve_full_jacobian(const HybridPowerSystem& sys,
-                                             const DistributedSlack& slack_cfg,
-                                             const PowerFlowOptions& opt) const;
+  /// Legacy API name. The implementation performs repeated full Newton solves
+  /// with bounded redispatch until the residual slack correction is absorbed;
+  /// it is not an augmented-Jacobian formulation.
+  DistributedSlackResult solve_full_jacobian(
+      const HybridPowerSystem& sys,
+      const DistributedSlack& slack_cfg,
+      const PowerFlowOptions& opt) const;
 };
 
 }  // namespace hacdcpf::powerflow

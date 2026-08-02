@@ -14,6 +14,11 @@
 
 namespace hacdcpf::powerflow {
 
+namespace detail {
+/// Internal homotopy transformation, exposed for deterministic accounting tests.
+void scale_system_by_lambda(HybridPowerSystem& sys, double lambda);
+}  // namespace detail
+
 /// State tracking for the homotopy λ-parameter.
 struct HomotopyState {
   double lambda{0.0};       ///< Current homotopy parameter ∈ [0, 1].

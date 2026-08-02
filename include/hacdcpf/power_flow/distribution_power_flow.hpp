@@ -265,6 +265,10 @@ struct ThreePhaseDPFResult {
   std::string result_source;
   bool fallback_used{false};
   std::string primary_solver_failed_reason;
+  bool jacobian_check_performed{false};
+  double max_jacobian_fd_error{0.0};
+  std::string model_scope{"three-phase-phase-domain"};
+  std::vector<std::string> model_limitations;
 };
 
 // ---------------------------------------------------------------------------
@@ -474,6 +478,7 @@ struct ThreePhaseNROptions {
   double tol{1e-6};             ///< Convergence tolerance on max |ΔP|,|ΔQ| mismatch (p.u.)
   bool   verbose{false};        ///< Print per-iteration residual
   bool   include_shunts{true};  ///< Include per-phase bus shunt admittance in Ybus
+  bool   verify_jacobian{false}; ///< Run a centered-FD Jacobian check at the initial state
 };
 
 /// Solve three-phase power flow using the Newton-Raphson method on the

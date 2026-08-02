@@ -75,6 +75,7 @@ struct ParameterValidationReport {
 struct StandardParameterApplyReport {
   int fields_changed{0};
   std::vector<std::string> applied_rule_ids;
+  std::vector<std::string> warnings;
 };
 
 /// Opt-in completion of physical AC-line parameters from published handbook

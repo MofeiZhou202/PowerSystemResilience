@@ -1,226 +1,899 @@
-% 第 8 章：power_models AML 求解器无关建模层
-\section{power\_models：AML 求解器无关建模层}\label{sec:powermodels}
+% 求解器无关建模层（MIPSolvers AML）
+% 本章文件由 \input 引入，不含导言区。
+\section{求解器无关建模层（MIPSolvers AML）}\label{sec:powermodels}
 
-\subsection{定位（诚实口径）}
-\compmeta{hacdcpf::power\_models}{\srcpath{include/hacdcpf/power\_models/}}
-五个 builder（acopf/acdcopf/dc\_opf/lindistflow/scuc）基于兄弟仓库 MIPSolvers 的
-AML（代数建模层），经 \srcpath{include/hacdcpf/aml/aml.hpp} 转发
-（\texttt{namespace hacdcpf::aml = mipsolvers::aml}）。
-\textbf{这是独立/备用的公式化层，并非生产 OPF 主链路}：全仓 grep 显示
-\srcpath{power\_models::solve\_*} 在生产 \texttt{src/} 中无任何调用方，仅被测试调用；
-生产 OPF 走 \srcpath{src/optimal\_power\_flow/}（第~\ref{sec:acopf}--\ref{sec:dcopf}~章）。
-该定位声明现已\textbf{形式化为结果字段}：\fld{AMLBuildResult} 默认携带
-\fld{model\_scope}=``experimental-aml-builder:not-production-runtime'' 与一条
-\fld{model\_limitations}（AML builder 是实验性形式化路径，不被生产
-\texttt{solve\_ac\_opf}/\texttt{solve\_dc\_opf} 运行时使用，
-aml\_build\_result.hpp:17--19），各 builder 结果按此口径进一步细化（见后文各节）。
-\textbf{命名冲突警示}：\fld{power\_models::DCOPFResult} 与 \fld{opf::DCOPFResult}
-同名不同物（dc\_opf\_model\_builder.hpp:7--8, 46）。
+本章给出 \srcpath{src/power\_models/} 下五个求解器无关建模器（builder）的建模口径。
+它们把工程语义层的 \srcpath{HybridPowerSystem}（或手工装配的规范数据结构）翻译为
+兄弟仓库 MIPSolvers 的 AML（Algebraic Modeling Layer）问题对象 \srcpath{aml::Model}，
+再由 MIPSolvers 求解引擎按问题类别分发给自研内核或可选外部后端
+（HiGHS/Ipopt/SCIP/Gurobi）求解。覆盖的模型家族为：极坐标交流 OPF（NLP）、
+交直流混合 OPF（NLP）、直流 OPF（LP）、配电网 LinDistFlow 线性松弛（LP）与
+安全约束机组组合 SCUC（MILP）。
 
-\subsection{AML 建模原语}
-\srcpath{MIPSolvers/include/mipsolvers/aml/model.hpp}：
-集合（\fld{add\_set}/\fld{add\_ordered\_set}）、参数、变量
-（\fld{add\_var}，\fld{VarType::Continuous/Binary}，逐键 \fld{set\_lb/set\_ub/fix}）、
-目标（\fld{minimize} 重载 LinearExpr/QuadExpr/NonlinearExpr）、
-非线性表达式 DAG（\fld{nl\_var/nl\_mul/nl\_sq/nl\_cos/nl\_sin} 等，arena 分配）、
-约束（线性 \fld{add\_constraint}、索引族 \fld{add\_constraints}、非线性
-\fld{add\_nl\_constraint}）、求解 \fld{solve(SolveOptions)}、辅助
-\fld{check\_bounds}/\fld{set\_nlp\_x0}/\fld{write\_lp}。
-\fld{SolveOptions}：\fld{solver\_name}（"" = 自动）、\fld{time\_limit\_sec}、
-\fld{mip\_gap\_tol}=1e-4、\fld{allow\_fallback}。
-默认分派链（MIPSolvers/src/engine/strategy/dispatcher.cpp:61--81）：
-LP $\to$ NativeIPMLP/NativePDLP/NativeLCQP/Gurobi/HiGHS；
-QP $\to$ Gurobi/NativeLCQP；NLP $\to$ Ipopt/NativeIPM/NativeNLP；
-MILP $\to$ HiGHS/Gurobi/NativeBranchAndCut；MINLP $\to$ Scip/NativeBranchAndCut。
-\fld{SolveResult}：TerminationStatus/PrimalStatus/DualStatus、
-\fld{objective\_value}/\fld{optimality\_gap}、\fld{var\_value}/\fld{dual}/
-\fld{reduced\_cost}、IIS 数据。
+\subsection{定位与总体架构}
 
-\subsection{AC OPF builder（AML 非线性）}
-头文件 \srcpath{ac\_pf\_model\_builder.hpp}；实现 src/power\_models/acopf\_builder.cpp（557 行）。
-数据转换 \srcpath{to\_acopf\_data}（:31--158）；求解 \srcpath{solve\_acopf}（:163--555），
-默认 \fld{solver\_name}=``NativeIPM'' 且 \fld{allow\_fallback}=false（:172--178，
-注释：NativeNLP 缺线搜索，病态时可能堆损坏，永不回退）。
+\subsubsection*{AML 层职责}
+AML 层是\textbf{求解器无关的公式化层}：builder 只负责把电网数据装配成
+“集合—参数—变量—目标—约束”的抽象模型，不直接调用任何具体求解器；
+求解由 \srcpath{aml::Model::solve} 统一入口按问题类别（LP/QP/MILP/NLP）分发
+（\srcpath{MIPSolvers/src/aml/model.cpp}:1037--1074，函数
+\srcpath{Model::solve}）。与自研引擎的关系按代码中的声明为准：AML 路径是
+\textbf{实验性公式化通道}，结果结构 \srcpath{AMLBuildResult} 的
+\fld{model\_scope} 字段固定为
+\texttt{experimental-aml-\allowbreak builder:\allowbreak not-production-\allowbreak runtime}，
+并在 \fld{model\_limitations} 中声明“不被生产运行时
+\srcpath{solve\_ac\_opf}/\srcpath{solve\_dc\_opf} 使用”
+（\srcpath{include/hacdcpf/power\_models/aml\_build\_result.hpp}:16--20）；
+交直流混合结果同样声明“生产混合 OPF 使用 Parity 公式化”
+（\srcpath{include/hacdcpf/power\_models/hybrid\_opf\_model\_builder.hpp}:83--86）。
+其实际用途是交叉验证（与第~\ref{sec:acopfnative}、\ref{sec:parityipm} 章的
+自研 IPM 结果互校）以及在装配合适后端时承接更大规模问题；生产 OPF 口径仍以
+第~\ref{sec:acopfnative}--\ref{sec:dcopf} 章为准。
 
-\paragraph{数学模型}
-变量 $V_m\in[v_{min},v_{max}]$（默认 [0.9,1.1]）、$V_a\in[-\pi,\pi]$、
-$P_g\in[p_g^{min},p_g^{max}]$、$Q_g\in[q_g^{min},q_g^{max}]$（pu，:204--211）。
-目标（:234--257）：
-\[
-\min\sum_g\big(a_2P_g^2+a_1P_g+a_0\big),\qquad a_2=c_2S_b^2,\ a_1=c_1S_b,\ a_0=c_0.
-\]
-$\pi$ 支路导纳（branch\_admittance.hpp:42--77，复变比 $\tau e^{-j\varphi}$，
-$y_s=1/(r+jx)$）：
-\[
-Y_{ff}=\frac{y_s+jb_c/2}{\tau^2},\quad Y_{tt}=y_s+\tfrac{jb_c}{2},\quad
-Y_{ft}=-\frac{y_se^{+j\varphi}}{\tau},\quad Y_{tf}=-\frac{y_se^{-j\varphi}}{\tau}.
-\]
-支路潮流（极坐标完整 AC，非二阶锥松弛，:341--407）：
-\[
-P_f=G_{ff}V_f^2+V_fV_t\big(G_{ft}\cos\theta_{ft}+B_{ft}\sin\theta_{ft}\big),\quad
-Q_f=-B_{ff}V_f^2+V_fV_t\big(G_{ft}\sin\theta_{ft}-B_{ft}\cos\theta_{ft}\big),
-\]
-$P_t/Q_t$ 同构（$\theta_{ft}=\theta_f-\theta_t$）。
-节点平衡（:294--414，注意并联符号：有功 $-G_sV^2$、无功 $+B_sV^2$）：
-\[
-\sum_{g\in i}P_g-P_{d,i}-G_{s,i}V_i^2-\sum_{\ell\ni i}P_\ell=0,\qquad
-\sum_{g\in i}Q_g-Q_{d,i}+B_{s,i}V_i^2-\sum_{\ell\ni i}Q_\ell=0.
-\]
-参考角 $V_a[slack]=0$ 以等式而非 fix 实现（:417--423，保持 IPM 可行）；
-热限仅 \fld{rate\_a\_pu}$>0$ 的支路两端 $P^2+Q^2\le S_{max}^2$（:425--443）。
-暖启动 x0 顺序 = 全部 $V_m$、$V_a$、$P_g$、$Q_g$（:259--269）。
+\subsubsection*{MIPSolvers 依赖}
+MIPSolvers 是本项目\textbf{唯一必需外部依赖}，以本地源码形式参与构建
+（本检出位于项目根目录 \srcpath{MIPSolvers/}，可用缓存变量
+\srcpath{MIPSOLVERS\_SOURCE\_DIR} 指向其他路径，
+\srcpath{cmake/Dependencies.cmake}:18--30），提供 Eigen3、fmt、nlohmann\_json、
+HiGHS、可选 Ipopt/SCIP 以及 AML/求解引擎两层设施。本项目侧仅有一层
+\textbf{命名空间桥接}：\srcpath{include/hacdcpf/aml/aml.hpp}:1--6 把
+\texttt{hacdcpf::aml} 别名到 \texttt{mipsolvers::aml}，五个 builder 全部经由该
+桥接使用 AML API，不直接包含 MIPSolvers 头文件
+（\srcpath{src/power\_models/acopf\_builder.cpp}:12、17）。
 
-\paragraph{数据转换要点（to\_acopf\_data）}
-仅 \fld{in\_service} 设备；\fld{pg\_max}$=\max(p_{max},p_{min})$ 防反转（:74）；
-非有限 Q 界回退 $\mp10^4$（:75--78）；external grid 仅当 $c_2\ne0\lor c_1\ne0$
-时作为可调度 slack 电源加入（注释 :95--97：让 IPM Hessian 在无常规机组时非奇异）；
-零阻抗支路（$r^2+x^2<10^{-12}$）静默跳过（:24,128--129，依赖 projection 层合并）；
-无 ref 母线时强制 \fld{buses[0].is\_ref}（:148--155）。
+\subsubsection*{总体数据流}
+\begin{figure}[H]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[font=\footnotesize,
+  box/.style={draw,rectangle,align=center,inner sep=4pt,minimum height=0.95cm},
+  arr/.style={-{Stealth[length=2.5mm]},thick}]
+\node[box] (rich) {工程语义层\\\srcpath{HybridPowerSystem}};
+\node[box,right=0.7cm of rich] (data) {规范数据装配\\\fld{to\_acopf\_data}\\\fld{to\_acdcopf\_data}};
+\node[box,right=0.7cm of data] (builder) {AML 建模器\\\fld{solve\_acopf} / \fld{solve\_acdcopf}\\\fld{solve\_dc\_opf} / \fld{solve\_lindistflow}\\\fld{solve\_scuc}};
+\node[box,right=0.7cm of builder] (aml) {AML 问题对象\\\srcpath{aml::Model}};
+\node[box,below=1.0cm of aml] (eng) {求解引擎分发\\\srcpath{SolverEngine}\\（按 LP/QP/MILP/NLP 类别）};
+\node[box,below left=1.0cm and -0.5cm of eng] (native) {自研内核（始终注册）\\NativeIPM / NativeIPMLP /\\NativeBranchAndCut 等};
+\node[box,below right=1.0cm and -0.5cm of eng] (ext) {外部后端（探测门控）\\HiGHS / Ipopt / SCIP / Gurobi};
+\draw[arr] (rich) -- (data);
+\draw[arr] (data) -- (builder);
+\draw[arr] (builder) -- (aml);
+\draw[arr] (aml) -- (eng);
+\draw[arr] (eng.south) -- (native.north);
+\draw[arr] (eng.south) -- (ext.north);
+\end{tikzpicture}}
+\caption{AML 建模层数据流：电网模型经规范数据结构进入 builder，装配为
+\srcpath{aml::Model} 后由求解引擎按问题类别分发；外部后端是否出现在候选表中
+取决于编译期宏与可执行文件探测（见本章“后端选择逻辑与运行时探测”节）}
+\end{figure}
 
-\paragraph{结果与诚实口径}
-\srcpath{AMLBuildResult}（aml\_build\_result.hpp:16--38）：诚实口径字段
-\fld{model\_scope}（默认 ``experimental-aml-builder:not-production-runtime''）与
-\fld{model\_limitations}（默认一条：AML builder 是实验性形式化路径，不被生产
-\texttt{solve\_ac\_opf}/\texttt{solve\_dc\_opf} 运行时使用）（:17--19）；
-\fld{solve\_result}、
-\fld{obj\_per\_h}（\$/h，用 MW 重算核验而非 solver 原始目标，:466--476）、
-违例指标 \fld{max\_p/q/thermal\_viol\_pu} 与 \fld{max\_dc\_p\_viol\_pu}、字符串 id 键的结果映射
-（\fld{vm\_pu}/\fld{va\_rad}/\fld{pg\_mw}/\fld{qg\_mvar}/\fld{pf\_mw}/\fld{qf\_mw}，
-DC 侧映射 \fld{vdc\_pu}/\fld{pac\_mw}/\fld{qac\_mvar}/\fld{pdc\_mw}）。
-无负荷削减变量——不可行时整个问题不可行；external grid 成本项是 Hessian 正则化手段，
-非市场行为模型。
+\subsubsection*{AML 建模接口速览}
+builder 用到的 AML API 分为两组（
+\srcpath{MIPSolvers/include/mipsolvers/aml/model.hpp}）：
+\begin{itemize}
+  \item \textbf{线性/混合整数组建}：\srcpath{add\_set}（同文件:54--59）、
+        \srcpath{add\_ordered\_set}（同文件:62--63，支持 \srcpath{prev} 取前一时段）、
+        \srcpath{add\_param}（同文件:72--73）、\srcpath{add\_var}（同文件:78--87，支持双索引
+        变量族与 \srcpath{VarType::Binary}）、\srcpath{minimize}（同文件:93）、
+        \srcpath{add\_constraint}/\srcpath{add\_constraints}（同文件:158--166，按集合
+        批量生成约束族）、\srcpath{VarArray::fix} 固定变量
+        （\srcpath{MIPSolvers/include/mipsolvers/aml/variable.hpp}:140）；
+  \item \textbf{非线性表达式 DAG 组建}：\srcpath{nl\_const}/\srcpath{nl\_var}/
+        \srcpath{nl\_neg}/\srcpath{nl\_add}/\srcpath{nl\_sub}/\srcpath{nl\_mul}/
+        \srcpath{nl\_div}/\srcpath{nl\_sq}/\srcpath{nl\_sqrt}/\srcpath{nl\_sin}/
+        \srcpath{nl\_cos}（同文件:113--133）、\srcpath{minimize(NonlinearExpr)}（同文件:103）、
+        \srcpath{add\_nl\_constraint}（同文件:146--148）、初值注入
+        \srcpath{set\_nlp\_x0}（同文件:153）。
+\end{itemize}
+求解选项为 \srcpath{aml::SolveOptions}（同文件:22--28），求解返回
+\srcpath{aml::SolveResult}（
+\srcpath{MIPSolvers/include/mipsolvers/aml/solve\_result.hpp}:57--147），两者在
+本章“结果结构与求解状态”“后端选择逻辑与运行时探测”两节展开。
 
-\subsection{混合 AC/DC OPF builder}
-头文件 \srcpath{hybrid\_opf\_model\_builder.hpp}；实现 src/power\_models/acdcopf\_builder.cpp
-（766 行）。\fld{ACDCOPFData} = \fld{ACOPFData} + dc\_buses/dc\_branches/converters/
-dcdc\_converters。求解 \srcpath{solve\_acdcopf}（:232--764），同样锁 NativeIPM 禁回退。
+\subsection{共享 \texorpdfstring{$\pi$}{π} 支路导纳（BranchAdmittance）}
 
-\paragraph{数学模型}
-新增变量 $V_{dc,k}\in[v_{dc}^{min},v_{dc}^{max}]$（默认 [0.9,1.1]）、换流器
-$P_{ac,c},Q_{ac,c}$（正 = 注入 AC 母线）、DC/DC 输出 $P_{out}$（:269--319）。
-目标仅 AC 机组成本（:322--336）。DC 支路潮流（对 $V_{dc}$ 线性，:508--524）：
-$P_{ij}=(V_{dc,i}-V_{dc,j})/r_{ij}$。
-VSC 耦合（无独立等式，直接注入 DC 平衡，:527--566）：
-\[
-I_{ac,c}=\frac{\sqrt{P_{ac,c}^2+Q_{ac,c}^2+\varepsilon^2}}{V_{m,a}}\ (\varepsilon=10^{-6}),\qquad
-P_{dc,c}=-P_{ac,c}-\big(a_c+b_cI_{ac,c}+c_cI_{ac,c}^2\big),
-\]
-$a=\fld{loss\_mw}/S_b$、$b=\fld{loss\_percent}/100$、$c=1-\eta$（:154--156）。
-DC/DC：输出母线 $+P_{out}$，输入母线 $-P_{in}$（:583--592）：
-\[
-P_{in}=\frac{P_{out}}{\eta}+\frac{r_{eq}\,(P_{out}/\eta)^2}{V_{dc,in}^2},
-\]
-其中 $r_{eq}=\fld{r\_eq\_pu}\ge0$ 为等值串联电阻（hpp:63，double 默认 $0.0$；
-\srcpath{to\_acdcopf\_data} 经 $\max(0,\fld{r\_eq\_pu})$ 保留而不再丢弃，:179），
-$r_{eq}=0$ 时退化为纯效率模型，$r_{eq}>0$ 时追加的
-$r_{eq}(P_{out}/\eta)^2/V_{dc,in}^2$ 为非线性 $I^2R$ 损耗项（:586--591）。
-按控制模式加一条等式——
-Power：$P_{out}=p_{ref}$；Droop：$P_{out}-k_{droop}(V_{dc,out}-v_{ref})=p_{ref}$；
-Voltage：$V_{dc,out}=v_{ref}$（输出母线已是 VSC Vdc 松弛则跳过）（:594--605）。
-DC 母线平衡 $\mathrm{Pdc\_acc}_k=0$（:608--612）；Vdc 松弛 $V_{dc}[k]=V_{dc,set}$（:614--621）。
-Vdc 松弛标记经共享解析器 \srcpath{resolve\_device\_control\_role} 判定（:112--126），
-与潮流/短路/暂态口径一致。
+\compmeta{BranchAdmittance}{\srcpath{include/hacdcpf/power\_models/branch\_admittance.hpp}}
 
-\paragraph{诚实口径}
-\fld{ACDCOPFBuilderResult} 自带 \fld{model\_scope}=``experimental-aml-hybrid-acdc-opf''
-与两条 \fld{model\_limitations}（hybrid\_opf\_model\_builder.hpp:83--86）：
-本层为实验路径，生产混合 OPF 用 parity 形式化；DC/DC 仅建模\textbf{正向传输}的
-smooth 效率+$I^2R$ 模型，不表示双向符号切换。
-DC/DC 的 $I^2R$ 损耗\textbf{现已建模}（见上式；本手册早前“省略 $I^2R$、eta 仅捕获
-一阶损耗”的声明已过时），DC 平衡审计改用与约束完全相同的效率+$I^2R$ 约定
-（:745--758，$V_{dc,in}$ 取下限 $0.1$ 防除零），修复了审计残差与约束模型不一致、
-把正常 $I^2R$ 损耗误报为平衡违规的问题——\fld{max\_dc\_p\_viol\_pu} 不再因
-DC/DC 项虚高。DC 支路仍无容量约束；孤立 DC 母线被静默剔除且其负荷不被服务
-（:52--56）。
+AC OPF 与 ACDCOPF 两个 NLP builder 共用同一 $\pi$ 形支路导纳计算
+（\srcpath{include/hacdcpf/power\_models/branch\_admittance.hpp}:42--77，函数
+\srcpath{branch\_admittance}）。约定复变比为 $\tau e^{-j\varphi}$（$\tau$ 为变比
+幅值、$\varphi$ 为移相角，弧度），串联导纳 $y_s=g_s+jb_s=1/(r+jx)$，则
+（同文件:9--17 注释与 56--74 实现一致）：
+\begin{align*}
+G_{ff} &= g_s/\tau^{2}, & B_{ff} &= (b_s + b_c/2)/\tau^{2},\\
+G_{tt} &= g_s,          & B_{tt} &= b_s + b_c/2,\\
+G_{ft} &= -(g_s\cos\varphi - b_s\sin\varphi)/\tau, &
+B_{ft} &= -(g_s\sin\varphi + b_s\cos\varphi)/\tau,\\
+G_{tf} &= -(g_s\cos\varphi + b_s\sin\varphi)/\tau, &
+B_{tf} &= \phantom{-}(g_s\sin\varphi - b_s\cos\varphi)/\tau .
+\end{align*}
+其中 $g_s = r/(r^{2}+x^{2})$、$b_s = -x/(r^{2}+x^{2})$；分母 $r^{2}+x^{2}$ 小于
+$10^{-12}$ 时钳位为 $10^{-6}$ 以避免除零，注释说明零阻抗支路应由投影层的母线
+合并在 OPF 之前消除（同文件:44--50）。该约定与生产 Parity 建模层使用的支路
+导纳口径一致（第~\ref{sec:parityform} 章）。
 
-\subsection{DC OPF builder（AML LP）}
-头文件 \srcpath{dc\_opf\_model\_builder.hpp}；实现 src/power\_models/dc\_opf\_builder.cpp
-（205 行）。输入 \fld{DCOPFData}：bus\_ids、slack\_bus、GenTuple
-\{id,bus,pmin,pmax,cost\}、BranchTuple\{from,to,susceptance,max\_flow\}、demands。
-变量 $p_g\in[p_{min},p_{max}]$~MW；$\theta_i\in[-10^6,10^6]$——\textbf{刻意宽角界}
-（:78--81：紧界会遮蔽线路潮流约束对偶、阻塞时给出错误 LMP）；slack 钉 0。
-目标 $\min\sum_gc_gp_g$（线性 \$/(MWh)）。
-节点平衡（:97--129）：$\sum_{g\in i}p_g-D_i-\sum_{\ell}b_\ell(\theta_i-\theta_j)=0$，
-支路潮流 $P_\ell=b_\ell(\theta_{from}-\theta_{to})$；
-潮流限 $-P_{max}\le b_\ell(\theta_f-\theta_t)\le P_{max}$（:131--161）。
-后端 auto 走 LP 链。结果：\fld{gen\_dispatch\_MW}、\fld{voltage\_angle\_rad}、
-\fld{branch\_flow\_MW}（键 ``from->to''）、\fld{lmp\_per\_MWh}
-（平衡约束对偶；:189--199）。诚实口径：纯 LP 线性成本、无损耗、无 V/Q、无切负荷；
-\textbf{无直接单元测试}。
+\subsection{AC OPF 建模器（极坐标 NLP）}\label{subsec:aml-acopf}
 
-\subsection{LinDistFlow builder（配网线性 LP）}
-头文件 \srcpath{lindistflow\_builder.hpp}（:3--31 自带数学文档）；实现
-\srcpath{src/power\_models/lindistflow\_builder.cpp}（186 行）。适用辐射状配电网。
-变量：支路 $P_{ij},Q_{ij}$、母线电压平方 $v_i\in[v_{min}^2,v_{max}^2]$
-（默认 $0.81$--$1.21$ pu$^2$）。
-约束：根电压固定 $v_{root}=\fld{root\_v\_sq\_pu}$；热限为\textbf{分离盒式近似}
-$|P_{ij}|\le S_{max}$ 且 $|Q_{ij}|\le S_{max}$（hpp:22 标注 approximate）；
-节点平衡 $\sum P_{ij}-P_{k(i),i}=-p_{load,i}$（辐射网每非根母线恰一条入支路）；
-LinDistFlow 电压降（Baran \& Wu 线性化，忽略 $I^2r$ 损耗项，:133--148）：
-\[
-v_j=v_i-2\,(r_{ij}P_{ij}+x_{ij}Q_{ij}).
-\]
-目标 $\min\sum_{i\ne root}(const-v_i)$——电压调节代理目标（hpp:27--28）。
-结果 \fld{voltage\_sq\_pu}（\textbf{单位 pu$^2$}）、\fld{branch\_p\_mw}/\fld{branch\_q\_mvar}。
-诚实口径：头文件注释现已与实现一致——平衡方程右端为 $-p_{load,i}$（hpp:15--16，
-实现亦只含负荷项，cpp:114--115），并新增 Scope 说明：仅固定负荷，
-不建 DG、可控源或切负荷变量（hpp:30--31）；无直接单元测试。
+\compmeta{ACOPFData / solve\_acopf}{\srcpath{include/hacdcpf/power\_models/ac\_pf\_model\_builder.hpp}}
 
-\subsection{SCUC builder（MILP）}
-头文件 \srcpath{scuc\_builder.hpp}；实现 src/power\_models/scuc\_builder.cpp（310 行）。
-\textbf{非网络 SCUC}：只有系统级功率平衡，无潮流/网络安全约束。
-变量 $u_{g,t}\in\{0,1\}$、$p_{g,t}\ge0$、$s_{g,t}\ge0$（启动指示连续松弛，
-靠目标启动成本迫使取 0/1，:71）。
-目标（:76--91）：$\min\sum_g\sum_t(c_gp_{g,t}+S_gs_{g,t}+C_gu_{g,t})$。
-约束：平衡 $\sum_gp_{g,t}=D_t$；容量 $p_g^{min}u\le p\le p_g^{max}u$；
-爬坡 $-R^{dn}\le p_{g,t}-p_{g,t-1}\le R^{up}$；启动逻辑 $s_{g,t}\ge u_{g,t}-u_{g,t-1}$；
-最小开/停机（Beta，窗口末端截断）：
-\[
-\sum_{j=t}^{t+W-1}u_{g,j}\ge W(u_{g,t}-u_{g,t-1}),\qquad
-\sum_{j=t}^{t+W-1}(1-u_{g,j})\ge W(u_{g,t-1}-u_{g,t}),\quad W=\min(T_{up/dn},\ n_T-t);
-\]
-旋转备用 $\sum_gp_g^{max}u_{g,t}\ge D_t+R_t$（仅当提供）。
-后端 auto 走 MILP 链（HiGHS / Gurobi / NativeBranchAndCut）。
-结果 \fld{commitment}/\fld{dispatch\_MW}/\fld{startup\_event}/\fld{price\_per\_MWh}
-（平衡对偶，仅 LP 松弛/MIP LP 可提供，:296--304），另含诚实口径字段
-\fld{model\_scope}=``experimental-aml-scuc:system-balance-no-network''、两条
-\fld{model\_limitations}（只系统级平衡、无网络约束；MILP 平衡对偶不是认证出清价，
-需固定组合后重跑 LP 定价），以及 \fld{price\_valid}=false 与
-\fld{price\_validity\_reason}=``MILP dual prices are unavailable or economically
-uncertified.''——先前“MILP 下价格对偶不可得”的声明已形式化为这两个字段
-（scuc\_builder.hpp:86--92）。诚实口径：无网络约束、无 N-1；
-min-up/down 与 reserve 为 Beta 扩展；无直接单元测试
-（市场 SCUC 测试走 \texttt{src/market/} 自有实现，与此 builder 无关）。
+\subsubsection*{功能说明}
+\srcpath{to\_acopf\_data} 把 \srcpath{HybridPowerSystem} 的交流部分转换为规范
+数据 \srcpath{ACOPFData}（标幺值，基准 $S_{\mathrm{base}}$ 取
+\fld{sys.base\_mva}，非正时回退 100~MVA，
+\srcpath{src/power\_models/acopf\_builder.cpp}:38--40），
+\srcpath{solve\_acopf} 再以 AML 非线性表达式 DAG 装配极坐标 AC OPF 并求解
+（同文件:169--561，函数 \srcpath{solve\_acopf}）。模型为含三角函数的非凸
+NLP，母线复电压以幅值 $V_m$ 与相角 $V_a$（弧度）表示。
 
-\subsection{求解后端汇总}
+\subsubsection*{数据转换口径}
+转换规则（同文件:31--164，函数 \srcpath{to\_acopf\_data}）：
+\begin{itemize}
+  \item \textbf{LCC 拒绝}：任一在运 \srcpath{LCCConverter} 存在即抛
+        \srcpath{std::invalid\_argument}，提示改用 ParityIPM 或 Ipopt 后端的
+        \srcpath{opf::solve\_ac\_opf}（同文件:32--37）；AML 路径不建模 LCC 直流耦合；
+  \item \textbf{母线}：仅在运母线入模；负荷 \fld{pd\_mw}/\fld{qd\_mvar} 与并联
+        \fld{gs\_mw}/\fld{bs\_mvar} 除以 $S_{\mathrm{base}}$ 化标幺；
+        \fld{vmin\_pu}/\fld{vmax\_pu} 非正时分别回退 0.9/1.1；\fld{vm0} 取
+        \fld{vm\_pu}（非正回退 1.0）；\fld{va0\_rad} 由 \fld{va\_deg} 角度制换算；
+        \fld{bus\_type} 为 SLACK 的母线标记 \fld{is\_ref}（同文件:46--63）；
+  \item \textbf{发电机}：仅在运且挂接在运母线者入模；\fld{pg\_max\_pu} 钳位
+        不低于 \fld{pg\_min\_pu}；无功界绝对值超过 $10^{9}$ 或非有限时放开为
+        $\pm 10^{4}$；初值 \fld{pg0\_pu}/\fld{qg0\_pu} 钳到界内；挂 slack 的
+        发电机把所在母线标记为参考（同文件:66--99）；
+  \item \textbf{外部电网}：仅当 \fld{cost\_c2} 或 \fld{cost\_c1} 非零时作为
+        “可调度松弛源”加入发电机集合，功率界取 $\pm$\fld{s\_sc\_max\_mva}
+        （非正回退 1000~MVA），注释说明其目的是在无常规发电机时仍使 IPM 的
+        Hessian 非奇异（同文件:101--124）；
+  \item \textbf{支路}：仅在运支路；$r^{2}+x^{2}<10^{-12}$ 的零阻抗支路（开关/
+        联络）直接跳过（同文件:24、133--135）；\fld{tap} 非正回退 1.0；
+        \fld{rate\_a\_mva} 折算 \fld{rate\_a\_pu}，非正记 0（不加约束）；
+        \fld{shift\_deg} 保持角度制，装配时换算弧度（同文件:127--152）；
+  \item \textbf{参考母线兜底}：无任何 SLACK 标记时强制首母线为参考
+        （同文件:154--161）；只保证“至少一个”，不检查多个参考的冲突。
+\end{itemize}
+
+\subsubsection*{决策变量}
+逐母线电压幅值、相角与逐发电机有功、无功（同文件:209--238）：
+\begin{align*}
+V_{m,i} &\in [\,V_{m,\min,i},\ V_{m,\max,i}\,], &
+V_{a,i} &\in [-\pi,\ \pi],\\
+P_{g} &\in [\,P_{g,\min},\ P_{g,\max}\,], &
+Q_{g} &\in [\,Q_{g,\min},\ Q_{g,\max}\,],
+\end{align*}
+注册时先按松界 $V_m\in[0.9,1.1]$、$P_g\in[0,10^{4}]$、$Q_g\in[-10^{4},10^{4}]$
+创建，再按数据逐元素覆写（同文件:211--217、224--238）。参考母线相角
+\textbf{不用} \srcpath{fix} 固定，而以等式约束钉零，注释说明此举保持 IPM 可行
+（同文件:219--229、422--429）。
+
+\subsubsection*{目标函数}
+以 MW 为自变量的二次成本之和（同文件:240--263）：
+\begin{align*}
+\min\ \sum_{g}\Big(c_{2,g}\,(S_{\mathrm{base}}P_g)^{2}
+  + c_{1,g}\,(S_{\mathrm{base}}P_g) + c_{0,g}\Big)
+\end{align*}
+展开系数 $a_2=c_2 S_{\mathrm{base}}^{2}$、$a_1=c_1 S_{\mathrm{base}}$、
+$a_0=c_0$；$a_1$/$a_2$ 为零的项不建表达式节点，线性成本与零成本发电机统一
+处理（同文件:248--261）。成本币种在代码中未固定，目标值量纲为“货币/h”。
+
+\subsubsection*{约束}
+逐母线有功、无功平衡（同文件:300--335、415--420）：
+\begin{align*}
+\sum_{g\ni i} P_g - P_{d,i} - G_{s,i}V_{m,i}^{2} - \sum_{\ell\ni i} P_{\ell} &= 0,\\
+\sum_{g\ni i} Q_g - Q_{d,i} + B_{s,i}V_{m,i}^{2} - \sum_{\ell\ni i} Q_{\ell} &= 0,
+\end{align*}
+其中 $G_{s,i}$/$B_{s,i}$ 为母线并联（\fld{gs\_pu}/\fld{bs\_pu}），$\sum_{\ell\ni i}$
+对以 $i$ 为 from 端或 to 端的支路求和。支路潮流（同文件:347--413，注释公式
+同文件:348--354 与表达式实现一致；导纳见本章 BranchAdmittance 节）：
+\begin{align*}
+P_{f} &= G_{ff}V_f^{2} + V_fV_t\big(G_{ft}\cos\theta_{ft} + B_{ft}\sin\theta_{ft}\big),\\
+Q_{f} &= -B_{ff}V_f^{2} + V_fV_t\big(G_{ft}\sin\theta_{ft} - B_{ft}\cos\theta_{ft}\big),\\
+P_{t} &= G_{tt}V_t^{2} + V_fV_t\big(G_{tf}\cos\theta_{tf} + B_{tf}\sin\theta_{tf}\big),\\
+Q_{t} &= -B_{tt}V_t^{2} + V_fV_t\big(G_{tf}\sin\theta_{tf} - B_{tf}\cos\theta_{tf}\big),
+\end{align*}
+$\theta_{ft}=\theta_f-\theta_t$。平衡约束以 \srcpath{add\_nl\_constraint} 逐母线
+登记为等式 \fld{pb\_*}/\fld{qb\_*}（同文件:415--420）；参考母线相角钉零
+$\theta_{\mathrm{ref}}=0$（同文件:422--429）；热稳定按视在功率两端分别限幅，
+\fld{rate\_a\_pu}$>0$ 才登记（同文件:431--449）：
+\begin{align*}
+P_f^{2}+Q_f^{2}\le S_{\max}^{2},\qquad P_t^{2}+Q_t^{2}\le S_{\max}^{2}.
+\end{align*}
+潮流表达式在平衡循环中只建一次并被热约束复用（同文件:356--359、433）。
+
+\subsubsection*{求解与结果回写}
+求解器默认 \fld{solver\_name} 置 \texttt{NativeIPM} 且强制
+\fld{allow\_fallback}\,=\,\texttt{false}——注释明确 NativeNLP 缺线搜索、在病态
+AC OPF 上可能破坏堆内存，故禁止回退（同文件:175--184）。初值按
+“全部 $V_m$、全部 $V_a$、全部 $P_g$、全部 $Q_g$”的注册顺序拼装
+（同文件:265--275）。求解后仅当 \srcpath{has\_primal()} 为真才回写
+（同文件:452--460）：母线 $V_m$/$V_a$（同文件:462--469）、发电机 $P_g$/$Q_g$ 乘
+$S_{\mathrm{base}}$ 回 MW/MVAr 并按 MW 口径重算目标值 \fld{obj\_per\_h}
+（同文件:471--482）、支路 from 端潮流按解析式复算（同文件:484--503）。另以解析式重算
+逐母线注入失配与热越限，写入 \fld{max\_p\_viol\_pu}/\fld{max\_q\_viol\_pu}/
+\fld{max\_thermal\_viol\_pu} 三个求解后审计量（同文件:505--558）。
+
+\subsubsection*{参数表}
+\srcpath{ACOPFData} 聚合三个子结构（
+\srcpath{include/hacdcpf/power\_models/ac\_pf\_model\_builder.hpp}:57--62）：
+\fld{base\_mva}（默认 100.0）、\fld{buses}、\fld{generators}、\fld{branches}。
+
+母线数据（同文件:18--29）：
+\begin{paramtable}
+\fld{id} & — & — & — & — & 母线字符串 ID（缺省为 B$+$\fld{index}）\\
+\fld{pd\_pu} & $P_d$ & pu & — & 0.0 & 有功负荷（$S_{\mathrm{base}}$ 基值）\\
+\fld{qd\_pu} & $Q_d$ & pu & — & 0.0 & 无功负荷\\
+\fld{gs\_pu} & $G_s$ & pu & — & 0.0 & 母线并联电导\\
+\fld{bs\_pu} & $B_s$ & pu & — & 0.0 & 母线并联电纳\\
+\fld{vm\_min} & $V_{m,\min}$ & pu & 0.9--1.1 & 0.9 & 电压幅值下限\\
+\fld{vm\_max} & $V_{m,\max}$ & pu & 0.9--1.1 & 1.1 & 电压幅值上限\\
+\fld{vm0} & $V_{m}^{(0)}$ & pu & — & 1.0 & 电压幅值初值\\
+\fld{va0\_rad} & $\theta^{(0)}$ & rad & $-\pi$--$\pi$ & 0.0 & 相角初值\\
+\fld{is\_ref} & — & — & true/false & false & 参考母线标记（相角钉零）\\
+\end{paramtable}
+
+发电机数据（同文件:31--43）：
+\begin{paramtable}
+\fld{id} & — & — & — & — & 发电机字符串 ID（缺省 G$+$\fld{index}）\\
+\fld{bus\_id} & — & — & — & — & 挂接母线 \fld{ACOPFBusData::id}\\
+\fld{pg\_min\_pu} & $P_{g,\min}$ & pu & — & 0.0 & 有功下限\\
+\fld{pg\_max\_pu} & $P_{g,\max}$ & pu & $\ge$\fld{pg\_min\_pu} & 0.0 & 有功上限（转换时钳位）\\
+\fld{qg\_min\_pu} & $Q_{g,\min}$ & pu & — & $-1.0$ & 无功下限（$<-10^{9}$ 放开为 $-10^{4}$）\\
+\fld{qg\_max\_pu} & $Q_{g,\max}$ & pu & — & 1.0 & 无功上限（$>10^{9}$ 放开为 $10^{4}$）\\
+\fld{cost\_c2} & $c_2$ & — & $\ge 0$ & 0.0 & 二次成本系数（币种未定，量纲 货币/(MW$^{2}\cdot$h)）\\
+\fld{cost\_c1} & $c_1$ & — & $\ge 0$ & 1.0 & 一次成本系数（量纲 货币/(MW$\cdot$h)）\\
+\fld{cost\_c0} & $c_0$ & — & $\ge 0$ & 0.0 & 固定成本（量纲 货币/h）\\
+\fld{pg0\_pu} & $P_g^{(0)}$ & pu & 界内 & 0.0 & 有功初值（转换时钳到界内）\\
+\fld{qg0\_pu} & $Q_g^{(0)}$ & pu & 界内 & 0.0 & 无功初值（转换时钳到界内）\\
+\end{paramtable}
+
+支路数据（同文件:45--55）：
+\begin{paramtable}
+\fld{id} & — & — & — & — & 支路字符串 ID（缺省 \fld{from->to\_index}）\\
+\fld{from\_bus} & $f$ & — & — & — & from 端母线 ID\\
+\fld{to\_bus} & $t$ & — & — & — & to 端母线 ID\\
+\fld{r\_pu} & $r$ & pu & $>0$ & 0.0 & 串联电阻\\
+\fld{x\_pu} & $x$ & pu & $>0$ & 0.05 & 串联电抗\\
+\fld{bc\_pu} & $b_c$ & pu & $\ge 0$ & 0.0 & 线路充电电纳（$\pi$ 形两端各半）\\
+\fld{tap} & $\tau$ & pu & $>0$ & 1.0 & 非标变比幅值（非正回退 1.0）\\
+\fld{shift\_deg} & $\varphi$ & $^\circ$ & — & 0.0 & 移相角（装配时换算弧度）\\
+\fld{rate\_a\_pu} & $S_{\max}$ & pu & $\ge 0$ & 0.0 & 长期热稳定限值，0=不加约束\\
+\end{paramtable}
+
+\subsection{交直流混合 OPF 建模器（ACDCOPF）}\label{subsec:aml-acdcopf}
+
+\compmeta{ACDCOPFData / solve\_acdcopf}{\srcpath{include/hacdcpf/power\_models/hybrid\_opf\_model\_builder.hpp}}
+
+\subsubsection*{功能说明}
+\srcpath{solve\_acdcopf} 在 AC OPF 核心（支路、平衡、热稳定）不变的基础上
+扩展直流侧（\srcpath{src/power\_models/acdcopf\_builder.cpp}:1--14 文件头）：
+直流母线电压变量 $V_{dc}$、直流支路潮流、直流母线功率平衡、VSC 换流器交流
+注入变量与损耗耦合、DC/DC 变换器三模式方程，以及直流电压松弛母线等式。
+交直流耦合经 VSC 损耗方程把直流功率平衡耦合到交流电压，模型整体仍为非凸
+NLP，默认后端同为 \texttt{NativeIPM} 且禁止回退（同文件:245--247）。
+
+\subsubsection*{数据转换口径}
+\srcpath{to\_acdcopf\_data} 复用 \srcpath{to\_acopf\_data} 生成交流部分
+（同文件:43--53），随后：
+\begin{itemize}
+  \item \textbf{LCC 拒绝}：与 AC 版一致，抛 \srcpath{std::invalid\_argument}
+        （同文件:44--49）；
+  \item \textbf{直流母线}：仅在运且非 \fld{DC\_ISOLATED} 者入模——孤立母线
+        视为失电，不建变量、不建平衡约束、其负荷不被供电，引用它的直流支路
+        一并丢弃（同文件:57--66）；\fld{vmin\_pu}/\fld{vmax\_pu}/\fld{vm\_pu} 非正
+        回退 0.9/1.1/1.0；负荷在 \fld{sys.dc.loads} 非空时按
+        \srcpath{effective\_load\_p\_mw} 汇总（
+        \srcpath{include/hacdcpf/model/effective\_capacity.hpp}:66），否则取
+        母线 \fld{pd\_mw}（\srcpath{src/power\_models/acdcopf\_builder.cpp}:73--80）；
+  \item \textbf{直流支路}：仅在运且两端母线均入模者；\fld{r\_pu} 非正钳位
+        $10^{-4}$（同文件:86--101）；
+  \item \textbf{直流电压松弛判定}：经共享控制角色解析器
+        \srcpath{resolve\_device\_control\_role} 判定
+        \fld{provides\_dc\_v\_reference}（
+        \srcpath{include/hacdcpf/model/device\_control\_role.hpp}:37、85--119），
+        使 VDC\_Q、VDC\_VAC、DC\_V\_DROOP\_AC\_V 三类模式都被识别为直流电压
+        成形，与潮流/短路/暂态口径一致（
+        \srcpath{src/power\_models/acdcopf\_builder.cpp}:114--132）；被标记母线的
+        \fld{vdc\_set} 取换流器 \fld{v\_dc\_set\_pu}（非正回退 1.0）；
+  \item \textbf{VSC 换流器}：\fld{pac\_min\_pu}/\fld{pac\_max\_pu} 直接取
+        \fld{pmin\_mw}/\fld{pmax\_mw} 折算，\textbf{不做}“0=不限”特判；
+        无功界超过 $\pm 10^{9}$ 放开为 $\pm 10^{6}$；初值钳到界内；损耗系数
+        $a=$ \fld{loss\_mw}$/S_{\mathrm{base}}$、$b=$ \fld{loss\_percent}$/100$、
+        $c=1-\min(\max(\eta,0),1)$（同文件:134--165）；
+  \item \textbf{DC/DC 变换器}：效率 $\eta$ 钳位 $[0.01,1]$，\fld{r\_eq\_pu}
+        取非负；容量 \fld{cap} 取 \fld{sn\_mva}，非正时回退 \fld{pmax\_mw}、
+        \fld{pmin\_mw}、\fld{p\_ref\_mw} 三者绝对值之最大者；
+        输出功率界按 \fld{pmax\_mw}/\fld{pmin\_mw} 非零优先、否则 $\pm$cap
+        （cap 非正则 $\pm 10^{6}$），上下限颠倒时交换；
+        \fld{forms\_out\_voltage} 在 Voltage 模式或带非零下垂增益的 Droop
+        模式为真（同文件:166--202）；
+  \item \textbf{交流参考补齐}：当交流数据尚无参考母线时，取首台
+        \fld{is\_ac\_grid\_forming} 换流器的交流母线为参考，并以其
+        \fld{v\_ac\_set\_pu}/\fld{v\_ac\_angle\_set\_deg} 置初值；已有松弛
+        发电机母线时不再钉第二个角度参考（与潮流
+        \srcpath{apply\_acpv\_voltage\_control} 的“SLACK 优先”一致）
+        （同文件:203--229）。
+\end{itemize}
+
+\subsubsection*{决策变量}
+交流部分 $V_m$、$V_a$、$P_g$、$Q_g$ 与 AC OPF 相同（同文件:276--295）；直流与
+耦合变量（同文件:297--326）：
+\begin{align*}
+V_{dc,k} &\in [\,V_{dc,\min,k},\ V_{dc,\max,k}\,], &
+P_{ac,c} &\in [\,P_{ac,\min,c},\ P_{ac,\max,c}\,],\\
+Q_{ac,c} &\in [\,Q_{ac,\min,c},\ Q_{ac,\max,c}\,], &
+P_{dcdc,d} &\in [\,P_{out,\min,d},\ P_{out,\max,d}\,],
+\end{align*}
+其中 $P_{ac,c}$/$Q_{ac,c}$ 取“注入交流母线为正”的发电机惯例
+（同文件:305--309），$P_{dcdc,d}$ 为注入输出侧直流母线的输出功率（同文件:318--321）。
+注册松界分别为 $V_{dc}\in[0.9,1.1]$ 与 $\pm 10^{6}$，随后逐元素覆写。
+
+\subsubsection*{目标函数}
+与 AC OPF 相同的 MW 口径二次发电成本（同文件:328--343）；换流器与直流侧不直接进入
+目标，其运行点由约束与网损间接决定。
+
+\subsubsection*{约束（交流部分）}
+交流母线平衡在 AC OPF 基础上叠加换流器注入项
+$\sum_{g\ni i}P_g + \sum_{c\ni i}P_{ac,c} - P_{d,i} - G_{s,i}V_{m,i}^{2}
+- \sum_{\ell\ni i}P_\ell = 0$（无功同理，同文件:393--470），等式登记
+（同文件:472--477）、参考相角钉零（同文件:478--483）、热稳定限幅（同文件:485--497）均与
+AC OPF 同式，不再重复。
+
+\subsubsection*{约束（直流部分）}
+直流支路潮流按线性口径建模（同文件:515--531；同文件头:8）：
+\begin{align*}
+P_{ij} = (V_{dc,i} - V_{dc,j}) / r_{ij},
+\end{align*}
+发送端母线减去 $P_{ij}$、接收端加上（同文件:517--531）。注意该式为电压差除以
+电阻的\textbf{线性化}形式，而非 $V_{dc,i}(V_{dc,i}-V_{dc,j})/r_{ij}$ 的双线性
+精确式。
+
+VSC 换流器耦合（同文件:533--573）：交流电流与交流侧损耗
+\begin{align*}
+I_{ac,c} &= \frac{\sqrt{P_{ac,c}^{2} + Q_{ac,c}^{2} + \varepsilon^{2}}}{V_{m,a(c)}},
+ & P_{loss,c} &= a_c + b_c I_{ac,c} + c_c I_{ac,c}^{2},
+\end{align*}
+其中 $\varepsilon=10^{-6}$ 为 sqrt 内数值正则化（同文件:36、556--561）。直流侧注入
+取功率平衡反演（同文件:570--572）：
+\begin{align*}
+P_{dc,c} = -\big(P_{ac,c} + P_{loss,c}\big),
+\end{align*}
+直接以表达式叠加进直流母线平衡，不再单列换流器等式约束（同文件:541--543 注释）。
+
+DC/DC 变换器耦合（同文件:575--612）：输出母线加 $P_{out}$，输入母线抽取
+\begin{align*}
+P_{in} = \frac{P_{out}}{\eta}
+  + r_{eq}\,\frac{(P_{out}/\eta)^{2}}{V_{dc,in}^{2}},
+\end{align*}
+$I^{2}R$ 项仅在 \fld{r\_eq\_pu}$>0$ 时加入（同文件:590--598）。控制模式各添一条
+等式（同文件:600--611）：
+\begin{align*}
+\text{Power:}\quad & P_{out} = P_{\mathrm{ref}};\\
+\text{Droop:}\quad & P_{out} - k_{\mathrm{droop}}\,(V_{dc,out} - V_{\mathrm{ref}})
+                     = P_{\mathrm{ref}};\\
+\text{Voltage:}\quad & V_{dc,out} = V_{\mathrm{ref}}
+\quad(\text{输出母线已是 VSC 直流松弛时跳过}).
+\end{align*}
+
+直流母线功率平衡逐母线登记为等式 \fld{pdc\_bal\_*}（同文件:614--618）：
+\begin{align*}
+-P_{d,k} - \sum_{j} P_{kj} + \sum_{j} P_{jk}
++ \sum_{c\ni k} P_{dc,c} + \sum_{d:\,\mathrm{out}=k} P_{out,d}
+- \sum_{d:\,\mathrm{in}=k} P_{in,d} = 0 .
+\end{align*}
+直流电压松弛母线钉值 $V_{dc,k}=V_{dc,\mathrm{set},k}$（同文件:620--627）。
+
+\subsubsection*{求解与结果回写}
+初值顺序为 $V_m$、$V_a$、$P_g$、$Q_g$、$V_{dc}$、$P_{ac}$、$Q_{ac}$、
+$P_{dcdc}$（同文件:345--359）。求解后回写（同文件:630--683）：交流部分进
+\fld{ac\_result}（\srcpath{AMLBuildResult}），直流母线电压 \fld{vdc\_pu}
+（同文件:658--662），换流器 \fld{pac\_mw}/\fld{qac\_mvar} 直接取变量值，
+\fld{pdc\_mw} 按损耗模型反演 $-(P_{ac}+P_{loss})S_{\mathrm{base}}$ 复算
+（同文件:664--678），DC/DC 输出功率 \fld{pdcdc\_mw}（同文件:680--683）。审计方面，
+交流注入失配（同文件:685--728）与直流母线平衡残差 \fld{max\_dc\_p\_viol\_pu}
+（同文件:730--767）均以解析式重算；直流残差复算中 DC/DC 的 $I^{2}R$ 项对输入
+电压取 0.1 下限保护（同文件:759--762），与模型内表达式无该下限略有差异，仅供
+审计参考。
+
+\subsubsection*{参数表}
+\srcpath{ACDCOPFData} 聚合（
+\srcpath{include/hacdcpf/power\_models/hybrid\_opf\_model\_builder.hpp}:73--79）：
+\fld{ac}（\srcpath{ACOPFData}）、\fld{dc\_buses}、\fld{dc\_branches}、
+\fld{converters}、\fld{dcdc\_converters}。
+
+直流母线数据（同文件:20--28）：
+\begin{paramtable}
+\fld{id} & — & — & — & — & 直流母线字符串 ID（缺省 DC$+$\fld{index}）\\
+\fld{vdc\_min} & $V_{dc,\min}$ & pu & 0.9--1.1 & 0.9 & 直流电压下限\\
+\fld{vdc\_max} & $V_{dc,\max}$ & pu & 0.9--1.1 & 1.1 & 直流电压上限\\
+\fld{vdc0} & $V_{dc}^{(0)}$ & pu & — & 1.0 & 直流电压初值\\
+\fld{pd\_pu} & $P_d$ & pu & — & 0.0 & 直流负荷（$S_{\mathrm{base}}$ 基值）\\
+\fld{is\_vdc\_slack} & — & — & true/false & false & 直流电压松弛母线标记\\
+\fld{vdc\_set} & $V_{dc,\mathrm{set}}$ & pu & 0.9--1.1 & 1.0 & 松弛母线电压钉值\\
+\end{paramtable}
+
+直流支路数据（同文件:30--35）：
+\begin{paramtable}
+\fld{id} & — & — & — & — & 支路字符串 ID\\
+\fld{from\_bus} & $i$ & — & — & — & 发送端直流母线 ID\\
+\fld{to\_bus} & $j$ & — & — & — & 接收端直流母线 ID\\
+\fld{r\_pu} & $r_{ij}$ & pu & $>0$ & 0.01 & 支路电阻（非正钳位 $10^{-4}$）\\
+\end{paramtable}
+
+VSC 换流器数据（同文件:37--51）：
+\begin{paramtable}
+\fld{id} & — & — & — & — & 换流器字符串 ID（缺省 VSC$+$\fld{index}）\\
+\fld{ac\_bus\_id} & — & — & — & — & 交流侧母线 ID\\
+\fld{dc\_bus\_id} & — & — & — & — & 直流侧母线 ID\\
+\fld{pac\_min\_pu} & $P_{ac,\min}$ & pu & — & $-1.0$ & 交流有功下限（无“0=不限”特判）\\
+\fld{pac\_max\_pu} & $P_{ac,\max}$ & pu & — & 1.0 & 交流有功上限（同上）\\
+\fld{qac\_min\_pu} & $Q_{ac,\min}$ & pu & — & $-0.5$ & 交流无功下限（$<-10^{9}$ 放开为 $-10^{6}$）\\
+\fld{qac\_max\_pu} & $Q_{ac,\max}$ & pu & — & 0.5 & 交流无功上限（$>10^{9}$ 放开为 $10^{6}$）\\
+\fld{pac0\_pu} & $P_{ac}^{(0)}$ & pu & 界内 & 0.0 & 有功初值（钳到界内）\\
+\fld{qac0\_pu} & $Q_{ac}^{(0)}$ & pu & 界内 & 0.0 & 无功初值（钳到界内）\\
+\fld{a\_pu} & $a$ & pu & $\ge 0$ & 0.0 & 损耗常数项（\fld{loss\_mw}$/S_{\mathrm{base}}$）\\
+\fld{b\_loss} & $b$ & pu & 0--0.05 & 0.0 & 损耗一次项系数（\fld{loss\_percent}$/100$）\\
+\fld{c\_loss} & $c$ & pu & 0--0.5 & 0.0 & 损耗二次项系数（$1-\eta$ 钳位后）\\
+\fld{is\_vdc\_slack} & — & — & true/false & false & 本台换流器是否成形直流电压\\
+\end{paramtable}
+
+DC/DC 变换器数据（同文件:57--71）：
+\begin{paramtable}
+\fld{id} & — & — & — & — & 变换器字符串 ID（缺省 DCDC$+$\fld{index}）\\
+\fld{in\_bus\_id} & — & — & — & — & 输入侧直流母线 ID\\
+\fld{out\_bus\_id} & — & — & — & — & 输出侧直流母线 ID\\
+\fld{control\_mode} & — & — & Voltage/Power/\allowbreak Droop & Voltage & 控制模式（\srcpath{DCDCControlMode}，
+  \srcpath{include/hacdcpf/model/enums/converter\_enums.hpp}:73--77）\\
+\fld{eta} & $\eta$ & pu & 0.01--1.0 & 0.98 & 前向变换效率（钳位 $[0.01,1]$）\\
+\fld{r\_eq\_pu} & $r_{eq}$ & pu & $\ge 0$ & 0.0 & 等值串联电阻（$I^{2}R$ 损耗项）\\
+\fld{p\_ref\_pu} & $P_{\mathrm{ref}}$ & pu & — & 0.0 & 功率设定值（Power/Droop 模式）\\
+\fld{v\_ref\_pu} & $V_{\mathrm{ref}}$ & pu & $>0$ & 1.0 & 电压参考（Voltage/Droop 模式，非正回退 1.0）\\
+\fld{k\_droop} & $k_{\mathrm{droop}}$ & pu & — & 0.0 & 直流电压下垂增益\\
+\fld{pout\_min\_pu} & $P_{out,\min}$ & pu & — & $-1.0$ & 输出功率下限\\
+\fld{pout\_max\_pu} & $P_{out,\max}$ & pu & — & 1.0 & 输出功率上限\\
+\fld{pout0\_pu} & $P_{out}^{(0)}$ & pu & 界内 & 0.0 & 输出功率初值\\
+\fld{forms\_out\_voltage} & — & — & true/false & false & 是否成形输出母线电压（Voltage 或带增益 Droop）\\
+\end{paramtable}
+
+\subsection{DC OPF 建模器（LP）}\label{subsec:aml-dcopf}
+
+\compmeta{DCOPFData / solve\_dc\_opf}{\srcpath{include/hacdcpf/power\_models/dc\_opf\_model\_builder.hpp}}
+
+\subsubsection*{功能说明}
+\srcpath{solve\_dc\_opf} 以 AML 线性组建 API 装配经典直流 OPF 线性规划
+（\srcpath{src/power\_models/dc\_opf\_builder.cpp}:13--203，函数
+\srcpath{solve\_dc\_opf}）。输入为手工装配的 \srcpath{DCOPFData}（无
+\srcpath{HybridPowerSystem} 转换函数）。注意其结果类型
+\srcpath{power\_models::DCOPFResult} 与生产路径 \srcpath{hacdcpf::opf::DCOPFResult}
+同名不同型（同头文件:7--8、46--53 注释明确区分；生产 DC OPF 见
+第~\ref{sec:dcopf} 章）。
+
+\subsubsection*{决策变量与目标}
+变量为发电机有功 $p_g$（MW，逐台界 \fld{pmin\_mw}--\fld{pmax\_mw}）与母线
+相角 $\theta_i$（rad）（同文件:76--88）。相角采用 $\pm 10^{6}$ 的宽界，注释说明紧相角界
+（如 $\pm\pi$）会遮蔽线路潮流约束的对偶、在阻塞算例中给出错误 LMP
+（同文件:78--81）；松弛母线相角以 \srcpath{fix} 钉零（同文件:89--90）。目标为线性发电
+成本（同文件:92--95）：
+\begin{align*}
+\min\ \sum_{g} c_g\,p_g ,
+\end{align*}
+$c_g$ 为 \fld{cost\_per\_mwh}（币种未定，量纲 货币/MWh）。
+
+\subsubsection*{约束}
+节点平衡（同文件:97--129）：
+\begin{align*}
+\sum_{g\ni i} p_g - D_i - \sum_{\ell=(i,j)} b_\ell(\theta_i-\theta_j)
++ \sum_{\ell=(k,i)} b_\ell(\theta_k-\theta_i) = 0,
+\end{align*}
+$b_\ell$ 为支路电纳 \fld{susceptance\_pu}，$D_i$ 为节点负荷
+\fld{demands\_MW}（缺项补 0，同文件:68--74）。线路潮流双向限幅
+（同文件:131--161）：
+\begin{align*}
+-P_{\max,\ell}\ \le\ b_\ell(\theta_f-\theta_t)\ \le\ P_{\max,\ell},
+\end{align*}
+\fld{max\_flow\_mw}$\le 0$ 时不限——实现上登记一条恒真约束占位（$0\le 1$ /
+$0\ge -1$，同文件:138--141、154--156；注释写作 $1\le\infty$ 的形式，与表达式
+形式不一致但语义同为恒真）。
+
+\subsubsection*{求解与结果回写}
+求解前先 \srcpath{check\_bounds} 校验变量界（同文件:163--165）。回写
+（同文件:167--200）：发电调度 \fld{gen\_dispatch\_MW}、相角
+\fld{voltage\_angle\_rad}、支路潮流按 $b_\ell(\theta_f-\theta_t)$ 复算
+\fld{branch\_flow\_MW}；LMP 取节点平衡约束的对偶，注释说明符号约定为
+“平衡写作 $\sum p_g - D = 0$，对偶即 $\partial\mathrm{obj}^{*}/\partial D$ 的
+正边际成本”（同文件:189--199），仅当 \srcpath{has\_duals()} 为真时可用。
+
+\subsubsection*{参数表}
+\srcpath{DCOPFData}（
+\srcpath{include/hacdcpf/power\_models/dc\_opf\_model\_builder.hpp}:19--44）：
+\begin{paramtable}
+\fld{bus\_ids} & — & — & — & — & 母线 ID 有序列表（非空校验）\\
+\fld{slack\_bus} & — & — & — & — & 松弛母线 ID，须在 \fld{bus\_ids} 中（同文件:18--30 校验）\\
+\fld{generators} & — & — & — & — & 发电机元组列表（见下行五字段）\\
+\fld{GenTuple::id} & — & — & — & — & 发电机 ID\\
+\fld{GenTuple::bus} & — & — & — & — & 挂接母线 ID\\
+\fld{GenTuple::pmin\_mw} & $p_{g,\min}$ & MW & $\ge 0$ & — & 有功下限（无内建默认）\\
+\fld{GenTuple::pmax\_mw} & $p_{g,\max}$ & MW & $>$\fld{pmin\_mw} & — & 有功上限\\
+\fld{GenTuple::cost\_per\_mwh} & $c_g$ & — & $\ge 0$ & — & 线性成本（币种未定，货币/MWh）\\
+\fld{branches} & — & — & — & — & 支路元组列表（见下行四字段）\\
+\fld{BranchTuple::from\_bus} & $f$ & — & — & — & from 端母线 ID\\
+\fld{BranchTuple::to\_bus} & $t$ & — & — & — & to 端母线 ID\\
+\fld{BranchTuple::\allowbreak susceptance\_pu} & $b_\ell$ & pu & $>0$ & — & 支路电纳\\
+\fld{BranchTuple::max\_flow\_mw} & $P_{\max,\ell}$ & MW & $\ge 0$ & — & 潮流限值，$\le 0$ 不限\\
+\fld{demands\_MW} & $D_i$ & MW & $\ge 0$ & 0 & 节点负荷（缺项补 0）\\
+\end{paramtable}
+该 builder 内部不做基准换算：电纳标幺与功率 MW 的量纲一致性由调用方
+保证（代码中无 $S_{\mathrm{base}}$ 字段）。
+
+\subsection{LinDistFlow 建模器（配电网线性松弛 LP）}\label{subsec:aml-lindistflow}
+
+\compmeta{LinDistFlowData / solve\_lindistflow}{\srcpath{include/hacdcpf/power\_models/lindistflow\_builder.hpp}}
+
+\subsubsection*{功能说明}
+面向\textbf{径向}配电网的 Baran \& Wu LinDistFlow 线性化：忽略 $I^{2}r$
+网损，以支路有功/无功潮流与母线电压平方为变量组建 LP
+（\srcpath{include/hacdcpf/power\_models/lindistflow\_builder.hpp}:7--28 文件头
+公式；\srcpath{src/power\_models/lindistflow\_builder.cpp}:28--184，函数
+\srcpath{solve\_lindistflow}）。文件头明确限定：仅固定负荷，不建分布式电源、
+可控源或切负荷变量（同头文件:30--31）。
+
+\subsubsection*{决策变量与目标}
+变量（同文件:51--58）：支路有功 $P_{ij}$、无功 $Q_{ij}$（MW/MVAr，注册松界
+$\pm 10^{20}$），母线电压平方 $v_i$（pu$^{2}$，界
+\fld{v\_min\_pu\_sq}--\fld{v\_max\_pu\_sq}）。根母线电压平方以变量界钉在
+\fld{root\_v\_sq\_pu}（同文件:60--65）。目标取电压调节代理指标——最大化非根
+母线电压平方之和（同文件:150--159）：
+\begin{align*}
+\min\ \sum_{i\ne \mathrm{root}} \big(-v_i\big)
+\qquad(\text{等价于}\ \max\textstyle\sum_{i\ne\mathrm{root}} v_i).
+\end{align*}
+
+\subsubsection*{约束}
+非根母线功率平衡（同文件:91--131）：
+\begin{align*}
+\sum_{j:\,(i,j)} P_{ij} - P_{ki} &= -p_{d,i}, &
+\sum_{j:\,(i,j)} Q_{ij} - Q_{ki} &= -q_{d,i},
+\end{align*}
+径向假设下每个非根母线恰有一条入支路（\fld{incoming\_branch} 映射，
+同文件:67--78）；根母线不建平衡，其注入自由，起平衡电源作用。支路电压降落
+（同文件:133--148）：
+\begin{align*}
+v_j = v_i - 2\,(r_{ij}P_{ij} + x_{ij}Q_{ij}).
+\end{align*}
+热限按变量界实现 $|P_{ij}|\le S_{\max,ij}$、$|Q_{ij}|\le S_{\max,ij}$——
+有功无功分别限幅的近似，非视在功率圆（同文件:80--89；同头文件:21--22 注明
+approximate）。电压限 $v_{\min}^{2}\le v_i\le v_{\max}^{2}$ 直接由变量界给出
+（默认 $0.9^{2}=0.81$、$1.1^{2}=1.21$）。
+
+\subsubsection*{求解与结果回写}
+\srcpath{check\_bounds} 后求解（同文件:161--163）；回写母线电压平方
+\fld{voltage\_sq\_pu} 与支路 $P$/$Q$（键为
+$\texttt{from}\rightarrow\texttt{to}$ 拼接字符串，同文件:21--23、165--183）。
+
+\subsubsection*{参数表}
+\srcpath{LinDistFlowData}（
+\srcpath{include/hacdcpf/power\_models/lindistflow\_builder.hpp}:46--71）：
+\begin{paramtable}
+\fld{bus\_ids} & — & — & — & — & 母线 ID 列表（须含根母线，非空校验）\\
+\fld{root\_bus} & — & — & — & — & 根母线（馈线首端）ID（非空校验）\\
+\fld{root\_v\_sq\_pu} & $v_{\mathrm{root}}$ & pu$^{2}$ & 0.81--1.21 & 1.0 & 根母线电压平方钉值\\
+\fld{branches} & — & — & — & — & 支路元组 $(f,t,r_{pu},x_{pu},S_{\max})$ 列表（非空校验）\\
+\fld{p\_load\_mw} & $p_{d,i}$ & MW & $\ge 0$ & 0 & 节点有功负荷（缺项补 0）\\
+\fld{q\_load\_mvar} & $q_{d,i}$ & MVAr & $\ge 0$ & 0 & 节点无功负荷（缺项补 0）\\
+\fld{v\_min\_pu\_sq} & $v_{\min}$ & pu$^{2}$ & — & 0.81 & 电压平方下限（$0.9^{2}$）\\
+\fld{v\_max\_pu\_sq} & $v_{\max}$ & pu$^{2}$ & — & 1.21 & 电压平方上限（$1.1^{2}$）\\
+\end{paramtable}
+量纲注意：电压降落方程把 pu 阻抗与 MW 潮流直接相乘，代码不做
+$S_{\mathrm{base}}$ 换算，负荷、阻抗与电压平方的标量一致性由调用方保证。
+
+\subsection{SCUC 建模器（MILP 机组组合）}\label{subsec:aml-scuc}
+
+\compmeta{SCUCData / solve\_scuc}{\srcpath{include/hacdcpf/power\_models/scuc\_builder.hpp}}
+
+\subsubsection*{功能说明}
+\srcpath{solve\_scuc} 装配安全约束机组组合的混合整数线性规划
+（\srcpath{src/power\_models/scuc\_builder.cpp}:24--308，函数
+\srcpath{solve\_scuc}；头文件数学形式摘要
+\srcpath{include/hacdcpf/power\_models/scuc\_builder.hpp}:7--15）。时段集合用
+\srcpath{add\_ordered\_set} 登记以支持 \srcpath{prev} 取前一时段
+（\srcpath{src/power\_models/scuc\_builder.cpp}:34）。
+
+\subsubsection*{决策变量}
+逐（机组 $g$，时段 $t$）（同文件:68--74）：
+\begin{align*}
+u_{g,t} &\in \{0,1\} &&\text{开停机状态（Binary）},\\
+p_{g,t} &\ge 0 &&\text{出力（MW）},\\
+s_{g,t} &\ge 0 &&\text{启动指示（连续，非 Binary）},
+\end{align*}
+$s_{g,t}$ 为\textbf{连续非负}变量，经启动约束与启动成本最小化起指示作用
+（同文件:71--74 注释“here treated as $\ge 0$”）。
+
+\subsubsection*{目标函数}
+燃料成本、启动成本与空载成本之和（同文件:76--91）：
+\begin{align*}
+\min\ \sum_{t}\sum_{g}\Big(c_g\,p_{g,t} + S_g\,s_{g,t} + C_g\,u_{g,t}\Big),
+\end{align*}
+$c_g$=\fld{cost\_per\_MWh}、$S_g$=\fld{startup\_cost}、$C_g$=\fld{commit\_cost}
+（币种均未定；缺失参数的装配默认值见参数表，同文件:52--66）。
+
+\subsubsection*{约束}
+系统功率平衡（同文件:93--101）：
+\begin{align*}
+\sum_{g} p_{g,t} = D_t \qquad \forall t .
+\end{align*}
+出力上下界与开停机联动（同文件:116--126）：
+\begin{align*}
+p_{g,\min}\,u_{g,t}\ \le\ p_{g,t}\ \le\ p_{g,\max}\,u_{g,t}.
+\end{align*}
+爬坡（仅 $t\ne t_0$，同文件:128--143）：
+\begin{align*}
+p_{g,t} - p_{g,t-1} &\le R^{up}_g, & p_{g,t-1} - p_{g,t} &\le R^{dn}_g .
+\end{align*}
+启动指示（仅 $t\ne t_0$，同文件:145--149）：
+\begin{align*}
+s_{g,t}\ \ge\ u_{g,t} - u_{g,t-1}.
+\end{align*}
+最小连续开机时间（\fld{min\_up\_periods}$>1$ 才登记，同文件:153--199）：令
+$W=\min(t+T^{up}_g-1,\ N_T-1)$、$W'=W-t+1$ 为截断窗口长度，$u_{g,t_0-1}$ 取
+\fld{initial\_commitment}（缺省 0），
+\begin{align*}
+\sum_{j=t}^{W} u_{g,j}\ \ge\ W'\,(u_{g,t} - u_{g,t-1}),
+\end{align*}
+实现式为 $u_{\mathrm{sum}} - W'u_{g,t} + W'u_{g,t-1}\ge 0$（同文件:184--197）；窗口在时域
+末端截断（注释同文件:192--194）。最小连续停机时间对偶地给出（同文件:201--253）：
+\begin{align*}
+\sum_{j=t}^{W} (1-u_{g,j})\ \ge\ W'\,(u_{g,t-1} - u_{g,t})
+\ \Longleftrightarrow\
+\sum_{j=t}^{W} u_{g,j} + W'u_{g,t-1} - W'u_{g,t} \le W' .
+\end{align*}
+旋转备用（仅对 \fld{spinning\_reserve\_MW} 列出的时段登记，同文件:255--272）：
+\begin{align*}
+\sum_{g} p_{g,\max}\,u_{g,t}\ \ge\ D_t + R_t .
+\end{align*}
+首时段无前一时段，爬坡与启动约束整体跳过（同文件:128--131），初始状态仅经
+\fld{initial\_commitment} 进入最小连续开停约束，不建“初始爬坡”约束。
+
+\subsubsection*{求解与结果回写}
+\srcpath{check\_bounds} 后求解（同文件:274--276）。回写开停机 \fld{commitment}、
+出力 \fld{dispatch\_MW}、启动事件 \fld{startup\_event}（均为 $(g,t)$ 键，
+同文件:282--294）；时段电价 \fld{price\_per\_MWh} 取平衡约束对偶，仅当
+\srcpath{has\_duals()} 为真（MILP 通常无对偶，同文件:296--304）。结果结构固定
+\fld{price\_valid}\,=\,\texttt{false} 并给出原因字符串，\fld{model\_scope} 为
+\texttt{experimental-aml-\allowbreak scuc:\allowbreak system-balance-\allowbreak no-network}，
+\fld{model\_limitations} 声明两条：仅系统级平衡、无任何输配电网络约束；
+MILP 平衡对偶不是经认证的出清价格，定价须固定开停机后重解 LP
+（\srcpath{include/hacdcpf/power\_models/scuc\_builder.hpp}:85--92）。
+
+\subsubsection*{参数表}
+\srcpath{SCUCData}（同文件:29--79；“默认值”列为 builder 装配时的缺省
+（同文件:52--66），结构体本身为 map 缺项语义）：
+\begin{paramtable}
+\fld{generator\_ids} & — & — & — & — & 机组 ID 有序列表（非空校验）\\
+\fld{period\_ids} & — & — & — & — & 时段 ID 时序列表（定义前驱关系，非空校验）\\
+\fld{demand\_MW} & $D_t$ & MW & $\ge 0$ & 0.0 & 逐时段系统负荷\\
+\fld{cost\_per\_MWh} & $c_g$ & — & $\ge 0$ & 1.0 & 燃料成本（币种未定，货币/MWh）\\
+\fld{pmin\_MW} & $p_{g,\min}$ & MW & $\ge 0$ & 0.0 & 最小稳定出力\\
+\fld{pmax\_MW} & $p_{g,\max}$ & MW & $>$\fld{pmin\_MW} & $10^{6}$ & 装机容量\\
+\fld{ramp\_up\_MW} & $R^{up}_g$ & MW/h & $>0$ & $10^{6}$ & 爬坡上限（缺省等效不限）\\
+\fld{ramp\_dn\_MW} & $R^{dn}_g$ & MW/h & $>0$ & $10^{6}$ & 滑坡上限（缺省等效不限）\\
+\fld{startup\_cost} & $S_g$ & — & $\ge 0$ & 0.0 & 启动成本（币种未定，货币/次）\\
+\fld{commit\_cost} & $C_g$ & — & $\ge 0$ & 0.0 & 空载成本（币种未定，货币/h）\\
+\fld{min\_up\_periods} & $T^{up}_g$ & 时段数 & $\ge 2$ & 不登记 & 最小连续开机时段数（$\le 1$ 跳过）\\
+\fld{min\_dn\_periods} & $T^{dn}_g$ & 时段数 & $\ge 2$ & 不登记 & 最小连续停机时段数（$\le 1$ 跳过）\\
+\fld{initial\_commitment} & $u_{g,t_0-1}$ & 0/1 & 0/1 & 0.0 & 首时段前的初始开停机状态\\
+\fld{spinning\_reserve\_MW} & $R_t$ & MW & $\ge 0$ & 不登记 & 逐时段旋转备用需求（缺省不建备用约束）\\
+\end{paramtable}
+
+\subsection{结果结构与求解状态}
+
+\subsubsection*{AMLBuildResult}
+AC/ACDCOPF 共用的聚合结果（
+\srcpath{include/hacdcpf/power\_models/aml\_build\_result.hpp}:16--38）：
+\fld{model\_scope} 与 \fld{model\_limitations} 携带实验性声明（见本章“定位”
+节）；\fld{solve\_result} 为 AML 原生求解状态；\fld{obj\_per\_h} 按 MW 口径
+重算的小时成本；\fld{max\_p\_viol\_pu}/\fld{max\_q\_viol\_pu}/
+\fld{max\_thermal\_viol\_pu}/\fld{max\_dc\_p\_viol\_pu} 为求解后解析复算的
+最大约束违限；\fld{vm\_pu}/\fld{va\_rad}/\fld{pg\_mw}/\fld{qg\_mvar}/
+\fld{pf\_mw}/\fld{qf\_mw}/\fld{vdc\_pu}/\fld{pac\_mw}/\fld{qac\_mvar}/
+\fld{pdc\_mw} 为以字符串 ID 为键的结果映射。交直流混合结果
+\srcpath{ACDCOPFBuilderResult} 在其外套一层：交流部分放 \fld{ac\_result}，
+另加 \fld{vdc\_pu}/\fld{pac\_mw}/\fld{qac\_mvar}/\fld{pdc\_mw}/
+\fld{pdcdc\_mw} 与 \fld{max\_dc\_p\_viol\_pu}，并带自身两条局限声明
+（实验路径；DC/DC 为平滑前向效率/$I^{2}R$ 模型，不表示双向符号切换，
+\srcpath{include/hacdcpf/power\_models/hybrid\_opf\_model\_builder.hpp}:82--94）。
+
+\subsubsection*{aml::SolveResult 摘要}
+求解状态三元组 \fld{termination\_status}/\fld{primal\_status}/
+\fld{dual\_status}（枚举含 Optimal/Infeasible/TimeLimit/NumericalError 等），
+判定辅助 \srcpath{has\_primal()}/\srcpath{is\_optimal()}/
+\srcpath{has\_duals()}；目标值 \fld{objective\_value}、界
+\fld{objective\_bound}、间隙 \fld{optimality\_gap}；统计
+\fld{solve\_time\_sec}/\fld{simplex\_iterations}/
+\fld{branch\_and\_cut\_nodes}/\fld{solver\_used}（实际求解器名）；
+解值经 \srcpath{var\_value}、对偶经 \srcpath{dual}、简约成本经
+\srcpath{reduced\_cost} 访问；IIS 数据可选（
+\srcpath{MIPSolvers/include/mipsolvers/aml/solve\_result.hpp}:21--52、57--147）。
+五个 builder 的回写都以 \srcpath{has\_primal()} 为门，无原始终解时仅返回
+状态（如 \srcpath{src/power\_models/acopf\_builder.cpp}:458--460）。
+
+\subsection{后端选择逻辑与运行时探测}
+
+\subsubsection*{求解选项 aml::SolveOptions}
+字段（\srcpath{MIPSolvers/include/mipsolvers/aml/model.hpp}:22--28）：
+\begin{paramtable}
+\fld{solver\_name} & — & — & 见优先级表 & 空串 & 指定后端名；空=按类别默认优先级\\
+\fld{time\_limit\_sec} & — & s & $>0$ & $10^{30}$ & 时间限制（\textbf{当前未下传}，见下）\\
+\fld{mip\_gap\_tol} & — & pu & $10^{-6}$--$10^{-2}$ & $10^{-4}$ & MIP 间隙容差（\textbf{当前未下传}）\\
+\fld{verbosity} & — & — & 0--2 & 0 & 日志级别（\textbf{当前未下传}）\\
+\fld{allow\_fallback} & — & — & true/false & true & 首选失败时是否依次尝试候选后端\\
+\end{paramtable}
+诚实口径：\srcpath{Model::solve} 只把 \fld{solver\_name} 与
+\fld{allow\_fallback} 转抄给引擎选项（
+\srcpath{MIPSolvers/src/aml/model.cpp}:1042--1044），引擎侧
+\srcpath{engine::SolveOptions} 亦无时间限/间隙字段（
+\srcpath{MIPSolvers/include/mipsolvers/engine/api/options.hpp}:16--21）；
+\fld{time\_limit\_sec}/\fld{mip\_gap\_tol}/\fld{verbosity} 目前声明而未被消费，
+设置它们不改变求解行为。
+
+\subsubsection*{问题类别分发}
+\srcpath{Model::solve} 按四级判据依次分类：非线性目标标记 \fld{has\_nl\_obj}
+为真$\to$NLP；否则无整型变量且含二次目标$\to$QP；否则含整型/二元
+变量$\to$MILP；其余为 LP，再分别编译为
+\srcpath{NLPModel}/\srcpath{QPModel}/\srcpath{MIPModel}/\srcpath{LPModel} 交给
+\srcpath{SolverEngine}（\srcpath{MIPSolvers/src/aml/model.cpp}:1037--1074）。
+两点如实说明：其一，NLP 判据只来自 \srcpath{minimize}/\srcpath{maximize} 的
+\srcpath{NonlinearExpr} 重载置位（同文件:929--940），
+\srcpath{add\_nl\_constraint} 本身不置该标记（同文件:1003--1010），而
+\srcpath{compile\_lp} 仅遍历线性行（同文件:136--143）——若某模型只有非线性
+约束而目标是线性的，将被误分发到 LP 路径并丢失非线性行；本章两个 NLP
+builder 的目标恒以 \srcpath{NonlinearExpr} 组装，不受此影响。其二，整型判定
+为逐变量扫描 \srcpath{VarType::Integer}/\srcpath{Binary}（同文件:304--310）。
+本章五个 builder 的落点：AC/ACDCOPF$\to$NLP，DC OPF 与
+LinDistFlow$\to$LP，SCUC$\to$MILP。
+
+\subsubsection*{适配器注册与可用性}
+\srcpath{SolverEngine} 构造时注册默认适配器：自研内核（NativeLinear、
+NativeNewton、NativeIPMLP、NativePDLP、NativeLCQP、NativeIPM、NativeNLP、
+NativeBranchAndCut）无条件注册；Gurobi/HiGHS/Ipopt/SCIP 仅当
+\srcpath{available()} 为真才注册（
+\srcpath{MIPSolvers/src/engine/api/solver.cpp}:131--174，函数
+\srcpath{register\_default\_adapters}）。三个外部后端的可用性判定
+（\srcpath{MIPSolvers/src/engine/solver/external/adapters.cpp}）：
+\begin{itemize}
+  \item HiGHS：编译宏 \srcpath{HACDCPF\_HAVE\_HIGHS\_LIB} 为真即可用，
+        否则要求构造时显式给出存在的可执行文件路径（同文件:1478--1484；
+        路径经 \srcpath{resolve\_explicit\_executable} 校验存在性，同文件:73--78、
+        1467--1468）；支持 LP/MILP（同文件:1474--1476）；库内嵌失败时回退
+        MPS 临时文件调 CLI 的流程见同文件:1490--1529；
+  \item Ipopt：宏 \srcpath{HACDCPF\_HAVE\_IPOPT} 或显式可执行路径
+        （同文件:1736--1742）；仅支持 NLP（同文件:1728--1730）；
+  \item SCIP：宏 \srcpath{HACDCPF\_HAVE\_SCIP\_LIB} 或显式可执行路径
+        （同文件:1748--1754）；仅支持 MINLP（同文件:1732--1734）。
+\end{itemize}
+默认注册以空路径构造适配器，即\textbf{不做 PATH 搜索}：未编译内嵌库时外部
+后端不进入候选表（同文件:1467--1468、1714--1718 与注册调用
+\srcpath{MIPSolvers/src/engine/api/solver.cpp}:153--171）。编译期门控由
+MIPSolvers 侧 CMake 定义（\srcpath{MIPSolvers/CMakeLists.txt}:111（HiGHS）、
+201（SCIP）、259（Ipopt））；根项目选项 \srcpath{HACDCPF\_ENABLE\_IPOPT}
+默认仅 macOS 为 ON，非 Apple 平台显式开启直接
+\srcpath{FATAL\_ERROR}（\srcpath{CMakeLists.txt}:60--68、122--127）。
+
+\subsubsection*{候选顺序与回退}
+分发器候选顺序为：用户指定 \fld{preferred\_solver} $\to$ 类别偏好设置 $\to$
+类别默认优先级表 $\to$ 注册表中其余支持该类别的适配器（
+\srcpath{MIPSolvers/src/engine/strategy/dispatcher.cpp}:143--185，函数
+\srcpath{candidate\_adapters}）。默认优先级表（同文件:61--81，函数
+\srcpath{default\_priority\_for}）：
 \begin{center}
 \footnotesize
-\begin{tabular}{@{}lllll@{}}
+\begin{tabular}{ll}
 \toprule
-Builder & 问题类 & 默认 solver & allow\_fallback & 实际链\\
+问题类别 & 默认候选顺序（前者优先）\\
 \midrule
-AC OPF & NLP & NativeIPM & \textbf{false} & 仅 NativeIPM\\
-混合 AC/DC OPF & NLP & NativeIPM & \textbf{false} & 仅 NativeIPM\\
-DC OPF & LP & auto & true & NativeIPMLP$\to$PDLP$\to$LCQP$\to$Gurobi$\to$HiGHS\\
-LinDistFlow & LP & auto & true & 同 LP 链\\
-SCUC & MILP & auto & true & HiGHS$\to$Gurobi$\to$NativeBranchAndCut\\
+LP & NativeIPMLP、NativePDLP、NativeLCQP、Gurobi、HiGHS\\
+QP & Gurobi、NativeLCQP\\
+NLP & Ipopt、NativeIPM、NativeNLP\\
+MILP & HiGHS、Gurobi、NativeBranchAndCut\\
+MINLP & Scip、NativeBranchAndCut\\
+LE/NLE & NativeLinear / NativeNewton\\
 \bottomrule
 \end{tabular}
 \end{center}
+求解循环按序尝试，首个成功（\fld{stats.success}）者返回；
+\fld{allow\_fallback} 为假时首选失败即终止（同文件:187--219，函数
+\srcpath{StrategyDispatcher::solve}）。本章两个 NLP builder 利用该机制强制
+锁定 \texttt{NativeIPM} 并关闭回退（
+\srcpath{src/power\_models/acopf\_builder.cpp}:179--184；
+\srcpath{src/power\_models/acdcopf\_builder.cpp}:245--247）；LP/MILP builder
+不显式指定后端，走默认优先级。实际命中的后端名记录在
+\fld{SolveResult::solver\_used}。平台侧另有门面
+\srcpath{hacdcpf::get\_solver\_capabilities()} 供运行期查询编译进的后端
+（\fld{has\_highs}/\fld{has\_ipopt}/\fld{has\_scip}/\fld{has\_gurobi} 等，
+\srcpath{include/hacdcpf/api/solver\_capabilities.hpp}:15--44）。
 
 \subsection{验证与校核}
-\textbf{仅两个测试目标直接覆盖 AML 层}：
+
+本章模型的验证全部来自主仓 ctest 套件中的单元测试，无外部工具对照：
 \begin{itemize}
-  \item \srcpath{tests/test\_hacdcpf.cpp:234--261}：孤立 DC 母线被剔除
-        （\fld{dc\_buses.size()}==2、支路剔除）；
-  \item \srcpath{tests/test\_converter\_coordination.cpp:1312--1590}：控制角色解析器
-        遍历 7 种 VSC 模式；Vdc 松弛选择与解析器一致；AC 参考与 grid-forming 解析一致；
-        DC/DC 三控制模式——算例设 \fld{r\_eq\_pu}=0.01（:1541），断言数据转换保留
-        \fld{r\_eq\_pu}（:1555）；Voltage：\fld{vdc\_pu}[``DC2'']$\approx1.03$
-        （margin $10^{-3}$）、Power：\fld{pdcdc\_mw}$\approx p_{ref}$（margin $10^{-2}$）
-        且 \fld{max\_dc\_p\_viol\_pu}$<10^{-4}$（:1575，验证含 $I^2R$ 的审计口径）、
-        Droop：\fld{pdcdc\_mw}$\approx p_{ref}+k(V_{dc}-v_{ref})S_b$（margin $2\times10^{-2}$）。
+  \item \textbf{LCC 范围守卫}：含在运 LCC 的系统调用 \srcpath{to\_acopf\_data}/
+        \srcpath{to\_acdcopf\_data} 必须抛出含“does not model LCC”的
+        \srcpath{std::invalid\_argument}，LCC 退出运行后转换恢复通过
+        （\srcpath{tests/test\_converter\_coordination.cpp}:1429--1461）；
+  \item \textbf{控制角色一致性}：六种换流器模式下
+        \fld{is\_vdc\_slack} 标记与 \srcpath{resolve\_device\_control\_role}
+        的 \fld{provides\_dc\_v\_reference} 逐一相符，VDC\_VAC 与
+        DC\_V\_DROOP\_AC\_V 为回归守卫（
+        \srcpath{tests/test\_converter\_coordination.cpp}:1395--1427）；
+  \item \textbf{交流参考一致性}：构网换流器在无松弛发电机时成为唯一交流
+        参考、已有 SLACK 时不钉第二角度（
+        \srcpath{tests/test\_converter\_coordination.cpp}:1463--1540）；
+  \item \textbf{孤立直流母线剔除}：DC\_ISOLATED 母线及其支路不进模型
+        （\srcpath{tests/test\_hacdcpf.cpp}:234--261）；
+  \item \textbf{DC/DC 三模式数值测试}：Voltage 模式输出母线电压钉在
+        1.03~pu、Power 模式输出功率等于设定值且直流平衡残差
+        \fld{max\_dc\_p\_viol\_pu}$<10^{-4}$、Droop 模式输出功率与下垂方程
+        自洽（\srcpath{tests/test\_converter\_coordination.cpp}:1583--1626）。
 \end{itemize}
-AC OPF / DC OPF / LinDistFlow / SCUC 的 AML 版本均无直接测试；
-\srcpath{tests/test\_acopf\_dcopf\_crossval.cpp} 验证的是生产 \texttt{opf::} 求解器
-而非本层（:20--21），引用时须区分。
+如实说明：当前代码检出中，DC OPF、LinDistFlow、SCUC 三个 builder 在主仓
+\srcpath{tests/} 下没有直接单元测试覆盖（全仓检索仅 AC/ACDCOPF 出现于
+上述两测试文件）；其正确性依赖 MIPSolvers 侧 AML 测试与调用方集成测试。
+跨引擎交叉验证的总体口径见第~\ref{sec:verification} 章。
+
+\subsection{边界与局限}
+
+\begin{enumerate}
+  \item \textbf{实验性定位}：结果结构自带
+        \fld{model\_scope}/\fld{model\_limitations} 声明，AML builder 不被
+        生产 \srcpath{solve\_ac\_opf}/\srcpath{solve\_dc\_opf} 运行时使用
+        （\srcpath{include/hacdcpf/power\_models/aml\_build\_result.hpp}:16--20；
+        \srcpath{include/hacdcpf/power\_models/hybrid\_opf\_model\_builder.hpp}:83--86；
+        \srcpath{include/hacdcpf/power\_models/scuc\_builder.hpp}:86--89）。
+  \item \textbf{LCC 不建模}：AC 与 ACDCOPF 数据转换遇在运 LCC 直接抛异常，
+        需改用 ParityIPM/Ipopt 生产路径（
+        \srcpath{src/power\_models/acopf\_builder.cpp}:32--37；
+        \srcpath{src/power\_models/acdcopf\_builder.cpp}:44--49）。
+  \item \textbf{NLP 后端锁定}：两个 NLP builder 固定 \texttt{NativeIPM} 且
+        禁止回退；代码注释指出 NativeNLP 缺线搜索、在病态 AC OPF 上可能破坏
+        堆内存，故不作为回退项（
+        \srcpath{src/power\_models/acopf\_builder.cpp}:175--184）。Ipopt 内嵌
+        后端仅 macOS 可编译（\srcpath{CMakeLists.txt}:60--68、122--127）。
+  \item \textbf{求解选项部分未生效}：\fld{time\_limit\_sec}/
+        \fld{mip\_gap\_tol}/\fld{verbosity} 声明但未下传引擎
+        （\srcpath{MIPSolvers/src/aml/model.cpp}:1042--1044）。
+  \item \textbf{模型导出入口未实现}：\srcpath{Model::write\_lp}/
+        \srcpath{write\_mps} 为占位桩，调用抛 \srcpath{std::logic\_error}
+        （\srcpath{MIPSolvers/src/aml/model.cpp}:1103--1111）。
+  \item \textbf{VSC 有功界无“0=不限”特判}：\fld{pmin\_mw}/\fld{pmax\_mw}
+        为 0 时 \fld{pac\_min\_pu}/\fld{pac\_max\_pu} 即钉零，与元件手册中
+        “0=不限”的惯例不同，调用方须显式给界（
+        \srcpath{src/power\_models/acdcopf\_builder.cpp}:149--150）。
+  \item \textbf{直流支路线性化}：直流潮流按 $(V_{dc,i}-V_{dc,j})/r_{ij}$
+        线性建模，非双线性精确式（
+        \srcpath{src/power\_models/acdcopf\_builder.cpp}:8、515--531）。
+  \item \textbf{DC/DC 单向效率模型}：效率与 $I^{2}R$ 项仅按前向传输建模，
+        不表示反向传输的符号切换（结果结构声明，
+        \srcpath{include/hacdcpf/power\_models/hybrid\_opf\_model\_builder.hpp}:85--86）；
+        直流残差审计对输入电压取 0.1 下限而模型内无此下限，两者在极端低压下
+        可有差异（\srcpath{src/power\_models/acdcopf\_builder.cpp}:759--762）。
+  \item \textbf{LinDistFlow 适用范围}：仅径向网络（\fld{incoming\_branch}
+        按“每母线一条入支路”建映射，非径向输入会被静默覆盖为最后一条）、
+        忽略网损、热限为有功/无功分别限幅的近似、只有固定负荷无 DG/切负荷
+        变量，且不做单位换算（
+        \srcpath{src/power\_models/lindistflow\_builder.cpp}:67--89；
+        \srcpath{include/hacdcpf/power\_models/lindistflow\_builder.hpp}:21--31）。
+  \item \textbf{SCUC 无网络、价格未认证}：仅系统级平衡；首时段无爬坡/启动
+        约束、初始出力历史不建模；启动指示为连续变量；MILP 对偶电价不可用
+        且 \fld{price\_valid} 固定为假，定价须固定开停机后重解 LP
+        （\srcpath{include/hacdcpf/power\_models/scuc\_builder.hpp}:85--92；
+        \srcpath{src/power\_models/scuc\_builder.cpp}:128--131、296--304）。
+  \item \textbf{DC OPF 量纲自洽责任在调用方}：电纳标幺与 MW 限值不做基准
+        换算；\fld{max\_flow\_mw}$\le 0$ 时以恒真约束占位；宽相角界
+        $\pm 10^{6}$ 是为保护 LMP 对偶的刻意选择（
+        \srcpath{src/power\_models/dc\_opf\_builder.cpp}:78--81、138--141）。
+  \item \textbf{参考母线唯一性不校验}：\srcpath{to\_acopf\_data} 只兜底
+        “至少一个”参考母线；存在多个 \fld{is\_ref} 时仅最后被扫描者钉相角，
+        其余仅保留电压界（\srcpath{src/power\_models/acopf\_builder.cpp}:154--161、
+        220--229）。
+  \item \textbf{违限指标为求解后审计}：\fld{max\_*\_viol\_pu} 各量是按解析式
+        对收敛解的复算，不反映求解器内点迭代过程的约束满足度
+        （\srcpath{src/power\_models/acopf\_builder.cpp}:505--558；
+        \srcpath{src/power\_models/acdcopf\_builder.cpp}:685--767）。
+\end{enumerate}

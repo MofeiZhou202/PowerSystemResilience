@@ -17,7 +17,7 @@ namespace hacdcpf::powerflow {
 /// The scaled system is:
 ///   J_hat * dx_hat = -F_hat
 /// where:
-///   F_hat    = D_F  * F          (residual_scale .* mismatch)
+///   F_hat    = D_F  * F          (residual_scale .* residual)
 ///   J_hat    = D_F  * J * D_x⁻¹ (row × col scaled Jacobian)
 ///   dx_hat   = D_x  * dx         (scaled Newton step)
 ///   dx       = D_x⁻¹ * dx_hat    (physical Newton step, via unscale_step)
@@ -105,4 +105,3 @@ NonlinearScaling build_nonlinear_scaling(
     const RobustNonlinearOptions& options);
 
 }  // namespace hacdcpf::powerflow
-

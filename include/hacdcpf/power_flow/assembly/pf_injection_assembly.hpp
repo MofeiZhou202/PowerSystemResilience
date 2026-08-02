@@ -6,6 +6,19 @@
 
 namespace hacdcpf::powerflow {
 
+/// Assemble the AC specified-injection vectors (generation positive and
+/// consumption negative) at the supplied voltage state.
+///
+/// This is the common accounting path for bus/component ZIP demand, VSC and
+/// LCC converters, and EnergyRouter AC ports.  Both output vectors are zeroed
+/// on entry and resized to the number of AC buses when necessary.
+void assemble_ac_injections(const SolverData& data,
+                            const Eigen::VectorXd& vm,
+                            const Eigen::VectorXd& va,
+                            const Eigen::VectorXd& vdc,
+                            Eigen::VectorXd& p_spec,
+                            Eigen::VectorXd& q_spec);
+
 /// Assemble the DC specified-injection vector @p pdc_spec (size ndc).
 ///
 /// The result covers all DC injection sources:

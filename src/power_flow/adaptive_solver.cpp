@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <future>
+#include <stdexcept>
 #include <unordered_map>
 #include <vector>
 
@@ -117,16 +118,52 @@ void set_dead_island_zero(const IslandInfo& island,
   }
 }
 
+HybridPowerSystem apply_reactive_limit_overrides(
+    const HybridPowerSystem& sys,
+    const std::unordered_map<int, ReactiveLimit>& q_limits) {
+  HybridPowerSystem working = sys;
+  const double base_mva =
+      working.ac.base_mva > 0.0 ? working.ac.base_mva : working.base_mva;
+  if (!(base_mva > 0.0) || !std::isfinite(base_mva)) {
+    throw std::runtime_error(
+        "AdaptiveSolver reactive-limit overrides require positive base_mva");
+  }
+  for (const auto& [bus_id, limit] : q_limits) {
+    if (!std::isfinite(limit.qmin) || !std::isfinite(limit.qmax) ||
+        limit.qmin > limit.qmax) {
+      throw std::runtime_error(
+          "AdaptiveSolver reactive limit for AC bus " +
+          std::to_string(bus_id) + " is invalid");
+    }
+    bool first = true;
+    bool found = false;
+    for (auto& generator : working.ac.generators) {
+      if (!generator.in_service || generator.bus != bus_id) continue;
+      found = true;
+      generator.qmin_mvar = first ? limit.qmin * base_mva : 0.0;
+      generator.qmax_mvar = first ? limit.qmax * base_mva : 0.0;
+      first = false;
+    }
+    if (!found) {
+      throw std::runtime_error(
+          "AdaptiveSolver reactive limit references AC bus " +
+          std::to_string(bus_id) + " without an in-service generator");
+    }
+  }
+  return working;
+}
+
 }  // namespace
 
 AdaptiveSolveResult AdaptiveSolver::solve(const HybridPowerSystem& sys,
                                           const PowerFlowOptions& opt,
                                           const std::unordered_map<int, ReactiveLimit>& q_limits) const {
-  (void)q_limits;
+  const HybridPowerSystem working =
+      apply_reactive_limit_overrides(sys, q_limits);
 
   AdaptiveSolveResult out;
-  const int nac = static_cast<int>(sys.ac.buses.size());
-  const int ndc = static_cast<int>(sys.dc.buses.size());
+  const int nac = static_cast<int>(working.ac.buses.size());
+  const int ndc = static_cast<int>(working.dc.buses.size());
   out.vm.assign(static_cast<size_t>(nac), 1.0);
   out.va.assign(static_cast<size_t>(nac), 0.0);
   out.vdc.assign(static_cast<size_t>(ndc), 1.0);
@@ -135,20 +172,20 @@ AdaptiveSolveResult AdaptiveSolver::solve(const HybridPowerSystem& sys,
   out.residual = 0.0;
 
   for (int i = 0; i < nac; ++i) {
-    out.vm[static_cast<size_t>(i)] = sys.ac.buses[static_cast<size_t>(i)].vm_pu;
-    out.va[static_cast<size_t>(i)] = sys.ac.buses[static_cast<size_t>(i)].va_deg * kPi / 180.0;
+    out.vm[static_cast<size_t>(i)] = working.ac.buses[static_cast<size_t>(i)].vm_pu;
+    out.va[static_cast<size_t>(i)] = working.ac.buses[static_cast<size_t>(i)].va_deg * kPi / 180.0;
   }
   for (int i = 0; i < ndc; ++i) {
-    out.vdc[static_cast<size_t>(i)] = sys.dc.buses[static_cast<size_t>(i)].vm_pu;
+    out.vdc[static_cast<size_t>(i)] = working.dc.buses[static_cast<size_t>(i)].vm_pu;
   }
 
-  out.islands = detect_islands(sys);
+  out.islands = detect_islands(working);
 
   // Single-island fast path: solve the whole system directly without
   // subsystem extraction to avoid any data loss.
   const bool single_island = (out.islands.size() == 1 && out.islands[0].has_generators);
   if (out.islands.empty() || single_island) {
-    SolverData data = make_solver_data(sys, opt.loss_model);
+    SolverData data = make_solver_data(working, opt.loss_model);
     NewtonSolver solver;
     PowerFlowResult r = solver.solve(data, opt, nullptr);
     if (!r.converged) {
@@ -184,10 +221,10 @@ AdaptiveSolveResult AdaptiveSolver::solve(const HybridPowerSystem& sys,
   ac_id_to_pos.reserve(static_cast<size_t>(nac));
   dc_id_to_pos.reserve(static_cast<size_t>(ndc));
   for (int i = 0; i < nac; ++i) {
-    ac_id_to_pos[sys.ac.buses[static_cast<size_t>(i)].index] = i;
+    ac_id_to_pos[working.ac.buses[static_cast<size_t>(i)].index] = i;
   }
   for (int i = 0; i < ndc; ++i) {
-    dc_id_to_pos[sys.dc.buses[static_cast<size_t>(i)].index] = i;
+    dc_id_to_pos[working.dc.buses[static_cast<size_t>(i)].index] = i;
   }
 
   struct IslandTask {
@@ -202,7 +239,7 @@ AdaptiveSolveResult AdaptiveSolver::solve(const HybridPowerSystem& sys,
     }
     int slack_override = 0;
     if (opt.enable_auto_swing_selection && !out.islands[ii].has_ac_slack) {
-      slack_override = auto_select_swing_bus(sys, out.islands[ii], ac_id_to_pos);
+      slack_override = auto_select_swing_bus(working, out.islands[ii], ac_id_to_pos);
     }
     tasks.push_back({ii, slack_override});
   }
@@ -212,7 +249,8 @@ AdaptiveSolveResult AdaptiveSolver::solve(const HybridPowerSystem& sys,
                           const PowerFlowOptions& pf_opt) -> PowerFlowResult {
     const auto& island = out.islands[task.island_idx];
     NewtonSolver solver;
-    HybridPowerSystem sub = extract_island_subsystem(sys, island, task.slack_override);
+    HybridPowerSystem sub =
+        extract_island_subsystem(working, island, task.slack_override);
     SolverData sub_data = make_solver_data_projected(
         projection::RichToCanonicalOperator::apply(std::move(sub)).canonical,
         pf_opt.loss_model);

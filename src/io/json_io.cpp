@@ -47,8 +47,8 @@ static double pf_ac_branch_rating_mva(const HybridPowerSystem& sys,
 
 static double pf_dc_branch_rating_mva(const HybridPowerSystem& sys,
                                       const DCBranch& br) {
-  if (br.s_max_mva > 1e-12) return br.s_max_mva;
   if (br.rate_a_mva > 1e-12) return br.rate_a_mva;
+  if (br.s_max_mva > 1e-12) return br.s_max_mva;
   return pf_dc_base_mva(sys);
 }
 
@@ -1496,6 +1496,7 @@ static json transformer2w_to_json(const Transformer2W& t) {
   j["tap_max"] = t.tap_max;
   j["tap_neutral"] = t.tap_neutral;
   j["tap_step_percent"] = t.tap_step_percent;
+  j["fixed_tap_pu"] = t.fixed_tap_pu;
   j["shift_deg"] = t.shift_deg;
   j["vector_group"] = t.vector_group;
   j["z0_percent"] = t.z0_percent;
@@ -1535,6 +1536,7 @@ static Transformer2W transformer2w_from_json(const json& j) {
   t.tap_max = jget(j, "tap_max", 0);
   t.tap_neutral = jget(j, "tap_neutral", 0);
   t.tap_step_percent = jget(j, "tap_step_percent", 0.0);
+  t.fixed_tap_pu = jget(j, "fixed_tap_pu", 1.0);
   t.shift_deg = jget(j, "shift_deg", 0.0);
   t.vector_group = jget<std::string>(j, "vector_group", "");
   t.z0_percent = jget(j, "z0_percent", 0.0);
@@ -1844,6 +1846,9 @@ static json three_phase_transformer_to_json(const ThreePhaseTransformer& t) {
   j["vn_lv_kv"] = t.vn_lv_kv;
   j["vk_percent"] = t.vk_percent;
   j["vkr_percent"] = t.vkr_percent;
+  j["use_signed_series_impedance"] = t.use_signed_series_impedance;
+  j["signed_series_r_percent"] = t.signed_series_r_percent;
+  j["signed_series_x_percent"] = t.signed_series_x_percent;
   j["pfe_kw"] = t.pfe_kw;
   j["i0_percent"] = t.i0_percent;
   j["vector_group"] = t.vector_group;
@@ -1858,6 +1863,7 @@ static json three_phase_transformer_to_json(const ThreePhaseTransformer& t) {
   j["tap_max"] = t.tap_max;
   j["tap_neutral"] = t.tap_neutral;
   j["tap_step_percent"] = t.tap_step_percent;
+  j["fixed_tap_pu"] = t.fixed_tap_pu;
   j["shift_deg"] = t.shift_deg;
   j["mtbf_hr"] = t.mtbf_hr;
   j["mttr_hr"] = t.mttr_hr;
@@ -1880,6 +1886,12 @@ static ThreePhaseTransformer three_phase_transformer_from_json(const json& j) {
   t.vn_lv_kv = jget(j, "vn_lv_kv", 0.0);
   t.vk_percent = jget(j, "vk_percent", 0.0);
   t.vkr_percent = jget(j, "vkr_percent", 0.0);
+  t.use_signed_series_impedance =
+      jget(j, "use_signed_series_impedance", false);
+  t.signed_series_r_percent =
+      jget(j, "signed_series_r_percent", 0.0);
+  t.signed_series_x_percent =
+      jget(j, "signed_series_x_percent", 0.0);
   t.pfe_kw = jget(j, "pfe_kw", 0.0);
   t.i0_percent = jget(j, "i0_percent", 0.0);
   t.vector_group = jget<std::string>(j, "vector_group", "");
@@ -1894,6 +1906,7 @@ static ThreePhaseTransformer three_phase_transformer_from_json(const json& j) {
   t.tap_max = jget(j, "tap_max", 0);
   t.tap_neutral = jget(j, "tap_neutral", 0);
   t.tap_step_percent = jget(j, "tap_step_percent", 0.0);
+  t.fixed_tap_pu = jget(j, "fixed_tap_pu", 1.0);
   t.shift_deg = jget(j, "shift_deg", 0.0);
   t.mtbf_hr = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
   t.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);

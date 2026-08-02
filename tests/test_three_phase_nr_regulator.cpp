@@ -304,9 +304,10 @@ TEST_CASE("Three-phase NR regulator fail-closes tap limit, oscillation, and unsu
     options.max_control_iter = 6;
     const auto result = solve_three_phase_nr(build_tap_limit_case(), options);
     REQUIRE(result.control_converged == false);
-    REQUIRE(result.converged == false);
+    REQUIRE(result.converged == true);
     CHECK(get_state(result, 0).stop_reason == "tap_limit_reached_below_band");
     CHECK(result.regulator_trace.back().stop_reason == "tap_limit_reached_below_band");
+    CHECK_FALSE(result.model_limitations.empty());
   }
 
   SECTION("control oscillation is reported as cycle_detected") {

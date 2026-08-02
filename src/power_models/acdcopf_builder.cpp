@@ -598,7 +598,7 @@ ACDCOPFBuilderResult solve_acdcopf(const ACDCOPFData& data,
     if (dd.control_mode == DCDCControlMode::Power) {
       m.add_nl_constraint("dcdc_p_" + dd.id, nl_Pout, CompareOp::Equal, dd.p_ref_pu);
     } else if (dd.control_mode == DCDCControlMode::Droop) {
-      NonlinearExpr droop = m.nl_sub(
+      NonlinearExpr droop = m.nl_add(
           nl_Pout,
           m.nl_mul(m.nl_const(dd.k_droop),
                    m.nl_sub(nl_Vdc[out_idx], m.nl_const(dd.v_ref_pu))));

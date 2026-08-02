@@ -1,8 +1,11 @@
 #include "hacdcpf/power_flow/residual_evaluator.hpp"
 
 #include <cmath>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
+#include "hacdcpf/model/device_control_role.hpp"
 #include "hacdcpf/power_flow/converter_model.hpp"
 #include "hacdcpf/power_flow/lcc_model.hpp"
 #include "hacdcpf/power_flow/pf_injection_assembly.hpp"
@@ -33,6 +36,73 @@ void compute_ac_power_injections(
   }
 }
 
+std::unordered_set<int> dc_reference_buses_for_residual(const SolverData& data) {
+  const int ndc = static_cast<int>(data.dc_buses.size());
+  std::unordered_set<int> references;
+  if (ndc == 0) return references;
+
+  std::unordered_map<int, int> pos_by_id;
+  pos_by_id.reserve(static_cast<size_t>(ndc));
+  for (int i = 0; i < ndc; ++i) {
+    pos_by_id[data.dc_buses[static_cast<size_t>(i)].index] = i;
+  }
+  std::vector<std::vector<int>> adjacency(static_cast<size_t>(ndc));
+  for (const auto& branch : data.dc_branches) {
+    if (!branch.in_service) continue;
+    const auto from = pos_by_id.find(branch.from_bus);
+    const auto to = pos_by_id.find(branch.to_bus);
+    if (from == pos_by_id.end() || to == pos_by_id.end()) continue;
+    adjacency[static_cast<size_t>(from->second)].push_back(to->second);
+    adjacency[static_cast<size_t>(to->second)].push_back(from->second);
+  }
+
+  std::vector<char> visited(static_cast<size_t>(ndc), 0);
+  for (int start = 0; start < ndc; ++start) {
+    if (visited[static_cast<size_t>(start)] != 0 ||
+        data.dc_buses[static_cast<size_t>(start)].bus_type ==
+            DCBusType::DC_ISOLATED) {
+      continue;
+    }
+    std::vector<int> component;
+    std::vector<int> stack{start};
+    while (!stack.empty()) {
+      const int bus = stack.back();
+      stack.pop_back();
+      if (visited[static_cast<size_t>(bus)] != 0) continue;
+      visited[static_cast<size_t>(bus)] = 1;
+      component.push_back(bus);
+      for (int neighbor : adjacency[static_cast<size_t>(bus)]) {
+        if (visited[static_cast<size_t>(neighbor)] == 0) stack.push_back(neighbor);
+      }
+    }
+
+    int declared_reference = -1;
+    bool converter_regulates_vdc = false;
+    std::unordered_set<int> component_ids;
+    for (int bus : component) {
+      const auto& dc_bus = data.dc_buses[static_cast<size_t>(bus)];
+      component_ids.insert(dc_bus.index);
+      if (declared_reference < 0 && dc_bus.bus_type == DCBusType::DC_V) {
+        declared_reference = bus;
+      }
+    }
+    for (const auto& converter : data.converters) {
+      if (!converter.in_service || component_ids.count(converter.bus_dc) == 0) continue;
+      const bool promotable = converter.control_mode == ConverterMode::PQ_MODE;
+      converter_regulates_vdc = converter_regulates_vdc || promotable ||
+                                resolve_device_control_role(converter).is_dc_grid_forming;
+    }
+    if (declared_reference >= 0) {
+      references.insert(declared_reference);
+    } else if (!converter_regulates_vdc && !component.empty()) {
+      // Mirrors Newton's explicit non-physical fallback when an island has no
+      // voltage-forming device at all.
+      references.insert(component.front());
+    }
+  }
+  return references;
+}
+
 }  // namespace
 
 ResidualBlocks evaluate_power_flow_residual(const SolverData& data,
@@ -45,12 +115,13 @@ ResidualBlocks evaluate_power_flow_residual(const SolverData& data,
   const int ndc = static_cast<int>(data.dc_buses.size());
 
   const AcBusSets ac = classify_ac_buses(data);
-  const int dc_slack = first_dc_slack_or_default(data);
+  const std::unordered_set<int> dc_slacks =
+      dc_reference_buses_for_residual(data);
 
   std::vector<int> dc_non_slack;
   dc_non_slack.reserve(static_cast<size_t>(std::max(0, ndc - 1)));
   for (int i = 0; i < ndc; ++i) {
-    if (i == dc_slack) continue;
+    if (dc_slacks.count(i) != 0) continue;
     // Isolated DC buses are de-energized and held at fixed voltage, so they are
     // not part of the solved equation set (mirrors DCSolver::solve).
     if (data.dc_buses[static_cast<size_t>(i)].bus_type == DCBusType::DC_ISOLATED) {
@@ -73,69 +144,9 @@ ResidualBlocks evaluate_power_flow_residual(const SolverData& data,
     compute_ac_power_injections(data.ybus, vm, va, pcalc, qcalc);
   }
 
-  Eigen::VectorXd p_spec = Eigen::VectorXd::Zero(n);
-  Eigen::VectorXd q_spec = Eigen::VectorXd::Zero(n);
-
-  for (int i = 0; i < n; ++i) {
-    const double v = vm[i];
-    double pd, qd, pw0, pw1, pw2, qw0, qw1, qw2;
-    if (data.has_component_loads) {
-      pd = data.pd_pu[i];
-      qd = data.qd_pu[i];
-      pw0 = data.bus_zip_pp[i];
-      pw1 = data.bus_zip_ip[i];
-      pw2 = data.bus_zip_zp[i];
-      qw0 = data.bus_zip_pq[i];
-      qw1 = data.bus_zip_iq[i];
-      qw2 = data.bus_zip_zq[i];
-    } else {
-      const auto& b = data.ac_buses[static_cast<size_t>(i)];
-      pd = b.pd_mw / data.base_mva;
-      qd = b.qd_mvar / data.base_mva;
-      pw0 = data.zip_pw[0]; pw1 = data.zip_pw[1]; pw2 = data.zip_pw[2];
-      qw0 = data.zip_qw[0]; qw1 = data.zip_qw[1]; qw2 = data.zip_qw[2];
-    }
-    p_spec[i] = data.pg[i] - (pd * pw0 + pd * pw1 * v + pd * pw2 * v * v);
-    q_spec[i] = data.qg[i] - (qd * qw0 + qd * qw1 * v + qd * qw2 * v * v);
-  }
-
-  for (const auto& conv : data.converters) {
-    if (!conv.in_service) {
-      continue;
-    }
-    const int ac_bus = conv.bus_ac - 1;
-    if (ac_bus >= 0 && ac_bus < n) {
-      const auto [pac, qac] =
-          converter_ac_injection(conv, vm, va, vdc, data.base_mva, data.loss_model);
-      p_spec[ac_bus] += pac;
-      q_spec[ac_bus] += qac;
-    }
-  }
-
-  // LCC stations: quasi-steady P/Q injection at the valve-side AC bus.
-  for (const auto& lcc : data.lcc_converters) {
-    if (!lcc.in_service) {
-      continue;
-    }
-    const int ac_bus = lcc.ac_bus - 1;
-    if (ac_bus >= 0 && ac_bus < n) {
-      const auto [pac, qac] = lcc_ac_injection(data, lcc, vm, vdc);
-      p_spec[ac_bus] += pac;
-      q_spec[ac_bus] += qac;
-    }
-  }
-
-  for (const auto& er : data.energy_routers) {
-    if (!er.in_service) continue;
-    for (const auto& p : er.ports) {
-      if (!p.in_service || p.port_type != ERPortType::AC) continue;
-      const int ac_bus = p.bus - 1;
-      if (ac_bus >= 0 && ac_bus < n) {
-        p_spec[ac_bus] += p.p_mw / data.base_mva;
-        q_spec[ac_bus] += p.q_mvar / data.base_mva;
-      }
-    }
-  }
+  Eigen::VectorXd p_spec;
+  Eigen::VectorXd q_spec;
+  assemble_ac_injections(data, vm, va, vdc, p_spec, q_spec);
 
   for (int k = 0; k < np; ++k) {
     const int i = ac.non_slack[static_cast<size_t>(k)];

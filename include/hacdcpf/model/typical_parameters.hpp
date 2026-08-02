@@ -548,6 +548,11 @@ inline TypicalParameterFillReport apply_typical_parameters(
           st.e_rated_mwh, st.p_rated_mw * TypicalParameters::kStorageDurationH);
       report.operational_limit_fields += d::fill_positive(st.soc_min, TypicalParameters::kSOCMin);
       report.operational_limit_fields += d::fill_positive(st.soc_max, TypicalParameters::kSOCMax);
+      if (st.soc_max <= st.soc_min) {
+        st.soc_min = TypicalParameters::kSOCMin;
+        st.soc_max = TypicalParameters::kSOCMax;
+        report.operational_limit_fields += 2;
+      }
       if (!std::isfinite(st.soc_init) || st.soc_init < st.soc_min || st.soc_init > st.soc_max) {
         st.soc_init = TypicalParameters::kSOCInit;
         report.operational_limit_fields += 1;
@@ -625,7 +630,10 @@ inline TypicalParameterFillReport apply_typical_parameters(
   }
 
   for (auto& l : sys.ac.loads) {
-    report.electrical_fields += d::fill_positive(l.scaling, 1.0);
+    if (!std::isfinite(l.scaling) || l.scaling < 0.0) {
+      l.scaling = 0.0;
+      report.electrical_fields += 1;
+    }
     if (d::missing(l.p_percent_p) && d::missing(l.i_percent_p) && d::missing(l.z_percent_p)) {
       l.p_percent_p = 100.0;
       report.electrical_fields += 1;
@@ -644,7 +652,10 @@ inline TypicalParameterFillReport apply_typical_parameters(
     }
   }
   for (auto& l : sys.dc.loads) {
-    report.electrical_fields += d::fill_positive(l.scaling, 1.0);
+    if (!std::isfinite(l.scaling) || l.scaling < 0.0) {
+      l.scaling = 0.0;
+      report.electrical_fields += 1;
+    }
     if (d::missing(l.p_percent) && d::missing(l.i_percent) && d::missing(l.z_percent)) {
       l.p_percent = 100.0;
       report.electrical_fields += 1;
@@ -798,10 +809,16 @@ inline TypicalParameterFillReport apply_typical_parameters(
   for (auto& cs : sys.ac.charging_stations) {
     report.operational_limit_fields += d::fill_positive(cs.p_fast_max_kw, 60.0);
     report.operational_limit_fields += d::fill_positive(cs.p_slow_max_kw, 7.0);
-    const double charger_count =
-        static_cast<double>(std::max(1, cs.n_fast + cs.n_slow + cs.num_chargers));
+    double station_capacity_kw =
+        std::max(0, cs.n_fast) * cs.p_fast_max_kw +
+        std::max(0, cs.n_slow) * cs.p_slow_max_kw;
+    if (station_capacity_kw <= TypicalParameters::kMissingTol) {
+      station_capacity_kw =
+          static_cast<double>(std::max(1, cs.num_chargers)) *
+          cs.p_slow_max_kw;
+    }
     report.operational_limit_fields += d::fill_positive(
-        cs.max_power_kw, charger_count * cs.p_slow_max_kw);
+        cs.max_power_kw, station_capacity_kw);
     report.operational_limit_fields += d::fill_efficiency(cs.power_factor, 0.95);
     if (options.fill_reliability) {
       report.reliability_fields += d::fill_positive(cs.mtbf_hours, TypicalParameters::kEquipmentMtbfHr);
@@ -839,7 +856,10 @@ inline TypicalParameterFillReport apply_typical_parameters(
 
   for (auto& s : sys.ac.shunts) {
     report.electrical_fields += d::fill_positive_int(s.n_steps, 1);
-    report.electrical_fields += d::fill_positive_int(s.current_step, 1);
+    if (s.current_step < 0 || s.current_step > s.n_steps) {
+      s.current_step = std::clamp(s.current_step, 0, s.n_steps);
+      report.electrical_fields += 1;
+    }
   }
 
   if (sys.three_phase_ac.has_value()) {

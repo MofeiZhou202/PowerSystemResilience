@@ -16,6 +16,7 @@
 #include "hacdcpf/power_flow/converter_coordination.hpp"
 #include "hacdcpf/power_flow/converter_model.hpp"
 #include "hacdcpf/power_flow/newton_solver.hpp"
+#include "hacdcpf/power_flow/pf_injection_assembly.hpp"
 #include "hacdcpf/assembly/solver_data.hpp"
 
 namespace hacdcpf::powerflow {
@@ -42,6 +43,12 @@ std::vector<double> per_bus_generation_pu(const HybridPowerSystem& sys) {
 }
 
 void normalize_factors(std::vector<double>& factors) {
+  for (double factor : factors) {
+    if (!std::isfinite(factor) || factor < 0.0) {
+      throw std::invalid_argument(
+          "Distributed slack participation factors must be finite and non-negative.");
+    }
+  }
   double sum = std::accumulate(factors.begin(), factors.end(), 0.0);
   if (sum <= 0.0) {
     if (!factors.empty()) {
@@ -63,15 +70,108 @@ DistributedSlack sanitize_slack_cfg(const HybridPowerSystem& sys, DistributedSla
     cfg.participation_factors.assign(cfg.participating_buses.size(), 1.0);
   }
   normalize_factors(cfg.participation_factors);
-  if (cfg.reference_bus == 0 && !cfg.participating_buses.empty()) {
-    cfg.reference_bus = cfg.participating_buses.front();
+  if (cfg.reference_bus == 0) {
+    const auto reference = std::find_if(
+        sys.ac.buses.begin(), sys.ac.buses.end(),
+        [](const ACBus& bus) {
+          return bus.in_service && bus.bus_type == BusType::SLACK;
+        });
+    if (reference == sys.ac.buses.end()) {
+      throw std::invalid_argument(
+          "Distributed slack requires an explicit reference_bus when no AC slack bus exists.");
+    }
+    cfg.reference_bus = reference->index;
+  }
+  const auto reference = std::find_if(
+      sys.ac.buses.begin(), sys.ac.buses.end(),
+      [&](const ACBus& bus) {
+        return bus.in_service && bus.index == cfg.reference_bus;
+      });
+  if (reference == sys.ac.buses.end()) {
+    throw std::invalid_argument(
+        "Distributed slack reference_bus is not an in-service AC bus.");
   }
   return cfg;
 }
 
+void apply_reference_bus(HybridPowerSystem& sys, int reference_bus) {
+  bool found = false;
+  for (auto& bus : sys.ac.buses) {
+    if (!bus.in_service) continue;
+    if (bus.index == reference_bus) {
+      bus.bus_type = BusType::SLACK;
+      found = true;
+    } else if (bus.bus_type == BusType::SLACK) {
+      const bool has_generator = std::any_of(
+          sys.ac.generators.begin(), sys.ac.generators.end(),
+          [&](const Generator& generator) {
+            return generator.in_service && generator.bus == bus.index;
+          });
+      bus.bus_type = has_generator ? BusType::PV : BusType::PQ;
+    }
+  }
+  if (!found) {
+    throw std::invalid_argument(
+        "Distributed slack reference_bus is not an in-service AC bus.");
+  }
+  for (auto& generator : sys.ac.generators) {
+    if (generator.in_service) {
+      generator.is_slack = generator.bus == reference_bus;
+    }
+  }
+}
+
+void apply_power_flow_options(SolverData& data, const PowerFlowOptions& opt) {
+  for (int index = 0; index < 3; ++index) {
+    data.zip_pw[index] = opt.zip_pw[index];
+    data.zip_qw[index] = opt.zip_qw[index];
+  }
+  data.enable_coupled_jacobian = opt.enable_coupled_jacobian;
+  data.enable_augmented_equations = opt.enable_augmented_equations;
+  data.enable_semi_smooth_newton = opt.enable_semi_smooth_newton;
+}
+
+struct ParticipationBounds {
+  double lower{-std::numeric_limits<double>::infinity()};
+  double upper{std::numeric_limits<double>::infinity()};
+};
+
+std::unordered_map<int, ParticipationBounds> generator_delta_bounds(
+    const HybridPowerSystem& sys,
+    const DistributedSlack& cfg) {
+  std::unordered_map<int, ParticipationBounds> bounds;
+  for (int bus : cfg.participating_buses) {
+    double scheduled = 0.0;
+    double lower = 0.0;
+    double upper = 0.0;
+    bool found = false;
+    for (const auto& generator : sys.ac.generators) {
+      if (!generator.in_service || generator.bus != bus) continue;
+      found = true;
+      scheduled += generator.pg_mw;
+      lower += generator.pmin_mw;
+      upper += generator.pmax_mw;
+    }
+    if (!found) {
+      bounds[bus] = {0.0, 0.0};
+      continue;
+    }
+    ParticipationBounds bus_bounds{
+        (lower - scheduled) / sys.base_mva,
+        (upper - scheduled) / sys.base_mva};
+    const auto cfg_limit = cfg.max_participation_p.find(bus);
+    if (cfg_limit != cfg.max_participation_p.end()) {
+      const double limit = std::abs(cfg_limit->second);
+      bus_bounds.lower = std::max(bus_bounds.lower, -limit);
+      bus_bounds.upper = std::min(bus_bounds.upper, limit);
+    }
+    bounds[bus] = bus_bounds;
+  }
+  return bounds;
+}
+
 double compute_total_participating_mismatch_pu(const SolverData& data,
-                                               const PowerFlowResult& result,
-                                               const std::vector<int>& buses) {
+                                               const PowerFlowResult& result) {
   const int n = static_cast<int>(data.ac_buses.size());
   const int ndc = static_cast<int>(data.dc_buses.size());
   if (n == 0 || result.vm.size() != static_cast<size_t>(n) ||
@@ -103,41 +203,34 @@ double compute_total_participating_mismatch_pu(const SolverData& data,
     }
   }
 
-  Eigen::VectorXd psch = Eigen::VectorXd::Zero(n);
-  for (int i = 0; i < n; ++i) {
-    const auto& bus = data.ac_buses[static_cast<size_t>(i)];
-    psch[i] = data.pg[i] - bus.pd_mw / data.base_mva;
-  }
-  for (const auto& conv : data.converters) {
-    if (!conv.in_service) {
-      continue;
-    }
-    const int ac = conv.bus_ac - 1;
-    if (ac >= 0 && ac < n) {
-      const auto [pac, qac] =
-          converter_ac_injection(conv, vm, va, vdc, data.base_mva, data.loss_model);
-      (void)qac;
-      psch[ac] += pac;
-    }
-  }
+  Eigen::VectorXd psch;
+  Eigen::VectorXd qsch;
+  assemble_ac_injections(data, vm, va, vdc, psch, qsch);
 
-  double total = 0.0;
-  for (int bus : buses) {
-    const int idx = bus - 1;
-    if (idx >= 0 && idx < n) {
-      total += pcalc[idx] - psch[idx];
-    }
-  }
-  return total;
+  // Sum over the complete solved AC network. Non-slack equations cancel to
+  // numerical tolerance; the remainder is the active power supplied by all
+  // slack buses. Restricting this sum to participating buses silently returns
+  // zero whenever the physical slack is not itself a participant.
+  return (pcalc - psch).sum();
 }
 
-std::unordered_map<int, double> distribute_with_limits(double total_slack_pu,
-                                                       const DistributedSlack& slack_cfg,
-                                                       std::vector<int>& hit_limits) {
-  std::unordered_map<int, double> alloc;
+struct BoundedAllocation {
+  std::unordered_map<int, double> by_bus;
+  std::vector<int> hit_limits;
+  double unallocated{0.0};
+};
+
+BoundedAllocation distribute_with_limits(
+    double total_slack_pu,
+    const DistributedSlack& slack_cfg,
+    const std::unordered_map<int, ParticipationBounds>& bounds,
+    const std::unordered_map<int, double>& already_allocated = {}) {
+  BoundedAllocation result;
+  auto& alloc = result.by_bus;
   const int n = static_cast<int>(slack_cfg.participating_buses.size());
   if (n == 0) {
-    return alloc;
+    result.unallocated = total_slack_pu;
+    return result;
   }
 
   std::vector<double> alpha = slack_cfg.participation_factors;
@@ -167,16 +260,22 @@ std::unordered_map<int, double> distribute_with_limits(double total_slack_pu,
       }
       const int bus = slack_cfg.participating_buses[static_cast<size_t>(i)];
       const double proposed = remaining * (alpha[static_cast<size_t>(i)] / active_sum);
-      const auto it_lim = slack_cfg.max_participation_p.find(bus);
-      const double lim =
-          (it_lim == slack_cfg.max_participation_p.end()) ? std::numeric_limits<double>::infinity()
-                                                          : std::abs(it_lim->second);
-      if (std::abs(proposed) > lim) {
-        const double clipped = std::copysign(lim, proposed);
+      ParticipationBounds available;
+      if (const auto bound_it = bounds.find(bus); bound_it != bounds.end()) {
+        available = bound_it->second;
+      }
+      const double prior = already_allocated.count(bus) != 0
+                               ? already_allocated.at(bus)
+                               : 0.0;
+      available.lower -= prior;
+      available.upper -= prior;
+      if (proposed < available.lower || proposed > available.upper) {
+        const double clipped = std::clamp(
+            proposed, available.lower, available.upper);
         alloc[bus] = clipped;
         remaining -= clipped;
         active[static_cast<size_t>(i)] = 0;
-        hit_limits.push_back(bus);
+        result.hit_limits.push_back(bus);
         any_limited = true;
       }
     }
@@ -202,9 +301,47 @@ std::unordered_map<int, double> distribute_with_limits(double total_slack_pu,
     }
   }
 
-  std::sort(hit_limits.begin(), hit_limits.end());
-  hit_limits.erase(std::unique(hit_limits.begin(), hit_limits.end()), hit_limits.end());
-  return alloc;
+  const double allocated = std::accumulate(
+      alloc.begin(), alloc.end(), 0.0,
+      [](double sum, const auto& entry) { return sum + entry.second; });
+  result.unallocated = total_slack_pu - allocated;
+  std::sort(result.hit_limits.begin(), result.hit_limits.end());
+  result.hit_limits.erase(
+      std::unique(result.hit_limits.begin(), result.hit_limits.end()),
+      result.hit_limits.end());
+  return result;
+}
+
+bool apply_generation_delta(HybridPowerSystem& sys, int bus, double delta_pu) {
+  std::vector<Generator*> generators;
+  for (auto& generator : sys.ac.generators) {
+    if (generator.in_service && generator.bus == bus) {
+      generators.push_back(&generator);
+    }
+  }
+  double remaining_mw = delta_pu * sys.base_mva;
+  for (int pass = 0; pass < 2 && std::abs(remaining_mw) > 1e-10; ++pass) {
+    std::vector<double> room(generators.size(), 0.0);
+    double total_room = 0.0;
+    for (size_t index = 0; index < generators.size(); ++index) {
+      const auto& generator = *generators[index];
+      room[index] = remaining_mw >= 0.0
+                        ? std::max(0.0, generator.pmax_mw - generator.pg_mw)
+                        : std::max(0.0, generator.pg_mw - generator.pmin_mw);
+      total_room += room[index];
+    }
+    if (total_room <= 1e-12) break;
+    const double requested = std::abs(remaining_mw);
+    for (size_t index = 0; index < generators.size(); ++index) {
+      if (room[index] <= 0.0) continue;
+      const double magnitude = std::min(
+          room[index], requested * room[index] / total_room);
+      const double change = std::copysign(magnitude, remaining_mw);
+      generators[index]->pg_mw += change;
+      remaining_mw -= change;
+    }
+  }
+  return std::abs(remaining_mw) <= 1e-8;
 }
 
 }  // namespace
@@ -251,20 +388,30 @@ DistributedSlack create_participation_factors(const HybridPowerSystem& sys,
     const double capacity = std::max(bus_pg[static_cast<size_t>(bus)], 1e-4);
     if (mode == "capacity") {
       raw.push_back(capacity);
-      max_p[bus] = 1.5 * capacity;
     } else if (mode == "droop") {
       const auto it = droop_coeffs.find(bus);
       const double coeff = (it == droop_coeffs.end()) ? 0.0 : it->second;
       raw.push_back((coeff > 0.0) ? (1.0 / coeff) : capacity);
-      max_p[bus] = 1.5 * capacity;
     } else if (mode == "equal") {
       raw.push_back(1.0);
-      max_p[bus] = 10.0;
     } else {
       throw std::invalid_argument(
           "Unknown distributed slack method: " + method +
           " (supported: capacity, droop, equal).");
     }
+
+    double scheduled_mw = 0.0;
+    double pmin_mw = 0.0;
+    double pmax_mw = 0.0;
+    for (const auto& generator : sys.ac.generators) {
+      if (!generator.in_service || generator.bus != bus) continue;
+      scheduled_mw += generator.pg_mw;
+      pmin_mw += generator.pmin_mw;
+      pmax_mw += generator.pmax_mw;
+    }
+    max_p[bus] = std::max(std::abs(pmin_mw - scheduled_mw),
+                          std::abs(pmax_mw - scheduled_mw)) /
+                 sys.base_mva;
   }
 
   normalize_factors(raw);
@@ -293,8 +440,15 @@ DistributedSlackResult DistributedSlackSolver::solve_simplified(const HybridPowe
   }
 
   DistributedSlack cfg = sanitize_slack_cfg(sys, slack_cfg);
+  HybridPowerSystem working = sys;
+  apply_reference_bus(working, cfg.reference_bus);
+  out.reference_bus_used = cfg.reference_bus;
+  out.model_scope = "post-solve-distributed-slack-allocation";
+  out.model_limitations.push_back(
+      "Allocation is a post-solve report and does not redispatch or re-solve the network.");
 
-  SolverData data = make_solver_data(sys, opt.loss_model);
+  SolverData data = make_solver_data(working, opt.loss_model);
+  apply_power_flow_options(data, opt);
   NewtonSolver solver;
   const PowerFlowResult base = solver.solve(data, opt, nullptr);
   out.diagnostics = base.diagnostics;
@@ -329,7 +483,7 @@ DistributedSlackResult DistributedSlackSolver::solve_simplified(const HybridPowe
   }
 
   const double total_slack =
-      compute_total_participating_mismatch_pu(data, base, cfg.participating_buses);
+      compute_total_participating_mismatch_pu(data, base);
   for (int i = 0; i < static_cast<int>(cfg.participating_buses.size()); ++i) {
     const int bus = cfg.participating_buses[static_cast<size_t>(i)];
     const double alpha = cfg.participation_factors[static_cast<size_t>(i)];
@@ -341,20 +495,117 @@ DistributedSlackResult DistributedSlackSolver::solve_simplified(const HybridPowe
 DistributedSlackResult DistributedSlackSolver::solve_full_jacobian(const HybridPowerSystem& sys,
                                                                    const DistributedSlack& slack_cfg,
                                                                    const PowerFlowOptions& opt) const {
-  DistributedSlackResult out = solve_simplified(sys, slack_cfg, opt);
-  if (!out.converged) {
+  DistributedSlackResult out;
+  const ConverterCoordinationReport coordination =
+      evaluate_converter_coordination(sys, opt.enable_converter_coordination_check);
+  out.diagnostics.converter_coordination = coordination;
+  if (coordination.enabled && coordination.has_blocking_issue()) {
+    out.diagnostics.termination_reason =
+        "Converter coordination feasibility check failed";
+    for (const auto& issue : coordination.issues) {
+      out.diagnostics.warnings.push_back(
+          "[" + issue.rule_id + "] " + issue.message);
+    }
     return out;
   }
 
   DistributedSlack cfg = sanitize_slack_cfg(sys, slack_cfg);
-  double total_slack = 0.0;
-  for (const auto& kv : out.distributed_slack_p) {
-    total_slack += kv.second;
+  HybridPowerSystem working = sys;
+  apply_reference_bus(working, cfg.reference_bus);
+  const auto bounds = generator_delta_bounds(sys, cfg);
+
+  out.reference_bus_used = cfg.reference_bus;
+  out.model_scope = "iterative-newton-bounded-distributed-slack-redispatch";
+  out.model_limitations.push_back(
+      "The legacy solve_full_jacobian API name is retained for compatibility; "
+      "the implemented algorithm is repeated full Newton redispatch, not one augmented Jacobian.");
+  out.diagnostics.warnings.push_back(out.model_limitations.front());
+  for (int bus : cfg.participating_buses) {
+    out.distributed_slack_p[bus] = 0.0;
   }
 
-  std::vector<int> hit_limits;
-  out.distributed_slack_p = distribute_with_limits(total_slack, cfg, hit_limits);
-  out.hit_limits = std::move(hit_limits);
+  constexpr int kMaxRedispatchSolves = 20;
+  const double redispatch_tol = std::max(1e-10, opt.tol);
+  for (int outer = 0; outer < kMaxRedispatchSolves; ++outer) {
+    SolverData data = make_solver_data(working, opt.loss_model);
+    apply_power_flow_options(data, opt);
+    NewtonSolver solver;
+    const PowerFlowResult solved = solver.solve(data, opt, nullptr);
+    out.diagnostics = solved.diagnostics;
+    out.diagnostics.converter_coordination = coordination;
+    out.diagnostics.warnings.push_back(out.model_limitations.front());
+    if (coordination.enabled) {
+      for (const auto& issue : coordination.issues) {
+        if (issue.severity == CoordinationSeverity::Warning ||
+            issue.severity == CoordinationSeverity::Info) {
+          out.diagnostics.warnings.push_back(
+              "[" + issue.rule_id + "] " + issue.message);
+        }
+      }
+    }
+    out.vm = data.bus_merge_map && data.bus_merge_map->has_merges()
+                 ? unproject_bus_vector(
+                       solved.vm, *data.bus_merge_map,
+                       BusVectorSemantics::Intensive)
+                 : solved.vm;
+    out.va = data.bus_merge_map && data.bus_merge_map->has_merges()
+                 ? unproject_bus_vector(
+                       solved.va, *data.bus_merge_map,
+                       BusVectorSemantics::Intensive)
+                 : solved.va;
+    out.vdc = solved.vdc;
+    out.iterations += solved.iterations;
+    out.residual = solved.residual;
+    if (!solved.converged) {
+      out.converged = false;
+      return out;
+    }
+
+    const double remaining_slack =
+        compute_total_participating_mismatch_pu(data, solved);
+    out.unallocated_slack_pu = remaining_slack;
+    if (std::abs(remaining_slack) <= redispatch_tol) {
+      out.converged = true;
+      out.unallocated_slack_pu = 0.0;
+      return out;
+    }
+
+    BoundedAllocation allocation = distribute_with_limits(
+        remaining_slack, cfg, bounds, out.distributed_slack_p);
+    out.hit_limits.insert(out.hit_limits.end(),
+                          allocation.hit_limits.begin(),
+                          allocation.hit_limits.end());
+    if (std::abs(allocation.unallocated) > redispatch_tol) {
+      out.converged = false;
+      out.unallocated_slack_pu = allocation.unallocated;
+      out.diagnostics.converged = false;
+      out.diagnostics.termination_reason =
+          "Distributed slack generator limits leave unallocated active power";
+      out.diagnostics.warnings.push_back(
+          "The requested slack correction exceeds aggregate pmin/pmax and participation limits.");
+      return out;
+    }
+    for (const auto& [bus, delta] : allocation.by_bus) {
+      if (!apply_generation_delta(working, bus, delta)) {
+        out.converged = false;
+        out.unallocated_slack_pu = remaining_slack;
+        out.diagnostics.converged = false;
+        out.diagnostics.termination_reason =
+            "Distributed slack generation update could not satisfy pmin/pmax";
+        return out;
+      }
+      out.distributed_slack_p[bus] += delta;
+    }
+  }
+
+  out.converged = false;
+  out.diagnostics.converged = false;
+  out.diagnostics.termination_reason =
+      "Distributed slack redispatch did not absorb loss changes within 20 Newton solves";
+  std::sort(out.hit_limits.begin(), out.hit_limits.end());
+  out.hit_limits.erase(
+      std::unique(out.hit_limits.begin(), out.hit_limits.end()),
+      out.hit_limits.end());
   return out;
 }
 

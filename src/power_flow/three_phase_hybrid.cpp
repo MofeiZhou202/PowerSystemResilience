@@ -544,10 +544,36 @@ ThreePhaseHybridPFResult solve_three_phase_hybrid_pf(
       }
       item.p_dc_pu = -converter.efficiency * p_ac;
       item.current_vuf = sequence_ratio(currents);
-      result.converter_coupling_residual = std::max(
-          result.converter_coupling_residual,
-          std::abs(item.p_dc_pu + converter.efficiency * p_ac));
       result.converters.push_back(std::move(item));
+    }
+    // Independently infer the aggregate converter injection required at each
+    // DC terminal from the solved network and fixed DC load. This avoids the
+    // tautological check pdc := -eta*pac followed by pdc + eta*pac == 0.
+    if (l.ndc > 0) {
+      const Eigen::VectorXd dc_current = problem.g_dc * result.dc_voltage;
+      Eigen::VectorXd reported_converter_injection =
+          Eigen::VectorXd::Zero(l.ndc);
+      for (int ci = 0; ci < static_cast<int>(problem.converters.size()); ++ci) {
+        const int terminal =
+            problem.converters[static_cast<size_t>(ci)].dc_terminal;
+        reported_converter_injection[terminal] +=
+            result.converters[static_cast<size_t>(ci)].p_dc_pu;
+      }
+      for (int terminal = 0; terminal < l.ndc; ++terminal) {
+        const bool has_converter = std::any_of(
+            problem.converters.begin(), problem.converters.end(),
+            [&](const ThreePhaseHybridPFConverter& converter) {
+              return converter.dc_terminal == terminal;
+            });
+        if (!has_converter) continue;
+        const double required_injection =
+            result.dc_voltage[terminal] * dc_current[terminal] +
+            problem.p_dc_load_pu[terminal];
+        result.converter_coupling_residual = std::max(
+            result.converter_coupling_residual,
+            std::abs(required_injection -
+                     reported_converter_injection[terminal]));
+      }
     }
     // Phase-node order need not be grouped by bus; converters provide the only
     // explicit grouping in this matrix API. Report the maximum terminal VUF.

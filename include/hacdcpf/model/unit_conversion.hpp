@@ -26,8 +26,9 @@ namespace hacdcpf {
 ///   * A DC branch is converted only when `r_pu == 0` AND it carries
 ///     `r_ohm_per_km` with a positive `length_km` and a positive base voltage.
 ///
-/// Line charging (`b_us_per_km`, microsiemens/km) fills `b_pu` when present and
-/// `b_pu` is still zero.  Parallel circuits divide the series impedance and
+/// Line charging (`b_us_per_km`, microsiemens/km, preferred when present; or
+/// `c_nf_per_km`, nanofarads/km at `ac.freq_hz`) fills `b_pu` independently
+/// when it is still zero. Parallel circuits divide the series impedance and
 /// scale the shunt by `n_parallel`.
 ///
 /// Branches that already provide per-unit data are left untouched, so existing

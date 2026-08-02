@@ -1,10 +1,13 @@
 #include "hacdcpf/assembly/solver_data.hpp"
 
+#include <array>
 #include <atomic>
 #include <cmath>
+#include <stdexcept>
 
 #include "hacdcpf/projection/result_attribution.hpp"
 #include "hacdcpf/model/device_control_role.hpp"
+#include "hacdcpf/model/effective_capacity.hpp"
 #include "hacdcpf/model/enums/grid_enums.hpp"
 #include "hacdcpf/model/enums/storage_enums.hpp"
 #include "hacdcpf/power_flow/admittance_builder.hpp"
@@ -31,8 +34,9 @@ void aggregate_generation(SolverData& data) {
     if (!sg.in_service) continue;
     const int idx = sg.bus - 1;
     if (idx < 0 || idx >= nac) continue;
-    data.pg[idx] += sg.p_mw * sg.scaling / data.base_mva;
-    data.qg[idx] += sg.q_mvar * sg.scaling / data.base_mva;
+    const double scaling = model::sanitize_scaling(sg.scaling);
+    data.pg[idx] += sg.p_mw * scaling / data.base_mva;
+    data.qg[idx] += sg.q_mvar * scaling / data.base_mva;
   }
 
   // Renewable generators.
@@ -145,26 +149,46 @@ void aggregate_load_demand(SolverData& data) {
 
   for (const auto& ld : data.loads) {
     if (!ld.in_service) continue;
+    if (ld.model == LoadModel::Exponential) {
+      throw std::invalid_argument(
+          "aggregate_load_demand: Load " + std::to_string(ld.index) +
+          " uses Exponential model without represented voltage exponents; "
+          "use ZIP or ConstantPower");
+    }
     const int idx = ld.bus - 1;
     if (idx < 0 || idx >= nac) continue;
 
-    const double pd = ld.p_mw * ld.scaling / data.base_mva;   // H1: apply scaling
-    const double qd = ld.q_mvar * ld.scaling / data.base_mva; // H1: apply scaling
+    const double scaling = model::sanitize_scaling(ld.scaling);
+    const double pd = ld.p_mw * scaling / data.base_mva;
+    const double qd = ld.q_mvar * scaling / data.base_mva;
     data.pd_pu[idx] += pd;
     data.qd_pu[idx] += qd;
 
-    const double abs_p = std::abs(ld.p_mw * ld.scaling);  // H1: scale ZIP weight
-    const double abs_q = std::abs(ld.q_mvar * ld.scaling);
+    const double abs_p = std::abs(ld.p_mw * scaling);
+    const double abs_q = std::abs(ld.q_mvar * scaling);
 
-    // Weighted sum of ZIP coefficients (weight = |P| or |Q|).
-    data.bus_zip_pp[idx] += (ld.p_percent_p / 100.0) * abs_p;
-    data.bus_zip_ip[idx] += (ld.i_percent_p / 100.0) * abs_p;
-    data.bus_zip_zp[idx] += (ld.z_percent_p / 100.0) * abs_p;
+    const auto normalized_zip = [](double z, double i, double p) {
+      z = std::isfinite(z) ? std::max(0.0, z) : 0.0;
+      i = std::isfinite(i) ? std::max(0.0, i) : 0.0;
+      p = std::isfinite(p) ? std::max(0.0, p) : 0.0;
+      const double sum = z + i + p;
+      if (sum <= 1e-20) return std::array<double, 3>{0.0, 0.0, 1.0};
+      return std::array<double, 3>{z / sum, i / sum, p / sum};
+    };
+    const auto zip_p = normalized_zip(
+        ld.z_percent_p, ld.i_percent_p, ld.p_percent_p);
+    const auto zip_q = normalized_zip(
+        ld.z_percent_q, ld.i_percent_q, ld.p_percent_q);
+
+    // Weighted sum of per-load normalized ZIP coefficients.
+    data.bus_zip_pp[idx] += zip_p[2] * abs_p;
+    data.bus_zip_ip[idx] += zip_p[1] * abs_p;
+    data.bus_zip_zp[idx] += zip_p[0] * abs_p;
     total_p_weight[idx] += abs_p;
 
-    data.bus_zip_pq[idx] += (ld.p_percent_q / 100.0) * abs_q;
-    data.bus_zip_iq[idx] += (ld.i_percent_q / 100.0) * abs_q;
-    data.bus_zip_zq[idx] += (ld.z_percent_q / 100.0) * abs_q;
+    data.bus_zip_pq[idx] += zip_q[2] * abs_q;
+    data.bus_zip_iq[idx] += zip_q[1] * abs_q;
+    data.bus_zip_zq[idx] += zip_q[0] * abs_q;
     total_q_weight[idx] += abs_q;
   }
 

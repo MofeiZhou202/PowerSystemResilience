@@ -10,13 +10,14 @@ double converter_loss(const VSCConverter& conv,
                       double vdc,
                       double base_mva,
                       LossModelType loss_model) {
+  const double eta = std::clamp(conv.eta, 0.01, 1.0);
   if (loss_model == LossModelType::Linear) {
-    return (1.0 - conv.eta) * std::abs(p);
+    return (1.0 - eta) * std::abs(p);
   }
 
   const double a = conv.loss_mw / base_mva;    // fixed / no-load loss
   const double b = conv.loss_percent / 100.0;   // switching loss ∝ I
-  const double c = 1.0 - conv.eta;              // conduction loss ∝ I²
+  const double c = 1.0 - eta;                   // conduction loss ∝ I²
   const double vdc_safe = std::max(vdc, 0.1);
   const double current = std::abs(p) / vdc_safe;
   return a + b * current + c * current * current;
@@ -27,14 +28,15 @@ std::pair<double, double> converter_loss_jacobian(const VSCConverter& conv,
                                                   double vdc,
                                                   double base_mva,
                                                   LossModelType loss_model) {
+  const double eta = std::clamp(conv.eta, 0.01, 1.0);
   if (loss_model == LossModelType::Linear) {
     const double sign = (p >= 0.0) ? 1.0 : -1.0;
-    return {(1.0 - conv.eta) * sign, 0.0};
+    return {(1.0 - eta) * sign, 0.0};
   }
 
   const double a = conv.loss_mw / base_mva;    // fixed / no-load loss
   const double b = conv.loss_percent / 100.0;   // switching loss ∝ I
-  const double c = 1.0 - conv.eta;              // conduction loss ∝ I²
+  const double c = 1.0 - eta;                   // conduction loss ∝ I²
   const double vdc_safe = std::max(vdc, 0.1);
   const double abs_p = std::abs(p);
   const double sign = (p >= 0.0) ? 1.0 : -1.0;
@@ -43,7 +45,11 @@ std::pair<double, double> converter_loss_jacobian(const VSCConverter& conv,
   // d(loss)/dp:   constant term 'a' has zero derivative w.r.t. p and vdc.
   const double dploss_dp = b * sign / vdc_safe + 2.0 * c * p / (vdc_safe * vdc_safe);
   const double dploss_dvdc =
-      -b * abs_p / (vdc_safe * vdc_safe) - 2.0 * c * p * p / (vdc_safe * vdc_safe * vdc_safe);
+      vdc > 0.1
+          ? (-b * abs_p / (vdc_safe * vdc_safe) -
+             2.0 * c * p * p /
+                 (vdc_safe * vdc_safe * vdc_safe))
+          : 0.0;
   (void)a;
 
   return {dploss_dp, dploss_dvdc};
@@ -240,8 +246,8 @@ DCDCPowerTransfer dcdc_power_transfer(const DCDCConverter& dcdc,
   out.p_out_ref_pu = dcdc.p_ref_mw / base_mva;
   if (dcdc.control_mode == DCDCControlMode::Droop && dcdc.k_droop != 0.0) {
     const double vdc_out = (bout >= 0 && bout < ndc) ? vdc[bout] : dcdc.v_ref_pu;
-    out.p_out_ref_pu += dcdc.k_droop * (vdc_out - dcdc.v_ref_pu);
-    out.dpout_ref_dvdc_out = dcdc.k_droop;
+    out.p_out_ref_pu -= dcdc.k_droop * (vdc_out - dcdc.v_ref_pu);
+    out.dpout_ref_dvdc_out = -dcdc.k_droop;
   } else if (dcdc.control_mode == DCDCControlMode::Voltage) {
     // True voltage forming: the converter holds its OUTPUT bus at v_ref_pu by
     // sourcing/sinking whatever power balances the output-side island, and
@@ -339,7 +345,10 @@ ConverterJacobianDCVmAC converter_dc_jacobian_vm_ac(const VSCConverter& conv,
   const double vm_ac =
       (ac_idx >= 0 && ac_idx < vm.size()) ? std::max(vm[ac_idx], 0.1) : 1.0;
   jac.dpdc_dvm_ac =
-      2.0 * conv.r_conv_ac_pu * pac0 * pac0 / (vm_ac * vm_ac * vm_ac);
+      ac_idx >= 0 && ac_idx < vm.size() && vm[ac_idx] > 0.1
+          ? 2.0 * conv.r_conv_ac_pu * pac0 * pac0 /
+                (vm_ac * vm_ac * vm_ac)
+          : 0.0;
   return jac;
 }
 

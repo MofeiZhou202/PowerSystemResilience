@@ -23,6 +23,7 @@ struct DCBus {
   double vm_pu{1.0};
   double vmax_pu{1.1};
   double vmin_pu{0.9};
+  // Additive bus-level DC demand; explicit DCLoad rows are added on top.
   double pd_mw{0.0};
   // Carbon factor of the ideal balancing source represented by a DC_V bus.
   // Internal unit: tCO2/MWh (numerically equivalent to kgCO2/kWh).
@@ -187,12 +188,13 @@ struct DCStorage {
 
   double eta_charge{0.95};
   double eta_discharge{0.95};
-  double self_discharge_pct{0.0};
+  double self_discharge_pct{0.0};  // percent per hour
 
   int max_cycles{5000};
   int current_cycles{0};
   double soh{1.0};
   double l_calendar_yr{15.0};
+  // Backward-compatible EOL threshold: <=1 is a fraction; >1 is percent.
   double eol_percent{0.8};
   double replacement_cost{0.0};
 

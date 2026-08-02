@@ -22,13 +22,4 @@ void SolverWorkspace::prepare_equations(int p_equations, int q_equations,
   dx.setZero(equation_count());
 }
 
-void SolverWorkspace::reset_iteration() noexcept {
-  residual.setZero();
-  dx.setZero();
-  if (jacobian.nonZeros() > 0) {
-    std::fill(jacobian.valuePtr(),
-              jacobian.valuePtr() + jacobian.nonZeros(), 0.0);
-  }
-}
-
 }  // namespace hacdcpf::powerflow

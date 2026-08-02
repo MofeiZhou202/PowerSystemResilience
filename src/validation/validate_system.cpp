@@ -151,6 +151,9 @@ ValidationReport validate(const HybridPowerSystem& sys) {
     {
         std::unordered_set<int> seen;
         for (const auto& b : sys.ac.buses) {
+            if (b.index <= 0)
+                r.add(S::Error, "ACBus", std::to_string(b.index),
+                      "index", "AC bus index must be positive");
             if (!seen.insert(b.index).second)
                 r.add(S::Error, "ACBus", std::to_string(b.index),
                       "index", "Duplicate AC bus index " + std::to_string(b.index));
@@ -161,6 +164,9 @@ ValidationReport validate(const HybridPowerSystem& sys) {
     {
         std::unordered_set<int> seen;
         for (const auto& b : sys.dc.buses) {
+            if (b.index <= 0)
+                r.add(S::Error, "DCBus", std::to_string(b.index),
+                      "index", "DC bus index must be positive");
             if (!seen.insert(b.index).second)
                 r.add(S::Error, "DCBus", std::to_string(b.index),
                       "index", "Duplicate DC bus index " + std::to_string(b.index));
@@ -218,6 +224,9 @@ ValidationReport validate(const HybridPowerSystem& sys) {
 
     // ── 4. AC branch bus references ───────────────────────────────────────────
     for (const auto& br : sys.ac.branches) {
+        if (br.from_bus == br.to_bus)
+            r.add(S::Error, "ACBranch", std::to_string(br.index),
+                  "from_bus/to_bus", "AC branch endpoints must be distinct");
         if (ac_ids.find(br.from_bus) == ac_ids.end())
             r.add(S::Error, "ACBranch", std::to_string(br.index),
                   "from_bus", "from_bus " + std::to_string(br.from_bus) + " not found");
@@ -228,6 +237,9 @@ ValidationReport validate(const HybridPowerSystem& sys) {
 
     // ── 5. DC branch bus references ───────────────────────────────────────────
     for (const auto& br : sys.dc.branches) {
+        if (br.from_bus == br.to_bus)
+            r.add(S::Error, "DCBranch", std::to_string(br.index),
+                  "from_bus/to_bus", "DC branch endpoints must be distinct");
         if (dc_ids.find(br.from_bus) == dc_ids.end())
             r.add(S::Error, "DCBranch", std::to_string(br.index),
                   "from_bus", "from_bus " + std::to_string(br.from_bus) + " not found in DC");
@@ -287,6 +299,23 @@ ValidationReport validate(const HybridPowerSystem& sys) {
     for (const auto& ld : sys.ac.loads) {
         require_ac_bus("Load", ld.index, "bus", ld.bus);
         require_nonnegative("Load", ld.index, "scaling", ld.scaling);
+        if (ld.model == LoadModel::Exponential)
+            r.add(S::Error, "Load", std::to_string(ld.index), "model",
+                  "Exponential load requires voltage exponents that are not "
+                  "represented by the current model; use ZIP or ConstantPower");
+        const auto check_zip_sum = [&](const char* field, double z, double i,
+                                       double p) {
+            const double sum = z + i + p;
+            if (!std::isfinite(sum) || z < 0.0 || i < 0.0 || p < 0.0 ||
+                std::abs(sum - 100.0) > 1e-6)
+                r.add(S::Error, "Load", std::to_string(ld.index), field,
+                      std::string(field) +
+                      " coefficients must be finite, non-negative, and sum to 100");
+        };
+        check_zip_sum("ZIP-P", ld.z_percent_p, ld.i_percent_p,
+                      ld.p_percent_p);
+        check_zip_sum("ZIP-Q", ld.z_percent_q, ld.i_percent_q,
+                      ld.p_percent_q);
     }
     for (const auto& ld : sys.ac.flexible_loads) {
         require_ac_bus("FlexibleLoad", ld.index, "bus", ld.bus);

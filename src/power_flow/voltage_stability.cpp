@@ -308,7 +308,9 @@ CpfResult CpfSolver::solve(const SolverData& base_data,
   if (monitor_bus < 0) {
     double max_pd = -1.0;
     for (int i = 0; i < N; ++i) {
-      const double pd = base_data.ac_buses[static_cast<size_t>(i)].pd_mw;
+      const double pd = base_data.has_component_loads
+                            ? base_data.pd_pu[i] * base_data.base_mva
+                            : base_data.ac_buses[static_cast<size_t>(i)].pd_mw;
       if (pd > max_pd) {
         max_pd      = pd;
         monitor_bus = i;
@@ -317,6 +319,27 @@ CpfResult CpfSolver::solve(const SolverData& base_data,
   }
   monitor_bus         = std::max(0, std::min(N - 1, monitor_bus));
   result.monitor_bus  = monitor_bus;
+
+  const bool has_pv_bus = std::any_of(
+      base_data.ac_buses.begin(), base_data.ac_buses.end(),
+      [](const ACBus& bus) {
+        return bus.in_service && bus.bus_type == BusType::PV;
+      });
+  const bool use_arc_length = opts.enable_arc_length && !has_pv_bus;
+  result.arc_length_used = use_arc_length;
+  result.q_limits_enforced = true;
+  if (opts.enable_arc_length && has_pv_bus) {
+    result.model_scope = "cpf:natural-parameterization+pv-pq-active-set";
+    result.model_limitations =
+        "Arc-length continuation was disabled because PV/PQ switching changes "
+        "the equation layout; the trace enforces Q limits through Newton solves "
+        "but cannot continue through a fold.";
+    result.warnings.push_back(result.model_limitations);
+  } else if (use_arc_length) {
+    result.model_scope = "cpf:arc-length-fixed-active-set";
+  } else {
+    result.model_scope = "cpf:natural-parameterization";
+  }
 
   const PowerFlowOptions pfo = make_corrector_opts(opts);
   NewtonSolver nr_solver;
@@ -338,6 +361,7 @@ CpfResult CpfSolver::solve(const SolverData& base_data,
     auto [p, q]    = total_load(base_data, lambda, dir);
     pt.p_total_mw  = p;
     pt.q_total_mvar = q;
+    pt.residual = pf.residual;
     if (opts.trace_all_buses) {
       pt.vm = pf.vm;
       pt.va = pf.va;
@@ -371,7 +395,6 @@ CpfResult CpfSolver::solve(const SolverData& base_data,
     step *= opts.step_shrink;
   }
   if (!pf_first.converged) {
-    result.nose_found = true;
     result.termination_reason = "no continuation step converged from base case";
   } else {
     record(lambda_first, pf_first);
@@ -393,6 +416,11 @@ CpfResult CpfSolver::solve(const SolverData& base_data,
       auto [p, q] = total_load(base_data, pt.lambda, dir);
       pt.p_total_mw = p;
       pt.q_total_mvar = q;
+      const Eigen::VectorXd residual =
+          evaluate_cpf_residual(base_data, dir, layout, y);
+      pt.residual = residual.size() > 0
+                        ? residual.lpNorm<Eigen::Infinity>()
+                        : 0.0;
       if (opts.trace_all_buses) {
         pt.vm.assign(vm.data(), vm.data() + vm.size());
         pt.va.assign(va.data(), va.data() + va.size());
@@ -403,7 +431,7 @@ CpfResult CpfSolver::solve(const SolverData& base_data,
       result.trace.push_back(std::move(pt));
     };
 
-    if (!opts.enable_arc_length) {
+    if (!use_arc_length) {
       // Explicit legacy mode: retain natural parameterization for callers that
       // require strictly increasing lambda samples.
       double lambda = lambda_first;
@@ -415,8 +443,8 @@ CpfResult CpfSolver::solve(const SolverData& base_data,
         if (!trial.converged) {
           step *= opts.step_shrink;
           if (step < opts.step_min) {
-            result.nose_found = true;
-            result.termination_reason = "natural parameterization stalled";
+            result.termination_reason =
+                "natural parameterization stalled; no lambda fold was observed";
             break;
           }
           continue;
@@ -429,15 +457,30 @@ CpfResult CpfSolver::solve(const SolverData& base_data,
       if (result.termination_reason.empty() && lambda >= opts.lambda_max)
         result.termination_reason = "lambda_max reached";
     } else {
-      step = std::clamp((y_curr - y_prev).norm(), opts.step_min, opts.step_max);
-      Eigen::VectorXd previous_tangent = (y_curr - y_prev).normalized();
+      const double initial_secant_norm = (y_curr - y_prev).norm();
+      if (!std::isfinite(initial_secant_norm) || initial_secant_norm <= 1e-14) {
+        result.termination_reason = "arc-length initial secant is zero";
+      }
+      step = std::clamp(initial_secant_norm, opts.step_min, opts.step_max);
+      Eigen::VectorXd previous_tangent;
+      if (initial_secant_norm > 1e-14 && std::isfinite(initial_secant_norm)) {
+        previous_tangent = (y_curr - y_prev) / initial_secant_norm;
+      }
       bool lower_branch = false;
       int lower_branch_points = 0;
 
-      for (int iter = 1; iter < opts.max_steps; ++iter) {
-        Eigen::VectorXd tangent = opts.use_secant_predictor
-            ? (y_curr - y_prev).normalized()
-            : previous_tangent;
+      for (int iter = 1;
+           result.termination_reason.empty() && iter < opts.max_steps; ++iter) {
+        Eigen::VectorXd tangent = previous_tangent;
+        if (opts.use_secant_predictor) {
+          const Eigen::VectorXd secant = y_curr - y_prev;
+          const double secant_norm = secant.norm();
+          if (!std::isfinite(secant_norm) || secant_norm <= 1e-14) {
+            result.termination_reason = "arc-length secant collapsed to zero";
+            break;
+          }
+          tangent = secant / secant_norm;
+        }
         if (tangent.dot(previous_tangent) < 0.0) tangent = -tangent;
         previous_tangent = tangent;
 
@@ -517,7 +560,11 @@ VoltageStabilityIndex compute_vsi(const CpfResult& result,
 
   // Base-case loading.
   double p_base = 0.0;
-  for (const auto& b : base_data.ac_buses) p_base += b.pd_mw;
+  if (base_data.has_component_loads) {
+    p_base = base_data.pd_pu.sum() * base_data.base_mva;
+  } else {
+    for (const auto& b : base_data.ac_buses) p_base += b.pd_mw;
+  }
   vsi.p_margin_mw = vsi.p_max_mw - p_base;
 
   // Monitor-bus base voltage.

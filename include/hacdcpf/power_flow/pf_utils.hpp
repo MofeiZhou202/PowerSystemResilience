@@ -67,16 +67,17 @@ inline void load_dc_initial_state(const InitialState* init,
   }
 }
 
-/// AC bus classification result (excludes the primary slack bus).
+/// AC bus classification result (excludes every fixed SLACK reference).
 struct AcBusSets {
   int slack{0};                 ///< Index of the primary AC slack bus.
-  std::vector<int> pv;         ///< PV buses (and additional SLACK buses).
+  std::vector<int> pv;         ///< PV buses.
   std::vector<int> pq;         ///< PQ buses.
   std::vector<int> non_slack;  ///< pv ∪ pq (all buses with Newton equations).
 };
 
 /// Classify AC buses into PV / PQ / non-slack groups.
-/// Additional SLACK buses (beyond the primary) are treated as PV buses.
+/// Every SLACK bus is an angle-and-voltage reference for its connected area and
+/// therefore contributes neither a P nor Q equation.
 inline AcBusSets classify_ac_buses(const SolverData& data) {
   AcBusSets sets;
   const int n = static_cast<int>(data.ac_buses.size());
@@ -85,12 +86,12 @@ inline AcBusSets classify_ac_buses(const SolverData& data) {
   sets.pq.reserve(static_cast<size_t>(n));
   sets.non_slack.reserve(static_cast<size_t>(n));
   for (int i = 0; i < n; ++i) {
-    if (i == sets.slack) continue;
     const BusType bt = data.ac_buses[static_cast<size_t>(i)].bus_type;
+    if (bt == BusType::SLACK) continue;
     if (bt == BusType::PQ) {
       sets.pq.push_back(i);
     } else {
-      sets.pv.push_back(i);  // BusType::PV or additional BusType::SLACK
+      sets.pv.push_back(i);
     }
     sets.non_slack.push_back(i);
   }

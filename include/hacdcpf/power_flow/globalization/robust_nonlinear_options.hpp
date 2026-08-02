@@ -151,10 +151,9 @@ struct RobustNonlinearOptions {
   /// SER exponent γ: δt_{k+1} = δt_k · (r_{k-1}/r_k)^γ.
   double ptc_gamma{0.7};
 
-  // ── Phase 4: Homotopy continuation ───────────────────────────────
-  /// After all other strategies fail, use homotopy continuation: ramp loads
-  /// and VSC setpoints from a flat-start base to the target values in steps
-  /// of homotopy_step0 (doubled on success, halved on failure).
+  // ── Phase 4: Homotopy continuation compatibility fields ──────────
+  /// Reserved for callers that explicitly invoke HomotopyContinuationSolver.
+  /// NewtonSolver does not automatically dispatch to homotopy when it fails.
   bool enable_homotopy{true};
 
   /// Initial homotopy parameter increment Δλ ∈ (0, 1].

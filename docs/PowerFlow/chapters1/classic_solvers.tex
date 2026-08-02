@@ -228,18 +228,22 @@ $1.5\,P_{g,i}$（capacity/droop）与 $10$~pu（equal）。\srcpath{sanitize\_sl
 含换流器 AC 注入 \srcpath{converter\_ac\_injection}，:111--122），按
 $\Delta P_i=\alpha_i\,\Delta P_{\Sigma}$ 分摊输出（:331--337）。
 
-\textbf{限值变体} \srcpath{solve\_full\_jacobian}（:341--359）：在简化变体结果上用
-\srcpath{distribute\_with\_limits}（:134--208）迭代裁剪重分摊——越限母线钉在
-$\pm$\fld{max\_participation\_p} 并计入 \fld{hit\_limits}，剩余不平衡在活跃集内按
-$\alpha$ 比例重分，最多 $n$ 轮收敛。
+\textbf{限值变体} \srcpath{solve\_full\_jacobian}：每轮完整 Newton 求解后，用
+\srcpath{distribute\_with\_limits} 迭代裁剪重分摊——越限母线钉在发电机
+$P_{\min}/P_{\max}$ 与 \fld{max\_participation\_p} 的交集边界并计入
+\fld{hit\_limits}，再把修正写回发电机并重解；剩余失配小于
+$\max(10^{-10},\fld{tol})$ pu 时结束，最多 20 次完整求解。
 
 诚实口径（重要）：
 \begin{itemize}
-  \item \textbf{两变体都不二次求解潮流}：母线电压/相角始终是单 slack 的基准 Newton 解，
-        \fld{distributed\_slack\_p} 仅为事后分摊量；名称 \texttt{full\_jacobian} 易被
-        误解为"含参与因子的增广雅可比重解"，实现并非如此；
-  \item 失配复算用母线级 \fld{pd\_mw} 恒功率口径（:106--110），不含 ZIP 电压项，
-        且为致密 $O(n^2)$，大系统有性能代价。
+  \item 简化变体只做一次 Newton，\fld{distributed\_slack\_p} 是事后分摊；限值变体
+        会重调度并反复重解。兼容名称 \texttt{full\_jacobian} 不表示把参与因子作为
+        单个增广 Jacobian 未知量；
+  \item 失配复算复用统一 AC 注入装配，覆盖组件负荷、ZIP 电压项、VSC/LCC 与
+        energy-router 注入；网络功率仍由 Ybus 致密复算，复杂度为 $O(n^2)$；
+  \item \fld{reference\_bus} 会实际改写角度参考；输出
+        \fld{distributed\_slack\_p} 的单位是系统 \fld{base\_mva} 基准上的 pu，
+        不是 MW。
 \end{itemize}
 
 \subsubsection*{求解参数}

@@ -11,10 +11,21 @@ namespace hacdcpf::powerflow {
 
 ACLinearizedDCResult solve_ac_linearized_dc(const SolverData& data) {
   ACLinearizedDCResult out;
+  const bool has_hybrid_assets =
+      !data.dc_buses.empty() || !data.dc_branches.empty() ||
+      !data.converters.empty() || !data.lcc_converters.empty() ||
+      !data.dcdc_converters.empty() || !data.energy_routers.empty();
+  if (has_hybrid_assets) {
+    out.model_scope = "ac-only-linearized-dc:not-applicable-to-hybrid";
+    out.model_limitations =
+        "DC networks and VSC/LCC/DC-DC/energy-router injections are not "
+        "represented by the B-theta linearized AC model.";
+    return out;
+  }
   const int n = static_cast<int>(data.ac_buses.size());
   const int nbr = static_cast<int>(data.ac_branches.size());
   if (n == 0) {
-    out.success = true;
+    out.model_limitations = "No in-service AC buses were available to solve.";
     return out;
   }
 
@@ -77,10 +88,13 @@ ACLinearizedDCResult solve_ac_linearized_dc(const SolverData& data) {
   B.setFromTriplets(triplets.begin(), triplets.end(), std::plus<double>());
   B.makeCompressed();
 
-  // Power injection: P = (Pg - Pd) / baseMVA + Pshift
+  // B*theta + Pshift = Pspec, hence B*theta = Pspec - Pshift.
   Eigen::VectorXd P = Eigen::VectorXd::Zero(n);
   for (int i = 0; i < n; ++i) {
-    P[i] = data.pg[i] - data.ac_buses[static_cast<size_t>(i)].pd_mw / data.base_mva + p_shift[i];
+    const double pd = (data.pd_pu.size() == n)
+                          ? data.pd_pu[i]
+                          : data.ac_buses[static_cast<size_t>(i)].pd_mw / data.base_mva;
+    P[i] = data.pg[i] - pd - p_shift[i];
   }
 
   // Build reduced system (exclude slack).
@@ -97,6 +111,7 @@ ACLinearizedDCResult solve_ac_linearized_dc(const SolverData& data) {
   if (nred == 0) {
     out.va.assign(static_cast<size_t>(n), 0.0);
     out.pf_mw.assign(static_cast<size_t>(nbr), 0.0);
+    out.residual_pu = 0.0;
     out.success = true;
     return out;
   }
@@ -143,6 +158,17 @@ ACLinearizedDCResult solve_ac_linearized_dc(const SolverData& data) {
     out.va[static_cast<size_t>(non_slack[static_cast<size_t>(k)])] = va_red[k];
   }
 
+  // Verify the solved non-reference equations after the full state is assembled.
+  out.residual_pu = 0.0;
+  for (int k = 0; k < nred; ++k) {
+    const int bus = non_slack[static_cast<size_t>(k)];
+    double balance = -P[bus];
+    for (int col = 0; col < n; ++col) {
+      balance += B.coeff(bus, col) * out.va[static_cast<size_t>(col)];
+    }
+    out.residual_pu = std::max(out.residual_pu, std::abs(balance));
+  }
+
   // Compute branch flows: Pf = b * (Va_from - Va_to - shift_rad) * baseMVA
   out.pf_mw.assign(static_cast<size_t>(nbr), 0.0);
   for (int k = 0; k < nbr; ++k) {
@@ -162,7 +188,11 @@ ACLinearizedDCResult solve_ac_linearized_dc(const SolverData& data) {
                                               shift_rad) * data.base_mva;
   }
 
-  out.success = true;
+  out.success = std::isfinite(out.residual_pu);
+  out.model_scope = "ac-only-linearized-dc";
+  out.model_limitations =
+      "Lossless balanced AC B-theta approximation; voltage magnitudes and "
+      "reactive-power balance are not solved.";
   return out;
 }
 

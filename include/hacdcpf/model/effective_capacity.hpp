@@ -12,7 +12,8 @@
 // classes of bug:
 //
 //   1. scaling=0 silently treated as full output  (reliability / resilience)
-//   2. pmax_mw==0 treated as "no limit" rather than "no capacity"
+//   2. pmax_mw==0 interpreted inconsistently instead of using the declared
+//      current/nameplate fallback
 //
 // Centralising the rules here lets every analysis module pull from one
 // canonical definition, so the *physical contract* that any one module
@@ -28,14 +29,15 @@
 //   - "effective_capacity_mw" : largest |P| the unit can supply (>=0).  For
 //                               non-dispatchable / fixed-injection units this
 //                               equals |effective_p_mw|.  For dispatchable
-//                               units it is the pmax_mw bound (no scaling,
-//                               since scaling is a fixed-injection concept).
+//                               units it is the pmax_mw bound multiplied by the
+//                               same availability scaling used by dispatch.
 //   - For out-of-service units both helpers return 0.
 //   - A non-positive scaling collapses the fixed-injection contribution to 0,
 //     so callers can use a single helper instead of duplicating the guard.
 // ============================================================================
 
 #include <algorithm>
+#include <cmath>
 
 #include "hacdcpf/model/ac_components.hpp"
 #include "hacdcpf/model/dc_components.hpp"
@@ -50,7 +52,7 @@ namespace hacdcpf::model {
 // (the unit acts as out-of-service) rather than corrupting downstream LP / MIP
 // inputs with signed or infinite coefficients.
 inline double sanitize_scaling(double s) {
-  return (s > 0.0) ? s : 0.0;
+  return (std::isfinite(s) && s > 0.0) ? s : 0.0;
 }
 
 // ---------------------------------------------------------------------------
@@ -117,6 +119,9 @@ inline double effective_capacity_mw(const StaticGeneratorDC& g) {
   if (!g.in_service) return 0.0;
   const double s = sanitize_scaling(g.scaling);
   if (s == 0.0) return 0.0;
+  if (!g.controllable) {
+    return std::max(0.0, g.p_set_mw * s);
+  }
   double cap = (g.pmax_mw > 0.0) ? g.pmax_mw : g.p_set_mw;
   return std::max(0.0, cap * s);
 }

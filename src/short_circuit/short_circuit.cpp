@@ -522,19 +522,17 @@ YbusTriplet build_sc_admittance_matrices(const ACSystem& ac,
       if (it == id_map.end()) continue;
       int mi = it->second;
 
-      Cx z_motor_ohm(m.r_pu, m.x_pu);
-      if (std::abs(z_motor_ohm) < 1e-15) continue;
-      double motor_vn = (m.vn_kv > 1e-6) ? m.vn_kv : 1.0;
-      double z_base = motor_vn * motor_vn / base_mva;
-      Cx z_motor = z_motor_ohm / z_base;
+      Cx z_motor_nameplate(m.r_pu, m.x_pu);
+      if (std::abs(z_motor_nameplate) < 1e-15 || m.sn_mva <= 1e-9) continue;
+      const double motor_to_system_base = base_mva / m.sn_mva;
+      Cx z_motor = z_motor_nameplate * motor_to_system_base;
       Cx y_motor = Cx(1.0, 0.0) / z_motor;
       Ybus(mi, mi) += y_motor;
       Ybus2(mi, mi) += y_motor;  // Z2 ≈ Z1 for asynchronous motors
 
       // Zero-sequence motor
       if (std::abs(m.r0_pu) > 1e-12 || std::abs(m.x0_pu) > 1e-12) {
-        Cx z_m0_ohm(m.r0_pu, m.x0_pu);
-        Cx z_m0 = z_m0_ohm / z_base;
+        Cx z_m0 = Cx(m.r0_pu, m.x0_pu) * motor_to_system_base;
         if (std::abs(z_m0) > 1e-15) {
           Ybus0(mi, mi) += Cx(1.0, 0.0) / z_m0;
         }
@@ -1170,27 +1168,24 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
     if (!m.in_service) continue;
     const double motor_p_mw = m.sn_mva * std::clamp(m.cos_phi, 0.01, 1.0);
     if (motor_p_mw < kMinMotorContributionMw) continue;
-    Cx z_motor_ohm(m.r_pu, m.x_pu);
-    if (std::abs(z_motor_ohm) < 1e-15) continue;
-    double mvn = (m.vn_kv > 1e-6) ? m.vn_kv : 1.0;
-    double z_base = mvn * mvn / base_mva;
-    Cx z_motor = z_motor_ohm / z_base;
+    Cx z_motor_nameplate(m.r_pu, m.x_pu);
+    if (std::abs(z_motor_nameplate) < 1e-15 || m.sn_mva <= 1e-9) continue;
+    const double motor_to_system_base = base_mva / m.sn_mva;
+    Cx z_motor = z_motor_nameplate * motor_to_system_base;
 
     double motor_ci = 0.0;
     Cx motor_z = z_motor;
     if (opt.fault_type == FaultType::ThreePhase) {
       motor_ci = voltage_source_contribution_ka(m.bus, z_motor);
     } else if (opt.fault_type == FaultType::SinglePhaseGround) {
-      Cx z_m0_ohm(m.r0_pu, m.x0_pu);
-      Cx z_m0 = z_m0_ohm / z_base;
+      Cx z_m0 = Cx(m.r0_pu, m.x0_pu) * motor_to_system_base;
       motor_z = (2.0 * z_motor + z_m0) / 3.0;
       motor_ci = voltage_source_contribution_ka(m.bus, motor_z);
     } else if (opt.fault_type == FaultType::TwoPhase) {
       motor_z = z_motor * 2.0 / std::sqrt(3.0);
       motor_ci = voltage_source_contribution_ka(m.bus, motor_z);
     } else if (opt.fault_type == FaultType::TwoPhaseGround) {
-      Cx z_m0_ohm(m.r0_pu, m.x0_pu);
-      Cx z_m0 = z_m0_ohm / z_base;
+      Cx z_m0 = Cx(m.r0_pu, m.x0_pu) * motor_to_system_base;
       motor_z = (2.0 * z_motor * z_m0 + z_motor * z_motor) / (3.0 * z_motor);
       motor_ci = voltage_source_contribution_ka(m.bus, motor_z);
     }
@@ -1383,11 +1378,9 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
         if (!m.in_service || m.bus != bus_id) continue;
         const double motor_p_mw = m.sn_mva * std::clamp(m.cos_phi, 0.01, 1.0);
         if (motor_p_mw < kMinMotorContributionMw) continue;
-        Cx z_motor_ohm(m.r_pu, m.x_pu);
-        if (std::abs(z_motor_ohm) < 1e-15) continue;
-        double mvn = (m.vn_kv > 1e-6) ? m.vn_kv : 1.0;
-        double z_base = mvn * mvn / base_mva;
-        Cx z_motor = z_motor_ohm / z_base;
+        Cx z_motor_nameplate(m.r_pu, m.x_pu);
+        if (std::abs(z_motor_nameplate) < 1e-15 || m.sn_mva <= 1e-9) continue;
+        Cx z_motor = z_motor_nameplate * (base_mva / m.sn_mva);
 
         if (opt.fault_type == FaultType::ThreePhase) {
           double m_pu = (c / std::abs(z_motor)) * std::abs(Zbus(k, fault_idx)) /
@@ -1598,11 +1591,10 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
         if (motor_p_mw < kMinMotorContributionMw) continue;
         auto mit = id_map.find(m.bus);
         if (mit == id_map.end()) continue;
-        Cx z_motor_ohm(m.r_pu, m.x_pu);
-        if (std::abs(z_motor_ohm) < 1e-15) continue;
+        Cx z_motor_nameplate(m.r_pu, m.x_pu);
+        if (std::abs(z_motor_nameplate) < 1e-15 || m.sn_mva <= 1e-9) continue;
         double mvn = (m.vn_kv > 1e-6) ? m.vn_kv : 1.0;
-        double z_base = mvn * mvn / base_mva;
-        Cx z_motor = z_motor_ohm / z_base;
+        Cx z_motor = z_motor_nameplate * (base_mva / m.sn_mva);
         double motor_current = (c / std::abs(z_motor)) * I_base;
 
         int mi = mit->second;

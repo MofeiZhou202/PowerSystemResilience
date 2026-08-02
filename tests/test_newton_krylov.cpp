@@ -34,6 +34,21 @@ TEST_CASE("Newton-Krylov GMRES solves a coupled AC-DC block system",
   CHECK((result.step - expected).lpNorm<Eigen::Infinity>() < 1e-10);
 }
 
+TEST_CASE("GMRES never accepts a small preconditioned residual as a true solution",
+          "[power_flow][newton_krylov][math_audit][B7]") {
+  const double scale = 1e6;
+  const Eigen::Vector2d rhs(1.0, -2.0);
+  Eigen::VectorXd x = Eigen::VectorXd::Zero(2);
+  const auto stats = hacdcpf::powerflow::gmres_solve(
+      [scale](const Eigen::VectorXd& value) { return scale * value; },
+      [scale](const Eigen::VectorXd& value) { return value / scale; },
+      rhs, x, 2, 2, 1e-4);
+
+  REQUIRE(stats.converged);
+  CHECK((rhs - scale * x).norm() / rhs.norm() < 1e-12);
+  CHECK(stats.final_relres < 1e-12);
+}
+
 TEST_CASE("Unified solver factory returns linked, callable solvers",
           "[power_flow][solver_factory]") {
   const auto sys = hacdcpf::test::make_two_bus_voltage_stability_case();
@@ -53,19 +68,25 @@ TEST_CASE("Unified solver factory returns linked, callable solvers",
   }
 }
 
-TEST_CASE("SolverWorkspace resets values while retaining its layout",
+TEST_CASE("SolverWorkspace preparation clears retained values",
           "[power_flow][workspace]") {
   hacdcpf::powerflow::SolverWorkspace workspace;
   workspace.prepare_state(4, 2);
   workspace.prepare_equations(3, 2, 1);
   workspace.vm.setConstant(0.7);
+  workspace.va.setOnes();
+  workspace.vdc.setConstant(0.8);
   workspace.residual.setOnes();
   workspace.dx.setOnes();
-  workspace.reset_iteration();
+  workspace.prepare_state(4, 2);
+  workspace.prepare_equations(3, 2, 1);
 
   CHECK(workspace.nac == 4);
   CHECK(workspace.ndc == 2);
   CHECK(workspace.equation_count() == 6);
+  CHECK(workspace.vm.isOnes());
+  CHECK(workspace.va.isZero());
+  CHECK(workspace.vdc.isOnes());
   CHECK(workspace.residual.isZero());
   CHECK(workspace.dx.isZero());
 }

@@ -378,19 +378,33 @@ TEST_CASE("DC_V bus backed by controllable DC storage is accepted as a physical 
   CHECK(report.feasible);
 }
 
-TEST_CASE("Conflicting VDC setpoints in one DC island are fatal",
+TEST_CASE("VDC setpoint conflicts are scoped to the same DC bus",
           "[converter][coordination][vsc]") {
-  hacdcpf::HybridPowerSystem sys;
-  sys.dc.buses = {dc_bus(1), dc_bus(2)};
-  sys.dc.branches = {dc_branch(1, 1, 2)};
-  sys.vsc_converters = {vdc_vsc(1, 1, 1.00), vdc_vsc(2, 2, 1.05)};
+  SECTION("different buses may have different voltages across line resistance") {
+    hacdcpf::HybridPowerSystem sys;
+    sys.dc.buses = {dc_bus(1), dc_bus(2)};
+    sys.dc.branches = {dc_branch(1, 1, 2)};
+    sys.vsc_converters = {vdc_vsc(1, 1, 1.00), vdc_vsc(2, 2, 1.05)};
 
-  const auto report = hacdcpf::powerflow::evaluate_converter_coordination(sys, true);
+    const auto report =
+        hacdcpf::powerflow::evaluate_converter_coordination(sys, true);
+    REQUIRE(report.dc_islands.size() == 1);
+    CHECK(report.dc_islands.front().droop_sources == 2);
+    CHECK_FALSE(report_has_rule(report, "DCISLAND-05"));
+    CHECK(report.feasible);
+  }
 
-  REQUIRE(report.dc_islands.size() == 1);
-  CHECK(report.dc_islands.front().droop_sources == 2);
-  CHECK(report_has_rule(report, "DCISLAND-05"));
-  CHECK_FALSE(report.feasible);
+  SECTION("two incompatible controls on one bus remain fatal") {
+    hacdcpf::HybridPowerSystem sys;
+    sys.dc.buses = {dc_bus(1)};
+    sys.vsc_converters = {vdc_vsc(1, 1, 1.00), vdc_vsc(2, 1, 1.05)};
+
+    const auto report =
+        hacdcpf::powerflow::evaluate_converter_coordination(sys, true);
+    REQUIRE(report.dc_islands.size() == 1);
+    CHECK(report_has_rule(report, "DCISLAND-05"));
+    CHECK_FALSE(report.feasible);
+  }
 }
 
 TEST_CASE("DC/DC Voltage mode forms its output voltage and is feasible with an input reference",
@@ -1611,7 +1625,7 @@ TEST_CASE("Hybrid AC/DC OPF models DC/DC converters in all three control modes",
     CHECK(res.max_dc_p_viol_pu < 1e-4);
   }
 
-  // Droop mode: Pout = p_ref + k_droop·(Vdc_out − v_ref)  (all per-unit; MW = pu·Sb).
+  // Droop mode: Pout = p_ref - k_droop·(Vdc_out − v_ref)  (negative feedback).
   {
     const double p_ref = 1.0, k = 2.0, v_ref = 1.0, Sb = 10.0;
     auto sys = build_case(DCDCControlMode::Droop, p_ref, v_ref, k, 1.5);
@@ -1620,7 +1634,7 @@ TEST_CASE("Hybrid AC/DC OPF models DC/DC converters in all three control modes",
     REQUIRE(res.pdcdc_mw.count("DCDC1") == 1);
     REQUIRE(res.vdc_pu.count("DC2") == 1);
     const double vdc2 = res.vdc_pu.at("DC2");
-    const double expected_mw = p_ref + k * (vdc2 - v_ref) * Sb;
+    const double expected_mw = p_ref - k * (vdc2 - v_ref) * Sb;
     CHECK(res.pdcdc_mw.at("DCDC1") == Catch::Approx(expected_mw).margin(2e-2));
   }
 }
@@ -1720,7 +1734,7 @@ TEST_CASE("DC_V_DROOP_AC_V converter forms Vdc by droop and holds its AC voltage
 
 // ── Mode 1: AC grid-forming (genuine AC reference in the power flow) ──────────
 TEST_CASE("AC_GRID_FORMING converter forms the islanded AC voltage and angle reference",
-          "[converter][mode1][powerflow]") {
+          "[converter][mode1][powerflow][math_audit][A1][D6]") {
   using namespace hacdcpf;
   HybridPowerSystem sys;
   sys.base_mva = 100.0;
@@ -1808,10 +1822,40 @@ TEST_CASE("AC_GRID_FORMING converter forms the islanded AC voltage and angle ref
   // Per-converter energy balance holds: P_ac + P_dc + loss = 0.
   CHECK(std::abs(itB->p_ac_mw + itB->p_dc_mw + itB->loss_mw) < 1e-6);
 
+  // A1 regression: validate the solved DC state and the upstream converter,
+  // not only the post-processed GFM report. With 6 MW crossing a 0.01 pu DC
+  // line the receiving voltage must move away from the flat 1.0 pu start, and
+  // the upstream converter must actually supply the transfer.
+  REQUIRE(r.vdc.size() == 2);
+  CHECK(r.vdc[1] < 0.9999);
+  const auto itA = std::find_if(r.vsc_transfers.begin(), r.vsc_transfers.end(),
+                                [](const VSCTransfer& t) { return t.index == 0; });
+  REQUIRE(itA != r.vsc_transfers.end());
+  CHECK(std::abs(itA->p_ac_mw) > 5.9);
+
   // Coordination: no GFM-05 (DC support present) and no blocking issues.
   const auto report = powerflow::evaluate_converter_coordination(sys, true);
   CHECK_FALSE(report_has_rule(report, "ACDC-GFM-05"));
   CHECK_FALSE(report.has_blocking_issue());
+
+  // D6 regression: a fixed co-located injection belongs to that component,
+  // not to the free-power GFM converter. Because bus 3 is a reference, adding
+  // fixed Q there does not change the solved network voltage; it must reduce
+  // only the converter's attributed Q by exactly the same amount.
+  StaticGenerator co_located;
+  co_located.index = 7;
+  co_located.bus = 3;
+  co_located.q_mvar = 1.5;
+  co_located.in_service = true;
+  sys.ac.static_generators.push_back(co_located);
+  const PowerFlowResult with_co_located = solve_power_flow(sys, opt);
+  REQUIRE(with_co_located.converged);
+  const auto itB_fixed = std::find_if(
+      with_co_located.vsc_transfers.begin(),
+      with_co_located.vsc_transfers.end(),
+      [](const VSCTransfer& transfer) { return transfer.index == 1; });
+  REQUIRE(itB_fixed != with_co_located.vsc_transfers.end());
+  CHECK(itB_fixed->q_ac_mvar == Catch::Approx(itB->q_ac_mvar - 1.5).margin(1e-8));
 }
 
 // ── ACDC-GFM-05: AC grid-forming needs DC-side support ───────────────────────

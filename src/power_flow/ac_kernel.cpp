@@ -78,29 +78,26 @@ void evaluate_ac_kernel_parallel(const JacobianPattern& pattern,
                                  double* values,
                                  Eigen::VectorXd& pcalc,
                                  Eigen::VectorXd& qcalc) {
-  const int n = static_cast<int>(vm.size());
-  const size_t nnz = build_jacobian ? static_cast<size_t>(pattern.matrix.nonZeros()) : 0U;
   const size_t n_entries = pattern.ac_entries.size();
   const int nthreads = effective_ac_threads(ac_eval_threads, n_entries);
-  if (nthreads <= 1) {
+  if (n_entries < kParallelEntryThreshold) {
     evaluate_ac_kernel_serial(pattern, vm, va, build_jacobian, values, pcalc, qcalc);
     return;
   }
 
-  struct ThreadAccum {
-    Eigen::VectorXd pcalc;
-    Eigen::VectorXd qcalc;
-    std::vector<double> jac_values;
+  struct EntryContribution {
+    double p{0.0};
+    double q{0.0};
+    double p_va{0.0};
+    double q_va{0.0};
+    double p_vm{0.0};
+    double q_vm{0.0};
   };
 
-  std::vector<ThreadAccum> accum(static_cast<size_t>(nthreads));
-  for (int t = 0; t < nthreads; ++t) {
-    accum[static_cast<size_t>(t)].pcalc = Eigen::VectorXd::Zero(n);
-    accum[static_cast<size_t>(t)].qcalc = Eigen::VectorXd::Zero(n);
-    if (build_jacobian) {
-      accum[static_cast<size_t>(t)].jac_values.assign(nnz, 0.0);
-    }
-  }
+  // Each entry is independent. Parallelize that work, then reduce in the
+  // authored entry order so floating-point addition order is independent of
+  // thread count.
+  std::vector<EntryContribution> contributions(n_entries);
 
   auto& pool = util::ThreadPool::global();
   pool.parallel_for(static_cast<size_t>(nthreads),
@@ -108,9 +105,9 @@ void evaluate_ac_kernel_parallel(const JacobianPattern& pattern,
       for (size_t t = t_begin; t < t_end; ++t) {
         const size_t begin = (n_entries * t) / static_cast<size_t>(nthreads);
         const size_t end = (n_entries * (t + 1)) / static_cast<size_t>(nthreads);
-        ThreadAccum& local = accum[t];
         for (size_t idx = begin; idx < end; ++idx) {
           const auto& entry = pattern.ac_entries[idx];
+          EntryContribution& contribution = contributions[idx];
           const int i = entry.i;
           const int j = entry.j;
           const double vi = vm[i];
@@ -121,38 +118,38 @@ void evaluate_ac_kernel_parallel(const JacobianPattern& pattern,
           const double c = std::cos(theta);
           const double s = std::sin(theta);
 
-          local.pcalc[i] += vi * vj * (g * c + b * s);
-          local.qcalc[i] += vi * vj * (g * s - b * c);
+          contribution.p = vi * vj * (g * c + b * s);
+          contribution.q = vi * vj * (g * s - b * c);
 
           if (!build_jacobian || i == j) {
             continue;
           }
           if (entry.p_va_nz >= 0) {
-            local.jac_values[static_cast<size_t>(entry.p_va_nz)] += vi * vj * (g * s - b * c);
+            contribution.p_va = vi * vj * (g * s - b * c);
           }
           if (entry.q_va_nz >= 0) {
-            local.jac_values[static_cast<size_t>(entry.q_va_nz)] += -vi * vj * (g * c + b * s);
+            contribution.q_va = -vi * vj * (g * c + b * s);
           }
           if (entry.p_vm_nz >= 0) {
-            local.jac_values[static_cast<size_t>(entry.p_vm_nz)] += vi * (g * c + b * s);
+            contribution.p_vm = vi * (g * c + b * s);
           }
           if (entry.q_vm_nz >= 0) {
-            local.jac_values[static_cast<size_t>(entry.q_vm_nz)] += vi * (g * s - b * c);
+            contribution.q_vm = vi * (g * s - b * c);
           }
         }
       }
     }, nthreads);
 
-  for (int t = 0; t < nthreads; ++t) {
-    pcalc += accum[static_cast<size_t>(t)].pcalc;
-    qcalc += accum[static_cast<size_t>(t)].qcalc;
-    if (!build_jacobian) {
-      continue;
-    }
-    const std::vector<double>& local = accum[static_cast<size_t>(t)].jac_values;
-    for (size_t nz = 0; nz < nnz; ++nz) {
-      values[nz] += local[nz];
-    }
+  for (size_t idx = 0; idx < n_entries; ++idx) {
+    const auto& entry = pattern.ac_entries[idx];
+    const auto& contribution = contributions[idx];
+    pcalc[entry.i] += contribution.p;
+    qcalc[entry.i] += contribution.q;
+    if (!build_jacobian || entry.i == entry.j) continue;
+    if (entry.p_va_nz >= 0) values[entry.p_va_nz] += contribution.p_va;
+    if (entry.q_va_nz >= 0) values[entry.q_va_nz] += contribution.q_va;
+    if (entry.p_vm_nz >= 0) values[entry.p_vm_nz] += contribution.p_vm;
+    if (entry.q_vm_nz >= 0) values[entry.q_vm_nz] += contribution.q_vm;
   }
 }
 

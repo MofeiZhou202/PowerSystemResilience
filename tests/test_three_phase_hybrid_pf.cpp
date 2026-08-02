@@ -100,6 +100,7 @@ TEST_CASE("Coupled unbalanced AC/DC PF solves GFL Vdc-Q control",
   CHECK(result.ac_active_balance_residual < 1e-9);
   CHECK(result.ac_reactive_balance_residual < 1e-9);
   CHECK(result.dc_balance_residual < 1e-9);
+  CHECK(result.converter_coupling_residual < 1e-9);
   REQUIRE(result.converters.size() == 1);
   CHECK(result.converters.front().p_dc_pu > 0.14);
   CHECK(result.converters.front().current_vuf < 1e-9);
@@ -115,6 +116,7 @@ TEST_CASE("Coupled unbalanced AC/DC PF solves GFM Vdc-internal-voltage control",
   REQUIRE(result.converged);
   CHECK(result.residual < 1e-9);
   CHECK(result.dc_balance_residual < 1e-9);
+  CHECK(result.converter_coupling_residual < 1e-9);
   REQUIRE(result.converters.size() == 1);
   CHECK(result.converters.front().p_dc_pu > 0.14);
   CHECK(std::abs(result.converters.front().internal_voltage_positive) ==

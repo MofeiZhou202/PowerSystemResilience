@@ -48,7 +48,10 @@ struct JacobianContext {
   };
   std::vector<NCPBusData> ncp_buses;
 
-  /// Voltage magnitude floor for Jacobian ∂P/∂V and ∂Q/∂V computations.
+  /// Voltage magnitude floor for the Pcalc/V and Qcalc/V diagonal formulas.
+  /// Above this floor the analytic Jacobian is exact. Below it the floor is a
+  /// deliberate finite-value safeguard and the Jacobian is not the exact
+  /// derivative of the unclamped physical residual.
   /// Populated from RobustNonlinearOptions::min_vm_pu by the Newton solver.
   double min_vm_pu{1e-8};
 };
@@ -82,6 +85,21 @@ struct JacobianPattern {
     int q_vdc_nz{-1};   // Q-row(ac_bus) → Vdc-col(dc_bus)
     int dc_vdc_nz{-1};  // DC-row(dc_bus) → Vdc-col(dc_bus)  (converter contribution)
     int dc_vm_nz{-1};   // DC-row(dc_bus) → Vm-col(ac_bus)   (AC-resistance cross-coupling)
+  };
+
+  /// Derivative of an AC grid-forming converter's DC energy-balance row with
+  /// respect to a variable on the converter's AC network row. The GFM AC bus
+  /// itself is a slack bus, but its network injection depends on every
+  /// non-slack voltage adjacent through Ybus.
+  struct GFMNetworkCouplingEntry {
+    int conv_index{0};
+    int ac_bus{0};
+    int dc_bus{0};
+    int neighbor_bus{0};
+    int dc_va_nz{-1};
+    int dc_vm_nz{-1};
+    double g{0.0};
+    double b{0.0};
   };
 
   /// Cross-coupling entry for a DCDC converter with I²R loss.
@@ -131,6 +149,7 @@ struct JacobianPattern {
   std::vector<ACEntry> ac_entries;
   std::vector<DCEntry> dc_entries;
   std::vector<CouplingEntry> coupling_entries;
+  std::vector<GFMNetworkCouplingEntry> gfm_network_coupling_entries;
   std::vector<DCDCCouplingEntry> dcdc_coupling_entries;
   std::vector<DCDroopEntry> dcdc_droop_entries;  ///< always built; droop diagonal + cross-term
   std::vector<LCCEntry> lcc_entries;  ///< always built; LCC AC↔DC coupling

@@ -1,13 +1,16 @@
 % !TEX program = xelatex
 % 编译方式：xelatex opf_manual.tex （需两遍以生成目录）
-% 注意：MiKTeX 在含中文的路径下编译会崩溃，请复制到纯英文路径（如 C:\latex_build\opf_manual\）再编译。
+% 注意：MiKTeX 在含中文的路径下编译会崩溃，请复制到纯英文路径（如 C:\latex_build\）后编译。
 \documentclass[UTF8,fontset=windows,a4paper,11pt]{ctexart}
 
 \usepackage[margin=2.2cm]{geometry}
 \usepackage{amsmath,amssymb}
 \usepackage{booktabs,longtable,array}
+\usepackage{graphicx}
 \usepackage{xcolor}
 \usepackage{float}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric}
 \usepackage{hyperref}
 \hypersetup{colorlinks=true,linkcolor=black,urlcolor=blue}
 
@@ -47,7 +50,7 @@
     \expandafter\fld@scan
   \fi}
 \makeatother
-% 模块元信息行：#1=求解器/类名  #2=头文件路径
+% 元件元信息行：#1=结构体/类名  #2=头文件路径
 \newcommand{\compmeta}[2]{\noindent\textbf{代码结构体：}\texttt{#1}\hfill
   \textbf{定义位置：}\texttt{#2}\par\smallskip}
 
@@ -65,8 +68,8 @@
 \makeatother
 
 \title{\textbf{交直流混合高弹性能源电力系统仿真平台}\\[0.5em]
-       {\Large 最优潮流技术手册}\\[0.3em]
-       {\large 数学模型、算法流程、参数选项与验证校核}}
+       {\Large 最优潮流（OPF）技术手册}\\[0.3em]
+       {\large 数学模型、求解算法、接口参数与验证}}
 \author{HySim-XJTU-HRPES（西安交通大学 HRPES 团队）}
 \date{\today}
 
@@ -74,19 +77,17 @@
 
 \maketitle
 \begin{abstract}
-\noindent 本手册依据 HySim-XJTU-HRPES 平台 C++ 源代码中的最优潮流（OPF）模块
-（\texttt{src/\allowbreak optimal\_power\_flow/}、\texttt{include/\allowbreak hacdcpf/\allowbreak optimal\_power\_flow/}
-与 \texttt{src/\allowbreak power\_models/}、\texttt{include/\allowbreak hacdcpf/\allowbreak power\_models/} 目录）
-整理，覆盖 AC OPF 顶层求解器（后端分发、经济调度兜底、目标同伦、Native AC 简约空间路径）、
-Parity 全空间 NLP 建模（换流器、DC/DC、储能、可切负荷、可再生、柔性负荷、能量路由器全家族）、
-原生原对偶内点法（Mehrotra 预估校正、Gondzio 校正、滤波线搜索、惯性控制）、
-DC OPF（QP/LP 链与 LMP）、无功优化（OLTC 离散档位与可投切并联的 MINLP 搜索）、
-三相混合 OPF（相域直角坐标、GFL/GFM 换流器、图降阶变体），
-以及基于 MIPSolvers AML 的求解器无关建模层（AC/混合/DC OPF、LinDistFlow、SCUC builder）、
-OPF 在平台中的下游应用（时序、可靠性、EV-交通、市场边界）与 GUI/HTTP 接入，
-并给出全部选项字段的默认值、结果与诊断数据结构、以及测试验证体系。
-文档风格与本平台《潮流计算技术手册》一致，全部公式逐条注明源码出处（文件:行号），
-近似、未接线、覆盖薄弱处均如实标注。
+\noindent 本手册依据 HySim-XJTU-HRPES 平台 C++ 源代码中的最优潮流模块
+（\texttt{src/\allowbreak optimal\_\allowbreak power\_\allowbreak flow/}、
+\texttt{include/\allowbreak hacdcpf/\allowbreak optimal\_\allowbreak power\_\allowbreak flow/}
+与 \texttt{src/\allowbreak power\_\allowbreak models/}）整理，按三个主类组织：
+\textbf{AC OPF}（Native IPM 紧致路径）、\textbf{DC OPF}（无损线性化 LP/QP）、
+\textbf{交直流混合 OPF}（Parity 全空间建模层 + Parity IPM / 嵌入式 Ipopt 求解核，
+承载含 DC/VSC/LCC 的算例）；另含三个专项——含 OLTC 离散档位的无功优化（RPO）、
+三相混合 OPF（相域），以及基于 MIPSolvers AML 的求解器无关建模层
+（acopf / acdcopf / dc\_opf / lindistflow / scuc builder）。每个求解器给出功能定位、
+完整数学模型（目标函数与约束逐条注明源码出处）、算法流程、全部选项与结果字段的
+单位制和默认值、验证与校核依据及已知局限。文档风格与《元件模型技术手册》一致。
 \end{abstract}
 
 \tableofcontents
@@ -95,172 +96,80 @@ OPF 在平台中的下游应用（时序、可靠性、EV-交通、市场边界�
 \section{阅读指南与约定}
 
 \subsection{数据来源}
-本手册全部内容取自以下源代码与文档，公式与参数均以代码为准：
+本手册全部模型、算法与参数取自以下源代码文件，参数表覆盖每个公开结构体的
+\textbf{全部对外字段}：
 \begin{itemize}
-  \item \texttt{src/optimal\_power\_flow/} —— 6 个实现文件：\texttt{ac\_opf.cpp}（顶层路由、
-        Native AC 简约空间 IPM、Ipopt 适配、经济调度兜底、目标同伦）、
-        \texttt{parity\_formulation.cpp}（全空间 NLP 装配与解析导数）、
-        \texttt{parity\_ipm.cpp}（原生原对偶 IPM）、\texttt{dc\_opf.cpp}（QP/LP 链）、
-        \texttt{reactive\_power\_opt.cpp}（RPO）、\texttt{three\_phase\_hybrid\_opf.cpp}（三相混合 OPF）；
-  \item \texttt{include/hacdcpf/optimal\_power\_flow/} —— 10 个头文件（求解器接口、选项、
-        结果、formulation、IPM 规范头）；
+  \item \texttt{src/optimal\_power\_flow/} 与
+        \texttt{include/hacdcpf/optimal\_power\_flow/} —— OPF 求解器本体
+        （AC/DC/RPO/三相混合）；
   \item \texttt{src/power\_models/} 与 \texttt{include/hacdcpf/power\_models/} ——
-        AML 求解器无关建模层（acopf/acdcopf/dc\_opf/lindistflow/scuc builder）；
-  \item \texttt{MIPSolvers/include/mipsolvers/aml/} —— AML 建模原语（Model/变量/约束/表达式/
-        求解结果），经 \texttt{include/hacdcpf/aml/aml.hpp} 转发；
-  \item \texttt{src/api/hacdcpf.cpp} —— 公共 API 门面（求解分发、结果回投影、独立审计）；
-  \item \srcpath{docs/technical\_notebook/sections/04\_opf.tex}、\srcpath{06\_power\_models.tex}、
-        \srcpath{11c\_native\_ipm\_vs\_parity\_ipm.tex}、
-        \srcpath{docs/reactive\_power\_optimization\_validation.md}、
-        \srcpath{docs/large\_hybrid\_ipm\_diagnostics.md} —— 既有技术笔记，本手册与之交叉核对；
-  \item \texttt{tests/} 与 \texttt{external\_data/} —— 验证与校核章节的测试矩阵与算例来源。
+        基于兄弟仓库 \texttt{MIPSolvers} AML 的求解器无关建模层；
+  \item \texttt{tests/} 下 OPF 相关测试与 \texttt{docs/} 下 OPF 相关设计/验证文档
+        —— 验证与校核一章的对照依据。
 \end{itemize}
-文中所有“\texttt{文件:行号}”引用基于当前代码检出处，代码演进后行号可能漂移，
-但函数名与文件路径保持稳定。
 
 \subsection{单位制约定}
-平台统一采用 MW·kV·MVA 单位制配合标幺值：系统基准功率
+与《元件模型技术手册》一致：平台统一采用 MW·kV·MVA 单位制配合标幺值，系统基准功率
 $S_{\mathrm{base}}=100$~MVA（\texttt{Defaults::kBaseMva}），基准频率 50~Hz。
-OPF 方程内部一律以标幺值求解；成本系数以 \$/(${MW}^2$h)、\$/(MWh)、\$/h 录入，
-在 pu 域换算为 $a_2=c_2S_b^2$、$a_1=c_1S_b$、$a_0=c_0$。对外结果中功率以 MW/Mvar、
-电压幅值以 pu、LMP 以 \$/MWh 给出；相角在结果结构体中以\textbf{弧度}存储
-（\fld{ACOPFResult::va}/\fld{DCOPFResult::va}），展示层才换算为度（$^\circ$），
-详见第~\ref{sec:options}~章总约定。
-ZIP 负荷权重三元组顺序为（恒功率、恒电流、恒阻抗）。
+OPF 内部方程一律以标幺值组装；目标函数中的成本项按有名值（MW、MVAr）计价后求和，
+量纲在相应章节注明。布尔量、枚举量、计数型整数及 ID 引用等无量纲参数，单位列填
+“—”；成本/价格类参数的币种在代码中未固定，单位列填“—”。
 
-\subsection{编号与符号约定}
-\begin{itemize}
-  \item \textbf{失配约定}：与潮流一致，$\mathrm{mismatch}=F^{\mathrm{spec}}-F^{\mathrm{calc}}$；
-        IPM 等式残差 $g(x)=0$、不等式 $h(x)\le 0$。
-  \item \textbf{注入约定}：节点注入以\textbf{发电为正、负荷为负}；换流器端口注入为正时
-        满足 $P_{ac}+P_{dc}+P_{loss}=0$。
-  \item \textbf{三类 ID 纪律}：组件 \texttt{.index}（对外稳定）、向量下标（内部 0-based）、
-        图节点索引（临时）不混用；结果回投影一律经映射回到稳定 ID。
-  \item \textbf{AC/DC 域隔离}：AC 与 DC 母线编号空间独立，跨域传递一律走
-        domain-qualified 映射（\fld{ac\_bus\_id\_to\_node\_idx} /
-        \fld{dc\_bus\_id\_to\_node\_idx}）。
-\end{itemize}
+\subsection{求解器家族与选择逻辑}
+平台 OPF 按建模口径分为三个主类与三个专项：
+\begin{enumerate}
+  \item \textbf{AC OPF}（纯交流，第\ref{sec:acopfnative}章）：Native IPM 紧致变量
+        路径（极坐标 $V/\theta$，障碍--罚混合原生内点循环），入口
+        \srcpath{opf::solve\_ac\_opf}；
+  \item \textbf{DC OPF}（第\ref{sec:dcopf}章）：无损线性化 LP/QP（纯交流口径，
+        不建直流电网，遇 LCC 直接拒绝），入口 \srcpath{opf::solve\_dc\_opf}；
+  \item \textbf{交直流混合 OPF}（第\ref{sec:parityform}--\ref{sec:parityipm}章）：
+        Parity 全空间建模层（显式直流电压块、VSC 三端口耦合、DC/DC、LCC 准稳态、
+        能量路由器）+ Parity IPM 或嵌入式 Ipopt 求解核；统一入口
+        \srcpath{opf::solve\_ac\_opf} 在 Auto 后端下检测到任何 DC/VSC/LCC 组件时
+        一律分派到此路径，显式选择不兼容后端则拒绝而非静默丢弃直流网络；
+  \item \textbf{专项}：含 OLTC 离散档位的无功优化 RPO（第\ref{sec:rpo}章）、
+        相域三相混合 OPF（第\ref{sec:threephase}章，活跃研发）、基于
+        MIPSolvers AML 的求解器无关建模层（第\ref{sec:powermodels}章，
+        供外部后端与交叉验证）。
+\end{enumerate}
+运行时可用后端由 \srcpath{include/hacdcpf/api/solver\_capabilities.hpp} 查询；
+嵌入式 Ipopt 仅在编译期开启 CMake 选项 \srcpath{HACDCPF\_ENABLE\_IPOPT}
+（仅 macOS 默认 ON，映射为编译宏 \srcpath{HACDCPF\_HAVE\_IPOPT}）时可用。
 
-\subsection{求解器家族总览}
-\begin{center}
-\footnotesize
-\begin{tabular}{@{}llll@{}}
-\toprule
-求解器 & 入口函数 & 适用网络 & 定位\\
-\midrule
-AC OPF（顶层） & \srcpath{opf::solve\_ac\_opf} & 混合 AC/DC & \textbf{生产主路径}（后端分发）\\
-Parity 全空间 NLP & \srcpath{parity::build\_problem} & 混合 AC/DC & 唯一同时优化 AC/DC/VSC/DCDC 的路径\\
-原生原对偶 IPM & \srcpath{parity::solve\_primal\_dual\_ipm} & 混合 AC/DC & Parity 默认内层求解器\\
-嵌入式 Ipopt & \srcpath{solve\_parity\_with\_ipopt} & 混合 AC/DC & 兜底/对照后端\\
-Native AC 简约空间 & （\srcpath{OPFSolverPath::NativeAC}） & AC+部分 DC & 旧路径，罚函数处理限值\\
-经济调度+PF & \srcpath{solve\_economic\_dispatch} & 纯 AC & 快速兜底（merit-order $\lambda$ 二分）\\
-DC OPF & \srcpath{opf::solve\_dc\_opf} & 纯 AC 线性化 & QP/LP 链 + LMP\\
-RPO 无功优化 & \srcpath{opf::solve\_rpo} & 混合 AC/DC & 离散档位/并联搜索 + 内层 AC OPF\\
-三相混合 OPF & \srcpath{solve\_three\_phase\_hybrid\_opf} & 三相 AC+DC & 活跃研发，Ipopt/NativeIPM 双后端\\
-AML builders & \srcpath{power\_models::solve\_*} & 见第~\ref{sec:powermodels}~章 & 求解器无关建模层（非生产链路）\\
-\bottomrule
-\end{tabular}
-\end{center}
+\subsection{诚实结果口径}
+平台铁律：近似、fallback、time-limit、模型覆盖不足必须写进结果的
+\fld{model\_scope}、\fld{ValidityFlags} 或 \fld{model\_\allowbreak limitations} 字段。
+各章“边界与局限”小节如实列出当前实现的已知近似与未覆盖项，不以后续路线图代替
+现状描述。
 
 \subsection{验证通道总览}
-各章末的“验证与校核”小节给出具体对照依据，总体通道如下（详见第~\ref{sec:validation}~章）：
+OPF 模块的验证通道（细节见第\ref{sec:verification}章）：
 \begin{itemize}
-  \item \textbf{手算小算例}：\srcpath{external\_data/opf\_hand\_cases/} 4 个带解析解的
-        DC OPF 案例（merit-order、双母线阻塞、切负荷、二次成本线性化），供 GUI 手工核对；
-  \item \textbf{MATPOWER 算例回归}：case4gs 至 case13659pegase 共 85 个 .m 算例
-        （79 标准 + 4 个 \texttt{contab\_*} + 2 个 \texttt{scenarios\_*}，分档见第~\ref{sec:validation}~章），
-        覆盖 parity IPM 收敛、后端语义、暖启动、目标缩放、大系统稀疏 KKT
-        （\srcpath{tests/test\_opf\_solver\_backends.cpp}）；
-  \item \textbf{三方交叉验证}：AC OPF / DC OPF / PF 调度回放一致性
-        （\srcpath{tests/test\_acopf\_dcopf\_crossval.cpp}），含 LMP 符号与阻塞再调度；
-  \item \textbf{RPO 交叉验证}：独立 OPF 复算 + PF 回放，判据与容差见
-        \srcpath{docs/reactive\_power\_optimization\_validation.md}；
-  \item \textbf{解析导数校核}：\srcpath{check\_ac\_opf\_jacobian\_fd}（有限差分对照，
-        见第~\ref{sec:acopf}~章诚实口径注）、DC slack KCL Jacobian FD（$<10^{-6}$）、
-        三相 OPF Jacobian/Hessian（$<10^{-5}$）；
-  \item \textbf{独立审计}：\srcpath{verify\_opf\_result} 对 OPF 结果重算电压限、机组限与目标值；
-  \item \textbf{GUI 端到端}：\srcpath{tools/gui\_api\_e2e.py}（\texttt{/api/session/opf} 回归）、
-        \srcpath{tools/validate\_case\_capabilities.py}（能力表打点）。
+  \item \textbf{手算解析解算例}：\srcpath{external\_data/opf\_hand\_cases/} 小型
+        AC/DC OPF 手算基准（当前作为 GUI 人工校核材料保存，未接入 ctest，
+        见第\ref{sec:verification}章）；
+  \item \textbf{MATPOWER 算例}：标准算例潮流/OPF 基准对照；
+  \item \textbf{跨求解器交叉验证}：Native IPM、Parity IPM、AML/Ipopt 三路结果互相比对
+        （\srcpath{tests/test\_acopf\_dcopf\_crossval.cpp}、
+        \srcpath{tests/test\_opf\_solver\_backends.cpp}）；
+  \item \textbf{BPA/DSP 算例}：LCC 直流算例的 OPF 对照报告
+        （\srcpath{docs/lcc\_dat\_opf\_report/}）；
+  \item \textbf{专项验证文档}：无功优化验证（\srcpath{docs/reactive\_\allowbreak
+        power\_\allowbreak optimization\_\allowbreak validation.md}）、大规模混合 IPM
+        诊断（\srcpath{docs/large\_\allowbreak hybrid\_\allowbreak ipm\_\allowbreak
+        diagnostics.md}）。
 \end{itemize}
-
-\subsection{现状与诚实口径声明}
-以下事项在各章节均有对应标注，此处集中声明（如实）：
-\begin{enumerate}
-  \item \textbf{DC OPF 支路对偶未认证}：原生单纯形不能正确处理有界 $P_f$ 变量，
-        \fld{branch\_mu\_valid} \textbf{恒为 false}（dc\_opf.cpp:680, 783），
-        \fld{branch\_mu\_lower/upper} 在支路限生效时不可作工程解释，直到实现 KKT 基提取；
-        该事实现附机器可读原因串 \fld{branch\_mu\_validity\_reason}（dc\_opf.cpp:681--682）。
-        注意区分：\fld{lmp\_valid}=true 仅认证\textbf{平衡行对偶}（节点电价能量分量），
-        \textbf{不蕴含}支路拥塞对偶有效（opf\_result.hpp:205--206）。
-  \item \textbf{RPO 无全局最优证书}：\fld{globally\_certified}=false、\fld{gap}=1.0，
-        只保证可行局部最优；\fld{bc\_stats} 仅为兼容信封，非 B\&B 全局 gap 证书；
-        时限/评估上限截断以 \fld{terminated\_by\_time\_limit}/
-        \fld{terminated\_by\_evaluation\_limit} 标志与 \fld{model\_limitations} 条目对外暴露
-        （reactive\_power\_opt.cpp:1296--1315）。
-  \item \textbf{AML power\_models 层不是生产 OPF 链路}：五个 builder 在生产 \texttt{src/}
-        中无调用方，仅被测试使用；其中 AC OPF / DC OPF / LinDistFlow / SCUC 的 AML 版本
-        无直接单元测试；该声明已形式化为各 builder 结果的 \fld{model\_scope}/
-        \fld{model\_limitations} 字段（如 \fld{AMLBuildResult} 默认
-        "experimental-aml-builder:not-production-runtime"，aml\_build\_result.hpp:17--19）。
-        \fld{power\_models::DCOPFResult} 与 \fld{opf::DCOPFResult} 同名不同物。
-  \item \textbf{Native AC 简约空间旧路径}用\textbf{外部二次罚}（非障碍）处理支路热限与
-        VSC 容量圆，换流器不钉 DC\_V 母线电压
-        （\fld{vsc\_vdc\_control\_modelled}=false，ac\_opf.cpp:2723）；
-        该路径结果附加 "legacy 外部障碍/罚循环，生产建议 ParityIPM" 的
-        \fld{model\_limitations} 条目（ac\_opf.cpp:2831--2848）。
-  \item \textbf{储能单时段无 SOC 模型}，parity 路径中钉在 UC 调度值 $\pm10^{-4}$/base
-        （\srcpath{parity\_formulation.cpp:674--717}）；\textbf{能量路由器为无损守恒行} $\sum P_{port}=0$，
-        \fld{loss\_percent} 未接入（:1563--1564）。
-  \item \textbf{AML 混合 OPF 的 DC/DC $I^2R$ 损耗现已建模}：\fld{r\_eq\_pu} 纳入数据转换
-        （acdcopf\_builder.cpp:179），约束为 $P_{in}=P_{out}/\eta + r_{eq}(P_{out}/\eta)^2/V_{dc,in}^2$
-        （:586--591），平衡审计与约束采用同一效率+$I^2R$ 约定（:745--758），
-        修复了审计把正常 $I^2R$ 损耗误报为平衡违规的问题；残余限制为仅正向传输的
-        smooth 模型、不表示双向符号切换（hybrid\_opf\_model\_builder.hpp:83--86）。
-  \item \textbf{Ipopt 适配器不返回约束乘子}，Ipopt 路径下 $\lambda$ 为空、LMP 提取跳过
-        （ac\_opf.cpp:2105--2108）；该事实现已形式化为 \fld{lmp\_valid}=false 及
-        \fld{lmp\_validity\_reason} 原因串（opf\_result.hpp:101--102），Parity IPM
-        路径在等式乘子齐全时置 \fld{lmp\_valid}=true（ac\_opf.cpp:2619--2628）。
-  \item \textbf{DC OPF 的 LP 回退采用 lambda 形式 PWL 凸组合}：仅对 $c_2>10^{-12}$ 且
-        $P^{max}>P^{min}$ 的机组，按 \fld{pwl\_segments}（默认 4，clamp 到 $[1,1000]$，
-        dc\_opf.cpp:166）取等距断点，$\lambda\in[0,1]$ 凸组合插值真实成本、无需 SOS2
-        （:471--491）；无二次项机组保留纯 $c_1$ 线性（:189--203）。
-        \fld{objective\_model} 如实区分 "QP"/"LP-PWL"/"LP"，生效段数记入
-        \fld{pwl\_segments\_effective}（QP 后端恒 0，:1200--1207）。
-  \item \textbf{LinDistFlow builder} 仅建固定负荷：头文件注释与实现一致，明确不建
-        DG/可控源/切负荷变量（lindistflow\_builder.hpp:15--16, 30--31）；热限为
-        $|P|,|Q|\le S_{max}$ 分离盒式近似；结果为电压平方 pu$^2$。
-  \item \textbf{AML SCUC 无网络约束}（无潮流、无 N-1）；MILP 下价格对偶通常不可得，
-        已形式化为 \fld{price\_valid}=false 与 \fld{price\_validity\_reason}
-        （scuc\_builder.hpp:86--92）。
-  \item \texttt{opf\_problem.hpp} 的 \texttt{OPFProblem} 已有消费方
-        \srcpath{opf\_solver\_interface.hpp}（\fld{OPFSolveResult} variant 与
-        \texttt{DefaultOPFSolver} 按域转发到 \srcpath{solve\_ac\_opf}/\srcpath{solve\_dc\_opf}，
-        已纳入公共门面 \srcpath{api/hacdcpf.hpp:12}），被测试消费
-        （test\_hacdcdss.cpp:420）但生产 \texttt{src/} 无调用方；
-        RPO 的 \fld{branching}/\fld{node\_sel}/\fld{int\_tol} 为遗留字段。
-  \item \textbf{雅可比诊断入口未接线}：\srcpath{ac\_opf\_solver.hpp:54} 声明的公开入口
-        \fld{compute\_jacobian\_diagnostics} 在全库\textbf{无实现}（调用会链接错误）；
-        实际的 FD 诊断 \srcpath{check\_ac\_opf\_jacobian\_fd}（ac\_opf.cpp:3826--4024，
-        签名与声明不同）目前无任何调用方，属死代码。
-  \item 环境变量开关众多（\texttt{HACDCPF\_OPF\_KKT\_FORM}/\texttt{\_LINEAR\_SOLVER}/
-        \texttt{\_MU\_STRATEGY}/\texttt{\_FILTER\_ALL} 等，全集见第~\ref{sec:options}~章），
-        inertia gate 默认关，注释明确其效果因算例而异（parity\_ipm.cpp:1244--1259）。
-  \item 三相混合 OPF 属\textbf{活跃研发/论文验证性质}，接口与产物格式仍可能调整；
-        AC 支路热限与 VSC 调制比尚未进入相域模型；该路径不导出约束乘子，
-        GUI 端点固定回显 \fld{lmp\_valid}=false 及原因。
-\end{enumerate}
 
 \newpage
 \input{chapters/overview}
-\input{chapters/ac_opf}
-\input{chapters/parity}
-\input{chapters/ipm}
+\input{chapters/ac_opf_native}
 \input{chapters/dc_opf}
+\input{chapters/parity_formulation}
+\input{chapters/parity_ipm}
 \input{chapters/rpo}
 \input{chapters/three_phase}
 \input{chapters/power_models}
-\input{chapters/options_results}
-\input{chapters/applications}
-\input{chapters/validation}
+\input{chapters/verification}
 
 \end{document}

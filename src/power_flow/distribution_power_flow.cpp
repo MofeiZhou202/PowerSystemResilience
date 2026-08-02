@@ -11,6 +11,7 @@
 
 #include "hacdcpf/analysis/distribution_power_flow.hpp"
 #include "hacdcpf/projection/result_attribution.hpp"
+#include "hacdcpf/model/effective_capacity.hpp"
 
 #include <algorithm>
 #include <array>
@@ -137,22 +138,38 @@ Complex branch_series_current(const ACBranch& branch,
 Complex branch_current_from_bus_into_branch(const ACBranch& branch,
                                             Complex v_from,
                                             Complex v_to) {
-  return branch_series_current(branch, v_from, v_to) /
-         std::conj(branch_complex_tap(branch));
+  const Complex tap = branch_complex_tap(branch);
+  const Complex y_half(0.0, branch.b_pu / 2.0);
+  return branch_series_current(branch, v_from, v_to) / std::conj(tap) +
+         y_half * v_from / std::norm(tap);
 }
 
 Complex branch_current_to_bus_into_branch(const ACBranch& branch,
                                           Complex v_from,
                                           Complex v_to) {
-  return -branch_series_current(branch, v_from, v_to);
+  const Complex y_half(0.0, branch.b_pu / 2.0);
+  return -branch_series_current(branch, v_from, v_to) + y_half * v_to;
 }
 
 Complex branch_subtree_current_seen_from_parent(const ACBranch& branch,
                                                 bool parent_is_from_side,
-                                                Complex child_bus_current) {
+                                                Complex child_bus_current,
+                                                Complex parent_voltage) {
   const Complex tap = branch_complex_tap(branch);
-  return parent_is_from_side ? (child_bus_current / std::conj(tap))
-                             : (std::conj(tap) * child_bus_current);
+  const Complex y_half(0.0, branch.b_pu / 2.0);
+  return parent_is_from_side
+             ? (child_bus_current / std::conj(tap) +
+                y_half * parent_voltage / std::norm(tap))
+             : (std::conj(tap) * child_bus_current + y_half * parent_voltage);
+}
+
+Complex branch_child_shunt_current(const ACBranch& branch,
+                                   bool parent_is_from_side,
+                                   Complex child_voltage) {
+  const Complex tap = branch_complex_tap(branch);
+  const Complex y_half(0.0, branch.b_pu / 2.0);
+  return parent_is_from_side ? y_half * child_voltage
+                             : y_half * child_voltage / std::norm(tap);
 }
 
 Complex branch_child_voltage_from_parent(const ACBranch& branch,
@@ -204,24 +221,20 @@ compute_net_injection(const ACSystem& ac_sys,
   const auto& buses = ac_sys.buses;
   std::vector<std::complex<double>> S_net(n, {0.0, 0.0});
 
-  // Load demand: use Load table if available, else bus-level pd/qd.
-  if (!ac_sys.loads.empty()) {
-    for (const auto& ld : ac_sys.loads) {
-      if (!ld.in_service) continue;
-      auto it = id_map.find(ld.bus);
-      if (it == id_map.end()) continue;
-      const int idx = it->second;
-      // At initial/current iteration, use constant-power part.
-      // ZIP model: S = S0 * (Pp + Ip*V + Zp*V^2), but BFS updates V each iter.
-      // For BFS net injection we use S0 directly (constant-power approximation).
-      S_net[idx] += std::complex<double>(ld.p_mw / base_mva, ld.q_mvar / base_mva);
-    }
-  } else {
-    // Fallback: bus-level demand.
-    for (int i = 0; i < n; ++i) {
-      if (!buses[i].in_service) continue;
-      S_net[i] = std::complex<double>(buses[i].pd_mw / base_mva, buses[i].qd_mvar / base_mva);
-    }
+  // Bus-level and component loads are additive, matching SolverData assembly.
+  for (int i = 0; i < n; ++i) {
+    if (!buses[i].in_service) continue;
+    S_net[i] += std::complex<double>(buses[i].pd_mw / base_mva,
+                                     buses[i].qd_mvar / base_mva);
+  }
+  for (const auto& ld : ac_sys.loads) {
+    if (!ld.in_service) continue;
+    auto it = id_map.find(ld.bus);
+    if (it == id_map.end()) continue;
+    const int idx = it->second;
+    const double scaling = model::sanitize_scaling(ld.scaling);
+    S_net[idx] += std::complex<double>(ld.p_mw * scaling / base_mva,
+                                       ld.q_mvar * scaling / base_mva);
   }
 
   // Charging station load (kW → MW).
@@ -273,8 +286,9 @@ compute_net_injection(const ACSystem& ac_sys,
     if (it == id_map.end()) continue;
     const int idx = it->second;
     if (idx == root) continue;
-    S_net[idx] -= std::complex<double>(sg.p_mw * sg.scaling / base_mva,
-                                       sg.q_mvar * sg.scaling / base_mva);
+    const double scaling = model::sanitize_scaling(sg.scaling);
+    S_net[idx] -= std::complex<double>(sg.p_mw * scaling / base_mva,
+                                       sg.q_mvar * scaling / base_mva);
   }
 
   // Subtract generation: renewable generators.
@@ -311,6 +325,62 @@ compute_net_injection(const ACSystem& ac_sys,
   return S_net;
 }
 
+double zip_multiplier(double vm,
+                      double z_percent,
+                      double i_percent,
+                      double p_percent) {
+  return (z_percent * vm * vm + i_percent * vm + p_percent) / 100.0;
+}
+
+Complex voltage_dependent_net_demand(
+    const ACSystem& ac_sys,
+    const std::unordered_map<int, int>& id_map,
+    const std::vector<Complex>& flat_voltage_net_demand,
+    int bus_index,
+    Complex voltage,
+    double base_mva,
+    bool include_shunts) {
+  Complex demand = flat_voltage_net_demand[static_cast<size_t>(bus_index)];
+  const double vm = std::abs(voltage);
+
+  for (const auto& load : ac_sys.loads) {
+    if (!load.in_service) continue;
+    const auto bus_it = id_map.find(load.bus);
+    if (bus_it == id_map.end() || bus_it->second != bus_index) continue;
+    const double scaling = model::sanitize_scaling(load.scaling);
+    const double p_base = load.p_mw * scaling / base_mva;
+    const double q_base = load.q_mvar * scaling / base_mva;
+    demand.real(demand.real() +
+                p_base * (zip_multiplier(vm,
+                                         load.z_percent_p,
+                                         load.i_percent_p,
+                                         load.p_percent_p) - 1.0));
+    demand.imag(demand.imag() +
+                q_base * (zip_multiplier(vm,
+                                         load.z_percent_q,
+                                         load.i_percent_q,
+                                         load.p_percent_q) - 1.0));
+  }
+
+  if (include_shunts) {
+    const double vm2_delta = std::norm(voltage) - 1.0;
+    const auto& bus = ac_sys.buses[static_cast<size_t>(bus_index)];
+    demand += Complex(bus.gs_mw / base_mva, -bus.bs_mvar / base_mva) *
+              vm2_delta;
+    for (const auto& shunt : ac_sys.shunts) {
+      if (!shunt.in_service) continue;
+      const auto bus_it = id_map.find(shunt.bus);
+      if (bus_it == id_map.end() || bus_it->second != bus_index) continue;
+      double bs = shunt.bs_mvar;
+      if (shunt.switchable && shunt.n_steps > 0) {
+        bs = shunt.bs_per_step * shunt.current_step;
+      }
+      demand += Complex(shunt.gs_mw / base_mva, -bs / base_mva) * vm2_delta;
+    }
+  }
+  return demand;
+}
+
 // -------------------------------------------------------------------------
 // Run the BFS inner loop (backward-forward sweep).
 // Returns max|ΔV| residual and updates V in place.
@@ -324,6 +394,9 @@ struct BFSInnerResult {
 BFSInnerResult run_bfs_sweep(const std::vector<ACBranch>& branches,
                              const BFSTree& tree,
                              const std::vector<std::complex<double>>& S_net,
+                             const ACSystem& ac_sys,
+                             const std::unordered_map<int, int>& id_map,
+                             double base_mva,
                              std::vector<std::complex<double>>& V,
                              int root, int n, int m,
                              const DPFOptions& opt) {
@@ -337,10 +410,15 @@ BFSInnerResult run_bfs_sweep(const std::vector<ACBranch>& branches,
       int j = tree.order[k];
       int b = tree.parent_branch[j];
       Complex Vj = V[j];
-      if (std::abs(Vj) > 1e-12)
-        I_branch[b] = std::conj(S_net[j] / Vj);
-      else
+      if (std::abs(Vj) > 1e-12) {
+        const Complex demand = voltage_dependent_net_demand(
+            ac_sys, id_map, S_net, j, Vj, base_mva, opt.include_shunts);
+        I_branch[b] = std::conj(demand / Vj) +
+                      branch_child_shunt_current(
+                          branches[b], tree.parent_is_from_side[j], Vj);
+      } else {
         I_branch[b] = {0.0, 0.0};
+      }
     }
     // Accumulate child currents into parent branch (reverse BFS order).
     for (int k = static_cast<int>(tree.order.size()) - 1; k >= 1; --k) {
@@ -350,7 +428,7 @@ BFSInnerResult run_bfs_sweep(const std::vector<ACBranch>& branches,
       if (i != root) {
         int bi = tree.parent_branch[i];
         I_branch[bi] += branch_subtree_current_seen_from_parent(
-            branches[bj], tree.parent_is_from_side[j], I_branch[bj]);
+            branches[bj], tree.parent_is_from_side[j], I_branch[bj], V[i]);
       }
     }
 
@@ -422,6 +500,24 @@ SinglePhaseSolveSnapshot solve_distribution_pf_ac_snapshot(
   }
 
   const BFSTree tree = build_bfs_tree(buses, branches, id_map, root);
+  int in_service_edges = 0;
+  for (const auto& branch : branches) {
+    if (branch.in_service && id_map.count(branch.from_bus) != 0 &&
+        id_map.count(branch.to_bus) != 0) {
+      ++in_service_edges;
+    }
+  }
+  if (static_cast<int>(tree.order.size()) != n || in_service_edges != n - 1) {
+    result.residual = std::numeric_limits<double>::infinity();
+    result.control_converged = false;
+    result.specialized_path_fail_close_reason =
+        static_cast<int>(tree.order.size()) != n
+            ? "bfs_requires_one_connected_component"
+            : "bfs_requires_radial_topology";
+    return {std::move(result),
+            std::vector<Complex>(static_cast<size_t>(n), Complex(0.0, 0.0)),
+            id_map};
+  }
 
   std::vector<std::complex<double>> S_net =
       compute_net_injection(ac_sys, id_map, root, n, base_mva, opt.include_shunts);
@@ -434,12 +530,14 @@ SinglePhaseSolveSnapshot solve_distribution_pf_ac_snapshot(
 
   BFSInnerResult bfs_result;
   if (!opt.enforce_q_limits) {
-    bfs_result = run_bfs_sweep(branches, tree, S_net, V, root, n, m, opt);
+    bfs_result = run_bfs_sweep(
+        branches, tree, S_net, ac_sys, id_map, base_mva, V, root, n, m, opt);
   } else {
     std::vector<bool> gen_q_clamped(ac_sys.generators.size(), false);
 
     for (int outer = 0; outer < opt.q_limit_max_outer_iter; ++outer) {
-      bfs_result = run_bfs_sweep(branches, tree, S_net, V, root, n, m, opt);
+      bfs_result = run_bfs_sweep(
+          branches, tree, S_net, ac_sys, id_map, base_mva, V, root, n, m, opt);
       if (!bfs_result.converged) {
         break;
       }
@@ -472,7 +570,12 @@ SinglePhaseSolveSnapshot solve_distribution_pf_ac_snapshot(
           q_bus_calc += S.imag();
         }
 
-        double q_demand = S_net[idx].imag() * base_mva + g.qg_mvar;
+        const double q_demand =
+            voltage_dependent_net_demand(ac_sys, id_map, S_net, idx, Vbus,
+                                         base_mva, opt.include_shunts)
+                .imag() *
+                base_mva +
+            g.qg_mvar;
         double q_gen_required = (q_bus_calc * base_mva) + q_demand;
 
         if (q_gen_required > g.qmax_mvar) {
@@ -1658,8 +1761,59 @@ ThreePhaseDPFResult solve_three_phase_distribution_pf(
   if (root < 0)
     throw std::runtime_error("solve_three_phase_distribution_pf: no SLACK bus found");
 
+  const auto is_full_three_phase = [](PhaseMask mask) {
+    return mask.bits == PhaseMask::abc().bits;
+  };
+  const bool unsupported_bus_mask = std::any_of(
+      buses.begin(), buses.end(), [&](const ThreePhaseACBus& bus) {
+        return bus.in_service && !is_full_three_phase(bus.phase_mask);
+      });
+  const bool unsupported_line_model = std::any_of(
+      lines.begin(), lines.end(), [&](const ThreePhaseACLine& line) {
+        return line.in_service &&
+               (!is_full_three_phase(line.phase_mask) || line.use_phase_matrix);
+      });
+  const bool unsupported_load_mask = std::any_of(
+      sys.loads.begin(), sys.loads.end(), [&](const ThreePhaseLoad& load) {
+        return load.in_service && !is_full_three_phase(load.phase_mask);
+      });
+  if (unsupported_bus_mask || unsupported_line_model || unsupported_load_mask) {
+    result.residual = std::numeric_limits<double>::infinity();
+    result.control_converged = false;
+    result.primary_solver = "bfs";
+    result.solver_used = "bfs";
+    result.primary_solver_failed_reason = unsupported_line_model &&
+                                                  std::any_of(
+                                                      lines.begin(), lines.end(),
+                                                      [](const ThreePhaseACLine& line) {
+                                                        return line.in_service &&
+                                                               line.use_phase_matrix;
+                                                      })
+                                              ? "bfs_does_not_support_explicit_phase_matrices_use_three_phase_nr"
+                                              : "bfs_requires_full_abc_phase_masks_use_three_phase_nr";
+    return result;
+  }
+
   // Build BFS tree
   const auto tree = build_tp_bfs_tree(buses, lines, id_map, root);
+  int in_service_edges = 0;
+  for (const auto& line : lines) {
+    if (line.in_service && id_map.count(line.from_bus) != 0 &&
+        id_map.count(line.to_bus) != 0) {
+      ++in_service_edges;
+    }
+  }
+  if (static_cast<int>(tree.order.size()) != n || in_service_edges != n - 1) {
+    result.residual = std::numeric_limits<double>::infinity();
+    result.control_converged = false;
+    result.primary_solver = "bfs";
+    result.solver_used = "bfs";
+    result.primary_solver_failed_reason =
+        static_cast<int>(tree.order.size()) != n
+            ? "bfs_requires_one_connected_component"
+            : "bfs_requires_radial_topology";
+    return result;
+  }
 
   // Compute per-phase net injection
   auto S_net = compute_tp_net_injection(sys, id_map, root, n, base_mva, opt.include_shunts);
@@ -2030,6 +2184,25 @@ std::vector<std::string> load_dss_commands_with_continuations(
       uncommented.append(raw_line.substr(pos, start - pos));
       in_block_comment = true;
       pos = start + 2;
+    }
+
+    char quote = '\0';
+    for (std::size_t idx = 0; idx < uncommented.size(); ++idx) {
+      const char ch = uncommented[idx];
+      if (quote != '\0') {
+        if (ch == quote) quote = '\0';
+        continue;
+      }
+      if (ch == '\'' || ch == '"') {
+        quote = ch;
+        continue;
+      }
+      if (ch == '!' ||
+          (ch == '/' && idx + 1 < uncommented.size() &&
+           uncommented[idx + 1] == '/')) {
+        uncommented.resize(idx);
+        break;
+      }
     }
 
     const std::string trimmed = trim_local(uncommented);
@@ -2506,7 +2679,7 @@ ParsedDSSBusTerminal parse_dss_bus_terminal(
     } catch (const std::exception&) {
     }
   }
-  if (parsed.nodes.empty()) {
+  if (parsed.nodes.empty() && default_phase_count > 0) {
     for (int phase = 1; phase <= std::clamp(default_phase_count, 1, 3); ++phase) {
       parsed.nodes.push_back(phase);
     }
@@ -2674,7 +2847,10 @@ double bus_base_kv_from_dss(double kv_base_ln, PhaseMask mask) {
 }
 
 double bus_base_impedance_ohm(const ThreePhaseACBus& bus, double base_mva) {
-  if (bus.base_kv <= 0.0 || base_mva <= 0.0) return 1.0;
+  if (bus.base_kv <= 0.0 || base_mva <= 0.0) {
+    throw std::runtime_error(
+        "OpenDSS import requires a positive voltage and power base");
+  }
   const double base_kv_ll =
       bus.phase_mask.count() == 3 ? bus.base_kv : bus.base_kv * std::sqrt(3.0);
   return (base_kv_ll * base_kv_ll) / base_mva;
@@ -2830,6 +3006,10 @@ double transformer_series_r_pu(
     const ThreePhaseTransformer& transformer,
     double base_mva) {
   if (transformer.sn_mva <= 0.0) return 0.0;
+  if (transformer.use_signed_series_impedance) {
+    return (transformer.signed_series_r_percent / 100.0) *
+           (base_mva / transformer.sn_mva);
+  }
   return (transformer.vkr_percent / 100.0) * (base_mva / transformer.sn_mva);
 }
 
@@ -2837,6 +3017,10 @@ double transformer_series_x_pu(
     const ThreePhaseTransformer& transformer,
     double base_mva) {
   if (transformer.sn_mva <= 0.0) return 0.0;
+  if (transformer.use_signed_series_impedance) {
+    return (transformer.signed_series_x_percent / 100.0) *
+           (base_mva / transformer.sn_mva);
+  }
   const double z_mag =
       (transformer.vk_percent / 100.0) * (base_mva / transformer.sn_mva);
   const double r_pu = transformer_series_r_pu(transformer, base_mva);
@@ -3110,6 +3294,16 @@ OpenDSSYMatrixSolveResult solve_opendss_ymatrix(
   if (node_order.empty()) {
     throw std::runtime_error("solve_opendss_ymatrix: empty YNodeOrder");
   }
+  std::vector<double> node_base_volts(node_order.size(), 1.0);
+  for (std::size_t idx = 0; idx < node_order.size(); ++idx) {
+    const ParsedDSSBusTerminal terminal =
+        parse_dss_bus_terminal(node_order[idx]);
+    ctx_Circuit_SetActiveBus(api.get(), terminal.bus_name.c_str());
+    api.check("ctx_Circuit_SetActiveBus");
+    const double kv_base = dss_get_double_value(
+        api, ctx_Bus_Get_kVBase, "ctx_Bus_Get_kVBase");
+    node_base_volts[idx] = std::max(1.0, kv_base * 1000.0);
+  }
 
   auto build_sparse_y_matrix = [&]() {
     uint32_t n_bus = 0;
@@ -3282,7 +3476,9 @@ OpenDSSYMatrixSolveResult solve_opendss_ymatrix(
     double max_change = 0.0;
     for (std::size_t idx = 0; idx < node_order.size(); ++idx) {
       const double vmag = std::abs(node_voltage(static_cast<int>(idx)));
-      max_change = std::max(max_change, std::abs(vmag - last_vmag[idx]));
+      max_change = std::max(
+          max_change,
+          std::abs(vmag - last_vmag[idx]) / node_base_volts[idx]);
       last_vmag[idx] = vmag;
     }
 
@@ -3295,7 +3491,9 @@ OpenDSSYMatrixSolveResult solve_opendss_ymatrix(
   }
 
   for (std::size_t idx = 0; idx < node_order.size(); ++idx) {
-    const ParsedDSSBusTerminal node = parse_dss_bus_terminal(node_order[idx], 1);
+    // YNodeOrder can contain explicit neutral nodes (for example bus.4).
+    // Disable phase fallback so a neutral cannot overwrite phase A.
+    const ParsedDSSBusTerminal node = parse_dss_bus_terminal(node_order[idx], 0);
     if (node.nodes.empty()) continue;
     const int phase = node.nodes.front();
     if (phase < 1 || phase > 3) continue;
@@ -3490,6 +3688,7 @@ ThreePhaseACSystem load_three_phase_system_from_opendss(
 #ifdef HACDCPF_HAVE_OPENDSS
   LocalDSSContext api;
   compile_master_dss(api, master_dss);
+  dss_run_command(api, "CalcVoltageBases");
   ctx_Solution_Solve(api.get());
   api.check("ctx_Solution_Solve");
   sys.base_freq_hz = dss_get_double_value(
@@ -3556,6 +3755,43 @@ ThreePhaseACSystem load_three_phase_system_from_opendss(
     }
     return sys.buses[static_cast<std::size_t>(it->second - 1)];
   };
+
+  auto reject_enabled_unsupported_class =
+      [&](auto first, auto next, auto get_name,
+          const std::string& api_class, const std::string& element_class) {
+        const std::string iteration_call =
+            "ctx_" + api_class + "_Get_First/Next";
+        const std::string name_call = "ctx_" + api_class + "_Get_Name";
+        for (int present = first(api.get()); present != 0;
+             present = next(api.get())) {
+          api.check(iteration_call.c_str());
+          const std::string name = lowercase_ascii_copy(
+              dss_get_string_value(api, get_name, name_call.c_str()));
+          ctx_Circuit_SetActiveElement(
+              api.get(), (element_class + "." + name).c_str());
+          api.check("ctx_Circuit_SetActiveElement");
+          if (ctx_CktElement_Get_Enabled(api.get()) != 0) {
+            api.check("ctx_CktElement_Get_Enabled");
+            throw std::runtime_error(
+                "load_three_phase_system_from_opendss: enabled " +
+                element_class + "." + name +
+                " is not represented by the native three-phase importer");
+          }
+          api.check("ctx_CktElement_Get_Enabled");
+        }
+      };
+  reject_enabled_unsupported_class(
+      ctx_Generators_Get_First, ctx_Generators_Get_Next,
+      ctx_Generators_Get_Name, "Generators", "Generator");
+  reject_enabled_unsupported_class(
+      ctx_PVSystems_Get_First, ctx_PVSystems_Get_Next,
+      ctx_PVSystems_Get_Name, "PVSystems", "PVSystem");
+  reject_enabled_unsupported_class(
+      ctx_Storages_Get_First, ctx_Storages_Get_Next,
+      ctx_Storages_Get_Name, "Storages", "Storage");
+  reject_enabled_unsupported_class(
+      ctx_Reactors_Get_First, ctx_Reactors_Get_Next,
+      ctx_Reactors_Get_Name, "Reactors", "Reactor");
 
   for (int has_line = ctx_Lines_Get_First(api.get());
        has_line != 0;
@@ -3674,6 +3910,12 @@ ThreePhaseACSystem load_three_phase_system_from_opendss(
     const std::vector<std::string> bus_names_local =
         dss_get_string_array(api, ctx_CktElement_Get_BusNames, uint16_t{0});
     if (bus_names_local.empty()) continue;
+    if (bus_names_local.size() != 1) {
+      throw std::runtime_error(
+          "load_three_phase_system_from_opendss: load " + load_name +
+          " has multiple terminals, which the native three-phase load model "
+          "does not represent");
+    }
     const ParsedDSSBusTerminal terminal =
         parse_dss_bus_terminal(bus_names_local.front(), phases);
 
@@ -3690,12 +3932,10 @@ ThreePhaseACSystem load_three_phase_system_from_opendss(
         dss_get_double_value(api, ctx_Loads_Get_Rneut, "ctx_Loads_Get_Rneut");
     const double load_xneut =
         dss_get_double_value(api, ctx_Loads_Get_Xneut, "ctx_Loads_Get_Xneut");
-    const bool explicit_single_terminal_wye = bus_names_local.size() <= 1;
     load.grounded =
         (load.connection == "delta") ||
-        explicit_single_terminal_wye ||
         terminal.has_ground_reference ||
-        !(load_rneut < 0.0 && load_xneut < 0.0);
+        load_rneut >= 0.0;
     load.r_neut_ohm = std::max(
         0.0,
         load_rneut);
@@ -3781,12 +4021,33 @@ ThreePhaseACSystem load_three_phase_system_from_opendss(
     const double q_per_phase_mvar =
         dss_get_double_value(api, ctx_Capacitors_Get_kvar, "ctx_Capacitors_Get_kvar") /
         1000.0 / static_cast<double>(phase_count);
+    const bool is_delta =
+        dss_get_int_value(api, ctx_Capacitors_Get_IsDelta,
+                          "ctx_Capacitors_Get_IsDelta") != 0;
+    if (is_delta) {
+      ThreePhaseLoad capacitor;
+      capacitor.index = static_cast<int>(sys.loads.size()) + 1;
+      capacitor.name = "capacitor." + cap_name;
+      capacitor.bus = bus.index;
+      capacitor.phase_mask = terminal.phase_mask;
+      capacitor.connection = "delta";
+      capacitor.grounded = false;
+      capacitor.const_z_percent = 100.0;
+      capacitor.const_i_percent = 0.0;
+      capacitor.const_p_percent = 0.0;
+      if (terminal.phase_mask.has(0)) capacitor.q_a_mvar = -q_per_phase_mvar;
+      if (terminal.phase_mask.has(1)) capacitor.q_b_mvar = -q_per_phase_mvar;
+      if (terminal.phase_mask.has(2)) capacitor.q_c_mvar = -q_per_phase_mvar;
+      sys.loads.push_back(std::move(capacitor));
+      continue;
+    }
     if (terminal.phase_mask.has(0)) bus.bs_a_mvar += q_per_phase_mvar;
     if (terminal.phase_mask.has(1)) bus.bs_b_mvar += q_per_phase_mvar;
     if (terminal.phase_mask.has(2)) bus.bs_c_mvar += q_per_phase_mvar;
   }
 
   std::unordered_map<std::string, int> transformer_index_by_name;
+  std::set<std::string> three_winding_transformer_names;
   auto get_or_create_internal_bus =
       [&](const std::string& raw_name,
           PhaseMask phase_mask,
@@ -3823,6 +4084,7 @@ ThreePhaseACSystem load_three_phase_system_from_opendss(
           double star_kv,
           double sn_mva,
           bool from_delta,
+          int delta_clock,
           double tap_ratio,
           Complex z_star_pu) {
         ThreePhaseTransformer transformer;
@@ -3830,9 +4092,12 @@ ThreePhaseACSystem load_three_phase_system_from_opendss(
         transformer.name = leg_name;
         transformer.sn_mva = sn_mva;
         transformer.vkr_percent =
-            std::max(1e-6, z_star_pu.real()) * 100.0;
+            z_star_pu.real() * 100.0;
         transformer.vk_percent =
-            std::max(1e-6, std::abs(z_star_pu)) * 100.0;
+            std::abs(z_star_pu) * 100.0;
+        transformer.use_signed_series_impedance = true;
+        transformer.signed_series_r_percent = z_star_pu.real() * 100.0;
+        transformer.signed_series_x_percent = z_star_pu.imag() * 100.0;
         const double effective_from_kv =
             from_kv * ((tap_ratio > 0.0) ? tap_ratio : 1.0);
         if (effective_from_kv >= star_kv) {
@@ -3847,7 +4112,7 @@ ThreePhaseACSystem load_three_phase_system_from_opendss(
               false,
               !from_delta,
               true,
-              from_delta ? 1 : 0);
+              from_delta ? delta_clock : 0);
         } else {
           transformer.hv_bus = star_bus;
           transformer.lv_bus = from_bus;
@@ -3860,7 +4125,7 @@ ThreePhaseACSystem load_three_phase_system_from_opendss(
               from_delta,
               true,
               !from_delta,
-              from_delta ? 1 : 0);
+              from_delta ? delta_clock : 0);
         }
         transformer_index_by_name[transformer.name] = transformer.index;
         sys.transformers.push_back(std::move(transformer));
@@ -3885,6 +4150,7 @@ ThreePhaseACSystem load_three_phase_system_from_opendss(
         ctx_Transformers_Get_NumWindings,
         "ctx_Transformers_Get_NumWindings");
     if (windings == 3) {
+      three_winding_transformer_names.insert(transformer_name);
       const std::vector<std::string> transformer_bus_names =
           dss_get_string_array(api, ctx_CktElement_Get_BusNames, uint16_t{0});
       if (transformer_bus_names.size() < 3) {
@@ -3903,6 +4169,8 @@ ThreePhaseACSystem load_three_phase_system_from_opendss(
       std::array<double, 3> kvas{};
       std::array<double, 3> taps{1.0, 1.0, 1.0};
       std::array<double, 3> r_percent{};
+      const int delta_clock =
+          transformer_clock_from_leadlag(dss_active_property(api, "leadlag"));
       for (int winding = 1; winding <= 3; ++winding) {
         ctx_Transformers_Set_Wdg(api.get(), winding);
         api.check("ctx_Transformers_Set_Wdg");
@@ -3952,6 +4220,7 @@ ThreePhaseACSystem load_three_phase_system_from_opendss(
           kvs[0],
           kvas[0] / 1000.0,
           is_delta[0],
+          delta_clock,
           taps[0],
           z_h);
       add_three_winding_star_leg(
@@ -3962,8 +4231,9 @@ ThreePhaseACSystem load_three_phase_system_from_opendss(
           terminals[1].phase_mask,
           kvs[1],
           kvs[0],
-          kvas[1] / 1000.0,
+          kvas[0] / 1000.0,
           is_delta[1],
+          delta_clock,
           taps[1],
           z_m);
       add_three_winding_star_leg(
@@ -3974,8 +4244,9 @@ ThreePhaseACSystem load_three_phase_system_from_opendss(
           terminals[2].phase_mask,
           kvs[2],
           kvs[0],
-          kvas[2] / 1000.0,
+          kvas[0] / 1000.0,
           is_delta[2],
+          delta_clock,
           taps[2],
           z_l);
       continue;
@@ -4010,12 +4281,10 @@ ThreePhaseACSystem load_three_phase_system_from_opendss(
           (winding == 1) ? hv_terminal.has_ground_reference : lv_terminal.has_ground_reference;
       const double winding_rneut =
           dss_get_double_value(api, ctx_Transformers_Get_Rneut, "ctx_Transformers_Get_Rneut");
-      const double winding_xneut =
-          dss_get_double_value(api, ctx_Transformers_Get_Xneut, "ctx_Transformers_Get_Xneut");
       grounded_wye[static_cast<std::size_t>(winding - 1)] =
           is_delta[static_cast<std::size_t>(winding - 1)] ||
           explicit_ground_reference ||
-          !(winding_rneut < 0.0 && winding_xneut < 0.0);
+          winding_rneut >= 0.0;
       kvs[static_cast<std::size_t>(winding - 1)] =
           dss_get_double_value(api, ctx_Transformers_Get_kV, "ctx_Transformers_Get_kV");
       kvas[static_cast<std::size_t>(winding - 1)] =
@@ -4039,6 +4308,14 @@ ThreePhaseACSystem load_three_phase_system_from_opendss(
         taps[tap_slot] = contract_it->second.tap_pu[tap_slot];
       }
     }
+    for (std::size_t tap_slot = 0; tap_slot < taps.size(); ++tap_slot) {
+      if (!std::isfinite(taps[tap_slot]) || taps[tap_slot] <= 0.0) {
+        throw std::runtime_error(
+            "load_three_phase_system_from_opendss: transformer " +
+            transformer_name + " winding " + std::to_string(tap_slot + 1) +
+            " has non-positive or non-finite tap");
+      }
+    }
 
     ThreePhaseTransformer transformer;
     transformer.index = static_cast<int>(sys.transformers.size()) + 1;
@@ -4047,7 +4324,7 @@ ThreePhaseACSystem load_three_phase_system_from_opendss(
     transformer.lv_bus = bus_id_by_name.at(lv_terminal.bus_name);
     transformer.hv_phase_mask = hv_terminal.phase_mask;
     transformer.lv_phase_mask = lv_terminal.phase_mask;
-    transformer.sn_mva = std::min(kvas[0], kvas[1]) / 1000.0;
+    transformer.sn_mva = kvas[0] / 1000.0;
     transformer.vn_hv_kv = kvs[0];
     transformer.vn_lv_kv = kvs[1];
     transformer.vkr_percent = r_percent[0] + r_percent[1];
@@ -4065,12 +4342,35 @@ ThreePhaseACSystem load_three_phase_system_from_opendss(
         grounded_wye[1],
         clock);
 
-    const bool tap_on_hv = std::abs(taps[0] - 1.0) > std::abs(taps[1] - 1.0);
-    const int tap_side = tap_on_hv ? 0 : 1;
-    const int tap_slot = tap_on_hv ? 0 : 1;
-    transformer.tap_side = tap_side;
+    const bool hv_variable =
+        num_taps[0] > 0 && std::abs(max_taps[0] - min_taps[0]) > 1e-9;
+    const bool lv_variable =
+        num_taps[1] > 0 && std::abs(max_taps[1] - min_taps[1]) > 1e-9;
+    // OpenDSS exposes the default tap grid on both windings even when neither
+    // winding has an independent control.  The native transformer has one
+    // discrete tap state, so retain the other winding's present tap in
+    // fixed_tap_pu.  If both grids are available, select the winding whose
+    // present tap is farther from neutral; ties keep the historical LV-side
+    // convention used by the importer.
+    int tap_slot = -1;
+    if (hv_variable && lv_variable) {
+      tap_slot =
+          (std::abs(taps[0] - 1.0) > std::abs(taps[1] - 1.0)) ? 0 : 1;
+    } else {
+      tap_slot = hv_variable ? 0 : (lv_variable ? 1 : -1);
+    }
+    if (tap_slot < 0) {
+      transformer.tap_side = 0;
+      transformer.fixed_tap_pu = taps[0] / std::max(1e-12, taps[1]);
+    } else if (tap_slot == 0) {
+      transformer.tap_side = 0;
+      transformer.fixed_tap_pu = 1.0 / std::max(1e-12, taps[1]);
+    } else {
+      transformer.tap_side = 1;
+      transformer.fixed_tap_pu = taps[0];
+    }
     const double tap_step =
-        (num_taps[tap_slot] > 0)
+        (tap_slot >= 0 && num_taps[static_cast<size_t>(tap_slot)] > 0)
             ? (max_taps[tap_slot] - min_taps[tap_slot]) /
                   static_cast<double>(num_taps[tap_slot])
             : 0.0;
@@ -4159,6 +4459,8 @@ ThreePhaseACSystem load_three_phase_system_from_opendss(
         source.x2_pu = source.x1_pu;
       }
     }
+    (void)ctx_Bus_ZscRefresh(api.get());
+    api.check("ctx_Bus_ZscRefresh");
     const std::vector<double> zsc1 = dss_get_double_array(api, ctx_Bus_Get_Zsc1);
     const std::vector<double> zsc0 = dss_get_double_array(api, ctx_Bus_Get_Zsc0);
     if (!has_nonzero_impedance(Complex(source.r1_pu, source.x1_pu)) && zsc1.size() >= 2) {
@@ -4211,6 +4513,12 @@ ThreePhaseACSystem load_three_phase_system_from_opendss(
         dss_get_string_value(api, ctx_RegControls_Get_Transformer, "ctx_RegControls_Get_Transformer"));
     const auto xfmr_it = transformer_index_by_name.find(control.transformer_name);
     if (xfmr_it == transformer_index_by_name.end()) {
+      if (three_winding_transformer_names.count(control.transformer_name) != 0) {
+        throw std::runtime_error(
+            "load_three_phase_system_from_opendss: RegControl " + control.name +
+            " targets three-winding transformer " + control.transformer_name +
+            "; dynamic three-winding tap controls are not supported");
+      }
       continue;
     }
     control.transformer_index = xfmr_it->second;

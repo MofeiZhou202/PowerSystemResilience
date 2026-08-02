@@ -34,9 +34,8 @@ struct HelmOptions {
   bool enforce_q_limits{true};
 
   // ── Sparse Ytrans ──────────────────────────────────────────────────────────
-  /// Minimum number of buses above which the series admittance matrix
-  /// (Ytrans) is stored and used as a sparse matrix instead of a dense
-  /// n×n array.  Set to 0 to always use sparse storage.
+  /// Minimum number of buses at which the HELM coefficient system uses sparse
+  /// LU. Smaller systems use dense full-pivot LU. Set to 0 to always use sparse LU.
   int sparse_threshold{200};
 
   // ── Warm start ─────────────────────────────────────────────────────────────
@@ -56,10 +55,11 @@ struct HelmOptions {
   bool allow_multi_slack{true};
 
   /// Optional participation factors for distributed-slack (K-factor) mode.
-  /// When non-empty: exactly one bus must still have BusType::SLACK as the
-  /// voltage-angle reference; the remaining imbalance is distributed among
-  /// PV generators according to these factors (indexed by bus index, 0-based).
-  /// All entries must be ≥ 0.  They are normalised internally.
+  /// When non-empty, the remaining scheduled-power imbalance is distributed
+  /// among PV generators according to these factors (indexed by bus position,
+  /// 0-based). Entries must be finite and non-negative; entries for SLACK and
+  /// PQ buses must be zero because their active injection cannot be prescribed
+  /// by this embedding. Eligible PV factors are normalised internally.
   std::vector<double> participation_factors;
 
   // ── Convergence trace ──────────────────────────────────────────────────────
@@ -77,7 +77,7 @@ struct HelmOptions {
 /// power series at s = 1 via Padé approximants.
 ///
 /// Key properties:
-///  - Flat start (s = 0 trivial solution) requires no initial guess.
+///  - Exact no-load germ at s = 0 supports ideal transformer taps and shifts.
 ///  - Warm-start modes (DCPF / Gauss–Seidel) accelerate convergence detection.
 ///  - Multiple SLACK buses are supported; all receive identity rows in Ymod.
 ///  - Distributed slack via participation factors (K-factor method).

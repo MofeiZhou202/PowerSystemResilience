@@ -1,0 +1,537 @@
+% !TEX program = xelatex
+% 编译方式：xelatex power_flow_math_audit.tex（建议两遍以生成目录）
+% src/power_flow 数学模型工业级审计报告（中文）
+\documentclass[11pt,a4paper,fontset=fandol]{ctexart}
+
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{amsmath,amssymb,bm,mathtools}
+\usepackage{booktabs,longtable,array,tabularx}
+\usepackage[table]{xcolor}
+\usepackage{float}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{caption}
+\usepackage{hyperref}
+
+\definecolor{hyblue}{HTML}{1F4E79}
+\definecolor{hyred}{HTML}{A23B3B}
+\definecolor{hyorange}{HTML}{A66A00}
+\definecolor{hygreen}{HTML}{2F6B4F}
+\definecolor{hygray}{HTML}{666666}
+\definecolor{hylight}{HTML}{EEF3F7}
+\hypersetup{colorlinks=true,linkcolor=hyblue,urlcolor=hyblue}
+\setlist[itemize]{leftmargin=1.7em,itemsep=0.2em}
+\setlist[enumerate]{leftmargin=1.8em,itemsep=0.2em}
+\renewcommand{\arraystretch}{1.22}
+\captionsetup{font=small,labelfont=bf}
+\emergencystretch=3em
+\sloppy
+
+\newcommand{\file}[1]{\texttt{#1}}
+\newcommand{\sevA}{\textcolor{hyred}{\textbf{严重（A）}}}
+\newcommand{\sevB}{\textcolor{hyorange}{\textbf{重要（B）}}}
+\newcommand{\sevC}{\textcolor{hyblue}{\textbf{次要（C）}}}
+\newcommand{\sevD}{\textcolor{hygray}{\textbf{观察（D）}}}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{src/power\_flow 数学模型审计报告}
+\fancyhead[R]{HySim-XJTU-HRPES}
+\fancyfoot[C]{\thepage}
+
+\title{\textbf{交直流混合潮流核心（\texttt{src/power\_flow}）数学模型\\工业级审计报告}\\[0.5em]
+\large 最严苛工业应用视角 \textbar{} 全量逐行审计 \textbar{} 有限差分与端到端数值实证}
+\author{审计执行：AI 代理审计组（18 路并行审计 + 主审逐行复核）}
+\date{2026 年 8 月 2 日}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+本报告对 HySim-XJTU-HRPES 平台潮流计算核心目录 \file{src/power\_flow}（36 个源文件、约 2.19 万行 C++20 代码）的\textbf{数学模型}进行了最严苛视角的工业级审计。审计覆盖：统一 AC/DC 极坐标 Newton--Raphson 主求解器及其雅可比装配、Ybus/SolverData 装配层、FDPF 与线性化 DC 潮流、HELM 全纯嵌入、CPF 连续潮流与同伦、VSC/LCC/DC-DC 换流器模型与协调检查、三相（abc 相域）NR 与配网前推回代（BFS）、OpenDSS 导入与参考求解、孤岛检测与自适应多孤岛求解、分布式松弛、以及 Newton-Krylov/LM/信赖域/非单调线搜索等全局化组件。
+
+审计方法为：18 路并行逐行审计（每路配备解析推导与\textbf{中心有限差分（FD）数值实证}，多数关键发现另以端到端算例复现），其后由主审对全部严重级与关键重要级发现\textbf{逐行重新核对源代码原文}。本报告只收录有代码行号与机理证据坐实的发现。
+
+\textbf{结论：}平台核心 AC 潮流数学骨架（注入公式、Grainger 标准雅可比、MATPOWER 约定 Ybus、DC 电导网络、VSC/LCC 换流器方程、三相网络雅可比）经解析与数值双重验证\textbf{正确}；但审计同时发现 \textbf{9 项严重（A 级）缺陷}（静默产生物理错误结果或核心方程错误）、\textbf{18 项重要（B 级）缺陷}、若干次要（C 级）与观察（D 级）项。A 级缺陷涉及：构网型（GFM）换流器 AC$\leftrightarrow$DC 能量守恒断裂且被报表掩盖、线性化 DC 潮流移相符号错误、三相不动点求解器电源电流符号错误、三相电流基准 $\sqrt{3}$ 因子缺失（污染调压器控制）、未接地星形绕组零序穿越、配网 BFS 孤岛伪解、OpenDSS 导入电压基值缺失致阻抗错两个数量级、OpenDSS 参考解被中性点电压污染、分布式松弛分摊总量口径错误。\textbf{在上述 A 级缺陷修复并补充回归测试之前，不建议将涉及相应模型路径的算例结果用于工业生产决策。}
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{审计范围、方法与定级标准}
+
+\subsection{范围}
+
+审计对象为 \file{src/power\_flow} 全部 36 个 \file{.cpp} 文件（约 21\,926 行）及其直接头文件契约（\file{include/hacdcpf/power\_flow/}、\file{include/hacdcpf/assembly/}）。装配层（\file{solver\_data.cpp}、\file{admittance\_builder.cpp} 等）与换流器模型按"数学模型实现地"一并纳入。OPF、短路、谐波等其他模块不在本次范围内。
+
+\subsection{方法}
+
+\begin{enumerate}
+  \item \textbf{逐行通读}：每个文件由独立审计通道全行通读（大文件分段双人），禁止抽样跳读。
+  \item \textbf{解析推导}：功率方程、雅可比各子块、变压器 $\pi$ 等值、换流器外特性等与教科书标准形式（Grainger \& Stevenson、Arrillaga《HVDC》、Stott--Alsa\c{c} FDPF、Trias HELM、Baran--Wu DistFlow、Fortescue 对称分量）逐式比对。
+  \item \textbf{数值实证}：对关键公式编写中心有限差分（FD）探针（$h=10^{-6}$）直接链接仓库已构建的 \file{libhacdcpf.a} 比对解析雅可比；对端到端缺陷构造最小复现算例实际求解。全部探针位于 \file{/tmp}，\textbf{未修改仓库任何文件}。
+  \item \textbf{主审复核}：主审对全部 A 级与关键 B 级发现按行号重新阅读源代码原文，确认摘录、机理与定级无误后方予收录。凡仅凭单通道证据且机理待设计者确认的，明确标注"待核实"。
+  \item \textbf{回归基线}：\file{test\_matpower\_cases}（87 用例）、\file{test\_converter\_coordination}（47 用例）、三相系列测试等现有测试在审计时全部通过——本报告第~\ref{sec:rootcause}~节解释了为何既有测试未能暴露这些缺陷。
+\end{enumerate}
+
+\subsection{缺陷定级标准}
+
+\begin{center}
+\begin{tabular}{@{}llp{9.5cm}@{}}
+\toprule
+\textbf{级别} & \textbf{标记} & \textbf{定义}\\
+\midrule
+严重 & \sevA{} & 导致求解结果物理错误且无告警/被掩盖，或核心求解器方程错误。\\
+重要 & \sevB{} & 确证的实现错误但影响有界（收敛性受损、非默认路径、特定配置触发），或功能/声明与实现系统性不符。\\
+次要 & \sevC{} & 边缘情形、口径/文档不一致、健壮性瑕疵。\\
+观察 & \sevD{} & 非数学错误，但应记录备查（工程取舍、潜在风险）。\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{严重缺陷（A 级）——必须严肃处理}
+\label{sec:severe}
+
+% ---------- A1 ----------
+\subsection{A1　构网型（AC\_GRID\_FORMING）换流器能量管道断裂：AC$\leftrightarrow$DC 能量不守恒且被报表掩盖}
+\label{sec:a1}
+
+\begin{itemize}
+  \item \textbf{位置}：\file{src/power\_flow/jacobian\_builder.cpp:149--171}（核心行 \file{:161}）；根因 \file{src/power\_flow/jacobian\_pattern.cpp:309--311} 与 \file{src/power\_flow/solver\_data.cpp:252--259}；掩盖层 \file{src/api/hacdcpf.cpp:1027--1053}。
+  \item \textbf{复核状态}：主审已逐行复核全部四处代码，机理成立；另经三路独立 FD/端到端探针实证（含复现仓库自身测试算例 \file{tests/test\_converter\_coordination.cpp:1722}）。
+\end{itemize}
+
+\textbf{机理。}GFM 换流器的 AC 母线被 \file{apply\_acpv\_voltage\_control} 提升为 SLACK（\file{solver\_data.cpp:254--255}）。雅可比稀疏模式仅在母线具有 P 或 Q 方程行时才把其 Ybus 行收入 \file{ac\_entries}（\file{jacobian\_pattern.cpp:309--311}），SLACK 行被整体剔除；AC 内核只遍历 \file{ac\_entries} 累加注入（\file{ac\_kernel.cpp:41--53}），故 $\texttt{pcalc}[\text{slack}] \equiv 0$。而能量管道按注释声明的设计意图计算
+\begin{equation}
+P_{ac} = \texttt{pcalc}[ac] - \texttt{p\_spec}[ac],\qquad P_{dc} = -\bigl(P_{ac} + \mathrm{loss}(P_{ac})\bigr),
+\end{equation}
+即"slack 母线网络注入减去共址电源/负荷"。由于 $\texttt{pcalc}[\text{slack}]\equiv 0$，实际算得 $P_{ac}=-\texttt{p\_spec}[\text{slack}]$；GFM 母线无共址元件时 $P_{ac}=0$，DC 侧注入退化为 $-(0+\mathrm{loss}(0))$，\textbf{DC 网络完全看不到换流器真实传输的功率}。
+
+\textbf{数值实证。}复现仓库算例（GFM 供 6 MW AC 孤岛负荷，经 DC 链路由主网侧 VDC\_Q 换流器馈电）：求解输出 $\texttt{vdc}=[1.00000000,\,1.00000000]$（物理正确解应下垂至约 0.9487 以供应 6 MW），上游换流器出力 0 MW；而 \file{populate\_derived\_results} 事后用完整 Ybus 重算并\textbf{报告} GFM $p_{ac}=+6.0038$ MW、$p_{dc}=-6.0638$ MW——报告值与所解 DC 状态互相矛盾，呈现"能量平衡成立"的假象，$\texttt{converged=true}$ 且无警告。
+
+\textbf{工业影响。}任何含 AC 构网型换流器带交流孤岛的交直流混合算例（微网、海上风电送出、孤岛供电），其 DC 电压分布、DC 潮流、换流器损耗与邻近 AC 潮流全部错误，量级可达整个 AC 孤岛的净交换功率。另注：HELM/CPF 残差路径（\file{pf\_injection\_assembly.cpp:64--72}）对 GFM 按 $-(p_{set}+\mathrm{loss})$ 计划值处理，与 Newton 路径、报告层形成\textbf{三套互相矛盾的口径}。
+
+\textbf{修复方向。}令 AC 内核为 slack 行保留 pcalc/qcalc 累加（不参与雅可比行即可），或在装配 \file{pdc\_spec} 前用完整 Ybus 行单独求 GFM 母线注入；同步补齐 DC 行对 AC 邻接变量的雅可比槽位，并新增"AC slack 注入 $=$ DC 侧吸收 $+$ 损耗"守恒回归测试。
+
+% ---------- A2 ----------
+\subsection{A2　三相 Compact/FixedPoint 求解器 Norton 固定电流符号错误：非 slack 外部电网时收敛到反极性伪解}
+\label{sec:a2}
+
+\begin{itemize}
+  \item \textbf{位置}：定义 \file{src/power\_flow/three\_phase\_nr.cpp:2344--2345}；消费点 \file{:4847--4855}、\file{:6014--6018}、\file{:6051--6054}、\file{:6237--6240}。
+  \item \textbf{复核状态}：主审已复核定义与 compact 求解器消费点代码；两路独立审计通道分别给出解析三重推导与数值复现（收敛到 $-E$、真实 KCL 残差 97 pu；改号后与精确 Newton 参考解一致，残差 $2.4\times10^{-10}$）。
+\end{itemize}
+
+\textbf{机理。}Norton 电源固定电流定义为 $\texttt{fixed\_current}=-K^{H}y_w e_w$，该符号是 \textbf{Newton 失配约定}所需（$P_{calc}=\mathrm{Re}\{V\,\mathrm{conj}(YV+I_{fix})\}$，支路流出电流 $=YV-y_NE$），本身正确。但不动点/紧凑求解器求解的 KCL 为
+\begin{equation}
+Y_{vv}V_v = I_{dev,v} \;{\color{hyred}+}\; y_{N}E \;-\; Y_{vf}V_f
+\quad\Longrightarrow\quad
+\text{RHS} = {\color{hyred}-}\,\texttt{fixed\_current} - Y_{vf}V_f ,
+\end{equation}
+而代码（\file{:6014--6018}）装配的是 $+\texttt{fixed\_current}-Y_{vf}V_f$，源项符号相反。
+
+\textbf{工业影响。}只要外部电网位于\textbf{非 slack} 母线（代码注释宣称支持的场景），\file{runpf\_phase} 的 Compact/FixedPoint 算法与 GUI \file{fixed\_point} 选项会\textbf{自洽地报告收敛}但电压角度翻转 $180^\circ$、电源功率荒谬。电源在 slack 母线时该固定电流行不进入变量右端，故现有测试（全部含 slack 电源）无法暴露。
+
+\textbf{修复方向。}不动点路径对 \file{fixed\_current} 取反（或两条路径各持一份符号）；补"非 slack Norton 源 + 恒功率负荷"回归用例。
+
+% ---------- A3 ----------
+\subsection{A3　线性化 DC 潮流移相注入符号错误：含移相器时结果整体违反功率平衡}
+\label{sec:a3}
+
+\begin{itemize}
+  \item \textbf{位置}：\file{src/power\_flow/ac\_linearized\_pf.cpp:66--68} 与 \file{:83}（支路回算公式 \file{:159--162}）。
+  \item \textbf{复核状态}：主审已复核全部相关行并完成代数推导；数值实证（3 节点、shift $=+10^\circ$）失配 3.49 pu（349 MW），改号后精确满足平衡。
+\end{itemize}
+
+\textbf{机理。}代码自身支路潮流公式为 $p_f=b(\theta_i-\theta_j-\varphi)$，节点注入恒等式 $P_{calc}=B\theta+p_{shift}$（其中 $p_{shift}[i]=\sum_k b_k(-\varphi_k)$，\file{:66--68}）。功率平衡要求
+\begin{equation}
+B\theta = P_{spec} \;{\color{hyred}-}\; p_{shift},
+\end{equation}
+而 \file{:83} 写成 $P = P_g - P_d \;{\color{hyred}+}\; p_{shift}$，符号相反。
+
+\textbf{工业影响。}任何含非零移相角（移相变压器、换流变移相建模）的系统，\file{solve\_ac\_dc\_power\_flow} 静默返回 \texttt{success=true} 而角度与支路潮流全错，误差量级 $2\sum b_k\varphi_k$。shift $=0$ 无影响——现有测试全部 shift $=0$，从未暴露。附带：手册 \file{docs/PowerFlow/chapters1/classic\_solvers.tex:146} 抄录了同一不自洽公式，修代码时手册需同步修正。
+
+\textbf{修复方向。}\file{:83} 改为 $-\,p_{shift}$（或将 \file{:66} 注入取正号）；补 shift $\neq 0$ 回归用例。
+
+% ---------- A4 ----------
+\subsection{A4　配网 BFS 对电气孤岛（不可达母线）静默输出伪造电压且 converged=true}
+\label{sec:a4}
+
+\begin{itemize}
+  \item \textbf{位置}：\file{src/power\_flow/distribution\_power\_flow.cpp:74--117}（\file{build\_bfs\_tree}）、\file{:324--382}（\file{run\_bfs\_sweep}）、\file{:429--433}（初值与写回）。三相 BFS 同病（\file{:1450--1489}、\file{:1555--1625}）。
+  \item \textbf{复核状态}：主审已复核上述代码，确认扫描仅遍历 \file{tree.order}、无连通性检查。
+\end{itemize}
+
+\textbf{机理。}BFS 树只覆盖 root 连通分量；回代/前推仅遍历 \file{tree.order}。不可达母线的注入被完全丢弃、电压保持初值 $\texttt{vm\_pu}\angle 0^\circ$；收敛检查 $\max|\Delta V|$ 对不可达母线贡献恒为 0，故 \texttt{result.converged} 仍可为 true。全文件无 $\texttt{tree.order.size()}==n$ 检查，结果亦无未覆盖母线标记。
+
+\textbf{工业影响。}带孤岛/未并网区域的算例（故障后拓扑、开关操作后）得到貌似收敛但部分母线为伪造电压的潮流结果，违反项目"诚实结果口径"铁律。
+
+\textbf{修复方向。}求解前检查连通分量数（项目已有 \file{is\_connected()}），不可达时 fail-close 或在结果中逐母线标记未覆盖。
+
+% ---------- A5 ----------
+\subsection{A5　OpenDSS 导入不建立电压基值：kVBase=0 时全部阻抗以 $Z_{base}=1\,\Omega$ 静默标幺化}
+\label{sec:a5}
+
+\begin{itemize}
+  \item \textbf{位置}：\file{src/power\_flow/distribution\_power\_flow.cpp:3493}（compile 后仅 Solve、无 CalcVoltageBases）、\file{:3528--3530}、\file{:2676--2681}（\file{bus\_base\_impedance\_ohm} 以 1.0 兜底）。
+  \item \textbf{复核状态}：主审已复核兜底代码；实证由项目实际链接的 altdss-capi 库复现（compile+Solve 后 \file{kVBase}$=0.0$，显式 CalcVoltageBases 后返回 7.1996）。
+\end{itemize}
+
+\textbf{机理。}对\textbf{不含} \file{CalcVoltageBases}/\file{SetkVBase} 命令的 master.dss，母线 \file{kVBase} 返回 0，\file{bus.base\_kv}$=0$，阻抗基准函数静默返回 $Z_{base}=1\,\Omega$（真值如 12.47 kV/1 MVA 应为 155.5 $\Omega$），线路 \file{r\_matrix\_pu}/\file{r1\_pu}/\file{b1\_pu} 与电源阻抗全部按 $1\,\Omega$ 折算——\textbf{普遍错两个数量级且无任何报错}。IEEE 官方算例（IEEE123/8500）恰好自带 CalcVoltageBases，故既有验证未暴露。
+
+\textbf{工业影响。}任何不带基值命令的 DSS 模型（用户自建模常见）导入后潮流结果完全错误且静默。
+
+\textbf{修复方向。}compile 后显式执行 CalcVoltageBases；或 \file{kVBase}$\le 0$ 时直接拒绝导入而非以 1.0 兜底。
+
+% ---------- A6 ----------
+\subsection{A6　OpenDSS 参考求解器把中性点（节点 4）电压写入 A 相：比对基准本身被污染}
+\label{sec:a6}
+
+\begin{itemize}
+  \item \textbf{位置}：\file{src/power\_flow/distribution\_power\_flow.cpp:3297--3304} 配合 \file{:2509--2513}（\file{parse\_dss\_bus\_terminal} 默认回退）。
+  \item \textbf{复核状态}：主审已复核两处代码，机理链完整；实证显示 \file{YNodeOrder} 含 \file{N1.4} 且排在 \file{N1.1} 之后（后写覆盖）。
+\end{itemize}
+
+\textbf{机理。}结果归因循环对每个 Y 矩阵节点调 \file{parse\_dss\_bus\_terminal(name, 1)}；节点号 $>3$（中性点 4）被丢弃后 \file{nodes} 为空，触发默认回退填入 $[1]$，于是中性点对地位移电压被当作 \textbf{A 相}写入 \file{voltage\_map[bus][0]}，且因排序在真实 A 相节点之后而\textbf{覆盖}真值。
+
+\textbf{工业影响。}四线制/显式中性点模型经 \file{algorithm=OpenDSS} 求得的"参考真值"本身被污染；该路径是 GUI 与测试中三相 NR 的比对基准（\file{run\_gui\_server.cpp:3032}），会把中性点位移大的系统（不平衡、接地故障研究）的正确 NR 结果误判为错误。
+
+\textbf{修复方向。}该语境禁用默认相回退；节点号 $>3$ 显式跳过。
+
+% ---------- A7 ----------
+\subsection{A7　三相电流基准缺 $\sqrt{3}$/3 因子：变压器观测电流全部失真，调压器 LDC 恰 3 倍过补偿}
+\label{sec:a7}
+
+\begin{itemize}
+  \item \textbf{位置}：\file{src/power\_flow/three\_phase\_nr.cpp:404--406}（定义）；消费点 \file{:4513--4530}（观测电流）、\file{:5745--5757}（LDC）。
+  \item \textbf{复核状态}：主审已复核定义与消费点；两路独立审计通道分别给出算术验证与机制分析。
+\end{itemize}
+
+\textbf{机理。}求解器为每相标幺（$S_{1\varphi}=S_{3\varphi}/3$、相电压基准），功率回算亦用 $s=V\,\mathrm{conj}(I)\cdot(\texttt{base\_mva}/3)$。自洽的电流基值必须为
+\begin{equation}
+I_{base}=\frac{S_{1\varphi}}{V_{LN}}=
+\begin{cases}
+\texttt{base\_mva}\cdot 10^3/(\sqrt{3}\,\texttt{base\_kv}), & \text{三相母线（base\_kv 为线电压）}\\[2pt]
+\texttt{base\_mva}\cdot 10^3/(3\,\texttt{base\_kv}), & \text{单相母线（base\_kv 为相电压）}
+\end{cases}
+\end{equation}
+代码给出 $\texttt{base\_mva}\cdot 1000/\texttt{base\_kv}$，对三相母线大 $\sqrt{3}$ 倍、单相母线大 3 倍。
+
+\textbf{工业影响。}(1) \file{transformer\_terminal\_observations} 的 hv/lv\_current\_amps 全部同比例偏大；(2) 调压器 LDC 项 $(I/CT)(R+jX)$ 同比例过补偿——调压器仅支持单相变压器（\file{:5701--5704}），即在其\textbf{唯一支持的配置}下 LDC 恰好多算 3 倍，启用 LDC 时档位决策错误。现有 native LDC 测试用同一个被污染的观测电流反推期望值（自洽通过），OpenDSS 交叉验证测试默认编译关闭，故均未暴露。
+
+\textbf{修复方向。}按上式修正基准；LDC 测试改用独立电流参考。
+
+% ---------- A8 ----------
+\subsection{A8　未接地星形（Y）绕组未做中性点消去：零序电流以正序强度穿越变压器}
+\label{sec:a8}
+
+\begin{itemize}
+  \item \textbf{位置}：\file{src/power\_flow/three\_phase\_nr.cpp:1411--1419}（\file{build\_wye\_connection\_embedding}）、\file{:1879--1917}（线性原语装配）。
+  \item \textbf{复核状态}：主审已复核代码；数值实证：纯共模激励下代码模型穿越电流 $|\!I_{t,cm}\!|=16.44$（$=|y_1|$ 全强度），P12 修正模型为 $1.8\times10^{-15}$。
+\end{itemize}
+
+\textbf{机理。}未接地星形绕组中性点浮空，KCL 强制 $I_a+I_b+I_c=0$，共模（零序）电流不能穿越变压器（对侧开口时本侧只见磁化级阻抗）。正确相域模型应对未接地侧做中性点消去（Kron 归算，等效于嵌入阵取投影阵 $P_{12}=I-\bm{1}\bm{1}^{T}/n$）。代码对 GroundedWye 与 Wye 一视同仁地返回\textbf{单位阵}嵌入（\file{:1414--1416}），零序电流按 $y_1$ 全强度穿越。
+
+\textbf{工业影响。}含 Y/y、Yn/y（高压侧不接地）变压器的网络中，单相接地等不平衡工况的零序电流被高估至 $z_1$ 量级（应为磁化级），三相不平衡潮流与接地分析结果失真。现有测试因 LV 侧悬空恰好不触发（悬空时任何模型共模电流均为零），属覆盖盲区。Delta 侧与 Yg/Yg 显式 $y_0$ 分解路径均正确，问题仅限未接地星形侧。
+
+\textbf{修复方向。}未接地星形侧嵌入改用 $P_{12}$ 投影（与负荷侧 \file{reduce\_wye\_shunt\_admittance} 同一数学）；补 Y/y 接地回路算例。
+
+% ---------- A9 ----------
+\subsection{A9　分布式松弛失配复算遗漏组件负荷、ZIP 电压项、LCC 与 ER 注入：分摊总量系统性错误}
+\label{sec:a9}
+
+\begin{itemize}
+  \item \textbf{位置}：\file{src/power\_flow/distributed\_slack\_solver.cpp:106--122}。
+  \item \textbf{复核状态}：主审已复核代码；数值验证（2 母线精确 NR + 逐行复算）：组件负荷 5 MW $\to$ 失配偏差 $-0.05$ pu（全额）；ZIP 恒电流 $\to$ $+pd(1-v)$；LCC 注入 $\to$ 全额，均与理论一致。
+\end{itemize}
+
+\textbf{机理。}主 NR 残差装配（\file{residual\_evaluator.cpp:79--138}）的 $p_{spec}=p_g-\mathrm{ZIP}(v)\text{负荷}+p_{ac}^{vsc}+p_{ac}^{lcc}+p_{ER}$，负荷在 \file{has\_component\_loads} 时为 \file{pd\_pu}（母线 pd $+$ Load 表 $+$ 充电站，含电压项）。分布式松弛复算只用母线级 \file{pd\_mw} 恒功率、仅加 VSC 注入，\textbf{不含组件负荷、ZIP 电压依赖、LCC 与 ER}。收敛后非 slack 参与母线的复算失配偏差全额等于上述遗漏项。
+
+\textbf{工业影响。}凡用 Load 组件表/充电站/ZIP/LCC/ER 的系统（该平台 rich 模型的主流建模方式），\file{distributed\_slack\_p} 被同量级量污染，分摊结果错误且无任何警告。叠加 B16 各项（零分摊退化、限值回退缺陷），分布式松弛功能当前不具备工业可用性。
+
+\textbf{修复方向。}复用 \file{residual\_evaluator} 同一装配消除两套 pspec 实现； slack 不在参与集时给诊断；限值改方向性 headroom。
+
+\newpage
+\section{重要缺陷（B 级）}
+\label{sec:major}
+
+\subsection{主 Newton 求解器与雅可比}
+
+\subsubsection*{B1　ZIP 负荷电压导数雅可比符号错误（P、Q 两块；解正确，收敛性受损）}
+\begin{itemize}
+  \item \textbf{位置}：\file{jacobian\_builder.cpp:282}、\file{:297}；残差侧 \file{:59--60}。\textbf{主审已复核。}
+  \item \textbf{机理}：$p_{spec}=p_g-p_d(w_0+w_1V+w_2V^2)$，本文件约定 $J=\partial(\mathrm{calc}-\mathrm{spec})/\partial x$，故应 $J \mathrel{+}= p_d w_1 + 2V p_d w_2$；代码取 \texttt{-=}，符号翻转。
+  \item \textbf{证据}：FD 探针中全部条目的失配恰好仅出现在 ZIP 母线 $V_m$ 对角，差值精确等于 $2\cdot dL/dV$（符号错误的铁证）；三路独立通道复现。
+  \item \textbf{影响}：残差正确故不动点正确；但牛顿退化为非精确牛顿——实测 2 母线弱馈线 80 MW：恒功率 5 次、恒流 16 次、恒阻抗 42 次迭代（上限 50）。ZIP 占比大/弱网时可误报不收敛。默认恒功率负荷（$w=\{1,0,0\}$）不触发，故 87 个 MATPOWER 用例全部通过而未暴露。
+  \item \textbf{修复}：两处 \texttt{-=} 改 \texttt{+=}。
+\end{itemize}
+
+\subsubsection*{B2　PQ$\to$PV 回切（restoration）为死代码}
+\begin{itemize}
+  \item \textbf{位置}：\file{newton\_solver.cpp:1337--1347}（执行点 \file{:1816--1819}）。\textbf{主审已复核。}
+  \item \textbf{机理}：回切检查只在内环收敛后执行；收敛时 Q 方程成立，代数化简得 \texttt{qg\_implied} $\equiv$ \texttt{qg\_state}，而切换时 \texttt{qg\_state} 被置为 \texttt{qmax}/\texttt{qmin}，故条件 \texttt{qg\_implied < qmax - q\_hys} 永假。
+  \item \textbf{影响}：打到 Q 限的 PV 母线永不恢复，与 MATPOWER 参考解系统性偏离（可行但保守）。\file{:1293--1298} 注释声明的第 4 步实际不发生。修复：按 MATPOWER 方向性电压判据（限 $Q_{max}$ 时 $V_m>V_{set}$ 回切）重写。
+\end{itemize}
+
+\subsubsection*{B3　VDC\_VAC（Mode 5）legacy 路径在默认配置下方程超定}
+\begin{itemize}
+  \item \textbf{位置}：\file{converter\_model.cpp:92--96}（legacy 实现 $q_{ac}\equiv 0$）、\file{newton\_solver.cpp:474--485}（\file{enforce\_vac\_setpoints} 每迭代钉住 $V_m$）。\textbf{主审已复核。}
+  \item \textbf{机理}：默认 \texttt{enable\_augmented\_equations=false} 时，VDC\_VAC 所在 PQ 母线的 $V_m$ 仍是未知量且 Q 平衡行保留，但每迭代被强制钉回设定值：$n$ 方程 $n-1$ 有效自由度。实证：默认选项 50 迭代耗尽、残差停滞 1.99（诚实失败 \texttt{converged=false}）；开启增广（Q 行替换为设定方程）后 4--5 步收敛至 $10^{-15}$。
+  \item \textbf{影响}：Mode 5 在默认配置下不可用，失败诚实但无任何"需开启增广方程"的提示。修复：legacy 路径默认启用增广行替换，或预检明确警告。
+\end{itemize}
+
+\subsubsection*{B4　半光滑 NCP 方程零点集不含限值分支（非默认路径）}
+\begin{itemize}
+  \item \textbf{位置}：\file{include/hacdcpf/power\_flow/ncp\_functions.hpp:42--45}。
+  \item \textbf{机理}：数值扫描表明现有 Fischer--Burmeister 组合 $F=0 \iff V_m=V_{set}\wedge Q_{min}\le Q_g\le Q_{max}$，两个限值分支（$Q_g=Q_{max}, V_m<V_{set}$ 等）都不是方程的根，与文档串直接矛盾；正确的半光滑形式应为中值型 $F=\mathrm{mid}(V_m-V_{set},\,Q_g-Q_{max},\,Q_g-Q_{min})$（已数值验证三物理分支全为 0）。另：\file{jacobian\_builder.cpp:497--501} 的 \texttt{qg\_implied} 未减换流器无功（注释与代码不符）。
+  \item \textbf{影响}：仅 \texttt{enable\_semi\_smooth\_newton=true}（默认 false）的研究路径；物理解落在 Q 限上的算例方程组无解。
+\end{itemize}
+
+\subsubsection*{B5　LM 恢复步 RHS 符号错误（非默认路径）}
+\begin{itemize}
+  \item \textbf{位置}：\file{newton\_solver.cpp:1702--1704}。\textbf{主审已复核。}
+  \item \textbf{机理}：本代码约定存储 $J=-F'$、$\mathrm{rhs}=F$（$F$ 为失配），LM 正规方程 $(J^{T}J+\lambda I)s=-F'^{T}F=+J^{T}\mathrm{rhs}$；代码取负号，$\lambda\to 0$ 时为负牛顿步、$\lambda\to\infty$ 时沿 merit 函数\textbf{上升}方向。数值验证：玩具算例 $\varphi(x_0)=0.2725$，代码步 $\varphi=1.0899$（恶化 4 倍）。注释自称 "negative gradient" 与表达式自相矛盾。
+  \item \textbf{影响}：仅 \texttt{enable\_auto\_fallback\_scheduling=true}（默认 false）触发；LM 步必被线搜索拒绝或被宽松阶梯错误接受，恢复机制失效。修复：去掉负号。
+\end{itemize}
+
+\subsubsection*{B6　信赖域增益比 $\rho$ 范数混用 + dogleg 缩放量纲混用（非默认路径）}
+\begin{itemize}
+  \item \textbf{位置}：\file{newton\_solver.cpp:1570--1576}、\file{:1545--1551}、\file{:1572}。\textbf{主审已复核。}
+  \item \textbf{机理}：(a) 实际下降用 $\lVert\cdot\rVert_\infty^2$、预测下降的模型项用 $\lVert\cdot\rVert_2^2$，二者不可比较——数值验证：精确线性模型下减小最大失配的好步得 $\rho=-0.02$ 被拒，坏步 $\rho=+0.56$ 被收；(b) dogleg 的牛顿段步长已还原物理量纲、Cauchy 段梯度却由缩放空间构造，\file{:1572} 模型残差一侧为 $D_F m$、另一侧为未缩放 $J s$，量纲不一致。
+  \item \textbf{影响}：\texttt{globalization==TrustRegion}（非默认）下接受/半径更新失真。
+\end{itemize}
+
+\subsubsection*{B7　GMRES 收敛判据混合范数：预条件残差对未预条件 $\lVert b\rVert$，可假性收敛并返回零步（非默认路径）}
+\begin{itemize}
+  \item \textbf{位置}：\file{newton\_krylov.cpp:62--67}。
+  \item \textbf{机理}：停机判据应为 $\lVert P^{-1}r\rVert/\lVert P^{-1}b\rVert$ 或真实 $\lVert r\rVert/\lVert b\rVert$；代码以预条件残差比未预条件 $\lVert b\rVert$。实证（编译运行真实代码）：$J=10^6 I$、精确 Schur 预条件、tol $=10^{-4}$，报告 converged、relres $=10^{-6}$，\textbf{真实 relres $=1.0$，返回零初始猜测}。另：Schur 预条件"左下块为 0"的结构声明（\file{newton\_krylov.hpp:49--59}）与 LCC/耦合 VSC 雅可比实际结构不符（\file{jacobian\_builder.cpp:385}）。
+  \item \textbf{影响}：\texttt{enable\_newton\_krylov\_fallback}（默认 false）$+$ 预条件启用时，Newton 可能拿零步/垃圾步前进。默认恒等预条件无此问题。
+\end{itemize}
+
+\subsection{换流器协调检查与孤岛检测（opt-in/自适应路径）}
+
+\subsubsection*{B8　协调检查遗漏 DC\_V\_DROOP\_AC\_V（Mode 6）：合法模型被误判 Fatal 并阻断求解}
+\begin{itemize}
+  \item \textbf{位置}：\file{converter\_coordination.cpp:886--919}。\textbf{主审已复核。}
+  \item \textbf{机理}：DC 岛电压源汇总循环只处理 PQ\_MODE 与 VDC\_Q/VDC\_VAC 分支，Mode 6 落入空白；同文件 \file{:341--346} 与共享 resolver 均明确 Mode 6 为 Vdc 构网。实证：单 Mode 6 换流器供 DC 负荷的合法模型，检查开启时 \texttt{converged=false}（DCISLAND-01 Fatal）；关闭时正常收敛。
+  \item \textbf{影响}：仅 \texttt{enable\_converter\_coordination\_check=true}（默认 false）。附带同根问题：DC\_V 母线 $+$ \texttt{control\_mode="DC\_V"} 储能被双重注册为两个刚性源误报 DCISLAND-04；AC\_PV/AC\_GFM 换流器计划 DC 注入不进入岛固定功率台账（DCISLAND-03 筛查失真）；DCISLAND-04/05 判定范围超出项目自身文档声明（下垂源不同参考、不同母线刚性源在数学上良定）。
+\end{itemize}
+
+\subsubsection*{B9　孤岛检测与多孤岛自适应路径的覆盖缺口}
+\begin{itemize}
+  \item \textbf{位置}：\file{island\_detector.cpp:122--157}（边集无 LCC）、\file{:200--202}（纯 DC 分量丢弃）、\file{:239--247}（带电判据只看 VSC \texttt{p\_set\_mw}）、\file{extract\_island\_subsystem}（不复制 LCC/ER）。\textbf{主审已复核。}
+  \item \textbf{机理}：(a) 两 AC 区域仅经 LCC 直流互联时被划为两个独立 AC 岛，中间 DC 分量因 \file{:200--202} 被整个丢弃，LCC 输电功率凭空消失且 \texttt{converged=true}；(b) 带电判据不查 \file{dc.storage}/\file{dc\_static\_generators}/\file{pv\_arrays}（与 \file{converter\_coordination.cpp:257--266} 口径矛盾），纯 DC 供电的 AC 岛误判死岛置零；(c) 检测把 ER 端口链当连通件合并孤岛，提取却不复制 ER，子系统内母线电气失联。
+  \item \textbf{影响}：含 LCC-HVDC 或能量路由器的系统一旦走多孤岛自适应路径（GUI 自适应求解），结果静默错误。
+\end{itemize}
+
+\subsection{FDPF、线性化 DC 与残差求值器}
+
+\subsubsection*{B10　FDPF 与线性化 DC 对混合 AC/DC 资产静默退化；线性化 DC 另忽略组件 Load 表}
+\begin{itemize}
+  \item \textbf{位置}：\file{fdpf\_solver.cpp:38--71}（spec 仅 $P_g-P_d$）、\file{src/api/hacdcpf.cpp:1871--1888}（无混合守卫）；\file{ac\_linearized\_pf.cpp:83}（只读母线级 \texttt{pd\_mw}）。
+  \item \textbf{机理}：换流器 AC 侧注入不进入 FDPF 失配、DC 网络完全不求解，入口不拒绝也不告警（对比 HELM 门面 \file{:1894--1907} 显式拒绝混合资产并置 \texttt{model\_scope}）；线性化 DC 只用母线级 \texttt{pd\_mw}，组件 Load/ChargingStation（平台主流建模方式）完全不可见——实证 80 MW 组件负荷算例输出 $p_f=0$。
+  \item \textbf{影响}：对混合系统/组件负荷建模误用时得到无声错误结果。修复：按 HELM 模式守卫并声明 \texttt{model\_scope}；线性化 DC 改用 \texttt{pd\_pu} 口径。
+\end{itemize}
+
+\subsubsection*{B11　\file{evaluate\_power\_flow\_residual} 与 Newton 实际方程集口径不一致（多 slack/多 DC 岛）}
+\begin{itemize}
+  \item \textbf{位置}：\file{residual\_evaluator.cpp:47--59}、\file{pf\_utils.hpp:80--98}；对照 \file{newton\_solver.cpp:584--601} 与 DC 岛参考规划。
+  \item \textbf{机理}：残差求值器把次 SLACK 当 PV（保留 P 行）、DC 只剔除单一全局参考；Newton 对所有 SLACK 剔除方程、每个 DC 岛各剔一个参考。多 slack/多 DC 岛系统下该函数度量的是另一个方程组——HELM 收敛后物理核验（\file{helm\_solver.cpp:407}）会误拒、CPF 与独立校核结论失真。
+\end{itemize}
+
+\subsection{HELM 求解器（一组）}
+
+\subsubsection*{B12　HELM 六项实现缺陷}
+\begin{enumerate}
+  \item \textbf{PV Model 2 的 $G_s$ 校正项卷积索引 off-by-one}（\file{helm\_solver.cpp:602--611}）：$|V|^2$ 级数应取 $n-1$ 阶系数，代码用 $n$ 阶截断形式。实证：PV 母线挂 $G_s=0.05$ 时物理残差 $4.756\times10^{-5}$（修正后 $7.4\times10^{-14}$）。带母线电导的 PV 母线被误报不收敛或（容差放宽时）静默错解。
+  \item \textbf{平直 germ（$V[0]=\bm{1}$）与非 1 变比/移相支路结构性不相容}（\file{:523--526}）：嵌入方程 $s^0$ 阶要求 $Y_{trans}\bm{1}=0$，仅当全部支路 $\mathrm{tap}=1\angle0^\circ$ 成立。实证：tap $=0.98$ 残差 $1.5\times10^{-2}$、移相 $5^\circ$ 残差 0.88。IEEE 14/30/57/118 等标准算例全部含非 1 变比——HELM 对其必然误报不收敛（或容差放宽时错解）。门面未拒绝此类输入。
+  \item \textbf{充电电容归属与平台规范 Ybus 不一致}（\file{:132--144}）：HELM 把 $jb/2$ 不按变比缩放两端平分，规范模型 from 侧为 $jb/(2|\tau|^2)$；tap $\neq 1$ 时内部模型偏离被核验的物理模型。
+  \item \textbf{独立 Shunt 组件被完全忽略}（\file{:106--154} 只加线路充电与母线 gs/bs）：实证含 0.05 pu 并联电容时误报不收敛。
+  \item \textbf{Q 限聚合用 min/max 而非求和}（\file{:462--465}）：多机 PV 母线能力被系统性低估。\textbf{主审已复核该行。}实证：两机 40+40 Mvar 被按 40 Mvar 执行，产生错误的 PV$\to$PQ 切换结局。
+  \item \textbf{分布式 slack 与物理残差核验互相冲突}（\file{:357--386} 修改内部注入、\file{:400--424} 用原始 \texttt{data.pg} 核验）：任何非零不平衡量必报不收敛，功能不可用。
+\end{enumerate}
+\textbf{总评}：HELM 内核（PQ/Slack 嵌入、$W$ 递推、Padé、物理核验兜底）在无抽头、无母线电导、无独立并联件的算例上数学正确（实机 $10^{-13}$ 级）；物理核验设计把上述缺陷多数降级为"误报不收敛"而非静默错解——但核验容差取 $\max(\texttt{tol}, \texttt{mismatch})$（\file{:411}），用户放宽 mismatch 即拆除防线。
+
+\subsection{CPF 与同伦}
+
+\subsubsection*{B13　CPF 三项口径缺陷}
+\begin{enumerate}
+  \item \textbf{\file{compute\_vsi} 负荷裕度口径不一致}（\file{voltage\_stability.cpp:518--521}）：\texttt{p\_base} 只加母线级 \texttt{pd\_mw}，\texttt{p\_max\_mw} 却含组件负荷与充电站——裕度被高估全部组件负荷。\textbf{主审已复核。}
+  \item \textbf{弧长校正段完全无 PV$\leftrightarrow$PQ/Q 限切换且未声明}（\file{:161--174}、\file{:225--281}）：方程结构在 $\lambda=0$ 固化，追踪的是"无功无限"系统的鼻点，Q 限 bind 的系统 $\lambda_{max}$ 偏乐观；违反诚实口径铁律。
+  \item \textbf{同伦注入缩放清单不完备}（\file{homotopy\_continuation.cpp:14--84}）：PV 阵列、充电站、VPP、微网、LCC、ER、\texttt{dc\_storage}（materialize 后）七类注入源未缩放，$\lambda=0$ 并非宣称的"零注入平凡解"，同伦路径失去数学依据。
+\end{enumerate}
+
+\subsection{三相 NR 求解器（一组）}
+
+\subsubsection*{B14　三相 NR 雅可比与建模五项（解正确性多不受影响，收敛性/健壮性受损）}
+\begin{enumerate}
+  \item \textbf{动态负荷雅可比全局符号反（Y 接与 $\Delta$ 接同病）}（\file{three\_phase\_nr.cpp:4082--4092}、\file{:4196--4216}，装配约定 \file{:3976--4011}）：失配侧 $+\,s_{inj}$、雅可比侧 $+\,\partial s_{inj}/\partial x$，而适配器约定要求 $-\,\partial s_{inj}/\partial x$。FD 实证：纯网络部分 max 误差 $2.7\times10^{-9}$，含恒流负荷误差 0.6，取反后 $9\times10^{-2}\to10^{-8}$ 量级。\textbf{主审已复核装配约定代码。}
+  \item \textbf{SolidGrounded 占位单位雅可比污染全部实接地 Y 接动态负荷}（\file{:3747--3754}、\file{:4061--4070}）：实接地中性点 $dV_n$ 应恒为 0，占位 Identity 解出 $dV_n=-dg_{explicit}\neq 0$；FD 实证默认 100\% 恒功率接地负荷雅可比误差 0.11--0.124，置 0 后 $2.7\times10^{-9}$。\textbf{主审已复核。}
+  \item \textbf{阻抗接地多支路 Y 接负荷局部中性点雅可比中 $y_{neutral}$ 被每支路累加}（\file{:3715--3733}）：残差中 $y_n$ 只出现一次（\file{:3695}），雅可比在逐相循环内每相加一次，$n$ 支路多算 $n-1$ 份；FD 实证 3 支路时恰为 $+2y_n$。\textbf{主审已复核。}
+  \item \textbf{\texttt{nle.project}（$V_m\ge 0.05$ 钳制）为死代码}（\file{:5456--5462}）：MIPSolvers \file{native\_adapters.cpp:83--181} 从不调用 \texttt{prob.project}；迭代中 $V_m$ 可穿越 0.05 直至变负，对角元 $p/V_i$、$q/V_i$ 在 $V_i\to 0$ 时爆炸（最终由线搜索/有限性检查诚实失败兜底）。文档 \file{three\_phase.tex:110--111} 声称钳制生效——文档与实现不符。
+  \item \textbf{Yg/Yg 原语磁化支路硬编码 \texttt{identity\_matrix(3)}，部分相掩码下维度失配}（\file{:1282--1285}）：$n=1/2$ 相端子时 Eigen 动态矩阵乘法维度非法，debug 断言、release（NDEBUG）下为未定义行为。触发条件：YNyn $+$ 部分相掩码 $+$ 非零 pfe/i0。
+\end{enumerate}
+
+\subsection{配网 BFS（一组）}
+
+\subsubsection*{B15　配网 BFS 五项模型覆盖缺口（未声明或运行时不防护）}
+\begin{enumerate}
+  \item \textbf{网状网络无运行时防护}（\file{distribution\_power\_flow.cpp:324--382}、\file{:522--535}）：BFS 只在生成树上满足 KCL，回环支路在扫描中电流恒为 0 但报告阶段按电压差算出非零功率，母线平衡被静默破坏；头文件虽声明"先验 \texttt{is\_radial()}"，求解器自身不检查、结果无标志。
+  \item \textbf{负荷注入口径与主 NR 系统性不一致}（\file{:208--225}）：Load 表非空时母线级 pd/qd 被整体忽略（主 NR 为加性语义），且未乘 \texttt{ld.scaling}；DPF 与 NR/OPF 结果不可互验。
+  \item \textbf{母线并联 gs/bs 按恒定功率（$|V|=1$）处理}（\file{:237--256}）：物理上应为 $(gs-j\,bs)|V|^2$ 恒定导纳，$|V|=0.9$ 时偏差约 19\%；与 HELM/MATPOWER 口径不符。
+  \item \textbf{线路充电 $b_{pu}$ 在扫描与结果中完全忽略且未声明}（全文件）：$\pi$ 等值退化为纯串联；电缆化配网/长线路的无功平衡与电压剖面系统性偏差。
+  \item \textbf{三相 BFS 忽略 PhaseMask}（\file{:1668--1688}）：缺相工况产生幻象相结果并污染 VUF 指标；\texttt{use\_phase\_matrix=true} 线路被退回序参数循环近似（文档有部分声明）。
+\end{enumerate}
+
+\subsection{OpenDSS 导入（一组）}
+
+\subsubsection*{B16　OpenDSS 导入器四项（A5/A6 之外）}
+\begin{enumerate}
+  \item \textbf{浮地（开路）中性点被误判为直接接地}（\file{distribution\_power\_flow.cpp:3693--3698}、\file{:4009--4018}）：EPRI 规定 \texttt{Rneut=-1}（\texttt{Xneut} 默认 0）表示中性点开路；判定要求 \texttt{rneut<0 \&\& xneut<0} 同时成立恒为假，负荷侧"单端子"条件又把显式浮地负荷强制接地。下游 \file{three\_phase\_nr.cpp:3082} 随之把浮地建成固态接地——不接地/经消弧线圈接地系统（中国 10 kV 典型）的零序通路凭空闭合。
+  \item \textbf{三绕组星形等值各腿基准容量取错}（\file{:3921--3932}、\file{:3945--3980}）：$z_h/z_m/z_l$ 为绕组 1 kVA 基值标幺（Yprim 实证），但各腿 \texttt{sn\_mva} 取自身 kvas——第三绕组容量减半时低压腿阻抗被放大 2 倍。2 绕组 \texttt{sn\_mva=min(kvas)}（\file{:4050}）同类。
+  \item \textbf{星形等值负阻抗腿被钳位/取模破坏}（\file{:3832--3835}、\file{:2829--2844}）：负电阻钳成 $10^{-6}$、负电抗符号被翻转，模型被静默篡改且无 \texttt{model\_limitations} 声明。
+  \item \textbf{$\Delta$ 接电容器一律按接地 Y 处理}（\file{:3751--3787}）与\textbf{三绕组 RegControl 静默丢弃}（\file{:4212--4216}）：前者改变零序通路，后者丢失有载调压行为。
+\end{enumerate}
+
+\subsection{分布式松弛与接口层}
+
+\subsubsection*{B17　分布式松弛其余四项（A9 之外）}
+\begin{enumerate}
+  \item \textbf{slack 不在参与集时静默零分摊}（\file{distributed\_slack\_solver.cpp:124--131}）：total 只覆盖参与母线，slack 计划出力为 0 被自动构造排除（\file{:223--224}）时 \texttt{distributed\_slack\_p} 全零且 \texttt{converged=true} 无警告。
+  \item \textbf{\texttt{solve\_full\_jacobian} 名不副实}（\file{:341--359}）：无增广雅可比、无重解潮流、无 [Pmin,Pmax] 裁剪——技术笔记声明的算法未实现；分摊后损耗变化 $\Delta P_{loss}$ 无迭代吸收。
+  \item \textbf{限值回退不使用 \texttt{pmax\_mw/pmin\_mw}}（\file{:254}）：$|\Delta P|\le 1.5 P_g$ 对称增量限不防负出力（可分摊出倒送）；全部钉限后剩余不平衡静默丢弃。
+  \item \textbf{ZIP 权重与精确雅可比开关未透传}（\file{hacdcpf.cpp:1568} 的 \file{apply\_zip\_weights} 仅主入口调用）：自适应/分布式路径恒用恒功率负荷与非耦合近似雅可比，与主 NR 口径不一致。
+\end{enumerate}
+
+\subsubsection*{B18　\texttt{PowerFlowMethod::DC} 工厂路由不解 AC 潮流却报告"收敛"与完整 AC 状态}
+\begin{itemize}
+  \item \textbf{位置}：\file{solver\_interface.cpp:48--71}、\file{:118--119}。
+  \item \textbf{机理}：\file{DCSolver::solve} 的未知量只有 DC 母线电压；适配器把 AC 母线\textbf{初始} \texttt{vm\_pu/va\_deg} 当作解填入结果。纯 AC 系统（\texttt{ndc==0}）时 0 迭代 0 残差直接 \texttt{converged=true}、报 \texttt{"DC power flow converged"}——未解任何方程即宣称收敛，且无 \texttt{model\_scope} 声明。标准 B$\theta$=P 线性 DC 潮流实际存在于 \file{ac\_linearized\_pf.cpp} 但工厂未指向它。GUI 的 dc 路由在调用后额外补跑全 AC 潮流，说明集成方已感知此缺陷。
+  \item \textbf{影响}：经工厂选 DC 的调用方（快速扫描、OPF 暖启动、事故筛选）会把初始猜测当作线性化潮流解使用。
+\end{itemize}
+
+\newpage
+\section{次要缺陷（C 级）汇总}
+\label{sec:minor}
+
+\begin{footnotesize}
+\begin{longtable}{@{}p{0.4cm}p{5.2cm}p{9.6cm}@{}}
+\toprule
+\textbf{\#} & \textbf{位置} & \textbf{问题}\\
+\midrule
+\endfirsthead
+\toprule
+\textbf{\#} & \textbf{位置} & \textbf{问题}\\
+\midrule
+\endhead
+C1 & \file{newton\_solver.cpp:1324,1330} & PV$\to$PQ 切换阈值含 $+0.01$ pu 迟滞带，收敛解可轻微超 Q 限（100 MVA 基准下 1 Mvar）；迟滞应用于防回切抖振而非切换阈值。\\
+C2 & \file{converter\_model.cpp:241--244} & DC-DC Droop 增益符号与自身 Voltage 模式及 VSC 下垂相反（疑似正反馈）。\textbf{待核实}：需对照设计文档终裁符号约定。\\
+C3 & \file{solver\_data.cpp:118--125} vs \file{residual\_evaluator.cpp:92--94} 等 & 停运母线的母线级负荷在两条负荷路径下口径不一致（Load 表空时计入、非空时剔除）。\\
+C4 & \file{converter\_model.cpp:20,}\newline\file{44--46,141,340} & 损耗雅可比在钳位区（$V_{dc}<0.1$ 或 $V_m<0.1$）与残差不一致（真实导数为 0，解析给非零）；与 \texttt{kMinVm=0.05} 两级钳位不配套。\\
+C5 & \file{lcc\_model.cpp:176,335--496} & LCC $U_d<1$ kV 钳位区残差/雅可比如实不一致（深度电压崩溃角点；正常收敛轨迹不经过）。\\
+C6 & \file{helm\_solver.cpp:723--725,512--515} & Q 限外环耗尽/LU 失败路径 \texttt{residual} 保持 0.0 且无 diagnostics——"不收敛但残余 0"的矛盾报告。\\
+C7 & \file{helm\_solver.cpp:369--385} & K 因子归一化对负 K 不一致（摊薄分母却不分摊功率）；slack 上 K 为无操作；\texttt{sparse\_threshold}/\texttt{allow\_multi\_slack} 选项未消费。\\
+C8 & \file{voltage\_stability.cpp:373--376} & CPF 首步不收敛即置 \texttt{nose\_found=true}，鼻点语义夸大（未观测到 $\lambda$ 回折）。\\
+C9 & \file{homotopy\_continuation.cpp:88--93} & 同伦 2 参数重载失败时返回部分加载解且 \texttt{converged=true}（API 包装层已修补，类接口本身仍是陷阱）。\\
+C10 & \file{voltage\_stability.cpp:438--439} & 割线切向量无零差保护（相邻接受点相同时 \texttt{normalized()} 产 NaN）。\\
+C11 & \file{three\_phase\_nr.cpp:589--594,}\newline\file{638--656} & 序分量线路零序并纳 \texttt{b0\_pu} 被忽略；\texttt{z0} 缺省静默取 \texttt{z1} 无日志。\\
+C12 & \file{three\_phase\_nr.cpp:1101--1104,}\newline\file{2438--2440}；\file{admittance\_builder.cpp:34,102} & 零阻抗/零电阻支路静默丢弃（拓扑被静默改变，依赖上游投影合并生效）；tap=0 静默按 1 处理。\\
+C13 & \file{three\_phase\_nr.cpp:5202--5253} & \texttt{total\_p\_loss\_mw}、\texttt{total\_q\_loss\_mvar} 仅累计线路损耗，不含变压器串联/励磁损耗，名不副实。\\
+C14 & \file{three\_phase\_nr.cpp:4537--4550,}\newline\file{6258--6260} & compact/fixed-point 把 PV 母线按 PQ 处理（与 NR 语义不一致）；\texttt{vmin\_pu} 为死参数。\\
+C15 & \file{three\_phase\_nr.cpp:3179--3185} & 阻抗接地恒 Z 负荷校准中性点分母缺 $\sum y_{shunt}$ 项（高阻接地时校准失真，二阶效应）。\\
+C16 & \file{distributed\_slack\_solver.cpp:}\newline\file{331--337} + 文档 & \texttt{distributed\_slack\_p} 实为标幺，技术笔记写 MW；结构体无单位声明。\\
+C17 & \file{distributed\_slack\_solver.cpp:}\newline\file{66--67,275} & \texttt{DistributedSlack::reference\_bus} 只写不读，文档声称的角度参考不成立。\\
+C18 & \file{adaptive\_solver.cpp:125} & \texttt{AdaptiveSolver::solve} 的 \texttt{q\_limits} 参数为死参（\texttt{(void)q\_limits;}）。\\
+C19 & \file{solver\_interface.cpp:132--135}；\file{solver\_factory.hpp:9--13} & 工厂 \texttt{create(options)} 忽略 options 恒返回 Newton；头文件用法示例引用不存在的 \texttt{opt.method} 成员，不可编译。\\
+C20 & \file{solver\_interface.cpp:81--104} & CPF 适配层：用户 options 不进入 CPF；\texttt{converged = !trace.empty()} 把"一步未走"报为收敛；\texttt{residual} 保持 0。\\
+C21 & \file{jacobian\_check.cpp:40,55} & 雅可比校验判据为纯相对误差（无绝对下限），小元素/真零元素被 FD 噪声误判（过严误报方向）；且 \textbf{全仓库零调用}，头文件示例引用不存在的函数签名。\\
+C22 & \file{distribution\_power\_flow.cpp:}\newline\file{2036--2039} & DSS 行内注释未剥离，注释中的 \texttt{key=value} 会渗入 tap contract 收集。\\
+C23 & \file{distribution\_power\_flow.cpp:}\newline\file{4068--4087} & 固定非单位变比丢失（num\_taps=0 或 minTap==maxTap 时）；双绕组同时带抽头时丢一侧。\\
+\bottomrule
+\end{longtable}
+\end{footnotesize}
+
+\section{观察项（D 级）汇总}
+\label{sec:obs}
+
+\begin{itemize}
+  \item \textbf{D1}　AC 内核并行归约顺序依赖线程数，结果不具位级可复现性（固定线程数下确定，\file{ac\_kernel.cpp:96--156}）。
+  \item \textbf{D2}　雅可比对角 \texttt{vi\_safe} 钳制在 $|V|<10^{-8}$ 角点使 J 非精确（合理防护，未声明，\file{jacobian\_builder.cpp:254}）。
+  \item \textbf{D3}　非单调"GLL"声明与实现不符：实现为自写窗口松弛判据（无 $\alpha$、无方向导数，阈值高于参考值），头文件 GLL 实现系死代码；线搜索宽松阶梯容许 $\le 2\times$ 残差增大（\file{newton\_solver.cpp:1212--1229}）。LMController/PtcSerController 亦为死代码，GUI 暴露的 \texttt{ptc\_gamma} 等旋钮无实效。
+  \item \textbf{D4}　换流器 Q/P/容量圆限值在潮流方程中不约束（已声明的设计取舍，仅 opt-in 解后诊断）；AC\_PV 母线因无 generator 永不触发 Q 限切换。
+  \item \textbf{D5}　VSC 效率 $\eta$ 未做区间钳制（DC-DC 已钳），$\eta>1$ 坏数据静默产生负损耗（\file{converter\_model.cpp:14,19}）。
+  \item \textbf{D6}　GFM 结果归因把同母线发电机无功计入换流器（\file{hacdcpf.cpp:1025}，高估 $q_g$；\textbf{待核实}共址场景频率）。
+  \item \textbf{D7}　FDPF $B''$ 未含 Shunt 组件表电纳（仅收敛速度，\file{admittance\_builder.cpp:168--173}）；FDPF 收敛/未收敛两路径 \texttt{residual} 语义不同且与 NR 口径不同。
+  \item \textbf{D8}　独立 DC 求解器雅可比缺换流器注入导数（准牛顿，收敛速度，\file{dc\_solver.cpp:109--120}）；\file{dc.hpp:9} 注释"linear approximation"与实际非线性方程不符。
+  \item \textbf{D9}　LCC：\texttt{alpha\_beyond\_range} 混入 $\gamma$ 反算越界（无消费方，潜伏报告陷阱）；定功率 \texttt{p\_set\_mw}$\le 0$ 静默闭锁站点；$Q=|P|\tan\varphi$（$\cos\varphi\approx U_d/U_{d0,t}$）为如实声明的近似。
+  \item \textbf{D10}　HELM 若干：ISOLATED 母线落入 PV 分支（边缘）；终值提取/Padé 奇异由物理核验兜底；\texttt{robust\_nonlinear\_options.hpp:155--158} 宣称的"自动同伦回退"全 src 未接线。
+  \item \textbf{D11}　三相：PV 发电机 \texttt{vm\_pu} 设定值被静默忽略（正序投影路径却采用，两路径语义不一致）；\texttt{ThreePhaseACLine.parallel} 被忽略；PV 无 Q 限（文档已声明）；ZIPV 分段幂律界点导数不连续；局部中性点求解失败在残差回调内抛异常会中止整个 Newton 而非标记不收敛。
+  \item \textbf{D12}　配网/OpenDSS：调压器每次按 \texttt{max\_tap\_change} 全幅盲动（OpenDSS 按偏差计算档数）；到档限即整体判不收敛（OpenDSS 语义为限位接受）；\texttt{solve\_opendss\_ymatrix} 收敛判据单位为伏特与 \texttt{opt.tol} 直接比较（过严）；\texttt{Zsc1/Zsc0} 回退路径实际不可达；三绕组星形腿移相钟点硬编码未读 \texttt{leadlag}；DSS Generator/PVSystem/Storage/Reactor 及双端子负荷不导入。
+  \item \textbf{D13}　\file{three\_phase\_hybrid.cpp:545--549}：\texttt{converter\_coupling\_residual} 按构造恒为 0，名不副实（该文件数学内核经 FD 验证正确，见第~\ref{sec:verified}~节）。
+  \item \textbf{D14}　工作区复用经核实安全（无陈旧状态污染路径）；\texttt{reset\_iteration} 与索引向量为死代码；\file{include/hacdcpf/power\_flow/globalization/nonlinear\_scaling.hpp:18} 头注释符号约定陈旧（实现自洽）。
+  \item \textbf{D15}　\file{admittance\_builder.cpp:34}：$r=0$、$x$ 极小（如 $10^{-15}$）支路产生 $10^{15}$ 级导纳，Ybus 无 min-x 保护（$B'$ 有）；\file{solver\_data.cpp:34} 未走 \texttt{sanitize\_scaling}，负 scaling 坏数据可穿透聚合层。
+\end{itemize}
+
+\newpage
+\section{已核查无误的数学内核（正面清单）}
+\label{sec:verified}
+
+以下核心数学内容经\textbf{解析推导 $+$ 有限差分/端到端数值双重验证}为正确（节选关键项，逐项行号备查）：
+
+\begin{enumerate}
+  \item \textbf{AC 注入与雅可比}：$P_i=\sum_j V_iV_j(G_{ij}\cos\theta_{ij}+B_{ij}\sin\theta_{ij})$、$Q_i=\sum_j V_iV_j(G_{ij}\sin\theta_{ij}-B_{ij}\cos\theta_{ij})$（\file{ac\_kernel.cpp:52--53}）及四个非对角雅可比块（\file{:58--69}）、对角恒等式 $\partial P_i/\partial\theta_i=-Q_i-B_{ii}V_i^2$ 等（\file{jacobian\_builder.cpp:263--285}）——与 Grainger \& Stevenson 一致；\textbf{对非对称 Ybus（复变比/移相）无任何对称性假设}，FD 验证精确（唯一失配项即 B1）。
+  \item \textbf{Ybus 装配}：$\pi$ 等值 $Y_{ff}=(y_s+jb/2)/|\tau|^2$、$Y_{ft}=-y_s/\tau^{*}$、$Y_{tf}=-y_s/\tau$、$Y_{tt}=y_s+jb/2$（\file{admittance\_builder.cpp:22--87}）——与 MATPOWER \texttt{makeYbus} 逐项一致，绝对校验误差 $\le 2.7\times10^{-15}$；DC 电导 Laplacian（\file{:90--125}）与 $P_{dc}=V\odot(GV)$ 及其精确雅可比（\file{jacobian\_builder.cpp:304--312}）。
+  \item \textbf{符号约定链}：$\texttt{mismatch}=\mathrm{spec}-\mathrm{calc}$、解 $J\Delta x=\texttt{mismatch}$、$x\mathrel{+}=\Delta x$，$J=\partial(\mathrm{calc}-\mathrm{spec})/\partial x$ 全局自洽；角度内部弧度制；失配 $\infty$ 范数、容差 $10^{-8}$ pu、NaN 守卫、$V_m\ge 0.05$ 步进钳制。
+  \item \textbf{PV$\leftrightarrow$PQ 切换}：隐含无功 \texttt{qg\_implied} 代数含 ZIP 严格相消（\file{newton\_solver.cpp:1318--1320}）；发电机限值聚合（\file{:770--823}）；DC 岛参考规划（刚性成网定容公式 $\mathrm{net}/(2-\eta)$、下垂提升）自洽。
+  \item \textbf{VSC 模型}：损耗 $a+bI+cI^2$ 及其解析导数、整流/逆变两方向能量一致、droop 稳定符号、AC/DC 交叉雅可比链式法则（\file{converter\_model.cpp:8--211}）——136 项 FD 比对通过（唯 B 级已列项除外）。
+  \item \textbf{LCC 模型}：$U_{d0}=(3\sqrt{2}/\pi)n_bE$、$R_c=(3/\pi)n_bX_c$、整流/逆变外特性与阀压降符号、四控制模式反算 $\alpha/\gamma$、全部 10 个耦合偏导块（\file{lcc\_model.cpp:34--496}）——与 Arrillaga《HVDC》一致，12 场景 FD 全过。
+  \item \textbf{DC-DC}：Power/Droop/Voltage 三模式传输与雅可比、$\eta$ 方向分段、Buck/Boost/Buck-Boost/Isolated 占空比关系（\file{converter\_model.cpp:213--328}）——24 项 FD 全过。
+  \item \textbf{FDPF}：FDXB 假设（$B'$：$R=0$/无充电/$|t|=1$/无相移；$B''$ 保留 $R$/充电/变比）实现与声明一致，$\Delta P/V=B'\Delta\theta$、$\Delta Q/V=B''\Delta V$ 符号链正确，与精确 NR 解差 $6.3\times10^{-10}$。
+  \item \textbf{DC 网络求解器}：$P=V\odot(GV)$ 解析雅可比（对角 $(GV)_k+G_{kk}V_k$）FD 校验通过，二次收敛实测。
+  \item \textbf{HELM 内核}：PQ/Slack 嵌入、$W=1/V$ 递推、$|V(s)|^2$ 约束行、复数$\to$实数映射、Padé $[L/L]$ 矩阵法、相邻逼近收敛判据、物理残差核验兜底——正确（缺陷限于 B12 所列边界）。
+  \item \textbf{CPF/同伦内核}：弧长方程 $t\cdot(y-y_{pred})=0$ 与增广雅可比末行自洽、$\partial f/\partial\lambda$ 列符号、回溯严格下降、$\lambda$ 回折检测——两母线复现成功翻越鼻点并保留下支点。
+  \item \textbf{三相网络雅可比}：相域 Grainger 全部子块（含 Norton 固定电流入对角方式）FD 验证 max 误差 $\le 4.1\times10^{-8}$；序-相变换 $T\,\mathrm{diag}(z_0,z_1,z_1)T^{-1}$、钟点方向（IEC，LV 滞后 HV $30n^\circ$）、分接头归算（副边移原边 tap$\to 1/t$、$Z\to Zt^2$）、恒 Z 负荷 Kron 归算、ZIP 分段与导数、VUF 对称分量——逐项正确（缺陷限于 B14/B15）。
+  \item \textbf{配网 BFS 内核}：复变比支路电流/电压递推（含父在 to 侧折算）与独立稠密 NR 差 $<2\times10^{-10}$；损耗 $=S_f+S_t$ 差 $<10^{-15}$；Q 限所需无功公式差 $2\times10^{-15}$；循环逆 $\lVert ZY-I\rVert<6\times10^{-17}$；三角形特例稠密 NR 与 fail-close 链正确。
+  \item \textbf{OpenDSS 换算}：MVASC3/MVASC1 阻抗推导（二次方程取根）与 OpenDSS \texttt{Zsc1/Zsc0} 偏差 $<0.3\%$；长度/阻抗/电容单位因子逐一正确；\texttt{leadlag} 钟点映射正确。
+  \item \textbf{三相混合矩阵求解器}（\file{three\_phase\_hybrid.cpp}）：AC/DC 残差、换流器六模式（含 GFL 正序电流源、GFM 虚拟阻抗）全部雅可比子块 FD 相对误差 $\le 7.3\times10^{-10}$；末态残差复算、超差翻转不收敛的"诚实审计"设计正确。
+  \item \textbf{全局化组件}：GMRES（MGS+Givens+重启动+真实残差复核）随机系统 relres $9.2\times10^{-13}$；缩放代数 $D_F/D_x$ 与还原精确（误差 $10^{-16}$）；MIPSolvers dogleg/TR 更新/SER 公式正确。
+  \item \textbf{孤岛检测图算法}：连通分量、组件表 1 基重编号 remap、AC/DC 域 map 分离、死岛置零与结果回写映射——正确（覆盖缺口限于 B9）。
+\end{enumerate}
+
+\newpage
+\section{系统性根因分析：为何既有测试未能暴露}
+\label{sec:rootcause}
+
+\begin{enumerate}
+  \item \textbf{默认参数遮蔽}：ZIP 默认恒功率（B1）、\texttt{r\_conv\_ac\_pu=0}、\texttt{enable\_coupled\_jacobian=false}、各稳健化开关默认关闭（B4--B7）——缺陷路径均不在默认回归覆盖内。
+  \item \textbf{测试断言的是结果而非牛顿方向}：雅可比符号类错误（B1、B14-1/2/3）不影响收敛解，只损失收敛速度，线搜索兜底后测试照常通过。
+  \item \textbf{算例结构盲区}：移相器 shift $=0$（A3）、电源在 slack 母线（A2）、IEEE 官方 DSS 自带 CalcVoltageBases（A5）、LV 侧悬空使零序不可见（A8）、含 slack 母线使 LDC 测试用被污染电流自洽验证（A7）——每处缺陷都精确落在测试数据的对称/退化点上。
+  \item \textbf{事后报表掩盖}：A1 的报告层用完整 Ybus 重算换流器功率，呈现能量守恒假象；测试只校验归因后 transfer 与宽松区间。
+  \item \textbf{多求解器口径漂移}：同一设备在 Newton/HELM/CPF/BFS/报表层各有独立装配实现（A1、A9、B10、B11、B15-2），缺统一装配单一来源，是"口径不一致"类缺陷的结构性来源。
+  \item \textbf{jacobian\_check 零调用}（C21）：仓库自带 FD 雅可比校验工具未接入任何测试，本可在 CI 中拦截 B1/B14 类错误。
+\end{enumerate}
+
+\section{处置建议（按优先级）}
+\label{sec:recommend}
+
+\begin{enumerate}
+  \item \textbf{立即（A 级，阻断投产）}：修复 A1（slack 行注入保留 $+$ 守恒回归测试）、A2（不动点源项取反）、A3（移相注入符号）、A4（BFS 连通性检查）、A5（CalcVoltageBases 或拒绝导入）、A6（中性点归因守卫）、A7（电流基准）、A8（未接地星形 $P_{12}$ 投影）、A9（复用统一装配）。每项修复必须附带"修复前失败、修复后通过"的回归用例。
+  \item \textbf{紧随（B 级）}：B1（两处符号）、B2（MATPOWER 方向性判据）、B3（legacy 路径警告或默认增广）、B5（去负号）、B8（Mode 6 分支）、B9（LCC/ER/DC 电源补全）、B12/B13/B14/B16 按子系统排期；B4--B7 非默认路径修复前应在选项文档中加注"该路径已知缺陷"。
+  \item \textbf{流程}：(a) 将 \file{jacobian\_check.cpp} 接入 CI 并改组合判据（$\mathrm{atol}+\mathrm{rtol}$）；(b) 统一注入装配单一来源，消除 Newton/HELM/CPF/BFS/分布式松弛/报表六套口径；(c) 全部"静默忽略/静默兜底"点（零阻抗、tap=0、$Z_{base}=1$、字段未消费）改为警告或拒绝；(d) 按 A7 教训，LDC/观测类测试必须使用独立参考值而非自洽反推；(e) 文档（\file{docs/PowerFlow/chapters1/}）与代码同步修订——手册中移相公式（A3）、信赖域/GLL 描述（D3）、钳制声明（B14-4）等已与实现不符。
+  \item \textbf{验证}：本审计全部 FD/端到端探针（约 30 个，位于 \file{/tmp} 各审计目录）可整理为回归测试套件；建议对 A1/A2/A3/A5/A7/A8 至少各保留一个端到端用例。
+\end{enumerate}
+
+\section{审计工件与可复现性}
+
+\begin{itemize}
+  \item 有限差分探针（C++，链接 \file{build/macos-release/libhacdcpf.a}）：AC 雅可比（含 tap/移相/ZIP）、AC/DC 耦合雅可比、VSC 单元与装配级、LCC 12 场景、GMRES 真实代码、Ybus 绝对校验、GFM 端到端复现（含仓库测试算例回放）、VDC\_VAC 迭代复现。
+  \item Python 复刻验证：HELM 全算法复刻与交叉验证、CPF 弧长全流程、三相雅可比逐元（含中性点隐式微分）、不动点 KCL 符号、BFS 与稠密 NR 互验、OpenDSS 语义（bundled altdss-capi 实证：kVBase、Rneut/Xneut 默认值、YNodeOrder、Yprim 绕组基值）。
+  \item 回归基线：\file{test\_matpower\_cases} 87 用例、\file{test\_converter\_coordination} 47 用例、\file{test\_three\_phase\_*} 系列、\file{test\_three\_phase\_hybrid\_pf}、\file{test\_advanced\_pf "[island]"} 审计时全部通过。
+  \item 本报告全部 A 级与关键 B 级发现已经主审按行号复核源代码原文；标注"待核实"者（C2、D6 及 B14 之外个别中置信度项）需模型作者确认设计意图后终裁。
+\end{itemize}
+
+\vspace{1.5em}
+\noindent\textbf{报告完。}
+
+\end{document}

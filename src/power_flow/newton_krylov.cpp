@@ -54,17 +54,21 @@ GmresStats gmres_solve(
   Eigen::VectorXd sn(restart);
   // Transformed right-hand side e₁·β.
   Eigen::VectorXd g(restart + 1);
+  const double norm_prec_b = std::max(prec_solve(b).norm(), 1e-300);
 
   for (int outer = 0; outer < max_outer; ++outer) {
-    // r = P⁻¹·(b − A·x)
-    Eigen::VectorXd r = prec_solve(b - matvec(x));
-
-    const double beta = r.norm();
-    if (beta / norm_b < tol) {
+    const Eigen::VectorXd true_r = b - matvec(x);
+    const double true_relres = true_r.norm() / norm_b;
+    if (true_relres < tol) {
       stats.converged = true;
-      stats.final_relres = beta / norm_b;
+      stats.final_relres = true_relres;
       return stats;
     }
+
+    // r = P⁻¹·(b − A·x)
+    Eigen::VectorXd r = prec_solve(true_r);
+
+    const double beta = r.norm();
 
     V.col(0) = r / beta;
     g.setZero();
@@ -111,7 +115,7 @@ GmresStats gmres_solve(
       g[j + 1] = -sn[j] * g[j];
       g[j] = cs[j] * g[j];
 
-      const double relres = std::abs(g[j + 1]) / norm_b;
+      const double relres = std::abs(g[j + 1]) / norm_prec_b;
       if (relres < tol) {
         break;
       }
@@ -125,9 +129,9 @@ GmresStats gmres_solve(
     x += V.leftCols(m_eff) * y;
 
     // Recompute true relative residual (after update, not just estimate).
-    const double true_relres = (b - matvec(x)).norm() / norm_b;
-    stats.final_relres = true_relres;
-    if (true_relres < tol) {
+    const double updated_true_relres = (b - matvec(x)).norm() / norm_b;
+    stats.final_relres = updated_true_relres;
+    if (updated_true_relres < tol) {
       stats.converged = true;
       return stats;
     }

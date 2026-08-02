@@ -103,13 +103,10 @@ SolverData、选项与规模摘要，工厂 \srcpath{build\_power\_flow\_problem
 （声明 \srcpath{power\_flow\_problem.hpp:44--46}，实现
 \srcpath{src/power\_flow/solver\_interface.cpp:27--37}）装配。
 \srcpath{solver\_factory.hpp} 提供 \texttt{PowerFlowMethod} 枚举（含
-\texttt{Continuation}）与两个 \texttt{create} 重载；六个子类的 \texttt{solve}
+\texttt{Continuation}）与显式 \texttt{create(PowerFlowMethod)}；六个子类的 \texttt{solve}
 与工厂实现同集中于新增的 \srcpath{src/power\_flow/solver\_interface.cpp}
-（:39--135）。注意 \texttt{create(const PowerFlowOptions\&)} 的语义已收窄：
-不再按 options 推断求解器，固定返回 Newton 求解器——算法选择须经
-\texttt{create(PowerFlowMethod)} 重载\textbf{显式}进行，
-\texttt{PowerFlowOptions} 只配置方法而不选择方法
-（\srcpath{solver\_factory.hpp:48--52} 注释与 \srcpath{solver\_interface.cpp:132--135}）。
+（:39--137）。算法选择须经 \texttt{PowerFlowMethod}\textbf{显式}进行；
+\texttt{PowerFlowOptions} 只配置已选方法，不再提供会被忽略的工厂重载。
 如实说明：抽象层现已完整接线（\texttt{NewtonHybridSolver::\allowbreak solve}
 委托 \srcpath{powerflow::NewtonSolver}，\srcpath{solver\_interface.cpp:39--41}），
 但生产门面 \srcpath{solve\_power\_flow} 仍不经过该抽象层，直接持有

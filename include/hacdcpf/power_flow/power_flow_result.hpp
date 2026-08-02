@@ -305,8 +305,14 @@ struct DistributedSlackResult {
   int iterations{0};
   double residual{0.0};
   SolverDiagnostics diagnostics;
+  /// Active-power correction by original AC bus ID [p.u. on system base_mva].
   std::unordered_map<int, double> distributed_slack_p;
   std::vector<int> hit_limits;
+  std::string distributed_slack_p_unit{"p.u. on system base_mva"};
+  std::string model_scope;
+  std::vector<std::string> model_limitations;
+  int reference_bus_used{0};
+  double unallocated_slack_pu{0.0};
 };
 
 }  // namespace hacdcpf

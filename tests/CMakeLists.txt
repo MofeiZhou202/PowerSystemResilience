@@ -128,6 +128,8 @@ hacdcpf_add_test(test_helm_solver         test_helm_solver.cpp)
 hacdcpf_add_test(test_homotopy_continuation test_homotopy_continuation.cpp)
 hacdcpf_add_test(test_voltage_stability   test_voltage_stability.cpp)
 hacdcpf_add_test(test_newton_krylov       test_newton_krylov.cpp)
+hacdcpf_add_test(test_power_flow_math_audit test_power_flow_math_audit.cpp)
+hacdcpf_add_test(test_component_models_math_audit test_component_models_math_audit.cpp)
 
 # DC island voltage-reference planning: a PQ VSC converter feeding a
 # reference-less DC island is auto-promoted to regulate Vdc (regulate + warn).

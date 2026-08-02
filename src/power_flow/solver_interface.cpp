@@ -6,7 +6,7 @@
 #include <utility>
 
 #include "hacdcpf/power_flow/adaptive_solver.hpp"
-#include "hacdcpf/power_flow/dc_solver.hpp"
+#include "hacdcpf/power_flow/ac_linearized_pf.hpp"
 #include "hacdcpf/power_flow/fdpf_solver.hpp"
 #include "hacdcpf/power_flow/newton_solver.hpp"
 #include "hacdcpf/power_flow/voltage_stability.hpp"
@@ -46,27 +46,24 @@ PowerFlowResult FDPFSolver::solve(const PowerFlowProblem& problem) {
 }
 
 PowerFlowResult DCPowerFlowSolver::solve(const PowerFlowProblem& problem) {
-  powerflow::DCSolver solver;
-  const InitialState* initial =
-      problem.options.initial_state ? &*problem.options.initial_state : nullptr;
-  const DCPowerFlowResult dc = solver.solve(problem.network, problem.options, initial);
+  const powerflow::ACLinearizedDCResult dc =
+      powerflow::solve_ac_linearized_dc(problem.network);
 
   PowerFlowResult result;
-  result.converged = dc.converged;
-  result.iterations = dc.iterations;
-  result.residual = dc.residual;
-  result.vdc = dc.vdc;
-  result.vm.reserve(problem.network.ac_buses.size());
-  result.va.reserve(problem.network.ac_buses.size());
-  for (const auto& bus : problem.network.ac_buses) {
-    result.vm.push_back(bus.vm_pu);
-    result.va.push_back(bus.va_deg * 3.14159265358979323846 / 180.0);
-  }
+  result.converged = dc.success;
+  result.iterations = dc.success ? 1 : 0;
+  result.residual = dc.residual_pu;
+  result.va = dc.va;
   result.diagnostics.converged = result.converged;
   result.diagnostics.iterations = result.iterations;
   result.diagnostics.final_mismatch_norm = result.residual;
   result.diagnostics.termination_reason =
-      result.converged ? "DC power flow converged" : "DC power flow failed";
+      result.converged ? "Linearized AC DC power flow converged"
+                       : "Linearized AC DC power flow is not applicable or failed";
+  result.converter_model_scope.model_scope = dc.model_scope;
+  if (!dc.model_limitations.empty()) {
+    result.diagnostics.warnings.push_back(dc.model_limitations);
+  }
   return result;
 }
 
@@ -81,11 +78,13 @@ PowerFlowResult AdaptiveHybridSolver::solve(const PowerFlowProblem& problem) {
 PowerFlowResult ContinuationPowerFlowSolver::solve(const PowerFlowProblem& problem) {
   powerflow::CpfSolver solver;
   solver.opts.trace_all_buses = true;
+  solver.opts.corrector_max_iter = problem.options.max_iter;
+  solver.opts.corrector_tol = problem.options.tol;
   const powerflow::CpfResult cpf = solver.solve(
       problem.network, powerflow::CpfDirection::proportional(problem.network));
 
   PowerFlowResult result;
-  result.converged = !cpf.trace.empty();
+  result.converged = cpf.trace.size() >= 2;
   result.iterations = cpf.total_pf_solves;
   result.diagnostics.converged = result.converged;
   result.diagnostics.iterations = result.iterations;
@@ -99,6 +98,14 @@ PowerFlowResult ContinuationPowerFlowSolver::solve(const PowerFlowProblem& probl
     result.vm = nose->vm;
     result.va = nose->va;
     result.vdc = nose->vdc;
+    result.residual = nose->residual;
+  }
+  result.diagnostics.final_mismatch_norm = result.residual;
+  result.diagnostics.warnings = cpf.warnings;
+  result.converter_model_scope.model_scope = cpf.model_scope;
+  if (!result.converged) {
+    result.diagnostics.warnings.push_back(
+        "Continuation PF did not advance beyond the base operating point.");
   }
   return result;
 }
@@ -127,11 +134,6 @@ std::unique_ptr<IPowerFlowSolver> PowerFlowSolverFactory::create(
     default:
       return std::make_unique<NewtonHybridSolver>();
   }
-}
-
-std::unique_ptr<IPowerFlowSolver> PowerFlowSolverFactory::create(
-    const PowerFlowOptions&) {
-  return create(PowerFlowMethod::Newton);
 }
 
 }  // namespace hacdcpf

@@ -210,7 +210,9 @@ double net_fixed_dc_injection_mw(const SolverData& data, int bus_idx) {
     if (st.in_service && st.bus - 1 == bus_idx) net += st.p_mw;
   }
   for (const auto& sg : data.dc_static_generators) {
-    if (sg.in_service && sg.bus - 1 == bus_idx) net += sg.p_mw * sg.scaling;
+    if (sg.in_service && sg.bus - 1 == bus_idx) {
+      net += sg.p_mw * model::sanitize_scaling(sg.scaling);
+    }
   }
   for (const auto& pv : data.dc_pv_arrays) {
     if (pv.in_service && pv.bus - 1 == bus_idx) net += pv.p_set_mw;
@@ -897,6 +899,21 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
   using Clock = std::chrono::steady_clock;
   PowerFlowResult out;
 
+  const bool has_vdc_vac = std::any_of(
+      data.converters.begin(), data.converters.end(), [](const VSCConverter& conv) {
+        return conv.in_service && conv.control_mode == ConverterMode::VDC_VAC;
+      });
+  if (has_vdc_vac && !data.enable_augmented_equations) {
+    SolverData augmented_data = data;
+    augmented_data.enable_augmented_equations = true;
+    PowerFlowResult augmented = solve(augmented_data, opt, init);
+    augmented.diagnostics.warnings.push_back(
+        "[PF-VDC-VAC-01] Enabled the VDC_VAC augmented voltage equation; "
+        "the legacy clamped-voltage path is overdetermined.");
+    cache_.valid = false;
+    return augmented;
+  }
+
   // The public facade keeps one NewtonSolver per thread. Reuse its state
   // workspace across ordinary solves, but use a local workspace for recursive
   // homotopy calls so an inner solve cannot overwrite the outer state.
@@ -1147,7 +1164,10 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
   };
 
   auto run_line_search = [&](const Eigen::VectorXd& direction,
-                             double base_resid,
+                             const Eigen::VectorXd& rhs,
+                             const Eigen::SparseMatrix<double>& jacobian,
+                             const powerflow::NonlinearScaling& scaling,
+                             bool use_scaled_system,
                              int& eval_count,
                              double& elapsed_ms) -> bool {
     eval_count = 0;
@@ -1155,22 +1175,30 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
     vm_best = vm;
     va_best = va;
     vdc_best = vdc;
-    double best_resid = kInf;
-    bool improved = false;
-    double alpha = 1.0;
     const int ls_steps = std::max(1, opt.max_line_search_steps);
+    const double phi_current = 0.5 * rhs.squaredNorm();
+    Eigen::VectorXd direction_for_jacobian = direction;
+    if (use_scaled_system) {
+      direction_for_jacobian =
+          direction.cwiseProduct(scaling.variable_scale());
+    }
+    // mismatch is the Newton RHS -F, while jacobian stores dF/dx.
+    const double directional_derivative =
+        (-rhs).dot(jacobian * direction_for_jacobian);
 
-    // Nonmonotone reference: φ_k^max = max over window of ½‖F‖² values.
-    // When nonmonotone LS is disabled, nm_ref == base_resid (monotone).
-    const double nm_ref = ropts.enable_nonmonotone_linesearch
-                              ? nm_linesearch.reference_merit()
-                              : base_resid;
-    // Use the actual nm_ref if it's a valid finite value, else fall back.
-    const double reference = (std::isfinite(nm_ref) && nm_ref >= base_resid)
-                                 ? nm_ref
-                                 : base_resid;
-
-    for (int ls = 0; ls < ls_steps; ++ls) {
+    powerflow::NonmonotoneLineSearch monotone_search(
+        1, ropts.armijo_c, ropts.line_search_beta);
+    if (!ropts.enable_nonmonotone_linesearch) {
+      monotone_search.push_merit(phi_current);
+    }
+    const auto& search = ropts.enable_nonmonotone_linesearch
+                             ? nm_linesearch
+                             : monotone_search;
+    const auto search_result = search.search(
+        phi_current,
+        directional_derivative,
+        ls_steps,
+        [&](double alpha) {
       vm_trial = vm;
       va_trial = va;
       vdc_trial = vdc;
@@ -1192,42 +1220,28 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
       if (!skip_vac_enforcement) enforce_vac_setpoints(converters, vm_trial);
       const double trial_resid = evaluate_trial_state(vm_trial, va_trial, vdc_trial);
       eval_count += 1;
+      if (!std::isfinite(trial_resid)) {
+        return kInf;
+      }
+      const Eigen::VectorXd trial_rhs =
+          use_scaled_system
+              ? scaling.apply_residual_scaling(mismatch_trial)
+              : mismatch_trial;
+      return 0.5 * trial_rhs.squaredNorm();
+    });
 
-      if (trial_resid < best_resid) {
-        best_resid = trial_resid;
-        vm_best = vm_trial;
-        va_best = va_trial;
-        vdc_best = vdc_trial;
-        improved = (trial_resid < base_resid);
-      }
-      if (trial_resid < base_resid) {
-        break;
-      }
-      alpha *= 0.5;
+    if (search_result.accepted) {
+      // search() returns immediately on acceptance, so the trial buffers hold
+      // exactly the accepted state.
+      vm_best = vm_trial;
+      va_best = va_trial;
+      vdc_best = vdc_trial;
     }
 
     auto t1 = Clock::now();
     elapsed_ms = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(t1 - t0)
                      .count();
-    double max_ratio = 1.01;
-    if (base_resid > 10.0) {
-      max_ratio = 2.0;
-    } else if (base_resid > 1.0) {
-      max_ratio = 1.5;
-    } else if (base_resid > 0.1) {
-      max_ratio = 1.2;
-    }
-    if (!improved && std::isfinite(best_resid) && best_resid <= base_resid * max_ratio) {
-      improved = true;
-    }
-    // Nonmonotone acceptance: if still not improved but best_resid is within the
-    // nonmonotone reference window, accept the step (GLL condition post-hoc).
-    if (!improved && ropts.enable_nonmonotone_linesearch &&
-        std::isfinite(best_resid) && std::isfinite(reference) &&
-        best_resid <= reference * (1.0 + ropts.armijo_c)) {
-      improved = true;
-    }
-    return improved;
+    return search_result.accepted;
   };
 
   auto solve_linear = [&](const Eigen::SparseMatrix<double>& jac,
@@ -1321,13 +1335,13 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
 
       BusControlState& mode = bus_control[static_cast<size_t>(i)];
       if (mode == BusControlState::PVActive) {
-        if (qg_implied > qmax + q_hys) {
+        if (qg_implied > qmax) {
           ac_buses[static_cast<size_t>(i)].bus_type = BusType::PQ;
           qg_state[i] = qmax;
           mode = BusControlState::PQLimited;
           any_switched = true;
           out.profiling.pv_to_pq_switches += 1;
-        } else if (qg_implied < qmin - q_hys) {
+        } else if (qg_implied < qmin) {
           ac_buses[static_cast<size_t>(i)].bus_type = BusType::PQ;
           qg_state[i] = qmin;
           mode = BusControlState::PQLimited;
@@ -1336,11 +1350,17 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
         }
       } else if (allow_restore && mode == BusControlState::PQLimited) {
         const double vm_set = gen_limits.vm_set_pu[static_cast<size_t>(i)];
-        if (qg_implied > qmin + q_hys && qg_implied < qmax - q_hys &&
-            std::abs(vm[i] - vm_set) < vm_tol) {
+        const double limit_tol = std::max(1e-10, q_hys * 1e-6);
+        const bool at_upper = std::abs(qg_state[i] - qmax) <= limit_tol;
+        const bool at_lower = std::abs(qg_state[i] - qmin) <= limit_tol;
+        const bool has_reactive_freedom = qmax - qmin > limit_tol;
+        const bool can_restore =
+            has_reactive_freedom &&
+            ((at_upper && vm[i] > vm_set + vm_tol) ||
+             (at_lower && vm[i] < vm_set - vm_tol));
+        if (can_restore) {
           ac_buses[static_cast<size_t>(i)].bus_type = BusType::PV;
           vm[i] = vm_set;
-          qg_state[i] = qg_implied;
           mode = BusControlState::PVActive;
           any_switched = true;
           out.profiling.pq_to_pv_switches += 1;
@@ -1353,7 +1373,11 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
   // Globalization state (Direction 4).
   using GS = PowerFlowOptions::GlobalizationStrategy;
   double tr_delta = opt.trust_region_radius0;
-  double ptc_delta_t = opt.ptc_delta0;
+  powerflow::PtcSerController ptc_ser(
+      ropts.ptc_dt0,
+      ropts.ptc_dt_min,
+      ropts.ptc_dt_max,
+      ropts.ptc_gamma);
   double prev_resid = kInf;
   double resid_ncp_initial = -1.0;   // first residual seen with NCP active (Gap 2)
 
@@ -1493,7 +1517,9 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
       }
 
       // ── Phase 2: Push merit into nonmonotone LS window ──────────────
-      nm_linesearch.push_merit(resid);
+      if (ropts.enable_nonmonotone_linesearch) {
+        nm_linesearch.push_merit(0.5 * rhs_for_linear.squaredNorm());
+      }
 
       // ── Phase 2: Anneal smooth-NCP μ when semi-smooth Newton is active ──
       if (data.enable_semi_smooth_newton && ropts.enable_smooth_ncp) {
@@ -1542,13 +1568,21 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
                 ? solve_linear_nk(jac_for_linear, rhs_for_linear, dx_scaled, linear_ms_this_iter)
                 : solve_linear(jac_for_linear, rhs_for_linear, dx_scaled, linear_ms_this_iter);
         if (tr_step_ok) {
-          dx = use_scaled_linear_system ? scaling.unscale_step(dx_scaled) : dx_scaled;
-          clip_step(dx, jac_ctx, opt);
           // Compute gradient g = Jᵀ·F  and J·g for Cauchy step.
           Eigen::VectorXd neg_mismatch = -rhs_for_linear;
           Eigen::VectorXd gradient = jac_for_linear.transpose() * neg_mismatch;
           Eigen::VectorXd jg = jac_for_linear * gradient;
-          Eigen::VectorXd step = dogleg_step(dx, gradient, jg, tr_delta);
+          Eigen::VectorXd step_scaled =
+              dogleg_step(dx_scaled, gradient, jg, tr_delta);
+          Eigen::VectorXd step = use_scaled_linear_system
+                                     ? scaling.unscale_step(step_scaled)
+                                     : step_scaled;
+          clip_step(step, jac_ctx, opt);
+          if (use_scaled_linear_system) {
+            step_scaled = step.cwiseProduct(scaling.variable_scale());
+          } else {
+            step_scaled = step;
+          }
 
           // Apply trial step.
           vm_trial = vm; va_trial = va; vdc_trial = vdc;
@@ -1567,13 +1601,18 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
           const double trial_resid = evaluate_trial_state(vm_trial, va_trial, vdc_trial);
           ls_evals_this_iter += 1;
 
-          const double f_sq = resid * resid;
-          const double f_new_sq = trial_resid * trial_resid;
-          Eigen::VectorXd model_step = neg_mismatch + cache_.pattern.matrix * step;
+          (void)trial_resid;
+          const Eigen::VectorXd trial_rhs = use_scaled_linear_system
+                                                ? scaling.apply_residual_scaling(mismatch_trial)
+                                                : mismatch_trial;
+          const double f_sq = rhs_for_linear.squaredNorm();
+          const double f_new_sq = trial_rhs.squaredNorm();
+          Eigen::VectorXd model_step =
+              neg_mismatch + jac_for_linear * step_scaled;
           const double pred_red = f_sq - model_step.squaredNorm();
 
           accepted_step = trust_region_update(f_sq, f_new_sq, pred_red,
-                                               tr_delta, step.norm(), opt.trust_region_max);
+                                               tr_delta, step_scaled.norm(), opt.trust_region_max);
           if (accepted_step) {
             vm_best = vm_trial; va_best = va_trial; vdc_best = vdc_trial;
           }
@@ -1585,7 +1624,7 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
         // J + (1/δt)·I has the same block structure as for J alone, so the
         // existing SchurBlockPreconditioner works directly.
         Eigen::SparseMatrix<double> ptc_jac = jac_for_linear;
-        ptc_jac.diagonal().array() += 1.0 / ptc_delta_t;
+        ptc_jac.diagonal().array() += 1.0 / ptc_ser.dt();
         const bool ptc_step_ok =
             use_nk_this_iter
                 ? solve_linear_nk(ptc_jac, rhs_for_linear, dx_scaled, linear_ms_this_iter)
@@ -1609,8 +1648,9 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
           if (!skip_vac_enforcement) enforce_vac_setpoints(converters, vm_best);
           accepted_step = true;
         }
-        // Update pseudo-timestep using SER formula.
-        ptc_update_timestep(prev_resid, resid, ptc_delta_t, opt.ptc_growth);
+        if (std::isfinite(prev_resid) && prev_resid > 0.0) {
+          ptc_ser.update(prev_resid, resid);
+        }
       } else {
         // Default: line search (existing code).
         // Phase 5: substitute NK-GMRES when condition is flagged bad.
@@ -1618,19 +1658,25 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
           if (solve_linear_nk(jac_for_linear, rhs_for_linear, dx_scaled, linear_ms_this_iter)) {
             dx = use_scaled_linear_system ? scaling.unscale_step(dx_scaled) : dx_scaled;
             clip_step(dx, jac_ctx, opt);
-            accepted_step = run_line_search(dx, resid, ls_evals_this_iter, ls_ms_this_iter);
+            accepted_step = run_line_search(
+                dx, rhs_for_linear, jac_for_linear, scaling,
+                use_scaled_linear_system, ls_evals_this_iter, ls_ms_this_iter);
           }
           // If NK step failed or didn't improve, fall through to standard LU below.
           if (!accepted_step) {
             if (solve_linear(jac_for_linear, rhs_for_linear, dx_scaled, linear_ms_this_iter)) {
               dx = use_scaled_linear_system ? scaling.unscale_step(dx_scaled) : dx_scaled;
-              accepted_step = run_line_search(dx, resid, ls_evals_this_iter, ls_ms_this_iter);
+              accepted_step = run_line_search(
+                  dx, rhs_for_linear, jac_for_linear, scaling,
+                  use_scaled_linear_system, ls_evals_this_iter, ls_ms_this_iter);
             }
           }
         } else {
           if (solve_linear(jac_for_linear, rhs_for_linear, dx_scaled, linear_ms_this_iter)) {
             dx = use_scaled_linear_system ? scaling.unscale_step(dx_scaled) : dx_scaled;
-            accepted_step = run_line_search(dx, resid, ls_evals_this_iter, ls_ms_this_iter);
+            accepted_step = run_line_search(
+                dx, rhs_for_linear, jac_for_linear, scaling,
+                use_scaled_linear_system, ls_evals_this_iter, ls_ms_this_iter);
           }
         }
 
@@ -1647,7 +1693,10 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
             if (solve_linear(reg_jac, rhs_for_linear, dx_scaled, linear_ms_this_iter)) {
               dx = use_scaled_linear_system ? scaling.unscale_step(dx_scaled) : dx_scaled;
               clip_step(dx, jac_ctx, opt);
-              if (run_line_search(dx, resid, ls_evals_this_iter, ls_ms_this_iter)) {
+              if (run_line_search(
+                      dx, rhs_for_linear, jac_for_linear, scaling,
+                      use_scaled_linear_system, ls_evals_this_iter,
+                      ls_ms_this_iter)) {
                 accepted_step = true;
                 break;
               }
@@ -1656,30 +1705,6 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
           }
         }
 
-        if (!accepted_step && dx.allFinite() && dx.cwiseAbs().maxCoeff() > 0.0 && resid > 0.1) {
-          vm_trial = vm; va_trial = va; vdc_trial = vdc;
-          constexpr double alpha_escape = 0.5;
-          for (int k = 0; k < jac_ctx.np; ++k) {
-            va_trial[jac_ctx.non_slack[static_cast<size_t>(k)]] += alpha_escape * dx[k];
-          }
-          for (int k = 0; k < jac_ctx.nq; ++k) {
-            const int bus = jac_ctx.pq[static_cast<size_t>(k)];
-            vm_trial[bus] = std::max(vm_trial[bus] + alpha_escape * dx[jac_ctx.np + k], kMinVm);
-          }
-          for (int k = 0; k < jac_ctx.ndc_eq; ++k) {
-            const int bus = jac_ctx.dc_non_slack[static_cast<size_t>(k)];
-            vdc_trial[bus] =
-                std::max(vdc_trial[bus] + alpha_escape * dx[jac_ctx.np + jac_ctx.nq + k], kMinVm);
-          }
-          if (!skip_vac_enforcement) enforce_vac_setpoints(converters, vm_trial);
-          const double escape_resid = evaluate_trial_state(vm_trial, va_trial, vdc_trial);
-          ls_evals_this_iter += 1;
-          if (std::isfinite(escape_resid) && escape_resid < resid * 2.0) {
-            vm_best = vm_trial; va_best = va_trial; vdc_best = vdc_trial;
-            accepted_step = true;
-            out.profiling.rejected_steps += 1;
-          }
-        }
       }  // end globalization dispatch
 
       // ── Gap 3: Auto-schedule Phase 3/4 in-loop recovery ───────────────
@@ -1699,9 +1724,9 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
             Eigen::SparseMatrix<double> JtJ =
                 (jac_for_linear.transpose() * jac_for_linear).pruned(0.0);
             JtJ.diagonal().array() += lm_lambda;
-            // RHS = Jᵀ·F (the negative gradient of ½‖F‖²).
+            // J stores -F', so J^T F is the negative merit gradient.
             const Eigen::VectorXd lm_rhs =
-                -(jac_for_linear.transpose() * rhs_for_linear);
+                jac_for_linear.transpose() * rhs_for_linear;
             Eigen::VectorXd lm_dx;
             if (cache_.solver->factorize(JtJ) &&
                 cache_.solver->solve(lm_rhs, lm_dx) && lm_dx.allFinite()) {
@@ -1709,7 +1734,10 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
                 lm_dx = scaling.unscale_step(lm_dx);
               }
               clip_step(lm_dx, jac_ctx, opt);
-              if (run_line_search(lm_dx, resid, ls_evals_this_iter, ls_ms_this_iter)) {
+              if (run_line_search(
+                      lm_dx, rhs_for_linear, jac_for_linear, scaling,
+                      use_scaled_linear_system, ls_evals_this_iter,
+                      ls_ms_this_iter)) {
                 dx = lm_dx;
                 accepted_step = true;
                 out.profiling.linear_solver_status = "lm_recovery";
@@ -1721,7 +1749,8 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
         // ── PTC recovery step ────────────────────────────────────────────
         if (!accepted_step && ropts.enable_ptc_ser) {
           Eigen::SparseMatrix<double> ptc_jac_rec = jac_for_linear;
-          ptc_jac_rec.diagonal().array() += 1.0 / std::max(ptc_delta_t, 1e-8);
+          ptc_jac_rec.diagonal().array() +=
+              1.0 / std::max(ptc_ser.dt(), 1e-8);
           Eigen::VectorXd ptc_dx;
           if (solve_linear(ptc_jac_rec, rhs_for_linear, ptc_dx, linear_ms_this_iter) &&
               ptc_dx.allFinite()) {

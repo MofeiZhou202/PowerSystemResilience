@@ -117,6 +117,34 @@ JacobianPattern build_jacobian_pattern(const SolverData& data, const JacobianCon
                          seen);
   }
 
+  // A GFM converter's AC terminal is a slack bus, so it has no AC equation
+  // row. Its DC energy balance still depends on the complete AC network
+  // injection at that bus. Reserve those cross-domain slots unconditionally.
+  for (const auto& conv : data.converters) {
+    if (!conv.in_service || conv.control_mode != ConverterMode::AC_GRID_FORMING) {
+      continue;
+    }
+    const int ac_bus = conv.bus_ac - 1;
+    const int dc_bus = conv.bus_dc - 1;
+    if (ac_bus < 0 || ac_bus >= ctx.n || dc_bus < 0 || dc_bus >= ctx.ndc) {
+      continue;
+    }
+    const int dc_row = ctx.dc_row[static_cast<size_t>(dc_bus)];
+    if (dc_row < 0) continue;
+    for (int col = 0; col < data.ybus.outerSize(); ++col) {
+      for (Eigen::SparseMatrix<std::complex<double>>::InnerIterator it(data.ybus, col);
+           it;
+           ++it) {
+        if (it.row() != ac_bus) continue;
+        const int neighbor = static_cast<int>(it.col());
+        add_pattern_position(
+            dc_row, ctx.va_col[static_cast<size_t>(neighbor)], triplets, seen);
+        add_pattern_position(
+            dc_row, ctx.vm_col[static_cast<size_t>(neighbor)], triplets, seen);
+      }
+    }
+  }
+
   // Cross-coupling sparsity for exact coupled Jacobian (Direction 1).
   if (data.enable_coupled_jacobian) {
     for (const auto& conv : data.converters) {
@@ -306,8 +334,43 @@ JacobianPattern build_jacobian_pattern(const SolverData& data, const JacobianCon
         pattern.b_diag[static_cast<size_t>(i)] = entry.b;
       }
 
-      if (p_row >= 0 || q_row >= 0) {
-        pattern.ac_entries.push_back(entry);
+      // pcalc/qcalc are physical network injections, not merely Jacobian-row
+      // work arrays. Keep slack rows for GFM energy coupling and result audits.
+      pattern.ac_entries.push_back(entry);
+    }
+  }
+
+  pattern.gfm_network_coupling_entries.clear();
+  for (size_t ci = 0; ci < data.converters.size(); ++ci) {
+    const auto& conv = data.converters[ci];
+    if (!conv.in_service || conv.control_mode != ConverterMode::AC_GRID_FORMING) {
+      continue;
+    }
+    const int ac_bus = conv.bus_ac - 1;
+    const int dc_bus = conv.bus_dc - 1;
+    if (ac_bus < 0 || ac_bus >= ctx.n || dc_bus < 0 || dc_bus >= ctx.ndc) {
+      continue;
+    }
+    const int dc_row = ctx.dc_row[static_cast<size_t>(dc_bus)];
+    if (dc_row < 0) continue;
+    for (int col = 0; col < data.ybus.outerSize(); ++col) {
+      for (Eigen::SparseMatrix<std::complex<double>>::InnerIterator it(data.ybus, col);
+           it;
+           ++it) {
+        if (it.row() != ac_bus) continue;
+        const int neighbor = static_cast<int>(it.col());
+        JacobianPattern::GFMNetworkCouplingEntry entry;
+        entry.conv_index = static_cast<int>(ci);
+        entry.ac_bus = ac_bus;
+        entry.dc_bus = dc_bus;
+        entry.neighbor_bus = neighbor;
+        entry.g = it.value().real();
+        entry.b = it.value().imag();
+        const int va_col = ctx.va_col[static_cast<size_t>(neighbor)];
+        const int vm_col = ctx.vm_col[static_cast<size_t>(neighbor)];
+        if (va_col >= 0) entry.dc_va_nz = lookup_nz(pattern, dc_row, va_col);
+        if (vm_col >= 0) entry.dc_vm_nz = lookup_nz(pattern, dc_row, vm_col);
+        pattern.gfm_network_coupling_entries.push_back(entry);
       }
     }
   }

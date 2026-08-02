@@ -9,6 +9,8 @@
 /// island-reference logic can reason about converters uniformly instead of
 /// re-deriving behaviour from the raw enum at every call site.
 
+#include <cmath>
+
 #include "hacdcpf/model/converter_components.hpp"
 #include "hacdcpf/model/enum_strings.hpp"
 #include "hacdcpf/model/enums/converter_enums.hpp"
@@ -63,7 +65,7 @@ inline DeviceControlRole resolve_device_control_role(const VSCConverter& conv) {
                               conv.control_mode == ConverterMode::VDC_VAC ||
                               conv.control_mode == ConverterMode::DC_V_DROOP_AC_V);
   const bool forms_dc_voltage =
-      (dc_droop_mode && conv.k_vdc != 0.0) || conv.grid_forming;
+      (dc_droop_mode && std::abs(conv.k_vdc) > 1e-12) || conv.grid_forming;
 
   switch (conv.control_mode) {
     case ConverterMode::PQ_MODE:  // Mode 3: AC_PQ
@@ -82,19 +84,19 @@ inline DeviceControlRole resolve_device_control_role(const VSCConverter& conv) {
       r.controls_dc_v_droop = true;
       r.controls_ac_q = true;
       r.ac_p_is_free = true;
-      r.provides_dc_v_reference = true;
+      r.provides_dc_v_reference = forms_dc_voltage;
       break;
     case ConverterMode::VDC_VAC:  // Mode 5: Udc + Vs (legacy qac=0 realization)
       r.controls_dc_v_droop = true;
       r.ac_p_is_free = true;
-      r.provides_dc_v_reference = true;
+      r.provides_dc_v_reference = forms_dc_voltage;
       break;
     case ConverterMode::DC_V_DROOP_AC_V:  // Mode 6: droop Udc + Vs
       r.controls_dc_v_droop = true;
       r.controls_ac_v = true;
       r.ac_p_is_free = true;
       r.ac_q_is_free = true;
-      r.provides_dc_v_reference = true;
+      r.provides_dc_v_reference = forms_dc_voltage;
       r.provides_ac_voltage_reference = true;
       break;
     case ConverterMode::AC_GRID_FORMING:  // Mode 1: δs + Vs

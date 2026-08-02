@@ -62,8 +62,11 @@ struct LCCOperatingPoint {
   double q_ac_mvar{0.0};
   double p_dc_mw{0.0};
   bool id_at_limit{false};        // current clamped at rated_current_a
+  bool ud_at_floor{false};        // raw U_d <= 1 kV; d()/dVdc is zero
   bool alpha_beyond_range{false}; // cos(alpha) argument outside [-1,1]:
                                   // even alpha = 0 cannot reach U_d (tap needed)
+  bool gamma_beyond_range{false}; // independent inverter extinction-angle
+                                  // back-calculation range indicator
   bool valid{false};              // false when inputs/config were unusable
 };
 

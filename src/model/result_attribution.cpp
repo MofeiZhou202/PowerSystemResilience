@@ -90,7 +90,7 @@ void add_collection(RichResultAttribution& out, const Collection& collection,
     row.position = static_cast<int>(i);
     row.name = display_name(component, fallback);
     row.in_service = component_in_service(component);
-    row.recovery = RecoveryClass::AuditOnly;
+    row.recovery = RecoveryClass::Unsupported;
     row.recovery_reason =
         "rich identity is total; solved observable is not yet attached";
     initialize(row, component);
@@ -406,8 +406,17 @@ RichResultAttribution CanonicalToRichOperator::apply(
                  });
   add_collection(out, rich.ac.asymmetric_loads, "asymmetric_load", "AC",
                  "Asymmetric Load", [&](auto& row, const auto& load) {
-                   set_value(row, "p_mw", load.pa_mw + load.pb_mw + load.pc_mw, "MW");
-                   set_value(row, "q_mvar", load.qa_mvar + load.qb_mvar + load.qc_mvar, "MVar");
+                   const double scaling =
+                       std::isfinite(load.scaling)
+                           ? std::max(0.0, load.scaling)
+                           : 0.0;
+                   set_value(row, "p_mw",
+                             scaling * (load.pa_mw + load.pb_mw + load.pc_mw),
+                             "MW");
+                   set_value(row, "q_mvar",
+                             scaling * (load.qa_mvar + load.qb_mvar +
+                                        load.qc_mvar),
+                             "MVar");
                  });
   add_collection(out, rich.ac.motors, "motor", "AC", "Motor",
                  [&](auto& row, const auto& motor) {
@@ -588,8 +597,12 @@ RichResultAttribution CanonicalToRichOperator::apply(
         set_terminal(*row, "to", flow.bus_to, false, flow.pt_mw,
                      flow.qt_mvar, bus_voltage(rich, rich_pf, flow.bus_to, false),
                      true, true, true);
-        row->recovery = electrical;
-        row->recovery_reason = "collapsed-device terminal-cut attribution";
+        row->recovery = flow.bus_from == flow.bus_to
+                            ? RecoveryClass::AuditOnly
+                            : electrical;
+        row->recovery_reason = flow.bus_from == flow.bus_to
+                                   ? "same-bus PF does not identify a physical cut flow"
+                                   : "collapsed-device terminal-cut attribution";
       }
     }
     for (const auto& flow : device_flows.ac_circuit_breakers) {
@@ -600,8 +613,12 @@ RichResultAttribution CanonicalToRichOperator::apply(
         set_terminal(*row, "to", flow.bus_to, false, flow.pt_mw,
                      flow.qt_mvar, bus_voltage(rich, rich_pf, flow.bus_to, false),
                      true, true, true);
-        row->recovery = electrical;
-        row->recovery_reason = "collapsed-device terminal-cut attribution";
+        row->recovery = flow.bus_from == flow.bus_to
+                            ? RecoveryClass::AuditOnly
+                            : electrical;
+        row->recovery_reason = flow.bus_from == flow.bus_to
+                                   ? "same-bus PF does not identify a physical cut flow"
+                                   : "collapsed-device terminal-cut attribution";
       }
     }
   }
@@ -646,9 +663,12 @@ RichResultAttribution CanonicalToRichOperator::apply(
                      true, true, true);
         set_terminal(*row, "to", breaker.bus_to, false, -p, -q, vm,
                      true, true, true);
-        row->recovery = RecoveryClass::Strong;
+        row->recovery = count == 1 ? RecoveryClass::Strong
+                                   : RecoveryClass::Approximate;
         row->recovery_reason =
-            "same-bus source-breaker cut attributed from external-grid dispatch";
+            count == 1
+                ? "same-bus source-breaker cut attributed from external-grid dispatch"
+                : "multiple same-bus source breakers use an equal-share convention";
       }
     }
   }
@@ -706,6 +726,19 @@ RichResultAttribution CanonicalToRichOperator::apply(
         row->recovery = RecoveryClass::Strong;
         row->recovery_reason = "OPF renewable map translated to rich identity";
       }
+    }
+  }
+
+  // An out-of-service component cannot carry an operating-point observable.
+  // Preserve its row/identity while forcing every numeric result and terminal
+  // flow to zero across all component types.
+  for (auto& row : out.components) {
+    if (row.in_service) continue;
+    for (auto& value : row.values) value.value = 0.0;
+    for (auto& terminal : row.terminals) {
+      terminal.p_mw = 0.0;
+      terminal.q_mvar = 0.0;
+      terminal.v_pu = 0.0;
     }
   }
 

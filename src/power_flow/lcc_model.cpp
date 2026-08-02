@@ -173,6 +173,11 @@ LCCOperatingPoint lcc_operating_point(const LCCConverter& conv,
       !std::isfinite(commutation_e_kv) || !std::isfinite(ud_kv)) {
     return op;
   }
+  if (conv.control_mode == LCCControlMode::ConstantPower &&
+      (!std::isfinite(conv.p_set_mw) || conv.p_set_mw <= 0.0)) {
+    return op;
+  }
+  op.ud_at_floor = ud_kv <= kMinUdKv;
   ud_kv = std::max(ud_kv, kMinUdKv);
 
   const StationParams p =
@@ -202,7 +207,7 @@ LCCOperatingPoint lcc_operating_point(const LCCConverter& conv,
   op.alpha_deg = back_calc_alpha(ud_kv, id, p, beyond);
   op.alpha_beyond_range = beyond;
   op.gamma_deg = back_calc_gamma(ud_kv, id, p, beyond);
-  op.alpha_beyond_range = op.alpha_beyond_range || beyond;
+  op.gamma_beyond_range = beyond;
   op.valid = true;
   return op;
 }
@@ -329,6 +334,7 @@ double lcc_dc_injection(const SolverData& data,
                         const Eigen::VectorXd& vdc) {
   LCCOperatingPoint op;
   if (!lcc_eval_at_state(data, conv, vm, vdc, op)) return 0.0;
+  if (op.ud_at_floor) return 0.0;
   return op.p_dc_mw / data.base_mva;
 }
 
@@ -338,6 +344,7 @@ double lcc_dc_jacobian_vdc(const SolverData& data,
                            const Eigen::VectorXd& vdc) {
   LCCOperatingPoint op;
   if (!lcc_eval_at_state(data, conv, vm, vdc, op)) return 0.0;
+  if (op.ud_at_floor) return 0.0;
 
   const double base_kv = lcc_dc_base_kv(data, conv);
   const bool rectifier = conv.station_role == LCCStationRole::Rectifier;
@@ -468,10 +475,13 @@ LCCJacobian lcc_ac_dc_jacobian(const SolverData& data,
       shared_ac_voltage
           ? 0.0
           : dpterm_dud0_commutation * dud0_commutation_dvm;
-  jac.dpac_dvdc = sign * dpterm_dud * base_kv / data.base_mva;
+  const double dud_dvdc_scale = op.ud_at_floor ? 0.0 : 1.0;
+  jac.dpac_dvdc =
+      sign * dpterm_dud * base_kv / data.base_mva * dud_dvdc_scale;
   jac.dpac_dvm = sign * dpterm_dvm_valve / data.base_mva;
   jac.dpac_dvm_comm = sign * dpterm_dvm_comm / data.base_mva;
-  jac.dpdc_dvdc = -sign * dpterm_dud * base_kv / data.base_mva;
+  jac.dpdc_dvdc =
+      -sign * dpterm_dud * base_kv / data.base_mva * dud_dvdc_scale;
   jac.dpdc_dvm = -sign * dpterm_dvm_valve / data.base_mva;
   jac.dpdc_dvm_comm = -sign * dpterm_dvm_comm / data.base_mva;
 
@@ -488,7 +498,8 @@ LCCJacobian lcc_ac_dc_jacobian(const SolverData& data,
         -dpterm_dvm_valve * s / ud -
         (p_term / ud) * (ud0_terminal / s) * dud0_terminal_dvm;
     const double dq_dvm_comm = -dpterm_dvm_comm * s / ud;
-    jac.dqac_dvdc = dq_dud * base_kv / data.base_mva;
+    jac.dqac_dvdc =
+        dq_dud * base_kv / data.base_mva * dud_dvdc_scale;
     jac.dqac_dvm = dq_dvm_valve / data.base_mva;
     jac.dqac_dvm_comm = dq_dvm_comm / data.base_mva;
   }

@@ -980,9 +980,8 @@ TEST_CASE("Three-phase NR stamps grounded-wye transformer zero-sequence magnetiz
   CHECK(mag_lv.vm_a_pu < open_lv.vm_a_pu);
   CHECK(std::abs(mag_lv.vm_a_pu - mag_lv.vm_b_pu) < 5e-4);
   CHECK(std::abs(mag_lv.vm_b_pu - mag_lv.vm_c_pu) < 5e-4);
-  CHECK(wrapped_angle_error_deg(mag_lv.va_a_deg, 0.0) < 2e-2);
-  CHECK(wrapped_angle_error_deg(mag_lv.va_b_deg, 0.0) < 2e-2);
-  CHECK(wrapped_angle_error_deg(mag_lv.va_c_deg, 0.0) < 2e-2);
+  CHECK(wrapped_angle_error_deg(mag_lv.va_a_deg, mag_lv.va_b_deg) < 2e-2);
+  CHECK(wrapped_angle_error_deg(mag_lv.va_b_deg, mag_lv.va_c_deg) < 2e-2);
 }
 
 TEST_CASE("Three-phase NR extends zero-sequence magnetizing semantics across blocked-port wye families", "[integration][powerflow][three_phase_nr][transformer]") {
@@ -1059,6 +1058,19 @@ TEST_CASE("Three-phase NR stamps partial-mask grounded-wye common-mode projector
   const auto& mag_lv = magnetized.bus_voltages[1];
   CHECK(std::abs(mag_lv.vm_a_pu - mag_lv.vm_b_pu) < 5e-4);
   CHECK(std::abs(mag_lv.vm_c_pu) <= 1e-12);
+}
+
+TEST_CASE("Three-phase NR sizes partial-mask Yg-Yg positive-sequence magnetizing blocks",
+          "[integration][powerflow][three_phase_nr][transformer][audit]") {
+  auto sys = build_partial_ynyn0_zero_sequence_magnetizing_case(false);
+  sys.transformers[0].pfe_kw = 12.0;
+  sys.transformers[0].i0_percent = 1.0;
+  const auto result = solve_three_phase_nr(sys, nr_options());
+  REQUIRE(result.converged);
+  REQUIRE(result.transformer_terminal_observations.size() == 1);
+  CHECK(result.bus_voltages[1].vm_a_pu > 0.0);
+  CHECK(result.bus_voltages[1].vm_b_pu > 0.0);
+  CHECK(std::abs(result.bus_voltages[1].vm_c_pu) <= 1e-12);
 }
 
 TEST_CASE("Three-phase NR stamps mixed grounded-delta zero-sequence magnetizing shunts in abc domain", "[integration][powerflow][three_phase_nr][transformer]") {
@@ -1417,11 +1429,10 @@ TEST_CASE("Three-phase NR consumes explicit transformer winding topology without
     const auto vbc = line_voltage(lv, 1, 2);
     const auto hv_vb = phase_voltage(hv, 1);
     const auto hv_vc = phase_voltage(hv, 2);
+    const auto floating_wye_bc = 0.5 * (hv_vb - hv_vc);
 
-    CHECK(std::abs(std::abs(vab) - std::sqrt(3.0) * std::abs(hv_vb)) < 5e-4);
-    CHECK(wrapped_angle_error_deg(angle_deg(vab), angle_deg(hv_vb)) < 1e-2);
-    CHECK(std::abs(std::abs(vbc) - std::sqrt(3.0) * std::abs(hv_vc)) < 5e-4);
-    CHECK(wrapped_angle_error_deg(angle_deg(vbc), angle_deg(hv_vc)) < 1e-2);
+    CHECK(std::abs(vab - std::sqrt(3.0) * floating_wye_bc) < 5e-4);
+    CHECK(std::abs(vbc + std::sqrt(3.0) * floating_wye_bc) < 5e-4);
   }
 
   SECTION("mixed wye-delta path infers canonical open-delta correspondence from connection, clock, and phase_mask alone") {
@@ -1435,11 +1446,10 @@ TEST_CASE("Three-phase NR consumes explicit transformer winding topology without
     const auto vca = line_voltage(lv, 2, 0);
     const auto hv_vb = phase_voltage(hv, 1);
     const auto hv_vc = phase_voltage(hv, 2);
+    const auto floating_wye_bc = 0.5 * (hv_vb - hv_vc);
 
-    CHECK(std::abs(std::abs(vbc) - std::sqrt(3.0) * std::abs(hv_vb)) < 5e-4);
-    CHECK(wrapped_angle_error_deg(angle_deg(vbc), angle_deg(hv_vb)) < 1e-2);
-    CHECK(std::abs(std::abs(vca) - std::sqrt(3.0) * std::abs(hv_vc)) < 5e-4);
-    CHECK(wrapped_angle_error_deg(angle_deg(vca), angle_deg(hv_vc)) < 1e-2);
+    CHECK(std::abs(vbc - std::sqrt(3.0) * floating_wye_bc) < 5e-4);
+    CHECK(std::abs(vca + std::sqrt(3.0) * floating_wye_bc) < 5e-4);
   }
 
   SECTION("mixed wye-delta path accepts one-sided explicit winding correspondence when the wye order is implied by phase_mask") {
@@ -1453,11 +1463,10 @@ TEST_CASE("Three-phase NR consumes explicit transformer winding topology without
     const auto vbc = line_voltage(lv, 1, 2);
     const auto hv_vb = phase_voltage(hv, 1);
     const auto hv_vc = phase_voltage(hv, 2);
+    const auto floating_wye_bc = 0.5 * (hv_vb - hv_vc);
 
-    CHECK(std::abs(std::abs(vab) - std::sqrt(3.0) * std::abs(hv_vb)) < 5e-4);
-    CHECK(wrapped_angle_error_deg(angle_deg(vab), angle_deg(hv_vb)) < 1e-2);
-    CHECK(std::abs(std::abs(vbc) - std::sqrt(3.0) * std::abs(hv_vc)) < 5e-4);
-    CHECK(wrapped_angle_error_deg(angle_deg(vbc), angle_deg(hv_vc)) < 1e-2);
+    CHECK(std::abs(vab - std::sqrt(3.0) * floating_wye_bc) < 5e-4);
+    CHECK(std::abs(vbc + std::sqrt(3.0) * floating_wye_bc) < 5e-4);
   }
 }
 
@@ -1477,13 +1486,13 @@ TEST_CASE("Three-phase NR stamps mixed-phase delta transformer primitives withou
     const auto result = solve_three_phase_nr(build_partial_yd1_case(), nr_options());
     REQUIRE(result.converged);
 
-    const auto& hv = result.bus_voltages[0];
     const auto& lv = result.bus_voltages[1];
     const auto vab = line_voltage(lv, 0, 1);
-    const auto hv_va = phase_voltage(hv, 0);
 
-    CHECK(std::abs(std::abs(vab) - std::sqrt(3.0) * std::abs(hv_va)) < 5e-4);
-    CHECK(wrapped_angle_error_deg(angle_deg(vab), angle_deg(hv_va)) < 1e-2);
+    // A single ungrounded-wye winding has no neutral return, so it cannot
+    // energize the delta side. The small delta anti-float shunt fixes only the
+    // otherwise singular common-mode voltage.
+    CHECK(std::abs(vab) < 5e-8);
     CHECK(std::abs(lv.vm_c_pu) <= 1e-12);
   }
 

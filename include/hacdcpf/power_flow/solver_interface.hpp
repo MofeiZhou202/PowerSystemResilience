@@ -45,7 +45,7 @@ public:
     [[nodiscard]] const char* name() const noexcept override { return "FDPF"; }
 };
 
-/// DC linearised PF.
+/// Lossless balanced-AC B-theta linearised PF (not the independent DC grid solver).
 class DCPowerFlowSolver final : public IPowerFlowSolver {
 public:
     [[nodiscard]] PowerFlowResult solve(const PowerFlowProblem& prob) override;

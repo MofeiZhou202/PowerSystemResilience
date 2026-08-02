@@ -126,6 +126,7 @@ namespace {
 
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kPhaseValueTol = 1e-12;
+constexpr double kMinSeriesImpedancePu = 1e-12;
 
 using Complex = std::complex<double>;
 using ComplexTriplet = Eigen::Triplet<Complex>;
@@ -372,6 +373,16 @@ double transformer_tap_pu(const ThreePhaseTransformer& transformer) {
       transformer.tap_step_percent);
 }
 
+double transformer_fixed_tap_pu(const ThreePhaseTransformer& transformer) {
+  if (!std::isfinite(transformer.fixed_tap_pu) ||
+      transformer.fixed_tap_pu <= kPhaseValueTol) {
+    throw std::runtime_error(
+        "transformer " + std::to_string(transformer.index) +
+        " requires positive finite fixed_tap_pu");
+  }
+  return transformer.fixed_tap_pu;
+}
+
 int transformer_tap_number(const ThreePhaseTransformer& transformer) {
   return transformer.tap_pos - transformer.tap_neutral;
 }
@@ -402,7 +413,10 @@ double bus_base_voltage_volts(const ThreePhaseACBus& bus) {
 }
 
 double bus_base_current_amps(double base_mva, const ThreePhaseACBus& bus) {
-  return base_mva * 1000.0 / std::max(kPhaseValueTol, bus.base_kv);
+  const double base_voltage_factor =
+      (bus.phase_mask.count() == 1) ? 3.0 : std::sqrt(3.0);
+  return base_mva * 1000.0 /
+         (base_voltage_factor * std::max(kPhaseValueTol, bus.base_kv));
 }
 
 int monitored_phase_index_from_node(int monitored_node) {
@@ -593,6 +607,15 @@ Eigen::Matrix3cd build_line_zabc(const ThreePhaseACLine& line) {
   return build_sequence_zabc(z0, z1, z1);
 }
 
+double line_parallel_count(const ThreePhaseACLine& line) {
+  if (line.parallel <= 0) {
+    throw std::runtime_error(
+        "line " + std::to_string(line.index) +
+        " requires a positive parallel circuit count");
+  }
+  return static_cast<double>(line.parallel);
+}
+
 Eigen::Matrix3cd build_phase_matrix(
     const PhaseValueMatrix3& real_matrix,
     const PhaseValueMatrix3& imag_matrix) {
@@ -628,31 +651,34 @@ void validate_line_phase_matrix_against_mask(const ThreePhaseACLine& line) {
 }
 
 Eigen::Matrix3cd build_line_series_matrix(const ThreePhaseACLine& line) {
+  const double parallel = line_parallel_count(line);
   if (line.use_phase_matrix) {
     validate_line_phase_matrix_against_mask(line);
-    return build_phase_matrix(line.r_matrix_pu, line.x_matrix_pu);
+    return build_phase_matrix(line.r_matrix_pu, line.x_matrix_pu) / parallel;
   }
-  return build_line_zabc(line);
+  return build_line_zabc(line) / parallel;
 }
 
 Eigen::Matrix3cd build_line_shunt_half_matrix(const ThreePhaseACLine& line) {
+  const double parallel = line_parallel_count(line);
   if (line.use_phase_matrix) {
     validate_line_phase_matrix_against_mask(line);
     Eigen::Matrix3cd y_shunt = Eigen::Matrix3cd::Zero();
     for (int row = 0; row < 3; ++row) {
       for (int col = 0; col < 3; ++col) {
         y_shunt(row, col) =
-            Complex(0.0, phase_matrix_get(line.b_matrix_pu, row, col) / 2.0);
+            Complex(0.0,
+                    parallel * phase_matrix_get(line.b_matrix_pu, row, col) /
+                        2.0);
       }
     }
     return y_shunt;
   }
 
-  Eigen::Matrix3cd y_shunt = Eigen::Matrix3cd::Zero();
-  for (int phase = 0; phase < 3; ++phase) {
-    y_shunt(phase, phase) = Complex(0.0, line.b1_pu / 2.0);
-  }
-  return y_shunt;
+  return build_sequence_zabc(
+      Complex(0.0, parallel * line.b0_pu / 2.0),
+      Complex(0.0, parallel * line.b1_pu / 2.0),
+      Complex(0.0, parallel * line.b1_pu / 2.0));
 }
 
 ComplexMatrixX select_phase_submatrix(
@@ -1098,14 +1124,15 @@ PrimitiveBranchModel build_line_primitive(
       line.index,
       "to");
 
-  if (!line.use_phase_matrix) {
-    const Complex z1(line.r1_pu, line.x1_pu);
-    if (std::abs(z1) < 1e-20) return primitive;
-  }
-
   const ComplexMatrixX z_sub = select_phase_submatrix(
       build_line_series_matrix(line),
       primitive.from_terminal.phases);
+  if (!z_sub.allFinite() || z_sub.norm() <= kMinSeriesImpedancePu) {
+    throw std::runtime_error(
+        "line " + std::to_string(line.index) +
+        " has zero or numerically unsafe series impedance; project/merge "
+        "zero-impedance topology before three-phase power flow");
+  }
   const ComplexMatrixX y_series = inverse_or_throw(
       z_sub,
       "line " + std::to_string(line.index) + " phase submatrix");
@@ -1133,6 +1160,26 @@ Complex transformer_impedance_from_vk_vkr(
   const double r = std::max(0.0, vkr_percent / 100.0) * scale;
   const double x_sq = std::max(0.0, z * z - r * r);
   return Complex(r, std::sqrt(x_sq));
+}
+
+Complex transformer_positive_sequence_impedance(
+    const ThreePhaseTransformer& transformer,
+    double base_mva) {
+  if (transformer.sn_mva <= kPhaseValueTol || base_mva <= kPhaseValueTol) {
+    throw std::runtime_error(
+        "transformer series impedance requires positive sn_mva/base_mva");
+  }
+  if (transformer.use_signed_series_impedance) {
+    const double scale = base_mva / transformer.sn_mva;
+    return Complex(transformer.signed_series_r_percent / 100.0,
+                   transformer.signed_series_x_percent / 100.0) *
+           scale;
+  }
+  return transformer_impedance_from_vk_vkr(
+      transformer.vk_percent,
+      transformer.vkr_percent,
+      base_mva,
+      transformer.sn_mva);
 }
 
 Complex transformer_magnetizing_admittance(
@@ -1163,6 +1210,11 @@ bool transformer_has_zero_sequence_magnetizing_branch(
 Complex transformer_zero_sequence_impedance(
     const ThreePhaseTransformer& transformer,
     double base_mva) {
+  if (transformer.use_signed_series_impedance &&
+      std::abs(transformer.vk0_percent) <= kPhaseValueTol &&
+      std::abs(transformer.vkr0_percent) <= kPhaseValueTol) {
+    return transformer_positive_sequence_impedance(transformer, base_mva);
+  }
   const double vk0_percent =
       std::abs(transformer.vk0_percent) > kPhaseValueTol
           ? transformer.vk0_percent
@@ -1230,7 +1282,8 @@ ZeroSequencePortAdmittance build_transformer_zero_sequence_port_admittance(
     };
   }
 
-  const double mag0_abs = std::abs(z0) * transformer.mag0_percent;
+  const double mag0_abs =
+      std::abs(z0) * transformer.mag0_percent / 100.0;
   const double x0_mag = mag0_abs / std::sqrt(transformer.mag0_rx * transformer.mag0_rx + 1.0);
   const double r0_mag = x0_mag * transformer.mag0_rx;
   const Complex z_hv = transformer.si0_hv_partial * z0;
@@ -1281,7 +1334,7 @@ PrimitiveBranchModel build_grounded_wye_grounded_wye_primitive(
   primitive.y_tt = k_lv.adjoint() * y_tt_winding * k_lv;
   if (std::abs(y_mag) > kPhaseValueTol) {
     primitive.y_ff +=
-        k_hv.adjoint() * (y_mag * identity_matrix(3)) * k_hv;
+        k_hv.adjoint() * (y_mag * identity_matrix(p0.rows())) * k_hv;
   }
   return primitive;
 }
@@ -1588,6 +1641,11 @@ TransformerConnectionEmbedding build_transformer_connection_embedding(
   TransformerConnectionEmbedding inferred;
   if (is_wye_like_connection(kind)) {
     inferred = build_wye_connection_embedding(terminal);
+    if (kind == TransformerConnectionKind::Wye) {
+      const int n = inferred.matrix.rows();
+      inferred.matrix -= ComplexMatrixX::Constant(
+          n, n, Complex(1.0 / static_cast<double>(n), 0.0));
+    }
   } else if (is_delta_connection(kind)) {
     inferred = build_delta_connection_embedding(terminal, positive_thirty_deg);
   } else {
@@ -2515,17 +2573,12 @@ TransformerPrimitiveRecord build_transformer_primitive(
         " shift_deg conflicts with vector_group clock");
   }
 
-  const double winding_tap_pu = tap_from_step(
-      transformer.tap_pos,
-      transformer.tap_neutral,
-      transformer.tap_step_percent);
-  const CanonicalTapProjection tap_projection =
+  const double winding_tap_pu = transformer_tap_pu(transformer);
+  CanonicalTapProjection tap_projection =
       normalize_transformer_tap_to_from_side(transformer.tap_side, winding_tap_pu);
-  const Complex z1 = transformer_impedance_from_vk_vkr(
-      transformer.vk_percent,
-      transformer.vkr_percent,
-      base_mva,
-      transformer.sn_mva);
+  tap_projection.branch_tap_pu *= transformer_fixed_tap_pu(transformer);
+  const Complex z1 =
+      transformer_positive_sequence_impedance(transformer, base_mva);
   if (std::abs(z1) <= kPhaseValueTol) {
     throw std::runtime_error(
         "transformer " + std::to_string(transformer.index) +
@@ -3182,6 +3235,10 @@ ComplexVectorX resolve_wye_branch_shunt_admittances(
         nominal_phase_terminal_voltage_pu(phase_indices[static_cast<size_t>(local)]);
     total_terminal_current += terminal_shunt_pu(local) * nominal_voltage;
   }
+  // The authored per-phase powers define target terminal currents at the
+  // nominal phase voltages. Neutral KCL therefore gives y_n*V_n=sum(I_target)
+  // exactly. The (sum(y_branch)+y_n) denominator belongs to the subsequent
+  // forward Kron reduction once the calibrated branch admittances are known.
   const Complex neutral_voltage = total_terminal_current / y_neutral_pu;
 
   for (int local = 0; local < terminal_shunt_pu.size(); ++local) {
@@ -3437,6 +3494,7 @@ struct LocalNeutralEquationEvaluation {
 struct LocalNeutralSolution {
   Complex neutral_voltage_pu{0.0, 0.0};
   Eigen::Matrix2d jacobian = Eigen::Matrix2d::Identity();
+  bool neutral_voltage_fixed{false};
   ComplexVectorX branch_voltages;
   std::vector<WyeDynamicBranchState> dynamic_branches;
 };
@@ -3693,6 +3751,10 @@ LocalNeutralEquationEvaluation evaluate_local_neutral_equation(
   evaluation.branch_voltages = ComplexVectorX::Zero(phase_count);
   evaluation.dynamic_branches.resize(static_cast<size_t>(phase_count));
   evaluation.residual = load.y_neutral_pu * neutral_voltage;
+  evaluation.jacobian(0, 0) = load.y_neutral_pu.real();
+  evaluation.jacobian(1, 0) = load.y_neutral_pu.imag();
+  evaluation.jacobian(0, 1) = -load.y_neutral_pu.imag();
+  evaluation.jacobian(1, 1) = load.y_neutral_pu.real();
 
   for (int local = 0; local < phase_count; ++local) {
     const Complex branch_voltage = phase_voltages(local) - neutral_voltage;
@@ -3713,15 +3775,13 @@ LocalNeutralEquationEvaluation evaluate_local_neutral_equation(
     evaluation.residual -= dynamic.current_pu;
 
     const Complex dg_dre =
-        load.y_neutral_pu -
-        load.y_shunt_pu(local) * Complex(-1.0, 0.0) -
+        -load.y_shunt_pu(local) * Complex(-1.0, 0.0) -
         dynamic_branch_current_derivative(
             branch_voltage,
             dynamic.power,
             Complex(-1.0, 0.0));
     const Complex dg_dim =
-        load.y_neutral_pu * Complex(0.0, 1.0) -
-        load.y_shunt_pu(local) * Complex(0.0, -1.0) -
+        -load.y_shunt_pu(local) * Complex(0.0, -1.0) -
         dynamic_branch_current_derivative(
             branch_voltage,
             dynamic.power,
@@ -3748,7 +3808,7 @@ LocalNeutralSolution solve_local_neutral_state(
     const auto evaluation =
         evaluate_local_neutral_equation(load, phase_voltages, Complex(0.0, 0.0));
     solution.neutral_voltage_pu = {0.0, 0.0};
-    solution.jacobian = Eigen::Matrix2d::Identity();
+    solution.neutral_voltage_fixed = true;
     solution.branch_voltages = evaluation.branch_voltages;
     solution.dynamic_branches = evaluation.dynamic_branches;
     return solution;
@@ -4064,10 +4124,12 @@ void add_wye_load_contributions(
                   neutral_state.branch_voltages(source_local),
                   neutral_state.dynamic_branches[static_cast<size_t>(source_local)].power,
                   d_phase_source);
-          const Complex d_neutral = solve_local_neutral_linearized(
-              neutral_state.jacobian,
-              -dg_explicit,
-              load.load_index);
+          const Complex d_neutral = neutral_state.neutral_voltage_fixed
+                                        ? Complex(0.0, 0.0)
+                                        : solve_local_neutral_linearized(
+                                              neutral_state.jacobian,
+                                              -dg_explicit,
+                                              load.load_index);
 
           for (size_t local = 0; local < load.nodes.size(); ++local) {
             const bool same_phase = static_cast<int>(local) == source_local;
@@ -4087,7 +4149,7 @@ void add_wye_load_contributions(
                 ctx,
                 load.nodes[local],
                 column_node,
-                ds,
+                -ds,
                 angle_column,
                 trips);
           }
@@ -4204,14 +4266,14 @@ void add_delta_load_contributions(
               ctx,
               load.from_node,
               column_node,
-              ds_from,
+              -ds_from,
               angle_column,
               trips);
           add_power_injection_derivative(
               ctx,
               load.to_node,
               column_node,
-              ds_to,
+              -ds_to,
               angle_column,
               trips);
         };
@@ -4844,7 +4906,9 @@ ComplexVectorX evaluate_fixed_point_current_injections(
     const PhaseSpec& spec,
     const ComplexVectorX& fixed_current,
     const ComplexVectorX& voltage_state) {
-  ComplexVectorX current = fixed_current;
+  // fixed_current is stored in the Newton convention YV + I_fix. The fixed
+  // point KCL is YV = I_device - I_fix.
+  ComplexVectorX current = -fixed_current;
 
   for (int node = 0; node < spec.p_spec.size(); ++node) {
     const Complex s_spec(spec.p_spec[node], spec.q_spec[node]);
@@ -5157,6 +5221,101 @@ ComplexVectorX scatter_compact_current_to_full(
   return full_current;
 }
 
+void append_three_phase_line_model_limitations(
+    const ThreePhaseACSystem& sys,
+    ThreePhaseDPFResult& result) {
+  for (const auto& line : sys.lines) {
+    if (!line.in_service || line.use_phase_matrix) continue;
+    const Complex z0(line.r0_pu, line.x0_pu);
+    const Complex z1(line.r1_pu, line.x1_pu);
+    if (std::abs(z0) <= kPhaseValueTol &&
+        std::abs(z1) > kPhaseValueTol) {
+      result.model_limitations.push_back(
+          "Three-phase line " + std::to_string(line.index) +
+          " has no zero-sequence impedance; z1 was used as an explicit "
+          "fallback for z0.");
+    }
+  }
+  const bool has_unenforced_pv_q_limits = std::any_of(
+      sys.generators.begin(), sys.generators.end(),
+      [&](const ThreePhaseGenerator& generator) {
+        if (!generator.in_service) return false;
+        const auto bus = std::find_if(
+            sys.buses.begin(), sys.buses.end(),
+            [&](const ThreePhaseACBus& candidate) {
+              return candidate.index == generator.bus;
+            });
+        return bus != sys.buses.end() && bus->bus_type == BusType::PV &&
+               (generator.qmax_mvar > generator.qmin_mvar ||
+                std::abs(generator.qmax_mvar) > kPhaseValueTol ||
+                std::abs(generator.qmin_mvar) > kPhaseValueTol);
+      });
+  if (has_unenforced_pv_q_limits) {
+    result.model_limitations.push_back(
+        "Three-phase PV reactive-power limits are not enforced; voltage "
+        "setpoints remain fixed even if implied Q exceeds generator limits.");
+  }
+  const bool has_piecewise_zip = std::any_of(
+      sys.loads.begin(), sys.loads.end(), [](const ThreePhaseLoad& load) {
+        return load.in_service && load.vmax_pu > load.vmin_pu &&
+               (load.const_p_percent < 100.0 || load.const_i_percent > 0.0 ||
+                load.const_z_percent > 0.0);
+      });
+  if (has_piecewise_zip) {
+    result.model_limitations.push_back(
+        "Three-phase ZIPV load equations are continuous but piecewise "
+        "differentiable at vmin_pu/vmax_pu.");
+  }
+}
+
+void accumulate_transformer_terminal_losses(
+    const std::vector<TransformerPrimitiveRecord>& transformer_primitives,
+    const Eigen::VectorXd& vm,
+    const Eigen::VectorXd& va,
+    double base_mva,
+    double& p_loss_a,
+    double& q_loss_a,
+    double& p_loss_b,
+    double& q_loss_b,
+    double& p_loss_c,
+    double& q_loss_c) {
+  const double s_base_1ph = base_mva / 3.0;
+  auto add_phase_loss = [&](int phase, const Complex& power) {
+    if (phase == 0) {
+      p_loss_a += power.real();
+      q_loss_a += power.imag();
+    } else if (phase == 1) {
+      p_loss_b += power.real();
+      q_loss_b += power.imag();
+    } else {
+      p_loss_c += power.real();
+      q_loss_c += power.imag();
+    }
+  };
+  for (const auto& transformer : transformer_primitives) {
+    const PrimitiveBranchObservation observation =
+        observe_primitive_branch(transformer.primitive, vm, va);
+    for (int local = 0;
+         local < static_cast<int>(
+                     transformer.primitive.from_terminal.phases.size());
+         ++local) {
+      add_phase_loss(
+          transformer.primitive.from_terminal.phases[static_cast<size_t>(local)],
+          observation.from_voltage(local) *
+              std::conj(observation.from_current(local)) * s_base_1ph);
+    }
+    for (int local = 0;
+         local < static_cast<int>(
+                     transformer.primitive.to_terminal.phases.size());
+         ++local) {
+      add_phase_loss(
+          transformer.primitive.to_terminal.phases[static_cast<size_t>(local)],
+          observation.to_voltage(local) *
+              std::conj(observation.to_current(local)) * s_base_1ph);
+    }
+  }
+}
+
 ThreePhaseDPFResult finalize_three_phase_result_from_state(
     const ThreePhaseACSystem& sys,
     const std::unordered_map<int, int>& id_map,
@@ -5177,6 +5336,7 @@ ThreePhaseDPFResult finalize_three_phase_result_from_state(
   result.converged = converged;
   result.iterations = iterations;
   result.residual = residual;
+  append_three_phase_line_model_limitations(sys, result);
 
   const double rad2deg = 180.0 / kPi;
   for (int bus_offset = 0; bus_offset < n; ++bus_offset) {
@@ -5242,6 +5402,20 @@ ThreePhaseDPFResult finalize_three_phase_result_from_state(
       }
     }
   }
+
+  // Transformer loss is the net complex power entering both physical
+  // terminals. Per-phase buckets use each terminal's authored phase labels.
+  accumulate_transformer_terminal_losses(
+      transformer_primitives,
+      vm,
+      va,
+      base_mva,
+      p_loss_a,
+      q_loss_a,
+      p_loss_b,
+      q_loss_b,
+      p_loss_c,
+      q_loss_c);
 
   result.p_loss_a_mw = p_loss_a;
   result.q_loss_a_mvar = q_loss_a;
@@ -5335,6 +5509,7 @@ ThreePhaseSolveSnapshot solve_three_phase_nr_snapshot(
   ThreePhaseDPFResult result;
   result.bus_voltages.resize(n);
   result.branch_powers.resize(m);
+  append_three_phase_line_model_limitations(sys, result);
 
   if (n == 0) {
     snapshot.result = std::move(result);
@@ -5392,8 +5567,45 @@ ThreePhaseSolveSnapshot solve_three_phase_nr_snapshot(
       va[node] = va_values[phase] * deg2rad;
     }
   }
+  std::vector<double> pv_voltage_setpoint(
+      static_cast<size_t>(indexer.total_nodes),
+      std::numeric_limits<double>::quiet_NaN());
+  for (const auto& generator : sys.generators) {
+    if (!generator.in_service) continue;
+    const auto bus_it = id_map.find(generator.bus);
+    if (bus_it == id_map.end()) continue;
+    const int bus_offset = bus_it->second;
+    if (sys.buses[static_cast<size_t>(bus_offset)].bus_type != BusType::PV) {
+      continue;
+    }
+    if (!std::isfinite(generator.vm_pu) || generator.vm_pu <= 0.0) {
+      throw std::runtime_error(
+          "three-phase PV generator " + std::to_string(generator.index) +
+          " requires positive finite vm_pu");
+    }
+    for (int phase = 0; phase < 3; ++phase) {
+      if (!generator.phase_mask.has(phase) ||
+          !indexer.has_node(bus_offset, phase)) {
+        continue;
+      }
+      const int node = indexer.node_index(bus_offset, phase);
+      double& authored = pv_voltage_setpoint[static_cast<size_t>(node)];
+      if (std::isfinite(authored) &&
+          std::abs(authored - generator.vm_pu) > 1e-9) {
+        throw std::runtime_error(
+            "three-phase PV bus " + std::to_string(generator.bus) +
+            " has conflicting generator vm_pu setpoints");
+      }
+      authored = generator.vm_pu;
+      vm[node] = generator.vm_pu;
+    }
+  }
   seed_source_voltage_guesses(sys.external_grids, id_map, indexer, sys, vm, va);
   seed_transformer_voltage_guesses(network_model.transformer_primitives, sys, vm, va);
+  for (int node = 0; node < indexer.total_nodes; ++node) {
+    const double setpoint = pv_voltage_setpoint[static_cast<size_t>(node)];
+    if (std::isfinite(setpoint)) vm[node] = setpoint;
+  }
 
   if (ctx.nvar == 0) {
     result.converged = true;
@@ -5401,14 +5613,15 @@ ThreePhaseSolveSnapshot solve_three_phase_nr_snapshot(
     result.residual = 0.0;
   } else {
     // ── Pack/unpack helpers: vm+va ↔ single x vector ──────────────────
-    // x = [va(angle_nodes[0..np-1]), vm(vm_nodes[0..nq-1])]
+    // Vm = u^2 keeps trial magnitudes non-negative while still allowing an
+    // electrically blocked terminal to converge to exactly zero voltage.
     auto pack_state = [&](const Eigen::VectorXd& vm_vec,
                           const Eigen::VectorXd& va_vec) -> Eigen::VectorXd {
       Eigen::VectorXd x(ctx.nvar);
       for (int k = 0; k < ctx.np; ++k)
         x[k] = va_vec[ctx.angle_nodes[k]];
       for (int k = 0; k < ctx.nq; ++k)
-        x[ctx.np + k] = vm_vec[ctx.vm_nodes[k]];
+        x[ctx.np + k] = std::sqrt(std::max(0.0, vm_vec[ctx.vm_nodes[k]]));
       return x;
     };
     auto unpack_state = [&](const Eigen::VectorXd& x,
@@ -5417,7 +5630,7 @@ ThreePhaseSolveSnapshot solve_three_phase_nr_snapshot(
       for (int k = 0; k < ctx.np; ++k)
         va_vec[ctx.angle_nodes[k]] = x[k];
       for (int k = 0; k < ctx.nq; ++k)
-        vm_vec[ctx.vm_nodes[k]] = x[ctx.np + k];
+        vm_vec[ctx.vm_nodes[k]] = x[ctx.np + k] * x[ctx.np + k];
     };
 
     // ── Build NonlinearSystem for NativeNewtonAdapter ─────────────────
@@ -5450,16 +5663,34 @@ ThreePhaseSolveSnapshot solve_three_phase_nr_snapshot(
           network_model.ybus, network_model.fixed_current,
           ctx, spec, prepared_loads, vm, va,
           mismatch_shared, jac_shared);
+      for (int k = 0; k < ctx.nq; ++k) {
+        jac_shared.col(ctx.np + k) *= 2.0 * x[ctx.np + k];
+      }
       j_out = jac_shared;
     };
 
-    // Projection: clamp Vm >= 0.05 (same as original hard lower bound)
-    nle.project = [&](Eigen::VectorXd& x) {
-      for (int k = 0; k < ctx.nq; ++k) {
-        double& v = x[ctx.np + k];
-        if (v < 0.05) v = 0.05;
+    try {
+    if (opt.verify_jacobian) {
+      Eigen::SparseMatrix<double> analytic_sparse;
+      nle.jacobian(nle.x0, analytic_sparse);
+      const Eigen::MatrixXd analytic(analytic_sparse);
+      Eigen::MatrixXd finite_difference(ctx.nvar, ctx.nvar);
+      for (int col = 0; col < ctx.nvar; ++col) {
+        const double h = 1e-6 * std::max(1.0, std::abs(nle.x0[col]));
+        Eigen::VectorXd plus = nle.x0;
+        Eigen::VectorXd minus = nle.x0;
+        plus[col] += h;
+        minus[col] -= h;
+        Eigen::VectorXd f_plus;
+        Eigen::VectorXd f_minus;
+        nle.residual(plus, f_plus);
+        nle.residual(minus, f_minus);
+        finite_difference.col(col) = (f_plus - f_minus) / (2.0 * h);
       }
-    };
+      result.jacobian_check_performed = true;
+      result.max_jacobian_fd_error =
+          (analytic - finite_difference).cwiseAbs().maxCoeff();
+    }
 
     // ── Solve via engine NR framework ─────────────────────────────────
     engine::NativeNLEOptions nle_opts;
@@ -5485,6 +5716,13 @@ ThreePhaseSolveSnapshot solve_three_phase_nr_snapshot(
     if (opt.verbose) {
       HACDCPF_LOG_DEBUG("  3ph-NR via NativeNewtonAdapter: {} in {} iter, residual={}",
                         sol.stats.status, sol.stats.iterations, sol.stats.residual_inf);
+    }
+    } catch (const std::exception& error) {
+      result.converged = false;
+      result.residual = std::numeric_limits<double>::infinity();
+      result.primary_solver_failed_reason =
+          std::string("three_phase_nr_inner_model_failure: ") + error.what();
+      result.model_limitations.push_back(result.primary_solver_failed_reason);
     }
   }
 
@@ -5557,6 +5795,18 @@ ThreePhaseSolveSnapshot solve_three_phase_nr_snapshot(
     }
   }
 
+  accumulate_transformer_terminal_losses(
+      network_model.transformer_primitives,
+      vm,
+      va,
+      base_mva,
+      p_loss_a,
+      q_loss_a,
+      p_loss_b,
+      q_loss_b,
+      p_loss_c,
+      q_loss_c);
+
   result.p_loss_a_mw = p_loss_a;   result.q_loss_a_mvar = q_loss_a;
   result.p_loss_b_mw = p_loss_b;   result.q_loss_b_mvar = q_loss_b;
   result.p_loss_c_mw = p_loss_c;   result.q_loss_c_mvar = q_loss_c;
@@ -5616,6 +5866,7 @@ ThreePhaseDPFResult solve_three_phase_nr(
 
     bool any_tap_changed = false;
     bool control_failed = !current_result.converged;
+    bool control_limited = false;
     std::vector<std::size_t> iteration_trace_positions;
 
     for (const auto& control : working.regulator_controls) {
@@ -5792,7 +6043,14 @@ ThreePhaseDPFResult solve_three_phase_nr(
               transformer.tap_min,
               transformer.tap_max);
           if (next_tap_pos == transformer.tap_pos) {
-            throw std::runtime_error("tap_limit_reached_below_band");
+            trace.next_tap_pos = transformer.tap_pos;
+            trace.next_tap_number = transformer_tap_number(transformer);
+            trace.stop_reason = "tap_limit_reached_below_band";
+            state.converged = false;
+            state.stop_reason = trace.stop_reason;
+            control_limited = true;
+            regulator_states.push_back(state);
+            continue;
           }
         } else if (control_voltage_volts > upper_band + 1e-6) {
           trace.decision_reason = "lower_voltage";
@@ -5801,7 +6059,14 @@ ThreePhaseDPFResult solve_three_phase_nr(
               transformer.tap_min,
               transformer.tap_max);
           if (next_tap_pos == transformer.tap_pos) {
-            throw std::runtime_error("tap_limit_reached_above_band");
+            trace.next_tap_pos = transformer.tap_pos;
+            trace.next_tap_number = transformer_tap_number(transformer);
+            trace.stop_reason = "tap_limit_reached_above_band";
+            state.converged = false;
+            state.stop_reason = trace.stop_reason;
+            control_limited = true;
+            regulator_states.push_back(state);
+            continue;
           }
         } else {
           trace.decision_reason = "within_band";
@@ -5848,7 +6113,13 @@ ThreePhaseDPFResult solve_three_phase_nr(
     }
 
     if (!any_tap_changed) {
-      current_result.control_converged = true;
+      current_result.control_converged = !control_limited;
+      if (control_limited) {
+        current_result.model_limitations.push_back(
+            "Regulator reached a discrete tap limit outside its voltage "
+            "band; the electrical power flow converged but voltage control "
+            "did not.");
+      }
       final_result = std::move(current_result);
       finalized = true;
       break;
@@ -5971,9 +6242,62 @@ ThreePhaseCompactPFData build_compact_pf_data(
   return build_compact_pf_data(*sys.three_phase_ac, include_shunts);
 }
 
+namespace {
+
+void validate_fixed_point_contract(
+    const ThreePhaseACSystem& sys,
+    const ThreePhaseFixedPointOptions& opt,
+    const std::string& solver_name) {
+  if (!std::isfinite(opt.vmin_pu) || opt.vmin_pu <= 0.0) {
+    throw std::runtime_error(solver_name + " requires finite vmin_pu > 0");
+  }
+  for (const auto& bus : sys.buses) {
+    if (bus.in_service && bus.bus_type == BusType::PV) {
+      throw std::runtime_error(
+          solver_name + " does not implement PV voltage control at bus " +
+          std::to_string(bus.index) + "; use solve_three_phase_nr");
+    }
+  }
+}
+
+void apply_fixed_point_voltage_validity(
+    const ThreePhaseACSystem& sys,
+    const ThreePhaseFixedPointOptions& opt,
+    ThreePhaseDPFResult& result) {
+  if (!result.converged) return;
+  for (size_t bus_pos = 0;
+       bus_pos < sys.buses.size() && bus_pos < result.bus_voltages.size();
+       ++bus_pos) {
+    const auto& bus = sys.buses[bus_pos];
+    if (!bus.in_service) continue;
+    const auto& voltage = result.bus_voltages[bus_pos];
+    const std::array<double, 3> magnitudes = {
+        voltage.vm_a_pu, voltage.vm_b_pu, voltage.vm_c_pu};
+    for (int phase = 0; phase < 3; ++phase) {
+      if (!bus.phase_mask.has(phase) ||
+          magnitudes[static_cast<size_t>(phase)] + 1e-12 >= opt.vmin_pu) {
+        continue;
+      }
+      result.converged = false;
+      result.primary_solver_failed_reason =
+          "solved voltage is below configured vmin_pu";
+      result.model_limitations.push_back(
+          "Bus " + std::to_string(bus.index) + " phase " +
+          std::string(1, static_cast<char>('A' + phase)) + " voltage " +
+          std::to_string(magnitudes[static_cast<size_t>(phase)]) +
+          " pu is below fixed-point vmin_pu=" + std::to_string(opt.vmin_pu) +
+          ".");
+      return;
+    }
+  }
+}
+
+}  // namespace
+
 ThreePhaseDPFResult solve_three_phase_compact_pf(
     const ThreePhaseACSystem& sys,
     const ThreePhaseFixedPointOptions& opt) {
+  validate_fixed_point_contract(sys, opt, "solve_three_phase_compact_pf");
   const CompactFixedPointContext context =
       build_compact_fixed_point_context(sys, opt.include_shunts);
   if (context.variable_indices.empty()) {
@@ -6002,6 +6326,7 @@ ThreePhaseDPFResult solve_three_phase_compact_pf(
         "compact",
         "compact",
         "compact_internal");
+    apply_fixed_point_voltage_validity(sys, opt, result);
     return result;
   }
 
@@ -6012,7 +6337,7 @@ ThreePhaseDPFResult solve_three_phase_compact_pf(
       lu);
 
   ComplexVectorX rhs =
-      gather_complex_entries(
+      -gather_complex_entries(
           context.network_model.fixed_current,
           context.variable_indices) -
       context.y_vf * context.fixed_voltage;
@@ -6108,6 +6433,7 @@ ThreePhaseDPFResult solve_three_phase_compact_pf(
       "compact",
       "compact",
       "compact_internal");
+  apply_fixed_point_voltage_validity(sys, opt, result);
   return result;
 }
 
@@ -6124,6 +6450,7 @@ ThreePhaseDPFResult solve_three_phase_compact_pf(
 ThreePhaseDPFResult solve_three_phase_fixed_point(
     const ThreePhaseACSystem& sys,
     const ThreePhaseFixedPointOptions& opt) {
+  validate_fixed_point_contract(sys, opt, "solve_three_phase_fixed_point");
   const CompactFixedPointContext compact_context =
       build_compact_fixed_point_context(sys, opt.include_shunts);
   const FullPhaseMatrixModel full_model =
@@ -6155,6 +6482,7 @@ ThreePhaseDPFResult solve_three_phase_fixed_point(
         "fixed_point",
         "fixed_point",
         "internal");
+    apply_fixed_point_voltage_validity(sys, opt, result);
     return result;
   }
 
@@ -6174,7 +6502,7 @@ ThreePhaseDPFResult solve_three_phase_fixed_point(
       lu);
 
   ComplexVectorX rhs =
-      gather_complex_entries(full_model.fixed_current, full_model.variable_indices) -
+      -gather_complex_entries(full_model.fixed_current, full_model.variable_indices) -
       y_vf * full_model.fixed_voltage;
   ComplexVectorX no_load_voltage = lu.solve(rhs);
   if (lu.info() != Eigen::Success || no_load_voltage.size() != rhs.size()) {
@@ -6334,6 +6662,7 @@ ThreePhaseDPFResult solve_three_phase_fixed_point(
       "fixed_point",
       "fixed_point",
       "internal");
+  apply_fixed_point_voltage_validity(sys, opt, result);
   return result;
 }
 

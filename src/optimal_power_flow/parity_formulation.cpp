@@ -161,6 +161,42 @@ Problem build_problem(const HybridPowerSystem& sys, const ParityOptions& opt) {
     }
   }
 
+  // Canonical projection keeps FlexibleLoad identities for OPF decisions and
+  // also embeds their baseline P/Q in a canonical Load for ordinary PF.  The
+  // flexible active-power variable below replaces that embedded P baseline;
+  // remove it once here so the balance contains the demand exactly once.  Q
+  // remains in qd_demand_pu because FlexibleLoad has no reactive decision.
+  for (const auto& fl : prob.data.flexible_loads) {
+    if (!fl.in_service || !fl.controllable) continue;
+    const int bus = fl.bus - 1;
+    if (bus < 0 || bus >= nb) continue;
+    const double baseline = std::max(0.0, fl.p_mw / prob.data.base_mva);
+    if (baseline <= 0.0) continue;
+
+    const double old_demand = std::max(0.0, prob.pd_demand_pu[bus]);
+    const double new_demand = std::max(0.0, old_demand - baseline);
+    if (old_demand > 1e-20 && new_demand > 1e-20) {
+      // FlexibleLoad's projected equivalent is constant-power. Remove its
+      // contribution from the weighted ZIP numerator as well as total demand.
+      prob.zip_pp[bus] =
+          std::max(0.0, prob.zip_pp[bus] * old_demand - baseline) /
+          new_demand;
+      prob.zip_ip[bus] = prob.zip_ip[bus] * old_demand / new_demand;
+      prob.zip_zp[bus] = prob.zip_zp[bus] * old_demand / new_demand;
+      const double sum = prob.zip_pp[bus] + prob.zip_ip[bus] + prob.zip_zp[bus];
+      if (sum > 1e-20) {
+        prob.zip_pp[bus] /= sum;
+        prob.zip_ip[bus] /= sum;
+        prob.zip_zp[bus] /= sum;
+      }
+    } else if (new_demand <= 1e-20) {
+      prob.zip_pp[bus] = 1.0;
+      prob.zip_ip[bus] = 0.0;
+      prob.zip_zp[bus] = 0.0;
+    }
+    prob.pd_demand_pu[bus] = new_demand;
+  }
+
   prob.gen_var_to_data.clear();
   prob.gen_bus.clear();
   prob.gen_var_to_data.reserve(prob.data.generators.size());

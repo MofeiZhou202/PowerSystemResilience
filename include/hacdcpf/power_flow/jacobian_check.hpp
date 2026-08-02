@@ -7,12 +7,11 @@
 ///
 /// Typical usage in a unit test:
 ///
-///   SolverData data = make_solver_data(sys, LossModelType::Linear);
-///   auto residual_fn = [&](const Eigen::VectorXd& x) {
-///       return evaluate_residual(data, x);
+///   auto residual_fn = [](const Eigen::VectorXd& x) {
+///       return x.array().square().matrix();
 ///   };
-///   auto jacobian_fn = [&](const Eigen::VectorXd& x) {
-///       return build_jacobian(data, x);
+///   auto jacobian_fn = [](const Eigen::VectorXd& x) {
+///       return (2.0 * x).asDiagonal().toDenseMatrix().sparseView();
 ///   };
 ///
 ///   auto report = hacdcpf::check_jacobian(residual_fn, jacobian_fn, x0);
@@ -31,10 +30,13 @@ namespace hacdcpf {
 // ── Report ────────────────────────────────────────────────────────────────────
 
 struct JacobianCheckReport {
-    bool   passed{false};           ///< true if max_relative_error < tolerance
-    double tolerance{1e-5};         ///< threshold used for this check
+    bool   passed{false};
+    double tolerance{1e-5};         ///< Legacy alias of relative_tolerance
+    double absolute_tolerance{1e-8};
+    double relative_tolerance{1e-5};
     double max_absolute_error{0.0}; ///< max |J_analytic - J_fd|
-    double max_relative_error{0.0}; ///< max |J_analytic - J_fd| / (|J_analytic| + eps)
+    double max_relative_error{0.0}; ///< symmetric relative error using max(|Ja|,|Jfd|)
+    double max_normalized_error{0.0}; ///< max error / (atol + rtol * scale)
 
     /// Location of the worst mismatch.
     int worst_row{-1};
@@ -57,13 +59,15 @@ using AnalyticJacFn =
 /// @param jacobian   Analytic J: ℝⁿ → ℝᵐˣⁿ  (returned as sparse)
 /// @param x0         Evaluation point
 /// @param h          Finite-difference step size (default 1e-6)
-/// @param tolerance  Pass/fail threshold on max relative error (default 1e-5)
+/// @param atol       Absolute tolerance for entries near zero
+/// @param rtol       Relative tolerance for non-zero entries
 [[nodiscard]] JacobianCheckReport check_jacobian(
     const ResidualFn&       residual,
     const AnalyticJacFn&    jacobian,
     const Eigen::VectorXd&  x0,
     double h         = 1e-6,
-    double tolerance = 1e-5);
+    double atol      = 1e-8,
+    double rtol      = 1e-5);
 
 // ── Dense overload ────────────────────────────────────────────────────────────
 
@@ -75,6 +79,7 @@ using DenseJacFn =
     const DenseJacFn&       jacobian,
     const Eigen::VectorXd&  x0,
     double h         = 1e-6,
-    double tolerance = 1e-5);
+    double atol      = 1e-8,
+    double rtol      = 1e-5);
 
 }  // namespace hacdcpf

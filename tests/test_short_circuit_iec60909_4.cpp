@@ -7,8 +7,9 @@
 //   partial currents: I"k(T1,T2) = 14.74 kA, I"kM1 = 2.54 kA, I"kM2 = 2.24 kA
 //
 // The case data (tests/data/short_circuit_iec60909_4.json) rounds some inputs
-// to four significant digits (grid R/X, motor impedances), so a 0.5% band is
-// used instead of an exact match.
+// to four significant digits. Motor r_pu/x_pu are the published impedances
+// converted from ohms to each motor's V_N^2/S_N nameplate base. A 0.5% band is
+// therefore used instead of an exact match.
 //
 // Regression coverage for three fixes:
 //   1. Transformer2W nameplate impedance is converted onto the LV bus voltage
@@ -18,6 +19,8 @@
 //      (κ_net·I_net + Σκ_M·I_M) instead of a single meshed κ on the total.
 //   3. Motor breaking-current factors use μ(I"kM/IrM) and q(PrM/p) with p =
 //      pole pairs, so M1 (5 MW, p = 2) gets q = 0.68 and M2 (3×1 MW) q = 0.57.
+//   4. Motor nameplate-base pu impedance is converted once to the system base;
+//      treating the same numeric values as ohms or system-base pu is rejected.
 
 #include <fstream>
 #include <sstream>

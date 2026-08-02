@@ -159,9 +159,13 @@ bool dc_storage_can_adjust(const DCStorage& st) {
   return st.soc_init > st.soc_min + 1e-6 && st.soc_init < st.soc_max - 1e-6;
 }
 
-bool dc_v_bus_has_storage_source(const HybridPowerSystem& sys, int bus) {
+bool dc_v_bus_has_unregistered_storage_source(const HybridPowerSystem& sys, int bus) {
   for (const auto& st : sys.dc.storage) {
-    if (st.bus == bus && storage_can_adjust(st)) return true;
+    const bool separately_registered =
+        st.control_mode == "DC_V" || st.control_mode == "VDC" ||
+        st.control_mode == "Voltage" || st.control_mode == "Droop" ||
+        st.control_mode == "DC_DROOP";
+    if (st.bus == bus && storage_can_adjust(st) && !separately_registered) return true;
   }
   for (const auto& st : sys.dc.dc_storage) {
     if (st.bus == bus && dc_storage_can_adjust(st)) return true;
@@ -338,12 +342,7 @@ void evaluate_vsc_device_rules(const HybridPowerSystem& sys,
     // grid-forming.  Such a converter must release its AC active power to balance
     // the DC island, so an explicit hard AC-P constraint is contradictory
     // (multi-converter model §4.1.3 / §16.3).
-    const bool forms_dc_voltage =
-        ((conv.control_mode == ConverterMode::VDC_Q ||
-          conv.control_mode == ConverterMode::VDC_VAC ||
-          conv.control_mode == ConverterMode::DC_V_DROOP_AC_V) &&
-         std::abs(conv.k_vdc) > 1e-9) ||
-        conv.grid_forming;
+    const bool forms_dc_voltage = resolve_device_control_role(conv).is_dc_grid_forming;
 
     // A converter forms the AC reference when it opts into AC grid-forming via
     // the explicit flag or selects the AC_GRID_FORMING (Mode 1) control mode.
@@ -836,7 +835,7 @@ ConverterCoordinationReport evaluate_converter_coordination(const HybridPowerSys
     if (bus.bus_type == DCBusType::DC_V) {
       summary.declared_v_buses.push_back(bus.index);
       summary.has_declared_v_bus = true;
-      if (dc_v_bus_has_storage_source(sys, bus.index)) {
+      if (dc_v_bus_has_unregistered_storage_source(sys, bus.index)) {
         add_voltage_source(summary,
                            "dc_bus_storage_source",
                            bus.index,
@@ -888,6 +887,7 @@ ConverterCoordinationReport evaluate_converter_coordination(const HybridPowerSys
     const int island = island_for_bus(conv.bus_dc);
     if (island < 0) continue;
     auto& summary = report.dc_islands[static_cast<size_t>(island)];
+    const bool forms_vdc = resolve_device_control_role(conv).is_dc_grid_forming;
     if (conv.control_mode == ConverterMode::PQ_MODE) {
       // A PQ VSC currently transfers its scheduled power, but the unified solver
       // auto-promotes the largest in-service PQ VSC of an otherwise
@@ -900,8 +900,7 @@ ConverterCoordinationReport evaluate_converter_coordination(const HybridPowerSys
       summary.fixed_power_mw += pdc;
       summary.promotable_vsc_sources += 1;
       add_vsc_vdc_flexibility(conv, summary);
-    } else if (conv.control_mode == ConverterMode::VDC_Q ||
-               conv.control_mode == ConverterMode::VDC_VAC) {
+    } else if (forms_vdc) {
       if (std::abs(conv.k_vdc) > 1e-9) {
         add_voltage_source(summary,
                            "vsc_converter",
@@ -916,6 +915,13 @@ ConverterCoordinationReport evaluate_converter_coordination(const HybridPowerSys
                            conv.k_vdc);
         add_vsc_vdc_flexibility(conv, summary);
       }
+    } else {
+      // AC_PV and AC_GRID_FORMING do not regulate Vdc. Their authored AC
+      // schedule is therefore a planned fixed DC-island transfer for the
+      // coordination headroom screen (the nonlinear solve may update a GFM
+      // transfer through its energy-conduit equation).
+      summary.fixed_power_devices += 1;
+      summary.fixed_power_mw += vsc_dc_injection_from_ac_setpoint_mw(conv);
     }
   }
 
@@ -1041,7 +1047,7 @@ ConverterCoordinationReport evaluate_converter_coordination(const HybridPowerSys
     const int island = island_for_bus(sg.bus);
     if (island < 0) continue;
     auto& summary = report.dc_islands[static_cast<size_t>(island)];
-    const double p0 = sg.p_mw * sg.scaling;
+    const double p0 = sg.p_mw * model::sanitize_scaling(sg.scaling);
     summary.fixed_power_devices += 1;
     summary.fixed_power_mw += p0;
     if (sg.controllable) {
@@ -1053,7 +1059,7 @@ ConverterCoordinationReport evaluate_converter_coordination(const HybridPowerSys
     const int island = island_for_bus(pv.bus);
     if (island < 0) continue;
     auto& summary = report.dc_islands[static_cast<size_t>(island)];
-    const double p0 = pv.p_set_mw * pv.scaling;
+    const double p0 = pv.p_set_mw * model::sanitize_scaling(pv.scaling);
     summary.fixed_power_devices += 1;
     summary.fixed_power_mw += p0;
     if (pv.controllable) {
@@ -1170,14 +1176,12 @@ ConverterCoordinationReport evaluate_converter_coordination(const HybridPowerSys
                  [](const DCVoltageControlSource& source) {
                    return source.has_v_set && std::isfinite(source.v_set_pu);
                  });
-    if (setpoint_sources.size() > 1) {
-      const auto minmax = std::minmax_element(
-          setpoint_sources.begin(),
-          setpoint_sources.end(),
-          [](const DCVoltageControlSource& a, const DCVoltageControlSource& b) {
-            return a.v_set_pu < b.v_set_pu;
-          });
-      if (std::abs(minmax.second->v_set_pu - minmax.first->v_set_pu) > kVSetTolPu) {
+    for (size_t i = 0; i < setpoint_sources.size(); ++i) {
+      for (size_t j = i + 1; j < setpoint_sources.size(); ++j) {
+        const auto& first = setpoint_sources[i];
+        const auto& second = setpoint_sources[j];
+        if (first.bus == second.bus &&
+            std::abs(first.v_set_pu - second.v_set_pu) > kVSetTolPu) {
         add_issue(report,
                   CoordinationSeverity::Fatal,
                   "DCISLAND-05",
@@ -1187,10 +1191,11 @@ ConverterCoordinationReport evaluate_converter_coordination(const HybridPowerSys
                   "DC island " + std::to_string(summary.island_index) + " (buses " +
                       join_ints(summary.dc_buses) +
                       ") has multiple DC voltage-forming sources with conflicting setpoints: " +
-                      source_label(*minmax.first) + "=" +
-                      std::to_string(minmax.first->v_set_pu) + " pu, " +
-                      source_label(*minmax.second) + "=" +
-                      std::to_string(minmax.second->v_set_pu) + " pu.");
+                    source_label(first) + "=" +
+                    std::to_string(first.v_set_pu) + " pu, " +
+                    source_label(second) + "=" +
+                    std::to_string(second.v_set_pu) + " pu on the same DC bus.");
+        }
       }
     }
 
@@ -1200,8 +1205,14 @@ ConverterCoordinationReport evaluate_converter_coordination(const HybridPowerSys
                  std::back_inserter(hard_sources),
                  [](const DCVoltageControlSource& source) { return !source.droop; });
 
-    if (hard_sources.size() > 1) {
-      if (summary.droop_sources == 0) {
+    bool duplicate_hard_bus = false;
+    for (size_t i = 0; i < hard_sources.size(); ++i) {
+      for (size_t j = i + 1; j < hard_sources.size(); ++j) {
+        duplicate_hard_bus = duplicate_hard_bus ||
+                             hard_sources[i].bus == hard_sources[j].bus;
+      }
+    }
+    if (duplicate_hard_bus && summary.droop_sources == 0) {
         add_issue(report,
                   CoordinationSeverity::Error,
                   "DCISLAND-04",
@@ -1211,9 +1222,8 @@ ConverterCoordinationReport evaluate_converter_coordination(const HybridPowerSys
                   "DC island " + std::to_string(summary.island_index) + " (buses " +
                       join_ints(summary.dc_buses) + ") has " +
                       std::to_string(summary.hard_vdc_sources) +
-                      " rigid DC voltage sources and no droop/participation rule; active-power "
-                      "sharing is over-constrained or non-unique.");
-      }
+                      " rigid DC voltage sources include duplicate constraints on one DC bus "
+                      "and no droop/participation rule; active-power sharing is over-constrained.");
     }
 
     // ── Multi-source DC voltage coordination (§6.5–6.7) ──────────────────────

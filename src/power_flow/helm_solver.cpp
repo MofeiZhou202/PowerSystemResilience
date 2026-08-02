@@ -140,7 +140,7 @@ void build_ytrans_yshunt(const SolverData& data,
     trip.emplace_back(j, i, ytf);
 
     const Cplx b_half(0.0, br.b_pu / 2.0);
-    Yshunt[static_cast<size_t>(i)] += b_half;
+    Yshunt[static_cast<size_t>(i)] += b_half / tap2;
     Yshunt[static_cast<size_t>(j)] += b_half;
   }
 
@@ -151,14 +151,51 @@ void build_ytrans_yshunt(const SolverData& data,
     Yshunt[static_cast<size_t>(i)] +=
         Cplx(data.ac_buses[static_cast<size_t>(i)].gs_mw,
              data.ac_buses[static_cast<size_t>(i)].bs_mvar) / base;
+
+  for (const auto& sh : data.shunts) {
+    if (!sh.in_service) continue;
+    const int i = sh.bus - 1;
+    if (i < 0 || i >= N) continue;
+    const double bs = sh.switchable && sh.n_steps > 0
+                          ? sh.bs_per_step * sh.current_step
+                          : sh.bs_mvar;
+    Yshunt[static_cast<size_t>(i)] += Cplx(sh.gs_mw, bs) / base;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Build the 2N×2N real modified admittance matrix for the HELM embedding.
 // Uses sparse Ytrans InnerIterator — O(nnz) per bus instead of O(N).
 // ─────────────────────────────────────────────────────────────────────────────
+Eigen::SparseMatrix<double> build_germ_matrix(
+    const SparseCplx& Ytrans, const std::vector<BusType>& btype, int N) {
+  std::vector<Eigen::Triplet<double>> trip;
+  trip.reserve(static_cast<size_t>(Ytrans.nonZeros() * 4 + 2 * N));
+
+  for (int i = 0; i < N; ++i) {
+    if (btype[static_cast<size_t>(i)] == BusType::SLACK) {
+      trip.emplace_back(2 * i, 2 * i, 1.0);
+      trip.emplace_back(2 * i + 1, 2 * i + 1, 1.0);
+      continue;
+    }
+    for (SparseCplx::InnerIterator it(Ytrans, i); it; ++it) {
+      const int j = static_cast<int>(it.col());
+      const Cplx y = it.value();
+      trip.emplace_back(2 * i, 2 * j, y.real());
+      trip.emplace_back(2 * i, 2 * j + 1, -y.imag());
+      trip.emplace_back(2 * i + 1, 2 * j, y.imag());
+      trip.emplace_back(2 * i + 1, 2 * j + 1, y.real());
+    }
+  }
+
+  Eigen::SparseMatrix<double> Y(2 * N, 2 * N);
+  Y.setFromTriplets(trip.begin(), trip.end());
+  return Y;
+}
+
 Eigen::SparseMatrix<double> build_ymod(const SparseCplx&           Ytrans,
                                        const std::vector<BusType>& btype,
+                                       const VecCplx&              germ,
                                        int N) {
   std::vector<Eigen::Triplet<double>> trip;
   trip.reserve(static_cast<size_t>(Ytrans.nonZeros() * 4 + 2 * N));
@@ -180,14 +217,17 @@ Eigen::SparseMatrix<double> build_ymod(const SparseCplx&           Ytrans,
         trip.emplace_back(2 * i + 1, 2 * j + 1,  y.real());
       }
 
-    } else {  // PV — Model 2
+    } else {  // PV — Model 2 about the no-load germ.
+      const Cplx v0_conj = std::conj(germ[static_cast<size_t>(i)]);
       for (SparseCplx::InnerIterator it(Ytrans, i); it; ++it) {
         const int  j = static_cast<int>(it.col());
-        const Cplx y = it.value();
+        const Cplx y = v0_conj * it.value();
         trip.emplace_back(2 * i, 2 * j,      y.real());
         trip.emplace_back(2 * i, 2 * j + 1, -y.imag());
       }
-      trip.emplace_back(2 * i + 1, 2 * i, 1.0);
+      trip.emplace_back(2 * i + 1, 2 * i, germ[static_cast<size_t>(i)].real());
+      trip.emplace_back(2 * i + 1, 2 * i + 1,
+                        germ[static_cast<size_t>(i)].imag());
     }
   }
 
@@ -368,8 +408,7 @@ void apply_distributed_slack(VecCplx& S_inj,
 
   double K_sum = 0.0;
   for (int i = 0; i < N; ++i)
-    if (btype[static_cast<size_t>(i)] == BusType::PV ||
-        btype[static_cast<size_t>(i)] == BusType::SLACK)
+    if (btype[static_cast<size_t>(i)] == BusType::PV)
       K_sum += K[static_cast<size_t>(i)];
   if (K_sum < 1e-12) return;
 
@@ -377,12 +416,21 @@ void apply_distributed_slack(VecCplx& S_inj,
     const double ki = K[static_cast<size_t>(i)];
     if (ki <= 0.0) continue;
     const BusType bt = btype[static_cast<size_t>(i)];
-    if (bt != BusType::PV && bt != BusType::SLACK) continue;
+    if (bt != BusType::PV) continue;
     const double delta_P = imbalance * ki / K_sum;
     S_inj[static_cast<size_t>(i)] =
         Cplx(S_inj[static_cast<size_t>(i)].real() + delta_P,
              S_inj[static_cast<size_t>(i)].imag());
   }
+}
+
+double magnitude_squared_coefficient(const VecCplx& series, int order) {
+  Cplx value{};
+  for (int k = 0; k <= order; ++k) {
+    value += series[static_cast<size_t>(k)] *
+             std::conj(series[static_cast<size_t>(order - k)]);
+  }
+  return value.real();
 }
 
 }  // namespace
@@ -397,6 +445,21 @@ PowerFlowResult HelmSolver::solve(const SolverData& data,
   result.vm.assign(static_cast<size_t>(N), 1.0);
   result.va.assign(static_cast<size_t>(N), 0.0);
 
+  auto fail = [&](std::string reason, std::string warning) {
+    result.converged = false;
+    result.residual = std::numeric_limits<double>::infinity();
+    result.diagnostics.converged = false;
+    result.diagnostics.iterations = result.iterations;
+    result.diagnostics.final_mismatch_norm = result.residual;
+    result.diagnostics.termination_reason = std::move(reason);
+    if (!warning.empty()) {
+      result.diagnostics.warnings.push_back(std::move(warning));
+    }
+  };
+
+  const SolverData* verification_data = &data;
+  SolverData distributed_slack_data;
+
   auto verify_physical_residual = [&]() {
     if (!result.converged) return;
     Eigen::Map<const Eigen::VectorXd> vm(result.vm.data(),
@@ -404,11 +467,12 @@ PowerFlowResult HelmSolver::solve(const SolverData& data,
     Eigen::Map<const Eigen::VectorXd> va(result.va.data(),
                                          static_cast<Eigen::Index>(result.va.size()));
     const Eigen::VectorXd vdc;
-    const auto residual = evaluate_power_flow_residual(data, vm, va, vdc);
+    const auto residual =
+        evaluate_power_flow_residual(*verification_data, vm, va, vdc);
     result.residual = residual.full.size() > 0
                           ? residual.full.lpNorm<Eigen::Infinity>()
                           : 0.0;
-    const double tolerance = std::max(opt.tol, helm_opts.mismatch);
+    const double tolerance = std::max(opt.tol, 1e-12);
     if (!std::isfinite(result.residual) || result.residual > tolerance) {
       result.converged = false;
       result.diagnostics.warnings.push_back(
@@ -434,11 +498,36 @@ PowerFlowResult HelmSolver::solve(const SolverData& data,
   for (int i = 0; i < N; ++i)
     btype[static_cast<size_t>(i)] = data.ac_buses[static_cast<size_t>(i)].bus_type;
 
-  // Require at least one SLACK bus; multiple SLACK buses are supported.
-  bool have_slack = false;
+  for (int i = 0; i < N; ++i) {
+    if (btype[static_cast<size_t>(i)] == BusType::ISOLATED) {
+      fail("HELM does not support in-model isolated AC buses",
+           "Project/de-energize isolated buses before HELM; they must not be "
+           "interpreted as PV equations.");
+      return result;
+    }
+  }
+
+  // Require at least one SLACK bus. Multiple references are opt-in.
+  int slack_count = 0;
   for (int i = 0; i < N; ++i)
-    if (btype[static_cast<size_t>(i)] == BusType::SLACK) { have_slack = true; break; }
-  if (!have_slack) { result.converged = false; return result; }
+    if (btype[static_cast<size_t>(i)] == BusType::SLACK) ++slack_count;
+  if (slack_count == 0) {
+    fail("HELM requires an AC slack bus",
+         "HELM was not run because the AC subsystem has no voltage-angle reference.");
+    return result;
+  }
+  if (!helm_opts.allow_multi_slack && slack_count > 1) {
+    fail("HELM multiple-slack input rejected by options",
+         "The AC subsystem has multiple slack buses while allow_multi_slack=false.");
+    return result;
+  }
+
+  if (helm_opts.max_coef < 4 || !std::isfinite(helm_opts.mismatch) ||
+      helm_opts.mismatch <= 0.0) {
+    fail("HELM options are invalid",
+         "max_coef must be at least 4 and mismatch must be finite and positive.");
+    return result;
+  }
 
   // Voltage setpoints (pu).
   std::vector<double> Vsp(static_cast<size_t>(N));
@@ -450,28 +539,106 @@ PowerFlowResult HelmSolver::solve(const SolverData& data,
   VecCplx    Yshunt;
   build_ytrans_yshunt(data, Ytrans, Yshunt);
 
+  // The no-load germ solves Ytrans*V0=0 at every non-reference bus. Unlike a
+  // flat all-ones germ, this remains an exact order-zero solution with ideal
+  // transformers and phase shifters.
+  Eigen::SparseMatrix<double> germ_matrix =
+      build_germ_matrix(Ytrans, btype, N);
+  germ_matrix.makeCompressed();
+  Eigen::SparseLU<Eigen::SparseMatrix<double>> germ_lu;
+  germ_lu.analyzePattern(germ_matrix);
+  germ_lu.factorize(germ_matrix);
+  if (germ_lu.info() != Eigen::Success) {
+    fail("HELM no-load germ factorization failed",
+         "The series-admittance network is singular after applying AC slack references.");
+    return result;
+  }
+  Eigen::VectorXd germ_rhs = Eigen::VectorXd::Zero(2 * N);
+  for (int i = 0; i < N; ++i) {
+    if (btype[static_cast<size_t>(i)] == BusType::SLACK) {
+      germ_rhs[2 * i] = 1.0;
+    }
+  }
+  const Eigen::VectorXd germ_solution = germ_lu.solve(germ_rhs);
+  if (germ_lu.info() != Eigen::Success || !germ_solution.allFinite()) {
+    fail("HELM no-load germ solve failed",
+         "The no-load transformer/phase-shifter germ could not be computed.");
+    return result;
+  }
+  VecCplx germ(static_cast<size_t>(N));
+  for (int i = 0; i < N; ++i) {
+    germ[static_cast<size_t>(i)] =
+        Cplx(germ_solution[2 * i], germ_solution[2 * i + 1]);
+    if (std::abs(germ[static_cast<size_t>(i)]) < 1e-12) {
+      fail("HELM no-load germ contains a zero voltage",
+           "The reciprocal-voltage series cannot be initialized at a zero-voltage germ.");
+      return result;
+    }
+  }
+
   // ── Q limits ───────────────────────────────────────────────────────────────
   const double inv_base = 1.0 / data.base_mva;
   const double kInf     = std::numeric_limits<double>::max();
-  std::vector<double> Qgmax(static_cast<size_t>(N),  kInf);
-  std::vector<double> Qgmin(static_cast<size_t>(N), -kInf);
+  std::vector<double> Qgmax(static_cast<size_t>(N), 0.0);
+  std::vector<double> Qgmin(static_cast<size_t>(N), 0.0);
+  std::vector<bool> has_q_capability(static_cast<size_t>(N), false);
   for (const auto& g : data.generators) {
     if (!g.in_service) continue;
     const int bi = g.bus - 1;
     if (bi < 0 || bi >= N) continue;
-    Qgmax[static_cast<size_t>(bi)] =
-        std::min(Qgmax[static_cast<size_t>(bi)], g.qmax_mvar * inv_base);
-    Qgmin[static_cast<size_t>(bi)] =
-        std::max(Qgmin[static_cast<size_t>(bi)], g.qmin_mvar * inv_base);
+    Qgmax[static_cast<size_t>(bi)] += g.qmax_mvar * inv_base;
+    Qgmin[static_cast<size_t>(bi)] += g.qmin_mvar * inv_base;
+    has_q_capability[static_cast<size_t>(bi)] = true;
+  }
+  for (int i = 0; i < N; ++i) {
+    if (!has_q_capability[static_cast<size_t>(i)]) {
+      Qgmax[static_cast<size_t>(i)] = kInf;
+      Qgmin[static_cast<size_t>(i)] = -kInf;
+    }
   }
 
   // ── Power injections ────────────────────────────────────────────────────────
   VecCplx S_inj = compute_injections(data, N);
 
   // Distributed slack (K-factor): re-balance P before HELM runs.
-  if (!helm_opts.participation_factors.empty() &&
-      static_cast<int>(helm_opts.participation_factors.size()) == N)
+  if (!helm_opts.participation_factors.empty()) {
+    if (static_cast<int>(helm_opts.participation_factors.size()) != N) {
+      fail("HELM distributed-slack factors have the wrong size",
+           "participation_factors must contain one entry per AC bus.");
+      return result;
+    }
+    double eligible_sum = 0.0;
+    for (int i = 0; i < N; ++i) {
+      const double k = helm_opts.participation_factors[static_cast<size_t>(i)];
+      if (!std::isfinite(k) || k < 0.0) {
+        fail("HELM distributed-slack factors are invalid",
+             "Participation factors must be finite and non-negative.");
+        return result;
+      }
+      if (btype[static_cast<size_t>(i)] == BusType::PV) {
+        eligible_sum += k;
+      } else if (k > 0.0) {
+        fail("HELM distributed-slack factor targets a non-PV bus",
+             "HELM can prescribe K-factor active-power changes only at PV buses; "
+             "slack and PQ entries must be zero.");
+        return result;
+      }
+    }
+    if (eligible_sum <= 1e-12) {
+      fail("HELM distributed-slack factors have no participating PV bus",
+           "At least one PV bus must have a positive participation factor.");
+      return result;
+    }
+    const VecCplx original_injections = S_inj;
     apply_distributed_slack(S_inj, btype, helm_opts.participation_factors, N);
+    distributed_slack_data = data;
+    for (int i = 0; i < N; ++i) {
+      distributed_slack_data.pg[i] +=
+          S_inj[static_cast<size_t>(i)].real() -
+          original_injections[static_cast<size_t>(i)].real();
+    }
+    verification_data = &distributed_slack_data;
+  }
 
   // Load Q for Q-limit bookkeeping.
   std::vector<double> Qd_pu(static_cast<size_t>(N), 0.0);
@@ -483,6 +650,8 @@ PowerFlowResult HelmSolver::solve(const SolverData& data,
   // ── Solver parameters ───────────────────────────────────────────────────────
   const int    max_coef = helm_opts.max_coef;
   const double mis_tol  = helm_opts.mismatch;
+  const double pade_stop_tol =
+      std::min(mis_tol, std::max(opt.tol, 1e-12));
 
   // ── Warm start: compute initial voltage estimate for Padé baseline ──────────
   VecCplx V_warm(static_cast<size_t>(N), Cplx{1.0, 0.0});
@@ -504,14 +673,27 @@ PowerFlowResult HelmSolver::solve(const SolverData& data,
   for (int q_outer = 0; q_outer < 10; ++q_outer) {
 
     // ── Build and factorize the 2N×2N modified admittance matrix ─────────────
-    Eigen::SparseMatrix<double> Ymod = build_ymod(Ytrans, btype, N);
+    Eigen::SparseMatrix<double> Ymod = build_ymod(Ytrans, btype, germ, N);
     Ymod.makeCompressed();
+    const bool use_sparse =
+        helm_opts.sparse_threshold <= 0 || N >= helm_opts.sparse_threshold;
     Eigen::SparseLU<Eigen::SparseMatrix<double>> lu;
-    lu.analyzePattern(Ymod);
-    lu.factorize(Ymod);
-    if (lu.info() != Eigen::Success) {
-      result.converged = false;
-      return result;
+    Eigen::FullPivLU<Eigen::MatrixXd> dense_lu;
+    if (use_sparse) {
+      lu.analyzePattern(Ymod);
+      lu.factorize(Ymod);
+      if (lu.info() != Eigen::Success) {
+        fail("HELM coefficient matrix factorization failed",
+             "Sparse LU could not factor the HELM Model-2 coefficient matrix.");
+        return result;
+      }
+    } else {
+      dense_lu.compute(Eigen::MatrixXd(Ymod));
+      if (!dense_lu.isInvertible()) {
+        fail("HELM coefficient matrix factorization failed",
+             "Dense LU found the HELM Model-2 coefficient matrix singular.");
+        return result;
+      }
     }
 
     // ── Allocate series storage ───────────────────────────────────────────────
@@ -519,10 +701,10 @@ PowerFlowResult HelmSolver::solve(const SolverData& data,
     MatCplx W  (static_cast<size_t>(N), VecCplx(static_cast<size_t>(max_coef), Cplx{}));
     MatCplx CC (static_cast<size_t>(N), VecCplx(static_cast<size_t>(max_coef), Cplx{}));
 
-    // Flat-start initialisation at s = 0.
+    // Exact no-load initialisation at s = 0.
     for (int i = 0; i < N; ++i) {
-      V[static_cast<size_t>(i)][0] = Cplx{1.0, 0.0};
-      W[static_cast<size_t>(i)][0] = Cplx{1.0, 0.0};
+      V[static_cast<size_t>(i)][0] = germ[static_cast<size_t>(i)];
+      W[static_cast<size_t>(i)][0] = Cplx{1.0, 0.0} / germ[static_cast<size_t>(i)];
     }
 
     // Padé baseline: use warm-start estimate (1+0j when warm_start == None).
@@ -542,13 +724,13 @@ PowerFlowResult HelmSolver::solve(const SolverData& data,
 
         if (bt == BusType::SLACK) {
           // Each SLACK bus gets its specific Vsp·e^{jθsp}.
-          // At n=1 the identity row RHS corrects the flat-start (1+0j).
+          // At n=1 the identity row moves the germ to the requested reference.
           // At n≥2: zero RHS enforces c^[n]=0 for all higher coefficients.
           if (n == 1) {
             const Cplx Vref = std::polar(Vsp[si],
                 data.ac_buses[si].va_deg * (kPi / 180.0));
-            rhs[2 * i]     = Vref.real() - 1.0;
-            rhs[2 * i + 1] = Vref.imag();
+            rhs[2 * i]     = Vref.real() - germ[si].real();
+            rhs[2 * i + 1] = Vref.imag() - germ[si].imag();
           }
 
         } else if (bt == BusType::PQ) {
@@ -566,7 +748,7 @@ PowerFlowResult HelmSolver::solve(const SolverData& data,
           // Row 2i+1 — |V|² constraint: V_re[i][n] = VV/2.
           double VV;
           if (n == 1) {
-            VV = Vsp[si] * Vsp[si] - 1.0;
+            VV = Vsp[si] * Vsp[si] - std::norm(germ[si]);
           } else {
             VV = 0.0;
             for (int k = 1; k < n; ++k) {
@@ -581,7 +763,8 @@ PowerFlowResult HelmSolver::solve(const SolverData& data,
           double p_cc;
           if (n == 1) {
             // CC = P_inject − Re(Ysh)  (first coefficient initialisation).
-            p_cc = S_inj[si].real() - Yshunt[si].real();
+            p_cc = S_inj[si].real() -
+                   Yshunt[si].real() * std::norm(germ[si]);
           } else {
             // Cache CC[i][n-1] = Σ_j Ytrans[i][j] · V[j][n-1] (sparse row).
             Cplx PP{};
@@ -600,14 +783,8 @@ PowerFlowResult HelmSolver::solve(const SolverData& data,
 
             // Shunt conductance correction (Re(Ysh) ≠ 0).
             if (std::abs(Yshunt[si].real()) > 1e-20) {
-              double VV_prev = 0.0;
-              for (int k = 1; k < n - 1; ++k) {
-                VV_prev += (V[si][static_cast<size_t>(k)] *
-                            std::conj(V[si][static_cast<size_t>(n - k)])).real();
-              }
-              // (VV_prev + 2·Re(V[i][n-1])) matches HELMpy's VVanterior usage.
               p_cc -= Yshunt[si].real() *
-                      (VV_prev + 2.0 * V[si][static_cast<size_t>(n - 1)].real());
+                      magnitude_squared_coefficient(V[si], n - 1);
             }
           }
           rhs[2 * i] = p_cc;
@@ -615,8 +792,13 @@ PowerFlowResult HelmSolver::solve(const SolverData& data,
       }  // per-bus RHS loop
 
       // ── Solve Y_mod · coef[:,n] = rhs ────────────────────────────────────
-      const Eigen::VectorXd coef_n = lu.solve(rhs);
-      if (lu.info() != Eigen::Success) {
+      Eigen::VectorXd coef_n;
+      if (use_sparse) {
+        coef_n = lu.solve(rhs);
+      } else {
+        coef_n = dense_lu.solve(rhs);
+      }
+      if ((use_sparse && lu.info() != Eigen::Success) || !coef_n.allFinite()) {
         diverged = true;
         break;
       }
@@ -633,7 +815,8 @@ PowerFlowResult HelmSolver::solve(const SolverData& data,
           aux += W[static_cast<size_t>(i)][static_cast<size_t>(k)] *
                  V[static_cast<size_t>(i)][static_cast<size_t>(n - k)];
         }
-        W[static_cast<size_t>(i)][static_cast<size_t>(n)] = -aux;
+        W[static_cast<size_t>(i)][static_cast<size_t>(n)] =
+            -aux / germ[static_cast<size_t>(i)];
       }
 
       n_computed = n;
@@ -649,7 +832,7 @@ PowerFlowResult HelmSolver::solve(const SolverData& data,
           const double dm = std::abs(std::abs(v_new) - std::abs(v_old));
           const double da = std::abs(std::arg(v_new)  - std::arg(v_old));
           const double d  = std::max(dm, da);
-          if (d > mis_tol) all_ok = false;
+          if (d > pade_stop_tol) all_ok = false;
           if (d > max_delta) max_delta = d;
           Vpade_prev[static_cast<size_t>(i)] = v_new;
         }
@@ -659,7 +842,9 @@ PowerFlowResult HelmSolver::solve(const SolverData& data,
     }  // coefficient loop
 
     if (diverged) {
-      result.converged = false;
+      result.iterations = n_computed;
+      fail("HELM coefficient solve failed",
+           "LU solve failed or produced non-finite power-series coefficients.");
       return result;
     }
 
@@ -721,7 +906,8 @@ PowerFlowResult HelmSolver::solve(const SolverData& data,
   }
 
   // Reached here only if Q-limit outer loop exhausted without a clean solution.
-  result.converged = false;
+  fail("HELM reactive-power limit outer loop exhausted",
+       "PV-to-PQ switching did not reach a stable active set within 10 outer iterations.");
   return result;
 }
 

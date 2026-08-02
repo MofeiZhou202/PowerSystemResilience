@@ -473,7 +473,10 @@ LifecycleSimResult run_lifecycle_simulation(
           st.soh = std::min(st.soh_calendar, st.soh_cycle);
 
           // Check for replacement
-          if (st.soh <= st.eol_percent) {
+          const double eol_fraction =
+              st.eol_percent > 1.0 ? st.eol_percent / 100.0
+                                   : st.eol_percent;
+          if (st.soh <= std::clamp(eol_fraction, 0.0, 1.0)) {
             ReplacementEvent re;
             re.year = year;
             re.storage_index = st.index;

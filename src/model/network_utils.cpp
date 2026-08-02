@@ -133,7 +133,7 @@ void add_equivalent_load_from_asymmetric(const AsymmetricLoad& al, ACSystem& ac,
   ld.bus = al.bus;
   ld.in_service = true;
   ld.name = al.name.empty() ? ("AsymmetricLoad_" + std::to_string(al.index)) : al.name;
-  const double s = (al.scaling > 0.0) ? al.scaling : 1.0;
+  const double s = std::isfinite(al.scaling) ? std::max(0.0, al.scaling) : 0.0;
   ld.p_mw = s * (al.pa_mw + al.pb_mw + al.pc_mw);
   ld.q_mvar = s * (al.qa_mvar + al.qb_mvar + al.qc_mvar);
   ld.model = LoadModel::ConstantPower;
@@ -203,34 +203,45 @@ void add_equivalent_branch_from_transformer2w(const Transformer2W& tr,
     nominal_ratio_pu =
         (tr.vn_hv_kv / tr.vn_lv_kv) / (base_kv_hv / base_kv_lv);
   }
+  const double fixed_tap =
+      (std::isfinite(tr.fixed_tap_pu) && tr.fixed_tap_pu > 1e-9)
+          ? tr.fixed_tap_pu
+          : 1.0;
   const double canonical_tap =
-      std::max(1e-6, nominal_ratio_pu * tap_position);
+      std::max(1e-6, nominal_ratio_pu * tap_position * fixed_tap);
+  const int parallel = std::max(1, tr.n_parallel);
 
   ACBranch br;
   br.index = next_idx++;
   br.from_bus = tr.hv_bus;
   br.to_bus = tr.lv_bus;
-  br.r_pu = r_pu * impedance_scale;
-  br.x_pu = x_pu * impedance_scale;
+  // The canonical branch is the aggregate equivalent of all parallel units.
+  // Store aggregate impedance/rating and reset n_parallel to one so consumers
+  // that explicitly stamp n_parallel cannot apply the factor a second time.
+  br.r_pu = r_pu * impedance_scale / static_cast<double>(parallel);
+  br.x_pu = x_pu * impedance_scale / static_cast<double>(parallel);
   br.b_pu = 0.0;
   br.tap = canonical_tap;
   br.shift_deg = tr.shift_deg;
-  br.rate_a_mva = tr.sn_mva;
+  br.rate_a_mva = tr.sn_mva * static_cast<double>(parallel);
+  br.n_parallel = 1;
   br.in_service = true;
   br.name = tr.name.empty() ? ("Transformer2W_" + std::to_string(tr.index)) : tr.name;
   if (tr.z0_percent > 0.0) {
     auto [r0_pu, x0_pu] =
         rx_from_z_percent_x_over_r(tr.z0_percent, tr.x0_r0, base_mva, tr.sn_mva);
-    br.r0_pu = r0_pu * impedance_scale * impedance_vbase_scale;
-    br.x0_pu = x0_pu * impedance_scale * impedance_vbase_scale;
+    br.r0_pu = r0_pu * impedance_scale * impedance_vbase_scale /
+               static_cast<double>(parallel);
+    br.x0_pu = x0_pu * impedance_scale * impedance_vbase_scale /
+               static_cast<double>(parallel);
   } else {
-    br.r0_pu = r_pu * impedance_scale;
-    br.x0_pu = x_pu * impedance_scale;
+    br.r0_pu = r_pu * impedance_scale / static_cast<double>(parallel);
+    br.x0_pu = x_pu * impedance_scale / static_cast<double>(parallel);
   }
   br.b0_pu = 0.0;
   br.vn_hv_kv = tr.vn_hv_kv;
   br.vn_lv_kv = tr.vn_lv_kv;
-  br.sn_mva = tr.sn_mva;
+  br.sn_mva = tr.sn_mva * static_cast<double>(parallel);
   ac.branches.push_back(br);
 }
 
@@ -277,6 +288,22 @@ void add_equivalent_branches_from_transformer3w(const Transformer3W& tr,
       rx_from_vk_vkr(tr.vk_hv_lv_percent, tr.vkr_hv_lv_percent, base_mva, sn_hv_lv);
   auto [r_ml, x_ml] =
       rx_from_vk_vkr(tr.vk_mv_lv_percent, tr.vkr_mv_lv_percent, base_mva, sn_mv_lv);
+
+  const auto voltage_base_scale = [&](double nameplate_kv, int bus) {
+    const double bus_kv = bus_base_kv_or_default(ac, bus);
+    if (nameplate_kv <= 1e-9 || bus_kv <= 1e-9) return 1.0;
+    const double ratio = nameplate_kv / bus_kv;
+    return ratio * ratio;
+  };
+  const double scale_hm = voltage_base_scale(tr.vn_mv_kv, tr.mv_bus);
+  const double scale_hl = voltage_base_scale(tr.vn_lv_kv, tr.lv_bus);
+  const double scale_ml = voltage_base_scale(tr.vn_lv_kv, tr.lv_bus);
+  r_hm *= scale_hm;
+  x_hm *= scale_hm;
+  r_hl *= scale_hl;
+  x_hl *= scale_hl;
+  r_ml *= scale_ml;
+  x_ml *= scale_ml;
 
   const Complex z_hm(r_hm, x_hm);
   const Complex z_hl(r_hl, x_hl);
@@ -343,7 +370,19 @@ void add_equivalent_branches_from_transformer3w(const Transformer3W& tr,
     br.r_pu = r_pu;
     br.x_pu = x_pu;
     br.b_pu = 0.0;
-    br.tap = tap_by_pair[pair_idx];
+    double nominal_ratio_pu = 1.0;
+    const double from_nameplate =
+        fw == 0 ? tr.vn_hv_kv : (fw == 1 ? tr.vn_mv_kv : tr.vn_lv_kv);
+    const double to_nameplate =
+        tw == 0 ? tr.vn_hv_kv : (tw == 1 ? tr.vn_mv_kv : tr.vn_lv_kv);
+    const double from_base = bus_base_kv_or_default(ac, p.from_bus);
+    const double to_base = bus_base_kv_or_default(ac, p.to_bus);
+    if (from_nameplate > 1e-9 && to_nameplate > 1e-9 &&
+        from_base > 1e-9 && to_base > 1e-9) {
+      nominal_ratio_pu =
+          (from_nameplate / to_nameplate) / (from_base / to_base);
+    }
+    br.tap = std::max(1e-6, tap_by_pair[pair_idx] * nominal_ratio_pu);
     br.shift_deg =
         (p.from_bus == tr.hv_bus && p.to_bus == tr.mv_bus)
             ? tr.shift_mv_deg
@@ -471,9 +510,8 @@ void add_equivalent_load_from_motor(const AsynchronousMotor& m,
   ld.p_percent_p = 100.0;
   ld.p_percent_q = 100.0;
 
-  // SC subtransient impedance: convert from ohms to pu on motor base so that
-  // the Load motor-fraction SC path (sn_mva, motor_percent, r_sc_pu, x_sub_pu)
-  // produces the same admittance as the dedicated Motor path.
+  // r_pu/x_pu are already on the motor nameplate base. Keep them unchanged so
+  // the Load motor-fraction and dedicated Motor short-circuit paths agree.
   ld.sn_mva       = m.sn_mva;
   ld.motor_percent = 1.0;
   ld.sc_source_type = "AsynchronousMotor";
@@ -484,14 +522,8 @@ void add_equivalent_load_from_motor(const AsynchronousMotor& m,
       projected_dynamic_profile(m.dynamic_model,
                                 "AsynchronousMotor:" + std::to_string(m.index),
                                 "Projected from asynchronous motor into canonical load");
-  if (m.vn_kv > 1e-6 && m.sn_mva > 1e-6) {
-    const double z_base_motor = m.vn_kv * m.vn_kv / m.sn_mva;
-    ld.r_sc_pu  = m.r_pu / z_base_motor;
-    ld.x_sub_pu = m.x_pu / z_base_motor;
-  } else {
-    ld.r_sc_pu  = m.r_pu;
-    ld.x_sub_pu = m.x_pu;
-  }
+  ld.r_sc_pu = m.r_pu;
+  ld.x_sub_pu = m.x_pu;
 
   ac.loads.push_back(ld);
 }
@@ -621,17 +653,39 @@ void project_chargers_into_stations(ACSystem& ac) {
     station_pos.emplace(ac.charging_stations[i].index, i);
   }
 
+  std::unordered_set<int> detailed_station_ids;
+  for (const auto& ch : ac.chargers) {
+    if (ch.in_service) detailed_station_ids.insert(ch.station_id);
+  }
+  for (int station_id : detailed_station_ids) {
+    const auto it = station_pos.find(station_id);
+    if (it == station_pos.end()) {
+      throw std::invalid_argument(
+          "project_to_canonical_models: charger station_id " +
+          std::to_string(station_id) +
+          " has no ChargingStation; a bus-qualified station is required");
+    }
+    auto& station = ac.charging_stations[it->second];
+    if (station.bus <= 0) {
+      throw std::invalid_argument(
+          "project_to_canonical_models: ChargingStation " +
+          std::to_string(station.index) + " has no valid AC bus");
+    }
+    station.p_total_kw = 0.0;
+    station.q_total_kvar = 0.0;
+    station.num_chargers = 0;
+  }
+
   for (const auto& ch : ac.chargers) {
     if (!ch.in_service) continue;
     auto it = station_pos.find(ch.station_id);
-    if (it == station_pos.end()) continue;
+    if (it == station_pos.end()) continue;  // diagnosed in the pre-pass above
     auto& cs = ac.charging_stations[it->second];
     const double p_kw = std::max(0.0, ch.p_ch_max_kw);
     cs.p_total_kw += p_kw;
     const double pf = std::clamp(cs.power_factor, 1e-3, 1.0);
     const double tanphi = std::tan(std::acos(pf));
     cs.q_total_kvar += p_kw * tanphi;
-    cs.num_chargers = std::max(cs.num_chargers, cs.n_fast + cs.n_slow);
     cs.num_chargers += 1;
   }
 }
@@ -678,7 +732,7 @@ void project_three_phase_if_needed(HybridPowerSystem& out) {
     br.b_pu = line.b1_pu;
     if ((br.r_pu == 0.0 && br.x_pu == 0.0) && line.length_km > 0.0) {
       const double kv = bus_base_kv_or_default(out.ac, line.from_bus);
-      const double z_base = (kv * kv) / std::max(1e-9, out.base_mva);
+      const double z_base = (kv * kv) / std::max(1e-9, out.ac.base_mva);
       const double parallel = std::max(1, line.parallel);
       const double r_ohm = (line.r1_ohm_per_km * line.length_km) / static_cast<double>(parallel);
       const double x_ohm = (line.x1_ohm_per_km * line.length_km) / static_cast<double>(parallel);
@@ -708,8 +762,11 @@ void project_three_phase_if_needed(HybridPowerSystem& out) {
     eq.vk_percent = tr.vk_percent;
     eq.vkr_percent = tr.vkr_percent;
     eq.tap_pos = tr.tap_pos;
+    eq.tap_min = tr.tap_min;
+    eq.tap_max = tr.tap_max;
     eq.tap_neutral = tr.tap_neutral;
     eq.tap_step_percent = tr.tap_step_percent;
+    eq.tap_side = tr.tap_side;
     eq.shift_deg = tr.shift_deg;
     eq.z0_percent = tr.vk0_percent;
     if (tr.vkr0_percent > 1e-9) {
@@ -737,7 +794,13 @@ void project_three_phase_if_needed(HybridPowerSystem& out) {
     eq.i_percent_q = ld.const_i_percent;
     eq.p_percent_q = ld.const_p_percent;
     eq.motor_percent = ld.motor_percent;
-    eq.x_sub_pu = ld.x_r_ratio;
+    const double load_s_mva = std::hypot(eq.p_mw, eq.q_mvar);
+    eq.sn_mva = load_s_mva;
+    if (ld.lrc_pu > 1e-9 && ld.x_r_ratio > 1e-9) {
+      const double z_sub_pu = 1.0 / ld.lrc_pu;
+      eq.r_sc_pu = z_sub_pu / std::sqrt(1.0 + ld.x_r_ratio * ld.x_r_ratio);
+      eq.x_sub_pu = eq.r_sc_pu * ld.x_r_ratio;
+    }
     eq.dynamic_model =
         projected_dynamic_profile(ld.dynamic_model,
                                   "ThreePhaseLoad:" + std::to_string(ld.index),
@@ -939,6 +1002,10 @@ ValidationResult validate(const HybridPowerSystem& sys) {
   std::unordered_set<int> ac_bus_idx;
   std::set<int> ac_dup_check;
   for (const auto& b : sys.ac.buses) {
+    if (b.index <= 0) {
+      res.errors.push_back("AC bus index must be positive: " +
+                           std::to_string(b.index));
+    }
     if (!ac_dup_check.insert(b.index).second) {
       res.errors.push_back("Duplicate AC bus index: " +
                            std::to_string(b.index));
@@ -950,6 +1017,10 @@ ValidationResult validate(const HybridPowerSystem& sys) {
   std::unordered_set<int> dc_bus_idx;
   std::set<int> dc_dup_check;
   for (const auto& b : sys.dc.buses) {
+    if (b.index <= 0) {
+      res.errors.push_back("DC bus index must be positive: " +
+                           std::to_string(b.index));
+    }
     if (!dc_dup_check.insert(b.index).second) {
       res.errors.push_back("Duplicate DC bus index: " +
                            std::to_string(b.index));
@@ -959,6 +1030,10 @@ ValidationResult validate(const HybridPowerSystem& sys) {
 
   // Check AC branches
   for (const auto& br : sys.ac.branches) {
+    if (br.from_bus == br.to_bus) {
+      res.errors.push_back("AC branch " + std::to_string(br.index) +
+                           " is a self-loop");
+    }
     if (ac_bus_idx.find(br.from_bus) == ac_bus_idx.end()) {
       res.errors.push_back("AC branch " + std::to_string(br.index) +
                            " from_bus " + std::to_string(br.from_bus) +
@@ -977,6 +1052,10 @@ ValidationResult validate(const HybridPowerSystem& sys) {
 
   // Check DC branches
   for (const auto& br : sys.dc.branches) {
+    if (br.from_bus == br.to_bus) {
+      res.errors.push_back("DC branch " + std::to_string(br.index) +
+                           " is a self-loop");
+    }
     if (dc_bus_idx.find(br.from_bus) == dc_bus_idx.end()) {
       res.errors.push_back("DC branch " + std::to_string(br.index) +
                            " from_bus " + std::to_string(br.from_bus) +
@@ -1278,8 +1357,10 @@ void strip_dead_islands(HybridPowerSystem& sys) {
     const auto& bset = comp_buses[c];
     // Check bus types
     for (int pos : components[c]) {
-      auto bt = buses[static_cast<size_t>(pos)].bus_type;
-      if (bt == BusType::SLACK || bt == BusType::PV) return true;
+      const auto& bus = buses[static_cast<size_t>(pos)];
+      if (bus.in_service &&
+          (bus.bus_type == BusType::SLACK || bus.bus_type == BusType::PV))
+        return true;
     }
     // Check generators
     for (const auto& g : sys.ac.generators) {
@@ -1303,7 +1384,7 @@ void strip_dead_islands(HybridPowerSystem& sys) {
     }
     // Check storage with active dispatch
     for (const auto& st : sys.ac.storage) {
-      if (st.in_service && bset.count(st.bus) && std::abs(st.p_mw) > 1e-9) return true;
+      if (st.in_service && bset.count(st.bus) && st.p_mw > 1e-9) return true;
     }
     // Check VSC converters (they inject into AC bus)
     for (const auto& conv : sys.vsc_converters) {
@@ -1591,6 +1672,8 @@ static void merge_zero_impedance_buses_impl(
           (std::abs(br.r_pu) >= impedance_threshold ||
            std::abs(br.x_pu) >= impedance_threshold)) continue;
       if (std::abs(br.b_pu) > 1e-6) continue;  // non-trivial charging 鈫?real line
+      if (std::abs(br.tap - 1.0) > 1e-9 || std::abs(br.shift_deg) > 1e-9)
+        continue;
 
       auto it_f = idx_to_pos.find(br.from_bus);
       auto it_t = idx_to_pos.find(br.to_bus);
@@ -1754,6 +1837,11 @@ static void merge_zero_impedance_buses_impl(
     br.to_bus = remap_ac(br.to_bus);
     // Remove self-loops (branches within the same merged bus)
     if (br.from_bus == br.to_bus) {
+      if (br.from_bus > 0 && br.from_bus <= static_cast<int>(buses.size()) &&
+          std::isfinite(br.b_pu)) {
+        buses[static_cast<size_t>(br.from_bus - 1)].bs_mvar +=
+            br.b_pu * sys.base_mva;
+      }
       merge_map.branch_orig_to_proj[orig_i] = -1;
       continue;
     }
@@ -1947,7 +2035,15 @@ std::vector<double> unproject_bus_vector(
 // If no port on a side has VF control, the first in-service port on
 // that side is auto-promoted to VDC_Q_MODE.
 // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
-static void expand_energy_routers(HybridPowerSystem& sys) {
+struct EnergyRouterExpansionRecord {
+  int router_index{0};
+  std::string canonical_type;
+  int canonical_index{0};
+};
+
+static void expand_energy_routers(
+    HybridPowerSystem& sys,
+    std::vector<EnergyRouterExpansionRecord>* expansion_records) {
   if (sys.energy_routers.empty()) return;
 
   // Find the next available indices for new elements.
@@ -1958,18 +2054,50 @@ static void expand_energy_routers(HybridPowerSystem& sys) {
   for (const auto& er : sys.energy_routers) {
     if (!er.in_service) continue;
 
-    // Partition ports by side.
+    // Partition ports by side and domain. A DC port is an existing DC-network
+    // terminal, never an AC terminal of a synthetic VSC.
     std::vector<const EnergyRouterPort*> side_a, side_b;
+    std::vector<const EnergyRouterPort*> side_a_ac, side_b_ac;
     for (const auto& port : er.ports) {
       if (!port.in_service) continue;
-      if (port.bus == 0) continue;
-      if (port.side == 0)
+      if (port.bus <= 0) {
+        throw std::invalid_argument(
+            "project_to_canonical_models: EnergyRouter " +
+            std::to_string(er.index) + " port " +
+            std::to_string(port.index) + " has no valid bus");
+      }
+      const bool bus_exists = port.port_type == ERPortType::AC
+                                  ? std::any_of(sys.ac.buses.begin(), sys.ac.buses.end(),
+                                                [&](const ACBus& b) {
+                                                  return b.index == port.bus;
+                                                })
+                                  : std::any_of(sys.dc.buses.begin(), sys.dc.buses.end(),
+                                                [&](const DCBus& b) {
+                                                  return b.index == port.bus;
+                                                });
+      if (!bus_exists) {
+        throw std::invalid_argument(
+            "project_to_canonical_models: EnergyRouter " +
+            std::to_string(er.index) + " port " +
+            std::to_string(port.index) + " references missing " +
+            (port.port_type == ERPortType::AC ? "AC" : "DC") +
+            " bus " + std::to_string(port.bus));
+      }
+      if (port.side == 0) {
         side_a.push_back(&port);
-      else
+        if (port.port_type == ERPortType::AC) side_a_ac.push_back(&port);
+      } else {
         side_b.push_back(&port);
+        if (port.port_type == ERPortType::AC) side_b_ac.push_back(&port);
+      }
     }
 
     if (side_a.empty() && side_b.empty()) continue;
+    if (side_a.empty() || side_b.empty()) {
+      throw std::invalid_argument(
+          "project_to_canonical_models: EnergyRouter " +
+          std::to_string(er.index) + " must have in-service ports on both sides");
+    }
 
     // 鈹€鈹€ Create Internal DC Buses 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
     const double dc_kv = (er.vn_dc_kv > 0.0) ? er.vn_dc_kv : 20.0;
@@ -1977,24 +2105,45 @@ static void expand_energy_routers(HybridPowerSystem& sys) {
                                 ? (1.0 - er.loss_percent / 100.0)
                                 : 0.98;
 
-    DCBus dc_alpha;
-    dc_alpha.index      = next_dc_bus++;
-    dc_alpha.bus_type    = DCBusType::DC_P;
-    dc_alpha.vm_pu       = 1.0;
-    dc_alpha.base_kv     = dc_kv;
-    dc_alpha.in_service  = true;
-    dc_alpha.name        = er.name + "_DC_alpha";
+    const auto side_dc_bus = [&](const auto& ports, const char* side_name) {
+      int dc_bus = 0;
+      for (const auto* port : ports) {
+        if (port->port_type != ERPortType::DC) continue;
+        if (dc_bus != 0 && dc_bus != port->bus) {
+          throw std::invalid_argument(
+              "project_to_canonical_models: EnergyRouter " +
+              std::to_string(er.index) + " has multiple distinct DC buses on side " +
+              side_name);
+        }
+        dc_bus = port->bus;
+      }
+      return dc_bus;
+    };
 
-    DCBus dc_beta;
-    dc_beta.index       = next_dc_bus++;
-    dc_beta.bus_type     = DCBusType::DC_P;
-    dc_beta.vm_pu        = 1.0;
-    dc_beta.base_kv      = dc_kv;
-    dc_beta.in_service   = true;
-    dc_beta.name         = er.name + "_DC_beta";
-
-    sys.dc.buses.push_back(dc_alpha);
-    sys.dc.buses.push_back(dc_beta);
+    int dc_alpha_index = side_dc_bus(side_a, "A");
+    int dc_beta_index = side_dc_bus(side_b, "B");
+    const auto create_internal_dc_bus = [&](const std::string& suffix) {
+      DCBus bus;
+      bus.index = next_dc_bus++;
+      bus.bus_type = DCBusType::DC_P;
+      bus.vm_pu = 1.0;
+      bus.base_kv = dc_kv;
+      bus.in_service = true;
+      bus.name = er.name + suffix;
+      const int index = bus.index;
+      sys.dc.buses.push_back(std::move(bus));
+      return index;
+    };
+    if (dc_alpha_index == 0)
+      dc_alpha_index = create_internal_dc_bus("_DC_alpha");
+    if (dc_beta_index == 0)
+      dc_beta_index = create_internal_dc_bus("_DC_beta");
+    if (dc_alpha_index == dc_beta_index) {
+      throw std::invalid_argument(
+          "project_to_canonical_models: EnergyRouter " +
+          std::to_string(er.index) +
+          " cannot connect both sides to the same DC bus");
+    }
 
     // --- Compute appropriate k_vdc for VDC_Q modes ---
     // The VDC_Q formula is p = k_vdc * (vdc^2 - v_set^2) [per-unit].
@@ -2010,15 +2159,15 @@ static void expand_energy_routers(HybridPowerSystem& sys) {
     // 鈹€鈹€ Create VSCs for Side A ports 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
     // Check if any side A port has VF control.
     bool side_a_has_vf = false;
-    for (const auto* p : side_a) {
+    for (const auto* p : side_a_ac) {
       if (p->control_mode == ERControlMode::VF) { side_a_has_vf = true; break; }
     }
-    for (size_t i = 0; i < side_a.size(); ++i) {
-      const auto* p = side_a[i];
+    for (size_t i = 0; i < side_a_ac.size(); ++i) {
+      const auto* p = side_a_ac[i];
       VSCConverter vsc;
       vsc.index        = next_vsc++;
       vsc.bus_ac       = p->bus;
-      vsc.bus_dc       = dc_alpha.index;
+      vsc.bus_dc       = dc_alpha_index;
       vsc.in_service   = true;
       vsc.name         = er.name + "_VSC_A" + std::to_string(p->index);
 
@@ -2071,19 +2220,22 @@ static void expand_energy_routers(HybridPowerSystem& sys) {
       vsc.dynamic_model = energy_router_profile_for(er, p, "VSC converter");
 
       sys.vsc_converters.push_back(vsc);
+      if (expansion_records)
+        expansion_records->push_back(
+            {er.index, "VSCConverter", vsc.index});
     }
 
     // 鈹€鈹€ Create VSCs for Side B ports 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
     bool side_b_has_vf = false;
-    for (const auto* p : side_b) {
+    for (const auto* p : side_b_ac) {
       if (p->control_mode == ERControlMode::VF) { side_b_has_vf = true; break; }
     }
-    for (size_t i = 0; i < side_b.size(); ++i) {
-      const auto* p = side_b[i];
+    for (size_t i = 0; i < side_b_ac.size(); ++i) {
+      const auto* p = side_b_ac[i];
       VSCConverter vsc;
       vsc.index        = next_vsc++;
       vsc.bus_ac       = p->bus;
-      vsc.bus_dc       = dc_beta.index;
+      vsc.bus_dc       = dc_beta_index;
       vsc.in_service   = true;
       vsc.name         = er.name + "_VSC_B" + std::to_string(p->index);
 
@@ -2125,6 +2277,9 @@ static void expand_energy_routers(HybridPowerSystem& sys) {
       vsc.dynamic_model = energy_router_profile_for(er, p, "VSC converter");
 
       sys.vsc_converters.push_back(vsc);
+      if (expansion_records)
+        expansion_records->push_back(
+            {er.index, "VSCConverter", vsc.index});
     }
 
     // ── Create DCDC converter between DC_α and DC_β ─────────────────
@@ -2134,7 +2289,7 @@ static void expand_energy_routers(HybridPowerSystem& sys) {
     // power (k*(V²−V_set²)=0).  So switch DCDC to Power mode, with
     // p_ref estimated from the sum of side B PQ port setpoints.
     bool side_b_controls_dc = false;
-    for (const auto* p : side_b) {
+    for (const auto* p : side_b_ac) {
       if (p->control_mode == ERControlMode::VF ||
           p->control_mode == ERControlMode::Droop) {
         side_b_controls_dc = true;
@@ -2144,21 +2299,18 @@ static void expand_energy_routers(HybridPowerSystem& sys) {
 
     DCDCConverter dcdc;
     dcdc.index        = next_dcdc++;
-    dcdc.bus_in       = dc_alpha.index;
-    dcdc.bus_out      = dc_beta.index;
+    dcdc.bus_in       = dc_alpha_index;
+    dcdc.bus_out      = dc_beta_index;
     dcdc.in_service   = true;
     dcdc.name         = er.name + "_DCDC";
     if (side_b_controls_dc) {
       // Side B VF/Droop controls dc_beta voltage → DCDC uses Power mode.
       dcdc.control_mode = DCDCControlMode::Power;
       double p_ref = 0.0;
-      for (const auto* p : side_b) {
-        if (p->control_mode == ERControlMode::PQ && p->p_set_mw > 0.0)
+      for (const auto* p : side_b_ac) {
+        if (p->control_mode == ERControlMode::PQ)
           p_ref += p->p_set_mw;
       }
-      // Add headroom for the VF port (estimate: half of remaining rated capacity)
-      double remaining = er.p_rated_mw - p_ref;
-      if (remaining > 0.0) p_ref += remaining * 0.5;
       dcdc.p_ref_mw  = p_ref;
       dcdc.v_ref_pu  = 1.0;
     } else {
@@ -2177,6 +2329,9 @@ static void expand_energy_routers(HybridPowerSystem& sys) {
     dcdc.dynamic_model = energy_router_profile_for(er, nullptr, "DCDC converter");
 
     sys.dc.dcdc_converters.push_back(dcdc);
+    if (expansion_records)
+      expansion_records->push_back(
+          {er.index, "DCDCConverter", dcdc.index});
   }
 
   // All ERs have been expanded 鈥?clear the vector to prevent double-counting
@@ -2300,23 +2455,12 @@ static void project_in_place(HybridPowerSystem& out,
   }
 
   // EnergyRouters 鈫?macro expansion into internal DC buses + VSCs + DCDC
-  const auto authored_energy_routers = out.energy_routers;
-  const std::size_t vsc_before_router = out.vsc_converters.size();
-  const std::size_t dcdc_before_router = out.dc.dcdc_converters.size();
-  expand_energy_routers(out);
+  std::vector<EnergyRouterExpansionRecord> router_expansions;
+  expand_energy_routers(out, &router_expansions);
   canonicalize_dc_bus_indices(out);
-  for (const auto& er : authored_energy_routers) {
-    const std::string prefix = er.name + "_";
-    for (std::size_t i = vsc_before_router; i < out.vsc_converters.size(); ++i) {
-      const auto& vsc = out.vsc_converters[i];
-      if (vsc.name.rfind(prefix, 0) == 0)
-        record_mapping("EnergyRouter", er.index, "VSCConverter", vsc.index);
-    }
-    for (std::size_t i = dcdc_before_router; i < out.dc.dcdc_converters.size(); ++i) {
-      const auto& dcdc = out.dc.dcdc_converters[i];
-      if (dcdc.name.rfind(prefix, 0) == 0)
-        record_mapping("EnergyRouter", er.index, "DCDCConverter", dcdc.index);
-    }
+  for (const auto& expansion : router_expansions) {
+    record_mapping("EnergyRouter", expansion.router_index,
+                   expansion.canonical_type, expansion.canonical_index);
   }
 
   // VirtualPowerPlants 鈫?StaticGenerator at aggregation bus
@@ -2465,25 +2609,9 @@ static void project_in_place(HybridPowerSystem& out,
 
   if (!out.ac.chargers.empty()) {
     if (out.ac.charging_stations.empty()) {
-      int next_cs = next_index_of(out.ac.charging_stations);
-      std::unordered_map<int, std::vector<const Charger*>> by_station;
-      for (const auto& ch : out.ac.chargers) {
-        if (!ch.in_service) continue;
-        by_station[ch.station_id].push_back(&ch);
-      }
-      for (const auto& [station_id, chargers] : by_station) {
-        if (chargers.empty()) continue;
-        ChargingStation cs;
-        cs.index = (station_id != 0) ? station_id : next_cs++;
-        cs.name = "StationFromChargers_" + std::to_string(cs.index);
-        cs.in_service = true;
-        cs.bus = 0;
-        cs.num_chargers = static_cast<int>(chargers.size());
-        for (const Charger* ch : chargers) {
-          cs.p_total_kw += std::max(0.0, ch->p_ch_max_kw);
-        }
-        out.ac.charging_stations.push_back(cs);
-      }
+      throw std::invalid_argument(
+          "project_to_canonical_models: Charger rows do not carry a bus; "
+          "provide bus-qualified ChargingStation rows before projection");
     }
     project_chargers_into_stations(out.ac);
     out.ac.chargers.clear();  // fully represented by charging_stations
@@ -2502,6 +2630,17 @@ static DeviceTerminalFlows device_terminal_flows_from_net(
         active == net_p.end() ? 0.0 : active->second,
         reactive == net_q.end() ? 0.0 : reactive->second};
   };
+  std::unordered_map<int, int> closed_device_count_by_terminal;
+  for (const auto& sw : sys.ac.switches) {
+    if (sw.in_service && sw.closed && sw.bus_from > 0 && sw.bus_to > 0 &&
+        sw.bus_from != sw.bus_to)
+      ++closed_device_count_by_terminal[sw.bus_to];
+  }
+  for (const auto& cb : sys.ac.circuit_breakers) {
+    if (cb.in_service && cb.closed && cb.bus_from > 0 && cb.bus_to > 0 &&
+        cb.bus_from != cb.bus_to)
+      ++closed_device_count_by_terminal[cb.bus_to];
+  }
   auto fill = [&](DeviceTerminalFlow& f, int from, int to, bool closed, double rate) {
     f.bus_from = from; f.bus_to = to; f.closed = closed; f.rate_mva = rate;
     if (!closed || !from || !to || from == to) return;
@@ -2510,6 +2649,9 @@ static DeviceTerminalFlows device_terminal_flows_from_net(
     // Unlike a topology-cut BFS, this remains valid when another path connects
     // the two endpoint areas.
     auto [p, q] = terminal_residual(to);
+    const int parallel_devices = std::max(1, closed_device_count_by_terminal[to]);
+    p /= static_cast<double>(parallel_devices);
+    q /= static_cast<double>(parallel_devices);
     f.pf_mw = -p; f.pt_mw = p; f.qf_mvar = -q; f.qt_mvar = q;
     if (rate > 0) f.loading_pct = 100.0 * std::hypot(p, q) / rate;
   };
@@ -2545,11 +2687,15 @@ DeviceTerminalFlows compute_device_terminal_flows(const HybridPowerSystem& sys,
   for (const auto& bus : sys.ac.buses) {
     add_p(bus.index, -bus.pd_mw);
     add_q(bus.index, -bus.qd_mvar);
+    add_p(bus.index, -bus.gs_mw);
+    add_q(bus.index, bus.bs_mvar);
   }
   for (const auto& load : sys.ac.loads) {
     if (!load.in_service) continue;
-    add_p(load.bus, -load.p_mw * load.scaling);
-    add_q(load.bus, -load.q_mvar * load.scaling);
+    const double scaling =
+        std::isfinite(load.scaling) ? std::max(0.0, load.scaling) : 0.0;
+    add_p(load.bus, -load.p_mw * scaling);
+    add_q(load.bus, -load.q_mvar * scaling);
   }
   for (const auto& load : sys.ac.flexible_loads) {
     if (!load.in_service) continue;
@@ -2558,9 +2704,11 @@ DeviceTerminalFlows compute_device_terminal_flows(const HybridPowerSystem& sys,
   }
   for (const auto& load : sys.ac.asymmetric_loads) {
     if (!load.in_service) continue;
-    add_p(load.bus, -(load.pa_mw + load.pb_mw + load.pc_mw) * load.scaling);
+    const double scaling =
+        std::isfinite(load.scaling) ? std::max(0.0, load.scaling) : 0.0;
+    add_p(load.bus, -(load.pa_mw + load.pb_mw + load.pc_mw) * scaling);
     add_q(load.bus,
-          -(load.qa_mvar + load.qb_mvar + load.qc_mvar) * load.scaling);
+          -(load.qa_mvar + load.qb_mvar + load.qc_mvar) * scaling);
   }
   for (const auto& station : sys.ac.charging_stations) {
     if (!station.in_service) continue;
@@ -2574,11 +2722,15 @@ DeviceTerminalFlows compute_device_terminal_flows(const HybridPowerSystem& sys,
   }
   for (const auto& gen : sys.ac.static_generators) {
     if (!gen.in_service) continue;
-    add_p(gen.bus, gen.p_mw * gen.scaling);
-    add_q(gen.bus, gen.q_mvar * gen.scaling);
+    const double scaling =
+        std::isfinite(gen.scaling) ? std::max(0.0, gen.scaling) : 0.0;
+    add_p(gen.bus, gen.p_mw * scaling);
+    add_q(gen.bus, gen.q_mvar * scaling);
   }
   for (const auto& gen : sys.ac.renewable_gens) {
-    if (gen.in_service) add_p(gen.bus, gen.p_mw);
+    if (!gen.in_service) continue;
+    add_p(gen.bus, gen.p_mw);
+    add_q(gen.bus, gen.q_mvar);
   }
   for (const auto& pv : sys.ac.pv_systems) {
     if (!pv.in_service) continue;
@@ -2589,6 +2741,46 @@ DeviceTerminalFlows compute_device_terminal_flows(const HybridPowerSystem& sys,
     if (!storage.in_service) continue;
     add_p(storage.bus, storage.p_mw);
     add_q(storage.bus, storage.q_mvar);
+  }
+  for (const auto& motor : sys.ac.motors) {
+    if (!motor.in_service) continue;
+    const double pf = std::clamp(motor.cos_phi, 0.01, 1.0);
+    add_p(motor.bus, -motor.sn_mva * pf);
+    add_q(motor.bus,
+          -motor.sn_mva * std::sqrt(std::max(0.0, 1.0 - pf * pf)));
+  }
+  for (const auto& shunt : sys.ac.shunts) {
+    if (!shunt.in_service) continue;
+    const double bs = shunt.switchable && shunt.n_steps > 0
+                          ? shunt.bs_per_step * shunt.current_step
+                          : shunt.bs_mvar;
+    add_p(shunt.bus, -shunt.gs_mw);
+    add_q(shunt.bus, bs);
+  }
+  for (const auto& mobile : sys.mobile_storage) {
+    if (!mobile.in_service || mobile.status == MobileStorageStatus::InTransit)
+      continue;
+    add_p(mobile.bus, mobile.p_mw);
+    add_q(mobile.bus, mobile.q_mvar);
+  }
+  for (const auto& vpp : sys.vpps) {
+    if (!vpp.in_service) continue;
+    add_p(vpp.pcc_bus, vpp.p_output_mw);
+    add_q(vpp.pcc_bus, vpp.q_output_mvar);
+  }
+  for (const auto& microgrid : sys.microgrids) {
+    if (!microgrid.in_service ||
+        microgrid.operating_mode != MicrogridMode::GridConnected)
+      continue;
+    add_p(microgrid.pcc_bus, microgrid.p_exchange_mw);
+  }
+  for (const auto& converter : sys.vsc_converters) {
+    if (!converter.in_service ||
+        (converter.control_mode != ConverterMode::PQ_MODE &&
+         converter.control_mode != ConverterMode::AC_PV))
+      continue;
+    add_p(converter.bus_ac, converter.p_set_mw);
+    add_q(converter.bus_ac, converter.q_set_mvar);
   }
   const size_t n = std::min(ac_branch_flows.size(), sys.ac.branches.size());
   for (size_t i = 0; i < n; ++i) {
@@ -2653,8 +2845,8 @@ ObservableAttribution evaluate_attribution(
         out.attributed_entities = 0;
         for (const auto& [original_position, projected_position] :
              projected.bus_merge_map->branch_orig_to_proj) {
-          (void)projected_position;
-          if (original_position >= 0 && original_position < out.canonical_entities)
+          if (original_position >= 0 && original_position < out.canonical_entities &&
+              projected_position >= 0)
             ++out.attributed_entities;
         }
       }

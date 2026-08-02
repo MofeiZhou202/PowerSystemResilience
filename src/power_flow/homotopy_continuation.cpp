@@ -2,16 +2,18 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <string>
 
 #include "hacdcpf/power_flow/hybrid.hpp"
 
 namespace hacdcpf::powerflow {
 
-namespace {
+namespace detail {
 
 /// Scale all active/reactive injections and setpoints by λ ∈ [0,1].
 /// Voltage setpoints and network parameters are left unchanged.
-static void scale_system_by_lambda(HybridPowerSystem& sys, double lambda) {
+void scale_system_by_lambda(HybridPowerSystem& sys, double lambda) {
   // AC bus lumped load (inline).
   for (auto& bus : sys.ac.buses) {
     bus.pd_mw   *= lambda;
@@ -30,6 +32,7 @@ static void scale_system_by_lambda(HybridPowerSystem& sys, double lambda) {
   // AC generators (dispatch setpoint).
   for (auto& g : sys.ac.generators) {
     g.pg_mw *= lambda;
+    g.qg_mvar *= lambda;
   }
   // Static generators / SGEN (PV plants, etc.).
   for (auto& sg : sys.ac.static_generators) {
@@ -44,6 +47,16 @@ static void scale_system_by_lambda(HybridPowerSystem& sys, double lambda) {
   // AC storage (dispatch setpoint).
   for (auto& st : sys.ac.storage) {
     st.p_mw *= lambda;
+    st.q_mvar *= lambda;
+  }
+  for (auto& pv : sys.ac.pv_systems) {
+    pv.p_mw *= lambda;
+    pv.q_mvar *= lambda;
+    pv.irradiance *= lambda;
+  }
+  for (auto& cs : sys.ac.charging_stations) {
+    cs.p_total_kw *= lambda;
+    cs.q_total_kvar *= lambda;
   }
   // DC bus lumped load.
   for (auto& bus : sys.dc.buses) {
@@ -69,9 +82,19 @@ static void scale_system_by_lambda(HybridPowerSystem& sys, double lambda) {
   for (auto& st : sys.dc.storage) {
     st.p_mw *= lambda;
   }
+  for (auto& st : sys.dc.dc_storage) {
+    st.p_mw *= lambda;
+  }
   // VSC active-power setpoints (voltage control setpoints kept as-is).
   for (auto& vsc : sys.vsc_converters) {
     vsc.p_set_mw *= lambda;
+    vsc.p_schedule_mw *= lambda;
+    vsc.p_initial_mw *= lambda;
+    vsc.q_set_mvar *= lambda;
+  }
+  for (auto& lcc : sys.lcc_converters) {
+    lcc.p_set_mw *= lambda;
+    lcc.i_set_ka *= lambda;
   }
   // DC/DC converter power reference.
   for (auto& dcdc : sys.dc.dcdc_converters) {
@@ -80,10 +103,27 @@ static void scale_system_by_lambda(HybridPowerSystem& sys, double lambda) {
   // Mobile storage.
   for (auto& ms : sys.mobile_storage) {
     ms.p_mw *= lambda;
+    ms.q_mvar *= lambda;
+  }
+  for (auto& vpp : sys.vpps) {
+    vpp.p_output_mw *= lambda;
+    vpp.q_output_mvar *= lambda;
+  }
+  for (auto& mg : sys.microgrids) {
+    mg.p_exchange_mw *= lambda;
+    mg.p_set_mw *= lambda;
+  }
+  for (auto& router : sys.energy_routers) {
+    for (auto& port : router.ports) {
+      port.p_mw *= lambda;
+      port.q_mvar *= lambda;
+      port.p_set_mw *= lambda;
+      port.q_set_mvar *= lambda;
+    }
   }
 }
 
-}  // namespace
+}  // namespace detail
 
 hacdcpf::PowerFlowResult HomotopyContinuationSolver::solve(
     const hacdcpf::HybridPowerSystem& sys,
@@ -115,7 +155,7 @@ hacdcpf::PowerFlowResult HomotopyContinuationSolver::solve(
   hacdcpf::PowerFlowResult current;
   {
     hacdcpf::HybridPowerSystem base = sys;
-    scale_system_by_lambda(base, 0.0);  // zero all injections
+    detail::scale_system_by_lambda(base, 0.0);  // zero all injections
     current = solve_hybrid(base, sub_opt);
     // For a zero-injection system the solver always converges trivially.
     // If it doesn't, something is structurally wrong; bail out early.
@@ -143,7 +183,7 @@ hacdcpf::PowerFlowResult HomotopyContinuationSolver::solve(
 
     // Build system at λ_next.
     hacdcpf::HybridPowerSystem trial_sys = sys;
-    scale_system_by_lambda(trial_sys, lambda_next);
+    detail::scale_system_by_lambda(trial_sys, lambda_next);
 
     // Warm-start from the last accepted solution.
     hacdcpf::PowerFlowOptions trial_opt =
@@ -175,6 +215,18 @@ hacdcpf::PowerFlowResult HomotopyContinuationSolver::solve(
     }
   }
 
+  if (homotopy_out.failed || homotopy_out.lambda < 1.0 - 1e-12) {
+    current.converged = false;
+    current.residual = std::numeric_limits<double>::infinity();
+    current.diagnostics.converged = false;
+    current.diagnostics.final_mismatch_norm = current.residual;
+    current.diagnostics.termination_reason =
+        "Homotopy failed before reaching lambda=1 (lambda=" +
+        std::to_string(homotopy_out.lambda) + ")";
+    current.diagnostics.warnings.push_back(
+        "The returned voltage is only the last accepted partial-loading state "
+        "and is not a solution of the requested full system.");
+  }
   return current;
 }
 

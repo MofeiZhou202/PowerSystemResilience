@@ -22,6 +22,7 @@
 #include "hacdcpf/power_flow/helm_solver.hpp"
 #include "hacdcpf/power_flow/homotopy_continuation.hpp"
 #include "hacdcpf/power_flow/newton_solver.hpp"
+#include "hacdcpf/power_flow/pf_injection_assembly.hpp"
 #include "hacdcpf/assembly/solver_data.hpp"
 #include "hacdcpf/power_flow/adaptive_solver.hpp"
 #include "hacdcpf/power_flow/distributed_slack_solver.hpp"
@@ -988,11 +989,45 @@ void populate_derived_results(const powerflow::SolverData& data,
                                 c.control_mode == ConverterMode::AC_GRID_FORMING);
       });
   Eigen::VectorXcd ybus_current;
+  Eigen::VectorXd fixed_p_spec;
+  Eigen::VectorXd fixed_q_spec;
+  std::vector<int> free_p_count(static_cast<size_t>(vm.size()), 0);
+  std::vector<int> free_q_count(static_cast<size_t>(vm.size()), 0);
   if (has_bus_attribution && data.ybus.rows() == vm.size() &&
       data.ybus.cols() == vm.size()) {
     Eigen::VectorXcd vbus(vm.size());
     for (Eigen::Index i = 0; i < vm.size(); ++i) vbus[i] = std::polar(vm[i], va[i]);
     ybus_current = data.ybus * vbus;
+
+    powerflow::SolverData attribution_data = data;
+    attribution_data.converters = eff_converters;
+    powerflow::assemble_ac_injections(
+        attribution_data, vm, va, vdc, fixed_p_spec, fixed_q_spec);
+    for (const auto& converter : eff_converters) {
+      if (!converter.in_service) continue;
+      const int aci = ac_pos(converter.bus_ac);
+      if (aci < 0 || aci >= static_cast<int>(vm.size())) continue;
+      const auto [pac, qac] = powerflow::converter_ac_injection(
+          converter, vm, va, vdc, data.base_mva, loss_model);
+      if (converter.control_mode == ConverterMode::AC_GRID_FORMING) {
+        fixed_p_spec[aci] -= pac;
+        fixed_q_spec[aci] -= qac;
+        free_p_count[static_cast<size_t>(aci)] += 1;
+        free_q_count[static_cast<size_t>(aci)] += 1;
+      } else if (converter.control_mode == ConverterMode::AC_PV) {
+        fixed_q_spec[aci] -= qac;
+        free_q_count[static_cast<size_t>(aci)] += 1;
+      }
+    }
+    for (Eigen::Index aci = 0; aci < vm.size(); ++aci) {
+      if (free_p_count[static_cast<size_t>(aci)] > 1 ||
+          free_q_count[static_cast<size_t>(aci)] > 1) {
+        result.diagnostics.warnings.push_back(
+            "[PF-ATTR-01] Multiple free-power converters share AC bus " +
+            std::to_string(data.ac_buses[static_cast<size_t>(aci)].index) +
+            "; the unassigned bus injection was attributed equally.");
+      }
+    }
   }
 
   result.vsc_transfers.reserve(eff_converters.size());
@@ -1019,10 +1054,11 @@ void populate_derived_results(const powerflow::SolverData& data,
         const std::complex<double> v_i = std::polar(vm[aci], va[aci]);
         const double q_net_inj =
             (v_i * std::conj(ybus_current[static_cast<Eigen::Index>(aci)])).imag();
-        const double qd_i = (aci < static_cast<int>(data.qd_pu.size()))
-                                ? data.qd_pu[static_cast<size_t>(aci)]
-                                : 0.0;
-        q_ac_pu_out = q_net_inj + qd_i;
+        const int count = free_q_count[static_cast<size_t>(aci)];
+        if (count > 0 && fixed_q_spec.size() == vm.size()) {
+          q_ac_pu_out =
+              (q_net_inj - fixed_q_spec[aci]) / static_cast<double>(count);
+        }
       }
     } else if (conv.control_mode == ConverterMode::AC_GRID_FORMING &&
                ybus_current.size() == vm.size()) {
@@ -1035,14 +1071,18 @@ void populate_derived_results(const powerflow::SolverData& data,
         const std::complex<double> v_i = std::polar(vm[aci], va[aci]);
         const std::complex<double> s_net =
             v_i * std::conj(ybus_current[static_cast<Eigen::Index>(aci)]);
-        const double pd_i = (aci < static_cast<int>(data.pd_pu.size()))
-                                ? data.pd_pu[static_cast<size_t>(aci)]
-                                : 0.0;
-        const double qd_i = (aci < static_cast<int>(data.qd_pu.size()))
-                                ? data.qd_pu[static_cast<size_t>(aci)]
-                                : 0.0;
-        p_ac_pu_out = s_net.real() + pd_i;
-        q_ac_pu_out = s_net.imag() + qd_i;
+        const int p_count = free_p_count[static_cast<size_t>(aci)];
+        const int q_count = free_q_count[static_cast<size_t>(aci)];
+        if (p_count > 0 && fixed_p_spec.size() == vm.size()) {
+          p_ac_pu_out =
+              (s_net.real() - fixed_p_spec[aci]) /
+              static_cast<double>(p_count);
+        }
+        if (q_count > 0 && fixed_q_spec.size() == vm.size()) {
+          q_ac_pu_out =
+              (s_net.imag() - fixed_q_spec[aci]) /
+              static_cast<double>(q_count);
+        }
         const int dci = dc_pos(conv.bus_dc);
         const double vdc_b = (dci >= 0 && dci < static_cast<int>(vdc.size()))
                                  ? vdc[static_cast<size_t>(dci)]
@@ -1870,6 +1910,21 @@ void destroy_solver_handle(SolverHandle* handle) {
 
 PowerFlowResult solve_power_flow_fdpf(const HybridPowerSystem& sys,
                                        const PowerFlowOptions& opt) {
+  const bool has_hybrid_assets =
+      !sys.dc.buses.empty() || !sys.dc.branches.empty() ||
+      !sys.vsc_converters.empty() || !sys.lcc_converters.empty() ||
+      !sys.dc.dcdc_converters.empty() || !sys.energy_routers.empty();
+  if (has_hybrid_assets) {
+    PowerFlowResult result;
+    result.diagnostics.termination_reason =
+        "FDPF facade supports the balanced AC subsystem only";
+    result.diagnostics.warnings.push_back(
+        "FDPF was not run because the model contains DC buses or converter "
+        "assets; use unified Newton or Newton-Krylov.");
+    result.converter_model_scope.model_scope =
+        "ac-only-fdpf:not-applicable-to-hybrid";
+    return result;
+  }
   powerflow::SolverData& data = get_cached_solver_data(sys, opt.loss_model);
   apply_zip_weights(data, opt);
   powerflow::FDPFSolver solver;

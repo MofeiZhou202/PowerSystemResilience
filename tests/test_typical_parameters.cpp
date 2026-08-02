@@ -680,7 +680,7 @@ TEST_CASE("design handbook completion previews and applies CIM line parameters",
   CHECK(suggestion.conductor_material == "copper");
   CHECK(suggestion.insulation == "XLPE");
   CHECK_THAT(suggestion.r20_ohm_per_km, WithinAbs(0.0754, 1e-12));
-  CHECK_THAT(suggestion.new_r_ohm_per_km, WithinAbs(0.09614254, 1e-8));
+  CHECK_THAT(suggestion.new_r_ohm_per_km, WithinAbs(0.0754, 1e-12));
   CHECK_THAT(suggestion.new_x_ohm_per_km, WithinAbs(0.08, 1e-12));
 
   DesignHandbookCompletionOptions options;
@@ -689,7 +689,7 @@ TEST_CASE("design handbook completion previews and applies CIM line parameters",
   CHECK(applied.fields_changed > 0);
   CHECK(applied.suggestions.front().applied);
   CHECK_THAT(sys.ac.branches.front().r_ohm_per_km,
-             WithinAbs(0.09614254, 1e-8));
+             WithinAbs(0.0754, 1e-12));
   REQUIRE(sys.three_phase_ac.has_value());
   CHECK_THAT(sys.three_phase_ac->lines.front().r1_pu,
              WithinAbs(sys.ac.branches.front().r_pu, 1e-12));
@@ -738,7 +738,7 @@ TEST_CASE("design handbook reports model and PSR geometry conflicts",
   CHECK(row.model_type_conflict);
   CHECK_FALSE(row.cross_section_inferred);
   CHECK(row.confidence == "medium");
-  CHECK_THAT(row.new_r_ohm_per_km, WithinAbs(0.1830645, 1e-7));
+  CHECK_THAT(row.new_r_ohm_per_km, WithinAbs(0.153, 1e-12));
   CHECK_THAT(row.new_x_ohm_per_km, WithinAbs(0.35, 1e-12));
   CHECK_FALSE(preview.warnings.empty());
 

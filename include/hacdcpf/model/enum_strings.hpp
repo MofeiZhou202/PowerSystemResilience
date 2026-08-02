@@ -218,14 +218,17 @@ inline LoadPriority load_priority_from_str(const std::string& s) {
 // ── RenewableType ───────────────────────────────────────────────────────
 inline std::string renewable_type_str(RenewableType t) {
   switch (t) {
+    case RenewableType::Wind: return "Wind";
     case RenewableType::SolarPV: return "SolarPV";
     case RenewableType::SolarCSP: return "SolarCSP";
-    default: return "Wind";
+    case RenewableType::Hydro: return "Hydro";
   }
+  return "Wind";
 }
 inline RenewableType renewable_type_from_str(const std::string& s) {
   if (s == "SolarPV") return RenewableType::SolarPV;
   if (s == "SolarCSP") return RenewableType::SolarCSP;
+  if (s == "Hydro") return RenewableType::Hydro;
   return RenewableType::Wind;
 }
 

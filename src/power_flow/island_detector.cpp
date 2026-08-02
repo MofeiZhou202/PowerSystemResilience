@@ -126,6 +126,11 @@ std::vector<IslandInfo> detect_islands(const HybridPowerSystem& sys) {
     add_edge(ac_node(conv.bus_ac), dc_node(conv.bus_dc));
   }
 
+  for (const auto& lcc : sys.lcc_converters) {
+    if (!lcc.in_service) continue;
+    add_edge(ac_node(lcc.ac_bus), dc_node(lcc.dc_bus));
+  }
+
   for (const auto& dcdc : sys.dc.dcdc_converters) {
     if (!dcdc.in_service) {
       continue;
@@ -145,7 +150,9 @@ std::vector<IslandInfo> detect_islands(const HybridPowerSystem& sys) {
       if (!port.in_service) {
         continue;
       }
-      const int u = ac_node(port.bus);
+      const int u = (port.port_type == ERPortType::AC)
+                        ? ac_node(port.bus)
+                        : dc_node(port.bus);
       if (u < 0) {
         continue;
       }
@@ -195,10 +202,6 @@ std::vector<IslandInfo> detect_islands(const HybridPowerSystem& sys) {
       } else {
         dc_buses.push_back(sys.dc.buses[static_cast<size_t>(node - nac)].index);
       }
-    }
-
-    if (ac_buses.empty()) {
-      continue;
     }
 
     std::sort(ac_buses.begin(), ac_buses.end());
@@ -267,7 +270,7 @@ std::vector<IslandInfo> detect_islands(const HybridPowerSystem& sys) {
     if (!has_generators) {
       for (const auto& st : sys.ac.storage) {
         if (!st.in_service || ac_set.count(st.bus) == 0) continue;
-        if (std::abs(st.p_mw) > 1e-9) { has_generators = true; break; }
+        if (st.p_mw > 1e-9) { has_generators = true; break; }
       }
     }
     if (!has_generators) {
@@ -285,6 +288,50 @@ std::vector<IslandInfo> detect_islands(const HybridPowerSystem& sys) {
         if (!eg.in_service || ac_set.count(eg.bus) == 0) continue;
         has_generators = true;
         break;
+      }
+    }
+    if (!has_generators) {
+      for (const auto& st : sys.dc.storage) {
+        if (st.in_service && dc_set.count(st.bus) != 0 &&
+            (std::abs(st.p_mw) > 1e-9 || st.controllable)) {
+          has_generators = true;
+          break;
+        }
+      }
+    }
+    if (!has_generators) {
+      for (const auto& st : sys.dc.dc_storage) {
+        if (st.in_service && dc_set.count(st.bus) != 0 &&
+            (std::abs(st.p_mw) > 1e-9 || st.controllable)) {
+          has_generators = true;
+          break;
+        }
+      }
+    }
+    if (!has_generators) {
+      for (const auto& sg : sys.dc.static_generators) {
+        if (sg.in_service && dc_set.count(sg.bus) != 0 &&
+            sg.p_mw * sg.scaling > 1e-9) {
+          has_generators = true;
+          break;
+        }
+      }
+    }
+    if (!has_generators) {
+      for (const auto& sg : sys.dc.dc_static_generators) {
+        if (sg.in_service && dc_set.count(sg.bus) != 0 &&
+            sg.p_set_mw * sg.scaling > 1e-9) {
+          has_generators = true;
+          break;
+        }
+      }
+    }
+    if (!has_generators) {
+      for (const auto& pv : sys.dc.pv_arrays) {
+        if (pv.in_service && dc_set.count(pv.bus) != 0 && pv.p_set_mw > 1e-9) {
+          has_generators = true;
+          break;
+        }
       }
     }
 
@@ -543,6 +590,43 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
     copy.bus_ac = it_ac->second;
     copy.bus_dc = it_dc->second;
     sub.vsc_converters.push_back(std::move(copy));
+  }
+
+  for (const auto& lcc : sys.lcc_converters) {
+    if (!lcc.in_service) continue;
+    const auto it_ac = ac_map.find(lcc.ac_bus);
+    const auto it_dc = dc_map.find(lcc.dc_bus);
+    if (it_ac == ac_map.end() || it_dc == dc_map.end()) continue;
+    LCCConverter copy = lcc;
+    copy.index = static_cast<int>(sub.lcc_converters.size()) + 1;
+    copy.ac_bus = it_ac->second;
+    copy.dc_bus = it_dc->second;
+    sub.lcc_converters.push_back(std::move(copy));
+  }
+
+  for (const auto& er : sys.energy_routers) {
+    if (!er.in_service) continue;
+    EnergyRouter copy = er;
+    copy.index = static_cast<int>(sub.energy_routers.size()) + 1;
+    copy.ports.clear();
+    for (const auto& port : er.ports) {
+      if (!port.in_service) continue;
+      EnergyRouterPort port_copy = port;
+      if (port.port_type == ERPortType::AC) {
+        const auto it = ac_map.find(port.bus);
+        if (it == ac_map.end()) continue;
+        port_copy.bus = it->second;
+      } else {
+        const auto it = dc_map.find(port.bus);
+        if (it == dc_map.end()) continue;
+        port_copy.bus = it->second;
+      }
+      copy.ports.push_back(std::move(port_copy));
+    }
+    if (!copy.ports.empty()) {
+      copy.num_ports = static_cast<int>(copy.ports.size());
+      sub.energy_routers.push_back(std::move(copy));
+    }
   }
 
   // Copy all AC component tables with bus remapping.

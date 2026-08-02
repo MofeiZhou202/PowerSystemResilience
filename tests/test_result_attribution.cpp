@@ -146,7 +146,8 @@ TEST_CASE("SPPT attribution is total and keyed by rich identity",
   const auto result = CanonicalToRichOperator::apply(
       rich, projection, &opf, &canonical_pf, &rich_pf);
 
-  CHECK(result.coverage.total());
+  CHECK_FALSE(result.coverage.total());
+  CHECK(result.coverage.unsupported_components > 0);
   CHECK(result.coverage.rich_components ==
         static_cast<int>(result.components.size()));
 

@@ -407,7 +407,7 @@ StandardParameterLibrary make_standard_parameter_library(
            ParameterIssueSeverity::Warning, transformer_source,
            "Resistive part of transformer short-circuit voltage."),
       rule("dc_bus.base_kv", "DC bus", "base_kv", "Nominal DC voltage",
-           lv ? 0.75 : 1.5, "kV", 0.05, 1000.0,
+           0.75, "kV", 0.05, 1000.0,
            ParameterIssueSeverity::Error, baseline,
            "Positive pole-to-pole or declared DC voltage base."),
       rule("dc_branch.r_pu", "DC branch", "r_pu", "Series resistance", 0.01,
@@ -422,10 +422,10 @@ StandardParameterLibrary make_standard_parameter_library(
            "Steady-state conversion efficiency."),
       rule("vsc.r_sc_pu", "VSC", "r_sc_pu", "Short-circuit resistance", 0.01,
            "pu", 1e-6, 1.0, ParameterIssueSeverity::Warning, baseline,
-           "Converter short-circuit resistance."),
+           "Converter short-circuit resistance on the converter's own p_rated_mw/vn_ac_kv base."),
       rule("vsc.x_sc_pu", "VSC", "x_sc_pu", "Short-circuit reactance", 0.15,
            "pu", 1e-6, 2.0, ParameterIssueSeverity::Warning, baseline,
-           "Converter short-circuit reactance."),
+           "Converter short-circuit reactance on the converter's own p_rated_mw/vn_ac_kv base."),
       rule("vsc.i_max_pu", "VSC", "i_max_pu", "Current limit", 1.2, "pu",
            0.1, 5.0, ParameterIssueSeverity::Warning, baseline,
            "Converter short-circuit or protection current limit."),
@@ -671,6 +671,12 @@ ParameterValidationReport validate_component_parameters(
     if (!converter.in_service) continue;
     check_range(report, library, "vsc.eta", "VSC", converter.index,
                 converter.name, "eta", converter.eta);
+    check_range(report, library, "vsc.r_sc_pu", "VSC", converter.index,
+                converter.name, "r_sc_pu", converter.r_sc_pu);
+    check_range(report, library, "vsc.x_sc_pu", "VSC", converter.index,
+                converter.name, "x_sc_pu", converter.x_sc_pu);
+    check_range(report, library, "vsc.i_max_pu", "VSC", converter.index,
+                converter.name, "i_max_pu", converter.i_max_pu);
     if (missing_positive(converter.p_rated_mw) &&
         missing_positive(converter.pmax_mw)) {
       add_issue(report, "vsc_missing_rating",
@@ -802,6 +808,94 @@ ParameterValidationReport validate_component_parameters(
                               vpp.p_output_mw);
   }
 
+  // Reliability rules are part of the active parameter contract too. Keep
+  // validation symmetric with the missing-only materialization path below.
+  const auto check_mtbf_pair = [&](const auto& item,
+                                   const std::string& prefix,
+                                   const std::string& type) {
+    if (!item.in_service) return;
+    check_range(report, library, prefix + ".mtbf_hours", type, item.index,
+                item.name, "mtbf_hours", item.mtbf_hours);
+    check_range(report, library, prefix + ".mttr_hours", type, item.index,
+                item.name, "mttr_hours", item.mttr_hours);
+  };
+  for (const auto& branch : system.ac.branches) {
+    if (!branch.in_service) continue;
+    const std::string geometry = uppercase_ascii(
+        branch.line_type + " " + branch.conductor_model);
+    const bool overhead = contains_text(branch.line_type, "架空") ||
+                          contains_text(geometry, "OVERHEAD") ||
+                          contains_text(geometry, "OHL");
+    const bool cable = contains_text(branch.line_type, "电缆") ||
+                       contains_text(geometry, "CABLE") ||
+                       contains_text(geometry, "YJV") ||
+                       contains_text(geometry, "XLPE");
+    const std::string prefix = overhead
+        ? "reliability.ac_overhead"
+        : (cable ? "reliability.ac_cable" : "reliability.ac_branch");
+    const double exposure = branch.length_km > kMissing ? branch.length_km : 1.0;
+    check_range(report, library, prefix + ".failure_rate", "AC branch",
+                branch.index, branch.name, "failure_rate_per_km",
+                branch.failure_rate / exposure);
+    check_range(report, library, prefix + ".mttr_hr", "AC branch",
+                branch.index, branch.name, "mttr_hr", branch.mttr_hr);
+  }
+  for (const auto& transformer : system.ac.transformers_2w)
+    check_mtbf_pair(transformer, "reliability.transformer", "Transformer");
+  for (const auto& transformer : system.ac.transformers_3w)
+    check_mtbf_pair(transformer, "reliability.transformer", "Transformer");
+  for (const auto& sw : system.ac.switches)
+    check_mtbf_pair(sw, "reliability.switch", "Switch");
+  for (const auto& generator : system.ac.generators) {
+    if (!generator.in_service) continue;
+    check_range(report, library, "reliability.generator.forced_outage_rate",
+                "Generator", generator.index, generator.name,
+                "forced_outage_rate", generator.forced_outage_rate);
+    check_range(report, library, "reliability.generator.mttr_hr",
+                "Generator", generator.index, generator.name, "mttr_hr",
+                generator.mttr_hr);
+  }
+  for (const auto& source : system.ac.static_generators)
+    check_mtbf_pair(source, "reliability.static_generator", "Static generator");
+  for (const auto& source : system.dc.static_generators)
+    check_mtbf_pair(source, "reliability.static_generator", "DC static generator");
+  for (const auto& source : system.dc.dc_static_generators)
+    check_mtbf_pair(source, "reliability.static_generator", "DC static generator");
+  for (const auto& source : system.ac.renewable_gens)
+    check_mtbf_pair(source, "reliability.renewable", "Renewable generator");
+  for (const auto& source : system.ac.pv_systems)
+    check_mtbf_pair(source, "reliability.pv", "PV system");
+  for (const auto& source : system.dc.pv_arrays)
+    check_mtbf_pair(source, "reliability.pv", "DC PV array");
+  const auto check_storage_reliability = [&](const auto& storage) {
+    if (!storage.in_service) return;
+    check_range(report, library, "reliability.storage.forced_outage_rate",
+                "Storage", storage.index, storage.name, "forced_outage_rate",
+                storage.forced_outage_rate);
+    check_range(report, library, "reliability.storage.mttr_hr", "Storage",
+                storage.index, storage.name, "mttr_hr", storage.mttr_hr);
+  };
+  for (const auto& storage : system.ac.storage)
+    check_storage_reliability(storage);
+  for (const auto& storage : system.dc.storage)
+    check_storage_reliability(storage);
+  for (const auto& storage : system.dc.dc_storage)
+    check_storage_reliability(storage);
+  for (const auto& converter : system.vsc_converters) {
+    if (!converter.in_service) continue;
+    check_range(report, library, "reliability.vsc.forced_outage_rate", "VSC",
+                converter.index, converter.name, "forced_outage_rate",
+                converter.forced_outage_rate);
+    check_range(report, library, "reliability.vsc.mttr_hr", "VSC",
+                converter.index, converter.name, "mttr_hr", converter.mttr_hr);
+  }
+  for (const auto& converter : system.dc.dcdc_converters)
+    check_mtbf_pair(converter, "reliability.dcdc", "DC-DC converter");
+  for (const auto& branch : system.dc.branches)
+    check_mtbf_pair(branch, "reliability.dc_branch", "DC branch");
+  for (const auto& microgrid : system.microgrids)
+    check_mtbf_pair(microgrid, "reliability.microgrid", "Microgrid");
+
   if (system.three_phase_ac.has_value()) {
     const auto& phase = *system.three_phase_ac;
     for (const auto& bus : phase.buses) {
@@ -819,15 +913,31 @@ ParameterValidationReport validate_component_parameters(
     }
     for (const auto& line : phase.lines) {
       if (!line.in_service) continue;
-      double impedance = std::hypot(line.r1_pu, line.x1_pu);
+      double impedance = 0.0;
+      bool matrix_invalid = false;
       if (line.use_phase_matrix) {
         for (std::size_t i = 0; i < line.r_matrix_pu.size(); ++i) {
-          impedance = std::max(
-              impedance,
-              std::hypot(line.r_matrix_pu[i], line.x_matrix_pu[i]));
+          const double r_entry = line.r_matrix_pu[i];
+          const double x_entry = line.x_matrix_pu[i];
+          if (!std::isfinite(r_entry) || !std::isfinite(x_entry)) {
+            matrix_invalid = true;
+          } else {
+            impedance = std::max(impedance, std::hypot(r_entry, x_entry));
+          }
+          const std::string suffix = "[" + std::to_string(i / 3) + "," +
+                                     std::to_string(i % 3) + "]";
+          check_range(report, library, "ac_branch.r_pu",
+                      "Three-phase AC line", line.index, line.name,
+                      "r_matrix_pu" + suffix, r_entry);
+          check_range(report, library, "ac_branch.x_pu",
+                      "Three-phase AC line", line.index, line.name,
+                      "x_matrix_pu" + suffix, x_entry);
         }
+      } else {
+        impedance = std::hypot(line.r1_pu, line.x1_pu);
       }
-      if (!std::isfinite(impedance) || impedance <= kMissing) {
+      if (matrix_invalid || !std::isfinite(impedance) ||
+          impedance <= kMissing) {
         add_issue(report, "three_phase_line_zero_series_impedance",
                   ParameterIssueSeverity::Error, "Three-phase AC line",
                   line.index, line.name, "r1_pu/x1_pu or phase matrix",
@@ -883,6 +993,8 @@ StandardParameterApplyReport apply_standard_parameter_library(
                 "system.frequency_hz", report);
 
   for (auto& bus : system.ac.buses) {
+    const bool vmin_missing = missing_positive(bus.vmin_pu);
+    const bool vmax_missing = missing_positive(bus.vmax_pu);
     fill_positive(bus.base_kv, value_or(library, "ac_bus.base_kv", 10.0),
                   "ac_bus.base_kv", report);
     fill_positive(bus.vm_pu, value_or(library, "ac_bus.vm_pu", 1.0),
@@ -892,10 +1004,15 @@ StandardParameterApplyReport apply_standard_parameter_library(
     fill_positive(bus.vmax_pu, value_or(library, "ac_bus.vmax_pu", 1.1),
                   "ac_bus.vmax_pu", report);
     if (bus.vmin_pu >= bus.vmax_pu) {
-      bus.vmin_pu = value_or(library, "ac_bus.vmin_pu", 0.9);
-      bus.vmax_pu = value_or(library, "ac_bus.vmax_pu", 1.1);
-      note_change(report, "ac_bus.vmin_pu");
-      note_change(report, "ac_bus.vmax_pu");
+      if (vmin_missing && !vmax_missing) {
+        bus.vmin_pu = std::min(
+            value_or(library, "ac_bus.vmin_pu", 0.9), bus.vmax_pu - 1e-6);
+        note_change(report, "ac_bus.vmin_pu");
+      } else if (vmax_missing && !vmin_missing) {
+        bus.vmax_pu = std::max(
+            value_or(library, "ac_bus.vmax_pu", 1.1), bus.vmin_pu + 1e-6);
+        note_change(report, "ac_bus.vmax_pu");
+      }
     }
   }
 
@@ -907,6 +1024,10 @@ StandardParameterApplyReport apply_standard_parameter_library(
         is_transformer ? "transformer.x_pu" : "ac_branch.x_pu";
     if (missing_impedance(branch.r_pu) && missing_impedance(branch.x_pu)) {
       fill_impedance(branch.r_pu, value_or(library, r_id, 0.01), r_id, report);
+      fill_impedance(branch.x_pu, value_or(library, x_id, 0.04), x_id, report);
+    } else if (missing_impedance(branch.r_pu)) {
+      fill_impedance(branch.r_pu, value_or(library, r_id, 0.01), r_id, report);
+    } else if (missing_impedance(branch.x_pu)) {
       fill_impedance(branch.x_pu, value_or(library, x_id, 0.04), x_id, report);
     }
     fill_positive(branch.rate_a_mva,
@@ -922,6 +1043,7 @@ StandardParameterApplyReport apply_standard_parameter_library(
   }
 
   for (auto& transformer : system.ac.transformers_2w) {
+    const bool vkr_missing = missing_positive(transformer.vkr_percent);
     fill_positive(transformer.sn_mva,
                   value_or(library, "transformer.sn_mva", 10.0),
                   "transformer.sn_mva", report);
@@ -931,6 +1053,10 @@ StandardParameterApplyReport apply_standard_parameter_library(
     fill_positive(transformer.vkr_percent,
                   value_or(library, "transformer.vkr_percent", 0.6),
                   "transformer.vkr_percent", report);
+    if (vkr_missing && transformer.vkr_percent > transformer.vk_percent) {
+      transformer.vkr_percent = transformer.vk_percent;
+      note_change(report, "transformer.vkr_percent");
+    }
   }
 
   for (auto& bus : system.dc.buses) {
@@ -1003,6 +1129,12 @@ StandardParameterApplyReport apply_standard_parameter_library(
         std::isfinite(branch.length_km) && branch.length_km > kMissing
             ? branch.length_km
             : 1.0;
+    if (!(std::isfinite(branch.length_km) && branch.length_km > kMissing) &&
+        missing_positive(branch.failure_rate)) {
+      report.warnings.push_back(
+          "AC branch " + std::to_string(branch.index) +
+          " has no positive length_km; reliability completion assumes 1 km exposure");
+    }
     fill_positive(branch.failure_rate, rate_per_km * exposure_km,
                   prefix + ".failure_rate", report);
     fill_positive(branch.mttr_hr,
@@ -1227,10 +1359,14 @@ DesignHandbookCompletionReport complete_design_handbook_parameters(
                                  ? options.overhead_reactance_ohm_per_km
                                  : options.cable_reactance_ohm_per_km;
     const double zbase = base_kv * base_kv / base_mva;
-    const double new_r_pu = resistance * branch.length_km / zbase;
-    const double new_x_pu = reactance * branch.length_km / zbase;
+    const int parallel = std::max(1, branch.n_parallel);
+    const double new_r_pu = resistance * branch.length_km /
+                            (zbase * static_cast<double>(parallel));
+    const double new_x_pu = reactance * branch.length_km /
+                            (zbase * static_cast<double>(parallel));
     const double new_rate_a_mva =
-        std::sqrt(3.0) * base_kv * (2.0 * area) / 1000.0;
+        std::sqrt(3.0) * base_kv * (2.0 * area) / 1000.0 *
+        static_cast<double>(parallel);
 
     DesignHandbookLineSuggestion suggestion;
     suggestion.branch_index = branch.index;
@@ -1257,7 +1393,7 @@ DesignHandbookCompletionReport complete_design_handbook_parameters(
     suggestion.r20_ohm_per_km = r20;
     suggestion.old_r_ohm_per_km = branch.r_ohm_per_km;
     suggestion.old_x_ohm_per_km = branch.x_ohm_per_km;
-    suggestion.new_r_ohm_per_km = resistance;
+    suggestion.new_r_ohm_per_km = r20;
     suggestion.new_x_ohm_per_km = reactance;
     suggestion.old_r_pu = branch.r_pu;
     suggestion.old_x_pu = branch.x_pu;
@@ -1273,7 +1409,7 @@ DesignHandbookCompletionReport complete_design_handbook_parameters(
                                      std::abs(new_value)});
       return std::abs(old_value - new_value) > 1e-10 * scale;
     };
-    const bool any_change = changed(branch.r_ohm_per_km, resistance) ||
+    const bool any_change = changed(branch.r_ohm_per_km, r20) ||
                             changed(branch.x_ohm_per_km, reactance) ||
                             changed(branch.r_pu, new_r_pu) ||
                             changed(branch.x_pu, new_x_pu) ||
@@ -1294,13 +1430,13 @@ DesignHandbookCompletionReport complete_design_handbook_parameters(
       const bool rate_c_followed_a =
           !(branch.rate_c_mva > kMissing) ||
           !changed(branch.rate_c_mva, old_rate_a_mva);
-      if (changed(branch.r_ohm_per_km, resistance)) ++report.fields_changed;
+      if (changed(branch.r_ohm_per_km, r20)) ++report.fields_changed;
       if (changed(branch.x_ohm_per_km, reactance)) ++report.fields_changed;
       if (changed(branch.r_pu, new_r_pu)) ++report.fields_changed;
       if (changed(branch.x_pu, new_x_pu)) ++report.fields_changed;
       if (changed(branch.rate_a_mva, new_rate_a_mva)) ++report.fields_changed;
       if (changed(branch.cross_section_mm2, area)) ++report.fields_changed;
-      branch.r_ohm_per_km = resistance;
+      branch.r_ohm_per_km = r20;
       branch.x_ohm_per_km = reactance;
       branch.r_pu = new_r_pu;
       branch.x_pu = new_x_pu;

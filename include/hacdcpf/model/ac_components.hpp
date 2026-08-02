@@ -92,6 +92,8 @@ struct ACBranch {
   bool parameters_inferred{false};
 
   // Reliability
+  // Aggregate component failure frequency in occurrences/year. Parameter
+  // completion may derive it from a per-km library rate times length_km.
   double failure_rate{0.0};
   double mttr_hr{0.0};
   double t_scheduled_hr{0.0};
@@ -140,7 +142,9 @@ struct Transformer2W {
   int tap_max{0};
   int tap_neutral{0};
   double tap_step_percent{0.0};
-
+  // Fixed off-nominal multiplier in addition to the discrete tap position.
+  // Importers use this when one or both authored winding taps are not dynamic.
+  double fixed_tap_pu{1.0};
   double shift_deg{0.0};
   std::string vector_group;
 
@@ -588,7 +592,7 @@ struct Storage {
 
   double eta_charge{0.95};
   double eta_discharge{0.95};
-  double self_discharge_pct{0.0};
+  double self_discharge_pct{0.0};  // percent per hour
 
   int max_cycles{5000};
   int current_cycles{0};
@@ -596,6 +600,7 @@ struct Storage {
   double soh_cycle{1.0};
   double soh_calendar{1.0};
   double l_calendar_yr{15.0};
+  // Backward-compatible EOL threshold: <=1 is a fraction; >1 is percent.
   double eol_percent{0.8};
   double replacement_cost{0.0};
 
@@ -1080,6 +1085,12 @@ struct ThreePhaseTransformer {
 
   double vk_percent{0.0};
   double vkr_percent{0.0};
+  // Some exact multi-winding star equivalents have signed leakage legs.
+  // vk/vkr cannot encode a negative reactance, so importers may opt into
+  // these signed percent values on the transformer's own MVA base.
+  bool use_signed_series_impedance{false};
+  double signed_series_r_percent{0.0};
+  double signed_series_x_percent{0.0};
   double pfe_kw{0.0};
   double i0_percent{0.0};
 
@@ -1099,6 +1110,10 @@ struct ThreePhaseTransformer {
   int tap_max{0};
   int tap_neutral{0};
   double tap_step_percent{0.0};
+  // Fixed multiplier on the canonical HV/LV branch ratio.  This preserves
+  // non-unit taps on the winding that is not represented by the dynamic tap
+  // state (and both winding taps when neither side is dynamic).
+  double fixed_tap_pu{1.0};
 
   double shift_deg{0.0};
 

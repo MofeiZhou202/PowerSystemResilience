@@ -23,8 +23,8 @@ struct InitialState {
 };
 
 struct ReactiveLimit {
-  double qmin{-0.5};
-  double qmax{0.5};
+  double qmin{-0.5};  ///< Aggregate bus lower reactive limit [p.u. on system base]
+  double qmax{0.5};   ///< Aggregate bus upper reactive limit [p.u. on system base]
 };
 
 struct DistributedSlack {

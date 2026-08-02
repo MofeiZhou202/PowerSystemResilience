@@ -2,14 +2,12 @@
 
 /// PowerFlowSolverFactory
 /// ======================
-/// Creates the appropriate IPowerFlowSolver based on PowerFlowOptions.
+/// Creates the requested IPowerFlowSolver from an explicit method selector.
 /// Centralises solver-selection logic so the facade functions and the
 /// robust pipeline have a single routing point.
 ///
 /// Usage:
-///   PowerFlowOptions opt;
-///   opt.method = PowerFlowMethod::Newton;
-///   auto solver = PowerFlowSolverFactory::create(opt);
+///   auto solver = PowerFlowSolverFactory::create(PowerFlowMethod::Newton);
 ///   auto result = solver->solve(problem);
 
 #include <memory>
@@ -45,11 +43,6 @@ public:
     [[nodiscard]] static std::unique_ptr<IPowerFlowSolver>
     create(PowerFlowMethod method);
 
-    /// Convenience overload for callers that use the default Newton method.
-    /// Algorithm selection is explicit through the PowerFlowMethod overload;
-    /// PowerFlowOptions configures a method but does not select one.
-    [[nodiscard]] static std::unique_ptr<IPowerFlowSolver>
-    create(const PowerFlowOptions& options);
 };
 
 }  // namespace hacdcpf

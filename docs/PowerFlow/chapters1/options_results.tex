@@ -403,6 +403,8 @@ NewtonKrylovFallback，:213--221）与记录结构 \fld{SolverModeSwitchRecord}
   \item \texttt{AdaptiveSolveResult}（:235--244）/ \texttt{IslandedSolveResult}
         （:246--254）：增 \fld{islands}（\texttt{IslandInfo} 逐岛信息），前者另含 \fld{branch\_flows}；
   \item \texttt{DistributedSlackResult}（:256--266）：增 \fld{diagnostics}、
-        \fld{distributed\_slack\_p}（母线 .index $\to$ 分摊有功 MW）、
+        \fld{distributed\_slack\_p}（母线 .index $\to$ 有功修正，系统
+        \fld{base\_mva} 基准上的 pu；单位字符串见
+        \fld{distributed\_slack\_p\_unit}）、
         \fld{hit\_limits}（触及参与上限的母线 .index）。
 \end{itemize}

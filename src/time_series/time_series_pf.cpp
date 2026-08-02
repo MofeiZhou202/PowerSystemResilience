@@ -55,6 +55,13 @@ double absolute_profile_value(const std::vector<double>* profile, int t,
   return profile ? profile_value(profile, t, fallback) : fallback;
 }
 
+double storage_retention(double self_discharge_pct_per_hour,
+                         double duration_hours) {
+  const double hourly = std::clamp(
+      1.0 - self_discharge_pct_per_hour / 100.0, 0.0, 1.0);
+  return std::pow(hourly, std::max(0.0, duration_hours));
+}
+
 void validate_time_series_data_for_solve(const TimeSeriesData& ts_data,
                                          bool require_steps) {
   if (ts_data.num_steps < 0) {
@@ -2309,8 +2316,7 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
     if (E < 1e-12) E = 1.0;  // fallback
     const double eta_charge = std::clamp(ess.eta_charge, 1e-6, 1.0);
     const double eta_discharge = std::clamp(ess.eta_discharge, 1e-6, 1.0);
-    const double retention =
-        std::clamp(1.0 - ess.self_discharge_pct / 100.0, 0.0, 1.0);
+    const double retention = storage_retention(ess.self_discharge_pct, dt);
     const double coeff_p = dt / (eta_discharge * E);
     const double coeff_charge =
         dt * (1.0 / eta_discharge - eta_charge) / E;
@@ -2339,8 +2345,7 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
     if (E < 1e-12) E = 1.0;
     const double eta_charge = std::clamp(ess.eta_charge, 1e-6, 1.0);
     const double eta_discharge = std::clamp(ess.eta_discharge, 1e-6, 1.0);
-    const double retention =
-        std::clamp(1.0 - ess.self_discharge_pct / 100.0, 0.0, 1.0);
+    const double retention = storage_retention(ess.self_discharge_pct, dt);
     const double coeff_p = dt / (eta_discharge * E);
     const double coeff_charge =
         dt * (1.0 / eta_discharge - eta_charge) / E;
@@ -3204,7 +3209,8 @@ Eigen::VectorXd priority_list_uc_heuristic(
     //    (zero dispatch for heuristic simplicity; B&C will optimize.)
     for (int si = 0; si < S; ++si) {
       const auto& ess = sys.ac.storage[static_cast<size_t>(build.storage_indices[static_cast<size_t>(si)])];
-      double sd = 1.0 - ess.self_discharge_pct / 100.0;
+      const double sd = storage_retention(
+          ess.self_discharge_pct, ts_data.step_duration_hr);
       // Keep ESS neutral for heuristic (p=0).
       x[ess_idx(si, t)] = 0.0;
       soc_ac[static_cast<size_t>(si)] = soc_ac[static_cast<size_t>(si)] * sd;
@@ -3212,7 +3218,8 @@ Eigen::VectorXd priority_list_uc_heuristic(
     }
     for (int si = 0; si < Sd; ++si) {
       const auto& ess = sys.dc.storage[static_cast<size_t>(build.dc_storage_indices[static_cast<size_t>(si)])];
-      double sd = 1.0 - ess.self_discharge_pct / 100.0;
+      const double sd = storage_retention(
+          ess.self_discharge_pct, ts_data.step_duration_hr);
       x[dcess_idx(si, t)] = 0.0;
       soc_dc[static_cast<size_t>(si)] = soc_dc[static_cast<size_t>(si)] * sd;
       x[dcsoc_idx(si, t)] = soc_dc[static_cast<size_t>(si)];
@@ -4029,8 +4036,7 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
           if (!ess.in_service) continue;
           const double E = std::max(ess.e_rated_mwh, 1e-12);
           const double dt = ts_data.step_duration_hr;
-          const double sd = std::clamp(
-              1.0 - ess.self_discharge_pct / 100.0, 0.0, 1.0);
+          const double sd = storage_retention(ess.self_discharge_pct, dt);
           const double pmax = effective_pmax(ess);
           const double raw_charge_cap = std::max(-ess.pmin_mw, 0.0);
           const double charge_cap = ess.p_rated_mw > 0.0

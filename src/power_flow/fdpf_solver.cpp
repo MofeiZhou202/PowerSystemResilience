@@ -70,11 +70,48 @@ void compute_specified_injections(const SolverData& data,
   }
 }
 
+double raw_power_flow_residual(const SolverData& data,
+                               const Eigen::VectorXd& vm,
+                               const Eigen::VectorXd& va,
+                               int slack) {
+  const int n = static_cast<int>(data.ac_buses.size());
+  Eigen::VectorXd pcalc = Eigen::VectorXd::Zero(n);
+  Eigen::VectorXd qcalc = Eigen::VectorXd::Zero(n);
+  compute_power_injections(data.ybus, vm, va, pcalc, qcalc);
+  Eigen::VectorXd p_spec = Eigen::VectorXd::Zero(n);
+  Eigen::VectorXd q_spec = Eigen::VectorXd::Zero(n);
+  compute_specified_injections(data, vm, p_spec, q_spec);
+  double residual = 0.0;
+  for (int i = 0; i < n; ++i) {
+    if (i == slack) continue;
+    residual = std::max(residual, std::abs(p_spec[i] - pcalc[i]));
+    if (data.ac_buses[static_cast<size_t>(i)].bus_type == BusType::PQ) {
+      residual = std::max(residual, std::abs(q_spec[i] - qcalc[i]));
+    }
+  }
+  return residual;
+}
+
 }  // namespace
 
 PowerFlowResult FDPFSolver::solve(const SolverData& data,
                                    const PowerFlowOptions& opt) const {
   PowerFlowResult out;
+  const bool has_hybrid_assets =
+      !data.dc_buses.empty() || !data.dc_branches.empty() ||
+      !data.converters.empty() || !data.lcc_converters.empty() ||
+      !data.dcdc_converters.empty() || !data.energy_routers.empty();
+  if (has_hybrid_assets) {
+    out.diagnostics.termination_reason =
+        "FDPF supports the balanced AC subsystem only";
+    out.diagnostics.warnings.push_back(
+        "FDPF was not run because the model contains DC buses or converter "
+        "assets; use unified Newton or Newton-Krylov.");
+    out.converter_model_scope.model_scope =
+        "ac-only-fdpf:not-applicable-to-hybrid";
+    return out;
+  }
+  out.converter_model_scope.model_scope = "ac-only-fdpf:fdxb";
   const int n = static_cast<int>(data.ac_buses.size());
   if (n == 0) {
     out.converged = true;
@@ -183,7 +220,6 @@ PowerFlowResult FDPFSolver::solve(const SolverData& data,
 
     if (normP < tol && normQ < tol) {
       out.converged = true;
-      out.residual = std::max(normP, normQ);
       break;
     }
 
@@ -205,25 +241,9 @@ PowerFlowResult FDPFSolver::solve(const SolverData& data,
   }
 
   out.iterations = iter;
-  if (!out.converged) {
-    // Compute final residual.
-    Eigen::VectorXd pcalc = Eigen::VectorXd::Zero(n);
-    Eigen::VectorXd qcalc = Eigen::VectorXd::Zero(n);
-    compute_power_injections(data.ybus, vm, va, pcalc, qcalc);
-    Eigen::VectorXd p_spec = Eigen::VectorXd::Zero(n);
-    Eigen::VectorXd q_spec = Eigen::VectorXd::Zero(n);
-    compute_specified_injections(data, vm, p_spec, q_spec);
-    double max_mis = 0.0;
-    for (int i = 0; i < n; ++i) {
-      if (i == slack) continue;
-      const auto& bus = data.ac_buses[static_cast<size_t>(i)];
-      max_mis = std::max(max_mis, std::abs(p_spec[i] - pcalc[i]));
-      if (bus.bus_type == BusType::PQ) {
-        max_mis = std::max(max_mis, std::abs(q_spec[i] - qcalc[i]));
-      }
-    }
-    out.residual = max_mis;
-  }
+  // Use one residual contract on both success and failure: the raw physical
+  // P/Q mismatch in pu, without the FDPF 1/V preconditioning.
+  out.residual = raw_power_flow_residual(data, vm, va, slack);
 
   out.vm.resize(static_cast<size_t>(n));
   out.va.resize(static_cast<size_t>(n));

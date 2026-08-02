@@ -184,9 +184,10 @@ of participating buses according to participation factors instead of assigning
 it all to a single slack bus.  Two variants are exposed:
 \begin{itemize}
   \item \texttt{solve\_power\_flow\_distributed\_slack} -- simplified form
-  (one extra slack sweep);
-  \item \texttt{solve\_power\_flow\_distributed\_slack\_full} -- full-Jacobian
-  distributed-slack, as described below.
+  (one Newton solve followed by a reported allocation);
+  \item \texttt{solve\_power\_flow\_distributed\_slack\_full} -- bounded
+  redispatch with repeated complete Newton solves.  The legacy ``full'' name is
+  retained for API compatibility; this is not an augmented-Jacobian method.
 \end{itemize}
 
 \subsubsection{Problem Formulation}
@@ -203,16 +204,19 @@ reference; it need not be the same as the swing generator.
 
 \subsubsection{Convergence Criterion}
 
-In the full-Jacobian variant, the distributed-slack equations are appended to
-the standard Newton residual and solved simultaneously.  Convergence is judged
-on the extended infinity-norm \(\|\Delta F\|_\infty < \varepsilon\).
+The simplified variant inherits convergence from its single Newton solve and
+reports the resulting mismatch allocation without changing the solved state.
+The bounded variant repeatedly solves Newton PF, redispatches the remaining
+active mismatch subject to generator and participation limits, and stops when
+the unallocated correction is at most \(\max(10^{-10},\varepsilon)\) p.u.  It
+fails closed when the limits cannot absorb the mismatch or after 20 solves.
 
 \subsubsection{Result Structure}
 
 \texttt{DistributedSlackResult} extends the standard bus-voltage vectors with:
 \begin{itemize}
   \item \texttt{distributed\_slack\_p} -- map from participating bus index to
-  final slack-share allocation (MW);
+  final active correction (p.u. on the system \texttt{base\_mva});
   \item \texttt{hit\_limits} -- list of buses that reached
   \texttt{max\_participation\_p} and were clamped.
 \end{itemize}
@@ -223,12 +227,12 @@ See Section~\ref{algo:a7} for the full pseudo-code and flowchart.
 
 \begin{algorithmic}[1]
 \Procedure{solve\_distributed\_slack}{$\mathit{sys}$, $\mathit{cfg}$, $\mathit{opt}$}
-  \State Run base Newton PF (A3); compute slack-bus mismatch $\Delta P_s$
-  \State Normalize participation factors $\alpha_g$
-  \For{each participating generator $g$}
-    \State $P_g \gets P_g + \alpha_g \Delta P_s$;\quad clamp to $[P_g^{\min}, P_g^{\max}]$
-  \EndFor
-  \State Re-run Newton PF on updated dispatch
+  \State Apply \texttt{reference\_bus} as the angle reference
+  \Repeat
+    \State Run Newton PF; compute the unified-injection mismatch $\Delta P_s$
+    \State Allocate $\Delta P_s$ by normalized $\alpha_g$ and clamp to generator limits
+    \State Redispatch participating generators
+  \Until{$|\Delta P_s|\le\max(10^{-10},\varepsilon)$ p.u. or 20 solves}
   \State \Return \textit{DistributedSlackResult}
 \EndProcedure
 \end{algorithmic}

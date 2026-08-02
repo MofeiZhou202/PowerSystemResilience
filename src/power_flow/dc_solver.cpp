@@ -119,6 +119,31 @@ DCPowerFlowResult DCSolver::solve(const SolverData& data,
       }
     }
 
+    // The network block above is d(V .* Gdc*V)/dV. Subtract the complete
+    // derivative of pdc_spec(V) so J = d(calc-spec)/dV, matching
+    // J*dx = spec-calc. A central difference deliberately reuses the single
+    // injection assembler and therefore covers VSC, LCC, DCDC and future
+    // voltage-dependent DC devices without solver-specific drift.
+    Eigen::VectorXd pdc_spec_plus = Eigen::VectorXd::Zero(ndc);
+    Eigen::VectorXd pdc_spec_minus = Eigen::VectorXd::Zero(ndc);
+    for (int rl = 0; rl < ndc_eq; ++rl) {
+      const int l = dc_non_slack[static_cast<size_t>(rl)];
+      const double h = 1e-6 * std::max(1.0, std::abs(vdc[l]));
+      Eigen::VectorXd plus = vdc;
+      Eigen::VectorXd minus = vdc;
+      plus[l] += h;
+      minus[l] -= h;
+      assemble_dc_injections(
+          data, vm_dummy, va_dummy, plus, pdc_spec_plus);
+      assemble_dc_injections(
+          data, vm_dummy, va_dummy, minus, pdc_spec_minus);
+      for (int rk = 0; rk < ndc_eq; ++rk) {
+        const int k = dc_non_slack[static_cast<size_t>(rk)];
+        jac(rk, rl) -=
+            (pdc_spec_plus[k] - pdc_spec_minus[k]) / (2.0 * h);
+      }
+    }
+
     Eigen::FullPivLU<Eigen::MatrixXd> lu(jac);
     if (!lu.isInvertible()) {
       out.converged = false;

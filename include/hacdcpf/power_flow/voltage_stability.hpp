@@ -110,6 +110,7 @@ struct CpfPoint {
   double vm_monitor{0.0};    ///< Monitor-bus voltage magnitude (p.u.).
   double p_total_mw{0.0};    ///< Total active load power (MW).
   double q_total_mvar{0.0};  ///< Total reactive load power (Mvar).
+  double residual{0.0};      ///< Physical power-flow infinity-norm residual (p.u.).
 
   /// All-bus voltage magnitudes (p.u.) — populated only when
   /// CpfOptions::trace_all_buses is set.
@@ -143,6 +144,19 @@ struct CpfResult {
 
   /// True if the voltage-collapse (nose) point was found within lambda_max.
   bool nose_found{false};
+
+  /// True only when every accepted continuation point enforced Newton's
+  /// PV/PQ active-set switching. Arc-length continuation currently requires a
+  /// fixed equation layout, so systems with PV buses use natural parameterization.
+  bool q_limits_enforced{true};
+
+  /// Whether the augmented arc-length corrector was actually used.
+  bool arc_length_used{false};
+
+  /// Machine-readable scope and explicit limitations of this trace.
+  std::string model_scope{"cpf:unset"};
+  std::string model_limitations;
+  std::vector<std::string> warnings;
 
   /// Human-readable reason for termination.
   std::string termination_reason;

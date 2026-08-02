@@ -79,7 +79,8 @@ void build_power_spec(const SolverData& data,
     if (!sg.in_service) continue;
     const int dc_bus = sg.bus - 1;
     if (dc_bus >= 0 && dc_bus < ndc) {
-      pdc_spec[dc_bus] += sg.p_mw * sg.scaling / data.base_mva;
+      pdc_spec[dc_bus] +=
+          sg.p_mw * model::sanitize_scaling(sg.scaling) / data.base_mva;
     }
   }
   // DC-side component loads: consumption is a negative net injection.
@@ -268,7 +269,7 @@ double evaluate_residual_impl(const SolverData& data,
       }
       if (p_vm_nz >= 0) {
         values[p_vm_nz] += pcalc[i] / vi_safe + gii * vi;
-        // ZIP load derivative: -d(Pd_load)/dVm
+        // J = d(calc-spec)/dx and spec contains -Pd(V), hence +dPd/dV.
         double pd, pw1, pw2;
         if (data.has_component_loads) {
           pd = data.pd_pu[i];
@@ -279,11 +280,11 @@ double evaluate_residual_impl(const SolverData& data,
           pw1 = data.zip_pw[1];
           pw2 = data.zip_pw[2];
         }
-        values[p_vm_nz] -= pd * pw1 + 2.0 * vi * pd * pw2;
+        values[p_vm_nz] += pd * pw1 + 2.0 * vi * pd * pw2;
       }
       if (q_vm_nz >= 0) {
         values[q_vm_nz] += qcalc[i] / vi_safe - bii * vi;
-        // ZIP load derivative: -d(Qd_load)/dVm
+        // J = d(calc-spec)/dx and spec contains -Qd(V), hence +dQd/dV.
         double qd, qw1, qw2;
         if (data.has_component_loads) {
           qd = data.qd_pu[i];
@@ -294,7 +295,7 @@ double evaluate_residual_impl(const SolverData& data,
           qw1 = data.zip_qw[1];
           qw2 = data.zip_qw[2];
         }
-        values[q_vm_nz] -= qd * qw1 + 2.0 * vi * qd * qw2;
+        values[q_vm_nz] += qd * qw1 + 2.0 * vi * qd * qw2;
       }
     }
   }
@@ -309,6 +310,38 @@ double evaluate_residual_impl(const SolverData& data,
       const double dcalc = entry.diagonal ? (pdc_linear[entry.i] + entry.g * vdc[entry.i])
                                           : (entry.g * vdc[entry.i]);
       values[entry.nz] += dcalc;
+    }
+
+    // Exact AC-network -> DC-row derivative for GFM energy conduits. The AC
+    // terminal is a slack bus (no local AC row/variables), but P_ac is the
+    // complete Ybus network injection and varies with neighboring states.
+    for (const auto& ge : pattern.gfm_network_coupling_entries) {
+      const auto& conv = converters[static_cast<size_t>(ge.conv_index)];
+      const double p_ac = pcalc[ge.ac_bus] - p_spec[ge.ac_bus];
+      const auto [dloss_dp, dloss_dvdc] = converter_loss_jacobian(
+          conv, p_ac, vdc[ge.dc_bus], data.base_mva, data.loss_model);
+      (void)dloss_dvdc;
+      const double vm_ac = std::max(vm[ge.ac_bus], 0.1);
+      const double conduit_factor =
+          1.0 + dloss_dp +
+          2.0 * conv.r_conv_ac_pu * p_ac / (vm_ac * vm_ac);
+      const double vi = vm[ge.ac_bus];
+      const double vj = vm[ge.neighbor_bus];
+      const double theta = va[ge.ac_bus] - va[ge.neighbor_bus];
+      const double c = std::cos(theta);
+      const double s = std::sin(theta);
+      if (ge.dc_va_nz >= 0 && ge.neighbor_bus != ge.ac_bus) {
+        const double dp_dva_j = vi * vj * (ge.g * s - ge.b * c);
+        values[ge.dc_va_nz] += conduit_factor * dp_dva_j;
+      }
+      if (ge.dc_vm_nz >= 0) {
+        const double dp_dvm_j =
+            (ge.neighbor_bus == ge.ac_bus)
+                ? (pcalc[ge.ac_bus] / std::max(std::abs(vi), ctx.min_vm_pu) +
+                   pattern.g_diag[static_cast<size_t>(ge.ac_bus)] * vi)
+                : vi * (ge.g * c + ge.b * s);
+        values[ge.dc_vm_nz] += conduit_factor * dp_dvm_j;
+      }
     }
 
     // Cross-coupling Jacobian terms (Direction 1).
@@ -350,9 +383,22 @@ double evaluate_residual_impl(const SolverData& data,
       if (dc_bus < 0 || dc_bus >= ctx.ndc) continue;
       const int nz = pattern.dc_vdc_diag_nz[static_cast<size_t>(dc_bus)];
       if (nz < 0) continue;
-      const auto dc_jac = converter_dc_jacobian_vdc(conv, vdc, data.base_mva, data.loss_model);
-      if (dc_jac.dpdc_dvdc != 0.0) {
-        values[nz] -= dc_jac.dpdc_dvdc;
+      double dpdc_dvdc = 0.0;
+      if (conv.control_mode == ConverterMode::AC_GRID_FORMING) {
+        const int ac_bus = conv.bus_ac - 1;
+        if (ac_bus >= 0 && ac_bus < n) {
+          const double p_ac = pcalc[ac_bus] - p_spec[ac_bus];
+          const auto [dloss_dp, dloss_dvdc] = converter_loss_jacobian(
+              conv, p_ac, vdc[dc_bus], data.base_mva, data.loss_model);
+          (void)dloss_dp;
+          dpdc_dvdc = -dloss_dvdc;
+        }
+      } else {
+        dpdc_dvdc = converter_dc_jacobian_vdc(
+            conv, vdc, data.base_mva, data.loss_model).dpdc_dvdc;
+      }
+      if (dpdc_dvdc != 0.0) {
+        values[nz] -= dpdc_dvdc;
       }
     }
     // LCC stations: the CEA (ConstantGamma) inverter's DC injection depends on
@@ -494,11 +540,9 @@ double evaluate_residual_impl(const SolverData& data,
       const int q_row = ctx.q_row[static_cast<size_t>(bus)];
       if (q_row < 0) continue;
 
-      // Qg = Qcalc + Qload - Qconv (implied reactive generation).
-      const double qload_pu = data.has_component_loads
-                                   ? data.qd_pu[bus]
-                                   : (data.ac_buses[static_cast<size_t>(bus)].qd_mvar / data.base_mva);
-      const double qg_implied = qcalc[bus] + qload_pu;
+      // q_spec = qg + every non-generator injection, hence this identity
+      // includes ZIP voltage dependence, VSC/LCC injections and ER ports.
+      const double qg_implied = qcalc[bus] - q_spec[bus] + qg[bus];
 
       // NCP residual replaces Q mismatch.
       const double ncp_mu = data.ncp_mu;
