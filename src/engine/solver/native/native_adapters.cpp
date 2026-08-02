@@ -400,23 +400,16 @@ BCOptions make_strict_highs_production_options(BCOptions opt) {
   opt.auto_highs_root_pipeline = true;
   opt.enable_domain_heuristics = false;
   opt.accept_verified_warm_start_incumbent = true;
-  // Improvement (1): turn on the two cheap HiGHS rounding heuristics that
-  // are off by default upstream.  ZI-Round and Shifting cost only a handful
-  // of rounding passes per call but routinely produce improved UC
-  // incumbents on large degenerate LPs (e.g. 118-bus 24T).
+  // StrictHiGHS policy: request the two optional upstream rounding heuristics.
+  // Their cost and incumbent effect remain instance-dependent.
   opt.highs_mip_run_zi_round = true;
   opt.highs_mip_run_shifting = true;
-  // Improvement (2): force presolve "on" and raise the substitution maxfillin
-  // so the LP relaxation tightens enough to attack the dual-bound bottleneck
-  // observed on IEEE 118-bus 24T (gap 7.11% at 60s with default presolve).
+  // StrictHiGHS policy: force presolve "on" and raise substitution maxfillin.
   opt.highs_force_presolve_on = true;
   opt.highs_presolve_substitution_maxfillin = 30;
-  // Improvement (3): keep dynamic LP cuts alive across more tree nodes
-  // (HiGHS default mip_lp_age_limit=10 → 30) and enable HiGHS symmetry
-  // detection so UC time-shift permutations between identical generators
-  // are pruned from the search tree.  Both target the dual-bound bottleneck
-  // identified in (1): primal heuristics cannot move the gap when the
-  // incumbent is already optimal — only the bound can.
+  // StrictHiGHS policy: keep dynamic LP cuts for more node visits and request
+  // upstream symmetry detection. Neither setting guarantees useful cuts or
+  // detectable symmetry on a particular model.
   opt.highs_mip_lp_age_limit = 30;
   opt.highs_mip_detect_symmetry = true;
   return opt;
@@ -430,17 +423,14 @@ BCOptions make_strict_highs_problem_options(const MIPModel& prob, BCOptions opt)
   const bool large_root =
       num_cols >= opt.highs_strict_auto_ipm_root_min_cols ||
       num_rows >= opt.highs_strict_auto_ipm_root_min_rows;
-  // Above the upper cap the IPM-root + crossover policy is net-negative
-  // (proven on IEEE 118-bus 24T: worse incumbent, no bound gain), so keep
-  // very large degenerate UC roots on simplex.
+  // The upper cap limits the automatic policy only. Explicit caller choices
+  // are not overridden by this size gate.
   const bool too_large_for_ipm_root =
       num_cols >= opt.highs_strict_auto_ipm_root_max_cols ||
       num_rows >= opt.highs_strict_auto_ipm_root_max_rows;
   const bool ipm_root_band = large_root && !too_large_for_ipm_root;
   // Minimum time budget: take the larger of the fixed floor and a
-  // size-proportional component.  Crossover cost scales roughly linearly with
-  // LP column count (e.g. 118-bus/26k cols needs ~728 crossover pivots vs ~6
-  // for 39-bus/6k cols), so the effective minimum is:
+  // size-proportional component. The effective minimum is:
   //   max(min_time_sec, n_cols * secs_per_kcol / 1000)
   // With the default secs_per_kcol=2.0:
   //   39-bus  (6360 cols)  → max(30, 12.7) = 30.0 s  (unchanged)
@@ -492,10 +482,9 @@ bool NativeBranchAndCutAdapter::supports(ProblemClass cls) const {
 
 SolveResult NativeBranchAndCutAdapter::solve_milp(const MIPModel& prob) const {
   // ── LP fast-path ──────────────────────────────────────────────────────
-  // When no integer/binary variables exist, skip the full B&C machinery and
-  // solve the LP directly with the native simplex.  This is faster, avoids
-  // the B&C feasibility-gate that can reject numerically-approximate LP
-  // solutions, and allows us to extract constraint duals for LMP pricing.
+  // When no integer/binary variables exist, skip the inapplicable B&C
+  // machinery and solve the LP directly. This also preserves constraint
+  // dual extraction for LMP pricing.
   if (prob.binary_idx.empty() && prob.integer_idx.empty()) {
     SimplexOptions sopt;
     sopt.max_iter = std::max(opt_.max_lp_iter, 20000);

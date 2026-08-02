@@ -183,16 +183,15 @@ struct BCOptions {
   /// Reject candidate incumbents whose (minimize-convention) objective
   /// exceeds the best known dual bound by more than this relative factor:
   ///   obj - bound > factor * max(1, |bound|).
-  /// Catches pathological repair-path incumbents (e.g. 1e6x the optimum)
-  /// without blocking legitimately weak early heuristics.  Non-positive or
-  /// non-finite disables the gate.
+  /// Rejects candidates that are orders of magnitude beyond the current
+  /// valid bound without treating the gate as a feasibility proof. A
+  /// non-positive or non-finite value disables the gate.
   double incumbent_quality_reject_factor{1e6};
   /// When the root LP relaxation of the PaPILO-presolved model fails or
   /// exhausts its (capped) budget, retry the whole solve once with PaPILO
-  /// presolve disabled.  The presolved 118-bus SCUC root LP is unsolvable
-  /// for the native simplex while the unpresolved one solves cleanly; this
-  /// converts such failures into valid (if slower) solves.  Only fires when
-  /// presolve actually reduced the model and enough wall-clock remains.
+  /// presolve disabled. This is a bounded recovery path, not evidence that
+  /// either model form is generally easier. It fires only when presolve
+  /// actually reduced the model and enough wall-clock remains.
   bool root_presolve_fallback{true};
   /// Minimum remaining wall-clock (seconds) required to attempt the
   /// unpresolved-root fallback retry.
@@ -360,9 +359,8 @@ struct BCOptions {
   // ═══════════════════════════════════════════════════════════════════════
   int ipm_auto_threshold{8000};
   int large_problem_threshold{10000};
-  /// For m <= 15000 simplex warm-start re-optimises
-  /// in ≤30 pivots (~0.3 ms), while IPM Cholesky costs ≥1 ms.  IPMDiver is only
-  /// beneficial when simplex cold-start would dominate (m>15000).
+  /// Row-count policy boundary for selecting the IPM-diver role. This is a
+  /// heuristic gate and carries no per-instance timing guarantee.
   int hybrid_ipm_threshold{15000};
   int xlarge_ipm_only_threshold{50000};
 
@@ -583,21 +581,21 @@ struct BCOptions {
   /// kernel choice above: native B&C with HiGHS LP numerics is the default.
   bool auto_highs_root_pipeline{false};
 
-  /// [D] Disable HiGHS symmetry detection (Nauty/Nauty-like).  UC/SCUC
-  /// variables are not interchangeable (distinct cost curves, ramp rates,
-  /// min up/down times), so symmetry detection finds nothing useful while
-  /// adding Nauty preprocessing overhead.  Set to true to re-enable.
+  /// [D] Disable HiGHS symmetry detection (Nauty/Nauty-like). Set to true to
+  /// request the upstream detector. Its usefulness and preprocessing cost are
+  /// instance-dependent; this option does not imply either outcome.
   bool highs_mip_detect_symmetry{false};
 
   /// [C] Root MIP heuristic effort fraction passed to HiGHS
-  /// (mip_heuristic_effort).  HiGHS default is 0.05; 0.15 gives RENS and
-  /// central rounding enough budget to find a good incumbent without
-  /// significantly delaying the first B&B node.
+  /// (mip_heuristic_effort). HiGHS default is 0.05; this wrapper passes 0.15.
+  /// The value changes the heuristic budget but carries no solve-time or
+  /// incumbent-quality guarantee.
   double highs_mip_heuristic_effort{0.15};
 
-  /// [E] Pseudocost reliability threshold (mip_pscost_minreliable).  HiGHS
-  /// default is 8; a value of 3 reaches statistical reliability faster,
-  /// reducing expensive strong-branching LP solves at shallow nodes.
+  /// [E] Pseudocost reliability threshold (mip_pscost_minreliable). HiGHS
+  /// default is 8; this wrapper passes 3, so fewer samples are required before
+  /// a pseudocost is treated as reliable. This trades probe count against
+  /// estimate quality and is not a performance guarantee.
   int highs_mip_pscost_minreliable{3};
 
   /// [H] Maximum B&B nodes processed while the best bound has not improved
@@ -668,10 +666,9 @@ struct BCOptions {
   ///   "on"    — Standard IPM → crossover → simplex-basis handoff (default).
   ///             Crossover drives the interior point to a vertex so all
   ///             sub-tree node LPs can be warm-started with dual simplex.
-  ///   "off"   — Pure IPM, no crossover.  Fastest for highly degenerate LPs
-  ///             (e.g., 118-bus UC) where crossover itself incurs O(10k–100k)
-  ///             degenerate simplex pivots.  No basis handoff: node LPs are
-  ///             solved from scratch (IPM or simplex per mip_lp_solver).
+  ///   "off"   — Pure IPM, no crossover. This avoids crossover work but also
+  ///             provides no basis handoff: node LPs are solved without the
+  ///             root crossover basis. The net effect is instance-dependent.
   ///   "choose"— Let HiGHS decide (currently treated as "on").
   /// Has no effect when mip_lp_solver="choose" (simplex root, no IPM).
   std::string highs_mip_root_crossover{"on"};
@@ -693,13 +690,10 @@ struct BCOptions {
   bool highs_strict_auto_ipm_root_for_large_models{true};
   int highs_strict_auto_ipm_root_min_cols{10000};
   int highs_strict_auto_ipm_root_min_rows{10000};
-  /// Upper cap on the auto root-IPM band.  Above this size the IPM root +
-  /// crossover policy is *disabled* and the root LP stays on simplex.
-  /// Rationale: on very large degenerate UC roots (e.g. IEEE 118-bus 24T,
-  /// 26400 cols / ~35600 rows) the IPM crossover produces a strictly worse
-  /// primal incumbent (167069 vs 159108, gap 15.8% vs 11.3%) for no dual-bound
-  /// benefit, so simplex-root is preferred there.  Models in the band
-  /// [min_cols, max_cols) keep the IPM-root policy.
+  /// Upper cap on the auto root-IPM band. Above this size the automatic IPM
+  /// root policy is disabled and the root LP stays on simplex. This is a
+  /// wrapper policy boundary, not a claim that one kernel dominates above or
+  /// below the threshold. Explicit caller choices remain authoritative.
   int highs_strict_auto_ipm_root_max_cols{20000};
   int highs_strict_auto_ipm_root_max_rows{20000};
   /// Fixed floor on the time budget required to activate auto root-IPM.
@@ -707,11 +701,9 @@ struct BCOptions {
   /// Size-proportional time scaling: require at least
   ///   max(min_time_sec, n_cols * secs_per_kcol / 1000)
   /// seconds of budget before engaging auto root-IPM.
-  /// Rationale: crossover cost grows roughly linearly with LP column count
-  /// (empirically ~728 pivots for 26k cols vs ~6 pivots for 6k cols).  For
-  /// small problems (39-bus, 6360 cols) this evaluates to 12.7s < 30s floor,
-  /// so the floor dominates.  For large problems (118-bus, 26400 cols) it
-  /// evaluates to 52.8s > 30s floor, correctly requiring a larger budget.
+  /// This size-dependent gate reserves more root time as the column count
+  /// grows. It is a policy heuristic and does not predict crossover work or
+  /// end-to-end solve time.
   double highs_strict_auto_ipm_root_secs_per_kcol{2.0};
 
   /// [J] Native IPM crash-basis seeding for StrictHiGHS.
@@ -745,8 +737,8 @@ struct BCOptions {
   /// (BackendB_HiGHSSafe) throughout cut LP / node LP / push / cleanup
   /// dispatches.  Requires CMake build flag
   /// MIPSOLVERS_ENABLE_FACTOR_BACKEND_B=ON; otherwise the backend id is
-  /// silently clamped to 0 (Backend A) at compile time.  Disabled by
-  /// default because of measured drift in certain MIP paths.
+  /// silently clamped to 0 (Backend A) at compile time. Disabled by default
+  /// because current MIP conformance coverage does not justify enabling it.
   bool use_forrest_tomlin_updates{false};
 
   /// Orbit-based symmetry breaking. At the root node, detect

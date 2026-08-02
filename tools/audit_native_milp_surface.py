@@ -20,6 +20,10 @@ MARKER_RE = re.compile(
 )
 GETENV_RE = re.compile(r"\b(?:(?:std|boost)::)?getenv\s*\(")
 ROADMAP_RE = re.compile(r"\bP[0-9]+(?:\.[0-9]+)?\b")
+UNQUALIFIED_PERFORMANCE_CLAIM_RE = re.compile(
+    r"\b(?:faster|fastest|speed-?up)\b|\bmeasured\s+(?:on|to|rationale)\b",
+    re.IGNORECASE,
+)
 
 
 def source_files(roots: Iterable[pathlib.Path]) -> list[pathlib.Path]:
@@ -186,6 +190,12 @@ def main() -> int:
     )
     marker_hits = line_hits(native_paths, MARKER_RE)
     roadmap_hits = line_hits(native_paths, ROADMAP_RE)
+    native_claim_paths = sorted(
+        set(native_paths + [repo / "src/engine/solver/native/native_adapters.cpp"])
+    )
+    performance_claim_hits = line_hits(
+        native_claim_paths, UNQUALIFIED_PERFORMANCE_CLAIM_RE
+    )
     direct_getenv_hits: list[str] = []
     for path in native_paths:
         cleaned = strip_comments_and_literals(path.read_text(errors="replace"))
@@ -221,6 +231,7 @@ def main() -> int:
             "direct_getenv_hits": direct_getenv_hits,
             "placeholder_marker_hits": marker_hits,
             "roadmap_marker_hits": roadmap_hits,
+            "unqualified_performance_claim_hits": performance_claim_hits,
         },
     }
 
@@ -242,6 +253,7 @@ def main() -> int:
             direct_getenv_hits,
             marker_hits,
             roadmap_hits,
+            performance_claim_hits,
         )
     )
     return 1 if failed else 0

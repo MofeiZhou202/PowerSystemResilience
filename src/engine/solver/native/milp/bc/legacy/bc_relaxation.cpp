@@ -1289,11 +1289,8 @@ bool solve_lp_relaxation_with_vendored_highs(const LPModel& lp,
     highs->setOptionValue("log_to_console", false);
     highs->setOptionValue("random_seed", 0);
     highs->setOptionValue("threads", 1);
-    // L2a: presolve the COLD root LP (no incoming basis) so HiGHS reduces the
-    // full model before the simplex solve.  On root-gap-closable SCUC the
-    // un-presolved 10151-row solve (~120ms) collapses to the presolved path
-    // (~17ms).  Node LPs (basis_hint present) keep presolve OFF so the
-    // original-space warm basis is applied directly.  Env escape hatch for A/B.
+    // Presolve a cold root LP when no incoming basis exists. Node LPs keep
+    // presolve off so an original-space warm basis can be applied directly.
     const bool cold_root_solve = (basis_hint == nullptr);
     const bool cold_root_presolve =
         cold_root_solve &&
@@ -2210,14 +2207,10 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
   const int n_lp = static_cast<int>(lp.vars.size());
   // Column count above which crashing a simplex basis from the warm-start
   // solution is worth its standard-form build cost.  This is a performance
-  // gate only — never a correctness one: the crash solve below always falls
-  // through to the standard cold/IPM paths if it does not reach a feasible
-  // vertex, so the threshold value can never change the answer, only the speed.
-  // Measured rationale (do not lower blindly): enabling the crash basis for
-  // sub-threshold roots regresses medium models (39-bus/24h 43->52 ms) with no
-  // gain on larger ones — the integer warm-start is a poor seed for the
-  // fractional LP optimum, so IEEE-118 (~16k cols) still does not converge from
-  // it.  Keep it high enough that only genuinely huge roots take the crash path.
+  // gate only, never a correctness one: the crash solve below falls through to
+  // the standard cold/IPM paths if it does not reach a feasible vertex. Keep
+  // the threshold conservative because an integer incumbent need not be a
+  // useful basis seed for the fractional root relaxation.
   constexpr int kWarmstartCrashMinCols = 30000;
   const bool huge_warmstart_root =
       (x0 != nullptr && x0->size() == n_lp && n_lp >= kWarmstartCrashMinCols);
@@ -2308,10 +2301,9 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
   }
 
   // A successfully solved IPM root is a valid dual bound for this relaxation
-  // even when the simplex crossover afterwards fails or times out.  Retain it
-  // across the fallthrough paths so a timed-out root never reports -inf with
-  // the bound already in hand (observed on IEEE-118: IPM had the exact root
-  // bound after 1.8s, the crossover timeout then discarded it).
+  // even when the simplex crossover afterwards fails or times out. Retain it
+  // across fallthrough paths so a timed-out root does not discard a certified
+  // bound already in hand.
   double ipm_root_dual_bound = std::numeric_limits<double>::quiet_NaN();
 
   // ---- Interior-point root-LP path ----
@@ -2362,9 +2354,7 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
       // A converged IPM root (status Optimal, duality gap ≈ 0) is an exact
       // dual bound for this relaxation.  Retain it so that if the mandatory
       // IPM→simplex crossover or the fallthrough cold simplex later times out,
-      // the root still publishes this rigorous bound instead of -inf (observed
-      // on IEEE-118: IPM had the exact root bound in 1.8 s, the crossover
-      // timeout then discarded it, leaving best_bound = -inf).
+      // the root still publishes this rigorous bound instead of -inf.
       ipm_root_dual_bound = ipm_res.stats.objective;
       // ═══════════════════════════════════════════════════════════════════
       // 3-Phase IPM→Simplex Crossover
@@ -2662,11 +2652,10 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
             std::fprintf(stderr, "\n");
 	        }
 
-	        // ── Phase 2: Push Phase — loose tolerances for fast feasibility ──
-        // The crash basis from IPM may need many pivots.  Allow cold-start
-        // fallback: a one-time ~2s cold-start is far cheaper than losing
-        // the simplex basis (which would cause dozens of cold starts + zero
-        // cuts in the B&C tree).
+	        // Phase 2: push with relaxed feasibility tolerances.
+        // The crash basis from IPM may need many pivots. Allow the standard
+        // cold-start fallback so failure to push does not remove every simplex
+        // basis-dependent tree path.
         SimplexOptions push_opt;
         push_opt.max_iter = huge_warmstart_root
           ? std::min(std::max(sf_m / 2, 3000), 12000)
@@ -2948,12 +2937,9 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
       return out;
     }
     SimplexOptions simplex_opt;
-    // Cold-start solves (roots, repair re-solves) on large degenerate LPs can
-    // need orders of magnitude more pivots than a warm node LP — the
-    // unpresolved 118-bus relaxation takes ~1e5 pivots (~40 s), far above
-    // max_lp_iter*10 = 5000, which turned a solvable root into a MaxIter
-    // failure.  The wall-clock budget (apply_simplex_budget) is the real
-    // governor for cold solves, so give them a generous iteration cap.
+    // Cold roots and repair re-solves may require substantially more pivots
+    // than a warm node LP. The wall-clock deadline remains authoritative, so
+    // cold solves receive a larger iteration ceiling.
     const bool cold_root_solve = (basis_hint == nullptr);
     simplex_opt.max_iter =
         cold_root_solve ? std::max(opt.max_lp_iter * 10, 100000)
@@ -3128,9 +3114,8 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // BUG FIX: Do NOT wrap LP as NLP for IPM solving. The std::function callback
-  // overhead makes it 10-100x slower than direct sparse matrix operations.
-  // Use NativeIPMLPAdapter (the LP-specific IPM) as a fallback instead.
+  // Use the LP-specific IPM adapter so the fallback retains sparse LP data and
+  // avoids the unrelated NLP callback layer.
   // ═══════════════════════════════════════════════════════════════════════════
   if (opt.verbose) {
     fprintf(stderr, "[BC_RELAX] Fallback: using NativeIPMLPAdapter (not NLP wrapper)\n");

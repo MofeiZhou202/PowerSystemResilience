@@ -202,7 +202,7 @@ void detail::explorer_thread(
     ActiveNodeGuard& operator=(const ActiveNodeGuard&) = delete;
   };
 
-  // IPM solver for IPMDiver role (fast ~30ms node LPs without cold-start).
+  // Dedicated IPM solver for the IPMDiver role.
   std::unique_ptr<NativeIPMLPAdapter> ipm_solver;
   if (is_ipm_diver) {
     IPMLPOptions ipm_opt;

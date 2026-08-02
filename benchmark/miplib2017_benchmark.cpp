@@ -224,6 +224,23 @@ struct Result {
   std::uint64_t branch_domain_dense_copies{0};
   std::uint64_t branch_domain_dense_values_copied{0};
   std::uint64_t branch_domain_moves{0};
+  std::uint64_t root_domain_probe_workspace_initializations{0};
+  std::uint64_t root_domain_probe_worlds{0};
+  std::uint64_t root_domain_probe_trail_pushes{0};
+  std::uint64_t root_domain_probe_rollbacks{0};
+  std::uint64_t root_domain_probe_failures{0};
+  std::uint64_t root_domain_probe_rows_processed{0};
+  std::uint64_t root_domain_probe_changed_columns{0};
+  std::uint64_t root_domain_probe_implication_export_columns_visited{0};
+  std::uint64_t root_domain_probe_implications_learned{0};
+  std::uint64_t root_domain_probe_committed_bound_changes{0};
+  std::uint64_t root_lp_probe_bound_workspace_initializations{0};
+  std::uint64_t root_lp_probe_bound_transactions{0};
+  std::uint64_t root_lp_probe_transaction_snapshot_values{0};
+  std::uint64_t root_lp_probe_transaction_rollbacks{0};
+  std::uint64_t root_lp_probe_transaction_failures{0};
+  std::uint64_t root_lp_probe_backend_cold_solves{0};
+  std::uint64_t root_lp_probe_backend_persistent_resolves{0};
   std::uint64_t strong_probe_base_sf_materializations{0};
   std::uint64_t strong_probe_bound_transactions{0};
   std::uint64_t strong_probe_transaction_snapshot_values{0};
@@ -1556,6 +1573,39 @@ Result run_native(const Instance& instance, const Config& cfg,
   result.branch_domain_dense_values_copied =
       native.bc_stats.branch_domain_dense_values_copied;
   result.branch_domain_moves = native.bc_stats.branch_domain_moves;
+  result.root_domain_probe_workspace_initializations =
+      native.bc_stats.root_domain_probe_workspace_initializations;
+  result.root_domain_probe_worlds = native.bc_stats.root_domain_probe_worlds;
+  result.root_domain_probe_trail_pushes =
+      native.bc_stats.root_domain_probe_trail_pushes;
+  result.root_domain_probe_rollbacks =
+      native.bc_stats.root_domain_probe_rollbacks;
+  result.root_domain_probe_failures =
+      native.bc_stats.root_domain_probe_failures;
+  result.root_domain_probe_rows_processed =
+      native.bc_stats.root_domain_probe_rows_processed;
+  result.root_domain_probe_changed_columns =
+      native.bc_stats.root_domain_probe_changed_columns;
+  result.root_domain_probe_implication_export_columns_visited =
+      native.bc_stats.root_domain_probe_implication_export_columns_visited;
+  result.root_domain_probe_implications_learned =
+      native.bc_stats.root_domain_probe_implications_learned;
+  result.root_domain_probe_committed_bound_changes =
+      native.bc_stats.root_domain_probe_committed_bound_changes;
+  result.root_lp_probe_bound_workspace_initializations =
+      native.bc_stats.root_lp_probe_bound_workspace_initializations;
+  result.root_lp_probe_bound_transactions =
+      native.bc_stats.root_lp_probe_bound_transactions;
+  result.root_lp_probe_transaction_snapshot_values =
+      native.bc_stats.root_lp_probe_transaction_snapshot_values;
+  result.root_lp_probe_transaction_rollbacks =
+      native.bc_stats.root_lp_probe_transaction_rollbacks;
+  result.root_lp_probe_transaction_failures =
+      native.bc_stats.root_lp_probe_transaction_failures;
+  result.root_lp_probe_backend_cold_solves =
+      native.bc_stats.root_lp_probe_backend_cold_solves;
+  result.root_lp_probe_backend_persistent_resolves =
+      native.bc_stats.root_lp_probe_backend_persistent_resolves;
   result.strong_probe_base_sf_materializations =
       native.bc_stats.strong_probe_base_sf_materializations;
   result.strong_probe_bound_transactions =
@@ -1906,6 +1956,21 @@ void write_csv(const fs::path& path, const std::vector<Result>& results) {
          "branch_payload_child_creations,branch_payload_shared_vectors,"
          "branch_payload_shared_elements,branch_domain_dense_copies,"
          "branch_domain_dense_values_copied,branch_domain_moves,"
+         "root_domain_probe_workspace_initializations,"
+         "root_domain_probe_worlds,root_domain_probe_trail_pushes,"
+         "root_domain_probe_rollbacks,root_domain_probe_failures,"
+         "root_domain_probe_rows_processed,"
+         "root_domain_probe_changed_columns,"
+         "root_domain_probe_implication_export_columns_visited,"
+         "root_domain_probe_implications_learned,"
+         "root_domain_probe_committed_bound_changes,"
+         "root_lp_probe_bound_workspace_initializations,"
+         "root_lp_probe_bound_transactions,"
+         "root_lp_probe_transaction_snapshot_values,"
+         "root_lp_probe_transaction_rollbacks,"
+         "root_lp_probe_transaction_failures,"
+         "root_lp_probe_backend_cold_solves,"
+         "root_lp_probe_backend_persistent_resolves,"
          "strong_probe_base_sf_materializations,"
          "strong_probe_bound_transactions,"
          "strong_probe_transaction_snapshot_values,"
@@ -2020,6 +2085,40 @@ void write_csv(const fs::path& path, const std::vector<Result>& results) {
         << csv_count(r.branch_domain_dense_values_copied,
                      r.native_diagnostics_available) << ','
         << csv_count(r.branch_domain_moves,
+                     r.native_diagnostics_available) << ','
+        << csv_count(r.root_domain_probe_workspace_initializations,
+                     r.native_diagnostics_available) << ','
+        << csv_count(r.root_domain_probe_worlds,
+                     r.native_diagnostics_available) << ','
+        << csv_count(r.root_domain_probe_trail_pushes,
+                     r.native_diagnostics_available) << ','
+        << csv_count(r.root_domain_probe_rollbacks,
+                     r.native_diagnostics_available) << ','
+        << csv_count(r.root_domain_probe_failures,
+                     r.native_diagnostics_available) << ','
+        << csv_count(r.root_domain_probe_rows_processed,
+                     r.native_diagnostics_available) << ','
+        << csv_count(r.root_domain_probe_changed_columns,
+                     r.native_diagnostics_available) << ','
+        << csv_count(r.root_domain_probe_implication_export_columns_visited,
+                     r.native_diagnostics_available) << ','
+        << csv_count(r.root_domain_probe_implications_learned,
+                     r.native_diagnostics_available) << ','
+        << csv_count(r.root_domain_probe_committed_bound_changes,
+                     r.native_diagnostics_available) << ','
+        << csv_count(r.root_lp_probe_bound_workspace_initializations,
+                     r.native_diagnostics_available) << ','
+        << csv_count(r.root_lp_probe_bound_transactions,
+                     r.native_diagnostics_available) << ','
+        << csv_count(r.root_lp_probe_transaction_snapshot_values,
+                     r.native_diagnostics_available) << ','
+        << csv_count(r.root_lp_probe_transaction_rollbacks,
+                     r.native_diagnostics_available) << ','
+        << csv_count(r.root_lp_probe_transaction_failures,
+                     r.native_diagnostics_available) << ','
+        << csv_count(r.root_lp_probe_backend_cold_solves,
+                     r.native_diagnostics_available) << ','
+        << csv_count(r.root_lp_probe_backend_persistent_resolves,
                      r.native_diagnostics_available) << ','
         << csv_count(r.strong_probe_base_sf_materializations,
                      r.native_diagnostics_available) << ','
@@ -2214,6 +2313,35 @@ json result_json(const Result& r) {
           {"dense_copies", r.branch_domain_dense_copies},
           {"dense_values_copied", r.branch_domain_dense_values_copied},
           {"moves", r.branch_domain_moves}}
+          : json(nullptr)},
+      {"root_domain_probing", r.native_diagnostics_available ? json{
+          {"workspace_initializations",
+           r.root_domain_probe_workspace_initializations},
+          {"worlds", r.root_domain_probe_worlds},
+          {"trail_pushes", r.root_domain_probe_trail_pushes},
+          {"rollbacks", r.root_domain_probe_rollbacks},
+          {"failures", r.root_domain_probe_failures},
+          {"rows_processed", r.root_domain_probe_rows_processed},
+          {"changed_columns", r.root_domain_probe_changed_columns},
+          {"implication_export_columns_visited",
+           r.root_domain_probe_implication_export_columns_visited},
+          {"implications_learned",
+           r.root_domain_probe_implications_learned},
+          {"committed_bound_changes",
+           r.root_domain_probe_committed_bound_changes}}
+          : json(nullptr)},
+      {"root_lp_probing", r.native_diagnostics_available ? json{
+          {"bound_workspace_initializations",
+           r.root_lp_probe_bound_workspace_initializations},
+          {"bound_transactions", r.root_lp_probe_bound_transactions},
+          {"transaction_snapshot_values",
+           r.root_lp_probe_transaction_snapshot_values},
+          {"transaction_rollbacks",
+           r.root_lp_probe_transaction_rollbacks},
+          {"transaction_failures", r.root_lp_probe_transaction_failures},
+          {"backend_cold_solves", r.root_lp_probe_backend_cold_solves},
+          {"backend_persistent_resolves",
+           r.root_lp_probe_backend_persistent_resolves}}
           : json(nullptr)},
       {"separator_storage", r.native_diagnostics_available ? json{
           {"sparse_candidates_created",
@@ -2556,6 +2684,50 @@ Result worker_result_from_json(const json& input) {
   result.tree_restart_last_node = optional_json_integer(
       tree_restart, "last_node", -1);
   result.tree_restart_last_source = tree_restart.value("last_source", "");
+
+  const json root_domain_probing =
+      input.contains("root_domain_probing") &&
+              input["root_domain_probing"].is_object()
+          ? input["root_domain_probing"] : json::object();
+  result.root_domain_probe_workspace_initializations =
+      root_domain_probing.value("workspace_initializations", std::uint64_t{0});
+  result.root_domain_probe_worlds =
+      root_domain_probing.value("worlds", std::uint64_t{0});
+  result.root_domain_probe_trail_pushes =
+      root_domain_probing.value("trail_pushes", std::uint64_t{0});
+  result.root_domain_probe_rollbacks =
+      root_domain_probing.value("rollbacks", std::uint64_t{0});
+  result.root_domain_probe_failures =
+      root_domain_probing.value("failures", std::uint64_t{0});
+  result.root_domain_probe_rows_processed =
+      root_domain_probing.value("rows_processed", std::uint64_t{0});
+  result.root_domain_probe_changed_columns =
+      root_domain_probing.value("changed_columns", std::uint64_t{0});
+  result.root_domain_probe_implication_export_columns_visited =
+      root_domain_probing.value("implication_export_columns_visited",
+                                std::uint64_t{0});
+  result.root_domain_probe_implications_learned =
+      root_domain_probing.value("implications_learned", std::uint64_t{0});
+  result.root_domain_probe_committed_bound_changes =
+      root_domain_probing.value("committed_bound_changes", std::uint64_t{0});
+
+  const json root_lp_probing =
+      input.contains("root_lp_probing") && input["root_lp_probing"].is_object()
+          ? input["root_lp_probing"] : json::object();
+  result.root_lp_probe_bound_workspace_initializations = root_lp_probing.value(
+      "bound_workspace_initializations", std::uint64_t{0});
+  result.root_lp_probe_bound_transactions = root_lp_probing.value(
+      "bound_transactions", std::uint64_t{0});
+  result.root_lp_probe_transaction_snapshot_values = root_lp_probing.value(
+      "transaction_snapshot_values", std::uint64_t{0});
+  result.root_lp_probe_transaction_rollbacks = root_lp_probing.value(
+      "transaction_rollbacks", std::uint64_t{0});
+  result.root_lp_probe_transaction_failures = root_lp_probing.value(
+      "transaction_failures", std::uint64_t{0});
+  result.root_lp_probe_backend_cold_solves = root_lp_probing.value(
+      "backend_cold_solves", std::uint64_t{0});
+  result.root_lp_probe_backend_persistent_resolves = root_lp_probing.value(
+      "backend_persistent_resolves", std::uint64_t{0});
 
   const json branching = input.contains("branching") && input["branching"].is_object()
       ? input["branching"] : json::object();

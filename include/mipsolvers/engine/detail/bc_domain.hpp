@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <vector>
 
@@ -108,6 +109,7 @@ class BCDomain {
     for (int rr = 0; rr < m_total_; ++rr) mark_propagate(rr);
 
     trail_.clear();
+    rows_processed_ = 0;
   }
 
   bool infeasible() const { return infeasible_; }
@@ -116,6 +118,11 @@ class BCDomain {
   const Eigen::VectorXd& ub() const { return ub_; }
   int num_vars() const { return n_; }
   int num_rows() const { return m_total_; }
+  std::size_t trail_size() const { return trail_.size(); }
+  const TrailEntry& trail_entry(std::size_t pos) const {
+    return trail_.at(pos);
+  }
+  std::uint64_t rows_processed() const { return rows_processed_; }
 
   /// Push a savepoint that `restore()` can later roll back to.
   Savepoint savepoint() const {
@@ -225,6 +232,7 @@ class BCDomain {
       const int rr = prop_inds_.back();
       prop_inds_.pop_back();
       prop_flag_[static_cast<size_t>(rr)] = 0;
+      ++rows_processed_;
       if (!propagate_row(rr)) {
         propagation_complete_ = true;
         return false;
@@ -546,6 +554,7 @@ class BCDomain {
   std::vector<int> prop_inds_;
 
   std::vector<TrailEntry> trail_;
+  std::uint64_t rows_processed_{0};
   bool infeasible_{false};
   bool propagation_complete_{true};
 };

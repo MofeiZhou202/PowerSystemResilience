@@ -2,19 +2,19 @@
 
 Date: 2026-08-01  
 Last verified: 2026-08-02
-Status: architecture and truthfulness remediation in progress; the final P06/P14
+Status: architecture and truthfulness remediation in progress; the post-P13
 controlled experiment does not establish a Native efficiency gain
 Scope: linear MILP, the native branch-and-cut tree, its LP kernels, and the
 strict HiGHS/SCIP reference paths
 
 ## 1. Executive conclusion
 
-The current post-P06/P14 repeated experiment shows **no evidence that Native MILP
+The final post-P13 repeated experiment shows **no evidence that Native MILP
 is faster than HiGHS or SCIP**, either generally or on the fixed four-instance
-cohort. Native and HiGHS both receive the 30-second PAR-10 penalty on every
-run; SCIP has the best shifted PAR-10, 12.144 seconds, on this selected cohort.
-Mean fixed-horizon PDI is 1.986850 seconds for Native, 1.671126 for HiGHS, and
-1.212551 for SCIP. All 36 trajectories are available and all 91 primal events pass
+cohort. Native and HiGHS both receive a 30.000-second shifted PAR-10; SCIP has
+the best shifted PAR-10, 12.197 seconds, on this selected cohort. Mean
+fixed-horizon PDI is 1.984103 seconds for Native, 1.676066 for HiGHS, and
+1.211046 for SCIP. All 36 trajectories are available and all 94 primal events pass
 original-space audit, but four independent instances are not enough for a
 population-level ranking. The D07 repair caps nested root-LNS solves by the
 outer remaining budget: current Native calls return in 2.700--2.900 seconds,
@@ -45,9 +45,10 @@ whole chain:
 6. cut and primal-heuristic portfolio control;
 7. search, restart, and parallel coordination.
 
-The immutable code audit contains 46 formal findings. The normalized
-remediation matrix currently has 24 closed, 23 partial, and 4 open acceptance
-rows. These counts are a truthfulness ledger, not a performance score: no
+The immutable code audit contains 46 formal findings. The 51 normalized audit
+rows currently have 25 closed, 22 partial, and 4 open outcomes. With 16
+post-audit discoveries, the complete ledger has 41 closed, 22 partial, and 4
+open records. These counts are a truthfulness ledger, not a performance score: no
 structural performance row is closed without repeated fixed-cohort evidence.
 
 On the large SCUC evidence already in this repository, the native LP tree
@@ -321,7 +322,7 @@ warm basis, or a node LP that is two orders of magnitude too slow.
 | Node LP reoptimization | Each dispatcher owns a persistent HiGHS node-LP instance; mutable ownership is not stored in queued bases. Dense basis-inverse materialization is removed and inverse rows/BTRAN are lazy. | Factor/basis repair and highly optimized FTRAN/BTRAN/repricing. | Fixed-cohort iteration/reinversion savings are not yet measured; local-row changes still rebuild structure. |
 | Cuts | GMI, covers, cliques, implied bounds, transformed cuts and experimental CGLP paths exist. | Integrated selection, numerical safeguards, pool/LP aging and broad separator portfolio. | Family presence exceeds evidence. CGLP stays off; dead disabled MIR implementation was removed. P5. |
 | Primal heuristics | Several rounding/repair/local mechanisms and subsolve counters exist. | Feasibility Jump, RENS/RINS, randomized/shifting, sub-MIP scheduling. | No portfolio-level primal-integral ablation. P5. |
-| Branching | Reliability probing, directional pseudocosts, exact-result reuse and calibration telemetry exist. Strong-branch directions reuse one current-node SF, apply exact incremental bound deltas, use a real 50-500 iteration cap, and do not copy the SF into temporary results. Node fractional frontiers are cached across unchanged LP states. | HiGHS reliability branching and SCIP hybrid strategies are mature. | Each direction still copies an input SF and normally cold-solves it; there is no transactional active-LP probe or objective cutoff. The post-remediation end-to-end cohort is not a paired pre/post branching ablation. |
+| Branching | Reliability probing, directional pseudocosts, exact-result reuse and calibration telemetry exist. Serial and shared parallel reliability paths materialize one active standard form per probing batch, apply each direction through an exact rollback transaction, and use persistent resolves after establishing a separate mutable probe owner. P13 Phase 1 root domain probing now uses one persistent `BCDomainProbeWorkspace`, trail-based sparse extraction, incremental row/clique propagation, and verified rollback; the final cohort records 3 workspaces, 612 worlds/rollbacks, 2,163 changed/exported columns, 12,696 processed rows, 48 implications, and zero failures. Phase 2 root LP probing separately uses one lazy `lb/ub` workspace and one synchronized SF; it records 9 workspaces, 336 transactions/rollbacks, zero failures, 12 cold solves, and 324 persistent resolves. Node fractional frontiers are cached across unchanged LP states. | HiGHS reliability branching and SCIP hybrid strategies are mature. | Strong probing still establishes a separate active form/owner and lacks controlled LP-iteration/reinversion attribution. P13 is structurally closed over both audited root-probing paths, but the post-remediation end-to-end cohort shows no Native speed gain. |
 | Queue/restart | Domain dedup uses compact hash buckets with exact bound comparison; hashes never decide equality. The sequential tree has a proof-gated incumbent restart transaction, disabled by default. | Joint queue/dive/restart system with global domain/cut feedback. | Multiple ordered containers, dense active child copies, queue scans, parallel ownership, and naturally triggered restart evidence remain. |
 | Conflict/clique/symmetry | Conflict propagation has threshold-indexed variable-to-clause wakeups; unrequested reason construction is skipped. Clique insertions update persistent sorted endpoint adjacency instead of rebuilding both CSR graphs. | HiGHS integrated clique/implication/symmetry; SCIP 10 cut conflicts/reflections and clause management. | LBD/activity aging, lazy persistent reason handles, symmetry reduction, and fixed-cohort payoff remain unestablished. |
 | Parallelism | A generation-counted condition variable replaces the 1 ms/5 ms monitor polling path. | HiGHS 1.15 prototype parallel MIP; SCIP concurrent/parallel modes. | Queue locks/scans and deterministic/TSAN/scaling acceptance remain open. |
@@ -600,7 +601,7 @@ Sections 10.1 and 10.2 predate the current audit remediation set. Their raw
 files remain useful for reproducing the defects that motivated the audit, but
 their timings, solve counts, and rankings must not be cited as measurements of
 the current working tree. Section 10.3 is the post-P16 intermediate run;
-Section 10.4 is the current post-P02 evidence.
+Section 10.15 is the current post-P13 evidence.
 
 **D10 seed-provenance correction.** Every report in Sections 10.1--10.6 stored
 `seed=0`, but the benchmark did not assign that value to Native `BCOptions`.
@@ -1064,8 +1065,8 @@ $-6$ at $(0,1,1,1,1,1)$. Per-target maximum/union accounting removes that
 conflict while preserving additive contributions from distinct target columns.
 
 After both repairs the differential passes 128/128 models and 1,410 assertions.
-The full MILP executable passes 51 test cases and 1,978 assertions, and CTest
-passes 18/18 registered tests. These counts are correctness evidence for a
+The full MILP executable passes 54 test cases and 2,029 assertions, and CTest
+passes 20/20 registered tests. These counts are correctness evidence for a
 small finite class. They do not measure speed, replace MIPLIB differentials,
 or justify closing E08.
 
@@ -1161,20 +1162,95 @@ queued node basis snapshots detach the mutable owner. This is meaningful
 architecture work, but local structural changes still rebuild and the final
 cohort has no LP-reinversion attribution. P03 stays `PARTIAL`.
 
-P05 has exactly one Native production use of
-`update_standard_form_bounds_incremental()`, in the serial strong-branch
-direction path. Native MILP still contains 34 full
-`update_standard_form_bounds()` call sites: 32 in `branch_and_cut.cpp`, one in
+P05 has one Native production call site for
+`update_standard_form_bounds_incremental()`, used to commit a root-probe
+one-sided infeasibility fixing after its directional transaction rolls back.
+Strong-branch directions use `StandardFormBoundTransaction`. Native MILP still
+contains 33 full `update_standard_form_bounds()` call sites: 31 in `branch_and_cut.cpp`, one in
 `bc_branching.cpp`, and one in `bc_parallel.cpp`, spanning node, heuristic,
 repair, dive, sub-MIP, audit, and probe paths. The incremental API is therefore
 live but not systemic. P05 stays `PARTIAL`.
 
-P11 still copies a complete standard form per direction in the parallel
-reliability helper (`StandardFormLP probe_sf = base_sf`); the serial path also
-materializes per-direction probe forms before applying incremental bound
-changes. Iteration limits and persistent solves repair part of the cost model,
-but transactional probe/restore ownership has not been implemented. P11 stays
-`PARTIAL`.
+P11 no longer copies a complete standard form per direction. Both the serial
+current-node path and the shared reliability helper used by parallel search
+materialize one active form per probing batch, transact each direction, and
+roll back only touched bound/RHS/objective scalars. In the final P13 report, 27
+base materializations serve 101 strong directions, with 101 rollbacks, zero
+transaction failures, 88 persistent resolves, and 13 cold solves. This is real
+production coverage, but it is not a controlled before/after attribution and a
+separate active form/owner must still be established. P11 stays `PARTIAL`.
+
+### 10.14 D16 cross-node propagation-reason repair
+
+An independently feasible SCIP objective-37 witness for `enlight_hard` exposed
+an unsound Native conflict. Parent row propagation derived a bound and a
+`DomainReasonBound`, but the normal path discarded the reason before child
+conflict analysis. The child then resolved an incomplete frontier into global
+unary no-goods, including `x101 >= 2 infeasible`, `x105 <= 1 infeasible`, and
+`x167 <= 0 infeasible`, and falsely exhausted the queue after 198 nodes.
+
+Row and proof propagation reasons now live as long as their derived node bounds.
+Optional source-tagged audit identified `conflict_pool` as the witness-violating
+source; the normal path allocates no event vector. Three default-round witness
+runs reached the time limit at 530/539/537 nodes without invalid publication or
+witness violation, and a 10-round stress reached 868 nodes rather than false
+exhaustion. This closes D16 only. Native still found no `enlight_hard`
+incumbent, and the post-D16 four-instance report showed no efficiency gain.
+
+### 10.15 P13 root domain and LP probing transactions
+
+The original P13 finding is primarily about Phase 1 root domain probing. The
+old path copied complete `lb/ub` vectors for each down/up world and then scanned
+all columns to export implications. Removing the redundant third down world did
+not close that finding, and the earlier claim that the separate Phase 2 root LP
+transaction alone closed P13 was incorrect.
+
+Phase 1 now owns one persistent `BCDomainProbeWorkspace`. It saves the domain
+trail, applies a single-variable fixing, incrementally propagates incident rows
+and cliques from newly fixed literals, collects only unique trailed columns,
+exports sparse bound deltas, and restores and validates only those columns.
+One-sided infeasibility fixings are committed through the same persistent
+domain. The final cohort records 3 workspaces, 612 worlds and rollbacks, 2,163
+trail pushes, 2,163 unique changed/exported columns, 12,696 processed rows, 48
+learned implications, no committed fixing, and zero failures. The removed
+unconditional extraction loop would have visited 122,400 columns on those same
+`612 x 200` worlds. This is structural-work evidence, not wall-time evidence.
+
+Phase 2 separately retains one lazy `lb/ub` workspace, one synchronized
+standard form, exact `StandardFormBoundTransaction` rollback, and a separate
+mutable LP owner. Nine Native runs record 9 workspaces, 336 transactions and
+rollbacks, zero failures, 12 cold solves, and 324 persistent resolves.
+
+The frozen working-tree report is
+`reports/miplib2017_audit_p13_root_domain_probe_transactions_2026-08-02.{json,csv}`.
+It uses four instances, three solvers, three repeats, one thread, seed zero, a
+3-second backend limit, a 2-second watchdog grace, and relative gap `1e-4`.
+
+| Solver | Runs | Audited incumbents | Proven | Mean PDI | Hard timeouts | Shifted PAR-10 |
+|---|---:|---:|---:|---:|---:|---:|
+| Native B&C + HiGHS LP | 12 | 6 | 0 | 1.984103 s | 0 | 30.000 s |
+| HiGHS MIP 1.14.0 | 12 | 9 | 0 | 1.676066 s | 0 | 30.000 s |
+| SCIP MIP 9.0.0 | 12 | 9 | 3 | 1.211046 s | 0 | 12.197 s |
+
+All 36 streams are available, all 94 primal events pass audit, three transient
+SCIP dual events are discarded explicitly, and no process hits the watchdog.
+Native/HiGHS has paired PDI ratio 1.102021 with 95% interval
+`[0.868196, 1.586477]`; Native/SCIP has PDI ratio 4.807893 with interval
+`[0.909243, 114.777614]` and PAR-10 ratio 8.610117.
+
+The manifest payload SHA-256 is
+`c89122b537ae5900dbefcffae9f3833e7edb78eb9e76127aac49dd45e2ab1789`;
+the JSON SHA-256 is
+`c244bdc3e22a89180b9c53e973df9526dbf760103f1bb5954fc89a25dbc3a74e`;
+the CSV SHA-256 is
+`c9e7500bfafbb88aa2595719e69268246a745b2ada754f2ff372fb0ade49a27a`.
+The manifest records a dirty, fully hashed source state
+`95819a55b2bdf3897ebfa3fb6f3da5004363959dab32a3e372c16bbadf929d54`.
+
+P13 is structurally closed over both audited root-probing paths. It does not
+close the performance question: Native remains 0/12 proven, its shifted PAR-10
+is 30.000 seconds, and the fixed cohort provides no end-to-end efficiency
+improvement evidence. E08 remains `OPEN`; P11 and P19 remain `PARTIAL`.
 
 ## 11. Sources
 

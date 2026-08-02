@@ -17,6 +17,7 @@
 #include "mipsolvers/engine/detail/bc_conformance_trace.hpp"
 #include "mipsolvers/engine/detail/bc_clique_table.hpp"
 #include "mipsolvers/engine/detail/bc_domain.hpp"
+#include "mipsolvers/engine/detail/bc_domain_probe.hpp"
 #include "mipsolvers/engine/detail/bc_env_options.hpp"
 #include "mipsolvers/engine/detail/bc_fallback.hpp"
 #include "mipsolvers/engine/detail/bc_legacy_helpers.hpp"
@@ -270,14 +271,21 @@ TEST_CASE("B&C: domain restore rolls back infeasible activity deltas",
   domain.init(lp, lb, ub);
   REQUIRE(domain.propagate());
   CHECK(domain.propagation_complete());
+  CHECK(domain.rows_processed() == 1);
 
   const detail::BCDomain::Savepoint sp = domain.savepoint();
+  CHECK(domain.trail_size() == sp.trail_size);
   REQUIRE(domain.fix_col(0, 1.0));
+  REQUIRE(domain.trail_size() == sp.trail_size + 1);
+  CHECK(domain.trail_entry(sp.trail_size).col == 0);
   CHECK_FALSE(domain.fix_col(1, 1.0));
   CHECK(domain.infeasible());
+  CHECK(domain.trail_size() == sp.trail_size + 2);
+  CHECK(domain.trail_entry(sp.trail_size + 1).col == 1);
 
   domain.restore(sp);
   CHECK_FALSE(domain.infeasible());
+  CHECK(domain.trail_size() == sp.trail_size);
   CHECK(domain.lb()[0] == Approx(0.0));
   CHECK(domain.lb()[1] == Approx(0.0));
   REQUIRE(domain.propagate());
@@ -286,6 +294,63 @@ TEST_CASE("B&C: domain restore rolls back infeasible activity deltas",
   REQUIRE(domain.fix_col(0, 1.0));
   REQUIRE(domain.propagate());
   CHECK(domain.ub()[1] == Approx(0.0));
+}
+
+TEST_CASE("B&C: domain probing exports and rolls back only trailed columns",
+          "[bc][domain][probing]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Zero(3);
+  lp.A.resize(1, 3);
+  lp.A.insert(0, 0) = 1.0;
+  lp.A.insert(0, 1) = 1.0;
+  lp.A.makeCompressed();
+  lp.b = Eigen::VectorXd::Ones(1);
+  lp.Aeq.resize(0, 3);
+  lp.beq.resize(0);
+  lp.vars = {{VarType::Binary, 0.0, 1.0},
+             {VarType::Binary, 0.0, 1.0},
+             {VarType::Binary, 0.0, 1.0}};
+
+  detail::CliqueTable clique_table;
+  REQUIRE(clique_table.add_literal_edges(
+              lp, {{{1, false}, {2, false}}}) == 1);
+
+  const Eigen::VectorXd lb = Eigen::VectorXd::Zero(3);
+  const Eigen::VectorXd ub = Eigen::VectorXd::Ones(3);
+  detail::BCDomainProbeWorkspace workspace(lp, lb, ub, &clique_table, 1e-9);
+  std::vector<detail::BCDomainProbeDelta> baseline;
+  REQUIRE(workspace.initialize(baseline) ==
+          detail::BCDomainProbeStatus::Feasible);
+  CHECK(baseline.empty());
+
+  const auto outcome = workspace.probe(0, true);
+  REQUIRE(outcome.status == detail::BCDomainProbeStatus::Feasible);
+  REQUIRE(outcome.deltas.size() == 3);
+  CHECK(outcome.deltas[0].col == 0);
+  CHECK(outcome.deltas[1].col == 1);
+  CHECK(outcome.deltas[2].col == 2);
+  CHECK(outcome.deltas[1].new_ub == Approx(0.0));
+  CHECK(outcome.deltas[2].new_lb == Approx(1.0));
+  CHECK(workspace.lb().isApprox(lb));
+  CHECK(workspace.ub().isApprox(ub));
+
+  const auto& telemetry = workspace.telemetry();
+  CHECK(telemetry.workspace_initializations == 1);
+  CHECK(telemetry.worlds == 1);
+  CHECK(telemetry.trail_pushes == 3);
+  CHECK(telemetry.changed_columns == 3);
+  CHECK(telemetry.rollbacks == 1);
+  CHECK(telemetry.failures == 0);
+  CHECK(telemetry.rows_processed > 0);
+
+  std::vector<detail::BCDomainProbeDelta> committed;
+  REQUIRE(workspace.commit(0, true, committed) ==
+          detail::BCDomainProbeStatus::Feasible);
+  CHECK(committed.size() == 3);
+  CHECK(workspace.lb()[0] == Approx(1.0));
+  CHECK(workspace.ub()[1] == Approx(0.0));
+  CHECK(workspace.lb()[2] == Approx(1.0));
 }
 
 TEST_CASE("B&C: compensated row activity survives catastrophic cancellation",

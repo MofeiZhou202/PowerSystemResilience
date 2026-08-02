@@ -1760,6 +1760,33 @@ TEST_CASE("MILP: production solve publishes queued-domain and COW telemetry",
   probe_mip.binary_idx = {0, 1, 2, 3, 4};
   const auto probe_result = solve_milp_bc(probe_mip, probe_opt);
   CHECK_FALSE(probe_result.stats.success);
+  CHECK(probe_result.bc_stats.root_domain_probe_workspace_initializations ==
+        1);
+  CHECK(probe_result.bc_stats.root_domain_probe_worlds > 1);
+  CHECK(probe_result.bc_stats.root_domain_probe_worlds ==
+        probe_result.bc_stats.root_domain_probe_rollbacks);
+  CHECK(probe_result.bc_stats.root_domain_probe_failures == 0);
+  CHECK(probe_result.bc_stats.root_domain_probe_trail_pushes >=
+        probe_result.bc_stats.root_domain_probe_worlds);
+  CHECK(probe_result.bc_stats.root_domain_probe_changed_columns <=
+        probe_result.bc_stats.root_domain_probe_trail_pushes);
+  CHECK(probe_result.bc_stats
+            .root_domain_probe_implication_export_columns_visited <=
+        probe_result.bc_stats.root_domain_probe_changed_columns);
+  CHECK(probe_result.bc_stats.root_domain_probe_rows_processed > 0);
+  CHECK(probe_result.bc_stats.root_lp_probe_bound_workspace_initializations ==
+        1);
+  CHECK(probe_result.bc_stats.root_lp_probe_bound_transactions > 1);
+  CHECK(probe_result.bc_stats.root_lp_probe_bound_transactions ==
+        probe_result.bc_stats.root_lp_probe_transaction_rollbacks);
+  CHECK(probe_result.bc_stats.root_lp_probe_transaction_failures == 0);
+  CHECK(probe_result.bc_stats.root_lp_probe_transaction_snapshot_values >=
+        3 * probe_result.bc_stats.root_lp_probe_bound_transactions);
+  CHECK(probe_result.bc_stats.root_lp_probe_backend_cold_solves >= 1);
+  CHECK(probe_result.bc_stats.root_lp_probe_backend_persistent_resolves >= 1);
+  CHECK(probe_result.bc_stats.root_lp_probe_backend_cold_solves +
+            probe_result.bc_stats.root_lp_probe_backend_persistent_resolves ==
+        probe_result.bc_stats.root_lp_probe_bound_transactions);
   CHECK(probe_result.bc_stats.strong_probe_bound_transactions > 0);
   CHECK(probe_result.bc_stats.strong_probe_bound_transactions ==
         probe_result.bc_stats.strong_probe_transaction_rollbacks);

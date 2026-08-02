@@ -1,6 +1,7 @@
 # Native MILP reliability branching: theory, contracts, and implementation plan
 
-Status: implementation and Phase F numerical evaluation complete, 2026-08-01.
+Status: implementation, Phase F evaluation, the D16 correctness re-audit, and
+the P13 root-probe transaction are recorded through 2026-08-02.
 This document records the design, implementation contracts, and experimental
 decisions. It does not claim that Native is already faster than HiGHS and does
 not authorize instance-specific tuning.
@@ -27,12 +28,14 @@ objective. The primary performance criterion is paired wall time; node count,
 LP solves, LP iterations, time to first incumbent, gap integral, and final gap
 are explanatory metrics.
 
-The fixed four-case diagnostic currently shows a useful but incomplete signal:
+An earlier fixed four-case branching diagnostic showed a useful but incomplete
+mechanism signal:
 the node geometric mean fell from 51.392 to 41.478, while `enlight_hard` used
 58 strong LP solves but recorded zero exact hits, zero warm hits, and zero
 strong-regret samples. This proves that branching behavior changed; it does not
-prove that the probe investment was used efficiently or that Native beats
-HiGHS.
+prove that the probe investment was used efficiently, that wall time improved,
+or that Native beats HiGHS. Section 19 records the newer post-correctness-fix
+solver comparison.
 
 ## 2. Branching model and exact directional gain
 
@@ -530,6 +533,14 @@ Phases A-E are complete:
 - Strong regret uses the same overlay scorer as selection. New mechanism
   telemetry records complete pairs, selected exact/unprobed outcomes, winner
   changes, unknown failures, probe iterations, and probe wall time.
+- The sequential current-node prober and the shared reliability helper used by
+  parallel search now materialize one active standard form per probing batch.
+  Each directional probe applies an exact `StandardFormBoundTransaction`, solves
+  against the active form, and rolls back only the touched bound, RHS, and
+  objective scalars. Per-direction standard-form copies have been removed.
+  Telemetry separates base materializations, transactions, snapshotted values,
+  rollbacks, failures, persistent resolves, and cold solves. This establishes a
+  structural copy reduction; it does not establish an end-to-end speedup.
 - Phase C centralizes exact/warm/incompatible probe reuse. Exact replacement
   requires the same closed domain, ordered local-row signature, model and
   objective epochs, and proof-bearing simplex evidence. Strictly tighter child
@@ -592,7 +603,7 @@ The repeated fixed-cohort command was:
 ./tests/miplib2017_benchmark \
   --data-dir tests/data/miplib2017/benchmark \
   --solu tests/data/miplib2017/miplib2017-v36.solu \
-  --instances 50v-10,enlight_hard,neos-3083819-nubu,wachplan \
+  --case 50v-10,enlight_hard,neos-3083819-nubu,wachplan \
   --solvers native-highs-lp --repeat 3 --time-limit 10 \
   --gap 1e-4 --max-nodes 50000 --seed 0 \
   --native-node-estimate sum
@@ -669,3 +680,212 @@ The final implementation was rebuilt through the `test_milp_solver`,
 The focused regression results were 192 assertions in 27 MILP cases, 15
 assertions in 4 branch-and-cut cases, and 99 assertions in 11 L2O cases. All
 passed, and `git diff --check` reported no whitespace errors.
+
+## 19. D16 correctness re-audit and frozen comparison, 2026-08-02
+
+### 19.1 Cross-node reason-lifetime defect
+
+SCIP's objective-37 solution for `enlight_hard` was used as an independent
+feasible witness. Before the repair, Native tightened column 13 from `[0,1]` to
+`[0,0]` at depth 4 under that witness. Source-tagged propagation replay located
+the violating artifact in `conflict_pool`. The pool contained globally visible
+unary claims including `x101 >= 2 infeasible`, `x105 <= 1 infeasible`, and
+`x167 <= 0 infeasible`, all contradicted by the feasible witness.
+
+The root cause was a lifetime mismatch. Row propagation computed a derived bound
+and its `DomainReasonBound`, but the normal configuration did not persist that
+reason with the child node. If a bound $b$ is valid only under antecedents $R$,
+the globally consumable implication is
+
+\[
+R \Longrightarrow b,
+\]
+
+not $b$ in isolation. Resolving a later conflict with a strict subset
+$R'\subset R$ is unsound unless $R'\Longrightarrow b$ is independently
+proved. The child analyzer had only the incomplete local frontier and could
+therefore turn a local conflict into an invalid global no-good.
+
+Node-domain closure now stores row and proof propagation reasons for the same
+lifetime as the bounds they justify. The optional diagnostic interface records
+`DomainPropagationSource`, events, and failures only when an audit caller
+requests them; the default production path does not allocate an event vector.
+The row-round contract was also corrected: `max_rounds=0` performs no linear-row
+round while retaining the separately budgeted conflict, clique, and implication
+closure.
+
+### 19.2 Failure evidence and post-repair witness checks
+
+The pre-repair 10-round run exhausted the search queue after 198 nodes. Because
+that run had excluded a known feasible objective-37 witness, the exhaustion is
+failure evidence, not a performance result. After the reason-lifetime repair:
+
+- three runs with the default three row rounds reached the time limit at
+  530, 539, and 537 nodes, with no invalid-conflict publication and no witness
+  violation;
+- a 10-round stress run reached 868 nodes and the time limit, rather than the
+  false 198-node exhaustion;
+- the focused parent/child regression requires conflict analysis to resolve an
+  inherited propagation reason back to the actual branch literal, without
+  excluding an independent feasible witness;
+- the zero-round regression requires the linear-row propagation budget to be
+  honored exactly.
+
+These checks close D16's specific proof-lifetime defect. Native still found no
+incumbent on `enlight_hard` in these witness runs, so the result is neither a
+general correctness proof nor evidence of improved efficiency.
+
+### 19.3 Frozen four-instance solver comparison
+
+The post-D16 report is
+`reports/miplib2017_audit_d16_reason_persistence_2026-08-02.{json,csv}`. Its
+immutable manifest records four instances, three repeats, one thread, seed zero,
+a 3-second backend limit, 2-second watchdog grace, relative gap `1e-4`, and
+Native reliability settings `probe_max=3`, directional reliability 2, and three
+row-propagation rounds. The current runner spelling is `--case`, not the removed
+`--instances` option.
+
+| Solver | Feasible | Proven | Mean fixed-horizon PDI | Shifted PAR-10 |
+|---|---:|---:|---:|---:|
+| Native B&C + HiGHS LP | 6/12 | 0/12 | 1.984450 s | 30.000 s |
+| HiGHS MIP 1.14.0 | 9/12 | 0/12 | 1.660431 s | 30.000 s |
+| SCIP MIP 9.0.0 | 9/12 | 3/12 | 1.205239 s | 12.144 s |
+
+The paired Native/HiGHS PDI ratio is 1.11159 with an instance-cluster bootstrap
+95% interval `[0.86347, 1.65066]`. The Native/SCIP PDI ratio is 6.30388 with
+interval `[0.92059, 255.46667]`; the Native/SCIP PAR-10 ratio is 11.22897. All
+36 event streams are available, all 95 primal events carry original-space
+vectors that pass the audit, and no call hit the hard watchdog.
+
+The manifest payload SHA-256 is
+`12dd95ba6a5875352e247d0f95b4cbe1e9695f0d387d9af6230a8447582ea79f`;
+the final JSON SHA-256 is
+`b829e6dc584c73e587e5bebcd10f4c9fe81ded32ba5bb3250a0b0e664630e2ff`.
+
+This cohort provides no evidence that Native's overall efficiency improved.
+The Native/HiGHS interval crosses one, Native proves no case, and SCIP is best on
+the reported proof count, mean PDI, and PAR-10. Four instances are also too few
+for a general ranking. P11 therefore remains `PARTIAL`, E08 remains `OPEN`, and
+the broader structural items E01, E02, and P21 remain unresolved.
+
+## 20. P13 root domain and LP probing transactions, 2026-08-02
+
+### 20.1 Scope correction
+
+The audit finding at
+`docs/native_milp_math_model_and_audit.tex:1546` is primarily about Phase 1
+root domain probing: after down and up propagation it repeated a down world and
+performed an unconditional `O(n)` implication-extraction scan. The earlier
+implementation removed the third world but left two complete `lb/ub` copies
+and two full-column scans per binary. Treating the separate Phase 2 root LP
+transaction as complete P13 closure was incorrect.
+
+P13 is now evaluated over both paths:
+
+- Phase 1 root domain probing owns sparse propagation, extraction, and rollback;
+- Phase 2 root LP probing owns bound/SF transactions and LP-state isolation.
+
+### 20.2 Root domain probing contract
+
+`BCDomainProbeWorkspace` is a separately testable state owner. It initializes
+one `BCDomain`, row activities, row-major views, changed-column stamps, and
+literal stamps. Every direction executes:
+
+1. save the trail and pending-row state;
+2. fix one binary literal;
+3. propagate only queued rows, then traverse clique neighbours of newly fixed
+   literals;
+4. collect unique columns from trail entries;
+5. return sparse old/new bound deltas;
+6. restore the savepoint and validate only the returned columns.
+
+A successful one-sided infeasibility fixing is committed to the same persistent
+domain; row and clique consequences are committed with it. Incomplete closure
+is not classified as infeasibility and increments a failure counter. There is
+no per-world `lb/ub` copy and no per-world scan of all columns.
+
+The direct component regression forces a row implication followed by a
+negative-literal clique implication. It requires exactly three returned
+columns, full rollback, matching telemetry, and a successful persistent commit.
+The production regression requires world/rollback equality, nonzero real trail
+and row work, zero failures, and implication-export visits no greater than
+changed columns.
+
+### 20.3 Root LP probing contract
+
+Phase 2 retains the separately implemented transaction:
+
+- one `lb/ub` workspace is initialized lazily;
+- down/up changes mutate and restore one scalar;
+- one synchronized standard form serves all simplex directions;
+- `StandardFormBoundTransaction` rolls back touched bound/RHS/objective
+  scalars;
+- the probe basis drops the node LP's mutable owner before establishing a
+  separate persistent owner;
+- one-sided infeasibility fixings use
+  `update_standard_form_bounds_incremental()`.
+
+These counters describe observed events. None is a synthetic
+"copies avoided" value.
+
+### 20.4 Regression evidence
+
+The final focused runs pass:
+
+- `test_branch_and_cut`: 342 assertions in 22 cases;
+- `test_milp_solver`: 2,029 assertions in 54 cases;
+- the `enlight_hard` production smoke: 204 worlds and rollbacks, 721 trail
+  pushes/changed/exported columns, 4,232 processed rows, 16 learned
+  implications, and zero failures;
+- the same smoke's root LP path: 100 transactions and rollbacks, one cold solve,
+  99 persistent resolves, and zero failures.
+
+This establishes execution, sparse extraction, state restoration, and
+accounting. It is not general MILP correctness or speed evidence.
+
+### 20.5 Repeated solver comparison
+
+The final report is
+`reports/miplib2017_audit_p13_root_domain_probe_transactions_2026-08-02.{json,csv}`.
+It uses four instances, three solvers, three repeats, one thread, seed zero, a
+3-second backend limit, a 2-second watchdog grace, and relative gap `1e-4`.
+
+Across the 12 Native runs, three execute Phase 1 root domain probing. They
+record 3 workspaces, 612 worlds and rollbacks, 2,163 trail pushes, 2,163 unique
+changed columns, 2,163 implication-export visits, 12,696 processed rows, 48
+learned implications, no committed fixing, and zero failures. On those same
+612 `enlight_hard` worlds, the removed unconditional `n=200` extraction loop
+would have visited 122,400 columns. This is direct structural-work evidence,
+not a wall-time attribution.
+
+Nine Native runs execute Phase 2 root LP probing: 9 workspaces serve 336
+directions; all 336 transactions roll back, none fails, and the backend records
+12 cold solves plus 324 persistent resolves.
+
+| Solver | Feasible | Proven | Mean fixed-horizon PDI | Shifted PAR-10 |
+|---|---:|---:|---:|---:|
+| Native B&C + HiGHS LP | 6/12 | 0/12 | 1.984103 s | 30.000 s |
+| HiGHS MIP 1.14.0 | 9/12 | 0/12 | 1.676066 s | 30.000 s |
+| SCIP MIP 9.0.0 | 9/12 | 3/12 | 1.211046 s | 12.197 s |
+
+Native/HiGHS has paired PDI ratio 1.10202 with 95% interval
+`[0.86820, 1.58648]`. Native/SCIP has PDI ratio 4.80789 with interval
+`[0.90924, 114.77761]` and PAR-10 ratio 8.61012. All 36 event streams are
+available, all 94 primal events pass original-space audit, three transient SCIP
+dual events are explicitly discarded, and no process hits the hard watchdog.
+
+The manifest payload SHA-256 is
+`c89122b537ae5900dbefcffae9f3833e7edb78eb9e76127aac49dd45e2ab1789`;
+the JSON SHA-256 is
+`c244bdc3e22a89180b9c53e973df9526dbf760103f1bb5954fc89a25dbc3a74e`;
+the CSV SHA-256 is
+`c9e7500bfafbb88aa2595719e69268246a745b2ada754f2ff372fb0ade49a27a`.
+The manifest records dirty source-state SHA-256
+`95819a55b2bdf3897ebfa3fb6f3da5004363959dab32a3e372c16bbadf929d54`,
+so this is not a clean-commit artifact.
+
+P13 is structurally closed for the audited root domain mechanism and the
+separate root LP copy mechanism. Native still proves 0/12, its PAR-10 is
+unchanged, and its mean PDI is effectively unchanged from the earlier report.
+There is no end-to-end efficiency improvement evidence. E08 remains `OPEN`;
+P11 and P19 remain `PARTIAL`.

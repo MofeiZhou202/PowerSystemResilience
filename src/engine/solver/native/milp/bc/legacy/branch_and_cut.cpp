@@ -61,6 +61,7 @@
 
 #include "mipsolvers/engine/detail/bc_types.hpp"
 #include "mipsolvers/engine/detail/bc_domain.hpp"
+#include "mipsolvers/engine/detail/bc_domain_probe.hpp"
 #include "mipsolvers/engine/detail/bc_env_options.hpp"
 #include "mipsolvers/engine/detail/bc_implied_bounds.hpp"
 #include "mipsolvers/engine/detail/bc_legacy_helpers.hpp"
@@ -1823,8 +1824,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     // [I] Root LP solver: "ipm" → IPX/HiPO at root (no basis).
     //     If highs_mip_root_crossover="on"  (default): crossover → simplex basis
     //       → dual simplex warm-starts at all sub-tree node LPs.
-    //     If highs_mip_root_crossover="off": pure IPM, no degenerate crossover;
-    //       fastest for large degenerate LPs (118-bus); no basis handoff.
+    //     If highs_mip_root_crossover="off": pure IPM, no crossover and no
+    //       root basis handoff. The net solve effect is instance-dependent.
     highs.setOptionValue("mip_lp_solver", opt.highs_mip_lp_solver);
     highs.setOptionValue("mip_ipm_solver", "choose");  // pick IPX vs HiPO automatically
     highs.setOptionValue("run_crossover", opt.highs_mip_root_crossover);
@@ -1888,8 +1889,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     if (!strict_highs_ok) {
       strict_highs_error = "pass_model_failed";
     } else {
-      // [K7] Improvement (7): inject per-variable branching priorities so
-      // HiGHS branches on high-priority UC commitment binaries first.
+      // StrictHiGHS policy: pass caller-provided branching priorities.
       if (!prob.branching_priority.empty() &&
           static_cast<int>(prob.branching_priority.size()) == orig_n) {
         std::vector<HighsInt> hp(prob.branching_priority.begin(),
@@ -1897,10 +1897,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         highs.hacdcpfSetColBranchingPriorities(
             static_cast<HighsInt>(hp.size()), hp.data());
       }
-      // [K6] Improvement (6): inject root cuts from a previous solve of
-      // the same problem.  Each cut row is in the original (pre-presolve)
-      // column space; HiGHS presolve processes them normally.  Tight cuts
-      // survive presolve and let HiGHS skip ~40s of root cut generation.
+      // StrictHiGHS policy: inject caller-provided root cuts from a previous
+      // solve. Each row is in original column space and is validated by the
+      // same model/presolve path as any other input row.
       if (opt.highs_root_cut_warm_start &&
           !opt.highs_root_cut_warm_start->empty()) {
         const auto& rc = *opt.highs_root_cut_warm_start;
@@ -1942,24 +1941,18 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
             highs.hacdcpfSetRootBasis(basis);
           }
         }
-        // Enable root separation rounds: static injected UC cuts (families
-        // A/G/C/V/R) do not provide Gomory/MIR tightening — on large UC
-        // instances (e.g. IEEE 118-bus, 54G×24T) the LP bound is stuck at
-        // 149,035 vs optimal 156,199 (4.7% gap) with 0 rounds.  HiGHS's
-        // dynamic Gomory/MIR rounds are needed to close this gap.  Allow 50
-        // rounds by default (matching options.hpp documented behaviour); use
-        // the explicitly specified value when non-zero.
+        // Keep upstream dynamic root separation available after injecting
+        // static cuts. Use the explicit caller cap when present, otherwise the
+        // wrapper policy value of 50 rounds.
         const int sepa_cap = (opt.highs_max_root_sepa_rounds > 0)
                              ? opt.highs_max_root_sepa_rounds : 50;
         highs.setOptionValue("hacdcpf_max_root_sepa_rounds",
                              static_cast<HighsInt>(sepa_cap));
         // When a warm incumbent will also be injected, suppress repeated
         // dive-loop RENS/RINS sub-MIPs so the budget goes to the search tree.
-        // Analytic centre: skip it for simplex root LP (computing AC from a
-        // vertex requires a fresh interior LP solve, ~10-15s on a 30K-row UC
-        // LP, eating into B&B budget).  For IPM root LP the solver already has
-        // an interior primal point, so hacdcpf reuses it as the analytic centre
-        // at zero extra cost — producing tighter Gomory/MIR cuts.
+        // Skip the separate analytic-centre request on a simplex root when a
+        // warm incumbent is already supplied. An IPM root may reuse its
+        // interior point through the upstream implementation.
         if (prob.initial_solution.size() > 0) {
           if (opt.highs_mip_lp_solver != "ipm") {
             highs.hacdcpfSetSkipAnalyticCenter(true);
@@ -3426,9 +3419,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 
   // Auto-tune crossover-skip threshold for UC-like problems.
   // UC (≥1000 binaries, ≥50% integer ratio) at 25k+ rows spends most root
-  // time in IPM→simplex push phase on a problem the rounding heuristic can
-  // solve in a few LPs anyway. Force IPM-only for such cases (e.g.
-  // uc_500g: 3.7s → <1s root LP).
+  // time in the IPM-to-simplex push phase. The shape gate selects IPM-only for
+  // these cases; it does not assert an end-to-end timing result.
   {
     int n_bin_total = 0;
     for (int j = 0; j < n; ++j) {
@@ -5031,11 +5023,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                short_budget_ipm_root ? 1 : 0);
   }
 
-  // Background analytic-centre thread.
-  // Spawn concurrently with the root LP solve so it overlaps with the root LP
-  // and cut rounds (typically 1–2s on SCUC-118).  Uses a zero-cost copy of
-  // root_lp; the interior-point solution without crossover approximates the
-  // analytic centre and is used by line-search rounding.
+  // Background analytic-centre thread. It owns a full LPModel copy so its
+  // zero-objective interior solve cannot race with root processing. The
+  // resulting interior point is used by line-search rounding.
   //
   // This is independent of the root LP algorithm.  HiGHS computes the analytic
   // centre in parallel with a simplex root and later consumes it through
@@ -5122,10 +5112,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     // Keep bc_stats.status in sync: callers reading BCResult::bc_stats.status
     // must not see an empty string on the root-relaxation failure path.
     out.bc_stats.status = out.stats.status;
-    // The presolved root LP can be genuinely harder for the native
-    // simplex than the original one (observed on 118-bus SCUC).  Retry the
-    // whole solve once without PaPILO presolve instead of entering the
-    // repair path with no usable root relaxation.  A root-stage time limit
+    // Retry once without PaPILO presolve instead of entering the repair path
+    // with no usable root relaxation. A root-stage time limit
     // also qualifies: with the budget reserve above it means the presolved
     // root exhausted its capped share, not the whole budget (a genuinely
     // expired limit leaves <= min_remaining and is filtered by the guard).
@@ -12341,10 +12329,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	        int xpool_resolve_iter_delta = -1;
 	        StandardFormLP accepted_unscaled_sf;
 	        bool accepted_unscaled_sf_valid = false;
-        // Fast path: when a basis hint is available, build SF directly and
-        // call solve_lp_from_sf — bypasses IPM (~30ms/round) and uses PATH A
-        // sparse warm-start with built-in basis extension for dimension
-        // mismatch (basis rows < SF rows after adding cut rows).
+        // When a basis hint is available, build SF directly and use the sparse
+        // warm-start path with built-in basis extension for a row-dimension
+        // mismatch after adding cuts.
         // The basis extension in solve_lp_from_sf handles the row shift when
         // cut rows are inserted before equality rows in the SF.
         const bool use_direct_sf_warm =
@@ -14028,8 +14015,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     effective_cut_rounds = 0;
   } else if (!highs_root_pipeline_active &&
              presolved_m > opt.cut_budget_very_large_row_threshold) {
-    // Very large (uc_500g m=34324): allow a few IPM-based cut rounds.
-    // IPM re-solve converges in ~30ms with warm-start vs ~10-25s simplex.
+    // Very large roots: allow only a few IPM-based cut rounds.
     effective_cut_rounds = std::min(opt.root_cut_rounds, 3);
     effective_cuts_per_round = std::min(opt.cuts_per_round, opt.cuts_per_round_very_large);
     opt.gmi_max_density = std::min(opt.gmi_max_density, 0.10);
@@ -14078,10 +14064,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     }
     // SCUC-like auto-tune: large binary fraction (>50%) + moderately sized root
     // LP + non-trivial fractional count.  The default filters (efficacy=1e-3,
-    // density=0.35) reject most Gomory cuts on these problems, causing the root
-    // to close ~0% of gap.  Relax the filters and grant more rounds so the
-    // incumbent heuristics start from a tighter LP.  Measured on SCUC IEEE-118
-    // 24t: gap at end of root drops from 1.24e-3 to well within gap_tol.
+    // density=0.35) reject many Gomory candidates on this model shape. Relax
+    // the filters and grant more rounds; the result remains subject to the
+    // ordinary validity, efficacy, density, stall, and deadline gates.
     if (is_scuc_like) {
       if (opt.gmi_min_efficacy > 1e-4)     opt.gmi_min_efficacy = 1e-4;
       if (opt.gmi_max_density  < 0.50)     opt.gmi_max_density  = 0.50;
@@ -14106,12 +14091,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       n >= opt.near_integral_n_threshold &&
       root_frac_bin_count <= opt.near_integral_max_frac_bins;
 
-  // Large UC-like detection: pump/repair/cuts all fail deterministically on
-  // tight-ramp UC. Measured on uc_200g (14400 vars, 4800 bins, 19264 rows):
-  //   cuts 1300ms → 0 cuts added (clique graph empty, MIR/cover rejected by
-  //   efficacy filters), pump 3600ms → 0 incumbents, prog-round 12500ms → 0
-  //   incumbents.  We hoist detection BEFORE root cut separation so we can
-  //   skip the 1.3s of fruitless scanning too.
+  // Large UC-like detection gates root work that has a bounded optional
+  // budget. Hoist the classification before separation so all optional
+  // components apply the same shape and deadline policy.
   int bc_skip_n_bin = 0;
   {
     for (int j = 0; j < n; ++j) {
@@ -14481,12 +14463,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         }
       }
 
-      // ── IPM re-solve path: when use_ipm_root is active, use IPM for the
-      // cut re-solve. This avoids the expensive StandardFormLP rebuild +
-      // column renumbering + simplex re-solve (~400ms per round on uc_100g).
-      // IPM warm-start from previous solution converges in ~14 iterations (~30ms).
-      // Trade-off: no simplex basis available after IPM → Gomory cuts only
-      // fire in round 1 (which has the crossover simplex basis).
+      // IPM re-solve path: when use_ipm_root is active, avoid rebuilding and
+      // renumbering a simplex standard form. Trade-off: the IPM result has no
+      // simplex basis, so tableau cuts require an earlier crossover basis.
       if (persistent_cut_resolved) {
         // State publication is deferred until the admission test below.
       } else if (root_cut_ipm) {
@@ -17206,11 +17185,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         }
       }
       // For large problems, use IPM-based repair (handles lb==ub fixed vars).
-      // For smaller problems, use simplex warm-start from root basis.
-      // Wall-time guard: an xlarge IPM repair can cost 6-10s on its own and
-      // starve B&C branching when the user supplies a short time_limit.
-      // Skip the IPM branch when we are already past 25% of the time budget;
-      // simplex repair still runs.
+      // For smaller problems, use a simplex warm-start from the root basis.
+      // The elapsed-time guard reserves the remaining budget for tree search;
+      // simplex repair remains available after the IPM branch is skipped.
       const double t_elapsed_pre_repair =
           std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
       const bool skip_ipm_repair_by_time =
@@ -17753,11 +17730,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         auto t_obj_pump0 = std::chrono::steady_clock::now();
         SimplexResult spx_res;
         bool tried_simplex = false;
-        // Only attempt simplex when:
-        //   (a) we have a warm basis to reuse;
-        //   (b) the LP is small enough that pivots are cheap. On large m
-        //       (>~25k rows), each primal-simplex pivot costs ~ms and we'd
-        //       rather pay the deterministic IPM price.
+        // Attempt simplex only with a reusable basis and below the row-count
+        // policy boundary; otherwise use the separately budgeted IPM path.
         const bool simplex_pump_enabled =
             (hint_raw != nullptr) && (pump_sf.A.rows() < 25000);
         if (simplex_pump_enabled) {
@@ -17835,9 +17809,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       // Last-chance feasibility: take the best (min-fractional) pump iterate,
       // round all integers, fix them, and solve the resulting LP. If feasible,
       // we have an incumbent even if the pump itself didn't converge.
-      // Skip on large UC-like problems: measured to fail 100% of the time
-      // (rounding a 4800-binary schedule violates ramp/power-balance rows)
-      // while costing 0.5–0.8s.
+      // Skip on the large UC-like policy branch, where fixing every integer at
+      // once conflicts with the intended bounded heuristic budget.
       if (!has_incumbent && !pump_large_uc_like &&
           best_n_frac < std::numeric_limits<int>::max() &&
           best_x_rounded.size() == n) {
@@ -18236,8 +18209,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   // each batch.
   //
   // Two-phase strategy:
-  //   Phase 1 (IPM): Use IPM with warm-start for fast LP re-solves (~20ms
-  //     each vs ~100ms with simplex). Tries fix-all-first before batches.
+  //   Phase 1 (IPM): use IPM with warm-start and try fix-all before batches.
   //   Phase 2 (Simplex fallback): If IPM fails, uses a simplex warm start.
   // ════════════════════════════════════════════════════════════════════════
 	  // Always run prog-round when the incumbent gap is proof-relevant.
@@ -18259,12 +18231,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	  // incumbent/root-bound gap is still proof-relevant; the generic guards
 	  // below (gap, root size, basis availability, and time budget) decide
 	  // whether this path is worth spending.
-  // SCUC-like shortcut: prog-round typically spends 2+ seconds for ~1% gap
-  // reduction while LNS closes the full gap in ~300ms by solving a
-  // restricted sub-MIP.  Skip prog-round for SCUC-like problems when we
-  // already have a pump/heuristic incumbent — LNS downstream will do the
-  // polishing much faster.  Measured on scuc_ieee118_24t: prog 2923ms → 0ms,
-  // LNS still reaches the same 2165004.98 optimum.
+  // SCUC-like policy: when an incumbent already exists and LNS is enabled,
+  // reserve the remaining optional heuristic budget for the restricted
+  // sub-MIP rather than running progressive rounding first.
   if (need_prog_round && is_scuc_like && has_incumbent && opt.enable_lns) {
     if (opt.verbose) {
       fprintf(stderr, "[B&C] skip prog-round (SCUC-like, has_incumbent, LNS enabled)\n");
@@ -18641,11 +18610,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         // min-up/min-down time and other structural implications to fix
         // additional integer variables for free (no LP solve needed).
 
-        // Scale down LP budget for larger problems where each LP is expensive.
-        // presolved_m ≤ 10000: ~6-50ms/LP → generous budget
-        // presolved_m > 10000: ~200-400ms/LP → moderate budget
-        // presolved_m > 20000: ~400-1000ms/LP → controlled budget
-        // For parallel mode, halve the budget — tree threads find incumbents too.
+        // Scale down the LP-count budget as row count grows. In parallel mode,
+        // reserve half of this optional budget for the tree workers.
         int max_prog_lps = (presolved_m > 20000) ? std::min(40, std::max(10, n_frac))
             : (presolved_m > 10000) ? std::min(50, std::max(15, n_frac))
             : std::min(200, std::max(40, n_frac * 2));
@@ -18993,18 +18959,13 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   }
 
   // ════════════════════════════════════════════════════════════════════════
-  // IPM-based Progressive Rounding: for very large problems without a
-  // simplex basis (xlarge IPM-only mode skips crossover).  Key insight:
-  // near-integer variables (10800 of 12000 for uc_500g) must NOT be passed
-  // as lb=ub to IPM — that creates a near-singular KKT system.  Instead,
-  // propagation uses full fixings (for implication chains) while IPM sees
-  // only batch-fixed + propagation-implied-fixed variables.
+  // IPM-based progressive rounding for large problems without a simplex
+  // basis. Near-integer variables are not all passed as lb=ub because mass
+  // fixing can make the KKT system ill-conditioned. Propagation sees full
+  // fixings; IPM sees only batch and propagation-implied fixings.
   // ════════════════════════════════════════════════════════════════════════
-  // Wall-time guard: IPM subsolves on xlarge problems cost ~1s each.  To
-  // preserve time for B&C branching (which *can* make progress without an
-  // incumbent) cap the whole IPM-heuristic block to a fraction of the
-  // user-supplied time_limit_sec and skip entirely when we are already
-  // behind on the budget.
+  // Cap this optional block to a fraction of the user time limit so it cannot
+  // consume the budget reserved for branch-and-bound.
   const double t_elapsed_before_prog_ipm =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   const double prog_ipm_wall_budget =
@@ -19013,8 +18974,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       (t_elapsed_before_prog_ipm > 0.40 * opt.time_limit_sec);
   if (need_prog_round && presolved_m > 5000 && !root.basis_hint &&
       !skip_prog_ipm_by_time) {
-    // Dedicated IPM with moderate iteration budget.  Infeasible sub-problems
-    // fail in ~500ms at 80 iters.  Feasible solves converge in 15-30 iters.
+    // Dedicated IPM with a fixed iteration and wall-time budget.
     std::unique_ptr<NativeIPMLPAdapter> prog_round_ipm_adapter;
     {
       IPMLPOptions pr_opt;
@@ -19254,17 +19214,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 
         // IPM LP solver — uses solve_lb/ub (no near-integer fixings).
         int prog_ipm_lp_count = 0;
-        // Budget: each IPM LP costs ~80-350ms depending on size.
-        // Scale budget with problem size to give larger problems more room:
-        // presolved_m ≤ 15000: ~80ms/LP → budget=30 (~2.5s)
-        // presolved_m ≤ 25000: ~150ms/LP → budget=25 (~3.5s)
-        // presolved_m > 25000: ~350ms/LP → budget=20 (~7s)
+        // Scale the LP-count budget down as row count grows.
         const int max_prog_ipm_lps = (presolved_m > 25000) ? 20
             : (presolved_m > 15000) ? 25 : 30;
-        // Cumulative wall-time budget for the IPM prog-round block.  Each
-        // IPM solve on xlarge is empirically ~700-1500ms rather than the
-        // ~350ms expected — without a wall clock cap the block can burn
-        // the entire time_limit and starve B&C branching.
+        // A cumulative wall-time cap prevents this optional block from
+        // starving branch-and-bound regardless of per-LP runtime.
         const auto t_prog_ipm_block_start = std::chrono::steady_clock::now();
         auto prog_ipm_time_ok = [&]() {
           return std::chrono::duration<double>(
@@ -19398,17 +19352,13 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 
   [[maybe_unused]] auto t_prog_done = std::chrono::steady_clock::now();
 
-  // Finds good incumbents much faster than simple rounding by following
-  // the LP relaxation surface downward.
+  // LP diving heuristic: follow the relaxation through successive bound
+  // fixings and warm re-solves.
   // ════════════════════════════════════════════════════════════════════════
   {  // LP Diving Heuristic scope
     SimplexOptions dive_opt;
     dive_opt.lp_kernel_backend = opt.lp_kernel_backend;
-    // Aggressive cap: successful warm dive re-solves need 30-450 iterations;
-    // a conflicting bound fix burns the whole cap before failing, so the cap
-    // is the per-failure price and 1000 lets two failures eat most of a
-    // large-root dive budget. 400 keeps every observed success and makes
-    // failed fixes ~2.5x cheaper to detect.
+    // A fixed iteration cap bounds the cost of a conflicting dive fixing.
     dive_opt.max_iter = 400;
     dive_opt.allow_cold_start = false;  // Prevents expensive cold start fallback.
     dive_opt.feasibility_tol = std::max(1e-10, opt.lp_tol * 0.1);
@@ -19423,10 +19373,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     // Budget: at most max_dive_lps LP solves or time budget.
     // Skip diving entirely if warm-start already provided a feasible incumbent.
     // Time is measured from dive start so root LP time doesn't eat the budget.
-    // Use dual simplex for dive LPs — even cold-start simplex is faster than
-    // IPM for re-solves because subsequent LPs warm-start from the previous basis.
-    // Key insight: HiGHS/Gurobi solve uc_200g in 3s using dual simplex re-solves
-    // (~0.5-2ms each) vs our IPM at ~111ms each.
+    // Use dual simplex so each accepted dive step can warm-start the next
+    // same-structure re-solve from the preceding basis.
     const int m_dive = static_cast<int>(base_lp.A.rows() + base_lp.Aeq.rows());
     const bool large_dive = m_dive > 5000;
     const bool xlarge_dive = m_dive > 10000;
@@ -19438,10 +19386,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         root_gap_closed() || root_incumbent_good_enough();
     // Low-fractionality rescue: on a large root whose LP relaxation is
     // almost integral and with no incumbent at all, warm bound-fix re-solves
-    // are cheap (measured 6-562 dual iterations on 118-bus SCUC after the
-    // BFRT exact-cover fixes) and diving is the only primal source left —
-    // the size-based skips below were tuned when the native kernel could
-    // not solve these LPs and would otherwise leave the row incumbent-free.
+    // can reuse the root basis, and diving may be the only remaining primal
+    // source. This exception is still bounded by the normal dive limits.
     const bool dive_low_frac_rescue =
         large_generic_low_frac_root && !has_incumbent;
 	    const int max_dive_lps =
@@ -19739,8 +19685,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       }
 
       // Try fixing the best remaining candidate.
-      // For large problems, try more candidates before giving up (each IPM LP
-      // is ~100ms, trying 10 vs 5 only costs ~500ms more if all fail).
+      // For large problems, allow more candidate fixings before giving up,
+      // subject to the shared dive budget.
       bool step_ok = false;
       const int max_attempts = xlarge_dive
           ? std::min(3, static_cast<int>(frac_vars.size()))
@@ -19776,7 +19722,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         ++dive_lp_count;
         bool dive_lp_ok = false;
         double dive_lp_obj = 0.0;
-        // Prefer dual simplex for dive LPs: ~1-5ms warm-started vs ~111ms IPM.
+        // Prefer dual simplex so accepted steps retain a reusable basis.
         {
           update_standard_form_bounds(dive_sf, base_lp, dive_lb, dive_ub);
           apply_dive_solve_budget();
@@ -19804,9 +19750,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
               step_ok = true;
             }
           } else if (presolved_m <= 5000) {
-            // IPM fallback only for small-medium problems.
-            // For large problems (m>5000), IPM takes ~100ms+ per dive LP failure,
-            // and the dive rarely finds incumbents. Skip to save time.
+            // Keep the IPM fallback below its row-count policy boundary and
+            // within the shared dive budget.
             if (auto* dive_ipm = ensure_root_heur_ipm()) {
               auto dive_ipm_res = dive_ipm->solve_node_lp(base_lp, dive_lb, dive_ub, dive_x);
               bool ipm_usable = dive_ipm_res.stats.success ||
@@ -19920,8 +19865,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         }
         if (!flipped) {
           ++dive_fail_count;
-          // For very large problems, abort on first failure — dives rarely
-          // find incumbents and each failure wastes ~150ms+.
+          // For very large problems, abort on the first failed fixing so the
+          // optional dive cannot consume the tree budget.
           if (xlarge_dive || dive_fail_count >= 2) {
             dive_failed = true;
             break;
@@ -20408,8 +20353,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                   return a.confidence > b.confidence;
                 });
 
-      // Use a higher fix ratio on very large problems to restrict
-      // the search space to find incumbents faster.
+      // Use a higher fix ratio on very large problems to make the restricted
+      // neighborhood smaller.
       const double effective_lns_fix_ratio = (presolved_m > opt.xlarge_ipm_only_threshold)
           ? std::max(opt.lns_fix_ratio, 0.92)
           : opt.lns_fix_ratio;
@@ -22280,6 +22225,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       !bc_optional_root_budget_expired())
   {
     int fixed_by_probe = 0;
+    bool root_domain_probe_changed_root = false;
 
     // Phase 1: Domain propagation probing — probe ALL unfixed binaries.
     // Each probe: fix variable → run bound propagation → check infeasibility.
@@ -22296,83 +22242,162 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       return c;
     }();
     if (!has_incumbent && n_unfixed_bins <= 1000) {
-      // Compute row-major matrices only when actually needed for domain propagation.
-      const Eigen::SparseMatrix<double, Eigen::RowMajor> probe_A_row = base_lp.A;
-      const Eigen::SparseMatrix<double, Eigen::RowMajor> probe_Aeq_row = base_lp.Aeq;
 	      auto t_dp_start = std::chrono::steady_clock::now();
 	      int dp_fixed = 0;
 	      int dp_count = 0;
 	      std::uint64_t dp_conflict_sources = 0;
 	      std::uint64_t dp_implication_sources = 0;
-	      Eigen::VectorXd plb(n), pub(n);  // Reusable scratch buffers.
-      for (int j = 0; j < n; ++j) {
-        if (!is_integer_type(base_lp.vars[j])) continue;
-        if (std::abs(root.ub[j] - root.lb[j]) < 1e-9) continue;
-        if (root.lb[j] != 0.0 || root.ub[j] != 1.0) continue;
 
-        // Probe down: x[j] = 0.
-        plb = root.lb; pub = root.ub;
-        pub[j] = 0.0;
-        node_bound_propagation(base_lp, probe_A_row, probe_Aeq_row, plb, pub, opt.bound_propagation_rounds);
-        if (!clique_table.empty()) clique_table.propagate(plb, pub);
+	      using ::mipsolvers::engine::detail::BCDomainProbeDelta;
+	      using ::mipsolvers::engine::detail::BCDomainProbeOutcome;
+	      using ::mipsolvers::engine::detail::BCDomainProbeStatus;
+	      using ::mipsolvers::engine::detail::BCDomainProbeWorkspace;
+
+	      BCDomainProbeWorkspace probe_domain(
+	          base_lp, root.lb, root.ub,
+	          clique_table.empty() ? nullptr : &clique_table, opt.int_tol);
+
+	      auto commit_probe_domain_deltas =
+	          [&](const std::vector<BCDomainProbeDelta>& deltas) {
+	        for (const auto& delta : deltas) {
+	          if (delta.col < 0 || delta.col >= n) continue;
+	          if (delta.new_lb > root.lb[delta.col] +
+	                                 bound_improvement_tolerance(
+	                                     1e-9, root.lb[delta.col],
+	                                     delta.new_lb)) {
+	            root.lb[delta.col] = delta.new_lb;
+	            ++out.bc_stats.root_domain_probe_committed_bound_changes;
+	            root_domain_probe_changed_root = true;
+	          }
+	          if (delta.new_ub < root.ub[delta.col] -
+	                                 bound_improvement_tolerance(
+	                                     1e-9, root.ub[delta.col],
+	                                     delta.new_ub)) {
+	            root.ub[delta.col] = delta.new_ub;
+	            ++out.bc_stats.root_domain_probe_committed_bound_changes;
+	            root_domain_probe_changed_root = true;
+	          }
+	        }
+	      };
+
+	      std::vector<BCDomainProbeDelta> baseline_deltas;
+	      const BCDomainProbeStatus baseline_status =
+	          probe_domain.initialize(baseline_deltas);
+	      bool probe_domain_ready =
+	          baseline_status == BCDomainProbeStatus::Feasible;
+	      if (probe_domain_ready) {
+	        commit_probe_domain_deltas(baseline_deltas);
+	      }
+
+	      auto learn_probe_implications =
+	          [&](int trigger_col, bool trigger_value_one,
+	              const std::vector<BCDomainProbeDelta>& deltas) {
+	        out.bc_stats.root_domain_probe_implication_export_columns_visited +=
+	            static_cast<std::uint64_t>(deltas.size());
+	        for (const auto& delta : deltas) {
+	          const int implied_col = delta.col;
+	          if (implied_col < 0 || implied_col >= n ||
+	              implied_col == trigger_col) {
+	            continue;
+	          }
+	          if (delta.new_lb > root.lb[implied_col] + 1e-9 &&
+	              implication_graph.add_implication(
+	                  trigger_col, trigger_value_one, implied_col, true,
+	                  delta.new_lb)) {
+	            ++dp_implication_sources;
+	            ++out.bc_stats.root_domain_probe_implications_learned;
+	          }
+	          if (delta.new_ub < root.ub[implied_col] - 1e-9 &&
+	              implication_graph.add_implication(
+	                  trigger_col, trigger_value_one, implied_col, false,
+	                  delta.new_ub)) {
+	            ++dp_implication_sources;
+	            ++out.bc_stats.root_domain_probe_implications_learned;
+	          }
+	        }
+	      };
+
+	      auto commit_probe_fixing = [&](int col, bool value_one) {
+	        std::vector<BCDomainProbeDelta> committed_deltas;
+	        const BCDomainProbeStatus status =
+	            probe_domain.commit(col, value_one, committed_deltas);
+	        if (status == BCDomainProbeStatus::Feasible) {
+	          commit_probe_domain_deltas(committed_deltas);
+	        }
+	        return status;
+	      };
+
+	      for (int j = 0; j < n; ++j) {
+	        if (!probe_domain_ready) break;
+	        if (!is_integer_type(base_lp.vars[j])) continue;
+	        if (std::abs(root.ub[j] - root.lb[j]) < 1e-9) continue;
+	        if (root.lb[j] != 0.0 || root.ub[j] != 1.0) continue;
+
+	        const BCDomainProbeOutcome down =
+	            probe_domain.probe(j, /*value_one=*/false);
 	        ++dp_count;
-	        if (!bounds_consistent(plb, pub)) {
-	          root.lb[j] = 1.0;  // x[j]=0 infeasible → fix to 1.
+	        if (down.status == BCDomainProbeStatus::Infeasible) {
 	          if (add_global_conflict(
 	                  {BranchDomainLiteral{j, 0.0, false}},
 	                  "root_domain_probe_down")) {
 	            ++dp_conflict_sources;
 	          }
-	          ++dp_fixed;
+	          const BCDomainProbeStatus commit_status =
+	              commit_probe_fixing(j, /*value_one=*/true);
+	          if (commit_status == BCDomainProbeStatus::Feasible) {
+	            ++dp_fixed;
+	          } else if (commit_status == BCDomainProbeStatus::Infeasible) {
+	            root.lb[j] = 1.0;
+	            root.ub[j] = 0.0;
+	            root_domain_probe_changed_root = true;
+	            probe_domain_ready = false;
+	          }
 	          continue;
 	        }
-	        for (int k = 0; k < n; ++k) {
-	          if (k == j) continue;
-	          if (plb[k] > root.lb[k] + 1e-9) {
-	            if (implication_graph.add_implication(j, false, k, true,
-	                                                  plb[k])) {
-	              ++dp_implication_sources;
-	            }
-	          }
-	          if (pub[k] < root.ub[k] - 1e-9) {
-	            if (implication_graph.add_implication(j, false, k, false,
-	                                                  pub[k])) {
-	              ++dp_implication_sources;
-	            }
-	          }
-	        }
+	        if (down.status == BCDomainProbeStatus::Incomplete) continue;
+	        learn_probe_implications(j, /*trigger_value_one=*/false, down.deltas);
 
-        // Probe up: x[j] = 1.
-        plb = root.lb; pub = root.ub;
-        plb[j] = 1.0;
-        node_bound_propagation(base_lp, probe_A_row, probe_Aeq_row, plb, pub, opt.bound_propagation_rounds);
-        if (!clique_table.empty()) clique_table.propagate(plb, pub);
+	        const BCDomainProbeOutcome up =
+	            probe_domain.probe(j, /*value_one=*/true);
 	        ++dp_count;
-	        if (!bounds_consistent(plb, pub)) {
-	          root.ub[j] = 0.0;  // x[j]=1 infeasible → fix to 0.
+	        if (up.status == BCDomainProbeStatus::Infeasible) {
 	          if (add_global_conflict(
 	                  {BranchDomainLiteral{j, 1.0, true}},
 	                  "root_domain_probe_up")) {
 	            ++dp_conflict_sources;
 	          }
-	          ++dp_fixed;
+	          const BCDomainProbeStatus commit_status =
+	              commit_probe_fixing(j, /*value_one=*/false);
+	          if (commit_status == BCDomainProbeStatus::Feasible) {
+	            ++dp_fixed;
+	          } else if (commit_status == BCDomainProbeStatus::Infeasible) {
+	            root.lb[j] = 1.0;
+	            root.ub[j] = 0.0;
+	            root_domain_probe_changed_root = true;
+	            probe_domain_ready = false;
+	          }
 	          continue;
 	        }
-
-	        for (int k = 0; k < n; ++k) {
-	          if (k == j) continue;
-	          if (plb[k] > root.lb[k] + 1e-9) {
-	            if (implication_graph.add_implication(j, true, k, true, plb[k])) {
-	              ++dp_implication_sources;
-	            }
-	          }
-	          if (pub[k] < root.ub[k] - 1e-9) {
-	            if (implication_graph.add_implication(j, true, k, false, pub[k])) {
-	              ++dp_implication_sources;
-	            }
-	          }
+	        if (up.status == BCDomainProbeStatus::Feasible) {
+	          learn_probe_implications(j, /*trigger_value_one=*/true, up.deltas);
 	        }
 	      }
+
+	      const auto& domain_probe_telemetry = probe_domain.telemetry();
+	      out.bc_stats.root_domain_probe_workspace_initializations +=
+	          domain_probe_telemetry.workspace_initializations;
+	      out.bc_stats.root_domain_probe_worlds +=
+	          domain_probe_telemetry.worlds;
+	      out.bc_stats.root_domain_probe_trail_pushes +=
+	          domain_probe_telemetry.trail_pushes;
+	      out.bc_stats.root_domain_probe_rollbacks +=
+	          domain_probe_telemetry.rollbacks;
+	      out.bc_stats.root_domain_probe_failures +=
+	          domain_probe_telemetry.failures;
+	      out.bc_stats.root_domain_probe_rows_processed +=
+	          domain_probe_telemetry.rows_processed;
+	      out.bc_stats.root_domain_probe_changed_columns +=
+	          domain_probe_telemetry.changed_columns;
 	      if (dp_conflict_sources > 0 || dp_implication_sources > 0) {
 	        note_global_domain_learning(dp_conflict_sources +
 	                                    dp_implication_sources);
@@ -23080,11 +23105,70 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           static_cast<std::uint64_t>(probe_cands.size());
     }
 
-    const double probe_base_bound = root.bound;
-    double best_split_bound = root.bound;
-    int best_split_var = -1;
-    for (int idx = 0; idx < static_cast<int>(probe_cands.size()) &&
-                      probed < effective_max_probe_vars; ++idx) {
+	    const double probe_base_bound = root.bound;
+	    double best_split_bound = root.bound;
+	    int best_split_var = -1;
+	    std::optional<Eigen::VectorXd> root_probe_lb_workspace;
+	    std::optional<Eigen::VectorXd> root_probe_ub_workspace;
+	    std::optional<SimplexBasis> root_probe_basis;
+	    bool root_probe_sf_synced = false;
+	    SimplexOptions root_probe_simplex_opt = probe_opt;
+	    root_probe_simplex_opt.allow_persistent_lp_state = true;
+	    auto ensure_root_probe_bound_workspace = [&]() {
+	      if (!root_probe_lb_workspace.has_value()) {
+	        root_probe_lb_workspace.emplace(root.lb);
+	        root_probe_ub_workspace.emplace(root.ub);
+	        ++out.bc_stats.root_lp_probe_bound_workspace_initializations;
+	      }
+	    };
+	    auto ensure_root_probe_sf = [&]() -> StandardFormLP& {
+	      StandardFormLP& sf = ensure_probe_sf();
+	      if (!root_probe_sf_synced) {
+	        update_standard_form_bounds(sf, base_lp, root.lb, root.ub);
+	        root_probe_sf_synced = true;
+	      }
+	      return sf;
+	    };
+	    auto root_probe_basis_hint = [&]() -> const SimplexBasis* {
+	      if (root_probe_basis.has_value()) return &*root_probe_basis;
+	      if (!root.basis_hint) return nullptr;
+	      root_probe_basis.emplace(*root.basis_hint);
+	      // The node LP owner is mutable. A probe must establish its own owner
+	      // before persistent resolves can be used across probe directions.
+	      root_probe_basis->cached_sparse_basis.reset();
+	      root_probe_basis->persist_eta_count = 0;
+	      return &*root_probe_basis;
+	    };
+	    auto invalidate_root_probe_sf = [&]() {
+	      probe_sf_ptr.reset();
+	      root_probe_sf_synced = false;
+	      root_probe_basis.reset();
+	    };
+	    auto commit_root_probe_bound = [&](int column, bool is_lb,
+	                                       double new_value) {
+	      const double old_value = is_lb ? root.lb[column] : root.ub[column];
+	      if (is_lb) {
+	        root.lb[column] = new_value;
+	      } else {
+	        root.ub[column] = new_value;
+	      }
+	      if (root_probe_lb_workspace.has_value()) {
+	        if (is_lb) {
+	          (*root_probe_lb_workspace)[column] = new_value;
+	        } else {
+	          (*root_probe_ub_workspace)[column] = new_value;
+	        }
+	      }
+	      if (!root_probe_sf_synced) return;
+	      const std::vector<BoundChangeInfo> committed_change{
+	          {column, 0.0, is_lb, old_value, new_value}};
+	      if (!update_standard_form_bounds_incremental(
+	              *probe_sf_ptr, base_lp, committed_change)) {
+	        invalidate_root_probe_sf();
+	      }
+	    };
+	    for (int idx = 0; idx < static_cast<int>(probe_cands.size()) &&
+	                      probed < effective_max_probe_vars; ++idx) {
       if (bc_optional_root_budget_expired()) break;
       const int j = probe_cands[idx];
       const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_probe_start).count();
@@ -23105,89 +23189,111 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         solver.set_solve_time_limit(std::max(
             0.001, remaining /
                        std::max(1, ipm_probe_directions_remaining)));
-        --ipm_probe_directions_remaining;
-        return true;
-      };
-      {
-        Eigen::VectorXd plb = root.lb, pub = root.ub;
-        pub[j] = 0.0;
-        if (auto* pipm = ensure_root_heur_ipm()) {
-          if (prepare_root_probe_ipm_solve(*pipm)) {
-            ++out.bc_stats.lp_solves;
-            auto res = pipm->solve_node_lp(base_lp, plb, pub, root.x_relax);
-            const std::string& status = res.stats.status;
-            const bool status_infeasible =
-                status.find("Infeasible") != std::string::npos ||
-                status.find("infeasible") != std::string::npos;
-            if (res.stats.success && res.x.size() == n &&
-                std::isfinite(res.stats.objective)) {
-              down_success = true;
-              down_bound = res.stats.objective;
-            } else if (res.stats.has_farkas_certificate || status_infeasible) {
-              down_proved_infeas = true;
-            }
-          }
-        } else {
-          ++out.bc_stats.lp_solves;
-          update_standard_form_bounds(ensure_probe_sf(), base_lp, plb, pub);
-          auto res = solve_lp_from_sf(ensure_probe_sf(), probe_opt, root.basis_hint.get());
-          const auto type = classify_lp_result(res, n);
-          if (type == LPFailureType::Success &&
-              std::isfinite(res.result.stats.objective)) {
-            down_success = true;
-            down_bound = res.result.stats.objective;
-          } else if (type == LPFailureType::Infeasible) {
-            down_proved_infeas = true;
-          }
-        }
-      }
+	        --ipm_probe_directions_remaining;
+	        return true;
+	      };
+	      auto run_root_probe_direction =
+	          [&](bool is_up, bool& success, bool& proved_infeas,
+	              double& direction_bound) {
+	            ensure_root_probe_bound_workspace();
+	            Eigen::VectorXd& plb = *root_probe_lb_workspace;
+	            Eigen::VectorXd& pub = *root_probe_ub_workspace;
+	            const double old_value = is_up ? plb[j] : pub[j];
+	            const double new_value = is_up ? 1.0 : 0.0;
+	            if (is_up) {
+	              plb[j] = new_value;
+	            } else {
+	              pub[j] = new_value;
+	            }
+	            auto restore_workspace_scalar = [&]() {
+	              if (is_up) {
+	                plb[j] = old_value;
+	              } else {
+	                pub[j] = old_value;
+	              }
+	            };
+
+	            if (auto* pipm = ensure_root_heur_ipm()) {
+	              if (prepare_root_probe_ipm_solve(*pipm)) {
+	                ++out.bc_stats.lp_solves;
+	                auto res =
+	                    pipm->solve_node_lp(base_lp, plb, pub, root.x_relax);
+	                const std::string& status = res.stats.status;
+	                const bool status_infeasible =
+	                    status.find("Infeasible") != std::string::npos ||
+	                    status.find("infeasible") != std::string::npos;
+	                if (res.stats.success && res.x.size() == n &&
+	                    std::isfinite(res.stats.objective)) {
+	                  success = true;
+	                  direction_bound = res.stats.objective;
+	                } else if (res.stats.has_farkas_certificate ||
+	                           status_infeasible) {
+	                  proved_infeas = true;
+	                }
+	              }
+	              restore_workspace_scalar();
+	              return;
+	            }
+
+	            StandardFormLP& sf = ensure_root_probe_sf();
+	            const std::vector<BoundChangeInfo> direction_change{
+	                {j, 0.0, is_up, old_value, new_value}};
+	            StandardFormBoundTransaction transaction(sf);
+	            if (!transaction.apply(base_lp, direction_change)) {
+	              ++out.bc_stats.root_lp_probe_transaction_failures;
+	              restore_workspace_scalar();
+	              invalidate_root_probe_sf();
+	              return;
+	            }
+	            ++out.bc_stats.root_lp_probe_bound_transactions;
+	            out.bc_stats.root_lp_probe_transaction_snapshot_values +=
+	                transaction.snapshot_value_count();
+	            ++out.bc_stats.lp_solves;
+	            auto res = solve_lp_from_sf(sf, root_probe_simplex_opt,
+	                                        root_probe_basis_hint());
+	            if (res.result.stats.solver_name ==
+	                "VendoredHighsPersistentLpKernel") {
+	              ++out.bc_stats.root_lp_probe_backend_persistent_resolves;
+	            } else {
+	              ++out.bc_stats.root_lp_probe_backend_cold_solves;
+	            }
+	            if (res.basis.cached_sparse_basis) {
+	              root_probe_basis = res.basis;
+	            }
+	            const auto type = classify_lp_result(res, n);
+	            if (type == LPFailureType::Success &&
+	                std::isfinite(res.result.stats.objective)) {
+	              success = true;
+	              direction_bound = res.result.stats.objective;
+	            } else if (type == LPFailureType::Infeasible) {
+	              proved_infeas = true;
+	            }
+	            if (transaction.rollback()) {
+	              ++out.bc_stats.root_lp_probe_transaction_rollbacks;
+	            } else {
+	              ++out.bc_stats.root_lp_probe_transaction_failures;
+	              invalidate_root_probe_sf();
+	            }
+	            restore_workspace_scalar();
+	          };
+	      run_root_probe_direction(/*is_up=*/false, down_success,
+	                               down_proved_infeas, down_bound);
 
       bool up_success = false;
       bool up_proved_infeas = false;
       double up_bound = root.bound;
       if (bc_optional_root_budget_expired()) break;
-      {
-        Eigen::VectorXd plb = root.lb, pub = root.ub;
-        plb[j] = 1.0;
-        if (auto* pipm2 = ensure_root_heur_ipm()) {
-          if (prepare_root_probe_ipm_solve(*pipm2)) {
-            ++out.bc_stats.lp_solves;
-            auto res = pipm2->solve_node_lp(base_lp, plb, pub, root.x_relax);
-            const std::string& status = res.stats.status;
-            const bool status_infeasible =
-                status.find("Infeasible") != std::string::npos ||
-                status.find("infeasible") != std::string::npos;
-            if (res.stats.success && res.x.size() == n &&
-                std::isfinite(res.stats.objective)) {
-              up_success = true;
-              up_bound = res.stats.objective;
-            } else if (res.stats.has_farkas_certificate || status_infeasible) {
-              up_proved_infeas = true;
-            }
-          }
-        } else {
-          ++out.bc_stats.lp_solves;
-          update_standard_form_bounds(ensure_probe_sf(), base_lp, plb, pub);
-          auto res = solve_lp_from_sf(ensure_probe_sf(), probe_opt, root.basis_hint.get());
-          const auto type = classify_lp_result(res, n);
-          if (type == LPFailureType::Success &&
-              std::isfinite(res.result.stats.objective)) {
-            up_success = true;
-            up_bound = res.result.stats.objective;
-          } else if (type == LPFailureType::Infeasible) {
-            up_proved_infeas = true;
-          }
-        }
-      }
+	      run_root_probe_direction(/*is_up=*/true, up_success,
+	                               up_proved_infeas, up_bound);
 
       ++probed;
 
-      if (down_proved_infeas && up_success) {
-        root.lb[j] = 1.0;
-        ++fixed_by_probe;
-      } else if (up_proved_infeas && down_success) {
-        root.ub[j] = 0.0;
-        ++fixed_by_probe;
+	      if (down_proved_infeas && up_success) {
+	        commit_root_probe_bound(j, /*is_lb=*/true, 1.0);
+	        ++fixed_by_probe;
+	      } else if (up_proved_infeas && down_success) {
+	        commit_root_probe_bound(j, /*is_lb=*/false, 0.0);
+	        ++fixed_by_probe;
       } else if (down_success && up_success) {
         const double frac_j = root.x_relax[j] - std::floor(root.x_relax[j]);
         pc[j].add_down(normalized_pseudocost_gain(
@@ -23240,7 +23346,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     }
 
     // Update root node with tightened bounds.
-    if (fixed_by_probe > 0) {
+	    if (root_domain_probe_changed_root || fixed_by_probe > 0) {
       // Re-solve root LP with new fixed variables.
       ++out.bc_stats.lp_solves;
       if (auto* probe_ipm = ensure_root_heur_ipm()) {
@@ -23919,10 +24025,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   const bool use_ipm_primary = opt.use_ipm_nodes && !root.basis_hint;
   const bool has_ipm_fallback = !use_ipm_primary;
 
-  // Sequential fallback infrastructure.
-  // When IPM fallback is available for node LPs, disable the expensive
-  // simplex fallback chain (L1-L3 retries + cold-start).
-  // IPM is faster (~50ms vs ~865ms cold-start) and more robust.
+  // Sequential fallback infrastructure. The dispatcher owns the fallback
+  // contract; this legacy manager retains the configured retry parameters
+  // without making a kernel timing claim.
   FallbackConfig seq_fb_config;
   seq_fb_config.l1_max_retries = opt.fallback_l1_retries;
   seq_fb_config.l1_perturbation = opt.fallback_l1_perturbation;
@@ -23997,9 +24102,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 		    return true;
 		  };
 
-	  // IPM-LP node solver: use IPM for node LP solves only when no simplex
-  // basis is available from crossover. With a basis, dual simplex warm-starts
-  // are far faster (~1-5ms vs ~111ms for IPM).
+	  // Use IPM for node LP solves only when crossover supplied no simplex
+  // basis. With a basis, the dispatcher uses same-structure simplex resolves.
   const bool use_ipm_nodes = use_ipm_primary;
   std::unique_ptr<NativeIPMLPAdapter> ipm_node_solver;
   if (use_ipm_nodes && !root_tree_setup_budget_expired) {
@@ -24016,7 +24120,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   }
 
   // IPM fallback solver: used when simplex warm-start fails at tree nodes.
-  // Much faster than cold-start simplex (~50ms vs ~865ms for m=4000).
   std::unique_ptr<NativeIPMLPAdapter> ipm_fallback_solver;
   if (has_ipm_fallback && !root_tree_setup_budget_expired) {
     IPMLPOptions fb_ipm_opt;
@@ -31281,8 +31384,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     };
 
 	    if (use_ipm_nodes && ipm_node_solver) {
-      // IPM-LP path: solve node LP directly from LPModel + bounds.
-      // Warm-start from parent's relaxation solution for ~2x speedup.
+      // IPM-LP path: solve node LP directly from LPModel + bounds and pass the
+      // parent relaxation as an initial point when available.
       if (consume_probe_lp && probe_lp_state->from_ipm) {
         node_result = std::move(probe_lp_state->ipm_result);
         probe_lp_state->consumed = true;
