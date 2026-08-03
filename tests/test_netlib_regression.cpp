@@ -7,6 +7,7 @@
 #include <catch2/catch_approx.hpp>
 
 #include <cstdio>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -40,14 +41,9 @@ const NetlibCase kCases[] = {
 };
 
 std::string netlib_path(const std::string& name) {
-  for (const char* prefix : {"tests/data/netlib/", "../tests/data/netlib/"}) {
-    const std::string p = std::string(prefix) + name + ".mps";
-    if (FILE* f = std::fopen(p.c_str(), "r")) {
-      std::fclose(f);
-      return p;
-    }
-  }
-  return "tests/data/netlib/" + name + ".mps";
+  return (std::filesystem::path(__FILE__).parent_path() / "data" / "netlib" /
+          (name + ".mps"))
+      .string();
 }
 
 LPModel read_mps_as_lp(const std::string& path) {
