@@ -20,6 +20,7 @@
 #include "mipsolvers/engine/detail/bc_domain_probe.hpp"
 #include "mipsolvers/engine/detail/bc_env_options.hpp"
 #include "mipsolvers/engine/detail/bc_fallback.hpp"
+#include "mipsolvers/engine/detail/bc_highs_style_numerics.hpp"
 #include "mipsolvers/engine/detail/bc_legacy_helpers.hpp"
 #include "mipsolvers/engine/detail/bc_numerics.hpp"
 #include "mipsolvers/engine/detail/bc_objective_propagation.hpp"
@@ -850,3 +851,78 @@ TEST_CASE("B&C: row MIR separator preserves coefficients without dense candidate
     CHECK(0.6 * integer_x - minimum_y <= lp.b[1] + 1e-12);
   }
 }
+
+TEST_CASE("B&C: extracted highs_style numeric helpers",
+          "[bc][numerics][extraction]") {
+  using detail::collect_changed_col_sides_with_tol;
+  using detail::highs_style_gcd;
+  using detail::highs_style_incumbent_upper_limit;
+  using detail::highs_style_objective_integral_scale;
+
+  SECTION("gcd matches Euclid on signed inputs and zero operands") {
+    CHECK(highs_style_gcd(12, 18) == 6);
+    CHECK(highs_style_gcd(-24, 36) == 12);
+    CHECK(highs_style_gcd(0, 7) == 7);
+    CHECK(highs_style_gcd(13, 0) == 13);
+    CHECK(highs_style_gcd(17, 5) == 1);
+  }
+
+  SECTION("collect_changed_col_sides flags the tightened side only") {
+    Eigen::VectorXd old_lb(3), old_ub(3), new_lb(3), new_ub(3);
+    old_lb << 0.0, 0.0, 0.0;
+    old_ub << 1.0, 1.0, 1.0;
+    new_lb << 0.5, 0.0, 0.0;  // col 0 lower tightened
+    new_ub << 1.0, 0.4, 1.0;  // col 1 upper tightened
+    const auto changed =
+        collect_changed_col_sides_with_tol(old_lb, old_ub, new_lb, new_ub, 1e-9);
+    CHECK(changed.lower == std::vector<int>{0});
+    CHECK(changed.upper == std::vector<int>{1});
+    CHECK(changed.any == std::vector<int>{0, 1});
+  }
+
+  SECTION("integral objective scale distinguishes integer and continuous cost") {
+    LPModel unit;
+    unit.c = Eigen::VectorXd::Constant(2, 1.0);
+    unit.vars.assign(2, VariableMeta{VarType::Integer, 0.0, 10.0});
+    CHECK(highs_style_objective_integral_scale(unit, 1e-9) == Approx(1.0));
+
+    LPModel half;  // UC-style 0.5 increments must recover an integral scale
+    half.c = Eigen::VectorXd::Constant(2, 0.5);
+    half.vars.assign(2, VariableMeta{VarType::Integer, 0.0, 10.0});
+    CHECK(highs_style_objective_integral_scale(half, 1e-9) == Approx(2.0));
+
+    LPModel cont;  // a continuous cost has no integral objective scale
+    cont.c = Eigen::VectorXd::Constant(1, 1.0);
+    cont.vars.assign(1, VariableMeta{VarType::Continuous, 0.0, 10.0});
+    CHECK(highs_style_objective_integral_scale(cont, 1e-9) == Approx(0.0));
+  }
+
+  SECTION("incumbent upper limit mirrors HiGHS computeNewUpperLimit") {
+    const double tol = 1e-9;
+
+    LPModel unit;  // integer objective, scale 1 -> next integer below incumbent
+    unit.c = Eigen::VectorXd::Constant(2, 1.0);
+    unit.vars.assign(2, VariableMeta{VarType::Integer, 0.0, 10.0});
+    CHECK(highs_style_incumbent_upper_limit(unit, 5.0, tol) ==
+          Approx(4.0).margin(1e-7));
+
+    LPModel half;  // scale 2 -> must improve by at least 0.5
+    half.c = Eigen::VectorXd::Constant(2, 0.5);
+    half.vars.assign(2, VariableMeta{VarType::Integer, 0.0, 10.0});
+    CHECK(highs_style_incumbent_upper_limit(half, 5.5, tol) ==
+          Approx(5.0).margin(1e-7));
+
+    LPModel cont;  // no integral scale -> strictly-below-incumbent cutoff
+    cont.c = Eigen::VectorXd::Constant(1, 1.0);
+    cont.vars.assign(1, VariableMeta{VarType::Continuous, 0.0, 10.0});
+    const double cont_cut = highs_style_incumbent_upper_limit(cont, 5.0, tol);
+    CHECK(cont_cut < 5.0);
+    CHECK(cont_cut == Approx(5.0 - tol).margin(1e-12));
+
+    // A non-finite incumbent leaves the cutoff at infinity.
+    CHECK(highs_style_incumbent_upper_limit(
+              unit, std::numeric_limits<double>::infinity(), tol) ==
+          std::numeric_limits<double>::infinity());
+  }
+}
+

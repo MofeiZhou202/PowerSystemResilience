@@ -112,6 +112,7 @@ add_library(mipsolvers STATIC
   src/engine/kernel/ipm/cones.cpp
   src/engine/kernel/ipm/conic_ipm_solver.cpp
   src/engine/kernel/ipm/ipm_lp_solver.cpp
+  src/engine/kernel/ipm/ipm_lp_solver_cached.cpp
   src/engine/kernel/ipm/ipm_solver.cpp
   src/engine/kernel/ipm/ipm_filter.cpp
   src/engine/kernel/ipm/ipm_scaling.cpp
@@ -244,13 +245,20 @@ if(MIPSOLVERS_HAVE_HIGHS_LIB)
     src/engine/solver/native/milp/bc/legacy/bc_env_options.cpp
     src/engine/solver/native/milp/bc/legacy/bc_parallel.cpp
     src/engine/solver/native/milp/bc/legacy/bc_utils.cpp
+    src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof.cpp
+    src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof_conflict.cpp
     src/engine/solver/native/milp/bc/legacy/bc_branching.cpp
     src/engine/solver/native/milp/bc/legacy/bc_cuts.cpp
+    src/engine/solver/native/milp/bc/legacy/bc_cuts_transformed.cpp
     src/engine/solver/native/milp/bc/legacy/bc_cglp.cpp
     src/engine/solver/native/milp/bc/legacy/bc_cglp_model.cpp
     src/engine/solver/native/milp/bc/legacy/bc_clique_table.cpp
     src/engine/solver/native/milp/bc/legacy/bc_domain_probe.cpp
+    src/engine/solver/native/milp/bc/legacy/bc_highs_style_numerics.cpp
+    src/engine/solver/native/milp/bc/legacy/bc_instance_features.cpp
+    src/engine/solver/native/milp/bc/legacy/bc_strict_scuc_cuts.cpp
     src/engine/solver/native/milp/bc/legacy/bc_relaxation.cpp
+    src/engine/solver/native/milp/bc/legacy/bc_relaxation_crash_basis.cpp
     src/engine/solver/native/milp/bc/legacy/bc_conformance_trace.cpp
     src/engine/solver/native/milp/bc/legacy/bc_implied_bounds.cpp
     src/engine/solver/native/milp/bc/legacy/bc_legacy_helpers.cpp
