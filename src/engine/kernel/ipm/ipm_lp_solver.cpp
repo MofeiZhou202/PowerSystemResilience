@@ -1272,6 +1272,9 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
   //   augmented: [diag(d)+reg, -Ae'; -Ae, -reg] [dx;dy] = [xi; -r_p]
   std::vector<double> xi_store(nn);
   double* xi_d = xi_store.data();
+  // Scratch for gated KKT iterative refinement of the Newton step.
+  std::vector<double> kkt_neg_rp(m), kkt_r2(m), kkt_ddy(m), kkt_adx(m);
+  std::vector<double> kkt_r1(nn), kkt_ddx(nn);
 #if MIPSOLVERS_USE_ACCELERATE
   // Apple Sparse matrix view over the augmented KKT CSC (values are refreshed
   // in place each iteration; the structure is fixed).
@@ -1293,13 +1296,14 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
     return mat;
   };
 #endif
-  auto solve_step = [&](const double* xi, double* dx_out, double* dy_out) {
+  auto raw_kkt_solve = [&](const double* xi, const double* prim_rhs,
+                           double* dx_out, double* dy_out) {
     if (use_augmented) {
 #if MIPSOLVERS_USE_ACCELERATE
       if (aug_use_accel) {
         for (int j = 0; j < nn; ++j) aug_solbuf[static_cast<size_t>(j)] = xi[j];
         for (int i = 0; i < m; ++i)
-          aug_solbuf[static_cast<size_t>(nn + i)] = -r_p_d[i];
+          aug_solbuf[static_cast<size_t>(nn + i)] = prim_rhs[i];
         DenseVector_Double bx{};
         bx.count = aug_kdim;
         bx.data = aug_solbuf.data();
@@ -1312,7 +1316,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
 #endif
       if (aug_use_cholmod) {
         for (int j = 0; j < nn; ++j) aug_rhsbuf[static_cast<size_t>(j)] = xi[j];
-        for (int i = 0; i < m; ++i) aug_rhsbuf[static_cast<size_t>(nn + i)] = -r_p_d[i];
+        for (int i = 0; i < m; ++i) aug_rhsbuf[static_cast<size_t>(nn + i)] = prim_rhs[i];
         if (!aug_chol.solve(aug_rhsbuf.data(), aug_solbuf.data())) {
           for (int j = 0; j < nn; ++j) dx_out[j] = std::numeric_limits<double>::quiet_NaN();
           for (int i = 0; i < m; ++i) dy_out[i] = std::numeric_limits<double>::quiet_NaN();
@@ -1323,7 +1327,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
         return;
       }
       for (int j = 0; j < nn; ++j) aug_rhs[j] = xi[j];
-      for (int i = 0; i < m; ++i) aug_rhs[nn + i] = -r_p_d[i];
+      for (int i = 0; i < m; ++i) aug_rhs[nn + i] = prim_rhs[i];
       if (!solve_kkt_sparse(aug_cache, aug_rhs, aug_dx, aug_dy) ||
           aug_dx.size() != nn || aug_dy.size() != m) {
         for (int j = 0; j < nn; ++j) dx_out[j] = std::numeric_limits<double>::quiet_NaN();
@@ -1335,11 +1339,66 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
       return;
     }
     for (int j = 0; j < nn; ++j) tmp_d[j] = theta_d[j] * xi[j];
-    std::memcpy(rhs_d, r_p_d, sizeof(double) * m);
+    for (int i = 0; i < m; ++i) rhs_d[i] = -prim_rhs[i];
     ae_mul_sub(tmp_d, rhs_d);
     solve_normal(rhs_d, dy_out);
     aet_mul(dy_out, Atdy_d);
     simd_fma(theta_d, Atdy_d, tmp_d, dx_out, nn);  // dx = theta*Atdy + theta*xi
+  };
+
+  // Newton step with gated KKT iterative refinement.  The regularized
+  // factorization biases the direction: the primal residual cannot drop below
+  // ~reg*||dy||, which stalls then destabilizes ill-conditioned LPs (e.g. agg,
+  // lotfi).  Refining against the *unregularized* KKT residual removes that
+  // bias.  On well-conditioned problems the residual is already below tol, so
+  // no correction solves run and the fast path is unchanged.
+  auto solve_step = [&](const double* xi, double* dx_out, double* dy_out) {
+    for (int i = 0; i < m; ++i) kkt_neg_rp[i] = -r_p_d[i];
+    raw_kkt_solve(xi, kkt_neg_rp.data(), dx_out, dy_out);
+    double rhs_scale = 1.0;
+    for (int i = 0; i < m; ++i) rhs_scale = std::max(rhs_scale, std::abs(r_p_d[i]));
+    for (int j = 0; j < nn; ++j) rhs_scale = std::max(rhs_scale, std::abs(xi[j]));
+    // Refinement gate.  A well-conditioned solve leaves a tiny relative KKT
+    // residual (measured: afiro 1.5e-4, sc205 6e-7) and skips refinement
+    // entirely, preserving the fast path.  An ill-conditioned one (agg ~0.23,
+    // i.e. the reg bias dominates) trips the 1% trigger and is then refined
+    // down to the tight target so the bias is removed and it converges.
+    const double refine_trigger = 1e-2 * rhs_scale;
+    const double refine_target = 1e-9 * rhs_scale;
+    auto kkt_residual = [&]() -> double {
+      aet_mul(dy_out, Atdy_d);         // Ae'dy
+      ae_mul(dx_out, kkt_adx.data());  // Ae dx
+      double res = 0.0;
+      for (int j = 0; j < nn; ++j) {
+        const double v = xi[j] - dvec[j] * dx_out[j] + Atdy_d[j];
+        kkt_r1[j] = v;
+        const double a = std::abs(v);
+        if (a > res) res = a;
+      }
+      for (int i = 0; i < m; ++i) {
+        const double v = -r_p_d[i] + kkt_adx[i];
+        kkt_r2[i] = v;
+        const double a = std::abs(v);
+        if (a > res) res = a;
+      }
+      return res;
+    };
+    double res = kkt_residual();
+    const bool need_refine = std::isfinite(res) && res > refine_trigger;
+    for (int ref = 0; ref < 5 && need_refine && std::isfinite(res) && res > refine_target; ++ref) {
+      raw_kkt_solve(kkt_r1.data(), kkt_r2.data(), kkt_ddx.data(), kkt_ddy.data());
+      for (int j = 0; j < nn; ++j) dx_out[j] += kkt_ddx[j];
+      for (int i = 0; i < m; ++i) dy_out[i] += kkt_ddy[i];
+      const double res_new = kkt_residual();
+      if (!std::isfinite(res_new) || res_new >= res) {
+        // Correction stopped helping (or the reg=0 system is singular): revert
+        // it and keep the last good direction.
+        for (int j = 0; j < nn; ++j) dx_out[j] -= kkt_ddx[j];
+        for (int i = 0; i < m; ++i) dy_out[i] -= kkt_ddy[i];
+        break;
+      }
+      res = res_new;
+    }
   };
 
   for (int iter = 0; iter < max_iter; ++iter) {
