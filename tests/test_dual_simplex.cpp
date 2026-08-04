@@ -11,6 +11,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <memory>
+#include <random>
 #include <string>
 #include <type_traits>
 
@@ -953,6 +955,83 @@ TEST_CASE(
   REQUIRE(reference.status == native_dual::Status::Unbounded);
   REQUIRE(reference.has_unbounded_certificate);
   check_results_equivalent(reference, sentinel);
+}
+
+TEST_CASE(
+    "DualSimplex: warm node reoptimization inherits basis and DSE norms",
+    "[dual_simplex][warm_start][s5]") {
+  // A moderately coupled root LP: m equality rows, n>m variables in [0,1] with
+  // random costs, feasible at the interior point x=0.5.
+  const int m = 24;
+  const int n = 60;
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Zero(n);
+  lp.A.resize(0, n);
+  lp.b.resize(0);
+  lp.Aeq.resize(m, n);
+  std::mt19937_64 rng(0x5335574dULL);  // "S5WM"
+  std::uniform_real_distribution<double> coef(-1.0, 1.0);
+  std::uniform_real_distribution<double> cost(0.0, 1.0);
+  std::uniform_real_distribution<double> pick(0.0, 1.0);
+  for (int j = 0; j < n; ++j) {
+    lp.c[j] = cost(rng);
+    lp.vars.push_back({VarType::Continuous, 0.0, 1.0});
+  }
+  std::vector<Eigen::Triplet<double>> trips;
+  Eigen::VectorXd rhs = Eigen::VectorXd::Zero(m);
+  for (int i = 0; i < m; ++i) {
+    for (int j = 0; j < n; ++j) {
+      if (pick(rng) < 0.35) {
+        const double v = coef(rng);
+        trips.emplace_back(i, j, v);
+        rhs[i] += v * 0.5;
+      }
+    }
+  }
+  lp.Aeq.setFromTriplets(trips.begin(), trips.end());
+  lp.Aeq.makeCompressed();
+  lp.beq = rhs;
+
+  const StandardFormLP sf = build_standard_form_lp(lp);
+  const SimplexOptions options = native_simplex_options();
+
+  const auto root = native_dual::solve(sf, options, nullptr);
+  REQUIRE(root.status == native_dual::Status::Optimal);
+  REQUIRE(root.edge_weights.size() == static_cast<std::size_t>(sf.A.rows()));
+
+  // A B&C node: tighten several variable upper bounds.
+  StandardFormLP sf_node = sf;
+  for (int j = 0; j < 6 && j < sf_node.n_original; ++j) {
+    sf_node.var_ub[j] = 0.25;
+  }
+
+  // Warm snapshot: parent basis, nonbasic sides, and DSE norms.
+  mipsolvers::engine::SimplexBasis hint;
+  hint.rows = static_cast<int>(sf.A.rows());
+  hint.cols = static_cast<int>(sf.A.cols());
+  hint.indices = root.basis;
+  hint.at_upper = root.at_upper;
+  hint.cached_dse_weights =
+      std::make_shared<const std::vector<double>>(root.edge_weights);
+  hint.cached_dse_basis =
+      std::make_shared<const std::vector<int>>(root.basis);
+
+  const auto cold_node = native_dual::solve(sf_node, options, nullptr);
+  const auto warm_node = native_dual::solve(sf_node, options, hint);
+  INFO("cold iters=" << cold_node.statistics.iterations
+                     << " dseInit=" << cold_node.statistics.dse_initialization_solves
+                     << " | warm iters=" << warm_node.statistics.iterations
+                     << " dseInit=" << warm_node.statistics.dse_initialization_solves);
+  REQUIRE(cold_node.status == native_dual::Status::Optimal);
+  REQUIRE(warm_node.status == native_dual::Status::Optimal);
+  // Same optimum from both starts.
+  CHECK(warm_node.max_objective ==
+        Approx(cold_node.max_objective).margin(1e-9));
+  // Warm re-solve from the parent basis converges in no more pivots than a cold
+  // solve and inherits the DSE norms (no re-initialization BTRANs).
+  CHECK(warm_node.statistics.iterations <= cold_node.statistics.iterations);
+  CHECK(warm_node.statistics.dse_initialization_solves == 0);
 }
 
 TEST_CASE("DualSimplex: cold shift-start policy is bounded and overridable",
