@@ -529,6 +529,62 @@ bool build_primal_transaction(MinorScratch& scratch, const State& state,
   return true;
 }
 
+// S3 certification step: the analytical BFRT dual-feasibility postcondition.
+// Reads solver state and the transaction's flip/shift stamps (via scratch); no
+// mutation. Returns false with a message on a non-finite or dual-infeasible
+// updated reduced cost.
+bool certify_bfrt_dual_feasibility(const State& state,
+                                   const MinorScratch& scratch,
+                                   const detail::IndexedVector& pivot_row,
+                                   int leaving_side, int entering_col,
+                                   int leaving_col, double dual_step,
+                                   std::string& failure) {
+  const unsigned int transaction_epoch = scratch.transaction_epoch;
+  auto is_flipped = [&](int col) {
+    return scratch.flipped_stamp[static_cast<std::size_t>(col)] ==
+           transaction_epoch;
+  };
+  auto cost_shift_at = [&](int col) {
+    return scratch.shifted_stamp[static_cast<std::size_t>(col)] ==
+                   transaction_epoch
+               ? scratch.shift_delta[static_cast<std::size_t>(col)]
+               : 0.0;
+  };
+  for (std::size_t k = 0; k < pivot_row.index.size(); ++k) {
+    const int j = pivot_row.index[k];
+    if ((state.basic[static_cast<std::size_t>(j)] && j != leaving_col) ||
+        j == entering_col) {
+      continue;
+    }
+    int move =
+        j == leaving_col
+            ? (state.bounds.enterable[static_cast<std::size_t>(j)]
+                   ? (leaving_side < 0 ? detail::sign(Move::Up)
+                                       : detail::sign(Move::Down))
+                   : detail::sign(Move::Fixed))
+            : detail::sign(state.move[static_cast<std::size_t>(j)]);
+    if (j != leaving_col && is_flipped(j)) move = -move;
+    if (move == 0) continue;
+    const double updated_reduced_cost =
+        state.reduced_costs[j] + dual_step * pivot_row.value[k] +
+        cost_shift_at(j);
+    if (!std::isfinite(updated_reduced_cost)) {
+      failure =
+          "analytical BFRT postcondition produced a non-finite reduced cost "
+          "at column " +
+          std::to_string(j);
+      return false;
+    }
+    if (move * updated_reduced_cost > state.options->optimality_tol) {
+      failure =
+          "analytical BFRT postcondition violates dual feasibility at column " +
+          std::to_string(j);
+      return false;
+    }
+  }
+  return true;
+}
+
 MinorOutcome minor_iteration(State& state, Statistics& statistics) {
   ++state.pricing_epoch;
   Leaving leaving;
@@ -750,36 +806,10 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
     // accumulator already guarantees unique columns. Reuse its packed support
     // directly instead of copying and sorting it on every pivot.
     const double _t_pc = g_ds_profile.enabled ? ds_clock() : 0.0;
-    for (std::size_t k = 0; k < pivot_row.index.size(); ++k) {
-      const int j = pivot_row.index[k];
-      if ((state.basic[static_cast<std::size_t>(j)] && j != leaving_col) ||
-          j == entering.col) {
-        continue;
-      }
-      int move =
-          j == leaving_col
-              ? (state.bounds.enterable[static_cast<std::size_t>(j)]
-                     ? (leaving.side < 0 ? detail::sign(Move::Up)
-                                         : detail::sign(Move::Down))
-                     : detail::sign(Move::Fixed))
-              : detail::sign(state.move[static_cast<std::size_t>(j)]);
-      if (j != leaving_col && is_flipped(j)) move = -move;
-      if (move == 0) continue;
-      const double updated_reduced_cost =
-          state.reduced_costs[j] + dual_step * pivot_row.value[k] +
-          cost_shift_at(j);
-      if (!std::isfinite(updated_reduced_cost)) {
-        return numerical_trouble(
-            "analytical BFRT postcondition produced a non-finite reduced "
-            "cost at column " +
-            std::to_string(j));
-      }
-      if (move * updated_reduced_cost > state.options->optimality_tol) {
-        return numerical_trouble(
-            "analytical BFRT postcondition violates dual feasibility at "
-            "column " +
-            std::to_string(j));
-      }
+    if (!certify_bfrt_dual_feasibility(state, g_ds_scratch, pivot_row,
+                                       leaving.side, entering.col, leaving_col,
+                                       dual_step, failure)) {
+      return numerical_trouble(std::move(failure));
     }
     if (g_ds_profile.enabled) g_ds_profile.postcond += ds_clock() - _t_pc;
 
