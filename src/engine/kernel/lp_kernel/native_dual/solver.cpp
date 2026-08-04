@@ -585,6 +585,52 @@ bool certify_bfrt_dual_feasibility(const State& state,
   return true;
 }
 
+// S3 certification step: verify the BFRT flip-RHS FTRAN image agrees with the
+// leaving-row change and derive the residual step. Reads state and bfrt_delta;
+// returns the clamped remaining_delta via out-param, false with a message on a
+// non-finite or beyond-envelope disagreement.
+bool certify_bfrt_leaving_agreement(const State& state,
+                                    const detail::IndexedVector& bfrt_delta,
+                                    int leaving_row, int leaving_side,
+                                    int leaving_col, double covered_violation,
+                                    double violation, double& remaining_delta,
+                                    std::string& failure) {
+  const double leaving_bound = leaving_side < 0
+                                   ? state.bounds.lower[leaving_col]
+                                   : state.bounds.upper[leaving_col];
+  const double bfrt_delta_at_row = bfrt_delta.at(leaving_row);
+  remaining_delta =
+      state.x_basic[leaving_row] - bfrt_delta_at_row - leaving_bound;
+  if (covered_violation == violation) {
+    remaining_delta = 0.0;
+  }
+  // The projected coverage (row_ep dot) and the FTRAN image agree only to
+  // rounding, so a flip set that near-exactly covers the violation leaves a
+  // remaining step whose sign is noise. Treat wrong-signed noise inside the
+  // rounding envelope as the degenerate zero step; a disagreement beyond it is
+  // still a real failure.
+  const double remaining_slack =
+      1024.0 * std::numeric_limits<double>::epsilon() *
+      std::max({1.0, std::abs(state.x_basic[leaving_row]),
+                std::abs(bfrt_delta_at_row), std::abs(leaving_bound)});
+  if (!std::isfinite(remaining_delta) ||
+      leaving_side * remaining_delta < -remaining_slack) {
+    failure = "packed BFRT FTRAN disagrees with the leaving-row change";
+    return false;
+  }
+  if (leaving_side * remaining_delta < 0.0) remaining_delta = 0.0;
+  return true;
+}
+
+// One dual minor iteration as an S3 proposal / certification / commit pipeline.
+//   Proposal    (read-only state + scratch): choose_leaving, multiply_AT_indexed_bfrt,
+//               choose_entering_bfrt, the aq/BFRT FTRANs, compute_dse_weights,
+//               build_primal_transaction.
+//   Certification (no mutation, scalar order): finiteness of the priced row and
+//               pivot, certify_bfrt_dual_feasibility, certify_bfrt_leaving_agreement.
+//   Commit      (atomic): the factor update is the first and only fallible commit
+//               step; basis/move/basic/reduced-cost/primal/weight state is published
+//               only after it succeeds, so no rollback path is reachable.
 MinorOutcome minor_iteration(State& state, Statistics& statistics) {
   ++state.pricing_epoch;
   Leaving leaving;
@@ -826,30 +872,13 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
       }
     }
 
-    const double leaving_bound =
-        leaving.side < 0 ? state.bounds.lower[leaving_col]
-                         : state.bounds.upper[leaving_col];
-    const double bfrt_delta_at_row = bfrt_delta.at(leaving.row);
-    double remaining_delta =
-        state.x_basic[leaving.row] - bfrt_delta_at_row - leaving_bound;
-    if (transaction.covered_violation == leaving.violation) {
-      remaining_delta = 0.0;
+    double remaining_delta = 0.0;
+    if (!certify_bfrt_leaving_agreement(
+            state, bfrt_delta, leaving.row, leaving.side, leaving_col,
+            transaction.covered_violation, leaving.violation, remaining_delta,
+            failure)) {
+      return numerical_trouble(std::move(failure));
     }
-    // The projected coverage (row_ep dot) and the FTRAN image agree only to
-    // rounding, so a flip set that near-exactly covers the violation leaves a
-    // remaining step whose sign is noise. Treat wrong-signed noise inside the
-    // rounding envelope as the degenerate zero step; a disagreement beyond it
-    // is still a real failure.
-    const double remaining_slack =
-        1024.0 * std::numeric_limits<double>::epsilon() *
-        std::max({1.0, std::abs(state.x_basic[leaving.row]),
-                  std::abs(bfrt_delta_at_row), std::abs(leaving_bound)});
-    if (!std::isfinite(remaining_delta) ||
-        leaving.side * remaining_delta < -remaining_slack) {
-      return numerical_trouble(
-          "packed BFRT FTRAN disagrees with the leaving-row change");
-    }
-    if (leaving.side * remaining_delta < 0.0) remaining_delta = 0.0;
 
     detail::EdgeWeightUpdate& edge_weight_update =
         g_ds_scratch.edge_weight_update;
