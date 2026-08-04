@@ -46,6 +46,7 @@
 #include "mipsolvers/engine/problem_types.hpp"
 #include "mipsolvers/engine/solver/external/adapters.hpp"
 #include "mipsolvers/engine/solver/native/lp/pdlp_solver.hpp"
+#include "../src/engine/kernel/lp_kernel/native_dual_core.hpp"
 
 #ifdef HACDCPF_HAVE_SCIP_LIB
 #include "scip/scip.h"
@@ -73,6 +74,9 @@ struct Config {
   int repeats{1};
   int max_iterations{100000};
   double time_limit_sec{30.0};
+  bool warm_cohort{false};
+  int warm_branch_vars{4};
+  double warm_branch_frac{0.5};
 };
 
 struct CaseInfo {
@@ -183,6 +187,14 @@ bool parse_args(int argc, char** argv, Config& cfg) {
     } else if (arg == "--max-iterations") {
       const char* v = value("--max-iterations"); if (!v) return false;
       cfg.max_iterations = std::max(1, std::atoi(v));
+    } else if (arg == "--warm-cohort") {
+      cfg.warm_cohort = true;
+    } else if (arg == "--warm-branch-vars") {
+      const char* v = value("--warm-branch-vars"); if (!v) return false;
+      cfg.warm_branch_vars = std::max(1, std::atoi(v));
+    } else if (arg == "--warm-branch-frac") {
+      const char* v = value("--warm-branch-frac"); if (!v) return false;
+      cfg.warm_branch_frac = std::min(0.99, std::max(0.01, std::atof(v)));
     } else if (arg == "--help" || arg == "-h") {
       std::cout
           << "Usage: netlib_solver_benchmark [options]\n"
@@ -196,6 +208,9 @@ bool parse_args(int argc, char** argv, Config& cfg) {
           << "  --repeat N           repetitions per case/algorithm\n"
           << "  --time-limit SEC     supported backend wall limit\n"
           << "  --max-iterations N   iterative algorithm limit\n"
+          << "  --warm-cohort        S5 warm node-reopt cohort (native kernel)\n"
+          << "  --warm-branch-vars N vars to tighten per node (default 4)\n"
+          << "  --warm-branch-frac F tighten to F*x* toward lb (default 0.5)\n"
           << "  --csv PATH           raw result CSV\n"
           << "  --json PATH          raw and summary JSON\n";
       return false;
@@ -964,6 +979,194 @@ void print_summary(const std::vector<Summary>& summaries) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// S5 warm re-optimization cohort.
+//
+// Measures the native dual-simplex kernel's warm-start value on a synthetic
+// B&C node: solve the root LP cold, tighten a few basic structural variables'
+// upper bounds (a branching decision), then re-solve the node twice - cold and
+// warm from the root basis + inherited DSE norms. Reports the warm/cold pivot
+// and wall ratios. Both node solves share the same StandardFormLP (presolve
+// free), so the ratio isolates the warm-start effect.
+// ---------------------------------------------------------------------------
+struct WarmCohortRow {
+  std::string name;
+  int rows{0};
+  int cols{0};
+  int root_pivots{0};
+  int cold_pivots{0};
+  int warm_pivots{0};
+  double cold_ms{0.0};
+  double warm_ms{0.0};
+  int warm_dse_init{0};
+  int branched{0};
+  bool usable{false};
+  std::string note;
+};
+
+double timed_native_solve(const eng::StandardFormLP& sf,
+                          const eng::SimplexOptions& options,
+                          const eng::SimplexBasis* hint, int repeats,
+                          eng::native_dual::Result& out) {
+  double best_ms = std::numeric_limits<double>::infinity();
+  for (int r = 0; r < std::max(1, repeats); ++r) {
+    const auto t0 = std::chrono::steady_clock::now();
+    out = eng::native_dual::solve(sf, options, hint);
+    const double ms = std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - t0)
+                          .count();
+    best_ms = std::min(best_ms, ms);
+  }
+  return best_ms;
+}
+
+void run_warm_cohort(const Config& cfg, const std::vector<CaseInfo>& cases) {
+  eng::SimplexOptions options;
+  options.lp_kernel_backend = eng::LpKernelBackend::ExperimentalNative;
+  options.max_iter = cfg.max_iterations;
+  options.time_limit_sec = cfg.time_limit_sec;
+
+  std::cout << "S5 warm re-optimization cohort (native dual-simplex kernel, "
+               "presolve-free)\n"
+            << cases.size() << " cases, branch<=" << cfg.warm_branch_vars
+            << " vars to " << cfg.warm_branch_frac << "*x*, min of "
+            << cfg.repeats << " wall sample(s)\n\n";
+  std::printf("%-12s %6s %6s %8s %8s %8s %8s %9s %9s %8s %6s\n", "case", "m",
+              "n", "rootPiv", "coldPiv", "warmPiv", "piv x", "coldMs", "warmMs",
+              "ms x", "dseIn");
+  std::printf("%s\n", std::string(104, '-').c_str());
+
+  std::vector<WarmCohortRow> table;
+  double log_piv_sum = 0.0;
+  double log_ms_sum = 0.0;
+  int usable = 0;
+  int mismatches = 0;
+  long total_cold_piv = 0;
+  long total_warm_piv = 0;
+  for (const auto& kase : cases) {
+    WarmCohortRow row;
+    row.name = kase.name;
+
+    eng::StandardFormLP sf = eng::build_standard_form_lp(kase.lp);
+    row.rows = static_cast<int>(sf.A.rows());
+    row.cols = static_cast<int>(sf.A.cols());
+
+    eng::native_dual::Result root;
+    timed_native_solve(sf, options, nullptr, 1, root);
+    if (root.status != eng::native_dual::Status::Optimal) {
+      row.note = "root-not-optimal";
+      table.push_back(row);
+      continue;
+    }
+    row.root_pivots = root.statistics.iterations;
+
+    // Build a node: tighten up to K basic structural variables toward their
+    // lower bound (shifted lb = 0), cutting the root optimum so the node needs
+    // a genuine re-optimization.
+    eng::StandardFormLP sf_node = sf;
+    int branched = 0;
+    for (std::size_t pos = 0;
+         pos < root.basis.size() && branched < cfg.warm_branch_vars; ++pos) {
+      const int col = root.basis[pos];
+      if (col < 0 || col >= sf.n_original) continue;  // structural only
+      const double xval = (pos < static_cast<std::size_t>(root.x_basic.size()))
+                              ? root.x_basic[static_cast<int>(pos)]
+                              : 0.0;
+      if (!(xval > 1e-6)) continue;  // need room to tighten below x*
+      sf_node.var_ub[col] = cfg.warm_branch_frac * xval;
+      ++branched;
+    }
+    row.branched = branched;
+    if (branched == 0) {
+      row.note = "no-branch-candidate";
+      table.push_back(row);
+      continue;
+    }
+
+    eng::native_dual::Result cold;
+    row.cold_ms =
+        timed_native_solve(sf_node, options, nullptr, cfg.repeats, cold);
+    if (cold.status != eng::native_dual::Status::Optimal) {
+      row.note = "node-not-optimal";
+      table.push_back(row);
+      continue;
+    }
+    row.cold_pivots = cold.statistics.iterations;
+
+    eng::SimplexBasis hint;
+    hint.bound_domain_version = eng::SimplexBasis::kBoundDomainVersion;
+    hint.rows = static_cast<int>(sf.A.rows());
+    hint.cols = static_cast<int>(sf.A.cols());
+    hint.indices = root.basis;
+    hint.at_upper = root.at_upper;
+    hint.cached_dse_weights =
+        std::make_shared<const std::vector<double>>(root.edge_weights);
+    hint.cached_dse_basis =
+        std::make_shared<const std::vector<int>>(root.basis);
+
+    eng::native_dual::Result warm;
+    row.warm_ms =
+        timed_native_solve(sf_node, options, &hint, cfg.repeats, warm);
+    if (warm.status != eng::native_dual::Status::Optimal) {
+      row.note = "warm-not-optimal";
+      table.push_back(row);
+      continue;
+    }
+    row.warm_pivots = warm.statistics.iterations;
+    row.warm_dse_init = warm.statistics.dse_initialization_solves;
+
+    const double obj_gap = std::abs(warm.max_objective - cold.max_objective);
+    if (obj_gap > 1e-6 * (1.0 + std::abs(cold.max_objective))) {
+      row.note = "OBJECTIVE-MISMATCH";
+      ++mismatches;
+      table.push_back(row);
+      continue;
+    }
+
+    row.usable = true;
+    ++usable;
+    total_cold_piv += row.cold_pivots;
+    total_warm_piv += row.warm_pivots;
+    log_piv_sum += std::log((row.warm_pivots + 1.0) / (row.cold_pivots + 1.0));
+    if (row.cold_ms > 0.0 && row.warm_ms > 0.0)
+      log_ms_sum += std::log(row.warm_ms / row.cold_ms);
+    table.push_back(row);
+  }
+
+  for (const auto& row : table) {
+    if (row.usable) {
+      std::printf("%-12s %6d %6d %8d %8d %8d %8.3f %9.3f %9.3f %8.3f %6d\n",
+                  row.name.c_str(), row.rows, row.cols, row.root_pivots,
+                  row.cold_pivots, row.warm_pivots,
+                  (row.warm_pivots + 1.0) / (row.cold_pivots + 1.0), row.cold_ms,
+                  row.warm_ms, row.warm_ms > 0.0 ? row.warm_ms / row.cold_ms : 0.0,
+                  row.warm_dse_init);
+    } else {
+      std::printf("%-12s %6d %6d %8d %8s %8s %8s %9s %9s %8s %6s  (%s)\n",
+                  row.name.c_str(), row.rows, row.cols, row.root_pivots, "-",
+                  "-", "-", "-", "-", "-", "-", row.note.c_str());
+    }
+  }
+
+  std::printf("%s\n", std::string(104, '-').c_str());
+  const double geo_piv = usable > 0 ? std::exp(log_piv_sum / usable) : 0.0;
+  const double geo_ms = usable > 0 ? std::exp(log_ms_sum / usable) : 0.0;
+  std::cout << "\nSummary: " << usable << " usable / " << cases.size()
+            << " cases, mismatches=" << mismatches << "\n";
+  if (usable > 0) {
+    std::printf("  geomean warm/cold pivots = %.4f  (%.2fx fewer)\n", geo_piv,
+                geo_piv > 0.0 ? 1.0 / geo_piv : 0.0);
+    std::printf("  geomean warm/cold wall   = %.4f  (%.2fx faster)\n", geo_ms,
+                geo_ms > 0.0 ? 1.0 / geo_ms : 0.0);
+    std::printf("  total pivots cold=%ld warm=%ld  (%.1f%% reduction)\n",
+                total_cold_piv, total_warm_piv,
+                total_cold_piv > 0
+                    ? 100.0 * (1.0 - static_cast<double>(total_warm_piv) /
+                                         static_cast<double>(total_cold_piv))
+                    : 0.0);
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -977,6 +1180,10 @@ int main(int argc, char** argv) {
   try {
     const std::vector<CaseInfo> cases = load_cases(cfg);
     if (cases.empty()) throw std::runtime_error("no matching NETLIB cases");
+    if (cfg.warm_cohort) {
+      run_warm_cohort(cfg, cases);
+      return 0;
+    }
     std::cout << "NETLIB cross-algorithm benchmark: " << cases.size()
               << " cases, " << cfg.solvers.size() << " algorithms, "
               << cfg.repeats << " repeat(s)\n";
