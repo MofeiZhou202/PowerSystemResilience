@@ -431,6 +431,29 @@ Next authorized step:
 - **snapshot 完备性判定（理论导向，避免 dead field）**：实测 `native_dual` warm-init（state.cpp `initialize_snapshot`）仅消费 hint 的 `basis_indices`（basis）、`at_upper`（sides）、`cached_dse_weights`+version（DSE norms）。它 **重建全新 `BasisFactor` 并 rebuild**（state.cpp:1345-1350），**不消费** hint 的 `cached_sparse_basis`（factor metadata 对 kernel warm 路径无关；factor 复用是更高层 `dual_simplex.cpp` `resolve_same_structure` / bc 的优化，已在该层处理），且 cost_shift/perturbation 每次 fresh 重置（state.cpp:1307-1308）。故 **kernel 级 warm snapshot 在 basis+sides+DSE-norms+bound-domain-version 处已完备**；§9 列出的 factor/refactor metadata 属更高层职责，cost journal 继承为投机优化（warm 路径已用 `decide_cost_shifted_dual_start` 按需重算），无证据前不实现（DR-1/DR-2 纪律）。
 - S5 状态：**完成**（version tag + falsifiability + warm cohort 6.85x + strong-branch restore 覆盖 + snapshot 完备性判定）。下一步 S6（架构改变后重测 reinversion，测量性）或 S7（algorithmic，真正 1v1 杠杆）。
 
+### DR-3（2026-08-04）：S7 证据——cold 处于算法地板，无 Class-A pivot 杠杆
+
+**触发**：S5 完成后执行 §16 step 7（S7 algorithmic）。§11 要求 evidence-first：分离 pivot bill → 3-way DSE → 退化相关性 → **仅在跨 cohort 可预测状态量+机制时**提 Class-A（§13.2 要求数学合同 + 重建基线）。
+
+**证据（repeat-3 fleet + d2q06c 深挖，测量性，无代码变更）**：
+1. **pivot bill**（d2q06c DS-PHASES）：dualII 主导 0.756s/4186 pivot（75% pivot、93% wall）；dualI 0.035s/1423；cleanup 9。
+2. **3-way DSE（repeat 3, 72 solves）**：Devex 824.7 pivot（0.804x）；StructuralDSE 与 ExactDSE **均 639.0 pivot**（per-pivot wall 微差为噪声，pivot 路径相同）。DSE 质量已到 exact，Devex→exact 已采纳；**DSE 非 S7 杠杆**。
+3. **native vs HiGHS（d2q06c，同 HFactor 后端）**：pivot **几乎相同**（native 5618 vs HiGHS 5243，差 ~7%）；wall native 816ms vs HiGHS 334ms → **per-pivot 2.28x**（native 0.145 vs HiGHS 0.064 ms/pivot）。**gap 是 per-pivot 成本，非 pivot count。**
+4. **PRICE 固有**：DS-DENSITY rowEP **40.16%**、pivotRow **40.30%** dense（远超 ~10% hypersparse 交叉点）→ hypersparse/row-wise PRICE 只会更慢；PRICE 成本是 40%-dense pivot 几何的固有代价，非算法低效（理论证伪 hypersparse-PRICE 杠杆，非试错）。
+5. **无退化杠杆**：degen_dual=216/5618（**3.8%**）、degen_primal=0、cycles=0、bound_flips=4002（71%，BFRT 已高效承担）。退化极低，无 anti-degeneracy Class-A 空间。
+
+**结论**：S7 在本 cohort **无 Class-A 算法杠杆**——pivot count 已与 HiGHS 持平、DSE 已 exact、退化极低（3.8%）、PRICE 在 40% 密度下固有。残余 **2.28x per-pivot gap** 分布于 native PRICE/BFRT/DSE vs HiGHS 成熟内核，属 SIMD/cache/fused-loop 微优化对标十年调优竞品，与本路线图算法范围正交、边际收益递减、且触碰 §12 禁止项（PRICE/CSC switching、absolute-dot fusion）。**cold 确认处于本架构算法地板**（第三次印证 DR-1/DR-2）。
+
+**决策**：不提 Class-A 热循环变更（§11 step 4 未满足：无可预测状态量+机制；pivot count 已持平即证无 pivot-reduction 空间）。S7 算法层收敛为"已达算法地板"结论。重开须满足 §12 条件（新理论/新架构成本项/新硬件事实），例如针对 40%-dense PRICE 的可验证 SIMD 独立 kernel（动态指令 AND bytes 同降，§13.3 gate），而非热循环投机。
+
+**替代方案**：
+- (a) 强推 PRICE/BFRT/DSE SIMD 微优化：拒绝——触 §12、正交算法范围、对标成熟竞品收益递减、已验证热循环高风险。
+- (b) 追 pivot count：拒绝——已与 HiGHS 持平（5618 vs 5243），无空间。
+- (c) 收敛为"算法地板"结论 + 记录证据（**采纳**）：诚实、evidence-backed、符合 §11/§13.2 纪律。
+
+**产品含义**：native dual simplex 的价值在 warm/B&C（S5 已证 6.85x node-reopt），非 cold 1v1 geomean。DR-1/DR-2/DR-3 三重独立印证 cold 近地板：S2 摊销、S4 顺序 DAG、S7 per-pivot 竞品对标。路线图 S0–S7 主线达成稳定内核 + 已证 warm 价值 + 诚实 cold 边界。
+
+
 
 
 
