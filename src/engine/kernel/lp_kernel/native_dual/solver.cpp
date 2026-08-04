@@ -463,6 +463,72 @@ struct MinorScratch {
 };
 thread_local MinorScratch g_ds_scratch;
 
+// S3 proposal step: build the primal transaction (basic-value changes) from the
+// two FTRAN images into `scratch.primal_changes`. The scratch is a parameter so
+// an S4 worker can propose on private storage; the arithmetic and order are the
+// production ones. Returns false with a message on an invalid or non-finite row.
+bool build_primal_transaction(MinorScratch& scratch, const State& state,
+                              const detail::IndexedVector& bfrt_delta,
+                              const detail::IndexedVector& direction,
+                              double primal_step, int leaving_row,
+                              double entering_bound, std::string& failure) {
+  std::vector<std::pair<int, double>>& primal_changes = scratch.primal_changes;
+  primal_changes.clear();
+  if (scratch.primal_delta.size() != static_cast<std::size_t>(state.m)) {
+    scratch.primal_delta.assign(static_cast<std::size_t>(state.m), 0.0);
+    scratch.primal_stamp.assign(static_cast<std::size_t>(state.m), 0);
+    scratch.primal_epoch = 0;
+  }
+  if (++scratch.primal_epoch == 0) {
+    std::fill(scratch.primal_stamp.begin(), scratch.primal_stamp.end(), 0);
+    ++scratch.primal_epoch;
+  }
+  scratch.primal_touched.clear();
+  auto add_primal_delta = [&](int row, double delta) {
+    if (row < 0 || row >= state.m) return false;
+    const std::size_t index = static_cast<std::size_t>(row);
+    if (scratch.primal_stamp[index] != scratch.primal_epoch) {
+      scratch.primal_stamp[index] = scratch.primal_epoch;
+      scratch.primal_delta[index] = 0.0;
+      scratch.primal_touched.push_back(row);
+    }
+    scratch.primal_delta[index] += delta;
+    return true;
+  };
+  for (std::size_t k = 0; k < bfrt_delta.index.size(); ++k) {
+    if (!add_primal_delta(bfrt_delta.index[k], -bfrt_delta.value[k])) {
+      failure = "packed primal transaction contains an invalid row";
+      return false;
+    }
+  }
+  for (std::size_t k = 0; k < direction.index.size(); ++k) {
+    if (!add_primal_delta(direction.index[k],
+                          -direction.value[k] * primal_step)) {
+      failure = "packed primal transaction contains an invalid row";
+      return false;
+    }
+  }
+  primal_changes.reserve(scratch.primal_touched.size() + 1);
+  for (const int row : scratch.primal_touched) {
+    const double delta = scratch.primal_delta[static_cast<std::size_t>(row)];
+    if (row != leaving_row && delta != 0.0) {
+      const double value = state.x_basic[row] + delta;
+      if (!std::isfinite(value)) {
+        failure = "packed primal transaction is non-finite";
+        return false;
+      }
+      primal_changes.emplace_back(row, value);
+    }
+  }
+  const double leaving_value = entering_bound + primal_step;
+  if (!std::isfinite(leaving_value)) {
+    failure = "packed primal transaction is non-finite";
+    return false;
+  }
+  primal_changes.emplace_back(leaving_row, leaving_value);
+  return true;
+}
+
 MinorOutcome minor_iteration(State& state, Statistics& statistics) {
   ++state.pricing_epoch;
   Leaving leaving;
@@ -778,63 +844,13 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
         entering_old_move == Move::Up ? state.bounds.lower[entering.col]
                                       : state.bounds.upper[entering.col];
     const double primal_step = remaining_delta / column_pivot;
-    std::vector<std::pair<int, double>>& primal_changes =
+    if (!build_primal_transaction(g_ds_scratch, state, bfrt_delta, direction,
+                                  primal_step, leaving.row, entering_bound,
+                                  failure)) {
+      return numerical_trouble(std::move(failure));
+    }
+    const std::vector<std::pair<int, double>>& primal_changes =
         g_ds_scratch.primal_changes;
-    primal_changes.clear();
-    if (g_ds_scratch.primal_delta.size() !=
-        static_cast<std::size_t>(state.m)) {
-      g_ds_scratch.primal_delta.assign(static_cast<std::size_t>(state.m), 0.0);
-      g_ds_scratch.primal_stamp.assign(static_cast<std::size_t>(state.m), 0);
-      g_ds_scratch.primal_epoch = 0;
-    }
-    if (++g_ds_scratch.primal_epoch == 0) {
-      std::fill(g_ds_scratch.primal_stamp.begin(),
-                g_ds_scratch.primal_stamp.end(), 0);
-      ++g_ds_scratch.primal_epoch;
-    }
-    g_ds_scratch.primal_touched.clear();
-    auto add_primal_delta = [&](int row, double delta) {
-      if (row < 0 || row >= state.m) return false;
-      const std::size_t index = static_cast<std::size_t>(row);
-      if (g_ds_scratch.primal_stamp[index] != g_ds_scratch.primal_epoch) {
-        g_ds_scratch.primal_stamp[index] = g_ds_scratch.primal_epoch;
-        g_ds_scratch.primal_delta[index] = 0.0;
-        g_ds_scratch.primal_touched.push_back(row);
-      }
-      g_ds_scratch.primal_delta[index] += delta;
-      return true;
-    };
-    for (std::size_t k = 0; k < bfrt_delta.index.size(); ++k) {
-      if (!add_primal_delta(bfrt_delta.index[k], -bfrt_delta.value[k])) {
-        return numerical_trouble(
-            "packed primal transaction contains an invalid row");
-      }
-    }
-    for (std::size_t k = 0; k < direction.index.size(); ++k) {
-      if (!add_primal_delta(direction.index[k],
-                            -direction.value[k] * primal_step)) {
-        return numerical_trouble(
-            "packed primal transaction contains an invalid row");
-      }
-    }
-    primal_changes.reserve(g_ds_scratch.primal_touched.size() + 1);
-    for (const int row : g_ds_scratch.primal_touched) {
-      const double delta =
-          g_ds_scratch.primal_delta[static_cast<std::size_t>(row)];
-      if (row != leaving.row && delta != 0.0) {
-        const double value = state.x_basic[row] + delta;
-        if (!std::isfinite(value)) {
-          return numerical_trouble(
-              "packed primal transaction is non-finite");
-        }
-        primal_changes.emplace_back(row, value);
-      }
-    }
-    const double leaving_value = entering_bound + primal_step;
-    if (!std::isfinite(leaving_value)) {
-      return numerical_trouble("packed primal transaction is non-finite");
-    }
-    primal_changes.emplace_back(leaving.row, leaving_value);
 
     const double _t_lu = g_ds_profile.enabled ? ds_clock() : 0.0;
     const bool _lu_ok =
