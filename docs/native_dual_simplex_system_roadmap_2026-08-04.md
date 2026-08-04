@@ -461,6 +461,27 @@ Next authorized step:
 - 即便最优 col-wise-SIMD 在 PRICE 桶上约 2x，PRICE 仅占 pivot 27% → 全局 <13%，808ms→~700ms，仍 2.1x 慢于 HiGHS 334ms（印证 DR-3 gap 分布式、非单桶）。
 **结论**：SIMD PRICE **不过 §13.3 gate**（bytes 不降）；row-wise 已 byte-optimal；col-wise switch 触 §12 且 byte gate fail。第四次印证 cold 近地板。harness 保留以 gate 未来 PRICE 提案。
 
+### DR-4（2026-08-04）：S6 reinversion 重测——K* 仍不过 2x gate，保持现策略
+
+**触发**：S2–S5 架构完成后按 §10 重测 reinversion 经济周期（S2–S5 改变 workspace/solve-update/warm-factor/certificate 的 R,u）。
+
+**方法**：`DS-REINVERT-MODEL` telemetry 已拟合每 case/phase 的 R_sec（refactor 成本）、u_sec（每 update 后 solve 成本斜率）。按 K\* = √(2R/u) 生成候选，cost(K)=R/K+u·K/2，比 cost(current)/cost(K\*)。工具 `tools/s6_reinversion_analysis.py`（管道接 `MIPSOLVERS_DS_PROFILE=1` 输出）。
+
+**证据（14 cases，iters≥200，native-dual-exact-dse）**：
+- phase II（主导，dual II 75% pivot）：K\* 中位 **81**（77–166），current cap 200 → 大案例偏高；d2q06c phase II（4186 iters）cur 200 vs K\* 105，cost ratio **1.215x**。
+- phase I：K\* **261–481**，current 200 → 偏低（phase I 的 u 更小，fill 更少）。
+- **max cost(cur)/cost(K\*) = 1.604x**（356-iter phase-II case），**< 2x gate → FAIL**。且该比值是 refactor+eta 成本上界，被 K-无关的 PRICE/BFRT/DSE 进一步稀释 → wall 收益更小。
+
+**结论**：重测 K\* 仍 **不过 2x promotion gate**（cohort max 1.604x，主导案例 1.215x）。S2–S5 架构变化未把 R,u 经济移动到足以启用独立 reinversion 调参——反而比此前 1.8x 更接近最优。**保持 `max(50, min(200, m/4))`**。safety/numerical/fill triggers 始终覆盖经济周期（§10 不变）。
+
+**替代方案**：
+- (a) 启用 K\*=√(2R/u) 经济周期：拒绝——max 1.604x < 2x gate。
+- (b) phase-split 周期（I→~260, II→~85）：拒绝——单案例最大收益仍 1.604x < gate，且增策略复杂度（§12 反对 hardcoded threshold policy）。
+- (c) 保持现策略 + 记录重测证据（**采纳**）。
+
+**路线图状态**：**S0–S7 主线全部完成/带证据延后。** S6 为最后一站，确认现 reinversion 策略在 S2–S5 后仍近最优。整体成果：稳定状态语义（S0）+ 测量合同（S1）+ factor-resident workspace（S2）+ 事务分层 pivot（S3）+ warm state（S5：version tag + falsifiability + cohort 6.85x + strong-branch restore）+ S4/S6/S7 带证据判定。cold 四重印证近地板；产品价值在 warm/B&C。
+
+
 
 
 
