@@ -297,7 +297,12 @@ bool rebuild_primal_state(State& state, Statistics& statistics,
     return false;
   }
   ++statistics.reinversions;
-  if (!reconstruct(state, failure)) {
+  // A primal major INVERT is a certification boundary: its reconstructed
+  // basic solution must satisfy the canonical equations under the same exact
+  // residual used by the termination audit. This also performs defect
+  // correction when a backward-stable FTRAN alone is not accurate enough for
+  // the primal feasibility contract.
+  if (!reconstruct(state, failure, true, true, true)) {
     failure = "primal major reconstruction failed: " + failure;
     return false;
   }

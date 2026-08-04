@@ -2011,6 +2011,7 @@ SimplexResult solve_lp_with_basis(const LPModel& lp,
       if (ps.solved_by_presolve || ps.use_reduced) {
         Eigen::VectorXd x_reduced;
         int iters = 0;
+        SolveStats reduced_stats;
         bool reduced_ok = true;
         if (ps.use_reduced) {
           // Solve the reduced LP directly via the impl (no re-entrant presolve).
@@ -2019,6 +2020,7 @@ SimplexResult solve_lp_with_basis(const LPModel& lp,
           reduced_ok = rr.result.stats.success;
           x_reduced = rr.result.x;
           iters = rr.result.stats.iterations;
+          reduced_stats = rr.result.stats;
         }  // else: reduced-to-empty -> postsolve an empty primal.
         if (reduced_ok) {
           Eigen::VectorXd x_orig;
@@ -2028,6 +2030,7 @@ SimplexResult solve_lp_with_basis(const LPModel& lp,
                                             x_orig, obj)) {
             SimplexResult r;
             r.result.x = std::move(x_orig);
+            r.result.stats = std::move(reduced_stats);
             r.result.stats.solver_name = "natDualSimplex+HiGHSpresolve";
             r.result.stats.success = true;
             r.result.stats.status = "Optimal";
@@ -2364,9 +2367,31 @@ static SimplexResult solve_lp_from_sf_impl(
   // Every failure is terminal here: retrying a different factor policy,
   // discarding a warm basis, or entering the legacy driver would hide a
   // violated algebraic invariant.
+  const auto native_kernel_start = std::chrono::steady_clock::now();
   native_dual::Result native =
       native_dual::solve(sf, opt, hint_match ? basis_hint : nullptr);
+  const double native_kernel_time_sec =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                    native_kernel_start)
+          .count();
   actual_iters = native.statistics.iterations;
+  out.result.stats.dual_phase_one_iterations =
+      native.statistics.dual_phase_one_iterations;
+  out.result.stats.dual_phase_two_iterations =
+      native.statistics.dual_phase_two_iterations;
+  out.result.stats.dse_initialization_solves =
+      native.statistics.dse_initialization_solves;
+  out.result.stats.certified_dse_btrans =
+      native.statistics.certified_dse_btrans;
+  out.result.stats.certified_dse_candidates =
+      native.statistics.certified_dse_candidates;
+  out.result.stats.certified_dse_rejections =
+      native.statistics.certified_dse_rejections;
+  out.result.stats.dse_initialization_time_sec =
+      native.statistics.dse_initialization_time_sec;
+  out.result.stats.certified_dse_time_sec =
+      native.statistics.certified_dse_time_sec;
+  out.result.stats.native_dual_kernel_time_sec = native_kernel_time_sec;
   MIPSOLVERS_LOG_DEBUG(
       "[NATIVE DUAL] status={} message='{}' m={} n={} iterations={} "
       "reinversions={} rank_repairs={} primal_inf={:.3e} dual_inf={:.3e}",

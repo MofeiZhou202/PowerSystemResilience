@@ -61,6 +61,9 @@ struct Statistics {
   int dse_reselections{0};
   int dse_initialization_solves{0};
   int dse_initialization_refinements{0};
+  int certified_dse_btrans{0};
+  int certified_dse_candidates{0};
+  int certified_dse_rejections{0};
   int devex_frameworks{0};
   int devex_restarts{0};
   int cycles_detected{0};
@@ -85,6 +88,8 @@ struct Statistics {
   double max_objective_drift{0.0};
   double max_cost_perturbation{0.0};
   double max_cost_shift{0.0};
+  double dse_initialization_time_sec{0.0};
+  double certified_dse_time_sec{0.0};
   double dual_phase_one_time_sec{0.0};
   double dual_phase_two_time_sec{0.0};
   double primal_phase_one_time_sec{0.0};
@@ -136,9 +141,9 @@ Result solve_phase2(const StandardFormLP& sf,
                     const SimplexOptions& options,
                     const SimplexBasis& basis_hint);
 
-// Full warm-start controller. A valid inherited basis must admit a legitimate
-// nonbasic bound-side assignment that is dual feasible. The solver never
-// shifts costs or discards a failed warm basis for a cold retry.
+// Full warm-start controller. A valid inherited basis may repair sparse
+// one-sided dual defects with cost shifts. It never discards a failed warm
+// basis for a cold retry.
 Result solve(const StandardFormLP& sf,
              const SimplexOptions& options,
              const SimplexBasis& basis_hint);

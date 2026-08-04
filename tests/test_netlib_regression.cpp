@@ -234,3 +234,22 @@ TEST_CASE("NETLIB: published optima via native kernels directly",
     }
   }
 }
+
+TEST_CASE("NETLIB: grow22 side reconstruction satisfies canonical residual",
+          "[netlib][regression][dual_simplex][reconstruction]") {
+  constexpr double kGrow22Objective = -1.60834336483e+08;
+  const LPModel lp = read_mps_as_lp(netlib_path("grow22"));
+  SimplexOptions opts;
+  opts.lp_kernel_backend = LpKernelBackend::ExperimentalNative;
+  opts.use_highs_presolve = true;
+  opts.max_iter = 100000;
+
+  const auto solved = solve_lp_with_basis(lp, opts);
+  INFO("status=" << solved.result.stats.status
+                  << " objective=" << solved.result.stats.objective
+                  << " residual=" << solved.result.stats.residual_inf);
+  REQUIRE(solved.result.stats.success);
+  CHECK(solved.result.stats.objective ==
+        Approx(kGrow22Objective).epsilon(1e-9).margin(1e-3));
+  CHECK(solved.result.stats.residual_inf <= 1e-7);
+}

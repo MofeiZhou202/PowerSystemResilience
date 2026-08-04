@@ -519,3 +519,531 @@ pseudocost shrinkage or node-estimate work. Each phase has mathematical,
 mechanism, search-quality, and paired wall-time acceptance gates. No probe
 count, reliability threshold, score weight, model-size threshold, or
 instance-specific parameter was changed.
+
+## 2026-08-03: rejected E3 cost-model PRICE
+
+The provisional `4 * row_ep.nnz >= m` selector and the CSC
+`cols >= 4096 && nnz >= 65536` parallel gate were removed. They treated row
+support density and model size as portable performance laws, which they are
+not. The replacement implements the section 6.1 cost model directly: each
+pivot computes the exact CSR work
+`sum(row_end[row] - row_start[row])`; one per-solve calibration observes CSR,
+serial CSC, and (when available) parallel CSC; later pivots select the smallest
+predicted cost from cumulative time / structural-work observations. No case
+name, density percentage, matrix-size cutoff, shift statistic, or environment
+policy enters the selector. The calibration pivot returns CSR output, so the
+measurement itself cannot change the first pivot's floating-point path.
+
+The vendored HiGHS 1.14 uses a 0.75 local `row_ep` density cutoff for column
+PRICE and `priceByRowWithSwitch` for sparse-to-dense result handling, backed by
+running result-density averages. The useful design lesson is local/historical
+state and mid-operation adaptation; its literal density constants are
+deliberately not copied. The rejected selector improved the structural proxy
+by using actual row work and identified hardware costs online.
+
+Kernel tests at 10/25/33/50/100%
+uniform support put the serial CSC crossover between 25% and 33%, while also
+demonstrating why that percentage must not become policy. The adaptive solve
+selected CSC 1032/1411 times on `scsd8` and 2312/2902 times on `25fv47`;
+three-repeat medians were 58.97 ms and 207.44 ms, respectively, with identical
+pivot counts across repeats and accurate objectives.
+
+The paired fixed NETLIB 24 x 3 gate rejected the change. With identical
+sentinel/warm-start code, CSR-only achieved 69/72 accurate results, 4.297 ms
+native geometric mean, and 0.757x versus HiGHS. Online adaptive PRICE retained
+69/72 but measured 4.472 ms and 0.743x: a 4.1% native regression. The first
+pivot's extra kernel evaluations and every-pivot clock reads cost more across
+short models than CSC recovered on the dense long paths. Production wiring,
+timing state, and selector tests were removed; only the forced CSC kernels,
+rounding-envelope test, and opt-in synthetic benchmark remain. Raw paired
+results are `reports/netlib_e3_{csr,cost_model}_repeat3.{csv,json}`. This
+rejection is theory-driven: it falsifies the assumed
+amortization term, rather than adding another case or size threshold.
+
+The threshold-free HiGHS-style follow-up was also rejected. Row-wise PRICE
+switched from stamped accumulation when `current_support + next_row_nnz >= n`,
+a structural saturation condition rather than a tuned density. Per-column
+double results stayed bit-exact because row accumulation order was unchanged,
+but switching required O(n) zero materialization and O(n) result export. The
+fixed cohort remained 69/72 accurate and measured 4.402 ms native geometric
+mean, 2.4% slower than the 4.297 ms CSR-only control. The production switch
+was removed. Raw results are
+`reports/netlib_e3_row_switch_repeat3.{csv,json}`. E3 is closed until a design
+eliminates the dense traffic term; changing its saturation condition would be
+threshold retuning, not a new theory.
+
+## 2026-08-03: E4 reinversion measurement, policy unchanged
+
+E4 added opt-in diagnostic telemetry without changing the simplex path when
+`MIPSOLVERS_DS_PROFILE` is unset. HFactor now accumulates wall time and
+synthetic work for every indexed solve while profiling. The dual driver takes
+counter snapshots around a complete minor iteration, so the fitted solve cost
+includes unit BTRAN, pivotal-column FTRAN, BFRT FTRAN, and DSE auxiliary
+FTRAN. The first version measured only the first two and was rejected as an
+incomplete lower bound.
+
+The estimator groups observations by exact `updates_since_rebuild` age, fits
+the age means, and separates Dual Phase I from Phase II. Scheduled rebuild
+cost uses only `UpdateLimit` events. HFactor `SyntheticWork`, numerical
+trouble, and terminal certification are reported as safety reinversions and
+remain dominant over any future schedule. Wall \(R\) covers the full major
+rebuild. Synthetic \(R\) is explicitly reported as `R_build_tick` because
+the dense reconstruction solves do not expose synthetic-clock work. This
+asymmetry is another reason synthetic \(T^*\) is corroboration rather than the
+wall-time decision metric.
+
+Three-repeat results were stable after warm-up. Phase-II synthetic fits had
+\(R^2\) of 0.962 (`scsd8`), 0.970 (`25fv47`), 0.938 (`degen3`), 0.977
+(`d2q06c`), and 0.842 (`grow7`). Corresponding
+`(scheduled interval, T_wall, T_tick)` values were about `(99, 89, 52)`,
+`(168, 94, 54)`, `(200, 141, 93)`, `(200, 133, 72)`, and `(50, 72, 48)`.
+Synthetic ticks robustly establish linear update-age growth, but their fixed
+operation weights are not calibrated to this machine's relative INVERT and
+triangular-solve wall costs. They are therefore structural corroboration, not
+the optimization objective.
+
+The predeclared policy gate required wall \(T^*\) to differ from the effective
+interval by more than 2x on cases totaling over 10% of suite time. No measured
+case met it; the largest ratio was about 1.8x on `25fv47`. The existing
+`max(50, min(200, m/4))` update limit is retained. No interval, clamp,
+matrix-size condition, or case-specific rule was added.
+
+## 2026-08-04: rejected strict-traffic PRICE/BFRT kernels
+
+Three threshold-free Class-P experiments tested whether a strict reduction in
+hot memory operations is sufficient to improve PRICE/BFRT.
+
+First, BFRT candidate records dropped an unused copied margin and moved taboo
+lookup from candidate construction to Harris-eligible candidates. Scan
+evaluation records also dropped fields used only inside their producing loop.
+Candidate order, breakpoint arithmetic, sorting keys, capacity summation, and
+taboo selection were unchanged. On `d2q06c`, five-repeat medians were
+1397.5 ms control, 1426.4 ms experiment, and 1398.7 ms restored control: a
+reproducible 2.1% regression. The layout change was removed.
+
+Second, PRICE used its output index vector directly as the touched list and
+compacted it in place. If \(S\) columns are touched and \(K\) survive
+tightening, index writes changed from \(S+K\) to \(S+\text{moves}\), with
+\(\text{moves}\le K\). Despite this non-increasing traffic proof, the fixed
+24x3 cohort retained 69/72 accuracy but moved from 4.277 to 4.453 ms native
+geometric mean and from 0.737x to 0.720x versus HiGHS. It was removed.
+
+Third, the stamped CSR accumulator was replaced by a HiGHS-style value-marked
+accumulator. Export cleared every touched value, eliminating the stamp array
+and one stamp read per visited matrix term. Since a literal `value == 0`
+test duplicates an index after exact cancellation and later revival, negative
+zero represented 'touched but currently zero' while positive zero represented
+'untouched'. A dedicated cancellation/reuse test passed, and all solver paths
+remained identical. The cohort nevertheless measured 4.329 ms and 0.733x,
+1.2% slower in native time than the same 4.277 ms control. The sign test and
+touched-value clear offset the removed stamp traffic; this implementation and
+its test were removed.
+
+Raw paired reports are
+`reports/netlib_e3_{strict_traffic_control,inplace_index_exp,no_stamp_exp}_repeat3.{csv,json}`.
+These results close scalar bookkeeping rearrangements around the existing CSR
+kernel. The next proposal must remove traffic and dynamic instructions
+together, or establish a locality transformation with a kernel benchmark
+before entering the solver.
+
+## 2026-08-04: retained HFactor-backed DSE intersection extraction
+
+The next experiment moved from scalar PRICE bookkeeping to an ownership
+boundary already used by HiGHS. `HVector` retains each FTRAN result in a dense
+backing array; HiGHS' DSE update reads that array on the pivotal-column
+support. Native previously exported the entire packed auxiliary FTRAN result,
+cleared an $m$-entry `dense_rho`, scattered the packed result back into it,
+and then gathered only the pivotal-column coordinates needed by the
+Goldfarb-Reid recurrence.
+
+The new HFactor backend operation solves the same indexed RHS and extracts the
+result directly on the previously captured pivotal FTRAN pattern. For
+$d=|\operatorname{supp}(B^{-1}a_q)|$ and
+$r=|\operatorname{supp}(B^{-1}B^{-T}e_p)|$, it replaces the $m$-entry clear,
+packed $r$-entry export, and $r$-entry scatter with one contiguous
+$d\le m$ extraction. It introduces no threshold or dispatch policy. FTRAN,
+recurrence, rounding, and commit order are unchanged; the indexed-solve wall
+and synthetic-work telemetry still records the operation.
+
+A coordinate differential test covers a permuted basis and compares the
+extracted sequence with ordinary packed FTRAN lookup. The fixed 24x3 A/B/A
+cohort produced native geometric means of 4.256 ms control, 4.234 ms direct
+extraction, and 4.263 ms restored control. Accuracy remained 69/72. After
+deleting only `runtime_ms`, all native JSON run records were identical across
+control and experiment, including iterations, status, objective, and
+feasibility audit. The approximately 0.6% fleet improvement is retained
+because it follows a strict materialization-elimination proof and passes the
+suite gate, not because of any per-case result.
+
+Raw A/B/A results are
+`reports/netlib_dse_extract_{control_a,experiment,control_c}_repeat3.{csv,json}`.
+
+## 2026-08-04: grow22 canonical reconstruction fixed, 72/72
+
+The three reported NETLIB failures were three repeats of one deterministic
+failure, `grow22`, not three different instances. At the scheduled rebuild
+after pivot 220, HFactor's BTRAN residual was (6.7\times10^{-16}), while the
+canonical (Ax=b) residual was (6.1467\times10^{-8}) against the fixed
+(10^{-8}) limit.
+
+The failure came from an incomplete audit-cache dependency. Primal
+reconstruction is (x_B(B,s)=B^{-1}(b-A_Nx_N(s))), but the cached audit key
+contained only the factor generation (B). `major_rebuild` audited the old
+side vector, changed boxed nonbasics to their dual-feasible sides, then skipped
+correction of the new primal reconstruction because the factor generation had
+not changed. Bound-side reconstruction now requests an exact residual audit,
+so a cached result for the preceding (s) cannot be reused.
+
+One correction reduced the failing residual to (1.4901\times10^{-8}) but did
+not cross the unchanged limit because the update to a large basic value was
+quantized by its double ULP. The former one-step correction was therefore
+completed into monotone iterative refinement. Each accepted step recomputes
+the residual in long double, must strictly reduce its infinity norm, and still
+fails closed on stagnation or after the machine-precision safety bound. No
+feasibility tolerance or benchmark acceptance threshold changed.
+
+The new `grow22` regression requires native success, the published objective,
+and audited residual. The full 24x3 cohort is now 72/72 successful and
+accurate for both Native and HiGHS. Native geometric mean is 4.788 ms versus
+3.589 ms for HiGHS, or 0.750x. The old 69/72 geometric mean counted the early
+failure runtime and is retired as a performance baseline. Raw results are
+`reports/netlib_correctness_72_repeat3.{csv,json}`.
+
+## 2026-08-04: rejected BFRT RHS materialization removal
+
+The next experiment tested the remaining `(row, contribution)` materialization
+in the BFRT flip RHS. For (L=\sum_{j\in F}\operatorname{nnz}(A_j)) and
+(S=|\cup_{j\in F}\operatorname{supp}(A_j)|\le L), a stamped row accumulator
+first replaced (O(L)) pair writes, (O(L\log L)) sorting, and (O(L))
+reduction reads by (O(L)) accumulation and (O(S\log S)) index sorting. A
+second variant exported rows in deterministic first-touch order and removed
+the remaining sort, giving (O(L+S)). Neither variant used a case, density,
+or dimension threshold.
+
+Both variants were Class A because the old `std::sort` did not preserve the
+order of equal-row contributions. They passed the complete correctness gates
+and the fixed cohort remained 72/72 accurate. The sorted-stamp A/B/A native
+geometric means were 4.861 ms experiment, 4.851 ms control, and 4.836 ms
+experiment; the experiment mean differed from control by only about 0.05%.
+The no-sort variant measured 4.849 ms versus the 4.851 ms control. These are
+performance-neutral, while four NETLIB pivot paths changed, so both scalar
+implementations were removed.
+
+A stronger ownership-boundary variant mirrored HiGHS `collectAj`: HFactor
+collected flip columns directly into its reusable `HVector`, performed the
+materialized-coverage projection there, and consumed the same backing storage
+for FTRAN. This additionally removed the indexed RHS export and HFactor
+scatter. A permuted-basis coordinate differential test and all correctness
+gates passed, but the fixed cohort measured 4.858 ms native and 0.740x versus
+HiGHS, below the 4.851 ms / 0.744x control. It too was removed.
+
+The result is a negative cost attribution, not permission to add a selector:
+BFRT RHS construction is not a fleet-level bottleneck in this cohort even
+when all of its avoidable materialization is deleted. Pricing thresholds or
+case-specific dispatch cannot repair an absent aggregate payoff. Raw reports
+are `reports/netlib_bfrt_{stamped_rhs,stamped_rhs_control,stamped_rhs_experiment_c,first_touch_rhs,hfactor_direct}_repeat3.{csv,json}`.
+
+## 2026-08-04: independent branch-free BFRT prefilter proof
+
+The next L4 experiment isolates the Phase-II cheap BFRT classification before
+`dot_error_bound`. The scalar reference follows the production strict
+comparison order. The AArch64 NEON kernel processes two packed PRICE entries,
+computes signed alpha, range, stability rejection, cheap rejection,
+certification, and exact-required masks without candidate-dependent branches,
+and writes two doubles plus one flag byte per lane. Two adjacent flag bytes
+are committed by one packed 16-bit store. The kernel is standalone and is not
+linked into `pricing.cpp`.
+
+Correctness is exact for every flag and bitwise for finite/signed-zero alpha
+and range. Independent expectations cover all-basic, all-fixed, odd lengths,
+`alpha == 0`, `alpha == stable_tolerance`, `alpha == cheap_error`, negative
+`alpha + cheap_error == 0`, and NaN/Inf in every floating input class. Lanes
+marked exact-required are explicitly returned to the existing scalar sparse
+dot; the experiment does not approximate its error bound.
+
+The Apple Clang 21 `-O3` disassembly gives seven scalar path lengths of
+37/40/56/56/57/58/58 instructions and a fixed NEON body of 80 instructions
+per two lanes. Weighting those blocks by the measured category counts for
+1,048,576 lanes gives 58,083,022 scalar versus 41,943,064 NEON dynamic machine
+instructions, a 27.788% reduction. The semantic array model gives 86,974,187
+versus 57,671,680 bytes, a 33.691% reduction. This model is compiler-gated and
+reports unavailable for an odd scalar tail or an unaudited toolchain; it does
+not present predicate counts as total machine instructions or claim hardware
+performance-counter data.
+
+Five serial runs of
+`./tests/native_dual_bfrt_simd_benchmark 1048576 20 7` all passed. Their
+seven-sample median speedups were 1.326x, 1.393x, 1.375x, 1.349x, and 1.332x,
+with a 1.349x median across runs. The byte proof is distribution-dependent
+while inactive lanes remain in the input: its exact condition is
+`31*active > 2*basic + fixed`. The production design must therefore make
+PRICE emit active-only packed support, which makes the 31-byte per-lane output
+reduction structural and threshold-free. Only after the scalar exact fallback
+and deterministic merge are included may this enter the full correctness and
+24x3 fleet gates. No complete-solver speedup is claimed yet.
+
+## 2026-08-04: production active PRICE/BFRT SIMD retained
+
+The production integration keeps the complete PRICE pivotal row: Devex needs
+basis-reference coefficients and reduced-cost commit needs the full update.
+The PRICE producer now records, during that same export loop, the packed
+positions whose columns are both nonbasic and movable. This four-byte position
+stream preserves the exact PRICE order and does not duplicate pivot values.
+BFRT therefore begins with an active-only domain without a second basic/move
+scan or any density, size, or case policy.
+
+In Phase II the two-lane NEON prefilter writes signed alpha and one flag byte
+per active lane; the later deferred-range change removed its derived range
+stream. Stability-prefiltered and cheap-rejected lanes merge without a full
+evaluation record; only `needs_exact` lanes call the unchanged sparse
+`dot_error_bound`. Cheap-certified lanes retain the same error coefficient
+product. Candidate insertion, all capacity sums, taboo lookup, and subsequent
+BFRT ordering remain in original PRICE order. Dual Phase I retains the prior
+scalar exact path. The former `BfrtScanEvaluation[]` materialization is not
+created on Phase II.
+
+The producer regression proves that the complete pivotal row is byte-for-byte
+unchanged and that the active positions preserve tiny-drop and PRICE order.
+All correctness gates passed: 9,961 dual-simplex assertions across 64 cases,
+41 LP assertions, 224 NETLIB assertions, 409 numerical-stability assertions,
+and zero SCUC must-pass failures.
+
+A temporary experiment-only off switch compared the original complete scan
+against the integrated path in one binary and was removed afterward. The fixed
+24x3 A/B/A native geometric means were 5.140 ms control, 4.803 ms experiment,
+and 5.187 ms control. Relative to the geometric mean of the two controls, the
+retained implementation is 7.5% faster. Every run was 72/72 successful and
+accurate; after deleting `runtime_ms`, all three JSON run arrays were exactly
+identical. The final paired run measured Native 4.780 ms versus HiGHS 3.727 ms,
+or 0.780x. Raw data are
+`reports/netlib_bfrt_simd_{control_a,experiment_b,control_c,production}_repeat3.{csv,json}`.
+
+## 2026-08-04: retained production structural exact DSE
+
+The next pivot-count experiment separates three cold edge-weight policies:
+explicit Devex, structural exact DSE, and full exact DSE. For a basis whose
+column assigned to row \(i\) has exactly one nonzero \(d_i\) in that row,
+\(B\) is diagonal in basis order and the exact DSE weight is
+\(\lVert B^{-T}e_i\rVert_2^2=1/d_i^2\). The structural policy uses that
+identity and otherwise starts Devex. The full policy uses the same identity
+when applicable and checked BTRAN weights otherwise. This is a structural
+proof boundary with no case, size, density, or timing threshold.
+
+All 144 structural/full NETLIB runs took the analytic path: initialization
+solve count was zero, and the two policies were identical on pivots, status,
+objective, and audited feasibility in all 72 paired runs. The formal
+three-way-plus-HiGHS measurement was:
+
+| Policy | Accurate | GeoMean ms | Mean pivots | Mean init ms | Kernel ms/pivot |
+|---|---:|---:|---:|---:|---:|
+| HiGHS simplex | 72/72 | 3.587 | - | - | - |
+| Native Devex | 72/72 | 4.658 | 824.7 | 0.00063 | 0.02003 |
+| Native structural exact DSE | 72/72 | 4.090 | 639.0 | 0.00158 | 0.02007 |
+| Native full exact DSE | 72/72 | 3.977 | 639.0 | 0.00159 | 0.01940 |
+
+The structural/full wall-time difference is measurement-order noise because
+their mathematical and discrete paths are identical. Across per-case medians,
+structural DSE won 19 cases and lost 5; pivots decreased on 14, increased on
+4, and were zero under both policies on 5. The largest structural wins were
+`lotfi` (0.621x Devex time) and `d2q06c` (0.654x, 8,510 to 5,609 pivots).
+The largest regressions were `stocfor2` (1.187x, 1,041 to 1,054 pivots) and
+`grow22` (1.035x, 732 to 810 pivots). These losses are evidence, not selectors.
+
+The independent 24x3 A/B/A bracket measured 4.677 ms Devex, 4.341 ms
+structural DSE, and 4.621 ms Devex. The control geometric mean was 4.649 ms,
+so structural DSE reduced elapsed time by 6.61%; controls differed by 1.19%.
+Mean pivots fell 22.52%, while geometric kernel time per pivot rose 3.59%.
+Initialization added only 0.00109 ms over the controls. This attributes the
+fleet gain to better pivot selection rather than a per-pivot kernel change.
+
+The first formal run exposed three repeated failures on `grow22`, all the same
+deterministic terminal residual. Primal cleanup performed a major INVERT and
+reconstruction, but its sampled residual audit did not share the long-double
+termination contract. Primal major reconstruction now requests the exact
+canonical audit and monotone defect correction immediately. The fixed
+\(10^{-8}\) feasibility tolerance was not changed; `grow22` became 9/9
+accurate in the targeted rerun with the same DSE pivot count, after which the
+complete correctness suite and formal cohort passed.
+
+Raw results are `reports/netlib_dse_threeway_repeat3.{csv,json}` and
+`reports/netlib_dse_aba_{A1_devex,B_structural,A2_devex}_repeat3.{csv,json}`.
+These first measurements justified a production gate, but did not themselves
+select a policy.
+
+The production gate used two fixed binaries rather than an in-process switch:
+the old production Devex binary bracketed the new production binary. Native
+geometric means were 4.674 ms Devex, 4.369 ms structural exact DSE, and 4.664
+ms Devex. Their control geometric mean is 4.669 ms, making the retained policy
+6.42% faster; the controls differ by 0.21%. Mean pivots reproduced the earlier
+824.7 to 639.0 change, and the structural initialization averaged 0.00142 ms
+with zero BTRAN. Every native and HiGHS run was accurate (72/72 per bracket),
+and every native status was Optimal. The experiment bracket measured HiGHS at
+3.559 ms, moving Native/HiGHS from 0.766x in the first control to 0.814x.
+
+Production now uses the analytic weights only when every cold basis column is
+an assigned-row singleton. Failure of that proof condition deterministically
+falls back to Devex; warm cached-weight handling is unchanged. Explicit
+Devex/StructuralExact/FullExact/CertifiedExact modes remain available for
+controlled experiments, but CertifiedExact is not a production path. Raw
+production-gate data are
+`reports/netlib_structural_production_{A_devex,B_exact,C_devex}_repeat3.{csv,json}`.
+
+The structural identity was subsequently extended to uncached warm hints. The
+proof depends only on the current assigned-row-singleton basis, not on whether
+the basis is cold. Matching cached DSE weights remain first priority;
+Production and explicit StructuralExact use analytic weights on a structural
+uncached hint, while a nonstructural hint and explicit nonproduction warm modes
+retain Devex. Tests cover both branches and zero initialization BTRAN.
+
+## 2026-08-04: rejected certified exact CHUZR
+
+The recursive DSE heap has a genuine proof gap: after its selected row is
+recomputed by BTRAN, the implementation does not re-establish that the row is
+the global exact-DSE maximizer. A benchmark-only fourth mode closed that gap
+without copying HiGHS' empirical `updated_weight >= 0.25 * exact_weight`
+decision. From (b_i^TB^{-T}e_i=1), the checked-BTRAN residual contract, and
+the residual dot-product rounding envelope, it derives a positive lower bound
+on every candidate weight and therefore an upper bound on every candidate
+merit. It evaluates candidates by descending upper bound and stops only after
+the best checked merit dominates all unvisited bounds.
+
+The brute-force exact-merit oracle and the complete dual-simplex suite passed.
+The four-case targeted performance gate did not:
+
+| Case | Devex pivots | Structural pivots | Certified pivots | Certified total ms | Certified BTRAN |
+|---|---:|---:|---:|---:|---:|
+| `grow22` | 732 | 810 | 806 | 321.59 | 33,444 |
+| `fit1d` | 67 | 70 | 70 | 7.06 | 604 |
+| `recipe` | 35 | 36 | 36 | 0.25 | 138 |
+| `stocfor2` | 1,041 | 1,054 | 1,061 | 1,802.75 | 125,306 |
+
+All 36 results were accurate. The four-case geometric means were 31.460 ms
+CertifiedExact, 5.529 ms Devex, and 5.499 ms StructuralExact. Exact selection
+did not remove any of the four pivot regressions, while the proof-safe lower
+bound was too loose to avoid many BTRANs on large bases. This falsifies the
+hypothesis that eager global weight correction is the missing algorithmic
+improvement. The mode and its telemetry remain benchmark-only for
+reproducibility; production never selects it. Per the staged gate, no
+full 24x3 A/B/A was run. Future work must either derive a structural bound that
+reduces the solve count asymptotically or target a different source of pivot
+quality; empirical selectors are out of scope. Raw data are
+`reports/netlib_certified_dse_targeted_repeat3.{csv,json}`.
+
+## 2026-08-04: rejected CHUZR row-stream fusion
+
+The next Class-P experiment removed `changed_primal_rows`: after committing a
+`primal_changes` entry, it immediately refreshed that row's lazy CHUZR heap.
+This preserved the producer row order and every heap operation while deleting
+one index write, one compact-index read, one loop, and the redundant search for
+the already-present leaving row. It contained no case, size, or density rule.
+
+On `d2q06c`, a 3-repeat control/experiment/control bracket measured geometric
+means of 1275.619 / 1279.995 / 1278.427 ms with exactly 8,510 pivots and accurate
+results throughout. Relative to the 1277.022 ms control geometric mean, the
+experiment regressed 0.23%. The compact four-byte row stream evidently pays
+for itself by shortening the commit dependency chain and improving locality
+over revisiting `pair<int,double>` records. The implementation was removed;
+the failed targeted gate intentionally stopped before 24x3.
+
+## 2026-08-04: retained redundant CHUZR search removal
+
+The rejected row-stream fusion was decomposed before closing the work. Since
+the transaction builder always appends `leaving.row` and the compact row stream
+copies every `primal_changes` row in order, the subsequent `std::find` for that
+same row and its fallback heap insertion are unreachable. Removing only this
+search preserves the compact consumer layout that the fusion lost. It changes
+no heap push, merit, row order, tie break, or pivot.
+
+A full Native+HiGHS B/A/B measured Native geometric means of 4.612 / 4.716 /
+4.685 ms and simultaneous HiGHS means of 3.512 / 3.580 / 3.573 ms. The effect
+is below stable wall-time resolution, so no speedup is claimed. Every bracket
+was 72/72 accurate. With timing fields and per-case load time removed, all
+three JSON documents were byte-identical. The change is retained because it
+strictly removes the per-pivot linear instruction stream without changing the
+memory layout; it introduces no threshold or runtime policy. Raw data are
+`reports/netlib_chuzr_{no_extra_scan_repeat3,extra_scan_control_repeat3,
+no_extra_scan_repeat3_c}.{csv,json}`.
+
+## 2026-08-04: retained DSE value-only transaction stream
+
+The pivotal-column `direction.index` already owns the ordered rows updated by
+the Goldfarb-Reid recurrence and remains valid through factor update and
+commit. The old DSE transaction duplicated each row in a 16-byte
+`{row,value}` record. The retained form materializes only the eight-byte values
+for nonpivotal rows plus one pivotal value, validates every value before any
+state mutation, and commits against the original direction stream. It deletes
+at least 12 bytes of transaction traffic per nonpivotal row without changing
+arithmetic, order, rollback boundaries, or pivots.
+
+The complete correctness suite passed. The 24x3 paired gate was 72/72 accurate
+with 639.0 mean pivots and measured Native 4.355 ms versus HiGHS 3.542 ms
+(0.813x). The preceding production measurement was 4.369 ms, so no wall-time
+speedup is claimed; retention follows from strict stream dominance and
+identical discrete paths. Raw data are
+`reports/netlib_dse_value_stream_full_repeat3.{csv,json}`.
+
+## 2026-08-04: rejected PRICE-owned BFRT absolute dot
+
+A producer-fusion experiment accumulated `sum_i |row_ep_i A_ij|` next to every
+signed PRICE accumulator. BFRT could then evaluate the unchanged exact error
+formula without materializing a dense row or rereading `needs_exact` CSC
+columns. This moved selective consumer work into the universal producer: every
+PRICE matrix term gained an absolute-value RMW and dependency.
+
+On `d2q06c`, fixed control/experiment/control geometric means were 857.9 /
+898.2 / 855.1 ms. The experiment regressed 4.9% against the 856.5 ms control
+geometric mean, increased kernel time per pivot from about 0.150 to 0.156 ms,
+and changed the path from 5,609 to 5,678 pivots because the absolute sum used
+PRICE rather than CSC accumulation order. All runs were accurate, but the
+traffic/instruction gate failed, so all production code was removed. Raw data
+are `reports/netlib_price_abs_d2q_{control_a,experiment_b,control_c}.{csv,json}`.
+
+## 2026-08-04: retained deferred BFRT range
+
+The branch-free Phase-II prefilter no longer exports a dense `range` value
+stream. `range=upper-lower` is derived from immutable model bounds, and only
+positive signed-alpha lanes consume it for capacity and candidates. The
+original-order merge now computes it once inside that positive branch. This
+unconditionally deletes 16 workspace bytes per active lane and also skips 16
+bound bytes plus one subtraction on every nonpositive lane. Scalar
+`dot_error_bound`, flags, capacity accumulation, candidate order, and all BFRT
+transaction semantics are unchanged.
+
+`d2q06c` kept the 5,609-pivot path. All dual-simplex, LP, NETLIB, numerical-
+stability, and SCUC must-pass gates passed. The full 24x3 run was 72/72 accurate
+for both Native and HiGHS, with 639.0 mean Native pivots. Native measured 4.358
+ms versus 3.502 ms for HiGHS (0.804x), within noise of the previous 4.355/3.542
+ms run. The change is retained for strict traffic dominance, not a wall-time
+claim. Raw data are
+`reports/netlib_bfrt_deferred_range_full_repeat3.{csv,json}`.
+
+An earlier attempt in the same iteration stored prevalidated reduced costs in
+`pivot_row.value` so commit could avoid recomputation. It reduced the profiled
+`rcUpdate` bucket from about 0.04 seconds to near zero on `d2q06c`, but changed
+the path from 5,609 to 5,592 pivots because the committed expression moved to
+a different floating contraction/rounding context. It failed the discrete-
+path gate and was fully removed.
+
+## 2026-08-04: retained minimal BFRT candidate state
+
+An accepted candidate satisfies `alpha = leaving_side * move_sign * pivot > 0`.
+Both signs are exactly +/-1 and remain live in state, so the selected pivot is
+recovered bitwise as `leaving_side * move_sign * alpha`. Margin is already
+represented by `breakpoint=margin/alpha` and has no later consumer. Candidate
+records therefore retain only column, alpha, breakpoint, range, and taboo
+metadata.
+
+This reduces the Apple AArch64 candidate layout from 56 to 40 bytes, deletes
+the Phase-II merge's candidate-only pivotal-row read, and removes the copied
+pivot from the Phase-I evaluation record. It does not repeat the earlier
+rejected compound experiment: taboo lookup remains in its established place,
+so no hash-probe dependency chain or candidate order changes.
+
+Exact positive/negative pivot tests and the complete correctness suite passed.
+`d2q06c` retained 5,609 pivots; the profiled BFRT bucket moved from about 0.16
+to 0.15 seconds. The full 24x3 gate was 72/72 accurate for Native and HiGHS,
+with 639.0 mean Native pivots. Native/HiGHS geometric means were 4.359/3.568 ms
+(0.819x). Normalized non-time reports were identical to the preceding
+production gate. Retention is based on the minimal-sufficient-state proof, not
+a wall-time claim. Raw data are
+`reports/netlib_bfrt_minimal_candidate_full_repeat3.{csv,json}`.

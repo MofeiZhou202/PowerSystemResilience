@@ -58,10 +58,12 @@ bool initialize_cost_shifted_dual_start(State& state, Statistics& statistics,
                                         std::string& failure);
 bool initialize_exact_edge_weights(State& state, Statistics& statistics,
                                    std::string& failure);
-// Cold-start dual pricing-weight policy: scalable Devex by default, with exact
-// DSE available only through SimplexOptions::exact_dse_initialization.
-bool initialize_cold_edge_weights(State& state, Statistics& statistics,
-                                  std::string& failure);
+// Uncached dual pricing-weight policy. Production uses analytic exact DSE on a
+// proved assigned-row singleton basis and otherwise starts scalable Devex;
+// the compatibility option requests checked full exact initialization only on
+// cold starts.
+bool initialize_uncached_edge_weights(State& state, Statistics& statistics,
+                                      std::string& failure);
 void initialize_devex_framework(State& state, Statistics& statistics);
 bool initialize_stabilized_cost(State& state, Statistics& statistics,
                                 std::string& failure);

@@ -200,6 +200,74 @@ if(TARGET ipopt_local)
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/ipopt/config")
 endif()
 
+# ── Hermetic oneMKL static payload ───────────────────────────────────────────
+# ipopt_local is a static archive, so its MKL symbols are resolved only when a
+# consumer links the final executable. Copy the static libraries and headers
+# into the package and recreate MIPSolvers::MKL from package-relative paths.
+set(_tp_mkl_library_names "")
+set(_tp_mkl_version "")
+if(MIPSOLVERS_HAVE_MKL_PARDISO)
+  set(_tp_mkl_include_dir "")
+  foreach(_tp_mkl_inc IN LISTS MIPSOLVERS_MKL_INCLUDE_DIRS)
+    if(EXISTS "${_tp_mkl_inc}/mkl_pardiso.h")
+      set(_tp_mkl_include_dir "${_tp_mkl_inc}")
+      break()
+    endif()
+  endforeach()
+  if(NOT _tp_mkl_include_dir)
+    message(FATAL_ERROR
+      "MKL Pardiso is enabled, but no include directory contains mkl_pardiso.h")
+  endif()
+
+  install(DIRECTORY "${_tp_mkl_include_dir}/"
+    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/mipsolvers-deps/oneapi-mkl"
+    FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp")
+
+  foreach(_tp_mkl_lib IN LISTS MIPSOLVERS_MKL_LIBRARIES)
+    if(IS_ABSOLUTE "${_tp_mkl_lib}" AND EXISTS "${_tp_mkl_lib}")
+      get_filename_component(_tp_mkl_name "${_tp_mkl_lib}" NAME)
+      install(FILES "${_tp_mkl_lib}"
+        DESTINATION "${CMAKE_INSTALL_LIBDIR}/mipsolvers-deps/oneapi-mkl")
+      list(APPEND _tp_mkl_library_names "${_tp_mkl_name}")
+    endif()
+  endforeach()
+  if(NOT _tp_mkl_library_names)
+    message(FATAL_ERROR
+      "MKL Pardiso is enabled, but no concrete MKL library files can be packaged")
+  endif()
+
+  if(MIPSOLVERS_MKL_ROOT)
+    if(NOT EXISTS "${MIPSOLVERS_MKL_ROOT}/manifest.cmake" OR
+       NOT EXISTS "${MIPSOLVERS_MKL_ROOT}/SHA256SUMS" OR
+       NOT IS_DIRECTORY "${MIPSOLVERS_MKL_ROOT}/licensing")
+      message(FATAL_ERROR
+        "The local oneMKL bundle is missing manifest.cmake, SHA256SUMS, or "
+        "licensing/. Recreate it with third_party/stage_onemkl.ps1.")
+    endif()
+    include("${MIPSOLVERS_MKL_ROOT}/manifest.cmake")
+    if(NOT MIPSOLVERS_LOCAL_MKL_MANIFEST_VERSION STREQUAL "1" OR
+       NOT MIPSOLVERS_LOCAL_MKL_LINKAGE STREQUAL "static" OR
+       NOT MIPSOLVERS_LOCAL_MKL_THREADING STREQUAL "sequential")
+      message(FATAL_ERROR
+        "Unsupported oneMKL bundle manifest at ${MIPSOLVERS_MKL_ROOT}")
+    endif()
+    if(WIN32 AND
+       (NOT MIPSOLVERS_LOCAL_MKL_ARCHITECTURE STREQUAL "x64" OR
+        NOT CMAKE_SIZEOF_VOID_P EQUAL 8))
+      message(FATAL_ERROR
+        "The staged oneMKL bundle is x64-only and cannot be packaged for the "
+        "current Windows target")
+    endif()
+    set(_tp_mkl_version "${MIPSOLVERS_LOCAL_MKL_VERSION}")
+    install(DIRECTORY "${MIPSOLVERS_MKL_ROOT}/licensing/"
+      DESTINATION "${CMAKE_INSTALL_DATADIR}/mipsolvers-third-party/licenses/oneapi-mkl")
+    install(FILES
+      "${MIPSOLVERS_MKL_ROOT}/manifest.cmake"
+      "${MIPSOLVERS_MKL_ROOT}/SHA256SUMS"
+      DESTINATION "${CMAKE_INSTALL_DATADIR}/mipsolvers-third-party/oneapi-mkl")
+  endif()
+endif()
+
 # ── Export set + package config ───────────────────────────────────────────────
 install(EXPORT ${MIPSOLVERS_THIRD_PARTY_EXPORT_SET}
   FILE mipsolversThirdPartyTargets.cmake
@@ -215,6 +283,7 @@ configure_package_config_file(
 set(_tp_enabled_deps "")
 foreach(_tp_dep IN ITEMS
     "highs:highs" "scip:libscip" "ipopt:ipopt_local" "mumps:dmumps"
+    "mkl:MIPSolvers::MKL"
     "cholmod:cholmod_vendored" "umfpack:umfpack_vendored" "klu:klu_vendored"
     "fmt:fmt" "catch2:Catch2" "reflapack:reflapack_vendored"
     "eigen:Eigen3::Eigen" "nlohmann_json:nlohmann_json::nlohmann_json")
@@ -260,6 +329,10 @@ endif()
 if(MIPSOLVERS_HAVE_IPOPT)
   list(APPEND _tp_public_defs MIPSOLVERS_HAVE_IPOPT=1 HACDCPF_HAVE_IPOPT=1)
 endif()
+if(MIPSOLVERS_HAVE_MKL_PARDISO)
+  list(APPEND _tp_public_defs
+    MIPSOLVERS_HAVE_MKL_PARDISO=1 HACDCPF_HAVE_MKL_PARDISO=1)
+endif()
 if((NOT DEFINED MIPSOLVERS_USE_MUMPS OR MIPSOLVERS_USE_MUMPS) AND TARGET MUMPS::MUMPS)
   list(APPEND _tp_public_defs MIPSOLVERS_HAVE_MUMPS=1 HACDCPF_HAVE_MUMPS=1)
 endif()
@@ -297,7 +370,7 @@ file(WRITE "${_tp_manifest}"
   "# Validated by cmake/UsePrebuiltThirdParty.cmake before the prebuilt\n"
   "# package is consumed; keep field names stable.\n"
   "\n"
-  "set(MIPSOLVERS_TP_MANIFEST_VERSION \"2\")\n"
+  "set(MIPSOLVERS_TP_MANIFEST_VERSION \"3\")\n"
   "set(MIPSOLVERS_TP_CXX_COMPILER_ID \"${CMAKE_CXX_COMPILER_ID}\")\n"
   "set(MIPSOLVERS_TP_CXX_COMPILER_VERSION \"${CMAKE_CXX_COMPILER_VERSION}\")\n"
   "set(MIPSOLVERS_TP_C_COMPILER_ID \"${CMAKE_C_COMPILER_ID}\")\n"
@@ -324,6 +397,10 @@ file(WRITE "${_tp_manifest}"
   "set(MIPSOLVERS_TP_HAVE_HIGHS_LIB \"${MIPSOLVERS_HAVE_HIGHS_LIB}\")\n"
   "set(MIPSOLVERS_TP_HAVE_SCIP_LIB \"${MIPSOLVERS_HAVE_SCIP_LIB}\")\n"
   "set(MIPSOLVERS_TP_HAVE_IPOPT \"${MIPSOLVERS_HAVE_IPOPT}\")\n"
+  "set(MIPSOLVERS_TP_IPOPT_LINEAR_SOLVER \"${MIPSOLVERS_IPOPT_LINEAR_SOLVER}\")\n"
+  "set(MIPSOLVERS_TP_HAVE_MKL_PARDISO \"${MIPSOLVERS_HAVE_MKL_PARDISO}\")\n"
+  "set(MIPSOLVERS_TP_MKL_LIBRARY_NAMES \"${_tp_mkl_library_names}\")\n"
+  "set(MIPSOLVERS_TP_MKL_VERSION \"${_tp_mkl_version}\")\n"
   "set(MIPSOLVERS_TP_HAVE_CHOLMOD \"${MIPSOLVERS_HAVE_CHOLMOD}\")\n"
   "set(MIPSOLVERS_TP_HAVE_SUITESPARSE \"${MIPSOLVERS_HAVE_SUITESPARSE}\")\n"
   "set(MIPSOLVERS_TP_HAVE_UMFPACK \"${MIPSOLVERS_HAVE_UMFPACK}\")\n"
@@ -353,3 +430,6 @@ unset(_tp_msvc_runtime)
 unset(_tp_build_config)
 unset(_tp_is_multi_config)
 unset(_tp_configuration_types)
+unset(_tp_mkl_include_dir)
+unset(_tp_mkl_library_names)
+unset(_tp_mkl_version)

@@ -1,6 +1,7 @@
 #include "state.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <cstdint>
@@ -20,6 +21,20 @@ std::vector<char> artificial_mask(const StandardFormLP& sf) {
     if (col >= 0 && col < sf.A.cols()) mask[static_cast<std::size_t>(col)] = 1;
   }
   return mask;
+}
+
+// S0 bound-domain contract: "no upper bound" reaches the solver core either as
+// mathematical +inf or as the model's finite sentinel (value >= 1e19, e.g.
+// VariableMeta's 1e20 copied verbatim into var_ub by the B&C relaxation
+// builders). The Bounds boundary canonicalizes both encodings to +inf so the
+// solver core can classify every upper bound with a single std::isfinite test.
+// The 1e19 threshold matches has_finite_upper_bound in dual_simplex_api.cpp,
+// keeping the whole standard-form pipeline on one bound classification.
+constexpr double kUpperBoundSentinel = 1e19;
+double canonical_upper_bound(double upper) {
+  return (std::isfinite(upper) && upper < kUpperBoundSentinel)
+             ? upper
+             : std::numeric_limits<double>::infinity();
 }
 
 double deterministic_fraction(int column) {
@@ -272,9 +287,9 @@ Bounds make_phase_two_bounds(const StandardFormLP& sf) {
   const std::vector<char> artificial = artificial_mask(sf);
   for (int j = 0; j < n; ++j) {
     if (artificial[static_cast<std::size_t>(j)]) continue;
-    const double original_upper = sf.var_ub[j];
-    if (!(original_upper > 0.0)) continue;
-    bounds.upper[j] = original_upper;
+    const double upper = canonical_upper_bound(sf.var_ub[j]);
+    if (!(upper > 0.0)) continue;
+    bounds.upper[j] = upper;
     bounds.enterable[static_cast<std::size_t>(j)] = 1;
   }
   return bounds;
@@ -502,7 +517,7 @@ int apply_certified_singleton_crash(const StandardFormLP& sf,
     }
     if (count != 1 || row < 0 || coefficient == 0.0) continue;
     const double value = sf.b[row] / coefficient;
-    const double upper = sf.var_ub[col];
+    const double upper = canonical_upper_bound(sf.var_ub[col]);
     if (value < 0.0 || (std::isfinite(upper) && value > upper)) continue;
     int& selected = candidate[static_cast<std::size_t>(row)];
     if (selected < 0 || col < selected) selected = col;
@@ -563,11 +578,17 @@ bool correct_canonical_primal_residual(State& state, std::string& failure,
     return false;
   }
   double residual_norm = residual.lpNorm<Eigen::Infinity>();
-  if (residual_norm > equation_limit) {
+  const double initial_residual_norm = residual_norm;
+  int correction_count = 0;
+  constexpr int kMaxDefectCorrections =
+      std::numeric_limits<double>::digits;
+  while (residual_norm > equation_limit &&
+         correction_count < kMaxDefectCorrections) {
     // Backward stability of Bx_B=rhs is necessary but can be weaker than the
-    // simplex feasibility contract when ||B||*||x_B|| is large.  One classical
-    // defect-correction step targets that contract directly without changing
-    // its tolerance or rebuilding the factor.
+    // simplex feasibility contract when ||B||*||x_B|| is large. Classical
+    // iterative refinement targets that contract directly. A single update
+    // is insufficient when adding delta to a large basic value is quantized
+    // by its double-precision ULP.
     const SolveEvidence correction = state.factor->checked_ftran(residual);
     if (!correction.accepted || correction.solution.size() != state.m ||
         !correction.solution.allFinite()) {
@@ -582,6 +603,7 @@ bool correct_canonical_primal_residual(State& state, std::string& failure,
     }
     state.x_basic += correction.solution;
     ++state.canonical_primal_corrections;
+    ++correction_count;
     x = full_primal(state);
     residual = equation_residual_vector(state.sf->A, x, state.sf->b,
                                         exact_residual);
@@ -590,16 +612,28 @@ bool correct_canonical_primal_residual(State& state, std::string& failure,
       return false;
     }
     const double corrected_norm = residual.lpNorm<Eigen::Infinity>();
-    if (corrected_norm > equation_limit) {
+    if (corrected_norm >= residual_norm) {
       std::ostringstream message;
       message << std::setprecision(17)
-              << "one-step canonical primal residual correction did not satisfy "
-                 "the fixed feasibility limit"
-              << " (before=" << residual_norm << ", after=" << corrected_norm
-              << ", limit=" << equation_limit << ')';
+              << "canonical primal iterative refinement made no progress"
+              << " (initial=" << initial_residual_norm
+              << ", before=" << residual_norm << ", after=" << corrected_norm
+              << ", limit=" << equation_limit
+              << ", corrections=" << correction_count << ')';
       failure = message.str();
       return false;
     }
+    residual_norm = corrected_norm;
+  }
+  if (residual_norm > equation_limit) {
+    std::ostringstream message;
+    message << std::setprecision(17)
+            << "canonical primal iterative refinement exhausted double precision"
+            << " (initial=" << initial_residual_norm
+            << ", after=" << residual_norm << ", limit=" << equation_limit
+            << ", corrections=" << correction_count << ')';
+    failure = message.str();
+    return false;
   }
   return true;
 }
@@ -816,15 +850,9 @@ bool initialize_cost_shifted_dual_start(State& state, Statistics& statistics,
   return true;
 }
 
-bool initialize_exact_edge_weights(State& state, Statistics& statistics,
-                                   std::string& failure) {
-  state.leaving_heap_valid = false;
-  state.edge_weight_mode = EdgeWeightMode::SteepestEdge;
-  state.devex_reference.clear();
-  state.devex_iterations = 0;
-  state.edge_weight.assign(static_cast<std::size_t>(state.m), 1.0);
-  bool diagonal_basis = true;
-  for (int row = 0; row < state.m && diagonal_basis; ++row) {
+bool initialize_structural_exact_edge_weights(State& state) {
+  std::vector<double> weights(static_cast<std::size_t>(state.m), 1.0);
+  for (int row = 0; row < state.m; ++row) {
     const int col = state.basis[static_cast<std::size_t>(row)];
     double diagonal = 0.0;
     int nonzeros = 0;
@@ -834,14 +862,28 @@ bool initialize_exact_edge_weights(State& state, Statistics& statistics,
       ++nonzeros;
       if (it.row() == row) diagonal = it.value();
     }
-    if (nonzeros != 1 || diagonal == 0.0) {
-      diagonal_basis = false;
-      break;
-    }
-    state.edge_weight[static_cast<std::size_t>(row)] =
+    if (nonzeros != 1 || diagonal == 0.0) return false;
+    weights[static_cast<std::size_t>(row)] =
         1.0 / (diagonal * diagonal);
   }
-  if (diagonal_basis) return true;
+
+  state.leaving_heap_valid = false;
+  state.edge_weight_mode = EdgeWeightMode::SteepestEdge;
+  state.devex_reference.clear();
+  state.devex_iterations = 0;
+  state.edge_weight = std::move(weights);
+  return true;
+}
+
+bool initialize_exact_edge_weights(State& state, Statistics& statistics,
+                                   std::string& failure) {
+  if (initialize_structural_exact_edge_weights(state)) return true;
+
+  state.leaving_heap_valid = false;
+  state.edge_weight_mode = EdgeWeightMode::SteepestEdge;
+  state.devex_reference.clear();
+  state.devex_iterations = 0;
+  state.edge_weight.assign(static_cast<std::size_t>(state.m), 1.0);
 
   const EdgeWeightEvidence batch = state.factor->compute_exact_edge_weights();
   statistics.dse_initialization_solves += state.m;
@@ -983,7 +1025,11 @@ bool major_rebuild(State& state, RebuildReason reason, bool reinvert,
             ? Move::Down
             : Move::Up;
   }
-  if (!reconstruct(state, failure, true, false)) {
+  // The side classification changes s in x_B(s)=B^-1(b-A_N x_N(s)). A
+  // canonical residual audit cached for the preceding side vector is not
+  // valid for this new primal map, even though the factor generation is the
+  // same. Force exact defect correction before the final rebuild audit.
+  if (!reconstruct(state, failure, true, false, true)) {
     failure = "bound-side reconstruction failed: " + failure;
     return false;
   }
@@ -1319,19 +1365,57 @@ bool initialize(State& state, const StandardFormLP& sf,
     return true;
   }
   if (hint != nullptr) {
+    const DualEdgeWeightInitialization mode =
+        options.dual_edge_weight_initialization;
+    const bool structural_production =
+        mode == DualEdgeWeightInitialization::StructuralExact ||
+        (mode == DualEdgeWeightInitialization::Production &&
+         !options.exact_dse_initialization);
+    if (structural_production) {
+      return initialize_uncached_edge_weights(state, statistics, failure);
+    }
     initialize_devex_framework(state, statistics);
     return true;
   }
-  return initialize_cold_edge_weights(state, statistics, failure);
+  return initialize_uncached_edge_weights(state, statistics, failure);
 }
 
-bool initialize_cold_edge_weights(State& state, Statistics& statistics,
-                                  std::string& failure) {
-  if (state.options != nullptr && state.options->exact_dse_initialization) {
-    return initialize_exact_edge_weights(state, statistics, failure);
+bool initialize_uncached_edge_weights(State& state, Statistics& statistics,
+                                      std::string& failure) {
+  const auto start = std::chrono::steady_clock::now();
+  DualEdgeWeightInitialization mode =
+      DualEdgeWeightInitialization::Production;
+  if (state.options != nullptr) {
+    mode = state.options->dual_edge_weight_initialization;
+    if (mode == DualEdgeWeightInitialization::Production) {
+      mode = state.options->exact_dse_initialization
+                 ? DualEdgeWeightInitialization::FullExact
+                 : DualEdgeWeightInitialization::StructuralExact;
+    }
   }
-  initialize_devex_framework(state, statistics);
-  return true;
+
+  bool ok = true;
+  state.certified_exact_dse_pricing =
+      mode == DualEdgeWeightInitialization::CertifiedExact;
+  switch (mode) {
+    case DualEdgeWeightInitialization::CertifiedExact:
+    case DualEdgeWeightInitialization::FullExact:
+      ok = initialize_exact_edge_weights(state, statistics, failure);
+      break;
+    case DualEdgeWeightInitialization::StructuralExact:
+      if (!initialize_structural_exact_edge_weights(state)) {
+        initialize_devex_framework(state, statistics);
+      }
+      break;
+    case DualEdgeWeightInitialization::Production:
+    case DualEdgeWeightInitialization::Devex:
+      initialize_devex_framework(state, statistics);
+      break;
+  }
+  statistics.dse_initialization_time_sec +=
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+          .count();
+  return ok;
 }
 
 Eigen::VectorXd full_primal(const State& state) {
@@ -1409,6 +1493,62 @@ Audit audit(const State& state, bool require_primal, bool require_dual,
       state.options->feasibility_tol *
       std::max(1.0, state.sf->b.lpNorm<Eigen::Infinity>());
   if (result.equation_residual > equation_limit) {
+    if (std::getenv("MIPSOLVERS_DS_WARM_DIAG") != nullptr) {
+      int wr = 0;
+      double wv = 0.0;
+      for (int i = 0; i < state.m; ++i) {
+        const double a = std::abs(equation_residual[i]);
+        if (a > wv) { wv = a; wr = i; }
+      }
+      const int bc = state.basis[static_cast<std::size_t>(wr)];
+      std::fprintf(stderr,
+          "[WARM-DIAG] m=%d n=%d worst_row=%d resid=%.4e | basic_col=%d "
+          "x_basic=%.4e lb=%.3e ub=%.3e enter=%d move=%d | ||x||inf=%.3e\n",
+          state.m, state.n, wr, equation_residual[wr], bc, state.x_basic[wr],
+          state.bounds.lower[bc], state.bounds.upper[bc],
+          static_cast<int>(state.bounds.enterable[bc]),
+          static_cast<int>(state.move[bc]), x.lpNorm<Eigen::Infinity>());
+      for (int j = 0; j < state.n; ++j) {
+        if (state.basic[static_cast<std::size_t>(j)]) continue;
+        double val = state.bounds.lower[j];
+        if (state.move[static_cast<std::size_t>(j)] == Move::Down)
+          val = state.bounds.upper[j];
+        if (val == 0.0) continue;
+        for (StandardColumnMatrix::InnerIterator it(state.sf->A, j); it; ++it) {
+          if (it.row() == wr && std::abs(it.value() * val) > 1.0) {
+            std::fprintf(stderr,
+                "  nonbasic j=%d val=%.4e A=%.4e contrib=%.4e ub=%.3e "
+                "enter=%d move=%d lb_shift=%.3e\n",
+                j, val, it.value(), it.value() * val, state.bounds.upper[j],
+                static_cast<int>(state.bounds.enterable[j]),
+                static_cast<int>(state.move[static_cast<std::size_t>(j)]),
+                j < static_cast<int>(state.sf->lb_shift.size())
+                    ? state.sf->lb_shift[j] : 0.0);
+          }
+        }
+      }
+      // Global max nonbasic value at bound (finds a huge/stale-bound nonbasic).
+      int jmax = -1;
+      double vmax = 0.0;
+      for (int j = 0; j < state.n; ++j) {
+        if (state.basic[static_cast<std::size_t>(j)]) continue;
+        double val = (state.move[static_cast<std::size_t>(j)] == Move::Down)
+                         ? state.bounds.upper[j] : state.bounds.lower[j];
+        if (std::abs(val) > vmax) { vmax = std::abs(val); jmax = j; }
+      }
+      if (jmax >= 0)
+        std::fprintf(stderr,
+            "  MAX-NONBASIC j=%d val=%.4e ub=%.3e lb=%.3e enter=%d move=%d "
+            "var_ub=%.4e lb_shift=%.3e rc=%.6e tol=%.3e\n",
+            jmax, vmax, state.bounds.upper[jmax], state.bounds.lower[jmax],
+            static_cast<int>(state.bounds.enterable[jmax]),
+            static_cast<int>(state.move[static_cast<std::size_t>(jmax)]),
+            jmax < static_cast<int>(state.sf->var_ub.size())
+                ? state.sf->var_ub[jmax] : -1.0,
+            jmax < static_cast<int>(state.sf->lb_shift.size())
+                ? state.sf->lb_shift[jmax] : 0.0,
+            state.reduced_costs[jmax], state.options->optimality_tol);
+    }
     std::ostringstream message;
     message << std::setprecision(17)
             << "Ax=b residual exceeds the canonical feasibility limit"
@@ -1476,6 +1616,12 @@ Result make_result(const State& state, Status status, std::string message,
       state.canonical_primal_corrections;
   result.statistics.iterative_refinements +=
       state.canonical_primal_corrections;
+  result.statistics.certified_dse_btrans += state.certified_dse_btrans;
+  result.statistics.certified_dse_candidates +=
+      state.certified_dse_candidates;
+  result.statistics.certified_dse_rejections +=
+      state.certified_dse_rejections;
+  result.statistics.certified_dse_time_sec += state.certified_dse_time_sec;
   result.basis = state.basis;
   result.at_upper.assign(static_cast<std::size_t>(state.n), 0);
   for (int j = 0; j < state.n; ++j) {

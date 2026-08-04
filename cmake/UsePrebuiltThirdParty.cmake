@@ -13,6 +13,11 @@
 # problem: FATAL_ERROR when the mode is ON, loud WARNING + in-tree fallback
 # when the mode is AUTO.
 
+set(_MIPSOLVERS_TP_BUILD_SCRIPT "third_party/build_third_party.sh")
+if(WIN32)
+  set(_MIPSOLVERS_TP_BUILD_SCRIPT "third_party\\build_third_party.ps1")
+endif()
+
 get_filename_component(_MIPSOLVERS_TP_PREFIX
   "${MIPSOLVERS_PREBUILT_THIRD_PARTY_PREFIX}" ABSOLUTE
   BASE_DIR "${CMAKE_CURRENT_BINARY_DIR}")
@@ -36,7 +41,7 @@ if(NOT EXISTS "${_MIPSOLVERS_TP_CONFIG}" OR NOT EXISTS "${_MIPSOLVERS_TP_MANIFES
     message(FATAL_ERROR
       "MIPSOLVERS_USE_PREBUILT_THIRD_PARTY=ON but no prebuilt third-party "
       "package was found under\n  ${_MIPSOLVERS_TP_PREFIX}\n"
-      "Build it first with:  third_party/build_third_party.sh\n"
+      "Build it first with:  ${_MIPSOLVERS_TP_BUILD_SCRIPT}\n"
       "or set -DMIPSOLVERS_PREBUILT_THIRD_PARTY_PREFIX=<prefix>,\n"
       "or configure with -DMIPSOLVERS_USE_PREBUILT_THIRD_PARTY=AUTO/OFF.")
   endif()
@@ -51,9 +56,69 @@ endif()
 include("${_MIPSOLVERS_TP_MANIFEST}")
 
 set(_MIPSOLVERS_TP_MISMATCH "")
-if(NOT "${MIPSOLVERS_TP_MANIFEST_VERSION}" STREQUAL "2")
+if(NOT "${MIPSOLVERS_TP_MANIFEST_VERSION}" STREQUAL "3")
   list(APPEND _MIPSOLVERS_TP_MISMATCH
-    "manifest format: prebuilt '${MIPSOLVERS_TP_MANIFEST_VERSION}' vs required '2'")
+    "manifest format: prebuilt '${MIPSOLVERS_TP_MANIFEST_VERSION}' vs required '3'")
+endif()
+
+# The normal in-tree defaults require embedded HiGHS, SCIP, and Ipopt. Mirror
+# those defaults here because prebuilt resolution runs before their option()
+# declarations in Dependencies.cmake. A parent project can explicitly disable
+# any of them before adding MIPSolvers.
+set(_MIPSOLVERS_TP_WANT_HIGHS ON)
+set(_MIPSOLVERS_TP_WANT_SCIP ON)
+set(_MIPSOLVERS_TP_WANT_IPOPT ON)
+if(DEFINED MIPSOLVERS_BUILD_EMBEDDED_HIGHS AND
+   NOT MIPSOLVERS_BUILD_EMBEDDED_HIGHS)
+  set(_MIPSOLVERS_TP_WANT_HIGHS OFF)
+endif()
+if(DEFINED MIPSOLVERS_BUILD_EMBEDDED_SCIP AND
+   NOT MIPSOLVERS_BUILD_EMBEDDED_SCIP)
+  set(_MIPSOLVERS_TP_WANT_SCIP OFF)
+endif()
+if(DEFINED MIPSOLVERS_BUILD_LOCAL_IPOPT AND
+   NOT MIPSOLVERS_BUILD_LOCAL_IPOPT)
+  set(_MIPSOLVERS_TP_WANT_IPOPT OFF)
+endif()
+if(_MIPSOLVERS_TP_WANT_HIGHS AND NOT MIPSOLVERS_TP_HAVE_HIGHS_LIB)
+  list(APPEND _MIPSOLVERS_TP_MISMATCH
+    "embedded HiGHS was requested but the prebuilt package does not contain it")
+endif()
+if(_MIPSOLVERS_TP_WANT_SCIP AND NOT MIPSOLVERS_TP_HAVE_SCIP_LIB)
+  list(APPEND _MIPSOLVERS_TP_MISMATCH
+    "embedded SCIP was requested but the prebuilt package does not contain it")
+endif()
+if(_MIPSOLVERS_TP_WANT_IPOPT AND NOT MIPSOLVERS_TP_HAVE_IPOPT)
+  list(APPEND _MIPSOLVERS_TP_MISMATCH
+    "embedded Ipopt was requested but the prebuilt package does not contain it")
+endif()
+if(MIPSOLVERS_TP_HAVE_IPOPT)
+  if(DEFINED MIPSOLVERS_IPOPT_LINEAR_SOLVER AND
+     NOT MIPSOLVERS_IPOPT_LINEAR_SOLVER STREQUAL "")
+    string(TOLOWER "${MIPSOLVERS_IPOPT_LINEAR_SOLVER}"
+      _MIPSOLVERS_TP_REQUESTED_IPOPT_LINEAR_SOLVER)
+    string(TOLOWER "${MIPSOLVERS_TP_IPOPT_LINEAR_SOLVER}"
+      _MIPSOLVERS_TP_PREBUILT_IPOPT_LINEAR_SOLVER)
+    if(NOT _MIPSOLVERS_TP_REQUESTED_IPOPT_LINEAR_SOLVER MATCHES
+       "^(mumps|pardisomkl)$")
+      list(APPEND _MIPSOLVERS_TP_MISMATCH
+        "invalid requested Ipopt linear solver '${MIPSOLVERS_IPOPT_LINEAR_SOLVER}'")
+    elseif(NOT _MIPSOLVERS_TP_REQUESTED_IPOPT_LINEAR_SOLVER STREQUAL
+           _MIPSOLVERS_TP_PREBUILT_IPOPT_LINEAR_SOLVER)
+      list(APPEND _MIPSOLVERS_TP_MISMATCH
+        "Ipopt linear solver: prebuilt '${MIPSOLVERS_TP_IPOPT_LINEAR_SOLVER}' vs requested '${MIPSOLVERS_IPOPT_LINEAR_SOLVER}'")
+    endif()
+  elseif(WIN32 AND NOT DEFINED MIPSOLVERS_IPOPT_LINEAR_SOLVER AND
+         NOT MIPSOLVERS_TP_IPOPT_LINEAR_SOLVER STREQUAL "pardisomkl")
+    list(APPEND _MIPSOLVERS_TP_MISMATCH
+      "Ipopt linear solver: prebuilt '${MIPSOLVERS_TP_IPOPT_LINEAR_SOLVER}' vs Windows default 'pardisomkl'")
+  endif()
+endif()
+if(WIN32 AND MIPSOLVERS_TP_HAVE_IPOPT AND
+   MIPSOLVERS_TP_IPOPT_LINEAR_SOLVER STREQUAL "pardisomkl" AND
+   NOT MIPSOLVERS_TP_HAVE_MKL_PARDISO)
+  list(APPEND _MIPSOLVERS_TP_MISMATCH
+    "Windows Ipopt package uses pardisomkl but contains no oneMKL payload")
 endif()
 if(NOT CMAKE_CXX_COMPILER_ID STREQUAL MIPSOLVERS_TP_CXX_COMPILER_ID)
   list(APPEND _MIPSOLVERS_TP_MISMATCH
@@ -154,7 +219,7 @@ if(_MIPSOLVERS_TP_MISMATCH)
       "MIPSOLVERS_USE_PREBUILT_THIRD_PARTY=ON but the prebuilt third-party "
       "package does not match the current toolchain:\n"
       "  ${_MIPSOLVERS_TP_MISMATCH_TEXT}\n"
-      "Rebuild it with third_party/build_third_party.sh, or configure with "
+      "Rebuild it with ${_MIPSOLVERS_TP_BUILD_SCRIPT}, or configure with "
       "-DMIPSOLVERS_USE_PREBUILT_THIRD_PARTY=OFF to build in-tree.")
   endif()
   message(WARNING
@@ -162,7 +227,7 @@ if(_MIPSOLVERS_TP_MISMATCH)
     "${_MIPSOLVERS_TP_PREFIX} — toolchain/ABI mismatch:\n"
     "  ${_MIPSOLVERS_TP_MISMATCH_TEXT}\n"
     "Falling back to the in-tree vendored build "
-    "(rebuild the package with third_party/build_third_party.sh to re-enable).")
+    "(rebuild the package with ${_MIPSOLVERS_TP_BUILD_SCRIPT} to re-enable).")
   return()
 endif()
 
@@ -204,6 +269,9 @@ if(MIPSOLVERS_HAVE_IPOPT)
   set(MIPSOLVERS_IPOPT_INCLUDE_DIRS ${MIPSOLVERS_TP_IPOPT_INCLUDE_DIRS})
   set(MIPSOLVERS_IPOPT_LIBRARIES ipopt_local)
 endif()
+set(MIPSOLVERS_HAVE_MKL_PARDISO "${MIPSOLVERS_TP_HAVE_MKL_PARDISO}")
+set(MIPSOLVERS_MKL_INCLUDE_DIRS "${MIPSOLVERS_TP_MKL_INCLUDE_DIRS}")
+set(MIPSOLVERS_MKL_LIBRARIES "${MIPSOLVERS_TP_MKL_LIBRARIES}")
 
 set(MIPSOLVERS_HAVE_CHOLMOD "${MIPSOLVERS_TP_HAVE_CHOLMOD}")
 set(MIPSOLVERS_CHOLMOD_INCLUDE_DIRS "")
@@ -228,7 +296,7 @@ set(Catch2_FOUND TRUE)
 
 # System numeric backends are not part of the prebuilt package. Gurobi and the
 # bundled PaPILO headers are resolved after this file returns.
-foreach(_MIPSOLVERS_TP_OPT_OPT SUPERLU MKL)
+foreach(_MIPSOLVERS_TP_OPT_OPT SUPERLU)
   if(MIPSOLVERS_USE_${_MIPSOLVERS_TP_OPT_OPT})
     message(WARNING
       "mipsolvers: MIPSOLVERS_USE_${_MIPSOLVERS_TP_OPT_OPT}=ON is ignored in "
@@ -240,9 +308,6 @@ unset(_MIPSOLVERS_TP_OPT_OPT)
 set(MIPSOLVERS_HAVE_SUPERLU OFF)
 set(MIPSOLVERS_SUPERLU_INCLUDE_DIR "")
 set(MIPSOLVERS_SUPERLU_LIBRARIES "")
-set(MIPSOLVERS_HAVE_MKL_PARDISO OFF)
-set(MIPSOLVERS_MKL_INCLUDE_DIRS "")
-set(MIPSOLVERS_MKL_LIBRARIES "")
 set(MIPSOLVERS_CONSUMER_NEEDS_BREW_MUMPS OFF)
 
 set(MIPSOLVERS_THIRD_PARTY_PREBUILT ON)
@@ -268,3 +333,9 @@ unset(_MIPSOLVERS_TP_CONFIG_INDEX)
 unset(_MIPSOLVERS_CURRENT_MULTI_CONFIG)
 unset(_MIPSOLVERS_CURRENT_MSVC_RUNTIME)
 unset(_MIPSOLVERS_CURRENT_MULTI_CONFIG)
+unset(_MIPSOLVERS_TP_BUILD_SCRIPT)
+unset(_MIPSOLVERS_TP_WANT_HIGHS)
+unset(_MIPSOLVERS_TP_WANT_SCIP)
+unset(_MIPSOLVERS_TP_WANT_IPOPT)
+unset(_MIPSOLVERS_TP_REQUESTED_IPOPT_LINEAR_SOLVER)
+unset(_MIPSOLVERS_TP_PREBUILT_IPOPT_LINEAR_SOLVER)

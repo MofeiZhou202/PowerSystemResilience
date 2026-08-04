@@ -645,6 +645,20 @@ enum class SimplexFactorBackend {
   BackendB_ShortChain = 3,
 };
 
+// Explicit pricing metric modes used by controlled benchmarks. Production
+// uses structural exact weights when every uncached basis column is a singleton
+// in its assigned row and otherwise starts Devex. The legacy
+// exact_dse_initialization switch still requests checked FullExact weights.
+// CertifiedExact additionally enables the proof-bounded exact CHUZR probe;
+// it is intentionally not selected by the production default.
+enum class DualEdgeWeightInitialization {
+  Production = 0,
+  Devex = 1,
+  StructuralExact = 2,
+  FullExact = 3,
+  CertifiedExact = 4,
+};
+
 inline SimplexFactorBackend simplex_factor_backend_from_id(int id) {
   switch (id) {
     case 3:
@@ -695,20 +709,23 @@ struct SimplexOptions {
   // ABI compatibility only. The rewritten native kernel never retries a
   // different basis after a failed warm start.
   const SimplexBasis* fallback_basis{nullptr};
-  // Opt-in exact cold-start DSE initialization. The scalable default uses a
-  // unit-weight Devex framework and lets the pivot recurrence refine it;
-  // setting this true performs one checked BTRAN per basis row.
+  // Opt-in full exact cold-start DSE initialization. The default computes
+  // analytic exact weights on an assigned-row singleton cold or uncached warm
+  // basis and otherwise starts a unit-weight Devex framework. Setting this true
+  // performs one checked BTRAN per basis row on a nonstructural cold basis.
   bool exact_dse_initialization{false};
+  DualEdgeWeightInitialization dual_edge_weight_initialization{
+      DualEdgeWeightInitialization::Production};
   // Parallel PRICE/BFRT worker budget. 0 selects a bounded hardware-aware
   // default, 1 forces deterministic serial execution, and values >1 cap the
   // number of persistent thread-pool tasks. Small or sparse scans remain
   // serial regardless. MIPSOLVERS_LP_KERNEL_THREADS overrides this value.
   int lp_kernel_threads{0};
-  // A cold basis may become dual feasible by shifting the costs of one-sided
-  // nonbasic columns. This is cheap for sparse defects, but a dense set of
-  // shifts creates an expensive mandatory original-cost cleanup. The default
-  // therefore selects genuine dual Phase I once the number of required shifts
-  // reaches max(count, ceil(fraction * standard-form columns)).
+  // A cold or warm basis may become dual feasible by shifting the costs of
+  // one-sided nonbasic columns. This is cheap for sparse defects, but a dense
+  // set of shifts creates an expensive mandatory original-cost cleanup. The
+  // default therefore selects genuine dual Phase I once the number of required
+  // shifts reaches max(count, ceil(fraction * standard-form columns)).
   int dual_shift_start_max_count{256};
   double dual_shift_start_max_fraction{0.125};
   // Legacy ABI fields; post-optimal frontier remapping was removed.

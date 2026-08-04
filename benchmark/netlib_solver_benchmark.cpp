@@ -10,6 +10,8 @@
 ///       --time-limit 30 --csv reports/netlib_benchmark.csv
 ///       --json reports/netlib_benchmark.json
 ///   netlib_solver_benchmark --case afiro --solvers highs-simplex,ipopt
+/// DSE comparison keys: native-dual-devex, native-dual-structural-dse,
+/// native-dual-exact-dse, native-dual-certified-dse.
 
 #include <algorithm>
 #include <chrono>
@@ -88,6 +90,16 @@ struct RunResult {
   bool accurate{false};
   int iterations{0};
   double runtime_ms{0.0};
+  bool native_telemetry{false};
+  int dual_pivots{0};
+  int dse_initialization_solves{0};
+  int certified_dse_btrans{0};
+  int certified_dse_candidates{0};
+  int certified_dse_rejections{0};
+  double dse_initialization_ms{0.0};
+  double certified_dse_ms{0.0};
+  double native_kernel_ms{0.0};
+  double native_kernel_ms_per_dual_pivot{0.0};
   double objective{std::numeric_limits<double>::quiet_NaN()};
   double reference_objective{std::numeric_limits<double>::quiet_NaN()};
   double objective_rel_error{std::numeric_limits<double>::infinity()};
@@ -106,6 +118,10 @@ struct Summary {
   double total_sec{0.0};
   double median_ms{0.0};
   double geometric_mean_ms{0.0};
+  int native_telemetry_count{0};
+  double mean_dual_pivots{0.0};
+  double mean_dse_initialization_ms{0.0};
+  double geometric_mean_kernel_ms_per_dual_pivot{0.0};
   double geometric_speedup_vs_highs_simplex{
       std::numeric_limits<double>::quiet_NaN()};
 };
@@ -168,6 +184,10 @@ bool parse_args(int argc, char** argv, Config& cfg) {
           << "  --data-dir DIR       tests/data directory\n"
           << "  --case TEXT          run matching instance names only\n"
           << "  --solvers A,B        select algorithms\n"
+          << "                       native DSE keys: native-dual-devex,\n"
+          << "                       native-dual-structural-dse,\n"
+          << "                       native-dual-exact-dse,\n"
+          << "                       native-dual-certified-dse\n"
           << "  --repeat N           repetitions per case/algorithm\n"
           << "  --time-limit SEC     supported backend wall limit\n"
           << "  --max-iterations N   iterative algorithm limit\n"
@@ -566,14 +586,40 @@ RunResult run_adapter(const CaseInfo& kase, const std::string& solver,
   row.solver = solver;
   eng::SolveResult result;
   const auto t0 = std::chrono::steady_clock::now();
-  if (solver == "native-dual-simplex") {
+  if (solver == "native-dual-simplex" || solver == "native-dual-devex" ||
+      solver == "native-dual-structural-dse" ||
+      solver == "native-dual-exact-dse" ||
+      solver == "native-dual-certified-dse") {
     eng::SimplexOptions opt;
     opt.lp_kernel_backend = eng::LpKernelBackend::ExperimentalNative;
     opt.max_iter = cfg.max_iterations;
     opt.time_limit_sec = cfg.time_limit_sec;
     opt.use_highs_presolve = true;
+    if (solver == "native-dual-devex") {
+      opt.dual_edge_weight_initialization =
+          eng::DualEdgeWeightInitialization::Devex;
+    } else if (solver == "native-dual-structural-dse") {
+      opt.dual_edge_weight_initialization =
+          eng::DualEdgeWeightInitialization::StructuralExact;
+    } else if (solver == "native-dual-exact-dse") {
+      opt.dual_edge_weight_initialization =
+          eng::DualEdgeWeightInitialization::FullExact;
+    } else if (solver == "native-dual-certified-dse") {
+      opt.dual_edge_weight_initialization =
+          eng::DualEdgeWeightInitialization::CertifiedExact;
+    }
     result = eng::solve_lp_with_basis(kase.lp, opt).result;
-    row.solver = "Native-DualSimplex(+HiGHS-presolve)";
+    if (solver == "native-dual-devex") {
+      row.solver = "Native-DualSimplex[Devex](+HiGHS-presolve)";
+    } else if (solver == "native-dual-structural-dse") {
+      row.solver = "Native-DualSimplex[StructuralDSE](+HiGHS-presolve)";
+    } else if (solver == "native-dual-exact-dse") {
+      row.solver = "Native-DualSimplex[ExactDSE](+HiGHS-presolve)";
+    } else if (solver == "native-dual-certified-dse") {
+      row.solver = "Native-DualSimplex[CertifiedDSE](+HiGHS-presolve)";
+    } else {
+      row.solver = "Native-DualSimplex(+HiGHS-presolve)";
+    }
   } else if (solver == "native-ipm") {
     eng::IPMLPOptions opt;
     opt.max_iter = std::min(cfg.max_iterations, 2000);
@@ -618,6 +664,22 @@ RunResult run_adapter(const CaseInfo& kase, const std::string& solver,
     row.success = result.stats.success;
     row.status = result.stats.status;
     row.iterations = result.stats.iterations;
+    row.native_telemetry = result.stats.native_dual_kernel_time_sec > 0.0;
+    row.dual_pivots = result.stats.dual_phase_one_iterations +
+                      result.stats.dual_phase_two_iterations;
+    row.dse_initialization_solves = result.stats.dse_initialization_solves;
+    row.certified_dse_btrans = result.stats.certified_dse_btrans;
+    row.certified_dse_candidates = result.stats.certified_dse_candidates;
+    row.certified_dse_rejections = result.stats.certified_dse_rejections;
+    row.dse_initialization_ms =
+        1000.0 * result.stats.dse_initialization_time_sec;
+    row.certified_dse_ms = 1000.0 * result.stats.certified_dse_time_sec;
+    row.native_kernel_ms = 1000.0 * result.stats.native_dual_kernel_time_sec;
+    if (row.dual_pivots > 0) {
+      row.native_kernel_ms_per_dual_pivot =
+          std::max(0.0, row.native_kernel_ms - row.dse_initialization_ms) /
+          row.dual_pivots;
+    }
     row.x = std::move(result.x);
   }
   return row;
@@ -661,6 +723,7 @@ std::vector<Summary> summarize(const std::vector<RunResult>& rows) {
     s.solver = solver;
     std::vector<double> times;
     std::vector<double> speedups;
+    std::vector<double> kernel_ms_per_pivot;
     double log_sum = 0.0;
     for (const RunResult* row : members) {
       ++s.attempts;
@@ -669,12 +732,33 @@ std::vector<Summary> summarize(const std::vector<RunResult>& rows) {
       s.total_sec += row->runtime_ms / 1000.0;
       times.push_back(row->runtime_ms);
       log_sum += std::log(std::max(1e-6, row->runtime_ms));
+      if (row->native_telemetry) {
+        ++s.native_telemetry_count;
+        s.mean_dual_pivots += row->dual_pivots;
+        s.mean_dse_initialization_ms += row->dse_initialization_ms;
+        if (row->dual_pivots > 0) {
+          kernel_ms_per_pivot.push_back(
+              row->native_kernel_ms_per_dual_pivot);
+        }
+      }
       const auto it = baseline.find({row->case_name, row->repeat});
       if (row->accurate && it != baseline.end())
         speedups.push_back(it->second / std::max(1e-6, row->runtime_ms));
     }
     s.median_ms = median(times);
     s.geometric_mean_ms = std::exp(log_sum / std::max<std::size_t>(1, members.size()));
+    if (s.native_telemetry_count > 0) {
+      s.mean_dual_pivots /= s.native_telemetry_count;
+      s.mean_dse_initialization_ms /= s.native_telemetry_count;
+    }
+    if (!kernel_ms_per_pivot.empty()) {
+      double kernel_log_sum = 0.0;
+      for (double value : kernel_ms_per_pivot) {
+        kernel_log_sum += std::log(std::max(1e-9, value));
+      }
+      s.geometric_mean_kernel_ms_per_dual_pivot =
+          std::exp(kernel_log_sum / kernel_ms_per_pivot.size());
+    }
     if (!speedups.empty()) {
       double log_speedup = 0.0;
       for (double value : speedups) log_speedup += std::log(value);
@@ -695,14 +779,23 @@ void write_csv(const fs::path& path, const std::vector<RunResult>& rows) {
   if (!path.parent_path().empty()) fs::create_directories(path.parent_path());
   std::ofstream out(path);
   out << "case,solver,repeat,rows,columns,nonzeros,available,success,accurate,"
-         "runtime_ms,iterations,objective,reference_objective,objective_rel_error,"
+         "runtime_ms,iterations,dual_pivots,dse_initialization_solves,"
+         "dse_initialization_ms,certified_dse_btrans,"
+         "certified_dse_candidates,certified_dse_rejections,"
+         "certified_dse_ms,native_kernel_ms,"
+         "native_kernel_ms_per_dual_pivot,objective,reference_objective,objective_rel_error,"
          "max_row_violation,max_bound_violation,normalized_primal_violation,status\n";
   out << std::setprecision(17);
   for (const auto& r : rows) {
     out << r.case_name << ',' << csv_escape(r.solver) << ',' << r.repeat << ','
         << r.rows << ',' << r.columns << ',' << r.nonzeros << ',' << r.available
         << ',' << r.success << ',' << r.accurate << ',' << r.runtime_ms << ','
-        << r.iterations << ',' << r.objective << ',' << r.reference_objective
+        << r.iterations << ',' << r.dual_pivots << ','
+        << r.dse_initialization_solves << ',' << r.dse_initialization_ms << ','
+        << r.certified_dse_btrans << ',' << r.certified_dse_candidates << ','
+        << r.certified_dse_rejections << ',' << r.certified_dse_ms << ','
+        << r.native_kernel_ms << ',' << r.native_kernel_ms_per_dual_pivot << ','
+        << r.objective << ',' << r.reference_objective
         << ',' << r.objective_rel_error << ',' << r.max_row_violation << ','
         << r.max_bound_violation << ',' << r.normalized_primal_violation << ','
         << csv_escape(r.status) << '\n';
@@ -732,7 +825,17 @@ void write_json(const fs::path& path, const Config& cfg,
         {"case", r.case_name}, {"solver", r.solver}, {"repeat", r.repeat},
         {"available", r.available}, {"success", r.success},
         {"accurate", r.accurate}, {"runtime_ms", r.runtime_ms},
-        {"iterations", r.iterations}, {"objective", finite_or_null(r.objective)},
+        {"iterations", r.iterations}, {"dual_pivots", r.dual_pivots},
+        {"dse_initialization_solves", r.dse_initialization_solves},
+        {"dse_initialization_ms", r.dse_initialization_ms},
+        {"certified_dse_btrans", r.certified_dse_btrans},
+        {"certified_dse_candidates", r.certified_dse_candidates},
+        {"certified_dse_rejections", r.certified_dse_rejections},
+        {"certified_dse_ms", r.certified_dse_ms},
+        {"native_kernel_ms", r.native_kernel_ms},
+        {"native_kernel_ms_per_dual_pivot",
+         r.native_kernel_ms_per_dual_pivot},
+        {"objective", finite_or_null(r.objective)},
         {"reference_objective", r.reference_objective},
         {"objective_rel_error", finite_or_null(r.objective_rel_error)},
         {"normalized_primal_violation", finite_or_null(r.normalized_primal_violation)},
@@ -744,6 +847,10 @@ void write_json(const fs::path& path, const Config& cfg,
         {"successes", s.successes}, {"accurate", s.accurate},
         {"total_sec", s.total_sec}, {"median_ms", s.median_ms},
         {"geometric_mean_ms", s.geometric_mean_ms},
+        {"mean_dual_pivots", s.mean_dual_pivots},
+        {"mean_dse_initialization_ms", s.mean_dse_initialization_ms},
+        {"geometric_mean_kernel_ms_per_dual_pivot",
+         s.geometric_mean_kernel_ms_per_dual_pivot},
         {"geometric_speedup_vs_highs_simplex",
          finite_or_null(s.geometric_speedup_vs_highs_simplex)}});
   }
@@ -764,6 +871,22 @@ void print_summary(const std::vector<Summary>& summaries) {
     std::printf("%-40s %4d/%-4d %4d/%-4d %12.3f %12.3f %11s\n",
                 s.solver.c_str(), s.successes, s.attempts, s.accurate,
                 s.attempts, s.median_ms, s.geometric_mean_ms, speedup);
+  }
+  bool have_native_telemetry = false;
+  for (const auto& s : summaries) {
+    have_native_telemetry = have_native_telemetry || s.native_telemetry_count > 0;
+  }
+  if (have_native_telemetry) {
+    std::cout << "\nNative DSE initialization diagnostics\n";
+    std::printf("%-55s %12s %14s %18s\n", "Algorithm", "Mean pivots",
+                "Mean init ms", "Kernel ms/pivot");
+    std::printf("%s\n", std::string(103, '-').c_str());
+    for (const auto& s : summaries) {
+      if (s.native_telemetry_count == 0) continue;
+      std::printf("%-55s %12.1f %14.6f %18.6f\n", s.solver.c_str(),
+                  s.mean_dual_pivots, s.mean_dse_initialization_ms,
+                  s.geometric_mean_kernel_ms_per_dual_pivot);
+    }
   }
 }
 
@@ -793,6 +916,21 @@ int main(int argc, char** argv) {
                       row.accurate ? "ACCURATE" : (row.success ? "WRONG" : "FAIL"),
                       row.objective_rel_error, row.normalized_primal_violation,
                       row.status.c_str());
+          if (row.native_telemetry) {
+            std::printf("    dual_pivots=%d init=%.6f ms/%d solves "
+                        "kernel=%.3f ms %.6f ms/pivot\n",
+                        row.dual_pivots, row.dse_initialization_ms,
+                        row.dse_initialization_solves, row.native_kernel_ms,
+                        row.native_kernel_ms_per_dual_pivot);
+            if (row.certified_dse_btrans > 0) {
+              std::printf("    certified_dse=%d BTRAN, %d candidates, "
+                          "%d rejected, %.3f ms\n",
+                          row.certified_dse_btrans,
+                          row.certified_dse_candidates,
+                          row.certified_dse_rejections,
+                          row.certified_dse_ms);
+            }
+          }
           std::fflush(stdout);
           rows.push_back(std::move(row));
         }

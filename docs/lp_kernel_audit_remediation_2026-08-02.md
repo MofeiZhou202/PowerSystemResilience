@@ -11,7 +11,10 @@
 
 正确性测试、ASan/UBSan 和 TSan 的定向并发测试通过。合成微基准证明并行内核在达到门槛时有效，但当前 24 个 NETLIB 模型没有达到保守并行门槛，因此不能把合成加速比宣称为 NETLIB 端到端加速。构建 A/B 也显示 native、LTO、PGO 在当前机器和训练负载上没有稳定总体收益，均不应默认开启。
 
-完整仓库仍有两个如实保留的失败：`grow22` 被 canonical residual 审计 fail-closed；MILP 随机差分 case 112 返回错误最优值。后者位于并行 LP kernel 之外的现有 MILP presolve/branch-and-cut 工作区。
+原始审计如实保留了两个失败：`grow22` 被 canonical residual 审计
+fail-closed；MILP 随机差分 case 112 返回错误最优值。2026-08-04 的后续
+修复已解决 `grow22` 的 reconstruction 依赖问题并达到 NETLIB 72/72；后者
+仍位于并行 LP kernel 之外的现有 MILP presolve/branch-and-cut 工作区。
 
 ## 2. 实现
 
@@ -120,7 +123,10 @@ PRICE 的工作划分足以摊薄线程池调度；BFRT 仅并行分类，确定
 
 ## 5. 未通过项
 
-1. NETLIB `grow22` 三次都 fail-closed：canonical `Ax=b` residual 为 `6.1467289924621582e-08`，严格上限为 `1e-08`。因此 NETLIB 是 69/72，不是 72/72。
+1. ~~NETLIB `grow22` 三次都 fail-closed~~：已于 2026-08-04 修复。
+   audit cache 原先只按 factor generation 去重，未包含 nonbasic side
+   vector；side classification 后的 primal reconstruction 因而跳过 defect
+   correction。修复后保持原 `1e-08` 上限，NETLIB 为 72/72。
 2. 完整 MILP 固定种子 `2858143525` 的随机差分 case 112 失败：solver 报告 `Optimal (tree exhausted)`、目标 `-5`，穷举 oracle 为 `-6`。当前为 702/703 assertions。该路径位于现有 native MILP presolve/branch-and-cut 修改中，本轮 LP kernel 文件没有以放宽 oracle 或降级审计的方式掩盖它。
 
 ## 6. 后续性能建议
@@ -134,4 +140,3 @@ PRICE 的工作划分足以摊薄线程池调度；BFRT 仅并行分类，确定
 5. PGO 必须用真实生产 LP/MILP 根松弛训练，并在 CI 记录 compiler version、源码 fingerprint 和 profile fingerprint。只有在独立验收集上中位数、几何均值、尾延迟同时不退化时才启用。
 6. 在 AVX-512 gather 或 SVE 目标机上重新评估显式 SIMD；arm64/NEON 当前不建议强制向量化稀疏 gather。
 7. 对更大的 BFRT scan，可尝试每 worker 构造局部候选数组后按区间稳定拼接，同时保留容量求和的原序串行语义。只有 profiling 证明 merge 成为瓶颈时才值得增加复杂度。
-

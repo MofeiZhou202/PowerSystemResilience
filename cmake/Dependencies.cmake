@@ -13,6 +13,35 @@ foreach(_MIPSOLVERS_FORBIDDEN_SOLVER_CACHE
 endforeach()
 unset(_MIPSOLVERS_FORBIDDEN_SOLVER_CACHE)
 
+# Optional hermetic oneMKL bundle. A non-empty value is authoritative: the
+# resolver must use that bundle and must not fall back to a machine install.
+set(MIPSOLVERS_MKL_ROOT "" CACHE PATH
+  "Root of a local static oneMKL bundle (include/, lib/, licensing/)")
+if(NOT MIPSOLVERS_MKL_ROOT AND DEFINED ENV{MIPSOLVERS_MKL_ROOT})
+  set(MIPSOLVERS_MKL_ROOT "$ENV{MIPSOLVERS_MKL_ROOT}" CACHE PATH
+    "Root of a local static oneMKL bundle (include/, lib/, licensing/)" FORCE)
+endif()
+if(NOT MIPSOLVERS_MKL_ROOT AND
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/oneapi-mkl/manifest.cmake")
+  set(MIPSOLVERS_MKL_ROOT
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/oneapi-mkl" CACHE PATH
+    "Root of a local static oneMKL bundle (include/, lib/, licensing/)" FORCE)
+endif()
+if(MIPSOLVERS_MKL_ROOT)
+  # A selected bundle is authoritative even when this build directory was
+  # previously configured against a system oneAPI installation.
+  foreach(_MIPSOLVERS_MKL_CACHE IN ITEMS
+      MIPSOLVERS_MKL_INCLUDE_DIR MIPSOLVERS_MKL_LP64_LIB
+      MIPSOLVERS_MKL_THREAD_LIB MIPSOLVERS_MKL_CORE_LIB)
+    unset(${_MIPSOLVERS_MKL_CACHE} CACHE)
+    unset(${_MIPSOLVERS_MKL_CACHE})
+  endforeach()
+  unset(_MIPSOLVERS_MKL_CACHE)
+  set(MIPSOLVERS_HAVE_MKL_PARDISO OFF)
+  set(MIPSOLVERS_MKL_INCLUDE_DIRS "")
+  set(MIPSOLVERS_MKL_LIBRARIES "")
+endif()
+
 # ── Prebuilt third-party package (AUTO/ON/OFF) ───────────────────────────────
 # When third_party/install (built by third_party/build_third_party.sh with
 # -DMIPSOLVERS_THIRD_PARTY_ONLY=ON) is present and toolchain-compatible, load
@@ -391,48 +420,66 @@ if(NOT DEFINED MIPSOLVERS_MKL_LIBRARIES)
 endif()
 option(MIPSOLVERS_USE_MKL "Enable Intel MKL PARDISO backend when available" ON)
 if(MIPSOLVERS_USE_MKL AND NOT APPLE AND NOT MIPSOLVERS_HAVE_MKL_PARDISO)
-  # Build the hints list carefully: $ENV{ONEAPI_ROOT} may be unset, which
-  # would expand to the bogus path "/mkl/latest" inside a quoted string.
-  set(_MKL_HINTS $ENV{MKLROOT})
-  if(DEFINED ENV{ONEAPI_ROOT})
-    list(APPEND _MKL_HINTS "$ENV{ONEAPI_ROOT}/mkl/latest")
+  if(MIPSOLVERS_MKL_ROOT)
+    # The explicit bundle is authoritative. Do not mix its headers or archives
+    # with a machine-level oneAPI installation when the bundle is incomplete.
+    set(_MKL_HINTS "${MIPSOLVERS_MKL_ROOT}")
+    set(_MIPSOLVERS_MKL_FIND_MODE NO_DEFAULT_PATH)
+  else()
+    # Build the hints list carefully: $ENV{ONEAPI_ROOT} may be unset, which
+    # would expand to the bogus path "/mkl/latest" inside a quoted string.
+    set(_MKL_HINTS $ENV{MKLROOT})
+    if(DEFINED ENV{ONEAPI_ROOT})
+      list(APPEND _MKL_HINTS "$ENV{ONEAPI_ROOT}/mkl/latest")
+    endif()
+    list(APPEND _MKL_HINTS
+      "${CMAKE_CURRENT_SOURCE_DIR}/third_party/oneapi-mkl"
+      "/opt/intel/oneapi/mkl/latest"
+      "/opt/intel/mkl"
+      "C:/Program Files (x86)/Intel/oneAPI/mkl/latest"
+      "C:/Program Files/Intel/oneAPI/mkl/latest")
+    set(_MIPSOLVERS_MKL_FIND_MODE "")
   endif()
-  list(APPEND _MKL_HINTS
-    "/opt/intel/oneapi/mkl/latest"
-    "/opt/intel/mkl"
-    "C:/Program Files (x86)/Intel/oneAPI/mkl/latest"
-    "C:/Program Files/Intel/oneAPI/mkl/latest")
   find_path(MIPSOLVERS_MKL_INCLUDE_DIR NAMES mkl_pardiso.h
-    HINTS ${_MKL_HINTS} PATH_SUFFIXES include)
+    HINTS ${_MKL_HINTS} ${_MIPSOLVERS_MKL_FIND_MODE}
+    PATH_SUFFIXES include)
   if(CMAKE_SIZEOF_VOID_P EQUAL 8)
     find_library(MIPSOLVERS_MKL_LP64_LIB   NAMES mkl_intel_lp64
-      HINTS ${_MKL_HINTS} PATH_SUFFIXES lib lib/intel64)
+      HINTS ${_MKL_HINTS} ${_MIPSOLVERS_MKL_FIND_MODE}
+      PATH_SUFFIXES lib lib/intel64)
     if(WIN32)
       find_library(MIPSOLVERS_MKL_THREAD_LIB NAMES mkl_sequential mkl_intel_thread
-        HINTS ${_MKL_HINTS} PATH_SUFFIXES lib lib/intel64)
+        HINTS ${_MKL_HINTS} ${_MIPSOLVERS_MKL_FIND_MODE}
+        PATH_SUFFIXES lib lib/intel64)
     else()
       find_library(MIPSOLVERS_MKL_THREAD_LIB NAMES mkl_intel_thread mkl_sequential
-        HINTS ${_MKL_HINTS} PATH_SUFFIXES lib lib/intel64)
+        HINTS ${_MKL_HINTS} ${_MIPSOLVERS_MKL_FIND_MODE}
+        PATH_SUFFIXES lib lib/intel64)
     endif()
     find_library(MIPSOLVERS_MKL_CORE_LIB   NAMES mkl_core
-      HINTS ${_MKL_HINTS} PATH_SUFFIXES lib lib/intel64)
+      HINTS ${_MKL_HINTS} ${_MIPSOLVERS_MKL_FIND_MODE}
+      PATH_SUFFIXES lib lib/intel64)
   else()
     find_library(MIPSOLVERS_MKL_LP64_LIB   NAMES mkl_intel_c
-      HINTS ${_MKL_HINTS} PATH_SUFFIXES lib lib/ia32)
+      HINTS ${_MKL_HINTS} ${_MIPSOLVERS_MKL_FIND_MODE}
+      PATH_SUFFIXES lib lib/ia32)
     if(WIN32)
       find_library(MIPSOLVERS_MKL_THREAD_LIB NAMES mkl_sequential mkl_intel_thread
-        HINTS ${_MKL_HINTS} PATH_SUFFIXES lib lib/ia32)
+        HINTS ${_MKL_HINTS} ${_MIPSOLVERS_MKL_FIND_MODE}
+        PATH_SUFFIXES lib lib/ia32)
     else()
       find_library(MIPSOLVERS_MKL_THREAD_LIB NAMES mkl_intel_thread mkl_sequential
-        HINTS ${_MKL_HINTS} PATH_SUFFIXES lib lib/ia32)
+        HINTS ${_MKL_HINTS} ${_MIPSOLVERS_MKL_FIND_MODE}
+        PATH_SUFFIXES lib lib/ia32)
     endif()
     find_library(MIPSOLVERS_MKL_CORE_LIB   NAMES mkl_core
-      HINTS ${_MKL_HINTS} PATH_SUFFIXES lib lib/ia32)
+      HINTS ${_MKL_HINTS} ${_MIPSOLVERS_MKL_FIND_MODE}
+      PATH_SUFFIXES lib lib/ia32)
   endif()
 
   # vcpkg toolchain settings can restrict find_* to rooted prefixes and miss
   # oneAPI's system install path on Windows. Fall back to direct path checks.
-  if(WIN32)
+  if(WIN32 AND NOT MIPSOLVERS_MKL_ROOT)
     if(NOT MIPSOLVERS_MKL_INCLUDE_DIR)
       set(_MKL_DEFAULT_INCLUDE "C:/Program Files (x86)/Intel/oneAPI/mkl/latest/include")
       if(EXISTS "${_MKL_DEFAULT_INCLUDE}/mkl_pardiso.h")
@@ -457,6 +504,16 @@ if(MIPSOLVERS_USE_MKL AND NOT APPLE AND NOT MIPSOLVERS_HAVE_MKL_PARDISO)
       endif()
       unset(_MKL_DEFAULT_LIBDIR)
     endif()
+  endif()
+
+  if(MIPSOLVERS_MKL_ROOT AND
+     (NOT MIPSOLVERS_MKL_INCLUDE_DIR OR NOT MIPSOLVERS_MKL_LP64_LIB OR
+      NOT MIPSOLVERS_MKL_THREAD_LIB OR NOT MIPSOLVERS_MKL_CORE_LIB))
+    message(FATAL_ERROR
+      "MIPSOLVERS_MKL_ROOT is set to '${MIPSOLVERS_MKL_ROOT}', but it is not "
+      "a complete static oneMKL bundle. Expected include/mkl_pardiso.h and "
+      "the LP64, sequential, and core libraries under lib/. Run "
+      "third_party/stage_onemkl.ps1 on Windows.")
   endif()
 
   if(MIPSOLVERS_MKL_INCLUDE_DIR AND MIPSOLVERS_MKL_LP64_LIB
@@ -489,6 +546,7 @@ if(MIPSOLVERS_USE_MKL AND NOT APPLE AND NOT MIPSOLVERS_HAVE_MKL_PARDISO)
 elseif(MIPSOLVERS_HAVE_MKL_PARDISO)
   message(STATUS "mipsolvers: Intel MKL detected at ${MIPSOLVERS_MKL_INCLUDE_DIRS}")
 endif()
+unset(_MIPSOLVERS_MKL_FIND_MODE)
 
 # ── Eigen3 (header-only) — vendored in third_party/eigen, then system ─────────
 # The vendored copy is authoritative (hermetic build); system/vcpkg installs are

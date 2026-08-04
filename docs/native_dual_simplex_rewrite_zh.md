@@ -214,8 +214,12 @@ canonical `Ax=b` 门限，也使用同一新基协议。超限状态不会进入
 basis decision、bound side、pivot、阈值、容差或迭代预算。
 
 reconstruction 还显式闭合 factor backward stability 与 canonical primal contract
-之间的差距：用扩展精度累加 `r=b-Ax`，仅在原门限要求时执行一次
-`B Delta x_B=r` defect correction，再按相同门限复核。
+之间的差距：用扩展精度累加 `r=b-Ax`，仅在原门限要求时执行单调 iterative
+defect correction `B Delta x_B=r`，每次更新后都按相同门限复核。只有 residual
+无穷范数严格下降时才能继续；停滞仍是 numerical failure，不允许放宽 feasibility
+tolerance。由于 `x_B=B^-1(b-A_N x_N)` 同时依赖 factor generation `B` 与
+nonbasic side vector `s`，canonical audit 只有在 `(B,s)` 都不变时才能复用；
+boxed-column side classification 即使没有 INVERT，也会使此前 audit 失效。
 
 强制差分从非对角乱序基开始，连续执行 10 次交换；每一步都把 FT FTRAN/BTRAN
 同时与 fresh HFactor 和 dense LU 比较，并覆盖同一 backend 连续 factorize。

@@ -216,7 +216,8 @@ one driver-visible rebuild request.
 
 The framework is selected from owned state, not by a tolerance change:
 
-- a logical/diagonal basis uses exact unit (or scaled diagonal) DSE weights;
+- a logical/diagonal cold or uncached warm basis uses exact unit (or scaled
+  diagonal) DSE weights;
 - a warm basis carrying matching cached DSE weights continues DSE;
 - a nonlogical warm basis without weights starts a Devex framework, avoiding
   `m` startup BTRAN solves.

@@ -496,6 +496,11 @@ struct State {
   Eigen::VectorXd reduced_costs;
   std::vector<double> edge_weight;
   EdgeWeightMode edge_weight_mode{EdgeWeightMode::SteepestEdge};
+  bool certified_exact_dse_pricing{false};
+  int certified_dse_btrans{0};
+  int certified_dse_candidates{0};
+  int certified_dse_rejections{0};
+  double certified_dse_time_sec{0.0};
   std::vector<char> devex_reference;
   int devex_iterations{0};
   double objective{0.0};

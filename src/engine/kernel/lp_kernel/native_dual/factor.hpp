@@ -60,6 +60,8 @@ class BasisFactor final : public BasisOps {
                               const std::vector<int>* rhs_pattern = nullptr) const;
   IndexedSolveEvidence indexed_ftran(const IndexedVector& rhs,
                                      bool capture_update = false) const;
+  bool indexed_ftran_at_captured_pattern(
+      const IndexedVector& rhs, std::vector<double>& result_value) const;
   IndexedSolveEvidence indexed_btran(const IndexedVector& rhs,
                                      bool capture_update = false) const;
   EdgeWeightEvidence compute_exact_edge_weights() const;
@@ -78,6 +80,21 @@ class BasisFactor final : public BasisOps {
   int update_count() const { return rank_factor_.n_updates; }
   bool last_solve_refined() const { return last_solve_refined_; }
   int rebuild_count() const { return rebuild_count_; }
+  void set_indexed_solve_profiling(bool enabled) {
+    rank_factor_.set_indexed_solve_profiling(enabled);
+  }
+  double profiled_indexed_solve_time_sec() const {
+    return rank_factor_.profiled_indexed_solve_time_sec();
+  }
+  double profiled_indexed_solve_synthetic_tick() const {
+    return rank_factor_.profiled_indexed_solve_synthetic_tick();
+  }
+  std::uint64_t profiled_indexed_solve_count() const {
+    return rank_factor_.profiled_indexed_solve_count();
+  }
+  double build_synthetic_tick() const {
+    return rank_factor_.build_synthetic_tick();
+  }
 
  private:
   SolveEvidence solve_checked(const Eigen::VectorXd& rhs,

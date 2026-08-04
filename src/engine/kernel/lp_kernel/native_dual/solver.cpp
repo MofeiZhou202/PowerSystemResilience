@@ -11,6 +11,7 @@
 #include <sstream>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace mipsolvers::engine::native_dual {
 namespace {
@@ -137,6 +138,126 @@ MinorOutcome numerical_trouble(std::string message) {
 // Accumulates wall time in each dual-simplex phase so a slow large-LP root can
 // be attributed to CHUZR/BTRAN, PRICE (A^T*row_ep), the ratio test, FTRAN, DSE
 // weight updates, or LU refactorization.  Zero cost when the env is unset.
+struct LinearFit {
+  long samples{0};
+  long double sum_x{0.0L};
+  long double sum_y{0.0L};
+  long double sum_xx{0.0L};
+  long double sum_xy{0.0L};
+  long double sum_yy{0.0L};
+
+  void clear() { *this = {}; }
+  void add(double x, double y) {
+    if (!std::isfinite(x) || !std::isfinite(y)) return;
+    const long double lx = x;
+    const long double ly = y;
+    ++samples;
+    sum_x += lx;
+    sum_y += ly;
+    sum_xx += lx * lx;
+    sum_xy += lx * ly;
+    sum_yy += ly * ly;
+  }
+  double slope() const {
+    const long double n = samples;
+    const long double denominator = n * sum_xx - sum_x * sum_x;
+    if (samples < 2 || denominator <= 0.0L) return 0.0;
+    return static_cast<double>((n * sum_xy - sum_x * sum_y) / denominator);
+  }
+  double r_squared() const {
+    const long double n = samples;
+    const long double covariance = n * sum_xy - sum_x * sum_y;
+    const long double variance_x = n * sum_xx - sum_x * sum_x;
+    const long double variance_y = n * sum_yy - sum_y * sum_y;
+    if (samples < 2 || variance_x <= 0.0L || variance_y <= 0.0L) return 0.0;
+    const long double value = covariance * covariance /
+                              (variance_x * variance_y);
+    return static_cast<double>(std::min(1.0L, std::max(0.0L, value)));
+  }
+};
+
+struct ReinvertAgeCell {
+  long iterations{0};
+  std::uint64_t solve_calls{0};
+  long double solve_time_sec{0.0L};
+  long double solve_synthetic_tick{0.0L};
+};
+
+struct ReinvertPhaseProfile {
+  std::vector<ReinvertAgeCell> ages;
+  double scheduled_reinvert_time_sec{0.0};
+  double scheduled_reinvert_synthetic_tick{0.0};
+  long long scheduled_interval_sum{0};
+  long scheduled_reinverts{0};
+  long safety_reinverts{0};
+
+  void clear() { *this = {}; }
+
+  void add_iteration(int age, double solve_time_sec,
+                     double solve_synthetic_tick,
+                     std::uint64_t solve_calls) {
+    if (age < 0 || solve_calls == 0 || !std::isfinite(solve_time_sec) ||
+        !std::isfinite(solve_synthetic_tick)) {
+      return;
+    }
+    if (ages.size() <= static_cast<std::size_t>(age)) {
+      ages.resize(static_cast<std::size_t>(age) + 1);
+    }
+    ReinvertAgeCell& cell = ages[static_cast<std::size_t>(age)];
+    ++cell.iterations;
+    cell.solve_calls += solve_calls;
+    cell.solve_time_sec += solve_time_sec;
+    cell.solve_synthetic_tick += solve_synthetic_tick;
+  }
+
+  void add_reinvert(bool scheduled, int interval, double time_sec,
+                    double synthetic_tick) {
+    if (!scheduled) {
+      ++safety_reinverts;
+      return;
+    }
+    ++scheduled_reinverts;
+    scheduled_interval_sum += interval;
+    scheduled_reinvert_time_sec += time_sec;
+    scheduled_reinvert_synthetic_tick += synthetic_tick;
+  }
+
+  LinearFit time_fit() const {
+    LinearFit fit;
+    for (std::size_t age = 0; age < ages.size(); ++age) {
+      const ReinvertAgeCell& cell = ages[age];
+      if (cell.iterations == 0) continue;
+      fit.add(static_cast<double>(age),
+              static_cast<double>(cell.solve_time_sec / cell.iterations));
+    }
+    return fit;
+  }
+
+  LinearFit synthetic_tick_fit() const {
+    LinearFit fit;
+    for (std::size_t age = 0; age < ages.size(); ++age) {
+      const ReinvertAgeCell& cell = ages[age];
+      if (cell.iterations == 0) continue;
+      fit.add(
+          static_cast<double>(age),
+          static_cast<double>(cell.solve_synthetic_tick / cell.iterations));
+    }
+    return fit;
+  }
+
+  long iterations() const {
+    long total = 0;
+    for (const ReinvertAgeCell& cell : ages) total += cell.iterations;
+    return total;
+  }
+
+  std::uint64_t solve_calls() const {
+    std::uint64_t total = 0;
+    for (const ReinvertAgeCell& cell : ages) total += cell.solve_calls;
+    return total;
+  }
+};
+
 struct DSProfile {
   bool enabled = false;
   double start_clock = 0.0;
@@ -154,6 +275,11 @@ struct DSProfile {
   // Average structural support of the two hot simplex vectors.
   double sum_rowep_nnz = 0.0, sum_pivotrow_nnz = 0.0;
   long density_samples = 0;
+  ReinvertPhaseProfile dual_one_reinvert;
+  ReinvertPhaseProfile dual_two_reinvert;
+  ReinvertPhaseProfile& reinvert_profile(Phase phase) {
+    return phase == Phase::DualOne ? dual_one_reinvert : dual_two_reinvert;
+  }
   void reset() {
     enabled = std::getenv("MIPSOLVERS_DS_PROFILE") != nullptr;
     leaving = price = entering = ftran = dse = rebuild = minor_total = primal =
@@ -161,6 +287,8 @@ struct DSProfile {
             bfrt_sort = bfrt_order = 0.0;
     sum_rowep_nnz = sum_pivotrow_nnz = 0.0;
     density_samples = 0;
+    dual_one_reinvert.clear();
+    dual_two_reinvert.clear();
     pivots = rebuilds = 0;
     bfrt_calls = bfrt_candidates = bfrt_groups = bfrt_selected_group =
         bfrt_flips = bfrt_stability_prefiltered = 0;
@@ -217,6 +345,52 @@ struct DSProfile {
           bfrt_selected_group / calls, bfrt_max_selected_group,
           bfrt_flips / calls, bfrt_max_flips,
           bfrt_stability_prefiltered);
+    }
+    const auto report_reinvert = [](const char* phase,
+                                    const ReinvertPhaseProfile& profile) {
+      const LinearFit wall_fit = profile.time_fit();
+      const LinearFit tick_fit = profile.synthetic_tick_fit();
+      const double average_reinvert_time =
+          profile.scheduled_reinverts > 0
+              ? profile.scheduled_reinvert_time_sec /
+                    profile.scheduled_reinverts
+              : 0.0;
+      const double average_reinvert_tick =
+          profile.scheduled_reinverts > 0
+              ? profile.scheduled_reinvert_synthetic_tick /
+                    profile.scheduled_reinverts
+              : 0.0;
+      const double u_wall = wall_fit.slope();
+      const double u_tick = tick_fit.slope();
+      const double t_wall =
+          u_wall > 0.0 && average_reinvert_time > 0.0
+              ? std::sqrt(2.0 * average_reinvert_time / u_wall)
+              : 0.0;
+      const double t_tick =
+          u_tick > 0.0 && average_reinvert_tick > 0.0
+              ? std::sqrt(2.0 * average_reinvert_tick / u_tick)
+              : 0.0;
+      std::fprintf(
+          stderr,
+          "[DS-REINVERT-MODEL] phase=%s iterations=%ld ages=%ld "
+          "solve_calls=%llu interval=%.1f scheduled=%ld safety=%ld "
+          "R_sec=%.6g R_build_tick=%.6g u_sec=%.6g u_tick=%.6g "
+          "T_wall=%.2f T_tick=%.2f r2=%.3f/%.3f\n",
+          phase, profile.iterations(), wall_fit.samples,
+          static_cast<unsigned long long>(profile.solve_calls()),
+          profile.scheduled_reinverts > 0
+              ? static_cast<double>(profile.scheduled_interval_sum) /
+                    profile.scheduled_reinverts
+              : 0.0,
+          profile.scheduled_reinverts, profile.safety_reinverts,
+          average_reinvert_time, average_reinvert_tick, u_wall, u_tick,
+          t_wall, t_tick, wall_fit.r_squared(), tick_fit.r_squared());
+    };
+    if (dual_one_reinvert.iterations() > 0) {
+      report_reinvert("I", dual_one_reinvert);
+    }
+    if (dual_two_reinvert.iterations() > 0) {
+      report_reinvert("II", dual_two_reinvert);
     }
     std::fprintf(
         stderr,
@@ -280,7 +454,7 @@ struct MinorScratch {
   std::vector<unsigned int> primal_stamp;
   std::vector<int> primal_touched;
   unsigned int primal_epoch{0};
-  std::vector<detail::EdgeWeightChange> edge_weight_changes;
+  detail::EdgeWeightUpdate edge_weight_update;
   std::vector<unsigned int> flipped_stamp;
   std::vector<unsigned int> shifted_stamp;
   std::vector<double> shift_delta;
@@ -358,15 +532,16 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
   }
 
   const double _t_pr = g_ds_profile.enabled ? ds_clock() : 0.0;
-  if (state.sf->A_row.rows() != state.m ||
-      state.sf->A_row.cols() != state.n) {
+  if (state.sf->A_row.rows() != state.m || state.sf->A_row.cols() != state.n) {
     return numerical_trouble("PRICE row matrix is dimensionally inconsistent");
   }
   // The priced row is consumed entirely within this pivot, so its backing
   // storage is reused across iterations.
   static thread_local detail::IndexedVector pivot_row_storage;
-  detail::multiply_AT_indexed(state.sf->A, state.sf->A_row, leaving.row_ep,
-                              pivot_row_storage, state.kernel_threads);
+  static thread_local std::vector<int> bfrt_active_position;
+  detail::multiply_AT_indexed_bfrt(state.sf->A_row, leaving.row_ep, state.basic,
+                                   state.move, pivot_row_storage,
+                                   bfrt_active_position);
   const detail::IndexedVector& pivot_row = pivot_row_storage;
   if (!pivot_row.finite()) {
     return numerical_trouble("packed PRICE produced non-finite values");
@@ -382,7 +557,7 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
   PivotTransaction transaction;
   const double _t_en = g_ds_profile.enabled ? ds_clock() : 0.0;
   const bool _en_ok = detail::choose_entering_bfrt(
-      state, leaving, pivot_row, transaction, failure);
+      state, leaving, pivot_row, bfrt_active_position, transaction, failure);
   if (g_ds_profile.enabled) g_ds_profile.entering += ds_clock() - _t_en;
   if (g_ds_profile.enabled && transaction.bfrt_candidate_count > 0) {
     ++g_ds_profile.bfrt_calls;
@@ -613,16 +788,16 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
     }
     if (leaving.side * remaining_delta < 0.0) remaining_delta = 0.0;
 
-    std::vector<detail::EdgeWeightChange>& edge_weight_changes =
-        g_ds_scratch.edge_weight_changes;
+    detail::EdgeWeightUpdate& edge_weight_update =
+        g_ds_scratch.edge_weight_update;
     bool restart_devex = false;
     const double _t_dse = g_ds_profile.enabled ? ds_clock() : 0.0;
     const bool _dse_ok = detail::compute_dse_weights(
-        state, leaving, pivot_row, direction, column_pivot, edge_weight_changes,
+        state, leaving, pivot_row, direction, column_pivot, edge_weight_update,
         restart_devex, failure);
     if (g_ds_profile.enabled) g_ds_profile.dse += ds_clock() - _t_dse;
     if (!_dse_ok) {
-    return numerical_trouble(std::move(failure));
+      return numerical_trouble(std::move(failure));
     }
 
     // The pivot's move/basis exchange is applied to `state` in place (the old
@@ -736,9 +911,14 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
       detail::cycle_signature_apply_move_toggle(state, flip.col, -old_sign);
     }
     if (g_ds_profile.enabled) g_ds_profile.cycle += ds_clock() - _t_cy;
-    for (const detail::EdgeWeightChange& change : edge_weight_changes) {
-      state.edge_weight[static_cast<std::size_t>(change.row)] = change.value;
+    std::size_t edge_value_position = 0;
+    for (const int row : direction.index) {
+      if (row == leaving.row) continue;
+      state.edge_weight[static_cast<std::size_t>(row)] =
+          edge_weight_update.nonpivotal_value[edge_value_position++];
     }
+    state.edge_weight[static_cast<std::size_t>(leaving.row)] =
+        edge_weight_update.pivotal_value;
     state.basic[static_cast<std::size_t>(leaving_col)] = 0;
     state.basic[static_cast<std::size_t>(entering.col)] = 1;
     static thread_local std::vector<int> changed_primal_rows;
@@ -748,7 +928,9 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
       state.x_basic[row] = value;
       changed_primal_rows.push_back(row);
     }
-    detail::refresh_leaving_heap(state, &changed_primal_rows, leaving.row);
+    // primal_changes always ends with leaving.row, so this stream already owns
+    // every row whose basic value changed during the committed transaction.
+    detail::refresh_leaving_heap(state, &changed_primal_rows);
     const double _t_rc = g_ds_profile.enabled ? ds_clock() : 0.0;
     for (std::size_t k = 0; k < pivot_row.index.size(); ++k) {
       const int j = pivot_row.index[k];
@@ -871,12 +1053,20 @@ Result run_phase(State& state, Statistics& statistics,
   };
   for (;;) {
     const bool reinvert = rebuild_reason != detail::RebuildReason::Initial;
+    const int rebuild_interval = state.updates_since_rebuild;
     const double _t_rb = g_ds_profile.enabled ? ds_clock() : 0.0;
     const bool _rb_ok = detail::major_rebuild(state, rebuild_reason, reinvert,
                                               statistics, failure);
     if (g_ds_profile.enabled) {
-      g_ds_profile.rebuild += ds_clock() - _t_rb;
+      const double rebuild_elapsed = ds_clock() - _t_rb;
+      g_ds_profile.rebuild += rebuild_elapsed;
       ++g_ds_profile.rebuilds;
+      if (_rb_ok && reinvert) {
+        g_ds_profile.reinvert_profile(state.phase).add_reinvert(
+            rebuild_reason == detail::RebuildReason::UpdateLimit,
+            rebuild_interval, rebuild_elapsed,
+            state.factor->build_synthetic_tick());
+      }
     }
     if (!_rb_ok) {
       return detail::make_result(state, Status::NumericalFailure,
@@ -959,9 +1149,32 @@ Result run_phase(State& state, Statistics& statistics,
         }
       }
 
+      const Phase iteration_phase = state.phase;
+      const int iteration_age = state.updates_since_rebuild;
+      const double solve_time_before =
+          g_ds_profile.enabled
+              ? state.factor->profiled_indexed_solve_time_sec()
+              : 0.0;
+      const double solve_tick_before =
+          g_ds_profile.enabled
+              ? state.factor->profiled_indexed_solve_synthetic_tick()
+              : 0.0;
+      const std::uint64_t solve_count_before =
+          g_ds_profile.enabled
+              ? state.factor->profiled_indexed_solve_count()
+              : 0;
       const double _t_minor = g_ds_profile.enabled ? ds_clock() : 0.0;
       MinorOutcome outcome = minor_iteration(state, statistics);
-      if (g_ds_profile.enabled) g_ds_profile.minor_total += ds_clock() - _t_minor;
+      if (g_ds_profile.enabled) {
+        g_ds_profile.minor_total += ds_clock() - _t_minor;
+        g_ds_profile.reinvert_profile(iteration_phase).add_iteration(
+            iteration_age,
+            state.factor->profiled_indexed_solve_time_sec() -
+                solve_time_before,
+            state.factor->profiled_indexed_solve_synthetic_tick() -
+                solve_tick_before,
+            state.factor->profiled_indexed_solve_count() - solve_count_before);
+      }
       if (outcome.kind == MinorKind::CycleBlocked) continue;
       if (outcome.kind == MinorKind::Pivoted) {
         first_fresh_numerical_failure.clear();
@@ -1128,6 +1341,7 @@ Result solve_impl(const StandardFormLP& sf, const SimplexOptions& options,
   }
   g_ds_profile.model_m = state.m;
   g_ds_profile.model_n = state.n;
+  state.factor->set_indexed_solve_profiling(g_ds_profile.enabled);
 
   auto run_dual_phase = [&]() -> Result {
     const Phase phase = state.phase;
@@ -1222,6 +1436,33 @@ Result solve_impl(const StandardFormLP& sf, const SimplexOptions& options,
                             statistics.primal_phase_two_time_sec);
   };
 
+  auto try_cost_shifted_dual_start =
+      [&](std::string& dual_start_failure) -> bool {
+    const detail::DualShiftStartDecision decision =
+        detail::decide_cost_shifted_dual_start(
+            state, std::getenv("MIPSOLVERS_DUAL_SHIFT_START"));
+    statistics.dual_start_required_cost_shift_lower_bound =
+        decision.required_shift_lower_bound;
+    statistics.dual_start_shift_threshold = decision.shift_threshold;
+    statistics.dual_start_adaptive_rejections =
+        decision.adaptive_rejection ? 1 : 0;
+    if (!decision.try_shift_start) return false;
+    if (!detail::initialize_cost_shifted_dual_start(
+            state, statistics, dual_start_failure)) {
+      if (std::getenv("MIPSOLVERS_DS_VERBOSE") != nullptr) {
+        std::fprintf(stderr,
+                     "[DUAL-SHIFT-START] initialization failed: %s\n",
+                     dual_start_failure.c_str());
+      }
+      return false;
+    }
+    if (statistics.dual_start_required_cost_shift_lower_bound == 0) {
+      statistics.dual_start_required_cost_shift_lower_bound =
+          statistics.dual_start_cost_shifts;
+    }
+    return true;
+  };
+
   // A cold basis that cannot select original-bound dual-feasible endpoints
   // enters a genuine dual Phase I. The logical anchor x0 satisfies Ax0=b, so
   // the auxiliary bounds act on z=x-x0 and the dual Phase-I objective is the
@@ -1234,7 +1475,7 @@ Result solve_impl(const StandardFormLP& sf, const SimplexOptions& options,
       const bool _ew_ok =
           state.factor->rebuild(state.basis, statistics.rank_repairs, failure) &&
           detail::reconstruct(state, failure) &&
-          detail::initialize_cold_edge_weights(state, statistics, failure);
+          detail::initialize_uncached_edge_weights(state, statistics, failure);
       if (g_ds_profile.enabled) g_ds_profile.edge_init += ds_clock() - _t_ew;
       if (!_ew_ok) {
         return detail::make_result(
@@ -1264,29 +1505,8 @@ Result solve_impl(const StandardFormLP& sf, const SimplexOptions& options,
       return run_dual_phase();
     }
 
-    const detail::DualShiftStartDecision shift_start =
-        detail::decide_cost_shifted_dual_start(
-            state, std::getenv("MIPSOLVERS_DUAL_SHIFT_START"));
-    statistics.dual_start_required_cost_shift_lower_bound =
-        shift_start.required_shift_lower_bound;
-    statistics.dual_start_shift_threshold = shift_start.shift_threshold;
-    statistics.dual_start_adaptive_rejections =
-        shift_start.adaptive_rejection ? 1 : 0;
-    if (shift_start.try_shift_start) {
-      if (detail::initialize_cost_shifted_dual_start(
-              state, statistics, dual_start_failure)) {
-        if (statistics.dual_start_required_cost_shift_lower_bound == 0) {
-          statistics.dual_start_required_cost_shift_lower_bound =
-              statistics.dual_start_cost_shifts;
-        }
-        return run_dual_phase();
-      }
-      if (std::getenv("MIPSOLVERS_DS_VERBOSE") != nullptr) {
-        std::fprintf(stderr,
-                     "[DUAL-SHIFT-START] initialization failed; falling back "
-                     "to dual Phase I: %s\n",
-                     dual_start_failure.c_str());
-      }
+    if (try_cost_shifted_dual_start(dual_start_failure)) {
+      return run_dual_phase();
     }
 
     const std::vector<int> pre_phase_one_basis = state.basis;
@@ -1373,6 +1593,9 @@ Result solve_impl(const StandardFormLP& sf, const SimplexOptions& options,
           "initial Phase-II invariant failed: " + initial.failure,
           statistics);
     }
+    return run_dual_phase();
+  }
+  if (try_cost_shifted_dual_start(failure)) {
     return run_dual_phase();
   }
   if (!allow_phase_one) {

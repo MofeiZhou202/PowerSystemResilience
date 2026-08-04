@@ -83,12 +83,19 @@ Two Windows profiles are supported:
    vendored reference BLAS/LAPACK, and provide Intel oneAPI `ifx`/`ifort` or a
    consistent MinGW `gfortran` toolchain.
 
-For the default profile, initialize oneAPI before configuring so `MKLROOT` is
-set and the MKL libraries are visible:
+For the default profile, initialize oneAPI once on a connected staging machine
+and create the repository-local static bundle:
 
 ```powershell
 cmd /k '"C:\Program Files (x86)\Intel\oneAPI\setvars.bat" intel64'
+.\third_party\stage_onemkl.ps1 -SourceRoot $env:MKLROOT -Force
 ```
+
+The staged `third_party/oneapi-mkl` directory contains the complete header
+tree, `mkl_intel_lp64.lib`, `mkl_sequential.lib`, `mkl_core.lib`, license
+material, a version manifest, and `SHA256SUMS`. It is ignored by Git and must
+be transferred as a controlled binary dependency or internal artifact. Normal
+CMake configuration never downloads oneMKL.
 
 The `windows-msvc-release` preset contains no machine-specific compiler or SDK
 paths. It uses the compiler, Ninja, Windows SDK, and oneAPI environment from
@@ -182,11 +189,18 @@ third-party build directory before rebuilding.
 ### Windows
 
 ```powershell
-third_party/build_third_party.ps1 -Jobs 8 -BuildType Release -Fresh
+.\third_party\stage_onemkl.ps1 -SourceRoot $env:MKLROOT -Force
+.\third_party\build_third_party.ps1 -Jobs 8 -BuildType Release -Fresh
 ```
 
-Run the script from the same initialized Visual Studio/oneAPI environment that
-will be used for the main build.
+The first command is needed only when creating or updating the local oneMKL
+bundle. `build_third_party.ps1` verifies every staged file against
+`SHA256SUMS`, builds with IPO disabled, and installs a relocatable
+`MIPSolvers::MKL` target alongside `ipopt_local`. It then runs a configure-only
+consumer contract check, which verifies parent-project target visibility and
+package-relative MKL paths without compiling or linking again. The sealed main
+build needs Visual Studio, the resulting `third_party/install` package, and the
+source trees; it does not need a machine-wide oneAPI installation.
 
 ### Reuse policy
 
@@ -225,6 +239,7 @@ Release dependency package from being linked into a Debug MSVC build.
 | `MIPSOLVERS_FORCE_BUILD_MUMPS` | `ON` | Build vendored MUMPS instead of Homebrew MUMPS |
 | `MIPSOLVERS_STATIC_LIBGFORTRAN` | `OFF` | Static GNU Fortran runtime flags on Linux |
 | `MIPSOLVERS_IPOPT_LINEAR_SOLVER` | platform dependent | `mumps`, or `pardisomkl` on Windows |
+| `MIPSOLVERS_MKL_ROOT` | empty | Authoritative local static oneMKL bundle; no system fallback when set |
 | `MIPSOLVERS_USE_PAPILO` | `ON` | Use bundled local PaPILO; native presolve remains available |
 | `MIPSOLVERS_PAPILO_SOURCE_DIR` | bundled | Override with another local PaPILO source tree |
 | `MIPSOLVERS_PAPILO_BOOST_DIR` | bundled | Override the local Boost include root for PaPILO |
@@ -234,6 +249,14 @@ Release dependency package from being linked into a Debug MSVC build.
 | `MIPSOLVERS_USE_OPENMP` | `ON` | Enable OpenMP when detected |
 
 ## Runtime deployment
+
+The Windows sealed profile links Ipopt against the sequential static oneMKL
+combination. It intentionally does not select `mkl_intel_thread` and therefore
+does not introduce an Intel OpenMP runtime DLL. Preserve the oneMKL license
+files installed under `share/mipsolvers-third-party/licenses/oneapi-mkl` in
+the deployment notices. Verify the final executable with
+`dumpbin /DEPENDENTS`; a static-library package alone is not proof that all
+runtime dependencies have been closed.
 
 Gurobi is never bundled. When its headers and library are detected at build
 time and `GRBloadenv()` can initialize a valid runtime licence, it is the

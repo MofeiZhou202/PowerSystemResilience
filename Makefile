@@ -341,6 +341,19 @@ netlib_solver_benchmark/fast:
 .PHONY : netlib_solver_benchmark/fast
 
 #=============================================================================
+# Target rules for targets named native_dual_bfrt_simd_benchmark
+
+# Build rule for target.
+native_dual_bfrt_simd_benchmark: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 native_dual_bfrt_simd_benchmark
+.PHONY : native_dual_bfrt_simd_benchmark
+
+# fast build rule for target.
+native_dual_bfrt_simd_benchmark/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_dual_bfrt_simd_benchmark.dir/build.make CMakeFiles/native_dual_bfrt_simd_benchmark.dir/build
+.PHONY : native_dual_bfrt_simd_benchmark/fast
+
+#=============================================================================
 # Target rules for targets named miplib2017_benchmark
 
 # Build rule for target.
@@ -814,6 +827,54 @@ benchmark/miplib2017_benchmark.s: benchmark/miplib2017_benchmark.cpp.s
 benchmark/miplib2017_benchmark.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/miplib2017_benchmark.dir/build.make CMakeFiles/miplib2017_benchmark.dir/benchmark/miplib2017_benchmark.cpp.s
 .PHONY : benchmark/miplib2017_benchmark.cpp.s
+
+benchmark/native_dual_bfrt_simd_benchmark.o: benchmark/native_dual_bfrt_simd_benchmark.cpp.o
+.PHONY : benchmark/native_dual_bfrt_simd_benchmark.o
+
+# target to build an object file
+benchmark/native_dual_bfrt_simd_benchmark.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_dual_bfrt_simd_benchmark.dir/build.make CMakeFiles/native_dual_bfrt_simd_benchmark.dir/benchmark/native_dual_bfrt_simd_benchmark.cpp.o
+.PHONY : benchmark/native_dual_bfrt_simd_benchmark.cpp.o
+
+benchmark/native_dual_bfrt_simd_benchmark.i: benchmark/native_dual_bfrt_simd_benchmark.cpp.i
+.PHONY : benchmark/native_dual_bfrt_simd_benchmark.i
+
+# target to preprocess a source file
+benchmark/native_dual_bfrt_simd_benchmark.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_dual_bfrt_simd_benchmark.dir/build.make CMakeFiles/native_dual_bfrt_simd_benchmark.dir/benchmark/native_dual_bfrt_simd_benchmark.cpp.i
+.PHONY : benchmark/native_dual_bfrt_simd_benchmark.cpp.i
+
+benchmark/native_dual_bfrt_simd_benchmark.s: benchmark/native_dual_bfrt_simd_benchmark.cpp.s
+.PHONY : benchmark/native_dual_bfrt_simd_benchmark.s
+
+# target to generate assembly for a file
+benchmark/native_dual_bfrt_simd_benchmark.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_dual_bfrt_simd_benchmark.dir/build.make CMakeFiles/native_dual_bfrt_simd_benchmark.dir/benchmark/native_dual_bfrt_simd_benchmark.cpp.s
+.PHONY : benchmark/native_dual_bfrt_simd_benchmark.cpp.s
+
+benchmark/native_dual_bfrt_simd_kernel.o: benchmark/native_dual_bfrt_simd_kernel.cpp.o
+.PHONY : benchmark/native_dual_bfrt_simd_kernel.o
+
+# target to build an object file
+benchmark/native_dual_bfrt_simd_kernel.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_dual_bfrt_simd_benchmark.dir/build.make CMakeFiles/native_dual_bfrt_simd_benchmark.dir/benchmark/native_dual_bfrt_simd_kernel.cpp.o
+.PHONY : benchmark/native_dual_bfrt_simd_kernel.cpp.o
+
+benchmark/native_dual_bfrt_simd_kernel.i: benchmark/native_dual_bfrt_simd_kernel.cpp.i
+.PHONY : benchmark/native_dual_bfrt_simd_kernel.i
+
+# target to preprocess a source file
+benchmark/native_dual_bfrt_simd_kernel.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_dual_bfrt_simd_benchmark.dir/build.make CMakeFiles/native_dual_bfrt_simd_benchmark.dir/benchmark/native_dual_bfrt_simd_kernel.cpp.i
+.PHONY : benchmark/native_dual_bfrt_simd_kernel.cpp.i
+
+benchmark/native_dual_bfrt_simd_kernel.s: benchmark/native_dual_bfrt_simd_kernel.cpp.s
+.PHONY : benchmark/native_dual_bfrt_simd_kernel.s
+
+# target to generate assembly for a file
+benchmark/native_dual_bfrt_simd_kernel.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_dual_bfrt_simd_benchmark.dir/build.make CMakeFiles/native_dual_bfrt_simd_benchmark.dir/benchmark/native_dual_bfrt_simd_kernel.cpp.s
+.PHONY : benchmark/native_dual_bfrt_simd_kernel.cpp.s
 
 benchmark/native_kernel_comparison.o: benchmark/native_kernel_comparison.cpp.o
 .PHONY : benchmark/native_kernel_comparison.o
@@ -7967,6 +8028,30 @@ src/engine/kernel/ipm/ipm_lp_solver.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/kernel/ipm/ipm_lp_solver.cpp.s
 .PHONY : src/engine/kernel/ipm/ipm_lp_solver.cpp.s
 
+src/engine/kernel/ipm/ipm_lp_solver_cached.o: src/engine/kernel/ipm/ipm_lp_solver_cached.cpp.o
+.PHONY : src/engine/kernel/ipm/ipm_lp_solver_cached.o
+
+# target to build an object file
+src/engine/kernel/ipm/ipm_lp_solver_cached.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/kernel/ipm/ipm_lp_solver_cached.cpp.o
+.PHONY : src/engine/kernel/ipm/ipm_lp_solver_cached.cpp.o
+
+src/engine/kernel/ipm/ipm_lp_solver_cached.i: src/engine/kernel/ipm/ipm_lp_solver_cached.cpp.i
+.PHONY : src/engine/kernel/ipm/ipm_lp_solver_cached.i
+
+# target to preprocess a source file
+src/engine/kernel/ipm/ipm_lp_solver_cached.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/kernel/ipm/ipm_lp_solver_cached.cpp.i
+.PHONY : src/engine/kernel/ipm/ipm_lp_solver_cached.cpp.i
+
+src/engine/kernel/ipm/ipm_lp_solver_cached.s: src/engine/kernel/ipm/ipm_lp_solver_cached.cpp.s
+.PHONY : src/engine/kernel/ipm/ipm_lp_solver_cached.s
+
+# target to generate assembly for a file
+src/engine/kernel/ipm/ipm_lp_solver_cached.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/kernel/ipm/ipm_lp_solver_cached.cpp.s
+.PHONY : src/engine/kernel/ipm/ipm_lp_solver_cached.cpp.s
+
 src/engine/kernel/ipm/ipm_restoration.o: src/engine/kernel/ipm/ipm_restoration.cpp.o
 .PHONY : src/engine/kernel/ipm/ipm_restoration.o
 
@@ -8639,6 +8724,30 @@ src/engine/solver/native/milp/bc/legacy/bc_cuts.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/legacy/bc_cuts.cpp.s
 .PHONY : src/engine/solver/native/milp/bc/legacy/bc_cuts.cpp.s
 
+src/engine/solver/native/milp/bc/legacy/bc_cuts_transformed.o: src/engine/solver/native/milp/bc/legacy/bc_cuts_transformed.cpp.o
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_cuts_transformed.o
+
+# target to build an object file
+src/engine/solver/native/milp/bc/legacy/bc_cuts_transformed.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/legacy/bc_cuts_transformed.cpp.o
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_cuts_transformed.cpp.o
+
+src/engine/solver/native/milp/bc/legacy/bc_cuts_transformed.i: src/engine/solver/native/milp/bc/legacy/bc_cuts_transformed.cpp.i
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_cuts_transformed.i
+
+# target to preprocess a source file
+src/engine/solver/native/milp/bc/legacy/bc_cuts_transformed.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/legacy/bc_cuts_transformed.cpp.i
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_cuts_transformed.cpp.i
+
+src/engine/solver/native/milp/bc/legacy/bc_cuts_transformed.s: src/engine/solver/native/milp/bc/legacy/bc_cuts_transformed.cpp.s
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_cuts_transformed.s
+
+# target to generate assembly for a file
+src/engine/solver/native/milp/bc/legacy/bc_cuts_transformed.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/legacy/bc_cuts_transformed.cpp.s
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_cuts_transformed.cpp.s
+
 src/engine/solver/native/milp/bc/legacy/bc_domain_probe.o: src/engine/solver/native/milp/bc/legacy/bc_domain_probe.cpp.o
 .PHONY : src/engine/solver/native/milp/bc/legacy/bc_domain_probe.o
 
@@ -8687,6 +8796,30 @@ src/engine/solver/native/milp/bc/legacy/bc_env_options.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/legacy/bc_env_options.cpp.s
 .PHONY : src/engine/solver/native/milp/bc/legacy/bc_env_options.cpp.s
 
+src/engine/solver/native/milp/bc/legacy/bc_highs_style_numerics.o: src/engine/solver/native/milp/bc/legacy/bc_highs_style_numerics.cpp.o
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_highs_style_numerics.o
+
+# target to build an object file
+src/engine/solver/native/milp/bc/legacy/bc_highs_style_numerics.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/legacy/bc_highs_style_numerics.cpp.o
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_highs_style_numerics.cpp.o
+
+src/engine/solver/native/milp/bc/legacy/bc_highs_style_numerics.i: src/engine/solver/native/milp/bc/legacy/bc_highs_style_numerics.cpp.i
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_highs_style_numerics.i
+
+# target to preprocess a source file
+src/engine/solver/native/milp/bc/legacy/bc_highs_style_numerics.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/legacy/bc_highs_style_numerics.cpp.i
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_highs_style_numerics.cpp.i
+
+src/engine/solver/native/milp/bc/legacy/bc_highs_style_numerics.s: src/engine/solver/native/milp/bc/legacy/bc_highs_style_numerics.cpp.s
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_highs_style_numerics.s
+
+# target to generate assembly for a file
+src/engine/solver/native/milp/bc/legacy/bc_highs_style_numerics.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/legacy/bc_highs_style_numerics.cpp.s
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_highs_style_numerics.cpp.s
+
 src/engine/solver/native/milp/bc/legacy/bc_implied_bounds.o: src/engine/solver/native/milp/bc/legacy/bc_implied_bounds.cpp.o
 .PHONY : src/engine/solver/native/milp/bc/legacy/bc_implied_bounds.o
 
@@ -8710,6 +8843,30 @@ src/engine/solver/native/milp/bc/legacy/bc_implied_bounds.s: src/engine/solver/n
 src/engine/solver/native/milp/bc/legacy/bc_implied_bounds.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/legacy/bc_implied_bounds.cpp.s
 .PHONY : src/engine/solver/native/milp/bc/legacy/bc_implied_bounds.cpp.s
+
+src/engine/solver/native/milp/bc/legacy/bc_instance_features.o: src/engine/solver/native/milp/bc/legacy/bc_instance_features.cpp.o
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_instance_features.o
+
+# target to build an object file
+src/engine/solver/native/milp/bc/legacy/bc_instance_features.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/legacy/bc_instance_features.cpp.o
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_instance_features.cpp.o
+
+src/engine/solver/native/milp/bc/legacy/bc_instance_features.i: src/engine/solver/native/milp/bc/legacy/bc_instance_features.cpp.i
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_instance_features.i
+
+# target to preprocess a source file
+src/engine/solver/native/milp/bc/legacy/bc_instance_features.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/legacy/bc_instance_features.cpp.i
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_instance_features.cpp.i
+
+src/engine/solver/native/milp/bc/legacy/bc_instance_features.s: src/engine/solver/native/milp/bc/legacy/bc_instance_features.cpp.s
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_instance_features.s
+
+# target to generate assembly for a file
+src/engine/solver/native/milp/bc/legacy/bc_instance_features.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/legacy/bc_instance_features.cpp.s
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_instance_features.cpp.s
 
 src/engine/solver/native/milp/bc/legacy/bc_legacy_helpers.o: src/engine/solver/native/milp/bc/legacy/bc_legacy_helpers.cpp.o
 .PHONY : src/engine/solver/native/milp/bc/legacy/bc_legacy_helpers.o
@@ -8831,6 +8988,30 @@ src/engine/solver/native/milp/bc/legacy/bc_relaxation.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/legacy/bc_relaxation.cpp.s
 .PHONY : src/engine/solver/native/milp/bc/legacy/bc_relaxation.cpp.s
 
+src/engine/solver/native/milp/bc/legacy/bc_relaxation_crash_basis.o: src/engine/solver/native/milp/bc/legacy/bc_relaxation_crash_basis.cpp.o
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_relaxation_crash_basis.o
+
+# target to build an object file
+src/engine/solver/native/milp/bc/legacy/bc_relaxation_crash_basis.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/legacy/bc_relaxation_crash_basis.cpp.o
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_relaxation_crash_basis.cpp.o
+
+src/engine/solver/native/milp/bc/legacy/bc_relaxation_crash_basis.i: src/engine/solver/native/milp/bc/legacy/bc_relaxation_crash_basis.cpp.i
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_relaxation_crash_basis.i
+
+# target to preprocess a source file
+src/engine/solver/native/milp/bc/legacy/bc_relaxation_crash_basis.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/legacy/bc_relaxation_crash_basis.cpp.i
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_relaxation_crash_basis.cpp.i
+
+src/engine/solver/native/milp/bc/legacy/bc_relaxation_crash_basis.s: src/engine/solver/native/milp/bc/legacy/bc_relaxation_crash_basis.cpp.s
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_relaxation_crash_basis.s
+
+# target to generate assembly for a file
+src/engine/solver/native/milp/bc/legacy/bc_relaxation_crash_basis.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/legacy/bc_relaxation_crash_basis.cpp.s
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_relaxation_crash_basis.cpp.s
+
 src/engine/solver/native/milp/bc/legacy/bc_root_audit.o: src/engine/solver/native/milp/bc/legacy/bc_root_audit.cpp.o
 .PHONY : src/engine/solver/native/milp/bc/legacy/bc_root_audit.o
 
@@ -8854,6 +9035,30 @@ src/engine/solver/native/milp/bc/legacy/bc_root_audit.s: src/engine/solver/nativ
 src/engine/solver/native/milp/bc/legacy/bc_root_audit.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/legacy/bc_root_audit.cpp.s
 .PHONY : src/engine/solver/native/milp/bc/legacy/bc_root_audit.cpp.s
+
+src/engine/solver/native/milp/bc/legacy/bc_strict_scuc_cuts.o: src/engine/solver/native/milp/bc/legacy/bc_strict_scuc_cuts.cpp.o
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_strict_scuc_cuts.o
+
+# target to build an object file
+src/engine/solver/native/milp/bc/legacy/bc_strict_scuc_cuts.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/legacy/bc_strict_scuc_cuts.cpp.o
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_strict_scuc_cuts.cpp.o
+
+src/engine/solver/native/milp/bc/legacy/bc_strict_scuc_cuts.i: src/engine/solver/native/milp/bc/legacy/bc_strict_scuc_cuts.cpp.i
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_strict_scuc_cuts.i
+
+# target to preprocess a source file
+src/engine/solver/native/milp/bc/legacy/bc_strict_scuc_cuts.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/legacy/bc_strict_scuc_cuts.cpp.i
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_strict_scuc_cuts.cpp.i
+
+src/engine/solver/native/milp/bc/legacy/bc_strict_scuc_cuts.s: src/engine/solver/native/milp/bc/legacy/bc_strict_scuc_cuts.cpp.s
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_strict_scuc_cuts.s
+
+# target to generate assembly for a file
+src/engine/solver/native/milp/bc/legacy/bc_strict_scuc_cuts.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/legacy/bc_strict_scuc_cuts.cpp.s
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_strict_scuc_cuts.cpp.s
 
 src/engine/solver/native/milp/bc/legacy/bc_uc_trace.o: src/engine/solver/native/milp/bc/legacy/bc_uc_trace.cpp.o
 .PHONY : src/engine/solver/native/milp/bc/legacy/bc_uc_trace.o
@@ -8902,6 +9107,54 @@ src/engine/solver/native/milp/bc/legacy/bc_utils.s: src/engine/solver/native/mil
 src/engine/solver/native/milp/bc/legacy/bc_utils.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/legacy/bc_utils.cpp.s
 .PHONY : src/engine/solver/native/milp/bc/legacy/bc_utils.cpp.s
+
+src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof.o: src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof.cpp.o
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof.o
+
+# target to build an object file
+src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof.cpp.o
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof.cpp.o
+
+src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof.i: src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof.cpp.i
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof.i
+
+# target to preprocess a source file
+src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof.cpp.i
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof.cpp.i
+
+src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof.s: src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof.cpp.s
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof.s
+
+# target to generate assembly for a file
+src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof.cpp.s
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof.cpp.s
+
+src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof_conflict.o: src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof_conflict.cpp.o
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof_conflict.o
+
+# target to build an object file
+src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof_conflict.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof_conflict.cpp.o
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof_conflict.cpp.o
+
+src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof_conflict.i: src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof_conflict.cpp.i
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof_conflict.i
+
+# target to preprocess a source file
+src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof_conflict.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof_conflict.cpp.i
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof_conflict.cpp.i
+
+src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof_conflict.s: src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof_conflict.cpp.s
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof_conflict.s
+
+# target to generate assembly for a file
+src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof_conflict.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/mipsolvers.dir/build.make CMakeFiles/mipsolvers.dir/src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof_conflict.cpp.s
+.PHONY : src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof_conflict.cpp.s
 
 src/engine/solver/native/milp/bc/legacy/bc_validation.o: src/engine/solver/native/milp/bc/legacy/bc_validation.cpp.o
 .PHONY : src/engine/solver/native/milp/bc/legacy/bc_validation.o
@@ -25335,6 +25588,7 @@ help:
 	@echo "... milp_benchmark_runner"
 	@echo "... miplib2017_benchmark"
 	@echo "... mipsolvers"
+	@echo "... native_dual_bfrt_simd_benchmark"
 	@echo "... native_kernel_comparison"
 	@echo "... netlib_solver_benchmark"
 	@echo "... opf_scale_probe"
@@ -25370,6 +25624,12 @@ help:
 	@echo "... benchmark/miplib2017_benchmark.o"
 	@echo "... benchmark/miplib2017_benchmark.i"
 	@echo "... benchmark/miplib2017_benchmark.s"
+	@echo "... benchmark/native_dual_bfrt_simd_benchmark.o"
+	@echo "... benchmark/native_dual_bfrt_simd_benchmark.i"
+	@echo "... benchmark/native_dual_bfrt_simd_benchmark.s"
+	@echo "... benchmark/native_dual_bfrt_simd_kernel.o"
+	@echo "... benchmark/native_dual_bfrt_simd_kernel.i"
+	@echo "... benchmark/native_dual_bfrt_simd_kernel.s"
 	@echo "... benchmark/native_kernel_comparison.o"
 	@echo "... benchmark/native_kernel_comparison.i"
 	@echo "... benchmark/native_kernel_comparison.s"
@@ -26264,6 +26524,9 @@ help:
 	@echo "... src/engine/kernel/ipm/ipm_lp_solver.o"
 	@echo "... src/engine/kernel/ipm/ipm_lp_solver.i"
 	@echo "... src/engine/kernel/ipm/ipm_lp_solver.s"
+	@echo "... src/engine/kernel/ipm/ipm_lp_solver_cached.o"
+	@echo "... src/engine/kernel/ipm/ipm_lp_solver_cached.i"
+	@echo "... src/engine/kernel/ipm/ipm_lp_solver_cached.s"
 	@echo "... src/engine/kernel/ipm/ipm_restoration.o"
 	@echo "... src/engine/kernel/ipm/ipm_restoration.i"
 	@echo "... src/engine/kernel/ipm/ipm_restoration.s"
@@ -26348,15 +26611,24 @@ help:
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_cuts.o"
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_cuts.i"
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_cuts.s"
+	@echo "... src/engine/solver/native/milp/bc/legacy/bc_cuts_transformed.o"
+	@echo "... src/engine/solver/native/milp/bc/legacy/bc_cuts_transformed.i"
+	@echo "... src/engine/solver/native/milp/bc/legacy/bc_cuts_transformed.s"
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_domain_probe.o"
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_domain_probe.i"
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_domain_probe.s"
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_env_options.o"
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_env_options.i"
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_env_options.s"
+	@echo "... src/engine/solver/native/milp/bc/legacy/bc_highs_style_numerics.o"
+	@echo "... src/engine/solver/native/milp/bc/legacy/bc_highs_style_numerics.i"
+	@echo "... src/engine/solver/native/milp/bc/legacy/bc_highs_style_numerics.s"
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_implied_bounds.o"
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_implied_bounds.i"
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_implied_bounds.s"
+	@echo "... src/engine/solver/native/milp/bc/legacy/bc_instance_features.o"
+	@echo "... src/engine/solver/native/milp/bc/legacy/bc_instance_features.i"
+	@echo "... src/engine/solver/native/milp/bc/legacy/bc_instance_features.s"
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_legacy_helpers.o"
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_legacy_helpers.i"
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_legacy_helpers.s"
@@ -26372,15 +26644,27 @@ help:
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_relaxation.o"
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_relaxation.i"
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_relaxation.s"
+	@echo "... src/engine/solver/native/milp/bc/legacy/bc_relaxation_crash_basis.o"
+	@echo "... src/engine/solver/native/milp/bc/legacy/bc_relaxation_crash_basis.i"
+	@echo "... src/engine/solver/native/milp/bc/legacy/bc_relaxation_crash_basis.s"
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_root_audit.o"
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_root_audit.i"
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_root_audit.s"
+	@echo "... src/engine/solver/native/milp/bc/legacy/bc_strict_scuc_cuts.o"
+	@echo "... src/engine/solver/native/milp/bc/legacy/bc_strict_scuc_cuts.i"
+	@echo "... src/engine/solver/native/milp/bc/legacy/bc_strict_scuc_cuts.s"
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_uc_trace.o"
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_uc_trace.i"
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_uc_trace.s"
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_utils.o"
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_utils.i"
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_utils.s"
+	@echo "... src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof.o"
+	@echo "... src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof.i"
+	@echo "... src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof.s"
+	@echo "... src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof_conflict.o"
+	@echo "... src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof_conflict.i"
+	@echo "... src/engine/solver/native/milp/bc/legacy/bc_utils_dual_proof_conflict.s"
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_validation.o"
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_validation.i"
 	@echo "... src/engine/solver/native/milp/bc/legacy/bc_validation.s"

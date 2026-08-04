@@ -11,6 +11,7 @@
 #include "mipsolvers/engine/kernel/lp_kernel/dual_simplex.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -153,6 +154,10 @@ struct HFactorBackend::Impl {
   // packed buffers allocated and initialized several O(m) arrays per pivot.
   mutable HVector update_vec_aq;
   mutable HVector update_vec_ep;
+  mutable bool profile_indexed_solves = false;
+  mutable double profiled_indexed_solve_time_sec = 0.0;
+  mutable double profiled_indexed_solve_synthetic_tick = 0.0;
+  mutable std::uint64_t profiled_indexed_solve_count = 0;
   mutable std::uint64_t aq_capture_serial = 0;
   mutable std::uint64_t ep_capture_serial = 0;
   mutable bool aq_capture_valid = false;
@@ -178,6 +183,29 @@ std::uint64_t HFactorBackend::dense_solve_count() const noexcept {
 
 std::uint64_t HFactorBackend::indexed_solve_count() const noexcept {
   return p_->indexed_solves;
+}
+
+void HFactorBackend::set_indexed_solve_profiling(bool enabled) noexcept {
+  p_->profile_indexed_solves = enabled;
+  p_->profiled_indexed_solve_time_sec = 0.0;
+  p_->profiled_indexed_solve_synthetic_tick = 0.0;
+  p_->profiled_indexed_solve_count = 0;
+}
+
+double HFactorBackend::profiled_indexed_solve_time_sec() const noexcept {
+  return p_->profiled_indexed_solve_time_sec;
+}
+
+double HFactorBackend::profiled_indexed_solve_synthetic_tick() const noexcept {
+  return p_->profiled_indexed_solve_synthetic_tick;
+}
+
+std::uint64_t HFactorBackend::profiled_indexed_solve_count() const noexcept {
+  return p_->profiled_indexed_solve_count;
+}
+
+double HFactorBackend::build_synthetic_tick() const noexcept {
+  return p_->f.build_synthetic_tick;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -761,10 +789,21 @@ bool HFactorBackend::ftran_indexed(
     vector.index[static_cast<std::size_t>(vector.count++)] = row;
   }
   HFactor& nc = const_cast<HFactor&>(p_->f);
+  const auto solve_start =
+      p_->profile_indexed_solves ? std::chrono::steady_clock::now()
+                                 : std::chrono::steady_clock::time_point{};
   nc.ftranCall(vector,
                static_cast<double>(vector.count) / std::max(1, m), nullptr);
+  auto record_profile = [&]() {
+    if (!p_->profile_indexed_solves) return;
+    p_->profiled_indexed_solve_time_sec += std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - solve_start).count();
+    p_->profiled_indexed_solve_synthetic_tick += vector.synthetic_tick;
+    ++p_->profiled_indexed_solve_count;
+  };
   if (vector.count < 0) {
     if (capture_update) p_->aq_capture_valid = false;
+    record_profile();
     return false;
   }
   result_index.reserve(
@@ -785,12 +824,70 @@ bool HFactorBackend::ftran_indexed(
   }
   if (!all_finite) {
     if (capture_update) p_->aq_capture_valid = false;
+    record_profile();
     return false;
   }
   if (capture_update) {
     p_->aq_capture_serial = p_->factor_serial;
     p_->aq_capture_valid = true;
   }
+  record_profile();
+  return true;
+}
+
+bool HFactorBackend::ftran_indexed_at_captured_pattern(
+    const std::vector<int>& rhs_index, const std::vector<double>& rhs_value,
+    std::vector<double>& result_value) const {
+  result_value.clear();
+  if (!valid || rhs_index.size() != rhs_value.size() ||
+      !p_->aq_capture_valid || p_->aq_capture_serial != p_->factor_serial) {
+    return false;
+  }
+  ++p_->indexed_solves;
+  HVector& vector = p_->solve_vec_ftran;
+  vector.clear();
+  vector.packFlag = false;
+  for (std::size_t k = 0; k < rhs_index.size(); ++k) {
+    const int row = rhs_index[k];
+    const double entry = rhs_value[k];
+    if (row < 0 || row >= m || entry == 0.0) continue;
+    vector.array[static_cast<std::size_t>(row)] = entry;
+    vector.index[static_cast<std::size_t>(vector.count++)] = row;
+  }
+  HFactor& nc = const_cast<HFactor&>(p_->f);
+  const auto solve_start =
+      p_->profile_indexed_solves ? std::chrono::steady_clock::now()
+                                 : std::chrono::steady_clock::time_point{};
+  nc.ftranCall(vector,
+               static_cast<double>(vector.count) / std::max(1, m), nullptr);
+  auto record_profile = [&]() {
+    if (!p_->profile_indexed_solves) return;
+    p_->profiled_indexed_solve_time_sec += std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - solve_start).count();
+    p_->profiled_indexed_solve_synthetic_tick += vector.synthetic_tick;
+    ++p_->profiled_indexed_solve_count;
+  };
+  if (vector.count < 0) {
+    record_profile();
+    return false;
+  }
+  for (HighsInt k = 0; k < vector.count; ++k) {
+    const HighsInt row = vector.index[static_cast<std::size_t>(k)];
+    if (!std::isfinite(vector.array[static_cast<std::size_t>(row)])) {
+      record_profile();
+      return false;
+    }
+  }
+
+  const HVector& captured = p_->update_vec_aq;
+  result_value.reserve(
+      static_cast<std::size_t>(std::max<HighsInt>(0, captured.count)));
+  for (HighsInt k = 0; k < captured.count; ++k) {
+    const HighsInt internal = captured.index[static_cast<std::size_t>(k)];
+    if (captured.array[static_cast<std::size_t>(internal)] == 0.0) continue;
+    result_value.push_back(vector.array[static_cast<std::size_t>(internal)]);
+  }
+  record_profile();
   return true;
 }
 
@@ -816,10 +913,21 @@ bool HFactorBackend::btran_indexed(
     vector.index[static_cast<std::size_t>(vector.count++)] = internal;
   }
   HFactor& nc = const_cast<HFactor&>(p_->f);
+  const auto solve_start =
+      p_->profile_indexed_solves ? std::chrono::steady_clock::now()
+                                 : std::chrono::steady_clock::time_point{};
   nc.btranCall(vector,
                static_cast<double>(vector.count) / std::max(1, m), nullptr);
+  auto record_profile = [&]() {
+    if (!p_->profile_indexed_solves) return;
+    p_->profiled_indexed_solve_time_sec += std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - solve_start).count();
+    p_->profiled_indexed_solve_synthetic_tick += vector.synthetic_tick;
+    ++p_->profiled_indexed_solve_count;
+  };
   if (vector.count < 0) {
     if (capture_update) p_->ep_capture_valid = false;
+    record_profile();
     return false;
   }
   result_index.reserve(
@@ -839,12 +947,14 @@ bool HFactorBackend::btran_indexed(
   }
   if (!all_finite) {
     if (capture_update) p_->ep_capture_valid = false;
+    record_profile();
     return false;
   }
   if (capture_update) {
     p_->ep_capture_serial = p_->factor_serial;
     p_->ep_capture_valid = true;
   }
+  record_profile();
   return true;
 }
 

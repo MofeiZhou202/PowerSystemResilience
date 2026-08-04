@@ -54,6 +54,14 @@ class HFactorBackend {
   std::uint64_t matrix_copy_count() const noexcept;
   std::uint64_t dense_solve_count() const noexcept;
   std::uint64_t indexed_solve_count() const noexcept;
+  // Opt-in solve telemetry. Synthetic work uses HiGHS' synthetic-clock units;
+  // wall time covers the HFactor call and result extraction.
+  void set_indexed_solve_profiling(bool enabled) noexcept;
+  double profiled_indexed_solve_time_sec() const noexcept;
+  double profiled_indexed_solve_synthetic_tick() const noexcept;
+  std::uint64_t profiled_indexed_solve_count() const noexcept;
+  // Synthetic work recorded by HFactor for the most recent INVERT.
+  double build_synthetic_tick() const noexcept;
 
   // Rows that received no pivot in the last failed build (HiGHS-style
   // basis repair input): replace each such row's basic column with the
@@ -142,6 +150,15 @@ class HFactorBackend {
                      std::vector<double>& result_value,
                      std::vector<int>& result_lookup,
                      bool capture_update = false) const;
+  // Solve the indexed RHS and extract the solution at the nonzero positions
+  // of the most recently captured FTRAN update column. Values are returned in
+  // the same order as that column's packed export. This avoids exporting and
+  // then re-scattering a second packed vector when only the intersection with
+  // the pivotal-column support is consumed (the DSE update).
+  bool ftran_indexed_at_captured_pattern(
+      const std::vector<int>& rhs_index,
+      const std::vector<double>& rhs_value,
+      std::vector<double>& result_value) const;
   bool btran_indexed(const std::vector<int>& rhs_index,
                      const std::vector<double>& rhs_value,
                      std::vector<int>& result_index,

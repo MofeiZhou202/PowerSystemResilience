@@ -750,6 +750,211 @@ TEST_CASE("DualSimplex: cost-shift crash certifies a cold dual start",
   CHECK(state.reduced_costs[0] == Approx(0.0).margin(1e-12));
 }
 
+TEST_CASE("DualSimplex: cost-shift start treats 1e20 as no upper bound",
+          "[dual_simplex][dual_crash][warm_start]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Constant(1, -1.0);
+  lp.A.resize(1, 1);
+  lp.A.insert(0, 0) = 1.0;
+  lp.A.makeCompressed();
+  lp.b = Eigen::VectorXd::Constant(1, 1.0);
+  lp.Aeq.resize(0, 1);
+  lp.beq.resize(0);
+  lp.vars.push_back({VarType::Continuous, 0.0, 1e20});
+
+  StandardFormLP sf = build_standard_form_lp(lp);
+  sf.var_ub[0] = 1e20;
+  const SimplexOptions options = native_simplex_options();
+  native_dual::Statistics statistics;
+  native_dual::detail::State state;
+  std::string failure;
+  REQUIRE(native_dual::detail::initialize(
+      state, sf, options, native_dual::detail::Phase::Two, nullptr,
+      statistics, failure));
+
+  CHECK_FALSE(native_dual::detail::normalize_nonbasic_moves(state, failure));
+  const auto decision =
+      native_dual::detail::decide_cost_shifted_dual_start(state, nullptr);
+  CHECK(decision.try_shift_start);
+  CHECK(decision.required_shift_lower_bound == 1);
+  REQUIRE(native_dual::detail::initialize_cost_shifted_dual_start(
+      state, statistics, failure));
+  CHECK(state.move[0] == native_dual::detail::Move::Up);
+  CHECK(native_dual::detail::full_primal(state)[0] == Approx(0.0));
+  CHECK(state.cost_shift.at(0) == Approx(-1.0));
+
+  mipsolvers::engine::SimplexBasis hint;
+  hint.rows = sf.A.rows();
+  hint.cols = sf.A.cols();
+  hint.indices = state.basis;
+  hint.at_upper.assign(static_cast<std::size_t>(sf.A.cols()), 0);
+  const auto warm = native_dual::solve(sf, options, hint);
+  INFO(warm.message);
+  REQUIRE(warm.status == native_dual::Status::Optimal);
+  CHECK(warm.max_objective == Approx(1.0).margin(1e-12));
+  CHECK(warm.statistics.dual_start_cost_shifts == 1);
+  CHECK(warm.statistics.dual_phase_one_iterations == 0);
+  CHECK(warm.statistics.primal_phase_one_iterations == 0);
+}
+
+namespace {
+
+// S0 metamorphic harness. Re-encode every mathematical +inf upper bound of a
+// standard form as the model's finite 1e20 sentinel, reproducing what the B&C
+// relaxation builders feed the solver core. The bound-domain contract requires
+// the solver to treat both encodings identically (equivalent trace, terminal
+// state and certificate), never as a real 1e20 cap.
+StandardFormLP with_upper_bound_sentinels(StandardFormLP sf) {
+  for (int j = 0; j < static_cast<int>(sf.var_ub.size()); ++j) {
+    if (!std::isfinite(sf.var_ub[j])) sf.var_ub[j] = 1e20;
+  }
+  return sf;
+}
+
+LPModel make_two_var_equality_lp(double c0, double c1, double a0, double a1,
+                                 double rhs) {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c.resize(2);
+  lp.c << c0, c1;
+  lp.A.resize(0, 2);
+  lp.b.resize(0);
+  lp.Aeq.resize(1, 2);
+  lp.Aeq.insert(0, 0) = a0;
+  lp.Aeq.insert(0, 1) = a1;
+  lp.Aeq.makeCompressed();
+  lp.beq.resize(1);
+  lp.beq << rhs;
+  lp.vars.push_back(
+      {VarType::Continuous, 0.0, std::numeric_limits<double>::infinity()});
+  lp.vars.push_back(
+      {VarType::Continuous, 0.0, std::numeric_limits<double>::infinity()});
+  return lp;
+}
+
+void check_results_equivalent(const native_dual::Result& reference,
+                              const native_dual::Result& sentinel) {
+  REQUIRE(sentinel.status == reference.status);
+  // Identical (+inf) bounds must produce a bit-identical pivot trace.
+  CHECK(sentinel.statistics.iterations == reference.statistics.iterations);
+  CHECK(sentinel.statistics.major_rebuilds ==
+        reference.statistics.major_rebuilds);
+  CHECK(sentinel.statistics.dual_phase_one_iterations ==
+        reference.statistics.dual_phase_one_iterations);
+  CHECK(sentinel.statistics.primal_phase_one_iterations ==
+        reference.statistics.primal_phase_one_iterations);
+  if (reference.status == native_dual::Status::Optimal) {
+    CHECK(sentinel.max_objective ==
+          Approx(reference.max_objective).margin(1e-9));
+    CHECK(sentinel.basis == reference.basis);
+    CHECK(sentinel.at_upper == reference.at_upper);
+  }
+  CHECK(sentinel.has_farkas_certificate == reference.has_farkas_certificate);
+  if (reference.has_farkas_certificate) {
+    CHECK(sentinel.farkas_margin == Approx(reference.farkas_margin));
+    REQUIRE(sentinel.farkas_multiplier.size() ==
+            reference.farkas_multiplier.size());
+    if (reference.farkas_multiplier.size() > 0) {
+      CHECK((sentinel.farkas_multiplier - reference.farkas_multiplier)
+                .lpNorm<Eigen::Infinity>() <= 1e-12);
+    }
+  }
+  CHECK(sentinel.has_unbounded_certificate ==
+        reference.has_unbounded_certificate);
+  if (reference.has_unbounded_certificate) {
+    REQUIRE(sentinel.primal_ray.size() == reference.primal_ray.size());
+    if (reference.primal_ray.size() > 0) {
+      CHECK((sentinel.primal_ray - reference.primal_ray)
+                .lpNorm<Eigen::Infinity>() <= 1e-12);
+    }
+  }
+}
+
+}  // namespace
+
+TEST_CASE(
+    "DualSimplex: 1e20 sentinel and +inf upper bounds are equivalent on a cold "
+    "Phase-I solve",
+    "[dual_simplex][bound_domain][metamorphic]") {
+  const LPModel lp = make_two_var_equality_lp(-2.0, -1.0, 1.0, 1.0, 4.0);
+  const StandardFormLP sf_inf = build_standard_form_lp(lp);
+  const StandardFormLP sf_sentinel = with_upper_bound_sentinels(sf_inf);
+  const SimplexOptions options = native_simplex_options();
+
+  const auto reference = native_dual::solve(sf_inf, options, nullptr);
+  const auto sentinel = native_dual::solve(sf_sentinel, options, nullptr);
+  INFO(reference.message);
+  REQUIRE(reference.status == native_dual::Status::Optimal);
+  check_results_equivalent(reference, sentinel);
+}
+
+TEST_CASE(
+    "DualSimplex: 1e20 sentinel and +inf upper bounds are equivalent on a warm "
+    "re-solve",
+    "[dual_simplex][bound_domain][metamorphic][warm_start]") {
+  const LPModel lp = make_two_var_equality_lp(-2.0, -1.0, 1.0, 1.0, 4.0);
+  const StandardFormLP sf_inf = build_standard_form_lp(lp);
+  const StandardFormLP sf_sentinel = with_upper_bound_sentinels(sf_inf);
+  const SimplexOptions options = native_simplex_options();
+
+  const auto cold = native_dual::solve(sf_inf, options, nullptr);
+  REQUIRE(cold.status == native_dual::Status::Optimal);
+
+  mipsolvers::engine::SimplexBasis hint;
+  hint.rows = static_cast<int>(sf_inf.A.rows());
+  hint.cols = static_cast<int>(sf_inf.A.cols());
+  hint.indices = cold.basis;
+  hint.at_upper = cold.at_upper;
+  if (static_cast<int>(hint.at_upper.size()) != hint.cols) {
+    hint.at_upper.assign(static_cast<std::size_t>(hint.cols), 0);
+  }
+
+  const auto reference = native_dual::solve(sf_inf, options, hint);
+  const auto sentinel = native_dual::solve(sf_sentinel, options, hint);
+  INFO(reference.message);
+  REQUIRE(reference.status == native_dual::Status::Optimal);
+  check_results_equivalent(reference, sentinel);
+}
+
+TEST_CASE(
+    "DualSimplex: 1e20 sentinel and +inf upper bounds yield an identical "
+    "infeasibility certificate",
+    "[dual_simplex][bound_domain][metamorphic][certificate]") {
+  const LPModel lp = make_two_var_equality_lp(1.0, 1.0, 1.0, 1.0, -1.0);
+  const StandardFormLP sf_inf = build_standard_form_lp(lp);
+  const StandardFormLP sf_sentinel = with_upper_bound_sentinels(sf_inf);
+  const SimplexOptions options = native_simplex_options();
+
+  const auto reference = native_dual::solve(sf_inf, options, nullptr);
+  const auto sentinel = native_dual::solve(sf_sentinel, options, nullptr);
+  INFO(reference.message);
+  REQUIRE(reference.status == native_dual::Status::PrimalInfeasible);
+  REQUIRE(reference.has_farkas_certificate);
+  check_results_equivalent(reference, sentinel);
+}
+
+TEST_CASE(
+    "DualSimplex: 1e20 sentinel and +inf upper bounds yield an identical "
+    "unbounded ray",
+    "[dual_simplex][bound_domain][metamorphic][unbounded]") {
+  // A lower-only column is the recession direction. Before S0 normalization the
+  // sentinel encoding capped the ray at 1e20 and returned a bogus Optimal; the
+  // fix makes both encodings certify unboundedness identically.
+  const LPModel lp = make_two_var_equality_lp(-1.0, -1.0, 1.0, -1.0, 0.0);
+  const StandardFormLP sf_inf = build_standard_form_lp(lp);
+  const StandardFormLP sf_sentinel = with_upper_bound_sentinels(sf_inf);
+  const SimplexOptions options = native_simplex_options();
+
+  const auto reference = native_dual::solve(sf_inf, options, nullptr);
+  const auto sentinel = native_dual::solve(sf_sentinel, options, nullptr);
+  INFO("reference=" << native_dual::status_name(reference.status)
+                    << " sentinel=" << native_dual::status_name(sentinel.status));
+  REQUIRE(reference.status == native_dual::Status::Unbounded);
+  REQUIRE(reference.has_unbounded_certificate);
+  check_results_equivalent(reference, sentinel);
+}
+
 TEST_CASE("DualSimplex: cold shift-start policy is bounded and overridable",
           "[dual_simplex][dual_crash][policy]") {
   LPModel lp;
@@ -1045,7 +1250,7 @@ TEST_CASE("DualSimplex: cold solve bypasses dual Phase I with shifted start",
         result.statistics.iterations);
 }
 
-TEST_CASE("IPM crossover basis can enter warm primal Phase I",
+TEST_CASE("Warm cost shift precedes opt-in primal Phase I",
           "[dual_simplex][crossover][primal_phase_one]") {
   LPModel lp;
   lp.sense = Sense::Minimize;
@@ -1070,9 +1275,15 @@ TEST_CASE("IPM crossover basis can enter warm primal Phase I",
 
   auto options = native_simplex_options();
   options.max_iter = 20;
-  const auto strict = native_dual::solve(sf, options, hint);
-  REQUIRE(strict.status == native_dual::Status::DualInfeasibleStart);
+  const auto shifted = native_dual::solve(sf, options, hint);
+  INFO("status=" << native_dual::status_name(shifted.status)
+                  << " message=" << shifted.message);
+  REQUIRE(shifted.status == native_dual::Status::Optimal);
+  CHECK(shifted.statistics.dual_start_cost_shifts == 1);
+  CHECK(shifted.statistics.primal_phase_one_iterations == 0);
+  CHECK(shifted.max_objective == Approx(12.0).margin(1e-10));
 
+  const EnvVarGuard shift_start("MIPSOLVERS_DUAL_SHIFT_START", "off");
   options.allow_warm_primal_phase_one = true;
   const auto crossover = native_dual::solve(sf, options, hint);
   INFO("status=" << native_dual::status_name(crossover.status)
@@ -1305,8 +1516,19 @@ TEST_CASE("DualSimplex: BFRT EXPAND accepts a near-exact capacity cover",
   CHECK(transaction.positive_capacity < leaving.violation);
   CHECK(leaving.violation - transaction.positive_capacity < 1e-12);
   CHECK(transaction.entering.col == 1);
+  CHECK(transaction.entering.pivot == alpha);
   CHECK(transaction.entering.alpha == Approx(alpha));
   CHECK(transaction.entering.theta == Approx(1.0));
+
+  state.move[1] = Move::Down;
+  state.reduced_costs[1] = alpha;
+  pivot_row.value[1] = -alpha;
+  REQUIRE(choose_entering_bfrt(state, leaving, pivot_row, transaction,
+                               failure));
+  INFO(failure);
+  CHECK(transaction.entering.col == 1);
+  CHECK(transaction.entering.pivot == -alpha);
+  CHECK(transaction.entering.alpha == Approx(alpha));
 }
 
 TEST_CASE("DualSimplex: Phase-I BFRT certifies capacity by residual projection",
@@ -1395,7 +1617,7 @@ TEST_CASE("DualSimplex: stabilized warm solve rebuilds and cleans original cost"
   REQUIRE(result.status == native_dual::Status::Optimal);
   CHECK(result.statistics.major_rebuilds >= 2);
   CHECK(result.statistics.max_cost_perturbation > 0.0);
-  CHECK(result.statistics.devex_frameworks == 1);
+  CHECK(result.statistics.devex_frameworks == 0);
   CHECK(result.statistics.dse_initialization_solves == 0);
   CHECK(result.statistics.harris_second_pass_candidates >= 1);
   CHECK(result.statistics.cleanup_passes == 1);
@@ -1450,8 +1672,9 @@ TEST_CASE("DualSimplex: batched DSE uses one existing INVERT",
   }
 }
 
-TEST_CASE("DualSimplex: cold pricing defaults to O(m+n) Devex",
+TEST_CASE("DualSimplex: cold pricing falls back to O(m+n) Devex",
           "[dual_simplex][performance][dse]") {
+  using mipsolvers::engine::DualEdgeWeightInitialization;
   using mipsolvers::engine::native_dual::Statistics;
   using mipsolvers::engine::native_dual::detail::BasisFactor;
   using mipsolvers::engine::native_dual::detail::State;
@@ -1464,9 +1687,10 @@ TEST_CASE("DualSimplex: cold pricing defaults to O(m+n) Devex",
   sf.A = dense.sparseView();
   sf.A.makeCompressed();
 
-  auto initialize_weights = [&](bool exact) {
+  auto initialize_weights = [&](DualEdgeWeightInitialization mode) {
     auto options = native_simplex_options();
-    options.exact_dse_initialization = exact;
+    options.exact_dse_initialization = false;
+    options.dual_edge_weight_initialization = mode;
     State state;
     state.sf = &sf;
     state.options = &options;
@@ -1478,18 +1702,222 @@ TEST_CASE("DualSimplex: cold pricing defaults to O(m+n) Devex",
     std::string failure;
     REQUIRE(state.factor->rebuild(state.basis, repairs, failure));
     Statistics statistics;
-    REQUIRE(mipsolvers::engine::native_dual::detail::initialize_cold_edge_weights(
+    REQUIRE(mipsolvers::engine::native_dual::detail::initialize_uncached_edge_weights(
         state, statistics, failure));
     return statistics;
   };
 
-  const Statistics scalable = initialize_weights(false);
+  const Statistics scalable =
+      initialize_weights(DualEdgeWeightInitialization::Devex);
   CHECK(scalable.devex_frameworks == 1);
   CHECK(scalable.dse_initialization_solves == 0);
 
-  const Statistics exact = initialize_weights(true);
+  const Statistics production =
+      initialize_weights(DualEdgeWeightInitialization::Production);
+  CHECK(production.devex_frameworks == 1);
+  CHECK(production.dse_initialization_solves == 0);
+
+  const Statistics structural =
+      initialize_weights(DualEdgeWeightInitialization::StructuralExact);
+  CHECK(structural.devex_frameworks == 1);
+  CHECK(structural.dse_initialization_solves == 0);
+
+  const Statistics exact =
+      initialize_weights(DualEdgeWeightInitialization::FullExact);
   CHECK(exact.devex_frameworks == 0);
   CHECK(exact.dse_initialization_solves == 3);
+}
+
+TEST_CASE("DualSimplex: structural DSE is exact on a scaled diagonal basis",
+          "[dual_simplex][performance][dse]") {
+  using mipsolvers::engine::DualEdgeWeightInitialization;
+  using mipsolvers::engine::native_dual::Statistics;
+  using mipsolvers::engine::native_dual::detail::BasisFactor;
+  using mipsolvers::engine::native_dual::detail::EdgeWeightMode;
+  using mipsolvers::engine::native_dual::detail::State;
+
+  StandardFormLP sf;
+  Eigen::Matrix<double, 3, 6> dense =
+      Eigen::Matrix<double, 3, 6>::Zero();
+  dense(0, 0) = 2.0;
+  dense(1, 1) = -3.0;
+  dense(2, 2) = 4.0;
+  dense(0, 3) = 1.0;
+  dense(1, 4) = 1.0;
+  dense(2, 5) = 1.0;
+  sf.A = dense.sparseView();
+  sf.A.makeCompressed();
+
+  auto options = native_simplex_options();
+  options.exact_dse_initialization = false;
+  options.dual_edge_weight_initialization =
+      DualEdgeWeightInitialization::Production;
+  State state;
+  state.sf = &sf;
+  state.options = &options;
+  state.m = 3;
+  state.n = 6;
+  state.basis = {0, 1, 2};
+  state.factor =
+      std::make_shared<BasisFactor>(sf, std::vector<int>{3, 4, 5});
+  int repairs = 0;
+  std::string failure;
+  REQUIRE(state.factor->rebuild(state.basis, repairs, failure));
+  Statistics statistics;
+  REQUIRE(mipsolvers::engine::native_dual::detail::initialize_uncached_edge_weights(
+      state, statistics, failure));
+
+  CHECK(state.edge_weight_mode == EdgeWeightMode::SteepestEdge);
+  REQUIRE(state.edge_weight.size() == 3);
+  CHECK(state.edge_weight[0] == Approx(0.25));
+  CHECK(state.edge_weight[1] == Approx(1.0 / 9.0));
+  CHECK(state.edge_weight[2] == Approx(1.0 / 16.0));
+  CHECK(statistics.devex_frameworks == 0);
+  CHECK(statistics.dse_initialization_solves == 0);
+  CHECK(statistics.dse_initialization_time_sec >= 0.0);
+}
+
+TEST_CASE("DualSimplex: uncached warm structural DSE has a proved Devex fallback",
+          "[dual_simplex][performance][dse][warm]") {
+  using mipsolvers::engine::DualEdgeWeightInitialization;
+  using mipsolvers::engine::SimplexBasis;
+  using namespace mipsolvers::engine::native_dual::detail;
+
+  auto make_form = [](bool structural) {
+    StandardFormLP sf;
+    Eigen::Matrix<double, 2, 4> dense =
+        Eigen::Matrix<double, 2, 4>::Zero();
+    dense(0, 0) = 2.0;
+    dense(1, 1) = -3.0;
+    if (!structural) {
+      dense(1, 0) = 1.0;
+      dense(0, 1) = 1.0;
+    }
+    dense(0, 2) = 1.0;
+    dense(1, 3) = 1.0;
+    sf.A = dense.sparseView();
+    sf.A.makeCompressed();
+    sf.A_row = sf.A;
+    sf.b = Eigen::VectorXd::Zero(2);
+    sf.c_max = Eigen::VectorXd::Zero(4);
+    sf.var_ub = Eigen::VectorXd::Constant(
+        4, std::numeric_limits<double>::infinity());
+    sf.n_original = 2;
+    sf.row_to_slack_col = {2, 3};
+    sf.row_to_surplus_col = {-1, -1};
+    sf.row_to_artificial_col = {-1, -1};
+    return sf;
+  };
+  SimplexBasis hint;
+  hint.rows = 2;
+  hint.cols = 4;
+  hint.indices = {0, 1};
+  hint.at_upper.assign(4, 0);
+  auto options = native_simplex_options();
+  options.dual_edge_weight_initialization =
+      DualEdgeWeightInitialization::Production;
+
+  SECTION("assigned-row singleton hint uses analytic exact DSE") {
+    const StandardFormLP sf = make_form(true);
+    State state;
+    mipsolvers::engine::native_dual::Statistics statistics;
+    std::string failure;
+    const bool initialized =
+        initialize(state, sf, options, Phase::Two, &hint, statistics, failure);
+    INFO(failure);
+    REQUIRE(initialized);
+    CHECK(state.edge_weight_mode ==
+          mipsolvers::engine::native_dual::detail::EdgeWeightMode::SteepestEdge);
+    CHECK(state.edge_weight ==
+          std::vector<double>{0.25, 1.0 / 9.0});
+    CHECK(statistics.devex_frameworks == 0);
+    CHECK(statistics.dse_initialization_solves == 0);
+  }
+
+  SECTION("nonstructural hint falls back without initialization solves") {
+    const StandardFormLP sf = make_form(false);
+    State state;
+    mipsolvers::engine::native_dual::Statistics statistics;
+    std::string failure;
+    const bool initialized =
+        initialize(state, sf, options, Phase::Two, &hint, statistics, failure);
+    INFO(failure);
+    REQUIRE(initialized);
+    CHECK(state.edge_weight_mode ==
+          mipsolvers::engine::native_dual::detail::EdgeWeightMode::Devex);
+    CHECK(statistics.devex_frameworks == 1);
+    CHECK(statistics.dse_initialization_solves == 0);
+  }
+}
+
+TEST_CASE("DualSimplex: certified DSE selects the brute-force exact merit",
+          "[dual_simplex][pricing][dse][certified]") {
+  using namespace mipsolvers::engine::native_dual::detail;
+
+  StandardFormLP sf;
+  Eigen::Matrix<double, 3, 6> dense;
+  dense << 2.0, 1.0, 0.0, 1.0, 0.0, 0.0,
+           0.0, 3.0, 1.0, 0.0, 1.0, 0.0,
+           1.0, 0.0, 4.0, 0.0, 0.0, 1.0;
+  sf.A = dense.sparseView();
+  sf.A.makeCompressed();
+  sf.A_row = sf.A;
+
+  auto options = native_simplex_options();
+  State state;
+  state.sf = &sf;
+  state.options = &options;
+  state.m = 3;
+  state.n = 6;
+  state.basis = {0, 1, 2};
+  state.basic = {1, 1, 1, 0, 0, 0};
+  state.move.assign(6, Move::Fixed);
+  state.bounds.lower = Eigen::VectorXd::Zero(6);
+  state.bounds.upper =
+      Eigen::VectorXd::Constant(6, std::numeric_limits<double>::infinity());
+  state.bounds.enterable.assign(6, 1);
+  state.x_basic.resize(3);
+  state.x_basic << -1.0, -2.0, -3.0;
+  state.edge_weight.assign(3, 1.0);
+  state.edge_weight_mode =
+      mipsolvers::engine::native_dual::detail::EdgeWeightMode::SteepestEdge;
+  state.certified_exact_dse_pricing = true;
+  state.factor =
+      std::make_shared<BasisFactor>(sf, std::vector<int>{3, 4, 5});
+  int repairs = 0;
+  std::string failure;
+  REQUIRE(state.factor->rebuild(state.basis, repairs, failure));
+
+  const Eigen::Matrix3d inverse = dense.leftCols<3>().inverse();
+  int expected_row = -1;
+  double expected_merit = -1.0;
+  for (int row = 0; row < 3; ++row) {
+    const double violation = -state.x_basic[row];
+    const double merit =
+        violation * violation / inverse.row(row).squaredNorm();
+    if (merit > expected_merit) {
+      expected_merit = merit;
+      expected_row = row;
+    }
+  }
+  REQUIRE(expected_row >= 0);
+  // Make the advisory recurrence cache prefer another row. Certified pricing
+  // must ignore that ordering and reproduce the brute-force exact DSE oracle.
+  state.edge_weight[static_cast<std::size_t>(expected_row)] = 1e12;
+  state.edge_weight[static_cast<std::size_t>((expected_row + 1) % 3)] = 1e-12;
+
+  Leaving leaving;
+  REQUIRE(choose_leaving(state, leaving, failure));
+  INFO(failure);
+  CHECK(leaving.row == expected_row);
+  CHECK(leaving.side == -1);
+  CHECK(state.certified_dse_candidates == 3);
+  CHECK(state.certified_dse_btrans >= 2);
+  REQUIRE(leaving.row_ep.dimension == 3);
+  for (int col = 0; col < 3; ++col) {
+    CHECK(leaving.row_ep.at(col) ==
+          Approx(inverse.row(expected_row)[col]).epsilon(2e-12));
+  }
 }
 
 TEST_CASE("Standard form uses adaptive CSC and a shared-value row view",
@@ -1634,21 +2062,24 @@ TEST_CASE("Cost journal stays sparse and deterministically densifies",
   CHECK(adaptive.empty());
 }
 
-TEST_CASE("Dense parallel PRICE agrees with the serial sparse product",
+TEST_CASE("Dense serial and parallel PRICE agree with the sparse product",
           "[dual_simplex][performance][parallel_price]") {
   using namespace mipsolvers::engine::native_dual::detail;
   constexpr int dimension = 4096;
   constexpr int entries_per_column = 16;
   StandardColumnMatrix A(dimension, dimension);
-  A.reserve(static_cast<StandardFormIndex>(dimension) * entries_per_column);
+  std::vector<Eigen::Triplet<double>> price_triplets;
+  price_triplets.reserve(dimension * entries_per_column);
   for (int column = 0; column < dimension; ++column) {
-    A.startVec(column);
-    for (int row = 0; row < entries_per_column; ++row) {
-      A.insertBackByOuterInner(column, row) =
-          0.25 + static_cast<double>((column + row) % 13) / 16.0;
+    for (int entry = 0; entry < entries_per_column; ++entry) {
+      const int row = (257 * entry + column) % dimension;
+      price_triplets.emplace_back(
+          row, column,
+          0.25 + static_cast<double>((column + row) % 13) / 16.0);
     }
   }
-  A.finalize();
+  A.setFromTriplets(price_triplets.begin(), price_triplets.end());
+  A.makeCompressed();
   StandardRowMatrix A_row;
   A_row = A;
 
@@ -1661,36 +2092,158 @@ TEST_CASE("Dense parallel PRICE agrees with the serial sparse product",
     y.value.push_back(1.0 + static_cast<double>(row % 7) / 8.0);
   }
 
+  IndexedVector sparse;
   IndexedVector serial;
   IndexedVector parallel;
-  multiply_AT_indexed(A, A_row, y, serial, 1);
-  multiply_AT_indexed(A, A_row, y, parallel, 4);
+  multiply_AT_indexed(A_row, y, sparse);
+  multiply_AT_indexed_csc(A, y, serial, 1);
+  multiply_AT_indexed_csc(A, y, parallel, 4);
+  REQUIRE(sparse.index.size() == serial.index.size());
   REQUIRE(serial.index.size() == parallel.index.size());
   REQUIRE(serial.index.size() == dimension);
 
   if (const char* requested =
           std::getenv("MIPSOLVERS_LP_KERNEL_BENCH_REPEATS")) {
     const int repeats = std::max(1, std::atoi(requested));
-    const auto serial_start = std::chrono::steady_clock::now();
-    for (int repeat = 0; repeat < repeats; ++repeat) {
-      multiply_AT_indexed(A, A_row, y, serial, 1);
+    for (int support_percent : {10, 25, 33, 50, 100}) {
+      IndexedVector probe_y = y;
+      const std::size_t support = static_cast<std::size_t>(
+          dimension * support_percent / 100);
+      probe_y.index.resize(support);
+      probe_y.value.resize(support);
+      const auto sparse_start = std::chrono::steady_clock::now();
+      for (int repeat = 0; repeat < repeats; ++repeat) {
+        multiply_AT_indexed(A_row, probe_y, sparse);
+      }
+      const double sparse_sec = std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - sparse_start).count();
+      const auto serial_start = std::chrono::steady_clock::now();
+      for (int repeat = 0; repeat < repeats; ++repeat) {
+        multiply_AT_indexed_csc(A, probe_y, serial, 1);
+      }
+      const double serial_sec = std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - serial_start).count();
+      const auto parallel_start = std::chrono::steady_clock::now();
+      for (int repeat = 0; repeat < repeats; ++repeat) {
+        multiply_AT_indexed_csc(A, probe_y, parallel, 4);
+      }
+      const double parallel_sec = std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - parallel_start).count();
+      std::fprintf(stderr,
+                   "[LP-KERNEL-BENCH] PRICE support=%d%% repeats=%d "
+                   "sparse_sec=%.9f serial_csc_sec=%.9f "
+                   "parallel_csc_sec=%.9f serial_speedup=%.6f "
+                   "parallel_speedup=%.6f\n",
+                   support_percent, repeats, sparse_sec, serial_sec,
+                   parallel_sec, sparse_sec / serial_sec,
+                   sparse_sec / parallel_sec);
     }
-    const double serial_sec = std::chrono::duration<double>(
-        std::chrono::steady_clock::now() - serial_start).count();
-    const auto parallel_start = std::chrono::steady_clock::now();
-    for (int repeat = 0; repeat < repeats; ++repeat) {
-      multiply_AT_indexed(A, A_row, y, parallel, 4);
-    }
-    const double parallel_sec = std::chrono::duration<double>(
-        std::chrono::steady_clock::now() - parallel_start).count();
-    std::fprintf(stderr,
-                 "[LP-KERNEL-BENCH] PRICE repeats=%d serial_sec=%.9f "
-                 "parallel_sec=%.9f speedup=%.6f\n",
-                 repeats, serial_sec, parallel_sec,
-                 serial_sec / parallel_sec);
   }
   for (int column = 0; column < dimension; ++column) {
+    CHECK(serial.at(column) == sparse.at(column));
     CHECK(parallel.at(column) == serial.at(column));
+  }
+}
+
+TEST_CASE("Dual PRICE emits active BFRT positions without changing its row",
+          "[dual_simplex][pricing][bfrt]") {
+  using namespace mipsolvers::engine::native_dual::detail;
+  StandardColumnMatrix A(1, 6);
+  std::vector<Eigen::Triplet<double>> entries = {{0, 0, 1.0},   {0, 1, 2.0},
+                                                 {0, 2, -3.0},  {0, 3, 4.0},
+                                                 {0, 4, 1e-16}, {0, 5, 5.0}};
+  A.setFromTriplets(entries.begin(), entries.end());
+  A.makeCompressed();
+  StandardRowMatrix A_row;
+  A_row = A;
+  IndexedVector y;
+  y.dimension = 1;
+  y.index = {0};
+  y.value = {1.0};
+
+  std::vector<char> basic(6, 0);
+  basic[1] = 1;
+  std::vector<Move> move(6, Move::Up);
+  move[3] = Move::Fixed;
+  IndexedVector reference;
+  IndexedVector produced;
+  std::vector<int> active_position;
+  multiply_AT_indexed(A_row, y, reference);
+  multiply_AT_indexed_bfrt(A_row, y, basic, move, produced, active_position);
+
+  CHECK(produced.index == reference.index);
+  CHECK(produced.value == reference.value);
+  CHECK(produced.index == std::vector<int>{0, 1, 2, 3, 5});
+  CHECK(active_position == std::vector<int>{0, 2, 4});
+  CHECK(produced.index[static_cast<std::size_t>(active_position[0])] == 0);
+  CHECK(produced.index[static_cast<std::size_t>(active_position[1])] == 2);
+  CHECK(produced.index[static_cast<std::size_t>(active_position[2])] == 5);
+}
+
+TEST_CASE("Experimental CSC PRICE respects its rounding envelope",
+          "[dual_simplex][performance][dense_price]") {
+  using namespace mipsolvers::engine::native_dual::detail;
+  constexpr int rows = 64;
+  constexpr int columns = 96;
+  constexpr int entries_per_column = 12;
+  std::vector<Eigen::Triplet<double>> triplets;
+  triplets.reserve(columns * entries_per_column);
+  for (int column = 0; column < columns; ++column) {
+    for (int entry = 0; entry < entries_per_column; ++entry) {
+      const int row = (7 * column + 5 * entry) % rows;
+      const double magnitude = 0.25 + ((11 * column + entry) % 17) / 8.0;
+      const double value = ((column + entry) % 2 == 0) ? magnitude : -magnitude;
+      triplets.emplace_back(row, column, value);
+    }
+  }
+  StandardColumnMatrix A(rows, columns);
+  A.setFromTriplets(triplets.begin(), triplets.end());
+  A.makeCompressed();
+  StandardRowMatrix A_row;
+  A_row = A;
+
+  IndexedVector y;
+  y.dimension = rows;
+  for (int row = rows - 1; row >= 0; --row) {
+    y.index.push_back(row);
+    const double magnitude = 0.5 + (row % 13) / 4.0;
+    y.value.push_back(row % 3 == 0 ? -magnitude : magnitude);
+  }
+
+  IndexedVector sparse;
+  IndexedVector dense;
+  multiply_AT_indexed(A_row, y, sparse);
+  multiply_AT_indexed_csc(A, y, dense, 1);
+
+  Eigen::VectorXd dense_y = Eigen::VectorXd::Zero(rows);
+  for (std::size_t k = 0; k < y.index.size(); ++k) {
+    dense_y[y.index[k]] = y.value[k];
+  }
+  Eigen::VectorXd row_order_reference = Eigen::VectorXd::Zero(columns);
+  for (std::size_t k = 0; k < y.index.size(); ++k) {
+    for (StandardRowMatrix::InnerIterator it(A_row, y.index[k]); it; ++it) {
+      row_order_reference[it.col()] += y.value[k] * it.value();
+    }
+  }
+  const long double eps = std::numeric_limits<double>::epsilon();
+  for (int column = 0; column < columns; ++column) {
+    long double reference = 0.0L;
+    long double absolute_sum = 0.0L;
+    int terms = 0;
+    for (StandardColumnMatrix::InnerIterator it(A, column); it; ++it) {
+      const long double term =
+          static_cast<long double>(it.value()) * dense_y[it.row()];
+      reference += term;
+      absolute_sum += std::abs(term);
+      ++terms;
+    }
+    const long double envelope =
+        (terms + 4.0L) * eps * absolute_sum + 1e-14L;
+    CHECK(std::abs(static_cast<long double>(sparse.at(column)) - reference) <=
+          envelope);
+    CHECK(std::abs(static_cast<long double>(dense.at(column)) - reference) <=
+          envelope);
+    CHECK(sparse.at(column) == row_order_reference[column]);
   }
 }
 
@@ -2435,6 +2988,76 @@ TEST_CASE("Sparse basis inverse rows never use the dense solve API",
   CHECK(after.dense_solves == before.dense_solves);
   CHECK(after.indexed_solves == before.indexed_solves + 1);
   CHECK(after.matrix_copies == 0);
+}
+
+TEST_CASE("HFactor indexed solve profiling is opt-in and cumulative",
+          "[dual_simplex][performance][hfactor]") {
+  Eigen::SparseMatrix<double> A(3, 3);
+  A.setIdentity();
+  A.makeCompressed();
+  const std::vector<int> basis{0, 1, 2};
+  HFactorBackend factor;
+  REQUIRE(factor.factorize(A, basis.data(), 3));
+
+  const std::vector<int> rhs_index{1};
+  const std::vector<double> rhs_value{2.0};
+  std::vector<int> result_index;
+  std::vector<double> result_value;
+  std::vector<int> result_lookup;
+  REQUIRE(factor.ftran_indexed(rhs_index, rhs_value, result_index,
+                               result_value, result_lookup));
+  CHECK(factor.profiled_indexed_solve_count() == 0);
+
+  factor.set_indexed_solve_profiling(true);
+  REQUIRE(factor.ftran_indexed(rhs_index, rhs_value, result_index,
+                               result_value, result_lookup, true));
+  std::vector<double> extracted;
+  REQUIRE(factor.ftran_indexed_at_captured_pattern(rhs_index, rhs_value,
+                                                    extracted));
+  REQUIRE(factor.btran_indexed(rhs_index, rhs_value, result_index,
+                               result_value, result_lookup));
+  CHECK(factor.profiled_indexed_solve_count() == 3);
+  CHECK(factor.profiled_indexed_solve_time_sec() >= 0.0);
+  CHECK(factor.profiled_indexed_solve_synthetic_tick() >= 0.0);
+}
+
+TEST_CASE("HFactor extracts DSE values on the captured FTRAN pattern",
+          "[dual_simplex][performance][dse][hfactor]") {
+  Eigen::SparseMatrix<double> A(3, 3);
+  std::vector<Eigen::Triplet<double>> entries{
+      {0, 0, 2.0}, {2, 0, 1.0}, {0, 1, 1.0},
+      {1, 1, 3.0}, {1, 2, 1.0}, {2, 2, 4.0}};
+  A.setFromTriplets(entries.begin(), entries.end());
+  A.makeCompressed();
+  const std::vector<int> basis{2, 0, 1};
+  HFactorBackend factor;
+  REQUIRE(factor.factorize(A, basis.data(), 3));
+
+  std::vector<int> direction_index;
+  std::vector<double> direction_value;
+  std::vector<int> lookup;
+  REQUIRE(factor.ftran_indexed({0, 2}, {1.25, -0.75}, direction_index,
+                               direction_value, lookup, true));
+  REQUIRE_FALSE(direction_index.empty());
+
+  std::vector<int> rho_index;
+  std::vector<double> rho_value;
+  REQUIRE(factor.ftran_indexed({0, 1}, {0.5, 2.0}, rho_index, rho_value,
+                               lookup));
+  std::vector<double> extracted;
+  REQUIRE(factor.ftran_indexed_at_captured_pattern(
+      {0, 1}, {0.5, 2.0}, extracted));
+  REQUIRE(extracted.size() == direction_index.size());
+  for (std::size_t k = 0; k < direction_index.size(); ++k) {
+    double expected = 0.0;
+    for (std::size_t p = 0; p < rho_index.size(); ++p) {
+      if (rho_index[p] == direction_index[k]) {
+        expected = rho_value[p];
+        break;
+      }
+    }
+    CHECK(extracted[k] == expected);
+  }
 }
 
 TEST_CASE("HFactor preserves caller basis positions and solve coordinates",

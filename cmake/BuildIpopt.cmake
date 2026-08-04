@@ -51,13 +51,19 @@ if(_MIPSOLVERS_IPOPT_LINEAR_SOLVER STREQUAL "mumps")
   include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/BuildMUMPS.cmake")
 else()
   if(NOT MIPSOLVERS_HAVE_MKL_PARDISO)
-    set(_MIPSOLVERS_IPOPT_MKL_ROOTS "$ENV{MKLROOT}")
-    if(DEFINED ENV{ONEAPI_ROOT})
-      list(APPEND _MIPSOLVERS_IPOPT_MKL_ROOTS "$ENV{ONEAPI_ROOT}/mkl/latest")
+    if(MIPSOLVERS_MKL_ROOT)
+      set(_MIPSOLVERS_IPOPT_MKL_ROOTS "${MIPSOLVERS_MKL_ROOT}")
+    else()
+      set(_MIPSOLVERS_IPOPT_MKL_ROOTS
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/oneapi-mkl"
+        "$ENV{MKLROOT}")
+      if(DEFINED ENV{ONEAPI_ROOT})
+        list(APPEND _MIPSOLVERS_IPOPT_MKL_ROOTS "$ENV{ONEAPI_ROOT}/mkl/latest")
+      endif()
+      list(APPEND _MIPSOLVERS_IPOPT_MKL_ROOTS
+        "C:/Program Files (x86)/Intel/oneAPI/mkl/latest"
+        "C:/Program Files/Intel/oneAPI/mkl/latest")
     endif()
-    list(APPEND _MIPSOLVERS_IPOPT_MKL_ROOTS
-      "C:/Program Files (x86)/Intel/oneAPI/mkl/latest"
-      "C:/Program Files/Intel/oneAPI/mkl/latest")
 
     foreach(_mkl_root IN LISTS _MIPSOLVERS_IPOPT_MKL_ROOTS)
       if(NOT _mkl_root)
@@ -65,6 +71,10 @@ else()
       endif()
       set(_mkl_inc "${_mkl_root}/include")
       set(_mkl_lib "${_mkl_root}/lib")
+      if(NOT EXISTS "${_mkl_lib}/mkl_intel_lp64.lib" AND
+         EXISTS "${_mkl_root}/lib/intel64/mkl_intel_lp64.lib")
+        set(_mkl_lib "${_mkl_root}/lib/intel64")
+      endif()
       if(EXISTS "${_mkl_inc}/mkl_pardiso.h"
          AND EXISTS "${_mkl_lib}/mkl_intel_lp64.lib"
          AND EXISTS "${_mkl_lib}/mkl_sequential.lib"
@@ -79,20 +89,33 @@ else()
           "${MIPSOLVERS_MKL_LP64_LIB}"
           "${MIPSOLVERS_MKL_THREAD_LIB}"
           "${MIPSOLVERS_MKL_CORE_LIB}")
-        if(EXISTS "C:/Program Files (x86)/Intel/oneAPI/compiler/latest/lib/libiomp5md.lib")
-          list(APPEND MIPSOLVERS_MKL_LIBRARIES
-            "C:/Program Files (x86)/Intel/oneAPI/compiler/latest/lib/libiomp5md.lib")
-        endif()
         break()
       endif()
     endforeach()
     unset(_MIPSOLVERS_IPOPT_MKL_ROOTS)
   endif()
 
+  if(MIPSOLVERS_MKL_ROOT)
+    foreach(_mkl_required IN ITEMS
+        "${MIPSOLVERS_MKL_ROOT}/include/mkl_pardiso.h"
+        "${MIPSOLVERS_MKL_ROOT}/lib/mkl_intel_lp64.lib"
+        "${MIPSOLVERS_MKL_ROOT}/lib/mkl_sequential.lib"
+        "${MIPSOLVERS_MKL_ROOT}/lib/mkl_core.lib"
+        "${MIPSOLVERS_MKL_ROOT}/licensing")
+      if(NOT EXISTS "${_mkl_required}")
+        message(FATAL_ERROR
+          "Incomplete hermetic oneMKL bundle at '${MIPSOLVERS_MKL_ROOT}': "
+          "missing '${_mkl_required}'. Run third_party/stage_onemkl.ps1.")
+      endif()
+    endforeach()
+    unset(_mkl_required)
+  endif()
+
   if(NOT MIPSOLVERS_HAVE_MKL_PARDISO)
     message(FATAL_ERROR
       "Embedded Ipopt on Windows uses MKL Pardiso by default and requires a "
-      "valid oneAPI MKL installation. Install oneAPI MKL or configure with "
+      "valid oneAPI MKL installation. Stage a local bundle with "
+      "third_party/stage_onemkl.ps1, or configure with "
       "-DMIPSOLVERS_IPOPT_LINEAR_SOLVER=mumps and provide a Fortran compiler.")
   endif()
 
@@ -298,8 +321,15 @@ target_compile_options(ipopt_local PRIVATE
 #   cmake/Dependencies.cmake (Accelerate on macOS, system BLAS/LAPACK on Linux,
 #   vendored reference LAPACK as offline fallback)
 if(WIN32)
-  target_include_directories(ipopt_local PRIVATE ${MIPSOLVERS_MKL_INCLUDE_DIRS})
-  target_link_libraries(ipopt_local PRIVATE ${MIPSOLVERS_MKL_LIBRARIES})
+  # Keep the exported static Ipopt target relocatable. The prebuilt package
+  # config recreates this imported interface against its installed MKL copy.
+  if(NOT TARGET MIPSolvers::MKL)
+    add_library(MIPSolvers::MKL INTERFACE IMPORTED GLOBAL)
+    set_target_properties(MIPSolvers::MKL PROPERTIES
+      INTERFACE_INCLUDE_DIRECTORIES "${MIPSOLVERS_MKL_INCLUDE_DIRS}"
+      INTERFACE_LINK_LIBRARIES "${MIPSOLVERS_MKL_LIBRARIES}")
+  endif()
+  target_link_libraries(ipopt_local PRIVATE MIPSolvers::MKL)
 elseif(MIPSOLVERS_BLAS_LIBRARIES)
   target_link_libraries(ipopt_local PRIVATE ${MIPSOLVERS_BLAS_LIBRARIES})
 else()

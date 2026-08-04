@@ -498,8 +498,14 @@ iteration budget changes, and the over-limit state is never used for pricing.
 
 Reconstruction separately closes the gap between factor backward stability and
 the canonical primal contract: it accumulates `r=b-Ax` in extended precision,
-applies one defect correction `B Delta x_B=r` only when required, and rechecks
-the original limit.
+applies monotone iterative defect corrections `B Delta x_B=r` only when
+required, and rechecks the original limit after every update. A correction may
+continue only while the infinity norm strictly decreases; stagnation remains a
+numerical failure and never relaxes the feasibility tolerance. Since
+`x_B=B^-1(b-A_N x_N)` depends on both the factor generation `B` and nonbasic
+side vector `s`, a cached canonical audit is reusable only while `(B,s)` is
+unchanged. In particular, boxed-column side classification invalidates an
+audit made before that classification even when no INVERT occurred.
 
 The mandatory differential tests start from a non-diagonal, permuted basis,
 perform ten exchanges, and after every exchange compare FT FTRAN/BTRAN with
@@ -618,3 +624,65 @@ FTRAN/BTRAN/update          highs/simplex/HSimplexNla.cpp, highs/util/HFactor.cp
 
 The native code may simplify data structures, but it must preserve the
 mathematical state transitions and postconditions documented above.
+
+## 15. Exact reconstruction at certification boundaries
+
+A major INVERT does more than replace the factor representation. Any primal
+state reconstructed from it must satisfy the same canonical equation contract
+used at publication:
+
+\[
+  \lVert b-Ax\rVert_\infty
+  \le \epsilon_f\max(1,\lVert b\rVert_\infty).
+\]
+
+Backward stability of the internal FTRAN is necessary but does not imply this
+absolute contract when large basic and nonbasic contributions cancel. After a
+primal major INVERT, reconstruction therefore computes the canonical residual
+with extended accumulation immediately and applies checked, monotone defect
+correction before the solver may treat the state as fresh. A cached or sampled
+intermediate audit cannot stand in for this certification-boundary audit.
+
+Uncached DSE initialization has a second exact structural boundary. If every basis
+column is a singleton \(d_i e_i\) in its assigned row, then
+\(B^{-T}e_i=e_i/d_i\) and the exact weight is \(1/d_i^2\); no BTRAN is
+mathematically required. Production uses this identity on a cold or warm
+structural basis and otherwise starts Devex without an initialization solve. Explicit
+benchmark policies may still force Devex or checked full exact weights. This is
+a proof boundary, not a case, dimension, density, or timing selector; production
+changes still require the gates in section 11.
+
+## 16. Derived values stay with their source owner
+
+The Phase-II BFRT prefilter may materialize classification state only when the
+ordered merge cannot derive it more cheaply from an owner that remains live.
+In particular, `range_j=upper_j-lower_j` belongs to the immutable bound store
+and is consumed only for positive signed-alpha lanes. It is therefore computed
+once in that merge branch, not exported as a dense prefilter value stream.
+This removes one eight-byte write and read per active lane and skips both bound
+loads for nonpositive lanes while preserving scalar exact certification and
+PRICE order.
+
+The same rule does not authorize moving committed floating values across a
+transaction boundary. A prevalidated reduced-cost stream changed the floating
+contraction context and the `d2q06c` pivot path, so it was rejected. Ownership
+removal is valid only when the surviving computation preserves the original
+arithmetic context and discrete path. The retained BFRT range change passed
+72/72 Native and HiGHS runs; after timing fields were removed, its report was
+identical to the preceding production report.
+
+## 17. BFRT candidate state is a sufficient statistic
+
+Once a column is admitted, its signed pivot satisfies
+
+\[
+  \alpha_j=s\,\operatorname{sign}(move_j)\,p_j>0.
+\]
+
+The move sign and leaving side remain live through selection, so the original
+pivot is recovered exactly by applying those signs to alpha. Margin is consumed
+when the breakpoint is formed. Candidate storage must therefore contain only
+the column, alpha, breakpoint, range, and taboo metadata; copying pivot or
+margin creates no information. This reduction is valid only while move signs
+cannot mutate during selection and breakpoint remains the sole downstream
+margin consumer.

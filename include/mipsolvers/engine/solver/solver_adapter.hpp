@@ -22,6 +22,17 @@ struct SolveStats {
   double unscaled_complementarity{0.0};
   double mip_gap{0.0};
   double runtime_sec{0.0};
+  // Native dual-simplex benchmark telemetry. These remain zero for other
+  // solvers and do not participate in termination or correctness decisions.
+  int dual_phase_one_iterations{0};
+  int dual_phase_two_iterations{0};
+  int dse_initialization_solves{0};
+  int certified_dse_btrans{0};
+  int certified_dse_candidates{0};
+  int certified_dse_rejections{0};
+  double dse_initialization_time_sec{0.0};
+  double certified_dse_time_sec{0.0};
+  double native_dual_kernel_time_sec{0.0};
   std::string status;
   std::string solver_name;
 

@@ -439,6 +439,17 @@ IndexedSolveEvidence BasisFactor::indexed_ftran(const IndexedVector& rhs,
   return evidence;
 }
 
+bool BasisFactor::indexed_ftran_at_captured_pattern(
+    const IndexedVector& rhs, std::vector<double>& result_value) const {
+  result_value.clear();
+  if (A_ == nullptr || rhs.dimension != A_->rows() || !rhs.finite() ||
+      !rank_factor_.valid) {
+    return false;
+  }
+  return rank_factor_.ftran_indexed_at_captured_pattern(
+      rhs.index, rhs.value, result_value);
+}
+
 IndexedSolveEvidence BasisFactor::indexed_btran(const IndexedVector& rhs,
                                                 bool capture_update) const {
   IndexedSolveEvidence evidence;
