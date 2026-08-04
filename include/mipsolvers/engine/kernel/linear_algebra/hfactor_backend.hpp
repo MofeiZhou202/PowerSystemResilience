@@ -159,6 +159,12 @@ class HFactorBackend {
       const std::vector<int>& rhs_index,
       const std::vector<double>& rhs_value,
       std::vector<double>& result_value) const;
+  // Read one entry of the most recently captured FTRAN update column (the
+  // dense update_vec_aq backing) at an external row. Returns false if the
+  // capture is stale or the row is not a basic position. Equals the packed
+  // export value at that row, so a caller needing a single element (the
+  // pivotal `column_pivot`) avoids building a lookup over the packed image.
+  bool captured_aq_value(int external_row, double& out) const;
   bool btran_indexed(const std::vector<int>& rhs_index,
                      const std::vector<double>& rhs_value,
                      std::vector<int>& result_index,

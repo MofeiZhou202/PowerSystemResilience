@@ -464,6 +464,10 @@ bool BasisFactor::indexed_ftran_at_captured_pattern(
       rhs.index, rhs.value, result_value);
 }
 
+bool BasisFactor::captured_aq_value(int external_row, double& out) const {
+  return rank_factor_.captured_aq_value(external_row, out);
+}
+
 IndexedSolveEvidence BasisFactor::indexed_btran(const IndexedVector& rhs,
                                                 bool capture_update) const {
   IndexedSolveEvidence evidence;

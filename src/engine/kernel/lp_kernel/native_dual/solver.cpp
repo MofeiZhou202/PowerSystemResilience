@@ -648,7 +648,14 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
     if (!direction_solve.accepted) {
       return numerical_trouble("packed pivotal-column FTRAN failed");
     }
-    const double column_pivot = direction.at(leaving.row);
+    // col_aq (roadmap S2): read the pivotal element from the factor-resident
+    // update_vec_aq backing (O(1)) instead of building a lookup over the packed
+    // FTRAN image for one element. Bit-identical to direction.at(leaving.row);
+    // the .at() fallback covers a stale capture.
+    double column_pivot;
+    if (!state.factor->captured_aq_value(leaving.row, column_pivot)) {
+      column_pivot = direction.at(leaving.row);
+    }
     if (!std::isfinite(column_pivot) || column_pivot == 0.0) {
       return numerical_trouble("packed pivotal-column FTRAN has no pivot");
     }

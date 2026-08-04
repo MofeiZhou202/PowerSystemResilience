@@ -891,6 +891,18 @@ bool HFactorBackend::ftran_indexed_at_captured_pattern(
   return true;
 }
 
+bool HFactorBackend::captured_aq_value(int external_row, double& out) const {
+  if (!valid || external_row < 0 || external_row >= m ||
+      !p_->aq_capture_valid || p_->aq_capture_serial != p_->factor_serial) {
+    return false;
+  }
+  const HighsInt internal =
+      p_->external_to_internal[static_cast<std::size_t>(external_row)];
+  if (internal < 0 || internal >= m) return false;
+  out = p_->update_vec_aq.array[static_cast<std::size_t>(internal)];
+  return true;
+}
+
 bool HFactorBackend::btran_indexed(
     const std::vector<int>& rhs_index, const std::vector<double>& rhs_value,
     std::vector<int>& result_index, std::vector<double>& result_value,

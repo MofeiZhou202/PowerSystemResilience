@@ -69,6 +69,11 @@ class BasisFactor final : public BasisOps {
                           bool capture_update = false) const;
   bool indexed_ftran_at_captured_pattern(
       const IndexedVector& rhs, std::vector<double>& result_value) const;
+  // O(1) read of the entering-column FTRAN (col_aq) at a single row, from the
+  // factor-resident update_vec_aq backing. Bit-identical to indexed_ftran's
+  // packed value at that row (the pivotal `column_pivot`); false if the capture
+  // is stale. Avoids building a lookup over the packed image for one element.
+  bool captured_aq_value(int external_row, double& out) const;
   IndexedSolveEvidence indexed_btran(const IndexedVector& rhs,
                                      bool capture_update = false) const;
   EdgeWeightEvidence compute_exact_edge_weights() const;
