@@ -202,3 +202,41 @@ the per-pivot-cost bottleneck. The harness is retained to gate future workspace
 proposals (e.g. col_aq) against this same amortization test before any hot-loop
 change.
 
+## 11. Measured result — col_aq column_pivot resident view (independent kernel)
+
+Harness: [native_dual_colaq_pivot_benchmark.cpp](../benchmark/native_dual_colaq_pivot_benchmark.cpp)
+(target `native_dual_colaq_pivot_benchmark`, self-contained, replicating
+`IndexedVector::at`/`build_lookup` exactly). col_aq (the entering-column FTRAN
+`direction`) has exactly one non-iterating consumer: the pivotal element
+`column_pivot = direction.at(leaving.row)` (solver.cpp:651). Because
+`ftran_indexed` leaves `lookup_slot` empty and the FTRAN support is far above the
+8-element linear-scan threshold, `.at()` builds an O(support) hash **for that one
+lookup, every pivot**. The resident view reads the factor's dense
+`update_vec_aq` backing at the leaving row — O(1). Bit-identical value.
+
+| FTRAN support | current (`at`+hash) | resident (dense) | ratio | saved |
+|---:|---:|---:|---:|---:|
+| 32 | 0.596 ms | 0.017 ms | 35x | 0.10 µs/pivot |
+| 100 | 1.336 ms | 0.018 ms | 73x | 0.23 µs/pivot |
+| 300 | 2.394 ms | 0.023 ms | 105x | 0.42 µs/pivot |
+| 700 | 2.561 ms | 0.031 ms | 82x | 0.45 µs/pivot |
+
+Unlike row_ep this cost is **not amortized** — it is a fixed per-pivot hash
+build. Both instructions (the `build_lookup` loop) and bytes (the `lookup_slot`
+allocation ≈ 8·support B/pivot) drop, so it passes the §13.3 structural gate. Its
+wall share is ≈0.3 % of a 153 µs d2q06c pivot — below wall resolution but a real,
+always-present, zero-risk Class-P saving.
+
+**Conclusion: `retain-eligible` (structural instruction/byte dominance),** on the
+same basis as the L4a/L4b "retained below wall resolution" changes. Implementation
+is a small factor accessor (dense `update_vec_aq` read at an external row via the
+backend's row mapping) replacing the single `.at()` at solver.cpp:651; it must be
+proven bit-identical (including the external↔internal row mapping) before promotion.
+
+**Combined S2 finding:** the resident-view value is *consumer-shaped*, not
+uniform. A consumer that reads the vector once (col_aq `column_pivot`) benefits
+structurally; a consumer amortized over many candidate reads (row_ep dot-scan)
+does not. Future workspace proposals must pass the matching harness before any
+hot-loop change.
+
+
