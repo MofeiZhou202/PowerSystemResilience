@@ -41,6 +41,21 @@ int hyper_sparse_min_rows() {
   }();
   return v;
 }
+
+// HiGHS-style running mean of the SOLVE RESULT density (HConst.h
+// kRunningAverageMultiplier = 0.05).  HFactor selects its dense skip-scan solve
+// when expected_density exceeds the kHyper*{L,U} thresholds (0.10-0.15).  The
+// bridge previously fed the RHS density (~1/m for a unit CHUZR/PRICE RHS),
+// which forced solveHyper even when the RESULT was dense (d2q06c row_ep/pivotal
+// row ~40%).  Feeding the running result density restores the HiGHS kernel
+// choice; the solve result is unchanged, only the internal strategy differs.
+inline void update_solve_density_mean(double& mean, HighsInt result_count,
+                                      int num_row) {
+  const double local =
+      static_cast<double>(std::max<HighsInt>(0, result_count)) /
+      static_cast<double>(std::max(1, num_row));
+  mean = 0.95 * mean + 0.05 * local;
+}
 }  // namespace
 
 struct HFactorBackend::Impl {
@@ -154,6 +169,14 @@ struct HFactorBackend::Impl {
   // packed buffers allocated and initialized several O(m) arrays per pivot.
   mutable HVector update_vec_aq;
   mutable HVector update_vec_ep;
+  // HiGHS-style running means of each solve's RESULT density, consulted only
+  // for m >= hyper_sparse_min_rows().  Start at 0 (cold: hyper-sparse) and warm
+  // toward the observed result density so dense-result bases (d2q06c) take the
+  // skip-scan kernel.  Persist across rebuilds within a solve like HiGHS.
+  mutable double density_mean_ftran = 0.0;
+  mutable double density_mean_btran = 0.0;
+  mutable double density_mean_aq = 0.0;
+  mutable double density_mean_ep = 0.0;
   mutable bool profile_indexed_solves = false;
   mutable double profiled_indexed_solve_time_sec = 0.0;
   mutable double profiled_indexed_solve_synthetic_tick = 0.0;
@@ -578,9 +601,8 @@ void HFactorBackend::ftran(const double* rhs, double* result,
       }
     }
   }
-  const double density =
-      static_cast<double>(vector.count) / static_cast<double>(m);
-  nc.ftranCall(vector, density, nullptr);
+  nc.ftranCall(vector, p_->density_mean_ftran, nullptr);
+  update_solve_density_mean(p_->density_mean_ftran, vector.count, m);
   for (int external = 0; external < m; ++external) {
     const int internal = static_cast<int>(
         p_->external_to_internal[static_cast<std::size_t>(external)]);
@@ -623,16 +645,16 @@ void HFactorBackend::ftran_for_update(
       }
     }
   }
-  // Pass the true RHS density so HFactor selects its hyper-sparse FTRAN
-  // strategy on sparse right-hand sides (SCUC pivotal columns are sparse);
-  // the solve result is identical to the dense strategy, only faster.  Small
-  // bases force density 1.0 (dense) for numerical steadiness (size gate).
+  // For m >= hyper_sparse_min_rows() feed the running result density so a dense
+  // pivotal column (col_aq) takes the skip-scan kernel; small bases force
+  // density 1.0 (dense) for numerical steadiness (size gate).  The solve result
+  // is identical to either strategy.
   const double density =
-      m >= hyper_sparse_min_rows()
-          ? static_cast<double>(vector.count) / static_cast<double>(m)
-          : 1.0;
+      m >= hyper_sparse_min_rows() ? p_->density_mean_aq : 1.0;
   HFactor& nc = const_cast<HFactor&>(p_->f);
   nc.ftranCall(vector, density, nullptr);
+  if (m >= hyper_sparse_min_rows())
+    update_solve_density_mean(p_->density_mean_aq, vector.count, m);
   for (int external = 0; external < m; ++external) {
     const int internal = static_cast<int>(
         p_->external_to_internal[static_cast<std::size_t>(external)]);
@@ -702,9 +724,8 @@ void HFactorBackend::btran(const double* rhs, double* result,
       }
     }
   }
-  const double density =
-      static_cast<double>(vector.count) / static_cast<double>(m);
-  nc.btranCall(vector, density, nullptr);
+  nc.btranCall(vector, p_->density_mean_btran, nullptr);
+  update_solve_density_mean(p_->density_mean_btran, vector.count, m);
   std::memcpy(result, vector.array.data(),
               static_cast<size_t>(m) * sizeof(double));
   if (result_pattern != nullptr && vector.count >= 0) {
@@ -747,16 +768,17 @@ void HFactorBackend::btran_for_update(
       }
     }
   }
-  // Pass the true RHS density so HFactor selects its hyper-sparse BTRAN
-  // strategy.  CHUZR's BTRAN RHS is a unit vector (count==1) — the canonical
-  // hyper-sparse case — where this is a large win; result is identical.  Small
-  // bases force density 1.0 (dense) for numerical steadiness (size gate).
+  // For m >= hyper_sparse_min_rows() feed the running result density (a dense
+  // pivotal row takes the skip-scan kernel); small bases force density 1.0
+  // (dense) for numerical steadiness (size gate).  Result is identical either
+  // way, and CHUZR's unit BTRAN RHS keeps the running mean low whenever the
+  // pivotal rows stay sparse.
   const double density =
-      m >= hyper_sparse_min_rows()
-          ? static_cast<double>(vector.count) / static_cast<double>(m)
-          : 1.0;
+      m >= hyper_sparse_min_rows() ? p_->density_mean_ep : 1.0;
   HFactor& nc = const_cast<HFactor&>(p_->f);
   nc.btranCall(vector, density, nullptr);
+  if (m >= hyper_sparse_min_rows())
+    update_solve_density_mean(p_->density_mean_ep, vector.count, m);
   std::memcpy(result, vector.array.data(), static_cast<size_t>(m) * sizeof(double));
   if (result_pattern != nullptr && vector.count >= 0) {
     result_pattern->reserve(static_cast<std::size_t>(vector.count));
@@ -779,6 +801,8 @@ bool HFactorBackend::ftran_indexed(
   if (!valid || rhs_index.size() != rhs_value.size()) return false;
   ++p_->indexed_solves;
   HVector& vector = capture_update ? p_->update_vec_aq : p_->solve_vec_ftran;
+  double& density_mean =
+      capture_update ? p_->density_mean_aq : p_->density_mean_ftran;
   vector.clear();
   vector.packFlag = capture_update;
   for (std::size_t k = 0; k < rhs_index.size(); ++k) {
@@ -792,8 +816,15 @@ bool HFactorBackend::ftran_indexed(
   const auto solve_start =
       p_->profile_indexed_solves ? std::chrono::steady_clock::now()
                                  : std::chrono::steady_clock::time_point{};
-  nc.ftranCall(vector,
-               static_cast<double>(vector.count) / std::max(1, m), nullptr);
+  // max(RHS density, running result density): never downgrades a dense RHS to
+  // hyper-sparse (preserves the prior choice + numerical steadiness) and adds
+  // the dense skip-scan kernel when the RESULT is dense (d2q06c row_ep/col_aq
+  // ~40%) even at m below the size gate.  No size gate here: the indexed hot
+  // path never had one, and max() only ever ADDS dense selections.
+  const double expected_density = std::max(
+      static_cast<double>(vector.count) / std::max(1, m), density_mean);
+  nc.ftranCall(vector, expected_density, nullptr);
+  update_solve_density_mean(density_mean, vector.count, m);
   auto record_profile = [&]() {
     if (!p_->profile_indexed_solves) return;
     p_->profiled_indexed_solve_time_sec += std::chrono::duration<double>(
@@ -858,8 +889,11 @@ bool HFactorBackend::ftran_indexed_at_captured_pattern(
   const auto solve_start =
       p_->profile_indexed_solves ? std::chrono::steady_clock::now()
                                  : std::chrono::steady_clock::time_point{};
-  nc.ftranCall(vector,
-               static_cast<double>(vector.count) / std::max(1, m), nullptr);
+  const double expected_density = std::max(
+      static_cast<double>(vector.count) / std::max(1, m),
+      p_->density_mean_ftran);
+  nc.ftranCall(vector, expected_density, nullptr);
+  update_solve_density_mean(p_->density_mean_ftran, vector.count, m);
   auto record_profile = [&]() {
     if (!p_->profile_indexed_solves) return;
     p_->profiled_indexed_solve_time_sec += std::chrono::duration<double>(
@@ -913,6 +947,8 @@ bool HFactorBackend::btran_indexed(
   if (!valid || rhs_index.size() != rhs_value.size()) return false;
   ++p_->indexed_solves;
   HVector& vector = capture_update ? p_->update_vec_ep : p_->solve_vec_btran;
+  double& density_mean =
+      capture_update ? p_->density_mean_ep : p_->density_mean_btran;
   vector.clear();
   vector.packFlag = capture_update;
   for (std::size_t k = 0; k < rhs_index.size(); ++k) {
@@ -928,8 +964,10 @@ bool HFactorBackend::btran_indexed(
   const auto solve_start =
       p_->profile_indexed_solves ? std::chrono::steady_clock::now()
                                  : std::chrono::steady_clock::time_point{};
-  nc.btranCall(vector,
-               static_cast<double>(vector.count) / std::max(1, m), nullptr);
+  const double expected_density = std::max(
+      static_cast<double>(vector.count) / std::max(1, m), density_mean);
+  nc.btranCall(vector, expected_density, nullptr);
+  update_solve_density_mean(density_mean, vector.count, m);
   auto record_profile = [&]() {
     if (!p_->profile_indexed_solves) return;
     p_->profiled_indexed_solve_time_sec += std::chrono::duration<double>(
