@@ -752,15 +752,17 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
     }
     if (g_ds_profile.enabled) g_ds_profile.postcond += ds_clock() - _t_pc;
 
-    detail::IndexedVector bfrt_delta;
-    bfrt_delta.dimension = state.m;
+    // col_bfrt (roadmap S2, first Class-P step): the BFRT flip-RHS FTRAN image
+    // is consumed entirely within this pivot, so its packed backing is reused
+    // across iterations instead of allocated per pivot. indexed_ftran_into is
+    // numerically identical to indexed_ftran (same ftran_indexed call).
+    static thread_local detail::IndexedVector bfrt_delta;
+    bfrt_delta.clear(state.m);
     if (has_flips) {
-      detail::IndexedSolveEvidence bfrt_solve =
-          state.factor->indexed_ftran(transaction.bfrt_rhs);
-      if (!bfrt_solve.accepted) {
+      if (!state.factor->indexed_ftran_into(transaction.bfrt_rhs,
+                                            bfrt_delta)) {
         return numerical_trouble("packed BFRT RHS FTRAN failed");
       }
-      bfrt_delta = std::move(bfrt_solve.solution);
     }
 
     const double leaving_bound =

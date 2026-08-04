@@ -60,6 +60,13 @@ class BasisFactor final : public BasisOps {
                               const std::vector<int>* rhs_pattern = nullptr) const;
   IndexedSolveEvidence indexed_ftran(const IndexedVector& rhs,
                                      bool capture_update = false) const;
+  // Same FTRAN as indexed_ftran but writes the packed result into a
+  // caller-owned vector, reusing its capacity across pivots. Numerically
+  // identical to indexed_ftran (same ftran_indexed call); it only removes the
+  // per-pivot allocation of the result vectors. Returns whether the solve was
+  // accepted.
+  bool indexed_ftran_into(const IndexedVector& rhs, IndexedVector& out,
+                          bool capture_update = false) const;
   bool indexed_ftran_at_captured_pattern(
       const IndexedVector& rhs, std::vector<double>& result_value) const;
   IndexedSolveEvidence indexed_btran(const IndexedVector& rhs,

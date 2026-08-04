@@ -439,6 +439,20 @@ IndexedSolveEvidence BasisFactor::indexed_ftran(const IndexedVector& rhs,
   return evidence;
 }
 
+bool BasisFactor::indexed_ftran_into(const IndexedVector& rhs,
+                                     IndexedVector& out,
+                                     bool capture_update) const {
+  out.clear(rhs.dimension);
+  if (A_ == nullptr || rhs.dimension != A_->rows() || !rhs.finite() ||
+      !rank_factor_.valid) {
+    return false;
+  }
+  // Identical solve to indexed_ftran; only the result buffers are caller-owned
+  // and reused, so the produced values and lookup_slot are the same.
+  return rank_factor_.ftran_indexed(rhs.index, rhs.value, out.index, out.value,
+                                    out.lookup_slot, capture_update);
+}
+
 bool BasisFactor::indexed_ftran_at_captured_pattern(
     const IndexedVector& rhs, std::vector<double>& result_value) const {
   result_value.clear();
