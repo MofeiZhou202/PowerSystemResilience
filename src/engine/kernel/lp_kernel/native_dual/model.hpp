@@ -683,6 +683,7 @@ struct PivotTransaction {
   int bfrt_group_count{0};
   int bfrt_selected_group_size{0};
   int bfrt_stability_prefiltered{0};
+  int bfrt_exact_dot_calls{0};
   double bfrt_sort_time_sec{0.0};
   double bfrt_order_time_sec{0.0};
 };

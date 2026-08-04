@@ -377,3 +377,28 @@ Next authorized step:
 - SCIP/SoPlex basis、pricing norm 与 strong-branch state persistence：`scip/lpi/lpi_spx.cpp`。
 - SCIP 10.0.3 memory-stall-separated measurement：<https://github.com/scipopt/scip/releases/tag/v10.0.3>。
 
+## 18. 决策记录
+
+### DR-1（2026-08-04）：S2 驻留视图摊销证据 → 优先 S3 候选削减
+
+**触发**：执行 §16 step 4（PRICE/BFRT/DSE/pivot verification 迁移到驻留 view）。
+
+**新证据**（两个生产密度独立内核，源码已入库；见 `native_dual_simplex_s2_workspace_design.md` §10–§11）：
+
+- `native_dual_price_resident_benchmark`（row_ep → `dot_error_bound`）：去掉每 pivot 的 `dense_row_ep` clear+scatter（≈25.7 kB/pivot）在候选 dot-scan 上被摊销。候选数 2 / 8 / 32 / 128 / all → materialize÷resident = 1.083 / 1.078 / 1.025 / 1.006 / 1.000x。大案例每 pivot 认证候选达数百（d2q06c BFRT ≈957 候选），落在 ≥128 摊销区 → wall 收益 <0.6%，低于分辨率。判定 **diagnostic-only**。
+- `native_dual_colaq_pivot_benchmark`（col_aq `column_pivot`）：单次 `.at()` 建 O(support) 哈希 → 驻留 dense O(1) 读，微内核 35–105x，指令与字节（`lookup_slot` ≈8·support B/pivot）同时下降，过 §13.3 结构 gate；但仅占 153 µs pivot 的约 0.3%，低于 wall 分辨率，按结构主导保留（已实现 `a54dd2b`，bit-identical，72/72）。
+
+**核心结论**：目标大案例每 pivot 的主导成本是候选**认证 dot-scan（计算）**，不是 S2 去除的 pivot 周边数据运动。驻留视图价值是**消费者形态相关**的：单次读消费者（col_aq `column_pivot`）有结构收益；被多候选摊销的消费者（row_ep dot-scan）没有。
+
+**反例/边界**：col_aq 证明驻留视图并非无用——结论不是"驻留视图无价值"，而是"其价值不触及主导项"。故保留 S2 已落地部分（col_bfrt 复用缓冲 `2e47c74`、col_aq 驻留读 `a54dd2b`）与两个 harness（作为后续 workspace 提案的摊销 gate）。
+
+**决策**：在 S1–S3 单线程基线块内，不再穷尽 S2 step 4 的低价值剩余迁移（row_ep dense-read 接线、col_bfrt fuller），转入 S3（step 5）。S3 首个重点"PRICE 无阈值只输出 active BFRT support + 解析上界 cheap prefilter"直接攻击已测得的主导项（认证候选数）。此举不越过任何阶段的正确性前置：S2 的 design + 独立内核 gate（step 3）已完成，S3 是既定下一步。
+
+**替代方案**：
+- (a) 穷尽 S2 驻留迁移：拒绝——harness 证明 ≤0.3% 且被摊销，为低于分辨率的收益承担热循环风险。
+- (b) 直接跳 S7（pivot-count/退化）：拒绝——§11 要求 S2/S3 per-pivot 架构先稳定，且 S7 明确最后。
+- (c) 优先 S3 候选削减（**采纳**）：收益须是所有候选的结构性质（非 case/density/wall selector），符合 §7。
+
+**保持不变量**：精确 `dot_error_bound`、原 PRICE 顺序、merge 顺序、scalar certification、proposal/commit 边界不变（§7、§12）。**下一步**：先测量当前认证路径每 pivot 的 exact-dot（needs-exact）候选数，量化可削减空间，再提出结构性收紧的解析上界。
+
+

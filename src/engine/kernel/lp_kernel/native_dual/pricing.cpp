@@ -829,6 +829,7 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
       }
       if (!positive) {
         if ((flags & kBfrtNeedsExact) != 0) {
+          ++transaction.bfrt_exact_dot_calls;
           const double error = dot_error_bound(state, leaving.row_ep, col,
                                                dense_row_ep_for_dot());
           if (alpha + error > 0.0) {
@@ -844,6 +845,7 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
         error = state.bfrt_error_coef[static_cast<std::size_t>(col)] *
                 row_ep_max_abs;
       } else {
+        ++transaction.bfrt_exact_dot_calls;
         error =
             dot_error_bound(state, leaving.row_ep, col, dense_row_ep_for_dot());
         if (!(alpha > error)) {

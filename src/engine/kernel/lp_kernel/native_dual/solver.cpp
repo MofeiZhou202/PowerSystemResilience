@@ -268,7 +268,7 @@ struct DSProfile {
   long pivots = 0, rebuilds = 0;
   long bfrt_calls = 0, bfrt_candidates = 0, bfrt_groups = 0,
        bfrt_selected_group = 0, bfrt_flips = 0,
-       bfrt_stability_prefiltered = 0;
+       bfrt_stability_prefiltered = 0, bfrt_exact_dots = 0;
   int bfrt_max_candidates = 0, bfrt_max_groups = 0,
       bfrt_max_selected_group = 0, bfrt_max_flips = 0;
   int model_m = 0, model_n = 0;
@@ -291,7 +291,7 @@ struct DSProfile {
     dual_two_reinvert.clear();
     pivots = rebuilds = 0;
     bfrt_calls = bfrt_candidates = bfrt_groups = bfrt_selected_group =
-        bfrt_flips = bfrt_stability_prefiltered = 0;
+        bfrt_flips = bfrt_stability_prefiltered = bfrt_exact_dots = 0;
     bfrt_max_candidates = bfrt_max_groups = bfrt_max_selected_group =
         bfrt_max_flips = 0;
     model_m = model_n = 0;
@@ -339,12 +339,13 @@ struct DSProfile {
           stderr,
           "[DS-BFRT] calls=%ld candidates=%.1f/%d order=%.6fs sort=%.6fs "
           "groups=%.1f/%d "
-          "selectedGroup=%.2f/%d flips=%.2f/%d stabilityPrefiltered=%ld\n",
+          "selectedGroup=%.2f/%d flips=%.2f/%d stabilityPrefiltered=%ld "
+          "exactDots=%.1f/pivot(%ld)\n",
           bfrt_calls, bfrt_candidates / calls, bfrt_max_candidates,
           bfrt_order, bfrt_sort, bfrt_groups / calls, bfrt_max_groups,
           bfrt_selected_group / calls, bfrt_max_selected_group,
           bfrt_flips / calls, bfrt_max_flips,
-          bfrt_stability_prefiltered);
+          bfrt_stability_prefiltered, bfrt_exact_dots / calls, bfrt_exact_dots);
     }
     const auto report_reinvert = [](const char* phase,
                                     const ReinvertPhaseProfile& profile) {
@@ -570,6 +571,7 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
     g_ds_profile.bfrt_order += transaction.bfrt_order_time_sec;
     g_ds_profile.bfrt_stability_prefiltered +=
         transaction.bfrt_stability_prefiltered;
+    g_ds_profile.bfrt_exact_dots += transaction.bfrt_exact_dot_calls;
     g_ds_profile.bfrt_max_candidates = std::max(
         g_ds_profile.bfrt_max_candidates, transaction.bfrt_candidate_count);
     g_ds_profile.bfrt_max_groups =
