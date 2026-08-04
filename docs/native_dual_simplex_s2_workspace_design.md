@@ -165,3 +165,40 @@ and 24×3 A/B/A; none is promoted on wall time alone.
 - [ ] Independent kernel: dynamic instructions **and** bytes both drop.
 - [ ] Full 24×3 A/B/A no correctness regression; wall change agrees with the
   kernel cost model.
+
+## 10. Measured result — row_ep PRICE resident view (independent kernel)
+
+Harness: [native_dual_price_resident_benchmark.cpp](../benchmark/native_dual_price_resident_benchmark.cpp)
+(target `native_dual_price_resident_benchmark`, self-contained). It replays
+`dot_error_bound` over production-density fixtures (d2q06c-shaped m=1759, n=6423,
+row_ep support ~40% of m) comparing the current *materialize* path
+(`dense_row_ep` = O(m) clear + O(support) scatter, then read) against the S2
+*resident* path (read the factor's dense BTRAN backing directly). Both checksums
+are **bit-identical**.
+
+Crossover vs candidates dotted per pivot (M4, Release):
+
+| candidates/pivot | materialize/resident | note |
+|---:|---:|---|
+| 2 | 1.083x | resident wins when almost nothing is dotted |
+| 8 | 1.078x | |
+| 32 | 1.025x | |
+| 128 | 1.006x | |
+| 6423 (all) | 1.000x | fully amortized |
+
+Byte model: the resident path removes `m·8 + |support|·16 ≈ 25.7 kB` per pivot
+(the clear + scatter). **But** `dense_row_ep` is built once per pivot and
+amortized over every certified candidate dot, and the shared dot-scan dominates:
+on the representative large cases the BFRT scan certifies on the order of
+hundreds of candidates per pivot (telemetry ~957 BFRT candidates on d2q06c), i.e.
+the ≥128 regime, where the removed 25.7 kB buys ≲0.6 % — below wall resolution.
+
+**Conclusion: `diagnostic-only`.** The row_ep materialize is already well
+amortized; the resident view removes real bytes that do not reach wall time on
+the target cases, confirming the roadmap rule that a byte reduction alone is not
+a sufficient gate (§13.3). A resident view is only worth the hot-loop risk where
+few candidates are certified per pivot (small degenerate models), which are not
+the per-pivot-cost bottleneck. The harness is retained to gate future workspace
+proposals (e.g. col_aq) against this same amortization test before any hot-loop
+change.
+
