@@ -401,4 +401,23 @@ Next authorized step:
 
 **保持不变量**：精确 `dot_error_bound`、原 PRICE 顺序、merge 顺序、scalar certification、proposal/commit 边界不变（§7、§12）。**下一步**：先测量当前认证路径每 pivot 的 exact-dot（needs-exact）候选数，量化可削减空间，再提出结构性收紧的解析上界。
 
+### DR-2（2026-08-04）：延后 S4/SIP，优先 S5 warm state
+
+**触发**：S3 完成（proposal/certification/commit 已分层，全部 bit-identical，24×3 仍 72/72，0.863x）；执行 §16 step 6（S4 serial + SIP）。
+
+**证据/理论**：
+- serial executor 已就绪：`minor_iteration` 现为 proposal（`detail::` 调用 + `build_primal_transaction`）/ certification（`certify_bfrt_*`）/ atomic commit 的清晰分层，三个抽出函数均以 scratch/scalar 传参，具备 per-worker 私有 scratch 条件。
+- SIP 唯一可测的 per-pivot 独立并行是 DSE-FTRAN（factor solve，≈17.8 µs/pivot）‖ PRICE（`A_row` 矩阵乘，≈37.4 µs/pivot）：二者从 `BTRAN(row_ep)` 分叉且资源不同（factor vs `A_row`），可并发；`aq`/`BFRT` FTRAN 共享 factor workspace，不可并发。完美 2-thread 重叠上界 ≈ min = 17.8 µs/pivot ≈ 11.6% wall，减每 pivot ≈3 µs 任务开销后 ≈9%。
+- 该 ≈9% 只在 2-thread 且须胜过 2-thread HiGHS（成熟 PAMI）；对 1v1 主 gate（当前 0.863x）无贡献（§2 value map：SIP 只改善并行对照，不解释单线程基线）。此前 1/2/4-thread run 在 `d2q06c`/`degen3` 相同，佐证细粒度数据并行无收益。
+
+**决策**：延后 S4/SIP。serial executor 保持 1v1 权威基线；SIP 仅在出现明确 equal-thread 需求且 DSE‖PRICE task overlap 通过 §13.3 gate 时重启。转入 S5 warm state——native dual simplex 的真实产品用途是 native B&C（MIP）内的 node reoptimization 与 strong branching，cold geomean 非该用途的正确度量（DR-1：cold per-pivot 近地板）。
+
+**替代方案**：
+- (a) 现在实现 SIP：拒绝——正交于近地板 1v1 gate，equal-thread 对 HiGHS PAMI 收益不确定，热循环成本高。
+- (b) 跳 S6/S7：拒绝——S6 需 S2–S5 架构先定，S7 明确最后。
+- (c) 优先 S5 warm state（**采纳**）：产品价值最高，且 S3 分层已为 warm snapshot 提供事务边界。
+
+**保持不变量**：serial executor 是 1v1 权威；SIP 与 serial 共享同一 DAG/proposal/certification/commit；warm snapshot 必须携带 bound-domain 版本（禁止重新引入 sentinel，§9）。**下一步**：审计当前 warm-start（`solve(sf, options, hint)`）携带的状态，对照 §9 要求的 basis + sides + DSE norms + cost journals + factor metadata，补齐缺失项（当前 hint 仅含 basis + at_upper，DSE norms 未 warm-start）。
+
+
 
