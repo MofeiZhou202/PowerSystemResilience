@@ -421,6 +421,12 @@ Next authorized step:
 
 **S4 代码级确认（2026-08-04）**：实测 `minor_iteration` 的 pivot 链为顺序 `BTRAN → PRICE → BFRT → FTRAN → DSE → commit`。`compute_dse_weights` 需 `direction`（pivotal-column FTRAN 输出），故 DSE 在 FTRAN 下游，**非与 PRICE 并行**（理想 DAG 的 `DSE‖PRICE` 与当前实现不符）。唯一名义独立对 `col_aq FTRAN`（`update_vec_aq`）‖ `col_bfrt FTRAN`（`solve_vec_ftran`）共享同一 HFactor 的 mutable HVector workspace，且 `col_bfrt` 仅在 `has_flips`（少数 pivot）出现。PRICE 数据并行为已关闭死路（§12）。故 real SIP 需 per-worker HFactor 副本（§9）或将 DSE 重构为从 BTRAN 分叉（Class A），皆为大改动且对 1v1 gate 正交、收益边际。**结论**：serial executor 确认为 S4 1v1 权威基线；不为边际正交收益向已验证热循环引入未验证 HFactor 并发（数据竞争风险）。SIP 仅在完成 Class-A DSE-from-BTRAN 重构且 per-worker factor 就绪后，凭 §13.3 equal-thread gate 重启。
 
+**S5 warm state 进展（2026-08-04）**：
+- **bound-domain 版本标签（commit 2a93314）**：`SimplexBasis` 携带 `kBoundDomainVersion=1`（S0 canonical +inf 表示）+ per-snapshot `bound_domain_version`。两个 producer（`export_basis`、LPModel wrapper）打标；warm DSE-inheritance guard 增加版本匹配检查 → 旧 sentinel-domain 的 reduced cost / DSE norm 无法被静默复用（§9 要求）。falsifiability 测试 `[bound_domain]`：匹配版本逐位继承 distinctive DSE norm（0 pivot），失配版本拒绝并重初始化。bit-identical Class-P（d2q06c 5609/31；fleet 72/72 639.0 pivot）。
+- **warm 再优化 cohort（commit d987c9e）**：`netlib_solver_benchmark --warm-cohort` 对每个 NETLIB case 求解 root，收紧若干 basic structural 变量上界（合成 B&C branch），再 cold vs warm（root basis + 继承 DSE norm）求解 node，报告 warm/cold pivot 与 wall 比。kernel 级（presolve-free），比值隔离 warm-start 效应。结果（24 case，4-var/0.5 branch，repeat 3）：17/24 usable（7 node 在合成 cut 下不可行，诚实跳过），0 objective mismatch，geomean warm/cold pivot 0.146（**6.85x 更少**）、wall 0.278（**3.60x 更快**）、总 pivot 削减 90.0%；每个 warm 求解 `dse_initialization_solves=0`（DSE norm 继承，无 re-init BTRAN）。将 §9 warm 价值从 unit-scale 证明提升为可报告 cohort。
+- **剩余 S5**：strong-branching parent-basis restore 覆盖；warm snapshot 的 cost journal / factor metadata 补齐（当前仅 basis + at_upper + DSE norm）。
+
+
 
 
 
