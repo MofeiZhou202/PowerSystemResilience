@@ -344,12 +344,15 @@ Serial A/B/A: Native / HiGHS / ratio
 Parallel equal-thread A/B/A:
 Warm cohorts:
 Setup / pivots / per-pivot / rebuild / cleanup / cert:
+Total pivots (dual + primal cleanup) / cleanup wall share:
 Representative cases:
 Theory confirmed or falsified:
 Unexpected cost transfer:
 Artifacts:
 Next authorized step:
 ```
+
+`Total pivots` 必须含 primal cleanup pivots，`cleanup wall share` = cleanup 墙钟 / kernel 墙钟（DS-PHASES）。DR-5 §(a) 记录 `dual_pivots` 指标曾掩盖 primal cleanup 第二次 solve（pilot4 356 dual + 693 cleanup），故任何 cold serial 结果不得只报 `dual_pivots`。
 
 ## 16. 固定执行顺序与当前下一步
 
@@ -366,6 +369,23 @@ Next authorized step:
 9. 最后重新评估 exact DSE、退化和 pivot-count 算法。
 
 这条路线的核心判断是：先统一状态语义，再固定证据，再消除 pivot DAG 上的结构性数据运动，最后才让并行与算法策略建立在稳定内核之上。后续工作不再按失败案例逐个打补丁，而按共同状态模型、共同数据流和共同成本模型推进。
+
+### 16.1 DR-5 重开后的当前下一步（2026-08-04）
+
+深度分析（`native_dual_beat_highs_deep_analysis`）按 §12 重开 S2/S3/S7 后，已落地/判定：
+
+- **已 retain**：P1/T2 expected_density running-mean（commit 668184d，0.852x→0.864x，Class A，全 cohort 绿）。
+- **已 reject**：P2 skip-basic PRICE 的 branch 版（matched-load A/B 无收益；每元素分支抵消累加节省）。
+- **重排至最后**：P0 cleanup 尾巴（E1 shift-start 是实测净赢，faithful HiGHS = 更慢 dual Phase I；真正杠杆 = 高效 dual Phase I）。
+
+当前授权的下一步（用户已选"full rebuild"，但受实测门槛约束）：
+
+1. **PRICE partition port（P2 的唯一可兑现形态）**：实现 branchless mutable partitioned `ar_matrix`（nonbasic 前缀 + per-pivot O(nnz(a_in)+nnz(a_out)) swap 维护），先做**独立内核 benchmark**证明 instructions AND bytes 同降（§13.3），再接生产。这是 Class-A reorder 大改动；branch 版已证死路。
+2. 若 partition port 未过独立内核 gate，则 PRICE 与 DR-3 一致近地板，转 P0 高效 dual Phase I 研究（消 bulk shift + cleanup 尾巴）。
+3. P3 单遍认证须走 S3 重设计（PRICE 无阈值只出 active support），不得逐 diff 融合越过 proposal/commit 边界。
+
+密度修复证明：**per-pivot 结构税确有可兑现项**（solve 内核选择），但兑现幅度受 case 分布与实测门槛约束；DR-3 的"分布式、竞品对标"判断在 PRICE branch 版上再次成立。
+
 
 ## 17. 外部参照
 
@@ -481,6 +501,44 @@ Next authorized step:
 - (c) 保持现策略 + 记录重测证据（**采纳**）。
 
 **路线图状态**：**S0–S7 主线全部完成/带证据延后。** S6 为最后一站，确认现 reinversion 策略在 S2–S5 后仍近最优。整体成果：稳定状态语义（S0）+ 测量合同（S1）+ factor-resident workspace（S2）+ 事务分层 pivot（S3）+ warm state（S5：version tag + falsifiability + cohort 6.85x + strong-branch restore）+ S4/S6/S7 带证据判定。cold 四重印证近地板；产品价值在 warm/B&C。
+
+### DR-5（2026-08-04）：深度分析按 §12 重开 S2/S3/S7 — density-EMA retain，skip-basic reject
+
+**触发**：`native_dual_beat_highs_deep_analysis_2026-08-04.md` 用 §12 重开条件（"不同的架构成本项"）挑战 DR-3 的"算法地板"结论：它承认 pivot-count 层面近地板正确，但把 2.28x per-pivot gap 分解为**六个命名结构税 T1–T6**（容器模型 / solve 桥 O(m) gather + 错 expected_density / PRICE 全行扫描+间接寻址 / ratio 多遍 / 每 pivot 对偶复核 / cleanup 政策）加一个被 `dual_pivots` 指标掩盖的 **primal cleanup 尾巴**。这些是新命名的成本项（非换 threshold），满足 §12 重开门槛。用户授权按 gate ROI 顺序尝试 P0–P4。
+
+**方法学修正采纳（analysis §4）**：本轮起，24×3 gate 报告 **total pivots（dual + primal cleanup）+ cleanup wall 份额**（§15 模板已补），避免 `dual_pivots` 再次掩盖第二次 solve。
+
+**新固定基线（本轮实测，one-thread，clean load）**：HiGHS geomean 3.638 ms，Native[ExactDSE] 4.269 ms，**0.852x**，72/72 accurate，mean pivots 639.0，0.0202 ms/pivot。（与 analysis §1.1 的 0.855x best-of-3 一致。）
+
+#### (a) P0 cleanup 尾巴 — 重排至最后（理论+实测张力，未改代码）
+faithful HiGHS = bounded 扰动 + 逐 pivot shiftBack + rebuild correctDualInfeasibilities，其对**大额 cold 对偶不可行**用高效 bound-flipping **dual Phase I** 解决（correctDualInfeasibilities 只 shift ~tol 小残差）。但 `native_dual_simplex_optimization_2026-07-31.md` 实测 **E1 cost-shifted start 是净赢**（0.785x vs pure dual Phase I 0.718x）；cleanup 尾巴是该赢的**代价**而非免费开销。E1-shifted 列停在 lower 且多数不再入基 → 逐 pivot shiftBack 无法移除其 shift（shifted 最优是**不同顶点**：pilot4 4 shifts → 693 cleanup pivots）。故 naive "换成 faithful HiGHS" = 退回更慢的 dual Phase I。真正杠杆 = **高效 dual Phase I**（使 bulk shift 不必要），非更聪明的 cleanup。**决策**：P0 重排至 P1/P3 结构项之后（用户选 C）。
+
+#### (b) P1/T2 expected_density running-mean — **retain**（commit 668184d，Class A）
+- **成本项**：K·C_critical-path（solve 桥内核选择，T2 第 2 点）。
+- **不变量/定理**：三角求解在 pivot 序下与策略无关地累加同一 B^{-1}rhs；hyper-sparse `solveHyper` 与 dense skip-scan 数学等价。expected_density 仅选内核，不改所解方程。
+- **producer→consumer 数据流变化**：`hfactor_backend` 的 solve 桥此前喂 HFactor **RHS 密度**（单位 CHUZR/PRICE RHS ≈1/m），永不越过 kHyper{Ftran,Btran}{L,U}=0.10–0.15 阈值 → dense-result 求解（d2q06c row_ep/col_aq ~40%）被误走 solveHyper。改喂 HiGHS 式 **per-vector 结果密度 running-mean**（init 0，EMA weight 0.05）。size-gated setup 解保留小 m dense 门；indexed 热路径解用 `max(RHS 密度, running mean)`（regression-proof：max 从不把 dense 解降级为 hyper-sparse → 无新的 adversarial 小 case 不变量暴露）。
+- **path-trace**：Class A。dense↔hyper-sparse ULP 差异使 7/24 case pivot path 微移——5 减少（d2q06c 5609→5476、scsd8 1017→952、degen3、grow22、degen2）、2 微增（25fv47 +6、lotfi +1）、17 不变。净有利，集中于最密 case。d2q06c FTRAN 桶 0.08→0.05s。
+- **promotion gate**：24×3 **0.852x → 0.864x**；mean pivots 639.0→630.5；72/72 accurate。全 correctness cohort 绿：dual_simplex 10093、netlib 224、numerical_stability 409、branch_and_cut 358、scuc 43、milp 2029。**判定 retain**（收益来自 C_critical-path 的 solve 内核选择项，未转移成本）。
+- **rollback**：`MIPSOLVERS_HFACTOR_HYPERSPARSE_MINROWS` 与 density-mean 逻辑；若任何 case pivot path 退化或精度回退则移除。
+
+#### (c) P2 skip-basic PRICE（branch 版）— **reject**（已 revert）
+- **假设**：PRICE 第一遍累加全行含 basic 列，但 basic 列 row_ap 解析为 0（B^{-1}A 限基为单位阵），仅 leaving 列=1；consumer（ratio/certify/rcUpdate/Devex）本已跳过或解析处理 basic → 累加 basic 是废功（T3 第 1 点，~27–50% 元素）。
+- **实现（safe 版，已验证正确）**：保留 leaving 列（值 1），只跳过其它 basic 列。certify/rcUpdate/Devex 无需改（leaving 仍在；stayed-basic 只贡献 0 + 冗余 drift force-0，安全丢弃）。pivots **不变**（5476，path-preserving）；10093+224 assertions 通过。
+- **实测判定**：matched-load A/B（d2q06c kernel/pivot，6 交替对，env `MIPSOLVERS_PRICE_NO_SKIP_BASIC`）：skip-ON 0.2045 vs skip-OFF 0.2030 → **0.7% 更慢（噪声内）= 无收益**。每元素 `basic[col]` 分支成本 + basic[] cache 压力抵消 ~30% 累加节省。**这正是 HiGHS 用 branchless partition 的原因**。branch-skip 是死路；只有完整 **mutable partitioned `ar_matrix` port**（per-pivot swaps，无每元素检查）才能兑现。**判定 reject**，clean revert。
+- **重开条件**：实现 branchless partition（nonbasic 前缀 + O(nnz(a_in)+nnz(a_out))/pivot swap 维护），按 §13.3 独立内核 gate（instructions AND bytes 同降）验证后重启。这是大改动（Class A reorder）。
+
+#### (d) P3 单遍认证 — **blocked-by-prerequisite**
+`certify_bfrt_dual_feasibility` 必须在**不可逆 factor update 之前**（proposal/certification 阶段）运行，而 rcUpdate 在其**之后**（commit 阶段）。naive 把 postcondition 融入 rcUpdate 会把检查移到 commit 之后 → 违反 §7/§12 的 proposal/commit 事务边界。故 P3 不能在不弱化事务边界下简单融合；需 S3 重设计（PRICE 无阈值只出 active support）而非逐 diff 融合。
+
+**替代方案**：
+- (a) 强推 branch-skip PRICE：拒绝——matched-load A/B 证无收益。
+- (b) 立即做 partition port：**授权待办**（用户已选），但为大 Class-A reorder，需独立内核 gate 先行；本轮未完成。
+- (c) retain density-EMA + 记录 skip-basic 负结果 + 重排 P0（**本轮采纳**）。
+
+**保持不变量**：scalar certification、proposal/commit 边界、精确 dot_error_bound、原 PRICE/merge 顺序不变（§7、§12）。density-EMA 为唯一生产变更，Class A，全 cohort 验证。
+
+**下一步（更新 §16）**：见下节修订。
+
 
 
 
