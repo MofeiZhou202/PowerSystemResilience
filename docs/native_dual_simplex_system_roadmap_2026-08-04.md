@@ -419,5 +419,8 @@ Next authorized step:
 
 **保持不变量**：serial executor 是 1v1 权威；SIP 与 serial 共享同一 DAG/proposal/certification/commit；warm snapshot 必须携带 bound-domain 版本（禁止重新引入 sentinel，§9）。**下一步**：审计当前 warm-start（`solve(sf, options, hint)`）携带的状态，对照 §9 要求的 basis + sides + DSE norms + cost journals + factor metadata，补齐缺失项（当前 hint 仅含 basis + at_upper，DSE norms 未 warm-start）。
 
+**S4 代码级确认（2026-08-04）**：实测 `minor_iteration` 的 pivot 链为顺序 `BTRAN → PRICE → BFRT → FTRAN → DSE → commit`。`compute_dse_weights` 需 `direction`（pivotal-column FTRAN 输出），故 DSE 在 FTRAN 下游，**非与 PRICE 并行**（理想 DAG 的 `DSE‖PRICE` 与当前实现不符）。唯一名义独立对 `col_aq FTRAN`（`update_vec_aq`）‖ `col_bfrt FTRAN`（`solve_vec_ftran`）共享同一 HFactor 的 mutable HVector workspace，且 `col_bfrt` 仅在 `has_flips`（少数 pivot）出现。PRICE 数据并行为已关闭死路（§12）。故 real SIP 需 per-worker HFactor 副本（§9）或将 DSE 重构为从 BTRAN 分叉（Class A），皆为大改动且对 1v1 gate 正交、收益边际。**结论**：serial executor 确认为 S4 1v1 权威基线；不为边际正交收益向已验证热循环引入未验证 HFactor 并发（数据竞争风险）。SIP 仅在完成 Class-A DSE-from-BTRAN 重构且 per-worker factor 就绪后，凭 §13.3 equal-thread gate 重启。
+
+
 
 
