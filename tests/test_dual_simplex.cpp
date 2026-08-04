@@ -1235,6 +1235,78 @@ TEST_CASE(
         mipsolvers::engine::SimplexBasis::kBoundDomainVersion);
 }
 
+TEST_CASE(
+    "solve_lp_from_sf carries the S5 warm snapshot through the node-LP primitive",
+    "[dual_simplex][warm_start][s5][bc_product]") {
+  // The native branch-and-cut node LP is re-solved through
+  // solve_lp_from_sf(sf, opt, &parent.basis). This pins the S5 product wiring:
+  // the primitive PRODUCES a warm snapshot (basis + DSE norms + bound-domain
+  // version) on the parent result, and a child re-optimization CONSUMES it -
+  // reaching the same optimum in no more pivots than a cold node solve.
+  const int m = 24;
+  const int n = 60;
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Zero(n);
+  lp.A.resize(0, n);
+  lp.b.resize(0);
+  lp.Aeq.resize(m, n);
+  std::mt19937_64 rng(0xBC5335ULL);  // "BC-S5"
+  std::uniform_real_distribution<double> coef(-1.0, 1.0);
+  std::uniform_real_distribution<double> cost(0.0, 1.0);
+  std::uniform_real_distribution<double> pick(0.0, 1.0);
+  for (int j = 0; j < n; ++j) {
+    lp.c[j] = cost(rng);
+    lp.vars.push_back({VarType::Continuous, 0.0, 1.0});
+  }
+  std::vector<Eigen::Triplet<double>> trips;
+  Eigen::VectorXd rhs = Eigen::VectorXd::Zero(m);
+  for (int i = 0; i < m; ++i) {
+    for (int j = 0; j < n; ++j) {
+      if (pick(rng) < 0.35) {
+        const double v = coef(rng);
+        trips.emplace_back(i, j, v);
+        rhs[i] += v * 0.5;
+      }
+    }
+  }
+  lp.Aeq.setFromTriplets(trips.begin(), trips.end());
+  lp.Aeq.makeCompressed();
+  lp.beq = rhs;
+
+  SimplexOptions options;
+  options.lp_kernel_backend = LpKernelBackend::ExperimentalNative;
+
+  const StandardFormLP root_sf = build_standard_form_lp(lp);
+  const auto root = solve_lp_from_sf(root_sf, options);
+  REQUIRE(root.result.stats.success);
+  // Producer: the node-LP primitive emits the S5 warm snapshot.
+  REQUIRE(root.basis.cached_dse_weights);
+  REQUIRE(root.basis.cached_dse_basis);
+  CHECK(root.basis.bound_domain_version ==
+        mipsolvers::engine::SimplexBasis::kBoundDomainVersion);
+
+  // A B&C node: tighten a few structural upper bounds (structure unchanged, so
+  // the parent basis hint stays dimensionally valid).
+  Eigen::VectorXd node_lb = Eigen::VectorXd::Zero(n);
+  Eigen::VectorXd node_ub = Eigen::VectorXd::Ones(n);
+  for (int j = 0; j < 6; ++j) node_ub[j] = 0.25;
+  StandardFormLP node_sf = root_sf;
+  update_standard_form_bounds(node_sf, lp, node_lb, node_ub);
+
+  const auto cold = solve_lp_from_sf(node_sf, options, nullptr);
+  const auto warm = solve_lp_from_sf(node_sf, options, &root.basis);
+  REQUIRE(cold.result.stats.success);
+  REQUIRE(warm.result.stats.success);
+  INFO("cold iters=" << cold.result.stats.iterations
+                     << " warm iters=" << warm.result.stats.iterations);
+  // Consumer: same optimum, and node re-opt from the parent snapshot is no
+  // costlier than a cold node solve (warm basis + inherited DSE norms).
+  CHECK(warm.result.stats.objective ==
+        Approx(cold.result.stats.objective).margin(1e-7));
+  CHECK(warm.result.stats.iterations <= cold.result.stats.iterations);
+}
+
 TEST_CASE("DualSimplex: cold shift-start policy is bounded and overridable",
           "[dual_simplex][dual_crash][policy]") {
   LPModel lp;
