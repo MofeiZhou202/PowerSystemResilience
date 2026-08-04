@@ -453,6 +453,15 @@ Next authorized step:
 
 **产品含义**：native dual simplex 的价值在 warm/B&C（S5 已证 6.85x node-reopt），非 cold 1v1 geomean。DR-1/DR-2/DR-3 三重独立印证 cold 近地板：S2 摊销、S4 顺序 DAG、S7 per-pivot 竞品对标。路线图 S0–S7 主线达成稳定内核 + 已证 warm 价值 + 诚实 cold 边界。
 
+**S7 SIMD PRICE 独立内核判定（2026-08-04，harness `native_dual_price_simd_benchmark`，用户要求 attempt）**：按 §13.3 gate 实测 PRICE（A^T·r_EP）SIMD，d2q06c-shape fixture（m=1759, n=6423, ~5 nnz/col, r_EP 40%）。跨密度稳健结果：
+- SIMD 层内加速仅 **1.08–1.27x**（row-wise 0.041→0.036、col-wise 0.023→0.020 ms/pivot），远不足以补 2.28x 竞品 gap；correctness simd-vs-scalar ≤3.3e-16。
+- **bytes 层内不变**（SIMD 流同一数据）→ §13.3 "dynamic instructions AND effective bytes 同降" **未过**（instructions 降、bytes 不降）。gate 设计正确——专门否决不减内存流量的纯 SIMD 微优化。
+- row-wise（生产热路径）经证是 **byte-adaptive 最优**：r_EP 40% 时比 col-wise 少读 **2.46x** bytes，r_EP 10% 时少 **10.09x**；其 scatter + per-nnz stamp branch 是 SIMD-hostile（scatter 无 NEON 支持）。
+- col-wise 仅在高 r_EP 密度 wall 更快（branchless streaming），但读 2.46x more bytes（byte gate fail）、属 §12 禁止的 PRICE/CSC switching、且不产出 BFRT `active_position`；低 r_EP（10%）row-wise 反超。非 clean 晋级项。
+- 即便最优 col-wise-SIMD 在 PRICE 桶上约 2x，PRICE 仅占 pivot 27% → 全局 <13%，808ms→~700ms，仍 2.1x 慢于 HiGHS 334ms（印证 DR-3 gap 分布式、非单桶）。
+**结论**：SIMD PRICE **不过 §13.3 gate**（bytes 不降）；row-wise 已 byte-optimal；col-wise switch 触 §12 且 byte gate fail。第四次印证 cold 近地板。harness 保留以 gate 未来 PRICE 提案。
+
+
 
 
 

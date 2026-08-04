@@ -458,6 +458,23 @@ if(MIPSOLVERS_HAVE_HIGHS_LIB)
     endif()
   endif()
 
+  # S7 independent-kernel harness: the PRICE (A^T*r_EP) SIMD gate. Compares the
+  # production row-wise SPA scatter and a column-wise gather-dot, each scalar vs
+  # NEON, on a d2q06c-shaped fixture, to test the §13.3 bytes-and-instructions
+  # gate for a SIMD PRICE kernel. Self-contained; not linked into the solver.
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/native_dual_price_simd_benchmark.cpp")
+    add_executable(native_dual_price_simd_benchmark
+      benchmark/native_dual_price_simd_benchmark.cpp)
+    set_target_properties(native_dual_price_simd_benchmark PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+    if(NOT MSVC)
+      target_compile_options(native_dual_price_simd_benchmark PRIVATE
+        -Wall -Wextra -Wpedantic
+        $<$<CONFIG:Release>:-O3 -DNDEBUG>
+        $<$<CONFIG:RelWithDebInfo>:-O2 -g -DNDEBUG>)
+    endif()
+  endif()
+
   # Standard MILP comparison over MIPLIB 2017. Unlike the NETLIB runner this
   # target preserves MPS integrality and audits every returned incumbent.
   if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/miplib2017_benchmark.cpp")
