@@ -17,6 +17,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -58,6 +60,9 @@ namespace {
 
 constexpr double kObjectiveTolerance = 1e-5;
 constexpr double kFeasibilityTolerance = 1e-7;
+// S1 measurement-contract schema version. Bump when the report field set or
+// aggregation semantics change so downstream comparisons stay well-defined.
+constexpr const char* kSchemaVersion = "s1-measurement-contract-1";
 
 struct Config {
   fs::path data_dir{"tests/data"};
@@ -774,6 +779,73 @@ json finite_or_null(double value) {
   return std::isfinite(value) ? json(value) : json(nullptr);
 }
 
+// S1 reproducibility provenance embedded in every report so a result is tied to
+// the exact binary, build, host architecture and invocation that produced it.
+// git_commit is best-effort (null when git is unavailable or out of tree).
+json build_provenance(const std::string& command_line) {
+  std::string git_commit;
+  // Deterministic override first (CI / sandboxed runs where a git subprocess is
+  // unavailable), then a best-effort git query.
+  if (const char* env = std::getenv("MIPSOLVERS_BENCH_GIT_COMMIT")) {
+    git_commit = env;
+  }
+#if defined(__unix__) || defined(__APPLE__)
+  if (git_commit.empty()) {
+    if (FILE* pipe = ::popen("git rev-parse HEAD 2>/dev/null", "r")) {
+      char buffer[128];
+      while (std::fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+        git_commit += buffer;
+      }
+      ::pclose(pipe);
+    }
+  }
+#endif
+  while (!git_commit.empty() &&
+         (git_commit.back() == '\n' || git_commit.back() == '\r' ||
+          git_commit.back() == ' ')) {
+    git_commit.pop_back();
+  }
+
+  char timestamp[32] = {0};
+  const std::time_t now = std::time(nullptr);
+  if (const std::tm* utc = std::gmtime(&now)) {
+    std::strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%SZ", utc);
+  }
+
+#if defined(__clang__)
+  const std::string compiler = std::string("clang ") + __clang_version__;
+#elif defined(__GNUC__)
+  const std::string compiler = std::string("gcc ") + __VERSION__;
+#else
+  const std::string compiler = "unknown";
+#endif
+
+#ifdef NDEBUG
+  const char* build_type = "Release/NDEBUG";
+#else
+  const char* build_type = "Debug";
+#endif
+
+#if defined(__aarch64__) || defined(_M_ARM64)
+  const char* target_arch = "arm64";
+#elif defined(__x86_64__) || defined(_M_X64)
+  const char* target_arch = "x86_64";
+#else
+  const char* target_arch = "unknown";
+#endif
+
+  json provenance;
+  provenance["schema_version"] = kSchemaVersion;
+  provenance["generated_utc"] = timestamp;
+  provenance["git_commit"] =
+      git_commit.empty() ? json(nullptr) : json(git_commit);
+  provenance["build_type"] = build_type;
+  provenance["compiler"] = compiler;
+  provenance["target_arch"] = target_arch;
+  provenance["command"] = command_line;
+  return provenance;
+}
+
 void write_csv(const fs::path& path, const std::vector<RunResult>& rows) {
   if (path.empty()) return;
   if (!path.parent_path().empty()) fs::create_directories(path.parent_path());
@@ -805,10 +877,12 @@ void write_csv(const fs::path& path, const std::vector<RunResult>& rows) {
 void write_json(const fs::path& path, const Config& cfg,
                 const std::vector<CaseInfo>& cases,
                 const std::vector<RunResult>& rows,
-                const std::vector<Summary>& summaries) {
+                const std::vector<Summary>& summaries,
+                const std::string& command_line) {
   if (path.empty()) return;
   if (!path.parent_path().empty()) fs::create_directories(path.parent_path());
   json root;
+  root["provenance"] = build_provenance(command_line);
   root["configuration"] = {{"data_dir", cfg.data_dir.string()},
                            {"repeats", cfg.repeats},
                            {"time_limit_sec", cfg.time_limit_sec},
@@ -895,6 +969,11 @@ void print_summary(const std::vector<Summary>& summaries) {
 int main(int argc, char** argv) {
   Config cfg;
   if (!parse_args(argc, argv, cfg)) return argc > 1 ? 1 : 0;
+  std::string command_line;
+  for (int i = 0; i < argc; ++i) {
+    if (i > 0) command_line += ' ';
+    command_line += argv[i];
+  }
   try {
     const std::vector<CaseInfo> cases = load_cases(cfg);
     if (cases.empty()) throw std::runtime_error("no matching NETLIB cases");
@@ -939,7 +1018,7 @@ int main(int argc, char** argv) {
     const std::vector<Summary> summaries = summarize(rows);
     print_summary(summaries);
     write_csv(cfg.csv_path, rows);
-    write_json(cfg.json_path, cfg, cases, rows, summaries);
+    write_json(cfg.json_path, cfg, cases, rows, summaries, command_line);
     if (!cfg.csv_path.empty()) std::cout << "CSV:  " << cfg.csv_path << '\n';
     if (!cfg.json_path.empty()) std::cout << "JSON: " << cfg.json_path << '\n';
     return 0;
