@@ -1122,6 +1122,119 @@ TEST_CASE(
   CHECK(warm_stale.max_objective == Approx(warm_fresh.max_objective).margin(1e-9));
 }
 
+TEST_CASE(
+    "DualSimplex: strong-branch probes reuse an immutable parent snapshot",
+    "[dual_simplex][warm_start][s5][strong_branch]") {
+  // Strong branching evaluates several tentative bound changes (probes) off the
+  // SAME parent LP, then restores the parent for the next candidate. This pins
+  // the kernel-level invariant behind roadmap S5/§9 ("strong branching 分支结束
+  // 后恢复 parent basis、sides、norm"): an immutable parent snapshot (basis +
+  // nonbasic sides + DSE norms) is reused across probes, and re-running a probe
+  // after an intervening probe yields a bit-identical warm solve - proving the
+  // parent is never mutated between probes.
+  const int m = 16;
+  const int n = 44;
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Zero(n);
+  lp.A.resize(0, n);
+  lp.b.resize(0);
+  lp.Aeq.resize(m, n);
+  std::mt19937_64 rng(0x5720B0BULL);  // "STRONGB"
+  std::uniform_real_distribution<double> coef(-1.0, 1.0);
+  std::uniform_real_distribution<double> cost(0.0, 1.0);
+  std::uniform_real_distribution<double> pick(0.0, 1.0);
+  for (int j = 0; j < n; ++j) {
+    lp.c[j] = cost(rng);
+    lp.vars.push_back({VarType::Continuous, 0.0, 1.0});
+  }
+  std::vector<Eigen::Triplet<double>> trips;
+  Eigen::VectorXd rhs = Eigen::VectorXd::Zero(m);
+  for (int i = 0; i < m; ++i) {
+    for (int j = 0; j < n; ++j) {
+      if (pick(rng) < 0.35) {
+        const double v = coef(rng);
+        trips.emplace_back(i, j, v);
+        rhs[i] += v * 0.5;
+      }
+    }
+  }
+  lp.Aeq.setFromTriplets(trips.begin(), trips.end());
+  lp.Aeq.makeCompressed();
+  lp.beq = rhs;
+
+  const StandardFormLP sf = build_standard_form_lp(lp);
+  const SimplexOptions options = native_simplex_options();
+
+  const auto root = native_dual::solve(sf, options, nullptr);
+  REQUIRE(root.status == native_dual::Status::Optimal);
+  REQUIRE(root.edge_weights.size() == static_cast<std::size_t>(m));
+
+  // Immutable parent snapshot, as strong branching holds it across probes.
+  mipsolvers::engine::SimplexBasis parent;
+  parent.bound_domain_version =
+      mipsolvers::engine::SimplexBasis::kBoundDomainVersion;
+  parent.rows = static_cast<int>(sf.A.rows());
+  parent.cols = static_cast<int>(sf.A.cols());
+  parent.indices = root.basis;
+  parent.at_upper = root.at_upper;
+  parent.cached_dse_weights =
+      std::make_shared<const std::vector<double>>(root.edge_weights);
+  parent.cached_dse_basis =
+      std::make_shared<const std::vector<int>>(root.basis);
+
+  // Two branching candidates whose tentative down-cut keeps the probe feasible.
+  std::vector<StandardFormLP> probe;
+  std::vector<double> probe_cold_obj;
+  for (std::size_t pos = 0; pos < root.basis.size() && probe.size() < 2; ++pos) {
+    const int col = root.basis[pos];
+    if (col < 0 || col >= sf.n_original) continue;
+    const double xv = (pos < static_cast<std::size_t>(root.x_basic.size()))
+                          ? root.x_basic[static_cast<int>(pos)]
+                          : 0.0;
+    if (!(xv > 1e-6)) continue;
+    StandardFormLP candidate = sf;
+    candidate.var_ub[col] = 0.5 * xv;  // tentative down-branch cut
+    const auto probe_cold = native_dual::solve(candidate, options, nullptr);
+    if (probe_cold.status == native_dual::Status::Optimal) {
+      probe.push_back(std::move(candidate));
+      probe_cold_obj.push_back(probe_cold.max_objective);
+    }
+  }
+  REQUIRE(probe.size() == 2);
+
+  // Probe A warm, then an intervening probe B warm, then re-probe A warm - all
+  // from the SAME immutable parent snapshot.
+  const auto a_warm1 = native_dual::solve(probe[0], options, parent);
+  const auto b_warm = native_dual::solve(probe[1], options, parent);
+  const auto a_warm2 = native_dual::solve(probe[0], options, parent);
+  REQUIRE(a_warm1.status == native_dual::Status::Optimal);
+  REQUIRE(b_warm.status == native_dual::Status::Optimal);
+  REQUIRE(a_warm2.status == native_dual::Status::Optimal);
+
+  // Parent restore/immutability: re-probing A after B is bit-identical to the
+  // first A probe (same pivots, objective, and basis) - the intervening probe
+  // did not mutate the parent snapshot.
+  CHECK(a_warm2.statistics.iterations == a_warm1.statistics.iterations);
+  CHECK(a_warm2.max_objective == a_warm1.max_objective);
+  CHECK(a_warm2.basis == a_warm1.basis);
+
+  // Correctness: each warm probe reaches its cold optimum and inherits the
+  // parent DSE norms (no re-initialization BTRANs).
+  CHECK(a_warm1.max_objective ==
+        Approx(probe_cold_obj[0]).margin(1e-9));
+  CHECK(b_warm.max_objective == Approx(probe_cold_obj[1]).margin(1e-9));
+  CHECK(a_warm1.statistics.dse_initialization_solves == 0);
+  CHECK(b_warm.statistics.dse_initialization_solves == 0);
+  CHECK(a_warm2.statistics.dse_initialization_solves == 0);
+
+  // The parent snapshot's own fields are unchanged after every probe.
+  CHECK(parent.indices == root.basis);
+  CHECK(parent.at_upper == root.at_upper);
+  CHECK(parent.bound_domain_version ==
+        mipsolvers::engine::SimplexBasis::kBoundDomainVersion);
+}
+
 TEST_CASE("DualSimplex: cold shift-start policy is bounded and overridable",
           "[dual_simplex][dual_crash][policy]") {
   LPModel lp;

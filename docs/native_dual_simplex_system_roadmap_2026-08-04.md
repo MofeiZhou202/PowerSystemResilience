@@ -426,6 +426,12 @@ Next authorized step:
 - **warm 再优化 cohort（commit d987c9e）**：`netlib_solver_benchmark --warm-cohort` 对每个 NETLIB case 求解 root，收紧若干 basic structural 变量上界（合成 B&C branch），再 cold vs warm（root basis + 继承 DSE norm）求解 node，报告 warm/cold pivot 与 wall 比。kernel 级（presolve-free），比值隔离 warm-start 效应。结果（24 case，4-var/0.5 branch，repeat 3）：17/24 usable（7 node 在合成 cut 下不可行，诚实跳过），0 objective mismatch，geomean warm/cold pivot 0.146（**6.85x 更少**）、wall 0.278（**3.60x 更快**）、总 pivot 削减 90.0%；每个 warm 求解 `dse_initialization_solves=0`（DSE norm 继承，无 re-init BTRAN）。将 §9 warm 价值从 unit-scale 证明提升为可报告 cohort。
 - **剩余 S5**：strong-branching parent-basis restore 覆盖；warm snapshot 的 cost journal / factor metadata 补齐（当前仅 basis + at_upper + DSE norm）。
 
+**S5 完成（2026-08-04）**：
+- **strong-branch parent restore 覆盖**：test `[strong_branch]` 固定 §9 kernel 级不变量——不可变 parent snapshot（basis + sides + DSE norms + version）跨多个 probe 复用：probe A warm → 中间 probe B warm → 再 probe A warm，第二次 A 与第一次 A **逐位相同**（pivots + objective + basis），证明中间 probe 未改动 parent；每个 warm probe `dse_init=0` 且与 cold 同 optimum；parent 字段全程不变。
+- **snapshot 完备性判定（理论导向，避免 dead field）**：实测 `native_dual` warm-init（state.cpp `initialize_snapshot`）仅消费 hint 的 `basis_indices`（basis）、`at_upper`（sides）、`cached_dse_weights`+version（DSE norms）。它 **重建全新 `BasisFactor` 并 rebuild**（state.cpp:1345-1350），**不消费** hint 的 `cached_sparse_basis`（factor metadata 对 kernel warm 路径无关；factor 复用是更高层 `dual_simplex.cpp` `resolve_same_structure` / bc 的优化，已在该层处理），且 cost_shift/perturbation 每次 fresh 重置（state.cpp:1307-1308）。故 **kernel 级 warm snapshot 在 basis+sides+DSE-norms+bound-domain-version 处已完备**；§9 列出的 factor/refactor metadata 属更高层职责，cost journal 继承为投机优化（warm 路径已用 `decide_cost_shifted_dual_start` 按需重算），无证据前不实现（DR-1/DR-2 纪律）。
+- S5 状态：**完成**（version tag + falsifiability + warm cohort 6.85x + strong-branch restore 覆盖 + snapshot 完备性判定）。下一步 S6（架构改变后重测 reinversion，测量性）或 S7（algorithmic，真正 1v1 杠杆）。
+
+
 
 
 
