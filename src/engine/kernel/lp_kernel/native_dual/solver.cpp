@@ -463,50 +463,6 @@ struct MinorScratch {
 };
 thread_local MinorScratch g_ds_scratch;
 
-// The pivot's move/basis mutations are applied to `state` in place (instead of
-// copy-modify-commit on O(n)/O(m) vectors).  Every numerical-trouble return
-// between the mutation and the commit must restore the pre-pivot state exactly
-// — the driver rebuilds from `state.basis`/`state.move` after a failure, so a
-// partially applied exchange would corrupt the iterate.  Restoration is exact
-// (the old values are integers/enums, not recomputed floats).
-class PivotStateGuard {
- public:
-  PivotStateGuard(State& state, const PivotTransaction& transaction,
-                  int leaving_row, int leaving_col, Move old_leaving_move,
-                  int entering_col, Move old_entering_move)
-      : state_(state),
-        transaction_(transaction),
-        leaving_row_(leaving_row),
-        leaving_col_(leaving_col),
-        old_leaving_move_(old_leaving_move),
-        entering_col_(entering_col),
-        old_entering_move_(old_entering_move) {}
-  ~PivotStateGuard() {
-    if (dismissed_) return;
-    state_.basis[static_cast<std::size_t>(leaving_row_)] = leaving_col_;
-    state_.move[static_cast<std::size_t>(leaving_col_)] = old_leaving_move_;
-    state_.move[static_cast<std::size_t>(entering_col_)] = old_entering_move_;
-    for (const BoundFlip& flip : transaction_.flips) {
-      if (flip.col >= 0 && flip.col < state_.n) {
-        state_.move[static_cast<std::size_t>(flip.col)] = flip.old_move;
-      }
-    }
-  }
-  void dismiss() { dismissed_ = true; }
-  PivotStateGuard(const PivotStateGuard&) = delete;
-  PivotStateGuard& operator=(const PivotStateGuard&) = delete;
-
- private:
-  State& state_;
-  const PivotTransaction& transaction_;
-  int leaving_row_;
-  int leaving_col_;
-  Move old_leaving_move_;
-  int entering_col_;
-  Move old_entering_move_;
-  bool dismissed_{false};
-};
-
 MinorOutcome minor_iteration(State& state, Statistics& statistics) {
   ++state.pricing_epoch;
   Leaving leaving;
@@ -811,22 +767,13 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
       return numerical_trouble(std::move(failure));
     }
 
-    // The pivot's move/basis exchange is applied to `state` in place (the old
-    // copy-modify-commit built and discarded an O(n) move vector and an O(m)
-    // basis vector on every pivot).  The guard restores the pre-pivot values
-    // exactly on every failure return below; `state.basic` and the float
-    // vectors are still only touched at the commit point.
-    const Move old_leaving_move =
-        state.move[static_cast<std::size_t>(leaving_col)];
+    // S3 proposal/certification/commit: every certification above ran on
+    // unmutated state. The remaining work builds the primal transaction on
+    // private workspace, then commits — the factor update is the first and only
+    // fallible commit step, so no rollback path is reachable and the move/basis
+    // exchange is published only after it succeeds.
     const Move entering_old_move =
         state.move[static_cast<std::size_t>(entering.col)];
-    PivotStateGuard pivot_guard(state, transaction, leaving.row, leaving_col,
-                                old_leaving_move, entering.col,
-                                entering_old_move);
-    for (const BoundFlip& flip : transaction.flips) {
-      state.move[static_cast<std::size_t>(flip.col)] =
-          flip.old_move == Move::Up ? Move::Down : Move::Up;
-    }
     const double entering_bound =
         entering_old_move == Move::Up ? state.bounds.lower[entering.col]
                                       : state.bounds.upper[entering.col];
@@ -889,13 +836,6 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
     }
     primal_changes.emplace_back(leaving.row, leaving_value);
 
-    state.move[static_cast<std::size_t>(leaving_col)] =
-        state.bounds.enterable[static_cast<std::size_t>(leaving_col)]
-            ? (leaving.side < 0 ? Move::Up : Move::Down)
-            : Move::Fixed;
-    state.move[static_cast<std::size_t>(entering.col)] = Move::Fixed;
-    state.basis[static_cast<std::size_t>(leaving.row)] = entering.col;
-
     const double _t_lu = g_ds_profile.enabled ? ds_clock() : 0.0;
     const bool _lu_ok =
         state.factor->update_indexed(leaving.row, entering.col, failure);
@@ -903,7 +843,18 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
     if (!_lu_ok) {
       return numerical_trouble(std::move(failure));
     }
-    pivot_guard.dismiss();
+    // Factor committed. update_indexed reads none of the basis/move state, so
+    // publishing the exchange here is bit-identical to the pre-update order.
+    for (const BoundFlip& flip : transaction.flips) {
+      state.move[static_cast<std::size_t>(flip.col)] =
+          flip.old_move == Move::Up ? Move::Down : Move::Up;
+    }
+    state.move[static_cast<std::size_t>(leaving_col)] =
+        state.bounds.enterable[static_cast<std::size_t>(leaving_col)]
+            ? (leaving.side < 0 ? Move::Up : Move::Down)
+            : Move::Fixed;
+    state.move[static_cast<std::size_t>(entering.col)] = Move::Fixed;
+    state.basis[static_cast<std::size_t>(leaving.row)] = entering.col;
     const double _t_cy = g_ds_profile.enabled ? ds_clock() : 0.0;
     detail::record_cycle_departure(state, leaving_col, entering.col);
     // O(changes) incremental cycle-signature maintenance: the pivot swaps one
