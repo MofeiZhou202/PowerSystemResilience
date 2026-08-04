@@ -1356,6 +1356,7 @@ bool initialize(State& state, const StandardFormLP& sf,
   initialize_cycle_guard(state);
   if (hint != nullptr && hint->cached_dse_basis &&
       hint->cached_dse_weights &&
+      hint->bound_domain_version == SimplexBasis::kBoundDomainVersion &&
       *hint->cached_dse_basis == state.basis &&
       hint->cached_dse_weights->size() == static_cast<std::size_t>(state.m)) {
     state.edge_weight_mode = EdgeWeightMode::SteepestEdge;
@@ -1590,6 +1591,7 @@ Audit audit(const State& state, bool require_primal, bool require_dual,
 
 SimplexBasis export_basis(const State& state) {
   SimplexBasis basis;
+  basis.bound_domain_version = SimplexBasis::kBoundDomainVersion;
   basis.indices = state.basis;
   basis.rows = state.m;
   basis.cols = state.n;

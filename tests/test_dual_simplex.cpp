@@ -1008,6 +1008,8 @@ TEST_CASE(
 
   // Warm snapshot: parent basis, nonbasic sides, and DSE norms.
   mipsolvers::engine::SimplexBasis hint;
+  hint.bound_domain_version =
+      mipsolvers::engine::SimplexBasis::kBoundDomainVersion;
   hint.rows = static_cast<int>(sf.A.rows());
   hint.cols = static_cast<int>(sf.A.cols());
   hint.indices = root.basis;
@@ -1032,6 +1034,92 @@ TEST_CASE(
   // solve and inherits the DSE norms (no re-initialization BTRANs).
   CHECK(warm_node.statistics.iterations <= cold_node.statistics.iterations);
   CHECK(warm_node.statistics.dse_initialization_solves == 0);
+}
+
+TEST_CASE(
+    "DualSimplex: warm-start rejects a stale bound-domain snapshot",
+    "[dual_simplex][warm_start][s5][bound_domain]") {
+  // Falsifiability guard for the SimplexBasis::bound_domain_version tag: a
+  // snapshot whose version does not match the running kernel must have its
+  // cached DSE norms rejected, so legacy sentinel-domain weights can never be
+  // silently reused. Both solves reuse the same optimal basis (0 pivots); the
+  // only observable difference is whether the distinctive DSE norms survive.
+  const int m = 12;
+  const int n = 30;
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Zero(n);
+  lp.A.resize(0, n);
+  lp.b.resize(0);
+  lp.Aeq.resize(m, n);
+  std::mt19937_64 rng(0xB0DD0FA7ULL);
+  std::uniform_real_distribution<double> coef(-1.0, 1.0);
+  std::uniform_real_distribution<double> cost(0.0, 1.0);
+  std::uniform_real_distribution<double> pick(0.0, 1.0);
+  for (int j = 0; j < n; ++j) {
+    lp.c[j] = cost(rng);
+    lp.vars.push_back({VarType::Continuous, 0.0, 1.0});
+  }
+  std::vector<Eigen::Triplet<double>> trips;
+  Eigen::VectorXd rhs = Eigen::VectorXd::Zero(m);
+  for (int i = 0; i < m; ++i) {
+    for (int j = 0; j < n; ++j) {
+      if (pick(rng) < 0.4) {
+        const double v = coef(rng);
+        trips.emplace_back(i, j, v);
+        rhs[i] += v * 0.5;
+      }
+    }
+  }
+  lp.Aeq.setFromTriplets(trips.begin(), trips.end());
+  lp.Aeq.makeCompressed();
+  lp.beq = rhs;
+
+  const StandardFormLP sf = build_standard_form_lp(lp);
+  const SimplexOptions options = native_simplex_options();
+
+  const auto root = native_dual::solve(sf, options, nullptr);
+  REQUIRE(root.status == native_dual::Status::Optimal);
+  REQUIRE(root.edge_weights.size() == static_cast<std::size_t>(m));
+
+  // Distinctive DSE norms that neither devex (all 1.0) nor structural-exact
+  // initialization can reproduce; used purely to trace inheritance.
+  const std::vector<double> distinctive(static_cast<std::size_t>(m), 7.5);
+
+  const auto make_hint = [&](int version) {
+    mipsolvers::engine::SimplexBasis h;
+    h.bound_domain_version = version;
+    h.rows = static_cast<int>(sf.A.rows());
+    h.cols = static_cast<int>(sf.A.cols());
+    h.indices = root.basis;
+    h.at_upper = root.at_upper;
+    h.cached_dse_weights =
+        std::make_shared<const std::vector<double>>(distinctive);
+    h.cached_dse_basis =
+        std::make_shared<const std::vector<int>>(root.basis);
+    return h;
+  };
+
+  // Current-version snapshot: DSE norms are inherited verbatim.
+  const auto fresh =
+      make_hint(mipsolvers::engine::SimplexBasis::kBoundDomainVersion);
+  const auto warm_fresh = native_dual::solve(sf, options, fresh);
+  REQUIRE(warm_fresh.status == native_dual::Status::Optimal);
+  REQUIRE(warm_fresh.statistics.iterations == 0);  // optimal basis reused
+  REQUIRE(warm_fresh.edge_weights.size() == static_cast<std::size_t>(m));
+  CHECK(warm_fresh.edge_weights == distinctive);  // inherited
+
+  // Stale-version snapshot: same basis reused (still 0 pivots), but the DSE
+  // norms are rejected and re-initialized, so the sentinel does NOT survive.
+  const auto stale =
+      make_hint(mipsolvers::engine::SimplexBasis::kBoundDomainVersion + 1);
+  const auto warm_stale = native_dual::solve(sf, options, stale);
+  REQUIRE(warm_stale.status == native_dual::Status::Optimal);
+  REQUIRE(warm_stale.statistics.iterations == 0);
+  REQUIRE(warm_stale.edge_weights.size() == static_cast<std::size_t>(m));
+  CHECK(warm_stale.edge_weights != distinctive);  // rejected, re-initialized
+  // Both reused the identical optimal basis; only the DSE inheritance differed.
+  CHECK(warm_stale.max_objective == Approx(warm_fresh.max_objective).margin(1e-9));
 }
 
 TEST_CASE("DualSimplex: cold shift-start policy is bounded and overridable",

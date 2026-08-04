@@ -780,6 +780,15 @@ struct SimplexOptions {
 };
 
 struct SimplexBasis {
+  // Bound-domain representation version. Snapshots produced under the
+  // canonical +inf upper-bound representation (roadmap S0) tag this with
+  // kBoundDomainVersion. A warm-start consumer must reject a snapshot whose
+  // version does not match, because cached reduced costs / DSE weights are
+  // only valid under the bound semantics that produced them (prevents
+  // reintroducing legacy sentinel semantics via a stale snapshot).
+  static constexpr int kBoundDomainVersion = 1;
+  int bound_domain_version{0};
+
   std::vector<int> indices;
   // Optional shared backing storage for basis indices.
   // When engaged, `indices` may be empty to avoid per-node duplicate buffers.

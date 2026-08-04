@@ -2477,6 +2477,7 @@ static SimplexResult solve_lp_from_sf_impl(
   out.solved_from_hint = hint_match;
   out.dual_reoptimized = hint_match;
   out.exact_optimal = true;
+  out.basis.bound_domain_version = SimplexBasis::kBoundDomainVersion;
   out.basis.indices = basis;
   out.basis.rows = m;
   out.basis.cols = n;
