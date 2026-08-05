@@ -15,6 +15,7 @@
 #include <Eigen/Core>
 
 #include "../native_dual_core.hpp"
+#include "partitioned_row_matrix.hpp"
 
 namespace mipsolvers::engine::native_dual::detail {
 
@@ -505,6 +506,10 @@ struct State {
   int devex_iterations{0};
   double objective{0.0};
   std::shared_ptr<BasisFactor> factor;
+  // Nonbasic/basic column partition of the row-major matrix, resynced at each
+  // dual-phase entry and maintained incrementally at every pivot commit so the
+  // partitioned PRICE scan can skip basic columns.
+  PartitionedRowMatrix partition_row;
   bool fresh_rebuild{false};
   bool costs_perturbed{false};
   bool costs_shifted{false};

@@ -158,6 +158,32 @@ void resync_cycle_signature(State& state) {
   state.cycle_signature_live_b = b;
 }
 
+bool partition_row_verify_enabled() {
+  static const bool enabled =
+      std::getenv("MIPSOLVERS_DS_VERIFY_PARTITION") != nullptr;
+  return enabled;
+}
+
+// Rebuilds the row partition from the current basis membership. Cheap
+// (O(nnz)); called at each dual-phase entry so any basis change from
+// initialization, crash, or a phase transition is absorbed before pivoting.
+void resync_partition_row(State& state) {
+  if (state.sf == nullptr) return;
+  if (state.partition_row.rows() != state.sf->A.rows() ||
+      state.partition_row.cols() != state.sf->A.cols()) {
+    state.partition_row.build(state.sf->A);
+  }
+  state.partition_row.partition(state.basic);
+}
+
+// Incremental per-pivot maintenance: the entering column joins the basic
+// suffix, the leaving column returns to the nonbasic prefix, in every row.
+void apply_partition_row_swap(State& state, int entering_col, int leaving_col) {
+  if (state.partition_row.empty()) return;
+  state.partition_row.set_basic(entering_col, state.sf->A);
+  state.partition_row.set_nonbasic(leaving_col, state.sf->A);
+}
+
 void cycle_signature_apply_basis_swap(State& state, int row, int old_col,
                                       int new_col) {
   const std::uint64_t old_token = cycle_basis_token(row, old_col);

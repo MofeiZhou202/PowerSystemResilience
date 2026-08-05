@@ -85,6 +85,10 @@ bool record_cycle_arrival(State& state, Statistics& statistics);
 void resync_cycle_signature(State& state);
 void cycle_signature_apply_basis_swap(State& state, int row, int old_col,
                                       int new_col);
+// Row-partition maintenance (see State::partition_row).
+bool partition_row_verify_enabled();
+void resync_partition_row(State& state);
+void apply_partition_row_swap(State& state, int entering_col, int leaving_col);
 // XOR-toggles the nonbasic move token (col, move_sign): adds it when absent,
 // removes it when present.  A move-side change is two toggles.
 void cycle_signature_apply_move_toggle(State& state, int col, int move_sign);

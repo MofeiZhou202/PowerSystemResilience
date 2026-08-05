@@ -958,6 +958,13 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
         edge_weight_update.pivotal_value;
     state.basic[static_cast<std::size_t>(leaving_col)] = 0;
     state.basic[static_cast<std::size_t>(entering.col)] = 1;
+    detail::apply_partition_row_swap(state, entering.col, leaving_col);
+    if (detail::partition_row_verify_enabled() &&
+        !state.partition_row.empty() &&
+        !state.partition_row.verify(state.basic)) {
+      return numerical_trouble(
+          "partitioned row matrix drifted from the basis membership");
+    }
     static thread_local std::vector<int> changed_primal_rows;
     changed_primal_rows.clear();
     changed_primal_rows.reserve(primal_changes.size());
@@ -1050,6 +1057,7 @@ Result run_phase(State& state, Statistics& statistics,
         state, Status::NumericalFailure,
         "stabilized-cost initialization failed: " + failure, statistics);
   }
+  detail::resync_partition_row(state);
 
   detail::RebuildReason rebuild_reason = detail::RebuildReason::Initial;
   std::string first_fresh_numerical_failure;
