@@ -1902,6 +1902,8 @@ bool lp_solution_residual_acceptable(const LPModel& lp,
   return viol <= tol * scale;
 }
 
+// AUDIT-NAV: LP kernel 分派与原空间结果恢复入口；先审核标准型映射，再审核
+// HiGHS/Native 后端选择、basis hint 兼容性和最终残差/证书。
 SimplexResult solve_lp_with_basis(const LPModel& lp,
                                   const SimplexOptions& input_opt,
                                   const SimplexBasis* basis_hint) {

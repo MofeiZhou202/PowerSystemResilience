@@ -104,6 +104,8 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
   return direct_solve(prob, x0);
 }
 
+// AUDIT-NAV: LP-IPM 非缓存主循环；缩放、KKT 路径、预测校正、正性步长和原空间
+// 残差必须成组审核。重复节点的结构复用入口在 ipm_lp_solver_cached.cpp。
 SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::VectorXd& x0, int ruiz_rounds) const {
   const bool has_warm_start = (x0.size() == prob.c.size());
   const bool ipm_verbose_env = (std::getenv("MIPSOLVERS_IPM_VERBOSE") != nullptr);

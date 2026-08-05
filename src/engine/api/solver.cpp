@@ -134,6 +134,8 @@ void throw_if_invalid(const api::ProblemVariant& problem) {
 
 }  // namespace
 
+// AUDIT-NAV: 公共求解入口从这里开始；默认适配器顺序、候选选择和最终结果映射
+// 分别在 register_default_adapters、StrategyDispatcher::solve 和本文件 solve 中审核。
 SolverEngine::SolverEngine(bool register_defaults) {
   if (register_defaults) {
     register_default_adapters();

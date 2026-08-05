@@ -33,6 +33,8 @@ constexpr int    kDefaultMaxIter = 200;
 
 }  // namespace
 
+// AUDIT-NAV: 领域无关 Dogleg 信赖域 NLE 主循环；与 native_adapters.cpp 中的
+// 正则化回溯 Newton 以及电力潮流 NewtonSolver 是三条独立路径。
 NLEResult NLESolver::solve(const NLEProblem& prob, const NLEOptions& opt) const {
   NLEResult result;
   result.x = prob.x0;

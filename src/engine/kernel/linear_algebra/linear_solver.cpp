@@ -463,6 +463,8 @@ int MumpsSolver::estimated_deficiency() const {
 }
 #endif
 
+// AUDIT-NAV: 所有原生 Newton/KKT 路径的默认稀疏后端在此决定；审核部署差异时
+// 先核对编译宏和返回顺序，再核对各后端的 analyze/factorize/solve 契约。
 std::unique_ptr<SparseLinearSolver> make_default_sparse_solver() {
   // Note: MumpsSolver is deliberately NOT the generic default — it factors
   // singular rank-deficient systems without flagging (it accepts tiny

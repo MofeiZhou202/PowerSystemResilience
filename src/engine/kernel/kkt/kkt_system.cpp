@@ -15,6 +15,13 @@ namespace mipsolvers::engine {
 
 namespace {
 
+constexpr double kKktRefinementTolerance = 1e-12;
+constexpr int kKktMaxRefinementSteps = 2;
+
+double infinity_norm(const Eigen::VectorXd& vector) {
+  return vector.size() == 0 ? 0.0 : vector.cwiseAbs().maxCoeff();
+}
+
 bool same_sparse_pattern(const Eigen::SparseMatrix<double>& matrix,
                          int cached_rows,
                          const std::vector<int>& outer,
@@ -251,6 +258,8 @@ bool factor_kkt_sparse(SparseKKTCache& cache,
   return factor_current_kkt(cache, n, meq);
 }
 
+// AUDIT-NAV: KKT 数值解的最终闸门；迭代改进只允许提交能严格降低原系统残差
+// 的有限候选，失败由上层正则化/恢复策略处理。
 bool solve_kkt_sparse(SparseKKTCache& cache,
                       const Eigen::VectorXd& rhs,
                       Eigen::VectorXd& dx,
@@ -263,9 +272,12 @@ bool solve_kkt_sparse(SparseKKTCache& cache,
     return false;
   }
   ++cache.linear_solves;
-  for (int ref = 0; ref < 2; ++ref) {
+  const double residual_limit =
+      kKktRefinementTolerance * std::max(1.0, infinity_norm(rhs));
+  for (int ref = 0; ref < kKktMaxRefinementSteps; ++ref) {
     Eigen::VectorXd residual = rhs - cache.kkt_orig * sol;
-    if (residual.cwiseAbs().maxCoeff() < 1e-14 * std::max(1.0, rhs.cwiseAbs().maxCoeff())) {
+    const double residual_norm = infinity_norm(residual);
+    if (!std::isfinite(residual_norm) || residual_norm <= residual_limit) {
       break;
     }
     Eigen::VectorXd correction;
@@ -273,7 +285,20 @@ bool solve_kkt_sparse(SparseKKTCache& cache,
       break;
     }
     ++cache.linear_solves;
-    sol += correction;
+    Eigen::VectorXd candidate = sol + correction;
+    if (!candidate.allFinite()) {
+      break;
+    }
+    const double candidate_residual_norm =
+        infinity_norm(rhs - cache.kkt_orig * candidate);
+    if (!std::isfinite(candidate_residual_norm) ||
+        candidate_residual_norm >= residual_norm) {
+      break;
+    }
+    sol = std::move(candidate);
+    if (candidate_residual_norm <= residual_limit) {
+      break;
+    }
   }
   dx = sol.head(cache.n);
   dlambda = sol.tail(cache.meq);

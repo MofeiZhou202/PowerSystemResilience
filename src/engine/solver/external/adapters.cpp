@@ -1652,6 +1652,8 @@ class CallbackTNLP final : public Ipopt::TNLP {
 
 }  // namespace
 
+// AUDIT-NAV: 外部适配器从本节开始。审核重点是模型/目标/状态/对偶映射和临时
+// 资源生命周期，不把适配器封装描述成项目自研算法。
 HighsAdapter::HighsAdapter(std::string executable)
     : executable_(resolve_explicit_executable(executable)) {}
 

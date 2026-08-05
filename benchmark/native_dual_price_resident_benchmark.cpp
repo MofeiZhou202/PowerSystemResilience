@@ -1,7 +1,7 @@
 /// native_dual_price_resident_benchmark.cpp
 ///
-/// S2 independent-kernel harness (roadmap native_dual_simplex_system_roadmap
-/// 2026-08-04, §6/§13.3) for the row_ep PRICE/dot-error-bound consumer.
+/// S2 independent-kernel harness (see docs/solvers.md section 5.2) for the
+/// row_ep PRICE/dot-error-bound consumer.
 ///
 /// The dual pivot's leaving-row BTRAN result `row_ep` is produced densely by
 /// the factor backend (HFactor solve_vec_btran.array).  The current PRICE

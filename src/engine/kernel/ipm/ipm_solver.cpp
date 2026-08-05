@@ -2014,6 +2014,8 @@ SolveResult NativeIPMAdapter::solve_nlp(const NLPModel& prob) const {
   return res;
 }
 
+// AUDIT-NAV: NLP-IPM 总入口；默认滤子路径依次拥有缩放、KKT 惯性修正、试点
+// 接受、二阶修正/恢复和障碍更新，只有完整 KKT 条件可发布成功。
 std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPModel& prob) const {
   const auto t0 = std::chrono::steady_clock::now();
   SolveResult out;

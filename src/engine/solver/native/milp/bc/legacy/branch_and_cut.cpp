@@ -113,6 +113,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   return state.run();
 }
 
+// AUDIT-NAV: MILP 树搜索的 14 段按编号组成唯一主流程；每段必须保持域/LP/割
+// 状态的事务边界，最终证明只能来自原模型上可信的界、证书和残差复核。
 BCResult BCSolveState::run() {
 #include "bc_run/01_setup_presolve_root_build.inc"
 #include "bc_run/02_root_relaxation_a.inc"

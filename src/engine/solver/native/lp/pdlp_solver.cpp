@@ -176,6 +176,8 @@ NativePDLPAdapter::NativePDLPAdapter(PDLPOptions opt) : opt_(std::move(opt)) {}
 std::string NativePDLPAdapter::name() const { return "NativePDLP"; }
 bool NativePDLPAdapter::supports(ProblemClass cls) const { return cls == ProblemClass::LP; }
 
+// AUDIT-NAV: PDLP 完整流程；按“行区间/CSR -> 缩放 -> 原始对偶更新 -> 平均点
+// 终止 -> 反缩放复核”审核。该路径不生成单纯形基。
 SolveResult NativePDLPAdapter::solve_lp(const LPModel& prob) const {
   const auto t0 = std::chrono::steady_clock::now();
   SolveResult out;

@@ -284,6 +284,8 @@ SolveResult NativeLCQPAdapter::solve_qp(const QPModel& prob) const {
   return solve_qp_ipm(Q, c, prob.A, prob.b, prob.Aeq, prob.beq, lb, ub);
 }
 
+// AUDIT-NAV: 凸 QP 内点主循环；KKT 模式只分析一次，每轮仅更新数值。
+// 非凸 Q 不具有全局最优保证，终止必须联合检查可行度、驻点和互补度。
 SolveResult NativeLCQPAdapter::solve_qp_ipm(
     const Eigen::SparseMatrix<double>& Q,
     const Eigen::VectorXd& c,

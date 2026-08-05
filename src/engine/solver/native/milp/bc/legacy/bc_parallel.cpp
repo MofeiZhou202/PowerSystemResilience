@@ -1268,7 +1268,7 @@ void detail::explorer_thread(
         // accumulated since it copied the baseline. This is correct under
         // concurrent aggregation because sums and counts are linear in
         // samples (SCIP parallel-UG style). See
-        // docs/parallel_bc_sharing_improvements_2026q2.md §4.
+        // See docs/solvers.md, section 8.
         std::lock_guard<std::mutex> lk(pc_mtx);
         for (int i : branchable_indices) {
           const int d_cnt = local_pc[i].down_cnt - base_pc[i].down_cnt;

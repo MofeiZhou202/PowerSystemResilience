@@ -189,6 +189,8 @@ std::vector<SolverAdapterPtr> StrategyDispatcher::candidate_adapters(
   return ordered;
 }
 
+// AUDIT-NAV: 此函数拥有“预处理 -> 适配器调用 -> 回退 -> 后处理”的完整事务。
+// 显式 solver 选择与自动候选的行为差异必须在这里保持可见。
 SolveResult StrategyDispatcher::solve(const AdapterRegistry& registry,
                                       const api::ProblemVariant& problem,
                                       const std::string& preferred_solver,

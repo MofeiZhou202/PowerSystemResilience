@@ -1757,6 +1757,8 @@ Result solve_phase2(const StandardFormLP& sf, const SimplexOptions& options,
   return result;
 }
 
+// AUDIT-NAV: 原生对偶单纯形总入口；solve_impl 拥有 Phase I/II、定价、BFRT、
+// 基更新和证书构造，本层负责最终 profiling 与原问题残差审计。
 Result solve(const StandardFormLP& sf, const SimplexOptions& options,
              const SimplexBasis* basis_hint) {
   Result result = solve_impl(sf, options, basis_hint, true);

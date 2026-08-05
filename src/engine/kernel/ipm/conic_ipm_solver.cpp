@@ -846,6 +846,8 @@ struct KktBackend {
 ConicIPMSolver::ConicIPMSolver(ConicIPMOptions options)
     : options_(options) {}
 
+// AUDIT-NAV: 锥 IPM 总入口；按“弦分解 -> 内点初始化 -> NT 缩放 -> 预测校正
+// -> 锥步长 -> 证书/原空间残差”审核，unknown 不得被上层改写为不可行。
 ConicIPMResult ConicIPMSolver::solve(const ConicModel& model) const {
   const auto t0 = std::chrono::steady_clock::now();
   const OmpThreadsGuard threads_guard(options_.num_threads);

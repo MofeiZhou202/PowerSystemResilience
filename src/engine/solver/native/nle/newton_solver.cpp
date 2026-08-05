@@ -543,6 +543,8 @@ bool apply_converter_mode_switching(std::vector<VSCConverter>& converters,
 
 }  // namespace
 
+// AUDIT-NAV: 电力潮流专用 Newton 主循环；模式缓存、AC/DC 状态、PV/PQ 切换、
+// 无功限值和 LM 恢复均在此路径，不能与通用 NLESolver 混用。
 PowerFlowResult NewtonSolver::solve(const SolverData& data,
                                     const PowerFlowOptions& opt,
                                     const InitialState* init) const {

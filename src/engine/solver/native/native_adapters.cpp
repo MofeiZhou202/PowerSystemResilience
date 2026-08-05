@@ -34,6 +34,7 @@ bool NativeLinearAdapter::supports(ProblemClass cls) const {
   return cls == ProblemClass::LE;
 }
 
+// AUDIT-NAV: LE 直接法入口；成功状态只能在原系统残差复核后发布。
 SolveResult NativeLinearAdapter::solve_le(const SparseLinSys& prob) const {
   const auto t0 = std::chrono::steady_clock::now();
   SolveResult out;
@@ -80,6 +81,7 @@ bool NativeNewtonAdapter::supports(ProblemClass cls) const {
   return cls == ProblemClass::NLE;
 }
 
+// AUDIT-NAV: NLE 主循环；依次审核残差、Jacobian、正则化和回溯接受条件。
 SolveResult NativeNewtonAdapter::solve_nle(const NonlinearSystem& prob) const {
   const auto t0 = std::chrono::steady_clock::now();
   SolveResult out;
@@ -190,6 +192,8 @@ bool NativeNLPAdapter::supports(ProblemClass cls) const {
   return cls == ProblemClass::NLP;
 }
 
+// AUDIT-NAV: 这是固定罚参数的轻量 Newton 法，不是 NativeIPM；成功时仍需同时
+// 审核原约束可行度和罚函数驻点残差。
 SolveResult NativeNLPAdapter::solve_nlp(const NLPModel& prob) const {
   const auto t0 = std::chrono::steady_clock::now();
   SolveResult out;
@@ -480,6 +484,8 @@ bool NativeBranchAndCutAdapter::supports(ProblemClass cls) const {
   return cls == ProblemClass::MILP || cls == ProblemClass::MINLP;
 }
 
+// AUDIT-NAV: MILP 适配层只处理 LP 快路径和 BCResult 映射；树搜索总流程见
+// BCSolveState::run，StrictHiGHS 则通过选项进入 HiGHS MIP 合约。
 SolveResult NativeBranchAndCutAdapter::solve_milp(const MIPModel& prob) const {
   // ── LP fast-path ──────────────────────────────────────────────────────
   // When no integer/binary variables exist, skip the inapplicable B&C

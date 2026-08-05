@@ -5,6 +5,8 @@
 
 namespace mipsolvers::engine {
 
+// AUDIT-NAV: 节点 LP 缓存从此建立；仅数值/界改变时才可复用符号结构，任何
+// 模式或事务签名不匹配都必须转入完整重建路径。
 void NativeIPMLPAdapter::prepare_for_node_solves(const LPModel& base_lp) {
   auto cs = std::make_unique<CachedState>();
 

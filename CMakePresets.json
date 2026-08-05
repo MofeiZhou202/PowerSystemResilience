@@ -56,6 +56,15 @@
       }
     },
     {
+      "name": "windows-offline-release",
+      "displayName": "Windows Offline Self-Contained Release",
+      "inherits": "windows-msvc-release",
+      "cacheVariables": {
+        "MIPSOLVERS_USE_PREBUILT_THIRD_PARTY": "ON",
+        "MIPSOLVERS_MKL_ROOT": "${sourceDir}/third_party/oneapi-mkl"
+      }
+    },
+    {
       "name": "windows-vcpkg-release",
       "displayName": "Windows MSVC Release with vcpkg",
       "inherits": "windows-msvc-release",
@@ -110,6 +119,12 @@
       "jobs": 8
     },
     {
+      "name": "windows-offline-release",
+      "configurePreset": "windows-offline-release",
+      "configuration": "Release",
+      "jobs": 8
+    },
+    {
       "name": "windows-vcpkg-release",
       "configurePreset": "windows-vcpkg-release",
       "configuration": "Release",
@@ -144,6 +159,14 @@
     {
       "name": "windows-msvc-release",
       "configurePreset": "windows-msvc-release",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-offline-release",
+      "configurePreset": "windows-offline-release",
       "configuration": "Release",
       "output": {
         "outputOnFailure": true

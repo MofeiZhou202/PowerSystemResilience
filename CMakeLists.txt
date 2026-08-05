@@ -1102,6 +1102,14 @@ install(TARGETS mipsolvers
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+if(TARGET scuc_solve)
+  install(TARGETS scuc_solve
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+if(TARGET scuc_case_builder)
+  install(TARGETS scuc_case_builder
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
 if(TARGET mipsolvers_hfactor)
   install(TARGETS mipsolvers_hfactor
     EXPORT mipsolversTargets
@@ -1157,7 +1165,8 @@ if(TARGET ipopt_local)
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 install(DIRECTORY include/mipsolvers
-  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  PATTERN ".*" EXCLUDE)
 
 # ── Bundle header-only deps ───────────────────────────────────────────────────
 # 安装包含 Eigen3 和 nlohmann_json 头文件，使外部项目无需系统安装即可使用。
@@ -1165,9 +1174,9 @@ install(DIRECTORY include/mipsolvers
 if(_ms_eigen3_bundle_src)
   install(DIRECTORY "${_ms_eigen3_bundle_src}/Eigen"
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/mipsolvers-deps/eigen3")
-  if(EXISTS "${_ms_eigen3_bundle_src}/unsupported")
-    install(DIRECTORY "${_ms_eigen3_bundle_src}/unsupported"
-      DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/mipsolvers-deps/eigen3")
+  if(EXISTS "${_ms_eigen3_bundle_src}/unsupported/Eigen")
+    install(DIRECTORY "${_ms_eigen3_bundle_src}/unsupported/Eigen"
+      DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/mipsolvers-deps/eigen3/unsupported")
   endif()
   message(STATUS "mipsolvers: bundling Eigen3 headers from ${_ms_eigen3_bundle_src}")
 endif()
@@ -1198,3 +1207,12 @@ install(FILES
   ${CMAKE_CURRENT_BINARY_DIR}/mipsolversConfig.cmake
   ${CMAKE_CURRENT_BINARY_DIR}/mipsolversConfigVersion.cmake
   DESTINATION ${MIPSOLVERS_INSTALL_CMAKEDIR})
+
+install(FILES
+  docs/README.md
+  docs/user_manual.md
+  docs/solvers.md
+  docs/testing.md
+  docs/numerical_methods.md
+  docs/build_and_deploy.md
+  DESTINATION ${CMAKE_INSTALL_DATADIR}/mipsolvers/docs)

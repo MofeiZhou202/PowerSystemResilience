@@ -32,6 +32,8 @@ bool has_finite_upper_bound(double value) {
 }
 }  // namespace
 
+// AUDIT-NAV: LP 原空间到单纯形标准型的唯一公共转换入口；目标方向、行符号、
+// 有限界哨兵和 postsolve 映射必须作为同一个契约审核。
 StandardFormLP build_standard_form_lp(const LPModel& lp) {
   const int n = static_cast<int>(lp.vars.size());
   StandardFormLP sf;
