@@ -1118,6 +1118,8 @@ int main(int argc, char** argv) {
             lp_native_only = 118;
         } else if (std::strcmp(argv[i], "--lp39-native") == 0) {
             lp_native_only = 39;
+        } else if (std::strcmp(argv[i], "--lp6-native") == 0) {
+            lp_native_only = 6;
         } else if (std::strcmp(argv[i], "--milp118-native-ipm") == 0) {
             milp_118_ipm_only = true;
         } else if (std::strcmp(argv[i], "--time-limit") == 0 && i + 1 < argc) {
@@ -1139,13 +1141,15 @@ int main(int argc, char** argv) {
 
     if (lp_native_only != 0) {
         SCUCInput inp = (lp_native_only == 118) ? build_ieee118_case(/*T=*/24)
-                                                : build_ieee39_case(/*T=*/24);
+                        : (lp_native_only == 39) ? build_ieee39_case(/*T=*/24)
+                                                 : build_6bus_case(/*T=*/4);
         inp.config.solve_sced = false;
         inp.config.solve_lmp  = false;
         engine::MIPModel mip = build_scuc_mip(inp);
         engine::LPModel lp = mip.linear_part;  // integrality dropped
         const char* label = (lp_native_only == 118) ? "UC_118bus_24T-relax"
-                                                    : "UC_39bus_24T-relax";
+                            : (lp_native_only == 39) ? "UC_39bus_24T-relax"
+                                                     : "UC_6bus_4T-relax";
         LpRow r = run_native_simplex_lp(
             label, lp, std::numeric_limits<double>::quiet_NaN(),
             time_limit_sec);
@@ -1153,6 +1157,13 @@ int main(int argc, char** argv) {
                     "rowviol=%.2e bndviol=%.2e status=%s\n",
                     label, r.runtime_ms, r.iterations, r.objective,
                     r.max_row_viol, r.max_bound_viol, r.status.c_str());
+        // IPM row (per-tier timing prints to stderr under MIPSOLVERS_IPM_VERBOSE).
+        LpRow ri = run_native_ipm_lp(label, lp,
+                                     std::numeric_limits<double>::quiet_NaN());
+        std::printf("%s natIPM %.1f ms iters=%d obj=%.8e "
+                    "rowviol=%.2e bndviol=%.2e status=%s\n",
+                    label, ri.runtime_ms, ri.iterations, ri.objective,
+                    ri.max_row_viol, ri.max_bound_viol, ri.status.c_str());
         return r.success ? 0 : 1;
     }
 

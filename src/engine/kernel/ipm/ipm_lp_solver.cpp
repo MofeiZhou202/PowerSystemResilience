@@ -1401,6 +1401,36 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
     }
   };
 
+  // Gondzio multiple centrality corrector scratch + a shared fraction-to-
+  // boundary step-length helper (used to score each corrector's step gain).
+  std::vector<double> gc_xi(nn), gc_ddx(nn), gc_ddy(m), gc_ddzl(nn),
+      gc_ddzu(nn), gc_rgl(nn), gc_rgu(nn), gc_zero_rp(m, 0.0);
+  auto compute_step_lengths = [&](const double* dxv, const double* dzlv,
+                                  const double* dzuv, double& ap_out,
+                                  double& ad_out) {
+    double ap_l = 1.0, ad_l = 1.0;
+    for (int j = 0; j < nn; ++j) {
+      if (dxv[j] < -kMinVal && flb_d[j]) {
+        const double a = -kTau * gl_d[j] / dxv[j];
+        if (a < ap_l) ap_l = a;
+      }
+      if (dxv[j] > kMinVal && fub_d[j]) {
+        const double a = kTau * gu_d[j] / dxv[j];
+        if (a < ap_l) ap_l = a;
+      }
+      if (dzlv[j] < -kMinVal) {
+        const double a = -kTau * zl_d[j] / dzlv[j];
+        if (a < ad_l) ad_l = a;
+      }
+      if (dzuv[j] < -kMinVal) {
+        const double a = -kTau * zu_d[j] / dzuv[j];
+        if (a < ad_l) ad_l = a;
+      }
+    }
+    ap_out = std::max(ap_l, kMinVal);
+    ad_out = std::max(ad_l, kMinVal);
+  };
+
   for (int iter = 0; iter < max_iter; ++iter) {
     if (opt_.time_limit_sec > 0.0 && std::isfinite(opt_.time_limit_sec)) {
       const double elapsed =
@@ -1688,6 +1718,76 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
       }
       ap = std::max(ap, kMinVal);
       ad = std::max(ad, kMinVal);
+    }
+
+    // ---- Gondzio multiple centrality correctors ----
+    // Each corrector reuses the current factorization (one extra back-solve via
+    // raw_kkt_solve with a ZERO primal rhs — it only re-centers complementarity)
+    // and is kept only if it enlarges the fraction-to-boundary step, pulling
+    // trial products back into the symmetric neighborhood [beta_min*mu,
+    // beta_max*mu].  Gated to the THROTTLED regime (min step < 0.9): when the
+    // Mehrotra step is already good, correcting only perturbs it and wastes
+    // solves (measured: +7 iters on 39-bus, +6.5s on 118-bus).  Throttling is
+    // the degenerate slow-start that stalls the affine step (6-bus: 64->30).
+    if (!skip_corrector && opt_.max_correctors > 0 && mu > 0.0 &&
+        std::min(ap, ad) < 0.9) {
+      constexpr double kBetaMin = 0.1, kBetaMax = 10.0;
+      constexpr double kDeltaAlpha = 0.1;   // step-enlargement probe
+      constexpr double kGammaAccept = 0.1;  // min total step gain to keep
+      const double lo = kBetaMin * mu, hi = kBetaMax * mu;
+      for (int kc = 0; kc < opt_.max_correctors; ++kc) {
+        const double ap_t = std::min(ap + kDeltaAlpha, 1.0);
+        const double ad_t = std::min(ad + kDeltaAlpha, 1.0);
+        for (int j = 0; j < nn; ++j) {
+          double rgl = 0.0, rgu = 0.0;
+          if (flb_d[j]) {
+            const double v =
+                (gl_d[j] + ap_t * dx_d[j]) * (zl_d[j] + ad_t * dzl[j]);
+            rgl = ((v < lo) ? lo : (v > hi ? hi : v)) - v;
+          }
+          if (fub_d[j]) {
+            const double v =
+                (gu_d[j] - ap_t * dx_d[j]) * (zu_d[j] + ad_t * dzu[j]);
+            rgu = ((v < lo) ? lo : (v > hi ? hi : v)) - v;
+          }
+          gc_rgl[j] = rgl;
+          gc_rgu[j] = rgu;
+          gc_xi[j] =
+              flb_d[j] * (rgl * inv_gl_d[j]) - fub_d[j] * (rgu * inv_gu_d[j]);
+        }
+        raw_kkt_solve(gc_xi.data(), gc_zero_rp.data(), gc_ddx.data(),
+                      gc_ddy.data());
+        bool corr_finite = true;
+        for (int j = 0; j < nn && corr_finite; ++j)
+          corr_finite = std::isfinite(gc_ddx[j]);
+        if (!corr_finite) break;
+        for (int j = 0; j < nn; ++j) {
+          gc_ddzl[j] = flb_d[j] * (gc_rgl[j] * inv_gl_d[j] -
+                                   zl_d[j] * inv_gl_d[j] * gc_ddx[j]);
+          gc_ddzu[j] = fub_d[j] * (gc_rgu[j] * inv_gu_d[j] +
+                                   zu_d[j] * inv_gu_d[j] * gc_ddx[j]);
+        }
+        for (int j = 0; j < nn; ++j) {
+          dx_d[j] += gc_ddx[j];
+          dzl[j] += gc_ddzl[j];
+          dzu[j] += gc_ddzu[j];
+        }
+        for (int i = 0; i < m; ++i) dy_d[i] += gc_ddy[i];
+        double ap_new = 0.0, ad_new = 0.0;
+        compute_step_lengths(dx_d, dzl.data(), dzu.data(), ap_new, ad_new);
+        if (ap_new + ad_new > ap + ad + kGammaAccept * kDeltaAlpha) {
+          ap = ap_new;
+          ad = ad_new;
+        } else {
+          for (int j = 0; j < nn; ++j) {
+            dx_d[j] -= gc_ddx[j];
+            dzl[j] -= gc_ddzl[j];
+            dzu[j] -= gc_ddzu[j];
+          }
+          for (int i = 0; i < m; ++i) dy_d[i] -= gc_ddy[i];
+          break;
+        }
+      }
     }
 
     t_corr += std::chrono::duration<double, std::milli>(tnow() - t_c).count();
