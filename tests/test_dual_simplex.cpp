@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <map>
 #include <memory>
 #include <random>
 #include <string>
@@ -24,6 +25,7 @@
 #include "mipsolvers/engine/kernel/linear_algebra/hfactor_backend.hpp"
 #include "../src/engine/kernel/lp_kernel/native_dual_core.hpp"
 #include "../src/engine/kernel/lp_kernel/native_dual/factor.hpp"
+#include "../src/engine/kernel/lp_kernel/native_dual/partitioned_row_matrix.hpp"
 #include "../src/engine/kernel/lp_kernel/native_dual/pricing.hpp"
 #include "../src/engine/kernel/lp_kernel/native_dual/primal_pricing.hpp"
 #include "../src/engine/kernel/lp_kernel/native_dual/state.hpp"
@@ -1305,6 +1307,104 @@ TEST_CASE(
   CHECK(warm.result.stats.objective ==
         Approx(cold.result.stats.objective).margin(1e-7));
   CHECK(warm.result.stats.iterations <= cold.result.stats.iterations);
+}
+
+TEST_CASE(
+    "PartitionedRowMatrix holds a valid nonbasic/basic partition across pivots",
+    "[dual_simplex][partitioned_price][p2]") {
+  using mipsolvers::engine::native_dual::detail::PartitionedRowMatrix;
+  // A coupled LP whose standard form mixes column densities; the partition is
+  // exercised structurally (any basis-membership predicate is admissible).
+  const int m = 14;
+  const int n = 34;
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Zero(n);
+  lp.A.resize(0, n);
+  lp.b.resize(0);
+  lp.Aeq.resize(m, n);
+  std::mt19937_64 rng(0x9A57C0DEULL);
+  std::uniform_real_distribution<double> coef(-1.0, 1.0);
+  std::uniform_real_distribution<double> pick(0.0, 1.0);
+  for (int j = 0; j < n; ++j) lp.vars.push_back({VarType::Continuous, 0.0, 1.0});
+  std::vector<Eigen::Triplet<double>> trips;
+  Eigen::VectorXd rhs = Eigen::VectorXd::Zero(m);
+  for (int i = 0; i < m; ++i) {
+    for (int j = 0; j < n; ++j) {
+      if (pick(rng) < 0.35) {
+        const double v = coef(rng);
+        trips.emplace_back(i, j, v);
+        rhs[i] += v * 0.5;
+      }
+    }
+  }
+  lp.Aeq.setFromTriplets(trips.begin(), trips.end());
+  lp.Aeq.makeCompressed();
+  lp.beq = rhs;
+
+  const StandardFormLP sf = build_standard_form_lp(lp);
+  const int sm = static_cast<int>(sf.A.rows());
+  const int sn = static_cast<int>(sf.A.cols());
+
+  // Reference: per-row (col -> value) map from the CSC standard form.
+  std::vector<std::map<int, double>> ref(static_cast<std::size_t>(sm));
+  for (int col = 0; col < sn; ++col)
+    for (StandardColumnMatrix::InnerIterator it(sf.A, col); it; ++it)
+      ref[static_cast<std::size_t>(it.row())][col] = it.value();
+
+  PartitionedRowMatrix part;
+  part.build(sf.A);
+  REQUIRE(part.rows() == sm);
+  REQUIRE(part.cols() == sn);
+
+  std::vector<char> basic(static_cast<std::size_t>(sn), 0);
+  std::vector<int> basic_cols;
+  std::vector<int> nonbasic_cols;
+  for (int j = 0; j < sn; ++j) {
+    if (j < sm) {
+      basic[static_cast<std::size_t>(j)] = 1;
+      basic_cols.push_back(j);
+    } else {
+      nonbasic_cols.push_back(j);
+    }
+  }
+  part.partition(basic);
+  REQUIRE(part.verify(basic));
+
+  const auto check_reconstruction = [&]() {
+    for (int row = 0; row < sm; ++row) {
+      std::map<int, double> got;
+      for (auto slot = part.row_start(row); slot < part.row_end(row); ++slot)
+        got[part.col_at(slot)] = part.value_at(slot);
+      REQUIRE(got == ref[static_cast<std::size_t>(row)]);
+      for (auto slot = part.row_start(row); slot < part.nonbasic_end(row); ++slot)
+        REQUIRE(basic[static_cast<std::size_t>(part.col_at(slot))] == 0);
+      for (auto slot = part.nonbasic_end(row); slot < part.row_end(row); ++slot)
+        REQUIRE(basic[static_cast<std::size_t>(part.col_at(slot))] == 1);
+    }
+  };
+  check_reconstruction();
+
+  // Simulate basis exchanges: entering leaves the prefix, leaving enters it.
+  for (int iter = 0; iter < 60; ++iter) {
+    if (basic_cols.empty() || nonbasic_cols.empty()) break;
+    const int ei = static_cast<int>(rng() % nonbasic_cols.size());
+    const int li = static_cast<int>(rng() % basic_cols.size());
+    const int entering = nonbasic_cols[static_cast<std::size_t>(ei)];
+    const int leaving = basic_cols[static_cast<std::size_t>(li)];
+    part.set_basic(entering, sf.A);
+    part.set_nonbasic(leaving, sf.A);
+    basic[static_cast<std::size_t>(entering)] = 1;
+    basic[static_cast<std::size_t>(leaving)] = 0;
+    nonbasic_cols[static_cast<std::size_t>(ei)] = nonbasic_cols.back();
+    nonbasic_cols.pop_back();
+    nonbasic_cols.push_back(leaving);
+    basic_cols[static_cast<std::size_t>(li)] = basic_cols.back();
+    basic_cols.pop_back();
+    basic_cols.push_back(entering);
+    REQUIRE(part.verify(basic));
+    check_reconstruction();
+  }
 }
 
 TEST_CASE("DualSimplex: cold shift-start policy is bounded and overridable",
