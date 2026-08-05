@@ -28,6 +28,16 @@ void multiply_AT_indexed_bfrt(const StandardRowMatrix& A_row,
                               const std::vector<Move>& move,
                               IndexedVector& result,
                               std::vector<int>& active_position);
+// Partitioned dual PRICE: scans only the nonbasic prefix of each row_ep-hit
+// row (skipping basic columns), then injects the leaving column's pivotal
+// entry. Produces the same nonbasic pivotal-row values and active positions
+// as multiply_AT_indexed_bfrt, in a nonbasic-first packing order.
+void multiply_AT_partitioned_bfrt(const PartitionedRowMatrix& partition,
+                                  const StandardColumnMatrix& columns,
+                                  const IndexedVector& y,
+                                  const std::vector<Move>& move, int leaving_col,
+                                  IndexedVector& result,
+                                  std::vector<int>& active_position);
 // Deterministic experimental CSC kernel exposed within the native-dual module
 // for rounding-envelope checks and controlled kernel benchmarks. Production
 // PRICE remains on the CSR path until a suite-positive selector is proved.

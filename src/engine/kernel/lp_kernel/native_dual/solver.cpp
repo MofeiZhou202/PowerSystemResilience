@@ -664,9 +664,17 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
   // storage is reused across iterations.
   static thread_local detail::IndexedVector pivot_row_storage;
   static thread_local std::vector<int> bfrt_active_position;
-  detail::multiply_AT_indexed_bfrt(state.sf->A_row, leaving.row_ep, state.basic,
-                                   state.move, pivot_row_storage,
-                                   bfrt_active_position);
+  if (!state.partition_row.empty()) {
+    const int leaving_col_priced =
+        state.basis[static_cast<std::size_t>(leaving.row)];
+    detail::multiply_AT_partitioned_bfrt(
+        state.partition_row, state.sf->A, leaving.row_ep, state.move,
+        leaving_col_priced, pivot_row_storage, bfrt_active_position);
+  } else {
+    detail::multiply_AT_indexed_bfrt(state.sf->A_row, leaving.row_ep,
+                                     state.basic, state.move, pivot_row_storage,
+                                     bfrt_active_position);
+  }
   const detail::IndexedVector& pivot_row = pivot_row_storage;
   if (!pivot_row.finite()) {
     return numerical_trouble("packed PRICE produced non-finite values");

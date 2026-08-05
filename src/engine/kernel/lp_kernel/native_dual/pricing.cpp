@@ -538,6 +538,84 @@ void multiply_AT_indexed_bfrt(const StandardRowMatrix& A_row,
   multiply_AT_indexed_impl(A_row, y, result, &basic, &move, &active_position);
 }
 
+void multiply_AT_partitioned_bfrt(const PartitionedRowMatrix& partition,
+                                  const StandardColumnMatrix& columns,
+                                  const IndexedVector& y,
+                                  const std::vector<Move>& move, int leaving_col,
+                                  IndexedVector& result,
+                                  std::vector<int>& active_position) {
+  active_position.clear();
+  result.clear(static_cast<int>(partition.cols()));
+  struct Accumulator {
+    std::vector<double> value;
+    std::vector<unsigned int> stamp;
+    std::vector<int> touched;
+    unsigned int epoch{0};
+  };
+  static thread_local Accumulator accumulator;
+  const std::size_t cols = static_cast<std::size_t>(partition.cols());
+  if (accumulator.value.size() != cols) {
+    accumulator.value.assign(cols, 0.0);
+    accumulator.stamp.assign(cols, 0);
+    accumulator.epoch = 0;
+  }
+  if (++accumulator.epoch == 0) {
+    std::fill(accumulator.stamp.begin(), accumulator.stamp.end(), 0);
+    ++accumulator.epoch;
+  }
+  accumulator.touched.clear();
+  for (std::size_t k = 0; k < y.index.size(); ++k) {
+    const int row = y.index[k];
+    const double multiplier = y.value[k];
+    if (row < 0 || row >= partition.rows() || multiplier == 0.0) continue;
+    const auto end = partition.nonbasic_end(row);
+    for (auto slot = partition.row_start(row); slot < end; ++slot) {
+      const int col = partition.col_at(slot);
+      const std::size_t index = static_cast<std::size_t>(col);
+      if (accumulator.stamp[index] != accumulator.epoch) {
+        accumulator.stamp[index] = accumulator.epoch;
+        accumulator.value[index] = 0.0;
+        accumulator.touched.push_back(col);
+      }
+      accumulator.value[index] += multiplier * partition.value_at(slot);
+    }
+  }
+  // The leaving column is basic (outside the nonbasic scan) but its pivotal
+  // entry alpha_r = e_r^T B^-1 A_{basis[r]} = 1 feeds the downstream dual
+  // reduced-cost update of the leaving variable; accumulate it from its own
+  // column over the row_ep support so that update is preserved.
+  if (leaving_col >= 0 && leaving_col < static_cast<int>(cols)) {
+    double leaving_alpha = 0.0;
+    for (StandardColumnMatrix::InnerIterator it(columns, leaving_col); it;
+         ++it) {
+      leaving_alpha += y.at(it.row()) * it.value();
+    }
+    const std::size_t index = static_cast<std::size_t>(leaving_col);
+    if (accumulator.stamp[index] != accumulator.epoch) {
+      accumulator.stamp[index] = accumulator.epoch;
+      accumulator.value[index] = 0.0;
+      accumulator.touched.push_back(leaving_col);
+    }
+    accumulator.value[index] += leaving_alpha;
+  }
+  const double tiny = price_tiny();
+  result.index.reserve(accumulator.touched.size());
+  result.value.reserve(accumulator.touched.size());
+  active_position.reserve(accumulator.touched.size());
+  for (const int col : accumulator.touched) {
+    const double value = accumulator.value[static_cast<std::size_t>(col)];
+    if (!(std::abs(value) <= tiny)) {
+      const int packed_position = static_cast<int>(result.index.size());
+      result.index.push_back(col);
+      result.value.push_back(value);
+      if (col != leaving_col &&
+          sign(move[static_cast<std::size_t>(col)]) != 0) {
+        active_position.push_back(packed_position);
+      }
+    }
+  }
+}
+
 void multiply_AT_indexed_csc(const StandardColumnMatrix& A,
                              const IndexedVector& y, IndexedVector& result,
                              int thread_count) {
