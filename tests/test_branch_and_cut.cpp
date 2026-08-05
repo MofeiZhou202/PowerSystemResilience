@@ -32,6 +32,22 @@ using Catch::Approx;
 
 namespace {
 
+void set_env_value(const char* name, const char* value) {
+#ifdef _WIN32
+  ::_putenv_s(name, value);
+#else
+  ::setenv(name, value, 1);
+#endif
+}
+
+void unset_env_value(const char* name) {
+#ifdef _WIN32
+  ::_putenv_s(name, "");
+#else
+  ::unsetenv(name);
+#endif
+}
+
 /// Sets an environment variable for the lifetime of the guard, restoring
 /// "unset" on destruction (the seams below are opt-in flags, never set in a
 /// normal environment).
@@ -40,13 +56,13 @@ struct EnvVarGuard {
   std::optional<std::string> previous;
   EnvVarGuard(const char* n, const char* v) : name(n) {
     if (const char* old = ::getenv(n)) previous = old;
-    ::setenv(n, v, 1);
+    set_env_value(n, v);
   }
   ~EnvVarGuard() {
     if (previous) {
-      ::setenv(name.c_str(), previous->c_str(), 1);
+      set_env_value(name.c_str(), previous->c_str());
     } else {
-      ::unsetenv(name.c_str());
+      unset_env_value(name.c_str());
     }
   }
 };
@@ -397,7 +413,7 @@ TEST_CASE("B&C: environment snapshot is immutable and shared across workers",
   CHECK(std::string(snapshot->value("MIPSOLVERS_TEST_SNAPSHOT_VALUE")) ==
         "before");
 
-  ::setenv("MIPSOLVERS_TEST_SNAPSHOT_VALUE", "after", 1);
+  set_env_value("MIPSOLVERS_TEST_SNAPSHOT_VALUE", "after");
   ScopedBcEnvOptions scope(snapshot);
   CHECK(std::string(bc_env_options().value(
             "MIPSOLVERS_TEST_SNAPSHOT_VALUE")) == "before");
@@ -425,7 +441,7 @@ TEST_CASE("B&C: result records the effective solve environment",
                   "MIPSOLVERS_TEST_SNAPSHOT_VALUE=recorded") !=
         result.effective_environment.end());
 
-  ::setenv("MIPSOLVERS_TEST_SNAPSHOT_VALUE", "next-solve", 1);
+  set_env_value("MIPSOLVERS_TEST_SNAPSHOT_VALUE", "next-solve");
   const BCResult next_result = solve_milp_bc(make_knapsack_10(), opt);
   REQUIRE(next_result.stats.success);
   CHECK(std::find(next_result.effective_environment.begin(),

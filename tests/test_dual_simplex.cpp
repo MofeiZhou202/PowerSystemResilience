@@ -35,6 +35,22 @@ using Catch::Approx;
 
 namespace {
 
+void set_env_value(const char* name, const char* value) {
+#ifdef _WIN32
+  ::_putenv_s(name, value);
+#else
+  ::setenv(name, value, 1);
+#endif
+}
+
+void unset_env_value(const char* name) {
+#ifdef _WIN32
+  ::_putenv_s(name, "");
+#else
+  ::unsetenv(name);
+#endif
+}
+
 class EnvVarGuard {
  public:
   EnvVarGuard(const char* name, const char* value) : name_(name) {
@@ -42,14 +58,14 @@ class EnvVarGuard {
       had_previous_ = true;
       previous_ = previous;
     }
-    ::setenv(name, value, 1);
+    set_env_value(name, value);
   }
 
   ~EnvVarGuard() {
     if (had_previous_) {
-      ::setenv(name_.c_str(), previous_.c_str(), 1);
+      set_env_value(name_.c_str(), previous_.c_str());
     } else {
-      ::unsetenv(name_.c_str());
+      unset_env_value(name_.c_str());
     }
   }
 

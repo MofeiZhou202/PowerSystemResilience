@@ -77,6 +77,13 @@ target_include_directories(cholmod_vendored PRIVATE
 target_compile_definitions(cholmod_vendored PRIVATE
   NPARTITION NMODIFY NMATRIXOPS)
 
+# The vendored generated SuiteSparse_config header enables the POSIX
+# clock_gettime timer unconditionally. MSVC has no CLOCK_MONOTONIC, and the
+# timer is optional, so disable it for the native Windows build.
+if(WIN32)
+  target_compile_definitions(cholmod_vendored PRIVATE NTIMER)
+endif()
+
 # ── BLAS/LAPACK for the supernodal kernels ────────────────────────────────────
 # Unified resolution lives in cmake/Dependencies.cmake (Accelerate on macOS,
 # system BLAS/LAPACK elsewhere, vendored reference LAPACK as fallback) and is

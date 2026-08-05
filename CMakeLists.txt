@@ -190,6 +190,12 @@ target_compile_features(mipsolvers PUBLIC cxx_std_20)
 
 add_library(mipsolvers::mipsolvers ALIAS mipsolvers)
 
+# The native B&C presolve fallback performs one bounded recursive retry. Its
+# solver frame exceeds the 1 MiB default executable stack on MSVC builds.
+if(MSVC)
+  target_link_options(mipsolvers INTERFACE "/STACK:8388608")
+endif()
+
 # ── Include directories ───────────────────────────────────────────────────────
 target_include_directories(mipsolvers
   PUBLIC
