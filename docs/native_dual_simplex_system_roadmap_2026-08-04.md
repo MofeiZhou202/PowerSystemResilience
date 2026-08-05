@@ -380,11 +380,10 @@ Next authorized step:
 
 当前授权的下一步（用户已选"full rebuild"，但受实测门槛约束）：
 
-1. **PRICE partition port（P2 的唯一可兑现形态）**：实现 branchless mutable partitioned `ar_matrix`（nonbasic 前缀 + per-pivot O(nnz(a_in)+nnz(a_out)) swap 维护），先做**独立内核 benchmark**证明 instructions AND bytes 同降（§13.3），再接生产。这是 Class-A reorder 大改动；branch 版已证死路。
-2. 若 partition port 未过独立内核 gate，则 PRICE 与 DR-3 一致近地板，转 P0 高效 dual Phase I 研究（消 bulk shift + cleanup 尾巴）。
-3. P3 单遍认证须走 S3 重设计（PRICE 无阈值只出 active support），不得逐 diff 融合越过 proposal/commit 边界。
-
-密度修复证明：**per-pivot 结构税确有可兑现项**（solve 内核选择），但兑现幅度受 case 分布与实测门槛约束；DR-3 的"分布式、竞品对标"判断在 PRICE branch 版上再次成立。
+1. **PRICE partition port（P2 的唯一可兑现形态）**：~~先做独立内核 benchmark~~ **独立内核 gate 已过**（DR-5 §(e)，`native_dual_workspace_price_benchmark`：bytes 1.558x + instructions 1.760x 同降，nonbasic 逐位相同）。**下一步 = live 整体重建**：把 `row_ep/row_ap/col_aq/col_bfrt` 从 IndexedVector 换成 factor-resident dense array + index + pack（HVector 化，internal 序），删 `hfactor_backend` 的 O(m) gather 与 per-solve rebuild，PRICE 改分区单遍散射。作为**一个 Class-A 基线**整体重建，用**全 cohort（10093/224/409/358/43/2029）+ NETLIB 72/72 + 24×3 A/B/A**晋级，**不逐 diff bit-identity**（§4.1）。
+2. live 重建须保持：scalar certification、proposal/commit 边界、精确 dot_error_bound（§7、§12）；partition 的 reorder 是 Class-A，允许 pivot-path trace 变化，但 nonbasic 结果集在同一 basis 下与 current 逐位相同（独立内核已证）。
+3. P3 单遍认证仍走 S3 重设计（PRICE 无阈值只出 active support），不得逐 diff 融合越过 proposal/commit 边界。
+4. 若 live 重建的全 cohort 24×3 A/B/A 未过 1.0x 或退化任何精度，回退并按 §15 记 reject；P0 高效 dual Phase I 为后备杠杆。
 
 
 ## 17. 外部参照
@@ -526,6 +525,20 @@ faithful HiGHS = bounded 扰动 + 逐 pivot shiftBack + rebuild correctDualInfea
 - **实现（safe 版，已验证正确）**：保留 leaving 列（值 1），只跳过其它 basic 列。certify/rcUpdate/Devex 无需改（leaving 仍在；stayed-basic 只贡献 0 + 冗余 drift force-0，安全丢弃）。pivots **不变**（5476，path-preserving）；10093+224 assertions 通过。
 - **实测判定**：matched-load A/B（d2q06c kernel/pivot，6 交替对，env `MIPSOLVERS_PRICE_NO_SKIP_BASIC`）：skip-ON 0.2045 vs skip-OFF 0.2030 → **0.7% 更慢（噪声内）= 无收益**。每元素 `basic[col]` 分支成本 + basic[] cache 压力抵消 ~30% 累加节省。**这正是 HiGHS 用 branchless partition 的原因**。branch-skip 是死路；只有完整 **mutable partitioned `ar_matrix` port**（per-pivot swaps，无每元素检查）才能兑现。**判定 reject**，clean revert。
 - **重开条件**：实现 branchless partition（nonbasic 前缀 + O(nnz(a_in)+nnz(a_out))/pivot swap 维护），按 §13.3 独立内核 gate（instructions AND bytes 同降）验证后重启。这是大改动（Class A reorder）。
+
+#### (e) P1+P2 整体重建的独立内核证据 — **gate PASSED**（2026-08-05，harness `native_dual_workspace_price_benchmark`）
+§(c) 的 reject 是**孤立 branch-skip** 的判定；analysis §4.1 的论点是六税只有**整体重建**才越过分辨率。据此建的独立内核 harness 把整条 PRICE 数据路两种形态在同一 d2q06c-shape fixture（m=1759, n=6423, 5 nnz/col, basis 27.4%, rEP 37.5%）对照：
+- **current**（生产形态）：IndexedVector + epoch-stamp 累加器扫**全行含 basic 列**（三条内存流 value/stamp/touched）+ 第二遍 pack + 第三遍 active_position。
+- **resident**（P1/P2 目标）：factor-resident dense `row_ap.array`（单流，仅按上次 support 清零）扫**nonbasic 前缀分区**，单遍 in-flight index + active_position。
+
+结果（nonbasic 结果集**逐位相同**，max-rel 0.00e+00，support-agree yes）：
+- nnz streamed/pivot 12075 → 8723（**1.38x 少**，basic skip）；
+- **effective bytes/pivot 429984 → 276028（1.558x DROP）**——省 stamp 流（T1 dense view 消补偿）+ 第二遍 + basic nnz；另 resident 消 T2.1 的 O(m) gather（28144 B/solve）；
+- **instruction proxy/pivot 83739 → 47588（1.760x DROP）**；
+- wall 0.0296 → 0.0227 ms/pivot（1.30x，次要信号）。
+- **§13.3 verdict：bytes DROP AND instructions DROP → gate PASSED。**
+
+**结论**：整体 resident+partitioned PRICE **过 §13.3 门**，证明 analysis 论点——T1 dense view（去 stamp）+ T3.4 单遍 + T3.1 分区**复合**才越过分辨率；孤立 branch（§(c)）不行。据此授权 live 整体重建（见 §16.1）。**判定 diagnostic→授权**（独立内核证据成立，live 重建仍需全 cohort + 24×3 A/B/A 晋级）。
 
 #### (d) P3 单遍认证 — **blocked-by-prerequisite**
 `certify_bfrt_dual_feasibility` 必须在**不可逆 factor update 之前**（proposal/certification 阶段）运行，而 rcUpdate 在其**之后**（commit 阶段）。naive 把 postcondition 融入 rcUpdate 会把检查移到 commit 之后 → 违反 §7/§12 的 proposal/commit 事务边界。故 P3 不能在不弱化事务边界下简单融合；需 S3 重设计（PRICE 无阈值只出 active support）而非逐 diff 融合。

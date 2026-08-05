@@ -475,6 +475,24 @@ if(MIPSOLVERS_HAVE_HIGHS_LIB)
     endif()
   endif()
 
+  # P1+P2 independent-kernel harness: the whole PRICE data path both ways -
+  # the production IndexedVector + epoch-stamp accumulator over all columns
+  # (three streams, multi-pass) vs the analysis's factor-resident dense row_ap
+  # over the nonbasic-prefix partition (one stream, single pass). Reports the
+  # §13.3 gate (effective bytes AND instruction proxy) plus wall. Self-contained.
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/native_dual_workspace_price_benchmark.cpp")
+    add_executable(native_dual_workspace_price_benchmark
+      benchmark/native_dual_workspace_price_benchmark.cpp)
+    set_target_properties(native_dual_workspace_price_benchmark PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+    if(NOT MSVC)
+      target_compile_options(native_dual_workspace_price_benchmark PRIVATE
+        -Wall -Wextra -Wpedantic
+        $<$<CONFIG:Release>:-O3 -DNDEBUG>
+        $<$<CONFIG:RelWithDebInfo>:-O2 -g -DNDEBUG>)
+    endif()
+  endif()
+
   # Standard MILP comparison over MIPLIB 2017. Unlike the NETLIB runner this
   # target preserves MPS integrality and audits every returned incumbent.
   if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/miplib2017_benchmark.cpp")
