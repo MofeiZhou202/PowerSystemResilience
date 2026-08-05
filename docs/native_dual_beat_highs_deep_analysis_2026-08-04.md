@@ -176,3 +176,33 @@ pilot4 31.0→15.8、grow22 54.0→33.5、25fv47 166.7→138.0（OFF 大胜）�
 ### 剩余主线
 
 P1（HVector 常驻工作区一揽子改造）仍是最大未实施项：indexed 热路径导出已 support-bounded，但每 solve 仍付 packed 导出/重导入 + internal↔external 置换查表 + IndexedVector 惰性哈希。按 §13.2 作为单个 Class-A 实验立项（新基线：d2q06c 5476/31）。cleanup 尾巴（§1.2）的 Class-A 解法（强化 dual Phase I）为第二立项。
+
+## 8. 分区定价的数学推导：正确性、成本与改进界（2026-08-05）
+
+**记号.** 标准形 $\max\{c^\top x : Ax=b,\ 0\le x\le u\}$，$A\in\mathbb{R}^{m\times n}$。基 $B$（$m$ 列）、非基 $N$（$n-m$ 列）。基本解 $x_B=B^{-1}(b-A_N x_N)$。
+
+**对偶单纯形一次迭代.** (i) CHUZR 选一个原始不可行的基本行 $r$（$x_{B_r}\notin[0,u_{B_r}]$）；(ii) 计算主元行（tableau row）
+$$\alpha_r \;=\; e_r^\top B^{-1} A \;=\; \rho^\top A,\qquad \rho := B^{-\top} e_r\ \text{(BTRAN)},$$
+即 $\alpha_{r,j}=\rho^\top A_j=\sum_{i}\rho_i A_{ij}$；(iii) CHUZC/BFRT 在**非基**列 $j\in N$ 上用比值 $d_j/\alpha_{r,j}$ 选进基列。
+
+**关键观察.** 比值检验只用 $\{\alpha_{r,j}:j\in N\}$。基列 $j\in B$ 的 $\alpha_{r,j}=e_r^\top B^{-1}B\,(\cdot)=e_r^\top(\cdot)\in\{0,1\}$ 是单位结构，进基选择从不使用。行式 PRICE 把 $\rho_i A_{ij}$ 散射进累加器 `acc[j]`。
+
+**定理（分区精确性）.** 对每个非基列 $j\in N$，仅在各 $\rho$-命中行的**非基列条目**上求和所得的 $\alpha_{r,j}$，与在全部列上求和所得**逐位相等**。
+*证.* $\alpha_{r,j}=\sum_{i\in R}\rho_i A_{ij}$，$R:=\{i:\rho_i\ne0\}$，只依赖列 $j$ 自身的条目。固定 $j\in N$，`acc[j]` 恰好接收 $A_{ij}\ne0\wedge\rho_i\ne0$ 之行的贡献，与同行其他（基或非基）列是否被扫描无关。跳过基列 $k\in B$ 只省略对 `acc[k]`（$k\in B$，随后丢弃）的写入。故对 $j\in N$ 的 $\alpha_{r,j}$ 不变。$\square$
+
+因此分区扫描对**被使用的**（非基）主元行条目是精确的。注：结果 packed **顺序**改变（首触顺序变）→ 下游 BFRT tie-break 可能不同 → Class A；但数值精确。
+
+**成本模型.** 设 $\rho$ 支撑 $|R|=$ BTRAN 结果密度 $\times m$。行式 PRICE 的 FMA+散射代价
+$$C_{\text{full}}=\sum_{i\in R}\mathrm{nnz}(A_{i,:}),\qquad C_{\text{part}}=\sum_{i\in R}\mathrm{nnz}_N(A_{i,:}),$$
+节省 $\Delta C=\sum_{i\in R}\mathrm{nnz}_B(A_{i,:})$（$\rho$-命中行里的基列条目）。
+
+**改进界.** 在"每条目以概率 $\beta=m/n$ 属基列"的一阶均匀模型下，
+$$\mathbb{E}\!\left[\frac{\Delta C}{C_{\text{full}}}\right]=\beta=\frac{m}{n}.$$
+d2q06c（标准形 $m\approx1759,\ n\approx6423$）：$\beta\approx0.27$。PRICE 占 minor $\approx0.15/0.62\approx24\%$，故墙钟建模节省 $\approx0.27\times24\%\approx6.5\%$ minor。
+
+**维护成本与净收益.** 每 pivot 恰有一进一出，分区维护 $O(\mathrm{nnz}(\text{enter})+\mathrm{nnz}(\text{leave}))$ 次交换；全程 $\approx 2\,\overline{\mathrm{nnz}_{\text{col}}}\cdot\#\text{pivots}$。d2q06c：$2\cdot5\cdot5476\approx5.5\!\times\!10^4$ 交换，远小于 PRICE 的 $\sum_{\text{piv}}\!\sum_{i\in R}\mathrm{nnz}(A_{i,:})\sim 5476\cdot700\cdot\overline{\mathrm{nnz}_{\text{row}}}$ 量级。净收益 $\Delta C-$ 维护 $>0$ 当 $\overline{\mathrm{nnz}_{\text{col}}}\cdot\#\text{piv}\ll\beta\,C_{\text{full}}$，在本 cohort 广泛成立。
+
+**为何过 §13.3 而 DR-1 常驻视图不过.** DR-1 的单消费者常驻视图省的是**固定的** per-pivot clear/scatter，被候选 dot-scan 摊销（$\ge128$ 候选即 <0.6%）。分区直接削减 dot-scan **本身**（$C_{\text{full}}$ 的 $\sum\mathrm{nnz}$ 主项），有效 bytes 与动态指令同降 → 过 §13.3；这是它清出分辨率而常驻视图不能的根因。
+
+**衍生改进.** 分区后 PRICE 的输出**本身就是**非基候选集合，故当前用于筛非基候选的第三遍 `active_position` 侧通道（T3.4）可并入 PRICE 单遍（进一步去一遍 support 走查）。更进一步：若把 $\rho$ 也按结果密度选择 dense/hyper kernel（§2-T2，已由 P4 修正），BTRAN→PRICE→BFRT 三段可共享同一 internal-序 dense 视图，逼近 HiGHS 的零拷贝流水（P1 一揽子的终态）。
+
