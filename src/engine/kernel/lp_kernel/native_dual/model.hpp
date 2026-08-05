@@ -689,6 +689,10 @@ struct PivotTransaction {
   int bfrt_selected_group_size{0};
   int bfrt_stability_prefiltered{0};
   int bfrt_exact_dot_calls{0};
+  // Step-1b: exact dots spent on pushed candidates whose breakpoint lies BEYOND
+  // the selected group (never summed into the capacity walk, never entered the
+  // basis) => wasted for pivot selection. Sizes the deferred-certification win.
+  int bfrt_exact_dot_wasted{0};
   double bfrt_sort_time_sec{0.0};
   double bfrt_order_time_sec{0.0};
 };

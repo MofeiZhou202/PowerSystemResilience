@@ -206,3 +206,64 @@ d2q06c（标准形 $m\approx1759,\ n\approx6423$）：$\beta\approx0.27$。PRICE
 
 **衍生改进.** 分区后 PRICE 的输出**本身就是**非基候选集合，故当前用于筛非基候选的第三遍 `active_position` 侧通道（T3.4）可并入 PRICE 单遍（进一步去一遍 support 走查）。更进一步：若把 $\rho$ 也按结果密度选择 dense/hyper kernel（§2-T2，已由 P4 修正），BTRAN→PRICE→BFRT 三段可共享同一 internal-序 dense 视图，逼近 HiGHS 的零拷贝流水（P1 一揽子的终态）。
 
+## 9. 精确/认证算术的数值分析理论：为什么 per-pivot 税是可迁移的常数因子（2026-08-06）
+
+**动机.** §2 把 per-pivot gap 归为"六个结构性税"，但 §7 之后的实测（DR-5 系列）逐一证明 wrapper 转换 ≈0%、internal-order fold ≈0%、per-candidate exact dots 全 fleet ≈0%。用 HiGHS 自带 `[SimplexInner-time]` 计时器（`highs_analysis_level=8`）对 d2q06c 逐操作对照后，gap 的真正来源是**精确/认证算术的常数因子**，散布在 BFRT + update + PRICE + DSE。本节从数值分析第一性原理推导该常数因子的**结构**，并据此给出**理论最优**的设计更新——不是"砍精度、丢证书"，而是把证书从 per-candidate **重定位**到 per-pivot。
+
+### 9.1 主元行系数的舍入误差模型（Higham 后向误差）
+
+主元行 $\alpha_{r,j}=\rho^\top A_j=\sum_{i} \rho_i A_{ij}$ 是长度 $k_j=|\{i:\rho_i\ne0,\ A_{ij}\ne0\}|$ 的浮点点积。经典结果（Higham, *ASNA* Thm 3.1）：
+$$\bigl|\mathrm{fl}(\rho^\top A_j)-\rho^\top A_j\bigr|\;\le\;\gamma_{k_j}\sum_i|\rho_i A_{ij}|\;=:\;e_j,\qquad \gamma_k=\frac{ku}{1-ku},\ u=2^{-53}.$$
+这**正是** native 的 `dot_error_bound`（pricing.cpp）：$e_j=\gamma_{k_j}S_j+256\,u\,S_j$，$S_j=\sum_i|\rho_i A_{ij}|$。主元符号/量级"可信"当且仅当 $|\alpha_{r,j}|>e_j$。native 对每个"廉价界不确定"的边界候选**逐个精确求** $e_j$：d2q06c 上 57.7 次/pivot，单次 $O(k_j)$，合计 $\sum_{\text{cand}}O(k_j)\approx 57.7\,\bar k$/pivot。
+
+### 9.2 相对误差定理：max-$|\alpha|$ 是精确界的廉价代理
+
+定义候选相对误差 $r_j:=e_j/|\alpha_{r,j}|=\gamma_{k_j}S_j/|\alpha_{r,j}|$。基更新（进基列 FTRAN 及 LU/eta 更新）以 $\alpha_{r,j^\ast}$ 为**除数**，其传播的相对扰动是 $O(r_{j^\ast})$，**只由被选中的 $j^\ast$ 决定，与被拒候选的 $r_j$ 无关**。
+
+> **定理 9.1（max-$|\alpha|$ 贪心最小化相对误差）.** 在 $S_j$ 可比（$S_j\le\|\rho\|_1\max_i|A_{ij}|$ 有界）的候选集合内，取 $|\alpha_{r,j}|$ 最大者即（近似）最小化 $r_j$。故在 Harris 放松后的**最优断点组**内选 max-$|\alpha|$ 主元，等价于以 $O(\text{group})$ 代价最小化传播相对误差——是 $O(\text{cand}\cdot k)$ 精确界的**廉价代理**。
+
+Harris(1973) 两遍比值检验的理论正是：把界放宽 $\delta$（原始不可行容限）以**扩大**候选组，使组内存在一个大 $|\alpha|$ 主元；付出的 $\delta$ 级原始越界可证明可回收。HiGHS 的 `chooseFinalLargeAlpha`（HEkkDualRow.cpp）即此。**关键：native 的 Harris pass-2（pricing.cpp:1300）已经在选 max-$|\alpha|$**——即稳健性主机制已存在，per-candidate exact dots 是叠加在其上的**第三层冗余**。
+
+### 9.3 两种稳健策略的等价，与理论最优的"认证赢家"中策
+
+- **策略 E（native 现状，逐候选精确）**：对每个边界候选算 $e_j$、拒 $|\alpha_j|\le e_j$、选最小比值。代价 $O(\text{cand}\cdot k)$。
+- **策略 H（HiGHS/Harris 启发式）**：阈值 $\alpha_j>T_a$ 收候选、组内选 max-$|\alpha|$、仅当选中 $|\alpha|$ 仍小才 re-price。代价 $O(\text{cand})+O(\text{group})$。
+- **等价命题.** 在存在终局后向误差审计 $\|B\hat x-b\|_\infty\le\text{tol}$（native 已有 `certify_bfrt_dual_feasibility`/`certify_bfrt_leaving_agreement` + reconstruct 审计）时，H 与 E **同样 sound**：漏检的小 $\alpha$ 主元必被审计拒 → rebuild/taboo，绝不产出错误最优。**实测证实**：关闭全部 exact dots（`MIPSOLVERS_DS_LEAN_RATIO`）在 d2q06c 上 Class-P（5476 pivots 逐位不变）、24/24 accurate。
+- **策略 M（理论最优，认证赢家）**：按 max-$|\alpha|$ 选主元（H），随后**只对被选中的 $j^\ast$** 算精确 $e_{j^\ast}$（1 次 dot，$O(k)$）。这**保留** per-pivot 先验证书，代价从 $O(\text{cand}\cdot k)$ 降到 $O(k)$——d2q06c 上 $57\times$ 缩减；$e_{j^\ast}$ 失败则优雅退化到终局审计。
+
+> **结论：证书不必被丢弃，而应被"重定位"**——从"认证每个候选"迁移到"认证被选中的主元 + 终局审计做后盾"。这是 native 的"certified"标签与 HiGHS 速度之间的理论正确折中，而非"砍精度"。
+
+### 9.4 Apple silicon 上的"精度幻觉"（实测 ABI 事实）
+
+native 的断点 $\theta_j=d_j/\alpha_j$ 与 DSE/证书累加器用 `long double`，意在扩展精度。**实测（arm64 Darwin, clang -O3）：**
+```
+sizeof(double)=8  sizeof(long double)=8   LDBL_MANT_DIG=53  DBL_MANT_DIG=53   (arm64)
+```
+即 **Apple 平台上 `long double` ≡ `double`（同 53-bit 尾数、同 8 字节）**。故 native 的"精确长双"算术在 Apple silicon 上**零额外精度**——只在 codegen 上是一个矢量化/FMA 可能保守对待的独立类型。推论：ARM Mac 上把 `long double`→`double` 对**值逐位无损**，仅去掉类型/codegen 惩罚。（x86 80-bit 或 Linux/aarch64 quad 平台折中不同——这是一条**平台条件化**的设计轴，需 `using ratio_real = ...` typedef 守卫。）
+
+### 9.5 数据结构推论：48B 候选不是精度产物，而是"提前物化"政策产物
+
+`sizeof(Candidate)=48`（实测）：`{col(4)+pad, α(8), breakpoint(8=long double≡double), range(8), taboo(1), taboo_expiry(4), needed_exact(1)}`。HiGHS `workData` 是 `pair<int,double>`（12–16B），把 range/breakpoint **推迟**到 `chooseFinal` 组走查时才算。故 native 的 fat struct **不是**精度产物（此处 long double=double），而是**物化政策**产物：对全部 $\approx938$ 候选提前算齐并存储，而组走查只消费 $\approx1.13$（flips 0.74/pivot）。写流量 $\approx938\times48$ B/pivot vs HiGHS $\approx\text{workCount}\times16$ B——这是 §2-T4 "重型 per-candidate 状态"税的**数值根因**。
+
+### 9.6 理论指导的设计更新（按理论收益 × 安全性排序）
+
+1. **选择机制**：以 max-$|\alpha|$（策略 M，Harris pass-2 已在做）为**主**稳健机制；**只认证赢家**。去掉 56.7/57.7 exact dots，Class-P（实测），保留 per-pivot 证书。→ 已由 `MIPSOLVERS_DS_LEAN_RATIO` 试验证实 sound；补齐"认证赢家"即得中策 M。
+2. **精度轴**：ARM 上 `ratio_real=double`（逐位无损），把 Candidate 瘦身到 `(col, α)` + 惰性 range/breakpoint，BFRT 候选内存流量减半。以 typedef 守卫 x86/quad。
+3. **物化政策**：range/breakpoint 推迟到组走查（只对 $\le$ 被选组算），对齐 HiGHS `choosePossible`→`chooseFinal` 的两段式。
+4. **DSE 轴（+7µs/pivot）**：**实测更正**——native `compute_dse_weights`（pricing.cpp:1620）**已经**用 Goldfarb–Reid 更新递推 $\beta_i-2(\alpha_i/\alpha_r)\tau_i+(\alpha_i/\alpha_r)^2\beta_r$（与 HiGHS `updateDualSteepestEdgeWeights` 逐式相同），**并非**精确逐行 BTRAN。故残差 DSE gap 不是"精确→递推"，而是递推**循环的 per-row 开销**：4 项 roundoff 下界 + `long double`（arm64 上 ≡ double，无 codegen 差）+ `EdgeWeightUpdate` 物化（vs HiGHS 就地更新，属 T1/T4 架构税）。将 floor 削到 1 项 + double（`MIPSOLVERS_DS_LEAN_DSE`）在 d2q06c 上 Class-P + accurate，但仅 ~1µs（噪声级）。→ DSE 已是正确算法，残差是安全/物化常数因子，去除风险高、收益微。
+5. **证书定位（总纲）**：先验界 $e_{j^\ast}$ + 终局审计给出与"逐候选精确认证"**同样的 soundness 包络**，代价 $O(k)$/pivot。证书被**重定位**而非丢弃。
+
+### 9.7 gate 影响的理论预测（诚实上界）
+
+用 HiGHS 自带计时器实测 d2q06c per-pivot：ratio/BFRT native 27µs vs HiGHS 12.3µs（+14.8）、update+copies 13 vs 2.3（+10.7）、DSE 16 vs 9（+7）、PRICE 18 vs 11.25（+6.8）、dual-feas 认证 3.6 vs 0（+3.6）。其中 exact dots 仅 ~2µs（实测去除 ~1.8% dense、~0% fleet）——**证书重定位本身收益小，但它是候选瘦身/物化推迟的 enabler**（1–2 去掉 fat-struct 的前置条件）。瘦身 + 推迟物化针对 +10~12µs 的 BFRT 物化项；DSE 递推针对 +7µs。**这些都是常数因子、集中在 dense case**；fleet gate（被小 case 主导）位移有限。故**理论预测 gate 天花板**：不下调 DSE 精确性与 update 机器，native 无法在 fleet 上翻过 HiGHS，因为这两项是 per-pivot 地板——这与"certified 精确核 vs 双精度启发式核"的本质一致，是**设计选择**而非 bug。
+
+### 9.8 执行记录（2026-08-06）：理论指导的重设计落地与实测
+
+按 §9.6 顺序落地并逐项验证：
+
+- **Increment 1（策略 M，证书重定位）——已实现为默认、已验证.** `pricing.cpp` 的比值检验默认走 Strategy M（`MIPSOLVERS_DS_EXACT_RATIO` 可回退 E）：以支配性廉价界作 per-pivot 证书 + max-$|\alpha|$ Harris 选择 + 终局审计。**exact dots 0/pivot（原 57.7）**；d2q06c **Class-P（5476 pivots 逐位不变）**；netlib **24/24 accurate**；**full ctest 20/20**（BC/SCUC/numstab/market 全绿）。收益 ~1.8% dense、~0% fleet（与 §9.7 预测一致）。**证书被重定位而非丢弃**——这是本次重设计的理论核心成果。
+- **Increment 3（DSE）——premise 被代码证伪.** native **已用** Goldfarb–Reid 递推（见 §9.6-4 更正）。`MIPSOLVERS_DS_LEAN_DSE` 削 floor+double：d2q06c Class-P + accurate，~1µs（噪声级），无回归无实益，保留 flag-gated。
+- **Increment 2（候选瘦身）——结构不匹配，未做.** native 的**分组走查**在走查中需要 breakpoint（分部分组反复找 min，最多 8 遍），故 HiGHS 的 `(col,α)`-only 延迟不成立（延迟=重算 8×）；`long double`==`double`（arm64）无 size 变化。清洁瘦身需连带替换走查，收益 dense-only、风险中，暂缓。
+
+**总结论.** 理论指导的逐项落地证明 **native 在算法层已经正确**（max-$|\alpha|$ Harris + Goldfarb–Reid 递推），此前"精确算术税"的六项中，比值 exact dots 是**可安全重定位的证书**（已落地），DSE 递推**本就存在**。残差 per-pivot gap 是安全下界/roundoff/物化的**常数因子机器**——每项单独小、去除风险高、且理论上 fleet-gate 中性。**"翻过 HiGHS"的唯一剩余路径是整体降精度成双精度启发式核（放弃证书）——这是产品定位的设计抉择，不是可由 bug 修复达成的目标。**
+

@@ -179,6 +179,10 @@ struct HFactorBackend::Impl {
   mutable double density_mean_ep = 0.0;
   mutable bool profile_indexed_solves = false;
   mutable double profiled_indexed_solve_time_sec = 0.0;
+  mutable double profiled_indexed_export_time_sec = 0.0;
+  // BTRAN-only export subset (row-space result, NO internal<->external convert,
+  // pure pack). FTRAN-export-with-conversion = export_time - export_btran_time.
+  mutable double profiled_indexed_export_btran_time_sec = 0.0;
   mutable double profiled_indexed_solve_synthetic_tick = 0.0;
   mutable std::uint64_t profiled_indexed_solve_count = 0;
   mutable std::uint64_t aq_capture_serial = 0;
@@ -188,6 +192,13 @@ struct HFactorBackend::Impl {
   mutable std::uint64_t dense_solves = 0;
   mutable std::uint64_t indexed_solves = 0;
   std::uint64_t factor_serial = 0;
+  // Caller basis position (external) -> HFactor internal position, and back.
+  HighsInt in_pos(int external) const {
+    return external_to_internal[static_cast<std::size_t>(external)];
+  }
+  HighsInt out_pos(HighsInt internal) const {
+    return internal_to_external[static_cast<std::size_t>(internal)];
+  }
 };
 
 HFactorBackend::HFactorBackend() : p_(std::make_unique<Impl>()) {}
@@ -211,12 +222,22 @@ std::uint64_t HFactorBackend::indexed_solve_count() const noexcept {
 void HFactorBackend::set_indexed_solve_profiling(bool enabled) noexcept {
   p_->profile_indexed_solves = enabled;
   p_->profiled_indexed_solve_time_sec = 0.0;
+  p_->profiled_indexed_export_time_sec = 0.0;
+  p_->profiled_indexed_export_btran_time_sec = 0.0;
   p_->profiled_indexed_solve_synthetic_tick = 0.0;
   p_->profiled_indexed_solve_count = 0;
 }
 
 double HFactorBackend::profiled_indexed_solve_time_sec() const noexcept {
   return p_->profiled_indexed_solve_time_sec;
+}
+
+double HFactorBackend::profiled_indexed_export_time_sec() const noexcept {
+  return p_->profiled_indexed_export_time_sec;
+}
+
+double HFactorBackend::profiled_indexed_export_btran_time_sec() const noexcept {
+  return p_->profiled_indexed_export_btran_time_sec;
 }
 
 double HFactorBackend::profiled_indexed_solve_synthetic_tick() const noexcept {
@@ -567,8 +588,7 @@ void HFactorBackend::ftran(const double* rhs, double* result,
     std::memcpy(buf.data(), rhs, static_cast<size_t>(m) * sizeof(double));
     nc.ftranCall(buf, /*factor_timer_clock_pointer*/ nullptr);
     for (int external = 0; external < m; ++external) {
-      const int internal = static_cast<int>(
-          p_->external_to_internal[static_cast<std::size_t>(external)]);
+      const int internal = static_cast<int>(p_->in_pos(external));
       result[external] = buf[static_cast<std::size_t>(internal)];
       if (result_pattern != nullptr && result[external] != 0.0) {
         result_pattern->push_back(external);
@@ -604,16 +624,14 @@ void HFactorBackend::ftran(const double* rhs, double* result,
   nc.ftranCall(vector, p_->density_mean_ftran, nullptr);
   update_solve_density_mean(p_->density_mean_ftran, vector.count, m);
   for (int external = 0; external < m; ++external) {
-    const int internal = static_cast<int>(
-        p_->external_to_internal[static_cast<std::size_t>(external)]);
+    const int internal = static_cast<int>(p_->in_pos(external));
     result[external] = vector.array[static_cast<std::size_t>(internal)];
   }
   if (result_pattern != nullptr && vector.count >= 0) {
     result_pattern->reserve(static_cast<std::size_t>(vector.count));
     for (HighsInt k = 0; k < vector.count; ++k) {
       const HighsInt internal = vector.index[static_cast<std::size_t>(k)];
-      result_pattern->push_back(static_cast<int>(
-          p_->internal_to_external[static_cast<std::size_t>(internal)]));
+      result_pattern->push_back(static_cast<int>(p_->out_pos(internal)));
     }
   }
 }
@@ -656,16 +674,14 @@ void HFactorBackend::ftran_for_update(
   if (m >= hyper_sparse_min_rows())
     update_solve_density_mean(p_->density_mean_aq, vector.count, m);
   for (int external = 0; external < m; ++external) {
-    const int internal = static_cast<int>(
-        p_->external_to_internal[static_cast<std::size_t>(external)]);
+    const int internal = static_cast<int>(p_->in_pos(external));
     result[external] = vector.array[static_cast<std::size_t>(internal)];
   }
   if (result_pattern != nullptr && vector.count >= 0) {
     result_pattern->reserve(static_cast<std::size_t>(vector.count));
     for (HighsInt k = 0; k < vector.count; ++k) {
       const HighsInt internal = vector.index[static_cast<std::size_t>(k)];
-      result_pattern->push_back(static_cast<int>(
-          p_->internal_to_external[static_cast<std::size_t>(internal)]));
+      result_pattern->push_back(static_cast<int>(p_->out_pos(internal)));
     }
   }
   p_->aq_capture_serial = p_->factor_serial;
@@ -683,8 +699,7 @@ void HFactorBackend::btran(const double* rhs, double* result,
     // Small system: exact dense path (byte-identical to pre-hyper-sparse).
     std::vector<double>& buf = p_->solve_buf;
     for (int external = 0; external < m; ++external) {
-      const int internal = static_cast<int>(
-          p_->external_to_internal[static_cast<std::size_t>(external)]);
+      const int internal = static_cast<int>(p_->in_pos(external));
       buf[static_cast<std::size_t>(internal)] = rhs[external];
     }
     nc.btranCall(buf, /*factor_timer_clock_pointer*/ nullptr);
@@ -705,8 +720,7 @@ void HFactorBackend::btran(const double* rhs, double* result,
   if (rhs_pattern != nullptr) {
     for (int external : *rhs_pattern) {
       if (external < 0 || external >= m) continue;
-      const int internal = static_cast<int>(
-          p_->external_to_internal[static_cast<std::size_t>(external)]);
+      const int internal = static_cast<int>(p_->in_pos(external));
       const double value = rhs[external];
       vector.array[static_cast<std::size_t>(internal)] = value;
       if (value != 0.0) {
@@ -715,8 +729,7 @@ void HFactorBackend::btran(const double* rhs, double* result,
     }
   } else {
     for (int external = 0; external < m; ++external) {
-      const int internal = static_cast<int>(
-          p_->external_to_internal[static_cast<std::size_t>(external)]);
+      const int internal = static_cast<int>(p_->in_pos(external));
       const double value = rhs[external];
       vector.array[static_cast<std::size_t>(internal)] = value;
       if (value != 0.0) {
@@ -750,8 +763,7 @@ void HFactorBackend::btran_for_update(
     for (int external : *rhs_pattern) {
       if (external < 0 || external >= m) continue;
       const double value = rhs[external];
-      const HighsInt internal =
-          p_->external_to_internal[static_cast<std::size_t>(external)];
+      const HighsInt internal = p_->in_pos(external);
       vector.array[static_cast<std::size_t>(internal)] = value;
       if (value != 0.0) {
         vector.index[static_cast<std::size_t>(vector.count++)] = internal;
@@ -760,8 +772,7 @@ void HFactorBackend::btran_for_update(
   } else {
     for (int external = 0; external < m; ++external) {
       const double value = rhs[external];
-      const HighsInt internal =
-          p_->external_to_internal[static_cast<std::size_t>(external)];
+      const HighsInt internal = p_->in_pos(external);
       vector.array[static_cast<std::size_t>(internal)] = value;
       if (value != 0.0) {
         vector.index[static_cast<std::size_t>(vector.count++)] = internal;
@@ -824,11 +835,17 @@ bool HFactorBackend::ftran_indexed(
   const double expected_density = std::max(
       static_cast<double>(vector.count) / std::max(1, m), density_mean);
   nc.ftranCall(vector, expected_density, nullptr);
+  const auto solve_end =
+      p_->profile_indexed_solves ? std::chrono::steady_clock::now()
+                                 : std::chrono::steady_clock::time_point{};
   update_solve_density_mean(density_mean, vector.count, m);
   auto record_profile = [&]() {
     if (!p_->profile_indexed_solves) return;
-    p_->profiled_indexed_solve_time_sec += std::chrono::duration<double>(
-        std::chrono::steady_clock::now() - solve_start).count();
+    const auto tp_now = std::chrono::steady_clock::now();
+    p_->profiled_indexed_solve_time_sec +=
+        std::chrono::duration<double>(tp_now - solve_start).count();
+    p_->profiled_indexed_export_time_sec +=
+        std::chrono::duration<double>(tp_now - solve_end).count();
     p_->profiled_indexed_solve_synthetic_tick += vector.synthetic_tick;
     ++p_->profiled_indexed_solve_count;
   };
@@ -849,8 +866,7 @@ bool HFactorBackend::ftran_indexed(
     const double entry = vector.array[static_cast<std::size_t>(internal)];
     if (entry == 0.0) continue;
     all_finite = all_finite && std::isfinite(entry);
-    result_index.push_back(static_cast<int>(
-        p_->internal_to_external[static_cast<std::size_t>(internal)]));
+    result_index.push_back(static_cast<int>(p_->out_pos(internal)));
     result_value.push_back(entry);
   }
   if (!all_finite) {
@@ -893,11 +909,17 @@ bool HFactorBackend::ftran_indexed_at_captured_pattern(
       static_cast<double>(vector.count) / std::max(1, m),
       p_->density_mean_ftran);
   nc.ftranCall(vector, expected_density, nullptr);
+  const auto solve_end =
+      p_->profile_indexed_solves ? std::chrono::steady_clock::now()
+                                 : std::chrono::steady_clock::time_point{};
   update_solve_density_mean(p_->density_mean_ftran, vector.count, m);
   auto record_profile = [&]() {
     if (!p_->profile_indexed_solves) return;
-    p_->profiled_indexed_solve_time_sec += std::chrono::duration<double>(
-        std::chrono::steady_clock::now() - solve_start).count();
+    const auto tp_now = std::chrono::steady_clock::now();
+    p_->profiled_indexed_solve_time_sec +=
+        std::chrono::duration<double>(tp_now - solve_start).count();
+    p_->profiled_indexed_export_time_sec +=
+        std::chrono::duration<double>(tp_now - solve_end).count();
     p_->profiled_indexed_solve_synthetic_tick += vector.synthetic_tick;
     ++p_->profiled_indexed_solve_count;
   };
@@ -930,8 +952,7 @@ bool HFactorBackend::captured_aq_value(int external_row, double& out) const {
       !p_->aq_capture_valid || p_->aq_capture_serial != p_->factor_serial) {
     return false;
   }
-  const HighsInt internal =
-      p_->external_to_internal[static_cast<std::size_t>(external_row)];
+  const HighsInt internal = p_->in_pos(external_row);
   if (internal < 0 || internal >= m) return false;
   out = p_->update_vec_aq.array[static_cast<std::size_t>(internal)];
   return true;
@@ -955,8 +976,7 @@ bool HFactorBackend::btran_indexed(
     const int external = rhs_index[k];
     const double entry = rhs_value[k];
     if (external < 0 || external >= m || entry == 0.0) continue;
-    const HighsInt internal =
-        p_->external_to_internal[static_cast<std::size_t>(external)];
+    const HighsInt internal = p_->in_pos(external);
     vector.array[static_cast<std::size_t>(internal)] = entry;
     vector.index[static_cast<std::size_t>(vector.count++)] = internal;
   }
@@ -967,11 +987,19 @@ bool HFactorBackend::btran_indexed(
   const double expected_density = std::max(
       static_cast<double>(vector.count) / std::max(1, m), density_mean);
   nc.btranCall(vector, expected_density, nullptr);
+  const auto solve_end =
+      p_->profile_indexed_solves ? std::chrono::steady_clock::now()
+                                 : std::chrono::steady_clock::time_point{};
   update_solve_density_mean(density_mean, vector.count, m);
   auto record_profile = [&]() {
     if (!p_->profile_indexed_solves) return;
-    p_->profiled_indexed_solve_time_sec += std::chrono::duration<double>(
-        std::chrono::steady_clock::now() - solve_start).count();
+    const auto tp_now = std::chrono::steady_clock::now();
+    p_->profiled_indexed_solve_time_sec +=
+        std::chrono::duration<double>(tp_now - solve_start).count();
+    const double export_sec =
+        std::chrono::duration<double>(tp_now - solve_end).count();
+    p_->profiled_indexed_export_time_sec += export_sec;
+    p_->profiled_indexed_export_btran_time_sec += export_sec;
     p_->profiled_indexed_solve_synthetic_tick += vector.synthetic_tick;
     ++p_->profiled_indexed_solve_count;
   };
@@ -1034,8 +1062,7 @@ bool HFactorBackend::update_captured(int pivot_row, int entering_col) {
     return false;
   }
 
-  const HighsInt internal_pivot =
-      p_->external_to_internal[static_cast<std::size_t>(pivot_row)];
+  const HighsInt internal_pivot = p_->in_pos(pivot_row);
   if (internal_pivot < 0 || internal_pivot >= m) return false;
 
   HVector& aq = p_->update_vec_aq;

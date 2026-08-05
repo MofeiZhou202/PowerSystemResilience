@@ -58,10 +58,17 @@ class HFactorBackend {
   // wall time covers the HFactor call and result extraction.
   void set_indexed_solve_profiling(bool enabled) noexcept;
   double profiled_indexed_solve_time_sec() const noexcept;
+  // Wall time spent ONLY in the internal<->external export/re-pack loop that
+  // follows each HFactor solve (subset of profiled_indexed_solve_time_sec).
+  // Sizes the wrapper-translation redundancy vs HiGHS' resident dense HVector.
+  double profiled_indexed_export_time_sec() const noexcept;
+  // BTRAN-only export subset (pure pack, no conversion).
+  double profiled_indexed_export_btran_time_sec() const noexcept;
   double profiled_indexed_solve_synthetic_tick() const noexcept;
   std::uint64_t profiled_indexed_solve_count() const noexcept;
   // Synthetic work recorded by HFactor for the most recent INVERT.
   double build_synthetic_tick() const noexcept;
+
 
   // Rows that received no pivot in the last failed build (HiGHS-style
   // basis repair input): replace each such row's basic column with the

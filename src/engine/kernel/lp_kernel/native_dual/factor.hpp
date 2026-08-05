@@ -98,6 +98,12 @@ class BasisFactor final : public BasisOps {
   double profiled_indexed_solve_time_sec() const {
     return rank_factor_.profiled_indexed_solve_time_sec();
   }
+  double profiled_indexed_export_time_sec() const {
+    return rank_factor_.profiled_indexed_export_time_sec();
+  }
+  double profiled_indexed_export_btran_time_sec() const {
+    return rank_factor_.profiled_indexed_export_btran_time_sec();
+  }
   double profiled_indexed_solve_synthetic_tick() const {
     return rank_factor_.profiled_indexed_solve_synthetic_tick();
   }

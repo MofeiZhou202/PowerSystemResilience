@@ -268,10 +268,17 @@ struct DSProfile {
   long pivots = 0, rebuilds = 0;
   long bfrt_calls = 0, bfrt_candidates = 0, bfrt_groups = 0,
        bfrt_selected_group = 0, bfrt_flips = 0,
-       bfrt_stability_prefiltered = 0, bfrt_exact_dots = 0;
+       bfrt_stability_prefiltered = 0, bfrt_exact_dots = 0,
+       bfrt_exact_dots_wasted = 0;
   int bfrt_max_candidates = 0, bfrt_max_groups = 0,
       bfrt_max_selected_group = 0, bfrt_max_flips = 0;
   int model_m = 0, model_n = 0;
+  // Wrapper-translation split (Step 1 measurement): total HFactor indexed-solve
+  // wall time and the export/re-pack subset of it. Captured from the factor at
+  // the end of solve_impl. solve_pure = solve_time - export_time.
+  double solve_time = 0.0, export_time = 0.0;
+  double export_btran_time = 0.0;
+  std::uint64_t solve_count = 0;
   // Average structural support of the two hot simplex vectors.
   double sum_rowep_nnz = 0.0, sum_pivotrow_nnz = 0.0;
   long density_samples = 0;
@@ -291,10 +298,14 @@ struct DSProfile {
     dual_two_reinvert.clear();
     pivots = rebuilds = 0;
     bfrt_calls = bfrt_candidates = bfrt_groups = bfrt_selected_group =
-        bfrt_flips = bfrt_stability_prefiltered = bfrt_exact_dots = 0;
+        bfrt_flips = bfrt_stability_prefiltered = bfrt_exact_dots =
+            bfrt_exact_dots_wasted = 0;
     bfrt_max_candidates = bfrt_max_groups = bfrt_max_selected_group =
         bfrt_max_flips = 0;
     model_m = model_n = 0;
+    solve_time = export_time = 0.0;
+    export_btran_time = 0.0;
+    solve_count = 0;
     start_clock = enabled ? std::chrono::duration<double>(
                                 std::chrono::steady_clock::now()
                                     .time_since_epoch())
@@ -322,6 +333,32 @@ struct DSProfile {
                  edge_init, leaving, price, entering, ftran, dse, postcond,
                  rc_update, valid, lu_update, cycle,
                  other - postcond - rc_update - valid - lu_update - cycle);
+    {
+      const double solve_pure = solve_time - export_time;
+      const double solve_related = leaving + ftran + dse;
+      const double export_ftran = export_time - export_btran_time;
+      std::fprintf(
+          stderr,
+          "[DS-SOLVE-SPLIT] indexedSolves=%llu solveWall=%.3f "
+          "pureSolve=%.3f export/convert=%.3f (%.1f%% of solveWall) | "
+          "solveRelatedBuckets(leaving+ftran+dse)=%.3f export=%.1f%% of those "
+          "| export=%.1f%% of minor=%.3f\n",
+          static_cast<unsigned long long>(solve_count), solve_time, solve_pure,
+          export_time, solve_time > 0 ? 100.0 * export_time / solve_time : 0.0,
+          solve_related,
+          solve_related > 0 ? 100.0 * export_time / solve_related : 0.0,
+          minor_total > 0 ? 100.0 * export_time / minor_total : 0.0,
+          minor_total);
+      std::fprintf(
+          stderr,
+          "[DS-EXPORT-SPLIT] total=%.4f ftranConvert(reorder removes)=%.4f "
+          "(%.1f%% of minor) btranPack(dedicated buffers remove)=%.4f "
+          "(%.1f%% of minor)\n",
+          export_time, export_ftran,
+          minor_total > 0 ? 100.0 * export_ftran / minor_total : 0.0,
+          export_btran_time,
+          minor_total > 0 ? 100.0 * export_btran_time / minor_total : 0.0);
+    }
     if (density_samples > 0) {
       const double avg_rowep = sum_rowep_nnz / static_cast<double>(density_samples);
       const double avg_pivotrow =
@@ -340,12 +377,17 @@ struct DSProfile {
           "[DS-BFRT] calls=%ld candidates=%.1f/%d order=%.6fs sort=%.6fs "
           "groups=%.1f/%d "
           "selectedGroup=%.2f/%d flips=%.2f/%d stabilityPrefiltered=%ld "
-          "exactDots=%.1f/pivot(%ld)\n",
+          "exactDots=%.1f/pivot(%ld) wastedExactDots=%.1f/pivot(%ld,%.0f%%)\n",
           bfrt_calls, bfrt_candidates / calls, bfrt_max_candidates,
           bfrt_order, bfrt_sort, bfrt_groups / calls, bfrt_max_groups,
           bfrt_selected_group / calls, bfrt_max_selected_group,
           bfrt_flips / calls, bfrt_max_flips,
-          bfrt_stability_prefiltered, bfrt_exact_dots / calls, bfrt_exact_dots);
+          bfrt_stability_prefiltered, bfrt_exact_dots / calls, bfrt_exact_dots,
+          bfrt_exact_dots_wasted / calls, bfrt_exact_dots_wasted,
+          bfrt_exact_dots > 0
+              ? 100.0 * static_cast<double>(bfrt_exact_dots_wasted) /
+                    static_cast<double>(bfrt_exact_dots)
+              : 0.0);
     }
     const auto report_reinvert = [](const char* phase,
                                     const ReinvertPhaseProfile& profile) {
@@ -704,6 +746,7 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
     g_ds_profile.bfrt_stability_prefiltered +=
         transaction.bfrt_stability_prefiltered;
     g_ds_profile.bfrt_exact_dots += transaction.bfrt_exact_dot_calls;
+    g_ds_profile.bfrt_exact_dots_wasted += transaction.bfrt_exact_dot_wasted;
     g_ds_profile.bfrt_max_candidates = std::max(
         g_ds_profile.bfrt_max_candidates, transaction.bfrt_candidate_count);
     g_ds_profile.bfrt_max_groups =
@@ -1395,6 +1438,19 @@ Result solve_impl(const StandardFormLP& sf, const SimplexOptions& options,
   g_ds_profile.model_m = state.m;
   g_ds_profile.model_n = state.n;
   state.factor->set_indexed_solve_profiling(g_ds_profile.enabled);
+  // Capture the wrapper-translation split (Step 1 measurement) at scope exit,
+  // while state.factor is still alive (report() runs after solve_impl returns).
+  struct SolveSplitGuard {
+    State& st;
+    ~SolveSplitGuard() {
+      if (!g_ds_profile.enabled || !st.factor) return;
+      g_ds_profile.solve_time = st.factor->profiled_indexed_solve_time_sec();
+      g_ds_profile.export_time = st.factor->profiled_indexed_export_time_sec();
+      g_ds_profile.export_btran_time =
+          st.factor->profiled_indexed_export_btran_time_sec();
+      g_ds_profile.solve_count = st.factor->profiled_indexed_solve_count();
+    }
+  } solve_split_guard{state};
 
   auto run_dual_phase = [&]() -> Result {
     const Phase phase = state.phase;

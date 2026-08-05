@@ -469,8 +469,16 @@ RunResult run_highs(const CaseInfo& kase, const std::string& algorithm,
   const auto t0 = std::chrono::steady_clock::now();
   Highs::resetGlobalScheduler(true);
   Highs highs;
-  highs.setOptionValue("output_flag", false);
-  highs.setOptionValue("log_to_console", false);
+  if (std::getenv("MIPSOLVERS_HIGHS_TIMER") != nullptr) {
+    // Emit HiGHS' own per-operation simplex timer report (kHighsAnalysisLevel
+    // SolverTime = 8) for a direct comparison against native's [DS-PROFILE].
+    highs.setOptionValue("output_flag", true);
+    highs.setOptionValue("log_to_console", true);
+    highs.setOptionValue("highs_analysis_level", 8);
+  } else {
+    highs.setOptionValue("output_flag", false);
+    highs.setOptionValue("log_to_console", false);
+  }
   highs.setOptionValue("threads", static_cast<HighsInt>(1));
   highs.setOptionValue("time_limit", time_limit_sec);
   highs.setOptionValue("solver", algorithm);

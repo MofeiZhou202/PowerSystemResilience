@@ -31,6 +31,11 @@ struct Candidate {
   double range{std::numeric_limits<double>::infinity()};
   bool taboo{false};
   int taboo_expiry{-1};
+  // Step-1b measurement: this candidate's stability certification consumed an
+  // exact dot_error_bound (cheap bound was inconclusive). Travels with the
+  // struct through the group swaps/sorts so we can tell, after the walk, how
+  // many exact dots were spent on candidates BEYOND the selected breakpoint.
+  bool needed_exact{false};
 };
 
 struct BfrtScanEvaluation {
@@ -49,6 +54,7 @@ struct BfrtScanEvaluation {
   bool stable{false};
   bool candidate{false};
   bool finite{true};
+  bool needed_exact{false};
 };
 
 enum BfrtPrefilterFlag : std::uint8_t {
@@ -362,6 +368,27 @@ double dot_error_bound(const State& state, const IndexedVector& row_ep, int col,
   const double gamma = product < 0.5 ? product / (1.0 - product) : 1.0;
   if (absolute_dot == 0.0) return 0.0;
   return gamma * absolute_dot + 256.0 * eps * absolute_dot;
+}
+
+// Ratio-test stability strategy (theory §9). DEFAULT = Strategy M: rely on the
+// dominating cheap error bound (bfrt_error_coef*row_ep_max_abs >= the exact
+// Higham bound gamma_k*Sum|rho_i A_ij|) for admission + native's max-|alpha|
+// Harris pass-2 selection + terminal audit. The dominating cheap bound IS a
+// per-pivot certificate (it upper-bounds the exact one), so the winner is
+// certified without the redundant per-candidate exact dots. Opt back into the
+// per-candidate exact bound (Strategy E) with MIPSOLVERS_DS_EXACT_RATIO.
+inline bool lean_ratio_enabled() {
+  static const bool v = std::getenv("MIPSOLVERS_DS_EXACT_RATIO") == nullptr;
+  return v;
+}
+
+// Lean DSE recurrence (MIPSOLVERS_DS_LEAN_DSE): native already uses the
+// Goldfarb-Reid update beta_i - 2(a_i/a_r)tau_i + (a_i/a_r)^2 beta_r; this only
+// trims the per-row overhead (long double, which == double on arm64, and the
+// 4-term roundoff floor -> a 1-term floor on |beta_i|).
+inline bool lean_dse_enabled() {
+  static const bool v = std::getenv("MIPSOLVERS_DS_LEAN_DSE") != nullptr;
+  return v;
 }
 
 void prefilter_active_phase_two(const State& state, const Leaving& leaving,
@@ -886,6 +913,7 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
     prefilter_active_phase_two(state, leaving, pivot_row, active_position,
                                row_ep_max_abs, stable_pivot_tolerance,
                                prefilter);
+    const bool lean = lean_ratio_enabled();
     for (int s = 0; s < scan_count; ++s) {
       const std::size_t position = static_cast<std::size_t>(s);
       const int col = scan_col(s);
@@ -906,7 +934,7 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
         continue;
       }
       if (!positive) {
-        if ((flags & kBfrtNeedsExact) != 0) {
+        if (!lean && (flags & kBfrtNeedsExact) != 0) {
           ++transaction.bfrt_exact_dot_calls;
           const double error = dot_error_bound(state, leaving.row_ep, col,
                                                dense_row_ep_for_dot());
@@ -919,14 +947,26 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
       }
 
       double error = 0.0;
-      if ((flags & kBfrtCheapCertified) != 0) {
-        error = state.bfrt_error_coef[static_cast<std::size_t>(col)] *
-                row_ep_max_abs;
-      } else {
+      bool used_exact_dot = false;
+      if (!lean && (flags & kBfrtCheapCertified) == 0) {
         ++transaction.bfrt_exact_dot_calls;
+        used_exact_dot = true;
         error =
             dot_error_bound(state, leaving.row_ep, col, dense_row_ep_for_dot());
         if (!(alpha > error)) {
+          if (alpha + error > 0.0) {
+            transaction.stability_blocked = true;
+            ++transaction.unstable_pivot_rejections;
+          }
+          continue;
+        }
+      } else {
+        // Cheap error bound (also the lean path for borderline candidates that
+        // would otherwise take an exact dot): conservative, so admission stays
+        // sound and the terminal audit remains the backstop.
+        error = state.bfrt_error_coef[static_cast<std::size_t>(col)] *
+                row_ep_max_abs;
+        if (lean && !(alpha > error)) {
           if (alpha + error > 0.0) {
             transaction.stability_blocked = true;
             ++transaction.unstable_pivot_rejections;
@@ -957,7 +997,7 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
           taboo_possible &&
           is_taboo_change(state, bfrt_leaving_col, col, &taboo_expiry);
       candidates.push_back(
-          {col, alpha, breakpoint, range, taboo, taboo_expiry});
+          {col, alpha, breakpoint, range, taboo, taboo_expiry, used_exact_dot});
     }
   }
   if (!branch_free_phase_two) {
@@ -1032,6 +1072,7 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
           const std::vector<double>* dense =
               parallel_scan ? parallel_dense_row_ep : dense_row_ep_for_dot();
           evaluation.error = dot_error_bound(state, leaving.row_ep, j, dense);
+          evaluation.needed_exact = true;
           if (!(evaluation.signed_alpha > evaluation.error)) {
             evaluation.stability_blocked =
                 evaluation.signed_alpha + evaluation.error > 0.0;
@@ -1101,7 +1142,7 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
                                             evaluation.col, &taboo_expiry);
       candidates.push_back({evaluation.col, evaluation.signed_alpha,
                             evaluation.breakpoint, evaluation.range, taboo,
-                            taboo_expiry});
+                            taboo_expiry, evaluation.needed_exact});
     }
   }
   if (candidates.empty()) return true;
@@ -1257,6 +1298,12 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
   if (selected_end <= selected_begin) return true;
   transaction.bfrt_selected_group_size =
       static_cast<int>(selected_end - selected_begin);
+  // Step-1b: candidates beyond the selected group were never summed into the
+  // capacity walk and never enter the basis. Any exact dot spent certifying
+  // their stability was wasted for pivot selection.
+  for (std::size_t i = selected_end; i < candidates.size(); ++i) {
+    if (candidates[i].needed_exact) ++transaction.bfrt_exact_dot_wasted;
+  }
 
   // Harris pass 1 uses the same numerically certified pivot domain as pass 2.
   // A raw tableau coefficient whose sign is inside its dot-product error bound
@@ -1605,6 +1652,7 @@ bool compute_dse_weights(const State& state, const Leaving& leaving,
       state.edge_weight[static_cast<std::size_t>(leaving.row)];
   const double inv_pivot = 1.0 / pivot;
   const int update_count = static_cast<int>(direction.index.size());
+  const bool lean_dse = lean_dse_enabled();
   update.nonpivotal_value.reserve(static_cast<std::size_t>(update_count));
   for (int position = 0; position < update_count; ++position) {
     const int row = direction.index[static_cast<std::size_t>(position)];
@@ -1617,20 +1665,29 @@ bool compute_dse_weights(const State& state, const Leaving& leaving,
         direction.value[static_cast<std::size_t>(position)] * inv_pivot;
     const double rho_value =
         rho_on_direction[static_cast<std::size_t>(position)];
-    const long double ratio_ld = static_cast<long double>(ratio);
-    const long double value_ld =
-        static_cast<long double>(
-            state.edge_weight[static_cast<std::size_t>(row)]) -
-        2.0L * ratio_ld * static_cast<long double>(rho_value) +
-        ratio_ld * ratio_ld *
-            static_cast<long double>(old_pivotal_weight);
-    const double value = static_cast<double>(value_ld);
-    const double roundoff =
-        1024.0 * std::numeric_limits<double>::epsilon() *
-        std::max({1.0,
-                  std::abs(state.edge_weight[static_cast<std::size_t>(row)]),
-                  std::abs(2.0 * ratio * rho_value),
-                  std::abs(ratio * ratio * old_pivotal_weight)});
+    const double stored_weight =
+        state.edge_weight[static_cast<std::size_t>(row)];
+    double value;
+    double roundoff;
+    if (lean_dse) {
+      // arm64: long double == double, so this is bit-identical to the branch
+      // below except for the leaner floor (dominant term |beta_i| only).
+      value = stored_weight - 2.0 * ratio * rho_value +
+              ratio * ratio * old_pivotal_weight;
+      roundoff = 1024.0 * std::numeric_limits<double>::epsilon() *
+                 std::max(1.0, std::abs(stored_weight));
+    } else {
+      const long double ratio_ld = static_cast<long double>(ratio);
+      const long double value_ld =
+          static_cast<long double>(stored_weight) -
+          2.0L * ratio_ld * static_cast<long double>(rho_value) +
+          ratio_ld * ratio_ld * static_cast<long double>(old_pivotal_weight);
+      value = static_cast<double>(value_ld);
+      roundoff = 1024.0 * std::numeric_limits<double>::epsilon() *
+                 std::max({1.0, std::abs(stored_weight),
+                           std::abs(2.0 * ratio * rho_value),
+                           std::abs(ratio * ratio * old_pivotal_weight)});
+    }
     if (!std::isfinite(value)) {
       failure = "Goldfarb-Reid update produced a non-finite DSE weight";
       return false;
