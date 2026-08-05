@@ -311,10 +311,12 @@ class StandardColumnMatrix {
 };
 
 // CSR row-access view over StandardColumnMatrix. It owns row pointers and an
-// adaptive-width (row-offset, column, CSC-position) indices, but shares the CSC
-// value array. At the audited 10^7-by-10^7 / 10^8-nnz scale all three indices
-// are 32-bit, so the row view costs 4 bytes/row + 8 bytes/nnz instead of
-// duplicating 8-byte values and 64-bit indices.
+// adaptive-width (row-offset, column, CSC-position) indices, plus a flat
+// row-ordered value copy so the PRICE inner loop streams values sequentially
+// instead of gathering one random CSC cache line per nonzero. At the audited
+// 10^7-by-10^7 / 10^8-nnz scale all three indices are 32-bit, so the row view
+// costs 4 bytes/row + 16 bytes/nnz — still below duplicating 8-byte values
+// with 64-bit indices, and the hot loop touches only 12 sequential bytes/nnz.
 class StandardRowMatrix {
  public:
   using StorageIndex = StandardFormIndex;
@@ -421,6 +423,7 @@ class StandardRowMatrix {
     }
     values_ = matrix.valuePtr();
     source_nnz_ = nnz;
+    refresh_flat_values();
   }
 
   void rebind_values(const StandardColumnMatrix& matrix) noexcept {
@@ -430,6 +433,7 @@ class StandardRowMatrix {
       return;
     }
     values_ = matrix.valuePtr();
+    refresh_flat_values();
   }
 
   StandardFormIndex rows() const noexcept { return rows_; }
@@ -477,6 +481,21 @@ class StandardRowMatrix {
                : 0.0;
   }
 
+  // Materializes the row-ordered value stream from the shared CSC values.
+  // Must run after any in-place change to the CSC value array the view is
+  // bound to (currently only ruiz_scale_standard_form).
+  void refresh_flat_values() noexcept {
+    if (values_ == nullptr) {
+      flat_values_.clear();
+      return;
+    }
+    flat_values_.resize(static_cast<std::size_t>(source_nnz_));
+    for (StandardFormIndex k = 0; k < source_nnz_; ++k) {
+      flat_values_[static_cast<std::size_t>(k)] =
+          values_[source_position(k)];
+    }
+  }
+
  private:
   StandardFormIndex outer_at(StandardFormIndex row) const noexcept {
     return wide_outer_
@@ -512,7 +531,9 @@ class StandardRowMatrix {
                      position32_[static_cast<std::size_t>(position)]);
   }
   double value_at(StandardFormIndex position) const {
-    return values_ == nullptr ? 0.0 : values_[source_position(position)];
+    return values_ == nullptr
+               ? 0.0
+               : flat_values_[static_cast<std::size_t>(position)];
   }
 
   StandardFormIndex rows_{0};
@@ -527,6 +548,7 @@ class StandardRowMatrix {
   std::vector<StandardFormIndex> inner64_;
   std::vector<std::uint32_t> position32_;
   std::vector<StandardFormIndex> position64_;
+  std::vector<double> flat_values_;
   const double* values_{nullptr};
 };
 

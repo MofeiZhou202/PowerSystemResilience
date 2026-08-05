@@ -2315,6 +2315,10 @@ TEST_CASE("Standard form uses adaptive CSC and a shared-value row view",
       StandardColumnMatrix::InnerIterator(copied.A, 0).row());
   const double source_value = sf.A.coeff(row, col);
   copied.A.valuePtr()[0] += 3.0;
+  // The row view materializes a flat row-ordered value stream for sequential
+  // PRICE access; in-place CSC mutations become visible after an explicit
+  // resync (production mutator: ruiz_scale_standard_form).
+  copied.A_row.refresh_flat_values();
   CHECK(copied.A_row.coeff(row, col) == Approx(source_value + 3.0));
   CHECK(sf.A_row.coeff(row, col) == Approx(source_value));
 

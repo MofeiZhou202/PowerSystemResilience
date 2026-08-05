@@ -839,8 +839,9 @@ void ruiz_scale_standard_form(StandardFormLP& sf, int rounds) {
         it.valueRef() *= row_update[it.row()] * col_update[j];
       }
     }
-    // A_row shares A's values, so the CSC update above is immediately visible
-    // through the row view and must not be applied a second time.
+    // A_row shares A's CSC values (must not be scaled a second time), but its
+    // flat row-ordered value stream is a materialized copy — resynchronized
+    // once after the final round below.
 
     // Scale b, c_max, var_ub.
     sf.b.array() *= row_update.array();
@@ -855,6 +856,10 @@ void ruiz_scale_standard_form(StandardFormLP& sf, int rounds) {
     sf.row_scale.array() *= row_update.array();
     sf.col_scale.array() *= col_update.array();
   }
+
+  // The row view's flat value stream was materialized before scaling; pick up
+  // the in-place CSC updates exactly once.
+  sf.A_row.refresh_flat_values();
 }
 
 // ---------------------------------------------------------------------------
