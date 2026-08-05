@@ -354,6 +354,58 @@ native_dual_bfrt_simd_benchmark/fast:
 .PHONY : native_dual_bfrt_simd_benchmark/fast
 
 #=============================================================================
+# Target rules for targets named native_dual_price_resident_benchmark
+
+# Build rule for target.
+native_dual_price_resident_benchmark: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 native_dual_price_resident_benchmark
+.PHONY : native_dual_price_resident_benchmark
+
+# fast build rule for target.
+native_dual_price_resident_benchmark/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_dual_price_resident_benchmark.dir/build.make CMakeFiles/native_dual_price_resident_benchmark.dir/build
+.PHONY : native_dual_price_resident_benchmark/fast
+
+#=============================================================================
+# Target rules for targets named native_dual_colaq_pivot_benchmark
+
+# Build rule for target.
+native_dual_colaq_pivot_benchmark: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 native_dual_colaq_pivot_benchmark
+.PHONY : native_dual_colaq_pivot_benchmark
+
+# fast build rule for target.
+native_dual_colaq_pivot_benchmark/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_dual_colaq_pivot_benchmark.dir/build.make CMakeFiles/native_dual_colaq_pivot_benchmark.dir/build
+.PHONY : native_dual_colaq_pivot_benchmark/fast
+
+#=============================================================================
+# Target rules for targets named native_dual_price_simd_benchmark
+
+# Build rule for target.
+native_dual_price_simd_benchmark: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 native_dual_price_simd_benchmark
+.PHONY : native_dual_price_simd_benchmark
+
+# fast build rule for target.
+native_dual_price_simd_benchmark/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_dual_price_simd_benchmark.dir/build.make CMakeFiles/native_dual_price_simd_benchmark.dir/build
+.PHONY : native_dual_price_simd_benchmark/fast
+
+#=============================================================================
+# Target rules for targets named native_dual_workspace_price_benchmark
+
+# Build rule for target.
+native_dual_workspace_price_benchmark: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 native_dual_workspace_price_benchmark
+.PHONY : native_dual_workspace_price_benchmark
+
+# fast build rule for target.
+native_dual_workspace_price_benchmark/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_dual_workspace_price_benchmark.dir/build.make CMakeFiles/native_dual_workspace_price_benchmark.dir/build
+.PHONY : native_dual_workspace_price_benchmark/fast
+
+#=============================================================================
 # Target rules for targets named miplib2017_benchmark
 
 # Build rule for target.
@@ -875,6 +927,102 @@ benchmark/native_dual_bfrt_simd_kernel.s: benchmark/native_dual_bfrt_simd_kernel
 benchmark/native_dual_bfrt_simd_kernel.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_dual_bfrt_simd_benchmark.dir/build.make CMakeFiles/native_dual_bfrt_simd_benchmark.dir/benchmark/native_dual_bfrt_simd_kernel.cpp.s
 .PHONY : benchmark/native_dual_bfrt_simd_kernel.cpp.s
+
+benchmark/native_dual_colaq_pivot_benchmark.o: benchmark/native_dual_colaq_pivot_benchmark.cpp.o
+.PHONY : benchmark/native_dual_colaq_pivot_benchmark.o
+
+# target to build an object file
+benchmark/native_dual_colaq_pivot_benchmark.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_dual_colaq_pivot_benchmark.dir/build.make CMakeFiles/native_dual_colaq_pivot_benchmark.dir/benchmark/native_dual_colaq_pivot_benchmark.cpp.o
+.PHONY : benchmark/native_dual_colaq_pivot_benchmark.cpp.o
+
+benchmark/native_dual_colaq_pivot_benchmark.i: benchmark/native_dual_colaq_pivot_benchmark.cpp.i
+.PHONY : benchmark/native_dual_colaq_pivot_benchmark.i
+
+# target to preprocess a source file
+benchmark/native_dual_colaq_pivot_benchmark.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_dual_colaq_pivot_benchmark.dir/build.make CMakeFiles/native_dual_colaq_pivot_benchmark.dir/benchmark/native_dual_colaq_pivot_benchmark.cpp.i
+.PHONY : benchmark/native_dual_colaq_pivot_benchmark.cpp.i
+
+benchmark/native_dual_colaq_pivot_benchmark.s: benchmark/native_dual_colaq_pivot_benchmark.cpp.s
+.PHONY : benchmark/native_dual_colaq_pivot_benchmark.s
+
+# target to generate assembly for a file
+benchmark/native_dual_colaq_pivot_benchmark.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_dual_colaq_pivot_benchmark.dir/build.make CMakeFiles/native_dual_colaq_pivot_benchmark.dir/benchmark/native_dual_colaq_pivot_benchmark.cpp.s
+.PHONY : benchmark/native_dual_colaq_pivot_benchmark.cpp.s
+
+benchmark/native_dual_price_resident_benchmark.o: benchmark/native_dual_price_resident_benchmark.cpp.o
+.PHONY : benchmark/native_dual_price_resident_benchmark.o
+
+# target to build an object file
+benchmark/native_dual_price_resident_benchmark.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_dual_price_resident_benchmark.dir/build.make CMakeFiles/native_dual_price_resident_benchmark.dir/benchmark/native_dual_price_resident_benchmark.cpp.o
+.PHONY : benchmark/native_dual_price_resident_benchmark.cpp.o
+
+benchmark/native_dual_price_resident_benchmark.i: benchmark/native_dual_price_resident_benchmark.cpp.i
+.PHONY : benchmark/native_dual_price_resident_benchmark.i
+
+# target to preprocess a source file
+benchmark/native_dual_price_resident_benchmark.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_dual_price_resident_benchmark.dir/build.make CMakeFiles/native_dual_price_resident_benchmark.dir/benchmark/native_dual_price_resident_benchmark.cpp.i
+.PHONY : benchmark/native_dual_price_resident_benchmark.cpp.i
+
+benchmark/native_dual_price_resident_benchmark.s: benchmark/native_dual_price_resident_benchmark.cpp.s
+.PHONY : benchmark/native_dual_price_resident_benchmark.s
+
+# target to generate assembly for a file
+benchmark/native_dual_price_resident_benchmark.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_dual_price_resident_benchmark.dir/build.make CMakeFiles/native_dual_price_resident_benchmark.dir/benchmark/native_dual_price_resident_benchmark.cpp.s
+.PHONY : benchmark/native_dual_price_resident_benchmark.cpp.s
+
+benchmark/native_dual_price_simd_benchmark.o: benchmark/native_dual_price_simd_benchmark.cpp.o
+.PHONY : benchmark/native_dual_price_simd_benchmark.o
+
+# target to build an object file
+benchmark/native_dual_price_simd_benchmark.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_dual_price_simd_benchmark.dir/build.make CMakeFiles/native_dual_price_simd_benchmark.dir/benchmark/native_dual_price_simd_benchmark.cpp.o
+.PHONY : benchmark/native_dual_price_simd_benchmark.cpp.o
+
+benchmark/native_dual_price_simd_benchmark.i: benchmark/native_dual_price_simd_benchmark.cpp.i
+.PHONY : benchmark/native_dual_price_simd_benchmark.i
+
+# target to preprocess a source file
+benchmark/native_dual_price_simd_benchmark.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_dual_price_simd_benchmark.dir/build.make CMakeFiles/native_dual_price_simd_benchmark.dir/benchmark/native_dual_price_simd_benchmark.cpp.i
+.PHONY : benchmark/native_dual_price_simd_benchmark.cpp.i
+
+benchmark/native_dual_price_simd_benchmark.s: benchmark/native_dual_price_simd_benchmark.cpp.s
+.PHONY : benchmark/native_dual_price_simd_benchmark.s
+
+# target to generate assembly for a file
+benchmark/native_dual_price_simd_benchmark.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_dual_price_simd_benchmark.dir/build.make CMakeFiles/native_dual_price_simd_benchmark.dir/benchmark/native_dual_price_simd_benchmark.cpp.s
+.PHONY : benchmark/native_dual_price_simd_benchmark.cpp.s
+
+benchmark/native_dual_workspace_price_benchmark.o: benchmark/native_dual_workspace_price_benchmark.cpp.o
+.PHONY : benchmark/native_dual_workspace_price_benchmark.o
+
+# target to build an object file
+benchmark/native_dual_workspace_price_benchmark.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_dual_workspace_price_benchmark.dir/build.make CMakeFiles/native_dual_workspace_price_benchmark.dir/benchmark/native_dual_workspace_price_benchmark.cpp.o
+.PHONY : benchmark/native_dual_workspace_price_benchmark.cpp.o
+
+benchmark/native_dual_workspace_price_benchmark.i: benchmark/native_dual_workspace_price_benchmark.cpp.i
+.PHONY : benchmark/native_dual_workspace_price_benchmark.i
+
+# target to preprocess a source file
+benchmark/native_dual_workspace_price_benchmark.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_dual_workspace_price_benchmark.dir/build.make CMakeFiles/native_dual_workspace_price_benchmark.dir/benchmark/native_dual_workspace_price_benchmark.cpp.i
+.PHONY : benchmark/native_dual_workspace_price_benchmark.cpp.i
+
+benchmark/native_dual_workspace_price_benchmark.s: benchmark/native_dual_workspace_price_benchmark.cpp.s
+.PHONY : benchmark/native_dual_workspace_price_benchmark.s
+
+# target to generate assembly for a file
+benchmark/native_dual_workspace_price_benchmark.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/native_dual_workspace_price_benchmark.dir/build.make CMakeFiles/native_dual_workspace_price_benchmark.dir/benchmark/native_dual_workspace_price_benchmark.cpp.s
+.PHONY : benchmark/native_dual_workspace_price_benchmark.cpp.s
 
 benchmark/native_kernel_comparison.o: benchmark/native_kernel_comparison.cpp.o
 .PHONY : benchmark/native_kernel_comparison.o
@@ -25589,6 +25737,10 @@ help:
 	@echo "... miplib2017_benchmark"
 	@echo "... mipsolvers"
 	@echo "... native_dual_bfrt_simd_benchmark"
+	@echo "... native_dual_colaq_pivot_benchmark"
+	@echo "... native_dual_price_resident_benchmark"
+	@echo "... native_dual_price_simd_benchmark"
+	@echo "... native_dual_workspace_price_benchmark"
 	@echo "... native_kernel_comparison"
 	@echo "... netlib_solver_benchmark"
 	@echo "... opf_scale_probe"
@@ -25630,6 +25782,18 @@ help:
 	@echo "... benchmark/native_dual_bfrt_simd_kernel.o"
 	@echo "... benchmark/native_dual_bfrt_simd_kernel.i"
 	@echo "... benchmark/native_dual_bfrt_simd_kernel.s"
+	@echo "... benchmark/native_dual_colaq_pivot_benchmark.o"
+	@echo "... benchmark/native_dual_colaq_pivot_benchmark.i"
+	@echo "... benchmark/native_dual_colaq_pivot_benchmark.s"
+	@echo "... benchmark/native_dual_price_resident_benchmark.o"
+	@echo "... benchmark/native_dual_price_resident_benchmark.i"
+	@echo "... benchmark/native_dual_price_resident_benchmark.s"
+	@echo "... benchmark/native_dual_price_simd_benchmark.o"
+	@echo "... benchmark/native_dual_price_simd_benchmark.i"
+	@echo "... benchmark/native_dual_price_simd_benchmark.s"
+	@echo "... benchmark/native_dual_workspace_price_benchmark.o"
+	@echo "... benchmark/native_dual_workspace_price_benchmark.i"
+	@echo "... benchmark/native_dual_workspace_price_benchmark.s"
 	@echo "... benchmark/native_kernel_comparison.o"
 	@echo "... benchmark/native_kernel_comparison.i"
 	@echo "... benchmark/native_kernel_comparison.s"

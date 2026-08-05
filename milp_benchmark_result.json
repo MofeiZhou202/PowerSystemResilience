@@ -10,7 +10,7 @@
     "n_vars": 212,
     "nodes": 0,
     "objective": 993830.1496144199,
-    "runtime_ms": 37.354709,
+    "runtime_ms": 100.486708,
     "status": "Optimal (root gap closed)",
     "success": true
   },
@@ -25,7 +25,7 @@
     "n_vars": 212,
     "nodes": 0,
     "objective": 993830.1496144199,
-    "runtime_ms": 42.424167,
+    "runtime_ms": 107.045584,
     "status": "Optimal (root gap closed)",
     "success": true
   },
@@ -40,7 +40,7 @@
     "n_vars": 212,
     "nodes": 0,
     "objective": 993830.1496144199,
-    "runtime_ms": 6.631458,
+    "runtime_ms": 15.628958,
     "status": "Optimal (root gap closed)",
     "success": true
   },
@@ -55,7 +55,7 @@
     "n_vars": 212,
     "nodes": 0,
     "objective": 993830.1496144199,
-    "runtime_ms": 44.140917,
+    "runtime_ms": 89.959209,
     "status": "Optimal (root gap closed)",
     "success": true
   },
@@ -70,7 +70,7 @@
     "n_vars": 212,
     "nodes": 0,
     "objective": 993830.1496144199,
-    "runtime_ms": 6.0615,
+    "runtime_ms": 9.011625,
     "status": "Optimal (root gap closed)",
     "success": true
   },
@@ -85,7 +85,7 @@
     "n_vars": 212,
     "nodes": 0,
     "objective": 993830.1496144199,
-    "runtime_ms": 41.758041,
+    "runtime_ms": 61.233041,
     "status": "Optimal (root gap closed)",
     "success": true
   },
@@ -100,7 +100,7 @@
     "n_vars": 212,
     "nodes": 0,
     "objective": 993830.1496144199,
-    "runtime_ms": 6.393583,
+    "runtime_ms": 8.122458,
     "status": "Optimal (root gap closed)",
     "success": true
   }

@@ -291,7 +291,8 @@ void NativeIPMLPAdapter::prepare_for_node_solves(const LPModel& base_lp) {
     s.attributes._reserved = 0;
     s.attributes._allocatedBySparse = false;
     s.blockSize = 1;
-    cs->accel_symbolic = SparseFactor(SparseFactorizationCholesky, s);
+    cs->accel_symbolic = SparseFactor(SparseFactorizationCholesky, s,
+                                      ipm_accel_symbolic_options());
     cs->accel_symbolic_valid = true;
     }
 #else

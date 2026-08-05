@@ -628,7 +628,9 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
         accel_cache_->cached_nnz == sparse_n_nnz) {
       accel_symbolic = accel_cache_->symbolic;
     } else {
-      accel_symbolic = SparseFactor(SparseFactorizationCholesky, make_apple_structure());
+      accel_symbolic = SparseFactor(SparseFactorizationCholesky,
+                                    make_apple_structure(),
+                                    ipm_accel_symbolic_options());
       if (accel_cache_) {
         if (accel_cache_->valid) SparseCleanup(accel_cache_->symbolic);
         accel_cache_->symbolic = accel_symbolic;
@@ -1036,8 +1038,8 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
         s.attributes._reserved = 0;
         s.attributes._allocatedBySparse = false;
         s.blockSize = 1;
-        aug_accel_symbolic =
-            SparseFactor(SparseFactorizationLDLTUnpivoted, s);
+        aug_accel_symbolic = SparseFactor(SparseFactorizationLDLTUnpivoted, s,
+                                          ipm_accel_symbolic_options());
         if (aug_accel_symbolic.status == SparseStatusOK) {
           if (accel_cache_->augmented_valid) {
             SparseCleanup(accel_cache_->augmented_symbolic);

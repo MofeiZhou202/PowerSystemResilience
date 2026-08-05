@@ -86,6 +86,29 @@ struct AccelSparseCache {
 #endif
 };
 
+#if MIPSOLVERS_USE_ACCELERATE
+// Fill-reducing ordering for the Apple Sparse symbolic factorization, selected
+// once by MIPSOLVERS_IPM_ORDER = metis|amd|colamd|default. Nested dissection
+// (metis) tends to beat the default on the block-structured SCUC augmented KKT.
+inline SparseSymbolicFactorOptions ipm_accel_symbolic_options() {
+  SparseSymbolicFactorOptions o{};  // control=0 (default)
+  static const SparseOrder_t method = [] {
+    const char* e = std::getenv("MIPSOLVERS_IPM_ORDER");
+    if (e && std::strcmp(e, "metis") == 0) return SparseOrderMetis;
+    if (e && std::strcmp(e, "amd") == 0) return SparseOrderAMD;
+    if (e && std::strcmp(e, "colamd") == 0) return SparseOrderCOLAMD;
+    return SparseOrderDefault;
+  }();
+  o.orderMethod = method;
+  o.order = nullptr;
+  o.ignoreRowsAndColumns = nullptr;
+  o.malloc = std::malloc;
+  o.free = std::free;
+  o.reportError = nullptr;
+  return o;
+}
+#endif
+
 constexpr double kBig = 1e20;
 constexpr double kTau = 0.9995;
 constexpr double kMinVal = 1e-14;
