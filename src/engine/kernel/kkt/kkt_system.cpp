@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <functional>
 #include <limits>
+#include <numeric>
 #include <vector>
 
 #include <Eigen/Core>
@@ -658,6 +660,72 @@ bool select_qr_tangent_partition(
   return true;
 }
 
+bool select_structural_tangent_partition(
+    const Eigen::SparseMatrix<double>& jg,
+    SparseInertiaKKTCache& cache) {
+  const int meq = static_cast<int>(jg.rows());
+  const int n = static_cast<int>(jg.cols());
+  std::vector<std::vector<int>> row_columns(static_cast<size_t>(meq));
+  for (int col = 0; col < jg.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(jg, col); it; ++it) {
+      if (it.value() != 0.0) {
+        row_columns[static_cast<size_t>(it.row())].push_back(col);
+      }
+    }
+  }
+  for (int row = 0; row < meq; ++row) {
+    auto& columns = row_columns[static_cast<size_t>(row)];
+    std::stable_sort(columns.begin(), columns.end(), [&](int lhs, int rhs) {
+      return std::abs(jg.coeff(row, lhs)) > std::abs(jg.coeff(row, rhs));
+    });
+  }
+  std::vector<int> column_match(static_cast<size_t>(n), -1);
+  std::vector<int> row_match(static_cast<size_t>(meq), -1);
+  std::vector<int> row_order(static_cast<size_t>(meq));
+  std::iota(row_order.begin(), row_order.end(), 0);
+  std::stable_sort(row_order.begin(), row_order.end(), [&](int lhs, int rhs) {
+    return row_columns[static_cast<size_t>(lhs)].size() <
+           row_columns[static_cast<size_t>(rhs)].size();
+  });
+
+  std::function<bool(int, std::vector<unsigned char>&)> augment =
+      [&](int row, std::vector<unsigned char>& seen_columns) {
+        for (int col : row_columns[static_cast<size_t>(row)]) {
+          if (seen_columns[static_cast<size_t>(col)] != 0) continue;
+          seen_columns[static_cast<size_t>(col)] = 1;
+          const int displaced_row = column_match[static_cast<size_t>(col)];
+          if (displaced_row < 0 || augment(displaced_row, seen_columns)) {
+            column_match[static_cast<size_t>(col)] = row;
+            row_match[static_cast<size_t>(row)] = col;
+            return true;
+          }
+        }
+        return false;
+      };
+
+  for (int row : row_order) {
+    std::vector<unsigned char> seen_columns(static_cast<size_t>(n), 0);
+    if (!augment(row, seen_columns)) return false;
+  }
+
+  cache.basic_columns = row_match;
+  std::vector<unsigned char> is_basic(static_cast<size_t>(n), 0);
+  for (int col : cache.basic_columns) {
+    if (col < 0 || col >= n) return false;
+    is_basic[static_cast<size_t>(col)] = 1;
+  }
+  cache.free_columns.clear();
+  cache.free_columns.reserve(static_cast<size_t>(n - meq));
+  for (int col = 0; col < n; ++col) {
+    if (is_basic[static_cast<size_t>(col)] == 0) {
+      cache.free_columns.push_back(col);
+    }
+  }
+  cache.tangent_partition_strategy = 4;
+  remember_tangent_partition_pattern(jg, cache);
+  return static_cast<int>(cache.free_columns.size()) == n - meq;
+}
+
 Eigen::SparseMatrix<double> extract_basic_jacobian(
     const Eigen::SparseMatrix<double>& jg,
     const std::vector<int>& basic_columns) {
@@ -701,6 +769,17 @@ bool factor_tangent_basis(const Eigen::SparseMatrix<double>& jg,
 
   if (cache.tangent_partition_strategy == 1) {
     select_natural_tangent_partition(jg, cache);
+    basis = extract_basic_jacobian(jg, cache.basic_columns);
+    if (factor_cached_sparse_matrix(cache.tangent_basis, basis,
+                                    static_cast<int>(jg.rows()), 0)) {
+      return true;
+    }
+  }
+
+  // A perfect matching of the equality-variable bipartite graph is a cheap
+  // structural-rank candidate. Numerical factorization below remains the
+  // authority, so cancellation or poor pivots still fall through to SparseQR.
+  if (select_structural_tangent_partition(jg, cache)) {
     basis = extract_basic_jacobian(jg, cache.basic_columns);
     if (factor_cached_sparse_matrix(cache.tangent_basis, basis,
                                     static_cast<int>(jg.rows()), 0)) {
@@ -834,8 +913,10 @@ void ensure_mumps_augmented_solver(SparseKKTCache& augmented) {
   augmented.pattern_outer.clear();
   augmented.pattern_inner.clear();
 }
+#endif
 
-bool factor_with_direct_mumps_inertia(
+#if defined(HACDCPF_HAVE_MUMPS) || defined(HACDCPF_HAVE_MKL_PARDISO)
+bool factor_with_direct_inertia(
     const Eigen::SparseMatrix<double>& w,
     const Eigen::SparseMatrix<double>& jg,
     const InertiaSettings& settings,
@@ -846,7 +927,11 @@ bool factor_with_direct_mumps_inertia(
   const int meq = static_cast<int>(jg.rows());
   const int dim = n + meq;
 
+#ifdef HACDCPF_HAVE_MUMPS
   ensure_mumps_augmented_solver(cache.augmented);
+#else
+  ensure_pardiso_augmented_solver(cache.augmented);
+#endif
   status.direct_factor_inertia = true;
 
   double delta_w = std::max(0.0, delta_w_last);
@@ -915,12 +1000,16 @@ bool factor_kkt_inertia_corrected_sparse(
   cache.factored = false;
   if (w.cols() != n || jg.cols() != n) return false;
 
-#ifdef HACDCPF_HAVE_MUMPS
+#if defined(HACDCPF_HAVE_MUMPS) || defined(HACDCPF_HAVE_MKL_PARDISO)
   // The inertia-corrected path is symmetric by construction. Use the
   // symmetric-indefinite LDLT backend even when a small reduced-space
   // certificate supplies the regularization threshold; generic KLU/UMFPACK
   // would discard symmetry and roughly double fill/flops.
+#ifdef HACDCPF_HAVE_MUMPS
   ensure_mumps_augmented_solver(cache.augmented);
+#else
+  ensure_pardiso_augmented_solver(cache.augmented);
+#endif
 #endif
 
   // For full-row-rank Jg, the bordered-Hessian identity gives
@@ -969,10 +1058,21 @@ bool factor_kkt_inertia_corrected_sparse(
       const bool factor_inertia_matches =
           !factor_inertia_available ||
           (factor_negative == meq && factor_deficiency == 0);
-      if (factored && factor_inertia_matches) {
+      const bool reduced_inertia_certified =
+          reduced_certificate.min_curvature + delta_w >=
+          reduced_certificate.margin;
+      // The null-space certificate is the bordered-Hessian inertia theorem,
+      // while a sparse factor's pivot count is a threshold-dependent numerical
+      // diagnostic. Near active-bound degeneracy PARDISO can perturb normal-
+      // space pivots and report a different count even though Jg has certified
+      // full row rank and Z'(W+delta*I)Z is strictly positive. Accept that
+      // mathematically certified factor here; solve_kkt_sparse still subjects
+      // every direction to its independent linear-residual gate.
+      if (factored && reduced_inertia_certified) {
         cache.factored = true;
         status.correct = true;
-        status.direct_factor_inertia = factor_inertia_available;
+        status.direct_factor_inertia =
+            factor_inertia_available && factor_inertia_matches;
         status.n_pos = n;
         status.n_neg = meq;
         status.delta_w_used = delta_w;
@@ -991,11 +1091,11 @@ bool factor_kkt_inertia_corrected_sparse(
     status.reduced_space_certificate = false;
   }
 
-#ifdef HACDCPF_HAVE_MUMPS
+#if defined(HACDCPF_HAVE_MUMPS) || defined(HACDCPF_HAVE_MKL_PARDISO)
   // The explicit null-space eigensolve is deliberately capped. Beyond that
   // cap, use the negative-pivot count of the symmetric-indefinite factor
   // instead of forcing the entire primal block to be positive definite.
-  return factor_with_direct_mumps_inertia(
+  return factor_with_direct_inertia(
       w, jg, settings, delta_w_last, cache, status);
 #else
 

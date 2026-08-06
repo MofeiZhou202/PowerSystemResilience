@@ -5,6 +5,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -268,6 +269,50 @@ TEST_CASE("Ipopt handles active bounds without synthetic Jacobian entries",
   REQUIRE(result.stats.success);
   REQUIRE(result.x.size() == 1);
   CHECK(result.x[0] == Approx(0.0).margin(1e-7));
+}
+
+TEST_CASE("Ipopt consumes an exact nonlinear Lagrangian Hessian",
+          "[ipopt][stability][hessian]") {
+  IpoptAdapter ipopt;
+  REQUIRE(ipopt.available());
+
+  auto hessian_calls = std::make_shared<int>(0);
+  NLPModel nlp = make_well_conditioned_nlp();
+  nlp.h = [](const Eigen::VectorXd& x, Eigen::VectorXd& h) {
+    h.resize(1);
+    h[0] = x.squaredNorm() - 10.0;
+  };
+  nlp.jac_h = [](const Eigen::VectorXd& x,
+                 Eigen::SparseMatrix<double>& jac) {
+    jac.resize(1, 2);
+    jac.insert(0, 0) = 2.0 * x[0];
+    jac.insert(0, 1) = 2.0 * x[1];
+    jac.makeCompressed();
+  };
+  nlp.lagrangian_hess =
+      [hessian_calls](const Eigen::VectorXd&,
+                      const Eigen::VectorXd& lambda,
+                      const Eigen::VectorXd* nu,
+                      Eigen::SparseMatrix<double>& hessian) {
+        REQUIRE(lambda.size() == 1);
+        REQUIRE(nu != nullptr);
+        REQUIRE(nu->size() == 1);
+        ++*hessian_calls;
+        const double diagonal = 2.0 + 2.0 * (*nu)[0];
+        hessian.resize(2, 2);
+        hessian.insert(0, 0) = diagonal;
+        hessian.insert(1, 1) = diagonal;
+        hessian.makeCompressed();
+      };
+
+  const SolveResult result = solve_with(ipopt, std::move(nlp), 200, 1e-9, 1e-7);
+  require_finite_stats(result);
+  REQUIRE(result.stats.success);
+  CHECK(result.x[0] == Approx(1.0).margin(2e-5));
+  CHECK(result.x[1] == Approx(2.0).margin(2e-5));
+  // Two calls discover a fixed sparsity pattern. Any additional call proves
+  // Ipopt requested numerical Hessian values during optimization.
+  CHECK(*hessian_calls > 2);
 }
 
 TEST_CASE("Ipopt solves moderate scaling and reports extreme-scaling termination",

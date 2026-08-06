@@ -13,6 +13,7 @@
 #include <Eigen/Core>
 #include <Eigen/Cholesky>
 #include <Eigen/Sparse>
+#include <Eigen/SparseLU>
 
 #include "mipsolvers/engine/solver/external/adapters.hpp"
 #include "mipsolvers/engine/kernel/ipm/ipm_filter.hpp"
@@ -40,6 +41,34 @@ bool is_effectively_finite(double value) {
 
 double inf_norm(const Eigen::VectorXd& v) {
   return (v.size() == 0) ? 0.0 : v.cwiseAbs().maxCoeff();
+}
+
+struct ProductDistribution {
+  int count{0};
+  double minimum{0.0};
+  double median{0.0};
+  double maximum{0.0};
+};
+
+ProductDistribution summarize_products(const Eigen::VectorXd& lhs,
+                                       const Eigen::VectorXd& rhs,
+                                       int begin, int count) {
+  ProductDistribution out;
+  if (count <= 0) return out;
+  std::vector<double> products;
+  products.reserve(static_cast<std::size_t>(count));
+  for (int i = begin; i < begin + count; ++i) {
+    products.push_back(lhs[i] * rhs[i]);
+  }
+  std::sort(products.begin(), products.end());
+  out.count = count;
+  out.minimum = products.front();
+  out.maximum = products.back();
+  const std::size_t middle = products.size() / 2;
+  out.median = products.size() % 2 == 0
+      ? 0.5 * (products[middle - 1] + products[middle])
+      : products[middle];
+  return out;
 }
 
 double objective_value(const NLPModel& prob, const Eigen::VectorXd& x) {
@@ -1278,7 +1307,421 @@ struct FilterSolveOutcome {
   int symbolic_analyses{0};
   int numeric_factorizations{0};
   int linear_solves{0};
+  int primary_factorizations{0};
+  int inertia_retry_factorizations{0};
+  int inertia_certificate_factorizations{0};
+  int active_set_polish_factorizations{0};
 };
+
+struct ActiveSetPolishOutcome {
+  bool converged{false};
+  Eigen::VectorXd x;
+  Eigen::VectorXd s;
+  Eigen::VectorXd lambda;
+  Eigen::VectorXd mu;
+  NLPState state;
+  ResidualSummary residuals;
+  int iterations{0};
+  int symbolic_analyses{0};
+  int numeric_factorizations{0};
+  int linear_solves{0};
+};
+
+Eigen::SparseMatrix<double> stack_active_jacobian(
+    const NLPState& state, const std::vector<int>& active) {
+  const int meq = static_cast<int>(state.jg.rows());
+  const int n = static_cast<int>(state.jg.cols());
+  std::vector<Eigen::Triplet<double>> triplets;
+  triplets.reserve(static_cast<std::size_t>(state.jg.nonZeros()) +
+                   static_cast<std::size_t>(state.jh.nonZeros()));
+  for (int col = 0; col < state.jg.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(state.jg, col); it;
+         ++it) {
+      triplets.emplace_back(it.row(), it.col(), it.value());
+    }
+  }
+  for (int k = 0; k < static_cast<int>(active.size()); ++k) {
+    const int source_row = active[static_cast<std::size_t>(k)];
+    for (int col = 0; col < state.jh.outerSize(); ++col) {
+      const double value = state.jh.coeff(source_row, col);
+      if (value != 0.0) {
+        triplets.emplace_back(meq + k, col, value);
+      }
+    }
+  }
+  Eigen::SparseMatrix<double> jacobian(
+      meq + static_cast<int>(active.size()), n);
+  jacobian.setFromTriplets(triplets.begin(), triplets.end());
+  jacobian.makeCompressed();
+  return jacobian;
+}
+
+bool select_independent_active_rows(
+    const NLPState& state, const Eigen::VectorXd& s,
+    const Eigen::VectorXd& mu, double path_scale,
+    std::vector<int>& active) {
+  const int n = static_cast<int>(state.jg.cols());
+  std::vector<Eigen::VectorXd> row_basis;
+  row_basis.reserve(static_cast<std::size_t>(n));
+  const auto append_if_independent = [&](Eigen::VectorXd row) {
+    const double row_norm = row.norm();
+    if (!(row_norm > 0.0) || !std::isfinite(row_norm)) return false;
+    row /= row_norm;
+    // Two-pass modified Gram-Schmidt is sufficient here because the selected
+    // rows only define a crossover working set; the sparse LDLT inertia and
+    // linear-residual checks remain the authoritative numerical certificates.
+    for (int pass = 0; pass < 2; ++pass) {
+      for (const Eigen::VectorXd& basis_row : row_basis) {
+        row.noalias() -= basis_row.dot(row) * basis_row;
+      }
+    }
+    const double residual_norm = row.norm();
+    const double rank_margin = std::sqrt(
+        std::numeric_limits<double>::epsilon() *
+        static_cast<double>(std::max(1, n)));
+    if (!(residual_norm > rank_margin)) return false;
+    row_basis.push_back(row / residual_norm);
+    return true;
+  };
+
+  for (int row = 0; row < state.jg.rows(); ++row) {
+    Eigen::VectorXd dense = Eigen::VectorXd::Zero(n);
+    for (int col = 0; col < state.jg.outerSize(); ++col) {
+      dense[col] = state.jg.coeff(row, col);
+    }
+    if (!append_if_independent(std::move(dense))) {
+      return false;
+    }
+  }
+
+  std::stable_sort(active.begin(), active.end(), [&](int lhs, int rhs) {
+    const auto confidence = [&](int row) {
+      return std::min(mu[row] / path_scale,
+                      path_scale / std::max(s[row], kMinPositive));
+    };
+    return confidence(lhs) > confidence(rhs);
+  });
+  std::vector<int> independent;
+  independent.reserve(active.size());
+  for (int source_row : active) {
+    if (static_cast<int>(row_basis.size()) >= n) break;
+    Eigen::VectorXd dense = Eigen::VectorXd::Zero(n);
+    for (int col = 0; col < state.jh.outerSize(); ++col) {
+      dense[col] = state.jh.coeff(source_row, col);
+    }
+    if (append_if_independent(std::move(dense))) {
+      independent.push_back(source_row);
+    }
+  }
+  active = std::move(independent);
+  return !active.empty();
+}
+
+// Crossover from the central path to the limiting active-set KKT system.
+// Under strict complementarity, active slacks are O(mu_bar) with multipliers
+// bounded away from zero, while inactive multipliers are O(mu_bar) with
+// slacks bounded away from zero.  A sqrt(mu)-scale separator therefore
+// identifies only constraints for which both sides of that asymptotic split
+// agree.  This routine is deliberately a certificate path: it never publishes
+// a point unless the full, unperturbed NLP KKT residuals pass the user gates.
+bool try_active_set_kkt_polish(
+    const NLPModel& prob, const IPMOptions& opt,
+    const std::vector<int>& lb_cols, const std::vector<int>& ub_cols,
+    const Eigen::VectorXd& x_start, const Eigen::VectorXd& s_start,
+    const Eigen::VectorXd& lambda_start, const Eigen::VectorXd& mu_start,
+    const ResidualSummary& start_residuals, ActiveSetPolishOutcome& out) {
+  if (!prob.lagrangian_hess || x_start.size() == 0 ||
+      s_start.size() != mu_start.size() ||
+      start_residuals.primal_feas >
+          std::max(1e-7, 10.0 * opt.tol_primal) ||
+      start_residuals.dual_feas > opt.tol_dual ||
+      start_residuals.complementarity <= opt.tol_complementarity) {
+    return false;
+  }
+
+  const double path_scale = std::sqrt(std::max(
+      {opt.tol_complementarity, start_residuals.complementarity,
+       64.0 * std::numeric_limits<double>::epsilon()}));
+  const double slack_threshold = 10.0 * path_scale;
+  const double multiplier_threshold = 0.1 * path_scale;
+  std::vector<int> active;
+  active.reserve(static_cast<std::size_t>(s_start.size()));
+  for (int i = 0; i < s_start.size(); ++i) {
+    if (s_start[i] <= slack_threshold &&
+        mu_start[i] >= multiplier_threshold) {
+      active.push_back(i);
+    }
+  }
+  if (opt.verbose) {
+    std::cerr << "[NativeIPM] active-set polish: active=" << active.size()
+              << "/" << s_start.size() << ", separator=" << path_scale
+              << ", start=(" << start_residuals.primal_feas << ", "
+              << start_residuals.dual_feas << ", "
+              << start_residuals.complementarity << ")\n";
+  }
+  if (active.empty()) return false;
+
+  NLPState selection_state;
+  std::string selection_status;
+  if (!evaluate_nlp_state(prob, x_start, lb_cols, ub_cols,
+                          selection_state, selection_status)) {
+    return false;
+  }
+  const std::vector<int> active_candidates = active;
+
+  Eigen::VectorXd x = x_start;
+  Eigen::VectorXd lambda = lambda_start;
+  Eigen::VectorXd mu = Eigen::VectorXd::Zero(mu_start.size());
+
+  SparseInertiaKKTCache polish_cache;
+  polish_cache.preferred_free_columns = prob.equality_free_columns;
+  polish_cache.augmented.refinement_tolerance = 1e-11;
+  const auto record_polish_work = [&]() {
+    out.symbolic_analyses = polish_cache.augmented.symbolic_analyses;
+    out.numeric_factorizations =
+        polish_cache.augmented.numeric_factorizations;
+    out.linear_solves = polish_cache.augmented.linear_solves;
+  };
+  double delta_w_last = 0.0;
+  const Eigen::VectorXd dual_contribution =
+      selection_state.jg.transpose() * lambda_start +
+      selection_state.jh.transpose() * mu_start;
+  const Eigen::SparseMatrix<double> identity =
+      diagonal_sparse(Eigen::VectorXd::Ones(x.size()));
+  InertiaSettings projection_settings;
+  projection_settings.mu = std::max(opt.tol_complementarity,
+                                     start_residuals.complementarity);
+  const int selection_meq = static_cast<int>(selection_state.g.size());
+  std::vector<unsigned char> excluded(
+      static_cast<std::size_t>(mu_start.size()), 0);
+  bool projection_accepted = false;
+  for (std::size_t projection_attempt = 0;
+       projection_attempt <= active_candidates.size(); ++projection_attempt) {
+    active.clear();
+    for (int row : active_candidates) {
+      if (excluded[static_cast<std::size_t>(row)] == 0) {
+        active.push_back(row);
+      }
+    }
+    const std::size_t eligible_count = active.size();
+    if (!select_independent_active_rows(selection_state, s_start, mu_start,
+                                        path_scale, active)) {
+      break;
+    }
+    if (opt.verbose && active.size() != eligible_count) {
+      std::cerr << "[NativeIPM] active-set rank filter: retained="
+                << active.size() << "/" << eligible_count << '\n';
+    }
+    const Eigen::SparseMatrix<double> selection_jacobian =
+        stack_active_jacobian(selection_state, active);
+    InertiaStatus projection_inertia;
+    delta_w_last = 0.0;
+    if (!factor_kkt_inertia_corrected_sparse(
+            identity, selection_jacobian, projection_settings, delta_w_last,
+            polish_cache, projection_inertia)) {
+      break;
+    }
+    Eigen::VectorXd projection_rhs(x.size() + selection_jacobian.rows());
+    projection_rhs.head(x.size()) = dual_contribution;
+    projection_rhs.tail(selection_jacobian.rows()).setZero();
+    Eigen::VectorXd projection_remainder;
+    Eigen::VectorXd projected_duals;
+    if (!solve_kkt_inertia_corrected_sparse(
+            polish_cache, projection_rhs, projection_remainder,
+            projected_duals)) {
+      break;
+    }
+
+    int most_negative_position = -1;
+    double most_negative_value = -path_scale;
+    for (int k = 0; k < static_cast<int>(active.size()); ++k) {
+      const double value = projected_duals[selection_meq + k];
+      if (value < most_negative_value) {
+        most_negative_value = value;
+        most_negative_position = k;
+      }
+    }
+    if (most_negative_position >= 0) {
+      const int rejected_row =
+          active[static_cast<std::size_t>(most_negative_position)];
+      excluded[static_cast<std::size_t>(rejected_row)] = 1;
+      if (opt.verbose) {
+        std::cerr << "[NativeIPM] active-set dual-sign filter: remove row="
+                  << rejected_row << ", multiplier=" << most_negative_value
+                  << '\n';
+      }
+      continue;
+    }
+
+    lambda = projected_duals.head(selection_meq);
+    mu.setZero();
+    for (int k = 0; k < static_cast<int>(active.size()); ++k) {
+      mu[active[static_cast<std::size_t>(k)]] =
+          std::max(0.0, projected_duals[selection_meq + k]);
+    }
+    projection_accepted = true;
+    break;
+  }
+  if (!projection_accepted) {
+    if (opt.verbose) {
+      std::cerr << "[NativeIPM] active-set polish rejected: no full-rank "
+                   "dual-feasible working set\n";
+    }
+    record_polish_work();
+    return false;
+  }
+  delta_w_last = 0.0;
+  constexpr int kMaxPolishIterations = 8;
+  for (int iteration = 0; iteration < kMaxPolishIterations; ++iteration) {
+    NLPState state;
+    std::string status;
+    if (!evaluate_nlp_state(prob, x, lb_cols, ub_cols, state, status)) {
+      record_polish_work();
+      return false;
+    }
+    Eigen::VectorXd s(state.h.size());
+    for (int i = 0; i < s.size(); ++i) {
+      s[i] = std::max(-state.h[i], kMinPositive);
+    }
+    const Eigen::VectorXd r_dual =
+        state.grad + state.jg.transpose() * lambda +
+        state.jh.transpose() * mu;
+    const ResidualSummary residuals = summarize_residuals(
+        r_dual, state.g, state.h + s, x, s, lambda, mu);
+    if (opt.verbose) {
+      std::cerr << "[NativeIPM] active-set polish iter=" << iteration
+                << ": primal=" << residuals.primal_feas
+                << ", dual=" << residuals.dual_feas
+                << ", complementarity=" << residuals.complementarity
+                << '\n';
+    }
+    if (residuals.primal_feas <= opt.tol_primal &&
+        residuals.dual_feas <= opt.tol_dual &&
+        residuals.complementarity <= opt.tol_complementarity) {
+      out.converged = true;
+      out.x = x;
+      out.s = std::move(s);
+      out.lambda = lambda;
+      out.mu = mu;
+      out.state = std::move(state);
+      out.residuals = residuals;
+      out.iterations = iteration;
+      record_polish_work();
+      return true;
+    }
+
+    const int meq = static_cast<int>(state.g.size());
+    const Eigen::SparseMatrix<double> active_jacobian =
+        stack_active_jacobian(state, active);
+    Eigen::VectorXd active_constraints(meq + static_cast<int>(active.size()));
+    if (meq > 0) active_constraints.head(meq) = state.g;
+    for (int k = 0; k < static_cast<int>(active.size()); ++k) {
+      active_constraints[meq + k] =
+          state.h[active[static_cast<std::size_t>(k)]];
+    }
+
+    const Eigen::VectorXd mu_nonlinear =
+        nonlinear_inequality_multipliers(mu, state.n_nonlinear_ineq);
+    Eigen::SparseMatrix<double> hessian;
+    if (!build_lagrangian_hessian(prob, x, lambda, &mu_nonlinear,
+                                  hessian, status)) {
+      record_polish_work();
+      return false;
+    }
+    InertiaSettings settings;
+    settings.mu = std::max(opt.tol_complementarity,
+                           start_residuals.complementarity);
+    InertiaStatus inertia;
+    if (!factor_kkt_inertia_corrected_sparse(
+            hessian, active_jacobian, settings, delta_w_last,
+            polish_cache, inertia)) {
+      if (opt.verbose) {
+        std::cerr << "[NativeIPM] active-set polish rejected: KKT rank/inertia "
+                     "certificate failed (rows="
+                  << active_jacobian.rows() << ", cols="
+                  << active_jacobian.cols() << ")\n";
+      }
+      record_polish_work();
+      return false;
+    }
+    Eigen::VectorXd rhs(x.size() + active_constraints.size());
+    rhs << -r_dual, -active_constraints;
+    Eigen::VectorXd dx;
+    Eigen::VectorXd dy;
+    if (!solve_kkt_inertia_corrected_sparse(polish_cache, rhs, dx, dy) ||
+        dy.size() != active_constraints.size()) {
+      if (opt.verbose) {
+        std::cerr << "[NativeIPM] active-set polish rejected: certified KKT "
+                     "solve residual failed\n";
+      }
+      record_polish_work();
+      return false;
+    }
+
+    Eigen::VectorXd dlambda = dy.head(meq);
+    Eigen::VectorXd dmu = Eigen::VectorXd::Zero(mu.size());
+    for (int k = 0; k < static_cast<int>(active.size()); ++k) {
+      dmu[active[static_cast<std::size_t>(k)]] = dy[meq + k];
+    }
+    double alpha_dual = 1.0;
+    for (int row : active) {
+      if (dmu[row] < 0.0) {
+        alpha_dual = std::min(alpha_dual, -0.995 * mu[row] / dmu[row]);
+      }
+    }
+
+    const double current_gate = std::max(
+        {residuals.primal_feas / std::max(opt.tol_primal, 1e-16),
+         residuals.dual_feas / std::max(opt.tol_dual, 1e-16),
+         residuals.complementarity /
+             std::max(opt.tol_complementarity, 1e-16)});
+    bool accepted = false;
+    double alpha = std::min(1.0, alpha_dual);
+    for (int backtrack = 0; backtrack < 16; ++backtrack, alpha *= 0.5) {
+      const Eigen::VectorXd trial_x = x + alpha * dx;
+      const Eigen::VectorXd trial_lambda = lambda + alpha * dlambda;
+      const Eigen::VectorXd trial_mu = mu + alpha * dmu;
+      if ((trial_mu.array() < 0.0).any()) continue;
+      NLPState trial_state;
+      if (!evaluate_nlp_state(prob, trial_x, lb_cols, ub_cols,
+                              trial_state, status)) {
+        continue;
+      }
+      Eigen::VectorXd trial_s(trial_state.h.size());
+      for (int i = 0; i < trial_s.size(); ++i) {
+        trial_s[i] = std::max(-trial_state.h[i], kMinPositive);
+      }
+      const Eigen::VectorXd trial_r_dual =
+          trial_state.grad + trial_state.jg.transpose() * trial_lambda +
+          trial_state.jh.transpose() * trial_mu;
+      const ResidualSummary trial_residuals = summarize_residuals(
+          trial_r_dual, trial_state.g, trial_state.h + trial_s,
+          trial_x, trial_s, trial_lambda, trial_mu);
+      const double trial_gate = std::max(
+          {trial_residuals.primal_feas / std::max(opt.tol_primal, 1e-16),
+           trial_residuals.dual_feas / std::max(opt.tol_dual, 1e-16),
+           trial_residuals.complementarity /
+               std::max(opt.tol_complementarity, 1e-16)});
+      if (trial_gate < current_gate * (1.0 - 1e-4 * alpha)) {
+        x = trial_x;
+        lambda = trial_lambda;
+        mu = trial_mu;
+        accepted = true;
+        break;
+      }
+    }
+    if (!accepted) {
+      if (opt.verbose) {
+        std::cerr << "[NativeIPM] active-set polish rejected: full KKT gate "
+                     "did not decrease\n";
+      }
+      record_polish_work();
+      return false;
+    }
+  }
+  record_polish_work();
+  return false;
+}
 
 FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
                                          const IPMOptions& opt) {
@@ -1331,8 +1774,22 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
         Eigen::VectorXd::Constant(s.size(), 2.0 * kMinPositive));
   }
   Eigen::VectorXd mu_ineq(state.h.size());
+  int representability_floor_clamps = 0;
+  int legacy_absolute_floor_hits = 0;
   for (int i = 0; i < mu_ineq.size(); ++i) {
-    mu_ineq[i] = std::clamp(mu_bar / std::max(s[i], kMinPositive), 1e-4, 1e4);
+    const double central_multiplier =
+        mu_bar / std::max(s[i], kMinPositive);
+    legacy_absolute_floor_hits += static_cast<int>(central_multiplier < 1e-4);
+    representability_floor_clamps +=
+        static_cast<int>(central_multiplier < 2.0 * kMinPositive);
+    // Preserve S*mu = mu_bar for model nonlinearities whenever representable.
+    // Generated box rows retain the historical bound-dual stabilization;
+    // unlike physical nonlinear slacks, their scale is the variable
+    // coordinate itself and the floor prevents a cold bound dual from being
+    // numerically absent.
+    mu_ineq[i] = i < state.n_nonlinear_ineq
+        ? std::max(central_multiplier, 2.0 * kMinPositive)
+        : std::clamp(central_multiplier, 1e-4, 1e4);
   }
   if (has_inequality_dual_start) {
     mu_ineq = opt.inequality_dual_start.cwiseMax(
@@ -1344,6 +1801,33 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
              (prob.hess || prob.lagrangian_hess)) {
     initialize_equality_duals_least_squares(
         state, mu_ineq, opt.constr_mult_init_max, lambda);
+  }
+
+  if (opt.verbose && !has_inequality_dual_start && s.size() > 0) {
+    const int nonlinear_count = state.n_nonlinear_ineq;
+    const int lower_count = static_cast<int>(lb_cols.size());
+    const int upper_count = static_cast<int>(ub_cols.size());
+    const ProductDistribution nonlinear =
+        summarize_products(s, mu_ineq, 0, nonlinear_count);
+    const ProductDistribution lower =
+        summarize_products(s, mu_ineq, nonlinear_count, lower_count);
+    const ProductDistribution upper = summarize_products(
+        s, mu_ineq, nonlinear_count + lower_count, upper_count);
+    const auto print_distribution = [](const char* name,
+                                       const ProductDistribution& values) {
+      std::cerr << ' ' << name << "=(n=" << values.count
+                << ",min=" << values.minimum
+                << ",median=" << values.median
+                << ",max=" << values.maximum << ')';
+    };
+    std::cerr << "[NativeIPM] initial complementarity: mu_bar=" << mu_bar
+              << ", representability_floor_clamps="
+              << representability_floor_clamps
+              << ", legacy_1e-4_floor_hits=" << legacy_absolute_floor_hits;
+    print_distribution("nonlinear", nonlinear);
+    print_distribution("lower", lower);
+    print_distribution("upper", upper);
+    std::cerr << '\n' << std::flush;
   }
 
   Filter filter;
@@ -1371,6 +1855,11 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
   AugmentedNewtonCache augmented_cache;
   NewtonStructureProfile newton_profile;
   bool newton_formulation_selected = false;
+  int retired_symbolic_analyses = 0;
+  int retired_numeric_factorizations = 0;
+  int retired_linear_solves = 0;
+  int inertia_retry_factorizations = 0;
+  int active_set_polish_factorizations = 0;
   int total_iters = 0;
   int outer_iters = 0;
   const int max_outer = 60;
@@ -1401,21 +1890,39 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
     result.objective = state.obj_orig;
     result.newton_profile = newton_profile;
     if (newton_profile.selected == "augmented") {
-      result.symbolic_analyses = augmented_cache.kkt.symbolic_analyses;
+      result.symbolic_analyses =
+          retired_symbolic_analyses + augmented_cache.kkt.symbolic_analyses;
       result.numeric_factorizations =
+          retired_numeric_factorizations +
           augmented_cache.kkt.numeric_factorizations;
-      result.linear_solves = augmented_cache.kkt.linear_solves;
+      result.linear_solves =
+          retired_linear_solves + augmented_cache.kkt.linear_solves;
     } else if (opt.use_inertia_correction) {
-      result.symbolic_analyses = kkt_cache.augmented.symbolic_analyses;
+      result.symbolic_analyses =
+          retired_symbolic_analyses + kkt_cache.augmented.symbolic_analyses;
       result.numeric_factorizations =
+          retired_numeric_factorizations +
           kkt_cache.augmented.numeric_factorizations;
-      result.linear_solves = kkt_cache.augmented.linear_solves;
+      result.linear_solves =
+          retired_linear_solves + kkt_cache.augmented.linear_solves;
     } else {
-      result.symbolic_analyses = regularized_kkt_cache.symbolic_analyses;
+      result.symbolic_analyses =
+          retired_symbolic_analyses + regularized_kkt_cache.symbolic_analyses;
       result.numeric_factorizations =
+          retired_numeric_factorizations +
           regularized_kkt_cache.numeric_factorizations;
-      result.linear_solves = regularized_kkt_cache.linear_solves;
+      result.linear_solves =
+          retired_linear_solves + regularized_kkt_cache.linear_solves;
     }
+    result.inertia_retry_factorizations = inertia_retry_factorizations;
+    result.active_set_polish_factorizations =
+        active_set_polish_factorizations;
+    result.primary_factorizations = std::max(
+        0, result.numeric_factorizations -
+               result.inertia_retry_factorizations -
+               result.active_set_polish_factorizations);
+    result.inertia_certificate_factorizations =
+        kkt_cache.primal_numeric_factorizations;
   };
 
   for (; outer_iters < max_outer && total_iters < max_total; ++outer_iters) {
@@ -1538,6 +2045,7 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
       Eigen::VectorXd rhs;  // Newton rhs (layout depends on the active path)
       InertiaSettings isettings;
       isettings.mu = mu_bar;
+      double iteration_delta_w_used = 0.0;
 
       Eigen::SparseMatrix<double> condensed_w;
       bool condensed_w_ready = false;
@@ -1588,7 +2096,7 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
                     << ",lnz=" << newton_profile.augmented_lnz << ")\n";
         }
       }
-      const bool use_augmented_newton =
+      bool use_augmented_newton =
           newton_profile.selected == "augmented" && state.jh.rows() > 0;
       if (use_augmented_newton) {
         // ── Augmented (uncondensed) Newton path ──
@@ -1674,6 +2182,11 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
           : (factor_kkt_with_regularization(
                  w, state.jg, regularized_kkt_cache) &&
              solve_kkt_sparse(regularized_kkt_cache, rhs, dx, dlambda));
+      if (opt.use_inertia_correction) {
+        inertia_retry_factorizations +=
+            std::max(0, istatus.factorization_attempts - 1);
+      }
+      iteration_delta_w_used = istatus.delta_w_used;
       if (!kkt_ok) {
         snapshot_outcome(false, total_iters + 1,
                          opt.use_inertia_correction
@@ -1681,6 +2194,58 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
                              : "Filter: regularized KKT factorization failed",
                          rs);
         return result;
+      }
+      const bool condensation_precision_exhausted =
+          opt.newton_formulation == NewtonFormulation::Auto &&
+          opt.use_inertia_correction && state.jh.rows() > 0 &&
+          istatus.reduced_space_certificate &&
+          istatus.min_reduced_curvature > 0.0 &&
+          istatus.reduced_curvature_margin >
+              istatus.min_reduced_curvature;
+      if (condensation_precision_exhausted) {
+        augmented_cache.n = static_cast<int>(state.hess.rows());
+        augmented_cache.meq = static_cast<int>(state.jg.rows());
+        augmented_cache.miq = static_cast<int>(state.jh.rows());
+        Eigen::VectorXd rhs_aug(
+            augmented_cache.n + augmented_cache.meq + augmented_cache.miq);
+        Eigen::VectorXd rhs_ineq_aug(augmented_cache.miq);
+        for (int i = 0; i < augmented_cache.miq; ++i) {
+          const double mui = std::max(mu_ineq[i], kMinPositive);
+          rhs_ineq_aug[i] =
+              -r_ineq[i] - (mu_bar - s[i] * mu_ineq[i]) / mui;
+        }
+        rhs_aug << -r_d, -r_eq, rhs_ineq_aug;
+        Eigen::VectorXd augmented_dx;
+        Eigen::VectorXd augmented_dlambda;
+        Eigen::VectorXd augmented_dmu;
+        // Condensed regularization compensates for the formed Schur product
+        // and is not transferable to the uncondensed matrix.
+        delta_w_last = 0.0;
+        if (factor_solve_augmented_newton(
+                augmented_cache, state.hess, state.jg, state.jh, s, mu_ineq,
+                delta_w_last, isettings, rhs_aug, augmented_dx,
+                augmented_dlambda, augmented_dmu)) {
+          retired_symbolic_analyses +=
+              kkt_cache.augmented.symbolic_analyses;
+          retired_numeric_factorizations +=
+              kkt_cache.augmented.numeric_factorizations;
+          retired_linear_solves += kkt_cache.augmented.linear_solves;
+          dx = std::move(augmented_dx);
+          dlambda = std::move(augmented_dlambda);
+          dmu_ineq = std::move(augmented_dmu);
+          ds = -r_ineq - state.jh * dx;
+          rhs = std::move(rhs_aug);
+          use_augmented_newton = true;
+          newton_profile.selected = "augmented";
+          if (opt.verbose) {
+            std::cerr
+                << "[NativeIPM] condensed precision certificate exhausted; "
+                   "escalating to augmented Newton at iter="
+                << total_iters << " (lambda_min="
+                << istatus.min_reduced_curvature << ", roundoff_margin="
+                << istatus.reduced_curvature_margin << ")\n";
+          }
+        }
       }
       if (opt.verbose) {
         std::cerr << "[NativeIPM] iter=" << total_iters
@@ -1709,7 +2274,7 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
       // Recover step directions for the eliminated variables:
       //   ds       = −r_ineq − Jh dx
       //   dmu_ineq = (μ_bar − s·μ − μ·ds) / s
-      if (s.size() > 0) {
+      if (!use_augmented_newton && s.size() > 0) {
         ds = -r_ineq - state.jh * dx;
         for (int i = 0; i < s.size(); ++i) {
           const double si = std::max(s[i], kMinPositive);
@@ -1721,9 +2286,9 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
       // Fraction-to-boundary step caps.
       const double tau = std::max(0.5, std::min(opt.alpha_max,
                                                 1.0 - 0.01 * mu_bar));
-      const double alpha_max_primal =
+      double alpha_max_primal =
           (s.size() == 0) ? 1.0 : max_positive_step(s, ds, tau);
-      const double alpha_max_dual =
+      double alpha_max_dual =
           (mu_ineq.size() == 0) ? 1.0
                                 : max_positive_step(mu_ineq, dmu_ineq, tau);
       if (s.size() > 0 && mu_ineq.size() > 0) {
@@ -1792,15 +2357,16 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
           dmu_ineq += dmu_gc;
         }
       }
+
+      const double theta_k = compute_theta(state.g, state.h, s);
+      const double theta_min =
+          opt.filter_theta_min_scale * std::max(1.0, theta_k);
       double alpha = std::min(1.0, alpha_max_primal);
 
       // Filter line search.
-      const double theta_k = compute_theta(state.g, state.h, s);
       const double phi_k = compute_barrier_phi(state.obj_orig, mu_bar, s);
       const double slope_k =
           barrier_descent_slope(state.grad, dx, s, ds, mu_bar);
-      const double theta_min =
-          opt.filter_theta_min_scale * std::max(1.0, theta_k);
 
       bool accepted = false;
       bool accepted_was_f_type = false;
@@ -1823,11 +2389,14 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
       }
 
       while (alpha > opt.filter_alpha_min) {
+        const double trial_alpha_dual = std::min(alpha_dual, alpha);
         const Eigen::VectorXd x_trial = x + alpha * dx;
         Eigen::VectorXd s_trial =
           (s.size() == 0) ? Eigen::VectorXd() : Eigen::VectorXd(s + alpha * ds);
-        const Eigen::VectorXd lambda_trial = lambda + alpha_dual * dlambda;
-        const Eigen::VectorXd mu_trial = mu_ineq + alpha_dual * dmu_ineq;
+        const Eigen::VectorXd lambda_trial =
+            lambda + trial_alpha_dual * dlambda;
+        const Eigen::VectorXd mu_trial =
+            mu_ineq + trial_alpha_dual * dmu_ineq;
 
         // Safety: slack positivity (fraction-to-boundary guarantees it, but
         // numerical rounding can still dip).
@@ -1878,10 +2447,12 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
               trial.residuals.dual_feas <= dual_guard;
           const bool complementarity_progress = s.size() > 0 &&
               trial.residuals.complementarity <=
-                  rs.complementarity * (1.0 - 1e-4 * alpha_dual) + 1e-14;
+                  rs.complementarity *
+                      (1.0 - 1e-4 * trial_alpha_dual) + 1e-14;
           const bool dual_progress =
               trial.residuals.dual_feas <=
-                  rs.dual_feas * (1.0 - 1e-4 * alpha_dual) + 1e-14;
+                  rs.dual_feas *
+                      (1.0 - 1e-4 * trial_alpha_dual) + 1e-14;
           const bool merit_progress =
               trial.residuals.merit + 1e-14 < rs.merit;
           if (componentwise_safe && merit_progress &&
@@ -1892,7 +2463,7 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
             if (opt.verbose) {
               std::cerr << "[NativeIPM] iter=" << total_iters
                         << " centrality step accepted: alpha=" << alpha
-                        << ", alpha_dual=" << alpha_dual
+                        << ", alpha_dual=" << trial_alpha_dual
                         << ", kkt_merit=" << rs.merit << " -> "
                         << accepted_trial.residuals.merit << '\n'
                         << std::flush;
@@ -1931,7 +2502,7 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
           if (opt.verbose) {
             std::cerr << "[NativeIPM] iter=" << total_iters
                       << " line search accepted: alpha=" << alpha
-                      << ", alpha_dual=" << alpha_dual
+                      << ", alpha_dual=" << trial_alpha_dual
                       << ", theta_trial=" << theta_trial
                       << ", phi_trial=" << phi_trial
                       << '\n' << std::flush;
@@ -2006,9 +2577,9 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
                 }
               }
               const Eigen::VectorXd lambda_soc_trial =
-                  lambda + alpha_dual * dlambda + dlambda_soc;
+                  lambda + trial_alpha_dual * dlambda + dlambda_soc;
               const Eigen::VectorXd mu_soc_trial =
-                  mu_ineq + alpha_dual * dmu_ineq + dmu_soc_extra;
+                  mu_ineq + trial_alpha_dual * dmu_ineq + dmu_soc_extra;
               TrialPoint soc_trial;
               if (evaluate_filter_trial_values(prob, lb_cols, ub_cols,
                                                x_soc_trial, s_soc_trial,
@@ -2072,6 +2643,28 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
           lambda = best_lambda;
           mu_ineq = best_mu_ineq;
         }
+        ActiveSetPolishOutcome polish;
+        bool polish_converged = false;
+        if (have_best) {
+          polish_converged = try_active_set_kkt_polish(
+              prob, opt, lb_cols, ub_cols, x, s, lambda, mu_ineq,
+              best_residuals, polish);
+          retired_symbolic_analyses += polish.symbolic_analyses;
+          retired_numeric_factorizations += polish.numeric_factorizations;
+          active_set_polish_factorizations += polish.numeric_factorizations;
+          retired_linear_solves += polish.linear_solves;
+        }
+        if (polish_converged) {
+          x = std::move(polish.x);
+          s = std::move(polish.s);
+          lambda = std::move(polish.lambda);
+          mu_ineq = std::move(polish.mu);
+          state = std::move(polish.state);
+          snapshot_outcome(
+              true, total_iters + polish.iterations + 1,
+              "Converged after active-set KKT polish", polish.residuals);
+          return result;
+        }
         snapshot_outcome(false, total_iters + 1,
                          "Filter: accepted-step collapse", best_residuals);
         return result;
@@ -2091,6 +2684,41 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
         s[i] = std::max(s[i], kMinPositive);
       }
       state = std::move(accepted_trial.state);
+
+      // Retain a proven regularization across a boundary-limited or locally
+      // untrustworthy step. A normal/tangential step classifier is still
+      // needed before this policy can be made less conservative.
+      if (!use_augmented_newton && opt.use_inertia_correction &&
+          iteration_delta_w_used > 0.0) {
+        const double meaningful_step =
+            1.0 / std::sqrt(static_cast<double>(
+                std::max(1, static_cast<int>(x.size()))));
+        const double predicted_phi_reduction =
+            std::max(0.0, -alpha * slope_k);
+        const double actual_phi_reduction = phi_k - phi_trial;
+        const double reduction_roundoff =
+            64.0 * std::numeric_limits<double>::epsilon() *
+            std::max(1.0, std::abs(phi_k));
+        const bool objective_model_predictive =
+            predicted_phi_reduction <= reduction_roundoff ||
+            actual_phi_reduction >= 0.1 * predicted_phi_reduction;
+        const bool feasibility_model_predictive =
+            theta_trial <= theta_k *
+                (1.0 - opt.filter_gamma_theta * std::max(alpha, 1e-3));
+        const bool decay_is_earned = alpha >= meaningful_step &&
+            (objective_model_predictive || feasibility_model_predictive);
+        if (!decay_is_earned) {
+          delta_w_last = std::max(delta_w_last, iteration_delta_w_used);
+          if (opt.verbose) {
+            std::cerr << "[NativeIPM] regularization retained: delta_w="
+                      << delta_w_last << ", alpha=" << alpha
+                      << ", dimension_step_floor=" << meaningful_step
+                      << ", actual_phi_reduction=" << actual_phi_reduction
+                      << ", predicted_phi_reduction="
+                      << predicted_phi_reduction << '\n';
+          }
+        }
+      }
 
       // Filter augmentation: insert (θ_k, φ_k) for θ-type (non-f-type) steps.
       if (!accepted_was_f_type) {
@@ -2202,6 +2830,535 @@ bool try_ipopt_fallback(const NLPModel& prob,
   return ipopt_converged;
 }
 
+struct FixedNLPMap {
+  int original_dimension{0};
+  std::vector<int> reduced_to_original;
+  std::vector<int> original_to_reduced;
+  Eigen::VectorXd fixed_values;
+
+  Eigen::VectorXd expand(const Eigen::VectorXd& reduced) const {
+    Eigen::VectorXd full = fixed_values;
+    for (int r = 0; r < static_cast<int>(reduced_to_original.size()); ++r) {
+      full[reduced_to_original[static_cast<std::size_t>(r)]] = reduced[r];
+    }
+    return full;
+  }
+
+  Eigen::VectorXd gather(const Eigen::VectorXd& full) const {
+    Eigen::VectorXd reduced(reduced_to_original.size());
+    for (int r = 0; r < reduced.size(); ++r) {
+      reduced[r] = full[reduced_to_original[static_cast<std::size_t>(r)]];
+    }
+    return reduced;
+  }
+};
+
+Eigen::SparseMatrix<double> gather_sparse_columns(
+    const Eigen::SparseMatrix<double>& full,
+    const FixedNLPMap& map) {
+  std::vector<Eigen::Triplet<double>> triplets;
+  triplets.reserve(static_cast<std::size_t>(full.nonZeros()));
+  for (int col = 0; col < full.outerSize(); ++col) {
+    const int reduced_col = map.original_to_reduced[static_cast<std::size_t>(col)];
+    if (reduced_col < 0) continue;
+    for (Eigen::SparseMatrix<double>::InnerIterator it(full, col); it; ++it) {
+      triplets.emplace_back(it.row(), reduced_col, it.value());
+    }
+  }
+  Eigen::SparseMatrix<double> reduced(
+      full.rows(), static_cast<int>(map.reduced_to_original.size()));
+  reduced.setFromTriplets(triplets.begin(), triplets.end());
+  reduced.makeCompressed();
+  return reduced;
+}
+
+Eigen::SparseMatrix<double> gather_sparse_principal_block(
+    const Eigen::SparseMatrix<double>& full,
+    const FixedNLPMap& map) {
+  std::vector<Eigen::Triplet<double>> triplets;
+  triplets.reserve(static_cast<std::size_t>(full.nonZeros()));
+  for (int col = 0; col < full.outerSize(); ++col) {
+    const int reduced_col = map.original_to_reduced[static_cast<std::size_t>(col)];
+    if (reduced_col < 0) continue;
+    for (Eigen::SparseMatrix<double>::InnerIterator it(full, col); it; ++it) {
+      const int reduced_row =
+          map.original_to_reduced[static_cast<std::size_t>(it.row())];
+      if (reduced_row >= 0) {
+        triplets.emplace_back(reduced_row, reduced_col, it.value());
+      }
+    }
+  }
+  const int nr = static_cast<int>(map.reduced_to_original.size());
+  Eigen::SparseMatrix<double> reduced(nr, nr);
+  reduced.setFromTriplets(triplets.begin(), triplets.end());
+  reduced.makeCompressed();
+  return reduced;
+}
+
+bool build_fixed_nlp_reduction(const NLPModel& original,
+                               NLPModel& reduced,
+                               std::shared_ptr<FixedNLPMap>& map) {
+  const int n = static_cast<int>(original.vars.size());
+  auto candidate = std::make_shared<FixedNLPMap>();
+  candidate->original_dimension = n;
+  candidate->original_to_reduced.assign(static_cast<std::size_t>(n), -1);
+  candidate->fixed_values = Eigen::VectorXd::Zero(n);
+
+  for (int col = 0; col < n; ++col) {
+    const VariableMeta& var = original.vars[static_cast<std::size_t>(col)];
+    const bool fixed = is_effectively_finite(var.lb) &&
+                       is_effectively_finite(var.ub) && var.lb == var.ub;
+    if (fixed) {
+      candidate->fixed_values[col] = var.lb;
+    } else {
+      candidate->original_to_reduced[static_cast<std::size_t>(col)] =
+          static_cast<int>(candidate->reduced_to_original.size());
+      candidate->reduced_to_original.push_back(col);
+      candidate->fixed_values[col] =
+          original.x0.size() == n && std::isfinite(original.x0[col])
+              ? original.x0[col]
+              : 0.0;
+    }
+  }
+  if (candidate->reduced_to_original.size() == static_cast<std::size_t>(n) ||
+      candidate->reduced_to_original.empty()) {
+    return false;
+  }
+
+  reduced = NLPModel{};
+  reduced.sense = original.sense;
+  reduced.solver_options = original.solver_options;
+  reduced.vars.reserve(candidate->reduced_to_original.size());
+  for (int original_col : candidate->reduced_to_original) {
+    reduced.vars.push_back(original.vars[static_cast<std::size_t>(original_col)]);
+  }
+  Eigen::VectorXd full_x0 = original.x0.size() == n
+      ? original.x0 : candidate->fixed_values;
+  for (int col = 0; col < n; ++col) {
+    if (candidate->original_to_reduced[static_cast<std::size_t>(col)] < 0) {
+      full_x0[col] = candidate->fixed_values[col];
+    }
+  }
+  reduced.x0 = candidate->gather(full_x0);
+
+  reduced.f = [&original, candidate](const Eigen::VectorXd& x) {
+    return original.f(candidate->expand(x));
+  };
+  reduced.grad = [&original, candidate](const Eigen::VectorXd& x,
+                                        Eigen::VectorXd& grad) {
+    Eigen::VectorXd full_grad;
+    original.grad(candidate->expand(x), full_grad);
+    grad = candidate->gather(full_grad);
+  };
+  if (original.hess) {
+    reduced.hess = [&original, candidate](const Eigen::VectorXd& x,
+                                          Eigen::SparseMatrix<double>& hess) {
+      Eigen::SparseMatrix<double> full;
+      original.hess(candidate->expand(x), full);
+      hess = gather_sparse_principal_block(full, *candidate);
+    };
+  }
+  if (original.lagrangian_hess) {
+    reduced.lagrangian_hess =
+        [&original, candidate](const Eigen::VectorXd& x,
+                               const Eigen::VectorXd& lambda,
+                               const Eigen::VectorXd* nu,
+                               Eigen::SparseMatrix<double>& hess) {
+          Eigen::SparseMatrix<double> full;
+          original.lagrangian_hess(candidate->expand(x), lambda, nu, full);
+          hess = gather_sparse_principal_block(full, *candidate);
+        };
+  }
+  if (original.g) {
+    reduced.g = [&original, candidate](const Eigen::VectorXd& x,
+                                       Eigen::VectorXd& g) {
+      original.g(candidate->expand(x), g);
+    };
+  }
+  if (original.jac_g) {
+    reduced.jac_g = [&original, candidate](const Eigen::VectorXd& x,
+                                           Eigen::SparseMatrix<double>& jac) {
+      Eigen::SparseMatrix<double> full;
+      original.jac_g(candidate->expand(x), full);
+      jac = gather_sparse_columns(full, *candidate);
+    };
+  }
+  if (original.h) {
+    reduced.h = [&original, candidate](const Eigen::VectorXd& x,
+                                       Eigen::VectorXd& h) {
+      original.h(candidate->expand(x), h);
+    };
+  }
+  if (original.jac_h) {
+    reduced.jac_h = [&original, candidate](const Eigen::VectorXd& x,
+                                           Eigen::SparseMatrix<double>& jac) {
+      Eigen::SparseMatrix<double> full;
+      original.jac_h(candidate->expand(x), full);
+      jac = gather_sparse_columns(full, *candidate);
+    };
+  }
+
+  std::vector<int> reduced_free_columns;
+  reduced_free_columns.reserve(original.equality_free_columns.size());
+  for (int original_col : original.equality_free_columns) {
+    if (original_col < 0 || original_col >= n) continue;
+    const int reduced_col =
+        candidate->original_to_reduced[static_cast<std::size_t>(original_col)];
+    if (reduced_col >= 0) reduced_free_columns.push_back(reduced_col);
+  }
+  reduced.equality_free_columns = std::move(reduced_free_columns);
+  map = std::move(candidate);
+  return true;
+}
+
+std::vector<int> finite_lower_bound_columns(const NLPModel& prob) {
+  std::vector<int> columns;
+  for (int col = 0; col < static_cast<int>(prob.vars.size()); ++col) {
+    if (is_effectively_finite(prob.vars[static_cast<std::size_t>(col)].lb)) {
+      columns.push_back(col);
+    }
+  }
+  return columns;
+}
+
+std::vector<int> finite_upper_bound_columns(const NLPModel& prob) {
+  std::vector<int> columns;
+  for (int col = 0; col < static_cast<int>(prob.vars.size()); ++col) {
+    if (is_effectively_finite(prob.vars[static_cast<std::size_t>(col)].ub)) {
+      columns.push_back(col);
+    }
+  }
+  return columns;
+}
+
+double raw_primal_violation(const NLPModel& prob, const Eigen::VectorXd& x) {
+  double violation = 0.0;
+  if (prob.g) {
+    Eigen::VectorXd equality;
+    prob.g(x, equality);
+    if (!equality.allFinite()) return std::numeric_limits<double>::infinity();
+    violation = std::max(violation, inf_norm(equality));
+  }
+  if (prob.h) {
+    Eigen::VectorXd inequality;
+    prob.h(x, inequality);
+    if (!inequality.allFinite()) return std::numeric_limits<double>::infinity();
+    if (inequality.size() > 0) {
+      violation = std::max(violation, std::max(0.0, inequality.maxCoeff()));
+    }
+  }
+  for (int col = 0; col < static_cast<int>(prob.vars.size()); ++col) {
+    const auto& variable = prob.vars[static_cast<std::size_t>(col)];
+    if (is_effectively_finite(variable.lb)) {
+      violation = std::max(violation, variable.lb - x[col]);
+    }
+    if (is_effectively_finite(variable.ub)) {
+      violation = std::max(violation, x[col] - variable.ub);
+    }
+  }
+  return std::max(0.0, violation);
+}
+
+bool recover_partitioned_equality_duals(
+    const NLPModel& prob, const NLPState& state,
+    const Eigen::VectorXd& inequality_dual, Eigen::VectorXd& equality_dual,
+    double& state_stationarity, double& control_stationarity) {
+  const int n = static_cast<int>(state.grad.size());
+  const int meq = static_cast<int>(state.jg.rows());
+  if (meq <= 0 || meq > n || state.jg.cols() != n ||
+      inequality_dual.size() != state.jh.rows() ||
+      static_cast<int>(prob.equality_free_columns.size()) != n - meq) {
+    return false;
+  }
+
+  std::vector<unsigned char> is_control(static_cast<std::size_t>(n), 0);
+  for (int col : prob.equality_free_columns) {
+    if (col < 0 || col >= n || is_control[static_cast<std::size_t>(col)] != 0) {
+      return false;
+    }
+    is_control[static_cast<std::size_t>(col)] = 1;
+  }
+  std::vector<int> state_columns;
+  state_columns.reserve(static_cast<std::size_t>(meq));
+  std::vector<int> variable_to_state(static_cast<std::size_t>(n), -1);
+  for (int col = 0; col < n; ++col) {
+    if (is_control[static_cast<std::size_t>(col)] == 0) {
+      variable_to_state[static_cast<std::size_t>(col)] =
+          static_cast<int>(state_columns.size());
+      state_columns.push_back(col);
+    }
+  }
+  if (static_cast<int>(state_columns.size()) != meq) return false;
+
+  std::vector<Eigen::Triplet<double>> triplets;
+  triplets.reserve(static_cast<std::size_t>(state.jg.nonZeros()));
+  for (int col = 0; col < state.jg.outerSize(); ++col) {
+    const int state_row = variable_to_state[static_cast<std::size_t>(col)];
+    if (state_row < 0) continue;
+    for (Eigen::SparseMatrix<double>::InnerIterator it(state.jg, col); it;
+         ++it) {
+      triplets.emplace_back(state_row, it.row(), it.value());
+    }
+  }
+  Eigen::SparseMatrix<double> state_jacobian_transpose(meq, meq);
+  state_jacobian_transpose.setFromTriplets(triplets.begin(), triplets.end());
+  state_jacobian_transpose.makeCompressed();
+
+  Eigen::SparseLU<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>> lu;
+  lu.analyzePattern(state_jacobian_transpose);
+  lu.factorize(state_jacobian_transpose);
+  if (lu.info() != Eigen::Success) return false;
+
+  const Eigen::VectorXd stationarity_without_equalities =
+      state.grad + state.jh.transpose() * inequality_dual;
+  Eigen::VectorXd rhs(meq);
+  for (int row = 0; row < meq; ++row) {
+    rhs[row] = -stationarity_without_equalities[
+        state_columns[static_cast<std::size_t>(row)]];
+  }
+  Eigen::VectorXd candidate = lu.solve(rhs);
+  if (lu.info() != Eigen::Success || !candidate.allFinite()) return false;
+
+  const Eigen::VectorXd stationarity =
+      stationarity_without_equalities + state.jg.transpose() * candidate;
+  state_stationarity = 0.0;
+  control_stationarity = 0.0;
+  for (int col = 0; col < n; ++col) {
+    if (is_control[static_cast<std::size_t>(col)] != 0) {
+      control_stationarity =
+          std::max(control_stationarity, std::abs(stationarity[col]));
+    } else {
+      state_stationarity =
+          std::max(state_stationarity, std::abs(stationarity[col]));
+    }
+  }
+  const double solve_scale = std::max(1.0, inf_norm(rhs));
+  if (!std::isfinite(state_stationarity) ||
+      state_stationarity > 1e-7 * solve_scale) {
+    return false;
+  }
+  equality_dual = std::move(candidate);
+  return true;
+}
+
+bool restore_fixed_nlp_certificate(
+    const NLPModel& original, const NLPModel& reduced,
+    const FixedNLPMap& map, SolveResult& out, IPMDetail& detail,
+    const IPMOptions& opt) {
+  const int n = map.original_dimension;
+  if (out.x.size() != static_cast<int>(map.reduced_to_original.size())) {
+    return false;
+  }
+  out.x = map.expand(out.x);
+  if (!out.stats.success) return true;
+
+  Eigen::VectorXd nonlinear = Eigen::VectorXd::Zero(0);
+  if (original.h) original.h(out.x, nonlinear);
+  const int n_nonlinear = static_cast<int>(nonlinear.size());
+  const std::vector<int> reduced_lb = finite_lower_bound_columns(reduced);
+  const std::vector<int> reduced_ub = finite_upper_bound_columns(reduced);
+  if (detail.mu_ineq.size() != n_nonlinear +
+          static_cast<int>(reduced_lb.size() + reduced_ub.size()) ||
+      detail.z_slack.size() != detail.mu_ineq.size()) {
+    return false;
+  }
+
+  const std::vector<int> original_lb = finite_lower_bound_columns(original);
+  const std::vector<int> original_ub = finite_upper_bound_columns(original);
+  Eigen::VectorXd original_mu = Eigen::VectorXd::Zero(
+      n_nonlinear + static_cast<int>(original_lb.size() + original_ub.size()));
+  Eigen::VectorXd original_slack = Eigen::VectorXd::Zero(original_mu.size());
+  if (n_nonlinear > 0) {
+    original_mu.head(n_nonlinear) = detail.mu_ineq.head(n_nonlinear);
+    original_slack.head(n_nonlinear) = detail.z_slack.head(n_nonlinear);
+  }
+
+  Eigen::VectorXd bound_lb = Eigen::VectorXd::Zero(n);
+  Eigen::VectorXd bound_ub = Eigen::VectorXd::Zero(n);
+  int reduced_row = n_nonlinear;
+  for (int reduced_col : reduced_lb) {
+    const int original_col =
+        map.reduced_to_original[static_cast<std::size_t>(reduced_col)];
+    bound_lb[original_col] = detail.mu_ineq[reduced_row++];
+  }
+  for (int reduced_col : reduced_ub) {
+    const int original_col =
+        map.reduced_to_original[static_cast<std::size_t>(reduced_col)];
+    bound_ub[original_col] = detail.mu_ineq[reduced_row++];
+  }
+
+  Eigen::VectorXd grad;
+  original.grad(out.x, grad);
+  if (original.sense == Sense::Maximize) grad = -grad;
+  if (original.g && detail.lambda_eq.size() > 0) {
+    Eigen::SparseMatrix<double> jac_g;
+    original.jac_g(out.x, jac_g);
+    grad.noalias() += jac_g.transpose() * detail.lambda_eq;
+  }
+  if (n_nonlinear > 0) {
+    Eigen::SparseMatrix<double> jac_h;
+    original.jac_h(out.x, jac_h);
+    grad.noalias() +=
+        jac_h.transpose() * original_mu.head(n_nonlinear);
+  }
+  for (int col = 0; col < n; ++col) {
+    if (map.original_to_reduced[static_cast<std::size_t>(col)] < 0) {
+      bound_lb[col] = std::max(grad[col], 0.0);
+      bound_ub[col] = std::max(-grad[col], 0.0);
+    }
+  }
+
+  int row = n_nonlinear;
+  for (int col : original_lb) {
+    original_mu[row] = bound_lb[col];
+    original_slack[row] = out.x[col] -
+        original.vars[static_cast<std::size_t>(col)].lb;
+    ++row;
+  }
+  for (int col : original_ub) {
+    original_mu[row] = bound_ub[col];
+    original_slack[row] =
+        original.vars[static_cast<std::size_t>(col)].ub - out.x[col];
+    ++row;
+  }
+
+  NLPState original_state;
+  std::string status;
+  if (!evaluate_nlp_state(original, out.x, original_lb, original_ub,
+                          original_state, status)) {
+    return false;
+  }
+  const Eigen::VectorXd r_dual =
+      original_state.grad + original_state.jg.transpose() * detail.lambda_eq +
+      original_state.jh.transpose() * original_mu;
+  const ResidualSummary residuals = summarize_residuals(
+      r_dual, original_state.g, original_state.h + original_slack,
+      out.x, original_slack, detail.lambda_eq, original_mu);
+
+  out.stats.objective = original.f(out.x);
+  out.stats.primal_feas = residuals.primal_feas;
+  out.stats.dual_feas = residuals.dual_feas;
+  out.stats.complementarity = residuals.complementarity;
+  out.stats.residual_inf = std::max(residuals.primal_feas, residuals.dual_feas);
+  out.stats.success = residuals.primal_feas <= opt.tol_primal &&
+                      residuals.dual_feas <= opt.tol_dual &&
+                      residuals.complementarity <= opt.tol_complementarity;
+  if (!out.stats.success) {
+    out.stats.status =
+        "Fixed-variable postsolve failed original-space KKT certification";
+  }
+  out.box_dual_lb = std::move(bound_lb);
+  out.box_dual_ub = std::move(bound_ub);
+  detail.mu_ineq = std::move(original_mu);
+  detail.z_slack = std::move(original_slack);
+  detail.complementarity = residuals.complementarity;
+  out.constraint_duals.resize(detail.mu_ineq.size() + detail.lambda_eq.size());
+  if (detail.mu_ineq.size() > 0) {
+    out.constraint_duals.head(detail.mu_ineq.size()) = detail.mu_ineq;
+  }
+  if (detail.lambda_eq.size() > 0) {
+    out.constraint_duals.tail(detail.lambda_eq.size()) = detail.lambda_eq;
+  }
+  return true;
+}
+
+void transform_filter_options_to_scaled_coordinates(
+    const ScalingFactors& scaling, IPMOptions& options) {
+  // r_d^s = s_f*r_d and (s*mu)^s = s_f*(s*mu). A single primal
+  // tolerance must protect every scaled constraint row.
+  double min_constraint_scale = 1.0;  // generated bound rows are unscaled
+  if (scaling.s_g.size() > 0) {
+    min_constraint_scale =
+        std::min(min_constraint_scale, scaling.s_g.minCoeff());
+  }
+  if (scaling.s_h.size() > 0) {
+    min_constraint_scale =
+        std::min(min_constraint_scale, scaling.s_h.minCoeff());
+  }
+  min_constraint_scale = std::clamp(min_constraint_scale, 1e-16, 1.0);
+  const double objective_scale = std::clamp(scaling.s_f, 1e-16, 1.0);
+  options.tol_primal *= min_constraint_scale;
+  options.tol_dual *= objective_scale;
+  options.tol_complementarity *= objective_scale;
+  if (options.tol_accept > 0.0) {
+    options.tol_accept *= std::min(min_constraint_scale, objective_scale);
+  }
+  options.mu_init *= objective_scale;
+  options.mu_min *= objective_scale;
+
+  // Original -> scaled dual/slack warm starts. Nonlinear inequalities lead;
+  // generated lower/upper bound rows have no row scale.
+  if (options.equality_dual_start.size() == scaling.s_g.size()) {
+    for (int i = 0; i < options.equality_dual_start.size(); ++i) {
+      options.equality_dual_start[i] *=
+          objective_scale / scaling.s_g[i];
+    }
+  }
+  if (options.inequality_dual_start.size() > 0) {
+    const int nonlinear_count = std::min(
+        static_cast<int>(scaling.s_h.size()),
+        static_cast<int>(options.inequality_dual_start.size()));
+    for (int i = 0; i < nonlinear_count; ++i) {
+      options.inequality_dual_start[i] *=
+          objective_scale / scaling.s_h[i];
+    }
+    for (int i = nonlinear_count; i < options.inequality_dual_start.size();
+         ++i) {
+      options.inequality_dual_start[i] *= objective_scale;
+    }
+  }
+  if (options.slack_start.size() > 0) {
+    const int nonlinear_count = std::min(
+        static_cast<int>(scaling.s_h.size()),
+        static_cast<int>(options.slack_start.size()));
+    for (int i = 0; i < nonlinear_count; ++i) {
+      options.slack_start[i] *= scaling.s_h[i];
+    }
+  }
+}
+
+bool audit_filter_outcome_in_original_coordinates(
+    const NLPModel& original, const ScalingFactors& scaling,
+    const FilterSolveOutcome& scaled, ResidualSummary& residuals) {
+  if (scaled.x.size() != static_cast<int>(original.vars.size())) return false;
+  Eigen::VectorXd lambda = scaled.lambda;
+  Eigen::VectorXd mu = scaled.mu_ineq;
+  Eigen::VectorXd slack = scaled.s;
+  if (!(scaling.s_f > 0.0) || !std::isfinite(scaling.s_f)) return false;
+  if (lambda.size() != scaling.s_g.size()) return false;
+  for (int i = 0; i < lambda.size(); ++i) {
+    lambda[i] *= scaling.s_g[i] / scaling.s_f;
+  }
+  const int nonlinear_count = scaled.n_nonlinear_ineq;
+  if (nonlinear_count > mu.size() || nonlinear_count > slack.size() ||
+      nonlinear_count > scaling.s_h.size()) {
+    return false;
+  }
+  for (int i = 0; i < nonlinear_count; ++i) {
+    mu[i] *= scaling.s_h[i] / scaling.s_f;
+    slack[i] /= scaling.s_h[i];
+  }
+  for (int i = nonlinear_count; i < mu.size(); ++i) {
+    mu[i] /= scaling.s_f;
+  }
+
+  NLPState state;
+  std::string status;
+  if (!evaluate_nlp_state(original, scaled.x, scaled.lb_cols, scaled.ub_cols,
+                          state, status)) {
+    return false;
+  }
+  if (state.h.size() != slack.size() || state.h.size() != mu.size() ||
+      state.g.size() != lambda.size()) {
+    return false;
+  }
+  const Eigen::VectorXd r_dual =
+      state.grad + state.jg.transpose() * lambda + state.jh.transpose() * mu;
+  residuals = summarize_residuals(r_dual, state.g, state.h + slack, scaled.x,
+                                  slack, lambda, mu);
+  return true;
+}
+
 }  // namespace
 
 NativeIPMAdapter::NativeIPMAdapter(IPMOptions opt) : opt_(std::move(opt)) {}
@@ -2224,6 +3381,8 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
   SolveResult out;
   out.stats.solver_name = name();
   IPMDetail detail;
+  detail.original_dimension = static_cast<int>(prob.vars.size());
+  detail.reduced_dimension = detail.original_dimension;
 
   const ValidationReport vr = validate(prob);
   if (!vr.valid) {
@@ -2236,6 +3395,28 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
     return {out, detail};
   }
 
+  NLPModel reduced_prob;
+  std::shared_ptr<FixedNLPMap> fixed_map;
+  if (build_fixed_nlp_reduction(prob, reduced_prob, fixed_map)) {
+    NativeIPMAdapter reduced_solver(opt_);
+    auto reduced_result = reduced_solver.solve_nlp_detail(reduced_prob);
+    out = std::move(reduced_result.first);
+    detail = std::move(reduced_result.second);
+    detail.original_dimension = static_cast<int>(prob.vars.size());
+    detail.reduced_dimension =
+        static_cast<int>(fixed_map->reduced_to_original.size());
+    detail.fixed_variables_eliminated =
+        detail.original_dimension - detail.reduced_dimension;
+    if (!restore_fixed_nlp_certificate(
+            prob, reduced_prob, *fixed_map, out, detail, opt_)) {
+      out.stats.success = false;
+      out.stats.status = "Fixed-variable postsolve mapping failed";
+    }
+    out.stats.runtime_sec = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - t0).count();
+    return {out, detail};
+  }
+
   // Filter-based driver (Wächter–Biegler). Opt-in via IPMOptions::globalization.
   if (opt_.globalization == Globalization::Filter) {
     const int n_f = static_cast<int>(prob.vars.size());
@@ -2244,6 +3425,7 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
     ScalingFactors sf;
     const NLPModel* active_prob = &prob;
     NLPModel scaled_prob;
+    IPMOptions active_opt = opt_;
     const bool do_scale = opt_.scale_problem;
     if (do_scale) {
       Eigen::VectorXd x0_interior = (prob.x0.size() == n_f)
@@ -2253,9 +3435,36 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
       sf = compute_scaling_factors(prob, x0_interior, opt_.scaling_g_max);
       scaled_prob = build_scaled_nlp_model(prob, sf);
       active_prob = &scaled_prob;
+
+      transform_filter_options_to_scaled_coordinates(sf, active_opt);
     }
 
-    FilterSolveOutcome fo = solve_nlp_filter_impl(*active_prob, opt_);
+    FilterSolveOutcome fo = solve_nlp_filter_impl(*active_prob, active_opt);
+    int solve_chain_numeric_factorizations = fo.numeric_factorizations;
+    int solve_chain_symbolic_analyses = fo.symbolic_analyses;
+    int solve_chain_linear_solves = fo.linear_solves;
+    int solve_chain_primary_factorizations = fo.primary_factorizations;
+    int solve_chain_inertia_retries = fo.inertia_retry_factorizations;
+    int solve_chain_inertia_certificates =
+        fo.inertia_certificate_factorizations;
+    int solve_chain_polish_factorizations =
+        fo.active_set_polish_factorizations;
+    int selected_base_numeric_factorizations = fo.numeric_factorizations;
+    int selected_base_symbolic_analyses = fo.symbolic_analyses;
+    int selected_base_linear_solves = fo.linear_solves;
+    int selected_base_primary_factorizations = fo.primary_factorizations;
+    int selected_base_inertia_retries = fo.inertia_retry_factorizations;
+    int selected_base_inertia_certificates =
+        fo.inertia_certificate_factorizations;
+    int selected_base_polish_factorizations =
+        fo.active_set_polish_factorizations;
+    int restoration_factorizations = 0;
+    int retry_factorizations = 0;
+    bool restoration_warm_start_used = false;
+    double restoration_normal_residual_before = 0.0;
+    double restoration_normal_residual_after = 0.0;
+    double restoration_state_stationarity = 0.0;
+    double restoration_control_stationarity = 0.0;
 
     // --- Feasibility restoration on line-search / inertia failure.
     if (!fo.converged && opt_.use_restoration_phase) {
@@ -2272,6 +3481,19 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
                                   : ((prob.x0.size() == n_f)
                                          ? prob.x0
                                          : Eigen::VectorXd::Zero(n_f));
+        restoration_normal_residual_before = raw_primal_violation(prob, x_R);
+        const bool restoration_is_applicable =
+            std::isfinite(restoration_normal_residual_before) &&
+            restoration_normal_residual_before > opt_.tol_primal;
+        if (!restoration_is_applicable) {
+          if (opt_.verbose) {
+            std::cerr << "[NativeIPM] restoration skipped: original normal "
+                         "residual="
+                      << restoration_normal_residual_before
+                      << " already satisfies primal tolerance="
+                      << opt_.tol_primal << '\n';
+          }
+        } else {
         RestorationBuild rb =
             build_restoration_nlp(prob, x_R, opt_.restoration_zeta);
         IPMOptions rst_opt = opt_;
@@ -2282,11 +3504,72 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
         rst_opt.max_iter = std::min(opt_.max_iter, 200);
 
         FilterSolveOutcome rf = solve_nlp_filter_impl(rb.model, rst_opt);
+        restoration_factorizations += rf.numeric_factorizations;
+        solve_chain_numeric_factorizations += rf.numeric_factorizations;
+        solve_chain_symbolic_analyses += rf.symbolic_analyses;
+        solve_chain_linear_solves += rf.linear_solves;
+        solve_chain_primary_factorizations += rf.primary_factorizations;
+        solve_chain_inertia_retries += rf.inertia_retry_factorizations;
+        solve_chain_inertia_certificates +=
+            rf.inertia_certificate_factorizations;
+        solve_chain_polish_factorizations +=
+            rf.active_set_polish_factorizations;
 
         if (rf.x.size() >= rb.n_x) {
           Eigen::VectorXd x_new = extract_x_from_restoration(rb, rf.x);
+          restoration_normal_residual_after =
+              raw_primal_violation(prob, x_new);
+          const double normal_roundoff =
+              64.0 * std::numeric_limits<double>::epsilon() *
+              std::max(1.0, restoration_normal_residual_before);
+          const bool restoration_reduces_normal_residual =
+              std::isfinite(restoration_normal_residual_after) &&
+              restoration_normal_residual_after + normal_roundoff <
+                  restoration_normal_residual_before;
+          if (!restoration_reduces_normal_residual) {
+            if (opt_.verbose) {
+              std::cerr << "[NativeIPM] restoration retry skipped: normal "
+                           "residual did not decrease (before="
+                        << restoration_normal_residual_before << ", after="
+                        << restoration_normal_residual_after << ")\n";
+            }
+          } else {
           NLPModel prob_retry = prob;
           prob_retry.x0 = x_new;
+
+          RestorationWarmStart warm = recover_restoration_warm_start(
+              prob, rb, rf.x, rf.lambda, rf.mu_ineq, rf.s,
+              rf.n_nonlinear_ineq, rf.lb_cols, rf.ub_cols);
+          if (warm.valid) {
+            const std::vector<int> original_lb =
+                finite_lower_bound_columns(prob);
+            const std::vector<int> original_ub =
+                finite_upper_bound_columns(prob);
+            NLPState retry_state;
+            std::string retry_state_status;
+            if (evaluate_nlp_state(prob, warm.x, original_lb, original_ub,
+                                   retry_state, retry_state_status) &&
+                retry_state.g.size() == warm.equality_dual.size() &&
+                retry_state.h.size() == warm.inequality_dual.size()) {
+              Eigen::VectorXd partitioned_lambda = warm.equality_dual;
+              if (recover_partitioned_equality_duals(
+                      prob, retry_state, warm.inequality_dual,
+                      partitioned_lambda, restoration_state_stationarity,
+                      restoration_control_stationarity)) {
+                warm.equality_dual = std::move(partitioned_lambda);
+              } else {
+                const Eigen::VectorXd stationarity =
+                    retry_state.grad +
+                    retry_state.jg.transpose() * warm.equality_dual +
+                    retry_state.jh.transpose() * warm.inequality_dual;
+                restoration_state_stationarity = inf_norm(stationarity);
+                restoration_control_stationarity = inf_norm(stationarity);
+              }
+              restoration_warm_start_used = true;
+            } else {
+              warm.valid = false;
+            }
+          }
 
           ScalingFactors sf2;
           NLPModel scaled_retry;
@@ -2301,20 +3584,111 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
 
           IPMOptions retry_opt = opt_;
           retry_opt.use_restoration_phase = false;  // one-shot restoration
+          if (restoration_warm_start_used) {
+            retry_opt.equality_dual_start = warm.equality_dual;
+            retry_opt.inequality_dual_start = warm.inequality_dual;
+            retry_opt.slack_start = warm.slack;
+            const double recovered_barrier =
+                warm.slack.dot(warm.inequality_dual) /
+                std::max(1, static_cast<int>(warm.slack.size()));
+            if (std::isfinite(recovered_barrier) && recovered_barrier > 0.0) {
+              retry_opt.mu_init = std::clamp(
+                  recovered_barrier, retry_opt.mu_min, retry_opt.mu_init);
+            }
+          }
+          if (opt_.scale_problem) {
+            transform_filter_options_to_scaled_coordinates(sf2, retry_opt);
+          }
+
+          if (opt_.verbose) {
+            std::cerr << "[NativeIPM] restoration structure: normal_before="
+                      << restoration_normal_residual_before
+                      << ", normal_after="
+                      << restoration_normal_residual_after
+                      << ", normal_step_accepted="
+                      << restoration_reduces_normal_residual
+                      << ", warm_start=" << restoration_warm_start_used
+                      << ", state_stationarity="
+                      << restoration_state_stationarity
+                      << ", control_reduced_gradient="
+                      << restoration_control_stationarity << '\n';
+          }
 
           FilterSolveOutcome fo_retry =
               solve_nlp_filter_impl(*retry_prob, retry_opt);
-          // Only adopt the retry if it did at least as well as the original.
-          if (fo_retry.converged ||
-              fo_retry.final_residuals.merit < fo.final_residuals.merit) {
+          retry_factorizations += fo_retry.numeric_factorizations;
+          solve_chain_numeric_factorizations +=
+              fo_retry.numeric_factorizations;
+          solve_chain_symbolic_analyses += fo_retry.symbolic_analyses;
+          solve_chain_linear_solves += fo_retry.linear_solves;
+          solve_chain_primary_factorizations +=
+              fo_retry.primary_factorizations;
+          solve_chain_inertia_retries +=
+              fo_retry.inertia_retry_factorizations;
+          solve_chain_inertia_certificates +=
+              fo_retry.inertia_certificate_factorizations;
+          solve_chain_polish_factorizations +=
+              fo_retry.active_set_polish_factorizations;
+          ResidualSummary original_before;
+          ResidualSummary original_retry;
+          bool before_audited = false;
+          bool retry_audited = false;
+          if (opt_.scale_problem) {
+            before_audited = audit_filter_outcome_in_original_coordinates(
+                prob, sf, fo, original_before);
+            retry_audited = audit_filter_outcome_in_original_coordinates(
+                prob, sf2, fo_retry, original_retry);
+          } else {
+            original_before = fo.final_residuals;
+            original_retry = fo_retry.final_residuals;
+            before_audited = true;
+            retry_audited = true;
+          }
+          const double before_stationarity = std::max(
+              original_before.dual_feas, original_before.complementarity);
+          const double retry_stationarity = std::max(
+              original_retry.dual_feas, original_retry.complementarity);
+          const bool retry_improves_original_kkt = before_audited &&
+              retry_audited &&
+              original_retry.primal_feas < original_before.primal_feas &&
+              retry_stationarity < before_stationarity;
+          if (opt_.verbose && before_audited && retry_audited) {
+            std::cerr << "[NativeIPM] restoration retry audit: before=(p="
+                      << original_before.primal_feas << ",d="
+                      << original_before.dual_feas << ",c="
+                      << original_before.complementarity << ") retry=(p="
+                      << original_retry.primal_feas << ",d="
+                      << original_retry.dual_feas << ",c="
+                      << original_retry.complementarity << ") accepted="
+                      << retry_improves_original_kkt << '\n';
+          }
+          // Restoration is a primal recovery mechanism. Compare in the
+          // original model coordinates and require simultaneous progress in
+          // primal feasibility and the dual/complementarity envelope.
+          if (retry_improves_original_kkt) {
             fo = fo_retry;
             sf = sf2;
+            selected_base_numeric_factorizations =
+                fo_retry.numeric_factorizations;
+            selected_base_symbolic_analyses = fo_retry.symbolic_analyses;
+            selected_base_linear_solves = fo_retry.linear_solves;
+            selected_base_primary_factorizations =
+                fo_retry.primary_factorizations;
+            selected_base_inertia_retries =
+                fo_retry.inertia_retry_factorizations;
+            selected_base_inertia_certificates =
+                fo_retry.inertia_certificate_factorizations;
+            selected_base_polish_factorizations =
+                fo_retry.active_set_polish_factorizations;
           }
+          }
+        }
         }
       }
     }
 
     // --- Unscale multipliers back to the original problem's coordinates.
+    bool needs_original_scale_refinement = false;
     if (opt_.scale_problem && sf.s_f > 0.0) {
       if (fo.lambda.size() == sf.s_g.size()) {
         for (int i = 0; i < fo.lambda.size(); ++i) {
@@ -2362,11 +3736,96 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
                  opt_.tol_complementarity)) {
           fo.converged = false;
           fo.status = "Scaled solve failed unscaled KKT certification";
+          needs_original_scale_refinement = true;
         }
       } else if (fo.converged) {
         fo.converged = false;
         fo.status = "Scaled solve could not evaluate unscaled KKT: " +
                     original_status;
+      }
+    }
+
+    // A scaled-space solution can be close to, but not yet inside, the strict
+    // original-scale KKT gate. A line-search collapse at an already feasible
+    // primal point is the same structural state: restoration has no normal
+    // residual to repair, while the dual/tangential trajectory still has work
+    // left. Continue with the same unscaled primal-dual central state and a
+    // fresh filter, rather than cold-starting or invoking restoration.
+    const int remaining_iterations = opt_.max_iter - fo.iterations;
+    const bool tangential_filter_stall = !fo.converged &&
+        fo.final_residuals.primal_feas <= opt_.tol_primal &&
+        (fo.status.rfind("Filter: accepted-step collapse", 0) == 0 ||
+         fo.status.rfind("Filter: line-search step too small", 0) == 0);
+    const bool continue_original_trajectory =
+        needs_original_scale_refinement || tangential_filter_stall;
+    if (continue_original_trajectory && remaining_iterations > 0 &&
+        fo.x.size() == n_f && fo.lambda.allFinite() &&
+        fo.mu_ineq.allFinite() && fo.s.allFinite() &&
+        (fo.mu_ineq.array() > kMinPositive).all() &&
+        (fo.s.array() > kMinPositive).all()) {
+      const int prior_iterations = fo.iterations;
+      const int prior_symbolic_analyses = fo.symbolic_analyses;
+      const int prior_numeric_factorizations = fo.numeric_factorizations;
+      const int prior_linear_solves = fo.linear_solves;
+      const int prior_primary_factorizations = fo.primary_factorizations;
+      const int prior_inertia_retries = fo.inertia_retry_factorizations;
+      const int prior_inertia_certificates =
+          fo.inertia_certificate_factorizations;
+      const int prior_polish_factorizations =
+          fo.active_set_polish_factorizations;
+      const ResidualSummary original_initial_residuals = fo.initial_residuals;
+
+      NLPModel refine_prob = prob;
+      refine_prob.x0 = fo.x;
+      IPMOptions refine_opt = opt_;
+      refine_opt.max_iter = remaining_iterations;
+      refine_opt.scale_problem = false;
+      refine_opt.use_restoration_phase = false;
+      refine_opt.equality_dual_start = fo.lambda;
+      refine_opt.inequality_dual_start = fo.mu_ineq;
+      refine_opt.slack_start = fo.s;
+      if (fo.mu_ineq.size() > 0) {
+        refine_opt.mu_init = std::clamp(
+            fo.mu_ineq.dot(fo.s) / fo.mu_ineq.size(),
+            refine_opt.mu_min, refine_opt.mu_init);
+      }
+
+      FilterSolveOutcome refined =
+          solve_nlp_filter_impl(refine_prob, refine_opt);
+      const bool adopt_refinement = refined.converged ||
+          refined.final_residuals.merit < fo.final_residuals.merit;
+      if (adopt_refinement) {
+        refined.iterations += prior_iterations;
+        refined.symbolic_analyses += prior_symbolic_analyses;
+        refined.numeric_factorizations += prior_numeric_factorizations;
+        refined.linear_solves += prior_linear_solves;
+        refined.primary_factorizations += prior_primary_factorizations;
+        refined.inertia_retry_factorizations += prior_inertia_retries;
+        refined.inertia_certificate_factorizations +=
+            prior_inertia_certificates;
+        refined.active_set_polish_factorizations +=
+            prior_polish_factorizations;
+        refined.initial_residuals = original_initial_residuals;
+        if (refined.converged) {
+          refined.status = tangential_filter_stall
+              ? "Converged after tangential filter continuation"
+              : "Converged after original-scale KKT refinement";
+        } else {
+          refined.status = "Original-scale KKT refinement: " + refined.status;
+        }
+        fo = std::move(refined);
+      } else {
+        fo.symbolic_analyses += refined.symbolic_analyses;
+        fo.numeric_factorizations += refined.numeric_factorizations;
+        fo.linear_solves += refined.linear_solves;
+        fo.primary_factorizations += refined.primary_factorizations;
+        fo.inertia_retry_factorizations +=
+            refined.inertia_retry_factorizations;
+        fo.inertia_certificate_factorizations +=
+            refined.inertia_certificate_factorizations;
+        fo.active_set_polish_factorizations +=
+            refined.active_set_polish_factorizations;
+        fo.iterations += refined.iterations;
       }
     }
 
@@ -2379,9 +3838,49 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
     detail.augmented_symbolic_flops = fo.newton_profile.augmented_flops;
     detail.condensed_symbolic_nonzeros = fo.newton_profile.condensed_lnz;
     detail.augmented_symbolic_nonzeros = fo.newton_profile.augmented_lnz;
-    detail.symbolic_analyses = fo.symbolic_analyses;
-    detail.numeric_factorizations = fo.numeric_factorizations;
-    detail.linear_solves = fo.linear_solves;
+    detail.symbolic_analyses = solve_chain_symbolic_analyses +
+        std::max(0, fo.symbolic_analyses - selected_base_symbolic_analyses);
+    detail.numeric_factorizations = solve_chain_numeric_factorizations +
+        std::max(0, fo.numeric_factorizations -
+                        selected_base_numeric_factorizations);
+    detail.linear_solves = solve_chain_linear_solves +
+        std::max(0, fo.linear_solves - selected_base_linear_solves);
+    detail.primary_factorizations = solve_chain_primary_factorizations +
+        std::max(0, fo.primary_factorizations -
+                        selected_base_primary_factorizations);
+    detail.inertia_retry_factorizations = solve_chain_inertia_retries +
+        std::max(0, fo.inertia_retry_factorizations -
+                        selected_base_inertia_retries);
+    detail.inertia_certificate_factorizations =
+        solve_chain_inertia_certificates +
+        std::max(0, fo.inertia_certificate_factorizations -
+                        selected_base_inertia_certificates);
+    detail.restoration_factorizations = restoration_factorizations;
+    detail.retry_factorizations = retry_factorizations;
+    detail.restoration_warm_start_used = restoration_warm_start_used;
+    detail.restoration_normal_residual_before =
+        restoration_normal_residual_before;
+    detail.restoration_normal_residual_after =
+        restoration_normal_residual_after;
+    detail.restoration_state_stationarity = restoration_state_stationarity;
+    detail.restoration_control_stationarity =
+        restoration_control_stationarity;
+    detail.active_set_polish_factorizations =
+        solve_chain_polish_factorizations +
+        std::max(0, fo.active_set_polish_factorizations -
+                        selected_base_polish_factorizations);
+    if (opt_.verbose) {
+      std::cerr << "[NativeIPM] factorization breakdown: total_kkt="
+                << detail.numeric_factorizations << ", primary="
+                << detail.primary_factorizations << ", inertia_retries="
+                << detail.inertia_retry_factorizations
+                << ", inertia_certificates="
+                << detail.inertia_certificate_factorizations
+                << ", restoration=" << detail.restoration_factorizations
+                << ", retry=" << detail.retry_factorizations
+                << ", active_set_polish="
+                << detail.active_set_polish_factorizations << '\n';
+    }
 
     out.x = fo.x.size() == n_f ? fo.x : Eigen::VectorXd::Zero(n_f);
     out.stats.success = fo.converged;
@@ -2426,23 +3925,38 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
       // driver before the optional Ipopt last-resort. Merit handles
       // quasi-Newton-only NLPs (no Hessian) and badly-conditioned small
       // problems more gracefully than the Filter prototype.
-      IPMOptions merit_opt = opt_;
-      merit_opt.globalization = Globalization::Merit;
-      merit_opt.use_restoration_phase = false;
-      merit_opt.use_second_order_correction = false;
-      merit_opt.scale_problem = false;
-      NativeIPMAdapter merit_solver(merit_opt);
-      auto merit_pair = merit_solver.solve_nlp_detail(prob);
-      if (merit_pair.first.stats.success) {
-        if (merit_pair.first.stats.solver_name == name()) {
-          merit_pair.first.stats.solver_name = "NativeIPM[MeritFallback]";
-          merit_pair.first.stats.status =
-              "Native Merit fallback after Filter failure: " + fo.status +
-              "; " + merit_pair.first.stats.status;
+      // Merit is a recovery engine for models that have only quasi-Newton
+      // curvature. Re-running a full exact-Hessian OPF with Merit discards the
+      // structural Filter trajectory, repeats hundreds of derivative/KKT
+      // evaluations, and has no stronger certificate. Keep exact-curvature
+      // models on the Filter result (or the explicitly allowed external path).
+      std::pair<SolveResult, IPMDetail> merit_pair;
+      const bool merit_is_structurally_applicable =
+          !prob.hess && !prob.lagrangian_hess;
+      if (merit_is_structurally_applicable) {
+        IPMOptions merit_opt = opt_;
+        merit_opt.globalization = Globalization::Merit;
+        merit_opt.use_restoration_phase = false;
+        merit_opt.use_second_order_correction = false;
+        merit_opt.scale_problem = false;
+        NativeIPMAdapter merit_solver(merit_opt);
+        merit_pair = merit_solver.solve_nlp_detail(prob);
+        if (merit_pair.first.stats.success) {
+          if (merit_pair.first.stats.solver_name == name()) {
+            merit_pair.first.stats.solver_name = "NativeIPM[MeritFallback]";
+            merit_pair.first.stats.status =
+                "Native Merit fallback after Filter failure: " + fo.status +
+                "; " + merit_pair.first.stats.status;
+          }
+          merit_pair.first.stats.runtime_sec =
+              std::chrono::duration<double>(
+                  std::chrono::steady_clock::now() - t0).count();
+          return merit_pair;
         }
-        merit_pair.first.stats.runtime_sec =
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-        return merit_pair;
+      } else if (opt_.verbose) {
+        std::cerr << "[NativeIPM] exact Lagrangian Hessian available; "
+                     "skipping non-structural Merit retry after Filter "
+                  << fo.status << '\n';
       }
 
       // A terminated Ipopt run is not accepted as a solution, but its full

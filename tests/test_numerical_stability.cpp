@@ -694,6 +694,106 @@ TEST_CASE("Augmented Newton path matches condensed path on inequality NLP",
   CHECK(ra.x[1] == Approx(rc.x[1]).margin(1e-6));
 }
 
+TEST_CASE("Native NLP exactly eliminates fixed variables and restores KKT",
+          "[numerical][nlp][fixed]") {
+  // min 0.5*x0^2 + 3*x1  s.t. x0 = 1, x1 fixed at 2.
+  // The reduced NLP has one primal column. In the original KKT convention,
+  // the fixed column has z_L=3, z_U=0 so stationarity is exact.
+  NLPModel nlp;
+  nlp.sense = Sense::Minimize;
+  nlp.vars.push_back({VarType::Continuous, -1e20, 1e20});
+  nlp.vars.push_back({VarType::Continuous, 2.0, 2.0});
+  nlp.x0 = (Eigen::VectorXd(2) << 0.0, 2.0).finished();
+  nlp.f = [](const Eigen::VectorXd& x) {
+    return 0.5 * x[0] * x[0] + 3.0 * x[1];
+  };
+  nlp.grad = [](const Eigen::VectorXd& x, Eigen::VectorXd& grad) {
+    grad = (Eigen::VectorXd(2) << x[0], 3.0).finished();
+  };
+  nlp.hess = [](const Eigen::VectorXd&, Eigen::SparseMatrix<double>& hess) {
+    hess.resize(2, 2);
+    hess.insert(0, 0) = 1.0;
+    hess.insert(1, 1) = 0.0;
+    hess.makeCompressed();
+  };
+  nlp.g = [](const Eigen::VectorXd& x, Eigen::VectorXd& equality) {
+    equality = Eigen::VectorXd::Constant(1, x[0] - 1.0);
+  };
+  nlp.jac_g = [](const Eigen::VectorXd&, Eigen::SparseMatrix<double>& jac) {
+    jac.resize(1, 2);
+    jac.insert(0, 0) = 1.0;
+    jac.makeCompressed();
+  };
+
+  IPMOptions options;
+  options.max_iter = 50;
+  options.tol_primal = 1e-9;
+  options.tol_dual = 1e-9;
+  options.tol_complementarity = 1e-9;
+  options.tol_accept = 0.0;
+  options.scale_problem = false;
+  options.use_restoration_phase = false;
+  const auto [result, detail] =
+      NativeIPMAdapter(options).solve_nlp_detail(nlp);
+
+  REQUIRE(result.stats.success);
+  REQUIRE(result.x.size() == 2);
+  CHECK(result.x[0] == Approx(1.0).margin(1e-9));
+  CHECK(result.x[1] == Approx(2.0).margin(0.0));
+  CHECK(result.stats.objective == Approx(6.5).margin(1e-9));
+  CHECK(result.stats.primal_feas <= options.tol_primal);
+  CHECK(result.stats.dual_feas <= options.tol_dual);
+  CHECK(result.stats.complementarity <= options.tol_complementarity);
+  CHECK(detail.original_dimension == 2);
+  CHECK(detail.reduced_dimension == 1);
+  CHECK(detail.fixed_variables_eliminated == 1);
+  REQUIRE(result.box_dual_lb.size() == 2);
+  REQUIRE(result.box_dual_ub.size() == 2);
+  CHECK(result.box_dual_lb[1] == Approx(3.0).margin(1e-9));
+  CHECK(result.box_dual_ub[1] == Approx(0.0).margin(1e-12));
+}
+
+TEST_CASE("Native NLP nonlinear multiplier initialization preserves centrality",
+          "[numerical][nlp][initialization]") {
+  NLPModel nlp;
+  nlp.vars.resize(1);
+  nlp.vars[0].lb = -1000.0;
+  nlp.vars[0].ub = 1000.0;
+  nlp.x0 = Eigen::VectorXd::Zero(1);
+  nlp.f = [](const Eigen::VectorXd&) { return 0.0; };
+  nlp.grad = [](const Eigen::VectorXd&, Eigen::VectorXd& gradient) {
+    gradient = Eigen::VectorXd::Zero(1);
+  };
+  nlp.h = [](const Eigen::VectorXd&, Eigen::VectorXd& inequality) {
+    inequality = Eigen::VectorXd::Constant(1, -700.0);
+  };
+  nlp.jac_h = [](const Eigen::VectorXd&,
+                 Eigen::SparseMatrix<double>& jacobian) {
+    jacobian.resize(1, 1);
+    jacobian.setZero();
+  };
+
+  IPMOptions options;
+  options.max_iter = 1;
+  options.mu_init = 1e-3;
+  options.mu_min = 1e-8;
+  options.tol_complementarity = 2e-1;
+  options.scale_problem = false;
+  options.use_restoration_phase = false;
+  const auto [result, detail] =
+      NativeIPMAdapter(options).solve_nlp_detail(nlp);
+
+  REQUIRE(result.stats.success);
+  REQUIRE(detail.z_slack.size() == 3);
+  REQUIRE(detail.mu_ineq.size() == detail.z_slack.size());
+  const Eigen::VectorXd products =
+      detail.z_slack.cwiseProduct(detail.mu_ineq);
+  CHECK(products[0] == Approx(2e-2).epsilon(1e-12));
+  CHECK(products[1] == Approx(0.1).epsilon(1e-12));
+  CHECK(products[2] == Approx(0.1).epsilon(1e-12));
+  CHECK(detail.mu_ineq[0] < 1e-4);
+}
+
 // ─── MUMPS symmetric-indefinite backend ─────────────────────────────────────
 // MumpsSolver (multifrontal LDLᵀ) on a symmetric indefinite KKT system:
 // analyze once, factorize, solve, then re-factorize new values in the same

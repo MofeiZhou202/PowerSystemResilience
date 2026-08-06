@@ -118,6 +118,20 @@ struct IPMDetail {
   int symbolic_analyses{0};
   int numeric_factorizations{0};
   int linear_solves{0};
+  int primary_factorizations{0};
+  int inertia_retry_factorizations{0};
+  int inertia_certificate_factorizations{0};
+  int restoration_factorizations{0};
+  int retry_factorizations{0};
+  int active_set_polish_factorizations{0};
+  bool restoration_warm_start_used{false};
+  double restoration_normal_residual_before{0.0};
+  double restoration_normal_residual_after{0.0};
+  double restoration_state_stationarity{0.0};
+  double restoration_control_stationarity{0.0};
+  int original_dimension{0};
+  int reduced_dimension{0};
+  int fixed_variables_eliminated{0};
 };
 
 /// Native primal-dual IPM for NLP problems, with a Wächter–Biegler filter

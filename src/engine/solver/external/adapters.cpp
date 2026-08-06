@@ -12,6 +12,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -1082,7 +1083,9 @@ class CallbackTNLP final : public Ipopt::TNLP {
         best_dual_inf_(0.0),
         best_complementarity_(0.0),
         best_iter_(0),
-        best_iterate_valid_(false) {
+        best_iterate_valid_(false),
+        exact_hessian_(false),
+        nnz_hess_(0) {
     if (prob_.g) {
       Eigen::VectorXd geq;
       prob_.g(prob_.x0, geq);
@@ -1114,6 +1117,53 @@ class CallbackTNLP final : public Ipopt::TNLP {
 
       nnz_jac_ = static_cast<int>(jac_rows_.size());
     }
+    // A TNLP Hessian has a fixed lower-triangular sparsity pattern.  Probe the
+    // supplied exact Lagrangian Hessian with two nonzero multiplier vectors so
+    // constraint curvature is present even when the initial multipliers are
+    // zero.  Sparse callbacks are expected to retain their structural entries;
+    // the second, nonuniform probe avoids accidental cancellation between rows.
+    if (prob_.lagrangian_hess) {
+      std::set<std::pair<int, int>> pattern;
+      const auto collect_hessian_pattern = [&](double sign) {
+        Eigen::VectorXd lambda(meq_);
+        Eigen::VectorXd nu(mineq_);
+        for (int i = 0; i < meq_; ++i) {
+          lambda[i] = sign * (1.0 + 0.013 * static_cast<double>(i + 1));
+        }
+        for (int i = 0; i < mineq_; ++i) {
+          nu[i] = sign * (1.0 + 0.017 * static_cast<double>(i + 1));
+        }
+        Eigen::SparseMatrix<double> hess;
+        prob_.lagrangian_hess(prob_.x0, lambda,
+                              mineq_ > 0 ? &nu : nullptr, hess);
+        if (hess.rows() != n_ || hess.cols() != n_) {
+          return false;
+        }
+        hess.makeCompressed();
+        for (int col = 0; col < hess.outerSize(); ++col) {
+          for (Eigen::SparseMatrix<double>::InnerIterator it(hess, col); it;
+               ++it) {
+            const int row = static_cast<int>(it.row());
+            const int column = static_cast<int>(it.col());
+            pattern.emplace(std::max(row, column), std::min(row, column));
+          }
+        }
+        return true;
+      };
+      try {
+        exact_hessian_ = collect_hessian_pattern(1.0) &&
+                         collect_hessian_pattern(-1.0);
+      } catch (const std::exception&) {
+        exact_hessian_ = false;
+      }
+      if (exact_hessian_) {
+        for (const auto& [row, col] : pattern) {
+          hess_rows_.push_back(row);
+          hess_cols_.push_back(col);
+        }
+        nnz_hess_ = static_cast<int>(hess_rows_.size());
+      }
+    }
     // Ipopt accepts nnz_jac_g == 0 for unconstrained problems.  Advertising a
     // synthetic entry here is unsafe because there is no valid constraint row
     // to attach it to and the value callback cannot reproduce that structure.
@@ -1127,7 +1177,7 @@ class CallbackTNLP final : public Ipopt::TNLP {
     n = n_;
     m = m_;
     nnz_jac_g = nnz_jac_;
-    nnz_h_lag = 0;
+    nnz_h_lag = nnz_hess_;
     index_style = Ipopt::TNLP::C_STYLE;
     return true;
   }
@@ -1332,18 +1382,64 @@ class CallbackTNLP final : public Ipopt::TNLP {
               Ipopt::Index* iRow,
               Ipopt::Index* jCol,
               Ipopt::Number* values) override {
-    (void)n;
-    (void)x;
+    if (n != n_ || m != m_ || nele_hess != nnz_hess_) {
+      return false;
+    }
     (void)new_x;
-    (void)obj_factor;
-    (void)m;
-    (void)lambda;
     (void)new_lambda;
-    (void)nele_hess;
-    (void)iRow;
-    (void)jCol;
-    (void)values;
-    return true;
+    if (!exact_hessian_) {
+      return nele_hess == 0;
+    }
+    if (values == nullptr) {
+      if (nele_hess > 0 && (iRow == nullptr || jCol == nullptr)) {
+        return false;
+      }
+      for (int k = 0; k < nnz_hess_; ++k) {
+        iRow[k] = hess_rows_[static_cast<std::size_t>(k)];
+        jCol[k] = hess_cols_[static_cast<std::size_t>(k)];
+      }
+      return true;
+    }
+    if (x == nullptr || (m_ > 0 && lambda == nullptr)) {
+      return false;
+    }
+
+    try {
+      Eigen::Map<const Eigen::VectorXd> xv(x, n_);
+      Eigen::VectorXd lambda_eq = Eigen::VectorXd::Zero(meq_);
+      Eigen::VectorXd nu = Eigen::VectorXd::Zero(mineq_);
+      for (int i = 0; i < meq_; ++i) lambda_eq[i] = lambda[i];
+      for (int i = 0; i < mineq_; ++i) nu[i] = lambda[meq_ + i];
+
+      Eigen::SparseMatrix<double> full_hessian;
+      prob_.lagrangian_hess(xv, lambda_eq,
+                            mineq_ > 0 ? &nu : nullptr, full_hessian);
+      Eigen::VectorXd zero_lambda = Eigen::VectorXd::Zero(meq_);
+      Eigen::VectorXd zero_nu = Eigen::VectorXd::Zero(mineq_);
+      Eigen::SparseMatrix<double> objective_hessian;
+      prob_.lagrangian_hess(
+          xv, zero_lambda, mineq_ > 0 ? &zero_nu : nullptr,
+          objective_hessian);
+      if (full_hessian.rows() != n_ || full_hessian.cols() != n_ ||
+          objective_hessian.rows() != n_ ||
+          objective_hessian.cols() != n_) {
+        return false;
+      }
+      // full_hessian = Hess(f + lambda'c).  Ipopt supplies an independent
+      // objective factor, so replace the implicit unit coefficient on Hess(f).
+      Eigen::SparseMatrix<double> combined =
+          full_hessian + (obj_factor - 1.0) * objective_hessian;
+      combined.makeCompressed();
+      for (int k = 0; k < nnz_hess_; ++k) {
+        values[k] = combined.coeff(
+            hess_rows_[static_cast<std::size_t>(k)],
+            hess_cols_[static_cast<std::size_t>(k)]);
+        if (!std::isfinite(values[k])) return false;
+      }
+      return true;
+    } catch (const std::exception&) {
+      return false;
+    }
   }
 
   void finalize_solution(Ipopt::SolverReturn status,
@@ -1624,6 +1720,10 @@ class CallbackTNLP final : public Ipopt::TNLP {
   int nnz_jac_;
   std::vector<int> jac_rows_;   ///< Sparse Jacobian row indices (structural pattern)
   std::vector<int> jac_cols_;   ///< Sparse Jacobian column indices (structural pattern)
+  bool exact_hessian_;
+  int nnz_hess_;
+  std::vector<int> hess_rows_;  ///< Lower-triangular Hessian row indices.
+  std::vector<int> hess_cols_;  ///< Lower-triangular Hessian column indices.
 
   Eigen::VectorXd solution_;
   Eigen::VectorXd constraint_dual_;
@@ -2397,7 +2497,9 @@ SolveResult IpoptAdapter::solve_nlp(const NLPModel& prob_in) const {
 
   app->Options()->SetIntegerValue("print_level", 0);
   app->Options()->SetStringValue("sb", "yes");
-  app->Options()->SetStringValue("hessian_approximation", "limited-memory");
+  app->Options()->SetStringValue(
+      "hessian_approximation",
+      prob.lagrangian_hess ? "exact" : "limited-memory");
   // Keep the adapter boundary deterministic for malformed configuration.
   // Passing NaN/Inf through SetNumericValue makes Ipopt fail during option
   // initialisation, while zero/negative tolerances are outside its contract.

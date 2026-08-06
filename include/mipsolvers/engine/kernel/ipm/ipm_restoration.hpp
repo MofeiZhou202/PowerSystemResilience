@@ -1,5 +1,7 @@
 #pragma once
 
+#include <vector>
+
 #include <Eigen/Core>
 
 #include "mipsolvers/engine/problem_types.hpp"
@@ -41,5 +43,27 @@ RestorationBuild build_restoration_nlp(const NLPModel& prob,
 /// Extract the x portion of a restoration solution vector.
 Eigen::VectorXd extract_x_from_restoration(const RestorationBuild& build,
                                            const Eigen::VectorXd& w);
+
+/// Primal-dual state of the original NLP recovered from a restoration solve.
+/// The restoration model appends p/n variables and therefore also appends
+/// bound rows. This helper maps rows by their structural block and variable
+/// column instead of assuming that the two generated-bound layouts coincide.
+struct RestorationWarmStart {
+  bool valid{false};
+  Eigen::VectorXd x;
+  Eigen::VectorXd equality_dual;
+  Eigen::VectorXd inequality_dual;
+  Eigen::VectorXd slack;
+};
+
+RestorationWarmStart recover_restoration_warm_start(
+    const NLPModel& original, const RestorationBuild& build,
+    const Eigen::VectorXd& restoration_x,
+    const Eigen::VectorXd& restoration_equality_dual,
+    const Eigen::VectorXd& restoration_inequality_dual,
+    const Eigen::VectorXd& restoration_slack,
+    int restoration_nonlinear_inequalities,
+    const std::vector<int>& restoration_lower_bound_columns,
+    const std::vector<int>& restoration_upper_bound_columns);
 
 }  // namespace mipsolvers::engine

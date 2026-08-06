@@ -11,11 +11,60 @@
 #include "mipsolvers/engine/api/solver.hpp"
 #include "mipsolvers/engine/api/options.hpp"
 #include "mipsolvers/engine/problem_types.hpp"
+#include "mipsolvers/engine/kernel/ipm/ipm_restoration.hpp"
 #include "mipsolvers/engine/kernel/ipm/ipm_solver.hpp"
 #include "mipsolvers/engine/kernel/kkt/kkt_system.hpp"
 
 using namespace mipsolvers::engine;
 using Catch::Approx;
+
+TEST_CASE("Restoration warm start maps only original bound rows",
+          "[ipm][restoration][structure]") {
+  NLPModel original;
+  original.vars = {
+      {VarType::Continuous, 0.0, 2.0},
+      {VarType::Continuous, -1.0, 1e20}};
+  original.g = [](const Eigen::VectorXd& x, Eigen::VectorXd& g) {
+    g.resize(1);
+    g[0] = x[0] + x[1] - 1.0;
+  };
+  original.h = [](const Eigen::VectorXd& x, Eigen::VectorXd& h) {
+    h.resize(1);
+    h[0] = x[0] * x[0] - 4.0;
+  };
+
+  Eigen::VectorXd x_reference(2);
+  x_reference << 0.5, 0.5;
+  const RestorationBuild build =
+      build_restoration_nlp(original, x_reference, 1e-4);
+
+  Eigen::VectorXd restoration_x(4);
+  restoration_x << 0.75, 0.25, 0.1, 0.1;
+  Eigen::VectorXd equality_dual(1);
+  equality_dual << -0.5;
+  Eigen::VectorXd inequality_dual(6);
+  inequality_dual << 10.0, 20.0, 30.0, 40.0, 50.0, 60.0;
+  Eigen::VectorXd slack(6);
+  slack << 1.0, 2.0, 3.0, 4.0, 5.0, 6.0;
+
+  const RestorationWarmStart warm = recover_restoration_warm_start(
+      original, build, restoration_x, equality_dual, inequality_dual, slack,
+      1, {0, 1, 2, 3}, {0});
+
+  REQUIRE(warm.valid);
+  REQUIRE(warm.inequality_dual.size() == 4);
+  CHECK(warm.x[0] == Approx(0.75));
+  CHECK(warm.x[1] == Approx(0.25));
+  CHECK(warm.equality_dual[0] == Approx(-0.5));
+  CHECK(warm.inequality_dual[0] == Approx(10.0));
+  CHECK(warm.inequality_dual[1] == Approx(20.0));
+  CHECK(warm.inequality_dual[2] == Approx(30.0));
+  CHECK(warm.inequality_dual[3] == Approx(60.0));
+  CHECK(warm.slack[0] == Approx(1.0));
+  CHECK(warm.slack[1] == Approx(2.0));
+  CHECK(warm.slack[2] == Approx(3.0));
+  CHECK(warm.slack[3] == Approx(6.0));
+}
 
 // Return SolveOptions that hard-pins a specific solver.
 static SolveOptions solver_opts(const std::string& name) {

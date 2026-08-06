@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace mipsolvers::engine {
 
@@ -243,6 +244,122 @@ Eigen::VectorXd extract_x_from_restoration(const RestorationBuild& build,
                                            const Eigen::VectorXd& w) {
   if (w.size() < build.n_x) return build.x_R;
   return w.head(build.n_x);
+}
+
+RestorationWarmStart recover_restoration_warm_start(
+    const NLPModel& original, const RestorationBuild& build,
+    const Eigen::VectorXd& restoration_x,
+    const Eigen::VectorXd& restoration_equality_dual,
+    const Eigen::VectorXd& restoration_inequality_dual,
+    const Eigen::VectorXd& restoration_slack,
+    int restoration_nonlinear_inequalities,
+    const std::vector<int>& restoration_lower_bound_columns,
+    const std::vector<int>& restoration_upper_bound_columns) {
+  RestorationWarmStart warm;
+  const int n = static_cast<int>(original.vars.size());
+  if (restoration_x.size() < build.n_x || build.n_x != n ||
+      restoration_nonlinear_inequalities < 0 ||
+      restoration_inequality_dual.size() != restoration_slack.size() ||
+      restoration_inequality_dual.size() !=
+          restoration_nonlinear_inequalities +
+              static_cast<int>(restoration_lower_bound_columns.size()) +
+              static_cast<int>(restoration_upper_bound_columns.size()) ||
+      !restoration_equality_dual.allFinite() ||
+      !restoration_inequality_dual.allFinite() ||
+      !restoration_slack.allFinite()) {
+    return warm;
+  }
+
+  warm.x = restoration_x.head(n);
+  if (!warm.x.allFinite()) return RestorationWarmStart{};
+
+  int original_nonlinear_inequalities = 0;
+  if (original.h) {
+    Eigen::VectorXd h;
+    original.h(warm.x, h);
+    if (!h.allFinite()) return RestorationWarmStart{};
+    original_nonlinear_inequalities = static_cast<int>(h.size());
+  }
+  if (original_nonlinear_inequalities !=
+      restoration_nonlinear_inequalities) {
+    return RestorationWarmStart{};
+  }
+
+  constexpr double kBoundInfinity = 1e19;
+  std::vector<int> original_lower_columns;
+  std::vector<int> original_upper_columns;
+  for (int col = 0; col < n; ++col) {
+    const auto& var = original.vars[static_cast<std::size_t>(col)];
+    if (std::isfinite(var.lb) && std::abs(var.lb) < kBoundInfinity) {
+      original_lower_columns.push_back(col);
+    }
+    if (std::isfinite(var.ub) && std::abs(var.ub) < kBoundInfinity) {
+      original_upper_columns.push_back(col);
+    }
+  }
+
+  std::vector<int> restoration_lower_position(
+      static_cast<std::size_t>(n), -1);
+  std::vector<int> restoration_upper_position(
+      static_cast<std::size_t>(n), -1);
+  for (int k = 0;
+       k < static_cast<int>(restoration_lower_bound_columns.size()); ++k) {
+    const int col = restoration_lower_bound_columns[static_cast<std::size_t>(k)];
+    if (col >= 0 && col < n) {
+      restoration_lower_position[static_cast<std::size_t>(col)] = k;
+    }
+  }
+  for (int k = 0;
+       k < static_cast<int>(restoration_upper_bound_columns.size()); ++k) {
+    const int col = restoration_upper_bound_columns[static_cast<std::size_t>(k)];
+    if (col >= 0 && col < n) {
+      restoration_upper_position[static_cast<std::size_t>(col)] = k;
+    }
+  }
+
+  const int original_rows = original_nonlinear_inequalities +
+      static_cast<int>(original_lower_columns.size()) +
+      static_cast<int>(original_upper_columns.size());
+  warm.inequality_dual.resize(original_rows);
+  warm.slack.resize(original_rows);
+  if (original_nonlinear_inequalities > 0) {
+    warm.inequality_dual.head(original_nonlinear_inequalities) =
+        restoration_inequality_dual.head(original_nonlinear_inequalities);
+    warm.slack.head(original_nonlinear_inequalities) =
+        restoration_slack.head(original_nonlinear_inequalities);
+  }
+
+  int destination = original_nonlinear_inequalities;
+  const int restoration_lower_offset = restoration_nonlinear_inequalities;
+  for (int col : original_lower_columns) {
+    const int position =
+        restoration_lower_position[static_cast<std::size_t>(col)];
+    if (position < 0) return RestorationWarmStart{};
+    const int source = restoration_lower_offset + position;
+    warm.inequality_dual[destination] = restoration_inequality_dual[source];
+    warm.slack[destination] = restoration_slack[source];
+    ++destination;
+  }
+
+  const int restoration_upper_offset = restoration_lower_offset +
+      static_cast<int>(restoration_lower_bound_columns.size());
+  for (int col : original_upper_columns) {
+    const int position =
+        restoration_upper_position[static_cast<std::size_t>(col)];
+    if (position < 0) return RestorationWarmStart{};
+    const int source = restoration_upper_offset + position;
+    warm.inequality_dual[destination] = restoration_inequality_dual[source];
+    warm.slack[destination] = restoration_slack[source];
+    ++destination;
+  }
+
+  if ((warm.inequality_dual.array() <= 0.0).any() ||
+      (warm.slack.array() <= 0.0).any()) {
+    return RestorationWarmStart{};
+  }
+  warm.equality_dual = restoration_equality_dual;
+  warm.valid = true;
+  return warm;
 }
 
 }  // namespace mipsolvers::engine

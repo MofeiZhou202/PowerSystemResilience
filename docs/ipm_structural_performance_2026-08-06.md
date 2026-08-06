@@ -62,7 +62,45 @@ Ipopt 共用同一初值、边界、目标/约束回调、精确 Lagrangian Hess
 Native 约 101 ms，主要是 MKL/PARDISO 进程初始化，必须与热运行分开报告。
 单个 HS071 只证明机制有效，不代表 CUTEst 全集结论。
 
-### 3.1 开放 LP 对 SCIP
+### 3.1 Hybrid AC/DC 项目的同模型直接桥接
+
+HybridACDCDistributionSystemsSimulation 现在通过显式
+`ACOPFSolverBackend::MIPSolversNativeIPM`，把构造一次的
+`parity::NLPModel` 直接交给 `NativeIPMAdapter`。Ipopt 使用同一变量、初值、
+边界、目标/约束/Jacobian 回调和精确 Lagrangian Hessian；运行时字符串为
+`mipsolvers_native`。旧 `ParityIPM` 保持项目内求解器语义，不能与本后端混称。
+Native 桥接强制 `allow_external_fallback=false`，基准还会检查实际后端标签，
+因此 Ipopt fallback 不能冒充 Native 成功。
+
+末端新增的是证书型 active-set KKT crossover，而非乘子裁剪。严格互补下，
+活跃约束满足 $s_i=O(\mu), z_i=\Omega(1)$，非活跃约束满足相反渐近关系，故用
+$\sqrt{\mu}$ 分离强活跃候选。等式行必须保留；候选不等式在等式行空间的补
+空间内按数值秩筛成独立工作集；相关行的 $J_h^Tz$ 先投影到该基，并通过乘子
+符号门。之后用精确 Lagrangian Hessian 解 active KKT。只有原尺度 primal、
+dual、complementarity 三项全部通过才提交。
+
+该 crossover 仅在 primal 与 dual 已通过、唯一剩余失败为 complementarity 时
+触发。case30/118 的候选曾分别产生 `144 x 132` 超定行集和数值相关行集，说明
+主轨迹尚未给出可靠极限活跃集；强行 polish 会恶化 stationarity 并增加排序/
+分解成本，因此已由残差证书门控掉，而不是按案例名禁用。
+
+对照现在显式区分求解器自身终止与共同原模型审计。默认工程 OPF 合同为
+`p<=1e-6, d<=1e-5, c<=1e-6`，`--strict-kkt` 保留
+`(1e-6,1e-6,1e-8)` 研究门。这个拆分是必要的：Ipopt 有 scaled aggregate 与
+acceptable 终止，而 Native 原先只有绝对分量严格门。工程合同下 case30 Native
+以 `p=8.5e-11,d=3.6e-6,c=1.8e-7` 通过，热运行 6.9 ms，Ipopt 9.5 ms；
+case118 Native 也通过但约 233 ms，仍慢于 Ipopt 约 30 ms。
+
+两个结构优化已经落地：精确 Hessian 模型 Filter 失败后不再无条件重跑 Merit，
+case300 从约 2.06 s 降到约 1.0 s；Parity Lagrangian Hessian 即使当前乘子为零
+也保留固定因子图位置，使 symbolic analysis 降到 case30/hybrid2000 的 1 次和
+case118/300 的 2 次。hybrid2000 从 8.22 s 降到 7.11 s，但仍以
+`p=1.5e-3,d=9.7e1,c=1.1e1` 失败；Ipopt 约 2.74 s 且通过。完整复现合同见
+Hybrid 项目的
+`docs/native_ipm_vs_ipopt.md`。这些数据证明桥接和 case9 crossover 有效，但
+不支持“Native 已普遍快于 Ipopt”的结论。
+
+### 3.2 开放 LP 对 SCIP
 
 同一 90 例 NETLIB 原始 MPS 的 `native-ipm-direct`/`scip-direct` 单进程运行中，
 Native 为 90/90 accurate、总计 9.7944 s、几何均值 12.4018 ms；SCIP 为
@@ -98,3 +136,40 @@ $$
 因此本轮可以确认“结构画像、惯性证书、后向误差门控”已跨 LP/NLP/Conic
 复用并产生可测收益，但不能据此宣称全部开放套件已经完成或 Native 在所有
 NLP/Conic 上领先 Ipopt/SCIP。
+
+## 6. OPF 下一阶段的理论合同
+
+OPF 的等式/控制分区、固定变量精确消元、数值分解复用下界以及首步方向质量
+正则化，已在 [opf_native_ipm_structural_derivation.md](opf_native_ipm_structural_derivation.md)
+中给出完整推导。该合同明确纠正两种不充分做法：有限等式松弛不能提交为严格
+原模型解；目标惯性正确也不代表非凸首步方向有用。后续实现与 hybrid2000
+验收均以该文档中的结构匹配、原空间 postsolve、RHS-only solve 和四重方向证书
+为准。
+
+### 6.1 本轮已验证的 OPF 轨迹改动
+
+- 冷启动的模型 nonlinear multiplier 不再使用绝对 `1e-4` 下限；1188 个
+  hybrid2000 非活跃非线性行恢复精确 `s_i*mu_i=mu_bar`，初始最大互补由
+  `0.0700122` 降为 `0.001`。生成 box rows 保留 bound-dual 稳定化下限。
+- `mu_init/mu_min`、终止 tolerance 与 warm start 由统一函数映射到缩放坐标；
+  restoration retry 不再遗漏 barrier 参数变换。
+- restoration 候选先回到原模型坐标比较，禁止不同 `sf/sf2` 的内部 merit
+  直接覆盖。
+- `IPMDetail` 新增主 factor、惯性重试、惯性证书、restoration、retry、
+  active-set polish 分项；总 factor 覆盖被拒绝的恢复链路。
+
+未缩放 `mu_init` 的实验轨迹曾达到约
+`5.65 s, (1.02e-5,16.93,0.2828)`，但 case30 同时从约 7 次迭代退化到
+177 次/153 ms，故该规则已撤销，不能列为有效最终结果。局部 tangent 投影/
+联合精化也未能把正 barrier slope 变负，相关实验代码已撤销并作为负结果记录
+在理论文档第 8.4 节。统一局部 KKT 接受门、corrector 后重算步长和绝对 KKT
+best-iterate 排名也因跨案例回归撤销。最终保留版本的跨案例数据以重新构建后的
+同模型 benchmark 为准。
+
+最终保留版本的单轮结果为：case30 通过；case118 以 dual `1.1088e-5` 略高于
+`1e-5`；case300 为 `(p,d,c)=(2.11e-13,1.48e-3,4.17e-6)`；hybrid2000
+为 `(1.94e2,1.57e4,1.06e-1)`，4.17 s。hybrid2000 完整账本为 232 次 KKT
+factor，其中 201 次 primary、31 次 inertia retry；phase 标签中 restoration
+占 22 次、post-restoration retry 占 117 次。后两者是 primary 的阶段子集，
+不应重复相加。主要成本已定位为恢复轨迹重复构造 Newton 矩阵，而非
+predictor/corrector 的 RHS-only solve。
