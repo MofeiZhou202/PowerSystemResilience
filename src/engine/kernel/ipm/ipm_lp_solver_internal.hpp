@@ -113,7 +113,7 @@ inline SparseSymbolicFactorOptions ipm_accel_symbolic_options() {
 constexpr double kBig = 1e20;
 constexpr double kTau = 0.9995;
 constexpr double kMinVal = 1e-14;
-constexpr int kBandedThreshold = 128;  // use banded Cholesky when bandwidth <= this
+constexpr int kBandedThreshold = 128;  // unconditional narrow-band fast path
 constexpr size_t kDenseScatterThreshold = 4'000'000;  // switch to dense BLAS when scatter > 4M
 constexpr size_t kDenseMaxBytes = 256 * 1024 * 1024;  // memory gate for the dense path
 constexpr size_t kMaxScatterEntries = 100'000'000;  // scatter map cap (~1.6GB)

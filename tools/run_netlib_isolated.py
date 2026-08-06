@@ -37,8 +37,10 @@ SOLVER_DISPLAY_NAMES = {
     "scip-direct": "SCIP-direct-MPS",
     "scip": "SCIP-LP(adapter)",
     "native-dual-simplex": "Native-DualSimplex(+HiGHS-presolve)",
+    "native-dual-direct": "Native-DualSimplex[direct]",
     "native-pdlp": "Native-PDLP",
     "native-ipm": "Native-IPM(+HiGHS-presolve)",
+    "native-ipm-direct": "Native-IPM[centrality-step,direct]",
     "native-lcqp": "Native-LCQP",
     "ipopt": "Ipopt-LP-as-NLP",
 }
@@ -71,8 +73,8 @@ def load_manifest(path: Path, selected: set[str] | None) -> list[dict[str, str]]
     return rows
 
 
-def timeout_row(case: dict[str, str], solver: str, repeat: int,
-                elapsed_ms: float, timeout_sec: float) -> dict[str, object]:
+def failure_row(case: dict[str, str], solver: str, repeat: int,
+                elapsed_ms: float, status: str) -> dict[str, object]:
     return {
         "case": case["name"],
         "solver": SOLVER_DISPLAY_NAMES.get(solver, solver),
@@ -100,8 +102,16 @@ def timeout_row(case: dict[str, str], solver: str, repeat: int,
         "max_row_violation": "",
         "max_bound_violation": "",
         "normalized_primal_violation": "",
-        "status": f"Hard timeout after {timeout_sec:g} sec",
+        "status": status,
     }
+
+
+def timeout_row(case: dict[str, str], solver: str, repeat: int,
+                elapsed_ms: float, timeout_sec: float) -> dict[str, object]:
+    return failure_row(
+        case, solver, repeat, elapsed_ms,
+        f"Hard timeout after {timeout_sec:g} sec",
+    )
 
 
 def as_bool(value: object) -> bool:
@@ -201,10 +211,14 @@ def main() -> int:
                     elapsed_ms = (time.perf_counter() - started) * 1000.0
                     log.write(f"isolated_exit_code={completed.returncode}\n")
                     if not case_csv.is_file() or not case_json.is_file():
-                        raise RuntimeError(
-                            f"{case['name']}: benchmark produced no result files "
-                            f"(exit {completed.returncode})"
-                        )
+                        status = f"Process exit {completed.returncode} without results"
+                        combined_rows.append(failure_row(
+                            case, args.solver, repeat, elapsed_ms, status))
+                        case_records.append({"name": case["name"], "load_ms": None})
+                        log.write(f"ABNORMAL_EXIT status={status}\n")
+                        log.flush()
+                        print(f"  {status} {elapsed_ms:.0f} ms", flush=True)
+                        continue
                     with case_csv.open(newline="", encoding="utf-8") as stream:
                         rows = list(csv.DictReader(stream))
                     if len(rows) != 1:

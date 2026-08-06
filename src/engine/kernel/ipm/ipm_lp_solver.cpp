@@ -94,11 +94,9 @@ IPMLPOptimalityAudit audit_ipm_lp_optimality(
     if (std::isnan(lower) || std::isnan(upper)) return audit;
     if (finite_side(lower)) {
       primal_violation = std::max(primal_violation, lower - x[j]);
-      primal_scale = std::max(primal_scale, std::abs(lower));
     }
     if (finite_side(upper)) {
       primal_violation = std::max(primal_violation, x[j] - upper);
-      primal_scale = std::max(primal_scale, std::abs(upper));
     }
   }
   primal_violation = std::max(0.0, primal_violation);
@@ -206,6 +204,7 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob) const {
 
 SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::VectorXd& x0) const {
   const auto solve_start = std::chrono::steady_clock::now();
+  const bool has_warm_start = x0.size() == prob.c.size();
   const bool has_deadline =
       opt_.time_limit_sec > 0.0 && std::isfinite(opt_.time_limit_sec);
   auto remaining_time = [&]() {
@@ -224,8 +223,10 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
   auto direct_solve = [this, &remaining_time, has_deadline](
                           const LPModel& p,
                           const Eigen::VectorXd& start,
-                          AugmentedBackendPolicy backend_policy) -> SolveResult {
-    auto run_variant = [&](int rounds) {
+                          AugmentedBackendPolicy backend_policy,
+                          IPMNewtonFormulation formulation) -> SolveResult {
+    auto run_variant = [&](int rounds, IPMNewtonFormulation form,
+                           const Eigen::VectorXd* override_start = nullptr) {
       const double budget = has_deadline ? remaining_time() : 0.0;
       if (has_deadline && budget <= 0.0) {
         SolveResult timed_out;
@@ -233,7 +234,8 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
         timed_out.stats.status = "Time limit";
         return timed_out;
       }
-      return solve_lp_impl(p, start, rounds, budget, backend_policy);
+      return solve_lp_impl(p, override_start ? *override_start : start,
+                           rounds, budget, backend_policy, form);
     };
     auto merit = [](const SolveResult& result) {
       if (result.stats.success) return 0.0;
@@ -261,16 +263,68 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
     // fails to converge, retry without scaling.  Equilibration helps most
     // problems (e.g. NETLIB afiro) but stalls some degenerate ones
     // (e.g. stocfor1) — retrying unscaled is the standard robustness answer.
-    SolveResult res = run_variant(opt_.ruiz_rounds);
-    if (!res.stats.success && opt_.ruiz_rounds > 0 &&
+    SolveResult res = run_variant(opt_.ruiz_rounds, formulation);
+    const bool explicit_normal_env =
+        std::getenv("MIPSOLVERS_IPM_FORCE_NORMAL") != nullptr;
+    const bool factorization_failed = res.stats.status == "Cholesky failed";
+    bool normal_stalled = res.stats.status == "Normal equations stalled";
+    bool normal_rejected =
+        res.stats.status == "Normal equations rejected" || normal_stalled ||
+        factorization_failed;
+    // An iteration-zero rejection can be a coordinate-scaling failure rather
+    // than a loss of information along the central path. Test the unscaled
+    // normal equations before changing formulation; their successful KKT audit
+    // is stronger evidence than a condition estimate in either coordinate set.
+    if (!res.stats.success && formulation == IPMNewtonFormulation::Auto &&
+        !explicit_normal_env && normal_rejected &&
+        res.stats.iterations == 0 && opt_.ruiz_rounds > 0 &&
         (!has_deadline || remaining_time() > 0.0)) {
-      SolveResult raw = run_variant(0);
+      SolveResult raw_normal = run_variant(0, formulation);
+      normal_stalled = normal_stalled ||
+                       raw_normal.stats.status == "Normal equations stalled";
+      normal_rejected = normal_rejected ||
+                        raw_normal.stats.status == "Normal equations rejected" ||
+                        normal_stalled;
+      keep_better(res, std::move(raw_normal));
+    }
+    if (!res.stats.success && formulation == IPMNewtonFormulation::Auto &&
+        !explicit_normal_env && normal_rejected &&
+        (!has_deadline || remaining_time() > 0.0)) {
+      // A backward-error failure needs a clean pivoted restart.  A trajectory
+      // stopped only because its step fell below FP64 resolution still owns a
+      // finite, primal-improving point; retain that primal state while
+      // rebuilding dual/barrier variables under the quasidefinite system.
+      formulation = IPMNewtonFormulation::ForceAugmented;
+      backend_policy = normal_stalled
+                           ? AugmentedBackendPolicy::StructurePreserving
+                           : AugmentedBackendPolicy::PivotingPortfolio;
+      // Both a line-search stall and a numeric factorization failure occur
+      // before a rejected Newton direction is applied. Their finite primal
+      // iterate is therefore valid recovery state. A backward-error or
+      // non-finite-direction rejection still restarts from the clean input.
+      const bool primal_state_uncontaminated =
+          normal_stalled || factorization_failed;
+      const Eigen::VectorXd* recovery_start =
+          primal_state_uncontaminated && res.x.size() == p.c.size() &&
+                  res.x.allFinite()
+              ? &res.x
+              : nullptr;
+      res = run_variant(opt_.ruiz_rounds, formulation, recovery_start);
+    }
+    if (!res.stats.success &&
+        res.stats.status != "Inaccurate Newton direction" &&
+        res.stats.status != "Normal equations rejected" &&
+        res.stats.status != "Normal equations stalled" &&
+        opt_.ruiz_rounds > 0 &&
+        (!has_deadline || remaining_time() > 0.0)) {
+      SolveResult raw = run_variant(0, formulation);
       keep_better(res, std::move(raw));
       if (!res.stats.success && (!has_deadline || remaining_time() > 0.0)) {
         // Extreme-scaling escalation: tighter Ruiz equilibration shrinks the
         // residual column-scale range that otherwise leaves the barrier
         // ill-conditioned and stalled (adversarial 10^6-scaled probes).
-        SolveResult more = run_variant(std::max(opt_.ruiz_rounds * 4, 40));
+        SolveResult more = run_variant(std::max(opt_.ruiz_rounds * 4, 40),
+                                       formulation);
         keep_better(res, std::move(more));
       }
     }
@@ -291,7 +345,6 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
     HighsLpPresolveConfig pcfg;
     pcfg.enabled = opt_.use_highs_presolve;
     pcfg = highs_lp_presolve_config_from_env(pcfg);
-    const bool has_warm_start = (x0.size() == prob.c.size());
     if (pcfg.enabled && !has_warm_start) {
       HighsLpPresolveResult ps = highs_presolve_lp(prob, pcfg);
       if (ps.infeasible) {
@@ -309,7 +362,8 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
           static const Eigen::VectorXd empty;
           SolveResult rr = direct_solve(
               ps.reduced, empty,
-              AugmentedBackendPolicy::StructurePreserving);
+              AugmentedBackendPolicy::StructurePreserving,
+              opt_.newton_formulation);
           reduced_ok = rr.stats.success;
           reduced_kernel_failed = !reduced_ok;
           x_reduced = rr.x;
@@ -342,29 +396,43 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
     // AUDIT-NAV: reduced KKT 数值失败后必须从原始初始点重启另一条完整 barrier
     // 轨迹；禁止按模型维数路由，也禁止在已分叉的轨迹中途替换线性后端。
     return finish(direct_solve(
-        prob, x0, AugmentedBackendPolicy::PivotingPortfolio));
+        prob, x0, AugmentedBackendPolicy::PivotingPortfolio,
+        opt_.newton_formulation));
   }
 
   if (reduced_postsolve_failed) {
     SolveResult pivoting = direct_solve(
-        prob, x0, AugmentedBackendPolicy::PivotingPortfolio);
+        prob, x0, AugmentedBackendPolicy::PivotingPortfolio,
+        opt_.newton_formulation);
     if (pivoting.stats.success ||
         (has_deadline && remaining_time() <= 0.0)) {
       return finish(std::move(pivoting));
     }
     SolveResult structure = direct_solve(
-        prob, x0, AugmentedBackendPolicy::StructurePreserving);
+        prob, x0, AugmentedBackendPolicy::StructurePreserving,
+        opt_.newton_formulation);
     return finish(structure.stats.success ? std::move(structure)
                                           : std::move(pivoting));
   }
 
   SolveResult primary = direct_solve(
-      prob, x0, AugmentedBackendPolicy::StructurePreserving);
+      prob, x0, AugmentedBackendPolicy::StructurePreserving,
+      opt_.newton_formulation);
 #ifdef HACDCPF_HAVE_MKL_PARDISO
   if (!primary.stats.success && (!has_deadline || remaining_time() > 0.0)) {
-    SolveResult pivoting = direct_solve(
-        prob, x0, AugmentedBackendPolicy::PivotingPortfolio);
-    if (pivoting.stats.success) primary = std::move(pivoting);
+    // A pivoted augmented direction that fails its measured backward-error
+    // contract should not be repeated under another scaling. Restart the
+    // algebraically equivalent structure-preserving quasidefinite LDLT path.
+    // Other failures retain the generic pivoting recovery.
+    const bool direction_failure =
+        primary.stats.status == "Inaccurate Newton direction";
+    SolveResult recovery = direct_solve(
+        prob, x0,
+        direction_failure ? AugmentedBackendPolicy::StructurePreserving
+                          : AugmentedBackendPolicy::PivotingPortfolio,
+        direction_failure ? IPMNewtonFormulation::ForceAugmented
+                          : opt_.newton_formulation);
+    if (recovery.stats.success) primary = std::move(recovery);
   }
 #endif
   return finish(std::move(primary));
@@ -377,7 +445,9 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
                                                int ruiz_rounds,
                                                double time_limit_sec,
                                                AugmentedBackendPolicy
-                                                   backend_policy) const {
+                                                   backend_policy,
+                                               IPMNewtonFormulation
+                                                   formulation) const {
   const bool has_warm_start = (x0.size() == prob.c.size());
   const bool ipm_verbose_env = (std::getenv("MIPSOLVERS_IPM_VERBOSE") != nullptr);
   SolveResult out;
@@ -548,6 +618,33 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
   };
   if (mi > 0) build_csr(A_mat, A_rp, A_ci, A_rv);
   if (me > 0) build_csr(Aeq_mat, Aeq_rp, Aeq_ci, Aeq_rv);
+  if (opt_.verbose || ipm_verbose_env) {
+    int empty_cols = 0;
+    int singleton_cols = 0;
+    for (int j = 0; j < n_orig; ++j) {
+      const int degree = A_o[j + 1] - A_o[j] +
+                         (me > 0 ? Aeq_o[j + 1] - Aeq_o[j] : 0);
+      empty_cols += degree == 0;
+      singleton_cols += degree == 1;
+    }
+    int empty_rows = 0;
+    int singleton_rows = 0;
+    for (int i = 0; i < mi; ++i) {
+      const int degree = A_rp[i + 1] - A_rp[i];
+      empty_rows += degree == 0;
+      singleton_rows += degree == 1;
+    }
+    for (int i = 0; i < me; ++i) {
+      const int degree = Aeq_rp[i + 1] - Aeq_rp[i];
+      empty_rows += degree == 0;
+      singleton_rows += degree == 1;
+    }
+    fprintf(stderr,
+            "IPM-LP structure fixed_cols=%d empty_cols=%d singleton_cols=%d "
+            "empty_rows=%d singleton_rows=%d\n",
+            n_fixed_vars, empty_cols, singleton_cols, empty_rows,
+            singleton_rows);
+  }
 
   // === SpMV operations ===
   // y -= Ae * x  (CSR-based: sequential y writes)
@@ -633,7 +730,24 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
   }
   // Slack columns: each touches exactly 1 row, so bandwidth contribution = 0
 
-  const bool use_banded = (bandwidth <= kBandedThreshold);
+  const bool env_force_normal =
+      std::getenv("MIPSOLVERS_IPM_FORCE_NORMAL") != nullptr;
+  const bool env_force_augmented =
+      std::getenv("MIPSOLVERS_IPM_FORCE_AUGMENTED") != nullptr;
+  const bool env_disable_banded =
+      std::getenv("MIPSOLVERS_IPM_DISABLE_BANDED") != nullptr;
+  if (env_force_normal) formulation = IPMNewtonFormulation::ForceNormal;
+  if (env_force_augmented && !env_force_normal)
+    formulation = IPMNewtonFormulation::ForceAugmented;
+  // Band storage grows as O(m*b), but its numeric factorization grows as
+  // O(m*b^2). A memory-only extension beyond the kernel's narrow-band domain
+  // can therefore route a sparse graph into a much more expensive dense-band
+  // factorization. Wider systems proceed to symbolic sparse analysis below.
+  // ForceAugmented is an externally visible formulation contract and must not
+  // be preempted by the banded normal-equations shortcut.
+  const bool use_banded = !env_disable_banded &&
+      formulation != IPMNewtonFormulation::ForceAugmented &&
+      bandwidth <= kBandedThreshold;
   const bool centrality_step_control = opt_.centrality_step_control;
   bool use_dense = false;  // set below when scatter table would exceed kDenseScatterThreshold
   // Sparse augmented-KKT path.  When the normal equations N = Ae*Ae' would be
@@ -644,17 +758,12 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
   // directly via factor_kkt_sparse/solve_kkt_sparse instead. This avoids both
   // the dense Ae*Ae' fill and the condition-number squaring inherent in normal
   // equations. Narrow-band systems remain on their specialized Cholesky path.
-  const bool force_normal =
-      !use_banded && (std::getenv("MIPSOLVERS_IPM_FORCE_NORMAL") != nullptr);
-  bool use_augmented = !force_normal && !use_banded &&
-                       (std::getenv("MIPSOLVERS_IPM_FORCE_AUGMENTED") != nullptr);
-#ifdef MIPSOLVERS_HAVE_CHOLMOD
-  // Prefer the augmented quasidefinite system whenever CHOLMOD is available:
-  // it avoids the condition-number squaring of normal equations.  The outer
-  // solve contract chooses structure-preserving versus pivoting recovery; no
-  // instance identity or matrix dimension participates in that decision.
-  if (!force_normal && !use_banded) use_augmented = true;
-#endif
+  const bool auto_formulation =
+      !use_banded && formulation == IPMNewtonFormulation::Auto;
+  bool use_augmented =
+      !use_banded && formulation == IPMNewtonFormulation::ForceAugmented;
+  bool auto_structure_augmented = false;
+  bool auto_hybrid_augmented = false;
 
   // === Banded storage: band[(row-col)*m + col] for row >= col, row-col <= bw ===
   const int bw = bandwidth;
@@ -665,13 +774,26 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
   // === Sparse path — normal equations N = Ae·Θ·Ae' ===
   Eigen::SparseMatrix<double> N_sparse;
 #if MIPSOLVERS_HAVE_CHOLMOD
-  // CHOLMOD is the preferred sparse Cholesky backend (supernodal BLAS-3).
-  CholmodLDLT cholmod_ldlt;
+    // CHOLMOD is the preferred sparse Cholesky backend (supernodal BLAS-3).
+    CholmodLDLT cholmod_ldlt;
+  // The augmented factor is built only for an explicit/recovery augmented
+  // solve. Auto starts with the smaller SPD normal equations and lets the
+  // numerical acceptance tests below decide whether a pivoted KKT restart is
+  // necessary.
+  CholmodLDLT aug_chol;
+  bool aug_symbolic_ready = false;
 #endif
   // True when the CHOLMOD backend owns the sparse normal-equations path;
   // false when CHOLMOD is not compiled or analyze failed, in which case
   // the platform backend below (Accelerate / Eigen) handles factorization.
   bool cholmod_ok = false;
+#ifdef HACDCPF_HAVE_MKL_PARDISO
+  MKLPardisoLLTSolver normal_pardiso;
+  bool use_normal_pardiso =
+      std::getenv("MIPSOLVERS_IPM_NORMAL_PARDISO") != nullptr;
+#else
+  const bool use_normal_pardiso = false;
+#endif
 #if MIPSOLVERS_USE_ACCELERATE
   std::vector<long> accel_col_starts;
   SparseOpaqueSymbolicFactorization accel_symbolic{};
@@ -764,7 +886,17 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
       // fits a bounded budget.
       const size_t dense_bytes =
           sizeof(double) * static_cast<size_t>(m) * static_cast<size_t>(nn);
-      use_dense = (estimated_scatter > kDenseScatterThreshold) &&
+      // Backend selection is exclusive.  In particular CHOLMOD may have
+      // already selected the augmented KKT path above; setting use_dense as
+      // well would skip dense structure allocation but later enter the dense
+      // cold-start branch and dereference empty matrices.
+      // Dense normal equations are an explicit ForceNormal fallback. Auto must
+      // first compare the sparse normal and augmented elimination trees;
+      // otherwise a scatter-count threshold can bypass the formulation policy
+      // and select an O(m^3) kernel on sparse LPs.
+      use_dense = formulation == IPMNewtonFormulation::ForceNormal &&
+                  !use_augmented &&
+                  (estimated_scatter > kDenseScatterThreshold) &&
                   (dense_bytes <= kDenseMaxBytes);
       if (!use_dense && estimated_scatter > kMaxScatterEntries) {
         // The dense normal-equations matrices exceed the byte budget and the
@@ -777,7 +909,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
     if (use_augmented) {
       // Skip all normal-equations setup; the augmented path builds its own
       // operands (Ae, diag(d)) below.
-    } else if (use_dense) {
+    } else if (!use_augmented && use_dense) {
       // Dense BLAS path: build Ae_dense (m x nn) once.  Each IPM iteration computes
       //   N = Ae_sqrt * Ae_sqrt'  where Ae_sqrt[:,k] = sqrt(theta[k]) * Ae[:,k]
       // via Eigen (backed by BLAS/Accelerate), then factorizes with dense LDLT.
@@ -799,15 +931,27 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
       // Sparse LDLT path — build Ae and compute N_sparse = Ae * Ae'
       using T = Eigen::Triplet<double>;
       std::vector<T> trips;
-      trips.reserve(prob.A.nonZeros() + prob.Aeq.nonZeros() + mi);
-      for (int k = 0; k < prob.A.outerSize(); ++k)
-        for (Eigen::SparseMatrix<double>::InnerIterator it(prob.A, k); it; ++it)
+      trips.reserve(A_mat.nonZeros() + Aeq_mat.nonZeros() + mi);
+      // The normal equations must use the same normalized/scaled operator as
+      // residual evaluation and RHS assembly.  Using prob.A here mixes original
+      // coefficients with Ruiz-scaled b/c and produces a different Newton
+      // system whenever scaling or one-sided row normalization is active.
+      // Fixed variables have dx_j == 0 and theta_j == 0 for the entire
+      // trajectory. Excluding their columns from the symbolic normal-equation
+      // graph avoids permanent fill from entries whose numeric contribution is
+      // identically zero; their primal value remains in residual evaluation.
+      for (int k = 0; k < A_mat.outerSize(); ++k) {
+        if (is_fixed[static_cast<size_t>(k)]) continue;
+        for (Eigen::SparseMatrix<double>::InnerIterator it(A_mat, k); it; ++it)
           trips.emplace_back(it.row(), it.col(), it.value());
+      }
       for (int i = 0; i < mi; ++i)
         trips.emplace_back(i, n_orig + i, 1.0);
-      for (int k = 0; k < prob.Aeq.outerSize(); ++k)
-        for (Eigen::SparseMatrix<double>::InnerIterator it(prob.Aeq, k); it; ++it)
+      for (int k = 0; k < Aeq_mat.outerSize(); ++k) {
+        if (is_fixed[static_cast<size_t>(k)]) continue;
+        for (Eigen::SparseMatrix<double>::InnerIterator it(Aeq_mat, k); it; ++it)
           trips.emplace_back(mi + it.row(), it.col(), it.value());
+      }
       Eigen::SparseMatrix<double> Ae(m, nn);
       Ae.setFromTriplets(trips.begin(), trips.end());
       Ae.makeCompressed();
@@ -825,41 +969,285 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
 
       const int* No = N_sparse.outerIndexPtr();
       const int* Ni = N_sparse.innerIndexPtr();
-      size_t total = 0;
-      for (int j = 0; j < n_orig; ++j) {
-        int nz = Ao[j + 1] - Ao[j];
-        total += static_cast<size_t>(nz) * nz;
-      }
-      sparse_scatter.reserve(total);
-      sparse_scatter_col_start.resize(n_orig + 1);
-      sparse_scatter_col_start[0] = 0;
-      for (int j = 0; j < n_orig; ++j) {
-        for (int pi = Ao[j]; pi < Ao[j + 1]; ++pi)
-          for (int pk = Ao[j]; pk < Ao[j + 1]; ++pk) {
-            int r1 = Ai[pi], r2 = Ai[pk];
-            const int* pos = std::lower_bound(Ni + No[r2], Ni + No[r2 + 1], r1);
-            if (pos != Ni + No[r2 + 1] && *pos == r1)
-              sparse_scatter.push_back({static_cast<int>(pos - Ni), Av[pi] * Av[pk]});
-          }
-        sparse_scatter_col_start[j + 1] = static_cast<int>(sparse_scatter.size());
-      }
-      sparse_diag_offsets.resize(m);
-      for (int i = 0; i < m; ++i) {
-        const int* pos = std::lower_bound(Ni + No[i], Ni + No[i + 1], i);
-        sparse_diag_offsets[i] = static_cast<int>(pos - Ni);
-      }
 #if MIPSOLVERS_HAVE_CHOLMOD && !MIPSOLVERS_USE_ACCELERATE
       // CHOLMOD symbolic analysis — once per sparsity pattern; the numeric
       // factorization later re-reads the aliased N_sparse.valuePtr().
       // Priority: Accelerate on macOS (measured ~2.7x faster factorization
       // than CHOLMOD on the same BLAS), then CHOLMOD, then Eigen.
-      cholmod_ok = cholmod_ldlt.analyze(m, N_sparse.outerIndexPtr(),
-                                        N_sparse.innerIndexPtr(),
-                                        N_sparse.valuePtr(), sparse_n_nnz);
+      const size_t full_lower_nnz =
+          static_cast<size_t>(m) * static_cast<size_t>(m + 1) / 2;
+      const bool normal_pattern_dense =
+          static_cast<size_t>(sparse_n_nnz) == full_lower_nnz;
+      double normal_flops = 0.0;
+      double normal_lnz = 0.0;
+      bool normal_symbolic_available = false;
+      if (normal_pattern_dense) {
+        // A complete elimination graph stays complete under every ordering.
+        // Its Cholesky factor and flop count are exact closed forms, so asking
+        // CHOLMOD to rediscover the dense tree is pure symbolic overhead.
+        const double dm = static_cast<double>(m);
+        normal_lnz = static_cast<double>(full_lower_nnz);
+        normal_flops = dm * (dm + 1.0) * (2.0 * dm + 1.0) / 6.0;
+        normal_symbolic_available = true;
+      } else {
+        cholmod_ok = cholmod_ldlt.analyze(
+            m, N_sparse.outerIndexPtr(), N_sparse.innerIndexPtr(),
+            N_sparse.valuePtr(), sparse_n_nnz);
+        normal_flops = cholmod_ldlt.symbolic_flops();
+        normal_lnz = cholmod_ldlt.symbolic_nonzeros();
+        normal_symbolic_available = cholmod_ok;
+      }
+      const bool normal_fill_economic =
+          normal_lnz > 0.0 &&
+          normal_lnz <= 5.0 * static_cast<double>(sparse_n_nnz);
+      // CHOLMOD's supernodal work-density crossover is 40 flop per stored L
+      // entry. Combining it with the 5x sparse-fill economy boundary gives a
+      // dimensionless 200 flop/entry gate for expensive frontal factors.
+      const bool normal_factor_high_intensity =
+          normal_lnz > 0.0 && normal_flops / normal_lnz > 200.0;
+      if (auto_formulation && normal_symbolic_available &&
+          (!normal_fill_economic || normal_pattern_dense ||
+           normal_factor_high_intensity)) {
+        // Analyze the augmented tree only after normal-equation fill leaves
+        // CHOLMOD's sparse-economy region, or N has lost sparsity completely.
+        // Symbolic cost alone never selects augmented: the larger indefinite
+        // formulation is a conditioning/sparsity safeguard, subject to a
+        // bounded work and memory overhead.
+        std::vector<int> probe_outer(static_cast<size_t>(nn + m + 1), 0);
+        std::vector<int> probe_inner;
+        std::vector<double> probe_values;
+        const size_t probe_nnz = static_cast<size_t>(nn + m + mi) +
+                                 static_cast<size_t>(A_mat.nonZeros()) +
+                                 static_cast<size_t>(Aeq_mat.nonZeros());
+        probe_inner.reserve(probe_nnz);
+        probe_values.reserve(probe_nnz);
+        auto append_probe = [&](int row) {
+          probe_inner.push_back(row);
+          probe_values.push_back(1.0);
+        };
+        int probe_pos = 0;
+        for (int j = 0; j < nn; ++j) {
+          probe_outer[static_cast<size_t>(j)] = probe_pos;
+          append_probe(j);
+          ++probe_pos;
+          if (j < n_orig) {
+            for (int p = A_o[j]; p < A_o[j + 1]; ++p) {
+              append_probe(nn + A_i[p]);
+              ++probe_pos;
+            }
+            for (int p = Aeq_o[j]; p < Aeq_o[j + 1]; ++p) {
+              append_probe(nn + mi + Aeq_i[p]);
+              ++probe_pos;
+            }
+          } else {
+            append_probe(nn + (j - n_orig));
+            ++probe_pos;
+          }
+        }
+        for (int i = 0; i < m; ++i) {
+          probe_outer[static_cast<size_t>(nn + i)] = probe_pos;
+          append_probe(nn + i);
+          ++probe_pos;
+        }
+        probe_outer[static_cast<size_t>(nn + m)] = probe_pos;
+
+        aug_chol.set_simplicial(true);
+        aug_symbolic_ready = aug_chol.analyze(
+            nn + m, probe_outer.data(), probe_inner.data(),
+            probe_values.data(), probe_pos);
+        const double augmented_flops = aug_chol.symbolic_flops();
+        const double augmented_lnz = aug_chol.symbolic_nonzeros();
+        const bool augmented_within_robustness_budget =
+            aug_symbolic_ready && normal_flops > 0.0 && normal_lnz > 0.0 &&
+            augmented_flops > 0.0 && augmented_lnz > 0.0 &&
+            augmented_flops <= 2.0 * normal_flops &&
+            augmented_lnz <= 2.0 * normal_lnz;
+        const bool augmented_strictly_cheaper =
+            aug_symbolic_ready && augmented_flops < normal_flops &&
+            augmented_lnz < normal_lnz;
+        const bool robustness_route =
+            !normal_fill_economic && augmented_within_robustness_budget;
+        const bool performance_route =
+            normal_fill_economic &&
+            (normal_pattern_dense || normal_factor_high_intensity) &&
+            augmented_strictly_cheaper;
+        // A full augmented graph can be more expensive even when eliminating
+        // degree-two primal vertices would expose a cheaper hybrid graph.
+        // Build that candidate independently: retain high-degree columns and
+        // replace each degree<=2 column by its exact dual Schur clique.
+        bool hybrid_performance_route = false;
+        double hybrid_flops = std::numeric_limits<double>::infinity();
+        double hybrid_lnz = std::numeric_limits<double>::infinity();
+        double normal_probe_ms = std::numeric_limits<double>::infinity();
+        double hybrid_probe_ms = std::numeric_limits<double>::infinity();
+        if (!robustness_route && !performance_route &&
+            normal_factor_high_intensity) {
+          std::vector<int> hybrid_map(static_cast<size_t>(nn), -1);
+          std::vector<std::pair<int, int>> hybrid_edges;
+          int hybrid_primal_dim = 0;
+          for (int j = 0; j < nn; ++j) {
+            int degree = 1;
+            int row1 = j - n_orig;
+            int row2 = -1;
+            if (j < n_orig) {
+              const int a_degree = A_o[j + 1] - A_o[j];
+              const int eq_degree = Aeq_o[j + 1] - Aeq_o[j];
+              degree = a_degree + eq_degree;
+              if (degree == 2) {
+                int seen = 0;
+                for (int p = A_o[j]; p < A_o[j + 1]; ++p)
+                  (seen++ == 0 ? row1 : row2) = A_i[p];
+                for (int p = Aeq_o[j]; p < Aeq_o[j + 1]; ++p)
+                  (seen++ == 0 ? row1 : row2) = mi + Aeq_i[p];
+              }
+            }
+            const bool condensable =
+                degree >= 1 && degree <= 2 &&
+                (flb[j] != 0.0 || fub[j] != 0.0) && !is_fixed[j];
+            if (condensable) {
+              if (degree == 2) hybrid_edges.emplace_back(row1, row2);
+            } else {
+              hybrid_map[static_cast<size_t>(j)] = hybrid_primal_dim++;
+            }
+          }
+          const int hybrid_dim = hybrid_primal_dim + m;
+          std::vector<Eigen::Triplet<double>> hybrid_triplets;
+          hybrid_triplets.reserve(
+              static_cast<size_t>(hybrid_primal_dim + m) +
+              static_cast<size_t>(A_mat.nonZeros() + Aeq_mat.nonZeros() + mi) +
+              hybrid_edges.size());
+          for (int j = 0; j < nn; ++j) {
+            const int reduced = hybrid_map[static_cast<size_t>(j)];
+            if (reduced < 0) continue;
+            hybrid_triplets.emplace_back(reduced, reduced, 1.0);
+            if (j < n_orig) {
+              for (int p = A_o[j]; p < A_o[j + 1]; ++p)
+                hybrid_triplets.emplace_back(hybrid_primal_dim + A_i[p],
+                                             reduced, 1.0);
+              for (int p = Aeq_o[j]; p < Aeq_o[j + 1]; ++p)
+                hybrid_triplets.emplace_back(
+                    hybrid_primal_dim + mi + Aeq_i[p], reduced, 1.0);
+            } else {
+              hybrid_triplets.emplace_back(
+                  hybrid_primal_dim + (j - n_orig), reduced, 1.0);
+            }
+          }
+          for (int i = 0; i < m; ++i)
+            hybrid_triplets.emplace_back(hybrid_primal_dim + i,
+                                         hybrid_primal_dim + i, -1.0);
+          for (const auto& [r1, r2] : hybrid_edges)
+            hybrid_triplets.emplace_back(
+                hybrid_primal_dim + std::max(r1, r2),
+                hybrid_primal_dim + std::min(r1, r2),
+                -std::sqrt(std::numeric_limits<double>::epsilon()));
+          Eigen::SparseMatrix<double> hybrid_candidate(hybrid_dim, hybrid_dim);
+          hybrid_candidate.setFromTriplets(hybrid_triplets.begin(),
+                                           hybrid_triplets.end());
+          hybrid_candidate.makeCompressed();
+          CholmodLDLT hybrid_symbolic;
+          hybrid_symbolic.set_simplicial(true);
+          const bool hybrid_symbolic_ok = hybrid_symbolic.analyze(
+              hybrid_dim, hybrid_candidate.outerIndexPtr(),
+              hybrid_candidate.innerIndexPtr(), hybrid_candidate.valuePtr(),
+              static_cast<int64_t>(hybrid_candidate.nonZeros()));
+          if (hybrid_symbolic_ok) {
+            hybrid_flops = hybrid_symbolic.symbolic_flops();
+            hybrid_lnz = hybrid_symbolic.symbolic_nonzeros();
+          }
+          const bool hybrid_symbolically_cheaper =
+              hybrid_symbolic_ok && hybrid_flops < normal_flops &&
+              hybrid_lnz < normal_lnz;
+#ifdef HACDCPF_HAVE_MKL_PARDISO
+          if (hybrid_symbolically_cheaper) {
+            MKLPardisoLLTSolver normal_probe;
+            normal_probe.analyze_pattern(N_sparse);
+            auto probe_start = std::chrono::steady_clock::now();
+            const bool normal_probe_ok = normal_probe.factorize(N_sparse);
+            normal_probe_ms = std::chrono::duration<double, std::milli>(
+                                  std::chrono::steady_clock::now() - probe_start)
+                                  .count();
+            MKLPardisoLDLTSolver hybrid_probe;
+            hybrid_probe.analyze_pattern(hybrid_candidate);
+            probe_start = std::chrono::steady_clock::now();
+            const bool hybrid_probe_ok =
+                hybrid_probe.factorize(hybrid_candidate);
+            hybrid_probe_ms = std::chrono::duration<double, std::milli>(
+                                  std::chrono::steady_clock::now() - probe_start)
+                                  .count();
+            hybrid_performance_route =
+                normal_probe_ok && hybrid_probe_ok &&
+                hybrid_probe_ms < normal_probe_ms;
+          }
+#else
+          hybrid_performance_route = hybrid_symbolically_cheaper;
 #endif
+        }
+        use_augmented =
+            robustness_route || performance_route || hybrid_performance_route;
+        auto_structure_augmented = performance_route;
+        auto_hybrid_augmented = hybrid_performance_route;
+        if (opt_.verbose || ipm_verbose_env) {
+          fprintf(stderr,
+                  "IPM-LP formulation=%s normal=(flops=%.0f,lnz=%.0f,anz=%d) "
+                  "augmented=(flops=%.0f,lnz=%.0f) hybrid=(flops=%.0f,"
+                  "lnz=%.0f,normal_probe_ms=%.3f,hybrid_probe_ms=%.3f)\n",
+                  use_augmented ? "augmented" : "normal", normal_flops,
+                  normal_lnz, sparse_n_nnz, augmented_flops, augmented_lnz,
+                  hybrid_flops, hybrid_lnz, normal_probe_ms,
+                  hybrid_probe_ms);
+        }
+      }
+      if (!use_augmented && !cholmod_ok) {
+        // ForceNormal, or a failed augmented probe, still needs the actual
+        // normal symbolic factor for numeric iterations.
+        cholmod_ok = cholmod_ldlt.analyze(
+            m, N_sparse.outerIndexPtr(), N_sparse.innerIndexPtr(),
+            N_sparse.valuePtr(), sparse_n_nnz);
+      }
+#ifdef HACDCPF_HAVE_MKL_PARDISO
+      // High-intensity frontal work benefits from PARDISO's parallel
+      // supernodal Cholesky on Windows. The 200 flop/entry boundary is the
+      // existing CHOLMOD 40-flop supernodal crossover combined with its 5x
+      // sparse-fill economy limit; it is independent of model identity/size.
+      if (!use_augmented && normal_factor_high_intensity)
+        use_normal_pardiso = true;
+#endif
+#endif
+      if (!use_augmented) {
+        size_t total = 0;
+        for (int j = 0; j < n_orig; ++j) {
+          int nz = Ao[j + 1] - Ao[j];
+          total += static_cast<size_t>(nz) * nz;
+        }
+        sparse_scatter.reserve(total);
+        sparse_scatter_col_start.resize(n_orig + 1);
+        sparse_scatter_col_start[0] = 0;
+        for (int j = 0; j < n_orig; ++j) {
+          for (int pi = Ao[j]; pi < Ao[j + 1]; ++pi)
+            for (int pk = Ao[j]; pk < Ao[j + 1]; ++pk) {
+              int r1 = Ai[pi], r2 = Ai[pk];
+              const int* pos =
+                  std::lower_bound(Ni + No[r2], Ni + No[r2 + 1], r1);
+              if (pos != Ni + No[r2 + 1] && *pos == r1) {
+                sparse_scatter.push_back(
+                    {static_cast<int>(pos - Ni), Av[pi] * Av[pk]});
+              }
+            }
+          sparse_scatter_col_start[j + 1] =
+              static_cast<int>(sparse_scatter.size());
+        }
+        sparse_diag_offsets.resize(m);
+        for (int i = 0; i < m; ++i) {
+          const int* pos = std::lower_bound(Ni + No[i], Ni + No[i + 1], i);
+          sparse_diag_offsets[i] = static_cast<int>(pos - Ni);
+        }
 #if !MIPSOLVERS_USE_ACCELERATE
-      if (!cholmod_ok) ldlt.analyzePattern(N_sparse);
+        if (!cholmod_ok) ldlt.analyzePattern(N_sparse);
 #endif
+#ifdef HACDCPF_HAVE_MKL_PARDISO
+        if (use_normal_pardiso) normal_pardiso.analyze_pattern(N_sparse);
+#endif
+      }
     }
   }
 
@@ -914,6 +1302,31 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
       }
     }
   }
+#endif
+
+  // Resolve the augmented backend once, before initialization.  The cold-start
+  // projection and the Newton system have the same elimination graph, so the
+  // structure-preserving path can retain its CHOLMOD symbolic factor for the
+  // barrier iterations.  A pivoting recovery keeps the PARDISO contract.
+#ifdef HACDCPF_HAVE_MKL_PARDISO
+  const char* aug_pardiso_env = std::getenv("MIPSOLVERS_IPM_AUG_PARDISO");
+  const char* aug_pardiso_ldlt_env =
+      std::getenv("MIPSOLVERS_IPM_AUG_PARDISO_LDLT");
+  const bool aug_pardiso_explicit =
+      aug_pardiso_env || aug_pardiso_ldlt_env;
+  const bool policy_prefers_pardiso =
+      backend_policy == AugmentedBackendPolicy::PivotingPortfolio ||
+      (formulation == IPMNewtonFormulation::Auto &&
+       !auto_structure_augmented);
+  const bool aug_use_pardiso = use_augmented &&
+      ((aug_pardiso_env && aug_pardiso_env[0] != '0') ||
+       (aug_pardiso_ldlt_env && aug_pardiso_ldlt_env[0] != '0') ||
+       (!aug_pardiso_explicit && policy_prefers_pardiso));
+  const bool aug_use_pardiso_ldlt =
+      aug_use_pardiso &&
+      aug_pardiso_ldlt_env && aug_pardiso_ldlt_env[0] != '0';
+#else
+  const bool aug_use_pardiso = false;
 #endif
 
   // === Initialization ===
@@ -1017,6 +1430,31 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
         std::fill(yv.begin(), yv.end(), 0.0);
       }
     } else if (!use_augmented) {
+#ifdef HACDCPF_HAVE_MKL_PARDISO
+      if (use_normal_pardiso) {
+        if (normal_pardiso.factorize(N_sparse)) {
+          Eigen::VectorXd init_rhs = Eigen::Map<const Eigen::VectorXd>(b.data(), m);
+          Eigen::VectorXd init_sol;
+          if (normal_pardiso.solve(init_rhs, init_sol) && init_sol.size() == m) {
+            aet_mul(init_sol.data(), x_d);
+            std::vector<double> tmp2(m);
+            ae_mul(c.data(), tmp2.data());
+            init_rhs = Eigen::Map<const Eigen::VectorXd>(tmp2.data(), m);
+            if (normal_pardiso.solve(init_rhs, init_sol) && init_sol.size() == m) {
+              std::memcpy(y_d, init_sol.data(), sizeof(double) * m);
+            } else {
+              std::fill(yv.begin(), yv.end(), 0.0);
+            }
+          } else {
+            std::fill(xv.begin(), xv.end(), 0.5);
+            std::fill(yv.begin(), yv.end(), 0.0);
+          }
+        } else {
+          std::fill(xv.begin(), xv.end(), 0.5);
+          std::fill(yv.begin(), yv.end(), 0.0);
+        }
+      } else
+#endif
 #if MIPSOLVERS_HAVE_CHOLMOD
       if (cholmod_ok) {
         // N_sparse currently holds the theta=1 fill (N = Ae*Ae' + reg).
@@ -1079,6 +1517,128 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
       }
       }
 #endif
+    } else {
+      // Cold start for the augmented formulation.  The normal paths above
+      // obtain the standard primal/dual least-squares point from A*A'.  Use
+      // the algebraically equivalent quasidefinite system here so a direct
+      // augmented route does not fall back to an arbitrary bound midpoint:
+      //
+      //   [ I  -Ae' ] [u] = [ 0]  -> u ~= argmin ||u||, Ae*u = b
+      //   [-Ae -d I ] [v]   [-b]
+      //
+      // The same factor with RHS [-c; 0] gives the least-squares dual y.
+      // A sqrt(eps) stripe keeps the projection quasidefinite without
+      // introducing the condition-number squaring that Auto avoided.
+      using T = Eigen::Triplet<double>;
+      std::vector<T> init_j_trips;
+      init_j_trips.reserve(static_cast<size_t>(A_mat.nonZeros() +
+                                               Aeq_mat.nonZeros() + mi));
+      for (int j = 0; j < n_orig; ++j) {
+        for (int p = A_o[j]; p < A_o[j + 1]; ++p)
+          init_j_trips.emplace_back(A_i[p], j, -A_v[p]);
+        if (me > 0) {
+          for (int p = Aeq_o[j]; p < Aeq_o[j + 1]; ++p)
+            init_j_trips.emplace_back(mi + Aeq_i[p], j, -Aeq_v[p]);
+        }
+      }
+      for (int i = 0; i < mi; ++i)
+        init_j_trips.emplace_back(i, n_orig + i, -1.0);
+      Eigen::SparseMatrix<double> init_jg(m, nn);
+      init_jg.setFromTriplets(init_j_trips.begin(), init_j_trips.end());
+      init_jg.makeCompressed();
+
+      const double init_reg =
+          std::sqrt(std::numeric_limits<double>::epsilon());
+      Eigen::VectorXd init_rhs(nn + m), init_x, init_y, discard_x, discard_y;
+      bool init_solved = false;
+#if MIPSOLVERS_HAVE_CHOLMOD
+      if (!aug_use_pardiso) {
+        // Lower-triangle CSC of [I+delta, -Ae'; -Ae, -delta I].  This is the
+        // exact full graph used by the structure-preserving Newton path.
+        const int init_dim = nn + m;
+        const int* jo = init_jg.outerIndexPtr();
+        const int* ji = init_jg.innerIndexPtr();
+        const double* jv = init_jg.valuePtr();
+        std::vector<int> ko(static_cast<size_t>(init_dim + 1), 0);
+        std::vector<int> ki;
+        std::vector<double> kv;
+        ki.reserve(static_cast<size_t>(nn + init_jg.nonZeros() + m));
+        kv.reserve(ki.capacity());
+        int pos = 0;
+        for (int j = 0; j < nn; ++j) {
+          ko[static_cast<size_t>(j)] = pos;
+          ki.push_back(j);
+          kv.push_back(1.0 + init_reg);
+          ++pos;
+          for (int p = jo[j]; p < jo[j + 1]; ++p) {
+            ki.push_back(nn + ji[p]);
+            kv.push_back(jv[p]);
+            ++pos;
+          }
+        }
+        for (int i = 0; i < m; ++i) {
+          ko[static_cast<size_t>(nn + i)] = pos;
+          ki.push_back(nn + i);
+          kv.push_back(-init_reg);
+          ++pos;
+        }
+        ko[static_cast<size_t>(init_dim)] = pos;
+
+        aug_chol.set_simplicial(true);
+        aug_symbolic_ready = aug_chol.analyze(
+            init_dim, ko.data(), ki.data(), kv.data(), pos);
+        init_solved = aug_symbolic_ready && aug_chol.factorize(kv.data());
+        Eigen::VectorXd init_solution(init_dim);
+        if (init_solved) {
+          init_rhs.setZero();
+          for (int i = 0; i < m; ++i) init_rhs[nn + i] = -b[i];
+          init_solved = aug_chol.solve(init_rhs.data(), init_solution.data());
+          if (init_solved) init_x = init_solution.head(nn);
+        }
+        if (init_solved) {
+          init_rhs.setZero();
+          for (int j = 0; j < nn; ++j) init_rhs[j] = -c[j];
+          init_solved = aug_chol.solve(init_rhs.data(), init_solution.data());
+          if (init_solved) init_y = init_solution.tail(m);
+        }
+      } else
+#endif
+      {
+        std::vector<T> init_w_trips;
+        init_w_trips.reserve(static_cast<size_t>(nn));
+        for (int j = 0; j < nn; ++j)
+          init_w_trips.emplace_back(j, j, 1.0);
+        Eigen::SparseMatrix<double> init_w(nn, nn);
+        init_w.setFromTriplets(init_w_trips.begin(), init_w_trips.end());
+        init_w.makeCompressed();
+
+        SparseKKTCache init_cache;
+#ifdef HACDCPF_HAVE_MKL_PARDISO
+        init_cache.solver = std::make_unique<MKLPardisoLDLTSolver>();
+#endif
+        init_solved = factor_kkt_sparse(init_cache, init_w, init_jg, init_reg);
+        if (init_solved) {
+          init_rhs.setZero();
+          for (int i = 0; i < m; ++i) init_rhs[nn + i] = -b[i];
+          init_solved =
+              solve_kkt_sparse(init_cache, init_rhs, init_x, discard_y) &&
+              init_x.size() == nn;
+        }
+        if (init_solved) {
+          init_rhs.setZero();
+          for (int j = 0; j < nn; ++j) init_rhs[j] = -c[j];
+          init_solved =
+              solve_kkt_sparse(init_cache, init_rhs, discard_x, init_y) &&
+              init_y.size() == m;
+        }
+      }
+      if (init_solved && init_x.allFinite() && init_y.allFinite()) {
+        std::memcpy(x_d, init_x.data(), sizeof(double) * nn);
+        std::memcpy(y_d, init_y.data(), sizeof(double) * m);
+      } else {
+        std::fill(xv.begin(), xv.end(), 0.5);
+        std::fill(yv.begin(), yv.end(), 0.0);
+      }
     }
 
     // Lock fixed variables at their exact value before general clamping.
@@ -1120,12 +1680,17 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
         // margin is catastrophic when the range is huge (extreme column
         // scaling): it would force x ~ 1e16 and destroy a good x_LS ~ 1e4,
         // seeding a starting point with pf ~ 1e18.
-        const double margin = std::min(0.01 * range, 1.0);
+        // A recovery warm start already lies on a useful primal trajectory.
+        // Preserve it up to the smallest explicit interior margin instead of
+        // applying the cold-start centering displacement a second time.
+        const double margin = has_warm_start
+                                  ? std::min(1e-6, 0.01 * range)
+                                  : std::min(0.01 * range, 1.0);
         x_d[j] = std::clamp(x_d[j], lb[j] + margin, ub[j] - margin);
       } else if (flb[j]) {
-        x_d[j] = std::max(x_d[j], lb[j] + 1.0);
+        x_d[j] = std::max(x_d[j], lb[j] + (has_warm_start ? 1e-6 : 1.0));
       } else if (fub[j]) {
-        x_d[j] = std::min(x_d[j], ub[j] - 1.0);
+        x_d[j] = std::min(x_d[j], ub[j] - (has_warm_start ? 1e-6 : 1.0));
       }
       // free variables: keep the least-squares value as-is
     }
@@ -1204,7 +1769,19 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
   Eigen::SparseMatrix<double> aug_w;
   SparseKKTCache aug_cache;
   Eigen::VectorXd aug_rhs, aug_dx, aug_dy;
-  CholmodLDLT aug_chol;
+  int aug_primal_dim = nn;
+  std::vector<int> aug_full_to_reduced(static_cast<size_t>(nn), -1);
+  std::vector<int> aug_reduced_to_full;
+  std::vector<int> aug_condensed_col;
+  std::vector<int> aug_condensed_row;
+  std::vector<double> aug_condensed_coeff;
+  std::vector<int> aug_condensed_row2;
+  std::vector<double> aug_condensed_coeff2;
+  Eigen::SparseMatrix<double> aug_dual_block;
+  std::vector<int> aug_dual_diag_pos;
+  std::vector<int> aug_condensed_cross_pos;
+  std::vector<int> aug_condensed_cross_t_pos;
+  double aug_factor_reg = 0.0;
   std::vector<int> aug_ko, aug_ki, aug_diag;      // lower-tri CSC of K + diag positions
   std::vector<double> aug_kv, aug_rhsbuf, aug_solbuf;
   bool aug_use_cholmod = false;
@@ -1215,21 +1792,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
   // with CHOLMOD.  A separately restarted recovery trajectory uses PARDISO's
   // pivoting portfolio.  Backend policy comes from the outer solve contract;
   // matrix dimensions and NETLIB-specific structure never select it here.
-  const char* aug_pardiso_env = std::getenv("MIPSOLVERS_IPM_AUG_PARDISO");
-  const char* aug_pardiso_ldlt_env =
-      std::getenv("MIPSOLVERS_IPM_AUG_PARDISO_LDLT");
   const int augmented_dim = nn + m;
-  const bool aug_pardiso_explicit =
-      aug_pardiso_env || aug_pardiso_ldlt_env;
-  const bool policy_prefers_pardiso =
-      backend_policy == AugmentedBackendPolicy::PivotingPortfolio;
-  const bool aug_use_pardiso = use_augmented &&
-      ((aug_pardiso_env && aug_pardiso_env[0] != '0') ||
-       (aug_pardiso_ldlt_env && aug_pardiso_ldlt_env[0] != '0') ||
-       (!aug_pardiso_explicit && policy_prefers_pardiso));
-  const bool aug_use_pardiso_ldlt =
-      aug_use_pardiso &&
-      aug_pardiso_ldlt_env && aug_pardiso_ldlt_env[0] != '0';
   if (aug_use_pardiso) {
     if (aug_use_pardiso_ldlt) {
       aug_cache.solver = std::make_unique<MKLPardisoLDLTSolver>();
@@ -1251,8 +1814,6 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
                        : "cholmod"),
             augmented_dim, m, nn, bandwidth);
   }
-#else
-  const bool aug_use_pardiso = false;
 #endif
 #if MIPSOLVERS_USE_ACCELERATE
   // Factor the quasidefinite augmented KKT [diag(d)+reg, -Ae'; -Ae, -reg] with
@@ -1274,26 +1835,143 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
   bool aug_accel_numeric_valid = false;
 #endif
   if (use_augmented) {
+    // Exact partial Schur complement for bound-constrained degree-one/two
+    // columns. For K = [D G'; G -reg*I], eliminating column j adds
+    // -g_j*g_j'/D(j) to the dual block. A degree-two primal vertex and its two
+    // incident edges are replaced by at most one dual edge, so the graph edge
+    // count cannot increase. Every RHS is adjusted and dx_j recovered below;
+    // the Newton equation and published LP are unchanged. Unbounded and fixed
+    // variables stay explicit because their diagonal can vanish.
+    aug_reduced_to_full.reserve(static_cast<size_t>(nn));
+    const bool aug_condensation_enabled =
+        aug_use_pardiso && formulation == IPMNewtonFormulation::Auto &&
+        !auto_structure_augmented;
+    if (aug_condensation_enabled) {
+      // Robustness-routed augmented systems keep the proven singleton graph.
+      // Degree-two condensation is enabled only when the separate hybrid
+      // formulation comparison has already proved it cheaper than SPD normal.
+      const int condensation_degree_limit = auto_hybrid_augmented ? 2 : 1;
+      for (int j = 0; j < nn; ++j) {
+        int degree = 1;
+        int row = j - n_orig;
+        double coeff = -1.0;
+        int row2 = -1;
+        double coeff2 = 0.0;
+        if (j < n_orig) {
+          const int a_degree = A_o[j + 1] - A_o[j];
+          const int eq_degree = me > 0 ? Aeq_o[j + 1] - Aeq_o[j] : 0;
+          degree = a_degree + eq_degree;
+          if (degree >= 1 && degree <= 2) {
+            int seen = 0;
+            auto append_incidence = [&](int incidence_row,
+                                        double incidence_coeff) {
+              if (seen == 0) {
+                row = incidence_row;
+                coeff = incidence_coeff;
+              } else {
+                row2 = incidence_row;
+                coeff2 = incidence_coeff;
+              }
+              ++seen;
+            };
+            for (int p = A_o[j]; p < A_o[j + 1]; ++p)
+              append_incidence(A_i[p], -A_v[p]);
+            for (int p = Aeq_o[j]; p < Aeq_o[j + 1]; ++p)
+              append_incidence(mi + Aeq_i[p], -Aeq_v[p]);
+          }
+        }
+        const bool has_barrier_curvature = flb[j] != 0.0 || fub[j] != 0.0;
+        if (degree >= 1 && degree <= condensation_degree_limit &&
+            has_barrier_curvature &&
+            !is_fixed[j]) {
+          aug_condensed_col.push_back(j);
+          aug_condensed_row.push_back(row);
+          aug_condensed_coeff.push_back(coeff);
+          aug_condensed_row2.push_back(row2);
+          aug_condensed_coeff2.push_back(coeff2);
+        } else {
+          aug_full_to_reduced[static_cast<size_t>(j)] =
+              static_cast<int>(aug_reduced_to_full.size());
+          aug_reduced_to_full.push_back(j);
+        }
+      }
+      aug_primal_dim = static_cast<int>(aug_reduced_to_full.size());
+      if ((opt_.verbose || ipm_verbose_env) && !aug_condensed_col.empty()) {
+        fprintf(stderr,
+                "IPM-LP augmented degree<=2 condensation=%zu kdim=%d->%d\n",
+                aug_condensed_col.size(), nn + m, aug_primal_dim + m);
+      }
+    } else {
+      for (int j = 0; j < nn; ++j) {
+        aug_full_to_reduced[static_cast<size_t>(j)] = j;
+        aug_reduced_to_full.push_back(j);
+      }
+    }
+
     std::vector<Eigen::Triplet<double>> tri;
     tri.reserve(static_cast<size_t>(prob.A.nonZeros() + prob.Aeq.nonZeros() + mi));
     for (int j = 0; j < n_orig; ++j) {
-      for (int p = A_o[j]; p < A_o[j + 1]; ++p)
-        tri.emplace_back(A_i[p], j, -A_v[p]);
-      if (me > 0)
-        for (int p = Aeq_o[j]; p < Aeq_o[j + 1]; ++p)
-          tri.emplace_back(mi + Aeq_i[p], j, -Aeq_v[p]);
+      const int reduced = aug_full_to_reduced[static_cast<size_t>(j)];
+      if (reduced >= 0) {
+        for (int p = A_o[j]; p < A_o[j + 1]; ++p)
+          tri.emplace_back(A_i[p], reduced, -A_v[p]);
+        if (me > 0)
+          for (int p = Aeq_o[j]; p < Aeq_o[j + 1]; ++p)
+            tri.emplace_back(mi + Aeq_i[p], reduced, -Aeq_v[p]);
+      }
     }
-    for (int i = 0; i < mi; ++i) tri.emplace_back(i, n_orig + i, -1.0);
-    aug_negAe.resize(m, nn);
+    for (int i = 0; i < mi; ++i) {
+      const int reduced =
+          aug_full_to_reduced[static_cast<size_t>(n_orig + i)];
+      if (reduced >= 0) tri.emplace_back(i, reduced, -1.0);
+    }
+    aug_negAe.resize(m, aug_primal_dim);
     aug_negAe.setFromTriplets(tri.begin(), tri.end());
     aug_negAe.makeCompressed();
     std::vector<Eigen::Triplet<double>> wtri;
-    wtri.reserve(static_cast<size_t>(nn));
-    for (int j = 0; j < nn; ++j) wtri.emplace_back(j, j, 1.0);
-    aug_w.resize(nn, nn);
+    wtri.reserve(static_cast<size_t>(aug_primal_dim));
+    for (int j = 0; j < aug_primal_dim; ++j) wtri.emplace_back(j, j, 1.0);
+    aug_w.resize(aug_primal_dim, aug_primal_dim);
     aug_w.setFromTriplets(wtri.begin(), wtri.end());
     aug_w.makeCompressed();
-    aug_rhs.resize(nn + m);
+    if (!aug_condensed_col.empty()) {
+      std::vector<Eigen::Triplet<double>> dual_tri;
+      dual_tri.reserve(static_cast<size_t>(m) +
+                       2 * aug_condensed_col.size());
+      for (int i = 0; i < m; ++i) dual_tri.emplace_back(i, i, 1.0);
+      for (size_t k = 0; k < aug_condensed_col.size(); ++k) {
+        const int r1 = aug_condensed_row[k];
+        const int r2 = aug_condensed_row2[k];
+        if (r2 >= 0) {
+          dual_tri.emplace_back(r1, r2, 1.0);
+          dual_tri.emplace_back(r2, r1, 1.0);
+        }
+      }
+      aug_dual_block.resize(m, m);
+      aug_dual_block.setFromTriplets(dual_tri.begin(), dual_tri.end());
+      aug_dual_block.makeCompressed();
+      const int* dual_outer = aug_dual_block.outerIndexPtr();
+      const int* dual_inner = aug_dual_block.innerIndexPtr();
+      auto dual_position = [&](int col, int row) {
+        const int* begin = dual_inner + dual_outer[col];
+        const int* end = dual_inner + dual_outer[col + 1];
+        return static_cast<int>(std::lower_bound(begin, end, row) - dual_inner);
+      };
+      aug_dual_diag_pos.resize(static_cast<size_t>(m));
+      for (int i = 0; i < m; ++i)
+        aug_dual_diag_pos[static_cast<size_t>(i)] = dual_position(i, i);
+      aug_condensed_cross_pos.assign(aug_condensed_col.size(), -1);
+      aug_condensed_cross_t_pos.assign(aug_condensed_col.size(), -1);
+      for (size_t k = 0; k < aug_condensed_col.size(); ++k) {
+        const int r1 = aug_condensed_row[k];
+        const int r2 = aug_condensed_row2[k];
+        if (r2 >= 0) {
+          aug_condensed_cross_pos[k] = dual_position(r2, r1);
+          aug_condensed_cross_t_pos[k] = dual_position(r1, r2);
+        }
+      }
+    }
+    aug_rhs.resize(aug_primal_dim + m);
 #if defined(MIPSOLVERS_HAVE_CHOLMOD) || MIPSOLVERS_USE_ACCELERATE
     // Lower-triangle CSC of K = [ diag(d)+reg  -Ae'; -Ae  -reg ] (dim nn+m).
     // Column j<nn: diagonal (row j) then the -Ae entries (rows nn+i, sorted);
@@ -1301,30 +1979,30 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
     const int* nAo = aug_negAe.outerIndexPtr();
     const int* nAi = aug_negAe.innerIndexPtr();
     const double* nAv = aug_negAe.valuePtr();
-    const int kdim = nn + m;
+    const int kdim = aug_primal_dim + m;
     aug_ko.assign(static_cast<size_t>(kdim + 1), 0);
     aug_diag.assign(static_cast<size_t>(kdim), 0);
-    aug_ki.reserve(static_cast<size_t>(nn) +
+    aug_ki.reserve(static_cast<size_t>(aug_primal_dim) +
                    static_cast<size_t>(aug_negAe.nonZeros()) +
                    static_cast<size_t>(m));
     aug_kv.reserve(aug_ki.capacity());
     int pos = 0;
-    for (int j = 0; j < nn; ++j) {
+    for (int j = 0; j < aug_primal_dim; ++j) {
       aug_ko[static_cast<size_t>(j)] = pos;
       aug_diag[static_cast<size_t>(j)] = pos;
       aug_ki.push_back(j);
       aug_kv.push_back(0.0);
       ++pos;
       for (int p = nAo[j]; p < nAo[j + 1]; ++p) {
-        aug_ki.push_back(nn + nAi[p]);
+        aug_ki.push_back(aug_primal_dim + nAi[p]);
         aug_kv.push_back(nAv[p]);
         ++pos;
       }
     }
     for (int i = 0; i < m; ++i) {
-      aug_ko[static_cast<size_t>(nn + i)] = pos;
-      aug_diag[static_cast<size_t>(nn + i)] = pos;
-      aug_ki.push_back(nn + i);
+      aug_ko[static_cast<size_t>(aug_primal_dim + i)] = pos;
+      aug_diag[static_cast<size_t>(aug_primal_dim + i)] = pos;
+      aug_ki.push_back(aug_primal_dim + i);
       aug_kv.push_back(0.0);
       ++pos;
     }
@@ -1375,9 +2053,13 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
 #endif
 #ifdef MIPSOLVERS_HAVE_CHOLMOD
     if (!aug_use_accel && !aug_use_pardiso) {
-      aug_chol.set_simplicial(true);  // quasidefinite (indefinite, unpivoted) LDLᵀ
-      aug_use_cholmod = aug_chol.analyze(kdim, aug_ko.data(), aug_ki.data(),
-                                         aug_kv.data(), static_cast<int64_t>(pos));
+      if (!aug_symbolic_ready) {
+        aug_chol.set_simplicial(true);  // quasidefinite, unpivoted LDLT
+        aug_symbolic_ready = aug_chol.analyze(
+            kdim, aug_ko.data(), aug_ki.data(), aug_kv.data(),
+            static_cast<int64_t>(pos));
+      }
+      aug_use_cholmod = aug_symbolic_ready;
     }
 #endif
 #endif
@@ -1408,7 +2090,17 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
   // iteration budgets the perturbation against the current nonlinear KKT
   // residual and iterate norm.  Failed factorizations still raise reg through
   // the dynamic retry below.
-  const double reg_floor = std::numeric_limits<double>::epsilon();
+  // An Auto-selected augmented system is the proactive robustness path: keep
+  // its quasidefinite pivots separated at the FP64 stability scale.  A
+  // pivoted recovery after normal-equation rejection must instead let the
+  // regularization vanish with mu so it can remove the accuracy bias that
+  // triggered the recovery.  Both choices follow formulation state, never
+  // instance identity or dimensions.
+  const double reg_floor =
+      formulation == IPMNewtonFormulation::Auto && use_augmented &&
+              !auto_structure_augmented
+          ? std::sqrt(std::numeric_limits<double>::epsilon())
+          : std::numeric_limits<double>::epsilon();
   double reg = reg_floor;
   const int max_iter = std::max(0, opt_.max_iter);
   const double effective_time_limit =
@@ -1417,6 +2109,9 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
   double last_pfeas = std::numeric_limits<double>::infinity();
   double last_dfeas = std::numeric_limits<double>::infinity();
   double last_mu = std::numeric_limits<double>::infinity();
+  bool augmented_pivot_instability_observed = false;
+  bool augmented_roundoff_step_observed = false;
+  bool augmented_stabilized_portfolio = false;
   double t_resid = 0, t_setup = 0, t_pred = 0, t_corr = 0, t_update = 0;
   double t_fill = 0, t_factor = 0;
   double t_init_overhead = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -1495,6 +2190,13 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
     for (int i = 0; i < m; ++i) Nv[sparse_diag_offsets[i]] += reg;
     auto t_ff2 = tnow();
     t_fill += std::chrono::duration<double, std::milli>(t_ff2 - t_ff).count();
+#ifdef HACDCPF_HAVE_MKL_PARDISO
+    if (use_normal_pardiso) {
+      const bool ok = normal_pardiso.factorize(N_sparse);
+      t_factor += std::chrono::duration<double, std::milli>(tnow() - t_ff2).count();
+      return ok;
+    }
+#endif
 #if MIPSOLVERS_HAVE_CHOLMOD
     if (cholmod_ok) {
       const bool ok = cholmod_ldlt.factorize(N_sparse.valuePtr());
@@ -1535,6 +2237,18 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
         Eigen::Map<Eigen::VectorXd> dy_map(dy, m);
         dy_map = ldlt_dense.solve(rhs_map);
       } else {
+#ifdef HACDCPF_HAVE_MKL_PARDISO
+        if (use_normal_pardiso) {
+          Eigen::Map<const Eigen::VectorXd> rhs_map(rhs, m);
+          Eigen::VectorXd solution;
+          if (!normal_pardiso.solve(rhs_map, solution) || solution.size() != m) {
+            std::fill(dy, dy + m, std::numeric_limits<double>::quiet_NaN());
+          } else {
+            std::memcpy(dy, solution.data(), sizeof(double) * m);
+          }
+          return;
+        }
+#endif
 #if MIPSOLVERS_HAVE_CHOLMOD
         if (cholmod_ok) {
           if (!cholmod_ldlt.solve(rhs, dy)) {
@@ -1602,6 +2316,13 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
   double iteration_kkt_final = 0.0;
   double iteration_kkt_relative = 0.0;
   int iteration_kkt_refinements = 0;
+  // Dembo-Eisenstat-Steihaug inexact-Newton forcing term.  eta < 1 preserves
+  // a contraction while allowing the intentional IP-PMM regularization error.
+  constexpr double kNewtonRefinementEta = 0.1;
+  // The forcing target controls iterative refinement. A finite direction that
+  // misses this sufficient local-convergence bound is still globalized by the
+  // centrality/positivity step controller; only its measured nonlinear progress
+  // and the final original-model audit may accept the resulting trajectory.
   bool augmented_backend_choice_logged = false;
 #if MIPSOLVERS_USE_ACCELERATE
   // Apple Sparse matrix view over the augmented KKT CSC (values are refreshed
@@ -1654,10 +2375,23 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
         for (int i = 0; i < m; ++i) dy_out[i] = aug_solbuf[static_cast<size_t>(nn + i)];
         return;
       }
-      for (int j = 0; j < nn; ++j) aug_rhs[j] = xi[j];
-      for (int i = 0; i < m; ++i) aug_rhs[nn + i] = prim_rhs[i];
+      for (int j = 0; j < aug_primal_dim; ++j) {
+        aug_rhs[j] = xi[aug_reduced_to_full[static_cast<size_t>(j)]];
+      }
+      for (int i = 0; i < m; ++i)
+        aug_rhs[aug_primal_dim + i] = prim_rhs[i];
+      for (size_t k = 0; k < aug_condensed_col.size(); ++k) {
+        const int full_col = aug_condensed_col[k];
+        const double denom = dvec[full_col] + aug_factor_reg;
+        aug_rhs[aug_primal_dim + aug_condensed_row[k]] -=
+            aug_condensed_coeff[k] * xi[full_col] / denom;
+        if (aug_condensed_row2[k] >= 0) {
+          aug_rhs[aug_primal_dim + aug_condensed_row2[k]] -=
+              aug_condensed_coeff2[k] * xi[full_col] / denom;
+        }
+      }
       if (!solve_kkt_sparse(aug_cache, aug_rhs, aug_dx, aug_dy) ||
-          aug_dx.size() != nn || aug_dy.size() != m) {
+          aug_dx.size() != aug_primal_dim || aug_dy.size() != m) {
         for (int j = 0; j < nn; ++j) dx_out[j] = std::numeric_limits<double>::quiet_NaN();
         for (int i = 0; i < m; ++i) dy_out[i] = std::numeric_limits<double>::quiet_NaN();
         return;
@@ -1668,8 +2402,22 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
                 aug_cache.solver->backend_name());
         augmented_backend_choice_logged = true;
       }
-      for (int j = 0; j < nn; ++j) dx_out[j] = aug_dx[j];
+      for (int j = 0; j < aug_primal_dim; ++j) {
+        dx_out[aug_reduced_to_full[static_cast<size_t>(j)]] = aug_dx[j];
+      }
       for (int i = 0; i < m; ++i) dy_out[i] = aug_dy[i];
+      for (size_t k = 0; k < aug_condensed_col.size(); ++k) {
+        const int full_col = aug_condensed_col[k];
+        const double denom = dvec[full_col] + aug_factor_reg;
+        dx_out[full_col] =
+            (xi[full_col] - aug_condensed_coeff[k] *
+                                dy_out[aug_condensed_row[k]] -
+             (aug_condensed_row2[k] >= 0
+                  ? aug_condensed_coeff2[k] *
+                        dy_out[aug_condensed_row2[k]]
+                  : 0.0)) /
+            denom;
+      }
       return;
     }
     for (int j = 0; j < nn; ++j) tmp_d[j] = theta_d[j] * xi[j];
@@ -1692,21 +2440,11 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
     double rhs_scale = 1.0;
     for (int i = 0; i < m; ++i) rhs_scale = std::max(rhs_scale, std::abs(r_p_d[i]));
     for (int j = 0; j < nn; ++j) rhs_scale = std::max(rhs_scale, std::abs(xi[j]));
-    // Inexact-Newton forcing condition.  A direction that is accurate only
-    // relative to its (possibly huge) Newton RHS can still be too inaccurate
-    // to reduce the current nonlinear KKT residual.  Require the unregularized
-    // linear residual to be at most eta*||F|| as well as 1e-9*||rhs||.  Thus
-    // factor solves are cheap early in the trajectory and automatically
-    // tighten near the solution without model-size or instance routing.
-    constexpr double kForcingEta = 0.1;
-    const double nonlinear_kkt_norm =
-        std::max({last_pfeas, last_dfeas, last_mu});
-    const double forcing_target =
-        std::isfinite(nonlinear_kkt_norm)
-            ? std::max(1e-12, kForcingEta * nonlinear_kkt_norm)
-            : std::numeric_limits<double>::infinity();
-    const double refine_target =
-        std::min(1e-9 * rhs_scale, forcing_target);
+    // The inexact-Newton contract must compare quantities in the same scaled
+    // coordinates. last_pfeas/last_dfeas/mu have different normalizations and
+    // therefore cannot bound this raw linear residual. The Newton RHS is the
+    // scaled nonlinear residual for this predictor/corrector equation.
+    const double refine_target = kNewtonRefinementEta * rhs_scale;
     auto kkt_residual = [&]() -> double {
       aet_mul(dy_out, Atdy_d);         // Ae'dy
       ae_mul(dx_out, kkt_adx.data());  // Ae dx
@@ -1776,6 +2514,9 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
       std::max(1e-10, 10.0 * std::max(0.0, opt_.tol_dual));
   const double publication_gap_tol =
       std::max(1e-10, 10.0 * std::max(0.0, opt_.tol_gap));
+  const bool termination_enabled = opt_.tol_primal >= 0.0 &&
+                                   opt_.tol_dual >= 0.0 &&
+                                   opt_.tol_gap >= 0.0;
   auto audit_current_iterate = [&]() {
     Eigen::VectorXd x_original(n_orig);
     Eigen::VectorXd row_duals_min(m);
@@ -1797,6 +2538,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
                                    bound_duals_lb, bound_duals_ub);
   };
 
+  int normal_tiny_step_streak = 0;
   for (int iter = 0; iter < max_iter; ++iter) {
     if (effective_time_limit > 0.0 && std::isfinite(effective_time_limit)) {
       const double elapsed =
@@ -1846,14 +2588,24 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
     const double relative_mu =
         mu / (1.0 + std::abs(scaled_primal_objective) /
                         static_cast<double>(std::max(1, n_compl)));
+    // The scaled test is only a cheap gate for the authoritative original-LP
+    // audit.  Let it open at the publication tolerances as well as the tighter
+    // internal targets; otherwise an already publishable iterate can run to
+    // MaxIter before the identical audit is finally performed after the loop.
+    const double candidate_primal_tol =
+        std::max(opt_.tol_primal, publication_primal_tol);
+    const double candidate_dual_tol =
+        std::max(opt_.tol_dual, publication_dual_tol);
+    const double candidate_gap_tol =
+        std::max(opt_.tol_gap, publication_gap_tol);
     const bool relative_candidate =
-        pfeas / (1.0 + scaled_rhs_norm) < opt_.tol_primal &&
-        dfeas / (1.0 + scaled_cost_norm) < opt_.tol_dual &&
-        relative_mu < opt_.tol_gap;
-    const bool absolute_candidate = pfeas < opt_.tol_primal &&
-                                    dfeas < opt_.tol_dual &&
-                                    mu < opt_.tol_gap;
-    if (absolute_candidate || relative_candidate) {
+        pfeas / (1.0 + scaled_rhs_norm) < candidate_primal_tol &&
+        dfeas / (1.0 + scaled_cost_norm) < candidate_dual_tol &&
+        relative_mu < candidate_gap_tol;
+    const bool absolute_candidate = pfeas < candidate_primal_tol &&
+                                    dfeas < candidate_dual_tol &&
+                                    mu < candidate_gap_tol;
+    if (termination_enabled && (absolute_candidate || relative_candidate)) {
       const IPMLPOptimalityAudit original = audit_current_iterate();
       if (original.acceptable(publication_primal_tol, publication_dual_tol,
                               publication_gap_tol)) {
@@ -1886,8 +2638,42 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
     const double nonlinear_kkt_norm = std::max({pfeas, dfeas, mu});
     const double regularization_budget =
         0.1 * nonlinear_kkt_norm / (1.0 + iterate_norm);
-    reg = std::clamp(std::min(1e-6 * mu, regularization_budget),
-                     reg_floor, 1e-2);
+    // A pivoted augmented factorization that needed no pivot perturbations has
+    // already demonstrated numerical nonsingularity. Adding O(mu) diagonal
+    // regularization then only biases the unregularized Newton equation and can
+    // force many short central-path steps. Conversely, a positive perturbation
+    // count is direct numerical evidence of near-singular pivots, so retain the
+    // IP-PMM residual-budget regularization for stabilization. The first
+    // adaptive factorization is an unregularized probe; its observed pivot
+    // telemetry governs every subsequent iteration.
+    const int perturbed_pivots =
+        aug_use_pardiso && aug_cache.solver
+            ? aug_cache.solver->perturbed_pivots()
+            : -1;
+    augmented_pivot_instability_observed =
+        augmented_pivot_instability_observed || perturbed_pivots > 0;
+#ifdef HACDCPF_HAVE_MKL_PARDISO
+    // The unregularized portfolio is a numerical-rank probe. If it observes
+    // perturbed pivots, discard that probe's backend choice and select once
+    // more on the stabilized KKT matrix below. Otherwise the probe can pin the
+    // trajectory to LU even though regularization restores the cheaper
+    // quasidefinite LDLT factorization.
+    if (aug_use_pardiso && !aug_pardiso_explicit &&
+        augmented_pivot_instability_observed &&
+        !augmented_stabilized_portfolio) {
+      aug_cache.solver = std::make_unique<MKLPardisoAdaptiveSolver>();
+      aug_cache.pattern_analyzed = false;
+      augmented_stabilized_portfolio = true;
+    }
+#endif
+    const bool pivot_probe_pending = aug_use_pardiso && perturbed_pivots < 0;
+    const bool pivot_stable = aug_use_pardiso && perturbed_pivots == 0 &&
+                              !augmented_pivot_instability_observed &&
+                              !augmented_roundoff_step_observed;
+    reg = pivot_probe_pending || pivot_stable
+              ? reg_floor
+              : std::clamp(std::min(1e-6 * mu, regularization_budget),
+                           reg_floor, 1e-2);
     MIPSOLVERS_OMP_PARALLEL_IF(nn > MIPSOLVERS_OMP_THRESHOLD)
     for (int j = 0; j < nn; ++j) {
       if (j < n_orig && is_fixed[j]) {
@@ -1943,13 +2729,54 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
           factor_ok = aug_numeric_factor();
         }
       } else {
-        // Portable fallback: unsymmetric LU via factor_kkt_sparse.
+        // PARDISO / portable fallback. Singleton columns are represented by
+        // their exact Schur terms on the dual diagonal.
         double* wv = aug_w.valuePtr();
-        for (int j = 0; j < nn; ++j) wv[j] = dvec[j];
-        factor_ok = factor_kkt_sparse(aug_cache, aug_w, aug_negAe, reg);
+        for (int j = 0; j < aug_primal_dim; ++j)
+          wv[j] = dvec[aug_reduced_to_full[static_cast<size_t>(j)]];
+        auto factor_augmented = [&](double rr) {
+          bool ok = false;
+          if (aug_condensed_col.empty()) {
+            ok = factor_kkt_sparse(aug_cache, aug_w, aug_negAe, rr);
+          } else {
+            double* dual_values = aug_dual_block.valuePtr();
+            std::memset(dual_values, 0,
+                        static_cast<size_t>(aug_dual_block.nonZeros()) *
+                            sizeof(double));
+            for (int i = 0; i < m; ++i)
+              dual_values[aug_dual_diag_pos[static_cast<size_t>(i)]] = -rr;
+            for (size_t k = 0; k < aug_condensed_col.size(); ++k) {
+              const int full_col = aug_condensed_col[k];
+              const double denom = dvec[full_col] + rr;
+              const double coeff = aug_condensed_coeff[k];
+              const int row = aug_condensed_row[k];
+              if (row < 0 || row >= m || !(denom > 0.0) ||
+                  !std::isfinite(denom) || !std::isfinite(coeff)) {
+                return false;
+              }
+              dual_values[aug_dual_diag_pos[static_cast<size_t>(row)]] -=
+                  coeff * coeff / denom;
+              const int row2 = aug_condensed_row2[k];
+              if (row2 >= 0) {
+                const double coeff2 = aug_condensed_coeff2[k];
+                if (!std::isfinite(coeff2)) return false;
+                dual_values[aug_dual_diag_pos[static_cast<size_t>(row2)]] -=
+                    coeff2 * coeff2 / denom;
+                const double cross = coeff * coeff2 / denom;
+                dual_values[aug_condensed_cross_pos[k]] -= cross;
+                dual_values[aug_condensed_cross_t_pos[k]] -= cross;
+              }
+            }
+            ok = factor_kkt_sparse_dual_block(
+                aug_cache, aug_w, aug_negAe, rr, aug_dual_block);
+          }
+          if (ok) aug_factor_reg = rr;
+          return ok;
+        };
+        factor_ok = factor_augmented(reg);
         for (int retry = 0; retry < 4 && !factor_ok; ++retry) {
           const double dyn_reg = reg * std::pow(100.0, retry + 1);
-          factor_ok = factor_kkt_sparse(aug_cache, aug_w, aug_negAe, dyn_reg);
+          factor_ok = factor_augmented(dyn_reg);
         }
       }
     } else {
@@ -1981,7 +2808,14 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
           for (int i = 0; i < m; ++i) Nv[sparse_diag_offsets[i]] += dyn_reg;
 #if MIPSOLVERS_HAVE_CHOLMOD
           if (cholmod_ok) {
-            factor_ok = cholmod_ldlt.factorize(N_sparse.valuePtr());
+#ifdef HACDCPF_HAVE_MKL_PARDISO
+            if (use_normal_pardiso) {
+              factor_ok = normal_pardiso.factorize(N_sparse);
+            } else
+#endif
+            {
+              factor_ok = cholmod_ldlt.factorize(N_sparse.valuePtr());
+            }
           } else
 #endif
 #if MIPSOLVERS_USE_ACCELERATE
@@ -2010,6 +2844,18 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
       out.stats.iterations = iter;
       break;
     }
+#if MIPSOLVERS_HAVE_CHOLMOD
+    if (auto_formulation && !use_augmented && cholmod_ok) {
+      const double normal_rcond = cholmod_ldlt.numeric_rcond();
+      if ((opt_.verbose || ipm_verbose_env) && iter == 0)
+        fprintf(stderr, "IPM-LP normal numeric rcond=%.3e\n", normal_rcond);
+      // N = A*Theta*A' squares the scaled operator condition number, so rcond
+      // is useful diagnostics.  It is not itself a direction-acceptance test:
+      // it bounds possible forward error, while the inexact-Newton contract
+      // below measures the actual unregularized KKT backward error.  Rejecting
+      // only from rcond discards accurate directions on rank-sensitive LPs.
+    }
+#endif
     t_setup += std::chrono::duration<double, std::milli>(tnow() - t_su).count();
 
     // ---- Predictor (affine, σ=0) ----
@@ -2023,6 +2869,24 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
     for (int j = 0; j < nn; ++j)
       xi_d[j] = -r_d_d[j] - flb_d[j] * zl_d[j] + fub_d[j] * zu_d[j];
     solve_step(xi_d, dx_aff_d, dy_aff_d);
+
+    if (!std::isfinite(iteration_kkt_relative)) {
+      if (opt_.verbose || ipm_verbose_env) {
+        fprintf(stderr,
+                "IPM-LP predictor direction rejected iter=%d rel=%.3e "
+                "target=%.3e formulation=%s\n",
+                iter, iteration_kkt_relative, kNewtonRefinementEta,
+                use_augmented ? "augmented" : "normal");
+      }
+      out.stats.success = false;
+      out.stats.iterations = iter;
+      out.stats.status = use_augmented ? "Inaccurate Newton direction"
+                                       : "Normal equations rejected";
+      out.stats.primal_feas = pfeas;
+      out.stats.dual_feas = dfeas;
+      out.stats.complementarity = mu;
+      break;
+    }
 
     // Δz_aff from complementarity
     for (int j = 0; j < nn; ++j) {
@@ -2166,6 +3030,24 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
       }
     }
 
+    if (!std::isfinite(iteration_kkt_relative)) {
+      if (opt_.verbose || ipm_verbose_env) {
+        fprintf(stderr,
+                "IPM-LP corrector direction rejected iter=%d rel=%.3e "
+                "target=%.3e formulation=%s\n",
+                iter, iteration_kkt_relative, kNewtonRefinementEta,
+                use_augmented ? "augmented" : "normal");
+      }
+      out.stats.success = false;
+      out.stats.iterations = iter;
+      out.stats.status = use_augmented ? "Inaccurate Newton direction"
+                                       : "Normal equations rejected";
+      out.stats.primal_feas = pfeas;
+      out.stats.dual_feas = dfeas;
+      out.stats.complementarity = mu;
+      break;
+    }
+
     if ((opt_.verbose || ipm_verbose_env) && (iter < 3 || iter % 5 == 0)) {
       fprintf(stderr,
               "IPM-LP %4d: pf=%.2e df=%.2e mu=%.2e reg=%.1e "
@@ -2178,7 +3060,38 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
               iteration_kkt_refinements, accepted_gondzio);
     }
 
+    // A fraction-to-boundary step below sqrt(eps) cannot make reliably
+    // distinguishable progress in FP64. On a pivot-stable augmented factor it
+    // is evidence that the unregularized direction is forward-unstable, so
+    // retain IP-PMM stabilization for the remainder of this barrier path.
+    if (use_augmented && aug_use_pardiso &&
+        std::min(ap, ad) <= std::sqrt(std::numeric_limits<double>::epsilon())) {
+      augmented_roundoff_step_observed = true;
+    }
+
     t_corr += std::chrono::duration<double, std::milli>(tnow() - t_c).count();
+
+    if (auto_formulation && !use_augmented) {
+      // Reject a normal-equations trajectory when the central-path line search
+      // can no longer resolve a step above the floating-point roundoff scale.
+      // Two consecutive violations suppress one-iteration transients. The
+      // outer solver then restarts augmented KKT from the original initial
+      // point; it never continues from a direction-contaminated iterate.
+      const double roundoff_step =
+          std::sqrt(std::numeric_limits<double>::epsilon());
+      const bool roundoff_limited = std::min(ap, ad) <= roundoff_step;
+      normal_tiny_step_streak =
+          roundoff_limited ? normal_tiny_step_streak + 1 : 0;
+      if (normal_tiny_step_streak >= 2) {
+        out.stats.success = false;
+        out.stats.iterations = iter;
+        out.stats.status = "Normal equations stalled";
+        out.stats.primal_feas = pfeas;
+        out.stats.dual_feas = dfeas;
+        out.stats.complementarity = mu;
+        break;
+      }
+    }
 
     // Finiteness guard: a failed solve or NaN in the search direction must
     // abort the loop instead of polluting the iterate and returning a NaN
@@ -2223,6 +3136,29 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
     printf("    init=%.3f resid=%.3f setup=%.3f pred=%.3f corr=%.3f update=%.3f\n",
            t_init_overhead, t_resid, t_setup, t_pred, t_corr, t_update);
     printf("    setup_sub: fill=%.3f factor=%.3f\n", t_fill, t_factor);
+#if MIPSOLVERS_HAVE_CHOLMOD
+    if (cholmod_ok) {
+      printf("    symbolic: normal flops=%.0f lnz=%.0f\n",
+             cholmod_ldlt.symbolic_flops(),
+             cholmod_ldlt.symbolic_nonzeros());
+    }
+    if (aug_use_cholmod) {
+      printf("    symbolic: augmented flops=%.0f lnz=%.0f\n",
+             aug_chol.symbolic_flops(), aug_chol.symbolic_nonzeros());
+    }
+#endif
+#ifdef HACDCPF_HAVE_MKL_PARDISO
+    if (use_normal_pardiso) {
+      printf("    pardiso: normal factor_nnz=%lld factor_work=%lld\n",
+             static_cast<long long>(normal_pardiso.factor_nonzeros()),
+             static_cast<long long>(normal_pardiso.factor_work()));
+    }
+    if (aug_use_pardiso && aug_cache.solver) {
+      printf("    pardiso: augmented factor_nnz=%lld factor_work=%lld\n",
+             static_cast<long long>(aug_cache.solver->factor_nonzeros()),
+             static_cast<long long>(aug_cache.solver->factor_work()));
+    }
+#endif
   }
 
 #if MIPSOLVERS_USE_ACCELERATE
@@ -2291,9 +3227,6 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
   }
   const bool original_optimal = audit.acceptable(
       publication_primal_tol, publication_dual_tol, publication_gap_tol);
-  const bool termination_enabled = opt_.tol_primal >= 0.0 &&
-                                   opt_.tol_dual >= 0.0 &&
-                                   opt_.tol_gap >= 0.0;
   if (out.stats.success) {
     if (!original_optimal) {
       out.stats.success = false;

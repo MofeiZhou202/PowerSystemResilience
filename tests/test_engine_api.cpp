@@ -15,6 +15,7 @@
 #include "mipsolvers/engine/api/options.hpp"
 #include "mipsolvers/engine/problem_types.hpp"
 #include "mipsolvers/engine/kernel/linear_algebra/linear_solver.hpp"
+#include "mipsolvers/engine/kernel/kkt/kkt_system.hpp"
 #include "mipsolvers/engine/solver/adapter_registry.hpp"
 #include "mipsolvers/engine/solver/external/adapters.hpp"
 
@@ -418,6 +419,11 @@ TEST_CASE("EigenSparseLU handles empty square systems", "[engine][api][linear-so
   Eigen::VectorXd x;
   CHECK(solver.solve(rhs, x));
   CHECK(x.size() == 0);
+
+  Eigen::MatrixXd rhs_many(0, 3), x_many;
+  CHECK(solver.solve_many(rhs_many, x_many));
+  CHECK(x_many.rows() == 0);
+  CHECK(x_many.cols() == 3);
 }
 
 TEST_CASE("Default sparse solver handles empty square systems", "[engine][api][linear-solver]") {
@@ -468,6 +474,71 @@ static void run_sparse_solve_3x3(SparseLinearSolver& solver) {
   CHECK(x[2] == Approx(2.5).epsilon(1e-10));
 }
 
+static void run_sparse_solve_many_3x3(SparseLinearSolver& solver) {
+  Eigen::SparseMatrix<double> A(3, 3);
+  A.insert(0, 0) = 4.0; A.insert(0, 1) = 1.0;
+  A.insert(1, 0) = 1.0; A.insert(1, 1) = 3.0; A.insert(1, 2) = 1.0;
+  A.insert(2, 1) = 1.0; A.insert(2, 2) = 2.0;
+  A.makeCompressed();
+
+  Eigen::MatrixXd expected(3, 3);
+  expected << 1.0, -2.0, 0.5,
+              2.0,  0.0, 1.5,
+              2.5,  3.0, -1.0;
+  const Eigen::MatrixXd rhs = A * expected;
+
+  solver.analyze_pattern(A);
+  REQUIRE(solver.factorize(A));
+  Eigen::MatrixXd x;
+  REQUIRE(solver.solve_many(rhs, x));
+  REQUIRE(x.rows() == expected.rows());
+  REQUIRE(x.cols() == expected.cols());
+  CHECK((x - expected).cwiseAbs().maxCoeff() == Approx(0.0).margin(1e-10));
+
+  Eigen::MatrixXd no_rhs(3, 0);
+  REQUIRE(solver.solve_many(no_rhs, x));
+  CHECK(x.rows() == 3);
+  CHECK(x.cols() == 0);
+
+  Eigen::MatrixXd wrong_rows = Eigen::MatrixXd::Ones(2, 2);
+  CHECK_FALSE(solver.solve_many(wrong_rows, x));
+}
+
+TEST_CASE("SparseLinearSolver multi-RHS default preserves custom backends",
+          "[engine][linear-solver][multi-rhs][fallback]") {
+  class IdentitySolver final : public SparseLinearSolver {
+   public:
+    const char* backend_name() const override { return "test-identity"; }
+    void analyze_pattern(const Eigen::SparseMatrix<double>& a) override {
+      dimension = a.rows();
+    }
+    bool factorize(const Eigen::SparseMatrix<double>& a) override {
+      dimension = a.rows();
+      return a.rows() == a.cols();
+    }
+    bool solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) override {
+      if (rhs.size() != dimension) return false;
+      ++solve_calls;
+      x = rhs;
+      return true;
+    }
+
+    Eigen::Index dimension{0};
+    int solve_calls{0};
+  } solver;
+
+  Eigen::SparseMatrix<double> identity(2, 2);
+  identity.setIdentity();
+  REQUIRE(solver.factorize(identity));
+  Eigen::MatrixXd rhs(2, 3);
+  rhs << 1.0, 2.0, 3.0,
+         4.0, 5.0, 6.0;
+  Eigen::MatrixXd x;
+  REQUIRE(solver.solve_many(rhs, x));
+  CHECK(x == rhs);
+  CHECK(solver.solve_calls == rhs.cols());
+}
+
 static void run_factorize_without_analyze(SparseLinearSolver& solver) {
   // Bug fix #1: factorize() called without prior analyze_pattern() must not
   // crash or assert-fail; it should auto-run analyzePattern internally.
@@ -495,6 +566,12 @@ TEST_CASE("EigenSparseLU: 3x3 sparse solve", "[engine][linear-solver][eigen]") {
   run_sparse_solve_3x3(solver);
 }
 
+TEST_CASE("EigenSparseLU: multiple right-hand sides",
+          "[engine][linear-solver][eigen][multi-rhs]") {
+  EigenSparseLUSolver solver;
+  run_sparse_solve_many_3x3(solver);
+}
+
 TEST_CASE("EigenSparseLU: empty-system path (no analyze_pattern)", "[engine][linear-solver][eigen]") {
   EigenSparseLUSolver solver;
   Eigen::SparseMatrix<double> a(0, 0);
@@ -515,6 +592,14 @@ TEST_CASE("Default sparse solver: 3x3 correctness + backend reported",
   run_sparse_solve_3x3(*solver);
 }
 
+TEST_CASE("Default sparse solver: multiple right-hand sides",
+          "[engine][linear-solver][default][multi-rhs]") {
+  auto solver = make_default_sparse_solver();
+  REQUIRE(solver != nullptr);
+  INFO("Backend in use: " << solver->backend_name());
+  run_sparse_solve_many_3x3(*solver);
+}
+
 TEST_CASE("Default sparse solver: factorize without analyze_pattern",
           "[engine][linear-solver][default]") {
   auto solver = make_default_sparse_solver();
@@ -525,11 +610,33 @@ TEST_CASE("Default sparse solver: factorize without analyze_pattern",
   run_factorize_without_analyze(*solver);
 }
 
+#ifdef HACDCPF_HAVE_UMFPACK
+TEST_CASE("EigenUmfPackSolver: multiple right-hand sides",
+          "[engine][linear-solver][umfpack][multi-rhs]") {
+  EigenUmfPackSolver solver;
+  run_sparse_solve_many_3x3(solver);
+}
+#endif
+
+#ifdef HACDCPF_HAVE_KLU
+TEST_CASE("EigenKluSolver: multiple right-hand sides",
+          "[engine][linear-solver][klu][multi-rhs]") {
+  EigenKluSolver solver;
+  run_sparse_solve_many_3x3(solver);
+}
+#endif
+
 // ─── SuperLU (compiled in only when HACDCPF_HAVE_SUPERLU is set) ─────────────
 #ifdef HACDCPF_HAVE_SUPERLU
 TEST_CASE("SuperLUSolver: 3x3 sparse solve", "[engine][linear-solver][superlu]") {
   SuperLUSolver solver;
   run_sparse_solve_3x3(solver);
+}
+
+TEST_CASE("SuperLUSolver: multiple right-hand sides",
+          "[engine][linear-solver][superlu][multi-rhs]") {
+  SuperLUSolver solver;
+  run_sparse_solve_many_3x3(solver);
 }
 
 TEST_CASE("SuperLUSolver: factorize without prior analyze_pattern",
@@ -562,6 +669,12 @@ TEST_CASE("MKLPardisoSolver: 3x3 sparse solve", "[engine][linear-solver][pardiso
   run_sparse_solve_3x3(solver);
 }
 
+TEST_CASE("MKLPardisoSolver: multiple right-hand sides",
+          "[engine][linear-solver][pardiso][multi-rhs]") {
+  MKLPardisoSolver solver;
+  run_sparse_solve_many_3x3(solver);
+}
+
 TEST_CASE("MKLPardisoSolver: factorize without prior analyze_pattern",
           "[engine][linear-solver][pardiso]") {
   MKLPardisoSolver solver;
@@ -582,6 +695,25 @@ TEST_CASE("MKLPardisoSolver: empty square system", "[engine][linear-solver][pard
 TEST_CASE("MKLPardisoSolver: backend name is correct", "[engine][linear-solver][pardiso]") {
   MKLPardisoSolver solver;
   CHECK(std::string(solver.backend_name()) == "Intel-MKL-PARDISO(Eigen)");
+}
+
+TEST_CASE("MKLPardisoLLTSolver: SPD solve",
+          "[engine][linear-solver][pardiso][llt]") {
+  MKLPardisoLLTSolver solver;
+  run_sparse_solve_3x3(solver);
+}
+
+TEST_CASE("MKLPardisoLLTSolver: multiple right-hand sides",
+          "[engine][linear-solver][pardiso][llt][multi-rhs]") {
+  MKLPardisoLLTSolver solver;
+  run_sparse_solve_many_3x3(solver);
+}
+
+TEST_CASE("MKLPardisoLLTSolver: backend name is correct",
+          "[engine][linear-solver][pardiso][llt]") {
+  MKLPardisoLLTSolver solver;
+  CHECK(std::string(solver.backend_name()) ==
+        "Intel-MKL-PARDISO-LLT(Eigen)");
 }
 
 static void run_symmetric_indefinite_solve(SparseLinearSolver& solver,
@@ -614,6 +746,12 @@ TEST_CASE("MKLPardisoLDLTSolver: symmetric indefinite 3x3 solve",
           "[engine][linear-solver][pardiso][ldlt]") {
   MKLPardisoLDLTSolver solver;
   run_symmetric_indefinite_solve(solver, true);
+}
+
+TEST_CASE("MKLPardisoLDLTSolver: multiple right-hand sides",
+          "[engine][linear-solver][pardiso][ldlt][multi-rhs]") {
+  MKLPardisoLDLTSolver solver;
+  run_sparse_solve_many_3x3(solver);
 }
 
 TEST_CASE("MKLPardisoLDLTSolver: factorize without prior analyze_pattern",
@@ -664,5 +802,77 @@ TEST_CASE("MKLPardisoAdaptiveSolver: empty square system",
   Eigen::VectorXd rhs(0), x;
   CHECK(solver.solve(rhs, x));
   CHECK(x.size() == 0);
+}
+
+TEST_CASE("KKT explicit dual diagonal preserves the assembled equation",
+          "[engine][linear-solver][pardiso][kkt]") {
+  // [ 2  -3 ] [dx] = [  1]
+  // [-3  -5 ] [dy]   [-11]
+  // has the exact solution (2, 1).  The -5 dual entry represents a Schur
+  // contribution supplied independently from the retained Jacobian pattern.
+  Eigen::SparseMatrix<double> w(1, 1);
+  w.insert(0, 0) = 2.0;
+  w.makeCompressed();
+  Eigen::SparseMatrix<double> jg(1, 1);
+  jg.insert(0, 0) = -3.0;
+  jg.makeCompressed();
+  Eigen::VectorXd dual_diagonal(1);
+  dual_diagonal << -5.0;
+
+  SparseKKTCache cache;
+  cache.solver = std::make_unique<MKLPardisoSolver>();
+  REQUIRE(factor_kkt_sparse_diagonal(cache, w, jg, 0.0,
+                                     dual_diagonal));
+  Eigen::VectorXd rhs(2);
+  rhs << 1.0, -11.0;
+  Eigen::VectorXd dx, dy;
+  REQUIRE(solve_kkt_sparse(cache, rhs, dx, dy));
+  REQUIRE(dx.size() == 1);
+  REQUIRE(dy.size() == 1);
+  CHECK(dx[0] == Approx(2.0).margin(1e-12));
+  CHECK(dy[0] == Approx(1.0).margin(1e-12));
+  CHECK((cache.kkt * (Eigen::VectorXd(2) << dx[0], dy[0]).finished() - rhs)
+            .lpNorm<Eigen::Infinity>() == Approx(0.0).margin(1e-12));
+}
+
+TEST_CASE("KKT sparse dual Schur block preserves off-diagonal coupling",
+          "[engine][linear-solver][pardiso][kkt]") {
+  // The exact solution is (dx,dy1,dy2)=(1,2,-1).  The dual off-diagonal is
+  // the fill edge produced when a degree-two primal column is condensed.
+  Eigen::SparseMatrix<double> w(1, 1);
+  w.insert(0, 0) = 2.0;
+  w.makeCompressed();
+  Eigen::SparseMatrix<double> jg(2, 1);
+  jg.insert(0, 0) = -1.0;
+  jg.insert(1, 0) = -2.0;
+  jg.makeCompressed();
+  Eigen::SparseMatrix<double> dual(2, 2);
+  dual.insert(0, 0) = -3.0;
+  dual.insert(1, 0) = -0.5;
+  dual.insert(0, 1) = -0.5;
+  dual.insert(1, 1) = -4.0;
+  dual.makeCompressed();
+
+  SparseKKTCache cache;
+  cache.solver = std::make_unique<MKLPardisoSolver>();
+  REQUIRE(factor_kkt_sparse_dual_block(cache, w, jg, 0.0, dual));
+  Eigen::VectorXd rhs(3);
+  rhs << 2.0, -6.5, 1.0;
+  Eigen::VectorXd dx, dy;
+  REQUIRE(solve_kkt_sparse(cache, rhs, dx, dy));
+  REQUIRE(dx.size() == 1);
+  REQUIRE(dy.size() == 2);
+  CHECK(dx[0] == Approx(1.0).margin(1e-12));
+  CHECK(dy[0] == Approx(2.0).margin(1e-12));
+  CHECK(dy[1] == Approx(-1.0).margin(1e-12));
+  Eigen::VectorXd solution(3);
+  solution << dx[0], dy[0], dy[1];
+  CHECK((cache.kkt * solution - rhs).lpNorm<Eigen::Infinity>() ==
+        Approx(0.0).margin(1e-12));
+
+  dual.valuePtr()[0] = -3.5;
+  REQUIRE(factor_kkt_sparse_dual_block(cache, w, jg, 0.0, dual));
+  CHECK(cache.symbolic_analyses == 1);
+  CHECK(cache.numeric_factorizations == 2);
 }
 #endif  // HACDCPF_HAVE_MKL_PARDISO

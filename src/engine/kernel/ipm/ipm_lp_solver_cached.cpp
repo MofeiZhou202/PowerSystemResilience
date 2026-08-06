@@ -420,7 +420,8 @@ SolveResult NativeIPMLPAdapter::solve_structure_aware_node_lp(
     node_lp.vars[static_cast<std::size_t>(j)].ub = node_ub[j];
   }
   return solve_lp_impl(node_lp, x0, opt_.ruiz_rounds, -1.0,
-                       AugmentedBackendPolicy::StructurePreserving);
+                       AugmentedBackendPolicy::StructurePreserving,
+                       IPMNewtonFormulation::ForceAugmented);
 }
 
 SolveResult NativeIPMLPAdapter::solve_cached_node_lp(
@@ -1321,7 +1322,8 @@ NativeIPMLPAdapter::solve_cached_bound_change_batch(
     entry.attempted = true;
     entry.result = use_augmented_direct
         ? solve_lp_impl(direct_lp, x0, opt_.ruiz_rounds, -1.0,
-                        AugmentedBackendPolicy::StructurePreserving)
+                        AugmentedBackendPolicy::StructurePreserving,
+                        IPMNewtonFormulation::ForceAugmented)
         : solve_cached_node_lp(node_lb, node_ub, x0);
   }
 

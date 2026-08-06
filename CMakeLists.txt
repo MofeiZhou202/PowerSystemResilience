@@ -276,6 +276,11 @@ if(MIPSOLVERS_HAVE_HIGHS_LIB)
     src/engine/solver/native/milp/bc/milp_presolve.cpp
     src/engine/solver/native/milp/bc/api.cpp
   )
+  if(MSVC)
+    set_source_files_properties(
+      src/engine/solver/native/milp/bc/legacy/branch_and_cut.cpp
+      PROPERTIES COMPILE_OPTIONS "/bigobj")
+  endif()
   target_compile_definitions(mipsolvers PUBLIC
     MIPSOLVERS_NATIVE_BC_STRICT_HIGHS=1
     MIPSOLVERS_NATIVE_BC_DYNAMIC_CUTS=1)
@@ -409,6 +414,23 @@ if(MIPSOLVERS_HAVE_HIGHS_LIB)
     endif()
     if(NOT MSVC)
       target_compile_options(netlib_solver_benchmark PRIVATE -Wall -Wextra
+        $<$<CONFIG:Release>:-O3 -DNDEBUG>
+        $<$<CONFIG:RelWithDebInfo>:-O2 -g -DNDEBUG>)
+    endif()
+  endif()
+
+  # Fixed-pattern KKT lifecycle benchmark: symbolic analysis once, repeated
+  # numeric factorizations, and multiple right-hand sides per factorization.
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/kkt_reuse_benchmark.cpp")
+    add_executable(kkt_reuse_benchmark
+      benchmark/kkt_reuse_benchmark.cpp)
+    set_target_properties(kkt_reuse_benchmark PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+    target_include_directories(kkt_reuse_benchmark PRIVATE
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+    target_link_libraries(kkt_reuse_benchmark PRIVATE mipsolvers)
+    if(NOT MSVC)
+      target_compile_options(kkt_reuse_benchmark PRIVATE -Wall -Wextra
         $<$<CONFIG:Release>:-O3 -DNDEBUG>
         $<$<CONFIG:RelWithDebInfo>:-O2 -g -DNDEBUG>)
     endif()
@@ -1177,6 +1199,15 @@ if(_ms_eigen3_bundle_src)
   if(EXISTS "${_ms_eigen3_bundle_src}/unsupported/Eigen")
     install(DIRECTORY "${_ms_eigen3_bundle_src}/unsupported/Eigen"
       DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/mipsolvers-deps/eigen3/unsupported")
+  endif()
+
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/nlp_open_benchmark.cpp")
+    add_executable(nlp_open_benchmark benchmark/nlp_open_benchmark.cpp)
+    set_target_properties(nlp_open_benchmark PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+    target_link_libraries(nlp_open_benchmark PRIVATE mipsolvers)
+    target_include_directories(nlp_open_benchmark PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/include)
   endif()
   message(STATUS "mipsolvers: bundling Eigen3 headers from ${_ms_eigen3_bundle_src}")
 endif()

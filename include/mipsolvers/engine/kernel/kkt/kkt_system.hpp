@@ -57,8 +57,7 @@ struct InertiaSettings {
 ///   [ W + δI   Jg' ] [ dx      ]   [ rhs_x  ]
 ///   [ Jg      -δI  ] [ dlambda ] = [ rhs_eq ]
 struct SparseKKTCache {
-  Eigen::SparseMatrix<double> kkt;       ///< Regularised KKT matrix (after factorisation build)
-  Eigen::SparseMatrix<double> kkt_orig;  ///< Copy used for iterative refinement residual
+  Eigen::SparseMatrix<double> kkt;       ///< Resident KKT matrix; also used for refinement residuals
   std::unique_ptr<SparseLinearSolver> solver;
   bool factored{false};
   bool pattern_analyzed{false};
@@ -71,6 +70,15 @@ struct SparseKKTCache {
   int symbolic_analyses{0};        ///< Number of ordering/symbolic analyses
   int numeric_factorizations{0};   ///< Number of numeric factorizations
   int linear_solves{0};            ///< Number of back-solves, including refinement
+  double refinement_tolerance{1e-12}; ///< Relative residual gate for correction solves
+
+  // Reused by solve_kkt_sparse().  Predictor/corrector/SOC solves have the
+  // same dimension, so retaining these vectors removes several allocations
+  // from every IPM iteration.
+  Eigen::VectorXd solve_solution;
+  Eigen::VectorXd solve_residual;
+  Eigen::VectorXd solve_correction;
+  Eigen::VectorXd solve_candidate;
 
   // ── Assembly scatter map (analyze-once for the [W; Jg] → KKT structure) ──
   // Positions of each source entry inside kkt's CSC value array.  Rebuilt
@@ -86,6 +94,10 @@ struct SparseKKTCache {
   std::vector<int> asm_w_pos;      ///< nnz(W): value index of W(i,j) in kkt
   std::vector<int> asm_jg_top;     ///< nnz(Jg): value index of Jg(r,c) at (n+r, c)
   std::vector<int> asm_jg_bot;     ///< nnz(Jg): value index of Jg(r,c) at (c, n+r)
+  int asm_dual_nnz{-1};            ///< Fingerprint: nnz(explicit dual block)
+  std::vector<int> asm_dual_outer; ///< Fingerprint: dual-block column pointers
+  std::vector<int> asm_dual_inner; ///< Fingerprint: dual-block row indices
+  std::vector<int> asm_dual_pos;   ///< nnz(dual): shifted value index in kkt
   std::vector<int> asm_diag_w;     ///< n: value index of (i,i)
   std::vector<int> asm_diag_c;     ///< meq: value index of (n+i, n+i)
 };
@@ -134,6 +146,25 @@ bool factor_kkt_sparse(SparseKKTCache& cache,
                        const Eigen::SparseMatrix<double>& jg,
                        double reg);
 
+/// Variant with an explicitly supplied dual diagonal.  This supports exact
+/// static condensation of diagonal primal variables: their Schur terms are
+/// accumulated into dual_diagonal while the retained primal block still gets
+/// the scalar primal_reg regularization.
+bool factor_kkt_sparse_diagonal(SparseKKTCache& cache,
+                                const Eigen::SparseMatrix<double>& w,
+                                const Eigen::SparseMatrix<double>& jg,
+                                double primal_reg,
+                                const Eigen::VectorXd& dual_diagonal);
+
+/// Variant with a full sparse dual block.  The block must contain its diagonal
+/// structurally and is inserted exactly as supplied.  This is the cached
+/// factorization primitive for exact partial Schur complements whose eliminated
+/// primal columns connect more than one constraint.
+bool factor_kkt_sparse_dual_block(
+    SparseKKTCache& cache, const Eigen::SparseMatrix<double>& w,
+    const Eigen::SparseMatrix<double>& jg, double primal_reg,
+    const Eigen::SparseMatrix<double>& dual_block);
+
 /// Back-solve the KKT system using a cached factorisation.
 /// Splits the solution into primal (dx) and dual (dlambda) parts.
 /// Applies up to 2 steps of iterative refinement.
@@ -148,6 +179,11 @@ bool solve_kkt_sparse(SparseKKTCache& cache,
 /// paths that keep cache.kkt resident across calls (e.g. the augmented
 /// Newton assembler in ipm_solver.cpp).
 bool factor_current_kkt(SparseKKTCache& cache, int n, int meq);
+
+/// Fast-path overload for an assembler that has already verified that the
+/// resident CSC structure is unchanged.
+bool factor_current_kkt(SparseKKTCache& cache, int n, int meq,
+                        bool pattern_is_unchanged);
 
 /// Factor a sparse augmented KKT matrix with inertia-preserving
 /// regularization. This operation performs no right-hand-side solve; call

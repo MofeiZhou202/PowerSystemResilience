@@ -18,6 +18,11 @@ namespace mipsolvers::engine {
 /// nonconvex-robustness guarantee; the default configuration does so.
 enum class Globalization { Merit, Filter };
 
+/// Algebraically equivalent primal-dual Newton formulations. Auto compares
+/// the elimination graphs once and selects the candidate whose symbolic
+/// factor work and storage are both strictly smaller.
+enum class NewtonFormulation { Auto, Condensed, Augmented };
+
 /// Options for the Interior-Point Method driver. Filter-specific fields are
 /// ignored when `globalization == Merit`.
 struct IPMOptions {
@@ -57,6 +62,7 @@ struct IPMOptions {
   // --- Filter-driver options (PR2+) -----------------------------------
   Globalization globalization{Globalization::Filter};
   bool use_inertia_correction{true};
+  NewtonFormulation newton_formulation{NewtonFormulation::Auto};
   // Solve the Newton step in the uncondensed augmented form
   //   [ H + δ_W I   Jgᵀ   Jhᵀ  ] [dx ]   [-r_d                       ]
   //   [ Jg          0     0    ] [dλ ] = [-r_eq                       ]
@@ -64,6 +70,8 @@ struct IPMOptions {
   // instead of the condensed [H + Jhᵀ(M/S)Jh, Jgᵀ; Jg, 0] form.  The
   // augmented form avoids the Jhᵀ(M/S)Jh product (fill + squared
   // conditioning) at the price of a larger sparse factorization.
+  /// Backward-compatible force flag. Prefer
+  /// `newton_formulation = NewtonFormulation::Augmented` in new code.
   bool use_augmented_newton{false};
 
   // Additional PR3 feature flags (all default-on; flip false to disable
@@ -98,6 +106,18 @@ struct IPMDetail {
   Eigen::VectorXd mu_ineq;    // inequality multipliers
   Eigen::VectorXd z_slack;    // inequality slacks
   double complementarity{0.0};
+  std::string newton_formulation{"unselected"};
+  int condensed_dimension{0};
+  int augmented_dimension{0};
+  int condensed_nonzeros{0};
+  int augmented_nonzeros{0};
+  double condensed_symbolic_flops{0.0};
+  double augmented_symbolic_flops{0.0};
+  double condensed_symbolic_nonzeros{0.0};
+  double augmented_symbolic_nonzeros{0.0};
+  int symbolic_analyses{0};
+  int numeric_factorizations{0};
+  int linear_solves{0};
 };
 
 /// Native primal-dual IPM for NLP problems, with a Wächter–Biegler filter

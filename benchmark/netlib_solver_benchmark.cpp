@@ -10,6 +10,7 @@
 ///       --time-limit 30 --csv reports/netlib_benchmark.csv
 ///       --json reports/netlib_benchmark.json
 ///   netlib_solver_benchmark --case afiro --solvers highs-simplex,ipopt
+/// Fully native comparison key: native-dual-direct (no HiGHS presolve).
 /// DSE comparison keys: native-dual-devex, native-dual-structural-dse,
 /// native-dual-exact-dse, native-dual-certified-dse.
 
@@ -214,6 +215,7 @@ bool parse_args(int argc, char** argv, Config& cfg) {
           << "                       IPM keys: native-ipm-direct,\n"
           << "                       native-ipm-legacy-step\n"
           << "                       native DSE keys: native-dual-devex,\n"
+          << "                       full-native key: native-dual-direct\n"
           << "                       native-dual-structural-dse,\n"
           << "                       native-dual-exact-dse,\n"
           << "                       native-dual-certified-dse\n"
@@ -630,7 +632,8 @@ RunResult run_adapter(const CaseInfo& kase, const std::string& solver,
   row.solver = solver;
   eng::SolveResult result;
   const auto t0 = std::chrono::steady_clock::now();
-  if (solver == "native-dual-simplex" || solver == "native-dual-devex" ||
+  if (solver == "native-dual-simplex" || solver == "native-dual-direct" ||
+      solver == "native-dual-devex" ||
       solver == "native-dual-structural-dse" ||
       solver == "native-dual-exact-dse" ||
       solver == "native-dual-certified-dse") {
@@ -638,7 +641,7 @@ RunResult run_adapter(const CaseInfo& kase, const std::string& solver,
     opt.lp_kernel_backend = eng::LpKernelBackend::ExperimentalNative;
     opt.max_iter = cfg.max_iterations;
     opt.time_limit_sec = cfg.time_limit_sec;
-    opt.use_highs_presolve = true;
+    opt.use_highs_presolve = solver != "native-dual-direct";
     if (solver == "native-dual-devex") {
       opt.dual_edge_weight_initialization =
           eng::DualEdgeWeightInitialization::Devex;
@@ -653,7 +656,9 @@ RunResult run_adapter(const CaseInfo& kase, const std::string& solver,
           eng::DualEdgeWeightInitialization::CertifiedExact;
     }
     result = eng::solve_lp_with_basis(kase.lp, opt).result;
-    if (solver == "native-dual-devex") {
+    if (solver == "native-dual-direct") {
+      row.solver = "Native-DualSimplex[direct]";
+    } else if (solver == "native-dual-devex") {
       row.solver = "Native-DualSimplex[Devex](+HiGHS-presolve)";
     } else if (solver == "native-dual-structural-dse") {
       row.solver = "Native-DualSimplex[StructuralDSE](+HiGHS-presolve)";

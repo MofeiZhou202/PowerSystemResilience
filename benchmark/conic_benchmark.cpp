@@ -112,6 +112,16 @@ struct RunRecord {
   double gap{0.0};         ///< Absolute duality gap s'z.
   double rel_gap{0.0};     ///< Solver-reported relative gap.
   double primal_objective{0.0};
+  std::string backend;
+  int kkt_dimension{0};
+  int kkt_nonzeros{0};
+  double kkt_symbolic_flops{0.0};
+  double kkt_symbolic_nonzeros{0.0};
+  int kkt_factorizations{0};
+  int kkt_linear_solves{0};
+  int kkt_refinements{0};
+  double max_initial_backward_error{0.0};
+  double max_final_backward_error{0.0};
   std::string status;
 };
 
@@ -585,6 +595,17 @@ int main(int argc, char** argv) {
       rec.gap = res.gap;
       rec.rel_gap = res.relative_gap;
       rec.primal_objective = res.primal_objective;
+      rec.backend = res.linear_solver_backend;
+      rec.kkt_dimension = res.kkt_dimension;
+      rec.kkt_nonzeros = res.kkt_nonzeros;
+      rec.kkt_symbolic_flops = res.kkt_symbolic_flops;
+      rec.kkt_symbolic_nonzeros = res.kkt_symbolic_nonzeros;
+      rec.kkt_factorizations = res.kkt_factorizations;
+      rec.kkt_linear_solves = res.kkt_linear_solves;
+      rec.kkt_refinements = res.kkt_refinements;
+      rec.max_initial_backward_error =
+          res.max_initial_kkt_backward_error;
+      rec.max_final_backward_error = res.max_final_kkt_backward_error;
       rec.status = res.status;
       records.push_back(rec);
       if (res.status != "optimal" ||
@@ -627,6 +648,18 @@ int main(int argc, char** argv) {
                       {"gap", r.gap},
                       {"rel_gap", r.rel_gap},
                       {"primal_objective", r.primal_objective},
+                      {"backend", r.backend},
+                      {"kkt_dimension", r.kkt_dimension},
+                      {"kkt_nonzeros", r.kkt_nonzeros},
+                      {"kkt_symbolic_flops", r.kkt_symbolic_flops},
+                      {"kkt_symbolic_nonzeros", r.kkt_symbolic_nonzeros},
+                      {"kkt_factorizations", r.kkt_factorizations},
+                      {"kkt_linear_solves", r.kkt_linear_solves},
+                      {"kkt_refinements", r.kkt_refinements},
+                      {"max_initial_kkt_backward_error",
+                       r.max_initial_backward_error},
+                      {"max_final_kkt_backward_error",
+                       r.max_final_backward_error},
                       {"status", r.status}});
     }
     std::ofstream f(json_path);

@@ -88,6 +88,45 @@ TEST_CASE("Ruiz equilibration rescues an ill-scaled LP", "[numerical][ruiz]") {
        << " | ruiz=10: iters=" << res.stats.iterations);
 }
 
+TEST_CASE("Sparse normal equations use the Ruiz-scaled operator",
+          "[numerical][ruiz][ipm][normal]") {
+  constexpr int m = 130;
+  constexpr int n = m + 1;
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Zero(n);
+  lp.c[n - 1] = 1.0;
+  lp.A.resize(0, n);
+  lp.b.resize(0);
+  lp.Aeq.resize(m, n);
+  lp.beq.resize(m);
+  for (int i = 0; i < m; ++i) {
+    const double row_scale = (i % 2 == 0) ? 1e-4 : 1e4;
+    lp.Aeq.insert(i, i) = row_scale;
+    lp.beq[i] = row_scale * (1.0 + 1e-3 * i);
+  }
+  // This column makes the normal-equations bandwidth 129, just beyond the
+  // banded kernel. Its positive objective fixes it at zero at the optimum.
+  lp.Aeq.insert(0, n - 1) = 1e-4;
+  lp.Aeq.insert(m - 1, n - 1) = 1e4;
+  lp.Aeq.makeCompressed();
+  lp.vars.assign(n, {VarType::Continuous, 0.0, 1e20});
+
+  IPMLPOptions opt;
+  opt.ruiz_rounds = 10;
+  opt.max_iter = 200;
+  opt.newton_formulation = IPMNewtonFormulation::ForceNormal;
+  const SolveResult result = NativeIPMLPAdapter(opt).solve_lp(lp);
+
+  INFO("status=" << result.stats.status
+                  << " primal=" << result.stats.primal_feas
+                  << " dual=" << result.stats.dual_feas);
+  REQUIRE(result.stats.success);
+  REQUIRE(result.x.size() == n);
+  CHECK(result.x[n - 1] == Approx(0.0).margin(1e-7));
+  CHECK((lp.Aeq * result.x - lp.beq).lpNorm<Eigen::Infinity>() < 1e-6);
+}
+
 // ─── O(nnz) row-norm sweep regression (item 8a) ────────────────────────────
 // The single-sweep row norms must match the direct per-row reference exactly.
 TEST_CASE("compute_scaling_factors matches row-wise reference",
@@ -273,6 +312,28 @@ TEST_CASE("IPM audit does not dilute residuals on subunit data scales",
       Eigen::VectorXd::Zero(1));
   REQUIRE(audit.valid);
   CHECK(audit.primal_residual_inf == Approx(violation).epsilon(1e-8));
+  CHECK(audit.relative_primal_residual == Approx(violation).epsilon(1e-8));
+  CHECK_FALSE(audit.acceptable(1e-7, 1e-12, 1e-12));
+}
+
+TEST_CASE("IPM audit does not use variable bounds to dilute row residuals",
+          "[numerical][ipm][audit]") {
+  LPModel lp;
+  lp.c = Eigen::VectorXd::Zero(1);
+  lp.A.resize(0, 1);
+  lp.b.resize(0);
+  lp.Aeq.resize(1, 1);
+  lp.Aeq.insert(0, 0) = 1.0;
+  lp.Aeq.makeCompressed();
+  lp.beq = Eigen::VectorXd::Ones(1);
+  lp.vars.push_back({VarType::Continuous, 0.0, 1e8});
+
+  constexpr double violation = 1e-4;
+  const IPMLPOptimalityAudit audit = audit_ipm_lp_optimality(
+      lp, Eigen::VectorXd::Constant(1, 1.0 + violation),
+      Eigen::VectorXd::Zero(1), Eigen::VectorXd::Zero(1),
+      Eigen::VectorXd::Zero(1));
+  REQUIRE(audit.valid);
   CHECK(audit.relative_primal_residual == Approx(violation).epsilon(1e-8));
   CHECK_FALSE(audit.acceptable(1e-7, 1e-12, 1e-12));
 }
@@ -609,15 +670,21 @@ TEST_CASE("Augmented Newton path matches condensed path on inequality NLP",
     options.tol_accept = 0.0;
     options.scale_problem = false;
     options.use_restoration_phase = false;
-    options.use_augmented_newton = augmented;
+    options.newton_formulation = augmented
+        ? NewtonFormulation::Augmented
+        : NewtonFormulation::Condensed;
     NativeIPMAdapter solver(options);
-    return solver.solve_nlp_detail(nlp).first;
+    return solver.solve_nlp_detail(nlp);
   };
 
-  const SolveResult rc = solve(false);
-  const SolveResult ra = solve(true);
+  const auto [rc, dc] = solve(false);
+  const auto [ra, da] = solve(true);
   REQUIRE(rc.stats.success);
   REQUIRE(ra.stats.success);
+  CHECK(dc.newton_formulation == "condensed");
+  CHECK(da.newton_formulation == "augmented");
+  CHECK(da.numeric_factorizations > 0);
+  CHECK(da.linear_solves > 0);
   CHECK(ra.stats.objective == Approx(4.0 / 3.0).margin(1e-5));
   CHECK(ra.x[0] == Approx(4.0 / 3.0).margin(1e-5));
   CHECK(ra.x[1] == Approx(2.0 / 3.0).margin(1e-5));
@@ -652,6 +719,14 @@ TEST_CASE("MumpsSolver solves symmetric indefinite KKT systems",
   Eigen::VectorXd x;
   REQUIRE(solver.solve(b, x));
   CHECK((K * x - b).lpNorm<Eigen::Infinity>() < 1e-10);
+  Eigen::MatrixXd expected_many(3, 2);
+  expected_many << 1.0, -0.5,
+                   2.0,  1.5,
+                  -1.0,  0.25;
+  const Eigen::MatrixXd rhs_many = K * expected_many;
+  Eigen::MatrixXd x_many;
+  REQUIRE(solver.solve_many(rhs_many, x_many));
+  CHECK((x_many - expected_many).cwiseAbs().maxCoeff() < 1e-10);
   CHECK(solver.negative_eigenvalues() == 1);
   CHECK(solver.estimated_deficiency() == 0);
   Eigen::VectorXd bad_dimension;

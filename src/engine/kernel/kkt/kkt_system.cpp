@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <vector>
 
@@ -15,7 +16,6 @@ namespace mipsolvers::engine {
 
 namespace {
 
-constexpr double kKktRefinementTolerance = 1e-12;
 constexpr int kKktMaxRefinementSteps = 2;
 
 double infinity_norm(const Eigen::VectorXd& vector) {
@@ -152,6 +152,10 @@ void build_augmented_scatter(SparseKKTCache& cache,
   cache.asm_w_inner.assign(w.innerIndexPtr(), w.innerIndexPtr() + w.nonZeros());
   cache.asm_jg_outer.assign(jg.outerIndexPtr(), jg.outerIndexPtr() + jg.outerSize() + 1);
   cache.asm_jg_inner.assign(jg.innerIndexPtr(), jg.innerIndexPtr() + jg.nonZeros());
+  cache.asm_dual_nnz = 0;
+  cache.asm_dual_outer.clear();
+  cache.asm_dual_inner.clear();
+  cache.asm_dual_pos.clear();
 }
 
 bool augmented_structure_matches(const SparseKKTCache& cache,
@@ -174,13 +178,15 @@ bool augmented_structure_matches(const SparseKKTCache& cache,
 
 // Assemble [W + δ_W I, Jg'; Jg, -δ_C I] into cache.kkt, reusing the cached
 // scatter map whenever the (w, jg) structure is unchanged.
-void assemble_augmented_kkt_cached(SparseKKTCache& cache,
+bool assemble_augmented_kkt_cached(SparseKKTCache& cache,
                                    const Eigen::SparseMatrix<double>& w,
                                    const Eigen::SparseMatrix<double>& jg,
-                                   double delta_w, double delta_c) {
+                                   double delta_w, double delta_c,
+                                   const Eigen::VectorXd* dual_diagonal = nullptr) {
   const int n = static_cast<int>(w.rows());
   const int meq = static_cast<int>(jg.rows());
-  if (!augmented_structure_matches(cache, w, jg)) {
+  const bool structure_changed = !augmented_structure_matches(cache, w, jg);
+  if (structure_changed) {
     // Slow path: triplet-assemble once to obtain the pattern, then build
     // the scatter map for subsequent fast refills.
     cache.kkt = assemble_augmented_kkt(w, jg, 0.0, 0.0);
@@ -200,8 +206,98 @@ void assemble_augmented_kkt_cached(SparseKKTCache& cache,
   }
   for (int i = 0; i < n; ++i)
     v[cache.asm_diag_w[static_cast<size_t>(i)]] += delta_w;
-  for (int i = 0; i < meq; ++i)
-    v[cache.asm_diag_c[static_cast<size_t>(i)]] -= delta_c;
+  for (int i = 0; i < meq; ++i) {
+    v[cache.asm_diag_c[static_cast<size_t>(i)]] +=
+        dual_diagonal ? (*dual_diagonal)[i] : -delta_c;
+  }
+  return !structure_changed;
+}
+
+bool dual_block_structure_matches(
+    const SparseKKTCache& cache, const Eigen::SparseMatrix<double>& w,
+    const Eigen::SparseMatrix<double>& jg,
+    const Eigen::SparseMatrix<double>& dual_block) {
+  const int dual_nnz = static_cast<int>(dual_block.nonZeros());
+  return augmented_structure_matches(cache, w, jg) &&
+         cache.asm_dual_nnz == dual_nnz &&
+         cache.asm_dual_outer.size() ==
+             static_cast<size_t>(dual_block.outerSize() + 1) &&
+         cache.asm_dual_inner.size() == static_cast<size_t>(dual_nnz) &&
+         std::memcmp(cache.asm_dual_outer.data(), dual_block.outerIndexPtr(),
+                     (dual_block.outerSize() + 1) * sizeof(int)) == 0 &&
+         std::memcmp(cache.asm_dual_inner.data(), dual_block.innerIndexPtr(),
+                     dual_nnz * sizeof(int)) == 0;
+}
+
+bool assemble_augmented_kkt_dual_block_cached(
+    SparseKKTCache& cache, const Eigen::SparseMatrix<double>& w,
+    const Eigen::SparseMatrix<double>& jg, double primal_reg,
+    const Eigen::SparseMatrix<double>& dual_block) {
+  const int n = static_cast<int>(w.rows());
+  const int meq = static_cast<int>(jg.rows());
+  const bool structure_changed =
+      !dual_block_structure_matches(cache, w, jg, dual_block);
+  if (structure_changed) {
+    std::vector<Eigen::Triplet<double>> tri;
+    tri.reserve(static_cast<size_t>(w.nonZeros() + 2 * jg.nonZeros() + n +
+                                    dual_block.nonZeros()));
+    for (int col = 0; col < w.outerSize(); ++col)
+      for (Eigen::SparseMatrix<double>::InnerIterator it(w, col); it; ++it)
+        tri.emplace_back(it.row(), it.col(), it.value());
+    for (int i = 0; i < n; ++i) tri.emplace_back(i, i, 0.0);
+    for (int col = 0; col < jg.outerSize(); ++col) {
+      for (Eigen::SparseMatrix<double>::InnerIterator it(jg, col); it; ++it) {
+        tri.emplace_back(it.col(), n + it.row(), it.value());
+        tri.emplace_back(n + it.row(), it.col(), it.value());
+      }
+    }
+    for (int col = 0; col < dual_block.outerSize(); ++col)
+      for (Eigen::SparseMatrix<double>::InnerIterator it(dual_block, col); it;
+           ++it)
+        tri.emplace_back(n + it.row(), n + it.col(), it.value());
+    cache.kkt.resize(n + meq, n + meq);
+    cache.kkt.setFromTriplets(tri.begin(), tri.end());
+    cache.kkt.makeCompressed();
+    build_augmented_scatter(cache, w, jg);
+
+    const int* ko = cache.kkt.outerIndexPtr();
+    const int* ki = cache.kkt.innerIndexPtr();
+    cache.asm_dual_pos.resize(static_cast<size_t>(dual_block.nonZeros()));
+    for (int col = 0; col < dual_block.outerSize(); ++col) {
+      for (int p = dual_block.outerIndexPtr()[col];
+           p < dual_block.outerIndexPtr()[col + 1]; ++p) {
+        const int shifted_col = n + col;
+        const int shifted_row = n + dual_block.innerIndexPtr()[p];
+        const int* begin = ki + ko[shifted_col];
+        const int* end = ki + ko[shifted_col + 1];
+        cache.asm_dual_pos[static_cast<size_t>(p)] = static_cast<int>(
+            std::lower_bound(begin, end, shifted_row) - ki);
+      }
+    }
+    cache.asm_dual_nnz = static_cast<int>(dual_block.nonZeros());
+    cache.asm_dual_outer.assign(
+        dual_block.outerIndexPtr(),
+        dual_block.outerIndexPtr() + dual_block.outerSize() + 1);
+    cache.asm_dual_inner.assign(
+        dual_block.innerIndexPtr(),
+        dual_block.innerIndexPtr() + dual_block.nonZeros());
+  }
+
+  double* values = cache.kkt.valuePtr();
+  std::memset(values, 0,
+              static_cast<size_t>(cache.kkt.nonZeros()) * sizeof(double));
+  for (int k = 0; k < w.nonZeros(); ++k)
+    values[cache.asm_w_pos[static_cast<size_t>(k)]] += w.valuePtr()[k];
+  for (int k = 0; k < jg.nonZeros(); ++k) {
+    values[cache.asm_jg_top[static_cast<size_t>(k)]] += jg.valuePtr()[k];
+    values[cache.asm_jg_bot[static_cast<size_t>(k)]] += jg.valuePtr()[k];
+  }
+  for (int i = 0; i < n; ++i)
+    values[cache.asm_diag_w[static_cast<size_t>(i)]] += primal_reg;
+  for (int k = 0; k < dual_block.nonZeros(); ++k)
+    values[cache.asm_dual_pos[static_cast<size_t>(k)]] +=
+        dual_block.valuePtr()[k];
+  return !structure_changed;
 }
 
 }  // namespace
@@ -211,9 +307,13 @@ void assemble_augmented_kkt_cached(SparseKKTCache& cache,
 // keep cache.kkt resident across calls (kkt scatter assembly here and the
 // augmented Newton assembler in ipm_solver.cpp).
 bool factor_current_kkt(SparseKKTCache& cache, int n, int meq) {
+  return factor_current_kkt(cache, n, meq, false);
+}
+
+bool factor_current_kkt(SparseKKTCache& cache, int n, int meq,
+                        bool pattern_is_unchanged) {
   cache.n = n;
   cache.meq = meq;
-  cache.kkt_orig = cache.kkt;
 
   if (!cache.solver) {
     cache.solver = make_default_sparse_solver();
@@ -221,8 +321,9 @@ bool factor_current_kkt(SparseKKTCache& cache, int n, int meq) {
   }
   const bool pattern_changed =
       !cache.pattern_analyzed ||
-      !same_sparse_pattern(cache.kkt, cache.dim, cache.pattern_outer,
-                           cache.pattern_inner);
+      (!pattern_is_unchanged &&
+       !same_sparse_pattern(cache.kkt, cache.dim, cache.pattern_outer,
+                            cache.pattern_inner));
   if (pattern_changed) {
     cache.solver->analyze_pattern(cache.kkt);
     remember_sparse_pattern(cache.kkt, cache.pattern_outer,
@@ -254,8 +355,48 @@ bool factor_kkt_sparse(SparseKKTCache& cache,
                        double reg) {
   const int n = static_cast<int>(w.rows());
   const int meq = static_cast<int>(jg.rows());
-  assemble_augmented_kkt_cached(cache, w, jg, reg, reg);
-  return factor_current_kkt(cache, n, meq);
+  const bool pattern_is_unchanged =
+      assemble_augmented_kkt_cached(cache, w, jg, reg, reg);
+  return factor_current_kkt(cache, n, meq, pattern_is_unchanged);
+}
+
+bool factor_kkt_sparse_diagonal(SparseKKTCache& cache,
+                                const Eigen::SparseMatrix<double>& w,
+                                const Eigen::SparseMatrix<double>& jg,
+                                double primal_reg,
+                                const Eigen::VectorXd& dual_diagonal) {
+  const int n = static_cast<int>(w.rows());
+  const int meq = static_cast<int>(jg.rows());
+  if (dual_diagonal.size() != meq || !dual_diagonal.allFinite()) {
+    cache.factored = false;
+    return false;
+  }
+  const bool pattern_is_unchanged = assemble_augmented_kkt_cached(
+      cache, w, jg, primal_reg, 0.0, &dual_diagonal);
+  return factor_current_kkt(cache, n, meq, pattern_is_unchanged);
+}
+
+bool factor_kkt_sparse_dual_block(
+    SparseKKTCache& cache, const Eigen::SparseMatrix<double>& w,
+    const Eigen::SparseMatrix<double>& jg, double primal_reg,
+    const Eigen::SparseMatrix<double>& dual_block) {
+  const int n = static_cast<int>(w.rows());
+  const int meq = static_cast<int>(jg.rows());
+  if (dual_block.rows() != meq || dual_block.cols() != meq ||
+      !dual_block.isCompressed()) {
+    cache.factored = false;
+    return false;
+  }
+  for (int k = 0; k < dual_block.nonZeros(); ++k) {
+    if (!std::isfinite(dual_block.valuePtr()[k])) {
+      cache.factored = false;
+      return false;
+    }
+  }
+  const bool pattern_is_unchanged =
+      assemble_augmented_kkt_dual_block_cached(cache, w, jg, primal_reg,
+                                               dual_block);
+  return factor_current_kkt(cache, n, meq, pattern_is_unchanged);
 }
 
 // AUDIT-NAV: KKT 数值解的最终闸门；迭代改进只允许提交能严格降低原系统残差
@@ -267,30 +408,32 @@ bool solve_kkt_sparse(SparseKKTCache& cache,
   if (!cache.factored) {
     return false;
   }
-  Eigen::VectorXd sol;
+  Eigen::VectorXd& sol = cache.solve_solution;
   if (!cache.solver || !cache.solver->solve(rhs, sol) || !sol.allFinite()) {
     return false;
   }
   ++cache.linear_solves;
   const double residual_limit =
-      kKktRefinementTolerance * std::max(1.0, infinity_norm(rhs));
+      cache.refinement_tolerance * std::max(1.0, infinity_norm(rhs));
+  Eigen::VectorXd& residual = cache.solve_residual;
+  Eigen::VectorXd& correction = cache.solve_correction;
+  Eigen::VectorXd& candidate = cache.solve_candidate;
   for (int ref = 0; ref < kKktMaxRefinementSteps; ++ref) {
-    Eigen::VectorXd residual = rhs - cache.kkt_orig * sol;
+    residual = rhs - cache.kkt * sol;
     const double residual_norm = infinity_norm(residual);
     if (!std::isfinite(residual_norm) || residual_norm <= residual_limit) {
       break;
     }
-    Eigen::VectorXd correction;
     if (!cache.solver->solve(residual, correction) || !correction.allFinite()) {
       break;
     }
     ++cache.linear_solves;
-    Eigen::VectorXd candidate = sol + correction;
+    candidate = sol + correction;
     if (!candidate.allFinite()) {
       break;
     }
     const double candidate_residual_norm =
-        infinity_norm(rhs - cache.kkt_orig * candidate);
+        infinity_norm(rhs - cache.kkt * candidate);
     if (!std::isfinite(candidate_residual_norm) ||
         candidate_residual_norm >= residual_norm) {
       break;
@@ -336,28 +479,20 @@ bool solve_kkt_reduced_sparse(const Eigen::SparseMatrix<double>& w,
 
     const Eigen::VectorXd rhs_x = rhs.head(n);
     const Eigen::VectorXd rhs_eq = rhs.tail(meq);
-    Eigen::VectorXd z_rhs;
-    if (!solver->solve(rhs_x, z_rhs) || !z_rhs.allFinite()) {
-      continue;
-    }
-
-    Eigen::MatrixXd z_cols = Eigen::MatrixXd::Zero(n, meq);
-    bool column_failure = false;
+    Eigen::MatrixXd block_rhs = Eigen::MatrixXd::Zero(n, meq + 1);
+    block_rhs.col(0) = rhs_x;
     for (int i = 0; i < meq; ++i) {
-      Eigen::VectorXd col_rhs = Eigen::VectorXd::Zero(n);
       for (Eigen::SparseMatrix<double>::InnerIterator it(jgt, i); it; ++it) {
-        col_rhs[it.row()] = it.value();
+        block_rhs(it.row(), i + 1) = it.value();
       }
-      Eigen::VectorXd z_col;
-      if (!solver->solve(col_rhs, z_col) || !z_col.allFinite()) {
-        column_failure = true;
-        break;
-      }
-      z_cols.col(i) = z_col;
     }
-    if (column_failure) {
+    Eigen::MatrixXd block_solution;
+    if (!solver->solve_many(block_rhs, block_solution) ||
+        !block_solution.allFinite()) {
       continue;
     }
+    const auto z_rhs = block_solution.col(0);
+    const auto z_cols = block_solution.rightCols(meq);
 
     Eigen::MatrixXd schur = Eigen::MatrixXd(jg * z_cols);
     schur.diagonal().array() += reg;
@@ -680,6 +815,17 @@ bool build_reduced_space_certificate(
   return true;
 }
 
+#ifdef HACDCPF_HAVE_MKL_PARDISO
+void ensure_pardiso_augmented_solver(SparseKKTCache& augmented) {
+  if (dynamic_cast<MKLPardisoLDLTSolver*>(augmented.solver.get()) != nullptr)
+    return;
+  augmented.solver = std::make_unique<MKLPardisoLDLTSolver>();
+  augmented.pattern_analyzed = false;
+  augmented.pattern_outer.clear();
+  augmented.pattern_inner.clear();
+}
+#endif
+
 #ifdef HACDCPF_HAVE_MUMPS
 void ensure_mumps_augmented_solver(SparseKKTCache& augmented) {
   if (dynamic_cast<MumpsSolver*>(augmented.solver.get()) != nullptr) return;
@@ -710,9 +856,11 @@ bool factor_with_direct_mumps_inertia(
   bool last_factor_succeeded = false;
 
   auto factor_and_check = [&](double delta_c) {
-    assemble_augmented_kkt_cached(cache.augmented, w, jg, delta_w, delta_c);
+    const bool pattern_is_unchanged = assemble_augmented_kkt_cached(
+        cache.augmented, w, jg, delta_w, delta_c);
     ++status.factorization_attempts;
-    const bool factored = factor_current_kkt(cache.augmented, n, meq);
+    const bool factored = factor_current_kkt(
+        cache.augmented, n, meq, pattern_is_unchanged);
     last_factor_succeeded = factored;
     const int deficiency = cache.augmented.solver->estimated_deficiency();
     const int negative = cache.augmented.solver->negative_eigenvalues();
@@ -783,6 +931,12 @@ bool factor_kkt_inertia_corrected_sparse(
   ReducedSpaceCertificate reduced_certificate;
   if (build_reduced_space_certificate(
           w, jg, settings, cache, reduced_certificate)) {
+#ifdef HACDCPF_HAVE_MKL_PARDISO
+    // The reduced-space construction has already certified full row rank of
+    // Jg, so PARDISO's inertia counts are sufficient here. Rank-deficient
+    // equalities stay on the δ_C repair path below.
+    ensure_pardiso_augmented_solver(cache.augmented);
+#endif
     status.reduced_space_certificate = true;
     status.tangent_dimension = reduced_certificate.dimension;
     status.min_reduced_curvature = reduced_certificate.min_curvature;
@@ -802,8 +956,10 @@ bool factor_kkt_inertia_corrected_sparse(
     bool delta_w_was_zero = (delta_w == 0.0);
     for (; status.factorization_attempts < 8;
          ++status.factorization_attempts) {
-      assemble_augmented_kkt_cached(cache.augmented, w, jg, delta_w, 0.0);
-      const bool factored = factor_current_kkt(cache.augmented, n, meq);
+      const bool pattern_is_unchanged = assemble_augmented_kkt_cached(
+          cache.augmented, w, jg, delta_w, 0.0);
+      const bool factored = factor_current_kkt(
+          cache.augmented, n, meq, pattern_is_unchanged);
       const int factor_negative =
           cache.augmented.solver->negative_eigenvalues();
       const int factor_deficiency =
@@ -870,8 +1026,10 @@ bool factor_kkt_inertia_corrected_sparse(
     // augmented matrix is equivalent to full row rank of Jg. The block LDLT
     // congruence then gives inertia (n, meq, 0) without materializing the dense
     // Schur complement.
-    assemble_augmented_kkt_cached(cache.augmented, w, jg, delta_w, 0.0);
-    if (factor_current_kkt(cache.augmented, n, meq)) {
+    const bool primal_pattern_is_unchanged = assemble_augmented_kkt_cached(
+        cache.augmented, w, jg, delta_w, 0.0);
+    if (factor_current_kkt(cache.augmented, n, meq,
+                           primal_pattern_is_unchanged)) {
       cache.factored = true;
       status.correct = true;
       status.delta_w_used = delta_w;
@@ -886,8 +1044,10 @@ bool factor_kkt_inertia_corrected_sparse(
     // deficient, so the augmented inertia remains (n, meq, 0).
     const double delta_c = settings.delta_c_stripe *
         std::pow(std::max(settings.mu, 1e-20), 0.25);
-    assemble_augmented_kkt_cached(cache.augmented, w, jg, delta_w, delta_c);
-    if (factor_current_kkt(cache.augmented, n, meq)) {
+    const bool dual_pattern_is_unchanged = assemble_augmented_kkt_cached(
+        cache.augmented, w, jg, delta_w, delta_c);
+    if (factor_current_kkt(cache.augmented, n, meq,
+                           dual_pattern_is_unchanged)) {
       cache.factored = true;
       status.correct = true;
       status.n_zero = 0;

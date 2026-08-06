@@ -14,6 +14,7 @@ using mipsolvers::engine::SuperLUSolver;
 #endif
 #ifdef HACDCPF_HAVE_MKL_PARDISO
 using mipsolvers::engine::MKLPardisoSolver;
+using mipsolvers::engine::MKLPardisoLLTSolver;
 using mipsolvers::engine::MKLPardisoLDLTSolver;
 using mipsolvers::engine::MKLPardisoAdaptiveSolver;
 #endif

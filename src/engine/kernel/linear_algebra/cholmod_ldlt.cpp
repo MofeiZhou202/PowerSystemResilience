@@ -181,4 +181,28 @@ int64_t CholmodLDLT::dim() const {
 #endif
 }
 
+double CholmodLDLT::symbolic_flops() const {
+#ifdef MIPSOLVERS_HAVE_CHOLMOD
+  return impl_->L ? impl_->c.fl : 0.0;
+#else
+  return 0.0;
+#endif
+}
+
+double CholmodLDLT::symbolic_nonzeros() const {
+#ifdef MIPSOLVERS_HAVE_CHOLMOD
+  return impl_->L ? impl_->c.lnz : 0.0;
+#else
+  return 0.0;
+#endif
+}
+
+double CholmodLDLT::numeric_rcond() const {
+#ifdef MIPSOLVERS_HAVE_CHOLMOD
+  return impl_->L ? cholmod_l_rcond(impl_->L, &impl_->c) : 0.0;
+#else
+  return 0.0;
+#endif
+}
+
 }  // namespace mipsolvers::engine

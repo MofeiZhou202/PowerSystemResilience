@@ -13,6 +13,16 @@
 
 namespace mipsolvers::engine {
 
+/// Algebraically equivalent Newton systems available to the LP IPM.
+/// Auto compares CHOLMOD symbolic work and fill estimates, then monitors the
+/// accepted Newton directions so a numerically weak normal-equations
+/// trajectory can be restarted from the original initial point.
+enum class IPMNewtonFormulation {
+  Auto,
+  ForceNormal,
+  ForceAugmented,
+};
+
 /// Options for the high-performance Interior Point Method LP solver.
 ///
 /// This is a Mehrotra predictor-corrector IPM designed for general LP:
@@ -49,6 +59,7 @@ struct IPMLPOptions {
   /// never published.  MIPSOLVERS_PRESOLVE* env vars override the effective
   /// config (see highs_lp_presolve_config_from_env).
   bool use_highs_presolve{false};
+  IPMNewtonFormulation newton_formulation{IPMNewtonFormulation::Auto};
 };
 
 /// Original-model KKT audit for a bounded-variable LP solution.
@@ -180,7 +191,8 @@ class NativeIPMLPAdapter final : public SolverAdapter {
   SolveResult solve_lp_impl(const LPModel& prob, const Eigen::VectorXd& x0,
                             int ruiz_rounds,
                             double time_limit_sec,
-                            AugmentedBackendPolicy backend_policy) const;
+                            AugmentedBackendPolicy backend_policy,
+                            IPMNewtonFormulation formulation) const;
 
   IPMLPOptions opt_;
   mutable std::unique_ptr<AccelSparseCache> accel_cache_;

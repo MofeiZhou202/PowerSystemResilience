@@ -29,7 +29,40 @@ bool is_empty_square_system(const Eigen::SparseMatrix<double>& a) {
   return a.rows() == 0 && a.cols() == 0;
 }
 
+template <typename Solver>
+bool solve_many_with_eigen(Solver& solver, bool empty_system,
+                           const Eigen::MatrixXd& rhs, Eigen::MatrixXd& x) {
+  if (empty_system) {
+    if (rhs.rows() != 0) return false;
+    x.resize(0, rhs.cols());
+    return true;
+  }
+  if (rhs.rows() != solver.rows() || !rhs.allFinite()) return false;
+  if (rhs.cols() == 0) {
+    x.resize(rhs.rows(), 0);
+    return true;
+  }
+  x = solver.solve(rhs);
+  return solver.info() == Eigen::Success && x.rows() == rhs.rows() &&
+         x.cols() == rhs.cols() && x.allFinite();
+}
+
 }  // namespace
+
+bool SparseLinearSolver::solve_many(const Eigen::MatrixXd& rhs,
+                                    Eigen::MatrixXd& x) {
+  if (!rhs.allFinite()) return false;
+  x.resize(rhs.rows(), rhs.cols());
+  for (Eigen::Index col = 0; col < rhs.cols(); ++col) {
+    Eigen::VectorXd solution;
+    if (!solve(rhs.col(col), solution) || solution.size() != rhs.rows() ||
+        !solution.allFinite()) {
+      return false;
+    }
+    x.col(col) = solution;
+  }
+  return true;
+}
 
 const char* EigenSparseLUSolver::backend_name() const {
   return "EigenSparseLU";
@@ -65,12 +98,18 @@ bool EigenSparseLUSolver::solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) 
   return solver_.info() == Eigen::Success;
 }
 
+bool EigenSparseLUSolver::solve_many(const Eigen::MatrixXd& rhs,
+                                     Eigen::MatrixXd& x) {
+  return solve_many_with_eigen(solver_, empty_system_, rhs, x);
+}
+
 #ifdef HACDCPF_HAVE_UMFPACK
 class EigenUmfPackSolver::Impl {
  public:
   Eigen::UmfPackLU<Eigen::SparseMatrix<double>> solver;
 };
 
+EigenUmfPackSolver::EigenUmfPackSolver() = default;
 EigenUmfPackSolver::~EigenUmfPackSolver() = default;
 
 const char* EigenUmfPackSolver::backend_name() const {
@@ -108,6 +147,17 @@ bool EigenUmfPackSolver::solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) {
   x = impl_->solver.solve(rhs);
   return impl_->solver.info() == Eigen::Success;
 }
+
+bool EigenUmfPackSolver::solve_many(const Eigen::MatrixXd& rhs,
+                                    Eigen::MatrixXd& x) {
+  if (!impl_ && !empty_system_) return false;
+  if (empty_system_) {
+    if (rhs.rows() != 0) return false;
+    x.resize(0, rhs.cols());
+    return true;
+  }
+  return solve_many_with_eigen(impl_->solver, false, rhs, x);
+}
 #endif
 
 #ifdef HACDCPF_HAVE_KLU
@@ -116,6 +166,7 @@ class EigenKluSolver::Impl {
   Eigen::KLU<Eigen::SparseMatrix<double>> solver;
 };
 
+EigenKluSolver::EigenKluSolver() = default;
 EigenKluSolver::~EigenKluSolver() = default;
 
 const char* EigenKluSolver::backend_name() const {
@@ -153,6 +204,17 @@ bool EigenKluSolver::solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) {
   x = impl_->solver.solve(rhs);
   return impl_->solver.info() == Eigen::Success;
 }
+
+bool EigenKluSolver::solve_many(const Eigen::MatrixXd& rhs,
+                                Eigen::MatrixXd& x) {
+  if (!impl_ && !empty_system_) return false;
+  if (empty_system_) {
+    if (rhs.rows() != 0) return false;
+    x.resize(0, rhs.cols());
+    return true;
+  }
+  return solve_many_with_eigen(impl_->solver, false, rhs, x);
+}
 #endif
 
 #ifdef HACDCPF_HAVE_SUPERLU
@@ -161,6 +223,7 @@ class SuperLUSolver::Impl {
   Eigen::SuperLU<Eigen::SparseMatrix<double>> solver;
 };
 
+SuperLUSolver::SuperLUSolver() = default;
 SuperLUSolver::~SuperLUSolver() = default;
 
 const char* SuperLUSolver::backend_name() const {
@@ -196,6 +259,17 @@ bool SuperLUSolver::solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) {
   if (!impl_) return false;
   x = impl_->solver.solve(rhs);
   return impl_->solver.info() == Eigen::Success;
+}
+
+bool SuperLUSolver::solve_many(const Eigen::MatrixXd& rhs,
+                               Eigen::MatrixXd& x) {
+  if (!impl_ && !empty_system_) return false;
+  if (empty_system_) {
+    if (rhs.rows() != 0) return false;
+    x.resize(0, rhs.cols());
+    return true;
+  }
+  return solve_many_with_eigen(impl_->solver, false, rhs, x);
 }
 #endif
 
@@ -243,8 +317,103 @@ bool MKLPardisoSolver::solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) {
   return impl_->solver.info() == Eigen::Success;
 }
 
+bool MKLPardisoSolver::solve_many(const Eigen::MatrixXd& rhs,
+                                  Eigen::MatrixXd& x) {
+  if (!impl_ && !empty_system_) return false;
+  if (empty_system_) {
+    if (rhs.rows() != 0) return false;
+    x.resize(0, rhs.cols());
+    return true;
+  }
+  return solve_many_with_eigen(impl_->solver, false, rhs, x);
+}
+
 int MKLPardisoSolver::perturbed_pivots() const {
   return impl_ ? static_cast<int>(impl_->solver.pardisoParameterArray()[13])
+               : -1;
+}
+
+std::int64_t MKLPardisoSolver::factor_nonzeros() const {
+  return impl_ ? static_cast<std::int64_t>(
+                     impl_->solver.pardisoParameterArray()[17])
+               : -1;
+}
+
+std::int64_t MKLPardisoSolver::factor_work() const {
+  return impl_ ? static_cast<std::int64_t>(
+                     impl_->solver.pardisoParameterArray()[18])
+               : -1;
+}
+
+class MKLPardisoLLTSolver::Impl {
+ public:
+  Eigen::PardisoLLT<Eigen::SparseMatrix<double>, Eigen::Lower> solver;
+};
+
+MKLPardisoLLTSolver::MKLPardisoLLTSolver() = default;
+MKLPardisoLLTSolver::~MKLPardisoLLTSolver() = default;
+
+const char* MKLPardisoLLTSolver::backend_name() const {
+  return "Intel-MKL-PARDISO-LLT(Eigen)";
+}
+
+void MKLPardisoLLTSolver::analyze_pattern(
+    const Eigen::SparseMatrix<double>& a) {
+  empty_system_ = is_empty_square_system(a);
+  if (empty_system_) return;
+  if (!impl_) impl_ = std::make_unique<Impl>();
+  impl_->solver.analyzePattern(a);
+}
+
+bool MKLPardisoLLTSolver::factorize(
+    const Eigen::SparseMatrix<double>& a) {
+  empty_system_ = is_empty_square_system(a);
+  if (empty_system_) return true;
+  if (!impl_) {
+    impl_ = std::make_unique<Impl>();
+    impl_->solver.analyzePattern(a);
+  }
+  impl_->solver.factorize(a);
+  return impl_->solver.info() == Eigen::Success;
+}
+
+bool MKLPardisoLLTSolver::solve(const Eigen::VectorXd& rhs,
+                                Eigen::VectorXd& x) {
+  if (empty_system_) {
+    if (rhs.size() != 0) return false;
+    x.resize(0);
+    return true;
+  }
+  if (!impl_) return false;
+  x = impl_->solver.solve(rhs);
+  return impl_->solver.info() == Eigen::Success && x.allFinite();
+}
+
+bool MKLPardisoLLTSolver::solve_many(const Eigen::MatrixXd& rhs,
+                                     Eigen::MatrixXd& x) {
+  if (!impl_ && !empty_system_) return false;
+  if (empty_system_) {
+    if (rhs.rows() != 0) return false;
+    x.resize(0, rhs.cols());
+    return true;
+  }
+  return solve_many_with_eigen(impl_->solver, false, rhs, x);
+}
+
+int MKLPardisoLLTSolver::perturbed_pivots() const {
+  return impl_ ? static_cast<int>(impl_->solver.pardisoParameterArray()[13])
+               : -1;
+}
+
+std::int64_t MKLPardisoLLTSolver::factor_nonzeros() const {
+  return impl_ ? static_cast<std::int64_t>(
+                     impl_->solver.pardisoParameterArray()[17])
+               : -1;
+}
+
+std::int64_t MKLPardisoLLTSolver::factor_work() const {
+  return impl_ ? static_cast<std::int64_t>(
+                     impl_->solver.pardisoParameterArray()[18])
                : -1;
 }
 
@@ -292,9 +461,61 @@ bool MKLPardisoLDLTSolver::solve(const Eigen::VectorXd& rhs,
   return impl_->solver.info() == Eigen::Success && x.allFinite();
 }
 
+bool MKLPardisoLDLTSolver::solve_many(const Eigen::MatrixXd& rhs,
+                                      Eigen::MatrixXd& x) {
+  if (!impl_ && !empty_system_) return false;
+  if (empty_system_) {
+    if (rhs.rows() != 0) return false;
+    x.resize(0, rhs.cols());
+    return true;
+  }
+  return solve_many_with_eigen(impl_->solver, false, rhs, x);
+}
+
 int MKLPardisoLDLTSolver::perturbed_pivots() const {
   return impl_ ? static_cast<int>(impl_->solver.pardisoParameterArray()[13])
                : -1;
+}
+
+std::int64_t MKLPardisoLDLTSolver::factor_nonzeros() const {
+  return impl_ ? static_cast<std::int64_t>(
+                     impl_->solver.pardisoParameterArray()[17])
+               : -1;
+}
+
+std::int64_t MKLPardisoLDLTSolver::factor_work() const {
+  return impl_ ? static_cast<std::int64_t>(
+                     impl_->solver.pardisoParameterArray()[18])
+               : -1;
+}
+
+int MKLPardisoLDLTSolver::negative_eigenvalues() const {
+  if (empty_system_) return 0;
+  // PARDISO IPARM(23), zero-based slot 22: negative eigenvalues for mtype=-2.
+  return impl_ ? static_cast<int>(
+                     impl_->solver.pardisoParameterArray()[22])
+               : -1;
+}
+
+int MKLPardisoLDLTSolver::estimated_deficiency() const {
+  if (empty_system_) return 0;
+  if (!impl_) return -1;
+  const auto& iparm = impl_->solver.pardisoParameterArray();
+  // IPARM(22)/(23) are the positive/negative inertia counts. Any missing
+  // pivots after a successful symmetric-indefinite factor are numerical zeros.
+  const int positive = static_cast<int>(iparm[21]);
+  const int negative = static_cast<int>(iparm[22]);
+  const int missing_inertia = std::max(
+      0, static_cast<int>(impl_->solver.rows()) - positive - negative);
+  const int perturbed = static_cast<int>(iparm[13]);
+  if (std::getenv("MIPSOLVERS_IPM_VERBOSE") != nullptr) {
+    std::fprintf(stderr,
+                 "PARDISO LDLT inertia: dim=%lld positive=%d negative=%d "
+                 "missing=%d perturbed=%d\n",
+                 static_cast<long long>(impl_->solver.rows()), positive,
+                 negative, missing_inertia, perturbed);
+  }
+  return missing_inertia;
 }
 
 class MKLPardisoAdaptiveSolver::Impl {
@@ -369,14 +590,16 @@ bool MKLPardisoAdaptiveSolver::factorize(
     return impl_->lu_factorized;
   }
 
-  // LDLT is the structure-preserving method, so evaluate it first. The timing
-  // comparison includes only numeric factorization; symbolic analysis is a
-  // one-time cost shared by all barrier iterations.
+  // LDLT is the structure-preserving method, so evaluate it first. LU remains
+  // lazy until solve() observes a failed/backward-unstable or perturbed LDLT
+  // factor. This avoids paying for two numeric factors when LDLT already gives
+  // a certified zero-perturbation solve.
   impl_->ldlt_factorized =
       timed_factor(impl_->ldlt, impl_->ldlt_factor_sec);
-  impl_->lu_factorized = timed_factor(impl_->lu, impl_->lu_factor_sec);
   impl_->matrix = a;
-  return impl_->ldlt_factorized || impl_->lu_factorized;
+  if (impl_->ldlt_factorized) return true;
+  impl_->lu_factorized = timed_factor(impl_->lu, impl_->lu_factor_sec);
+  return impl_->lu_factorized;
 }
 
 bool MKLPardisoAdaptiveSolver::solve(const Eigen::VectorXd& rhs,
@@ -404,12 +627,8 @@ bool MKLPardisoAdaptiveSolver::solve(const Eigen::VectorXd& rhs,
                   .count();
     return ok && solution.allFinite();
   };
-  const bool ldlt_ok =
-      impl_->ldlt_factorized &&
-      timed_solve(impl_->ldlt, x_ldlt, ldlt_solve_sec);
-  const bool lu_ok =
-      impl_->lu_factorized && timed_solve(impl_->lu, x_lu, lu_solve_sec);
-  if (!ldlt_ok && !lu_ok) return false;
+  const bool ldlt_ok = impl_->ldlt_factorized &&
+                       timed_solve(impl_->ldlt, x_ldlt, ldlt_solve_sec);
 
   std::vector<double> row_sums(static_cast<std::size_t>(impl_->matrix.rows()),
                                0.0);
@@ -432,12 +651,35 @@ bool MKLPardisoAdaptiveSolver::solve(const Eigen::VectorXd& rhs,
   };
   const double ldlt_error = ldlt_ok ? backward_error(x_ldlt)
                                     : std::numeric_limits<double>::infinity();
-  const double lu_error = lu_ok ? backward_error(x_lu)
-                                : std::numeric_limits<double>::infinity();
   const double stable_limit = std::sqrt(std::numeric_limits<double>::epsilon());
   const bool ldlt_stable = ldlt_ok && ldlt_error <= stable_limit;
-  const bool lu_stable = lu_ok && lu_error <= stable_limit;
   const int ldlt_perturbed = impl_->ldlt.perturbed_pivots();
+
+  if (ldlt_stable && ldlt_perturbed == 0) {
+    impl_->selected = Impl::Backend::LDLT;
+    x = std::move(x_ldlt);
+    if (std::getenv("MIPSOLVERS_IPM_VERBOSE") != nullptr) {
+      std::fprintf(stderr,
+                   "PARDISO portfolio: ldlt_factor=%.6g ldlt_solve=%.6g "
+                   "ldlt_error=%.3e ldlt_perturbed=0 lu=skipped\n",
+                   impl_->ldlt_factor_sec, ldlt_solve_sec, ldlt_error);
+    }
+    return x.allFinite();
+  }
+
+  if (!impl_->lu_factorized) {
+    const auto start = std::chrono::steady_clock::now();
+    impl_->lu_factorized = impl_->lu.factorize(impl_->matrix);
+    impl_->lu_factor_sec =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+            .count();
+  }
+  const bool lu_ok = impl_->lu_factorized &&
+                     timed_solve(impl_->lu, x_lu, lu_solve_sec);
+  if (!ldlt_ok && !lu_ok) return false;
+  const double lu_error = lu_ok ? backward_error(x_lu)
+                                : std::numeric_limits<double>::infinity();
+  const bool lu_stable = lu_ok && lu_error <= stable_limit;
   const int lu_perturbed = impl_->lu.perturbed_pivots();
 
   if (std::getenv("MIPSOLVERS_IPM_VERBOSE") != nullptr) {
@@ -469,6 +711,27 @@ bool MKLPardisoAdaptiveSolver::solve(const Eigen::VectorXd& rhs,
   x = impl_->selected == Impl::Backend::LDLT ? std::move(x_ldlt)
                                               : std::move(x_lu);
   return x.allFinite();
+}
+
+int MKLPardisoAdaptiveSolver::perturbed_pivots() const {
+  if (!impl_) return -1;
+  if (impl_->selected == Impl::Backend::LDLT)
+    return impl_->ldlt.perturbed_pivots();
+  if (impl_->selected == Impl::Backend::LU)
+    return impl_->lu.perturbed_pivots();
+  return -1;
+}
+
+std::int64_t MKLPardisoAdaptiveSolver::factor_nonzeros() const {
+  if (!impl_) return -1;
+  return impl_->selected == Impl::Backend::LU ? impl_->lu.factor_nonzeros()
+                                               : impl_->ldlt.factor_nonzeros();
+}
+
+std::int64_t MKLPardisoAdaptiveSolver::factor_work() const {
+  if (!impl_) return -1;
+  return impl_->selected == Impl::Backend::LU ? impl_->lu.factor_work()
+                                               : impl_->ldlt.factor_work();
 }
 
 #endif
@@ -681,6 +944,49 @@ bool MumpsSolver::solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) {
       1.0, rhs.lpNorm<Eigen::Infinity>() +
                p.matrix_inf_norm * x.lpNorm<Eigen::Infinity>());
   return residual.lpNorm<Eigen::Infinity>() <= 1e-9 * scale;
+}
+
+bool MumpsSolver::solve_many(const Eigen::MatrixXd& rhs, Eigen::MatrixXd& x) {
+  std::lock_guard<std::recursive_mutex> _lk(g_mumps_api_mutex);
+  if (empty_system_) {
+    if (rhs.rows() != 0) return false;
+    x.resize(0, rhs.cols());
+    return true;
+  }
+  if (!impl_ || !impl_->analyzed || !impl_->factorized) return false;
+  auto& p = *impl_;
+  if (rhs.rows() != p.n ||
+      rhs.cols() > std::numeric_limits<MUMPS_INT>::max() ||
+      !rhs.allFinite()) {
+    return false;
+  }
+  if (rhs.cols() == 0) {
+    x.resize(p.n, 0);
+    return true;
+  }
+
+  p.rhs_buf.assign(rhs.data(), rhs.data() + rhs.size());
+  p.par.rhs = p.rhs_buf.data();
+  p.par.nrhs = static_cast<MUMPS_INT>(rhs.cols());
+  p.par.lrhs = p.n;
+  p.par.job = 3;  // JOB_SOLVE, all column-major right-hand sides at once
+  dmumps_c(&p.par);
+  if (p.par.infog[0] != 0) return false;
+  x = Eigen::Map<const Eigen::MatrixXd>(p.rhs_buf.data(), p.n, rhs.cols());
+  if (!x.allFinite()) return false;
+
+  Eigen::MatrixXd residual = -rhs;
+  for (MUMPS_INT entry = 0; entry < p.nnz_lower; ++entry) {
+    const int row = p.irn[static_cast<size_t>(entry)] - 1;
+    const int col = p.jcn[static_cast<size_t>(entry)] - 1;
+    const double value = p.a_vals[static_cast<size_t>(entry)];
+    residual.row(row) += value * x.row(col);
+    if (row != col) residual.row(col) += value * x.row(row);
+  }
+  const double scale = std::max(
+      1.0, rhs.cwiseAbs().maxCoeff() +
+               p.matrix_inf_norm * x.cwiseAbs().maxCoeff());
+  return residual.cwiseAbs().maxCoeff() <= 1e-9 * scale;
 }
 
 int MumpsSolver::negative_eigenvalues() const {

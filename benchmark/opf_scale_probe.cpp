@@ -29,6 +29,7 @@ int main(int argc, char** argv) {
   const std::string mode = (argc > 2) ? argv[2] : "both";
   bool verbose = false;
   bool least_square_init_duals = false;
+  NewtonFormulation formulation = NewtonFormulation::Auto;
   int repetitions = 1;
   for (int arg = 3; arg < argc; ++arg) {
     const std::string value = argv[arg];
@@ -42,6 +43,13 @@ int main(int argc, char** argv) {
     }
     if (value == "no-ls-duals") {
       least_square_init_duals = false;
+      continue;
+    }
+    if (value == "auto" || value == "condensed" || value == "augmented") {
+      formulation = value == "condensed"
+          ? NewtonFormulation::Condensed
+          : (value == "augmented" ? NewtonFormulation::Augmented
+                                    : NewtonFormulation::Auto);
       continue;
     }
     char* end = nullptr;
@@ -187,6 +195,7 @@ int main(int argc, char** argv) {
   opt.scale_problem = false;
   opt.allow_external_fallback = false;
   opt.least_square_init_duals = least_square_init_duals;
+  opt.newton_formulation = formulation;
 
   nlp.solver_options.max_iterations = opt.max_iter;
   nlp.solver_options.tolerance = 1e-6;
@@ -199,27 +208,39 @@ int main(int argc, char** argv) {
   nlp.solver_options.acceptable_complementarity_tolerance = 1e-6;
 
   const auto report = [&](const char* requested, int run, int order_position,
-                          const SolveResult& res, double elapsed_ms) {
+                          const SolveResult& res, double elapsed_ms,
+                          const IPMDetail* detail) {
     std::printf(
         "solver=%s actual=%s run=%d order_pos=%d ls_duals=%d buses=%d n=%d "
         "meq=%d miq=%d success=%d "
         "status=\"%s\" iters=%d obj=%.12g primal=%.3e dual=%.3e "
-        "compl=%.3e total_ms=%.3f\n",
+        "compl=%.3e total_ms=%.3f formulation=%s condensed_flops=%.0f "
+        "augmented_flops=%.0f condensed_lnz=%.0f augmented_lnz=%.0f "
+        "symbolic=%d factors=%d solves=%d\n",
         requested, res.stats.solver_name.c_str(), run, order_position,
         static_cast<int>(least_square_init_duals), nb, n, 2 * nb, ne,
         static_cast<int>(res.stats.success), res.stats.status.c_str(),
         res.stats.iterations, res.stats.objective, res.stats.primal_feas,
-        res.stats.dual_feas, res.stats.complementarity, elapsed_ms);
+        res.stats.dual_feas, res.stats.complementarity, elapsed_ms,
+        detail ? detail->newton_formulation.c_str() : "external",
+        detail ? detail->condensed_symbolic_flops : 0.0,
+        detail ? detail->augmented_symbolic_flops : 0.0,
+        detail ? detail->condensed_symbolic_nonzeros : 0.0,
+        detail ? detail->augmented_symbolic_nonzeros : 0.0,
+        detail ? detail->symbolic_analyses : 0,
+        detail ? detail->numeric_factorizations : 0,
+        detail ? detail->linear_solves : 0);
   };
 
   bool all_requested_succeeded = true;
   const auto run_native = [&](int run, int order_position) {
     NativeIPMAdapter solver(opt);
     const auto t0 = std::chrono::steady_clock::now();
-    const SolveResult res = solver.solve_nlp(nlp);
+    const auto solved = solver.solve_nlp_detail(nlp);
+    const SolveResult& res = solved.first;
     const double ms = std::chrono::duration<double, std::milli>(
                           std::chrono::steady_clock::now() - t0).count();
-    report("native", run, order_position, res, ms);
+    report("native", run, order_position, res, ms, &solved.second);
     all_requested_succeeded = all_requested_succeeded && res.stats.success;
   };
   const auto run_ipopt = [&](int run, int order_position) {
@@ -228,7 +249,7 @@ int main(int argc, char** argv) {
     const SolveResult res = solver.solve_nlp(nlp);
     const double ms = std::chrono::duration<double, std::milli>(
                           std::chrono::steady_clock::now() - t0).count();
-    report("ipopt", run, order_position, res, ms);
+    report("ipopt", run, order_position, res, ms, nullptr);
     all_requested_succeeded = all_requested_succeeded && res.stats.success;
   };
 

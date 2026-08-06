@@ -530,9 +530,15 @@ $$
 | $B$ 装配：半定块 | $\min\{O(n_b p_b^3 + n_b^2\bar k_b),\ O(n_b^2\bar k_b^2)\}$ | 自适应稠密合同 / 稀疏解析核，$\bar k_b$ 为每列块内平均非零数 |
 | KKT 分解 | CHOLMOD 超节点 LLᵀ（SPD）或 MUMPS LDLᵀ（不定），问题相关 | 符号分解摊还，数值分解每迭代 |
 | max_step | SOC $O(k)$；半定每块对角合同 + 特征分解 $O(p_b^3)$ | NT 空间的 $\lambda$ 为对角阵，省去 Cholesky 与三角求解；每迭代调用 4 次 |
-| 迭代精化 | 每次 1 回代 + 数次 SpMV | 仅 q/s 块存在时 |
+| 迭代精化 | 每次 1 回代 + 数次 SpMV | q/s 块存在且同坐标 KKT 后向误差超过 inexact-Newton forcing gate 时 |
 
 **说明。** 稀疏解析核降低 Schur 数值装配常数；弦分解进一步改变锥块和 KKT 图结构，使聚合图最大团较小的大阶 SDP 按团规模计算。无法通过收益门控的稠密 SDP 仍产生 $O(n_b^2)$ Schur 元素。`conic_benchmark --suite sparse_lp` 的 $10^6$ 对角 KKT 用例验证线性内存路径，`--suite chordal_sdp` 验证大阶稀疏 SDP 的团解耦路径。
+
+迭代精化不再按 `refinement` 固定执行；该选项现在是最多校正次数。求解器在
+NT 缩放的同一 3x3 方程坐标中计算分块后向误差，只在其超过 `0.1` 的
+inexact-Newton 收缩充分条件时回代，且拒绝未严格降低误差的校正。结果字段
+`kkt_linear_solves`、`kkt_refinements` 和 `max_*_kkt_backward_error` 使这项决策
+可审计。
 
 ---
 

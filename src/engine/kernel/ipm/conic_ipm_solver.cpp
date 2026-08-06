@@ -604,6 +604,8 @@ struct KktBackend {
   CholmodLDLT chol;
   bool use_mumps = false;
   bool available = false;
+  int factorizations = 0;
+  int linear_solves = 0;
 #if defined(MIPSOLVERS_HAVE_MUMPS)
   std::unique_ptr<MumpsSolver> mumps;
   std::unique_ptr<Eigen::Map<Eigen::SparseMatrix<double>>> kmap;
@@ -653,11 +655,18 @@ struct KktBackend {
         sys.apply_delta(delta);
         ok = chol.factorize(sys.values.data());
       }
-      if (ok) return true;
-      return switch_to_mumps();  // rest of the solve uses MUMPS
+      if (ok) {
+        ++factorizations;
+        return true;
+      }
+      const bool mumps_ok = switch_to_mumps();  // rest of solve uses MUMPS
+      if (mumps_ok) ++factorizations;
+      return mumps_ok;
     }
 #if defined(MIPSOLVERS_HAVE_MUMPS)
-    return mumps->factorize(*kmap);
+    const bool ok = mumps->factorize(*kmap);
+    if (ok) ++factorizations;
+    return ok;
 #else
     return false;
 #endif
@@ -666,9 +675,22 @@ struct KktBackend {
   bool solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& out) {
     out.resize(sys.dim);
 #if defined(MIPSOLVERS_HAVE_MUMPS)
-    if (use_mumps) return mumps->solve(rhs, out);
+    if (use_mumps) {
+      const bool ok = mumps->solve(rhs, out);
+      if (ok) ++linear_solves;
+      return ok;
+    }
 #endif
-    return chol.solve(rhs.data(), out.data());
+    const bool ok = chol.solve(rhs.data(), out.data());
+    if (ok) ++linear_solves;
+    return ok;
+  }
+
+  [[nodiscard]] const char* backend_name() const {
+#if defined(MIPSOLVERS_HAVE_MUMPS)
+    if (use_mumps && mumps) return mumps->backend_name();
+#endif
+    return "SuiteSparse-CHOLMOD";
   }
 };
 
@@ -908,6 +930,18 @@ ConicIPMResult ConicIPMSolver::solve(const ConicModel& model) const {
             std::max(rx.norm() / norm_b1, rs.norm() / norm_h1);
         res.dual_infeasibility = rc.norm() / norm_c1;
         res.iterations = inner.iterations;
+        res.linear_solver_backend = inner.linear_solver_backend;
+        res.kkt_dimension = inner.kkt_dimension;
+        res.kkt_nonzeros = inner.kkt_nonzeros;
+        res.kkt_symbolic_flops = inner.kkt_symbolic_flops;
+        res.kkt_symbolic_nonzeros = inner.kkt_symbolic_nonzeros;
+        res.kkt_factorizations = inner.kkt_factorizations;
+        res.kkt_linear_solves = inner.kkt_linear_solves;
+        res.kkt_refinements = inner.kkt_refinements;
+        res.max_initial_kkt_backward_error =
+            inner.max_initial_kkt_backward_error;
+        res.max_final_kkt_backward_error =
+            inner.max_final_kkt_backward_error;
         res.chordal_decomposition_used = true;
         res.chordal_clique_count = chordal_map.clique_count;
         res.chordal_max_clique_order = chordal_map.max_clique_order;
@@ -974,6 +1008,9 @@ ConicIPMResult ConicIPMSolver::solve(const ConicModel& model) const {
   double sigma = 1.0;
   double alpha_p = 0.0;
   double alpha_d = 0.0;
+  int accepted_kkt_refinements = 0;
+  double max_initial_kkt_backward_error = 0.0;
+  double max_final_kkt_backward_error = 0.0;
 
   for (int iter = 0;; ++iter) {
     // ── Residuals, gap, termination ──────────────────────────────────────
@@ -1074,8 +1111,40 @@ ConicIPMResult ConicIPMSolver::solve(const ConicModel& model) const {
       dz = scaled_h_inv(scaling, gdx - t);
       ds = -r_s - gdx;
       if (refine) {
-        // Iterative refinement on the 3x3 KKT residual.
-        for (int ref = 0; ref < options_.refinement; ++ref) {
+        // Dembo-Eisenstat-Steihaug inexact-Newton certificate in the same
+        // scaled coordinates as the 3x3 direction equations.  This avoids a
+        // mandatory extra back-solve when the direct factor already gives a
+        // contraction-quality direction.
+        auto inf = [](const Eigen::VectorXd& v) {
+          return v.size() == 0 ? 0.0 : v.cwiseAbs().maxCoeff();
+        };
+        auto backward_error = [&]() {
+          Eigen::VectorXd hz(dz.size());
+          scaling.apply_h(dz, hz);
+          const Eigen::VectorXd atdy = model.A.transpose() * dy;
+          const Eigen::VectorXd gtdz = model.G.transpose() * dz;
+          const Eigen::VectorXd adx = model.A * dx;
+          const Eigen::VectorXd gdx_now = model.G * dx;
+          const Eigen::VectorXd wr = scaled_w(scaling, r_l);
+          const Eigen::VectorXd f1 = atdy + gtdz + r_c;
+          const Eigen::VectorXd f2 = adx + r_x;
+          const Eigen::VectorXd f3 = gdx_now - hz + r_s + wr;
+          const double eta1 = inf(f1) /
+              (1.0 + inf(atdy) + inf(gtdz) + inf(r_c));
+          const double eta2 = inf(f2) /
+              (1.0 + inf(adx) + inf(r_x));
+          const double eta3 = inf(f3) /
+              (1.0 + inf(gdx_now) + inf(hz) + inf(r_s) + inf(wr));
+          return std::max({eta1, eta2, eta3});
+        };
+
+        constexpr double kNewtonForcingEta = 0.1;
+        double eta = backward_error();
+        max_initial_kkt_backward_error =
+            std::max(max_initial_kkt_backward_error, eta);
+        for (int ref = 0; ref < options_.refinement &&
+                          std::isfinite(eta) && eta > kNewtonForcingEta;
+             ++ref) {
           Eigen::VectorXd hz(dz.size());
           scaling.apply_h(dz, hz);
           const Eigen::VectorXd f1 =
@@ -1091,12 +1160,27 @@ ConicIPMResult ConicIPMSolver::solve(const ConicModel& model) const {
           Eigen::VectorXd sol3;
           if (!kkt.solve(rhs3, sol3)) return false;
           const Eigen::VectorXd cdx = sol3.head(n);
-          dx += cdx;
-          dy += sol3.tail(meq);
+          const Eigen::VectorXd cdy = sol3.tail(meq);
           const Eigen::VectorXd gcdx = model.G * cdx;
-          dz += scaled_h_inv(scaling, gcdx - t3);
-          ds -= gcdx;  // keep G dx + ds = -rs exact
+          const Eigen::VectorXd cdz = scaled_h_inv(scaling, gcdx - t3);
+          const Eigen::VectorXd cds = -gcdx;
+          dx += cdx;
+          dy += cdy;
+          dz += cdz;
+          ds += cds;  // keep G dx + ds = -rs exact
+          const double improved_eta = backward_error();
+          if (!std::isfinite(improved_eta) || improved_eta >= eta) {
+            dx -= cdx;
+            dy -= cdy;
+            dz -= cdz;
+            ds -= cds;
+            break;
+          }
+          eta = improved_eta;
+          ++accepted_kkt_refinements;
         }
+        max_final_kkt_backward_error =
+            std::max(max_final_kkt_backward_error, eta);
       }
       return true;
     };
@@ -1154,6 +1238,16 @@ ConicIPMResult ConicIPMSolver::solve(const ConicModel& model) const {
   res.y = std::move(y);
   res.s = std::move(s);
   res.z = std::move(z);
+  res.linear_solver_backend = kkt.backend_name();
+  res.kkt_dimension = kkt.sys.dim;
+  res.kkt_nonzeros = static_cast<int>(kkt.sys.inner.size());
+  res.kkt_symbolic_flops = kkt.chol.symbolic_flops();
+  res.kkt_symbolic_nonzeros = kkt.chol.symbolic_nonzeros();
+  res.kkt_factorizations = kkt.factorizations;
+  res.kkt_linear_solves = kkt.linear_solves;
+  res.kkt_refinements = accepted_kkt_refinements;
+  res.max_initial_kkt_backward_error = max_initial_kkt_backward_error;
+  res.max_final_kkt_backward_error = max_final_kkt_backward_error;
   res.runtime_sec = std::chrono::duration<double>(t1 - t0).count();
   return res;
 }

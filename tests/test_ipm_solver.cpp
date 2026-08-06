@@ -717,6 +717,42 @@ TEST_CASE("Scaled filter IPM reports an unscaled self-consistent KKT result",
         Approx(returned_complementarity).margin(1e-12));
 }
 
+TEST_CASE("Reduced sparse KKT block solve matches the regularized system",
+          "[ipm][kkt][multi-rhs]") {
+  Eigen::SparseMatrix<double> w(4, 4);
+  w.insert(0, 0) = 5.0; w.insert(0, 1) = -1.0;
+  w.insert(1, 0) = -1.0; w.insert(1, 1) = 4.0;
+  w.insert(1, 2) = 0.5; w.insert(2, 1) = 0.5;
+  w.insert(2, 2) = 3.0; w.insert(2, 3) = -0.25;
+  w.insert(3, 2) = -0.25; w.insert(3, 3) = 2.0;
+  w.makeCompressed();
+
+  Eigen::SparseMatrix<double> jg(2, 4);
+  jg.insert(0, 0) = 1.0; jg.insert(0, 2) = -0.5;
+  jg.insert(1, 1) = 1.0; jg.insert(1, 3) = 0.75;
+  jg.makeCompressed();
+
+  Eigen::VectorXd rhs(6);
+  rhs << 1.0, -2.0, 0.5, 3.0, -0.25, 1.5;
+  Eigen::VectorXd dx, dlambda;
+  constexpr double reg = 1e-8;
+  REQUIRE(solve_kkt_reduced_sparse(w, jg, rhs, dx, dlambda,
+                                   2, reg, reg));
+
+  Eigen::MatrixXd kkt = Eigen::MatrixXd::Zero(6, 6);
+  kkt.topLeftCorner(4, 4) = Eigen::MatrixXd(w);
+  kkt.topLeftCorner(4, 4).diagonal().array() += reg;
+  kkt.topRightCorner(4, 2) = Eigen::MatrixXd(jg.transpose());
+  kkt.bottomLeftCorner(2, 4) = Eigen::MatrixXd(jg);
+  kkt.bottomRightCorner(2, 2).diagonal().array() -= reg;
+  Eigen::VectorXd solution(6);
+  solution << dx, dlambda;
+  CHECK((kkt * solution - rhs).lpNorm<Eigen::Infinity>() < 1e-10);
+
+  CHECK_FALSE(solve_kkt_reduced_sparse(w, jg, rhs, dx, dlambda,
+                                       1, reg, reg));
+}
+
 TEST_CASE("Sparse augmented KKT reuses one factor for multiple right-hand sides",
           "[ipm][kkt]") {
   Eigen::SparseMatrix<double> w(3, 3);
@@ -764,10 +800,16 @@ TEST_CASE("Sparse augmented KKT reuses one factor for multiple right-hand sides"
   Eigen::VectorXd rhs1(5);
   rhs1 << 1.0, -2.0, 0.5, 0.25, -0.75;
   check_rhs(rhs1);
+  const double* const solution_workspace =
+      cache.augmented.solve_solution.data();
+  const double* const residual_workspace =
+      cache.augmented.solve_residual.data();
   Eigen::VectorXd rhs2(5);
   rhs2 << -0.5, 1.5, 2.0, -1.0, 0.5;
   check_rhs(rhs2);
 
+  CHECK(cache.augmented.solve_solution.data() == solution_workspace);
+  CHECK(cache.augmented.solve_residual.data() == residual_workspace);
   CHECK(cache.augmented.numeric_factorizations == 1);
   CHECK(cache.augmented.symbolic_analyses == 1);
   CHECK(cache.augmented.linear_solves >= 2);
