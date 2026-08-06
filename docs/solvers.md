@@ -230,12 +230,20 @@ y^{k+1} = projection_row_dual(y^k + sigma A(2x^{k+1}-x^k))
 
 主流程：预处理/变量变换 -> Ruiz 缩放 -> 严格内部初值 -> 计算原始、对偶和
 互补残差 -> 组装 normal equation 或增广系统 -> 仿射方向 -> 估计
-`mu_aff` 与中心参数 -> 校正方向 -> fraction-to-boundary 步长 -> 更新 ->
-反缩放和原问题残差审计。
+`mu_aff` 与标准 Mehrotra 中心参数 -> 校正方向 -> 由试探互补度决定的动态
+primal/dual 缓冲步长 -> Gondzio 校正 -> 更新 -> 相对候选检查 -> 反缩放并在
+原模型上审计 primal、dual stationarity 和 relative gap。缩放条件只产生候选，
+不能绕过原模型 KKT 审计发布 `Optimal`。
+`IPMLPOptions::centrality_step_control=false` 只用于复现旧的固定 `0.9995`
+步长和 `sigma<=0.5` A/B，不建议生产使用。
 
 线性代数路径按结构选择带状 Cholesky、CHOLMOD、Eigen LDLT 或增广系统后端，
 并在固定模式上复用符号分析。`ipm_lp_solver_cached.cpp` 专门处理 B&C 重复节点：
 只有上下界/目标改变时复用结构，事务签名不匹配则退回完整求解。
+
+该求解器当前仍没有 HSD 状态机，不能从普通迭代失败推出不可行或无界。现代
+IPM 文献、当前差距、P1 全量 A/B 和后续 HSD/IP-PMM 验收见
+[Native LP 内点法理论设计](native_ipm_design.md)。
 
 ### 5.5 `NativeLCQP`
 
@@ -434,4 +442,3 @@ MILP、预处理、数值稳定性、NETLIB、SCUC、AML 和 L2O。实际构建�
 - 原生 B&C 依赖 HiGHS 库编译其主要实现；MINLP 非凸全局性没有保证。
 - 性能结论强依赖编译器、BLAS、稀疏后端、线程和数据集。本文不引用已删除的
   历史快照；只有 `testing.md` 中带复现环境的数据可作为当前证据。
-

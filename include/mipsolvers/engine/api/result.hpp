@@ -1,5 +1,6 @@
 #pragma once
 
+#include <limits>
 #include <string>
 
 #include <Eigen/Core>
@@ -19,6 +20,10 @@ struct Stats {
   double unscaled_primal_feas{0.0};
   double unscaled_dual_feas{0.0};
   double unscaled_complementarity{0.0};
+  double relative_primal_residual{std::numeric_limits<double>::quiet_NaN()};
+  double relative_dual_residual{std::numeric_limits<double>::quiet_NaN()};
+  double relative_gap{std::numeric_limits<double>::quiet_NaN()};
+  double dual_objective{std::numeric_limits<double>::quiet_NaN()};
   double mip_gap{0.0};
   double runtime_sec{0.0};
   std::string status;

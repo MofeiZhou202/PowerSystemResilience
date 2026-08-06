@@ -419,7 +419,8 @@ SolveResult NativeIPMLPAdapter::solve_structure_aware_node_lp(
     node_lp.vars[static_cast<std::size_t>(j)].lb = node_lb[j];
     node_lp.vars[static_cast<std::size_t>(j)].ub = node_ub[j];
   }
-  return solve_lp_impl(node_lp, x0, opt_.ruiz_rounds);
+  return solve_lp_impl(node_lp, x0, opt_.ruiz_rounds, -1.0,
+                       AugmentedBackendPolicy::StructurePreserving);
 }
 
 SolveResult NativeIPMLPAdapter::solve_cached_node_lp(
@@ -844,6 +845,43 @@ SolveResult NativeIPMLPAdapter::solve_cached_node_lp(
     }
   };
 
+  double scaled_rhs_norm = 0.0;
+  double scaled_cost_norm = 0.0;
+  for (double value : b_vec)
+    scaled_rhs_norm = std::max(scaled_rhs_norm, std::abs(value));
+  for (double value : c_vec)
+    scaled_cost_norm = std::max(scaled_cost_norm, std::abs(value));
+  const double publication_primal_tol =
+      std::max(1e-10, 10.0 * std::max(0.0, opt_.tol_primal));
+  const double publication_dual_tol =
+      std::max(1e-10, 10.0 * std::max(0.0, opt_.tol_dual));
+  const double publication_gap_tol =
+      std::max(1e-10, 10.0 * std::max(0.0, opt_.tol_gap));
+  auto audit_current_iterate = [&]() {
+    Eigen::VectorXd x_original(n_orig);
+    Eigen::VectorXd row_duals_min(m);
+    Eigen::VectorXd bound_duals_lb(n_orig);
+    Eigen::VectorXd bound_duals_ub(n_orig);
+    for (int j = 0; j < n_orig; ++j) {
+      const double dc = scaling ? cs.scal_dc[static_cast<size_t>(j)] : 1.0;
+      x_original[j] = x_d[j] * dc;
+      bound_duals_lb[j] = flb_d[j] ? zl_d[j] / dc : 0.0;
+      bound_duals_ub[j] = fub_d[j] ? zu_d[j] / dc : 0.0;
+    }
+    for (int i = 0; i < m; ++i) {
+      const double row_sign =
+          (!cs.flip_row.empty() && i < mi &&
+           cs.flip_row[static_cast<size_t>(i)] != 0)
+              ? -1.0
+              : 1.0;
+      const double dr = scaling ? cs.scal_dr[static_cast<size_t>(i)] : 1.0;
+      row_duals_min[i] = row_sign * y_d[i] * dr;
+    }
+    return audit_ipm_lp_optimality(
+        cs.base_lp_copy, x_original, row_duals_min, bound_duals_lb,
+        bound_duals_ub, &node_lb, &node_ub);
+  };
+
   double last_pfeas = 0.0, last_dfeas = 0.0, last_mu = 0.0;
   for (int iter = 0; iter < max_iter; ++iter) {
     if (opt_.time_limit_sec > 0.0 && std::isfinite(opt_.time_limit_sec)) {
@@ -880,15 +918,34 @@ SolveResult NativeIPMLPAdapter::solve_cached_node_lp(
     double mu = (n_compl > 0) ? comp_sum / n_compl : 0.0;
     last_pfeas = pfeas; last_dfeas = dfeas; last_mu = mu;
 
-    if (pfeas < opt_.tol_primal && dfeas < opt_.tol_dual && mu < opt_.tol_gap) {
-      out.stats.success = true;
-      out.stats.iterations = iter;
-      out.stats.primal_feas = pfeas;
-      out.stats.dual_feas = dfeas;
-      out.stats.complementarity = mu;
-      out.stats.status = "Optimal";
-      converged = true;
-      break;
+    double scaled_primal_objective = 0.0;
+    for (int j = 0; j < n_orig; ++j)
+      scaled_primal_objective += c_vec[j] * x_d[j];
+    const double relative_mu =
+        mu / (1.0 + std::abs(scaled_primal_objective) /
+                        static_cast<double>(std::max(1, n_compl)));
+    const bool relative_candidate =
+        pfeas / (1.0 + scaled_rhs_norm) < opt_.tol_primal &&
+        dfeas / (1.0 + scaled_cost_norm) < opt_.tol_dual &&
+        relative_mu < opt_.tol_gap;
+    const bool absolute_candidate = pfeas < opt_.tol_primal &&
+                                    dfeas < opt_.tol_dual &&
+                                    mu < opt_.tol_gap;
+    if (absolute_candidate || relative_candidate) {
+      const IPMLPOptimalityAudit original = audit_current_iterate();
+      if (original.acceptable(publication_primal_tol, publication_dual_tol,
+                              publication_gap_tol)) {
+        out.stats.success = true;
+        out.stats.iterations = iter;
+        out.stats.primal_feas = pfeas;
+        out.stats.dual_feas = dfeas;
+        out.stats.complementarity = mu;
+        out.stats.status = absolute_candidate
+                               ? "Optimal"
+                               : "Optimal (original KKT audit)";
+        converged = true;
+        break;
+      }
     }
 
     // Theta + factorize
@@ -978,27 +1035,14 @@ SolveResult NativeIPMLPAdapter::solve_cached_node_lp(
       dzu_aff_d[j] = fub_d[j] * (-zu_d[j] + zu_d[j] * inv_gu_d[j] * dx_aff_d[j]);
     }
 
-    double ap_aff = 1.0, ad_aff = 1.0;
-    for (int j = 0; j < nn; ++j) {
-      if (dx_aff_d[j] < -kMinVal && flb_d[j]) {
-        double a = -kTau * gl_d[j] / dx_aff_d[j];
-        if (a < ap_aff) ap_aff = a;
-      }
-      if (dx_aff_d[j] > kMinVal && fub_d[j]) {
-        double a = kTau * gu_d[j] / dx_aff_d[j];
-        if (a < ap_aff) ap_aff = a;
-      }
-      if (dzl_aff_d[j] < -kMinVal) {
-        double a = -kTau * zl_d[j] / dzl_aff_d[j];
-        if (a < ad_aff) ad_aff = a;
-      }
-      if (dzu_aff_d[j] < -kMinVal) {
-        double a = -kTau * zu_d[j] / dzu_aff_d[j];
-        if (a < ad_aff) ad_aff = a;
-      }
-    }
-    ap_aff = std::max(ap_aff, kMinVal);
-    ad_aff = std::max(ad_aff, kMinVal);
+    const double affine_fraction = opt_.centrality_step_control
+                                       ? 1.0 - std::numeric_limits<double>::epsilon()
+                                       : kTau;
+    const IPMStepLengths affine_step = ipm_maximum_step_lengths(
+        gl_d, gu_d, zl_d, zu_d, dx_aff_d, dzl_aff_d, dzu_aff_d, flb_d,
+        fub_d, nn, affine_fraction);
+    const double ap_aff = std::max(affine_step.primal, kMinVal);
+    const double ad_aff = std::max(affine_step.dual, kMinVal);
 
     double mu_aff = 0.0;
     for (int j = 0; j < nn; ++j) {
@@ -1010,19 +1054,32 @@ SolveResult NativeIPMLPAdapter::solve_cached_node_lp(
     // mu_aff / mu would be 0/0 = NaN.  With no complementarity there is
     // nothing to center — take a pure affine step instead of letting NaN
     // propagate into the corrector rhs and the returned solution.
-    double sigma = (mu > 0.0) ? std::min(std::pow(mu_aff / mu, 3.0), 0.5) : 0.0;
-    double sigma_mu = sigma * mu;
+    const double sigma_raw =
+        (mu > 0.0) ? std::pow(std::max(0.0, mu_aff / mu), 3.0) : 0.0;
+    const double sigma = opt_.centrality_step_control
+                             ? std::clamp(sigma_raw, 0.0, 1.0)
+                             : std::min(sigma_raw, 0.5);
+    const double sigma_mu = sigma * mu;
 
     double ap, ad;
     const bool skip_corrector = (ap_aff > 0.9 && ad_aff > 0.9 && sigma < 0.02);
 
+    auto compute_step_lengths = [&](const double* dxv, const double* dzlv,
+                                    const double* dzuv) {
+      return ipm_centrality_step_lengths(
+          gl_d, gu_d, zl_d, zu_d, dxv, dzlv, dzuv, flb_d, fub_d, nn,
+          n_compl, opt_.centrality_step_control);
+    };
+
     if (skip_corrector) {
-      ap = ap_aff;
-      ad = ad_aff;
       std::memcpy(dx_d, dx_aff_d, sizeof(double) * nn);
       std::memcpy(dy_d, dy_aff_d, sizeof(double) * m);
       std::memcpy(dzl.data(), dzl_aff_d, sizeof(double) * nn);
       std::memcpy(dzu.data(), dzu_aff_d, sizeof(double) * nn);
+      const IPMStepLengths step =
+          compute_step_lengths(dx_d, dzl.data(), dzu.data());
+      ap = std::max(step.primal, kMinVal);
+      ad = std::max(step.dual, kMinVal);
     } else {
       // Corrector
       for (int j = 0; j < nn; ++j) {
@@ -1042,27 +1099,10 @@ SolveResult NativeIPMLPAdapter::solve_cached_node_lp(
         dzu[j] = fub_d[j] * ((sigma_mu + dzu_aff_d[j] * dx_aff_d[j]) * inv_gu_d[j] - zu_d[j] + zu_d[j] * inv_gu_d[j] * dx_d[j]);
       }
 
-      ap = 1.0; ad = 1.0;
-      for (int j = 0; j < nn; ++j) {
-        if (dx_d[j] < -kMinVal && flb_d[j]) {
-          double a = -kTau * gl_d[j] / dx_d[j];
-          if (a < ap) ap = a;
-        }
-        if (dx_d[j] > kMinVal && fub_d[j]) {
-          double a = kTau * gu_d[j] / dx_d[j];
-          if (a < ap) ap = a;
-        }
-        if (dzl[j] < -kMinVal) {
-          double a = -kTau * zl_d[j] / dzl[j];
-          if (a < ad) ad = a;
-        }
-        if (dzu[j] < -kMinVal) {
-          double a = -kTau * zu_d[j] / dzu[j];
-          if (a < ad) ad = a;
-        }
-      }
-      ap = std::max(ap, kMinVal);
-      ad = std::max(ad, kMinVal);
+      const IPMStepLengths step =
+          compute_step_lengths(dx_d, dzl.data(), dzu.data());
+      ap = std::max(step.primal, kMinVal);
+      ad = std::max(step.dual, kMinVal);
     }
 
     // Finiteness guard (same as the non-cached path): abort on a NaN
@@ -1128,10 +1168,39 @@ SolveResult NativeIPMLPAdapter::solve_cached_node_lp(
   out.box_dual_lb.resize(n_orig);
   out.box_dual_ub.resize(n_orig);
   for (int j = 0; j < n_orig; ++j) {
-    out.box_dual_lb(j) = scaling ? zl_d[j] / cs.scal_dc[static_cast<size_t>(j)]
-                                 : zl_d[j];
-    out.box_dual_ub(j) = scaling ? zu_d[j] / cs.scal_dc[static_cast<size_t>(j)]
-                                 : zu_d[j];
+    const double inv_scale =
+        scaling ? 1.0 / cs.scal_dc[static_cast<size_t>(j)] : 1.0;
+    out.box_dual_lb(j) = flb_d[j] ? zl_d[j] * inv_scale : 0.0;
+    out.box_dual_ub(j) = fub_d[j] ? zu_d[j] * inv_scale : 0.0;
+  }
+
+  Eigen::VectorXd row_duals_min = sense_sign * out.constraint_duals;
+  const IPMLPOptimalityAudit audit = audit_ipm_lp_optimality(
+      cs.base_lp_copy, out.x, row_duals_min, out.box_dual_lb,
+      out.box_dual_ub, &node_lb, &node_ub);
+  if (audit.valid) {
+    out.stats.unscaled_primal_feas = audit.primal_residual_inf;
+    out.stats.unscaled_dual_feas = audit.dual_residual_inf;
+    out.stats.unscaled_complementarity =
+        std::abs(audit.primal_objective - audit.dual_objective);
+    out.stats.relative_primal_residual = audit.relative_primal_residual;
+    out.stats.relative_dual_residual = audit.relative_dual_residual;
+    out.stats.relative_gap = audit.relative_gap;
+    out.stats.dual_objective = sense_sign * audit.dual_objective;
+  }
+  const bool original_optimal = audit.acceptable(
+      publication_primal_tol, publication_dual_tol, publication_gap_tol);
+  const bool termination_enabled = opt_.tol_primal >= 0.0 &&
+                                   opt_.tol_dual >= 0.0 &&
+                                   opt_.tol_gap >= 0.0;
+  if (out.stats.success) {
+    if (!original_optimal) {
+      out.stats.success = false;
+      out.stats.status = "Optimality audit rejected";
+    }
+  } else if (termination_enabled && original_optimal) {
+    out.stats.success = true;
+    out.stats.status = "Optimal (final original KKT audit)";
   }
   out.stats.runtime_sec =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -1251,7 +1320,8 @@ NativeIPMLPAdapter::solve_cached_bound_change_batch(
         : previous_solve_limit;
     entry.attempted = true;
     entry.result = use_augmented_direct
-        ? solve_lp_impl(direct_lp, x0, opt_.ruiz_rounds)
+        ? solve_lp_impl(direct_lp, x0, opt_.ruiz_rounds, -1.0,
+                        AugmentedBackendPolicy::StructurePreserving)
         : solve_cached_node_lp(node_lb, node_ub, x0);
   }
 

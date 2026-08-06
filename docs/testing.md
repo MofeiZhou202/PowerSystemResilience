@@ -14,12 +14,14 @@
 
 | 项目 | 值 |
 |---|---|
-| 日期 | 2026-08-05 |
+| 日期 | 2026-08-06 |
 | 平台 | Windows，PowerShell |
 | 工作分支 | `release/windows-self-contained` |
+| 测试提交 | `5a43072477be` |
 | 构建目录 | `build/windows-vcpkg-release` |
 | 生成器/编译器 | Ninja Multi-Config / MSVC 19.44（VS 2022 17.14） |
-| 配置 | Release，HFactor/MKL/MUMPS/OpenMP/PaPILO/SuiteSparse/SuperLU 开启 |
+| 配置 | Release，HiGHS/SCIP/Ipopt-PardisoMKL/OpenMP/PaPILO/SuiteSparse 开启 |
+| 不可用数值后端 | MUMPS、SuperLU |
 | Gurobi | 关闭 |
 | 源码 `TEST_CASE` 数 | 328 |
 | 当前 CTest 覆盖的 `TEST_CASE` 数 | 309 |
@@ -37,10 +39,13 @@ ctest --test-dir build/windows-vcpkg-release -C Release -L benchmark --output-on
 
 | 标签 | 目标数 | 通过 | 失败 | 实际耗时 |
 |---|---:|---:|---:|---:|
-| `unit` | 13 | 12 | 1 | 2.29 s |
-| `integration` | 3 | 1 | 2 | 0.73 s |
-| `benchmark` | 2 | 2 | 0 | 0.50 s |
-| 合计 | 18 | 15 | 3 | 3.52 s |
+| `unit` | 13 | 12 | 1 | 4.98 s |
+| `integration` | 3 | 2 | 1 | 1.55 s |
+| `benchmark` | 2 | 2 | 0 | 0.85 s |
+| 合计 | 18 | 16 | 2 | 4.81 s wall time |
+
+标签行是 CTest 报告的累计 processor time；合计是 `-j 2` 并行执行的真实墙钟
+时间，因此不等于三行相加。
 
 ### 3.1 失败项
 
@@ -51,15 +56,56 @@ ctest --test-dir build/windows-vcpkg-release -C Release -L benchmark --output-on
 2. `test_ipopt_parameter_stability`：近相关等式用例返回
    `x=(1.001262, 0.998738)`，未满足逐变量 `2e-5` 的断言。其余 5 个实际执行
    用例通过；该项反映近秩亏等式下的解分量稳定性风险。
-3. `test_netlib_regression`：3 个用例中 2 个通过；`grow22` 用例在读入数据时
-   返回 `FilereaderRetcode=2`。同一次 benchmark 还报告 `afiro`、`adlittle`、
-   `share2b`、`stocfor1`、`kb2` 不可读，因此这是数据集未部署，不是数值断言
-   失败。
+
+`test_netlib_regression` 在部署标准数据后通过，耗时 0.71 s，不再属于失败项。
 
 `test_scuc_module.cpp` 和 `test_market_simulation.cpp` 共 19 个 `TEST_CASE` 未进入
 当前 CTest 配置，不计为通过。发布前需要在启用 SCUC 测试目标的构建中补跑。
 
-### 3.2 Release smoke 基准
+### 3.2 NETLIB 全面基准
+
+已使用 90 个带官方数值参考目标的标准 NETLIB LP，对 14 个算法配置完成
+1,260 次全量求解，并对 5 个重点算法完成 450 次分层重复求解。统一门槛为
+相对目标误差 `<=1e-5`、归一化原始可行性违反 `<=1e-7`。
+
+核心结果为 HiGHS simplex 87/90 accurate、HiGHS IPM 86/90、SCIP direct
+85/90、Native dual/Structural DSE/Exact DSE 各 84/90。详细的规模分层、
+失败案例、DSE 遥测、原始结果文件和复现命令见
+[NETLIB 线性规划求解器全面基准](netlib_benchmark.md)。
+
+Native IPM 的 P1 理论增强另做了同一二进制 A/B：动态互补缓冲步长和标准
+Mehrotra 中心参数为 78/90 accurate，legacy 固定步长为 76/90；无准确案例
+回退，76 个共同准确案例上配对几何平均快 1.199 倍。该改动的方程、源码锚点
+和 HSD/IP-PMM 后续门槛见
+[Native LP 内点法理论设计](native_ipm_design.md)。
+
+P2a 进一步加入原模型 primal/dual/gap 审计和相对候选停止，最终为 83/90
+success、81/90 accurate；相对 P1 新增 `d6cube`、`degen3`、`shell`，无 accurate
+回退。`shell` 从 2,000 次失败降至 108 次、约 41.6 ms，并通过原模型 KKT。
+
+上述 P1/P2a 数字是阶段基线。当前严格正确性验收使用库默认
+`IPMLPOptions::max_iter=200`，而不是把迭代上限提高到 1,000：
+
+```powershell
+python tools/run_netlib_isolated.py `
+  --executable tests/Release/netlib_solver_benchmark.exe `
+  --data-dir tests/data --solver native-ipm `
+  --solver-time-limit 40 --hard-timeout 50 --max-iterations 200 `
+  --csv reports/netlib_native_ipm_residual_regularization_full90_2026-08-06.csv `
+  --json reports/netlib_native_ipm_residual_regularization_full90_2026-08-06.json `
+  --log reports/netlib_native_ipm_residual_regularization_full90_2026-08-06.log
+```
+
+结果为 90/90 success、90/90 accurate，无超时、崩溃或隔离子进程异常；总求解
+时间 47.497 s，中位数 21.717 ms。准确门槛保持相对目标误差 `<=1e-5` 和归一化
+原始可行性违反 `<=1e-7`。`test_engine_api` 为 31/31 用例、138 个断言通过；
+`test_numerical_stability` 为 23/23 用例、446 个断言通过。
+
+合入后的定向测试为：`test_numerical_stability` 22/22 用例、442 个断言通过；
+`test_netlib_regression` 3/3 用例、224 个断言通过。重新执行全部 18 个 CTest
+仍为 16 通过、2 失败，失败项及数值与 3.1 节相同，没有出现新的跨模块回归。
+
+### 3.3 Release smoke 基准
 
 `native_kernel_comparison --smoke --check --time-limit 60` 的单次结果如下。所有
 路径目标均为 `993830.1496`、gap 为 0；这些数字只用于正确性烟雾测试，样本太小
@@ -76,7 +122,7 @@ ctest --test-dir build/windows-vcpkg-release -C Release -L benchmark --output-on
 为 2.3 ms/30 次迭代，HiGHS-LP 为 8.9 ms/37 次迭代；三者目标一致，报告最大
 行违反分别为 `5.68e-14`、`1.96e-12`、`0`。
 
-### 3.3 构建状态
+### 3.4 构建状态
 
 核心库和上述 18 个测试/基准目标均在当前工作树重新编译成功。无目标过滤的
 全量构建仍失败于独立基准 `native_dual_bfrt_simd_benchmark.cpp:277`：MSVC

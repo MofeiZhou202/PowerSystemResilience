@@ -11,6 +11,8 @@
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 
+#include <limits>
+
 #include "mipsolvers/engine/kernel/ipm/ipm_lp_solver.hpp"
 #include "mipsolvers/engine/kernel/ipm/ipm_scaling.hpp"
 #include "mipsolvers/engine/kernel/ipm/ipm_solver.hpp"
@@ -179,6 +181,216 @@ TEST_CASE("IPM solves sparse-path LP accurately (sparse IR path)",
   CHECK(res.stats.objective == Approx(static_cast<double>(n)).margin(1e-4 * n));
   for (int i = 0; i < n; ++i)
     CHECK(res.x[i] == Approx(1.0).margin(1e-4));
+}
+
+TEST_CASE("IPM centrality step control preserves the legacy opt-out result",
+          "[numerical][ipm][centrality]") {
+  const LPModel lp = make_scaled_lp(1e3, 1e-3, 1e-2, 1e2);
+
+  IPMLPOptions modern_opt;
+  modern_opt.max_correctors = 0;
+  REQUIRE(modern_opt.centrality_step_control);
+  const SolveResult modern = NativeIPMLPAdapter(modern_opt).solve_lp(lp);
+
+  IPMLPOptions legacy_opt = modern_opt;
+  legacy_opt.centrality_step_control = false;
+  const SolveResult legacy = NativeIPMLPAdapter(legacy_opt).solve_lp(lp);
+
+  REQUIRE(modern.stats.success);
+  REQUIRE(legacy.stats.success);
+  CHECK(modern.stats.objective == Approx(-14.0).margin(1e-6));
+  CHECK(legacy.stats.objective == Approx(-14.0).margin(1e-6));
+  CHECK(modern.stats.objective == Approx(legacy.stats.objective).margin(1e-8));
+}
+
+TEST_CASE("IPM original-model audit checks the complete bounded LP KKT system",
+          "[numerical][ipm][audit]") {
+  const double r1 = 1e3, r2 = 1e-3, c1 = 1e-2, c2 = 1e2;
+  const LPModel lp = make_scaled_lp(r1, r2, c1, c2);
+  Eigen::VectorXd x(2), row_duals(2), zl(2), zu(2);
+  x << 2.0 / c1, 4.0 / c2;
+  row_duals << -1.0 / r1, -1.0 / r2;
+  zl.setZero();
+  zu.setZero();
+
+  const IPMLPOptimalityAudit exact =
+      audit_ipm_lp_optimality(lp, x, row_duals, zl, zu);
+  REQUIRE(exact.valid);
+  CHECK(exact.primal_objective == Approx(-14.0));
+  CHECK(exact.dual_objective == Approx(-14.0));
+  CHECK(exact.relative_primal_residual == Approx(0.0).margin(1e-15));
+  CHECK(exact.relative_dual_residual == Approx(0.0).margin(1e-15));
+  CHECK(exact.relative_gap == Approx(0.0).margin(1e-15));
+  CHECK(exact.acceptable(1e-12, 1e-12, 1e-12));
+
+  row_duals[0] = 0.0;
+  const IPMLPOptimalityAudit bad_dual =
+      audit_ipm_lp_optimality(lp, x, row_duals, zl, zu);
+  REQUIRE(bad_dual.valid);
+  CHECK(bad_dual.relative_dual_residual > 1e-6);
+  CHECK(bad_dual.relative_gap > 1e-6);
+  CHECK_FALSE(bad_dual.acceptable(1e-12, 1e-12, 1e-12));
+}
+
+TEST_CASE("IPM audit reconstructs fixed-column bound multipliers",
+          "[numerical][ipm][audit]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Constant(1, 3.0);
+  lp.A.resize(0, 1);
+  lp.b.resize(0);
+  lp.Aeq.resize(0, 1);
+  lp.beq.resize(0);
+  lp.vars.push_back({VarType::Continuous, 2.0, 2.0});
+
+  const IPMLPOptimalityAudit audit = audit_ipm_lp_optimality(
+      lp, Eigen::VectorXd::Constant(1, 2.0), Eigen::VectorXd(),
+      Eigen::VectorXd::Zero(1), Eigen::VectorXd::Zero(1));
+  REQUIRE(audit.valid);
+  CHECK(audit.primal_objective == Approx(6.0));
+  CHECK(audit.dual_objective == Approx(6.0));
+  CHECK(audit.relative_dual_residual == Approx(0.0));
+  CHECK(audit.relative_gap == Approx(0.0));
+}
+
+TEST_CASE("IPM audit does not dilute residuals on subunit data scales",
+          "[numerical][ipm][audit]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Zero(1);
+  lp.A.resize(0, 1);
+  lp.b.resize(0);
+  lp.Aeq.resize(1, 1);
+  lp.Aeq.insert(0, 0) = 1.0;
+  lp.Aeq.makeCompressed();
+  lp.beq = Eigen::VectorXd::Constant(1, 0.75);
+  lp.vars.push_back({VarType::Continuous, -1e20, 1e20});
+
+  constexpr double violation = 1.3e-7;
+  const IPMLPOptimalityAudit audit = audit_ipm_lp_optimality(
+      lp, Eigen::VectorXd::Constant(1, 0.75 + violation),
+      Eigen::VectorXd::Zero(1), Eigen::VectorXd::Zero(1),
+      Eigen::VectorXd::Zero(1));
+  REQUIRE(audit.valid);
+  CHECK(audit.primal_residual_inf == Approx(violation).epsilon(1e-8));
+  CHECK(audit.relative_primal_residual == Approx(violation).epsilon(1e-8));
+  CHECK_FALSE(audit.acceptable(1e-7, 1e-12, 1e-12));
+}
+
+TEST_CASE("IPM audit handles objective sense and both ranged-row signs",
+          "[numerical][ipm][audit]") {
+  SECTION("maximize with an active variable upper bound") {
+    LPModel lp;
+    lp.sense = Sense::Maximize;
+    lp.c = Eigen::VectorXd::Ones(1);
+    lp.A.resize(0, 1);
+    lp.b.resize(0);
+    lp.Aeq.resize(0, 1);
+    lp.beq.resize(0);
+    lp.vars.push_back({VarType::Continuous, 0.0, 2.0});
+    const IPMLPOptimalityAudit audit = audit_ipm_lp_optimality(
+        lp, Eigen::VectorXd::Constant(1, 2.0), Eigen::VectorXd(),
+        Eigen::VectorXd::Zero(1), Eigen::VectorXd::Ones(1));
+    REQUIRE(audit.valid);
+    CHECK(audit.primal_objective == Approx(-2.0));
+    CHECK(audit.dual_objective == Approx(-2.0));
+    CHECK(audit.acceptable(1e-12, 1e-12, 1e-12));
+  }
+
+  SECTION("ranged row selects its active upper side") {
+    LPModel lp;
+    lp.c = Eigen::VectorXd::Constant(1, -1.0);
+    lp.A.resize(1, 1);
+    lp.A.insert(0, 0) = 1.0;
+    lp.A.makeCompressed();
+    lp.row_lhs = Eigen::VectorXd::Constant(1, 1.0);
+    lp.b = Eigen::VectorXd::Constant(1, 2.0);
+    lp.Aeq.resize(0, 1);
+    lp.beq.resize(0);
+    lp.vars.push_back({VarType::Continuous, -1e20, 1e20});
+    const IPMLPOptimalityAudit audit = audit_ipm_lp_optimality(
+        lp, Eigen::VectorXd::Constant(1, 2.0),
+        Eigen::VectorXd::Constant(1, -1.0), Eigen::VectorXd::Zero(1),
+        Eigen::VectorXd::Zero(1));
+    REQUIRE(audit.valid);
+    CHECK(audit.dual_objective == Approx(-2.0));
+    CHECK(audit.acceptable(1e-12, 1e-12, 1e-12));
+  }
+
+  SECTION("lower-only row requires a nonnegative row dual") {
+    LPModel lp;
+    lp.c = Eigen::VectorXd::Ones(1);
+    lp.A.resize(1, 1);
+    lp.A.insert(0, 0) = 1.0;
+    lp.A.makeCompressed();
+    lp.row_lhs = Eigen::VectorXd::Ones(1);
+    lp.b = Eigen::VectorXd::Constant(
+        1, std::numeric_limits<double>::infinity());
+    lp.Aeq.resize(0, 1);
+    lp.beq.resize(0);
+    lp.vars.push_back({VarType::Continuous, -1e20, 1e20});
+    const IPMLPOptimalityAudit audit = audit_ipm_lp_optimality(
+        lp, Eigen::VectorXd::Ones(1), Eigen::VectorXd::Ones(1),
+        Eigen::VectorXd::Zero(1), Eigen::VectorXd::Zero(1));
+    REQUIRE(audit.valid);
+    CHECK(audit.dual_objective == Approx(1.0));
+    CHECK(audit.acceptable(1e-12, 1e-12, 1e-12));
+  }
+}
+
+TEST_CASE("Fresh IPM honors iteration limits above 200 and reports residuals",
+          "[numerical][ipm][limits]") {
+  LPModel lp;
+  lp.c = Eigen::VectorXd::Zero(1);
+  lp.A.resize(0, 1);
+  lp.b.resize(0);
+  lp.Aeq.resize(0, 1);
+  lp.beq.resize(0);
+  lp.vars.push_back({VarType::Continuous, -1e20, 1e20});
+
+  IPMLPOptions opt;
+  opt.max_iter = 205;
+  opt.ruiz_rounds = 0;
+  opt.max_correctors = 0;
+  // Negative tolerances intentionally make convergence impossible while the
+  // zero KKT system keeps every iteration finite and deterministic.
+  opt.tol_primal = -1.0;
+  opt.tol_dual = -1.0;
+  opt.tol_gap = -1.0;
+
+  const SolveResult res = NativeIPMLPAdapter(opt).solve_lp(lp);
+  CHECK_FALSE(res.stats.success);
+  CHECK(res.stats.status == "MaxIter");
+  CHECK(res.stats.iterations == 205);
+  CHECK(res.stats.primal_feas == Approx(0.0));
+  CHECK(res.stats.dual_feas == Approx(0.0));
+  CHECK(res.stats.complementarity == Approx(0.0));
+}
+
+TEST_CASE("Fresh IPM scaling retries share one wall-clock limit",
+          "[numerical][ipm][limits]") {
+  LPModel lp;
+  lp.c = Eigen::VectorXd::Zero(1);
+  lp.A.resize(0, 1);
+  lp.b.resize(0);
+  lp.Aeq.resize(0, 1);
+  lp.beq.resize(0);
+  lp.vars.push_back({VarType::Continuous, -1e20, 1e20});
+
+  IPMLPOptions opt;
+  opt.max_iter = 100000000;
+  opt.time_limit_sec = 0.05;
+  opt.ruiz_rounds = 10;
+  opt.max_correctors = 0;
+  opt.tol_primal = -1.0;
+  opt.tol_dual = -1.0;
+  opt.tol_gap = -1.0;
+
+  const SolveResult res = NativeIPMLPAdapter(opt).solve_lp(lp);
+  CHECK_FALSE(res.stats.success);
+  CHECK(res.stats.status == "Time limit");
+  CHECK(res.stats.runtime_sec >= 0.04);
+  CHECK(res.stats.runtime_sec < 0.12);
 }
 
 // ─── UMFPACK iterative refinement in the dual simplex basis (item 9a) ──────

@@ -7,7 +7,185 @@
 
 #include "ipm_lp_solver_internal.hpp"
 
+#include "mipsolvers/engine/kernel/lp_kernel/dual_simplex.hpp"
+
 namespace mipsolvers::engine {
+
+bool IPMLPOptimalityAudit::acceptable(double primal_tolerance,
+                                      double dual_tolerance,
+                                      double gap_tolerance) const {
+  return valid && std::isfinite(primal_tolerance) && primal_tolerance >= 0.0 &&
+         std::isfinite(dual_tolerance) && dual_tolerance >= 0.0 &&
+         std::isfinite(gap_tolerance) && gap_tolerance >= 0.0 &&
+         relative_primal_residual <= primal_tolerance &&
+         relative_dual_residual <= dual_tolerance &&
+         relative_gap <= gap_tolerance;
+}
+
+IPMLPOptimalityAudit audit_ipm_lp_optimality(
+    const LPModel& lp, const Eigen::VectorXd& x,
+    const Eigen::VectorXd& row_duals_min,
+    const Eigen::VectorXd& box_dual_lb_min,
+    const Eigen::VectorXd& box_dual_ub_min,
+    const Eigen::VectorXd* lower_bounds_override,
+    const Eigen::VectorXd* upper_bounds_override) {
+  IPMLPOptimalityAudit audit;
+  constexpr double kSideSentinel = 1e19;
+  const int n = static_cast<int>(lp.c.size());
+  const int mi = static_cast<int>(lp.A.rows());
+  const int me = static_cast<int>(lp.Aeq.rows());
+  const bool has_override = lower_bounds_override || upper_bounds_override;
+  if (n != static_cast<int>(lp.vars.size()) || x.size() != n ||
+      row_duals_min.size() != mi + me || box_dual_lb_min.size() != n ||
+      box_dual_ub_min.size() != n ||
+      (mi > 0 && lp.A.cols() != n) || lp.b.size() != mi ||
+      (lp.row_lhs.size() != 0 && lp.row_lhs.size() != mi) ||
+      (me > 0 && lp.Aeq.cols() != n) || lp.beq.size() != me ||
+      (has_override &&
+       (!lower_bounds_override || !upper_bounds_override ||
+        lower_bounds_override->size() != n ||
+        upper_bounds_override->size() != n)) ||
+      !x.allFinite() || !lp.c.allFinite() || !row_duals_min.allFinite() ||
+      !box_dual_lb_min.allFinite() || !box_dual_ub_min.allFinite()) {
+    return audit;
+  }
+
+  auto lower_bound = [&](int j) {
+    return has_override ? (*lower_bounds_override)[j]
+                        : lp.vars[static_cast<std::size_t>(j)].lb;
+  };
+  auto upper_bound = [&](int j) {
+    return has_override ? (*upper_bounds_override)[j]
+                        : lp.vars[static_cast<std::size_t>(j)].ub;
+  };
+  auto finite_side = [&](double value) {
+    return std::isfinite(value) && std::abs(value) < kSideSentinel;
+  };
+
+  double primal_violation = 0.0;
+  double primal_scale = 0.0;
+  if (mi > 0) {
+    const Eigen::VectorXd activity = lp.A * x;
+    if (!activity.allFinite()) return audit;
+    for (int i = 0; i < mi; ++i) {
+      const double upper = lp.b[i];
+      const double lower = lp_row_lhs_or_neg_inf(lp, i);
+      if (std::isnan(upper) || std::isnan(lower)) return audit;
+      if (finite_side(upper)) {
+        primal_violation = std::max(primal_violation, activity[i] - upper);
+        primal_scale = std::max(primal_scale, std::abs(upper));
+      }
+      if (finite_side(lower)) {
+        primal_violation = std::max(primal_violation, lower - activity[i]);
+        primal_scale = std::max(primal_scale, std::abs(lower));
+      }
+    }
+  }
+  if (me > 0) {
+    const Eigen::VectorXd residual = lp.Aeq * x - lp.beq;
+    if (!residual.allFinite()) return audit;
+    primal_violation =
+        std::max(primal_violation, residual.lpNorm<Eigen::Infinity>());
+    primal_scale = std::max(primal_scale, lp.beq.lpNorm<Eigen::Infinity>());
+  }
+  for (int j = 0; j < n; ++j) {
+    const double lower = lower_bound(j);
+    const double upper = upper_bound(j);
+    if (std::isnan(lower) || std::isnan(upper)) return audit;
+    if (finite_side(lower)) {
+      primal_violation = std::max(primal_violation, lower - x[j]);
+      primal_scale = std::max(primal_scale, std::abs(lower));
+    }
+    if (finite_side(upper)) {
+      primal_violation = std::max(primal_violation, x[j] - upper);
+      primal_scale = std::max(primal_scale, std::abs(upper));
+    }
+  }
+  primal_violation = std::max(0.0, primal_violation);
+
+  const int sense_sign = lp.sense == Sense::Maximize ? -1 : 1;
+  Eigen::VectorXd stationarity = sense_sign * lp.c;
+  if (mi > 0) stationarity.noalias() -= lp.A.transpose() * row_duals_min.head(mi);
+  if (me > 0)
+    stationarity.noalias() -= lp.Aeq.transpose() * row_duals_min.tail(me);
+  if (!stationarity.allFinite()) return audit;
+
+  double dual_violation = 0.0;
+  double dual_objective = 0.0;
+  for (int i = 0; i < mi; ++i) {
+    const double y = row_duals_min[i];
+    const double upper = lp.b[i];
+    const double lower = lp_row_lhs_or_neg_inf(lp, i);
+    const bool has_upper = finite_side(upper);
+    const bool has_lower = finite_side(lower);
+    if (has_upper && has_lower) {
+      dual_objective += y * (y >= 0.0 ? lower : upper);
+    } else if (has_upper) {
+      dual_violation = std::max(dual_violation, std::max(0.0, y));
+      dual_objective += y * upper;
+    } else if (has_lower) {
+      dual_violation = std::max(dual_violation, std::max(0.0, -y));
+      dual_objective += y * lower;
+    } else {
+      dual_violation = std::max(dual_violation, std::abs(y));
+    }
+  }
+  for (int i = 0; i < me; ++i) {
+    dual_objective += row_duals_min[mi + i] * lp.beq[i];
+  }
+
+  for (int j = 0; j < n; ++j) {
+    const double lower = lower_bound(j);
+    const double upper = upper_bound(j);
+    const bool has_lower = finite_side(lower);
+    const bool has_upper = finite_side(upper);
+    double zl = has_lower ? box_dual_lb_min[j] : 0.0;
+    double zu = has_upper ? box_dual_ub_min[j] : 0.0;
+    if (!has_lower)
+      dual_violation = std::max(dual_violation, std::abs(box_dual_lb_min[j]));
+    if (!has_upper)
+      dual_violation = std::max(dual_violation, std::abs(box_dual_ub_min[j]));
+
+    // A fixed column was removed from the barrier system. Its two bound
+    // multipliers are non-unique, so reconstruct the minimum-norm sign-feasible
+    // pair that closes stationarity instead of auditing stale barrier values.
+    const bool fixed = has_lower && has_upper && upper - lower < 1e-9;
+    if (fixed) {
+      zl = std::max(0.0, stationarity[j]);
+      zu = std::max(0.0, -stationarity[j]);
+    } else {
+      dual_violation = std::max(dual_violation, std::max(0.0, -zl));
+      dual_violation = std::max(dual_violation, std::max(0.0, -zu));
+    }
+    stationarity[j] += -zl + zu;
+    if (has_lower) dual_objective += lower * zl;
+    if (has_upper) dual_objective -= upper * zu;
+  }
+
+  dual_violation =
+      std::max(dual_violation, stationarity.lpNorm<Eigen::Infinity>());
+  const double primal_objective = sense_sign * lp.c.dot(x);
+  const double relative_gap =
+      std::abs(primal_objective - dual_objective) /
+      (1.0 + std::abs(primal_objective) + std::abs(dual_objective));
+  const double cost_scale = lp.c.lpNorm<Eigen::Infinity>();
+
+  audit.valid = std::isfinite(primal_violation) &&
+                std::isfinite(dual_violation) &&
+                std::isfinite(primal_objective) &&
+                std::isfinite(dual_objective) && std::isfinite(relative_gap);
+  if (!audit.valid) return audit;
+  audit.primal_residual_inf = primal_violation;
+  audit.dual_residual_inf = dual_violation;
+  audit.relative_primal_residual =
+      primal_violation / std::max(1.0, primal_scale);
+  audit.relative_dual_residual =
+      dual_violation / std::max(1.0, cost_scale);
+  audit.primal_objective = primal_objective;
+  audit.dual_objective = dual_objective;
+  audit.relative_gap = relative_gap;
+  return audit;
+}
 
 NativeIPMLPAdapter::NativeIPMLPAdapter(IPMLPOptions opt)
     : opt_(std::move(opt)), accel_cache_(std::make_unique<AccelSparseCache>()) {}
@@ -27,26 +205,77 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob) const {
 }
 
 SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::VectorXd& x0) const {
+  const auto solve_start = std::chrono::steady_clock::now();
+  const bool has_deadline =
+      opt_.time_limit_sec > 0.0 && std::isfinite(opt_.time_limit_sec);
+  auto remaining_time = [&]() {
+    if (!has_deadline) return 0.0;
+    const double elapsed = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - solve_start).count();
+    return std::max(0.0, opt_.time_limit_sec - elapsed);
+  };
+  auto finish = [&](SolveResult result) {
+    result.stats.runtime_sec = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - solve_start).count();
+    return result;
+  };
+
   // Direct solve with the standard Ruiz-escalation robustness ladder.
-  auto direct_solve = [this](const LPModel& p,
-                             const Eigen::VectorXd& start) -> SolveResult {
+  auto direct_solve = [this, &remaining_time, has_deadline](
+                          const LPModel& p,
+                          const Eigen::VectorXd& start,
+                          AugmentedBackendPolicy backend_policy) -> SolveResult {
+    auto run_variant = [&](int rounds) {
+      const double budget = has_deadline ? remaining_time() : 0.0;
+      if (has_deadline && budget <= 0.0) {
+        SolveResult timed_out;
+        timed_out.stats.solver_name = name();
+        timed_out.stats.status = "Time limit";
+        return timed_out;
+      }
+      return solve_lp_impl(p, start, rounds, budget, backend_policy);
+    };
+    auto merit = [](const SolveResult& result) {
+      if (result.stats.success) return 0.0;
+      if (result.x.size() == 0 || !result.x.allFinite()) {
+        return std::numeric_limits<double>::infinity();
+      }
+      const double primal = std::isfinite(result.stats.primal_feas)
+                                ? std::max(0.0, result.stats.primal_feas)
+                                : std::numeric_limits<double>::infinity();
+      const double dual = std::isfinite(result.stats.dual_feas)
+                              ? std::max(0.0, result.stats.dual_feas)
+                              : std::numeric_limits<double>::infinity();
+      const double comp = std::isfinite(result.stats.complementarity)
+                              ? std::max(0.0, result.stats.complementarity)
+                              : std::numeric_limits<double>::infinity();
+      return std::max({primal, dual, comp});
+    };
+    auto keep_better = [&](SolveResult& incumbent, SolveResult candidate) {
+      if (candidate.stats.success || merit(candidate) < merit(incumbent)) {
+        incumbent = std::move(candidate);
+      }
+    };
+
     // Scaling fallback: solve with the configured Ruiz rounds first; if it
     // fails to converge, retry without scaling.  Equilibration helps most
     // problems (e.g. NETLIB afiro) but stalls some degenerate ones
     // (e.g. stocfor1) — retrying unscaled is the standard robustness answer.
-    SolveResult res = solve_lp_impl(p, start, opt_.ruiz_rounds);
-    if (!res.stats.success && opt_.ruiz_rounds > 0) {
-      SolveResult raw = solve_lp_impl(p, start, 0);
-      if (raw.stats.success) {
-        res = std::move(raw);
-      } else {
+    SolveResult res = run_variant(opt_.ruiz_rounds);
+    if (!res.stats.success && opt_.ruiz_rounds > 0 &&
+        (!has_deadline || remaining_time() > 0.0)) {
+      SolveResult raw = run_variant(0);
+      keep_better(res, std::move(raw));
+      if (!res.stats.success && (!has_deadline || remaining_time() > 0.0)) {
         // Extreme-scaling escalation: tighter Ruiz equilibration shrinks the
         // residual column-scale range that otherwise leaves the barrier
         // ill-conditioned and stalled (adversarial 10^6-scaled probes).
-        SolveResult more =
-            solve_lp_impl(p, start, std::max(opt_.ruiz_rounds * 4, 40));
-        if (more.stats.success) res = std::move(more);
+        SolveResult more = run_variant(std::max(opt_.ruiz_rounds * 4, 40));
+        keep_better(res, std::move(more));
       }
+    }
+    if (!res.stats.success && has_deadline && remaining_time() <= 0.0) {
+      res.stats.status = "Time limit";
     }
     return res;
   };
@@ -56,6 +285,8 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
   // postsolve the primal to original space.  Only on cold solves (a warm start
   // refers to the original variable space).  Any failure falls through to a
   // direct solve, so a wrong or infeasible answer is never published.
+  bool reduced_kernel_failed = false;
+  bool reduced_postsolve_failed = false;
   {
     HighsLpPresolveConfig pcfg;
     pcfg.enabled = opt_.use_highs_presolve;
@@ -68,7 +299,7 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
         r.stats.solver_name = name();
         r.stats.success = false;
         r.stats.status = "Infeasible (presolve)";
-        return r;
+        return finish(std::move(r));
       }
       if (ps.solved_by_presolve || ps.use_reduced) {
         Eigen::VectorXd x_reduced;
@@ -76,15 +307,20 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
         bool reduced_ok = true;
         if (ps.use_reduced) {
           static const Eigen::VectorXd empty;
-          SolveResult rr = direct_solve(ps.reduced, empty);
+          SolveResult rr = direct_solve(
+              ps.reduced, empty,
+              AugmentedBackendPolicy::StructurePreserving);
           reduced_ok = rr.stats.success;
+          reduced_kernel_failed = !reduced_ok;
           x_reduced = rr.x;
           iters = rr.stats.iterations;
         }  // else: reduced-to-empty -> postsolve an empty primal.
         if (reduced_ok) {
           Eigen::VectorXd x_orig;
           double obj = 0.0;
-          if (highs_presolve_recover_primal(prob, ps, x_reduced, 1e-6, x_orig,
+          const double audit_tol =
+              std::max(1e-10, 10.0 * std::max(0.0, opt_.tol_primal));
+          if (highs_presolve_recover_primal(prob, ps, x_reduced, audit_tol, x_orig,
                                             obj)) {
             SolveResult r;
             r.x = std::move(x_orig);
@@ -93,20 +329,55 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
             r.stats.status = "Optimal";
             r.stats.objective = obj;
             r.stats.iterations = iters;
-            return r;
+            return finish(std::move(r));
           }
         }
         // Postsolve/audit/reduced-solve failure: fall through to a direct solve.
+        reduced_postsolve_failed = reduced_ok;
       }
     }
   }
 
-  return direct_solve(prob, x0);
+  if (reduced_kernel_failed) {
+    // AUDIT-NAV: reduced KKT 数值失败后必须从原始初始点重启另一条完整 barrier
+    // 轨迹；禁止按模型维数路由，也禁止在已分叉的轨迹中途替换线性后端。
+    return finish(direct_solve(
+        prob, x0, AugmentedBackendPolicy::PivotingPortfolio));
+  }
+
+  if (reduced_postsolve_failed) {
+    SolveResult pivoting = direct_solve(
+        prob, x0, AugmentedBackendPolicy::PivotingPortfolio);
+    if (pivoting.stats.success ||
+        (has_deadline && remaining_time() <= 0.0)) {
+      return finish(std::move(pivoting));
+    }
+    SolveResult structure = direct_solve(
+        prob, x0, AugmentedBackendPolicy::StructurePreserving);
+    return finish(structure.stats.success ? std::move(structure)
+                                          : std::move(pivoting));
+  }
+
+  SolveResult primary = direct_solve(
+      prob, x0, AugmentedBackendPolicy::StructurePreserving);
+#ifdef HACDCPF_HAVE_MKL_PARDISO
+  if (!primary.stats.success && (!has_deadline || remaining_time() > 0.0)) {
+    SolveResult pivoting = direct_solve(
+        prob, x0, AugmentedBackendPolicy::PivotingPortfolio);
+    if (pivoting.stats.success) primary = std::move(pivoting);
+  }
+#endif
+  return finish(std::move(primary));
 }
 
 // AUDIT-NAV: LP-IPM 非缓存主循环；缩放、KKT 路径、预测校正、正性步长和原空间
 // 残差必须成组审核。重复节点的结构复用入口在 ipm_lp_solver_cached.cpp。
-SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::VectorXd& x0, int ruiz_rounds) const {
+SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
+                                               const Eigen::VectorXd& x0,
+                                               int ruiz_rounds,
+                                               double time_limit_sec,
+                                               AugmentedBackendPolicy
+                                                   backend_policy) const {
   const bool has_warm_start = (x0.size() == prob.c.size());
   const bool ipm_verbose_env = (std::getenv("MIPSOLVERS_IPM_VERBOSE") != nullptr);
   SolveResult out;
@@ -363,26 +634,26 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
   // Slack columns: each touches exactly 1 row, so bandwidth contribution = 0
 
   const bool use_banded = (bandwidth <= kBandedThreshold);
+  const bool centrality_step_control = opt_.centrality_step_control;
   bool use_dense = false;  // set below when scatter table would exceed kDenseScatterThreshold
   // Sparse augmented-KKT path.  When the normal equations N = Ae*Ae' would be
   // too dense to form (large SCUC/DC-power-flow LPs — the ProblemTooLarge gate
   // below), solve the sparse quasidefinite augmented system
   //   [ diag(d)+reg   -Ae' ] [dx]   [ xi ]
   //   [ -Ae           -reg ] [dy] = [-r_p]
-  // directly via factor_kkt_sparse/solve_kkt_sparse instead — this avoids the
-  // dense Ae*Ae' fill entirely.  Off by default (env override for testing).
-  bool use_augmented =
-      !use_banded && (std::getenv("MIPSOLVERS_IPM_FORCE_AUGMENTED") != nullptr);
+  // directly via factor_kkt_sparse/solve_kkt_sparse instead. This avoids both
+  // the dense Ae*Ae' fill and the condition-number squaring inherent in normal
+  // equations. Narrow-band systems remain on their specialized Cholesky path.
+  const bool force_normal =
+      !use_banded && (std::getenv("MIPSOLVERS_IPM_FORCE_NORMAL") != nullptr);
+  bool use_augmented = !force_normal && !use_banded &&
+                       (std::getenv("MIPSOLVERS_IPM_FORCE_AUGMENTED") != nullptr);
 #ifdef MIPSOLVERS_HAVE_CHOLMOD
-  // Dense normal equations (nearly-full bandwidth — SCUC / DC power flow, whose
-  // transmission constraints couple everything) make N = Ae*Ae' expensive to
-  // form and ill-conditioned.  The sparse augmented KKT is both better
-  // conditioned (fewer IPM iterations) and cheaper (no Ae*Ae' fill), so route
-  // there whenever CHOLMOD's simplicial LDLT can factor the quasidefinite
-  // system.  Measured ~1.7x faster on 39-bus (55 vs 114 iters) and ~10x on the
-  // 6-bus relaxation.  Small/sparse-normal problems keep the parallel
-  // Accelerate Cholesky path where it is faster.
-  if (!use_banded && m > 256 && bandwidth > m / 4) use_augmented = true;
+  // Prefer the augmented quasidefinite system whenever CHOLMOD is available:
+  // it avoids the condition-number squaring of normal equations.  The outer
+  // solve contract chooses structure-preserving versus pivoting recovery; no
+  // instance identity or matrix dimension participates in that decision.
+  if (!force_normal && !use_banded) use_augmented = true;
 #endif
 
   // === Banded storage: band[(row-col)*m + col] for row >= col, row-col <= bw ===
@@ -939,6 +1210,50 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
   bool aug_use_cholmod = false;
   int aug_kdim = 0;
   bool aug_use_accel = false;  // Apple Accelerate unpivoted LDLᵀ (parallel, quasidefinite)
+#ifdef HACDCPF_HAVE_MKL_PARDISO
+  // The primary trajectory preserves the symmetric quasidefinite structure
+  // with CHOLMOD.  A separately restarted recovery trajectory uses PARDISO's
+  // pivoting portfolio.  Backend policy comes from the outer solve contract;
+  // matrix dimensions and NETLIB-specific structure never select it here.
+  const char* aug_pardiso_env = std::getenv("MIPSOLVERS_IPM_AUG_PARDISO");
+  const char* aug_pardiso_ldlt_env =
+      std::getenv("MIPSOLVERS_IPM_AUG_PARDISO_LDLT");
+  const int augmented_dim = nn + m;
+  const bool aug_pardiso_explicit =
+      aug_pardiso_env || aug_pardiso_ldlt_env;
+  const bool policy_prefers_pardiso =
+      backend_policy == AugmentedBackendPolicy::PivotingPortfolio;
+  const bool aug_use_pardiso = use_augmented &&
+      ((aug_pardiso_env && aug_pardiso_env[0] != '0') ||
+       (aug_pardiso_ldlt_env && aug_pardiso_ldlt_env[0] != '0') ||
+       (!aug_pardiso_explicit && policy_prefers_pardiso));
+  const bool aug_use_pardiso_ldlt =
+      aug_use_pardiso &&
+      aug_pardiso_ldlt_env && aug_pardiso_ldlt_env[0] != '0';
+  if (aug_use_pardiso) {
+    if (aug_use_pardiso_ldlt) {
+      aug_cache.solver = std::make_unique<MKLPardisoLDLTSolver>();
+    } else if (!aug_pardiso_explicit) {
+      aug_cache.solver = std::make_unique<MKLPardisoAdaptiveSolver>();
+    } else {
+      aug_cache.solver = std::make_unique<MKLPardisoSolver>();
+    }
+  }
+  if ((opt_.verbose || ipm_verbose_env) && use_augmented) {
+    fprintf(stderr,
+            "IPM-LP augmented backend=%s kdim=%d rows=%d variables=%d "
+            "bandwidth=%d\n",
+            aug_use_pardiso_ldlt
+                ? "pardiso-ldlt"
+                : (aug_use_pardiso
+                       ? (aug_pardiso_explicit ? "pardiso-lu"
+                                                : "pardiso-adaptive")
+                       : "cholmod"),
+            augmented_dim, m, nn, bandwidth);
+  }
+#else
+  const bool aug_use_pardiso = false;
+#endif
 #if MIPSOLVERS_USE_ACCELERATE
   // Factor the quasidefinite augmented KKT [diag(d)+reg, -Ae'; -Ae, -reg] with
   // Accelerate's multithreaded unpivoted LDLᵀ instead of the serial CHOLMOD
@@ -1059,7 +1374,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
     }
 #endif
 #ifdef MIPSOLVERS_HAVE_CHOLMOD
-    if (!aug_use_accel) {
+    if (!aug_use_accel && !aug_use_pardiso) {
       aug_chol.set_simplicial(true);  // quasidefinite (indefinite, unpivoted) LDLᵀ
       aug_use_cholmod = aug_chol.analyze(kdim, aug_ko.data(), aug_ki.data(),
                                          aug_kv.data(), static_cast<int64_t>(pos));
@@ -1089,15 +1404,19 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
 
   // Primal-dual regularization (IP-PMM style).  reg is the diagonal added to
   // the normal equations (dual reg delta) and, via 1/(d+reg), also bounds
-  // theta (primal reg rho).  It starts at reg_floor and is refreshed each
-  // iteration to track the barrier scale mu (see the loop), so it stabilizes
-  // the near-singular degenerate-LP normal equations early then vanishes as
-  // mu -> 0 to keep the solution accurate.
-  const double reg_floor = (n_fixed_vars > n_orig / 4) ? 1e-6 : 1e-10;
+  // theta (primal reg rho).  Its effective floor is machine precision; each
+  // iteration budgets the perturbation against the current nonlinear KKT
+  // residual and iterate norm.  Failed factorizations still raise reg through
+  // the dynamic retry below.
+  const double reg_floor = std::numeric_limits<double>::epsilon();
   double reg = reg_floor;
-  const int max_iter = std::min(opt_.max_iter, 200);
+  const int max_iter = std::max(0, opt_.max_iter);
+  const double effective_time_limit =
+      time_limit_sec >= 0.0 ? time_limit_sec : opt_.time_limit_sec;
   bool converged = false;
-
+  double last_pfeas = std::numeric_limits<double>::infinity();
+  double last_dfeas = std::numeric_limits<double>::infinity();
+  double last_mu = std::numeric_limits<double>::infinity();
   double t_resid = 0, t_setup = 0, t_pred = 0, t_corr = 0, t_update = 0;
   double t_fill = 0, t_factor = 0;
   double t_init_overhead = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -1279,6 +1598,11 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
   // Scratch for gated KKT iterative refinement of the Newton step.
   std::vector<double> kkt_neg_rp(m), kkt_r2(m), kkt_ddy(m), kkt_adx(m);
   std::vector<double> kkt_r1(nn), kkt_ddx(nn);
+  double iteration_kkt_initial = 0.0;
+  double iteration_kkt_final = 0.0;
+  double iteration_kkt_relative = 0.0;
+  int iteration_kkt_refinements = 0;
+  bool augmented_backend_choice_logged = false;
 #if MIPSOLVERS_USE_ACCELERATE
   // Apple Sparse matrix view over the augmented KKT CSC (values are refreshed
   // in place each iteration; the structure is fixed).
@@ -1338,6 +1662,12 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
         for (int i = 0; i < m; ++i) dy_out[i] = std::numeric_limits<double>::quiet_NaN();
         return;
       }
+      if (!augmented_backend_choice_logged &&
+          (opt_.verbose || ipm_verbose_env) && aug_cache.solver) {
+        fprintf(stderr, "IPM-LP selected augmented backend=%s\n",
+                aug_cache.solver->backend_name());
+        augmented_backend_choice_logged = true;
+      }
       for (int j = 0; j < nn; ++j) dx_out[j] = aug_dx[j];
       for (int i = 0; i < m; ++i) dy_out[i] = aug_dy[i];
       return;
@@ -1362,13 +1692,21 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
     double rhs_scale = 1.0;
     for (int i = 0; i < m; ++i) rhs_scale = std::max(rhs_scale, std::abs(r_p_d[i]));
     for (int j = 0; j < nn; ++j) rhs_scale = std::max(rhs_scale, std::abs(xi[j]));
-    // Refinement gate.  A well-conditioned solve leaves a tiny relative KKT
-    // residual (measured: afiro 1.5e-4, sc205 6e-7) and skips refinement
-    // entirely, preserving the fast path.  An ill-conditioned one (agg ~0.23,
-    // i.e. the reg bias dominates) trips the 1% trigger and is then refined
-    // down to the tight target so the bias is removed and it converges.
-    const double refine_trigger = 1e-2 * rhs_scale;
-    const double refine_target = 1e-9 * rhs_scale;
+    // Inexact-Newton forcing condition.  A direction that is accurate only
+    // relative to its (possibly huge) Newton RHS can still be too inaccurate
+    // to reduce the current nonlinear KKT residual.  Require the unregularized
+    // linear residual to be at most eta*||F|| as well as 1e-9*||rhs||.  Thus
+    // factor solves are cheap early in the trajectory and automatically
+    // tighten near the solution without model-size or instance routing.
+    constexpr double kForcingEta = 0.1;
+    const double nonlinear_kkt_norm =
+        std::max({last_pfeas, last_dfeas, last_mu});
+    const double forcing_target =
+        std::isfinite(nonlinear_kkt_norm)
+            ? std::max(1e-12, kForcingEta * nonlinear_kkt_norm)
+            : std::numeric_limits<double>::infinity();
+    const double refine_target =
+        std::min(1e-9 * rhs_scale, forcing_target);
     auto kkt_residual = [&]() -> double {
       aet_mul(dy_out, Atdy_d);         // Ae'dy
       ae_mul(dx_out, kkt_adx.data());  // Ae dx
@@ -1388,7 +1726,8 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
       return res;
     };
     double res = kkt_residual();
-    const bool need_refine = std::isfinite(res) && res > refine_trigger;
+    iteration_kkt_initial = std::max(iteration_kkt_initial, res);
+    const bool need_refine = std::isfinite(res) && res > refine_target;
     for (int ref = 0; ref < 5 && need_refine && std::isfinite(res) && res > refine_target; ++ref) {
       raw_kkt_solve(kkt_r1.data(), kkt_r2.data(), kkt_ddx.data(), kkt_ddy.data());
       for (int j = 0; j < nn; ++j) dx_out[j] += kkt_ddx[j];
@@ -1402,48 +1741,74 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
         break;
       }
       res = res_new;
+      ++iteration_kkt_refinements;
     }
+    iteration_kkt_final = std::max(iteration_kkt_final, res);
+    iteration_kkt_relative =
+        std::max(iteration_kkt_relative, res / rhs_scale);
   };
 
   // Gondzio multiple centrality corrector scratch + a shared fraction-to-
   // boundary step-length helper (used to score each corrector's step gain).
   std::vector<double> gc_xi(nn), gc_ddx(nn), gc_ddy(m), gc_ddzl(nn),
       gc_ddzu(nn), gc_rgl(nn), gc_rgu(nn), gc_zero_rp(m, 0.0);
+  int barrier_count = 0;
+  for (int j = 0; j < nn; ++j) {
+    barrier_count += static_cast<int>(flb_d[j]) + static_cast<int>(fub_d[j]);
+  }
   auto compute_step_lengths = [&](const double* dxv, const double* dzlv,
                                   const double* dzuv, double& ap_out,
                                   double& ad_out) {
-    double ap_l = 1.0, ad_l = 1.0;
-    for (int j = 0; j < nn; ++j) {
-      if (dxv[j] < -kMinVal && flb_d[j]) {
-        const double a = -kTau * gl_d[j] / dxv[j];
-        if (a < ap_l) ap_l = a;
-      }
-      if (dxv[j] > kMinVal && fub_d[j]) {
-        const double a = kTau * gu_d[j] / dxv[j];
-        if (a < ap_l) ap_l = a;
-      }
-      if (dzlv[j] < -kMinVal) {
-        const double a = -kTau * zl_d[j] / dzlv[j];
-        if (a < ad_l) ad_l = a;
-      }
-      if (dzuv[j] < -kMinVal) {
-        const double a = -kTau * zu_d[j] / dzuv[j];
-        if (a < ad_l) ad_l = a;
-      }
+    const IPMStepLengths step = ipm_centrality_step_lengths(
+        gl_d, gu_d, zl_d, zu_d, dxv, dzlv, dzuv, flb_d, fub_d, nn,
+        barrier_count, centrality_step_control);
+    ap_out = std::max(step.primal, kMinVal);
+    ad_out = std::max(step.dual, kMinVal);
+  };
+
+  double scaled_rhs_norm = 0.0;
+  double scaled_cost_norm = 0.0;
+  for (double value : b) scaled_rhs_norm = std::max(scaled_rhs_norm, std::abs(value));
+  for (double value : c) scaled_cost_norm = std::max(scaled_cost_norm, std::abs(value));
+  const double publication_primal_tol =
+      std::max(1e-10, 10.0 * std::max(0.0, opt_.tol_primal));
+  const double publication_dual_tol =
+      std::max(1e-10, 10.0 * std::max(0.0, opt_.tol_dual));
+  const double publication_gap_tol =
+      std::max(1e-10, 10.0 * std::max(0.0, opt_.tol_gap));
+  auto audit_current_iterate = [&]() {
+    Eigen::VectorXd x_original(n_orig);
+    Eigen::VectorXd row_duals_min(m);
+    Eigen::VectorXd bound_duals_lb(n_orig);
+    Eigen::VectorXd bound_duals_ub(n_orig);
+    for (int j = 0; j < n_orig; ++j) {
+      const double dc = scal.active ? scal.dc[static_cast<size_t>(j)] : 1.0;
+      x_original[j] = x_d[j] * dc;
+      bound_duals_lb[j] = flb_d[j] ? zl_d[j] / dc : 0.0;
+      bound_duals_ub[j] = fub_d[j] ? zu_d[j] / dc : 0.0;
     }
-    ap_out = std::max(ap_l, kMinVal);
-    ad_out = std::max(ad_l, kMinVal);
+    for (int i = 0; i < m; ++i) {
+      const double row_sign =
+          (any_flip && i < mi && flip_row[static_cast<size_t>(i)]) ? -1.0 : 1.0;
+      const double dr = scal.active ? scal.dr[static_cast<size_t>(i)] : 1.0;
+      row_duals_min[i] = row_sign * y_d[i] * dr;
+    }
+    return audit_ipm_lp_optimality(prob, x_original, row_duals_min,
+                                   bound_duals_lb, bound_duals_ub);
   };
 
   for (int iter = 0; iter < max_iter; ++iter) {
-    if (opt_.time_limit_sec > 0.0 && std::isfinite(opt_.time_limit_sec)) {
+    if (effective_time_limit > 0.0 && std::isfinite(effective_time_limit)) {
       const double elapsed =
           std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
               .count();
-      if (elapsed >= opt_.time_limit_sec) {
+      if (elapsed >= effective_time_limit) {
         out.stats.success = false;
         out.stats.iterations = iter;
         out.stats.status = "Time limit";
+        out.stats.primal_feas = last_pfeas;
+        out.stats.dual_feas = last_dfeas;
+        out.stats.complementarity = last_mu;
         break;
       }
     }
@@ -1468,31 +1833,61 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
       if (ap > pfeas) pfeas = ap;
     }
     double mu = (n_compl > 0) ? comp_sum / n_compl : 0.0;
+    last_pfeas = pfeas;
+    last_dfeas = dfeas;
+    last_mu = mu;
 
-    if ((opt_.verbose || ipm_verbose_env) && (iter < 3 || iter % 5 == 0))
-      fprintf(stderr, "IPM-LP %3d: pf=%.2e df=%.2e mu=%.2e\n", iter, pfeas, dfeas, mu);
-
-    if (pfeas < opt_.tol_primal && dfeas < opt_.tol_dual && mu < opt_.tol_gap) {
-      out.stats.success = true;
-      out.stats.iterations = iter;
-      out.stats.primal_feas = pfeas;
-      out.stats.dual_feas = dfeas;
-      out.stats.complementarity = mu;
-      out.stats.status = "Optimal";
-      converged = true;
-      break;
+    // Scaling may leave an absolute residual large even when the original LP
+    // already satisfies KKT (NETLIB shell is the canonical example). Use the
+    // cheap relative measures only as a trigger; the original-model audit is
+    // the authority, so this cannot publish a scaled-space false positive.
+    double scaled_primal_objective = 0.0;
+    for (int j = 0; j < n_orig; ++j) scaled_primal_objective += c[j] * x_d[j];
+    const double relative_mu =
+        mu / (1.0 + std::abs(scaled_primal_objective) /
+                        static_cast<double>(std::max(1, n_compl)));
+    const bool relative_candidate =
+        pfeas / (1.0 + scaled_rhs_norm) < opt_.tol_primal &&
+        dfeas / (1.0 + scaled_cost_norm) < opt_.tol_dual &&
+        relative_mu < opt_.tol_gap;
+    const bool absolute_candidate = pfeas < opt_.tol_primal &&
+                                    dfeas < opt_.tol_dual &&
+                                    mu < opt_.tol_gap;
+    if (absolute_candidate || relative_candidate) {
+      const IPMLPOptimalityAudit original = audit_current_iterate();
+      if (original.acceptable(publication_primal_tol, publication_dual_tol,
+                              publication_gap_tol)) {
+        out.stats.success = true;
+        out.stats.iterations = iter;
+        out.stats.primal_feas = pfeas;
+        out.stats.dual_feas = dfeas;
+        out.stats.complementarity = mu;
+        out.stats.status = absolute_candidate
+                               ? "Optimal"
+                               : "Optimal (original KKT audit)";
+        converged = true;
+        break;
+      }
     }
     t_resid += std::chrono::duration<double, std::milli>(tnow() - t_s).count();
 
     // Build Θ, precompute inv_gl, inv_gu, and factorize
     auto t_su = tnow();
     // Refresh the primal-dual regularization to track the barrier scale mu.
-    // reg damps the (otherwise unbounded on degenerate LPs) Newton step early
-    // then vanishes as mu -> 0.  Applied as primal reg in theta = 1/(d+reg) —
-    // bounding theta at 1/reg instead of the old hard 1e14 cap that amplified
-    // dx = theta*(Ae'dy) into 1e25+ garbage — and as dual reg on the
-    // normal-equations diagonal (added inside fill_and_factor).
-    reg = std::clamp(1e-6 * mu, reg_floor, 1e-2);
+    // In a regularized Newton equation the perturbation contributes at most
+    // O(reg*(1+||(x,y)||inf)) to the KKT residual.  Enforce the same eta=0.1
+    // inexact-Newton budget used by solve_step, so regularization cannot become
+    // the late-iteration accuracy floor on large-dual or degenerate models.
+    double iterate_norm = 0.0;
+    for (int j = 0; j < nn; ++j)
+      iterate_norm = std::max(iterate_norm, std::abs(x_d[j]));
+    for (int i = 0; i < m; ++i)
+      iterate_norm = std::max(iterate_norm, std::abs(y_d[i]));
+    const double nonlinear_kkt_norm = std::max({pfeas, dfeas, mu});
+    const double regularization_budget =
+        0.1 * nonlinear_kkt_norm / (1.0 + iterate_norm);
+    reg = std::clamp(std::min(1e-6 * mu, regularization_budget),
+                     reg_floor, 1e-2);
     MIPSOLVERS_OMP_PARALLEL_IF(nn > MIPSOLVERS_OMP_THRESHOLD)
     for (int j = 0; j < nn; ++j) {
       if (j < n_orig && is_fixed[j]) {
@@ -1619,6 +2014,10 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
 
     // ---- Predictor (affine, σ=0) ----
     auto t_p = tnow();
+    iteration_kkt_initial = 0.0;
+    iteration_kkt_final = 0.0;
+    iteration_kkt_relative = 0.0;
+    iteration_kkt_refinements = 0;
 
     // ξ_aff = -r_d - z_l + z_u; solve for (Δx_aff, Δy_aff).
     for (int j = 0; j < nn; ++j)
@@ -1631,28 +2030,16 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
       dzu_aff_d[j] = fub_d[j] * (-zu_d[j] + zu_d[j] * inv_gu_d[j] * dx_aff_d[j]);
     }
 
-    // Affine step sizes
-    double ap_aff = 1.0, ad_aff = 1.0;
-    for (int j = 0; j < nn; ++j) {
-      if (dx_aff_d[j] < -kMinVal && flb_d[j]) {
-        double a = -kTau * gl_d[j] / dx_aff_d[j];
-        if (a < ap_aff) ap_aff = a;
-      }
-      if (dx_aff_d[j] > kMinVal && fub_d[j]) {
-        double a = kTau * gu_d[j] / dx_aff_d[j];
-        if (a < ap_aff) ap_aff = a;
-      }
-      if (dzl_aff_d[j] < -kMinVal) {
-        double a = -kTau * zl_d[j] / dzl_aff_d[j];
-        if (a < ad_aff) ad_aff = a;
-      }
-      if (dzu_aff_d[j] < -kMinVal) {
-        double a = -kTau * zu_d[j] / dzu_aff_d[j];
-        if (a < ad_aff) ad_aff = a;
-      }
-    }
-    ap_aff = std::max(ap_aff, kMinVal);
-    ad_aff = std::max(ad_aff, kMinVal);
+    // Mehrotra's affine point uses the maximum positivity step.  The legacy
+    // branch retains kTau exactly for same-binary A/B experiments.
+    const double affine_fraction = centrality_step_control
+                                       ? 1.0 - std::numeric_limits<double>::epsilon()
+                                       : kTau;
+    const IPMStepLengths affine_step = ipm_maximum_step_lengths(
+        gl_d, gu_d, zl_d, zu_d, dx_aff_d, dzl_aff_d, dzu_aff_d, flb_d,
+        fub_d, nn, affine_fraction);
+    const double ap_aff = std::max(affine_step.primal, kMinVal);
+    const double ad_aff = std::max(affine_step.dual, kMinVal);
 
     // Centering parameter
     double mu_aff = 0.0;
@@ -1665,7 +2052,13 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
     // mu_aff / mu would be 0/0 = NaN.  With no complementarity there is
     // nothing to center — take a pure affine step instead of letting NaN
     // propagate into the corrector rhs and the returned solution.
-    double sigma = (mu > 0.0) ? std::min(std::pow(mu_aff / mu, 3.0), 0.5) : 0.0;
+    const double sigma_raw =
+        (mu > 0.0) ? std::pow(std::max(0.0, mu_aff / mu), 3.0) : 0.0;
+    // Standard Mehrotra centering allows sigma up to one.  The old 0.5 cap is
+    // retained only behind the legacy comparison switch.
+    const double sigma = centrality_step_control
+                             ? std::clamp(sigma_raw, 0.0, 1.0)
+                             : std::min(sigma_raw, 0.5);
     double sigma_mu = sigma * mu;
 
     t_pred += std::chrono::duration<double, std::milli>(tnow() - t_p).count();
@@ -1678,12 +2071,11 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
     
     if (skip_corrector) {
       // Use affine direction directly (with very small centering)
-      ap = ap_aff;
-      ad = ad_aff;
       std::memcpy(dx_d, dx_aff_d, sizeof(double) * nn);
       std::memcpy(dy_d, dy_aff_d, sizeof(double) * m);
       std::memcpy(dzl.data(), dzl_aff_d, sizeof(double) * nn);
       std::memcpy(dzu.data(), dzu_aff_d, sizeof(double) * nn);
+      compute_step_lengths(dx_d, dzl.data(), dzu.data(), ap, ad);
     } else {
       // ---- Corrector (centering + Mehrotra second-order) ----
       for (int j = 0; j < nn; ++j) {
@@ -1699,29 +2091,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
         dzu[j] = fub_d[j] * ((sigma_mu + dzu_aff_d[j] * dx_aff_d[j]) * inv_gu_d[j] - zu_d[j] + zu_d[j] * inv_gu_d[j] * dx_d[j]);
       }
 
-      // Corrector step sizes
-      ap = 1.0;
-      ad = 1.0;
-      for (int j = 0; j < nn; ++j) {
-        if (dx_d[j] < -kMinVal && flb_d[j]) {
-          double a = -kTau * gl_d[j] / dx_d[j];
-          if (a < ap) ap = a;
-        }
-        if (dx_d[j] > kMinVal && fub_d[j]) {
-          double a = kTau * gu_d[j] / dx_d[j];
-          if (a < ap) ap = a;
-        }
-        if (dzl[j] < -kMinVal) {
-          double a = -kTau * zl_d[j] / dzl[j];
-          if (a < ad) ad = a;
-        }
-        if (dzu[j] < -kMinVal) {
-          double a = -kTau * zu_d[j] / dzu[j];
-          if (a < ad) ad = a;
-        }
-      }
-      ap = std::max(ap, kMinVal);
-      ad = std::max(ad, kMinVal);
+      compute_step_lengths(dx_d, dzl.data(), dzu.data(), ap, ad);
     }
 
     // ---- Gondzio multiple centrality correctors ----
@@ -1733,6 +2103,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
     // Mehrotra step is already good, correcting only perturbs it and wastes
     // solves (measured: +7 iters on 39-bus, +6.5s on 118-bus).  Throttling is
     // the degenerate slow-start that stalls the affine step (6-bus: 64->30).
+    int accepted_gondzio = 0;
     if (!skip_corrector && opt_.max_correctors > 0 && mu > 0.0 &&
         std::min(ap, ad) < 0.9) {
       constexpr double kBetaMin = 0.1, kBetaMax = 10.0;
@@ -1782,6 +2153,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
         if (ap_new + ad_new > ap + ad + kGammaAccept * kDeltaAlpha) {
           ap = ap_new;
           ad = ad_new;
+          ++accepted_gondzio;
         } else {
           for (int j = 0; j < nn; ++j) {
             dx_d[j] -= gc_ddx[j];
@@ -1792,6 +2164,18 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
           break;
         }
       }
+    }
+
+    if ((opt_.verbose || ipm_verbose_env) && (iter < 3 || iter % 5 == 0)) {
+      fprintf(stderr,
+              "IPM-LP %4d: pf=%.2e df=%.2e mu=%.2e reg=%.1e "
+              "aff=(%.2e,%.2e) sigma=%.2e step=(%.2e,%.2e) "
+              "block=(%d,%d) kkt=(%.2e->%.2e,rel=%.2e,r%d) gc=%d\n",
+              iter, pfeas, dfeas, mu, reg, ap_aff, ad_aff, sigma, ap, ad,
+              affine_step.primal_index, affine_step.dual_index,
+              iteration_kkt_initial, iteration_kkt_final,
+              iteration_kkt_relative,
+              iteration_kkt_refinements, accepted_gondzio);
     }
 
     t_corr += std::chrono::duration<double, std::milli>(tnow() - t_c).count();
@@ -1858,44 +2242,17 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
   if (!converged && out.stats.status.empty()) {
     out.stats.status = "MaxIter";
     out.stats.success = false;
+    out.stats.iterations = max_iter;
+  }
+  if (!converged) {
+    out.stats.primal_feas = last_pfeas;
+    out.stats.dual_feas = last_dfeas;
+    out.stats.complementarity = last_mu;
   }
   out.x.resize(n_orig);
   for (int j = 0; j < n_orig; ++j)
     out.x(j) = scal.active ? x_d[j] * scal.dc[static_cast<size_t>(j)] : x_d[j];
   out.stats.objective = prob.c.dot(out.x);
-  // Original-space feasibility audit.  A scaled (Ruiz) solve can converge in
-  // scaled coordinates yet map back to an infeasible original-space point
-  // (observed on afiro).  Reject such false-optima so solve_lp's unscaled retry
-  // can recover, and so "Optimal" is never reported for a violated solution.
-  if (out.stats.success) {
-    double bnd_viol = 0.0;
-    for (int j = 0; j < n_orig; ++j) {
-      const double lbj = prob.vars[static_cast<size_t>(j)].lb;
-      const double ubj = prob.vars[static_cast<size_t>(j)].ub;
-      if (lbj > -1e19) bnd_viol = std::max(bnd_viol, lbj - out.x(j));
-      if (ubj < 1e19) bnd_viol = std::max(bnd_viol, out.x(j) - ubj);
-    }
-    double row_viol = 0.0;
-    if (prob.A.rows() > 0) {
-      const Eigen::VectorXd ax = prob.A * out.x;
-      for (int i = 0; i < ax.size(); ++i)
-        row_viol = std::max(row_viol, ax(i) - prob.b(i));
-    }
-    if (prob.Aeq.rows() > 0) {
-      const Eigen::VectorXd ae = prob.Aeq * out.x;
-      for (int i = 0; i < ae.size(); ++i)
-        row_viol = std::max(row_viol, std::abs(ae(i) - prob.beq(i)));
-    }
-    double scale = 1.0;
-    if (prob.b.size()) scale = std::max(scale, prob.b.cwiseAbs().maxCoeff());
-    if (prob.beq.size()) scale = std::max(scale, prob.beq.cwiseAbs().maxCoeff());
-    if (out.x.size()) scale = std::max(scale, out.x.cwiseAbs().maxCoeff());
-    const double audit_tol = 1e-6 * scale;
-    if (std::max(bnd_viol, row_viol) > audit_tol) {
-      out.stats.success = false;
-      out.stats.status = "Residual audit rejected";
-    }
-  }
   if (m > 0) {
     out.constraint_duals.resize(m);
     for (int i = 0; i < m; ++i) {
@@ -1911,10 +2268,40 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob, const Eigen::
   out.box_dual_lb.resize(n_orig);
   out.box_dual_ub.resize(n_orig);
   for (int j = 0; j < n_orig; ++j) {
-    out.box_dual_lb(j) = scal.active ? zl_d[j] / scal.dc[static_cast<size_t>(j)]
-                                     : zl_d[j];
-    out.box_dual_ub(j) = scal.active ? zu_d[j] / scal.dc[static_cast<size_t>(j)]
-                                     : zu_d[j];
+    const double inv_scale =
+        scal.active ? 1.0 / scal.dc[static_cast<size_t>(j)] : 1.0;
+    out.box_dual_lb(j) = flb_d[j] ? zl_d[j] * inv_scale : 0.0;
+    out.box_dual_ub(j) = fub_d[j] ? zu_d[j] * inv_scale : 0.0;
+  }
+
+  // The iteration test is intentionally cheap and runs in scaled coordinates.
+  // Publication is fail-closed against a full KKT audit in the original model.
+  Eigen::VectorXd row_duals_min = sense_sign * out.constraint_duals;
+  const IPMLPOptimalityAudit audit = audit_ipm_lp_optimality(
+      prob, out.x, row_duals_min, out.box_dual_lb, out.box_dual_ub);
+  if (audit.valid) {
+    out.stats.unscaled_primal_feas = audit.primal_residual_inf;
+    out.stats.unscaled_dual_feas = audit.dual_residual_inf;
+    out.stats.unscaled_complementarity =
+        std::abs(audit.primal_objective - audit.dual_objective);
+    out.stats.relative_primal_residual = audit.relative_primal_residual;
+    out.stats.relative_dual_residual = audit.relative_dual_residual;
+    out.stats.relative_gap = audit.relative_gap;
+    out.stats.dual_objective = sense_sign * audit.dual_objective;
+  }
+  const bool original_optimal = audit.acceptable(
+      publication_primal_tol, publication_dual_tol, publication_gap_tol);
+  const bool termination_enabled = opt_.tol_primal >= 0.0 &&
+                                   opt_.tol_dual >= 0.0 &&
+                                   opt_.tol_gap >= 0.0;
+  if (out.stats.success) {
+    if (!original_optimal) {
+      out.stats.success = false;
+      out.stats.status = "Optimality audit rejected";
+    }
+  } else if (termination_enabled && original_optimal) {
+    out.stats.success = true;
+    out.stats.status = "Optimal (final original KKT audit)";
   }
   out.stats.runtime_sec =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();

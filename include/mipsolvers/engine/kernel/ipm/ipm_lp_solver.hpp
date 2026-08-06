@@ -35,6 +35,10 @@ struct IPMLPOptions {
   double tol_gap{1e-8};      ///< Complementarity gap tolerance
   int ruiz_rounds{10};       ///< Ruiz equilibration rounds (0 = disable)
   int max_correctors{3};     ///< Max Gondzio centering correctors per iteration
+  /// Keep blocking complementarity products away from zero with the adaptive
+  /// primal/dual step rule used by modern bounded-variable IPMs.  Disable only
+  /// for controlled comparison with the legacy fixed 0.9995 boundary fraction.
+  bool centrality_step_control{true};
   bool presolve{true};       ///< Enable presolve (fixed vars, singleton rows, etc.)
   bool crossover{false};     ///< Purify solution to a vertex (for simplex warm-start)
   bool verbose{false};       ///< Print per-iteration log
@@ -46,6 +50,36 @@ struct IPMLPOptions {
   /// config (see highs_lp_presolve_config_from_env).
   bool use_highs_presolve{false};
 };
+
+/// Original-model KKT audit for a bounded-variable LP solution.
+///
+/// Dual inputs use the minimization convention, regardless of LPModel::sense:
+/// stationarity is c_min - A' y - z_l + z_u = 0, and an upper-only row has
+/// y <= 0. This convention is also used internally by the native LP IPM.
+struct IPMLPOptimalityAudit {
+  bool valid{false};
+  double primal_residual_inf{std::numeric_limits<double>::infinity()};
+  double dual_residual_inf{std::numeric_limits<double>::infinity()};
+  double relative_primal_residual{std::numeric_limits<double>::infinity()};
+  double relative_dual_residual{std::numeric_limits<double>::infinity()};
+  double primal_objective{std::numeric_limits<double>::quiet_NaN()};
+  double dual_objective{std::numeric_limits<double>::quiet_NaN()};
+  double relative_gap{std::numeric_limits<double>::infinity()};
+
+  bool acceptable(double primal_tolerance, double dual_tolerance,
+                  double gap_tolerance) const;
+};
+
+/// Recompute primal feasibility, dual feasibility, and the duality gap in the
+/// unscaled LPModel coordinates. Optional bound overrides support cached node
+/// LPs without copying the constraint matrices. Exposed for numerical tests.
+IPMLPOptimalityAudit audit_ipm_lp_optimality(
+    const LPModel& lp, const Eigen::VectorXd& x,
+    const Eigen::VectorXd& row_duals_min,
+    const Eigen::VectorXd& box_dual_lb_min,
+    const Eigen::VectorXd& box_dual_ub_min,
+    const Eigen::VectorXd* lower_bounds_override = nullptr,
+    const Eigen::VectorXd* upper_bounds_override = nullptr);
 
 /// Forward declaration for Apple Accelerate sparse Cholesky cache.
 struct AccelSparseCache;
@@ -135,11 +169,18 @@ class NativeIPMLPAdapter final : public SolverAdapter {
   void set_solve_time_limit(double time_limit_sec);
 
  private:
+  enum class AugmentedBackendPolicy {
+    StructurePreserving,
+    PivotingPortfolio,
+  };
+
   /// Core solve with an explicit Ruiz round count.  The public entry points
   /// retry with scaling disabled when a scaled solve fails to converge
   /// (scaling helps most problems but stalls some degenerate ones).
   SolveResult solve_lp_impl(const LPModel& prob, const Eigen::VectorXd& x0,
-                            int ruiz_rounds) const;
+                            int ruiz_rounds,
+                            double time_limit_sec,
+                            AugmentedBackendPolicy backend_policy) const;
 
   IPMLPOptions opt_;
   mutable std::unique_ptr<AccelSparseCache> accel_cache_;

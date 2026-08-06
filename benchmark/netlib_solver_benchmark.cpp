@@ -63,13 +63,14 @@ constexpr double kObjectiveTolerance = 1e-5;
 constexpr double kFeasibilityTolerance = 1e-7;
 // S1 measurement-contract schema version. Bump when the report field set or
 // aggregation semantics change so downstream comparisons stay well-defined.
-constexpr const char* kSchemaVersion = "s1-measurement-contract-1";
+constexpr const char* kSchemaVersion = "s1-measurement-contract-2";
 
 struct Config {
   fs::path data_dir{"tests/data"};
   fs::path csv_path;
   fs::path json_path;
   std::string case_filter;
+  std::vector<std::string> case_names;
   std::vector<std::string> solvers;
   int repeats{1};
   int max_iterations{100000};
@@ -115,6 +116,10 @@ struct RunResult {
   double max_row_violation{std::numeric_limits<double>::infinity()};
   double max_bound_violation{std::numeric_limits<double>::infinity()};
   double normalized_primal_violation{std::numeric_limits<double>::infinity()};
+  double relative_primal_residual{std::numeric_limits<double>::quiet_NaN()};
+  double relative_dual_residual{std::numeric_limits<double>::quiet_NaN()};
+  double relative_gap{std::numeric_limits<double>::quiet_NaN()};
+  double dual_objective{std::numeric_limits<double>::quiet_NaN()};
   std::string status;
   Eigen::VectorXd x;
 };
@@ -122,6 +127,7 @@ struct RunResult {
 struct Summary {
   std::string solver;
   int attempts{0};
+  int available{0};
   int successes{0};
   int accurate{0};
   double total_sec{0.0};
@@ -155,7 +161,7 @@ std::string csv_escape(const std::string& text) {
 bool parse_args(int argc, char** argv, Config& cfg) {
   const std::vector<std::string> defaults = {
       "highs-simplex", "highs-ipm", "highs-pdlp", "scip-direct", "scip",
-      "native-dual-simplex", "native-ipm", "native-pdlp",
+      "native-dual-simplex", "native-ipm", "native-ipm-direct", "native-pdlp",
       "native-lcqp", "ipopt"};
   cfg.solvers = defaults;
   for (int i = 1; i < argc; ++i) {
@@ -175,6 +181,9 @@ bool parse_args(int argc, char** argv, Config& cfg) {
       const char* v = value("--json"); if (!v) return false; cfg.json_path = v;
     } else if (arg == "--case") {
       const char* v = value("--case"); if (!v) return false; cfg.case_filter = v;
+    } else if (arg == "--cases") {
+      const char* v = value("--cases"); if (!v) return false;
+      cfg.case_names = split(v, ',');
     } else if (arg == "--solvers") {
       const char* v = value("--solvers"); if (!v) return false;
       cfg.solvers = split(v, ',');
@@ -200,7 +209,10 @@ bool parse_args(int argc, char** argv, Config& cfg) {
           << "Usage: netlib_solver_benchmark [options]\n"
           << "  --data-dir DIR       tests/data directory\n"
           << "  --case TEXT          run matching instance names only\n"
+          << "  --cases A,B          run an exact comma-separated case list\n"
           << "  --solvers A,B        select algorithms\n"
+          << "                       IPM keys: native-ipm-direct,\n"
+          << "                       native-ipm-legacy-step\n"
           << "                       native DSE keys: native-dual-devex,\n"
           << "                       native-dual-structural-dse,\n"
           << "                       native-dual-exact-dse,\n"
@@ -334,6 +346,10 @@ std::vector<CaseInfo> load_cases(const Config& cfg) {
   std::vector<CaseInfo> cases;
   for (const auto& [name, reference] : refs) {
     if (!cfg.case_filter.empty() && name.find(cfg.case_filter) == std::string::npos)
+      continue;
+    if (!cfg.case_names.empty() &&
+        std::find(cfg.case_names.begin(), cfg.case_names.end(), name) ==
+            cfg.case_names.end())
       continue;
     CaseInfo info;
     info.name = name;
@@ -648,13 +664,21 @@ RunResult run_adapter(const CaseInfo& kase, const std::string& solver,
     } else {
       row.solver = "Native-DualSimplex(+HiGHS-presolve)";
     }
-  } else if (solver == "native-ipm") {
+  } else if (solver == "native-ipm" || solver == "native-ipm-direct" ||
+             solver == "native-ipm-legacy-step") {
     eng::IPMLPOptions opt;
     opt.max_iter = std::min(cfg.max_iterations, 2000);
     opt.time_limit_sec = cfg.time_limit_sec;
-    opt.use_highs_presolve = true;
+    opt.use_highs_presolve = solver != "native-ipm-direct";
+    opt.centrality_step_control = solver != "native-ipm-legacy-step";
     result = eng::NativeIPMLPAdapter(opt).solve_lp(kase.lp);
-    row.solver = "Native-IPM(+HiGHS-presolve)";
+    if (!opt.use_highs_presolve) {
+      row.solver = "Native-IPM[centrality-step,direct]";
+    } else {
+      row.solver = opt.centrality_step_control
+                       ? "Native-IPM[centrality-step](+HiGHS-presolve)"
+                       : "Native-IPM[legacy-step](+HiGHS-presolve)";
+    }
   } else if (solver == "native-pdlp") {
     eng::PDLPOptions opt;
     opt.max_iter = cfg.max_iterations;
@@ -703,6 +727,10 @@ RunResult run_adapter(const CaseInfo& kase, const std::string& solver,
         1000.0 * result.stats.dse_initialization_time_sec;
     row.certified_dse_ms = 1000.0 * result.stats.certified_dse_time_sec;
     row.native_kernel_ms = 1000.0 * result.stats.native_dual_kernel_time_sec;
+    row.relative_primal_residual = result.stats.relative_primal_residual;
+    row.relative_dual_residual = result.stats.relative_dual_residual;
+    row.relative_gap = result.stats.relative_gap;
+    row.dual_objective = result.stats.dual_objective;
     if (row.dual_pivots > 0) {
       row.native_kernel_ms_per_dual_pivot =
           std::max(0.0, row.native_kernel_ms - row.dse_initialization_ms) /
@@ -755,11 +783,14 @@ std::vector<Summary> summarize(const std::vector<RunResult>& rows) {
     double log_sum = 0.0;
     for (const RunResult* row : members) {
       ++s.attempts;
+      s.available += row->available ? 1 : 0;
       s.successes += row->success ? 1 : 0;
       s.accurate += row->accurate ? 1 : 0;
       s.total_sec += row->runtime_ms / 1000.0;
-      times.push_back(row->runtime_ms);
-      log_sum += std::log(std::max(1e-6, row->runtime_ms));
+      if (row->available) {
+        times.push_back(row->runtime_ms);
+        log_sum += std::log(std::max(1e-6, row->runtime_ms));
+      }
       if (row->native_telemetry) {
         ++s.native_telemetry_count;
         s.mean_dual_pivots += row->dual_pivots;
@@ -774,7 +805,9 @@ std::vector<Summary> summarize(const std::vector<RunResult>& rows) {
         speedups.push_back(it->second / std::max(1e-6, row->runtime_ms));
     }
     s.median_ms = median(times);
-    s.geometric_mean_ms = std::exp(log_sum / std::max<std::size_t>(1, members.size()));
+    s.geometric_mean_ms = times.empty()
+                             ? 0.0
+                             : std::exp(log_sum / times.size());
     if (s.native_telemetry_count > 0) {
       s.mean_dual_pivots /= s.native_telemetry_count;
       s.mean_dse_initialization_ms /= s.native_telemetry_count;
@@ -839,6 +872,8 @@ json build_provenance(const std::string& command_line) {
   const std::string compiler = std::string("clang ") + __clang_version__;
 #elif defined(__GNUC__)
   const std::string compiler = std::string("gcc ") + __VERSION__;
+#elif defined(_MSC_VER)
+  const std::string compiler = "msvc " + std::to_string(_MSC_VER);
 #else
   const std::string compiler = "unknown";
 #endif
@@ -879,7 +914,9 @@ void write_csv(const fs::path& path, const std::vector<RunResult>& rows) {
          "certified_dse_candidates,certified_dse_rejections,"
          "certified_dse_ms,native_kernel_ms,"
          "native_kernel_ms_per_dual_pivot,objective,reference_objective,objective_rel_error,"
-         "max_row_violation,max_bound_violation,normalized_primal_violation,status\n";
+         "max_row_violation,max_bound_violation,normalized_primal_violation,"
+         "relative_primal_residual,relative_dual_residual,relative_gap,"
+         "dual_objective,status\n";
   out << std::setprecision(17);
   for (const auto& r : rows) {
     out << r.case_name << ',' << csv_escape(r.solver) << ',' << r.repeat << ','
@@ -893,6 +930,8 @@ void write_csv(const fs::path& path, const std::vector<RunResult>& rows) {
         << r.objective << ',' << r.reference_objective
         << ',' << r.objective_rel_error << ',' << r.max_row_violation << ','
         << r.max_bound_violation << ',' << r.normalized_primal_violation << ','
+        << r.relative_primal_residual << ',' << r.relative_dual_residual << ','
+        << r.relative_gap << ',' << r.dual_objective << ','
         << csv_escape(r.status) << '\n';
   }
 }
@@ -936,11 +975,16 @@ void write_json(const fs::path& path, const Config& cfg,
         {"reference_objective", r.reference_objective},
         {"objective_rel_error", finite_or_null(r.objective_rel_error)},
         {"normalized_primal_violation", finite_or_null(r.normalized_primal_violation)},
+        {"relative_primal_residual", finite_or_null(r.relative_primal_residual)},
+        {"relative_dual_residual", finite_or_null(r.relative_dual_residual)},
+        {"relative_gap", finite_or_null(r.relative_gap)},
+        {"dual_objective", finite_or_null(r.dual_objective)},
         {"status", r.status}});
   }
   for (const auto& s : summaries) {
     root["summary"].push_back({
         {"solver", s.solver}, {"attempts", s.attempts},
+        {"available", s.available},
         {"successes", s.successes}, {"accurate", s.accurate},
         {"total_sec", s.total_sec}, {"median_ms", s.median_ms},
         {"geometric_mean_ms", s.geometric_mean_ms},
@@ -957,17 +1001,18 @@ void write_json(const fs::path& path, const Config& cfg,
 void print_summary(const std::vector<Summary>& summaries) {
   std::cout << "\nSummary (accuracy requires success, rel.obj<=1e-5, "
                "normalized primal violation<=1e-7)\n";
-  std::printf("%-40s %9s %9s %12s %12s %11s\n", "Algorithm", "Success",
-              "Accurate", "Median ms", "GeoMean ms", "vs HiGHS");
-  std::printf("%s\n", std::string(100, '-').c_str());
+  std::printf("%-40s %9s %9s %9s %12s %12s %11s\n", "Algorithm", "Available",
+              "Success", "Accurate", "Median ms", "GeoMean ms", "vs HiGHS");
+  std::printf("%s\n", std::string(110, '-').c_str());
   for (const auto& s : summaries) {
     char speedup[32] = "-";
     if (std::isfinite(s.geometric_speedup_vs_highs_simplex))
       std::snprintf(speedup, sizeof(speedup), "%.3fx",
                     s.geometric_speedup_vs_highs_simplex);
-    std::printf("%-40s %4d/%-4d %4d/%-4d %12.3f %12.3f %11s\n",
-                s.solver.c_str(), s.successes, s.attempts, s.accurate,
-                s.attempts, s.median_ms, s.geometric_mean_ms, speedup);
+    std::printf("%-40s %4d/%-4d %4d/%-4d %4d/%-4d %12.3f %12.3f %11s\n",
+                s.solver.c_str(), s.available, s.attempts, s.successes,
+                s.attempts, s.accurate, s.attempts, s.median_ms,
+                s.geometric_mean_ms, speedup);
   }
   bool have_native_telemetry = false;
   for (const auto& s : summaries) {
@@ -1210,6 +1255,12 @@ int main(int argc, char** argv) {
                       row.accurate ? "ACCURATE" : (row.success ? "WRONG" : "FAIL"),
                       row.objective_rel_error, row.normalized_primal_violation,
                       row.status.c_str());
+          if (std::isfinite(row.relative_dual_residual) ||
+              std::isfinite(row.relative_gap)) {
+            std::printf("    original-kkt primal=%.3e dual=%.3e gap=%.3e\n",
+                        row.relative_primal_residual,
+                        row.relative_dual_residual, row.relative_gap);
+          }
           if (row.native_telemetry) {
             std::printf("    dual_pivots=%d init=%.6f ms/%d solves "
                         "kernel=%.3f ms %.6f ms/pivot\n",

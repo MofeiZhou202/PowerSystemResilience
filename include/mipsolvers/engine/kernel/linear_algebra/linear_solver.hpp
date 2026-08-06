@@ -16,6 +16,8 @@ class SparseLinearSolver {
   virtual void analyze_pattern(const Eigen::SparseMatrix<double>& a) = 0;
   virtual bool factorize(const Eigen::SparseMatrix<double>& a) = 0;
   virtual bool solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) = 0;
+  /// Number of pivots perturbed by the last numerical factorization.
+  virtual int perturbed_pivots() const { return -1; }
   /// Factor inertia when exposed by a symmetric-indefinite backend.
   virtual int negative_eigenvalues() const { return -1; }
   virtual int estimated_deficiency() const { return -1; }
@@ -91,7 +93,44 @@ class MKLPardisoSolver final : public SparseLinearSolver {
   void analyze_pattern(const Eigen::SparseMatrix<double>& a) override;
   bool factorize(const Eigen::SparseMatrix<double>& a) override;
   bool solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) override;
+  int perturbed_pivots() const override;
 
+ private:
+  class Impl;
+  std::unique_ptr<Impl> impl_;
+  bool empty_system_{false};
+};
+
+/// MKL PARDISO symmetric-indefinite LDL^T backend for augmented KKT systems.
+/// The lower triangle is authoritative; callers may still provide a full
+/// symmetric matrix because Eigen's PardisoLDLT wrapper selects that triangle.
+class MKLPardisoLDLTSolver final : public SparseLinearSolver {
+ public:
+  MKLPardisoLDLTSolver();
+  ~MKLPardisoLDLTSolver() override;
+  const char* backend_name() const override;
+  void analyze_pattern(const Eigen::SparseMatrix<double>& a) override;
+  bool factorize(const Eigen::SparseMatrix<double>& a) override;
+  bool solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) override;
+  int perturbed_pivots() const override;
+
+ private:
+  class Impl;
+  std::unique_ptr<Impl> impl_;
+  bool empty_system_{false};
+};
+
+/// One-shot numerical portfolio for symmetric-indefinite KKT matrices.
+/// The first factorization/solve is evaluated with both PARDISO LU and LDLT;
+/// subsequent factorizations reuse the fastest backward-stable backend.
+class MKLPardisoAdaptiveSolver final : public SparseLinearSolver {
+ public:
+  MKLPardisoAdaptiveSolver();
+  ~MKLPardisoAdaptiveSolver() override;
+  const char* backend_name() const override;
+  void analyze_pattern(const Eigen::SparseMatrix<double>& a) override;
+  bool factorize(const Eigen::SparseMatrix<double>& a) override;
+  bool solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) override;
  private:
   class Impl;
   std::unique_ptr<Impl> impl_;

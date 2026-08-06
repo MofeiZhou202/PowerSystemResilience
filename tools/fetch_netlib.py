@@ -41,6 +41,8 @@ SUMMARY_ROW = re.compile(
     r"(?P<objective>[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:E[+-]?\d+)?)"
 )
 
+CPLEX_TABLE_HEADER = "Problem        CPLEX(Sparc)          MINOS(MIPS)"
+
 
 def download(url: str) -> bytes:
     request = urllib.request.Request(url, headers={"User-Agent": "MIPSolvers-NETLIB-fetch"})
@@ -68,6 +70,51 @@ def parse_references(text: str) -> dict[str, Reference]:
         )
     if len(references) < 80:
         raise RuntimeError(f"parsed only {len(references)} official NETLIB references")
+
+    # The first summary table contains 1988 MINOS/VAX values.  The same
+    # official readme later publishes double-precision CPLEX/Sparc revisions
+    # for the numerically sensitive models.  Prefer that first revised column
+    # when present; the second MINOS/MIPS column is an independent comparison,
+    # not a replacement for CPLEX.  Fixed column boundaries are required here
+    # because some rows intentionally leave the CPLEX field blank.
+    lines = text.splitlines()
+    try:
+        header_index = next(
+            i for i, line in enumerate(lines) if CPLEX_TABLE_HEADER in line
+        )
+    except StopIteration:
+        raise RuntimeError("official NETLIB CPLEX revision table is missing")
+    # Numeric rows use a 12-character problem field followed by two
+    # 21-character right-aligned result fields.  The labels are centered, so
+    # their text positions are not valid field boundaries.
+    problem_column_end = 12
+    minos_column = 33
+    revised = 0
+    for line in lines[header_index + 1 :]:
+        if line.startswith("The above CPLEX"):
+            break
+        if not line.strip() or len(line) <= problem_column_end:
+            continue
+        name = line[:problem_column_end].strip()
+        cplex_value = line[problem_column_end:minos_column].strip()
+        key = canonical_name(name)
+        if key not in references or not cplex_value:
+            continue
+        try:
+            objective = float(cplex_value)
+        except ValueError:
+            continue
+        old = references[key]
+        references[key] = Reference(
+            official_name=old.official_name,
+            rows=old.rows,
+            columns=old.columns,
+            nonzeros=old.nonzeros,
+            objective=objective,
+        )
+        revised += 1
+    if revised < 8:
+        raise RuntimeError(f"parsed only {revised} CPLEX NETLIB revisions")
     return references
 
 
@@ -107,7 +154,8 @@ def write_provenance(path: Path, count: int, source: str) -> None:
         f"- 官方规模与参考目标：{OFFICIAL_README}\n"
         "- 获取工具：`tools/fetch_netlib.py`\n\n"
         "`mps_manifest.csv` 保存每个解压文件的 SHA-256。参考目标来自 NETLIB "
-        "官方 README；部分数值困难实例在不同求解器和容差下可能得到略有差异的"
+        "官方 README：默认取问题汇总表，对后续 CPLEX(Sparc) 修订表中有数值的"
+        "案例优先取双精度 CPLEX 结果。部分数值困难实例在不同求解器和容差下可能得到略有差异的"
         "目标值，因此 benchmark 还会独立检查原模型可行性。\n\n"
         "Data-Netlib 仓库明确说明其 EPL-2.0 许可适用于构建系统而不适用于 "
         "`*.mps.gz` 数据文件。重新分发算例前应单独确认原始问题数据的许可条件；"

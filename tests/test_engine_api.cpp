@@ -583,4 +583,86 @@ TEST_CASE("MKLPardisoSolver: backend name is correct", "[engine][linear-solver][
   MKLPardisoSolver solver;
   CHECK(std::string(solver.backend_name()) == "Intel-MKL-PARDISO(Eigen)");
 }
+
+static void run_symmetric_indefinite_solve(SparseLinearSolver& solver,
+                                            bool analyze_first) {
+  // K = [ 2  1  0; 1 -2  1; 0  1  3 ] has both positive and negative
+  // eigenvalues.  This exercises PARDISO's symmetric-indefinite mode rather
+  // than merely testing LDLT on a positive-definite matrix.
+  Eigen::SparseMatrix<double> k(3, 3);
+  k.insert(0, 0) = 2.0;
+  k.insert(0, 1) = 1.0;
+  k.insert(1, 0) = 1.0;
+  k.insert(1, 1) = -2.0;
+  k.insert(1, 2) = 1.0;
+  k.insert(2, 1) = 1.0;
+  k.insert(2, 2) = 3.0;
+  k.makeCompressed();
+  Eigen::VectorXd expected(3);
+  expected << 1.0, -2.0, 0.5;
+  const Eigen::VectorXd rhs = k * expected;
+
+  if (analyze_first) solver.analyze_pattern(k);
+  REQUIRE(solver.factorize(k));
+  Eigen::VectorXd x;
+  REQUIRE(solver.solve(rhs, x));
+  REQUIRE(x.size() == expected.size());
+  CHECK((x - expected).lpNorm<Eigen::Infinity>() == Approx(0.0).margin(1e-11));
+}
+
+TEST_CASE("MKLPardisoLDLTSolver: symmetric indefinite 3x3 solve",
+          "[engine][linear-solver][pardiso][ldlt]") {
+  MKLPardisoLDLTSolver solver;
+  run_symmetric_indefinite_solve(solver, true);
+}
+
+TEST_CASE("MKLPardisoLDLTSolver: factorize without prior analyze_pattern",
+          "[engine][linear-solver][pardiso][ldlt]") {
+  MKLPardisoLDLTSolver solver;
+  run_symmetric_indefinite_solve(solver, false);
+}
+
+TEST_CASE("MKLPardisoLDLTSolver: empty square system",
+          "[engine][linear-solver][pardiso][ldlt]") {
+  MKLPardisoLDLTSolver solver;
+  Eigen::SparseMatrix<double> a(0, 0);
+  a.makeCompressed();
+  solver.analyze_pattern(a);
+  CHECK(solver.factorize(a));
+  Eigen::VectorXd rhs(0), x;
+  CHECK(solver.solve(rhs, x));
+  CHECK(x.size() == 0);
+}
+
+TEST_CASE("MKLPardisoLDLTSolver: backend name is correct",
+          "[engine][linear-solver][pardiso][ldlt]") {
+  MKLPardisoLDLTSolver solver;
+  CHECK(std::string(solver.backend_name()) ==
+        "Intel-MKL-PARDISO-LDLT(Eigen)");
+}
+
+TEST_CASE("MKLPardisoAdaptiveSolver: symmetric indefinite 3x3 solve",
+          "[engine][linear-solver][pardiso][adaptive]") {
+  MKLPardisoAdaptiveSolver solver;
+  run_symmetric_indefinite_solve(solver, true);
+  CHECK(std::string(solver.backend_name()).find(
+            "Intel-MKL-PARDISO-Adaptive[") == 0);
+}
+
+TEST_CASE("MKLPardisoAdaptiveSolver: factorize without analyze",
+          "[engine][linear-solver][pardiso][adaptive]") {
+  MKLPardisoAdaptiveSolver solver;
+  run_symmetric_indefinite_solve(solver, false);
+}
+
+TEST_CASE("MKLPardisoAdaptiveSolver: empty square system",
+          "[engine][linear-solver][pardiso][adaptive]") {
+  MKLPardisoAdaptiveSolver solver;
+  Eigen::SparseMatrix<double> a(0, 0);
+  a.makeCompressed();
+  CHECK(solver.factorize(a));
+  Eigen::VectorXd rhs(0), x;
+  CHECK(solver.solve(rhs, x));
+  CHECK(x.size() == 0);
+}
 #endif  // HACDCPF_HAVE_MKL_PARDISO

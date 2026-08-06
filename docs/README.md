@@ -14,9 +14,13 @@
    数据结构、执行流程、数值保护和源码定位。
 3. [测试与基准结果](testing.md)：当前工作树的可复现测试结果、覆盖范围和
    尚未验证的风险。
+   NETLIB 的 90 案例、14 算法配置详细结果见
+   [NETLIB 求解器全面基准](netlib_benchmark.md)。
 4. [数值方法](numerical_methods.md)：缩放、KKT、稀疏分解、迭代改进等公共
    数值约定。
-5. [Engine API](engine.md)：C++ 模型、选项、结果和适配器接口参考。
+5. [Native LP 内点法设计](native_ipm_design.md)：现代 IPM 文献、当前实现
+   差距、HSD/IP-PMM 路线和可证伪验收门槛。
+6. [Engine API](engine.md)：C++ 模型、选项、结果和适配器接口参考。
 
 ## 用户文档
 
@@ -30,6 +34,7 @@
 | [SCUC 算例构造器](case_builder.md) | 内置算例和复现方法 |
 | [锥规划专题](conic_sdp.md) | LP/SOCP/SDP 的锥内点法详细推导 |
 | [Windows CI 验证](windows_ci_validation.md) | Windows 发布验证清单 |
+| [NETLIB 求解器基准](netlib_benchmark.md) | 90 个标准 LP 的正确性、性能、失败分析与复现 |
 | [教程](tutorial/) | 演示程序和可生成幻灯片的教程源文件 |
 
 ## 维护规则

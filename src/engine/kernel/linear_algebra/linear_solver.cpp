@@ -1,7 +1,11 @@
 #include "mipsolvers/engine/kernel/linear_algebra/linear_solver.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <limits>
 #include <vector>
 
 #ifdef HACDCPF_HAVE_UMFPACK
@@ -238,6 +242,235 @@ bool MKLPardisoSolver::solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) {
   x = impl_->solver.solve(rhs);
   return impl_->solver.info() == Eigen::Success;
 }
+
+int MKLPardisoSolver::perturbed_pivots() const {
+  return impl_ ? static_cast<int>(impl_->solver.pardisoParameterArray()[13])
+               : -1;
+}
+
+class MKLPardisoLDLTSolver::Impl {
+ public:
+  Eigen::PardisoLDLT<Eigen::SparseMatrix<double>, Eigen::Lower> solver;
+};
+
+MKLPardisoLDLTSolver::MKLPardisoLDLTSolver() = default;
+MKLPardisoLDLTSolver::~MKLPardisoLDLTSolver() = default;
+
+const char* MKLPardisoLDLTSolver::backend_name() const {
+  return "Intel-MKL-PARDISO-LDLT(Eigen)";
+}
+
+void MKLPardisoLDLTSolver::analyze_pattern(
+    const Eigen::SparseMatrix<double>& a) {
+  empty_system_ = is_empty_square_system(a);
+  if (empty_system_) return;
+  if (!impl_) impl_ = std::make_unique<Impl>();
+  impl_->solver.analyzePattern(a);
+}
+
+bool MKLPardisoLDLTSolver::factorize(
+    const Eigen::SparseMatrix<double>& a) {
+  empty_system_ = is_empty_square_system(a);
+  if (empty_system_) return true;
+  if (!impl_) {
+    impl_ = std::make_unique<Impl>();
+    impl_->solver.analyzePattern(a);
+  }
+  impl_->solver.factorize(a);
+  return impl_->solver.info() == Eigen::Success;
+}
+
+bool MKLPardisoLDLTSolver::solve(const Eigen::VectorXd& rhs,
+                                 Eigen::VectorXd& x) {
+  if (empty_system_) {
+    if (rhs.size() != 0) return false;
+    x.resize(0);
+    return true;
+  }
+  if (!impl_) return false;
+  x = impl_->solver.solve(rhs);
+  return impl_->solver.info() == Eigen::Success && x.allFinite();
+}
+
+int MKLPardisoLDLTSolver::perturbed_pivots() const {
+  return impl_ ? static_cast<int>(impl_->solver.pardisoParameterArray()[13])
+               : -1;
+}
+
+class MKLPardisoAdaptiveSolver::Impl {
+ public:
+  enum class Backend { Undecided, LU, LDLT };
+
+  MKLPardisoSolver lu;
+  MKLPardisoLDLTSolver ldlt;
+  Eigen::SparseMatrix<double> matrix;
+  Backend selected{Backend::Undecided};
+  bool lu_factorized{false};
+  bool ldlt_factorized{false};
+  double lu_factor_sec{std::numeric_limits<double>::infinity()};
+  double ldlt_factor_sec{std::numeric_limits<double>::infinity()};
+};
+
+MKLPardisoAdaptiveSolver::MKLPardisoAdaptiveSolver() = default;
+MKLPardisoAdaptiveSolver::~MKLPardisoAdaptiveSolver() = default;
+
+const char* MKLPardisoAdaptiveSolver::backend_name() const {
+  if (!impl_ || impl_->selected == Impl::Backend::Undecided)
+    return "Intel-MKL-PARDISO-Adaptive(Eigen)";
+  return impl_->selected == Impl::Backend::LDLT
+             ? "Intel-MKL-PARDISO-Adaptive[LDLT](Eigen)"
+             : "Intel-MKL-PARDISO-Adaptive[LU](Eigen)";
+}
+
+void MKLPardisoAdaptiveSolver::analyze_pattern(
+    const Eigen::SparseMatrix<double>& a) {
+  empty_system_ = is_empty_square_system(a);
+  if (empty_system_) return;
+  if (!impl_) impl_ = std::make_unique<Impl>();
+  impl_->selected = Impl::Backend::Undecided;
+  impl_->lu_factorized = false;
+  impl_->ldlt_factorized = false;
+  impl_->lu.analyze_pattern(a);
+  impl_->ldlt.analyze_pattern(a);
+}
+
+bool MKLPardisoAdaptiveSolver::factorize(
+    const Eigen::SparseMatrix<double>& a) {
+  empty_system_ = is_empty_square_system(a);
+  if (empty_system_) return true;
+  if (!impl_) {
+    impl_ = std::make_unique<Impl>();
+    impl_->lu.analyze_pattern(a);
+    impl_->ldlt.analyze_pattern(a);
+  }
+  auto timed_factor = [&](SparseLinearSolver& solver, double& elapsed) {
+    const auto start = std::chrono::steady_clock::now();
+    const bool ok = solver.factorize(a);
+    elapsed = std::chrono::duration<double>(
+                  std::chrono::steady_clock::now() - start)
+                  .count();
+    return ok;
+  };
+
+  if (impl_->selected == Impl::Backend::LU) {
+    impl_->lu_factorized = timed_factor(impl_->lu, impl_->lu_factor_sec);
+    if (impl_->lu_factorized) return true;
+    impl_->ldlt_factorized =
+        timed_factor(impl_->ldlt, impl_->ldlt_factor_sec);
+    if (impl_->ldlt_factorized) impl_->selected = Impl::Backend::LDLT;
+    return impl_->ldlt_factorized;
+  }
+  if (impl_->selected == Impl::Backend::LDLT) {
+    impl_->ldlt_factorized =
+        timed_factor(impl_->ldlt, impl_->ldlt_factor_sec);
+    if (impl_->ldlt_factorized) return true;
+    impl_->lu_factorized = timed_factor(impl_->lu, impl_->lu_factor_sec);
+    if (impl_->lu_factorized) impl_->selected = Impl::Backend::LU;
+    return impl_->lu_factorized;
+  }
+
+  // LDLT is the structure-preserving method, so evaluate it first. The timing
+  // comparison includes only numeric factorization; symbolic analysis is a
+  // one-time cost shared by all barrier iterations.
+  impl_->ldlt_factorized =
+      timed_factor(impl_->ldlt, impl_->ldlt_factor_sec);
+  impl_->lu_factorized = timed_factor(impl_->lu, impl_->lu_factor_sec);
+  impl_->matrix = a;
+  return impl_->ldlt_factorized || impl_->lu_factorized;
+}
+
+bool MKLPardisoAdaptiveSolver::solve(const Eigen::VectorXd& rhs,
+                                     Eigen::VectorXd& x) {
+  if (empty_system_) {
+    if (rhs.size() != 0) return false;
+    x.resize(0);
+    return true;
+  }
+  if (!impl_) return false;
+  if (impl_->selected == Impl::Backend::LU)
+    return impl_->lu.solve(rhs, x);
+  if (impl_->selected == Impl::Backend::LDLT)
+    return impl_->ldlt.solve(rhs, x);
+
+  Eigen::VectorXd x_lu, x_ldlt;
+  double lu_solve_sec = std::numeric_limits<double>::infinity();
+  double ldlt_solve_sec = std::numeric_limits<double>::infinity();
+  auto timed_solve = [&](SparseLinearSolver& solver, Eigen::VectorXd& solution,
+                         double& elapsed) {
+    const auto start = std::chrono::steady_clock::now();
+    const bool ok = solver.solve(rhs, solution);
+    elapsed = std::chrono::duration<double>(
+                  std::chrono::steady_clock::now() - start)
+                  .count();
+    return ok && solution.allFinite();
+  };
+  const bool ldlt_ok =
+      impl_->ldlt_factorized &&
+      timed_solve(impl_->ldlt, x_ldlt, ldlt_solve_sec);
+  const bool lu_ok =
+      impl_->lu_factorized && timed_solve(impl_->lu, x_lu, lu_solve_sec);
+  if (!ldlt_ok && !lu_ok) return false;
+
+  std::vector<double> row_sums(static_cast<std::size_t>(impl_->matrix.rows()),
+                               0.0);
+  for (int col = 0; col < impl_->matrix.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(impl_->matrix, col); it;
+         ++it) {
+      row_sums[static_cast<std::size_t>(it.row())] += std::abs(it.value());
+    }
+  }
+  const double matrix_norm = row_sums.empty()
+                                 ? 0.0
+                                 : *std::max_element(row_sums.begin(),
+                                                     row_sums.end());
+  auto backward_error = [&](const Eigen::VectorXd& solution) {
+    const double residual =
+        (impl_->matrix * solution - rhs).lpNorm<Eigen::Infinity>();
+    const double scale = 1.0 + rhs.lpNorm<Eigen::Infinity>() +
+                         matrix_norm * solution.lpNorm<Eigen::Infinity>();
+    return residual / scale;
+  };
+  const double ldlt_error = ldlt_ok ? backward_error(x_ldlt)
+                                    : std::numeric_limits<double>::infinity();
+  const double lu_error = lu_ok ? backward_error(x_lu)
+                                : std::numeric_limits<double>::infinity();
+  const double stable_limit = std::sqrt(std::numeric_limits<double>::epsilon());
+  const bool ldlt_stable = ldlt_ok && ldlt_error <= stable_limit;
+  const bool lu_stable = lu_ok && lu_error <= stable_limit;
+  const int ldlt_perturbed = impl_->ldlt.perturbed_pivots();
+  const int lu_perturbed = impl_->lu.perturbed_pivots();
+
+  if (std::getenv("MIPSOLVERS_IPM_VERBOSE") != nullptr) {
+    std::fprintf(stderr,
+                 "PARDISO portfolio: ldlt_factor=%.6g ldlt_solve=%.6g "
+                 "ldlt_error=%.3e ldlt_perturbed=%d lu_factor=%.6g "
+                 "lu_solve=%.6g lu_error=%.3e lu_perturbed=%d\n",
+                 impl_->ldlt_factor_sec, ldlt_solve_sec, ldlt_error,
+                 ldlt_perturbed, impl_->lu_factor_sec, lu_solve_sec, lu_error,
+                 lu_perturbed);
+  }
+
+  if (ldlt_ok && lu_ok && ldlt_perturbed >= 0 && lu_perturbed >= 0 &&
+      ldlt_perturbed != lu_perturbed) {
+    impl_->selected = ldlt_perturbed < lu_perturbed ? Impl::Backend::LDLT
+                                                    : Impl::Backend::LU;
+  } else if (ldlt_stable != lu_stable) {
+    impl_->selected = ldlt_stable ? Impl::Backend::LDLT : Impl::Backend::LU;
+  } else if (ldlt_stable && lu_stable) {
+    impl_->selected =
+        impl_->ldlt_factor_sec + ldlt_solve_sec <=
+                impl_->lu_factor_sec + lu_solve_sec
+            ? Impl::Backend::LDLT
+            : Impl::Backend::LU;
+  } else {
+    impl_->selected = ldlt_error <= lu_error ? Impl::Backend::LDLT
+                                             : Impl::Backend::LU;
+  }
+  x = impl_->selected == Impl::Backend::LDLT ? std::move(x_ldlt)
+                                              : std::move(x_lu);
+  return x.allFinite();
+}
+
 #endif
 
 #ifdef HACDCPF_HAVE_MUMPS

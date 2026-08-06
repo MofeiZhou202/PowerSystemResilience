@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -116,6 +117,137 @@ constexpr int kBandedThreshold = 128;  // use banded Cholesky when bandwidth <= 
 constexpr size_t kDenseScatterThreshold = 4'000'000;  // switch to dense BLAS when scatter > 4M
 constexpr size_t kDenseMaxBytes = 256 * 1024 * 1024;  // memory gate for the dense path
 constexpr size_t kMaxScatterEntries = 100'000'000;  // scatter map cap (~1.6GB)
+
+struct IPMStepLengths {
+  double primal{1.0};
+  double dual{1.0};
+  int primal_index{-1};
+  int dual_index{-1};
+  // -1 denotes a lower-bound product, +1 an upper-bound product.
+  int primal_side{0};
+  int dual_side{0};
+};
+
+/// Largest strictly interior primal/dual steps for the bounded-variable
+/// formulation. `fraction` is either the legacy kTau or 1-epsilon when the
+/// result feeds Mehrotra's affine-point and adaptive-step calculations.
+inline IPMStepLengths ipm_maximum_step_lengths(
+    const double* gl, const double* gu, const double* zl, const double* zu,
+    const double* dx, const double* dzl, const double* dzu,
+    const double* has_lb, const double* has_ub, int n, double fraction) {
+  IPMStepLengths step;
+  for (int j = 0; j < n; ++j) {
+    if (has_lb[j] && dx[j] < -kMinVal) {
+      const double a = -fraction * gl[j] / dx[j];
+      if (a < step.primal) {
+        step.primal = a;
+        step.primal_index = j;
+        step.primal_side = -1;
+      }
+    }
+    if (has_ub[j] && dx[j] > kMinVal) {
+      const double a = fraction * gu[j] / dx[j];
+      if (a < step.primal) {
+        step.primal = a;
+        step.primal_index = j;
+        step.primal_side = 1;
+      }
+    }
+    if (has_lb[j] && dzl[j] < -kMinVal) {
+      const double a = -fraction * zl[j] / dzl[j];
+      if (a < step.dual) {
+        step.dual = a;
+        step.dual_index = j;
+        step.dual_side = -1;
+      }
+    }
+    if (has_ub[j] && dzu[j] < -kMinVal) {
+      const double a = -fraction * zu[j] / dzu[j];
+      if (a < step.dual) {
+        step.dual = a;
+        step.dual_index = j;
+        step.dual_side = 1;
+      }
+    }
+  }
+  step.primal = std::clamp(step.primal, 0.0, 1.0);
+  step.dual = std::clamp(step.dual, 0.0, 1.0);
+  return step;
+}
+
+/// IPX-style complementarity-buffered step rule.  At the maximum positivity
+/// step, define mu_full from the trial products and reserve 0.1*mu_full in the
+/// blocking product.  This replaces a fixed fraction-to-boundary constant by
+/// a central-path quantity while preserving at least 90% of the maximum step.
+inline IPMStepLengths ipm_centrality_step_lengths(
+    const double* gl, const double* gu, const double* zl, const double* zu,
+    const double* dx, const double* dzl, const double* dzu,
+    const double* has_lb, const double* has_ub, int n, int n_compl,
+    bool centrality_control) {
+  if (!centrality_control) {
+    return ipm_maximum_step_lengths(gl, gu, zl, zu, dx, dzl, dzu, has_lb,
+                                    has_ub, n, kTau);
+  }
+
+  constexpr double kGamma = 0.9;
+  const double strict_fraction = 1.0 - std::numeric_limits<double>::epsilon();
+  const IPMStepLengths maximum = ipm_maximum_step_lengths(
+      gl, gu, zl, zu, dx, dzl, dzu, has_lb, has_ub, n, strict_fraction);
+  IPMStepLengths step = maximum;
+
+  double mu_full = 0.0;
+  if (n_compl > 0) {
+    for (int j = 0; j < n; ++j) {
+      if (has_lb[j]) {
+        mu_full += (gl[j] + maximum.primal * dx[j]) *
+                   (zl[j] + maximum.dual * dzl[j]);
+      }
+      if (has_ub[j]) {
+        mu_full += (gu[j] - maximum.primal * dx[j]) *
+                   (zu[j] + maximum.dual * dzu[j]);
+      }
+    }
+    mu_full = std::max(0.0, mu_full / static_cast<double>(n_compl));
+  }
+  const double product_buffer = (1.0 - kGamma) * mu_full;
+
+  auto buffered_alpha = [&](double value, double direction,
+                            double paired_trial, double maximum_alpha) {
+    double alpha = maximum_alpha;
+    if (paired_trial > 0.0 && std::isfinite(paired_trial)) {
+      const double buffer = product_buffer / paired_trial;
+      const double candidate = (value - buffer) / (-direction);
+      if (std::isfinite(candidate)) alpha = candidate;
+    }
+    return std::clamp(alpha, kGamma * maximum_alpha, 1.0);
+  };
+
+  if (maximum.primal < 1.0 && maximum.primal_index >= 0) {
+    const int j = maximum.primal_index;
+    if (maximum.primal_side < 0) {
+      step.primal = buffered_alpha(
+          gl[j], dx[j], zl[j] + maximum.dual * dzl[j], maximum.primal);
+    } else {
+      step.primal = buffered_alpha(
+          gu[j], -dx[j], zu[j] + maximum.dual * dzu[j], maximum.primal);
+    }
+  }
+  if (maximum.dual < 1.0 && maximum.dual_index >= 0) {
+    const int j = maximum.dual_index;
+    if (maximum.dual_side < 0) {
+      step.dual = buffered_alpha(
+          zl[j], dzl[j], gl[j] + maximum.primal * dx[j], maximum.dual);
+    } else {
+      step.dual = buffered_alpha(
+          zu[j], dzu[j], gu[j] - maximum.primal * dx[j], maximum.dual);
+    }
+  }
+
+  // A full Newton step can land exactly on the boundary after rounding.
+  step.primal = std::min(step.primal, 1.0 - 1e-6);
+  step.dual = std::min(step.dual, 1.0 - 1e-6);
+  return step;
+}
 
 // =====================================================================
 // SIMD-optimized vector operations (ARM NEON)
