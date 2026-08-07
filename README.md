@@ -92,7 +92,7 @@ ctest --preset windows-msvc-release
 | OpenDSS bridge `HACDCPF_ENABLE_OPENDSS` | `OFF` | 需显式开启并提供 DSS C-API。 |
 | OpenDSS compare `HACDCPF_ENABLE_OPENDSS_COMPARE` | `OFF` | 依赖 OpenDSS bridge。 |
 | SuiteSparse `HACDCPF_USE_SUITESPARSE` | `ON` | 默认复用 MIPSolvers vendored UMFPACK/KLU；关闭时回退到 vendored Eigen SparseLU。MIPSolvers 提供 MUMPS（LDLᵀ）时其为默认后端（可用 `HACDCPF_OPF_LINEAR_SOLVER=mumps/umfpack/klu/eigen` 指定）；Parity IPM 默认采用增广 Newton 形式（`HACDCPF_OPF_KKT_FORM=condensed` 可切回）。 |
-| IPOPT `HACDCPF_ENABLE_IPOPT` | macOS 默认 `ON`，其他平台默认 `OFF` | 当前嵌入式 IPOPT 路径按平台受限。 |
+| IPOPT `HACDCPF_ENABLE_IPOPT` | macOS/Windows preset `ON`，Linux preset `OFF` | Windows 使用 MIPSolvers 导出的本地 oneMKL 静态 prebuilt 包；常规配置阶段不联网。 |
 | PaPILO `HACDCPF_USE_PAPILO` | `ON` | 默认使用 MIPSolvers 包内 PaPILO 与 Boost 头；关闭或 minimal profile 时回退到原生 presolve。 |
 | Gurobi `HACDCPF_USE_GUROBI` | `ON` | 默认探测并优先使用本机 Gurobi；未安装、许可证不可用或求解失败时自动回退到包内 HiGHS/原生求解器。 |
 
@@ -249,6 +249,11 @@ Eigen 3.4.1（包括 `unsupported/Eigen/MatrixFunctions`）、fmt、nlohmann/jso
 HiGHS、SCIP、MUMPS、Ipopt、SuiteSparse、PaPILO 与所需 Boost 头；项目默认从本地源码解析这些依赖，
 无需系统 Eigen 或网络包管理器。封闭环境须同时交付两个源码目录，也可通过
 `MIPSOLVERS_SOURCE_DIR` 指向包内其他位置。
+
+Windows 的嵌入式 Ipopt 使用 MIPSolvers 中预先 staging 的 sequential 静态 oneMKL
+依赖包。联网准备机运行 `third_party/stage_onemkl.ps1` 和
+`third_party/build_third_party.ps1` 后，封闭环境只消费带 manifest、SHA-256 与许可
+材料的 `MIPSolvers/third_party/install`，不依赖机器级 oneAPI 安装。
 
 跨平台构建建议使用仓库内的 CMake presets；macOS/Linux/Windows 的依赖安装、
 `MIPSolvers` 源码路径、SuiteSparse 稀疏求解器和 Windows OPF 后端选择见

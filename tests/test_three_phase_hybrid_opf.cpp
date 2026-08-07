@@ -105,6 +105,9 @@ ThreePhaseHybridOPFCase make_small_hybrid_case() {
 
 TEST_CASE("Monolithic phase hybrid OPF Full and GR recover the same solution",
           "[opf][three_phase][hybrid][kron]") {
+#ifndef HACDCPF_HAVE_IPOPT
+  SKIP("embedded Ipopt is not available in this build");
+#endif
   const auto c = make_small_hybrid_case();
   ThreePhaseHybridOPFOptions full_options;
   full_options.variant = ModelVariant::Full;
@@ -144,6 +147,9 @@ TEST_CASE("Monolithic phase hybrid OPF Full and GR recover the same solution",
 
 TEST_CASE("Graph-reduced OPF sequence retains every time-varying load node",
           "[opf][three_phase][hybrid][sequence][kron]") {
+#ifndef HACDCPF_HAVE_IPOPT
+  SKIP("embedded Ipopt is not available in this build");
+#endif
   auto first = make_small_hybrid_case();
   auto second = first;
   second.p_load_pu[3] = 0.035;
@@ -173,6 +179,9 @@ TEST_CASE("Graph-reduced OPF sequence retains every time-varying load node",
 
 TEST_CASE("Sequence-aware VSC ports recover GFL and GFM dynamic equilibria",
           "[opf][three_phase][hybrid][converter][dynamics]") {
+#ifndef HACDCPF_HAVE_IPOPT
+  SKIP("embedded Ipopt is not available in this build");
+#endif
   ThreePhaseHybridOPFOptions options;
   options.variant = ModelVariant::GraphReduced;
   options.backend = SolverBackend::Ipopt;
@@ -283,6 +292,9 @@ TEST_CASE("Sequence-aware VSC ports recover GFL and GFM dynamic equilibria",
 
 TEST_CASE("Independent coupled PF reproduces the OPF operating point",
           "[opf][power_flow][three_phase][hybrid][crosscheck]") {
+#ifndef HACDCPF_HAVE_IPOPT
+  SKIP("embedded Ipopt is not available in this build");
+#endif
   ThreePhaseHybridOPFOptions options;
   options.variant = ModelVariant::GraphReduced;
   options.backend = SolverBackend::Ipopt;
@@ -402,6 +414,9 @@ TEST_CASE("Native Full certifies a graph-reduced primal-dual transport",
 
 TEST_CASE("Exact constraint oracle preserves the graph-reduced OPF solution",
           "[opf][three_phase][hybrid][kron][constraint_oracle]") {
+#ifndef HACDCPF_HAVE_IPOPT
+  SKIP("embedded Ipopt is not available in this build");
+#endif
   const auto c = make_small_hybrid_case();
   ThreePhaseHybridOPFOptions all_rows_options;
   all_rows_options.variant = ModelVariant::GraphReduced;
@@ -462,6 +477,9 @@ TEST_CASE("Exact constraint oracle preserves the graph-reduced OPF solution",
 
 TEST_CASE("Lifted phase-hybrid relaxation gives a certified OPF lower bound",
           "[opf][three_phase][hybrid][relaxation]") {
+#ifndef HACDCPF_HAVE_IPOPT
+  SKIP("embedded Ipopt is not available in this build");
+#endif
   const auto c = make_small_hybrid_case();
 
   ThreePhaseHybridOPFOptions nonlinear_options;

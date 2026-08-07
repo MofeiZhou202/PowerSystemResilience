@@ -49,7 +49,10 @@
       "generator": "Visual Studio 17 2022",
       "architecture": "x64",
       "cacheVariables": {
-        "HACDCPF_ENABLE_IPOPT": "OFF",
+        "HACDCPF_ENABLE_IPOPT": "ON",
+        "MIPSOLVERS_IPOPT_LINEAR_SOLVER": "pardisomkl",
+        "MIPSOLVERS_USE_PREBUILT_THIRD_PARTY": "ON",
+        "MIPSOLVERS_PREBUILT_THIRD_PARTY_PREFIX": "${sourceDir}/../MIPSolvers/third_party/install",
         "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
       },
       "environment": {

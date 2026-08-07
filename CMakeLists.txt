@@ -127,13 +127,6 @@ if(WIN32)
   add_compile_definitions(SCIP_NO_STRTOK_R)
 endif()
 
-if(HACDCPF_ENABLE_IPOPT AND NOT APPLE)
-  message(FATAL_ERROR
-    "HACDCPF_ENABLE_IPOPT=ON was requested, but the current MIPSolvers "
-    "embedded Ipopt CMake path is macOS-only. Keep it OFF on Windows/Linux "
-    "or extend MIPSolvers/cmake/BuildIpopt.cmake for that platform.")
-endif()
-
 if(HACDCPF_DEPENDENCY_PROFILE STREQUAL "minimal")
   set(_hacdcpf_build_mipsolvers_tests OFF)
   set(_hacdcpf_build_mipsolvers_scuc OFF)

@@ -46,8 +46,14 @@ MIPSolvers/third_party/papilo/
 MIPSolvers/third_party/boost_papilo/
 MIPSolvers/highs/  MIPSolvers/scip/  MIPSolvers/mumps/
 MIPSolvers/ipopt/  MIPSolvers/suitesparse/
+MIPSolvers/third_party/install/
 HybridACDCDistributionSystemsSimulation/third_party/OpenXLSX-master/
 ```
+
+On Windows, `MIPSolvers/third_party/install` is produced from a staged static
+oneMKL bundle and is ABI-specific. Keep it together with its manifest and
+oneMKL license notices; do not reuse it across MSVC toolsets, architectures,
+runtime-library modes, or Release/Debug configurations.
 
 ## Toolchain Prerequisites
 
@@ -81,8 +87,22 @@ ctest --preset linux-release
 ### Windows
 
 Use an x64 Native Tools Prompt or Developer PowerShell for Visual Studio 2022.
-The default preset builds vendored dependencies directly and does not require
-vcpkg, system Eigen, or a Unix compatibility layer.
+Prepare MIPSolvers once on a connected Windows staging machine:
+
+```powershell
+cd ..\MIPSolvers
+.\third_party\stage_onemkl.ps1 -SourceRoot $env:MKLROOT -Force
+.\third_party\build_third_party.ps1 -Jobs 8 -BuildType Release -Fresh
+cd ..\HybridACDCDistributionSystemsSimulation
+```
+
+Transfer both repositories, including the ignored
+`MIPSolvers/third_party/install` artifact, into the sealed environment. The
+staging script records SHA-256 hashes and license material; the prebuilt
+package exports Ipopt plus a relocatable static `MIPSolvers::MKL` target. Its
+post-install consumer check is configure-only, so it validates target scope and
+paths without another compile or link pass. `build_third_party.ps1` and the
+main Windows build preset cap parallelism at 8 and keep IPO disabled.
 
 ```powershell
 cmake --preset windows-msvc-release
@@ -90,10 +110,11 @@ cmake --build --preset windows-msvc-release
 ctest --preset windows-msvc-release
 ```
 
-The preset uses the dynamic MSVC runtime (`/MD` in Release). Embedded Ipopt is
-off in the main Windows profile; Native/Parity IPM and the local HiGHS/SCIP
-paths remain available. `windows-vcpkg-release` is retained only as a
-compatibility profile for sites that deliberately supply additional packages.
+The preset uses the dynamic MSVC runtime (`/MD` in Release), requires the
+compatible MIPSolvers prebuilt package, and enables embedded Ipopt with the
+sequential static PardisoMKL backend. `windows-vcpkg-release` remains a
+compatibility profile for sites that deliberately supply additional packages;
+it inherits the same Ipopt/prebuilt contract.
 
 ## Hermetic Verification
 
@@ -147,7 +168,7 @@ for diagnostics, not as a stable application API.
 |---|---:|---|
 | `HACDCPF_DEPENDENCY_PROFILE` | `portable` | Builds the solver subset needed by the application; `full` also builds MIPSolvers developer targets. |
 | `HACDCPF_USE_SUITESPARSE` | `ON` | Uses vendored UMFPACK/KLU; `OFF` selects Eigen SparseLU fallback. |
-| `HACDCPF_ENABLE_IPOPT` | macOS `ON`, Linux/Windows `OFF` | Enables the embedded Ipopt path where the main project currently validates it. |
+| `HACDCPF_ENABLE_IPOPT` | macOS/Windows presets `ON`, Linux preset `OFF` | Enables embedded Ipopt; Windows consumes the local oneMKL prebuilt package. |
 | `HACDCPF_ENABLE_ETAP` | `ON` | Builds against vendored OpenXLSX. |
 | `HACDCPF_ENABLE_OPENDSS` | `OFF` | Requires a separately supplied local DSS C-API. |
 | `HACDCPF_ENABLE_NATIVE_ARCH` | `OFF` | Enables host-specific CPU instructions; keep `OFF` for portable binaries. |

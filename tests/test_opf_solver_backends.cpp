@@ -113,6 +113,9 @@ TEST_CASE("AC OPF converges on internal hybrid case300_acdc", "[opf][acdc]") {
 
 TEST_CASE("case300_acdc forwards iteration and tolerance options to Ipopt",
           "[opf][acdc][ipopt][options]") {
+#ifndef HACDCPF_HAVE_IPOPT
+  SKIP("embedded Ipopt is not available in this build");
+#endif
   const HybridPowerSystem sys = io::build_case300_acdc();
 
   opf::ACOPFOptions capped_options;
