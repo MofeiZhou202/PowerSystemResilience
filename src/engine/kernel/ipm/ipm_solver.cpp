@@ -27,13 +27,16 @@ namespace mipsolvers::engine {
 namespace {
 
 constexpr double kBoundInfinity = 1e19;
-// Numerical interior floor. This must remain well below
-// tol_complementarity / ||mu||_inf; otherwise active constraints acquire an
-// artificial complementarity floor s_i*mu_i above the requested KKT tolerance.
-constexpr double kMinPositive = 1e-12;
 constexpr double kMinReg = 1e-9;
 constexpr double kMaxReg = 1e-2;
 constexpr int kMaxBacktracks = 20;
+
+double minimum_safe_positive() {
+  // sqrt(min_normal) keeps both the value and its reciprocal representable.
+  return std::sqrt(std::numeric_limits<double>::min());
+}
+
+const double kMinPositive = minimum_safe_positive();
 
 bool is_effectively_finite(double value) {
   return std::isfinite(value) && std::abs(value) < kBoundInfinity;
@@ -153,12 +156,10 @@ struct NLPState {
 bool initialize_equality_duals_least_squares(
     const NLPState& state,
     const Eigen::VectorXd& mu,
-    double multiplier_norm_limit,
     Eigen::VectorXd& lambda) {
   const int meq = static_cast<int>(state.jg.rows());
   if (meq == 0 || state.jg.cols() != state.grad.size() ||
-      lambda.size() != meq || mu.size() != state.jh.rows() ||
-      !std::isfinite(multiplier_norm_limit) || multiplier_norm_limit <= 0.0) {
+      lambda.size() != meq || mu.size() != state.jh.rows()) {
     return false;
   }
 
@@ -187,8 +188,7 @@ bool initialize_equality_duals_least_squares(
   Eigen::VectorXd candidate;
   if (!solve_kkt_inertia_corrected_sparse(
           cache, rhs, stationarity_remainder, candidate) ||
-      candidate.size() != meq ||
-      !candidate.allFinite() || inf_norm(candidate) > multiplier_norm_limit) {
+      candidate.size() != meq || !candidate.allFinite()) {
     return false;
   }
 
@@ -206,6 +206,193 @@ bool initialize_equality_duals_least_squares(
 
   lambda = candidate;
   return true;
+}
+
+Eigen::VectorXd initial_variable_scale(const std::vector<VariableMeta>& vars,
+                                       const Eigen::VectorXd& x) {
+  Eigen::VectorXd scale(x.size());
+  for (int col = 0; col < x.size(); ++col) {
+    const auto& var = vars[static_cast<std::size_t>(col)];
+    const bool finite_lb = is_effectively_finite(var.lb);
+    const bool finite_ub = is_effectively_finite(var.ub);
+    const double width = finite_lb && finite_ub
+        ? std::max(0.0, var.ub - var.lb)
+        : 0.0;
+    scale[col] = std::max({1.0, std::abs(x[col]), width,
+                           finite_lb ? std::abs(var.lb) : 0.0,
+                           finite_ub ? std::abs(var.ub) : 0.0});
+  }
+  return scale;
+}
+
+Eigen::VectorXd initialize_slacks_from_linearization_resolution(
+    const NLPState& state, const std::vector<VariableMeta>& vars,
+    const Eigen::VectorXd& x) {
+  Eigen::VectorXd row_reach_squared = Eigen::VectorXd::Zero(state.h.size());
+  const Eigen::VectorXd variable_scale = initial_variable_scale(vars, x);
+  for (int col = 0; col < state.jh.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(state.jh, col); it; ++it) {
+      const double scaled = it.value() * variable_scale[col];
+      row_reach_squared[it.row()] += scaled * scaled;
+    }
+  }
+
+  const double root_epsilon =
+      std::sqrt(std::numeric_limits<double>::epsilon());
+  const double representability_floor = minimum_safe_positive();
+  Eigen::VectorXd slack(state.h.size());
+  for (int row = 0; row < state.h.size(); ++row) {
+    const double row_reach = std::sqrt(row_reach_squared[row]);
+    const double resolution = std::max(
+        representability_floor,
+        root_epsilon * std::max(std::abs(state.h[row]), row_reach));
+    slack[row] = std::max(-state.h[row], resolution);
+  }
+  return slack;
+}
+
+Eigen::VectorXd stationarity_invisible_multiplier_floor(
+    const NLPState& state) {
+  const int inequalities = static_cast<int>(state.jh.rows());
+  Eigen::VectorXd row_one_norm = Eigen::VectorXd::Zero(inequalities);
+  for (int col = 0; col < state.jh.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(state.jh, col); it; ++it) {
+      row_one_norm[it.row()] += std::abs(it.value());
+    }
+  }
+
+  Eigen::VectorXd row_weight(inequalities);
+  for (int row = 0; row < inequalities; ++row) {
+    row_weight[row] = 1.0 / std::max(1.0, row_one_norm[row]);
+  }
+  Eigen::VectorXd column_load = Eigen::VectorXd::Zero(state.grad.size());
+  for (int col = 0; col < state.jh.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(state.jh, col); it; ++it) {
+      column_load[col] += std::abs(it.value()) * row_weight[it.row()];
+    }
+  }
+
+  const double root_epsilon =
+      std::sqrt(std::numeric_limits<double>::epsilon());
+  const double stationarity_budget =
+      root_epsilon * std::max(1.0, inf_norm(state.grad));
+  const double maximum_load =
+      column_load.size() > 0 ? column_load.maxCoeff() : 0.0;
+  if (!(maximum_load > 0.0) || !std::isfinite(maximum_load)) {
+    return Eigen::VectorXd::Constant(inequalities, minimum_safe_positive());
+  }
+  return (stationarity_budget / maximum_load) * row_weight;
+}
+
+bool project_stationarity_through_equalities(
+    const NLPState& state, const Eigen::VectorXd& value,
+    SparseInertiaKKTCache& cache, bool& cache_ready,
+    Eigen::VectorXd& nullspace_component, Eigen::VectorXd& multiplier) {
+  const int meq = static_cast<int>(state.jg.rows());
+  if (meq == 0) {
+    nullspace_component = value;
+    multiplier.resize(0);
+    return true;
+  }
+  if (!cache_ready) {
+    const Eigen::SparseMatrix<double> metric =
+        diagonal_sparse(Eigen::VectorXd::Ones(state.grad.size()));
+    InertiaSettings settings;
+    settings.max_tangent_dimension = -1;
+    settings.mu = 1.0;
+    InertiaStatus inertia;
+    double delta_w_last = 0.0;
+    if (!factor_kkt_inertia_corrected_sparse(
+            metric, state.jg, settings, delta_w_last, cache, inertia)) {
+      return false;
+    }
+    cache_ready = true;
+  }
+
+  Eigen::VectorXd rhs(value.size() + meq);
+  rhs.head(value.size()) = -value;
+  rhs.tail(meq).setZero();
+  Eigen::VectorXd negative_component;
+  if (!solve_kkt_inertia_corrected_sparse(
+          cache, rhs, negative_component, multiplier) ||
+      !negative_component.allFinite() || !multiplier.allFinite()) {
+    return false;
+  }
+  nullspace_component = -negative_component;
+  return true;
+}
+
+bool initialize_cold_primal_dual_state(
+    const NLPState& state, const Eigen::VectorXd& slack,
+    double requested_barrier, Eigen::VectorXd& lambda,
+    Eigen::VectorXd& mu, double& barrier) {
+  if (slack.size() != state.h.size() ||
+      (slack.size() > 0 && (!(slack.array() > 0.0).all() ||
+                            !slack.allFinite()))) {
+    return false;
+  }
+  if (slack.size() == 0) {
+    mu.resize(0);
+    barrier = 0.0;
+    return true;
+  }
+
+  const Eigen::VectorXd multiplier_floor =
+      stationarity_invisible_multiplier_floor(state);
+  const Eigen::VectorXd inverse_slack = slack.cwiseInverse();
+  const Eigen::VectorXd base_stationarity =
+      state.grad + state.jh.transpose() * multiplier_floor;
+  const Eigen::VectorXd central_direction =
+      state.jh.transpose() * inverse_slack;
+
+  SparseInertiaKKTCache projection_cache;
+  bool projection_ready = false;
+  Eigen::VectorXd projected_base;
+  Eigen::VectorXd projected_center;
+  Eigen::VectorXd lambda_base;
+  Eigen::VectorXd lambda_center;
+  if (!project_stationarity_through_equalities(
+          state, base_stationarity, projection_cache, projection_ready,
+          projected_base, lambda_base) ||
+      !project_stationarity_through_equalities(
+          state, central_direction, projection_cache, projection_ready,
+          projected_center, lambda_center)) {
+    return false;
+  }
+
+  double central_barrier = requested_barrier;
+  if (!(central_barrier > 0.0) || !std::isfinite(central_barrier)) {
+    const double center_norm_squared = projected_center.squaredNorm();
+    const double projection_error =
+        std::sqrt(std::numeric_limits<double>::epsilon()) *
+        std::max(1.0, central_direction.norm());
+    const bool center_is_resolved =
+        center_norm_squared > projection_error * projection_error;
+    if (center_is_resolved) {
+      central_barrier = std::max(
+          0.0, -projected_center.dot(projected_base) / center_norm_squared);
+    } else {
+      central_barrier = 0.0;
+    }
+    if (!(central_barrier > 0.0) || !std::isfinite(central_barrier)) {
+      // A positive central ray may be unable to reduce stationarity because
+      // P*q and P*c point in the same direction. Stationarity then does not
+      // identify a positive minimizer. Equilibrate the two resolved projected
+      // blocks by norm; if P*c itself is unresolved, fall back to the mean
+      // complementarity of the stationarity-invisible multiplier floor.
+      central_barrier = center_is_resolved && projected_base.norm() > projection_error
+          ? projected_base.norm() / std::sqrt(center_norm_squared)
+          : slack.dot(multiplier_floor) / static_cast<double>(slack.size());
+    }
+  }
+
+  mu = multiplier_floor + central_barrier * inverse_slack;
+  lambda = lambda_base + central_barrier * lambda_center;
+  if (!mu.allFinite() || !(mu.array() > 0.0).all() || !lambda.allFinite()) {
+    return false;
+  }
+  barrier = slack.dot(mu) / static_cast<double>(slack.size());
+  return std::isfinite(barrier) && barrier > 0.0;
 }
 
 void initialize_quasi_newton_state(int n, DiagonalQNState& state) {
@@ -1760,15 +1947,14 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
     return result;
   }
 
-  // Slacks are initialized strictly positive so the barrier log is defined.
-  Eigen::VectorXd s(state.h.size());
-  for (int i = 0; i < s.size(); ++i) {
-    s[i] = std::max(-state.h[i], 1e-2);
-  }
+  Eigen::VectorXd s = initialize_slacks_from_linearization_resolution(
+      state, prob.vars, x);
 
-  const double effective_mu_min = std::max(
-      opt.mu_min, 0.1 * std::max(opt.tol_complementarity, 0.0));
-  double mu_bar = std::max(effective_mu_min, opt.mu_init);
+  const double effective_mu_min =
+      opt.mu_min > 0.0 && std::isfinite(opt.mu_min)
+          ? opt.mu_min
+          : minimum_safe_positive();
+  double mu_bar = 0.0;
 
   // Primal–dual multiplier initialization.
   Eigen::VectorXd lambda = Eigen::VectorXd::Zero(state.g.size());
@@ -1776,6 +1962,7 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
       opt.equality_dual_start.size() == lambda.size() &&
       opt.equality_dual_start.allFinite();
   const bool has_inequality_dual_start =
+      state.h.size() > 0 &&
       opt.inequality_dual_start.size() == state.h.size() &&
       opt.inequality_dual_start.allFinite() &&
       (opt.inequality_dual_start.array() > 0.0).all();
@@ -1783,44 +1970,33 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
       opt.slack_start.size() == s.size() && opt.slack_start.allFinite() &&
       (opt.slack_start.array() > 0.0).all();
   if (has_slack_start) {
-    s = opt.slack_start.cwiseMax(
-        Eigen::VectorXd::Constant(s.size(), 2.0 * kMinPositive));
+    s = opt.slack_start;
   }
-  Eigen::VectorXd mu_ineq(state.h.size());
-  int representability_floor_clamps = 0;
-  int legacy_absolute_floor_hits = 0;
-  for (int i = 0; i < mu_ineq.size(); ++i) {
-    const double central_multiplier =
-        mu_bar / std::max(s[i], kMinPositive);
-    legacy_absolute_floor_hits += static_cast<int>(central_multiplier < 1e-4);
-    representability_floor_clamps +=
-        static_cast<int>(central_multiplier < 2.0 * kMinPositive);
-    // Preserve S*mu = mu_bar for model nonlinearities whenever representable.
-    // Generated box rows retain the historical bound-dual stabilization;
-    // unlike physical nonlinear slacks, their scale is the variable
-    // coordinate itself and the floor prevents a cold bound dual from being
-    // numerically absent.
-    mu_ineq[i] = i < state.n_nonlinear_ineq
-        ? std::max(central_multiplier, 2.0 * kMinPositive)
-        : std::clamp(central_multiplier, 1e-4, 1e4);
-  }
+  Eigen::VectorXd mu_ineq;
+  bool cold_lambda_initialized = false;
   if (has_inequality_dual_start) {
-    mu_ineq = opt.inequality_dual_start.cwiseMax(
-        Eigen::VectorXd::Constant(mu_ineq.size(), 2.0 * kMinPositive));
-  }
-  if (has_slack_start && has_inequality_dual_start && s.size() > 0) {
-    const double recovered_barrier =
-        s.dot(mu_ineq) / static_cast<double>(s.size());
-    if (std::isfinite(recovered_barrier) && recovered_barrier > 0.0) {
-      mu_bar = std::clamp(recovered_barrier, effective_mu_min, mu_bar);
+    mu_ineq = opt.inequality_dual_start;
+    mu_bar = s.size() > 0
+        ? s.dot(mu_ineq) / static_cast<double>(s.size())
+        : 0.0;
+  } else if (s.size() > 0) {
+    cold_lambda_initialized = initialize_cold_primal_dual_state(
+        state, s, opt.mu_init, lambda, mu_ineq, mu_bar);
+    if (!cold_lambda_initialized) {
+      result.status = "Filter: scale-covariant dual initialization failed";
+      result.x = x;
+      return result;
     }
+  } else {
+    mu_ineq.resize(0);
+    mu_bar = std::max(0.0, opt.mu_init);
   }
+  mu_bar = std::max(effective_mu_min, mu_bar);
   if (has_equality_dual_start) {
     lambda = opt.equality_dual_start;
-  } else if (opt.least_square_init_duals &&
+  } else if (!cold_lambda_initialized && opt.least_square_init_duals &&
              (prob.hess || prob.lagrangian_hess)) {
-    initialize_equality_duals_least_squares(
-        state, mu_ineq, opt.constr_mult_init_max, lambda);
+    initialize_equality_duals_least_squares(state, mu_ineq, lambda);
   }
 
   if (opt.verbose && !has_inequality_dual_start && s.size() > 0) {
@@ -1840,10 +2016,7 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
                 << ",median=" << values.median
                 << ",max=" << values.maximum << ')';
     };
-    std::cerr << "[NativeIPM] initial complementarity: mu_bar=" << mu_bar
-              << ", representability_floor_clamps="
-              << representability_floor_clamps
-              << ", legacy_1e-4_floor_hits=" << legacy_absolute_floor_hits;
+    std::cerr << "[NativeIPM] initial complementarity: mu_bar=" << mu_bar;
     print_distribution("nonlinear", nonlinear);
     print_distribution("lower", lower);
     print_distribution("upper", upper);
@@ -4296,8 +4469,7 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
   if (has_equality_dual_start) {
     lambda = opt_.equality_dual_start;
   } else if (opt_.least_square_init_duals && !qn_state.active) {
-    initialize_equality_duals_least_squares(
-        current_state, mu, opt_.constr_mult_init_max, lambda);
+    initialize_equality_duals_least_squares(current_state, mu, lambda);
   }
 
   const Eigen::VectorXd mu_nonlinear0 =

@@ -57,12 +57,11 @@ struct IPMOptions {
 
   // Cold-start equality multipliers from
   //   min_lambda ||grad f + Jh^T mu + Jg^T lambda||_2.
-  // The candidate is used only when it improves stationarity and its infinity
-  // norm does not exceed constr_mult_init_max. A valid user warm start takes
-  // precedence. Pure quasi-Newton models defer this initialization because
-  // their first Lagrangian secants depend on the multiplier trajectory.
+  // The candidate is used only when it improves stationarity by more than its
+  // floating-point comparison error. A valid user warm start takes precedence.
+  // Pure quasi-Newton models defer this initialization because their first
+  // Lagrangian secants depend on the multiplier trajectory.
   bool least_square_init_duals{false};
-  double constr_mult_init_max{1000.0};
 
   // --- Filter-driver options (PR2+) -----------------------------------
   Globalization globalization{Globalization::Filter};
@@ -87,9 +86,12 @@ struct IPMOptions {
   double scaling_g_max{100.0};
   double restoration_zeta{1e-4};
 
-  // Barrier schedule (IPOPT Implementation Paper defaults).
+  // Barrier schedule. `mu_init` is an exposed user policy; a nonpositive value
+  // explicitly requests the scale-covariant automatic initializer derived
+  // from the current primal-dual state. A nonpositive minimum requests the
+  // floating-point representability limit.
   double mu_init{0.1};
-  double mu_min{1e-11};
+  double mu_min{0.0};
   double kappa_mu{0.2};
   double theta_mu{1.5};
   double kappa_epsilon{10.0};

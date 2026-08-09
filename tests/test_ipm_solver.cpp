@@ -631,6 +631,62 @@ TEST_CASE("Native IPM preserves only an audited Phase-I primal start",
   CHECK(rejected_first_x >= 0.0);
 }
 
+TEST_CASE("Automatic Phase-II initialization is row-scale covariant",
+          "[ipm][nlp][phase2][initialization][scaling]") {
+  const auto solve_scaled_row = [](double row_scale) {
+    NLPModel nlp;
+    nlp.sense = Sense::Minimize;
+    nlp.vars.push_back({VarType::Continuous, -1e20, 1e20});
+    nlp.x0 = Eigen::VectorXd::Zero(1);
+    nlp.f = [](const Eigen::VectorXd&) { return 0.0; };
+    nlp.grad = [](const Eigen::VectorXd&, Eigen::VectorXd& gradient) {
+      gradient = Eigen::VectorXd::Zero(1);
+    };
+    nlp.hess = [](const Eigen::VectorXd&,
+                  Eigen::SparseMatrix<double>& hessian) {
+      hessian.resize(1, 1);
+      hessian.setIdentity();
+    };
+    nlp.h = [row_scale](const Eigen::VectorXd& x,
+                        Eigen::VectorXd& inequality) {
+      inequality = Eigen::VectorXd::Constant(1, row_scale * x[0]);
+    };
+    nlp.jac_h = [row_scale](const Eigen::VectorXd&,
+                            Eigen::SparseMatrix<double>& jacobian) {
+      jacobian.resize(1, 1);
+      jacobian.insert(0, 0) = row_scale;
+    };
+
+    IPMOptions options;
+    options.primal_feasible_start = true;
+    options.max_iter = 1;
+    options.tol_primal = row_scale * 1e-6;
+    options.tol_dual = 1e-6;
+    options.tol_complementarity = 1e-6;
+    options.tol_accept = 0.0;
+    options.scale_problem = false;
+    options.use_restoration_phase = false;
+    options.mu_init = 0.0;
+    options.mu_min = 0.0;
+    return NativeIPMAdapter(options).solve_nlp_detail(nlp);
+  };
+
+  const auto [unit_result, unit_detail] = solve_scaled_row(1.0);
+  const auto [scaled_result, scaled_detail] = solve_scaled_row(1e6);
+  REQUIRE(unit_result.stats.success);
+  REQUIRE(scaled_result.stats.success);
+  REQUIRE(unit_detail.z_slack.size() == 1);
+  REQUIRE(unit_detail.mu_ineq.size() == 1);
+  REQUIRE(scaled_detail.z_slack.size() == 1);
+  REQUIRE(scaled_detail.mu_ineq.size() == 1);
+  CHECK(unit_detail.z_slack[0] > 0.0);
+  CHECK(unit_detail.z_slack[0] < 1e-6);
+  CHECK(scaled_detail.z_slack[0] / 1e6 ==
+        Approx(unit_detail.z_slack[0]).epsilon(1e-12));
+  CHECK(scaled_detail.mu_ineq[0] * 1e6 ==
+        Approx(unit_detail.mu_ineq[0]).epsilon(1e-12));
+}
+
 TEST_CASE("Filter IPM uses inertia correction on a nonconvex objective",
           "[ipm][nlp][nonconvex][inertia]") {
   NLPModel nlp;
