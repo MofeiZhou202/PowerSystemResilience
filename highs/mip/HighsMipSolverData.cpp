@@ -2915,8 +2915,7 @@ restart:
   }
   hacdcpfLogHighsFrontierConformance(*this, lp, "root_lp_initial");
 
-  if (cutpool.getNumCuts() != 0) {
-    assert(numRestarts != 0);
+  if (numRestarts != 0 && cutpool.getNumCuts() != 0) {
     HighsCutSet cutset;
     analysis.mipTimerStart(kMipClockSeparateLpCuts);
     cutpool.separateLpCutsAfterRestart(cutset, &mipsolver);
