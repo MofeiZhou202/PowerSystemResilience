@@ -4,11 +4,10 @@
 /// =================================
 /// Harmonic power-flow (HPF) study for hybrid AC/DC distribution networks.
 ///
-/// This module implements the frequency-domain "harmonic penetration" form of
-/// the unified AC/DC harmonic power flow described in docs/harmonic_general.md,
-/// docs/harmonic_initial.md, docs/harmonic_nic.md and docs/harmonic_multiple_nic.md
-/// (Becker et al., "Harmonic Power-Flow Study of Hybrid AC/DC Grids with
-/// Converter-Interfaced Distributed Energy Resources").
+/// This module implements a frequency-domain "harmonic penetration" form of
+/// hybrid AC/DC harmonic power flow. Historical derivations and proposed
+/// extensions are retained under docs/archive/theory/harmonics/; current
+/// behavior is defined by this header, the implementation, and registered tests.
 ///
 /// Pipeline (mirrors the documentation):
 ///   solve_power_flow(system)                         // Step 0: operating point
@@ -132,7 +131,7 @@ struct HarmonicNIC {
 // ───────────────────────────────────────────────────────────────────────────
 // Frequency-dependent conductor resistance (skin effect) model.
 //   None             R(h) = R₁
-//   SqrtOrder        R(h) = R₁·√h                  (docs/harmonic_three_phase.md §2.3)
+//   SqrtOrder        R(h) = R₁·√h                  (archived theory §2.3)
 //   ProportionalSqrt R(h) = R₁·(1 + k·√h)          (k = skin_coefficient)
 enum class SkinEffectModel {
   None,
@@ -298,8 +297,8 @@ HarmonicSpectrum default_dc_ripple_spectrum();
 // Three-phase (phase-domain) harmonic power flow
 // ═══════════════════════════════════════════════════════════════════════════
 // Extends the single-phase / positive-sequence model above to an unbalanced
-// abc-domain network, per docs/harmonic_three_phase.md.  The AC network is
-// assembled on 3·N phase-nodes; line impedances become 3×3 phase matrices
+// abc-domain network, following the archived three-phase derivation. The AC
+// network is assembled on 3·N phase-nodes; line impedances become 3×3 phase matrices
 // Z_abc(h) = A·diag(z0(h), z1(h), z1(h))·A⁻¹ (or explicit phase matrices), and a
 // *balanced* harmonic current source automatically carries the correct phase
 // sequence for its order:
@@ -477,7 +476,7 @@ HarmonicComplianceReport check_harmonic_limits(const HPF3phResult& result,
 // characteristic six-pulse order pairs (an AC order h couples to a DC order r
 // whenever |h − r| = 1, e.g. AC 5th & 7th ↔ DC 6th, AC 11th & 13th ↔ DC 12th).
 //
-// Level-1 cross-coupling (docs/harmonic_general.md §10.1, docs/harmonic_three_phase.md):
+// Level-1 cross-coupling (archived harmonic theory):
 //   ΔI_ac,abc(h)  += k_ad · V_dc(r)          (DC ripple voltage drives AC current)
 //   ΔI_dc(r)      += k_da · V_ac,a(h)         (AC harmonic voltage drives DC current)
 // With k_ad = k_da = 0 the solve reduces to the decoupled spectrum-injection model.

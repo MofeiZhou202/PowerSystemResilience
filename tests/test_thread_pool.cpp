@@ -7,7 +7,24 @@
 
 #include "hacdcpf/util/thread_pool.hpp"
 
+#if defined(__APPLE__)
+#include <pthread.h>
+#endif
+
 using namespace std::chrono_literals;
+
+#if defined(__APPLE__)
+TEST_CASE("ThreadPool honors a requested minimum worker stack size",
+          "[thread-pool][stack-size]") {
+  constexpr size_t requested_stack_size = 4U * 1024U * 1024U;
+  hacdcpf::util::ThreadPool pool(1, requested_stack_size);
+  auto stack_size = pool.submit([] {
+    return pthread_get_stacksize_np(pthread_self());
+  });
+
+  CHECK(stack_size.get() >= requested_stack_size);
+}
+#endif
 
 TEST_CASE("ThreadPool static parallel_for joins every worker before rethrow",
           "[thread-pool][exception-safety]") {

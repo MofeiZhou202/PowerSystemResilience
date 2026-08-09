@@ -1,3 +1,7 @@
+> **ARCHIVED:** This theory chapter belongs to the legacy technical notebook
+> and is not a current runtime contract. Use the
+> [active documentation index](../../../../README.md) and source/tests.
+
 > Documentation Sync (2026-07-12)
 > Scope: reviewed against current repository structure, CMake presets/options, and registered test targets.
 > Status: theoretical notebook reference; pair with runtime tests for production decisions.

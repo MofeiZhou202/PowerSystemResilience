@@ -3,7 +3,6 @@
 
 内容
 ----
-opf_manual.pdf     当前版本 PDF（XeLaTeX 编译，143 页）
 opf_manual.tex     主文档（导言区、统一参数表环境、阅读指南：数据来源 /
                    单位制约定 / 求解器家族与选择逻辑 / 诚实结果口径 /
                    验证通道总览）
@@ -28,7 +27,9 @@ chapters/          九个章节源文件（由主文档 \input 引入）：
   power_models.tex       求解器无关建模层（MIPSolvers AML：acopf/acdcopf/
                          dc_opf/lindistflow/scuc 五个 builder、后端分发）
   verification.tex       验证与校核、已知局限（12 通道验证矩阵、30 条已知
-                         局限汇总、可信边界结论）
+                   局限汇总、可信边界结论）
+
+PDF 和 LaTeX 中间文件是本地构建产物，不纳入版本控制。
 
 每节结构（与《元件模型技术手册》一致）：
   功能定位 → 数学模型/算法（公式逐条注明源码出处 文件:行号）→
@@ -50,7 +51,7 @@ include/hacdcpf/optimal_power_flow/、src/power_models/ 及 tests/、docs/
   xelatex opf_manual.tex
 
 （第一遍排版，第二遍生成目录与交叉引用；宏包缺失时 MiKTeX 会自动下载。）
-编译出的 PDF 可拷回本文件夹。本次构建副本位于 C:\latex_build\opf_manual\。
+生成后应进行页面渲染检查；不要提交 PDF、.xdv 或辅助文件。
 
 生成日期：2026-07-31（v2：章节按 AC OPF / DC OPF / 交直流混合 OPF 三个主类
 重组，交直流混合 OPF（Parity 建模层 + Parity IPM 求解核）独立成章）

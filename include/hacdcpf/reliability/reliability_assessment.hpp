@@ -376,7 +376,8 @@ void apply_comprehensive_reliability_data(HybridPowerSystem& sys);
 ///
 /// The cyber state is reduced to two consequence-equivalent classes:
 /// automation available and automation unavailable.  This is the scalar
-/// interface-matrix model from docs/cyber_physical_reliability_extension.md;
+/// interface-matrix model discussed in the archived design reference
+/// docs/archive/theory/cyber_physical_reliability_extension.md;
 /// it does not claim to model a communication topology or cyber-node power.
 ///
 /// Class semantics (doc section 4.1):

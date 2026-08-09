@@ -14,8 +14,13 @@
 #include <future>
 #include <mutex>
 #include <queue>
+#include <system_error>
 #include <thread>
 #include <vector>
+
+#if !defined(_WIN32)
+#include <pthread.h>
+#endif
 
 namespace hacdcpf::util {
 
@@ -23,12 +28,21 @@ class ThreadPool {
  public:
   /// Construct a pool with \p num_threads workers.
   /// If num_threads <= 0, uses hardware_concurrency().
-  explicit ThreadPool(int num_threads = 0) {
+  explicit ThreadPool(int num_threads = 0,
+                      size_t minimum_worker_stack_size = 0) {
     if (num_threads <= 0) {
       num_threads = static_cast<int>(std::thread::hardware_concurrency());
       if (num_threads <= 0) num_threads = 1;
     }
     workers_.reserve(static_cast<size_t>(num_threads));
+#if !defined(_WIN32)
+    if (minimum_worker_stack_size != 0) {
+      start_pthread_workers(num_threads, minimum_worker_stack_size);
+      return;
+    }
+#else
+    (void)minimum_worker_stack_size;
+#endif
     for (int i = 0; i < num_threads; ++i) {
       workers_.emplace_back([this] { worker_loop(); });
     }
@@ -43,13 +57,22 @@ class ThreadPool {
     for (auto& w : workers_) {
       if (w.joinable()) w.join();
     }
+#if !defined(_WIN32)
+    for (pthread_t worker : pthread_workers_) pthread_join(worker, nullptr);
+#endif
   }
 
   ThreadPool(const ThreadPool&) = delete;
   ThreadPool& operator=(const ThreadPool&) = delete;
 
   /// Number of worker threads.
-  int size() const { return static_cast<int>(workers_.size()); }
+  int size() const {
+#if !defined(_WIN32)
+    return static_cast<int>(workers_.size() + pthread_workers_.size());
+#else
+    return static_cast<int>(workers_.size());
+#endif
+  }
 
   /// Submit a callable and obtain a future for its result.
   template <typename F>
@@ -175,6 +198,53 @@ class ThreadPool {
   }
 
  private:
+#if !defined(_WIN32)
+  static void* pthread_worker_entry(void* pool) {
+    static_cast<ThreadPool*>(pool)->worker_loop();
+    return nullptr;
+  }
+
+  void start_pthread_workers(int num_threads, size_t minimum_stack_size) {
+    pthread_attr_t attr;
+    int error = pthread_attr_init(&attr);
+    if (error != 0)
+      throw std::system_error(error, std::generic_category(),
+                              "pthread_attr_init");
+
+    size_t default_stack_size = 0;
+    error = pthread_attr_getstacksize(&attr, &default_stack_size);
+    if (error == 0 && minimum_stack_size > default_stack_size)
+      error = pthread_attr_setstacksize(&attr, minimum_stack_size);
+    if (error != 0) {
+      pthread_attr_destroy(&attr);
+      throw std::system_error(error, std::generic_category(),
+                              "pthread worker stack size");
+    }
+
+    pthread_workers_.reserve(static_cast<size_t>(num_threads));
+    for (int i = 0; i < num_threads; ++i) {
+      pthread_t worker;
+      error = pthread_create(&worker, &attr, &ThreadPool::pthread_worker_entry,
+                             this);
+      if (error != 0) {
+        {
+          std::lock_guard<std::mutex> lk(mtx_);
+          shutdown_ = true;
+        }
+        cv_.notify_all();
+        for (pthread_t started : pthread_workers_)
+          pthread_join(started, nullptr);
+        pthread_workers_.clear();
+        pthread_attr_destroy(&attr);
+        throw std::system_error(error, std::generic_category(),
+                                "pthread_create");
+      }
+      pthread_workers_.push_back(worker);
+    }
+    pthread_attr_destroy(&attr);
+  }
+#endif
+
   void worker_loop() {
     while (true) {
       std::function<void()> task;
@@ -190,6 +260,9 @@ class ThreadPool {
   }
 
   std::vector<std::thread> workers_;
+#if !defined(_WIN32)
+  std::vector<pthread_t> pthread_workers_;
+#endif
   std::queue<std::function<void()>> tasks_;
   std::mutex mtx_;
   std::condition_variable cv_;

@@ -188,6 +188,42 @@ TEST_CASE("Graph topology: bridge and cut-vertex detection", "[graph][topology]"
   REQUIRE(has_cutv_2);
 }
 
+TEST_CASE("Graph topology: iterative Tarjan survives stack growth",
+          "[graph][topology][tarjan]") {
+  constexpr int node_count = 64;
+  std::vector<ACBus> buses;
+  std::vector<ACBranch> branches;
+  buses.reserve(node_count);
+  branches.reserve(node_count - 1);
+
+  for (int bus_id = 1; bus_id <= node_count; ++bus_id) {
+    buses.push_back(make_ac_bus(
+        bus_id, bus_id == 1 ? BusType::SLACK : BusType::PQ));
+  }
+  for (int bus_id = 1; bus_id < node_count; ++bus_id) {
+    branches.push_back(
+        make_ac_branch(bus_id - 1, bus_id, bus_id + 1));
+  }
+
+  const auto graph =
+      build_power_system_graph(make_simple_system(buses, branches));
+  const auto report = analyze_topology(graph);
+
+  REQUIRE(report.bridge_edge_ids.size() == node_count - 1);
+  REQUIRE(report.cut_vertex_bus_ids.size() == node_count - 2);
+}
+
+TEST_CASE("Graph topology: parallel edges are not bridges",
+          "[graph][topology][tarjan]") {
+  const auto graph = build_power_system_graph(make_simple_system(
+      {make_ac_bus(1, BusType::SLACK), make_ac_bus(2, BusType::PQ)},
+      {make_ac_branch(10, 1, 2), make_ac_branch(20, 1, 2)}));
+  const auto report = analyze_topology(graph);
+
+  REQUIRE(report.bridge_edge_ids.empty());
+  REQUIRE(report.cut_vertex_bus_ids.empty());
+}
+
 TEST_CASE("Graph topology: isolated load node diagnostic", "[graph][topology]") {
   // Bus 2 has load but no branch
   HybridPowerSystem sys;
@@ -1031,4 +1067,3 @@ TEST_CASE("DC_ISOLATED bus is excluded from graph topology and islands",
   for (const auto& d : rep.diagnostics)
     REQUIRE(d.code != DiagCode::GraphNoDCVoltageRef);
 }
-

@@ -1,3 +1,6 @@
+> **ARCHIVED:** This interop design is not a current runtime contract. Use the
+> [active documentation index](../../README.md) and source/tests for current behavior.
+
 > Documentation Sync (2026-07-12)
 > Scope: reviewed against current repository structure, CMake presets/options, and registered test targets.
 > Status: design/analysis reference; confirm behavior against current implementation before adopting conclusions.

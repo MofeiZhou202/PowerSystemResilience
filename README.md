@@ -3,15 +3,21 @@
 **交直流混合高弹性能源电力系统仿真分析平台**<br>
 高弹性能源电力系统研究团队 · 西安交通大学
 
-本文档面向工程使用者和开发者，说明 HySim-XJTU-HRPES 从“工程场景建模”到“规范模型求解”、再到“结果回投”的完整链路。文档入口见 `docs/README.md`，更底层的公式和接口见 `docs/technical_notebook/`。
+本文档面向工程使用者和开发者，说明 HySim-XJTU-HRPES 从“工程场景建模”到“规范模型求解”、再到“结果回投”的完整链路。当前合同与实现参考统一从 `docs/README.md` 进入；历史审计、理论提案和旧技术总笔记隔离在 `docs/archive/`，不代表当前行为。
 
-## 文档同步状态（2026-07-30）
+## 文档同步状态（2026-08-09）
 
 - `docs/README.md` 是当前文档的唯一导航入口，明确区分运行契约与理论参考。
-- 2026-07-30 将 MIPSolvers 固定到 `78d9272`：纳入重写的 native dual
-  simplex、生产级 HiGHS LP kernel 选择、增强的 LP IPM/锥 IPM 与 MILP
-  presolve/B&C 修复；`full-dev` 可同时构建并注册 MIPSolvers 与本项目的
-  完整测试树。
+- 历史审计、理论提案与旧技术总笔记已迁入 `docs/archive/`；受版本控制的
+  PDF/LaTeX 中间产物已移除，活动索引不再直接导航到归档材料。
+- `AGENTS.md`、`CLAUDE.md` 与项目级 `manage-codebase-context` skill
+  为不同编码代理提供统一入口；动态验证基线和未闭环调试集中维护在
+  `docs/development_status.md`，不再依赖按日期堆积的审计快照。
+- 2026-08-08 将 MIPSolvers 固定到 `60f8bc4`：纳入系统更新后的 native
+  dual simplex（分区 PRICE、驻留 pivot workspace、warm re-optimization）、
+  LP IPM Gondzio multiple centrality correctors、MILP B&C 拆分与跨平台构建修复。
+  `full-dev` 同时构建两仓库完整测试树；本次升级回归 1429/1429 个已注册
+  测试通过，3 个缺少外部运行时或条件不满足的用例明确跳过。
 - 2026-07-28 增加 IEC-CGE 注释配电单线图 SVG 导入：从
   `cge:psr_ref` 与几何端点恢复导线、母线、开关、母联和配变拓扑，按
   `BestEffort` 口径补齐缺失电气参数，源外孤岛保持隔离；两个真实馈线
@@ -79,7 +85,7 @@ ctest --preset windows-msvc-release
 | 场景生成与台风弹性 | 已实现 | 常规/可靠性/弹性三族场景生成与聚类缩减，Holland 风场台风故障序列。 |
 | 碳流追踪 | 已实现并持续回归 | 比例/矩阵碳流追踪、年度碳核算（含储能碳库存动态）与用户/节点绿电证书（GEC）核算。 |
 | EV-电力-交通耦合 | 已实现（持续扩展） | CTM/LTM 传播、Formulation A–H 联合优化家族、选址定容 MILP 与滚动时域 MPC；结果按“可证伪证书”口径区分全局最优/局部驻点/启发式。 |
-| SPPT 可执行理论层 | 已实现（研究验证性质） | 语义保持投影理论（`docs/latex/sppt_theory.tex`）的 MR1–MR8 证伪套件、MR3 证书语料（CSV/LaTeX）、准入守卫与 agent 循环。 |
+| SPPT 可执行理论层 | 已实现（研究验证性质） | MR1–MR8 证伪套件、MR3 证书语料（CSV/LaTeX）、准入守卫与 agent 循环；当前缺少受版本控制的独立理论/运行契约，见 `docs/module_documentation_map.md`。 |
 | Web GUI 服务 | 已集成可运行 | `run_gui_server` 为独立可执行服务，上述能力均经 HTTP API 暴露；前端为原生 JS 单页应用。 |
 | Python SDK 与 AI 工具层 | v1 已实现 | `/api/v1` 独立会话、模型 revision/ETag、异步 PF/OPF 作业；Python 提供类型化客户端、结果诚实性检查、工具 Schema、影响分级与显式变更批准。 |
 
@@ -489,7 +495,7 @@ fixtures 见 `data/etap_sample.xlsx`、`data/etap_feeder.xml`。GUI 后端端到
 | 园区综合能源 | `include/hacdcpf/integrated_energy/`, `src/integrated_energy/` |
 | 承载力/薄弱环节/反事实 | `include/hacdcpf/analysis/hosting_capacity.hpp` 等, `src/analysis/` |
 | 场景生成/台风 | `include/hacdcpf/analysis/scenario_generation.hpp`, `include/hacdcpf/analysis/typhoon_resilience.hpp`, `src/scenario_generation/` |
-| SPPT 验证层 | `include/hacdcpf/sppt/`, `src/sppt/`（理论：`docs/latex/sppt_theory.tex`） |
+| SPPT 验证层 | `include/hacdcpf/sppt/`, `src/sppt/`（文档覆盖：`docs/module_documentation_map.md`） |
 | 网络重构 | `include/hacdcpf/network_reconfiguration/`, `src/network_reconfiguration/` |
 | 可靠性 | `include/hacdcpf/reliability/`, `include/hacdcpf/analysis/three_stage_reliability.hpp`, `src/reliability/` |
 | 弹性恢复 | `include/hacdcpf/resilience/resilience_assessment.hpp`, `src/resilience/` |
@@ -500,7 +506,7 @@ fixtures 见 `data/etap_sample.xlsx`、`data/etap_feeder.xml`。GUI 后端端到
 | Python SDK / AI 工具层 | `python/src/hysim/`（类型化客户端、可替换传输、结果口径、工具策略与本地服务生命周期） |
 | Diagnostics/benchmarks | `tools/`（`opendss_pf_compare`、`etap_convert`、`matpower_pf_compare`、`sppt_certify`/`sppt_ablation`/`sppt_benchmark`/`sppt_agent_demo`、`hybrid_acdc_pf_study`、`phase_graph_reduction_benchmark`、`phase_hybrid_opf_benchmark`、gridlabd/transient/short-circuit validation matrices 等） |
 | 文档索引 | `docs/README.md` |
-| 技术笔记 | `docs/technical_notebook/` |
+| 历史文档归档 | `docs/archive/`（仅用于追溯，不代表当前行为） |
 
 ## 10. 维护原则
 

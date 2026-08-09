@@ -13,6 +13,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <numeric>
 #include <sstream>
 #include <string>
@@ -43,6 +44,15 @@ constexpr double kTauTrippingHr = 1.0 / 30.0;
 constexpr double kTauRepairHr = 1.0;
 constexpr double kReliabilityVoll = 10.0;
 constexpr double kDefaultFailureRate = 0.1;
+// Darwin pthreads default to a 512 KiB stack. ASan expands the embedded
+// solver's largest observed frame to about 340 KiB, so use an 8x stack margin
+// for solver-bearing contingency workers. POSIX platforms with a larger
+// default retain their existing stack size.
+constexpr size_t kReliabilityWorkerStackBytes = 4U * 1024U * 1024U;
+
+// HiGHS scheduler reset and native B&C process state are not safe across
+// concurrent solves. Fault preprocessing remains parallel outside this lock.
+std::mutex stage_milp_solve_mutex;
 
 // DC bus IDs are shifted by kDCBusOffset throughout the NativeCase model so
 // that DC bus k is represented as (k + kDCBusOffset) in the c.buses / c.loads /
@@ -1486,6 +1496,9 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
       opt.gap_tol          = kGapTol;
       opt.verbose          = false;
       opt.use_simplex_lp_nodes = true;
+      // Contingencies are already parallelized by the caller. Keep fallback
+      // B&C serial to avoid nested worker pools and oversubscription.
+      opt.num_threads      = 1;
       auto bc_res  = engine::solve_milp_bc(mip, opt);
       res_x        = bc_res.x;
       res_success  = bc_res.stats.success;
@@ -1503,6 +1516,7 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     highs_options.gap_tol = kGapTol;
     engine::StrictHighsBranchAndCutAdapter highs(highs_options);
     {
+      std::lock_guard<std::mutex> solve_lock(stage_milp_solve_mutex);
       auto highs_res = highs.solve_milp(mip);
       res_x        = highs_res.x;
       res_success  = highs_res.stats.success;
@@ -2216,7 +2230,8 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
     }
   };
   if (r.parallel_execution.effective) {
-    hacdcpf::util::ThreadPool pool(r.parallel_execution.resolved_workers);
+    hacdcpf::util::ThreadPool pool(r.parallel_execution.resolved_workers,
+                                   kReliabilityWorkerStackBytes);
     pool.parallel_for_dynamic(c.faults.size(), evaluate_fault,
                               r.parallel_execution.resolved_workers);
     r.parallel_execution.actual_parallel_evaluations =

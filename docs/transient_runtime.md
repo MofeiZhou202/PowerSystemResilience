@@ -4,9 +4,10 @@ Updated: 2026-07-12
 
 The transient module is a phasor-domain electromechanical simulation. Its
 implementation is under `include/hacdcpf/dynamics` and `src/dynamics`.
-Mathematical background is retained in
-`dynamics_electromechanical_transient_design.md`; this document defines current
-runtime behavior.
+Historical mathematical background is retained in
+`archive/theory/dynamics_electromechanical_transient_design.md`; that archived
+design does not define current behavior. This document owns the runtime
+contract.
 
 ## Solve path
 
@@ -59,4 +60,3 @@ failed run as converged.
 health guard is enabled. That is a dynamic-model/initialization defect, not a
 Canvas mapping issue, and must be resolved in the solver rather than hidden in
 the renderer.
-

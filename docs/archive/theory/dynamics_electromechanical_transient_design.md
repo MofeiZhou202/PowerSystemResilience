@@ -1,3 +1,6 @@
+> **ARCHIVED:** This design assessment is not a current runtime contract. Use
+> the [active documentation index](../../README.md) and source/tests for current behavior.
+
 > Documentation Sync (2026-07-12)
 > Scope: design and mathematical-derivation document for the electromechanical (RMS/phasor) transient
 > simulation module, written against the current repository, the local PowerSimulationsDynamics.jl

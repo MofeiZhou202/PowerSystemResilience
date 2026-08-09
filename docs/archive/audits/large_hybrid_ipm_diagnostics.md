@@ -1,3 +1,6 @@
+> **ARCHIVED:** This is point-in-time diagnostic evidence, not a current solver
+> contract. Use the [active documentation index](../../README.md) and current tests.
+
 # 大型富混合 AC/DC IPM 内部诊断与求解器调用链
 
 ## 1. 调用链

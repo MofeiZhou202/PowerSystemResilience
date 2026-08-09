@@ -6,10 +6,12 @@
 # Optimal Network Reconfiguration — Mathematical Models (Canonical Space)
 
 This document is the engineering/math reference for the hybrid AC/DC optimal
-network reconfiguration (ONR). It supersedes the prose in
-`docs/technical_notebook/sections/07_network_reconfiguration.tex`, restated as
-configurable constraint groups, objectives, and an optional power-flow layer so
-they can be toggled from the GUI. CBs, switches, AC/DC lines, and DC/DC
+network reconfiguration (ONR). It supersedes the prose in the archived
+technical-notebook section
+`docs/archive/reference/technical_notebook/sections/07_network_reconfiguration.tex`.
+That material is restated here as configurable constraint groups, objectives,
+and an optional power-flow layer so they can be toggled from the GUI. CBs,
+switches, AC/DC lines, and DC/DC
 converters are optimized over the **canonical** model space, then projected back
 to device operations.
 

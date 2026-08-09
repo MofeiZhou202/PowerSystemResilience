@@ -30,6 +30,8 @@ playwright-report/
 # external_data/
 
 # LaTeX build artifacts
+docs/**/*.pdf
+docs/**/*.xdv
 docs/**/*.aux
 docs/**/*.log
 docs/**/*.out
@@ -56,6 +58,12 @@ docs/generated/
 outputs/
 etap-main/
 .github/
+!.github/
+.github/*
+!.github/skills/
+.github/skills/*
+!.github/skills/manage-codebase-context/
+!.github/skills/manage-codebase-context/**
 .claude/
 .venv/
 

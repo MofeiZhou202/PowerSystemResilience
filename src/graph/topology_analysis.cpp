@@ -66,7 +66,9 @@ void tarjan_bridge_ap(const PowerSystemGraph& g,
   std::vector<bool> is_ap(n, false);
   int timer = 0;
 
-  // Iterative Tarjan using explicit stack
+  // Tarjan (1972), SIAM J. Comput. 1(2), pp. 146-160: a DFS tree edge
+  // (p,u) is a bridge exactly when low[u] > disc[p].
+  // Iterative Tarjan using explicit stack.
   // Stack frame: (node, adj_iterator_index, parent_edge_id)
   struct Frame { int u; int ai; int parent_eid; };
   std::vector<Frame> stk;
@@ -80,15 +82,15 @@ void tarjan_bridge_ap(const PowerSystemGraph& g,
     int root_child_count = 0;
 
     while (!stk.empty()) {
-      auto& [u, ai, pe] = stk.back();
-      if (ai < static_cast<int>(g.adj[u].size())) {
-        auto [eid, v] = g.adj[u][ai];
-        ++ai;
+      Frame& frame = stk.back();
+      const int u = frame.u;
+      if (frame.ai < static_cast<int>(g.adj[u].size())) {
+        auto [eid, v] = g.adj[u][frame.ai++];
         if (!g.edges[eid].in_service) continue;
         if (!g.nodes[v].in_service) continue;
         // Skip the edge we came from (for simple graphs); but handle
         // multi-edges by checking edge id, not just neighbor
-        if (eid == pe) continue;
+        if (eid == frame.parent_eid) continue;
 
         if (disc[v] < 0) {
           // Tree edge
@@ -102,27 +104,17 @@ void tarjan_bridge_ap(const PowerSystemGraph& g,
         }
       } else {
         // Done processing u — propagate low upward
+        const Frame finished = frame;
         stk.pop_back();
         if (!stk.empty()) {
-          auto& [p, pai, ppe] = stk.back();
-          (void)pai; (void)ppe;
-          if (low[p] > low[u]) low[p] = low[u];
+          const int p = stk.back().u;
+          if (low[p] > low[finished.u]) low[p] = low[finished.u];
           // Articulation point check (non-root)
-          if (parent[p] >= 0 && low[u] >= disc[p])
+          if (parent[p] >= 0 && low[finished.u] >= disc[p])
             is_ap[p] = true;
           // Bridge check
-          if (low[u] > disc[p]) {
-            // Find the edge id connecting p -> u
-            // The parent edge id is in the child frame we just popped
-            // We stored pe in the child's frame; retrieve it
-            // (pe was set when we pushed v's frame)
-            // Search adj[p] for edge to u:
-            for (auto [eid2, nb] : g.adj[p]) {
-              if (nb == u && g.edges[eid2].in_service) {
-                out_bridges.push_back(eid2);
-                break;
-              }
-            }
+          if (low[finished.u] > disc[p]) {
+            out_bridges.push_back(finished.parent_eid);
           }
         }
       }

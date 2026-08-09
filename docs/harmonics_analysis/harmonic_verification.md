@@ -1,6 +1,6 @@
 > Documentation Sync (2026-07-12)
 > Scope: reviewed against current repository structure, CMake presets/options, and registered test targets.
-> Status: design/analysis reference; confirm behavior against current implementation before adopting conclusions.
+> Status: implementation-backed verification reference; re-run the cited tests after solver changes.
 > Source of truth: when text and implementation diverge, treat src/, include/, tests/, and CMake files as authoritative.
 
 # Harmonic Power-Flow — Correctness Verification
@@ -8,7 +8,7 @@
 This note records the correctness verification of the harmonic power-flow (HPF)
 module (`src/harmonics_power_flow/harmonics_power_flow.cpp`, API in
 `include/hacdcpf/analysis/harmonics_power_flow.hpp`) implementing the hybrid AC/DC
-"harmonic penetration" study from `docs/harmonic_*.md`.
+"harmonic penetration" study from `docs/harmonics_analysis/harmonic_*.md`.
 
 ## Summary
 

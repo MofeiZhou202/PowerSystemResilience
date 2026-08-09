@@ -2,9 +2,9 @@
 
 /// model/converter_model_scope.hpp
 /// =================================
-/// Per-engine declaration of which parts of the unified AC/DC (VSC) and DC/DC
-/// converter model (multi-converter model, docs/multiple_converter.md) a given
-/// result actually honored.
+/// Per-engine declaration of the unified AC/DC (VSC) and DC/DC converter-model
+/// features that a given result actually honored. Historical theory is retained
+/// in docs/archive/theory/multiple_converter.md.
 ///
 /// Different analyses (snapshot power flow, OPF, harmonics, time-series,
 /// reliability) deliberately model converters at different fidelity.  Attaching

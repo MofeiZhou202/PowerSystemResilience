@@ -3940,7 +3940,7 @@ reliability.
   [network_reconfiguration_models.md](network_reconfiguration_models.md).
 - Existing focused references:
   [reliability_assessment_models.md](reliability_assessment_models.md) and
-  [cyber_physical_reliability_extension.md](cyber_physical_reliability_extension.md).
+  archived [cyber-physical fidelity ladder](archive/theory/cyber_physical_reliability_extension.md).
 
 Canonical external starting points include Billinton and Allan for power-system
 reliability, IEEE 1366 for distribution indices, IEC 61850 for substation

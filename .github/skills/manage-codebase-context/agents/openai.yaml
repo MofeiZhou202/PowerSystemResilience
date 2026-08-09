@@ -1,0 +1,4 @@
+interface:
+  display_name: "Manage Codebase Context"
+  short_description: "Keep AI-facing codebase status accurate and concise"
+  default_prompt: "Use $manage-codebase-context to refresh the project context and verified development status."

@@ -1,12 +1,13 @@
 潮流计算技术手册 — 修订版 1 说明
 ==================================
 
-新增文件（2026-07-22）
-----------------------
-power_flow_manual1.pdf   修订版 1 PDF（XeLaTeX 两遍编译，80 页）
+受控源文件（最初修订于 2026-07-22）
+----------------------------------
 power_flow_manual1.tex   修订版 1 主文档（导言区已同步修订，
                          "现状与诚实口径声明"更新为 7 条）
 chapters1/               修订版 1 章节源文件（11 章，与 chapters/ 同名对应）
+
+PDF 和 LaTeX 中间文件是本地构建产物，不纳入版本控制。
 
 修订依据
 --------
@@ -43,17 +44,12 @@ C:\Users\82536\Desktop\HybridACDCDistributionSystemsSimulation 的潮流模块
 8. 第 7、8 章（配电网、三相）：实现无变化，仅个别 tests/CMakeLists.txt
    行号引用更新，实质内容原样保留。
 
-重新编译（路径须为纯 ASCII）
----------------------------
+本地生成 PDF（路径须为纯 ASCII）
+--------------------------------
 把整个文件夹（power_flow_manual1.tex 与 chapters1/）复制到纯英文路径
 （如 C:\latex_build\pf_manual1\），执行两遍：
 
   xelatex power_flow_manual1.tex
   xelatex power_flow_manual1.tex
 
-注意
-----
-原 power_flow_manual.tex 与 chapters/ 源文件未做任何修改。
-原 power_flow_manual.pdf 在本次修订过程中被一次验证性重编译刷新
-（源文件未动，内容由相同源产生，与原版等价）；如需严格保留原始
-二进制，请从备份恢复。
+生成后应进行页面渲染检查；不要提交 PDF、.xdv 或辅助文件。

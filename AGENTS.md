@@ -1,13 +1,27 @@
 # AGENTS.md — HySim-XJTU-HRPES 项目记忆
 
 > 供 AI 代理与新加入开发者快速建立全局认识。与代码冲突时，以 `src/`、`include/`、`tests/`、`CMakeLists.txt` 为准。
-> 最后核实：2026-07-18。
+> 最后核实：2026-08-09。当前验证基线与未闭环调试见 `docs/development_status.md`。
 
 ## 项目速览
 
 - **HySim-XJTU-HRPES**：交直流混合高弹性能源电力系统仿真分析平台（西安交通大学 HRPES 团队）。
 - 核心是 C++20 静态库 `hacdcpf`（`src/` + `include/hacdcpf/`），外加独立 HTTP 后端可执行 `run_gui_server`（`tests/run_gui_server.cpp`，约 2.1 万行）与原生 JS 单页 GUI（`web/`，挂载于 `/xjtu/`）。
 - 唯一必需外部依赖是**兄弟仓库 `../MIPSolvers`**（本地源码，非系统安装；提供 Eigen3、fmt、nlohmann_json、HiGHS、Ipopt/SCIP 与 AML 建模层）。路径可用 `MIPSOLVERS_SOURCE_DIR` 覆盖。
+
+## AI 快速入口
+
+| 入口 | 用途 |
+|---|---|
+| `docs/development_status.md` | 最近验证的构建/测试基线、当前脏工作树与未闭环问题 |
+| `docs/README.md` | 实现契约与理论材料的唯一文档导航入口 |
+| `.github/skills/manage-codebase-context/SKILL.md` | 代码状态核实、交接和 AI 文档同步流程 |
+
+### Skills
+
+| Skill | When to use |
+|---|---|
+| [manage-codebase-context](.github/skills/manage-codebase-context/SKILL.md) | 仓库入门、当前代码/测试状态、架构交接、依赖升级或 AI 文档维护 |
 
 ## 架构主线（务必先理解）
 

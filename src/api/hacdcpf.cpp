@@ -1749,7 +1749,7 @@ PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOp
   }
 
   // Declare which parts of the unified converter model this snapshot Newton
-  // solve honored (multi-converter model, docs/multiple_converter.md).
+  // solve honored (historical theory: docs/archive/theory/multiple_converter.md).
   {
     auto& sc = result.converter_model_scope;
     const bool has_active_lcc = std::any_of(

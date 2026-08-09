@@ -1,3 +1,6 @@
+> **ARCHIVED:** This is a point-in-time validation record, not a current solver
+> contract. Use the [active documentation index](../../README.md) and current tests.
+
 # 无功优化数学模型与全过程交叉验证
 
 ## 1. 模型定位
