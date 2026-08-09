@@ -51,6 +51,11 @@ if(_MIPSOLVERS_IPOPT_LINEAR_SOLVER STREQUAL "mumps")
   include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/BuildMUMPS.cmake")
 else()
   if(NOT MIPSOLVERS_HAVE_MKL_PARDISO)
+    if(MIPSOLVERS_MKL_THREADING STREQUAL "INTEL")
+      set(_MIPSOLVERS_MKL_THREAD_NAME "mkl_intel_thread")
+    else()
+      set(_MIPSOLVERS_MKL_THREAD_NAME "mkl_sequential")
+    endif()
     if(MIPSOLVERS_MKL_ROOT)
       set(_MIPSOLVERS_IPOPT_MKL_ROOTS "${MIPSOLVERS_MKL_ROOT}")
     else()
@@ -77,29 +82,59 @@ else()
       endif()
       if(EXISTS "${_mkl_inc}/mkl_pardiso.h"
          AND EXISTS "${_mkl_lib}/mkl_intel_lp64.lib"
-         AND EXISTS "${_mkl_lib}/mkl_sequential.lib"
+         AND EXISTS "${_mkl_lib}/${_MIPSOLVERS_MKL_THREAD_NAME}.lib"
          AND EXISTS "${_mkl_lib}/mkl_core.lib")
         set(MIPSOLVERS_HAVE_MKL_PARDISO ON)
         set(MIPSOLVERS_MKL_INCLUDE_DIR "${_mkl_inc}")
         set(MIPSOLVERS_MKL_LP64_LIB "${_mkl_lib}/mkl_intel_lp64.lib")
-        set(MIPSOLVERS_MKL_THREAD_LIB "${_mkl_lib}/mkl_sequential.lib")
+        set(MIPSOLVERS_MKL_THREAD_LIB
+          "${_mkl_lib}/${_MIPSOLVERS_MKL_THREAD_NAME}.lib")
         set(MIPSOLVERS_MKL_CORE_LIB "${_mkl_lib}/mkl_core.lib")
         set(MIPSOLVERS_MKL_INCLUDE_DIRS "${MIPSOLVERS_MKL_INCLUDE_DIR}")
         set(MIPSOLVERS_MKL_LIBRARIES
           "${MIPSOLVERS_MKL_LP64_LIB}"
           "${MIPSOLVERS_MKL_THREAD_LIB}"
           "${MIPSOLVERS_MKL_CORE_LIB}")
+        if(MIPSOLVERS_MKL_THREADING STREQUAL "INTEL")
+          find_library(_MIPSOLVERS_IPOPT_IOMP5MD NAMES libiomp5md
+            HINTS "$ENV{INTEL_COMPILER_ROOT}"
+                  "C:/Program Files (x86)/Intel/oneAPI/compiler/latest"
+            PATH_SUFFIXES lib lib/intel64)
+          if(NOT _MIPSOLVERS_IPOPT_IOMP5MD)
+            message(FATAL_ERROR
+              "MIPSOLVERS_MKL_THREADING=INTEL requires libiomp5md on Windows.")
+          endif()
+          list(APPEND MIPSOLVERS_MKL_LIBRARIES
+            "${_MIPSOLVERS_IPOPT_IOMP5MD}")
+          find_file(_MIPSOLVERS_IPOPT_IOMP5MD_DLL NAMES libiomp5md.dll
+            HINTS "$ENV{INTEL_COMPILER_ROOT}"
+                  "C:/Program Files (x86)/Intel/oneAPI/compiler/latest"
+            PATH_SUFFIXES bin redist/intel64/compiler)
+          if(NOT _MIPSOLVERS_IPOPT_IOMP5MD_DLL)
+            message(FATAL_ERROR
+              "MIPSOLVERS_MKL_THREADING=INTEL requires libiomp5md.dll on Windows.")
+          endif()
+          set(MIPSOLVERS_MKL_RUNTIME_DLLS
+            "${_MIPSOLVERS_IPOPT_IOMP5MD_DLL}" CACHE INTERNAL
+            "Runtime DLLs required by the selected oneMKL threading layer" FORCE)
+        endif()
         break()
       endif()
     endforeach()
     unset(_MIPSOLVERS_IPOPT_MKL_ROOTS)
+    unset(_MIPSOLVERS_MKL_THREAD_NAME)
   endif()
 
   if(MIPSOLVERS_MKL_ROOT)
+    if(MIPSOLVERS_MKL_THREADING STREQUAL "INTEL")
+      set(_MIPSOLVERS_BUNDLE_THREAD_LIB "mkl_intel_thread.lib")
+    else()
+      set(_MIPSOLVERS_BUNDLE_THREAD_LIB "mkl_sequential.lib")
+    endif()
     foreach(_mkl_required IN ITEMS
         "${MIPSOLVERS_MKL_ROOT}/include/mkl_pardiso.h"
         "${MIPSOLVERS_MKL_ROOT}/lib/mkl_intel_lp64.lib"
-        "${MIPSOLVERS_MKL_ROOT}/lib/mkl_sequential.lib"
+        "${MIPSOLVERS_MKL_ROOT}/lib/${_MIPSOLVERS_BUNDLE_THREAD_LIB}"
         "${MIPSOLVERS_MKL_ROOT}/lib/mkl_core.lib"
         "${MIPSOLVERS_MKL_ROOT}/licensing")
       if(NOT EXISTS "${_mkl_required}")
@@ -109,6 +144,7 @@ else()
       endif()
     endforeach()
     unset(_mkl_required)
+    unset(_MIPSOLVERS_BUNDLE_THREAD_LIB)
   endif()
 
   if(NOT MIPSOLVERS_HAVE_MKL_PARDISO)

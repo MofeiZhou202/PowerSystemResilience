@@ -1340,12 +1340,19 @@ Eigen::SparseMatrix<double> stack_active_jacobian(
       triplets.emplace_back(it.row(), it.col(), it.value());
     }
   }
+  std::vector<int> active_position(
+      static_cast<std::size_t>(state.jh.rows()), -1);
   for (int k = 0; k < static_cast<int>(active.size()); ++k) {
-    const int source_row = active[static_cast<std::size_t>(k)];
-    for (int col = 0; col < state.jh.outerSize(); ++col) {
-      const double value = state.jh.coeff(source_row, col);
-      if (value != 0.0) {
-        triplets.emplace_back(meq + k, col, value);
+    active_position[static_cast<std::size_t>(
+        active[static_cast<std::size_t>(k)])] = k;
+  }
+  for (int col = 0; col < state.jh.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(state.jh, col); it;
+         ++it) {
+      const int position =
+          active_position[static_cast<std::size_t>(it.row())];
+      if (position >= 0) {
+        triplets.emplace_back(meq + position, col, it.value());
       }
     }
   }
@@ -1728,7 +1735,11 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
   FilterSolveOutcome result;
   const int n = static_cast<int>(prob.vars.size());
   Eigen::VectorXd x = (prob.x0.size() == n) ? prob.x0 : Eigen::VectorXd::Zero(n);
-  interiorize_initial_point(prob.vars, x);
+  // A caller-audited Phase-I point is already tolerance-feasible in the
+  // original coordinates. Preserve that exact point: generated bound rows and
+  // positive slacks support an infeasible-start primal-dual state, while an
+  // implicit projection here can destroy nonlinear equality feasibility.
+  if (!opt.primal_feasible_start) interiorize_initial_point(prob.vars, x);
 
   std::vector<int> lb_cols;
   std::vector<int> ub_cols;
@@ -1768,8 +1779,10 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
       opt.inequality_dual_start.size() == state.h.size() &&
       opt.inequality_dual_start.allFinite() &&
       (opt.inequality_dual_start.array() > 0.0).all();
-  if (opt.slack_start.size() == s.size() && opt.slack_start.allFinite() &&
-      (opt.slack_start.array() > 0.0).all()) {
+  const bool has_slack_start =
+      opt.slack_start.size() == s.size() && opt.slack_start.allFinite() &&
+      (opt.slack_start.array() > 0.0).all();
+  if (has_slack_start) {
     s = opt.slack_start.cwiseMax(
         Eigen::VectorXd::Constant(s.size(), 2.0 * kMinPositive));
   }
@@ -1794,6 +1807,13 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
   if (has_inequality_dual_start) {
     mu_ineq = opt.inequality_dual_start.cwiseMax(
         Eigen::VectorXd::Constant(mu_ineq.size(), 2.0 * kMinPositive));
+  }
+  if (has_slack_start && has_inequality_dual_start && s.size() > 0) {
+    const double recovered_barrier =
+        s.dot(mu_ineq) / static_cast<double>(s.size());
+    if (std::isfinite(recovered_barrier) && recovered_barrier > 0.0) {
+      mu_bar = std::clamp(recovered_barrier, effective_mu_min, mu_bar);
+    }
   }
   if (has_equality_dual_start) {
     lambda = opt.equality_dual_start;
@@ -2426,10 +2446,14 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
         // special case only when the primal displacement is at roundoff scale
         // and the independently recomputed KKT residuals prove componentwise
         // non-worsening plus strict dual/complementarity progress.
-        const double relative_primal_step = std::max(
-            alpha * inf_norm(dx) / (1.0 + inf_norm(x)),
-            alpha * inf_norm(ds) / (1.0 + inf_norm(s)));
-        if (relative_primal_step <= 1e-12) {
+        const double relative_primal_direction = std::max(
+            inf_norm(dx) / (1.0 + inf_norm(x)),
+            inf_norm(ds) / (1.0 + inf_norm(s)));
+        const bool centrality_candidate =
+            relative_primal_direction <=
+                std::sqrt(std::numeric_limits<double>::epsilon()) ||
+            opt.primal_feasible_start;
+        if (centrality_candidate) {
           const Eigen::VectorXd r_dual_trial =
               state.grad + state.jg.transpose() * lambda_trial +
               state.jh.transpose() * mu_trial;
@@ -2438,10 +2462,19 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
           trial.residuals = summarize_residuals(
               r_dual_trial, r_eq_trial, r_ineq_trial, x_trial, s_trial,
               lambda_trial, mu_trial);
-          const double primal_guard =
-              rs.primal_feas + 1e-10 * (1.0 + rs.primal_feas);
-          const double dual_guard =
-              rs.dual_feas + 1e-10 * (1.0 + rs.dual_feas);
+          // A Phase-I handoff owns a tolerance-defined feasible
+          // neighbourhood, not the often much smaller residual of its exact
+          // endpoint.  Requiring every tangential/centrality step to preserve
+          // that accidental residual can reduce a valid full step to repeated
+          // powers-of-two backtracking even though all caller KKT gates remain
+          // satisfied.  The neighbourhood below is derived solely from the
+          // caller's contract; ordinary cold starts retain the roundoff guard.
+          const double primal_guard = opt.primal_feasible_start
+              ? std::max(rs.primal_feas, opt.tol_primal)
+              : rs.primal_feas + 1e-10 * (1.0 + rs.primal_feas);
+          const double dual_guard = opt.primal_feasible_start
+              ? std::max(rs.dual_feas, opt.tol_dual)
+              : rs.dual_feas + 1e-10 * (1.0 + rs.dual_feas);
           const bool componentwise_safe =
               trial.residuals.primal_feas <= primal_guard &&
               trial.residuals.dual_feas <= dual_guard;
@@ -2581,17 +2614,17 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
               const Eigen::VectorXd mu_soc_trial =
                   mu_ineq + trial_alpha_dual * dmu_ineq + dmu_soc_extra;
               TrialPoint soc_trial;
-              if (evaluate_filter_trial_values(prob, lb_cols, ub_cols,
-                                               x_soc_trial, s_soc_trial,
-                                               lambda_soc_trial, mu_soc_trial,
-                                               eval_status, soc_trial)) {
+              if (evaluate_filter_trial_values(
+                      prob, lb_cols, ub_cols, x_soc_trial, s_soc_trial,
+                      lambda_soc_trial, mu_soc_trial, eval_status,
+                      soc_trial)) {
                 const double theta_soc = compute_theta(soc_trial.state.g,
                                                        soc_trial.state.h,
                                                        s_soc_trial);
                 const double phi_soc = compute_barrier_phi(
                     soc_trial.state.obj_orig, mu_bar, s_soc_trial);
 
-                bool soc_filter_ok = filter.is_acceptable(
+                const bool soc_filter_ok = filter.is_acceptable(
                     theta_soc, phi_soc, opt.filter_gamma_theta,
                     opt.filter_gamma_phi);
                 bool soc_accept = false;
@@ -2637,7 +2670,7 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
                     << ", soc_attempted=" << soc_attempted
                     << '\n' << std::flush;
         }
-        if (have_best) {
+        if (have_best && !opt.primal_feasible_start) {
           x = best_x;
           s = best_s;
           lambda = best_lambda;
@@ -2645,7 +2678,7 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
         }
         ActiveSetPolishOutcome polish;
         bool polish_converged = false;
-        if (have_best) {
+        if (have_best && !opt.primal_feasible_start) {
           polish_converged = try_active_set_kkt_polish(
               prob, opt, lb_cols, ub_cols, x, s, lambda, mu_ineq,
               best_residuals, polish);
@@ -2741,6 +2774,11 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
       break;
     }
     mu_bar = mu_new;
+    // Filter entries compare the barrier objective phi_mu. Once mu changes,
+    // old (theta, phi_mu) pairs belong to a different objective and no longer
+    // define valid dominance tests for the new barrier subproblem.
+    filter.reset_with_theta_upper_bound(
+        1e4 * std::max(1.0, compute_theta(state.g, state.h, s)));
   }
 
   // Exhausted outer iterations. Fall back to the best iterate seen so the
@@ -3150,7 +3188,6 @@ bool restore_fixed_nlp_certificate(
     return false;
   }
   out.x = map.expand(out.x);
-  if (!out.stats.success) return true;
 
   Eigen::VectorXd nonlinear = Eigen::VectorXd::Zero(0);
   if (original.h) original.h(out.x, nonlinear);
@@ -3381,6 +3418,7 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
   SolveResult out;
   out.stats.solver_name = name();
   IPMDetail detail;
+  detail.primal_feasible_start_requested = opt_.primal_feasible_start;
   detail.original_dimension = static_cast<int>(prob.vars.size());
   detail.reduced_dimension = detail.original_dimension;
 
@@ -3395,6 +3433,24 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
     return {out, detail};
   }
 
+  const bool valid_primal_start =
+      prob.x0.size() == static_cast<int>(prob.vars.size()) &&
+      prob.x0.allFinite();
+  const double start_primal_violation = valid_primal_start
+      ? raw_primal_violation(prob, prob.x0)
+      : std::numeric_limits<double>::infinity();
+  const bool primal_feasible_start_accepted =
+      opt_.primal_feasible_start &&
+      std::isfinite(start_primal_violation) &&
+      start_primal_violation <= opt_.tol_primal;
+  detail.primal_feasible_start_accepted = primal_feasible_start_accepted;
+  if (opt_.verbose && opt_.primal_feasible_start) {
+    std::cerr << "[NativeIPM] primal-feasible start: requested=1, accepted="
+              << primal_feasible_start_accepted
+              << ", original_primal=" << start_primal_violation
+              << ", tolerance=" << opt_.tol_primal << '\n';
+  }
+
   NLPModel reduced_prob;
   std::shared_ptr<FixedNLPMap> fixed_map;
   if (build_fixed_nlp_reduction(prob, reduced_prob, fixed_map)) {
@@ -3402,6 +3458,10 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
     auto reduced_result = reduced_solver.solve_nlp_detail(reduced_prob);
     out = std::move(reduced_result.first);
     detail = std::move(reduced_result.second);
+    detail.primal_feasible_start_requested = opt_.primal_feasible_start;
+    detail.primal_feasible_start_accepted =
+        primal_feasible_start_accepted &&
+        detail.primal_feasible_start_accepted;
     detail.original_dimension = static_cast<int>(prob.vars.size());
     detail.reduced_dimension =
         static_cast<int>(fixed_map->reduced_to_original.size());
@@ -3426,6 +3486,12 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
     const NLPModel* active_prob = &prob;
     NLPModel scaled_prob;
     IPMOptions active_opt = opt_;
+    active_opt.primal_feasible_start = primal_feasible_start_accepted;
+    if (primal_feasible_start_accepted) {
+      active_opt.newton_formulation = NewtonFormulation::Augmented;
+      active_opt.use_augmented_newton = false;
+      active_opt.least_square_init_duals = true;
+    }
     const bool do_scale = opt_.scale_problem;
     if (do_scale) {
       Eigen::VectorXd x0_interior = (prob.x0.size() == n_f)
@@ -3467,7 +3533,8 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
     double restoration_control_stationarity = 0.0;
 
     // --- Feasibility restoration on line-search / inertia failure.
-    if (!fo.converged && opt_.use_restoration_phase) {
+    if (!fo.converged && opt_.use_restoration_phase &&
+        !primal_feasible_start_accepted) {
       const bool triggerable =
         fo.status.rfind("Filter: line-search step too small", 0) == 0 ||
         fo.status.rfind("Filter: accepted-step collapse", 0) == 0 ||
@@ -3752,12 +3819,40 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
     // left. Continue with the same unscaled primal-dual central state and a
     // fresh filter, rather than cold-starting or invoking restoration.
     const int remaining_iterations = opt_.max_iter - fo.iterations;
-    const bool tangential_filter_stall = !fo.converged &&
-        fo.final_residuals.primal_feas <= opt_.tol_primal &&
+    const bool filter_step_stall = !fo.converged &&
         (fo.status.rfind("Filter: accepted-step collapse", 0) == 0 ||
          fo.status.rfind("Filter: line-search step too small", 0) == 0);
+    // A caller-audited Phase-I point owns the normal-feasibility contract.
+    // If scaling subsequently stalls after moving that point slightly outside
+    // the original primal gate, restoration remains the wrong owner: continue
+    // the same warm primal-dual trajectory in original coordinates and let the
+    // caller's three KKT tolerances decide success. This trigger introduces no
+    // residual multiplier or case-dependent neighbourhood threshold.
+    const bool phase1_scaled_filter_stall =
+        primal_feasible_start_accepted && filter_step_stall;
+    const bool tangential_filter_stall = filter_step_stall &&
+        fo.final_residuals.primal_feas <= opt_.tol_primal;
     const bool continue_original_trajectory =
-        needs_original_scale_refinement || tangential_filter_stall;
+        needs_original_scale_refinement || tangential_filter_stall ||
+        phase1_scaled_filter_stall;
+    if (opt_.verbose) {
+      std::cerr << "[NativeIPM] original-scale continuation: requested="
+                << continue_original_trajectory
+                << ", scaled_certification_failed="
+                << needs_original_scale_refinement
+                << ", tangential_filter_stall=" << tangential_filter_stall
+                << ", phase1_scaled_filter_stall="
+                << phase1_scaled_filter_stall
+                << ", remaining_iterations=" << remaining_iterations
+                << ", residuals=(primal="
+                << fo.final_residuals.primal_feas
+                << ",dual=" << fo.final_residuals.dual_feas
+                << ",complementarity="
+                << fo.final_residuals.complementarity << ")"
+                << ", warm_dimensions=(lambda=" << fo.lambda.size()
+                << ",mu=" << fo.mu_ineq.size()
+                << ",slack=" << fo.s.size() << ")" << '\n';
+    }
     if (continue_original_trajectory && remaining_iterations > 0 &&
         fo.x.size() == n_f && fo.lambda.allFinite() &&
         fo.mu_ineq.allFinite() && fo.s.allFinite() &&
@@ -3781,6 +3876,13 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
       refine_opt.max_iter = remaining_iterations;
       refine_opt.scale_problem = false;
       refine_opt.use_restoration_phase = false;
+      // Coordinate continuation is part of the same Phase-II trajectory.
+      // Preserve the Newton formulation selected for the audited Phase-I
+      // handoff; re-running Auto on the unscaled sparsity estimates can switch
+      // back to the condensed system precisely when low-barrier M/S terms make
+      // that algebraic elimination numerically fragile.
+      refine_opt.newton_formulation = active_opt.newton_formulation;
+      refine_opt.use_augmented_newton = active_opt.use_augmented_newton;
       refine_opt.equality_dual_start = fo.lambda;
       refine_opt.inequality_dual_start = fo.mu_ineq;
       refine_opt.slack_start = fo.s;
@@ -3789,11 +3891,30 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
             fo.mu_ineq.dot(fo.s) / fo.mu_ineq.size(),
             refine_opt.mu_min, refine_opt.mu_init);
       }
+      if (opt_.verbose) {
+        std::cerr << "[NativeIPM] original-scale continuation start: "
+                  << "max_iter=" << refine_opt.max_iter
+                  << ", recovered_mu=" << refine_opt.mu_init << '\n';
+      }
 
       FilterSolveOutcome refined =
           solve_nlp_filter_impl(refine_prob, refine_opt);
       const bool adopt_refinement = refined.converged ||
           refined.final_residuals.merit < fo.final_residuals.merit;
+      if (opt_.verbose) {
+        std::cerr << "[NativeIPM] original-scale continuation finish: "
+                  << "adopted=" << adopt_refinement
+                  << ", converged=" << refined.converged
+                  << ", iterations=" << refined.iterations
+                  << ", before_merit=" << fo.final_residuals.merit
+                  << ", after_merit=" << refined.final_residuals.merit
+                  << ", residuals=(primal="
+                  << refined.final_residuals.primal_feas
+                  << ",dual=" << refined.final_residuals.dual_feas
+                  << ",complementarity="
+                  << refined.final_residuals.complementarity << ")"
+                  << ", status=\"" << refined.status << "\"\n";
+      }
       if (adopt_refinement) {
         refined.iterations += prior_iterations;
         refined.symbolic_analyses += prior_symbolic_analyses;
@@ -3807,7 +3928,8 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
             prior_polish_factorizations;
         refined.initial_residuals = original_initial_residuals;
         if (refined.converged) {
-          refined.status = tangential_filter_stall
+          refined.status = (tangential_filter_stall ||
+                            phase1_scaled_filter_stall)
               ? "Converged after tangential filter continuation"
               : "Converged after original-scale KKT refinement";
         } else {
@@ -3892,6 +4014,44 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
     out.stats.complementarity = fo.final_residuals.complementarity;
     out.stats.residual_inf =
         std::max(fo.final_residuals.primal_feas, fo.final_residuals.dual_feas);
+
+    // Preserve the best finite primal-dual state even when the filter does not
+    // certify convergence. Fixed-variable postsolve and external audit need
+    // these vectors to evaluate the original-coordinate KKT residuals; their
+    // presence never upgrades success without those independent gates.
+    const bool complete_filter_state =
+        fo.lambda.allFinite() && fo.mu_ineq.allFinite() && fo.s.allFinite() &&
+        fo.mu_ineq.size() == fo.s.size();
+    if (complete_filter_state) {
+      out.constraint_duals.resize(fo.mu_ineq.size() + fo.lambda.size());
+      if (fo.mu_ineq.size() > 0) {
+        out.constraint_duals.head(fo.mu_ineq.size()) = fo.mu_ineq;
+      }
+      if (fo.lambda.size() > 0) {
+        out.constraint_duals.tail(fo.lambda.size()) = fo.lambda;
+      }
+      out.box_dual_lb = Eigen::VectorXd::Zero(n_f);
+      out.box_dual_ub = Eigen::VectorXd::Zero(n_f);
+      for (int k = 0; k < static_cast<int>(fo.lb_cols.size()); ++k) {
+        const int idx = fo.n_nonlinear_ineq + k;
+        if (idx < fo.mu_ineq.size()) {
+          out.box_dual_lb[fo.lb_cols[static_cast<size_t>(k)]] =
+              fo.mu_ineq[idx];
+        }
+      }
+      for (int k = 0; k < static_cast<int>(fo.ub_cols.size()); ++k) {
+        const int idx = fo.n_nonlinear_ineq +
+                        static_cast<int>(fo.lb_cols.size()) + k;
+        if (idx < fo.mu_ineq.size()) {
+          out.box_dual_ub[fo.ub_cols[static_cast<size_t>(k)]] =
+              fo.mu_ineq[idx];
+        }
+      }
+      detail.lambda_eq = fo.lambda;
+      detail.mu_ineq = fo.mu_ineq;
+      detail.z_slack = fo.s;
+      detail.complementarity = fo.final_residuals.complementarity;
+    }
 
     if (fo.converged) {
       out.constraint_duals.resize(fo.mu_ineq.size() + fo.lambda.size());

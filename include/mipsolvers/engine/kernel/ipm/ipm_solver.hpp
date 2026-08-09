@@ -50,6 +50,11 @@ struct IPMOptions {
   Eigen::VectorXd inequality_dual_start;
   Eigen::VectorXd slack_start;
 
+  // The caller asserts that x0 was produced by an external Phase I and passes
+  // the original-coordinate primal tolerance. Native IPM independently audits
+  // that assertion before using the feasible-start initialization policy.
+  bool primal_feasible_start{false};
+
   // Cold-start equality multipliers from
   //   min_lambda ||grad f + Jh^T mu + Jg^T lambda||_2.
   // The candidate is used only when it improves stationarity and its infinity
@@ -124,6 +129,8 @@ struct IPMDetail {
   int restoration_factorizations{0};
   int retry_factorizations{0};
   int active_set_polish_factorizations{0};
+  bool primal_feasible_start_requested{false};
+  bool primal_feasible_start_accepted{false};
   bool restoration_warm_start_used{false};
   double restoration_normal_residual_before{0.0};
   double restoration_normal_residual_after{0.0};

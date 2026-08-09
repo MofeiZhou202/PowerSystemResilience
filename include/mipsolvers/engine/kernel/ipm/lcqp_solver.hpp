@@ -17,6 +17,9 @@ struct LCQPOptions {
   double tol_primal{1e-8};
   double tol_dual{1e-8};
   double tol_gap{1e-8};
+  // Optional primal estimate in the model's original coordinates. An empty or
+  // dimensionally incompatible vector retains the generic bound-centre start.
+  Eigen::VectorXd initial_point{};
   bool verbose{false};
 };
 

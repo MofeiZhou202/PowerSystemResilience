@@ -6,6 +6,8 @@
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <string>
 
 #include "mipsolvers/engine/api/solver.hpp"
@@ -13,6 +15,7 @@
 #include "mipsolvers/engine/problem_types.hpp"
 #include "mipsolvers/engine/kernel/ipm/ipm_restoration.hpp"
 #include "mipsolvers/engine/kernel/ipm/ipm_solver.hpp"
+#include "mipsolvers/engine/kernel/ipm/lcqp_solver.hpp"
 #include "mipsolvers/engine/kernel/kkt/kkt_system.hpp"
 
 using namespace mipsolvers::engine;
@@ -150,6 +153,73 @@ TEST_CASE("IPM/QP: convex QP solved", "[ipm][qp]") {
   CHECK(res.stats.objective == Approx(0.5).margin(1e-4));
   CHECK(res.x[0] == Approx(0.5).margin(1e-4));
   CHECK(res.x[1] == Approx(0.5).margin(1e-4));
+}
+
+TEST_CASE("Native LCQP condenses general inequality slacks",
+          "[ipm][qp][inequality][structure]") {
+  QPModel qp;
+  qp.sense = Sense::Minimize;
+  qp.c = Eigen::VectorXd::Zero(2);
+  qp.Q.resize(2, 2);
+  qp.Q.insert(0, 0) = 2.0;
+  qp.Q.insert(1, 1) = 2.0;
+  qp.Q.makeCompressed();
+  qp.A.resize(1, 2);
+  qp.A.insert(0, 0) = -1.0;
+  qp.A.insert(0, 1) = -1.0;
+  qp.A.makeCompressed();
+  qp.b = Eigen::VectorXd::Constant(1, -1.0);
+  qp.Aeq.resize(0, 2);
+  qp.beq.resize(0);
+  qp.vars.push_back({VarType::Continuous, 0.0, 1e20});
+  qp.vars.push_back({VarType::Continuous, 0.0, 1e20});
+
+  const SolveResult result = NativeLCQPAdapter().solve_qp(qp);
+
+  INFO("status=" << result.stats.status
+       << " primal=" << result.stats.primal_feas
+       << " dual=" << result.stats.dual_feas
+       << " complementarity=" << result.stats.complementarity);
+  REQUIRE(result.stats.success);
+  REQUIRE(result.x.size() == 2);
+  CHECK(result.x[0] == Approx(0.5).margin(1e-5));
+  CHECK(result.x[1] == Approx(0.5).margin(1e-5));
+  CHECK(result.stats.objective == Approx(0.5).margin(1e-5));
+  CHECK((qp.A * result.x - qp.b).maxCoeff() <= 1e-7);
+}
+
+TEST_CASE("Native LCQP accepts a structural primal initial point",
+          "[ipm][qp][initial-point]") {
+  QPModel qp;
+  qp.sense = Sense::Minimize;
+  qp.c = Eigen::VectorXd::Zero(2);
+  qp.Q.resize(2, 2);
+  qp.Q.insert(0, 0) = 2.0;
+  qp.Q.insert(1, 1) = 2.0;
+  qp.Q.makeCompressed();
+  qp.A.resize(1, 2);
+  qp.A.insert(0, 0) = -1.0;
+  qp.A.insert(0, 1) = -1.0;
+  qp.A.makeCompressed();
+  qp.b = Eigen::VectorXd::Constant(1, -1.0);
+  qp.Aeq.resize(0, 2);
+  qp.beq.resize(0);
+  qp.vars.push_back({VarType::Continuous, 0.0, 1e20});
+  qp.vars.push_back({VarType::Continuous, 0.0, 1e20});
+
+  LCQPOptions options;
+  options.initial_point.resize(2);
+  options.initial_point << 0.75, 0.25;
+  const SolveResult result = NativeLCQPAdapter(options).solve_qp(qp);
+
+  INFO("status=" << result.stats.status
+       << " primal=" << result.stats.primal_feas
+       << " dual=" << result.stats.dual_feas
+       << " complementarity=" << result.stats.complementarity);
+  REQUIRE(result.stats.success);
+  CHECK(result.x[0] == Approx(0.5).margin(1e-5));
+  CHECK(result.x[1] == Approx(0.5).margin(1e-5));
+  CHECK((qp.A * result.x - qp.b).maxCoeff() <= options.tol_primal);
 }
 
 // ─── IPM warm start / numerical robustness ────────────────────────────────
@@ -507,6 +577,60 @@ TEST_CASE("Filter IPM recovers from an infeasible inequality start",
   CHECK(detail.complementarity < options.tol_complementarity);
 }
 
+TEST_CASE("Native IPM preserves only an audited Phase-I primal start",
+          "[ipm][nlp][phase1][initialization][regression]") {
+  const auto make_model = [](double& first_objective_x) {
+    NLPModel nlp;
+    nlp.sense = Sense::Minimize;
+    nlp.vars.push_back({VarType::Continuous, 0.0, 1.0});
+    nlp.x0 = Eigen::VectorXd::Constant(1, -5e-5);
+    nlp.f = [&first_objective_x](const Eigen::VectorXd& x) {
+      if (!std::isfinite(first_objective_x)) first_objective_x = x[0];
+      return 0.5 * x.squaredNorm();
+    };
+    nlp.grad = [](const Eigen::VectorXd& x, Eigen::VectorXd& gradient) {
+      gradient = x;
+    };
+    nlp.hess = [](const Eigen::VectorXd&,
+                  Eigen::SparseMatrix<double>& hessian) {
+      hessian.resize(1, 1);
+      hessian.insert(0, 0) = 1.0;
+    };
+    return nlp;
+  };
+
+  IPMOptions options;
+  options.primal_feasible_start = true;
+  options.max_iter = 1;
+  options.tol_primal = 1e-4;
+  options.tol_dual = 1e-4;
+  options.tol_complementarity = 1e-4;
+  options.tol_accept = 0.0;
+  options.scale_problem = false;
+  options.use_restoration_phase = false;
+
+  double accepted_first_x = std::numeric_limits<double>::quiet_NaN();
+  const auto [accepted_result, accepted_detail] =
+      NativeIPMAdapter(options).solve_nlp_detail(
+          make_model(accepted_first_x));
+  (void)accepted_result;
+  CHECK(accepted_detail.primal_feasible_start_requested);
+  CHECK(accepted_detail.primal_feasible_start_accepted);
+  REQUIRE(std::isfinite(accepted_first_x));
+  CHECK(accepted_first_x == Approx(-5e-5).margin(1e-15));
+
+  options.tol_primal = 1e-6;
+  double rejected_first_x = std::numeric_limits<double>::quiet_NaN();
+  const auto [rejected_result, rejected_detail] =
+      NativeIPMAdapter(options).solve_nlp_detail(
+          make_model(rejected_first_x));
+  (void)rejected_result;
+  CHECK(rejected_detail.primal_feasible_start_requested);
+  CHECK_FALSE(rejected_detail.primal_feasible_start_accepted);
+  REQUIRE(std::isfinite(rejected_first_x));
+  CHECK(rejected_first_x >= 0.0);
+}
+
 TEST_CASE("Filter IPM uses inertia correction on a nonconvex objective",
           "[ipm][nlp][nonconvex][inertia]") {
   NLPModel nlp;
@@ -585,6 +709,10 @@ TEST_CASE("Filter IPM handles rank-deficient equality multipliers",
   NativeIPMAdapter solver(options);
   const auto [result, detail] = solver.solve_nlp_detail(nlp);
 
+  INFO("status=" << result.stats.status
+       << " primal=" << result.stats.primal_feas
+       << " dual=" << result.stats.dual_feas
+       << " complementarity=" << result.stats.complementarity);
   REQUIRE(result.stats.success);
   REQUIRE(detail.lambda_eq.size() == 2);
   CHECK(result.stats.primal_feas < options.tol_primal);
