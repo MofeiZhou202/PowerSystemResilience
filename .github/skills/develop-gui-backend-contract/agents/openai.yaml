@@ -1,0 +1,6 @@
+interface:
+  display_name: "HySim GUI Backend Contract"
+  short_description: "Synchronize HySim backend schemas and GUI behavior"
+  default_prompt: "Use $develop-gui-backend-contract to implement and verify an end-to-end HySim backend-to-GUI feature."
+policy:
+  allow_implicit_invocation: true

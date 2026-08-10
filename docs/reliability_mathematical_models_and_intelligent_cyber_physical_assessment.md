@@ -1,7 +1,7 @@
 # Reliability Mathematical Models and Intelligent Cyber-Physical Extension
 
 > Verified against the public contracts, implementations, and reliability tests
-> on 2026-07-19.
+> on 2026-08-10.
 >
 > Implementation sources: `include/hacdcpf/reliability/`,
 > `include/hacdcpf/analysis/three_stage_reliability.hpp`, and
@@ -13,9 +13,10 @@
 > **Proposed** means a mathematical extension, not current runtime behavior.
 > Sections labelled **Proposed** may reuse dynamics or short-circuit kernels
 > that exist outside the reliability workflow. Reported EENS, LOLE, LOLF,
-> SAIDI, and related metrics are protection/FRT-aware only when the result
-> explicitly reports `protection_frt_reliability_coupled=true` and identifies
-> the coupled event path.
+> The three-stage result is protection-conditioned only when
+> `protection_model.configuration_applied=true`; this static event abstraction
+> does not make the result DER-FRT-aware. No current reliability route claims a
+> coupled protection/FRT trajectory model.
 >
 > This consolidated export supersedes implementation-status claims in the older
 > focused reliability documents where later source changes have fixed an issue.
@@ -413,6 +414,116 @@ The strict policy does not invent missing risk. The current Monte Carlo and FMEA
 paths use the shared resolver and the same per-kind fallback table. This avoids
 the historical inconsistency in which the same branch had different implied
 unavailability in different methods.
+
+### 3.4 User configuration and component coverage
+
+**Implemented.** `ReliabilityConfiguration` is a session/model overlay rather
+than another copy of reliability fields in every rich component POD. Every
+optional failure-mode field follows
+
+$$
+\theta_m^{effective}=
+\operatorname{first}\left(
+\theta_m^{mode-user},\theta_m^{protection-user},\theta_m^{case},
+\theta_m^{template},\theta_m^{policy}
+\right).
+$$
+
+The overlay covers enable state; one of annual failure rate, MTBF, or forced
+outage rate; MTTR; conditional and demand probabilities; isolation, switching,
+repair, and cyber-recovery durations; and residual capacity. Invalid units,
+non-finite values, conflicting hazard forms, out-of-range probabilities, and
+dangling mode IDs are rejected before the configuration is saved or executed.
+
+Catalog generation now enumerates the complete rich-model device inventory,
+including AC/DC/three-phase busbar nodes, AC/DC bus loads, two- and
+three-winding transformers, regulator controls, dedicated DC storage, LCC
+converters, and three-phase lines, transformers, loads, generators, external
+grids, and regulator controls. This is **catalog
+and parameter coverage**, not a claim that every consequence is expressible by
+every physical engine. A three-phase, LCC, control-only, or other unsupported
+steady-state mutation remains in the catalog with an explicit unsupported
+reason; it is not assigned zero shed.
+
+External references use `component_kind + component .index`, for example
+`ac_transformer_2w:7`; vector positions are internal. Duplicate indices within
+one component kind are rejected. User protection rows bind a protective device
+to one protected component, an optional backup, and an explicit stable-ID zone.
+The catalog consumes fail-to-trip/fail-to-open probabilities and nuisance-trip
+frequency, while the failure-mode consequence operator applies the resolved
+zone mutation. Three-stage restoration consumes protection rows separately.
+Let $r$ be successful automatic-reclose probability and
+
+$$
+q_j=1-(1-p_j^{trip})(1-p_j^{open}),\qquad j\in\{1,2\}.
+$$
+
+For initiating component frequency $\lambda$, it generates the mutually
+exclusive event frequencies
+
+$$
+\begin{aligned}
+\lambda^{transient}&=\lambda r,\\
+\lambda^{primary}&=\lambda(1-r)(1-q_1),\\
+\lambda^{backup}&=\lambda(1-r)q_1(1-q_2),\\
+\lambda^{unresolved}&=\lambda(1-r)q_1q_2.
+\end{aligned}
+$$
+
+Hence their sum is exactly $\lambda$. Successful reclose is a momentary event
+and is excluded from sustained IEEE 1366 SAIFI, SAIDI, and EENS. Primary and
+backup clearing times replace the Stage-1 isolation time for their respective
+scenarios while total isolation/switching/repair duration remains conserved.
+Backup clearance expands the forced-outage set using supported stable
+`zone_component_ids`; primary-plus-backup failure forbids restoration. If the
+backup device has its own protection row, that row supplies $q_2$; otherwise
+the result states the abstract upstream-backup assumption.
+
+This is a static event tree, not a time-current or protection/FRT simulation.
+It does not derive pickup, direction/distance/differential selectivity, relay
+coordination, or settings from short-circuit current, and it does not couple
+DER-FRT or GFM/GFL dynamics. Nuisance-trip frequency remains a failure-mode
+FMEA input and is not a three-stage scenario.
+
+The GUI reads its field inventory from the backend-aligned schema and submits
+only edited or previously saved mode rows. A different loaded model clears the
+overlay; a same-model Canvas resynchronization preserves it and revalidates all
+stable references before execution. Saving or importing a non-empty overlay
+selects `failure_mode_fmea`; NSQ, sequential MC, component FMEA, F&D, and the
+three-stage model do not consume failure-mode IDs. Three-stage restoration can
+nevertheless consume the overlay's protection rows and reports this narrower
+scope explicitly; no method may silently claim that ignored fields applied.
+
+### 3.5 GUI calculation workflow and impact comparison
+
+The reliability toolbar displays the active method's implemented calculation
+principle, aggregation equation, consequence engine, and validity boundary. It
+also exposes five persistent stages: configuration and parameter resolution,
+state/fault enumeration, consequence mapping, solution/restoration, and metric
+aggregation with boundary audit. The unified HTTP request does not publish
+stage-level progress events, so enumeration, consequence mapping, and solving
+are shown as concurrently active while that request is outstanding; the GUI
+does not infer fictitious percentages or completion times.
+
+After the response arrives, the stage states are reconstructed from
+`reliability_configuration`, `failure_mode_coverage`, `data_quality`,
+`model_scope`, `model_limitations`, and `validity`. Unsupported failure modes,
+an unconsumed custom configuration, missing required data, and solver/model
+fallbacks are shown as limited states rather than completed support. The same
+coverage summary reports component count, mode count, expressible consequences,
+and active protection configurations.
+
+The registered `reliability_workflow_e2e` uses the built-in
+`cyber_physical_reliability_demo` FLISR case for three directional checks:
+
+- physical stress: increasing load scale must increase EENS;
+- information service: loss of automation must increase EENS and retain the
+  separate response-delay and frozen-control contributions;
+- reliability data: increasing a positive passive failure-mode frequency must
+  increase its mode frequency and total failure-mode EENS.
+
+These are method-local sensitivity checks, not a claim that EENS values from
+different consequence engines are directly commensurable.
 
 ## 4. Common consequence model
 
@@ -1908,8 +2019,8 @@ the validated composite policy, not the unconstrained model.
 
 ### 17.1 Dependability and security
 
-**Proposed, partly supported by current failure-mode FMEA.** Protection has two
-distinct failure families:
+**Implemented as a static event abstraction; dynamic coordination remains
+proposed.** Protection has two distinct failure families:
 
 - dependability failure: fail-to-trip on a real demand;
 - security failure: nuisance trip with no in-zone fault.
@@ -1993,8 +2104,9 @@ current reliability evaluators.
 
 ### 18.1 Implementation status and exact boundary
 
-Protection and DER ride-through are not wholly absent from the repository, but
-they are not yet integrated into the reliability consequence path.
+Static protection-event conditioning is integrated into failure-mode FMEA and
+three-stage restoration. Relay trajectories, detailed coordination, and DER
+ride-through are not yet integrated into the reliability consequence path.
 
 | Capability | Current status | Reliability implication |
 |---|---|---|
@@ -2002,8 +2114,9 @@ they are not yet integrated into the reliability consequence path.
 | GFL/GFM dynamic models, current limits, limiter priorities, volt-var, and frequency-watt controls | **Implemented, opt-in, in dynamics** | Available for transient studies; not converted into contingency-class probabilities or EENS stages |
 | Detailed short-circuit converter contribution | **Implemented in short-circuit analysis** | GFL is represented as a current source and GFM as a voltage source behind impedance; this is a static fault snapshot, not relay/FRT event evolution |
 | Switch capabilities, fuse/recloser/sectionalizer metadata, reclose intervals, and lockout data | **Represented in the rich model** | Data exist, but reliability does not simulate time-current curves, reclose shots, fuse saving, or sectionalizer counts |
-| Fail-to-trip, nuisance-trip, fail-to-open/close, protection-zone expansion, and interlock checks | **Implemented as reliability event abstractions** | Consequences are available, but pickup, timing, selectivity, and DER-dependent fault current are not derived |
-| Full relay logic, primary/backup coordination, breaker-failure sequence, DER FRT/protection feedback, and FRT-conditioned EENS | **Proposed** | Required before reliability results can claim protection-logic or DER-FRT coverage |
+| Fail-to-trip, nuisance-trip, fail-to-open/close, protection-zone expansion, and interlock checks | **Implemented as reliability event abstractions** | Failure-mode FMEA consumes nuisance trips and protection mutations; three-stage restoration consumes reclose, primary/backup probabilities, configured clearing times, and backup-zone expansion. Pickup and selectivity are not derived |
+| Static mutually exclusive primary/backup/unresolved event tree | **Implemented in three-stage restoration** | Frequencies are conserved and unresolved faults block restoration; configured times and probabilities are inputs rather than short-circuit-derived relay behavior |
+| Full relay logic, time-current/distance/differential coordination, breaker mechanics, DER FRT/protection feedback, and FRT-conditioned EENS | **Proposed** | Required before reliability results can claim dynamic protection-logic or DER-FRT coverage |
 
 The current dynamics IEEE-1547 block uses filtered positive-sequence voltage
 magnitude and frequency inferred from voltage angle, continuous band-specific
@@ -3868,7 +3981,8 @@ actual reliability improvement.
 The present reliability module has a strong reusable base: current parameter
 semantics are unified; Monte Carlo supports hybrid consequences; staged FMEA
 keeps switching and repair windows disjoint; the three-stage model holds the
-fault and restoration plan through MTTR; storage and grid-forming support are
+fault and restoration plan through MTTR and conditions it on a frequency-
+conserving static protection event tree; storage and grid-forming support are
 bounded; and model-scope flags disclose approximations.
 
 Several implemented outputs still require explicit academic qualification:

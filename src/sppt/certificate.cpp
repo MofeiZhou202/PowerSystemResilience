@@ -136,7 +136,7 @@ CertificateRow certify_case(const HybridPowerSystem& sys, std::string case_name,
   row.opf_dual_residual = du.residual;
   row.opf_pass = du.passed;
   row.opf_converged = du.detail.find("non-convergence") == std::string::npos &&
-                      du.detail.find("vacuous") == std::string::npos;
+                      du.observation == MetamorphicObservation::Observed;
   return row;
 }
 

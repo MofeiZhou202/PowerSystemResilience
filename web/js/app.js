@@ -44,6 +44,9 @@ const App = (() => {
     d.textContent = str;
     return d.innerHTML;
   }
+  function escapeAttr(str) {
+    return escapeHtml(String(str ?? '')).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
 
   // ========== Display Unit Helpers ==========
   // Reads the pfDisplayUnit selector (MW / kW / W) and converts power values.
@@ -81,6 +84,8 @@ const App = (() => {
   let _lastDynamicCarbonData = null;
   let _lastTransientData = null;
   let _lastReliabilityData = null;
+  let _reliabilityConfigurationData = null;
+  let _reliabilityConfigurationDirty = false;
   let _lastResilienceData = null;
   let _lastWeakLinkData = null;
   let _lastCounterfactualData = null;
@@ -121,6 +126,7 @@ const App = (() => {
   const _canvasPlaybackControllers = new Map();
   let _activeWorkflow = 'steady';
   let _parameterLibraryData = null;
+  let _parameterLibrarySelectedInstance = '';
   const _reliabilityResultRefs = new Map();
   let _reliabilityResultRefSequence = 0;
   let _importedEvTrafficScenario = null;
@@ -135,6 +141,7 @@ const App = (() => {
   let _seqProfileEditorState = null;
   let _marketParticipantRows = null;
   let _collectWeakLinkEvidence = null;
+  let _refreshReliabilityWorkflow = null;
 
   function collectWeakLinkEvidence(...args) {
     if (!_collectWeakLinkEvidence) {
@@ -400,6 +407,20 @@ const App = (() => {
     if (typeof Canvas !== 'undefined' && Canvas.clearResults) Canvas.clearResults();
     if (reason) log(reason, 'info');
     updateDependencyChips();
+  }
+
+  function resetReliabilityConfigurationEditor() {
+    _reliabilityConfigurationData = null;
+    _reliabilityConfigurationDirty = false;
+    const details = document.getElementById('relReliabilityConfiguration');
+    if (details) details.open = false;
+    const modeRows = document.getElementById('relReliabilityModeRows');
+    const protectionRows = document.getElementById('relProtectionRows');
+    const status = document.getElementById('relConfigStatus');
+    if (modeRows) modeRows.replaceChildren();
+    if (protectionRows) protectionRows.replaceChildren();
+    if (status) status.textContent = '';
+    _refreshReliabilityWorkflow?.({ reset: true });
   }
 
   function workflowForModule(moduleName) {
@@ -1081,6 +1102,139 @@ const App = (() => {
     }).join('');
   }
 
+  function parameterRangeText(minimum, maximum, unit = '') {
+    const hasMinimum = minimum !== null && minimum !== undefined &&
+      Number.isFinite(Number(minimum));
+    const hasMaximum = maximum !== null && maximum !== undefined &&
+      Number.isFinite(Number(maximum));
+    if (!hasMinimum && !hasMaximum) return '按项目 / 铭牌校核';
+    const suffix = unit ? ` ${unit}` : '';
+    if (hasMinimum && hasMaximum && Number(minimum) === Number(maximum)) {
+      return `${minimum}${suffix}`;
+    }
+    if (hasMinimum && hasMaximum) return `${minimum} - ${maximum}${suffix}`;
+    return hasMinimum ? `>= ${minimum}${suffix}` : `<= ${maximum}${suffix}`;
+  }
+
+  function parameterCircuitSvg(family) {
+    const common = 'viewBox="0 0 420 150" role="img"';
+    const terminals = '<circle cx="24" cy="75" r="5"/><circle cx="396" cy="75" r="5"/>';
+    const circuits = {
+      system_base: `<svg ${common} aria-label="标幺值基准关系"><line x1="24" y1="75" x2="396" y2="75"/><rect x="145" y="42" width="130" height="66"/><text x="210" y="69">S_base, V_base</text><text x="210" y="91">Z_base = V²/S</text>${terminals}</svg>`,
+      ac_bus: `<svg ${common} aria-label="交流母线电压状态"><line x1="24" y1="75" x2="176" y2="75"/><line x1="176" y1="28" x2="176" y2="122"/><line x1="176" y1="75" x2="396" y2="75"/><circle cx="176" cy="75" r="8"/><text x="235" y="58">V = |V|∠θ</text><text x="235" y="88">V_min ≤ |V| ≤ V_max</text>${terminals}</svg>`,
+      ac_line_pi: `<svg ${common} aria-label="交流线路π型等值电路"><line x1="24" y1="75" x2="82" y2="75"/><path d="M82 75h18l8-15 16 30 16-30 16 30 16-15h74"/><line x1="246" y1="75" x2="396" y2="75"/><line x1="82" y1="75" x2="82" y2="112"/><line x1="66" y1="112" x2="98" y2="112"/><line x1="246" y1="75" x2="246" y2="112"/><line x1="230" y1="112" x2="262" y2="112"/><text x="164" y="42">R + jX</text><text x="58" y="135">jB/2</text><text x="226" y="135">jB/2</text>${terminals}</svg>`,
+      transformer_t: `<svg ${common} aria-label="双绕组变压器等值电路"><line x1="24" y1="75" x2="100" y2="75"/><path d="M100 75h15l8-15 16 30 16-30 16 30 16-15h28"/><line x1="215" y1="75" x2="240" y2="75"/><circle cx="260" cy="75" r="24"/><circle cx="292" cy="75" r="24"/><line x1="316" y1="75" x2="396" y2="75"/><line x1="215" y1="75" x2="215" y2="120"/><path d="M200 120h30M204 128h22M209 136h12"/><text x="155" y="42">R_k + jX_k</text><text x="276" y="34">tap : 1</text><text x="170" y="137">R_m ∥ jX_m</text>${terminals}</svg>`,
+      dc_bus: `<svg ${common} aria-label="直流母线电压状态"><line x1="24" y1="75" x2="172" y2="75"/><line x1="172" y1="30" x2="172" y2="120"/><circle cx="172" cy="75" r="8"/><line x1="172" y1="75" x2="396" y2="75"/><text x="235" y="67">V_dc</text><text x="235" y="91">P = V_dc · I_dc</text>${terminals}</svg>`,
+      dc_series: `<svg ${common} aria-label="直流支路串联电阻等值电路"><line x1="24" y1="75" x2="100" y2="75"/><path d="M100 75l12-18 24 36 24-36 24 36 24-36 12 18h176"/><text x="160" y="40">R_dc</text><text x="145" y="124">I_dc = ΔV / R_dc</text>${terminals}</svg>`,
+      vsc_bridge: `<svg ${common} aria-label="VSC交直流换流器等值电路"><line x1="24" y1="75" x2="72" y2="75"/><path d="M72 75h12l7-14 14 28 14-28 14 28 10-14h20"/><rect x="163" y="37" width="96" height="76"/><path d="M178 92l66-34M178 58l66 34"/><line x1="259" y1="75" x2="396" y2="75"/><text x="110" y="42">R_sc+jX_sc</text><text x="211" y="27">VSC</text><text x="282" y="57">P_dc</text><text x="282" y="89">η, I_max</text>${terminals}</svg>`,
+      dcdc_bridge: `<svg ${common} aria-label="DC/DC换流器等值电路"><line x1="24" y1="75" x2="130" y2="75"/><rect x="130" y="38" width="160" height="74"/><path d="M153 75h42M183 59l16 16-16 16M267 75h-42M237 59l-16 16 16 16"/><line x1="290" y1="75" x2="396" y2="75"/><text x="210" y="28">DC/DC</text><text x="210" y="133">V_out = g(D,n)·V_in, P_out = ηP_in</text>${terminals}</svg>`,
+      storage_source: `<svg ${common} aria-label="储能与变流器等值模型"><line x1="24" y1="75" x2="116" y2="75"/><rect x="116" y="39" width="86" height="72"/><text x="159" y="70">PCS</text><text x="159" y="91">η_ch / η_dis</text><line x1="202" y1="75" x2="274" y2="75"/><rect x="274" y="45" width="96" height="60"/><line x1="290" y1="60" x2="310" y2="60"/><line x1="300" y1="50" x2="300" y2="70"/><line x1="328" y1="60" x2="348" y2="60"/><text x="322" y="92">E, SOC</text><line x1="370" y1="75" x2="396" y2="75"/>${terminals}</svg>`,
+      reliability_block: `<svg ${common} aria-label="可靠性状态与恢复模型"><rect x="42" y="48" width="112" height="54"/><rect x="266" y="48" width="112" height="54"/><path d="M154 63h112M266 88H154"/><path d="M252 55l14 8-14 8M168 80l-14 8 14 8"/><text x="98" y="80">可用</text><text x="322" y="80">故障</text><text x="210" y="49">λ</text><text x="210" y="108">μ = 1/MTTR</text></svg>`,
+      generic: `<svg ${common} aria-label="模型参数块"><line x1="24" y1="75" x2="120" y2="75"/><rect x="120" y="38" width="180" height="74"/><text x="210" y="69">参数化模型</text><text x="210" y="91">详见模型契约</text><line x1="300" y1="75" x2="396" y2="75"/>${terminals}</svg>`,
+    };
+    return circuits[family] || circuits.generic;
+  }
+
+  function renderParameterModelExplorer(data, activeComponent) {
+    const catalogs = Array.isArray(data.model_catalog) ? data.model_catalog : [];
+    const catalog = catalogs.find(item => item.component_type === activeComponent) || null;
+    const title = document.getElementById('parameterModelTitle');
+    const scope = document.getElementById('parameterModelScope');
+    const circuit = document.getElementById('parameterEquivalentCircuit');
+    const caption = document.getElementById('parameterCircuitCaption');
+    const instanceSelect = document.getElementById('parameterLibraryInstance');
+    const instances = (Array.isArray(data.parameter_instances) ? data.parameter_instances : [])
+      .filter(item => item.component_type === activeComponent);
+
+    if (title) title.textContent = catalog?.title || '全部注册参数';
+    if (scope) scope.textContent = catalog?.model_scope ||
+      '选择一个元件模型后，可对照当前实例值、配置默认值、典型工程范围和后端硬校验范围。';
+    if (circuit) circuit.innerHTML = parameterCircuitSvg(catalog?.equivalent_circuit_family || 'generic');
+    if (caption) caption.textContent = catalog?.equivalent_circuit_caption || '参数契约总览';
+
+    if (!instanceSelect) return null;
+    const selectedExists = instances.some(item => item.identity === _parameterLibrarySelectedInstance);
+    if (!selectedExists) _parameterLibrarySelectedInstance = instances[0]?.identity || '';
+    instanceSelect.disabled = instances.length === 0;
+    instanceSelect.innerHTML = instances.length
+      ? instances.map(item => {
+          const label = `${item.domain ? `[${String(item.domain).toUpperCase()}] ` : ''}${item.component_name || item.component_kind} #${item.component_index}${item.in_service === false ? ' · 停运' : ''}`;
+          return `<option value="${parameterLibraryAttr(item.identity)}"${item.identity === _parameterLibrarySelectedInstance ? ' selected' : ''}>${escapeHtml(label)}</option>`;
+        }).join('')
+      : '<option value="">当前模型无此类实例</option>';
+    return instances.find(item => item.identity === _parameterLibrarySelectedInstance) || null;
+  }
+
+  function parameterInstanceValueText(value) {
+    if (value === null || value === undefined) return '-';
+    if (typeof value === 'boolean') return value ? '是' : '否';
+    if (typeof value === 'object') return JSON.stringify(value);
+    return String(value);
+  }
+
+  function parameterInstanceFieldLabel(field) {
+    const leaf = String(field || '').split('.').pop() || field;
+    return COMP.fieldLabels?.[leaf] || leaf.replaceAll('_', ' ');
+  }
+
+  const PARAMETER_GROUP_LABELS = Object.freeze({
+    identity_connection: '标识与连接',
+    electrical_physical: '电气与物理',
+    rating_limits: '额定值与限值',
+    operation_control: '运行与控制',
+    cost_carbon: '成本与碳',
+    reliability: '可靠性',
+    dynamics: '动态模型',
+  });
+  const PARAMETER_GROUP_ORDER = Object.freeze([
+    'identity_connection', 'electrical_physical', 'rating_limits',
+    'operation_control', 'cost_carbon', 'reliability', 'dynamics',
+  ]);
+
+  function renderParameterInstanceRow(item, componentType) {
+    const groupLabel = PARAMETER_GROUP_LABELS[item.group] || '模型输入';
+    const value = parameterInstanceValueText(item.value);
+    const source = item.source === 'authored_system_json' ? '后端系统 JSON' : (item.source || '后端实例');
+    return `<tr data-instance-field="${parameterLibraryAttr(item.field || item.id || '')}" data-parameter-group="${parameterLibraryAttr(item.group || 'model_input')}" data-current-state="instance">
+      <td>${escapeHtml(componentType || '')}</td>
+      <td><span class="parameter-group-label">${escapeHtml(groupLabel)}</span><span class="parameter-rule-label">${escapeHtml(item.label || parameterInstanceFieldLabel(item.field))}</span><span class="parameter-rule-key">${escapeHtml(item.field || item.id || '')}</span></td>
+      <td><span class="parameter-current-value">${escapeHtml(value)}</span></td>
+      <td><span class="parameter-source-readonly">属性</span></td>
+      <td>${escapeHtml(item.unit || '')}</td>
+      <td><span class="parameter-range-value">未发布</span></td>
+      <td><span class="parameter-range-value">未注册</span></td>
+      <td><span class="parameter-state instance">实例输入</span></td>
+      <td><span class="parameter-model-role">${escapeHtml(item.model_role || '后端当前模型的实例输入；不属于全局标准默认值。')}</span></td>
+      <td><span class="parameter-source-readonly">${escapeHtml(source)}</span></td>
+    </tr>`;
+  }
+
+  function parameterReliabilityRows(data, selectedInstance) {
+    if (!selectedInstance) return [];
+    const schema = Array.isArray(data.reliability_parameter_schema)
+      ? data.reliability_parameter_schema : [];
+    const fieldLabels = {
+      enabled: '启用', failure_rate_per_year: '年故障频率', mtbf_hours: 'MTBF',
+      mttr_hours: 'MTTR', forced_outage_rate: '强迫停运率',
+      probability_given_initiated: '条件发生概率', demand_frequency_per_year: '年需求次数',
+      probability_per_demand: '每次需求失败概率', isolation_hr: '隔离时间',
+      switching_hr: '切换时间', repair_hr: '修复时间', cyber_recovery_hr: '信息恢复时间',
+      residual_capacity_factor: '剩余容量系数',
+    };
+    return (selectedInstance.reliability_modes || []).flatMap(mode => schema.map(field => ({
+      id: `reliability.${mode.mode_id}.${field.name}`,
+      field: `${mode.mode_id}.${field.name}`,
+      label: `${mode.display_name || mode.mode_id} / ${fieldLabels[field.name] || field.name}`,
+      value: field.name === 'enabled' ? mode.enabled : mode.resolved_parameters?.[field.name],
+      unit: field.unit || '',
+      group: 'reliability',
+      source: mode.data_source || 'resolved_failure_mode_catalog',
+      model_role: mode.supported === false
+        ? `可靠性失效模式；当前后果模型受限：${mode.unsupported_reason || '未提供原因'}`
+        : '可靠性失效模式的后端解析有效值。',
+    })));
+  }
+
   function renderParameterLibrary(data, validation = null) {
     if (!data) return;
     _parameterLibraryData = data;
@@ -1093,33 +1247,72 @@ const App = (() => {
     }
 
     const rules = Array.isArray(data.rules) ? data.rules : [];
+    const catalogs = Array.isArray(data.model_catalog) ? data.model_catalog : [];
     const componentFilter = document.getElementById('parameterLibraryComponentFilter');
     const selectedComponent = componentFilter?.value || '';
-    const components = [...new Set(rules.map(item => item.component_type).filter(Boolean))];
+    const components = catalogs.map(item => item.component_type).filter(Boolean);
     if (componentFilter) {
-      componentFilter.innerHTML = '<option value="">全部元件</option>' +
+      componentFilter.innerHTML = '<option value="">全部元件模型</option>' +
         components.map(component => `<option value="${parameterLibraryAttr(component)}">${escapeHtml(component)}</option>`).join('');
       componentFilter.value = components.includes(selectedComponent) ? selectedComponent : '';
     }
     const activeComponent = componentFilter?.value || '';
+    const physicalRules = rules.filter(item => !String(item.component_type || '').startsWith('Reliability -'));
     const visibleRules = activeComponent
-      ? rules.filter(item => item.component_type === activeComponent) : rules;
+      ? physicalRules.filter(item => item.component_type === activeComponent) : physicalRules;
+    const selectedInstance = renderParameterModelExplorer(data, activeComponent);
+    const coveredFields = new Set(visibleRules.map(item => item.parameter));
+    const instanceRows = selectedInstance
+      ? (selectedInstance.model_parameters || []).filter(item => !coveredFields.has(item.field))
+          .sort((a, b) => {
+            const groupA = PARAMETER_GROUP_ORDER.indexOf(a.group);
+            const groupB = PARAMETER_GROUP_ORDER.indexOf(b.group);
+            return (groupA < 0 ? 99 : groupA) - (groupB < 0 ? 99 : groupB) ||
+              String(a.field).localeCompare(String(b.field));
+          }) : [];
+    const reliabilityRows = parameterReliabilityRows(data, selectedInstance);
 
     const body = document.querySelector('#parameterLibraryTable tbody');
     if (body) {
-      body.innerHTML = visibleRules.map(item => `<tr data-rule-id="${parameterLibraryAttr(item.id)}" title="${parameterLibraryAttr(item.description || '')}">
+      const standardRows = visibleRules.map(item => {
+        const currentValue = selectedInstance?.values?.[item.id];
+        const hasCurrent = currentValue !== null && currentValue !== undefined && Number.isFinite(Number(currentValue));
+        const belowHard = hasCurrent && item.has_min && Number(currentValue) < Number(item.min_value);
+        const aboveHard = hasCurrent && item.has_max && Number(currentValue) > Number(item.max_value);
+        const hasTypicalMin = item.typical_min !== null && item.typical_min !== undefined &&
+          Number.isFinite(Number(item.typical_min));
+        const hasTypicalMax = item.typical_max !== null && item.typical_max !== undefined &&
+          Number.isFinite(Number(item.typical_max));
+        const outsideTypical = hasCurrent &&
+          ((hasTypicalMin && Number(currentValue) < Number(item.typical_min)) ||
+           (hasTypicalMax && Number(currentValue) > Number(item.typical_max)));
+        const state = belowHard || aboveHard ? 'error' : (outsideTypical ? 'attention' : (hasCurrent ? 'ok' : 'unknown'));
+        const stateText = state === 'error' ? '超出硬范围' : state === 'attention'
+          ? '偏离典型范围' : state === 'ok' ? '范围内' : '无实例值';
+        const currentText = hasCurrent ? String(currentValue) : '-';
+        const typical = parameterRangeText(item.typical_min, item.typical_max);
+        return `<tr data-rule-id="${parameterLibraryAttr(item.id)}" data-current-state="${state}" title="${parameterLibraryAttr(item.description || '')}">
         <td>${escapeHtml(item.component_type || '')}</td>
-        <td><span class="parameter-rule-label">${escapeHtml(item.label || item.parameter || '')}</span><span class="parameter-rule-key">${escapeHtml(item.id || '')}</span></td>
+        <td><span class="parameter-rule-label">${escapeHtml(item.label || item.parameter || '')} <b>${escapeHtml(item.symbol || '')}</b></span><span class="parameter-rule-key">${escapeHtml(item.id || '')}</span></td>
+        <td><span class="parameter-current-value">${escapeHtml(currentText)}</span></td>
         <td><input class="parameter-library-input" data-field="default_value" type="number" step="any" value="${parameterLibraryAttr(item.default_value)}" ${item.editable === false ? 'disabled' : ''}></td>
         <td><input class="parameter-library-input" data-field="unit" type="text" value="${parameterLibraryAttr(item.unit)}" ${item.editable === false ? 'disabled' : ''}></td>
-        <td><input class="parameter-library-input" data-field="min_value" type="number" step="any" value="${parameterLibraryAttr(item.min_value)}" ${item.editable === false ? 'disabled' : ''}></td>
-        <td><input class="parameter-library-input" data-field="max_value" type="number" step="any" value="${parameterLibraryAttr(item.max_value)}" ${item.editable === false ? 'disabled' : ''}></td>
-        <td><select class="parameter-library-select" data-field="severity" ${item.editable === false ? 'disabled' : ''}>
+        <td><span class="parameter-range-value">${escapeHtml(typical)}</span><small>${escapeHtml(item.typical_range_kind || '')}</small></td>
+        <td><div class="parameter-hard-range"><input class="parameter-library-input" aria-label="硬下限" data-field="min_value" type="number" step="any" value="${parameterLibraryAttr(item.min_value)}" ${item.editable === false ? 'disabled' : ''}><span>至</span><input class="parameter-library-input" aria-label="硬上限" data-field="max_value" type="number" step="any" value="${parameterLibraryAttr(item.max_value)}" ${item.editable === false ? 'disabled' : ''}></div></td>
+        <td><span class="parameter-state ${state}">${stateText}</span><select class="parameter-library-select" aria-label="越界级别" data-field="severity" ${item.editable === false ? 'disabled' : ''}>
           <option value="warning"${item.severity === 'warning' ? ' selected' : ''}>告警</option>
           <option value="error"${item.severity === 'error' ? ' selected' : ''}>错误</option>
         </select></td>
-        <td><input class="parameter-library-input parameter-library-source" data-field="source" type="text" value="${parameterLibraryAttr(item.source)}" ${item.editable === false ? 'disabled' : ''}></td>
-      </tr>`).join('') || '<tr><td colspan="8">当前筛选没有参数。</td></tr>';
+        <td><span class="parameter-model-role">${escapeHtml(item.model_role || item.description || '')}</span>${item.equation ? `<code>${escapeHtml(item.equation)}</code>` : ''}</td>
+        <td><span class="parameter-source-readonly">典型值：${escapeHtml(item.typical_range_source || '未发布')}</span><input class="parameter-library-input parameter-library-source" data-field="source" type="text" value="${parameterLibraryAttr(item.source)}" ${item.editable === false ? 'disabled' : ''}></td>
+      </tr>`;
+      }).join('');
+      const completeInstanceRows = instanceRows
+        .map(item => renderParameterInstanceRow(item, activeComponent)).join('');
+      const integratedReliabilityRows = reliabilityRows
+        .map(item => renderParameterInstanceRow(item, activeComponent)).join('');
+      body.innerHTML = standardRows + completeInstanceRows + integratedReliabilityRows ||
+        '<tr><td colspan="10">当前模型没有实例；载入包含该模型的系统后显示完整实例参数。</td></tr>';
     }
 
     const description = document.getElementById('parameterLibraryDescription');
@@ -1128,7 +1321,9 @@ const App = (() => {
     const summary = document.getElementById('parameterLibrarySummary');
     if (summary) {
       summary.innerHTML = `<span>版本<strong>${escapeHtml(data.version || '-')}</strong></span>
-        <span>规则<strong>${rules.length}</strong></span>
+        <span>模型<strong>${catalogs.length}</strong></span>
+        <span>实例<strong>${(data.parameter_instances || []).length}</strong></span>
+        <span>标准规则<strong>${physicalRules.length}</strong></span>
         <span>库状态<strong>${libraryValidation.valid === false ? '无效' : '有效'}</strong></span>`;
     }
     if (validation) renderParameterLibraryDiagnostics(validation);
@@ -1137,10 +1332,18 @@ const App = (() => {
   async function loadParameterLibrary(force = false) {
     if (_parameterLibraryData && !force) {
       renderParameterLibrary(_parameterLibraryData);
+      const selected = typeof Canvas !== 'undefined'
+        ? Canvas.getComponent(Canvas.state?.selectedId) : null;
+      syncParameterExplorerToCanvasSelection(selected);
       return _parameterLibraryData;
     }
     const data = await apiGet('/api/session/parameter_library');
-    if (data) renderParameterLibrary(data);
+    if (data) {
+      renderParameterLibrary(data);
+      const selected = typeof Canvas !== 'undefined'
+        ? Canvas.getComponent(Canvas.state?.selectedId) : null;
+      syncParameterExplorerToCanvasSelection(selected);
+    }
     return data;
   }
 
@@ -1161,6 +1364,92 @@ const App = (() => {
       });
     });
     return library;
+  }
+
+  const PARAMETER_INSTANCE_CANVAS_BUCKET = Object.freeze({
+    ac_bus: 'ac',
+    ac_generator: 'gen',
+    ac_load: 'load',
+    dc_bus: 'dc',
+    ac_branch: 'branch',
+    transformer_2w: 'trafo',
+    external_grid: 'extGrid',
+    ac_static_generator: 'sgen',
+    ac_renewable_generator: 'renGen',
+    ac_pv_system: 'pv',
+    ac_switch: 'sw',
+    ac_circuit_breaker: 'cb',
+    asynchronous_motor: 'motor',
+    flexible_load: 'flexLoad',
+    asymmetric_load: 'asymLoad',
+    shunt: 'shunt',
+    ac_transformer_3w: 'trafo3w',
+    charger: 'charger',
+    charging_station: 'chargingStation',
+    ac_regulator_control: 'trafo',
+    dc_branch: 'dcBranch',
+    dc_load: 'dcLoad',
+    dc_static_generator: 'dcSgen',
+    dc_static_generator_ac: 'dcSgen',
+    dc_pv_array: 'dcPv',
+    dc_circuit_breaker: 'dcCb',
+    vsc_converter: 'vsc',
+    lcc_converter: 'lcc',
+    dcdc_converter: 'dcdcConverter',
+    storage: 'storage',
+    dc_storage: 'dcStorage',
+    energy_router: 'energyRouter',
+    mobile_storage: 'mobileStorage',
+    virtual_power_plant: 'vpp',
+    microgrid: 'microgrid',
+  });
+
+  function syncParameterExplorerToCanvasSelection(comp) {
+    if (!comp || !_parameterLibraryData || typeof Canvas === 'undefined' ||
+        document.querySelector('.module-btn.active')?.dataset.module !== 'parameterLibrary') {
+      return false;
+    }
+
+    const maps = Canvas.getCompBusMap?.();
+    if (!maps) return false;
+    const candidates = (_parameterLibraryData.parameter_instances || []).filter(instance => {
+      const bucketName = PARAMETER_INSTANCE_CANVAS_BUCKET[instance.component_kind];
+      return bucketName && maps[bucketName]?.[instance.component_index] === comp.id;
+    }).map(instance => {
+      let score = instance.component_kind === comp.type ? 100 : 0;
+      if (comp.type === 'transformer_2w' && comp.params?._from_branch) {
+        if (instance.component_kind === 'transformer_2w' &&
+            Number(instance.component_index) === Number(comp.params._transformer_index)) {
+          score += 200;
+        } else if (instance.component_kind === 'ac_branch' &&
+                   Number(instance.component_index) === Number(comp.params.source_branch_idx ?? comp.params.index)) {
+          score += 150;
+        }
+      }
+      return { instance, score };
+    }).sort((a, b) => b.score - a.score ||
+      String(a.instance.identity).localeCompare(String(b.instance.identity)));
+
+    if (!candidates.length) return false;
+    if (candidates.length > 1 && candidates[0].score === candidates[1].score) {
+      console.warn('Ambiguous parameter instance mapping for Canvas component', comp.id,
+        candidates.filter(item => item.score === candidates[0].score)
+          .map(item => item.instance.identity));
+      return false;
+    }
+
+    const selected = candidates[0].instance;
+    const componentFilter = document.getElementById('parameterLibraryComponentFilter');
+    if (!componentFilter || ![...componentFilter.options]
+        .some(option => option.value === selected.component_type)) return false;
+    if (componentFilter.value === selected.component_type &&
+        _parameterLibrarySelectedInstance === selected.identity) return true;
+
+    _parameterLibraryData = parameterLibraryFromEditor() || _parameterLibraryData;
+    componentFilter.value = selected.component_type;
+    _parameterLibrarySelectedInstance = selected.identity;
+    renderParameterLibrary(_parameterLibraryData);
+    return true;
   }
 
   async function saveParameterLibrary(options = {}) {
@@ -2477,6 +2766,7 @@ const App = (() => {
     setStatus('加载中...', 'busy');
     const data = await apiPost('/api/session/load_builtin', { case: caseName });
     if (data) {
+	  resetReliabilityConfigurationEditor();
       log(`已加载算例: ${caseName}`, 'success');
       // Parse and display on canvas
       if (data._system_json || data._raw_json) {
@@ -2484,6 +2774,8 @@ const App = (() => {
           const sys = systemJsonFromLoadResponse(data);
           Canvas.loadFromSystemJson(sys);
           _canvasDirty = false;  // backend already has the correct system
+          _parameterLibraryData = null;
+          _parameterLibrarySelectedInstance = '';
           updateResilienceSwitchDefault();
           invalidateAnalysisResults('算例已变更，旧潮流和碳流结果已失效');
           log(`画布已更新: ${data.counts ? JSON.stringify(data.counts) : ''}`, 'info');
@@ -2506,12 +2798,16 @@ const App = (() => {
 
   // Render a freshly-loaded backend system onto the canvas (shared by the ETAP
   // import paths); logs any permissive-import warnings.
-  function applyLoadedSystem(data, label) {
+  function applyLoadedSystem(data, label, options = {}) {
     if (data._system_json || data._raw_json) {
       try {
+	        if (options.resetReliabilityConfiguration)
+	          resetReliabilityConfigurationEditor();
         const sys = systemJsonFromLoadResponse(data);
 	        Canvas.loadFromSystemJson(sys);
 	        _canvasDirty = false;  // backend already has the correct system
+	        _parameterLibraryData = null;
+	        _parameterLibrarySelectedInstance = '';
 	        const methodInput = document.getElementById('pfMethod');
 	        const recommendedMethod = data._recommended_pf_method ||
 	          ((data._has_three_phase_ac || sys.three_phase_ac) ? 'three_phase' : '');
@@ -2558,7 +2854,7 @@ const App = (() => {
       const data = await apiPost('/api/session/load_gridlabd', { glm_string: glm });
       if (!data) { setStatus('加载失败', 'error'); return; }
       log(`已导入GridLAB-D GLM: ${file.name}`, 'success');
-      applyLoadedSystem(data, 'GridLAB-D GLM');
+      applyLoadedSystem(data, 'GridLAB-D GLM', { resetReliabilityConfiguration: true });
       showModelIoStatus('GridLAB-D 导入完成', [
         ['文件', file.name],
         ['AC母线', data.counts?.ac_buses ?? data.ac_buses ?? ''],
@@ -2640,7 +2936,7 @@ const App = (() => {
       if (!data) { setStatus('加载失败', 'error'); return; }
       const label = projectFiles.length > 1 ? `${master?.path || master?.name} (+${projectFiles.length - 1})` : selected[0].name;
       log(`已导入OpenDSS DSS: ${label}`, 'success');
-      applyLoadedSystem(data, 'OpenDSS DSS');
+      applyLoadedSystem(data, 'OpenDSS DSS', { resetReliabilityConfiguration: true });
 	      showModelIoStatus('OpenDSS 导入完成', [
 	        ['文件', label],
 	        ['导入路径', data._opendss_import_mode || ''],
@@ -2671,7 +2967,7 @@ const App = (() => {
       });
       if (!data) { setStatus('加载失败', 'error'); return; }
       log(`已导入PSD.jl: ${file.name}`, 'success');
-      applyLoadedSystem(data, 'PowerSimulationsDynamics.jl');
+      applyLoadedSystem(data, 'PowerSimulationsDynamics.jl', { resetReliabilityConfiguration: true });
       showModelIoStatus('PowerSimulationsDynamics.jl 导入完成', [
         ['文件', file.name],
         ['导入路径', 'HACDCPF_RICH_MODEL_JSON'],
@@ -2735,7 +3031,7 @@ const App = (() => {
         return;
       }
       log(`已导入ETAP工作簿: ${file.name}`, 'success');
-      applyLoadedSystem(data, 'ETAP工作簿');
+      applyLoadedSystem(data, 'ETAP工作簿', { resetReliabilityConfiguration: true });
       showModelIoStatus('ETAP 工作簿导入完成', [
         ['文件', file.name],
         ['AC母线', data.counts?.ac_buses ?? data.ac_buses ?? ''],
@@ -2758,7 +3054,7 @@ const App = (() => {
       const data = await apiPost('/api/session/load_etap_xml', { xml_string: xml });
       if (!data) { setStatus('加载失败', 'error'); return; }
       log(`已导入ETAP工程: ${file.name}`, 'success');
-      applyLoadedSystem(data, 'ETAP工程');
+      applyLoadedSystem(data, 'ETAP工程', { resetReliabilityConfiguration: true });
       showModelIoStatus('ETAP XML 导入完成', [
         ['文件', file.name],
         ['AC母线', data.counts?.ac_buses ?? data.ac_buses ?? ''],
@@ -2791,7 +3087,7 @@ const App = (() => {
         return;
       }
       log(`已导入BPA DAT: ${file.name}`, 'success');
-      applyLoadedSystem(data, 'BPA DAT');
+      applyLoadedSystem(data, 'BPA DAT', { resetReliabilityConfiguration: true });
       showModelIoStatus('BPA DAT 导入完成', [
         ['文件', file.name],
         ['AC母线', data.counts?.ac_buses ?? data.ac_buses ?? ''],
@@ -2810,6 +3106,7 @@ const App = (() => {
     setStatus('创建中...', 'busy');
     const data = await apiPost('/api/session/new_empty');
     if (data) {
+	  resetReliabilityConfigurationEditor();
       Canvas.clearAll();
       _canvasDirty = false;  // backend already has the empty system
       updateResilienceSwitchDefault(true);
@@ -2956,7 +3253,7 @@ const App = (() => {
       if (data.error) throw new Error(data.error);
       const fileLabel = selected.map((file) => file.name).join(', ');
       log(`已导入配电台区CIM: ${fileLabel}`, 'success');
-      applyLoadedSystem(data, '配电台区CIM');
+      applyLoadedSystem(data, '配电台区CIM', { resetReliabilityConfiguration: true });
       showModelIoStatus('配电台区 CIM 导入完成', [
         ['模式', data._cim_import_mode === 'folder_merge' ? '文件夹拼接' : '单文件'],
         ['文件', selected.length === 1 ? selected[0].name : `${selected.length} 个 XML`],
@@ -3004,7 +3301,7 @@ const App = (() => {
       if (!data) { setStatus('加载失败', 'error'); return; }
       if (data.error) throw new Error(data.error);
       log(`已导入配电SVG: ${file.name}`, 'success');
-      applyLoadedSystem(data, '配电IEC-CGE SVG');
+      applyLoadedSystem(data, '配电IEC-CGE SVG', { resetReliabilityConfiguration: true });
       const completion = data._svg_parameter_completion || {};
       const standardNames = (completion.references || [])
         .filter(ref => ref.role !== 'engineering_assumption')
@@ -3161,7 +3458,7 @@ const App = (() => {
       if (!response.ok || data.error) {
         throw new Error(data.error || `HTTP ${response.status}`);
       }
-      applyLoadedSystem(data, 'BPA/DSP DAT');
+      applyLoadedSystem(data, 'BPA/DSP DAT', { resetReliabilityConfiguration: true });
       const report = data._bpa_import_report || {};
       log(`已导入BPA/DSP DAT: ${file.name}`, 'success');
       showModelIoStatus('BPA/DSP DAT 导入完成', [
@@ -3249,6 +3546,7 @@ const App = (() => {
           json_string: JSON.stringify(sys)
         });
         if (data) {
+	      resetReliabilityConfigurationEditor();
           let loadedName = sys?.name || '';
           if (data._raw_json) {
             // The backend strips unknown fields from the system JSON, so the
@@ -3300,7 +3598,10 @@ const App = (() => {
       console.log('[syncToBackend] DC buses:', JSON.stringify(sys.dc?.buses, null, 2));
     }
     window.__lastSyncJson = jsonStr;  // for debugging in console
-    const data = await apiPost('/api/session/load_json_string', { json_string: jsonStr });
+    const data = await apiPost('/api/session/load_json_string', {
+      json_string: jsonStr,
+      preserve_reliability_configuration: true,
+    });
     if (!data) {
       log('同步到后端失败', 'error');
       return false;
@@ -13032,6 +13333,275 @@ const App = (() => {
   }
 
   // ========== Property Editor ==========
+  const PROPERTY_SECTION_DEFINITIONS = [
+    ['identity', '基本信息与连接'],
+    ['electrical', '电气与额定参数'],
+    ['operation', '运行与控制'],
+    ['protection', '保护与安全'],
+    ['cost', '经济与碳参数'],
+    ['reliability', '可靠性参数'],
+    ['analysis', '专项分析参数'],
+    ['data', '数据与来源'],
+    ['dynamic', '暂态模型参数'],
+  ];
+
+  const PROPERTY_RELIABILITY_FIELDS = new Set([
+    'failure_rate', 'failure_rate_per_year', 'forced_outage_rate',
+    'mtbf_hr', 'mtbf_hours', 'mttr_hr', 'mttr_hours', 't_scheduled_hr',
+  ]);
+
+  const RELIABILITY_MODE_NUMBER_FIELDS = [
+    'failure_rate_per_year', 'mtbf_hours', 'mttr_hours',
+    'forced_outage_rate', 'probability_given_initiated',
+    'demand_frequency_per_year', 'probability_per_demand',
+    'isolation_hr', 'switching_hr', 'repair_hr',
+    'cyber_recovery_hr', 'residual_capacity_factor',
+  ];
+
+  const RELIABILITY_HAZARD_FIELDS = new Set([
+    'failure_rate_per_year', 'mtbf_hours', 'forced_outage_rate',
+  ]);
+
+  function reliabilityConfiguredModeMap(data) {
+    return new Map((data?.configuration?.mode_overrides || [])
+      .map(row => [String(row.mode_id || ''), row]));
+  }
+
+  const PROPERTY_IDENTITY_FIELDS = new Set([
+    'name', 'index', 'description', 'in_service', 'type', 'bus_type',
+    'bus', 'bus_ac', 'bus_dc', 'bus_in', 'bus_out', 'from_bus', 'to_bus',
+    'hv_bus', 'mv_bus', 'lv_bus', 'pcc_bus', 'aggregation_bus', 'station_id',
+    'target_bus', 'area', 'zone', 'location', 'control_area', 'carrier',
+  ]);
+
+  function propertySectionForField(key) {
+    if (PROPERTY_RELIABILITY_FIELDS.has(key) ||
+        /^(mtbf|mttr|failure_|forced_outage|t_scheduled)/.test(key)) return 'reliability';
+    if (key === 'dynamic_model') return 'dynamic';
+    if (PROPERTY_IDENTITY_FIELDS.has(key) || /^port\d+_(bus|type|side)$/.test(key))
+      return 'identity';
+    if (/^(cost_|startup_cost|shutdown_cost|charge_bid_price|discharge_bid_price|buy_price|sell_price|price_profile|emission_|carbon_|om_cost|throughput_cost|cost_per_)/.test(key))
+      return 'cost';
+    if (/^(cap_|_ies_|profile_id|parameter_source|parameters_inferred|cross_section_inferred)/.test(key))
+      return key.startsWith('cap_') ? 'analysis' : 'data';
+    if (/(breaker|reclose|islanding|interlock|protection|i_breaking|closed|grounded)/.test(key))
+      return 'protection';
+    if (/(control|controllable|grid_forming|is_master|participation|set_|_set_|droop|ramp_|tap_|switchable|current_step|status|availability|curtailable|v2g|operating_mode)/.test(key))
+      return 'operation';
+    return 'electrical';
+  }
+
+  function createPropertySection(fieldsDiv, sectionKey, keysCount = 0) {
+    const definition = PROPERTY_SECTION_DEFINITIONS.find(([key]) => key === sectionKey);
+    const details = document.createElement('details');
+    details.className = 'prop-category';
+    details.dataset.propertySection = sectionKey;
+    details.open = true;
+    const summary = document.createElement('summary');
+    const title = document.createElement('span');
+    title.textContent = definition?.[1] || sectionKey;
+    const count = document.createElement('small');
+    count.textContent = keysCount > 0 ? `${keysCount} 项` : '';
+    summary.append(title, count);
+    const body = document.createElement('div');
+    body.className = 'prop-category-body';
+    details.append(summary, body);
+    fieldsDiv.appendChild(details);
+    return { details, body, count };
+  }
+
+  const RELIABILITY_KIND_TO_CANVAS_BUCKET = {
+    ac_bus: 'ac', ac_bus_load: 'ac', dc_bus: 'dc', dc_bus_load: 'dc',
+    ac_generator: 'gen', ac_branch: 'branch', ac_load: 'load',
+    ac_static_generator: 'sgen', dc_static_generator_ac: 'dcSgen',
+    dc_static_generator: 'dcSgen', ac_renewable_generator: 'renGen',
+    ac_storage: 'storage', ac_pv_system: 'pv', ac_transformer_2w: 'trafo',
+    ac_transformer_3w: 'trafo3w', ac_switch: 'sw',
+    ac_circuit_breaker: 'cb', external_grid: 'extGrid', dc_branch: 'dcBranch',
+    dc_load: 'dcLoad', dcdc_converter: 'dcdcConverter',
+    dc_circuit_breaker: 'dcCb', dc_storage: 'dcStorage',
+    dc_dedicated_storage: 'dcStorage', dc_pv_array: 'dcPv',
+    vsc_converter: 'vsc', lcc_converter: 'lcc', energy_router: 'energyRouter',
+    microgrid: 'microgrid', mobile_storage: 'mobileStorage',
+    virtual_power_plant: 'vpp', flexible_load: 'flexLoad',
+    asymmetric_load: 'asymLoad', shunt: 'shunt', charger: 'charger',
+    charging_station: 'chargingStation', asynchronous_motor: 'motor',
+  };
+
+  function reliabilityStableIdsForCanvasComponent(comp, data) {
+    const maps = Canvas.getCompBusMap ? Canvas.getCompBusMap() : {};
+    const ids = new Set();
+    for (const component of data?.components || []) {
+      const bucketName = RELIABILITY_KIND_TO_CANVAS_BUCKET[component.component_kind];
+      const bucket = bucketName ? maps[bucketName] : null;
+      if (bucket && Number(bucket[Number(component.component_index)]) === Number(comp.id)) {
+        ids.add(String(component.stable_id));
+      }
+    }
+    if (comp.type === 'energy_router') {
+      const routerIndex = Number(comp.params?.index);
+      for (const component of data?.components || []) {
+        if (component.component_kind === 'energy_router_port' &&
+            String(component.stable_id || '').startsWith(`energy_router_port:${routerIndex}/`)) {
+          ids.add(String(component.stable_id));
+        }
+      }
+    }
+    return ids;
+  }
+
+  const RELIABILITY_PROPERTY_FIELD_LABELS = {
+    failure_rate_per_year: '故障率', mtbf_hours: 'MTBF', mttr_hours: 'MTTR',
+    forced_outage_rate: '强迫停运率',
+    probability_given_initiated: '条件发生概率',
+    demand_frequency_per_year: '需求频率', probability_per_demand: '按需失败概率',
+    isolation_hr: '隔离时间', switching_hr: '切换时间', repair_hr: '修复时间',
+    cyber_recovery_hr: '网络恢复时间', residual_capacity_factor: '残余容量',
+  };
+
+  function markReliabilityPropertyInputEdited(input, row) {
+    input.dataset.relPropertyEdited = 'true';
+    input.classList.remove('rel-config-inherited');
+    row.dataset.relPropertyEdited = 'true';
+    if (!RELIABILITY_HAZARD_FIELDS.has(input.dataset.relPropertyField)) return;
+    row.querySelectorAll('[data-rel-property-field]').forEach(sibling => {
+      if (sibling !== input &&
+          RELIABILITY_HAZARD_FIELDS.has(sibling.dataset.relPropertyField)) {
+        sibling.dataset.relPropertyExplicit = 'false';
+        sibling.dataset.relPropertyEdited = 'false';
+        sibling.classList.add('rel-config-inherited');
+      }
+    });
+  }
+
+  function renderComponentReliabilityPropertyModes(comp, host, data) {
+    if (Canvas.state.selectedId !== comp.id || !host.isConnected) return;
+    host.replaceChildren();
+    const stableIds = reliabilityStableIdsForCanvasComponent(comp, data);
+    const modes = (data?.effective_modes || []).filter(mode => stableIds.has(String(mode.stable_id)));
+    if (!modes.length) {
+      const empty = document.createElement('p');
+      empty.className = 'prop-reliability-empty';
+      empty.textContent = '当前元件未进入可靠性失效模式目录。';
+      host.appendChild(empty);
+      return;
+    }
+    const configured = reliabilityConfiguredModeMap(data);
+    const schemaFields = (data?.schema?.mode_fields || [])
+      .filter(field => field.name !== 'enabled');
+    const overview = document.createElement('div');
+    overview.className = 'prop-reliability-overview';
+    overview.textContent = `${stableIds.size} 个稳定对象 / ${modes.length} 个失效模式；虚线值为后端解析值`;
+    host.appendChild(overview);
+    modes.forEach((mode, modeIndex) => {
+      const override = configured.get(String(mode.mode_id)) || {};
+      const row = document.createElement('details');
+      row.className = 'prop-reliability-mode';
+      row.dataset.relPropertyMode = encodeURIComponent(mode.mode_id);
+      row.open = modeIndex === 0;
+      const summary = document.createElement('summary');
+      const name = document.createElement('span');
+      name.textContent = mode.display_name || mode.mode_id;
+      const state = document.createElement('small');
+      state.className = mode.supported === false ? 'limited' : 'supported';
+      state.textContent = mode.supported === false ? '后果受限' : (mode.data_source || '已解析');
+      state.title = mode.unsupported_reason || '';
+      summary.append(name, state);
+      row.appendChild(summary);
+
+      const enabledWrap = document.createElement('label');
+      enabledWrap.className = 'prop-reliability-enabled';
+      const enabled = document.createElement('input');
+      enabled.type = 'checkbox';
+      enabled.checked = override.enabled !== undefined && override.enabled !== null
+        ? override.enabled !== false : mode.enabled !== false;
+      enabled.dataset.relPropertyEnabled = 'true';
+      enabled.dataset.relPropertyExplicit = override.enabled !== undefined && override.enabled !== null
+        ? 'true' : 'false';
+      enabled.addEventListener('change', () => {
+        enabled.dataset.relPropertyEdited = 'true';
+        row.dataset.relPropertyEdited = 'true';
+      });
+      enabledWrap.append(enabled, document.createTextNode('启用该模式'));
+      row.appendChild(enabledWrap);
+
+      const grid = document.createElement('div');
+      grid.className = 'prop-reliability-grid';
+      schemaFields.forEach(field => {
+        const explicit = override[field.name] !== undefined && override[field.name] !== null;
+        const value = explicit ? override[field.name] : mode.resolved_parameters?.[field.name];
+        const wrapper = document.createElement('label');
+        const label = RELIABILITY_PROPERTY_FIELD_LABELS[field.name] || field.name;
+        wrapper.textContent = field.unit ? `${label} (${field.unit})` : label;
+        const input = document.createElement('input');
+        input.type = 'number';
+        input.step = 'any';
+        if (field.minimum !== undefined) input.min = String(field.minimum);
+        if (field.maximum !== undefined && field.maximum !== null)
+          input.max = String(field.maximum);
+        input.value = value === undefined || value === null ? '' : String(value);
+        input.dataset.relPropertyField = field.name;
+        input.dataset.relPropertyExplicit = explicit ? 'true' : 'false';
+        input.dataset.relPropertyEdited = 'false';
+        if (!explicit) input.classList.add('rel-config-inherited');
+        input.title = explicit
+          ? '当前用户覆盖值'
+          : '当前后端解析值；只有修改后才保存为用户覆盖';
+        input.addEventListener('input', () => markReliabilityPropertyInputEdited(input, row));
+        wrapper.appendChild(input);
+        grid.appendChild(wrapper);
+      });
+      row.appendChild(grid);
+      host.appendChild(row);
+    });
+  }
+
+  async function loadComponentReliabilityPropertyModes(comp, host) {
+    host.innerHTML = '<p class="prop-reliability-empty">正在读取后端可靠性参数...</p>';
+    let data = _reliabilityConfigurationData;
+    if (!data) data = await apiGet('/api/session/reliability/configuration', { quiet: true });
+    if (!data || data.error) {
+      host.innerHTML = '<p class="prop-reliability-empty">可靠性参数读取失败。</p>';
+      return;
+    }
+    _reliabilityConfigurationData = data;
+    renderComponentReliabilityPropertyModes(comp, host, data);
+  }
+
+  function componentReliabilityConfigurationCandidate() {
+    const data = _reliabilityConfigurationData;
+    const configuration = structuredClone(data?.configuration || {
+      profile_id: 'user_custom', mode_overrides: [], protection: [],
+    });
+    const overrides = new Map((configuration.mode_overrides || [])
+      .map(value => [String(value.mode_id || ''), value]));
+    let changed = false;
+    document.querySelectorAll('#propFields [data-rel-property-mode]').forEach(row => {
+      if (row.dataset.relPropertyEdited !== 'true') return;
+      const modeId = decodeURIComponent(row.dataset.relPropertyMode || '');
+      const value = structuredClone(overrides.get(modeId) || { mode_id: modeId });
+      const enabled = row.querySelector('[data-rel-property-enabled]');
+      if (enabled?.dataset.relPropertyEdited === 'true') value.enabled = !!enabled.checked;
+      row.querySelectorAll('[data-rel-property-field]').forEach(input => {
+        if (input.dataset.relPropertyEdited !== 'true') return;
+        const field = input.dataset.relPropertyField;
+        if (RELIABILITY_HAZARD_FIELDS.has(field)) {
+          RELIABILITY_HAZARD_FIELDS.forEach(hazard => delete value[hazard]);
+        }
+        const raw = input.value.trim();
+        if (raw === '') delete value[field];
+        else value[field] = Number(raw);
+      });
+      if (Object.keys(value).length === 1) overrides.delete(modeId);
+      else overrides.set(modeId, value);
+      changed = true;
+    });
+    configuration.profile_id = configuration.profile_id || 'user_custom';
+    configuration.mode_overrides = [...overrides.values()];
+    configuration.protection = configuration.protection || [];
+    return { changed, configuration };
+  }
+
   function onSelectionChanged(compId) {
     const propEmpty = document.getElementById('propEmpty');
     const propEditor = document.getElementById('propEditor');
@@ -13044,6 +13614,8 @@ const App = (() => {
 
     const comp = Canvas.getComponent(compId);
     if (!comp) return;
+
+    syncParameterExplorerToCanvasSelection(comp);
 
     propEmpty.style.display = 'none';
     propEditor.style.display = 'block';
@@ -13078,31 +13650,18 @@ const App = (() => {
     }
 
     const defaults = COMP.defaults[comp.type] || {};
-    // Optional section dividers: when a field key matches, a header row is
-    // inserted before it to group the OPF constraint-limit fields visually.
-    const sectionHeaders = {
-      generator:      { cost_c2: '运行成本', forced_outage_rate: '可靠性参数', dynamic_model: '暂态模型参数' },
-      load:           { cost_mw: '负荷削减成本', dynamic_model: '暂态模型参数' },
-      external_grid:  { cost_c2: '购售电成本', dynamic_model: '暂态模型参数' },
-      storage:        { charge_bid_price: '时序运行成本', forced_outage_rate: '可靠性参数', dynamic_model: '暂态模型参数' },
-      pv_system:      { cost_c1: '运行成本', mtbf_hours: '可靠性参数', dynamic_model: '暂态模型参数' },
-      renewable_gen:  { cost_c1: '运行成本', mtbf_hours: '可靠性参数' },
-      static_generator: { cost_c1: '时序运行成本', mtbf_hours: '可靠性参数', dynamic_model: '暂态模型参数' },
-      vsc_converter:  { r_conv_ac_pu: '约束限值 (OPF)', grid_forming: '构网与协调', dynamic_model: '暂态模型参数' },
-      dc_load:        { cost_mw: '负荷削减成本', dynamic_model: '暂态模型参数' },
-      dc_storage:     { charge_bid_price: '时序运行成本', forced_outage_rate: '可靠性参数', dynamic_model: '暂态模型参数' },
-      dc_pv_array:    { cost_c1: '运行成本', mtbf_hours: '可靠性参数', dynamic_model: '暂态模型参数' },
-      asymmetric_load: { dynamic_model: '暂态模型参数' },
-      dcdc_converter: { topology: '占空比约束 (OPF)' },
-    };
-    const secMap = sectionHeaders[comp.type] || null;
-    Object.keys(defaults).forEach(key => {
-      if (secMap && secMap[key]) {
-        const hd = document.createElement('div');
-        hd.className = 'prop-section-header';
-        hd.textContent = secMap[key];
-        fieldsDiv.appendChild(hd);
-      }
+    const groupedKeys = new Map(PROPERTY_SECTION_DEFINITIONS.map(([key]) => [key, []]));
+    Object.keys(defaults).forEach(key => groupedKeys.get(propertySectionForField(key)).push(key));
+    const sectionBodies = new Map();
+    PROPERTY_SECTION_DEFINITIONS.forEach(([sectionKey]) => {
+      const keys = groupedKeys.get(sectionKey) || [];
+      if (!keys.length && sectionKey !== 'reliability') return;
+      sectionBodies.set(sectionKey,
+        createPropertySection(fieldsDiv, sectionKey, keys.length));
+    });
+    const orderedFields = PROPERTY_SECTION_DEFINITIONS.flatMap(([section]) =>
+      (groupedKeys.get(section) || []).map(key => ({ section, key })));
+    orderedFields.forEach(({ section, key }) => {
       const rawVal = comp.params[key] !== undefined ? comp.params[key] : defaults[key];
       const val = key === 'emission_factor_tco2_mwh'
         ? carbonFactorDisplay(rawVal)
@@ -13289,11 +13848,15 @@ const App = (() => {
         div.appendChild(inp);
       }
 
-      fieldsDiv.appendChild(div);
+      sectionBodies.get(section)?.body.appendChild(div);
     });
+    const reliabilityModes = document.createElement('div');
+    reliabilityModes.className = 'prop-reliability-modes';
+    sectionBodies.get('reliability')?.body.appendChild(reliabilityModes);
+    void loadComponentReliabilityPropertyModes(comp, reliabilityModes);
   }
 
-  function applyProperties() {
+  async function applyProperties() {
     const compId = Canvas.state.selectedId;
     if (compId === null) return;
     const comp = Canvas.getComponent(compId);
@@ -13351,6 +13914,21 @@ const App = (() => {
       log(msg, 'error');
       return;
     }
+    const reliabilityCandidate = componentReliabilityConfigurationCandidate();
+    if (reliabilityCandidate.changed) {
+      const saved = await apiPostResult('/api/session/reliability/configuration', {
+        configuration: reliabilityCandidate.configuration,
+      }, { quiet: true });
+      if (!saved?.ok) {
+        const msg = saved?.data?.error || '元件可靠性参数校验失败';
+        setStatus(msg, 'error');
+        log(msg, 'error');
+        return;
+      }
+      _reliabilityConfigurationData = saved.data;
+      if (document.getElementById('relReliabilityConfiguration')?.open)
+        renderReliabilityConfiguration(saved.data);
+    }
     updates.forEach(({ key, val }) => {
       const oldVal = comp.params[key];
       const sameNumber = typeof oldVal === 'number' && typeof val === 'number' &&
@@ -13383,11 +13961,15 @@ const App = (() => {
     if (changedKeys.size > 0 && comp.type === 'ac_branch') {
       onSelectionChanged(compId);
     }
-    if (changedKeys.size > 0) {
-      log(`已更新 ${comp.params.name} 的属性 (${[...changedKeys].join(', ')})`, 'info');
+    if (changedKeys.size > 0 || reliabilityCandidate.changed) {
+      const detail = [...changedKeys];
+      if (reliabilityCandidate.changed) detail.push('可靠性模式覆盖');
+      log(`已更新 ${comp.params.name} 的属性 (${detail.join(', ')})`, 'info');
     } else {
       log(`${comp.params.name} 属性未变化`, 'info');
     }
+    if (reliabilityCandidate.changed && changedKeys.size === 0)
+      onSelectionChanged(compId);
   }
 
   /**
@@ -13549,7 +14131,17 @@ const App = (() => {
       const shared = document.getElementById('resultsSummary');
       if (shared) shared.innerHTML = '';
     }
-    if (moduleName === 'parameterLibrary') loadParameterLibrary();
+    if (moduleName === 'parameterLibrary') {
+      const empty = document.getElementById('resultsEmpty');
+      const content = document.getElementById('resultsContent');
+      if (empty) empty.style.display = 'none';
+      if (content) content.style.display = 'block';
+      switchTab('results');
+      loadParameterLibrary();
+    }
+    if (moduleName === 'reliability' && changed) {
+      setTimeout(() => _refreshReliabilityWorkflow?.({ load: true }), 0);
+    }
     if (moduleName === 'rpo' && changed) {
       setTimeout(() => refreshRpoInputAudit({ quiet: true }), 0);
     }
@@ -13559,6 +14151,7 @@ const App = (() => {
     const bar = document.getElementById('subToolbar');
     if (!bar) return;
     const subKey = subsectionForModule(moduleName);
+    bar.classList.toggle('reliability-expanded', subKey === 'reliability');
     let anyVisible = false;
     bar.querySelectorAll('.sub-section').forEach(sec => {
       const match = sec.dataset.sub === subKey;
@@ -16477,6 +17070,136 @@ const App = (() => {
     document.getElementById('btnToggleTheme')?.addEventListener('click', toggleThemeMode);
   }
 
+  const WORKSPACE_LAYOUT_STORAGE_KEY = 'hysimWorkspaceLayoutV1';
+  let _workspaceLayout = null;
+
+  function defaultWorkspaceLayout() {
+    const mobile = window.matchMedia?.('(max-width: 720px)').matches === true;
+    return {
+      density: 'compact',
+      libraryCollapsed: mobile,
+      ribbonCollapsed: mobile,
+      inspectorCollapsed: false,
+      consoleCollapsed: true,
+      focus: false,
+    };
+  }
+
+  function normalizeWorkspaceLayout(candidate) {
+    const defaults = defaultWorkspaceLayout();
+    const value = candidate && typeof candidate === 'object' ? candidate : {};
+    return {
+      density: value.density === 'standard' ? 'standard' : 'compact',
+      libraryCollapsed: typeof value.libraryCollapsed === 'boolean'
+        ? value.libraryCollapsed : defaults.libraryCollapsed,
+      ribbonCollapsed: typeof value.ribbonCollapsed === 'boolean'
+        ? value.ribbonCollapsed : defaults.ribbonCollapsed,
+      inspectorCollapsed: typeof value.inspectorCollapsed === 'boolean'
+        ? value.inspectorCollapsed : defaults.inspectorCollapsed,
+      consoleCollapsed: typeof value.consoleCollapsed === 'boolean'
+        ? value.consoleCollapsed : defaults.consoleCollapsed,
+      focus: typeof value.focus === 'boolean' ? value.focus : defaults.focus,
+    };
+  }
+
+  function loadWorkspaceLayout() {
+    try {
+      const saved = localStorage.getItem(WORKSPACE_LAYOUT_STORAGE_KEY);
+      return normalizeWorkspaceLayout(saved ? JSON.parse(saved) : null);
+    } catch (_) {
+      return defaultWorkspaceLayout();
+    }
+  }
+
+  function refreshWorkspaceGeometry() {
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      document.querySelectorAll('.js-plotly-plot').forEach(element => {
+        try { Plotly.Plots.resize(element); } catch (_) { /* Plotly is optional */ }
+      });
+      window.dispatchEvent(new Event('resize'));
+    }));
+  }
+
+  function applyWorkspaceLayout(layout, { persist = true } = {}) {
+    _workspaceLayout = normalizeWorkspaceLayout(layout);
+    const body = document.body;
+    body.dataset.workspaceDensity = _workspaceLayout.density;
+    body.classList.toggle('library-collapsed', _workspaceLayout.libraryCollapsed);
+    body.classList.toggle('ribbon-collapsed', _workspaceLayout.ribbonCollapsed);
+    body.classList.toggle('inspector-collapsed', _workspaceLayout.inspectorCollapsed);
+    body.classList.toggle('console-collapsed', _workspaceLayout.consoleCollapsed);
+    body.classList.toggle('workspace-focus', _workspaceLayout.focus);
+
+    document.querySelectorAll('[data-workspace-density]').forEach(button => {
+      button.setAttribute('aria-pressed',
+        button.dataset.workspaceDensity === _workspaceLayout.density ? 'true' : 'false');
+    });
+    const regionState = {
+      btnToggleLibrary: !_workspaceLayout.libraryCollapsed && !_workspaceLayout.focus,
+      btnToggleRibbon: !_workspaceLayout.ribbonCollapsed && !_workspaceLayout.focus,
+      btnToggleInspector: !_workspaceLayout.inspectorCollapsed,
+      btnToggleConsole: !_workspaceLayout.consoleCollapsed && !_workspaceLayout.focus,
+    };
+    Object.entries(regionState).forEach(([id, visible]) => {
+      document.getElementById(id)?.setAttribute('aria-pressed', visible ? 'true' : 'false');
+    });
+    ['btnToggleLibrary', 'btnToggleRibbon', 'btnToggleConsole'].forEach(id => {
+      const button = document.getElementById(id);
+      if (button) button.disabled = _workspaceLayout.focus;
+    });
+    document.getElementById('btnWorkspaceFocus')?.setAttribute(
+      'aria-pressed', _workspaceLayout.focus ? 'true' : 'false');
+    const consoleToggle = document.getElementById('btnConsoleHeaderToggle');
+    consoleToggle?.setAttribute('aria-expanded',
+      _workspaceLayout.consoleCollapsed ? 'false' : 'true');
+    const consoleGlyph = document.getElementById('consoleToggleGlyph');
+    if (consoleGlyph) consoleGlyph.textContent = _workspaceLayout.consoleCollapsed ? '⌃' : '⌄';
+
+    if (persist) {
+      try {
+        localStorage.setItem(WORKSPACE_LAYOUT_STORAGE_KEY, JSON.stringify(_workspaceLayout));
+      } catch (_) { /* persistence is optional */ }
+    }
+    refreshWorkspaceGeometry();
+    return { ..._workspaceLayout };
+  }
+
+  function updateWorkspaceLayout(patch) {
+    return applyWorkspaceLayout({ ...(_workspaceLayout || defaultWorkspaceLayout()), ...patch });
+  }
+
+  function initWorkspaceLayout() {
+    applyWorkspaceLayout(loadWorkspaceLayout(), { persist: false });
+    document.querySelectorAll('[data-workspace-density]').forEach(button => {
+      button.addEventListener('click', () => updateWorkspaceLayout({
+        density: button.dataset.workspaceDensity,
+      }));
+    });
+    document.getElementById('btnWorkspaceFocus')?.addEventListener('click', () => {
+      updateWorkspaceLayout({ focus: !_workspaceLayout.focus });
+    });
+    const regionButtons = {
+      btnToggleLibrary: 'libraryCollapsed',
+      btnToggleRibbon: 'ribbonCollapsed',
+      btnToggleInspector: 'inspectorCollapsed',
+      btnToggleConsole: 'consoleCollapsed',
+    };
+    Object.entries(regionButtons).forEach(([id, key]) => {
+      document.getElementById(id)?.addEventListener('click', () => {
+        updateWorkspaceLayout({ [key]: !_workspaceLayout[key] });
+      });
+    });
+    document.getElementById('btnConsoleHeaderToggle')?.addEventListener('click', () => {
+      updateWorkspaceLayout({ consoleCollapsed: !_workspaceLayout.consoleCollapsed });
+    });
+    document.addEventListener('keydown', event => {
+      if (event.defaultPrevented || event.key.toLowerCase() !== 'f' || !event.shiftKey ||
+          (!event.ctrlKey && !event.metaKey)) return;
+      event.preventDefault();
+      updateWorkspaceLayout({ focus: !_workspaceLayout.focus });
+    });
+  }
+
   // Current auto-layout direction chosen in the toolbar (TB/LR/RADIAL/COMPACT).
   function layoutDirection() {
     return document.getElementById('layoutDirSelect')?.value || 'TB';
@@ -16504,6 +17227,7 @@ const App = (() => {
   function init() {
     // Apply the saved light/dark theme before anything renders.
     initThemeMode();
+    initWorkspaceLayout();
     HySimCore.RuntimeDiagnostics?.init({ chipId: 'runtimeHealthChip', log });
     HySimCore.Accessibility?.init();
 
@@ -16720,6 +17444,12 @@ const App = (() => {
     document.getElementById('btnParameterLibraryApply')?.addEventListener('click', applyParameterLibraryDefaults);
     document.getElementById('parameterLibraryComponentFilter')?.addEventListener('change', () => {
       _parameterLibraryData = parameterLibraryFromEditor() || _parameterLibraryData;
+      _parameterLibrarySelectedInstance = '';
+      renderParameterLibrary(_parameterLibraryData);
+    });
+    document.getElementById('parameterLibraryInstance')?.addEventListener('change', event => {
+      _parameterLibraryData = parameterLibraryFromEditor() || _parameterLibraryData;
+      _parameterLibrarySelectedInstance = event.target.value || '';
       renderParameterLibrary(_parameterLibraryData);
     });
     document.getElementById('btnParameterLibraryImport')?.addEventListener('click', () => {
@@ -17511,6 +18241,248 @@ const App = (() => {
       setStatus('SEQ 负荷曲线与空间倍率已应用', 'success');
     }
 
+	    const RELIABILITY_METHOD_PRINCIPLES = {
+	      nsq: {
+	        title: '非序贯蒙特卡洛（独立状态抽样）',
+	        formula: 'EENS_inc = H · E[max(0, S - S_N-0)]；LOLE = H · P(S > epsilon)',
+	        sampling: '按元件不可用度独立抽取系统状态，不保留故障时间顺序。',
+	        consequence: '每个状态调用所选稳态网络后果模型，N-0 切负荷单独记为基线。',
+	        aggregation: '由样本均值估计增量 EENS、EDNS、PLC/LOLE，并报告收敛信息。',
+	        boundary: '单一负荷水平；状态样本不等同于年度时序轨迹，跨方法结果不可直接等价比较。',
+	      },
+	      seq: {
+	        title: '序贯蒙特卡洛（逐时状态演化）',
+	        formula: 'EENS = E[sum_h S_h · delta_t]；LOLF = E[0 -> 1 失负荷转换次数/年]',
+	        sampling: '按故障/修复过程逐时推进元件状态，并应用时序与空间负荷倍率。',
+	        consequence: '每个时步对当前停运集合执行网络切负荷计算。',
+	        aggregation: '先形成逐年 EENS、LOLE、LOLF，再跨模拟年份求期望。',
+	        boundary: '时间分辨率和模拟年数决定罕见事件精度；负荷曲线不是概率预测模型。',
+	      },
+	      fmea: {
+	        title: '元件 N-1 FMEA（分阶段频率加权）',
+	        formula: 'EENS = sum_k lambda_k · (S_sw,k tau_sw,k + S_rep,k max(0, MTTR_k - tau_sw,k))',
+	        sampling: '确定性枚举在运元件的单一停运故障，不存在蒙特卡洛抽样误差。',
+	        consequence: '分别评估切换窗口与修复窗口，可条件化信息服务和智能功能成功率。',
+	        aggregation: '以校准故障频率乘分阶段未供电量，汇总系统、节点与客户指标。',
+	        boundary: '恢复开关搜索是启发式；信息维度为 Level-1 条件后果，不含显式通信拓扑。',
+	      },
+	      failure_mode_fmea: {
+	        title: '失效模式 FMEA（元件语义与保护配置）',
+	        formula: 'EENS = sum_m f_m d_m S_m；f_m = lambda_m 或 nu_d,m p_d,m',
+	        sampling: '展开时基、按需、物理、网络控制与保护模式；N-2 选项另计 U_i U_j H S_ij。',
+	        consequence: '将每个模式映射为停运、降额、冻结控制、保护区扩大或显式不支持。',
+	        aggregation: '按模式频率与持续时间聚合 EENS/LOLE，并保留模式级归因和数据来源。',
+	        boundary: '稳态模型无法表达的测量、动作或保护后果必须标记为不支持，不计作零风险。',
+	      },
+	      fd: {
+	        title: '频率-持续时间（发电充裕度 COPT）',
+	        formula: 'LOLE = LOLP · H；LOLD = LOLE / LOLF',
+	        sampling: '卷积 AC 发电机容量停运状态，形成容量停运概率与频率表。',
+	        consequence: '以恒定峰值负荷比较可用发电容量，不求解网络潮流或恢复。',
+	        aggregation: '由容量不足状态汇总 LOLP、LOLE、LOLF 与平均持续时间。',
+	        boundary: '仅发电充裕度；不提供网络故障、DC 后果、EENS 或客户停电指标。',
+	      },
+	      three_stage: {
+	        title: '三阶段恢复 MILP（隔离、重构、修复）',
+	        formula: 'EENS = sum_k lambda_k · sum_s S_k,s tau_k,s',
+	        sampling: '确定性枚举启用范围内的线路及可选设备 N-1 故障。',
+	        consequence: '阶段 1 隔离、阶段 2 开关重构、阶段 3 修复窗口分别计算切负荷。',
+	        aggregation: '按元件故障率加权各阶段未供电量，输出故障、节点和系统指标。',
+	        boundary: 'DC 可采用线性潮流或显式容量回退；设备故障覆盖受勾选范围约束。',
+	      },
+	    };
+
+	    const RELIABILITY_PHYSICAL_MODEL_LABELS = {
+	      auto: '自动：按系统域与统计方法选择已实现的稳态后果模型',
+	      hybrid_network_lp: 'AC/DC 网络 LP：AC 相角潮流、DC 功率平衡与有界换流',
+	      ac_only_dcopf: 'AC DC-OPF：仅平衡正序有功网络，不表达 DC、电压与无功可行性',
+	      restoration_milp: '三阶段恢复 MILP：隔离、重构、修复窗口与开关动作约束',
+	      generation_adequacy: '发电充裕度 COPT：容量停运状态与恒定峰值负荷比较',
+	    };
+
+	    const RELIABILITY_STAGE_DEFAULTS = {
+	      configuration: '读取元件、可靠性与保护配置',
+	      enumeration: '按所选方法构造样本、状态或故障集',
+	      consequence: '将停运或失效模式投影到网络后果',
+	      solution: '计算切负荷、重构或容量充裕度',
+	      aggregation: '汇总指标、归因、有效性与模型边界',
+	    };
+
+	    function reliabilityEffectiveMethod() {
+	      return document.getElementById('relPhysicalModel')?.value === 'restoration_milp'
+	        ? 'three_stage'
+	        : (document.getElementById('relMethod')?.value || 'nsq');
+	    }
+
+	    function renderReliabilityPrinciple() {
+	      const method = reliabilityEffectiveMethod();
+	      const principle = RELIABILITY_METHOD_PRINCIPLES[method] || RELIABILITY_METHOD_PRINCIPLES.nsq;
+	      const physicalModel = document.getElementById('relPhysicalModel')?.value || 'auto';
+	      const values = {
+	        relPrincipleMethod: principle.title,
+	        relPrincipleFormula: principle.formula,
+	        relPrincipleSampling: principle.sampling,
+	        relPrincipleConsequence: principle.consequence,
+	        relPrincipleAggregation: principle.aggregation,
+	        relPrincipleBoundary: principle.boundary,
+	        relPrincipleScope: RELIABILITY_PHYSICAL_MODEL_LABELS[physicalModel] || physicalModel,
+	      };
+	      Object.entries(values).forEach(([id, value]) => {
+	        const element = document.getElementById(id);
+	        if (element) element.textContent = value;
+	      });
+	    }
+
+	    function setReliabilityWorkflowStage(stage, state, detail) {
+	      const row = document.querySelector(`#relWorkflowStages [data-rel-stage="${stage}"]`);
+	      if (!row) return;
+	      const labels = {
+	        ready: '就绪', pending: '待执行', running: '执行中',
+	        complete: '完成', limited: '受限', error: '失败',
+	      };
+	      row.dataset.state = state;
+	      const description = row.querySelector('small');
+	      const status = row.querySelector('em');
+	      if (description) description.textContent = detail || RELIABILITY_STAGE_DEFAULTS[stage] || '';
+	      if (status) status.textContent = labels[state] || state;
+	    }
+
+	    function setReliabilityWorkflowRunStatus(text, state = 'ready') {
+	      const status = document.getElementById('relWorkflowRunStatus');
+	      if (!status) return;
+	      status.textContent = text;
+	      status.dataset.state = state;
+	    }
+
+	    function resetReliabilityWorkflow() {
+	      renderReliabilityPrinciple();
+	      setReliabilityWorkflowStage('configuration', 'ready');
+	      ['enumeration', 'consequence', 'solution', 'aggregation'].forEach(stage =>
+	        setReliabilityWorkflowStage(stage, 'pending'));
+	      setReliabilityWorkflowRunStatus('等待运行');
+	      for (const id of ['relWorkflowComponents', 'relWorkflowModes',
+	                        'relWorkflowSupported', 'relWorkflowProtection']) {
+	        const element = document.getElementById(id);
+	        if (element) element.textContent = '待同步';
+	      }
+	      const limitations = document.getElementById('relWorkflowLimitations');
+	      const list = document.getElementById('relWorkflowLimitationList');
+	      if (limitations) limitations.hidden = true;
+	      if (list) list.replaceChildren();
+	    }
+
+	    function renderReliabilityWorkflowCoverage(data) {
+	      const coverage = data?.failure_mode_coverage || data?.coverage || {};
+	      const configuration = data?.configuration || data?.reliability_configuration || {};
+	      const totalModes = Number(coverage.modes_total || 0);
+	      const unsupportedModes = Number(coverage.modes_unsupported || 0);
+	      const protectionCount = Array.isArray(configuration.protection)
+	        ? configuration.protection.length
+	        : Number(configuration.protection_configuration_count || 0);
+	      const values = {
+	        relWorkflowComponents: Number.isFinite(Number(coverage.components_total))
+	          ? String(Number(coverage.components_total)) : '—',
+	        relWorkflowModes: totalModes ? String(totalModes) : '按方法生成',
+	        relWorkflowSupported: totalModes ? `${Math.max(0, totalModes - unsupportedModes)}/${totalModes}` : '见结果范围',
+	        relWorkflowProtection: String(protectionCount),
+	      };
+	      Object.entries(values).forEach(([id, value]) => {
+	        const element = document.getElementById(id);
+	        if (element) element.textContent = value;
+	      });
+	    }
+
+	    function reliabilityLimitationItems(data) {
+	      const items = [];
+	      const append = value => {
+	        if (Array.isArray(value)) value.forEach(append);
+	        else if (value && typeof value === 'object') {
+	          if (value.reason) append(value.reason);
+	          else if (value.message) append(value.message);
+	        } else if (value !== null && value !== undefined && String(value).trim()) {
+	          items.push(String(value).trim());
+	        }
+	      };
+	      append(data?.model_limitations);
+	      append(data?.reliability_configuration?.limitation);
+	      const unsupported = Number(data?.failure_mode_coverage?.modes_unsupported || 0);
+	      if (unsupported > 0) items.push(`${unsupported} 个失效模式未由当前稳态后果模型表达`);
+	      const invalidFlags = Object.entries(data?.validity || {})
+	        .filter(([key, value]) => value === false &&
+	          /(valid|converged|enforced|modelled|available|coupled)$/.test(key))
+	        .slice(0, 4)
+	        .map(([key]) => `有效性声明：${key} = false`);
+	      items.push(...invalidFlags);
+	      return [...new Set(items)];
+	    }
+
+	    function renderReliabilityWorkflowLimitations(items) {
+	      const panel = document.getElementById('relWorkflowLimitations');
+	      const list = document.getElementById('relWorkflowLimitationList');
+	      if (!panel || !list) return;
+	      list.replaceChildren(...items.map(item => {
+	        const row = document.createElement('li');
+	        row.textContent = item;
+	        return row;
+	      }));
+	      panel.hidden = items.length === 0;
+	    }
+
+	    function beginReliabilityWorkflow() {
+	      renderReliabilityPrinciple();
+	      renderReliabilityWorkflowLimitations([]);
+	      setReliabilityWorkflowStage('configuration', 'running', '同步模型并校验参数与保护配置');
+	      ['enumeration', 'consequence', 'solution', 'aggregation'].forEach(stage =>
+	        setReliabilityWorkflowStage(stage, 'pending'));
+	      setReliabilityWorkflowRunStatus('准备输入', 'running');
+	    }
+
+	    function markReliabilityBackendRunning() {
+	      setReliabilityWorkflowStage('configuration', 'complete', '模型、参数与配置已通过前端校验');
+	      setReliabilityWorkflowStage('enumeration', 'running', '后端统一请求正在枚举状态或故障');
+	      setReliabilityWorkflowStage('consequence', 'running', '后端统一请求正在映射故障后果');
+	      setReliabilityWorkflowStage('solution', 'running', '后端统一请求正在执行求解与恢复');
+	      setReliabilityWorkflowStage('aggregation', 'pending', '等待后端结果后执行指标与边界审计');
+	      setReliabilityWorkflowRunStatus('后端执行中 · 未提供细分实时进度', 'running');
+	    }
+
+	    function failReliabilityWorkflow(stage, message) {
+	      setReliabilityWorkflowStage(stage || 'configuration', 'error', message || '分析未完成');
+	      setReliabilityWorkflowRunStatus('分析失败', 'error');
+	    }
+
+	    function completeReliabilityWorkflow(data) {
+	      renderReliabilityWorkflowCoverage(data);
+	      const limitations = reliabilityLimitationItems(data);
+	      const config = data?.reliability_configuration || {};
+	      const configuredButUnused = config.configured === true && config.applied === false;
+	      const missingData = Number(data?.data_quality?.missing_required_data || 0);
+	      const unsupported = Number(data?.failure_mode_coverage?.modes_unsupported || 0);
+	      setReliabilityWorkflowStage('configuration', configuredButUnused || missingData > 0 ? 'limited' : 'complete',
+	        configuredButUnused ? '自定义配置未被当前方法消费' :
+	          (missingData > 0 ? `${missingData} 个必需可靠性数据缺失` : '有效参数与配置已解析'));
+	      setReliabilityWorkflowStage('enumeration', unsupported > 0 ? 'limited' : 'complete',
+	        unsupported > 0 ? `${unsupported} 个模式保留为不支持状态` : '样本、状态或故障集已完成');
+	      setReliabilityWorkflowStage('consequence', limitations.length ? 'limited' : 'complete',
+	        limitations.length ? '结果包含模型范围或有效性限制' : '故障后果已映射并保留归因');
+	      const solveLimited = Object.entries(data?.validity || {}).some(([key, value]) =>
+	        value === false && /(valid|converged|enforced)$/.test(key));
+	      setReliabilityWorkflowStage('solution', solveLimited ? 'limited' : 'complete',
+	        solveLimited ? '求解完成，但有效性声明包含受限项' : '求解与恢复结果已返回');
+	      setReliabilityWorkflowStage('aggregation', 'complete', '指标、覆盖、归因与模型边界已汇总');
+	      renderReliabilityWorkflowLimitations(limitations);
+	      const limited = configuredButUnused || missingData > 0 || unsupported > 0 ||
+	        limitations.length > 0 || solveLimited;
+	      setReliabilityWorkflowRunStatus(limited ? '完成 · 存在模型边界' : '完成',
+	        limited ? 'limited' : 'complete');
+	    }
+
+	    _refreshReliabilityWorkflow = async options => {
+	      if (options?.reset) resetReliabilityWorkflow();
+	      else renderReliabilityPrinciple();
+	      if (options?.load) await loadReliabilityConfiguration({ quiet: true });
+	    };
+
 	    function updateReliabilityControlState() {
 	      const physicalModel = document.getElementById('relPhysicalModel')?.value || 'auto';
 	      const methodEl = document.getElementById('relMethod');
@@ -17553,9 +18525,10 @@ const App = (() => {
 	      });
 	      if (hintEl) {
 	        hintEl.textContent = controlState.useThreeStage
-	          ? '三阶段恢复 MILP 将作为独立可靠性评估运行'
+	          ? '三阶段恢复 MILP 将独立运行；默认串行以避免进程内求解器排队，可手动启用并行'
 	          : '后果模型由所选统计方法自动匹配';
 	      }
+	      renderReliabilityPrinciple();
 	    }
 
 	    function activateCyberPhysicalReliability() {
@@ -17602,8 +18575,190 @@ const App = (() => {
 	      if (physicalModelEl?.value === 'restoration_milp') {
 	        if (cyberToggle) cyberToggle.checked = false;
 	        if (intelligentToggle) intelligentToggle.checked = false;
+	        const parallelToggle = document.getElementById('relParallel');
+	        if (parallelToggle?.checked) {
+	          parallelToggle.checked = false;
+	          log('三阶段恢复已默认切换为串行故障评估；需要时可手动启用并行', 'info');
+	        }
 	      }
 	      updateReliabilityControlState();
+	    }
+
+	    function reliabilityConfigNumberInput(modeId, field, value, explicit) {
+	      const shown = value === null || value === undefined ? '' : String(value);
+	      const inherited = explicit ? '' : ' rel-config-inherited';
+	      const title = explicit
+	        ? '当前用户覆盖值；修改后保存到会话配置'
+	        : '当前有效值（用例/模板/默认值解析结果）；只有修改后才保存为用户覆盖';
+	      return `<input class="${inherited.trim()}" type="number" step="any" min="0" ` +
+	        `data-rel-mode="${encodeURIComponent(modeId)}" data-rel-field="${field}" ` +
+	        `data-rel-explicit="${explicit ? 'true' : 'false'}" title="${escapeAttr(title)}" ` +
+	        `value="${escapeAttr(shown)}"/>`;
+	    }
+
+	    function renderReliabilityModeConfiguration(data) {
+	      const tbody = document.getElementById('relReliabilityModeRows');
+	      if (!tbody) return;
+	      const configured = reliabilityConfiguredModeMap(data);
+	      const rows = data?.effective_modes || [];
+	      tbody.innerHTML = rows.map(mode => {
+	        const override = configured.get(String(mode.mode_id)) || {};
+	        const enabledExplicit = override.enabled !== null && override.enabled !== undefined;
+	        const enabled = enabledExplicit ? override.enabled !== false : mode.enabled !== false;
+	        const resolved = mode.resolved_parameters || {};
+	        const inputs = RELIABILITY_MODE_NUMBER_FIELDS.map(field => {
+	          const explicit = override[field] !== null && override[field] !== undefined;
+	          const value = explicit ? override[field] : resolved[field];
+	          return `<td>${reliabilityConfigNumberInput(mode.mode_id, field, value, explicit)}</td>`;
+	        }).join('');
+	        const support = mode.supported
+	          ? '<span>是</span>'
+	          : `<span class="rel-config-unsupported" title="${escapeAttr(mode.unsupported_reason || '')}">否</span>`;
+	        return `<tr data-rel-mode-row="${encodeURIComponent(mode.mode_id)}" ` +
+	          `data-rel-configured="${configured.has(String(mode.mode_id)) ? 'true' : 'false'}">` +
+	          `<td><input type="checkbox" data-rel-mode-enabled="${encodeURIComponent(mode.mode_id)}" ` +
+	          `data-rel-explicit="${enabledExplicit ? 'true' : 'false'}" ${enabled ? 'checked' : ''}/></td>` +
+	          `<td>${escapeHtml(`${mode.component_domain || ''} / ${mode.component_kind || ''}`)}<br>${escapeHtml(mode.component_name || mode.stable_id || '')}</td>` +
+	          `<td title="${escapeAttr(mode.mode_id || '')}">${escapeHtml(mode.display_name || mode.mode_id || '')}</td>` +
+	          `<td>${support}</td>${inputs}` +
+	          `<td>${Number(mode.effective_failure_rate_per_year || 0).toPrecision(5)}</td>` +
+	          `<td>${Number(mode.effective_repair_hr || 0).toPrecision(5)}</td>` +
+	          `<td>${escapeHtml(mode.data_source || '')}</td></tr>`;
+	      }).join('');
+	      const filter = String(document.getElementById('relConfigFilter')?.value || '').trim().toLowerCase();
+	      tbody.querySelectorAll('tr').forEach(row => {
+	        row.hidden = !!filter && !row.textContent.toLowerCase().includes(filter);
+	      });
+	    }
+
+	    function reliabilityComponentOptions(components, selected, allowEmpty = false) {
+	      const options = [];
+	      if (allowEmpty) options.push('<option value=""></option>');
+	      for (const component of components || []) {
+	        const id = String(component.stable_id || '');
+	        options.push(`<option value="${encodeURIComponent(id)}" ${id === selected ? 'selected' : ''}>` +
+	          `${escapeHtml(`${component.component_domain || ''} / ${component.component_kind || ''} / ${component.component_name || id}`)}</option>`);
+	      }
+	      return options.join('');
+	    }
+
+	    function renderReliabilityProtectionConfiguration(data) {
+	      const tbody = document.getElementById('relProtectionRows');
+	      if (!tbody) return;
+	      const components = data?.components || [];
+	      const rows = data?.configuration?.protection || [];
+	      tbody.innerHTML = rows.map((row, index) => {
+	        const probability = (field, value) => `<input type="number" min="0" max="1" step="any" data-protection-field="${field}" value="${escapeHtml(String(value ?? 0))}"/>`;
+	        return `<tr data-protection-row="${index}">` +
+	          `<td><input type="checkbox" data-protection-field="enabled" ${row.enabled !== false ? 'checked' : ''}/></td>` +
+	          `<td><input type="text" data-protection-field="protection_id" value="${escapeAttr(row.protection_id || '')}"/></td>` +
+	          `<td><select data-protection-field="protective_device_id">${reliabilityComponentOptions(components, row.protective_device_id)}</select></td>` +
+	          `<td><select data-protection-field="protected_component_id">${reliabilityComponentOptions(components, row.protected_component_id)}</select></td>` +
+	          `<td><select data-protection-field="backup_device_id">${reliabilityComponentOptions(components, row.backup_device_id, true)}</select></td>` +
+	          `<td><input class="rel-zone-input" type="text" data-protection-field="zone_component_ids" value="${escapeAttr((row.zone_component_ids || []).join(', '))}"/></td>` +
+	          `<td>${probability('fail_to_trip_probability', row.fail_to_trip_probability)}</td>` +
+	          `<td><input type="number" min="0" step="any" data-protection-field="nuisance_trip_frequency_per_year" value="${escapeHtml(String(row.nuisance_trip_frequency_per_year ?? 0))}"/></td>` +
+	          `<td>${probability('fail_to_open_probability', row.fail_to_open_probability)}</td>` +
+	          `<td><input type="number" min="0" step="any" data-protection-field="primary_clearing_time_s" value="${escapeHtml(String(row.primary_clearing_time_s ?? 0))}"/></td>` +
+	          `<td><input type="number" min="0" step="any" data-protection-field="backup_clearing_time_s" value="${escapeHtml(String(row.backup_clearing_time_s ?? 0))}"/></td>` +
+	          `<td><input type="checkbox" data-protection-field="automatic_reclose" ${row.automatic_reclose ? 'checked' : ''}/></td>` +
+	          `<td>${probability('successful_reclose_probability', row.successful_reclose_probability)}</td>` +
+	          `<td><button class="toolbar-btn" type="button" data-remove-protection="${index}" title="删除保护配置">删除</button></td></tr>`;
+	      }).join('');
+	    }
+
+	    function renderReliabilityConfiguration(data) {
+	      _reliabilityConfigurationData = data;
+	      renderReliabilityModeConfiguration(data);
+	      renderReliabilityProtectionConfiguration(data);
+	      renderReliabilityWorkflowCoverage(data);
+	      const status = document.getElementById('relConfigStatus');
+	      const coverage = data?.coverage || {};
+	      if (status) status.textContent =
+	        `${coverage.components_total || 0} 元件 / ${coverage.modes_total || 0} 模式 / ${coverage.modes_unsupported || 0} 未由稳态后果模型表达`;
+	      const workflowStatus = document.getElementById('relWorkflowRunStatus');
+	      if (workflowStatus?.dataset.state !== 'running') {
+	        setReliabilityWorkflowStage('configuration', 'complete',
+	          `${coverage.components_total || 0} 个元件、${coverage.modes_total || 0} 个模式已解析`);
+	      }
+	      _reliabilityConfigurationDirty = false;
+	    }
+
+	    async function loadReliabilityConfiguration(options = {}) {
+	      const data = await apiGet('/api/session/reliability/configuration', { quiet: !!options.quiet });
+	      if (data && !data.error) renderReliabilityConfiguration(data);
+	      return data;
+	    }
+
+	    function readReliabilityConfigurationFromEditor() {
+	      const modeRows = [];
+	      document.querySelectorAll('#relReliabilityModeRows tr[data-rel-mode-row]').forEach(row => {
+	        const modeId = decodeURIComponent(row.dataset.relModeRow || '');
+	        const value = { mode_id: modeId };
+	        const enabled = row.querySelector('[data-rel-mode-enabled]');
+	        if (enabled?.dataset.relExplicit === 'true' || enabled?.dataset.relEdited === 'true') {
+	          value.enabled = !!enabled.checked;
+	        }
+	        row.querySelectorAll('[data-rel-field]').forEach(input => {
+	          if (input.dataset.relExplicit !== 'true' && input.dataset.relEdited !== 'true') return;
+	          const text = input.value.trim();
+	          if (text !== '') value[input.dataset.relField] = Number(text);
+	        });
+	        if (Object.keys(value).length > 1) modeRows.push(value);
+	      });
+	      const protection = [];
+	      document.querySelectorAll('#relProtectionRows tr[data-protection-row]').forEach(row => {
+	        const value = {};
+	        row.querySelectorAll('[data-protection-field]').forEach(input => {
+	          const field = input.dataset.protectionField;
+	          if (input.type === 'checkbox') value[field] = input.checked;
+	          else if (input.tagName === 'SELECT') value[field] = decodeURIComponent(input.value || '');
+	          else if (field === 'zone_component_ids') value[field] = input.value.split(',').map(x => x.trim()).filter(Boolean);
+	          else if (input.type === 'number') value[field] = Number(input.value);
+	          else value[field] = input.value.trim();
+	        });
+	        protection.push(value);
+	      });
+	      return { profile_id: 'user_custom', mode_overrides: modeRows, protection };
+	    }
+
+	    async function saveReliabilityConfiguration(options = {}) {
+	      const configuration = readReliabilityConfigurationFromEditor();
+	      const result = await apiPostResult('/api/session/reliability/configuration',
+	        { configuration }, { quiet: !!options.quiet });
+	      if (!result?.ok) {
+	        const status = document.getElementById('relConfigStatus');
+	        if (status) status.textContent = result?.data?.error || '配置校验失败';
+	        return null;
+	      }
+	      renderReliabilityConfiguration(result.data);
+	      if (configuration.mode_overrides.length || configuration.protection.length) {
+	        const method = document.getElementById('relMethod');
+	        if (method) {
+	          method.value = 'failure_mode_fmea';
+	          changeReliabilityMethod();
+	        }
+	      }
+	      if (!options.quiet) log('可靠性与保护配置已校验并保存', 'success');
+	      return result.data;
+	    }
+
+	    function addReliabilityProtectionRow() {
+	      if (!_reliabilityConfigurationData) return;
+	      const protection = _reliabilityConfigurationData.configuration.protection || [];
+	      const components = _reliabilityConfigurationData.components || [];
+	      const device = components.find(c => ['ac_switch', 'ac_circuit_breaker', 'dc_circuit_breaker'].includes(c.component_kind)) || components[0];
+	      const protectedComponent = components.find(c => c.stable_id !== device?.stable_id) || device;
+	      protection.push({ protection_id: `custom_protection_${protection.length + 1}`,
+	        protective_device_id: device?.stable_id || '', protected_component_id: protectedComponent?.stable_id || '',
+	        backup_device_id: '', zone_component_ids: protectedComponent ? [protectedComponent.stable_id] : [],
+	        enabled: true, fail_to_trip_probability: 0.005,
+	        nuisance_trip_frequency_per_year: 0,
+	        fail_to_open_probability: 0.005, primary_clearing_time_s: 0.1,
+	        backup_clearing_time_s: 0.5, automatic_reclose: false,
+	        successful_reclose_probability: 0 });
+	      renderReliabilityProtectionConfiguration(_reliabilityConfigurationData);
+	      _reliabilityConfigurationDirty = true;
 	    }
 
 	    function updateReliabilityParameterAdvice(quality, state = 'warning') {
@@ -17646,25 +18801,52 @@ const App = (() => {
 
 	    // Bar 3: Reliability — run + export. Backend live.
 	    async function runReliability(options = {}) {
+	      beginReliabilityWorkflow();
 	      setStatus('可靠性分析中...', 'busy');
-	      if (!await syncToBackend(true)) { setStatus('同步失败', 'error'); return; }
+	      if (!await syncToBackend(true)) {
+	        setStatus('同步失败', 'error');
+	        failReliabilityWorkflow('configuration', '当前模型同步到后端失败');
+	        return;
+	      }
+	      if (_reliabilityConfigurationDirty &&
+	          !await saveReliabilityConfiguration({ quiet: true })) {
+	        setStatus('可靠性配置校验失败', 'error');
+	        failReliabilityWorkflow('configuration', '可靠性或保护配置未通过后端校验');
+	        return;
+	      }
 	      if (!options.skipParameterCheck) {
 	        const quality = await apiGet('/api/session/reliability/data_quality');
 	        if (!quality) {
 	          setStatus('可靠性参数校验失败', 'error');
+	          failReliabilityWorkflow('configuration', '无法读取可靠性参数覆盖状态');
 	          return;
 	        }
 	        const total = Number(quality.components_total || 0);
 	        const covered = Number(quality.components_with_reliability_data || 0);
 	        if (total > 0 && covered === 0) {
 	          updateReliabilityParameterAdvice(quality, 'warning');
-	          setStatus('请先补全可靠性参数', 'error');
-	          log('当前模型没有有效故障率和修复时间；请点击“应用参数库后运行”', 'warn');
-	          return;
+	          const dataPolicy = document.getElementById('relDataPolicy')?.value || 'missing_only';
+	          if (dataPolicy === 'case_data_only') {
+	            setStatus('严格策略缺少可靠性参数', 'error');
+	            log('严格策略不生成缺失参数；请点击“应用参数库后运行”或切换数据策略', 'warn');
+	            failReliabilityWorkflow('configuration', '严格策略下没有有效故障率和修复时间');
+	            return;
+	          }
+	          log('当前模型没有自带故障率和修复时间；本次计算使用所选策略的统一回退值', 'warn');
+	        } else {
+	          updateReliabilityParameterAdvice(null);
 	        }
-	        updateReliabilityParameterAdvice(null);
 	      }
-	      const selectedMethod = (document.getElementById('relMethod')?.value) || 'nsq';
+	      const configured = _reliabilityConfigurationData?.configuration;
+	      const hasModeConfiguration = (configured?.mode_overrides || []).length > 0 ||
+	        (configured?.protection || []).length > 0;
+	      const methodInput = document.getElementById('relMethod');
+	      if (hasModeConfiguration && methodInput?.value !== 'failure_mode_fmea') {
+	        methodInput.value = 'failure_mode_fmea';
+	        changeReliabilityMethod();
+	        log('已按当前元件/保护配置切换到失效模式 FMEA', 'info');
+	      }
+	      const selectedMethod = methodInput?.value || 'nsq';
 	      const physicalModel = (document.getElementById('relPhysicalModel')?.value) || 'auto';
 	      const method = physicalModel === 'restoration_milp' ? 'three_stage' : selectedMethod;
 	      const maxIter = parseInt(document.getElementById('relMaxIter')?.value) || 2000;
@@ -17696,6 +18878,7 @@ const App = (() => {
 	          !Number.isFinite(physicalSwitchMinutes) || physicalSwitchMinutes < 0) {
 	        setStatus('物理维度参数无效', 'error');
 	        log('负荷倍率和默认切换时间必须是非负数', 'error');
+	        failReliabilityWorkflow('configuration', '物理维度参数不是有效的非负数');
 	        return;
 	      }
 	      if (informationEnabled &&
@@ -17704,23 +18887,27 @@ const App = (() => {
 	           !Number.isFinite(cyberManualMinutes) || cyberManualMinutes < 0)) {
 	        setStatus('信息维度参数无效', 'error');
 	        log('服务可用率必须在 0-1 内，自动/人工响应时间必须为非负分钟数', 'error');
+	        failReliabilityWorkflow('configuration', '信息服务概率或响应时间无效');
 	        return;
 	      }
 	      if (informationEnabled && cyberManualMinutes < cyberAutoMinutes) {
 	        setStatus('信息维度参数无效', 'error');
 	        log('人工响应时间不能小于自动响应时间', 'error');
+	        failReliabilityWorkflow('configuration', '人工响应时间小于自动响应时间');
 	        return;
 	      }
 	      if (intelligentEnabled && Object.values(intelligentProbabilities).some(value =>
 	          !Number.isFinite(value) || value < 0 || value > 1)) {
 	        setStatus('智能维度参数无效', 'error');
 	        log('检测、隔离、决策、执行和保护成功率必须在 0-1 内', 'error');
+	        failReliabilityWorkflow('configuration', '智能维度成功概率不在 0-1 范围内');
 	        return;
 	      }
 	      if (method === 'seq' && seqProfileText.trim() &&
 	          (!seqProfile.length || seqProfile.some(v => !Number.isFinite(v) || v < 0))) {
 	        setStatus('SEQ负荷曲线包含无效倍率', 'error');
 	        log('SEQ负荷曲线必须是由逗号或空格分隔的非负数', 'error');
+	        failReliabilityWorkflow('configuration', 'SEQ 负荷曲线包含无效倍率');
 	        return;
 	      }
 	      if (method === 'seq' && seqSpatialText) {
@@ -17729,6 +18916,7 @@ const App = (() => {
 	        } catch (err) {
 	          setStatus('SEQ空间倍率 JSON 无效', 'error');
 	          log(`SEQ空间倍率必须是有效 JSON：${err.message || err}`, 'error');
+	          failReliabilityWorkflow('configuration', 'SEQ 空间倍率不是有效 JSON');
 	          return;
 	        }
 	        const validKinds = new Set(['ac_load', 'dc_load', 'ac_bus', 'dc_bus']);
@@ -17738,6 +18926,7 @@ const App = (() => {
 	          !Number.isFinite(Number(row.factor)) || Number(row.factor) < 0)) {
 	          setStatus('SEQ空间倍率格式无效', 'error');
 	          log('SEQ空间倍率必须是 [{kind,index,factor}]；factor 为非负数', 'error');
+	          failReliabilityWorkflow('configuration', 'SEQ 空间倍率字段或数值无效');
 	          return;
 	        }
 	      }
@@ -17827,16 +19016,19 @@ const App = (() => {
 	        },
 	        reporting: { metric_focus: metricFocus, weak_basis: weakBasis },
 	      };
+	      markReliabilityBackendRunning();
 	      const data = await apiPost('/api/session/run_reliability', opts);
 	      if (data && !data.error) {
 	        data._metric_focus = metricFocus;
 	        data._weak_basis = weakBasis;
 	        _lastReliabilityData = Object.assign({ _method: method }, data);
+	        completeReliabilityWorkflow(data);
 	        showReliabilityResults(data, method);
         switchTab('results');
         setStatus('可靠性分析完成');
       } else {
         setStatus('计算失败', 'error');
+	        failReliabilityWorkflow('solution', data?.error || '后端可靠性计算未返回有效结果');
 	      }
 	    }
 
@@ -18369,6 +19561,37 @@ const App = (() => {
 	      return html ? renderReliabilityPanel('元件建模', html) : '';
 	    }
 
+	    function renderReliabilityProtectionModelHtml(data) {
+	      const model = data?.protection_model;
+	      if (!model) return '';
+	      const rows = [
+	        ['配置状态', model.configuration_applied ? '已进入三阶段计算' : '未匹配三阶段故障集'],
+	        ['应用保护行', String(model.rows_applied ?? 0)],
+	        ['持续故障场景', String(model.sustained_scenarios_generated ?? 0)],
+	        ['初始故障频率', `${relMetricHtml(model.initiating_fault_frequency_per_year, 6)} occ/yr`],
+	        ['持续故障频率', `${relMetricHtml(model.sustained_fault_frequency_per_year, 6)} occ/yr`],
+	        ['成功重合瞬时频率', `${relMetricHtml(model.transient_reclose_frequency_per_year, 6)} occ/yr`],
+	      ];
+	      let html = '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px;">' +
+	        relScopeBadge(model.configuration_applied ? '保护配置已应用' : '保护配置未应用',
+	          !!model.configuration_applied) +
+	        relScopeBadge('瞬时重合不计持续停电指标', false) + '</div>';
+	      html += '<table><tbody>';
+	      rows.forEach(([label, value]) => {
+	        html += `<tr><td>${escapeHtml(label)}</td><td>${value}</td></tr>`;
+	      });
+	      html += '</tbody></table>';
+	      const formula = data?.metric_semantics?.protection_conditioning_formula;
+	      if (formula) {
+	        html += `<div style="color:var(--muted,#8a909c);font-size:11px;margin-top:6px;">${escapeHtml(formula)}</div>`;
+	      }
+	      const limitations = Array.isArray(model.limitations) ? model.limitations : [];
+	      limitations.forEach(text => {
+	        html += `<div class="sub-hint-warn">${escapeHtml(text)}</div>`;
+	      });
+	      return renderReliabilityPanel('保护配置与故障恢复', html);
+	    }
+
 		    function renderReliabilitySelectionHtml(data, method) {
 		      const focus = relSelectedMetricFocus(data);
 		      const basis = relSelectedWeakBasis(data, method);
@@ -18417,6 +19640,7 @@ const App = (() => {
 		      html += renderFailureModeLegendHtml(data);
 		      html += renderReliabilitySelectionHtml(data, method);
 		      html += renderReliabilityDimensionAuditHtml(data);
+		      html += renderReliabilityProtectionModelHtml(data);
 		      html += renderRelScopeHtml(data);
 		      html += renderCyberPhysicalReliabilityHtml(data);
 		      html += renderReliabilityMetricsHtml(data, method);
@@ -18485,6 +19709,24 @@ const App = (() => {
 	          html += `<tr><td>${escapeHtml(na2)}</td><td>${escapeHtml(nb2)}</td><td>${uij}</td><td>${nf(co.total_shed_mw, 2)}</td><td>${nf(co.eens_contribution, 3)}</td></tr>`;
 	        });
 	        html += '</tbody></table>';
+	      }
+	      // Three-stage restoration: per-fault load shed by stage
+	      if (method === 'three_stage' && Array.isArray(data.faults) && data.faults.length) {
+	        const faultRows = relRankRows(data.faults, weakBasis);
+	        html += '<h4 style="margin:10px 0 4px;">三阶段故障传播与恢复</h4><table><thead><tr><th>元件</th><th>类型</th><th>保护场景</th><th>概率/清除</th><th>状态</th><th>阶段1</th><th>阶段2</th><th>阶段3</th><th>合计(kW)</th><th>EENS</th><th>LOLE</th></tr></thead><tbody>';
+	        const tsMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
+	        faultRows.slice(0, 15).forEach(f => {
+	          const clk = reliabilityClickAttr(f, tsMap);
+	          const name = f.display_name || f.component_name || `故障 ${f.line_id} (${f.from_bus ?? '—'} -> ${f.to_bus ?? '—'})`;
+	          const type = f.display_type || reliabilityComponentTypeLabel(f.component_type);
+	          const protectionScenario = {
+	            primary_cleared: '主保护清除', backup_cleared: '后备保护清除',
+	            unresolved_after_backup_failure: '主备均失败', unconfigured: '未配置',
+	          }[f.protection_scenario] || f.protection_scenario || '未配置';
+	          const probabilityAndTime = `${nf(Number(f.scenario_probability) * 100, 3)}% / ${nf(f.clearing_time_s, 3)} s`;
+	          html += `<tr${clk}><td>${escapeHtml(name)}</td><td>${escapeHtml(type)}</td><td>${escapeHtml(protectionScenario)}</td><td>${escapeHtml(probabilityAndTime)}</td><td>${escapeHtml(f.status || '')}</td><td>${nf(f.pls_stage1, 1)}</td><td>${nf(f.pls_stage2, 1)}</td><td>${nf(f.pls_stage3, 1)}</td><td>${nf(f.pls_total, 1)}</td><td>${nf(f.eens_contribution_mwh_yr ?? f.eens_contribution, 3)}</td><td>${nf(f.lole_contribution_hr_yr ?? f.lole_contribution, 3)}</td></tr>`;
+	        });
+        html += '</tbody></table>';
 	        const sequenceRows = faultRows.filter(f =>
 	          Array.isArray(f.switching_sequence) && f.switching_sequence.length);
 	        if (sequenceRows.length) {
@@ -18500,19 +19742,6 @@ const App = (() => {
 	          html += '</tbody></table>';
 	        }
 	      }
-	      // Three-stage restoration: per-fault load shed by stage
-	      if (method === 'three_stage' && Array.isArray(data.faults) && data.faults.length) {
-	        const faultRows = relRankRows(data.faults, weakBasis);
-	        html += '<h4 style="margin:10px 0 4px;">三阶段故障传播与恢复</h4><table><thead><tr><th>元件</th><th>类型</th><th>状态</th><th>阶段1</th><th>阶段2</th><th>阶段3</th><th>合计(kW)</th><th>EENS</th><th>LOLE</th></tr></thead><tbody>';
-	        const tsMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
-	        faultRows.slice(0, 15).forEach(f => {
-	          const clk = reliabilityClickAttr(f, tsMap);
-	          const name = f.display_name || f.component_name || `故障 ${f.line_id} (${f.from_bus ?? '—'} -> ${f.to_bus ?? '—'})`;
-	          const type = f.display_type || reliabilityComponentTypeLabel(f.component_type);
-	          html += `<tr${clk}><td>${escapeHtml(name)}</td><td>${escapeHtml(type)}</td><td>${escapeHtml(f.status || '')}</td><td>${nf(f.pls_stage1, 1)}</td><td>${nf(f.pls_stage2, 1)}</td><td>${nf(f.pls_stage3, 1)}</td><td>${nf(f.pls_total, 1)}</td><td>${nf(f.eens_contribution_mwh_yr ?? f.eens_contribution, 3)}</td><td>${nf(f.lole_contribution_hr_yr ?? f.lole_contribution, 3)}</td></tr>`;
-	        });
-        html += '</tbody></table>';
-      }
 	      document.getElementById('reliabilityResults').innerHTML = html;
 	      drawReliabilityDashboard(data, method);
 	      if (typeof Canvas !== 'undefined' && Canvas.showReliabilityImpactResults) {
@@ -18571,6 +19800,108 @@ const App = (() => {
 	    document.getElementById('relIntelligentEnabled')?.addEventListener('change', activateIntelligentReliability);
 	    updateReliabilityControlState();
 	    updateSeqProfileSummary();
+	    document.getElementById('relReliabilityConfiguration')?.addEventListener('toggle', event => {
+	      if (event.currentTarget.open && !_reliabilityConfigurationData)
+	        loadReliabilityConfiguration();
+	    });
+	    document.getElementById('btnRelConfigRefresh')?.addEventListener('click', async () => {
+	      if (!await syncToBackend(true)) return;
+	      await loadReliabilityConfiguration();
+	    });
+	    document.getElementById('btnRelConfigSave')?.addEventListener('click', () =>
+	      saveReliabilityConfiguration());
+	    document.getElementById('btnRelProtectionAdd')?.addEventListener('click',
+	      addReliabilityProtectionRow);
+	    document.getElementById('relReliabilityConfiguration')?.addEventListener('input', event => {
+	      if (event.target.id === 'relConfigFilter') {
+	        const needle = event.target.value.trim().toLowerCase();
+	        document.querySelectorAll('#relReliabilityModeRows tr').forEach(row => {
+	          row.hidden = !!needle && !row.textContent.toLowerCase().includes(needle);
+	        });
+	      } else {
+	        const modeRow = event.target.closest?.('tr[data-rel-mode-row]');
+	        if (modeRow) {
+	          modeRow.dataset.relEdited = 'true';
+	          const fieldInput = event.target.closest?.('[data-rel-field]');
+	          if (fieldInput) {
+	            fieldInput.dataset.relEdited = 'true';
+	            fieldInput.classList.remove('rel-config-inherited');
+	            if (RELIABILITY_HAZARD_FIELDS.has(fieldInput.dataset.relField)) {
+	              modeRow.querySelectorAll('[data-rel-field]').forEach(sibling => {
+	                if (sibling !== fieldInput &&
+	                    RELIABILITY_HAZARD_FIELDS.has(sibling.dataset.relField)) {
+	                  sibling.dataset.relExplicit = 'false';
+	                  sibling.dataset.relEdited = 'false';
+	                  sibling.classList.add('rel-config-inherited');
+	                }
+	              });
+	            }
+	          }
+	        }
+	        _reliabilityConfigurationDirty = true;
+	      }
+	    });
+	    document.getElementById('relReliabilityConfiguration')?.addEventListener('change', event => {
+	      if (event.target.id !== 'relConfigFilter') {
+	        const modeRow = event.target.closest?.('tr[data-rel-mode-row]');
+	        if (modeRow) {
+	          modeRow.dataset.relEdited = 'true';
+	          const enabled = event.target.closest?.('[data-rel-mode-enabled]');
+	          if (enabled) enabled.dataset.relEdited = 'true';
+	        }
+	        _reliabilityConfigurationDirty = true;
+	      }
+	    });
+	    document.getElementById('relProtectionRows')?.addEventListener('click', event => {
+	      const button = event.target.closest('[data-remove-protection]');
+	      if (!button || !_reliabilityConfigurationData) return;
+	      _reliabilityConfigurationData.configuration.protection.splice(
+	        Number(button.dataset.removeProtection), 1);
+	      renderReliabilityProtectionConfiguration(_reliabilityConfigurationData);
+	      _reliabilityConfigurationDirty = true;
+	    });
+	    document.getElementById('btnRelConfigExport')?.addEventListener('click', () => {
+	      downloadJsonFile(`reliability_configuration_${tsTagForFilename()}.json`,
+	        readReliabilityConfigurationFromEditor());
+	    });
+	    document.getElementById('btnRelConfigImport')?.addEventListener('click', () =>
+	      document.getElementById('fileRelConfigImport')?.click());
+	    document.getElementById('btnRelConfigClear')?.addEventListener('click', async () => {
+	      if (!window.confirm('清空当前模型的全部可靠性与保护自定义配置？')) return;
+	      const result = await apiPostResult('/api/session/reliability/configuration', {
+	        configuration: { profile_id: 'user_custom', mode_overrides: [], protection: [] },
+	      });
+	      if (!result?.ok) {
+	        log(`可靠性配置清空失败：${result?.data?.error || '后端拒绝请求'}`, 'error');
+	        return;
+	      }
+	      renderReliabilityConfiguration(result.data);
+	      log('可靠性与保护自定义配置已清空', 'success');
+	    });
+	    document.getElementById('fileRelConfigImport')?.addEventListener('change', async event => {
+	      const file = event.target.files?.[0];
+	      event.target.value = '';
+	      if (!file) return;
+	      try {
+	        const parsed = JSON.parse(await file.text());
+	        const configuration = parsed.configuration || parsed;
+	        const result = await apiPostResult('/api/session/reliability/configuration',
+	          { configuration });
+	        if (!result?.ok) throw new Error(result?.data?.error || '配置导入失败');
+	        renderReliabilityConfiguration(result.data);
+	        if ((configuration.mode_overrides || []).length ||
+	            (configuration.protection || []).length) {
+	          const method = document.getElementById('relMethod');
+	          if (method) {
+	            method.value = 'failure_mode_fmea';
+	            changeReliabilityMethod();
+	          }
+	        }
+	        log('可靠性配置已导入并通过后端校验', 'success');
+	      } catch (error) {
+	        log(`可靠性配置导入失败：${error.message || error}`, 'error');
+	      }
+	    });
 	    document.getElementById('btnRunReliability')?.addEventListener('click', () => runReliability());
 	    document.getElementById('btnRelApplyParameters')?.addEventListener('click', applyReliabilityParametersAndRun);
     document.getElementById('btnExportReliabilityResults')?.addEventListener('click', () => {
@@ -21923,6 +23254,8 @@ const App = (() => {
     getAccessibilityAudit: () => HySimCore.Accessibility?.audit() || null,
     getRuntimeDiagnostics: () => HySimCore.RuntimeDiagnostics?.snapshot() || null,
     clearRuntimeDiagnostics: () => HySimCore.RuntimeDiagnostics?.clear() || null,
+    getWorkspaceLayout: () => ({ ...(_workspaceLayout || defaultWorkspaceLayout()) }),
+    setWorkspaceLayout: patch => updateWorkspaceLayout(patch || {}),
     selectStableRef,
     openLocalSubgraph(domain, index, hops = 2) {
       openSubDiagramFor(domain, Number(index), Number(hops) || 2);

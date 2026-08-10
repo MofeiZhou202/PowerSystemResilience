@@ -25,11 +25,33 @@ and existing executable tests.
 
 ## Open findings
 
+None. AUD-001 through AUD-011 are closed by the source, result-contract, and
+registered regression changes summarized below.
+
+## Closed findings
+
+| ID | Closure | Focused regression |
+|---|---|---|
+| AUD-001 | Typhoon catalogs and selected samples are immutable caller-owned `shared_ptr` snapshots, including mixed-option concurrent refresh. | `test_typhoon_traffic_impact` catalog concurrency case |
+| AUD-002 | Traffic-impact inputs validate finite hydrology, wind, speed, capacity, coordinate, and ordered clamp ranges before evaluation. | `test_typhoon_traffic_impact` invalid-bound cases |
+| AUD-003 | Campus results declare `isolated-campus-multi-carrier-milp`, capability flags, limitations, and aggregate PCC attribution; non-unity PF is rejected. | `test_integrated_energy_campus` scope case |
+| AUD-004 | `total_transport_km` is computed from solved EV/HV/ICV distance and is zero when transport is disabled. | `test_integrated_energy_campus` transport case |
+| AUD-005 | Passive conversion, storage, retention, and transfer efficiencies reject values outside `(0,1]`; heat-pump COP remains a distinct gain. | `test_integrated_energy_campus` invalid-efficiency case |
+| AUD-006 | SPPT exposes `Observed`/`NotObserved`; missing MR3d LMPs are non-passing, non-observed evidence. | `test_sppt_metamorphic` MR3d case |
+| AUD-007 | Formulation D leaves unavailable LMP vectors empty and reports `lmp_available=false`, a reason, and a warning. | `test_ev_power_traffic_joint_opt_d` LMP availability checks |
+| AUD-008 | Every public HPF result family reports requested/converged base PF, stored-operating-point use, and model limitations. | `test_harmonics_power_flow` fallback cases |
+| AUD-009 | Topology cycles explicitly contain graph-edge positions; cut vertices and propagated resilience results expose AC/DC-qualified IDs. | `test_graph` same-ID topology case |
+| AUD-010 | CSV uses full-field integer parsing and quoted-field state-machine parsing; trailing text and malformed quotes are rejected. | `test_carbonflow_dynamic_storage` CSV cases |
+| AUD-011 | StrictHiGHS B&C calls execute on fresh joined threads, isolating them from Native adapter TLS while Native retains the caller thread's required stack capacity. | `test_resilience_assessment` five-cycle ordered backend case |
+
+The original evidence and required closure statements are retained below as
+the review record. The table above is the current status.
+
 ### High
 
 #### AUD-001: typhoon catalog cache returns references that can be invalidated concurrently
 
-- Module: `scenario_generation/` (**documentation uncovered**)
+- Module: `scenario_generation/` (focused contract added)
 - Evidence: `src/scenario_generation/typhoon_resilience.cpp:949-979`,
   `tests/run_gui_server.cpp:2093-2124`,
   `src/scenario_generation/scenario_generation.cpp:2436-2453`
@@ -47,7 +69,7 @@ and existing executable tests.
 
 #### AUD-002: typhoon traffic validation allows invalid `std::clamp` bounds
 
-- Module: `scenario_generation/` (**documentation uncovered**)
+- Module: `scenario_generation/` (focused contract added)
 - Evidence: `src/scenario_generation/typhoon_traffic_impact.cpp:176-185` and
   `196-209`, with later clamps at lines 269 and 278.
 - Validation does not reject non-finite values, negative
@@ -62,7 +84,7 @@ and existing executable tests.
 
 #### AUD-003: campus IES exposes electrical PCC fields without network coupling
 
-- Module: `integrated_energy/` (**documentation uncovered**)
+- Module: `integrated_energy/` (focused contract added)
 - Evidence: public fields at
   `include/hacdcpf/integrated_energy/integrated_energy_system.hpp:12-15`, solver
   entry at `src/integrated_energy/integrated_energy_optimizer.cpp:369-389`, and
@@ -100,7 +122,7 @@ and existing executable tests.
 
 #### AUD-004: disabling transport still reports authored transport demand as solved activity
 
-- Module: `integrated_energy/` (**documentation uncovered**)
+- Module: `integrated_energy/` (focused contract added)
 - Evidence: `src/integrated_energy/integrated_energy_optimizer.cpp:615` sets
   modelled transport to zero when disabled, while line 832 always sums
   `data.transport_demand_km` into `result.total_transport_km`.
@@ -111,7 +133,7 @@ and existing executable tests.
 
 #### AUD-005: integrated-energy normalisation accepts efficiencies above unity
 
-- Module: `integrated_energy/` (**documentation uncovered**)
+- Module: `integrated_energy/` (focused contract added)
 - Evidence: `src/integrated_energy/integrated_energy_optimizer.cpp:42-51` and
   applications at lines 153-168.
 - `bounded_efficiency()` accepts values through `1.5` for conversion, storage,
@@ -126,7 +148,7 @@ and existing executable tests.
 
 #### AUD-006: the public SPPT MR3d relation passes when no nodal prices exist
 
-- Module: `sppt/` (**documentation uncovered**)
+- Module: `sppt/` (focused contract added)
 - Evidence: `src/sppt/metamorphic.cpp:216-269` and suite registration at lines
   499-508; `src/sppt/certificate.cpp:135-140` uses a different interpretation.
 - `mr3_semantic_preservation_opf_dual()` returns `passed=true` when either LMP
@@ -173,7 +195,7 @@ and existing executable tests.
 
 #### AUD-009: graph topology exposes conflicting and domain-ambiguous index contracts
 
-- Module: `graph/` (**documentation uncovered**)
+- Module: `graph/` (focused contract added)
 - Evidence: `include/hacdcpf/graph/topology_analysis.hpp:99-101` describes
   `fundamental_cycles` as node indices, while the API contract at lines 131-133
   and `src/graph/topology_analysis.cpp:256-286` return graph edge indices.
@@ -191,7 +213,7 @@ and existing executable tests.
 
 #### AUD-010: carbon CSV integer fields accept trailing text
 
-- Module: `carbon_analysis/` (**documentation uncovered**)
+- Module: `carbon_analysis/` (focused contract added)
 - Evidence: `src/carbon_analysis/annual_carbon_analysis.cpp:2093-2100` and
   2226-2234 call `std::stoi` without checking the consumed length, unlike the
   strict double parser at lines 2038-2051.
@@ -209,52 +231,50 @@ and existing executable tests.
 | `power_flow/` | Focused | Baseline | Active manual and regression baseline retained; the point-in-time math audit is archived. |
 | `optimal_power_flow/` | Focused | Baseline | Active OPF manual retained; point-in-time diagnostics and validation are archived. |
 | `power_models/` | Focused | Baseline | Ownership and AML builder documentation confirmed. |
-| `graph/` | **Uncovered** | Deep | Open: AUD-009. |
+| `graph/` | Focused | Deep | AUD-009 closed; domain-qualified topology and cycle index contracts are tested. |
 | `network_reconfiguration/` | Focused | Baseline | No new finding in this pass. |
 | `reliability/` | Focused | Sampled | Result-scope and existing sanitizer evidence checked; no new finding recorded. |
-| `resilience/` | Distributed | Deep | Open: AUD-011; AUD-009 also propagates into one result path. |
+| `resilience/` | Distributed | Deep | AUD-011 closed; AUD-009 propagation now exposes AC/DC cut-vertex lists. |
 | `analysis/` | Distributed | Sampled | Focused submodule documents exist; no umbrella result contract. |
-| `scenario_generation/` | **Uncovered** | Deep | Open: AUD-001, AUD-002. |
+| `scenario_generation/` | Focused | Deep | AUD-001 and AUD-002 closed. |
 | `short_circuit/` | Focused | Baseline | Existing derivation/audit retained. |
-| `harmonics_power_flow/` | Distributed | Deep | Open: AUD-008. |
+| `harmonics_power_flow/` | Distributed | Deep | AUD-008 closed. |
 | `dynamics/` | Focused | Baseline | Active runtime contract confirmed; broader design material is archived. |
 | `time_series/` | Focused | Baseline | Existing pipeline and annual/lifecycle contracts retained. |
-| `carbon_analysis/` | **Uncovered** | Deep | Open: AUD-010. |
-| `ev_power_traffic/` | Distributed | Deep | Open: AUD-007. |
-| `integrated_energy/` | **Uncovered** | Deep | Open: AUD-003, AUD-004, AUD-005. |
+| `carbon_analysis/` | Focused | Deep | AUD-010 closed. |
+| `ev_power_traffic/` | Distributed | Deep | AUD-007 closed. |
+| `integrated_energy/` | Focused | Deep | AUD-003, AUD-004, and AUD-005 closed. |
 | `market/` | Focused | Baseline | AC-only/fallback contract confirmed. |
-| `sppt/` | **Uncovered** | Deep | Open: AUD-006. |
+| `sppt/` | Focused | Deep | AUD-006 closed. |
 | `io/` | Focused | Baseline | Format ownership and clean-clone documentation checked. |
-| `api/`, `src/server/`, `web/` | Focused | Sampled | Typhoon cache and graph ambiguity reach HTTP consumers. |
-
-`Uncovered` means no active dedicated module contract exists. It does not mean
-the module has no comments, tests, or mentions in archived theory material.
+| `api/`, `src/server/`, `web/` | Focused | Sampled | Typhoon snapshot ownership and domain-qualified graph output are verified at the HTTP boundary. |
 
 ## Verification evidence
 
-The following current `build/macos-release` executables were newer than their
-reviewed sources and passed on 2026-08-09:
+The following targets were rebuilt from current source in
+`/private/tmp/hysim_reliability_config_debug` with ETAP, Ipopt, and OpenDSS
+disabled and the local dependency dirty-check override:
 
-| Target | Result |
+| Scope | Result |
 |---|---|
-| `test_typhoon_traffic_impact` | 3 cases, 23 assertions passed |
-| `test_integrated_energy_campus` | 3 cases, 89 assertions passed |
-| `test_sppt_metamorphic` | 15 cases, 75 assertions passed |
-| `test_harmonics_power_flow` | 51 cases, 351 assertions passed |
-| `test_graph` | 28 cases, 113 assertions passed |
-| `test_ev_power_traffic_joint_opt_d` | 15 cases, 192 assertions passed |
-| `test_carbonflow_case_validation` | 5 cases, 202 assertions passed |
+| Typhoon traffic/catalog | `test_typhoon_traffic_impact`: 5 cases, 35 assertions |
+| Campus integrated energy | `test_integrated_energy_campus`: 6 cases, 106 assertions |
+| SPPT executable layer | 7 targets: 33 cases, 213 assertions |
+| Harmonics | `test_harmonics_power_flow`: 52 cases, 359 assertions |
+| EV Formulation D | `test_ev_power_traffic_joint_opt_d`: 15 cases, 196 assertions |
+| Graph/reduction | `test_graph`, `test_graph_kron`, `test_graph_roundtrip`: 55 cases, 461 assertions |
+| Scenario generation/schema | 2 targets: 12 cases, 105 assertions |
+| Carbon snapshot/annual/GEC | 3 targets: 41 cases, 574 assertions |
+| Resilience/reliability shared suite | `test_resilience_assessment`: 39 cases, 360 assertions, including five Native-to-StrictHiGHS cycles |
+| Runtime server | `run_gui_server` compiled and linked against the changed contracts |
 
-The rebuilt `build/sanitizers/tests/test_resilience_assessment` experiment used
-the current dirty sibling MIPSolvers sources because a reproducible Release
-build correctly refused them. The isolated hybrid StrictHiGHS case passed (1
-case, 26 assertions); the ordered Native-then-StrictHiGHS pair failed (1 of 2
-cases, 1 of 7 assertions), confirming AUD-011 without a sanitizer memory
-diagnostic.
+An exact packaged-task/jthread microbenchmark measured 0.0145--0.0187 ms per
+create/run/join cycle across five 1000-cycle runs, below the 10 ms fixed-overhead
+threshold. The full resilience test executable completed after isolation; no
+material runtime increase was observable at its reported precision.
 
-These passing tests do not cover the open findings above. No full rebuild,
-full CTest run, complete sanitizer suite, thread race detector, or
-external-engine cross-validation was performed for this audit pass.
+No full CTest, complete sanitizer suite, thread race detector, or
+external-engine cross-validation was performed for this closure pass.
 
 ## Closure rules
 

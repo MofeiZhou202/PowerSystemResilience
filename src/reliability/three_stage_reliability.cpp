@@ -65,11 +65,15 @@ struct LoadPoint {
   double p_kw{0.0};
   double customers{1.0};
   double q_kvar{0.0};  // F14: measured reactive demand (0 -> reconstruct from 0.9 PF)
+  ReliabilityComponentKind component_kind{ReliabilityComponentKind::Unknown};
+  int component_position{-1};
 };
 
 struct SourcePoint {
   int bus{0};
   double p_kw{0.0};
+  ReliabilityComponentKind component_kind{ReliabilityComponentKind::Unknown};
+  int component_position{-1};
 };
 
 enum class FaultKind { ACBranch, DCBranch, Generator, Transformer2W,
@@ -112,6 +116,19 @@ struct FaultLine {
   double tau_sw_hr{kTauTrippingHr - kTauSwitchHr};
   double tau_rep_hr{kTauRepairHr - kTauTrippingHr};
   FaultKind kind{FaultKind::ACBranch};
+  double initiating_failure_rate{0.0};
+  double scenario_probability{1.0};
+  std::string protection_scenario{"unconfigured"};
+  std::string protection_id;
+  std::string primary_device_id;
+  std::string backup_device_id;
+  double reclose_success_probability{0.0};
+  double primary_failure_probability{0.0};
+  double backup_failure_probability{0.0};
+  double clearing_time_s{0.0};
+  std::vector<ComponentRef> additional_outages;
+  std::vector<std::string> protection_zone_component_ids;
+  bool restoration_forbidden{false};
 };
 
 struct NativeCase {
@@ -125,7 +142,294 @@ struct NativeCase {
   bool include_converter_faults{false};
   bool include_switch_faults{false};
   bool include_dc_power_flow{true};
+  bool protection_configuration_applied{false};
+  int protection_rows_applied{0};
+  int protection_scenarios_generated{0};
+  double initiating_fault_frequency_per_year{0.0};
+  double sustained_fault_frequency_per_year{0.0};
+  double transient_reclose_frequency_per_year{0.0};
+  std::vector<std::string> protection_configuration_limitations;
 };
+
+ReliabilityComponentKind primary_component_kind(FaultKind kind) {
+  using K = ReliabilityComponentKind;
+  switch (kind) {
+    case FaultKind::ACBranch: return K::ACBranch;
+    case FaultKind::DCBranch: return K::DCBranch;
+    case FaultKind::Generator: return K::ACGenerator;
+    case FaultKind::Transformer2W: return K::ACTransformer2W;
+    case FaultKind::VSCConverter: return K::VSCConverter;
+    case FaultKind::DCDCConverter: return K::DCDCConverter;
+    case FaultKind::ACSwitch: return K::ACSwitch;
+    case FaultKind::ACCircuitBreaker: return K::ACCircuitBreaker;
+    case FaultKind::DCCircuitBreaker: return K::DCCircuitBreaker;
+    case FaultKind::StaticGenerator: return K::ACStaticGenerator;
+    case FaultKind::RenewableGenerator: return K::ACRenewableGenerator;
+    case FaultKind::PVSystem: return K::ACPVSystem;
+    case FaultKind::Storage: return K::ACStorage;
+    case FaultKind::Microgrid: return K::Microgrid;
+  }
+  return K::Unknown;
+}
+
+bool component_outaged(const FaultLine& fault, ReliabilityComponentKind kind,
+                       int position) {
+  if (primary_component_kind(fault.kind) == kind && fault.index == position)
+    return true;
+  return std::any_of(fault.additional_outages.begin(),
+                     fault.additional_outages.end(),
+                     [&](const ComponentRef& ref) {
+                       return ref.kind == kind && ref.element_index == position;
+                     });
+}
+
+bool load_outaged(const FaultLine& fault, const LoadPoint& load) {
+  return component_outaged(fault, load.component_kind,
+                            load.component_position);
+}
+
+template <typename T>
+std::optional<ComponentRef> fault_component_ref(
+    const FaultLine& fault, ReliabilityComponentKind kind,
+    const std::vector<T>& values) {
+  if (fault.index < 0 || fault.index >= static_cast<int>(values.size()))
+    return std::nullopt;
+  ComponentRef ref;
+  ref.kind = kind;
+  ref.element_index = fault.index;
+  ref.component_index = values[static_cast<size_t>(fault.index)].index;
+  ref.element_name = values[static_cast<size_t>(fault.index)].name;
+  ref.stable_id = to_string(kind) + ":" + std::to_string(ref.component_index);
+  return ref;
+}
+
+std::optional<ComponentRef> fault_component_ref(const HybridPowerSystem& sys,
+                                                const FaultLine& fault) {
+  using K = ReliabilityComponentKind;
+  switch (fault.kind) {
+    case FaultKind::ACBranch:
+      return fault_component_ref(fault, K::ACBranch, sys.ac.branches);
+    case FaultKind::DCBranch:
+      return fault_component_ref(fault, K::DCBranch, sys.dc.branches);
+    case FaultKind::Generator:
+      return fault_component_ref(fault, K::ACGenerator, sys.ac.generators);
+    case FaultKind::Transformer2W:
+      return fault_component_ref(fault, K::ACTransformer2W,
+                                 sys.ac.transformers_2w);
+    case FaultKind::VSCConverter:
+      return fault_component_ref(fault, K::VSCConverter, sys.vsc_converters);
+    case FaultKind::DCDCConverter:
+      return fault_component_ref(fault, K::DCDCConverter,
+                                 sys.dc.dcdc_converters);
+    case FaultKind::ACSwitch:
+      return fault_component_ref(fault, K::ACSwitch, sys.ac.switches);
+    case FaultKind::ACCircuitBreaker:
+      return fault_component_ref(fault, K::ACCircuitBreaker,
+                                 sys.ac.circuit_breakers);
+    case FaultKind::DCCircuitBreaker:
+      return fault_component_ref(fault, K::DCCircuitBreaker,
+                                 sys.dc.dc_circuit_breakers);
+    case FaultKind::StaticGenerator:
+      return fault_component_ref(fault, K::ACStaticGenerator,
+                                 sys.ac.static_generators);
+    case FaultKind::RenewableGenerator:
+      return fault_component_ref(fault, K::ACRenewableGenerator,
+                                 sys.ac.renewable_gens);
+    case FaultKind::PVSystem:
+      return fault_component_ref(fault, K::ACPVSystem, sys.ac.pv_systems);
+    case FaultKind::Storage:
+      return fault_component_ref(fault, K::ACStorage, sys.ac.storage);
+    case FaultKind::Microgrid:
+      return fault_component_ref(fault, K::Microgrid, sys.microgrids);
+  }
+  return std::nullopt;
+}
+
+double combined_primary_failure_probability(
+    const ProtectionConfiguration& protection) {
+  const double trip = std::clamp(protection.fail_to_trip_probability, 0.0, 1.0);
+  const double open = std::clamp(protection.fail_to_open_probability, 0.0, 1.0);
+  // Series-success model for command/trip and physical contact opening.
+  // Derivation: docs/reliability_mathematical_models_and_intelligent_cyber_physical_assessment.md
+  // Sections 17-18; P(success)=(1-p_trip)(1-p_open).
+  return 1.0 - (1.0 - trip) * (1.0 - open);
+}
+
+void append_unique_outage(std::vector<ComponentRef>& refs,
+                          const ComponentRef& candidate) {
+  if (std::none_of(refs.begin(), refs.end(), [&](const ComponentRef& ref) {
+        return ref.kind == candidate.kind &&
+               ref.element_index == candidate.element_index;
+      }))
+    refs.push_back(candidate);
+}
+
+bool three_stage_zone_kind_supported(ReliabilityComponentKind kind) {
+  using K = ReliabilityComponentKind;
+  switch (kind) {
+    case K::ACGenerator:
+    case K::ACBranch:
+    case K::ACLoad:
+    case K::ACBusLoad:
+    case K::ACStaticGenerator:
+    case K::ACRenewableGenerator:
+    case K::ACStorage:
+    case K::ACPVSystem:
+    case K::ACTransformer2W:
+    case K::ACSwitch:
+    case K::ACCircuitBreaker:
+    case K::ExternalGrid:
+    case K::DCBusLoad:
+    case K::DCBranch:
+    case K::DCLoad:
+    case K::DCStaticGenerator:
+    case K::DCStaticGeneratorAC:
+    case K::DCDCConverter:
+    case K::DCCircuitBreaker:
+    case K::DCPVArray:
+    case K::VSCConverter:
+    case K::Microgrid:
+      return true;
+    default:
+      return false;
+  }
+}
+
+void apply_protection_configuration(
+    NativeCase& c, const ReliabilityConfiguration& configuration) {
+  for (const auto& fault : c.faults)
+    c.initiating_fault_frequency_per_year += fault.failure_rate;
+  if (configuration.protection.empty()) {
+    c.sustained_fault_frequency_per_year =
+        c.initiating_fault_frequency_per_year;
+    return;
+  }
+
+  std::unordered_map<std::string, const ProtectionConfiguration*> by_component;
+  std::unordered_map<std::string, const ProtectionConfiguration*> by_device;
+  for (const auto& row : configuration.protection) {
+    if (!row.enabled) continue;
+    by_component[row.protected_component_id] = &row;
+    by_device[row.protective_device_id] = &row;
+  }
+
+  std::unordered_set<std::string> applied_rows;
+  std::unordered_set<std::string> limitations;
+  std::vector<FaultLine> scenarios;
+  scenarios.reserve(c.faults.size() * 2U);
+  int next_id = 1;
+  for (const auto& base : c.faults) {
+    const auto ref = fault_component_ref(c.sys, base);
+    const auto configured = ref ? by_component.find(ref->stable_id)
+                                : by_component.end();
+    if (configured == by_component.end()) {
+      auto unchanged = base;
+      unchanged.id = next_id++;
+      unchanged.initiating_failure_rate = base.failure_rate;
+      unchanged.clearing_time_s = base.tau_iso_hr * 3600.0;
+      scenarios.push_back(std::move(unchanged));
+      c.sustained_fault_frequency_per_year += base.failure_rate;
+      continue;
+    }
+
+    const auto& protection = *configured->second;
+    applied_rows.insert(protection.protection_id);
+    const double reclose = protection.automatic_reclose
+        ? std::clamp(protection.successful_reclose_probability, 0.0, 1.0)
+        : 0.0;
+    const double primary_failure =
+        combined_primary_failure_probability(protection);
+    double backup_failure = 0.0;
+    if (!protection.backup_device_id.empty()) {
+      const auto backup_row = by_device.find(protection.backup_device_id);
+      if (backup_row != by_device.end()) {
+        backup_failure =
+            combined_primary_failure_probability(*backup_row->second);
+      } else {
+        limitations.insert("Backup device '" + protection.backup_device_id +
+                           "' has no protection row; its clearing availability is assumed to be 1.0.");
+      }
+    } else if (primary_failure > 0.0) {
+      limitations.insert("Protection row '" + protection.protection_id +
+                         "' has no backup_device_id; configured zone clearance is treated as an abstract upstream backup action.");
+    }
+
+    const double total_duration =
+        base.tau_iso_hr + base.tau_sw_hr + base.tau_rep_hr;
+    const double permanent_probability = 1.0 - reclose;
+    c.transient_reclose_frequency_per_year += base.failure_rate * reclose;
+
+    const auto add_scenario = [&](double conditional_probability,
+                                  const std::string& outcome,
+                                  double clearing_time_s,
+                                  bool use_backup_zone,
+                                  bool restoration_forbidden) {
+      if (conditional_probability <= 1e-15) return;
+      FaultLine scenario = base;
+      scenario.id = next_id++;
+      scenario.initiating_failure_rate = base.failure_rate;
+      scenario.scenario_probability = conditional_probability;
+      scenario.failure_rate = base.failure_rate * conditional_probability;
+      scenario.protection_scenario = outcome;
+      scenario.protection_id = protection.protection_id;
+      scenario.primary_device_id = protection.protective_device_id;
+      scenario.backup_device_id = protection.backup_device_id;
+      scenario.reclose_success_probability = reclose;
+      scenario.primary_failure_probability = primary_failure;
+      scenario.backup_failure_probability = backup_failure;
+      scenario.clearing_time_s = clearing_time_s > 0.0
+          ? clearing_time_s : base.tau_iso_hr * 3600.0;
+      scenario.tau_iso_hr = scenario.clearing_time_s / 3600.0;
+      scenario.tau_rep_hr = std::max(
+          0.0, total_duration - scenario.tau_iso_hr - scenario.tau_sw_hr);
+      scenario.protection_zone_component_ids = protection.zone_component_ids;
+      scenario.restoration_forbidden = restoration_forbidden;
+      if (!use_backup_zone && protection.resolved_protective_device)
+        append_unique_outage(scenario.additional_outages,
+                             *protection.resolved_protective_device);
+      if (use_backup_zone) {
+        for (const auto& zone_ref : protection.resolved_zone_components) {
+          if (three_stage_zone_kind_supported(zone_ref.kind)) {
+            append_unique_outage(scenario.additional_outages, zone_ref);
+          } else {
+            limitations.insert("Protection zone component '" +
+                               zone_ref.stable_id +
+                               "' is outside the three-stage consequence model and is not removed from the recovery topology.");
+          }
+        }
+        if (protection.resolved_backup_device)
+          append_unique_outage(scenario.additional_outages,
+                               *protection.resolved_backup_device);
+      }
+      scenarios.push_back(std::move(scenario));
+      c.sustained_fault_frequency_per_year +=
+          base.failure_rate * conditional_probability;
+      ++c.protection_scenarios_generated;
+    };
+
+    add_scenario(permanent_probability * (1.0 - primary_failure),
+                 "primary_cleared", protection.primary_clearing_time_s,
+                 false, false);
+    add_scenario(permanent_probability * primary_failure *
+                     (1.0 - backup_failure),
+                 "backup_cleared", protection.backup_clearing_time_s,
+                 true, false);
+    add_scenario(permanent_probability * primary_failure * backup_failure,
+                 "unresolved_after_backup_failure",
+                 protection.backup_clearing_time_s, true, true);
+  }
+
+  for (const auto& row : configuration.protection) {
+    if (row.enabled && !applied_rows.count(row.protection_id))
+      limitations.insert("Protection row '" + row.protection_id +
+                         "' does not match an enabled three-stage contingency; enable the corresponding component fault family.");
+  }
+  c.faults = std::move(scenarios);
+  c.protection_rows_applied = static_cast<int>(applied_rows.size());
+  c.protection_configuration_applied = !applied_rows.empty();
+  c.protection_configuration_limitations.assign(limitations.begin(),
+                                                 limitations.end());
+}
 
 std::string read_file_text(const fs::path& path) {
   std::ifstream in(path);
@@ -158,9 +462,10 @@ double bus_customers(const ACBus& b) {
   return std::max(1.0, b.pd_mw * 10.0);
 }
 
-void add_source(std::vector<SourcePoint>& sources, int bus, double p_mw) {
+void add_source(std::vector<SourcePoint>& sources, int bus, double p_mw,
+                ReliabilityComponentKind kind, int position) {
   if (bus <= 0 || p_mw <= 1e-9) return;
-  sources.push_back({bus, p_mw * 1000.0});
+  sources.push_back({bus, p_mw * 1000.0, kind, position});
 }
 
 bool microgrid_contains_bus(const Microgrid& microgrid, int bus) {
@@ -174,8 +479,8 @@ bool microgrid_available_for_islanding(const HybridPowerSystem& sys, int bus,
   for (int i = 0; i < static_cast<int>(sys.microgrids.size()); ++i) {
     const auto& microgrid = sys.microgrids[i];
     if (!microgrid_contains_bus(microgrid, bus)) continue;
-    const bool faulted = fault && fault->kind == FaultKind::Microgrid &&
-                         fault->index == i;
+    const bool faulted = fault && component_outaged(
+        *fault, ReliabilityComponentKind::Microgrid, i);
     return microgrid.in_service && microgrid.islanding_capability && !faulted;
   }
   return true;
@@ -247,77 +552,111 @@ NativeCase build_native_case(const HybridPowerSystem& sys,
     if (b.in_service) add_bus(c.buses, b.index + kDCBusOffset);
   }
 
-  for (const auto& ld : sys.ac.loads) {
+  for (int i = 0; i < static_cast<int>(sys.ac.loads.size()); ++i) {
+    const auto& ld = sys.ac.loads[i];
     if (!ld.in_service) continue;
     add_bus(c.buses, ld.bus);
     c.loads.push_back({ld.bus, std::max(0.0, ld.p_mw * ld.scaling * 1000.0),
-                       load_customers(sys, ld), ld.q_mvar * ld.scaling * 1000.0});
+                       load_customers(sys, ld), ld.q_mvar * ld.scaling * 1000.0,
+                       ReliabilityComponentKind::ACLoad, i});
   }
-  for (const auto& b : sys.ac.buses) {
+  for (int i = 0; i < static_cast<int>(sys.ac.buses.size()); ++i) {
+    const auto& b = sys.ac.buses[i];
     if (!b.in_service || b.pd_mw <= 1e-9) continue;
-    c.loads.push_back({b.index, b.pd_mw * 1000.0, bus_customers(b), b.qd_mvar * 1000.0});
+    c.loads.push_back({b.index, b.pd_mw * 1000.0, bus_customers(b),
+                       b.qd_mvar * 1000.0,
+                       ReliabilityComponentKind::ACBusLoad, i});
   }
-  for (const auto& ld : sys.dc.loads) {
+  for (int i = 0; i < static_cast<int>(sys.dc.loads.size()); ++i) {
+    const auto& ld = sys.dc.loads[i];
     if (!ld.in_service) continue;
     add_bus(c.buses, ld.bus + kDCBusOffset);
     c.loads.push_back({ld.bus + kDCBusOffset, std::max(0.0, ld.p_mw * ld.scaling * 1000.0),
-                       std::max(1.0, ld.p_mw * 10.0)});
+                       std::max(1.0, ld.p_mw * 10.0), 0.0,
+                       ReliabilityComponentKind::DCLoad, i});
   }
-  for (const auto& b : sys.dc.buses) {
+  for (int i = 0; i < static_cast<int>(sys.dc.buses.size()); ++i) {
+    const auto& b = sys.dc.buses[i];
     if (!b.in_service || b.pd_mw <= 1e-9) continue;
     c.loads.push_back({b.index + kDCBusOffset, b.pd_mw * 1000.0,
-                       b.n_customers > 0 ? static_cast<double>(b.n_customers) : std::max(1.0, b.pd_mw * 10.0)});
+                       b.n_customers > 0 ? static_cast<double>(b.n_customers) : std::max(1.0, b.pd_mw * 10.0),
+                       0.0, ReliabilityComponentKind::DCBusLoad, i});
   }
 
-  for (const auto& eg : sys.ac.external_grids) {
+  for (int i = 0; i < static_cast<int>(sys.ac.external_grids.size()); ++i) {
+    const auto& eg = sys.ac.external_grids[i];
     if (!eg.in_service) continue;
-    add_source(c.sources, eg.bus, eg.s_sc_max_mva > 0.0 ? eg.s_sc_max_mva : 1.0e4);
+    add_source(c.sources, eg.bus,
+               eg.s_sc_max_mva > 0.0 ? eg.s_sc_max_mva : 1.0e4,
+               ReliabilityComponentKind::ExternalGrid, i);
   }
-  for (const auto& g : sys.ac.generators) {
+  for (int i = 0; i < static_cast<int>(sys.ac.generators.size()); ++i) {
+    const auto& g = sys.ac.generators[i];
     const double cap = hacdcpf::model::effective_capacity_mw(g);
-    if (cap > 0.0) add_source(c.sources, g.bus, cap);
+    if (cap > 0.0) add_source(c.sources, g.bus, cap,
+                              ReliabilityComponentKind::ACGenerator, i);
   }
-  for (const auto& sg : sys.ac.static_generators) {
+  for (int i = 0; i < static_cast<int>(sys.ac.static_generators.size()); ++i) {
+    const auto& sg = sys.ac.static_generators[i];
     // Effective fixed-injection capacity must honour `scaling`; without it,
     // a unit scheduled out (scaling=0) would still appear at full nameplate
     // power in the connectivity model and over-state restoration headroom.
     if (!microgrid_available_for_islanding(sys, sg.bus)) continue;
     const double cap = hacdcpf::model::effective_capacity_mw(sg);
-    if (cap > 0.0) add_source(c.sources, sg.bus, cap);
+    if (cap > 0.0) add_source(c.sources, sg.bus, cap,
+                              ReliabilityComponentKind::ACStaticGenerator, i);
   }
-  for (const auto& rg : sys.ac.renewable_gens) {
+  for (int i = 0; i < static_cast<int>(sys.ac.renewable_gens.size()); ++i) {
+    const auto& rg = sys.ac.renewable_gens[i];
     if (!rg.in_service || !microgrid_available_for_islanding(sys, rg.bus)) continue;
-    add_source(c.sources, rg.bus, rg.p_rated_mw > 0.0 ? rg.p_rated_mw * rg.capacity_factor : rg.p_mw);
+    add_source(c.sources, rg.bus,
+               rg.p_rated_mw > 0.0 ? rg.p_rated_mw * rg.capacity_factor : rg.p_mw,
+               ReliabilityComponentKind::ACRenewableGenerator, i);
   }
-  for (const auto& pv : sys.ac.pv_systems) {
+  for (int i = 0; i < static_cast<int>(sys.ac.pv_systems.size()); ++i) {
+    const auto& pv = sys.ac.pv_systems[i];
     if (!pv.in_service || !microgrid_available_for_islanding(sys, pv.bus)) continue;
-    add_source(c.sources, pv.bus, pv.pmax_mw > 0.0 ? pv.pmax_mw : pv.p_mw);
+    add_source(c.sources, pv.bus, pv.pmax_mw > 0.0 ? pv.pmax_mw : pv.p_mw,
+               ReliabilityComponentKind::ACPVSystem, i);
   }
-  for (const auto& st : sys.ac.storage) {
+  for (int i = 0; i < static_cast<int>(sys.ac.storage.size()); ++i) {
+    const auto& st = sys.ac.storage[i];
     if (!microgrid_available_for_islanding(sys, st.bus)) continue;
     const double cap = hacdcpf::model::effective_capacity_mw(st);
-    if (cap > 0.0) add_source(c.sources, st.bus, cap);
+    if (cap > 0.0) add_source(c.sources, st.bus, cap,
+                              ReliabilityComponentKind::ACStorage, i);
   }
-  for (const auto& g : sys.dc.dc_static_generators) {
+  for (int i = 0; i < static_cast<int>(sys.dc.dc_static_generators.size()); ++i) {
+    const auto& g = sys.dc.dc_static_generators[i];
     const double cap = hacdcpf::model::effective_capacity_mw(g);
-    if (cap > 0.0) add_source(c.sources, g.bus + kDCBusOffset, cap);
+    if (cap > 0.0) add_source(c.sources, g.bus + kDCBusOffset, cap,
+                              ReliabilityComponentKind::DCStaticGeneratorAC, i);
   }
-  for (const auto& g : sys.dc.static_generators) {
+  for (int i = 0; i < static_cast<int>(sys.dc.static_generators.size()); ++i) {
+    const auto& g = sys.dc.static_generators[i];
     // Same scaling-aware treatment as the AC counterpart above.
     const double cap = hacdcpf::model::effective_capacity_mw(g);
-    if (cap > 0.0) add_source(c.sources, g.bus + kDCBusOffset, cap);
+    if (cap > 0.0) add_source(c.sources, g.bus + kDCBusOffset, cap,
+                              ReliabilityComponentKind::DCStaticGenerator, i);
   }
-  for (const auto& pv : sys.dc.pv_arrays) {
+  for (int i = 0; i < static_cast<int>(sys.dc.pv_arrays.size()); ++i) {
+    const auto& pv = sys.dc.pv_arrays[i];
     if (!pv.in_service) continue;
-    add_source(c.sources, pv.bus + kDCBusOffset, pv.p_set_mw);
+    add_source(c.sources, pv.bus + kDCBusOffset, pv.p_set_mw,
+               ReliabilityComponentKind::DCPVArray, i);
   }
-  for (const auto& b : sys.dc.buses) {
-    if (b.in_service && b.bus_type == DCBusType::DC_V) add_source(c.sources, b.index + kDCBusOffset, 1.0e4);
+  for (int i = 0; i < static_cast<int>(sys.dc.buses.size()); ++i) {
+    const auto& b = sys.dc.buses[i];
+    if (b.in_service && b.bus_type == DCBusType::DC_V)
+      add_source(c.sources, b.index + kDCBusOffset, 1.0e4,
+                 ReliabilityComponentKind::DCBus, i);
   }
-  for (const auto& microgrid : sys.microgrids) {
+  for (int i = 0; i < static_cast<int>(sys.microgrids.size()); ++i) {
+    const auto& microgrid = sys.microgrids[i];
     if (!microgrid.in_service || !microgrid.islanding_capability) continue;
     add_source(c.sources, microgrid.pcc_bus,
-               residual_microgrid_capacity_mw(sys, microgrid));
+               residual_microgrid_capacity_mw(sys, microgrid),
+               ReliabilityComponentKind::Microgrid, i);
   }
 
   int id = 1;
@@ -500,6 +839,7 @@ NativeCase build_native_case(const HybridPowerSystem& sys,
 
   std::sort(c.buses.begin(), c.buses.end());
   c.buses.erase(std::unique(c.buses.begin(), c.buses.end()), c.buses.end());
+  apply_protection_configuration(c, options.reliability_configuration);
   return c;
 }
 
@@ -801,7 +1141,7 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     }
     const bool is_no_switch = !br.in_service || has_open_switch;
     const bool is_failed =
-        (fault.kind == FaultKind::ACBranch && b == fault.index) ||
+        component_outaged(fault, ReliabilityComponentKind::ACBranch, b) ||
         forced_open_pairs.count(undirected_key(br.from_bus, br.to_bus)) > 0;
     const double s_max = br.rate_a_mva > 1e-9 ? br.rate_a_mva : default_rate_mw;
     ac_branches.push_back({b, it_f->second, it_t->second,
@@ -821,18 +1161,35 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     auto it_f = ac_bus_pos.find(sw.bus_from);
     auto it_t = ac_bus_pos.find(sw.bus_to);
     if (it_f == ac_bus_pos.end() || it_t == ac_bus_pos.end()) continue;
-    const bool controlled_branch_fault = fault.kind == FaultKind::ACBranch &&
-        fault.index >= 0 && fault.index < static_cast<int>(sys.ac.branches.size()) &&
-        ((sw.controlled_element_type == "ac_branch" &&
-          sw.controlled_element_index == sys.ac.branches[fault.index].index) ||
-         sw.controlled_branch_index == sys.ac.branches[fault.index].index);
-    const bool controlled_transformer_fault =
-        fault.kind == FaultKind::Transformer2W && fault.index >= 0 &&
-        fault.index < static_cast<int>(sys.ac.transformers_2w.size()) &&
-        sw.controlled_element_type == "transformer_2w" &&
-        sw.controlled_element_index == sys.ac.transformers_2w[fault.index].index;
+    bool controlled_branch_fault = false;
+    for (int branch_pos = 0;
+         branch_pos < static_cast<int>(sys.ac.branches.size()); ++branch_pos) {
+      const auto& controlled = sys.ac.branches[branch_pos];
+      if (component_outaged(fault, ReliabilityComponentKind::ACBranch,
+                            branch_pos) &&
+          ((sw.controlled_element_type == "ac_branch" &&
+            sw.controlled_element_index == controlled.index) ||
+           sw.controlled_branch_index == controlled.index)) {
+        controlled_branch_fault = true;
+        break;
+      }
+    }
+    bool controlled_transformer_fault = false;
+    for (int transformer_pos = 0;
+         transformer_pos < static_cast<int>(sys.ac.transformers_2w.size());
+         ++transformer_pos) {
+      const auto& controlled = sys.ac.transformers_2w[transformer_pos];
+      if (component_outaged(fault,
+                            ReliabilityComponentKind::ACTransformer2W,
+                            transformer_pos) &&
+          sw.controlled_element_type == "transformer_2w" &&
+          sw.controlled_element_index == controlled.index) {
+        controlled_transformer_fault = true;
+        break;
+      }
+    }
     const bool sw_failed =
-        (fault.kind == FaultKind::ACSwitch && si == fault.index) ||
+        component_outaged(fault, ReliabilityComponentKind::ACSwitch, si) ||
         controlled_branch_fault || controlled_transformer_fault ||
         (forced_open_switches &&
          forced_open_switches->count(sw.index) > 0);
@@ -845,9 +1202,10 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
                            sw.closed || eligible_restoration_tie(sw)});
     branch_pair_seen[undirected_key(sw.bus_from, sw.bus_to)] = true;
   }
-  // AC circuit breakers as near-ideal restoration edges (opt-in switch faults),
+  // AC circuit breakers are always topology edges; include_switch_faults only
+  // controls whether their own outages enter the initiating contingency set.
   // deduped against branch/switch pairs and forced open when faulted.
-  if (c.include_switch_faults) {
+  {
     for (int ci = 0; ci < static_cast<int>(sys.ac.circuit_breakers.size()); ++ci) {
       const auto& cb = sys.ac.circuit_breakers[ci];
       if (!cb.in_service) continue;
@@ -855,7 +1213,8 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
       auto it_f = ac_bus_pos.find(cb.bus_from);
       auto it_t = ac_bus_pos.find(cb.bus_to);
       if (it_f == ac_bus_pos.end() || it_t == ac_bus_pos.end()) continue;
-      const bool cb_failed = (fault.kind == FaultKind::ACCircuitBreaker && ci == fault.index);
+      const bool cb_failed = component_outaged(
+          fault, ReliabilityComponentKind::ACCircuitBreaker, ci);
       ac_branches.push_back({-1, it_f->second, it_t->second,
                              1e-6, 1e-6, default_rate_mw,
                              !cb.closed, cb_failed, -1});
@@ -872,8 +1231,8 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     auto it_f = ac_bus_pos.find(tr.hv_bus);
     auto it_t = ac_bus_pos.find(tr.lv_bus);
     if (it_f == ac_bus_pos.end() || it_t == ac_bus_pos.end()) continue;
-    const bool tf_failed =
-        (fault.kind == FaultKind::Transformer2W && t == fault.index);
+    const bool tf_failed = component_outaged(
+        fault, ReliabilityComponentKind::ACTransformer2W, t);
     const double s_max = tr.sn_mva > 1e-9 ? tr.sn_mva : default_rate_mw;
     ac_branches.push_back({-1, it_f->second, it_t->second,
                            1e-6, 1e-6, s_max,
@@ -909,8 +1268,11 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     is_source[it->second] = true;
     if (fixes_voltage) is_voltage_anchor[it->second] = true;
   };
-  for (const auto& eg : sys.ac.external_grids) {
+  for (int i = 0; i < static_cast<int>(sys.ac.external_grids.size()); ++i) {
+    const auto& eg = sys.ac.external_grids[i];
     if (!eg.in_service) continue;
+    if (component_outaged(fault, ReliabilityComponentKind::ExternalGrid, i))
+      continue;
     const double cap = eg.s_sc_max_mva > 0.0 ? eg.s_sc_max_mva : 1.0e4;
     add_dispatch(eg.bus, cap);
     mark_anchor(eg.bus);
@@ -926,7 +1288,8 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     // repaired at the end of the repair window (tau_RP).  Stage 3 [tau_TP, tau_RP]
     // IS that repair window, so the faulted unit stays out in all three stages
     // (F7: Stage 3 is "during repair", not "after repair").
-    if (fault.kind == FaultKind::Generator && gi == fault.index) continue;
+    if (component_outaged(fault, ReliabilityComponentKind::ACGenerator, gi))
+      continue;
     add_dispatch(g.bus, g.pmax_mw > 0.0 ? g.pmax_mw : g.pg_mw);
     // The Generator model represents a synchronous/voltage-controlled source.
     // Inverter-based DER use StaticGenerator/RenewableGen/PVSystem instead.
@@ -939,7 +1302,9 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
   for (int i = 0; i < static_cast<int>(sys.ac.static_generators.size()); ++i) {
     const auto& sg = sys.ac.static_generators[i];
     if (!sg.in_service) continue;
-    if (fault.kind == FaultKind::StaticGenerator && fault.index == i) continue;
+    if (component_outaged(fault, ReliabilityComponentKind::ACStaticGenerator,
+                          i))
+      continue;
     if (!microgrid_available_for_islanding(sys, sg.bus, &fault)) continue;
     const double cap = hacdcpf::model::effective_capacity_mw(sg);
     add_dispatch(sg.bus, cap);
@@ -950,7 +1315,9 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
   for (int i = 0; i < static_cast<int>(sys.ac.renewable_gens.size()); ++i) {
     const auto& rg = sys.ac.renewable_gens[i];
     if (!rg.in_service) continue;
-    if (fault.kind == FaultKind::RenewableGenerator && fault.index == i) continue;
+    if (component_outaged(fault,
+                          ReliabilityComponentKind::ACRenewableGenerator, i))
+      continue;
     if (!microgrid_available_for_islanding(sys, rg.bus, &fault)) continue;
     const double cap = rg.p_rated_mw > 0.0 ? rg.p_rated_mw * rg.capacity_factor : rg.p_mw;
     add_dispatch(rg.bus, cap);
@@ -959,7 +1326,8 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
   for (int i = 0; i < static_cast<int>(sys.ac.pv_systems.size()); ++i) {
     const auto& pv = sys.ac.pv_systems[i];
     if (!pv.in_service) continue;
-    if (fault.kind == FaultKind::PVSystem && fault.index == i) continue;
+    if (component_outaged(fault, ReliabilityComponentKind::ACPVSystem, i))
+      continue;
     if (!microgrid_available_for_islanding(sys, pv.bus, &fault)) continue;
     const double cap = pv.pmax_mw > 0.0 ? pv.pmax_mw : pv.p_mw;
     add_dispatch(pv.bus, cap);
@@ -968,7 +1336,8 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
   for (int i = 0; i < static_cast<int>(sys.ac.storage.size()); ++i) {
     const auto& st = sys.ac.storage[i];
     if (!st.in_service) continue;
-    if (fault.kind == FaultKind::Storage && fault.index == i) continue;
+    if (component_outaged(fault, ReliabilityComponentKind::ACStorage, i))
+      continue;
     if (!microgrid_available_for_islanding(sys, st.bus, &fault)) continue;
     const auto bus = ac_bus_pos.find(st.bus);
     if (bus == ac_bus_pos.end()) continue;
@@ -989,7 +1358,7 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
   for (int i = 0; i < static_cast<int>(sys.microgrids.size()); ++i) {
     const auto& microgrid = sys.microgrids[i];
     if (!microgrid.in_service || !microgrid.islanding_capability ||
-        (fault.kind == FaultKind::Microgrid && fault.index == i))
+        component_outaged(fault, ReliabilityComponentKind::Microgrid, i))
       continue;
     const double residual = residual_microgrid_capacity_mw(sys, microgrid);
     if (residual <= 1e-9) continue;
@@ -1015,6 +1384,7 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     auto it = ac_bus_pos.find(bus);
     if (it == ac_bus_pos.end()) continue;  // DC-only load — handled below
     load_ac_bus[li] = it->second;
+    if (load_outaged(fault, c.loads[li])) continue;
     const double p_mw = std::max(0.0, c.loads[li].p_kw) / 1000.0;
     p_d[it->second] += p_mw;
     // F14: use the load's measured reactive demand when provided; otherwise fall
@@ -1661,6 +2031,7 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     // Distribute shed proportionally among load points at this bus
     for (int li = 0; li < nd_total; ++li) {
       if (load_ac_bus[li] != i) continue;
+      if (load_outaged(fault, c.loads[li])) continue;
       const double ld_mw = std::max(0.0, c.loads[li].p_kw) / 1000.0;
       const double share = ld_mw / p_d[i];
       out.shed_by_load[li] = psh_bus_mw * share * 1000.0;  // back to kW
@@ -1683,34 +2054,42 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
       bool on = br.in_service;
       // F7: the faulted branch is out in every stage (repaired only at tau_RP);
       // do not re-energize it in Stage 3.
-      if (fault.kind == FaultKind::ACBranch && b == fault.index) on = false;
+      if (component_outaged(fault, ReliabilityComponentKind::ACBranch, b))
+        on = false;
       if (on) connect_dc(br.from_bus, br.to_bus);
     }
     for (int b = 0; b < static_cast<int>(sys.dc.branches.size()); ++b) {
       const auto& br = sys.dc.branches[b];
       bool on = br.in_service;
-      if (fault.kind == FaultKind::DCBranch && b == fault.index) on = false;  // F7
+      if (component_outaged(fault, ReliabilityComponentKind::DCBranch, b))
+        on = false;  // F7
       if (on) connect_dc(br.from_bus + kDCBusOffset, br.to_bus + kDCBusOffset);
     }
     for (int vi = 0; vi < static_cast<int>(sys.vsc_converters.size()); ++vi) {
       const auto& vsc = sys.vsc_converters[vi];
       if (!vsc.in_service) continue;
-      if (fault.kind == FaultKind::VSCConverter && vi == fault.index) continue;
+      if (component_outaged(fault, ReliabilityComponentKind::VSCConverter,
+                            vi))
+        continue;
       connect_dc(vsc.bus_ac, vsc.bus_dc + kDCBusOffset);
     }
     for (int di = 0; di < static_cast<int>(sys.dc.dcdc_converters.size()); ++di) {
       const auto& dc = sys.dc.dcdc_converters[di];
       if (!dc.in_service) continue;
-      if (fault.kind == FaultKind::DCDCConverter && di == fault.index) continue;
+      if (component_outaged(fault, ReliabilityComponentKind::DCDCConverter,
+                            di))
+        continue;
       connect_dc(dc.bus_in + kDCBusOffset, dc.bus_out + kDCBusOffset);
     }
-    // DC circuit breakers as connectivity edges (opt-in switch/breaker faults):
-    // a faulted DC breaker is out for the event, disconnecting its DC segment.
-    if (c.include_switch_faults) {
+    // DC circuit breakers are always connectivity edges; the option controls
+    // initiating-breaker enumeration, while protection zones may still open one.
+    {
       for (int ci = 0; ci < static_cast<int>(sys.dc.dc_circuit_breakers.size()); ++ci) {
         const auto& cb = sys.dc.dc_circuit_breakers[ci];
         if (!cb.in_service || !cb.closed) continue;
-        if (fault.kind == FaultKind::DCCircuitBreaker && ci == fault.index) continue;
+        if (component_outaged(fault,
+                              ReliabilityComponentKind::DCCircuitBreaker, ci))
+          continue;
         connect_dc(cb.bus_from + kDCBusOffset, cb.bus_to + kDCBusOffset);
       }
     }
@@ -1722,6 +2101,9 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     std::unordered_map<int, double> comp_ac_source_kw;
     std::unordered_map<int, double> comp_dc_source_kw;
     for (const auto& s : c.sources) {
+      if (component_outaged(fault, s.component_kind,
+                            s.component_position))
+        continue;
       auto it = dc_comp.find(s.bus);
       if (it == dc_comp.end()) continue;
       if (s.bus >= kDCBusOffset) comp_dc_source_kw[it->second] += s.p_kw;
@@ -1730,6 +2112,7 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     std::unordered_map<int, double> comp_ac_served_kw;
     for (int li = 0; li < nd_total; ++li) {
       if (load_ac_bus[li] < 0) continue;
+      if (load_outaged(fault, c.loads[li])) continue;
       auto it = dc_comp.find(c.loads[li].bus);
       if (it == dc_comp.end()) continue;
       comp_ac_served_kw[it->second] +=
@@ -1739,7 +2122,9 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     for (int vi = 0; vi < static_cast<int>(sys.vsc_converters.size()); ++vi) {
       const auto& vsc = sys.vsc_converters[vi];
       if (!vsc.in_service) continue;
-      if (fault.kind == FaultKind::VSCConverter && vi == fault.index) continue;
+      if (component_outaged(fault, ReliabilityComponentKind::VSCConverter,
+                            vi))
+        continue;
       auto ac_it = dc_comp.find(vsc.bus_ac);
       auto dc_it = dc_comp.find(vsc.bus_dc + kDCBusOffset);
       if (ac_it == dc_comp.end() || dc_it == dc_comp.end()) continue;
@@ -1776,6 +2161,9 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
           if (b.bus_type == DCBusType::DC_V) vref[it->second] = 1;
         }
         for (const auto& s : c.sources) {
+          if (component_outaged(fault, s.component_kind,
+                                s.component_position))
+            continue;
           if (s.bus < kDCBusOffset) continue;
           auto it = dcpos.find(s.bus - kDCBusOffset);
           if (it != dcpos.end()) dcsrc_mw[it->second] += s.p_kw / 1000.0;
@@ -1785,7 +2173,8 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
         for (int b = 0; b < static_cast<int>(sys.dc.branches.size()); ++b) {
           const auto& br = sys.dc.branches[b];
           if (!br.in_service) continue;
-          if (fault.kind == FaultKind::DCBranch && b == fault.index) continue;
+          if (component_outaged(fault, ReliabilityComponentKind::DCBranch, b))
+            continue;
           auto itf = dcpos.find(br.from_bus), itt = dcpos.find(br.to_bus);
           if (itf == dcpos.end() || itt == dcpos.end()) continue;
           const double smax = br.rate_a_mva > 1e-9 ? br.rate_a_mva
@@ -1795,7 +2184,9 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
         for (int d = 0; d < static_cast<int>(sys.dc.dcdc_converters.size()); ++d) {
           const auto& dd = sys.dc.dcdc_converters[d];
           if (!dd.in_service) continue;
-          if (fault.kind == FaultKind::DCDCConverter && d == fault.index) continue;
+          if (component_outaged(fault,
+                                ReliabilityComponentKind::DCDCConverter, d))
+            continue;
           auto itf = dcpos.find(dd.bus_in), itt = dcpos.find(dd.bus_out);
           if (itf == dcpos.end() || itt == dcpos.end()) continue;
           const double cap = std::max(std::abs(dd.pmax_mw), std::abs(dd.pmin_mw));
@@ -1806,7 +2197,9 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
         for (int vi = 0; vi < static_cast<int>(sys.vsc_converters.size()); ++vi) {
           const auto& v = sys.vsc_converters[vi];
           if (!v.in_service) continue;
-          if (fault.kind == FaultKind::VSCConverter && vi == fault.index) continue;
+          if (component_outaged(fault, ReliabilityComponentKind::VSCConverter,
+                                vi))
+            continue;
           auto itd = dcpos.find(v.bus_dc);
           if (itd == dcpos.end()) continue;
           vref[itd->second] = 1;  // VSC forms the DC voltage reference
@@ -1818,6 +2211,10 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
         std::vector<double> dcload_mw;
         for (int li = 0; li < nd_total; ++li) {
           if (load_ac_bus[li] >= 0) continue;
+          if (load_outaged(fault, c.loads[li])) {
+            out.shed_by_load[li] = std::max(0.0, c.loads[li].p_kw);
+            continue;
+          }
           auto it = dcpos.find(c.loads[li].bus - kDCBusOffset);
           if (it == dcpos.end()) { out.shed_by_load[li] = std::max(0.0, c.loads[li].p_kw); continue; }
           dcload_li.push_back(li);
@@ -1926,12 +2323,17 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     std::unordered_map<int, double> dc_comp_demand;
     for (int li = 0; li < nd_total; ++li) {
       if (load_ac_bus[li] >= 0) continue;
+      if (load_outaged(fault, c.loads[li])) continue;
       auto it = dc_comp.find(c.loads[li].bus);
       if (it != dc_comp.end()) dc_comp_demand[it->second] += std::max(0.0, c.loads[li].p_kw);
     }
     for (int li = 0; li < nd_total; ++li) {
       if (load_ac_bus[li] >= 0) continue;
       const double li_kw = std::max(0.0, c.loads[li].p_kw);
+      if (load_outaged(fault, c.loads[li])) {
+        out.shed_by_load[li] = li_kw;
+        continue;
+      }
       auto it = dc_comp.find(c.loads[li].bus);
       if (it == dc_comp.end()) { out.shed_by_load[li] = li_kw; continue; }
       const int cid = it->second;
@@ -1951,6 +2353,11 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
       }
     }
     }  // if (!dc_pf_done)
+  }
+
+  for (int li = 0; li < nd_total; ++li) {
+    if (load_outaged(fault, c.loads[li]))
+      out.shed_by_load[li] = std::max(0.0, c.loads[li].p_kw);
   }
 
   out.shed_kw = std::accumulate(out.shed_by_load.begin(), out.shed_by_load.end(), 0.0);
@@ -2072,6 +2479,18 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
   r.eens_kwh_yr = 0.0;
   r.eens_cost = 0.0;
   r.worst_line = 0;
+  r.protection_configuration_applied =
+      c.protection_configuration_applied;
+  r.protection_rows_applied = c.protection_rows_applied;
+  r.protection_scenarios_generated = c.protection_scenarios_generated;
+  r.initiating_fault_frequency_per_year =
+      c.initiating_fault_frequency_per_year;
+  r.sustained_fault_frequency_per_year =
+      c.sustained_fault_frequency_per_year;
+  r.transient_reclose_frequency_per_year =
+      c.transient_reclose_frequency_per_year;
+  r.protection_configuration_limitations =
+      c.protection_configuration_limitations;
 
   double total_customers = 0.0;
   for (const auto& ld : c.loads) total_customers += std::max(1.0, ld.customers);
@@ -2165,6 +2584,11 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
       }
     };
     item.interlock = precheck_protection_interlocks(c.sys, fault);
+    if (fault.restoration_forbidden) {
+      item.interlock.valid = false;
+      item.interlock.message =
+          "configured primary and backup protection both failed; restoration is blocked until fault clearance";
+    }
     item.s1 = solve_stage_milp(c, fault, 1, INT_MAX, nullptr,
                                &item.interlock.forced_open_switch_indices,
                                nullptr, true, &storage_energy,
@@ -2285,6 +2709,19 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
     d.from_bus = fault.from_bus;
     d.to_bus = fault.to_bus;
     d.failure_rate = fault.failure_rate;
+    d.initiating_failure_rate = fault.initiating_failure_rate > 0.0
+        ? fault.initiating_failure_rate : fault.failure_rate;
+    d.scenario_probability = fault.scenario_probability;
+    d.protection_scenario = fault.protection_scenario;
+    d.protection_id = fault.protection_id;
+    d.primary_device_id = fault.primary_device_id;
+    d.backup_device_id = fault.backup_device_id;
+    d.reclose_success_probability = fault.reclose_success_probability;
+    d.primary_failure_probability = fault.primary_failure_probability;
+    d.backup_failure_probability = fault.backup_failure_probability;
+    d.clearing_time_s = fault.clearing_time_s;
+    d.protection_zone_component_ids =
+        fault.protection_zone_component_ids;
     d.stage1_status = s1.status;
     d.stage2_status = s2.status;
     d.stage3_status = s3.status;
@@ -2366,6 +2803,80 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
                : "Stage-2 and repair-window switching plans are inconsistent");
     int action_order = 0;
     bool isolation_valid = true;
+    if (!fault.protection_id.empty()) {
+      const bool backup_action =
+          fault.protection_scenario != "primary_cleared";
+      const std::string device_id = backup_action
+          ? fault.backup_device_id : fault.primary_device_id;
+      ThreeStageSwitchAction action;
+      action.sequence_order = ++action_order;
+      action.action = "trip";
+      action.purpose = backup_action
+          ? "configured_backup_fault_clearance"
+          : "configured_primary_fault_clearance";
+      action.operation_time_s = fault.clearing_time_s;
+      if (device_id.empty()) {
+        action.switch_name = "abstract upstream backup protection";
+        action.switch_type = "unresolved_backup_device";
+      }
+      const auto bind_switch = [&](const Switch& sw) {
+        action.switch_index = sw.index;
+        action.switch_name = sw.name;
+        action.switch_type = switch_type_str(sw.switch_type);
+        action.bus_from = sw.bus_from;
+        action.bus_to = sw.bus_to;
+        const auto caps = effective_switch_capabilities(sw);
+        action.validated = sw.in_service && sw.closed && !sw.locked_closed &&
+                           caps.can_interrupt_fault_current;
+      };
+      if (device_id.rfind("ac_switch:", 0) == 0) {
+        const int stable_index = std::stoi(device_id.substr(10));
+        const auto it = std::find_if(
+            c.sys.ac.switches.begin(), c.sys.ac.switches.end(),
+            [&](const Switch& sw) { return sw.index == stable_index; });
+        if (it != c.sys.ac.switches.end()) bind_switch(*it);
+      } else if (device_id.rfind("ac_circuit_breaker:", 0) == 0) {
+        const int stable_index = std::stoi(device_id.substr(19));
+        const auto it = std::find_if(
+            c.sys.ac.circuit_breakers.begin(),
+            c.sys.ac.circuit_breakers.end(),
+            [&](const CircuitBreaker& breaker) {
+              return breaker.index == stable_index;
+            });
+        if (it != c.sys.ac.circuit_breakers.end()) {
+          action.switch_index = it->index;
+          action.switch_name = it->name;
+          action.switch_type = "CircuitBreaker";
+          action.bus_from = it->bus_from;
+          action.bus_to = it->bus_to;
+          action.validated = it->in_service && it->closed;
+        }
+      } else if (device_id.rfind("dc_circuit_breaker:", 0) == 0) {
+        const int stable_index = std::stoi(device_id.substr(19));
+        const auto it = std::find_if(
+            c.sys.dc.dc_circuit_breakers.begin(),
+            c.sys.dc.dc_circuit_breakers.end(),
+            [&](const DCCircuitBreaker& breaker) {
+              return breaker.index == stable_index;
+            });
+        if (it != c.sys.dc.dc_circuit_breakers.end()) {
+          action.switch_index = it->index;
+          action.switch_name = it->name;
+          action.switch_type = "DCCircuitBreaker";
+          action.bus_from = it->bus_from;
+          action.bus_to = it->bus_to;
+          action.validated = it->in_service && it->closed;
+        }
+      }
+      action.validation_message = action.validated
+          ? "configured protection device resolved by stable component identity"
+          : "configured protection device is absent, open, locked, or lacks fault-interruption capability";
+      if (!action.validated) {
+        isolation_valid = false;
+        d.switching_sequence_valid = false;
+      }
+      d.switching_sequence.push_back(std::move(action));
+    }
     std::vector<const Switch*> protection_actions;
     std::vector<const Switch*> boundary_actions;
     std::unordered_map<int, const Switch*> switch_by_index;
@@ -2468,7 +2979,8 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
           : cleared_by_protection.count(dependency->second) > 0;
       append_isolation_action(*sw, false, upstream_cleared);
     }
-    d.fault_isolation_explicit = !protection_actions.empty() ||
+    d.fault_isolation_explicit = !fault.protection_id.empty() ||
+                                 !protection_actions.empty() ||
                                  !boundary_actions.empty();
     d.fault_isolation_message = d.fault_isolation_explicit
         ? (isolation_valid
@@ -2609,6 +3121,17 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
        "DCDC devices are still treated as lossless connectivity edges. "
       "SOP setpoints (psop) are zero (VSC dispatch not co-optimised in this model). "
       "Reactive power modelled as p_d * tan(arccos(0.9)); loss terms dropped (LinDistFlow).";
+  if (c.protection_configuration_applied) {
+    r.model_limitations +=
+        " Session protection configuration is applied by mutually exclusive "
+        "sustained-event scenarios: successful automatic reclose is classified "
+        "as momentary and excluded from IEEE-1366 sustained SAIFI/SAIDI/EENS; "
+        "primary command/trip and contact-opening failures are independent; "
+        "configured backup zones are topology/load consequence sets, not relay "
+        "pickup, time-current, directional, DER-FRT, or waveform simulations.";
+  }
+  for (const auto& limitation : c.protection_configuration_limitations)
+    r.model_limitations += " " + limitation;
 
       // Validity flags describe whole-result physical coverage.  They are true for
       // pure-AC cases and intentionally false for hybrid cases because DC/VSC/SOP
@@ -2671,19 +3194,33 @@ ThreeStageReliabilityResult run_three_stage_reliability(
   }
   try {
     HybridPowerSystem sys = io::from_json(text);
-    NativeCase c = build_native_case(sys, options);
+    ThreeStageReliabilityOptions effective_options = options;
+    if (!effective_options.reliability_configuration.protection.empty() ||
+        !effective_options.reliability_configuration.mode_overrides.empty()) {
+      const auto validation = validate_reliability_configuration(
+          sys, effective_options.reliability_configuration);
+      if (!validation.ok()) {
+        std::string message = "invalid reliability configuration";
+        for (const auto& error : validation.errors) message += "; " + error;
+        throw std::runtime_error(message);
+      }
+      effective_options.reliability_configuration =
+          resolve_reliability_configuration(
+              sys, std::move(effective_options.reliability_configuration));
+    }
+    NativeCase c = build_native_case(sys, effective_options);
     if (c.loads.empty()) {
       result.error = "case JSON contains no load points";
       return result;
     }
-    if (c.faults.empty()) {
+    if (c.faults.empty() && c.initiating_fault_frequency_per_year <= 0.0) {
       result.error = "case JSON contains no AC/DC branch contingencies";
       return result;
     }
     std::unordered_set<int> unavailable_ties(
-        options.unavailable_tie_switch_ids.begin(),
-        options.unavailable_tie_switch_ids.end());
-    run_native_case(c, result, options, unavailable_ties);
+        effective_options.unavailable_tie_switch_ids.begin(),
+        effective_options.unavailable_tie_switch_ids.end());
+    run_native_case(c, result, effective_options, unavailable_ties);
   } catch (const std::exception& e) {
     result.error = std::string("failed to evaluate native three-stage reliability: ") + e.what();
   }
@@ -2700,19 +3237,33 @@ ThreeStageReliabilityResult run_three_stage_reliability_from_string(
   }
   try {
     HybridPowerSystem sys = io::from_json(case_json_text);
-    NativeCase c = build_native_case(sys, options);
+    ThreeStageReliabilityOptions effective_options = options;
+    if (!effective_options.reliability_configuration.protection.empty() ||
+        !effective_options.reliability_configuration.mode_overrides.empty()) {
+      const auto validation = validate_reliability_configuration(
+          sys, effective_options.reliability_configuration);
+      if (!validation.ok()) {
+        std::string message = "invalid reliability configuration";
+        for (const auto& error : validation.errors) message += "; " + error;
+        throw std::runtime_error(message);
+      }
+      effective_options.reliability_configuration =
+          resolve_reliability_configuration(
+              sys, std::move(effective_options.reliability_configuration));
+    }
+    NativeCase c = build_native_case(sys, effective_options);
     if (c.loads.empty()) {
       result.error = "case JSON contains no load points";
       return result;
     }
-    if (c.faults.empty()) {
+    if (c.faults.empty() && c.initiating_fault_frequency_per_year <= 0.0) {
       result.error = "case JSON contains no AC/DC branch contingencies";
       return result;
     }
     std::unordered_set<int> unavailable_ties(
-        options.unavailable_tie_switch_ids.begin(),
-        options.unavailable_tie_switch_ids.end());
-    run_native_case(c, result, options, unavailable_ties);
+        effective_options.unavailable_tie_switch_ids.begin(),
+        effective_options.unavailable_tie_switch_ids.end());
+    run_native_case(c, result, effective_options, unavailable_ties);
   } catch (const std::exception& e) {
     result.error = std::string("failed to evaluate native three-stage reliability: ") + e.what();
   }

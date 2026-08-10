@@ -2433,8 +2433,8 @@ ResilienceScenarioResult generate_resilience_scenarios(const HybridPowerSystem& 
   catalog_opts.stochastic = true;
   catalog_opts.use_month_defaults = true;
   catalog_opts.use_sst_resource = true;
-  const auto& catalog = get_or_build_typhoon_catalog(catalog_opts);
-  const auto catalog_counts = typhoon_catalog_counts_to_json(catalog);
+  const auto catalog = get_or_build_typhoon_catalog(catalog_opts);
+  const auto catalog_counts = typhoon_catalog_counts_to_json(*catalog);
   nlohmann::json coverage_samples = nlohmann::json::array();
   std::uint64_t approximate_repair_candidate_count = 0;
   std::unordered_map<int, std::size_t> ac_branch_pos;
@@ -2450,8 +2450,8 @@ ResilienceScenarioResult generate_resilience_scenarios(const HybridPowerSystem& 
   }
 
   for (auto intensity : options.intensity_levels) {
-    const auto category_it = catalog.by_category.find(intensity);
-    if (category_it == catalog.by_category.end() || category_it->second.empty()) {
+    const auto category_it = catalog->by_category.find(intensity);
+    if (category_it == catalog->by_category.end() || category_it->second.empty()) {
       if (warnings) warnings->push_back("No typhoon catalog samples classified as " + std::string(to_string(intensity)) + "; resilience scenario group skipped.");
       continue;
     }
@@ -2467,7 +2467,7 @@ ResilienceScenarioResult generate_resilience_scenarios(const HybridPowerSystem& 
     candidates.reserve(static_cast<std::size_t>(selected_count));
     for (int i = 0; i < selected_count; ++i) {
       const unsigned int seed = perturbation.seed + static_cast<unsigned int>(typhoon_category_ordinal(intensity) * 100003 + i * 4099 + 7001);
-      const auto& sample = catalog.samples[category_indices[(start + static_cast<std::size_t>(i)) % category_indices.size()]];
+      const auto& sample = catalog->samples[category_indices[(start + static_cast<std::size_t>(i)) % category_indices.size()]];
       std::mt19937 rng(seed);
       const std::string candidate_id =
           "resilience:" + std::string(to_string(intensity)) + ":" +
@@ -2656,7 +2656,7 @@ ResilienceScenarioResult generate_resilience_scenarios(const HybridPowerSystem& 
                    {"load_site_count", load_sites.size()},
                    {"catalog_first_month", catalog_opts.first_month},
                    {"catalog_last_month", catalog_opts.last_month},
-                   {"catalog_sample_count", catalog.samples.size()},
+                   {"catalog_sample_count", catalog->samples.size()},
                    {"catalog_counts", catalog_counts},
                    {"classification", "max_vmax_ms_skip_first_point"},
                    {"strict_category_sampling", true}};
@@ -2692,7 +2692,7 @@ ResilienceScenarioResult generate_resilience_scenarios(const HybridPowerSystem& 
                    approximate_repair_candidate_count},
                   {"catalog_first_month", catalog_opts.first_month},
                   {"catalog_last_month", catalog_opts.last_month},
-                  {"catalog_sample_count", catalog.samples.size()},
+                  {"catalog_sample_count", catalog->samples.size()},
                   {"catalog_counts", catalog_counts},
                   {"classification", "max_vmax_ms_skip_first_point"},
                   {"strict_category_sampling", true},

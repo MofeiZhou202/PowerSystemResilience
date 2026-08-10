@@ -5,7 +5,7 @@
 
 本文档面向工程使用者和开发者，说明 HySim-XJTU-HRPES 从“工程场景建模”到“规范模型求解”、再到“结果回投”的完整链路。当前合同与实现参考统一从 `docs/README.md` 进入；历史审计、理论提案和旧技术总笔记隔离在 `docs/archive/`，不代表当前行为。
 
-## 文档同步状态（2026-08-09）
+## 文档同步状态（2026-08-10）
 
 - `docs/README.md` 是当前文档的唯一导航入口，明确区分运行契约与理论参考。
 - 历史审计、理论提案与旧技术总笔记已迁入 `docs/archive/`；受版本控制的
@@ -61,7 +61,7 @@ cmake --build --preset windows-msvc-release
 ctest --preset windows-msvc-release
 ```
 
-## 当前建模与仿真包状态快照（2026-07-24）
+## 当前建模与仿真包状态快照（2026-08-09）
 
 本节用于快速回答“现在这个包到底做到哪一步了”。结论基于当前仓库源码组织、CMake 选项与已注册测试目标，而不是历史规划文档。
 
@@ -74,7 +74,7 @@ ctest --preset windows-msvc-release
 | 三相混合 PF / OPF | 活跃研发中，GUI 已接入 | `powerflow::solve_three_phase_hybrid_pf` 与 `opf::phase_hybrid` 已接入 `/xjtu/` 潮流/OPF 工具栏；OPF 提供 Full 与 GraphReduced（稀疏 Kron 降阶）、Ipopt/NativeIPM 双后端。GUI rich-model 适配范围见下文。 |
 | 电压稳定 | 已实现 | 连续潮流（CPF）采用增广 `[state, lambda]` 弧长预测-校正，可越过 P-V 鼻点并保留下支采样；输出 P-V 曲线与 VSI 指标。 |
 | 图建模、网络降阶、重构 | 已实现并持续回归 | 支持连通性、开关收缩、Kron/series/pendant/sparse-Kron reduction、ONR。 |
-| 可靠性与弹性分析 | 已实现并持续回归 | 包含 MC、FMEA（含 failure-mode 目录路径与信息物理 Level 1 调节）、三阶段可靠性与交直流配电弹性严格 MIP，以及 MIP 拓扑/MESS 状态到场景特定 DAE 二次证书的回放桥；证书明确区分 L1/L2 数值诊断、L3 场景阈值证明与未支持的动态动作。 |
+| 可靠性与弹性分析 | 已实现并持续回归 | 包含 MC、FMEA 和三阶段可靠性；failure-mode FMEA 目录覆盖当前 rich-model 元件，并提供会话级元件参数/保护区自定义、稳定 ID 校验及 GUI/API 一一映射。GUI 按方法显示计算原则，并贯穿展示配置、枚举、后果映射、求解恢复和指标审计五阶段；目录覆盖不等于所有稳态后果均可表达，LCC、三相和控制类未支持后果会显式报告。弹性严格 MIP 及 DAE 二次证书保持既有边界。 |
 | 三相与短路分析 | 已实现并持续回归 | 三相 NR 与 AC/DC 短路分析（IEC 60909 简化与详细路径、DC 故障水平估计）均有独立测试族。 |
 | 谐波分析 | 已实现（持续增强） | 频域穿透、Newton 非线性、三相 abc 与 AC/DC 耦合谐波潮流，频扫/谐振检测与 IEEE 519 / GB/T 14549 合规校核。 |
 | 暂态动力学 | 已实现基础框架（持续增强） | 动态建模、事件、7 类求解器（含 MassMatrixDae 同时式 DAE）、DAE 诊断、小信号与频率观测；设备模型覆盖同步机/调速器/励磁/PSS、GFM/GFL 逆变器、DER 与 IEEE 1547 保护。显式三相网络自动启用 GFL 逐相电流状态与相域限流，GFM 采用序耦合 Norton 端口和最大相电流限流；三线制默认阻断零序电流。 |
@@ -233,8 +233,8 @@ Canonical 层的一个重要设计原则是：求解器只看到必要的数学�
 | 网络重构 | `solve_optimal_reconfiguration`, `run_topology_reconfiguration` | LinDistFlow MILP + graph connectivity | 开/合支路集合、损耗 proxy、PF 校验 |
 | 图分析/降阶 | `build_power_system_graph`, `contract_zero_impedance_edges`, Kron/series/pendant/sparse-Kron recovery | graph abstraction | 连通性、径向性、super-node、恢复映射 |
 | 可靠性 MC | `run_nonsequential_mc`, `run_sequential_mc` | component outage sampling + DC OPF state evaluation | EENS、LOLE、LOLF、CoV、VaR/CVaR、关键元件 |
-| FMEA 可靠性 | `run_distribution_fmea`, `run_failure_mode_fmea` | N-1/N-2 enumeration + switching/repair stage evaluation；可选信息物理 Level 1 调节（`CyberPhysicalFMEAOptions`） | contingency detail、EENS/EDNS/SAIFI/SAIDI |
-| 三阶段可靠性 | `run_three_stage_reliability` | native C++ MILP via MIPSolvers | 三阶段失负荷、SOP 动作、节点可靠性指标 |
+| FMEA 可靠性 | `run_distribution_fmea`, `run_failure_mode_fmea` | 全 rich-model 失效模式目录 + N-1/N-2 enumeration + switching/repair stage evaluation；会话级参数与保护区覆盖；可选信息物理 Level 1 调节（`CyberPhysicalFMEAOptions`） | contingency detail、EENS/EDNS/SAIFI/SAIDI、参数来源、覆盖与未支持后果诊断 |
+| 三阶段可靠性 | `run_three_stage_reliability` | native C++ MILP via MIPSolvers；会话保护配置按自动重合、主保护、后备保护和未清除四类互斥事件调节故障频率、清除时间、停运区与恢复准入 | 三阶段失负荷、保护场景审计、SOP 动作、节点可靠性指标；继电整定与 DER-FRT 动态闭环仍显式受限 |
 | 配电弹性 | `run_distribution_resilience_assessment`, `run_distribution_resilience_mip_assessment`, `run_certified_distribution_resilience_mip` | heuristic sequential 或 multi-period hybrid AC/DC MIP；可将拓扑/MESS 转换送入多保真 DAE oracle | 恢复曲线、元件/MESS 状态、故障序列、弹性指标、逐转换动态证书及模型边界 |
 | 短路分析 | `compute_short_circuit`, `run_short_circuit_detailed`, `dc_bus_fault_level` | Z-bus IEC 60909 简化 / 完整 IEC（c 因子、κ/ip/ib/ik/ith、变压器修正、电机与换流器贡献）；DC 为戴维南保守上限估计 | 故障电流、IEC 指标、DC 故障水平与开断 duty |
 | 谐波潮流 | `solve_harmonic_power_flow`（及 `_newton` / `_3ph` / `_3ph_hybrid` / `_hybrid_newton` 变体）, `frequency_scan`, `check_harmonic_limits` | 频域穿透（NIC 双端口桥）、Newton 非线性、三相 abc、AC/DC 耦合 | 谐波电压/电流、频扫/谐振、IEEE 519 / GB/T 14549 合规、K 因子/TDD |
@@ -349,7 +349,8 @@ HybridPowerSystem
 
 ```text
 HybridPowerSystem + reliability data
-  -> validate component failure rates, MTTR, customer/load metadata
+  -> stable-ID catalog + user mode/protection overlay validation
+  -> resolve user override > case data > built-in template > policy fallback
   -> enumerate or sample component outages
   -> stage evaluation using OPF / reconfiguration / restoration model
   -> accumulate frequency-weighted EENS, LOLE, SAIFI, SAIDI
@@ -453,6 +454,10 @@ Python v1 SDK 对上述接口提供 `TopologyChunk`、`SubgraphView`、`ResultFr
 第五阶段补齐工程界面的可访问性：工作流、模块和页签采用 roving-tabindex 键盘导航，支持方向键、Home/End，提供主工作区跳转、清晰焦点环、对话框语义、控制台播报、减少动画和高对比度偏好。`hysim_accessibility_audit_v1` 会检查关键地标、导航和控件名称。
 
 第六阶段增加本地运行时防护：`hysim_runtime_diagnostics_v1` 捕获全局脚本错误、未处理 Promise 拒绝、HTTP/网络失败及在线状态，在依赖栏显示“前端”健康芯片。诊断仅在内存中保留最近 25 条截断记录，不上传、不持久化，并可通过 `App.getRuntimeDiagnostics()` 检查或清空。
+
+第七阶段将 GUI 调整为画布优先的工程工作区：提供标准/紧凑密度，元件库、上下文功能区、右侧检查器和控制台可独立显隐；专注模式保留当前模块、页签和结果，仅隐藏辅助区域。布局写入浏览器本地状态并在刷新后恢复，移动端首次进入默认收起元件库、上下文功能区和控制台，模型参数与可靠性结果仍在右侧检查器中完整呈现。
+
+模型参数页由后端 `model_catalog` 提供 44 类可序列化实体/系统模型，不再由标准规则数量反推元件列表。当前实例字段来自权威系统 JSON 序列化并按工程语义分组；可靠性失效模式归入对应实体的“可靠性”属性，不再作为 `Reliability - ...` 伪元件单列。未登记的典型范围或硬边界明确显示为未发布/未注册，避免前端虚构校核依据。
 
 无 GIS 自动布局采用 `hysim_layout_graph_v1` 语义投影：AC、DC 和耦合域分开，VSC/DC-DC/多端 Energy Router 保持星形超边，域内馈线从 Slack/外部电网开始识别，并保留锁定节点。30 母线或 180 元件以上的系统由本地 ELK.js 0.9.3 Worker 执行 layered 骨架布局，普通支路和设备再按电力语义回挂；失败时自动回退原 BFS 布局。Canvas 提供增量布局、位置锁定、馈线折叠/局部展开，以及 `hysim_layout_metrics_v1` 的交叉、重叠、折点、面积和耗时指标。四个代表算例的 PNG 与指标预算位于 `tests/e2e/baselines/layout/`，验证入口为 `tests/e2e/layout_baseline_e2e.mjs`。
 

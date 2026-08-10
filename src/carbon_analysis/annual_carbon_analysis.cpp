@@ -4,6 +4,7 @@
 #include "hacdcpf/carbon_analysis/annual_carbon_analysis.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <fstream>
 #include <functional>
@@ -2016,12 +2017,67 @@ std::string trim(const std::string& s) {
 
 std::vector<std::string> split_csv_row(const std::string& line) {
   std::vector<std::string> cols;
-  std::istringstream ss(line);
-  std::string col;
-  while (std::getline(ss, col, ',')) {
-    cols.push_back(trim(col));
+  std::string field;
+  bool in_quotes = false;
+  bool quoted_field = false;
+  bool quote_closed = false;
+
+  auto finish_field = [&] {
+    cols.push_back(quoted_field ? field : trim(field));
+    field.clear();
+    quoted_field = false;
+    quote_closed = false;
+  };
+
+  for (std::size_t i = 0; i < line.size(); ++i) {
+    const char c = line[i];
+    if (in_quotes) {
+      if (c != '"') {
+        field.push_back(c);
+      } else if (i + 1 < line.size() && line[i + 1] == '"') {
+        field.push_back('"');
+        ++i;
+      } else {
+        in_quotes = false;
+        quote_closed = true;
+      }
+      continue;
+    }
+
+    if (c == ',') {
+      finish_field();
+    } else if (c == '"') {
+      if (!field.empty() || quoted_field || quote_closed) {
+        throw std::invalid_argument("CSV field contains an unexpected quote");
+      }
+      quoted_field = true;
+      in_quotes = true;
+    } else if (quote_closed) {
+      if (!std::isspace(static_cast<unsigned char>(c))) {
+        throw std::invalid_argument(
+            "CSV field contains characters after a closing quote");
+      }
+    } else {
+      field.push_back(c);
+    }
   }
+  if (in_quotes) {
+    throw std::invalid_argument("CSV row contains an unterminated quoted field");
+  }
+  finish_field();
   return cols;
+}
+
+int parse_int_field(const std::string& s, const std::string& field_name) {
+  int value = 0;
+  const char* begin = s.data();
+  const char* end = begin + s.size();
+  const auto parsed = std::from_chars(begin, end, value);
+  if (s.empty() || parsed.ec != std::errc{} || parsed.ptr != end) {
+    throw std::invalid_argument("Invalid integer for field '" + field_name +
+                                "': " + s);
+  }
+  return value;
 }
 
 bool parse_bool_field(const std::string& s, const std::string& field_name) {
@@ -2086,13 +2142,15 @@ std::vector<AnnualNodeGECInput> parse_annual_node_gec_inputs_csv(
     if (tl.empty()) continue;
     const auto cols = split_csv_row(tl);
     const size_t min_cols = has_intensity_col ? 4u : 3u;
-    if (cols.size() < min_cols) {
-      throw std::invalid_argument("Node GEC CSV: too few columns in row: " + tl);
+    if (cols.size() != min_cols) {
+      throw std::invalid_argument("Node GEC CSV: expected " +
+                                  std::to_string(min_cols) +
+                                  " columns in row: " + tl);
     }
 
     AnnualNodeGECInput item;
     try {
-      item.bus_index = std::stoi(cols[0]);
+      item.bus_index = parse_int_field(cols[0], "bus_index");
     } catch (...) {
       throw std::invalid_argument("Node GEC CSV: invalid bus_index: " + cols[0]);
     }
@@ -2219,16 +2277,18 @@ std::vector<AnnualUserGECInput> parse_annual_user_gec_inputs_csv(
     if (tl.empty()) continue;
     const auto cols = split_csv_row(tl);
     const size_t min_cols = has_intensity_col ? 5u : 4u;
-    if (cols.size() < min_cols) {
-      throw std::invalid_argument("User GEC CSV: too few columns in row: " + tl);
+    if (cols.size() != min_cols) {
+      throw std::invalid_argument("User GEC CSV: expected " +
+                                  std::to_string(min_cols) +
+                                  " columns in row: " + tl);
     }
 
     int user_id = 0;
-    try { user_id = std::stoi(cols[0]); }
+    try { user_id = parse_int_field(cols[0], "user_id"); }
     catch (...) { throw std::invalid_argument("User GEC CSV: invalid user_id: " + cols[0]); }
 
     int load_index = 0;
-    try { load_index = std::stoi(cols[1]); }
+    try { load_index = parse_int_field(cols[1], "load_index"); }
     catch (...) { throw std::invalid_argument("User GEC CSV: invalid load_index: " + cols[1]); }
 
     const bool is_dc = parse_bool_field(cols[2], "is_dc");

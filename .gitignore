@@ -64,6 +64,8 @@ etap-main/
 .github/skills/*
 !.github/skills/manage-codebase-context/
 !.github/skills/manage-codebase-context/**
+!.github/skills/develop-gui-backend-contract/
+!.github/skills/develop-gui-backend-contract/**
 .claude/
 .venv/
 

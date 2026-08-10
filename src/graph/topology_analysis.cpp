@@ -407,9 +407,13 @@ TopologyReport analyze_topology(const PowerSystemGraph& g) {
         std::unique(rep.bridge_edge_ids.begin(), rep.bridge_edge_ids.end()),
         rep.bridge_edge_ids.end());
   }
-  // Convert node indices to bus IDs for cut vertices
-  for (int ni : ap_node_idxs)
+  // Convert graph-node positions to stable, domain-qualified bus references.
+  // The flat integer list remains only as a compatibility view and may contain
+  // the same integer twice when AC and DC IDs overlap.
+  for (int ni : ap_node_idxs) {
+    rep.cut_vertices.push_back({g.nodes[ni].domain, g.nodes[ni].bus_id});
     rep.cut_vertex_bus_ids.push_back(g.nodes[ni].bus_id);
+  }
 
   // ── Fundamental cycles ───────────────────────────────────────────
   if (rep.cycle_count > 0)

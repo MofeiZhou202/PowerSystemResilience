@@ -79,6 +79,11 @@ struct IslandInfo {
   IslandStatus   status{IslandStatus::Valid};
 };
 
+struct TopologyBusRef {
+  NodeDomain domain{NodeDomain::AC};
+  int bus_id{0};
+};
+
 // ═══════════════════════════════════════════════════════════════════════
 // Topology report
 // ═══════════════════════════════════════════════════════════════════════
@@ -96,9 +101,10 @@ struct TopologyReport {
   int   cycle_count{0};         ///< #in-service-edges - #nodes + #components
 
   // Structural analysis
-  std::vector<int> bridge_edge_ids;       ///< Edge IDs that are cut-edges
-  std::vector<int> cut_vertex_bus_ids;    ///< Bus IDs of articulation points
-  std::vector<std::vector<int>> fundamental_cycles; ///< Each cycle is a list of node indices
+  std::vector<int> bridge_edge_ids;       ///< Cut-edge positions in graph.edges[]
+  std::vector<TopologyBusRef> cut_vertices; ///< Domain-qualified articulation points
+  std::vector<int> cut_vertex_bus_ids;      ///< Deprecated flat compatibility view
+  std::vector<std::vector<int>> fundamental_cycles; ///< Each cycle is graph.edges[] indices
 
   // Diagnostics
   std::vector<Diagnostic> diagnostics;

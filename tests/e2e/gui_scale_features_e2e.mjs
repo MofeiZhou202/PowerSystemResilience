@@ -511,7 +511,7 @@ async function main() {
 
     // ---- 4a) A rendered import must retain authored physical names when the
     // canvas rebuilds the system JSON for a backend sync.
-    const cimNames = await page.evaluate(() => {
+    const cimNames = await page.evaluate(async () => {
       const system = {
         name: '物理名称往返', base_mva: 10,
         ac: {
@@ -523,11 +523,17 @@ async function main() {
           branches: [
             { index: 11, name: '人民路一回线', from_bus: 1, to_bus: 2,
               r_pu: 0.01, x_pu: 0.02, b_pu: 0, rate_a_mva: 5, in_service: true },
+            { index: 12, name: '人民路主变支路', from_bus: 1, to_bus: 2,
+              branch_kind: 'transformer', r_pu: 0.01, x_pu: 0.08, b_pu: 0,
+              rate_a_mva: 10, tap: 1.02, in_service: true },
           ],
           transformers_2w: [
             { index: 21, name: '人民路#1配变', hv_bus: 2, lv_bus: 3,
               sn_mva: 0.4, vn_hv_kv: 10, vn_lv_kv: 0.4,
               vk_percent: 4, vkr_percent: 1, in_service: true },
+            { index: 22, name: '人民路主变', hv_bus: 1, lv_bus: 2,
+              source_branch_idx: 12, sn_mva: 10, vn_hv_kv: 110, vn_lv_kv: 10,
+              vk_percent: 8, vkr_percent: 1, in_service: true },
           ],
           switches: [
             { index: 31, name: '人民路01T01刀闸', bus_from: 1, bus_to: 2,
@@ -543,7 +549,16 @@ async function main() {
         dc: { buses: [], branches: [], loads: [] },
       };
       Canvas.loadFromSystemJson(system, { forceRender: true });
+      App.switchTab('topology');
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       const roundTrip = Canvas.buildSystemJson();
+      const transformerTable = document.getElementById('trafoTableInner');
+      const linkedPosition = transformerTable.__vctx.items.findIndex(item => Number(item.index) === 22);
+      const linkedRow = transformerTable.querySelector(`tbody tr[data-row="${linkedPosition}"]`);
+      const linkedGlyph = Canvas.state.components.find(component =>
+        component.type === 'transformer_2w' &&
+        Number(component.params?._transformer_index) === 22);
+      linkedRow?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       return {
         buses: roundTrip.ac.buses.map((item) => item.name),
         branches: roundTrip.ac.branches.map((item) => item.name),
@@ -552,6 +567,13 @@ async function main() {
         breakers: roundTrip.ac.circuit_breakers.map((item) => item.name),
         loads: roundTrip.ac.loads.map((item) => item.name),
         generators: roundTrip.ac.generators.map((item) => item.name),
+        linkedTransformer: {
+          position: linkedPosition,
+          rowCompId: Number(linkedRow?.dataset.compId),
+          mapCompId: Number(Canvas.getCompBusMap().trafo[22]),
+          glyphCompId: Number(linkedGlyph?.id),
+          selectedId: Number(Canvas.state.selectedId),
+        },
       };
     });
     check(cimNames.buses.join('|') === '站内一段母线|人民路环网节点|台区低压母线',
@@ -560,6 +582,13 @@ async function main() {
       'CIM line physical name survives canvas round-trip');
     check(cimNames.transformers.includes('人民路#1配变'),
       'CIM transformer physical name survives canvas round-trip');
+    check(cimNames.transformers.includes('人民路主变') &&
+          cimNames.linkedTransformer.position >= 0 &&
+          Number.isInteger(cimNames.linkedTransformer.glyphCompId) &&
+          cimNames.linkedTransformer.rowCompId === cimNames.linkedTransformer.glyphCompId &&
+          cimNames.linkedTransformer.mapCompId === cimNames.linkedTransformer.glyphCompId &&
+          cimNames.linkedTransformer.selectedId === cimNames.linkedTransformer.glyphCompId,
+      `branch-backed transformer topology row links to Canvas ${JSON.stringify(cimNames.linkedTransformer)}`);
     check(cimNames.switches.includes('人民路01T01刀闸'),
       'CIM switch physical name survives canvas round-trip');
     check(cimNames.breakers.includes('人民路进线断路器'),

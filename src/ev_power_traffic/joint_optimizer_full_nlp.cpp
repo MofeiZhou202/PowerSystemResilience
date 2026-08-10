@@ -1676,7 +1676,10 @@ static void decode_solution(const FJModel& m,
   if (m.opts.include_dcopf) {
     const auto& sys = m.problem->system;
     result.gen_dispatch_mw.assign(static_cast<std::size_t>(T), {});
-    result.lmp_by_step.assign(static_cast<std::size_t>(T), {});
+    result.lmp_available = false;
+    result.lmp_unavailability_reason =
+        "The full-joint NLP path does not expose power-balance equality multipliers as LMPs.";
+    result.warnings.push_back(result.lmp_unavailability_reason);
     for (int gi = 0; gi < static_cast<int>(sys.ac.generators.size()); ++gi) {
       const int base = m.gen_base[static_cast<std::size_t>(gi)];
       if (base < 0) continue;

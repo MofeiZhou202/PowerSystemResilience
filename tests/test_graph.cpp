@@ -188,6 +188,56 @@ TEST_CASE("Graph topology: bridge and cut-vertex detection", "[graph][topology]"
   REQUIRE(has_cutv_2);
 }
 
+TEST_CASE("Graph topology: cut vertices retain AC/DC domains for colliding bus IDs",
+          "[graph][topology][collision]") {
+  // AC1 -- AC2 -- VSC -- DC2 -- DC3.  Both inner buses are articulation
+  // points, but their stable integer IDs intentionally collide.
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.buses = {make_ac_bus(1, BusType::SLACK),
+                  make_ac_bus(2, BusType::PQ)};
+  sys.ac.branches = {make_ac_branch(10, 1, 2)};
+
+  DCBus dc2;
+  dc2.index = 2;
+  dc2.bus_type = DCBusType::DC_V;
+  dc2.in_service = true;
+  DCBus dc3;
+  dc3.index = 3;
+  dc3.bus_type = DCBusType::DC_P;
+  dc3.in_service = true;
+  sys.dc.buses = {dc2, dc3};
+
+  DCBranch dc_branch;
+  dc_branch.index = 20;
+  dc_branch.from_bus = 2;
+  dc_branch.to_bus = 3;
+  dc_branch.r_pu = 0.02;
+  dc_branch.in_service = true;
+  sys.dc.branches = {dc_branch};
+
+  VSCConverter vsc;
+  vsc.index = 30;
+  vsc.bus_ac = 2;
+  vsc.bus_dc = 2;
+  vsc.in_service = true;
+  sys.vsc_converters = {vsc};
+
+  const auto graph = build_power_system_graph(sys);
+  const auto report = analyze_topology(graph);
+
+  const auto has_ref = [&](NodeDomain domain, int bus_id) {
+    return std::any_of(report.cut_vertices.begin(), report.cut_vertices.end(),
+                       [&](const TopologyBusRef& ref) {
+                         return ref.domain == domain && ref.bus_id == bus_id;
+                       });
+  };
+  REQUIRE(has_ref(NodeDomain::AC, 2));
+  REQUIRE(has_ref(NodeDomain::DC, 2));
+  REQUIRE(std::count(report.cut_vertex_bus_ids.begin(),
+                     report.cut_vertex_bus_ids.end(), 2) == 2);
+}
+
 TEST_CASE("Graph topology: iterative Tarjan survives stack growth",
           "[graph][topology][tarjan]") {
   constexpr int node_count = 64;
@@ -257,6 +307,13 @@ TEST_CASE("Graph topology: cycle detection in mesh network", "[graph][topology]"
   REQUIRE(rep.is_radial == false);
   REQUIRE(rep.cycle_count == 1);
   REQUIRE(!rep.fundamental_cycles.empty());
+  for (const auto& cycle : rep.fundamental_cycles) {
+    REQUIRE(cycle.size() >= 3);
+    for (const int edge_position : cycle) {
+      REQUIRE(edge_position >= 0);
+      REQUIRE(edge_position < static_cast<int>(g.edges.size()));
+    }
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════

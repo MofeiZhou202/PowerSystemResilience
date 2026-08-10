@@ -1623,7 +1623,10 @@ static JointOptimizerResult solve_certified_dynamic_mpec_milp(
 
   if (opts.include_dcopf) {
     result.gen_dispatch_mw.resize(static_cast<std::size_t>(T));
-    result.lmp_by_step.resize(static_cast<std::size_t>(T));
+    result.lmp_available = false;
+    result.lmp_unavailability_reason =
+        "The certified dynamic MILP path does not expose power-balance duals.";
+    result.warnings.push_back(result.lmp_unavailability_reason);
     for (int j = 0; j < n_vars; ++j) {
       const auto& col = cols[static_cast<std::size_t>(j)];
       if (col.kind != CDCol::Kind::GeneratorPower || col.step < 0 ||
@@ -2612,7 +2615,10 @@ JointOptimizerResult solve_joint_optimizer(
   // DC-OPF variable decoding
   if (opts.include_dcopf) {
     result.gen_dispatch_mw.resize(static_cast<std::size_t>(T));
-    result.lmp_by_step.resize(static_cast<std::size_t>(T));
+    result.lmp_available = false;
+    result.lmp_unavailability_reason =
+        "Formulation D decoded generator dispatch but its solver path did not expose power-balance duals.";
+    result.warnings.push_back(result.lmp_unavailability_reason);
 
     for (int j = 0; j < n_vars; ++j) {
       const auto& col = cols[static_cast<std::size_t>(j)];
@@ -2625,9 +2631,9 @@ JointOptimizerResult solve_joint_optimizer(
       }
     }
 
-    // Compute LMPs from dual variables (not extracted from LP duals here;
-    // report placeholder — dual extraction is implementation-specific).
-    // For the social welfare accounting use the primal cost instead.
+    // Nodal prices require duals of the DC power-balance equalities. The
+    // current Formulation D solver interface exposes only the primal vector,
+    // so price availability remains false and no empty per-step maps are made.
   }
 
   // Social welfare

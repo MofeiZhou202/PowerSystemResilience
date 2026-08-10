@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <future>
 #include <limits>
 #include <numeric>
 #include <queue>
@@ -1584,6 +1585,21 @@ DistributionResilienceResult run_distribution_resilience_mip_assessment(
   bc_opts.enable_cglp_cuts = opts.mip.enable_cglp_cuts;
 
   engine::SolveResult solve_result;
+  // MIPSolvers' native branch-and-cut stack owns thread-local profiling and
+  // scratch state shared by the Native and StrictHiGHS adapters.  Keep Native
+  // on the caller thread because its recursive sub-MIP path requires the main
+  // thread's larger stack, and isolate StrictHiGHS on a fresh joined thread so
+  // it cannot inherit or publish Native TLS in a long-lived process.
+  const auto solve_branch_and_cut_isolated = [&built](auto make_adapter) {
+    std::packaged_task<engine::SolveResult()> task(
+        [&built, make_adapter = std::move(make_adapter)]() mutable {
+          auto adapter = make_adapter();
+          return adapter.solve_milp(built.model);
+        });
+    auto future = task.get_future();
+    std::jthread worker(std::move(task));
+    return future.get();
+  };
   switch (opts.mip.solver) {
     case DistributionResilienceMIPSolver::Native: {
       engine::NativeBranchAndCutAdapter adapter(bc_opts);
@@ -1591,8 +1607,9 @@ DistributionResilienceResult run_distribution_resilience_mip_assessment(
       break;
     }
     case DistributionResilienceMIPSolver::HiGHS: {
-      engine::StrictHighsBranchAndCutAdapter adapter(bc_opts);
-      solve_result = adapter.solve_milp(built.model);
+      solve_result = solve_branch_and_cut_isolated([bc_opts] {
+        return engine::StrictHighsBranchAndCutAdapter(bc_opts);
+      });
       break;
     }
     case DistributionResilienceMIPSolver::Gurobi: {

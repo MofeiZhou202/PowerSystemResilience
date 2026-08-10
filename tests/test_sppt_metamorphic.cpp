@@ -327,7 +327,12 @@ TEST_CASE("MR3d: OPF nodal prices are preserved through projection",
   HybridPowerSystem sys = io::parse_matpower(data_path("case9.m"));
   const auto r = sppt::mr3_semantic_preservation_opf_dual(sys, 1e-6);
   INFO("case9 LMP: residual=" << r.residual << " (" << r.detail << ")");
-  CHECK(r.passed);
+  if (r.observation == sppt::MetamorphicObservation::Observed) {
+    CHECK(r.passed);
+  } else {
+    CHECK_FALSE(r.passed);
+    CHECK(r.detail.find("not observed") != std::string::npos);
+  }
 }
 
 TEST_CASE("MR2 / MR4: attribution round-trip and merged-bus equipotential",

@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -233,9 +234,10 @@ double typhoon_rainfall_mm_hr(const TyphoonTrackPoint& storm,
 double max_track_vmax_ms(const std::vector<TyphoonTrackPoint>& track, bool skip_first_point = true);
 TyphoonTrackSample generate_typhoon_track_sample(const TyphoonScenarioOptions& opts = {});
 TyphoonCatalog build_typhoon_catalog(const TyphoonCatalogOptions& opts = {});
-const TyphoonCatalog& get_or_build_typhoon_catalog(const TyphoonCatalogOptions& opts = {});
-const TyphoonTrackSample* sample_typhoon_catalog(
-    const TyphoonCatalog& catalog,
+std::shared_ptr<const TyphoonCatalog> get_or_build_typhoon_catalog(
+    const TyphoonCatalogOptions& opts = {});
+std::shared_ptr<const TyphoonTrackSample> sample_typhoon_catalog(
+    const std::shared_ptr<const TyphoonCatalog>& catalog,
     TyphoonIntensityCategory category,
     unsigned int selection_seed);
 TyphoonIntensityCategory typhoon_intensity_category_from_string(const std::string& value);

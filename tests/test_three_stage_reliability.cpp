@@ -34,10 +34,15 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 
+#include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "hacdcpf/analysis/three_stage_reliability.hpp"
 #include "hacdcpf/io/json_io.hpp"
@@ -1144,4 +1149,196 @@ TEST_CASE("Three-stage reliability — VSC transfer limits AC source support for
   CHECK(r.faults.front().raw_pls_stage3 == Catch::Approx(400.0).margin(1e-3));
   CHECK(r.faults.front().n0_pls_stage3 == Catch::Approx(400.0).margin(1e-3));
   CHECK(r.faults.front().pls_stage3 == Catch::Approx(0.0).margin(1e-3));
+}
+
+TEST_CASE("Three-stage reliability — custom protection conditions sustained scenarios",
+          "[reliability][three_stage][protection_configuration]") {
+  const char* json = R"json({
+    "name":"protection_conditioning", "base_mva":10.0,
+    "ac":{"base_mva":10.0,
+      "buses":[
+        {"index":1,"bus_type":1,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":0.0,"qd_mvar":0.0,"n_customers":1},
+        {"index":2,"bus_type":3,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":1.0,"qd_mvar":0.0,"n_customers":10}
+      ],
+      "branches":[
+        {"index":1,"name":"ProtectedLine","from_bus":1,"to_bus":2,"r_pu":0.001,"x_pu":0.001,"rate_a_mva":10.0,"in_service":true,"failure_rate":1.0,"mttr_hr":1.0}
+      ],
+      "loads":[],"external_grids":[],
+      "generators":[{"index":1,"bus":1,"in_service":true,"pg_mw":2.0,"pmax_mw":2.0,"pmin_mw":0.0,"qmax_mvar":2.0,"qmin_mvar":0.0}],
+      "static_generators":[],"renewable_gens":[],"pv_systems":[],"storage":[],"switches":[],
+      "circuit_breakers":[{"index":10,"name":"PrimaryCB","bus_from":1,"bus_to":2,"closed":true,"in_service":true}]
+    },
+    "dc":{"buses":[],"branches":[],"loads":[],"storage":[],"static_generators":[],"dc_static_generators":[],"pv_arrays":[],"dc_circuit_breakers":[]},
+    "vsc_converters":[],"dcdc_converters":[]
+  })json";
+
+  hacdcpf::analysis::ThreeStageReliabilityOptions baseline_options;
+  baseline_options.enable_parallel = false;
+  const auto baseline =
+      hacdcpf::analysis::run_three_stage_reliability_from_string(
+          json, baseline_options);
+  REQUIRE(baseline.ok);
+  REQUIRE(baseline.faults.size() == 1);
+
+  hacdcpf::analysis::ProtectionConfiguration protection;
+  protection.protection_id = "P-main";
+  protection.protective_device_id = "ac_circuit_breaker:10";
+  protection.protected_component_id = "ac_branch:1";
+  protection.zone_component_ids = {"ac_branch:1"};
+  protection.automatic_reclose = true;
+  protection.successful_reclose_probability = 0.8;
+  protection.primary_clearing_time_s = 0.12;
+
+  auto configured_options = baseline_options;
+  configured_options.reliability_configuration.protection = {protection};
+  const auto configured =
+      hacdcpf::analysis::run_three_stage_reliability_from_string(
+          json, configured_options);
+  REQUIRE(configured.ok);
+  REQUIRE(configured.protection_configuration_applied);
+  REQUIRE(configured.protection_rows_applied == 1);
+  REQUIRE(configured.faults.size() == 1);
+  const auto& scenario = configured.faults.front();
+  CHECK(scenario.protection_scenario == "primary_cleared");
+  CHECK(scenario.scenario_probability == Catch::Approx(0.2).margin(1e-12));
+  CHECK(scenario.failure_rate == Catch::Approx(0.2).margin(1e-12));
+  CHECK(scenario.initiating_failure_rate == Catch::Approx(1.0));
+  CHECK(scenario.clearing_time_s == Catch::Approx(0.12));
+  CHECK(scenario.tau_iso_hr == Catch::Approx(0.12 / 3600.0).margin(1e-12));
+  CHECK(configured.transient_reclose_frequency_per_year ==
+        Catch::Approx(0.8).margin(1e-12));
+  CHECK(configured.sustained_fault_frequency_per_year ==
+        Catch::Approx(0.2).margin(1e-12));
+  CHECK(configured.eens_kwh_yr ==
+        Catch::Approx(0.2 * baseline.eens_kwh_yr).margin(1e-6));
+}
+
+TEST_CASE("Three-stage reliability — backup protection expands the outage zone",
+          "[reliability][three_stage][protection_configuration]") {
+  const char* json = R"json({
+    "name":"backup_zone", "base_mva":10.0,
+    "ac":{"base_mva":10.0,
+      "buses":[
+        {"index":1,"bus_type":1,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":0.0,"qd_mvar":0.0,"n_customers":1},
+        {"index":2,"bus_type":3,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":1.0,"qd_mvar":0.0,"n_customers":10},
+        {"index":3,"bus_type":3,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":1.0,"qd_mvar":0.0,"n_customers":10}
+      ],
+      "branches":[
+        {"index":1,"name":"ProtectedLine","from_bus":1,"to_bus":2,"r_pu":0.001,"x_pu":0.001,"rate_a_mva":10.0,"in_service":true,"failure_rate":1.0,"mttr_hr":1.0},
+        {"index":2,"name":"BackupZoneLine","from_bus":1,"to_bus":3,"r_pu":0.001,"x_pu":0.001,"rate_a_mva":10.0,"in_service":true,"failure_rate":0.0,"mttr_hr":1.0}
+      ],
+      "loads":[],"external_grids":[],
+      "generators":[{"index":1,"bus":1,"in_service":true,"pg_mw":3.0,"pmax_mw":3.0,"pmin_mw":0.0,"qmax_mvar":3.0,"qmin_mvar":0.0}],
+      "static_generators":[],"renewable_gens":[],"pv_systems":[],"storage":[],"switches":[],
+      "circuit_breakers":[
+        {"index":10,"name":"PrimaryCB","bus_from":1,"bus_to":2,"closed":true,"in_service":true},
+        {"index":11,"name":"BackupCB","bus_from":1,"bus_to":3,"closed":true,"in_service":true}
+      ]
+    },
+    "dc":{"buses":[],"branches":[],"loads":[],"storage":[],"static_generators":[],"dc_static_generators":[],"pv_arrays":[],"dc_circuit_breakers":[]},
+    "vsc_converters":[],"dcdc_converters":[]
+  })json";
+
+  hacdcpf::analysis::ProtectionConfiguration protection;
+  protection.protection_id = "P-zone";
+  protection.protective_device_id = "ac_circuit_breaker:10";
+  protection.protected_component_id = "ac_branch:1";
+  protection.backup_device_id = "ac_circuit_breaker:11";
+  protection.zone_component_ids = {"ac_branch:1", "ac_branch:2"};
+  protection.fail_to_trip_probability = 0.5;
+  protection.primary_clearing_time_s = 0.1;
+  protection.backup_clearing_time_s = 0.5;
+
+  hacdcpf::analysis::ThreeStageReliabilityOptions options;
+  options.enable_parallel = false;
+  options.reliability_configuration.protection = {protection};
+  const auto result =
+      hacdcpf::analysis::run_three_stage_reliability_from_string(json, options);
+  REQUIRE(result.ok);
+  REQUIRE(result.faults.size() == 3); // two scenarios for line 1, line 2 unchanged
+  const hacdcpf::analysis::ThreeStageFaultDetail* primary = nullptr;
+  const hacdcpf::analysis::ThreeStageFaultDetail* backup = nullptr;
+  for (const auto& fault : result.faults) {
+    if (fault.protection_scenario == "primary_cleared") primary = &fault;
+    if (fault.protection_scenario == "backup_cleared") backup = &fault;
+  }
+  REQUIRE(primary != nullptr);
+  REQUIRE(backup != nullptr);
+  CHECK(primary->failure_rate == Catch::Approx(0.5).margin(1e-12));
+  CHECK(backup->failure_rate == Catch::Approx(0.5).margin(1e-12));
+  CHECK(primary->clearing_time_s == Catch::Approx(0.1));
+  CHECK(backup->clearing_time_s == Catch::Approx(0.5));
+  CHECK(backup->backup_device_id == "ac_circuit_breaker:11");
+  CHECK(backup->pls_stage3 > primary->pls_stage3 + 900.0);
+  CHECK(result.initiating_fault_frequency_per_year ==
+        Catch::Approx(result.sustained_fault_frequency_per_year).margin(1e-12));
+}
+
+// Hidden diagnostic for the theory-guided cost prediction: two sustained
+// protection scenarios should remain within the same order as one scenario.
+TEST_CASE("Protection scenario runtime probe", "[.protection_runtime_probe]") {
+  const char* json = R"json({
+    "name":"protection_runtime_probe", "base_mva":10.0,
+    "ac":{"base_mva":10.0,
+      "buses":[
+        {"index":1,"bus_type":1,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":0.0,"qd_mvar":0.0,"n_customers":1},
+        {"index":2,"bus_type":3,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":1.0,"qd_mvar":0.0,"n_customers":10}
+      ],
+      "branches":[
+        {"index":1,"name":"ProtectedLine","from_bus":1,"to_bus":2,"r_pu":0.001,"x_pu":0.001,"rate_a_mva":10.0,"in_service":true,"failure_rate":1.0,"mttr_hr":1.0}
+      ],
+      "loads":[],"external_grids":[],
+      "generators":[{"index":1,"bus":1,"in_service":true,"pg_mw":2.0,"pmax_mw":2.0,"pmin_mw":0.0,"qmax_mvar":2.0,"qmin_mvar":0.0}],
+      "static_generators":[],"renewable_gens":[],"pv_systems":[],"storage":[],"switches":[],
+      "circuit_breakers":[{"index":10,"name":"PrimaryCB","bus_from":1,"bus_to":2,"closed":true,"in_service":true}]
+    },
+    "dc":{"buses":[],"branches":[],"loads":[],"storage":[],"static_generators":[],"dc_static_generators":[],"pv_arrays":[],"dc_circuit_breakers":[]},
+    "vsc_converters":[],"dcdc_converters":[]
+  })json";
+
+  hacdcpf::analysis::ThreeStageReliabilityOptions baseline;
+  baseline.enable_parallel = false;
+  auto primary = baseline;
+  hacdcpf::analysis::ProtectionConfiguration row;
+  row.protection_id = "P-main";
+  row.protective_device_id = "ac_circuit_breaker:10";
+  row.protected_component_id = "ac_branch:1";
+  row.zone_component_ids = {"ac_branch:1"};
+  row.primary_clearing_time_s = 0.1;
+  row.backup_clearing_time_s = 0.5;
+  primary.reliability_configuration.protection = {row};
+  auto primary_backup = primary;
+  primary_backup.reliability_configuration.protection[0]
+      .fail_to_trip_probability = 0.5;
+
+  const auto measure = [&](const auto& options) {
+    std::vector<double> seconds;
+    std::size_t scenarios = 0;
+    for (int repeat = 0; repeat < 7; ++repeat) {
+      const auto started = std::chrono::steady_clock::now();
+      const auto result =
+          hacdcpf::analysis::run_three_stage_reliability_from_string(
+              json, options);
+      const auto elapsed = std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - started).count();
+      REQUIRE(result.ok);
+      scenarios = result.faults.size();
+      if (repeat >= 2) seconds.push_back(elapsed);
+    }
+    std::sort(seconds.begin(), seconds.end());
+    return std::pair{seconds[seconds.size() / 2], scenarios};
+  };
+
+  const auto baseline_result = measure(baseline);
+  const auto primary_result = measure(primary);
+  const auto backup_result = measure(primary_backup);
+  std::cout << "PROTECTION_RUNTIME baseline=" << baseline_result.first
+            << " primary=" << primary_result.first
+            << " primary_backup=" << backup_result.first
+            << " primary_to_baseline="
+            << primary_result.first / baseline_result.first
+            << " backup_to_primary="
+            << backup_result.first / primary_result.first
+            << " scenarios=" << baseline_result.second << ','
+            << primary_result.second << ',' << backup_result.second << '\n';
 }

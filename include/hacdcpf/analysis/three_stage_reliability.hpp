@@ -29,6 +29,7 @@
 #include <string>
 #include <vector>
 
+#include "hacdcpf/reliability/failure_mode.hpp"
 #include "hacdcpf/util/parallel_execution.hpp"
 
 namespace hacdcpf::analysis {
@@ -58,6 +59,17 @@ struct ThreeStageFaultDetail {
   int from_bus{0};
   int to_bus{0};
   double failure_rate{0.0};    ///< occ / yr
+  double initiating_failure_rate{0.0}; ///< physical initiating events / yr
+  double scenario_probability{1.0};    ///< conditional probability after initiation
+  std::string protection_scenario{"unconfigured"};
+  std::string protection_id;
+  std::string primary_device_id;
+  std::string backup_device_id;
+  double reclose_success_probability{0.0};
+  double primary_failure_probability{0.0};
+  double backup_failure_probability{0.0};
+  double clearing_time_s{0.0};
+  std::vector<std::string> protection_zone_component_ids;
   std::string status;         ///< "success" | "success (approximate)" | "failed"
   std::string stage1_status;
   std::string stage2_status;
@@ -164,9 +176,11 @@ struct ThreeStageReliabilityResult {
   ///    optimised.  psop vectors in FaultDetail are filled with zeros.
   ///  - DC loads and DC generation are handled by a connectivity/capacity
   ///    fallback, but no DC power-flow constraints are enforced.
-  ///  - The N-1 contingency set enumerates in-service ACBranch and DCBranch
-  ///    outages only.  VSC, DC/DC, switch, breaker, transformer, generator,
-  ///    load, and storage outages are outside this evaluator's fault set.
+  ///  - The default N-1 contingency set enumerates in-service ACBranch and
+  ///    DCBranch outages. Generator, two-winding transformer, VSC/DC-DC, and
+  ///    switch/breaker faults are opt-in; DER, storage, and microgrid source
+  ///    faults are included with the generator fault family. Load faults are
+  ///    represented when an applied protection zone removes a load component.
   std::string model_limitations;
 
   /// Structured model-capability declaration.  Pure AC systems report
@@ -193,6 +207,15 @@ struct ThreeStageReliabilityResult {
   /// remains sequential inside each fault because Stage 3 holds the accepted
   /// Stage-2 switching plan.
   hacdcpf::util::ParallelExecutionInfo parallel_execution;
+
+  /// Audit of session protection configuration consumed by the staged model.
+  bool protection_configuration_applied{false};
+  int protection_rows_applied{0};
+  int protection_scenarios_generated{0};
+  double initiating_fault_frequency_per_year{0.0};
+  double sustained_fault_frequency_per_year{0.0};
+  double transient_reclose_frequency_per_year{0.0};
+  std::vector<std::string> protection_configuration_limitations;
 };
 
 // ─── Options ─────────────────────────────────────────────────────────────────
@@ -257,6 +280,11 @@ struct ThreeStageReliabilityOptions {
   /// and all physical constraints/demand are identical, so the accepted
   /// Stage-2 solution is already an exact feasible optimum for Stage 3.
   bool revalidate_stage3_plan{false};
+
+  /// Session-level protection definitions. The staged evaluator validates and
+  /// resolves stable component references against the submitted system before
+  /// generating mutually exclusive protection-conditioned contingencies.
+  ReliabilityConfiguration reliability_configuration{};
 };
 
 // ─── Entry points ────────────────────────────────────────────────────────────

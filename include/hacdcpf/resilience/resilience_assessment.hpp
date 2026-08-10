@@ -391,6 +391,8 @@ struct DistributionResilienceStepResult {
   /// Removing any of these buses would split the connected network further.
   /// Useful for prioritizing repair crew dispatch.
   std::vector<int> cut_vertex_bus_ids;
+  std::vector<int> cut_vertex_ac_bus_ids;
+  std::vector<int> cut_vertex_dc_bus_ids;
 
   /// Branch IDs of bridges (cut-edges) in the current topology.
   /// Restoring a failed bridge reconnects the largest sub-tree downstream.

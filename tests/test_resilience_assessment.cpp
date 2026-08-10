@@ -242,6 +242,64 @@ static HybridPowerSystem make_hybrid_no_switch_bus_load_case() {
   return sys;
 }
 
+static HybridPowerSystem make_hybrid_transfer_component_case() {
+  auto sys = make_hybrid_no_switch_bus_load_case();
+
+  DCBus dc3;
+  dc3.index = 3;
+  dc3.bus_type = DCBusType::DC_P;
+  dc3.in_service = true;
+  sys.dc.buses.push_back(dc3);
+
+  DCLoad dc_load;
+  dc_load.index = 10;
+  dc_load.bus = 3;
+  dc_load.p_mw = 0.3;
+  dc_load.priority = LoadPriority::Critical;
+  sys.dc.loads.push_back(dc_load);
+
+  DCDCConverter dcdc;
+  dcdc.index = 20;
+  dcdc.bus_in = 2;
+  dcdc.bus_out = 3;
+  dcdc.pmax_mw = 2.0;
+  dcdc.pmin_mw = -2.0;
+  dcdc.sn_mva = 2.0;
+  sys.dc.dcdc_converters.push_back(dcdc);
+
+  DCStorage storage;
+  storage.index = 30;
+  storage.bus = 3;
+  storage.pmax_mw = 0.2;
+  storage.p_rated_mw = 0.2;
+  storage.e_rated_mwh = 0.5;
+  storage.e_mwh = 0.4;
+  storage.soc_min = 0.1;
+  storage.eta_discharge = 0.95;
+  sys.dc.dc_storage.push_back(storage);
+
+  return sys;
+}
+
+static DistributionResilienceOptions make_hybrid_dc_fault_options(
+    DistributionResilienceMIPSolver solver) {
+  DistributionResilienceFault fault;
+  fault.branch_kind = ResilienceBranchKind::DC;
+  fault.branch_index = 1;
+  fault.outage_start_hr = 0.0;
+  fault.repair_duration_hr = 1.0;
+  fault.name = "dc_feeder_fault";
+
+  DistributionResilienceOptions opts;
+  opts.horizon_hours = 2;
+  opts.time_step_hr = 1.0;
+  opts.default_fault_count = 0;
+  opts.faults = {fault};
+  opts.mip.solver = solver;
+  opts.mip.max_time_s = 20;
+  return opts;
+}
+
 // ── Test cases ────────────────────────────────────────────────────────────────
 
 TEST_CASE("Resilience: empty system returns error", "[resilience]") {
@@ -1032,54 +1090,9 @@ TEST_CASE("Resilience: MIP solver returns feasible on zero-fault system", "[resi
 
 TEST_CASE("Resilience: strict MIP models hybrid transfer components and DC faults",
           "[resilience][mip][hybrid]") {
-  auto sys = make_hybrid_no_switch_bus_load_case();
-
-  DCBus dc3;
-  dc3.index = 3;
-  dc3.bus_type = DCBusType::DC_P;
-  dc3.in_service = true;
-  sys.dc.buses.push_back(dc3);
-
-  DCLoad dc_load;
-  dc_load.index = 10;
-  dc_load.bus = 3;
-  dc_load.p_mw = 0.3;
-  dc_load.priority = LoadPriority::Critical;
-  sys.dc.loads.push_back(dc_load);
-
-  DCDCConverter dcdc;
-  dcdc.index = 20;
-  dcdc.bus_in = 2;
-  dcdc.bus_out = 3;
-  dcdc.pmax_mw = 2.0;
-  dcdc.pmin_mw = -2.0;
-  dcdc.sn_mva = 2.0;
-  sys.dc.dcdc_converters.push_back(dcdc);
-
-  DCStorage storage;
-  storage.index = 30;
-  storage.bus = 3;
-  storage.pmax_mw = 0.2;
-  storage.p_rated_mw = 0.2;
-  storage.e_rated_mwh = 0.5;
-  storage.e_mwh = 0.4;
-  storage.soc_min = 0.1;
-  storage.eta_discharge = 0.95;
-  sys.dc.dc_storage.push_back(storage);
-
-  DistributionResilienceFault fault;
-  fault.branch_kind = ResilienceBranchKind::DC;
-  fault.branch_index = 1;
-  fault.outage_start_hr = 0.0;
-  fault.repair_duration_hr = 1.0;
-  fault.name = "dc_feeder_fault";
-
-  DistributionResilienceOptions opts;
-  opts.horizon_hours = 2;
-  opts.time_step_hr = 1.0;
-  opts.default_fault_count = 0;
-  opts.faults = {fault};
-  opts.mip.solver = DistributionResilienceMIPSolver::HiGHS;
+  const auto sys = make_hybrid_transfer_component_case();
+  const auto opts =
+      make_hybrid_dc_fault_options(DistributionResilienceMIPSolver::HiGHS);
 
   const auto r = run_distribution_resilience_mip_assessment(sys, opts);
   INFO(r.status);
@@ -1136,6 +1149,38 @@ TEST_CASE("Resilience: strict MIP models hybrid transfer components and DC fault
                     [](const BusVoltageStep& voltage) {
                       return voltage.domain == "DC" && voltage.bus_index == 1;
                     }));
+}
+
+TEST_CASE("Resilience B&C backends are independent across ordered calls",
+          "[resilience][mip][backend-state]") {
+  const auto native_sys = make_radial_3bus();
+  DistributionResilienceOptions native_opts;
+  native_opts.horizon_hours = 2;
+  native_opts.time_step_hr = 1.0;
+  native_opts.default_fault_count = 0;
+  native_opts.mip.solver = DistributionResilienceMIPSolver::Native;
+  native_opts.mip.max_time_s = 20;
+
+  const auto highs_sys = make_hybrid_transfer_component_case();
+  const auto highs_opts =
+      make_hybrid_dc_fault_options(DistributionResilienceMIPSolver::HiGHS);
+
+  for (int iteration = 0; iteration < 5; ++iteration) {
+    CAPTURE(iteration);
+    const auto native_result =
+        run_distribution_resilience_mip_assessment(native_sys, native_opts);
+    INFO(native_result.status);
+    INFO(native_result.model_stats.solver_status);
+    REQUIRE(native_result.feasible);
+
+    const auto highs_result =
+        run_distribution_resilience_mip_assessment(highs_sys, highs_opts);
+    INFO(highs_result.status);
+    INFO(highs_result.model_stats.solver_status);
+    REQUIRE(highs_result.feasible);
+    CHECK(highs_result.model_stats.validity.dc_network_modelled);
+    CHECK(highs_result.model_stats.validity.vsc_dispatch_modelled);
+  }
 }
 
 TEST_CASE("Resilience: strict MIP rejects unmatched domain-qualified faults",

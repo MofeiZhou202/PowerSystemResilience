@@ -247,8 +247,14 @@ struct HPFResult {
   std::vector<HarmonicBranchFlow> ac_branch_flows;
   std::vector<HarmonicBranchFlow> dc_branch_flows;
 
-  /// Whether the per-order linear systems factorised successfully.
+  /// Fundamental operating-point audit. A requested but non-converged base PF
+  /// means stored/nominal voltages were used and is listed in model_limitations.
+  bool base_pf_requested{false};
   bool base_pf_converged{false};
+  bool used_stored_operating_point{false};
+  std::vector<std::string> model_limitations;
+
+  /// Whether the per-order linear systems factorised successfully.
   std::map<int, bool> ac_order_solved;
   std::map<int, bool> dc_order_solved;
 
@@ -381,7 +387,10 @@ struct HPF3phResult {
   std::vector<int> ac_orders;  ///< orders actually solved (excludes fundamental)
   std::vector<ThreePhaseHarmonicBusResult> bus_results;
 
+  bool base_pf_requested{false};
   bool base_pf_converged{false};
+  bool used_stored_operating_point{false};
+  std::vector<std::string> model_limitations;
   std::map<int, bool> ac_order_solved;
 
   double max_thd_pct{0.0};
@@ -528,6 +537,10 @@ struct HPFHybrid3phResult {
   std::vector<HarmonicBusResult>           dc_bus_results;
 
   bool combined_solved{false};
+  bool base_pf_requested{false};
+  bool base_pf_converged{false};
+  bool used_stored_operating_point{false};
+  std::vector<std::string> model_limitations;
 
   double max_ac_thd_pct{0.0};
   int    max_ac_thd_bus{-1};
@@ -578,6 +591,10 @@ struct HPFNewtonResult {
   std::vector<HarmonicBusResult> ac_bus_results;
 
   bool converged{true};
+  bool base_pf_requested{false};
+  bool base_pf_converged{false};
+  bool used_stored_operating_point{false};
+  std::vector<std::string> model_limitations;
   std::map<int, int>    iterations;      ///< Newton iterations per order
   std::map<int, double> final_residual;  ///< ‖r‖∞ per order
   int max_iterations_used{0};
@@ -846,6 +863,10 @@ struct HPFHybridNewtonResult {
   std::vector<HarmonicBusResult> ac_bus_results;
   std::vector<HarmonicBusResult> dc_bus_results;
   bool   converged{false};
+  bool base_pf_requested{false};
+  bool base_pf_converged{false};
+  bool used_stored_operating_point{false};
+  std::vector<std::string> model_limitations;
   int    iterations{0};
   double final_residual{0.0};
   double max_ac_thd_pct{0.0};

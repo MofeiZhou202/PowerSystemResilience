@@ -12,6 +12,14 @@ struct CampusIESSankeyFlow {
   std::string carrier;
 };
 
+struct CampusIESValidity {
+  bool multi_carrier_balances_modelled{true};
+  bool aggregate_pcc_active_power_modelled{true};
+  bool electrical_network_coupled{false};
+  bool reactive_power_modelled{false};
+  bool voltage_and_branch_limits_enforced{false};
+};
+
 struct CampusIESResult {
   bool feasible{false};
   bool optimal{false};
@@ -19,6 +27,10 @@ struct CampusIESResult {
   std::string status;
   double objective{0.0};
   double solve_time_sec{0.0};
+  std::string model_scope{"isolated-campus-multi-carrier-milp"};
+  CampusIESValidity validity;
+  std::vector<std::string> model_limitations;
+  int pcc_ac_bus{0};
 
   std::vector<double> p_grid_import_mw;
   std::vector<double> p_grid_export_mw;

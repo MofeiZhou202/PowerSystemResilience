@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <future>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -27,6 +28,20 @@ namespace {
 
 constexpr double kInf = std::numeric_limits<double>::infinity();
 constexpr double kEps = 1e-9;
+
+template <typename AdapterFactory>
+engine::SolveResult solve_branch_and_cut_isolated(
+    const engine::MIPModel& model,
+    AdapterFactory make_adapter) {
+  std::packaged_task<engine::SolveResult()> task(
+      [&model, make_adapter = std::move(make_adapter)]() mutable {
+        auto adapter = make_adapter();
+        return adapter.solve_milp(model);
+      });
+  auto future = task.get_future();
+  std::jthread worker(std::move(task));
+  return future.get();
+}
 
 const std::vector<double> kDefaultLoadProfile = {
     0.64, 0.60, 0.58, 0.56, 0.56, 0.58, 0.64, 0.76,
@@ -910,8 +925,9 @@ StageSolution solve_stage_milp(const StageData& data,
       break;
     }
     case DistributionResilienceMIPSolver::HiGHS: {
-      engine::StrictHighsBranchAndCutAdapter adapter(bc_opts);
-      solve_result = adapter.solve_milp(mb.model);
+      solve_result = solve_branch_and_cut_isolated(mb.model, [bc_opts] {
+        return engine::StrictHighsBranchAndCutAdapter(bc_opts);
+      });
       break;
     }
     case DistributionResilienceMIPSolver::Gurobi: {
@@ -1228,8 +1244,9 @@ engine::SolveResult solve_stage_mess_model(const engine::MIPModel& model,
       return adapter.solve_milp(model);
     }
     case DistributionResilienceMIPSolver::HiGHS: {
-      engine::StrictHighsBranchAndCutAdapter adapter(bc_opts);
-      return adapter.solve_milp(model);
+      return solve_branch_and_cut_isolated(model, [bc_opts] {
+        return engine::StrictHighsBranchAndCutAdapter(bc_opts);
+      });
     }
     case DistributionResilienceMIPSolver::Gurobi: {
       engine::GurobiAdapter adapter;

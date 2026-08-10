@@ -1,6 +1,6 @@
 # Runtime API Contract
 
-Updated: 2026-07-19
+Updated: 2026-08-10
 
 The GUI server is implemented in `tests/run_gui_server.cpp`. Session endpoints
 operate on one loaded `HybridPowerSystem`; a model-changing request clears
@@ -99,6 +99,124 @@ is dirty. Result playback never synchronizes or changes the model.
 Specialized production routes for resilience, hosting capacity, campus IES,
 EV traffic, lifecycle, scenario generation, and SPPT remain discoverable in
 the server source. Legacy embedded-UI routes are not part of this contract.
+
+## Reliability and protection configuration
+
+The process-global GUI session exposes a model-bound reliability configuration:
+
+| Method and route | Contract |
+|---|---|
+| `GET /api/session/reliability/configuration` | Return schema, sparse saved overrides, effective failure modes, stable component inventory, coverage, support diagnostics, and validation. |
+| `POST /api/session/reliability/configuration/validate` | Parse and validate a candidate without changing session state. |
+| `POST /api/session/reliability/configuration` | Validate, resolve protection-zone references, save atomically, and clear cached analyses. |
+
+Failure-mode overrides are keyed by `mode_id`; protection references use
+`component_kind + component .index` stable IDs such as `ac_transformer_2w:7`.
+Vector position is returned only as `component_position` for diagnostics and is
+not an external identity. Duplicate `.index` values within one component kind
+are rejected because they would make the stable mapping ambiguous.
+
+The mode schema exposes optional `enabled`, hazard (`failure_rate_per_year`,
+`mtbf_hours`, `forced_outage_rate`), repair/duration, conditional/demand
+probability, cyber recovery, and residual-capacity fields. At most one hazard
+form may be supplied. Effective precedence is user mode override, user
+protection configuration, authored case data, built-in component template,
+then the selected missing-data policy.
+
+Every `effective_modes[]` row also returns `resolved_parameters` with the same
+12 numeric field names used by the writable schema. These values are the
+canonical/equivalent result after applying that precedence: resolved annual
+frequency, equivalent MTTF/MTBF, repair duration, steady unavailability,
+conditional and demand probabilities, stage durations, cyber recovery, and
+residual capacity. They are display values, not saved overrides. The GUI marks
+them as inherited and posts only fields the user actually changes; choosing a
+different hazard representation replaces the prior hazard override instead of
+submitting mutually exclusive forms together.
+
+Protection rows map one protective device to a protected component, optional
+backup device, and explicit protection-zone component IDs. Fail-to-trip and
+fail-to-open probabilities, nuisance-trip frequency, clearing times, automatic
+reclose, and reclose-success probability round trip through the same schema.
+Failure-mode FMEA consumes device failure probabilities, nuisance trips, and
+zone mutations. Three-stage restoration consumes protection rows, configured
+clearing times, automatic-reclose probability, primary/backup dependability,
+and backup-zone expansion; it does not consume `mode_overrides`.
+
+For a physical initiating frequency `lambda`, reclose-success probability
+`r`, and primary/backup failure probabilities
+`q=1-(1-p_fail_to_trip)*(1-p_fail_to_open)`, the three-stage route generates
+mutually exclusive sustained scenarios:
+
+```text
+lambda_transient  = lambda*r
+lambda_primary    = lambda*(1-r)*(1-q1)
+lambda_backup     = lambda*(1-r)*q1*(1-q2)
+lambda_unresolved = lambda*(1-r)*q1*q2
+```
+
+Successful reclose is reported as a momentary frequency and excluded from the
+sustained IEEE 1366 SAIFI/SAIDI/EENS aggregation. Primary and backup scenarios
+use their configured clearing times. Backup clearance removes every supported
+stable component in `zone_component_ids`; unresolved primary-plus-backup
+failure blocks restoration until clearance. A matching protection row for the
+backup device supplies `q2`; otherwise the response declares the assumed
+upstream-backup boundary. Initiating frequency is conserved between transient
+and sustained scenarios.
+
+This is a probability-conditioned protection event abstraction, not a relay
+time-current simulation. It does not calculate pickup from short-circuit
+current, direction/distance/differential selectivity, setting coordination,
+breaker mechanics, DER ride-through, or GFM/GFL dynamic feedback. Configured
+nuisance-trip frequency remains a failure-mode-FMEA input and is not yet a
+three-stage recovery scenario.
+
+Saved overrides are sparse. The GUI does not turn every effective built-in row
+into an explicit user value. Loading a different built-in or imported model, or
+replacing component arrays through `/api/session/update_components`, clears the
+configuration. `/api/session/load_json_string` also clears it unless
+the caller sets `preserve_reliability_configuration: true`; the GUI uses that
+flag only for a same-canvas synchronization, after which stable references are
+validated again before reliability execution. Saving or importing a non-empty
+custom configuration makes the GUI select `failure_mode_fmea`, because it is
+the only method that consumes failure-mode IDs; users may then explicitly
+select three-stage restoration to apply the protection rows only.
+
+Every `POST /api/session/run_reliability` response includes a
+`reliability_configuration` audit object. `configured` reports whether the
+session has sparse mode/protection rows. Failure-mode FMEA consumes mode and
+protection overrides. Three-stage restoration reports `applied: true` and
+`applied_scope: ["protection"]` only when at least one enabled protection row
+matches an enumerated contingency; otherwise its scope is empty and its
+limitation explains unmatched rows or ignored mode overrides. Other methods
+return `applied: false` plus a non-empty `limitation` when saved configuration
+exists; they never silently imply that custom values affected the run.
+
+`coverage.modes_unsupported` is derived from the same consequence-patch
+decision returned as `effective_modes[].supported`; it is not a catalog-only
+estimate. For `dist33_microgrid_der` the current catalog has 228 modes, of
+which 54 have no consequence representation: 33 AC-bus, 2 DC-bus, 14
+AC-switch, 3 flexible-load, and 2 VSC measurement/control modes. Their editable
+reliability parameters remain available, but the response carries a specific
+`unsupported_reason` rather than treating their impact as zero.
+
+The GUI workflow distinguishes a completed approximation from a failed solve.
+A non-empty `model_limitations` makes consequence mapping visibly limited even
+when metrics were calculated. False validity fields whose names express
+validity, convergence, enforcement, or solver admission make solving/recovery
+limited. A transport error or JSON `error` is a failed stage instead.
+
+For `dist33_microgrid_der`, ordinary FMEA currently completes with
+`physical_model=hybrid_network_lp` and `model_scope=hybrid-acdc-network-lp`.
+It includes active-power AC/DC restoration, but does not certify nonlinear AC
+voltage/reactive feasibility and does not search DC-side repair switching.
+Three-stage evaluation returns HTTP 200 with `ok=false` plus `error_detail`
+when the hybrid DC/VSC connectivity fallback is used; fault results and metrics
+are still returned, while `restoration_milp_solved`, voltage, branch-flow, and
+radiality validity remain false. The pure-AC `dist33_tie_demo` is the matching
+case for certified three-stage restoration and returns `ok=true` with those
+MILP validity flags true. Both three-stage HTTP routes execute the solver on a
+dedicated large-stack worker so a solver stack requirement cannot terminate an
+HTTP worker process.
 
 ## Lazy Canvas frames
 

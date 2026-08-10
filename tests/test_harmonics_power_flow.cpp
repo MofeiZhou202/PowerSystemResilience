@@ -2114,6 +2114,35 @@ TEST_CASE("HPF NIC operating point derived from a converged base power flow",
   CHECK(r.max_ac_thd_pct > 0.0);
 }
 
+TEST_CASE("Harmonic Newton families disclose base power-flow fallback",
+          "[harmonics][newton][hybrid][basepf][validity]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.dc.base_mva = 100.0;
+  sys.ac.buses = {ac_bus(1, BusType::PQ)};
+  sys.dc.buses = {dc_bus(1, DCBusType::DC_P)};
+
+  HPFOptions options;
+  options.run_base_power_flow = true;
+  options.ac_orders = {5};
+  options.dc_orders = {6};
+
+  const auto newton =
+      solve_harmonic_power_flow_newton(sys, {}, {}, options);
+  CHECK(newton.base_pf_requested);
+  CHECK_FALSE(newton.base_pf_converged);
+  CHECK(newton.used_stored_operating_point);
+  CHECK_FALSE(newton.model_limitations.empty());
+
+  const auto hybrid =
+      solve_harmonic_power_flow_hybrid_newton(sys, {}, options);
+  CHECK(hybrid.base_pf_requested);
+  CHECK_FALSE(hybrid.base_pf_converged);
+  CHECK(hybrid.used_stored_operating_point);
+  CHECK_FALSE(hybrid.model_limitations.empty());
+}
+
 // Exercises the single-phase NIC Norton output admittance (y_out_ac) stamping,
 // which the existing NIC test leaves at zero.  A pure conductance g = 0.5 at the
 // AC port turns the radial node into a loaded node; the closed-form two-node
@@ -2230,7 +2259,6 @@ TEST_CASE("HPF projects rich topology and broadcasts merged-bus observables",
   CHECK_THAT(std::abs(vbus(result, 20, 5)), WithinAbs(std::abs(vbus(result, 30, 5)), 1e-12));
   CHECK(std::abs(vbus(result, 30, 5)) > 0.0);
 }
-
 
 
 

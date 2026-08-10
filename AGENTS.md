@@ -22,6 +22,7 @@
 | Skill | When to use |
 |---|---|
 | [manage-codebase-context](.github/skills/manage-codebase-context/SKILL.md) | 仓库入门、当前代码/测试状态、架构交接、依赖升级或 AI 文档维护 |
+| [develop-gui-backend-contract](.github/skills/develop-gui-backend-contract/SKILL.md) | HTTP/JSON、参数编辑、Canvas/拓扑定位、分析可视化、响应式 GUI 或前后端 E2E 的同步设计与实现 |
 
 ## 架构主线（务必先理解）
 

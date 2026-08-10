@@ -677,3 +677,46 @@ TEST_CASE("Dynamic storage ledger exposes inconsistent SOC snapshots",
   CHECK(inconsistent.max_storage_step_energy_balance_error_mwh ==
         Approx(1.0).margin(1e-10));
 }
+
+TEST_CASE("Carbon CSV integer fields reject trailing text",
+          "[carbonflow][csv][validation]") {
+  using namespace hacdcpf::analysis;
+
+  CHECK_THROWS_AS(parse_annual_node_gec_inputs_csv(
+                      "bus_index,is_dc,annual_gec_mwh\n"
+                      "12abc,false,10\n"),
+                  std::invalid_argument);
+  CHECK_THROWS_AS(parse_annual_user_gec_inputs_csv(
+                      "user_id,load_index,is_dc,annual_gec_mwh\n"
+                      "7,9tail,false,10\n"),
+                  std::invalid_argument);
+}
+
+TEST_CASE("Carbon CSV parser handles quoted fields and rejects malformed quotes",
+          "[carbonflow][csv][validation]") {
+  using namespace hacdcpf::analysis;
+
+  const auto nodes = parse_annual_node_gec_inputs_csv(
+      "bus_index,is_dc,annual_gec_mwh,gec_intensity_tco2_mwh\n"
+      "\"12\",\"false\",\"10.5\",\"0.4\"\n");
+  REQUIRE(nodes.size() == 1);
+  CHECK(nodes.front().bus_index == 12);
+  CHECK_FALSE(nodes.front().is_dc);
+  CHECK(nodes.front().annual_gec_mwh == Approx(10.5));
+  CHECK(nodes.front().gec_intensity_tco2_mwh == Approx(0.4));
+
+  // RFC 4180 doubled quotes are decoded inside one field, after which strict
+  // integer validation rejects the resulting non-numeric identifier.
+  CHECK_THROWS_AS(parse_annual_node_gec_inputs_csv(
+                      "bus_index,is_dc,annual_gec_mwh\n"
+                      "\"12\"\"escaped\",false,10\n"),
+                  std::invalid_argument);
+  CHECK_THROWS_AS(parse_annual_node_gec_inputs_csv(
+                      "bus_index,is_dc,annual_gec_mwh\n"
+                      "\"12,false,10\n"),
+                  std::invalid_argument);
+  CHECK_THROWS_AS(parse_annual_node_gec_inputs_csv(
+                      "bus_index,is_dc,annual_gec_mwh\n"
+                      "\"12\"suffix,false,10\n"),
+                  std::invalid_argument);
+}

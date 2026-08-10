@@ -16,8 +16,10 @@
 #include <catch2/catch_approx.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -443,7 +445,7 @@ TEST_CASE("catalog: coverage summary splits active/passive and physical/cyber",
   CHECK(cov.modes_passive > 0);
   CHECK(cov.modes_physical > 0);
   CHECK(cov.modes_cyber_control > 0);
-  CHECK(cov.components_total == 3);  // switch + breaker + vsc
+  CHECK(cov.components_total == 4);  // AC bus + switch + breaker + VSC
 }
 
 TEST_CASE("catalog: activation filter excludes active modes",
@@ -527,6 +529,498 @@ TEST_CASE("catalog: rich components (grid/load/router/mobile/vpp/microgrid) are 
       CHECK(e.mode.params.repair_hr == Approx(48.0));
     }
   }
+}
+
+TEST_CASE("catalog: LCC, dedicated DC storage, regulator and three-phase models are catalogued",
+          "[reliability][failure_mode][catalog][complete]") {
+  HybridPowerSystem sys;
+  ACBus ac_bus;
+  ac_bus.index = 9;
+  ac_bus.name = "ACBus9";
+  sys.ac.buses = {ac_bus};
+  DCBus dc_bus;
+  dc_bus.index = 10;
+  dc_bus.name = "DCBus10";
+  sys.dc.buses = {dc_bus};
+  RegulatorControl regulator;
+  regulator.index = 11;
+  regulator.name = "Reg11";
+  regulator.enabled = true;
+  sys.ac.regulator_controls = {regulator};
+
+  DCStorage storage;
+  storage.index = 12;
+  storage.name = "DCESS12";
+  storage.in_service = true;
+  storage.forced_outage_rate = 0.03;
+  storage.mttr_hr = 6.0;
+  sys.dc.dc_storage = {storage};
+
+  LCCConverter lcc;
+  lcc.index = 13;
+  lcc.name = "LCC13";
+  lcc.in_service = true;
+  sys.lcc_converters = {lcc};
+
+  ThreePhaseACSystem tp;
+  ThreePhaseACBus tp_bus;
+  tp_bus.index = 20;
+  tp_bus.name = "TPBus20";
+  tp.buses = {tp_bus};
+  ThreePhaseACLine line;
+  line.index = 21;
+  line.name = "TPLine21";
+  line.failure_rate = 0.2;
+  line.mttr_hr = 5.0;
+  tp.lines = {line};
+  ThreePhaseTransformer transformer;
+  transformer.index = 22;
+  transformer.name = "TPT22";
+  transformer.mtbf_hr = 8760.0;
+  transformer.mttr_hr = 24.0;
+  tp.transformers = {transformer};
+  ThreePhaseLoad load;
+  load.index = 23;
+  load.name = "TPLoad23";
+  tp.loads = {load};
+  ThreePhaseGenerator generator;
+  generator.index = 24;
+  generator.name = "TPGen24";
+  tp.generators = {generator};
+  ThreePhaseExternalGrid grid;
+  grid.index = 25;
+  grid.name = "TPGrid25";
+  tp.external_grids = {grid};
+  ThreePhaseRegulatorControl tp_regulator;
+  tp_regulator.index = 26;
+  tp_regulator.name = "TPReg26";
+  tp_regulator.enabled = true;
+  tp.regulator_controls = {tp_regulator};
+  sys.three_phase_ac = tp;
+
+  const auto catalog = build_failure_mode_catalog(
+      sys, FailureModeCatalogOptions{}, ReliabilityDataPolicy{});
+  std::set<ReliabilityComponentKind> kinds;
+  for (const auto& entry : catalog) kinds.insert(entry.mode.ref.component.kind);
+  CHECK(kinds.count(ReliabilityComponentKind::ACBus) == 1);
+  CHECK(kinds.count(ReliabilityComponentKind::DCBus) == 1);
+  CHECK(kinds.count(ReliabilityComponentKind::ACRegulatorControl) == 1);
+  CHECK(kinds.count(ReliabilityComponentKind::DCDedicatedStorage) == 1);
+  CHECK(kinds.count(ReliabilityComponentKind::LCCConverter) == 1);
+  CHECK(kinds.count(ReliabilityComponentKind::ThreePhaseACBus) == 1);
+  CHECK(kinds.count(ReliabilityComponentKind::ThreePhaseACLine) == 1);
+  CHECK(kinds.count(ReliabilityComponentKind::ThreePhaseTransformer) == 1);
+  CHECK(kinds.count(ReliabilityComponentKind::ThreePhaseLoad) == 1);
+  CHECK(kinds.count(ReliabilityComponentKind::ThreePhaseGenerator) == 1);
+  CHECK(kinds.count(ReliabilityComponentKind::ThreePhaseExternalGrid) == 1);
+  CHECK(kinds.count(ReliabilityComponentKind::ThreePhaseRegulatorControl) == 1);
+}
+
+TEST_CASE("configuration: transformer override has precedence and validates",
+          "[reliability][configuration][transformer]") {
+  HybridPowerSystem sys;
+  Transformer2W transformer;
+  transformer.index = 7;
+  transformer.name = "MainTransformer";
+  transformer.in_service = true;
+  transformer.mtbf_hours = 87600.0;
+  transformer.mttr_hours = 100.0;
+  sys.ac.transformers_2w = {transformer};
+
+  const auto baseline = build_failure_mode_catalog(
+      sys, FailureModeCatalogOptions{}, ReliabilityDataPolicy{});
+  const auto it = std::find_if(baseline.begin(), baseline.end(), [](const auto& entry) {
+    return entry.mode.ref.consequence == FailureConsequenceKind::ForcedOutage;
+  });
+  REQUIRE(it != baseline.end());
+
+  ReliabilityConfiguration configuration;
+  FailureModeParameterOverride custom;
+  custom.mode_id = it->mode.ref.mode_id;
+  custom.failure_rate_per_year = 2.0;
+  custom.repair_hr = 12.0;
+  custom.isolation_hr = 0.25;
+  configuration.mode_overrides = {custom};
+  CHECK(validate_reliability_configuration(sys, configuration).ok());
+
+  FailureModeCatalogOptions options;
+  options.configuration = &configuration;
+  const auto configured = build_failure_mode_catalog(
+      sys, options, ReliabilityDataPolicy{});
+  const auto configured_it = std::find_if(
+      configured.begin(), configured.end(), [&](const auto& entry) {
+        return entry.mode.ref.mode_id == custom.mode_id;
+      });
+  REQUIRE(configured_it != configured.end());
+  CHECK(configured_it->mode.params.lambda_per_year == Approx(2.0));
+  CHECK(configured_it->mode.repair_hr == Approx(12.0));
+  CHECK(configured_it->mode.isolation_hr == Approx(0.25));
+  CHECK(configured_it->mode.params.data_source == "user_override");
+}
+
+TEST_CASE("configuration: explicit zero hazards and repair durations override defaults",
+          "[reliability][configuration][precedence]") {
+  HybridPowerSystem sys;
+  ACBranch branch;
+  branch.index = 4;
+  branch.name = "Line4";
+  branch.in_service = true;
+  branch.failure_rate = 0.8;
+  branch.mttr_hr = 6.0;
+  sys.ac.branches = {branch};
+  CircuitBreaker breaker;
+  breaker.index = 9;
+  breaker.name = "CB9";
+  breaker.in_service = true;
+  sys.ac.circuit_breakers = {breaker};
+
+  const auto baseline = build_failure_mode_catalog(
+      sys, FailureModeCatalogOptions{}, ReliabilityDataPolicy{});
+  const auto branch_mode = std::find_if(
+      baseline.begin(), baseline.end(), [](const auto& entry) {
+        return entry.mode.ref.component.kind == ReliabilityComponentKind::ACBranch &&
+               entry.mode.ref.consequence == FailureConsequenceKind::ForcedOutage;
+      });
+  const auto trip_mode = std::find_if(
+      baseline.begin(), baseline.end(), [](const auto& entry) {
+        return entry.mode.ref.component.kind ==
+                   ReliabilityComponentKind::ACCircuitBreaker &&
+               entry.mode.ref.consequence == FailureConsequenceKind::FailToTrip;
+      });
+  REQUIRE(branch_mode != baseline.end());
+  REQUIRE(trip_mode != baseline.end());
+
+  FailureModeParameterOverride branch_override;
+  branch_override.mode_id = branch_mode->mode.ref.mode_id;
+  branch_override.failure_rate_per_year = 0.0;
+  branch_override.mttr_hours = 0.0;
+  FailureModeParameterOverride trip_override;
+  trip_override.mode_id = trip_mode->mode.ref.mode_id;
+  trip_override.demand_frequency_per_year = 12.0;
+  trip_override.probability_per_demand = 0.0;
+  ReliabilityConfiguration configuration;
+  configuration.mode_overrides = {branch_override, trip_override};
+  REQUIRE(validate_reliability_configuration(sys, configuration).ok());
+
+  FailureModeCatalogOptions options;
+  options.configuration = &configuration;
+  const auto configured = build_failure_mode_catalog(
+      sys, options, ReliabilityDataPolicy{});
+  const auto configured_branch = std::find_if(
+      configured.begin(), configured.end(), [&](const auto& entry) {
+        return entry.mode.ref.mode_id == branch_override.mode_id;
+      });
+  const auto configured_trip = std::find_if(
+      configured.begin(), configured.end(), [&](const auto& entry) {
+        return entry.mode.ref.mode_id == trip_override.mode_id;
+      });
+  REQUIRE(configured_branch != configured.end());
+  REQUIRE(configured_trip != configured.end());
+  CHECK(configured_branch->mode.params.lambda_per_year == 0.0);
+  CHECK(configured_branch->mode.params.repair_hr == 0.0);
+  CHECK(configured_branch->mode.params.unavailability == 0.0);
+  CHECK(configured_trip->mode.params.probability_per_demand == 0.0);
+  CHECK(configured_trip->mode.params.lambda_active_per_year == 0.0);
+  CHECK(configured_trip->mode.params.lambda_per_year == 0.0);
+}
+
+TEST_CASE("configuration: invalid probabilities and dangling protection references reject",
+          "[reliability][configuration][validation]") {
+  HybridPowerSystem sys;
+  CircuitBreaker breaker;
+  breaker.index = 1;
+  breaker.name = "CB1";
+  sys.ac.circuit_breakers = {breaker};
+  const auto catalog = build_failure_mode_catalog(
+      sys, FailureModeCatalogOptions{}, ReliabilityDataPolicy{});
+  REQUIRE_FALSE(catalog.empty());
+
+  ReliabilityConfiguration configuration;
+  FailureModeParameterOverride invalid_mode;
+  invalid_mode.mode_id = catalog.front().mode.ref.mode_id;
+  invalid_mode.probability_per_demand = 1.1;
+  configuration.mode_overrides = {invalid_mode};
+  ProtectionConfiguration invalid_protection;
+  invalid_protection.protection_id = "P1";
+  invalid_protection.protective_device_id = "missing:device";
+  invalid_protection.protected_component_id = "missing:asset";
+  invalid_protection.zone_component_ids = {"missing:zone"};
+  configuration.protection = {invalid_protection};
+  const auto report = validate_reliability_configuration(sys, configuration);
+  CHECK_FALSE(report.ok());
+  CHECK(report.errors.size() >= 4);
+}
+
+TEST_CASE("configuration: duplicate component indices reject ambiguous stable IDs",
+          "[reliability][configuration][validation]") {
+  HybridPowerSystem sys;
+  CircuitBreaker first;
+  first.index = 7;
+  first.name = "CB-A";
+  CircuitBreaker second;
+  second.index = 7;
+  second.name = "CB-B";
+  sys.ac.circuit_breakers = {first, second};
+
+  const auto report = validate_reliability_configuration(
+      sys, ReliabilityConfiguration{});
+  CHECK_FALSE(report.ok());
+  CHECK(std::any_of(report.errors.begin(), report.errors.end(),
+                    [](const std::string& message) {
+                      return message.find("duplicate stable component ID") !=
+                             std::string::npos;
+                    }));
+}
+
+TEST_CASE("configuration: protection ownership, uniqueness and zones are validated",
+          "[reliability][configuration][protection][validation]") {
+  HybridPowerSystem sys;
+  ACBranch branch;
+  branch.index = 1;
+  branch.name = "ProtectedLine";
+  branch.in_service = true;
+  sys.ac.branches = {branch};
+  CircuitBreaker breaker;
+  breaker.index = 2;
+  breaker.name = "MainBreaker";
+  breaker.in_service = true;
+  sys.ac.circuit_breakers = {breaker};
+  Generator generator;
+  generator.index = 3;
+  generator.name = "NotAProtectionDevice";
+  generator.in_service = true;
+  sys.ac.generators = {generator};
+
+  const auto catalog = build_failure_mode_catalog(
+      sys, FailureModeCatalogOptions{}, ReliabilityDataPolicy{});
+  auto component_id = [&](ReliabilityComponentKind kind) {
+    const auto it = std::find_if(catalog.begin(), catalog.end(),
+                                 [&](const auto& entry) {
+      return entry.mode.ref.component.kind == kind;
+    });
+    REQUIRE(it != catalog.end());
+    return it->mode.ref.component.stable_id;
+  };
+  const std::string branch_id = component_id(ReliabilityComponentKind::ACBranch);
+  const std::string breaker_id =
+      component_id(ReliabilityComponentKind::ACCircuitBreaker);
+  const std::string generator_id =
+      component_id(ReliabilityComponentKind::ACGenerator);
+
+  ProtectionConfiguration valid;
+  valid.protection_id = "P-main";
+  valid.protective_device_id = breaker_id;
+  valid.protected_component_id = branch_id;
+  valid.zone_component_ids = {branch_id};
+
+  SECTION("non-switching device cannot own protection") {
+    valid.protective_device_id = generator_id;
+    ReliabilityConfiguration configuration;
+    configuration.protection = {valid};
+    const auto report = validate_reliability_configuration(sys, configuration);
+    CHECK_FALSE(report.ok());
+    CHECK(std::any_of(report.errors.begin(), report.errors.end(),
+                      [](const std::string& message) {
+      return message.find("protective_device_id must reference a switch or circuit breaker") !=
+             std::string::npos;
+    }));
+  }
+
+  SECTION("one device cannot have two enabled protection rows") {
+    auto duplicate = valid;
+    duplicate.protection_id = "P-duplicate";
+    ReliabilityConfiguration configuration;
+    configuration.protection = {valid, duplicate};
+    const auto report = validate_reliability_configuration(sys, configuration);
+    CHECK_FALSE(report.ok());
+    CHECK(std::any_of(report.errors.begin(), report.errors.end(),
+                      [](const std::string& message) {
+      return message.find("only one enabled protection row") != std::string::npos;
+    }));
+  }
+
+  SECTION("enabled zone must include its protected component") {
+    valid.zone_component_ids = {breaker_id};
+    ReliabilityConfiguration configuration;
+    configuration.protection = {valid};
+    const auto report = validate_reliability_configuration(sys, configuration);
+    CHECK_FALSE(report.ok());
+    CHECK(std::any_of(report.errors.begin(), report.errors.end(),
+                      [](const std::string& message) {
+      return message.find("zone_component_ids must include protected_component_id") !=
+             std::string::npos;
+    }));
+  }
+}
+
+TEST_CASE("configuration: custom protection zone targets explicit components",
+          "[reliability][configuration][protection]") {
+  HybridPowerSystem sys;
+  ACBranch protected_branch;
+  protected_branch.index = 1;
+  protected_branch.name = "ProtectedLine";
+  protected_branch.in_service = true;
+  sys.ac.branches = {protected_branch};
+  CircuitBreaker breaker;
+  breaker.index = 2;
+  breaker.name = "MainBreaker";
+  breaker.in_service = true;
+  sys.ac.circuit_breakers = {breaker};
+
+  const auto baseline = build_failure_mode_catalog(
+      sys, FailureModeCatalogOptions{}, ReliabilityDataPolicy{});
+  const FailureModeCatalogEntry* trip = nullptr;
+  std::string branch_id;
+  for (const auto& entry : baseline) {
+    if (entry.mode.ref.component.kind == ReliabilityComponentKind::ACCircuitBreaker &&
+        entry.mode.ref.consequence == FailureConsequenceKind::FailToTrip)
+      trip = &entry;
+    if (entry.mode.ref.component.kind == ReliabilityComponentKind::ACBranch)
+      branch_id = entry.mode.ref.component.stable_id;
+  }
+  REQUIRE(trip != nullptr);
+  REQUIRE_FALSE(branch_id.empty());
+
+  ReliabilityConfiguration configuration;
+  ProtectionConfiguration protection;
+  protection.protection_id = "P-main";
+  protection.protective_device_id = trip->mode.ref.component.stable_id;
+  protection.protected_component_id = branch_id;
+  protection.zone_component_ids = {branch_id};
+  protection.fail_to_trip_probability = 0.0;
+  configuration.protection = {protection};
+  REQUIRE(validate_reliability_configuration(sys, configuration).ok());
+  configuration = resolve_reliability_configuration(sys, std::move(configuration));
+
+  FailureModeCatalogOptions configured_options;
+  configured_options.configuration = &configuration;
+  const auto configured_catalog = build_failure_mode_catalog(
+      sys, configured_options, ReliabilityDataPolicy{});
+  const auto configured_trip = std::find_if(
+      configured_catalog.begin(), configured_catalog.end(), [&](const auto& entry) {
+        return entry.mode.ref.mode_id == trip->mode.ref.mode_id;
+      });
+  REQUIRE(configured_trip != configured_catalog.end());
+  CHECK(configured_trip->mode.probability_per_demand == 0.0);
+  CHECK(configured_trip->mode.params.lambda_active_per_year == 0.0);
+  CHECK(configured_trip->mode.params.lambda_per_year == 0.0);
+
+  ConsequenceModelCapabilities capabilities;
+  capabilities.supports_protection_modeling = true;
+  const auto patch = build_consequence_patch(
+      sys, trip->mode, capabilities, &configuration);
+  REQUIRE(patch.representable_by_selected_model);
+  REQUIRE(patch.mutations.size() == 1);
+  CHECK(patch.mutations.front().kind == MutationKind::ForceOutOfService);
+  CHECK(patch.mutations.front().target_kind == ReliabilityComponentKind::ACBranch);
+  CHECK(patch.mutations.front().target_index == 0);
+}
+
+TEST_CASE("configuration: every supported protective device consumes nuisance frequency",
+          "[reliability][configuration][protection][catalog]") {
+  HybridPowerSystem sys;
+  Switch ac_switch;
+  ac_switch.index = 1;
+  ac_switch.name = "SW1";
+  ac_switch.in_service = true;
+  sys.ac.switches = {ac_switch};
+  CircuitBreaker ac_breaker;
+  ac_breaker.index = 2;
+  ac_breaker.name = "ACCB2";
+  ac_breaker.in_service = true;
+  sys.ac.circuit_breakers = {ac_breaker};
+  DCCircuitBreaker dc_breaker;
+  dc_breaker.index = 3;
+  dc_breaker.name = "DCCB3";
+  dc_breaker.in_service = true;
+  sys.dc.dc_circuit_breakers = {dc_breaker};
+
+  const auto baseline = build_failure_mode_catalog(
+      sys, FailureModeCatalogOptions{}, ReliabilityDataPolicy{});
+  const std::array<ReliabilityComponentKind, 3> protective_kinds = {
+      ReliabilityComponentKind::ACSwitch,
+      ReliabilityComponentKind::ACCircuitBreaker,
+      ReliabilityComponentKind::DCCircuitBreaker};
+  ReliabilityConfiguration configuration;
+  for (std::size_t i = 0; i < protective_kinds.size(); ++i) {
+    const auto it = std::find_if(baseline.begin(), baseline.end(),
+                                 [&](const auto& entry) {
+      return entry.mode.ref.component.kind == protective_kinds[i];
+    });
+    REQUIRE(it != baseline.end());
+    ProtectionConfiguration protection;
+    protection.protection_id = "P" + std::to_string(i);
+    protection.protective_device_id = it->mode.ref.component.stable_id;
+    protection.protected_component_id = it->mode.ref.component.stable_id;
+    protection.zone_component_ids = {it->mode.ref.component.stable_id};
+    protection.nuisance_trip_frequency_per_year = 1.25 + static_cast<double>(i);
+    configuration.protection.push_back(std::move(protection));
+  }
+  REQUIRE(validate_reliability_configuration(sys, configuration).ok());
+
+  FailureModeCatalogOptions options;
+  options.configuration = &configuration;
+  const auto configured = build_failure_mode_catalog(
+      sys, options, ReliabilityDataPolicy{});
+  for (std::size_t i = 0; i < protective_kinds.size(); ++i) {
+    const auto nuisance = std::find_if(configured.begin(), configured.end(),
+                                       [&](const auto& entry) {
+      return entry.mode.ref.component.kind == protective_kinds[i] &&
+             entry.mode.ref.consequence == FailureConsequenceKind::NuisanceTrip;
+    });
+    REQUIRE(nuisance != configured.end());
+    CHECK(nuisance->mode.params.lambda_per_year ==
+          Approx(1.25 + static_cast<double>(i)));
+    CHECK(nuisance->mode.params.data_source == "user_override");
+  }
+}
+
+TEST_CASE("configuration: unsupported protection-zone targets reject consequence execution",
+          "[reliability][configuration][protection][consequence]") {
+  HybridPowerSystem sys;
+  CircuitBreaker breaker;
+  breaker.index = 1;
+  breaker.name = "MainBreaker";
+  breaker.in_service = true;
+  sys.ac.circuit_breakers = {breaker};
+  LCCConverter lcc;
+  lcc.index = 2;
+  lcc.name = "UnsupportedLCC";
+  lcc.in_service = true;
+  sys.lcc_converters = {lcc};
+
+  const auto baseline = build_failure_mode_catalog(
+      sys, FailureModeCatalogOptions{}, ReliabilityDataPolicy{});
+  const auto trip = std::find_if(baseline.begin(), baseline.end(),
+                                 [](const auto& entry) {
+    return entry.mode.ref.component.kind ==
+               ReliabilityComponentKind::ACCircuitBreaker &&
+           entry.mode.ref.consequence == FailureConsequenceKind::FailToTrip;
+  });
+  const auto lcc_mode = std::find_if(baseline.begin(), baseline.end(),
+                                     [](const auto& entry) {
+    return entry.mode.ref.component.kind == ReliabilityComponentKind::LCCConverter;
+  });
+  REQUIRE(trip != baseline.end());
+  REQUIRE(lcc_mode != baseline.end());
+
+  ReliabilityConfiguration configuration;
+  ProtectionConfiguration protection;
+  protection.protection_id = "P-LCC";
+  protection.protective_device_id = trip->mode.ref.component.stable_id;
+  protection.protected_component_id = lcc_mode->mode.ref.component.stable_id;
+  protection.zone_component_ids = {lcc_mode->mode.ref.component.stable_id};
+  configuration.protection = {protection};
+  REQUIRE(validate_reliability_configuration(sys, configuration).ok());
+  configuration = resolve_reliability_configuration(sys, std::move(configuration));
+
+  ConsequenceModelCapabilities capabilities;
+  capabilities.supports_protection_modeling = true;
+  const auto patch = build_consequence_patch(
+      sys, trip->mode, capabilities, &configuration);
+  CHECK_FALSE(patch.representable_by_selected_model);
+  CHECK(patch.mutations.empty());
+  CHECK(patch.unsupported_reason.find("lcc_converter:2") != std::string::npos);
 }
 
 TEST_CASE("catalog: aggregated sources support forced-outage; control effects + unmodeled kinds unsupported",

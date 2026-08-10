@@ -191,23 +191,85 @@ double map_value_or(const std::unordered_map<int, double>& values,
   return it == values.end() ? fallback : it->second;
 }
 
+void validate_typhoon_traffic_options(
+    const TyphoonTrafficImpactOptions& options) {
+  const auto finite = [](double value) { return std::isfinite(value); };
+  const auto unit_interval = [&](double value) {
+    return finite(value) && value >= 0.0 && value <= 1.0;
+  };
+  if (options.num_steps <= 0 || !finite(options.time_step_hr) ||
+      options.time_step_hr <= 0.0 || !finite(options.start_hour)) {
+    throw std::invalid_argument(
+        "typhoon traffic impact requires a finite positive horizon and time step");
+  }
+  if (!finite(options.study_center_latitude) ||
+      options.study_center_latitude < -90.0 ||
+      options.study_center_latitude > 90.0 ||
+      !finite(options.study_center_longitude) ||
+      options.study_center_longitude < -180.0 ||
+      options.study_center_longitude > 180.0 ||
+      !finite(options.affine_network_span_km) ||
+      options.affine_network_span_km <= 0.0 ||
+      !finite(options.auto_geographic_track_distance_km) ||
+      options.auto_geographic_track_distance_km < 0.0) {
+    throw std::invalid_argument(
+        "typhoon traffic georeferencing parameters are outside their physical range");
+  }
+  if (!unit_interval(options.rainfall_runoff_coefficient) ||
+      !finite(options.drainage_rate_mm_hr) ||
+      options.drainage_rate_mm_hr < 0.0 ||
+      !finite(options.maximum_surface_water_mm) ||
+      options.maximum_surface_water_mm < 0.0 ||
+      !finite(options.depth_speed_quadratic) ||
+      !finite(options.depth_speed_linear) ||
+      !finite(options.depth_speed_intercept_km_hr) ||
+      options.depth_speed_intercept_km_hr <= 0.0 ||
+      !finite(options.flood_closure_depth_mm) ||
+      options.flood_closure_depth_mm <= 0.0) {
+    throw std::invalid_argument(
+        "typhoon traffic hydrology parameters are outside their physical range");
+  }
+  if (!finite(options.minimum_open_speed_factor) ||
+      options.minimum_open_speed_factor <= 0.0 ||
+      options.minimum_open_speed_factor > 1.0 ||
+      !finite(options.wind_capacity_reduction_start_ms) ||
+      options.wind_capacity_reduction_start_ms < 0.0 ||
+      !finite(options.wind_capacity_reduction_full_ms) ||
+      options.wind_capacity_reduction_full_ms <=
+          options.wind_capacity_reduction_start_ms ||
+      !unit_interval(options.minimum_wind_capacity_factor) ||
+      !finite(options.wind_closure_ms) || options.wind_closure_ms < 0.0 ||
+      !finite(options.capacity_speed_exponent) ||
+      options.capacity_speed_exponent < 0.0 ||
+      !unit_interval(options.minimum_open_capacity_factor)) {
+    throw std::invalid_argument(
+        "typhoon traffic speed and capacity parameters are outside their physical range");
+  }
+  for (const auto& [link, value] : options.drainage_rate_by_link_mm_hr) {
+    if (!finite(value) || value < 0.0) {
+      throw std::invalid_argument(
+          "typhoon traffic drainage_rate_by_link_mm_hr contains an invalid value for link " +
+          std::to_string(link));
+    }
+  }
+  for (const auto& [link, value] : options.runoff_multiplier_by_link) {
+    if (!finite(value) || value < 0.0) {
+      throw std::invalid_argument(
+          "typhoon traffic runoff_multiplier_by_link contains an invalid value for link " +
+          std::to_string(link));
+    }
+  }
+}
+
 }  // namespace
 
 TyphoonTrafficImpactResult apply_typhoon_traffic_impact(
     const evpt::TrafficGraph& traffic,
     const std::vector<TyphoonTrackPoint>& track,
     const TyphoonTrafficImpactOptions& options) {
-  if (options.num_steps <= 0 || options.time_step_hr <= 0.0) {
-    throw std::invalid_argument(
-        "typhoon traffic impact requires positive horizon and time step");
-  }
-  if (options.rainfall_runoff_coefficient < 0.0 ||
-      options.drainage_rate_mm_hr < 0.0 ||
-      options.flood_closure_depth_mm <= 0.0 ||
-      options.depth_speed_intercept_km_hr <= 0.0) {
-    throw std::invalid_argument(
-        "typhoon traffic impact parameters are outside their physical range");
-  }
+  // std::clamp requires ordered bounds; validate every public bound before the
+  // hydrology recurrence or speed/capacity projection consumes it.
+  validate_typhoon_traffic_options(options);
 
   TyphoonTrafficImpactResult result;
   result.impacted_traffic = traffic;

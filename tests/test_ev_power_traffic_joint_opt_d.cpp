@@ -319,6 +319,13 @@ TEST_CASE("FormD D2: SocialWelfareMax LP + DC-OPF simultaneous coupling",
     }
     CHECK(g1_dispatched == true);
   }
+
+  SECTION("nodal prices disclose unavailable duals") {
+    CHECK_FALSE(res.lmp_available);
+    CHECK(res.lmp_by_step.empty());
+    CHECK_FALSE(res.lmp_unavailability_reason.empty());
+    CHECK_FALSE(res.warnings.empty());
+  }
 }
 
 // =============================================================================

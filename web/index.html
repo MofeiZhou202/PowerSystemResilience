@@ -15,6 +15,18 @@
   <div class="logo-mini" title="交直流混合高弹性能源电力系统仿真分析平台" aria-label="HySim-XJTU-HRPES">
     <span class="brand-name">HySim</span><span class="brand-affiliation">XJTU-HRPES</span>
   </div>
+  <div id="workspaceControls" class="workspace-controls" aria-label="工作区布局">
+    <div class="workspace-density" role="group" aria-label="界面密度">
+      <button id="btnDensityStandard" class="workspace-mode-btn" type="button" data-workspace-density="standard" aria-pressed="false">标准</button>
+      <button id="btnDensityCompact" class="workspace-mode-btn" type="button" data-workspace-density="compact" aria-pressed="true">紧凑</button>
+    </div>
+    <button id="btnWorkspaceFocus" class="workspace-icon-btn" type="button" title="专注模式（Ctrl/Cmd+Shift+F）" aria-label="切换专注模式" aria-pressed="false"><span aria-hidden="true">⛶</span></button>
+    <span class="workspace-control-divider" aria-hidden="true"></span>
+    <button id="btnToggleLibrary" class="workspace-icon-btn" type="button" title="显示或隐藏元件库" aria-label="显示或隐藏元件库" aria-pressed="true"><span aria-hidden="true">◧</span></button>
+    <button id="btnToggleRibbon" class="workspace-icon-btn" type="button" title="显示或隐藏上下文功能区" aria-label="显示或隐藏上下文功能区" aria-pressed="true"><span aria-hidden="true">▰</span></button>
+    <button id="btnToggleInspector" class="workspace-icon-btn" type="button" title="显示或隐藏右侧检查器" aria-label="显示或隐藏右侧检查器" aria-pressed="true"><span aria-hidden="true">◨</span></button>
+    <button id="btnToggleConsole" class="workspace-icon-btn" type="button" title="显示或折叠控制台" aria-label="显示或折叠控制台" aria-pressed="false"><span aria-hidden="true">▤</span></button>
+  </div>
   <button id="btnLoadCase" class="toolbar-btn legacy-io-shortcut" title="加载算例">加载算例</button>
   <button id="btnSelect" class="toolbar-btn canvas-tool active" title="选择 (V)">选择</button>
   <button id="btnConnect" class="toolbar-btn canvas-tool" title="连线 (C)">连线</button>
@@ -63,7 +75,7 @@
     <input type="file" id="fileImportCimDistProject" accept=".xml" webkitdirectory directory multiple style="display:none"/>
     <input type="file" id="fileImportSvgDistribution" accept=".svg,image/svg+xml" style="display:none"/>
     <input type="file" id="fileImportParameterLibrary" accept=".json,application/json" style="display:none"/>
-    <button id="btnToggleTheme" class="btn btn-sm" title="切换浅色 / 深色背景主题">🌓 主题</button>
+    <button id="btnToggleTheme" class="btn btn-sm theme-toggle" title="切换浅色 / 深色背景主题" aria-label="切换浅色或深色背景主题">◐</button>
     <span id="canvasInfo" class="canvas-info">0 元件 | 0 连接</span>
     <span id="layoutMetricChip" class="canvas-info" title="最近一次布局质量">布局: —</span>
     <span id="statusBadge" class="badge task-status" data-state="idle" role="status" aria-live="polite">
@@ -1966,6 +1978,106 @@
         </select>
       </label>
     </div>
+    <section id="relWorkflow" class="rel-workflow" aria-labelledby="relWorkflowTitle">
+      <div class="rel-workflow-header">
+        <div>
+          <h3 id="relWorkflowTitle">可靠性计算原则</h3>
+          <p id="relPrincipleScope" class="rel-principle-scope"></p>
+        </div>
+        <span id="relWorkflowRunStatus" class="rel-workflow-run-status" aria-live="polite">等待运行</span>
+      </div>
+      <div class="rel-workflow-body">
+        <div class="rel-principle" aria-live="polite">
+          <strong id="relPrincipleMethod"></strong>
+          <code id="relPrincipleFormula"></code>
+          <dl class="rel-principle-facts">
+            <div><dt>状态/故障</dt><dd id="relPrincipleSampling"></dd></div>
+            <div><dt>后果计算</dt><dd id="relPrincipleConsequence"></dd></div>
+            <div><dt>指标聚合</dt><dd id="relPrincipleAggregation"></dd></div>
+            <div><dt>有效边界</dt><dd id="relPrincipleBoundary"></dd></div>
+          </dl>
+        </div>
+        <ol id="relWorkflowStages" class="rel-workflow-stages" aria-label="可靠性分析五阶段">
+          <li data-rel-stage="configuration" data-state="ready">
+            <span class="rel-stage-index" aria-hidden="true">1</span>
+            <span><strong>配置与参数解析</strong><small>等待读取元件、可靠性与保护配置</small></span>
+            <em>就绪</em>
+          </li>
+          <li data-rel-stage="enumeration" data-state="pending">
+            <span class="rel-stage-index" aria-hidden="true">2</span>
+            <span><strong>状态/故障枚举</strong><small>按所选方法构造样本、状态或故障集</small></span>
+            <em>待执行</em>
+          </li>
+          <li data-rel-stage="consequence" data-state="pending">
+            <span class="rel-stage-index" aria-hidden="true">3</span>
+            <span><strong>后果模型映射</strong><small>将停运或失效模式投影到网络后果</small></span>
+            <em>待执行</em>
+          </li>
+          <li data-rel-stage="solution" data-state="pending">
+            <span class="rel-stage-index" aria-hidden="true">4</span>
+            <span><strong>求解与恢复</strong><small>计算切负荷、重构或容量充裕度</small></span>
+            <em>待执行</em>
+          </li>
+          <li data-rel-stage="aggregation" data-state="pending">
+            <span class="rel-stage-index" aria-hidden="true">5</span>
+            <span><strong>指标聚合与边界审计</strong><small>汇总 EENS、LOLE、客户指标及有效性</small></span>
+            <em>待执行</em>
+          </li>
+        </ol>
+      </div>
+      <dl class="rel-workflow-coverage" aria-label="当前可靠性模型覆盖摘要">
+        <div><dt>元件</dt><dd id="relWorkflowComponents">待同步</dd></div>
+        <div><dt>失效模式</dt><dd id="relWorkflowModes">待同步</dd></div>
+        <div><dt>后果支持</dt><dd id="relWorkflowSupported">待同步</dd></div>
+        <div><dt>保护配置</dt><dd id="relWorkflowProtection">待同步</dd></div>
+      </dl>
+      <div id="relWorkflowLimitations" class="rel-workflow-limitations" hidden>
+        <strong>模型边界</strong>
+        <ul id="relWorkflowLimitationList"></ul>
+      </div>
+    </section>
+    <details id="relReliabilityConfiguration" class="rel-configuration-editor">
+      <summary>失效模式 FMEA 元件可靠性与保护配置</summary>
+      <div class="rel-config-toolbar">
+        <label class="sub-label">筛选
+          <input id="relConfigFilter" type="search" autocomplete="off"/>
+        </label>
+        <button id="btnRelConfigRefresh" class="toolbar-btn" type="button">刷新</button>
+        <button id="btnRelConfigSave" class="toolbar-btn run-btn" type="button">校验并保存</button>
+        <button id="btnRelConfigExport" class="toolbar-btn" type="button">导出配置</button>
+        <button id="btnRelConfigImport" class="toolbar-btn" type="button">导入配置</button>
+        <button id="btnRelConfigClear" class="toolbar-btn" type="button">清空配置</button>
+        <input id="fileRelConfigImport" type="file" accept=".json" hidden/>
+        <span id="relConfigStatus" class="sub-hint"></span>
+      </div>
+      <div class="rel-config-table-wrap">
+        <table id="relReliabilityModeTable" class="rel-config-table">
+          <thead><tr>
+            <th>启用</th><th>域/元件</th><th>失效模式</th><th>支持</th>
+            <th>故障率<br>(occ/year)</th><th>MTBF<br>(h)</th><th>MTTR<br>(h)</th>
+            <th>FOR<br>(pu)</th><th>条件概率<br>(pu)</th><th>需求频率<br>(/year)</th>
+            <th>按需失败<br>(pu)</th><th>隔离<br>(h)</th><th>切换<br>(h)</th>
+            <th>修复<br>(h)</th><th>网络恢复<br>(h)</th><th>残余容量<br>(pu)</th>
+            <th>有效 λ<br>(/year)</th><th>有效修复<br>(h)</th><th>来源</th>
+          </tr></thead>
+          <tbody id="relReliabilityModeRows"></tbody>
+        </table>
+      </div>
+      <div class="rel-config-protection-toolbar">
+        <strong>保护配置</strong>
+        <button id="btnRelProtectionAdd" class="toolbar-btn" type="button">新增保护</button>
+      </div>
+      <div class="rel-config-table-wrap">
+        <table id="relProtectionTable" class="rel-config-table rel-protection-table">
+          <thead><tr>
+            <th>启用</th><th>配置 ID</th><th>保护设备</th><th>被保护元件</th><th>后备设备</th>
+            <th>保护区元件</th><th>拒动概率</th><th>误动频率(/year)</th><th>拒分概率</th>
+            <th>主保护(s)</th><th>后备(s)</th><th>自动重合</th><th>重合成功率</th><th></th>
+          </tr></thead>
+          <tbody id="relProtectionRows"></tbody>
+        </table>
+      </div>
+    </details>
     <div class="rel-param-group rel-param-group-actions" title="参数库补全建议、运行可靠性分析与结果导出">
       <span class="rel-param-title">运行与导出</span>
       <div id="relParameterAdvice" class="rel-parameter-advice" hidden>
@@ -2901,13 +3013,38 @@
               </div>
               <div id="parameterLibrarySummary" class="parameter-library-summary"></div>
             </div>
+            <div id="parameterModelExplorer" class="parameter-model-explorer">
+              <div class="parameter-model-info">
+                <div class="parameter-model-title-row">
+                  <div>
+                    <span class="parameter-model-kicker">模型与计算原则</span>
+                    <h5 id="parameterModelTitle">选择元件模型</h5>
+                  </div>
+                  <label class="parameter-instance-label">当前实例
+                    <select id="parameterLibraryInstance" title="按稳定元件标识查看当前模型值">
+                      <option value="">未选择实例</option>
+                    </select>
+                  </label>
+                </div>
+                <p id="parameterModelScope" class="parameter-model-scope">从上方“元件”选择器选择一个模型，查看适用范围、参数作用和等值电路。</p>
+                <div class="parameter-range-legend" aria-label="参数范围口径">
+                  <span><i class="parameter-range-mark current"></i>当前实例值</span>
+                  <span><i class="parameter-range-mark typical"></i>典型范围，仅工程筛查</span>
+                  <span><i class="parameter-range-mark hard"></i>硬范围，参与后端校验</span>
+                </div>
+              </div>
+              <figure class="parameter-circuit-figure">
+                <div id="parameterEquivalentCircuit" class="parameter-equivalent-circuit"></div>
+                <figcaption id="parameterCircuitCaption">等值电路随元件模型切换</figcaption>
+              </figure>
+            </div>
             <div id="parameterLibraryTableWrap" class="parameter-library-table-wrap">
               <table id="parameterLibraryTable">
                 <thead><tr>
-                  <th>元件</th><th>参数</th><th>默认值</th><th>单位</th>
-                  <th>下限</th><th>上限</th><th>级别</th><th>来源 / 依据</th>
+                  <th>元件</th><th>参数 / 符号</th><th>当前值</th><th>配置默认值</th><th>单位</th>
+                  <th>典型范围</th><th>硬校验范围</th><th>状态</th><th>模型作用 / 方程</th><th>来源 / 依据</th>
                 </tr></thead>
-                <tbody><tr><td colspan="8">正在载入参数库...</td></tr></tbody>
+                <tbody><tr><td colspan="10">正在载入参数库...</td></tr></tbody>
               </table>
             </div>
             <h5>模型参数诊断</h5>
@@ -3176,7 +3313,7 @@
           <div class="topo-section">
             <h4>可靠性分析结果</h4>
             <div id="reliabilityResults" class="topo-table-wrap">
-              <p class="empty-hint">运行可靠性分析后查看结果（后端接口 TODO）</p>
+              <p class="empty-hint">运行可靠性分析后在此查看结果</p>
             </div>
           </div>
         </div><!-- /result-group reliability -->
@@ -3209,7 +3346,7 @@
               <div id="resilienceSelectedComponentCurve" class="tspf-chart selected-component-chart"></div>
             </div>
             <div id="resilienceResults" class="topo-table-wrap">
-              <p class="empty-hint">运行弹性分析后查看结果（后端接口 TODO）</p>
+              <p class="empty-hint">运行弹性分析后在此查看结果</p>
             </div>
           </div>
         </div><!-- /result-group resilience -->
@@ -3268,7 +3405,9 @@
 <!-- ===== Bottom Console ===== -->
 <div id="console">
   <div class="console-header">
-    <span>控制台</span>
+    <button id="btnConsoleHeaderToggle" class="console-title-toggle" type="button" aria-expanded="false" aria-controls="consoleLog">
+      <span>控制台</span><span id="consoleToggleGlyph" aria-hidden="true">⌄</span>
+    </button>
     <button id="btnClearConsole" class="btn btn-xs">清除</button>
   </div>
   <div id="consoleLog"></div>

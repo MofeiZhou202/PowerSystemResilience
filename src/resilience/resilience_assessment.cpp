@@ -1296,6 +1296,12 @@ DistributionResilienceResult run_distribution_resilience_assessment(
       const auto g    = gr::build_power_system_graph(sys_snap);
       const auto topo = gr::analyze_topology(g);
       sr.cut_vertex_bus_ids = topo.cut_vertex_bus_ids;
+      for (const auto& ref : topo.cut_vertices) {
+        auto& ids = ref.domain == gr::NodeDomain::DC
+                        ? sr.cut_vertex_dc_bus_ids
+                        : sr.cut_vertex_ac_bus_ids;
+        ids.push_back(ref.bus_id);
+      }
       // Map graph bridge edge IDs back to AC branch indices.
       sr.bridge_branch_ids.clear();
       sr.bridge_branch_ids.reserve(topo.bridge_edge_ids.size());

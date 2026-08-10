@@ -497,12 +497,27 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
     set_tests_properties(top_toolbar_semantics_test PROPERTIES
       LABELS "gui;unit;layout;semantics")
 
+    add_test(NAME workspace_layout_e2e
+      COMMAND "${HACDCPF_NODE_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/tests/e2e/workspace_layout_e2e.mjs"
+              --server "$<TARGET_FILE:run_gui_server>"
+              --data-dir "${CMAKE_SOURCE_DIR}/data")
+    set_tests_properties(workspace_layout_e2e PROPERTIES
+      LABELS "gui;e2e;browser;layout" TIMEOUT 120)
+
     add_test(NAME gui_scale_features_e2e
       COMMAND "${HACDCPF_NODE_EXECUTABLE}"
               "${CMAKE_SOURCE_DIR}/tests/e2e/gui_scale_features_e2e.mjs"
               --server "$<TARGET_FILE:run_gui_server>"
               --data-dir "${CMAKE_SOURCE_DIR}/data")
     set_tests_properties(gui_scale_features_e2e PROPERTIES LABELS "gui;e2e;browser" TIMEOUT 300)
+
+    add_test(NAME topology_transformer_link_e2e
+      COMMAND "${HACDCPF_NODE_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/tests/e2e/topology_transformer_link_e2e.mjs"
+              --server "$<TARGET_FILE:run_gui_server>")
+    set_tests_properties(topology_transformer_link_e2e PROPERTIES
+      LABELS "gui;e2e;browser;topology;transformer" TIMEOUT 120)
 
     add_test(NAME gui_lcc_dat_roundtrip_e2e
       COMMAND "${HACDCPF_NODE_EXECUTABLE}"
@@ -526,6 +541,27 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
               --server "$<TARGET_FILE:run_gui_server>")
     set_tests_properties(parameter_contract_e2e PROPERTIES
       LABELS "gui;e2e;browser;parameter_contract" TIMEOUT 120)
+
+    add_test(NAME reliability_configuration_e2e
+      COMMAND "${HACDCPF_NODE_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/tests/e2e/reliability_configuration_e2e.mjs"
+              --server "$<TARGET_FILE:run_gui_server>")
+    set_tests_properties(reliability_configuration_e2e PROPERTIES
+      LABELS "gui;e2e;browser;reliability;parameter_contract" TIMEOUT 180)
+
+    add_test(NAME reliability_default_policy_e2e
+      COMMAND "${HACDCPF_NODE_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/tests/e2e/reliability_default_policy_e2e.mjs"
+              --server "$<TARGET_FILE:run_gui_server>")
+    set_tests_properties(reliability_default_policy_e2e PROPERTIES
+      LABELS "gui;e2e;browser;reliability;three_stage" TIMEOUT 180)
+
+    add_test(NAME reliability_workflow_e2e
+      COMMAND "${HACDCPF_NODE_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/tests/e2e/reliability_workflow_e2e.mjs"
+              --server "$<TARGET_FILE:run_gui_server>")
+    set_tests_properties(reliability_workflow_e2e PROPERTIES
+      LABELS "gui;e2e;browser;reliability;workflow" TIMEOUT 180)
 
     add_test(NAME market_gui_e2e
       COMMAND "${HACDCPF_NODE_EXECUTABLE}"

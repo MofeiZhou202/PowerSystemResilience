@@ -9,9 +9,13 @@ struct CampusIESData {
   int num_steps{24};
   double step_duration_hr{1.0};
 
+  /// Stable AC bus label used only to attribute the aggregate PCC exchange.
+  /// solve_campus_ies() does not receive or solve an electrical network.
   int pcc_ac_bus{0};
   double import_limit_mw{20.0};
   double export_limit_mw{20.0};
+  /// Reserved compatibility field. Values other than unity are rejected until
+  /// reactive-power and voltage constraints are part of the solved model.
   double fixed_power_factor{1.0};
 
   std::vector<double> electric_load_mw;

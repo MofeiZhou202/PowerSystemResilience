@@ -26,14 +26,20 @@
 
 namespace hacdcpf::sppt {
 
+enum class MetamorphicObservation {
+  Observed,
+  NotObserved,
+};
+
 /// Outcome of a single metamorphic relation.
 struct MetamorphicResult {
   std::string id;          ///< "MR1" .. "MR8"
   std::string name;        ///< human-readable relation name
   bool        passed{false};
+  MetamorphicObservation observation{MetamorphicObservation::Observed};
   double      residual{0.0};    ///< measured residual / deviation (0 when N/A)
   double      tolerance{0.0};   ///< tolerance the residual was checked against
-  std::string detail;      ///< diagnostic note (why it passed / failed)
+  std::string detail;      ///< diagnostic note (why it passed, failed, or was not observed)
 };
 
 // ── MR1: projection idempotence ──────────────────────────────────────────────

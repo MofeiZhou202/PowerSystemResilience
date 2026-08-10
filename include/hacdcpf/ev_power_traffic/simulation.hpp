@@ -312,7 +312,11 @@ struct JointOptimizerResult {
   std::vector<std::unordered_map<int, double>> gen_dispatch_mw;
 
   /// LMPs [$/MWh] per step: lmp_by_step[step][bus_index].
+  /// Empty when lmp_available is false; an empty inner map is never used as an
+  /// implicit availability signal.
   std::vector<std::unordered_map<int, double>> lmp_by_step;
+  bool lmp_available{false};
+  std::string lmp_unavailability_reason;
 
   std::vector<std::string> warnings;
 };

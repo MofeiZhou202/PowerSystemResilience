@@ -946,37 +946,44 @@ TyphoonCatalog build_typhoon_catalog(const TyphoonCatalogOptions& raw_opts) {
   return catalog;
 }
 
-const TyphoonCatalog& get_or_build_typhoon_catalog(const TyphoonCatalogOptions& raw_opts) {
+std::shared_ptr<const TyphoonCatalog> get_or_build_typhoon_catalog(
+    const TyphoonCatalogOptions& raw_opts) {
   static std::mutex mu;
   static std::string cached_key;
-  static TyphoonCatalog cached;
+  static std::shared_ptr<const TyphoonCatalog> cached;
   const auto opts = normalize_catalog_options(raw_opts);
   const auto key = catalog_option_key(opts);
   const auto path = default_catalog_path(opts);
   std::lock_guard<std::mutex> lk(mu);
-  if (cached_key == key && !cached.samples.empty()) return cached;
+  if (cached_key == key && cached && !cached->samples.empty()) return cached;
   TyphoonCatalog loaded;
   if (load_catalog_from_disk(path, opts, &loaded)) {
-    cached = std::move(loaded);
+    cached = std::make_shared<const TyphoonCatalog>(std::move(loaded));
   } else {
-    cached = build_typhoon_catalog(opts);
-    cached.source_path = path.string();
-    cached.loaded_from_disk = false;
-    save_catalog_to_disk(path, opts, cached);
+    auto built = build_typhoon_catalog(opts);
+    built.source_path = path.string();
+    built.loaded_from_disk = false;
+    save_catalog_to_disk(path, opts, built);
+    cached = std::make_shared<const TyphoonCatalog>(std::move(built));
   }
   cached_key = key;
   return cached;
 }
 
-const TyphoonTrackSample* sample_typhoon_catalog(
-    const TyphoonCatalog& catalog,
+std::shared_ptr<const TyphoonTrackSample> sample_typhoon_catalog(
+    const std::shared_ptr<const TyphoonCatalog>& catalog,
     TyphoonIntensityCategory category,
     unsigned int selection_seed) {
-  auto it = catalog.by_category.find(category);
-  if (it == catalog.by_category.end() || it->second.empty()) return nullptr;
+  if (!catalog) return {};
+  auto it = catalog->by_category.find(category);
+  if (it == catalog->by_category.end() || it->second.empty()) return {};
   std::mt19937 rng(selection_seed);
   std::uniform_int_distribution<std::size_t> pick(0, it->second.size() - 1);
-  return &catalog.samples[it->second[pick(rng)]];
+  const auto sample_index = it->second[pick(rng)];
+  if (sample_index >= catalog->samples.size()) return {};
+  // C++ shared_ptr aliasing ownership: the catalog snapshot remains alive for
+  // as long as the selected sample is observed, without copying its track.
+  return {catalog, &catalog->samples[sample_index]};
 }
 
 std::vector<TyphoonLineSegment> generate_typhoon_line_segments(

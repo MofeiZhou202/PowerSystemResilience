@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numeric>
 #include <string>
 
 #include "hacdcpf/integrated_energy/integrated_energy_optimizer.hpp"
@@ -160,4 +161,51 @@ TEST_CASE("Campus integrated energy carbon budget activates CCUS",
   REQUIRE(budgeted.feasible);
   CHECK(budgeted.total_carbon_residual_tco2 <= data.co2_budget_tco2 + 1e-5);
   CHECK(budgeted.total_co2_captured_tco2 > baseline.total_co2_captured_tco2 + 1e-5);
+}
+
+TEST_CASE("Campus integrated energy declares its isolated electrical scope",
+          "[integrated_energy][campus_ies][scope]") {
+  CampusIESData data = make_sample_campus_ies_data(4);
+  data.pcc_ac_bus = 27;
+  const auto result = solve_campus_ies(data, {});
+  REQUIRE(result.feasible);
+  CHECK(result.pcc_ac_bus == 27);
+  CHECK(result.model_scope == "isolated-campus-multi-carrier-milp");
+  CHECK(result.validity.multi_carrier_balances_modelled);
+  CHECK(result.validity.aggregate_pcc_active_power_modelled);
+  CHECK_FALSE(result.validity.electrical_network_coupled);
+  CHECK_FALSE(result.validity.reactive_power_modelled);
+  CHECK_FALSE(result.validity.voltage_and_branch_limits_enforced);
+  CHECK_FALSE(result.model_limitations.empty());
+}
+
+TEST_CASE("Campus integrated energy rejects unmodelled power factor and active efficiencies",
+          "[integrated_energy][campus_ies][validation]") {
+  CampusIESData data = make_sample_campus_ies_data(2);
+  data.fixed_power_factor = 0.95;
+  CHECK_THROWS_AS(solve_campus_ies(data, {}), std::invalid_argument);
+
+  data = make_sample_campus_ies_data(2);
+  data.eta_fuelcell = 1.01;
+  CHECK_THROWS_AS(solve_campus_ies(data, {}), std::invalid_argument);
+
+  data = make_sample_campus_ies_data(2);
+  data.electric_storage_retention = 1.0001;
+  CHECK_THROWS_AS(solve_campus_ies(data, {}), std::invalid_argument);
+}
+
+TEST_CASE("Campus transport total reports solved activity",
+          "[integrated_energy][campus_ies][transport]") {
+  CampusIESData data = make_sample_campus_ies_data(4);
+  CampusIESOptions options;
+  options.enable_transport = false;
+  const auto disabled = solve_campus_ies(data, options);
+  REQUIRE(disabled.feasible);
+  const auto total = [](const std::vector<double>& values) {
+    return std::accumulate(values.begin(), values.end(), 0.0);
+  };
+  CHECK(disabled.total_transport_km == Approx(0.0).margin(1e-9));
+  CHECK(total(disabled.d_ev_km) == Approx(0.0).margin(1e-9));
+  CHECK(total(disabled.d_hv_km) == Approx(0.0).margin(1e-9));
+  CHECK(total(disabled.d_icv_km) == Approx(0.0).margin(1e-9));
 }

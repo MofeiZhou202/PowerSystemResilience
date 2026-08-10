@@ -20,20 +20,12 @@ These labels do not mean that a solver is correct, complete, or production
 ready. They describe how efficiently a maintainer can discover its current
 contract and limitations.
 
-## Explicit uncovered modules
+## Focused contracts added
 
-The following implemented source modules have no active dedicated contract:
-
-- **Uncovered:** `graph/`
-- **Uncovered:** `scenario_generation/`
-- **Uncovered:** `carbon_analysis/`
-- **Uncovered:** `integrated_energy/`
-- **Uncovered:** `sppt/`
-
-Their source-backed defects and review depth are tracked in the
-[module code audit](module_code_audit.md). Archived technical-notebook
-mentions, ignored `docs/latex/` files, source comments, and tests do not count
-as an active clean-clone documentation contract.
+The formerly uncovered `graph/`, `scenario_generation/`, `carbon_analysis/`,
+`integrated_energy/`, and `sppt/` modules now have tracked runtime contracts.
+Their source-backed review and closure evidence remain in the
+[module code audit](module_code_audit.md).
 
 ## Module coverage
 
@@ -44,21 +36,21 @@ as an active clean-clone documentation contract.
 | `power_flow/` | Focused | [Power-flow manual](PowerFlow/power_flow_manual1.tex) | The broad manual remains active. The point-in-time mathematical audit is archived; open defects belong in the living code audit and tests. |
 | `optimal_power_flow/` | Focused | [OPF manual](OptimalPowerFlow/opf_manual.tex) | Native, parity, DC, RPO, and three-phase paths are separated. Point-in-time IPM diagnostics and RPO validation are archived. |
 | `power_models/` | Focused | OPF manual chapter `chapters/power_models.tex` | AML builders are documented inside the OPF manual; a separate document is unnecessary while that ownership stays clear. |
-| `graph/` | Uncovered | Source headers and tests | The former broad notebook discussion is archived. There is no active graph/reduction contract covering stable IDs, edge mapping, and round trip in one place. |
+| `graph/` | Focused | [Graph and reduction runtime](graph_runtime_contract.md) | Stable/domain-qualified IDs, graph positions, reduction mappings, approximation boundaries, and recovery are explicit. |
 | `network_reconfiguration/` | Focused | [Network reconfiguration models](network_reconfiguration_models.md), [certified restoration runtime](certified_restoration_runtime.md) | Canonical-space ONR and certified restoration are distinguished. |
 | `reliability/` | Focused | [Consolidated reliability model](reliability_mathematical_models_and_intelligent_cyber_physical_assessment.md), [canonical methods](reliability_assessment_models.md) | Coverage is deep but duplicated. The consolidated document owns current status; focused documents should retain derivations without competing status claims. |
 | `resilience/` | Distributed | [Certified restoration runtime](certified_restoration_runtime.md) | One restoration workflow is well specified; heuristic, multi-period MIP, staged MILP, and MESS routing lack a single module-wide result contract. |
 | `analysis/` | Distributed | [Hosting capacity](capacity_analysis_implementation.md), [weak-link identification](multidimensional_weak_link_identification.md) | Major analyses have focused notes, but there is no umbrella contract for shared validity and attribution conventions. |
-| `scenario_generation/` | Uncovered | Source headers and tests | Conventional, reliability, resilience, and typhoon scenario generators need a tracked contract for inputs, randomness, units, and reproducibility. |
+| `scenario_generation/` | Focused | [Scenario generation runtime](scenario_generation_contract.md) | Regular, reliability, resilience, typhoon, traffic-impact, reproducibility, and fallback contracts are explicit. |
 | `short_circuit/` | Focused | [Short-circuit derivation and audit](short_circuit_rich_acdc_derivation.md) | AC and DC approximation boundaries are explicit; remember that public headers live under `include/hacdcpf/analysis/`. |
 | `harmonics_power_flow/` | Distributed | [Correctness verification](harmonics_analysis/harmonic_verification.md) | The five theory notes are archived. A runtime contract should enumerate active algorithms, inputs, outputs, standards checks, and unsupported couplings. |
 | `dynamics/` | Focused | [Transient runtime](transient_runtime.md) | The active runtime contract owns shipped behavior. Broader design and optional PSD interop material is archived. |
 | `time_series/` | Focused | [Time-series PF](time_series_power_flow_models.md), [rich UC models](sequential_production_simulation_rich_models.md), [annual/lifecycle](annual_simulation_models.md) | Coverage is strong but overlapping. Each document now has a distinct owner: pipeline, component extensions, and annual/lifecycle orchestration. |
-| `carbon_analysis/` | Uncovered | Source headers and tests | The former broad notebook discussion is archived. No focused input/output, indexing, or unit contract exists. |
+| `carbon_analysis/` | Focused | [Carbon analysis runtime](carbon_analysis_contract.md) | Snapshot/annual/GEC inputs, units, source IDs, AC/DC identity, and validity gates are explicit. |
 | `ev_power_traffic/` | Distributed | [Scenario format](ev_traffic_scenario_format.md) | The active input schema is concise, while Formulations A-H and runtime result boundaries lack a focused implementation contract. The broad theory chapter is archived. |
-| `integrated_energy/` | Uncovered | Source headers and tests | The electric-thermal-hydrogen MILP needs a dedicated contract for carriers, balances, units, solver scope, and result validity. |
+| `integrated_energy/` | Focused | [Campus integrated energy runtime](integrated_energy_contract.md) | Carrier units, aggregate PCC scope, efficiencies, solver fallback, validity, and result mapping are explicit. |
 | `market/` | Focused | [Market runtime](market_simulation_runtime.md), [mathematical model](market_simulation_mathematical_models.md) | Runtime and derivation are separated; AC-only and fallback boundaries must remain explicit. |
-| `sppt/` | Uncovered | Source headers and tests | The executable MR1-MR8 layer has no tracked canonical theory/runtime document; the locally referenced `docs/latex/sppt_theory.tex` is ignored. |
+| `sppt/` | Focused | [SPPT executable runtime](sppt_runtime_contract.md) | MR observation semantics, certificates, guards, attribution, authority, benchmarks, and ablations are explicit. |
 | `io/` | Focused | [Digital-twin architecture](digital_twin_data_io_architecture.md), [CIM/CGMES](cim_cgmes3_crosswalk.md), [SVG](svg_distribution_import.md), [BPA/DSP](bpa_dsp_component_mapping.md) | Broad format coverage exists. Contract/status/roadmap tags in the digital-twin document are essential because it mixes normative and proposed material. |
 | `api/`, `src/server/`, `web/` | Focused | [Runtime API](runtime_api.md), [Python API](python_api.md), [Canvas runtime](gui_canvas_runtime.md), [case catalog](case_catalog.md) | User-visible routes and GUI contracts have focused entry points. Route examples must continue to match `tests/run_gui_server.cpp`. |
 
@@ -84,10 +76,8 @@ This is a documentation backlog, not a product roadmap.
 | Priority | Work | Completion criterion |
 |---|---|---|
 | P0 | Keep the canonical index clean-clone-safe. | Every local link from `docs/README.md` resolves to a tracked file. |
-| P1 | Add focused contracts for `graph`, `scenario_generation`, `carbon_analysis`, `integrated_energy`, and `sppt`. | Each contract names entry points, inputs, outputs, units/index spaces, approximation boundaries, and registered tests. |
 | P1 | Add a concise harmonic runtime contract. | Implemented algorithms and standards checks are separated from the five theory notes. |
 | P1 | Complete module-wide result contracts for `resilience` and `ev_power_traffic`. | Every public result identifies scope, validity/fallback state, units, and authored/canonical index space. |
-| P2 | Extract a concise graph/reduction contract from the archived technical notebook and current source. | Stable IDs, graph indices, merge/expand maps, and round-trip recovery are discoverable without reading the full notebook. |
 | P2 | Reduce status duplication in reliability and time-series documents. | Exactly one document owns current status for each workflow; companions link to it. |
 | P2 | Define a reproducible build/refresh command for each LaTeX manual. | A maintainer can regenerate and visually verify each untracked PDF from tracked sources. |
 

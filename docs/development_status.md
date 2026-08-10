@@ -1,6 +1,6 @@
 # Development Status
 
-Updated: 2026-08-09
+Updated: 2026-08-10
 
 This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
@@ -21,25 +21,207 @@ the current Git worktrees remain authoritative.
 The two full CTest results establish the normal build baseline. They do not
 claim that every sanitizer entry point is green.
 
+## Reliability configuration enhancement
+
+The current dirty HySim worktree adds a model-bound reliability/protection
+configuration across `failure_mode`, the GUI server, and `/xjtu/`. The catalog
+now includes previously absent AC/DC/three-phase buses, transformers, bus-load,
+regulator, dedicated DC storage, LCC, and three-phase component families. User
+overrides are sparse and use stable component `.index` identities; explicit
+protection zones and all backend schema fields round trip through the GUI.
+Unsupported steady-state consequences and protection-zone targets remain
+diagnostics rather than fabricated zero-impact support.
+
+Focused verification used the existing Debug build directory with the local
+dependency dirty-check override; no Release result is claimed:
+
+```bash
+cmake -S . -B /private/tmp/hysim_reliability_config_debug \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DHACDCDSS_SKIP_MIPSOLVERS_DIRTY_CHECK=ON \
+  -DHACDCPF_ENABLE_ETAP=OFF \
+  -DHACDCPF_ENABLE_IPOPT=OFF \
+  -DHACDCPF_ENABLE_OPENDSS=OFF
+cmake --build /private/tmp/hysim_reliability_config_debug \
+  --target test_reliability_resolver run_gui_server -j4
+```
+
+`test_reliability_resolver` passed 53 cases and 347 assertions. Registered
+CTest `reliability_configuration_e2e` passed in 40.09 seconds and verified
+transformer and AC-branch overrides, resolved-value display for every returned
+mode and all 12 numeric fields, sparse GUI save, all mode/protection fields,
+invalid-input rejection, duplicate-name identity, same-model preservation,
+component-array and replacement-model reset, explicit non-application by other
+methods, custom protection probabilities, semantic property grouping across 27
+mapped Canvas component kinds, a non-generator property-panel edit, and a
+390 px layout after overriding a persisted 1180 px panel width. The focused
+`topology_transformer_link_e2e` passed in 3.71 seconds and verified that both
+standalone and branch-backed transformer rows select the correct Canvas glyph.
+The automated comprehensive case covers the core AC/DC equipment families;
+manual GUI inspection of that case showed 121 components, 266 modes, and all
+3192 numeric cells populated with finite resolved values.
+`node --check` passed for the changed JavaScript files. Browser inspection at
+1440x1000 and 390x844 found no
+page-level horizontal overflow; the large mode table uses bounded independent
+scrolling; the calculation principles, all five execution stages, and the
+protection editor remain reachable. Only the focused `macos-release` targets
+described below were rebuilt; no complete Release/full-dev build, full CTest,
+or sanitizer run was performed for this enhancement.
+
+Three-stage restoration now consumes the same session protection rows without
+claiming that failure-mode overrides apply. For each initiating fault it splits
+frequency into successful-reclose, primary-cleared, backup-cleared, and
+unresolved scenarios; configured clearing times enter Stage 1, the backup zone
+expands the outage set, and primary-plus-backup failure blocks restoration.
+Successful reclose is excluded from sustained IEEE 1366 indices, while the
+result audits initiating, transient, and sustained frequencies and their exact
+conservation. The GUI renders this protection/recovery audit and the governing
+formula from the response.
+
+Focused `macos-release` verification passed 27 regular
+`test_three_stage_reliability` cases with 1365 assertions, including exact
+`r=0.8` scaling of sustained EENS to 20% of baseline, primary/backup frequency
+conservation, backup-zone expansion, and configured clearing times. The
+registered `reliability_configuration_e2e` and
+`reliability_default_policy_e2e` passed in 39.39 and 7.16 seconds after
+checking both unified and legacy API protection fields, strict-policy rejection,
+unified fallback execution, and the empty-configuration JSON contract. A
+direct-C++ timing probe on the
+same arm64 macOS 26.5.2 host, Apple clang 21, `-O3 -DNDEBUG`, commit `493f6351`
+used two warmups plus five measured repetitions per variant. Across three
+independent runs, median no-configuration/primary/primary-plus-backup times were
+`0.473--0.488 / 0.477--0.480 / 0.630--0.648 ms`; the two-scenario/single-
+scenario ratio was `1.320--1.353x`, within the predeclared approximately `2x`
+upper-order prediction because parsing, assembly, and healthy-state solves are
+shared fixed costs. The hidden diagnostic is reproducible with
+`./build/macos-release/tests/test_three_stage_reliability
+'Protection scenario runtime probe'`; it is excluded from regular CTest.
+Manual inspection of the rebuilt GUI loaded `dist33_tie_demo`, selected the
+three-stage consequence model, and displayed its equation and five-stage
+workflow. The follow-up browser regression closes a discovered policy mismatch:
+`missing_only` now runs with the backend's declared unified fallback values,
+while `case_data_only` alone blocks zero-coverage input and offers the explicit
+`Apply parameter library and run` path. Selecting three-stage restoration now
+defaults the GUI fault loop to serial execution, avoiding queue amplification
+against the process-serialized solver while retaining an explicit parallel
+opt-in. Its Dist33 run completed with a response-backed `limited` state and a
+visible protection/recovery panel. The obsolete empty-result text claiming that
+the reliability and resilience backend interfaces were pending was removed.
+
+The same dirty worktree now adds a reliability calculation workflow to the GUI:
+method-specific principles and equations, five persistent execution stages,
+catalog/protection coverage, and response-backed limitation states. Because the
+unified endpoint has no stage-progress stream, the GUI labels enumeration,
+consequence mapping, and solving as one backend interval instead of inventing
+percent completion. The registered `reliability_workflow_e2e` uses the built-in
+`cyber_physical_reliability_demo` case and passed with these directional EENS
+checks (MWh/year): physical load scale `1.0 -> 1.5`,
+`1.0000005 -> 4.30000075`; information availability `1 -> 0`,
+`0.10000005 -> 4.400001`; dominant passive-mode failure frequency doubled,
+`10.000005 -> 20.000005`. Its completed GUI stage states were
+`complete/complete/limited/complete/complete`; the limited consequence state
+was backed by runtime model declarations, and 390 px viewport overflow was
+zero. After rebuilding the focused `macos-release` targets,
+registered `reliability_workflow_e2e` passed in 9.20 seconds. It now also runs real
+three-stage requests for both Dist33 variants: `dist33_microgrid_der` returns a
+completed hybrid connectivity-fallback result with `ok=false` and explicit
+invalid MILP flags, while `dist33_tie_demo` returns `ok=true` with branch-flow,
+voltage, radiality, and restoration-MILP validity true. Both unified and legacy
+three-stage routes execute the core solver on a dedicated 4 MiB-stack worker;
+an additional response-construction failure was traced under LLDB to a nullable
+`const char*` passed to nlohmann JSON after a successful solve. Both routes now
+construct an explicit JSON string or JSON null, closing the observed
+`strlen(nullptr)` process termination for empty custom configurations. The
+rebuilt `test_reliability_resolver` remained at 53 cases and 347 assertions. The broad
+`gui_scale_features_e2e` transformer-link assertion also passed, but that run
+was not green overall because two later, unrelated comprehensive-OPF checks did
+not converge; no green result is claimed for that suite.
+
+## Model parameter explorer
+
+The dirty worktree extends `/api/session/parameter_library` and the Model
+Parameters GUI with backend-owned presentation metadata. All 52 underlying
+rules return symbols, quantities, model roles, equations, typical-range
+provenance, and an equivalent-circuit family. Typical screening ranges are
+explicitly separate from editable hard validation bounds. The backend now owns
+a 44-entry catalog covering every physical/system family serialized by
+`HybridPowerSystem`; the selector no longer depends on which families happen
+to have standard-completion rules.
+
+The current-system snapshot flattens all fields from `hacdcpf::io::to_json`,
+uses domain-qualified stable identities, and groups them by engineering
+semantics. Resolved failure modes are attached to their physical component by
+`reliability_kind + component .index`; the legacy reliability rule groups stay
+in the 52-rule JSON contract but are hidden as standalone models. The GUI
+therefore shows 24 physical standard rules in the overview, complete read-only
+instance fields, and reliability parameters within each matching instance.
+Unknown typical/hard ranges are reported as unpublished/unregistered rather
+than synthesized. Existing save/import/export/validate/apply behavior remains
+intact; authored instance values remain editable through Canvas properties.
+
+Focused Debug verification rebuilt `run_gui_server`. The registered
+`parameter_contract_e2e` passed in 8.99 seconds with 44 catalog models, no
+standalone reliability pseudo-models, complete field-contract checks, stable
+Canvas selection, profile save round trips, and mobile overflow checks. The
+registered `reliability_configuration_e2e` passed in 38.63 seconds. Real
+browser inspection of `comprehensive_hybrid_acdc` found 108 stable instances;
+the selected generator exposed 76 grouped rows, including 41 resolved
+reliability rows, with no visible overlap. `node --check` passed for
+`web/js/app.js` and the E2E script. No Release/full-dev build, full CTest, or
+sanitizer run was performed for this GUI enhancement.
+
+The same regression exercises every mappable instance family present in the
+distribution case, same-number AC/DC buses, consecutive AC branches,
+VSC/storage, transformer aliases, current-value refresh, unsaved profile-edit
+preservation, and module/tab stability. Selecting a Canvas glyph while Model
+Parameters is active follows the exact domain-qualified instance without
+rebuilding or losing unsaved profile edits.
+
+## GUI workspace density
+
+The dirty worktree now provides a workspace-first GUI layout modeled on common
+engineering simulation tools: standard and compact densities, independent
+component-library/context-ribbon/inspector/console docks, a focus mode that
+preserves the active module and inspector tab, and persisted layout state.
+Desktop first load uses compact density with a collapsed console. At 720 px and
+below the component library, contextual ribbon, console, and desktop-only
+dependency chips start collapsed while global element location and the active
+right-side parameter/result view remain reachable.
+
+The registered Debug CTest selection passed 5/5:
+`top_toolbar_semantics_test`, `workspace_layout_e2e`,
+`topology_transformer_link_e2e`, `parameter_contract_e2e`, and
+`reliability_configuration_e2e` (54.21 seconds total). At 1440x1000, focus mode
+increased the measured Canvas area from 959x649 to 1115x919 while preserving the
+short-circuit module, topology tab, and console contents. The layout round trip
+survived reload; a real 390x844 Chromium check reported zero page-level
+horizontal overflow and showed no overlapping controls. JavaScript syntax and
+`git diff --check` passed. No Release/full-dev build, full CTest, or sanitizer
+run was performed for this frontend-only change.
+
 ## Active module audit
 
 The living [module code audit](module_code_audit.md) records the current
-source-backed findings and audit depth. The documentation coverage pass marks
-`graph/`, `scenario_generation/`, `carbon_analysis/`, `integrated_energy/`, and
-`sppt/` as having no active dedicated contract. Focused macOS Release
-executables for typhoon traffic,
-campus IES, SPPT metamorphic relations, harmonics, graph topology, EV
-Formulation D, and carbon case validation passed on 2026-08-09; these tests do
-not exercise the open concurrency, invalid-input, or unavailable-result paths.
-No full rebuild, full CTest, or complete sanitizer suite was run specifically
-for this audit.
+source-backed findings and audit depth. AUD-001 through AUD-011 are closed.
+Focused runtime contracts now cover `graph/`, `scenario_generation/`,
+`carbon_analysis/`, `integrated_energy/`, and `sppt/`; the canonical links are
+in [docs/README.md](README.md).
 
-A focused current-source sanitizer rebuild exposed an additional ordered-call
-failure: the hybrid StrictHiGHS resilience case passes alone, but fails with
-`StrictHiGHS Other run=-1` after the Native external-MESS-availability case in
-the same process. This is tracked as AUD-011. The experiment used the dirty
-sibling MIPSolvers worktree with the non-Release dirty-check override; it does
-not replace the reproducible Release baseline above.
+Current-source Debug verification rebuilt all affected targets. The focused
+and contract suites passed: typhoon traffic/catalog 5 cases/35 assertions,
+campus IES 6/106, harmonics 52/359, EV Formulation D 15/196,
+graph/Kron/round-trip 55/461, scenario generation/schema 12/105,
+carbon snapshot/annual/GEC 41/574, SPPT 33/213, and the shared
+resilience/reliability executable 39/360. `run_gui_server` also rebuilt and
+linked successfully.
+
+AUD-011 is closed by running StrictHiGHS restoration B&C calls on a fresh
+joined thread while keeping Native on the caller thread, whose larger stack is
+required by recursive sub-MIPs. The same-process regression completed five
+Native-to-StrictHiGHS cycles. A 1000-cycle packaged-task/jthread benchmark
+measured 0.0145--0.0187 ms fixed overhead per cycle, below the 10 ms threshold.
+No full CTest, complete sanitizer suite, or external-engine cross-validation
+was run specifically for this closure pass.
 
 ## Closed investigation
 

@@ -6,6 +6,60 @@ WebGL2 and LOD0/1/2 aggregation while creating no per-bus SVG DOM. The existing
 SVG canvas remains authoritative for normal-size authored diagrams. Large-model
 selection uses one `{domain,index}` bus reference across WebGL, the virtualized
 topology tables, result navigation, and the bounded local SVG subgraph.
+For normal SVG models, topology-table component rows use stable component
+`.index` mappings. A two-winding transformer extracted from an AC branch is
+registered under both its branch index and transformer index, so either table
+selects the same transformer glyph rather than losing the rich-device link.
+
+The component property editor groups authored fields by semantics: identity
+and connection, electrical/rating, operation/control, protection/safety,
+cost/carbon, reliability, analysis-specific, data/source, and dynamics. The
+reliability group is present for every selected Canvas component and resolves
+its failure modes from the backend `component_kind + component .index`
+inventory. Energy-router port modes are shown on their parent router, and a
+branch-backed transformer retains both branch and transformer aliases. All 12
+backend numeric mode fields are displayed; inherited effective values use a
+dashed style, while Apply posts only fields actually edited by the user.
+
+The Model Parameters module follows the same identity rule for its read-only
+current-value snapshot: `domain:component_kind:component .index`. Its profile
+table edits registered defaults and validation policy; authored instance values
+remain owned by the Canvas property editor. While this module is active,
+selecting a mapped Canvas glyph updates both the component-model filter and the
+exact current instance. AC/DC buses remain domain-qualified, and a
+branch-backed transformer prefers its dedicated transformer identity when that
+alias exists, otherwise its AC-branch identity. The selection refresh preserves
+unsaved profile-table edits. A displayed typical range or profile default
+therefore cannot silently become an instance override.
+
+The component-model selector is populated from the backend `model_catalog`,
+currently 44 serializable physical/system families, rather than from the
+smaller standard-rule set. Current-instance rows are the flattened authoritative
+system JSON fields and are grouped by identity/connection, electrical/physical,
+ratings/limits, operation/control, cost/carbon, reliability, and dynamics.
+Resolved failure modes are integrated into the selected physical instance;
+legacy `Reliability - ...` registry groups are not shown as standalone models.
+Unknown typical or validation ranges are explicitly marked unpublished or
+unregistered.
+
+## Workspace layout
+
+The GUI uses an engineering-workstation layout rather than keeping every tool
+surface permanently open. First-time desktop sessions use compact density and
+a collapsed console; first-time viewports up to 720 px also collapse the
+component library and contextual ribbon. Users can independently show or hide
+the component library, contextual ribbon, right inspector, and console. The
+standard density always retains every original toolbar command, while compact
+density exposes the primary canvas commands and keeps secondary commands
+available by returning to standard density.
+
+Focus mode hides workflow guidance, dependency status, the contextual ribbon,
+the component library, and the console while preserving the current module,
+inspector tab, results, authored model, and console contents. Exiting focus mode
+restores the prior dock preferences. Density, dock visibility, and focus state
+round trip through `hysimWorkspaceLayoutV1`; the shortcut is
+`Ctrl/Cmd+Shift+F`. Layout changes trigger chart and viewport resize handling
+without rebuilding the Canvas model or changing result identity.
 
 The intended division of work is:
 
@@ -16,7 +70,7 @@ The intended division of work is:
 - Backend chunks: serve topology LOD, spatial windows, time frames, and worst
   violations through `/api/v1`.
 
-Updated: 2026-07-28
+Updated: 2026-08-10
 
 The authored model lives in `Canvas.state`, while analysis results live in SVG
 result overlays. These states must remain separate.

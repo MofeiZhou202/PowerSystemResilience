@@ -108,6 +108,18 @@ struct OperatingPoint {
   std::unordered_map<int, VSCTransfer> vsc_by_index;
 };
 
+template <class Result>
+void record_operating_point_audit(Result& result, const HPFOptions& options,
+                                  bool base_pf_converged) {
+  result.base_pf_requested = options.run_base_power_flow;
+  result.base_pf_converged = base_pf_converged;
+  result.used_stored_operating_point = !base_pf_converged;
+  if (options.run_base_power_flow && !base_pf_converged) {
+    result.model_limitations.push_back(
+        "Requested base power flow did not converge; harmonic calculations used stored or nominal fundamental voltages.");
+  }
+}
+
 OperatingPoint extract_operating_point(const HybridPowerSystem& sys,
                                        const HPFOptions& opt) {
   OperatingPoint op;
@@ -443,7 +455,7 @@ HPFResult solve_harmonic_power_flow(const HybridPowerSystem& rich_sys,
   }
 
   OperatingPoint op = extract_operating_point(sys, opt);
-  res.base_pf_converged = op.pf_converged;
+  record_operating_point_audit(res, opt, op.pf_converged);
 
   auto ac_pos = [&](int id) -> int {
     auto it = ac_id2pos.find(id);
@@ -1194,7 +1206,7 @@ HPF3phResult solve_harmonic_power_flow_3ph(const ThreePhaseACSystem& sys,
       have_pf = false;
     }
   }
-  res.base_pf_converged = have_pf;
+  record_operating_point_audit(res, opt, have_pf);
   std::unordered_map<int, int> pfpos;
   if (have_pf)
     for (int i = 0; i < (int)tp.bus_results.size(); ++i)
@@ -1540,6 +1552,7 @@ HPFHybrid3phResult solve_harmonic_power_flow_3ph_hybrid(
     try { tp = powerflow::solve_three_phase(ac, {}); have_pf = tp.converged; }
     catch (...) { have_pf = false; }
   }
+  record_operating_point_audit(res, opt, have_pf);
   res.combined_solved = false;
   std::unordered_map<int, int> pfpos;
   if (have_pf)
@@ -1794,6 +1807,7 @@ HPFNewtonResult solve_harmonic_power_flow_newton(
   auto ac_pos = [&](int id) { auto it = ac_id2pos.find(id); return it == ac_id2pos.end() ? -1 : it->second; };
 
   OperatingPoint op = extract_operating_point(sys, opt);
+  record_operating_point_audit(res, opt, op.pf_converged);
 
   std::vector<HarmonicBusResult> ac_res(n);
   for (int i = 0; i < n; ++i) {
@@ -1903,7 +1917,7 @@ HPF3phResult solve_harmonic_power_flow_3ph_newton(
     try { tp = powerflow::solve_three_phase(sys, {}); have_pf = tp.converged; }
     catch (...) { have_pf = false; }
   }
-  res.base_pf_converged = have_pf;
+  record_operating_point_audit(res, opt, have_pf);
   std::unordered_map<int, int> pfpos;
   if (have_pf)
     for (int i = 0; i < (int)tp.bus_results.size(); ++i) pfpos[tp.bus_results[i].bus_id] = i;
@@ -2053,6 +2067,7 @@ HPFNewtonResult solve_harmonic_power_flow_newton_real(
   const auto id2pos = build_id_map(sys.ac.buses);
   auto pos = [&](int id) { auto it = id2pos.find(id); return it == id2pos.end() ? -1 : it->second; };
   OperatingPoint op = extract_operating_point(sys, opt);
+  record_operating_point_audit(res, opt, op.pf_converged);
 
   std::vector<HarmonicBusResult> ac_res(n);
   for (int i = 0; i < n; ++i) {
@@ -2188,6 +2203,7 @@ HPFNewtonResult solve_harmonic_power_flow_newton_coupled(
   const auto id2pos = build_id_map(sys.ac.buses);
   auto pos = [&](int id) { auto it = id2pos.find(id); return it == id2pos.end() ? -1 : it->second; };
   OperatingPoint op = extract_operating_point(sys, opt);
+  record_operating_point_audit(res, opt, op.pf_converged);
 
   std::vector<int> orders;
   for (int h : opt.ac_orders) if (h > 1) orders.push_back(h);
@@ -2509,7 +2525,8 @@ HPF3phResult solve_harmonic_power_flow_3ph_newton_real(
   auto pos = [&](int id) { auto it = id2pos.find(id); return it == id2pos.end() ? -1 : it->second; };
   auto node = [](int p, int ph) { return p * 3 + ph; };
   std::vector<std::array<Cx, 3>> vph1;
-  res.base_pf_converged = extract_3ph_vph1(sys, opt, vph1);
+  const bool base_pf_converged = extract_3ph_vph1(sys, opt, vph1);
+  record_operating_point_audit(res, opt, base_pf_converged);
 
   std::vector<ThreePhaseHarmonicBusResult> bus_res(n);
   for (int i = 0; i < n; ++i) {
@@ -2637,7 +2654,8 @@ HPF3phResult solve_harmonic_power_flow_3ph_newton_coupled(
   auto pos = [&](int id) { auto it = id2pos.find(id); return it == id2pos.end() ? -1 : it->second; };
   auto node = [](int p, int ph) { return p * 3 + ph; };
   std::vector<std::array<Cx, 3>> vph1;
-  res.base_pf_converged = extract_3ph_vph1(sys, opt, vph1);
+  const bool base_pf_converged = extract_3ph_vph1(sys, opt, vph1);
+  record_operating_point_audit(res, opt, base_pf_converged);
 
   std::vector<int> orders;
   for (int h : opt.ac_orders) if (h > 1) orders.push_back(h);
@@ -2860,6 +2878,7 @@ HPFHybridNewtonResult solve_harmonic_power_flow_hybrid_newton(
   auto dc_pos = [&](int id) { auto it = dc_id2pos.find(id); return it == dc_id2pos.end() ? -1 : it->second; };
 
   OperatingPoint op = extract_operating_point(sys, opt);
+  record_operating_point_audit(res, opt, op.pf_converged);
   std::vector<double> vdc0(ndc, 1.0);
   for (int k = 0; k < ndc; ++k)
     vdc0[k] = (std::abs(sys.dc.buses[k].vm_pu) > 1e-9) ? sys.dc.buses[k].vm_pu : 1.0;

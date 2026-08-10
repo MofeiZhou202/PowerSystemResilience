@@ -1,6 +1,6 @@
 # Documentation Index
 
-Updated: 2026-08-09
+Updated: 2026-08-10
 
 This is the canonical entry point for active project documentation. Runtime
 behavior is defined by `include/`, `src/`, `tests/run_gui_server.cpp`, `web/`,
@@ -43,6 +43,7 @@ source-backed defects.
 |---|---|---|---|
 | Component models and validation | Implementation reference | [Component-model audit source](ComponentModels/component_models_math_audit.tex) | [Registered parameter system](parameter_system.md) |
 | Rich-to-canonical projection and result recovery | Contract | [Projection and result attribution](projection_and_results.md) | Component and power-flow manuals |
+| Graph topology, reduction, and recovery | Contract | [Graph and reduction runtime](graph_runtime_contract.md) | Projection and result attribution |
 | Editable parameters and effective values | Contract | [Registered parameter system](parameter_system.md) | [Distribution parameter standards](distribution_parameter_completion_standards.md) |
 | AC/DC and three-phase power flow | Implementation reference | [Power-flow manual source](PowerFlow/power_flow_manual1.tex) | [Harmonic verification](harmonics_analysis/harmonic_verification.md) |
 | AC/DC, DC, parity, three-phase OPF, and RPO | Implementation reference | [OPF manual source](OptimalPowerFlow/opf_manual.tex) | Registered OPF and RPO tests |
@@ -55,10 +56,14 @@ source-backed defects.
 |---|---|---|---|
 | Time-series UC -> OPF -> PF | Implementation reference | [Time-series power-flow models](time_series_power_flow_models.md) | [Rich component models](sequential_production_simulation_rich_models.md) |
 | Annual production and lifecycle | Implementation reference | [Annual simulation models](annual_simulation_models.md) | Time-series documents above |
+| Scenario generation and typhoon impacts | Contract | [Scenario generation runtime](scenario_generation_contract.md) | [Case catalog](case_catalog.md) |
+| Carbon tracing, annual inventory, and GEC | Contract | [Carbon analysis runtime](carbon_analysis_contract.md) | Time-series documents above |
+| Campus integrated energy | Contract | [Campus integrated energy runtime](integrated_energy_contract.md) | Current headers and registered tests |
 | Day-ahead and real-time market | Contract | [Market runtime](market_simulation_runtime.md) | [Implemented mathematical model](market_simulation_mathematical_models.md) |
-| Reliability | Implementation reference | [Consolidated reliability model](reliability_mathematical_models_and_intelligent_cyber_physical_assessment.md) | [Canonical reliability methods](reliability_assessment_models.md) |
+| Reliability | Implementation reference | [Consolidated reliability model](reliability_mathematical_models_and_intelligent_cyber_physical_assessment.md) | [Canonical reliability methods](reliability_assessment_models.md), [runtime configuration API](runtime_api.md#reliability-and-protection-configuration) |
 | Resilience and restoration | Contract | [Certified restoration runtime](certified_restoration_runtime.md) | [Network reconfiguration models](network_reconfiguration_models.md) |
 | EV and traffic inputs | Contract | [EV/traffic scenario format](ev_traffic_scenario_format.md) | Current headers and registered tests |
+| SPPT executable verification | Contract | [SPPT executable runtime](sppt_runtime_contract.md) | [Projection and result attribution](projection_and_results.md) |
 
 ## Dynamics, faults, and power quality
 

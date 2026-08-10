@@ -7649,8 +7649,16 @@ const Canvas = (() => {
 	        case 'generator': putIndexed('gen', comp, idx.gen++); break;
 	        case 'load': putIndexed('load', comp, idx.load++); break;
 	        case 'transformer_2w':
-	          if (p._from_branch) putIndexed('branch', comp, idx.br++);
-	          else putIndexed('trafo', comp, idx.trafo++);
+	          if (p._from_branch) {
+	            putIndexed('branch', comp, idx.br++);
+	            // A rich transformer extracted from this branch still appears in
+	            // ac.transformers_2w. Register its stable transformer index as an
+	            // alias so the Transformer topology row selects the same glyph.
+	            const transformerIndex = Number(p._transformer_index);
+	            if (Number.isFinite(transformerIndex)) {
+	              maps.trafo[transformerIndex] = comp.id;
+	            }
+	          } else putIndexed('trafo', comp, idx.trafo++);
 	          break;
 	        case 'external_grid': putIndexed('extGrid', comp, idx.eg++); break;
 	        case 'storage': putIndexed('storage', comp, idx.stor++); break;

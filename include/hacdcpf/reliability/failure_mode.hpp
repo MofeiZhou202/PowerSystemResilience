@@ -15,6 +15,7 @@
 ///     -> parameter resolver -> consequence operator -> consequence engine
 ///     -> metrics -> GUI/API.
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -29,6 +30,7 @@ namespace hacdcpf::analysis {
 
 /// Stable reliability component kind across AC, DC, and hybrid domains.
 enum class ReliabilityComponentKind {
+  ACBus,
   ACGenerator,
   ACBranch,
   ACLoad,
@@ -42,6 +44,7 @@ enum class ReliabilityComponentKind {
   ACSwitch,
   ACCircuitBreaker,
   ExternalGrid,
+  DCBus,
   DCBusLoad,
   DCBranch,
   DCLoad,
@@ -63,6 +66,16 @@ enum class ReliabilityComponentKind {
   Charger,
   ChargingStation,
   AsynchronousMotor,
+  ACRegulatorControl,
+  DCDedicatedStorage,
+  LCCConverter,
+  ThreePhaseACBus,
+  ThreePhaseACLine,
+  ThreePhaseTransformer,
+  ThreePhaseLoad,
+  ThreePhaseGenerator,
+  ThreePhaseExternalGrid,
+  ThreePhaseRegulatorControl,
   Unknown
 };
 
@@ -71,9 +84,10 @@ enum class ReliabilityComponentKind {
 struct ComponentRef {
   ReliabilityComponentKind kind{ReliabilityComponentKind::Unknown};
   int element_index{0};        ///< 0-based position within its container vector
+  int component_index{0};      ///< stable rich-component .index exposed to API/GUI
   std::string element_name;    ///< business label, may be empty
   std::string domain;          ///< "AC", "DC", or "Hybrid"
-  std::string stable_id;       ///< e.g. "ac_branch:5" or "vsc:VSC1"
+  std::string stable_id;       ///< e.g. "ac_branch:5" or "vsc_converter:12"
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -118,7 +132,7 @@ enum class FailureConsequenceKind {
 /// Identity of a single failure mode of a component.
 struct FailureModeRef {
   ComponentRef component;
-  std::string mode_id;        ///< stable id, e.g. "vsc:VSC1/grid_forming_lost"
+  std::string mode_id;        ///< stable id, e.g. "vsc_converter:12/grid_forming_lost"
   std::string display_name;   ///< human-readable label
   FailureActivation activation{FailureActivation::Passive};
   FailureCause cause{FailureCause::Physical};
@@ -137,6 +151,64 @@ struct FailureModeReliability {
   double repair_hr{0.0};                    ///< tau_rep (stage 3, physical)
   double cyber_recovery_hr{0.0};            ///< recovery time for cyber modes
   double residual_capacity_factor{0.5};     ///< derating: surviving capacity fraction (0..1]
+};
+
+/// User-owned override for one catalog failure mode.  Every optional field is
+/// an overlay: omitted fields retain the case value or selected template.
+struct FailureModeParameterOverride {
+  std::string mode_id;
+  std::optional<bool> enabled;
+  std::optional<double> failure_rate_per_year;
+  std::optional<double> mtbf_hours;
+  std::optional<double> mttr_hours;
+  std::optional<double> forced_outage_rate;
+  std::optional<double> probability_given_initiated;
+  std::optional<double> demand_frequency_per_year;
+  std::optional<double> probability_per_demand;
+  std::optional<double> isolation_hr;
+  std::optional<double> switching_hr;
+  std::optional<double> repair_hr;
+  std::optional<double> cyber_recovery_hr;
+  std::optional<double> residual_capacity_factor;
+};
+
+/// Custom protection chain for one protective device.  Stable component IDs
+/// are obtained from the effective catalog returned by the API.
+struct ProtectionConfiguration {
+  std::string protection_id;
+  std::string protective_device_id;
+  std::string protected_component_id;
+  std::string backup_device_id;
+  std::vector<std::string> zone_component_ids;
+  bool enabled{true};
+  double fail_to_trip_probability{0.0};
+  double nuisance_trip_frequency_per_year{0.0};
+  double fail_to_open_probability{0.0};
+  double primary_clearing_time_s{0.0};
+  double backup_clearing_time_s{0.0};
+  bool automatic_reclose{false};
+  double successful_reclose_probability{0.0};
+  /// Derived from zone_component_ids by resolve_reliability_configuration().
+  /// Not part of the external JSON contract.
+  std::vector<ComponentRef> resolved_zone_components;
+  std::optional<ComponentRef> resolved_protective_device;
+  std::optional<ComponentRef> resolved_protected_component;
+  std::optional<ComponentRef> resolved_backup_device;
+};
+
+/// Complete reliability configuration for a session/model.  Built-in values
+/// remain the baseline; user overrides have precedence and are never written
+/// back into the imported source model.
+struct ReliabilityConfiguration {
+  std::string profile_id{"builtin_with_user_overrides"};
+  std::vector<FailureModeParameterOverride> mode_overrides;
+  std::vector<ProtectionConfiguration> protection;
+};
+
+struct ReliabilityConfigurationValidation {
+  std::vector<std::string> errors;
+  std::vector<std::string> warnings;
+  bool ok() const { return errors.empty(); }
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -175,6 +247,10 @@ struct FailureModeCatalogOptions {
   // Default switching/isolation times used when a mode does not specify them.
   double default_isolation_hr{0.5};
   double default_switching_hr{0.5};
+
+  /// Optional session-level custom values. The caller retains ownership for
+  /// the duration of catalog construction / FMEA execution.
+  const ReliabilityConfiguration* configuration{nullptr};
 };
 
 /// One catalog entry: a mode plus enable/support diagnostics.
@@ -210,6 +286,16 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
     const HybridPowerSystem& sys,
     const FailureModeCatalogOptions& options,
     const ReliabilityDataPolicy& data_policy);
+
+ReliabilityConfigurationValidation validate_reliability_configuration(
+    const HybridPowerSystem& sys,
+    const ReliabilityConfiguration& configuration,
+    const ReliabilityDataPolicy& data_policy = ReliabilityDataPolicy{});
+
+ReliabilityConfiguration resolve_reliability_configuration(
+    const HybridPowerSystem& sys,
+    ReliabilityConfiguration configuration,
+    const ReliabilityDataPolicy& data_policy = ReliabilityDataPolicy{});
 
 /// Summarize a catalog into a coverage record.
 FailureModeCoverage summarize_failure_mode_coverage(
@@ -285,7 +371,8 @@ std::string to_string(MutationCategory c);
 ConsequencePatch build_consequence_patch(
     const HybridPowerSystem& sys,
     const FailureModeReliability& mode,
-    const ConsequenceModelCapabilities& capabilities);
+    const ConsequenceModelCapabilities& capabilities,
+    const ReliabilityConfiguration* configuration = nullptr);
 
 /// Apply a patch to a COPY of `sys` and return the mutated system for the
 /// representable mutations.  Non-representable mutations are skipped (their

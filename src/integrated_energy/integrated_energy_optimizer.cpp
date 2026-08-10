@@ -43,11 +43,16 @@ double positive_or_zero(double v) {
   return std::isfinite(v) ? std::max(0.0, v) : 0.0;
 }
 
-double bounded_efficiency(double v, double fallback) {
-  if (!std::isfinite(v) || v <= 0.0 || v > 1.5) {
-    return fallback;
+double require_unit_efficiency(double value, const char* field_name) {
+  // Passive conversion and storage factors obey 0 < eta <= 1. Heat-pump COP
+  // is validated separately because it is a performance ratio, not eta.
+  // Contract and carrier-balance derivation: docs/integrated_energy_contract.md.
+  if (!std::isfinite(value) || value <= 0.0 || value > 1.0) {
+    throw std::invalid_argument(
+        std::string("CampusIESData.") + field_name +
+        " must be finite and in (0, 1]");
   }
-  return v;
+  return value;
 }
 
 std::vector<double> profile_or_default(const std::vector<double>& src,
@@ -87,6 +92,12 @@ CampusIESData normalize_data(const CampusIESData& input) {
     throw std::invalid_argument("CampusIESData.step_duration_hr must be positive");
   }
   const int n = d.num_steps;
+  if (!std::isfinite(d.fixed_power_factor) ||
+      std::abs(d.fixed_power_factor - 1.0) > 1e-12) {
+    throw std::invalid_argument(
+        "CampusIESData.fixed_power_factor must be 1.0 because the campus MILP "
+        "does not model reactive power or network voltage");
+  }
 
   d.import_limit_mw = positive_or_zero(d.import_limit_mw);
   d.export_limit_mw = positive_or_zero(d.export_limit_mw);
@@ -150,22 +161,37 @@ CampusIESData normalize_data(const CampusIESData& input) {
   d.daily_weekly_hydrogen_transfer_max_mw = positive_or_zero(d.daily_weekly_hydrogen_transfer_max_mw);
   d.weekly_seasonal_hydrogen_transfer_max_mw = positive_or_zero(d.weekly_seasonal_hydrogen_transfer_max_mw);
 
-  d.eta_electrolysis = bounded_efficiency(d.eta_electrolysis, 0.65);
-  d.eta_power_to_fuel = bounded_efficiency(d.eta_power_to_fuel, 0.50);
-  d.eta_fuelcell = bounded_efficiency(d.eta_fuelcell, 0.52);
+  d.eta_electrolysis = require_unit_efficiency(d.eta_electrolysis, "eta_electrolysis");
+  d.eta_power_to_fuel = require_unit_efficiency(d.eta_power_to_fuel, "eta_power_to_fuel");
+  d.eta_fuelcell = require_unit_efficiency(d.eta_fuelcell, "eta_fuelcell");
   if (!std::isfinite(d.cop_heatpump) || d.cop_heatpump <= 0.0) {
     d.cop_heatpump = 3.2;
   }
-  d.eta_chp_elec = bounded_efficiency(d.eta_chp_elec, 0.35);
-  d.eta_chp_heat = bounded_efficiency(d.eta_chp_heat, 0.45);
-  d.eta_chp_total = bounded_efficiency(d.eta_chp_total, 0.82);
-  d.eta_storage_charge = bounded_efficiency(d.eta_storage_charge, 0.95);
-  d.eta_storage_discharge = bounded_efficiency(d.eta_storage_discharge, 0.95);
-  d.electric_storage_retention = bounded_efficiency(d.electric_storage_retention, 0.999);
-  d.thermal_storage_retention = bounded_efficiency(d.thermal_storage_retention, 0.995);
-  d.hydrogen_storage_retention = bounded_efficiency(d.hydrogen_storage_retention, 0.999);
-  d.weekly_hydrogen_storage_retention = bounded_efficiency(d.weekly_hydrogen_storage_retention, 0.9995);
-  d.seasonal_hydrogen_storage_retention = bounded_efficiency(d.seasonal_hydrogen_storage_retention, 0.9998);
+  d.eta_chp_elec = require_unit_efficiency(d.eta_chp_elec, "eta_chp_elec");
+  d.eta_chp_heat = require_unit_efficiency(d.eta_chp_heat, "eta_chp_heat");
+  d.eta_chp_total = require_unit_efficiency(d.eta_chp_total, "eta_chp_total");
+  d.eta_storage_charge = require_unit_efficiency(d.eta_storage_charge, "eta_storage_charge");
+  d.eta_storage_discharge = require_unit_efficiency(d.eta_storage_discharge, "eta_storage_discharge");
+  d.electric_storage_retention = require_unit_efficiency(
+      d.electric_storage_retention, "electric_storage_retention");
+  d.thermal_storage_retention = require_unit_efficiency(
+      d.thermal_storage_retention, "thermal_storage_retention");
+  d.hydrogen_storage_retention = require_unit_efficiency(
+      d.hydrogen_storage_retention, "hydrogen_storage_retention");
+  d.weekly_hydrogen_storage_retention = require_unit_efficiency(
+      d.weekly_hydrogen_storage_retention,
+      "weekly_hydrogen_storage_retention");
+  d.seasonal_hydrogen_storage_retention = require_unit_efficiency(
+      d.seasonal_hydrogen_storage_retention,
+      "seasonal_hydrogen_storage_retention");
+  d.eta_daily_to_weekly = require_unit_efficiency(
+      d.eta_daily_to_weekly, "eta_daily_to_weekly");
+  d.eta_weekly_to_daily = require_unit_efficiency(
+      d.eta_weekly_to_daily, "eta_weekly_to_daily");
+  d.eta_weekly_to_seasonal = require_unit_efficiency(
+      d.eta_weekly_to_seasonal, "eta_weekly_to_seasonal");
+  d.eta_seasonal_to_weekly = require_unit_efficiency(
+      d.eta_seasonal_to_weekly, "eta_seasonal_to_weekly");
 
   d.ev_ratio = positive_or_zero(d.ev_ratio);
   d.hv_ratio = positive_or_zero(d.hv_ratio);
@@ -751,6 +777,10 @@ CampusIESResult solve_campus_ies(const CampusIESData& raw_data,
   const auto sr = m.solve(solve_options);
 
   CampusIESResult result;
+  result.pcc_ac_bus = data.pcc_ac_bus;
+  result.model_limitations = {
+      "The PCC is an aggregate active-power exchange and is not coupled to an AC network.",
+      "Reactive power, bus voltages, branch flows, and electrical security limits are not modelled."};
   result.feasible = sr.has_primal();
   result.optimal = sr.is_optimal() &&
                    std::isfinite(sr.optimality_gap) &&
@@ -829,7 +859,9 @@ CampusIESResult solve_campus_ies(const CampusIESData& raw_data,
   result.total_heat_load_mwh = profile_sum_energy(data.heat_load_mw, dt);
   result.total_hydrogen_load_mwh = profile_sum_energy(data.hydrogen_load_mw, dt);
   result.total_fuel_load_mwh = profile_sum_energy(data.fuel_load_mw, dt);
-  result.total_transport_km = sum_vec(data.transport_demand_km);
+  result.total_transport_km = sum_vec(result.d_ev_km) +
+                              sum_vec(result.d_hv_km) +
+                              sum_vec(result.d_icv_km);
   result.total_emissions_tco2 = sum_vec(result.emissions_tco2);
   result.total_co2_captured_tco2 = sum_vec(result.co2_captured_tco2);
   result.total_carbon_residual_tco2 = sum_vec(result.carbon_residual_tco2);

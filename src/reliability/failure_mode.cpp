@@ -10,9 +10,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 #include "hacdcpf/util/parallel_execution.hpp"
@@ -25,6 +27,7 @@ namespace hacdcpf::analysis {
 // ═══════════════════════════════════════════════════════════════════════
 std::string to_string(ReliabilityComponentKind k) {
   switch (k) {
+    case ReliabilityComponentKind::ACBus:                return "ac_bus";
     case ReliabilityComponentKind::ACGenerator:          return "ac_generator";
     case ReliabilityComponentKind::ACBranch:             return "ac_branch";
     case ReliabilityComponentKind::ACLoad:               return "ac_load";
@@ -38,6 +41,7 @@ std::string to_string(ReliabilityComponentKind k) {
     case ReliabilityComponentKind::ACSwitch:             return "ac_switch";
     case ReliabilityComponentKind::ACCircuitBreaker:     return "ac_circuit_breaker";
     case ReliabilityComponentKind::ExternalGrid:         return "external_grid";
+    case ReliabilityComponentKind::DCBus:                return "dc_bus";
     case ReliabilityComponentKind::DCBusLoad:            return "dc_bus_load";
     case ReliabilityComponentKind::DCBranch:             return "dc_branch";
     case ReliabilityComponentKind::DCLoad:               return "dc_load";
@@ -59,6 +63,17 @@ std::string to_string(ReliabilityComponentKind k) {
     case ReliabilityComponentKind::Charger:              return "charger";
     case ReliabilityComponentKind::ChargingStation:      return "charging_station";
     case ReliabilityComponentKind::AsynchronousMotor:    return "asynchronous_motor";
+    case ReliabilityComponentKind::ACRegulatorControl:   return "ac_regulator_control";
+    case ReliabilityComponentKind::DCDedicatedStorage:   return "dc_dedicated_storage";
+    case ReliabilityComponentKind::LCCConverter:         return "lcc_converter";
+    case ReliabilityComponentKind::ThreePhaseACBus:      return "three_phase_ac_bus";
+    case ReliabilityComponentKind::ThreePhaseACLine:     return "three_phase_ac_line";
+    case ReliabilityComponentKind::ThreePhaseTransformer:return "three_phase_transformer";
+    case ReliabilityComponentKind::ThreePhaseLoad:       return "three_phase_load";
+    case ReliabilityComponentKind::ThreePhaseGenerator:  return "three_phase_generator";
+    case ReliabilityComponentKind::ThreePhaseExternalGrid:return "three_phase_external_grid";
+    case ReliabilityComponentKind::ThreePhaseRegulatorControl:
+      return "three_phase_regulator_control";
     case ReliabilityComponentKind::Unknown:              return "unknown";
   }
   return "unknown";
@@ -136,6 +151,7 @@ std::string nm(const std::string& name, const char* prefix, int idx) {
 // ── Per-component-kind domain string ─────────────────────────────────────
 const char* domain_of(ReliabilityComponentKind k) {
   switch (k) {
+    case ReliabilityComponentKind::DCBus:
     case ReliabilityComponentKind::DCBranch:
     case ReliabilityComponentKind::DCLoad:
     case ReliabilityComponentKind::DCBusLoad:
@@ -144,11 +160,13 @@ const char* domain_of(ReliabilityComponentKind k) {
     case ReliabilityComponentKind::DCCircuitBreaker:
     case ReliabilityComponentKind::DCStorage:
     case ReliabilityComponentKind::DCPVArray:
+    case ReliabilityComponentKind::DCDedicatedStorage:
       return "DC";
     case ReliabilityComponentKind::DCDCConverter:
     case ReliabilityComponentKind::VSCConverter:
     case ReliabilityComponentKind::EnergyRouter:
     case ReliabilityComponentKind::EnergyRouterPort:
+    case ReliabilityComponentKind::LCCConverter:
       return "Hybrid";
     default:
       return "AC";
@@ -161,14 +179,35 @@ struct CatalogCtx {
   const ReliabilityDataPolicy& policy;
   std::vector<FailureModeCatalogEntry>& out;
 
-  ComponentRef make_ref(ReliabilityComponentKind k, int idx, const std::string& name) const {
+  const FailureModeParameterOverride* override_for(
+      const std::string& mode_id) const {
+    if (!opt.configuration) return nullptr;
+    for (const auto& value : opt.configuration->mode_overrides)
+      if (value.mode_id == mode_id) return &value;
+    return nullptr;
+  }
+
+  const ProtectionConfiguration* protection_for(
+      const std::string& component_id) const {
+    if (!opt.configuration) return nullptr;
+    for (const auto& value : opt.configuration->protection)
+      if (value.enabled && value.protective_device_id == component_id)
+        return &value;
+    return nullptr;
+  }
+
+  ComponentRef make_ref(ReliabilityComponentKind k, int position,
+                        const std::string& name, int component_index,
+                        const std::string& owner_id = {}) const {
     ComponentRef ref;
     ref.kind = k;
-    ref.element_index = idx;
+    ref.element_index = position;
+    ref.component_index = component_index;
     ref.element_name = name;
     ref.domain = domain_of(k);
-    ref.stable_id = to_string(k) + ":" +
-                    (name.empty() ? std::to_string(idx) : name);
+    ref.stable_id = to_string(k) + ":";
+    if (!owner_id.empty()) ref.stable_id += owner_id + "/";
+    ref.stable_id += std::to_string(component_index);
     return ref;
   }
 
@@ -177,7 +216,7 @@ struct CatalogCtx {
   // per-mode template fallbacks used when case data is incomplete.
   void add(const ComponentRef& ref, const std::string& suffix,
            const std::string& disp, FailureActivation act, FailureCause cause,
-           FailureConsequenceKind cons, const ReliabilityRawFields& raw,
+           FailureConsequenceKind cons, const ReliabilityRawFields& raw_input,
            double def_lambda, double def_repair,
            double iso_hr, double sw_hr, double residual_capacity = 0.5) {
     if (!kind_included(ref.kind, opt)) return;
@@ -193,6 +232,50 @@ struct CatalogCtx {
     e.mode.ref.cause = cause;
     e.mode.ref.consequence = cons;
 
+    ReliabilityRawFields raw = raw_input;
+    const auto* protection = protection_for(ref.stable_id);
+    if (protection && cons == FailureConsequenceKind::FailToTrip) {
+      raw.probability_per_demand = protection->fail_to_trip_probability;
+      raw.active_params_are_template = false;
+    } else if (protection && cons == FailureConsequenceKind::FailToOpen) {
+      raw.probability_per_demand = protection->fail_to_open_probability;
+      raw.active_params_are_template = false;
+    } else if (protection && cons == FailureConsequenceKind::NuisanceTrip) {
+      raw.failure_rate_per_year = protection->nuisance_trip_frequency_per_year;
+    }
+
+    const auto* custom = override_for(e.mode.ref.mode_id);
+    if (custom) {
+      if (custom->failure_rate_per_year) {
+        raw.failure_rate_per_year = *custom->failure_rate_per_year;
+        raw.mtbf_hours = 0.0;
+        raw.forced_outage_rate = 0.0;
+      }
+      if (custom->mtbf_hours) {
+        raw.mtbf_hours = *custom->mtbf_hours;
+        raw.failure_rate_per_year = 0.0;
+        raw.forced_outage_rate = 0.0;
+      }
+      if (custom->mttr_hours) {
+        raw.mttr_hours = *custom->mttr_hours;
+        raw.mttr_hr = 0.0;
+      }
+      if (custom->forced_outage_rate) {
+        raw.forced_outage_rate = *custom->forced_outage_rate;
+        raw.failure_rate_per_year = 0.0;
+        raw.mtbf_hours = 0.0;
+      }
+      if (custom->demand_frequency_per_year)
+        raw.demand_frequency_per_year = *custom->demand_frequency_per_year;
+      if (custom->probability_per_demand) {
+        raw.probability_per_demand = *custom->probability_per_demand;
+        raw.active_params_are_template = false;
+      }
+      if (custom->repair_hr) raw.mttr_hr = *custom->repair_hr;
+      if (custom->cyber_recovery_hr)
+        raw.cyber_recovery_hr = *custom->cyber_recovery_hr;
+    }
+
     e.mode.params = resolve_reliability_params(raw, policy, def_lambda, def_repair);
     e.mode.probability_per_demand = raw.probability_per_demand;
     e.mode.demand_frequency_per_year = raw.demand_frequency_per_year;
@@ -201,6 +284,90 @@ struct CatalogCtx {
     e.mode.switching_hr = sw_hr;
     e.mode.repair_hr = e.mode.params.repair_hr;
     e.mode.residual_capacity_factor = residual_capacity;
+    const double hours_per_year =
+        std::isfinite(policy.hours_per_year) && policy.hours_per_year > 0.0
+            ? policy.hours_per_year
+            : 8760.0;
+    auto set_resolved_lambda = [&](double lambda) {
+      e.mode.params.lambda_per_year = lambda;
+      e.mode.params.mttf_hr = lambda > 0.0 ? hours_per_year / lambda : 0.0;
+      const double repair = e.mode.params.repair_hr;
+      if (lambda > 0.0 && repair > 0.0) {
+        const double mu = hours_per_year / repair;
+        e.mode.params.unavailability = lambda / (lambda + mu);
+      } else {
+        e.mode.params.unavailability = 0.0;
+      }
+    };
+    if (protection && cons == FailureConsequenceKind::FailToTrip) {
+      e.mode.probability_per_demand = protection->fail_to_trip_probability;
+      e.mode.params.probability_per_demand =
+          protection->fail_to_trip_probability;
+      e.mode.params.lambda_active_per_year =
+          raw.demand_frequency_per_year * protection->fail_to_trip_probability;
+      set_resolved_lambda(e.mode.params.lambda_active_per_year);
+      e.mode.params.data_source = "user_override";
+      e.mode.params.has_data = true;
+    } else if (protection && cons == FailureConsequenceKind::FailToOpen) {
+      e.mode.probability_per_demand = protection->fail_to_open_probability;
+      e.mode.params.probability_per_demand =
+          protection->fail_to_open_probability;
+      e.mode.params.lambda_active_per_year =
+          raw.demand_frequency_per_year * protection->fail_to_open_probability;
+      set_resolved_lambda(e.mode.params.lambda_active_per_year);
+      e.mode.params.data_source = "user_override";
+      e.mode.params.has_data = true;
+    } else if (protection && cons == FailureConsequenceKind::NuisanceTrip) {
+      set_resolved_lambda(protection->nuisance_trip_frequency_per_year);
+      e.mode.params.data_source = "user_override";
+      e.mode.params.has_data = true;
+    }
+    if (custom) {
+      if (custom->enabled) e.enabled = *custom->enabled;
+      if (custom->failure_rate_per_year)
+        set_resolved_lambda(*custom->failure_rate_per_year);
+      if (custom->forced_outage_rate) {
+        const double unavailable = *custom->forced_outage_rate;
+        e.mode.params.unavailability = unavailable;
+        if (unavailable == 0.0) {
+          e.mode.params.lambda_per_year = 0.0;
+          e.mode.params.mttf_hr = 0.0;
+        }
+      }
+      if (custom->demand_frequency_per_year || custom->probability_per_demand) {
+        e.mode.params.demand_frequency_per_year = raw.demand_frequency_per_year;
+        e.mode.params.probability_per_demand = raw.probability_per_demand;
+        e.mode.params.lambda_active_per_year =
+            raw.demand_frequency_per_year * raw.probability_per_demand;
+        set_resolved_lambda(e.mode.params.lambda_active_per_year);
+      }
+      if (custom->probability_given_initiated)
+        e.mode.probability_given_initiated =
+            *custom->probability_given_initiated;
+      if (custom->isolation_hr) e.mode.isolation_hr = *custom->isolation_hr;
+      if (custom->switching_hr) e.mode.switching_hr = *custom->switching_hr;
+      if (custom->mttr_hours) {
+        e.mode.params.repair_hr = *custom->mttr_hours;
+        e.mode.repair_hr = *custom->mttr_hours;
+        set_resolved_lambda(e.mode.params.lambda_per_year);
+      }
+      if (custom->cyber_recovery_hr) {
+        e.mode.params.cyber_recovery_hr = *custom->cyber_recovery_hr;
+        e.mode.params.repair_hr = *custom->cyber_recovery_hr;
+        e.mode.cyber_recovery_hr = *custom->cyber_recovery_hr;
+        e.mode.repair_hr = *custom->cyber_recovery_hr;
+        set_resolved_lambda(e.mode.params.lambda_per_year);
+      }
+      if (custom->repair_hr) {
+        e.mode.repair_hr = *custom->repair_hr;
+        e.mode.params.repair_hr = *custom->repair_hr;
+        set_resolved_lambda(e.mode.params.lambda_per_year);
+      }
+      if (custom->residual_capacity_factor)
+        e.mode.residual_capacity_factor = *custom->residual_capacity_factor;
+      e.mode.params.data_source = "user_override";
+      e.mode.params.has_data = true;
+    }
 
     // Disable modes that resolved to missing data under strict policy.
     if (e.mode.params.data_source == "missing") {
@@ -259,11 +426,31 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
 
   auto inservice = [&](bool s) { return !options.only_in_service || s; };
 
+  // Screening templates are user-replaceable priors, not equipment standards;
+  // parameter precedence and validity boundaries are documented in the
+  // reliability model contract, section 3.4.
+  for (size_t i = 0; i < sys.ac.buses.size(); ++i) {
+    const auto& bus = sys.ac.buses[i];
+    if (!inservice(bus.in_service)) continue;
+    auto ref = ctx.make_ref(K::ACBus, static_cast<int>(i),
+                            nm(bus.name, "ACBus_", bus.index), bus.index);
+    ctx.add(ref, "busbar_fault", "AC busbar fault", A::Passive, C::Physical,
+            Q::ForcedOutage, rf_lambda(0.0, 0.0), 0.01, 8.0, iso, sw);
+  }
+  for (size_t i = 0; i < sys.dc.buses.size(); ++i) {
+    const auto& bus = sys.dc.buses[i];
+    if (!inservice(bus.in_service)) continue;
+    auto ref = ctx.make_ref(K::DCBus, static_cast<int>(i),
+                            nm(bus.name, "DCBus_", bus.index), bus.index);
+    ctx.add(ref, "busbar_fault", "DC busbar fault", A::Passive, C::Physical,
+            Q::ForcedOutage, rf_lambda(0.0, 0.0), 0.01, 8.0, iso, sw);
+  }
+
   // ── AC generators ──
   for (size_t i = 0; i < sys.ac.generators.size(); ++i) {
     const auto& g = sys.ac.generators[i];
     if (!inservice(g.in_service)) continue;
-    auto ref = ctx.make_ref(K::ACGenerator, (int)i, nm(g.name, "Gen_", g.index));
+    auto ref = ctx.make_ref(K::ACGenerator, (int)i, nm(g.name, "Gen_", g.index), g.index);
     ctx.add(ref, "forced_outage", "forced outage", A::Passive, C::Physical,
             Q::ForcedOutage, rf_for(g.forced_outage_rate, g.mttr_hr),
             8760.0 / 2000.0, 50.0, iso, sw);
@@ -279,7 +466,7 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
     const auto& b = sys.ac.branches[i];
     if (!inservice(b.in_service)) continue;
     auto ref = ctx.make_ref(K::ACBranch, (int)i,
-        nm(b.name, "ACBr_", b.index));
+        nm(b.name, "ACBr_", b.index), b.index);
     ctx.add(ref, "permanent_fault", "permanent line/cable fault", A::Passive,
             C::Physical, Q::ForcedOutage, rf_lambda(b.failure_rate, b.mttr_hr),
             0.35, 10.0, iso, sw);
@@ -291,7 +478,8 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
   for (size_t i = 0; i < sys.ac.transformers_2w.size(); ++i) {
     const auto& t = sys.ac.transformers_2w[i];
     if (!inservice(t.in_service)) continue;
-    auto ref = ctx.make_ref(K::ACTransformer2W, (int)i, nm(t.name, "Trafo2W_", t.index));
+    auto ref = ctx.make_ref(K::ACTransformer2W, (int)i,
+                            nm(t.name, "Trafo2W_", t.index), t.index);
     ctx.add(ref, "internal_fault", "internal fault", A::Passive, C::Physical,
             Q::ForcedOutage, rf_mtbf(t.mtbf_hours, t.mttr_hours), 0.03, 200.0, iso, sw);
     ctx.add(ref, "tap_changer_failure", "tap-changer failure", A::ActiveOnDemand,
@@ -303,7 +491,8 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
   for (size_t i = 0; i < sys.ac.transformers_3w.size(); ++i) {
     const auto& t = sys.ac.transformers_3w[i];
     if (!inservice(t.in_service)) continue;
-    auto ref = ctx.make_ref(K::ACTransformer3W, (int)i, nm(t.name, "Trafo3W_", t.index));
+    auto ref = ctx.make_ref(K::ACTransformer3W, (int)i,
+                            nm(t.name, "Trafo3W_", t.index), t.index);
     ctx.add(ref, "internal_fault", "internal fault", A::Passive, C::Physical,
             Q::ForcedOutage, rf_mtbf(t.mtbf_hours, t.mttr_hours), 0.04, 200.0, iso, sw);
     ctx.add(ref, "cooling_derating", "cooling derating", A::Passive, C::Physical,
@@ -314,7 +503,8 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
   for (size_t i = 0; i < sys.ac.static_generators.size(); ++i) {
     const auto& sg = sys.ac.static_generators[i];
     if (!inservice(sg.in_service)) continue;
-    auto ref = ctx.make_ref(K::ACStaticGenerator, (int)i, nm(sg.name, "SGen_", sg.index));
+    auto ref = ctx.make_ref(K::ACStaticGenerator, (int)i,
+                            nm(sg.name, "SGen_", sg.index), sg.index);
     ctx.add(ref, "unit_outage", "unit outage", A::Passive, C::Physical,
             Q::ForcedOutage, rf_mtbf(sg.mtbf_hours, sg.mttr_hours), 1.5, 24.0, iso, sw);
     ctx.add(ref, "dispatch_control_unavailable", "dispatch/control unavailable",
@@ -324,7 +514,8 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
   for (size_t i = 0; i < sys.ac.renewable_gens.size(); ++i) {
     const auto& rg = sys.ac.renewable_gens[i];
     if (!inservice(rg.in_service)) continue;
-    auto ref = ctx.make_ref(K::ACRenewableGenerator, (int)i, nm(rg.name, "RGen_", rg.index));
+    auto ref = ctx.make_ref(K::ACRenewableGenerator, (int)i,
+                            nm(rg.name, "RGen_", rg.index), rg.index);
     ctx.add(ref, "unit_outage", "unit outage", A::Passive, C::Physical,
             Q::ForcedOutage, rf_mtbf(rg.mtbf_hours, rg.mttr_hours), 2.0, 48.0, iso, sw);
     ctx.add(ref, "resource_derating", "resource/availability derating", A::Passive,
@@ -335,7 +526,8 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
   for (size_t i = 0; i < sys.ac.pv_systems.size(); ++i) {
     const auto& pv = sys.ac.pv_systems[i];
     if (!inservice(pv.in_service)) continue;
-    auto ref = ctx.make_ref(K::ACPVSystem, (int)i, nm(pv.name, "PV_", pv.index));
+    auto ref = ctx.make_ref(K::ACPVSystem, (int)i,
+                            nm(pv.name, "PV_", pv.index), pv.index);
     ctx.add(ref, "plant_outage", "whole plant outage", A::Passive, C::Physical,
             Q::ForcedOutage, rf_mtbf(pv.mtbf_hours, pv.mttr_hours), 1.5, 24.0, iso, sw);
     ctx.add(ref, "inverter_failure", "inverter failure", A::Passive, C::Physical,
@@ -346,7 +538,8 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
   for (size_t i = 0; i < sys.ac.storage.size(); ++i) {
     const auto& st = sys.ac.storage[i];
     if (!inservice(st.in_service)) continue;
-    auto ref = ctx.make_ref(K::ACStorage, (int)i, nm(st.name, "BESS_", st.index));
+    auto ref = ctx.make_ref(K::ACStorage, (int)i,
+                            nm(st.name, "BESS_", st.index), st.index);
     ctx.add(ref, "unit_outage", "whole unit outage", A::Passive, C::Physical,
             Q::ForcedOutage, rf_for(st.forced_outage_rate, st.mttr_hr), 1.0, 24.0, iso, sw);
     ctx.add(ref, "pcs_failure", "PCS power-stage failure", A::Passive, C::Physical,
@@ -359,7 +552,8 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
   for (size_t i = 0; i < sys.ac.switches.size(); ++i) {
     const auto& s = sys.ac.switches[i];
     if (!inservice(s.in_service)) continue;
-    auto ref = ctx.make_ref(K::ACSwitch, (int)i, nm(s.name, "SW_", s.index));
+    auto ref = ctx.make_ref(K::ACSwitch, (int)i,
+                            nm(s.name, "SW_", s.index), s.index);
     // Passive hardware outage.
     ReliabilityRawFields hw = rf_mtbf(s.mtbf_hours, s.mttr_hours);
     ctx.add(ref, "hardware_outage", "mechanism unavailable", A::Passive, C::Physical,
@@ -396,6 +590,9 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
     }
     ctx.add(ref, "stuck_closed", "stuck closed", A::Passive, C::Physical,
             Q::StuckClosed, rf_lambda(0.0, 0.0), 0.005, 4.0, iso, sw);
+    ctx.add(ref, "nuisance_trip", "nuisance trip", A::Passive,
+            C::ProtectionLogic, Q::NuisanceTrip, rf_lambda(0.0, 0.0),
+            0.01, 1.0, iso, sw);
     ctx.add(ref, "comm_loss", "remote command unavailable", A::Passive,
             C::Communication, Q::CommunicationLoss, rf_cyber(0.5, 2.0),
             0.5, 2.0, iso, sw);
@@ -405,7 +602,8 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
   for (size_t i = 0; i < sys.ac.circuit_breakers.size(); ++i) {
     const auto& cb = sys.ac.circuit_breakers[i];
     if (!inservice(cb.in_service)) continue;
-    auto ref = ctx.make_ref(K::ACCircuitBreaker, (int)i, nm(cb.name, "CB_", cb.index));
+    auto ref = ctx.make_ref(K::ACCircuitBreaker, (int)i,
+                            nm(cb.name, "CB_", cb.index), cb.index);
     ctx.add(ref, "hardware_outage", "breaker hardware outage", A::Passive, C::Physical,
             Q::ForcedOutage, rf_lambda(0.0, 0.0), 0.05, 8.0, iso, sw);
     ctx.add(ref, "fail_to_trip", "fail to trip for a fault", A::ActiveOnDemand,
@@ -424,7 +622,8 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
   for (size_t i = 0; i < sys.vsc_converters.size(); ++i) {
     const auto& v = sys.vsc_converters[i];
     if (!inservice(v.in_service)) continue;
-    auto ref = ctx.make_ref(K::VSCConverter, (int)i, nm(v.name, "VSC_", v.index));
+    auto ref = ctx.make_ref(K::VSCConverter, (int)i,
+                            nm(v.name, "VSC_", v.index), v.index);
     ctx.add(ref, "power_stage_outage", "power-stage outage", A::Passive, C::Physical,
             Q::ForcedOutage, rf_for(v.forced_outage_rate, v.mttr_hr), 0.10, 48.0, iso, sw);
     ctx.add(ref, "derating", "power-stage derating", A::Passive, C::Physical,
@@ -444,7 +643,8 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
   for (size_t i = 0; i < sys.dc.branches.size(); ++i) {
     const auto& b = sys.dc.branches[i];
     if (!inservice(b.in_service)) continue;
-    auto ref = ctx.make_ref(K::DCBranch, (int)i, nm(b.name, "DCBr_", b.index));
+    auto ref = ctx.make_ref(K::DCBranch, (int)i,
+                            nm(b.name, "DCBr_", b.index), b.index);
     ctx.add(ref, "pole_fault", "pole/cable permanent fault", A::Passive, C::Physical,
             Q::ForcedOutage, rf_mtbf(b.mtbf_hours, b.mttr_hours), 0.20, 24.0, iso, sw);
     ctx.add(ref, "derating", "derating", A::Passive, C::Physical, Q::Derating,
@@ -455,7 +655,8 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
   for (size_t i = 0; i < sys.dc.dcdc_converters.size(); ++i) {
     const auto& d = sys.dc.dcdc_converters[i];
     if (!inservice(d.in_service)) continue;
-    auto ref = ctx.make_ref(K::DCDCConverter, (int)i, nm(d.name, "DCDC_", d.index));
+    auto ref = ctx.make_ref(K::DCDCConverter, (int)i,
+                            nm(d.name, "DCDC_", d.index), d.index);
     ctx.add(ref, "power_stage_outage", "power-stage outage", A::Passive, C::Physical,
             Q::ForcedOutage, rf_mtbf(d.mtbf_hours, d.mttr_hours), 0.20, 48.0, iso, sw);
     ctx.add(ref, "derating", "power-stage derating", A::Passive, C::Physical,
@@ -470,7 +671,8 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
   for (size_t i = 0; i < sys.dc.dc_circuit_breakers.size(); ++i) {
     const auto& cb = sys.dc.dc_circuit_breakers[i];
     if (!inservice(cb.in_service)) continue;
-    auto ref = ctx.make_ref(K::DCCircuitBreaker, (int)i, nm(cb.name, "DCCB_", cb.index));
+    auto ref = ctx.make_ref(K::DCCircuitBreaker, (int)i,
+                            nm(cb.name, "DCCB_", cb.index), cb.index);
     ctx.add(ref, "hardware_outage", "breaker hardware outage", A::Passive, C::Physical,
             Q::ForcedOutage, rf_lambda(0.0, 0.0), 0.10, 8.0, iso, sw);
     ctx.add(ref, "fail_to_trip", "fail to trip for a DC fault", A::ActiveOnDemand,
@@ -478,13 +680,17 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
     ctx.add(ref, "fail_to_close", "fail to close during restoration",
             A::ActiveOnDemand, C::Physical, Q::FailToClose, rf_active(0.01, 2.0, 0.0),
             0.01, 1.0, iso, sw);
+    ctx.add(ref, "nuisance_trip", "nuisance trip", A::Passive,
+            C::ProtectionLogic, Q::NuisanceTrip, rf_lambda(0.0, 0.0),
+            0.01, 1.0, iso, sw);
   }
 
   // ── DC storage ──
   for (size_t i = 0; i < sys.dc.storage.size(); ++i) {
     const auto& st = sys.dc.storage[i];
     if (!inservice(st.in_service)) continue;
-    auto ref = ctx.make_ref(K::DCStorage, (int)i, nm(st.name, "DCStorage_", st.index));
+    auto ref = ctx.make_ref(K::DCStorage, (int)i,
+                            nm(st.name, "DCStorage_", st.index), st.index);
     ctx.add(ref, "unit_outage", "whole unit outage", A::Passive, C::Physical,
             Q::ForcedOutage, rf_for(st.forced_outage_rate, st.mttr_hr), 1.0, 24.0, iso, sw);
     ctx.add(ref, "bms_control_unavailable", "BMS/control unavailable", A::Passive,
@@ -495,7 +701,8 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
   for (size_t i = 0; i < sys.dc.pv_arrays.size(); ++i) {
     const auto& pv = sys.dc.pv_arrays[i];
     if (!inservice(pv.in_service)) continue;
-    auto ref = ctx.make_ref(K::DCPVArray, (int)i, nm(pv.name, "DCPV_", pv.index));
+    auto ref = ctx.make_ref(K::DCPVArray, (int)i,
+                            nm(pv.name, "DCPV_", pv.index), pv.index);
     ctx.add(ref, "array_outage", "array/string outage", A::Passive, C::Physical,
             Q::ForcedOutage, rf_mtbf(pv.mtbf_hours, pv.mttr_hours), 1.5, 24.0, iso, sw);
   }
@@ -504,14 +711,16 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
   for (size_t i = 0; i < sys.dc.dc_static_generators.size(); ++i) {
     const auto& sg = sys.dc.dc_static_generators[i];
     if (!inservice(sg.in_service)) continue;
-    auto ref = ctx.make_ref(K::DCStaticGenerator, (int)i, nm(sg.name, "DCSGen_", sg.index));
+    auto ref = ctx.make_ref(K::DCStaticGenerator, (int)i,
+                            nm(sg.name, "DCSGen_", sg.index), sg.index);
     ctx.add(ref, "source_outage", "source outage", A::Passive, C::Physical,
             Q::ForcedOutage, rf_mtbf(sg.mtbf_hours, sg.mttr_hours), 1.5, 24.0, iso, sw);
   }
   for (size_t i = 0; i < sys.dc.static_generators.size(); ++i) {
     const auto& sg = sys.dc.static_generators[i];
     if (!inservice(sg.in_service)) continue;
-    auto ref = ctx.make_ref(K::DCStaticGeneratorAC, (int)i, nm(sg.name, "DCSGen2_", sg.index));
+    auto ref = ctx.make_ref(K::DCStaticGeneratorAC, (int)i,
+                            nm(sg.name, "DCSGen2_", sg.index), sg.index);
     ctx.add(ref, "source_outage", "source outage", A::Passive, C::Physical,
             Q::ForcedOutage, rf_mtbf(sg.mtbf_hours, sg.mttr_hours), 1.5, 24.0, iso, sw);
   }
@@ -520,7 +729,8 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
   for (size_t i = 0; i < sys.ac.external_grids.size(); ++i) {
     const auto& eg = sys.ac.external_grids[i];
     if (!inservice(eg.in_service)) continue;
-    auto ref = ctx.make_ref(K::ExternalGrid, (int)i, nm(eg.name, "ExtGrid_", eg.index));
+    auto ref = ctx.make_ref(K::ExternalGrid, (int)i,
+                            nm(eg.name, "ExtGrid_", eg.index), eg.index);
     // ExternalGrid carries no asset reliability fields; use a utility supply-point
     // template (rare but high-impact) when policy permits defaulting.
     ctx.add(ref, "supply_unavailable", "upstream supply unavailable", A::Passive,
@@ -534,7 +744,8 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
   for (size_t i = 0; i < sys.ac.loads.size(); ++i) {
     const auto& ld = sys.ac.loads[i];
     if (!inservice(ld.in_service)) continue;
-    auto ref = ctx.make_ref(K::ACLoad, (int)i, nm(ld.name, "Load_", ld.index));
+    auto ref = ctx.make_ref(K::ACLoad, (int)i,
+                            nm(ld.name, "Load_", ld.index), ld.index);
     ctx.add(ref, "load_point_interruption", "load-point interruption", A::Passive,
             C::Physical, Q::ForcedOutage, rf_lambda(0.0, 0.0), 0.2, 3.0, iso, sw);
     if (ld.controllable)
@@ -547,7 +758,8 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
   for (size_t i = 0; i < sys.ac.flexible_loads.size(); ++i) {
     const auto& fl = sys.ac.flexible_loads[i];
     if (!inservice(fl.in_service)) continue;
-    auto ref = ctx.make_ref(K::FlexibleLoad, (int)i, nm(fl.name, "FlexLoad_", fl.index));
+    auto ref = ctx.make_ref(K::FlexibleLoad, (int)i,
+                            nm(fl.name, "FlexLoad_", fl.index), fl.index);
     ctx.add(ref, "dr_unavailable", "demand response unavailable", A::ActiveOnDemand,
             C::CyberControl, Q::ControlUnavailable, rf_active(0.05, 4.0, 0.0),
             0.0, 1.0, iso, sw);
@@ -557,7 +769,8 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
   for (size_t i = 0; i < sys.ac.asymmetric_loads.size(); ++i) {
     const auto& al = sys.ac.asymmetric_loads[i];
     if (!inservice(al.in_service)) continue;
-    auto ref = ctx.make_ref(K::AsymmetricLoad, (int)i, nm(al.name, "AsymLoad_", al.index));
+    auto ref = ctx.make_ref(K::AsymmetricLoad, (int)i,
+                            nm(al.name, "AsymLoad_", al.index), al.index);
     ctx.add(ref, "phase_interruption", "phase-specific load interruption", A::Passive,
             C::Physical, Q::ForcedOutage, rf_lambda(0.0, 0.0), 0.2, 3.0, iso, sw);
   }
@@ -566,7 +779,8 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
   for (size_t i = 0; i < sys.ac.shunts.size(); ++i) {
     const auto& sh = sys.ac.shunts[i];
     if (!inservice(sh.in_service)) continue;
-    auto ref = ctx.make_ref(K::Shunt, (int)i, nm(sh.name, "Shunt_", sh.index));
+    auto ref = ctx.make_ref(K::Shunt, (int)i,
+                            nm(sh.name, "Shunt_", sh.index), sh.index);
     ctx.add(ref, "shunt_unavailable", "shunt unavailable", A::Passive, C::Physical,
             Q::ForcedOutage, rf_lambda(0.0, 0.0), 0.1, 8.0, iso, sw);
   }
@@ -575,7 +789,8 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
   for (size_t i = 0; i < sys.ac.chargers.size(); ++i) {
     const auto& ch = sys.ac.chargers[i];
     if (!inservice(ch.in_service)) continue;
-    auto ref = ctx.make_ref(K::Charger, (int)i, nm(ch.name, "Charger_", ch.index));
+    auto ref = ctx.make_ref(K::Charger, (int)i,
+                            nm(ch.name, "Charger_", ch.index), ch.index);
     ctx.add(ref, "charger_outage", "charger outage", A::Passive, C::Physical,
             Q::ForcedOutage, rf_mtbf(ch.mtbf_hours, ch.mttr_hours), 1.0, 8.0, iso, sw);
     ctx.add(ref, "comm_failure", "communication/control failure", A::Passive,
@@ -586,7 +801,8 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
   for (size_t i = 0; i < sys.ac.charging_stations.size(); ++i) {
     const auto& cs = sys.ac.charging_stations[i];
     if (!inservice(cs.in_service)) continue;
-    auto ref = ctx.make_ref(K::ChargingStation, (int)i, nm(cs.name, "ChgStation_", cs.index));
+    auto ref = ctx.make_ref(K::ChargingStation, (int)i,
+                            nm(cs.name, "ChgStation_", cs.index), cs.index);
     ctx.add(ref, "station_outage", "station outage", A::Passive, C::Physical,
             Q::ForcedOutage, rf_mtbf(cs.mtbf_hours, cs.mttr_hours), 0.5, 8.0, iso, sw);
   }
@@ -595,7 +811,8 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
   for (size_t i = 0; i < sys.ac.motors.size(); ++i) {
     const auto& mo = sys.ac.motors[i];
     if (!inservice(mo.in_service)) continue;
-    auto ref = ctx.make_ref(K::AsynchronousMotor, (int)i, nm(mo.name, "Motor_", mo.index));
+    auto ref = ctx.make_ref(K::AsynchronousMotor, (int)i,
+                            nm(mo.name, "Motor_", mo.index), mo.index);
     ctx.add(ref, "motor_outage", "motor outage", A::Passive, C::Physical,
             Q::ForcedOutage, rf_lambda(0.0, 0.0), 0.5, 24.0, iso, sw);
     ctx.add(ref, "start_failure", "start failure on demand", A::ActiveOnDemand,
@@ -606,7 +823,8 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
   for (size_t i = 0; i < sys.dc.loads.size(); ++i) {
     const auto& ld = sys.dc.loads[i];
     if (!inservice(ld.in_service)) continue;
-    auto ref = ctx.make_ref(K::DCLoad, (int)i, nm(ld.name, "DCLoad_", ld.index));
+    auto ref = ctx.make_ref(K::DCLoad, (int)i,
+                            nm(ld.name, "DCLoad_", ld.index), ld.index);
     ctx.add(ref, "load_point_interruption", "DC load-point interruption", A::Passive,
             C::Physical, Q::ForcedOutage, rf_lambda(0.0, 0.0), 0.2, 3.0, iso, sw);
     if (ld.controllable)
@@ -619,7 +837,8 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
   for (size_t i = 0; i < sys.energy_routers.size(); ++i) {
     const auto& er = sys.energy_routers[i];
     if (!inservice(er.in_service)) continue;
-    auto ref = ctx.make_ref(K::EnergyRouter, (int)i, nm(er.name, "ERouter_", er.index));
+    auto ref = ctx.make_ref(K::EnergyRouter, (int)i,
+                            nm(er.name, "ERouter_", er.index), er.index);
     ctx.add(ref, "router_outage", "whole router outage", A::Passive, C::Physical,
             Q::ForcedOutage, rf_mtbf(er.mtbf_hours, er.mttr_hours), 0.2, 48.0, iso, sw);
     ctx.add(ref, "routing_control_failure", "routing/control failure", A::Passive,
@@ -630,7 +849,8 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
       const auto& port = er.ports[p];
       if (!inservice(port.in_service)) continue;
       auto pref = ctx.make_ref(K::EnergyRouterPort, (int)p,
-          nm(port.name, "ERPort_", port.index));
+          nm(port.name, "ERPort_", port.index), port.index,
+          std::to_string(er.index));
       ctx.add(pref, "port_outage", "port outage", A::Passive, C::Physical,
               Q::ForcedOutage, rf_lambda(0.0, 0.0), 0.3, 24.0, iso, sw);
     }
@@ -640,7 +860,8 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
   for (size_t i = 0; i < sys.mobile_storage.size(); ++i) {
     const auto& ms = sys.mobile_storage[i];
     if (!inservice(ms.in_service)) continue;
-    auto ref = ctx.make_ref(K::MobileStorage, (int)i, nm(ms.name, "MobStorage_", ms.index));
+    auto ref = ctx.make_ref(K::MobileStorage, (int)i,
+                            nm(ms.name, "MobStorage_", ms.index), ms.index);
     ctx.add(ref, "unit_outage", "whole unit outage", A::Passive, C::Physical,
             Q::ForcedOutage, rf_mtbf(ms.mtbf_hours, ms.mttr_hours), 1.0, 24.0, iso, sw);
     ctx.add(ref, "vehicle_unavailable", "vehicle unavailable", A::ActiveOnDemand,
@@ -654,7 +875,8 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
   for (size_t i = 0; i < sys.vpps.size(); ++i) {
     const auto& vpp = sys.vpps[i];
     if (!inservice(vpp.in_service)) continue;
-    auto ref = ctx.make_ref(K::VirtualPowerPlant, (int)i, nm(vpp.name, "VPP_", vpp.index));
+    auto ref = ctx.make_ref(K::VirtualPowerPlant, (int)i,
+                            nm(vpp.name, "VPP_", vpp.index), vpp.index);
     ctx.add(ref, "aggregation_unavailable", "aggregation unavailable", A::Passive,
             C::Physical, Q::ForcedOutage, rf_mtbf(vpp.mtbf_hours, vpp.mttr_hours),
             0.5, 4.0, iso, sw);
@@ -667,7 +889,8 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
   for (size_t i = 0; i < sys.microgrids.size(); ++i) {
     const auto& mg = sys.microgrids[i];
     if (!inservice(mg.in_service)) continue;
-    auto ref = ctx.make_ref(K::Microgrid, (int)i, nm(mg.name, "MGrid_", mg.index));
+    auto ref = ctx.make_ref(K::Microgrid, (int)i,
+                            nm(mg.name, "MGrid_", mg.index), mg.index);
     ctx.add(ref, "supply_outage", "grid-connected supply/export outage", A::Passive,
             C::Physical, Q::ForcedOutage, rf_mtbf(mg.mtbf_hours, mg.mttr_hours),
             0.3, 4.0, iso, sw);
@@ -679,7 +902,312 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
             rf_mtbf(mg.mtbf_hours, mg.mttr_hours), 0.3, 4.0, iso, sw);
   }
 
+  // Bus-level demands are distinct load points from explicit Load/DCLoad rows.
+  for (size_t i = 0; i < sys.ac.buses.size(); ++i) {
+    const auto& bus = sys.ac.buses[i];
+    if (!inservice(bus.in_service) || bus.pd_mw <= 0.0) continue;
+    auto ref = ctx.make_ref(K::ACBusLoad, (int)i,
+                            nm(bus.name, "ACBusLoad_", bus.index), bus.index);
+    ctx.add(ref, "load_point_interruption", "bus-level load interruption",
+            A::Passive, C::Physical, Q::ForcedOutage, rf_lambda(0.0, 0.0),
+            0.2, 3.0, iso, sw);
+  }
+  for (size_t i = 0; i < sys.dc.buses.size(); ++i) {
+    const auto& bus = sys.dc.buses[i];
+    if (!inservice(bus.in_service) || bus.pd_mw <= 0.0) continue;
+    auto ref = ctx.make_ref(K::DCBusLoad, (int)i,
+                            nm(bus.name, "DCBusLoad_", bus.index), bus.index);
+    ctx.add(ref, "load_point_interruption", "DC bus-level load interruption",
+            A::Passive, C::Physical, Q::ForcedOutage, rf_lambda(0.0, 0.0),
+            0.2, 3.0, iso, sw);
+  }
+
+  // Control objects have active-on-demand reliability even though they carry
+  // no physical in-service state in the rich model.
+  for (size_t i = 0; i < sys.ac.regulator_controls.size(); ++i) {
+    const auto& rc = sys.ac.regulator_controls[i];
+    if (!inservice(rc.enabled)) continue;
+    auto ref = ctx.make_ref(K::ACRegulatorControl, (int)i,
+                            nm(rc.name, "RegControl_", rc.index), rc.index);
+    ctx.add(ref, "control_unavailable", "tap regulator control unavailable",
+            A::ActiveOnDemand, C::CyberControl, Q::ControlUnavailable,
+            rf_active(0.01, 12.0, 0.0), 0.0, 4.0, iso, sw);
+  }
+
+  // Dedicated DC storage is a separate container from the legacy Storage row.
+  for (size_t i = 0; i < sys.dc.dc_storage.size(); ++i) {
+    const auto& st = sys.dc.dc_storage[i];
+    if (!inservice(st.in_service)) continue;
+    auto ref = ctx.make_ref(K::DCDedicatedStorage, (int)i,
+                            nm(st.name, "DCESS_", st.index), st.index);
+    ctx.add(ref, "unit_outage", "whole unit outage", A::Passive, C::Physical,
+            Q::ForcedOutage, rf_for(st.forced_outage_rate, st.mttr_hr),
+            1.0, 24.0, iso, sw);
+    ctx.add(ref, "bms_control_unavailable", "BMS/control unavailable",
+            A::Passive, C::CyberControl, Q::ControlUnavailable,
+            rf_cyber(0.0, 2.0), 0.3, 2.0, iso, sw);
+  }
+
+  // LCC imports currently carry no native reliability tuple. The template is
+  // explicit and remains replaceable through the same per-mode override API.
+  for (size_t i = 0; i < sys.lcc_converters.size(); ++i) {
+    const auto& lcc = sys.lcc_converters[i];
+    if (!inservice(lcc.in_service)) continue;
+    auto ref = ctx.make_ref(K::LCCConverter, (int)i,
+                            nm(lcc.name, "LCC_", lcc.index), lcc.index);
+    ctx.add(ref, "power_stage_outage", "power-stage outage", A::Passive,
+            C::Physical, Q::ForcedOutage, rf_lambda(0.0, 0.0),
+            0.2, 48.0, iso, sw);
+    ctx.add(ref, "firing_control_unavailable", "firing control unavailable",
+            A::Passive, C::CyberControl, Q::ControlUnavailable,
+            rf_cyber(0.3, 2.0), 0.3, 2.0, iso, sw);
+  }
+
+  if (sys.three_phase_ac) {
+    const auto& tp = *sys.three_phase_ac;
+    for (size_t i = 0; i < tp.buses.size(); ++i) {
+      const auto& bus = tp.buses[i];
+      if (!inservice(bus.in_service)) continue;
+      auto ref = ctx.make_ref(K::ThreePhaseACBus, static_cast<int>(i),
+                              nm(bus.name, "TPBus_", bus.index), bus.index);
+      ctx.add(ref, "busbar_fault", "three-phase busbar fault", A::Passive,
+              C::Physical, Q::ForcedOutage, rf_lambda(0.0, 0.0),
+              0.01, 8.0, iso, sw);
+    }
+    for (size_t i = 0; i < tp.lines.size(); ++i) {
+      const auto& line = tp.lines[i];
+      if (!inservice(line.in_service)) continue;
+      auto ref = ctx.make_ref(K::ThreePhaseACLine, (int)i,
+                              nm(line.name, "TPLine_", line.index), line.index);
+      ctx.add(ref, "permanent_fault", "three-phase line permanent fault",
+              A::Passive, C::Physical, Q::ForcedOutage,
+              rf_lambda(line.failure_rate, line.mttr_hr), 0.35, 10.0, iso, sw);
+    }
+    for (size_t i = 0; i < tp.transformers.size(); ++i) {
+      const auto& tr = tp.transformers[i];
+      if (!inservice(tr.in_service)) continue;
+      auto ref = ctx.make_ref(K::ThreePhaseTransformer, (int)i,
+                              nm(tr.name, "TPTrafo_", tr.index), tr.index);
+      ctx.add(ref, "internal_fault", "three-phase transformer internal fault",
+              A::Passive, C::Physical, Q::ForcedOutage,
+              rf_mtbf(tr.mtbf_hr, tr.mttr_hr), 0.03, 200.0, iso, sw);
+    }
+    for (size_t i = 0; i < tp.loads.size(); ++i) {
+      const auto& load = tp.loads[i];
+      if (!inservice(load.in_service)) continue;
+      auto ref = ctx.make_ref(K::ThreePhaseLoad, (int)i,
+                              nm(load.name, "TPLoad_", load.index), load.index);
+      ctx.add(ref, "phase_interruption", "three-phase load interruption",
+              A::Passive, C::Physical, Q::ForcedOutage, rf_lambda(0.0, 0.0),
+              0.2, 3.0, iso, sw);
+    }
+    for (size_t i = 0; i < tp.generators.size(); ++i) {
+      const auto& gen = tp.generators[i];
+      if (!inservice(gen.in_service)) continue;
+      auto ref = ctx.make_ref(K::ThreePhaseGenerator, (int)i,
+                              nm(gen.name, "TPGen_", gen.index), gen.index);
+      ctx.add(ref, "unit_outage", "three-phase generator outage", A::Passive,
+              C::Physical, Q::ForcedOutage, rf_lambda(0.0, 0.0),
+              1.0, 24.0, iso, sw);
+    }
+    for (size_t i = 0; i < tp.external_grids.size(); ++i) {
+      const auto& grid = tp.external_grids[i];
+      if (!inservice(grid.in_service)) continue;
+      auto ref = ctx.make_ref(K::ThreePhaseExternalGrid, (int)i,
+                              nm(grid.name, "TPGrid_", grid.index), grid.index);
+      ctx.add(ref, "supply_unavailable", "three-phase upstream supply unavailable",
+              A::Passive, C::Physical, Q::ForcedOutage, rf_lambda(0.0, 0.0),
+              0.1, 2.0, iso, sw);
+    }
+    for (size_t i = 0; i < tp.regulator_controls.size(); ++i) {
+      const auto& rc = tp.regulator_controls[i];
+      if (!inservice(rc.enabled)) continue;
+      auto ref = ctx.make_ref(K::ThreePhaseRegulatorControl, (int)i,
+                              nm(rc.name, "TPRegControl_", rc.index), rc.index);
+      ctx.add(ref, "control_unavailable", "three-phase regulator unavailable",
+              A::ActiveOnDemand, C::CyberControl, Q::ControlUnavailable,
+              rf_active(0.01, 12.0, 0.0), 0.0, 4.0, iso, sw);
+    }
+  }
+
   return out;
+}
+
+ReliabilityConfigurationValidation validate_reliability_configuration(
+    const HybridPowerSystem& sys,
+    const ReliabilityConfiguration& configuration,
+    const ReliabilityDataPolicy& data_policy) {
+  ReliabilityConfigurationValidation report;
+  FailureModeCatalogOptions options;
+  options.only_in_service = false;
+  const auto baseline = build_failure_mode_catalog(sys, options, data_policy);
+  std::unordered_set<std::string> mode_ids;
+  std::unordered_set<std::string> component_ids;
+  std::unordered_map<std::string, int> component_positions;
+  std::unordered_map<std::string, ReliabilityComponentKind> component_kinds;
+  for (const auto& entry : baseline) {
+    mode_ids.insert(entry.mode.ref.mode_id);
+    const auto& component = entry.mode.ref.component;
+    component_ids.insert(component.stable_id);
+    component_kinds.emplace(component.stable_id, component.kind);
+    const auto [position, inserted] = component_positions.emplace(
+        component.stable_id, component.element_index);
+    if (!inserted && position->second != component.element_index) {
+      const std::string message =
+          "duplicate stable component ID '" + component.stable_id +
+          "' from repeated .index values in component kind '" +
+          to_string(component.kind) + "'";
+      if (std::find(report.errors.begin(), report.errors.end(), message) ==
+          report.errors.end())
+        report.errors.push_back(message);
+    }
+  }
+
+  auto finite_nonnegative = [](const std::optional<double>& value) {
+    return !value || (std::isfinite(*value) && *value >= 0.0);
+  };
+  auto finite_positive = [](const std::optional<double>& value) {
+    return !value || (std::isfinite(*value) && *value > 0.0);
+  };
+  auto probability = [](const std::optional<double>& value,
+                        bool positive = false) {
+    return !value || (std::isfinite(*value) &&
+                      *value >= (positive ? std::numeric_limits<double>::min() : 0.0) &&
+                      *value <= 1.0);
+  };
+
+  std::unordered_set<std::string> override_ids;
+  for (const auto& value : configuration.mode_overrides) {
+    const std::string prefix = "mode_overrides[" + value.mode_id + "]: ";
+    if (value.mode_id.empty() || !mode_ids.count(value.mode_id))
+      report.errors.push_back(prefix + "mode_id does not exist in the current model");
+    if (!override_ids.insert(value.mode_id).second)
+      report.errors.push_back(prefix + "duplicate mode_id");
+    if (!finite_nonnegative(value.failure_rate_per_year) ||
+        !finite_positive(value.mtbf_hours) ||
+        !finite_nonnegative(value.mttr_hours) ||
+        !finite_nonnegative(value.demand_frequency_per_year) ||
+        !finite_nonnegative(value.isolation_hr) ||
+        !finite_nonnegative(value.switching_hr) ||
+        !finite_nonnegative(value.repair_hr) ||
+        !finite_nonnegative(value.cyber_recovery_hr))
+      report.errors.push_back(prefix + "rates and durations must be finite and non-negative");
+    if (!probability(value.forced_outage_rate) ||
+        !probability(value.probability_given_initiated) ||
+        !probability(value.probability_per_demand) ||
+        !probability(value.residual_capacity_factor, true))
+      report.errors.push_back(prefix + "probabilities must be in [0,1] and residual_capacity_factor in (0,1]");
+    if (value.forced_outage_rate && *value.forced_outage_rate >= 1.0)
+      report.errors.push_back(prefix + "forced_outage_rate must be in [0,1)");
+    const int hazard_forms = static_cast<int>(value.failure_rate_per_year.has_value()) +
+                             static_cast<int>(value.mtbf_hours.has_value()) +
+                             static_cast<int>(value.forced_outage_rate.has_value());
+    if (hazard_forms > 1)
+      report.errors.push_back(prefix + "specify only one of failure_rate_per_year, mtbf_hours, or forced_outage_rate");
+  }
+
+  std::unordered_set<std::string> protection_ids;
+  std::unordered_set<std::string> enabled_protective_devices;
+  for (const auto& value : configuration.protection) {
+    const std::string prefix = "protection[" + value.protection_id + "]: ";
+    if (value.protection_id.empty() ||
+        !protection_ids.insert(value.protection_id).second)
+      report.errors.push_back(prefix + "protection_id must be non-empty and unique");
+    auto require_component = [&](const std::string& field,
+                                 const std::string& component_id,
+                                 bool optional) {
+      if (component_id.empty() && optional) return;
+      if (component_id.empty() || !component_ids.count(component_id))
+        report.errors.push_back(prefix + field + " does not reference a current component");
+    };
+    require_component("protective_device_id", value.protective_device_id, false);
+    require_component("protected_component_id", value.protected_component_id, false);
+    require_component("backup_device_id", value.backup_device_id, true);
+    for (const auto& id : value.zone_component_ids)
+      require_component("zone_component_ids", id, false);
+    auto is_protective_device = [&](const std::string& id) {
+      const auto it = component_kinds.find(id);
+      if (it == component_kinds.end()) return false;
+      return it->second == ReliabilityComponentKind::ACSwitch ||
+             it->second == ReliabilityComponentKind::ACCircuitBreaker ||
+             it->second == ReliabilityComponentKind::DCCircuitBreaker;
+    };
+    if (component_ids.count(value.protective_device_id) &&
+        !is_protective_device(value.protective_device_id))
+      report.errors.push_back(prefix +
+                              "protective_device_id must reference a switch or circuit breaker");
+    if (!value.backup_device_id.empty() &&
+        component_ids.count(value.backup_device_id) &&
+        !is_protective_device(value.backup_device_id))
+      report.errors.push_back(prefix +
+                              "backup_device_id must reference a switch or circuit breaker");
+    if (value.enabled &&
+        !enabled_protective_devices.insert(value.protective_device_id).second)
+      report.errors.push_back(prefix +
+                              "only one enabled protection row is allowed per protective device");
+    auto valid_probability = [](double v) {
+      return std::isfinite(v) && v >= 0.0 && v <= 1.0;
+    };
+    if (!valid_probability(value.fail_to_trip_probability) ||
+        !valid_probability(value.fail_to_open_probability) ||
+        !valid_probability(value.successful_reclose_probability))
+      report.errors.push_back(prefix + "probabilities must be in [0,1]");
+    if (!std::isfinite(value.nuisance_trip_frequency_per_year) ||
+        value.nuisance_trip_frequency_per_year < 0.0)
+      report.errors.push_back(prefix +
+                              "nuisance-trip frequency must be finite and non-negative");
+    if (!std::isfinite(value.primary_clearing_time_s) ||
+        value.primary_clearing_time_s < 0.0 ||
+        !std::isfinite(value.backup_clearing_time_s) ||
+        value.backup_clearing_time_s < 0.0)
+      report.errors.push_back(prefix + "clearing times must be finite and non-negative");
+    if (value.enabled && value.zone_component_ids.empty())
+      report.errors.push_back(prefix + "enabled protection requires an explicit zone");
+    if (value.enabled && !value.protected_component_id.empty() &&
+        std::find(value.zone_component_ids.begin(), value.zone_component_ids.end(),
+                  value.protected_component_id) == value.zone_component_ids.end())
+      report.errors.push_back(prefix +
+                              "zone_component_ids must include protected_component_id");
+  }
+  return report;
+}
+
+ReliabilityConfiguration resolve_reliability_configuration(
+    const HybridPowerSystem& sys,
+    ReliabilityConfiguration configuration,
+    const ReliabilityDataPolicy& data_policy) {
+  FailureModeCatalogOptions options;
+  options.only_in_service = false;
+  const auto baseline = build_failure_mode_catalog(sys, options, data_policy);
+  std::unordered_map<std::string, ComponentRef> components;
+  for (const auto& entry : baseline)
+    components.emplace(entry.mode.ref.component.stable_id,
+                       entry.mode.ref.component);
+  for (auto& protection : configuration.protection) {
+    protection.resolved_protective_device.reset();
+    protection.resolved_protected_component.reset();
+    protection.resolved_backup_device.reset();
+    protection.resolved_zone_components.clear();
+    protection.resolved_zone_components.reserve(
+        protection.zone_component_ids.size());
+    for (const auto& id : protection.zone_component_ids) {
+      const auto it = components.find(id);
+      if (it != components.end())
+        protection.resolved_zone_components.push_back(it->second);
+    }
+    if (const auto it = components.find(protection.protective_device_id);
+        it != components.end())
+      protection.resolved_protective_device = it->second;
+    if (const auto it = components.find(protection.protected_component_id);
+        it != components.end())
+      protection.resolved_protected_component = it->second;
+    if (!protection.backup_device_id.empty()) {
+      if (const auto it = components.find(protection.backup_device_id);
+          it != components.end())
+        protection.resolved_backup_device = it->second;
+    }
+  }
+  return configuration;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -695,7 +1223,7 @@ FailureModeCoverage summarize_failure_mode_coverage(
     if (!e.supported_by_selected_consequence_model) cov.modes_unsupported++;
 
     const auto& src = e.mode.params.data_source;
-    if (src == "case") cov.modes_case_data++;
+    if (src == "case" || src == "user_override") cov.modes_case_data++;
     else if (src == "default" || e.mode.params.used_default) cov.modes_template_or_default++;
     else if (src == "missing") cov.modes_missing_data++;
 
@@ -790,7 +1318,8 @@ bool steady_state_engine_models(ReliabilityComponentKind k) {
 ConsequencePatch build_consequence_patch(
     const HybridPowerSystem& /*sys*/,
     const FailureModeReliability& mode,
-    const ConsequenceModelCapabilities& caps) {
+    const ConsequenceModelCapabilities& caps,
+    const ReliabilityConfiguration* configuration) {
   ConsequencePatch patch;
   patch.mode = mode.ref;
   const auto kind = mode.ref.component.kind;
@@ -804,6 +1333,27 @@ ConsequencePatch build_consequence_patch(
     m.factor = factor; m.note = note;
     patch.mutations.push_back(m);
   };
+  auto add_target_mut = [&](const ComponentRef& target, MutationCategory cat,
+                            MutationKind mk, const std::string& note) {
+    ConsequenceMutation m;
+    m.category = cat;
+    m.kind = mk;
+    m.target_kind = target.kind;
+    m.target_index = target.element_index;
+    m.note = note;
+    patch.mutations.push_back(std::move(m));
+    patch.affected_canonical_ids.push_back(target.stable_id);
+  };
+  const ProtectionConfiguration* custom_protection = nullptr;
+  if (configuration) {
+    for (const auto& value : configuration->protection) {
+      if (value.enabled &&
+          value.protective_device_id == mode.ref.component.stable_id) {
+        custom_protection = &value;
+        break;
+      }
+    }
+  }
   auto unsupported = [&](const std::string& reason) {
     patch.representable_by_selected_model = false;
     patch.unsupported_reason = reason;
@@ -816,6 +1366,8 @@ ConsequencePatch build_consequence_patch(
   // (handled via the ForceLoadShed mutation).  This is supported.
   const bool is_load_point = kind == ReliabilityComponentKind::ACLoad ||
                              kind == ReliabilityComponentKind::DCLoad ||
+                             kind == ReliabilityComponentKind::ACBusLoad ||
+                             kind == ReliabilityComponentKind::DCBusLoad ||
                              kind == ReliabilityComponentKind::AsymmetricLoad;
   if (is_load_point) {
     if (mode.ref.consequence == FailureConsequenceKind::ForcedOutage) {
@@ -946,10 +1498,53 @@ ConsequencePatch build_consequence_patch(
       break;
     case FailureConsequenceKind::FailToTrip:
     case FailureConsequenceKind::ProtectionZoneTrip:
-      if (caps.supports_protection_modeling)
-        add_mut(MutationCategory::Protection, MutationKind::ProtectionZoneExpansion,
-                0.0, "breaker fail-to-trip: backup protection expands the outage zone");
-      else unsupported("protection misoperation needs a protection-zone model");
+      if (caps.supports_protection_modeling) {
+        if (custom_protection &&
+            !custom_protection->resolved_zone_components.empty()) {
+          const auto unsupported_target = std::find_if(
+              custom_protection->resolved_zone_components.begin(),
+              custom_protection->resolved_zone_components.end(),
+              [](const ComponentRef& target) {
+            const bool load_target =
+                target.kind == ReliabilityComponentKind::ACLoad ||
+                target.kind == ReliabilityComponentKind::DCLoad ||
+                target.kind == ReliabilityComponentKind::ACBusLoad ||
+                target.kind == ReliabilityComponentKind::DCBusLoad ||
+                target.kind == ReliabilityComponentKind::AsymmetricLoad;
+            const bool aggregated_source =
+                target.kind == ReliabilityComponentKind::ExternalGrid ||
+                target.kind == ReliabilityComponentKind::VirtualPowerPlant ||
+                target.kind == ReliabilityComponentKind::MobileStorage ||
+                target.kind == ReliabilityComponentKind::Microgrid ||
+                target.kind == ReliabilityComponentKind::EnergyRouter;
+            return !load_target && !aggregated_source &&
+                   !steady_state_engine_models(target.kind);
+          });
+          if (unsupported_target !=
+              custom_protection->resolved_zone_components.end()) {
+            unsupported("custom protection zone component '" +
+                        unsupported_target->stable_id +
+                        "' is not represented by the steady-state AC/DC shed engine");
+            break;
+          }
+          for (const auto& target :
+               custom_protection->resolved_zone_components) {
+            const bool load_target = target.kind == ReliabilityComponentKind::ACLoad ||
+                                     target.kind == ReliabilityComponentKind::DCLoad ||
+                                     target.kind == ReliabilityComponentKind::ACBusLoad ||
+                                     target.kind == ReliabilityComponentKind::DCBusLoad ||
+                                     target.kind == ReliabilityComponentKind::AsymmetricLoad;
+            add_target_mut(target, MutationCategory::Protection,
+                           load_target ? MutationKind::ForceLoadShed
+                                       : MutationKind::ForceOutOfService,
+                           "custom protection zone cleared by backup device");
+          }
+        } else {
+          add_mut(MutationCategory::Protection,
+                  MutationKind::ProtectionZoneExpansion, 0.0,
+                  "breaker fail-to-trip: backup protection expands the outage zone");
+        }
+      } else unsupported("protection misoperation needs a protection-zone model");
       break;
     case FailureConsequenceKind::CommunicationLoss: {
       // Loss of the remote dispatch / command channel.  For a *dispatchable*
@@ -1021,6 +1616,19 @@ void set_in_service(HybridPowerSystem& s, ReliabilityComponentKind k, int i, boo
     case K::Microgrid:           if (ok(s.microgrids.size()))           s.microgrids[i].in_service = v; break;
     case K::EnergyRouter:        if (ok(s.energy_routers.size()))       s.energy_routers[i].in_service = v; break;
     default: break;
+  }
+}
+
+void interrupt_load_point(HybridPowerSystem& s, ReliabilityComponentKind k, int i) {
+  using K = ReliabilityComponentKind;
+  auto ok = [&](size_t n) { return i >= 0 && static_cast<size_t>(i) < n; };
+  if (k == K::ACBusLoad && ok(s.ac.buses.size())) {
+    s.ac.buses[i].pd_mw = 0.0;
+    s.ac.buses[i].qd_mvar = 0.0;
+  } else if (k == K::DCBusLoad && ok(s.dc.buses.size())) {
+    s.dc.buses[i].pd_mw = 0.0;
+  } else {
+    set_in_service(s, k, i, false);
   }
 }
 
@@ -1127,7 +1735,7 @@ HybridPowerSystem apply_consequence_patch(const HybridPowerSystem& sys,
       case MutationKind::ForceLoadShed:
         // Interrupt the load point: remove it from served demand so the OPF/LP
         // does not supply it; the FMEA engine adds its MW to the shed result.
-        set_in_service(s, m.target_kind, m.target_index, false);
+        interrupt_load_point(s, m.target_kind, m.target_index);
         break;
       case MutationKind::ProtectionZoneExpansion:
         expand_protection_zone(s, m.target_kind, m.target_index);
@@ -1226,6 +1834,14 @@ void forced_load_point(const HybridPowerSystem& sys, const ConsequenceMutation& 
     const auto& al = sys.ac.asymmetric_loads[i];
     mw = std::max(0.0, (al.pa_mw + al.pb_mw + al.pc_mw) * al.scaling);
     bus_id = al.bus; is_dc = false;
+  } else if (mut.target_kind == K::ACBusLoad && i >= 0 &&
+             static_cast<size_t>(i) < sys.ac.buses.size()) {
+    const auto& bus = sys.ac.buses[i];
+    mw = std::max(0.0, bus.pd_mw); bus_id = bus.index; is_dc = false;
+  } else if (mut.target_kind == K::DCBusLoad && i >= 0 &&
+             static_cast<size_t>(i) < sys.dc.buses.size()) {
+    const auto& bus = sys.dc.buses[i];
+    mw = std::max(0.0, bus.pd_mw); bus_id = bus.index; is_dc = true;
   }
 }
 
@@ -1354,8 +1970,8 @@ FailureModeFMEAResult run_failure_mode_fmea(
     }
 
     // Map the mode to a consequence patch under the engine capabilities.
-    ConsequencePatch patch =
-        build_consequence_patch(sys, entry.mode, caps);
+    ConsequencePatch patch = build_consequence_patch(
+        sys, entry.mode, caps, options.catalog.configuration);
     work.supported_by_selected_model = patch.representable_by_selected_model;
     c.supported = patch.representable_by_selected_model;
     c.unsupported_reason = patch.unsupported_reason;

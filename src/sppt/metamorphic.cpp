@@ -233,9 +233,10 @@ MetamorphicResult mr3_semantic_preservation_opf_dual(const HybridPowerSystem& sy
     return r;
   }
   if (ref.lmp.empty() || can.lmp.empty()) {
-    r.passed = true;  // no duals to compare — vacuously preserved
+    r.passed = false;
+    r.observation = MetamorphicObservation::NotObserved;
     r.residual = 0.0;
-    r.detail = "no LMPs reported (vacuous)";
+    r.detail = "not observed: one or both DC-OPF solves reported no LMPs";
     return r;
   }
 
