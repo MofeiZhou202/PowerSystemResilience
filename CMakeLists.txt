@@ -90,6 +90,7 @@ add_library(mipsolvers STATIC
   src/engine/solver/solver_adapter.cpp
   src/engine/solver/adapter_registry.cpp
   src/engine/solver/native/native_adapters.cpp
+  src/engine/solver/native/native_lp_selector.cpp
   src/engine/solver/native/conic_ipm_adapter.cpp
   src/engine/solver/external/adapters.cpp
   src/engine/solver/native/lp/pdlp_solver.cpp

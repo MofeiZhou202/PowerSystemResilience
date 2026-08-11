@@ -10,6 +10,7 @@
 #include "mipsolvers/engine/kernel/ipm/ipm_solver.hpp"
 #include "mipsolvers/engine/kernel/ipm/lcqp_solver.hpp"
 #include "mipsolvers/engine/solver/native/native_adapters.hpp"
+#include "mipsolvers/engine/solver/native/native_lp_selector.hpp"
 #include "mipsolvers/engine/solver/native/lp/pdlp_solver.hpp"
 #include "mipsolvers/engine/util/problem_validation.hpp"
 
@@ -165,6 +166,8 @@ std::size_t SolverEngine::register_default_adapters() {
 
   register_if_missing(std::make_shared<NativeLinearAdapter>());
   register_if_missing(std::make_shared<NativeNewtonAdapter>());
+  register_if_missing(std::make_shared<NativeAutoLPAdapter>());
+  register_if_missing(std::make_shared<NativeDualSimplexLPAdapter>());
   register_if_missing(std::make_shared<NativeIPMLPAdapter>());
   register_if_missing(std::make_shared<NativePDLPAdapter>());
   register_if_missing(std::make_shared<NativeLCQPAdapter>());
