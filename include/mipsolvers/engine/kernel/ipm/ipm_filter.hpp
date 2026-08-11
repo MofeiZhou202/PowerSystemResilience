@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <limits>
 #include <vector>
 
 namespace mipsolvers::engine {
@@ -27,16 +28,22 @@ class Filter {
   bool is_acceptable(double theta_trial, double phi_trial,
                      double gamma_theta, double gamma_phi) const;
 
+  /// Whether theta satisfies the persistent feasibility wall. This check is
+  /// separate from filter dominance because gamma_theta must not move a bound
+  /// derived from the caller's primal-feasibility contract.
+  bool satisfies_theta_upper_bound(double theta_trial) const;
+
   /// Add an entry with the Wächter–Biegler margin semantics. Dominated
   /// existing entries are pruned so the filter size stays bounded.
   void add_entry(double theta, double phi,
                  double gamma_theta, double gamma_phi);
 
-  /// Initialize the filter with a hard upper bound on θ. Used at problem
-  /// startup to forbid iterates with very large constraint violation.
+  /// Reset dominance entries and install a persistent hard upper bound on
+  /// theta. The bound survives clear(), because changing the barrier objective
+  /// invalidates dominance entries but not a primal-feasibility contract.
   void reset_with_theta_upper_bound(double theta_max);
 
-  /// Clear all entries. Called when the barrier parameter μ is decreased.
+  /// Clear barrier-objective dominance entries while preserving the theta wall.
   void clear();
 
   std::size_t size() const { return entries_.size(); }
@@ -44,6 +51,7 @@ class Filter {
 
  private:
   std::vector<FilterEntry> entries_;
+  double theta_upper_bound_{std::numeric_limits<double>::infinity()};
 };
 
 }  // namespace mipsolvers::engine

@@ -109,6 +109,19 @@ struct VariableMeta {
   std::string name;
 };
 
+// VariableMeta's public no-bound representation predates the use of IEEE
+// infinities in internal solver states. Keep the representation contract in
+// one place so solver adapters do not invent nearby magnitude thresholds.
+inline constexpr double kVariableNoBound = VariableMeta{}.ub;
+
+inline bool variable_has_finite_lower_bound(double value) {
+  return std::isfinite(value) && value > -kVariableNoBound;
+}
+
+inline bool variable_has_finite_upper_bound(double value) {
+  return std::isfinite(value) && value < kVariableNoBound;
+}
+
 struct SparseLinSys {
   Eigen::SparseMatrix<double> A;
   Eigen::VectorXd b;

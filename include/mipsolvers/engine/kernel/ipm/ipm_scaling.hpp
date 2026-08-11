@@ -9,7 +9,8 @@ namespace mipsolvers::engine {
 /// Gradient-based scaling factors (IPOPT-style "gradient-based" scaling).
 ///
 /// Given ∇f, ∇g, ∇h evaluated at the interiorized initial point and a target
-/// `g_max` (default 100), each scale factor is chosen so that the
+/// caller-selected `g_max`; the Native IPM's automatic policy uses the unit
+/// normalization target. Each scale factor is chosen so that the
 /// infinity-norm of the corresponding (scaled) gradient / row is bounded by
 /// g_max:
 ///   s_f   = min(1, g_max / ‖∇f(x₀)‖_∞)

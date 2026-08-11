@@ -19,9 +19,26 @@
 #endif
 #ifdef HACDCPF_HAVE_MKL_PARDISO
 #include <Eigen/PardisoSupport>
+#include <mkl_service.h>
 #endif
 
 namespace mipsolvers::engine {
+
+int mkl_max_threads() {
+#ifdef HACDCPF_HAVE_MKL_PARDISO
+  return mkl_get_max_threads();
+#else
+  return 1;
+#endif
+}
+
+void set_mkl_num_threads(int threads) {
+#ifdef HACDCPF_HAVE_MKL_PARDISO
+  mkl_set_num_threads(threads);
+#else
+  (void)threads;
+#endif
+}
 
 namespace {
 

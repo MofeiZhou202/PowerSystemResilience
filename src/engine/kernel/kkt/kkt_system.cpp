@@ -18,8 +18,6 @@ namespace mipsolvers::engine {
 
 namespace {
 
-constexpr int kKktMaxRefinementSteps = 2;
-
 double infinity_norm(const Eigen::VectorXd& vector) {
   return vector.size() == 0 ? 0.0 : vector.cwiseAbs().maxCoeff();
 }
@@ -62,6 +60,22 @@ bool factor_cached_sparse_matrix(SparseKKTCache& cache,
   matrix.makeCompressed();
   cache.kkt = std::move(matrix);
   return factor_current_kkt(cache, n, meq);
+}
+
+double sparse_absolute_max(const Eigen::SparseMatrix<double>& matrix) {
+  double scale = 0.0;
+  for (int k = 0; k < matrix.nonZeros(); ++k) {
+    scale = std::max(scale, std::abs(matrix.valuePtr()[k]));
+  }
+  return scale;
+}
+
+double rounding_gamma(Eigen::Index operation_count) {
+  const double u = std::numeric_limits<double>::epsilon();
+  const double work = static_cast<double>(std::max<Eigen::Index>(1, operation_count));
+  const double product = work * u;
+  return product < 1.0 ? product / (1.0 - product)
+                       : std::sqrt(u);
 }
 
 Eigen::SparseMatrix<double> assemble_augmented_kkt(
@@ -415,12 +429,15 @@ bool solve_kkt_sparse(SparseKKTCache& cache,
     return false;
   }
   ++cache.linear_solves;
+  const double requested_tolerance = cache.refinement_tolerance > 0.0
+      ? cache.refinement_tolerance
+      : std::sqrt(std::numeric_limits<double>::epsilon());
   const double residual_limit =
-      cache.refinement_tolerance * std::max(1.0, infinity_norm(rhs));
+      requested_tolerance * std::max(1.0, infinity_norm(rhs));
   Eigen::VectorXd& residual = cache.solve_residual;
   Eigen::VectorXd& correction = cache.solve_correction;
   Eigen::VectorXd& candidate = cache.solve_candidate;
-  for (int ref = 0; ref < kKktMaxRefinementSteps; ++ref) {
+  while (true) {
     residual = rhs - cache.kkt * sol;
     const double residual_norm = infinity_norm(residual);
     if (!std::isfinite(residual_norm) || residual_norm <= residual_limit) {
@@ -445,6 +462,12 @@ bool solve_kkt_sparse(SparseKKTCache& cache,
       break;
     }
   }
+  residual = rhs - cache.kkt * sol;
+  const double certified_residual_norm = infinity_norm(residual);
+  if (!std::isfinite(certified_residual_norm) ||
+      certified_residual_norm > residual_limit) {
+    return false;
+  }
   dx = sol.head(cache.n);
   dlambda = sol.tail(cache.meq);
   return true;
@@ -465,7 +488,7 @@ bool solve_kkt_reduced_sparse(const Eigen::SparseMatrix<double>& w,
   }
 
   const Eigen::SparseMatrix<double> jgt = jg.transpose();
-  for (double reg = min_reg; reg <= max_reg; reg *= 10.0) {
+  for (double reg = min_reg; reg <= max_reg; reg *= 2.0) {
     Eigen::SparseMatrix<double> w_reg = w;
     w_reg.reserve(w.nonZeros() + n);
     for (int i = 0; i < n; ++i) {
@@ -539,10 +562,37 @@ double increased_primal_regularization(double delta_w,
     delta_w_was_zero = false;
     return settings.delta_w_0;
   }
-  const double multiplier = (delta_w < settings.delta_w_0 * 1.1)
-      ? settings.kappa_w_plus_first
-      : settings.kappa_w_plus;
-  return std::max(delta_w * multiplier, settings.delta_w_0);
+  // Exact powers of two bracket the smallest usable regularization without
+  // introducing a decimal growth policy or additional rounding error.
+  return std::max(delta_w * 2.0, settings.delta_w_0);
+}
+
+InertiaSettings resolve_inertia_settings(
+    const Eigen::SparseMatrix<double>& w,
+    const Eigen::SparseMatrix<double>& jg,
+    const InertiaSettings& requested) {
+  InertiaSettings resolved = requested;
+  const double root_epsilon =
+      std::sqrt(std::numeric_limits<double>::epsilon());
+  const double primal_scale = std::max(1.0, sparse_absolute_max(w));
+  const double kkt_scale = std::max(primal_scale, sparse_absolute_max(jg));
+  if (!(resolved.delta_w_min >= 0.0) || !std::isfinite(resolved.delta_w_min)) {
+    resolved.delta_w_min = 0.0;
+  }
+  if (!(resolved.delta_w_0 > 0.0) || !std::isfinite(resolved.delta_w_0)) {
+    resolved.delta_w_0 = root_epsilon * primal_scale;
+  }
+  if (!(resolved.delta_w_max > 0.0) || !std::isfinite(resolved.delta_w_max)) {
+    // Beyond this point the unregularized primal block is below the
+    // sqrt(epsilon) resolution of delta*I, so further escalation has no
+    // defensible connection to the supplied local model.
+    resolved.delta_w_max = primal_scale / root_epsilon;
+  }
+  if (!(resolved.delta_c_stripe > 0.0) ||
+      !std::isfinite(resolved.delta_c_stripe)) {
+    resolved.delta_c_stripe = root_epsilon * kkt_scale;
+  }
+  return resolved;
 }
 
 #ifndef HACDCPF_HAVE_MUMPS
@@ -813,8 +863,9 @@ bool build_reduced_space_certificate(
   const int nullity = n - meq;
   certificate = ReducedSpaceCertificate{};
   certificate.dimension = nullity;
-  if (meq < 0 || nullity < 0 ||
-      nullity > settings.max_tangent_dimension) {
+  if (meq < 0 || nullity < 0 || settings.max_tangent_dimension < 0 ||
+      (settings.max_tangent_dimension > 0 &&
+       nullity > settings.max_tangent_dimension)) {
     return false;
   }
   if (nullity == 0) {
@@ -860,7 +911,11 @@ bool build_reduced_space_certificate(
   }
   const double jacobian_inf = meq == 0 ? 0.0 : jacobian_row_sum.maxCoeff();
   const double z_inf = z.cwiseAbs().rowwise().sum().maxCoeff();
-  const double residual_limit = settings.nullspace_residual_tolerance *
+  const double nullspace_tolerance =
+      settings.nullspace_residual_tolerance > 0.0
+          ? settings.nullspace_residual_tolerance
+          : std::sqrt(std::numeric_limits<double>::epsilon());
+  const double residual_limit = nullspace_tolerance *
       std::max(1.0, jacobian_inf * z_inf);
   if (!z.allFinite() || !std::isfinite(certificate.nullspace_residual) ||
       certificate.nullspace_residual > residual_limit) {
@@ -885,10 +940,8 @@ bool build_reduced_space_certificate(
   // problem. Use that bound, rather than a fixed relative gap, so a large
   // positive barrier eigenvalue cannot manufacture a large primal shift while
   // the smallest tangent eigenvalue remains safely positive.
-  constexpr double kDenseEigenRoundoffMultiplier = 64.0;
-  const double roundoff_margin = kDenseEigenRoundoffMultiplier *
-      std::max(1, nullity) * std::numeric_limits<double>::epsilon() *
-      spectral_scale;
+  const double roundoff_margin =
+      rounding_gamma(std::max(1, nullity)) * spectral_scale;
   certificate.margin = std::max(
       settings.reduced_curvature_tolerance, roundoff_margin);
   return true;
@@ -916,6 +969,49 @@ void ensure_mumps_augmented_solver(SparseKKTCache& augmented) {
 #endif
 
 #if defined(HACDCPF_HAVE_MUMPS) || defined(HACDCPF_HAVE_MKL_PARDISO)
+bool factor_unregularized_with_direct_inertia(
+    const Eigen::SparseMatrix<double>& w,
+    const Eigen::SparseMatrix<double>& jg,
+    double& delta_w_last,
+    SparseInertiaKKTCache& cache,
+    InertiaStatus& status) {
+  const int n = static_cast<int>(w.rows());
+  const int meq = static_cast<int>(jg.rows());
+  const int dim = n + meq;
+#ifdef HACDCPF_HAVE_MUMPS
+  ensure_mumps_augmented_solver(cache.augmented);
+#else
+  ensure_pardiso_augmented_solver(cache.augmented);
+#endif
+  const bool pattern_is_unchanged =
+      assemble_augmented_kkt_cached(cache.augmented, w, jg, 0.0, 0.0);
+  ++status.factorization_attempts;
+  const bool factored =
+      factor_current_kkt(cache.augmented, n, meq, pattern_is_unchanged);
+  const int deficiency = cache.augmented.solver->estimated_deficiency();
+  const int negative = cache.augmented.solver->negative_eigenvalues();
+  status.direct_factor_inertia = negative >= 0 && deficiency >= 0;
+  status.n_zero = std::max(0, deficiency);
+  status.n_neg = std::max(0, negative);
+  status.n_pos = status.direct_factor_inertia
+      ? std::max(0, dim - negative - deficiency)
+      : 0;
+  status.delta_w_used = 0.0;
+  status.delta_c_used = 0.0;
+  if (factored && deficiency == 0 && negative == meq) {
+    cache.factored = true;
+    status.correct = true;
+    status.n_pos = n;
+    status.n_neg = meq;
+    status.n_zero = 0;
+    delta_w_last = 0.0;
+    return true;
+  }
+  cache.factored = false;
+  cache.augmented.factored = false;
+  return false;
+}
+
 bool factor_with_direct_inertia(
     const Eigen::SparseMatrix<double>& w,
     const Eigen::SparseMatrix<double>& jg,
@@ -936,17 +1032,13 @@ bool factor_with_direct_inertia(
 
   double delta_w = std::max(0.0, delta_w_last);
   bool delta_w_was_zero = (delta_w == 0.0);
-  const double delta_c_repair = settings.delta_c_stripe *
-      std::pow(std::max(settings.mu, 1e-20), 0.25);
-  bool last_factor_succeeded = false;
-
+  const double delta_c_repair = settings.delta_c_stripe;
   auto factor_and_check = [&](double delta_c) {
     const bool pattern_is_unchanged = assemble_augmented_kkt_cached(
         cache.augmented, w, jg, delta_w, delta_c);
     ++status.factorization_attempts;
     const bool factored = factor_current_kkt(
         cache.augmented, n, meq, pattern_is_unchanged);
-    last_factor_succeeded = factored;
     const int deficiency = cache.augmented.solver->estimated_deficiency();
     const int negative = cache.augmented.solver->negative_eigenvalues();
     status.n_zero = std::max(0, deficiency);
@@ -958,17 +1050,18 @@ bool factor_with_direct_inertia(
     return factored && deficiency == 0 && negative == meq;
   };
 
-  while (status.factorization_attempts < 60) {
-    if (factor_and_check(0.0) ||
-        ((status.n_zero > 0 || !last_factor_succeeded) &&
-         factor_and_check(delta_c_repair))) {
+  while (delta_w <= settings.delta_w_max) {
+    // A threshold-pivoted factor may hide row-rank deficiency by reporting a
+    // nonsingular factor with the wrong inertia. The positive dual stripe is
+    // the block-theoretic rank repair, so test it after every unsuccessful
+    // zero-stripe inertia check, not only when the backend reports deficiency.
+    if (factor_and_check(0.0) || factor_and_check(delta_c_repair)) {
       cache.factored = true;
       status.correct = true;
       status.n_pos = n;
       status.n_neg = meq;
       status.n_zero = 0;
-      delta_w_last = std::max(
-          settings.delta_w_min, delta_w * settings.kappa_w_minus);
+      delta_w_last = std::max(settings.delta_w_min, delta_w);
       return true;
     }
 
@@ -993,7 +1086,11 @@ bool factor_kkt_inertia_corrected_sparse(
     const InertiaSettings& settings,
     double& delta_w_last,
     SparseInertiaKKTCache& cache,
-    InertiaStatus& status) {
+    InertiaStatus& status,
+    double min_delta_w) {
+  const InertiaSettings resolved_settings =
+      resolve_inertia_settings(w, jg, settings);
+  const InertiaSettings& effective = resolved_settings;
   const int n = static_cast<int>(w.rows());
   const int meq = static_cast<int>(jg.rows());
   status = InertiaStatus{};
@@ -1012,6 +1109,19 @@ bool factor_kkt_inertia_corrected_sparse(
 #endif
 #endif
 
+  // Automatic policy starts from the exact, unregularized KKT matrix. When a
+  // symmetric-indefinite backend reports the target inertia, that factor is
+  // already the bordered-Hessian certificate and is reused for the solve.
+  // Only an inconclusive/wrong inertia triggers the complete reduced-space
+  // construction below; no model-size threshold participates in the choice.
+#if defined(HACDCPF_HAVE_MUMPS) || defined(HACDCPF_HAVE_MKL_PARDISO)
+  if (min_delta_w <= 0.0 && settings.max_tangent_dimension == 0 &&
+      factor_unregularized_with_direct_inertia(
+          w, jg, delta_w_last, cache, status)) {
+    return true;
+  }
+#endif
+
   // For full-row-rank Jg, the bordered-Hessian identity gives
   // inertia(K) = (meq, meq, 0) + inertia(Z' (W + delta_W I) Z).
   // The generalized eigenvalues of (Z'WZ, Z'Z) therefore provide the exact
@@ -1019,7 +1129,7 @@ bool factor_kkt_inertia_corrected_sparse(
   // negative curvature in constrained normal directions to become positive.
   ReducedSpaceCertificate reduced_certificate;
   if (build_reduced_space_certificate(
-          w, jg, settings, cache, reduced_certificate)) {
+          w, jg, effective, cache, reduced_certificate)) {
 #ifdef HACDCPF_HAVE_MKL_PARDISO
     // The reduced-space construction has already certified full row rank of
     // Jg, so PARDISO's inertia counts are sufficient here. Rank-deficient
@@ -1036,15 +1146,15 @@ bool factor_kkt_inertia_corrected_sparse(
     // A mathematically positive O(eps) pivot is still a numerical null pivot
     // to a sparse threshold factorization. When a shift is required, place it
     // safely inside the positive half-line at sqrt(eps) relative scale so the
-    // direct inertia check does not trigger an 8x regularization jump.
+    // direct inertia check does not trigger an avoidable regularization jump.
     const double factor_margin = required_shift > 0.0
-        ? 64.0 * std::sqrt(std::numeric_limits<double>::epsilon()) *
+        ? std::sqrt(std::numeric_limits<double>::epsilon()) *
               std::max(1.0, std::abs(reduced_certificate.min_curvature))
         : 0.0;
-    double delta_w = required_shift + factor_margin;
+    double delta_w = std::max(required_shift + factor_margin, min_delta_w);
     bool delta_w_was_zero = (delta_w == 0.0);
-    for (; status.factorization_attempts < 8;
-         ++status.factorization_attempts) {
+    while (delta_w <= effective.delta_w_max) {
+      ++status.factorization_attempts;
       const bool pattern_is_unchanged = assemble_augmented_kkt_cached(
           cache.augmented, w, jg, delta_w, 0.0);
       const bool factored = factor_current_kkt(
@@ -1077,13 +1187,12 @@ bool factor_kkt_inertia_corrected_sparse(
         status.n_neg = meq;
         status.delta_w_used = delta_w;
         status.delta_c_used = 0.0;
-        delta_w_last = std::max(
-            settings.delta_w_min, delta_w * settings.kappa_w_minus);
+        delta_w_last = std::max(effective.delta_w_min, delta_w);
         return true;
       }
       delta_w = increased_primal_regularization(
-          delta_w, delta_w_was_zero, settings);
-      if (delta_w > settings.delta_w_max) {
+          delta_w, delta_w_was_zero, effective);
+      if (delta_w > effective.delta_w_max) {
         status.delta_w_used = delta_w;
         return false;
       }
@@ -1095,23 +1204,24 @@ bool factor_kkt_inertia_corrected_sparse(
   // The explicit null-space eigensolve is deliberately capped. Beyond that
   // cap, use the negative-pivot count of the symmetric-indefinite factor
   // instead of forcing the entire primal block to be positive definite.
+  delta_w_last = std::max(delta_w_last, min_delta_w);
   return factor_with_direct_inertia(
-      w, jg, settings, delta_w_last, cache, status);
+      w, jg, effective, delta_w_last, cache, status);
 #else
 
-  // Wächter-Biegler δ_W schedule: start from last successful δ_W; on failure,
-  // if δ_W was zero → jump to δ_w_0; else multiply by κ_W⁺_first (first
-  // repair) or κ_W⁺ (subsequent).
-  double delta_w = std::max(0.0, delta_w_last);
+  // Start from the last successful shift; after the first locally derived
+  // positive value, exact powers of two bracket a usable regularization.
+  double delta_w = std::max(std::max(0.0, delta_w_last), min_delta_w);
   bool delta_w_was_zero = (delta_w == 0.0);
 
-  for (; status.factorization_attempts < 60; ++status.factorization_attempts) {
+  while (delta_w <= effective.delta_w_max) {
+    ++status.factorization_attempts;
     const Eigen::SparseMatrix<double> h_delta =
         add_scaled_identity(w, delta_w);
     if (!certify_primal_positive_definite(h_delta, cache)) {
       delta_w = increased_primal_regularization(
-          delta_w, delta_w_was_zero, settings);
-      if (delta_w > settings.delta_w_max) {
+          delta_w, delta_w_was_zero, effective);
+      if (delta_w > effective.delta_w_max) {
         status.delta_w_used = delta_w;
         status.delta_c_used = 0.0;
         return false;
@@ -1134,16 +1244,14 @@ bool factor_kkt_inertia_corrected_sparse(
       status.correct = true;
       status.delta_w_used = delta_w;
       status.delta_c_used = 0.0;
-      delta_w_last = std::max(
-          settings.delta_w_min, delta_w * settings.kappa_w_minus);
+      delta_w_last = std::max(effective.delta_w_min, delta_w);
       return true;
     }
 
     // A positive dual regularization makes
     // Jg H_delta^{-1} Jg' + delta_C I positive definite even when Jg is rank
     // deficient, so the augmented inertia remains (n, meq, 0).
-    const double delta_c = settings.delta_c_stripe *
-        std::pow(std::max(settings.mu, 1e-20), 0.25);
+    const double delta_c = effective.delta_c_stripe;
     const bool dual_pattern_is_unchanged = assemble_augmented_kkt_cached(
         cache.augmented, w, jg, delta_w, delta_c);
     if (factor_current_kkt(cache.augmented, n, meq,
@@ -1153,14 +1261,13 @@ bool factor_kkt_inertia_corrected_sparse(
       status.n_zero = 0;
       status.delta_w_used = delta_w;
       status.delta_c_used = delta_c;
-      delta_w_last = std::max(
-          settings.delta_w_min, delta_w * settings.kappa_w_minus);
+      delta_w_last = std::max(effective.delta_w_min, delta_w);
       return true;
     }
 
     delta_w = increased_primal_regularization(
-        delta_w, delta_w_was_zero, settings);
-    if (delta_w > settings.delta_w_max) {
+        delta_w, delta_w_was_zero, effective);
+    if (delta_w > effective.delta_w_max) {
       status.delta_w_used = delta_w;
       status.delta_c_used = delta_c;
       return false;

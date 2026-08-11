@@ -11,6 +11,7 @@ bool Filter::is_acceptable(double theta_trial, double phi_trial,
   if (!std::isfinite(theta_trial) || !std::isfinite(phi_trial)) {
     return false;
   }
+  if (!satisfies_theta_upper_bound(theta_trial)) return false;
   for (const auto& e : entries_) {
     const double theta_bound = (1.0 - gamma_theta) * e.theta;
     const double phi_bound = e.phi - gamma_phi * e.theta;
@@ -19,6 +20,10 @@ bool Filter::is_acceptable(double theta_trial, double phi_trial,
     }
   }
   return true;
+}
+
+bool Filter::satisfies_theta_upper_bound(double theta_trial) const {
+  return std::isfinite(theta_trial) && theta_trial < theta_upper_bound_;
 }
 
 void Filter::add_entry(double theta, double phi,
@@ -44,10 +49,9 @@ void Filter::add_entry(double theta, double phi,
 void Filter::reset_with_theta_upper_bound(double theta_max) {
   entries_.clear();
   if (std::isfinite(theta_max) && theta_max > 0.0) {
-    // Hard upper bound forbidding any iterate with θ ≥ theta_max.
-    // Represented as an entry with φ = −∞ so the φ coordinate is effectively
-    // non-restrictive — only θ matters.
-    entries_.push_back({theta_max, -std::numeric_limits<double>::infinity()});
+    theta_upper_bound_ = theta_max;
+  } else {
+    theta_upper_bound_ = std::numeric_limits<double>::infinity();
   }
 }
 

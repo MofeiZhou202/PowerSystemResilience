@@ -16,8 +16,10 @@ namespace mipsolvers::engine {
 ///                   h_nonlin(x) ≤ 0          (original nonlinear inequalities)
 ///                   x_L ≤ x ≤ x_U,   p, n ≥ 0
 ///
-/// where x_R is the iterate at which the main IPM stalled, ζ is a small
-/// proximal weight, and D_R = diag(min(1, 1/max(1, |x_R,j|))).
+/// where x_R is the iterate at which the main IPM stalled and
+/// D_R = diag(min(1, 1/max(1, |x_R,j|))). A positive ζ is caller policy; a
+/// nonpositive ζ selects a backward-error-level tie breaker relative to the
+/// unit l1 penalty.
 ///
 /// The decision vector of the returned NLPModel is laid out as
 ///   [ x  (n vars) | p  (m_eq vars) | n  (m_eq vars) ]

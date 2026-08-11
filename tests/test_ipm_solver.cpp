@@ -13,6 +13,7 @@
 #include "mipsolvers/engine/api/solver.hpp"
 #include "mipsolvers/engine/api/options.hpp"
 #include "mipsolvers/engine/problem_types.hpp"
+#include "mipsolvers/engine/kernel/ipm/ipm_filter.hpp"
 #include "mipsolvers/engine/kernel/ipm/ipm_restoration.hpp"
 #include "mipsolvers/engine/kernel/ipm/ipm_solver.hpp"
 #include "mipsolvers/engine/kernel/ipm/lcqp_solver.hpp"
@@ -20,6 +21,23 @@
 
 using namespace mipsolvers::engine;
 using Catch::Approx;
+
+TEST_CASE("Filter feasibility wall is independent of dominance margins",
+          "[ipm][filter][contract]") {
+  Filter filter;
+  const double contract_bound = std::nextafter(
+      1.0, std::numeric_limits<double>::infinity());
+  filter.reset_with_theta_upper_bound(contract_bound);
+
+  CHECK(filter.is_acceptable(1.0, 0.0, 0.25, 0.25));
+  CHECK_FALSE(filter.is_acceptable(contract_bound, 0.0, 0.25, 0.25));
+
+  filter.add_entry(0.5, 1.0, 0.25, 0.25);
+  filter.clear();
+  CHECK(filter.size() == 0);
+  CHECK(filter.is_acceptable(1.0, 0.0, 0.25, 0.25));
+  CHECK_FALSE(filter.satisfies_theta_upper_bound(contract_bound));
+}
 
 TEST_CASE("Restoration warm start maps only original bound rows",
           "[ipm][restoration][structure]") {
@@ -39,7 +57,14 @@ TEST_CASE("Restoration warm start maps only original bound rows",
   Eigen::VectorXd x_reference(2);
   x_reference << 0.5, 0.5;
   const RestorationBuild build =
-      build_restoration_nlp(original, x_reference, 1e-4);
+      build_restoration_nlp(original, x_reference, 0.0);
+  REQUIRE(build.model.x0.size() == 4);
+  CHECK(build.model.x0[2] > 0.0);
+  CHECK(build.model.x0[3] > 0.0);
+  Eigen::VectorXd restoration_initial_residual;
+  build.model.g(build.model.x0, restoration_initial_residual);
+  REQUIRE(restoration_initial_residual.size() == 1);
+  CHECK(restoration_initial_residual[0] == 0.0);
 
   Eigen::VectorXd restoration_x(4);
   restoration_x << 0.75, 0.25, 0.1, 0.1;
@@ -220,6 +245,45 @@ TEST_CASE("Native LCQP accepts a structural primal initial point",
   CHECK(result.x[0] == Approx(0.5).margin(1e-5));
   CHECK(result.x[1] == Approx(0.5).margin(1e-5));
   CHECK((qp.A * result.x - qp.b).maxCoeff() <= options.tol_primal);
+}
+
+TEST_CASE("Native LCQP returns an audited initial descent candidate before KKT",
+          "[ipm][qp][initial-point][candidate]") {
+  QPModel qp;
+  qp.sense = Sense::Minimize;
+  qp.c = Eigen::VectorXd::Zero(2);
+  qp.Q.resize(2, 2);
+  qp.Q.insert(0, 0) = 2.0;
+  qp.Q.insert(1, 1) = 2.0;
+  qp.Q.makeCompressed();
+  qp.A.resize(1, 2);
+  qp.A.insert(0, 0) = -1.0;
+  qp.A.insert(0, 1) = -1.0;
+  qp.A.makeCompressed();
+  qp.b = Eigen::VectorXd::Constant(1, -1.0);
+  qp.Aeq.resize(0, 2);
+  qp.beq.resize(0);
+  qp.vars.push_back({VarType::Continuous, 0.0, kVariableNoBound});
+  qp.vars.push_back({VarType::Continuous, 0.0, kVariableNoBound});
+
+  LCQPOptions options;
+  options.max_iter = 0;
+  options.initial_point.resize(2);
+  options.initial_point << 0.75, 0.25;
+  options.return_feasible_descent_candidate = true;
+  options.candidate_objective_upper_bound =
+      0.5 * options.initial_point.dot(qp.Q * options.initial_point) +
+      qp.c.dot(options.initial_point);
+
+  const SolveResult result = NativeLCQPAdapter(options).solve_qp(qp);
+
+  CHECK_FALSE(result.stats.success);
+  REQUIRE(result.x.size() == options.initial_point.size());
+  CHECK(result.x == options.initial_point);
+  CHECK(result.stats.iterations == 0);
+  CHECK(result.stats.primal_feas <= options.tol_primal);
+  CHECK(result.stats.status ==
+        "Feasible descent candidate; optimality not certified");
 }
 
 // ─── IPM warm start / numerical robustness ────────────────────────────────
@@ -471,7 +535,59 @@ TEST_CASE("Filter accepts certified centrality-only multiplier steps",
   CHECK(result.stats.solver_name == "NativeIPM");
   CHECK(result.stats.primal_feas < options.tol_primal);
   CHECK(result.stats.dual_feas < options.tol_dual);
-  CHECK(detail.complementarity < options.tol_complementarity);
+  CHECK(detail.complementarity <= options.tol_complementarity);
+}
+
+TEST_CASE("Auto Newton retries the unique equivalent formulation",
+          "[ipm][nlp][newton][fallback][regression]") {
+  // Jh is finite, while Jh^T(M/S)Jh is not representable for M/S=1.
+  // The smaller condensed graph is therefore selected first but cannot earn
+  // a numeric certificate; the uncondensed augmented entries remain finite.
+  const double jacobian_scale =
+      2.0 * std::sqrt(std::numeric_limits<double>::max());
+
+  NLPModel nlp;
+  nlp.sense = Sense::Minimize;
+  nlp.vars.push_back(
+      {VarType::Continuous, -kVariableNoBound, kVariableNoBound});
+  nlp.x0 = Eigen::VectorXd::Zero(1);
+  nlp.f = [](const Eigen::VectorXd&) { return 0.0; };
+  nlp.grad = [](const Eigen::VectorXd&, Eigen::VectorXd& gradient) {
+    gradient = Eigen::VectorXd::Zero(1);
+  };
+  nlp.hess = [](const Eigen::VectorXd&,
+                Eigen::SparseMatrix<double>& hessian) {
+    hessian.resize(1, 1);
+    hessian.setIdentity();
+  };
+  nlp.h = [jacobian_scale](const Eigen::VectorXd& x,
+                           Eigen::VectorXd& inequality) {
+    inequality.resize(1);
+    inequality[0] = jacobian_scale * x[0] - 1.0;
+  };
+  nlp.jac_h = [jacobian_scale](const Eigen::VectorXd&,
+                                Eigen::SparseMatrix<double>& jacobian) {
+    jacobian.resize(1, 1);
+    jacobian.insert(0, 0) = jacobian_scale;
+  };
+
+  IPMOptions options;
+  options.max_iter = 1;
+  options.tol_accept = 0.0;
+  options.scale_problem = false;
+  options.use_restoration_phase = false;
+  options.newton_formulation = NewtonFormulation::Auto;
+  options.slack_start = Eigen::VectorXd::Ones(1);
+  options.inequality_dual_start = Eigen::VectorXd::Ones(1);
+
+  const auto [result, detail] =
+      NativeIPMAdapter(options).solve_nlp_detail(nlp);
+  INFO(result.stats.status);
+  CHECK(detail.condensed_dimension < detail.augmented_dimension);
+  CHECK(detail.condensed_symbolic_flops < detail.augmented_symbolic_flops);
+  CHECK(detail.condensed_symbolic_nonzeros <
+        detail.augmented_symbolic_nonzeros);
+  CHECK(detail.newton_formulation == "augmented");
 }
 
 TEST_CASE("Least-squares dual initialization removes a pure multiplier step",
@@ -685,6 +801,142 @@ TEST_CASE("Automatic Phase-II initialization is row-scale covariant",
         Approx(unit_detail.z_slack[0]).epsilon(1e-12));
   CHECK(scaled_detail.mu_ineq[0] * 1e6 ==
         Approx(unit_detail.mu_ineq[0]).epsilon(1e-12));
+}
+
+TEST_CASE("Phase-I handoff does not impose a shared complementarity product",
+          "[ipm][nlp][phase1][phase2][initialization][regression]") {
+  constexpr int inequality_count = 10000;
+  const double root_epsilon =
+      std::sqrt(std::numeric_limits<double>::epsilon());
+
+  NLPModel nlp;
+  nlp.sense = Sense::Minimize;
+  nlp.vars.push_back(
+      {VarType::Continuous, -kVariableNoBound, kVariableNoBound});
+  nlp.x0 = Eigen::VectorXd::Zero(1);
+  nlp.f = [](const Eigen::VectorXd&) { return 0.0; };
+  nlp.grad = [](const Eigen::VectorXd&, Eigen::VectorXd& gradient) {
+    gradient = Eigen::VectorXd::Zero(1);
+  };
+  nlp.hess = [](const Eigen::VectorXd&,
+                Eigen::SparseMatrix<double>& hessian) {
+    hessian.resize(1, 1);
+    hessian.setIdentity();
+  };
+  nlp.h = [root_epsilon](const Eigen::VectorXd&,
+                         Eigen::VectorXd& inequality) {
+    inequality.resize(inequality_count);
+    for (int row = 0; row < inequality_count; ++row) {
+      const double relative_row = static_cast<double>(row) /
+          static_cast<double>(inequality_count - 1);
+      inequality[row] = -root_epsilon * (1.0 + relative_row);
+    }
+  };
+  nlp.jac_h = [](const Eigen::VectorXd&,
+                  Eigen::SparseMatrix<double>& jacobian) {
+    jacobian.resize(inequality_count, 1);
+  };
+
+  IPMOptions options;
+  options.primal_feasible_start = true;
+  options.max_iter = 1;
+  options.tol_primal = 1e-4;
+  options.tol_dual = 1e-4;
+  options.tol_complementarity = 1e-4;
+  options.tol_accept = 0.0;
+  options.scale_problem = false;
+  options.use_restoration_phase = false;
+  options.mu_init = 0.0;
+  options.mu_min = 0.0;
+
+  const auto [result, detail] =
+      NativeIPMAdapter(options).solve_nlp_detail(nlp);
+  INFO(result.stats.status);
+  REQUIRE(result.stats.success);
+  REQUIRE(detail.z_slack.size() == inequality_count);
+  REQUIRE(detail.mu_ineq.size() == inequality_count);
+  const Eigen::VectorXd products =
+      detail.z_slack.cwiseProduct(detail.mu_ineq);
+  CHECK(products.maxCoeff() > products.minCoeff());
+  CHECK(detail.mu_ineq.maxCoeff() ==
+        Approx(std::sqrt(std::numeric_limits<double>::min())));
+}
+
+TEST_CASE("Phase-I many-row dual selector improves original stationarity",
+          "[ipm][nlp][phase1][phase2][initialization][regression]") {
+  constexpr int inequality_count = 10000;
+  constexpr double primal_tolerance = 1e-4;
+  constexpr double objective_gradient = 1e6;
+
+  NLPModel nlp;
+  nlp.sense = Sense::Minimize;
+  nlp.vars.push_back(
+      {VarType::Continuous, -kVariableNoBound, kVariableNoBound});
+  nlp.x0 = Eigen::VectorXd::Zero(1);
+  nlp.f = [](const Eigen::VectorXd& x) {
+    return -objective_gradient * x[0];
+  };
+  nlp.grad = [](const Eigen::VectorXd&, Eigen::VectorXd& gradient) {
+    gradient = Eigen::VectorXd::Constant(1, -objective_gradient);
+  };
+  nlp.hess = [](const Eigen::VectorXd&,
+                Eigen::SparseMatrix<double>& hessian) {
+    hessian.resize(1, 1);
+    hessian.setIdentity();
+  };
+  nlp.h = [](const Eigen::VectorXd& x, Eigen::VectorXd& inequality) {
+    inequality.resize(inequality_count);
+    for (int row = 0; row < inequality_count; ++row) {
+      const double fraction = static_cast<double>(row + 1) /
+          static_cast<double>(inequality_count);
+      inequality[row] = x[0] - primal_tolerance * fraction;
+    }
+  };
+  nlp.jac_h = [](const Eigen::VectorXd&,
+                  Eigen::SparseMatrix<double>& jacobian) {
+    jacobian.resize(inequality_count, 1);
+    jacobian.reserve(inequality_count);
+    for (int row = 0; row < inequality_count; ++row) {
+      jacobian.insert(row, 0) = 1.0;
+    }
+  };
+
+  IPMOptions options;
+  options.primal_feasible_start = true;
+  options.max_iter = 1;
+  options.tol_primal = primal_tolerance;
+  options.tol_dual = 0.75 * objective_gradient;
+  options.tol_complementarity = objective_gradient;
+  options.tol_accept = 0.0;
+  options.scale_problem = false;
+  options.use_restoration_phase = false;
+  options.mu_init = 0.0;
+  options.mu_min = 0.0;
+
+  const auto [result, detail] =
+      NativeIPMAdapter(options).solve_nlp_detail(nlp);
+  INFO(result.stats.status);
+  REQUIRE(result.stats.success);
+  REQUIRE(detail.z_slack.size() == inequality_count);
+  REQUIRE(detail.mu_ineq.size() == inequality_count);
+  REQUIRE((detail.mu_ineq.array() > 0.0).all());
+
+  const double stationarity =
+      std::abs(-objective_gradient + detail.mu_ineq.sum());
+  CHECK(stationarity < objective_gradient);
+  const double accumulation_condition =
+      objective_gradient + detail.mu_ineq.lpNorm<1>();
+  const double accumulation_gamma =
+      static_cast<double>(inequality_count) *
+      std::numeric_limits<double>::epsilon() /
+      (1.0 - static_cast<double>(inequality_count) *
+                 std::numeric_limits<double>::epsilon());
+  CHECK(std::abs(stationarity - result.stats.dual_feas) <=
+        accumulation_gamma * accumulation_condition);
+  const Eigen::VectorXd products =
+      detail.z_slack.cwiseProduct(detail.mu_ineq);
+  CHECK(products.maxCoeff() > products.minCoeff());
+  CHECK(detail.mu_ineq.maxCoeff() > 1.0);
 }
 
 TEST_CASE("Filter IPM uses inertia correction on a nonconvex objective",
@@ -1005,6 +1257,7 @@ TEST_CASE("Sparse augmented KKT reuses one factor for multiple right-hand sides"
 
   SparseInertiaKKTCache cache;
   InertiaSettings settings;
+  settings.max_tangent_dimension = static_cast<int>(w.rows());
   settings.mu = 1e-2;
   InertiaStatus status;
   double delta_w_last = 0.0;
@@ -1062,6 +1315,7 @@ TEST_CASE("Sparse augmented KKT reuses symbolic analysis by exact pattern",
 
   SparseInertiaKKTCache cache;
   InertiaSettings settings;
+  settings.max_tangent_dimension = static_cast<int>(w.rows());
   InertiaStatus status;
   double delta_w_last = 0.0;
   REQUIRE(factor_kkt_inertia_corrected_sparse(
@@ -1107,6 +1361,7 @@ TEST_CASE("KKT inertia uses reduced rather than full-space curvature",
   SparseInertiaKKTCache cache;
   cache.preferred_free_columns = {0, 1};
   InertiaSettings settings;
+  settings.max_tangent_dimension = static_cast<int>(w.rows());
   InertiaStatus status;
   double delta_w_last = 0.0;
   REQUIRE(factor_kkt_inertia_corrected_sparse(

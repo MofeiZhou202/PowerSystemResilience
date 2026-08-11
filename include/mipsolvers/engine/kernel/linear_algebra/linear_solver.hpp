@@ -9,6 +9,13 @@
 
 namespace mipsolvers::engine {
 
+/// Query/override the MKL thread count used by the multi-threaded PARDISO
+/// factorization. When MKL is not linked, the getter returns 1 and the setter
+/// is a no-op. Pinning to 1 makes the factorization serial and bit-reproducible
+/// (used for deterministic OPF acceptance on sensitive stiff problems).
+int mkl_max_threads();
+void set_mkl_num_threads(int threads);
+
 /// Abstract sparse linear solver interface (self-contained in solver module).
 class SparseLinearSolver {
  public:

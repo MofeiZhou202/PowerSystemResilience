@@ -35,9 +35,13 @@ struct IPMOptions {
   /// tol_accept, it is accepted as a near-optimal solution even when the
   /// strict tolerances are not met. Disabled when set to 0.
   double tol_accept{1e-2};
-  double alpha_max{0.95};  // fraction-to-boundary τ
-  int qn_sparse_block_size{8};
-  int qn_max_blocks{6};
+  // Positive values are explicit caller policies. Nonpositive requests the
+  // largest strict-interior fraction distinguishable at machine precision.
+  double alpha_max{0.0};
+  // Positive values are explicit sparse-memory policies. Nonpositive uses
+  // one complete current full-space secant block derived from model dimension.
+  int qn_sparse_block_size{0};
+  int qn_max_blocks{0};
   bool verbose{false};
   // Keep native solver results native by default. When enabled, a failed
   // native solve may call Ipopt and the solver_name will identify that path.
@@ -83,28 +87,40 @@ struct IPMOptions {
   bool use_second_order_correction{true};
   bool use_restoration_phase{true};
   bool scale_problem{true};
-  double scaling_g_max{100.0};
-  double restoration_zeta{1e-4};
+  // Positive values select a caller scaling target. Nonpositive normalizes
+  // derivative infinity norms to the unit scale.
+  double scaling_g_max{0.0};
+  // A positive value is an explicit proximal-weight policy. A nonpositive
+  // value requests the backward-error-level tie breaker derived from the unit
+  // l1 restoration penalty.
+  double restoration_zeta{0.0};
 
   // Barrier schedule. `mu_init` is an exposed user policy; a nonpositive value
   // explicitly requests the scale-covariant automatic initializer derived
   // from the current primal-dual state. A nonpositive minimum requests the
   // floating-point representability limit.
-  double mu_init{0.1};
+  double mu_init{0.0};
   double mu_min{0.0};
-  double kappa_mu{0.2};
-  double theta_mu{1.5};
-  double kappa_epsilon{10.0};
+  // Positive values expose the legacy monotone barrier policy. With either
+  // value nonpositive, the next target is derived from the current product
+  // distribution, the caller complementarity gate, and representability.
+  double kappa_mu{0.0};
+  double theta_mu{0.0};
+  // Positive values are an exposed inner-barrier policy. Nonpositive selects
+  // the unit central-neighborhood coefficient E_mu <= mu.
+  double kappa_epsilon{0.0};
 
-  // Filter line search constants (Wächter–Biegler 2006, Table 1 defaults).
-  double filter_gamma_theta{1e-5};
-  double filter_gamma_phi{1e-5};
-  double filter_s_theta{1.1};
-  double filter_s_phi{2.3};
-  double filter_delta{1.0};
-  double filter_eta_phi{1e-4};
-  double filter_theta_min_scale{1e-4};  // θ_min = scale · max(1, θ₀)
-  double filter_alpha_min{1e-10};
+  // Positive values opt into the parameterized Wächter-Biegler switching
+  // filter. The all-zero default uses strict Pareto improvement with
+  // machine-roundoff margins and a locally resolvable minimum step.
+  double filter_gamma_theta{0.0};
+  double filter_gamma_phi{0.0};
+  double filter_s_theta{0.0};
+  double filter_s_phi{0.0};
+  double filter_delta{0.0};
+  double filter_eta_phi{0.0};
+  double filter_theta_min_scale{0.0};
+  double filter_alpha_min{0.0};
 };
 
 /// Detailed IPM result (extends SolveResult with multiplier information).

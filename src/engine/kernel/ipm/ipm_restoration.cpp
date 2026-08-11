@@ -17,6 +17,27 @@ Eigen::VectorXd make_dr(const Eigen::VectorXd& x_R) {
   return d;
 }
 
+Eigen::VectorXd restoration_variable_scale(
+    const NLPModel& prob, const Eigen::VectorXd& x_R) {
+  Eigen::VectorXd scale(x_R.size());
+  for (int col = 0; col < x_R.size(); ++col) {
+    if (col >= static_cast<int>(prob.vars.size())) {
+      scale[col] = std::max(1.0, std::abs(x_R[col]));
+      continue;
+    }
+    const auto& var = prob.vars[static_cast<std::size_t>(col)];
+    const bool finite_lb = variable_has_finite_lower_bound(var.lb);
+    const bool finite_ub = variable_has_finite_upper_bound(var.ub);
+    const double width = finite_lb && finite_ub
+        ? std::max(0.0, var.ub - var.lb)
+        : 0.0;
+    scale[col] = std::max({1.0, std::abs(x_R[col]), width,
+                           finite_lb ? std::abs(var.lb) : 0.0,
+                           finite_ub ? std::abs(var.ub) : 0.0});
+  }
+  return scale;
+}
+
 }  // namespace
 
 RestorationBuild build_restoration_nlp(const NLPModel& prob,
@@ -27,10 +48,27 @@ RestorationBuild build_restoration_nlp(const NLPModel& prob,
 
   // Determine equality count by probing jac_g at x_R once, if available.
   int m_eq = 0;
+  Eigen::VectorXd g0;
   if (prob.g) {
-    Eigen::VectorXd g0;
     prob.g(x_R, g0);
     m_eq = static_cast<int>(g0.size());
+  }
+  Eigen::VectorXd equality_row_reach = Eigen::VectorXd::Zero(m_eq);
+  if (m_eq > 0 && prob.jac_g) {
+    Eigen::SparseMatrix<double> jacobian;
+    prob.jac_g(x_R, jacobian);
+    if (jacobian.rows() == m_eq && jacobian.cols() == n_x) {
+      const Eigen::VectorXd variable_scale =
+          restoration_variable_scale(prob, x_R);
+      for (int col = 0; col < jacobian.outerSize(); ++col) {
+        for (Eigen::SparseMatrix<double>::InnerIterator it(jacobian, col); it;
+             ++it) {
+          const double scaled = it.value() * variable_scale[col];
+          equality_row_reach[it.row()] += scaled * scaled;
+        }
+      }
+      equality_row_reach = equality_row_reach.array().sqrt();
+    }
   }
 
   const int n_p = m_eq;
@@ -52,15 +90,15 @@ RestorationBuild build_restoration_nlp(const NLPModel& prob,
       out.vars[j] = prob.vars[j];
     } else {
       VariableMeta v;
-      v.lb = -1e20;
-      v.ub = 1e20;
+      v.lb = -kVariableNoBound;
+      v.ub = kVariableNoBound;
       out.vars[j] = v;
     }
   }
   for (int j = n_x; j < N; ++j) {
     VariableMeta v;
     v.lb = 0.0;
-    v.ub = 1e20;
+    v.ub = kVariableNoBound;
     out.vars[j] = v;
   }
 
@@ -68,13 +106,19 @@ RestorationBuild build_restoration_nlp(const NLPModel& prob,
   Eigen::VectorXd w0 = Eigen::VectorXd::Zero(N);
   w0.head(n_x) = x_R;
   if (m_eq > 0 && prob.g) {
-    Eigen::VectorXd g0;
-    prob.g(x_R, g0);
+    const double root_epsilon =
+        std::sqrt(std::numeric_limits<double>::epsilon());
+    const double representability_floor =
+        std::sqrt(std::numeric_limits<double>::min());
     for (int i = 0; i < m_eq; ++i) {
       const double gi = g0[i];
-      // Split g into p-n so that g + p - n = 0 ⇒ p - n = -g.
-      const double p_i = std::max(-gi, 1e-4);
-      const double n_i = std::max(gi, 1e-4);
+      const double resolution = std::max(
+          representability_floor,
+          root_epsilon * std::max(std::abs(gi), equality_row_reach[i]));
+      // Adding the same row-local resolution to both sides preserves
+      // p-n=-g while obtaining a strictly positive, scale-covariant start.
+      const double p_i = resolution + std::max(-gi, 0.0);
+      const double n_i = resolution + std::max(gi, 0.0);
       w0[n_x + i] = p_i;
       w0[n_x + n_p + i] = n_i;
     }
@@ -82,7 +126,9 @@ RestorationBuild build_restoration_nlp(const NLPModel& prob,
   out.x0 = w0;
 
   Eigen::VectorXd dr = make_dr(x_R);
-  const double zeta_val = zeta;
+  const double zeta_val = zeta > 0.0 && std::isfinite(zeta)
+      ? zeta
+      : std::sqrt(std::numeric_limits<double>::epsilon());
   const Eigen::VectorXd x_ref = x_R;
 
   // Objective: Σ (p_i + n_i) + (ζ/2) ‖D_R (x − x_R)‖²
@@ -285,15 +331,14 @@ RestorationWarmStart recover_restoration_warm_start(
     return RestorationWarmStart{};
   }
 
-  constexpr double kBoundInfinity = 1e19;
   std::vector<int> original_lower_columns;
   std::vector<int> original_upper_columns;
   for (int col = 0; col < n; ++col) {
     const auto& var = original.vars[static_cast<std::size_t>(col)];
-    if (std::isfinite(var.lb) && std::abs(var.lb) < kBoundInfinity) {
+    if (variable_has_finite_lower_bound(var.lb)) {
       original_lower_columns.push_back(col);
     }
-    if (std::isfinite(var.ub) && std::abs(var.ub) < kBoundInfinity) {
+    if (variable_has_finite_upper_bound(var.ub)) {
       original_upper_columns.push_back(col);
     }
   }

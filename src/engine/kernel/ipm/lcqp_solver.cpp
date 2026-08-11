@@ -3,7 +3,7 @@
 //
 // Optimizations:
 // - Symbolic factorization cached (pattern never changes, only D diagonal values)
-// - Adaptive centering: σ = min(0.3, 100μ) for faster convergence near optimum
+// - Caller-visible Mehrotra centering policy: sigma=(mu_aff/mu)^p
 //
 // This is a high-performance implementation for DC OPF problems.
 
@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <numeric>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -26,8 +27,19 @@
 namespace mipsolvers::engine {
 
 namespace {
-constexpr double kBigNum = 1e15;
-constexpr double kTau = 0.995;  // Step length fraction
+double minimum_safe_positive() {
+  return std::sqrt(std::numeric_limits<double>::min());
+}
+
+double summation_roundoff_bound(int term_count, double absolute_term_sum) {
+  if (term_count <= 0 || !(absolute_term_sum > 0.0)) return 0.0;
+  const double accumulated_error =
+      static_cast<double>(term_count) * std::numeric_limits<double>::epsilon();
+  if (!(accumulated_error < 1.0)) {
+    return std::numeric_limits<double>::infinity();
+  }
+  return accumulated_error / (1.0 - accumulated_error) * absolute_term_sum;
+}
 
 struct LCQPProfile {
   bool enabled{std::getenv("MIPSOLVERS_LCQP_PROF") != nullptr};
@@ -62,14 +74,15 @@ struct LCQPProfile {
 };
 
 // Compute max step α s.t. v + α*dv > 0
-double max_step_pos(const Eigen::VectorXd& v, const Eigen::VectorXd& dv) {
+double max_step_pos(const Eigen::VectorXd& v, const Eigen::VectorXd& dv,
+                    double interior_fraction) {
   double alpha = 1.0;
   for (int i = 0; i < v.size(); ++i) {
     // Every negative component can hit the cone boundary.  Ignoring a small
     // negative direction is unsafe when the corresponding slack or dual is
     // even smaller, and can turn complementarity negative on the update.
     if (dv(i) < 0.0) {
-      alpha = std::min(alpha, -kTau * v(i) / dv(i));
+      alpha = std::min(alpha, -interior_fraction * v(i) / dv(i));
     }
   }
   return std::clamp(alpha, 0.0, 1.0);
@@ -90,12 +103,15 @@ RuizScaling compute_ruiz_scaling(const Eigen::SparseMatrix<double>& Q,
                                  const Eigen::SparseMatrix<double>& Aeq,
                                  const Eigen::SparseMatrix<double>& A,
                                  int n, int meq, int mineq,
-                                 int rounds = 5) {
+                                 int iteration_budget) {
   Eigen::VectorXd col_scale = Eigen::VectorXd::Ones(n);
   Eigen::VectorXd equality_row_scale = Eigen::VectorXd::Ones(meq);
   Eigen::VectorXd inequality_row_scale = Eigen::VectorXd::Ones(mineq);
 
-  for (int r = 0; r < rounds; ++r) {
+  const double scaling_resolution =
+      std::sqrt(std::numeric_limits<double>::epsilon());
+  for (int r = 0; r < iteration_budget; ++r) {
+    double maximum_log_update = 0.0;
     // Column scaling from the *effectively-scaled* matrices.
     // Scaled Q[i,j] = col_scale[i] * Q[i,j] * col_scale[j]
     // Scaled Aeq[i,j] = row_scale[i] * Aeq[i,j] * col_scale[j]
@@ -121,9 +137,11 @@ RuizScaling compute_ruiz_scaling(const Eigen::SparseMatrix<double>& Q,
       }
     }
     for (int j = 0; j < n; ++j) {
-      if (col_max[j] > 1e-12) {
+      if (col_max[j] > minimum_safe_positive()) {
         double s = 1.0 / std::sqrt(col_max[j]);
         col_scale[j] *= s;
+        maximum_log_update =
+            std::max(maximum_log_update, std::abs(std::log(s)));
       }
     }
 
@@ -138,9 +156,11 @@ RuizScaling compute_ruiz_scaling(const Eigen::SparseMatrix<double>& Q,
         }
       }
       for (int i = 0; i < meq; ++i) {
-        if (row_max[i] > 1e-12) {
+        if (row_max[i] > minimum_safe_positive()) {
           double s = 1.0 / std::sqrt(row_max[i]);
           equality_row_scale[i] *= s;
+          maximum_log_update =
+              std::max(maximum_log_update, std::abs(std::log(s)));
         }
       }
     }
@@ -154,11 +174,15 @@ RuizScaling compute_ruiz_scaling(const Eigen::SparseMatrix<double>& Q,
         }
       }
       for (int i = 0; i < mineq; ++i) {
-        if (row_max[i] > 1e-12) {
-          inequality_row_scale[i] *= 1.0 / std::sqrt(row_max[i]);
+        if (row_max[i] > minimum_safe_positive()) {
+          const double s = 1.0 / std::sqrt(row_max[i]);
+          inequality_row_scale[i] *= s;
+          maximum_log_update =
+              std::max(maximum_log_update, std::abs(std::log(s)));
         }
       }
     }
+    if (maximum_log_update <= scaling_resolution) break;
   }
   return {col_scale, equality_row_scale, inequality_row_scale};
 }
@@ -264,6 +288,10 @@ SolveResult NativeLCQPAdapter::solve_qp(const QPModel& prob) const {
   SolveResult result;
   result.stats.solver_name = name();
 
+  if (!std::isfinite(opt_.centering_exponent)) {
+    result.stats.status = "LCQP centering exponent must be finite";
+    return result;
+  }
   const int n = static_cast<int>(prob.c.size());
   if (n == 0) {
     result.stats.success = true;
@@ -275,10 +303,12 @@ SolveResult NativeLCQPAdapter::solve_qp(const QPModel& prob) const {
   // Extract bounds
   Eigen::VectorXd lb(n), ub(n);
   for (int i = 0; i < n; ++i) {
-    lb(i) = (i < static_cast<int>(prob.vars.size())) ? prob.vars[i].lb : -kBigNum;
-    ub(i) = (i < static_cast<int>(prob.vars.size())) ? prob.vars[i].ub : kBigNum;
-    if (lb(i) < -kBigNum + 1) lb(i) = -kBigNum;
-    if (ub(i) > kBigNum - 1) ub(i) = kBigNum;
+    lb(i) = (i < static_cast<int>(prob.vars.size()))
+        ? prob.vars[i].lb
+        : -std::numeric_limits<double>::infinity();
+    ub(i) = (i < static_cast<int>(prob.vars.size()))
+        ? prob.vars[i].ub
+        : std::numeric_limits<double>::infinity();
   }
 
   // Handle sense
@@ -308,6 +338,8 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
   result.stats.solver_name = name();
   LCQPProfile profile;
   const auto setup_started = std::chrono::steady_clock::now();
+  const double centering_exponent =
+      opt_.centering_exponent > 0.0 ? opt_.centering_exponent : 1.0;
 
   const int n = static_cast<int>(c.size());
   const int meq = static_cast<int>(Aeq.rows());
@@ -318,8 +350,8 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
   // Find finite bounds
   std::vector<int> idx_lb, idx_ub;
   for (int i = 0; i < n; ++i) {
-    if (lb(i) > -kBigNum + 1) idx_lb.push_back(i);
-    if (ub(i) < kBigNum - 1) idx_ub.push_back(i);
+    if (variable_has_finite_lower_bound(lb(i))) idx_lb.push_back(i);
+    if (variable_has_finite_upper_bound(ub(i))) idx_ub.push_back(i);
   }
   const int nlb = static_cast<int>(idx_lb.size());
   const int nub = static_cast<int>(idx_ub.size());
@@ -328,7 +360,7 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
   if (nslack == 0 && meq == 0) {
     // Unconstrained
     if (Q.nonZeros() == 0) {
-      if (c.norm() > 1e-10) {
+      if (c.squaredNorm() > 0.0) {
         result.stats.success = false;
         result.stats.status = "Unbounded";
         return result;
@@ -340,23 +372,72 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
       return result;
     }
     auto solver = make_default_sparse_solver();
-    Eigen::SparseMatrix<double> Qreg = Q;
-    for (int i = 0; i < n; ++i) Qreg.coeffRef(i, i) += 1e-10;
-    solver->analyze_pattern(Qreg);
-    solver->factorize(Qreg);
+    solver->analyze_pattern(Q);
+    if (!solver->factorize(Q)) {
+      result.stats.status = "Unconstrained Hessian factorization failed";
+      return result;
+    }
     Eigen::VectorXd neg_c = -c;
-    solver->solve(neg_c, result.x);
+    if (!solver->solve(neg_c, result.x) || !result.x.allFinite()) {
+      result.stats.status = "Unconstrained Hessian solve failed";
+      return result;
+    }
     result.stats.success = true;
     result.stats.objective = 0.5 * result.x.dot(Q * result.x) + c.dot(result.x);
     result.stats.status = "Optimal";
     return result;
   }
 
+  // A caller may already have a structurally derived feasible descent point.
+  // Audit it in the model's original coordinates before equilibration or KKT
+  // construction; this status is deliberately not an optimality certificate.
+  const bool has_initial_point =
+      opt_.initial_point.size() == n && opt_.initial_point.allFinite();
+  if (opt_.return_feasible_descent_candidate && has_initial_point) {
+    const Eigen::VectorXd& candidate = opt_.initial_point;
+    double primal_feasibility = 0.0;
+    if (meq > 0) {
+      primal_feasibility = std::max(
+          primal_feasibility,
+          (Aeq * candidate - beq).lpNorm<Eigen::Infinity>());
+    }
+    if (mineq > 0) {
+      primal_feasibility = std::max(
+          primal_feasibility,
+          std::max(0.0, (A * candidate - b).maxCoeff()));
+    }
+    for (int variable = 0; variable < n; ++variable) {
+      if (variable_has_finite_lower_bound(lb[variable])) {
+        primal_feasibility = std::max(
+            primal_feasibility, lb[variable] - candidate[variable]);
+      }
+      if (variable_has_finite_upper_bound(ub[variable])) {
+        primal_feasibility = std::max(
+            primal_feasibility, candidate[variable] - ub[variable]);
+      }
+    }
+    const double objective =
+        0.5 * candidate.dot(Q * candidate) + c.dot(candidate);
+    if (std::isfinite(primal_feasibility) && std::isfinite(objective) &&
+        primal_feasibility <= opt_.tol_primal &&
+        objective <= opt_.candidate_objective_upper_bound) {
+      result.x = candidate;
+      result.stats.objective = objective;
+      result.stats.primal_feas = primal_feasibility;
+      result.stats.dual_feas = std::numeric_limits<double>::infinity();
+      result.stats.complementarity = std::numeric_limits<double>::infinity();
+      result.stats.status =
+          "Feasible descent candidate; optimality not certified";
+      return result;
+    }
+  }
+
   // ===========================================================================
   // Ruiz equilibration: scale the problem for better IPM conditioning.
   // Scaled variables: x_s = D^{-1} x  where D = diag(col_scale).
   // ===========================================================================
-  auto scaling = compute_ruiz_scaling(Q, Aeq, A, n, meq, mineq);
+  auto scaling = compute_ruiz_scaling(
+      Q, Aeq, A, n, meq, mineq, opt_.max_iter);
   const Eigen::VectorXd& d = scaling.col_scale;
   const Eigen::VectorXd& eq_rs = scaling.equality_row_scale;
   const Eigen::VectorXd& ineq_rs = scaling.inequality_row_scale;
@@ -390,8 +471,10 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
   Eigen::VectorXd lbs(n), ubs(n);
   for (int i = 0; i < n; ++i) {
     double di = d[i];
-    lbs[i] = (lb(i) > -kBigNum + 1) ? lb(i) / di : lb(i);
-    ubs[i] = (ub(i) < kBigNum - 1) ? ub(i) / di : ub(i);
+    lbs[i] = variable_has_finite_lower_bound(lb(i)) ? lb(i) / di :
+        -std::numeric_limits<double>::infinity();
+    ubs[i] = variable_has_finite_upper_bound(ub(i)) ? ub(i) / di :
+        std::numeric_limits<double>::infinity();
   }
 
   // Re-identify finite bounds on scaled problem (indices unchanged)
@@ -412,37 +495,72 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
 
   // Initialize x from a caller-supplied structural estimate when available.
   // Scaling it here preserves the exact original-coordinate point.
-  const bool has_initial_point =
-      opt_.initial_point.size() == n && opt_.initial_point.allFinite();
   Eigen::VectorXd x = Eigen::VectorXd::Zero(n);
   if (has_initial_point) {
     x = opt_.initial_point.cwiseQuotient(d);
   } else {
     for (int i = 0; i < n; ++i) {
-      double lo = (lbs(i) > -kBigNum + 1) ? lbs(i) : -10.0;
-      double hi = (ubs(i) < kBigNum - 1) ? ubs(i) : 10.0;
-      x(i) = 0.5 * (lo + hi);
+      const bool finite_lower = std::isfinite(lbs(i));
+      const bool finite_upper = std::isfinite(ubs(i));
+      if (finite_lower && finite_upper) {
+        x(i) = std::midpoint(lbs(i), ubs(i));
+      } else if (finite_lower) {
+        x(i) = lbs(i) + std::sqrt(std::numeric_limits<double>::epsilon()) *
+            std::max(1.0, std::abs(lbs(i)));
+      } else if (finite_upper) {
+        x(i) = ubs(i) - std::sqrt(std::numeric_limits<double>::epsilon()) *
+            std::max(1.0, std::abs(ubs(i)));
+      }
     }
   }
 
-  // Initialize slacks and duals (in scaled space).
+  const double root_epsilon =
+      std::sqrt(std::numeric_limits<double>::epsilon());
+
+  // Resolve strict interiority at the local linearization resolution.
   Eigen::VectorXd s_ineq(mineq), z_ineq(mineq);
   if (mineq > 0) {
-    s_ineq = (bs - As * x).cwiseMax(1.0);
-    z_ineq.setOnes();
+    Eigen::VectorXd row_reach = bs.cwiseAbs();
+    Eigen::VectorXi row_term_count = Eigen::VectorXi::Ones(mineq);
+    for (int col = 0; col < As.outerSize(); ++col) {
+      const double variable_reach = std::max(1.0, std::abs(x[col]));
+      for (Eigen::SparseMatrix<double>::InnerIterator it(As, col); it; ++it) {
+        row_reach[it.row()] += std::abs(it.value()) * variable_reach;
+        ++row_term_count[it.row()];
+      }
+    }
+    Eigen::VectorXd row_resolution(mineq);
+    for (int row = 0; row < mineq; ++row) {
+      row_resolution[row] = std::max(
+          minimum_safe_positive(),
+          summation_roundoff_bound(row_term_count[row], row_reach[row]));
+    }
+    s_ineq = (bs - As * x).cwiseMax(row_resolution);
   }
 
   Eigen::VectorXd s_lb(nlb), z_lb(nlb);
   for (int k = 0; k < nlb; ++k) {
-    s_lb(k) = std::max(x(idx_lb[k]) - lbs(idx_lb[k]), 1.0);
-    z_lb(k) = 1.0;
+    const int variable = idx_lb[k];
+    const double reach =
+        std::max({1.0, std::abs(x[variable]), std::abs(lbs[variable])});
+    s_lb(k) = std::max(
+        x(variable) - lbs(variable), summation_roundoff_bound(2, reach));
   }
 
   Eigen::VectorXd s_ub(nub), z_ub(nub);
   for (int k = 0; k < nub; ++k) {
-    s_ub(k) = std::max(ubs(idx_ub[k]) - x(idx_ub[k]), 1.0);
-    z_ub(k) = 1.0;
+    const int variable = idx_ub[k];
+    const double reach =
+        std::max({1.0, std::abs(x[variable]), std::abs(ubs[variable])});
+    s_ub(k) = std::max(
+        ubs(variable) - x(variable), summation_roundoff_bound(2, reach));
   }
+
+  // Ruiz scaling makes unit magnitude the local coordinate scale. These are
+  // auxiliary QP cone duals, not OPF multipliers or a common OPF s*mu target.
+  if (mineq > 0) z_ineq.setOnes();
+  if (nlb > 0) z_lb.setOnes();
+  if (nub > 0) z_ub.setOnes();
 
   Eigen::VectorXd y = Eigen::VectorXd::Zero(meq);
 
@@ -452,7 +570,23 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
 
   // Build KKT pattern once
   const int kkt_dim = n + meq;
-  const double reg = 1e-8;
+  double kkt_scale = 1.0;
+  for (int col = 0; col < Qs.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(Qs, col); it; ++it) {
+      kkt_scale = std::max(kkt_scale, std::abs(it.value()));
+    }
+  }
+  for (int col = 0; col < Aeqs.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(Aeqs, col); it; ++it) {
+      kkt_scale = std::max(kkt_scale, std::abs(it.value()));
+    }
+  }
+  for (int col = 0; col < As.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(As, col); it; ++it) {
+      kkt_scale = std::max(kkt_scale, std::abs(it.value()));
+    }
+  }
+  const double reg = root_epsilon * kkt_scale;
 
   // Eliminating general-inequality slacks and duals contributes A' W A to
   // the primal block. Its graph is fixed because W=diag(z/s) stays positive;
@@ -539,7 +673,7 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
     }
     normal_contributions.reserve(
         static_cast<size_t>(contribution_count));
-    const auto kkt_value_index = [&](int row, int col) {
+    const auto kkt_value_index = [&](Eigen::Index row, Eigen::Index col) {
       const Eigen::Index begin = numeric_kkt.outerIndexPtr()[col];
       const Eigen::Index end = numeric_kkt.outerIndexPtr()[col + 1];
       const auto* found = std::lower_bound(
@@ -608,34 +742,52 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
       std::chrono::steady_clock::now() - analyze_started).count();
   profile.backend = use_cholmod ? "cholmod" : "general";
 
-  // Stall / infeasibility detection state
-  double prev_mu = 1e30;
-  double prev_obj = 1e30;
-  int stall_count = 0;
-  int obj_stable_count = 0;
-  constexpr int kMaxStall = 30;          // Consecutive iterations with < 1% mu reduction
-  constexpr double kStallRatio = 0.999;  // mu must decrease by at least 0.1% per iter
-  constexpr double kInfeasGrowth = 1e12; // If residuals exceed this, declare infeasible
-
   // Scaling factor for dual feasibility: normalize by cost vector magnitude.
   // Degenerate variables at their bounds produce large dual multipliers (z ≈ c)
   // that inflate raw dual residuals. Scaling prevents false non-convergence.
   const double c_norm = cs.lpNorm<Eigen::Infinity>();
   const double dual_scale = 1.0 + c_norm;
 
-  // Cap effective iteration limit for IPM — convergence beyond 500 iterations
-  // indicates numerical issues, not insufficient iterations.
-  const int effective_max_iter = std::min(opt_.max_iter, 500);
+  const int effective_max_iter = opt_.max_iter;
+  const double interior_margin = std::max(
+      std::sqrt(std::numeric_limits<double>::epsilon()),
+      std::sqrt(std::clamp(opt_.tol_gap, 0.0, 1.0)));
+  const double interior_fraction = 1.0 - interior_margin;
 
   for (int iter = 0; iter < effective_max_iter; ++iter) {
     profile.iterations = iter;
     // Compute residuals (all in scaled space)
     Eigen::VectorXd r_dual = cs;
-    if (Qs.nonZeros() > 0) r_dual += Qs * x;
-    if (meq > 0) r_dual += Aeqs.transpose() * y;
-    if (mineq > 0) r_dual += As.transpose() * z_ineq;
+    double dual_roundoff_scale =
+        std::max(1.0, cs.lpNorm<Eigen::Infinity>());
+    if (Qs.nonZeros() > 0) {
+      const Eigen::VectorXd term = Qs * x;
+      r_dual += term;
+      dual_roundoff_scale =
+          std::max(dual_roundoff_scale, term.lpNorm<Eigen::Infinity>());
+    }
+    if (meq > 0) {
+      const Eigen::VectorXd term = Aeqs.transpose() * y;
+      r_dual += term;
+      dual_roundoff_scale =
+          std::max(dual_roundoff_scale, term.lpNorm<Eigen::Infinity>());
+    }
+    if (mineq > 0) {
+      const Eigen::VectorXd term = As.transpose() * z_ineq;
+      r_dual += term;
+      dual_roundoff_scale =
+          std::max(dual_roundoff_scale, term.lpNorm<Eigen::Infinity>());
+    }
     for (int k = 0; k < nlb; ++k) r_dual(idx_lb[k]) -= z_lb(k);
     for (int k = 0; k < nub; ++k) r_dual(idx_ub[k]) += z_ub(k);
+    if (nlb > 0) {
+      dual_roundoff_scale = std::max(
+          dual_roundoff_scale, z_lb.lpNorm<Eigen::Infinity>());
+    }
+    if (nub > 0) {
+      dual_roundoff_scale = std::max(
+          dual_roundoff_scale, z_ub.lpNorm<Eigen::Infinity>());
+    }
 
     Eigen::VectorXd r_eq = (meq > 0) ? Aeqs * x - beqs : Eigen::VectorXd();
     Eigen::VectorXd r_ineq =
@@ -650,6 +802,22 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
     for (int k = 0; k < nlb; ++k) mu += s_lb(k) * z_lb(k);
     for (int k = 0; k < nub; ++k) mu += s_ub(k) * z_ub(k);
     if (nslack > 0) mu /= nslack;
+    double complementarity_inf = 0.0;
+    if (mineq > 0) {
+      complementarity_inf = std::max(
+          complementarity_inf,
+          s_ineq.cwiseProduct(z_ineq).lpNorm<Eigen::Infinity>());
+    }
+    if (nlb > 0) {
+      complementarity_inf = std::max(
+          complementarity_inf,
+          s_lb.cwiseProduct(z_lb).lpNorm<Eigen::Infinity>());
+    }
+    if (nub > 0) {
+      complementarity_inf = std::max(
+          complementarity_inf,
+          s_ub.cwiseProduct(z_ub).lpNorm<Eigen::Infinity>());
+    }
 
     // Convergence check — use scaled dual feasibility
     double pfeas = std::max(
@@ -659,6 +827,8 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
                  r_sub.lpNorm<Eigen::Infinity>()));
     double dfeas_raw = r_dual.lpNorm<Eigen::Infinity>();
     double dfeas = dfeas_raw / dual_scale;  // Scaled dual infeasibility
+    const double dual_comparison_error =
+        root_epsilon * dual_roundoff_scale;
     // Objective in scaled space (unscale for reporting: x_orig = D * x_scaled)
     Eigen::VectorXd x_orig = d.cwiseProduct(x);
     double obj = 0.5 * x_orig.dot(Q * x_orig) + c.dot(x_orig);
@@ -668,106 +838,84 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
     }
 
     // Primary convergence: all scaled criteria met
-    if (pfeas < opt_.tol_primal && dfeas < opt_.tol_dual &&
-        mu >= 0.0 && mu < opt_.tol_gap) {
+    const bool dual_within_backward_error =
+        dfeas_raw <= opt_.tol_dual * dual_scale + dual_comparison_error;
+    if (pfeas < opt_.tol_primal && dual_within_backward_error &&
+        complementarity_inf >= 0.0 &&
+        complementarity_inf < opt_.tol_gap) {
       result.x = x_orig;
       result.stats.success = true;
       result.stats.iterations = iter;
       result.stats.objective = obj;
       result.stats.primal_feas = pfeas;
       result.stats.dual_feas = dfeas;
-      result.stats.complementarity = mu;
-      result.stats.status = "Optimal";
+      result.stats.complementarity = complementarity_inf;
+      result.stats.status = dfeas < opt_.tol_dual
+          ? "Optimal"
+          : "Optimal (backward-error audited)";
+      result.constraint_duals.resize(mineq + meq);
+      if (mineq > 0) {
+        result.constraint_duals.head(mineq) =
+            z_ineq.cwiseProduct(ineq_rs);
+      }
+      if (meq > 0) {
+        result.constraint_duals.tail(meq) = y.cwiseProduct(eq_rs);
+      }
       return result;
     }
 
-    // Track objective stability
-    double obj_rel_change = std::abs(obj - prev_obj) / std::max(1.0, std::abs(obj));
-    if (iter > 5 && obj_rel_change < 1e-10) {
-      ++obj_stable_count;
-    } else {
-      obj_stable_count = 0;
-    }
-    prev_obj = obj;
-
-    // Near-optimal acceptance: primal converged, objective stable, mu small.
-    // Dual residuals may be inflated by degenerate bound multipliers but the
-    // primal solution is correct.
-    if (pfeas < opt_.tol_primal && mu >= 0.0 &&
-        mu < opt_.tol_gap * 1e3 &&
-        obj_stable_count >= 3) {
+    const double quadratic_model_term = 0.5 * x_orig.dot(Q * x_orig);
+    const double linear_model_term = c.dot(x_orig);
+    const double objective_comparison_error = root_epsilon * std::max(
+        {1.0, std::abs(quadratic_model_term), std::abs(linear_model_term)});
+    if (opt_.return_feasible_descent_candidate &&
+        pfeas < opt_.tol_primal &&
+        obj + objective_comparison_error <=
+            opt_.candidate_objective_upper_bound) {
       result.x = x_orig;
-      result.stats.success = true;
       result.stats.iterations = iter;
       result.stats.objective = obj;
       result.stats.primal_feas = pfeas;
       result.stats.dual_feas = dfeas;
-      result.stats.complementarity = mu;
-      result.stats.status = "Optimal (near)";
+      result.stats.complementarity = complementarity_inf;
+      result.stats.status = "Feasible descent candidate; optimality not certified";
+      result.constraint_duals.resize(mineq + meq);
+      if (mineq > 0) {
+        result.constraint_duals.head(mineq) =
+            z_ineq.cwiseProduct(ineq_rs);
+      }
+      if (meq > 0) {
+        result.constraint_duals.tail(meq) = y.cwiseProduct(eq_rs);
+      }
       return result;
     }
 
-    // Early termination: primal residuals diverged (likely infeasible).
-    // Only check primal — dual explosion from degenerate bound duals is
-    // a numerical artifact, not true infeasibility.
-    if (pfeas > kInfeasGrowth || !std::isfinite(pfeas) || !std::isfinite(dfeas_raw)) {
+    if (!std::isfinite(pfeas) || !std::isfinite(dfeas_raw) ||
+        !std::isfinite(mu) || !std::isfinite(complementarity_inf) ||
+        !std::isfinite(obj)) {
       result.x = x_orig;
       result.stats.success = false;
       result.stats.iterations = iter;
       result.stats.objective = obj;
       result.stats.primal_feas = pfeas;
       result.stats.dual_feas = dfeas;
-      result.stats.status = "Infeasible (residuals diverged)";
+      result.stats.status = "Non-finite iterate diagnostics";
       return result;
     }
-
-    // Stall detection: mu not decreasing sufficiently
-    if (iter > 10) {
-      if (mu > prev_mu * kStallRatio) {
-        ++stall_count;
-      } else {
-        stall_count = 0;
-      }
-      if (stall_count >= kMaxStall) {
-        // Before declaring stall, check if we have a good-enough primal solution
-        if (pfeas < opt_.tol_primal && mu >= 0.0 && mu < 1e-3) {
-          result.x = x_orig;
-          result.stats.success = true;
-          result.stats.iterations = iter;
-          result.stats.objective = obj;
-          result.stats.primal_feas = pfeas;
-          result.stats.dual_feas = dfeas;
-          result.stats.complementarity = mu;
-          result.stats.status = "Optimal (stall-accept)";
-          return result;
-        }
-        result.x = x_orig;
-        result.stats.success = false;
-        result.stats.iterations = iter;
-        result.stats.objective = obj;
-        result.stats.primal_feas = pfeas;
-        result.stats.dual_feas = dfeas;
-        result.stats.complementarity = mu;
-        result.stats.status = "Stalled (no progress)";
-        return result;
-      }
-    }
-    prev_mu = mu;
 
     const auto assembly_started = std::chrono::steady_clock::now();
     Eigen::VectorXd ineq_ratio(mineq);
     for (int row = 0; row < mineq; ++row) {
-      ineq_ratio[row] =
-          z_ineq[row] / std::max(s_ineq[row], 1e-12);
+      ineq_ratio[row] = z_ineq[row] / s_ineq[row];
     }
 
     // Build diagonal D = z_lb/s_lb + z_ub/s_ub.
     Eigen::VectorXd D = Eigen::VectorXd::Zero(n);
     for (int k = 0; k < nlb; ++k) {
-      D(idx_lb[k]) += z_lb(k) / std::max(s_lb(k), 1e-12);
+      D(idx_lb[k]) += z_lb(k) / s_lb(k);
     }
     for (int k = 0; k < nub; ++k) {
-      D(idx_ub[k]) += z_ub(k) / std::max(s_ub(k), 1e-12);
+      D(idx_ub[k]) += z_ub(k) / s_ub(k);
     }
 
     // Update only numerical values in the fixed primal-block graph.  Each
@@ -944,7 +1092,7 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
     const double sigma = std::pow(
         std::clamp(mu_affine / std::max(mu, std::numeric_limits<double>::min()),
                    0.0, 1.0),
-        3.0);
+        centering_exponent);
     const Direction direction = solve_direction(sigma, &affine);
     if (!direction.valid) {
       result.stats.success = false;
@@ -964,16 +1112,22 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
     // Compute step lengths
     double alpha_p = 1.0, alpha_d = 1.0;
     if (mineq > 0) {
-      alpha_p = std::min(alpha_p, max_step_pos(s_ineq, ds_ineq));
-      alpha_d = std::min(alpha_d, max_step_pos(z_ineq, dz_ineq));
+      alpha_p = std::min(
+          alpha_p, max_step_pos(s_ineq, ds_ineq, interior_fraction));
+      alpha_d = std::min(
+          alpha_d, max_step_pos(z_ineq, dz_ineq, interior_fraction));
     }
     if (nlb > 0) {
-      alpha_p = std::min(alpha_p, max_step_pos(s_lb, ds_lb));
-      alpha_d = std::min(alpha_d, max_step_pos(z_lb, dz_lb));
+      alpha_p = std::min(
+          alpha_p, max_step_pos(s_lb, ds_lb, interior_fraction));
+      alpha_d = std::min(
+          alpha_d, max_step_pos(z_lb, dz_lb, interior_fraction));
     }
     if (nub > 0) {
-      alpha_p = std::min(alpha_p, max_step_pos(s_ub, ds_ub));
-      alpha_d = std::min(alpha_d, max_step_pos(z_ub, dz_ub));
+      alpha_p = std::min(
+          alpha_p, max_step_pos(s_ub, ds_ub, interior_fraction));
+      alpha_d = std::min(
+          alpha_d, max_step_pos(z_ub, dz_ub, interior_fraction));
     }
 
     const auto relative_displacement = [](const Eigen::VectorXd& state,

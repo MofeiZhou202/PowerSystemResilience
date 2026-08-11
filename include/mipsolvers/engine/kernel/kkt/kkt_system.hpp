@@ -36,20 +36,22 @@ struct InertiaStatus {
   double nullspace_residual{0.0}; ///< infinity norm of Jg*Z
 };
 
-/// Wächter-Biegler regularization schedule parameters for inertia correction.
-/// Defaults match IPOPT's documented constants (see Ipopt Implementation Paper, 2006).
+/// Optional overrides for inertia correction. Nonpositive numeric values
+/// request scale-covariant defaults derived from the current KKT matrix and
+/// floating-point backward-error bounds.
 struct InertiaSettings {
-  double delta_w_min{1e-20};
-  double delta_w_0{1e-4};          ///< First positive δ_W when unregularized factor fails.
-  double delta_w_max{1e40};        ///< Cap — exceeding requests restoration.
-  double kappa_w_plus_first{100.0};///< Multiplier used the first time δ_W goes positive.
-  double kappa_w_plus{8.0};        ///< Subsequent growth factor while inertia still wrong.
-  double kappa_w_minus{1.0 / 3.0}; ///< δ_W_last ← κ_W⁻ · δ_W after a successful solve.
-  double delta_c_stripe{1e-8};     ///< δ_C = delta_c_stripe · μ^{1/4} when Jg rank-deficient.
-  double mu{1.0};                  ///< Current barrier parameter (only used for δ_C).
-  int max_tangent_dimension{32};   ///< Dense null-space certificate size cap.
-  double reduced_curvature_tolerance{1e-10}; ///< Absolute projected-eigenvalue margin floor.
-  double nullspace_residual_tolerance{1e-8}; ///< Relative acceptance tolerance for Jg*Z.
+  double delta_w_min{0.0};
+  double delta_w_0{0.0};           ///< Initial positive δ_W; <=0 derives it locally.
+  double delta_w_max{0.0};         ///< Maximum δ_W; <=0 derives it locally.
+  double delta_c_stripe{0.0};      ///< Dual rank-repair stripe; <=0 derives it locally.
+  double mu{0.0};                  ///< Retained for source compatibility; not a scale rule.
+  /// Optional dense null-space certificate policy. Zero derives the complete
+  /// tangent dimension from the current Jacobian, a negative value disables
+  /// the optional construction, and a positive value is a caller-owned memory
+  /// limit rather than an internal model-size threshold.
+  int max_tangent_dimension{0};
+  double reduced_curvature_tolerance{0.0}; ///< Optional absolute eigenvalue margin.
+  double nullspace_residual_tolerance{0.0}; ///< Optional relative Jg*Z tolerance.
 };
 
 /// Cached KKT matrix and its LU factorization.
@@ -70,7 +72,7 @@ struct SparseKKTCache {
   int symbolic_analyses{0};        ///< Number of ordering/symbolic analyses
   int numeric_factorizations{0};   ///< Number of numeric factorizations
   int linear_solves{0};            ///< Number of back-solves, including refinement
-  double refinement_tolerance{1e-12}; ///< Relative residual gate for correction solves
+  double refinement_tolerance{0.0}; ///< <=0 uses sqrt(epsilon) backward-error gate.
 
   // Reused by solve_kkt_sparse().  Predictor/corrector/SOC solves have the
   // same dimension, so retaining these vectors removes several allocations
@@ -167,8 +169,8 @@ bool factor_kkt_sparse_dual_block(
 
 /// Back-solve the KKT system using a cached factorisation.
 /// Splits the solution into primal (dx) and dual (dlambda) parts.
-/// Applies up to 2 steps of iterative refinement.
-/// Returns false if not factored or if NaN appears.
+/// Refines while the original-system residual strictly decreases and returns
+/// false unless the final residual passes the configured backward-error gate.
 bool solve_kkt_sparse(SparseKKTCache& cache,
                       const Eigen::VectorXd& rhs,
                       Eigen::VectorXd& dx,
@@ -189,13 +191,21 @@ bool factor_current_kkt(SparseKKTCache& cache, int n, int meq,
 /// regularization. This operation performs no right-hand-side solve; call
 /// solve_kkt_inertia_corrected_sparse() repeatedly for predictor, corrector,
 /// and second-order-correction right-hand sides.
+///
+/// `min_delta_w` is an optional lower bound on the primal shift δ_W. The
+/// default 0 keeps the exact scale-covariant policy (smallest δ_W that
+/// certifies the target inertia). A positive value lets a caller force a
+/// larger shift when the minimal-inertia factor is numerically usable but
+/// produces a pathologically large Newton direction on a razor-thin reduced
+/// margin; the extra regularization bounds that direction.
 bool factor_kkt_inertia_corrected_sparse(
     const Eigen::SparseMatrix<double>& w,
     const Eigen::SparseMatrix<double>& jg,
     const InertiaSettings& settings,
     double& delta_w_last,
     SparseInertiaKKTCache& cache,
-    InertiaStatus& status);
+    InertiaStatus& status,
+    double min_delta_w = 0.0);
 
 /// Solve against the most recently factored augmented KKT matrix. The numeric
 /// and symbolic factors are not recomputed.
