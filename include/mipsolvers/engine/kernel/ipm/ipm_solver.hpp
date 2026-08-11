@@ -50,6 +50,9 @@ struct IPMOptions {
   // Optional primal-dual central-path warm start. Each vector is used only
   // when its dimension matches the assembled block and all entries are finite;
   // slack and inequality-dual entries must additionally be strictly positive.
+  // When both inequality vectors are valid, the automatic barrier initializer
+  // recovers mean(s_i * mu_i) from this complete state. A primal-only Phase-I
+  // handoff instead retains its row-wise, minimum-product barrier policy.
   Eigen::VectorXd equality_dual_start;
   Eigen::VectorXd inequality_dual_start;
   Eigen::VectorXd slack_start;
@@ -129,6 +132,8 @@ struct IPMDetail {
   Eigen::VectorXd mu_ineq;    // inequality multipliers
   Eigen::VectorXd z_slack;    // inequality slacks
   double complementarity{0.0};
+  /// Concrete sparse factorization backend used by the selected Newton path.
+  std::string linear_solver_backend{"unselected"};
   std::string newton_formulation{"unselected"};
   int condensed_dimension{0};
   int augmented_dimension{0};
@@ -147,6 +152,11 @@ struct IPMDetail {
   int restoration_factorizations{0};
   int retry_factorizations{0};
   int active_set_polish_factorizations{0};
+  int accepted_steps{0};
+  int rejected_steps{0};
+  int trial_value_evaluations{0};
+  int trial_full_derivative_evaluations{0};
+  int trial_rejections_before_derivatives{0};
   bool primal_feasible_start_requested{false};
   bool primal_feasible_start_accepted{false};
   bool restoration_warm_start_used{false};

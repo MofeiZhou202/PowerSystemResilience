@@ -1485,7 +1485,6 @@ class CallbackTNLP final : public Ipopt::TNLP {
       bound_dual_lb_ = best_bound_dual_lb_;
       bound_dual_ub_ = best_bound_dual_ub_;
       objective_ = prob_.f(solution_);
-      iters_ = best_iter_;
       primal_inf_ = best_primal_inf_;
       dual_inf_ = best_dual_inf_;
       complementarity_ = best_complementarity_;
@@ -2495,8 +2494,9 @@ SolveResult IpoptAdapter::solve_nlp(const NLPModel& prob_in) const {
   Ipopt::SmartPtr<Ipopt::TNLP> nlp = new CallbackTNLP(prob);
   Ipopt::SmartPtr<Ipopt::IpoptApplication> app = IpoptApplicationFactory();
 
-  app->Options()->SetIntegerValue("print_level", 0);
-  app->Options()->SetStringValue("sb", "yes");
+  const bool trace_ipopt = std::getenv("HACDCPF_OPF_TRACE") != nullptr;
+  app->Options()->SetIntegerValue("print_level", trace_ipopt ? 5 : 0);
+  app->Options()->SetStringValue("sb", trace_ipopt ? "no" : "yes");
   app->Options()->SetStringValue(
       "hessian_approximation",
       prob.lagrangian_hess ? "exact" : "limited-memory");

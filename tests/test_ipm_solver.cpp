@@ -438,6 +438,42 @@ TEST_CASE("Native IPM acceptable result reports its actual KKT residual",
   CHECK(result.stats.complementarity <= options.tol_accept);
 }
 
+TEST_CASE("Filter certifies a solution reached on the last allowed step",
+          "[ipm][nlp][filter][iteration-budget][regression]") {
+  NLPModel nlp;
+  nlp.sense = Sense::Minimize;
+  nlp.vars.push_back({VarType::Continuous, -1e20, 1e20});
+  nlp.x0 = Eigen::VectorXd::Ones(1);
+  nlp.f = [](const Eigen::VectorXd& x) { return 0.5 * x.squaredNorm(); };
+  nlp.grad = [](const Eigen::VectorXd& x, Eigen::VectorXd& gradient) {
+    gradient = x;
+  };
+  nlp.hess = [](const Eigen::VectorXd&,
+                Eigen::SparseMatrix<double>& hessian) {
+    hessian.resize(1, 1);
+    hessian.setIdentity();
+  };
+
+  IPMOptions options;
+  options.max_iter = 1;
+  options.tol_primal = 1e-8;
+  options.tol_dual = 1e-8;
+  options.tol_complementarity = 1e-8;
+  options.tol_accept = 0.0;
+  options.scale_problem = false;
+  options.use_restoration_phase = false;
+
+  const SolveResult result = NativeIPMAdapter(options).solve_nlp(nlp);
+
+  INFO(result.stats.status);
+  REQUIRE(result.stats.success);
+  CHECK(result.stats.iterations == 1);
+  CHECK(result.x[0] == Approx(0.0).margin(options.tol_dual));
+  CHECK(result.stats.primal_feas <= options.tol_primal);
+  CHECK(result.stats.dual_feas <= options.tol_dual);
+  CHECK(result.stats.complementarity <= options.tol_complementarity);
+}
+
 TEST_CASE("Filter line search evaluates Jacobians only at accepted iterates",
           "[ipm][nlp][performance]") {
   int equality_calls = 0;
@@ -860,6 +896,101 @@ TEST_CASE("Phase-I handoff does not impose a shared complementarity product",
   CHECK(products.maxCoeff() > products.minCoeff());
   CHECK(detail.mu_ineq.maxCoeff() ==
         Approx(std::sqrt(std::numeric_limits<double>::min())));
+}
+
+TEST_CASE("Complete warm start recovers its current mean barrier",
+          "[ipm][nlp][phase2][initialization][warm-start][regression]") {
+  const auto solve = [](double initial_barrier) {
+    NLPModel nlp;
+    nlp.sense = Sense::Minimize;
+    nlp.vars.push_back({VarType::Continuous, 0.0, 2.0});
+    nlp.x0 = Eigen::VectorXd::Constant(1, 0.5);
+    nlp.f = [](const Eigen::VectorXd& x) { return x[0]; };
+    nlp.grad = [](const Eigen::VectorXd&, Eigen::VectorXd& gradient) {
+      gradient = Eigen::VectorXd::Ones(1);
+    };
+    nlp.hess = [](const Eigen::VectorXd&,
+                  Eigen::SparseMatrix<double>& hessian) {
+      hessian.resize(1, 1);
+    };
+
+    IPMOptions options;
+    options.primal_feasible_start = true;
+    options.max_iter = 1;
+    options.tol_primal = 1e-8;
+    options.tol_dual = 1e-2;
+    options.tol_complementarity = 1e-1;
+    options.tol_accept = 0.0;
+    options.scale_problem = false;
+    options.use_restoration_phase = false;
+    options.use_second_order_correction = false;
+    options.mu_init = initial_barrier;
+    options.mu_min = 0.0;
+    options.inequality_dual_start.resize(2);
+    options.inequality_dual_start << 2.0, 1.0;
+    options.slack_start.resize(2);
+    options.slack_start << 0.5, 1.5;
+    return NativeIPMAdapter(options).solve_nlp_detail(nlp);
+  };
+
+  const double recovered_barrier = (0.5 * 2.0 + 1.5 * 1.0) / 2.0;
+  const auto [automatic_result, automatic_detail] = solve(0.0);
+  const auto [explicit_result, explicit_detail] = solve(recovered_barrier);
+
+  INFO(automatic_result.stats.status);
+  INFO(explicit_result.stats.status);
+  REQUIRE(automatic_result.x.size() == explicit_result.x.size());
+  REQUIRE(automatic_detail.mu_ineq.size() == explicit_detail.mu_ineq.size());
+  REQUIRE(automatic_detail.z_slack.size() == explicit_detail.z_slack.size());
+  CHECK(automatic_result.x.isApprox(explicit_result.x, 1e-12));
+  CHECK(automatic_detail.mu_ineq.isApprox(explicit_detail.mu_ineq, 1e-12));
+  CHECK(automatic_detail.z_slack.isApprox(explicit_detail.z_slack, 1e-12));
+  CHECK(automatic_result.stats.dual_feas ==
+        Approx(explicit_result.stats.dual_feas).epsilon(1e-12));
+  CHECK(automatic_detail.complementarity ==
+        Approx(explicit_detail.complementarity).epsilon(1e-12));
+}
+
+TEST_CASE("Complete warm start is not replaced by the Phase-I dual selector",
+          "[ipm][nlp][phase2][initialization][warm-start][regression]") {
+  NLPModel nlp;
+  nlp.sense = Sense::Minimize;
+  nlp.vars.push_back({VarType::Continuous, 0.0, 2.0});
+  nlp.x0 = Eigen::VectorXd::Constant(1, 0.5);
+  nlp.f = [](const Eigen::VectorXd&) { return 0.0; };
+  nlp.grad = [](const Eigen::VectorXd&, Eigen::VectorXd& gradient) {
+    gradient = Eigen::VectorXd::Zero(1);
+  };
+  nlp.hess = [](const Eigen::VectorXd&,
+                Eigen::SparseMatrix<double>& hessian) {
+    hessian.resize(1, 1);
+  };
+
+  IPMOptions options;
+  options.primal_feasible_start = true;
+  options.max_iter = 1;
+  options.tol_primal = 1e-8;
+  options.tol_dual = 10.0;
+  options.tol_complementarity = 10.0;
+  options.tol_accept = 0.0;
+  options.scale_problem = false;
+  options.use_restoration_phase = false;
+  options.mu_init = 0.0;
+  options.mu_min = 0.0;
+  options.inequality_dual_start.resize(2);
+  options.inequality_dual_start << 10.0, 1.0;
+  options.slack_start.resize(2);
+  options.slack_start << 0.5, 1.5;
+
+  const auto [result, detail] =
+      NativeIPMAdapter(options).solve_nlp_detail(nlp);
+
+  INFO(result.stats.status);
+  REQUIRE(result.stats.success);
+  REQUIRE(detail.mu_ineq.size() == options.inequality_dual_start.size());
+  REQUIRE(detail.z_slack.size() == options.slack_start.size());
+  CHECK(detail.mu_ineq.isApprox(options.inequality_dual_start, 0.0));
+  CHECK(detail.z_slack.isApprox(options.slack_start, 0.0));
 }
 
 TEST_CASE("Phase-I many-row dual selector improves original stationarity",
