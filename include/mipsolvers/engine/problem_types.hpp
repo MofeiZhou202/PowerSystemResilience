@@ -264,6 +264,10 @@ struct NLPModel {
   std::function<void(const Eigen::VectorXd&, Eigen::VectorXd&)> h;
   std::function<void(const Eigen::VectorXd&, Eigen::SparseMatrix<double>&)> jac_h;
 
+  // Optional diagnostic labels for the rows returned by h(). Generated box
+  // bounds are named from VariableMeta::name by native solvers.
+  std::vector<std::string> nonlinear_inequality_names;
+
   // Optional independent-control columns for equality-constrained Newton
   // systems. When its size equals n - m_eq, native IPM may use the complement
   // as a square state Jacobian to construct and verify a sparse null-space

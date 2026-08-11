@@ -39,8 +39,9 @@ ScalingFactors compute_scaling_factors(const NLPModel& prob,
 ///   - owns captures to the original callbacks via std::function,
 ///   - exposes scaled callbacks (objective, gradient, constraints, Jacobians,
 ///     Hessian) that internally call the originals and scale their outputs,
-///   - has identical `vars`, `x0`, `sense`, `symbolic_*` fields as `prob` so
-///     bound handling and validation are unaffected.
+///   - has identical `vars`, `x0`, `sense`, `symbolic_*`, and diagnostic row
+///     names as `prob` so bound handling, validation, and traces are
+///     unaffected.
 ///
 /// The caller must keep `prob` alive for the lifetime of the returned model
 /// because the lambdas capture `prob` by reference.

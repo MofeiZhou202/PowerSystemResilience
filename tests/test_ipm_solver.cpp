@@ -15,12 +15,34 @@
 #include "mipsolvers/engine/problem_types.hpp"
 #include "mipsolvers/engine/kernel/ipm/ipm_filter.hpp"
 #include "mipsolvers/engine/kernel/ipm/ipm_restoration.hpp"
+#include "mipsolvers/engine/kernel/ipm/ipm_scaling.hpp"
 #include "mipsolvers/engine/kernel/ipm/ipm_solver.hpp"
 #include "mipsolvers/engine/kernel/ipm/lcqp_solver.hpp"
 #include "mipsolvers/engine/kernel/kkt/kkt_system.hpp"
 
 using namespace mipsolvers::engine;
 using Catch::Approx;
+
+TEST_CASE("NLP scaling preserves diagnostic names",
+          "[ipm][scaling][diagnostics]") {
+  NLPModel original;
+  original.vars = {
+      {VarType::Continuous, 0.0, 2.0, "dispatch"},
+      {VarType::Continuous, -1.0, 1.0, "voltage"}};
+  original.nonlinear_inequality_names = {"thermal_limit"};
+
+  ScalingFactors factors;
+  factors.s_f = 0.5;
+  factors.s_g.resize(0);
+  factors.s_h = Eigen::VectorXd::Constant(1, 0.25);
+  const NLPModel scaled = build_scaled_nlp_model(original, factors);
+
+  REQUIRE(scaled.vars.size() == 2);
+  CHECK(scaled.vars[0].name == "dispatch");
+  CHECK(scaled.vars[1].name == "voltage");
+  REQUIRE(scaled.nonlinear_inequality_names.size() == 1);
+  CHECK(scaled.nonlinear_inequality_names[0] == "thermal_limit");
+}
 
 TEST_CASE("Filter feasibility wall is independent of dominance margins",
           "[ipm][filter][contract]") {
@@ -463,7 +485,8 @@ TEST_CASE("Filter certifies a solution reached on the last allowed step",
   options.scale_problem = false;
   options.use_restoration_phase = false;
 
-  const SolveResult result = NativeIPMAdapter(options).solve_nlp(nlp);
+  const auto [result, detail] =
+      NativeIPMAdapter(options).solve_nlp_detail(nlp);
 
   INFO(result.stats.status);
   REQUIRE(result.stats.success);
@@ -472,6 +495,49 @@ TEST_CASE("Filter certifies a solution reached on the last allowed step",
   CHECK(result.stats.primal_feas <= options.tol_primal);
   CHECK(result.stats.dual_feas <= options.tol_dual);
   CHECK(result.stats.complementarity <= options.tol_complementarity);
+  CHECK(detail.trial_value_evaluations ==
+        detail.trial_full_derivative_evaluations +
+            detail.trial_rejections_before_derivatives);
+}
+
+TEST_CASE("Failed last-step derivative audit preserves trial counters",
+          "[ipm][nlp][filter][iteration-budget][regression]") {
+  int gradient_calls = 0;
+  NLPModel nlp;
+  nlp.sense = Sense::Minimize;
+  nlp.vars.push_back({VarType::Continuous, -1e20, 1e20});
+  nlp.x0 = Eigen::VectorXd::Ones(1);
+  nlp.f = [](const Eigen::VectorXd& x) { return 0.5 * x.squaredNorm(); };
+  nlp.grad = [&gradient_calls](const Eigen::VectorXd& x,
+                               Eigen::VectorXd& gradient) {
+    gradient = x;
+    if (++gradient_calls > 1) {
+      gradient[0] = std::numeric_limits<double>::quiet_NaN();
+    }
+  };
+  nlp.hess = [](const Eigen::VectorXd&,
+                Eigen::SparseMatrix<double>& hessian) {
+    hessian.resize(1, 1);
+    hessian.setIdentity();
+  };
+
+  IPMOptions options;
+  options.max_iter = 1;
+  options.tol_primal = 1e-8;
+  options.tol_dual = 1e-8;
+  options.tol_complementarity = 1e-8;
+  options.tol_accept = 0.0;
+  options.scale_problem = false;
+  options.use_restoration_phase = false;
+
+  const auto [result, detail] =
+      NativeIPMAdapter(options).solve_nlp_detail(nlp);
+
+  CHECK_FALSE(result.stats.success);
+  CHECK(gradient_calls >= 2);
+  CHECK(detail.trial_value_evaluations ==
+        detail.trial_full_derivative_evaluations +
+            detail.trial_rejections_before_derivatives);
 }
 
 TEST_CASE("Filter line search evaluates Jacobians only at accepted iterates",
@@ -676,9 +742,12 @@ TEST_CASE("Least-squares dual initialization removes a pure multiplier step",
 
   options.least_square_init_duals = false;
   NativeIPMAdapter zero_dual_solver(options);
-  const SolveResult zero_dual_result = zero_dual_solver.solve_nlp(nlp);
-  CHECK_FALSE(zero_dual_result.stats.success);
-  CHECK(zero_dual_result.stats.dual_feas > options.tol_dual);
+  const auto [zero_dual_result, zero_dual_detail] =
+      zero_dual_solver.solve_nlp_detail(nlp);
+  REQUIRE(zero_dual_result.stats.success);
+  REQUIRE(zero_dual_detail.lambda_eq.size() == 1);
+  CHECK(zero_dual_detail.lambda_eq[0] == Approx(2.0).margin(1e-12));
+  CHECK(zero_dual_result.stats.dual_feas <= options.tol_dual);
 }
 
 TEST_CASE("Filter IPM recovers from an infeasible inequality start",

@@ -1307,6 +1307,40 @@ double max_positive_step(const Eigen::VectorXd& v,
   return std::clamp(alpha, 0.0, 1.0);
 }
 
+std::string diagnostic_variable_name(const NLPModel& prob, int col) {
+  if (col < 0 || col >= static_cast<int>(prob.vars.size())) return "var?";
+  const std::string& name = prob.vars[static_cast<std::size_t>(col)].name;
+  return name.empty() ? "x[" + std::to_string(col) + "]" : name;
+}
+
+std::string diagnostic_inequality_name(
+    const NLPModel& prob, int row, int inequality_count,
+    int nonlinear_count, const std::vector<int>& lower_columns,
+    const std::vector<int>& upper_columns) {
+  if (row < 0 || row >= inequality_count) return "row?";
+  if (row < nonlinear_count) {
+    if (row < static_cast<int>(prob.nonlinear_inequality_names.size()) &&
+        !prob.nonlinear_inequality_names[
+             static_cast<std::size_t>(row)].empty()) {
+      return prob.nonlinear_inequality_names[static_cast<std::size_t>(row)];
+    }
+    return "nonlinear[" + std::to_string(row) + "]";
+  }
+  const int bound_row = row - nonlinear_count;
+  if (bound_row < static_cast<int>(lower_columns.size())) {
+    return "lower:" + diagnostic_variable_name(
+        prob, lower_columns[static_cast<std::size_t>(bound_row)]);
+  }
+  const int upper_row =
+      bound_row - static_cast<int>(lower_columns.size());
+  if (upper_row >= 0 &&
+      upper_row < static_cast<int>(upper_columns.size())) {
+    return "upper:" + diagnostic_variable_name(
+        prob, upper_columns[static_cast<std::size_t>(upper_row)]);
+  }
+  return "bound?";
+}
+
 Eigen::SparseMatrix<double> scale_rows(const Eigen::SparseMatrix<double>& a,
                                        const Eigen::VectorXd& d) {
   Eigen::SparseMatrix<double> out = a;
@@ -3064,17 +3098,30 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
         std::cerr << "[NativeIPM] iter=" << total_iters
                    << " direction: |dx|inf=" << inf_norm(dx)
                    << ", dx_index=" << dx_index
+                   << ", dx_name="
+                   << diagnostic_variable_name(
+                          prob, static_cast<int>(dx_index))
                    << ", x=" << (dx_index >= 0 ? x[dx_index] : 0.0)
                    << ", |ds|inf=" << inf_norm(ds)
                    << ", |dmu|inf=" << inf_norm(dmu_ineq)
                    << ", alpha_pri_max=" << alpha_max_primal
                    << ", alpha_dual_max=" << alpha_max_dual
                    << ", primal_blocker=" << primal_blocker
+                   << ", primal_blocker_name="
+                   << diagnostic_inequality_name(
+                          prob, primal_blocker,
+                          static_cast<int>(state.h.size()),
+                          state.n_nonlinear_ineq, lb_cols, ub_cols)
                    << ", blocker_s="
                    << (primal_blocker >= 0 ? s[primal_blocker] : 0.0)
                    << ", blocker_ds="
                    << (primal_blocker >= 0 ? ds[primal_blocker] : 0.0)
                    << ", dual_blocker=" << dual_blocker
+                   << ", dual_blocker_name="
+                   << diagnostic_inequality_name(
+                          prob, dual_blocker,
+                          static_cast<int>(state.h.size()),
+                          state.n_nonlinear_ineq, lb_cols, ub_cols)
                    << ", blocker_mu="
                    << (dual_blocker >= 0 ? mu_ineq[dual_blocker] : 0.0)
                    << ", blocker_dmu="
@@ -3517,6 +3564,17 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
                   phi_trial = phi_soc;
                   accepted_trial = std::move(soc_trial);
                   accepted = true;
+                  if (opt.verbose) {
+                    std::cerr << "[NativeIPM] iter=" << total_iters
+                              << " SOC accepted: alpha=" << alpha
+                              << ", residuals=(primal="
+                              << accepted_trial.residuals.primal_feas
+                              << ",dual="
+                              << accepted_trial.residuals.dual_feas
+                              << ",complementarity="
+                              << accepted_trial.residuals.complementarity
+                              << ")\n" << std::flush;
+                  }
                   break;
                 }
                 if (!opt.primal_feasible_start) {
@@ -3565,18 +3623,36 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
       state = std::move(accepted_trial.state);
       ++accepted_steps;
 
-      // The accepted trial has already been evaluated in original
-      // coordinates. Certify it immediately so a point reached on the final
-      // allowed Newton step is not mislabeled as an iteration-limit failure.
+      // Phase-I trials already carry complete derivatives. Ordinary filter
+      // trials intentionally evaluate values only; on the final allowed step,
+      // perform the derivative audit that the next loop iteration would have
+      // performed. This prevents a true last-step solution from being labeled
+      // as an iteration-limit failure without adding another Newton step.
+      bool accepted_residuals_are_complete = opt.primal_feasible_start;
+      ResidualSummary accepted_residuals = accepted_trial.residuals;
+      if (!accepted_residuals_are_complete && total_iters + 1 >= max_total) {
+        TrialPoint certified_trial;
+        ++trial_value_evaluations;
+        if (evaluate_trial_point(prob, lb_cols, ub_cols, x, s, lambda,
+                                 mu_ineq, eval_status, certified_trial)) {
+          state = std::move(certified_trial.state);
+          accepted_residuals = certified_trial.residuals;
+          accepted_residuals_are_complete = true;
+          ++trial_full_derivative_evaluations;
+        } else {
+          ++trial_rejections_before_derivatives;
+        }
+      }
       // This is the same public KKT contract used at the top of the loop; it
       // neither consumes an extra iteration nor substitutes a scaled metric.
-      if (accepted_trial.residuals.primal_feas <= opt.tol_primal &&
-          accepted_trial.residuals.dual_feas <= opt.tol_dual &&
+      if (accepted_residuals_are_complete &&
+          accepted_residuals.primal_feas <= opt.tol_primal &&
+          accepted_residuals.dual_feas <= opt.tol_dual &&
           (s.size() == 0 ||
-           accepted_trial.residuals.complementarity <=
+           accepted_residuals.complementarity <=
                opt.tol_complementarity)) {
         snapshot_outcome(true, total_iters + 1, "Converged",
-                         accepted_trial.residuals);
+                         accepted_residuals);
         return result;
       }
 
@@ -3818,6 +3894,8 @@ bool build_fixed_nlp_reduction(const NLPModel& original,
   reduced = NLPModel{};
   reduced.sense = original.sense;
   reduced.solver_options = original.solver_options;
+  reduced.nonlinear_inequality_names =
+      original.nonlinear_inequality_names;
   reduced.vars.reserve(candidate->reduced_to_original.size());
   for (int original_col : candidate->reduced_to_original) {
     reduced.vars.push_back(original.vars[static_cast<std::size_t>(original_col)]);
@@ -4035,6 +4113,7 @@ bool restore_fixed_nlp_certificate(
     const NLPModel& original, const NLPModel& reduced,
     const FixedNLPMap& map, SolveResult& out, IPMDetail& detail,
     const IPMOptions& opt) {
+  const double reduced_dual_feasibility = out.stats.dual_feas;
   const int n = map.original_dimension;
   if (out.x.size() != static_cast<int>(map.reduced_to_original.size())) {
     return false;
@@ -4135,6 +4214,24 @@ bool restore_fixed_nlp_certificate(
   if (!out.stats.success) {
     out.stats.status =
         "Fixed-variable postsolve failed original-space KKT certification";
+    if (std::getenv("HACDCPF_OPF_TRACE") != nullptr && r_dual.size() > 0) {
+      Eigen::Index worst_column = -1;
+      r_dual.cwiseAbs().maxCoeff(&worst_column);
+      const Eigen::VectorXd equality_term =
+          original_state.jg.transpose() * detail.lambda_eq;
+      const Eigen::VectorXd inequality_term =
+          original_state.jh.transpose() * original_mu;
+      const bool fixed = map.original_to_reduced[
+          static_cast<std::size_t>(worst_column)] < 0;
+      std::cerr << "[NativeIPM] fixed-variable postsolve audit: reduced_dual="
+                << reduced_dual_feasibility << ", original_dual="
+                << residuals.dual_feas << ", worst_column=" << worst_column
+                << ", fixed=" << fixed
+                << ", gradient=" << original_state.grad[worst_column]
+                << ", equality_term=" << equality_term[worst_column]
+                << ", inequality_term=" << inequality_term[worst_column]
+                << ", residual=" << r_dual[worst_column] << '\n';
+    }
   }
   out.box_dual_lb = std::move(bound_lb);
   out.box_dual_ub = std::move(bound_ub);
