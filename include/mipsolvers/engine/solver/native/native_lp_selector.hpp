@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <string>
 
 #include "mipsolvers/engine/solver/solver_adapter.hpp"
@@ -11,7 +12,9 @@ namespace mipsolvers::engine {
 /// 2026-08-11: Native-DualSimplex[ExactDSE](+HiGHS-presolve)).
 class NativeDualSimplexLPAdapter final : public SolverAdapter {
  public:
-  explicit NativeDualSimplexLPAdapter(double time_limit_sec = 0.0);
+  explicit NativeDualSimplexLPAdapter(
+      double time_limit_sec = 0.0,
+      const std::atomic<bool>* cancel_flag = nullptr);
 
   std::string name() const override;
   bool supports(ProblemClass cls) const override;
@@ -19,6 +22,7 @@ class NativeDualSimplexLPAdapter final : public SolverAdapter {
 
  private:
   double time_limit_sec_{0.0};
+  const std::atomic<bool>* cancel_flag_{nullptr};
 };
 
 /// Concurrent LP portfolio (the default native LP path).

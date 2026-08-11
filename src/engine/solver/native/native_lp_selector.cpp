@@ -1,5 +1,6 @@
 #include "mipsolvers/engine/solver/native/native_lp_selector.hpp"
 
+#include <atomic>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -21,6 +22,7 @@ namespace {
 struct PortfolioSlot {
   std::mutex m;
   std::condition_variable cv;
+  std::atomic<bool> cancel{false};  // set once a winner is chosen → stop the loser
   int finished{0};
   bool have_winner{false};
   SolveResult winner;
@@ -33,14 +35,16 @@ void publish(const std::shared_ptr<PortfolioSlot>& slot, SolveResult r) {
   if (!slot->have_winner && (r.stats.success || slot->finished == 2)) {
     slot->winner = std::move(r);
     slot->have_winner = true;
+    slot->cancel.store(true, std::memory_order_relaxed);  // cancel the loser
   }
   slot->cv.notify_all();
 }
 
 }  // namespace
 
-NativeDualSimplexLPAdapter::NativeDualSimplexLPAdapter(double time_limit_sec)
-    : time_limit_sec_(time_limit_sec) {}
+NativeDualSimplexLPAdapter::NativeDualSimplexLPAdapter(
+    double time_limit_sec, const std::atomic<bool>* cancel_flag)
+    : time_limit_sec_(time_limit_sec), cancel_flag_(cancel_flag) {}
 
 std::string NativeDualSimplexLPAdapter::name() const {
   return "NativeDualSimplex";
@@ -57,6 +61,7 @@ SolveResult NativeDualSimplexLPAdapter::solve_lp(const LPModel& prob) const {
       DualEdgeWeightInitialization::FullExact;  // ExactDSE
   opt.use_highs_presolve = true;  // best-geomean NETLIB configuration
   opt.time_limit_sec = time_limit_sec_;
+  opt.cancel_flag = cancel_flag_;
   SolveResult r = solve_lp_with_basis(prob, opt).result;
   // solve_lp_with_basis reports stats.objective in the internal minimize
   // convention (objective_const - max_objective). The public adapter contract,
@@ -90,7 +95,7 @@ SolveResult NativeAutoLPAdapter::solve_lp(const LPModel& prob) const {
   auto dse_worker = [slot, lp = prob, tl]() {
     SolveResult r;
     try {
-      r = NativeDualSimplexLPAdapter(tl).solve_lp(lp);
+      r = NativeDualSimplexLPAdapter(tl, &slot->cancel).solve_lp(lp);
     } catch (...) {
       r.stats.success = false;
       r.stats.status = "NativeDualSimplex exception";
@@ -102,6 +107,7 @@ SolveResult NativeAutoLPAdapter::solve_lp(const LPModel& prob) const {
     try {
       IPMLPOptions opt;  // defaults == native-ipm-direct
       opt.time_limit_sec = tl;
+      opt.cancel_flag = &slot->cancel;
       r = NativeIPMLPAdapter(opt).solve_lp(lp);
     } catch (...) {
       r.stats.success = false;

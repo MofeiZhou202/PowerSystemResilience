@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <limits>
 #include <string>
@@ -60,6 +61,10 @@ struct IPMLPOptions {
   /// config (see highs_lp_presolve_config_from_env).
   bool use_highs_presolve{false};
   IPMNewtonFormulation newton_formulation{IPMNewtonFormulation::Auto};
+  // Cooperative external abort polled once per IPM iteration. When set, the
+  // solve stops promptly; used by the LP portfolio to cancel the losing kernel.
+  // nullptr (default) leaves the solve unchanged.
+  const std::atomic<bool>* cancel_flag{nullptr};
 };
 
 /// Original-model KKT audit for a bounded-variable LP solution.

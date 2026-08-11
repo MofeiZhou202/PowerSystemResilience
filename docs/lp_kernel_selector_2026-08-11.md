@@ -86,8 +86,10 @@ function of the sparsity pattern alone. The structural estimator was removed.
 realizing the per-instance `min(T_DSE, T_IPM)` directly instead of predicting
 it. Both kernels are audited, so whichever wins is correct; the adapter
 recomputes the user objective `c·x` on the dual-simplex path (that kernel
-reports the internal minimize-sense value). The loser is detached and bounded by
-the solve's time limit.
+reports the internal minimize-sense value). When one kernel wins, a shared abort
+flag (`SimplexOptions::cancel_flag` / `IPMLPOptions::cancel_flag`, polled at each
+kernel's wall-time checkpoint) stops the loser promptly instead of letting it
+run to completion.
 
 Measured on the 24 NETLIB instances (repeat 3, geomean of medians vs
 HiGHS-simplex):
@@ -100,15 +102,18 @@ HiGHS-simplex):
 | **concurrent portfolio (shipped)** | **1.26x** |
 
 All 72 solves accurate; the full 18-test suite is green with the portfolio as
-the default `solve_lp()` path. The portfolio lands below the 1.5x oracle because
-of thread-spawn overhead and losers that run to completion (the kernels have no
-cooperative-cancel hook), at roughly 2x CPU.
+the default `solve_lp()` path. Measured geomean is 1.30x vs HiGHS-simplex.
+Cooperative cancellation is essential: an A/B over the 72 solves showed it cuts
+user CPU ~35% (4.60s -> 2.98s) and wall time ~72% (2.89s -> 0.81s), because an
+uncancelled loser otherwise keeps a core busy and slows every subsequent solve.
 
 ## 6. Limitations and notes
 
-- ~2x CPU per solve: both kernels run until one finishes; the loser is detached
-  and finishes on its own (bounded by the time limit). A cooperative-cancel hook
-  or a shared thread pool would cut the wasted work — a future optimization.
+- Cooperative cancellation stops the losing kernel when the winner finishes
+  (shared abort flag polled at each kernel's wall-time checkpoint); it is unset
+  by default, so every non-portfolio caller keeps a bit-identical path. A shared
+  thread pool (instead of two fresh threads per solve) would trim the remaining
+  spawn overhead — a future optimization.
 - Non-deterministic winner (timing-dependent), but not the answer: both kernels
   are audited to the same tolerances, so the returned objective/solution agree.
 - MILP/SCUC/B&C are unaffected: they call `solve_lp_with_basis` /

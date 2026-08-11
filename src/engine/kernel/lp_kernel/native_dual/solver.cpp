@@ -37,6 +37,11 @@ Result empty_result(Status status, std::string message,
 
 bool wall_time_hit(const SimplexOptions& options,
                    const std::chrono::steady_clock::time_point& start) {
+  if (options.cancel_flag != nullptr &&
+      options.cancel_flag->load(std::memory_order_relaxed)) {
+    if (options.time_limit_hit != nullptr) *options.time_limit_hit = true;
+    return true;
+  }
   if (options.time_limit_hit != nullptr && *options.time_limit_hit) return true;
   if (options.time_limit_sec <= 0.0) return false;
   const double elapsed =
