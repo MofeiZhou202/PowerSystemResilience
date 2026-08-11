@@ -18,6 +18,7 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <numeric>
 #include <optional>
 #include <random>
 #include <set>
@@ -57,6 +58,7 @@
 #include "hacdcpf/io/matpower_parser.hpp"
 #include "hacdcpf/io/powersimulationsdynamics_io.hpp"
 #include "hacdcpf/model/enum_strings.hpp"
+#include "hacdcpf/model/device_control_role.hpp"
 #include "hacdcpf/model/standard_parameter_library.hpp"
 #include "hacdcpf/power_flow/three_phase.hpp"
 #include "hacdcpf/power_flow/three_phase_hybrid.hpp"
@@ -6275,6 +6277,449 @@ static std::string reliability_policy_label(
   return "case_data_only";
 }
 
+static json apply_reliability_der_control_scenario(
+    hacdcpf::HybridPowerSystem& sys, const json& request) {
+  json options = json::object();
+  if (request.contains("dimensions") && request["dimensions"].is_object()) {
+    options = request["dimensions"].value("der_control", json::object());
+  }
+  if (!options.is_object())
+    throw std::runtime_error("dimensions.der_control must be an object");
+
+  const std::string scenario = options.value("scenario", std::string("authored"));
+  if (scenario != "authored" && scenario != "force_grid_following" &&
+      scenario != "promote_grid_forming") {
+    throw std::runtime_error(
+        "dimensions.der_control.scenario must be authored, "
+        "force_grid_following, or promote_grid_forming");
+  }
+  const bool black_start_enabled = options.value("black_start_enabled", true);
+  json devices = json::array();
+  int authored_gfm = 0;
+  int effective_gfm = 0;
+  int eligible_count = 0;
+
+  auto apply_simple = [&](auto& values, const char* kind, auto eligible_fn,
+                          auto anti_islanding_fn) {
+    for (auto& value : values) {
+      if (!value.in_service) continue;
+      const bool eligible = eligible_fn(value);
+      const bool authored = value.grid_forming;
+      if (scenario == "force_grid_following") value.grid_forming = false;
+      if (scenario == "promote_grid_forming" && eligible)
+        value.grid_forming = true;
+      authored_gfm += authored ? 1 : 0;
+      effective_gfm += value.grid_forming ? 1 : 0;
+      eligible_count += eligible ? 1 : 0;
+      devices.push_back({
+          {"stable_id", std::string(kind) + ":" + std::to_string(value.index)},
+          {"component_kind", kind},
+          {"component_index", value.index},
+          {"component_name", value.name},
+          {"eligible_for_promotion", eligible},
+          {"authored_role", authored ? "grid_forming" : "grid_following"},
+          {"effective_role", value.grid_forming ? "grid_forming" : "grid_following"},
+          {"anti_islanding", anti_islanding_fn(value)},
+          {"black_start_credited", black_start_enabled && value.grid_forming}});
+    }
+  };
+
+  apply_simple(sys.ac.static_generators, "ac_static_generator",
+               [](const auto& x) { return x.controllable; },
+               [](const auto& x) { return x.anti_islanding; });
+  apply_simple(sys.ac.renewable_gens, "ac_renewable_generator",
+               [](const auto& x) { return x.curtailable; },
+               [](const auto& x) { return x.anti_islanding; });
+  apply_simple(sys.ac.pv_systems, "ac_pv_system",
+               [](const auto& x) { return x.controllable; },
+               [](const auto& x) { return x.anti_islanding; });
+  apply_simple(sys.ac.storage, "ac_storage",
+               [](const auto& x) { return x.controllable; },
+               [](const auto& x) { return x.anti_islanding; });
+  apply_simple(sys.mobile_storage, "mobile_storage",
+               [](const auto& x) { return x.controllable; },
+               [](const auto&) { return false; });
+
+  for (auto& converter : sys.vsc_converters) {
+    if (!converter.in_service) continue;
+    const auto authored_role = hacdcpf::resolve_device_control_role(converter);
+    if (scenario == "force_grid_following") {
+      converter.ac_grid_forming = false;
+      converter.grid_forming = false;
+      if (converter.control_mode == hacdcpf::ConverterMode::AC_GRID_FORMING)
+        converter.control_mode = hacdcpf::ConverterMode::PQ_MODE;
+    } else if (scenario == "promote_grid_forming" && converter.controllable) {
+      converter.ac_grid_forming = true;
+      // Reliability sensitivity promotes the AC terminal. Avoid inventing an
+      // unsupported dual-side voltage source without an explicit energy buffer.
+      if (!converter.allow_dual_side_grid_forming || !converter.has_energy_buffer)
+        converter.grid_forming = false;
+    }
+    const auto effective_role = hacdcpf::resolve_device_control_role(converter);
+    const bool authored = authored_role.is_ac_grid_forming ||
+                          authored_role.is_dc_grid_forming;
+    const bool effective = effective_role.is_ac_grid_forming ||
+                           effective_role.is_dc_grid_forming;
+    authored_gfm += authored ? 1 : 0;
+    effective_gfm += effective ? 1 : 0;
+    eligible_count += converter.controllable ? 1 : 0;
+    devices.push_back({
+        {"stable_id", "vsc_converter:" + std::to_string(converter.index)},
+        {"component_kind", "vsc_converter"},
+        {"component_index", converter.index},
+        {"component_name", converter.name},
+        {"eligible_for_promotion", converter.controllable},
+        {"authored_role", authored ? "grid_forming" : "grid_following"},
+        {"effective_role", effective ? "grid_forming" : "grid_following"},
+        {"ac_voltage_reference", effective_role.provides_ac_voltage_reference},
+        {"ac_frequency_reference", effective_role.provides_ac_angle_reference},
+        {"dc_voltage_reference", effective_role.provides_dc_v_reference},
+        {"anti_islanding", false},
+        {"black_start_credited", black_start_enabled && effective}});
+  }
+
+  json limitations = json::array();
+  limitations.push_back(
+      "Grid-forming is a steady-state island-reference credit; transient synchronization, current limiting, and protection/FRT trajectories are not certified.");
+  if (!black_start_enabled) {
+    limitations.push_back(
+        "Black-start credit is disabled in the audit. Methods without an independent black-start state may still use an authored grid-forming flag as a composite island-source capability.");
+  }
+  return json{{"scenario", scenario},
+              {"black_start_enabled", black_start_enabled},
+              {"device_count", devices.size()},
+              {"eligible_device_count", eligible_count},
+              {"authored_grid_forming_count", authored_gfm},
+              {"effective_grid_forming_count", effective_gfm},
+              {"devices", std::move(devices)},
+              {"limitations", std::move(limitations)}};
+}
+
+static std::string reliability_system_fingerprint(
+    const hacdcpf::HybridPowerSystem& sys) {
+  const std::string serialized = hacdcpf::io::to_json(sys, -1);
+  std::uint64_t hash = 1469598103934665603ULL;
+  for (unsigned char byte : serialized) {
+    hash ^= static_cast<std::uint64_t>(byte);
+    hash *= 1099511628211ULL;
+  }
+  std::ostringstream out;
+  out << std::hex << hash;
+  return out.str();
+}
+
+struct ReliabilityComparisonRankRow {
+  std::string key;
+  std::string name;
+  std::string component_kind;
+  double score{0.0};
+};
+
+static std::optional<double> reliability_comparison_metric(
+    const json& result, const std::string& key) {
+  const json metrics = result.value("metrics", json::object());
+  if (!metrics.is_object() || !metrics.contains(key)) return std::nullopt;
+  const json& value = metrics.at(key);
+  if (value.is_object()) {
+    if (value.value("available", true) == false || !value.contains("value"))
+      return std::nullopt;
+    if (!value.at("value").is_number()) return std::nullopt;
+    const double number = value.at("value").get<double>();
+    return std::isfinite(number) ? std::optional<double>(number) : std::nullopt;
+  }
+  if (!value.is_number()) return std::nullopt;
+  const double number = value.get<double>();
+  return std::isfinite(number) ? std::optional<double>(number) : std::nullopt;
+}
+
+static std::vector<ReliabilityComparisonRankRow>
+reliability_comparison_rank_rows(const json& result) {
+  json rows = result.value("critical_components", json::array());
+  if (!rows.is_array() || rows.empty())
+    rows = result.value("contingencies", json::array());
+  if (!rows.is_array() || rows.empty()) rows = result.value("faults", json::array());
+  if (!rows.is_array()) return {};
+
+  std::map<std::string, ReliabilityComparisonRankRow> aggregated;
+  for (const auto& row : rows) {
+    if (!row.is_object()) continue;
+    std::string key = row.value("stable_id", std::string());
+    std::string kind = row.value(
+        "component_kind",
+        row.value("canonical_component_type",
+                  row.value("component_type", std::string())));
+    if (key.empty() && !row.value("canvas_type", std::string()).empty() &&
+        row.contains("canvas_index") && row["canvas_index"].is_number_integer()) {
+      key = row.value("canvas_type", std::string()) + ":" +
+            std::to_string(row["canvas_index"].get<int>());
+    }
+    // Public comparison identity must never fall back to a vector position.
+    if (key.empty()) continue;
+
+    double score = 0.0;
+    bool has_score = false;
+    for (const char* field : {"associated_eens_mwh_yr", "eens_contribution_mwh_yr",
+                              "eens_contribution", "loss_weighted_risk",
+                              "importance"}) {
+      if (!row.contains(field) || !row[field].is_number()) continue;
+      const double candidate = row[field].get<double>();
+      if (!std::isfinite(candidate) || candidate < 0.0) continue;
+      score = candidate;
+      has_score = true;
+      break;
+    }
+    if (!has_score) continue;
+    auto& target = aggregated[key];
+    target.key = key;
+    target.name = row.value("display_name",
+                            row.value("component_name", key));
+    target.component_kind = kind;
+    target.score += score;
+  }
+  std::vector<ReliabilityComparisonRankRow> ranked;
+  for (auto& [key, row] : aggregated) ranked.push_back(std::move(row));
+  std::sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) {
+    if (std::abs(a.score - b.score) > 1e-15) return a.score > b.score;
+    return a.key < b.key;
+  });
+  return ranked;
+}
+
+static std::map<std::string, double> reliability_average_ranks(
+    const std::vector<ReliabilityComparisonRankRow>& rows) {
+  std::map<std::string, double> ranks;
+  size_t begin = 0;
+  while (begin < rows.size()) {
+    size_t end = begin + 1;
+    while (end < rows.size() &&
+           std::abs(rows[end].score - rows[begin].score) <= 1e-15)
+      ++end;
+    const double average_rank =
+        (static_cast<double>(begin + 1) + static_cast<double>(end)) / 2.0;
+    for (size_t i = begin; i < end; ++i) ranks[rows[i].key] = average_rank;
+    begin = end;
+  }
+  return ranks;
+}
+
+static json reliability_compare_results(const json& request) {
+  const json results = request.value("results", json::array());
+  if (!results.is_array() || results.size() < 2 || results.size() > 12)
+    throw std::runtime_error("results must contain 2 to 12 reliability results");
+  const int top_k = std::clamp(request.value("top_k", 5), 1, 50);
+
+  struct MethodData {
+    std::string id;
+    std::string method;
+    std::string scenario;
+    std::string scope;
+    std::vector<ReliabilityComparisonRankRow> rows;
+    std::map<std::string, double> ranks;
+  };
+  std::vector<MethodData> methods;
+  json method_summary = json::array();
+  std::unordered_set<std::string> ids;
+  json reference_basis = json::object();
+  bool basis_verified = true;
+  for (size_t i = 0; i < results.size(); ++i) {
+    const auto& result = results.at(i);
+    if (!result.is_object())
+      throw std::runtime_error("reliability comparison results must be objects");
+    MethodData method;
+    method.method = result.value("method", std::string());
+    if (method.method.empty())
+      throw std::runtime_error("each reliability comparison result requires method");
+    const json basis = result.value("comparison_basis", json::object());
+    if (!basis.is_object() ||
+        basis.value("system_fingerprint", std::string()).empty()) {
+      basis_verified = false;
+    } else if (reference_basis.empty()) {
+      reference_basis = basis;
+    } else if (basis != reference_basis) {
+      throw std::runtime_error(
+          "reliability results do not share the same system, data policy, "
+          "load scale, reporting hours, and DER control basis");
+    }
+    method.scenario = result.value("der_control", json::object())
+                          .value("scenario", std::string("authored"));
+    method.id = result.value("comparison_id",
+                             method.method + ":" + method.scenario);
+    if (!ids.insert(method.id).second)
+      method.id += ":" + std::to_string(i + 1);
+    method.scope = result.value("model_scope", std::string("unspecified"));
+    method.rows = reliability_comparison_rank_rows(result);
+    method.ranks = reliability_average_ranks(method.rows);
+    method_summary.push_back({{"id", method.id},
+                              {"method", method.method},
+                              {"der_control_scenario", method.scenario},
+                              {"model_scope", method.scope},
+                              {"ranked_component_count", method.rows.size()},
+                              {"converged", result.value("converged", true)}});
+    methods.push_back(std::move(method));
+  }
+
+  // IEEE 1366 supplies the metric semantics; this block only summarizes
+  // already-computed like-for-like values. It deliberately omits unavailable
+  // metrics instead of coercing them to zero.
+  json metric_robustness = json::object();
+  for (const char* metric : {"eens_mwh_yr", "edns_mw", "lole_hr_yr",
+                             "lolf_occ_yr", "saifi", "saidi", "caidi",
+                             "asai", "plc"}) {
+    std::vector<double> values;
+    json by_method = json::object();
+    for (size_t i = 0; i < results.size(); ++i) {
+      const auto value = reliability_comparison_metric(results.at(i), metric);
+      if (value) {
+        values.push_back(*value);
+        by_method[methods[i].id] = *value;
+      } else {
+        by_method[methods[i].id] = nullptr;
+      }
+    }
+    if (values.size() < 2) {
+      metric_robustness[metric] = {
+          {"available", false},
+          {"reason", "Fewer than two methods returned a comparable value."},
+          {"values", std::move(by_method)}};
+      continue;
+    }
+    std::sort(values.begin(), values.end());
+    const double sum = std::accumulate(values.begin(), values.end(), 0.0);
+    const double mean = sum / static_cast<double>(values.size());
+    double sq = 0.0;
+    for (double value : values) sq += (value - mean) * (value - mean);
+    const double stddev = std::sqrt(sq / static_cast<double>(values.size()));
+    const double median = values.size() % 2 == 0
+        ? (values[values.size() / 2 - 1] + values[values.size() / 2]) / 2.0
+        : values[values.size() / 2];
+    const double scale = std::max(std::abs(median), 1e-12);
+    metric_robustness[metric] = {
+        {"available", true},
+        {"method_count", values.size()},
+        {"minimum", values.front()},
+        {"maximum", values.back()},
+        {"mean", mean},
+        {"median", median},
+        {"standard_deviation", stddev},
+        {"coefficient_of_variation",
+         std::abs(mean) > 1e-12 ? json(stddev / std::abs(mean)) : json(nullptr)},
+        {"normalized_range", (values.back() - values.front()) / scale},
+        {"values", std::move(by_method)}};
+  }
+
+  json rank_agreement = json::array();
+  for (size_t i = 0; i < methods.size(); ++i) {
+    for (size_t j = i + 1; j < methods.size(); ++j) {
+      std::vector<std::pair<double, double>> common;
+      for (const auto& [key, rank] : methods[i].ranks) {
+        if (const auto it = methods[j].ranks.find(key);
+            it != methods[j].ranks.end())
+          common.emplace_back(rank, it->second);
+      }
+      std::unordered_set<std::string> top_a, top_b;
+      for (size_t k = 0; k < methods[i].rows.size() && k < static_cast<size_t>(top_k); ++k)
+        top_a.insert(methods[i].rows[k].key);
+      for (size_t k = 0; k < methods[j].rows.size() && k < static_cast<size_t>(top_k); ++k)
+        top_b.insert(methods[j].rows[k].key);
+      size_t intersection = 0;
+      for (const auto& key : top_a) intersection += top_b.count(key);
+      const size_t union_size = top_a.size() + top_b.size() - intersection;
+      json spearman = nullptr;
+      if (common.size() >= 2) {
+        double mean_a = 0.0, mean_b = 0.0;
+        for (const auto& value : common) {
+          mean_a += value.first;
+          mean_b += value.second;
+        }
+        mean_a /= static_cast<double>(common.size());
+        mean_b /= static_cast<double>(common.size());
+        double covariance = 0.0, variance_a = 0.0, variance_b = 0.0;
+        for (const auto& value : common) {
+          const double da = value.first - mean_a;
+          const double db = value.second - mean_b;
+          covariance += da * db;
+          variance_a += da * da;
+          variance_b += db * db;
+        }
+        if (variance_a > 1e-15 && variance_b > 1e-15)
+          spearman = std::clamp(covariance / std::sqrt(variance_a * variance_b),
+                                -1.0, 1.0);
+      }
+      rank_agreement.push_back({
+          {"method_a", methods[i].id},
+          {"method_b", methods[j].id},
+          {"common_component_count", common.size()},
+          {"spearman", spearman},
+          {"spearman_available", !spearman.is_null()},
+          {"top_k", top_k},
+          {"top_k_jaccard", union_size > 0
+                                ? json(static_cast<double>(intersection) /
+                                       static_cast<double>(union_size))
+                                : json(nullptr)}});
+    }
+  }
+
+  struct ConsensusRow {
+    std::string key;
+    std::string name;
+    std::string component_kind;
+    int appearances{0};
+    double rank_sum{0.0};
+    double reciprocal_rank_sum{0.0};
+    std::vector<std::string> method_ids;
+  };
+  std::map<std::string, ConsensusRow> consensus_map;
+  for (const auto& method : methods) {
+    for (size_t i = 0; i < method.rows.size(); ++i) {
+      const auto& source = method.rows[i];
+      auto& row = consensus_map[source.key];
+      row.key = source.key;
+      row.name = source.name;
+      row.component_kind = source.component_kind;
+      row.appearances++;
+      row.rank_sum += static_cast<double>(i + 1);
+      row.reciprocal_rank_sum += 1.0 / static_cast<double>(i + 1);
+      row.method_ids.push_back(method.id);
+    }
+  }
+  std::vector<ConsensusRow> consensus;
+  for (auto& [key, row] : consensus_map) consensus.push_back(std::move(row));
+  std::sort(consensus.begin(), consensus.end(), [](const auto& a, const auto& b) {
+    if (a.appearances != b.appearances) return a.appearances > b.appearances;
+    if (std::abs(a.reciprocal_rank_sum - b.reciprocal_rank_sum) > 1e-15)
+      return a.reciprocal_rank_sum > b.reciprocal_rank_sum;
+    return a.key < b.key;
+  });
+  json consensus_json = json::array();
+  for (const auto& row : consensus) {
+    consensus_json.push_back({
+        {"stable_id", row.key}, {"display_name", row.name},
+        {"component_kind", row.component_kind},
+        {"method_appearances", row.appearances},
+        {"method_fraction", static_cast<double>(row.appearances) /
+                                static_cast<double>(methods.size())},
+        {"mean_rank", row.rank_sum / static_cast<double>(row.appearances)},
+        {"reciprocal_rank_score", row.reciprocal_rank_sum},
+        {"methods", row.method_ids}});
+  }
+
+  return json{{"comparison_scope", "same-snapshot-result-aggregation"},
+              {"comparison_basis_verified", basis_verified},
+              {"comparison_basis", reference_basis},
+              {"top_k", top_k},
+              {"methods", std::move(method_summary)},
+              {"metric_robustness", std::move(metric_robustness)},
+              {"rank_agreement", std::move(rank_agreement)},
+              {"consensus_weak_components", std::move(consensus_json)},
+              {"limitations", json::array({
+                  "Metric spread reflects both algorithmic uncertainty and model-scope differences; it is not a confidence interval.",
+                  "Monte Carlo co-outage attribution and deterministic FMEA marginal contributions are ranking signals with different semantics.",
+                  "Rank agreement uses stable component identities only; rows without stable identity are excluded.",
+                  basis_verified
+                      ? "All compared results share one verified model and parameter basis."
+                      : "Comparison basis could not be verified because at least one result omitted its system fingerprint."})}};
+}
+
 // Parse the reliability data policy from a request body and, when the policy is
 // "overwrite_template", apply the named reliability template to `sys`.
 // Templates are now OPT-IN (default = case data only) so a normal run never
@@ -6304,6 +6749,11 @@ static hacdcpf::analysis::ReliabilityDataPolicy parse_reliability_data_policy(
   }
   pol.template_name = tmpl;
   pol.fail_on_missing_required_data = j.value("fail_on_missing", false);
+  const json load = j.value("load", json::object());
+  pol.hours_per_year = load.value(
+      "hours_per_year", j.value("hours_per_year", 8760.0));
+  if (!std::isfinite(pol.hours_per_year) || pol.hours_per_year <= 0.0)
+    throw std::runtime_error("load.hours_per_year must be finite and positive");
 
   if (pol.default_policy == ReliabilityDefaultPolicy::OverwriteWithNamedTemplate) {
     if (tmpl == "comprehensive" || tmpl == "comprehensive-hybrid") {
@@ -7178,6 +7628,9 @@ static json three_stage_fault_json(
       {"storage_energy_used_stage2_mwh", f.storage_energy_used_stage2_mwh},
       {"storage_energy_used_stage3_mwh", f.storage_energy_used_stage3_mwh},
       {"storage_energy_remaining_mwh", f.storage_energy_remaining_mwh},
+      {"vsc_dispatch_kw", json{{"stage1", f.psop1},
+                                {"stage2", f.psop2},
+                                {"stage3", f.psop3}}},
       {"shed_kw", f.pls_total},
       {"shed_mw", f.pls_total / 1000.0},
       {"eens_contribution", f.eens_contribution_mwh_yr},
@@ -7203,12 +7656,35 @@ static void populate_three_stage_result_json(
     const hacdcpf::analysis::ThreeStageReliabilityResult& r,
     double hours_per_year) {
   if (!std::isfinite(hours_per_year) || hours_per_year <= 0.0) hours_per_year = 8760.0;
-  out["physical_model"] = "ac_lindistflow_restoration_milp";
+  out["physical_model"] = "coupled_acdc_lindistflow_restoration_milp";
   out["ok"] = r.ok;
   if (!r.error.empty()) out["error_detail"] = r.error;
   out["model_scope"] = r.model_scope;
   out["model_limitations"] = r.model_limitations;
   out["validity"] = three_stage_validity_json(r.validity);
+  out["component_coverage"] = json{
+      {"ac_network", "lindistflow_active_reactive_voltage_radial"},
+      {"dc_network", "lindistflow_active_voltage_radial"},
+      {"vsc", "bidirectional_constant_efficiency_pq"},
+      {"dcdc", "bidirectional_constant_efficiency"},
+      {"ac_der", "dispatch_capacity_grid_forming_role"},
+      {"dc_der", "static_generator_pv_storage_dispatch"},
+      {"mobile_storage", "status_power_soc_stage_chronology"},
+      {"vpp", "pcc_boundary_aggregate_dispatch"},
+      {"storage", "ac_mobile_dc_stage_chronology"},
+      {"lcc", sys.lcc_converters.empty()
+          ? "not_present" : "unsupported_quasi_steady_commutation_model"},
+      {"energy_router", sys.energy_routers.empty()
+          ? "not_present" : "unsupported_multiport_power_balance"},
+      {"protection", "conditioned_outage_and_restoration_topology"}};
+  out["calculation_principles"] = json{
+      {"objective", "min sum(P_shed_ac + P_shed_dc)"},
+      {"ac_balance", "sum(P_in-P_out)+P_gen+P_storage+P_vsc+P_shed=P_load"},
+      {"dc_balance", "sum(P_in-P_out)+P_der+P_storage+eta*P_converter_in-P_converter_out+P_shed=P_load"},
+      {"voltage", "v_j=v_i-2(r*P+x*Q)/S_base (AC); v_j=v_i-2r*P/S_base (DC)"},
+      {"storage", "E_(s+1)=E_s-P_discharge*Delta_t_s"},
+      {"vpp", "0<=P_vpp<=Pmax at PCC, falling back to P_generation_sum then P_output when Pmax is absent; Q is curtailable toward zero from the submitted operating point"},
+      {"reliability", "EENS=sum_k lambda_k sum_s P_shed(k,s)*Delta_t(k,s)"}};
   add_reliability_parallel_json(out, r.parallel_execution.requested,
                                 r.parallel_execution);
   out["counts"] = json{{"nb", r.nb}, {"nb_ac", r.nb_ac}, {"nb_dc", r.nb_dc},
@@ -23598,8 +24074,8 @@ int main(int argc, char** argv) {
     // ---- Reliability Assessment (Three-Stage Fault-Recovery Restoration) ----
     // Exposes the staged restoration reliability evaluator as a first-class
     // reliability method (code-review item 5 / Finding 6).  The result already
-    // carries model_scope / validity / model_limitations declaring the AC
-    // LinDistFlow restoration MILP scope and the DC connectivity fallback.
+    // carries model_scope / validity / model_limitations declaring the coupled
+    // AC/DC LinDistFlow restoration MILP scope and explicit unsupported assets.
     svr.Post("/api/session/run_reliability_three_stage",
              [](const httplib::Request& req, httplib::Response& res) {
       try {
@@ -23698,6 +24174,10 @@ int main(int argc, char** argv) {
         g_session.cancel.store(false);
         const auto j = json::parse(req.body.empty() ? "{}" : req.body);
         const std::string method = j.value("method", std::string("fmea"));
+        const std::string system_fingerprint =
+            reliability_system_fingerprint(sys);
+        const json der_control_audit =
+            apply_reliability_der_control_scenario(sys, j);
         auto pol = parse_reliability_data_policy(j, sys);
         const json load = j.value("load", json::object());
         const json mc   = j.value("monte_carlo", json::object());
@@ -23729,6 +24209,17 @@ int main(int argc, char** argv) {
         json out;
         out["method"] = method;
         out["data_policy"] = reliability_policy_label(pol);
+	        out["der_control"] = der_control_audit;
+	        out["comparison_basis"] = json{
+	            {"system_fingerprint", system_fingerprint},
+	            {"data_policy", reliability_policy_label(pol)},
+	            {"load_scale_factor", load_scale},
+	            {"hours_per_year",
+	             load.value("hours_per_year", j.value("hours_per_year", 8760))},
+	            {"der_control_scenario",
+	             der_control_audit.value("scenario", "authored")},
+	            {"black_start_enabled",
+	             der_control_audit.value("black_start_enabled", true)}};
 	        const bool has_custom_reliability_configuration =
 	            !reliability_configuration.mode_overrides.empty() ||
 	            !reliability_configuration.protection.empty();
@@ -23903,7 +24394,8 @@ int main(int argc, char** argv) {
           fo.enable_grid_forming_vsc_support = physical_dimension.value(
               "enable_grid_forming_vsc_support", true);
           fo.enable_black_start_storage = physical_dimension.value(
-              "enable_black_start_storage", true);
+              "enable_black_start_storage",
+              der_control_audit.value("black_start_enabled", true));
           fo.max_repair_switch_actions = rest.value("max_switch_actions", 2);
           fo.max_repair_opf_calls = rest.value("max_physical_evaluations", 200);
           fo.enable_parallel = rest.value("parallel", parallel_requested);
@@ -24187,6 +24679,19 @@ int main(int argc, char** argv) {
         g_session.busy.store(false);
         res.status = 400;
         res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      }
+    });
+
+    svr.Post("/api/session/reliability/compare_results",
+             [](const httplib::Request& req, httplib::Response& res) {
+      try {
+        const auto body = json::parse(req.body.empty() ? "{}" : req.body);
+        res.set_content(reliability_compare_results(body).dump(),
+                        "application/json");
+      } catch (const std::exception& error) {
+        res.status = 400;
+        res.set_content(json{{"error", error.what()}}.dump(),
+                        "application/json");
       }
     });
 

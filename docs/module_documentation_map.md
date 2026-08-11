@@ -1,6 +1,6 @@
 # Module Documentation Map
 
-Updated: 2026-08-09
+Updated: 2026-08-11
 
 This living map evaluates documentation coverage, not implementation quality.
 Source, registered tests, and runtime responses remain authoritative. Update
@@ -38,7 +38,7 @@ Their source-backed review and closure evidence remain in the
 | `power_models/` | Focused | OPF manual chapter `chapters/power_models.tex` | AML builders are documented inside the OPF manual; a separate document is unnecessary while that ownership stays clear. |
 | `graph/` | Focused | [Graph and reduction runtime](graph_runtime_contract.md) | Stable/domain-qualified IDs, graph positions, reduction mappings, approximation boundaries, and recovery are explicit. |
 | `network_reconfiguration/` | Focused | [Network reconfiguration models](network_reconfiguration_models.md), [certified restoration runtime](certified_restoration_runtime.md) | Canonical-space ONR and certified restoration are distinguished. |
-| `reliability/` | Focused | [Consolidated reliability model](reliability_mathematical_models_and_intelligent_cyber_physical_assessment.md), [canonical methods](reliability_assessment_models.md) | Coverage is deep but duplicated. The consolidated document owns current status; focused documents should retain derivations without competing status claims. |
+| `reliability/` | Focused | [Consolidated reliability model](reliability_mathematical_models_and_intelligent_cyber_physical_assessment.md), [calculation workflow and case guide](reliability_calculation_workflow_and_case_guide.md), [canonical methods](reliability_assessment_models.md) | The consolidated document owns current status, while the workflow guide owns reproducible GUI calculation and result interpretation. Focused derivations must not compete with those roles. |
 | `resilience/` | Distributed | [Certified restoration runtime](certified_restoration_runtime.md) | One restoration workflow is well specified; heuristic, multi-period MIP, staged MILP, and MESS routing lack a single module-wide result contract. |
 | `analysis/` | Distributed | [Hosting capacity](capacity_analysis_implementation.md), [weak-link identification](multidimensional_weak_link_identification.md) | Major analyses have focused notes, but there is no umbrella contract for shared validity and attribution conventions. |
 | `scenario_generation/` | Focused | [Scenario generation runtime](scenario_generation_contract.md) | Regular, reliability, resilience, typhoon, traffic-impact, reproducibility, and fallback contracts are explicit. |

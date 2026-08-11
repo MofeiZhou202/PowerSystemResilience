@@ -1,6 +1,6 @@
 # Documentation Index
 
-Updated: 2026-08-10
+Updated: 2026-08-11
 
 This is the canonical entry point for active project documentation. Runtime
 behavior is defined by `include/`, `src/`, `tests/run_gui_server.cpp`, `web/`,
@@ -60,7 +60,7 @@ source-backed defects.
 | Carbon tracing, annual inventory, and GEC | Contract | [Carbon analysis runtime](carbon_analysis_contract.md) | Time-series documents above |
 | Campus integrated energy | Contract | [Campus integrated energy runtime](integrated_energy_contract.md) | Current headers and registered tests |
 | Day-ahead and real-time market | Contract | [Market runtime](market_simulation_runtime.md) | [Implemented mathematical model](market_simulation_mathematical_models.md) |
-| Reliability | Implementation reference | [Consolidated reliability model](reliability_mathematical_models_and_intelligent_cyber_physical_assessment.md) | [Canonical reliability methods](reliability_assessment_models.md), [runtime configuration API](runtime_api.md#reliability-and-protection-configuration) |
+| Reliability | Implementation reference | [Consolidated reliability model](reliability_mathematical_models_and_intelligent_cyber_physical_assessment.md) | [Calculation workflow and case guide](reliability_calculation_workflow_and_case_guide.md), [canonical reliability methods](reliability_assessment_models.md), [runtime configuration API](runtime_api.md#reliability-and-protection-configuration) |
 | Resilience and restoration | Contract | [Certified restoration runtime](certified_restoration_runtime.md) | [Network reconfiguration models](network_reconfiguration_models.md) |
 | EV and traffic inputs | Contract | [EV/traffic scenario format](ev_traffic_scenario_format.md) | Current headers and registered tests |
 | SPPT executable verification | Contract | [SPPT executable runtime](sppt_runtime_contract.md) | [Projection and result attribution](projection_and_results.md) |

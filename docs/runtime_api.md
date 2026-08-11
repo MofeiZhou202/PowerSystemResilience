@@ -209,12 +209,12 @@ For `dist33_microgrid_der`, ordinary FMEA currently completes with
 `physical_model=hybrid_network_lp` and `model_scope=hybrid-acdc-network-lp`.
 It includes active-power AC/DC restoration, but does not certify nonlinear AC
 voltage/reactive feasibility and does not search DC-side repair switching.
-Three-stage evaluation returns HTTP 200 with `ok=false` plus `error_detail`
-when the hybrid DC/VSC connectivity fallback is used; fault results and metrics
-are still returned, while `restoration_milp_solved`, voltage, branch-flow, and
-radiality validity remain false. The pure-AC `dist33_tie_demo` is the matching
-case for certified three-stage restoration and returns `ok=true` with those
-MILP validity flags true. Both three-stage HTTP routes execute the solver on a
+Three-stage evaluation uses
+`model_scope=coupled-acdc-lindistflow-restoration-milp` and returns `ok=true`
+with restoration-MILP, branch-flow, voltage, radial-topology, DC-power-flow,
+and VSC/SOP-dispatch validity flags true. Fault rows return signed VSC dispatch
+for every stage. The pure-AC `dist33_tie_demo` remains the corresponding
+AC-only certified case. Both three-stage HTTP routes execute the solver on a
 dedicated large-stack worker so a solver stack requirement cannot terminate an
 HTTP worker process.
 

@@ -1,6 +1,6 @@
 # Development Status
 
-Updated: 2026-08-10
+Updated: 2026-08-11
 
 This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
@@ -21,7 +21,77 @@ the current Git worktrees remain authoritative.
 The two full CTest results establish the normal build baseline. They do not
 claim that every sanitizer entry point is green.
 
+## DER control and reliability-method comparison
+
+The unified reliability request now applies an optional calculation-copy DER
+control scenario: authored roles, forced grid-following, or promotion of
+eligible controllable resources to grid-forming. Every result exposes a stable-
+ID device audit with authored/effective role, reference capability,
+anti-islanding and black-start credit. This is a steady-state reliability
+sensitivity model; dynamic synchronization, current limiting and protection-
+FRT trajectories remain explicit limitations. Disabling black-start removes
+the explicit FMEA storage credit, while methods that still use a composite GFM/
+black-start flag disclose that boundary.
+
+The GUI adds deterministic, Monte Carlo and full six-method comparison sets.
+Each production result carries a system fingerprint and normalized calculation
+basis. The comparison backend rejects mismatched bases, omits unavailable
+metrics, reports min/median/max, coefficient of variation and normalized range,
+and compares weak-component rankings by stable-ID Spearman correlation, top-5
+Jaccard overlap and consensus reciprocal rank. The default reporting horizon is
+8760 hours across the compared methods.
+
+Focused `macos-release` verification rebuilt `run_gui_server`. The three
+registered GFL/GFM physical cases passed, `reliability_control_state_test`
+passed, and the extended `reliability_workflow_e2e` passed in 8.90 seconds. The
+latter used the built-in cyber-physical case to verify the per-device control
+audit and same-basis component-FMEA versus failure-mode-FMEA comparison,
+including statistic bounds and stable consensus identities. JavaScript syntax
+and `git diff --check` passed. No complete CTest or sanitizer run was performed
+for this increment.
+
+The reliability calculation-guide refresh reused the existing
+`macos-release/tests/run_gui_server` binary without rebuilding it. A direct
+`reliability_workflow_e2e.mjs` run completed successfully and reproduced the
+documented cyber-physical EENS sequences `1.0000005 -> 4.30000075`,
+`0.10000005 -> 4.400001`, and `10.000005 -> 20.000005 MWh/year`. Direct
+production-API capture for `dist33_microgrid_der` returned the coupled-model
+baseline EENS/LOLE/SAIDI of `4.276339 MWh/year`, `1.261167 h/year`, and
+`72.861707 min/customer-year`; promoting 11 eligible resources to steady-state
+GFM reduced those values to `0.010627`, `0.027833`, and `0.172683`. These
+Dist33 values are worked-case evidence, not registered cross-version numeric
+thresholds. The validity flags and directional checks remain the enforced
+contracts. No full CTest or sanitizer run was performed for this documentation
+refresh.
+
 ## Reliability configuration enhancement
+
+The dirty worktree now registers `reliability_dimension_validation_e2e`, which
+uses the production unified reliability route for seven physical,
+information, and intelligent scenarios on both `dist33_microgrid_der` and
+`comprehensive_hybrid_acdc`. The registered `macos-release` CTest passed 1/1
+in 0.79 seconds. Load scale 1.3 changed EENS from `0.149400` to `0.194220`
+and from `15.162140` to `35.964740 MWh/year`; disabling six restoration
+resource classes changed it to `1.656000` and `21.312060`. With automatic and
+manual endpoints of `0.014940/0.334800` and `15.449294/267.580000`, the
+factorized intelligent probability was exactly `0.6500736`, effective
+automation probability was `0.58506624`, and measured joint EENS was
+`0.1476607125` and `120.0668358520`, matching the affine total-expectation
+identity within the predeclared `1e-8` tolerance.
+
+The comprehensive case retained a signed duration attribution of
+`-0.251539 MWh/year` and a control attribution of `+104.869081 MWh/year`.
+This is not clamped: the derivation explicitly permits non-monotone
+counterfactual attributions when a longer switching window shortens the
+fixed-MTTR repair window or changes topology. The response localized negative
+duration terms to `HV-Line-110kV` and `F3-Line-15-16`; total endpoint ordering
+and the exact decomposition still passed. Both cases declare the Level-1
+independence boundary, no joint class probabilities, and no protection/FRT
+coupling. The test reused the existing `macos-release/tests/run_gui_server`
+binary; CMake reconfiguration disclosed that local MIPSolvers HEAD
+`82f4583d4f9070549c75a1ffa5d8d3bac8d9dc6f` differs from the recorded pin
+`60f8bc4e4eeb58c239f83b7ff0fde1be75cd05b0`, so no reproducible rebuild or
+full-suite claim is made for this increment.
 
 The current dirty HySim worktree adds a model-bound reliability/protection
 configuration across `failure_mode`, the GUI server, and `/xjtu/`. The catalog
@@ -78,10 +148,16 @@ result audits initiating, transient, and sustained frequencies and their exact
 conservation. The GUI renders this protection/recovery audit and the governing
 formula from the response.
 
-Focused `macos-release` verification passed 27 regular
-`test_three_stage_reliability` cases with 1365 assertions, including exact
+Focused `macos-release` verification now passes 35 regular
+`test_three_stage_reliability` cases with 1454 assertions. In addition to exact
 `r=0.8` scaling of sustained EENS to 20% of baseline, primary/backup frequency
-conservation, backup-zone expansion, and configured clearing times. The
+conservation, backup-zone expansion, and configured clearing times, the suite
+now verifies coupled AC/DC nodal balance and voltage/radial constraints,
+bidirectional VSC and DC-DC efficiency, DC line limits, four DC DER fault
+families, AC/DC/mobile-storage stage chronology, mobile-storage transit state,
+VPP PCC-boundary outages, and equal-number AC/DC bus-ID isolation. A direct
+`build_dist33_microgrid_der()` regression returns `ok=true` with the coupled
+scope and all branch-flow/voltage/radial/DC/VSC validity flags true. The
 registered `reliability_configuration_e2e` and
 `reliability_default_policy_e2e` passed in 39.39 and 7.16 seconds after
 checking both unified and legacy API protection fields, strict-policy rejection,
@@ -104,8 +180,9 @@ while `case_data_only` alone blocks zero-coverage input and offers the explicit
 `Apply parameter library and run` path. Selecting three-stage restoration now
 defaults the GUI fault loop to serial execution, avoiding queue amplification
 against the process-serialized solver while retaining an explicit parallel
-opt-in. Its Dist33 run completed with a response-backed `limited` state and a
-visible protection/recovery panel. The obsolete empty-result text claiming that
+opt-in. Earlier Dist33 GUI evidence in this paragraph predated the coupled DC
+model and is superseded by the current source-level and workflow contracts
+below. The obsolete empty-result text claiming that
 the reliability and resilience backend interfaces were pending was removed.
 
 The same dirty worktree now adds a reliability calculation workflow to the GUI:
@@ -122,13 +199,19 @@ checks (MWh/year): physical load scale `1.0 -> 1.5`,
 `complete/complete/limited/complete/complete`; the limited consequence state
 was backed by runtime model declarations, and 390 px viewport overflow was
 zero. After rebuilding the focused `macos-release` targets,
-registered `reliability_workflow_e2e` passed in 9.20 seconds. It now also runs real
-three-stage requests for both Dist33 variants: `dist33_microgrid_der` returns a
-completed hybrid connectivity-fallback result with `ok=false` and explicit
-invalid MILP flags, while `dist33_tie_demo` returns `ok=true` with branch-flow,
-voltage, radiality, and restoration-MILP validity true. Both unified and legacy
+the registered `reliability_workflow_e2e` passed in 11.14 seconds and exercises
+real three-stage requests for both
+Dist33 variants: `dist33_microgrid_der` uses
+`coupled-acdc-lindistflow-restoration-milp`, returns `ok=true`, signed VSC
+dispatch, and true branch-flow/voltage/radial/DC/restoration validity flags;
+`dist33_tie_demo` remains an exact AC case. The rebuilt registered
+`reliability_configuration_e2e` and `reliability_default_policy_e2e` also
+passed in 50.17 and 9.78 seconds. Both unified and legacy
 three-stage routes execute the core solver on a dedicated 4 MiB-stack worker;
-an additional response-construction failure was traced under LLDB to a nullable
+the workflow wall time is `1.21x` the previously recorded 9.20-second run,
+inside the predeclared `3x` AC/DC-model expansion budget. This is an end-to-end
+runtime comparison, not a solver-only microbenchmark. An additional
+response-construction failure was traced under LLDB to a nullable
 `const char*` passed to nlohmann JSON after a successful solve. Both routes now
 construct an explicit JSON string or JSON null, closing the observed
 `strlen(nullptr)` process termination for empty custom configurations. The

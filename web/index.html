@@ -1876,7 +1876,7 @@
         <input id="relTsFaults" type="checkbox"/>
         <span>三阶段设备/电源故障</span>
       </label>
-      <label class="sub-label sub-checkbox" title="三阶段 DC 子网用 DC LinDistFlow 潮流替代容量回退：母线电压下限、线路电阻压降与热稳定限制（仅三阶段恢复 MILP；默认开启，取消勾选则回退到容量法）">
+      <label class="sub-label sub-checkbox" title="将 DC 节点平衡、电压、线路限额、VSC/DC-DC 双向效率、DC DER 与储能并入三阶段 AC/DC 联合 MILP；默认开启，关闭后结果明确标记为容量回退">
         <input id="relTsDcPf" type="checkbox" checked/>
         <span>三阶段DC潮流</span>
       </label>
@@ -1924,6 +1924,22 @@
         <input id="relProtectionSuccess" type="number" value="0.995" min="0" max="1" step="0.001"/>
       </label>
       <span class="sub-hint">独立因子筛查 · 保护-FRT 未耦合</span>
+    </div>
+    <div class="rel-param-group rel-der-control-group" title="在不改写当前模型的前提下，对可靠性计算副本施加 DER 控制角色场景">
+      <span class="rel-param-title">DER 控制</span>
+      <label class="sub-label" title="原始配置使用每个元件属性中的构网标志；跟网场景撤销孤岛参考；构网提升仅提升具备可控能力的 DER">
+        控制场景
+        <select id="relDerControlScenario">
+          <option value="authored" selected>元件原始配置</option>
+          <option value="force_grid_following">全部跟网 (GFL)</option>
+          <option value="promote_grid_forming">可控 DER 构网 (GFM)</option>
+        </select>
+      </label>
+      <label class="sub-label sub-checkbox" title="允许构网储能/DER 在死岛恢复中获得黑启动能力；关闭后后端会明确报告仍采用复合构网标志的算法边界">
+        <input id="relDerBlackStart" type="checkbox" checked/>
+        <span>计入黑启动</span>
+      </label>
+      <span class="sub-hint">GFL 依附带电岛 · GFM 提供参考</span>
     </div>
     <div class="rel-param-group" title="可靠性统计评估方法、抽样规模与序贯负荷模型">
       <span class="rel-param-title">方法与抽样</span>
@@ -2086,6 +2102,15 @@
                 title="按当前模型参数库补全缺失字段，并重新运行可靠性分析">应用参数库后运行</button>
       </div>
       <button id="btnRunReliability" class="toolbar-btn run-btn" title="运行可靠性分析">运行可靠性分析</button>
+      <label class="sub-label" title="快速对比运行元件 FMEA、失效模式 FMEA 和三阶段恢复；完整对比还包含 NSQ、SEQ 与 F&amp;D">
+        对比集
+        <select id="relComparisonProfile">
+          <option value="deterministic" selected>确定性三算法</option>
+          <option value="monte_carlo">NSQ / SEQ</option>
+          <option value="all">全部六算法</option>
+        </select>
+      </label>
+      <button id="btnCompareReliability" class="toolbar-btn" title="在相同模型快照、参数策略、负荷和 DER 控制场景下比较指标与薄弱环节排序">算法稳健性对比</button>
       <button id="btnExportReliabilityResults" class="toolbar-btn" title="将可靠性分析结果导出为 JSON">结果导出</button>
     </div>
   </div>

@@ -20,8 +20,8 @@
  *         for verifying hybrid network handling.
  *
  *   TC-4  case33bw_acdc  — modified IEEE 33-bus (Baran–Wu variant) with an
- *         added DC sub-grid and SOP device.  Exercises the documented hybrid
- *         connectivity fallback and zero-dispatch SOP reporting.
+ *         added DC sub-grid and SOP device. Exercises the coupled AC/DC
+ *         restoration model and signed VSC dispatch reporting.
  *
  * Sanity ranges used in TC-2 / TC-3 / TC-4:
  *   SAIFI    ≥ 0                    (frequency index is non-negative)
@@ -45,6 +45,7 @@
 #include <vector>
 
 #include "hacdcpf/analysis/three_stage_reliability.hpp"
+#include "hacdcpf/io/case_builders.hpp"
 #include "hacdcpf/io/json_io.hpp"
 #include "hacdcpf/reliability/reliability_assessment.hpp"
 
@@ -352,9 +353,13 @@ TEST_CASE("Three-stage reliability — case33mg_acdc (33-bus AC/DC + microgrid)"
   CHECK(r.model_scope.find("dc-lindistflow") != std::string::npos);
   CHECK(r.model_limitations.find("ACBranch and DCBranch") != std::string::npos);
   CHECK(r.validity.dc_power_flow_enforced);
-  CHECK_FALSE(r.validity.sop_dispatch_optimised);
+  CHECK(r.validity.sop_dispatch_optimised);
+  CHECK(r.validity.branch_flow_enforced);
+  CHECK(r.validity.voltage_constraints_enforced);
+  CHECK(r.validity.radial_topology_enforced);
+  CHECK(r.validity.restoration_milp_solved);
 
-  check_result_shape(r, false);
+  check_result_shape(r);
 
   std::printf("[TC-3] case33mg_acdc: nb=%d (ac=%d dc=%d), nl=%d (ac=%d dc=%d), "
                "vsc=%d, sop=%d, mg=%d\n",
@@ -517,7 +522,7 @@ TEST_CASE("Three-stage reliability — case33bw_acdc (33-bus BW + SOP)",
   CHECK(r.nl_sop >= 1);
   CHECK(r.model_scope.find("dc-lindistflow") != std::string::npos);
   CHECK(r.validity.dc_power_flow_enforced);
-  CHECK_FALSE(r.validity.sop_dispatch_optimised);
+  CHECK(r.validity.sop_dispatch_optimised);
 
   // SOP configuration must be populated.
   CHECK(!r.sop_config.empty());
@@ -527,7 +532,7 @@ TEST_CASE("Three-stage reliability — case33bw_acdc (33-bus BW + SOP)",
     CHECK(sop.efficiency <= 1.0);
   }
 
-  check_result_shape(r, false);
+  check_result_shape(r);
 
   // All three stage-1 SOP power vectors must have the right length.
   for (const auto& f : r.faults) {
@@ -1140,8 +1145,8 @@ TEST_CASE("Three-stage reliability — VSC transfer limits AC source support for
 
   ThreeStageReliabilityOptions opts;
   auto r = run_three_stage_reliability_from_string(json, opts);
-  REQUIRE_FALSE(r.ok);
-  REQUIRE(!r.error.empty());
+  REQUIRE(r.ok);
+  REQUIRE(r.error.empty());
   CHECK(r.model_scope.find("dc-lindistflow") != std::string::npos);
   CHECK(r.validity.dc_power_flow_enforced);
   REQUIRE(r.faults.size() == 1);
@@ -1149,6 +1154,332 @@ TEST_CASE("Three-stage reliability — VSC transfer limits AC source support for
   CHECK(r.faults.front().raw_pls_stage3 == Catch::Approx(400.0).margin(1e-3));
   CHECK(r.faults.front().n0_pls_stage3 == Catch::Approx(400.0).margin(1e-3));
   CHECK(r.faults.front().pls_stage3 == Catch::Approx(0.0).margin(1e-3));
+}
+
+TEST_CASE("Three-stage reliability — coupled VSC applies efficiency once in both directions",
+          "[reliability][three_stage][hybrid][vsc]") {
+  SECTION("AC to DC transfer") {
+    auto sys = make_two_bus_islanding_case(0.0, 1.0);
+    sys.ac.buses[1].pd_mw = 0.0;
+    sys.ac.buses[1].qd_mvar = 0.0;
+    sys.ac.external_grids.clear();
+    hacdcpf::Generator generator;
+    generator.index = 1; generator.bus = 1; generator.in_service = true;
+    generator.pmax_mw = 5.0; generator.qmax_mvar = 5.0; generator.is_slack = true;
+    sys.ac.generators = {generator};
+    hacdcpf::DCBus dc_bus;
+    dc_bus.index = 101; dc_bus.in_service = true;
+    sys.dc.buses = {dc_bus};
+    hacdcpf::DCLoad load;
+    load.index = 1; load.bus = 101; load.in_service = true; load.p_mw = 1.0;
+    sys.dc.loads = {load};
+    hacdcpf::VSCConverter converter;
+    converter.index = 1; converter.bus_ac = 1; converter.bus_dc = 101;
+    converter.in_service = true; converter.pmax_mw = 1.0;
+    converter.pmin_mw = -1.0; converter.p_rated_mw = 1.0; converter.eta = 0.9;
+    sys.vsc_converters = {converter};
+
+    const auto result = run_three_stage_reliability_from_string(
+        hacdcpf::io::to_json(sys, 2), {});
+    REQUIRE(result.ok);
+    REQUIRE(result.faults.size() == 1);
+    CHECK(result.faults.front().raw_pls_stage3 ==
+          Catch::Approx(100.0).margin(1e-3));
+    REQUIRE(result.faults.front().psop3.size() == 1);
+    CHECK(result.faults.front().psop3.front() ==
+          Catch::Approx(1000.0).margin(1e-3));
+  }
+
+  SECTION("DC to AC transfer") {
+    auto sys = make_two_bus_islanding_case(0.9, 1.0);
+    sys.ac.external_grids.clear();
+    hacdcpf::Generator generator;
+    generator.index = 1; generator.bus = 1; generator.in_service = true;
+    generator.pmax_mw = 5.0; generator.qmax_mvar = 5.0; generator.is_slack = true;
+    sys.ac.generators = {generator};
+    hacdcpf::DCBus dc_bus;
+    dc_bus.index = 101; dc_bus.bus_type = hacdcpf::DCBusType::DC_V;
+    dc_bus.in_service = true;
+    sys.dc.buses = {dc_bus};
+    hacdcpf::StaticGeneratorDC dc_generator;
+    dc_generator.index = 1; dc_generator.bus = 101; dc_generator.in_service = true;
+    dc_generator.controllable = true; dc_generator.pmax_mw = 2.0;
+    dc_generator.p_set_mw = 2.0;
+    sys.dc.dc_static_generators = {dc_generator};
+    hacdcpf::VSCConverter converter;
+    converter.index = 1; converter.bus_ac = 2; converter.bus_dc = 101;
+    converter.in_service = true; converter.pmax_mw = 2.0;
+    converter.pmin_mw = -2.0; converter.p_rated_mw = 2.0;
+    converter.qmin_mvar = -1.0; converter.qmax_mvar = 1.0;
+    converter.eta = 0.9; converter.ac_grid_forming = true;
+    sys.vsc_converters = {converter};
+
+    const auto result = run_three_stage_reliability_from_string(
+        hacdcpf::io::to_json(sys, 2), {});
+    REQUIRE(result.ok);
+    REQUIRE(result.faults.size() == 1);
+    CHECK(result.faults.front().raw_pls_stage3 ==
+          Catch::Approx(0.0).margin(1e-3));
+    REQUIRE(result.faults.front().psop3.size() == 1);
+    CHECK(result.faults.front().psop3.front() ==
+          Catch::Approx(-1000.0).margin(1e-3));
+  }
+}
+
+TEST_CASE("Three-stage reliability — DC-DC efficiency and outage are physical",
+          "[reliability][three_stage][hybrid][dcdc]") {
+  auto sys = make_two_bus_islanding_case(0.0, 1.0);
+  sys.ac.buses[1].pd_mw = 0.0;
+  sys.ac.buses[1].qd_mvar = 0.0;
+  hacdcpf::DCBus d1; d1.index = 101; d1.in_service = true;
+  hacdcpf::DCBus d2; d2.index = 102; d2.in_service = true;
+  sys.dc.buses = {d1, d2};
+  hacdcpf::DCLoad load;
+  load.index = 1; load.bus = 102; load.in_service = true; load.p_mw = 1.0;
+  sys.dc.loads = {load};
+  hacdcpf::VSCConverter vsc;
+  vsc.index = 1; vsc.bus_ac = 1; vsc.bus_dc = 101; vsc.in_service = true;
+  vsc.pmax_mw = 2.0; vsc.pmin_mw = -2.0; vsc.p_rated_mw = 2.0; vsc.eta = 1.0;
+  sys.vsc_converters = {vsc};
+  hacdcpf::DCDCConverter dcdc;
+  dcdc.index = 1; dcdc.bus_in = 101; dcdc.bus_out = 102; dcdc.in_service = true;
+  dcdc.pmax_mw = 1.0; dcdc.pmin_mw = -1.0; dcdc.sn_mva = 1.0;
+  dcdc.eta = 0.8; dcdc.mtbf_hours = 8760.0; dcdc.mttr_hours = 2.0;
+  sys.dc.dcdc_converters = {dcdc};
+
+  ThreeStageReliabilityOptions options;
+  options.include_converter_faults = true;
+  const auto result = run_three_stage_reliability_from_string(
+      hacdcpf::io::to_json(sys, 2), options);
+  REQUIRE(result.ok);
+  const auto fault = std::find_if(result.faults.begin(), result.faults.end(),
+                                  [](const auto& row) {
+                                    return row.component_type == "dcdc_converter";
+                                  });
+  REQUIRE(fault != result.faults.end());
+  CHECK(fault->raw_pls_stage3 == Catch::Approx(1000.0).margin(1e-3));
+  const auto branch_fault = std::find_if(result.faults.begin(), result.faults.end(),
+                                         [](const auto& row) {
+                                           return row.component_type == "ac_branch";
+                                         });
+  REQUIRE(branch_fault != result.faults.end());
+  CHECK(branch_fault->raw_pls_stage3 == Catch::Approx(200.0).margin(1e-3));
+}
+
+TEST_CASE("Three-stage reliability — DC storage energy carries across all stages",
+          "[reliability][three_stage][hybrid][storage]") {
+  auto sys = make_two_bus_islanding_case(0.0, 2.0);
+  sys.ac.buses[1].pd_mw = 0.0;
+  sys.ac.buses[1].qd_mvar = 0.0;
+  hacdcpf::DCBus bus;
+  bus.index = 101; bus.bus_type = hacdcpf::DCBusType::DC_V; bus.in_service = true;
+  sys.dc.buses = {bus};
+  hacdcpf::DCLoad load;
+  load.index = 1; load.bus = 101; load.in_service = true; load.p_mw = 1.0;
+  sys.dc.loads = {load};
+  hacdcpf::Storage storage;
+  storage.index = 1; storage.bus = 101; storage.in_service = true;
+  storage.pmax_mw = 1.0; storage.p_rated_mw = 1.0;
+  storage.e_rated_mwh = 1.25; storage.soc_init = 1.0; storage.soc_min = 0.0;
+  storage.eta_discharge = 0.8;
+  sys.dc.storage = {storage};
+
+  const auto result = run_three_stage_reliability_from_string(
+      hacdcpf::io::to_json(sys, 2), {});
+  REQUIRE(result.ok);
+  REQUIRE(result.faults.size() == 1);
+  const auto& fault = result.faults.front();
+  CHECK(fault.storage_energy_initial_mwh == Catch::Approx(1.0).margin(1e-9));
+  CHECK(fault.storage_energy_used_stage1_mwh +
+        fault.storage_energy_used_stage2_mwh +
+        fault.storage_energy_used_stage3_mwh == Catch::Approx(1.0).margin(1e-6));
+  CHECK(fault.storage_energy_remaining_mwh == Catch::Approx(0.0).margin(1e-6));
+  CHECK(fault.raw_pls_stage3 > 400.0);
+}
+
+TEST_CASE("Three-stage reliability — all DC DER fault families are enumerated",
+          "[reliability][three_stage][hybrid][fault_set]") {
+  hacdcpf::HybridPowerSystem sys;
+  hacdcpf::DCBus bus;
+  bus.index = 101; bus.bus_type = hacdcpf::DCBusType::DC_V; bus.in_service = true;
+  bus.pd_mw = 0.7; sys.dc.buses = {bus};
+  hacdcpf::StaticGeneratorDC g1;
+  g1.index = 1; g1.bus = 101; g1.in_service = true; g1.controllable = true;
+  g1.pmax_mw = 0.2; g1.p_set_mw = 0.2; g1.mtbf_hours = 8760.0; g1.mttr_hours = 2.0;
+  sys.dc.dc_static_generators = {g1};
+  hacdcpf::StaticGenerator g2;
+  g2.index = 2; g2.bus = 101; g2.in_service = true; g2.controllable = true;
+  g2.pmax_mw = 0.2; g2.p_mw = 0.2; g2.scaling = 1.0;
+  g2.mtbf_hours = 8760.0; g2.mttr_hours = 2.0;
+  sys.dc.static_generators = {g2};
+  hacdcpf::PVArrayDC pv;
+  pv.index = 3; pv.bus = 101; pv.in_service = true; pv.p_set_mw = 0.2;
+  pv.mtbf_hours = 8760.0; pv.mttr_hours = 2.0;
+  sys.dc.pv_arrays = {pv};
+  hacdcpf::Storage storage;
+  storage.index = 4; storage.bus = 101; storage.in_service = true;
+  storage.pmax_mw = 0.2; storage.p_rated_mw = 0.2;
+  storage.e_rated_mwh = 1.0; storage.soc_init = 1.0; storage.soc_min = 0.0;
+  storage.forced_outage_rate = 0.01; storage.mttr_hr = 2.0;
+  sys.dc.storage = {storage};
+
+  ThreeStageReliabilityOptions options;
+  options.include_generator_faults = true;
+  const auto result = run_three_stage_reliability_from_string(
+      hacdcpf::io::to_json(sys, 2), options);
+  REQUIRE(result.ok);
+  std::vector<std::string> types;
+  for (const auto& fault : result.faults) types.push_back(fault.component_type);
+  for (const char* expected : {"dc_static_generator", "dc_static_generator_ac",
+                               "dc_pv_array", "dc_storage"})
+  {
+    const auto fault = std::find_if(result.faults.begin(), result.faults.end(),
+                                    [&](const auto& row) {
+                                      return row.component_type == expected;
+                                    });
+    REQUIRE(fault != result.faults.end());
+    CHECK(fault->raw_pls_stage3 > 90.0);
+  }
+}
+
+TEST_CASE("Three-stage reliability — mobile storage status, energy and outage are physical",
+          "[reliability][three_stage][der][mobile_storage]") {
+  const auto run = [](hacdcpf::MobileStorageStatus status) {
+    auto sys = make_two_bus_islanding_case(0.0, 1.0);
+    sys.ac.buses.front().pd_mw = 0.4;
+    sys.ac.buses.front().qd_mvar = 0.08;
+    sys.ac.external_grids.front().s_sc_max_mva = 0.1;
+
+    hacdcpf::MobileStorage storage;
+    storage.index = 7;
+    storage.bus = 1;
+    storage.in_service = true;
+    storage.status = status;
+    storage.p_rated_mw = 0.3;
+    storage.pmax_mw = 0.3;
+    storage.qmax_mvar = 0.1;
+    storage.e_rated_mwh = 1.0;
+    storage.soc_init = 1.0;
+    storage.soc_min = 0.0;
+    storage.eta_discharge = 1.0;
+    storage.grid_forming = true;
+    storage.mtbf_hours = 8760.0;
+    storage.mttr_hours = 2.0;
+    sys.mobile_storage = {storage};
+
+    ThreeStageReliabilityOptions options;
+    options.include_generator_faults = true;
+    options.enable_parallel = false;
+    return run_three_stage_reliability_from_string(
+        hacdcpf::io::to_json(sys, 2), options);
+  };
+
+  const auto deployed = run(hacdcpf::MobileStorageStatus::Deployed);
+  REQUIRE(deployed.ok);
+  const auto mobile_fault = std::find_if(
+      deployed.faults.begin(), deployed.faults.end(), [](const auto& row) {
+        return row.component_type == "mobile_storage";
+      });
+  REQUIRE(mobile_fault != deployed.faults.end());
+  CHECK(mobile_fault->pls_stage3 == Catch::Approx(300.0).margin(1e-3));
+  const auto branch_fault = std::find_if(
+      deployed.faults.begin(), deployed.faults.end(), [](const auto& row) {
+        return row.component_type == "ac_branch";
+      });
+  REQUIRE(branch_fault != deployed.faults.end());
+  CHECK(branch_fault->raw_pls_stage3 == Catch::Approx(0.0).margin(1e-3));
+  CHECK(branch_fault->storage_energy_used_stage1_mwh +
+            branch_fault->storage_energy_used_stage2_mwh +
+            branch_fault->storage_energy_used_stage3_mwh ==
+        Catch::Approx(0.3).margin(1e-6));
+
+  const auto in_transit = run(hacdcpf::MobileStorageStatus::InTransit);
+  REQUIRE(in_transit.ok);
+  CHECK(std::none_of(in_transit.faults.begin(), in_transit.faults.end(),
+                     [](const auto& row) {
+                       return row.component_type == "mobile_storage";
+                     }));
+  REQUIRE_FALSE(in_transit.faults.empty());
+  CHECK(in_transit.faults.front().raw_pls_stage3 ==
+        Catch::Approx(300.0).margin(1e-3));
+}
+
+TEST_CASE("Three-stage reliability — VPP is an outage-aware PCC boundary dispatch",
+          "[reliability][three_stage][der][vpp]") {
+  auto sys = make_two_bus_islanding_case(0.0, 1.0);
+  sys.ac.buses.front().pd_mw = 0.4;
+  sys.ac.buses.front().qd_mvar = 0.08;
+  sys.ac.external_grids.front().s_sc_max_mva = 0.1;
+  hacdcpf::VirtualPowerPlant vpp;
+  vpp.index = 9;
+  vpp.pcc_bus = 1;
+  vpp.in_service = true;
+  vpp.p_generation_sum_mw = 0.3;
+  vpp.pmax_mw = 0.3;
+  vpp.q_output_mvar = 0.08;
+  vpp.mtbf_hours = 8760.0;
+  vpp.mttr_hours = 2.0;
+  sys.vpps = {vpp};
+
+  ThreeStageReliabilityOptions options;
+  options.include_generator_faults = true;
+  options.enable_parallel = false;
+  const auto result = run_three_stage_reliability_from_string(
+      hacdcpf::io::to_json(sys, 2), options);
+  REQUIRE(result.ok);
+  const auto fault = std::find_if(result.faults.begin(), result.faults.end(),
+                                  [](const auto& row) {
+                                    return row.component_type ==
+                                           "virtual_power_plant";
+                                  });
+  REQUIRE(fault != result.faults.end());
+  CHECK(fault->pls_stage3 == Catch::Approx(300.0).margin(1e-3));
+}
+
+TEST_CASE("Three-stage reliability — equal AC and DC bus IDs remain isolated",
+          "[reliability][three_stage][hybrid][domain_map]") {
+  auto sys = make_two_bus_islanding_case(0.0, 1.0);
+  hacdcpf::DCBus dc_bus;
+  dc_bus.index = 1;
+  dc_bus.bus_type = hacdcpf::DCBusType::DC_V;
+  dc_bus.in_service = true;
+  sys.dc.buses = {dc_bus};
+  hacdcpf::DCLoad dc_load;
+  dc_load.index = 1;
+  dc_load.bus = 1;
+  dc_load.in_service = true;
+  dc_load.p_mw = 0.5;
+  sys.dc.loads = {dc_load};
+
+  ThreeStageReliabilityOptions options;
+  options.enable_parallel = false;
+  const auto result = run_three_stage_reliability_from_string(
+      hacdcpf::io::to_json(sys, 2), options);
+  REQUIRE(result.ok);
+  REQUIRE(result.faults.size() == 1);
+  CHECK(result.faults.front().raw_pls_stage3 ==
+        Catch::Approx(500.0).margin(1e-3));
+}
+
+TEST_CASE("Three-stage reliability — built-in Dist33 DER uses the coupled model",
+          "[reliability][three_stage][builtin][dist33_der]") {
+  const auto sys = hacdcpf::io::build_dist33_microgrid_der();
+  ThreeStageReliabilityOptions options;
+  options.enable_parallel = false;
+  const auto result = run_three_stage_reliability_from_string(
+      hacdcpf::io::to_json(sys, 2), options);
+  INFO("error: " << result.error);
+  REQUIRE(result.ok);
+  CHECK(result.model_scope ==
+        "coupled-acdc-lindistflow-restoration-milp");
+  CHECK(result.validity.dc_power_flow_enforced);
+  CHECK(result.validity.sop_dispatch_optimised);
+  CHECK(result.validity.branch_flow_enforced);
+  CHECK(result.validity.voltage_constraints_enforced);
+  CHECK(result.validity.radial_topology_enforced);
+  REQUIRE_FALSE(result.faults.empty());
+  for (const auto& fault : result.faults)
+    CHECK(fault.psop3.size() == sys.vsc_converters.size());
 }
 
 TEST_CASE("Three-stage reliability — custom protection conditions sustained scenarios",

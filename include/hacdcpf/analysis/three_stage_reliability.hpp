@@ -130,10 +130,9 @@ struct ThreeStageSopConfig {
 
 /// Aggregate result of one three-stage reliability evaluation.
 struct ThreeStageReliabilityResult {
-  /// True only when the result is a verified exact evaluation inside the
-  /// evaluator's full physical scope.  Hybrid DC/VSC/SOP cases currently
-  /// return metrics with `ok == false` because they use the documented
-  /// DC-connectivity fallback rather than a full physical restoration MILP.
+  /// True only when every stage is verified inside the declared model scope.
+  /// The default coupled model includes AC/DC LinDistFlow, bidirectional
+  /// VSC/DC-DC transfer, conventional AC/DC DER, and storage chronology.
   bool ok{false};
   std::string error;          ///< populated when ok == false
 
@@ -171,11 +170,13 @@ struct ThreeStageReliabilityResult {
   ///  - AC restoration is a finite-source LinDistFlow MILP with explicit
   ///    p_g/q_g capacity bounds, energized-bus indicators, strict radial forest
   ///    constraints, branch flow limits, voltage bounds, and continuous load shed.
-  ///  - VSC converters and DC/DC converters are treated as lossless graph
-  ///    edges only in the DC fallback; their power-flow setpoints are NOT
-  ///    optimised.  psop vectors in FaultDetail are filled with zeros.
-  ///  - DC loads and DC generation are handled by a connectivity/capacity
-  ///    fallback, but no DC power-flow constraints are enforced.
+  ///  - VSC and DC/DC transfers are optimized bidirectionally with constant
+  ///    efficiency. Fixed/quadratic loss and DC/DC duty-ratio voltage
+  ///    conversion remain outside the linear model.
+  ///  - DC load, DER, storage, branch voltage/flow, and energized radial
+  ///    topology are part of the same stage MILP as the AC network.
+  ///  - LCC converters and multi-port energy routers are outside this linear
+  ///    stage model; their presence clears `ok` and the physical-validity flags.
   ///  - The default N-1 contingency set enumerates in-service ACBranch and
   ///    DCBranch outages. Generator, two-winding transformer, VSC/DC-DC, and
   ///    switch/breaker faults are opt-in; DER, storage, and microgrid source
@@ -184,15 +185,13 @@ struct ThreeStageReliabilityResult {
   std::string model_limitations;
 
   /// Structured model-capability declaration.  Pure AC systems report
-  /// "ac-lindistflow-milp".  Hybrid systems report
-  /// "ac-lindistflow-milp+dc-connectivity-fallback" because DC/VSC/SOP
-  /// physics are not co-optimised in the restoration MILP.
-  std::string model_scope{"ac-lindistflow-milp+dc-connectivity-fallback"};
+  /// "ac-lindistflow-milp". Hybrid systems in the default physical scope
+  /// report "coupled-acdc-lindistflow-restoration-milp".
+  std::string model_scope{"coupled-acdc-lindistflow-restoration-milp"};
 
   /// Per-feature validity flags so downstream code can branch on whether a
   /// given physical constraint was actually enforced for the whole reported
-  /// system.  AC-only runs set branch/voltage/radial/restoration flags true;
-  /// hybrid runs keep them false because the DC/VSC/SOP portion is fallback-only.
+  /// system.
   struct ValidityFlags {
     bool branch_flow_enforced{false};
     bool voltage_constraints_enforced{false};
@@ -249,24 +248,21 @@ struct ThreeStageReliabilityOptions {
   /// controls whether their outages are added to the contingency set.
   bool include_transformer_faults{false};
 
-  /// Include VSC and DC-DC converter outage contingencies.  A faulted converter
-  /// is removed from the DC connectivity/capacity fallback for the event (its
-  /// AC<->DC or DC<->DC coupling and transfer capacity are lost), so DC loads
-  /// that depend on it are shed.  Default off preserves the branch-only model.
+  /// Include VSC and DC-DC converter outage contingencies. A faulted converter
+  /// is removed from the coupled stage balance and loses its voltage-forming
+  /// role for the event. Default off preserves the branch-only set.
   bool include_converter_faults{false};
 
   /// Include AC switch and AC/DC circuit-breaker outage contingencies.  A
   /// faulted AC switch/breaker edge is forced open in all three stages (like a
-  /// faulted branch); a faulted DC breaker is dropped from the DC connectivity
-  /// fallback.  Default off preserves the branch-only model.
+  /// faulted branch); a faulted DC breaker is forced open in the DC topology
+  /// and power-flow constraints. Default off preserves the branch-only model.
   bool include_switch_faults{false};
 
-  /// Use a DC LinDistFlow power flow for the DC subnetwork (per-bus voltage
-  /// bounds v in [vmin^2, vmax^2], resistive branch drop v_j = v_i - 2 r P, and
-  /// per-branch thermal limits), coupled to the AC MILP through per-component VSC
-  /// transfer budgets.  Default **on**: hybrid runs are physics-based by default,
-  /// and the aggregate capacity fallback is used automatically only if the DC LP
-  /// fails to solve.  Set false to force the legacy capacity-only fallback.
+  /// Include DC LinDistFlow, DC energized radial topology, bidirectional VSC /
+  /// DC-DC efficiency, and DC DER/storage in the same stage MILP as AC. Default
+  /// **on**. A solve failure is explicit and never silently falls back. Set
+  /// false only to request the legacy capacity-only diagnostic path.
   bool include_dc_power_flow{true};
 
   /// Evaluate independent contingencies concurrently. The automatic worker

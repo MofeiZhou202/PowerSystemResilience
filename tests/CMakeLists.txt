@@ -563,6 +563,13 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
     set_tests_properties(reliability_workflow_e2e PROPERTIES
       LABELS "gui;e2e;browser;reliability;workflow" TIMEOUT 180)
 
+    add_test(NAME reliability_dimension_validation_e2e
+      COMMAND "${HACDCPF_NODE_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/tests/e2e/reliability_dimension_validation_e2e.mjs"
+              --server "$<TARGET_FILE:run_gui_server>")
+    set_tests_properties(reliability_dimension_validation_e2e PROPERTIES
+      LABELS "gui;e2e;reliability;physical;information;intelligent" TIMEOUT 180)
+
     add_test(NAME market_gui_e2e
       COMMAND "${HACDCPF_NODE_EXECUTABLE}"
               "${CMAKE_SOURCE_DIR}/tests/e2e/market_gui_e2e.mjs"

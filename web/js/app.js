@@ -18283,12 +18283,12 @@ const App = (() => {
 	        boundary: '仅发电充裕度；不提供网络故障、DC 后果、EENS 或客户停电指标。',
 	      },
 	      three_stage: {
-	        title: '三阶段恢复 MILP（隔离、重构、修复）',
+	        title: '三阶段 AC/DC 联合恢复 MILP（隔离、重构、修复）',
 	        formula: 'EENS = sum_k lambda_k · sum_s S_k,s tau_k,s',
 	        sampling: '确定性枚举启用范围内的线路及可选设备 N-1 故障。',
-	        consequence: '阶段 1 隔离、阶段 2 开关重构、阶段 3 修复窗口分别计算切负荷。',
+	        consequence: '每个阶段联合求解 AC/DC 节点平衡、电压、径向拓扑、双向换流、DER 与储能切负荷。',
 	        aggregation: '按元件故障率加权各阶段未供电量，输出故障、节点和系统指标。',
-	        boundary: 'DC 可采用线性潮流或显式容量回退；设备故障覆盖受勾选范围约束。',
+	        boundary: '默认采用耦合 LinDistFlow；仅用户关闭三阶段 DC 潮流时使用并明确标记容量回退。',
 	      },
 	    };
 
@@ -18405,6 +18405,7 @@ const App = (() => {
 	      };
 	      append(data?.model_limitations);
 	      append(data?.reliability_configuration?.limitation);
+	      append(data?.der_control?.limitations);
 	      const unsupported = Number(data?.failure_mode_coverage?.modes_unsupported || 0);
 	      if (unsupported > 0) items.push(`${unsupported} 个失效模式未由当前稳态后果模型表达`);
 	      const invalidFlags = Object.entries(data?.validity || {})
@@ -18803,10 +18804,10 @@ const App = (() => {
 	    async function runReliability(options = {}) {
 	      beginReliabilityWorkflow();
 	      setStatus('可靠性分析中...', 'busy');
-	      if (!await syncToBackend(true)) {
+	      if (!options.skipSync && !await syncToBackend(true)) {
 	        setStatus('同步失败', 'error');
 	        failReliabilityWorkflow('configuration', '当前模型同步到后端失败');
-	        return;
+	        return null;
 	      }
 	      if (_reliabilityConfigurationDirty &&
 	          !await saveReliabilityConfiguration({ quiet: true })) {
@@ -18841,14 +18842,17 @@ const App = (() => {
 	      const hasModeConfiguration = (configured?.mode_overrides || []).length > 0 ||
 	        (configured?.protection || []).length > 0;
 	      const methodInput = document.getElementById('relMethod');
-	      if (hasModeConfiguration && methodInput?.value !== 'failure_mode_fmea') {
+	      if (!options.methodOverride && hasModeConfiguration &&
+	          methodInput?.value !== 'failure_mode_fmea') {
 	        methodInput.value = 'failure_mode_fmea';
 	        changeReliabilityMethod();
 	        log('已按当前元件/保护配置切换到失效模式 FMEA', 'info');
 	      }
-	      const selectedMethod = methodInput?.value || 'nsq';
-	      const physicalModel = (document.getElementById('relPhysicalModel')?.value) || 'auto';
-	      const method = physicalModel === 'restoration_milp' ? 'three_stage' : selectedMethod;
+	      const selectedMethod = options.methodOverride || methodInput?.value || 'nsq';
+	      const physicalModel = options.physicalModelOverride ||
+	        ((document.getElementById('relPhysicalModel')?.value) || 'auto');
+	      const method = selectedMethod === 'three_stage' || physicalModel === 'restoration_milp'
+	        ? 'three_stage' : selectedMethod;
 	      const maxIter = parseInt(document.getElementById('relMaxIter')?.value) || 2000;
 	      const metricFocus = (document.getElementById('relMetricFocus')?.value) || 'all';
 	      const weakBasis = (document.getElementById('relWeakBasis')?.value) || 'auto';
@@ -18937,7 +18941,7 @@ const App = (() => {
 	        reliability_template: (document.getElementById('relTemplate')?.value) || 'none',
 	        load: {
 	          scale_factor: physicalLoadScale,
-	          hours_per_year: 8736,
+	          hours_per_year: 8760,
 	          profile_factors: method === 'seq' && seqProfileText.trim() ? seqProfile : [],
 	          spatial_factors: method === 'seq' ? seqSpatialFactors : [],
 	        },
@@ -18980,6 +18984,11 @@ const App = (() => {
 	        },
 	        max_order: (document.getElementById('relFmN2')?.checked ? 2 : 1),
 	        dimensions: {
+	          der_control: {
+	            scenario: document.getElementById('relDerControlScenario')?.value || 'authored',
+	            black_start_enabled:
+	              document.getElementById('relDerBlackStart')?.checked !== false,
+	          },
 	          physical: {
 	            load_scale_factor: physicalLoadScale,
 	            switching_time_hr: physicalSwitchMinutes / 60,
@@ -19021,15 +19030,151 @@ const App = (() => {
 	      if (data && !data.error) {
 	        data._metric_focus = metricFocus;
 	        data._weak_basis = weakBasis;
+	        if (options.returnData) return data;
 	        _lastReliabilityData = Object.assign({ _method: method }, data);
 	        completeReliabilityWorkflow(data);
 	        showReliabilityResults(data, method);
         switchTab('results');
         setStatus('可靠性分析完成');
+        return data;
       } else {
         setStatus('计算失败', 'error');
 	        failReliabilityWorkflow('solution', data?.error || '后端可靠性计算未返回有效结果');
+	        return null;
 	      }
+	    }
+
+	    function reliabilityComparisonSnapshot(data, method, sequence) {
+	      return {
+	        comparison_id: `${method}:${data?.der_control?.scenario || 'authored'}:${sequence}`,
+	        method,
+	        model_scope: data?.model_scope || 'unspecified',
+	        converged: data?.converged !== false && data?.ok !== false,
+	        metrics: data?.metrics || {},
+	        comparison_basis: data?.comparison_basis || {},
+	        der_control: data?.der_control || {},
+	        critical_components: Array.isArray(data?.critical_components)
+	          ? data.critical_components : [],
+	        contingencies: Array.isArray(data?.contingencies)
+	          ? data.contingencies : [],
+	        faults: Array.isArray(data?.faults) ? data.faults : [],
+	      };
+	    }
+
+	    function showReliabilityComparisonResults(data) {
+	      document.getElementById('resultsEmpty').style.display = 'none';
+	      document.getElementById('resultsContent').style.display = 'block';
+	      setActiveResultGroup('reliability');
+	      const methodLabel = {
+	        nsq: '非序贯 MC', seq: '序贯 MC', fmea: '元件 FMEA',
+	        failure_mode_fmea: '失效模式 FMEA', fd: 'F&D',
+	        three_stage: '三阶段恢复',
+	      };
+	      const metricLabel = {
+	        eens_mwh_yr: 'EENS (MWh/yr)', edns_mw: 'EDNS (MW)',
+	        lole_hr_yr: 'LOLE (h/yr)', lolf_occ_yr: 'LOLF (occ/yr)',
+	        saifi: 'SAIFI', saidi: 'SAIDI', caidi: 'CAIDI', asai: 'ASAI', plc: 'PLC',
+	      };
+	      const nf = (value, digits = 4) => Number.isFinite(Number(value))
+	        ? Number(value).toFixed(digits) : '—';
+	      const methods = Array.isArray(data?.methods) ? data.methods : [];
+	      let html = '<div style="margin-bottom:8px;"><b>同快照算法稳健性对比</b> · ' +
+	        (data?.comparison_basis_verified ? '计算基准已校验' : '计算基准未完全校验') + '</div>';
+	      html += '<table><thead><tr><th>算法</th><th>DER 场景</th><th>后果模型范围</th><th>可排序元件</th><th>状态</th></tr></thead><tbody>';
+	      methods.forEach(row => {
+	        html += `<tr><td>${escapeHtml(methodLabel[row.method] || row.method)}</td>` +
+	          `<td>${escapeHtml(row.der_control_scenario || 'authored')}</td>` +
+	          `<td>${escapeHtml(row.model_scope || '—')}</td>` +
+	          `<td>${escapeHtml(String(row.ranked_component_count ?? 0))}</td>` +
+	          `<td>${row.converged === false ? '未收敛/失败' : '完成'}</td></tr>`;
+	      });
+	      html += '</tbody></table>';
+
+	      html += '<h4 style="margin:12px 0 4px;">关键指标离散度</h4>' +
+	        '<table><thead><tr><th>指标</th><th>方法数</th><th>最小</th><th>中位数</th><th>最大</th><th>变异系数</th><th>归一化极差</th></tr></thead><tbody>';
+	      Object.entries(data?.metric_robustness || {}).forEach(([key, row]) => {
+	        if (!row?.available) {
+	          html += `<tr><td>${escapeHtml(metricLabel[key] || key)}</td><td colspan="6" title="${escapeAttr(row?.reason || '')}">不可比</td></tr>`;
+	          return;
+	        }
+	        html += `<tr><td>${escapeHtml(metricLabel[key] || key)}</td>` +
+	          `<td>${row.method_count}</td><td>${nf(row.minimum)}</td>` +
+	          `<td>${nf(row.median)}</td><td>${nf(row.maximum)}</td>` +
+	          `<td>${nf(row.coefficient_of_variation)}</td>` +
+	          `<td>${nf(row.normalized_range)}</td></tr>`;
+	      });
+	      html += '</tbody></table>';
+
+	      html += '<h4 style="margin:12px 0 4px;">薄弱环节排序一致性</h4>' +
+	        '<table><thead><tr><th>算法 A</th><th>算法 B</th><th>共同元件</th><th>Spearman</th><th>Top-k Jaccard</th></tr></thead><tbody>';
+	      (data?.rank_agreement || []).forEach(row => {
+	        html += `<tr><td>${escapeHtml(row.method_a || '')}</td>` +
+	          `<td>${escapeHtml(row.method_b || '')}</td>` +
+	          `<td>${row.common_component_count ?? 0}</td>` +
+	          `<td>${row.spearman_available ? nf(row.spearman, 3) : '不可比'}</td>` +
+	          `<td>${nf(row.top_k_jaccard, 3)}</td></tr>`;
+	      });
+	      html += '</tbody></table>';
+
+	      const consensus = Array.isArray(data?.consensus_weak_components)
+	        ? data.consensus_weak_components : [];
+	      html += '<h4 style="margin:12px 0 4px;">共识薄弱元件</h4>' +
+	        '<table><thead><tr><th>#</th><th>稳定 ID</th><th>元件</th><th>算法覆盖</th><th>平均名次</th><th>倒数排名得分</th></tr></thead><tbody>';
+	      consensus.slice(0, 15).forEach((row, index) => {
+	        html += `<tr><td>${index + 1}</td><td>${escapeHtml(row.stable_id || '')}</td>` +
+	          `<td>${escapeHtml(row.display_name || row.component_kind || '')}</td>` +
+	          `<td>${row.method_appearances}/${methods.length}</td>` +
+	          `<td>${nf(row.mean_rank, 2)}</td>` +
+	          `<td>${nf(row.reciprocal_rank_score, 3)}</td></tr>`;
+	      });
+	      html += '</tbody></table>';
+	      (data?.limitations || []).forEach(text => {
+	        html += `<div class="sub-hint-warn" style="margin-top:6px;">${escapeHtml(text)}</div>`;
+	      });
+	      document.getElementById('reliabilityResults').innerHTML = html;
+	    }
+
+	    async function compareReliabilityAlgorithms() {
+	      const profiles = {
+	        deterministic: ['fmea', 'failure_mode_fmea', 'three_stage'],
+	        monte_carlo: ['nsq', 'seq'],
+	        all: ['nsq', 'seq', 'fmea', 'failure_mode_fmea', 'fd', 'three_stage'],
+	      };
+	      const profile = document.getElementById('relComparisonProfile')?.value || 'deterministic';
+	      const methods = profiles[profile] || profiles.deterministic;
+	      const snapshots = [];
+	      setStatus(`算法对比 0/${methods.length}`, 'busy');
+	      for (let index = 0; index < methods.length; ++index) {
+	        const method = methods[index];
+	        setReliabilityWorkflowRunStatus(`对比 ${index + 1}/${methods.length}: ${method}`, 'running');
+	        const result = await runReliability({
+	          methodOverride: method,
+	          physicalModelOverride: method === 'three_stage' ? 'restoration_milp' : 'auto',
+	          returnData: true,
+	          skipSync: index > 0,
+	          skipParameterCheck: index > 0,
+	        });
+	        if (!result) {
+	          setStatus(`算法对比在 ${method} 失败`, 'error');
+	          return;
+	        }
+	        snapshots.push(reliabilityComparisonSnapshot(result, method, index + 1));
+	        setStatus(`算法对比 ${index + 1}/${methods.length}`, 'busy');
+	      }
+	      const compared = await apiPostResult('/api/session/reliability/compare_results', {
+	        top_k: 5,
+	        results: snapshots,
+	      });
+	      if (!compared?.ok) {
+	        setStatus('算法对比汇总失败', 'error');
+	        log(compared?.data?.error || '可靠性对比接口返回失败', 'error');
+	        return;
+	      }
+	      _lastReliabilityData = Object.assign({ _method: 'comparison' }, compared.data);
+	      showReliabilityComparisonResults(compared.data);
+	      switchTab('results');
+	      setReliabilityWorkflowRunStatus('算法对比完成', 'complete');
+	      setStatus('可靠性算法稳健性对比完成');
 	    }
 
 	    function relMetricValue(data, key) {
@@ -19349,7 +19494,22 @@ const App = (() => {
           vkeys.forEach(k => { if (typeof v[k] === 'boolean') h += relScopeBadge(k.replace(/_/g, ' '), v[k]); });
         }
       }
-      if (v.generation_adequacy_only) h += '<br>' + relScopeBadge('仅发电充裕度 — 无网络/DC/用户指标', false);
+	      if (v.generation_adequacy_only) h += '<br>' + relScopeBadge('仅发电充裕度 — 无网络/DC/用户指标', false);
+	      const coverage = data.component_coverage;
+	      if (coverage && typeof coverage === 'object') {
+	        const labels = {
+	          ac_network: 'AC网络', dc_network: 'DC网络', vsc: 'VSC', dcdc: 'DC-DC',
+	          ac_der: 'AC DER', dc_der: 'DC DER', mobile_storage: '移动储能',
+	          vpp: 'VPP', storage: 'AC/移动/DC储能', lcc: 'LCC',
+	          energy_router: '能量路由器', protection: '保护恢复',
+	        };
+	        h += '<br><b>模型覆盖：</b>';
+	        Object.keys(labels).forEach(key => {
+	          const state = String(coverage[key] || '');
+	          if (!state || state === 'not_present') return;
+	          h += relScopeBadge(labels[key], !state.startsWith('unsupported'));
+	        });
+	      }
 	      const dq = data.data_quality;
 	      if (dq) {
 	        h += `<br><b>数据质量：</b>${dq.components_with_reliability_data}/${dq.components_total} 含用例数据，${dq.components_defaulted} 默认值`;
@@ -19561,6 +19721,42 @@ const App = (() => {
 	      return html ? renderReliabilityPanel('元件建模', html) : '';
 	    }
 
+	    function renderReliabilityDerControlHtml(data) {
+	      const audit = data?.der_control;
+	      if (!audit) return '';
+	      const scenarioLabels = {
+	        authored: '元件原始配置',
+	        force_grid_following: '全部跟网 (GFL)',
+	        promote_grid_forming: '可控 DER 构网 (GFM)',
+	      };
+	      let html = '<table><tbody>' +
+	        `<tr><td>控制场景</td><td>${escapeHtml(scenarioLabels[audit.scenario] || audit.scenario || '—')}</td></tr>` +
+	        `<tr><td>DER / VSC 数量</td><td>${audit.device_count ?? 0}</td></tr>` +
+	        `<tr><td>可提升设备</td><td>${audit.eligible_device_count ?? 0}</td></tr>` +
+	        `<tr><td>构网数量（原始 → 有效）</td><td>${audit.authored_grid_forming_count ?? 0} → ${audit.effective_grid_forming_count ?? 0}</td></tr>` +
+	        `<tr><td>黑启动计入</td><td>${audit.black_start_enabled === false ? '否' : '是'}</td></tr>` +
+	        '</tbody></table>';
+	      const devices = Array.isArray(audit.devices) ? audit.devices : [];
+	      if (devices.length) {
+	        html += '<div class="rel-der-audit-table"><table><thead><tr><th>稳定 ID</th><th>元件</th><th>原始</th><th>有效</th><th>参考能力</th></tr></thead><tbody>';
+	        devices.forEach(row => {
+	          const references = [row.ac_frequency_reference ? 'AC频率' : '',
+	            row.ac_voltage_reference ? 'AC电压' : '', row.dc_voltage_reference ? 'DC电压' : '',
+	            row.black_start_credited ? '黑启动' : ''].filter(Boolean).join(' / ') || '依附电网';
+	          html += `<tr><td>${escapeHtml(row.stable_id || '')}</td>` +
+	            `<td>${escapeHtml(row.component_name || row.component_kind || '')}</td>` +
+	            `<td>${row.authored_role === 'grid_forming' ? 'GFM' : 'GFL'}</td>` +
+	            `<td>${row.effective_role === 'grid_forming' ? 'GFM' : 'GFL'}</td>` +
+	            `<td>${escapeHtml(references)}</td></tr>`;
+	        });
+	        html += '</tbody></table></div>';
+	      }
+	      (audit.limitations || []).forEach(text => {
+	        html += `<div class="sub-hint-warn" style="margin-top:6px;">${escapeHtml(text)}</div>`;
+	      });
+	      return renderReliabilityPanel('DER 控制方式与孤岛能力', html);
+	    }
+
 	    function renderReliabilityProtectionModelHtml(data) {
 	      const model = data?.protection_model;
 	      if (!model) return '';
@@ -19635,7 +19831,8 @@ const App = (() => {
 		      html += renderReliabilityKpiTiles(data, method);
 		      html += renderReliabilityBaselineAuditHtml(data);
 		      html += renderReliabilityDashboardShell(data, method);
-		      html += renderReliabilityComponentModelHtml(data);
+	      html += renderReliabilityComponentModelHtml(data);
+	      html += renderReliabilityDerControlHtml(data);
 		      html += renderFailureModeCoverageHtml(data);
 		      html += renderFailureModeLegendHtml(data);
 		      html += renderReliabilitySelectionHtml(data, method);
@@ -19903,6 +20100,8 @@ const App = (() => {
 	      }
 	    });
 	    document.getElementById('btnRunReliability')?.addEventListener('click', () => runReliability());
+	    document.getElementById('btnCompareReliability')?.addEventListener(
+	      'click', compareReliabilityAlgorithms);
 	    document.getElementById('btnRelApplyParameters')?.addEventListener('click', applyReliabilityParametersAndRun);
     document.getElementById('btnExportReliabilityResults')?.addEventListener('click', () => {
       if (!_lastReliabilityData) {

@@ -54,5 +54,10 @@ assert.match(html, /id="relDetectionSuccess"/);
 assert.match(html, /id="relProtectionSuccess"/);
 assert.match(html, /id="relPhysicalGfm"/);
 assert.match(html, /id="relPhysicalBlackStart"/);
+assert.match(html, /id="relDerControlScenario"/);
+assert.match(html, /value="force_grid_following"/);
+assert.match(html, /value="promote_grid_forming"/);
+assert.match(html, /id="relDerBlackStart"/);
+assert.match(html, /id="btnCompareReliability"/);
 
 console.log('reliability control-state contract passed');

@@ -571,8 +571,7 @@ economic objective value.
 |---|---|---|---|
 | AC DC-OPF | AC-only MC and FMEA | $P=B\theta$, nodal balance, source and branch limits, load shed | no voltage magnitude or reactive feasibility |
 | Hybrid AC/DC network LP | hybrid MC, component FMEA, failure-mode FMEA | AC angle-flow equations; DC balances; bounded VSC/DC-DC transfer; storage/DER sources | DC transfer is linear and steady-state; no nonlinear AC validation |
-| AC LinDistFlow restoration MILP | three-stage model | active/reactive balance, squared voltage, radial forest, switch decisions, storage | linearized losses; AC formulation |
-| DC LinDistFlow LP | three-stage hybrid path | resistive voltage drop, DC voltage and line limits, bounded VSC support | falls back to capacity/connectivity if solve fails |
+| Coupled AC/DC LinDistFlow restoration MILP | three-stage model | AC active/reactive and DC active balance, domain-specific squared voltage, radial forests, switch decisions, bidirectional VSC/DC-DC transfer, DER and storage chronology | linearized losses; LCC and multi-port energy routers are rejected as outside scope |
 
 All public result objects expose `model_scope`, `model_limitations`, and/or
 validity flags. These declarations are part of the mathematical result and must
@@ -1125,10 +1124,12 @@ $$
 
 ### 10.2 AC LinDistFlow restoration MILP
 
-For each stage, the model minimizes active load shed:
+For each stage, the joint model minimizes AC and DC active load shed:
 
 $$
-\min \sum_{i\in\mathcal B^{ac}} w_i p_i^{sh}+10^{-8}\sum_b p_b^{st}.
+\min \sum_{i\in\mathcal B^{ac}} w_i p_i^{sh}
++\sum_{d\in\mathcal B^{dc}} w_d p_d^{sh}
++10^{-8}\left(\sum_b p_b^{st}+\sum_c p_c^{conv}\right).
 $$
 
 The storage term only breaks dispatch degeneracy and preserves energy when
@@ -1250,17 +1251,24 @@ $$
 E_{b,s+1}=E_{b,s}-p_{b,s}^{st}\Delta t_s,
 $$
 
-with discharge bounded by rating and remaining deliverable energy. Stage 3 is
+with discharge bounded by rating and remaining deliverable energy. The same
+chronology is enforced for stationary AC storage, deployed/stationary mobile
+storage, and DC storage in the stable solver order
+`[AC Storage | MobileStorage | DC Storage]`. `InTransit` mobile storage has zero
+electrical availability and is not enumerated as an available-source outage.
+Stage 3 is
 re-solved only when needed to enforce changed storage-energy limits; otherwise
 the exact accepted Stage-2 topology/solution can be reused because physical
 topology and demand are unchanged.
 
-### 10.5 DC LinDistFlow coupling
+### 10.5 Coupled DC LinDistFlow, converters, and DC DER
 
-The default hybrid path solves a DC LP with
+The default hybrid path builds the DC network in the same stage MILP as the AC
+network. AC and DC bus maps are domain-qualified, so equal numeric bus IDs do
+not alias. For each DC branch,
 
 $$
-v_e=v_d-2r_{de}P_{de},
+v_e-v_d+\frac{2r_{de}}{S_{base}^{dc}}P_{de}=0
 $$
 
 $$
@@ -1268,10 +1276,45 @@ $$
 \qquad |P_{de}|\le\overline P_{de},
 $$
 
-and per-bus balance including DC sources, shed, bounded DC/DC transfers, and VSC
-injections. VSC transfer is capped by converter rating and available AC-side
-surplus. If the DC LP cannot be solved, a connectivity/capacity fallback is used
-and the scope flags disclose that fallback.
+subject to branch-state Big-M relaxation, energized-endpoint constraints, and a
+strict DC radial forest. Parallel physical DC circuits retain separate flow and
+rating constraints but share one topological corridor variable.
+
+For a VSC with AC-to-DC transfer $p_v^+$, DC-to-AC transfer $p_v^-$, and
+constant efficiency $\eta_v$,
+
+$$
+P_v^{ac}=-p_v^+ + \eta_v p_v^-,\qquad
+P_v^{dc}=\eta_v p_v^+ - p_v^- ,
+$$
+
+$$
+0\le p_v^+,p_v^-\le \overline P_v.
+$$
+
+The small positive transfer cost removes simultaneous counter-flow degeneracy.
+`psop` reports $1000(p_v^+-p_v^-)$ in kW. DC-DC converters use the analogous
+two-direction formulation at their input/output DC buses. DC static generators,
+DC-compatible static generators, PV arrays, and storage enter the DC balance
+with device outage, power, voltage-root, and energy constraints as applicable.
+
+AC DER covers synchronous generators, static generators, renewable generators,
+PV, stationary and mobile storage, microgrid residual aggregates, and VPP PCC
+boundary aggregates. Device Q bounds are used where the component model exposes
+them. VPP active capacity uses `pmax_mw` when present, then falls back to
+`p_generation_sum_mw` and `p_output_mw`. A VPP has no stable member-reference
+list in the current data model, so it
+is deliberately treated as one independent boundary injection rather than
+silently expanding or double-counting inferred members.
+
+The solver does not silently fall back after a failed coupled MILP. A failed or
+approximate stage clears `ok`. The legacy connectivity/capacity fallback is
+used only when `include_dc_power_flow=false`, and that explicit user choice
+clears the physical-validity flags. LCC converters and multi-port energy routers
+remain rejected because their commutation and port-balance equations are not
+equivalent to VSC equations. Converter standby/quadratic loss, nonlinear AC
+apparent-power circles, DC-DC duty-ratio voltage conversion, and quadratic line
+losses remain outside this linear reliability model.
 
 ### 10.6 Frequency weighting and N-0 qualification
 
@@ -3976,7 +4019,65 @@ restoration, protection, communication redundancy, local DER autonomy, and
 microgrid endurance. This separates an attractive automation feature from an
 actual reliability improvement.
 
-## 28. Overall assessment
+## 28. Implemented DER control sensitivity and method robustness
+
+The unified reliability route accepts `dimensions.der_control` and applies it
+to a private calculation copy, never to the authored session model. Three
+implemented scenarios are available:
+
+| Scenario | Runtime treatment |
+|---|---|
+| `authored` | Keep every component's submitted GFL/GFM role. |
+| `force_grid_following` | Remove AC/DC voltage-reference credit from DER and VSC resources; an AC-grid-forming VSC control mode is reduced to PQ for this sensitivity run. |
+| `promote_grid_forming` | Promote eligible controllable AC DER and VSC resources to GFM; unsupported VSC dual-side forming is not invented without its energy-buffer gate. |
+
+Each result returns a `der_control` audit keyed by stable component identity.
+It reports authored/effective role, promotion eligibility, anti-islanding,
+AC-frequency, AC-voltage, DC-voltage and black-start credit where defined. GFL
+resources remain injections inside an already energized island. GFM resources
+may provide the island reference only within the selected consequence engine's
+power, energy, topology and control-availability constraints.
+
+`black_start_enabled=false` removes explicit FMEA storage black-start credit.
+Some deterministic engines still store GFM and black-start as one composite
+component flag. The result therefore carries an explicit limitation rather
+than claiming that live-island voltage forming and dead-island energization are
+fully separated. Transient synchronization, current limiting, relay/FRT
+trajectories and inverter stability remain outside this sensitivity model.
+
+The GUI can run NSQ, SEQ, component FMEA, failure-mode FMEA, F&D and three-stage
+restoration from the same model snapshot. A comparison request carries a
+deterministic system fingerprint plus data policy, load scale, reporting hours,
+DER scenario and black-start setting. The backend rejects results whose
+declared bases differ. The GUI default reporting horizon is 8760 hours for all
+methods; unavailable metrics remain unavailable and are never converted to
+zero.
+
+For a metric $y$ returned by at least two methods, the comparison reports
+
+$$
+\bar y=\frac{1}{M}\sum_m y_m,\qquad
+CV=\frac{\sqrt{M^{-1}\sum_m(y_m-\bar y)^2}}{|\bar y|},\qquad
+R_n=\frac{\max y_m-\min y_m}{\max(|\operatorname{median}(y)|,10^{-12})}.
+$$
+
+These values describe method/model-scope sensitivity, not a confidence
+interval. Weak-component rows are first aggregated from failure modes to stable
+component IDs. Pairwise agreement then uses Spearman correlation on the common
+ranked components and top-$k$ Jaccard overlap
+
+$$
+J_k(A,B)=\frac{|T_k(A)\cap T_k(B)|}{|T_k(A)\cup T_k(B)|}.
+$$
+
+No Spearman value is emitted with fewer than two common, non-constant ranks.
+The consensus table orders components by method appearances and reciprocal-rank
+score $\sum_m 1/r_{m,c}$, and reports mean rank and method coverage. This keeps
+Monte Carlo co-outage attribution visibly distinct from deterministic FMEA
+frequency-times-consequence importance while still exposing stable and
+method-sensitive weak links.
+
+## 29. Overall assessment
 
 The present reliability module has a strong reusable base: current parameter
 semantics are unified; Monte Carlo supports hybrid consequences; staged FMEA
@@ -4029,7 +4130,7 @@ keeps the assessment physically meaningful and prevents algorithm accuracy or
 communication availability from being mistaken for delivered customer
 reliability.
 
-## 29. Source cross-reference
+## 30. Source cross-reference
 
 - Parameter, Monte Carlo, COPT, customer indices, component FMEA, Level-1 cyber
   conditioning, and physical consequence engines:

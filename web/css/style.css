@@ -3719,6 +3719,26 @@ tr.topo-clickable:focus-visible {
   flex: 1 1 620px;
   border-left-color: #e5c07b;
 }
+.rel-der-control-group {
+  flex: 0 1 520px;
+  border-left: 3px solid var(--status-success);
+}
+.rel-der-audit-table {
+  max-height: 230px;
+  margin-top: 8px;
+  overflow: auto;
+  border: 1px solid var(--sub-bar-border);
+}
+.rel-der-audit-table table {
+  width: 100%;
+  min-width: 620px;
+  border-collapse: collapse;
+}
+.rel-der-audit-table th {
+  position: sticky;
+  top: 0;
+  background: var(--sub-bar-bg);
+}
 .rel-dimension-information .rel-param-title { color: #56b6c2; }
 .rel-dimension-intelligent .rel-param-title { color: #e5c07b; }
 .reliability-dimension-audit {

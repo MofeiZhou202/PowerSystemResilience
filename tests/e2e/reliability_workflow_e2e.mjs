@@ -156,6 +156,48 @@ async function main() {
 
     const reliabilityBase = await request(base, '/api/session/run_reliability',
       failureModeRequest());
+    assert(physicalBase.der_control?.scenario === 'authored' &&
+      Number(physicalBase.der_control?.device_count) > 0 &&
+      Array.isArray(physicalBase.der_control?.devices),
+    'reliability result does not expose the per-device DER control audit');
+    const comparison = await request(base, '/api/session/reliability/compare_results', {
+      top_k: 5,
+      results: [
+        {
+          comparison_id: 'fmea:authored',
+          method: 'fmea',
+          model_scope: physicalBase.model_scope,
+          comparison_basis: physicalBase.comparison_basis,
+          metrics: physicalBase.metrics,
+          der_control: physicalBase.der_control,
+          contingencies: physicalBase.contingencies,
+        },
+        {
+          comparison_id: 'failure_mode_fmea:authored',
+          method: 'failure_mode_fmea',
+          model_scope: reliabilityBase.model_scope,
+          comparison_basis: reliabilityBase.comparison_basis,
+          metrics: reliabilityBase.metrics,
+          der_control: reliabilityBase.der_control,
+          contingencies: reliabilityBase.contingencies,
+        },
+      ],
+    });
+    const eensRobustness = comparison.metric_robustness?.eens_mwh_yr;
+    assert(comparison.comparison_basis_verified === true &&
+      eensRobustness?.available === true &&
+      Number(eensRobustness.method_count) === 2 &&
+      Number(eensRobustness.normalized_range) >= 0,
+    'same-snapshot EENS robustness summary is incomplete');
+    assert((comparison.rank_agreement || []).every(row =>
+      (row.spearman === null ||
+        (Number(row.spearman) >= -1 && Number(row.spearman) <= 1)) &&
+      (row.top_k_jaccard === null ||
+        (Number(row.top_k_jaccard) >= 0 && Number(row.top_k_jaccard) <= 1))),
+    'rank-agreement statistics are outside mathematical bounds');
+    assert((comparison.consensus_weak_components || []).every(row =>
+      typeof row.stable_id === 'string' && row.stable_id.includes(':')),
+    'consensus weak components are not keyed by stable component identity');
     const dominantMode = (reliabilityBase.contingencies || []).find(row =>
       row.supported !== false && row.activation === 'passive' &&
       Number(row.eens_contribution) > 0 && Number(row.frequency_per_year) > 0);
@@ -203,11 +245,20 @@ async function main() {
       execution: { parallel: false },
       restoration: { parallel: false },
     });
-    assert(hybridThreeStage.ok === false &&
-      String(hybridThreeStage.error_detail || '').includes('connectivity fallback') &&
-      hybridThreeStage.validity?.restoration_milp_solved === false &&
+    assert(hybridThreeStage.ok === true &&
+      hybridThreeStage.model_scope === 'coupled-acdc-lindistflow-restoration-milp' &&
+      hybridThreeStage.validity?.restoration_milp_solved === true &&
+      hybridThreeStage.validity?.branch_flow_enforced === true &&
+      hybridThreeStage.validity?.voltage_constraints_enforced === true &&
+      hybridThreeStage.validity?.radial_topology_enforced === true &&
+      hybridThreeStage.validity?.sop_dispatch_optimised === true &&
+      hybridThreeStage.component_coverage?.dc_der === 'static_generator_pv_storage_dispatch' &&
+      (hybridThreeStage.faults || []).every(f =>
+        Array.isArray(f.vsc_dispatch_kw?.stage1) &&
+        Array.isArray(f.vsc_dispatch_kw?.stage2) &&
+        Array.isArray(f.vsc_dispatch_kw?.stage3)) &&
       (hybridThreeStage.faults || []).length > 0,
-    'Dist33 DER hybrid three-stage boundary was not returned as a completed limited result');
+    'Dist33 DER hybrid three-stage coupled-model contract is incomplete');
 
     await request(base, '/api/session/load_builtin', { case: 'dist33_tie_demo' });
     const acThreeStage = await request(base, '/api/session/run_reliability', {
@@ -233,6 +284,10 @@ async function main() {
       document.getElementById('relWorkflowComponents')?.textContent !== '待同步');
     assert(await page.locator('#relWorkflowStages > li').count() === 5,
       'reliability workflow does not expose five stages');
+    assert(await page.locator('#relDerControlScenario').count() === 1 &&
+      await page.locator('#relDerBlackStart').count() === 1 &&
+      await page.locator('#btnCompareReliability').count() === 1,
+    'DER control or reliability-comparison GUI controls are missing');
 
     const principleChecks = [
       ['nsq', '独立状态抽样'],
@@ -247,7 +302,7 @@ async function main() {
         `${method} calculation principle did not update`);
     }
     await page.locator('#relPhysicalModel').selectOption('restoration_milp');
-    assert((await page.locator('#relPrincipleMethod').textContent())?.includes('三阶段恢复 MILP'),
+    assert((await page.locator('#relPrincipleMethod').textContent())?.includes('三阶段 AC/DC 联合恢复 MILP'),
       'restoration consequence model did not switch the displayed principle');
 
     await page.locator('#relPhysicalModel').selectOption('auto');
@@ -308,6 +363,8 @@ async function main() {
         metric(informationUnavailable, 'eens_mwh_yr')],
       reliability_eens: [metric(reliabilityBase, 'eens_mwh_yr'),
         metric(reliabilityStressed, 'eens_mwh_yr')],
+      comparison_eens_normalized_range: eensRobustness.normalized_range,
+      comparison_consensus_count: comparison.consensus_weak_components?.length || 0,
       dist33_hybrid_three_stage_ok: hybridThreeStage.ok,
       dist33_ac_three_stage_ok: acThreeStage.ok,
       workflow_states: workflow.states,
