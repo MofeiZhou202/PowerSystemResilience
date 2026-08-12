@@ -2277,19 +2277,61 @@
                 out.bc_stats.status = out.stats.status;
                 break;
               }
-              // Non-deadline hard-LP outcome (e.g. the dual simplex exhausting
-              // its anti-cycling ladder on a numerically degenerate node, or an
-              // iteration-limit stop): this OPTIONAL reduced-cost / certificate
-              // resolve could not reach optimality. Abandoning the whole tree
-              // search here would forfeit every other queued node, so instead
-              // skip the resolve and branch on `cur` with its existing valid
-              // relaxation and bound. cur.bound remains a sound lower bound and
-              // the learned conflicts/cuts stay in the global pools for the
-              // children; only this one node is left un-tightened. Control falls
-              // through to the lp_refresh_needed = false reset below, so the
-              // node is branched (not re-queued for a resolve that would fail
-              // identically). node_sf is a scratch buffer rebuilt before its
-              // next use, so leaving it in replay_node's form is harmless.
+              // The dual simplex could not solve this reduced-cost / certificate
+              // resolve LP (e.g. it exhausted its anti-cycling ladder on a
+              // numerically degenerate node — MIPLIB3 blend2/misc03 have node
+              // LPs the simplex cannot pivot to optimality). The interior-point
+              // method does not cycle, so retry the cut-augmented node LP with
+              // the IPM before giving up, reusing the same ipm_cut_solver +
+              // build_node_lp_with_local_cuts bound pattern the pool-cut resolve
+              // below uses. A converged IPM solve yields an audited node bound
+              // and a relaxation point to branch on.
+              apply_tree_ipm_deadline(ipm_cut_solver);
+              LPModel ipm_resolve_lp =
+                  build_node_lp_with_local_cuts(replay_node);
+              auto ipm_resolve_res =
+                  ipm_cut_solver.solve_lp(ipm_resolve_lp, cur.x_relax);
+              ++out.bc_stats.lp_solves;
+              ++out.bc_stats.rc_fixing_resolve_lps;
+              if (ipm_resolve_res.stats.success &&
+                  ipm_resolve_res.x.size() == n &&
+                  std::isfinite(ipm_resolve_res.stats.objective)) {
+                const double old_bound = cur.bound;
+                cur = std::move(replay_node);
+                cur.fractional_branchables_valid = false;
+                cur.x_relax =
+                    clamp_to_bounds(ipm_resolve_res.x, cur.lb, cur.ub);
+                cur.x_seed = cur.x_relax;
+                cur.bound =
+                    std::max(cur.bound, ipm_resolve_res.stats.objective);
+                {
+                  const double lift = std::max(0.0, cur.bound - old_bound);
+                  ++out.bc_stats.rc_proof_resolve_lift_samples;
+                  out.bc_stats.rc_proof_resolve_lift_sum += lift;
+                  out.bc_stats.rc_proof_resolve_lift_max =
+                      std::max(out.bc_stats.rc_proof_resolve_lift_max, lift);
+                }
+                if (cur.bound > old_bound + 1e-7) {
+                  ++out.bc_stats.rc_fixing_resolve_bound_improvements;
+                }
+                if (incumbent_prunes_node(
+                        has_incumbent && std::isfinite(cur_upper_limit),
+                        cur_upper_limit, cur.bound,
+                        std::max(1e-9, opt.lp_tol))) {
+                  ++out.bc_stats.rc_fixing_resolve_prunes;
+                  continue;
+                }
+              }
+              // Neither the simplex nor the IPM solved the resolve LP: skip this
+              // OPTIONAL resolve and branch on `cur` with its existing valid
+              // relaxation and bound rather than abandoning the whole tree
+              // search. On the IPM-success path `cur` already holds the tightened
+              // node; on failure `cur` is unchanged and still sound (cur.bound is
+              // a valid lower bound; learned conflicts/cuts remain in the global
+              // pools for the children). Control falls through to the
+              // lp_refresh_needed = false reset below, so the node is branched
+              // (not re-queued for a resolve that would fail identically). node_sf
+              // is a scratch buffer rebuilt before its next use.
 	        }
 	      } else if (replay_domain_changed &&
 	                 bounds_consistent(replay_node.lb, replay_node.ub)) {
