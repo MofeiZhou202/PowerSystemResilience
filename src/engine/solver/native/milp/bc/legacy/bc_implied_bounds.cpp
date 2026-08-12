@@ -404,6 +404,16 @@ struct NativeImpliedColumnBounds {
   std::uint64_t upper_tightened{0};
 };
 
+// The presolved LPModel represents +/-infinity with the 1e20 sentinel (native
+// MILPPresolve and PaPILO both use kInf=1e20), which std::isfinite treats as a
+// finite bound. Using such a sentinel as a real bound in activity sums causes
+// catastrophic cancellation (1e20 - 1e20) and yields invalid variable bounds
+// (MIPLIB3 blend2: a free-upper column got a 1e20 implied lower bound that
+// produced x177<=2908*x266-2908 instead of the correct x177<=2908*x266).
+inline bool model_finite(double v) {
+  return std::isfinite(v) && std::abs(v) < 1e19;
+}
+
 NativeImpliedColumnBounds compute_implied_column_bounds_from_rows(
     const LPModel& lp,
     int max_passes = 16,
@@ -428,13 +438,13 @@ NativeImpliedColumnBounds compute_implied_column_bounds_from_rows(
     const double raw = lp.vars[static_cast<std::size_t>(col)].lb;
     if (out.lower_source[static_cast<std::size_t>(col)] == row) return raw;
     const double impl = out.lower[static_cast<std::size_t>(col)];
-    return std::isfinite(impl) ? std::max(raw, impl) : raw;
+    return model_finite(impl) ? std::max(raw, impl) : raw;
   };
   auto effective_upper = [&](int row, int col) {
     const double raw = lp.vars[static_cast<std::size_t>(col)].ub;
     if (out.upper_source[static_cast<std::size_t>(col)] == row) return raw;
     const double impl = out.upper[static_cast<std::size_t>(col)];
-    return std::isfinite(impl) ? std::min(raw, impl) : raw;
+    return model_finite(impl) ? std::min(raw, impl) : raw;
   };
   auto lower_activity_bound = [&](int row, int col, double coef) {
     return coef > 0.0 ? effective_lower(row, col)
@@ -446,7 +456,7 @@ NativeImpliedColumnBounds compute_implied_column_bounds_from_rows(
   };
   auto add_activity = [](double& activity, int& num_inf, double coef,
                          double bound) {
-    if (std::isfinite(bound)) {
+    if (model_finite(bound)) {
       activity += coef * bound;
     } else {
       ++num_inf;
@@ -454,31 +464,31 @@ NativeImpliedColumnBounds compute_implied_column_bounds_from_rows(
   };
   auto remove_activity = [](double& activity, int& num_inf, double coef,
                             double bound) {
-    if (std::isfinite(bound)) {
+    if (model_finite(bound)) {
       activity -= coef * bound;
     } else {
       --num_inf;
     }
   };
   auto try_tighten_lower = [&](int row, int col, double value) {
-    if (!std::isfinite(value)) return false;
+    if (!model_finite(value)) return false;
     const double raw_lb = lp.vars[static_cast<std::size_t>(col)].lb;
     const double raw_ub = lp.vars[static_cast<std::size_t>(col)].ub;
     if (value <= raw_lb + tol || value > raw_ub + tol) return false;
     const double cur = out.lower[static_cast<std::size_t>(col)];
-    if (std::isfinite(cur) && value <= cur + tol) return false;
+    if (model_finite(cur) && value <= cur + tol) return false;
     out.lower[static_cast<std::size_t>(col)] = value;
     out.lower_source[static_cast<std::size_t>(col)] = row;
     ++out.lower_tightened;
     return true;
   };
   auto try_tighten_upper = [&](int row, int col, double value) {
-    if (!std::isfinite(value)) return false;
+    if (!model_finite(value)) return false;
     const double raw_lb = lp.vars[static_cast<std::size_t>(col)].lb;
     const double raw_ub = lp.vars[static_cast<std::size_t>(col)].ub;
     if (value >= raw_ub - tol || value < raw_lb - tol) return false;
     const double cur = out.upper[static_cast<std::size_t>(col)];
-    if (std::isfinite(cur) && value >= cur - tol) return false;
+    if (model_finite(cur) && value >= cur - tol) return false;
     out.upper[static_cast<std::size_t>(col)] = value;
     out.upper_source[static_cast<std::size_t>(col)] = row;
     ++out.upper_tightened;
@@ -614,14 +624,14 @@ NativeVariableBoundSourceStats build_variable_bound_table_from_rows(
     if (implied_col_bounds.lower_source[static_cast<std::size_t>(col)] == row)
       return var.lb;
     const double impl = implied_col_bounds.lower[static_cast<std::size_t>(col)];
-    return std::isfinite(impl) ? std::max(var.lb, impl) : var.lb;
+    return model_finite(impl) ? std::max(var.lb, impl) : var.lb;
   };
   auto effective_upper = [&](int row, int col) {
     const auto& var = lp.vars[static_cast<std::size_t>(col)];
     if (implied_col_bounds.upper_source[static_cast<std::size_t>(col)] == row)
       return var.ub;
     const double impl = implied_col_bounds.upper[static_cast<std::size_t>(col)];
-    return std::isfinite(impl) ? std::min(var.ub, impl) : var.ub;
+    return model_finite(impl) ? std::min(var.ub, impl) : var.ub;
   };
   auto bound_for_lower_activity = [&](int row, int col, double coef) {
     return coef > 0.0 ? effective_lower(row, col) : effective_upper(row, col);
@@ -631,7 +641,7 @@ NativeVariableBoundSourceStats build_variable_bound_table_from_rows(
   };
   auto add_activity = [](double& activity, int& num_inf, double coef,
                          double bound) {
-    if (std::isfinite(bound)) {
+    if (model_finite(bound)) {
       activity += coef * bound;
     } else {
       ++num_inf;
@@ -639,7 +649,7 @@ NativeVariableBoundSourceStats build_variable_bound_table_from_rows(
   };
   auto remove_activity = [](double& activity, int& num_inf, double coef,
                             double bound) {
-    if (std::isfinite(bound)) {
+    if (model_finite(bound)) {
       activity -= coef * bound;
     } else {
       --num_inf;
