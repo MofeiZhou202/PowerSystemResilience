@@ -2099,10 +2099,18 @@
 	                ++highs_bad_transform;
 	                continue;
 	              }
-	              coef = rec.coef * trigger_scale / target_scale;
-	              constant =
-	                  (rec.coef * trigger_shift + rec.constant - target_shift) /
-	                  target_scale;
+	              // The postsolve stack maps presolved -> original space as
+	              // x_orig = scale * x_presolved + shift, i.e. the presolved
+	              // variable is x_presolved = (x_orig - shift) / scale.
+	              // Substituting into the presolved varbound
+	              //   x_target_hs (<=/>=) rec.coef * x_trigger_hs + rec.constant
+	              // gives the original-space bound. (The previous form used the
+	              // inverse scale direction and produced varbounds that excluded
+	              // feasible optima, e.g. MIPLIB3 blend2 x174<=33 vs true 2128.)
+	              coef = rec.coef * target_scale / trigger_scale;
+	              constant = target_shift + target_scale * rec.constant -
+	                         target_scale * rec.coef * trigger_shift /
+	                             trigger_scale;
 	              if (target_scale < 0.0) is_vub = !is_vub;
 	              mapped_from_original = true;
 	            }
