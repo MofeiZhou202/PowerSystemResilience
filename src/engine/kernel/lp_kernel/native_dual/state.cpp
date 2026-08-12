@@ -1000,6 +1000,76 @@ bool initialize_stabilized_cost(State& state, Statistics& statistics,
   return reconstruct(state, failure);
 }
 
+bool reperturb_stabilized_cost(State& state, int seed, Statistics& statistics,
+                               std::string& failure) {
+  // Anti-degeneracy re-perturbation (Wolfe, "A technique for resolving
+  // degeneracy in linear programming", 1963; Gill, Murray, Saunders & Wright,
+  // "A practical anti-cycling procedure...", Math. Prog. 45 (1989), the EXPAND
+  // family). Bland's rule plus the single startup cost perturbation cannot
+  // break a numerical dual-degenerate stall when the startup perturbation
+  // happens to CANCEL across the cycling basis, leaving reduced costs ~1e-8
+  // (observed on MIPLIB3 blend2: a 54<->135 two-cycle survives a 1.4e-6
+  // perturbation). Replace the perturbation with a fresh, differently-seeded
+  // and geometrically escalated pattern so the cancelling coincidence does not
+  // recur. The magnitude stays capped far below every tolerance, so the
+  // perturbed optimum remains within the LP accuracy contract; the terminal
+  // cleanup removes the perturbation and re-audits on the original cost.
+  if (state.original_cost.size() != state.n) {
+    state.original_cost = state.cost;
+  }
+  state.cost = state.original_cost;
+  state.cost_perturbation.reset(state.n);
+  state.costs_perturbed = false;
+  state.perturbation_disabled = false;
+  if (state.phase != Phase::Two) return true;
+
+  double max_abs_structural_cost = 1.0;
+  for (int j = 0; j < state.sf->n_original && j < state.n; ++j) {
+    max_abs_structural_cost =
+        std::max(max_abs_structural_cost, std::abs(state.original_cost[j]));
+  }
+  if (max_abs_structural_cost > 100.0) {
+    max_abs_structural_cost = std::sqrt(std::sqrt(max_abs_structural_cost));
+  }
+  // Escalate geometrically with each retry (2x per re-perturbation) but cap the
+  // factor so the worst-case bias stays negligible (64 * 5e-7 = 3.2e-5).
+  const double escalation =
+      std::ldexp(1.0, std::min(6, std::max(0, seed)));
+  const double structural_base = 5e-7 * max_abs_structural_cost * escalation;
+  const double logical_base = 1e-12 * escalation;
+  const std::uint64_t seed_mix =
+      cycle_mix(static_cast<std::uint64_t>(seed) + 1);
+  for (int j = 0; j < state.n; ++j) {
+    if (!state.bounds.enterable[static_cast<std::size_t>(j)]) continue;
+    // Seed-varied per-column fraction: the same splitmix hash as the startup
+    // perturbation, but on a seed-mixed column key so a different set of
+    // columns receives the larger magnitudes on each retry.
+    const double fraction = deterministic_fraction(static_cast<int>(
+        static_cast<std::uint64_t>(static_cast<std::uint32_t>(j)) ^ seed_mix));
+    double perturbation = 0.0;
+    if (j < state.sf->n_original) {
+      const double magnitude = (1.0 + fraction) *
+                               (std::abs(state.original_cost[j]) + 1.0) *
+                               structural_base;
+      // Dual-feasibility-preserving sign convention (identical to the startup
+      // perturbation): shift toward the finite side.
+      if (std::isfinite(state.bounds.upper[j])) {
+        perturbation = state.original_cost[j] >= 0.0 ? magnitude : -magnitude;
+      } else {
+        perturbation = -magnitude;
+      }
+    } else {
+      perturbation = (0.5 - fraction) * logical_base;
+    }
+    state.cost_perturbation.set(j, perturbation);
+    state.cost[j] += perturbation;
+    statistics.max_cost_perturbation =
+        std::max(statistics.max_cost_perturbation, std::abs(perturbation));
+  }
+  state.costs_perturbed = state.cost_perturbation.max_abs() > 0.0;
+  return reconstruct(state, failure);
+}
+
 bool major_rebuild(State& state, RebuildReason reason, bool reinvert,
                    Statistics& statistics, std::string& failure) {
   const Eigen::VectorXd previous_x = state.x_basic;

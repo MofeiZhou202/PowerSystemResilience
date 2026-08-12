@@ -67,6 +67,8 @@ bool initialize_uncached_edge_weights(State& state, Statistics& statistics,
 void initialize_devex_framework(State& state, Statistics& statistics);
 bool initialize_stabilized_cost(State& state, Statistics& statistics,
                                 std::string& failure);
+bool reperturb_stabilized_cost(State& state, int seed, Statistics& statistics,
+                               std::string& failure);
 bool major_rebuild(State& state, RebuildReason reason, bool reinvert,
                    Statistics& statistics, std::string& failure);
 void restore_original_cost(State& state);
