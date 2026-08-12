@@ -30,6 +30,10 @@ struct IPMOptions {
   double tol_primal{1e-6};
   double tol_dual{1e-6};
   double tol_complementarity{1e-6};
+  // When enabled, the stationarity gate is
+  // ||grad L||inf / (1 + max(||lambda||inf, ||mu||inf)). The default keeps
+  // the generic NLP adapter's historical absolute stationarity contract.
+  bool multiplier_relative_stationarity{false};
   /// "Acceptable" convergence level (Ipopt-style): if the best iterate
   /// satisfies primal feasibility, dual feasibility, and complementarity at
   /// tol_accept, it is accepted as a near-optimal solution even when the
@@ -61,6 +65,11 @@ struct IPMOptions {
   // the original-coordinate primal tolerance. Native IPM independently audits
   // that assertion before using the feasible-start initialization policy.
   bool primal_feasible_start{false};
+
+  // Preserve an externally restored x0 without enabling the feasible-start
+  // multiplier, Newton, or globalization policies. Native independently
+  // audits the original-coordinate primal tolerance before honoring it.
+  bool preserve_initial_point{false};
 
   // Cold-start equality multipliers from
   //   min_lambda ||grad f + Jh^T mu + Jg^T lambda||_2.

@@ -264,6 +264,13 @@ struct NLPModel {
   std::function<void(const Eigen::VectorXd&, Eigen::VectorXd&)> h;
   std::function<void(const Eigen::VectorXd&, Eigen::SparseMatrix<double>&)> jac_h;
 
+  // Optional independent maximum constraint violation in the caller's
+  // original coordinates. Native IPM uses this only to audit an externally
+  // restored x0 before preserving it; variable bounds are always audited by
+  // the adapter itself. The callback must return a finite nonnegative value.
+  std::function<double(const Eigen::VectorXd&)>
+      original_constraint_violation;
+
   // Optional diagnostic labels for the rows returned by h(). Generated box
   // bounds are named from VariableMeta::name by native solvers.
   std::vector<std::string> nonlinear_inequality_names;

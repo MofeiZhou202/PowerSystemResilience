@@ -266,6 +266,8 @@ TEST_CASE("IpoptAdapter returns NLP multipliers in engine KKT convention",
   };
   nlp.solver_options.tolerance = 1e-10;
   nlp.solver_options.acceptable_tolerance = 1e-9;
+  nlp.solver_options.complementarity_tolerance = 1e-10;
+  nlp.solver_options.acceptable_complementarity_tolerance = 1e-9;
 
   const SolveResult result = ipopt.solve_nlp(nlp);
   REQUIRE(result.stats.success);
@@ -297,14 +299,21 @@ TEST_CASE("IpoptAdapter unscales active variable-bound multipliers",
   };
   nlp.solver_options.tolerance = 1e-10;
   nlp.solver_options.acceptable_tolerance = 1e-9;
+  nlp.solver_options.complementarity_tolerance = 1e-10;
+  nlp.solver_options.acceptable_complementarity_tolerance = 1e-9;
 
   const SolveResult result = ipopt.solve_nlp(nlp);
   REQUIRE(result.stats.success);
   REQUIRE(result.box_dual_lb.size() == 1);
   REQUIRE(result.box_dual_ub.size() == 1);
+  CHECK(result.x[0] >= nlp.vars[0].lb);
+  CHECK(result.x[0] <= nlp.vars[0].ub);
   CHECK(result.x[0] == Approx(0.0).margin(1e-7));
   CHECK(result.box_dual_lb[0] == Approx(1.0).margin(1e-6));
   CHECK(result.box_dual_ub[0] == Approx(0.0).margin(1e-6));
+  CHECK(std::abs(result.box_dual_lb[0] *
+                 (result.x[0] - nlp.vars[0].lb)) <=
+        nlp.solver_options.complementarity_tolerance);
 }
 #endif
 

@@ -7,6 +7,7 @@
 #include <Eigen/Sparse>
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <string>
 
@@ -153,6 +154,7 @@ TEST_CASE("IPM: LP solved by barrier method", "[ipm][lp]") {
   for (const auto& solver_name : eng.list_solvers(ProblemClass::LP)) {
     DYNAMIC_SECTION("solver=" << solver_name) {
       auto res = eng.solve_lp(lp, solver_opts(solver_name));
+      INFO(solver_name << ": " << res.stats.status);
       CHECK(res.stats.success);
       if (res.stats.success) {
         CHECK(res.stats.objective == Approx(-6.0).margin(1e-4));
@@ -484,6 +486,7 @@ TEST_CASE("Filter certifies a solution reached on the last allowed step",
   options.tol_accept = 0.0;
   options.scale_problem = false;
   options.use_restoration_phase = false;
+  options.verbose = std::getenv("HACDCPF_OPF_TRACE") != nullptr;
 
   const auto [result, detail] =
       NativeIPMAdapter(options).solve_nlp_detail(nlp);
@@ -690,6 +693,61 @@ TEST_CASE("Auto Newton retries the unique equivalent formulation",
   CHECK(detail.condensed_symbolic_nonzeros <
         detail.augmented_symbolic_nonzeros);
   CHECK(detail.newton_formulation == "augmented");
+  CHECK(detail.numeric_factorizations >= 2);
+  CHECK(detail.numeric_factorizations ==
+        detail.primary_factorizations +
+            detail.inertia_retry_factorizations +
+            detail.active_set_polish_factorizations);
+}
+
+TEST_CASE("Filter distinguishes a machine-resolution step from convergence",
+          "[ipm][nlp][termination][stagnation][regression]") {
+  const auto make_model = [](bool exact_hessian) {
+    NLPModel nlp;
+    nlp.sense = Sense::Minimize;
+    nlp.vars.push_back(
+        {VarType::Continuous, -kVariableNoBound, kVariableNoBound});
+    nlp.x0 = Eigen::VectorXd::Zero(1);
+    nlp.f = [exact_hessian](const Eigen::VectorXd& x) {
+      return exact_hessian
+          ? 0.5e20 * x[0] * x[0] + 1.0e10 * x[0]
+          : 1.0e10 * x[0];
+    };
+    nlp.grad = [exact_hessian](const Eigen::VectorXd& x,
+                               Eigen::VectorXd& gradient) {
+      gradient.resize(1);
+      gradient[0] = exact_hessian ? 1.0e20 * x[0] + 1.0e10 : 1.0e10;
+    };
+    nlp.hess = [](const Eigen::VectorXd&,
+                  Eigen::SparseMatrix<double>& hessian) {
+      hessian.resize(1, 1);
+      hessian.insert(0, 0) = 1.0e20;
+    };
+    return nlp;
+  };
+
+  IPMOptions options;
+  options.max_iter = 10;
+  options.tol_primal = 1.0e-12;
+  options.tol_dual = 1.0e-12;
+  options.tol_complementarity = 1.0e-12;
+  options.tol_accept = 0.0;
+  options.scale_problem = false;
+  options.use_restoration_phase = false;
+
+  const auto [stagnated, stagnated_detail] =
+      NativeIPMAdapter(options).solve_nlp_detail(make_model(false));
+  (void)stagnated_detail;
+  CHECK_FALSE(stagnated.stats.success);
+  CHECK(stagnated.stats.status.find("iterate stagnation") !=
+        std::string::npos);
+  CHECK(stagnated.stats.dual_feas > options.tol_dual);
+
+  const auto [converged, converged_detail] =
+      NativeIPMAdapter(options).solve_nlp_detail(make_model(true));
+  (void)converged_detail;
+  REQUIRE(converged.stats.success);
+  CHECK(converged.stats.dual_feas <= options.tol_dual);
 }
 
 TEST_CASE("Least-squares dual initialization removes a pure multiplier step",
@@ -789,8 +847,8 @@ TEST_CASE("Filter IPM recovers from an infeasible inequality start",
   NativeIPMAdapter solver(options);
   const auto [result, detail] = solver.solve_nlp_detail(nlp);
 
-  REQUIRE(result.stats.success);
   INFO(result.stats.status);
+  REQUIRE(result.stats.success);
   CHECK(result.stats.solver_name == "NativeIPM");
   CHECK(result.x[0] == Approx(1.0).margin(1e-6));
   CHECK(result.stats.primal_feas < options.tol_primal);
@@ -816,6 +874,20 @@ TEST_CASE("Native IPM preserves only an audited Phase-I primal start",
                   Eigen::SparseMatrix<double>& hessian) {
       hessian.resize(1, 1);
       hessian.insert(0, 0) = 1.0;
+    };
+    // The callback equality is deliberately expressed in an internal row
+    // coordinate. The independent original-coordinate audit must govern the
+    // preserve decision, while Native continues to audit the box itself.
+    nlp.g = [](const Eigen::VectorXd& x, Eigen::VectorXd& equality) {
+      equality = 100.0 * x;
+    };
+    nlp.jac_g = [](const Eigen::VectorXd&,
+                   Eigen::SparseMatrix<double>& jacobian) {
+      jacobian.resize(1, 1);
+      jacobian.insert(0, 0) = 100.0;
+    };
+    nlp.original_constraint_violation = [](const Eigen::VectorXd& x) {
+      return std::abs(x[0]);
     };
     return nlp;
   };
@@ -850,6 +922,43 @@ TEST_CASE("Native IPM preserves only an audited Phase-I primal start",
   CHECK_FALSE(rejected_detail.primal_feasible_start_accepted);
   REQUIRE(std::isfinite(rejected_first_x));
   CHECK(rejected_first_x >= 0.0);
+}
+
+TEST_CASE("Native IPM can preserve an audited primal without feasible-start policy",
+          "[ipm][nlp][phase1][initialization][regression]") {
+  const auto first_evaluation = [](double tolerance) {
+    double first_x = std::numeric_limits<double>::quiet_NaN();
+    NLPModel nlp;
+    nlp.sense = Sense::Minimize;
+    nlp.vars.push_back({VarType::Continuous, 0.0, 1.0});
+    nlp.x0 = Eigen::VectorXd::Constant(1, -5e-5);
+    nlp.f = [&first_x](const Eigen::VectorXd& x) {
+      if (!std::isfinite(first_x)) first_x = x[0];
+      return 0.5 * x.squaredNorm();
+    };
+    nlp.grad = [](const Eigen::VectorXd& x, Eigen::VectorXd& gradient) {
+      gradient = x;
+    };
+    nlp.hess = [](const Eigen::VectorXd&,
+                  Eigen::SparseMatrix<double>& hessian) {
+      hessian.resize(1, 1);
+      hessian.insert(0, 0) = 1.0;
+    };
+    IPMOptions options;
+    options.preserve_initial_point = true;
+    options.max_iter = 1;
+    options.tol_primal = tolerance;
+    options.tol_dual = tolerance;
+    options.tol_complementarity = tolerance;
+    options.tol_accept = 0.0;
+    options.scale_problem = false;
+    options.use_restoration_phase = false;
+    NativeIPMAdapter(options).solve_nlp_detail(nlp);
+    return first_x;
+  };
+
+  CHECK(first_evaluation(1e-4) == Approx(-5e-5).margin(1e-15));
+  CHECK(first_evaluation(1e-6) >= 0.0);
 }
 
 TEST_CASE("Automatic Phase-II initialization is row-scale covariant",
@@ -963,8 +1072,8 @@ TEST_CASE("Phase-I handoff does not impose a shared complementarity product",
   const Eigen::VectorXd products =
       detail.z_slack.cwiseProduct(detail.mu_ineq);
   CHECK(products.maxCoeff() > products.minCoeff());
-  CHECK(detail.mu_ineq.maxCoeff() ==
-        Approx(std::sqrt(std::numeric_limits<double>::min())));
+  CHECK(detail.mu_ineq.minCoeff() >=
+        std::sqrt(std::numeric_limits<double>::min()));
 }
 
 TEST_CASE("Complete warm start recovers its current mean barrier",
@@ -1018,6 +1127,71 @@ TEST_CASE("Complete warm start recovers its current mean barrier",
         Approx(explicit_result.stats.dual_feas).epsilon(1e-12));
   CHECK(automatic_detail.complementarity ==
         Approx(explicit_detail.complementarity).epsilon(1e-12));
+}
+
+TEST_CASE("Scaled complementarity guard preserves a positive strict budget",
+          "[ipm][nlp][scaling][complementarity][regression]") {
+  const auto solve_at_boundary = [](double tolerance) {
+    NLPModel nlp;
+    nlp.sense = Sense::Minimize;
+    nlp.vars.push_back(
+        {VarType::Continuous, -kVariableNoBound, kVariableNoBound});
+    nlp.x0 = Eigen::VectorXd::Zero(1);
+    nlp.f = [](const Eigen::VectorXd& x) { return 16.0 * x[0]; };
+    nlp.grad = [](const Eigen::VectorXd&, Eigen::VectorXd& gradient) {
+      gradient = Eigen::VectorXd::Constant(1, 16.0);
+    };
+    nlp.hess = [](const Eigen::VectorXd&,
+                  Eigen::SparseMatrix<double>& hessian) {
+      hessian.resize(1, 1);
+    };
+    nlp.g = [](const Eigen::VectorXd& x, Eigen::VectorXd& equality) {
+      equality = x;
+    };
+    nlp.jac_g = [](const Eigen::VectorXd&,
+                   Eigen::SparseMatrix<double>& jacobian) {
+      jacobian.resize(1, 1);
+      jacobian.setIdentity();
+    };
+    nlp.h = [](const Eigen::VectorXd&, Eigen::VectorXd& inequality) {
+      inequality = Eigen::VectorXd::Constant(1, -1.0);
+    };
+    nlp.jac_h = [](const Eigen::VectorXd&,
+                   Eigen::SparseMatrix<double>& jacobian) {
+      jacobian.resize(1, 1);
+    };
+
+    IPMOptions options;
+    options.max_iter = 1;
+    options.tol_primal = tolerance;
+    options.tol_dual = tolerance;
+    options.tol_complementarity = tolerance;
+    options.tol_accept = 0.0;
+    options.scale_problem = true;
+    options.use_restoration_phase = false;
+    options.equality_dual_start = Eigen::VectorXd::Constant(1, -16.0);
+    const double forward_resolution =
+        std::sqrt(std::numeric_limits<double>::epsilon()) *
+        std::max(1.0, tolerance);
+    const double guard = std::min(forward_resolution, tolerance / 2.0);
+    const double guarded_boundary = tolerance - guard;
+    options.inequality_dual_start = Eigen::VectorXd::Constant(
+        1, std::nextafter(guarded_boundary, 0.0));
+    options.slack_start = Eigen::VectorXd::Ones(1);
+
+    return NativeIPMAdapter(options).solve_nlp_detail(nlp);
+  };
+
+  for (const double tolerance : {1.0e-4, 1.0e-12}) {
+    DYNAMIC_SECTION("tolerance=" << tolerance) {
+      const auto [result, detail] = solve_at_boundary(tolerance);
+      INFO(result.stats.status);
+      REQUIRE(result.stats.success);
+      CHECK(detail.numeric_factorizations == 0);
+      CHECK(result.stats.complementarity < tolerance);
+      CHECK(detail.complementarity <= tolerance);
+    }
+  }
 }
 
 TEST_CASE("Complete warm start is not replaced by the Phase-I dual selector",
@@ -1101,42 +1275,48 @@ TEST_CASE("Phase-I many-row dual selector improves original stationarity",
     }
   };
 
-  IPMOptions options;
-  options.primal_feasible_start = true;
-  options.max_iter = 1;
-  options.tol_primal = primal_tolerance;
-  options.tol_dual = 0.75 * objective_gradient;
-  options.tol_complementarity = objective_gradient;
-  options.tol_accept = 0.0;
-  options.scale_problem = false;
-  options.use_restoration_phase = false;
-  options.mu_init = 0.0;
-  options.mu_min = 0.0;
+  for (const bool full_feasible_start_policy : {false, true}) {
+    DYNAMIC_SECTION("full_feasible_start_policy="
+                    << full_feasible_start_policy) {
+      IPMOptions options;
+      options.primal_feasible_start = full_feasible_start_policy;
+      options.preserve_initial_point = !full_feasible_start_policy;
+      options.max_iter = 1;
+      options.tol_primal = primal_tolerance;
+      options.tol_dual = 0.75 * objective_gradient;
+      options.tol_complementarity = objective_gradient;
+      options.tol_accept = 0.0;
+      options.scale_problem = false;
+      options.use_restoration_phase = false;
+      options.mu_init = 0.0;
+      options.mu_min = 0.0;
 
-  const auto [result, detail] =
-      NativeIPMAdapter(options).solve_nlp_detail(nlp);
-  INFO(result.stats.status);
-  REQUIRE(result.stats.success);
-  REQUIRE(detail.z_slack.size() == inequality_count);
-  REQUIRE(detail.mu_ineq.size() == inequality_count);
-  REQUIRE((detail.mu_ineq.array() > 0.0).all());
+      const auto [result, detail] =
+          NativeIPMAdapter(options).solve_nlp_detail(nlp);
+      INFO(result.stats.status);
+      REQUIRE(result.stats.success);
+      REQUIRE(detail.z_slack.size() == inequality_count);
+      REQUIRE(detail.mu_ineq.size() == inequality_count);
+      REQUIRE((detail.mu_ineq.array() > 0.0).all());
 
-  const double stationarity =
-      std::abs(-objective_gradient + detail.mu_ineq.sum());
-  CHECK(stationarity < objective_gradient);
-  const double accumulation_condition =
-      objective_gradient + detail.mu_ineq.lpNorm<1>();
-  const double accumulation_gamma =
-      static_cast<double>(inequality_count) *
-      std::numeric_limits<double>::epsilon() /
-      (1.0 - static_cast<double>(inequality_count) *
-                 std::numeric_limits<double>::epsilon());
-  CHECK(std::abs(stationarity - result.stats.dual_feas) <=
-        accumulation_gamma * accumulation_condition);
-  const Eigen::VectorXd products =
-      detail.z_slack.cwiseProduct(detail.mu_ineq);
-  CHECK(products.maxCoeff() > products.minCoeff());
-  CHECK(detail.mu_ineq.maxCoeff() > 1.0);
+      const double stationarity =
+          std::abs(-objective_gradient + detail.mu_ineq.sum());
+      CHECK(stationarity < objective_gradient);
+      const double accumulation_condition =
+          objective_gradient + detail.mu_ineq.lpNorm<1>();
+      const double accumulation_gamma =
+          static_cast<double>(inequality_count) *
+          std::numeric_limits<double>::epsilon() /
+          (1.0 - static_cast<double>(inequality_count) *
+                     std::numeric_limits<double>::epsilon());
+      CHECK(std::abs(stationarity - result.stats.dual_feas) <=
+            accumulation_gamma * accumulation_condition);
+      const Eigen::VectorXd products =
+          detail.z_slack.cwiseProduct(detail.mu_ineq);
+      CHECK(products.maxCoeff() > products.minCoeff());
+      CHECK(detail.mu_ineq.maxCoeff() > 1.0);
+    }
+  }
 }
 
 TEST_CASE("Filter IPM uses inertia correction on a nonconvex objective",

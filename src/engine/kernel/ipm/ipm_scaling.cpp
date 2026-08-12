@@ -86,6 +86,7 @@ NLPModel build_scaled_nlp_model(const NLPModel& prob,
   out.symbolic_constraints = prob.symbolic_constraints;
   out.equality_free_columns = prob.equality_free_columns;
   out.nonlinear_inequality_names = prob.nonlinear_inequality_names;
+  out.original_constraint_violation = prob.original_constraint_violation;
 
   const double s_f = factors.s_f;
   const Eigen::VectorXd s_g = factors.s_g;

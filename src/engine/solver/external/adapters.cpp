@@ -1480,6 +1480,14 @@ class CallbackTNLP final : public Ipopt::TNLP {
         status == Ipopt::STOP_AT_ACCEPTABLE_POINT ||
         status == Ipopt::FEASIBLE_POINT_FOUND;
     if (!successful_terminal && best_iterate_valid_) {
+      if (std::getenv("HACDCPF_OPF_TRACE") != nullptr) {
+        std::fprintf(stderr,
+                     "IPOPT_BEST_ITERATE iter=%d merit=%.17g "
+                     "primal=%.17g dual=%.17g complementarity=%.17g\n",
+                     best_iter_, best_merit_, best_primal_inf_,
+                     best_dual_inf_, best_complementarity_);
+        std::fflush(stderr);
+      }
       solution_ = best_solution_;
       constraint_dual_ = best_constraint_dual_;
       bound_dual_lb_ = best_bound_dual_lb_;
@@ -1572,16 +1580,10 @@ class CallbackTNLP final : public Ipopt::TNLP {
             max_abs(current_lambda), max_abs(current_z_l),
             max_abs(current_z_u)});
         const double dual = max_abs(lagrangian_gradient) / multiplier_scale;
-        const double inequality_multiplier_scale = 1.0 + std::max({
-            mineq_ > 0
-                ? max_abs(current_lambda.tail(mineq_).eval())
-                : 0.0,
-            max_abs(current_z_l), max_abs(current_z_u)});
         const double comp = std::max({
             max_abs(lower_complementarity),
             max_abs(upper_complementarity),
-            max_abs(constraint_complementarity)}) /
-            inequality_multiplier_scale;
+            max_abs(constraint_complementarity)});
         const double merit = std::max({primal, dual, comp});
         if (std::isfinite(merit) && merit < best_merit_) {
           best_merit_ = merit;
@@ -2500,6 +2502,14 @@ SolveResult IpoptAdapter::solve_nlp(const NLPModel& prob_in) const {
   app->Options()->SetStringValue(
       "hessian_approximation",
       prob.lagrangian_hess ? "exact" : "limited-memory");
+  // SolveResult exposes the caller's original constraint and variable bounds
+  // together with Ipopt's multipliers. Solve that exact contract: Ipopt's
+  // default bound relaxation can otherwise leave tiny signed violations whose
+  // products with large active multipliers fail original-model
+  // complementarity. A post-solve projection is insufficient because it can
+  // perturb coupled equality constraints without recomputing the primal-dual
+  // endpoint.
+  app->Options()->SetNumericValue("bound_relax_factor", 0.0);
   // Keep the adapter boundary deterministic for malformed configuration.
   // Passing NaN/Inf through SetNumericValue makes Ipopt fail during option
   // initialisation, while zero/negative tolerances are outside its contract.
