@@ -1332,6 +1332,39 @@ Result run_phase(State& state, Statistics& statistics,
         if (state.bland_stall_counter >= bland_threshold) {
           state.bland_active = true;
         }
+        // Anti-cycling exhaustion guard. Once Bland's rule is engaged, every
+        // re-perturbation has been spent, and the stall counter is pinned at
+        // its 2*threshold cap, no escape mechanism remains: a CycleBlocked minor
+        // iteration leaves the iterate unchanged (choose_leaving_bland re-picks
+        // the same smallest-index row and the ratio test re-fails identically),
+        // so the loop would otherwise spin on that iterate until the wall-clock
+        // deadline — measured on MIPLIB3 blend2 as 9.8e6 no-progress minor
+        // iterations against 21 pivots (12 s) inside a single node LP. The
+        // CycleBlocked `continue` never reaches the top-of-loop max_iter test,
+        // which is why the kMaxReperturbations cap ("terminate at the ordinary
+        // iteration limit rather than looping forever") is otherwise defeated.
+        // Terminate here with the same certified interrupted dual bound the
+        // iteration-limit path returns; by weak duality it bounds the LP optimum
+        // even though the basis is not optimal. Normal solves resolve their
+        // cycle before exhaustion and never reach this state, so their pivot
+        // paths and iteration counts are unchanged.
+        if (state.phase == Phase::Two && state.bland_active &&
+            state.reperturbation_count >= kMaxReperturbations &&
+            state.bland_stall_counter >= 2 * bland_threshold) {
+          std::ostringstream message;
+          message << "dual simplex anti-cycling exhausted"
+                  << " (iterations=" << statistics.iterations
+                  << ", reperturbations=" << state.reperturbation_count
+                  << ", cycles=" << statistics.cycles_detected
+                  << ", taboo_rows=" << statistics.taboo_rows
+                  << ", stability_blocked_rows="
+                  << statistics.stability_blocked_rows << ')';
+          const bool bound_certified = certify_interrupted_dual_bound(state);
+          Result result = detail::make_result(
+              state, Status::IterationLimit, message.str(), statistics);
+          result.dual_bound_certified = bound_certified;
+          return result;
+        }
         continue;
       }
       if (outcome.kind == MinorKind::Pivoted) {

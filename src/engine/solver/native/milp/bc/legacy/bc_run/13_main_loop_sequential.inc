@@ -2267,16 +2267,29 @@
 	            continue;
 	          }
 	        } else {
-              replay_node.lp_refresh_needed = true;
-              replay_node.fractional_branchables_valid = false;
-              node_queue.push_priority(std::move(replay_node));
-              out.stats.status =
-                  simplex_node_deadline_hit || bc_time_limit_expired()
-                      ? bc_status::kTimeLimitReached
-                      : fmt::format("Node LP refresh failed: {}",
-                                    late_res.result.stats.status);
-              out.bc_stats.status = out.stats.status;
-              break;
+              if (simplex_node_deadline_hit || bc_time_limit_expired()) {
+                // Genuine wall/node deadline: stop the tree search cleanly and
+                // preserve the node for a later resume.
+                replay_node.lp_refresh_needed = true;
+                replay_node.fractional_branchables_valid = false;
+                node_queue.push_priority(std::move(replay_node));
+                out.stats.status = bc_status::kTimeLimitReached;
+                out.bc_stats.status = out.stats.status;
+                break;
+              }
+              // Non-deadline hard-LP outcome (e.g. the dual simplex exhausting
+              // its anti-cycling ladder on a numerically degenerate node, or an
+              // iteration-limit stop): this OPTIONAL reduced-cost / certificate
+              // resolve could not reach optimality. Abandoning the whole tree
+              // search here would forfeit every other queued node, so instead
+              // skip the resolve and branch on `cur` with its existing valid
+              // relaxation and bound. cur.bound remains a sound lower bound and
+              // the learned conflicts/cuts stay in the global pools for the
+              // children; only this one node is left un-tightened. Control falls
+              // through to the lp_refresh_needed = false reset below, so the
+              // node is branched (not re-queued for a resolve that would fail
+              // identically). node_sf is a scratch buffer rebuilt before its
+              // next use, so leaving it in replay_node's form is harmless.
 	        }
 	      } else if (replay_domain_changed &&
 	                 bounds_consistent(replay_node.lb, replay_node.ub)) {
