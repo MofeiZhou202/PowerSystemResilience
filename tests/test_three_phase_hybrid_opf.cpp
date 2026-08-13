@@ -101,6 +101,84 @@ ThreePhaseHybridOPFCase make_small_hybrid_case() {
   return c;
 }
 
+ThreePhaseHybridOPFCase make_large_sparse_hybrid_case(int bus_count) {
+  ThreePhaseHybridOPFCase c;
+  c.name = "large_sparse_phase_hybrid";
+  c.base_mva = 1.0;
+  const int n = 3 * bus_count;
+  std::vector<Eigen::Triplet<Complex>> ytrip;
+  ytrip.reserve(static_cast<std::size_t>(12 * bus_count));
+  const Complex admittance{8.0, -16.0};
+  for (int bus = 0; bus + 1 < bus_count; ++bus) {
+    for (int phase = 0; phase < 3; ++phase) {
+      const int from = 3 * bus + phase;
+      const int to = 3 * (bus + 1) + phase;
+      ytrip.emplace_back(from, from, admittance);
+      ytrip.emplace_back(to, to, admittance);
+      ytrip.emplace_back(from, to, -admittance);
+      ytrip.emplace_back(to, from, -admittance);
+    }
+  }
+  c.y_ac.resize(n, n);
+  c.y_ac.setFromTriplets(ytrip.begin(), ytrip.end());
+  c.y_ac.makeCompressed();
+  c.i_ac_fixed = Eigen::VectorXcd::Zero(n);
+  c.p_load_pu = Eigen::VectorXd::Zero(n);
+  c.q_load_pu = Eigen::VectorXd::Zero(n);
+  for (int phase = 0; phase < 3; ++phase) {
+    c.p_load_pu[n - 3 + phase] = 2e-4;
+    c.q_load_pu[n - 3 + phase] = 5e-5;
+  }
+  c.v_min_pu = Eigen::VectorXd::Constant(n, 0.85);
+  c.v_max_pu = Eigen::VectorXd::Constant(n, 1.10);
+  c.voltage_start.resize(n);
+  c.ac_phase_index.resize(n);
+  const double angles[3] = {0.0, -2.0 * M_PI / 3.0, 2.0 * M_PI / 3.0};
+  for (int bus = 0; bus < bus_count; ++bus) {
+    for (int phase = 0; phase < 3; ++phase) {
+      const int node = 3 * bus + phase;
+      c.voltage_start[node] = std::polar(0.98, angles[phase]);
+      c.ac_phase_index[static_cast<std::size_t>(node)] = phase;
+    }
+    c.three_phase_bus_nodes.push_back(
+        {3 * bus, 3 * bus + 1, 3 * bus + 2});
+  }
+  c.reference_nodes = {0, 1, 2};
+  c.reference_voltage.resize(3);
+  for (int phase = 0; phase < 3; ++phase) {
+    c.reference_voltage[phase] = std::polar(1.0, angles[phase]);
+    PhaseGenerator generator;
+    generator.phase_node = phase;
+    generator.p_min_pu = -0.2;
+    generator.p_max_pu = 1.0;
+    generator.q_min_pu = -1.0;
+    generator.q_max_pu = 1.0;
+    generator.cost_c2 = 0.1;
+    generator.cost_c1 = 30.0;
+    c.generators.push_back(generator);
+  }
+  c.vuf_max = 0.05;
+
+  c.g_dc.resize(2, 2);
+  std::vector<Eigen::Triplet<double>> gtrip{
+      {0, 0, 50.0}, {0, 1, -50.0}, {1, 0, -50.0}, {1, 1, 50.0}};
+  c.g_dc.setFromTriplets(gtrip.begin(), gtrip.end());
+  c.p_dc_load_pu = Eigen::VectorXd::Zero(2);
+  c.p_dc_load_pu[1] = 1e-3;
+  c.v_dc_start = Eigen::VectorXd::Ones(2);
+  c.v_dc_min_pu = Eigen::VectorXd::Constant(2, 0.90);
+  c.v_dc_max_pu = Eigen::VectorXd::Constant(2, 1.10);
+  c.dc_reference_terminals = {0};
+  c.dc_reference_voltage_pu = Eigen::VectorXd::Ones(1);
+  PhaseVSC converter;
+  converter.phase_nodes = {n - 3, n - 2, n - 1};
+  converter.dc_terminal = 0;
+  converter.efficiency = 0.98;
+  converter.s_max_pu = 0.25;
+  c.converters.push_back(converter);
+  return c;
+}
+
 }  // namespace
 
 TEST_CASE("Monolithic phase hybrid OPF Full and GR recover the same solution",
@@ -408,6 +486,15 @@ TEST_CASE("Native Full certifies a graph-reduced primal-dual transport",
   CHECK(full.phase_one_constraint_violation <= options.tolerance);
   CHECK(full.phase_one_primal_feasible);
   CHECK(full.phase_one_dual_initialized);
+  CHECK_FALSE(full.phase_one_budget_exhausted);
+  CHECK(full.phase_one_iterations <= options.phase_one_max_iterations);
+  CHECK(full.phase_one_factorizations <=
+        options.phase_one_max_factorizations);
+  CHECK(full.phase_one_backtracks <=
+        options.phase_one_max_iterations *
+            options.phase_one_max_backtracks);
+  CHECK(full.phase_one_runtime_ms >= 0.0);
+  CHECK(full.phase_one_termination == "certified");
   CHECK(full.phase_two_start_requested);
   CHECK(full.phase_two_start_accepted);
   CHECK_FALSE(full.phase_two_linear_solver_backend.empty());
@@ -416,6 +503,96 @@ TEST_CASE("Native Full certifies a graph-reduced primal-dual transport",
   CHECK(full.complementarity <= 1e-6);
   CHECK(std::abs(full.objective - reduced.objective) <=
         1e-6 * std::max(1.0, std::abs(full.objective)));
+}
+
+TEST_CASE("Native Phase I obeys a zero-factorization hard budget",
+          "[opf][three_phase][hybrid][native][phase_one][budget]") {
+  auto c = make_small_hybrid_case();
+  c.voltage_start.array() *= 0.92;
+
+  ThreePhaseHybridOPFOptions options;
+  options.variant = ModelVariant::Full;
+  options.backend = SolverBackend::NativeIPM;
+  options.max_iterations = 1;
+  options.tolerance = 1e-7;
+  options.phase_one_max_iterations = 12;
+  options.phase_one_max_factorizations = 0;
+  options.phase_one_max_backtracks = 4;
+  options.phase_one_time_limit_ms = 1000.0;
+
+  const auto result = solve_three_phase_hybrid_opf(c, options);
+  CHECK(result.phase_one_factorizations == 0);
+  CHECK(result.phase_one_iterations == 0);
+  CHECK(result.phase_one_budget_exhausted);
+  CHECK(result.phase_one_termination == "factorization-budget");
+  CHECK_FALSE(result.phase_one_dual_initialized);
+  CHECK(result.phase_two_start_requested);
+  CHECK_FALSE(result.phase_two_start_accepted);
+}
+
+TEST_CASE("Native Phase I permits a full step with no backtracking budget",
+          "[opf][three_phase][hybrid][native][phase_one][budget]") {
+  auto c = make_small_hybrid_case();
+  c.voltage_start.array() *= 0.99;
+
+  ThreePhaseHybridOPFOptions options;
+  options.variant = ModelVariant::Full;
+  options.backend = SolverBackend::NativeIPM;
+  options.max_iterations = 0;
+  options.tolerance = 1e-7;
+  options.phase_one_max_iterations = 1;
+  options.phase_one_max_factorizations = 3;
+  options.phase_one_max_backtracks = 0;
+  options.phase_one_time_limit_ms = 1000.0;
+
+  const auto result = solve_three_phase_hybrid_opf(c, options);
+  CHECK(result.phase_one_iterations == 1);
+  CHECK(result.phase_one_backtracks == 0);
+  CHECK(result.phase_one_factorizations <= 3);
+  CHECK(result.phase_one_constraint_violation <
+        result.phase_one_initial_violation);
+}
+
+TEST_CASE("Large Native Phase I remains sparse and budget bounded",
+          "[opf][three_phase][hybrid][native][phase_one][large][sparse]") {
+  const auto c = make_large_sparse_hybrid_case(360);
+  const int phase_nodes = static_cast<int>(c.y_ac.rows());
+  const int nvar = 2 * phase_nodes + 2 * static_cast<int>(c.generators.size()) +
+                   static_cast<int>(c.g_dc.rows()) + 2 * 3 + 1;
+  REQUIRE(nvar > 2000);
+
+  ThreePhaseHybridOPFOptions options;
+  options.variant = ModelVariant::Full;
+  options.backend = SolverBackend::NativeIPM;
+  options.max_iterations = 0;
+  options.tolerance = 1e-6;
+  options.phase_one_max_iterations = 2;
+  options.phase_one_max_factorizations = 5;
+  options.phase_one_max_backtracks = 4;
+  options.phase_one_time_limit_ms = 5000.0;
+
+  const auto result = solve_three_phase_hybrid_opf(c, options);
+  INFO("termination=" << result.phase_one_termination
+       << " solver=" << result.phase_one_linear_solver
+       << " initial=" << result.phase_one_initial_violation
+       << " final=" << result.phase_one_constraint_violation
+       << " dual_full=" << result.initial_dual_residual
+       << " dual_fit=" << result.phase_one_dual_fit_residual
+       << " iterations=" << result.phase_one_iterations
+       << " factorizations=" << result.phase_one_factorizations
+       << " runtime_ms=" << result.phase_one_runtime_ms);
+  CHECK(result.variables == nvar);
+  CHECK(result.phase_one_iterations <= options.phase_one_max_iterations);
+  CHECK(result.phase_one_factorizations <=
+        options.phase_one_max_factorizations);
+  CHECK((result.phase_one_linear_solver == "sparse-basis-lu" ||
+         result.phase_one_linear_solver == "sparse-qr"));
+  CHECK(std::isfinite(result.phase_one_constraint_violation));
+  CHECK(result.phase_one_constraint_violation <=
+        result.phase_one_initial_violation);
+  CHECK(result.phase_one_primal_feasible);
+  CHECK(result.phase_one_dual_initialized);
+  CHECK(result.phase_one_dual_fit_residual <= 1e-6);
 }
 
 TEST_CASE("Exact constraint oracle preserves the graph-reduced OPF solution",

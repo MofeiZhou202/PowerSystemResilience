@@ -59,29 +59,54 @@ claim that every sanitizer entry point is green.
 The dependency pin now advances to MIPSolvers `adfc98f`. For the monolithic
 three-phase hybrid OPF NativeIPM path, Phase I restores a primal point in the
 assembled OPF coordinates and generates equality multipliers, positive
-inequality multipliers, and positive slacks. The `NLPModel` exposes an
+inequality multipliers, and positive slacks. Restoration uses a declared sparse
+state/basic Newton system when available and SparseQR otherwise; it no longer
+materializes a dense Jacobian or forms `J J^T`. Iteration, total primal-plus-
+dual factorization, and per-iteration backtrack caps are hard work bounds. The
+wall-clock deadline is cooperative because an in-flight sparse factorization
+cannot be interrupted. Finite-budget Phase I never invokes Ipopt. The
+`NLPModel` exposes an
 independent original-per-unit maximum violation callback. Phase II requests
 MIPSolvers' `primal_feasible_start` and `preserve_initial_point` policies; the
 adapter preserves the point only when its independent constraint and variable-
 bound audit is finite and no greater than `tol_primal`. Otherwise its ordinary
 infeasible-start interiorization remains active. Public results report the
-Phase I certificate, whether dual initialization completed, whether Phase II
-requested and accepted the start, and the selected linear backend. A Phase II
+Phase I certificate, budget consumption and termination, whether dual
+initialization completed, whether Phase II requested and accepted the start,
+and the selected linear backend. Dual quality is the state/basic stationarity
+fit (or SparseQR normal residual), not full-space stationarity: Phase I leaves
+the reduced gradient for Phase II instead of duplicating optimization. A Phase II
 zero-iteration termination honestly reports `unselected` because no KKT
 factorization occurred.
 
 On AppleClang 21, arm64 macOS, Release, the rebuilt MIPSolvers
 `test_ipm_solver --rng-seed 1` passed 30 cases and 203 assertions. The rebuilt
-HySim `test_three_phase_hybrid_opf --rng-seed 1` passed 8 cases and 112
-assertions. The focused graph-reduced-to-Full primal-dual transport passed 16
+HySim `test_three_phase_hybrid_opf --rng-seed 1 --reporter compact` passed 11
+cases and 139 assertions. The focused graph-reduced-to-Full primal-dual transport passed 16
 assertions: the Full Phase I violation was approximately `8.08e-15`, Phase II
 requested and accepted the preserved point, and final primal/dual/
 complementarity residuals were approximately `8.08e-15`, `2.56e-7`, and
 `1.00e-7`. This small case terminated before a Phase II KKT factorization, so
 the backend correctly reported `unselected`. The added O(rows + variables)
 audit was not timed against a disabled-audit baseline, so the predeclared
-under-1% performance prediction remains unverified. No full CTest, sanitizer
-run, or Windows package validation was performed for this increment.
+under-1% performance prediction remains unverified.
+
+The added sparse large-case regression has 360 three-phase buses, 1080 phase
+nodes, and 2175 OPF variables. With two Newton iterations, five total
+factorizations, four backtracks per iteration, and a 5000 ms cooperative time
+budget, Phase I used SparseQR and three total factorizations. It reduced the
+original-coordinate violation from `1.0e-3` to `2.66788e-9` in approximately
+1539 ms and produced a `7.81839e-15` dual-fit residual. The full-space
+stationarity was `2.2572`, as expected for a feasible but non-optimal point.
+The zero-factorization and zero-backtracking tests also passed. The
+predeclared `>=2x` restoration-speed prediction has not been measured against
+the removed old path and remains unverified. The rebuilt production
+`run_gui_server` target compiles and exports the Phase I diagnostics, but no
+monolithic phase-hybrid HTTP E2E currently exercises that route. A manual
+probe loaded the three-bus `td_coordination_all_components` fixture, but its
+monolithic OPF request returned the server's generic `Unknown server error`,
+so the runtime JSON contract is not claimed as verified. No full CTest,
+sanitizer run, or Windows package validation was performed for this increment.
 
 ## DER control and reliability-method comparison
 

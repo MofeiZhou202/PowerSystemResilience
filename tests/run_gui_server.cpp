@@ -16774,6 +16774,16 @@ int main(int argc, char** argv) {
 	        phase_opt.tolerance = std::clamp(
 	            opf_request_options.value("feasibility_tol", 1.0e-6),
 	            1.0e-12, 1.0);
+	        phase_opt.phase_one_time_limit_ms = std::clamp(
+	            phase_request.value("phase_one_time_limit_ms", 5000.0),
+	            -1.0, 3600000.0);
+	        phase_opt.phase_one_max_iterations = std::clamp(
+	            phase_request.value("phase_one_max_iterations", 12), 0, 10000);
+	        phase_opt.phase_one_max_factorizations = std::clamp(
+	            phase_request.value("phase_one_max_factorizations", 14),
+	            0, 10000);
+	        phase_opt.phase_one_max_backtracks = std::clamp(
+	            phase_request.value("phase_one_max_backtracks", 12), 0, 100);
 	        phase_opt.verbose = opf_request_options.value("verbose", false);
 	        phase_opt.verify_derivatives =
 	            phase_request.value("verify_derivatives", false);
@@ -16807,12 +16817,30 @@ int main(int argc, char** argv) {
 	        out["solver_backend"] =
 	            phase_opt.backend == hacdcpf::opf::phase_hybrid::SolverBackend::Ipopt
 	                ? "phase_hybrid_ipopt" : "phase_hybrid_native_ipm";
-        out["fallback_used"] = phase_auto_fallback;
-        if (robust_strategy) {
-          out["strategy_effective"] = "robust_phase_warm_start_and_fallback";
-        }
+	        out["fallback_used"] = phase_auto_fallback;
+	        if (robust_strategy) {
+	          out["strategy_effective"] = "robust_phase_warm_start_and_fallback";
+	        }
 	        out["max_constraint_violation_pu"] = phase_result.primal_residual;
 	        out["max_stationarity"] = phase_result.dual_residual;
+	        out["phase_one"] =
+	            json{{"initial_violation", phase_result.phase_one_initial_violation},
+	                 {"primal_violation", phase_result.phase_one_constraint_violation},
+	                 {"full_stationarity", phase_result.initial_dual_residual},
+	                 {"dual_fit_residual", phase_result.phase_one_dual_fit_residual},
+	                 {"primal_feasible", phase_result.phase_one_primal_feasible},
+	                 {"dual_initialized", phase_result.phase_one_dual_initialized},
+	                 {"budget_exhausted", phase_result.phase_one_budget_exhausted},
+	                 {"termination", phase_result.phase_one_termination},
+	                 {"linear_solver", phase_result.phase_one_linear_solver},
+	                 {"iterations", phase_result.phase_one_iterations},
+	                 {"factorizations", phase_result.phase_one_factorizations},
+	                 {"backtracks", phase_result.phase_one_backtracks},
+	                 {"runtime_ms", phase_result.phase_one_runtime_ms},
+	                 {"phase_two_start_requested",
+	                  phase_result.phase_two_start_requested},
+	                 {"phase_two_start_accepted",
+	                  phase_result.phase_two_start_accepted}};
 	        out["vdc"] = phase_result.dc_voltage;
 	        out["dc_bus_results"] = gui_phase_hybrid_dc_bus_results(
 	            phase_model, phase_result.dc_voltage);
@@ -16952,9 +16980,21 @@ int main(int argc, char** argv) {
 	        out["options_effective"] =
 	            json{{"max_iterations", phase_opt.max_iterations},
 	                 {"tolerance", phase_opt.tolerance},
+	                 {"phase_one_time_limit_ms",
+	                  phase_opt.phase_one_time_limit_ms},
+	                 {"phase_one_max_iterations",
+	                  phase_opt.phase_one_max_iterations},
+	                 {"phase_one_max_factorizations",
+	                  phase_opt.phase_one_max_factorizations},
+	                 {"phase_one_max_backtracks",
+	                  phase_opt.phase_one_max_backtracks},
 	                 {"variant", out["analysis_scope"]["phase_graph_variant"]},
-                 {"backend", out["solver_backend"]},
-                 {"warm_start_with_ipopt", phase_opt.warm_start_with_ipopt},
+	                 {"backend", out["solver_backend"]},
+	                 {"warm_start_with_ipopt_requested",
+	                  phase_opt.warm_start_with_ipopt},
+	                 {"warm_start_with_ipopt_effective",
+	                  phase_opt.warm_start_with_ipopt &&
+	                      phase_opt.phase_one_time_limit_ms <= 0.0},
                  {"vuf_max", vuf_max},
 	                 {"constraint_oracle", phase_opt.use_constraint_oracle},
 	                 {"include_shunts", include_shunts}};

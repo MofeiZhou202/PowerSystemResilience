@@ -107,6 +107,15 @@ struct ThreePhaseHybridOPFOptions {
   graph::SparseKronOptions reduction_options{};
   int max_iterations{300};
   double tolerance{1e-7};
+  /// Cooperative wall-clock budget for Phase I. A sparse factorization is an
+  /// indivisible unit and may finish after this deadline; the factorization
+  /// cap below is the hard finite-work bound.
+  double phase_one_time_limit_ms{5000.0};
+  int phase_one_max_iterations{12};
+  int phase_one_max_factorizations{14};
+  int phase_one_max_backtracks{12};
+  /// Legacy unlimited-budget fallback. It is considered only when
+  /// phase_one_time_limit_ms <= 0; finite-budget Phase I never invokes Ipopt.
   bool warm_start_with_ipopt{false};
   bool verify_derivatives{false};
   bool verbose{false};
@@ -160,8 +169,19 @@ struct ThreePhaseHybridOPFResult {
   /// this audit, including variable bounds, at its primal tolerance.
   double phase_one_constraint_violation{
       std::numeric_limits<double>::infinity()};
+  double phase_one_initial_violation{
+      std::numeric_limits<double>::infinity()};
+  double phase_one_dual_fit_residual{
+      std::numeric_limits<double>::infinity()};
   bool phase_one_primal_feasible{false};
   bool phase_one_dual_initialized{false};
+  bool phase_one_budget_exhausted{false};
+  int phase_one_iterations{0};
+  int phase_one_factorizations{0};
+  int phase_one_backtracks{0};
+  double phase_one_runtime_ms{0.0};
+  std::string phase_one_termination{"not-run"};
+  std::string phase_one_linear_solver{"unselected"};
   bool phase_two_start_requested{false};
   bool phase_two_start_accepted{false};
   /// Numeric KKT backend selected by Phase II. "unselected" is valid when

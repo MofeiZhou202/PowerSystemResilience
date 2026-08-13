@@ -11,9 +11,7 @@
 #include <utility>
 
 #include <Eigen/OrderingMethods>
-#include <Eigen/QR>
 #include <Eigen/Sparse>
-#include <Eigen/SparseCholesky>
 #include <Eigen/SparseLU>
 #include <Eigen/SparseQR>
 
@@ -1784,7 +1782,11 @@ void initialize_primal_dual_start(const engine::NLPModel& nlp,
                                   const Eigen::VectorXd* inequality_dual_seed,
                                   const Eigen::VectorXd* slack_seed,
                                   double* initial_dual_residual,
-                                  engine::IPMOptions& options) {
+                                  double* dual_fit_residual,
+                                  engine::IPMOptions& options,
+                                  int max_factorizations =
+                                      std::numeric_limits<int>::max(),
+                                  int* factorization_count = nullptr) {
   const int n = static_cast<int>(nlp.vars.size());
   if (nlp.x0.size() != n || !nlp.x0.allFinite()) return;
 
@@ -1938,8 +1940,11 @@ void initialize_primal_dual_start(const engine::NLPModel& nlp,
       transpose_basis.makeCompressed();
       Eigen::SparseLU<Eigen::SparseMatrix<double>,
                       Eigen::COLAMDOrdering<int>> lu;
+      if (max_factorizations <= 0) return;
       lu.analyzePattern(transpose_basis);
       lu.factorize(transpose_basis);
+      --max_factorizations;
+      if (factorization_count != nullptr) ++*factorization_count;
       if (lu.info() == Eigen::Success) {
         Eigen::VectorXd rhs(equality_count);
         for (int basic = 0; basic < equality_count; ++basic) {
@@ -1958,6 +1963,14 @@ void initialize_primal_dual_start(const engine::NLPModel& nlp,
                 options.inequality_dual_start.cwiseAbs().maxCoeff());
             *initial_dual_residual =
                 stationarity.cwiseAbs().maxCoeff() / multiplier_scale;
+            if (dual_fit_residual != nullptr) {
+              double basic_residual = 0.0;
+              for (int col : basic_columns) {
+                basic_residual =
+                    std::max(basic_residual, std::abs(stationarity[col]));
+              }
+              *dual_fit_residual = basic_residual / multiplier_scale;
+            }
           }
           return;
         }
@@ -1988,6 +2001,14 @@ void initialize_primal_dual_start(const engine::NLPModel& nlp,
         *initial_dual_residual =
             stationarity_without_equalities.cwiseAbs().maxCoeff() /
             multiplier_scale;
+        if (dual_fit_residual != nullptr) {
+          const Eigen::VectorXd normal_residual =
+              equality_jacobian * stationarity_without_equalities;
+          *dual_fit_residual =
+              (normal_residual.size() > 0
+                   ? normal_residual.cwiseAbs().maxCoeff() : 0.0) /
+              multiplier_scale;
+        }
       }
       return;
     }
@@ -2055,15 +2076,10 @@ void initialize_primal_dual_start(const engine::NLPModel& nlp,
   }
   Eigen::VectorXd scaled_dual;
   bool solved_dual = false;
-  if (n <= 2000) {
-    Eigen::CompleteOrthogonalDecomposition<Eigen::MatrixXd> solver{
-        Eigen::MatrixXd(stationarity_matrix)};
-    solver.setThreshold(1e-14);
-    scaled_dual = solver.solve(-recovery_rhs);
-    solved_dual = scaled_dual.allFinite();
-  } else {
+  if (max_factorizations > 0) {
     Eigen::SparseQR<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>> qr;
     qr.compute(stationarity_matrix);
+    if (factorization_count != nullptr) ++*factorization_count;
     if (qr.info() != Eigen::Success) return;
     scaled_dual = qr.solve(-recovery_rhs);
     solved_dual = qr.info() == Eigen::Success && scaled_dual.allFinite();
@@ -2086,14 +2102,37 @@ void initialize_primal_dual_start(const engine::NLPModel& nlp,
           options.inequality_dual_start.cwiseAbs().maxCoeff());
       *initial_dual_residual =
           stationarity.cwiseAbs().maxCoeff() / multiplier_scale;
+      if (dual_fit_residual != nullptr) {
+        const Eigen::VectorXd normal_residual =
+            equality_jacobian * stationarity;
+        *dual_fit_residual =
+            (normal_residual.size() > 0
+                 ? normal_residual.cwiseAbs().maxCoeff() : 0.0) /
+            multiplier_scale;
+      }
     }
   }
 }
 
-bool restore_primal_feasibility(const engine::NLPModel& nlp,
-                                Eigen::VectorXd& x,
-                                double tolerance) {
-  const auto physical_residual = [&](const Eigen::VectorXd& point) {
+struct PhaseOneRestorationResult {
+  bool converged{false};
+  bool budget_exhausted{false};
+  int iterations{0};
+  int factorizations{0};
+  int backtracks{0};
+  double initial_violation{std::numeric_limits<double>::infinity()};
+  double final_violation{std::numeric_limits<double>::infinity()};
+  double runtime_ms{0.0};
+  std::string termination{"invalid-start"};
+  std::string linear_solver{"unselected"};
+};
+
+double phase_one_violation(const engine::NLPModel& nlp,
+                           const Eigen::VectorXd& point) {
+  double violation = 0.0;
+  if (nlp.original_constraint_violation) {
+    violation = nlp.original_constraint_violation(point);
+  } else {
     Eigen::VectorXd equality;
     Eigen::VectorXd inequality;
     nlp.g(point, equality);
@@ -2102,20 +2141,110 @@ bool restore_primal_feasibility(const engine::NLPModel& nlp,
         ? equality.cwiseAbs().maxCoeff() : 0.0;
     const double ineq = inequality.size() > 0
         ? std::max(0.0, inequality.maxCoeff()) : 0.0;
-    return std::max(eq, ineq);
-  };
+    violation = std::max(eq, ineq);
+  }
+  if (!std::isfinite(violation) || violation < 0.0) {
+    return std::numeric_limits<double>::infinity();
+  }
+  for (int col = 0; col < point.size(); ++col) {
+    const auto& variable = nlp.vars[static_cast<std::size_t>(col)];
+    if (engine::variable_has_finite_lower_bound(variable.lb)) {
+      violation = std::max(
+          violation, std::max(0.0, variable.lb - point[col]));
+    }
+    if (engine::variable_has_finite_upper_bound(variable.ub)) {
+      violation = std::max(
+          violation, std::max(0.0, point[col] - variable.ub));
+    }
+  }
+  return violation;
+}
 
-  double residual = physical_residual(x);
-  for (int iteration = 0; iteration < 30 && residual > tolerance; ++iteration) {
+PhaseOneRestorationResult restore_primal_feasibility(
+    const engine::NLPModel& nlp,
+    Eigen::VectorXd& x,
+    double tolerance,
+    int max_iterations,
+    int max_factorizations,
+    int max_backtracks,
+    double time_limit_ms) {
+  PhaseOneRestorationResult result;
+  const auto started = std::chrono::steady_clock::now();
+  const auto elapsed_ms = [&]() {
+    return std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+  };
+  if (x.size() != static_cast<int>(nlp.vars.size()) || !x.allFinite()) {
+    return result;
+  }
+
+  double residual = phase_one_violation(nlp, x);
+  result.initial_violation = residual;
+  Eigen::VectorXd best_x = x;
+  double best_residual = residual;
+
+  const int n = static_cast<int>(nlp.vars.size());
+  Eigen::VectorXd initial_equalities;
+  nlp.g(x, initial_equalities);
+  const int equality_count = static_cast<int>(initial_equalities.size());
+  std::vector<int> basic_columns;
+  std::vector<int> variable_to_basic(static_cast<std::size_t>(n), -1);
+  bool valid_partition = equality_count <= n &&
+      static_cast<int>(nlp.equality_free_columns.size()) == n - equality_count;
+  if (valid_partition) {
+    std::vector<bool> is_free(static_cast<std::size_t>(n), false);
+    for (int col : nlp.equality_free_columns) {
+      if (col < 0 || col >= n || is_free[static_cast<std::size_t>(col)]) {
+        valid_partition = false;
+        break;
+      }
+      is_free[static_cast<std::size_t>(col)] = true;
+    }
+    if (valid_partition) {
+      basic_columns.reserve(static_cast<std::size_t>(equality_count));
+      for (int col = 0; col < n; ++col) {
+        if (!is_free[static_cast<std::size_t>(col)]) {
+          variable_to_basic[static_cast<std::size_t>(col)] =
+              static_cast<int>(basic_columns.size());
+          basic_columns.push_back(col);
+        }
+      }
+      valid_partition =
+          static_cast<int>(basic_columns.size()) == equality_count;
+    }
+  }
+
+  Eigen::SparseLU<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>>
+      basis_solver;
+  bool basis_pattern_analyzed = false;
+  for (; result.iterations < std::max(0, max_iterations) &&
+         residual > tolerance;) {
+    if (result.factorizations >= std::max(0, max_factorizations)) {
+      result.budget_exhausted = true;
+      result.termination = "factorization-budget";
+      break;
+    }
+    if (time_limit_ms > 0.0 && elapsed_ms() >= time_limit_ms) {
+      result.budget_exhausted = true;
+      result.termination = "time-budget";
+      break;
+    }
+
     Eigen::VectorXd equality;
     Eigen::SparseMatrix<double> jacobian;
     nlp.g(x, equality);
     nlp.jac_g(x, jacobian);
+    if (!equality.allFinite() || jacobian.rows() != equality_count ||
+        jacobian.cols() != n) {
+      result.termination = "invalid-jacobian";
+      break;
+    }
     Eigen::VectorXd row_scale = Eigen::VectorXd::Ones(equality.size());
     for (int col = 0; col < jacobian.outerSize(); ++col) {
       for (Eigen::SparseMatrix<double>::InnerIterator it(jacobian, col);
            it; ++it) {
-        row_scale[it.row()] = std::max(row_scale[it.row()], std::abs(it.value()));
+        row_scale[it.row()] =
+            std::max(row_scale[it.row()], std::abs(it.value()));
       }
     }
     row_scale = row_scale.cwiseInverse();
@@ -2127,50 +2256,125 @@ bool restore_primal_feasibility(const engine::NLPModel& nlp,
     }
     const Eigen::VectorXd scaled_equality =
         row_scale.cwiseProduct(equality);
-    Eigen::VectorXd step;
-    if (x.size() <= 2000) {
-      Eigen::CompleteOrthogonalDecomposition<Eigen::MatrixXd> solver{
-          Eigen::MatrixXd(jacobian)};
-      solver.setThreshold(1e-12);
-      step = solver.solve(-scaled_equality);
-    } else {
-      Eigen::SparseMatrix<double> normal = jacobian * jacobian.transpose();
-      for (int row = 0; row < normal.rows(); ++row) {
-        normal.coeffRef(row, row) += 1e-10;
+    Eigen::VectorXd step = Eigen::VectorXd::Zero(n);
+    bool solved_step = false;
+    if (valid_partition) {
+      // Nocedal--Wright (2006), Section 11.1: hold the independent control
+      // variables fixed and solve the square state/basic Newton correction.
+      std::vector<Triplet> basis_trips;
+      basis_trips.reserve(static_cast<std::size_t>(jacobian.nonZeros()));
+      for (int col = 0; col < jacobian.outerSize(); ++col) {
+        const int basic = variable_to_basic[static_cast<std::size_t>(col)];
+        if (basic < 0) continue;
+        for (Eigen::SparseMatrix<double>::InnerIterator it(jacobian, col);
+             it; ++it) {
+          basis_trips.emplace_back(it.row(), basic, it.value());
+        }
       }
-      normal.makeCompressed();
-      Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>> solver;
-      solver.compute(normal);
-      if (solver.info() != Eigen::Success) return false;
-      const Eigen::VectorXd dual_step = solver.solve(-scaled_equality);
-      if (solver.info() != Eigen::Success || !dual_step.allFinite()) return false;
-      step = jacobian.transpose() * dual_step;
+      Eigen::SparseMatrix<double> basis(equality_count, equality_count);
+      basis.setFromTriplets(basis_trips.begin(), basis_trips.end());
+      basis.makeCompressed();
+      if (!basis_pattern_analyzed) {
+        basis_solver.analyzePattern(basis);
+        basis_pattern_analyzed = basis_solver.info() == Eigen::Success;
+      }
+      if (basis_pattern_analyzed) {
+        basis_solver.factorize(basis);
+        ++result.factorizations;
+        if (basis_solver.info() == Eigen::Success) {
+          const Eigen::VectorXd basic_step =
+              basis_solver.solve(-scaled_equality);
+          if (basis_solver.info() == Eigen::Success &&
+              basic_step.allFinite()) {
+            for (int basic = 0; basic < equality_count; ++basic) {
+              step[basic_columns[static_cast<std::size_t>(basic)]] =
+                  basic_step[basic];
+            }
+            solved_step = true;
+            result.linear_solver = "sparse-basis-lu";
+          }
+        }
+      }
     }
-    if (!step.allFinite()) return false;
+    if (!solved_step) {
+      if (time_limit_ms > 0.0 && elapsed_ms() >= time_limit_ms) {
+        result.budget_exhausted = true;
+        result.termination = "time-budget";
+        break;
+      }
+      if (result.factorizations >= std::max(0, max_factorizations)) {
+        result.budget_exhausted = true;
+        result.termination = "factorization-budget";
+        break;
+      }
+      // Nocedal--Wright (2006), Section 11.1: solve the rectangular Newton
+      // correction directly. Sparse QR avoids both dense materialization and
+      // the squared conditioning/fill of J*J^T normal equations.
+      Eigen::SparseQR<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>>
+          qr;
+      qr.compute(jacobian);
+      ++result.factorizations;
+      if (qr.info() != Eigen::Success) {
+        result.termination = "singular-jacobian";
+        break;
+      }
+      step = qr.solve(-scaled_equality);
+      solved_step = qr.info() == Eigen::Success && step.allFinite();
+      if (solved_step) result.linear_solver = "sparse-qr";
+    }
+    ++result.iterations;
+    if (!solved_step) {
+      result.termination = "linear-solve-failed";
+      break;
+    }
 
     bool accepted = false;
     double alpha = 1.0;
-    for (int line_search = 0; line_search < 24; ++line_search) {
+    const int backtrack_limit = std::max(0, max_backtracks);
+    for (int line_search = 0; line_search <= backtrack_limit;
+         ++line_search) {
       Eigen::VectorXd trial = x + alpha * step;
-      bool finite = trial.allFinite();
-      for (int col = 0; col < trial.size() && finite; ++col) {
+      for (int col = 0; col < trial.size(); ++col) {
         const auto& variable = nlp.vars[static_cast<std::size_t>(col)];
         trial[col] = std::min(variable.ub, std::max(variable.lb, trial[col]));
       }
-      if (finite) {
-        const double trial_residual = physical_residual(trial);
-        if (trial_residual < residual) {
-          x = trial;
-          residual = trial_residual;
-          accepted = true;
-          break;
+      const double trial_residual = phase_one_violation(nlp, trial);
+      // Deuflhard (2011), Sections 2.2--2.3: monotone damped Newton accepts
+      // only a strict residual improvement; no Phase-II filter is duplicated.
+      if (std::isfinite(trial_residual) && trial_residual < residual) {
+        x = std::move(trial);
+        residual = trial_residual;
+        if (residual < best_residual) {
+          best_residual = residual;
+          best_x = x;
         }
+        accepted = true;
+        break;
       }
-      alpha *= 0.5;
+      if (line_search < backtrack_limit) {
+        ++result.backtracks;
+        alpha *= 0.5;
+      }
     }
-    if (!accepted) return false;
+    if (!accepted) {
+      result.termination = "no-decreasing-step";
+      break;
+    }
   }
-  return residual <= tolerance;
+  x = std::move(best_x);
+  result.final_violation = best_residual;
+  result.converged = std::isfinite(best_residual) &&
+                     best_residual <= tolerance;
+  if (result.converged) {
+    result.termination = "certified";
+  } else if (result.termination == "invalid-start") {
+    result.budget_exhausted =
+        result.iterations >= std::max(0, max_iterations);
+    result.termination = result.budget_exhausted
+        ? "iteration-budget" : "incomplete";
+  }
+  result.runtime_ms = elapsed_ms();
+  return result;
 }
 
 double max_vuf(const ThreePhaseHybridOPFCase& c,
@@ -2576,25 +2780,22 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf_impl(
 
   engine::SolveResult solved;
   engine::IPMDetail detail;
-  double initial_dual_residual = 0.0;
+  double initial_dual_residual = std::numeric_limits<double>::infinity();
+  double phase_one_dual_fit_residual =
+      std::numeric_limits<double>::infinity();
   double phase_one_constraint_violation =
       std::numeric_limits<double>::infinity();
   double phase_one_tolerance = 0.0;
   bool phase_one_dual_initialized = false;
+  PhaseOneRestorationResult phase_one_result;
   const auto start = std::chrono::steady_clock::now();
   if (options.backend == SolverBackend::NativeIPM) {
-    const auto primal_residual = [&](const Eigen::VectorXd& point) {
-      Eigen::VectorXd equalities;
-      Eigen::VectorXd inequalities;
-      nlp.g(point, equalities);
-      nlp.h(point, inequalities);
-      return std::max(
-          equalities.size() > 0
-              ? equalities.cwiseAbs().maxCoeff() : 0.0,
-          inequalities.size() > 0
-              ? std::max(0.0, inequalities.maxCoeff()) : 0.0);
+    const auto phase_one_started = std::chrono::steady_clock::now();
+    const auto phase_one_elapsed_ms = [&]() {
+      return std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - phase_one_started).count();
     };
-    double start_primal_residual = primal_residual(nlp.x0);
+    double start_primal_residual = phase_one_violation(nlp, nlp.x0);
     log_stage("initial residual=" + std::to_string(start_primal_residual));
     if (options.verbose) {
       Eigen::VectorXd debug_equalities;
@@ -2632,21 +2833,28 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf_impl(
       }
     }
 
-    // Phase I constructs a feasible primal point and a central primal-dual
-    // state. Phase II may preserve that point only if the independent
-    // MIPSolvers audit accepts it at this same tolerance.
+    // Phase I constructs a feasible primal point and fits multipliers on the
+    // state/basic equations. It intentionally leaves the control-space
+    // reduced gradient for Phase II. Phase II may preserve the primal point
+    // only if the independent MIPSolvers audit accepts the same tolerance.
     phase_one_tolerance = std::min(options.tolerance, 1e-7);
     log_stage("Phase I primal restoration: start");
     Eigen::VectorXd restored_start = nlp.x0;
-    bool restored = restore_primal_feasibility(
-        nlp, restored_start, phase_one_tolerance);
+    phase_one_result = restore_primal_feasibility(
+        nlp, restored_start, phase_one_tolerance,
+        options.phase_one_max_iterations,
+        options.phase_one_max_factorizations,
+        options.phase_one_max_backtracks,
+        options.phase_one_time_limit_ms);
     if (restored_start.allFinite()) nlp.x0 = std::move(restored_start);
-    start_primal_residual = primal_residual(nlp.x0);
-    log_stage(std::string("Phase I primal restoration: ") +
-              (restored ? "converged" : "incomplete") + " (p=" +
+    start_primal_residual = phase_one_violation(nlp, nlp.x0);
+    log_stage("Phase I primal restoration: " +
+              phase_one_result.termination + " (p=" +
               std::to_string(start_primal_residual) + ")");
 
-    if (options.warm_start_with_ipopt && start_primal_residual > 1e-5) {
+    if (options.warm_start_with_ipopt &&
+        options.phase_one_time_limit_ms <= 0.0 &&
+        start_primal_residual > 1e-5) {
       log_stage("Ipopt warm solve: start");
       engine::IpoptAdapter ipopt;
       engine::NLPModel feasibility_nlp = nlp;
@@ -2662,12 +2870,32 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf_impl(
       if (warm.x.size() == data->layout.nvar && warm.x.allFinite()) nlp.x0 = warm.x;
       log_stage("post-Ipopt Phase I primal restoration: start");
       restored_start = nlp.x0;
-      restored = restore_primal_feasibility(
-          nlp, restored_start, phase_one_tolerance);
+      const PhaseOneRestorationResult post_ipopt_result =
+          restore_primal_feasibility(
+              nlp, restored_start, phase_one_tolerance,
+              std::max(0, options.phase_one_max_iterations -
+                              phase_one_result.iterations),
+              std::max(0, options.phase_one_max_factorizations -
+                              phase_one_result.factorizations),
+              options.phase_one_max_backtracks,
+              options.phase_one_time_limit_ms);
       if (restored_start.allFinite()) nlp.x0 = std::move(restored_start);
-      log_stage(std::string("post-Ipopt Phase I primal restoration: ") +
-                (restored ? "converged" : "incomplete") + " (p=" +
-                std::to_string(primal_residual(nlp.x0)) + ")");
+      phase_one_result.converged = post_ipopt_result.converged;
+      phase_one_result.budget_exhausted =
+          phase_one_result.budget_exhausted ||
+          post_ipopt_result.budget_exhausted;
+      phase_one_result.iterations += post_ipopt_result.iterations;
+      phase_one_result.factorizations += post_ipopt_result.factorizations;
+      phase_one_result.backtracks += post_ipopt_result.backtracks;
+      phase_one_result.final_violation = post_ipopt_result.final_violation;
+      phase_one_result.termination = post_ipopt_result.termination;
+      if (post_ipopt_result.linear_solver != "unselected") {
+        phase_one_result.linear_solver = post_ipopt_result.linear_solver;
+      }
+      start_primal_residual = phase_one_violation(nlp, nlp.x0);
+      log_stage("post-Ipopt Phase I primal restoration: " +
+                phase_one_result.termination + " (p=" +
+                std::to_string(start_primal_residual) + ")");
     }
     engine::IPMOptions ipm_options;
     ipm_options.max_iter = options.max_iterations;
@@ -2708,25 +2936,35 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf_impl(
         selected_slack_seed.size() == enforced_count
             ? &selected_slack_seed : nullptr;
     log_stage("dual initialization: start");
-    initialize_primal_dual_start(nlp, equality_dual_seed,
-                                 inequality_dual_seed, slack_seed,
-                                 &initial_dual_residual, ipm_options);
-    phase_one_constraint_violation =
-        nlp.original_constraint_violation(nlp.x0);
-    for (int col = 0; col < nlp.x0.size(); ++col) {
-      const auto& variable = nlp.vars[static_cast<std::size_t>(col)];
-      if (engine::variable_has_finite_lower_bound(variable.lb)) {
-        phase_one_constraint_violation = std::max(
-            phase_one_constraint_violation,
-            std::max(0.0, variable.lb - nlp.x0[col]));
-      }
-      if (engine::variable_has_finite_upper_bound(variable.ub)) {
-        phase_one_constraint_violation = std::max(
-            phase_one_constraint_violation,
-            std::max(0.0, nlp.x0[col] - variable.ub));
+    int dual_factorizations = 0;
+    int remaining_factorizations = std::max(
+        0, options.phase_one_max_factorizations -
+               phase_one_result.factorizations);
+    if (options.phase_one_time_limit_ms > 0.0 &&
+        phase_one_elapsed_ms() >= options.phase_one_time_limit_ms) {
+      remaining_factorizations = 0;
+      phase_one_result.budget_exhausted = true;
+      if (phase_one_result.converged) {
+        phase_one_result.termination = "time-budget-after-primal";
       }
     }
+    initialize_primal_dual_start(nlp, equality_dual_seed,
+                                 inequality_dual_seed, slack_seed,
+                                 &initial_dual_residual,
+                                 &phase_one_dual_fit_residual, ipm_options,
+                                 remaining_factorizations,
+                                 &dual_factorizations);
+    phase_one_result.factorizations += dual_factorizations;
+    phase_one_result.runtime_ms = phase_one_elapsed_ms();
+    phase_one_constraint_violation = phase_one_violation(nlp, nlp.x0);
+    // docs/OptimalPowerFlow/chapters/three_phase.tex,
+    // eq. (phase-one-dual-fit): certify the state/basic multiplier fit, not
+    // full stationarity, which retains Phase II's reduced-gradient signal.
+    const double dual_quality_tolerance =
+        std::max(1e-6, 10.0 * options.tolerance);
     phase_one_dual_initialized =
+        std::isfinite(phase_one_dual_fit_residual) &&
+        phase_one_dual_fit_residual <= dual_quality_tolerance &&
         ipm_options.equality_dual_start.size() == data->layout.neq &&
         ipm_options.equality_dual_start.allFinite() &&
         ipm_options.inequality_dual_start.size() > 0 &&
@@ -2736,6 +2974,14 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf_impl(
         ipm_options.slack_start.allFinite() &&
         (ipm_options.inequality_dual_start.array() > 0.0).all() &&
         (ipm_options.slack_start.array() > 0.0).all();
+    if (!phase_one_dual_initialized &&
+        phase_one_result.factorizations >=
+            std::max(0, options.phase_one_max_factorizations)) {
+      phase_one_result.budget_exhausted = true;
+      if (phase_one_result.converged) {
+        phase_one_result.termination = "factorization-budget-after-primal";
+      }
+    }
     log_stage("Phase I dual initialization: done (d=" +
               std::to_string(initial_dual_residual) + ")");
     engine::NativeIPMAdapter native(ipm_options);
@@ -2757,6 +3003,7 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf_impl(
     double recovered_dual_residual = 0.0;
     initialize_primal_dual_start(recovery_nlp, nullptr, nullptr, nullptr,
                                  &recovered_dual_residual,
+                                 nullptr,
                                  recovery_options);
     if (recovered_dual_residual <= 1e-6 &&
         recovery_options.equality_dual_start.size() == data->layout.neq) {
@@ -2780,11 +3027,25 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf_impl(
   result.runtime_ms = runtime_ms;
   result.initial_dual_residual = initial_dual_residual;
   result.phase_one_constraint_violation = phase_one_constraint_violation;
+  result.phase_one_initial_violation = phase_one_result.initial_violation;
+  result.phase_one_dual_fit_residual = phase_one_dual_fit_residual;
   result.phase_one_primal_feasible =
       options.backend == SolverBackend::NativeIPM &&
       std::isfinite(phase_one_constraint_violation) &&
       phase_one_constraint_violation <= phase_one_tolerance;
   result.phase_one_dual_initialized = phase_one_dual_initialized;
+  result.phase_one_budget_exhausted =
+      phase_one_result.budget_exhausted ||
+      (options.backend == SolverBackend::NativeIPM &&
+       !phase_one_dual_initialized &&
+       phase_one_result.factorizations >=
+           std::max(0, options.phase_one_max_factorizations));
+  result.phase_one_iterations = phase_one_result.iterations;
+  result.phase_one_factorizations = phase_one_result.factorizations;
+  result.phase_one_backtracks = phase_one_result.backtracks;
+  result.phase_one_runtime_ms = phase_one_result.runtime_ms;
+  result.phase_one_termination = phase_one_result.termination;
+  result.phase_one_linear_solver = phase_one_result.linear_solver;
   result.phase_two_start_requested =
       detail.primal_feasible_start_requested;
   result.phase_two_start_accepted =
