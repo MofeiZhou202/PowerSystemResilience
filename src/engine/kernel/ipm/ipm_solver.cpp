@@ -26,7 +26,6 @@
 namespace mipsolvers::engine {
 namespace {
 
-constexpr double kBoundInfinity = 1e19;
 // Numerical interior floor. This must remain well below
 // tol_complementarity / ||mu||_inf; otherwise active constraints acquire an
 // artificial complementarity floor s_i*mu_i above the requested KKT tolerance.
@@ -34,10 +33,6 @@ constexpr double kMinPositive = 1e-12;
 constexpr double kMinReg = 1e-9;
 constexpr double kMaxReg = 1e-2;
 constexpr int kMaxBacktracks = 20;
-
-bool is_effectively_finite(double value) {
-  return std::isfinite(value) && std::abs(value) < kBoundInfinity;
-}
 
 double inf_norm(const Eigen::VectorXd& v) {
   return (v.size() == 0) ? 0.0 : v.cwiseAbs().maxCoeff();
@@ -1046,8 +1041,8 @@ void interiorize_initial_point(const std::vector<VariableMeta>& vars, Eigen::Vec
     const double ub = vars[static_cast<size_t>(i)].ub;
     if (!std::isfinite(x[i])) x[i] = 0.0;
 
-    const bool has_lb = is_effectively_finite(lb);
-    const bool has_ub = is_effectively_finite(ub);
+    const bool has_lb = variable_has_finite_lower_bound(lb);
+    const bool has_ub = variable_has_finite_upper_bound(ub);
     if (has_lb && has_ub) {
       const double width = ub - lb;
       const double scale = std::max({1.0, std::abs(lb), std::abs(ub)});
@@ -1304,6 +1299,7 @@ struct FilterSolveOutcome {
   std::vector<int> lb_cols;
   std::vector<int> ub_cols;
   NewtonStructureProfile newton_profile;
+  std::string linear_solver_backend{"unselected"};
   int symbolic_analyses{0};
   int numeric_factorizations{0};
   int linear_solves{0};
@@ -1311,6 +1307,11 @@ struct FilterSolveOutcome {
   int inertia_retry_factorizations{0};
   int inertia_certificate_factorizations{0};
   int active_set_polish_factorizations{0};
+  int accepted_steps{0};
+  int rejected_steps{0};
+  int trial_value_evaluations{0};
+  int trial_full_derivative_evaluations{0};
+  int trial_rejections_before_derivatives{0};
 };
 
 struct ActiveSetPolishOutcome {
@@ -1728,15 +1729,19 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
   FilterSolveOutcome result;
   const int n = static_cast<int>(prob.vars.size());
   Eigen::VectorXd x = (prob.x0.size() == n) ? prob.x0 : Eigen::VectorXd::Zero(n);
-  interiorize_initial_point(prob.vars, x);
+  if (!opt.primal_feasible_start && !opt.preserve_initial_point) {
+    interiorize_initial_point(prob.vars, x);
+  }
 
   std::vector<int> lb_cols;
   std::vector<int> ub_cols;
   lb_cols.reserve(static_cast<size_t>(n));
   ub_cols.reserve(static_cast<size_t>(n));
   for (int j = 0; j < n; ++j) {
-    if (is_effectively_finite(prob.vars[static_cast<size_t>(j)].lb)) lb_cols.push_back(j);
-    if (is_effectively_finite(prob.vars[static_cast<size_t>(j)].ub)) ub_cols.push_back(j);
+    if (variable_has_finite_lower_bound(
+            prob.vars[static_cast<size_t>(j)].lb)) lb_cols.push_back(j);
+    if (variable_has_finite_upper_bound(
+            prob.vars[static_cast<size_t>(j)].ub)) ub_cols.push_back(j);
   }
   result.lb_cols = lb_cols;
   result.ub_cols = ub_cols;
@@ -1860,6 +1865,11 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
   int retired_linear_solves = 0;
   int inertia_retry_factorizations = 0;
   int active_set_polish_factorizations = 0;
+  int accepted_steps = 0;
+  int rejected_steps = 0;
+  int trial_value_evaluations = 0;
+  int trial_full_derivative_evaluations = 0;
+  int trial_rejections_before_derivatives = 0;
   int total_iters = 0;
   int outer_iters = 0;
   const int max_outer = 60;
@@ -1890,6 +1900,10 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
     result.objective = state.obj_orig;
     result.newton_profile = newton_profile;
     if (newton_profile.selected == "augmented") {
+      if (augmented_cache.kkt.solver) {
+        result.linear_solver_backend =
+            augmented_cache.kkt.solver->backend_name();
+      }
       result.symbolic_analyses =
           retired_symbolic_analyses + augmented_cache.kkt.symbolic_analyses;
       result.numeric_factorizations =
@@ -1898,6 +1912,10 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
       result.linear_solves =
           retired_linear_solves + augmented_cache.kkt.linear_solves;
     } else if (opt.use_inertia_correction) {
+      if (kkt_cache.augmented.solver) {
+        result.linear_solver_backend =
+            kkt_cache.augmented.solver->backend_name();
+      }
       result.symbolic_analyses =
           retired_symbolic_analyses + kkt_cache.augmented.symbolic_analyses;
       result.numeric_factorizations =
@@ -1906,6 +1924,10 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
       result.linear_solves =
           retired_linear_solves + kkt_cache.augmented.linear_solves;
     } else {
+      if (regularized_kkt_cache.solver) {
+        result.linear_solver_backend =
+            regularized_kkt_cache.solver->backend_name();
+      }
       result.symbolic_analyses =
           retired_symbolic_analyses + regularized_kkt_cache.symbolic_analyses;
       result.numeric_factorizations =
@@ -1923,6 +1945,13 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
                result.active_set_polish_factorizations);
     result.inertia_certificate_factorizations =
         kkt_cache.primal_numeric_factorizations;
+    result.accepted_steps = accepted_steps;
+    result.rejected_steps = rejected_steps;
+    result.trial_value_evaluations = trial_value_evaluations;
+    result.trial_full_derivative_evaluations =
+        trial_full_derivative_evaluations;
+    result.trial_rejections_before_derivatives =
+        trial_rejections_before_derivatives;
   };
 
   for (; outer_iters < max_outer && total_iters < max_total; ++outer_iters) {
@@ -2410,9 +2439,12 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
         }
 
         TrialPoint trial;
+        ++trial_value_evaluations;
         if (!evaluate_filter_trial_values(prob, lb_cols, ub_cols,
                                           x_trial, s_trial, lambda_trial,
                                           mu_trial, eval_status, trial)) {
+          ++rejected_steps;
+          ++trial_rejections_before_derivatives;
           alpha *= 0.5;
           continue;
         }
@@ -2519,6 +2551,9 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
                     << '\n' << std::flush;
         }
 
+        ++rejected_steps;
+        ++trial_rejections_before_derivatives;
+
         // Second-order correction: on the very first rejection, if θ is the
         // blocker (θ_trial > θ_k), resolve the KKT with RHS
         //   (rhs_x, −(α · g + g(x + α dx)))
@@ -2581,6 +2616,7 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
               const Eigen::VectorXd mu_soc_trial =
                   mu_ineq + trial_alpha_dual * dmu_ineq + dmu_soc_extra;
               TrialPoint soc_trial;
+              ++trial_value_evaluations;
               if (evaluate_filter_trial_values(prob, lb_cols, ub_cols,
                                                x_soc_trial, s_soc_trial,
                                                lambda_soc_trial, mu_soc_trial,
@@ -2616,6 +2652,11 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
                   accepted = true;
                   break;
                 }
+                ++rejected_steps;
+                ++trial_rejections_before_derivatives;
+              } else {
+                ++rejected_steps;
+                ++trial_rejections_before_derivatives;
               }
             }
           }
@@ -2671,6 +2712,7 @@ FilterSolveOutcome solve_nlp_filter_impl(const NLPModel& prob,
       }
 
       // Apply one coherent primal-dual trial accepted by the same gate.
+      ++accepted_steps;
       x = accepted_trial.x;
       s = accepted_trial.s;
       lambda = accepted_trial.lambda;
@@ -2778,8 +2820,8 @@ bool try_ipopt_fallback(const NLPModel& prob,
   std::vector<int> ub_cols;
   for (int col = 0; col < fallback.x.size(); ++col) {
     const auto& var = prob.vars[static_cast<std::size_t>(col)];
-    if (is_effectively_finite(var.lb)) lb_cols.push_back(col);
-    if (is_effectively_finite(var.ub)) ub_cols.push_back(col);
+    if (variable_has_finite_lower_bound(var.lb)) lb_cols.push_back(col);
+    if (variable_has_finite_upper_bound(var.ub)) ub_cols.push_back(col);
   }
 
   const int mineq = mnlin + static_cast<int>(lb_cols.size()) +
@@ -2906,8 +2948,9 @@ bool build_fixed_nlp_reduction(const NLPModel& original,
 
   for (int col = 0; col < n; ++col) {
     const VariableMeta& var = original.vars[static_cast<std::size_t>(col)];
-    const bool fixed = is_effectively_finite(var.lb) &&
-                       is_effectively_finite(var.ub) && var.lb == var.ub;
+    const bool fixed = variable_has_finite_lower_bound(var.lb) &&
+                       variable_has_finite_upper_bound(var.ub) &&
+                       var.lb == var.ub;
     if (fixed) {
       candidate->fixed_values[col] = var.lb;
     } else {
@@ -2928,6 +2971,8 @@ bool build_fixed_nlp_reduction(const NLPModel& original,
   reduced = NLPModel{};
   reduced.sense = original.sense;
   reduced.solver_options = original.solver_options;
+  reduced.nonlinear_inequality_names =
+      original.nonlinear_inequality_names;
   reduced.vars.reserve(candidate->reduced_to_original.size());
   for (int original_col : candidate->reduced_to_original) {
     reduced.vars.push_back(original.vars[static_cast<std::size_t>(original_col)]);
@@ -2997,6 +3042,12 @@ bool build_fixed_nlp_reduction(const NLPModel& original,
       jac = gather_sparse_columns(full, *candidate);
     };
   }
+  if (original.original_constraint_violation) {
+    reduced.original_constraint_violation =
+        [&original, candidate](const Eigen::VectorXd& x) {
+          return original.original_constraint_violation(candidate->expand(x));
+        };
+  }
 
   std::vector<int> reduced_free_columns;
   reduced_free_columns.reserve(original.equality_free_columns.size());
@@ -3014,7 +3065,8 @@ bool build_fixed_nlp_reduction(const NLPModel& original,
 std::vector<int> finite_lower_bound_columns(const NLPModel& prob) {
   std::vector<int> columns;
   for (int col = 0; col < static_cast<int>(prob.vars.size()); ++col) {
-    if (is_effectively_finite(prob.vars[static_cast<std::size_t>(col)].lb)) {
+    if (variable_has_finite_lower_bound(
+            prob.vars[static_cast<std::size_t>(col)].lb)) {
       columns.push_back(col);
     }
   }
@@ -3024,7 +3076,8 @@ std::vector<int> finite_lower_bound_columns(const NLPModel& prob) {
 std::vector<int> finite_upper_bound_columns(const NLPModel& prob) {
   std::vector<int> columns;
   for (int col = 0; col < static_cast<int>(prob.vars.size()); ++col) {
-    if (is_effectively_finite(prob.vars[static_cast<std::size_t>(col)].ub)) {
+    if (variable_has_finite_upper_bound(
+            prob.vars[static_cast<std::size_t>(col)].ub)) {
       columns.push_back(col);
     }
   }
@@ -3033,13 +3086,22 @@ std::vector<int> finite_upper_bound_columns(const NLPModel& prob) {
 
 double raw_primal_violation(const NLPModel& prob, const Eigen::VectorXd& x) {
   double violation = 0.0;
-  if (prob.g) {
+  // Original-coordinate callbacks take precedence over solver-coordinate
+  // callbacks, while bound residuals remain independently audited. See
+  // docs/native_ipm_windows_integration_2026-08-13.md, "Restored starts".
+  if (prob.original_constraint_violation) {
+    const double original_violation = prob.original_constraint_violation(x);
+    if (!std::isfinite(original_violation) || original_violation < 0.0) {
+      return std::numeric_limits<double>::infinity();
+    }
+    violation = original_violation;
+  } else if (prob.g) {
     Eigen::VectorXd equality;
     prob.g(x, equality);
     if (!equality.allFinite()) return std::numeric_limits<double>::infinity();
     violation = std::max(violation, inf_norm(equality));
   }
-  if (prob.h) {
+  if (!prob.original_constraint_violation && prob.h) {
     Eigen::VectorXd inequality;
     prob.h(x, inequality);
     if (!inequality.allFinite()) return std::numeric_limits<double>::infinity();
@@ -3049,10 +3111,10 @@ double raw_primal_violation(const NLPModel& prob, const Eigen::VectorXd& x) {
   }
   for (int col = 0; col < static_cast<int>(prob.vars.size()); ++col) {
     const auto& variable = prob.vars[static_cast<std::size_t>(col)];
-    if (is_effectively_finite(variable.lb)) {
+    if (variable_has_finite_lower_bound(variable.lb)) {
       violation = std::max(violation, variable.lb - x[col]);
     }
-    if (is_effectively_finite(variable.ub)) {
+    if (variable_has_finite_upper_bound(variable.ub)) {
       violation = std::max(violation, x[col] - variable.ub);
     }
   }
@@ -3381,6 +3443,7 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
   SolveResult out;
   out.stats.solver_name = name();
   IPMDetail detail;
+  detail.primal_feasible_start_requested = opt_.primal_feasible_start;
   detail.original_dimension = static_cast<int>(prob.vars.size());
   detail.reduced_dimension = detail.original_dimension;
 
@@ -3395,13 +3458,37 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
     return {out, detail};
   }
 
+  const bool valid_primal_start =
+      prob.x0.size() == static_cast<int>(prob.vars.size()) &&
+      prob.x0.allFinite();
+  const double start_primal_violation = valid_primal_start
+      ? raw_primal_violation(prob, prob.x0)
+      : std::numeric_limits<double>::infinity();
+  const bool primal_feasible_start_accepted =
+      opt_.globalization == Globalization::Filter &&
+      opt_.primal_feasible_start && std::isfinite(start_primal_violation) &&
+      start_primal_violation <= opt_.tol_primal;
+  const bool preserve_initial_point_accepted =
+      opt_.globalization == Globalization::Filter &&
+      opt_.preserve_initial_point && std::isfinite(start_primal_violation) &&
+      start_primal_violation <= opt_.tol_primal;
+  detail.primal_feasible_start_accepted = primal_feasible_start_accepted;
+
+  IPMOptions audited_opt = opt_;
+  audited_opt.primal_feasible_start = primal_feasible_start_accepted;
+  audited_opt.preserve_initial_point = preserve_initial_point_accepted;
+
   NLPModel reduced_prob;
   std::shared_ptr<FixedNLPMap> fixed_map;
   if (build_fixed_nlp_reduction(prob, reduced_prob, fixed_map)) {
-    NativeIPMAdapter reduced_solver(opt_);
+    NativeIPMAdapter reduced_solver(audited_opt);
     auto reduced_result = reduced_solver.solve_nlp_detail(reduced_prob);
     out = std::move(reduced_result.first);
     detail = std::move(reduced_result.second);
+    detail.primal_feasible_start_requested = opt_.primal_feasible_start;
+    detail.primal_feasible_start_accepted =
+        primal_feasible_start_accepted &&
+        detail.primal_feasible_start_accepted;
     detail.original_dimension = static_cast<int>(prob.vars.size());
     detail.reduced_dimension =
         static_cast<int>(fixed_map->reduced_to_original.size());
@@ -3425,13 +3512,16 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
     ScalingFactors sf;
     const NLPModel* active_prob = &prob;
     NLPModel scaled_prob;
-    IPMOptions active_opt = opt_;
-    const bool do_scale = opt_.scale_problem;
+    IPMOptions active_opt = audited_opt;
+    const bool do_scale = audited_opt.scale_problem;
     if (do_scale) {
       Eigen::VectorXd x0_interior = (prob.x0.size() == n_f)
                                         ? prob.x0
                                         : Eigen::VectorXd::Zero(n_f);
-      interiorize_initial_point(prob.vars, x0_interior);
+      if (!primal_feasible_start_accepted &&
+          !preserve_initial_point_accepted) {
+        interiorize_initial_point(prob.vars, x0_interior);
+      }
       sf = compute_scaling_factors(prob, x0_interior, opt_.scaling_g_max);
       scaled_prob = build_scaled_nlp_model(prob, sf);
       active_prob = &scaled_prob;
@@ -3449,6 +3539,15 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
         fo.inertia_certificate_factorizations;
     int solve_chain_polish_factorizations =
         fo.active_set_polish_factorizations;
+    std::string solve_chain_linear_solver_backend =
+        fo.linear_solver_backend;
+    int solve_chain_accepted_steps = fo.accepted_steps;
+    int solve_chain_rejected_steps = fo.rejected_steps;
+    int solve_chain_trial_value_evaluations = fo.trial_value_evaluations;
+    int solve_chain_trial_full_derivative_evaluations =
+        fo.trial_full_derivative_evaluations;
+    int solve_chain_trial_rejections_before_derivatives =
+        fo.trial_rejections_before_derivatives;
     int selected_base_numeric_factorizations = fo.numeric_factorizations;
     int selected_base_symbolic_analyses = fo.symbolic_analyses;
     int selected_base_linear_solves = fo.linear_solves;
@@ -3458,6 +3557,13 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
         fo.inertia_certificate_factorizations;
     int selected_base_polish_factorizations =
         fo.active_set_polish_factorizations;
+    int selected_base_accepted_steps = fo.accepted_steps;
+    int selected_base_rejected_steps = fo.rejected_steps;
+    int selected_base_trial_value_evaluations = fo.trial_value_evaluations;
+    int selected_base_trial_full_derivative_evaluations =
+        fo.trial_full_derivative_evaluations;
+    int selected_base_trial_rejections_before_derivatives =
+        fo.trial_rejections_before_derivatives;
     int restoration_factorizations = 0;
     int retry_factorizations = 0;
     bool restoration_warm_start_used = false;
@@ -3502,6 +3608,8 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
         rst_opt.scale_problem = false;
         rst_opt.globalization = Globalization::Filter;
         rst_opt.max_iter = std::min(opt_.max_iter, 200);
+        rst_opt.primal_feasible_start = false;
+        rst_opt.preserve_initial_point = false;
 
         FilterSolveOutcome rf = solve_nlp_filter_impl(rb.model, rst_opt);
         restoration_factorizations += rf.numeric_factorizations;
@@ -3514,6 +3622,17 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
             rf.inertia_certificate_factorizations;
         solve_chain_polish_factorizations +=
             rf.active_set_polish_factorizations;
+        if (solve_chain_linear_solver_backend == "unselected" &&
+            rf.linear_solver_backend != "unselected") {
+          solve_chain_linear_solver_backend = rf.linear_solver_backend;
+        }
+        solve_chain_accepted_steps += rf.accepted_steps;
+        solve_chain_rejected_steps += rf.rejected_steps;
+        solve_chain_trial_value_evaluations += rf.trial_value_evaluations;
+        solve_chain_trial_full_derivative_evaluations +=
+            rf.trial_full_derivative_evaluations;
+        solve_chain_trial_rejections_before_derivatives +=
+            rf.trial_rejections_before_derivatives;
 
         if (rf.x.size() >= rb.n_x) {
           Eigen::VectorXd x_new = extract_x_from_restoration(rb, rf.x);
@@ -3584,6 +3703,8 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
 
           IPMOptions retry_opt = opt_;
           retry_opt.use_restoration_phase = false;  // one-shot restoration
+          retry_opt.primal_feasible_start = false;
+          retry_opt.preserve_initial_point = false;
           if (restoration_warm_start_used) {
             retry_opt.equality_dual_start = warm.equality_dual;
             retry_opt.inequality_dual_start = warm.inequality_dual;
@@ -3629,6 +3750,19 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
               fo_retry.inertia_certificate_factorizations;
           solve_chain_polish_factorizations +=
               fo_retry.active_set_polish_factorizations;
+          if (solve_chain_linear_solver_backend == "unselected" &&
+              fo_retry.linear_solver_backend != "unselected") {
+            solve_chain_linear_solver_backend =
+                fo_retry.linear_solver_backend;
+          }
+          solve_chain_accepted_steps += fo_retry.accepted_steps;
+          solve_chain_rejected_steps += fo_retry.rejected_steps;
+          solve_chain_trial_value_evaluations +=
+              fo_retry.trial_value_evaluations;
+          solve_chain_trial_full_derivative_evaluations +=
+              fo_retry.trial_full_derivative_evaluations;
+          solve_chain_trial_rejections_before_derivatives +=
+              fo_retry.trial_rejections_before_derivatives;
           ResidualSummary original_before;
           ResidualSummary original_retry;
           bool before_audited = false;
@@ -3680,6 +3814,14 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
                 fo_retry.inertia_certificate_factorizations;
             selected_base_polish_factorizations =
                 fo_retry.active_set_polish_factorizations;
+            selected_base_accepted_steps = fo_retry.accepted_steps;
+            selected_base_rejected_steps = fo_retry.rejected_steps;
+            selected_base_trial_value_evaluations =
+                fo_retry.trial_value_evaluations;
+            selected_base_trial_full_derivative_evaluations =
+                fo_retry.trial_full_derivative_evaluations;
+            selected_base_trial_rejections_before_derivatives =
+                fo_retry.trial_rejections_before_derivatives;
           }
           }
         }
@@ -3773,6 +3915,13 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
           fo.inertia_certificate_factorizations;
       const int prior_polish_factorizations =
           fo.active_set_polish_factorizations;
+      const int prior_accepted_steps = fo.accepted_steps;
+      const int prior_rejected_steps = fo.rejected_steps;
+      const int prior_trial_value_evaluations = fo.trial_value_evaluations;
+      const int prior_trial_full_derivative_evaluations =
+          fo.trial_full_derivative_evaluations;
+      const int prior_trial_rejections_before_derivatives =
+          fo.trial_rejections_before_derivatives;
       const ResidualSummary original_initial_residuals = fo.initial_residuals;
 
       NLPModel refine_prob = prob;
@@ -3781,6 +3930,8 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
       refine_opt.max_iter = remaining_iterations;
       refine_opt.scale_problem = false;
       refine_opt.use_restoration_phase = false;
+      refine_opt.primal_feasible_start = true;
+      refine_opt.preserve_initial_point = true;
       refine_opt.equality_dual_start = fo.lambda;
       refine_opt.inequality_dual_start = fo.mu_ineq;
       refine_opt.slack_start = fo.s;
@@ -3805,6 +3956,16 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
             prior_inertia_certificates;
         refined.active_set_polish_factorizations +=
             prior_polish_factorizations;
+        refined.accepted_steps += prior_accepted_steps;
+        refined.rejected_steps += prior_rejected_steps;
+        refined.trial_value_evaluations += prior_trial_value_evaluations;
+        refined.trial_full_derivative_evaluations +=
+            prior_trial_full_derivative_evaluations;
+        refined.trial_rejections_before_derivatives +=
+            prior_trial_rejections_before_derivatives;
+        if (refined.linear_solver_backend == "unselected") {
+          refined.linear_solver_backend = fo.linear_solver_backend;
+        }
         refined.initial_residuals = original_initial_residuals;
         if (refined.converged) {
           refined.status = tangential_filter_stall
@@ -3825,10 +3986,20 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
             refined.inertia_certificate_factorizations;
         fo.active_set_polish_factorizations +=
             refined.active_set_polish_factorizations;
+        fo.accepted_steps += refined.accepted_steps;
+        fo.rejected_steps += refined.rejected_steps;
+        fo.trial_value_evaluations += refined.trial_value_evaluations;
+        fo.trial_full_derivative_evaluations +=
+            refined.trial_full_derivative_evaluations;
+        fo.trial_rejections_before_derivatives +=
+            refined.trial_rejections_before_derivatives;
         fo.iterations += refined.iterations;
       }
     }
 
+    detail.linear_solver_backend = fo.linear_solver_backend != "unselected"
+        ? fo.linear_solver_backend
+        : solve_chain_linear_solver_backend;
     detail.newton_formulation = fo.newton_profile.selected;
     detail.condensed_dimension = fo.newton_profile.condensed_dimension;
     detail.augmented_dimension = fo.newton_profile.augmented_dimension;
@@ -3869,6 +4040,21 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
         solve_chain_polish_factorizations +
         std::max(0, fo.active_set_polish_factorizations -
                         selected_base_polish_factorizations);
+    detail.accepted_steps = solve_chain_accepted_steps +
+        std::max(0, fo.accepted_steps - selected_base_accepted_steps);
+    detail.rejected_steps = solve_chain_rejected_steps +
+        std::max(0, fo.rejected_steps - selected_base_rejected_steps);
+    detail.trial_value_evaluations = solve_chain_trial_value_evaluations +
+        std::max(0, fo.trial_value_evaluations -
+                        selected_base_trial_value_evaluations);
+    detail.trial_full_derivative_evaluations =
+        solve_chain_trial_full_derivative_evaluations +
+        std::max(0, fo.trial_full_derivative_evaluations -
+                        selected_base_trial_full_derivative_evaluations);
+    detail.trial_rejections_before_derivatives =
+        solve_chain_trial_rejections_before_derivatives +
+        std::max(0, fo.trial_rejections_before_derivatives -
+                        selected_base_trial_rejections_before_derivatives);
     if (opt_.verbose) {
       std::cerr << "[NativeIPM] factorization breakdown: total_kkt="
                 << detail.numeric_factorizations << ", primary="
@@ -3989,6 +4175,8 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
         IPMOptions refine_opt = opt_;
         refine_opt.scale_problem = false;
         refine_opt.use_restoration_phase = false;
+        refine_opt.primal_feasible_start = false;
+        refine_opt.preserve_initial_point = false;
         refine_opt.equality_dual_start = candidate_detail.lambda_eq;
         refine_opt.inequality_dual_start = candidate_detail.mu_ineq;
         refine_opt.slack_start = candidate_detail.z_slack;
@@ -4034,6 +4222,28 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
           detail.z_slack = refined.s;
           detail.complementarity =
               refined.final_residuals.complementarity;
+          if (detail.linear_solver_backend == "unselected") {
+            detail.linear_solver_backend =
+                refined.linear_solver_backend;
+          }
+          detail.symbolic_analyses += refined.symbolic_analyses;
+          detail.numeric_factorizations += refined.numeric_factorizations;
+          detail.linear_solves += refined.linear_solves;
+          detail.primary_factorizations += refined.primary_factorizations;
+          detail.inertia_retry_factorizations +=
+              refined.inertia_retry_factorizations;
+          detail.inertia_certificate_factorizations +=
+              refined.inertia_certificate_factorizations;
+          detail.active_set_polish_factorizations +=
+              refined.active_set_polish_factorizations;
+          detail.accepted_steps += refined.accepted_steps;
+          detail.rejected_steps += refined.rejected_steps;
+          detail.trial_value_evaluations +=
+              refined.trial_value_evaluations;
+          detail.trial_full_derivative_evaluations +=
+              refined.trial_full_derivative_evaluations;
+          detail.trial_rejections_before_derivatives +=
+              refined.trial_rejections_before_derivatives;
           out.stats.runtime_sec = std::chrono::duration<double>(
               std::chrono::steady_clock::now() - t0).count();
           return {out, detail};
@@ -4073,8 +4283,10 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
   lb_cols.reserve(static_cast<size_t>(n));
   ub_cols.reserve(static_cast<size_t>(n));
   for (int j = 0; j < n; ++j) {
-    if (is_effectively_finite(prob.vars[static_cast<size_t>(j)].lb)) lb_cols.push_back(j);
-    if (is_effectively_finite(prob.vars[static_cast<size_t>(j)].ub)) ub_cols.push_back(j);
+    if (variable_has_finite_lower_bound(
+            prob.vars[static_cast<size_t>(j)].lb)) lb_cols.push_back(j);
+    if (variable_has_finite_upper_bound(
+            prob.vars[static_cast<size_t>(j)].ub)) ub_cols.push_back(j);
   }
 
   Eigen::VectorXd grad;

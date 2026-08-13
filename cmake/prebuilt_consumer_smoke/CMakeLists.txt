@@ -37,9 +37,17 @@ if(NOT _mkl_includes OR NOT _mkl_libraries)
   message(FATAL_ERROR "MIPSolvers::MKL has an incomplete link interface")
 endif()
 list(LENGTH _mkl_libraries _mkl_library_count)
-if(NOT _mkl_library_count EQUAL 3)
+if(MIPSOLVERS_TP_MKL_THREADING STREQUAL "SEQUENTIAL" AND
+   NOT _mkl_library_count EQUAL 3)
   message(FATAL_ERROR
     "Expected three sequential static oneMKL libraries, got: ${_mkl_libraries}")
+elseif(MIPSOLVERS_TP_MKL_THREADING STREQUAL "INTEL" AND
+       _mkl_library_count LESS 4)
+  message(FATAL_ERROR
+    "Expected threaded oneMKL plus Intel OpenMP import libraries, got: ${_mkl_libraries}")
+elseif(NOT MIPSOLVERS_TP_MKL_THREADING MATCHES "^(SEQUENTIAL|INTEL)$")
+  message(FATAL_ERROR
+    "Package declares invalid oneMKL threading mode: ${MIPSOLVERS_TP_MKL_THREADING}")
 endif()
 
 foreach(_payload IN LISTS _mkl_includes _mkl_libraries)
@@ -50,6 +58,22 @@ foreach(_payload IN LISTS _mkl_includes _mkl_libraries)
   if(_payload_relative MATCHES "^\\.\\.(/|$)")
     message(FATAL_ERROR
       "oneMKL payload escapes the prebuilt prefix: ${_payload}")
+  endif()
+endforeach()
+
+if(MIPSOLVERS_TP_MKL_THREADING STREQUAL "INTEL" AND
+   NOT MIPSOLVERS_TP_MKL_RUNTIME_DLLS)
+  message(FATAL_ERROR "Threaded oneMKL package declares no runtime DLLs")
+endif()
+foreach(_runtime IN LISTS MIPSOLVERS_TP_MKL_RUNTIME_DLLS)
+  if(NOT IS_ABSOLUTE "${_runtime}" OR NOT EXISTS "${_runtime}")
+    message(FATAL_ERROR "Missing prebuilt oneMKL runtime payload: ${_runtime}")
+  endif()
+  file(RELATIVE_PATH _runtime_relative
+    "${MIPSOLVERS_EXPECTED_PREFIX}" "${_runtime}")
+  if(_runtime_relative MATCHES "^\\.\\.(/|$)")
+    message(FATAL_ERROR
+      "oneMKL runtime payload escapes the prebuilt prefix: ${_runtime}")
   endif()
 endforeach()
 

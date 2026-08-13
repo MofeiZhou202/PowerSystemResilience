@@ -17,6 +17,35 @@ unset(_MIPSOLVERS_FORBIDDEN_SOLVER_CACHE)
 # resolver must use that bundle and must not fall back to a machine install.
 set(MIPSOLVERS_MKL_ROOT "" CACHE PATH
   "Root of a local static oneMKL bundle (include/, lib/, licensing/)")
+set(MIPSOLVERS_MKL_RUNTIME_DLLS "" CACHE INTERNAL
+  "Runtime DLLs required by the selected oneMKL threading layer" FORCE)
+if(WIN32)
+  set(MIPSOLVERS_MKL_THREADING "SEQUENTIAL" CACHE STRING
+    "Windows oneMKL threading layer for PARDISO (SEQUENTIAL or INTEL)")
+  set_property(CACHE MIPSOLVERS_MKL_THREADING PROPERTY STRINGS SEQUENTIAL INTEL)
+  string(TOUPPER "${MIPSOLVERS_MKL_THREADING}" MIPSOLVERS_MKL_THREADING)
+  set(MIPSOLVERS_MKL_THREADING "${MIPSOLVERS_MKL_THREADING}" CACHE STRING
+    "Windows oneMKL threading layer for PARDISO (SEQUENTIAL or INTEL)" FORCE)
+  if(NOT MIPSOLVERS_MKL_THREADING MATCHES "^(SEQUENTIAL|INTEL)$")
+    message(FATAL_ERROR
+      "MIPSOLVERS_MKL_THREADING must be SEQUENTIAL or INTEL "
+      "(got '${MIPSOLVERS_MKL_THREADING}').")
+  endif()
+  if(MIPSOLVERS_MKL_THREAD_LIB)
+    get_filename_component(_MIPSOLVERS_MKL_THREAD_BASENAME
+      "${MIPSOLVERS_MKL_THREAD_LIB}" NAME_WE)
+    if((MIPSOLVERS_MKL_THREADING STREQUAL "INTEL" AND
+        NOT _MIPSOLVERS_MKL_THREAD_BASENAME STREQUAL "mkl_intel_thread") OR
+       (MIPSOLVERS_MKL_THREADING STREQUAL "SEQUENTIAL" AND
+        NOT _MIPSOLVERS_MKL_THREAD_BASENAME STREQUAL "mkl_sequential"))
+      unset(MIPSOLVERS_MKL_THREAD_LIB CACHE)
+      unset(MIPSOLVERS_MKL_THREAD_LIB)
+    endif()
+    unset(_MIPSOLVERS_MKL_THREAD_BASENAME)
+  endif()
+else()
+  set(MIPSOLVERS_MKL_THREADING "")
+endif()
 if(NOT MIPSOLVERS_MKL_ROOT AND DEFINED ENV{MIPSOLVERS_MKL_ROOT})
   set(MIPSOLVERS_MKL_ROOT "$ENV{MIPSOLVERS_MKL_ROOT}" CACHE PATH
     "Root of a local static oneMKL bundle (include/, lib/, licensing/)" FORCE)
@@ -28,6 +57,16 @@ if(NOT MIPSOLVERS_MKL_ROOT AND
     "Root of a local static oneMKL bundle (include/, lib/, licensing/)" FORCE)
 endif()
 if(MIPSOLVERS_MKL_ROOT)
+  if(WIN32 AND EXISTS "${MIPSOLVERS_MKL_ROOT}/manifest.cmake")
+    include("${MIPSOLVERS_MKL_ROOT}/manifest.cmake")
+    if(MIPSOLVERS_MKL_THREADING STREQUAL "INTEL" AND
+       MIPSOLVERS_LOCAL_MKL_THREADING STREQUAL "sequential")
+      message(FATAL_ERROR
+        "The staged oneMKL bundle at '${MIPSOLVERS_MKL_ROOT}' is sequential. "
+        "Use MIPSOLVERS_MKL_THREADING=SEQUENTIAL or select a complete local "
+        "oneAPI installation without the staged sequential manifest.")
+    endif()
+  endif()
   # A selected bundle is authoritative even when this build directory was
   # previously configured against a system oneAPI installation.
   foreach(_MIPSOLVERS_MKL_CACHE IN ITEMS
@@ -447,8 +486,12 @@ if(MIPSOLVERS_USE_MKL AND NOT APPLE AND NOT MIPSOLVERS_HAVE_MKL_PARDISO)
     find_library(MIPSOLVERS_MKL_LP64_LIB   NAMES mkl_intel_lp64
       HINTS ${_MKL_HINTS} ${_MIPSOLVERS_MKL_FIND_MODE}
       PATH_SUFFIXES lib lib/intel64)
-    if(WIN32)
-      find_library(MIPSOLVERS_MKL_THREAD_LIB NAMES mkl_sequential mkl_intel_thread
+    if(WIN32 AND MIPSOLVERS_MKL_THREADING STREQUAL "INTEL")
+      find_library(MIPSOLVERS_MKL_THREAD_LIB NAMES mkl_intel_thread
+        HINTS ${_MKL_HINTS} ${_MIPSOLVERS_MKL_FIND_MODE}
+        PATH_SUFFIXES lib lib/intel64)
+    elseif(WIN32)
+      find_library(MIPSOLVERS_MKL_THREAD_LIB NAMES mkl_sequential
         HINTS ${_MKL_HINTS} ${_MIPSOLVERS_MKL_FIND_MODE}
         PATH_SUFFIXES lib lib/intel64)
     else()
@@ -463,8 +506,12 @@ if(MIPSOLVERS_USE_MKL AND NOT APPLE AND NOT MIPSOLVERS_HAVE_MKL_PARDISO)
     find_library(MIPSOLVERS_MKL_LP64_LIB   NAMES mkl_intel_c
       HINTS ${_MKL_HINTS} ${_MIPSOLVERS_MKL_FIND_MODE}
       PATH_SUFFIXES lib lib/ia32)
-    if(WIN32)
-      find_library(MIPSOLVERS_MKL_THREAD_LIB NAMES mkl_sequential mkl_intel_thread
+    if(WIN32 AND MIPSOLVERS_MKL_THREADING STREQUAL "INTEL")
+      find_library(MIPSOLVERS_MKL_THREAD_LIB NAMES mkl_intel_thread
+        HINTS ${_MKL_HINTS} ${_MIPSOLVERS_MKL_FIND_MODE}
+        PATH_SUFFIXES lib lib/ia32)
+    elseif(WIN32)
+      find_library(MIPSOLVERS_MKL_THREAD_LIB NAMES mkl_sequential
         HINTS ${_MKL_HINTS} ${_MIPSOLVERS_MKL_FIND_MODE}
         PATH_SUFFIXES lib lib/ia32)
     else()
@@ -493,8 +540,16 @@ if(MIPSOLVERS_USE_MKL AND NOT APPLE AND NOT MIPSOLVERS_HAVE_MKL_PARDISO)
       if(NOT MIPSOLVERS_MKL_LP64_LIB AND EXISTS "${_MKL_DEFAULT_LIBDIR}/mkl_intel_lp64.lib")
         set(MIPSOLVERS_MKL_LP64_LIB "${_MKL_DEFAULT_LIBDIR}/mkl_intel_lp64.lib")
       endif()
-      if(NOT MIPSOLVERS_MKL_THREAD_LIB AND EXISTS "${_MKL_DEFAULT_LIBDIR}/mkl_sequential.lib")
-        set(MIPSOLVERS_MKL_THREAD_LIB "${_MKL_DEFAULT_LIBDIR}/mkl_sequential.lib")
+      if(NOT MIPSOLVERS_MKL_THREAD_LIB)
+        if(MIPSOLVERS_MKL_THREADING STREQUAL "INTEL" AND
+           EXISTS "${_MKL_DEFAULT_LIBDIR}/mkl_intel_thread.lib")
+          set(MIPSOLVERS_MKL_THREAD_LIB
+            "${_MKL_DEFAULT_LIBDIR}/mkl_intel_thread.lib")
+        elseif(MIPSOLVERS_MKL_THREADING STREQUAL "SEQUENTIAL" AND
+               EXISTS "${_MKL_DEFAULT_LIBDIR}/mkl_sequential.lib")
+          set(MIPSOLVERS_MKL_THREAD_LIB
+            "${_MKL_DEFAULT_LIBDIR}/mkl_sequential.lib")
+        endif()
       endif()
       if(NOT MIPSOLVERS_MKL_CORE_LIB AND EXISTS "${_MKL_DEFAULT_LIBDIR}/mkl_core.lib")
         set(MIPSOLVERS_MKL_CORE_LIB "${_MKL_DEFAULT_LIBDIR}/mkl_core.lib")
@@ -512,7 +567,8 @@ if(MIPSOLVERS_USE_MKL AND NOT APPLE AND NOT MIPSOLVERS_HAVE_MKL_PARDISO)
     message(FATAL_ERROR
       "MIPSOLVERS_MKL_ROOT is set to '${MIPSOLVERS_MKL_ROOT}', but it is not "
       "a complete static oneMKL bundle. Expected include/mkl_pardiso.h and "
-      "the LP64, sequential, and core libraries under lib/. Run "
+      "the LP64, selected threading, and core libraries "
+      "under lib/. Run "
       "third_party/stage_onemkl.ps1 on Windows.")
   endif()
 
@@ -522,14 +578,26 @@ if(MIPSOLVERS_USE_MKL AND NOT APPLE AND NOT MIPSOLVERS_HAVE_MKL_PARDISO)
     list(APPEND MIPSOLVERS_MKL_INCLUDE_DIRS ${MIPSOLVERS_MKL_INCLUDE_DIR})
     list(APPEND MIPSOLVERS_MKL_LIBRARIES
       ${MIPSOLVERS_MKL_LP64_LIB} ${MIPSOLVERS_MKL_THREAD_LIB} ${MIPSOLVERS_MKL_CORE_LIB})
-    if(WIN32)
+    if(WIN32 AND MIPSOLVERS_MKL_THREADING STREQUAL "INTEL")
       # mkl_intel_thread requires the Intel OpenMP runtime on Windows.
       find_library(_MKL_IOMP5MD NAMES libiomp5md
         HINTS ${_MKL_HINTS} "$ENV{INTEL_COMPILER_ROOT}"
         PATH_SUFFIXES lib lib/intel64 redist/intel64/compiler)
-      if(_MKL_IOMP5MD)
-        list(APPEND MIPSOLVERS_MKL_LIBRARIES ${_MKL_IOMP5MD})
+      if(NOT _MKL_IOMP5MD)
+        message(FATAL_ERROR
+          "MIPSOLVERS_MKL_THREADING=INTEL requires libiomp5md.lib on Windows.")
       endif()
+      list(APPEND MIPSOLVERS_MKL_LIBRARIES ${_MKL_IOMP5MD})
+      find_file(_MKL_IOMP5MD_DLL NAMES libiomp5md.dll
+        HINTS ${_MKL_HINTS} "$ENV{INTEL_COMPILER_ROOT}"
+              "C:/Program Files (x86)/Intel/oneAPI/compiler/latest"
+        PATH_SUFFIXES bin redist/intel64/compiler)
+      if(NOT _MKL_IOMP5MD_DLL)
+        message(FATAL_ERROR
+          "MIPSOLVERS_MKL_THREADING=INTEL requires libiomp5md.dll on Windows.")
+      endif()
+      set(MIPSOLVERS_MKL_RUNTIME_DLLS "${_MKL_IOMP5MD_DLL}" CACHE INTERNAL
+        "Runtime DLLs required by the selected oneMKL threading layer" FORCE)
     elseif(UNIX)
       find_library(_MKL_IOMP5 NAMES iomp5
         HINTS ${_MKL_HINTS} "$ENV{INTEL_COMPILER_ROOT}"

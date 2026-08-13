@@ -205,6 +205,7 @@ endif()
 # consumer links the final executable. Copy the static libraries and headers
 # into the package and recreate MIPSolvers::MKL from package-relative paths.
 set(_tp_mkl_library_names "")
+set(_tp_mkl_runtime_names "")
 set(_tp_mkl_version "")
 if(MIPSOLVERS_HAVE_MKL_PARDISO)
   set(_tp_mkl_include_dir "")
@@ -236,35 +237,55 @@ if(MIPSOLVERS_HAVE_MKL_PARDISO)
       "MKL Pardiso is enabled, but no concrete MKL library files can be packaged")
   endif()
 
+  foreach(_tp_mkl_runtime IN LISTS MIPSOLVERS_MKL_RUNTIME_DLLS)
+    if(NOT IS_ABSOLUTE "${_tp_mkl_runtime}" OR
+       NOT EXISTS "${_tp_mkl_runtime}")
+      message(FATAL_ERROR
+        "Declared oneMKL runtime DLL is missing: ${_tp_mkl_runtime}")
+    endif()
+    get_filename_component(_tp_mkl_runtime_name "${_tp_mkl_runtime}" NAME)
+    install(FILES "${_tp_mkl_runtime}" DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    list(APPEND _tp_mkl_runtime_names "${_tp_mkl_runtime_name}")
+  endforeach()
+
   if(MIPSOLVERS_MKL_ROOT)
-    if(NOT EXISTS "${MIPSOLVERS_MKL_ROOT}/manifest.cmake" OR
-       NOT EXISTS "${MIPSOLVERS_MKL_ROOT}/SHA256SUMS" OR
-       NOT IS_DIRECTORY "${MIPSOLVERS_MKL_ROOT}/licensing")
+    if(EXISTS "${MIPSOLVERS_MKL_ROOT}/manifest.cmake")
+      if(NOT EXISTS "${MIPSOLVERS_MKL_ROOT}/SHA256SUMS" OR
+         NOT IS_DIRECTORY "${MIPSOLVERS_MKL_ROOT}/licensing")
+        message(FATAL_ERROR
+          "The staged oneMKL bundle is missing SHA256SUMS or licensing/. "
+          "Recreate it with third_party/stage_onemkl.ps1.")
+      endif()
+      include("${MIPSOLVERS_MKL_ROOT}/manifest.cmake")
+      if(NOT MIPSOLVERS_LOCAL_MKL_MANIFEST_VERSION STREQUAL "1" OR
+         NOT MIPSOLVERS_LOCAL_MKL_LINKAGE STREQUAL "static" OR
+         NOT MIPSOLVERS_LOCAL_MKL_THREADING STREQUAL "sequential" OR
+         (WIN32 AND NOT MIPSOLVERS_MKL_THREADING STREQUAL "SEQUENTIAL"))
+        message(FATAL_ERROR
+          "Unsupported oneMKL bundle manifest or threading selection at "
+          "${MIPSOLVERS_MKL_ROOT}")
+      endif()
+      if(WIN32 AND
+         (NOT MIPSOLVERS_LOCAL_MKL_ARCHITECTURE STREQUAL "x64" OR
+          NOT CMAKE_SIZEOF_VOID_P EQUAL 8))
+        message(FATAL_ERROR
+          "The staged oneMKL bundle is x64-only and cannot be packaged for "
+          "the current Windows target")
+      endif()
+      set(_tp_mkl_version "${MIPSOLVERS_LOCAL_MKL_VERSION}")
+      install(FILES
+        "${MIPSOLVERS_MKL_ROOT}/manifest.cmake"
+        "${MIPSOLVERS_MKL_ROOT}/SHA256SUMS"
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/mipsolvers-third-party/oneapi-mkl")
+    elseif(WIN32 AND NOT MIPSOLVERS_MKL_THREADING STREQUAL "INTEL")
       message(FATAL_ERROR
-        "The local oneMKL bundle is missing manifest.cmake, SHA256SUMS, or "
-        "licensing/. Recreate it with third_party/stage_onemkl.ps1.")
+        "A non-staged MIPSOLVERS_MKL_ROOT is supported only by the explicit "
+        "Windows MIPSOLVERS_MKL_THREADING=INTEL profile.")
     endif()
-    include("${MIPSOLVERS_MKL_ROOT}/manifest.cmake")
-    if(NOT MIPSOLVERS_LOCAL_MKL_MANIFEST_VERSION STREQUAL "1" OR
-       NOT MIPSOLVERS_LOCAL_MKL_LINKAGE STREQUAL "static" OR
-       NOT MIPSOLVERS_LOCAL_MKL_THREADING STREQUAL "sequential")
-      message(FATAL_ERROR
-        "Unsupported oneMKL bundle manifest at ${MIPSOLVERS_MKL_ROOT}")
+    if(IS_DIRECTORY "${MIPSOLVERS_MKL_ROOT}/licensing")
+      install(DIRECTORY "${MIPSOLVERS_MKL_ROOT}/licensing/"
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/mipsolvers-third-party/licenses/oneapi-mkl")
     endif()
-    if(WIN32 AND
-       (NOT MIPSOLVERS_LOCAL_MKL_ARCHITECTURE STREQUAL "x64" OR
-        NOT CMAKE_SIZEOF_VOID_P EQUAL 8))
-      message(FATAL_ERROR
-        "The staged oneMKL bundle is x64-only and cannot be packaged for the "
-        "current Windows target")
-    endif()
-    set(_tp_mkl_version "${MIPSOLVERS_LOCAL_MKL_VERSION}")
-    install(DIRECTORY "${MIPSOLVERS_MKL_ROOT}/licensing/"
-      DESTINATION "${CMAKE_INSTALL_DATADIR}/mipsolvers-third-party/licenses/oneapi-mkl")
-    install(FILES
-      "${MIPSOLVERS_MKL_ROOT}/manifest.cmake"
-      "${MIPSOLVERS_MKL_ROOT}/SHA256SUMS"
-      DESTINATION "${CMAKE_INSTALL_DATADIR}/mipsolvers-third-party/oneapi-mkl")
   endif()
 endif()
 
@@ -399,7 +420,9 @@ file(WRITE "${_tp_manifest}"
   "set(MIPSOLVERS_TP_HAVE_IPOPT \"${MIPSOLVERS_HAVE_IPOPT}\")\n"
   "set(MIPSOLVERS_TP_IPOPT_LINEAR_SOLVER \"${MIPSOLVERS_IPOPT_LINEAR_SOLVER}\")\n"
   "set(MIPSOLVERS_TP_HAVE_MKL_PARDISO \"${MIPSOLVERS_HAVE_MKL_PARDISO}\")\n"
+  "set(MIPSOLVERS_TP_MKL_THREADING \"${MIPSOLVERS_MKL_THREADING}\")\n"
   "set(MIPSOLVERS_TP_MKL_LIBRARY_NAMES \"${_tp_mkl_library_names}\")\n"
+  "set(MIPSOLVERS_TP_MKL_RUNTIME_NAMES \"${_tp_mkl_runtime_names}\")\n"
   "set(MIPSOLVERS_TP_MKL_VERSION \"${_tp_mkl_version}\")\n"
   "set(MIPSOLVERS_TP_HAVE_CHOLMOD \"${MIPSOLVERS_HAVE_CHOLMOD}\")\n"
   "set(MIPSOLVERS_TP_HAVE_SUITESPARSE \"${MIPSOLVERS_HAVE_SUITESPARSE}\")\n"
@@ -432,4 +455,7 @@ unset(_tp_is_multi_config)
 unset(_tp_configuration_types)
 unset(_tp_mkl_include_dir)
 unset(_tp_mkl_library_names)
+unset(_tp_mkl_runtime_names)
+unset(_tp_mkl_runtime)
+unset(_tp_mkl_runtime_name)
 unset(_tp_mkl_version)

@@ -40,6 +40,7 @@ ScalingFactors compute_scaling_factors(const NLPModel& prob,
 ///     Hessian) that internally call the originals and scale their outputs,
 ///   - has identical `vars`, `x0`, `sense`, `symbolic_*` fields as `prob` so
 ///     bound handling and validation are unaffected.
+///   - original-coordinate audit callbacks and inequality names are preserved.
 ///
 /// The caller must keep `prob` alive for the lifetime of the returned model
 /// because the lambdas capture `prob` by reference.

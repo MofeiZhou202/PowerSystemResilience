@@ -61,6 +61,13 @@ if(NOT "${MIPSOLVERS_TP_MANIFEST_VERSION}" STREQUAL "3")
     "manifest format: prebuilt '${MIPSOLVERS_TP_MANIFEST_VERSION}' vs required '3'")
 endif()
 
+# Format-3 Windows packages produced before the threading field existed used
+# the sealed sequential profile by construction.
+if(WIN32 AND MIPSOLVERS_TP_HAVE_MKL_PARDISO AND
+   NOT MIPSOLVERS_TP_MKL_THREADING)
+  set(MIPSOLVERS_TP_MKL_THREADING "SEQUENTIAL")
+endif()
+
 # The normal in-tree defaults require embedded HiGHS, SCIP, and Ipopt. Mirror
 # those defaults here because prebuilt resolution runs before their option()
 # declarations in Dependencies.cmake. A parent project can explicitly disable
@@ -119,6 +126,21 @@ if(WIN32 AND MIPSOLVERS_TP_HAVE_IPOPT AND
    NOT MIPSOLVERS_TP_HAVE_MKL_PARDISO)
   list(APPEND _MIPSOLVERS_TP_MISMATCH
     "Windows Ipopt package uses pardisomkl but contains no oneMKL payload")
+endif()
+if(WIN32 AND MIPSOLVERS_TP_HAVE_MKL_PARDISO AND
+   DEFINED MIPSOLVERS_MKL_THREADING AND
+   NOT MIPSOLVERS_MKL_THREADING STREQUAL "")
+  string(TOUPPER "${MIPSOLVERS_MKL_THREADING}"
+    _MIPSOLVERS_TP_REQUESTED_MKL_THREADING)
+  if(NOT _MIPSOLVERS_TP_REQUESTED_MKL_THREADING STREQUAL
+         MIPSOLVERS_TP_MKL_THREADING)
+    list(APPEND _MIPSOLVERS_TP_MISMATCH
+      "oneMKL threading: prebuilt '${MIPSOLVERS_TP_MKL_THREADING}' vs requested '${_MIPSOLVERS_TP_REQUESTED_MKL_THREADING}'")
+  endif()
+elseif(WIN32 AND MIPSOLVERS_TP_HAVE_MKL_PARDISO AND
+       NOT MIPSOLVERS_TP_MKL_THREADING STREQUAL "SEQUENTIAL")
+  list(APPEND _MIPSOLVERS_TP_MISMATCH
+    "oneMKL threading: prebuilt '${MIPSOLVERS_TP_MKL_THREADING}' vs default 'SEQUENTIAL'")
 endif()
 if(NOT CMAKE_CXX_COMPILER_ID STREQUAL MIPSOLVERS_TP_CXX_COMPILER_ID)
   list(APPEND _MIPSOLVERS_TP_MISMATCH
@@ -272,6 +294,13 @@ endif()
 set(MIPSOLVERS_HAVE_MKL_PARDISO "${MIPSOLVERS_TP_HAVE_MKL_PARDISO}")
 set(MIPSOLVERS_MKL_INCLUDE_DIRS "${MIPSOLVERS_TP_MKL_INCLUDE_DIRS}")
 set(MIPSOLVERS_MKL_LIBRARIES "${MIPSOLVERS_TP_MKL_LIBRARIES}")
+if(WIN32)
+  set(MIPSOLVERS_MKL_THREADING "${MIPSOLVERS_TP_MKL_THREADING}" CACHE STRING
+    "Windows oneMKL threading layer for PARDISO (SEQUENTIAL or INTEL)" FORCE)
+endif()
+set(MIPSOLVERS_MKL_RUNTIME_DLLS "${MIPSOLVERS_TP_MKL_RUNTIME_DLLS}"
+  CACHE INTERNAL
+  "Runtime DLLs required by the selected oneMKL threading layer" FORCE)
 
 set(MIPSOLVERS_HAVE_CHOLMOD "${MIPSOLVERS_TP_HAVE_CHOLMOD}")
 set(MIPSOLVERS_CHOLMOD_INCLUDE_DIRS "")

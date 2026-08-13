@@ -109,6 +109,19 @@ struct VariableMeta {
   std::string name;
 };
 
+// VariableMeta's public no-bound representation predates internal uses of
+// IEEE infinities. Keep the boundary contract centralized; see
+// docs/native_ipm_windows_integration_2026-08-13.md, "Bound contract".
+inline constexpr double kVariableNoBound = VariableMeta{}.ub;
+
+inline bool variable_has_finite_lower_bound(double value) {
+  return std::isfinite(value) && value > -kVariableNoBound;
+}
+
+inline bool variable_has_finite_upper_bound(double value) {
+  return std::isfinite(value) && value < kVariableNoBound;
+}
+
 struct SparseLinSys {
   Eigen::SparseMatrix<double> A;
   Eigen::VectorXd b;
@@ -250,6 +263,17 @@ struct NLPModel {
   std::function<void(const Eigen::VectorXd&, Eigen::SparseMatrix<double>&)> jac_g;
   std::function<void(const Eigen::VectorXd&, Eigen::VectorXd&)> h;
   std::function<void(const Eigen::VectorXd&, Eigen::SparseMatrix<double>&)> jac_h;
+
+  // Optional independent maximum constraint violation in the caller's
+  // original coordinates. Native IPM uses this only to audit an externally
+  // restored x0 before preserving it; variable bounds are audited separately.
+  // The callback must return a finite, nonnegative value.
+  std::function<double(const Eigen::VectorXd&)>
+      original_constraint_violation;
+
+  // Optional diagnostic labels for rows returned by h(). Generated bound
+  // rows derive their labels from VariableMeta::name.
+  std::vector<std::string> nonlinear_inequality_names;
 
   // Optional independent-control columns for equality-constrained Newton
   // systems. When its size equals n - m_eq, native IPM may use the complement
