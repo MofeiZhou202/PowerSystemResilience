@@ -1,6 +1,6 @@
 # Development Status
 
-Updated: 2026-08-13
+Updated: 2026-08-14
 
 This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
@@ -10,7 +10,7 @@ the current Git worktrees remain authoritative.
 
 | Scope | Result |
 |---|---|
-| Required MIPSolvers source | Current pin `7b4cba8f20431847bc9914d886724d33559df612` on MIPSolvers `main`; the full regressions below were established at the older `60f8bc4e4eeb58c239f83b7ff0fde1be75cd05b0` baseline |
+| Required MIPSolvers source | Current pin `adfc98f3bd4721682f72f65ba030a18cfad1749d` on MIPSolvers `main`; the full regressions below were established at the older `60f8bc4e4eeb58c239f83b7ff0fde1be75cd05b0` baseline |
 | `full-dev` regression | 1430/1430 registered tests completed without failure; 3 condition-dependent tests skipped |
 | `macos-release` regression | 1425/1425 registered tests completed without failure; 3 condition-dependent tests skipped |
 | Graph ASan/UBSan subset | 28 cases, 113 assertions passed after the iterative Tarjan fix |
@@ -30,14 +30,12 @@ explicit. Windows packaging requires a clean pinned MIPSolvers checkout, Trial
 CTest success, required runtime/data presence, and an extracted-package startup
 smoke test before hashing the manifest and ZIP.
 
-The HySim dependency pin is updated from `60f8bc4` to MIPSolvers `main` commit
-`7b4cba8`. That commit guards the optional CHOLMOD augmented-factor calls and
-restores the no-SuiteSparse build. A clean Release build with SuiteSparse,
-SuperLU, MKL, Ipopt, Gurobi, and PaPILO disabled passed `test_ipm_solver`: 30
-cases and 188 assertions. The sibling MIPSolvers worktree still contains
-separate uncommitted native IPM/Windows changes; Trial verification therefore
-uses a clean temporary checkout at the pinned commit. No claim is made for a
-Windows package yet.
+The Trial verification below used the earlier MIPSolvers `7b4cba8` pin. That
+commit guards the optional CHOLMOD augmented-factor calls and restores the
+no-SuiteSparse build. Its clean Release build with SuiteSparse, SuperLU, MKL,
+Ipopt, Gurobi, and PaPILO disabled passed `test_ipm_solver`: 30 cases and 188
+assertions. The current dependency upgrade and OPF verification are recorded
+separately below. No claim is made for a Windows package yet.
 
 A clean Debug Trial build against that checkout rebuilt `test_edition_profile`
 and `run_gui_server`. All five registered Trial tests passed in 8.19 seconds:
@@ -55,6 +53,35 @@ unverified.
 
 The two full CTest results establish the normal build baseline. They do not
 claim that every sanitizer entry point is green.
+
+## Three-phase hybrid OPF Phase I/II integration
+
+The dependency pin now advances to MIPSolvers `adfc98f`. For the monolithic
+three-phase hybrid OPF NativeIPM path, Phase I restores a primal point in the
+assembled OPF coordinates and generates equality multipliers, positive
+inequality multipliers, and positive slacks. The `NLPModel` exposes an
+independent original-per-unit maximum violation callback. Phase II requests
+MIPSolvers' `primal_feasible_start` and `preserve_initial_point` policies; the
+adapter preserves the point only when its independent constraint and variable-
+bound audit is finite and no greater than `tol_primal`. Otherwise its ordinary
+infeasible-start interiorization remains active. Public results report the
+Phase I certificate, whether dual initialization completed, whether Phase II
+requested and accepted the start, and the selected linear backend. A Phase II
+zero-iteration termination honestly reports `unselected` because no KKT
+factorization occurred.
+
+On AppleClang 21, arm64 macOS, Release, the rebuilt MIPSolvers
+`test_ipm_solver --rng-seed 1` passed 30 cases and 203 assertions. The rebuilt
+HySim `test_three_phase_hybrid_opf --rng-seed 1` passed 8 cases and 112
+assertions. The focused graph-reduced-to-Full primal-dual transport passed 16
+assertions: the Full Phase I violation was approximately `8.08e-15`, Phase II
+requested and accepted the preserved point, and final primal/dual/
+complementarity residuals were approximately `8.08e-15`, `2.56e-7`, and
+`1.00e-7`. This small case terminated before a Phase II KKT factorization, so
+the backend correctly reported `unselected`. The added O(rows + variables)
+audit was not timed against a disabled-audit baseline, so the predeclared
+under-1% performance prediction remains unverified. No full CTest, sanitizer
+run, or Windows package validation was performed for this increment.
 
 ## DER control and reliability-method comparison
 

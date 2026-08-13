@@ -5,7 +5,7 @@
 
 本文档面向工程使用者和开发者，说明 HySim-XJTU-HRPES 从“工程场景建模”到“规范模型求解”、再到“结果回投”的完整链路。当前合同与实现参考统一从 `docs/README.md` 进入；历史审计、理论提案和旧技术总笔记隔离在 `docs/archive/`，不代表当前行为。
 
-## 文档同步状态（2026-08-13）
+## 文档同步状态（2026-08-14）
 
 - `docs/README.md` 是当前文档的唯一导航入口，明确区分运行契约与理论参考。
 - `main` 提供统一 Trial 能力清单、后端 fail-closed 403 防绕过、五阶段
@@ -21,8 +21,12 @@
   LP IPM Gondzio multiple centrality correctors、MILP B&C 拆分与跨平台构建修复。
   `full-dev` 同时构建两仓库完整测试树；该历史升级回归 1429/1429 个已注册
   测试通过，3 个缺少外部运行时或条件不满足的用例明确跳过。当前 Trial
-  集成将依赖 pin 更新到 MIPSolvers `7b4cba8`，并在无 SuiteSparse 配置下
-  通过 native IPM 的 30 个测试用例；新的完整双仓库回归仍待运行。
+  Trial 集成先将依赖 pin 更新到 MIPSolvers `7b4cba8`；当前 pin 为
+  `adfc98f`，加入 Native IPM 的原坐标可行起点审计、方向性变量界契约和
+  滤波器诊断。三相混合 OPF 的 Phase I 现在构造可行原始点及对偶/松弛状态，
+  Phase II 仅在 MIPSolvers 独立审计接受后保留该起点。MIPSolvers IPM 30 个
+  用例/203 个断言与 HySim 三相混合 OPF 8 个用例/112 个断言通过；新的完整
+  双仓库回归仍待运行。
 - 2026-07-28 增加 IEC-CGE 注释配电单线图 SVG 导入：从
   `cge:psr_ref` 与几何端点恢复导线、母线、开关、母联和配变拓扑，按
   `BestEffort` 口径补齐缺失电气参数，源外孤岛保持隔离；两个真实馈线

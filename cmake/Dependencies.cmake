@@ -20,7 +20,7 @@
 #     environments where the tree layout differs from the default.
 #
 # Last verified compatible commit (update when upgrading MIPSolvers):
-set(_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT "7b4cba8f20431847bc9914d886724d33559df612"
+set(_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT "adfc98f3bd4721682f72f65ba030a18cfad1749d"
   CACHE STRING "Expected MIPSolvers HEAD commit (empty = skip check)" FORCE)
 
 set(MIPSOLVERS_SOURCE_DIR "" CACHE PATH

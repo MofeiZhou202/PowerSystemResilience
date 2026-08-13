@@ -405,6 +405,12 @@ TEST_CASE("Native Full certifies a graph-reduced primal-dual transport",
   REQUIRE(full.converged);
   CHECK(full.initial_primal_residual <= 1e-6);
   CHECK(full.initial_dual_residual <= 1e-6);
+  CHECK(full.phase_one_constraint_violation <= options.tolerance);
+  CHECK(full.phase_one_primal_feasible);
+  CHECK(full.phase_one_dual_initialized);
+  CHECK(full.phase_two_start_requested);
+  CHECK(full.phase_two_start_accepted);
+  CHECK_FALSE(full.phase_two_linear_solver_backend.empty());
   CHECK(full.primal_residual <= 1e-6);
   CHECK(full.dual_residual <= 1e-6);
   CHECK(full.complementarity <= 1e-6);

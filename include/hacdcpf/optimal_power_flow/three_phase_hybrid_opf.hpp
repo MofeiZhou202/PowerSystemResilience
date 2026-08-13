@@ -155,6 +155,18 @@ struct ThreePhaseHybridOPFResult {
   double runtime_ms{0.0};
   double initial_primal_residual{0.0};
   double initial_dual_residual{0.0};
+  /// Phase I certificate in the assembled OPF's original per-unit
+  /// coordinates. Phase II preserves the point only after MIPSolvers repeats
+  /// this audit, including variable bounds, at its primal tolerance.
+  double phase_one_constraint_violation{
+      std::numeric_limits<double>::infinity()};
+  bool phase_one_primal_feasible{false};
+  bool phase_one_dual_initialized{false};
+  bool phase_two_start_requested{false};
+  bool phase_two_start_accepted{false};
+  /// Numeric KKT backend selected by Phase II. "unselected" is valid when
+  /// the accepted Phase I point satisfies termination before factorization.
+  std::string phase_two_linear_solver_backend{"unselected"};
   int initial_worst_equality{-1};
   int initial_worst_inequality{-1};
   double primal_residual{0.0};

@@ -1746,6 +1746,28 @@ engine::NLPModel build_nlp(const std::shared_ptr<ModelData>& d,
   nlp.jac_h = [d](const Eigen::VectorXd& x, Eigen::SparseMatrix<double>& j) {
     inequality_jacobian(*d, x, j, &d->enforced_inequality_rows);
   };
+  // Wachter--Biegler (2006), Sections 2--3: a restored filter-IPM start is
+  // preserved only after an independent max-norm feasibility audit. Undo the
+  // internal equality row scaling so this callback reports the OPF's original
+  // per-unit coordinates; MIPSolvers audits variable bounds independently.
+  nlp.original_constraint_violation = [d](const Eigen::VectorXd& x) {
+    Eigen::VectorXd equalities;
+    Eigen::VectorXd full_inequalities;
+    evaluate_equalities(*d, x, equalities);
+    evaluate_inequalities(*d, x, full_inequalities);
+    if (equalities.size() != d->equality_scale.size() ||
+        !equalities.allFinite() || !full_inequalities.allFinite()) {
+      return std::numeric_limits<double>::infinity();
+    }
+    equalities.array() /= d->equality_scale.array();
+    const Eigen::VectorXd inequalities = select_inequality_rows(
+        full_inequalities, d->enforced_inequality_rows);
+    const double equality_violation = equalities.size() > 0
+        ? equalities.cwiseAbs().maxCoeff() : 0.0;
+    const double inequality_violation = inequalities.size() > 0
+        ? std::max(0.0, inequalities.maxCoeff()) : 0.0;
+    return std::max(equality_violation, inequality_violation);
+  };
   const int equality_nullity = l.nvar - l.neq;
   if (equality_nullity == l.nc) {
     nlp.equality_free_columns.reserve(static_cast<std::size_t>(l.nc));
@@ -2555,6 +2577,10 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf_impl(
   engine::SolveResult solved;
   engine::IPMDetail detail;
   double initial_dual_residual = 0.0;
+  double phase_one_constraint_violation =
+      std::numeric_limits<double>::infinity();
+  double phase_one_tolerance = 0.0;
+  bool phase_one_dual_initialized = false;
   const auto start = std::chrono::steady_clock::now();
   if (options.backend == SolverBackend::NativeIPM) {
     const auto primal_residual = [&](const Eigen::VectorXd& point) {
@@ -2606,12 +2632,17 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf_impl(
       }
     }
 
-    log_stage("primal restoration: start");
+    // Phase I constructs a feasible primal point and a central primal-dual
+    // state. Phase II may preserve that point only if the independent
+    // MIPSolvers audit accepts it at this same tolerance.
+    phase_one_tolerance = std::min(options.tolerance, 1e-7);
+    log_stage("Phase I primal restoration: start");
     Eigen::VectorXd restored_start = nlp.x0;
-    bool restored = restore_primal_feasibility(nlp, restored_start, 1e-7);
+    bool restored = restore_primal_feasibility(
+        nlp, restored_start, phase_one_tolerance);
     if (restored_start.allFinite()) nlp.x0 = std::move(restored_start);
     start_primal_residual = primal_residual(nlp.x0);
-    log_stage(std::string("primal restoration: ") +
+    log_stage(std::string("Phase I primal restoration: ") +
               (restored ? "converged" : "incomplete") + " (p=" +
               std::to_string(start_primal_residual) + ")");
 
@@ -2629,23 +2660,26 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf_impl(
                 ", p=" + std::to_string(warm.stats.unscaled_primal_feas) +
                 ", d=" + std::to_string(warm.stats.unscaled_dual_feas) + ")");
       if (warm.x.size() == data->layout.nvar && warm.x.allFinite()) nlp.x0 = warm.x;
-      log_stage("post-Ipopt primal restoration: start");
+      log_stage("post-Ipopt Phase I primal restoration: start");
       restored_start = nlp.x0;
-      restored = restore_primal_feasibility(nlp, restored_start, 1e-7);
+      restored = restore_primal_feasibility(
+          nlp, restored_start, phase_one_tolerance);
       if (restored_start.allFinite()) nlp.x0 = std::move(restored_start);
-      log_stage(std::string("post-Ipopt primal restoration: ") +
+      log_stage(std::string("post-Ipopt Phase I primal restoration: ") +
                 (restored ? "converged" : "incomplete") + " (p=" +
                 std::to_string(primal_residual(nlp.x0)) + ")");
     }
     engine::IPMOptions ipm_options;
     ipm_options.max_iter = options.max_iterations;
-    ipm_options.tol_primal = std::min(options.tolerance, 1e-7);
+    ipm_options.tol_primal = phase_one_tolerance;
     ipm_options.tol_dual = options.tolerance;
     ipm_options.tol_complementarity = options.tolerance;
     ipm_options.tol_accept = 0.0;
     ipm_options.globalization = engine::Globalization::Filter;
     ipm_options.scale_problem = false;
     ipm_options.verbose = options.verbose;
+    ipm_options.primal_feasible_start = true;
+    ipm_options.preserve_initial_point = true;
     const Eigen::VectorXd* equality_dual_seed =
         options.equality_dual_start.size() == data->layout.neq
             ? &options.equality_dual_start : nullptr;
@@ -2677,12 +2711,37 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf_impl(
     initialize_primal_dual_start(nlp, equality_dual_seed,
                                  inequality_dual_seed, slack_seed,
                                  &initial_dual_residual, ipm_options);
-    log_stage("dual initialization: done (d=" +
+    phase_one_constraint_violation =
+        nlp.original_constraint_violation(nlp.x0);
+    for (int col = 0; col < nlp.x0.size(); ++col) {
+      const auto& variable = nlp.vars[static_cast<std::size_t>(col)];
+      if (engine::variable_has_finite_lower_bound(variable.lb)) {
+        phase_one_constraint_violation = std::max(
+            phase_one_constraint_violation,
+            std::max(0.0, variable.lb - nlp.x0[col]));
+      }
+      if (engine::variable_has_finite_upper_bound(variable.ub)) {
+        phase_one_constraint_violation = std::max(
+            phase_one_constraint_violation,
+            std::max(0.0, nlp.x0[col] - variable.ub));
+      }
+    }
+    phase_one_dual_initialized =
+        ipm_options.equality_dual_start.size() == data->layout.neq &&
+        ipm_options.equality_dual_start.allFinite() &&
+        ipm_options.inequality_dual_start.size() > 0 &&
+        ipm_options.inequality_dual_start.size() ==
+            ipm_options.slack_start.size() &&
+        ipm_options.inequality_dual_start.allFinite() &&
+        ipm_options.slack_start.allFinite() &&
+        (ipm_options.inequality_dual_start.array() > 0.0).all() &&
+        (ipm_options.slack_start.array() > 0.0).all();
+    log_stage("Phase I dual initialization: done (d=" +
               std::to_string(initial_dual_residual) + ")");
     engine::NativeIPMAdapter native(ipm_options);
-    log_stage("NativeIPM: start");
+    log_stage("Phase II NativeIPM: start");
     std::tie(solved, detail) = native.solve_nlp_detail(nlp);
-    log_stage("NativeIPM: done (status=" + solved.stats.status + ")");
+    log_stage("Phase II NativeIPM: done (status=" + solved.stats.status + ")");
   } else {
     engine::IpoptAdapter ipopt;
     solved = ipopt.solve_nlp(nlp);
@@ -2720,6 +2779,17 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf_impl(
   result.objective = solved.stats.objective;
   result.runtime_ms = runtime_ms;
   result.initial_dual_residual = initial_dual_residual;
+  result.phase_one_constraint_violation = phase_one_constraint_violation;
+  result.phase_one_primal_feasible =
+      options.backend == SolverBackend::NativeIPM &&
+      std::isfinite(phase_one_constraint_violation) &&
+      phase_one_constraint_violation <= phase_one_tolerance;
+  result.phase_one_dual_initialized = phase_one_dual_initialized;
+  result.phase_two_start_requested =
+      detail.primal_feasible_start_requested;
+  result.phase_two_start_accepted =
+      detail.primal_feasible_start_accepted;
+  result.phase_two_linear_solver_backend = detail.linear_solver_backend;
   Eigen::VectorXd initial_g;
   Eigen::VectorXd initial_h;
   evaluate_equalities(*data, nlp.x0, initial_g);
