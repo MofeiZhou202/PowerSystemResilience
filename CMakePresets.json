@@ -73,6 +73,21 @@
       }
     },
     {
+      "name": "windows-trial-release",
+      "displayName": "Windows Trial Edition Release",
+      "inherits": "windows-vcpkg-release",
+      "binaryDir": "${sourceDir}/build/windows-trial-release",
+      "cacheVariables": {
+        "HACDCPF_TRIAL_EDITION": "ON",
+        "HACDCPF_ENABLE_IPO": "OFF",
+        "HACDCPF_ENABLE_ETAP": "OFF",
+        "HACDCPF_ENABLE_OPENDSS": "ON",
+        "HACDCPF_USE_GUROBI": "OFF",
+        "MIPSOLVERS_ENABLE_IPO": "OFF",
+        "OPENXLSX_ENABLE_LTO": "OFF"
+      }
+    },
+    {
       "name": "full-dev",
       "displayName": "Full Developer Build",
       "inherits": "base",
@@ -103,6 +118,12 @@
     {
       "name": "windows-vcpkg-release",
       "configurePreset": "windows-vcpkg-release",
+      "configuration": "Release",
+      "jobs": 8
+    },
+    {
+      "name": "windows-trial-release",
+      "configurePreset": "windows-trial-release",
       "configuration": "Release",
       "jobs": 8
     },
@@ -138,6 +159,14 @@
     {
       "name": "windows-vcpkg-release",
       "configurePreset": "windows-vcpkg-release",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-trial-release",
+      "configurePreset": "windows-trial-release",
       "configuration": "Release",
       "output": {
         "outputOnFailure": true

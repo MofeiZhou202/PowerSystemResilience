@@ -5,9 +5,12 @@
 
 本文档面向工程使用者和开发者，说明 HySim-XJTU-HRPES 从“工程场景建模”到“规范模型求解”、再到“结果回投”的完整链路。当前合同与实现参考统一从 `docs/README.md` 进入；历史审计、理论提案和旧技术总笔记隔离在 `docs/archive/`，不代表当前行为。
 
-## 文档同步状态（2026-08-10）
+## 文档同步状态（2026-08-13）
 
 - `docs/README.md` 是当前文档的唯一导航入口，明确区分运行契约与理论参考。
+- `main` 提供统一 Trial 能力清单、后端 fail-closed 403 防绕过、五阶段
+  GUI、后端指标分析计划、Trial 专属验收测试和白名单 Windows 打包；
+  维护边界见 `docs/trial_edition_design.md`。
 - 历史审计、理论提案与旧技术总笔记已迁入 `docs/archive/`；受版本控制的
   PDF/LaTeX 中间产物已移除，活动索引不再直接导航到归档材料。
 - `AGENTS.md`、`CLAUDE.md` 与项目级 `manage-codebase-context` skill
@@ -16,8 +19,10 @@
 - 2026-08-08 将 MIPSolvers 固定到 `60f8bc4`：纳入系统更新后的 native
   dual simplex（分区 PRICE、驻留 pivot workspace、warm re-optimization）、
   LP IPM Gondzio multiple centrality correctors、MILP B&C 拆分与跨平台构建修复。
-  `full-dev` 同时构建两仓库完整测试树；本次升级回归 1429/1429 个已注册
-  测试通过，3 个缺少外部运行时或条件不满足的用例明确跳过。
+  `full-dev` 同时构建两仓库完整测试树；该历史升级回归 1429/1429 个已注册
+  测试通过，3 个缺少外部运行时或条件不满足的用例明确跳过。当前 Trial
+  集成将依赖 pin 更新到 MIPSolvers `7b4cba8`，并在无 SuiteSparse 配置下
+  通过 native IPM 的 30 个测试用例；新的完整双仓库回归仍待运行。
 - 2026-07-28 增加 IEC-CGE 注释配电单线图 SVG 导入：从
   `cge:psr_ref` 与几何端点恢复导线、母线、开关、母联和配变拓扑，按
   `BestEffort` 口径补齐缺失电气参数，源外孤岛保持隔离；两个真实馈线
@@ -59,6 +64,15 @@ ctest --preset linux-release
 cmake --preset windows-msvc-release
 cmake --build --preset windows-msvc-release
 ctest --preset windows-msvc-release
+```
+
+Trial Windows 包使用独立 preset，并在打包前强制运行 Trial 验收测试：
+
+```powershell
+cmake --preset windows-trial-release
+cmake --build --preset windows-trial-release --target run_gui_server
+ctest --preset windows-trial-release -L trial --output-on-failure
+powershell -ExecutionPolicy Bypass -File tools/package_trial_windows.ps1
 ```
 
 ## 当前建模与仿真包状态快照（2026-08-09）

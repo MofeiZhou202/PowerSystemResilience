@@ -1,6 +1,6 @@
 # Development Status
 
-Updated: 2026-08-11
+Updated: 2026-08-13
 
 This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
@@ -10,13 +10,48 @@ the current Git worktrees remain authoritative.
 
 | Scope | Result |
 |---|---|
-| Required MIPSolvers source | Sibling `../MIPSolvers`, branch `dev`, expected commit `60f8bc4e4eeb58c239f83b7ff0fde1be75cd05b0` |
+| Required MIPSolvers source | Current pin `7b4cba8f20431847bc9914d886724d33559df612` on MIPSolvers `main`; the full regressions below were established at the older `60f8bc4e4eeb58c239f83b7ff0fde1be75cd05b0` baseline |
 | `full-dev` regression | 1430/1430 registered tests completed without failure; 3 condition-dependent tests skipped |
 | `macos-release` regression | 1425/1425 registered tests completed without failure; 3 condition-dependent tests skipped |
 | Graph ASan/UBSan subset | 28 cases, 113 assertions passed after the iterative Tarjan fix |
 | Reliability ASan/UBSan | Complete three-stage suite 25 cases/1339 assertions; `case33mg_acdc` 477 assertions and five consecutive parallel repeats passed; `test_1_no_sop` 79 assertions |
 | Market ASan/UBSan | Complete suite 22 cases/845 assertions; focused initial root-cut case 1/42 |
 | Other sanitizer subsets | Thread pool 4 cases/6 assertions; `test_hacdcpf` 26/89; `test_acopf_dcopf_crossval` 10/84; `test_power_flow_math_audit` 40/204 |
+
+## Trial edition integration
+
+Current `main` reimplements the two `trial_design` commits on top of the newer
+reliability and GUI work. The backend owns an embedded edition profile,
+indicator-to-analysis plan, and fail-closed method/path policy. Known disabled
+routes return `TRIAL_FEATURE_DISABLED`; an unclassified future API route is
+also denied. The GUI consumes the profile and plan, removes disabled controls,
+avoids the eager dynamics-schema request, and keeps each solver execution
+explicit. Windows packaging requires a clean pinned MIPSolvers checkout, Trial
+CTest success, required runtime/data presence, and an extracted-package startup
+smoke test before hashing the manifest and ZIP.
+
+The HySim dependency pin is updated from `60f8bc4` to MIPSolvers `main` commit
+`7b4cba8`. That commit guards the optional CHOLMOD augmented-factor calls and
+restores the no-SuiteSparse build. A clean Release build with SuiteSparse,
+SuperLU, MKL, Ipopt, Gurobi, and PaPILO disabled passed `test_ipm_solver`: 30
+cases and 188 assertions. The sibling MIPSolvers worktree still contains
+separate uncommitted native IPM/Windows changes; Trial verification therefore
+uses a clean temporary checkout at the pinned commit. No claim is made for a
+Windows package yet.
+
+A clean Debug Trial build against that checkout rebuilt `test_edition_profile`
+and `run_gui_server`. All five registered Trial tests passed in 8.19 seconds:
+three C++ profile/policy/plan cases, the fail-closed HTTP E2E, and the
+Playwright GUI E2E. Manual browser inspection at 1440x1000 and 390x844 found no
+page-level horizontal overflow, toolbar overlap, or clipped controls; the
+mobile indicator-plan band was expanded so all nine backend-ordered links end
+above the workspace. A separate clean full-edition Debug build passed the full
+profile case, `runtime_api_v1_e2e`, `reliability_workflow_e2e`, and
+`reliability_dimension_validation_e2e` in 57.93 seconds. JavaScript syntax,
+Python AST parsing, preset JSON parsing, required package-data presence, and
+`git diff --check` passed. PowerShell is unavailable on this macOS host, so the
+Windows preset, staged DLL startup, manifest, and ZIP creation remain
+unverified.
 
 The two full CTest results establish the normal build baseline. They do not
 claim that every sanitizer entry point is green.
