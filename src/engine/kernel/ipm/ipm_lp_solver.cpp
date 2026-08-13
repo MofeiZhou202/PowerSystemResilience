@@ -2363,6 +2363,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
         return;
       }
 #endif
+#if MIPSOLVERS_HAVE_CHOLMOD
       if (aug_use_cholmod) {
         for (int j = 0; j < nn; ++j) aug_rhsbuf[static_cast<size_t>(j)] = xi[j];
         for (int i = 0; i < m; ++i) aug_rhsbuf[static_cast<size_t>(nn + i)] = prim_rhs[i];
@@ -2375,6 +2376,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
         for (int i = 0; i < m; ++i) dy_out[i] = aug_solbuf[static_cast<size_t>(nn + i)];
         return;
       }
+#endif
       for (int j = 0; j < aug_primal_dim; ++j) {
         aug_rhs[j] = xi[aug_reduced_to_full[static_cast<size_t>(j)]];
       }
@@ -2726,7 +2728,11 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
             return aug_accel_numeric.status == SparseStatusOK;
           }
 #endif
+#if MIPSOLVERS_HAVE_CHOLMOD
           return aug_chol.factorize(aug_kv.data());
+#else
+          return false;
+#endif
         };
         set_aug_diag(reg);
         factor_ok = aug_numeric_factor();
