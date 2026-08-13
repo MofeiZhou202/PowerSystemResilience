@@ -125,6 +125,8 @@ const App = (() => {
   let _lastInvalidationReason = '';
   const _canvasPlaybackControllers = new Map();
   let _activeWorkflow = 'steady';
+  let _editionProfile = { edition: 'full', product_name: 'HySim-XJTU-HRPES' };
+  let _trialAnalysisPlanRequest = 0;
   let _parameterLibraryData = null;
   let _parameterLibrarySelectedInstance = '';
   const _reliabilityResultRefs = new Map();
@@ -319,6 +321,10 @@ const App = (() => {
     market: 'marketBehavior',
     ies: 'integratedEnergy',
     sustainability: 'carbonFlow',
+    parameter_validation: 'parameterLibrary',
+    indicator_design: 'indicatorDesign',
+    panoramic_simulation: 'scenarioGeneration',
+    weak_link_identification: 'weakLinks',
   };
   // 时序潮流 (tspf) and 时序生产模拟 (timeSeries=annual) share ONE sub-section and
   // result group (identical modeling controls). These maps route both modules to
@@ -340,6 +346,196 @@ const App = (() => {
   };
   const subsectionForModule = (m) => SUBSECTION_FOR_MODULE[m] || m;
   const resultGroupForModule = (m) => RESULT_GROUP_FOR_MODULE[m] || m;
+
+  const TRIAL_MODULE_WORKFLOWS = {
+    modelIO: 'modeling',
+    parameterLibrary: 'parameter_validation',
+    topologyAnalysis: 'parameter_validation',
+    indicatorDesign: 'indicator_design',
+    scenarioGeneration: 'panoramic_simulation',
+    powerFlow: 'panoramic_simulation',
+    opf: 'panoramic_simulation',
+    shortCircuit: 'panoramic_simulation',
+    hosting: 'panoramic_simulation',
+    reliability: 'panoramic_simulation',
+    resilience: 'panoramic_simulation',
+    carbonFlow: 'panoramic_simulation',
+    weakLinks: 'weak_link_identification',
+  };
+
+  async function loadEditionProfile() {
+    try {
+      const response = await fetch(`${API_BASE}/api/edition`, { cache: 'no-store' });
+      if (response.ok) {
+        const profile = await response.json();
+        if (profile?.schema === 'hacdcpf.edition-profile.v1') _editionProfile = profile;
+      }
+    } catch (_) {
+      // A full-edition server predating the profile endpoint remains usable.
+    }
+    return _editionProfile;
+  }
+
+  function selectedTrialIndicators() {
+    return Array.from(document.querySelectorAll('[data-trial-indicator]:checked'),
+      input => input.dataset.trialIndicatorId).filter(Boolean);
+  }
+
+  async function updateTrialAnalysisPlan() {
+    if (_editionProfile.edition !== 'trial') return null;
+    const requestId = ++_trialAnalysisPlanRequest;
+    const payload = await apiPost('/api/edition/analysis_plan', {
+      indicators: selectedTrialIndicators(),
+    }, { quiet: true });
+    if (requestId !== _trialAnalysisPlanRequest || !payload) return null;
+    const steps = Array.isArray(payload.steps) ? payload.steps : [];
+    const required = new Set(steps.map(step => step.module));
+    document.querySelectorAll('.module-btn[data-group="panoramic_simulation"]').forEach(button => {
+      button.classList.toggle('trial-plan-excluded', !required.has(button.dataset.module));
+    });
+    const makeStepButton = step => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'trial-plan-step';
+      button.dataset.module = step.module;
+      button.textContent = step.label;
+      button.addEventListener('click', () => setActiveModule(step.module));
+      return button;
+    };
+    const plan = document.getElementById('trialAnalysisPlan');
+    if (plan) {
+      plan.replaceChildren();
+      steps.forEach((step, index) => {
+        if (index) plan.append(document.createTextNode(' / '));
+        plan.append(makeStepButton(step));
+      });
+    }
+    const result = document.getElementById('trialIndicatorResults');
+    if (result) {
+      const list = document.createElement('ol');
+      list.className = 'trial-plan-list';
+      steps.forEach(step => {
+        const item = document.createElement('li');
+        item.append(makeStepButton(step));
+        list.append(item);
+      });
+      result.replaceChildren(list);
+    }
+    return payload;
+  }
+
+  function installTrialIndicatorDesign() {
+    const moduleBar = document.getElementById('moduleBar');
+    const subToolbar = document.getElementById('subToolbar');
+    const resultsContent = document.getElementById('resultsContent');
+    if (!moduleBar || !subToolbar || !resultsContent) return;
+    const moduleButton = document.createElement('button');
+    moduleButton.id = 'moduleIndicatorDesign';
+    moduleButton.className = 'module-btn';
+    moduleButton.dataset.module = 'indicatorDesign';
+    moduleButton.dataset.group = 'indicator_design';
+    moduleButton.textContent = '指标体系';
+    moduleButton.addEventListener('click', () => setActiveModule('indicatorDesign'));
+    moduleBar.append(moduleButton);
+
+    const section = document.createElement('div');
+    section.className = 'sub-section trial-indicator-section';
+    section.dataset.sub = 'indicatorDesign';
+    section.hidden = true;
+    for (const level of ['system', 'user']) {
+      const group = document.createElement('fieldset');
+      group.className = 'trial-indicator-group';
+      const legend = document.createElement('legend');
+      legend.textContent = level === 'system' ? '系统级' : '用户级';
+      group.append(legend);
+      (_editionProfile.indicators || []).filter(item => item.level === level).forEach(item => {
+        const label = document.createElement('label');
+        label.className = 'sub-label sub-checkbox';
+        const input = document.createElement('input');
+        input.type = 'checkbox';
+        input.checked = true;
+        input.dataset.trialIndicator = item.dimension;
+        input.dataset.trialIndicatorId = item.id;
+        input.addEventListener('change', updateTrialAnalysisPlan);
+        const text = document.createElement('span');
+        text.textContent = item.label;
+        label.append(input, text);
+        group.append(label);
+      });
+      section.append(group);
+    }
+    const plan = document.createElement('span');
+    plan.id = 'trialAnalysisPlan';
+    plan.className = 'trial-analysis-plan';
+    section.append(plan);
+    subToolbar.append(section);
+
+    const resultGroup = document.createElement('div');
+    resultGroup.className = 'result-group';
+    resultGroup.dataset.resultGroup = 'indicatorDesign';
+    const resultSection = document.createElement('div');
+    resultSection.className = 'topo-section';
+    const heading = document.createElement('h4');
+    heading.textContent = '全景评估指标体系';
+    const result = document.createElement('div');
+    result.id = 'trialIndicatorResults';
+    resultSection.append(heading, result);
+    resultGroup.append(resultSection);
+    resultsContent.append(resultGroup);
+  }
+
+  function applyTrialEditionProfile() {
+    if (_editionProfile.edition !== 'trial') return;
+    document.body.dataset.edition = 'trial';
+    document.title = _editionProfile.product_name || 'HySim Trial';
+    const logo = document.querySelector('.logo-mini');
+    if (logo && !document.getElementById('editionBadge')) {
+      const badge = document.createElement('span');
+      badge.id = 'editionBadge';
+      badge.className = 'edition-badge';
+      badge.textContent = 'TRIAL';
+      logo.append(badge);
+    }
+    const workflowBar = document.getElementById('workflowBar');
+    if (workflowBar) {
+      workflowBar.replaceChildren();
+      (_editionProfile.workflow || []).forEach(step => {
+        const button = document.createElement('button');
+        button.className = 'workflow-btn';
+        button.dataset.workflow = step.id;
+        button.textContent = step.label;
+        button.addEventListener('click', () => setActiveWorkflow(step.id));
+        workflowBar.append(button);
+      });
+    }
+    const enabled = new Set(_editionProfile.frontend_modules || []);
+    document.querySelectorAll('.module-btn').forEach(button => {
+      if (!enabled.has(button.dataset.module)) button.remove();
+      else if (TRIAL_MODULE_WORKFLOWS[button.dataset.module]) {
+        button.dataset.group = TRIAL_MODULE_WORKFLOWS[button.dataset.module];
+      }
+    });
+    document.querySelectorAll('.sub-section, .result-group').forEach(element => {
+      const module = element.dataset.sub || element.dataset.resultGroup;
+      if (module && !enabled.has(module) && module !== 'carbonAnalysis') element.remove();
+    });
+    const advancedIoIds = [
+      'btnExportEtap', 'btnExportEtapXml', 'btnImportEtapXlsxCase',
+      'btnImportEtapXmlCase', 'btnIoImportEtapXlsx', 'btnIoImportEtapXml',
+      'btnIoImportBpaDat', 'btnIoImportCimDist', 'btnIoImportCimDistProject',
+      'btnIoImportSvgDistribution', 'btnIoImportPsdJulia', 'btnIoExportEtap',
+      'btnIoExportEtapXml', 'btnIoExportBpaDat', 'btnIoExportCimDist',
+      'btnIoExportSvgDistribution', 'btnIoExportPsd', 'fileImportBpaDat',
+      'fileImportPsdJulia', 'fileImportCimDist', 'fileImportCimDistProject',
+      'fileImportSvgDistribution', 'fileImportEtapXlsx', 'fileImportEtapXml',
+    ];
+    advancedIoIds.forEach(id => document.getElementById(id)?.remove());
+    document.getElementById('ioSvgAutoComplete')?.closest('label')?.remove();
+    document.querySelector('.io-group-out-cim')?.remove();
+    installTrialIndicatorDesign();
+    updateTrialAnalysisPlan();
+    HySimCore.Accessibility?.syncNavigation();
+  }
 
   function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -14152,6 +14348,7 @@ const App = (() => {
     if (!bar) return;
     const subKey = subsectionForModule(moduleName);
     bar.classList.toggle('reliability-expanded', subKey === 'reliability');
+    bar.classList.toggle('trial-indicator-expanded', subKey === 'indicatorDesign');
     let anyVisible = false;
     bar.querySelectorAll('.sub-section').forEach(sec => {
       const match = sec.dataset.sub === subKey;
@@ -17224,7 +17421,8 @@ const App = (() => {
     return metrics;
   }
 
-  function init() {
+  async function init() {
+    await loadEditionProfile();
     // Apply the saved light/dark theme before anything renders.
     initThemeMode();
     initWorkspaceLayout();
@@ -17246,7 +17444,7 @@ const App = (() => {
     loadMatpowerFileList();
     // Warm the transient model catalog so the per-component dynamic-model editor
     // is ready as soon as a component is selected.
-    ensureDynSchema();
+    if (_editionProfile.edition !== 'trial') ensureDynSchema();
 
     // ---- Toolbar Events ----
     // Bar 1: 加载算例 -> open case-load modal
@@ -23423,7 +23621,12 @@ const App = (() => {
     // ---- Toolbar default state ----
     Canvas.setMode('select');
     setActiveCanvasTool('btnSelect');
-    setActiveModule('powerFlow');  // default-activate Power Flow module
+    if (_editionProfile.edition === 'trial') {
+      applyTrialEditionProfile();
+      setActiveModule('modelIO');
+    } else {
+      setActiveModule('powerFlow');  // default-activate Power Flow module
+    }
     updateDependencyChips();
   }
 

@@ -1328,6 +1328,7 @@ body[data-active-result-group="parameterLibrary"] #rightPanel {
 #resultsContent[data-active-group="reliability"]  .result-group[data-result-group="reliability"],
 #resultsContent[data-active-group="scenarioGeneration"] .result-group[data-result-group="scenarioGeneration"],
 #resultsContent[data-active-group="resilience"]   .result-group[data-result-group="resilience"],
+#resultsContent[data-active-group="indicatorDesign"] .result-group[data-result-group="indicatorDesign"],
 #resultsContent[data-active-group="weakLinks"]    .result-group[data-result-group="weakLinks"] {
   display: block;
 }
@@ -3052,6 +3053,54 @@ tr.topo-clickable:focus-visible {
   line-height: 1;
   letter-spacing: 0;
 }
+.edition-badge {
+  align-self: flex-start;
+  margin-top: 3px;
+  padding: 1px 4px;
+  border: 1px solid #f0b35d;
+  border-radius: 3px;
+  color: #ffd48f;
+  font-size: 9px;
+  font-weight: 750;
+}
+.trial-indicator-section {
+  align-items: flex-start;
+  gap: 10px;
+}
+.trial-indicator-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 220px;
+  padding: 4px 8px;
+  border: 1px solid var(--sub-bar-border);
+}
+.trial-indicator-group legend {
+  padding: 0 4px;
+  font-size: 11px;
+  font-weight: 700;
+}
+.trial-analysis-plan {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px;
+  min-height: 28px;
+}
+.trial-plan-step {
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  text-decoration: underline;
+}
+.trial-plan-excluded { opacity: 0.45; }
+.trial-plan-list {
+  display: grid;
+  gap: 5px;
+  padding-left: 22px;
+}
 .toolbar-btn {
   min-width: 64px;
   max-width: 128px;
@@ -4247,6 +4296,9 @@ body[data-workspace-density="compact"] .sub-toolbar {
 }
 body[data-workspace-density="compact"] .sub-toolbar.reliability-expanded {
   max-height: min(18vh, 112px);
+}
+body[data-workspace-density="compact"] .sub-toolbar.trial-indicator-expanded {
+  max-height: min(32vh, 240px);
 }
 body[data-workspace-density="compact"] #componentLib {
   width: 156px;

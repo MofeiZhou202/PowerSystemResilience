@@ -87,6 +87,7 @@
 #include "hacdcpf/graph/graph.hpp"
 #include "hacdcpf/dynamics/dynamics.hpp"
 #include "hacdcpf/util/thread_pool.hpp"
+#include "edition_profile.hpp"
 #include "runtime_api_v1.hpp"
 
 using json = nlohmann::json;
@@ -3130,7 +3131,7 @@ std::optional<GuiOpenDSSUploadProject> materialize_gui_opendss_upload_project(
 }
 
 std::filesystem::path project_root_path() {
-#ifdef HACDCPF_PROJECT_ROOT
+#if defined(HACDCPF_PROJECT_ROOT) && !defined(HACDCPF_TRIAL_EDITION)
   return std::filesystem::path(HACDCPF_PROJECT_ROOT);
 #else
   return std::filesystem::current_path();
@@ -10075,6 +10076,28 @@ int main(int argc, char** argv) {
 
   httplib::Server svr;
   svr.new_task_queue = [] { return new httplib::ThreadPool(8); };
+  if (hacdcpf::server::trial_edition_enabled()) {
+    svr.set_pre_routing_handler([](const httplib::Request& req,
+                                   httplib::Response& res) {
+      const auto decision =
+          hacdcpf::server::classify_trial_route(req.method, req.path);
+      if (decision.access ==
+          hacdcpf::server::EditionRouteAccess::Retained) {
+        return httplib::Server::HandlerResponse::Unhandled;
+      }
+      res.status = 403;
+      res.set_header("Cache-Control", "no-store");
+      res.set_content(
+          json{{"error",
+                {{"code", "TRIAL_FEATURE_DISABLED"},
+                 {"feature", decision.feature},
+                 {"message",
+                  "This capability is not included in the Trial edition."}}}}
+              .dump(),
+          "application/json");
+      return httplib::Server::HandlerResponse::Handled;
+    });
+  }
   hacdcpf::server::RuntimeApiV1 api_v1(
       [](const std::string& name) { return build_case(name); },
       args.api_job_workers);
@@ -10120,7 +10143,7 @@ int main(int argc, char** argv) {
         fs::current_path() / ".." / "matpower" / "data",
         fs::current_path() / "matpower" / "data",
     };
-#ifdef HACDCPF_PROJECT_ROOT
+#if defined(HACDCPF_PROJECT_ROOT) && !defined(HACDCPF_TRIAL_EDITION)
     candidates.push_back(fs::path(HACDCPF_PROJECT_ROOT) / "data");
 #endif
     for (const auto& c : candidates) {
@@ -10146,7 +10169,7 @@ int main(int argc, char** argv) {
         fs::current_path() / ".." / "external_data" / "matpower",
         fs::current_path() / ".." / ".." / "external_data" / "matpower",
     };
-#ifdef HACDCPF_PROJECT_ROOT
+#if defined(HACDCPF_PROJECT_ROOT) && !defined(HACDCPF_TRIAL_EDITION)
     candidates.push_back(fs::path(HACDCPF_PROJECT_ROOT) / "external_data" / "matpower");
 #endif
     candidates.push_back(fs::path(data_dir));  // legacy fallback: matpower files in data dir
@@ -10157,6 +10180,30 @@ int main(int argc, char** argv) {
     return p.string();
   }();
   std::cout << "MATPOWER directory: " << matpower_dir << "\n";
+
+  svr.Get("/api/edition", [](const httplib::Request&, httplib::Response& res) {
+    res.set_header("Cache-Control", "no-store");
+    res.set_content(hacdcpf::server::edition_profile_json().dump(),
+                    "application/json");
+  });
+  svr.Post("/api/edition/analysis_plan",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      const json request = json::parse(req.body.empty() ? "{}" : req.body);
+      res.set_header("Cache-Control", "no-store");
+      res.set_content(
+          hacdcpf::server::edition_analysis_plan_json(request).dump(),
+          "application/json");
+    } catch (const std::exception& error) {
+      res.status = 400;
+      res.set_content(
+          json{{"error",
+                {{"code", "INVALID_EDITION_PLAN"},
+                 {"message", error.what()}}}}
+              .dump(),
+          "application/json");
+    }
+  });
 
   svr.Get("/api/cases", [](const httplib::Request&, httplib::Response& res) {
     json out;
@@ -25282,7 +25329,7 @@ int main(int argc, char** argv) {
         fs::current_path() / ".." / ".." / "web",
         fs::current_path() / ".." / ".." / ".." / "web",
     };
-#ifdef HACDCPF_PROJECT_ROOT
+#if defined(HACDCPF_PROJECT_ROOT) && !defined(HACDCPF_TRIAL_EDITION)
     candidates.push_back(fs::path(HACDCPF_PROJECT_ROOT) / "web");
 #endif
     for (const auto& c : candidates) {
@@ -25298,7 +25345,7 @@ int main(int argc, char** argv) {
   } else {
     std::cerr << "WARNING: web/ frontend directory not found.\n"
               << "         Looked relative to cwd (" << fs::current_path().string() << ")"
-#ifdef HACDCPF_PROJECT_ROOT
+#if defined(HACDCPF_PROJECT_ROOT) && !defined(HACDCPF_TRIAL_EDITION)
               << " and " << HACDCPF_PROJECT_ROOT
 #endif
               << ".\n         The /xjtu/ canvas UI will be unavailable (404). "

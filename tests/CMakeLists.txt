@@ -413,6 +413,19 @@ hacdcpf_add_test(test_ltm_stress test_ltm_stress.cpp)
 #   4-link corridor, and free-flow travel-time accuracy.
 hacdcpf_add_test(test_ctm_ltm_comparison test_ctm_ltm_comparison.cpp)
 
+add_executable(test_edition_profile
+  test_edition_profile.cpp
+  "${CMAKE_SOURCE_DIR}/src/server/edition_profile.cpp")
+target_include_directories(test_edition_profile PRIVATE
+  "${CMAKE_SOURCE_DIR}/src/server")
+target_link_libraries(test_edition_profile PRIVATE
+  Catch2::Catch2WithMain nlohmann_json::nlohmann_json)
+if(HACDCPF_TRIAL_EDITION)
+  target_compile_definitions(test_edition_profile PRIVATE HACDCPF_TRIAL_EDITION=1)
+endif()
+catch_discover_tests(test_edition_profile
+  PROPERTIES LABELS "trial;unit")
+
 # ── HySim Web GUI server (single-line-diagram editor + REST backend) ──────────
 # Migrated from HybridACDCPowerSystemsPlanning. Header-only httplib is vendored
 # under third_party/; nlohmann_json arrives transitively via hacdcpf -> mipsolvers.
@@ -420,6 +433,7 @@ hacdcpf_add_test(test_ctm_ltm_comparison test_ctm_ltm_comparison.cpp)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
   add_executable(run_gui_server
     run_gui_server.cpp
+    "${CMAKE_SOURCE_DIR}/src/server/edition_profile.cpp"
     "${CMAKE_SOURCE_DIR}/src/server/runtime_api_v1.cpp")
   target_link_libraries(run_gui_server PRIVATE hacdcpf::hacdcpf)
   target_include_directories(run_gui_server PRIVATE
@@ -427,6 +441,9 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
     "${CMAKE_SOURCE_DIR}/src/server")
   target_compile_definitions(run_gui_server PRIVATE
     HACDCPF_PROJECT_ROOT="${CMAKE_SOURCE_DIR}")
+  if(HACDCPF_TRIAL_EDITION)
+    target_compile_definitions(run_gui_server PRIVATE HACDCPF_TRIAL_EDITION=1)
+  endif()
   # httplib needs Winsock2 on Windows (freeaddrinfo / WSACleanup / socket).
   if(WIN32)
     target_link_libraries(run_gui_server PRIVATE ws2_32)
@@ -469,6 +486,15 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
               --data-dir "${CMAKE_SOURCE_DIR}/data")
     set_tests_properties(runtime_api_v1_e2e PROPERTIES
       LABELS "api;v1;e2e" TIMEOUT 120)
+    if(HACDCPF_TRIAL_EDITION)
+      add_test(NAME trial_edition_api_e2e
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/tools/trial_edition_e2e.py"
+                --server "$<TARGET_FILE:run_gui_server>"
+                --data-dir "${CMAKE_SOURCE_DIR}/data")
+      set_tests_properties(trial_edition_api_e2e PROPERTIES
+        LABELS "trial;api;e2e" TIMEOUT 180)
+    endif()
   endif()
 
   # Browser end-to-end smoke test for the large-system / scalability GUI features
@@ -570,12 +596,21 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
     set_tests_properties(reliability_dimension_validation_e2e PROPERTIES
       LABELS "gui;e2e;reliability;physical;information;intelligent" TIMEOUT 180)
 
-    add_test(NAME market_gui_e2e
-      COMMAND "${HACDCPF_NODE_EXECUTABLE}"
-              "${CMAKE_SOURCE_DIR}/tests/e2e/market_gui_e2e.mjs"
-              --server "$<TARGET_FILE:run_gui_server>")
-    set_tests_properties(market_gui_e2e PROPERTIES
-      LABELS "gui;e2e;browser;market" TIMEOUT 180)
+    if(HACDCPF_TRIAL_EDITION)
+      add_test(NAME trial_gui_e2e
+        COMMAND "${HACDCPF_NODE_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/tests/e2e/trial_gui_e2e.mjs"
+                --server "$<TARGET_FILE:run_gui_server>")
+      set_tests_properties(trial_gui_e2e PROPERTIES
+        LABELS "trial;gui;e2e;browser" TIMEOUT 180)
+    else()
+      add_test(NAME market_gui_e2e
+        COMMAND "${HACDCPF_NODE_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/tests/e2e/market_gui_e2e.mjs"
+                --server "$<TARGET_FILE:run_gui_server>")
+      set_tests_properties(market_gui_e2e PROPERTIES
+        LABELS "gui;e2e;browser;market" TIMEOUT 180)
+    endif()
 
     add_test(NAME rpo_gui_e2e
       COMMAND "${HACDCPF_NODE_EXECUTABLE}"

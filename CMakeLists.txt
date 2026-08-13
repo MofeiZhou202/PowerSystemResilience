@@ -25,6 +25,8 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 option(HACDCPF_BUILD_TESTS    "Build unit/integration tests"               ON)
+option(HACDCPF_TRIAL_EDITION
+       "Build the capability-gated Trial GUI server"                       OFF)
 option(HACDCPF_ENABLE_IPO
        "Enable IPO for a dedicated production build without tests"        OFF)
 if(HACDCPF_ENABLE_IPO AND HACDCPF_BUILD_TESTS)

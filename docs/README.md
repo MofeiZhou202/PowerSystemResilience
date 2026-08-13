@@ -1,6 +1,6 @@
 # Documentation Index
 
-Updated: 2026-08-11
+Updated: 2026-08-13
 
 This is the canonical entry point for active project documentation. Runtime
 behavior is defined by `include/`, `src/`, `tests/run_gui_server.cpp`, `web/`,
@@ -31,6 +31,7 @@ source-backed defects.
 |---|---|---|
 | Current verified builds, dependency state, and active engineering work | Status | [Development status](development_status.md) |
 | Cross-platform offline build and dependency profiles | Contract | [Cross-platform build](cross_platform_build.md) |
+| Trial edition capabilities, enforcement, tests, and packaging | Contract | [Trial edition](trial_edition_design.md) |
 | Runtime HTTP routes and response boundaries | Contract | [Runtime API](runtime_api.md) |
 | Built-in cases and capability-oriented examples | Contract | [Case catalog](case_catalog.md) |
 | Python client and AI integration boundary | Contract | [Python API](python_api.md) |
