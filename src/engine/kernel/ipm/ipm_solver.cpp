@@ -26,6 +26,60 @@
 #include "mipsolvers/engine/util/problem_validation.hpp"
 
 namespace mipsolvers::engine {
+
+IPMTerminationMetrics evaluate_ipm_termination(
+    double primal, double raw_dual, double raw_complementarity,
+    const Eigen::VectorXd& equality_multipliers,
+    const Eigen::VectorXd& complementarity_multipliers,
+    double objective_gradient_inf, const IPMOptions& options) {
+  IPMTerminationMetrics metrics;
+  const double threshold =
+      options.multiplier_scale_threshold > 0.0 &&
+              std::isfinite(options.multiplier_scale_threshold)
+          ? options.multiplier_scale_threshold
+          : std::max(1.0, objective_gradient_inf);
+  const double total_abs = equality_multipliers.cwiseAbs().sum() +
+                           complementarity_multipliers.cwiseAbs().sum();
+  const Eigen::Index total_count = equality_multipliers.size() +
+                                   complementarity_multipliers.size();
+  const double total_mean = total_count > 0
+      ? total_abs / static_cast<double>(total_count) : 0.0;
+  const double complementarity_mean =
+      complementarity_multipliers.size() > 0
+          ? complementarity_multipliers.cwiseAbs().mean() : 0.0;
+  metrics.dual_scale = std::max(threshold, total_mean) / threshold;
+  metrics.complementarity_scale =
+      std::max(threshold, complementarity_mean) / threshold;
+  metrics.overall_error = std::max(
+      {primal, raw_dual / metrics.dual_scale,
+       raw_complementarity / metrics.complementarity_scale});
+  const bool overall_gate_enabled = options.tol_overall > 0.0 &&
+      std::isfinite(options.tol_overall);
+  const double dual_condition = options.multiplier_relative_stationarity
+      ? raw_dual / metrics.dual_scale : raw_dual;
+  metrics.strict = (!overall_gate_enabled ||
+                    metrics.overall_error <= options.tol_overall) &&
+      primal <= options.tol_primal && dual_condition <= options.tol_dual &&
+      (!(options.raw_dual_guard > 0.0) ||
+       raw_dual <= options.raw_dual_guard) &&
+      raw_complementarity <= options.tol_complementarity;
+  const double acceptable_primal = options.tol_accept_primal > 0.0
+      ? options.tol_accept_primal : options.tol_accept;
+  const double acceptable_dual = options.tol_accept_dual > 0.0
+      ? options.tol_accept_dual : options.tol_accept;
+  const double acceptable_complementarity =
+      options.tol_accept_complementarity > 0.0
+          ? options.tol_accept_complementarity : options.tol_accept;
+  metrics.acceptable = options.tol_accept > 0.0 &&
+      options.acceptable_iter > 0 &&
+      metrics.overall_error <= options.tol_accept &&
+      primal <= acceptable_primal && dual_condition <= acceptable_dual &&
+      (!(options.raw_dual_accept_guard > 0.0) ||
+       raw_dual <= options.raw_dual_accept_guard) &&
+      raw_complementarity <= acceptable_complementarity;
+  return metrics;
+}
+
 namespace {
 
 double minimum_safe_positive() {
@@ -1949,6 +2003,9 @@ struct ResidualSummary {
   double primal_feas{0.0};
   double dual_feas{0.0};
   double complementarity{0.0};
+  double dual_scale{1.0};
+  double complementarity_scale{1.0};
+  double overall_error{0.0};
   double merit{0.0};
 };
 
@@ -1970,6 +2027,76 @@ ResidualSummary summarize_residuals(const Eigen::VectorXd& r_dual,
                                     const Eigen::VectorXd& s,
                                     const Eigen::VectorXd& lambda,
                                     const Eigen::VectorXd& mu);
+
+double mean_abs(const Eigen::VectorXd& values) {
+  return values.size() == 0 ? 0.0 : values.cwiseAbs().mean();
+}
+
+double effective_multiplier_scale_threshold(const IPMOptions& opt,
+                                            const Eigen::VectorXd& gradient) {
+  if (opt.multiplier_scale_threshold > 0.0 &&
+      std::isfinite(opt.multiplier_scale_threshold)) {
+    return opt.multiplier_scale_threshold;
+  }
+  return std::max(1.0, inf_norm(gradient));
+}
+
+void apply_optimality_scaling(ResidualSummary& residuals,
+                              const Eigen::VectorXd& lambda,
+                              const Eigen::VectorXd& mu,
+                              double threshold) {
+  threshold = std::max(threshold, std::numeric_limits<double>::min());
+  const double multiplier_sum = lambda.cwiseAbs().sum() +
+                                mu.cwiseAbs().sum();
+  const Eigen::Index multiplier_count = lambda.size() + mu.size();
+  const double multiplier_mean = multiplier_count > 0
+      ? multiplier_sum / static_cast<double>(multiplier_count)
+      : 0.0;
+  residuals.dual_scale = std::max(threshold, multiplier_mean) / threshold;
+  residuals.complementarity_scale =
+      std::max(threshold, mean_abs(mu)) / threshold;
+  residuals.overall_error = std::max(
+      {residuals.primal_feas,
+       residuals.dual_feas / residuals.dual_scale,
+       residuals.complementarity / residuals.complementarity_scale});
+  residuals.merit = residuals.overall_error;
+}
+
+bool strict_termination(const ResidualSummary& residuals,
+                        const IPMOptions& opt) {
+  const double dual_condition = opt.multiplier_relative_stationarity
+      ? residuals.dual_feas / residuals.dual_scale
+      : residuals.dual_feas;
+  return (!(opt.tol_overall > 0.0) ||
+          residuals.overall_error <= opt.tol_overall) &&
+         residuals.primal_feas <= opt.tol_primal &&
+         dual_condition <= opt.tol_dual &&
+         (!(opt.raw_dual_guard > 0.0) ||
+          residuals.dual_feas <= opt.raw_dual_guard) &&
+         residuals.complementarity <= opt.tol_complementarity;
+}
+
+bool acceptable_termination(const ResidualSummary& residuals,
+                            const IPMOptions& opt) {
+  if (!(opt.tol_accept > 0.0) || !std::isfinite(opt.tol_accept) ||
+      opt.acceptable_iter <= 0) {
+    return false;
+  }
+  const double primal = opt.tol_accept_primal > 0.0
+      ? opt.tol_accept_primal : opt.tol_accept;
+  const double dual = opt.tol_accept_dual > 0.0
+      ? opt.tol_accept_dual : opt.tol_accept;
+  const double complementarity = opt.tol_accept_complementarity > 0.0
+      ? opt.tol_accept_complementarity : opt.tol_accept;
+  return residuals.overall_error <= opt.tol_accept &&
+         residuals.primal_feas <= primal &&
+         (opt.multiplier_relative_stationarity
+              ? residuals.dual_feas / residuals.dual_scale
+              : residuals.dual_feas) <= dual &&
+         (!(opt.raw_dual_accept_guard > 0.0) ||
+          residuals.dual_feas <= opt.raw_dual_accept_guard) &&
+         residuals.complementarity <= complementarity;
+}
 
 struct TrialPoint {
   bool valid{false};
@@ -2156,6 +2283,7 @@ ResidualSummary summarize_residuals(const Eigen::VectorXd& r_dual,
   // termination and reported residuals above remain absolute.
   out.merit = std::max(
       {scaled_primal, scaled_dual, scaled_complementarity});
+  out.overall_error = out.merit;
   return out;
 }
 
@@ -2164,8 +2292,7 @@ double stationarity_condition(const ResidualSummary& residuals,
                               const Eigen::VectorXd& mu,
                               bool multiplier_relative) {
   if (!multiplier_relative) return residuals.dual_feas;
-  return residuals.dual_feas /
-      (1.0 + std::max(inf_norm(lambda), inf_norm(mu)));
+  return residuals.dual_feas / residuals.dual_scale;
 }
 
 // ------------------------- Filter-driver helpers --------------------------
@@ -2208,6 +2335,8 @@ double barrier_descent_slope(const Eigen::VectorXd& grad,
 
 struct FilterSolveOutcome {
   bool converged{false};
+  bool strict_convergence{false};
+  bool acceptable_convergence{false};
   int iterations{0};
   std::string status{"Max iterations reached"};
   Eigen::VectorXd x;
@@ -2218,6 +2347,7 @@ struct FilterSolveOutcome {
   ResidualSummary initial_residuals{};
   ResidualSummary final_residuals{};
   double objective{0.0};
+  double barrier_parameter{0.0};
   std::vector<int> lb_cols;
   std::vector<int> ub_cols;
   NewtonStructureProfile newton_profile;
@@ -2591,14 +2721,18 @@ FilterSolveOutcome solve_nlp_filter_impl(
   Eigen::VectorXd best_mu_ineq = mu_ineq;
   double best_kkt_merit = std::numeric_limits<double>::infinity();
   bool have_best = false;
+  int consecutive_acceptable = 0;
   ResidualSummary best_residuals{};
   std::string terminal_status =
       "Filter: max iterations reached without convergence";
 
   auto snapshot_outcome = [&](bool converged, int iters,
                               const std::string& status,
-                              const ResidualSummary& rs) {
+                              const ResidualSummary& rs,
+                              bool acceptable = false) {
     result.converged = converged;
+    result.strict_convergence = converged && !acceptable;
+    result.acceptable_convergence = converged && acceptable;
     result.iterations = iters;
     result.status = status;
     result.x = x;
@@ -2608,6 +2742,7 @@ FilterSolveOutcome solve_nlp_filter_impl(
     result.n_nonlinear_ineq = state.n_nonlinear_ineq;
     result.final_residuals = rs;
     result.objective = state.obj_orig;
+    result.barrier_parameter = mu_bar;
     result.newton_profile = newton_profile;
     if (newton_profile.selected == "augmented") {
       if (augmented_cache.kkt.solver) {
@@ -2725,6 +2860,9 @@ FilterSolveOutcome solve_nlp_filter_impl(
 
       ResidualSummary rs =
           summarize_residuals(r_d, r_eq, r_ineq, x, s, lambda, mu_ineq);
+      apply_optimality_scaling(
+          rs, lambda, mu_ineq,
+          effective_multiplier_scale_threshold(opt, state.grad));
       if (total_iters == 0) result.initial_residuals = rs;
       if (opt.verbose) {
         std::cerr << "[NativeIPM] iter=" << total_iters
@@ -2745,14 +2883,23 @@ FilterSolveOutcome solve_nlp_filter_impl(
         have_best = true;
       }
 
-      // Outer convergence: problem solved to user tolerance.
+      // Strict convergence combines the configured stationarity metric with
+      // the optional scaled-overall and raw-dual gates.
       const double dual_condition = stationarity_condition(
           rs, lambda, mu_ineq, opt.multiplier_relative_stationarity);
-      if (rs.primal_feas <= opt.tol_primal &&
-          dual_condition <= opt.tol_dual &&
-          (s.size() == 0 || rs.complementarity <= opt.tol_complementarity)) {
+      if (strict_termination(rs, opt)) {
         snapshot_outcome(true, total_iters + 1, "Converged", rs);
         return result;
+      }
+      if (acceptable_termination(rs, opt)) {
+        ++consecutive_acceptable;
+        if (consecutive_acceptable >= opt.acceptable_iter) {
+          snapshot_outcome(true, total_iters + 1,
+                           "Converged (acceptable level)", rs, true);
+          return result;
+        }
+      } else {
+        consecutive_acceptable = 0;
       }
 
       // Once the caller's primal and stationarity gates are satisfied, an
@@ -3903,21 +4050,19 @@ FilterSolveOutcome solve_nlp_filter_impl(
           ++trial_rejections_before_derivatives;
         }
       }
+      if (accepted_residuals_are_complete) {
+        apply_optimality_scaling(
+            accepted_residuals, lambda, mu_ineq,
+            effective_multiplier_scale_threshold(opt, state.grad));
+      }
       // This is the same public KKT contract used at the top of the loop; it
       // neither consumes an extra iteration nor substitutes a scaled metric.
       if (accepted_residuals_are_complete &&
-          accepted_residuals.primal_feas <= opt.tol_primal &&
-          stationarity_condition(
-              accepted_residuals, lambda, mu_ineq,
-              opt.multiplier_relative_stationarity) <= opt.tol_dual &&
-          (s.size() == 0 ||
-           accepted_residuals.complementarity <=
-               opt.tol_complementarity)) {
+          strict_termination(accepted_residuals, opt)) {
         snapshot_outcome(true, total_iters + 1, "Converged",
                          accepted_residuals);
         return result;
       }
-
       // Historical OPF trajectories deliberately stopped their primal path
       // once feasibility and complementarity were resolved, then fitted the
       // multipliers at the fixed endpoint. Preserve that separation here: a
@@ -3963,20 +4108,18 @@ FilterSolveOutcome solve_nlp_filter_impl(
           const ResidualSummary polished_residuals = summarize_residuals(
               polished_dual, state.g, state.h + s, x, s,
               polished_lambda, polished_mu);
-          if (polished_residuals.primal_feas <= opt.tol_primal &&
-              stationarity_condition(
-                  polished_residuals, polished_lambda, polished_mu,
-                  opt.multiplier_relative_stationarity) <= opt.tol_dual &&
-              (s.size() == 0 ||
-               polished_residuals.complementarity <=
-                   opt.tol_complementarity)) {
+          ResidualSummary polished_scaled = polished_residuals;
+          apply_optimality_scaling(
+              polished_scaled, polished_lambda, polished_mu,
+              effective_multiplier_scale_threshold(opt, state.grad));
+          if (strict_termination(polished_scaled, opt)) {
             lambda = std::move(polished_lambda);
             mu_ineq = std::move(polished_mu);
             mu_bar = polished_barrier;
             snapshot_outcome(
                 true, total_iters + 1,
                 "Converged after machine-resolution dual projection",
-                polished_residuals);
+                polished_scaled);
             return result;
           }
         }
@@ -4555,21 +4698,23 @@ bool restore_fixed_nlp_certificate(
   const Eigen::VectorXd r_dual =
       original_state.grad + original_state.jg.transpose() * detail.lambda_eq +
       original_state.jh.transpose() * original_mu;
-  const ResidualSummary residuals = summarize_residuals(
+  ResidualSummary residuals = summarize_residuals(
       r_dual, original_state.g, original_state.h + original_slack,
       out.x, original_slack, detail.lambda_eq, original_mu);
-  const double postsolve_stationarity = stationarity_condition(
+  apply_optimality_scaling(
       residuals, detail.lambda_eq, original_mu,
-      opt.multiplier_relative_stationarity);
-
+      effective_multiplier_scale_threshold(opt, original_state.grad));
   out.stats.objective = original.f(out.x);
   out.stats.primal_feas = residuals.primal_feas;
   out.stats.dual_feas = residuals.dual_feas;
   out.stats.complementarity = residuals.complementarity;
   out.stats.residual_inf = std::max(residuals.primal_feas, residuals.dual_feas);
-  out.stats.success = residuals.primal_feas <= opt.tol_primal &&
-                      postsolve_stationarity <= opt.tol_dual &&
-                      residuals.complementarity <= opt.tol_complementarity;
+  const bool postsolve_strict = strict_termination(residuals, opt);
+  const bool postsolve_acceptable = out.stats.acceptable_convergence &&
+      acceptable_termination(residuals, opt);
+  out.stats.success = postsolve_strict || postsolve_acceptable;
+  out.stats.strict_convergence = postsolve_strict;
+  out.stats.acceptable_convergence = postsolve_acceptable;
   if (!out.stats.success) {
     out.stats.status =
         "Fixed-variable postsolve failed original-space KKT certification";
@@ -4628,6 +4773,12 @@ void transform_filter_options_to_scaled_coordinates(
       !(options.mu_init > 0.0 && std::isfinite(options.mu_init));
   options.tol_primal *= min_constraint_scale;
   options.tol_dual *= objective_scale;
+  if (options.raw_dual_guard > 0.0) {
+    options.raw_dual_guard *= objective_scale;
+  }
+  if (options.tol_overall > 0.0) {
+    options.tol_overall *= std::min(min_constraint_scale, objective_scale);
+  }
   // A scaled-space endpoint is unscaled and independently certified against
   // the caller's strict original-coordinate gate. Reserve the normalized
   // nonlinear forward-resolution budget before scaling so the perturbed KKT
@@ -4642,6 +4793,21 @@ void transform_filter_options_to_scaled_coordinates(
       guarded_complementarity_tolerance * objective_scale;
   if (options.tol_accept > 0.0) {
     options.tol_accept *= std::min(min_constraint_scale, objective_scale);
+  }
+  if (options.tol_accept_primal > 0.0) {
+    options.tol_accept_primal *= min_constraint_scale;
+  }
+  if (options.tol_accept_dual > 0.0) {
+    options.tol_accept_dual *= objective_scale;
+  }
+  if (options.raw_dual_accept_guard > 0.0) {
+    options.raw_dual_accept_guard *= objective_scale;
+  }
+  if (options.tol_accept_complementarity > 0.0) {
+    options.tol_accept_complementarity *= objective_scale;
+  }
+  if (options.multiplier_scale_threshold > 0.0) {
+    options.multiplier_scale_threshold *= objective_scale;
   }
   // In the derivative-normalized model, one is the resolved unit
   // complementarity scale. Its geometric mean must use the final tolerance in
@@ -5419,6 +5585,8 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
 
     out.x = fo.x.size() == n_f ? fo.x : Eigen::VectorXd::Zero(n_f);
     out.stats.success = fo.converged;
+    out.stats.strict_convergence = fo.strict_convergence;
+    out.stats.acceptable_convergence = fo.acceptable_convergence;
     out.stats.status = fo.status;
     out.stats.iterations = fo.iterations;
     out.stats.objective = fo.objective;
@@ -5463,6 +5631,7 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
       detail.lambda_eq = fo.lambda;
       detail.mu_ineq = fo.mu_ineq;
       detail.z_slack = fo.s;
+      detail.barrier_parameter = fo.barrier_parameter;
       detail.complementarity = fo.final_residuals.complementarity;
     }
 
@@ -5732,6 +5901,8 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
   double best_merit = std::numeric_limits<double>::infinity();
   IterateSnapshot best_iterate;
   const double comp_tol = opt_.tol_complementarity;
+  int consecutive_acceptable = 0;
+  bool acceptable_converged = false;
 
   for (int iter = 0; iter < opt_.max_iter; ++iter) {
     iter_done = iter + 1;
@@ -5761,7 +5932,11 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
     const Eigen::VectorXd r_dual = grad + jg.transpose() * lambda + jh.transpose() * mu;
     const Eigen::VectorXd r_eq = g;
     const Eigen::VectorXd r_ineq = h + s;
-    const ResidualSummary cur = summarize_residuals(r_dual, r_eq, r_ineq, x, s, lambda, mu);
+    ResidualSummary cur = summarize_residuals(
+        r_dual, r_eq, r_ineq, x, s, lambda, mu);
+    apply_optimality_scaling(
+        cur, lambda, mu,
+        effective_multiplier_scale_threshold(opt_, current_state.grad));
 
     out.stats.objective = current_state.obj_orig;
     out.stats.primal_feas = cur.primal_feas;
@@ -5782,12 +5957,21 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
       best_iterate.iteration = iter + 1;
     }
 
-    if (cur.primal_feas <= opt_.tol_primal &&
-        cur.dual_feas <= opt_.tol_dual &&
-        cur.complementarity <= comp_tol) {
+    if (strict_termination(cur, opt_)) {
       converged = true;
       native_status = "Converged";
       break;
+    }
+    if (acceptable_termination(cur, opt_)) {
+      ++consecutive_acceptable;
+      if (consecutive_acceptable >= opt_.acceptable_iter) {
+        converged = true;
+        acceptable_converged = true;
+        native_status = "Converged (acceptable level)";
+        break;
+      }
+    } else {
+      consecutive_acceptable = 0;
     }
 
     Eigen::SparseMatrix<double> w = hess;
@@ -5938,21 +6122,6 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
     iter_done = best_iterate.iteration;
   }
 
-  // Acceptable convergence is still a KKT condition: all three components
-  // must meet the relaxed tolerance.
-  if (!converged && best_iterate.valid && opt_.tol_accept > 0.0 &&
-      best_iterate.residuals.primal_feas <= opt_.tol_accept &&
-      best_iterate.residuals.dual_feas <= opt_.tol_accept &&
-      best_iterate.residuals.complementarity <= opt_.tol_accept) {
-    x = best_iterate.x;
-    s = best_iterate.s;
-    lambda = best_iterate.lambda;
-    mu = best_iterate.mu;
-    converged = true;
-    native_status = "Converged (acceptable tolerance)";
-    iter_done = best_iterate.iteration;
-  }
-
   // A restored best iterate may not match current_state. Re-evaluate it before
   // reporting residuals and multipliers.
   if (converged &&
@@ -5972,10 +6141,16 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
     const Eigen::VectorXd r_dual = grad + jg.transpose() * lambda + jh.transpose() * mu;
     const Eigen::VectorXd r_eq = g;
     const Eigen::VectorXd r_ineq = h + s;
-    const ResidualSummary fin = summarize_residuals(r_dual, r_eq, r_ineq, x, s, lambda, mu);
+    ResidualSummary fin = summarize_residuals(
+        r_dual, r_eq, r_ineq, x, s, lambda, mu);
+    apply_optimality_scaling(
+        fin, lambda, mu,
+        effective_multiplier_scale_threshold(opt_, current_state.grad));
 
     out.x = x;
     out.stats.success = true;
+    out.stats.strict_convergence = !acceptable_converged;
+    out.stats.acceptable_convergence = acceptable_converged;
     out.stats.status = native_status;
     out.stats.iterations = iter_done;
     out.stats.objective = objective_value(prob, x);

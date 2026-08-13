@@ -420,6 +420,7 @@ TEST_CASE("Native IPM acceptable tolerance requires full KKT feasibility",
   options.tol_dual = 1e-12;
   options.tol_complementarity = 1e-12;
   options.tol_accept = 1e-2;
+  options.acceptable_iter = 2;
   NativeIPMAdapter solver(options);
   const SolveResult result = solver.solve_nlp(nlp);
 
@@ -452,14 +453,63 @@ TEST_CASE("Native IPM acceptable result reports its actual KKT residual",
   options.tol_dual = 1e-12;
   options.tol_complementarity = 1e-12;
   options.tol_accept = 1e-2;
-  NativeIPMAdapter solver(options);
-  const SolveResult result = solver.solve_nlp(nlp);
+  options.acceptable_iter = 2;
+  const SolveResult transient = NativeIPMAdapter(options).solve_nlp(nlp);
+  CHECK_FALSE(transient.stats.success);
+  CHECK_FALSE(transient.stats.acceptable_convergence);
+
+  options.acceptable_iter = 1;
+  const SolveResult result = NativeIPMAdapter(options).solve_nlp(nlp);
 
   REQUIRE(result.stats.success);
-  CHECK(result.stats.status == "Converged (acceptable tolerance)");
+  CHECK(result.stats.status == "Converged (acceptable level)");
+  CHECK(result.stats.acceptable_convergence);
+  CHECK_FALSE(result.stats.strict_convergence);
   CHECK(result.stats.primal_feas <= options.tol_accept);
   CHECK(result.stats.dual_feas == Approx(5e-3).margin(1e-12));
   CHECK(result.stats.complementarity <= options.tol_accept);
+}
+
+TEST_CASE("IPM raw dual guard is explicit and complementarity remains raw",
+          "[ipm][termination][regression]") {
+  IPMOptions options;
+  options.tol_primal = 1e-4;
+  options.tol_dual = 1e-4;
+  options.tol_complementarity = 1e-4;
+  options.tol_overall = 1e-4;
+  options.multiplier_scale_threshold = 1.0;
+  options.multiplier_relative_stationarity = true;
+
+  Eigen::VectorXd equality = Eigen::VectorXd::Constant(100, 1e6);
+  Eigen::VectorXd inequality = Eigen::VectorXd::Constant(100, 1e6);
+  const IPMTerminationMetrics scaled_dual = evaluate_ipm_termination(
+      0.0, 1.0, 0.0, equality, inequality, 1.0, options);
+  CHECK(scaled_dual.overall_error <= options.tol_overall);
+  CHECK(scaled_dual.strict);
+
+  options.raw_dual_guard = options.tol_dual;
+  const IPMTerminationMetrics guarded_dual = evaluate_ipm_termination(
+      0.0, 1.0, 0.0, equality, inequality, 1.0, options);
+  CHECK(guarded_dual.overall_error <= options.tol_overall);
+  CHECK_FALSE(guarded_dual.strict);
+
+  const IPMTerminationMetrics raw_complementarity_guard =
+      evaluate_ipm_termination(0.0, 0.0, 1.0, equality, inequality, 1.0,
+                               options);
+  CHECK(raw_complementarity_guard.overall_error <= options.tol_overall);
+  CHECK_FALSE(raw_complementarity_guard.strict);
+}
+
+TEST_CASE("A single huge multiplier does not define the whole dual scale",
+          "[ipm][termination][regression]") {
+  IPMOptions options;
+  options.multiplier_scale_threshold = 1.0;
+  Eigen::VectorXd equality = Eigen::VectorXd::Zero(1000);
+  equality[0] = 1e6;
+  const IPMTerminationMetrics metrics = evaluate_ipm_termination(
+      0.0, 1.0, 0.0, equality, Eigen::VectorXd(), 1.0, options);
+  CHECK(metrics.dual_scale == Approx(1e3));
+  CHECK(metrics.dual_scale < 1.0 + equality.lpNorm<Eigen::Infinity>());
 }
 
 TEST_CASE("Filter certifies a solution reached on the last allowed step",

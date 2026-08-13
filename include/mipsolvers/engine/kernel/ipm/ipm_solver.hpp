@@ -28,17 +28,38 @@ enum class NewtonFormulation { Auto, Condensed, Augmented };
 struct IPMOptions {
   int max_iter{400};
   double tol_primal{1e-6};
+  /// Stationarity tolerance in the solver's historical metric. With
+  /// multiplier_relative_stationarity enabled this is ||grad L||inf divided
+  /// by the IPOPT-style average-multiplier scale; otherwise it is unscaled.
   double tol_dual{1e-6};
+  /// Unscaled max |s_i mu_i| complementarity guard.
   double tol_complementarity{1e-6};
-  // When enabled, the stationarity gate is
-  // ||grad L||inf / (1 + max(||lambda||inf, ||mu||inf)). The default keeps
-  // the generic NLP adapter's historical absolute stationarity contract.
+  /// Optional unscaled ||grad L||inf guard. Zero disables this additional
+  /// guard so existing callers retain their historical stationarity contract.
+  double raw_dual_guard{0.0};
+  /// Optional scaled overall NLP error tolerance. Nonpositive disables this
+  /// additional gate so existing component-tolerance callers are unchanged.
+  double tol_overall{0.0};
+  /// Positive values select the multiplier scale threshold used by the
+  /// IPOPT-style average-multiplier scaling. Nonpositive derives it from the
+  /// current objective-gradient infinity norm, with one as the unit floor.
+  double multiplier_scale_threshold{0.0};
+  // Retained for source compatibility. When true, tol_dual applies to the
+  // average-multiplier-scaled stationarity metric.
   bool multiplier_relative_stationarity{false};
-  /// "Acceptable" convergence level (Ipopt-style): if the best iterate
-  /// satisfies primal feasibility, dual feasibility, and complementarity at
-  /// tol_accept, it is accepted as a near-optimal solution even when the
-  /// strict tolerances are not met. Disabled when set to 0.
-  double tol_accept{1e-2};
+  /// Scaled overall acceptable level. Acceptance is disabled unless this and
+  /// acceptable_iter are positive. The stationarity component uses the same
+  /// metric as tol_dual; nonpositive component values inherit tol_accept.
+  double tol_accept{0.0};
+  double tol_accept_primal{0.0};
+  double tol_accept_dual{0.0};
+  double tol_accept_complementarity{0.0};
+  /// Optional unscaled acceptable-level ||grad L||inf guard. Zero disables it.
+  double raw_dual_accept_guard{0.0};
+  /// Number of consecutive complete iterates required at the acceptable
+  /// level. This prevents one transient or restored best iterate from being
+  /// reported as acceptable convergence.
+  int acceptable_iter{0};
   // Positive values are explicit caller policies. Nonpositive requests the
   // largest strict-interior fraction distinguishable at machine precision.
   double alpha_max{0.0};
@@ -141,6 +162,8 @@ struct IPMDetail {
   Eigen::VectorXd mu_ineq;    // inequality multipliers
   Eigen::VectorXd z_slack;    // inequality slacks
   double complementarity{0.0};
+  /// Final central-path target. This is distinct from max |s_i mu_i|.
+  double barrier_parameter{0.0};
   /// Concrete sparse factorization backend used by the selected Newton path.
   std::string linear_solver_backend{"unselected"};
   std::string newton_formulation{"unselected"};
@@ -177,6 +200,22 @@ struct IPMDetail {
   int reduced_dimension{0};
   int fixed_variables_eliminated{0};
 };
+
+struct IPMTerminationMetrics {
+  double dual_scale{1.0};
+  double complementarity_scale{1.0};
+  double overall_error{0.0};
+  bool strict{false};
+  bool acceptable{false};
+};
+
+/// Evaluate the two-layer IPOPT-style termination contract from
+/// original-coordinate residuals without running an IPM trajectory.
+[[nodiscard]] IPMTerminationMetrics evaluate_ipm_termination(
+    double primal, double raw_dual, double raw_complementarity,
+    const Eigen::VectorXd& equality_multipliers,
+    const Eigen::VectorXd& complementarity_multipliers,
+    double objective_gradient_inf, const IPMOptions& options);
 
 /// Native primal-dual IPM for NLP problems, with a Wächter–Biegler filter
 /// driver and an optional Mehrotra-style merit driver.

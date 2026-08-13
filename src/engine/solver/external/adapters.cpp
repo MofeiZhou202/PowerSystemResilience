@@ -1074,6 +1074,7 @@ class CallbackTNLP final : public Ipopt::TNLP {
         primal_inf_(0.0),
         dual_inf_(0.0),
         complementarity_(0.0),
+        barrier_parameter_(0.0),
         unscaled_primal_inf_(0.0),
         unscaled_dual_inf_(0.0),
         unscaled_complementarity_(0.0),
@@ -1534,7 +1535,8 @@ class CallbackTNLP final : public Ipopt::TNLP {
     }
     primal_inf_ = inf_pr;
     dual_inf_ = inf_du;
-    complementarity_ = mu;
+    complementarity_ = unscaled_complementarity_;
+    barrier_parameter_ = mu;
 
     // Keep a coherent unscaled primal-dual iterate from the regular algorithm.
     // A later restoration failure can otherwise pair restoration variables with
@@ -1624,6 +1626,7 @@ class CallbackTNLP final : public Ipopt::TNLP {
     out.stats.primal_feas = primal_inf_;
     out.stats.dual_feas = dual_inf_;
     out.stats.complementarity = complementarity_;
+    out.stats.barrier_parameter = barrier_parameter_;
     out.stats.unscaled_primal_feas = unscaled_primal_inf_;
     out.stats.unscaled_dual_feas = unscaled_dual_inf_;
     out.stats.unscaled_complementarity = unscaled_complementarity_;
@@ -1631,10 +1634,18 @@ class CallbackTNLP final : public Ipopt::TNLP {
 
     switch (app_status) {
       case Ipopt::Solve_Succeeded:
+        out.stats.success = true;
+        out.stats.strict_convergence = true;
+        out.stats.status = "Converged";
+        break;
       case Ipopt::Solved_To_Acceptable_Level:
+        out.stats.success = true;
+        out.stats.acceptable_convergence = true;
+        out.stats.status = "Converged (acceptable level)";
+        break;
       case Ipopt::Feasible_Point_Found:
         out.stats.success = true;
-        out.stats.status = "Converged";
+        out.stats.status = "Feasible point found";
         break;
       case Ipopt::Maximum_Iterations_Exceeded:
         out.stats.success = false;
@@ -1734,6 +1745,7 @@ class CallbackTNLP final : public Ipopt::TNLP {
   double primal_inf_;
   double dual_inf_;
   double complementarity_;
+  double barrier_parameter_;
   double unscaled_primal_inf_;
   double unscaled_dual_inf_;
   double unscaled_complementarity_;
@@ -2554,6 +2566,8 @@ SolveResult IpoptAdapter::solve_nlp(const NLPModel& prob_in) const {
       "acceptable_constr_viol_tol", acceptable_constraint_tolerance);
   app->Options()->SetNumericValue(
       "acceptable_compl_inf_tol", acceptable_complementarity_tolerance);
+  app->Options()->SetIntegerValue(
+      "acceptable_iter", std::max(0, prob.solver_options.acceptable_iterations));
 
   const Ipopt::ApplicationReturnStatus init_status = app->Initialize();
   if (init_status != Ipopt::Solve_Succeeded) {

@@ -11,12 +11,15 @@ namespace mipsolvers::engine {
 
 struct SolveStats {
   bool success{false};
+  bool strict_convergence{false};
+  bool acceptable_convergence{false};
   int iterations{0};
   double objective{0.0};
   double residual_inf{0.0};
   double primal_feas{0.0};
   double dual_feas{0.0};
   double complementarity{0.0};
+  double barrier_parameter{0.0};
   double unscaled_primal_feas{0.0};
   double unscaled_dual_feas{0.0};
   double unscaled_complementarity{0.0};

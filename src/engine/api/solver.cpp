@@ -24,12 +24,15 @@ api::Result to_api_result(const SolveResult& in) {
   out.box_dual_ub = in.box_dual_ub;
 
   out.stats.success = in.stats.success;
+  out.stats.strict_convergence = in.stats.strict_convergence;
+  out.stats.acceptable_convergence = in.stats.acceptable_convergence;
   out.stats.iterations = in.stats.iterations;
   out.stats.objective = in.stats.objective;
   out.stats.residual_inf = in.stats.residual_inf;
   out.stats.primal_feas = in.stats.primal_feas;
   out.stats.dual_feas = in.stats.dual_feas;
   out.stats.complementarity = in.stats.complementarity;
+  out.stats.barrier_parameter = in.stats.barrier_parameter;
   out.stats.unscaled_primal_feas = in.stats.unscaled_primal_feas;
   out.stats.unscaled_dual_feas = in.stats.unscaled_dual_feas;
   out.stats.unscaled_complementarity = in.stats.unscaled_complementarity;

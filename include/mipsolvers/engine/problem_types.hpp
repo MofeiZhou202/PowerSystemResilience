@@ -243,6 +243,9 @@ struct NLPSolverOptions {
   double acceptable_dual_infeasibility_tolerance{1e10};
   double acceptable_constraint_violation_tolerance{1e-2};
   double acceptable_complementarity_tolerance{1e-2};
+  /// Consecutive acceptable iterates required by Ipopt. Zero disables the
+  /// acceptable-level exit while preserving strict convergence.
+  int acceptable_iterations{0};
 };
 
 struct NLPModel {
