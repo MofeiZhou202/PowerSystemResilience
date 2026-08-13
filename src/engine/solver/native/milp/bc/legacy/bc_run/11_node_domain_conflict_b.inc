@@ -194,9 +194,10 @@
 			    std::uint64_t global_learning_events{0};
 			    int conflicts_learned{0};
 			    int cuts_learned{0};
-			    bool domain_changed{false};
-			    bool propagation_source_changed{false};
-		    bool pruned{false};
+		    bool domain_changed{false};
+		    bool propagation_source_changed{false};
+		    bool deadline_interrupted{false};
+	    bool pruned{false};
 		  };
 
   auto run_node_domain_closure =
@@ -535,6 +536,10 @@
         std::max<std::size_t>(8, 2 * static_cast<std::size_t>(n) + 8);
 	    bool changed = inherited_root_domain || !incoming_reasons.empty();
     for (std::size_t pass = 0; pass < max_closure_passes; ++pass) {
+      if (bc_remaining_sec() <= bc_post_root_finalize_reserve_sec) {
+        st.deadline_interrupted = true;
+        break;
+      }
       ++st.closure_passes;
       const std::size_t pass_changes_before = changes_out.size();
       const std::size_t pass_reasons_before = node.domain_reason_bounds.size();
@@ -609,6 +614,10 @@
           collect_propagation_audit ? node.ub : Eigen::VectorXd{};
       std::vector<DomainPropagationEvent> propagation_audit_events;
       DomainPropagationFailure propagation_audit_failure;
+      bool propagation_interrupted = false;
+      const std::function<bool()> propagation_stop_requested = [&]() {
+        return bc_remaining_sec() <= bc_post_root_finalize_reserve_sec;
+      };
       const bool node_domain_ok = propagate_node_domain(
               base_lp, A_row_cached, Aeq_row_cached, row_index_cached, node.lb,
               node.ub, opt.bound_propagation_rounds, &conflict_pool,
@@ -617,7 +626,12 @@
 	              &row_reason_bounds,
 	              node.domain_reason_bounds.read_ptr(),
               collect_propagation_audit ? &propagation_audit_events : nullptr,
-              collect_propagation_audit ? &propagation_audit_failure : nullptr);
+              collect_propagation_audit ? &propagation_audit_failure : nullptr,
+              &propagation_stop_requested, &propagation_interrupted);
+      if (propagation_interrupted) {
+        st.deadline_interrupted = true;
+        break;
+      }
       if (witness_in_domain_before &&
           !audit_witness_in_box(node.lb, node.ub)) {
         const double witness_tol =

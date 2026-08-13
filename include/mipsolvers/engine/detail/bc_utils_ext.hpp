@@ -6,8 +6,41 @@
 
 #include "mipsolvers/engine/detail/bc_utils_core.hpp"
 
+#include <functional>
+#include <thread>
+#include <utility>
+
 namespace mipsolvers::engine::detail {
 
+/// Join-on-destruction ownership for B&C background tasks.
+/// ISO C++20 [thread.thread.destr]: destroying a joinable std::thread calls
+/// std::terminate, so every early return of the owning scope must join first.
+/// Destructor join makes that invariant structural ([thread.jthread]); crash
+/// record and derivation in
+/// docs/native_milp_root_quality_restart_prerequisites_2026-08-13.md,
+/// "Root Background-Task Ownership".
+class ScopedJoinThread {
+ public:
+  ScopedJoinThread() = default;
+  explicit ScopedJoinThread(std::thread t) : thread_(std::move(t)) {}
+  ScopedJoinThread(const ScopedJoinThread&) = delete;
+  ScopedJoinThread& operator=(const ScopedJoinThread&) = delete;
+  ScopedJoinThread(ScopedJoinThread&& other) noexcept
+      : thread_(std::move(other.thread_)) {}
+  ScopedJoinThread& operator=(ScopedJoinThread&& other) {
+    join();
+    thread_ = std::move(other.thread_);
+    return *this;
+  }
+  ~ScopedJoinThread() { join(); }
+  bool joinable() const { return thread_.joinable(); }
+  void join() {
+    if (thread_.joinable()) thread_.join();
+  }
+
+ private:
+  std::thread thread_;
+};
 
 /// @brief Add sparse rows (cuts) to an LP model's inequality system.
 struct SeparatorStorageStats;
@@ -1136,7 +1169,9 @@ bool propagate_node_domain(
         std::vector<DomainReasonBound>* reason_bounds_out = nullptr,
         const std::vector<DomainReasonBound>* existing_reason_bounds = nullptr,
         std::vector<DomainPropagationEvent>* propagation_events = nullptr,
-        DomainPropagationFailure* propagation_failure = nullptr);
+        DomainPropagationFailure* propagation_failure = nullptr,
+        const std::function<bool()>* stop_requested = nullptr,
+        bool* interrupted = nullptr);
 
 bool propagate_node_domain(
         const LPModel& lp,
@@ -1156,6 +1191,8 @@ bool propagate_node_domain(
         std::vector<DomainReasonBound>* reason_bounds_out = nullptr,
         const std::vector<DomainReasonBound>* existing_reason_bounds = nullptr,
         std::vector<DomainPropagationEvent>* propagation_events = nullptr,
-        DomainPropagationFailure* propagation_failure = nullptr);
+        DomainPropagationFailure* propagation_failure = nullptr,
+        const std::function<bool()>* stop_requested = nullptr,
+        bool* interrupted = nullptr);
 
 }  // namespace mipsolvers::engine::detail

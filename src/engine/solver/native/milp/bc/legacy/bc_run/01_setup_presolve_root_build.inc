@@ -59,6 +59,25 @@
   out.effective_environment = solve_environment->active_settings();
   out.stats.solver_name = "NativeBranchAndCut";
   out.stats.status = bc_status::kNotStarted;
+  const bool requested_highs_root_native_tree_contract =
+      opt.highs_root_native_tree_contract;
+  if (requested_highs_root_native_tree_contract) {
+    // retain_postsolve: the same pass that defines the strict working space
+    // must own the postsolve certificate for native tree incumbents. See
+    // "Strict Tree-Incumbent Postsolve Ownership" in
+    // docs/native_milp_root_quality_restart_prerequisites_2026-08-13.md.
+    const auto& preflight = cached_highs_presolve_side_state(
+        prob.linear_part, std::max(0.001, opt.time_limit_sec), nullptr,
+        /*retain_postsolve=*/true);
+    // The compositional root contract requires a retained affine map into a
+    // genuine HiGHS-reduced working model. Identity/not-reduced models stay on
+    // the established native pipeline; derivation and p200 measurements are in
+    // docs/native_milp_root_quality_restart_prerequisites_2026-08-13.md.
+    opt.highs_root_native_tree_contract =
+        preflight.presolve_ok && preflight.highs_status == "reduced" &&
+        preflight.presolved_lp_available &&
+        preflight.side_state_available;
+  }
   const auto highs_contract = apply_bc_strict_highs_contract(opt);
   const bool requested_vendored_highs_lp =
       highs_contract.requested_vendored_highs_lp;
@@ -275,6 +294,7 @@
       strict_highs_root_fixed_point ? base_lp : LPModel{};
 
   if (strict_highs_root_fixed_point &&
+      !opt.highs_root_native_tree_contract &&
       !bc_env_options().root_separation_only) {
     out.bc_stats.collection_scope = "strict_highs_summary";
     out.bc_stats.lp_solve_count_available = false;
@@ -1439,11 +1459,60 @@
 
   // ── PaPILO presolve ──
   PaPILOPresolveResult papilo_ps;
+  HighsLpPresolveResult highs_mip_ps;
   // True iff the working model below is the PaPILO-reduced one; gates the
   // unpresolved-root fallback retry (root_presolve_fallback).
   bool papilo_model_reduced = false;
+  bool highs_mip_model_reduced = false;
+  if (opt.use_papilo_presolve && !strict_highs_root_fixed_point &&
+      opt.lp_kernel_backend == LpKernelBackend::HiGHS) {
+    HighsLpPresolveConfig cfg;
+    cfg.enabled = true;
+    cfg.nnz_floor = 0;
+    cfg.nnz_cap = 0;
+    cfg.min_shrink = 1.0;
+    cfg.time_limit_sec = std::max(
+        0.001, bc_remaining_sec() - bc_post_root_finalize_reserve_sec);
+    cfg.verbose = opt.verbose;
+    highs_mip_ps = highs_presolve_lp(base_lp, cfg);
+    if (highs_mip_ps.status == "timeout") {
+      publish_verified_warm_start_time_limit();
+      return return_with_profile();
+    }
+    if (highs_mip_ps.infeasible) {
+      out.stats.status = bc_status::kInfeasibleHighsPresolve;
+      return return_with_profile();
+    }
+    if (highs_mip_ps.solved_by_presolve) {
+      Eigen::VectorXd recovered;
+      double recovered_objective = 0.0;
+      if (highs_presolve_recover_primal(
+              prob.linear_part, highs_mip_ps, Eigen::VectorXd{}, 1e-6,
+              recovered, recovered_objective)) {
+        out.x = std::move(recovered);
+        out.stats.success = true;
+        out.stats.status = bc_status::kOptimalHighsPresolve;
+        out.stats.objective = recovered_objective;
+        out.stats.mip_gap = 0.0;
+        out.stats.primal_feas = 0.0;
+        out.stats.residual_inf = 0.0;
+        out.stats.runtime_sec = bc_elapsed_sec();
+        out.bc_stats.runtime_sec = out.stats.runtime_sec;
+        out.bc_stats.best_obj = recovered_objective;
+        out.bc_stats.best_bound = recovered_objective;
+        out.bc_stats.gap = 0.0;
+        out.bc_stats.status = out.stats.status;
+        return return_with_profile();
+      }
+    }
+    if (highs_mip_ps.use_reduced && !highs_mip_ps.reduced.vars.empty()) {
+      base_lp = highs_mip_ps.reduced;
+      highs_mip_model_reduced = true;
+    }
+  }
 #ifdef MIPSOLVERS_HAVE_PAPILO
-  if (opt.use_papilo_presolve && !strict_highs_root_fixed_point) {
+  if (opt.use_papilo_presolve && !strict_highs_root_fixed_point &&
+      opt.lp_kernel_backend != LpKernelBackend::HiGHS) {
     papilo_ps = papilo_presolve_mip(base_lp, opt.verbose,
                                     opt.papilo_aggressive
                                         ? PaPILOProfile::kAggressive
@@ -1498,6 +1567,7 @@
   MILPPresolve native_ps(native_presolve_options);
   bool native_model_reduced = false;
   if (!strict_highs_root_fixed_point && !papilo_model_reduced &&
+      !highs_mip_model_reduced &&
       !bc_env_flag_enabled("MIPSOLVERS_NATIVE_TOPLEVEL_PRESOLVE_OFF")) {
     out.bc_stats.native_presolve_attempted = true;
     std::vector<int> nps_bin, nps_int;
@@ -1558,6 +1628,9 @@
 
   HiGHSPresolvedModelStats highs_presolve_side_state;
   bool strict_highs_presolved_working_space = false;
+  // Identity (not_reduced) strict working space: coordinates are already
+  // original, so finalization validates directly instead of postsolving.
+  bool strict_highs_identity_working_space = false;
   double strict_highs_presolved_objective_offset = 0.0;
   const bool highs_presolve_vb_source_disabled =
       bc_env_flag_enabled("MIPSOLVERS_DISABLE_HIGHS_PRESOLVE_VB_SOURCE");
@@ -1568,10 +1641,20 @@
       bc_env_flag_enabled("MIPSOLVERS_HIGHS_PRESOLVE_STATS");
   if (highs_presolve_vb_source_requested) {
     bool highs_presolve_cache_hit = false;
-    highs_presolve_side_state =
-        cached_highs_presolve_side_state(
-            base_lp, std::max(0.001, bc_remaining_sec()),
-            &highs_presolve_cache_hit);
+    if (highs_mip_ps.attempted) {
+      // The retained production pass owns the exact postsolve stack and side
+      // state. Running presolve again here would either duplicate its cost or,
+      // after a reduction, describe an incompatible second reduced coordinate
+      // system. See the production-presolve derivation in
+      // docs/native_milp_root_source_eligibility_2026-08-13.md.
+      highs_presolve_side_state = highs_mip_ps.side_state;
+    } else {
+      highs_presolve_side_state =
+          cached_highs_presolve_side_state(
+              base_lp, std::max(0.001, bc_remaining_sec()),
+              &highs_presolve_cache_hit,
+              /*retain_postsolve=*/strict_highs_root_fixed_point);
+    }
     if (strict_highs_root_fixed_point) {
       if (highs_presolve_side_state.presolve_ok &&
           highs_presolve_side_state.highs_status == "reduced" &&
@@ -1598,6 +1681,31 @@
                      static_cast<int>(base_lp.A.nonZeros()) +
                          static_cast<int>(base_lp.Aeq.nonZeros()),
                      strict_highs_presolved_objective_offset);
+        }
+      } else if (highs_presolve_side_state.presolve_ok &&
+                 highs_presolve_side_state.highs_status == "not_reduced" &&
+                 highs_presolve_side_state.side_state_available &&
+                 highs_presolve_side_state.presolved_lp_available &&
+                 highs_presolve_side_state.cols ==
+                     static_cast<int>(base_lp.vars.size()) &&
+                 highs_presolve_side_state.rows ==
+                     static_cast<int>(base_lp.A.rows() + base_lp.Aeq.rows())) {
+        // HiGHS presolve's identity fixed point is an exact owned working
+        // space, with no affine or objective transformation. See
+        // docs/native_milp_root_quality_restart_prerequisites_2026-08-13.md,
+        // "Coupled HiGHS Root-Primal Ownership" and its p200 mismatch record.
+        strict_highs_presolved_working_space = true;
+        strict_highs_identity_working_space = true;
+        strict_highs_presolved_objective_offset = 0.0;
+        if (opt.verbose) {
+          fmt::print(stderr,
+                     "[B&C-HIGHS-PRESOLVED-WORKING-LP] enabled=1 "
+                     "identity=1 cache={} status={} rows={} cols={} nnz={}\n",
+                     highs_presolve_cache_hit ? "hit" : "miss",
+                     highs_presolve_side_state.highs_status,
+                     highs_presolve_side_state.rows,
+                     highs_presolve_side_state.cols,
+                     highs_presolve_side_state.nnz);
         }
       } else {
         if (opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr ||
@@ -1679,6 +1787,8 @@
     }
     return return_with_profile();
   }
+  const bool highs_presolved_working_space =
+      strict_highs_presolved_working_space || highs_mip_model_reduced;
 
   const bool use_huge_warmstart_root_shortcut =
       !opt.use_ipm_nodes && warmstart_provided &&
@@ -1694,7 +1804,7 @@
   const int n = static_cast<int>(base_lp.vars.size());
   std::vector<char> declared_branchable_cols(static_cast<std::size_t>(n), 0);
   std::vector<char> declared_binary_cols(static_cast<std::size_t>(n), 0);
-  if (strict_highs_presolved_working_space &&
+  if (highs_presolved_working_space &&
       highs_presolve_side_state.side_state_available &&
       static_cast<int>(highs_presolve_side_state.presolved_col_type.size()) >=
           n) {
@@ -1719,6 +1829,12 @@
   } else {
     for (int j = 0; j < n; ++j) {
       int orig_j = j;
+      if (highs_mip_model_reduced) {
+        if (j >= static_cast<int>(highs_mip_ps.reduced_to_orig_col.size())) {
+          continue;
+        }
+        orig_j = highs_mip_ps.reduced_to_orig_col[static_cast<std::size_t>(j)];
+      }
 #ifdef MIPSOLVERS_HAVE_PAPILO
       if (papilo_ps.success && !papilo_ps.reduced_to_orig_col.empty()) {
         if (j >= static_cast<int>(papilo_ps.reduced_to_orig_col.size())) {
@@ -1825,7 +1941,8 @@
     const int declared_binary_count = static_cast<int>(
         std::count(declared_binary_cols.begin(), declared_binary_cols.end(), 1));
     const char* presolve_tag =
-        strict_highs_presolved_working_space ? " presolve=highs" :
+        (strict_highs_presolved_working_space || highs_mip_model_reduced)
+            ? " presolve=highs" :
 #ifdef MIPSOLVERS_HAVE_PAPILO
         (papilo_ps.success ? " presolve=papilo" : "");
     const char* mapped_tag =
@@ -1927,6 +2044,14 @@
   // Determine the reduced-space column mapping: original → PaPILO-reduced.
   auto map_original_col_to_reduced = [&](int orig_j) -> int {
     int j = orig_j;
+    if (highs_mip_model_reduced) {
+      if (j < 0 ||
+          j >= static_cast<int>(highs_mip_ps.orig_to_reduced_col.size())) {
+        return -1;
+      }
+      j = highs_mip_ps.orig_to_reduced_col[static_cast<std::size_t>(j)];
+      if (j < 0) return -1;
+    }
 #ifdef MIPSOLVERS_HAVE_PAPILO
     if (papilo_ps.success && !papilo_ps.orig_to_reduced_col.empty()) {
       if (j < 0 || j >= static_cast<int>(papilo_ps.orig_to_reduced_col.size()))
@@ -1948,6 +2073,9 @@
   bool reduced_warmstart_available = false;
   if (warmstart_provided) {
     Eigen::VectorXd mapped = prob.initial_solution;
+    if (highs_mip_model_reduced) {
+      mapped = highs_presolve_forward_map(highs_mip_ps, mapped);
+    }
 #ifdef MIPSOLVERS_HAVE_PAPILO
     if (papilo_ps.success && !papilo_ps.orig_to_reduced_col.empty()) {
       mapped = papilo_forward_map(papilo_ps, mapped);
@@ -2046,6 +2174,15 @@
   std::vector<int> branch_original_cols(static_cast<std::size_t>(n), -1);
   for (int j = 0; j < n; ++j) {
     int original = j;
+    if (highs_mip_model_reduced) {
+      if (original < 0 ||
+          original >= static_cast<int>(
+                          highs_mip_ps.reduced_to_orig_col.size())) {
+        continue;
+      }
+      original = highs_mip_ps.reduced_to_orig_col[
+          static_cast<std::size_t>(original)];
+    }
     if (strict_highs_presolved_working_space) {
       if (original < 0 ||
           original >= static_cast<int>(
@@ -2438,7 +2575,7 @@
                 .presolved_col_linearly_transformable.size()) ==
                 highs_presolve_side_state.cols &&
             highs_presolve_side_state.cols == n;
-        if (strict_highs_presolved_working_space &&
+        if (highs_presolved_working_space &&
             root_highs_presolved_col_identity) {
           root_highs_presolved_col_identity = true;
         } else

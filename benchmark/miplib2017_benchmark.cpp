@@ -85,6 +85,7 @@ struct Config {
   double hard_timeout_grace_sec{5.0};
   double gap{1e-4};
   std::string native_node_estimate{"sum"};
+  bool highs_verbose{false};
   bool native_verbose{false};
   bool native_papilo_presolve{true};
   bool native_presolve_probing{true};
@@ -484,6 +485,8 @@ bool parse_args(int argc, char** argv, Config& cfg) {
     } else if (arg == "--native-node-estimate") {
       const char* v = value("--native-node-estimate"); if (!v) return false;
       cfg.native_node_estimate = v;
+    } else if (arg == "--highs-verbose") {
+      cfg.highs_verbose = true;
     } else if (arg == "--native-verbose") {
       cfg.native_verbose = true;
     } else if (arg == "--native-no-papilo-presolve") {
@@ -553,6 +556,7 @@ bool parse_args(int argc, char** argv, Config& cfg) {
           << "  --time-limit SEC     per-solve wall limit\n"
           << "  --hard-timeout-grace SEC  process watchdog grace after the solve limit\n"
           << "  --native-node-estimate MODE  sum or maximum\n"
+          << "  --highs-verbose       enable HiGHS MIP diagnostic logging\n"
           << "  --native-verbose      enable native B&C diagnostic logging\n"
           << "  --native-no-papilo-presolve  disable PaPILO in native audit runs\n"
           << "  --native-no-presolve-probing  disable Native presolve probing\n"
@@ -1046,8 +1050,9 @@ Result run_highs(const Instance& instance, const Config& cfg) {
 
   Highs::resetGlobalScheduler(true);
   Highs highs;
-  highs.setOptionValue("output_flag", false);
-  highs.setOptionValue("log_to_console", false);
+  highs.setOptionValue("output_flag", cfg.highs_verbose);
+  highs.setOptionValue("log_to_console", cfg.highs_verbose);
+  if (cfg.highs_verbose) highs.setOptionValue("mip_report_level", 2);
   highs.setOptionValue("threads", 1);
   highs.setOptionValue("random_seed", cfg.seed);
   highs.setOptionValue("time_limit", cfg.time_limit_sec);
@@ -1386,6 +1391,17 @@ Result run_native(const Instance& instance, const Config& cfg,
   options.lp_kernel_backend = experimental_native_lp
       ? eng::LpKernelBackend::ExperimentalNative
       : eng::LpKernelBackend::HiGHS;
+  // Achterberg (2007), Secs. 4.1-4.2; derivation and proof-ownership gate in
+  // docs/native_milp_cutpool_proof_ownership_2026-08-13.md.
+  options.auto_highs_root_pipeline = !experimental_native_lp;
+  // HiGHS owns its coupled presolve/root state machine; the native solver
+  // imports the audited root state and retains ownership of tree search.
+  // Derivation: docs/native_milp_root_quality_restart_prerequisites_2026-08-13.md,
+  // "Coupled HiGHS Root-Primal Ownership".
+  options.highs_root_native_tree_contract = !experimental_native_lp;
+  // Achterberg (2007), Sec. 9.4; Berthold (2006), Sec. 3.5; bounded RENS
+  // contract in docs/native_milp_root_quality_restart_prerequisites_2026-08-13.md.
+  options.enable_root_low_fractionality_rens = !experimental_native_lp;
   options.time_limit_sec = cfg.time_limit_sec;
   options.gap_tol = cfg.gap;
   options.max_nodes = cfg.max_nodes;
@@ -2842,6 +2858,7 @@ Result run_solver_isolated(const Instance& instance, const Config& cfg,
       "--max-nodes", std::to_string(cfg.max_nodes),
       "--seed", std::to_string(cfg.seed),
       "--native-node-estimate", cfg.native_node_estimate};
+  if (cfg.highs_verbose) arguments.push_back("--highs-verbose");
   if (cfg.native_verbose) arguments.push_back("--native-verbose");
   if (!cfg.native_papilo_presolve) {
     arguments.push_back("--native-no-papilo-presolve");
@@ -3074,6 +3091,7 @@ void write_json(const fs::path& path, const Config& cfg,
   out["repeats"] = cfg.repeats;
   out["solvers"] = cfg.solvers;
   out["case_filters"] = cfg.case_filters;
+  out["highs_verbose"] = cfg.highs_verbose;
   out["native_tree_restart"] = {
       {"enabled", cfg.native_tree_restart},
       {"max_restarts", cfg.native_tree_restart_max},

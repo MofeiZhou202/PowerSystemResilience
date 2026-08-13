@@ -230,6 +230,13 @@
   // integer rounding from two ends), which still provides diversity.
   if (opt.use_linesearch_rounding && !root_gap_closed() &&
       !skip_pump_large_uc_like) {
+    // HiGHS HighsPrimalHeuristics::centralRounding uses firstlpsol as point1;
+    // degeneracy-sensitive derivation and measurement in
+    // docs/native_milp_root_quality_restart_prerequisites_2026-08-13.md.
+    // The post-cut root point may have the same objective but different
+    // coordinates and therefore a different rounding-breakpoint sequence.
+    const Eigen::VectorXd& x_line_start =
+        first_root_lp_x.size() == n ? first_root_lp_x : root.x_relax;
     const Eigen::VectorXd* x_anchor_ptr = nullptr;
     Eigen::VectorXd x_rounded_anchor;
     if (analytic_centre.has_value() && analytic_centre->size() == n) {
@@ -239,7 +246,7 @@
       x_rounded_anchor = root.x_relax;
       for (int i = 0; i < n; ++i) {
         if (is_integer_type(base_lp.vars[i])) {
-          x_rounded_anchor[i] = std::round(root.x_relax[i]);
+          x_rounded_anchor[i] = std::round(x_line_start[i]);
           x_rounded_anchor[i] =
               std::min(root.ub[i], std::max(root.lb[i], x_rounded_anchor[i]));
         }
@@ -255,28 +262,28 @@
       ++tries;
       double next_alpha = 1.0;
       bool reached_anchor_rounding = true;
-      Eigen::VectorXd xr = root.x_relax;
+      Eigen::VectorXd xr = x_line_start;
       for (int i = 0; i < n; ++i) {
         if (!is_integer_type(base_lp.vars[i])) continue;
         double rounded;
         if (opt.use_lock_count_rounding && i < static_cast<int>(uplocks.size())) {
           if (uplocks[i] == 0) {
             rounded = std::ceil(
-                std::max(root.x_relax[i], (*x_anchor_ptr)[i]) - opt.int_tol);
+                std::max(x_line_start[i], (*x_anchor_ptr)[i]) - opt.int_tol);
           } else if (downlocks[i] == 0) {
             rounded = std::floor(
-                std::min(root.x_relax[i], (*x_anchor_ptr)[i]) + opt.int_tol);
+                std::min(x_line_start[i], (*x_anchor_ptr)[i]) + opt.int_tol);
           } else {
-            const double convex =
-                (1.0 - alpha) * root.x_relax[i] + alpha * (*x_anchor_ptr)[i];
+              const double convex =
+                (1.0 - alpha) * x_line_start[i] + alpha * (*x_anchor_ptr)[i];
             const double anchor_round = std::floor((*x_anchor_ptr)[i] + 0.5);
             rounded = std::floor(convex + 0.5);
             if (std::abs(rounded - anchor_round) > opt.int_tol) {
               reached_anchor_rounding = false;
-              const double denom = std::abs((*x_anchor_ptr)[i] - root.x_relax[i]);
+              const double denom = std::abs((*x_anchor_ptr)[i] - x_line_start[i]);
               if (denom > 1e-12) {
                 const double cand_alpha =
-                    (rounded + 0.5 + opt.int_tol - root.x_relax[i]) / denom;
+                    (rounded + 0.5 + opt.int_tol - x_line_start[i]) / denom;
                 if (cand_alpha > alpha + 1e-2 && cand_alpha < next_alpha) {
                   next_alpha = cand_alpha;
                 }
@@ -285,15 +292,15 @@
           }
         } else {
           const double convex =
-              (1.0 - alpha) * root.x_relax[i] + alpha * (*x_anchor_ptr)[i];
+              (1.0 - alpha) * x_line_start[i] + alpha * (*x_anchor_ptr)[i];
           const double anchor_round = std::floor((*x_anchor_ptr)[i] + 0.5);
           rounded = std::floor(convex + 0.5);
           if (std::abs(rounded - anchor_round) > opt.int_tol) {
             reached_anchor_rounding = false;
-            const double denom = std::abs((*x_anchor_ptr)[i] - root.x_relax[i]);
+            const double denom = std::abs((*x_anchor_ptr)[i] - x_line_start[i]);
             if (denom > 1e-12) {
               const double cand_alpha =
-                  (rounded + 0.5 + opt.int_tol - root.x_relax[i]) / denom;
+                  (rounded + 0.5 + opt.int_tol - x_line_start[i]) / denom;
               if (cand_alpha > alpha + 1e-2 && cand_alpha < next_alpha) {
                 next_alpha = cand_alpha;
               }
@@ -301,6 +308,14 @@
           }
         }
         xr[i] = std::min(root.ub[i], std::max(root.lb[i], rounded));
+      }
+      if (bc_env_flag_enabled("MIPSOLVERS_LINESEARCH_COORD_TRACE")) {
+        fmt::print(stderr, "[B&C-LINESEARCH-COORD] alpha={:.17g} bits=", alpha);
+        for (int i = 0; i < n; ++i) {
+          if (!is_integer_type(base_lp.vars[i])) continue;
+          fmt::print(stderr, "{}", static_cast<long long>(std::llround(xr[i])));
+        }
+        fmt::print(stderr, "\n");
       }
       if (try_fixed_integer_repair("linesearch_round", xr)) {
         if (opt.verbose) {
@@ -2601,4 +2616,3 @@
         }
         break;
       }
-

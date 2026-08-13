@@ -1834,7 +1834,10 @@ bool propagate_node_domain_impl(
     std::vector<DomainReasonBound>* reason_bounds_out,
     const std::vector<DomainReasonBound>* existing_reason_bounds,
     std::vector<DomainPropagationEvent>* propagation_events,
-    DomainPropagationFailure* propagation_failure) {
+    DomainPropagationFailure* propagation_failure,
+    const std::function<bool()>* stop_requested,
+    bool* interrupted) {
+  if (interrupted != nullptr) *interrupted = false;
   if (propagation_failure != nullptr) {
     *propagation_failure = DomainPropagationFailure{};
   }
@@ -1927,6 +1930,17 @@ bool propagate_node_domain_impl(
   const int max_passes = std::max(4, 2 * row_round_budget + 4);
   const std::uint64_t full_scan_rows =
       static_cast<std::uint64_t>(A_row.rows()) + static_cast<std::uint64_t>(Aeq_row.rows());
+  std::uint64_t stop_poll_counter = 0;
+  auto propagation_stop_requested = [&]() {
+    // Amortized deadline polling; derivation and measured first-node overrun in
+    // docs/native_milp_root_source_eligibility_2026-08-13.md.
+    if (stop_requested == nullptr || ((stop_poll_counter++ & 63U) != 0U)) {
+      return false;
+    }
+    if (!(*stop_requested)()) return false;
+    if (interrupted != nullptr) *interrupted = true;
+    return true;
+  };
 
   auto finalize_profile = [&]() {
     profile.bound_tightenings = static_cast<std::uint64_t>(std::max(0, local_tightened));
@@ -2126,12 +2140,14 @@ bool propagate_node_domain_impl(
   }
 
   for (int pass = 0; pass < max_passes; ++pass) {
+    if (propagation_stop_requested()) break;
     if (changed_vars.empty() && pending_ineq_rows.empty() && pending_eq_rows.empty()) {
       break;
     }
     ++profile.active_passes;
 
     while (!changed_vars.empty()) {
+      if (propagation_stop_requested()) break;
       const int j = changed_vars.front();
       changed_vars.pop_front();
       queued_vars[static_cast<std::size_t>(j)] = 0;
@@ -2223,7 +2239,7 @@ bool propagate_node_domain_impl(
         }
       }
     }
-    if (conflict_var >= 0) break;
+    if ((interrupted != nullptr && *interrupted) || conflict_var >= 0) break;
 
     const bool process_row_round =
         row_rounds_used < row_round_budget &&
@@ -2234,6 +2250,7 @@ bool propagate_node_domain_impl(
     }
 
     while (!pending_ineq_rows.empty()) {
+      if (propagation_stop_requested()) break;
       const int r = pending_ineq_rows.front();
       pending_ineq_rows.pop_front();
       queued_ineq[static_cast<std::size_t>(r)] = 0;
@@ -2316,9 +2333,10 @@ bool propagate_node_domain_impl(
       if (std::isfinite(lhs)) propagate_upper_side(-1.0, -lhs);
       if (conflict_var >= 0) break;
     }
-    if (conflict_var >= 0) break;
+    if ((interrupted != nullptr && *interrupted) || conflict_var >= 0) break;
 
     while (!pending_eq_rows.empty()) {
+      if (propagation_stop_requested()) break;
       const int r = pending_eq_rows.front();
       pending_eq_rows.pop_front();
       queued_eq[static_cast<std::size_t>(r)] = 0;
@@ -2450,7 +2468,7 @@ bool propagate_node_domain_impl(
       }
       if (conflict_var >= 0) break;
     }
-    if (conflict_var >= 0) break;
+    if ((interrupted != nullptr && *interrupted) || conflict_var >= 0) break;
 
     if (!clause_propagation_step(conflict_pool, lp.vars, node_lb, node_ub,
                                  arena, lb_reason, ub_reason,
@@ -2518,14 +2536,17 @@ bool propagate_node_domain(
     std::vector<DomainReasonBound>* reason_bounds_out,
     const std::vector<DomainReasonBound>* existing_reason_bounds,
     std::vector<DomainPropagationEvent>* propagation_events,
-    DomainPropagationFailure* propagation_failure) {
+    DomainPropagationFailure* propagation_failure,
+    const std::function<bool()>* stop_requested,
+    bool* interrupted) {
   return propagate_node_domain_impl(lp, A_row, Aeq_row, row_index, node_lb, node_ub,
                                     max_rounds, conflict_pool, clique_table,
                                     implication_graph, changes_out,
                                     branch_reasons, learned_conflict,
                                     total_tightened, reason_bounds_out,
                                     existing_reason_bounds, propagation_events,
-                                    propagation_failure);
+                                    propagation_failure, stop_requested,
+                                    interrupted);
 }
 
 bool propagate_node_domain(
@@ -2546,14 +2567,17 @@ bool propagate_node_domain(
     std::vector<DomainReasonBound>* reason_bounds_out,
     const std::vector<DomainReasonBound>* existing_reason_bounds,
     std::vector<DomainPropagationEvent>* propagation_events,
-    DomainPropagationFailure* propagation_failure) {
+    DomainPropagationFailure* propagation_failure,
+    const std::function<bool()>* stop_requested,
+    bool* interrupted) {
   return propagate_node_domain_impl(lp, A_row, Aeq_row, row_index, node_lb, node_ub,
                                     max_rounds, conflict_pool, clique_table,
                                     implication_graph, changes_out,
                                     branch_reasons, learned_conflict,
                                     total_tightened, reason_bounds_out,
                                     existing_reason_bounds, propagation_events,
-                                    propagation_failure);
+                                    propagation_failure, stop_requested,
+                                    interrupted);
 }
 
 }  // namespace mipsolvers::engine::detail

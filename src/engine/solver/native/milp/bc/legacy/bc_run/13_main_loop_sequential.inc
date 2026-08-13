@@ -2449,6 +2449,38 @@
       state.ctx.candidates = &candidates;
       state.ctx.lp_x = cur.x_relax.data();
       state.ctx.lp_x_size = static_cast<std::size_t>(cur.x_relax.size());
+      if (highs_mip_model_reduced) {
+        bool mapping_ok = true;
+        state.original_candidates.reserve(candidates.size());
+        for (int red_col : candidates) {
+          if (red_col < 0 ||
+              red_col >= static_cast<int>(
+                             highs_mip_ps.reduced_to_orig_col.size())) {
+            mapping_ok = false;
+            break;
+          }
+          const int orig_col = highs_mip_ps.reduced_to_orig_col[
+              static_cast<std::size_t>(red_col)];
+          if (orig_col < 0 || orig_col >= orig_n) {
+            mapping_ok = false;
+            break;
+          }
+          state.original_candidates.push_back(orig_col);
+        }
+        if (mapping_ok &&
+            state.original_candidates.size() == candidates.size()) {
+          // HiGHS::postsolve reconstructs eliminated columns, so callback LP
+          // values satisfy the documented original-space contract.
+          state.original_lp_x =
+              highs_postsolve_primal(highs_mip_ps, cur.x_relax);
+          if (state.original_lp_x.size() == orig_n) {
+            state.ctx.candidates = &state.original_candidates;
+            state.ctx.lp_x = state.original_lp_x.data();
+            state.ctx.lp_x_size =
+                static_cast<std::size_t>(state.original_lp_x.size());
+          }
+        }
+      }
 #ifdef MIPSOLVERS_HAVE_PAPILO
       if (papilo_ps.success && !papilo_ps.reduced_to_orig_col.empty()) {
         const auto& reduced_to_orig = papilo_ps.reduced_to_orig_col;

@@ -1380,6 +1380,20 @@ TEST_CASE("StrictHiGHS adapter executes the HiGHS MIP contract",
   CHECK(strict.lp_kernel_backend == LpKernelBackend::HiGHS);
 }
 
+TEST_CASE("HiGHS root ownership preserves native tree ownership",
+          "[milp][dispatch][highs_root]") {
+  BCOptions opt;
+  opt.lp_kernel_backend = LpKernelBackend::ExperimentalNative;
+  opt.highs_root_native_tree_contract = true;
+
+  const auto state = detail::apply_bc_strict_highs_contract(opt);
+  CHECK(state.requested_vendored_highs_lp);
+  CHECK(state.strict_highs_lp_contract);
+  CHECK(opt.lp_kernel_backend == LpKernelBackend::HiGHS);
+  CHECK(opt.auto_highs_root_pipeline);
+  CHECK_FALSE(opt.strict_highs_mip_contract);
+}
+
 // 10-item 0-1 knapsack used by the StrictHiGHS tests.
 //
 //   maximise  10x0 + 9x1 + 8x2 + 7x3 + 6x4 + 5x5 + 4x6 + 3x7 + 7x8 + 2x9
@@ -1689,6 +1703,9 @@ TEST_CASE("MILP: production solve publishes queued-domain and COW telemetry",
   BCOptions opt;
   opt.lp_kernel_backend = LpKernelBackend::ExperimentalNative;
   opt.use_papilo_presolve = false;
+  // This fixture measures child-domain copy-on-write telemetry and therefore
+  // requires a nontrivial tree. Root separation is covered independently.
+  opt.cuts = CutType::None;
   opt.root_cut_rounds = 0;
   opt.use_feasibility_pump = false;
   opt.use_progressive_rounding = false;

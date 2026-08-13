@@ -6,6 +6,8 @@
 
 #include <Eigen/Core>
 #include <Eigen/Sparse>
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <algorithm>
 #include <limits>
@@ -26,6 +28,7 @@
 #include "mipsolvers/engine/detail/bc_objective_propagation.hpp"
 #include "mipsolvers/engine/detail/bc_utils.hpp"
 #include "mipsolvers/engine/problem_types.hpp"
+#include "mipsolvers/engine/strategy/highs_presolve_side_state.hpp"
 
 using namespace mipsolvers::engine;
 using Catch::Approx;
@@ -311,6 +314,86 @@ TEST_CASE("B&C: domain restore rolls back infeasible activity deltas",
   REQUIRE(domain.fix_col(0, 1.0));
   REQUIRE(domain.propagate());
   CHECK(domain.ub()[1] == Approx(0.0));
+}
+
+TEST_CASE("B&C: domain restore rolls back infeasible upper-bound deltas",
+          "[bc][domain][restore]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Zero(2);
+  lp.A.resize(1, 2);
+  lp.A.insert(0, 0) = 1.0;
+  lp.A.insert(0, 1) = 1.0;
+  lp.A.makeCompressed();
+  lp.b = Eigen::VectorXd::Constant(
+      1, std::numeric_limits<double>::infinity());
+  lp.row_lhs = Eigen::VectorXd::Ones(1);
+  lp.Aeq.resize(0, 2);
+  lp.beq.resize(0);
+  lp.vars = {{VarType::Binary, 0.0, 1.0},
+             {VarType::Binary, 0.0, 1.0}};
+
+  detail::BCDomain domain;
+  const Eigen::VectorXd lb = Eigen::VectorXd::Zero(2);
+  const Eigen::VectorXd ub = Eigen::VectorXd::Ones(2);
+  domain.init(lp, lb, ub);
+  REQUIRE(domain.propagate());
+
+  const detail::BCDomain::Savepoint sp = domain.savepoint();
+  REQUIRE(domain.fix_col(0, 0.0));
+  CHECK_FALSE(domain.fix_col(1, 0.0));
+  CHECK(domain.infeasible());
+
+  domain.restore(sp);
+  CHECK_FALSE(domain.infeasible());
+  CHECK(domain.ub()[0] == Approx(1.0));
+  CHECK(domain.ub()[1] == Approx(1.0));
+  REQUIRE(domain.fix_col(0, 0.0));
+  REQUIRE(domain.propagate());
+  CHECK(domain.lb()[1] == Approx(1.0));
+}
+
+TEST_CASE("B&C: integer preferences project through evolving domain",
+          "[bc][domain][repair_projection]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Zero(2);
+  lp.A.resize(1, 2);
+  lp.A.insert(0, 0) = 1.0;
+  lp.A.insert(0, 1) = 1.0;
+  lp.A.makeCompressed();
+  lp.b = Eigen::VectorXd::Constant(
+      1, std::numeric_limits<double>::infinity());
+  lp.row_lhs = Eigen::VectorXd::Ones(1);
+  lp.Aeq.resize(0, 2);
+  lp.beq.resize(0);
+  lp.vars = {{VarType::Binary, 0.0, 1.0},
+             {VarType::Binary, 0.0, 1.0}};
+
+  detail::BCDomain domain;
+  domain.init(lp, Eigen::VectorXd::Zero(2), Eigen::VectorXd::Ones(2),
+              detail::BCDomain::InitialPropagation::AlreadyClosed);
+  CHECK(domain.propagation_complete());
+  CHECK(domain.rows_processed() == 0);
+  REQUIRE(domain.propagate());
+  const detail::BCDomain::Savepoint sp = domain.savepoint();
+
+  // x0=0 implies x1=1. Sequential projection must clamp the later stale
+  // x1=0 preference to that propagated value. See the root-quality derivation.
+  const Eigen::VectorXd preference = Eigen::VectorXd::Zero(2);
+  REQUIRE(domain.project_integer_preferences({0, 1}, preference));
+  CHECK(domain.lb()[0] == Approx(0.0));
+  CHECK(domain.ub()[0] == Approx(0.0));
+  CHECK(domain.lb()[1] == Approx(1.0));
+  CHECK(domain.ub()[1] == Approx(1.0));
+
+  domain.restore(sp);
+  CHECK_FALSE(domain.infeasible());
+  CHECK(domain.lb()[0] == Approx(0.0));
+  CHECK(domain.ub()[0] == Approx(1.0));
+  CHECK(domain.lb()[1] == Approx(0.0));
+  CHECK(domain.ub()[1] == Approx(1.0));
+  REQUIRE(domain.propagate());
 }
 
 TEST_CASE("B&C: domain probing exports and rolls back only trailed columns",
@@ -731,6 +814,180 @@ TEST_CASE("B&C: timed-out HiGHS presolve side state is not cached",
   CHECK(cache_hit);
 }
 
+TEST_CASE("B&C: HiGHS presolve forward map applies retained affine transforms",
+          "[bc][presolve][highs][mapping]") {
+  HighsLpPresolveResult ps;
+  ps.orig_cols = 4;
+  ps.reduced_to_orig_col = {2, 0};
+  ps.reduced_col_scale = {-2.0, 0.5};
+  ps.reduced_col_constant = {7.0, -1.0};
+  ps.reduced_col_linearly_transformable = {1, 1};
+
+  Eigen::VectorXd original(4);
+  original << 2.0, 99.0, 1.0, -5.0;
+  const Eigen::VectorXd reduced = highs_presolve_forward_map(ps, original);
+  REQUIRE(reduced.size() == 2);
+  CHECK(reduced[0] == Approx(3.0));
+  CHECK(reduced[1] == Approx(6.0));
+
+  ps.reduced_col_linearly_transformable[1] = 0;
+  CHECK(highs_presolve_forward_map(ps, original).size() == 0);
+  ps.reduced_col_linearly_transformable[1] = 1;
+  ps.reduced_col_scale[1] = 0.0;
+  CHECK(highs_presolve_forward_map(ps, original).size() == 0);
+}
+
+TEST_CASE("B&C: HiGHS side-state forward map transfers root primals",
+          "[bc][presolve][highs][mapping][root-primal]") {
+  HiGHSPresolvedModelStats side_state;
+  side_state.side_state_available = true;
+  side_state.presolved_col_orig = {2, 0};
+  side_state.presolved_col_scale = {-2.0, 0.5};
+  side_state.presolved_col_constant = {7.0, -1.0};
+  side_state.presolved_col_linearly_transformable = {1, 1};
+
+  Eigen::VectorXd original(4);
+  original << 2.0, 99.0, 1.0, -5.0;
+  const Eigen::VectorXd reduced =
+      highs_presolve_forward_map(side_state, 4, original);
+  REQUIRE(reduced.size() == 2);
+  CHECK(reduced[0] == Approx(3.0));
+  CHECK(reduced[1] == Approx(6.0));
+
+  side_state.presolved_col_linearly_transformable[1] = 0;
+  CHECK(highs_presolve_forward_map(side_state, 4, original).size() == 0);
+}
+
+TEST_CASE("B&C: HiGHS affine maps preserve variable-bound inequalities",
+          "[bc][presolve][highs][mapping][varbound]") {
+  bool upper = true;
+  double coef = 3.0;
+  double constant = 5.0;
+  REQUIRE(detail::highs_style_map_variable_bound_to_reduced(
+      upper, coef, constant, 2.0, 7.0, 4.0, -1.0));
+  CHECK(upper);
+  CHECK(coef == Approx(6.0));
+  CHECK(constant == Approx(-2.5));
+
+  upper = true;
+  coef = 3.0;
+  constant = 5.0;
+  REQUIRE(detail::highs_style_map_variable_bound_to_reduced(
+      upper, coef, constant, -2.0, 7.0, 4.0, -1.0));
+  CHECK_FALSE(upper);
+  CHECK(coef == Approx(-6.0));
+  CHECK(constant == Approx(2.5));
+
+  CHECK_FALSE(detail::highs_style_map_variable_bound_to_reduced(
+      upper, coef, constant, 0.0, 0.0, 1.0, 0.0));
+}
+
+TEST_CASE("B&C: only LP-owned transformed cuts enter tree propagation",
+          "[bc][cuts][highs][ownership]") {
+  CHECK(detail::highs_style_cutpool_row_tree_owned(true, true));
+  CHECK_FALSE(detail::highs_style_cutpool_row_tree_owned(true, false));
+  CHECK_FALSE(detail::highs_style_cutpool_row_tree_owned(false, true));
+  CHECK_FALSE(detail::highs_style_cutpool_row_tree_owned(false, false));
+
+  CHECK(detail::highs_style_cutpool_candidate_stays_root_owned(true, true));
+  CHECK(detail::highs_style_cutpool_candidate_stays_root_owned(true, false));
+  CHECK(detail::highs_style_cutpool_candidate_stays_root_owned(false, true));
+  CHECK_FALSE(
+      detail::highs_style_cutpool_candidate_stays_root_owned(false, false));
+}
+
+TEST_CASE("B&C: retained HiGHS presolve postsolves eliminated columns",
+          "[bc][presolve][highs][postsolve]") {
+  LPModel lp = make_knapsack_10().linear_part;
+  constexpr int original_cols = 11;
+  Eigen::SparseMatrix<double> extended(1, original_cols);
+  for (Eigen::SparseMatrix<double>::InnerIterator it(lp.A, 0); it; ++it) {
+    extended.insert(it.row(), it.col()) = it.value();
+  }
+  for (int col = 1; col < lp.A.cols(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(lp.A, col); it; ++it) {
+      extended.insert(it.row(), it.col()) = it.value();
+    }
+  }
+  extended.insert(0, 10) = 1.0;
+  extended.makeCompressed();
+  lp.A = std::move(extended);
+  lp.b[0] = 16.0;
+  lp.c.conservativeResize(original_cols);
+  lp.c[10] = 3.0;
+  lp.vars.push_back({VarType::Continuous, 2.0, 2.0});
+
+  HighsLpPresolveConfig cfg;
+  cfg.enabled = true;
+  cfg.nnz_floor = 0;
+  cfg.nnz_cap = 0;
+  cfg.min_shrink = 1.0;
+  cfg.time_limit_sec = 1.0;
+  const HighsLpPresolveResult ps = highs_presolve_lp(lp, cfg);
+  REQUIRE(ps.use_reduced);
+  REQUIRE(ps.reduced_cols < original_cols);
+  REQUIRE(ps.side_state.side_state_available);
+  REQUIRE(ps.side_state.cols == ps.reduced_cols);
+
+  // This instance deliberately need not support forward projection: HiGHS
+  // may mark surviving columns as non-linearly transformable. The all-zero
+  // reduced point is feasible for the presolved <= knapsack and isolates the
+  // retained HighsPostsolveStack reconstruction contract.
+  const Eigen::VectorXd reduced = Eigen::VectorXd::Zero(ps.reduced_cols);
+
+  Eigen::VectorXd recovered;
+  double recovered_objective = 0.0;
+  REQUIRE(highs_presolve_recover_primal(
+      lp, ps, reduced, 1e-7, recovered, recovered_objective));
+  REQUIRE(recovered.size() == original_cols);
+  CHECK(recovered[10] == Approx(2.0));
+  CHECK(recovered_objective == Approx(lp.c.dot(recovered)));
+}
+
+TEST_CASE("B&C: node propagation reports deadline interruption without conflict",
+          "[bc][deadline][propagation]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Zero(2);
+  lp.A.resize(1, 2);
+  lp.A.insert(0, 0) = 1.0;
+  lp.A.insert(0, 1) = 1.0;
+  lp.A.makeCompressed();
+  lp.b = Eigen::VectorXd::Constant(1, 1.0);
+  lp.Aeq.resize(0, 2);
+  lp.beq.resize(0);
+  lp.vars = {{VarType::Binary, 0.0, 1.0},
+             {VarType::Binary, 0.0, 1.0}};
+
+  Eigen::SparseMatrix<double, Eigen::RowMajor> a_row = lp.A;
+  Eigen::SparseMatrix<double, Eigen::RowMajor> aeq_row = lp.Aeq;
+  detail::RowPropagationIndex row_index;
+  row_index.build(2, a_row, aeq_row);
+  Eigen::VectorXd lb = Eigen::VectorXd::Zero(2);
+  Eigen::VectorXd ub = Eigen::VectorXd::Ones(2);
+  std::vector<BoundChangeInfo> changes{
+      {0, 1.0, true, 0.0, 1.0}};
+  lb[0] = 1.0;
+  std::vector<detail::BranchDomainLiteral> learned_conflict;
+  bool interrupted = false;
+  int polls = 0;
+  const std::function<bool()> stop_requested = [&]() {
+    ++polls;
+    return true;
+  };
+
+  CHECK(detail::propagate_node_domain(
+      lp, a_row, aeq_row, row_index, lb, ub, 4,
+      static_cast<const detail::ConflictPool*>(nullptr), nullptr, nullptr,
+      changes, {}, &learned_conflict, nullptr, nullptr, nullptr, nullptr,
+      nullptr, &stop_requested, &interrupted));
+  CHECK(interrupted);
+  CHECK(polls == 1);
+  CHECK(learned_conflict.empty());
+  CHECK(lb[0] == Approx(1.0));
+  CHECK(ub[1] == Approx(1.0));
+}
+
 TEST_CASE("B&C: reduced-cost fixing requires the matching active bound side",
           "[bc][reduced_cost][regression]") {
   std::vector<VariableMeta> vars{
@@ -874,6 +1131,8 @@ TEST_CASE("B&C: extracted highs_style numeric helpers",
   using detail::highs_style_gcd;
   using detail::highs_style_incumbent_upper_limit;
   using detail::highs_style_objective_integral_scale;
+  using detail::highs_style_root_source_eligible;
+  using detail::presolved_objective_value;
 
   SECTION("gcd matches Euclid on signed inputs and zero operands") {
     CHECK(highs_style_gcd(12, 18) == 6);
@@ -940,5 +1199,219 @@ TEST_CASE("B&C: extracted highs_style numeric helpers",
               unit, std::numeric_limits<double>::infinity(), tol) ==
           std::numeric_limits<double>::infinity());
   }
+
+  SECTION("root source separation accepts declared-only integer models") {
+    CHECK(highs_style_root_source_eligible(271, 0, 14.90225894));
+    CHECK(highs_style_root_source_eligible(0, 3, 14.90225894));
+    CHECK_FALSE(highs_style_root_source_eligible(0, 0, 14.90225894));
+    CHECK_FALSE(highs_style_root_source_eligible(
+        271, 0, std::numeric_limits<double>::infinity()));
+  }
+
+  SECTION("presolved objectives remove the retained constant offset") {
+    CHECK(presolved_objective_value(-97.0, -100.0) == Approx(3.0));
+    CHECK(presolved_objective_value(12.5, 2.25) == Approx(10.25));
+  }
 }
 
+TEST_CASE("B&C: HiGHS presolve offset cannot falsely close the root gap",
+          "[bc][presolve][highs][objective]") {
+  MIPModel mip = make_knapsack_10();
+  constexpr int original_cols = 11;
+  Eigen::SparseMatrix<double> extended(1, original_cols);
+  for (int col = 0; col < mip.linear_part.A.cols(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(mip.linear_part.A, col);
+         it; ++it) {
+      extended.insert(it.row(), it.col()) = it.value();
+    }
+  }
+  extended.insert(0, 10) = 1.0;
+  extended.makeCompressed();
+  mip.linear_part.A = std::move(extended);
+  mip.linear_part.b[0] += 1.0;
+  mip.linear_part.c.conservativeResize(original_cols);
+  mip.linear_part.c[10] = 100.0;
+  mip.linear_part.vars.push_back({VarType::Continuous, 1.0, 1.0});
+  mip.initial_solution = Eigen::VectorXd::Zero(original_cols);
+  mip.initial_solution[10] = 1.0;
+
+  HighsLpPresolveConfig cfg;
+  cfg.enabled = true;
+  cfg.nnz_floor = 0;
+  cfg.nnz_cap = 0;
+  cfg.min_shrink = 1.0;
+  const HighsLpPresolveResult ps =
+      highs_presolve_lp(mip.linear_part, cfg);
+  REQUIRE(ps.use_reduced);
+  REQUIRE(ps.objective_offset == Approx(-100.0));
+
+  BCOptions opt;
+  opt.strict_highs_mip_contract = false;
+  opt.lp_kernel_backend = LpKernelBackend::HiGHS;
+  opt.cuts = CutType::None;
+  opt.gap_tol = 0.1;
+  opt.time_limit_sec = 2.0;
+  const BCResult result = solve_milp_bc(mip, opt);
+
+  REQUIRE(result.stats.success);
+  CHECK(result.stats.objective > 100.0);
+}
+
+TEST_CASE("B&C: audited HiGHS reduced-to-empty result skips the root LP",
+          "[bc][presolve][highs][empty]") {
+  MIPModel mip;
+  mip.linear_part.sense = Sense::Minimize;
+  mip.linear_part.c.resize(2);
+  mip.linear_part.c << 3.0, -2.0;
+  mip.linear_part.A.resize(0, 2);
+  mip.linear_part.b.resize(0);
+  mip.linear_part.Aeq.resize(1, 2);
+  mip.linear_part.Aeq.insert(0, 0) = 1.0;
+  mip.linear_part.Aeq.insert(0, 1) = 1.0;
+  mip.linear_part.Aeq.makeCompressed();
+  mip.linear_part.beq = Eigen::VectorXd::Constant(1, 1.0);
+  mip.linear_part.vars = {
+      {VarType::Binary, 0.0, 1.0},
+      {VarType::Binary, 0.0, 1.0}};
+  mip.binary_idx = {0, 1};
+
+  HighsLpPresolveConfig cfg;
+  cfg.enabled = true;
+  cfg.nnz_floor = 0;
+  cfg.nnz_cap = 0;
+  const HighsLpPresolveResult ps =
+      highs_presolve_lp(mip.linear_part, cfg);
+  REQUIRE(ps.solved_by_presolve);
+
+  BCOptions opt;
+  opt.strict_highs_mip_contract = false;
+  opt.lp_kernel_backend = LpKernelBackend::HiGHS;
+  const BCResult result = solve_milp_bc(mip, opt);
+
+  REQUIRE(result.stats.success);
+  CHECK(result.stats.objective == Approx(-2.0));
+  CHECK(result.stats.iterations == 0);
+  CHECK(result.bc_stats.nodes_explored == 0);
+  CHECK(result.bc_stats.lp_solves == 0);
+  REQUIRE(result.x.size() == 2);
+  CHECK(result.x[0] == Approx(0.0));
+  CHECK(result.x[1] == Approx(1.0));
+}
+
+TEST_CASE("ScopedJoinThread joins a running thread on every scope exit",
+          "[bc][background-task]") {
+  // ISO C++20 [thread.thread.destr]: a joinable std::thread destructor calls
+  // std::terminate. The wrapper must convert every scope exit (including the
+  // strict-root transactional early return) into a join. Derivation:
+  // docs/native_milp_root_quality_restart_prerequisites_2026-08-13.md,
+  // "Root Background-Task Ownership".
+  std::atomic<bool> finished{false};
+  {
+    detail::ScopedJoinThread worker{std::thread([&finished]() {
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      finished.store(true);
+    })};
+    REQUIRE(worker.joinable());
+  }  // Destructor must join here; a terminate would abort the test binary.
+  REQUIRE(finished.load());
+
+  // Move-assignment over a running thread must join the previous thread
+  // before adopting the new one, and destruction of a moved-from wrapper
+  // must be a no-op.
+  std::atomic<int> completed{0};
+  detail::ScopedJoinThread first{std::thread([&completed]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    completed.fetch_add(1);
+  })};
+  first = detail::ScopedJoinThread(std::thread([&completed]() {
+    completed.fetch_add(1);
+  }));
+  REQUIRE(completed.load() >= 1);  // previous thread joined by assignment
+  first.join();
+  REQUIRE(completed.load() == 2);
+  REQUIRE_FALSE(first.joinable());
+}
+
+TEST_CASE("Retained side-state pass postsolves working-space primals",
+          "[bc][strict-postsolve]") {
+  // The 10-item knapsack (LP-fractional at its relaxation optimum, so
+  // presolve cannot solve it) plus one continuous column x10 tied by the
+  // doubleton equality 2 x10 - x0 = 3. HiGHS presolve eliminates x10 and
+  // returns `reduced`; the retained presolve-only instance must reconstruct
+  // it via Highs::postsolve. Derivation:
+  // docs/native_milp_root_quality_restart_prerequisites_2026-08-13.md,
+  // "Strict Tree-Incumbent Postsolve Ownership".
+  MIPModel knapsack = make_knapsack_10();
+  LPModel lp = knapsack.linear_part;
+  const int n_orig = 11;
+  lp.c.conservativeResize(n_orig);
+  lp.c[10] = 1.0;
+  Eigen::SparseMatrix<double> A(1, n_orig);
+  for (int j = 0; j < 10; ++j) A.insert(0, j) = lp.A.coeff(0, j);
+  A.makeCompressed();
+  lp.A = A;
+  lp.Aeq.resize(1, n_orig);
+  lp.Aeq.insert(0, 0) = -1.0;
+  lp.Aeq.insert(0, 10) = 2.0;
+  lp.Aeq.makeCompressed();
+  lp.beq = Eigen::VectorXd::Constant(1, 3.0);
+  lp.vars.push_back({VarType::Continuous, 0.0, 10.0});
+
+  // A retention-less pass caches without the instance; the strict-contract
+  // caller then upgrades the same entry in place.
+  const auto& first = detail::cached_highs_presolve_side_state(
+      lp, 10.0, nullptr, /*retain_postsolve=*/false);
+  REQUIRE(first.presolve_ok);
+  REQUIRE(first.highs_status == "reduced");
+  CHECK(first.impl == nullptr);
+
+  const auto& ss = detail::cached_highs_presolve_side_state(
+      lp, 10.0, nullptr, /*retain_postsolve=*/true);
+  REQUIRE(ss.presolve_ok);
+  REQUIRE(ss.highs_status == "reduced");
+  REQUIRE(ss.presolved_lp_available);
+  REQUIRE(ss.impl != nullptr);
+  REQUIRE(ss.impl_mutex != nullptr);
+  REQUIRE(ss.original_cols == n_orig);
+  const int n_work = static_cast<int>(ss.presolved_lp.vars.size());
+  REQUIRE(n_work > 0);
+  REQUIRE(n_work < n_orig);
+
+  // Produce a working-space incumbent exactly as the strict tree does: an
+  // integer-feasible point of the presolved working model itself. Then the
+  // retained instance must publish it as an original-feasible point.
+  MIPModel working;
+  working.linear_part = ss.presolved_lp;
+  for (int j = 0; j < n_work; ++j) {
+    const VarType type = working.linear_part.vars[static_cast<std::size_t>(j)].type;
+    if (type == VarType::Binary) working.binary_idx.push_back(j);
+    if (type == VarType::Integer) working.integer_idx.push_back(j);
+  }
+  BCOptions working_opt;
+  working_opt.strict_highs_mip_contract = false;
+  working_opt.lp_kernel_backend = LpKernelBackend::HiGHS;
+  working_opt.time_limit_sec = 10.0;
+  const BCResult working_result = solve_milp_bc(working, working_opt);
+  REQUIRE(working_result.stats.success);
+  REQUIRE(working_result.x.size() == static_cast<Eigen::Index>(n_work));
+
+  const Eigen::VectorXd recovered =
+      highs_side_state_postsolve_primal(ss, working_result.x);
+  REQUIRE(recovered.size() == n_orig);
+  double knapsack_weight = 0.0;
+  for (int j = 0; j < 10; ++j) {
+    knapsack_weight += lp.A.coeff(0, j) * recovered[j];
+    CHECK(recovered[j] >= -1e-9);
+    CHECK(recovered[j] <= 1.0 + 1e-9);
+    CHECK(std::abs(recovered[j] - std::round(recovered[j])) <= 1e-6);
+  }
+  CHECK(knapsack_weight <= 14.0 + 1e-9);
+  CHECK(2.0 * recovered[10] - recovered[0] == Approx(3.0).margin(1e-9));
+  CHECK(recovered[10] >= -1e-9);
+  CHECK(recovered[10] <= 10.0 + 1e-9);
+
+  // A wrong-dimension working point must be rejected, not fabricated.
+  const Eigen::VectorXd bad = highs_side_state_postsolve_primal(
+      ss, Eigen::VectorXd::Zero(n_work + 7));
+  CHECK(bad.size() == 0);
+}

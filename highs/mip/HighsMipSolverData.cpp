@@ -1546,6 +1546,18 @@ void HighsMipSolverData::runSetup() {
         }
       }
     }
+    if (std::getenv("MIPSOLVERS_ROOT_LOCK_TRACE") != nullptr) {
+      for (HighsInt col = 0; col != model.num_col_; ++col) {
+        const HighsVarType type = mipsolver.variableType(col);
+        if (type != HighsVarType::kInteger &&
+            type != HighsVarType::kImplicitInteger) {
+          continue;
+        }
+        std::fprintf(stderr, "[HIGHS-ROOT-LOCK] col=%d up=%d down=%d\n",
+                     static_cast<int>(col), static_cast<int>(uplocks[col]),
+                     static_cast<int>(downlocks[col]));
+      }
+    }
   }
 
   rowintegral.resize(mipsolver.numRow());
@@ -2899,6 +2911,29 @@ restart:
   firstlpsol = lp.getSolution().col_value;
   firstlpsolobj = lp.getObjective();
   rootlpsolobj = firstlpsolobj;
+
+  if (std::getenv("MIPSOLVERS_FIRST_ROOT_LP_COORD_TRACE") != nullptr) {
+    const HighsOptions& lp_options = lp.getLpSolver().getOptions();
+    std::fprintf(stderr,
+                 "[HIGHS-FIRST-ROOT-LP-OPTIONS] simplex_strategy=%d "
+                 "scale_strategy=%d presolve=%s\n",
+                 static_cast<int>(lp_options.simplex_strategy),
+                 static_cast<int>(lp_options.simplex_scale_strategy),
+                 lp_options.presolve.c_str());
+    for (HighsInt col = 0; col != mipsolver.numCol(); ++col) {
+      const HighsVarType type = mipsolver.variableType(col);
+      if (type != HighsVarType::kInteger &&
+          type != HighsVarType::kImplicitInteger) {
+        continue;
+      }
+      std::fprintf(stderr,
+                   "[HIGHS-FIRST-ROOT-LP-COORD] col=%d x=%.17g "
+                   "lb=%.17g ub=%.17g round=%lld\n",
+                   static_cast<int>(col), firstlpsol[col],
+                   domain.col_lower_[col], domain.col_upper_[col],
+                   static_cast<long long>(std::llround(firstlpsol[col])));
+    }
+  }
 
   if (lp.getLpSolver().getBasis().valid && lp.numRows() == mipsolver.numRow())
     firstrootbasis = lp.getLpSolver().getBasis();

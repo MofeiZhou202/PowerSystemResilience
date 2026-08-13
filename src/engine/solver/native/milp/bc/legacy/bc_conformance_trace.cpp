@@ -124,7 +124,8 @@ std::uint64_t bc_model_side_state_signature(const LPModel& lp) {
 const HiGHSPresolvedModelStats& cached_highs_presolve_side_state(
     const LPModel& lp,
     double time_limit_sec,
-    bool* cache_hit) {
+    bool* cache_hit,
+    bool retain_postsolve) {
   static std::mutex cache_mutex;
   static std::unordered_map<std::uint64_t, HiGHSPresolvedModelStats> cache;
   static thread_local HiGHSPresolvedModelStats timed_out_result;
@@ -133,12 +134,20 @@ const HiGHSPresolvedModelStats& cached_highs_presolve_side_state(
     std::lock_guard<std::mutex> lock(cache_mutex);
     auto it = cache.find(sig);
     if (it != cache.end()) {
-      if (cache_hit != nullptr) *cache_hit = true;
-      return it->second;
+      // A retention-less entry cannot postsolve working-space primals; a
+      // strict-contract caller needs the retained instance, so recompute
+      // once and upgrade the entry. Entries already carrying the instance
+      // serve both kinds of caller.
+      const bool needs_upgrade = retain_postsolve && !it->second.impl &&
+                                 it->second.highs_status == "reduced";
+      if (!needs_upgrade) {
+        if (cache_hit != nullptr) *cache_hit = true;
+        return it->second;
+      }
     }
   }
   HiGHSPresolvedModelStats computed =
-      highs_presolve_model_stats(lp, time_limit_sec);
+      highs_presolve_model_stats(lp, time_limit_sec, retain_postsolve);
   // A time-limited partial presolve is not reusable: a later solve may have a
   // larger budget and must be allowed to compute the complete side state.
   if (computed.highs_status == "timeout") {
@@ -147,7 +156,7 @@ const HiGHSPresolvedModelStats& cached_highs_presolve_side_state(
     return timed_out_result;
   }
   std::lock_guard<std::mutex> lock(cache_mutex);
-  auto [it, inserted] = cache.emplace(sig, std::move(computed));
+  auto [it, inserted] = cache.insert_or_assign(sig, std::move(computed));
   (void)inserted;
   if (cache_hit != nullptr) *cache_hit = false;
   return it->second;

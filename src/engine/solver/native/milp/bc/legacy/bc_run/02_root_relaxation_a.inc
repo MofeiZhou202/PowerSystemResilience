@@ -9,13 +9,13 @@
 	      highs_presolve_side_state.presolved_col_orig.size() ==
 	          highs_presolve_side_state.presolved_col_type.size()) {
 	    const std::size_t mask_cols =
-	        strict_highs_presolved_working_space
+	        highs_presolved_working_space
 	            ? std::min<std::size_t>(
 	                  highs_presolve_side_state.presolved_col_type.size(),
 	                  static_cast<std::size_t>(std::max(0, n)))
 	            : highs_presolve_side_state.presolved_col_orig.size();
 	    for (std::size_t k = 0; k < mask_cols; ++k) {
-	      int col = strict_highs_presolved_working_space
+	      int col = highs_presolved_working_space
 	                    ? static_cast<int>(k)
 	                    : highs_presolve_side_state.presolved_col_orig[k];
 	      // The HiGHS side-state is computed from the current root `base_lp`.
@@ -106,8 +106,7 @@
         }
         const int hrows = highs_presolve_side_state.rows;
         const int hcols = highs_presolve_side_state.cols;
-        const bool direct_presolved_space =
-            strict_highs_presolved_working_space;
+        const bool direct_presolved_space = highs_presolved_working_space;
         if (static_cast<int>(highs_presolve_side_state.presolved_row_lower.size()) != hrows ||
             static_cast<int>(highs_presolve_side_state.presolved_row_upper.size()) != hrows ||
             static_cast<int>(highs_presolve_side_state.presolved_a_start.size()) != hrows + 1) {
@@ -375,8 +374,7 @@
                 highs_presolve_side_state.cols) {
           return 0;
         }
-        const bool direct_presolved_space =
-            strict_highs_presolved_working_space;
+        const bool direct_presolved_space = highs_presolved_working_space;
         if (!direct_presolved_space &&
             (static_cast<int>(
                  highs_presolve_side_state.presolved_col_orig.size()) !=
@@ -962,7 +960,8 @@
   const bool short_budget_root =
       opt.time_limit_sec > 0.0 && opt.time_limit_sec <= 10.0;
   const bool root_fallback_available =
-      papilo_model_reduced && opt.root_presolve_fallback;
+      (papilo_model_reduced || highs_mip_model_reduced) &&
+      opt.root_presolve_fallback;
   root_solve_opt.time_limit_sec = bc_root_lp_budget_sec(
       root_remaining_before_reserve, opt.time_limit_sec,
       opt.root_presolve_fallback_min_remaining_sec,
@@ -987,11 +986,22 @@
   // central rounding, so native must not gate it on use_ipm_root.
   // Disabled automatically for trivially small problems (n < 100).
   std::optional<Eigen::VectorXd> analytic_centre;
-  std::unique_ptr<std::thread> ac_thread_ptr;
+  // Join-on-destruction: the strict-root transactional early return must not
+  // destroy a joinable thread ([thread.thread.destr] terminates). Derivation:
+  // docs/native_milp_root_quality_restart_prerequisites_2026-08-13.md,
+  // "Root Background-Task Ownership".
+  ScopedJoinThread ac_thread;
   {
     const double remaining_before_root = bc_remaining_sec();
+    // HiGHS HighsMipSolverData::start/finishAnalyticCenterComputation and
+    // HighsPrimalHeuristics::centralRounding; Achterberg (2007), Sec. 9.2;
+    // short-budget derivation in
+    // docs/native_milp_root_quality_restart_prerequisites_2026-08-13.md.
+    // The automatic HiGHS root profile needs the actual interior endpoint:
+    // nearest-integer fallback does not generate the central-rounding path.
     const bool spawn_analytic_centre =
-        opt.use_analytic_centre && !short_budget_root && n >= 100 &&
+        opt.use_analytic_centre &&
+        (!short_budget_root || opt.auto_highs_root_pipeline) && n >= 100 &&
         remaining_before_root > 2.0;
     if (spawn_analytic_centre) {
       LPModel ac_lp_copy = root_lp;  // copy with node bounds
@@ -1002,34 +1012,44 @@
           v.type = VarType::Continuous;
         }
       }
-      const int ac_iter = std::max(
-          1, std::min(opt.analytic_centre_max_iter,
-                      static_cast<int>(remaining_before_root * 20.0)));
       const int ac_n = n;
-      ac_thread_ptr = std::make_unique<std::thread>(
-          [ac_lp = std::move(ac_lp_copy), &analytic_centre, ac_iter, ac_n,
+      ac_thread = ScopedJoinThread(std::thread(
+          [ac_lp = std::move(ac_lp_copy), &analytic_centre, ac_n,
            remaining_before_root, solve_environment]() mutable {
             ScopedBcEnvOptions environment_scope(solve_environment);
-            IPMLPOptions ac_opt;
-            ac_opt.max_iter   = ac_iter;
-            ac_opt.time_limit_sec = std::max(0.001, 0.5 * remaining_before_root);
-            ac_opt.tol_primal = 1e-5;
-            ac_opt.tol_dual   = 1e-5;
-            ac_opt.tol_gap    = 1e-5;
-            ac_opt.crossover  = false;  // keep interior; no vertex purification
-            ac_opt.verbose    = false;
-            NativeIPMLPAdapter ac_ipm(ac_opt);
-            auto res = ac_ipm.solve_lp(ac_lp);
-            if (res.stats.success && res.x.size() == ac_n) {
-              analytic_centre = std::move(res.x);
+#ifdef MIPSOLVERS_HAVE_HIGHS_LIB
+            // HiGHS HighsMipSolverData::startAnalyticCenterComputation:
+            // IPX centring with presolve/crossover disabled.  This is the
+            // algorithm whose point is consumed by centralRounding; an
+            // ordinary native-IPM optimum is not an equivalent endpoint.
+            Highs ac_highs;
+            ac_highs.setOptionValue("output_flag", false);
+            ac_highs.setOptionValue("log_to_console", false);
+            ac_highs.setOptionValue("threads", 1);
+            ac_highs.setOptionValue("presolve", "off");
+            ac_highs.setOptionValue("solver", "ipm");
+            ac_highs.setOptionValue("ipm_iteration_limit", 200);
+            ac_highs.setOptionValue("run_crossover", "off");
+            ac_highs.setOptionValue("run_centring", true);
+            ac_highs.setOptionValue(
+                "time_limit", std::max(0.001, 0.5 * remaining_before_root));
+            if (bc_pass_mip_model_to_highs(ac_highs, ac_lp, nullptr, nullptr) &&
+                ac_highs.run() == HighsStatus::kOk &&
+                ac_highs.getModelStatus() == HighsModelStatus::kOptimal) {
+              const auto& col_value = ac_highs.getSolution().col_value;
+              if (static_cast<int>(col_value.size()) == ac_n) {
+                analytic_centre = Eigen::Map<const Eigen::VectorXd>(
+                    col_value.data(), ac_n);
+              }
             }
-          });
+#endif
+          }));
     }
   }
   auto join_root_background_tasks = [&]() {
-    if (ac_thread_ptr && ac_thread_ptr->joinable()) {
+    if (ac_thread.joinable()) {
       [[maybe_unused]] auto t_ac_join0 = std::chrono::steady_clock::now();
-      ac_thread_ptr->join();
+      ac_thread.join();
       [[maybe_unused]] auto t_ac_join1 = std::chrono::steady_clock::now();
       if (opt.verbose) {
         fmt::print(stderr, "[B&C-ANALYTIC-CENTRE] {} join_wait={:.1f}ms\n",
@@ -1078,7 +1098,8 @@
     if ((out.stats.status == bc_status::kRootRelaxationFailed ||
          out.stats.status == bc_status::kTimeLimitReached) &&
         opt.root_presolve_fallback &&
-        (papilo_model_reduced || test_forced_fallback) &&
+        (papilo_model_reduced || highs_mip_model_reduced ||
+         test_forced_fallback) &&
         bc_remaining_sec() > opt.root_presolve_fallback_min_remaining_sec) {
       // ac_thread captures references to locals of this frame — join before
       // anything else.
@@ -1142,6 +1163,24 @@
 
 	  root.x_relax = clamp_to_bounds(root_relax.primal.x, root.lb, root.ub);
 	  const Eigen::VectorXd certified_root_primal_x = root.x_relax;
+	  // HiGHS HighsMipSolverData::firstlpsol is immutable across root resolves
+	  // and is the first endpoint of centralRounding.  Keep it distinct from
+	  // root_lp_source_x, which is intentionally refreshed for separators.
+	  // Coordinate-level derivation in
+	  // docs/native_milp_root_quality_restart_prerequisites_2026-08-13.md.
+	  const Eigen::VectorXd first_root_lp_x = root_relax.primal.x;
+	  if (bc_env_flag_enabled("MIPSOLVERS_FIRST_ROOT_LP_COORD_TRACE")) {
+	    for (int j = 0; j < n; ++j) {
+	      if (!is_integer_type(root_lp.vars[static_cast<std::size_t>(j)])) {
+	        continue;
+	      }
+	      fmt::print(stderr,
+	                 "[NATIVE-FIRST-ROOT-LP-COORD] col={} x={:.17g} "
+	                 "lb={:.17g} ub={:.17g} round={}\n",
+	                 j, first_root_lp_x[j], root.lb[j], root.ub[j],
+	                 static_cast<long long>(std::llround(first_root_lp_x[j])));
+	    }
+	  }
 	  Eigen::VectorXd root_lp_source_x = root_relax.primal.x;
 	  auto refresh_root_lp_source_solution = [&]() {
 	    // The basis handle may own the scaled canonical standard-form model;
@@ -2242,8 +2281,73 @@
           bool is_vub = source.is_vub;
           double coef = source.coef;
           double constant = source.constant;
+          if (highs_mip_model_reduced) {
+            if (col < 0 || trigger_col < 0 ||
+                col >= static_cast<int>(
+                           highs_mip_ps.orig_to_reduced_col.size()) ||
+                trigger_col >= static_cast<int>(
+                                   highs_mip_ps.orig_to_reduced_col.size())) {
+              ++presolve_map_bad_col;
+              continue;
+            }
+            const int mapped_col = highs_mip_ps.orig_to_reduced_col[
+                static_cast<std::size_t>(col)];
+            const int mapped_trigger = highs_mip_ps.orig_to_reduced_col[
+                static_cast<std::size_t>(trigger_col)];
+            if (mapped_col < 0) {
+              ++presolve_map_elim_col;
+              ++presolve_map_project_no_expr;
+              continue;
+            }
+            if (mapped_trigger < 0) {
+              ++presolve_map_elim_trigger;
+              continue;
+            }
+            if (mapped_col >= static_cast<int>(
+                                  highs_mip_ps.reduced_col_scale.size()) ||
+                mapped_trigger >= static_cast<int>(
+                                      highs_mip_ps.reduced_col_scale.size()) ||
+                mapped_col >= static_cast<int>(
+                                  highs_mip_ps.reduced_col_constant.size()) ||
+                mapped_trigger >= static_cast<int>(
+                                      highs_mip_ps.reduced_col_constant.size()) ||
+                mapped_col >= static_cast<int>(
+                                  highs_mip_ps
+                                      .reduced_col_linearly_transformable
+                                      .size()) ||
+                mapped_trigger >= static_cast<int>(
+                                      highs_mip_ps
+                                          .reduced_col_linearly_transformable
+                                          .size()) ||
+                highs_mip_ps.reduced_col_linearly_transformable[
+                    static_cast<std::size_t>(mapped_col)] == 0 ||
+                highs_mip_ps.reduced_col_linearly_transformable[
+                    static_cast<std::size_t>(mapped_trigger)] == 0) {
+              ++presolve_map_project_no_expr;
+              continue;
+            }
+            const double target_scale = highs_mip_ps.reduced_col_scale[
+                static_cast<std::size_t>(mapped_col)];
+            const double target_constant = highs_mip_ps.reduced_col_constant[
+                static_cast<std::size_t>(mapped_col)];
+            const double trigger_scale = highs_mip_ps.reduced_col_scale[
+                static_cast<std::size_t>(mapped_trigger)];
+            const double trigger_constant =
+                highs_mip_ps.reduced_col_constant[
+                    static_cast<std::size_t>(mapped_trigger)];
+            if (!highs_style_map_variable_bound_to_reduced(
+                    is_vub, coef, constant, target_scale, target_constant,
+                    trigger_scale, trigger_constant)) {
+              ++presolve_map_project_bad_alpha;
+              continue;
+            }
+            col = mapped_col;
+            trigger_col = mapped_trigger;
+            ++presolve_map_projected_col;
+          }
 #ifdef MIPSOLVERS_HAVE_PAPILO
-          if (papilo_ps.success && !papilo_ps.orig_to_reduced_col.empty()) {
+          if (!highs_mip_model_reduced && papilo_ps.success &&
+              !papilo_ps.orig_to_reduced_col.empty()) {
             if (col < 0 ||
                 col >= static_cast<int>(papilo_ps.orig_to_reduced_col.size()) ||
                 trigger_col < 0 ||

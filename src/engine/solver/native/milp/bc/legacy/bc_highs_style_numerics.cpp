@@ -255,4 +255,56 @@ double highs_style_incumbent_upper_limit(const LPModel& lp,
                   std::nextafter(incumbent_obj, -kInf));
 }
 
+bool highs_style_root_source_eligible(int declared_integer_cols,
+                                      int implied_integer_cols,
+                                      double root_bound) {
+  // Achterberg (2007), Constraint Integer Programming, Secs. 4.1-4.2:
+  // tableau/path disjunctions arise from every fractional integer variable;
+  // presolve-inferred integrality only enlarges that set.
+  return std::isfinite(root_bound) &&
+         (declared_integer_cols > 0 || implied_integer_cols > 0);
+}
+
+double presolved_objective_value(double original_objective,
+                                 double presolved_objective_offset) {
+  // HiGHS HighsLp::offset_: f_original = f_reduced + offset; derivation in
+  // docs/native_milp_root_source_eligibility_2026-08-13.md.
+  return original_objective - presolved_objective_offset;
+}
+
+bool highs_style_map_variable_bound_to_reduced(
+    bool& is_upper, double& coef, double& constant, double target_scale,
+    double target_shift, double trigger_scale, double trigger_shift) {
+  if (!std::isfinite(coef) || !std::isfinite(constant) ||
+      !std::isfinite(target_scale) || !std::isfinite(target_shift) ||
+      !std::isfinite(trigger_scale) || !std::isfinite(trigger_shift) ||
+      std::abs(target_scale) <= 1e-12) {
+    return false;
+  }
+  // HiGHS HighsPostsolveStack::linearTransform and
+  // docs/native_milp_presolve_varbound_coordinates_2026-08-13.md:
+  // x_t <= a*x_z+b, x_i=s_i*y_i+c_i gives
+  // y_t <= (a*s_z/s_t)y_z+(a*c_z+b-c_t)/s_t.
+  constant =
+      (coef * trigger_shift + constant - target_shift) / target_scale;
+  coef = coef * trigger_scale / target_scale;
+  if (target_scale < 0.0) is_upper = !is_upper;
+  return std::isfinite(coef) && std::isfinite(constant);
+}
+
+bool highs_style_cutpool_row_tree_owned(bool alive, bool in_root_lp) {
+  // HiGHS HighsCutPool::separate and HighsLpRelaxation::addCuts; derivation in
+  // docs/native_milp_cutpool_proof_ownership_2026-08-13.md. A separator row
+  // becomes a tree-global proof artifact only after successful LP admission.
+  return alive && in_root_lp;
+}
+
+bool highs_style_cutpool_candidate_stays_root_owned(
+    bool strict_highs_root_fixed_point, bool auto_highs_root_pipeline) {
+  // HiGHS HighsCutPool::separate and HighsLpRelaxation::addCuts; derivation in
+  // docs/native_milp_cutpool_proof_ownership_2026-08-13.md. Both HiGHS-style
+  // execution modes defer tree ownership until root-LP admission.
+  return strict_highs_root_fixed_point || auto_highs_root_pipeline;
+}
+
 }  // namespace mipsolvers::engine::detail

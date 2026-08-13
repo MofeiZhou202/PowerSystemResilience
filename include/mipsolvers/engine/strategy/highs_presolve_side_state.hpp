@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -57,6 +58,20 @@ struct HiGHSPresolvedModelStats {
   bool presolved_lp_available{false};
   double presolved_objective_offset{0.0};
   LPModel presolved_lp;
+  /// Original column count of the model the pass presolved; sizes the
+  /// postsolved primal returned by highs_side_state_postsolve_primal.
+  int original_cols{0};
+  /// Retained presolve-only HiGHS instance. Highs::run() consumes the MIP
+  /// postsolve lifecycle, but a presolve()-only instance keeps
+  /// Highs::postsolve valid for the kReduced state, so any point of the
+  /// presolved working space can be published in original coordinates.
+  /// Populated only when the pass is invoked with retain_postsolve=true.
+  /// Derivation: docs/native_milp_root_quality_restart_prerequisites_
+  /// 2026-08-13.md, "Strict Tree-Incumbent Postsolve Ownership".
+  std::shared_ptr<void> impl;
+  /// Highs::postsolve mutates the instance and cache entries are shared
+  /// across solves; serialize access.
+  std::shared_ptr<std::mutex> impl_mutex;
   std::vector<double> presolved_row_lower;
   std::vector<double> presolved_row_upper;
   std::vector<double> presolved_col_lower;
@@ -129,10 +144,23 @@ HiGHSPresolveBridgeInfo highs_presolve_bridge_info();
 
 /// Run HiGHS presolve in-process and return presolved model side-state counts.
 /// This is intentionally diagnostic-only: it does not replace native presolve
-/// or change B&C behavior.
+/// or change B&C behavior.  With retain_postsolve=true and a genuine
+/// `reduced` outcome, the presolve-only HiGHS instance is retained in `impl`
+/// so working-space primals can later be postsolved to original coordinates.
 HiGHSPresolvedModelStats highs_presolve_model_stats(
     const LPModel& lp,
-    double time_limit_sec = 0.0);
+    double time_limit_sec = 0.0,
+    bool retain_postsolve = false);
+
+/// Postsolve a primal point of the retained pass's presolved working space to
+/// original coordinates through that pass's HighsPostsolveStack
+/// (Highs::postsolve MIP path: primal-only column solution, row values
+/// ignored, eliminated columns reconstructed).  Returns an empty vector when
+/// no instance was retained, the input size does not match the presolved
+/// column count, or postsolve fails.
+Eigen::VectorXd highs_side_state_postsolve_primal(
+    const HiGHSPresolvedModelStats& side_state,
+    const Eigen::VectorXd& x_working);
 
 /// Solve the supplied LP relaxation with HiGHS, presolve disabled, and return a
 /// diagnostic LP-state/frontier signature.  This is intentionally diagnostic
@@ -169,6 +197,7 @@ struct HighsLpPresolveConfig {
   long nnz_cap{300000};     ///< Skip presolve when the original nnz exceeds this.
   double min_shrink{1.0};   ///< Use the reduced LP whenever
                             ///< reduced_nnz < min_shrink * original_nnz.
+  double time_limit_sec{0.0}; ///< HiGHS presolve deadline; 0 means unlimited.
   bool verbose{false};      ///< Emit a one-line [HIGHS-PRESOLVE] summary.
 };
 
@@ -196,6 +225,13 @@ struct HighsLpPresolveResult {
   int reduced_cols{0};
   long reduced_nnz{0};
   double presolve_ms{0.0};
+  double objective_offset{0.0};
+  std::vector<int> reduced_to_orig_col;
+  std::vector<int> orig_to_reduced_col;
+  std::vector<double> reduced_col_scale;
+  std::vector<double> reduced_col_constant;
+  std::vector<unsigned char> reduced_col_linearly_transformable;
+  HiGHSPresolvedModelStats side_state; ///< Snapshot from the retained pass.
   std::shared_ptr<void> impl;     ///< Retained HiGHS instance for postsolve.
 };
 
@@ -210,6 +246,19 @@ HighsLpPresolveResult highs_presolve_lp(const LPModel& lp,
 /// and interior-point kernels).  Returns an empty vector on failure.
 Eigen::VectorXd highs_postsolve_primal(const HighsLpPresolveResult& ps,
                                        const Eigen::VectorXd& x_reduced);
+
+/// Project an original-space primal into the retained HiGHS presolved space.
+/// Returns an empty vector when any surviving column lacks an exact affine map.
+Eigen::VectorXd highs_presolve_forward_map(const HighsLpPresolveResult& ps,
+                                           const Eigen::VectorXd& x_original);
+
+/// Project an original-space primal into a retained HiGHS side-state model.
+/// Returns an empty vector unless every presolved column has an exact affine
+/// transform and @p original_cols matches @p x_original.
+Eigen::VectorXd highs_presolve_forward_map(
+    const HiGHSPresolvedModelStats& side_state,
+    int original_cols,
+    const Eigen::VectorXd& x_original);
 
 /// Postsolve @p x_reduced, then audit the recovered primal against the original
 /// LP (bounds + rows, sentinel-aware).  On success fills @p x_orig_out and

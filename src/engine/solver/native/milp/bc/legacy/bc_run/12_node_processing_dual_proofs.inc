@@ -1091,10 +1091,15 @@
     }
     NodeDomainClosureStats child_closure_stats;
     const std::vector<DomainReasonBound> no_incoming_reasons;
-    if (!run_node_domain_closure(child, no_incoming_reasons, prop_changes,
-                                 &new_cuts, &cut_count, inc_obj_snapshot,
-                                 has_inc_snapshot, "child_pre_lp",
-                                 &child_closure_stats)) {
+    const bool child_closure_ok = run_node_domain_closure(
+        child, no_incoming_reasons, prop_changes, &new_cuts, &cut_count,
+        inc_obj_snapshot, has_inc_snapshot, "child_pre_lp",
+        &child_closure_stats);
+    if (child_closure_stats.deadline_interrupted) {
+      simplex_node_deadline_hit = true;
+      return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
+    }
+    if (!child_closure_ok) {
       branch_obs.has_inference = true;
       branch_obs.inference_count =
           static_cast<double>(child_closure_stats.tightened +

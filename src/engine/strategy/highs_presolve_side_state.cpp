@@ -456,11 +456,13 @@ HiGHSPresolveBridgeInfo highs_presolve_bridge_info() {
 }
 
 HiGHSPresolvedModelStats highs_presolve_model_stats(const LPModel& lp,
-                                                    double time_limit_sec) {
+                                                    double time_limit_sec,
+                                                    bool retain_postsolve) {
   HiGHSPresolvedModelStats stats;
   const auto bridge = highs_presolve_bridge_info();
   stats.available = bridge.available;
   stats.bridge_source = bridge.source;
+  stats.original_cols = static_cast<int>(lp.vars.size());
 
 #ifdef MIPSOLVERS_HAVE_HIGHS_LIB
   if (!bridge.available) return stats;
@@ -554,7 +556,10 @@ HiGHSPresolvedModelStats highs_presolve_model_stats(const LPModel& lp,
   }
   start[static_cast<std::size_t>(ncols)] = static_cast<HighsInt>(index.size());
 
-  Highs highs;
+  // shared_ptr so a retain_postsolve pass can hand the presolve-only
+  // instance (and its intact postsolve lifecycle) to the side-state struct.
+  auto highs_owner = std::make_shared<Highs>();
+  Highs& highs = *highs_owner;
   highs.setOptionValue("output_flag", false);
   highs.setOptionValue("log_to_console", false);
   highs.setOptionValue("threads", 1);
@@ -607,6 +612,16 @@ HiGHSPresolvedModelStats highs_presolve_model_stats(const LPModel& lp,
         static_cast<int>(stats.presolved_lp.A.rows()) +
                 static_cast<int>(stats.presolved_lp.Aeq.rows()) <=
             static_cast<int>(presolved.num_row_);
+  }
+  if (retain_postsolve && stats.presolved_lp_available &&
+      stats.highs_status == "reduced") {
+    // Presolve-only lifecycle: Highs::postsolve stays valid for kReduced, so
+    // this instance can publish any working-space primal in original
+    // coordinates. Derivation: docs/native_milp_root_quality_restart_
+    // prerequisites_2026-08-13.md, "Strict Tree-Incumbent Postsolve
+    // Ownership".
+    stats.impl = highs_owner;
+    stats.impl_mutex = std::make_shared<std::mutex>();
   }
 
   const auto& side_state = highs.getPresolveSideState();
@@ -1263,6 +1278,9 @@ HighsLpPresolveResult highs_presolve_lp(const LPModel& lp,
   highs->setOptionValue("output_flag", false);
   highs->setOptionValue("log_to_console", false);
   highs->setOptionValue("threads", 1);
+  if (cfg.time_limit_sec > 0.0 && std::isfinite(cfg.time_limit_sec)) {
+    highs->setOptionValue("time_limit", std::max(0.001, cfg.time_limit_sec));
+  }
   if (!native_lp_to_highs(lp, *highs)) {
     out.status = "pass_error";
     return out;
@@ -1291,6 +1309,7 @@ HighsLpPresolveResult highs_presolve_lp(const LPModel& lp,
       break;
     case HighsPresolveStatus::kReduced: {
       const HighsLp& presolved = highs->getPresolvedLp();
+      out.objective_offset = presolved.offset_;
       const bool sizes_ok =
           presolved.num_col_ >= 0 && presolved.num_row_ >= 0 &&
           static_cast<int>(presolved.col_cost_.size()) >= presolved.num_col_ &&
@@ -1304,6 +1323,121 @@ HighsLpPresolveResult highs_presolve_lp(const LPModel& lp,
       }
       LPModel reduced =
           convert_highs_presolved_lp_to_native(presolved, lp.sense);
+      const auto& side_state = highs->getPresolveSideState();
+      const bool mapping_ok =
+          side_state.available &&
+          static_cast<int>(side_state.presolved_col_orig.size()) ==
+              presolved.num_col_ &&
+          static_cast<int>(side_state.presolved_col_scale.size()) ==
+              presolved.num_col_ &&
+          static_cast<int>(side_state.presolved_col_constant.size()) ==
+              presolved.num_col_ &&
+          static_cast<int>(
+              side_state.presolved_col_linearly_transformable.size()) ==
+              presolved.num_col_;
+      if (!mapping_ok) {
+        out.status = "presolved_mapping_unavailable";
+        break;
+      }
+      out.reduced_to_orig_col.reserve(
+          side_state.presolved_col_orig.size());
+      for (const HighsInt col : side_state.presolved_col_orig) {
+        out.reduced_to_orig_col.push_back(static_cast<int>(col));
+      }
+      out.orig_to_reduced_col.assign(
+          static_cast<std::size_t>(out.orig_cols), -1);
+      for (int j = 0; j < static_cast<int>(out.reduced_to_orig_col.size()); ++j) {
+        const int orig = out.reduced_to_orig_col[static_cast<std::size_t>(j)];
+        if (orig >= 0 && orig < out.orig_cols) {
+          out.orig_to_reduced_col[static_cast<std::size_t>(orig)] = j;
+        }
+      }
+      out.reduced_col_scale = side_state.presolved_col_scale;
+      out.reduced_col_constant = side_state.presolved_col_constant;
+      out.reduced_col_linearly_transformable =
+          side_state.presolved_col_linearly_transformable;
+      out.side_state.available = true;
+      out.side_state.pass_ok = true;
+      out.side_state.presolve_ok = true;
+      out.side_state.bridge_source = bridge.source;
+      out.side_state.highs_status = out.status;
+      out.side_state.side_state_available = true;
+      out.side_state.rows = static_cast<int>(side_state.rows);
+      out.side_state.cols = static_cast<int>(side_state.cols);
+      out.side_state.nnz = static_cast<int>(side_state.nnz);
+      out.side_state.ranged_rows = static_cast<int>(side_state.ranged_rows);
+      out.side_state.binary_cols = static_cast<int>(side_state.binary_cols);
+      out.side_state.integer_cols = static_cast<int>(side_state.integer_cols);
+      out.side_state.implied_integer_cols =
+          static_cast<int>(side_state.implied_integer_cols);
+      out.side_state.continuous_cols =
+          static_cast<int>(side_state.continuous_cols);
+      out.side_state.fixed_cols = static_cast<int>(side_state.fixed_cols);
+      out.side_state.vub_count = static_cast<int>(side_state.vub_count);
+      out.side_state.vlb_count = static_cast<int>(side_state.vlb_count);
+      out.side_state.vub_attempts = static_cast<int>(side_state.vub_attempts);
+      out.side_state.vub_accepted = static_cast<int>(side_state.vub_accepted);
+      out.side_state.vub_replaced = static_cast<int>(side_state.vub_replaced);
+      out.side_state.vlb_attempts = static_cast<int>(side_state.vlb_attempts);
+      out.side_state.vlb_accepted = static_cast<int>(side_state.vlb_accepted);
+      out.side_state.vlb_replaced = static_cast<int>(side_state.vlb_replaced);
+      out.side_state.probing_calls = static_cast<int>(side_state.probing_calls);
+      out.side_state.probing_conflicts =
+          static_cast<int>(side_state.probing_conflicts);
+      out.side_state.probing_reductions =
+          static_cast<int>(side_state.probing_reductions);
+      out.side_state.probing_substitutions =
+          static_cast<int>(side_state.probing_substitutions);
+      out.side_state.vub_hash = side_state.vub_hash;
+      out.side_state.vlb_hash = side_state.vlb_hash;
+      out.side_state.presolved_lp_available = true;
+      out.side_state.presolved_objective_offset = presolved.offset_;
+      out.side_state.presolved_row_lower = side_state.presolved_row_lower;
+      out.side_state.presolved_row_upper = side_state.presolved_row_upper;
+      out.side_state.presolved_col_lower = side_state.presolved_col_lower;
+      out.side_state.presolved_col_upper = side_state.presolved_col_upper;
+      out.side_state.presolved_col_orig = out.reduced_to_orig_col;
+      out.side_state.presolved_col_scale = out.reduced_col_scale;
+      out.side_state.presolved_col_constant = out.reduced_col_constant;
+      out.side_state.presolved_col_linearly_transformable =
+          out.reduced_col_linearly_transformable;
+      out.side_state.presolved_col_type.reserve(
+          side_state.presolved_col_type.size());
+      for (const HighsVarType type : side_state.presolved_col_type) {
+        out.side_state.presolved_col_type.push_back(
+            static_cast<unsigned char>(type));
+      }
+      out.side_state.presolved_a_start.reserve(
+          side_state.presolved_a_start.size());
+      for (const HighsInt value : side_state.presolved_a_start) {
+        out.side_state.presolved_a_start.push_back(static_cast<int>(value));
+      }
+      out.side_state.presolved_a_index.reserve(
+          side_state.presolved_a_index.size());
+      for (const HighsInt value : side_state.presolved_a_index) {
+        out.side_state.presolved_a_index.push_back(static_cast<int>(value));
+      }
+      out.side_state.presolved_a_value = side_state.presolved_a_value;
+      out.side_state.var_bounds.reserve(side_state.var_bounds.size());
+      for (const auto& record : side_state.var_bounds) {
+        HiGHSPresolvedModelStats::VarBoundRecord copied;
+        copied.target_col = static_cast<int>(record.target_col);
+        copied.trigger_col = static_cast<int>(record.trigger_col);
+        copied.target_orig_col = static_cast<int>(record.target_orig_col);
+        copied.trigger_orig_col = static_cast<int>(record.trigger_orig_col);
+        copied.coef = record.coef;
+        copied.constant = record.constant;
+        copied.target_scale = record.target_scale;
+        copied.target_constant = record.target_constant;
+        copied.trigger_scale = record.trigger_scale;
+        copied.trigger_constant = record.trigger_constant;
+        copied.upper = record.upper;
+        copied.target_linearly_transformable =
+            record.target_linearly_transformable;
+        copied.trigger_linearly_transformable =
+            record.trigger_linearly_transformable;
+        out.side_state.var_bounds.push_back(copied);
+      }
       out.reduced_rows =
           static_cast<int>(reduced.A.rows() + reduced.Aeq.rows());
       out.reduced_cols = static_cast<int>(reduced.vars.size());
@@ -1365,6 +1499,73 @@ Eigen::VectorXd highs_postsolve_primal(const HighsLpPresolveResult& ps,
 #endif
 }
 
+Eigen::VectorXd highs_presolve_forward_map(const HighsLpPresolveResult& ps,
+                                           const Eigen::VectorXd& x_original) {
+  const int n_reduced = static_cast<int>(ps.reduced_to_orig_col.size());
+  if (x_original.size() != ps.orig_cols || n_reduced <= 0 ||
+      static_cast<int>(ps.reduced_col_scale.size()) != n_reduced ||
+      static_cast<int>(ps.reduced_col_constant.size()) != n_reduced ||
+      static_cast<int>(ps.reduced_col_linearly_transformable.size()) !=
+          n_reduced) {
+    return {};
+  }
+  Eigen::VectorXd x_reduced(n_reduced);
+  for (int j = 0; j < n_reduced; ++j) {
+    const int orig = ps.reduced_to_orig_col[static_cast<std::size_t>(j)];
+    const double scale = ps.reduced_col_scale[static_cast<std::size_t>(j)];
+    const double constant =
+        ps.reduced_col_constant[static_cast<std::size_t>(j)];
+    // HiGHS HighsPostsolveStack::linearTransform; derivation in
+    // docs/native_milp_root_source_eligibility_2026-08-13.md.
+    // x_original = scale * x_reduced + constant.
+    if (orig < 0 || orig >= x_original.size() ||
+        ps.reduced_col_linearly_transformable[static_cast<std::size_t>(j)] ==
+            0 ||
+        !std::isfinite(scale) || !std::isfinite(constant) ||
+        std::abs(scale) <= 1e-12) {
+      return {};
+    }
+    x_reduced[j] = (x_original[orig] - constant) / scale;
+  }
+  return x_reduced;
+}
+
+Eigen::VectorXd highs_presolve_forward_map(
+    const HiGHSPresolvedModelStats& side_state,
+    int original_cols,
+    const Eigen::VectorXd& x_original) {
+  const int n_reduced = static_cast<int>(side_state.presolved_col_orig.size());
+  if (!side_state.side_state_available || original_cols < 0 ||
+      x_original.size() != original_cols || n_reduced <= 0 ||
+      static_cast<int>(side_state.presolved_col_scale.size()) != n_reduced ||
+      static_cast<int>(side_state.presolved_col_constant.size()) != n_reduced ||
+      static_cast<int>(side_state.presolved_col_linearly_transformable.size()) !=
+          n_reduced) {
+    return {};
+  }
+
+  Eigen::VectorXd x_reduced(n_reduced);
+  for (int j = 0; j < n_reduced; ++j) {
+    const int orig = side_state.presolved_col_orig[static_cast<std::size_t>(j)];
+    const double scale =
+        side_state.presolved_col_scale[static_cast<std::size_t>(j)];
+    const double constant =
+        side_state.presolved_col_constant[static_cast<std::size_t>(j)];
+    // HiGHS HighsPostsolveStack::linearTransform; affine inverse derived in
+    // docs/native_milp_root_quality_restart_prerequisites_2026-08-13.md,
+    // "Coupled HiGHS Root-Primal Ownership".
+    if (orig < 0 || orig >= original_cols ||
+        side_state.presolved_col_linearly_transformable[
+            static_cast<std::size_t>(j)] == 0 ||
+        !std::isfinite(scale) || !std::isfinite(constant) ||
+        std::abs(scale) <= 1e-12) {
+      return {};
+    }
+    x_reduced[j] = (x_original[orig] - constant) / scale;
+  }
+  return x_reduced;
+}
+
 bool highs_presolve_recover_primal(const LPModel& lp,
                                    const HighsLpPresolveResult& ps,
                                    const Eigen::VectorXd& x_reduced,
@@ -1379,6 +1580,45 @@ bool highs_presolve_recover_primal(const LPModel& lp,
   objective_out = lp.c.dot(x);
   x_orig_out = std::move(x);
   return true;
+}
+
+Eigen::VectorXd highs_side_state_postsolve_primal(
+    const HiGHSPresolvedModelStats& side_state,
+    const Eigen::VectorXd& x_working) {
+#ifdef MIPSOLVERS_HAVE_HIGHS_LIB
+  if (!side_state.impl || !side_state.impl_mutex ||
+      side_state.original_cols <= 0 ||
+      static_cast<int>(x_working.size()) !=
+          static_cast<int>(side_state.presolved_lp.vars.size())) {
+    return {};
+  }
+  // Highs::postsolve mutates the retained instance and side-state cache
+  // entries are shared across solves; serialize the recovery.
+  std::lock_guard<std::mutex> lock(*side_state.impl_mutex);
+  auto* highs = static_cast<Highs*>(side_state.impl.get());
+  HighsSolution sol;
+  sol.col_value.assign(x_working.data(), x_working.data() + x_working.size());
+  sol.value_valid = true;
+  // Vendored Highs::callRunPostsolve MIP branch: primal-only column solution
+  // of presolved size, row values ignored, eliminated original columns
+  // reconstructed through the HighsPostsolveStack.
+  const auto st = highs->postsolve(sol);
+  if (!(st == HighsStatus::kOk || st == HighsStatus::kWarning)) return {};
+  const HighsSolution& full = highs->getSolution();
+  if (!full.value_valid ||
+      static_cast<int>(full.col_value.size()) != side_state.original_cols) {
+    return {};
+  }
+  Eigen::VectorXd x(side_state.original_cols);
+  for (int j = 0; j < side_state.original_cols; ++j) {
+    x[j] = full.col_value[static_cast<std::size_t>(j)];
+  }
+  return x;
+#else
+  (void)side_state;
+  (void)x_working;
+  return {};
+#endif
 }
 
 }  // namespace mipsolvers::engine

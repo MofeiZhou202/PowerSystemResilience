@@ -25,10 +25,14 @@ char bc_native_basis_status(int col,
 double bc_native_reduced_cost(int col, const SimplexBasis* basis_hint);
 
 std::uint64_t bc_model_side_state_signature(const LPModel& lp);
+/// With retain_postsolve=true the returned side state carries the
+/// presolve-only HiGHS instance for later working-space primal postsolve; a
+/// cached retention-less entry is recomputed once with retention.
 const HiGHSPresolvedModelStats& cached_highs_presolve_side_state(
     const LPModel& lp,
     double time_limit_sec = 0.0,
-    bool* cache_hit = nullptr);
+    bool* cache_hit = nullptr,
+    bool retain_postsolve = false);
 
 std::uint64_t bc_trace_hash_mix(std::uint64_t seed, std::uint64_t value);
 std::uint64_t bc_trace_hash_double(double value);
