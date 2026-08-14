@@ -184,6 +184,10 @@ struct QPModel {
   Eigen::SparseMatrix<double> Aeq;  // Equality constraints Aeq*x = beq
   Eigen::VectorXd beq;
   std::vector<VariableMeta> vars;
+  /// Optional primal warm start in original variable coordinates. NativeLCQP
+  /// audits size/finiteness, projects it onto finite box bounds, and otherwise
+  /// follows its deterministic cold initialization.
+  Eigen::VectorXd x0;
 };
 
 /// Cone dimensions, cvxopt-style: K = R^l_+ x Q^{q[0]} x ... x Q^{q[k]} x

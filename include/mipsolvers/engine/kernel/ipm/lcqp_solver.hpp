@@ -17,6 +17,9 @@ struct LCQPOptions {
   double tol_primal{1e-8};
   double tol_dual{1e-8};
   double tol_gap{1e-8};
+  /// Cooperative wall-clock limit for one solve. A sparse factorization is
+  /// indivisible and may finish after the deadline; 0 disables the limit.
+  double time_limit_sec{0.0};
   bool verbose{false};
 };
 
@@ -47,7 +50,8 @@ class NativeLCQPAdapter final : public SolverAdapter {
       const Eigen::SparseMatrix<double>& Aeq,
       const Eigen::VectorXd& beq,
       const Eigen::VectorXd& lb,
-      const Eigen::VectorXd& ub) const;
+      const Eigen::VectorXd& ub,
+      const Eigen::VectorXd* x0) const;
 };
 
 }  // namespace mipsolvers::engine

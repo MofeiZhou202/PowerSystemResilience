@@ -10,6 +10,7 @@
 #include "mipsolvers/engine/kernel/ipm/lcqp_solver.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <vector>
@@ -254,6 +255,13 @@ SolveResult NativeLCQPAdapter::solve_qp(const QPModel& prob) const {
     for (int i = 0; i < m_ineq; ++i)
       qp_aug.vars.push_back({VarType::Continuous, 0.0, std::numeric_limits<double>::infinity(), {}});
 
+    if (prob.x0.size() == n && prob.x0.allFinite()) {
+      qp_aug.x0.resize(n_aug);
+      qp_aug.x0.head(n) = prob.x0;
+      qp_aug.x0.tail(m_ineq) =
+          (prob.b - prob.A * prob.x0).cwiseMax(0.0);
+    }
+
     SolveResult out = solve_qp(qp_aug);  // recurse (no ineq this time)
     // Strip slack variables from solution
     if (static_cast<int>(out.x.size()) == n_aug)
@@ -281,7 +289,9 @@ SolveResult NativeLCQPAdapter::solve_qp(const QPModel& prob) const {
     c = -c;
   }
 
-  return solve_qp_ipm(Q, c, prob.A, prob.b, prob.Aeq, prob.beq, lb, ub);
+  const Eigen::VectorXd* x0 =
+      prob.x0.size() == n && prob.x0.allFinite() ? &prob.x0 : nullptr;
+  return solve_qp_ipm(Q, c, prob.A, prob.b, prob.Aeq, prob.beq, lb, ub, x0);
 }
 
 // AUDIT-NAV: 凸 QP 内点主循环；KKT 模式只分析一次，每轮仅更新数值。
@@ -294,10 +304,20 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
     const Eigen::SparseMatrix<double>& Aeq,
     const Eigen::VectorXd& beq,
     const Eigen::VectorXd& lb,
-    const Eigen::VectorXd& ub) const {
+    const Eigen::VectorXd& ub,
+    const Eigen::VectorXd* x0) const {
 
   SolveResult result;
   result.stats.solver_name = name();
+  const auto solve_started = std::chrono::steady_clock::now();
+  const bool has_deadline =
+      opt_.time_limit_sec > 0.0 && std::isfinite(opt_.time_limit_sec);
+  const auto deadline_hit = [&]() {
+    return has_deadline &&
+        std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                      solve_started)
+                .count() >= opt_.time_limit_sec;
+  };
 
   const int n = static_cast<int>(c.size());
   const int meq = static_cast<int>(Aeq.rows());
@@ -330,8 +350,11 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
     Eigen::SparseMatrix<double> Qreg = Q;
     for (int i = 0; i < n; ++i) Qreg.coeffRef(i, i) += 1e-10;
     solver->analyze_pattern(Qreg);
+    result.stats.symbolic_analyze_calls = 1;
+    result.stats.factorization_calls = 1;
     solver->factorize(Qreg);
     Eigen::VectorXd neg_c = -c;
+    result.stats.linear_solve_calls = 1;
     solver->solve(neg_c, result.x);
     result.stats.success = true;
     result.stats.objective = 0.5 * result.x.dot(Q * result.x) + c.dot(result.x);
@@ -389,24 +412,36 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
   //   s_lb, s_ub, z_lb, z_ub >= 0
   // ===========================================================================
 
-  // Initialize x at center of bounds (in scaled space)
+  // Initialize x at the supplied structure-restored point when its contract is
+  // complete; otherwise retain the deterministic center-of-bounds cold start.
+  // The equality residual is preserved by diagonal Ruiz scaling because
+  // x_scaled = D^{-1} x_original. See Nocedal--Wright (2006), Section 16.1.
   Eigen::VectorXd x = Eigen::VectorXd::Zero(n);
+  const bool use_warm_start = x0 != nullptr && x0->size() == n && x0->allFinite();
   for (int i = 0; i < n; ++i) {
-    double lo = (lbs(i) > -kBigNum + 1) ? lbs(i) : -10.0;
-    double hi = (ubs(i) < kBigNum - 1) ? ubs(i) : 10.0;
-    x(i) = 0.5 * (lo + hi);
+    if (use_warm_start) {
+      x(i) = (*x0)(i) / d[i];
+      if (lbs(i) > -kBigNum + 1) x(i) = std::max(x(i), lbs(i));
+      if (ubs(i) < kBigNum - 1) x(i) = std::min(x(i), ubs(i));
+    } else {
+      const double lo = (lbs(i) > -kBigNum + 1) ? lbs(i) : -10.0;
+      const double hi = (ubs(i) < kBigNum - 1) ? ubs(i) : 10.0;
+      x(i) = 0.5 * (lo + hi);
+    }
   }
+  result.stats.warm_start_used = use_warm_start;
 
   // Initialize slacks and duals (in scaled space)
   Eigen::VectorXd s_lb(nlb), z_lb(nlb);
+  const double bound_slack_floor = use_warm_start ? 1e-2 : 1.0;
   for (int k = 0; k < nlb; ++k) {
-    s_lb(k) = std::max(x(idx_lb[k]) - lbs(idx_lb[k]), 1.0);
+    s_lb(k) = std::max(x(idx_lb[k]) - lbs(idx_lb[k]), bound_slack_floor);
     z_lb(k) = 1.0;
   }
 
   Eigen::VectorXd s_ub(nub), z_ub(nub);
   for (int k = 0; k < nub; ++k) {
-    s_ub(k) = std::max(ubs(idx_ub[k]) - x(idx_ub[k]), 1.0);
+    s_ub(k) = std::max(ubs(idx_ub[k]) - x(idx_ub[k]), bound_slack_floor);
     z_ub(k) = 1.0;
   }
 
@@ -453,6 +488,7 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
   // Do symbolic factorization once (pattern never changes)
   auto kkt_solver = make_default_sparse_solver();
   kkt_solver->analyze_pattern(KKT);
+  result.stats.symbolic_analyze_calls = 1;
 
   // Stall / infeasibility detection state
   double prev_mu = 1e30;
@@ -497,6 +533,7 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
     double pfeas = std::max(r_eq.lpNorm<Eigen::Infinity>(),
                             std::max(r_slb.lpNorm<Eigen::Infinity>(),
                                      r_sub.lpNorm<Eigen::Infinity>()));
+    if (iter == 0) result.stats.initial_primal_feas = pfeas;
     double dfeas_raw = r_dual.lpNorm<Eigen::Infinity>();
     double dfeas = dfeas_raw / dual_scale;  // Scaled dual infeasibility
     // Objective in scaled space (unscale for reporting: x_orig = D * x_scaled)
@@ -542,6 +579,23 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
       result.stats.dual_feas = dfeas;
       result.stats.complementarity = mu;
       result.stats.status = "Optimal (near)";
+      return result;
+    }
+
+    // Cooperative deadline: scaling, symbolic analysis, and one in-flight
+    // numeric factorization are indivisible. Return the latest finite primal
+    // so a Phase-I caller may apply its own explicit feasibility admission.
+    // Nocedal--Wright (2006), Sec. 19.6: an interrupted barrier iterate is not
+    // an optimality certificate and must therefore remain success=false.
+    if (deadline_hit()) {
+      result.x = x_orig;
+      result.stats.success = false;
+      result.stats.iterations = iter;
+      result.stats.objective = obj;
+      result.stats.primal_feas = pfeas;
+      result.stats.dual_feas = dfeas;
+      result.stats.complementarity = mu;
+      result.stats.status = "TimeLimit";
       return result;
     }
 
@@ -607,6 +661,7 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
     }
     
     // Numeric factorization (reuses symbolic analysis)
+    ++result.stats.factorization_calls;
     if (!kkt_solver->factorize(KKT)) {
       result.stats.success = false;
       result.stats.status = "KKT factorization failed";
@@ -635,6 +690,7 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
     if (meq > 0) rhs.tail(meq) = -r_eq;
 
     Eigen::VectorXd sol;
+    ++result.stats.linear_solve_calls;
     if (!kkt_solver->solve(rhs, sol) || !sol.allFinite()) {
       result.stats.success = false;
       result.stats.status = "KKT solve NaN";

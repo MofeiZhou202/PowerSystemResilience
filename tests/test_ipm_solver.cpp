@@ -9,10 +9,12 @@
 #include <cmath>
 #include <limits>
 #include <string>
+#include <vector>
 
 #include "mipsolvers/engine/api/solver.hpp"
 #include "mipsolvers/engine/api/options.hpp"
 #include "mipsolvers/engine/problem_types.hpp"
+#include "mipsolvers/engine/kernel/ipm/lcqp_solver.hpp"
 #include "mipsolvers/engine/kernel/ipm/ipm_restoration.hpp"
 #include "mipsolvers/engine/kernel/ipm/ipm_scaling.hpp"
 #include "mipsolvers/engine/kernel/ipm/ipm_solver.hpp"
@@ -190,6 +192,80 @@ TEST_CASE("IPM/QP: convex QP solved", "[ipm][qp]") {
   CHECK(res.stats.objective == Approx(0.5).margin(1e-4));
   CHECK(res.x[0] == Approx(0.5).margin(1e-4));
   CHECK(res.x[1] == Approx(0.5).margin(1e-4));
+}
+
+TEST_CASE("NativeLCQP consumes a complete primal warm start",
+          "[ipm][qp][warm-start]") {
+  QPModel qp;
+  qp.sense = Sense::Minimize;
+  qp.c = Eigen::VectorXd::Zero(2);
+  qp.Q.resize(2, 2);
+  qp.Q.insert(0, 0) = 2.0;
+  qp.Q.insert(1, 1) = 2.0;
+  qp.Q.makeCompressed();
+  qp.A.resize(0, 2);
+  qp.b.resize(0);
+  qp.Aeq.resize(1, 2);
+  qp.Aeq.insert(0, 0) = 1.0;
+  qp.Aeq.insert(0, 1) = 1.0;
+  qp.Aeq.makeCompressed();
+  qp.beq = Eigen::VectorXd::Constant(1, 1.4);
+  qp.vars = {{VarType::Continuous, 0.0, 1.0},
+             {VarType::Continuous, 0.0, 1.0}};
+
+  NativeLCQPAdapter solver;
+  const SolveResult cold = solver.solve_qp(qp);
+  REQUIRE(cold.stats.success);
+  REQUIRE_FALSE(cold.stats.warm_start_used);
+  REQUIRE(std::isfinite(cold.stats.initial_primal_feas));
+
+  qp.x0 = Eigen::VectorXd::Constant(2, 0.7);
+  const SolveResult warm = solver.solve_qp(qp);
+  REQUIRE(warm.stats.success);
+  CHECK(warm.stats.warm_start_used);
+  CHECK(warm.stats.initial_primal_feas <= 1e-12);
+  CHECK(warm.stats.initial_primal_feas < cold.stats.initial_primal_feas);
+  CHECK(warm.x[0] == Approx(0.7).margin(1e-7));
+  CHECK(warm.x[1] == Approx(0.7).margin(1e-7));
+
+  qp.x0 = Eigen::VectorXd::Constant(1, 0.7);
+  const SolveResult rejected = solver.solve_qp(qp);
+  REQUIRE(rejected.stats.success);
+  CHECK_FALSE(rejected.stats.warm_start_used);
+  CHECK(rejected.stats.iterations == cold.stats.iterations);
+  CHECK((rejected.x - cold.x).lpNorm<Eigen::Infinity>() <= 1e-12);
+}
+
+TEST_CASE("NativeLCQP wall deadline returns an uncertified finite iterate",
+          "[ipm][qp][time-limit]") {
+  QPModel qp;
+  qp.sense = Sense::Minimize;
+  qp.c = Eigen::VectorXd::Zero(2);
+  qp.Q.resize(2, 2);
+  qp.Q.insert(0, 0) = 2.0;
+  qp.Q.insert(1, 1) = 2.0;
+  qp.Q.makeCompressed();
+  qp.A.resize(0, 2);
+  qp.b.resize(0);
+  qp.Aeq.resize(1, 2);
+  qp.Aeq.insert(0, 0) = 1.0;
+  qp.Aeq.insert(0, 1) = 1.0;
+  qp.Aeq.makeCompressed();
+  qp.beq = Eigen::VectorXd::Constant(1, 1.4);
+  qp.vars = {{VarType::Continuous, 0.0, 1.0},
+             {VarType::Continuous, 0.0, 1.0}};
+
+  LCQPOptions options;
+  options.time_limit_sec = 1e-12;
+  NativeLCQPAdapter solver(options);
+  const SolveResult result = solver.solve_qp(qp);
+
+  CHECK_FALSE(result.stats.success);
+  CHECK(result.stats.status == "TimeLimit");
+  REQUIRE(result.x.size() == 2);
+  CHECK(result.x.allFinite());
+  CHECK(result.stats.symbolic_analyze_calls == 1);
+  CHECK(result.stats.factorization_calls == 0);
 }
 
 // ─── IPM warm start / numerical robustness ────────────────────────────────
@@ -596,6 +672,185 @@ TEST_CASE("Native IPM preserves only an audited restored start",
   CHECK(rejected_detail.primal_feasible_start_requested);
   CHECK_FALSE(rejected_detail.primal_feasible_start_accepted);
   CHECK(rejected_x >= 0.0);
+}
+
+TEST_CASE("Native IPM accepts a complete near-feasible central warm start",
+          "[ipm][nlp][initialization][central-warm-start]") {
+  double first_x = std::numeric_limits<double>::quiet_NaN();
+  NLPModel nlp;
+  nlp.sense = Sense::Minimize;
+  nlp.vars.push_back({VarType::Continuous, 0.0, 1.0, "dispatch"});
+  nlp.x0 = Eigen::VectorXd::Constant(1, -5e-3);
+  nlp.f = [&first_x](const Eigen::VectorXd& x) {
+    if (!std::isfinite(first_x)) first_x = x[0];
+    return 0.5 * x.squaredNorm();
+  };
+  nlp.grad = [](const Eigen::VectorXd& x, Eigen::VectorXd& gradient) {
+    gradient = x;
+  };
+  nlp.hess = [](const Eigen::VectorXd&,
+                Eigen::SparseMatrix<double>& hessian) {
+    hessian.resize(1, 1);
+    hessian.setIdentity();
+  };
+
+  IPMOptions options;
+  options.central_warm_start = true;
+  options.central_warm_start_primal_tolerance = 1e-2;
+  options.central_warm_start_centrality_tolerance = 0.5;
+  options.equality_dual_start.resize(0);
+  options.slack_start = Eigen::VectorXd::Constant(2, 5e-3);
+  options.slack_start[1] = 1.005;
+  options.inequality_dual_start =
+      Eigen::VectorXd::Constant(2, options.mu_init / 5e-3);
+  options.inequality_dual_start[1] = options.mu_init / 1.005;
+  options.max_iter = 5;
+  options.tol_primal = 1e-8;
+  options.tol_dual = 1e-8;
+  options.tol_complementarity = 1e-8;
+  options.tol_accept = 0.0;
+  options.scale_problem = false;
+  options.use_restoration_phase = false;
+  const auto [result, detail] =
+      NativeIPMAdapter(options).solve_nlp_detail(nlp);
+  (void)result;
+
+  CHECK(detail.central_warm_start_requested);
+  CHECK(detail.central_warm_start_accepted);
+  CHECK(detail.central_warm_start_rejection_reason.empty());
+  CHECK(detail.central_warm_start_original_primal_violation ==
+        Approx(5e-3));
+  CHECK(detail.central_warm_start_primal_residual == Approx(1e-2));
+  CHECK(detail.central_warm_start_centrality == Approx(0.0).margin(1e-14));
+  CHECK(detail.central_warm_start_max_inequality_dual == Approx(20.0));
+  CHECK(std::isfinite(detail.central_warm_start_dual_residual));
+  CHECK(first_x == Approx(-5e-3).margin(1e-15));
+  if (detail.first_step_accepted) {
+    CHECK(detail.first_step_primal_alpha > 0.0);
+    CHECK(detail.first_step_primal_alpha <= 1.0);
+    CHECK(detail.first_step_dual_alpha > 0.0);
+    CHECK(std::isfinite(detail.first_step_barrier_objective_before));
+    CHECK(std::isfinite(detail.first_step_barrier_objective_after));
+  }
+
+  IPMOptions magnitude_limited = options;
+  magnitude_limited.central_warm_start_max_inequality_dual = 10.0;
+  const auto [rejected_result, magnitude_detail] =
+      NativeIPMAdapter(magnitude_limited).solve_nlp_detail(nlp);
+  (void)rejected_result;
+  CHECK_FALSE(magnitude_detail.central_warm_start_accepted);
+  CHECK(magnitude_detail.central_warm_start_max_inequality_dual ==
+        Approx(20.0));
+  CHECK(magnitude_detail.central_warm_start_rejection_reason.find(
+            "magnitude") != std::string::npos);
+}
+
+TEST_CASE("Rejected central warm starts are exact cold starts",
+          "[ipm][nlp][initialization][central-warm-start]") {
+  const auto first_evaluation = [](bool request_central,
+                                   bool complete_slack,
+                                   double multiplier,
+                                   IPMDetail& detail) {
+    std::vector<double> evaluated_x;
+    NLPModel nlp;
+    nlp.sense = Sense::Minimize;
+    nlp.vars.push_back({VarType::Continuous, 0.0, 1.0, "dispatch"});
+    nlp.x0 = Eigen::VectorXd::Constant(1, -5e-3);
+    nlp.f = [&evaluated_x](const Eigen::VectorXd& x) {
+      evaluated_x.push_back(x[0]);
+      return 0.5 * x.squaredNorm();
+    };
+    nlp.grad = [](const Eigen::VectorXd& x, Eigen::VectorXd& gradient) {
+      gradient = x;
+    };
+    nlp.hess = [](const Eigen::VectorXd&,
+                  Eigen::SparseMatrix<double>& hessian) {
+      hessian.resize(1, 1);
+      hessian.setIdentity();
+    };
+
+    IPMOptions options;
+    options.central_warm_start = request_central;
+    options.equality_dual_start.resize(0);
+    options.inequality_dual_start = Eigen::VectorXd::Constant(2, multiplier);
+    if (complete_slack) {
+      options.slack_start.resize(2);
+      options.slack_start << 5e-3, 1.005;
+    }
+    options.max_iter = 1;
+    options.tol_accept = 0.0;
+    options.scale_problem = false;
+    options.use_restoration_phase = false;
+    auto solved = NativeIPMAdapter(options).solve_nlp_detail(nlp);
+    detail = std::move(solved.second);
+    REQUIRE(evaluated_x.size() >= static_cast<std::size_t>(
+        request_central ? 2 : 1));
+    // A requested central start is audited once at raw x0 before the filter
+    // sees its initialization point.
+    return evaluated_x[request_central ? 1 : 0];
+  };
+
+  IPMDetail cold_detail;
+  const double cold_x = first_evaluation(false, false, 0.0, cold_detail);
+  IPMDetail incomplete_detail;
+  const double incomplete_x =
+      first_evaluation(true, false, 20.0, incomplete_detail);
+  CHECK_FALSE(incomplete_detail.central_warm_start_accepted);
+  CHECK(incomplete_detail.central_warm_start_rejection_reason.find("slack") !=
+        std::string::npos);
+  CHECK(incomplete_x == Approx(cold_x).margin(1e-15));
+
+  IPMDetail noncentral_detail;
+  const double noncentral_x =
+      first_evaluation(true, true, 1.0, noncentral_detail);
+  CHECK_FALSE(noncentral_detail.central_warm_start_accepted);
+  CHECK(noncentral_detail.central_warm_start_rejection_reason.find(
+            "centrality") != std::string::npos);
+  CHECK(noncentral_x == Approx(cold_x).margin(1e-15));
+}
+
+TEST_CASE("Fixed-variable reduction maps central bound warm starts",
+          "[ipm][nlp][initialization][central-warm-start][fixed-variable]") {
+  double first_free_x = std::numeric_limits<double>::quiet_NaN();
+  NLPModel nlp;
+  nlp.sense = Sense::Minimize;
+  nlp.vars = {
+      {VarType::Continuous, 2.0, 2.0, "fixed"},
+      {VarType::Continuous, 0.0, 1.0, "free"}};
+  nlp.x0.resize(2);
+  nlp.x0 << 2.0, -5e-3;
+  nlp.f = [&first_free_x](const Eigen::VectorXd& x) {
+    if (!std::isfinite(first_free_x)) first_free_x = x[1];
+    return 0.5 * x.squaredNorm();
+  };
+  nlp.grad = [](const Eigen::VectorXd& x, Eigen::VectorXd& gradient) {
+    gradient = x;
+  };
+  nlp.hess = [](const Eigen::VectorXd&,
+                Eigen::SparseMatrix<double>& hessian) {
+    hessian.resize(2, 2);
+    hessian.setIdentity();
+  };
+
+  IPMOptions options;
+  options.central_warm_start = true;
+  options.equality_dual_start.resize(0);
+  options.slack_start.resize(4);
+  options.slack_start << 5e-3, 5e-3, 5e-3, 1.005;
+  options.inequality_dual_start =
+      (options.mu_init * options.slack_start.cwiseInverse()).eval();
+  options.max_iter = 1;
+  options.tol_accept = 0.0;
+  options.scale_problem = false;
+  options.use_restoration_phase = false;
+  const auto [result, detail] =
+      NativeIPMAdapter(options).solve_nlp_detail(nlp);
+  (void)result;
+
+  CHECK(detail.central_warm_start_requested);
+  CHECK(detail.central_warm_start_accepted);
+  CHECK(detail.fixed_variables_eliminated == 1);
+  CHECK(first_free_x == Approx(-5e-3).margin(1e-15));
 }
 
 TEST_CASE("Filter diagnostics report coherent trial accounting",

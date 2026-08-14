@@ -34,6 +34,8 @@ api::Result to_api_result(const SolveResult& in) {
   out.stats.unscaled_primal_feas = in.stats.unscaled_primal_feas;
   out.stats.unscaled_dual_feas = in.stats.unscaled_dual_feas;
   out.stats.unscaled_complementarity = in.stats.unscaled_complementarity;
+  out.stats.initial_primal_feas = in.stats.initial_primal_feas;
+  out.stats.warm_start_used = in.stats.warm_start_used;
   out.stats.relative_primal_residual = in.stats.relative_primal_residual;
   out.stats.relative_dual_residual = in.stats.relative_dual_residual;
   out.stats.relative_gap = in.stats.relative_gap;

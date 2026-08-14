@@ -50,6 +50,18 @@ struct IPMOptions {
   bool primal_feasible_start{false};
   bool preserve_initial_point{false};
 
+  // Audited Phase-I -> Phase-II handoff. Unlike primal_feasible_start, this
+  // contract permits a near-feasible point inside a central-path corridor.
+  // It is accepted only with complete primal/dual/slack coverage and
+  //   max(||g||_inf, ||h+s||_inf) <= central_warm_start_primal_tolerance,
+  //   max_i |s_i*z_i/mu_init - 1| <= central_warm_start_centrality_tolerance.
+  // Rejection discards every warm vector and follows ordinary cold-start
+  // interiorization. See Waechter--Biegler (2006), Sections 2--3.
+  bool central_warm_start{false};
+  double central_warm_start_primal_tolerance{1e-2};
+  double central_warm_start_centrality_tolerance{0.5};
+  double central_warm_start_max_inequality_dual{1e4};
+
   // Optional primal-dual central-path warm start. Each vector is used only
   // when its dimension matches the assembled block and all entries are finite;
   // slack and inequality-dual entries must additionally be strictly positive.
@@ -139,6 +151,20 @@ struct IPMDetail {
   int trial_rejections_before_derivatives{0};
   bool primal_feasible_start_requested{false};
   bool primal_feasible_start_accepted{false};
+  bool central_warm_start_requested{false};
+  bool central_warm_start_accepted{false};
+  double central_warm_start_original_primal_violation{0.0};
+  double central_warm_start_primal_residual{0.0};
+  double central_warm_start_dual_residual{0.0};
+  double central_warm_start_centrality{0.0};
+  double central_warm_start_mu{0.0};
+  double central_warm_start_max_inequality_dual{0.0};
+  std::string central_warm_start_rejection_reason;
+  bool first_step_accepted{false};
+  double first_step_primal_alpha{0.0};
+  double first_step_dual_alpha{0.0};
+  double first_step_barrier_objective_before{0.0};
+  double first_step_barrier_objective_after{0.0};
   bool restoration_warm_start_used{false};
   double restoration_normal_residual_before{0.0};
   double restoration_normal_residual_after{0.0};

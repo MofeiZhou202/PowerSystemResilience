@@ -158,7 +158,6 @@ ValidationReport validate(const LPModel& model) {
   } else {
     validate_variable_meta(model.vars, out);
   }
-
   return out;
 }
 
@@ -193,6 +192,11 @@ ValidationReport validate(const QPModel& model) {
     add_error(out, "vars size must equal c.size");
   } else {
     validate_variable_meta(model.vars, out);
+  }
+  if (model.x0.size() != 0 && model.x0.size() != n) {
+    add_error(out, "x0 must be empty or have size c.size");
+  } else if (model.x0.size() == n && !model.x0.allFinite()) {
+    add_error(out, "x0 must contain only finite values");
   }
 
   return out;

@@ -20,6 +20,15 @@ struct SolveStats {
   double unscaled_primal_feas{0.0};
   double unscaled_dual_feas{0.0};
   double unscaled_complementarity{0.0};
+  /// Initial primal residual measured by solvers that expose warm-start
+  /// diagnostics. NaN means unavailable.
+  double initial_primal_feas{std::numeric_limits<double>::quiet_NaN()};
+  bool warm_start_used{false};
+  /// Sparse linear algebra work performed by solvers that expose it. These
+  /// counters remain zero when the backend does not report the operation.
+  int symbolic_analyze_calls{0};
+  int factorization_calls{0};
+  int linear_solve_calls{0};
   /// Original-model normalized KKT diagnostics. NaN means unavailable.
   double relative_primal_residual{std::numeric_limits<double>::quiet_NaN()};
   double relative_dual_residual{std::numeric_limits<double>::quiet_NaN()};

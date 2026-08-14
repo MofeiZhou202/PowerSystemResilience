@@ -20,6 +20,8 @@ struct Stats {
   double unscaled_primal_feas{0.0};
   double unscaled_dual_feas{0.0};
   double unscaled_complementarity{0.0};
+  double initial_primal_feas{std::numeric_limits<double>::quiet_NaN()};
+  bool warm_start_used{false};
   double relative_primal_residual{std::numeric_limits<double>::quiet_NaN()};
   double relative_dual_residual{std::numeric_limits<double>::quiet_NaN()};
   double relative_gap{std::numeric_limits<double>::quiet_NaN()};
