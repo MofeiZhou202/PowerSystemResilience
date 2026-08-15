@@ -109,6 +109,19 @@ struct VariableMeta {
   std::string name;
 };
 
+// VariableMeta's public no-bound representation predates the use of IEEE
+// infinities in internal solver states. Keep the representation contract in
+// one place so solver adapters do not invent nearby magnitude thresholds.
+inline constexpr double kVariableNoBound = VariableMeta{}.ub;
+
+inline bool variable_has_finite_lower_bound(double value) {
+  return std::isfinite(value) && value > -kVariableNoBound;
+}
+
+inline bool variable_has_finite_upper_bound(double value) {
+  return std::isfinite(value) && value < kVariableNoBound;
+}
+
 struct SparseLinSys {
   Eigen::SparseMatrix<double> A;
   Eigen::VectorXd b;
@@ -230,6 +243,9 @@ struct NLPSolverOptions {
   double acceptable_dual_infeasibility_tolerance{1e10};
   double acceptable_constraint_violation_tolerance{1e-2};
   double acceptable_complementarity_tolerance{1e-2};
+  /// Consecutive acceptable iterates required by Ipopt. Zero disables the
+  /// acceptable-level exit while preserving strict convergence.
+  int acceptable_iterations{0};
 };
 
 struct NLPModel {
@@ -250,6 +266,17 @@ struct NLPModel {
   std::function<void(const Eigen::VectorXd&, Eigen::SparseMatrix<double>&)> jac_g;
   std::function<void(const Eigen::VectorXd&, Eigen::VectorXd&)> h;
   std::function<void(const Eigen::VectorXd&, Eigen::SparseMatrix<double>&)> jac_h;
+
+  // Optional independent maximum constraint violation in the caller's
+  // original coordinates. Native IPM uses this only to audit an externally
+  // restored x0 before preserving it; variable bounds are always audited by
+  // the adapter itself. The callback must return a finite nonnegative value.
+  std::function<double(const Eigen::VectorXd&)>
+      original_constraint_violation;
+
+  // Optional diagnostic labels for the rows returned by h(). Generated box
+  // bounds are named from VariableMeta::name by native solvers.
+  std::vector<std::string> nonlinear_inequality_names;
 
   // Optional independent-control columns for equality-constrained Newton
   // systems. When its size equals n - m_eq, native IPM may use the complement

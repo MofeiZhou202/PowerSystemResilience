@@ -1,5 +1,6 @@
 #pragma once
 
+#include <limits>
 #include <string>
 
 #include <Eigen/Core>
@@ -17,6 +18,15 @@ struct LCQPOptions {
   double tol_primal{1e-8};
   double tol_dual{1e-8};
   double tol_gap{1e-8};
+  /// Mehrotra centering policy sigma=(mu_aff/mu)^p. Positive values are
+  /// explicit caller policy; nonpositive uses the identity map p=1.
+  double centering_exponent{0.0};
+  // Optional primal estimate in the model's original coordinates. An empty or
+  // dimensionally incompatible vector retains the generic bound-centre start.
+  Eigen::VectorXd initial_point{};
+  bool return_feasible_descent_candidate{false};
+  double candidate_objective_upper_bound{
+      std::numeric_limits<double>::infinity()};
   bool verbose{false};
 };
 

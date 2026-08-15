@@ -52,6 +52,17 @@ class CholmodLDLT {
   bool valid() const;
   int64_t dim() const;
 
+  /// Symbolic estimates reported by CHOLMOD's most recent analyze().  They
+  /// expose elimination-tree work (factor flops) and memory traffic (nnz(L))
+  /// so callers can select mathematically equivalent KKT formulations without
+  /// dimension- or instance-specific heuristics.
+  double symbolic_flops() const;
+  double symbolic_nonzeros() const;
+
+  /// Rough reciprocal condition estimate of the current numeric factor.
+  /// Returns zero before a successful factorization or without CHOLMOD.
+  double numeric_rcond() const;
+
  private:
   struct Impl;
   Impl* impl_;  // raw, owned via explicit ctor/dtor (keeps cholmod.h out of this header)

@@ -97,6 +97,22 @@ material, a version manifest, and `SHA256SUMS`. It is ignored by Git and must
 be transferred as a controlled binary dependency or internal artifact. Normal
 CMake configuration never downloads oneMKL.
 
+The hermetic bundle is deliberately sequential. For a local shared-memory
+PARDISO build, select the Intel threading layer explicitly:
+
+```powershell
+cmake -S . -B build/windows-threaded `
+  -DMIPSOLVERS_MKL_THREADING=INTEL `
+  -DMIPSOLVERS_USE_OPENMP=OFF
+```
+
+This links `mkl_intel_thread` and `libiomp5md`; the runtime DLL is exported in
+`MIPSOLVERS_MKL_RUNTIME_DLLS` for consumers to deploy beside executables.
+Disabling the separate C++ OpenMP kernels avoids loading both the MSVC and
+Intel OpenMP runtimes in one process. For nonconvex solver comparisons across
+different thread counts, use oneMKL compatible CBWR so parallel reductions do
+not change the accepted nonlinear trajectory.
+
 The `windows-msvc-release` preset contains no machine-specific compiler or SDK
 paths. It uses the compiler, Ninja, Windows SDK, and oneAPI environment from
 the current shell.

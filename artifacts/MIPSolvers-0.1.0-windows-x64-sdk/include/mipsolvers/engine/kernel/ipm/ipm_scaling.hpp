@@ -9,7 +9,8 @@ namespace mipsolvers::engine {
 /// Gradient-based scaling factors (IPOPT-style "gradient-based" scaling).
 ///
 /// Given ∇f, ∇g, ∇h evaluated at the interiorized initial point and a target
-/// `g_max` (default 100), each scale factor is chosen so that the
+/// caller-selected `g_max`; the Native IPM's automatic policy uses the unit
+/// normalization target. Each scale factor is chosen so that the
 /// infinity-norm of the corresponding (scaled) gradient / row is bounded by
 /// g_max:
 ///   s_f   = min(1, g_max / ‖∇f(x₀)‖_∞)
@@ -38,8 +39,9 @@ ScalingFactors compute_scaling_factors(const NLPModel& prob,
 ///   - owns captures to the original callbacks via std::function,
 ///   - exposes scaled callbacks (objective, gradient, constraints, Jacobians,
 ///     Hessian) that internally call the originals and scale their outputs,
-///   - has identical `vars`, `x0`, `sense`, `symbolic_*` fields as `prob` so
-///     bound handling and validation are unaffected.
+///   - has identical `vars`, `x0`, `sense`, `symbolic_*`, and diagnostic row
+///     names as `prob` so bound handling, validation, and traces are
+///     unaffected.
 ///
 /// The caller must keep `prob` alive for the lifetime of the returned model
 /// because the lambdas capture `prob` by reference.

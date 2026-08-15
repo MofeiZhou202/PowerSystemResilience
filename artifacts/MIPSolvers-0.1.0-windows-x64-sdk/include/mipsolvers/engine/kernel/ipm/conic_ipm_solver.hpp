@@ -26,8 +26,8 @@ struct ConicIPMOptions {
   double abstol{1e-7};      ///< Absolute duality-gap tolerance.
   double reltol{1e-6};      ///< Relative duality-gap tolerance.
   double feastol{1e-7};     ///< Feasibility (primal/dual residual) tolerance.
-  int refinement{1};        ///< Iterative-refinement steps on the 3x3 KKT residual
-                            ///< (only applied when q/s blocks are present).
+  int refinement{1};        ///< Maximum refinement steps. A same-coordinate
+                            ///< KKT backward-error gate skips unnecessary solves.
   int num_threads{0};       ///< OpenMP threads for parallel regions (0 = library default).
   bool chordal_decomposition{true};  ///< Decompose beneficial sparse SDP blocks.
   int chordal_min_order{32};  ///< Smallest SDP order considered for decomposition.
@@ -55,6 +55,16 @@ struct ConicIPMResult {
   bool chordal_decomposition_used{false};  ///< At least one decomposed SDP block.
   int chordal_clique_count{0};             ///< Generated maximal PSD cliques.
   int chordal_max_clique_order{0};         ///< Largest generated clique order.
+  std::string linear_solver_backend;       ///< Numeric KKT backend selected.
+  int kkt_dimension{0};                    ///< Reduced KKT dimension.
+  int kkt_nonzeros{0};                     ///< Stored lower-triangle entries.
+  double kkt_symbolic_flops{0.0};          ///< Elimination-tree work estimate.
+  double kkt_symbolic_nonzeros{0.0};       ///< Symbolic nnz(L) estimate.
+  int kkt_factorizations{0};               ///< Numeric KKT factorizations.
+  int kkt_linear_solves{0};                ///< Back-solves, including refinement.
+  int kkt_refinements{0};                  ///< Accepted refinement corrections.
+  double max_initial_kkt_backward_error{0.0};
+  double max_final_kkt_backward_error{0.0};
 };
 
 /// Mehrotra predictor-corrector conic IPM (cvxopt conelp algorithm).

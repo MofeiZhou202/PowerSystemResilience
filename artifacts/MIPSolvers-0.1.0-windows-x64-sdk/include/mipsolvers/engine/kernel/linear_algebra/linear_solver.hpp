@@ -1,12 +1,20 @@
 #pragma once
 
 #include <memory>
+#include <cstdint>
 
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 #include <Eigen/SparseLU>
 
 namespace mipsolvers::engine {
+
+/// Query/override the MKL thread count used by the multi-threaded PARDISO
+/// factorization. When MKL is not linked, the getter returns 1 and the setter
+/// is a no-op. Pinning to 1 makes the factorization serial and bit-reproducible
+/// (used for deterministic OPF acceptance on sensitive stiff problems).
+int mkl_max_threads();
+void set_mkl_num_threads(int threads);
 
 /// Abstract sparse linear solver interface (self-contained in solver module).
 class SparseLinearSolver {
@@ -16,9 +24,18 @@ class SparseLinearSolver {
   virtual void analyze_pattern(const Eigen::SparseMatrix<double>& a) = 0;
   virtual bool factorize(const Eigen::SparseMatrix<double>& a) = 0;
   virtual bool solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) = 0;
+  /// Number of pivots perturbed by the last numerical factorization.
+  virtual int perturbed_pivots() const { return -1; }
+  /// Backend-reported symbolic factor nonzeros and factorization work.
+  virtual std::int64_t factor_nonzeros() const { return -1; }
+  virtual std::int64_t factor_work() const { return -1; }
   /// Factor inertia when exposed by a symmetric-indefinite backend.
   virtual int negative_eigenvalues() const { return -1; }
   virtual int estimated_deficiency() const { return -1; }
+  /// Solve multiple right-hand sides against the current factorization.
+  /// The default preserves source compatibility for third-party backends by
+  /// dispatching one column at a time; native backends override this method.
+  virtual bool solve_many(const Eigen::MatrixXd& rhs, Eigen::MatrixXd& x);
 };
 
 class EigenSparseLUSolver final : public SparseLinearSolver {
@@ -27,6 +44,7 @@ class EigenSparseLUSolver final : public SparseLinearSolver {
   void analyze_pattern(const Eigen::SparseMatrix<double>& a) override;
   bool factorize(const Eigen::SparseMatrix<double>& a) override;
   bool solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) override;
+  bool solve_many(const Eigen::MatrixXd& rhs, Eigen::MatrixXd& x) override;
 
  private:
   Eigen::SparseLU<Eigen::SparseMatrix<double>> solver_;
@@ -37,11 +55,13 @@ class EigenSparseLUSolver final : public SparseLinearSolver {
 #ifdef HACDCPF_HAVE_UMFPACK
 class EigenUmfPackSolver final : public SparseLinearSolver {
  public:
+  EigenUmfPackSolver();
   ~EigenUmfPackSolver() override;
   const char* backend_name() const override;
   void analyze_pattern(const Eigen::SparseMatrix<double>& a) override;
   bool factorize(const Eigen::SparseMatrix<double>& a) override;
   bool solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) override;
+  bool solve_many(const Eigen::MatrixXd& rhs, Eigen::MatrixXd& x) override;
 
  private:
   class Impl;
@@ -53,11 +73,13 @@ class EigenUmfPackSolver final : public SparseLinearSolver {
 #ifdef HACDCPF_HAVE_KLU
 class EigenKluSolver final : public SparseLinearSolver {
  public:
+  EigenKluSolver();
   ~EigenKluSolver() override;
   const char* backend_name() const override;
   void analyze_pattern(const Eigen::SparseMatrix<double>& a) override;
   bool factorize(const Eigen::SparseMatrix<double>& a) override;
   bool solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) override;
+  bool solve_many(const Eigen::MatrixXd& rhs, Eigen::MatrixXd& x) override;
 
  private:
   class Impl;
@@ -69,11 +91,13 @@ class EigenKluSolver final : public SparseLinearSolver {
 #ifdef HACDCPF_HAVE_SUPERLU
 class SuperLUSolver final : public SparseLinearSolver {
  public:
+  SuperLUSolver();
   ~SuperLUSolver() override;
   const char* backend_name() const override;
   void analyze_pattern(const Eigen::SparseMatrix<double>& a) override;
   bool factorize(const Eigen::SparseMatrix<double>& a) override;
   bool solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) override;
+  bool solve_many(const Eigen::MatrixXd& rhs, Eigen::MatrixXd& x) override;
 
  private:
   class Impl;
@@ -91,7 +115,76 @@ class MKLPardisoSolver final : public SparseLinearSolver {
   void analyze_pattern(const Eigen::SparseMatrix<double>& a) override;
   bool factorize(const Eigen::SparseMatrix<double>& a) override;
   bool solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) override;
+  bool solve_many(const Eigen::MatrixXd& rhs, Eigen::MatrixXd& x) override;
+  int perturbed_pivots() const override;
+  std::int64_t factor_nonzeros() const override;
+  std::int64_t factor_work() const override;
 
+ private:
+  class Impl;
+  std::unique_ptr<Impl> impl_;
+  bool empty_system_{false};
+};
+
+/// MKL PARDISO sparse Cholesky backend for symmetric positive-definite
+/// normal equations. The lower triangle is authoritative.
+class MKLPardisoLLTSolver final : public SparseLinearSolver {
+ public:
+  MKLPardisoLLTSolver();
+  ~MKLPardisoLLTSolver() override;
+  const char* backend_name() const override;
+  void analyze_pattern(const Eigen::SparseMatrix<double>& a) override;
+  bool factorize(const Eigen::SparseMatrix<double>& a) override;
+  bool solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) override;
+  bool solve_many(const Eigen::MatrixXd& rhs, Eigen::MatrixXd& x) override;
+  int perturbed_pivots() const override;
+  std::int64_t factor_nonzeros() const override;
+  std::int64_t factor_work() const override;
+
+ private:
+  class Impl;
+  std::unique_ptr<Impl> impl_;
+  bool empty_system_{false};
+};
+
+/// MKL PARDISO symmetric-indefinite LDL^T backend for augmented KKT systems.
+/// The lower triangle is authoritative; callers may still provide a full
+/// symmetric matrix because Eigen's PardisoLDLT wrapper selects that triangle.
+class MKLPardisoLDLTSolver final : public SparseLinearSolver {
+ public:
+  MKLPardisoLDLTSolver();
+  ~MKLPardisoLDLTSolver() override;
+  const char* backend_name() const override;
+  void analyze_pattern(const Eigen::SparseMatrix<double>& a) override;
+  bool factorize(const Eigen::SparseMatrix<double>& a) override;
+  bool solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) override;
+  bool solve_many(const Eigen::MatrixXd& rhs, Eigen::MatrixXd& x) override;
+  int perturbed_pivots() const override;
+  std::int64_t factor_nonzeros() const override;
+  std::int64_t factor_work() const override;
+  int negative_eigenvalues() const override;
+  int estimated_deficiency() const override;
+
+ private:
+  class Impl;
+  std::unique_ptr<Impl> impl_;
+  bool empty_system_{false};
+};
+
+/// One-shot numerical portfolio for symmetric-indefinite KKT matrices.
+/// The first factorization/solve is evaluated with both PARDISO LU and LDLT;
+/// subsequent factorizations reuse the fastest backward-stable backend.
+class MKLPardisoAdaptiveSolver final : public SparseLinearSolver {
+ public:
+  MKLPardisoAdaptiveSolver();
+  ~MKLPardisoAdaptiveSolver() override;
+  const char* backend_name() const override;
+  void analyze_pattern(const Eigen::SparseMatrix<double>& a) override;
+  bool factorize(const Eigen::SparseMatrix<double>& a) override;
+  bool solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) override;
+  int perturbed_pivots() const override;
+  std::int64_t factor_nonzeros() const override;
+  std::int64_t factor_work() const override;
  private:
   class Impl;
   std::unique_ptr<Impl> impl_;
@@ -117,6 +210,7 @@ class MumpsSolver final : public SparseLinearSolver {
   void analyze_pattern(const Eigen::SparseMatrix<double>& a) override;
   bool factorize(const Eigen::SparseMatrix<double>& a) override;
   bool solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) override;
+  bool solve_many(const Eigen::MatrixXd& rhs, Eigen::MatrixXd& x) override;
 
   /// Number of negative eigenvalues of the factored matrix — the negative
   /// pivots of the LDLᵀ factorization (INFOG(12)), which equal the matrix

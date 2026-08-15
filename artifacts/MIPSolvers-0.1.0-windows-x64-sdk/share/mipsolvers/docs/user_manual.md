@@ -219,9 +219,9 @@ options.strategy_policy = StrategyPolicy::Auto;
 | `HiGHS` | LP/MILP | 通用开源生产后端 |
 | `StrictHiGHS` | MILP | 使用项目规定的 HiGHS MIP 合约 |
 | `NativeBranchAndCut` | MILP/MINLP | 自研树搜索、研究和定制回调 |
-| `NativeIPMLP` | LP | 原生 LP 内点法、对偶和重复节点 |
-| `NativePDLP` | LP | 超大稀疏、中等精度一阶求解 |
-| `NativeLCQP` | LP/QP | 凸 QP；当前原生路径以等式和箱界为主 |
+| `NativeIPMLP` | LP | 原生 LP 内点法；研究/影子路径，必须保留解后审计和 fallback |
+| `NativePDLP` | LP | 一阶法研究路径；当前 NETLIB 严格门槛下不用于生产 |
+| `NativeLCQP` | LP/QP | 凸 QP 实验路径；LP 自动路由当前不应选择 |
 | `NativeIPM` | NLP | 原始-对偶滤子内点法 |
 | `NativeNLP` | NLP | 轻量罚函数 Newton |
 | `NativeConicIPM` | CONIC | LP/SOCP/SDP 锥内点法 |
@@ -248,6 +248,10 @@ options.strategy_policy = StrategyPolicy::Auto;
 | `stats.primal_feas` | 原始可行性指标 |
 | `stats.dual_feas` | 对偶/驻点可行性指标 |
 | `stats.complementarity` | 互补残差 |
+| `stats.relative_primal_residual` | 原模型归一化 primal residual；不支持时为 NaN |
+| `stats.relative_dual_residual` | 原模型归一化 stationarity/dual residual；不支持时为 NaN |
+| `stats.relative_gap` | 原模型 primal/dual objective relative gap；不支持时为 NaN |
+| `stats.dual_objective` | 原目标方向下的对偶目标；无可审计对偶点时为 NaN |
 | `stats.mip_gap` | MILP 相对 gap |
 | `stats.runtime_sec` | 求解耗时 |
 | `constraint_duals` | `[不等式行对偶, 等式行对偶]`，可用时填充 |
@@ -715,6 +719,13 @@ print(result["scuc"]["converged"])
   `deterministic_parallel=true`。
 
 当前平台的实测覆盖和已知失败见[测试与基准结果](testing.md)。
+90 个 NETLIB LP 的本机结果表明：通用 LP 默认应选择 `HiGHS` 的 simplex
+路径；大型稀疏 LP 可尝试 HiGHS IPM，但仍需解后审计并保留 simplex fallback。
+Native IPM 经理论步长和原模型 KKT 审计停止增强后达到 81/90 accurate，但仍无
+HSD 不可行/无界证书；
+Native dual、PDLP、LCQP 和 SCIP LP adapter 也仍适合开发验证，不应仅凭
+`Optimal`/`Solved` 状态进入生产。完整数据、例外案例和性能分层见
+[NETLIB 线性规划求解器全面基准](netlib_benchmark.md)。
 
 ## 10. 常见问题
 
@@ -750,8 +761,9 @@ libstdc++ ABI 与构建一致。Windows 还需要确保依赖 DLL 在扩展同�
 
 ### NETLIB 测试读文件失败
 
-回归数据集不一定随源码部署。确认测试数据路径后再判断为求解器失败；读取错误
-与数值不收敛是两类问题。
+回归数据集不随源码部署。可运行
+`python tools\fetch_netlib.py --output-dir tests\data` 下载、校验并生成 manifest，
+再执行回归；读取错误与数值不收敛是两类问题。
 
 ## 11. 发布前检查清单
 
@@ -769,7 +781,9 @@ libstdc++ ABI 与构建一致。Windows 还需要确保依赖 DLL 在扩展同�
 - [文档总览](README.md)
 - [求解器实现与算法审查手册](solvers.md)
 - [数值方法](numerical_methods.md)
+- [Native LP 内点法理论设计](native_ipm_design.md)
 - [测试与基准结果](testing.md)
+- [NETLIB 线性规划求解器全面基准](netlib_benchmark.md)
 - [Engine API](engine.md)
 - [Python API](python_api.md)
 - [AML Python API](aml_python_api.md)
