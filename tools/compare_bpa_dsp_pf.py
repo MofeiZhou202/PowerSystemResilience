@@ -63,9 +63,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--angle-align",
-        choices=("slack", "median", "none"),
+        choices=("slack", "median", "island", "none"),
         default="slack",
-        help="Voltage-angle reference alignment (default: slack)",
+        help="Voltage-angle reference alignment (default: slack; island aligns each AC island)",
     )
     parser.add_argument("--vm-tol", type=float, default=1e-3, help="Bus Vm tolerance in pu")
     parser.add_argument(
@@ -359,6 +359,39 @@ def choose_angle_offset(
     return statistics.median(delta for _hysim, _dsp, delta in raw_deltas), "median"
 
 
+def ac_island_by_bus(
+    hysim_buses: list[dict[str, Any]], hysim_branches: list[dict[str, Any]]
+) -> dict[int, int]:
+    adjacency: dict[int, set[int]] = {
+        int(bus["id"]): set() for bus in hysim_buses if bus.get("type", "AC") == "AC"
+    }
+    for branch in hysim_branches:
+        if branch.get("in_service", True) is False:
+            continue
+        from_bus = int(branch["from"])
+        to_bus = int(branch["to"])
+        if from_bus not in adjacency or to_bus not in adjacency:
+            continue
+        adjacency[from_bus].add(to_bus)
+        adjacency[to_bus].add(from_bus)
+
+    component_by_bus: dict[int, int] = {}
+    component = 0
+    for start in adjacency:
+        if start in component_by_bus:
+            continue
+        queue = deque([start])
+        component_by_bus[start] = component
+        while queue:
+            current = queue.popleft()
+            for neighbour in adjacency[current]:
+                if neighbour not in component_by_bus:
+                    component_by_bus[neighbour] = component
+                    queue.append(neighbour)
+        component += 1
+    return component_by_bus
+
+
 def compare_buses(
     hysim_buses: list[dict[str, Any]],
     dsp_buses: list[dict[str, Any]],
@@ -366,7 +399,8 @@ def compare_buses(
     angle_mode: str,
     vm_tol: float,
     angle_tol: float,
-) -> tuple[list[dict[str, Any]], float, str]:
+    component_by_bus: dict[int, int] | None = None,
+) -> tuple[list[dict[str, Any]], float, str, list[dict[str, Any]]]:
     raw_deltas: list[tuple[dict[str, Any], dict[str, Any], float]] = []
     for dsp_bus in dsp_buses:
         hysim_bus = matches.get(int(dsp_bus["seq"]))
@@ -374,12 +408,23 @@ def compare_buses(
             continue
         hysim_angle = math.degrees(float(hysim_bus.get("va_rad", 0.0)))
         raw_deltas.append((hysim_bus, dsp_bus, hysim_angle - float(dsp_bus["va_deg"])))
-    angle_offset, angle_source = choose_angle_offset(angle_mode, raw_deltas)
+    island_offsets: dict[int, tuple[float, str]] = {}
+    if angle_mode == "island":
+        grouped: dict[int, list[tuple[dict[str, Any], dict[str, Any], float]]] = defaultdict(list)
+        for item in raw_deltas:
+            grouped[(component_by_bus or {}).get(int(item[0]["id"]), -1)].append(item)
+        for component, items in grouped.items():
+            island_offsets[component] = choose_angle_offset("slack", items)
+        angle_offset, angle_source = 0.0, "per-island slack/median"
+    else:
+        angle_offset, angle_source = choose_angle_offset(angle_mode, raw_deltas)
 
     rows: list[dict[str, Any]] = []
     for hysim_bus, dsp_bus, raw_angle_delta in raw_deltas:
         vm_delta = float(hysim_bus["vm_pu"]) - float(dsp_bus["vm_pu"])
-        aligned_angle_delta = raw_angle_delta - angle_offset
+        island = (component_by_bus or {}).get(int(hysim_bus["id"]), -1)
+        row_offset = island_offsets.get(island, (angle_offset, angle_source))[0]
+        aligned_angle_delta = raw_angle_delta - row_offset
         rows.append(
             {
                 "match_status": "matched",
@@ -395,12 +440,18 @@ def compare_buses(
                 "dsp_va_deg": dsp_bus["va_deg"],
                 "hysim_va_deg": raw_angle_delta + float(dsp_bus["va_deg"]),
                 "raw_delta_va_deg": raw_angle_delta,
+                "angle_island": island,
+                "angle_offset_deg": row_offset,
                 "aligned_delta_va_deg": aligned_angle_delta,
                 "within_tolerance": abs(vm_delta) <= vm_tol
                 and abs(aligned_angle_delta) <= angle_tol,
             }
         )
-    return rows, angle_offset, angle_source
+    offset_rows = [
+        {"island": component, "offset_deg": value[0], "source": value[1]}
+        for component, value in sorted(island_offsets.items())
+    ]
+    return rows, angle_offset, angle_source, offset_rows
 
 
 def compare_generators(
@@ -804,13 +855,15 @@ def run(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
     hysim_bus_by_id = {int(bus["id"]): bus for bus in hysim_buses}
 
     bus_matches, bus_unmatched = match_buses(hysim_buses, dsp["buses"])
-    bus_rows, angle_offset, angle_source = compare_buses(
+    component_by_bus = ac_island_by_bus(hysim_buses, hysim_branches)
+    bus_rows, angle_offset, angle_source, island_offsets = compare_buses(
         hysim_buses,
         dsp["buses"],
         bus_matches,
         args.angle_align,
         args.vm_tol,
         args.angle_tol_deg,
+        component_by_bus,
     )
     generator_rows, generator_unmatched = compare_generators(
         hysim_generators,
@@ -859,6 +912,7 @@ def run(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
             "requested": args.angle_align,
             "source": angle_source,
             "offset_deg": angle_offset,
+            "island_offsets": island_offsets,
             "definition": "HySim angle minus DSP angle; subtracted before comparison",
         },
         "tolerances": {

@@ -159,6 +159,150 @@ static HybridPowerSystem build_3bus_distributed_slack() {
     return sys;
 }
 
+// Two PV buses with incompatible voltage targets are connected through a
+// common, electrically stiff bus. With both PV controls active, the earlier
+// bus 3 has the milder upper-limit violation while the later bus 4 has the
+// dominant lower-limit violation. Enforcing the dominant limit and re-solving
+// leaves bus 3 feasible and able to regulate the local voltage.
+static HybridPowerSystem build_strongly_coupled_pv_network() {
+    HybridPowerSystem sys;
+    sys.base_mva = 100.0;
+    auto& ac = sys.ac;
+    ac.base_mva = 100.0;
+
+    const double initial_vm[] = {1.0, 204.0 / 210.0, 0.98, 0.96};
+    for (int i = 1; i <= 4; ++i) {
+        ACBus b;
+        b.index = i;
+        b.bus_type = (i == 1) ? BusType::SLACK
+                              : (i >= 3) ? BusType::PV : BusType::PQ;
+        b.vm_pu = initial_vm[i - 1];
+        b.va_deg = 0.0;
+        b.vmin_pu = 0.9;
+        b.vmax_pu = 1.1;
+        b.in_service = true;
+        ac.buses.push_back(b);
+    }
+
+    const int endpoints[][2] = {{1, 2}, {2, 3}, {2, 4}};
+    const double reactance[] = {0.1, 0.01, 0.01};
+    for (int k = 0; k < 3; ++k) {
+        ACBranch br;
+        br.index = k + 1;
+        br.from_bus = endpoints[k][0];
+        br.to_bus = endpoints[k][1];
+        br.r_pu = 0.0;
+        br.x_pu = reactance[k];
+        br.tap = 1.0;
+        br.rate_a_mva = 10000.0;
+        br.in_service = true;
+        ac.branches.push_back(br);
+    }
+
+    Generator slack;
+    slack.index = 1;
+    slack.bus = 1;
+    slack.is_slack = true;
+    slack.vg_pu = 1.0;
+    slack.qmin_mvar = -10000.0;
+    slack.qmax_mvar = 10000.0;
+    slack.in_service = true;
+
+    Generator high_setpoint;
+    high_setpoint.index = 2;
+    high_setpoint.bus = 3;
+    high_setpoint.vg_pu = 0.98;
+    high_setpoint.qmin_mvar = -600.0;
+    high_setpoint.qmax_mvar = 80.0;
+    high_setpoint.in_service = true;
+
+    Generator low_setpoint;
+    low_setpoint.index = 3;
+    low_setpoint.bus = 4;
+    low_setpoint.vg_pu = 0.96;
+    low_setpoint.qmin_mvar = -4.5;
+    low_setpoint.qmax_mvar = 600.0;
+    low_setpoint.in_service = true;
+
+    ac.generators = {slack, high_setpoint, low_setpoint};
+    return sys;
+}
+
+// BPA BQ3 is connected to the grid and initially carries the group's Q
+// requirement; BQ4 is a later, otherwise equivalent card behind a 0.0001 pu
+// station link. When BQ4 also has an external branch, both cards participate
+// in DSP card-order compatibility. A dangling BQ4 must not displace BQ3.
+static HybridPowerSystem build_bpa_card_order_network(bool connect_bq4_externally) {
+    HybridPowerSystem sys;
+    sys.base_mva = 100.0;
+    sys.ac.base_mva = 100.0;
+
+    for (int i = 1; i <= 4; ++i) {
+        ACBus bus;
+        bus.index = i;
+        bus.base_kv = 35.0;
+        bus.bus_type = i == 1 ? BusType::SLACK
+                              : i >= 3 ? BusType::PV : BusType::PQ;
+        bus.vm_pu = 1.0;
+        bus.vmin_pu = 0.9;
+        bus.vmax_pu = 1.1;
+        bus.in_service = true;
+        if (i == 3) bus.qd_mvar = 25.0;
+        sys.ac.buses.push_back(bus);
+    }
+
+    const int endpoints[][2] = {{1, 2}, {2, 3}, {3, 4}};
+    const double reactance[] = {0.1, 0.05, 0.0001};
+    for (int k = 0; k < 3; ++k) {
+        ACBranch branch;
+        branch.index = k + 1;
+        branch.from_bus = endpoints[k][0];
+        branch.to_bus = endpoints[k][1];
+        branch.x_pu = reactance[k];
+        branch.tap = 1.0;
+        branch.rate_a_mva = 10000.0;
+        branch.in_service = true;
+        sys.ac.branches.push_back(branch);
+    }
+    if (connect_bq4_externally) {
+        ACBranch branch;
+        branch.index = 4;
+        branch.from_bus = 4;
+        branch.to_bus = 2;
+        branch.x_pu = 0.2;
+        branch.tap = 1.0;
+        branch.rate_a_mva = 10000.0;
+        branch.in_service = true;
+        sys.ac.branches.push_back(branch);
+    }
+
+    Generator slack;
+    slack.index = 1;
+    slack.bus = 1;
+    slack.is_slack = true;
+    slack.vg_pu = 1.0;
+    slack.qmin_mvar = -10000.0;
+    slack.qmax_mvar = 10000.0;
+    slack.in_service = true;
+
+    Generator bq3;
+    bq3.index = 2;
+    bq3.bus = 3;
+    bq3.vg_pu = 1.0;
+    bq3.qmin_mvar = -20.0;
+    bq3.qmax_mvar = 20.0;
+    bq3.bpa_is_bq = true;
+    bq3.bpa_source_order = 10;
+    bq3.in_service = true;
+
+    Generator bq4 = bq3;
+    bq4.index = 3;
+    bq4.bus = 4;
+    bq4.bpa_source_order = 20;
+    sys.ac.generators = {slack, bq3, bq4};
+    return sys;
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // SECTION 1 — Island detection
 // ═════════════════════════════════════════════════════════════════════════════
@@ -718,6 +862,85 @@ TEST_CASE("PV/PQ conversion: case118 converges WITH switching (full mode)",
 
     const auto r = solve_power_flow(sys, opt);
     REQUIRE(r.converged);
+}
+
+TEST_CASE("PV/PQ conversion re-solves strongly coupled controls one at a time",
+          "[advanced_pf][pvpq][regression]") {
+    const auto sys = build_strongly_coupled_pv_network();
+    PowerFlowOptions opt;
+    opt.enable_pv_pq_conversion = true;
+    opt.pv_q_hysteresis_pu = 0.0;
+    opt.tol = 1e-10;
+    opt.max_iter = 80;
+
+    const auto r = solve_power_flow(sys, opt);
+
+    REQUIRE(r.converged);
+    CHECK(r.profiling.pv_to_pq_switches == 1);
+    REQUIRE(r.vm.size() == 4);
+    CHECK(std::abs(r.vm[2] - 0.98) < 1e-8);
+    CHECK(*std::min_element(r.vm.begin(), r.vm.end()) > 0.9);
+}
+
+TEST_CASE("BPA BQ strong groups use source card order without merging buses",
+          "[advanced_pf][pvpq][bpa][regression]") {
+    const auto sys = build_bpa_card_order_network(true);
+    PowerFlowOptions opt;
+    opt.enable_pv_pq_conversion = true;
+    opt.pv_q_hysteresis_pu = 0.0;
+    opt.tol = 1e-10;
+    opt.max_iter = 80;
+
+    const auto r = solve_power_flow(sys, opt);
+
+    REQUIRE(r.converged);
+    CHECK(r.profiling.pv_to_pq_switches == 1);
+    REQUIRE(r.vm.size() == 4);
+    CHECK(std::abs(r.vm[2] - 1.0) < 1e-9);
+    CHECK(std::abs(r.vm[3] - 1.0) > 1e-6);
+    REQUIRE(r.branch_flows.size() == 4);
+    CHECK(std::abs(r.branch_flows[2].qf_mvar) > 1.0);
+}
+
+TEST_CASE("BPA BQ card order excludes a controller with only a short station link",
+          "[advanced_pf][pvpq][bpa][regression]") {
+    const auto sys = build_bpa_card_order_network(false);
+    PowerFlowOptions opt;
+    opt.enable_pv_pq_conversion = true;
+    opt.pv_q_hysteresis_pu = 0.0;
+    opt.tol = 1e-10;
+    opt.max_iter = 80;
+
+    const auto r = solve_power_flow(sys, opt);
+
+    REQUIRE(r.converged);
+    CHECK(r.profiling.pv_to_pq_switches == 1);
+    REQUIRE(r.vm.size() == 4);
+    CHECK(std::abs(r.vm[2] - 1.0) > 1e-8);
+    CHECK(std::abs(r.vm[3] - 1.0) < 1e-9);
+}
+
+TEST_CASE("BPA BQ with violated zero reactive range is fixed PQ as a batch",
+          "[advanced_pf][pvpq][bpa][regression]") {
+    auto sys = build_bpa_card_order_network(true);
+    sys.ac.generators[1].qmin_mvar = 0.0;
+    sys.ac.generators[1].qmax_mvar = 0.0;
+    sys.ac.generators[2].qmin_mvar = 0.0;
+    sys.ac.generators[2].qmax_mvar = 0.0;
+
+    PowerFlowOptions opt;
+    opt.enable_pv_pq_conversion = true;
+    opt.pv_q_hysteresis_pu = 0.0;
+    opt.tol = 1e-10;
+    opt.max_iter = 80;
+
+    const auto r = solve_power_flow(sys, opt);
+
+    REQUIRE(r.converged);
+    CHECK(r.profiling.pv_to_pq_switches == 2);
+    REQUIRE(r.vm.size() == 4);
+    CHECK(std::abs(r.vm[2] - 1.0) > 1e-5);
+    CHECK(std::abs(r.vm[3] - 1.0) > 1e-5);
 }
 
 TEST_CASE("PV/PQ conversion: adaptive try-without-then-retry pattern on case2383wp",

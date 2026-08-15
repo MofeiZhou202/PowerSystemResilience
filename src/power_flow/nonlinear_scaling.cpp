@@ -94,5 +94,77 @@ NonlinearScaling build_nonlinear_scaling(
   return NonlinearScaling(std::move(res_scale), std::move(var_scale));
 }
 
+NonlinearScaling equilibrate_nonlinear_scaling(
+    const NonlinearScaling& nominal,
+    const Eigen::SparseMatrix<double>& jacobian,
+    const RobustNonlinearOptions& options) {
+  if (jacobian.rows() == 0 || jacobian.cols() == 0) return nominal;
+
+  Eigen::VectorXd row_scale = nominal.residual_scale();
+  Eigen::VectorXd variable_scale = nominal.variable_scale();
+  if (row_scale.size() != jacobian.rows()) {
+    row_scale = Eigen::VectorXd::Ones(jacobian.rows());
+  }
+  if (variable_scale.size() != jacobian.cols()) {
+    variable_scale = Eigen::VectorXd::Ones(jacobian.cols());
+  }
+
+  Eigen::SparseMatrix<double> balanced =
+      nominal.apply_jacobian_scaling(jacobian);
+  constexpr int kPasses = 4;
+  constexpr double kTiny = 1e-30;
+  const double scale_min = std::max(options.min_scale, kTiny);
+  const double scale_max = std::max(options.max_scale, scale_min);
+
+  for (int pass = 0; pass < kPasses; ++pass) {
+    Eigen::VectorXd row_max = Eigen::VectorXd::Zero(balanced.rows());
+    for (int col = 0; col < balanced.outerSize(); ++col) {
+      for (Eigen::SparseMatrix<double>::InnerIterator it(balanced, col); it;
+           ++it) {
+        row_max[it.row()] =
+            std::max(row_max[it.row()], std::abs(it.value()));
+      }
+    }
+    Eigen::VectorXd row_factor = Eigen::VectorXd::Ones(balanced.rows());
+    for (int row = 0; row < row_max.size(); ++row) {
+      if (row_max[row] <= kTiny) continue;
+      const double requested = 1.0 / std::sqrt(row_max[row]);
+      const double updated =
+          std::clamp(row_scale[row] * requested, scale_min, scale_max);
+      row_factor[row] = updated / row_scale[row];
+      row_scale[row] = updated;
+    }
+    for (int col = 0; col < balanced.outerSize(); ++col) {
+      for (Eigen::SparseMatrix<double>::InnerIterator it(balanced, col); it;
+           ++it) {
+        it.valueRef() *= row_factor[it.row()];
+      }
+    }
+
+    Eigen::VectorXd col_max = Eigen::VectorXd::Zero(balanced.cols());
+    for (int col = 0; col < balanced.outerSize(); ++col) {
+      for (Eigen::SparseMatrix<double>::InnerIterator it(balanced, col); it;
+           ++it) {
+        col_max[col] = std::max(col_max[col], std::abs(it.value()));
+      }
+    }
+    for (int col = 0; col < col_max.size(); ++col) {
+      if (col_max[col] <= kTiny) continue;
+      const double requested = 1.0 / std::sqrt(col_max[col]);
+      const double updated = std::clamp(variable_scale[col] / requested,
+                                        scale_min, scale_max);
+      const double effective = variable_scale[col] / updated;
+      variable_scale[col] = updated;
+      for (Eigen::SparseMatrix<double>::InnerIterator it(balanced, col); it;
+           ++it) {
+        it.valueRef() *= effective;
+      }
+    }
+  }
+
+  return NonlinearScaling(std::move(row_scale),
+                          std::move(variable_scale));
+}
+
 }  // namespace hacdcpf::powerflow
 

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <iostream>
 #include <limits>
 #include <stdexcept>
 #include <thread>
@@ -34,7 +35,9 @@ constexpr double kInf = std::numeric_limits<double>::infinity();
 enum class BusControlState {
   FixedPQ,
   PVActive,
-  PQLimited,
+  PQLimitedMin,
+  PQLimitedMax,
+  BQFixedPQ,
 };
 
 void reset_or_resize(Eigen::VectorXd& v, int n) {
@@ -767,6 +770,10 @@ struct GeneratorLimitData {
   std::vector<double> vm_set_pu;
   std::vector<bool> has_generator;
   std::vector<bool> has_finite_q_limits;
+  std::vector<bool> has_bpa_bq;
+  std::vector<bool> bpa_card_order_eligible;
+  std::vector<int> bpa_source_order;
+  std::vector<int> bpa_strong_group;
 };
 
 GeneratorLimitData build_generator_limit_data(const SolverData& data,
@@ -778,6 +785,10 @@ GeneratorLimitData build_generator_limit_data(const SolverData& data,
   out.vm_set_pu.assign(static_cast<size_t>(n), 1.0);
   out.has_generator.assign(static_cast<size_t>(n), false);
   out.has_finite_q_limits.assign(static_cast<size_t>(n), true);
+  out.has_bpa_bq.assign(static_cast<size_t>(n), false);
+  out.bpa_card_order_eligible.assign(static_cast<size_t>(n), false);
+  out.bpa_source_order.assign(static_cast<size_t>(n), -1);
+  out.bpa_strong_group.assign(static_cast<size_t>(n), -1);
 
   std::vector<bool> vm_set_init(static_cast<size_t>(n), false);
   for (int i = 0; i < n; ++i) {
@@ -793,6 +804,12 @@ GeneratorLimitData build_generator_limit_data(const SolverData& data,
       continue;
     }
     out.has_generator[static_cast<size_t>(bus)] = true;
+    if (gen.bpa_is_bq) {
+      out.has_bpa_bq[static_cast<size_t>(bus)] = true;
+      out.bpa_source_order[static_cast<size_t>(bus)] = std::max(
+          out.bpa_source_order[static_cast<size_t>(bus)],
+          gen.bpa_source_order);
+    }
     if (!vm_set_init[static_cast<size_t>(bus)]) {
       out.vm_set_pu[static_cast<size_t>(bus)] = gen.vg_pu;
       vm_set_init[static_cast<size_t>(bus)] = true;
@@ -819,6 +836,78 @@ GeneratorLimitData build_generator_limit_data(const SolverData& data,
       out.qmax_pu[static_cast<size_t>(i)] = kInf;
       out.qmin_pu[static_cast<size_t>(i)] = -kInf;
     }
+  }
+
+  // Preserve every authored bus/branch, but identify equivalence classes of
+  // BPA BQ controllers connected through DSP's 0.0001 pu short-link scale.
+  // Card order is relevant only when at least two controllers also have a
+  // non-short external connection and share voltage targets and Q limits;
+  // all other PV buses retain the generic severity rule.
+  constexpr double kBpaStrongLinkMaxPu = 1.01e-4;
+  constexpr double kBpaControlEqualityTol = 1e-10;
+  std::vector<int> parent(static_cast<size_t>(n));
+  for (int i = 0; i < n; ++i) parent[static_cast<size_t>(i)] = i;
+  const auto root_of = [&](int node) {
+    while (parent[static_cast<size_t>(node)] != node) {
+      node = parent[static_cast<size_t>(node)];
+    }
+    return node;
+  };
+  const auto unite = [&](int a, int b) {
+    a = root_of(a);
+    b = root_of(b);
+    if (a != b) parent[static_cast<size_t>(b)] = a;
+  };
+  for (const auto& branch : data.ac_branches) {
+    if (!branch.in_service) continue;
+    const int from = branch.from_bus - 1;
+    const int to = branch.to_bus - 1;
+    if (from < 0 || from >= n || to < 0 || to >= n) continue;
+    const double z = std::hypot(branch.r_pu, branch.x_pu);
+    if (z > kBpaStrongLinkMaxPu) {
+      out.bpa_card_order_eligible[static_cast<size_t>(from)] = true;
+      out.bpa_card_order_eligible[static_cast<size_t>(to)] = true;
+      continue;
+    }
+    const double kv_from = ac_buses[static_cast<size_t>(from)].base_kv;
+    const double kv_to = ac_buses[static_cast<size_t>(to)].base_kv;
+    const double kv_tol = std::max(1e-3, 1e-6 * std::max(kv_from, kv_to));
+    if (std::abs(kv_from - kv_to) > kv_tol) continue;
+    unite(from, to);
+  }
+
+  int next_group = 0;
+  for (int i = 0; i < n; ++i) {
+    if (!out.has_bpa_bq[static_cast<size_t>(i)] ||
+        out.bpa_strong_group[static_cast<size_t>(i)] >= 0) {
+      continue;
+    }
+    std::vector<int> members;
+    const int component = root_of(i);
+    for (int j = i; j < n; ++j) {
+      if (!out.has_bpa_bq[static_cast<size_t>(j)] ||
+          !out.bpa_card_order_eligible[static_cast<size_t>(j)] ||
+          root_of(j) != component) {
+        continue;
+      }
+      if (std::abs(out.vm_set_pu[static_cast<size_t>(j)] -
+                   out.vm_set_pu[static_cast<size_t>(i)]) >
+              kBpaControlEqualityTol ||
+          std::abs(out.qmin_pu[static_cast<size_t>(j)] -
+                   out.qmin_pu[static_cast<size_t>(i)]) >
+              kBpaControlEqualityTol ||
+          std::abs(out.qmax_pu[static_cast<size_t>(j)] -
+                   out.qmax_pu[static_cast<size_t>(i)]) >
+              kBpaControlEqualityTol) {
+        continue;
+      }
+      members.push_back(j);
+    }
+    if (members.size() < 2) continue;
+    for (const int member : members) {
+      out.bpa_strong_group[static_cast<size_t>(member)] = next_group;
+    }
+    ++next_group;
   }
 
   return out;
@@ -1033,6 +1122,7 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
   }
   out.diagnostics.promoted_vsc_indices = dc_plan.promoted_converter_idx;
   for (auto& w : dc_plan.warnings) out.diagnostics.warnings.push_back(std::move(w));
+
   JacobianContext jac_ctx = build_jacobian_context(ac_buses, ndc, slack, dc_slacks, &data, &converters);
   jac_ctx.min_vm_pu = opt.robust_nonlinear.min_vm_pu;
   if (jac_ctx.nvar == 0) {
@@ -1061,7 +1151,6 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
     }
   }
   const GeneratorLimitData gen_limits = build_generator_limit_data(data, ac_buses);
-
   // Note: We intentionally do NOT override bus.vm_pu with gen.vg_pu here.
   // For MATPOWER cases, the bus Vm column contains the actual converged
   // solution, which should be used as the initial guess.  The gen Vg column
@@ -1183,10 +1272,14 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
                                   out.profiling.ac_eval_threads);
   };
 
+  const bool has_active_lcc = std::any_of(
+      data.lcc_converters.begin(), data.lcc_converters.end(),
+      [](const LCCConverter& lcc) { return lcc.in_service; });
+
   auto run_line_search = [&](const Eigen::VectorXd& direction,
                              const Eigen::VectorXd& rhs,
                              const Eigen::SparseMatrix<double>& jacobian,
-                             const powerflow::NonlinearScaling& scaling,
+                             const powerflow::NonlinearScaling& line_scaling,
                              bool use_scaled_system,
                              int& eval_count,
                              double& elapsed_ms) -> bool {
@@ -1200,7 +1293,7 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
     Eigen::VectorXd direction_for_jacobian = direction;
     if (use_scaled_system) {
       direction_for_jacobian =
-          direction.cwiseProduct(scaling.variable_scale());
+          direction.cwiseProduct(line_scaling.variable_scale());
     }
     // mismatch is the Newton RHS -F, while jacobian stores dF/dx.
     const double directional_derivative =
@@ -1237,6 +1330,28 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
             std::max(vdc_trial[bus] + alpha * direction[jac_ctx.np + jac_ctx.nq + k], kMinVm);
       }
 
+      // A polar Newton step that crosses into the near-zero-voltage region can
+      // converge toward a non-physical low-voltage root. Backtrack before
+      // evaluating such a trial; this is a line-search feasibility guard, not
+      // an initial-state or warm-start procedure.
+      const double authored_min_trial_voltage =
+          std::max(0.0, ropts.min_trial_voltage_pu);
+      // LCC constant-power/characteristic equations have a low-voltage root.
+      // Keep normal LCC operating-point solves on the high-voltage branch,
+      // while preserving the explicit zero setting for voltage-collapse
+      // studies. Pure-AC and VSC-only systems retain the authored threshold.
+      const double min_trial_voltage =
+          authored_min_trial_voltage > 0.0 && has_active_lcc
+              ? std::max(authored_min_trial_voltage, 0.75)
+              : authored_min_trial_voltage;
+      if (min_trial_voltage > 0.0 &&
+          ((vm_trial.size() > 0 &&
+            vm_trial.minCoeff() < min_trial_voltage) ||
+           (vdc_trial.size() > 0 &&
+            vdc_trial.minCoeff() < min_trial_voltage))) {
+        return kInf;
+      }
+
       if (!skip_vac_enforcement) enforce_vac_setpoints(converters, vm_trial);
       const double trial_resid = evaluate_trial_state(vm_trial, va_trial, vdc_trial);
       eval_count += 1;
@@ -1245,7 +1360,7 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
       }
       const Eigen::VectorXd trial_rhs =
           use_scaled_system
-              ? scaling.apply_residual_scaling(mismatch_trial)
+              ? line_scaling.apply_residual_scaling(mismatch_trial)
               : mismatch_trial;
       return 0.5 * trial_rhs.squaredNorm();
     });
@@ -1324,9 +1439,9 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
     return false;
   };
 
-  // Outer loop (standard MATPOWER approach):
+  // Outer loop:
   //   1. Run Newton to convergence.
-  //   2. Check Q limits on PV buses — switch violated ones to PQ.
+  //   2. Check Q limits on PV buses and switch violated controls in one batch.
   //   3. Re-run Newton from converged state.
   //   4. After all PV buses are within limits, try PQ→PV restoration.
   //   5. Repeat until no further switching is needed.
@@ -1337,14 +1452,65 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
   bool restoration_attempted = false;
   std::unordered_set<std::string> converged_active_sets;
 
-  // Helper lambda: enforce Q limits on PV buses.
-  // allow_restore=false: only PV→PQ switching (safe during iterations).
-  // allow_restore=true: also PQ→PV restoration (post-convergence only).
-  auto check_q_limits_and_switch = [&](bool allow_restore,
-                                       double entry_margin_pu) -> bool {
-    bool any_switched = false;
-    const double q_hys = std::max(0.0, opt.pv_q_hysteresis_pu);
-    const double vm_tol = std::max(0.0, opt.pv_recover_vm_tol_pu);
+  // Select one violation at a time from the same converged fixed-active-set
+  // point. The wrapper below repeatedly invokes this selector so generic PV
+  // controls still enter their limits as one batch, while BPA-equivalent BQ
+  // groups retain their source-card allocation rule.
+  auto switch_most_violated_pv_to_pq =
+      [&](double entry_margin_pu) -> bool {
+    constexpr double kDegenerateQRangeTolPu = 1e-12;
+    constexpr double kSeverityTieTol = 1e-12;
+
+    // DSP treats zero-width BQ limits as a fixed-Q state once the converged PV
+    // solution proves that Q=Qmin=Qmax cannot hold. Release all such violated
+    // cards together: switching them one at a time creates a long artificial
+    // active-set path, while pre-classifying every zero-width BQ as PQ can make
+    // the initial fixed active set unsolvable.
+    std::vector<std::pair<int, double>> degenerate_bq;
+    for (int i = 0; i < n; ++i) {
+      if (i == slack ||
+          ac_buses[static_cast<size_t>(i)].bus_type == BusType::SLACK ||
+          bus_control[static_cast<size_t>(i)] != BusControlState::PVActive ||
+          !gen_limits.has_bpa_bq[static_cast<size_t>(i)] ||
+          !gen_limits.has_finite_q_limits[static_cast<size_t>(i)]) {
+        continue;
+      }
+      const double qmax = gen_limits.qmax_pu[static_cast<size_t>(i)];
+      const double qmin = gen_limits.qmin_pu[static_cast<size_t>(i)];
+      if (qmax - qmin > kDegenerateQRangeTolPu) continue;
+
+      const double qload_pu =
+          ac_buses[static_cast<size_t>(i)].qd_mvar / data.base_mva;
+      const double qconv = q_spec[i] - (qg_state[i] - qload_pu);
+      const double qg_implied = qcalc[i] + qload_pu - qconv;
+      if (std::isfinite(qg_implied) &&
+          (qg_implied > qmax + entry_margin_pu ||
+           qg_implied < qmin - entry_margin_pu)) {
+        degenerate_bq.emplace_back(i, 0.5 * (qmin + qmax));
+      }
+    }
+    if (!degenerate_bq.empty()) {
+      for (const auto& [bus, fixed_q] : degenerate_bq) {
+        if (opt.verbose) {
+          std::cerr << "[PF-PVPQ] PV->fixed-PQ bus="
+                    << ac_buses[static_cast<size_t>(bus)].index
+                    << " name=" << ac_buses[static_cast<size_t>(bus)].name
+                    << " q=" << fixed_q << '\n';
+        }
+        ac_buses[static_cast<size_t>(bus)].bus_type = BusType::PQ;
+        qg_state[bus] = fixed_q;
+        bus_control[static_cast<size_t>(bus)] = BusControlState::BQFixedPQ;
+        last_control_change_iteration[static_cast<size_t>(bus)] = total_iters;
+      }
+      out.profiling.pv_to_pq_switches +=
+          static_cast<int>(degenerate_bq.size());
+      return true;
+    }
+
+    int selected_bus = -1;
+    double selected_q = 0.0;
+    double selected_severity = -1.0;
+    BusControlState selected_state = BusControlState::FixedPQ;
     for (int i = 0; i < n; ++i) {
       if (i == slack) continue;
       // Additional SLACK buses are excluded from the Jacobian and must not be switched.
@@ -1359,51 +1525,176 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
       const double qg_implied = qcalc[i] + qload_pu - qconv;
 
       BusControlState& mode = bus_control[static_cast<size_t>(i)];
-      if (mode == BusControlState::PVActive) {
-        if (qg_implied > qmax + entry_margin_pu) {
-          ac_buses[static_cast<size_t>(i)].bus_type = BusType::PQ;
-          qg_state[i] = qmax;
-          mode = BusControlState::PQLimited;
-          any_switched = true;
-          out.profiling.pv_to_pq_switches += 1;
-          last_control_change_iteration[static_cast<size_t>(i)] = total_iters;
-        } else if (qg_implied < qmin - entry_margin_pu) {
-          ac_buses[static_cast<size_t>(i)].bus_type = BusType::PQ;
-          qg_state[i] = qmin;
-          mode = BusControlState::PQLimited;
-          any_switched = true;
-          out.profiling.pv_to_pq_switches += 1;
-          last_control_change_iteration[static_cast<size_t>(i)] = total_iters;
+      if (mode != BusControlState::PVActive || !std::isfinite(qg_implied)) {
+        continue;
+      }
+      const int candidate_group =
+          gen_limits.bpa_strong_group[static_cast<size_t>(i)];
+      if (candidate_group >= 0) {
+        bool group_already_limited = false;
+        for (size_t pos = 0; pos < bus_control.size(); ++pos) {
+          const BusControlState state = bus_control[pos];
+          if (gen_limits.bpa_strong_group[pos] == candidate_group &&
+              state != BusControlState::PVActive &&
+              state != BusControlState::FixedPQ) {
+            group_already_limited = true;
+            break;
+          }
         }
-      } else if (allow_restore && mode == BusControlState::PQLimited) {
-        const double vm_set = gen_limits.vm_set_pu[static_cast<size_t>(i)];
-        const double limit_tol = std::max(1e-10, q_hys * 1e-6);
-        const bool at_upper = std::abs(qg_state[i] - qmax) <= limit_tol;
-        const bool at_lower = std::abs(qg_state[i] - qmin) <= limit_tol;
-        const bool has_reactive_freedom = qmax - qmin > limit_tol;
-        const int hold_iterations =
-            ropts.enable_activity_hysteresis
-                ? std::max(0, ropts.min_active_set_hold_iters)
-                : 0;
-        const bool hold_satisfied =
-            total_iters -
-                    last_control_change_iteration[static_cast<size_t>(i)] >=
-                hold_iterations;
-        const bool can_restore =
-            has_reactive_freedom && hold_satisfied &&
-            ((at_upper && vm[i] > vm_set + vm_tol) ||
-             (at_lower && vm[i] < vm_set - vm_tol));
-        if (can_restore) {
-          ac_buses[static_cast<size_t>(i)].bus_type = BusType::PV;
-          vm[i] = vm_set;
-          mode = BusControlState::PVActive;
-          any_switched = true;
-          out.profiling.pq_to_pv_switches += 1;
-          last_control_change_iteration[static_cast<size_t>(i)] = total_iters;
-        }
+        if (group_already_limited) continue;
+      }
+      double violation = 0.0;
+      double limited_q = 0.0;
+      BusControlState candidate_state = BusControlState::FixedPQ;
+      if (qg_implied > qmax + entry_margin_pu) {
+        violation = qg_implied - qmax;
+        limited_q = qmax;
+        candidate_state = BusControlState::PQLimitedMax;
+      } else if (qg_implied < qmin - entry_margin_pu) {
+        violation = qmin - qg_implied;
+        limited_q = qmin;
+        candidate_state = BusControlState::PQLimitedMin;
+      } else {
+        continue;
+      }
+
+      const double q_range = std::max(qmax - qmin, 1e-12);
+      const double severity = violation / q_range;
+      const bool more_severe = severity > selected_severity + kSeverityTieTol;
+      const bool later_tie =
+          std::abs(severity - selected_severity) <= kSeverityTieTol &&
+          i > selected_bus;
+      if (more_severe || later_tie) {
+        selected_bus = i;
+        selected_q = limited_q;
+        selected_severity = severity;
+        selected_state = candidate_state;
       }
     }
-    return any_switched;
+
+    // Legacy BPA compatibility heuristic for equivalent controllers on very
+    // short station links. Once a group member violates in one direction,
+    // apply that limit to the still-active BQ with the latest source position.
+    // This is deliberately BPA-only and must not be interpreted as an
+    // identified DSP station-level allocation law.
+    if (selected_bus >= 0) {
+      const int group =
+          gen_limits.bpa_strong_group[static_cast<size_t>(selected_bus)];
+      if (group >= 0) {
+        int latest_bus = selected_bus;
+        int latest_order =
+            gen_limits.bpa_source_order[static_cast<size_t>(selected_bus)];
+        for (int i = 0; i < n; ++i) {
+          if (gen_limits.bpa_strong_group[static_cast<size_t>(i)] != group ||
+              bus_control[static_cast<size_t>(i)] !=
+                  BusControlState::PVActive) {
+            continue;
+          }
+          const int order =
+              gen_limits.bpa_source_order[static_cast<size_t>(i)];
+          if (order > latest_order) {
+            latest_bus = i;
+            latest_order = order;
+          }
+        }
+        selected_bus = latest_bus;
+        selected_q =
+            selected_state == BusControlState::PQLimitedMax
+                ? gen_limits.qmax_pu[static_cast<size_t>(selected_bus)]
+                : gen_limits.qmin_pu[static_cast<size_t>(selected_bus)];
+      }
+    }
+
+    if (selected_bus >= 0) {
+      if (opt.verbose) {
+        std::cerr << "[PF-PVPQ] PV->PQ bus="
+                  << ac_buses[static_cast<size_t>(selected_bus)].index
+                  << " name="
+                  << ac_buses[static_cast<size_t>(selected_bus)].name
+                  << " limit="
+                  << (selected_state == BusControlState::PQLimitedMax
+                          ? "Qmax"
+                          : "Qmin")
+                  << " q=" << selected_q
+                  << " severity=" << selected_severity << '\n';
+      }
+      ac_buses[static_cast<size_t>(selected_bus)].bus_type = BusType::PQ;
+      qg_state[selected_bus] = selected_q;
+      bus_control[static_cast<size_t>(selected_bus)] = selected_state;
+      last_control_change_iteration[static_cast<size_t>(selected_bus)] =
+          total_iters;
+      out.profiling.pv_to_pq_switches += 1;
+      return true;
+    }
+    return false;
+  };
+
+  // Enforce the voltage side of the PV/PQ complementarity conditions. Qmax is
+  // valid only below the setpoint and Qmin only above it. Restore one
+  // inconsistent controller and re-solve before making another transition.
+  auto restore_most_inconsistent_limited_bus = [&]() -> bool {
+    const double vm_tol = std::max(0.0, opt.pv_recover_vm_tol_pu);
+    const int hold_iterations =
+        ropts.enable_activity_hysteresis
+            ? std::max(0, ropts.min_active_set_hold_iters)
+            : 0;
+    int selected_bus = -1;
+    double selected_violation = 0.0;
+    for (int i = 0; i < n; ++i) {
+      const BusControlState mode = bus_control[static_cast<size_t>(i)];
+      const double vm_set = gen_limits.vm_set_pu[static_cast<size_t>(i)];
+      double violation = 0.0;
+      if (mode == BusControlState::PQLimitedMax) {
+        violation = vm[i] - vm_set - vm_tol;
+      } else if (mode == BusControlState::PQLimitedMin) {
+        violation = vm_set - vm[i] - vm_tol;
+      } else {
+        continue;
+      }
+      if (total_iters -
+              last_control_change_iteration[static_cast<size_t>(i)] <
+          hold_iterations) {
+        continue;
+      }
+      if (violation > selected_violation) {
+        selected_bus = i;
+        selected_violation = violation;
+      }
+    }
+
+    if (selected_bus >= 0) {
+      if (opt.verbose) {
+        std::cerr << "[PF-PVPQ] PQ->PV bus="
+                  << ac_buses[static_cast<size_t>(selected_bus)].index
+                  << " name="
+                  << ac_buses[static_cast<size_t>(selected_bus)].name
+                  << " voltage_violation=" << selected_violation << '\n';
+      }
+      ac_buses[static_cast<size_t>(selected_bus)].bus_type = BusType::PV;
+      vm[selected_bus] =
+          gen_limits.vm_set_pu[static_cast<size_t>(selected_bus)];
+      bus_control[static_cast<size_t>(selected_bus)] =
+          BusControlState::PVActive;
+      last_control_change_iteration[static_cast<size_t>(selected_bus)] =
+          total_iters;
+      out.profiling.pq_to_pv_switches += 1;
+      return true;
+    }
+    return false;
+  };
+
+  // Apply every decision that is valid at the same converged fixed-active-set
+  // point. BPA-equivalent groups contribute at most one selected controller;
+  // zero-width BQ controls are converted together by the selector itself.
+  auto check_q_limits_and_switch = [&](bool allow_restore,
+                                       double entry_margin_pu) -> bool {
+    bool changed = false;
+    if (allow_restore) {
+      while (restore_most_inconsistent_limited_bus()) changed = true;
+    } else {
+      while (switch_most_violated_pv_to_pq(entry_margin_pu)) changed = true;
+    }
+    return changed;
   };
 
   // Globalization state (Direction 4).
@@ -1510,15 +1801,11 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
       out.iterations = total_iters + inner_iters + 1;
       out.residual = resid;
 
-      const auto scaling = powerflow::build_nonlinear_scaling(jac_ctx,
-                                                               data,
-                                                               p_spec,
-                                                               q_spec,
-                                                               pdc_spec,
-                                                               vm,
-                                                               vdc,
-                                                               opt.robust_nonlinear);
-      mismatch_scaled = scaling.apply_residual_scaling(mismatch);
+      const auto convergence_scaling =
+          powerflow::build_nonlinear_scaling(jac_ctx, data, p_spec, q_spec,
+                                             pdc_spec, vm, vdc,
+                                             opt.robust_nonlinear);
+      mismatch_scaled = convergence_scaling.apply_residual_scaling(mismatch);
       const double scaled_resid = (mismatch_scaled.size() == 0)
                                       ? 0.0
                                       : mismatch_scaled.cwiseAbs().maxCoeff();
@@ -1537,11 +1824,20 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
           opt.robust_nonlinear.enable_jacobian_row_col_equilibration &&
           (opt.robust_nonlinear.enable_residual_scaling ||
            opt.robust_nonlinear.enable_variable_scaling);
+      const auto linear_scaling =
+          use_scaled_linear_system
+              ? powerflow::equilibrate_nonlinear_scaling(
+                    convergence_scaling, cache_.pattern.matrix,
+                    opt.robust_nonlinear)
+              : convergence_scaling;
       const Eigen::SparseMatrix<double> jac_for_linear =
-          use_scaled_linear_system ? scaling.apply_jacobian_scaling(cache_.pattern.matrix)
-                                   : cache_.pattern.matrix;
-      const Eigen::VectorXd& rhs_for_linear =
-          use_scaled_linear_system ? mismatch_scaled : mismatch;
+          use_scaled_linear_system
+              ? linear_scaling.apply_jacobian_scaling(cache_.pattern.matrix)
+              : cache_.pattern.matrix;
+      const Eigen::VectorXd rhs_for_linear =
+          use_scaled_linear_system
+              ? linear_scaling.apply_residual_scaling(mismatch)
+              : mismatch;
 
       if (opt.robust_nonlinear.enable_condition_monitor ||
           ropts.enable_newton_krylov_fallback) {
@@ -1640,11 +1936,12 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
           Eigen::VectorXd step_scaled =
               dogleg_step(dx_scaled, gradient, jg, tr_delta);
           Eigen::VectorXd step = use_scaled_linear_system
-                                     ? scaling.unscale_step(step_scaled)
+                                     ? linear_scaling.unscale_step(step_scaled)
                                      : step_scaled;
           clip_step(step, jac_ctx, opt);
           if (use_scaled_linear_system) {
-            step_scaled = step.cwiseProduct(scaling.variable_scale());
+            step_scaled =
+                step.cwiseProduct(linear_scaling.variable_scale());
           } else {
             step_scaled = step;
           }
@@ -1668,7 +1965,8 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
 
           (void)trial_resid;
           const Eigen::VectorXd trial_rhs = use_scaled_linear_system
-                                                ? scaling.apply_residual_scaling(mismatch_trial)
+                                                ? linear_scaling.apply_residual_scaling(
+                                                      mismatch_trial)
                                                 : mismatch_trial;
           const double f_sq = rhs_for_linear.squaredNorm();
           const double f_new_sq = trial_rhs.squaredNorm();
@@ -1695,7 +1993,7 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
                 ? solve_linear_nk(ptc_jac, rhs_for_linear, dx_scaled, linear_ms_this_iter)
                 : solve_linear(ptc_jac, rhs_for_linear, dx_scaled, linear_ms_this_iter);
         if (ptc_step_ok) {
-          dx = use_scaled_linear_system ? scaling.unscale_step(dx_scaled) : dx_scaled;
+          dx = use_scaled_linear_system ? linear_scaling.unscale_step(dx_scaled) : dx_scaled;
           clip_step(dx, jac_ctx, opt);
           // PTC: accept step unconditionally.
           vm_best = vm; va_best = va; vdc_best = vdc;
@@ -1721,26 +2019,32 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
         // Phase 5: substitute NK-GMRES when condition is flagged bad.
         if (use_nk_this_iter) {
           if (solve_linear_nk(jac_for_linear, rhs_for_linear, dx_scaled, linear_ms_this_iter)) {
-            dx = use_scaled_linear_system ? scaling.unscale_step(dx_scaled) : dx_scaled;
+            dx = use_scaled_linear_system ? linear_scaling.unscale_step(dx_scaled) : dx_scaled;
             clip_step(dx, jac_ctx, opt);
             accepted_step = run_line_search(
-                dx, rhs_for_linear, jac_for_linear, scaling,
+                dx, rhs_for_linear, jac_for_linear, linear_scaling,
                 use_scaled_linear_system, ls_evals_this_iter, ls_ms_this_iter);
           }
           // If NK step failed or didn't improve, fall through to standard LU below.
           if (!accepted_step) {
             if (solve_linear(jac_for_linear, rhs_for_linear, dx_scaled, linear_ms_this_iter)) {
-              dx = use_scaled_linear_system ? scaling.unscale_step(dx_scaled) : dx_scaled;
+              dx = use_scaled_linear_system
+                       ? linear_scaling.unscale_step(dx_scaled)
+                       : dx_scaled;
+              clip_step(dx, jac_ctx, opt);
               accepted_step = run_line_search(
-                  dx, rhs_for_linear, jac_for_linear, scaling,
+                  dx, rhs_for_linear, jac_for_linear, linear_scaling,
                   use_scaled_linear_system, ls_evals_this_iter, ls_ms_this_iter);
             }
           }
         } else {
           if (solve_linear(jac_for_linear, rhs_for_linear, dx_scaled, linear_ms_this_iter)) {
-            dx = use_scaled_linear_system ? scaling.unscale_step(dx_scaled) : dx_scaled;
+            dx = use_scaled_linear_system
+                     ? linear_scaling.unscale_step(dx_scaled)
+                     : dx_scaled;
+            clip_step(dx, jac_ctx, opt);
             accepted_step = run_line_search(
-                dx, rhs_for_linear, jac_for_linear, scaling,
+                dx, rhs_for_linear, jac_for_linear, linear_scaling,
                 use_scaled_linear_system, ls_evals_this_iter, ls_ms_this_iter);
           }
         }
@@ -1756,10 +2060,10 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
             out.profiling.regularization_count += 1;
 
             if (solve_linear(reg_jac, rhs_for_linear, dx_scaled, linear_ms_this_iter)) {
-              dx = use_scaled_linear_system ? scaling.unscale_step(dx_scaled) : dx_scaled;
+              dx = use_scaled_linear_system ? linear_scaling.unscale_step(dx_scaled) : dx_scaled;
               clip_step(dx, jac_ctx, opt);
               if (run_line_search(
-                      dx, rhs_for_linear, jac_for_linear, scaling,
+                      dx, rhs_for_linear, jac_for_linear, linear_scaling,
                       use_scaled_linear_system, ls_evals_this_iter,
                       ls_ms_this_iter)) {
                 accepted_step = true;
@@ -1796,11 +2100,11 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
             if (cache_.solver->factorize(JtJ) &&
                 cache_.solver->solve(lm_rhs, lm_dx) && lm_dx.allFinite()) {
               if (use_scaled_linear_system) {
-                lm_dx = scaling.unscale_step(lm_dx);
+                lm_dx = linear_scaling.unscale_step(lm_dx);
               }
               clip_step(lm_dx, jac_ctx, opt);
               if (run_line_search(
-                      lm_dx, rhs_for_linear, jac_for_linear, scaling,
+                      lm_dx, rhs_for_linear, jac_for_linear, linear_scaling,
                       use_scaled_linear_system, ls_evals_this_iter,
                       ls_ms_this_iter)) {
                 dx = lm_dx;
@@ -1820,7 +2124,7 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
           if (solve_linear(ptc_jac_rec, rhs_for_linear, ptc_dx, linear_ms_this_iter) &&
               ptc_dx.allFinite()) {
             if (use_scaled_linear_system) {
-              ptc_dx = scaling.unscale_step(ptc_dx);
+              ptc_dx = linear_scaling.unscale_step(ptc_dx);
             }
             clip_step(ptc_dx, jac_ctx, opt);
             // PTC step: accept unconditionally (same as the PTC globalization branch).
@@ -1865,29 +2169,20 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
       vm = vm_best;
       va = va_best;
       vdc = vdc_best;
-
     }  // end inner Newton loop
 
     total_iters += inner_iters;
     out.converged = inner_converged;
+    if (inner_failed && opt.verbose) {
+      std::cerr << "[PF-PVPQ] fixed-active-set Newton failed after outer="
+                << outer << " residual=" << out.residual << '\n';
+    }
     if (inner_failed || !opt.enable_pv_pq_conversion || data.enable_semi_smooth_newton) {
       break;
     }
 
     if (!inner_converged) {
-      // Newton failed to converge — try PV→PQ switching on violated buses
-      // and re-run from current state, which may help convergence.
-      // Guard: only switch when the residual is small enough that Q
-      // estimates are meaningful.  At large residuals, switching based on
-      // inaccurate Q values creates PV↔PQ oscillation across outer loops
-      // without ever converging (observed as 48–264 spurious switches on
-      // case118 basin tests).
-      if (out.residual > 0.1 ||
-          !check_q_limits_and_switch(/*allow_restore=*/false,
-                                     /*entry_margin_pu=*/0.0)) {
-        break;  // No reliable switches possible — give up.
-      }
-      continue;  // Re-run Newton with updated bus types.
+      break;
     }
 
     std::string active_set_signature;
@@ -1931,6 +2226,11 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
         "the returned electrical root is not Q-limit certified.");
   }
 
+  // The last permitted outer iteration may have changed a bus type. Always
+  // synchronize the final residual context with the final active set.
+  jac_ctx = build_jacobian_context(ac_buses, ndc, slack, dc_slacks, &data, &converters);
+  resize_for_context();
+  ensure_pattern();
   if (!skip_vac_enforcement) enforce_vac_setpoints(converters, vm);
   out.residual = evaluate_residual_only(data,
                                         jac_ctx,
@@ -1969,9 +2269,11 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
   // switching (PV→PQ or PQ→PV) resulted in a higher final residual than what
   // was achieved during an earlier inner Newton loop, convergence is correctly
   // reported as false.
-  out.converged = ((opt.robust_nonlinear.enable_residual_scaling
-                        ? out.profiling.scaled_residual_norm
-                        : out.residual) < opt.tol);
+  const bool residual_converged =
+      (opt.robust_nonlinear.enable_residual_scaling
+           ? out.profiling.scaled_residual_norm
+           : out.residual) < opt.tol;
+  out.converged = residual_converged;
 
   out.reactive_limits.enforcement_requested =
       opt.enable_pv_pq_conversion || data.enable_semi_smooth_newton;
@@ -1994,7 +2296,10 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
     out.reactive_limits.max_violation_pu = std::max(
         out.reactive_limits.max_violation_pu,
         std::max({0.0, upper_violation, lower_violation}));
-    if (bus_control[static_cast<size_t>(i)] == BusControlState::PQLimited) {
+    const BusControlState state = bus_control[static_cast<size_t>(i)];
+    if (state == BusControlState::PQLimitedMin ||
+        state == BusControlState::PQLimitedMax ||
+        state == BusControlState::BQFixedPQ) {
       out.reactive_limits.active_limited_buses += 1;
     }
   }

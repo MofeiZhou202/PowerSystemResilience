@@ -292,6 +292,12 @@ struct Generator {
   double qmin_mvar{0.0};
   bool is_slack{false};
 
+  // BPA/DSP import provenance used only to reproduce BQ active-set ordering
+  // in electrically indistinguishable controller groups. Other importers and
+  // hand-authored models leave these defaults unchanged.
+  bool bpa_is_bq{false};
+  int bpa_source_order{-1};
+
   double cost_c2{0.0};
   double cost_c1{0.0};
   double cost_c0{0.0};

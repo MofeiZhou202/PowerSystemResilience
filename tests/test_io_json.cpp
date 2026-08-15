@@ -69,6 +69,7 @@ static HybridPowerSystem make_2bus() {
 
     Generator g; g.bus=1; g.is_slack=true; g.pmax_mw=200.0; g.pmin_mw=0.0;
     g.qmax_mvar=100.0; g.qmin_mvar=-100.0; g.vg_pu=1.04; g.in_service=true;
+    g.bpa_is_bq=true; g.bpa_source_order=17;
     sys.ac.generators = {g};
 
     return sys;
@@ -141,6 +142,8 @@ TEST_CASE("JSON round-trip: 2-bus system serialises and deserialises", "[io][jso
     CHECK_THAT(restored.ac.branches[0].r0_pu, WithinAbs(0.03, 1e-9));
     CHECK_THAT(restored.ac.branches[0].x0_pu, WithinAbs(0.12, 1e-9));
     CHECK_THAT(restored.ac.branches[0].b0_pu, WithinAbs(0.001, 1e-9));
+    CHECK(restored.ac.generators[0].bpa_is_bq);
+    CHECK(restored.ac.generators[0].bpa_source_order == 17);
 }
 
 TEST_CASE("JSON round-trip: renewable costs and islanding roles are preserved",

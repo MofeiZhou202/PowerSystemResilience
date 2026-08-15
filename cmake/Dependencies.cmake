@@ -135,6 +135,59 @@ endif()
 
 set(_HACDCDSS_MIPSOLVERS_BINARY_DIR
     "${CMAKE_CURRENT_BINARY_DIR}/_deps/mipsolvers_build")
+# Compatibility for older local MIPSolvers revisions that expect fmt and
+# nlohmann_json to be installed system-wide.  Current pinned revisions vendor
+# these dependencies themselves, so this path is only used when that vendored
+# layout is absent.  The explicit source directories keep the fallback fully
+# offline and work with the project's CMake 3.20 minimum.
+if(NOT EXISTS "${_HACDCDSS_MIPSOLVERS_DIR}/third_party/fmt/CMakeLists.txt")
+  set(_HACDCDSS_FMT_DIR
+      "${CMAKE_CURRENT_SOURCE_DIR}/third_party/fmt-10.2.1")
+  set(_HACDCDSS_FMT_BINARY_DIR
+      "${CMAKE_CURRENT_BINARY_DIR}/_deps/fmt-build")
+  set(_HACDCDSS_JSON_DIR
+      "${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann_json-3.11.3")
+  set(_HACDCDSS_JSON_BINARY_DIR
+      "${CMAKE_CURRENT_BINARY_DIR}/_deps/nlohmann_json-build")
+  if(NOT EXISTS "${_HACDCDSS_FMT_DIR}/CMakeLists.txt")
+    message(FATAL_ERROR
+      "This MIPSolvers revision has no vendored fmt. Restore the offline "
+      "fallback at ${_HACDCDSS_FMT_DIR}.")
+  endif()
+  if(NOT EXISTS "${_HACDCDSS_JSON_DIR}/CMakeLists.txt")
+    message(FATAL_ERROR
+      "This MIPSolvers revision has no vendored nlohmann_json. Restore the "
+      "offline fallback at ${_HACDCDSS_JSON_DIR}.")
+  endif()
+
+  set(FMT_DOC OFF CACHE BOOL "" FORCE)
+  set(FMT_TEST OFF CACHE BOOL "" FORCE)
+  set(FMT_FUZZ OFF CACHE BOOL "" FORCE)
+  set(FMT_INSTALL ON CACHE BOOL "" FORCE)
+  if(NOT TARGET fmt::fmt)
+    add_subdirectory(
+      "${_HACDCDSS_FMT_DIR}"
+      "${_HACDCDSS_FMT_BINARY_DIR}"
+      EXCLUDE_FROM_ALL)
+  endif()
+  set(fmt_DIR "${_HACDCDSS_FMT_BINARY_DIR}")
+  list(PREPEND CMAKE_PREFIX_PATH "${_HACDCDSS_FMT_BINARY_DIR}")
+
+  set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
+  set(JSON_Install ON CACHE BOOL "" FORCE)
+  if(NOT TARGET nlohmann_json::nlohmann_json)
+    add_subdirectory(
+      "${_HACDCDSS_JSON_DIR}"
+      "${_HACDCDSS_JSON_BINARY_DIR}"
+      EXCLUDE_FROM_ALL)
+  endif()
+  set(nlohmann_json_DIR "${_HACDCDSS_JSON_BINARY_DIR}")
+  list(PREPEND CMAKE_PREFIX_PATH "${_HACDCDSS_JSON_BINARY_DIR}")
+
+  message(STATUS
+    "hacdcdss: using local fmt and nlohmann_json compatibility sources")
+endif()
+
 if(NOT TARGET mipsolvers::mipsolvers)
   add_subdirectory(
     "${_HACDCDSS_MIPSOLVERS_DIR}"
@@ -162,36 +215,59 @@ endif()
 if(HACDCPF_BUILD_TESTS)
   set(_HACDCDSS_CATCH2_DIR
       "${_HACDCDSS_MIPSOLVERS_DIR}/third_party/catch2")
-  if(NOT TARGET Catch2::Catch2WithMain)
-    if(NOT EXISTS "${_HACDCDSS_CATCH2_DIR}/catch_amalgamated.cpp" OR
-       NOT EXISTS "${_HACDCDSS_CATCH2_DIR}/catch2/catch_test_macros.hpp")
+  set(_HACDCDSS_CATCH2_KIND "MIPSolvers vendored (3.7.1)")
+  set(_HACDCDSS_CATCH2_AMALGAMATED ON)
+  if(NOT EXISTS "${_HACDCDSS_CATCH2_DIR}/catch_amalgamated.cpp" OR
+     NOT EXISTS "${_HACDCDSS_CATCH2_DIR}/catch2/catch_test_macros.hpp")
+    set(_HACDCDSS_CATCH2_DIR
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/catch2-src")
+    set(_HACDCDSS_CATCH2_KIND "local compatibility source")
+    set(_HACDCDSS_CATCH2_AMALGAMATED OFF)
+    if(NOT EXISTS "${_HACDCDSS_CATCH2_DIR}/CMakeLists.txt")
       message(FATAL_ERROR
-        "MIPSolvers vendored Catch2 is incomplete at "
-        "${_HACDCDSS_CATCH2_DIR}. Restore third_party/catch2; network "
-        "downloads are disabled for hermetic builds.")
+        "This MIPSolvers revision has no vendored Catch2. Restore the offline "
+        "fallback at ${_HACDCDSS_CATCH2_DIR}; network downloads are disabled.")
     endif()
-    find_package(Threads REQUIRED)
-    add_library(Catch2 STATIC
-      "${_HACDCDSS_CATCH2_DIR}/catch_amalgamated.cpp")
-    target_include_directories(Catch2 PUBLIC "${_HACDCDSS_CATCH2_DIR}")
-    target_compile_definitions(Catch2 PRIVATE CATCH_AMALGAMATED_CUSTOM_MAIN)
-    target_link_libraries(Catch2 PUBLIC Threads::Threads)
-    set_target_properties(Catch2 PROPERTIES POSITION_INDEPENDENT_CODE ON)
-    add_library(Catch2::Catch2 ALIAS Catch2)
+  endif()
 
-    add_library(Catch2WithMain STATIC
-      "${_HACDCDSS_CATCH2_DIR}/catch_amalgamated.cpp")
-    target_include_directories(Catch2WithMain PUBLIC "${_HACDCDSS_CATCH2_DIR}")
-    target_link_libraries(Catch2WithMain PUBLIC Threads::Threads)
-    set_target_properties(Catch2WithMain PROPERTIES POSITION_INDEPENDENT_CODE ON)
-    add_library(Catch2::Catch2WithMain ALIAS Catch2WithMain)
+  if(NOT TARGET Catch2::Catch2WithMain)
+    if(_HACDCDSS_CATCH2_AMALGAMATED)
+      find_package(Threads REQUIRED)
+      add_library(Catch2 STATIC
+        "${_HACDCDSS_CATCH2_DIR}/catch_amalgamated.cpp")
+      target_include_directories(Catch2 PUBLIC "${_HACDCDSS_CATCH2_DIR}")
+      target_compile_definitions(Catch2 PRIVATE CATCH_AMALGAMATED_CUSTOM_MAIN)
+      target_link_libraries(Catch2 PUBLIC Threads::Threads)
+      set_target_properties(Catch2 PROPERTIES POSITION_INDEPENDENT_CODE ON)
+      add_library(Catch2::Catch2 ALIAS Catch2)
+
+      add_library(Catch2WithMain STATIC
+        "${_HACDCDSS_CATCH2_DIR}/catch_amalgamated.cpp")
+      target_include_directories(Catch2WithMain PUBLIC "${_HACDCDSS_CATCH2_DIR}")
+      target_link_libraries(Catch2WithMain PUBLIC Threads::Threads)
+      set_target_properties(Catch2WithMain PROPERTIES POSITION_INDEPENDENT_CODE ON)
+      add_library(Catch2::Catch2WithMain ALIAS Catch2WithMain)
+    else()
+      set(CATCH_INSTALL_DOCS OFF CACHE BOOL "" FORCE)
+      set(CATCH_INSTALL_EXTRAS OFF CACHE BOOL "" FORCE)
+      set(CATCH_DEVELOPMENT_BUILD OFF CACHE BOOL "" FORCE)
+      add_subdirectory(
+        "${_HACDCDSS_CATCH2_DIR}"
+        "${CMAKE_CURRENT_BINARY_DIR}/_deps/catch2-build"
+        EXCLUDE_FROM_ALL)
+    endif()
+  endif()
+  if(NOT TARGET Catch2::Catch2WithMain)
+    message(FATAL_ERROR
+      "Catch2 source at ${_HACDCDSS_CATCH2_DIR} did not create the expected "
+      "Catch2::Catch2WithMain target.")
   endif()
   if(NOT EXISTS "${_HACDCDSS_CATCH2_DIR}/extras/Catch.cmake")
     message(FATAL_ERROR
-      "MIPSolvers vendored Catch2 is missing extras/Catch.cmake, required for "
-      "test discovery in an offline build.")
+      "Catch2 at ${_HACDCDSS_CATCH2_DIR} is missing extras/Catch.cmake, "
+      "required for test discovery in an offline build.")
   endif()
-  message(STATUS "hacdcdss: Catch2 = MIPSolvers vendored (3.7.1)")
+  message(STATUS "hacdcdss: Catch2 = ${_HACDCDSS_CATCH2_KIND}")
   list(APPEND CMAKE_MODULE_PATH "${_HACDCDSS_CATCH2_DIR}/extras")
   include(CTest)
   include(Catch)

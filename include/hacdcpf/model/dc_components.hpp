@@ -31,6 +31,14 @@ struct DCBus {
   bool in_service{true};
   std::string name;
 
+  // Optional source-format provenance.  BPA/DSP uses BB as a passive DC
+  // junction and BA/BM/BZ as converter-terminal DC buses.  These fields do
+  // not alter the nodal equations, but preserve the card semantics through a
+  // DAT -> JSON -> model round trip.
+  std::string source_card;
+  std::string converter_role;
+  std::string converter_layer;
+
   double base_kv{0.0};
   int area{0};
   int zone{0};
@@ -64,6 +72,13 @@ struct DCBranch {
   // with length_km and a positive base voltage, convert_actual_to_per_unit()
   // fills r_pu from it (used only when r_pu is still zero).
   double r_ohm_per_km{0.0};
+
+  // Engineering values retained from BPA/DSP LD/LY/LM/LZ cards.  The steady-
+  // state DC power flow uses r_pu only; L and C are retained for reporting and
+  // future dynamic models instead of being silently discarded by the import.
+  double inductance_mh{0.0};
+  double capacitance_uf{0.0};
+  std::string source_card;
 
   double mtbf_hours{0.0};
   double mttr_hours{0.0};

@@ -475,6 +475,9 @@ static json dc_bus_to_json(const DCBus& b) {
   j["emission_factor_tco2_mwh"] = b.emission_factor_tco2_mwh;
   j["in_service"] = b.in_service;
   j["name"] = b.name;
+  j["source_card"] = b.source_card;
+  j["converter_role"] = b.converter_role;
+  j["converter_layer"] = b.converter_layer;
   j["latitude"] = b.latitude;
   j["longitude"] = b.longitude;
   return j;
@@ -493,6 +496,9 @@ static DCBus dc_bus_from_json(const json& j) {
       jget(j, "emission_factor_tco2_mwh", 0.0);
   b.in_service = jget(j, "in_service", true);
   b.name = jget<std::string>(j, "name", "");
+  b.source_card = jget<std::string>(j, "source_card", "");
+  b.converter_role = jget<std::string>(j, "converter_role", "");
+  b.converter_layer = jget<std::string>(j, "converter_layer", "");
   b.latitude = jget_alias(j, "latitude", "lat", 0.0);
   b.longitude = jget_alias(j, "longitude", "lon", 0.0);
   return b;
@@ -510,6 +516,9 @@ static json dc_branch_to_json(const DCBranch& br) {
   j["length_km"] = br.length_km;
   j["base_kv"] = br.base_kv;
   j["r_ohm_per_km"] = br.r_ohm_per_km;
+  j["inductance_mh"] = br.inductance_mh;
+  j["capacitance_uf"] = br.capacitance_uf;
+  j["source_card"] = br.source_card;
   return j;
 }
 
@@ -525,6 +534,9 @@ static DCBranch dc_branch_from_json(const json& j) {
   br.length_km = jget(j, "length_km", 0.0);
   br.base_kv = jget(j, "base_kv", 0.0);
   br.r_ohm_per_km = jget(j, "r_ohm_per_km", 0.0);
+  br.inductance_mh = jget(j, "inductance_mh", 0.0);
+  br.capacitance_uf = jget(j, "capacitance_uf", 0.0);
+  br.source_card = jget<std::string>(j, "source_card", "");
   return br;
 }
 
@@ -678,6 +690,8 @@ static json generator_to_json(const Generator& g) {
   j["qmax_mvar"] = g.qmax_mvar;
   j["qmin_mvar"] = g.qmin_mvar;
   j["is_slack"] = g.is_slack;
+  j["bpa_is_bq"] = g.bpa_is_bq;
+  j["bpa_source_order"] = g.bpa_source_order;
   j["cost_c2"] = g.cost_c2;
   j["cost_c1"] = g.cost_c1;
   j["cost_c0"] = g.cost_c0;
@@ -721,6 +735,8 @@ static Generator generator_from_json(const json& j) {
   g.qmax_mvar = jget(j, "qmax_mvar", 0.0);
   g.qmin_mvar = jget(j, "qmin_mvar", 0.0);
   g.is_slack = jget(j, "is_slack", false);
+  g.bpa_is_bq = jget(j, "bpa_is_bq", false);
+  g.bpa_source_order = jget(j, "bpa_source_order", -1);
   g.cost_c2 = jget(j, "cost_c2", 0.0);
   g.cost_c1 = jget(j, "cost_c1", 0.0);
   g.cost_c0 = jget(j, "cost_c0", 0.0);
@@ -1159,6 +1175,10 @@ static json lcc_to_json(const LCCConverter& c) {
   j["dc_bus"] = c.dc_bus;
   j["in_service"] = c.in_service;
   j["station_role"] = lcc_station_role_str(c.station_role);
+  j["source_card"] = c.source_card;
+  j["layer_code"] = c.layer_code;
+  j["power_percent"] = c.power_percent;
+  j["q_compensation_mvar"] = c.q_compensation_mvar;
   j["n_bridges"] = c.n_bridges;
   j["alpha_min_deg"] = c.alpha_min_deg;
   j["alpha_stop_deg"] = c.alpha_stop_deg;
@@ -1198,6 +1218,10 @@ static LCCConverter lcc_from_json(const json& j) {
   c.in_service = jget(j, "in_service", true);
   c.station_role = lcc_station_role_from_str(
       jget<std::string>(j, "station_role", "RECTIFIER"));
+  c.source_card = jget<std::string>(j, "source_card", "BD");
+  c.layer_code = jget<std::string>(j, "layer_code", "");
+  c.power_percent = jget(j, "power_percent", 100.0);
+  c.q_compensation_mvar = jget(j, "q_compensation_mvar", 0.0);
   c.n_bridges = jget(j, "n_bridges", 1);
   c.alpha_min_deg = jget(j, "alpha_min_deg", 5.0);
   c.alpha_stop_deg = jget(j, "alpha_stop_deg", 140.0);

@@ -88,12 +88,16 @@ ACLinearizedDCResult solve_ac_linearized_dc(const SolverData& data) {
   B.setFromTriplets(triplets.begin(), triplets.end(), std::plus<double>());
   B.makeCompressed();
 
-  // B*theta + Pshift = Pspec, hence B*theta = Pspec - Pshift.
+  // B*theta + Pshift = Pspec, hence B*theta = Pspec - Pshift. Component loads
+  // are already aggregated into pd_pu by SolverData; using only the legacy
+  // bus-level pd_mw field would omit imported Load records and produce a poor
+  // angle seed for large BPA systems.
   Eigen::VectorXd P = Eigen::VectorXd::Zero(n);
   for (int i = 0; i < n; ++i) {
-    const double pd = (data.pd_pu.size() == n)
-                          ? data.pd_pu[i]
-                          : data.ac_buses[static_cast<size_t>(i)].pd_mw / data.base_mva;
+    const double pd =
+        data.has_component_loads && data.pd_pu.size() == n
+            ? data.pd_pu[i]
+            : data.ac_buses[static_cast<size_t>(i)].pd_mw / data.base_mva;
     P[i] = data.pg[i] - pd - p_shift[i];
   }
 

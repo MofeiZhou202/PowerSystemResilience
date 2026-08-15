@@ -192,9 +192,7 @@ struct LCCTransfer {
                          // state (fixed taps: departs from the scheduled
                          // AlphaN a tap changer would hold)
   double gamma_deg{0.0}; // extinction angle: the CEA control value while the
-                         // characteristic holds; back-calculated physical
-                         // value when the rated-current limit binds (then
-                         // gamma >= gamma_set — see id_at_limit)
+                         // characteristic holds; otherwise back-calculated
   double ud0_kv{0.0};    // ideal no-load DC voltage (3*sqrt(2)/pi)*n_b*E at
                          // the solved valve-side voltage
   double ud_kv{0.0};     // solved DC terminal voltage
@@ -208,11 +206,8 @@ struct LCCTransfer {
   bool tap_control_active{false};
   bool tap_control_converged{false};
   bool tap_at_limit{false};
-  bool id_at_limit{false};           // DC current clamped at rated_current_a:
-                                     // the current order/limit binds, so a
-                                     // CEA/constant-alpha setpoint is NOT
-                                     // held (gamma/alpha then float above
-                                     // their minimum — physically safe)
+  bool id_at_limit{false};           // blocked at the unidirectional Id=0 bound;
+                                     // BridgeIn is not a Newton current limit;
   bool alpha_within_limits{true};  // alpha_min_deg <= alpha <= alpha_stop_deg
   bool gamma_within_limits{true};  // gamma >= gamma_min_deg (when specified)
 };

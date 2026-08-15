@@ -42,14 +42,18 @@ StationParams station_params(const LCCConverter& conv,
       kUd0Factor * nb * std::max(commutation_e_kv, 0.0);
   p.rc_ohm = kThreeOverPi * nb * std::max(conv.x_comm_ohm, kMinXCommOhm);
   p.vdrop_kv = nb * conv.v_drop_v * 1e-3;
-  p.id_max_ka = (conv.rated_current_a > 0.0) ? conv.rated_current_a * 1e-3 : 0.0;
+  // BridgeIn is a bridge nameplate/reporting value, not a steady-state
+  // current order. The actual order comes from the LD/DC/BM controls
+  // (scheduled P, scheduled I, alpha/gamma, or Udc). Keep the LCC
+  // unidirectional guard below, but do not silently replace the declared
+  // control mode with constant-current operation at the nameplate value.
+  p.id_max_ka = 0.0;
   return p;
 }
 
-// Clamp the DC current to the physical unidirectional range [0, id_max].
-// LCC current cannot reverse (thyristor blocking); the rated-current clamp is
-// mostly a transient-iteration guard (a constant-power rectifier at low U_d
-// would otherwise demand unbounded current).
+// Enforce the physical unidirectional current range. id_max remains available
+// to generic callers, but BPA/DSP BridgeIn does not populate it because that
+// field is a nameplate rather than a steady-state current order.
 double clamp_id(double id_ka, double id_max_ka, bool& at_limit) {
   at_limit = false;
   if (id_ka < 0.0) {
@@ -352,9 +356,7 @@ double lcc_dc_jacobian_vdc(const SolverData& data,
       std::max(vm[conv.ac_bus - 1], 0.0) * conv.vn_ac_kv;
   const StationParams p = station_params(
       conv, terminal_e_kv, lcc_commutation_voltage_kv(data, conv, vm));
-  // Equality with the rated current is still reported through id_at_limit,
-  // but Newton stays on the authored control characteristic. Only a strict
-  // overshoot uses the clamped constant-current derivative.
+  // At a true current boundary, use the matching one-sided derivative.
   if (current_limit_strictly_binds(conv, p, op.ud_kv)) {
     // Current clamped at the rated/blocking limit: the injection degenerates
     // to constant current (pdc = ±U_d * I_lim), whose slope is ±I_lim.  A

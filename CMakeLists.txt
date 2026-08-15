@@ -783,6 +783,22 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/dsp_pf_compare_dump.cpp")
   hacdcpf_copy_opendss_runtime(dsp_pf_compare_dump)
 endif()
 
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tools/yunnan_reactive_model_validation.cpp)
+  add_executable(yunnan_reactive_model_validation
+    tools/yunnan_reactive_model_validation.cpp)
+  target_link_libraries(yunnan_reactive_model_validation
+    PRIVATE hacdcpf::hacdcpf)
+  hacdcpf_copy_opendss_runtime(yunnan_reactive_model_validation)
+endif()
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/ieee39_reactive_model_validation.cpp")
+  add_executable(ieee39_reactive_model_validation
+    tools/ieee39_reactive_model_validation.cpp)
+  target_link_libraries(ieee39_reactive_model_validation
+    PRIVATE hacdcpf::hacdcpf)
+  hacdcpf_copy_opendss_runtime(ieee39_reactive_model_validation)
+endif()
+
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/gridlabd_validation_matrix.cpp")
   add_executable(gridlabd_validation_matrix tools/gridlabd_validation_matrix.cpp)
   target_link_libraries(gridlabd_validation_matrix PRIVATE hacdcpf::hacdcpf)

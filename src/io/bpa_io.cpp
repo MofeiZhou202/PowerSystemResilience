@@ -219,6 +219,10 @@ struct RControl {
   double controlled_kv{0.0};
   double tap_max_kv{0.0};
   double tap_min_kv{0.0};
+  // Source columns 56-57. DSP perturbation tests on the CIGRE LCC case show
+  // that this value does not discretize converter-transformer tap control:
+  // blank, 02, 25 and 50 produce identical taps and LCC operating points.
+  // Retain it as source metadata, but do not map it to LCC discrete positions.
   int tap_count{0};
 };
 
@@ -288,6 +292,84 @@ struct PendingLzLink {
   std::string name2;
   double i_rated_a{0.0};
   double r_ohm{0.0};
+  double inductance_mh{0.0};
+};
+
+/// BA/BA1/BA2 form one layered LCC station record.  BA names the external
+/// AC/DC terminal, BA1 supplies the built-in converter transformer, and BA2
+/// supplies the steady-state converter limits and setpoints.
+struct BaStation {
+  std::string locator;
+  std::string name;
+  double primary_kv{0.0};
+  std::string role;
+  std::string layer;
+  int bridges{1};
+  double smoothing_reactor_mh{0.0};
+  double power_percent{100.0};
+  double q_compensation_mvar{0.0};
+
+  bool has_ba1{false};
+  double valve_kv{0.0};
+  double transformer_sn_mva{0.0};
+  double transformer_x_pu{0.0};
+  double tap_max_kv{0.0};
+  double tap_min_kv{0.0};
+
+  bool has_ba2{false};
+  double v_drop_v{0.0};
+  double rated_current_a{0.0};
+  double alpha_min_deg{0.0};
+  double alpha_stop_deg{0.0};
+  double normal_angle_deg{0.0};
+  double rated_dc_kv{0.0};
+  int dc_bus{0};
+};
+
+/// DC is the system-level control record for a layered/hybrid LCC scheme.
+/// The four terminals are high/low rectifier and high/low inverter positions;
+/// a blank name denotes an unused position.
+struct LayeredDcControl {
+  std::string locator;
+  std::string rectifier_high;
+  double rectifier_high_kv{0.0};
+  std::string rectifier_low;
+  double rectifier_low_kv{0.0};
+  std::string inverter_high;
+  double inverter_high_kv{0.0};
+  std::string inverter_low;
+  double inverter_low_kv{0.0};
+  int system_type{0};
+  int control_mode{0};
+  int inverter_layer_mode{0};
+  double p_sch_mw{0.0};
+  double rectifier_v_sch_kv{0.0};
+  double inverter_v_sch_kv{0.0};
+  int converter_calculation_mode{1};
+};
+
+struct BmStation {
+  BdStation station;
+  std::string locator;
+  std::string role;
+  double normal_angle_deg{0.0};
+  double gamma_min_deg{0.0};
+  double p_sch_mw{0.0};
+  double v_sch_kv{0.0};
+};
+
+struct PendingNativeDcLine {
+  std::string locator;
+  std::string source_card;
+  std::string name1;
+  double kv1{0.0};
+  std::string name2;
+  double kv2{0.0};
+  double i_rated_a{0.0};
+  double r_ohm{0.0};
+  double inductance_mh{0.0};
+  double capacitance_uf{0.0};
+  double length_km{0.0};
 };
 
 /// L+ continuation data for line shunt reactors. The two Mvar values belong
@@ -323,9 +405,16 @@ struct Importer {
   std::unordered_map<std::string, BzStation> bz_by_name;
   std::vector<std::string> bz_order;  // BZ card order -> stable VSC .index
   std::vector<PendingLzLink> pending_lz_links;
+  std::unordered_map<std::string, BaStation> ba_by_name;
+  std::vector<std::string> ba_order;
+  std::vector<LayeredDcControl> layered_dc_controls;
+  std::unordered_map<std::string, BmStation> bm_by_name;
+  std::vector<std::string> bm_order;
+  std::vector<PendingNativeDcLine> pending_native_dc_lines;
   std::vector<PendingLineShunt> pending_line_shunts;
   bool g_half_note_emitted{false};
   bool magnetizing_note_emitted{false};
+  int current_source_order{-1};
 
   std::string name_of(const std::string& raw) const {
     return names_need_gbk ? gbk_to_utf8(trim(raw)) : trim(raw);
@@ -378,7 +467,12 @@ struct Importer {
 
   int ensure_dc_bus(const std::string& name, double base_kv) {
     auto it = dc_bus_by_name.find(name);
-    if (it != dc_bus_by_name.end()) return it->second;
+    if (it != dc_bus_by_name.end()) {
+      DCBus& existing =
+          result.system.dc.buses[static_cast<size_t>(it->second) - 1];
+      if (existing.base_kv <= 0.0 && base_kv > 0.0) existing.base_kv = base_kv;
+      return it->second;
+    }
     DCBus bus;
     bus.index = static_cast<int>(result.system.dc.buses.size()) + 1;
     bus.bus_type = DCBusType::DC_P;
@@ -495,6 +589,8 @@ struct Importer {
         gen.qmin_mvar = qgenmin;
       }
       gen.is_slack = (type == "BS");
+      gen.bpa_is_bq = (type == "BQ");
+      gen.bpa_source_order = gen.bpa_is_bq ? current_source_order : -1;
       gen.name = name;
       result.system.ac.generators.push_back(std::move(gen));
     }
@@ -750,6 +846,8 @@ struct Importer {
     st.primary_kv = num(field(line, 59, 62), present);
     st.dc_kv = num(field(line, 63, 66), present);
     st.dc_bus = ensure_dc_bus(name, st.dc_kv);
+    result.system.dc.buses[static_cast<size_t>(st.dc_bus) - 1].source_card =
+        "BD";
     bd_by_name.emplace(name, st);
   }
 
@@ -890,7 +988,12 @@ struct Importer {
           c.tap_control_modelled = true;
           c.transformer_tap_min_pu = tap_min;
           c.transformer_tap_max_pu = tap_max;
-          c.transformer_tap_steps = control->tap_count;
+          // DSP solves the LCC converter-transformer tap continuously inside
+          // the R-card range. Columns 56-57 do not quantize this control (the
+          // CIGRE black-box matrix blank/02/25/50 is invariant), so importing
+          // them as discrete positions creates artificial angle and Udc
+          // residuals on production cases.
+          c.transformer_tap_steps = 0;
           c.transformer_tap_winding =
               control->adjustable_terminal == 2 ? 2 : 1;
         } else {
@@ -941,6 +1044,8 @@ struct Importer {
 
     const double i_rated = num(field(line, 34, 37), present);
     const double r_ohm = num(field(line, 38, 41), present);
+    const double inductance_mh = num(field(line, 42, 46), present);
+    const double capacitance_uf = num(field(line, 47, 51), present);
     const std::string ctrl_point = field(line, 56, 56);
     const double p_sch = num(field(line, 57, 61), present);
     const double vdc_rect = num(field(line, 62, 66), present);
@@ -971,6 +1076,9 @@ struct Importer {
       br.rate_a_mva = vdc_kv * i_rated / 1000.0;
     }
     br.length_km = length;
+    br.inductance_mh = inductance_mh;
+    br.capacitance_uf = capacitance_uf;
+    br.source_card = "LD";
     if (length > 0.0) {
       // LD columns 38-41 contain the resistance of the complete DC line.
       // Preserve the equivalent engineering value used by the GUI instead of
@@ -1095,6 +1203,404 @@ struct Importer {
   }
 
   // ── VSC-HVDC station node card: BZ ───────────────────────────────────
+  // Layered/hybrid LCC cards: BA, BA1, BA2, DC, BB, LY.
+  void parse_ba_card(const std::string& line, const std::string& locator) {
+    bool present = false;
+    const std::string name = name_of(raw_field(line, 7, 14));
+    if (name.empty()) {
+      warn(ImportDisposition::Rejected, ImportReasonCode::MissingRequired,
+           locator, "BA/BA1/BA2 card without a station name; skipped.");
+      return;
+    }
+
+    const char continuation = line.size() > 2 ? line[2] : ' ';
+    auto it = ba_by_name.find(name);
+    if (it == ba_by_name.end()) {
+      BaStation seed;
+      seed.name = name;
+      seed.locator = locator;
+      it = ba_by_name.emplace(name, std::move(seed)).first;
+      ba_order.push_back(name);
+    }
+    BaStation& st = it->second;
+
+    if (continuation == '1') {
+      st.has_ba1 = true;
+      st.valve_kv = num(field(line, 20, 23), present);
+      st.transformer_sn_mva = num(field(line, 25, 28), present);
+      st.transformer_x_pu = num_rx(field(line, 37, 40), present);
+      st.tap_max_kv = num(field(line, 44, 49), present);
+      st.tap_min_kv = num(field(line, 51, 56), present);
+      return;
+    }
+    if (continuation == '2') {
+      st.has_ba2 = true;
+      st.v_drop_v = num(field(line, 20, 23), present);
+      st.rated_current_a = num(field(line, 26, 30), present);
+      st.alpha_min_deg = num(field(line, 31, 35), present);
+      st.alpha_stop_deg = num(field(line, 36, 41), present);
+      st.normal_angle_deg = num(field(line, 43, 47), present);
+      st.rated_dc_kv = num(field(line, 68, 71), present);
+      st.dc_bus = ensure_dc_bus(name, st.rated_dc_kv);
+      return;
+    }
+
+    st.locator = locator;
+    st.primary_kv = num(field(line, 15, 18), present);
+    st.role = field(line, 22, 22);
+    st.layer = field(line, 24, 24);
+    const double bridges = num(field(line, 26, 26), present);
+    st.bridges = bridges > 0.0 ? static_cast<int>(std::lround(bridges)) : 1;
+    st.smoothing_reactor_mh = num(field(line, 41, 45), present);
+    const double percent = num(field(line, 46, 50), present);
+    if (percent > 0.0) st.power_percent = percent;
+    st.q_compensation_mvar = num(field(line, 51, 55), present);
+    st.dc_bus = ensure_dc_bus(name, st.rated_dc_kv);
+  }
+
+  void parse_layered_dc_control(const std::string& line,
+                                const std::string& locator) {
+    bool present = false;
+    LayeredDcControl control;
+    control.locator = locator;
+    control.rectifier_high = name_of(raw_field(line, 4, 11));
+    control.rectifier_high_kv = num(field(line, 12, 15), present);
+    control.rectifier_low = name_of(raw_field(line, 16, 23));
+    control.rectifier_low_kv = num(field(line, 24, 27), present);
+    control.inverter_high = name_of(raw_field(line, 28, 35));
+    control.inverter_high_kv = num(field(line, 36, 39), present);
+    control.inverter_low = name_of(raw_field(line, 40, 47));
+    control.inverter_low_kv = num(field(line, 48, 51), present);
+    control.system_type =
+        static_cast<int>(std::lround(num(field(line, 53, 53), present)));
+    control.control_mode =
+        static_cast<int>(std::lround(num(field(line, 55, 55), present)));
+    control.inverter_layer_mode =
+        static_cast<int>(std::lround(num(field(line, 57, 57), present)));
+    control.p_sch_mw = num(field(line, 61, 65), present);
+    control.rectifier_v_sch_kv = num(field(line, 67, 71), present);
+    control.inverter_v_sch_kv = num(field(line, 73, 77), present);
+    const double calculation_mode = num(field(line, 87, 87), present);
+    if (present) {
+      control.converter_calculation_mode =
+          static_cast<int>(std::lround(calculation_mode));
+    }
+    layered_dc_controls.push_back(std::move(control));
+  }
+
+  void parse_bb_card(const std::string& line, const std::string& locator) {
+    bool present = false;
+    const std::string name = name_of(raw_field(line, 7, 14));
+    const double kv = num(field(line, 15, 18), present);
+    if (name.empty()) {
+      warn(ImportDisposition::Rejected, ImportReasonCode::MissingRequired,
+           locator, "BB card without a DC bus name; skipped.");
+      return;
+    }
+    const int index = ensure_dc_bus(name, kv);
+    DCBus& bus = result.system.dc.buses[static_cast<size_t>(index) - 1];
+    bus.source_card = "BB";
+    bus.converter_role = field(line, 22, 22);
+    bus.converter_layer = field(line, 24, 24);
+    bus.bus_type = DCBusType::DC_P;
+    bus.pd_mw = 0.0;
+    result.report.add(ImportDisposition::Accepted, ImportReasonCode::Ok,
+                      ImportSeverity::Info, locator,
+                      "BB passive junction imported as a zero-injection "
+                      "DC_P bus whose voltage is solved from DC KCL.");
+  }
+
+  // Multi-terminal LCC cards: BM and LM.
+  void parse_bm_card(const std::string& line, const std::string& locator) {
+    bool present = false;
+    const std::string name = name_of(raw_field(line, 7, 14));
+    if (name.empty()) {
+      warn(ImportDisposition::Rejected, ImportReasonCode::MissingRequired,
+           locator, "BM card without a station name; skipped.");
+      return;
+    }
+    if (bm_by_name.count(name) != 0) {
+      warn(ImportDisposition::Rejected, ImportReasonCode::DuplicateId, locator,
+           "Duplicate BM station '" + name + "'; skipped.");
+      return;
+    }
+
+    BmStation bm;
+    bm.locator = locator;
+    BdStation& st = bm.station;
+    st.name = name;
+    st.ac_kv = num(field(line, 15, 18), present);
+    st.ac_bus = ensure_ac_bus(name, st.ac_kv, locator, /*quiet=*/true);
+    st.bridges = num(field(line, 21, 25), present);
+    st.sr_mh = num(field(line, 26, 30), present);
+    st.alpha_min_deg = num(field(line, 31, 35), present);
+    st.alpha_stop_deg = num(field(line, 36, 40), present);
+    st.vdrop_v = num(field(line, 41, 45), present);
+    st.bridge_in_a = num(field(line, 46, 50), present);
+    st.primary_name = name_of(raw_field(line, 51, 58));
+    st.primary_kv = num(field(line, 59, 62), present);
+    bm.role = field(line, 63, 63);
+    bm.normal_angle_deg = num_scaled(field(line, 64, 66), 10.0, present);
+    bm.gamma_min_deg = num(field(line, 67, 69), present);
+    bm.p_sch_mw = num(field(line, 70, 74), present);
+    bm.v_sch_kv = num(field(line, 75, 79), present);
+    st.dc_kv = num(field(line, 80, 85), present);
+    st.dc_bus = ensure_dc_bus(name, st.dc_kv);
+    DCBus& dc_bus =
+        result.system.dc.buses[static_cast<size_t>(st.dc_bus) - 1];
+    dc_bus.source_card = "BM";
+    dc_bus.converter_role = bm.role;
+    bm_order.push_back(name);
+    bm_by_name.emplace(name, std::move(bm));
+  }
+
+  void parse_native_dc_line(const std::string& line,
+                            const std::string& locator,
+                            const std::string& source_card) {
+    bool present = false;
+    PendingNativeDcLine branch;
+    branch.locator = locator;
+    branch.source_card = source_card;
+    branch.name1 = name_of(raw_field(line, 7, 14));
+    branch.kv1 = num(field(line, 15, 18), present);
+    branch.name2 = name_of(raw_field(line, 20, 27));
+    branch.kv2 = num(field(line, 28, 31), present);
+    branch.i_rated_a = num(field(line, 34, 37), present);
+    branch.r_ohm = num(field(line, 38, 42), present);
+    branch.inductance_mh = num(field(line, 43, 49), present);
+    branch.capacitance_uf = num(field(line, 50, 56), present);
+    branch.length_km = num(field(line, 77, 81), present);
+    if (branch.name1.empty() || branch.name2.empty()) {
+      warn(ImportDisposition::Rejected, ImportReasonCode::MissingRequired,
+           locator, source_card + " card with a missing terminal; skipped.");
+      return;
+    }
+    pending_native_dc_lines.push_back(std::move(branch));
+  }
+
+  const LayeredDcControl* find_layered_control(
+      const BaStation& station) const {
+    for (const auto& control : layered_dc_controls) {
+      if (control.rectifier_high == station.name ||
+          control.rectifier_low == station.name ||
+          control.inverter_high == station.name ||
+          control.inverter_low == station.name) {
+        return &control;
+      }
+    }
+    return nullptr;
+  }
+
+  void make_ba_station(BaStation& st) {
+    if (!st.has_ba1 || !st.has_ba2 || st.primary_kv <= 0.0 ||
+        st.valve_kv <= 0.0 || st.rated_dc_kv <= 0.0) {
+      warn(ImportDisposition::Rejected, ImportReasonCode::MissingRequired,
+           st.locator, "BA station '" + st.name +
+                           "' is missing BA1/BA2 or a required voltage; "
+                           "station skipped.");
+      return;
+    }
+
+    st.dc_bus = ensure_dc_bus(st.name, st.rated_dc_kv);
+    DCBus& dc_bus =
+        result.system.dc.buses[static_cast<size_t>(st.dc_bus) - 1];
+    dc_bus.source_card = "BA";
+    dc_bus.converter_role = st.role;
+    dc_bus.converter_layer = st.layer;
+
+    const int primary_bus =
+        ensure_ac_bus(st.name, st.primary_kv, st.locator, /*quiet=*/true);
+    const int valve_bus =
+        ensure_ac_bus(st.name, st.valve_kv, st.locator, /*quiet=*/true);
+
+    ACBranch transformer;
+    transformer.index = static_cast<int>(result.system.ac.branches.size());
+    transformer.from_bus = primary_bus;
+    transformer.to_bus = valve_bus;
+    transformer.x_pu = st.transformer_x_pu;
+    transformer.tap = 1.0;
+    transformer.sn_mva = st.transformer_sn_mva;
+    transformer.vn_hv_kv = std::max(st.primary_kv, st.valve_kv);
+    transformer.vn_lv_kv = std::min(st.primary_kv, st.valve_kv);
+    transformer.name = "T_BA_" + st.name + "_" + st.layer;
+    const int transformer_index = transformer.index;
+    result.system.ac.branches.push_back(std::move(transformer));
+
+    TransformerCardData transformer_data;
+    transformer_data.branch_index = transformer_index;
+    transformer_data.name1 = st.name;
+    transformer_data.name2 = st.name;
+    transformer_data.kv1 = st.primary_kv;
+    transformer_data.kv2 = st.valve_kv;
+    transformer_data.tap1_kv = st.primary_kv;
+    transformer_data.tap2_kv = st.valve_kv;
+    transformer_card_data.emplace(transformer_index,
+                                  std::move(transformer_data));
+
+    const LayeredDcControl* control = find_layered_control(st);
+    const bool rectifier = st.role != "I";
+    double p_sch = 0.0;
+    double local_v_sch = 0.0;
+    if (control != nullptr) {
+      p_sch = control->p_sch_mw * st.power_percent / 100.0;
+      local_v_sch = rectifier ? control->rectifier_v_sch_kv
+                              : control->inverter_v_sch_kv;
+    } else {
+      warn(ImportDisposition::Coerced, ImportReasonCode::MissingRequired,
+           st.locator, "BA station '" + st.name +
+                           "' has no matching DC control card; zero scheduled "
+                           "power is used.");
+    }
+
+    BdStation native;
+    native.name = st.name;
+    native.ac_bus = valve_bus;
+    native.dc_bus = st.dc_bus;
+    native.ac_kv = st.valve_kv;
+    native.dc_kv = st.rated_dc_kv;
+    native.bridges = st.bridges;
+    native.sr_mh = st.smoothing_reactor_mh;
+    native.alpha_min_deg = st.alpha_min_deg;
+    native.alpha_stop_deg = st.alpha_stop_deg;
+    native.vdrop_v = st.v_drop_v;
+    native.bridge_in_a = st.rated_current_a;
+    native.primary_name = st.name;
+    native.primary_kv = st.primary_kv;
+
+    const size_t before = result.system.lcc_converters.size();
+    make_lcc_station(native,
+                     rectifier ? LCCStationRole::Rectifier
+                               : LCCStationRole::Inverter,
+                     st.locator, p_sch, st.rated_dc_kv, local_v_sch,
+                     st.normal_angle_deg, st.normal_angle_deg);
+    if (result.system.lcc_converters.size() == before) return;
+    LCCConverter& converter = result.system.lcc_converters.back();
+    converter.source_card = "BA";
+    converter.layer_code = st.layer;
+    converter.power_percent = st.power_percent;
+    converter.q_compensation_mvar = st.q_compensation_mvar;
+    converter.model_scope =
+        "bpa-layered-lcc-quasi-steady+embedded-transformer-tap-control";
+    converter.model_limitations =
+        "BA/BA1/BA2 layered-LCC steady-state projection. BA1 creates the "
+        "converter transformer; LY and the common DC network provide KCL. "
+        "Smoothing reactor and line inductance are dynamic-only. Series "
+        "high/low layer sharing remains explicitly uncalibrated until a DSP "
+        "component case containing both layers is available.";
+
+    if (st.tap_min_kv > 0.0 && st.tap_max_kv >= st.tap_min_kv &&
+        st.primary_kv > 0.0 && st.normal_angle_deg > 0.0) {
+      converter.tap_control_modelled = true;
+      converter.transformer_tap_min_pu = st.tap_min_kv / st.primary_kv;
+      converter.transformer_tap_max_pu = st.tap_max_kv / st.primary_kv;
+      converter.transformer_tap_steps = 0;
+      converter.transformer_tap_winding = 1;
+    }
+
+    if (std::abs(st.q_compensation_mvar) > 0.0) {
+      Shunt compensation;
+      compensation.index =
+          static_cast<int>(result.system.ac.shunts.size());
+      compensation.bus = primary_bus;
+      // BPA BA Qshunt is positive for capacitive compensation. The rich
+      // model uses positive bs_mvar for reactive injection at 1 pu.
+      compensation.bs_mvar = st.q_compensation_mvar;
+      compensation.name = "BA_QSH_" + st.name + "_" + st.layer;
+      result.system.ac.shunts.push_back(std::move(compensation));
+    }
+
+    result.report.add(
+        ImportDisposition::Accepted, ImportReasonCode::Ok,
+        ImportSeverity::Info, st.locator,
+        "BA/BA1/BA2 station '" + st.name +
+            "' imported as a native LCC converter plus its embedded BA1 "
+            "converter transformer.");
+  }
+
+  void make_bm_station(BmStation& bm) {
+    const bool rectifier = bm.role != "I";
+    const size_t before = result.system.lcc_converters.size();
+    make_lcc_station(bm.station,
+                     rectifier ? LCCStationRole::Rectifier
+                               : LCCStationRole::Inverter,
+                     bm.locator, bm.p_sch_mw, bm.station.dc_kv,
+                     bm.v_sch_kv, bm.normal_angle_deg,
+                     bm.normal_angle_deg);
+    if (result.system.lcc_converters.size() == before) return;
+    LCCConverter& converter = result.system.lcc_converters.back();
+    converter.source_card = "BM";
+    converter.gamma_min_deg = bm.gamma_min_deg;
+    converter.model_scope = converter.tap_control_modelled
+                                ? "bpa-mtdc-lcc-quasi-steady+tap-control"
+                                : "bpa-mtdc-lcc-quasi-steady";
+    converter.model_limitations =
+        "BM multi-terminal LCC station on the native DC nodal network. LM "
+        "resistance is in the unified Newton equations; smoothing reactors "
+        "and line inductance are dynamic-only.";
+    result.report.add(ImportDisposition::Accepted, ImportReasonCode::Ok,
+                      ImportSeverity::Info, bm.locator,
+                      "BM station '" + bm.station.name +
+                          "' imported as a native multi-terminal LCC "
+                          "converter.");
+  }
+
+  void make_native_dc_line(const PendingNativeDcLine& pending) {
+    const auto from_it = dc_bus_by_name.find(pending.name1);
+    const auto to_it = dc_bus_by_name.find(pending.name2);
+    if (from_it == dc_bus_by_name.end() || to_it == dc_bus_by_name.end()) {
+      warn(ImportDisposition::Rejected, ImportReasonCode::UnresolvedBusRef,
+           pending.locator, pending.source_card + " card references an "
+           "undeclared DC node ('" + pending.name1 + "' / '" +
+           pending.name2 + "'); skipped.");
+      return;
+    }
+    const DCBus& from_bus =
+        result.system.dc.buses[static_cast<size_t>(from_it->second) - 1];
+    const DCBus& to_bus =
+        result.system.dc.buses[static_cast<size_t>(to_it->second) - 1];
+    const double base_kv = from_bus.base_kv > 0.0 ? from_bus.base_kv
+                           : to_bus.base_kv > 0.0 ? to_bus.base_kv
+                                                  : 0.0;
+    if (base_kv <= 0.0) {
+      warn(ImportDisposition::Rejected, ImportReasonCode::MissingRequired,
+           pending.locator, pending.source_card +
+                                " line has no rated DC voltage; skipped.");
+      return;
+    }
+    if (from_bus.base_kv > 0.0 && to_bus.base_kv > 0.0 &&
+        std::abs(from_bus.base_kv - to_bus.base_kv) > 1e-6) {
+      warn(ImportDisposition::Coerced, ImportReasonCode::UnitInferred,
+           pending.locator, pending.source_card +
+                                " terminal DC bases differ; the from-terminal "
+                                "base is used for per-unit conversion.");
+    }
+
+    DCBranch branch;
+    branch.index = static_cast<int>(result.system.dc.branches.size());
+    branch.from_bus = from_it->second;
+    branch.to_bus = to_it->second;
+    branch.r_pu = pending.r_ohm * mva_base / (base_kv * base_kv);
+    branch.base_kv = base_kv;
+    branch.rate_a_mva = pending.i_rated_a > 0.0
+                            ? base_kv * pending.i_rated_a / 1000.0
+                            : 0.0;
+    branch.inductance_mh = pending.inductance_mh;
+    branch.capacitance_uf = pending.capacitance_uf;
+    branch.length_km = pending.length_km;
+    if (pending.length_km > 0.0) {
+      branch.r_ohm_per_km = pending.r_ohm / pending.length_km;
+    }
+    branch.source_card = pending.source_card;
+    branch.name = pending.source_card + "_" + pending.name1 + "_" +
+                  pending.name2;
+    result.system.dc.branches.push_back(std::move(branch));
+    result.report.add(ImportDisposition::Accepted, ImportReasonCode::Ok,
+                      ImportSeverity::Info, pending.locator,
+                      pending.source_card +
+                          " line imported into the native resistive DC "
+                          "network; L/C retained as dynamic metadata.");
+  }
+
   void parse_bz_card(const std::string& line, const std::string& locator) {
     bool present = false;
     const std::string name = name_of(raw_field(line, 7, 14));
@@ -1120,6 +1626,8 @@ struct Importer {
     if (poles >= 1.0) st.n_poles = static_cast<int>(std::lround(poles));
     st.udcn_bz_kv = num(field(line, 67, 70), present);
     st.dc_bus = ensure_dc_bus(name, st.udcn_bz_kv);
+    result.system.dc.buses[static_cast<size_t>(st.dc_bus) - 1].source_card =
+        "BZ";
     bz_order.push_back(name);
     bz_by_name.emplace(name, std::move(st));
   }
@@ -1171,6 +1679,7 @@ struct Importer {
     lz.name2 = name_of(raw_field(line, 20, 27));
     lz.i_rated_a = num(field(line, 34, 37), present);
     lz.r_ohm = num(field(line, 38, 43), present);
+    lz.inductance_mh = num(field(line, 44, 50), present);
     pending_lz_links.push_back(std::move(lz));
   }
 
@@ -1264,20 +1773,22 @@ struct Importer {
 
   // ── VSC-HVDC line construction (materialized after the whole file) ────
   void make_lz_branch(const PendingLzLink& lz) {
-    const auto it1 = bz_by_name.find(lz.name1);
-    const auto it2 = bz_by_name.find(lz.name2);
-    if (lz.name1.empty() || lz.name2.empty() || it1 == bz_by_name.end() ||
-        it2 == bz_by_name.end()) {
+    const auto dc1 = dc_bus_by_name.find(lz.name1);
+    const auto dc2 = dc_bus_by_name.find(lz.name2);
+    if (lz.name1.empty() || lz.name2.empty() || dc1 == dc_bus_by_name.end() ||
+        dc2 == dc_bus_by_name.end()) {
       // DSP aborts with "LZ卡没有对应BZ卡"; here the line is dropped.
       warn(ImportDisposition::Rejected, ImportReasonCode::UnresolvedBusRef,
-           lz.locator, "LZ card references a VSC station without a BZ card "
-                       "('" + lz.name1 + "' / '" + lz.name2 + "'); skipped.");
+           lz.locator, "LZ card references an undeclared DC node "
+                        "('" + lz.name1 + "' / '" + lz.name2 + "'); skipped.");
       return;
     }
-    const BzStation& st1 = it1->second;
-    const BzStation& st2 = it2->second;
-    const double udcn1 = bz_udcn_kv(st1);
-    const double udcn2 = bz_udcn_kv(st2);
+    const DCBus& bus1 =
+        result.system.dc.buses[static_cast<size_t>(dc1->second) - 1];
+    const DCBus& bus2 =
+        result.system.dc.buses[static_cast<size_t>(dc2->second) - 1];
+    const double udcn1 = bus1.base_kv;
+    const double udcn2 = bus2.base_kv;
     const double udcn = udcn1 > 0.0 ? udcn1 : udcn2;
     if (udcn1 > 0.0 && udcn2 > 0.0 && std::abs(udcn1 - udcn2) > 1e-6) {
       // The card manual requires equal rated DC voltages at both ends.
@@ -1287,20 +1798,33 @@ struct Importer {
                            std::to_string(udcn1) + " / " +
                            std::to_string(udcn2) + " kV); the first is used.");
     }
-    if (st1.n_poles != st2.n_poles) {
+    int n_poles = 1;
+    const auto bz1 = bz_by_name.find(lz.name1);
+    const auto bz2 = bz_by_name.find(lz.name2);
+    if (bz1 != bz_by_name.end()) n_poles = std::max(1, bz1->second.n_poles);
+    if (bz2 != bz_by_name.end()) {
+      if (bz1 != bz_by_name.end() &&
+          bz1->second.n_poles != bz2->second.n_poles) {
+        warn(ImportDisposition::Coerced, ImportReasonCode::UnitInferred,
+             lz.locator, "LZ card '" + lz.name1 + "'-'" + lz.name2 +
+                             "': terminal pole counts differ; the first "
+                             "VSC station's value is used.");
+      } else if (bz1 == bz_by_name.end()) {
+        n_poles = std::max(1, bz2->second.n_poles);
+      }
+    }
+    if (bz1 == bz_by_name.end() && bz2 == bz_by_name.end()) {
       warn(ImportDisposition::Coerced, ImportReasonCode::UnitInferred,
-           lz.locator, "LZ card '" + lz.name1 + "'-'" + lz.name2 +
-                           "': terminal pole counts differ; the first "
-                           "station's is used.");
+           lz.locator, "LZ line has no BZ terminal; one pole is assumed.");
     }
 
     DCBranch br;
     br.index = static_cast<int>(result.system.dc.branches.size());
-    br.from_bus = st1.dc_bus;
-    br.to_bus = st2.dc_bus;
+    br.from_bus = dc1->second;
+    br.to_bus = dc2->second;
     // R on the card is per pole; n poles in parallel give R/n (verified
     // against DSP: poles 2 -> 1 doubles the line loss).
-    const double r_eff = lz.r_ohm / std::max(1, st1.n_poles);
+    const double r_eff = lz.r_ohm / n_poles;
     if (udcn > 0.0) {
       br.r_pu = r_eff * mva_base / (udcn * udcn);
       br.base_kv = udcn;
@@ -1312,8 +1836,300 @@ struct Importer {
     if (lz.i_rated_a > 0.0 && udcn > 0.0) {
       br.rate_a_mva = udcn * lz.i_rated_a / 1000.0;
     }
+    br.inductance_mh = lz.inductance_mh;
+    br.source_card = "LZ";
     br.name = "LZ_" + lz.name1 + "_" + lz.name2;
     result.system.dc.branches.push_back(std::move(br));
+  }
+
+  static bool solve_dense_linear(std::vector<std::vector<double>>& a,
+                                 std::vector<double>& b) {
+    const size_t n = b.size();
+    if (a.size() != n) return false;
+    for (size_t col = 0; col < n; ++col) {
+      size_t pivot = col;
+      for (size_t row = col + 1; row < n; ++row) {
+        if (std::abs(a[row][col]) > std::abs(a[pivot][col])) pivot = row;
+      }
+      if (std::abs(a[pivot][col]) < 1e-12) return false;
+      if (pivot != col) {
+        std::swap(a[pivot], a[col]);
+        std::swap(b[pivot], b[col]);
+      }
+      for (size_t row = col + 1; row < n; ++row) {
+        const double factor = a[row][col] / a[col][col];
+        if (factor == 0.0) continue;
+        a[row][col] = 0.0;
+        for (size_t k = col + 1; k < n; ++k) {
+          a[row][k] -= factor * a[col][k];
+        }
+        b[row] -= factor * b[col];
+      }
+    }
+    for (size_t rev = 0; rev < n; ++rev) {
+      const size_t row = n - 1 - rev;
+      double rhs = b[row];
+      for (size_t col = row + 1; col < n; ++col) {
+        rhs -= a[row][col] * b[col];
+      }
+      b[row] = rhs / a[row][row];
+    }
+    return true;
+  }
+
+  /// DSP layered control mode 1 fixes the BA rectifier terminal at the DC-card
+  /// P/Udc boundary.  A mode-1 BZ in the same hybrid DC grid balances power,
+  /// but its own card voltage is not the controlled physical terminal.  The
+  /// generic solver realizes a BZ voltage former through a stiff droop, so a
+  /// small resistive-network pre-solve translates the DSP boundary into the
+  /// equivalent internal BZ droop target without changing Newton equations.
+  void calibrate_layered_dc_voltage_targets() {
+    if (layered_dc_controls.empty() || result.system.dc.buses.empty()) return;
+
+    const size_t ndc = result.system.dc.buses.size();
+    std::unordered_map<int, size_t> bus_pos;
+    bus_pos.reserve(ndc);
+    for (size_t i = 0; i < ndc; ++i) {
+      bus_pos[result.system.dc.buses[i].index] = i;
+    }
+
+    std::vector<std::vector<std::pair<size_t, double>>> graph(ndc);
+    for (const auto& branch : result.system.dc.branches) {
+      if (!branch.in_service || !(branch.r_pu > 0.0)) continue;
+      const auto from = bus_pos.find(branch.from_bus);
+      const auto to = bus_pos.find(branch.to_bus);
+      if (from == bus_pos.end() || to == bus_pos.end()) continue;
+      const double g = 1.0 / branch.r_pu;
+      graph[from->second].emplace_back(to->second, g);
+      graph[to->second].emplace_back(from->second, g);
+    }
+
+    const double base_mva = mva_base > 0.0 ? mva_base : 100.0;
+    for (const auto& control : layered_dc_controls) {
+      if (control.control_mode != 1) {
+        warn(ImportDisposition::Coerced, ImportReasonCode::UnsupportedControl,
+             control.locator,
+             "DC layered-control mode " +
+                 std::to_string(control.control_mode) +
+                 " is retained as metadata but is not calibrated to a BZ "
+                 "voltage-former target.");
+        continue;
+      }
+
+      std::vector<const BaStation*> active_rectifiers;
+      for (const std::string* name :
+           {&control.rectifier_high, &control.rectifier_low}) {
+        if (name->empty()) continue;
+        const auto it = ba_by_name.find(*name);
+        if (it != ba_by_name.end() && it->second.dc_bus > 0) {
+          active_rectifiers.push_back(&it->second);
+        }
+      }
+      if (active_rectifiers.size() != 1) {
+        warn(ImportDisposition::Coerced,
+             ImportReasonCode::UnsupportedControl, control.locator,
+             "DC layered-control calibration requires exactly one active BA "
+             "rectifier layer; high/low series sharing remains uncalibrated.");
+        continue;
+      }
+
+      const BaStation& ba = *active_rectifiers.front();
+      const auto ba_pos_it = bus_pos.find(ba.dc_bus);
+      if (ba_pos_it == bus_pos.end()) continue;
+      const size_t ba_pos = ba_pos_it->second;
+
+      std::vector<size_t> component;
+      std::vector<char> seen(ndc, 0);
+      std::vector<size_t> stack{ba_pos};
+      seen[ba_pos] = 1;
+      while (!stack.empty()) {
+        const size_t current = stack.back();
+        stack.pop_back();
+        component.push_back(current);
+        for (const auto& [next, conductance] : graph[current]) {
+          (void)conductance;
+          if (!seen[next]) {
+            seen[next] = 1;
+            stack.push_back(next);
+          }
+        }
+      }
+
+      std::vector<size_t> balancing_vsc;
+      for (size_t i = 0; i < result.system.vsc_converters.size(); ++i) {
+        const auto& converter = result.system.vsc_converters[i];
+        const auto pos = bus_pos.find(converter.bus_dc);
+        if (converter.in_service && pos != bus_pos.end() && seen[pos->second] &&
+            converter.control_mode == ConverterMode::VDC_Q) {
+          balancing_vsc.push_back(i);
+        }
+      }
+      if (balancing_vsc.size() != 1) {
+        warn(ImportDisposition::Coerced,
+             ImportReasonCode::UnsupportedControl, control.locator,
+             "DC layered-control calibration requires exactly one mode-1 BZ "
+             "balancing station in the BA-connected DC component.");
+        continue;
+      }
+
+      VSCConverter& balance =
+          result.system.vsc_converters[balancing_vsc.front()];
+      const size_t balance_pos = bus_pos.at(balance.bus_dc);
+      if (balance_pos == ba_pos || component.size() < 2 ||
+          !(balance.k_vdc > 0.0)) {
+        continue;
+      }
+
+      const double ba_base_kv =
+          result.system.dc.buses[ba_pos].base_kv > 0.0
+              ? result.system.dc.buses[ba_pos].base_kv
+              : ba.rated_dc_kv;
+      if (!(ba_base_kv > 0.0) || !(control.rectifier_v_sch_kv > 0.0)) {
+        warn(ImportDisposition::Coerced, ImportReasonCode::MissingRequired,
+             control.locator,
+             "DC layered-control calibration skipped because the BA rated or "
+             "scheduled rectifier voltage is missing.");
+        continue;
+      }
+      const double ba_voltage = control.rectifier_v_sch_kv / ba_base_kv;
+
+      std::vector<double> p_spec(ndc, 0.0);
+      for (size_t pos : component) {
+        p_spec[pos] -= result.system.dc.buses[pos].pd_mw / base_mva;
+      }
+      for (const auto& converter : result.system.vsc_converters) {
+        if (!converter.in_service || &converter == &balance) continue;
+        const auto pos = bus_pos.find(converter.bus_dc);
+        if (pos == bus_pos.end() || !seen[pos->second]) continue;
+        if (converter.control_mode != ConverterMode::PQ_MODE &&
+            converter.control_mode != ConverterMode::AC_PV &&
+            converter.control_mode != ConverterMode::AC_GRID_FORMING) {
+          continue;
+        }
+        const double p = converter.p_set_mw / base_mva;
+        const double loss = (1.0 - converter.eta) * std::abs(p);
+        p_spec[pos->second] -= p + loss;
+      }
+      for (const auto& converter : result.system.lcc_converters) {
+        if (!converter.in_service ||
+            converter.control_mode != LCCControlMode::ConstantPower) {
+          continue;
+        }
+        const auto pos = bus_pos.find(converter.dc_bus);
+        if (pos == bus_pos.end() || !seen[pos->second]) continue;
+        const double sign = converter.station_role == LCCStationRole::Rectifier
+                                ? 1.0
+                                : -1.0;
+        p_spec[pos->second] += sign * converter.p_set_mw / base_mva;
+      }
+
+      std::vector<size_t> variable_buses;
+      std::vector<size_t> equation_buses;
+      for (size_t pos : component) {
+        if (pos != ba_pos) variable_buses.push_back(pos);
+        if (pos != balance_pos) equation_buses.push_back(pos);
+      }
+      if (variable_buses.size() != equation_buses.size()) continue;
+
+      std::unordered_map<size_t, size_t> variable_col;
+      for (size_t i = 0; i < variable_buses.size(); ++i) {
+        variable_col[variable_buses[i]] = i;
+      }
+      std::vector<double> voltage(ndc, 1.0);
+      voltage[ba_pos] = ba_voltage;
+      bool converged = false;
+      for (int iteration = 0; iteration < 40; ++iteration) {
+        const size_t n = variable_buses.size();
+        std::vector<double> mismatch(n, 0.0);
+        std::vector<std::vector<double>> jacobian(
+            n, std::vector<double>(n, 0.0));
+        double max_mismatch = 0.0;
+        for (size_t row = 0; row < n; ++row) {
+          const size_t i = equation_buses[row];
+          double current = 0.0;
+          double diagonal_g = 0.0;
+          for (const auto& [j, g] : graph[i]) {
+            if (!seen[j]) continue;
+            current += g * (voltage[i] - voltage[j]);
+            diagonal_g += g;
+            const auto col = variable_col.find(j);
+            if (col != variable_col.end()) {
+              jacobian[row][col->second] -= voltage[i] * g;
+            }
+          }
+          mismatch[row] = voltage[i] * current - p_spec[i];
+          max_mismatch = std::max(max_mismatch, std::abs(mismatch[row]));
+          const auto diagonal = variable_col.find(i);
+          if (diagonal != variable_col.end()) {
+            jacobian[row][diagonal->second] += current +
+                                               voltage[i] * diagonal_g;
+          }
+        }
+        // Near-zero LZ links are common between a passive BB junction and a
+        // small auxiliary BZ terminal.  Their large conductance causes benign
+        // cancellation at roughly 1e-9--1e-8 pu in double precision; 1e-8 pu
+        // is already sub-watt on the 100 MVA BPA base.
+        if (max_mismatch < 1e-8) {
+          converged = true;
+          break;
+        }
+        for (double& value : mismatch) value = -value;
+        if (!solve_dense_linear(jacobian, mismatch)) break;
+
+        double step = 1.0;
+        for (size_t col = 0; col < variable_buses.size(); ++col) {
+          const double dv = mismatch[col];
+          if (dv < 0.0) {
+            step = std::min(step,
+                            0.8 * voltage[variable_buses[col]] / -dv);
+          }
+        }
+        step = std::clamp(step, 1e-3, 1.0);
+        for (size_t col = 0; col < variable_buses.size(); ++col) {
+          voltage[variable_buses[col]] += step * mismatch[col];
+        }
+      }
+      if (!converged) {
+        warn(ImportDisposition::Coerced, ImportReasonCode::UnsupportedControl,
+             control.locator,
+             "DC layered-control resistive pre-solve did not converge; the "
+             "original BZ voltage target is retained.");
+        continue;
+      }
+
+      double balance_p = 0.0;
+      for (const auto& [other, conductance] : graph[balance_pos]) {
+        if (seen[other]) {
+          balance_p += voltage[balance_pos] * conductance *
+                       (voltage[balance_pos] - voltage[other]);
+        }
+      }
+      const double target_sq = voltage[balance_pos] * voltage[balance_pos] +
+                               balance_p / balance.k_vdc;
+      if (!(target_sq > 0.0) || !std::isfinite(target_sq)) {
+        warn(ImportDisposition::Coerced, ImportReasonCode::UnsupportedControl,
+             control.locator,
+             "DC layered-control calibration produced an invalid BZ droop "
+             "target; the original target is retained.");
+        continue;
+      }
+
+      balance.v_dc_set_pu = std::sqrt(target_sq);
+      for (size_t pos : component) {
+        result.system.dc.buses[pos].vm_pu = voltage[pos];
+      }
+      std::ostringstream message;
+      message << "DC mode-1 layered control calibrated: BA '" << ba.name
+              << "' holds " << control.rectifier_v_sch_kv
+              << " kV at " << control.p_sch_mw
+              << " MW; balancing BZ '"
+              << result.system.dc.buses[balance_pos].name
+              << "' uses internal droop target " << balance.v_dc_set_pu
+              << " pu for a predicted physical terminal voltage "
+              << voltage[balance_pos] << " pu.";
+      result.report.add(ImportDisposition::Accepted, ImportReasonCode::Ok,
+                        ImportSeverity::Info, control.locator, message.str());
+    }
   }
 
   // ── Line dispatch ──────────────────────────────────────────────────────
@@ -1371,6 +2187,8 @@ struct Importer {
         continue;
       }
 
+      current_source_order = static_cast<int>(line_no);
+
       const std::string type = raw_field(line, 1, 2);
       if (type == "B " || type == "BS" || type == "BE" || type == "BQ") {
         parse_bus_card(line, locator);
@@ -1384,6 +2202,18 @@ struct Importer {
         parse_bd_card(line, locator);
       } else if (type == "LD") {
         parse_ld_card(line, locator);
+      } else if (type == "BA") {
+        parse_ba_card(line, locator);
+      } else if (type == "DC") {
+        parse_layered_dc_control(line, locator);
+      } else if (type == "BB") {
+        parse_bb_card(line, locator);
+      } else if (type == "LY") {
+        parse_native_dc_line(line, locator, "LY");
+      } else if (type == "BM") {
+        parse_bm_card(line, locator);
+      } else if (type == "LM") {
+        parse_native_dc_line(line, locator, "LM");
       } else if (type == "BZ") {
         // BZ+ shares the leading "BZ"; column 3 disambiguates.
         if (line.size() > 2 && line[2] == '+') {
@@ -1395,11 +2225,6 @@ struct Importer {
         parse_lz_card(line, locator);
       } else if (type == "R ") {
         parse_r_card(line, locator);
-      } else if (type == "BA" || type == "LY" || type == "DC" || type == "BB" ||
-                 type == "BM" || type == "LM") {
-        warn(ImportDisposition::Skipped, ImportReasonCode::UnsupportedControl,
-             locator, type + " card (multi-terminal / LCCDC DC data) is not "
-                      "supported by this importer; skipped.");
       } else {
         warn(ImportDisposition::Skipped, ImportReasonCode::UnknownField, locator,
              "Unrecognized card type '" + name_of(raw_field(line, 1, 2)) +
@@ -1436,6 +2261,18 @@ struct Importer {
                         ImportSeverity::Info, link.locator, lcc_msg.str());
     }
 
+    // Materialize layered and multi-terminal LCC stations only after every
+    // BA continuation, DC control card, T card, and R card has been read.
+    for (const auto& name : ba_order) {
+      make_ba_station(ba_by_name.at(name));
+    }
+    for (const auto& name : bm_order) {
+      make_bm_station(bm_by_name.at(name));
+    }
+    for (const auto& branch : pending_native_dc_lines) {
+      make_native_dc_line(branch);
+    }
+
     // Materialize VSC-HVDC stations (BZ/BZ+) and lines (LZ) now that every
     // card has been seen: the BZ+ continuation and the LZ terminals may in
     // principle appear anywhere after their BZ cards.
@@ -1445,6 +2282,7 @@ struct Importer {
     for (const auto& lz : pending_lz_links) {
       make_lz_branch(lz);
     }
+    calibrate_layered_dc_voltage_targets();
 
     HybridPowerSystem& sys = result.system;
     sys.base_mva = mva_base;

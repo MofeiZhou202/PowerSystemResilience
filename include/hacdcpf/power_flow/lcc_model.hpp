@@ -27,13 +27,11 @@
 /// OPF currently keeps the imported/calibrated tap fixed and reports that
 /// limitation in its model scope.
 ///
-/// Current-limit note: the DC current is clamped to [0, rated_current_a]
-/// (LCC current cannot reverse; the rated current is also the link's current
-/// order).  When the clamp binds at the solution, a CEA / constant-alpha
-/// setpoint is NOT held — the station degenerates to constant-current
-/// behaviour and gamma/alpha float (gamma stays above gamma_min, so
-/// commutation margin is preserved).  This is reported via
-/// LCCTransfer::id_at_limit and a [LCC-PHYS-03] diagnostic, never silently.
+/// Current-limit note: BridgeIn on BD/BA/BM is a bridge nameplate/reporting
+/// value, not a steady-state current order. Newton therefore does not clamp
+/// at rated_current_a; actual current orders come from LD/DC/BM controls.
+/// Thyristor current remains unidirectional (Id >= 0), and operation above
+/// the nameplate is reported as an overload diagnostic.
 
 #include <utility>
 
@@ -61,8 +59,8 @@ struct LCCOperatingPoint {
   double p_ac_mw{0.0};
   double q_ac_mvar{0.0};
   double p_dc_mw{0.0};
-  bool id_at_limit{false};        // current clamped at rated_current_a
   bool ud_at_floor{false};        // raw U_d <= 1 kV; d()/dVdc is zero
+  bool id_at_limit{false};        // blocked at the unidirectional Id=0 bound
   bool alpha_beyond_range{false}; // cos(alpha) argument outside [-1,1]:
                                   // even alpha = 0 cannot reach U_d (tap needed)
   bool gamma_beyond_range{false}; // independent inverter extinction-angle

@@ -70,6 +70,12 @@ struct RobustNonlinearOptions {
   /// Maximum number of backtrack trials before the step is rejected.
   int max_line_search_trials{12};
 
+  /// Reject line-search trial states whose AC or DC voltage magnitude falls
+  /// below this value (pu). This keeps a normal operating-point solve away
+  /// from a near-zero-voltage root without changing the power-flow equations.
+  /// Set to 0 to disable the guard for voltage-collapse / low-voltage studies.
+  double min_trial_voltage_pu{0.5};
+
   // ── Phase 2: Smooth CHKS NCP continuation ─────────────────────────
   /// Use CHKS-smoothed min/max operators for PV/PQ complementarity. mu is
   /// annealed from ncp_mu0 to ncp_mu_min as the residual decreases, driving

@@ -3341,6 +3341,17 @@ struct FMEASimplexCache {
   std::string component_name;
 };
 
+template <typename Basis>
+void copy_optional_dse_cache(Basis& destination, const Basis& source) {
+  if constexpr (requires {
+                  destination.cached_dse_weights = source.cached_dse_weights;
+                  destination.cached_dse_basis = source.cached_dse_basis;
+                }) {
+    destination.cached_dse_weights = source.cached_dse_weights;
+    destination.cached_dse_basis = source.cached_dse_basis;
+  }
+}
+
 double positive_or_zero(double value) {
   return std::isfinite(value) ? std::max(0.0, value) : 0.0;
 }
@@ -3907,8 +3918,7 @@ StateEvalResult evaluate_hybrid_fmea_network_lp(
     next_basis.rows = solve_certificate.basis.rows;
     next_basis.cols = solve_certificate.basis.cols;
     next_basis.at_upper = solve_certificate.basis.at_upper;
-    next_basis.cached_dse_weights = solve_certificate.basis.cached_dse_weights;
-    next_basis.cached_dse_basis = solve_certificate.basis.cached_dse_basis;
+    copy_optional_dse_cache(next_basis, solve_certificate.basis);
     next_basis.sf_n_slack = solve_certificate.basis.sf_n_slack;
     next_basis.sf_n_surplus = solve_certificate.basis.sf_n_surplus;
     next_basis.sf_n_artificial = solve_certificate.basis.sf_n_artificial;

@@ -790,7 +790,10 @@ PowerFlowResult solve_newton_with_lcc_tap_control(
     return result;
   }
 
-  InitialState warm_start;
+  // This is continuation between successive R-card tap-control solves, not a
+  // pre-solve initializer: the first unified AC/DC Newton solve always starts
+  // from the authored state (or an explicitly supplied InitialState).
+  InitialState previous_tap_solution;
   const InitialState* solve_initial = initial_state;
   PowerFlowResult result;
   for (int outer_solve = 0; outer_solve < kMaxOuterSolves; ++outer_solve) {
@@ -886,10 +889,10 @@ PowerFlowResult solve_newton_with_lcc_tap_control(
 
     if (all_converged || !any_tap_changed) break;
     powerflow::rebuild_matrices(data);
-    warm_start.vm = result.vm;
-    warm_start.va = result.va;
-    warm_start.vdc = result.vdc;
-    solve_initial = &warm_start;
+    previous_tap_solution.vm = result.vm;
+    previous_tap_solution.va = result.va;
+    previous_tap_solution.vdc = result.vdc;
+    solve_initial = &previous_tap_solution;
   }
 
   result.diagnostics.warnings.insert(result.diagnostics.warnings.end(),
@@ -1299,19 +1302,23 @@ void populate_derived_results(const powerflow::SolverData& data,
           " deg (commutation-failure risk); no tap/control remedial action "
           "is modelled.");
     }
-    if (op.id_at_limit && op.id_ka > 0.0 &&
-        powerflow::lcc_forms_dc_voltage(lcc) &&
-        (!tr.tap_control_active || !tr.tap_control_converged)) {
-      // Honest control-mode note: the rated-current clamp (current order)
-      // binds, so the declared CEA / constant-alpha setpoint is not held;
-      // the reported gamma/alpha is the back-calculated physical value
-      // (>= the minimum, so commutation margin is preserved).
+    // BridgeIn is reported to whole amperes in fixed-column LCC cards. Use a
+    // small engineering tolerance so Newton round-off at the nameplate is not
+    // misreported as an overload.
+    constexpr double kRatingAbsTolA = 0.1;
+    constexpr double kRatingRelTol = 1e-6;
+    if (lcc.rated_current_a > 0.0 &&
+        op.id_ka * 1000.0 >
+            lcc.rated_current_a * (1.0 + kRatingRelTol) +
+                kRatingAbsTolA) {
       result.diagnostics.warnings.push_back(
-          "[LCC-PHYS-03] LCC station " + std::to_string(lcc.index) +
-          " runs at its rated current (" + std::to_string(op.id_ka) +
-          " kA): the current limit binds and the CEA/constant-alpha setpoint "
-          "is not held with fixed converter-transformer taps; back-calculated "
-          "gamma/alpha is reported instead.");
+          "[LCC-RATING-01] " + lcc.source_card + " station " +
+          std::to_string(lcc.index) +
+          " operates at " + std::to_string(op.id_ka * 1000.0) +
+          " A, above BridgeIn=" + std::to_string(lcc.rated_current_a) +
+          " A. DSP steady-state semantics retain BridgeIn as a nameplate/"
+          "reporting value, so the Newton control characteristic is not "
+          "clipped; assess the overload separately.");
     }
   }
 }

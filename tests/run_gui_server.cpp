@@ -762,6 +762,7 @@ void apply_pf_robust_options(const json& o,
   set_if_double(o, "armijo_c", opt.armijo_c);
   set_if_double(o, "line_search_beta", opt.line_search_beta);
   set_if_int(o, "max_line_search_trials", opt.max_line_search_trials);
+  set_if_double(o, "min_trial_voltage_pu", opt.min_trial_voltage_pu);
   set_if_double(o, "ncp_mu0", opt.ncp_mu0);
   set_if_double(o, "ncp_mu_min", opt.ncp_mu_min);
   set_if_double(o, "ncp_mu_factor", opt.ncp_mu_factor);
@@ -899,6 +900,7 @@ json pf_robust_options_to_json(const hacdcpf::powerflow::RobustNonlinearOptions&
       {"armijo_c", opt.armijo_c},
       {"line_search_beta", opt.line_search_beta},
       {"max_line_search_trials", opt.max_line_search_trials},
+      {"min_trial_voltage_pu", opt.min_trial_voltage_pu},
       {"ncp_mu0", opt.ncp_mu0},
       {"ncp_mu_min", opt.ncp_mu_min},
       {"ncp_mu_factor", opt.ncp_mu_factor},
@@ -12801,6 +12803,29 @@ int main(int argc, char** argv) {
         for (const auto& v : pf.vsc_transfers) {
           bus_p_out[v.bus_ac] -= v.p_ac_mw;
           bus_q_out[v.bus_ac] -= v.q_ac_mvar;
+        }
+        for (const auto& lcc : pf.lcc_transfers) {
+          bus_p_out[lcc.bus_ac] -= lcc.p_ac_mw;
+          bus_q_out[lcc.bus_ac] -= lcc.q_ac_mvar;
+        }
+        std::unordered_map<int, double> solved_vm_by_bus;
+        for (size_t i = 0; i < sys.ac.buses.size(); ++i) {
+          const auto& bus = sys.ac.buses[i];
+          const double vm = i < pf.vm.size() ? pf.vm[i] : bus.vm_pu;
+          solved_vm_by_bus[bus.index] = vm;
+          bus_p_out[bus.index] += bus.gs_mw * vm * vm;
+          bus_q_out[bus.index] -= bus.bs_mvar * vm * vm;
+        }
+        for (const auto& shunt : sys.ac.shunts) {
+          if (!shunt.in_service) continue;
+          const double vm = solved_vm_by_bus.count(shunt.bus)
+                                ? solved_vm_by_bus[shunt.bus]
+                                : 1.0;
+          const double bs = shunt.switchable && shunt.n_steps > 0
+                                ? shunt.bs_per_step * shunt.current_step
+                                : shunt.bs_mvar;
+          bus_p_out[shunt.bus] += shunt.gs_mw * vm * vm;
+          bus_q_out[shunt.bus] -= bs * vm * vm;
         }
 
         struct TwoWindingTerminalFlow {
