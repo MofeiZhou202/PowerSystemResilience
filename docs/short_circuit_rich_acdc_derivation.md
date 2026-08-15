@@ -230,8 +230,13 @@ current reconstruction rather than only the effective current magnitude.
 
 ## 4. Sequence Matrix Construction
 
-The detailed path builds dense sequence matrices in
-`build_sc_admittance_matrices(...)`.
+The detailed path builds sparse sequence matrices in
+`build_sc_admittance_matrices(...)`. It never forms a full `Zbus`. For a fault
+at bus `k`, the implementation factors each required sequence matrix once and
+solves `Y_s z_k=e_k`; `z_k` is the selected inverse column. Non-fault current
+metrics additionally require selected inverse diagonal entries, which are
+extracted with bounded dense RHS blocks while retaining only each block's
+diagonal.
 
 ### 4.1 Passive Branches
 
@@ -832,9 +837,12 @@ before using it as a final equipment-duty calculation.
 1. The overview AC API is not equivalent to the detailed API for unbalanced
    faults. It approximates `Z1 = Z2 = Z0`; the detailed API should be preferred
    for SLG, LL, and LLG studies.
-2. Detailed AC uses dense full inverses of `Y1`, `Y2`, and `Y0`. This is easy
-   to audit but scales worse than sparse solve-per-fault methods and can hide
-   singular sequence networks by returning zero matrices.
+2. The GUI selected-fault route deliberately omits non-fault bus current
+   metrics and returns zero for those fields. It still returns complete
+   fault-bus duties, source contributions, the full remaining-voltage profile,
+   and optional branch currents. The C++ API keeps
+   `compute_nonfault_currents=true` by default when full self-impedance data is
+   required.
 3. Transformer vector groups do not fully block or pass zero-sequence paths.
    This affects SLG and LLG correctness for delta, grounded-wye, zigzag, and
    grounding-transformer cases.
@@ -854,6 +862,30 @@ before using it as a final equipment-duty calculation.
    through, or protection blocking time.
 10. Protection coordination is not simulated. Ratings and trip curves require
     post-processing or a dedicated protection module.
+
+### 10.3 Sparse Solve and Runtime Contract
+
+`SparseInverseSolver` uses SuiteSparse KLU when the Release build provides it,
+with Eigen SparseLU as the portable fallback. Detailed batch analysis builds
+one shared sparse context and reuses the sequence-network symbolic/numeric
+factors across requested fault buses. Cooperative cancellation is checked
+between inverse-diagonal RHS blocks and between fault locations; an in-flight
+sparse factorization or triangular solve remains indivisible.
+
+The production HTTP contracts are intentionally distinct:
+
+- `/api/session/sc`: positive-sequence overview for all buses; returns
+  `Sk`, `Ik''`, and driving-point impedance with
+  `model_scope=overview-positive-sequence`.
+- `/api/session/sc_detailed`: complete selected-fault duties and full voltage
+  profile with `model_scope=selected-fault-complete-voltage-profile`; the GUI
+  disables non-fault current metrics because it does not consume them.
+- `run_short_circuit_detailed(...)`: full C++ result by default, including
+  non-fault self-impedance current metrics.
+
+On the Release/KLU Yunnan case (4512 authored buses, 3927 canonical buses), the
+measured HTTP wall times were `74.2 ms` for all-bus overview and `29.7 ms` for
+one selected detailed fault. The former implementation exceeded 90 seconds.
 
 ## 11. Recommended Correctness Criteria
 
@@ -1005,15 +1037,13 @@ short-circuit module.
 2. Add DC breaker duty post-processing:
    compare `I_f` with `i_breaking_ka`, `i_rated_ka`, and technology-specific
    interruption assumptions.
-3. Replace dense inverses in detailed AC analysis with sparse factorization and
-   selected right-hand-side solves for better performance and conditioning.
-4. Add transformer vector-group zero-sequence rules for SLG and LLG studies.
-5. Split `BranchOriginType::Switch` into distinct `Switch` and
+3. Add transformer vector-group zero-sequence rules for SLG and LLG studies.
+4. Split `BranchOriginType::Switch` into distinct `Switch` and
    `CircuitBreaker` origins.
-6. Add explicit converter fault model metadata to results:
+5. Add explicit converter fault model metadata to results:
    `grid_following_current_source`, `ac_grid_forming_voltage_source`,
    `dc_side_forming_not_ac_source`, or `not_modeled`.
-7. Add a protection-result layer that maps branch/source currents to AC CBs,
+6. Add a protection-result layer that maps branch/source currents to AC CBs,
    DCCBs, fuses, and converter blocking thresholds without changing the
    electrical short-circuit solve.
 

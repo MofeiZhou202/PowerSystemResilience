@@ -108,6 +108,12 @@ def build_inventory(model: dict[str, Any]) -> dict[str, Any]:
         "loads": len(loads),
         "shunts": len(rows_at(model, "ac", "shunts")),
         "transformers_2w": len(rows_at(model, "ac", "transformers_2w")),
+        "transformer_like_branches": sum(
+            str(row.get("name", "")).startswith("T_")
+            or float(row.get("sn_mva", 0.0) or 0.0) > 0.0
+            or float(row.get("vn_hv_kv", 0.0) or 0.0) > 0.0
+            for row in branches if isinstance(row, dict)
+        ),
         "switches": len(rows_at(model, "ac", "switches")),
         "circuit_breakers": len(rows_at(model, "ac", "circuit_breakers")),
         "storage": len(rows_at(model, "ac", "storage")),
@@ -138,6 +144,20 @@ def build_inventory(model: dict[str, Any]) -> dict[str, Any]:
             any(abs(float(row.get(key, 0.0) or 0.0)) > 0.0
                 for key in ("latitude", "longitude"))
             for row in buses if isinstance(row, dict)
+        ),
+        "switchable_shunts": sum(
+            bool(row.get("switchable", False))
+            or int(row.get("num_steps", 0) or 0) > 0
+            for row in rows_at(model, "ac", "shunts")
+            if isinstance(row, dict)
+        ),
+        "load_profiles": sum(
+            row.get("profile_id") is not None and int(row.get("profile_id")) >= 0
+            for row in loads if isinstance(row, dict)
+        ),
+        "generator_profiles": sum(
+            row.get("profile_id") is not None and int(row.get("profile_id")) >= 0
+            for row in generators if isinstance(row, dict)
         ),
         "first_ac_bus": buses[0].get("index") if buses else None,
     }
@@ -185,6 +205,9 @@ def build_probes(inventory: dict[str, Any]) -> list[Probe]:
     no_gis = require_any("buses_with_gis", reason="requires authored GIS coordinates")
     no_ies = require_any(
         "storage", "renewables", reason="requires integrated-energy assets")
+    no_profiles = require_any(
+        "load_profiles", "generator_profiles",
+        reason="requires authored operating profiles")
 
     probes = [
         pf_probe("ac_newton", options={"max_iter": 200,
@@ -261,11 +284,12 @@ def build_probes(inventory: dict[str, Any]) -> list[Probe]:
         Probe("hosting_capacity", "Hosting capacity",
               "/api/session/run_hosting_capacity", {}, timeout_s=60.0,
               applicability=require_any(
-                  "transformers_2w", reason="requires transformer capacity metadata")),
+                  "transformers_2w", "transformer_like_branches",
+                  reason="requires transformer capacity metadata")),
         Probe("reactive_power_optimization", "Reactive power optimization",
               "/api/session/run_rpo", {}, timeout_s=120.0,
               applicability=require_any(
-                  "transformers_2w", "switches",
+                  "switchable_shunts", "switches",
                   reason="requires controllable taps or switched shunts")),
         Probe("network_reconfiguration", "Network reconfiguration",
               "/api/session/run_reconfig",
@@ -285,6 +309,14 @@ def build_probes(inventory: dict[str, Any]) -> list[Probe]:
               {"regular_clusters": 2, "reliability_clusters": 2,
                "resilience_clusters": 2}, timeout_s=90.0,
               limitation="No authored stochastic/time-series inputs; generated defaults are not case evidence."),
+        Probe("counterfactual_planning", "Planning analysis",
+              "/api/session/run_counterfactual_planning", {}, timeout_s=180.0,
+              limitation="No authored planning portfolio; backend default measures are a workflow probe."),
+        Probe("multidimensional_weak_links", "Planning analysis",
+              "/api/session/run_multidimensional_weak_links",
+              {"entities": [], "options": {"mode": "planning", "top_k": 10,
+                                             "minimum_dimensions": 1}},
+              timeout_s=60.0, applicability=no_reliability),
         Probe("typhoon_faults", "Typhoon resilience",
               "/api/session/generate_typhoon_faults", {}, timeout_s=90.0,
               applicability=no_gis),
@@ -298,6 +330,21 @@ def build_probes(inventory: dict[str, Any]) -> list[Probe]:
               {"num_steps": 4, "offer_segments": 2,
                "network_constraints": True, "run_ac_validation": False},
               timeout_s=180.0, applicability=no_market),
+        Probe("real_time_market", "Market",
+              "/api/session/run_real_time_market", {}, timeout_s=120.0,
+              applicability=no_market),
+        Probe("repeated_market_game", "Market",
+              "/api/session/run_repeated_market_game", {}, timeout_s=120.0,
+              applicability=no_market),
+        Probe("annual_production", "Time series",
+              "/api/session/run_annual_sim", {}, timeout_s=180.0,
+              applicability=no_profiles),
+        Probe("lifecycle_simulation", "Lifecycle",
+              "/api/session/run_lifecycle_sim", {}, timeout_s=180.0,
+              applicability=no_ies),
+        Probe("lifecycle_comparison", "Lifecycle",
+              "/api/session/run_lifecycle_compare", {}, timeout_s=180.0,
+              applicability=no_ies),
         Probe("integrated_energy", "Integrated energy",
               "/api/session/run_campus_ies", {}, timeout_s=120.0,
               applicability=no_ies),
@@ -392,7 +439,10 @@ def summarize(probe: Probe, status_code: int, data: Any,
     elif probe.kind == "time_series":
         summary.update({"num_steps": data.get("num_steps"),
                         "num_converged": data.get("num_converged"),
-                        "status": data.get("status")})
+                        "status": data.get("status"),
+                        "vm_min": data.get("vm_min"),
+                        "vm_max": data.get("vm_max"),
+                        "profile_audit": data.get("profile_audit")})
         if data.get("num_steps") and data.get("num_converged") != data.get("num_steps"):
             return "FAIL", summary
     else:
@@ -400,6 +450,30 @@ def summarize(probe: Probe, status_code: int, data: Any,
         for key in ("ok", "success", "converged", "status", "model_scope"):
             if key in data:
                 summary[key] = data[key]
+        if probe.probe_id == "topology":
+            summary.update({key: data.get(key) for key in (
+                "n_buses", "n_branches", "n_ac_islands", "n_dc_islands",
+                "is_connected", "is_radial", "cycle_count")})
+        elif probe.probe_id == "network_reduction":
+            summary.update({key: data.get(key) for key in (
+                "before", "after", "n_buses_eliminated",
+                "n_branches_eliminated", "reduction_pct_buses")})
+        elif probe.probe_id == "sppt_guard":
+            summary.update({key: data.get(key) for key in (
+                "accepted", "validation_ok", "well_posed", "reason")})
+        elif probe.probe_id == "harmonics_penetration":
+            summary.update({key: data.get(key) for key in (
+                "base_pf_converged", "max_ac_thd_pct", "max_ac_thd_bus",
+                "max_dc_thd_pct", "message")})
+        elif probe.probe_id == "carbon_flow":
+            summary.update({key: data.get(key) for key in (
+                "matrix_solved", "matrix_rank", "matrix_relative_residual",
+                "max_node_power_balance_error_mw", "execution_time_sec")})
+        elif probe.probe_id == "hosting_capacity":
+            summary["transformer_count"] = len(data.get("transformers") or [])
+            summary["standard"] = data.get("standard")
+        elif probe.probe_id == "scenario_generation":
+            summary["scenario_summary"] = data.get("summary")
     if probe.limitation:
         summary["limitation"] = probe.limitation
         return "LIMITED", summary
@@ -441,11 +515,24 @@ def markdown_report(case_path: Path, inventory: dict[str, Any],
             detail = row.get("reason", "")
         elif summary.get("error"):
             detail = summary["error"]
+            if "cancel_recovered" in summary:
+                detail += f"; cancel_recovered={summary['cancel_recovered']}"
         else:
             fields = []
             for key in ("converged", "method_actual", "iterations", "residual",
-                        "q_certified", "q_max_violation_pu", "num_converged",
-                        "num_steps", "result_count", "status", "limitation"):
+                        "solver_ms", "pv_to_pq", "pq_to_pv", "q_certified",
+                        "q_max_violation_pu", "core_solve_ms",
+                        "factorization_calls", "phase_one_runtime_ms",
+                        "phase_one_termination", "phase_one_constraint_violation",
+                        "phase_one_in_handoff_corridor",
+                        "phase_two_start_accepted", "num_converged", "num_steps",
+                        "vm_min", "vm_max", "result_count", "status",
+                        "n_buses", "n_branches", "n_ac_islands", "is_connected",
+                        "n_buses_eliminated", "n_branches_eliminated",
+                        "reduction_pct_buses", "accepted", "validation_ok",
+                        "base_pf_converged", "max_ac_thd_pct", "matrix_solved",
+                        "matrix_relative_residual", "transformer_count", "standard",
+                        "limitation"):
                 if summary.get(key) is not None:
                     fields.append(f"{key}={summary[key]}")
             detail = "; ".join(fields) or ", ".join(summary.get("keys", [])[:8])
@@ -468,6 +555,8 @@ def main() -> int:
                         default=str(ROOT / "output" / "yunnan_capability_audit.md"))
     parser.add_argument("--only", default="",
                         help="Comma-separated probe ids; empty runs the full matrix")
+    parser.add_argument("--merge-inputs", default="",
+                        help="Comma-separated audit JSON files to merge without HTTP calls")
     args = parser.parse_args()
 
     case_path = Path(args.case).resolve()
@@ -476,6 +565,39 @@ def main() -> int:
     selected = {item.strip() for item in args.only.split(",") if item.strip()}
     probes = [p for p in build_probes(inventory)
               if not selected or p.probe_id in selected]
+
+    if args.merge_inputs:
+        merged: dict[str, dict[str, Any]] = {}
+        for raw_path in args.merge_inputs.split(","):
+            source = Path(raw_path.strip())
+            if not source:
+                continue
+            source_report = json.loads(source.read_text(encoding="utf-8"))
+            for row in source_report.get("results", []):
+                merged[row["probe_id"]] = row
+        ordered_ids = [probe.probe_id for probe in build_probes(inventory)]
+        results = [merged[probe_id] for probe_id in ordered_ids
+                   if probe_id in merged]
+        results.extend(row for probe_id, row in merged.items()
+                       if probe_id not in ordered_ids)
+        report = {
+            "schema": "yunnan_capability_audit_v1",
+            "case": str(case_path),
+            "base_url": args.base_url,
+            "inventory": inventory,
+            "results": results,
+        }
+        out_json = Path(args.out_json)
+        out_md = Path(args.out_md)
+        out_json.parent.mkdir(parents=True, exist_ok=True)
+        out_md.parent.mkdir(parents=True, exist_ok=True)
+        out_json.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8")
+        out_md.write_text(markdown_report(case_path, inventory, results),
+                          encoding="utf-8")
+        print(f"Merged {len(results)} probes into {out_json} and {out_md}")
+        return 0
 
     client = Client(args.base_url)
     print(f"Loading {case_path} into {args.base_url}", flush=True)

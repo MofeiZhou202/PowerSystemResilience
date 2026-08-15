@@ -459,6 +459,50 @@ TEST_CASE("SC detailed: downstream fault reports upstream source contribution an
   CHECK(std::isfinite(bus2->v_remaining_pu));
 }
 
+TEST_CASE("SC detailed voltage-profile mode skips non-fault inverse diagonals",
+          "[short_circuit][detailed][selected_inverse]") {
+  auto sys = make_sys(
+      {make_bus(1, BusType::SLACK), make_bus(2, BusType::PQ),
+       make_bus(3, BusType::PQ)},
+      {make_branch(1, 1, 2, 0.02, 0.20),
+       make_branch(2, 2, 3, 0.03, 0.30)},
+      100.0, 0.001);
+
+  SCDetailedOptions full_options;
+  full_options.compute_branch_flows = false;
+  const auto full = run_short_circuit_detailed(sys, 3, full_options);
+
+  auto profile_options = full_options;
+  profile_options.compute_nonfault_currents = false;
+  const auto profile = run_short_circuit_detailed(sys, 3, profile_options);
+
+  REQUIRE(full.solved);
+  REQUIRE(profile.solved);
+  REQUIRE(profile.bus_results.size() == full.bus_results.size());
+  for (size_t i = 0; i < full.bus_results.size(); ++i) {
+    CHECK(profile.bus_results[i].v_remaining_pu ==
+          Catch::Approx(full.bus_results[i].v_remaining_pu).margin(1e-12));
+    if (profile.bus_results[i].bus_id == 3) {
+      CHECK(profile.bus_results[i].ikss_ka ==
+            Catch::Approx(full.bus_results[i].ikss_ka).margin(1e-12));
+      CHECK(profile.bus_results[i].ip_ka ==
+            Catch::Approx(full.bus_results[i].ip_ka).margin(1e-12));
+      CHECK(profile.bus_results[i].ib_ka ==
+            Catch::Approx(full.bus_results[i].ib_ka).margin(1e-12));
+      CHECK(profile.bus_results[i].ik_ka ==
+            Catch::Approx(full.bus_results[i].ik_ka).margin(1e-12));
+      CHECK(profile.bus_results[i].ith_ka ==
+            Catch::Approx(full.bus_results[i].ith_ka).margin(1e-12));
+    } else {
+      CHECK(profile.bus_results[i].ikss_ka == 0.0);
+      CHECK(profile.bus_results[i].ip_ka == 0.0);
+      CHECK(profile.bus_results[i].ib_ka == 0.0);
+      CHECK(profile.bus_results[i].ik_ka == 0.0);
+      CHECK(profile.bus_results[i].ith_ka == 0.0);
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Test 5 — Fault-type ratios (SLG vs 3PH on 2-bus grounded source)
 // ---------------------------------------------------------------------------
@@ -652,6 +696,27 @@ TEST_CASE("SC detailed: minimum external-grid data lowers fault current",
   CHECK(i_max > 0.0);
   CHECK(i_min > 0.0);
   CHECK(i_min < i_max * 0.2);
+}
+
+TEST_CASE("SC overview includes an external-grid source without generators",
+          "[short_circuit][overview][external_grid]") {
+  auto sys = make_sys(
+      {make_bus(1, BusType::SLACK), make_bus(2, BusType::PQ)},
+      {make_branch(1, 1, 2, 0.02, 0.20)}, 100.0, 0.001);
+  sys.ac.generators.clear();
+
+  ExternalGrid grid;
+  grid.index = 1;
+  grid.bus = 1;
+  grid.in_service = true;
+  grid.s_sc_max_mva = 5000.0;
+  grid.rx_max = 0.1;
+  sys.ac.external_grids = {grid};
+
+  const auto result = compute_short_circuit(sys);
+  REQUIRE(result.bus_results.size() == 2);
+  CHECK(result.bus_results[0].ikpp_ka > 0.0);
+  CHECK(result.bus_results[1].ikpp_ka > 0.0);
 }
 
 TEST_CASE("SC detailed: fault-bus peak uses formula (59) per-contribution kappa",

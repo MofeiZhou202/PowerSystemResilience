@@ -20,6 +20,7 @@
 #define M_PI 3.14159265358979323846
 #endif
 #include <complex>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -30,6 +31,9 @@
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
 #include <Eigen/SparseLU>
+#if defined(HACDCPF_OPF_HAVE_KLU)
+#include <Eigen/KLUSupport>
+#endif
 
 #include "hacdcpf/model/components.hpp"
 #include "hacdcpf/model/enum_strings.hpp"
@@ -45,7 +49,21 @@ namespace {
 
 using Cx = std::complex<double>;
 using SpMat = Eigen::SparseMatrix<Cx>;
+using RowSpMat = Eigen::SparseMatrix<Cx, Eigen::RowMajor>;
+#if defined(HACDCPF_OPF_HAVE_KLU)
+using SpLU = Eigen::KLU<SpMat>;
+#else
 using SpLU  = Eigen::SparseLU<SpMat>;
+#endif
+
+class RowSparseAccumulator : public RowSpMat {
+ public:
+  using RowSpMat::RowSpMat;
+
+  Cx& operator()(Eigen::Index row, Eigen::Index col) {
+    return coeffRef(row, col);
+  }
+};
 
 constexpr double kMinMotorContributionMw = 0.05;
 
@@ -253,7 +271,8 @@ SpMat build_fault_ybus(const ACSystem& ac_sys,
                        const SCOptions& opt) {
   using Trip = Eigen::Triplet<Cx>;
   std::vector<Trip> trips;
-  trips.reserve(6 * ac_sys.branches.size() + 2 * ac_sys.generators.size());
+  trips.reserve(6 * ac_sys.branches.size() + 2 * ac_sys.generators.size() +
+                ac_sys.external_grids.size());
 
   // --- branches ---
   for (const auto& br : ac_sys.branches) {
@@ -302,6 +321,31 @@ SpMat build_fault_ybus(const ACSystem& ac_sys,
     trips.emplace_back(gi, gi, y_gen);
   }
 
+  // IEC 60909 equivalent-voltage-source model: an external grid is a source
+  // behind its short-circuit impedance, just like the detailed sequence path.
+  SCDetailedOptions detailed_opt;
+  detailed_opt.c_factor = opt.c_factor;
+  detailed_opt.default_xdpp = opt.default_xdpp;
+  const double base_mva = ac_sys.base_mva > 0.0 ? ac_sys.base_mva : 100.0;
+  for (const auto& eg : ac_sys.external_grids) {
+    if (!eg.in_service) continue;
+    const auto it = id_map.find(eg.bus);
+    if (it == id_map.end()) continue;
+    double bus_kv = 1.0;
+    for (const auto& bus : ac_sys.buses) {
+      if (bus.index == eg.bus) {
+        bus_kv = bus.base_kv > 1e-6 ? bus.base_kv : 1.0;
+        break;
+      }
+    }
+    const auto impedance =
+        external_grid_impedance_sc(eg, bus_kv, base_mva, detailed_opt);
+    if (std::abs(impedance.z1) > 1e-15) {
+      trips.emplace_back(
+          it->second, it->second, Cx(1.0, 0.0) / impedance.z1);
+    }
+  }
+
   SpMat Y(n, n);
   Y.setFromTriplets(trips.begin(), trips.end());
   Y.makeCompressed();
@@ -321,19 +365,80 @@ Cx compute_zkk(SpLU& lu, int k, int n) {
   return z_col[k];
 }
 
+class SparseInverseSolver {
+ public:
+  explicit SparseInverseSolver(const SpMat& matrix) : size_(matrix.rows()) {
+    for (int col = 0; col < matrix.outerSize(); ++col) {
+      for (SpMat::InnerIterator it(matrix, col); it; ++it) {
+        if (!std::isfinite(std::real(it.value())) ||
+            !std::isfinite(std::imag(it.value()))) {
+          return;
+        }
+      }
+    }
+    lu_.analyzePattern(matrix);
+    lu_.factorize(matrix);
+    valid_ = lu_.info() == Eigen::Success;
+  }
+
+  [[nodiscard]] bool valid() const noexcept { return valid_; }
+
+  Eigen::VectorXcd inverse_column(int column) {
+    Eigen::VectorXcd result = Eigen::VectorXcd::Zero(size_);
+    if (!valid_ || column < 0 || column >= size_) return result;
+    Eigen::VectorXcd rhs = Eigen::VectorXcd::Zero(size_);
+    rhs[column] = Cx(1.0, 0.0);
+    result = lu_.solve(rhs);
+    if (lu_.info() != Eigen::Success || !result.allFinite()) {
+      result.setZero();
+    }
+    return result;
+  }
+
+  std::vector<Cx> inverse_diagonal(
+      size_t rhs_batch_size,
+      const std::function<bool()>& cancellation_requested) {
+    std::vector<Cx> diagonal(static_cast<size_t>(size_), Cx(0.0, 0.0));
+    if (!valid_) return diagonal;
+
+    const int batch_size = static_cast<int>(
+        std::clamp<size_t>(rhs_batch_size, 1, 256));
+    for (int start = 0; start < size_; start += batch_size) {
+      if (cancellation_requested && cancellation_requested()) {
+        throw std::runtime_error("short-circuit analysis cancelled");
+      }
+      const int width = std::min(batch_size, size_ - start);
+      Eigen::MatrixXcd rhs = Eigen::MatrixXcd::Zero(size_, width);
+      for (int j = 0; j < width; ++j) rhs(start + j, j) = Cx(1.0, 0.0);
+      // Y^{-1}e_k is exactly column k of Zbus.  Only its kth entry is retained;
+      // see Davis (2006), Ch. 3, and docs/short_circuit_rich_acdc_derivation.md.
+      const Eigen::MatrixXcd columns = lu_.solve(rhs);
+      if (lu_.info() != Eigen::Success || !columns.allFinite()) {
+        return std::vector<Cx>(static_cast<size_t>(size_), Cx(0.0, 0.0));
+      }
+      for (int j = 0; j < width; ++j) {
+        diagonal[static_cast<size_t>(start + j)] = columns(start + j, j);
+      }
+    }
+    return diagonal;
+  }
+
+ private:
+  SpLU lu_;
+  int size_{0};
+  bool valid_{false};
+};
+
 // -------------------------------------------------------------------------
 // Single-bus fault calculation
 // -------------------------------------------------------------------------
-BusFaultResult fault_at_bus(SpLU& lu,
-                             int k, int bus_id,
-                             int n,
-                             double base_mva,
-                             double base_kv,
-                             const SCOptions& opt) {
+BusFaultResult fault_at_bus_with_zkk(Cx Z_kk,
+                                     int bus_id,
+                                     double base_mva,
+                                     double base_kv,
+                                     const SCOptions& opt) {
   BusFaultResult r;
   r.bus_id = bus_id;
-
-  Cx Z_kk = compute_zkk(lu, k, n);
   r.z_thevenin = Z_kk;
 
   // Pre-fault voltage assumed 1.0∠0° p.u. (flat profile, conservative)
@@ -372,14 +477,24 @@ BusFaultResult fault_at_bus(SpLU& lu,
   return r;
 }
 
+BusFaultResult fault_at_bus(SpLU& lu,
+                            int k, int bus_id,
+                            int n,
+                            double base_mva,
+                            double base_kv,
+                            const SCOptions& opt) {
+  return fault_at_bus_with_zkk(
+      compute_zkk(lu, k, n), bus_id, base_mva, base_kv, opt);
+}
+
 // -------------------------------------------------------------------------
 // IEC 60909: Build subtransient admittance matrices
 //   pos-seq (Ybus), neg-seq (Ybus2), zero-seq (Ybus0)
 // -------------------------------------------------------------------------
 struct YbusTriplet {
-  Eigen::MatrixXcd Ybus;   // positive-sequence dense
-  Eigen::MatrixXcd Ybus2;  // negative-sequence dense (differs from Ybus for converters)
-  Eigen::MatrixXcd Ybus0;  // zero-sequence dense
+  SpMat Ybus;   // positive-sequence sparse
+  SpMat Ybus2;  // negative-sequence sparse (differs from Ybus for converters)
+  SpMat Ybus0;  // zero-sequence sparse
 };
 
 YbusTriplet build_sc_admittance_matrices(const ACSystem& ac,
@@ -390,9 +505,13 @@ YbusTriplet build_sc_admittance_matrices(const ACSystem& ac,
                                          const std::unordered_map<int, TransformerBranchCorrection>& transformer_corrections,
                                          bool steady_state,
                                          bool machine_shunts = true) {
-  Eigen::MatrixXcd Ybus  = Eigen::MatrixXcd::Zero(n, n);
-  Eigen::MatrixXcd Ybus2 = Eigen::MatrixXcd::Zero(n, n);  // negative-sequence
-  Eigen::MatrixXcd Ybus0 = Eigen::MatrixXcd::Zero(n, n);
+  RowSparseAccumulator Ybus(n, n);
+  RowSparseAccumulator Ybus2(n, n);  // negative-sequence
+  RowSparseAccumulator Ybus0(n, n);
+  const int estimated_row_nnz = 12;
+  Ybus.reserve(Eigen::VectorXi::Constant(n, estimated_row_nnz));
+  Ybus2.reserve(Eigen::VectorXi::Constant(n, estimated_row_nnz));
+  Ybus0.reserve(Eigen::VectorXi::Constant(n, estimated_row_nnz));
 
   const double base_mva = ac.base_mva > 0.0 ? ac.base_mva : 100.0;
 
@@ -698,24 +817,97 @@ YbusTriplet build_sc_admittance_matrices(const ACSystem& ac,
     // In a full implementation, vector groups (Yy, Dy, Yd) affect zero-sequence paths
   }
 
-  return {Ybus, Ybus2, Ybus0};
+  Ybus.makeCompressed();
+  Ybus2.makeCompressed();
+  Ybus0.makeCompressed();
+  return {SpMat(Ybus), SpMat(Ybus2), SpMat(Ybus0)};
 }
 
-// -------------------------------------------------------------------------
-// Safely invert a dense matrix, returning zero matrix on failure
-// -------------------------------------------------------------------------
-Eigen::MatrixXcd safe_inverse(const Eigen::MatrixXcd& M) {
-  const int n = static_cast<int>(M.rows());
-  // Check for NaN/Inf
-  for (int i = 0; i < n; ++i)
-    for (int j = 0; j < n; ++j)
-      if (std::isnan(std::abs(M(i,j))) || std::isinf(std::abs(M(i,j))))
-        return Eigen::MatrixXcd::Zero(n, n);
-  // Use FullPivLU for robust inversion
-  Eigen::FullPivLU<Eigen::MatrixXcd> lu(M);
-  if (!lu.isInvertible())
-    return Eigen::MatrixXcd::Zero(n, n);
-  return lu.inverse();
+struct DetailedSparseContext {
+  std::unique_ptr<SparseInverseSolver> subtransient_positive;
+  std::unique_ptr<SparseInverseSolver> subtransient_negative;
+  std::unique_ptr<SparseInverseSolver> subtransient_zero;
+  std::unique_ptr<SparseInverseSolver> network_positive;
+  std::unique_ptr<SparseInverseSolver> network_zero;
+  std::unique_ptr<SparseInverseSolver> steady_positive;
+  std::vector<Cx> subtransient_positive_diagonal;
+  std::vector<Cx> subtransient_negative_diagonal;
+  std::vector<Cx> subtransient_zero_diagonal;
+  std::vector<Cx> steady_positive_diagonal;
+};
+
+DetailedSparseContext build_detailed_sparse_context(
+    const HybridPowerSystem& projected,
+    const std::unordered_map<int, int>& id_map,
+    const SCDetailedOptions& opt,
+    const std::unordered_map<int, TransformerBranchCorrection>& transformer_corrections) {
+  const auto& ac = projected.ac;
+  const int n = static_cast<int>(ac.buses.size());
+  DetailedSparseContext context;
+
+  auto [sub1, sub2, sub0] = build_sc_admittance_matrices(
+      ac, projected.vsc_converters, id_map, n, opt,
+      transformer_corrections, false);
+  context.subtransient_positive =
+      std::make_unique<SparseInverseSolver>(sub1);
+  context.subtransient_positive_diagonal.assign(
+      static_cast<size_t>(n), Cx(0.0, 0.0));
+  if (opt.compute_nonfault_currents) {
+    context.subtransient_positive_diagonal =
+        context.subtransient_positive->inverse_diagonal(
+            opt.inverse_rhs_batch_size, opt.cancellation_requested);
+  }
+  context.subtransient_negative_diagonal.assign(
+      static_cast<size_t>(n), Cx(0.0, 0.0));
+  context.subtransient_zero_diagonal.assign(
+      static_cast<size_t>(n), Cx(0.0, 0.0));
+  if (opt.fault_type != FaultType::ThreePhase) {
+    context.subtransient_negative =
+        std::make_unique<SparseInverseSolver>(sub2);
+    if (opt.compute_nonfault_currents) {
+      context.subtransient_negative_diagonal =
+          context.subtransient_negative->inverse_diagonal(
+              opt.inverse_rhs_batch_size, opt.cancellation_requested);
+    }
+  }
+  if (opt.fault_type == FaultType::SinglePhaseGround ||
+      opt.fault_type == FaultType::TwoPhaseGround) {
+    context.subtransient_zero =
+        std::make_unique<SparseInverseSolver>(sub0);
+    if (opt.compute_nonfault_currents) {
+      context.subtransient_zero_diagonal =
+          context.subtransient_zero->inverse_diagonal(
+              opt.inverse_rhs_batch_size, opt.cancellation_requested);
+    }
+  }
+
+  auto [network1, network2, network0] = build_sc_admittance_matrices(
+      ac, projected.vsc_converters, id_map, n, opt,
+      transformer_corrections, false, false);
+  (void)network2;
+  context.network_positive =
+      std::make_unique<SparseInverseSolver>(network1);
+  if (opt.fault_type == FaultType::SinglePhaseGround ||
+      opt.fault_type == FaultType::TwoPhaseGround) {
+    context.network_zero =
+        std::make_unique<SparseInverseSolver>(network0);
+  }
+
+  auto [steady1, steady2, steady0] = build_sc_admittance_matrices(
+      ac, projected.vsc_converters, id_map, n, opt,
+      transformer_corrections, true);
+  (void)steady2;
+  (void)steady0;
+  context.steady_positive =
+      std::make_unique<SparseInverseSolver>(steady1);
+  context.steady_positive_diagonal.assign(
+      static_cast<size_t>(n), Cx(0.0, 0.0));
+  if (opt.compute_nonfault_currents) {
+    context.steady_positive_diagonal =
+        context.steady_positive->inverse_diagonal(
+            opt.inverse_rhs_batch_size, opt.cancellation_requested);
+  }
+  return context;
 }
 
 // -------------------------------------------------------------------------
@@ -758,23 +950,33 @@ struct TransferRatios {
 };
 
 TransferRatios compute_transfer(FaultType ft,
-                                const Eigen::MatrixXcd& Zbus,
-                                const Eigen::MatrixXcd& Zbus2,
-                                const Eigen::MatrixXcd& Zbus0,
-                                int bus_idx, int fault_idx) {
+                                const Eigen::VectorXcd& zbus_column,
+                                const Eigen::VectorXcd& zbus2_column,
+                                const Eigen::VectorXcd& zbus0_column,
+                                const std::vector<Cx>& zbus_diagonal,
+                                const std::vector<Cx>& zbus2_diagonal,
+                                const std::vector<Cx>& zbus0_diagonal,
+                                int bus_idx) {
+  const auto diag_at = [bus_idx](const std::vector<Cx>& diagonal) -> Cx {
+    return bus_idx >= 0 && bus_idx < static_cast<int>(diagonal.size())
+               ? diagonal[static_cast<size_t>(bus_idx)]
+               : Cx(0.0, 0.0);
+  };
   TransferRatios tr;
   switch (ft) {
     case FaultType::ThreePhase:
-      tr.Zk_xfer = Zbus(bus_idx, fault_idx);
-      tr.Zk_self = Zbus(bus_idx, bus_idx);
+      tr.Zk_xfer = zbus_column(bus_idx);
+      tr.Zk_self = diag_at(zbus_diagonal);
       break;
     case FaultType::SinglePhaseGround:
-      tr.Zk_xfer = (Zbus(bus_idx, fault_idx) + Zbus2(bus_idx, fault_idx) + Zbus0(bus_idx, fault_idx)) / 3.0;
-      tr.Zk_self = (Zbus(bus_idx, bus_idx) + Zbus2(bus_idx, bus_idx) + Zbus0(bus_idx, bus_idx)) / 3.0;
+      tr.Zk_xfer = (zbus_column(bus_idx) + zbus2_column(bus_idx) +
+                    zbus0_column(bus_idx)) / 3.0;
+      tr.Zk_self = (diag_at(zbus_diagonal) + diag_at(zbus2_diagonal) +
+                    diag_at(zbus0_diagonal)) / 3.0;
       break;
     case FaultType::TwoPhase:
-      tr.Zk_xfer = (Zbus(bus_idx, fault_idx) + Zbus2(bus_idx, fault_idx)) / std::sqrt(3.0);
-      tr.Zk_self = (Zbus(bus_idx, bus_idx) + Zbus2(bus_idx, bus_idx)) / std::sqrt(3.0);
+      tr.Zk_xfer = (zbus_column(bus_idx) + zbus2_column(bus_idx)) / std::sqrt(3.0);
+      tr.Zk_self = (diag_at(zbus_diagonal) + diag_at(zbus2_diagonal)) / std::sqrt(3.0);
       break;
     case FaultType::TwoPhaseGround: {
       auto z_eff = [](Cx z1, Cx z2, Cx z0) -> Cx {
@@ -782,13 +984,15 @@ TransferRatios compute_transfer(FaultType ft,
             ? (z2 * z0) / (z2 + z0) : Cx(0.0, 0.0);
         return z1 + z2_par_z0;
       };
-      tr.Zk_xfer = z_eff(Zbus(bus_idx, fault_idx), Zbus2(bus_idx, fault_idx), Zbus0(bus_idx, fault_idx));
-      tr.Zk_self = z_eff(Zbus(bus_idx, bus_idx), Zbus2(bus_idx, bus_idx), Zbus0(bus_idx, bus_idx));
+      tr.Zk_xfer = z_eff(zbus_column(bus_idx), zbus2_column(bus_idx),
+                         zbus0_column(bus_idx));
+      tr.Zk_self = z_eff(diag_at(zbus_diagonal), diag_at(zbus2_diagonal),
+                         diag_at(zbus0_diagonal));
       break;
     }
     default:
-      tr.Zk_xfer = Zbus(bus_idx, fault_idx);
-      tr.Zk_self = Zbus(bus_idx, bus_idx);
+      tr.Zk_xfer = zbus_column(bus_idx);
+      tr.Zk_self = diag_at(zbus_diagonal);
       break;
   }
   return tr;
@@ -865,11 +1069,11 @@ SCResult compute_short_circuit(const HybridPowerSystem& sys,
 
   // Build and factorise Y_fault
   SpMat Y_fault = build_fault_ybus(ac, id_map, n, opt);
-  SpLU lu;
-  lu.analyzePattern(Y_fault);
-  lu.factorize(Y_fault);
-  if (lu.info() != Eigen::Success)
+  SparseInverseSolver inverse(Y_fault);
+  if (!inverse.valid())
     throw std::runtime_error("compute_short_circuit: Y_fault factorisation failed");
+  const auto zbus_diagonal = inverse.inverse_diagonal(
+      opt.inverse_rhs_batch_size, opt.cancellation_requested);
 
   std::vector<BusFaultResult> canonical_bus_results;
   canonical_bus_results.reserve(n);
@@ -888,8 +1092,9 @@ SCResult compute_short_circuit(const HybridPowerSystem& sys,
       }
     }
     double base_kv = ac.buses[k].base_kv;
-    canonical_bus_results.push_back(
-        fault_at_bus(lu, k, bus_id, n, projected.base_mva, base_kv, opt));
+    canonical_bus_results.push_back(fault_at_bus_with_zkk(
+        zbus_diagonal[static_cast<size_t>(k)], bus_id,
+        projected.base_mva, base_kv, opt));
   }
   if (projected.bus_merge_map) {
     const auto positions =
@@ -1006,15 +1211,16 @@ std::complex<double> calculate_motor_impedance_sc(const SCMotorParams& p) {
   return {p.r_ohm, p.x_ohm};
 }
 
-SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
-                                            int fault_bus_id,
-                                            const SCDetailedOptions& opt) {
+SCDetailedResult run_short_circuit_detailed_impl(
+    const HybridPowerSystem& sys,
+    int fault_bus_id,
+    const SCDetailedOptions& opt,
+    const projection::ProjectionBundle& projection_bundle,
+    DetailedSparseContext& sparse_context) {
   SCDetailedResult out;
   out.fault_bus_id = fault_bus_id;
   out.solved = false;
 
-  const auto projection_bundle =
-      projection::RichToCanonicalOperator::apply(sys);
   const auto& projected = projection_bundle.canonical;
   const auto& ac = projected.ac;
   const int n = static_cast<int>(ac.buses.size());
@@ -1056,8 +1262,6 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
   const double c = detailed_voltage_factor(fault_kv, opt);
   const double I_base = base_mva / (std::sqrt(3.0) * fault_kv);  // kA
   const Cx Zf(opt.fault_impedance_pu, 0.0);
-  const auto transformer_corrections = build_transformer_branch_corrections(
-      ac, projected.branch_expand_map, base_mva, opt);
 
   auto bus_kv = [&](int bus_id) -> double {
     for (const auto& bus : ac.buses) {
@@ -1080,17 +1284,28 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
     return {z.z1, z.z0};
   };
 
-  // ====== Step 1: Build subtransient Ybus & Zbus ======
-  auto [Ybus, Ybus2, Ybus0] = build_sc_admittance_matrices(
-      ac, projected.vsc_converters, id_map, n, opt, transformer_corrections, false);
-  Eigen::MatrixXcd Zbus  = safe_inverse(Ybus);
-  Eigen::MatrixXcd Zbus2 = safe_inverse(Ybus2);
-  Eigen::MatrixXcd Zbus0 = safe_inverse(Ybus0);
+  // ====== Step 1: Selected columns from shared sparse sequence factors ======
+  // IEC 60909 only requires Z[:,k] and selected diagonal entries for a fault
+  // at k.  The batch API constructs sparse_context once and reuses its
+  // symbolic/numeric factorizations for every requested fault location.
+  const auto& Zbus_diag = sparse_context.subtransient_positive_diagonal;
+  const auto& Zbus2_diag = sparse_context.subtransient_negative_diagonal;
+  const auto& Zbus0_diag = sparse_context.subtransient_zero_diagonal;
+  const Eigen::VectorXcd Zbus_col =
+      sparse_context.subtransient_positive->inverse_column(fault_idx);
+  Eigen::VectorXcd Zbus2_col = Eigen::VectorXcd::Zero(n);
+  Eigen::VectorXcd Zbus0_col = Eigen::VectorXcd::Zero(n);
+  if (sparse_context.subtransient_negative) {
+    Zbus2_col = sparse_context.subtransient_negative->inverse_column(fault_idx);
+  }
+  if (sparse_context.subtransient_zero) {
+    Zbus0_col = sparse_context.subtransient_zero->inverse_column(fault_idx);
+  }
 
   // ====== Step 2: Compute initial SC current (Ikss) at fault bus ======
-  Cx Z1_fault = Zbus(fault_idx, fault_idx);
-  Cx Z2_fault = Zbus2(fault_idx, fault_idx);
-  Cx Z0_fault = Zbus0(fault_idx, fault_idx);
+  Cx Z1_fault = Zbus_col(fault_idx);
+  Cx Z2_fault = Zbus2_col(fault_idx);
+  Cx Z0_fault = Zbus0_col(fault_idx);
   Cx Zk = compute_Zk(opt.fault_type, Z1_fault, Z2_fault, Z0_fault, Zf);
 
   double I_kss_pu = (std::abs(Zk) > 1e-15) ? (c / std::abs(Zk)) : 0.0;
@@ -1106,8 +1321,9 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
   auto source_transfer_abs = [&](int source_bus_id) -> double {
     auto it = id_map.find(source_bus_id);
     if (it == id_map.end() || std::abs(Zk) <= 1e-15) return 0.0;
-    const auto tr = compute_transfer(opt.fault_type, Zbus, Zbus2, Zbus0,
-                                     it->second, fault_idx);
+    const auto tr = compute_transfer(
+        opt.fault_type, Zbus_col, Zbus2_col, Zbus0_col,
+        Zbus_diag, Zbus2_diag, Zbus0_diag, it->second);
     return std::abs(tr.Zk_xfer) / std::abs(Zk);
   };
 
@@ -1281,13 +1497,13 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
   const double no_motor = std::max(0.0, total_ikss_kA - gen_contrib - motor_contrib - load_contrib);
 
   Eigen::VectorXcd V_fault(n);
-  const Cx Z_voltage_denom = Zbus(fault_idx, fault_idx) + Zf;
+  const Cx Z_voltage_denom = Z1_fault + Zf;
   for (int k = 0; k < n; ++k) {
     if (k == fault_idx) {
       V_fault[k] = Cx(0.0, 0.0);
     } else if (std::abs(Z_voltage_denom) > 1e-15) {
       V_fault[k] = Cx(c, 0.0) *
-                   (Cx(1.0, 0.0) - Zbus(k, fault_idx) / Z_voltage_denom);
+                   (Cx(1.0, 0.0) - Zbus_col(k) / Z_voltage_denom);
     } else {
       V_fault[k] = Cx(c, 0.0);
     }
@@ -1314,8 +1530,16 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
       row.ikss_no_motor_ka = no_motor;
       row.v_remaining_pu = 0.0;  // Voltage at fault point is zero
     } else {
+      if (!opt.compute_nonfault_currents) {
+        if (opt.compute_voltage_drops) {
+          row.v_remaining_pu = std::abs(V_fault[k]);
+        }
+        continue;
+      }
       // Transfer impedance based contribution
-      auto tr = compute_transfer(opt.fault_type, Zbus, Zbus2, Zbus0, k, fault_idx);
+      auto tr = compute_transfer(
+          opt.fault_type, Zbus_col, Zbus2_col, Zbus0_col,
+          Zbus_diag, Zbus2_diag, Zbus0_diag, k);
       double I_pu = (std::abs(Zk) > 1e-15 && std::abs(tr.Zk_self) > 1e-15)
                         ? c * std::abs(tr.Zk_xfer) / (std::abs(Zk) * std::abs(tr.Zk_self))
                         : 0.0;
@@ -1326,8 +1550,8 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
       if (opt.fault_type == FaultType::ThreePhase) {
         row.ikss_2_ka = 0.0;
       } else {
-        double Z2_self = std::abs(Zbus2(k, k));
-        double Z2_xfer = std::abs(Zbus2(k, fault_idx));
+        double Z2_self = std::abs(Zbus2_diag[static_cast<size_t>(k)]);
+        double Z2_xfer = std::abs(Zbus2_col(k));
         row.ikss_2_ka = (Z2_self > 1e-15 && std::abs(Zk) > 1e-15)
             ? c * Z2_xfer / (std::abs(Zk) * Z2_self) * I_base : 0.0;
       }
@@ -1352,7 +1576,7 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
 
         if (opt.fault_type == FaultType::ThreePhase) {
           if (std::abs(z_gen_corr) > 1e-15 && std::abs(Zk) > 1e-15)
-            bus_gen += c * std::abs(Zbus(k, fault_idx)) / (std::abs(z_gen_corr) * std::abs(Zk)) * I_base;
+            bus_gen += c * std::abs(Zbus_col(k)) / (std::abs(z_gen_corr) * std::abs(Zk)) * I_base;
         } else if (opt.fault_type == FaultType::SinglePhaseGround) {
           Cx z_gen_0 = Cx(g.r0_pu, g.x0_pu) * (base_mva / mbase);
           double KG0 = c / (1.0 + g.x0_pu * sin_phi);
@@ -1363,7 +1587,7 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
         } else if (opt.fault_type == FaultType::TwoPhase) {
           Cx z_k = z_gen_corr * 2.0 / std::sqrt(3.0);
           if (std::abs(z_k) > 1e-15 && std::abs(Zk) > 1e-15)
-            bus_gen += (c / std::abs(z_k)) * std::abs(Zbus(k, fault_idx) * 2.0 / std::sqrt(3.0)) / std::abs(Zk) * I_base;
+            bus_gen += (c / std::abs(z_k)) * std::abs(Zbus_col(k) * 2.0 / std::sqrt(3.0)) / std::abs(Zk) * I_base;
         } else if (opt.fault_type == FaultType::TwoPhaseGround) {
           Cx z_gen_0 = Cx(g.r0_pu, g.x0_pu) * (base_mva / mbase);
           double KG0 = c / (1.0 + g.x0_pu * sin_phi);
@@ -1383,8 +1607,8 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
         Cx z_motor = z_motor_nameplate * (base_mva / m.sn_mva);
 
         if (opt.fault_type == FaultType::ThreePhase) {
-          double m_pu = (c / std::abs(z_motor)) * std::abs(Zbus(k, fault_idx)) /
-                        (std::abs(Zk) * std::abs(Zbus(k, k)));
+          double m_pu = (c / std::abs(z_motor)) * std::abs(Zbus_col(k)) /
+                        (std::abs(Zk) * std::abs(Zbus_diag[static_cast<size_t>(k)]));
           bus_motor += m_pu * I_base;
         } else {
           // For unbalanced faults, use transfer ratio
@@ -1493,22 +1717,26 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
   // shunts) feeding the fault, for the network part of the peak summation.
   double kappa_net = kappa;
   {
-    auto [Ybus_net, Ybus2_net, Ybus0_net] = build_sc_admittance_matrices(
-        ac, projected.vsc_converters, id_map, n, opt, transformer_corrections,
-        false, false);
-    Eigen::MatrixXcd Zbus_net = safe_inverse(Ybus_net);
+    const Eigen::VectorXcd Zbus_net_col =
+        sparse_context.network_positive->inverse_column(fault_idx);
     Cx Zk_net;
     if (opt.fault_type == FaultType::ThreePhase) {
       Zk_net = compute_Zk(opt.fault_type,
-                          Zbus_net(fault_idx, fault_idx),
-                          Zbus_net(fault_idx, fault_idx),
+                          Zbus_net_col(fault_idx),
+                          Zbus_net_col(fault_idx),
                           Cx(0.0, 0.0), Zf);
-    } else {
-      Eigen::MatrixXcd Zbus0_net = safe_inverse(Ybus0_net);
+    } else if (sparse_context.network_zero) {
+      const Eigen::VectorXcd Zbus0_net_col =
+          sparse_context.network_zero->inverse_column(fault_idx);
       Zk_net = compute_Zk(opt.fault_type,
-                          Zbus_net(fault_idx, fault_idx),
-                          Zbus_net(fault_idx, fault_idx),
-                          Zbus0_net(fault_idx, fault_idx), Zf);
+                          Zbus_net_col(fault_idx),
+                          Zbus_net_col(fault_idx),
+                          Zbus0_net_col(fault_idx), Zf);
+    } else {
+      Zk_net = compute_Zk(opt.fault_type,
+                          Zbus_net_col(fault_idx),
+                          Zbus_net_col(fault_idx),
+                          Cx(0.0, 0.0), Zf);
     }
     kappa_net = kappa_of(Zk_net);
   }
@@ -1522,6 +1750,7 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
   for (int k = 0; k < n; ++k) {
     auto& row = out.bus_results[k];
     if (k != fault_idx) {
+      if (!opt.compute_nonfault_currents) continue;
       const double current_source_ka =
           std::max(0.0, row.ikss_ka - row.ikss_1_ka);
       row.ip_ka = std::sqrt(2.0) *
@@ -1542,6 +1771,7 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
 
     for (int k = 0; k < n; ++k) {
       auto& row = out.bus_results[k];
+      if (k != fault_idx && !opt.compute_nonfault_currents) continue;
       double Ib = 0.0;
 
       // Generator contribution to breaking current
@@ -1571,9 +1801,9 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
         double gen_current = 0.0, gen_current_tr = 0.0;
         if (opt.fault_type == FaultType::ThreePhase && std::abs(z_gen_corr) > 1e-15) {
           gen_current = (c / std::abs(z_gen_corr)) * I_base;
-          Cx Z_k_b = Zbus(fault_idx, fault_idx) + Zf;
+          Cx Z_k_b = Z1_fault + Zf;
           gen_current_tr = (std::abs(Z_k_b) > 1e-15)
-              ? (c * std::abs(Zbus(gi, fault_idx))) / (std::abs(z_gen_corr) * std::abs(Z_k_b)) * I_base
+              ? (c * std::abs(Zbus_col(gi))) / (std::abs(z_gen_corr) * std::abs(Z_k_b)) * I_base
               : 0.0;
         }
 
@@ -1598,9 +1828,9 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
         double motor_current = (c / std::abs(z_motor)) * I_base;
 
         int mi = mit->second;
-        double Zk_abs = std::abs(Zbus(fault_idx, fault_idx) + Zf);
+        double Zk_abs = std::abs(Z1_fault + Zf);
         double motor_current_tr = (Zk_abs > 1e-15)
-            ? motor_current * std::abs(Zbus(mi, fault_idx)) / Zk_abs
+            ? motor_current * std::abs(Zbus_col(mi)) / Zk_abs
             : 0.0;
 
         if (motor_current > 1e-15) {
@@ -1627,10 +1857,10 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
         const Cx z_load = Cx(ld.r_sc_pu, ld.x_sub_pu) * (base_mva / actual_s);
         if (std::abs(z_load) <= 1e-15) continue;
         const double motor_current = (c / std::abs(z_load)) * I_base;
-        const double Zk_abs = std::abs(Zbus(fault_idx, fault_idx) + Zf);
+        const double Zk_abs = std::abs(Z1_fault + Zf);
         const double motor_current_tr =
             (Zk_abs > 1e-15)
-                ? motor_current * std::abs(Zbus(lit->second, fault_idx)) / Zk_abs
+                ? motor_current * std::abs(Zbus_col(lit->second)) / Zk_abs
                 : 0.0;
         if (motor_current <= 1e-15) continue;
         const double sn = (actual_s > 1e-6) ? actual_s : 1.0;
@@ -1652,18 +1882,19 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
 
   // ====== Step 7: Steady-state current (Ik) ======
   {
-    auto [Ybus_s, Ybus2_s, Ybus0_s] = build_sc_admittance_matrices(
-        ac, projected.vsc_converters, id_map, n, opt, transformer_corrections, true);
-    Eigen::MatrixXcd Zbus_s = safe_inverse(Ybus_s);
+    const auto& Zbus_s_diag = sparse_context.steady_positive_diagonal;
+    const Eigen::VectorXcd Zbus_s_col =
+        sparse_context.steady_positive->inverse_column(fault_idx);
 
     Cx Zk_s = compute_Zk(opt.fault_type,
-                          Zbus_s(fault_idx, fault_idx),
-                          Zbus0(fault_idx, fault_idx), Zf);
+                          Zbus_s_col(fault_idx),
+                          Z0_fault, Zf);
     double Ik_1_pu = (std::abs(Zk_s) > 1e-15) ? (c / std::abs(Zk_s)) : 0.0;
     double Ik_1_kA = Ik_1_pu * I_base;
 
     for (int k = 0; k < n; ++k) {
       auto& row = out.bus_results[k];
+      if (k != fault_idx && !opt.compute_nonfault_currents) continue;
       double Ik = 0.0;
 
       // Generator lambda_max contribution
@@ -1687,7 +1918,7 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
           lambda_max = 2.8 + (5.0 - 2.8) * (xd_xq - 1.2) / (1.5 - 1.2);
 
         double tr_ratio = (std::abs(Zk_s) > 1e-15)
-            ? std::abs(Zbus_s(gi, fault_idx)) / std::abs(Zk_s)
+            ? std::abs(Zbus_s_col(gi)) / std::abs(Zk_s)
             : 0.0;
 
         Ik += lambda_max * I_rG * tr_ratio;
@@ -1713,8 +1944,10 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
         Ik += (Ik_1_kA - gen_ss_contrib);
       } else {
         // Other buses: transfer from steady-state
-        double I_ss_pu = (std::abs(Zk_s) > 1e-15 && std::abs(Zbus_s(k, k)) > 1e-15)
-            ? c * std::abs(Zbus_s(k, fault_idx)) / (std::abs(Zk_s) * std::abs(Zbus_s(k, k)))
+        double I_ss_pu = (std::abs(Zk_s) > 1e-15 &&
+                          std::abs(Zbus_s_diag[static_cast<size_t>(k)]) > 1e-15)
+            ? c * std::abs(Zbus_s_col(k)) /
+                  (std::abs(Zk_s) * std::abs(Zbus_s_diag[static_cast<size_t>(k)]))
             : 0.0;
         double gen_ss_k = 0.0;
         int bus_id = ac.buses[k].index;
@@ -1729,7 +1962,7 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
           double KG = c / (1.0 + xd * sin_phi);
           Cx z_gen = Cx(g.ra_pu, xd) * (base_mva / mbase) * KG;
           if (std::abs(z_gen) > 1e-15 && std::abs(Zk_s) > 1e-15)
-            gen_ss_k += c * std::abs(Zbus_s(k, fault_idx)) / (std::abs(z_gen) * std::abs(Zk_s)) * I_base;
+            gen_ss_k += c * std::abs(Zbus_s_col(k)) / (std::abs(z_gen) * std::abs(Zk_s)) * I_base;
         }
         Ik += (I_ss_pu * I_base - gen_ss_k);
       }
@@ -1743,13 +1976,16 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
     const double Tk = opt.ith_duration_s;
     for (int k = 0; k < n; ++k) {
       auto& row = out.bus_results[k];
+      if (k != fault_idx && !opt.compute_nonfault_currents) continue;
 
       // I_th = I_kss * sqrt(m + n)
       // m: DC component heat factor, n: AC decay heat factor
       // Simplified: m = (1/(2*f*Tk)) * (exp(-4*pi*f*Tk*R/X) - 1) / (-4*pi*f*R/X) + 1
       //             n ≈ 1 for constant AC component
 
-      Cx Z_k_th = (k == fault_idx) ? Z1_fault : Zbus(k, k);
+      Cx Z_k_th = (k == fault_idx)
+                      ? Z1_fault
+                      : Zbus_diag[static_cast<size_t>(k)];
       double rx_ratio = (std::abs(std::imag(Z_k_th)) > 1e-15)
                             ? std::abs(std::real(Z_k_th) / std::imag(Z_k_th))
                             : 0.0;
@@ -1853,13 +2089,47 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
   return out;
 }
 
+SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
+                                            int fault_bus_id,
+                                            const SCDetailedOptions& opt) {
+  const auto projection_bundle =
+      projection::RichToCanonicalOperator::apply(sys);
+  const auto& projected = projection_bundle.canonical;
+  const auto id_map = build_id_map(projected.ac.buses);
+  const double base_mva = projected.ac.base_mva > 0.0
+                              ? projected.ac.base_mva
+                              : 100.0;
+  const auto transformer_corrections = build_transformer_branch_corrections(
+      projected.ac, projected.branch_expand_map, base_mva, opt);
+  auto sparse_context = build_detailed_sparse_context(
+      projected, id_map, opt, transformer_corrections);
+  return run_short_circuit_detailed_impl(
+      sys, fault_bus_id, opt, projection_bundle, sparse_context);
+}
+
 std::vector<SCDetailedResult> run_short_circuit_detailed_batch(const HybridPowerSystem& sys,
                                                                const std::vector<int>& fault_bus_ids,
                                                                const SCDetailedOptions& opt) {
+  const auto projection_bundle =
+      projection::RichToCanonicalOperator::apply(sys);
+  const auto& projected = projection_bundle.canonical;
+  const auto id_map = build_id_map(projected.ac.buses);
+  const double base_mva = projected.ac.base_mva > 0.0
+                              ? projected.ac.base_mva
+                              : 100.0;
+  const auto transformer_corrections = build_transformer_branch_corrections(
+      projected.ac, projected.branch_expand_map, base_mva, opt);
+  auto sparse_context = build_detailed_sparse_context(
+      projected, id_map, opt, transformer_corrections);
+
   std::vector<SCDetailedResult> out;
   out.reserve(fault_bus_ids.size());
   for (const int bus_id : fault_bus_ids) {
-    out.push_back(run_short_circuit_detailed(sys, bus_id, opt));
+    if (opt.cancellation_requested && opt.cancellation_requested()) {
+      throw std::runtime_error("short-circuit analysis cancelled");
+    }
+    out.push_back(run_short_circuit_detailed_impl(
+        sys, bus_id, opt, projection_bundle, sparse_context));
   }
   return out;
 }

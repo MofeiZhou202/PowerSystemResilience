@@ -14,6 +14,12 @@ runs power flow first. Two related calculations are returned:
   solved flow directions;
 - a sparse linear system `A w = b` solves nodal carbon intensity.
 
+Both paths remain sparse. Proportional tracing factors its sparse allocation
+matrix once with SparseLU and applies the factors to all source RHS. The nodal
+carbon-potential solve uses rank-revealing SparseQR so `matrix_rank`, the pivot
+condition estimate, and residual validity remain part of the result contract.
+Neither production path materializes a dense `node_count x node_count` matrix.
+
 The model consumes explicit generator, external-grid, renewable, negative-load,
 storage, converter, energy-router, and load semantics present in the system and
 solved result. It is post-processing: it does not redispatch power or repair a
@@ -97,3 +103,12 @@ exports or missing sources fail the nodal-balance validity gate.
   multi-step storage workflows.
 - `test_crossmodule_integration`: PF/OPF/reconfiguration/carbon consistency.
 
+## Performance Baseline
+
+On the Release Yunnan case, the canonical carbon matrix is `3927 x 3927` with
+reported rank 3927. The sparse implementation completed the production HTTP
+request in `1.469 s`, with `matrix_solved=true`, relative residual `0`, finite
+condition estimate `5.173`, and both power-balance and tracing verification
+true. The former dense QR implementation measured `11.35 s`. The case has no
+authored carbon factors, so this measurement validates numerical plumbing and
+performance, not the evidential quality of the fallback emissions factors.

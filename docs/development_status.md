@@ -760,6 +760,68 @@ assertions, one data-dependent skip), `test_bpa_io` (25/885),
 (49/275), and `test_advanced_pf` (30/218). The rebuilt `run_gui_server` is the
 binary used for the full Yunnan request.
 
+The production-HTTP Yunnan capability audit is reproducible with
+`tools/validate_yunnan_capabilities.py`; its merged machine-readable and human
+reports are `output/yunnan_capability_audit.json` and `.md`. It covers 46
+probes without inventing missing case data: 14 passed, 6 ran with an explicit
+input limitation, 20 were correctly classified not applicable, 3 returned a
+numerical non-convergence, and 3 exhausted a declared wall budget.
+
+The PF comparison confirms that the fixed active-set Newton path is the right
+production default for this case. Screening used `16.0 ms` solver time and 7
+iterations. Q-certified Newton used `42.6 ms`, 19 total iterations, 218
+PV-to-PQ entries, 3 restorations, and no cycle. Distributed slack (`1081 ms`),
+HELM (`443 ms`), and Newton-Krylov (`378 ms`) converged but were materially
+slower. FDPF stopped after 1000 iterations without convergence; explicit
+homotopy stopped after 110 iterations at residual `1.35` and an uncertified Q
+violation. DC and hybrid-linearized PF remain useful screening models, not
+substitutes for the nonlinear Q certificate.
+
+Parity OPF with AC-PF warm start converged in 37 iterations and 36
+factorizations both with and without central Phase I. Phase I measured
+`0.66 ms`, observed initial constraint violation `0.2199 > 0.1`, terminated
+`outside-phase-one-admission`, and correctly left the ordinary Phase-II start
+unchanged. Core solve time was `676.7 ms` with Phase I and `675.3 ms` without;
+the difference is noise. DCOPF completed in `217 ms` core time. Because the
+case has no authored generator cost curves, these runs certify feasibility and
+solver work, not economic fidelity.
+
+Topology, projection guard, network reduction, harmonics zero-injection,
+hosting capacity, carbon-flow plumbing, and scenario generation all returned
+normally. The system is one connected AC island with 673 cycles. General graph
+reduction eliminated 143 buses/branches in `159 ms`; SPPT admission passed.
+Hosting capacity evaluated 2428 BPA transformer branches in `27.7 ms`.
+Carbon tracing solved a rank-3927 canonical matrix with zero reported relative
+residual in `11.35 s`, but the result uses fallback factors because no authored
+carbon factors exist. Scenario generation took `2.36 s` and produced 6344
+default reliability contingencies; those defaults are workflow evidence, not
+Yunnan stochastic-data evidence.
+
+The Yunnan short-circuit and carbon-flow scale failures are closed in the dirty
+worktree. Detailed sequence matrices are sparse, KLU factors are shared across
+batch fault locations, selected inverse columns replace full `Zbus` matrices,
+and inverse diagonals use bounded RHS blocks with cooperative cancellation.
+The GUI all-bus route now uses its documented positive-sequence overview model;
+the selected-fault route computes complete fault-point duties and the full
+remaining-voltage profile without unused non-fault current diagonals. Release
+HTTP wall times were `74.2 ms` for 4512 overview rows and `29.7 ms` for one
+detailed fault, versus both former paths exceeding 90 seconds. Carbon tracing
+and nodal intensity now remain sparse throughout; the same case fell from
+`11.35 s` to `1.469 s`, with rank 3927, relative residual zero, finite condition
+estimate `5.173`, and all validity flags true. Focused Release tests passed 523
+short-circuit assertions, 8 IEC assertions, and 594 carbon assertions.
+
+Two scale failures remain open. Default counterfactual planning
+exceeded 180 seconds and ignored cancellation because it nests baseline, five
+measure, and up to ten pair evaluations across economic, carbon, reliability,
+and resilience models. It needs a shared prepared assessment session, bounded
+dimension selection, and cancellation at every clone/measure/pair boundary.
+Finally, the four-step default time-series profile returned voltage arrays but
+zero converged steps; all four minima hit `0.05 pu`. The case has no authored
+load or generator profiles, so the default `0.4--0.5` load multipliers are not
+an admissible Yunnan operating trajectory and must not be presented as a
+successful production simulation.
+
 The GUI/API E2E passed all PF Q-certificate and fast-screening assertions, but
 the complete run was 70/71 because the separate Hybrid Auto OPF check reached
 the Ipopt iteration limit. Browser E2E passed the new default/control assertion

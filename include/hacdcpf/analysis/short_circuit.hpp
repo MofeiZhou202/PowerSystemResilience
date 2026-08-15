@@ -6,6 +6,7 @@
 // Cross-validated against analytical Thevenin impedances on known networks.
 
 #include <complex>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -37,6 +38,8 @@ struct SCOptions {
   bool   compute_all_buses{true}; ///< If true compute fault at every bus;
                                   ///  set to false and use compute_fault_at_bus()
                                   ///  for single-bus queries.
+  size_t inverse_rhs_batch_size{32}; ///< Bounded RHS columns for inverse diagonal extraction.
+  std::function<bool()> cancellation_requested; ///< Cooperative cancellation between RHS batches.
 };
 
 // ---------------------------------------------------------------------------
@@ -101,8 +104,11 @@ struct SCDetailedOptions {
   bool   apply_iec_transformer_correction{true}; ///< Apply IEC 60909 K_T to transformer impedance.
   bool   compute_branch_flows{true};   ///< Compute branch fault currents/power flows
   bool   compute_voltage_drops{true};  ///< Compute remaining voltage at non-fault buses
+  bool   compute_nonfault_currents{true}; ///< Compute current metrics at every non-fault bus.
   bool   compute_ith{true};            ///< Compute thermal equivalent SC current
   double ith_duration_s{1.0};          ///< Duration for I_th computation (default 1 s)
+  size_t inverse_rhs_batch_size{32};   ///< Bounded dense RHS columns for selected inverse data.
+  std::function<bool()> cancellation_requested; ///< Cooperative cancellation between RHS batches.
 };
 
 struct SCDetailedBusResult {

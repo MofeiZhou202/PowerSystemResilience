@@ -578,6 +578,7 @@ json sc_options_to_json(const hacdcpf::analysis::SCDetailedOptions& opt) {
       {"default_xdpp", opt.default_xdpp},
       {"compute_branch_flows", opt.compute_branch_flows},
       {"compute_voltage_drops", opt.compute_voltage_drops},
+      {"compute_nonfault_currents", opt.compute_nonfault_currents},
       {"compute_ith", opt.compute_ith},
       {"ith_duration_s", opt.ith_duration_s},
   };
@@ -18381,40 +18382,38 @@ int main(int argc, char** argv) {
       }
       g_session.cancel.store(false);
       const auto j = json::parse(req.body.empty() ? "{}" : req.body);
-      hacdcpf::analysis::SCDetailedOptions dopt;
-      apply_sc_request_options(j, dopt);
-      dopt.compute_branch_flows = false;
-      dopt.compute_voltage_drops = false;
-      // Fault at every AC bus
-      std::vector<int> all_bus_ids;
-      std::unordered_map<int, double> bus_kv;
-      for (const auto& b : sys.ac.buses) {
-        if (b.in_service) {
-          all_bus_ids.push_back(b.index);
-          bus_kv[b.index] = b.base_kv;
-        }
-      }
-      auto detailed = hacdcpf::analysis::run_short_circuit_detailed_batch(sys, all_bus_ids, dopt);
+      hacdcpf::analysis::SCDetailedOptions request_opt;
+      apply_sc_request_options(j, request_opt);
+      hacdcpf::analysis::SCOptions opt;
+      opt.fault_type = request_opt.fault_type;
+      opt.default_xdpp = request_opt.default_xdpp;
+      opt.c_factor = request_opt.c_factor > 0.0
+                         ? request_opt.c_factor
+                         : (request_opt.calc_type == hacdcpf::analysis::SCCalcType::Max
+                                ? 1.1
+                                : 1.0);
+      opt.cancellation_requested = [] {
+        return g_session.cancel.load(std::memory_order_relaxed);
+      };
+      const auto overview = hacdcpf::analysis::compute_short_circuit(sys, opt);
       json out;
-      out["fault_type"] = sc_fault_type_name(dopt.fault_type);
-      out["calc_type"] = sc_calc_type_name(dopt.calc_type);
-      out["c_factor"] = dopt.c_factor;
-      out["options"] = sc_options_to_json(dopt);
+      out["fault_type"] = sc_fault_type_name(request_opt.fault_type);
+      out["calc_type"] = sc_calc_type_name(request_opt.calc_type);
+      out["c_factor"] = opt.c_factor;
+      out["options"] = sc_options_to_json(request_opt);
+      out["model_scope"] = "overview-positive-sequence";
+      out["model_limitations"] = json::array({
+          "Detailed sequence-network source contributions, peak, breaking, steady-state, thermal, voltage, and branch results require /api/session/sc_detailed."
+      });
       out["bus_results"] = json::array();
-      for (const auto& dr : detailed) {
-        // Find the fault bus's own result
-        const auto it = std::find_if(dr.bus_results.begin(), dr.bus_results.end(),
-            [&](const hacdcpf::analysis::SCDetailedBusResult& br){ return br.bus_id == dr.fault_bus_id; });
-        if (it != dr.bus_results.end()) {
-          const double un = bus_kv.count(dr.fault_bus_id) ? bus_kv.at(dr.fault_bus_id) : 110.0;
-          const double sk = std::sqrt(3.0) * un * it->ikss_ka;
-          out["bus_results"].push_back(json{
-            {"bus_id", dr.fault_bus_id},
-            {"ikpp_ka", it->ikss_ka}, {"sk_mva", sk},
-            {"ip_ka", it->ip_ka}, {"ib_ka", it->ib_ka},
-            {"ik_ka", it->ik_ka}, {"ith_ka", it->ith_ka}
-          });
-        }
+      for (const auto& row : overview.bus_results) {
+        out["bus_results"].push_back(json{
+            {"bus_id", row.bus_id},
+            {"ikpp_ka", row.ikpp_ka},
+            {"sk_mva", row.sk_mva},
+            {"z_thevenin_re", row.z_thevenin.real()},
+            {"z_thevenin_im", row.z_thevenin.imag()}
+        });
       }
       res.set_content(out.dump(), "application/json");
       g_session.busy.store(false);
@@ -18937,12 +18936,23 @@ int main(int argc, char** argv) {
         if (fault_bus_ids.empty()) throw std::runtime_error("No fault_bus_ids specified");
         hacdcpf::analysis::SCDetailedOptions dopt;
         apply_sc_request_options(j, dopt);
+        // The selected-bus GUI consumes complete fault-bus duties plus the
+        // network voltage profile; non-fault current metrics would require
+        // two full inverse diagonals and are returned as zero-valued fields.
+        dopt.compute_nonfault_currents = false;
+        dopt.cancellation_requested = [] {
+          return g_session.cancel.load(std::memory_order_relaxed);
+        };
         auto results = hacdcpf::analysis::run_short_circuit_detailed_batch(sys, fault_bus_ids, dopt);
         json out;
         out["fault_type"] = sc_fault_type_name(dopt.fault_type);
         out["calc_type"] = sc_calc_type_name(dopt.calc_type);
         out["c_factor"] = dopt.c_factor;
         out["options"] = sc_options_to_json(dopt);
+        out["model_scope"] = "selected-fault-complete-voltage-profile";
+        out["model_limitations"] = json::array({
+            "Non-fault bus current metrics are omitted; request the C++ API with compute_nonfault_currents=true when those self-impedance quantities are required."
+        });
         json res_arr = json::array();
         for (const auto& dr : results) {
           json rj;

@@ -13,6 +13,8 @@
 
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
+#include <Eigen/SparseLU>
+#include <Eigen/SparseQR>
 
 #include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/detail/logging.hpp"
@@ -1456,21 +1458,30 @@ TracingResult proportional_tracing(const std::vector<Source>& sources,
   result.edge_loss_alloc.resize(edges.size());
   if (node_count == 0 || sources.empty()) return result;
 
-  Eigen::MatrixXd allocation_matrix = Eigen::MatrixXd::Zero(node_count, node_count);
+  using Sparse = Eigen::SparseMatrix<double>;
+  using Triplet = Eigen::Triplet<double>;
+  std::vector<Triplet> allocation_triplets;
+  allocation_triplets.reserve(static_cast<size_t>(node_count) + edges.size());
   for (int node = 0; node < node_count; ++node) {
-    allocation_matrix(node, node) =
+    allocation_triplets.emplace_back(
+        node, node,
         (total_inflow[static_cast<size_t>(node)] > kTol)
             ? total_inflow[static_cast<size_t>(node)]
-            : 1.0;
+            : 1.0);
   }
   for (const auto& edge : edges) {
     if (edge.from_node_loc < 0 || edge.from_node_loc >= node_count ||
         edge.to_node_loc < 0 || edge.to_node_loc >= node_count) {
       continue;
     }
-    allocation_matrix(edge.to_node_loc, edge.from_node_loc) -=
-        std::max(edge.recv_mw, 0.0);
+    allocation_triplets.emplace_back(
+        edge.to_node_loc, edge.from_node_loc,
+        -std::max(edge.recv_mw, 0.0));
   }
+  Sparse allocation_matrix(node_count, node_count);
+  allocation_matrix.setFromTriplets(allocation_triplets.begin(),
+                                    allocation_triplets.end());
+  allocation_matrix.makeCompressed();
 
   Eigen::MatrixXd source_injection =
       Eigen::MatrixXd::Zero(node_count, static_cast<int>(sources.size()));
@@ -1480,11 +1491,16 @@ TracingResult proportional_tracing(const std::vector<Source>& sources,
     source_injection(source.node_loc, static_cast<int>(source_pos)) += source.p_mw;
   }
 
-  Eigen::ColPivHouseholderQR<Eigen::MatrixXd> qr(allocation_matrix);
-  qr.setThreshold(std::max(opt.regularization_eps, 1e-12));
-  if (qr.rank() < node_count) return result;
-  Eigen::MatrixXd source_fraction = qr.solve(source_injection);
-  if (!source_fraction.allFinite()) return result;
+  // Davis, Direct Methods for Sparse Linear Systems, Ch. 5-6: the tracing
+  // stage needs a nonsingular solve but exposes no rank diagnostic, so sparse
+  // LU avoids the extra rank-revealing QR work.  The audited carbon-potential
+  // solve below retains SparseQR rank and pivot-condition checks.
+  Eigen::SparseLU<Sparse, Eigen::COLAMDOrdering<int>> lu;
+  lu.analyzePattern(allocation_matrix);
+  lu.factorize(allocation_matrix);
+  if (lu.info() != Eigen::Success) return result;
+  Eigen::MatrixXd source_fraction = lu.solve(source_injection);
+  if (lu.info() != Eigen::Success || !source_fraction.allFinite()) return result;
 
   for (int node = 0; node < node_count; ++node) {
     for (int source_pos = 0; source_pos < source_fraction.cols(); ++source_pos) {
@@ -1733,19 +1749,10 @@ MatrixResult solve_carbon_matrix(const HybridPowerSystem& sys,
     Pout(ld.node_loc) += ld.p_mw;
   }
 
-  Eigen::SparseMatrix<double> A(node_count, node_count);
+  using Sparse = Eigen::SparseMatrix<double>;
+  Sparse A(node_count, node_count);
   std::vector<Triplet> a_triplets;
   a_triplets.reserve(static_cast<size_t>(node_count + static_cast<int>(in_triplets.size())));
-  for (int i = 0; i < node_count; ++i) {
-    const double diag = (std::abs(Pout(i)) > opt.regularization_eps) ? Pout(i)
-                                                                     : opt.regularization_eps;
-    a_triplets.emplace_back(i, i, diag);
-  }
-  for (const auto& t : in_triplets) {
-    a_triplets.emplace_back(t.row(), t.col(), -t.value());
-  }
-  A.setFromTriplets(a_triplets.begin(), a_triplets.end());
-
   Eigen::VectorXd b = Eigen::VectorXd::Zero(node_count);
   Eigen::VectorXd gen_at_bus = Eigen::VectorXd::Zero(node_count);
   for (const auto& s : sources) {
@@ -1754,46 +1761,79 @@ MatrixResult solve_carbon_matrix(const HybridPowerSystem& sys,
     gen_at_bus(s.node_loc) += s.p_mw;
   }
 
-  Eigen::MatrixXd A_dense = Eigen::MatrixXd(A);
   std::vector<double> load_at_bus(static_cast<size_t>(node_count), 0.0);
   for (const auto& ld : loads) {
     if (ld.node_loc >= 0 && ld.node_loc < node_count) {
       load_at_bus[static_cast<size_t>(ld.node_loc)] += ld.p_mw;
     }
   }
+  std::vector<double> row_max(static_cast<size_t>(node_count), 0.0);
+  for (const auto& t : in_triplets) {
+    row_max[static_cast<size_t>(t.row())] =
+        std::max(row_max[static_cast<size_t>(t.row())], std::abs(t.value()));
+  }
+  std::vector<bool> inactive_row(static_cast<size_t>(node_count), false);
   for (int i = 0; i < node_count; ++i) {
-    if (load_at_bus[static_cast<size_t>(i)] < 1e-8 && gen_at_bus(i) < 1e-8) {
-      const double row_norm = A_dense.row(i).norm();
-      if (row_norm < 1e-6) {
-        A_dense.row(i).setZero();
-        b(i) = 0.0;
-        A_dense(i, i) = 1.0;
-      }
+    const double diag = (std::abs(Pout(i)) > opt.regularization_eps)
+                            ? Pout(i)
+                            : opt.regularization_eps;
+    row_max[static_cast<size_t>(i)] =
+        std::max(row_max[static_cast<size_t>(i)], std::abs(diag));
+    inactive_row[static_cast<size_t>(i)] =
+        load_at_bus[static_cast<size_t>(i)] < 1e-8 && gen_at_bus(i) < 1e-8 &&
+        row_max[static_cast<size_t>(i)] < 1e-6;
+    if (inactive_row[static_cast<size_t>(i)]) {
+      a_triplets.emplace_back(i, i, 1.0);
+      b(i) = 0.0;
+      row_max[static_cast<size_t>(i)] = 1.0;
+    } else {
+      a_triplets.emplace_back(i, i, diag);
     }
   }
+  for (const auto& t : in_triplets) {
+    if (!inactive_row[static_cast<size_t>(t.row())]) {
+      a_triplets.emplace_back(t.row(), t.col(), -t.value());
+    }
+  }
+  A.setFromTriplets(a_triplets.begin(), a_triplets.end());
+  A.makeCompressed();
 
-  Eigen::MatrixXd A_scaled = A_dense;
+  Sparse A_scaled = A;
   Eigen::VectorXd b_scaled = b;
-  for (int i = 0; i < node_count; ++i) {
-    const double row_scale = A_scaled.row(i).cwiseAbs().maxCoeff();
-    if (row_scale > std::max(opt.regularization_eps, 1e-15)) {
-      A_scaled.row(i) /= row_scale;
-      b_scaled(i) /= row_scale;
+  const double min_scale = std::max(opt.regularization_eps, 1e-15);
+  for (int col = 0; col < A_scaled.outerSize(); ++col) {
+    for (Sparse::InnerIterator it(A_scaled, col); it; ++it) {
+      const double scale = row_max[static_cast<size_t>(it.row())];
+      if (scale > min_scale) it.valueRef() /= scale;
     }
   }
+  for (int i = 0; i < node_count; ++i) {
+    const double scale = row_max[static_cast<size_t>(i)];
+    if (scale > min_scale) b_scaled(i) /= scale;
+  }
 
-  Eigen::ColPivHouseholderQR<Eigen::MatrixXd> qr(A_scaled);
-  qr.setThreshold(std::max(opt.regularization_eps, 1e-12));
+  // Davis, Direct Methods for Sparse Linear Systems, Ch. 7. SparseQR keeps
+  // the prior rank-revealing QR contract while avoiding dense n-by-n storage.
+  Eigen::SparseQR<Sparse, Eigen::COLAMDOrdering<int>> qr;
+  qr.setPivotThreshold(std::max(opt.regularization_eps, 1e-12));
+  qr.compute(A_scaled);
+  if (qr.info() != Eigen::Success) {
+    res.condition_estimate = std::numeric_limits<double>::max();
+    return res;
+  }
   res.rank = static_cast<int>(qr.rank());
   if (res.rank < node_count) {
     res.condition_estimate = std::numeric_limits<double>::max();
     return res;
   }
 
-  const Eigen::VectorXd pivots =
-      qr.matrixR().diagonal().head(node_count).cwiseAbs();
-  const double max_pivot = pivots.maxCoeff();
-  const double min_pivot = pivots.minCoeff();
+  double max_pivot = 0.0;
+  double min_pivot = std::numeric_limits<double>::max();
+  for (int i = 0; i < node_count; ++i) {
+    const double pivot = std::abs(qr.matrixR().coeff(i, i));
+    max_pivot = std::max(max_pivot, pivot);
+    min_pivot = std::min(min_pivot, pivot);
+  }
   res.condition_estimate =
       (min_pivot > 0.0 && std::isfinite(max_pivot) && std::isfinite(min_pivot))
           ? max_pivot / min_pivot
@@ -1805,7 +1845,7 @@ MatrixResult solve_carbon_matrix(const HybridPowerSystem& sys,
   }
 
   Eigen::VectorXd w = qr.solve(b_scaled);
-  if (!w.allFinite()) {
+  if (qr.info() != Eigen::Success || !w.allFinite()) {
     return res;
   }
   for (int i = 0; i < node_count; ++i) {
@@ -1815,10 +1855,10 @@ MatrixResult solve_carbon_matrix(const HybridPowerSystem& sys,
     if (w(i) < 0.0) w(i) = 0.0;
   }
 
-  const Eigen::VectorXd residual_vector = A_dense * w - b;
+  const Eigen::VectorXd residual_vector = A * w - b;
   res.residual = residual_vector.norm();
   const double residual_scale =
-      std::max(A_dense.norm() * w.norm() + b.norm(), 1e-15);
+      std::max(A.norm() * w.norm() + b.norm(), 1e-15);
   res.relative_residual = res.residual / residual_scale;
   if (!std::isfinite(res.residual) || !std::isfinite(res.relative_residual) ||
       (res.residual > opt.regularization_eps &&
