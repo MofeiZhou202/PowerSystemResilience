@@ -22,6 +22,8 @@ find_dependency(Threads)
 # exported static archive has a LINK_ONLY dependency on this target.
 set(MIPSOLVERS_TP_MKL_INCLUDE_DIRS "")
 set(MIPSOLVERS_TP_MKL_LIBRARIES "")
+set(MIPSOLVERS_TP_MKL_THREADING "@MIPSOLVERS_MKL_THREADING@")
+set(MIPSOLVERS_TP_MKL_RUNTIME_DLLS "")
 if("@MIPSOLVERS_HAVE_MKL_PARDISO@")
   set(MIPSOLVERS_TP_MKL_INCLUDE_DIRS
     "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_INCLUDEDIR@/mipsolvers-deps/oneapi-mkl")
@@ -34,6 +36,16 @@ if("@MIPSOLVERS_HAVE_MKL_PARDISO@")
     endif()
     list(APPEND MIPSOLVERS_TP_MKL_LIBRARIES "${_MIPSOLVERS_TP_MKL_LIB}")
   endforeach()
+  foreach(_MIPSOLVERS_TP_MKL_RUNTIME_NAME IN ITEMS @_tp_mkl_runtime_names@)
+    set(_MIPSOLVERS_TP_MKL_RUNTIME
+      "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/${_MIPSOLVERS_TP_MKL_RUNTIME_NAME}")
+    if(NOT EXISTS "${_MIPSOLVERS_TP_MKL_RUNTIME}")
+      message(FATAL_ERROR
+        "Corrupt MIPSolvers third-party package: missing ${_MIPSOLVERS_TP_MKL_RUNTIME}")
+    endif()
+    list(APPEND MIPSOLVERS_TP_MKL_RUNTIME_DLLS
+      "${_MIPSOLVERS_TP_MKL_RUNTIME}")
+  endforeach()
   if(NOT TARGET MIPSolvers::MKL)
     add_library(MIPSolvers::MKL INTERFACE IMPORTED GLOBAL)
     set_target_properties(MIPSolvers::MKL PROPERTIES
@@ -42,6 +54,8 @@ if("@MIPSOLVERS_HAVE_MKL_PARDISO@")
   endif()
   unset(_MIPSOLVERS_TP_MKL_LIB)
   unset(_MIPSOLVERS_TP_MKL_NAME)
+  unset(_MIPSOLVERS_TP_MKL_RUNTIME)
+  unset(_MIPSOLVERS_TP_MKL_RUNTIME_NAME)
 endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/mipsolversThirdPartyTargets.cmake")

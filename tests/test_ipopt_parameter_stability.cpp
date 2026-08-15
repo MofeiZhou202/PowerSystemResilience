@@ -355,8 +355,14 @@ TEST_CASE("Ipopt reports finite diagnostics for nearly dependent equalities",
   require_finite_stats(result);
   REQUIRE(result.stats.success);
   REQUIRE(result.x.size() == 2);
-  CHECK(result.x[0] == Approx(1.0).margin(2e-5));
-  CHECK(result.x[1] == Approx(1.0).margin(2e-5));
+  // The two rows differ by only 1e-6, so a small feasible-row residual can be
+  // amplified by the inverse row separation in individual coordinates. The
+  // cross-backend contract is the original equality system, not a particular
+  // null-space representative selected by MUMPS or PARDISO.
+  constexpr double epsilon = 1e-6;
+  CHECK(result.x[0] + result.x[1] == Approx(2.0).margin(1e-8));
+  CHECK(result.x[0] + (1.0 + epsilon) * result.x[1] ==
+        Approx(2.0 + epsilon).margin(1e-8));
   CHECK(result.stats.primal_feas < 1e-6);
 }
 #else

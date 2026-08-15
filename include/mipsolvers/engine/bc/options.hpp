@@ -152,6 +152,10 @@ struct BCOptions {
   /// its associated MILP policy overrides. LP-kernel selection alone never
   /// changes branching, cuts, heuristics, presolve, or full-MIP ownership.
   bool strict_highs_mip_contract{false};
+  /// Give the coupled HiGHS state machine ownership of presolve and root-node
+  /// processing, then import its root LP and primal state into the native tree.
+  /// Unlike strict_highs_mip_contract, this never delegates tree search.
+  bool highs_root_native_tree_contract{false};
   /// Development diagnostic only. Production keeps the HiGHS root frontier;
   /// suppressing it would violate the selected LP-backend contract.
   bool suppress_vendored_highs_root_frontier{false};
@@ -172,6 +176,9 @@ struct BCOptions {
   // ═══════════════════════════════════════════════════════════════════════
   bool use_feasibility_pump{true};
   bool use_progressive_rounding{true};
+  /// Enable top-level MILP presolve. The production HiGHS LP backend uses the
+  /// retained HiGHS presolve/postsolve stack; ExperimentalNative retains the
+  /// PaPILO path for controlled kernel comparisons.
   bool use_papilo_presolve{true};
   bool native_presolve_probing{true};
   bool papilo_aggressive{false};

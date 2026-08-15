@@ -1181,6 +1181,14 @@ bool HighsPrimalHeuristics::tryRoundedPoint(const std::vector<double>& point,
         ziRound(lpsol);
         return mipsolver.mipdata_->trySolution(lpsol, solution_source);
       } else {
+        if (std::getenv("MIPSOLVERS_ACCEPTED_REPAIR_COORD_TRACE") != nullptr) {
+          for (HighsInt col = 0; col != mipsolver.numCol(); ++col) {
+            std::fprintf(stderr,
+                         "[HIGHS-ACCEPTED-REPAIR-COORD] source=%d col=%d "
+                         "x=%.17g\n",
+                         solution_source, static_cast<int>(col), lpsol[col]);
+          }
+        }
         // all integer variables are fixed -> add incumbent
         mipsolver.mipdata_->addIncumbent(lpsol, lprelax.getObjective(),
                                          solution_source);
@@ -1236,6 +1244,18 @@ bool HighsPrimalHeuristics::linesearchRounding(
                          point1[col]) /
                         std::abs(point2[col] - point1[col]);
       if (tmpalpha < nextalpha && tmpalpha > alpha + 1e-2) nextalpha = tmpalpha;
+    }
+
+    if (std::getenv("MIPSOLVERS_LINESEARCH_COORD_TRACE") != nullptr) {
+      std::fprintf(stderr,
+                   "[HIGHS-LINESEARCH-COORD] source=%d alpha=%.17g bits=",
+                   solution_source, alpha);
+      for (HighsInt col = 0; col != mipsolver.numCol(); ++col) {
+        if (!mipsolver.isColInteger(col)) continue;
+        std::fprintf(stderr, "%lld",
+                     static_cast<long long>(std::llround(roundedpoint[col])));
+      }
+      std::fprintf(stderr, "\n");
     }
 
     if (tryRoundedPoint(roundedpoint, solution_source)) return true;
@@ -1804,6 +1824,32 @@ void HighsPrimalHeuristics::centralRounding() {
   if (mipsolver.mipdata_->analyticCenter.size() !=
       static_cast<size_t>(mipsolver.numCol()))
     return;
+
+  if (std::getenv("MIPSOLVERS_ROOT_REPAIR_DOMAIN_TRACE") != nullptr) {
+    const HighsDomain& trace_domain = mipsolver.mipdata_->domain;
+    for (HighsInt col = 0; col != mipsolver.numCol(); ++col) {
+      std::fprintf(stderr,
+                   "[HIGHS-ROOT-REPAIR-DOMAIN] col=%d lb=%.17g ub=%.17g\n",
+                   static_cast<int>(col), trace_domain.col_lower_[col],
+                   trace_domain.col_upper_[col]);
+    }
+  }
+  if (std::getenv("MIPSOLVERS_ROOT_REPAIR_ROW_ZERO_TRACE") != nullptr) {
+    HighsSparseMatrix trace_matrix = mipsolver.model_->a_matrix_;
+    trace_matrix.ensureRowwise();
+    std::fprintf(stderr,
+                 "[HIGHS-ROOT-REPAIR-ROW-ZERO] lhs=%.17g rhs=%.17g terms=",
+                 mipsolver.model_->row_lower_[0],
+                 mipsolver.model_->row_upper_[0]);
+    const HighsInt begin = trace_matrix.start_[0];
+    const HighsInt end = trace_matrix.start_[1];
+    for (HighsInt p = begin; p != end; ++p) {
+      std::fprintf(stderr, "%s%d:%.17g", p == begin ? "" : ",",
+                   static_cast<int>(trace_matrix.index_[p]),
+                   trace_matrix.value_[p]);
+    }
+    std::fprintf(stderr, "\n");
+  }
 
   if (!mipsolver.mipdata_->firstlpsol.empty())
     linesearchRounding(mipsolver.mipdata_->firstlpsol,

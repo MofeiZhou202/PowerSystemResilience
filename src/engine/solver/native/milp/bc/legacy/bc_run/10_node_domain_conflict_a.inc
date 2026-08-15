@@ -1134,7 +1134,12 @@
 	             : rb.source_conflict_literal.value > rb.bound.value + 1e-9);
           if (!rb.has_proof_activity_audit ||
               !std::isfinite(rb.proof_activity_margin) ||
-              rb.proof_activity_margin < -std::max(1e-8, opt.lp_tol) ||
+              // SOUNDNESS: require a real violation margin exceeding the node
+              // feasibility tolerance; a knife-edge margin (<= kNodeFeasibilityTol)
+              // is within LP feasibility noise and yields an unsound certificate
+              // that can exclude an LP-feasible optimum (MIPLIB3 gen). See
+              // /memories/repo/mipsolvers-objcutoff-soundness-bug.md.
+              !(rb.proof_activity_margin > kNodeFeasibilityTol) ||
               !source_excludes_target ||
               !structural_certificate_ok(frontier)) {
 	      ++out.bc_stats.bound_lifting_certificates_rejected_audit;
@@ -1661,6 +1666,19 @@
 	      obj.proof_required_activity =
 	          target_bound->proof_required_activity;
 	    }
+	    // SOUNDNESS: a scoped conflict clause backed by a proof-activity
+	    // certificate is a valid global infeasibility statement only if the
+	    // forbidden literal makes the source row's min-activity exceed its rhs by
+	    // MORE than the node feasibility tolerance kNodeFeasibilityTol (1e-6). A
+	    // knife-edge margin (<= feas tol) is within LP feasibility noise, so the
+	    // "violated" point is feasible by the solver's own tolerance and the
+	    // clause can wrongly exclude an LP-feasible optimum (MIPLIB3 `gen`:
+	    // margin 1.01e-7 pruned the true optimum). See
+	    // /memories/repo/mipsolvers-objcutoff-soundness-bug.md.
+	    if (obj.has_proof_activity_audit &&
+	        !(obj.proof_activity_margin > kNodeFeasibilityTol)) {
+	      return published_global > 0;
+	    }
     const std::size_t h = conflict_clause_hash(sig);
     obj.hash = h;
     for (const auto& existing : node.scoped_conflict_clauses) {
@@ -1718,6 +1736,16 @@
 	    obj.proof_activity = target_bound.proof_activity;
 	    obj.proof_required_activity =
 	        target_bound.proof_required_activity;
+	    // SOUNDNESS: reject knife-edge proof-activity certificates whose margin
+	    // is within the node feasibility tolerance kNodeFeasibilityTol (1e-6).
+	    // Such a "violation" is feasible by the solver's own tolerance, so the
+	    // clause can wrongly exclude an LP-feasible optimum. See the note at the
+	    // add_scoped_conflict_object gate above /
+	    // /memories/repo/mipsolvers-objcutoff-soundness-bug.md.
+	    if (obj.has_proof_activity_audit &&
+	        !(obj.proof_activity_margin > kNodeFeasibilityTol)) {
+	      return false;
+	    }
     const std::size_t h = conflict_clause_hash(sig);
     obj.hash = h;
 	    for (const auto& existing : node.scoped_conflict_clauses) {

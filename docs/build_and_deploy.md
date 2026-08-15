@@ -327,6 +327,7 @@ Release dependency package from being linked into a Debug MSVC build.
 | `MIPSOLVERS_STATIC_LIBGFORTRAN` | `OFF` | Static GNU Fortran runtime flags on Linux |
 | `MIPSOLVERS_IPOPT_LINEAR_SOLVER` | platform dependent | `mumps`, or `pardisomkl` on Windows |
 | `MIPSOLVERS_MKL_ROOT` | empty | Authoritative local static oneMKL bundle; no system fallback when set |
+| `MIPSOLVERS_MKL_THREADING` | Windows: `SEQUENTIAL` | Windows-only `SEQUENTIAL` or explicit local oneAPI `INTEL` threading for Pardiso |
 | `MIPSOLVERS_USE_PAPILO` | `ON` | Use bundled local PaPILO; native presolve remains available |
 | `MIPSOLVERS_PAPILO_SOURCE_DIR` | bundled | Override with another local PaPILO source tree |
 | `MIPSOLVERS_PAPILO_BOOST_DIR` | bundled | Override the local Boost include root for PaPILO |
@@ -344,6 +345,13 @@ files installed under `share/mipsolvers-third-party/licenses/oneapi-mkl` in
 the deployment notices. Verify the final executable with
 `dumpbin /DEPENDENTS`; a static-library package alone is not proof that all
 runtime dependencies have been closed.
+
+`MIPSOLVERS_MKL_THREADING=INTEL` is an explicit local oneAPI profile. It links
+`mkl_intel_thread` and `libiomp5md`, installs the resolved `libiomp5md.dll`
+beside package executables, and records that DLL in both the package config and
+manifest. Package loading and the prebuilt consumer smoke test fail if a
+declared runtime file is absent. The repository-staged oneMKL bundle remains
+sequential-only; threaded builds must use a complete local oneAPI installation.
 
 Gurobi is never bundled. When its headers and library are detected at build
 time and `GRBloadenv()` can initialize a valid runtime licence, it is the

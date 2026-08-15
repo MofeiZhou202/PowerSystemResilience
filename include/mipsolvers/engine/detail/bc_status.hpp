@@ -14,9 +14,12 @@ inline constexpr char kConflictingIntegralityDeclaration[] =
 inline constexpr char kUnsupportedFreeIntegerVariable[] =
     "Unsupported free integer variable in native B&C";
 inline constexpr char kInfeasiblePapiloPresolve[] = "Infeasible (PaPILO presolve)";
+inline constexpr char kInfeasibleHighsPresolve[] = "Infeasible (HiGHS presolve)";
+inline constexpr char kOptimalHighsPresolve[] = "Optimal (HiGHS presolve)";
 inline constexpr char kInfeasibleNativePresolve[] = "Infeasible (native presolve)";
 inline constexpr char kInvalidReducedIncumbent[] = "Invalid reduced-space incumbent";
 inline constexpr char kInvalidPapiloPostsolveIncumbent[] = "Invalid incumbent after PaPILO postsolve";
+inline constexpr char kInvalidHighsPostsolveIncumbent[] = "Invalid incumbent after HiGHS postsolve";
 inline constexpr char kInfeasibleVariableBounds[] = "Infeasible variable bounds";
 inline constexpr char kHighsPresolvedWorkingLpUnavailable[] =
     "HiGHS presolved working LP unavailable";

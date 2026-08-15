@@ -128,13 +128,18 @@ BcStrictHighsContractState apply_bc_strict_highs_contract(BCOptions& opt) {
   BcStrictHighsContractState state;
   state.domain_heuristics = opt.enable_domain_heuristics;
   state.requested_vendored_highs_lp = bc_vendored_highs_lp_kernel_enabled(opt);
-  if (opt.strict_highs_mip_contract) {
+  if (opt.strict_highs_mip_contract ||
+      opt.highs_root_native_tree_contract) {
     state.requested_vendored_highs_lp = true;
   }
   if (state.requested_vendored_highs_lp) {
     opt.lp_kernel_backend = LpKernelBackend::HiGHS;
   }
-  state.strict_highs_lp_contract = opt.strict_highs_mip_contract;
+  state.strict_highs_lp_contract =
+      opt.strict_highs_mip_contract || opt.highs_root_native_tree_contract;
+  if (opt.highs_root_native_tree_contract) {
+    opt.auto_highs_root_pipeline = true;
+  }
   state.allow_vendored_root_frontier =
       bc_vendored_highs_root_frontier_enabled(opt);
 

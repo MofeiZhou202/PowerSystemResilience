@@ -416,6 +416,9 @@
 	  if (!strict_highs_lp_contract && heuristic_x_orig.size() > 0 &&
       std::isfinite(heuristic_obj)) {
 	    Eigen::VectorXd x_fwd = heuristic_x_orig;
+    if (highs_mip_model_reduced) {
+      x_fwd = highs_presolve_forward_map(highs_mip_ps, x_fwd);
+    }
 #ifdef MIPSOLVERS_HAVE_PAPILO
     if (papilo_ps.success && !papilo_ps.orig_to_reduced_col.empty()) {
       x_fwd = papilo_forward_map(papilo_ps, x_fwd);

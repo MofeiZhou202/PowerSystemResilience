@@ -2325,6 +2325,26 @@
         return std::min(rens_ub[col], std::max(rens_lb[col], fixval));
       };
 
+      // Berthold (2006), Sec. 3.5; Achterberg (2007), Sec. 9.4; derivation in
+      // docs/native_milp_root_quality_restart_prerequisites_2026-08-13.md.
+      // RENS fixes integer variables that are integral in the root relaxation
+      // directly. Re-solving the unchanged relaxation between partial batches
+      // does not define a stronger neighbourhood and is prohibitive on large
+      // roots, so use LP rounds only when the integral set cannot reach the
+      // target fixing rate.
+      const int target_fixed = static_cast<int>(std::ceil(
+          target_fixing_rate * static_cast<double>(n_eligible)));
+      for (int col : eligible_ints) {
+        if (n_fixed >= target_fixed) break;
+        const double value = root.x_relax[col];
+        if (!is_integral(value, opt.int_tol)) continue;
+        const double fixed_value =
+            std::min(rens_ub[col], std::max(rens_lb[col], std::round(value)));
+        if (tighten_rens_bound(col, fixed_value, fixed_value)) {
+          mark_new_fixed();
+        }
+      }
+
       LPModel rens_relax_lp = root_lp;
       apply_node_bounds(rens_relax_lp.vars, rens_lb, rens_ub);
       const Eigen::SparseMatrix<double, Eigen::RowMajor> rens_A_row = root_lp.A;
@@ -2564,18 +2584,23 @@
   // propagate to tree nodes already created from the original root.
   const int root_probe_rows =
       static_cast<int>(base_lp.A.rows() + base_lp.Aeq.rows());
-  const bool skip_short_basis_free_root_probing =
-      !root.basis_hint && root_probe_rows > 10000 &&
+  // Savelsbergh (1994), Secs. 3-4; Achterberg (2007), Sec. 3.3; measured
+  // entry-cost derivation in
+  // docs/native_milp_root_quality_restart_prerequisites_2026-08-13.md.
+  // The stateful domain workspace needs an O(nnz) baseline closure before its
+  // first cancellable probing world, independently of simplex basis ownership.
+  const bool skip_short_large_root_probing =
+      root_probe_rows > 10000 &&
       opt.time_limit_sec > 0.0 && opt.time_limit_sec <= 10.0;
-  if (skip_short_basis_free_root_probing && opt.verbose) {
+  if (skip_short_large_root_probing && opt.verbose) {
     fmt::print(stderr,
                "[B&C PROBE] skipped standalone probing on short-budget "
-               "basis-free large root\n");
+               "large root\n");
   }
   // This scope also contains reduced-cost/cutoff follow-up that consumes the
-  // probe LP state. In basis-free short-budget mode, entering only its cheap
-  // propagation prefix can still reactivate that basis-dependent tail.
-  if (!skip_short_basis_free_root_probing && !concurrent_tree_launched &&
+  // probe LP state. On a short large root, entering its propagation prefix can
+  // still reactivate that coupled tail after the local probing budget expires.
+  if (!skip_short_large_root_probing && !concurrent_tree_launched &&
       !root_gap_closed() &&
       !bc_optional_root_budget_expired())
   {
@@ -2596,8 +2621,26 @@
       }
       return c;
     }();
-    if (!has_incumbent && n_unfixed_bins <= 1000) {
+	    if (!has_incumbent && n_unfixed_bins <= 1000) {
 	      auto t_dp_start = std::chrono::steady_clock::now();
+	      // Savelsbergh (1994), Secs. 3-4; Achterberg (2007), Sec. 3.3;
+	      // deadline derivation in
+	      // docs/native_milp_root_quality_restart_prerequisites_2026-08-13.md.
+	      // A completed probing world is an independent valid deduction.  Bound
+	      // optional root probing by 5% of the solve limit and stop only between
+	      // worlds, leaving the existing post-root finalization reserve intact.
+	      const double domain_probe_time_budget =
+	          opt.time_limit_sec > 0.0 && std::isfinite(opt.time_limit_sec)
+	              ? std::min(0.05 * opt.time_limit_sec,
+	                         std::max(0.0, bc_remaining_sec() -
+	                                           bc_post_root_finalize_reserve_sec))
+	              : std::numeric_limits<double>::infinity();
+	      auto domain_probe_budget_expired = [&]() {
+	        return bc_optional_root_budget_expired() ||
+	               std::chrono::duration<double>(
+	                   std::chrono::steady_clock::now() - t_dp_start).count() >=
+	                   domain_probe_time_budget;
+	      };
 	      int dp_fixed = 0;
 	      int dp_count = 0;
 	      std::uint64_t dp_conflict_sources = 0;

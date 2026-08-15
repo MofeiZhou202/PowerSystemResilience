@@ -1139,6 +1139,7 @@ int add_zero_half_cuts(LPModel& lp,
     std::size_t pos_j = 0;
     double lhs = 0.0;
     double norm_sq = 0.0;
+    bool cut_invalid = false;
     while (pos_i < terms_i.size() || pos_j < terms_j.size()) {
       const int col_i =
           pos_i < terms_i.size() ? terms_i[pos_i].first : n;
@@ -1161,12 +1162,28 @@ int add_zero_half_cuts(LPModel& lp,
       }
       if (is_integer_type(lp.vars[static_cast<std::size_t>(col)])) {
         value = std::round(value);
+      } else if (std::abs(value) > 1e-9) {
+        // SOUNDNESS: a zero-half (0-1/2 Chvatal-Gomory) cut floors the
+        // aggregated RHS, which is valid only if the aggregated LHS is
+        // integer-valued for every feasible point. A continuous variable with a
+        // nonzero aggregated coefficient (e.g. 0.5*(1+0)=0.5 when the two source
+        // rows have odd coefficient sum) leaves a non-integer term in the LHS,
+        // so flooring the RHS over-tightens and can cut off a feasible optimum
+        // (MIPLIB3 `gen`: the cut 0.5*x598 + ... <= -1 excluded the true
+        // optimum, whose activity was -0.5). The `cont_all_int` pre-filter only
+        // checks the ORIGINAL row coefficients, not the aggregate, so it does
+        // not catch this. Reject the whole cut. (See Caprara & Fischetti,
+        // "0-1/2 Chvatal-Gomory cuts", Math. Prog. 1996 — the construction is
+        // pure-integer; continuous columns must aggregate to zero.)
+        cut_invalid = true;
+        break;
       }
       if (std::abs(value) <= 1e-12) continue;
       coeff.insertBack(col) = value;
       lhs += value * x[col];
       norm_sq += value * value;
     }
+    if (cut_invalid) continue;
 
     double actual_viol = lhs - rhs;
     if (actual_viol < 1e-4) continue;

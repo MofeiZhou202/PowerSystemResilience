@@ -20,6 +20,7 @@
 
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
+#include <Eigen/SparseQR>
 
 #include "mipsolvers/engine/kernel/linear_algebra/cholmod_ldlt.hpp"
 #include "mipsolvers/engine/kernel/linear_algebra/linear_solver.hpp"
@@ -207,76 +208,20 @@ bool NativeLCQPAdapter::supports(ProblemClass cls) const {
 }
 
 SolveResult NativeLCQPAdapter::solve_lp(const LPModel& prob) const {
-  const int n       = static_cast<int>(prob.c.size());
-  const int m_ineq  = static_cast<int>(prob.A.rows());
-
-  if (m_ineq == 0) {
-    // No inequality constraints — pass through directly.
-    QPModel qp;
-    qp.sense = prob.sense;
-    qp.Q.resize(n, n);
-    qp.c    = prob.c;
-    qp.Aeq  = prob.Aeq;
-    qp.beq  = prob.beq;
-    qp.vars = prob.vars;
-    return solve_qp(qp);
-  }
-
-  // Convert A*x <= b to equality form by adding slack variables s >= 0:
-  //   [Aeq  0 ] [x]   [beq]
-  //   [A    I ] [s] = [b  ]
-  //   lb_s = 0,  ub_s = +inf
-  const int n_aug = n + m_ineq;
-
+  const int n = static_cast<int>(prob.c.size());
   QPModel qp;
   qp.sense = prob.sense;
-  qp.Q.resize(n_aug, n_aug);  // zero (LP → no Q)
-
-  // Augmented cost: [c; 0] (no cost on slacks)
-  qp.c.resize(n_aug);
-  qp.c << prob.c, Eigen::VectorXd::Zero(m_ineq);
-
-  // Build augmented equality constraint matrix [Aeq 0; A I]
-  const int m_eq   = static_cast<int>(prob.Aeq.rows());
-  const int m_all  = m_eq + m_ineq;
-  qp.Aeq.resize(m_all, n_aug);
-  {
-    std::vector<Eigen::Triplet<double>> trips;
-    trips.reserve(static_cast<size_t>(prob.Aeq.nonZeros() + prob.A.nonZeros() + m_ineq));
-    // Top block: [Aeq | 0]
-    for (int k = 0; k < prob.Aeq.outerSize(); ++k)
-      for (Eigen::SparseMatrix<double>::InnerIterator it(prob.Aeq, k); it; ++it)
-        trips.emplace_back(static_cast<int>(it.row()), static_cast<int>(it.col()), it.value());
-    // Bottom block: [A | I]
-    for (int k = 0; k < prob.A.outerSize(); ++k)
-      for (Eigen::SparseMatrix<double>::InnerIterator it(prob.A, k); it; ++it)
-        trips.emplace_back(m_eq + static_cast<int>(it.row()), static_cast<int>(it.col()), it.value());
-    for (int i = 0; i < m_ineq; ++i)
-      trips.emplace_back(m_eq + i, n + i, 1.0);   // slack identity block
-    qp.Aeq.setFromTriplets(trips.begin(), trips.end());
-    qp.Aeq.makeCompressed();
-  }
-
-  // Augmented RHS: [beq; b]
-  qp.beq.resize(m_all);
-  if (m_eq > 0) qp.beq.head(m_eq) = prob.beq;
-  qp.beq.tail(m_ineq) = prob.b;
-
-  // Augmented variables: original vars + slack vars (lb=0, ub=+inf)
+  qp.Q.resize(n, n);
+  qp.c = prob.c;
+  qp.A = prob.A;
+  qp.b = prob.b;
+  qp.Aeq = prob.Aeq;
+  qp.beq = prob.beq;
   qp.vars = prob.vars;
-  for (int i = 0; i < m_ineq; ++i)
-    qp.vars.push_back({VarType::Continuous, 0.0, std::numeric_limits<double>::infinity(), {}});
 
   SolveResult out = solve_qp(qp);
-  // Strip slack variables from solution
-  if (static_cast<int>(out.x.size()) == n_aug) {
-    out.x.conservativeResize(n);
-  }
-  // Re-compute objective using original (un-augmented) cost vector c.
-  // solve_qp already handles Maximize by negating c internally, so the
-  // returned objective is the minimization value (possibly negated). We
-  // recompute from scratch to get the user-facing value (c.dot(x) for min,
-  // -c.dot(x) for max, to match the convention used throughout the engine).
+  // Restore the caller-facing objective sign after solve_qp's internal
+  // minimization transform.
   if (out.stats.success) {
     out.stats.objective = prob.c.dot(out.x);
   }
@@ -290,6 +235,10 @@ SolveResult NativeLCQPAdapter::solve_qp(const QPModel& prob) const {
 
   if (!std::isfinite(opt_.centering_exponent)) {
     result.stats.status = "LCQP centering exponent must be finite";
+    return result;
+  }
+  if (opt_.time_limit_sec < 0.0 || !std::isfinite(opt_.time_limit_sec)) {
+    result.stats.status = "LCQP time limit must be finite and nonnegative";
     return result;
   }
   const int n = static_cast<int>(prob.c.size());
@@ -319,7 +268,12 @@ SolveResult NativeLCQPAdapter::solve_qp(const QPModel& prob) const {
     c = -c;
   }
 
-  return solve_qp_ipm(Q, c, prob.A, prob.b, prob.Aeq, prob.beq, lb, ub);
+  LCQPOptions active_options = opt_;
+  if (prob.x0.size() == n && prob.x0.allFinite()) {
+    active_options.initial_point = prob.x0;
+  }
+  return NativeLCQPAdapter(active_options).solve_qp_ipm(
+      Q, c, prob.A, prob.b, prob.Aeq, prob.beq, lb, ub);
 }
 
 // AUDIT-NAV: 凸 QP 内点主循环；KKT 模式只分析一次，每轮仅更新数值。
@@ -338,6 +292,14 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
   result.stats.solver_name = name();
   LCQPProfile profile;
   const auto setup_started = std::chrono::steady_clock::now();
+  const auto solve_started = setup_started;
+  const bool has_deadline = opt_.time_limit_sec > 0.0;
+  const auto deadline_hit = [&]() {
+    return has_deadline &&
+        std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                      solve_started)
+                .count() >= opt_.time_limit_sec;
+  };
   const double centering_exponent =
       opt_.centering_exponent > 0.0 ? opt_.centering_exponent : 1.0;
 
@@ -373,11 +335,14 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
     }
     auto solver = make_default_sparse_solver();
     solver->analyze_pattern(Q);
+    ++result.stats.symbolic_analyze_calls;
+    ++result.stats.factorization_calls;
     if (!solver->factorize(Q)) {
       result.stats.status = "Unconstrained Hessian factorization failed";
       return result;
     }
     Eigen::VectorXd neg_c = -c;
+    ++result.stats.linear_solve_calls;
     if (!solver->solve(neg_c, result.x) || !result.x.allFinite()) {
       result.stats.status = "Unconstrained Hessian solve failed";
       return result;
@@ -500,8 +465,13 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
     x = opt_.initial_point.cwiseQuotient(d);
   } else {
     for (int i = 0; i < n; ++i) {
-      const bool finite_lower = std::isfinite(lbs(i));
-      const bool finite_upper = std::isfinite(ubs(i));
+      // Reuse the directional bound contract applied before scaling. Testing
+      // std::isfinite here would reinterpret the public 1e20 no-bound
+      // sentinel as a physical limit and initialize at an enormous midpoint.
+      const bool finite_lower =
+          std::binary_search(idx_lb.begin(), idx_lb.end(), i);
+      const bool finite_upper =
+          std::binary_search(idx_ub.begin(), idx_ub.end(), i);
       if (finite_lower && finite_upper) {
         x(i) = std::midpoint(lbs(i), ubs(i));
       } else if (finite_lower) {
@@ -513,6 +483,62 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
       }
     }
   }
+  if (!has_initial_point && meq > 0) {
+    // Project the generic point onto the equality linearization before
+    // constructing bound complementarity. This is the minimum-norm correction
+    // min ||dx||_2 subject to Aeq dx = beq - Aeq x; accepting it only when it
+    // respects the box avoids replacing one infeasibility with another.
+    // Nocedal--Wright (2006), Sec. 15.4.
+    Eigen::SparseQR<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>> qr;
+    qr.compute(Aeqs);
+    if (qr.info() == Eigen::Success) {
+      const Eigen::VectorXd correction = qr.solve(beqs - Aeqs * x);
+      const Eigen::VectorXd candidate = x + correction;
+      bool respects_bounds = candidate.size() == n && candidate.allFinite();
+      for (int index : idx_lb) {
+        respects_bounds = respects_bounds && candidate[index] >= lbs[index];
+      }
+      for (int index : idx_ub) {
+        respects_bounds = respects_bounds && candidate[index] <= ubs[index];
+      }
+      const double residual_before =
+          (Aeqs * x - beqs).lpNorm<Eigen::Infinity>();
+      const double residual_after = respects_bounds
+          ? (Aeqs * candidate - beqs).lpNorm<Eigen::Infinity>()
+          : std::numeric_limits<double>::infinity();
+      const double comparison_error =
+          std::numeric_limits<double>::epsilon() *
+          std::max({1.0, residual_before, residual_after});
+      if (residual_after + comparison_error < residual_before) {
+        x = candidate;
+      }
+    }
+  }
+  result.stats.warm_start_used = has_initial_point;
+  const Eigen::VectorXd initial_x_original = d.cwiseProduct(x);
+  double initial_primal_feasibility = 0.0;
+  if (meq > 0) {
+    initial_primal_feasibility = std::max(
+        initial_primal_feasibility,
+        (Aeq * initial_x_original - beq).lpNorm<Eigen::Infinity>());
+  }
+  if (mineq > 0) {
+    initial_primal_feasibility = std::max(
+        initial_primal_feasibility,
+        std::max(0.0, (A * initial_x_original - b).maxCoeff()));
+  }
+  for (int i = 0; i < n; ++i) {
+    if (variable_has_finite_lower_bound(lb[i])) {
+      initial_primal_feasibility = std::max(
+          initial_primal_feasibility, lb[i] - initial_x_original[i]);
+    }
+    if (variable_has_finite_upper_bound(ub[i])) {
+      initial_primal_feasibility = std::max(
+          initial_primal_feasibility, initial_x_original[i] - ub[i]);
+    }
+  }
+  result.stats.initial_primal_feas =
+      std::max(0.0, initial_primal_feasibility);
 
   const double root_epsilon =
       std::sqrt(std::numeric_limits<double>::epsilon());
@@ -725,10 +751,16 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
   profile.pattern_seconds = std::chrono::duration<double>(
       std::chrono::steady_clock::now() - pattern_started).count();
   const auto analyze_started = std::chrono::steady_clock::now();
-  if (meq == 0) {
+  // For a pure LP, Q supplies no explicit curvature and positive definiteness
+  // depends entirely on the current barrier diagonal and normal-equation
+  // contribution. Keep that numerically marginal path on the general sparse
+  // backend; CHOLMOD is selected only when the model contributes quadratic
+  // curvature to the condensed system.
+  if (meq == 0 && Q.nonZeros() > 0) {
     use_cholmod = cholmod_solver.analyze(
         kkt_dim, kkt_lower.outerIndexPtr(), kkt_lower.innerIndexPtr(),
         kkt_lower.valuePtr(), kkt_lower.nonZeros());
+    if (use_cholmod) ++result.stats.symbolic_analyze_calls;
   }
 
   // Do symbolic factorization once (pattern never changes).
@@ -737,6 +769,7 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
   if (!use_cholmod) {
     kkt_solver->analyze_pattern(KKT);
     general_solver_analyzed = true;
+    ++result.stats.symbolic_analyze_calls;
   }
   profile.analyze_seconds = std::chrono::duration<double>(
       std::chrono::steady_clock::now() - analyze_started).count();
@@ -756,6 +789,15 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
 
   for (int iter = 0; iter < effective_max_iter; ++iter) {
     profile.iterations = iter;
+    if (deadline_hit()) {
+      result.x = d.cwiseProduct(x);
+      result.stats.success = false;
+      result.stats.iterations = iter;
+      result.stats.objective =
+          0.5 * result.x.dot(Q * result.x) + c.dot(result.x);
+      result.stats.status = "TimeLimit";
+      return result;
+    }
     // Compute residuals (all in scaled space)
     Eigen::VectorXd r_dual = cs;
     double dual_roundoff_scale =
@@ -946,6 +988,7 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
     const auto factor_started = std::chrono::steady_clock::now();
     bool factorized = false;
     if (use_cholmod) {
+      ++result.stats.factorization_calls;
       factorized = cholmod_solver.factorize(kkt_lower.valuePtr());
       if (!factorized) use_cholmod = false;
     }
@@ -957,7 +1000,9 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
       if (!general_solver_analyzed) {
         kkt_solver->analyze_pattern(KKT);
         general_solver_analyzed = true;
+        ++result.stats.symbolic_analyze_calls;
       }
+      ++result.stats.factorization_calls;
       factorized = kkt_solver->factorize(KKT);
     }
     profile.factor_seconds += std::chrono::duration<double>(
@@ -1013,9 +1058,39 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
       Eigen::VectorXd sol;
       bool solved = false;
       const auto linear_solve_started = std::chrono::steady_clock::now();
+      ++result.stats.linear_solve_calls;
       if (use_cholmod) {
         sol.resize(kkt_dim);
         solved = cholmod_solver.solve(rhs.data(), sol.data());
+        if (!solved || !sol.allFinite()) {
+          // CHOLMOD and the general backend solve the same condensed Newton
+          // system. A failed triangular solve is a backend failure, not a
+          // mathematical certificate; refactor the identical symmetric KKT
+          // matrix with the general sparse solver before rejecting the step.
+          // Nocedal--Wright (2006), Sec. 19.3.
+          use_cholmod = false;
+          KKT = kkt_lower.selfadjointView<Eigen::Lower>();
+          KKT.makeCompressed();
+          if (!general_solver_analyzed) {
+            kkt_solver->analyze_pattern(KKT);
+            general_solver_analyzed = true;
+            ++result.stats.symbolic_analyze_calls;
+          }
+          const auto fallback_factor_started =
+              std::chrono::steady_clock::now();
+          ++result.stats.factorization_calls;
+          const bool fallback_factorized = kkt_solver->factorize(KKT);
+          profile.factor_seconds += std::chrono::duration<double>(
+              std::chrono::steady_clock::now() - fallback_factor_started)
+                                        .count();
+          ++profile.factorizations;
+          if (fallback_factorized) {
+            ++result.stats.linear_solve_calls;
+            solved = kkt_solver->solve(rhs, sol);
+          } else {
+            solved = false;
+          }
+        }
       } else {
         solved = kkt_solver->solve(rhs, sol);
       }
@@ -1057,7 +1132,15 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
     const Direction affine = solve_direction(0.0, nullptr);
     if (!affine.valid) {
       result.stats.success = false;
-      result.stats.status = "KKT affine solve NaN";
+      result.stats.status =
+          "KKT affine solve non-finite (dx=" +
+          std::to_string(affine.dx.allFinite()) + ", ds_ineq=" +
+          std::to_string(affine.ds_ineq.allFinite()) + ", dz_ineq=" +
+          std::to_string(affine.dz_ineq.allFinite()) + ", ds_lb=" +
+          std::to_string(affine.ds_lb.allFinite()) + ", dz_lb=" +
+          std::to_string(affine.dz_lb.allFinite()) + ", ds_ub=" +
+          std::to_string(affine.ds_ub.allFinite()) + ", dz_ub=" +
+          std::to_string(affine.dz_ub.allFinite()) + ")";
       result.stats.iterations = iter;
       return result;
     }

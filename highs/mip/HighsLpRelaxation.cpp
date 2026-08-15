@@ -65,7 +65,13 @@ uint64_t hacdcpfXpoolLedgerMix(uint64_t h, uint64_t v) {
 }
 
 uint64_t hacdcpfXpoolLedgerDouble(double value) {
-  return static_cast<uint64_t>(HighsHashHelpers::double_hash_code(value));
+  // Cut bounds legitimately include +/-infinity. Hash the IEEE-754 payload
+  // directly so every bound has a deterministic fingerprint without a
+  // non-finite floating-to-integer conversion.
+  uint64_t bits = 0;
+  static_assert(sizeof(bits) == sizeof(value));
+  std::memcpy(&bits, &value, sizeof(bits));
+  return bits;
 }
 
 bool hacdcpfXpoolStateTraceEnabled() {

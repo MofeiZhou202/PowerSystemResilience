@@ -1107,6 +1107,7 @@
 	  auto seed_root_transformed_cutpool_domain_rows = [&]() -> int {
 	    int added = 0;
 	    int duplicates = 0;
+	    int provisional_rows = 0;
 	    int domain_only_rows = 0;
 	    int lp_visible_rows = 0;
 	    for (int i = 0; i < static_cast<int>(root_transformed_cutpool.size()); ++i) {
@@ -1115,18 +1116,18 @@
 	          !std::isfinite(cut.rhs)) {
 	        continue;
 	      }
-	      if (i < static_cast<int>(root_transformed_cut_alive.size()) &&
-	          root_transformed_cut_alive[static_cast<std::size_t>(i)] == 0) {
-	        continue;
-	      }
+	      const bool alive =
+	          i >= static_cast<int>(root_transformed_cut_alive.size()) ||
+	          root_transformed_cut_alive[static_cast<std::size_t>(i)] != 0;
 	      const bool in_root_lp =
 	          i < static_cast<int>(root_transformed_cut_in_lp.size()) &&
 	          root_transformed_cut_in_lp[static_cast<std::size_t>(i)] != 0;
+	      if (!highs_style_cutpool_row_tree_owned(alive, in_root_lp)) {
+	        ++provisional_rows;
+	        continue;
+	      }
 	      Eigen::SparseVector<double> coeff = cut.coeff;
-		      // HiGHS marks selected cutpool rows as LP rows (age=-1), so they are
-		      // no longer candidates for later cutpool separation.  Rows that were
-		      // never admitted to the root LP remain available for future node LPs.
-		      const bool domain_only = in_root_lp;
+		      const bool domain_only = true;
 	      if (add_cut_to_global_domain_pool(
                   std::move(coeff), cut.rhs,
                   "root_transformed_cutpool_seed", domain_only)) {
@@ -1150,10 +1151,11 @@
 	        bc_env_options().value("MIPSOLVERS_XTAB_DIAG") != nullptr) {
 	      fmt::print(stderr,
 	                 "[B&C-CUTPOOL-DOMAIN] source=root_transformed_cutpool_seed "
-	                 "poolRows={} added={} dup={} domain_only={} lp_visible={} "
-	                 "cutpool={}\n",
+	                 "poolRows={} added={} dup={} provisional={} "
+	                 "domain_only={} lp_visible={} cutpool={}\n",
 	                 static_cast<int>(root_transformed_cutpool.size()), added,
-	                 duplicates, domain_only_rows, lp_visible_rows,
+	                 duplicates, provisional_rows, domain_only_rows,
+	                 lp_visible_rows,
 	                 cut_pool.size());
 	    }
 	    return added;
@@ -1425,7 +1427,15 @@
 		    root_incumbent_source = source;
 		    note_incumbent_update(/*depth=*/0, root.bound);
 		    consume_objective_cutoff_artifacts(source);
-		    if (root_incumbent_fixed_point_hook) {
+		    // An audited incumbent equal to the rigorous root bound is already an
+		    // exact optimality certificate; incumbent-driven closure cannot add
+		    // proof value. See Achterberg (2007), Sec. 3.1, and the mismatch
+		    // derivation in docs/native_milp_root_quality_restart_prerequisites_2026-08-13.md.
+		    const bool exact_root_certificate =
+		        std::isfinite(root.bound) &&
+		        incumbent_obj - root.bound <=
+		            1e-9 * std::max(1.0, std::abs(incumbent_obj));
+		    if (root_incumbent_fixed_point_hook && !exact_root_certificate) {
 		      root_incumbent_fixed_point_hook(source);
 		    }
 		    return true;
@@ -1654,6 +1664,14 @@
         !use_objective_propagation || base_lp.sense != Sense::Minimize) {
       return;
     }
+	    // Achterberg (2007), Sec. 3.1: an audited primal meeting the rigorous
+	    // root dual bound is already an exact certificate. Incumbent-driven
+	    // closure cannot strengthen it; call-graph mismatch analysis is in
+	    // docs/native_milp_root_quality_restart_prerequisites_2026-08-13.md.
+	    if (incumbent_obj - root.bound <=
+	        1e-9 * std::max(1.0, std::abs(incumbent_obj))) {
+	      return;
+	    }
 	    const double upper_limit = incumbent_upper_limit();
 	    if (!std::isfinite(upper_limit)) {
 	      return;
@@ -2246,6 +2264,23 @@
 	               n > 1 ? root.lb[1] : 0.0, n > 1 ? root.ub[1] : 0.0);
 	  }
 
+	  if (pending_highs_root_primal.size() == n) {
+	    const double highs_root_primal_obj = objective_value(
+	        base_lp.c, pending_highs_root_primal, base_lp.sense);
+	    const bool adopted_highs_root_primal = adopt_root_incumbent(
+	        "highs_root_primal", pending_highs_root_primal,
+	        highs_root_primal_obj);
+	    note_root_subsolve("highs_root_primal", 0.0, true,
+	                       adopted_highs_root_primal);
+	    if (opt.verbose) {
+	      fmt::print(stderr,
+	                 "[B&C-HIGHS-ROOT-PRIMAL] available=1 adopted={} "
+	                 "obj={:.12g}\n",
+	                 adopted_highs_root_primal ? 1 : 0,
+	                 highs_root_primal_obj);
+	    }
+	  }
+
 	  if (!strict_highs_lp_contract &&
       has_verified_root_cutoff && verified_root_cutoff_x.size() == n) {
 	    const bool improved = adopt_root_incumbent(
@@ -2264,9 +2299,9 @@
   // The thread ran concurrently with root LP + root cuts.  Join here (after
   // all cut rounds) before we enter the root heuristic phase that uses it.
   // If the thread completed early, join() returns immediately (no stall).
-  if (ac_thread_ptr && ac_thread_ptr->joinable()) {
+  if (ac_thread.joinable()) {
     [[maybe_unused]] auto t_ac_join0 = std::chrono::steady_clock::now();
-    ac_thread_ptr->join();
+    ac_thread.join();
     [[maybe_unused]] auto t_ac_join1 = std::chrono::steady_clock::now();
     if (opt.verbose) {
       fmt::print(stderr, "[B&C-ANALYTIC-CENTRE] {} join_wait={:.1f}ms\n",
@@ -2281,6 +2316,10 @@
     }
 
     Eigen::VectorXd x_fwd = heuristic_x_orig;
+
+    if (highs_mip_model_reduced) {
+      x_fwd = highs_presolve_forward_map(highs_mip_ps, x_fwd);
+    }
 
 #ifdef MIPSOLVERS_HAVE_PAPILO
     if (papilo_ps.success && !papilo_ps.reduced_to_orig_col.empty()) {
@@ -2410,9 +2449,50 @@
   // instead of the prior O(nnz) full-rescan.
   using ::mipsolvers::engine::detail::BCDomain;
   BCDomain repair_domain;
-  repair_domain.init(base_lp, root.lb, root.ub);
-  // One initial sweep absorbs whatever tightening the root box already implies.
-  (void)repair_domain.propagate();
+  // HiGHS HighsPrimalHeuristics::tryRoundedPoint copies the structural
+  // HighsDomain; generated separation rows retain separate cut-pool ownership.
+  // The cut-augmented base_lp is still used by repair and incumbent audit.
+  // Derivation in
+  // docs/native_milp_root_quality_restart_prerequisites_2026-08-13.md.
+  repair_domain.init(root_lp, root.lb, root.ub,
+                     BCDomain::InitialPropagation::AlreadyClosed);
+  if (bc_env_flag_enabled("MIPSOLVERS_ROOT_REPAIR_ROW_ZERO_TRACE")) {
+    const Eigen::SparseMatrix<double, Eigen::RowMajor> trace_rows = root_lp.A;
+    fmt::print(stderr,
+               "[NATIVE-ROOT-REPAIR-ROW-ZERO] lhs={:.17g} rhs={:.17g} "
+               "terms=",
+               lp_row_lhs_or_neg_inf(root_lp, 0), root_lp.b[0]);
+    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(
+             trace_rows, 0);
+         it; ++it) {
+      fmt::print(stderr, "{}{}:{:.17g}", it.index() == 0 ? "" : ",",
+                 it.col(), it.value());
+    }
+    fmt::print(stderr, "\n");
+  }
+  // The root box has already passed root-domain closure. This snapshot mirrors
+  // HiGHS' copy of its live domain and therefore starts with an empty queue.
+  const bool repair_domain_initial_propagation = repair_domain.propagate();
+  if (bc_env_flag_enabled("MIPSOLVERS_ROOT_REPAIR_CONFLICT_TRACE")) {
+    fmt::print(stderr,
+               "[NATIVE-ROOT-REPAIR-INIT] ok={} infeasible={} complete={} "
+               "rows={}\n",
+               repair_domain_initial_propagation ? 1 : 0,
+               repair_domain.infeasible() ? 1 : 0,
+               repair_domain.propagation_complete() ? 1 : 0,
+               repair_domain.rows_processed());
+  }
+  if (bc_env_flag_enabled("MIPSOLVERS_ROOT_REPAIR_DOMAIN_TRACE")) {
+    const Eigen::VectorXd& trace_lb = repair_domain.lb();
+    const Eigen::VectorXd& trace_ub = repair_domain.ub();
+    for (int j = 0; j < n; ++j) {
+      fmt::print(stderr,
+                 "[NATIVE-ROOT-REPAIR-DOMAIN] col={} lb={:.17g} "
+                 "ub={:.17g}\n",
+                 j, trace_lb[j], trace_ub[j]);
+    }
+  }
+  bool traced_first_incomplete_repair = false;
 
   auto try_fixed_integer_repair = [&](const char* source,
                                       Eigen::VectorXd xr) -> bool {
@@ -2431,21 +2511,51 @@
       return improved;
     }
 
-    // HiGHS tryRoundedPoint analog: fix the rounded integers in the persistent
-    // domain, then propagate. The state machine mirrors HiGHS exactly:
-    //   savepoint -> fix_col* -> propagate -> {use lb/ub} -> restore.
+    // HiGHS tryRoundedPoint analog: project the rounded preferences through
+    // the evolving persistent domain in lock-priority order. The state
+    // machine is savepoint -> {clamp, fix_col, propagate}* -> restore.
     // If propagation proves infeasibility we never reach the LP solver — this
     // is the short-circuit that bounds linesearchRounding on large UC roots.
     const BCDomain::Savepoint domain_sp = repair_domain.savepoint();
-    bool prop_infeasible = false;
-    for (int i = 0; i < n; ++i) {
-      if (!is_integer_type(base_lp.vars[i])) continue;
-      if (!repair_domain.fix_col(i, xr[i])) { prop_infeasible = true; break; }
-    }
-    if (!prop_infeasible) {
-      if (!repair_domain.propagate()) prop_infeasible = true;
-    }
+    // HiGHS HighsPrimalHeuristics::tryRoundedPoint; Achterberg (2007),
+    // Secs. 3.1 and 9.2. Derivation in
+    // docs/native_milp_root_quality_restart_prerequisites_2026-08-13.md.
+    const bool prop_infeasible = !repair_domain.project_integer_preferences(
+        repair_integer_order, xr);
     if (prop_infeasible) {
+      if (bc_env_flag_enabled("MIPSOLVERS_ROOT_REPAIR_CONFLICT_TRACE")) {
+        if (!repair_domain.infeasible() &&
+            !repair_domain.propagation_complete() &&
+            !traced_first_incomplete_repair) {
+          traced_first_incomplete_repair = true;
+          for (int chunk = 1;
+               chunk <= 8 && !repair_domain.infeasible() &&
+               !repair_domain.propagation_complete();
+               ++chunk) {
+            const std::uint64_t rows_before = repair_domain.rows_processed();
+            (void)repair_domain.propagate();
+            fmt::print(stderr,
+                       "[NATIVE-ROOT-REPAIR-INCOMPLETE] chunk={} col={} "
+                       "rows={} trail={} pending={} infeasible={} complete={}\n",
+                       chunk, repair_domain.last_preference_col(),
+                       repair_domain.rows_processed() - rows_before,
+                       repair_domain.trail_size(),
+                       repair_domain.pending_row_count(),
+                       repair_domain.infeasible() ? 1 : 0,
+                       repair_domain.propagation_complete() ? 1 : 0);
+          }
+        }
+        const auto& cert = repair_domain.infeasibility_certificate();
+        fmt::print(stderr,
+                   "[NATIVE-ROOT-REPAIR-CONFLICT] source={} kind={} row={} "
+                   "col={} activity={:.17g} magnitude={:.17g} inf={} "
+                   "side={:.17g} requested=[{:.17g},{:.17g}] "
+                   "scratch={:.17g} scratch_inf={}\n",
+                   source, cert.kind, cert.row, cert.col, cert.activity,
+                   cert.magnitude, cert.infinity_count, cert.row_side,
+                   cert.requested_lb, cert.requested_ub,
+                   cert.scratch_activity, cert.scratch_infinity_count);
+      }
       repair_domain.restore(domain_sp);
       note_root_subsolve(source, 0.0, false);
       return false;

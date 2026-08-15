@@ -728,7 +728,50 @@ void refresh_leaving_heap(State& state, const std::vector<int>* changed_rows) {
   }
 }
 
+// Bland's-rule CHUZR (active only while state.bland_active). Selects the
+// primal-infeasible basic variable of SMALLEST column index, bypassing the DSE
+// merit heap and the taboo table. Together with the smallest-index Bland CHUZC
+// this yields a non-repeating basis sequence, guaranteeing finite termination
+// out of a dual-degenerate livelock (Bland 1977). Edge weights are still
+// maintained by the shared compute_dse_weights step, so normal pricing resumes
+// cleanly once a productive pivot clears state.bland_active.
+bool choose_leaving_bland(State& state, Leaving& leaving,
+                          std::string& failure) {
+  leaving = {};
+  for (int row = 0; row < state.m; ++row) {
+    int side = 0;
+    const double violation = primal_infeasibility(state, row, side);
+    if (side == 0) continue;
+    if (leaving.row < 0 ||
+        state.basis[static_cast<std::size_t>(row)] <
+            state.basis[static_cast<std::size_t>(leaving.row)]) {
+      leaving.row = row;
+      leaving.side = side;
+      leaving.violation = violation;
+      leaving.delta = side * violation;
+    }
+  }
+  // The DSE merit heap is not consulted here, so invalidate it to force a fresh
+  // rebuild the next time steepest-edge CHUZR runs.
+  state.leaving_heap_valid = false;
+  if (leaving.row < 0) return true;
+  static thread_local IndexedVector unit;
+  unit.clear(state.m);
+  unit.index.push_back(leaving.row);
+  unit.value.push_back(1.0);
+  IndexedSolveEvidence row_solve = state.factor->indexed_btran(unit, true);
+  leaving.row_ep = std::move(row_solve.solution);
+  if (!row_solve.accepted) {
+    failure = "CHUZR packed BTRAN failed (Bland)";
+    return false;
+  }
+  return true;
+}
+
 bool choose_leaving(State& state, Leaving& leaving, std::string& failure) {
+  if (state.bland_active) {
+    return choose_leaving_bland(state, leaving, failure);
+  }
   if (state.certified_exact_dse_pricing &&
       state.edge_weight_mode == EdgeWeightMode::SteepestEdge) {
     return choose_leaving_certified_exact(state, leaving, failure);
@@ -1148,6 +1191,31 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
   if (candidates.empty()) return true;
 
   transaction.bfrt_candidate_count = static_cast<int>(candidates.size());
+  if (state.bland_active) {
+    // Bland's-rule CHUZC: among the certified stable candidates take the one
+    // with the minimum dual ratio (breakpoint), breaking ties by SMALLEST
+    // column index, and pivot on it alone -- no bound flips, taboo ignored.
+    // The minimum breakpoint is the exact dual ratio-test step, so dual
+    // feasibility is preserved and the downstream certification still applies;
+    // combined with the smallest-index Bland CHUZR this cannot repeat a basis,
+    // guaranteeing finite termination (Bland 1977).
+    const Candidate* pick = nullptr;
+    for (const Candidate& candidate : candidates) {
+      if (pick == nullptr || candidate.breakpoint < pick->breakpoint ||
+          (candidate.breakpoint == pick->breakpoint &&
+           candidate.col < pick->col)) {
+        pick = &candidate;
+      }
+    }
+    if (pick == nullptr) return true;
+    transaction.entering.col = pick->col;
+    transaction.entering.pivot =
+        leaving.side *
+        sign(state.move[static_cast<std::size_t>(pick->col)]) * pick->alpha;
+    transaction.entering.alpha = pick->alpha;
+    transaction.entering.theta = static_cast<double>(pick->breakpoint);
+    return true;
+  }
   std::size_t selected_begin = 0;
   std::size_t selected_end = 0;
   // HiGHS' BFRT uses the same 1e-12 initial total-change budget. It is an

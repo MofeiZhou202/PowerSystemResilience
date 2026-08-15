@@ -27,6 +27,9 @@ struct LCQPOptions {
   bool return_feasible_descent_candidate{false};
   double candidate_objective_upper_bound{
       std::numeric_limits<double>::infinity()};
+  /// Cooperative wall-clock limit for one solve. Sparse factorization is
+  /// indivisible and may finish after the deadline; zero disables the limit.
+  double time_limit_sec{0.0};
   bool verbose{false};
 };
 

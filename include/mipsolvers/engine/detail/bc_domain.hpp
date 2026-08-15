@@ -30,6 +30,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <stdexcept>
 #include <vector>
 
 #include <Eigen/Core>
@@ -42,6 +43,25 @@ namespace mipsolvers::engine::detail {
 
 class BCDomain {
  public:
+  enum class InitialPropagation {
+    FullSweep,
+    AlreadyClosed,
+  };
+
+  struct InfeasibilityCertificate {
+    const char* kind{"none"};
+    int row{-1};
+    int col{-1};
+    double activity{0.0};
+    double magnitude{0.0};
+    int infinity_count{0};
+    double row_side{0.0};
+    double requested_lb{0.0};
+    double requested_ub{0.0};
+    double scratch_activity{0.0};
+    int scratch_infinity_count{0};
+  };
+
   struct TrailEntry {
     int col;
     double old_lb;
@@ -55,6 +75,7 @@ class BCDomain {
     std::vector<int> pending_rows;
     bool infeasible{false};
     bool propagation_complete{true};
+    InfeasibilityCertificate certificate;
   };
 
   static constexpr double kFeasTol = 1e-7;
@@ -63,10 +84,13 @@ class BCDomain {
   BCDomain() = default;
 
   /// Initialise from an `LPModel` snapshot and a starting (lb,ub) box.
-  /// Recomputes all row activities and marks all rows for an initial sweep.
+  /// Recomputes all row activities. By default all rows are marked for an
+  /// initial sweep; an already-closed snapshot starts with an empty queue.
   void init(const LPModel& lp,
             const Eigen::VectorXd& lb_in,
-            const Eigen::VectorXd& ub_in) {
+            const Eigen::VectorXd& ub_in,
+            InitialPropagation initial_propagation =
+                InitialPropagation::FullSweep) {
     lp_ = &lp;
     n_ = static_cast<int>(lp.vars.size());
     m_ineq_ = static_cast<int>(lp.A.rows());
@@ -104,9 +128,16 @@ class BCDomain {
     for (int r = 0; r < m_ineq_; ++r) compute_row_activity_initial(r, A_row_, /*offset=*/0);
     for (int r = 0; r < m_eq_;   ++r) compute_row_activity_initial(r, Aeq_row_, /*offset=*/m_ineq_);
 
-    // Mark every row for an initial pass and detect immediate infeasibility.
+    // A copied, already-closed domain starts with no pending rows. Future bound
+    // changes still mark every incident row through apply_lb/ub_delta.
+    // HiGHS HighsPrimalHeuristics::tryRoundedPoint copies its live HighsDomain;
+    // derivation in native_milp_root_quality_restart_prerequisites_2026-08-13.md.
     infeasible_ = false;
-    for (int rr = 0; rr < m_total_; ++rr) mark_propagate(rr);
+    infeasibility_certificate_ = {};
+    propagation_complete_ = true;
+    if (initial_propagation == InitialPropagation::FullSweep) {
+      for (int rr = 0; rr < m_total_; ++rr) mark_propagate(rr);
+    }
 
     trail_.clear();
     rows_processed_ = 0;
@@ -119,15 +150,20 @@ class BCDomain {
   int num_vars() const { return n_; }
   int num_rows() const { return m_total_; }
   std::size_t trail_size() const { return trail_.size(); }
+  std::size_t pending_row_count() const { return prop_inds_.size(); }
+  int last_preference_col() const { return last_preference_col_; }
   const TrailEntry& trail_entry(std::size_t pos) const {
     return trail_.at(pos);
   }
   std::uint64_t rows_processed() const { return rows_processed_; }
+  const InfeasibilityCertificate& infeasibility_certificate() const {
+    return infeasibility_certificate_;
+  }
 
   /// Push a savepoint that `restore()` can later roll back to.
   Savepoint savepoint() const {
     return Savepoint{trail_.size(), prop_inds_, infeasible_,
-                     propagation_complete_};
+                     propagation_complete_, infeasibility_certificate_};
   }
 
   /// Roll back every bound change (and its activity-delta side effects)
@@ -168,12 +204,38 @@ class BCDomain {
     }
     infeasible_ = sp.infeasible;
     propagation_complete_ = sp.propagation_complete;
+    infeasibility_certificate_ = sp.certificate;
   }
 
   /// Fix `col` to a value (lb=ub=v). Returns `false` and sets `infeasible()`
   /// if the new bounds are inconsistent with the existing domain or if the
   /// activity-delta detects a row violation.
   bool fix_col(int col, double v) { return change_bound(col, v, v); }
+
+  /// Sequentially project rounded integer preferences through this domain.
+  /// Each earlier fixing reaches propagation closure before the next request
+  /// is clamped, so an implied value overrides a stale rounded preference.
+  bool project_integer_preferences(const std::vector<int>& order,
+                                   const Eigen::VectorXd& preference) {
+    if (preference.size() != n_) {
+      throw std::invalid_argument(
+          "BCDomain integer preference vector has the wrong dimension");
+    }
+    for (const int col : order) {
+      last_preference_col_ = col;
+      if (col < 0 || col >= n_ || !is_integer_var(lp_->vars[col])) {
+        throw std::invalid_argument(
+            "BCDomain integer preference order contains an invalid column");
+      }
+      // HiGHS HighsPrimalHeuristics::tryRoundedPoint; Achterberg (2007),
+      // Secs. 3.1 and 9.2. Derivation in
+      // docs/native_milp_root_quality_restart_prerequisites_2026-08-13.md.
+      const double rounded = std::round(preference[col]);
+      const double value = std::min(ub_[col], std::max(lb_[col], rounded));
+      if (!fix_col(col, value) || !propagate()) return false;
+    }
+    return true;
+  }
 
   /// Tighten the bounds of `col` to [new_lb, new_ub] (intersected with current).
   /// Returns false if the resulting domain is empty or the activity-delta
@@ -191,6 +253,8 @@ class BCDomain {
     }
     if (new_lb > new_ub + kFeasTol) {
       infeasible_ = true;
+      infeasibility_certificate_ = {"bound", -1, col, 0.0, 0.0, 0, 0.0,
+                                    new_lb, new_ub, 0.0, 0};
       return false;
     }
     bool changed_lb = false;
@@ -208,12 +272,16 @@ class BCDomain {
     trail_.push_back({col, cur_lb, cur_ub, changed_lb, changed_ub});
 
     if (changed_lb) {
-      apply_lb_delta(col, cur_lb, new_lb, /*touch_marks=*/true);
+      // Transaction invariant: the explicit bound and cached activities must
+      // describe the same box even when the delta proves infeasibility.
+      // HiGHS HighsDomain::changeBound/backtrack; derivation in
+      // docs/native_milp_root_quality_restart_prerequisites_2026-08-13.md.
       lb_[col] = new_lb;
+      apply_lb_delta(col, cur_lb, new_lb, /*touch_marks=*/true);
     }
     if (!infeasible_ && changed_ub) {
-      apply_ub_delta(col, cur_ub, new_ub, /*touch_marks=*/true);
       ub_[col] = new_ub;
+      apply_ub_delta(col, cur_ub, new_ub, /*touch_marks=*/true);
     }
     return !infeasible_;
   }
@@ -318,7 +386,12 @@ class BCDomain {
         if (act_inf_min_[static_cast<size_t>(rr)] == 0 &&
             act_min_[static_cast<size_t>(rr)].violates_upper(
                 row_hi_[static_cast<size_t>(rr)], kFeasTol)) {
-          infeasible_ = true; return;
+          record_activity_infeasibility("lb_delta_min_gt_upper", rr, col,
+                                        true,
+                                        act_min_[static_cast<size_t>(rr)],
+                                        act_inf_min_[static_cast<size_t>(rr)],
+                                        row_hi_[static_cast<size_t>(rr)]);
+          return;
         }
         if (touch_marks) mark_propagate(rr);
       } else {
@@ -328,7 +401,12 @@ class BCDomain {
         if (act_inf_max_[static_cast<size_t>(rr)] == 0 &&
             act_max_[static_cast<size_t>(rr)].violates_lower(
                 row_lo_[static_cast<size_t>(rr)], kFeasTol)) {
-          infeasible_ = true; return;
+          record_activity_infeasibility("lb_delta_max_lt_lower", rr, col,
+                                        false,
+                                        act_max_[static_cast<size_t>(rr)],
+                                        act_inf_max_[static_cast<size_t>(rr)],
+                                        row_lo_[static_cast<size_t>(rr)]);
+          return;
         }
         if (touch_marks) mark_propagate(rr);
       }
@@ -347,7 +425,12 @@ class BCDomain {
         if (act_inf_max_[static_cast<size_t>(rr)] == 0 &&
             act_max_[static_cast<size_t>(rr)].violates_lower(
                 row_lo_[static_cast<size_t>(rr)], kFeasTol)) {
-          infeasible_ = true; return;
+          record_activity_infeasibility("ub_delta_max_lt_lower", rr, col,
+                                        false,
+                                        act_max_[static_cast<size_t>(rr)],
+                                        act_inf_max_[static_cast<size_t>(rr)],
+                                        row_lo_[static_cast<size_t>(rr)]);
+          return;
         }
         if (touch_marks) mark_propagate(rr);
       } else {
@@ -357,7 +440,12 @@ class BCDomain {
         if (act_inf_min_[static_cast<size_t>(rr)] == 0 &&
             act_min_[static_cast<size_t>(rr)].violates_upper(
                 row_hi_[static_cast<size_t>(rr)], kFeasTol)) {
-          infeasible_ = true; return;
+          record_activity_infeasibility("ub_delta_min_gt_upper", rr, col,
+                                        true,
+                                        act_min_[static_cast<size_t>(rr)],
+                                        act_inf_min_[static_cast<size_t>(rr)],
+                                        row_hi_[static_cast<size_t>(rr)]);
+          return;
         }
         if (touch_marks) mark_propagate(rr);
       }
@@ -402,11 +490,15 @@ class BCDomain {
     // Quick infeasibility re-check (cheap; HighsDomain does the same).
     if (infmin == 0 && std::isfinite(hi) &&
         amin.violates_upper(hi, kFeasTol)) {
-      infeasible_ = true; return false;
+      record_activity_infeasibility("row_min_gt_upper", rr, -1, true, amin,
+                                    infmin, hi);
+      return false;
     }
     if (infmax == 0 && std::isfinite(lo) &&
         amax.violates_lower(lo, kFeasTol)) {
-      infeasible_ = true; return false;
+      record_activity_infeasibility("row_max_lt_lower", rr, -1, false, amax,
+                                    infmax, lo);
+      return false;
     }
 
     auto sweep_row = [&](auto IteratorMaker, int row_in_block) {
@@ -529,6 +621,46 @@ class BCDomain {
 
   // ----------------------------------------------------------------- state
 
+  void record_activity_infeasibility(const char* kind, int row, int col,
+                                     bool minimum,
+                                     const StableActivitySum& activity,
+                                     int infinity_count, double row_side) {
+    StableActivitySum scratch;
+    int scratch_inf = 0;
+    auto accumulate = [&](auto& matrix, int row_in_block) {
+      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(
+               matrix, row_in_block);
+           it; ++it) {
+        const int j = static_cast<int>(it.col());
+        const double a = it.value();
+        const double bound = minimum ? (a > 0.0 ? lb_[j] : ub_[j])
+                                     : (a > 0.0 ? ub_[j] : lb_[j]);
+        if (std::isfinite(bound)) {
+          scratch.add_product(a, bound);
+        } else {
+          ++scratch_inf;
+        }
+      }
+    };
+    if (row < m_ineq_) {
+      accumulate(A_row_, row);
+    } else {
+      accumulate(Aeq_row_, row - m_ineq_);
+    }
+    infeasible_ = true;
+    infeasibility_certificate_ = {kind,
+                                  row,
+                                  col,
+                                  activity.value(),
+                                  activity.magnitude(),
+                                  infinity_count,
+                                  row_side,
+                                  0.0,
+                                  0.0,
+                                  scratch.value(),
+                                  scratch_inf};
+  }
+
   const LPModel* lp_{nullptr};
   int n_{0};
   int m_ineq_{0};
@@ -557,6 +689,8 @@ class BCDomain {
   std::uint64_t rows_processed_{0};
   bool infeasible_{false};
   bool propagation_complete_{true};
+  int last_preference_col_{-1};
+  InfeasibilityCertificate infeasibility_certificate_;
 };
 
 }  // namespace mipsolvers::engine::detail

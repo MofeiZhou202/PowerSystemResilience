@@ -42,6 +42,11 @@ constexpr double kHighsDefaultMipTolerance = 1e-6;
 bool simplex_wall_time_limit_hit(
     const SimplexOptions& opt,
     const std::chrono::steady_clock::time_point& start) {
+  if (opt.cancel_flag != nullptr &&
+      opt.cancel_flag->load(std::memory_order_relaxed)) {
+    if (opt.time_limit_hit != nullptr) *opt.time_limit_hit = true;
+    return true;
+  }
   if (!(opt.time_limit_sec > 0.0) || !std::isfinite(opt.time_limit_sec)) {
     return false;
   }

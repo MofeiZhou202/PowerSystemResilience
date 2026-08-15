@@ -8,7 +8,7 @@
                   : 0;
           const int eff_max = (cur.depth == 0)
                                   ? (!cur.basis_hint ||
-                                             skip_short_basis_free_root_probing
+                                             skip_short_large_root_probing
                                          ? 0
                                          : std::min(
                                                {opt.probe_max_candidates, 3,
@@ -1785,7 +1785,9 @@
   const double objective_report_offset =
       strict_highs_presolved_working_space
           ? strict_highs_presolved_objective_offset
-          : (papilo_model_reduced ? papilo_ps.objective_offset : 0.0);
+          : (highs_mip_model_reduced
+                 ? highs_mip_ps.objective_offset
+                 : (papilo_model_reduced ? papilo_ps.objective_offset : 0.0));
   auto report_objective_value = [&](double internal_obj) {
     if (!std::isfinite(internal_obj)) return internal_obj;
     const double with_offset = internal_obj + objective_report_offset;
@@ -1882,6 +1884,78 @@
     }
   }
 
+  // HighsMipSolverData::transformNewIntegerFeasibleSolution has already
+  // postsolved the captured root incumbent; that original/working pair is the
+  // fast path. Any other strict-mode incumbent is a point of the presolved
+  // working space and postsolves through the retained presolve-only pass
+  // (Highs::postsolve MIP branch); the run() lifecycle that consumed the root
+  // owner's postsolve does not apply to that instance. Identity working
+  // spaces are already in original coordinates. Derivation:
+  // docs/native_milp_root_quality_restart_prerequisites_2026-08-13.md,
+  // "Strict Tree-Incumbent Postsolve Ownership".
+  if (has_incumbent && strict_highs_presolved_working_space) {
+    const bool paired_certificate_ok =
+        pending_highs_root_primal.size() == out.x.size() &&
+        pending_highs_root_primal_original.size() == orig_n &&
+        (pending_highs_root_primal - out.x).lpNorm<Eigen::Infinity>() <=
+            1e-9;
+    std::string strict_transfer_error;
+    if (paired_certificate_ok) {
+      out.x = pending_highs_root_primal_original;
+    } else if (strict_highs_identity_working_space) {
+      if (out.x.size() != orig_n) {
+        strict_transfer_error = "strict identity dimension mismatch";
+      }
+    } else {
+      Eigen::VectorXd recovered = highs_side_state_postsolve_primal(
+          highs_presolve_side_state, out.x);
+      if (recovered.size() == orig_n) {
+        out.x = std::move(recovered);
+      } else {
+        strict_transfer_error = "strict tree postsolve unavailable";
+      }
+    }
+    const auto strict_validation = strict_transfer_error.empty()
+        ? validate_incumbent_solution(prob.linear_part, out.x, 1e-6)
+        : IncumbentValidationSummary{};
+    if (!strict_transfer_error.empty() || !strict_validation.ok()) {
+      has_incumbent = false;
+      out.x = Eigen::VectorXd::Zero(orig_n);
+      out.stats.objective = 0.0;
+      out.stats.mip_gap = kInf;
+      out.stats.success = false;
+      out.stats.status = strict_transfer_error.empty()
+          ? fmt::format(
+                "{} ({})", bc_status::kInvalidHighsPostsolveIncumbent,
+                format_incumbent_validation_failure(
+                    "strict-highs-postsolve", prob.linear_part,
+                    strict_validation))
+          : fmt::format("{} ({})",
+                        bc_status::kInvalidHighsPostsolveIncumbent,
+                        strict_transfer_error);
+    }
+  }
+
+  // HiGHS HighsPostsolveStack reconstructs every eliminated original column;
+  // derivation in docs/native_milp_root_source_eligibility_2026-08-13.md.
+  if (has_incumbent && highs_mip_model_reduced) {
+    out.x = highs_postsolve_primal(highs_mip_ps, out.x);
+    const auto highs_validation =
+        validate_incumbent_solution(prob.linear_part, out.x, 1e-6);
+    if (!highs_validation.ok()) {
+      has_incumbent = false;
+      out.x = Eigen::VectorXd::Zero(
+          static_cast<int>(prob.linear_part.vars.size()));
+      out.stats.objective = 0.0;
+      out.stats.mip_gap = kInf;
+      out.stats.success = false;
+      out.stats.status = fmt::format(
+          "{} ({})", bc_status::kInvalidHighsPostsolveIncumbent,
+          format_incumbent_validation_failure(
+              "highs-postsolve", prob.linear_part, highs_validation));
+    }
+  }
+
   // ── PaPILO postsolve (undo presolve reduction) ──
 #ifdef MIPSOLVERS_HAVE_PAPILO
   if (has_incumbent && papilo_ps.success && !papilo_ps.reduced_to_orig_col.empty()) {
@@ -1966,7 +2040,7 @@
   }
 
   // Recompute objective in original space after all postsolve passes.
-  if (has_incumbent && !strict_highs_presolved_working_space) {
+  if (has_incumbent) {
     const auto& orig_lp = prob.linear_part;
     double obj_val = 0.0;
     const int orig_nc = static_cast<int>(orig_lp.c.size());
@@ -2023,6 +2097,9 @@
       }
 
       Eigen::VectorXd original_x = event.incumbent;
+      if (highs_mip_model_reduced) {
+        original_x = highs_postsolve_primal(highs_mip_ps, original_x);
+      }
 #ifdef MIPSOLVERS_HAVE_PAPILO
       if (papilo_ps.success && !papilo_ps.reduced_to_orig_col.empty()) {
         original_x = papilo_postsolve(papilo_ps, original_x);
@@ -2107,6 +2184,14 @@
     exported->conflictscoredown.assign(static_cast<size_t>(orig_n), 0.0);
     for (int col : declared_branchable_indices) {
       int orig_col = col;
+      if (highs_mip_model_reduced) {
+        if (col < 0 ||
+            col >= static_cast<int>(highs_mip_ps.reduced_to_orig_col.size())) {
+          continue;
+        }
+        orig_col = highs_mip_ps.reduced_to_orig_col[
+            static_cast<std::size_t>(col)];
+      }
 #ifdef MIPSOLVERS_HAVE_PAPILO
       if (papilo_ps.success && !papilo_ps.reduced_to_orig_col.empty()) {
         if (col < 0 ||

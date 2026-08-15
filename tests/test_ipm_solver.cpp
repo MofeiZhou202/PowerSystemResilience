@@ -237,6 +237,80 @@ TEST_CASE("Native LCQP condenses general inequality slacks",
   CHECK((qp.A * result.x - qp.b).maxCoeff() <= 1e-7);
 }
 
+TEST_CASE("NativeLCQP consumes a complete model warm start",
+          "[ipm][qp][warm-start]") {
+  QPModel qp;
+  qp.sense = Sense::Minimize;
+  qp.c = Eigen::VectorXd::Zero(2);
+  qp.Q.resize(2, 2);
+  qp.Q.insert(0, 0) = 2.0;
+  qp.Q.insert(1, 1) = 2.0;
+  qp.Q.makeCompressed();
+  qp.A.resize(0, 2);
+  qp.b.resize(0);
+  qp.Aeq.resize(1, 2);
+  qp.Aeq.insert(0, 0) = 1.0;
+  qp.Aeq.insert(0, 1) = 1.0;
+  qp.Aeq.makeCompressed();
+  qp.beq = Eigen::VectorXd::Constant(1, 1.4);
+  qp.vars = {{VarType::Continuous, 0.0, 1.0},
+             {VarType::Continuous, 0.0, 1.0}};
+
+  NativeLCQPAdapter solver;
+  const SolveResult cold = solver.solve_qp(qp);
+  REQUIRE(cold.stats.success);
+  REQUIRE_FALSE(cold.stats.warm_start_used);
+  REQUIRE(std::isfinite(cold.stats.initial_primal_feas));
+
+  qp.x0 = Eigen::VectorXd::Constant(2, 0.7);
+  const SolveResult warm = solver.solve_qp(qp);
+  REQUIRE(warm.stats.success);
+  CHECK(warm.stats.warm_start_used);
+  CHECK(warm.stats.initial_primal_feas <= 1e-12);
+  // The cold path may now reach the same equality-feasible point through its
+  // minimum-norm projection; consuming x0 must remain no worse.
+  CHECK(warm.stats.initial_primal_feas <= cold.stats.initial_primal_feas);
+  CHECK(warm.x[0] == Approx(0.7).margin(1e-7));
+  CHECK(warm.x[1] == Approx(0.7).margin(1e-7));
+
+  qp.x0 = Eigen::VectorXd::Constant(1, 0.7);
+  const SolveResult rejected = solver.solve_qp(qp);
+  REQUIRE(rejected.stats.success);
+  CHECK_FALSE(rejected.stats.warm_start_used);
+  CHECK((rejected.x - cold.x).lpNorm<Eigen::Infinity>() <= 1e-12);
+}
+
+TEST_CASE("NativeLCQP time limit returns an uncertified finite iterate",
+          "[ipm][qp][time-limit]") {
+  QPModel qp;
+  qp.sense = Sense::Minimize;
+  qp.c = Eigen::VectorXd::Zero(2);
+  qp.Q.resize(2, 2);
+  qp.Q.insert(0, 0) = 2.0;
+  qp.Q.insert(1, 1) = 2.0;
+  qp.Q.makeCompressed();
+  qp.A.resize(0, 2);
+  qp.b.resize(0);
+  qp.Aeq.resize(1, 2);
+  qp.Aeq.insert(0, 0) = 1.0;
+  qp.Aeq.insert(0, 1) = 1.0;
+  qp.Aeq.makeCompressed();
+  qp.beq = Eigen::VectorXd::Constant(1, 1.4);
+  qp.vars = {{VarType::Continuous, 0.0, 1.0},
+             {VarType::Continuous, 0.0, 1.0}};
+
+  LCQPOptions options;
+  options.time_limit_sec = std::numeric_limits<double>::min();
+  const SolveResult result = NativeLCQPAdapter(options).solve_qp(qp);
+
+  CHECK_FALSE(result.stats.success);
+  CHECK(result.stats.status == "TimeLimit");
+  REQUIRE(result.x.size() == 2);
+  CHECK(result.x.allFinite());
+  CHECK(result.stats.symbolic_analyze_calls == 1);
+  CHECK(result.stats.factorization_calls == 0);
+}
+
 TEST_CASE("Native LCQP accepts a structural primal initial point",
           "[ipm][qp][initial-point]") {
   QPModel qp;
@@ -1367,6 +1441,68 @@ TEST_CASE("Phase-I many-row dual selector improves original stationarity",
       CHECK(detail.mu_ineq.maxCoeff() > 1.0);
     }
   }
+}
+
+TEST_CASE("Native IPM audits a complete central warm start",
+          "[ipm][nlp][initialization][central-warm-start]") {
+  double first_x = std::numeric_limits<double>::quiet_NaN();
+  NLPModel nlp;
+  nlp.sense = Sense::Minimize;
+  nlp.vars.push_back({VarType::Continuous, 0.0, 1.0, "dispatch"});
+  nlp.x0 = Eigen::VectorXd::Constant(1, -5e-3);
+  nlp.f = [&first_x](const Eigen::VectorXd& x) {
+    if (!std::isfinite(first_x)) first_x = x[0];
+    return 0.5 * x.squaredNorm();
+  };
+  nlp.grad = [](const Eigen::VectorXd& x, Eigen::VectorXd& gradient) {
+    gradient = x;
+  };
+  nlp.hess = [](const Eigen::VectorXd&,
+                Eigen::SparseMatrix<double>& hessian) {
+    hessian.resize(1, 1);
+    hessian.setIdentity();
+  };
+
+  IPMOptions options;
+  options.central_warm_start = true;
+  options.central_warm_start_primal_tolerance = 1e-2;
+  options.central_warm_start_centrality_tolerance = 0.5;
+  options.equality_dual_start.resize(0);
+  options.slack_start.resize(2);
+  options.slack_start << 5e-3, 1.005;
+  const double initial_barrier = 0.1;
+  options.inequality_dual_start =
+      initial_barrier * options.slack_start.cwiseInverse();
+  options.max_iter = 1;
+  options.tol_primal = 1e-8;
+  options.tol_dual = 1e-8;
+  options.tol_complementarity = 1e-8;
+  options.tol_accept = 0.0;
+  options.scale_problem = false;
+  options.use_restoration_phase = false;
+
+  const auto [result, detail] =
+      NativeIPMAdapter(options).solve_nlp_detail(nlp);
+  (void)result;
+
+  CHECK(detail.central_warm_start_requested);
+  CHECK(detail.central_warm_start_accepted);
+  CHECK(detail.central_warm_start_rejection_reason.empty());
+  CHECK(detail.central_warm_start_original_primal_violation == Approx(5e-3));
+  CHECK(detail.central_warm_start_primal_residual == Approx(1e-2));
+  CHECK(detail.central_warm_start_centrality == Approx(0.0).margin(1e-14));
+  CHECK(detail.central_warm_start_mu == Approx(initial_barrier));
+  CHECK(std::isfinite(detail.central_warm_start_dual_residual));
+  CHECK(first_x == Approx(-5e-3).margin(1e-15));
+
+  IPMOptions incomplete = options;
+  incomplete.slack_start.resize(0);
+  const auto [rejected_result, rejected_detail] =
+      NativeIPMAdapter(incomplete).solve_nlp_detail(nlp);
+  (void)rejected_result;
+  CHECK_FALSE(rejected_detail.central_warm_start_accepted);
+  CHECK(rejected_detail.central_warm_start_rejection_reason.find("slack") !=
+        std::string::npos);
 }
 
 TEST_CASE("Filter IPM uses inertia correction on a nonconvex objective",

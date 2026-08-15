@@ -2364,6 +2364,11 @@ struct FilterSolveOutcome {
   int trial_value_evaluations{0};
   int trial_full_derivative_evaluations{0};
   int trial_rejections_before_derivatives{0};
+  bool first_step_accepted{false};
+  double first_step_primal_alpha{0.0};
+  double first_step_dual_alpha{0.0};
+  double first_step_barrier_objective_before{0.0};
+  double first_step_barrier_objective_after{0.0};
 };
 
 FilterSolveOutcome solve_nlp_filter_impl(
@@ -4022,6 +4027,13 @@ FilterSolveOutcome solve_nlp_filter_impl(
       }
 
       // Apply one coherent primal-dual trial accepted by the same gate.
+      if (total_iters == 0) {
+        result.first_step_accepted = true;
+        result.first_step_primal_alpha = alpha;
+        result.first_step_dual_alpha = std::min(alpha_dual, alpha);
+        result.first_step_barrier_objective_before = phi_k;
+        result.first_step_barrier_objective_after = phi_trial;
+      }
       x = accepted_trial.x;
       s = accepted_trial.s;
       lambda = accepted_trial.lambda;
@@ -4526,6 +4538,167 @@ double raw_primal_violation(const NLPModel& prob, const Eigen::VectorXd& x) {
   return std::max(0.0, violation);
 }
 
+struct CentralWarmStartAudit {
+  bool accepted{false};
+  double original_primal_violation{0.0};
+  double primal_residual{0.0};
+  double dual_residual{0.0};
+  double centrality{0.0};
+  double mu{0.0};
+  double max_inequality_dual{0.0};
+  std::string rejection_reason;
+};
+
+CentralWarmStartAudit audit_central_warm_start(
+    const NLPModel& prob, const IPMOptions& opt) {
+  CentralWarmStartAudit audit;
+  const auto reject = [&audit](std::string reason) {
+    audit.rejection_reason = std::move(reason);
+    return audit;
+  };
+  if (opt.globalization != Globalization::Filter) {
+    return reject("central warm start requires filter globalization");
+  }
+  const double primal_tolerance =
+      opt.central_warm_start_primal_tolerance > 0.0 &&
+              std::isfinite(opt.central_warm_start_primal_tolerance)
+          ? opt.central_warm_start_primal_tolerance
+          : opt.tol_primal;
+  if (!(primal_tolerance > 0.0) || !std::isfinite(primal_tolerance)) {
+    return reject("invalid central primal tolerance");
+  }
+  if (!(opt.central_warm_start_centrality_tolerance >= 0.0) ||
+      !std::isfinite(opt.central_warm_start_centrality_tolerance)) {
+    return reject("invalid centrality tolerance");
+  }
+  if (opt.central_warm_start_max_inequality_dual < 0.0 ||
+      !std::isfinite(opt.central_warm_start_max_inequality_dual)) {
+    return reject("invalid inequality-dual magnitude policy");
+  }
+
+  const int n = static_cast<int>(prob.vars.size());
+  if (prob.x0.size() != n || !prob.x0.allFinite()) {
+    return reject("primal start is incomplete or non-finite");
+  }
+
+  const std::vector<int> lb_cols = finite_lower_bound_columns(prob);
+  const std::vector<int> ub_cols = finite_upper_bound_columns(prob);
+  NLPState state;
+  std::string status;
+  if (!evaluate_nlp_state(prob, prob.x0, lb_cols, ub_cols, state, status)) {
+    return reject("model evaluation failed: " + status);
+  }
+  if (opt.equality_dual_start.size() != state.g.size() ||
+      !opt.equality_dual_start.allFinite()) {
+    return reject("equality dual start is incomplete or non-finite");
+  }
+  if (opt.inequality_dual_start.size() != state.h.size() ||
+      !opt.inequality_dual_start.allFinite() ||
+      (opt.inequality_dual_start.array() <= 0.0).any()) {
+    return reject("inequality dual start is incomplete or not positive");
+  }
+  if (opt.slack_start.size() != state.h.size() ||
+      !opt.slack_start.allFinite() ||
+      (opt.slack_start.array() <= 0.0).any()) {
+    return reject("slack start is incomplete or not positive");
+  }
+
+  audit.original_primal_violation = raw_primal_violation(prob, prob.x0);
+  audit.primal_residual = std::max(
+      inf_norm(state.g), inf_norm(state.h + opt.slack_start));
+  const Eigen::VectorXd dual_residual =
+      state.grad + state.jg.transpose() * opt.equality_dual_start +
+      state.jh.transpose() * opt.inequality_dual_start;
+  audit.dual_residual = inf_norm(dual_residual);
+  const Eigen::VectorXd products =
+      opt.slack_start.cwiseProduct(opt.inequality_dual_start);
+  audit.mu = products.size() > 0
+      ? products.mean()
+      : std::max(opt.tol_complementarity, minimum_safe_positive());
+  if (!(audit.mu > 0.0) || !std::isfinite(audit.mu)) {
+    return reject("mean complementarity is not finite and positive");
+  }
+  audit.centrality = products.size() == 0
+      ? 0.0
+      : (products.array() / audit.mu - 1.0).abs().maxCoeff();
+  audit.max_inequality_dual = state.h.size() == 0
+      ? 0.0 : opt.inequality_dual_start.maxCoeff();
+  const double centrality_tolerance =
+      opt.central_warm_start_centrality_tolerance > 0.0
+          ? opt.central_warm_start_centrality_tolerance
+          : opt.tol_complementarity / audit.mu;
+
+  if (!std::isfinite(audit.original_primal_violation) ||
+      audit.original_primal_violation > primal_tolerance) {
+    return reject("original-coordinate primal violation exceeds tolerance");
+  }
+  if (!std::isfinite(audit.primal_residual) ||
+      audit.primal_residual > primal_tolerance) {
+    return reject("perturbed primal residual exceeds tolerance");
+  }
+  if (!std::isfinite(audit.dual_residual)) {
+    return reject("dual residual is non-finite");
+  }
+  if (opt.central_warm_start_max_inequality_dual > 0.0 &&
+      audit.max_inequality_dual >
+          opt.central_warm_start_max_inequality_dual) {
+    return reject("inequality dual magnitude exceeds caller policy");
+  }
+  // The relative product test is exactly the componentwise complementarity
+  // error normalized by the recovered barrier parameter.
+  if (!std::isfinite(audit.centrality) ||
+      !std::isfinite(centrality_tolerance) ||
+      audit.centrality > centrality_tolerance) {
+    return reject("complementarity centrality exceeds tolerance");
+  }
+  audit.accepted = true;
+  return audit;
+}
+
+bool map_fixed_reduction_inequality_vector(
+    const NLPModel& original, const NLPModel& reduced,
+    const FixedNLPMap& map, const Eigen::VectorXd& full,
+    Eigen::VectorXd& gathered) {
+  Eigen::VectorXd nonlinear = Eigen::VectorXd::Zero(0);
+  if (original.h) {
+    const Eigen::VectorXd x = original.x0.size() == map.original_dimension
+        ? original.x0
+        : map.expand(reduced.x0);
+    original.h(x, nonlinear);
+    if (!nonlinear.allFinite()) return false;
+  }
+  const int n_nonlinear = static_cast<int>(nonlinear.size());
+  const std::vector<int> original_lb = finite_lower_bound_columns(original);
+  const std::vector<int> original_ub = finite_upper_bound_columns(original);
+  const std::vector<int> reduced_lb = finite_lower_bound_columns(reduced);
+  const std::vector<int> reduced_ub = finite_upper_bound_columns(reduced);
+  if (full.size() != n_nonlinear + static_cast<int>(original_lb.size()) +
+          static_cast<int>(original_ub.size())) {
+    return false;
+  }
+  gathered.resize(n_nonlinear + static_cast<int>(reduced_lb.size()) +
+                  static_cast<int>(reduced_ub.size()));
+  if (n_nonlinear > 0) gathered.head(n_nonlinear) = full.head(n_nonlinear);
+  int output_row = n_nonlinear;
+  for (int k = 0; k < static_cast<int>(original_lb.size()); ++k) {
+    if (map.original_to_reduced[
+            static_cast<std::size_t>(original_lb[static_cast<std::size_t>(k)])]
+        >= 0) {
+      gathered[output_row++] = full[n_nonlinear + k];
+    }
+  }
+  const int original_upper_offset =
+      n_nonlinear + static_cast<int>(original_lb.size());
+  for (int k = 0; k < static_cast<int>(original_ub.size()); ++k) {
+    if (map.original_to_reduced[
+            static_cast<std::size_t>(original_ub[static_cast<std::size_t>(k)])]
+        >= 0) {
+      gathered[output_row++] = full[original_upper_offset + k];
+    }
+  }
+  return output_row == gathered.size();
+}
+
 bool recover_partitioned_equality_duals(
     const NLPModel& prob, const NLPState& state,
     const Eigen::VectorXd& inequality_dual, Eigen::VectorXd& equality_dual,
@@ -4917,6 +5090,7 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
   out.stats.solver_name = name();
   IPMDetail detail;
   detail.primal_feasible_start_requested = opt_.primal_feasible_start;
+  detail.central_warm_start_requested = opt_.central_warm_start;
   detail.original_dimension = static_cast<int>(prob.vars.size());
   detail.reduced_dimension = detail.original_dimension;
 
@@ -4959,10 +5133,67 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
               << ", tolerance=" << opt_.tol_primal << '\n';
   }
 
+  IPMOptions audited_opt = opt_;
+  audited_opt.primal_feasible_start = primal_feasible_start_accepted;
+  audited_opt.preserve_initial_point = preserve_initial_point_accepted;
+  CentralWarmStartAudit central_audit;
+  if (opt_.central_warm_start) {
+    central_audit = audit_central_warm_start(prob, opt_);
+    detail.central_warm_start_accepted = central_audit.accepted;
+    detail.central_warm_start_original_primal_violation =
+        central_audit.original_primal_violation;
+    detail.central_warm_start_primal_residual = central_audit.primal_residual;
+    detail.central_warm_start_dual_residual = central_audit.dual_residual;
+    detail.central_warm_start_centrality = central_audit.centrality;
+    detail.central_warm_start_mu = central_audit.mu;
+    detail.central_warm_start_max_inequality_dual =
+        central_audit.max_inequality_dual;
+    detail.central_warm_start_rejection_reason =
+        central_audit.rejection_reason;
+    audited_opt.central_warm_start = central_audit.accepted;
+    if (central_audit.accepted) {
+      // A complete central state is a Phase-II start. Preserve its primal and
+      // dual coordinates without enabling the Phase-I trial policy.
+      audited_opt.primal_feasible_start = false;
+      audited_opt.preserve_initial_point = true;
+      audited_opt.mu_init = central_audit.mu;
+    } else {
+      // The contract is all-or-nothing: a rejected state must be
+      // observationally identical to the ordinary cold path.
+      audited_opt.equality_dual_start.resize(0);
+      audited_opt.inequality_dual_start.resize(0);
+      audited_opt.slack_start.resize(0);
+      audited_opt.primal_feasible_start = false;
+      audited_opt.preserve_initial_point = false;
+    }
+  }
+
   NLPModel reduced_prob;
   std::shared_ptr<FixedNLPMap> fixed_map;
   if (build_fixed_nlp_reduction(prob, reduced_prob, fixed_map)) {
-    NativeIPMAdapter reduced_solver(opt_);
+    IPMOptions reduced_opt = audited_opt;
+    if (audited_opt.central_warm_start) {
+      Eigen::VectorXd reduced_inequality_dual;
+      Eigen::VectorXd reduced_slack;
+      const bool mapped = map_fixed_reduction_inequality_vector(
+          prob, reduced_prob, *fixed_map,
+          audited_opt.inequality_dual_start, reduced_inequality_dual) &&
+          map_fixed_reduction_inequality_vector(
+              prob, reduced_prob, *fixed_map, audited_opt.slack_start,
+              reduced_slack);
+      if (mapped) {
+        reduced_opt.inequality_dual_start =
+            std::move(reduced_inequality_dual);
+        reduced_opt.slack_start = std::move(reduced_slack);
+      } else {
+        reduced_opt.central_warm_start = false;
+        reduced_opt.preserve_initial_point = false;
+        reduced_opt.equality_dual_start.resize(0);
+        reduced_opt.inequality_dual_start.resize(0);
+        reduced_opt.slack_start.resize(0);
+      }
+    }
+    NativeIPMAdapter reduced_solver(reduced_opt);
     auto reduced_result = reduced_solver.solve_nlp_detail(reduced_prob);
     out = std::move(reduced_result.first);
     detail = std::move(reduced_result.second);
@@ -4970,6 +5201,26 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
     detail.primal_feasible_start_accepted =
         primal_feasible_start_accepted &&
         detail.primal_feasible_start_accepted;
+    detail.central_warm_start_requested = opt_.central_warm_start;
+    detail.central_warm_start_accepted = central_audit.accepted &&
+        reduced_opt.central_warm_start && detail.central_warm_start_accepted;
+    detail.central_warm_start_original_primal_violation =
+        central_audit.original_primal_violation;
+    detail.central_warm_start_primal_residual = central_audit.primal_residual;
+    detail.central_warm_start_dual_residual = central_audit.dual_residual;
+    detail.central_warm_start_centrality = central_audit.centrality;
+    detail.central_warm_start_mu = central_audit.mu;
+    detail.central_warm_start_max_inequality_dual =
+        central_audit.max_inequality_dual;
+    if (!detail.central_warm_start_accepted) {
+      if (!central_audit.rejection_reason.empty()) {
+        detail.central_warm_start_rejection_reason =
+            central_audit.rejection_reason;
+      } else if (!reduced_opt.central_warm_start) {
+        detail.central_warm_start_rejection_reason =
+            "fixed-variable warm-vector mapping failed";
+      }
+    }
     detail.original_dimension = static_cast<int>(prob.vars.size());
     detail.reduced_dimension =
         static_cast<int>(fixed_map->reduced_to_original.size());
@@ -4993,9 +5244,7 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
     ScalingFactors sf;
     const NLPModel* active_prob = &prob;
     NLPModel scaled_prob;
-    IPMOptions active_opt = opt_;
-    active_opt.primal_feasible_start = primal_feasible_start_accepted;
-    active_opt.preserve_initial_point = preserve_initial_point_accepted;
+    IPMOptions active_opt = audited_opt;
     if (primal_feasible_start_accepted) {
       active_opt.least_square_init_duals = true;
     }
@@ -5008,7 +5257,9 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
       Eigen::VectorXd x0_interior = (prob.x0.size() == n_f)
                                         ? prob.x0
                                         : Eigen::VectorXd::Zero(n_f);
-      interiorize_initial_point(prob.vars, x0_interior);
+      if (!central_audit.accepted) {
+        interiorize_initial_point(prob.vars, x0_interior);
+      }
       sf = compute_scaling_factors(prob, x0_interior, scaling_target);
       scaled_prob = build_scaled_nlp_model(prob, sf);
       active_prob = &scaled_prob;
@@ -5570,6 +5821,13 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
         solve_chain_trial_rejections_before_derivatives +
         std::max(0, fo.trial_rejections_before_derivatives -
                         selected_base_trial_rejections_before_derivatives);
+    detail.first_step_accepted = fo.first_step_accepted;
+    detail.first_step_primal_alpha = fo.first_step_primal_alpha;
+    detail.first_step_dual_alpha = fo.first_step_dual_alpha;
+    detail.first_step_barrier_objective_before =
+        fo.first_step_barrier_objective_before;
+    detail.first_step_barrier_objective_after =
+        fo.first_step_barrier_objective_after;
     if (opt_.verbose) {
       std::cerr << "[NativeIPM] factorization breakdown: total_kkt="
                 << detail.numeric_factorizations << ", primary="

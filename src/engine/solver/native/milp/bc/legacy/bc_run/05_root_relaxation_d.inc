@@ -1364,6 +1364,8 @@
       opt.verbose || bc_env_options().value("MIPSOLVERS_BC_CONF") != nullptr ||
       bc_env_options().value("MIPSOLVERS_BC_TIMELINE") != nullptr;
 
+	  Eigen::VectorXd pending_highs_root_primal;
+	  Eigen::VectorXd pending_highs_root_primal_original;
 	  bool strict_highs_evaluate_root_imported = false;
 	  const bool strict_highs_evaluate_root_enabled =
 	      strict_highs_root_fixed_point &&
@@ -1376,6 +1378,16 @@
 	    highs_root_owner->setOptionValue("output_flag", false);
 	    highs_root_owner->setOptionValue("log_to_console", false);
 	    highs_root_owner->setOptionValue("mip_rel_gap", opt.gap_tol);
+	    // Compositional root ownership requires the owner's final root
+	    // coordinates to stay isomorphic to native's fixed working columns.
+	    // Every root re-presolve is gated on mip_allow_restart
+	    // (HighsMipSolverData::evaluateRootNode restart sites), so disabling
+	    // it pins the preflight coordinate system by construction; the
+	    // incompatible-columns branch below is then a genuine invariant
+	    // violation. Scope cut (represolve-based restart strength) and sweep
+	    // evidence: docs/native_milp_root_quality_restart_prerequisites_
+	    // 2026-08-13.md, "Strict-Root Coordinate Pinning".
+	    highs_root_owner->setOptionValue("mip_allow_restart", false);
 	    bool strict_highs_eval_ok =
 	        bc_pass_mip_model_to_highs(*highs_root_owner,
 	                                   strict_highs_original_entry_lp, nullptr,
@@ -1633,14 +1645,46 @@
 	                 static_cast<int>(final_highs_lp.num_col_),
 	                 static_cast<int>(final_highs_lp.a_matrix_.numNz()),
 	                 final_highs_lp.offset_);
-	      auto final_round = root_highs_final_state_round(
-	          highs_root_owner, final_lprelax, final_root_lp);
-	      if (final_round) {
+	      const bool compatible_working_columns =
+	          static_cast<int>(final_highs_lp.num_col_) == n;
+	      if (!compatible_working_columns) {
+	        // HiGHS root restarts may represolve into a different coordinate
+	        // system. Native domain/tree state is fixed at n columns, so import
+	        // is transactional and rolls back before any oracle state commits.
+	        // Achterberg (2007), Sec. 10.1; derivation and p200 mismatch in
+	        // docs/native_milp_root_quality_restart_prerequisites_2026-08-13.md.
+	        strict_highs_eval_error = fmt::format(
+	            "incompatible_root_columns_{}_native_{}",
+	            static_cast<int>(final_highs_lp.num_col_), n);
+	        out.stats.status = bc_status::kHighsPresolvedWorkingLpMismatch;
+	        return return_with_profile();
+	      } else if (auto final_round = root_highs_final_state_round(
+	                     highs_root_owner, final_lprelax, final_root_lp)) {
 	        root_xpool_authority_highs_owner = highs_root_owner;
 	        const bool imported = import_root_highs_oracle_state(
 	            *final_round, final_root_lp, root.lb, root.ub);
 	        strict_highs_evaluate_root_imported = imported;
-	        if (!imported) strict_highs_eval_error = "state_import_failed";
+	        if (!imported) {
+	          strict_highs_eval_error = "state_import_failed";
+	        } else {
+	          const HighsSolution& root_solution = highs_root_owner->getSolution();
+	          if (root_solution.value_valid &&
+	              static_cast<int>(root_solution.col_value.size()) == orig_n) {
+	            Eigen::Map<const Eigen::VectorXd> original_root_primal(
+	                root_solution.col_value.data(), orig_n);
+	            // HiGHS::run() exposes the incumbent after postsolve. The exact
+	            // inverse affine map and native audit are specified in
+	            // docs/native_milp_root_quality_restart_prerequisites_2026-08-13.md,
+	            // "Coupled HiGHS Root-Primal Ownership".
+	            pending_highs_root_primal = highs_presolve_forward_map(
+	                highs_presolve_side_state, orig_n, original_root_primal);
+	            if (pending_highs_root_primal.size() != n) {
+	              pending_highs_root_primal.resize(0);
+	            } else {
+	              pending_highs_root_primal_original = original_root_primal;
+	            }
+	          }
+	        }
 	      } else {
 	        strict_highs_eval_error = "final_state_incomplete";
 	      }
@@ -1685,9 +1729,15 @@
 
 	  const bool run_highs_style_root_source_loop =
 	      !strict_highs_root_fixed_point &&
-	      opt.auto_highs_root_pipeline && opt.cuts != CutType::None &&
+	      opt.cuts != CutType::None &&
           root_highs_presolved_side_state_first_class &&
-	      root_implied_integer_count > 0 && std::isfinite(root.bound);
+	      // Achterberg (2007), Secs. 4.1-4.2; derivation in
+	      // docs/native_milp_root_source_eligibility_2026-08-13.md.
+	      highs_style_root_source_eligible(
+	          static_cast<int>(std::count(declared_branchable_cols.begin(),
+	                                      declared_branchable_cols.end(), 1)),
+	                                      root_implied_integer_count,
+	                                      root.bound);
       if (!run_highs_style_root_source_loop && opt.auto_highs_root_pipeline &&
           opt.cuts != CutType::None && strict_highs_root_fixed_point &&
           root_highs_presolved_side_state_first_class &&
@@ -1767,6 +1817,10 @@
         };
 
 		        for (int source_round = 0;;) {
+          // Anytime root separation stops between valid LP fixed-point rounds;
+          // budget derivation in
+          // docs/native_milp_root_source_eligibility_2026-08-13.md.
+          if (bc_optional_root_budget_expired()) break;
           if (!(root.bound < root_separation_optimality_limit())) {
             break;
           }
@@ -2118,8 +2172,14 @@
 	  if (!strict_highs_lp_contract &&
       heuristic_x_orig.size() > 0 && std::isfinite(heuristic_obj) &&
 	      std::isfinite(root.bound)) {
+    const double presolve_objective_offset =
+        highs_mip_model_reduced
+            ? highs_mip_ps.objective_offset
+            : (papilo_model_reduced ? papilo_ps.objective_offset : 0.0);
+    const double heuristic_obj_in_root_space = presolved_objective_value(
+        heuristic_obj, presolve_objective_offset);
     const double heuristic_gap =
-        std::max(0.0, (heuristic_obj - root.bound) /
+        std::max(0.0, (heuristic_obj_in_root_space - root.bound) /
                            std::max(1.0, std::abs(heuristic_obj)));
     if (!opt.require_tree_exhaustion_certificate &&
         heuristic_gap <= opt.gap_tol) {
@@ -2139,8 +2199,13 @@
       out.stats.status = bc_status::kOptimalRootGapClosed;
 
       out.bc_stats.runtime_sec = runtime;
-      out.bc_stats.best_bound = root.bound;
-      out.bc_stats.best_obj = heuristic_obj;
+      const double root_bound_in_original_space =
+          root.bound + presolve_objective_offset;
+      out.bc_stats.best_bound =
+          base_lp.sense == Sense::Minimize
+              ? root_bound_in_original_space
+              : -root_bound_in_original_space;
+      out.bc_stats.best_obj = out.stats.objective;
       out.bc_stats.gap = heuristic_gap;
       out.bc_stats.status = out.stats.status;
 
@@ -2291,28 +2356,93 @@
     root_cut_skip_reason = "root_objective_cutoff_domain";
   }
 
-  // Precompute LP column lock counts.
-  // uplocks[j]  = number of constraints in which x_j appears with a positive
-  //               coefficient (i.e. raising x_j tightens the row).
-  // downlocks[j] = number of constraints where x_j has a negative coefficient.
-  // Computed from the inequality block (A) and equality block (Aeq) of base_lp.
-  // Only computed when the flag is active; otherwise both vectors stay empty.
+  // Precompute LP column lock counts.  For l <= a*x <= u, a finite upper
+  // side contributes an up-lock for a_j>0 and a down-lock for a_j<0; a finite
+  // lower side contributes the opposite locks.  Thus every nonzero equality
+  // coefficient contributes in both directions.
+  // Achterberg (2007), Sec. 9.2; HiGHS HighsMipSolverData::setup; derivation
+  // in docs/native_milp_root_quality_restart_prerequisites_2026-08-13.md.
   std::vector<int> uplocks(n, 0), downlocks(n, 0);
   if (opt.use_lock_count_rounding || opt.use_linesearch_rounding) {
-    auto accumulate_locks = [&](const Eigen::SparseMatrix<double>& M) {
-      for (int k = 0; k < M.outerSize(); ++k) {
-        for (Eigen::SparseMatrix<double>::InnerIterator it(M, k); it; ++it) {
-          const int j = static_cast<int>(it.col());
-          if (j < n) {
-            if (it.value() > 0.0) ++uplocks[j];
-            else if (it.value() < 0.0) ++downlocks[j];
-          }
+    const LPModel& lock_lp = root_lp;
+    for (int k = 0; k < lock_lp.A.outerSize(); ++k) {
+      for (Eigen::SparseMatrix<double>::InnerIterator it(lock_lp.A, k); it; ++it) {
+        const int j = static_cast<int>(it.col());
+        const int r = static_cast<int>(it.row());
+        if (j < 0 || j >= n || r < 0 || r >= lock_lp.A.rows()) continue;
+        const double a = it.value();
+        if (std::isfinite(lock_lp.b[r])) {
+          if (a > 0.0) ++uplocks[j];
+          else if (a < 0.0) ++downlocks[j];
+        }
+        const double lhs = lp_row_lhs_or_neg_inf(lock_lp, r);
+        if (std::isfinite(lhs)) {
+          if (a > 0.0) ++downlocks[j];
+          else if (a < 0.0) ++uplocks[j];
         }
       }
-    };
-    accumulate_locks(base_lp.A);
-    accumulate_locks(base_lp.Aeq);
+    }
+    for (int k = 0; k < lock_lp.Aeq.outerSize(); ++k) {
+      for (Eigen::SparseMatrix<double>::InnerIterator it(lock_lp.Aeq, k); it; ++it) {
+        const int j = static_cast<int>(it.col());
+        if (j < 0 || j >= n || it.value() == 0.0) continue;
+        ++uplocks[j];
+        ++downlocks[j];
+      }
+    }
+    if (bc_env_flag_enabled("MIPSOLVERS_ROOT_LOCK_TRACE")) {
+      for (int j = 0; j < n; ++j) {
+        if (!is_integer_type(lock_lp.vars[static_cast<std::size_t>(j)])) {
+          continue;
+        }
+        fmt::print(stderr,
+                   "[NATIVE-ROOT-LOCK] col={} up={} down={}\n", j,
+                   uplocks[j], downlocks[j]);
+      }
+    }
   }
+
+  // Fix high-impact integers first, then use a stable hash/index tie break.
+  // This is the HiGHS setupIntCols order used by tryRoundedPoint's sequential
+  // propagation projection. Achterberg (2007), Secs. 3.1 and 9.2; derivation
+  // in docs/native_milp_root_quality_restart_prerequisites_2026-08-13.md.
+  std::vector<int> repair_integer_order;
+  repair_integer_order.reserve(static_cast<std::size_t>(n));
+  for (int j = 0; j < n; ++j) {
+    if (is_integer_type(root_lp.vars[static_cast<std::size_t>(j)])) {
+      repair_integer_order.push_back(j);
+    }
+  }
+  constexpr double kRepairOrderFeasTol = 1e-6;
+  std::sort(repair_integer_order.begin(), repair_integer_order.end(),
+            [&](const int lhs, const int rhs) {
+    const double lhs_lock_score =
+        (kRepairOrderFeasTol + static_cast<double>(uplocks[lhs])) *
+        (kRepairOrderFeasTol + static_cast<double>(downlocks[lhs]));
+    const double rhs_lock_score =
+        (kRepairOrderFeasTol + static_cast<double>(uplocks[rhs])) *
+        (kRepairOrderFeasTol + static_cast<double>(downlocks[rhs]));
+    if (lhs_lock_score != rhs_lock_score) {
+      return lhs_lock_score > rhs_lock_score;
+    }
+
+    const auto literal_degree = [&](const int col, const bool value_one) {
+      const auto range = clique_table.literal_neighbours(col, value_one);
+      return range.first == nullptr
+                 ? 0
+                 : static_cast<int>(range.second - range.first);
+    };
+    const double lhs_clique_score =
+        (kRepairOrderFeasTol + literal_degree(lhs, true)) *
+        (kRepairOrderFeasTol + literal_degree(lhs, false));
+    const double rhs_clique_score =
+        (kRepairOrderFeasTol + literal_degree(rhs, true)) *
+        (kRepairOrderFeasTol + literal_degree(rhs, false));
+    return std::make_tuple(lhs_clique_score,
+                           HighsHashHelpers::hash(uint64_t(lhs)), lhs) >
+           std::make_tuple(rhs_clique_score,
+                           HighsHashHelpers::hash(uint64_t(rhs)), rhs);
+  });
 
   // On very large, already-near-integral roots, full cut separation is often
   // dominated by scanning overhead and rarely changes the solve path.

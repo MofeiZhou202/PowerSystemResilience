@@ -518,12 +518,15 @@
               ++extracted_vb_rows;
             }
           }
-	          // Strict root fixed-point keeps transformed rows in this HiGHS-style
-	          // private pool until the root separation loop has finished.  Copying
-	          // them into the native global pool here creates a second lifecycle
-	          // for the same row (available vs LP-owned age), which HiGHS does not
-	          // have.  Non-strict/native modes keep the legacy live propagation path.
-		          if (!strict_highs_root_fixed_point) {
+		          // HiGHS HighsCutPool::separate and HighsLpRelaxation::addCuts;
+		          // ownership derivation in
+		          // docs/native_milp_cutpool_proof_ownership_2026-08-13.md.
+		          // The automatic HiGHS-style pipeline also uses this private pool even
+		          // when the full strict contract is disabled.  Tree-global ownership
+		          // starts only after successful root-LP admission.
+		          if (!highs_style_cutpool_candidate_stays_root_owned(
+		                  strict_highs_root_fixed_point,
+		                  opt.auto_highs_root_pipeline)) {
 		            bool new_domain_source = false;
 		            if (cut_pool.add(row.coeff, row.rhs, /*domain_only=*/true,
 		                             &new_domain_source)) {
@@ -2302,8 +2305,7 @@
           return 0;
         }
 		    const Eigen::VectorXd& source_x = root_source_solution();
-		    if (!root_relax.simplex || source_x.size() != n ||
-		        root_implied_integer_count <= 0) {
+		    if (!root_relax.simplex || source_x.size() != n) {
           root_source_trace.tableau_ms +=
               root_source_elapsed_ms(t_tableau0);
 	      return 0;
@@ -2314,11 +2316,6 @@
 	    }
 	    SimplexResult tableau_simplex = *root_relax.simplex;
 	    const int implied_marked = mark_implied_integer_simplex(tableau_simplex);
-	    if (implied_marked == 0) {
-          root_source_trace.tableau_ms +=
-              root_source_elapsed_ms(t_tableau0);
-          return 0;
-        }
 	    const bool large_transformed_source_root =
 	        presolved_m > opt.cut_budget_large_row_threshold;
 	    const int max_tableau_cuts = strict_highs_root_fixed_point

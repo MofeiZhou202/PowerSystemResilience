@@ -47,6 +47,7 @@
 #include "mipsolvers/engine/problem_types.hpp"
 #include "mipsolvers/engine/solver/external/adapters.hpp"
 #include "mipsolvers/engine/solver/native/lp/pdlp_solver.hpp"
+#include "mipsolvers/engine/solver/native/native_lp_selector.hpp"
 #include "../src/engine/kernel/lp_kernel/native_dual_core.hpp"
 
 #ifdef HACDCPF_HAVE_SCIP_LIB
@@ -684,6 +685,10 @@ RunResult run_adapter(const CaseInfo& kase, const std::string& solver,
                        ? "Native-IPM[centrality-step](+HiGHS-presolve)"
                        : "Native-IPM[legacy-step](+HiGHS-presolve)";
     }
+  } else if (solver == "native-auto") {
+    eng::NativeAutoLPAdapter adapter(cfg.time_limit_sec);
+    result = adapter.solve_lp(kase.lp);
+    row.solver = "Native-Auto[selector]";
   } else if (solver == "native-pdlp") {
     eng::PDLPOptions opt;
     opt.max_iter = cfg.max_iterations;

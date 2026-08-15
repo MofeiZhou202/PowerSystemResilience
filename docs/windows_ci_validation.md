@@ -18,17 +18,17 @@ The regression surface is the shared execution path used by these tests:
 - `test_scuc_module`
 - `test_market_simulation`
 
-The two concrete Windows-specific failures were:
+The concrete Windows-specific failures were:
 
 1. External solver subprocess redirection hardcoded to `/dev/null`.
 2. Debug JSON export in `test_market_simulation.cpp` hardcoded to `/tmp`.
 3. Empty sparse systems reaching Eigen SparseLU and dividing by zero in
-  `SparseLU_Memory.h`.
+   `SparseLU_Memory.h`.
 
 Windows does not provide either path. The expected fixed behavior is:
 
 - subprocess output is redirected to `NUL` on Windows;
-- temporary debug JSON is written via `std::filesystem::temp_directory_path()`.
+- temporary debug JSON is written via `std::filesystem::temp_directory_path()`;
 - empty `0x0` sparse systems are short-circuited before calling Eigen or
   SuiteSparse backends.
 

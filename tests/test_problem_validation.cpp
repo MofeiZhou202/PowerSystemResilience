@@ -2,6 +2,8 @@
 /// Tests for the engine problem validation functions.
 #include <catch2/catch_test_macros.hpp>
 
+#include <limits>
+
 #include "mipsolvers/engine/util/problem_validation.hpp"
 #include "mipsolvers/engine/problem_types.hpp"
 
@@ -105,6 +107,21 @@ TEST_CASE("validate QPModel: Hessian shape mismatch yields error", "[validation]
 
   auto rep = validate(qp);
   CHECK_FALSE(rep.valid);
+}
+
+TEST_CASE("validate QPModel: warm start is empty or complete and finite",
+          "[validation][qp][warm-start]") {
+  QPModel qp;
+  qp.c = Eigen::VectorXd::Ones(2);
+  qp.vars = {{VarType::Continuous, 0.0, 10.0},
+             {VarType::Continuous, 0.0, 10.0}};
+  qp.x0 = Eigen::VectorXd::Zero(2);
+  CHECK(validate(qp).valid);
+  qp.x0 = Eigen::VectorXd::Zero(1);
+  CHECK_FALSE(validate(qp).valid);
+  qp.x0.resize(2);
+  qp.x0 << 0.0, std::numeric_limits<double>::quiet_NaN();
+  CHECK_FALSE(validate(qp).valid);
 }
 
 // ─── MIPModel validation ──────────────────────────────────────────────────────

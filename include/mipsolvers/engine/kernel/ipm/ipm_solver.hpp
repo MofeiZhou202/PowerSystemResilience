@@ -92,6 +92,16 @@ struct IPMOptions {
   // audits the original-coordinate primal tolerance before honoring it.
   bool preserve_initial_point{false};
 
+  // A complete external primal-dual state may bypass cold interiorization
+  // only after an original-coordinate feasibility and centrality audit.
+  // Nonpositive tolerances derive from the corresponding caller KKT
+  // tolerance. A nonpositive multiplier limit disables the optional exposed
+  // magnitude policy; finiteness and positivity are always required.
+  bool central_warm_start{false};
+  double central_warm_start_primal_tolerance{0.0};
+  double central_warm_start_centrality_tolerance{0.0};
+  double central_warm_start_max_inequality_dual{0.0};
+
   // Cold-start equality multipliers from
   //   min_lambda ||grad f + Jh^T mu + Jg^T lambda||_2.
   // The candidate is used only when it improves stationarity by more than its
@@ -191,6 +201,20 @@ struct IPMDetail {
   int trial_rejections_before_derivatives{0};
   bool primal_feasible_start_requested{false};
   bool primal_feasible_start_accepted{false};
+  bool central_warm_start_requested{false};
+  bool central_warm_start_accepted{false};
+  double central_warm_start_original_primal_violation{0.0};
+  double central_warm_start_primal_residual{0.0};
+  double central_warm_start_dual_residual{0.0};
+  double central_warm_start_centrality{0.0};
+  double central_warm_start_mu{0.0};
+  double central_warm_start_max_inequality_dual{0.0};
+  std::string central_warm_start_rejection_reason;
+  bool first_step_accepted{false};
+  double first_step_primal_alpha{0.0};
+  double first_step_dual_alpha{0.0};
+  double first_step_barrier_objective_before{0.0};
+  double first_step_barrier_objective_after{0.0};
   bool restoration_warm_start_used{false};
   double restoration_normal_residual_before{0.0};
   double restoration_normal_residual_after{0.0};

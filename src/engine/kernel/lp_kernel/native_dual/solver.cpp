@@ -37,6 +37,11 @@ Result empty_result(Status status, std::string message,
 
 bool wall_time_hit(const SimplexOptions& options,
                    const std::chrono::steady_clock::time_point& start) {
+  if (options.cancel_flag != nullptr &&
+      options.cancel_flag->load(std::memory_order_relaxed)) {
+    if (options.time_limit_hit != nullptr) *options.time_limit_hit = true;
+    return true;
+  }
   if (options.time_limit_hit != nullptr && *options.time_limit_hit) return true;
   if (options.time_limit_sec <= 0.0) return false;
   const double elapsed =
@@ -1050,8 +1055,31 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
       }
     }
     const double _t_ca = g_ds_profile.enabled ? ds_clock() : 0.0;
-    detail::record_cycle_arrival(state, statistics);
+    const bool cycle_detected = detail::record_cycle_arrival(state, statistics);
     if (g_ds_profile.enabled) g_ds_profile.cycle += ds_clock() - _t_ca;
+    // Bland's-rule anti-cycling trigger. record_cycle_arrival reports an EXACT
+    // basis repeat (a genuine cycle), which -- unlike the working objective --
+    // is not masked by the ~1e-6 objective jitter of a numerical limit cycle.
+    // A hysteretic run length climbs on repeats and drains on fresh bases: once
+    // it exceeds max(50, m/2) the taboo heuristic has demonstrably failed to
+    // break the cycle, so engage smallest-index CHUZR/CHUZC (Bland 1977), which
+    // produces a non-repeating basis sequence and hence finite termination.
+    // Bland stays on until enough fresh bases drain the counter back to zero.
+    {
+      const int bland_threshold = std::max(50, state.m / 2);
+      if (cycle_detected) {
+        if (state.bland_stall_counter < 2 * bland_threshold) {
+          ++state.bland_stall_counter;
+        }
+        if (state.bland_stall_counter >= bland_threshold) {
+          state.bland_active = true;
+        }
+      } else if (state.bland_stall_counter > 0) {
+        if (--state.bland_stall_counter == 0) {
+          state.bland_active = false;
+        }
+      }
+    }
     if (state.edge_weight_mode == detail::EdgeWeightMode::Devex) {
       ++state.devex_iterations;
       if (restart_devex) {
@@ -1271,7 +1299,74 @@ Result run_phase(State& state, Statistics& statistics,
                 solve_tick_before,
             state.factor->profiled_indexed_solve_count() - solve_count_before);
       }
-      if (outcome.kind == MinorKind::CycleBlocked) continue;
+      // Anti-degeneracy re-perturbation. Bland's rule has saturated (the stall
+      // counter is pinned at its 2*threshold cap) yet the cycle persists, which
+      // means the active startup cost perturbation cancels across the cycling
+      // basis (reduced costs ~1e-8). Replace it with a fresh, differently
+      // seeded and escalated perturbation (Wolfe 1963 / Gill et al. EXPAND
+      // 1989) and force a rebuild. Capped so a pathological instance still
+      // terminates at the ordinary iteration limit rather than looping forever.
+      constexpr int kMaxReperturbations = 12;
+      if (state.bland_active &&
+          state.bland_stall_counter >= 2 * std::max(50, state.m / 2) &&
+          state.reperturbation_count < kMaxReperturbations &&
+          state.phase == Phase::Two) {
+        ++state.reperturbation_count;
+        if (!detail::reperturb_stabilized_cost(
+                state, state.reperturbation_count, statistics, failure)) {
+          return detail::make_result(state, Status::NumericalFailure,
+                                     std::move(failure), statistics);
+        }
+        state.bland_active = false;
+        state.bland_stall_counter = 0;
+        rebuild_reason = detail::RebuildReason::NumericalTrouble;
+        break;
+      }
+      if (outcome.kind == MinorKind::CycleBlocked) {
+        // An all-candidates-taboo minor iteration made no progress; count it
+        // toward the same hysteretic Bland's-rule trigger as a detected cycle.
+        const int bland_threshold = std::max(50, state.m / 2);
+        if (state.bland_stall_counter < 2 * bland_threshold) {
+          ++state.bland_stall_counter;
+        }
+        if (state.bland_stall_counter >= bland_threshold) {
+          state.bland_active = true;
+        }
+        // Anti-cycling exhaustion guard. Once Bland's rule is engaged, every
+        // re-perturbation has been spent, and the stall counter is pinned at
+        // its 2*threshold cap, no escape mechanism remains: a CycleBlocked minor
+        // iteration leaves the iterate unchanged (choose_leaving_bland re-picks
+        // the same smallest-index row and the ratio test re-fails identically),
+        // so the loop would otherwise spin on that iterate until the wall-clock
+        // deadline — measured on MIPLIB3 blend2 as 9.8e6 no-progress minor
+        // iterations against 21 pivots (12 s) inside a single node LP. The
+        // CycleBlocked `continue` never reaches the top-of-loop max_iter test,
+        // which is why the kMaxReperturbations cap ("terminate at the ordinary
+        // iteration limit rather than looping forever") is otherwise defeated.
+        // Terminate here with the same certified interrupted dual bound the
+        // iteration-limit path returns; by weak duality it bounds the LP optimum
+        // even though the basis is not optimal. Normal solves resolve their
+        // cycle before exhaustion and never reach this state, so their pivot
+        // paths and iteration counts are unchanged.
+        if (state.phase == Phase::Two && state.bland_active &&
+            state.reperturbation_count >= kMaxReperturbations &&
+            state.bland_stall_counter >= 2 * bland_threshold) {
+          std::ostringstream message;
+          message << "dual simplex anti-cycling exhausted"
+                  << " (iterations=" << statistics.iterations
+                  << ", reperturbations=" << state.reperturbation_count
+                  << ", cycles=" << statistics.cycles_detected
+                  << ", taboo_rows=" << statistics.taboo_rows
+                  << ", stability_blocked_rows="
+                  << statistics.stability_blocked_rows << ')';
+          const bool bound_certified = certify_interrupted_dual_bound(state);
+          Result result = detail::make_result(
+              state, Status::IterationLimit, message.str(), statistics);
+          result.dual_bound_certified = bound_certified;
+          return result;
+        }
+        continue;
+      }
       if (outcome.kind == MinorKind::Pivoted) {
         first_fresh_numerical_failure.clear();
         if (state.phase == Phase::DualOne &&

@@ -2542,6 +2542,13 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
 
   int normal_tiny_step_streak = 0;
   for (int iter = 0; iter < max_iter; ++iter) {
+    if (opt_.cancel_flag != nullptr &&
+        opt_.cancel_flag->load(std::memory_order_relaxed)) {
+      out.stats.success = false;
+      out.stats.iterations = iter;
+      out.stats.status = "Cancelled";
+      break;
+    }
     if (effective_time_limit > 0.0 && std::isfinite(effective_time_limit)) {
       const double elapsed =
           std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)

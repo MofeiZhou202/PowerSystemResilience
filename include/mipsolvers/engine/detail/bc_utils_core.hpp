@@ -892,7 +892,16 @@ class NodeQueue {
                     !std::isfinite(cert.source_conflict_literal.value) ||
                     !cert.has_proof_activity_audit ||
                     !std::isfinite(cert.proof_activity_margin) ||
-                    cert.proof_activity_margin < -1e-8) {
+                    // SOUNDNESS: a bound-lifting certificate is a valid global
+                    // infeasibility statement only if the forbidden literal
+                    // makes the source row's min-activity exceed its rhs by MORE
+                    // than the node feasibility tolerance. A knife-edge margin
+                    // (<= kNodeFeasibilityTol) is within LP feasibility noise, so
+                    // the "violated" point is feasible by the solver's own
+                    // tolerance and the certificate can wrongly exclude an
+                    // LP-feasible optimum (MIPLIB3 gen). See
+                    // /memories/repo/mipsolvers-objcutoff-soundness-bug.md.
+                    !(cert.proof_activity_margin > kNodeFeasibilityTol)) {
                     return false;
                 }
                 const bool source_excludes_target =

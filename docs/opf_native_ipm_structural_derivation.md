@@ -432,7 +432,44 @@ dual:   1.63e-1 -> 3.29e1
 性能。两项实验均已撤销。正确的局部门必须识别 normal/tangential step 与
 barrier 切换事件，不能对所有局部 Filter 候选套同一个分量单调门。
 
-### 8.4 保留的负结果
+### 8.4 Phase-I 到 Phase-II 的 central warm-start 合同
+
+`IPMOptions::central_warm_start` 与最终可行的
+`primal_feasible_start` 是两个不同合同。前者允许 Phase I 在有限预算内只进入
+中心邻域，但必须同时提供完整的 $x,s,\lambda,z$，并在任何 KKT 分解前通过
+
+$$
+\max\{\|g(x)\|_\infty,\|h(x)+s\|_\infty\}\le\epsilon_p,
+\qquad
+\max_i\left|\frac{s_i z_i}{\mu_0}-1\right|\le\eta_c.
+$$
+
+实现从提交的逐行互补乘积恢复
+$\mu_0=\operatorname{mean}_i(s_i z_i)$，而不覆盖为固定障碍参数。
+$\epsilon_p$ 由调用者显式给出；非正值回退到同一求解合同的
+`tol_primal`。$\eta_c$ 也可显式给出；非正值按
+$\eta_c=\epsilon_c/\mu_0$ 从 `tol_complementarity` 推导。原坐标 callback
+给出的约束违反量和变量 bounds 还要分别通过 $\epsilon_p$。完整 dual residual
+$\|\nabla f+J_g^T\lambda+J_h^Tz\|_\infty$ 被记录但不作为门槛，因为 OPF
+Phase I 有意保留控制空间 reduced gradient 给 Phase II。
+
+乘子幅值不设隐藏上限。只有调用者给出正的
+`central_warm_start_max_inequality_dual` 时，才把它作为显式策略检查
+$\|z\|_\infty$；默认非正值禁用该策略。任一检查失败时，全部 warm vectors
+一起丢弃并进入普通 interiorization；不会部分消费 Phase-I 状态。
+
+固定变量消元保持非线性行不变，并从 lower-bound、upper-bound 两块中删去固定
+列对应行后再递归审计。这样原模型 warm-vector 维度不会在约化 NLP 中静默失配，
+递归诊断也回传到原坐标结果。审计仅需一次模型/导数评估和稀疏矩阵乘法，成本
+$O(n+m+\operatorname{nnz}J)$，不增加 KKT 分解。
+
+该合同沿用 Wächter--Biegler (2006) 第 2--3 节的 filter/barrier 邻域口径；
+近期 warm-start 研究脉络参见 Chen--Goulart--Jones (2025,
+arXiv:2512.00693)、WARP (2026, arXiv:2605.05728) 与
+Taheri--Molzahn (2026, arXiv:2606.08984)。这些工作支持把 Phase I 视为有预算的
+邻域构造器，而不是复制一遍高精度 IPM。
+
+### 8.5 保留的负结果
 
 未缩放 `mu_init` 的诊断轨迹曾把 hybrid2000 推进到缩放坐标
 `(p,d,c)=(6.31e-7,2.09e-1,2.83e-3)` 后，MUMPS 报告目标惯性且
@@ -443,3 +480,25 @@ barrier 切换事件，不能对所有局部 Filter 候选套同一个分量单�
 结论是直接惯性计数、常规后向残差和事后 tangent 投影仍不足以构造可靠下降
 方向；下一实现应在 state/control 分区上直接解约化系统或切换到能提供更强
 数值证书的因子后端，不能翻转方向、放宽 filter 或反复增大统一正则化。
+
+## 9. 线性约束 QP 的 primal 结构初值合同
+
+`QPModel::x0` 是与上述 NLP central warm start 分离的轻量合同。NativeLCQP
+只在 `x0.size()==n` 且全部有限时消费；否则使用完全相同的确定性盒中心冷
+初始化。消费前先按有限变量界投影，再用 Ruiz 列尺度映射
+$x_s=D^{-1}x_0$。对一般不等式增广出的 slack 使用
+$s_0=\max(b-Ax_0,0)$，从而保持原始变量部分不变。
+
+Warm-start bound slack 按实际距离初始化并施加 $10^{-2}$ 正下限（冷启动
+仍保留原有单位下限）：
+
+$$
+s_i^L=\max(x_i-l_i,10^{-2}),\qquad
+s_i^U=\max(u_i-x_i,10^{-2}).
+$$
+
+这使 equality-feasible 的结构点不会被人为的单位 slack residual 淹没，同时
+仍保证对数障碍有定义。`SolveStats::warm_start_used` 和
+`initial_primal_feas` 报告实际消费及第 0 次迭代残差。该合同不接受外部 dual/
+slack，不声称 central-path warm start；OPF 的连通分量配平和约化 Laplacian
+投影属于调用方，NativeLCQP 只审计、缩放并执行 QP Phase II。

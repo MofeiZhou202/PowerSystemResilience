@@ -100,20 +100,18 @@ else()
             HINTS "$ENV{INTEL_COMPILER_ROOT}"
                   "C:/Program Files (x86)/Intel/oneAPI/compiler/latest"
             PATH_SUFFIXES lib lib/intel64)
-          if(NOT _MIPSOLVERS_IPOPT_IOMP5MD)
-            message(FATAL_ERROR
-              "MIPSOLVERS_MKL_THREADING=INTEL requires libiomp5md on Windows.")
-          endif()
-          list(APPEND MIPSOLVERS_MKL_LIBRARIES
-            "${_MIPSOLVERS_IPOPT_IOMP5MD}")
           find_file(_MIPSOLVERS_IPOPT_IOMP5MD_DLL NAMES libiomp5md.dll
             HINTS "$ENV{INTEL_COMPILER_ROOT}"
                   "C:/Program Files (x86)/Intel/oneAPI/compiler/latest"
             PATH_SUFFIXES bin redist/intel64/compiler)
-          if(NOT _MIPSOLVERS_IPOPT_IOMP5MD_DLL)
+          if(NOT _MIPSOLVERS_IPOPT_IOMP5MD OR
+             NOT _MIPSOLVERS_IPOPT_IOMP5MD_DLL)
             message(FATAL_ERROR
-              "MIPSOLVERS_MKL_THREADING=INTEL requires libiomp5md.dll on Windows.")
+              "MIPSOLVERS_MKL_THREADING=INTEL requires both libiomp5md.lib "
+              "and libiomp5md.dll on Windows.")
           endif()
+          list(APPEND MIPSOLVERS_MKL_LIBRARIES
+            "${_MIPSOLVERS_IPOPT_IOMP5MD}")
           set(MIPSOLVERS_MKL_RUNTIME_DLLS
             "${_MIPSOLVERS_IPOPT_IOMP5MD_DLL}" CACHE INTERNAL
             "Runtime DLLs required by the selected oneMKL threading layer" FORCE)

@@ -84,6 +84,7 @@
 
 	      for (int j = 0; j < n; ++j) {
 	        if (!probe_domain_ready) break;
+	        if (domain_probe_budget_expired()) break;
 	        if (!is_integer_type(base_lp.vars[j])) continue;
 	        if (std::abs(root.ub[j] - root.lb[j]) < 1e-9) continue;
 	        if (root.lb[j] != 0.0 || root.ub[j] != 1.0) continue;
@@ -111,6 +112,7 @@
 	        }
 	        if (down.status == BCDomainProbeStatus::Incomplete) continue;
 	        learn_probe_implications(j, /*trigger_value_one=*/false, down.deltas);
+	        if (domain_probe_budget_expired()) break;
 
 	        const BCDomainProbeOutcome up =
 	            probe_domain.probe(j, /*value_one=*/true);
@@ -1383,8 +1385,15 @@
   }
 
   [[maybe_unused]] auto t_probe_done = std::chrono::steady_clock::now();
-  const bool root_tree_setup_budget_expired =
+  bool root_tree_setup_budget_expired =
       bc_optional_root_budget_expired();
+  auto refresh_root_tree_setup_budget = [&]() {
+    // Tree workspaces are independent optional O(nnz) stages. Recheck the
+    // anytime boundary between them; derivation and measured overrun in
+    // docs/native_milp_root_source_eligibility_2026-08-13.md.
+    root_tree_setup_budget_expired =
+        root_tree_setup_budget_expired || bc_optional_root_budget_expired();
+  };
   if (opt.verbose) {
     fmt::print(stderr, "[B&C ROOT] probing={:.1f}ms has_incumbent={} (total root={:.1f}ms)\n",
             std::chrono::duration<double, std::milli>(t_probe_done - t_dive_done).count(),
@@ -1660,12 +1669,23 @@
   // workspaces from it.
   StandardFormLP tree_base_sf;
   StandardFormLP node_sf;
+  const auto t_tree_setup_start = std::chrono::steady_clock::now();
   if (!root_tree_setup_budget_expired) {
-    tree_base_sf = build_standard_form_lp(base_lp);
-    ruiz_scale_standard_form(tree_base_sf);
+    // PersistentLPState owns the cut-free Ruiz-scaled root standard form and
+    // probing rebuilds it after its final domain changes. Reuse that exact
+    // object instead of repeating the O(nnz) conversion and scaling; see
+    // docs/native_milp_root_source_eligibility_2026-08-13.md.
+    tree_base_sf = ensure_base_sf();
     update_standard_form_bounds(tree_base_sf, base_lp, root.lb, root.ub);
     node_sf = tree_base_sf;
   }
+  if (trace_bc_timeline) {
+    fmt::print(stderr, "[B&C-TREE-SETUP] stage=standard_form ms={:.1f} expired={}\n",
+               std::chrono::duration<double, std::milli>(
+                   std::chrono::steady_clock::now() - t_tree_setup_start).count(),
+               root_tree_setup_budget_expired ? 1 : 0);
+  }
+  refresh_root_tree_setup_budget();
   // Shared node-SF workspace hygiene: process_single_child and the refresh/
   // replay paths reuse node_sf, and cuts-augmented solves replace it with a
   // locally-augmented SF.  This flag tracks that state so the next child can
@@ -1772,6 +1792,13 @@
     Aeq_row_cached = base_lp.Aeq;
     row_index_cached.build(n, A_row_cached, Aeq_row_cached);
   }
+  if (trace_bc_timeline) {
+    fmt::print(stderr, "[B&C-TREE-SETUP] stage=propagation_index total_ms={:.1f} expired={}\n",
+               std::chrono::duration<double, std::milli>(
+                   std::chrono::steady_clock::now() - t_tree_setup_start).count(),
+               root_tree_setup_budget_expired ? 1 : 0);
+  }
+  refresh_root_tree_setup_budget();
 
   // Determine early if IPM fallback will be used for node LPs.
   // When simplex has a root basis (from crossover), simplex is primary solver
@@ -1873,8 +1900,19 @@
     ipm_node_solver = std::make_unique<NativeIPMLPAdapter>(ipm_opt);
     ipm_node_solver->prepare_for_node_solves(base_lp);
   }
+  if (trace_bc_timeline) {
+    fmt::print(stderr, "[B&C-TREE-SETUP] stage=ipm_primary total_ms={:.1f} expired={}\n",
+               std::chrono::duration<double, std::milli>(
+                   std::chrono::steady_clock::now() - t_tree_setup_start).count(),
+               root_tree_setup_budget_expired ? 1 : 0);
+  }
+  refresh_root_tree_setup_budget();
 
   // IPM fallback solver: used when simplex warm-start fails at tree nodes.
+  // Keep it unprepared so ordinary successful-simplex runs do not pay the
+  // cached IPM construction cost. NativeIPMLPAdapter::solve_node_lp provides
+  // the complete deadline-limited uncached path; measured derivation in
+  // docs/native_milp_root_source_eligibility_2026-08-13.md.
   std::unique_ptr<NativeIPMLPAdapter> ipm_fallback_solver;
   if (has_ipm_fallback && !root_tree_setup_budget_expired) {
     IPMLPOptions fb_ipm_opt;
@@ -1884,8 +1922,14 @@
     fb_ipm_opt.tol_gap = 1e-6;
     fb_ipm_opt.verbose = false;
     ipm_fallback_solver = std::make_unique<NativeIPMLPAdapter>(fb_ipm_opt);
-    ipm_fallback_solver->prepare_for_node_solves(base_lp);
   }
+  if (trace_bc_timeline) {
+    fmt::print(stderr, "[B&C-TREE-SETUP] stage=ipm_fallback total_ms={:.1f} expired={}\n",
+               std::chrono::duration<double, std::milli>(
+                   std::chrono::steady_clock::now() - t_tree_setup_start).count(),
+               root_tree_setup_budget_expired ? 1 : 0);
+  }
+  refresh_root_tree_setup_budget();
 
   // IPM adapter for pool-cut / child-cut re-solves.  These re-solves only
   // need a primal solution for bound tightening (the simplex basis from the

@@ -709,6 +709,10 @@ struct SimplexOptions {
   int max_iter{2000};
   double time_limit_sec{0.0};
   bool* time_limit_hit{nullptr};
+  // Cooperative external abort polled by the wall-time checks. When set, the
+  // solve stops promptly; used by the LP portfolio to cancel the losing kernel.
+  // nullptr (default) leaves every existing pivot path bit-identical.
+  const std::atomic<bool>* cancel_flag{nullptr};
   double feasibility_tol{1e-8};
   double optimality_tol{1e-8};
   bool verbose{false};

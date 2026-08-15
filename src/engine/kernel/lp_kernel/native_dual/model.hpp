@@ -530,6 +530,20 @@ struct State {
   std::uint64_t cycle_signature_live_b{0};
   int pivot_sequence{0};
   int pricing_epoch{0};
+  // Bland's-rule anti-cycling fallback (Bland 1977, "New finite pivoting rules
+  // for the simplex method", Math. of OR 2(2):103-107). Engaged after a run of
+  // consecutive degenerate / cycle-blocked minor iterations that the taboo
+  // heuristic cannot escape; while active, CHUZR and CHUZC both select the
+  // smallest variable index, producing a strictly non-repeating basis sequence
+  // and hence finite termination. Reset by any dual-objective-improving
+  // (non-degenerate) pivot, after which steepest-edge/DSE pricing resumes.
+  bool bland_active{false};
+  int bland_stall_counter{0};
+  // Count of anti-degeneracy re-perturbations applied in this solve. When
+  // Bland's rule saturates but the cycle persists (the active cost perturbation
+  // cancels across the cycling basis), a fresh differently-seeded perturbation
+  // is applied; this counter both seeds the new pattern and caps the retries.
+  int reperturbation_count{0};
   // Lazy CHUZR heap. Each touched row gets a new version and, when infeasible,
   // a new heap entry. Stale entries are discarded when they reach the top.
   // Dense primal changes and reconstructions invalidate the whole structure.

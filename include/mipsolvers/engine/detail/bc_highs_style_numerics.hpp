@@ -51,4 +51,31 @@ double highs_style_objective_integral_scale(const LPModel& lp, double eps);
 double highs_style_incumbent_upper_limit(const LPModel& lp, double incumbent_obj,
                                          double feastol);
 
+/// Whether a finite root relaxation has integer disjunctions available to the
+/// transformed-tableau/path separation loop. Inferred integer columns augment
+/// the disjunction set; they are not a prerequisite for declared integers.
+bool highs_style_root_source_eligible(int declared_integer_cols,
+                                      int implied_integer_cols,
+                                      double root_bound);
+
+/// Convert an original internal-minimization objective into the presolved
+/// objective space used by root bounds.
+double presolved_objective_value(double original_objective,
+                                 double presolved_objective_offset);
+
+/// Transport x_target (<=/>=) coef*x_trigger+constant through retained affine
+/// maps x_i=scale_i*y_i+shift_i. Returns false for a non-invertible mapping.
+bool highs_style_map_variable_bound_to_reduced(
+    bool& is_upper, double& coef, double& constant, double target_scale,
+    double target_shift, double trigger_scale, double trigger_shift);
+
+/// Whether a transformed root cut has crossed the proof-ownership boundary
+/// required for export to tree-domain propagation.
+bool highs_style_cutpool_row_tree_owned(bool alive, bool in_root_lp);
+
+/// Whether generated transformed cuts remain private to the root cutpool
+/// until the LP-ownership test can be applied.
+bool highs_style_cutpool_candidate_stays_root_owned(
+    bool strict_highs_root_fixed_point, bool auto_highs_root_pipeline);
+
 }  // namespace mipsolvers::engine::detail

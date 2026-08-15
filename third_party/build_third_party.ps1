@@ -20,6 +20,9 @@ param(
 
     [string]$OneMklRoot = "",
 
+    [ValidateSet("SEQUENTIAL", "INTEL")]
+    [string]$MklThreading = "SEQUENTIAL",
+
     [string]$Generator = "Visual Studio 17 2022",
 
     [string]$Architecture = "x64",
@@ -51,16 +54,23 @@ if (-not [string]::IsNullOrWhiteSpace($Architecture) -and
     $Architecture -ne "x64") {
     throw "The staged static oneMKL bundle supports only the x64 architecture."
 }
-if (-not (Test-Path -LiteralPath (Join-Path $OneMklRoot "manifest.cmake") -PathType Leaf) -or
-    -not (Test-Path -LiteralPath (Join-Path $OneMklRoot "SHA256SUMS") -PathType Leaf)) {
-    throw "A staged oneMKL bundle is required at $OneMklRoot. Run third_party\stage_onemkl.ps1 first."
+if ($MklThreading -eq "INTEL" -and
+    (Test-Path -LiteralPath (Join-Path $OneMklRoot "manifest.cmake") -PathType Leaf)) {
+    throw "The staged oneMKL bundle is sequential-only. Use -MklThreading SEQUENTIAL or point -OneMklRoot at a complete local oneAPI installation without the staged manifest."
 }
 $OneMklRoot = (Resolve-Path -LiteralPath $OneMklRoot).Path
 
 $HashFile = Join-Path $OneMklRoot "SHA256SUMS"
+$BundleManifest = Join-Path $OneMklRoot "manifest.cmake"
+if ($MklThreading -eq "SEQUENTIAL" -and
+    (-not (Test-Path -LiteralPath $BundleManifest -PathType Leaf) -or
+     -not (Test-Path -LiteralPath $HashFile -PathType Leaf))) {
+    throw "A staged oneMKL bundle is required at $OneMklRoot. Run third_party\stage_onemkl.ps1 first."
+}
 $VerifiedFiles = 0
 $ExpectedFiles = @{}
-foreach ($HashLine in (Get-Content -LiteralPath $HashFile)) {
+if (Test-Path -LiteralPath $BundleManifest -PathType Leaf) {
+    foreach ($HashLine in (Get-Content -LiteralPath $HashFile)) {
     if ($HashLine -notmatch '^([0-9a-fA-F]{64})  (.+)$') {
         throw "Malformed SHA256SUMS line: $HashLine"
     }
@@ -86,18 +96,19 @@ foreach ($HashLine in (Get-Content -LiteralPath $HashFile)) {
         throw "oneMKL bundle hash mismatch: $RelativePath"
     }
     $VerifiedFiles++
-}
-if ($VerifiedFiles -eq 0) {
-    throw "SHA256SUMS contains no files."
-}
-$BundlePrefix = $OneMklRoot.TrimEnd('\') + '\'
-foreach ($BundleEntry in (Get-ChildItem -LiteralPath $OneMklRoot -Recurse -File)) {
-    if ($BundleEntry.FullName -eq $HashFile) {
-        continue
     }
-    $ActualRelativePath = $BundleEntry.FullName.Substring($BundlePrefix.Length).Replace('\', '/')
-    if (-not $ExpectedFiles.ContainsKey($ActualRelativePath)) {
-        throw "oneMKL bundle contains a file not listed in SHA256SUMS: $ActualRelativePath"
+    if ($VerifiedFiles -eq 0) {
+        throw "SHA256SUMS contains no files."
+    }
+    $BundlePrefix = $OneMklRoot.TrimEnd('\') + '\'
+    foreach ($BundleEntry in (Get-ChildItem -LiteralPath $OneMklRoot -Recurse -File)) {
+        if ($BundleEntry.FullName -eq $HashFile) {
+            continue
+        }
+        $ActualRelativePath = $BundleEntry.FullName.Substring($BundlePrefix.Length).Replace('\', '/')
+        if (-not $ExpectedFiles.ContainsKey($ActualRelativePath)) {
+            throw "oneMKL bundle contains a file not listed in SHA256SUMS: $ActualRelativePath"
+        }
     }
 }
 
@@ -121,6 +132,7 @@ $ConfigureArgs = @(
     "-DMIPSOLVERS_BUILD_LOCAL_IPOPT=ON",
     "-DMIPSOLVERS_IPOPT_LINEAR_SOLVER=pardisomkl",
     "-DMIPSOLVERS_MKL_ROOT=$OneMklRoot",
+    "-DMIPSOLVERS_MKL_THREADING=$MklThreading",
     "-DMIPSOLVERS_ENABLE_IPO=OFF",
     "-DCMAKE_CONFIGURATION_TYPES=$BuildType",
     "-DCMAKE_BUILD_TYPE=$BuildType",
@@ -178,6 +190,7 @@ Write-Host "== prebuilt third-party summary =="
 Write-Host "prefix:     $Prefix"
 Write-Host "build type: $BuildType"
 Write-Host "oneMKL:     $OneMklRoot"
+Write-Host "threading:  $MklThreading"
 Write-Host ("wall time:  {0:mm\:ss}" -f $Timer.Elapsed)
 $Libraries = Get-ChildItem -LiteralPath $Prefix -Recurse -File -ErrorAction SilentlyContinue |
     Where-Object { $_.Extension -in @(".lib", ".dll", ".a", ".so", ".dylib") }
