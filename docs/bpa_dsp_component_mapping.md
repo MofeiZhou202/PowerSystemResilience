@@ -46,7 +46,7 @@ T 卡固定 tap 并报告限制。
 | BS（平衡） | `ACBus`(Slack) + `Generator` | ✅ | |
 | BE（PV） | `ACBus`(PV) + `Generator` | ✅ | |
 | BQ（无功受限 PV） | `ACBus`(PV) + `Generator.qmax/qmin` | ✅ | 导入为 PV；NR 求解支持 Q 限值转 PQ |
-| L（线路） | `ACBranch` | 🔶 | R/X、B/2、额定电流→rate_a、并联回数均有；**G/2 对地电导不建模**（导入告警） |
+| L（线路） | `ACBranch` | 🔶 | R/X、B/2、额定电流→rate_a、并联回数均有；**G/2 对地电导不建模**（导入告警）；精确零数据 L 卡标记为 `ideal_connectivity` 并在 canonical projection 收缩 |
 | T（双绕组变） | `ACBranch`(带 tap) / `Transformer2W` | 🔶 | 励磁 G/B 不建模（告警）；DSP 数值扰动表明本案例的 T 卡 R/X 直接按系统基准进入支路 |
 | R（LTC 调压） | 既有 `ACBranch` + `LCCConverter` tap 控制元数据 | 🔶 | R 是 T 支路的控制记录，**不新建第二台变压器或第二条电气支路**；匹配 LCC 换流变时保留范围并由统一 PF 外环调节 |
 | BX/X（可投切并联） | `Shunt` | 🔶 | 固定并联可表示；无可投切并联稳态控制 |
@@ -101,6 +101,16 @@ T 卡固定 tap 并报告限制。
    默认已切换为 `LccQuasiSteady`。
 5. **优化边界**：PF 外环不是 OPF 的 tap 联合优化。OPF 仍把 LCC 控制定值和
    换流变 tap 视为固定输入；换相重叠角 μ 也未显式迭代。
+6. **零数据 L 卡是连接关系，不是 `1e-4 pu` 物理线路**：当源卡的 R、X、G/2、
+   B/2、长度和额定值均精确为零时，导入器保留
+   `parameter_source="bpa_dsp_ideal_connectivity"`，并令
+   `ACBranch::ideal_connectivity=true`。canonical projection 在 Ybus 与 PV/PQ
+   活跃集构建前收缩其端点，避免不同 PV 电压设定经 `1/x` 形成虚假无功环流。
+   源卡存在非零 X、但数值被 DSP 下限钳为 `1e-4 pu` 时仍是物理线路，不收缩。
+   对缺少该字段的旧 BPA JSON，仅当存在 `bpa_is_bq` 或
+   `bpa_source_order` 指纹，并且 L 支路满足同电压等级、零 R/B/tap/shift/长度/
+   额定值/导线参数、无既有参数来源且 `|X|=1e-4 pu` 的全部条件时，才迁移为
+   `parameter_source="legacy_bpa_dsp_numerical_tie"`。普通 JSON 不执行该迁移。
 
 ## 4. 与 DSP 潮流的集成对比（四案例）
 

@@ -5,6 +5,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
@@ -16,6 +17,7 @@
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
 #include <Eigen/SparseLU>
+#include <Eigen/SparseQR>
 
 // High-performance sparse KKT factorizations from SuiteSparse, used for large
 // systems (≳1500 KKT unknowns).  UMFPACK and KLU provide stronger numerical
@@ -232,6 +234,7 @@ struct SparseKKTCache {
   // backend id; -1 = not analysed for the current pattern.
   int analyzed_dim[5]{-1, -1, -1, -1, -1};
   int analyzed_nnz[5]{-1, -1, -1, -1, -1};
+  std::uint64_t analyzed_pattern[5]{0, 0, 0, 0, 0};
   bool factored{false};
   bool solve_degraded{false};  ///< last solve was inaccurate → escalate backend
   int symbolic_analyze_calls{0};
@@ -241,6 +244,29 @@ struct SparseKKTCache {
   int meq{0};
   int niq{0};        ///< inequality-multiplier block size (augmented form only)
 };
+
+std::uint64_t sparse_pattern_signature(
+    const Eigen::SparseMatrix<double>& matrix) {
+  // FNV-1a over the compressed sparse coordinates. Symbolic factorization is
+  // reusable only for the identical graph; equal dimensions and nnz alone do
+  // not establish that contract (Davis, Direct Methods for Sparse Linear
+  // Systems, SIAM 2006, Sections 4.1 and 7.6).
+  std::uint64_t hash = 1469598103934665603ULL;
+  const auto add = [&](std::uint64_t value) {
+    hash ^= value;
+    hash *= 1099511628211ULL;
+  };
+  add(static_cast<std::uint64_t>(matrix.rows()));
+  add(static_cast<std::uint64_t>(matrix.cols()));
+  add(static_cast<std::uint64_t>(matrix.nonZeros()));
+  for (int col = 0; col < matrix.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(matrix, col); it; ++it) {
+      add(static_cast<std::uint64_t>(it.row()));
+      add(static_cast<std::uint64_t>(it.col()));
+    }
+  }
+  return hash == 0 ? 1 : hash;
+}
 
 // Ordered candidate backends for a preference (most-preferred first), filtered
 // to those compiled in and de-duplicated.  The Auto order is structure-aware:
@@ -518,6 +544,8 @@ bool factor_assembled_kkt(SparseKKTCache& cache,
   _asm.stop();  // assembly + equilibration ends here; factorization follows
 
   const int nnz = static_cast<int>(cache.kkt.nonZeros());
+  const std::uint64_t pattern_signature =
+      sparse_pattern_signature(cache.kkt);
   const std::vector<int> order =
       backend_order(sparse_backend_preference(), cache.pure_ac);
   if (cache.active == 0) cache.active = order.front();
@@ -544,11 +572,14 @@ bool factor_assembled_kkt(SparseKKTCache& cache,
   for (int backend : trylist) {
     cache.active = backend;
     const bool need_analyze =
-        (cache.analyzed_dim[backend] != dim) || (cache.analyzed_nnz[backend] != nnz);
+        cache.analyzed_dim[backend] != dim ||
+        cache.analyzed_nnz[backend] != nnz ||
+        cache.analyzed_pattern[backend] != pattern_signature;
     if (sparse_factorize_active(cache, need_analyze)) {
       if (need_analyze) {
         cache.analyzed_dim[backend] = dim;
         cache.analyzed_nnz[backend] = nnz;
+        cache.analyzed_pattern[backend] = pattern_signature;
       }
       cache.factored = true;
       return true;
@@ -843,7 +874,1192 @@ void assemble_inequalities(const Problem& prob,
   jh.makeCompressed();
 }
 
+struct PhaseOneState {
+  double initial_violation{std::numeric_limits<double>::infinity()};
+  double final_violation{std::numeric_limits<double>::infinity()};
+  double dual_fit_residual{std::numeric_limits<double>::infinity()};
+  bool primal_feasible{false};
+  bool in_handoff_corridor{false};
+  bool dual_initialized{false};
+  bool central_start_accepted{false};
+  double handoff_primal_tolerance{0.0};
+  double perturbed_primal_residual{
+      std::numeric_limits<double>::infinity()};
+  double centrality{std::numeric_limits<double>::infinity()};
+  double barrier_mu{0.0};
+  std::string rejection_reason;
+  bool budget_exhausted{false};
+  int iterations{0};
+  int factorizations{0};
+  int backtracks{0};
+  bool structural_step_attempted{false};
+  bool structural_step_accepted{false};
+  int structural_factorizations{0};
+  double structural_violation{std::numeric_limits<double>::infinity()};
+  std::string structure{"ac-state-basic"};
+  double runtime_ms{0.0};
+  std::string termination{"not-run"};
+  std::string linear_solver{"unselected"};
+  std::vector<int> basic_columns;
+};
+
+struct DispatchDualPredictorDiagnostics {
+  bool attempted{false};
+  bool accepted{false};
+  double runtime_ms{0.0};
+  double baseline_raw{std::numeric_limits<double>::infinity()};
+  double candidate_raw{std::numeric_limits<double>::infinity()};
+  double baseline_normalized{std::numeric_limits<double>::infinity()};
+  double candidate_normalized{std::numeric_limits<double>::infinity()};
+  std::string status{"not-attempted"};
+};
+
+DispatchDualPredictorDiagnostics predict_component_dispatch_duals(
+    const Problem& prob,
+    const Eigen::VectorXd& x,
+    const Eigen::VectorXd& xmin,
+    const Eigen::VectorXd& xmax,
+    const Eigen::VectorXd& gradient,
+    double objective_scale,
+    const Eigen::SparseMatrix<double>& equality_jacobian,
+    const Eigen::SparseMatrix<double>& inequality_jacobian,
+    const Eigen::VectorXd& inequality_dual,
+    double minimum_improvement,
+    Eigen::VectorXd& equality_dual) {
+  DispatchDualPredictorDiagnostics diagnostics;
+  diagnostics.attempted = true;
+  const auto started = std::chrono::steady_clock::now();
+  const auto finish = [&](std::string status) {
+    diagnostics.status = std::move(status);
+    diagnostics.runtime_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    return diagnostics;
+  };
+  const int buses = prob.vidx.n_va;
+  if (buses <= 0 || prob.vidx.n_pg <= 0 ||
+      equality_dual.size() != prob.cidx.n_eq_total) {
+    return finish("rejected: no AC generator component");
+  }
+
+  // Dommel--Tinney (1968): an OPF reduced-gradient/adjoint seed follows the
+  // power-network graph. We retain only its zeroth-order island-price term;
+  // unlike a PF-adjoint fit, this requires no sparse factorization and is
+  // rebuilt safely after topology changes. Taheri--Molzahn (2026,
+  // arXiv:2606.08984) motivates the strict full-residual rejection below:
+  // partial primal/dual coverage often makes ACOPF restarts slower or fragile.
+  std::vector<int> parent(static_cast<std::size_t>(buses));
+  std::vector<unsigned char> rank(static_cast<std::size_t>(buses), 0);
+  for (int bus = 0; bus < buses; ++bus) {
+    parent[static_cast<std::size_t>(bus)] = bus;
+  }
+  const auto find_root = [&](int bus) {
+    int root = bus;
+    while (parent[static_cast<std::size_t>(root)] != root) {
+      root = parent[static_cast<std::size_t>(root)];
+    }
+    while (parent[static_cast<std::size_t>(bus)] != bus) {
+      const int next = parent[static_cast<std::size_t>(bus)];
+      parent[static_cast<std::size_t>(bus)] = root;
+      bus = next;
+    }
+    return root;
+  };
+  const auto unite = [&](int lhs, int rhs) {
+    int root_lhs = find_root(lhs);
+    int root_rhs = find_root(rhs);
+    if (root_lhs == root_rhs) return;
+    if (rank[static_cast<std::size_t>(root_lhs)] <
+        rank[static_cast<std::size_t>(root_rhs)]) {
+      std::swap(root_lhs, root_rhs);
+    }
+    parent[static_cast<std::size_t>(root_rhs)] = root_lhs;
+    if (rank[static_cast<std::size_t>(root_lhs)] ==
+        rank[static_cast<std::size_t>(root_rhs)]) {
+      ++rank[static_cast<std::size_t>(root_lhs)];
+    }
+  };
+  for (int col = 0; col < prob.data.ybus.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<std::complex<double>>::InnerIterator it(
+             prob.data.ybus, col); it; ++it) {
+      if (it.row() != it.col() && std::abs(it.value()) > 0.0) {
+        unite(static_cast<int>(it.row()), static_cast<int>(it.col()));
+      }
+    }
+  }
+  for (int bus = 0; bus < buses; ++bus) {
+    parent[static_cast<std::size_t>(bus)] = find_root(bus);
+  }
+
+  const Eigen::VectorXd stationarity_without_equalities =
+      objective_scale * gradient +
+      inequality_jacobian.transpose() * inequality_dual;
+  diagnostics.baseline_raw = inf_norm(stationarity_without_equalities);
+  diagnostics.baseline_normalized = diagnostics.baseline_raw /
+      (1.0 + inf_norm(inequality_dual));
+
+  std::vector<std::vector<double>> active_prices(
+      static_cast<std::size_t>(buses));
+  std::vector<std::vector<double>> reactive_prices(
+      static_cast<std::size_t>(buses));
+  std::vector<std::vector<double>> all_active_prices(
+      static_cast<std::size_t>(buses));
+  std::vector<std::vector<double>> all_reactive_prices(
+      static_cast<std::size_t>(buses));
+  for (int generator = 0; generator < prob.vidx.n_pg; ++generator) {
+    const int bus = prob.gen_bus[static_cast<std::size_t>(generator)];
+    const int root = parent[static_cast<std::size_t>(bus)];
+    const int p_col = prob.vidx.i_pg + generator;
+    const int q_col = prob.vidx.i_qg + generator;
+    const double p_price = stationarity_without_equalities[p_col] /
+                           std::max(std::abs(prob.scale_p), 1e-12);
+    const double q_price = stationarity_without_equalities[q_col] /
+                           std::max(std::abs(prob.scale_q), 1e-12);
+    all_active_prices[static_cast<std::size_t>(root)].push_back(p_price);
+    all_reactive_prices[static_cast<std::size_t>(root)].push_back(q_price);
+    const auto is_interior = [&](int col) {
+      const double width = xmax[col] - xmin[col];
+      const double margin = 1e-5 * std::max(1.0, std::abs(width));
+      return std::isfinite(width) && width > 2.0 * margin &&
+             x[col] > xmin[col] + margin && x[col] < xmax[col] - margin;
+    };
+    if (is_interior(p_col)) {
+      active_prices[static_cast<std::size_t>(root)].push_back(p_price);
+    }
+    if (is_interior(q_col)) {
+      reactive_prices[static_cast<std::size_t>(root)].push_back(q_price);
+    }
+  }
+
+  const auto median = [](std::vector<double>& values) {
+    const std::size_t middle = values.size() / 2;
+    std::nth_element(values.begin(), values.begin() + middle, values.end());
+    return values[middle];
+  };
+  Eigen::VectorXd candidate = Eigen::VectorXd::Zero(equality_dual.size());
+  std::vector<double> active_price_by_root(
+      static_cast<std::size_t>(buses), 0.0);
+  std::vector<double> reactive_price_by_root(
+      static_cast<std::size_t>(buses), 0.0);
+  std::vector<unsigned char> has_active_price(
+      static_cast<std::size_t>(buses), 0);
+  std::vector<unsigned char> has_reactive_price(
+      static_cast<std::size_t>(buses), 0);
+  int priced_components = 0;
+  for (int root = 0; root < buses; ++root) {
+    if (parent[static_cast<std::size_t>(root)] != root) continue;
+    auto& p_values = active_prices[static_cast<std::size_t>(root)].empty()
+        ? all_active_prices[static_cast<std::size_t>(root)]
+        : active_prices[static_cast<std::size_t>(root)];
+    auto& q_values = reactive_prices[static_cast<std::size_t>(root)].empty()
+        ? all_reactive_prices[static_cast<std::size_t>(root)]
+        : reactive_prices[static_cast<std::size_t>(root)];
+    if (!p_values.empty()) {
+      active_price_by_root[static_cast<std::size_t>(root)] = median(p_values);
+      has_active_price[static_cast<std::size_t>(root)] = 1;
+      ++priced_components;
+    }
+    if (!q_values.empty()) {
+      reactive_price_by_root[static_cast<std::size_t>(root)] = median(q_values);
+      has_reactive_price[static_cast<std::size_t>(root)] = 1;
+    }
+  }
+  for (int bus = 0; bus < buses; ++bus) {
+    const int root = parent[static_cast<std::size_t>(bus)];
+    if (has_active_price[static_cast<std::size_t>(root)] != 0) {
+      candidate[prob.cidx.i_pbal_ac + bus] =
+          active_price_by_root[static_cast<std::size_t>(root)];
+    }
+    if (has_reactive_price[static_cast<std::size_t>(root)] != 0) {
+      candidate[prob.cidx.i_qbal_ac + bus] =
+          reactive_price_by_root[static_cast<std::size_t>(root)];
+    }
+  }
+  if (priced_components == 0 || !candidate.allFinite()) {
+    return finish("rejected: no finite component price");
+  }
+
+  const Eigen::VectorXd candidate_stationarity =
+      stationarity_without_equalities + equality_jacobian.transpose() * candidate;
+  diagnostics.candidate_raw = inf_norm(candidate_stationarity);
+  diagnostics.candidate_normalized = diagnostics.candidate_raw /
+      (1.0 + std::max(inf_norm(inequality_dual), inf_norm(candidate)));
+  const double required = std::clamp(minimum_improvement, 0.0, 1.0);
+  const bool raw_improves = std::isfinite(diagnostics.candidate_raw) &&
+      diagnostics.candidate_raw <=
+          (1.0 - required) * diagnostics.baseline_raw;
+  const bool normalized_improves =
+      std::isfinite(diagnostics.candidate_normalized) &&
+      diagnostics.candidate_normalized <=
+          (1.0 - required) * diagnostics.baseline_normalized;
+  if (!raw_improves || !normalized_improves) {
+    return finish("rejected: exact dual residual did not improve");
+  }
+  equality_dual = std::move(candidate);
+  diagnostics.accepted = true;
+  return finish("accepted: component dispatch-price predictor");
+}
+
+std::vector<int> parity_basic_columns(const Problem& prob) {
+  const auto& v = prob.vidx;
+  const int required = prob.cidx.n_eq_total;
+  std::vector<int> columns;
+  columns.reserve(static_cast<std::size_t>(required));
+  std::vector<unsigned char> selected(
+      static_cast<std::size_t>(v.n_total), 0);
+  const auto add = [&](int col) {
+    if (col >= 0 && col < v.n_total &&
+        selected[static_cast<std::size_t>(col)] == 0 &&
+        static_cast<int>(columns.size()) < required) {
+      selected[static_cast<std::size_t>(col)] = 1;
+      columns.push_back(col);
+    }
+  };
+  const auto add_block = [&](int offset, int count) {
+    for (int k = 0; k < count; ++k) add(offset + k);
+  };
+
+  // Nocedal--Wright (2006), Section 11.1: voltage coordinates are states;
+  // device powers needed by coupling/reference equations complete the square
+  // basic Jacobian. The remaining device powers are independent controls.
+  add_block(v.i_va, v.n_va);
+  std::vector<int> reactive_generator_by_bus(
+      static_cast<std::size_t>(v.n_vm), -1);
+  for (int k = 0; k < v.n_qg &&
+                  k < static_cast<int>(prob.gen_bus.size()); ++k) {
+    const int bus = prob.gen_bus[static_cast<std::size_t>(k)];
+    if (bus >= 0 && bus < v.n_vm &&
+        reactive_generator_by_bus[static_cast<std::size_t>(bus)] < 0) {
+      reactive_generator_by_bus[static_cast<std::size_t>(bus)] = k;
+    }
+  }
+  for (int bus = 0; bus < v.n_vm; ++bus) {
+    const int generator =
+        reactive_generator_by_bus[static_cast<std::size_t>(bus)];
+    if (generator >= 0) add(v.i_qg + generator);
+    else add(v.i_vm + bus);
+  }
+  add_block(v.i_vdc, v.n_vdc);
+  add_block(v.i_pdc, v.n_pdc);
+  add_block(v.i_pdcdc, v.n_pdcdc);
+  for (int router : prob.er_router_to_data) {
+    const auto found = std::find_if(
+        prob.er_ports.begin(), prob.er_ports.end(),
+        [router](const Problem::ERPortInfo& port) {
+          return port.router_idx == router;
+        });
+    if (found != prob.er_ports.end()) add(v.i_erp + found->pvar);
+  }
+  for (int reference_bus : prob.ac_angle_reference_buses) {
+    const auto found = std::find(prob.gen_bus.begin(), prob.gen_bus.end(),
+                                 reference_bus);
+    if (found != prob.gen_bus.end()) {
+      add(v.i_pg + static_cast<int>(found - prob.gen_bus.begin()));
+    }
+  }
+  for (int k = 0; k < prob.cidx.n_dc_ref; ++k) {
+    if (k < v.n_pac) add(v.i_pac + k);
+    else if (k < v.n_pstordc) add(v.i_pstordc + k);
+  }
+
+  // Complete unusual component mixes deterministically. Numerical
+  // factorization remains the final validity check before this basis is used.
+  for (const auto [offset, count] : std::array<std::pair<int, int>, 13>{
+           std::pair{v.i_pg, v.n_pg}, {v.i_qg, v.n_qg},
+           {v.i_pac, v.n_pac}, {v.i_qac, v.n_qac},
+           {v.i_dpd, v.n_dpd}, {v.i_dqd, v.n_dqd},
+           {v.i_pren, v.n_pren}, {v.i_qren, v.n_qren},
+           {v.i_pstor, v.n_pstor}, {v.i_qstor, v.n_qstor},
+           {v.i_pstordc, v.n_pstordc}, {v.i_pflex, v.n_pflex},
+           {v.i_erp, v.n_erp}}) {
+    add_block(offset, count);
+  }
+  if (static_cast<int>(columns.size()) != required) columns.clear();
+  return columns;
+}
+
+Eigen::SparseMatrix<double> select_columns(
+    const Eigen::SparseMatrix<double>& matrix,
+    const std::vector<int>& columns) {
+  std::vector<int> source_to_selected(
+      static_cast<std::size_t>(matrix.cols()), -1);
+  for (int local = 0; local < static_cast<int>(columns.size()); ++local) {
+    source_to_selected[static_cast<std::size_t>(
+        columns[static_cast<std::size_t>(local)])] = local;
+  }
+  std::vector<Eigen::Triplet<double>> trips;
+  trips.reserve(static_cast<std::size_t>(matrix.nonZeros()));
+  for (int col = 0; col < matrix.outerSize(); ++col) {
+    const int selected_col =
+        source_to_selected[static_cast<std::size_t>(col)];
+    if (selected_col < 0) continue;
+    for (Eigen::SparseMatrix<double>::InnerIterator it(matrix, col); it;
+         ++it) {
+      trips.emplace_back(it.row(), selected_col, it.value());
+    }
+  }
+  Eigen::SparseMatrix<double> selected(
+      matrix.rows(), static_cast<int>(columns.size()));
+  selected.setFromTriplets(trips.begin(), trips.end());
+  selected.makeCompressed();
+  return selected;
+}
+
+bool pivot_bounded_basic_column(const Problem& prob,
+                                int limiting_col,
+                                double direction,
+                                const Eigen::VectorXd& x,
+                                const Eigen::VectorXd& xmin,
+                                const Eigen::VectorXd& xmax,
+                                std::vector<int>& basic_columns) {
+  const auto& v = prob.vidx;
+  const std::array<std::pair<int, int>, 12> families{
+      std::pair{v.i_pg, v.n_pg}, {v.i_qg, v.n_qg},
+      {v.i_pac, v.n_pac}, {v.i_qac, v.n_qac},
+      {v.i_pdc, v.n_pdc}, {v.i_pdcdc, v.n_pdcdc},
+      {v.i_pren, v.n_pren}, {v.i_qren, v.n_qren},
+      {v.i_pstor, v.n_pstor}, {v.i_qstor, v.n_qstor},
+      {v.i_pstordc, v.n_pstordc}, {v.i_erp, v.n_erp}};
+  const auto family = std::find_if(
+      families.begin(), families.end(),
+      [limiting_col](const auto& block) {
+        return limiting_col >= block.first &&
+               limiting_col < block.first + block.second;
+      });
+  if (family == families.end()) return false;
+
+  const auto position = std::find(
+      basic_columns.begin(), basic_columns.end(), limiting_col);
+  if (position == basic_columns.end()) return false;
+  std::vector<unsigned char> selected(
+      static_cast<std::size_t>(v.n_total), 0);
+  for (int col : basic_columns) {
+    selected[static_cast<std::size_t>(col)] = 1;
+  }
+  int replacement = -1;
+  double best_room = 0.0;
+  for (int col = family->first; col < family->first + family->second; ++col) {
+    if (selected[static_cast<std::size_t>(col)] != 0) continue;
+    const double room = direction < 0.0
+        ? x[col] - xmin[col] : xmax[col] - x[col];
+    if (std::isfinite(room) && room > best_room) {
+      best_room = room;
+      replacement = col;
+    }
+  }
+  if (replacement < 0) return false;
+  *position = replacement;
+  return true;
+}
+
+std::vector<int> phase_one_free_columns(
+    const Problem& prob,
+    const std::vector<unsigned char>& fixed_at_bound,
+    int required_rows) {
+  const auto& v = prob.vidx;
+  std::vector<int> columns;
+  std::vector<unsigned char> selected(
+      static_cast<std::size_t>(v.n_total), 0);
+  const auto add = [&](int col) {
+    if (col >= 0 && col < v.n_total &&
+        fixed_at_bound[static_cast<std::size_t>(col)] == 0 &&
+        selected[static_cast<std::size_t>(col)] == 0) {
+      selected[static_cast<std::size_t>(col)] = 1;
+      columns.push_back(col);
+    }
+  };
+  const auto add_block = [&](int offset, int count) {
+    for (int k = 0; k < count; ++k) add(offset + k);
+  };
+  for (const auto [offset, count] : std::array<std::pair<int, int>, 16>{
+           std::pair{v.i_va, v.n_va}, {v.i_vm, v.n_vm},
+           {v.i_pg, v.n_pg}, {v.i_qg, v.n_qg},
+           {v.i_vdc, v.n_vdc}, {v.i_pac, v.n_pac},
+           {v.i_qac, v.n_qac}, {v.i_pdc, v.n_pdc},
+           {v.i_pstor, v.n_pstor}, {v.i_qstor, v.n_qstor},
+           {v.i_pstordc, v.n_pstordc}, {v.i_pdcdc, v.n_pdcdc},
+           {v.i_erp, v.n_erp}, {v.i_erq, v.n_erq},
+           {v.i_pren, v.n_pren}, {v.i_qren, v.n_qren}}) {
+    add_block(offset, count);
+  }
+  if (static_cast<int>(columns.size()) < required_rows) {
+    add_block(v.i_pflex, v.n_pflex);
+    add_block(v.i_dpd, v.n_dpd);
+    add_block(v.i_dqd, v.n_dqd);
+  }
+  return columns;
+}
+
+double phase_one_violation(const Problem& prob,
+                           const Eigen::VectorXd& x,
+                           const Eigen::VectorXd& xmin,
+                           const Eigen::VectorXd& xmax,
+                           const std::vector<int>& lb_cols,
+                           const std::vector<int>& ub_cols) {
+  EvalWorkspace ws;
+  Eigen::VectorXd g;
+  Eigen::VectorXd h;
+  equality_constraints(prob, x, ws, g);
+  nonlinear_inequality_constraints(prob, x, h);
+  if (!g.allFinite() || !h.allFinite()) {
+    return std::numeric_limits<double>::infinity();
+  }
+  const double equality_violation = inf_norm(g);
+  double inequality_violation = h.size() > 0
+      ? std::max(0.0, h.maxCoeff()) : 0.0;
+  for (int col : lb_cols) {
+    inequality_violation = std::max(
+        inequality_violation, xmin[col] - x[col]);
+  }
+  for (int col : ub_cols) {
+    inequality_violation = std::max(
+        inequality_violation, x[col] - xmax[col]);
+  }
+  return std::max(equality_violation, inequality_violation);
+}
+
+struct HybridSchurRepair {
+  bool attempted{false};
+  bool accepted{false};
+  int factorizations{0};
+  int backtracks{0};
+  double global_violation{std::numeric_limits<double>::infinity()};
+  double block_violation{std::numeric_limits<double>::infinity()};
+  std::string status{"not-applicable"};
+};
+
+double hybrid_dc_converter_violation(const Problem& prob,
+                                     const Eigen::VectorXd& x) {
+  EvalWorkspace ws;
+  Eigen::VectorXd equality;
+  equality_constraints(prob, x, ws, equality);
+  if (!equality.allFinite()) return std::numeric_limits<double>::infinity();
+  const auto& c = prob.cidx;
+  double value = 0.0;
+  const auto accumulate = [&](int offset, int count) {
+    for (int row = 0; row < count; ++row)
+      value = std::max(value, std::abs(equality[offset + row]));
+  };
+  accumulate(c.i_pbal_dc, c.n_pbal_dc);
+  accumulate(c.i_conv_bal, c.n_conv_bal);
+  accumulate(c.i_dc_ref, c.n_dc_ref);
+  return value;
+}
+
+HybridSchurRepair repair_hybrid_dc_converter_block(
+    const Problem& prob,
+    Eigen::VectorXd& x,
+    const Eigen::VectorXd& xmin,
+    const Eigen::VectorXd& xmax,
+    const std::vector<int>& lb_cols,
+    const std::vector<int>& ub_cols,
+    const IPMOptions& opt,
+    double initial_violation) {
+  HybridSchurRepair repair;
+  const auto& v = prob.vidx;
+  const auto& c = prob.cidx;
+  if (v.n_vdc <= 0 || v.n_pdc <= 0 || v.n_pac != v.n_pdc ||
+      c.n_pbal_dc != v.n_vdc || c.n_conv_bal != v.n_pdc) {
+    return repair;
+  }
+  repair.attempted = true;
+  const double initial_structural_violation =
+      hybrid_dc_converter_violation(prob, x);
+
+  EvalWorkspace ws;
+  Eigen::VectorXd equality;
+  Eigen::SparseMatrix<double> jacobian;
+  equality_constraints(prob, x, ws, equality);
+  equality_jacobian(prob, x, ws, jacobian);
+  const int rows = c.n_pbal_dc + c.n_dc_ref;
+  const int cols = v.n_vdc + v.n_pac;
+  if (!equality.allFinite() || rows <= 0 || cols < rows) {
+    repair.status = "hybrid-schur-invalid-shape";
+    return repair;
+  }
+
+  std::vector<Eigen::Triplet<double>> trips;
+  trips.reserve(static_cast<std::size_t>(
+      prob.data.gdc.nonZeros() + c.n_dc_ref + 2 * v.n_pac));
+  Eigen::VectorXd rhs = Eigen::VectorXd::Zero(rows);
+  for (int local_row = 0; local_row < c.n_pbal_dc; ++local_row) {
+    const int source_row = c.i_pbal_dc + local_row;
+    rhs[local_row] = -equality[source_row];
+    for (int dc = 0; dc < v.n_vdc; ++dc) {
+      const double value = jacobian.coeff(source_row, v.i_vdc + dc);
+      if (value != 0.0) trips.emplace_back(local_row, dc, value);
+    }
+    for (int k = 0; k < v.n_pdc; ++k) {
+      const double j_dc_pdc = jacobian.coeff(source_row, v.i_pdc + k);
+      if (j_dc_pdc == 0.0) continue;
+      const int conv_row = c.i_conv_bal + k;
+      const double j_conv_pdc = jacobian.coeff(conv_row, v.i_pdc + k);
+      const double j_conv_pac = jacobian.coeff(conv_row, v.i_pac + k);
+      if (std::abs(j_conv_pdc) <= 1e-12) {
+        repair.status = "hybrid-schur-singular-converter-block";
+        return repair;
+      }
+      // Exact block Gaussian elimination:
+      // dpdc = -(gconv + Jpac*dpac)/Jpdc, substituted into the DC rows.
+      // See Golub--Van Loan (2013), Section 3.2.
+      rhs[local_row] +=
+          j_dc_pdc * equality[conv_row] / j_conv_pdc;
+      const double schur = -j_dc_pdc * j_conv_pac / j_conv_pdc;
+      if (schur != 0.0)
+        trips.emplace_back(local_row, v.n_vdc + k, schur);
+    }
+  }
+  for (int local = 0; local < c.n_dc_ref; ++local) {
+    const int row = c.n_pbal_dc + local;
+    const int source_row = c.i_dc_ref + local;
+    rhs[row] = -equality[source_row];
+    for (int dc = 0; dc < v.n_vdc; ++dc) {
+      const double value = jacobian.coeff(source_row, v.i_vdc + dc);
+      if (value != 0.0) trips.emplace_back(row, dc, value);
+    }
+  }
+
+  Eigen::SparseMatrix<double> schur(rows, cols);
+  schur.setFromTriplets(trips.begin(), trips.end());
+  schur.makeCompressed();
+  Eigen::VectorXd row_scale = Eigen::VectorXd::Ones(rows);
+  for (int col = 0; col < schur.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(schur, col); it; ++it)
+      row_scale[it.row()] = std::max(row_scale[it.row()], std::abs(it.value()));
+  }
+  row_scale = row_scale.cwiseInverse();
+  for (int col = 0; col < schur.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(schur, col); it; ++it)
+      it.valueRef() *= row_scale[it.row()];
+  }
+  Eigen::SparseQR<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>> qr;
+  qr.compute(schur);
+  ++repair.factorizations;
+  if (qr.info() != Eigen::Success) {
+    repair.status = "hybrid-schur-factorization-failed";
+    return repair;
+  }
+  const Eigen::VectorXd reduced_step = qr.solve(row_scale.cwiseProduct(rhs));
+  if (qr.info() != Eigen::Success || !reduced_step.allFinite()) {
+    repair.status = "hybrid-schur-solve-failed";
+    return repair;
+  }
+  Eigen::VectorXd step = Eigen::VectorXd::Zero(x.size());
+  for (int dc = 0; dc < v.n_vdc; ++dc)
+    step[v.i_vdc + dc] = reduced_step[dc];
+  for (int k = 0; k < v.n_pac; ++k) {
+    step[v.i_pac + k] = reduced_step[v.n_vdc + k];
+    const int conv_row = c.i_conv_bal + k;
+    const double j_pdc = jacobian.coeff(conv_row, v.i_pdc + k);
+    const double j_pac = jacobian.coeff(conv_row, v.i_pac + k);
+    step[v.i_pdc + k] =
+        -(equality[conv_row] + j_pac * step[v.i_pac + k]) / j_pdc;
+  }
+
+  double alpha = 1.0;
+  for (int col = 0; col < step.size(); ++col) {
+    if (step[col] < 0.0 && std::isfinite(xmin[col]))
+      alpha = std::min(alpha, 0.995 * (xmin[col] - x[col]) / step[col]);
+    else if (step[col] > 0.0 && std::isfinite(xmax[col]))
+      alpha = std::min(alpha, 0.995 * (xmax[col] - x[col]) / step[col]);
+  }
+  alpha = std::clamp(alpha, 0.0, 1.0);
+  for (int attempt = 0;
+       attempt <= std::max(0, opt.phase_one_max_backtracks); ++attempt) {
+    Eigen::VectorXd trial = x + alpha * step;
+    const double violation = phase_one_violation(
+        prob, trial, xmin, xmax, lb_cols, ub_cols);
+    const double structural_violation =
+        hybrid_dc_converter_violation(prob, trial);
+    // Block-coordinate Newton must decrease the block it actually solves;
+    // an unrelated AC row may continue to define the global infinity norm.
+    // Requiring the global norm not to increase preserves monotonicity before
+    // the following AC state/basic Newton step (Nocedal--Wright, 2006, §11.1).
+    if (std::isfinite(violation) &&
+        structural_violation < initial_structural_violation &&
+        violation <= initial_violation) {
+      x = std::move(trial);
+      repair.accepted = true;
+      repair.global_violation = violation;
+      repair.block_violation = structural_violation;
+      repair.status = "hybrid-dc-converter-schur";
+      return repair;
+    }
+    if (attempt < std::max(0, opt.phase_one_max_backtracks)) {
+      ++repair.backtracks;
+      alpha *= 0.5;
+    }
+  }
+  repair.global_violation = initial_violation;
+  repair.block_violation = initial_structural_violation;
+  repair.status = "hybrid-schur-no-decreasing-step";
+  return repair;
+}
+
+PhaseOneState restore_phase_one_primal(
+    const Problem& prob,
+    Eigen::VectorXd& x,
+    const Eigen::VectorXd& xmin,
+    const Eigen::VectorXd& xmax,
+    const std::vector<int>& lb_cols,
+    const std::vector<int>& ub_cols,
+    const IPMOptions& opt) {
+  PhaseOneState state;
+  state.barrier_mu = std::clamp(
+      std::isfinite(opt.phase_one_barrier_mu) &&
+              opt.phase_one_barrier_mu > 0.0
+          ? opt.phase_one_barrier_mu
+          : 0.1,
+      1e-12, 0.1);
+  const double primal_mu_factor =
+      std::isfinite(opt.phase_one_primal_mu_factor)
+      ? std::max(0.0, opt.phase_one_primal_mu_factor) : 0.1;
+  // Phase I only has to enter the central neighborhood from which Phase II's
+  // filter IPM is effective; final feasibility remains a Phase-II contract.
+  // See Waechter--Biegler (2006), Sections 2--3.
+  state.handoff_primal_tolerance = std::max(
+      opt.tol_primal, primal_mu_factor * state.barrier_mu);
+  const auto started = std::chrono::steady_clock::now();
+  const auto elapsed_ms = [&]() {
+    return std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+  };
+  double violation = phase_one_violation(
+      prob, x, xmin, xmax, lb_cols, ub_cols);
+  state.initial_violation = violation;
+  state.final_violation = violation;
+  if (prob.vidx.n_vdc > 0 &&
+      state.factorizations < std::max(0, opt.phase_one_max_factorizations)) {
+    const HybridSchurRepair repair = repair_hybrid_dc_converter_block(
+        prob, x, xmin, xmax, lb_cols, ub_cols, opt, violation);
+    state.structural_step_attempted = repair.attempted;
+    state.structural_step_accepted = repair.accepted;
+    state.structural_factorizations = repair.factorizations;
+    state.factorizations += repair.factorizations;
+    state.backtracks += repair.backtracks;
+    state.structural_violation = repair.block_violation;
+    if (repair.attempted) state.structure = repair.status;
+    if (repair.accepted) violation = repair.global_violation;
+    state.final_violation = violation;
+  }
+  const double admission_mu_factor =
+      std::isfinite(opt.phase_one_admission_mu_factor)
+      ? std::max(0.0, opt.phase_one_admission_mu_factor) : 1.0;
+  if (!std::isfinite(violation) ||
+      violation > admission_mu_factor * state.barrier_mu) {
+    state.termination = "outside-phase-one-admission";
+    state.rejection_reason = "raw primal violation exceeds Phase-I admission";
+    state.runtime_ms = elapsed_ms();
+    return state;
+  }
+  Eigen::VectorXd best_x = x;
+  state.basic_columns = parity_basic_columns(prob);
+  Eigen::SparseLU<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>>
+      basis_solver;
+  bool basis_pattern_analyzed = false;
+  std::vector<unsigned char> fixed_at_bound(
+      static_cast<std::size_t>(x.size()), 0);
+  for (int col = 0; col < x.size(); ++col) {
+    if (std::isfinite(xmin[col]) && std::isfinite(xmax[col]) &&
+        xmax[col] - xmin[col] <= 2.0 * opt.tol_primal) {
+      fixed_at_bound[static_cast<std::size_t>(col)] = 1;
+    }
+  }
+
+  for (; state.iterations < std::max(0, opt.phase_one_max_iterations) &&
+         violation > state.handoff_primal_tolerance;) {
+    if (state.factorizations >=
+        std::max(0, opt.phase_one_max_factorizations)) {
+      state.budget_exhausted = true;
+      state.termination = "factorization-budget";
+      break;
+    }
+    if (opt.phase_one_time_limit_ms > 0.0 &&
+        elapsed_ms() >= opt.phase_one_time_limit_ms) {
+      state.budget_exhausted = true;
+      state.termination = "time-budget";
+      break;
+    }
+
+    EvalWorkspace ws;
+    Eigen::VectorXd equality;
+    Eigen::SparseMatrix<double> jacobian;
+    equality_constraints(prob, x, ws, equality);
+    equality_jacobian(prob, x, ws, jacobian);
+    if (!equality.allFinite() || jacobian.rows() != equality.size() ||
+        jacobian.cols() != x.size()) {
+      state.termination = "invalid-jacobian";
+      break;
+    }
+
+    Eigen::VectorXd inequality;
+    Eigen::SparseMatrix<double> inequality_jacobian;
+    assemble_inequalities(prob, x, xmin, xmax, lb_cols, ub_cols,
+                          inequality, inequality_jacobian);
+    std::vector<int> violated_rows;
+    for (int row = 0; row < inequality.size(); ++row) {
+      if (inequality[row] > state.handoff_primal_tolerance) {
+        violated_rows.push_back(row);
+      }
+    }
+    Eigen::VectorXd restoration_residual(
+        equality.size() + static_cast<int>(violated_rows.size()));
+    restoration_residual.head(equality.size()) = equality;
+    std::vector<Eigen::Triplet<double>> restoration_trips;
+    restoration_trips.reserve(static_cast<std::size_t>(
+        jacobian.nonZeros() + inequality_jacobian.nonZeros()));
+    for (int col = 0; col < jacobian.outerSize(); ++col) {
+      for (Eigen::SparseMatrix<double>::InnerIterator it(jacobian, col); it;
+           ++it) {
+        restoration_trips.emplace_back(it.row(), it.col(), it.value());
+      }
+    }
+    std::vector<int> inequality_to_active(
+        static_cast<std::size_t>(inequality.size()), -1);
+    for (int local = 0; local < static_cast<int>(violated_rows.size());
+         ++local) {
+      const int source = violated_rows[static_cast<std::size_t>(local)];
+      inequality_to_active[static_cast<std::size_t>(source)] = local;
+      restoration_residual[equality.size() + local] = inequality[source];
+    }
+    for (int col = 0; col < inequality_jacobian.outerSize(); ++col) {
+      for (Eigen::SparseMatrix<double>::InnerIterator it(
+               inequality_jacobian, col); it; ++it) {
+        const int local = inequality_to_active[
+            static_cast<std::size_t>(it.row())];
+        if (local >= 0) {
+          restoration_trips.emplace_back(
+              equality.size() + local, it.col(), it.value());
+        }
+      }
+    }
+    Eigen::SparseMatrix<double> restoration_jacobian(
+        restoration_residual.size(), x.size());
+    restoration_jacobian.setFromTriplets(
+        restoration_trips.begin(), restoration_trips.end());
+    restoration_jacobian.makeCompressed();
+
+    Eigen::VectorXd row_scale =
+        Eigen::VectorXd::Ones(restoration_residual.size());
+    for (int col = 0; col < restoration_jacobian.outerSize(); ++col) {
+      for (Eigen::SparseMatrix<double>::InnerIterator it(
+               restoration_jacobian, col); it;
+           ++it) {
+        row_scale[it.row()] =
+            std::max(row_scale[it.row()], std::abs(it.value()));
+      }
+    }
+    row_scale = row_scale.cwiseInverse();
+    for (int col = 0; col < restoration_jacobian.outerSize(); ++col) {
+      for (Eigen::SparseMatrix<double>::InnerIterator it(
+               restoration_jacobian, col); it;
+           ++it) {
+        it.valueRef() *= row_scale[it.row()];
+      }
+    }
+
+    Eigen::VectorXd step = Eigen::VectorXd::Zero(x.size());
+    bool solved_step = false;
+    if (violated_rows.empty() && !state.basic_columns.empty()) {
+      const Eigen::SparseMatrix<double> basis =
+          select_columns(restoration_jacobian, state.basic_columns);
+      if (!basis_pattern_analyzed) {
+        basis_solver.analyzePattern(basis);
+        basis_pattern_analyzed = true;
+      }
+      basis_solver.factorize(basis);
+      ++state.factorizations;
+      if (basis_solver.info() == Eigen::Success) {
+        const Eigen::VectorXd basic_step =
+            basis_solver.solve(-row_scale.cwiseProduct(restoration_residual));
+        if (basis_solver.info() == Eigen::Success && basic_step.allFinite()) {
+          for (int local = 0;
+               local < static_cast<int>(state.basic_columns.size()); ++local) {
+            step[state.basic_columns[static_cast<std::size_t>(local)]] =
+                basic_step[local];
+          }
+          solved_step = true;
+          state.linear_solver = "sparse-basis-lu";
+        }
+      }
+    }
+    if (!solved_step) {
+      if (state.factorizations >=
+          std::max(0, opt.phase_one_max_factorizations)) {
+        state.budget_exhausted = true;
+        state.termination = "factorization-budget";
+        break;
+      }
+      // Nocedal--Wright (2006), Section 11.1: violated h_i <= 0 rows join the
+      // constraint-Newton residual. Direct SparseQR avoids dense materialization
+      // and the squared conditioning of J*J' normal equations.
+      const std::vector<int> free_columns = phase_one_free_columns(
+          prob, fixed_at_bound, restoration_jacobian.rows());
+      if (free_columns.empty()) {
+        state.termination = "all-columns-bound";
+        break;
+      }
+      const Eigen::SparseMatrix<double> free_jacobian =
+          select_columns(restoration_jacobian, free_columns);
+      Eigen::SparseMatrix<double> scaled_free_jacobian = free_jacobian;
+      Eigen::VectorXd column_scale = Eigen::VectorXd::Ones(free_columns.size());
+      for (int local = 0; local < static_cast<int>(free_columns.size());
+           ++local) {
+        const int source = free_columns[static_cast<std::size_t>(local)];
+        if (std::isfinite(xmin[source]) && std::isfinite(xmax[source])) {
+          column_scale[local] =
+              std::max(1e-12, xmax[source] - xmin[source]);
+        }
+        for (Eigen::SparseMatrix<double>::InnerIterator it(
+                 scaled_free_jacobian, local); it; ++it) {
+          it.valueRef() *= column_scale[local];
+        }
+      }
+      Eigen::SparseQR<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>> qr;
+      // Nocedal--Wright (2006), Section 7.5: solve in range-scaled variable
+      // coordinates so a unit step means a comparable fraction of each
+      // variable's available interval.
+      qr.compute(scaled_free_jacobian);
+      ++state.factorizations;
+      if (qr.info() == Eigen::Success) {
+        const Eigen::VectorXd free_step =
+            qr.solve(-row_scale.cwiseProduct(restoration_residual));
+        solved_step = qr.info() == Eigen::Success && free_step.allFinite();
+        if (solved_step) {
+          for (int local = 0; local < static_cast<int>(free_columns.size());
+               ++local) {
+            step[free_columns[static_cast<std::size_t>(local)]] =
+                column_scale[local] * free_step[local];
+          }
+        }
+      }
+      if (solved_step) state.linear_solver = "sparse-qr";
+    }
+    ++state.iterations;
+    if (!solved_step) {
+      state.termination = "linear-solve-failed";
+      break;
+    }
+
+    bool accepted = false;
+    double alpha = 1.0;
+    int limiting_col = -1;
+    for (int col = 0; col < step.size(); ++col) {
+      if (step[col] < 0.0 && std::isfinite(xmin[col])) {
+        const double candidate =
+            0.995 * (xmin[col] - x[col]) / step[col];
+        if (candidate < alpha) {
+          alpha = candidate;
+          limiting_col = col;
+        }
+      } else if (step[col] > 0.0 && std::isfinite(xmax[col])) {
+        const double candidate =
+            0.995 * (xmax[col] - x[col]) / step[col];
+        if (candidate < alpha) {
+          alpha = candidate;
+          limiting_col = col;
+        }
+      }
+    }
+    alpha = std::clamp(alpha, 0.0, 1.0);
+    if (opt.verbose && limiting_col >= 0) {
+      std::fprintf(stderr,
+                   "parity Phase I bound step: iteration=%d alpha=%.12g "
+                   "column=%d x=%.12g step=%.12g bounds=[%.12g,%.12g]\n",
+                   state.iterations, alpha, limiting_col, x[limiting_col],
+                   step[limiting_col], xmin[limiting_col],
+                   xmax[limiting_col]);
+    }
+    const int backtrack_limit = std::max(0, opt.phase_one_max_backtracks);
+    for (int attempt = 0; attempt <= backtrack_limit; ++attempt) {
+      Eigen::VectorXd trial = x + alpha * step;
+      const double trial_violation = phase_one_violation(
+          prob, trial, xmin, xmax, lb_cols, ub_cols);
+      // Deuflhard (2011), Sections 2.2--2.3: accept only strict monotone
+      // improvement; no filter, barrier schedule, or second-order correction.
+      if (std::isfinite(trial_violation) && trial_violation < violation) {
+        x = std::move(trial);
+        violation = trial_violation;
+        best_x = x;
+        state.final_violation = violation;
+        accepted = true;
+        // Nocedal--Wright (2006), Section 16.5: once a basic variable reaches
+        // a bound, the fixed basis no longer represents the local free
+        // manifold. Fall back to the all-column constraint Newton solve on the
+        // next iteration instead of taking vanishing steps against that bound.
+        if (limiting_col >= 0 && !state.basic_columns.empty()) {
+          const bool pivoted = pivot_bounded_basic_column(
+              prob, limiting_col, step[limiting_col], x, xmin, xmax,
+              state.basic_columns);
+          if (pivoted) {
+            basis_pattern_analyzed = false;
+          } else {
+            state.basic_columns.clear();
+          }
+        }
+        if (limiting_col >= 0) {
+          fixed_at_bound[static_cast<std::size_t>(limiting_col)] = 1;
+        }
+        break;
+      }
+      if (attempt < backtrack_limit) {
+        ++state.backtracks;
+        alpha *= 0.5;
+      }
+    }
+    if (!accepted) {
+      state.termination = "no-decreasing-step";
+      break;
+    }
+  }
+
+  x = std::move(best_x);
+  state.final_violation = phase_one_violation(
+      prob, x, xmin, xmax, lb_cols, ub_cols);
+  if (opt.verbose) {
+    EvalWorkspace final_ws;
+    Eigen::VectorXd final_g;
+    Eigen::VectorXd final_h;
+    Eigen::SparseMatrix<double> final_jh;
+    equality_constraints(prob, x, final_ws, final_g);
+    assemble_inequalities(prob, x, xmin, xmax, lb_cols, ub_cols,
+                          final_h, final_jh);
+    Eigen::Index worst_g = 0;
+    Eigen::Index worst_h = 0;
+    const double g_inf = final_g.size() > 0
+        ? final_g.cwiseAbs().maxCoeff(&worst_g) : 0.0;
+    const double h_inf = final_h.size() > 0
+        ? std::max(0.0, final_h.maxCoeff(&worst_h)) : 0.0;
+    std::fprintf(stderr,
+                 "parity Phase I final: g_inf=%.12g row=%td "
+                 "h_plus=%.12g row=%td\n",
+                 g_inf, worst_g, h_inf, worst_h);
+  }
+  state.in_handoff_corridor = std::isfinite(state.final_violation) &&
+      state.final_violation <= state.handoff_primal_tolerance;
+  state.primal_feasible = std::isfinite(state.final_violation) &&
+      state.final_violation <= opt.tol_primal;
+  if (state.in_handoff_corridor) {
+    state.termination = "corridor-certified";
+  } else if (state.termination == "not-run") {
+    state.budget_exhausted =
+        state.iterations >= std::max(0, opt.phase_one_max_iterations);
+    state.termination = state.budget_exhausted
+        ? "iteration-budget" : "incomplete";
+  }
+  state.runtime_ms = elapsed_ms();
+  return state;
+}
+
+bool initialize_phase_one_duals(
+    const Problem& prob,
+    const Eigen::VectorXd& x,
+    const Eigen::VectorXd& rh,
+    const Eigen::SparseMatrix<double>& dh,
+    const IPMOptions& opt,
+    PhaseOneState& state,
+    Eigen::VectorXd& z,
+    Eigen::VectorXd& mu,
+    Eigen::VectorXd& lambda) {
+  if (!state.in_handoff_corridor ||
+      state.factorizations >= std::max(0, opt.phase_one_max_factorizations)) {
+    if (state.in_handoff_corridor) {
+      state.budget_exhausted = true;
+      state.termination = "factorization-budget-after-primal";
+    }
+    if (!state.in_handoff_corridor) {
+      state.rejection_reason = "raw primal violation exceeds corridor";
+    }
+    return false;
+  }
+
+  // Spend half of the remaining primal corridor on a positive slack floor:
+  // if v=max(0,max h_i)<=epsilon_p and
+  // s_floor=(epsilon_p-v)/2, then h_i+s_i <= (epsilon_p+v)/2<=epsilon_p.
+  // This avoids the 1/s blow-up produced by a representability-only floor
+  // while preserving z_i*mu_i=mu_0 without another factorization.
+  const double max_positive_inequality = rh.size() > 0
+      ? std::max(0.0, rh.maxCoeff()) : 0.0;
+  const double central_slack_floor = std::max(
+      2e-10, 0.5 * (state.handoff_primal_tolerance -
+                     max_positive_inequality));
+  z = (-rh.array()).max(central_slack_floor).matrix();
+  mu = (state.barrier_mu / z.array()).matrix();
+  Eigen::VectorXd gradient;
+  Eigen::VectorXd hdiag;
+  objective_gradient_hessian_diag(prob, x, gradient, hdiag);
+  const double gradient_norm = inf_norm(gradient);
+  const double objective_scale = gradient_norm > 100.0
+      ? 100.0 / gradient_norm : 1.0;
+
+  EvalWorkspace ws;
+  Eigen::VectorXd equality;
+  Eigen::SparseMatrix<double> jg;
+  equality_constraints(prob, x, ws, equality);
+  equality_jacobian(prob, x, ws, jg);
+  const Eigen::VectorXd stationarity_without_equalities =
+      objective_scale * gradient + dh.transpose() * mu;
+
+  bool solved_dual = false;
+  if (!state.basic_columns.empty()) {
+    const Eigen::SparseMatrix<double> basis =
+        select_columns(jg, state.basic_columns);
+    Eigen::SparseLU<Eigen::SparseMatrix<double>,
+                    Eigen::COLAMDOrdering<int>> lu;
+    lu.compute(Eigen::SparseMatrix<double>(basis.transpose()));
+    ++state.factorizations;
+    if (lu.info() == Eigen::Success) {
+      Eigen::VectorXd rhs(state.basic_columns.size());
+      for (int local = 0;
+           local < static_cast<int>(state.basic_columns.size()); ++local) {
+        rhs[local] = -stationarity_without_equalities[
+            state.basic_columns[static_cast<std::size_t>(local)]];
+      }
+      lambda = lu.solve(rhs);
+      solved_dual = lu.info() == Eigen::Success && lambda.allFinite();
+    }
+  }
+  if (!solved_dual) {
+    if (state.factorizations >=
+        std::max(0, opt.phase_one_max_factorizations)) {
+      state.budget_exhausted = true;
+      state.termination = "factorization-budget-after-primal";
+      return false;
+    }
+    // Nocedal--Wright (2006), Section 11.1: structural fallback fits equality
+    // multipliers once by least squares on Jg' lambda = -r.
+    Eigen::SparseQR<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>> qr;
+    qr.compute(jg.transpose());
+    ++state.factorizations;
+    if (qr.info() != Eigen::Success) return false;
+    lambda = qr.solve(-stationarity_without_equalities);
+    solved_dual = qr.info() == Eigen::Success && lambda.allFinite();
+  }
+  if (!solved_dual) return false;
+  const Eigen::VectorXd stationarity =
+      stationarity_without_equalities + jg.transpose() * lambda;
+  const double multiplier_scale = 1.0 + std::max(
+      inf_norm(lambda), inf_norm(mu));
+  if (!state.basic_columns.empty()) {
+    double basic_residual = 0.0;
+    for (int col : state.basic_columns) {
+      basic_residual = std::max(basic_residual, std::abs(stationarity[col]));
+    }
+    state.dual_fit_residual = basic_residual / multiplier_scale;
+  } else {
+    state.dual_fit_residual = inf_norm(jg * stationarity) / multiplier_scale;
+  }
+  state.dual_initialized = std::isfinite(state.dual_fit_residual) &&
+      state.dual_fit_residual <= std::max(1e-6, 10.0 * opt.tol_dual) &&
+      (z.array() > 0.0).all() && (mu.array() > 0.0).all();
+  state.perturbed_primal_residual = std::max(
+      inf_norm(equality), inf_norm(rh + z));
+  state.centrality = z.size() == 0 ? 0.0 :
+      (z.cwiseProduct(mu).array() / state.barrier_mu - 1.0)
+          .abs().maxCoeff();
+  const double centrality_tolerance =
+      std::isfinite(opt.phase_one_centrality_tolerance)
+      ? std::max(0.0, opt.phase_one_centrality_tolerance) : 0.5;
+  state.central_start_accepted = state.dual_initialized &&
+      std::isfinite(state.perturbed_primal_residual) &&
+      state.perturbed_primal_residual <= state.handoff_primal_tolerance &&
+      std::isfinite(state.centrality) &&
+      state.centrality <= centrality_tolerance;
+  if (!state.dual_initialized) {
+    state.rejection_reason = "dual initialization failed";
+  } else if (state.perturbed_primal_residual >
+             state.handoff_primal_tolerance) {
+    state.rejection_reason = "perturbed primal residual exceeds corridor";
+  } else if (state.centrality > centrality_tolerance) {
+    state.rejection_reason = "complementarity centrality exceeds tolerance";
+  }
+  if (state.central_start_accepted) {
+    state.termination = "central-corridor-certified";
+  }
+  if (state.dual_initialized && state.linear_solver == "unselected") {
+    state.linear_solver = "sparse-qr";
+  }
+  return state.central_start_accepted;
+}
+
 }  // namespace
+
+struct IPMPreparedState::Impl {
+  SparseKKTCache sparse_cache;
+};
+
+IPMPreparedState::IPMPreparedState() : impl_(std::make_unique<Impl>()) {}
+IPMPreparedState::~IPMPreparedState() = default;
+IPMPreparedState::IPMPreparedState(IPMPreparedState&&) noexcept = default;
+IPMPreparedState& IPMPreparedState::operator=(IPMPreparedState&&) noexcept =
+    default;
+void IPMPreparedState::reset() { impl_ = std::make_unique<Impl>(); }
+
+IPMInitialPointDiagnostics evaluate_ipm_initial_point(
+    const Problem& prob, const Eigen::VectorXd& primal_start) {
+  IPMInitialPointDiagnostics diagnostics;
+  const int n = prob.vidx.n_total;
+  if (primal_start.size() != n || !primal_start.allFinite()) {
+    return diagnostics;
+  }
+  Eigen::VectorXd xmin;
+  Eigen::VectorXd xmax;
+  build_variable_bounds(prob, xmin, xmax);
+  Eigen::VectorXd x = primal_start;
+  for (int i = 0; i < n; ++i) {
+    if (std::isfinite(xmin[i]) && std::isfinite(xmax[i])) {
+      const double width = std::max(0.0, xmax[i] - xmin[i]);
+      const double eps =
+          std::min(1e-6 * std::max(1.0, width), 0.49 * width);
+      x[i] = std::clamp(x[i], xmin[i] + eps, xmax[i] - eps);
+    } else if (std::isfinite(xmin[i])) {
+      x[i] = std::max(x[i], xmin[i] + 1e-8);
+    } else if (std::isfinite(xmax[i])) {
+      x[i] = std::min(x[i], xmax[i] - 1e-8);
+    }
+  }
+  std::vector<int> lb_cols;
+  std::vector<int> ub_cols;
+  for (int i = 0; i < n; ++i) {
+    if (std::isfinite(xmin[i])) lb_cols.push_back(i);
+    if (std::isfinite(xmax[i])) ub_cols.push_back(i);
+  }
+  Eigen::VectorXd rh;
+  Eigen::SparseMatrix<double> dh;
+  assemble_inequalities(prob, x, xmin, xmax, lb_cols, ub_cols, rh, dh);
+  if (!rh.allFinite()) return diagnostics;
+  Eigen::VectorXd z(rh.size());
+  Eigen::VectorXd mu(rh.size());
+  for (int i = 0; i < rh.size(); ++i) {
+    z[i] = rh[i] >= 0.0 ? std::max(rh[i], 1.0)
+                        : std::max(-rh[i], 1e-2);
+    mu[i] = std::max(1.0 / z[i], 1e-2);
+  }
+  Eigen::VectorXd gradient;
+  Eigen::VectorXd hdiag;
+  objective_gradient_hessian_diag(prob, x, gradient, hdiag);
+  const double gradient_norm = inf_norm(gradient);
+  const double objective_scale =
+      gradient_norm > 100.0 ? 100.0 / gradient_norm : 1.0;
+  EvalWorkspace workspace;
+  Eigen::VectorXd equality;
+  equality_constraints(prob, x, workspace, equality);
+  const Eigen::VectorXd stationarity =
+      objective_scale * gradient + dh.transpose() * mu;
+  const double raw_primal = std::max(
+      inf_norm(equality), rh.size() > 0 ? std::max(0.0, rh.maxCoeff()) : 0.0);
+  diagnostics.primal_inf = raw_primal /
+      (1.0 + std::max(inf_norm(x), inf_norm(z)));
+  diagnostics.dual_inf = inf_norm(stationarity) /
+      (1.0 + inf_norm(mu));
+  diagnostics.complementarity = rh.size() > 0
+      ? z.dot(mu) / static_cast<double>(rh.size()) /
+            (1.0 + inf_norm(x))
+      : 0.0;
+  diagnostics.valid = std::isfinite(diagnostics.primal_inf) &&
+      std::isfinite(diagnostics.dual_inf) &&
+      std::isfinite(diagnostics.complementarity);
+  return diagnostics;
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Mehrotra Predictor-Corrector IPM
@@ -918,6 +2134,19 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
       opt.inequality_dual_start->minCoeff() > 0.0 &&
       opt.slack_start->minCoeff() > 0.0;
 
+  const Eigen::VectorXd phase_two_fallback_x = x;
+  PhaseOneState phase_one;
+  const auto phase_one_started = std::chrono::steady_clock::now();
+  if (opt.enable_phase_one && !compatible_dual_start) {
+    phase_one = restore_phase_one_primal(
+        prob, x, xmin, xmax, lb_cols, ub_cols, opt);
+    assemble_inequalities(prob, x, xmin, xmax, lb_cols, ub_cols, rh, dh);
+  } else if (compatible_dual_start) {
+    phase_one.termination = "continuation-state-preserved";
+  } else {
+    phase_one.termination = "disabled";
+  }
+
   // Slack initialization: use a larger minimum floor (1.0) to ensure a
   // well-conditioned condensed KKT from a cold start.  A compatible warm
   // start instead preserves the previous central-path state.
@@ -943,6 +2172,25 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
   Eigen::VectorXd lambda = compatible_dual_start
                                ? *opt.equality_dual_start
                                : Eigen::VectorXd::Zero(meq);
+  DispatchDualPredictorDiagnostics dispatch_dual_predictor;
+  if (opt.enable_phase_one && !compatible_dual_start) {
+    const bool phase_one_accepted = initialize_phase_one_duals(
+        prob, x, rh, dh, opt, phase_one, z, mu, lambda);
+    if (!phase_one_accepted) {
+      // Phase I is a warm-start producer, not an alternative infeasible-start
+      // trajectory. Only its certified primal/dual state may alter Phase II.
+      x = phase_two_fallback_x;
+      assemble_inequalities(prob, x, xmin, xmax, lb_cols, ub_cols, rh, dh);
+      for (int i = 0; i < niq; ++i) {
+        z[i] = (rh[i] >= 0.0) ? std::max(rh[i], 1.0)
+                              : std::max(-rh[i], 1e-2);
+        mu[i] = std::max(1.0 / z[i], 1e-2);
+      }
+      lambda.setZero();
+    }
+    phase_one.runtime_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - phase_one_started).count();
+  }
 
   const double tau = opt.alpha_max;  // fraction-to-boundary factor
 
@@ -988,6 +2236,24 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
 
   equality_constraints(prob, x, eq_ws, rg);
   equality_jacobian(prob, x, eq_ws, jg);
+
+  if (opt.enable_phase_one && opt.phase_one_dispatch_dual_predictor &&
+      warm_start_used && !compatible_dual_start &&
+      !phase_one.central_start_accepted) {
+    dispatch_dual_predictor = predict_component_dispatch_duals(
+        prob, x, xmin, xmax, grad, obj_scale, jg, dh, mu,
+        opt.phase_one_dispatch_dual_min_improvement, lambda);
+  } else if (!opt.phase_one_dispatch_dual_predictor) {
+    dispatch_dual_predictor.status = "disabled";
+  } else if (!warm_start_used) {
+    dispatch_dual_predictor.status = "not-attempted: no primal warm start";
+  } else if (compatible_dual_start) {
+    dispatch_dual_predictor.status =
+        "not-attempted: continuation state preserved";
+  } else if (phase_one.central_start_accepted) {
+    dispatch_dual_predictor.status =
+        "not-attempted: central Phase-I state accepted";
+  }
 
   // Lagrangian gradient: Lx = obj_scale·∇f + Jg'·λ + Jh'·μ
   Eigen::VectorXd Lx = obj_scale * grad + jg.transpose() * lambda + dh.transpose() * mu;
@@ -1040,6 +2306,52 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
   IPMResult out;
   out.status = "maximum iterations reached";
   out.warm_start_used = warm_start_used;
+  out.phase_one_initial_violation = phase_one.initial_violation;
+  out.phase_one_constraint_violation = phase_one.final_violation;
+  out.phase_one_dual_fit_residual = phase_one.dual_fit_residual;
+  out.phase_one_primal_feasible = phase_one.primal_feasible;
+  out.phase_one_in_handoff_corridor = phase_one.in_handoff_corridor;
+  out.phase_one_dual_initialized = phase_one.dual_initialized;
+  out.phase_one_handoff_primal_tolerance =
+      phase_one.handoff_primal_tolerance;
+  out.phase_one_perturbed_primal_residual =
+      phase_one.perturbed_primal_residual;
+  out.phase_one_centrality = phase_one.centrality;
+  out.phase_one_barrier_mu = phase_one.barrier_mu;
+  out.phase_one_budget_exhausted = phase_one.budget_exhausted;
+  out.phase_one_iterations = phase_one.iterations;
+  out.phase_one_factorizations = phase_one.factorizations;
+  out.phase_one_backtracks = phase_one.backtracks;
+  out.phase_one_structural_step_attempted =
+      phase_one.structural_step_attempted;
+  out.phase_one_structural_step_accepted =
+      phase_one.structural_step_accepted;
+  out.phase_one_structural_factorizations =
+      phase_one.structural_factorizations;
+  out.phase_one_structural_violation = phase_one.structural_violation;
+  out.phase_one_structure = phase_one.structure;
+  out.phase_one_runtime_ms = phase_one.runtime_ms;
+  out.phase_one_termination = phase_one.termination;
+  out.phase_one_linear_solver = phase_one.linear_solver;
+  out.dispatch_dual_predictor_attempted =
+      dispatch_dual_predictor.attempted;
+  out.dispatch_dual_predictor_accepted =
+      dispatch_dual_predictor.accepted;
+  out.dispatch_dual_predictor_runtime_ms =
+      dispatch_dual_predictor.runtime_ms;
+  out.dispatch_dual_predictor_baseline_raw =
+      dispatch_dual_predictor.baseline_raw;
+  out.dispatch_dual_predictor_candidate_raw =
+      dispatch_dual_predictor.candidate_raw;
+  out.dispatch_dual_predictor_baseline_normalized =
+      dispatch_dual_predictor.baseline_normalized;
+  out.dispatch_dual_predictor_candidate_normalized =
+      dispatch_dual_predictor.candidate_normalized;
+  out.dispatch_dual_predictor_status =
+      std::move(dispatch_dual_predictor.status);
+  out.phase_two_start_accepted = compatible_dual_start ||
+                                 phase_one.central_start_accepted;
+  out.phase_two_start_rejection_reason = phase_one.rejection_reason;
   out.initial_primal_inf = feascond;
   out.initial_dual_inf = gradcond;
   out.initial_complementarity = compcond;
@@ -1068,7 +2380,23 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
       dense_backend_forced() ||
       (!has_linear_solver_override() && kDenseAutoKktDim > 0 && kkt_dim <= kDenseAutoKktDim);
   DenseKKTCache dense_cache;
-  SparseKKTCache sparse_cache;
+  SparseKKTCache local_sparse_cache;
+  SparseKKTCache& sparse_cache =
+      opt.prepared_state != nullptr
+          ? opt.prepared_state->impl_->sparse_cache
+          : local_sparse_cache;
+  const int symbolic_analyze_calls_before = sparse_cache.symbolic_analyze_calls;
+  const int backend_escalations_before = sparse_cache.backend_escalations;
+  const int scaling_rebuilds_before = sparse_cache.scaling_rebuilds;
+  const bool had_prepared_symbolic = std::any_of(
+      std::begin(sparse_cache.analyzed_dim),
+      std::end(sparse_cache.analyzed_dim),
+      [](int dimension) { return dimension >= 0; });
+  // Numeric values and Ruiz scaling belong to one solve. Only backend ordering
+  // and analyzePattern state survive through IPMPreparedState.
+  sparse_cache.factored = false;
+  sparse_cache.solve_degraded = false;
+  sparse_cache.scale.resize(0);
   // Structure-aware backend selection (see backend_order): a problem is KLU-
   // eligible only when it has no DC / VSC / DC-DC / energy-router subsystems,
   // i.e. it is a pure AC network.  Hybrid AC/DC KKTs need the MUMPS LDLᵀ
@@ -2133,9 +3461,25 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
       default: out.linear_solver = "sparse"; break;
     }
   }
-  out.symbolic_analyze_calls = sparse_cache.symbolic_analyze_calls;
-  out.backend_escalations = sparse_cache.backend_escalations;
-  out.scaling_rebuilds = sparse_cache.scaling_rebuilds;
+  out.symbolic_analyze_calls =
+      sparse_cache.symbolic_analyze_calls - symbolic_analyze_calls_before;
+  out.symbolic_reused = opt.prepared_state != nullptr &&
+                        had_prepared_symbolic &&
+                        out.factorization_calls > 0 &&
+                        out.symbolic_analyze_calls == 0;
+  out.backend_escalations =
+      sparse_cache.backend_escalations - backend_escalations_before;
+  out.scaling_rebuilds = sparse_cache.scaling_rebuilds - scaling_rebuilds_before;
+  if (opt.prepared_numeric_refactor) {
+    // Eigen's SuiteSparse adapters and the current MUMPS wrapper expose a fresh
+    // numeric factorize after symbolic analysis, but no distinct cross-solve
+    // factor object whose drift can be audited before use. Fail closed rather
+    // than labelling ordinary numeric factorization as reuse.
+    out.numeric_refactor_status =
+        "unsupported: backend recomputes numeric factors after symbolic reuse";
+  } else {
+    out.numeric_refactor_status = "not-requested";
+  }
   return out;
 }
 

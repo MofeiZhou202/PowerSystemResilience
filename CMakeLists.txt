@@ -758,8 +758,8 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/opf_numerical_benchmark.cpp")
   add_executable(opf_numerical_benchmark tools/opf_numerical_benchmark.cpp)
   target_link_libraries(opf_numerical_benchmark PRIVATE hacdcpf::hacdcpf)
   target_compile_options(opf_numerical_benchmark PRIVATE
-    $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3 -DNDEBUG>
-    $<$<CXX_COMPILER_ID:MSVC>:/O2 /DNDEBUG>)
+    $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3 -DNDEBUG -Wall -Wextra -Wpedantic>
+    $<$<CXX_COMPILER_ID:MSVC>:/O2 /DNDEBUG /W4>)
   hacdcpf_copy_opendss_runtime(opf_numerical_benchmark)
 endif()
 
@@ -965,6 +965,14 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/phase_hybrid_opf_benchmark.cpp")
     $<$<CXX_COMPILER_ID:MSVC>:/O2 /DNDEBUG>)
   hacdcpf_copy_opendss_runtime(phase_hybrid_opf_benchmark)
 endif()
+
+add_executable(phase_one_restoration_benchmark
+  tools/phase_one_restoration_benchmark.cpp)
+target_link_libraries(phase_one_restoration_benchmark PRIVATE hacdcpf::hacdcpf)
+target_compile_definitions(phase_one_restoration_benchmark PRIVATE
+  HACDCPF_BOUNDED_PHASE_ONE=1
+  HACDCPF_MATPOWER_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/external_data/matpower")
+hacdcpf_copy_opendss_runtime(phase_one_restoration_benchmark)
 
 # ── SPPT Verified-Intelligent-Modeling agent-loop demo (Alg. 2 / Thm. 8.9) ───
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/sppt_agent_demo.cpp")

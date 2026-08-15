@@ -69,6 +69,7 @@ struct GlobalizationOptions {
 struct PVPQSwitchingOptions {
   double pv_q_hysteresis_pu{0.01};
   double pv_recover_vm_tol_pu{0.01};
+  int    pv_pq_max_outer_iterations{30};
   bool   enable_pv_pq_conversion{true};
   bool   enable_auto_swing_selection{true};
 };
@@ -116,6 +117,7 @@ struct PowerFlowOptions {
 
   double pv_q_hysteresis_pu{0.01};
   double pv_recover_vm_tol_pu{0.01};
+  int pv_pq_max_outer_iterations{30};
 
   double converter_vdc_switch_high_pu{0.03};
   double converter_vdc_switch_low_pu{0.01};

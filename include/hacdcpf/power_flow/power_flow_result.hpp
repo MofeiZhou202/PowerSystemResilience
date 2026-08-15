@@ -111,6 +111,10 @@ struct SolverProfiling {
   int rejected_steps{0};
   int pv_to_pq_switches{0};
   int pq_to_pv_switches{0};
+  int pv_pq_outer_iterations{0};
+  int pv_pq_repeated_active_sets{0};
+  int smooth_ncp_continuation_updates{0};
+  double smooth_ncp_final_mu{0.0};
   int converter_mode_switches{0};
   std::vector<double> residual_by_iter;
   std::vector<int> line_search_evals_by_iter;
@@ -126,6 +130,15 @@ struct SolverProfiling {
   double condition_estimate{0.0};
   int regularization_count{0};
   std::string linear_solver_status{"not_run"};
+};
+
+struct ReactiveLimitDiagnostics {
+  bool enforcement_requested{false};
+  bool certified{false};
+  bool active_set_cycle_detected{false};
+  bool outer_iteration_limit_reached{false};
+  int active_limited_buses{0};
+  double max_violation_pu{0.0};
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -253,6 +266,7 @@ struct PowerFlowResult {
   double residual{0.0};
   SolverProfiling profiling;
   SolverDiagnostics diagnostics;
+  ReactiveLimitDiagnostics reactive_limits;
   std::vector<BranchFlow> branch_flows;
   // Solver-native canonical branch space, retained before public results are
   // mapped back to authored branches. Downstream supplied-PF analyses consume
@@ -289,6 +303,9 @@ struct AdaptiveSolveResult {
   double residual{0.0};
   std::vector<IslandInfo> islands;
   std::vector<BranchFlow> branch_flows;
+  SolverDiagnostics diagnostics;
+  SolverProfiling profiling;
+  ReactiveLimitDiagnostics reactive_limits;
 };
 
 struct IslandedSolveResult {

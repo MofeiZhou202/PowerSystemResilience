@@ -1805,7 +1805,10 @@ void initialize_primal_dual_start(const engine::NLPModel& nlp,
       nonlinear_inequalities.size() > 0
           ? std::max(0.0, nonlinear_inequalities.maxCoeff())
           : 0.0);
-  if (primal_neighborhood > 1e-5) return;
+  const double dual_initialization_neighborhood =
+      options.central_warm_start
+      ? options.central_warm_start_primal_tolerance : 1e-5;
+  if (primal_neighborhood > dual_initialization_neighborhood) return;
 
   std::vector<int> lower_bound_variables;
   std::vector<int> upper_bound_variables;
@@ -1857,9 +1860,18 @@ void initialize_primal_dual_start(const engine::NLPModel& nlp,
   // Slack is a primal state tied to the current Full point by h(x)+s=0.  A
   // reduced-model slack cannot be copied after voltage recovery; reconstruct
   // it first, then transfer the inequality multiplier.
+  const double max_positive_inequality = inequality_values.size() > 0
+      ? std::max(0.0, inequality_values.maxCoeff()) : 0.0;
+  // Use the remaining central-corridor margin to bound mu_i=mu_0/s_i while
+  // retaining h_i+s_i<=epsilon_p. This is O(m) and adds no KKT factorization.
+  const double slack_floor = options.central_warm_start
+      ? std::max(2e-10,
+          0.5 * (options.central_warm_start_primal_tolerance -
+                 max_positive_inequality))
+      : 1e-2;
   options.slack_start = has_inequality_dual_seed
       ? (-inequality_values.array()).max(2e-10).matrix()
-      : (-inequality_values.array()).max(1e-2).matrix();
+      : (-inequality_values.array()).max(slack_floor).matrix();
   if (!has_inequality_dual_seed && slack_seed != nullptr &&
       slack_seed->size() == nonlinear_count && slack_seed->allFinite() &&
       (slack_seed->array() > 0.0).all()) {
@@ -2276,7 +2288,11 @@ PhaseOneRestorationResult restore_primal_feasibility(
       basis.makeCompressed();
       if (!basis_pattern_analyzed) {
         basis_solver.analyzePattern(basis);
-        basis_pattern_analyzed = basis_solver.info() == Eigen::Success;
+        // Eigen SparseLU reports numerical status after factorize()/compute();
+        // analyzePattern() only prepares the symbolic ordering.  Gating the
+        // numerical factorization on info() here silently disabled the
+        // Nocedal--Wright (2006), Section 11.1 state/basic Newton path.
+        basis_pattern_analyzed = true;
       }
       if (basis_pattern_analyzed) {
         basis_solver.factorize(basis);
@@ -2785,7 +2801,22 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf_impl(
       std::numeric_limits<double>::infinity();
   double phase_one_constraint_violation =
       std::numeric_limits<double>::infinity();
-  double phase_one_tolerance = 0.0;
+  const double phase_one_barrier_mu = std::clamp(
+      std::isfinite(options.phase_one_barrier_mu) &&
+              options.phase_one_barrier_mu > 0.0
+          ? options.phase_one_barrier_mu
+          : 0.1,
+      1e-12, 0.1);
+  const double phase_one_primal_mu_factor =
+      std::isfinite(options.phase_one_primal_mu_factor)
+      ? std::max(0.0, options.phase_one_primal_mu_factor) : 0.1;
+  const double phase_one_tolerance = std::max(
+      options.tolerance,
+      phase_one_primal_mu_factor * phase_one_barrier_mu);
+  const double phase_one_admission_mu_factor =
+      std::isfinite(options.phase_one_admission_mu_factor)
+      ? std::max(0.0, options.phase_one_admission_mu_factor) : 1.0;
+  bool phase_one_admitted = false;
   bool phase_one_dual_initialized = false;
   PhaseOneRestorationResult phase_one_result;
   const auto start = std::chrono::steady_clock::now();
@@ -2796,6 +2827,9 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf_impl(
           std::chrono::steady_clock::now() - phase_one_started).count();
     };
     double start_primal_residual = phase_one_violation(nlp, nlp.x0);
+    phase_one_admitted = std::isfinite(start_primal_residual) &&
+        start_primal_residual <=
+            phase_one_admission_mu_factor * phase_one_barrier_mu;
     log_stage("initial residual=" + std::to_string(start_primal_residual));
     if (options.verbose) {
       Eigen::VectorXd debug_equalities;
@@ -2833,26 +2867,31 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf_impl(
       }
     }
 
-    // Phase I constructs a feasible primal point and fits multipliers on the
-    // state/basic equations. It intentionally leaves the control-space
-    // reduced gradient for Phase II. Phase II may preserve the primal point
-    // only if the independent MIPSolvers audit accepts the same tolerance.
-    phase_one_tolerance = std::min(options.tolerance, 1e-7);
+    // Phase I enters an eta_p*mu_0 central corridor and fits multipliers on
+    // the state/basic equations. It intentionally leaves the control-space
+    // reduced gradient for Phase II. Final feasibility remains Phase II's
+    // strict options.tolerance contract. Waechter--Biegler (2006), Sec. 2--3.
     log_stage("Phase I primal restoration: start");
     Eigen::VectorXd restored_start = nlp.x0;
-    phase_one_result = restore_primal_feasibility(
-        nlp, restored_start, phase_one_tolerance,
-        options.phase_one_max_iterations,
-        options.phase_one_max_factorizations,
-        options.phase_one_max_backtracks,
-        options.phase_one_time_limit_ms);
-    if (restored_start.allFinite()) nlp.x0 = std::move(restored_start);
+    if (phase_one_admitted) {
+      phase_one_result = restore_primal_feasibility(
+          nlp, restored_start, phase_one_tolerance,
+          options.phase_one_max_iterations,
+          options.phase_one_max_factorizations,
+          options.phase_one_max_backtracks,
+          options.phase_one_time_limit_ms);
+      if (restored_start.allFinite()) nlp.x0 = std::move(restored_start);
+    } else {
+      phase_one_result.initial_violation = start_primal_residual;
+      phase_one_result.final_violation = start_primal_residual;
+      phase_one_result.termination = "outside-phase-one-admission";
+    }
     start_primal_residual = phase_one_violation(nlp, nlp.x0);
     log_stage("Phase I primal restoration: " +
               phase_one_result.termination + " (p=" +
               std::to_string(start_primal_residual) + ")");
 
-    if (options.warm_start_with_ipopt &&
+    if (phase_one_admitted && options.warm_start_with_ipopt &&
         options.phase_one_time_limit_ms <= 0.0 &&
         start_primal_residual > 1e-5) {
       log_stage("Ipopt warm solve: start");
@@ -2899,15 +2938,19 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf_impl(
     }
     engine::IPMOptions ipm_options;
     ipm_options.max_iter = options.max_iterations;
-    ipm_options.tol_primal = phase_one_tolerance;
+    ipm_options.tol_primal = options.tolerance;
     ipm_options.tol_dual = options.tolerance;
     ipm_options.tol_complementarity = options.tolerance;
     ipm_options.tol_accept = 0.0;
     ipm_options.globalization = engine::Globalization::Filter;
     ipm_options.scale_problem = false;
     ipm_options.verbose = options.verbose;
-    ipm_options.primal_feasible_start = true;
-    ipm_options.preserve_initial_point = true;
+    ipm_options.central_warm_start = phase_one_admitted;
+    ipm_options.central_warm_start_primal_tolerance = phase_one_tolerance;
+    ipm_options.central_warm_start_centrality_tolerance =
+        std::isfinite(options.phase_one_centrality_tolerance)
+        ? std::max(0.0, options.phase_one_centrality_tolerance) : 0.5;
+    ipm_options.mu_init = phase_one_barrier_mu;
     const Eigen::VectorXd* equality_dual_seed =
         options.equality_dual_start.size() == data->layout.neq
             ? &options.equality_dual_start : nullptr;
@@ -2955,6 +2998,10 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf_impl(
                                  remaining_factorizations,
                                  &dual_factorizations);
     phase_one_result.factorizations += dual_factorizations;
+    if (dual_factorizations > 0 &&
+        phase_one_result.linear_solver == "unselected") {
+      phase_one_result.linear_solver = "sparse-basis-lu";
+    }
     phase_one_result.runtime_ms = phase_one_elapsed_ms();
     phase_one_constraint_violation = phase_one_violation(nlp, nlp.x0);
     // docs/OptimalPowerFlow/chapters/three_phase.tex,
@@ -2987,6 +3034,9 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf_impl(
     engine::NativeIPMAdapter native(ipm_options);
     log_stage("Phase II NativeIPM: start");
     std::tie(solved, detail) = native.solve_nlp_detail(nlp);
+    if (detail.central_warm_start_accepted) {
+      phase_one_result.termination = "central-corridor-certified";
+    }
     log_stage("Phase II NativeIPM: done (status=" + solved.stats.status + ")");
   } else {
     engine::IpoptAdapter ipopt;
@@ -3032,8 +3082,21 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf_impl(
   result.phase_one_primal_feasible =
       options.backend == SolverBackend::NativeIPM &&
       std::isfinite(phase_one_constraint_violation) &&
+      phase_one_constraint_violation <= options.tolerance;
+  result.phase_one_in_handoff_corridor =
+      options.backend == SolverBackend::NativeIPM &&
+      std::isfinite(phase_one_constraint_violation) &&
       phase_one_constraint_violation <= phase_one_tolerance;
   result.phase_one_dual_initialized = phase_one_dual_initialized;
+  result.phase_one_handoff_primal_tolerance = phase_one_tolerance;
+  result.phase_one_perturbed_primal_residual =
+      detail.central_warm_start_requested
+      ? detail.central_warm_start_primal_residual
+      : std::numeric_limits<double>::infinity();
+  result.phase_one_centrality = detail.central_warm_start_requested
+      ? detail.central_warm_start_centrality
+      : std::numeric_limits<double>::infinity();
+  result.phase_one_barrier_mu = phase_one_barrier_mu;
   result.phase_one_budget_exhausted =
       phase_one_result.budget_exhausted ||
       (options.backend == SolverBackend::NativeIPM &&
@@ -3047,9 +3110,11 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf_impl(
   result.phase_one_termination = phase_one_result.termination;
   result.phase_one_linear_solver = phase_one_result.linear_solver;
   result.phase_two_start_requested =
-      detail.primal_feasible_start_requested;
+      detail.central_warm_start_requested;
   result.phase_two_start_accepted =
-      detail.primal_feasible_start_accepted;
+      detail.central_warm_start_accepted;
+  result.phase_two_start_rejection_reason =
+      detail.central_warm_start_rejection_reason;
   result.phase_two_linear_solver_backend = detail.linear_solver_backend;
   Eigen::VectorXd initial_g;
   Eigen::VectorXd initial_h;

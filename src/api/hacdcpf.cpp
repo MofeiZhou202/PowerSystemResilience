@@ -2211,6 +2211,7 @@ PowerFlowOptions PowerFlowOptions::from_parts(
   // PV/PQ switching
   o.pv_q_hysteresis_pu        = switching.pv_q_hysteresis_pu;
   o.pv_recover_vm_tol_pu      = switching.pv_recover_vm_tol_pu;
+  o.pv_pq_max_outer_iterations = switching.pv_pq_max_outer_iterations;
   o.enable_pv_pq_conversion   = switching.enable_pv_pq_conversion;
   o.enable_auto_swing_selection = switching.enable_auto_swing_selection;
 

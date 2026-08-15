@@ -74,6 +74,41 @@ static HybridPowerSystem make_2bus() {
     return sys;
 }
 
+TEST_CASE("JSON branch ideal-connectivity provenance is explicit and legacy BPA migration is scoped",
+          "[io][json][roundtrip][bpa][projection]") {
+    auto explicit_model = make_2bus();
+    explicit_model.ac.branches.front().ideal_connectivity = true;
+    explicit_model.ac.branches.front().parameter_source =
+        "bpa_dsp_ideal_connectivity";
+    const auto explicit_round_trip = from_json(to_json(explicit_model));
+    REQUIRE(explicit_round_trip.ac.branches.size() == 1);
+    CHECK(explicit_round_trip.ac.branches.front().ideal_connectivity);
+
+    auto legacy_model = make_2bus();
+    auto& tie = legacy_model.ac.branches.front();
+    tie.name = "L_LEGACY_A_LEGACY_B";
+    tie.r_pu = 0.0;
+    tie.x_pu = 1e-4;
+    tie.b_pu = 0.0;
+    tie.length_km = 0.0;
+    tie.rate_a_mva = 0.0;
+    auto legacy_json = nlohmann::json::parse(to_json(legacy_model));
+    legacy_json["ac"]["branches"][0].erase("ideal_connectivity");
+    legacy_json["ac"]["generators"][0]["bpa_is_bq"] = false;
+    legacy_json["ac"]["generators"][0]["bpa_source_order"] = 42;
+    const auto migrated = from_json(legacy_json.dump());
+    REQUIRE(migrated.ac.branches.size() == 1);
+    CHECK(migrated.ac.branches.front().ideal_connectivity);
+    CHECK(migrated.ac.branches.front().parameter_source ==
+          "legacy_bpa_dsp_numerical_tie");
+
+    legacy_json["ac"]["generators"][0].erase("bpa_is_bq");
+    legacy_json["ac"]["generators"][0].erase("bpa_source_order");
+    const auto ordinary = from_json(legacy_json.dump());
+    REQUIRE(ordinary.ac.branches.size() == 1);
+    CHECK_FALSE(ordinary.ac.branches.front().ideal_connectivity);
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // JSON round-trip: simple 2-bus system
 // ═════════════════════════════════════════════════════════════════════════════

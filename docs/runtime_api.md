@@ -1,6 +1,6 @@
 # Runtime API Contract
 
-Updated: 2026-08-10
+Updated: 2026-08-14
 
 The GUI server is implemented in `tests/run_gui_server.cpp`. Session endpoints
 operate on one loaded `HybridPowerSystem`; a model-changing request clears
@@ -46,6 +46,39 @@ Version 1 currently accepts `power_flow` with `method=ac_newton` and
 `optimal_power_flow` with `network_model=balanced_aggregate` using parity,
 Ipopt, auto, economic dispatch, or DC. Other production analyses remain on the
 legacy routes until their result contracts are migrated.
+
+Parity/auto OPF accepts bounded Phase-I controls under `request.options`:
+`enable_phase_one`, time/iteration/factorization/backtrack budgets, barrier,
+admission, primal-corridor, and centrality parameters. Large pure-AC dispatch
+starts additionally accept `ac_pf_warm_start`, `ac_pf_dc_phase_one`, minimum
+bus count, an end-to-end `ac_pf_dc_phase_one_time_limit_ms` wall budget, DC
+iteration/residual limits, required dual improvement, and the baseline-dual
+trigger. The budget includes projection, formulation, structural initialization,
+symbolic analysis, and numeric iterations; one in-flight sparse factorization
+may overshoot it. Values `<= 0` disable the wall limit. The response returns
+`ipm_profiling` with the effective
+baseline/candidate primal-dual residuals, budget use, admission status, and
+Phase-II acceptance. `parity_formulation_builds=1` certifies that baseline and
+candidate evaluation reused one immutable formulation, while
+`dc_phase_one_symbolic_analyze_calls` reports the separate DC KKT analysis.
+The default-off research controls `phase_one_dispatch_dual_predictor` and
+`phase_one_dispatch_dual_min_improvement` enable a zero-factorization
+component-price candidate. Its attempted/accepted/runtime/status and raw plus
+normalized residual pairs are returned as `dispatch_dual_predictor_*`; a
+rejected candidate does not alter the Phase-II start.
+The same profiling object also carries the prepared-session contract:
+`prepared_session_used`, `formulation_reused`, `mapping_reused`,
+`symbolic_reused`, `continuation_state_reused`, `numeric_refactor_*`, and
+`prepared_session_invalidation_reason`. The HTTP endpoint currently performs
+standalone solves, so `prepared_session_used=false`; the owning repeated-solve
+API is `opf::PreparedACOPFSession` in C++. These fields are still returned so a
+future session-aware HTTP scheduler can adopt the contract without changing
+the response schema. Numeric-factor reuse fails closed: the current backends
+recompute numeric factors after a reusable symbolic ordering and report an
+explicit `unsupported` status when the experimental request is enabled.
+Non-finite inactive residuals are JSON `null`. A DC
+iteration-limit point is returned only as `phase_one_warm_start_only=true`; it
+does not set `converged=true` or claim DCOPF optimality.
 
 Queued cancellation is immediate. A running PF/OPF solver currently has no
 cooperative cancellation token; its state becomes `cancelling`, its eventual
@@ -95,6 +128,18 @@ is dirty. Result playback never synchronizes or changes the model.
 | `POST /api/session/harmonics*` | Harmonic PF, three-phase, frequency scan, metrics, and Newton variants. |
 | `POST /api/session/run_reliability*` | Non-sequential, sequential, FMEA, feeder, and three-stage reliability. |
 | `POST /api/session/run_reconfig` | Topology reconfiguration. |
+
+Balanced Newton PF accepts `enable_pv_pq_conversion` and the bounded
+`pv_pq_max_outer_iterations` control. The response `reactive_limits` object
+reports whether generator Q-limit enforcement was requested and certified,
+whether an active-set signature repeated, whether the outer budget was
+exhausted, switch counts, active limited buses, and maximum violation in pu.
+The corresponding validity flags are
+`generator_reactive_limits_enforced` and
+`generator_reactive_limits_certified`. The GUI default is fast screening with
+conversion disabled; a converged screening result must not be interpreted as a
+Q-limit-certified engineering result. The switching and smooth-NCP theory is
+specified in [the PV/PQ contract](pv_pq_switching_contract.md).
 
 Specialized production routes for resilience, hosting capacity, campus IES,
 EV traffic, lifecycle, scenario generation, and SPPT remain discoverable in

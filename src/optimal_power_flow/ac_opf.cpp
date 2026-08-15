@@ -1,5 +1,4 @@
-#include "hacdcpf/optimal_power_flow/opf_options.hpp"
-#include "hacdcpf/optimal_power_flow/opf_result.hpp"
+#include "hacdcpf/optimal_power_flow/ac_opf_solver.hpp"
 
 #include <algorithm>
 #include <array>
@@ -8,6 +7,7 @@
 #include <cstdlib>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -19,6 +19,7 @@
 #include <Eigen/SparseCholesky>
 
 #include "hacdcpf/graph/graph.hpp"
+#include "hacdcpf/io/json_io.hpp"
 #include "hacdcpf/power_flow/ac.hpp"
 #include "hacdcpf/power_flow/hybrid.hpp"
 #include "hacdcpf/power_flow/jacobian_builder.hpp"
@@ -27,6 +28,7 @@
 #include "hacdcpf/assembly/solver_data.hpp"
 #include "hacdcpf/projection/project_to_canonical.hpp"
 #include "hacdcpf/optimal_power_flow/formulation.hpp"
+#include "hacdcpf/optimal_power_flow/dc_opf_solver.hpp"
 #include "hacdcpf/optimal_power_flow/native_ipm_solver.hpp"
 #include "hacdcpf/validation/validate_system.hpp"
 
@@ -42,6 +44,32 @@ constexpr double kPi = 3.14159265358979323846;
 constexpr double kDegToRad = kPi / 180.0;
 constexpr double kMinInteriorWidth = 1e-6;
 constexpr double kHugeBound = 1e4;
+
+struct PreparedSessionState {
+  ACOPFOptions options;
+  std::optional<parity::Problem> problem;
+  std::optional<parity::ParityOptions> formulation_options;
+  std::string system_snapshot;
+  std::uint64_t layout_signature{0};
+  parity::IPMPreparedState ipm_state;
+  ACOPFResult previous_result;
+  bool has_previous_result{false};
+};
+
+bool same_formulation_options(const parity::ParityOptions& lhs,
+                              const parity::ParityOptions& rhs) {
+  return lhs.load_shedding == rhs.load_shedding && lhs.voll == rhs.voll &&
+         lhs.eps_iac == rhs.eps_iac && lhs.objective == rhs.objective &&
+         lhs.voltage_target_pu == rhs.voltage_target_pu &&
+         lhs.voltage_deviation_weight == rhs.voltage_deviation_weight &&
+         lhs.active_loss_weight == rhs.active_loss_weight &&
+         lhs.enforce_branch_limits == rhs.enforce_branch_limits &&
+         lhs.enforce_converter_capacity == rhs.enforce_converter_capacity &&
+         lhs.enforce_converter_current_limits ==
+             rhs.enforce_converter_current_limits &&
+         lhs.enforce_converter_modulation_limits ==
+             rhs.enforce_converter_modulation_limits;
+}
 
 void unproject_per_bus_ac_opf_result(ACOPFResult& out, const BusMergeMap& map) {
   if (map.ext_to_int.empty() || map.n_original <= 0) {
@@ -2227,11 +2255,19 @@ ACOPFResult build_hybrid_power_flow_warm_start(
   warm.vm = map_power_flow_ac_voltage_to_parity(prob, sys, pf.vm, 1.0);
   warm.va = map_power_flow_ac_voltage_to_parity(prob, sys, pf.va, 0.0);
   warm.vdc = map_power_flow_dc_voltage_to_parity(prob, sys, pf.vdc);
+  std::unordered_map<int, const Generator*> authored_generators;
+  authored_generators.reserve(sys.ac.generators.size());
+  for (const auto& gen : sys.ac.generators)
+    authored_generators.emplace(gen.index, &gen);
   warm.pg_mw.reserve(prob.data.generators.size());
   warm.qg_mvar.reserve(prob.data.generators.size());
   for (const auto& gen : prob.data.generators) {
-    warm.pg_mw.push_back(gen.pg_mw);
-    warm.qg_mvar.push_back(gen.qg_mvar);
+    const auto authored = authored_generators.find(gen.index);
+    const Generator& seed = authored == authored_generators.end()
+        ? gen
+        : *authored->second;
+    warm.pg_mw.push_back(seed.pg_mw);
+    warm.qg_mvar.push_back(seed.qg_mvar);
   }
 
   const auto find_vsc = [&](int index) -> const VSCTransfer* {
@@ -2262,6 +2298,35 @@ ACOPFResult build_hybrid_power_flow_warm_start(
   }
   recover_power_flow_generator_dispatch(prob, warm);
   return warm;
+}
+
+// Reuse the immutable Parity topology/formulation while advancing only the
+// authored operating point that build_initial_point and result fallback read.
+// DC Phase I changes no bounds, costs, admittances, or compact index maps, so
+// rebuilding Problem would duplicate O(n + nnz) storage without changing the
+// NLP. This update is equivalent to the pg/qg/vm/va seed fields of a rebuild.
+void update_parity_operating_point(parity::Problem& prob,
+                                   const HybridPowerSystem& sys) {
+  std::unordered_map<int, const ACBus*> buses;
+  buses.reserve(sys.ac.buses.size());
+  for (const auto& bus : sys.ac.buses) buses.emplace(bus.index, &bus);
+  for (auto& bus : prob.data.ac_buses) {
+    const auto authored = buses.find(bus.index);
+    if (authored == buses.end()) continue;
+    bus.vm_pu = authored->second->vm_pu;
+    bus.va_deg = authored->second->va_deg;
+  }
+
+  std::unordered_map<int, const Generator*> generators;
+  generators.reserve(sys.ac.generators.size());
+  for (const auto& gen : sys.ac.generators)
+    generators.emplace(gen.index, &gen);
+  for (auto& gen : prob.data.generators) {
+    const auto authored = generators.find(gen.index);
+    if (authored == generators.end()) continue;
+    gen.pg_mw = authored->second->pg_mw;
+    gen.qg_mvar = authored->second->qg_mvar;
+  }
 }
 
 #ifdef HACDCPF_HAVE_IPOPT
@@ -2483,8 +2548,10 @@ parity::IPMResult solve_parity_with_ipopt(const parity::Problem& prob,
   return res;
 }
 
-ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptions& opt,
-                                  ParityInnerSolver inner = ParityInnerSolver::Auto) {
+ACOPFResult solve_with_parity_ipm(
+    const HybridPowerSystem& sys, const ACOPFOptions& opt,
+    ParityInnerSolver inner = ParityInnerSolver::Auto,
+    PreparedSessionState* prepared = nullptr) {
   ACOPFResult out;
   // Parity-IPM uses the AML hybrid OPF builder, which enforces the VDC_Q DC-bus
   // voltage equality and the converter capacity circle / quadratic loss.
@@ -2537,9 +2604,102 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
   form_opt.enforce_converter_capacity = opt.enforce_converter_capacity;
   form_opt.enforce_converter_current_limits = opt.enforce_converter_current_limits;
   form_opt.enforce_converter_modulation_limits = opt.enforce_converter_modulation_limits;
-  const parity::Problem prob = parity::build_problem(sys, form_opt);
-  const auto& vidx = prob.vidx;
-  const auto& cidx = prob.cidx;
+  bool dc_phase_one_requested = false;
+  bool dc_phase_one_accepted = false;
+  int dc_phase_one_iterations = 0;
+  double dc_phase_one_runtime_ms = 0.0;
+  double dc_phase_one_time_limit_ms =
+      opt.ac_pf_dc_phase_one_time_limit_ms;
+  bool dc_phase_one_budget_exhausted = false;
+  double dc_phase_one_budget_overshoot_ms = 0.0;
+  int dc_phase_one_symbolic_analyze_calls = 0;
+  int parity_formulation_builds = 0;
+  double dc_phase_one_residual = std::numeric_limits<double>::infinity();
+  double dc_phase_one_candidate_primal =
+      std::numeric_limits<double>::infinity();
+  double dc_phase_one_candidate_dual =
+      std::numeric_limits<double>::infinity();
+  double dc_phase_one_baseline_primal =
+      std::numeric_limits<double>::infinity();
+  double dc_phase_one_baseline_dual =
+      std::numeric_limits<double>::infinity();
+  std::string dc_phase_one_status = "not-requested";
+  const bool pure_ac = sys.dc.buses.empty() && sys.dc.branches.empty() &&
+      sys.vsc_converters.empty() && sys.lcc_converters.empty() &&
+      sys.dc.dcdc_converters.empty() && sys.energy_routers.empty();
+  const bool dc_phase_one_eligible =
+      opt.ac_pf_warm_start && opt.warm_start == nullptr &&
+      opt.ac_pf_dc_phase_one && pure_ac &&
+      static_cast<int>(sys.ac.buses.size()) >=
+          std::max(0, opt.ac_pf_dc_phase_one_min_buses);
+  bool formulation_reused = false;
+  bool mapping_reused = false;
+  bool prepared_structure_invalidated = false;
+  std::string prepared_invalidation_reason = "not-prepared";
+  parity::Problem local_problem;
+  parity::Problem* problem_ptr = nullptr;
+  if (prepared != nullptr) {
+    const std::string snapshot = io::to_json(sys, -1);
+    const bool same_model = prepared->problem.has_value() &&
+        prepared->formulation_options.has_value() &&
+        same_formulation_options(*prepared->formulation_options, form_opt) &&
+        prepared->system_snapshot == snapshot;
+    if (same_model) {
+      problem_ptr = &*prepared->problem;
+      formulation_reused = true;
+      mapping_reused = true;
+      prepared_invalidation_reason = "none";
+    } else if (prepared->problem.has_value() &&
+               prepared->formulation_options.has_value() &&
+               same_formulation_options(*prepared->formulation_options,
+                                        form_opt) &&
+               parity::refresh_problem_numeric_data(*prepared->problem, sys)) {
+      const std::uint64_t refreshed_layout =
+          parity::problem_layout_signature(*prepared->problem);
+      if (refreshed_layout != prepared->layout_signature) {
+        throw std::logic_error(
+            "prepared OPF numeric refresh changed the audited layout");
+      }
+      prepared->system_snapshot = std::move(snapshot);
+      problem_ptr = &*prepared->problem;
+      formulation_reused = true;
+      mapping_reused = true;
+      prepared_invalidation_reason =
+          "numeric-parameters-refreshed: formulation, mapping, and symbolic retained";
+    } else {
+      const bool had_prepared_problem = prepared->problem.has_value();
+      parity::Problem rebuilt = parity::build_problem(sys, form_opt);
+      ++parity_formulation_builds;
+      const std::uint64_t rebuilt_layout =
+          parity::problem_layout_signature(rebuilt);
+      if (prepared->layout_signature == 0) {
+        prepared_invalidation_reason = "initial-build";
+      } else if (prepared->layout_signature == rebuilt_layout &&
+                 !had_prepared_problem) {
+        prepared_invalidation_reason = "initial-build";
+      } else {
+        prepared_structure_invalidated = had_prepared_problem;
+        prepared_invalidation_reason =
+            prepared->layout_signature == rebuilt_layout
+                ? "structural-compatibility-check-failed"
+                : "layout-signature-changed";
+        prepared->ipm_state.reset();
+      }
+      prepared->problem = std::move(rebuilt);
+      prepared->formulation_options = form_opt;
+      prepared->system_snapshot = std::move(snapshot);
+      prepared->layout_signature = rebuilt_layout;
+      problem_ptr = &*prepared->problem;
+    }
+  } else {
+    local_problem = parity::build_problem(sys, form_opt);
+    ++parity_formulation_builds;
+    problem_ptr = &local_problem;
+  }
+  parity::Problem& prob = *problem_ptr;
+  const std::uint64_t layout_signature =
+      prepared != nullptr ? prepared->layout_signature
+                          : parity::problem_layout_signature(prob);
 
   parity::IPMOptions ipm_opt;
   ipm_opt.max_iter = std::max(1, opt.max_inner_iterations * std::max(1, opt.max_outer_iterations));
@@ -2549,11 +2709,33 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
   ipm_opt.regularization = std::max(opt.regularization, 1e-12);
   ipm_opt.alpha_max = std::clamp(opt.interior_fraction, 0.5, 0.9999);
   ipm_opt.verbose = opt.verbose;
+  ipm_opt.enable_phase_one = opt.enable_phase_one;
+  ipm_opt.phase_one_time_limit_ms = opt.phase_one_time_limit_ms;
+  ipm_opt.phase_one_max_iterations = opt.phase_one_max_iterations;
+  ipm_opt.phase_one_max_factorizations = opt.phase_one_max_factorizations;
+  ipm_opt.phase_one_max_backtracks = opt.phase_one_max_backtracks;
+  ipm_opt.phase_one_barrier_mu = opt.phase_one_barrier_mu;
+  ipm_opt.phase_one_admission_mu_factor =
+      opt.phase_one_admission_mu_factor;
+  ipm_opt.phase_one_primal_mu_factor = opt.phase_one_primal_mu_factor;
+  ipm_opt.phase_one_centrality_tolerance =
+      opt.phase_one_centrality_tolerance;
+  ipm_opt.phase_one_dispatch_dual_predictor =
+      opt.phase_one_dispatch_dual_predictor;
+  ipm_opt.phase_one_dispatch_dual_min_improvement =
+      opt.phase_one_dispatch_dual_min_improvement;
+  ipm_opt.prepared_state = prepared != nullptr ? &prepared->ipm_state : nullptr;
+  ipm_opt.prepared_numeric_refactor = opt.prepared_numeric_refactor;
+  ipm_opt.prepared_numeric_max_relative_drift =
+      opt.prepared_numeric_max_relative_drift;
+  ipm_opt.prepared_numeric_backward_error_tolerance =
+      opt.prepared_numeric_backward_error_tolerance;
   Eigen::VectorXd primal_warm_start;
   Eigen::VectorXd equality_dual_warm_start;
   Eigen::VectorXd inequality_dual_warm_start;
   Eigen::VectorXd slack_warm_start;
   bool warm_start_mapped = false;
+  bool complete_continuation_state_supplied = false;
   // Hybrid-PF warm start (opt-in): seed AC voltages, DC voltages, VSC powers,
   // and DC/DC powers from the same coupled physical equations that the OPF
   // enforces.  A plain AC PF only supplies (vm, va) and leaves hybrid cases in
@@ -2566,19 +2748,150 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
     pf_opt.enable_converter_mode_switching = true;
     pf_opt.enable_pv_pq_conversion = true;
     pf_opt.enable_auto_swing_selection = true;
-    const hacdcpf::PowerFlowResult pf = hacdcpf::powerflow::solve_hybrid(sys, pf_opt);
-    if (pf.converged) {
-      pf_warm = build_hybrid_power_flow_warm_start(prob, sys, pf);
-      primal_warm_start =
-          build_parity_primal_warm_start(prob, pf_warm, warm_start_mapped);
-      if (warm_start_mapped) {
-        ipm_opt.primal_start = &primal_warm_start;
+    const hacdcpf::PowerFlowResult baseline_pf =
+        hacdcpf::powerflow::solve_hybrid(sys, pf_opt);
+    if (baseline_pf.converged) {
+      pf_warm = build_hybrid_power_flow_warm_start(prob, sys, baseline_pf);
+      primal_warm_start = build_parity_primal_warm_start(
+          prob, pf_warm, warm_start_mapped);
+    }
+    const auto baseline_diagnostics = warm_start_mapped
+        ? parity::evaluate_ipm_initial_point(prob, primal_warm_start)
+        : parity::IPMInitialPointDiagnostics{};
+    dc_phase_one_baseline_primal = baseline_diagnostics.primal_inf;
+    dc_phase_one_baseline_dual = baseline_diagnostics.dual_inf;
+
+    const bool baseline_needs_dispatch_phase =
+        !baseline_diagnostics.valid ||
+        baseline_diagnostics.dual_inf > std::max(
+            0.0, opt.ac_pf_dc_phase_one_baseline_dual_threshold);
+    if (dc_phase_one_eligible) {
+      dc_phase_one_requested = true;
+      if (!baseline_needs_dispatch_phase) {
+        dc_phase_one_status =
+            "skipped: baseline AC-PF dual residual already acceptable";
+      } else {
+        DCOPFOptions dc_options;
+        dc_options.solver = DCOPFSolverBackend::NativeQP;
+        dc_options.max_iterations =
+            std::max(1, opt.ac_pf_dc_phase_one_max_iterations);
+        dc_options.phase_one_time_limit_ms =
+            opt.ac_pf_dc_phase_one_time_limit_ms;
+        dc_options.compute_lmp = false;
+        dc_options.load_shedding = false;
+        dc_options.structural_warm_start = true;
+        dc_options.compact_quadratic_model = true;
+        dc_options.accept_phase_one_iterate = true;
+        dc_options.phase_one_iterate_tolerance =
+            std::max(0.0, opt.ac_pf_dc_phase_one_tolerance);
+        const DCOPFResult dc = solve_dc_opf(sys, dc_options);
+        dc_phase_one_iterations = dc.iterations;
+        dc_phase_one_runtime_ms = 1000.0 * dc.runtime_sec;
+        dc_phase_one_budget_exhausted = dc.phase_one_budget_exhausted;
+        dc_phase_one_budget_overshoot_ms = dc.phase_one_budget_overshoot_ms;
+        dc_phase_one_symbolic_analyze_calls =
+            dc.native_qp_symbolic_analyze_calls;
+        dc_phase_one_residual = dc.phase_one_warm_start_only
+            ? dc.phase_one_iterate_residual
+            : dc.solver_initial_primal_residual;
+        dc_phase_one_status = dc.status;
+        const bool usable = dc.converged || dc.phase_one_warm_start_only;
+        const bool mapping_matches =
+            dc.pg_mw.size() == sys.ac.generators.size() &&
+            dc.va.size() == sys.ac.buses.size();
+        if (usable && mapping_matches) {
+          HybridPowerSystem candidate_system = sys;
+          for (std::size_t i = 0;
+               i < candidate_system.ac.generators.size(); ++i)
+            candidate_system.ac.generators[i].pg_mw = dc.pg_mw[i];
+          for (std::size_t i = 0; i < candidate_system.ac.buses.size(); ++i)
+            candidate_system.ac.buses[i].va_deg = dc.va[i] / kDegToRad;
+          const hacdcpf::PowerFlowResult candidate_pf =
+              hacdcpf::powerflow::solve_hybrid(candidate_system, pf_opt);
+          bool candidate_mapped = false;
+          bool candidate_operating_point_loaded = false;
+          Eigen::VectorXd candidate_primal;
+          ACOPFResult candidate_warm;
+          if (candidate_pf.converged) {
+            // build_parity_primal_warm_start preserves Phase-I load-shedding
+            // slacks from build_initial_point. Refresh the mutable operating
+            // point first so those un-mapped variables match the candidate,
+            // exactly as a full Problem rebuild would, while all formulation
+            // structure and sparse matrices remain shared.
+            update_parity_operating_point(prob, candidate_system);
+            candidate_operating_point_loaded = true;
+            candidate_warm = build_hybrid_power_flow_warm_start(
+                prob, candidate_system, candidate_pf);
+            candidate_primal = build_parity_primal_warm_start(
+                prob, candidate_warm, candidate_mapped);
+          }
+          const auto candidate_diagnostics = candidate_mapped
+              ? parity::evaluate_ipm_initial_point(
+                    prob, candidate_primal)
+              : parity::IPMInitialPointDiagnostics{};
+          dc_phase_one_candidate_primal = candidate_diagnostics.primal_inf;
+          dc_phase_one_candidate_dual = candidate_diagnostics.dual_inf;
+          const double required_improvement = std::clamp(
+              opt.ac_pf_dc_phase_one_min_dual_improvement, 0.0, 1.0);
+          const bool improves_dual = candidate_diagnostics.valid &&
+              baseline_diagnostics.valid &&
+              candidate_diagnostics.dual_inf <=
+                  (1.0 - required_improvement) *
+                      baseline_diagnostics.dual_inf;
+          const bool improves_primal = candidate_diagnostics.valid &&
+              baseline_diagnostics.valid &&
+              candidate_diagnostics.primal_inf <=
+                  baseline_diagnostics.primal_inf;
+          if (candidate_diagnostics.valid &&
+              (improves_dual || improves_primal ||
+               !baseline_diagnostics.valid)) {
+            dc_phase_one_accepted = true;
+            pf_warm = std::move(candidate_warm);
+            primal_warm_start = std::move(candidate_primal);
+            warm_start_mapped = true;
+          } else {
+            if (candidate_operating_point_loaded)
+              update_parity_operating_point(prob, sys);
+            dc_phase_one_status +=
+                "; rejected: no primal/dual initialization improvement";
+          }
+        } else if (usable) {
+          dc_phase_one_status +=
+              "; rejected: authored result mapping mismatch";
+        }
       }
     }
+    if (warm_start_mapped) ipm_opt.primal_start = &primal_warm_start;
   }
   if (opt.warm_start != nullptr) {
+    const bool exact_layout =
+        !prepared_structure_invalidated &&
+        opt.warm_start->ipm_layout_signature != 0 &&
+        opt.warm_start->ipm_layout_signature == layout_signature;
+    const bool complete_native_state = exact_layout &&
+        opt.warm_start->ipm_primal_state.size() ==
+            static_cast<size_t>(prob.vidx.n_total) &&
+        opt.warm_start->ipm_equality_dual_state.size() ==
+            static_cast<size_t>(prob.cidx.n_eq_total) &&
+        !opt.warm_start->ipm_inequality_dual_state.empty() &&
+        opt.warm_start->ipm_inequality_dual_state.size() ==
+            opt.warm_start->ipm_slack_state.size();
+    ACOPFResult physical_only;
+    const ACOPFResult* warm_source = opt.warm_start;
+    if (!complete_native_state &&
+        !opt.warm_start->ipm_primal_state.empty()) {
+      // Dimension compatibility alone does not establish semantic row/column
+      // identity. Preserve the public physical mapping while removing every
+      // opaque native block as one all-or-nothing unit.
+      physical_only = *opt.warm_start;
+      physical_only.ipm_primal_state.clear();
+      physical_only.ipm_equality_dual_state.clear();
+      physical_only.ipm_inequality_dual_state.clear();
+      physical_only.ipm_slack_state.clear();
+      warm_source = &physical_only;
+    }
     primal_warm_start =
-        build_parity_primal_warm_start(prob, *opt.warm_start, warm_start_mapped);
+        build_parity_primal_warm_start(prob, *warm_source, warm_start_mapped);
     if (warm_start_mapped) {
       ipm_opt.primal_start = &primal_warm_start;
       const auto copy_state = [](const std::vector<double>& source,
@@ -2590,16 +2903,22 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
         destination = Eigen::Map<const Eigen::VectorXd>(
             source.data(), static_cast<Eigen::Index>(source.size()));
       };
-      copy_state(opt.warm_start->ipm_equality_dual_state,
-                 equality_dual_warm_start);
-      copy_state(opt.warm_start->ipm_inequality_dual_state,
-                 inequality_dual_warm_start);
-      copy_state(opt.warm_start->ipm_slack_state, slack_warm_start);
-      ipm_opt.equality_dual_start = &equality_dual_warm_start;
-      ipm_opt.inequality_dual_start = &inequality_dual_warm_start;
-      ipm_opt.slack_start = &slack_warm_start;
+      if (complete_native_state) {
+        copy_state(opt.warm_start->ipm_equality_dual_state,
+                   equality_dual_warm_start);
+        copy_state(opt.warm_start->ipm_inequality_dual_state,
+                   inequality_dual_warm_start);
+        copy_state(opt.warm_start->ipm_slack_state, slack_warm_start);
+        ipm_opt.equality_dual_start = &equality_dual_warm_start;
+        ipm_opt.inequality_dual_start = &inequality_dual_warm_start;
+        ipm_opt.slack_start = &slack_warm_start;
+        complete_continuation_state_supplied = true;
+      }
     }
   }
+
+  const auto& vidx = prob.vidx;
+  const auto& cidx = prob.cidx;
 
   // ── Inner nonlinear solver selection ──────────────────────────────────────
   // Auto with a coupled PF start uses standalone Ipopt first on difficult
@@ -2678,8 +2997,103 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
   out.profiling.backend_escalations = ipm_res.backend_escalations;
   out.profiling.scaling_rebuilds = ipm_res.scaling_rebuilds;
   out.profiling.warm_start_used = ipm_res.warm_start_used;
+  out.profiling.prepared_session_used = prepared != nullptr;
+  out.profiling.formulation_reused = formulation_reused;
+  out.profiling.mapping_reused = mapping_reused;
+  out.profiling.symbolic_reused = ipm_res.symbolic_reused;
+  out.profiling.continuation_state_reused =
+      complete_continuation_state_supplied &&
+      ipm_res.phase_two_start_accepted;
+  out.profiling.numeric_refactor_attempted =
+      ipm_res.numeric_refactor_attempted;
+  out.profiling.numeric_refactor_accepted =
+      ipm_res.numeric_refactor_accepted;
+  out.profiling.numeric_refactor_relative_drift =
+      ipm_res.numeric_refactor_relative_drift;
+  out.profiling.numeric_refactor_backward_error =
+      ipm_res.numeric_refactor_backward_error;
+  out.profiling.numeric_refactor_status = ipm_res.numeric_refactor_status;
+  out.profiling.prepared_session_invalidation_reason =
+      std::move(prepared_invalidation_reason);
   out.profiling.initial_primal_residual = ipm_res.initial_primal_inf;
   out.profiling.initial_dual_residual = ipm_res.initial_dual_inf;
+  out.profiling.dc_phase_one_requested = dc_phase_one_requested;
+  out.profiling.dc_phase_one_accepted = dc_phase_one_accepted;
+  out.profiling.dc_phase_one_iterations = dc_phase_one_iterations;
+  out.profiling.dc_phase_one_runtime_ms = dc_phase_one_runtime_ms;
+  out.profiling.dc_phase_one_time_limit_ms = dc_phase_one_time_limit_ms;
+  out.profiling.dc_phase_one_budget_exhausted =
+      dc_phase_one_budget_exhausted;
+  out.profiling.dc_phase_one_budget_overshoot_ms =
+      dc_phase_one_budget_overshoot_ms;
+  out.profiling.dc_phase_one_symbolic_analyze_calls =
+      dc_phase_one_symbolic_analyze_calls;
+  out.profiling.parity_formulation_builds = parity_formulation_builds;
+  out.profiling.dc_phase_one_residual = dc_phase_one_residual;
+  out.profiling.dc_phase_one_candidate_primal =
+      dc_phase_one_candidate_primal;
+  out.profiling.dc_phase_one_candidate_dual =
+      dc_phase_one_candidate_dual;
+  out.profiling.dc_phase_one_baseline_primal =
+      dc_phase_one_baseline_primal;
+  out.profiling.dc_phase_one_baseline_dual =
+      dc_phase_one_baseline_dual;
+  out.profiling.dc_phase_one_status = std::move(dc_phase_one_status);
+  out.profiling.phase_one_initial_violation =
+      ipm_res.phase_one_initial_violation;
+  out.profiling.phase_one_constraint_violation =
+      ipm_res.phase_one_constraint_violation;
+  out.profiling.phase_one_dual_fit_residual =
+      ipm_res.phase_one_dual_fit_residual;
+  out.profiling.phase_one_primal_feasible =
+      ipm_res.phase_one_primal_feasible;
+  out.profiling.phase_one_in_handoff_corridor =
+      ipm_res.phase_one_in_handoff_corridor;
+  out.profiling.phase_one_dual_initialized =
+      ipm_res.phase_one_dual_initialized;
+  out.profiling.phase_one_handoff_primal_tolerance =
+      ipm_res.phase_one_handoff_primal_tolerance;
+  out.profiling.phase_one_perturbed_primal_residual =
+      ipm_res.phase_one_perturbed_primal_residual;
+  out.profiling.phase_one_centrality = ipm_res.phase_one_centrality;
+  out.profiling.dispatch_dual_predictor_attempted =
+      ipm_res.dispatch_dual_predictor_attempted;
+  out.profiling.dispatch_dual_predictor_accepted =
+      ipm_res.dispatch_dual_predictor_accepted;
+  out.profiling.dispatch_dual_predictor_runtime_ms =
+      ipm_res.dispatch_dual_predictor_runtime_ms;
+  out.profiling.dispatch_dual_predictor_baseline_raw =
+      ipm_res.dispatch_dual_predictor_baseline_raw;
+  out.profiling.dispatch_dual_predictor_candidate_raw =
+      ipm_res.dispatch_dual_predictor_candidate_raw;
+  out.profiling.dispatch_dual_predictor_baseline_normalized =
+      ipm_res.dispatch_dual_predictor_baseline_normalized;
+  out.profiling.dispatch_dual_predictor_candidate_normalized =
+      ipm_res.dispatch_dual_predictor_candidate_normalized;
+  out.profiling.dispatch_dual_predictor_status =
+      std::move(ipm_res.dispatch_dual_predictor_status);
+  out.profiling.phase_one_barrier_mu = ipm_res.phase_one_barrier_mu;
+  out.profiling.phase_one_budget_exhausted =
+      ipm_res.phase_one_budget_exhausted;
+  out.profiling.phase_one_iterations = ipm_res.phase_one_iterations;
+  out.profiling.phase_one_factorizations = ipm_res.phase_one_factorizations;
+  out.profiling.phase_one_backtracks = ipm_res.phase_one_backtracks;
+  out.profiling.phase_one_structural_step_attempted =
+      ipm_res.phase_one_structural_step_attempted;
+  out.profiling.phase_one_structural_step_accepted =
+      ipm_res.phase_one_structural_step_accepted;
+  out.profiling.phase_one_structural_factorizations =
+      ipm_res.phase_one_structural_factorizations;
+  out.profiling.phase_one_structural_violation =
+      ipm_res.phase_one_structural_violation;
+  out.profiling.phase_one_structure = ipm_res.phase_one_structure;
+  out.profiling.phase_one_runtime_ms = ipm_res.phase_one_runtime_ms;
+  out.profiling.phase_one_termination = ipm_res.phase_one_termination;
+  out.profiling.phase_one_linear_solver = ipm_res.phase_one_linear_solver;
+  out.profiling.phase_two_start_accepted =
+      ipm_res.phase_two_start_accepted;
+  out.profiling.phase_two_start_rejection_reason =
+      ipm_res.phase_two_start_rejection_reason;
   out.profiling.final_barrier_mu = ipm_res.complementarity;
   const auto save_state = [](const Eigen::VectorXd& source,
                              std::vector<double>& destination) {
@@ -2693,6 +3107,7 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
   save_state(ipm_res.lambda_eq, out.ipm_equality_dual_state);
   save_state(ipm_res.mu, out.ipm_inequality_dual_state);
   save_state(ipm_res.z, out.ipm_slack_state);
+  out.ipm_layout_signature = layout_signature;
 
   // Optional Davidenko homotopy tangent at the returned point (one extra
   // inertia-controlled KKT solve) for objective-continuation drivers.
@@ -3035,7 +3450,16 @@ bool contains_hybrid_acdc_components(const HybridPowerSystem& sys) {
 
 }  // namespace
 
-ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_in) {
+struct PreparedACOPFSession::Impl {
+  explicit Impl(ACOPFOptions options) {
+    state.options = std::move(options);
+  }
+  PreparedSessionState state;
+};
+
+ACOPFResult solve_ac_opf_impl(const HybridPowerSystem& sys,
+                              const ACOPFOptions& opt_in,
+                              PreparedSessionState* prepared) {
   ACOPFResult out;
   ACOPFOptions opt = opt_in;
   // Native AC-OPF models converters as free P_ac/Q_ac/P_dc box-bounded variables
@@ -3390,7 +3814,8 @@ ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_i
         } else if (!chain.empty()) {
           opt_t.warm_start = &chain.back();
         }
-        ACOPFResult r_t = solve_with_parity_ipm(sys_t, opt_t, inner);
+        ACOPFResult r_t =
+            solve_with_parity_ipm(sys_t, opt_t, inner, prepared);
         if (r_t.converged) {
           const bool fast = r_t.iterations <= 20;
           chain.push_back(std::move(r_t));
@@ -3463,7 +3888,7 @@ ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_i
           full_target_opt.ac_pf_warm_start = true;
           full_target_opt.warm_start = nullptr;
           ACOPFResult full_target =
-              solve_with_parity_ipm(sys_work, full_target_opt, inner);
+              solve_with_parity_ipm(sys_work, full_target_opt, inner, prepared);
           if (full_target.converged) {
             full_target.status =
                 "converged (full objective after incomplete objective homotopy)";
@@ -3484,13 +3909,13 @@ ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_i
       ACOPFOptions standalone_opt = opt;
       standalone_opt.objective_homotopy = false;
       return separate_external_grid_dispatch(
-          solve_with_parity_ipm(sys_work, standalone_opt, inner));
+          solve_with_parity_ipm(sys_work, standalone_opt, inner, prepared));
     }
     // The parity path internally applies the Ipopt fallback when inner == Auto
     // and opt.allow_fallback is set, so no separate recursive economic-dispatch
     // fallback is needed here.
     return separate_external_grid_dispatch(
-        solve_with_parity_ipm(sys_work, opt, inner));
+        solve_with_parity_ipm(sys_work, opt, inner, prepared));
   }
 
   HybridPowerSystem ac_only = sys_work;
@@ -4206,6 +4631,37 @@ finalize:
   trim_internal_dc_bus_results(out, data.projection_certificate);
 
   return separate_external_grid_dispatch(std::move(out));
+}
+
+ACOPFResult solve_ac_opf(const HybridPowerSystem& sys,
+                         const ACOPFOptions& options) {
+  return solve_ac_opf_impl(sys, options, nullptr);
+}
+
+PreparedACOPFSession::PreparedACOPFSession(ACOPFOptions options)
+    : impl_(std::make_unique<Impl>(std::move(options))) {}
+PreparedACOPFSession::~PreparedACOPFSession() = default;
+PreparedACOPFSession::PreparedACOPFSession(PreparedACOPFSession&&) noexcept =
+    default;
+PreparedACOPFSession& PreparedACOPFSession::operator=(
+    PreparedACOPFSession&&) noexcept = default;
+
+ACOPFResult PreparedACOPFSession::solve(const HybridPowerSystem& sys) {
+  ACOPFOptions options = impl_->state.options;
+  if (options.warm_start == nullptr && impl_->state.has_previous_result) {
+    options.warm_start = &impl_->state.previous_result;
+  }
+  ACOPFResult result = solve_ac_opf_impl(sys, options, &impl_->state);
+  if (result.ipm_layout_signature != 0) {
+    impl_->state.previous_result = result;
+    impl_->state.has_previous_result = true;
+  }
+  return result;
+}
+
+void PreparedACOPFSession::reset() {
+  ACOPFOptions options = impl_->state.options;
+  impl_ = std::make_unique<Impl>(std::move(options));
 }
 
 ACOPFJacobianDiagnostics check_ac_opf_jacobian_fd(const HybridPowerSystem& sys,

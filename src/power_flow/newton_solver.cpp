@@ -893,18 +893,19 @@ bool apply_converter_mode_switching(std::vector<VSCConverter>& converters,
 
 }  // namespace
 
-PowerFlowResult NewtonSolver::solve(const SolverData& data,
+PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
                                     const PowerFlowOptions& opt,
                                     const InitialState* init) const {
   using Clock = std::chrono::steady_clock;
   PowerFlowResult out;
+  const auto& ropts = opt.robust_nonlinear;
 
   const bool has_vdc_vac = std::any_of(
-      data.converters.begin(), data.converters.end(), [](const VSCConverter& conv) {
+      input_data.converters.begin(), input_data.converters.end(), [](const VSCConverter& conv) {
         return conv.in_service && conv.control_mode == ConverterMode::VDC_VAC;
       });
-  if (has_vdc_vac && !data.enable_augmented_equations) {
-    SolverData augmented_data = data;
+  if (has_vdc_vac && !input_data.enable_augmented_equations) {
+    SolverData augmented_data = input_data;
     augmented_data.enable_augmented_equations = true;
     PowerFlowResult augmented = solve(augmented_data, opt, init);
     augmented.diagnostics.warnings.push_back(
@@ -913,6 +914,26 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
     cache_.valid = false;
     return augmented;
   }
+
+  // Smooth complementarity continuation changes only the NCP parameter, not
+  // the caller-owned formulation. Keep that mutable scalar in a local copy so
+  // residual/Jacobian evaluations always see a coherent mu without const_cast.
+  std::unique_ptr<SolverData> smooth_ncp_data;
+  if (input_data.enable_semi_smooth_newton && ropts.enable_smooth_ncp) {
+    smooth_ncp_data = std::make_unique<SolverData>(input_data);
+    const double mu_min = std::max(0.0, ropts.ncp_mu_min);
+    const double mu_start =
+        input_data.ncp_mu > 0.0 ? input_data.ncp_mu : ropts.ncp_mu0;
+    smooth_ncp_data->ncp_mu = std::max(mu_min, mu_start);
+  }
+  const SolverData& data = smooth_ncp_data ? *smooth_ncp_data : input_data;
+  struct LocalDataCacheGuard {
+    PatternCache& cache;
+    bool invalidate;
+    ~LocalDataCacheGuard() {
+      if (invalidate) cache.valid = false;
+    }
+  } local_data_cache_guard{cache_, smooth_ncp_data != nullptr};
 
   // The public facade keeps one NewtonSolver per thread. Reuse its state
   // workspace across ordinary solves, but use a local workspace for recursive
@@ -1082,7 +1103,6 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
   bool skip_vac_enforcement = data.enable_augmented_equations;
 
   // Nonmonotone line search state (Phase 2).
-  const auto& ropts = opt.robust_nonlinear;
   powerflow::NonmonotoneLineSearch nm_linesearch(
       ropts.nonmonotone_window,
       ropts.armijo_c,
@@ -1310,13 +1330,18 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
   //   3. Re-run Newton from converged state.
   //   4. After all PV buses are within limits, try PQ→PV restoration.
   //   5. Repeat until no further switching is needed.
-  constexpr int kMaxOuterLoops = 30;
+  const int max_outer_loops = std::max(1, opt.pv_pq_max_outer_iterations);
   int total_iters = 0;
+  std::vector<int> last_control_change_iteration(static_cast<size_t>(n),
+                                                  -opt.max_iter);
+  bool restoration_attempted = false;
+  std::unordered_set<std::string> converged_active_sets;
 
   // Helper lambda: enforce Q limits on PV buses.
   // allow_restore=false: only PV→PQ switching (safe during iterations).
   // allow_restore=true: also PQ→PV restoration (post-convergence only).
-  auto check_q_limits_and_switch = [&](bool allow_restore) -> bool {
+  auto check_q_limits_and_switch = [&](bool allow_restore,
+                                       double entry_margin_pu) -> bool {
     bool any_switched = false;
     const double q_hys = std::max(0.0, opt.pv_q_hysteresis_pu);
     const double vm_tol = std::max(0.0, opt.pv_recover_vm_tol_pu);
@@ -1335,18 +1360,20 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
 
       BusControlState& mode = bus_control[static_cast<size_t>(i)];
       if (mode == BusControlState::PVActive) {
-        if (qg_implied > qmax) {
+        if (qg_implied > qmax + entry_margin_pu) {
           ac_buses[static_cast<size_t>(i)].bus_type = BusType::PQ;
           qg_state[i] = qmax;
           mode = BusControlState::PQLimited;
           any_switched = true;
           out.profiling.pv_to_pq_switches += 1;
-        } else if (qg_implied < qmin) {
+          last_control_change_iteration[static_cast<size_t>(i)] = total_iters;
+        } else if (qg_implied < qmin - entry_margin_pu) {
           ac_buses[static_cast<size_t>(i)].bus_type = BusType::PQ;
           qg_state[i] = qmin;
           mode = BusControlState::PQLimited;
           any_switched = true;
           out.profiling.pv_to_pq_switches += 1;
+          last_control_change_iteration[static_cast<size_t>(i)] = total_iters;
         }
       } else if (allow_restore && mode == BusControlState::PQLimited) {
         const double vm_set = gen_limits.vm_set_pu[static_cast<size_t>(i)];
@@ -1354,8 +1381,16 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
         const bool at_upper = std::abs(qg_state[i] - qmax) <= limit_tol;
         const bool at_lower = std::abs(qg_state[i] - qmin) <= limit_tol;
         const bool has_reactive_freedom = qmax - qmin > limit_tol;
+        const int hold_iterations =
+            ropts.enable_activity_hysteresis
+                ? std::max(0, ropts.min_active_set_hold_iters)
+                : 0;
+        const bool hold_satisfied =
+            total_iters -
+                    last_control_change_iteration[static_cast<size_t>(i)] >=
+                hold_iterations;
         const bool can_restore =
-            has_reactive_freedom &&
+            has_reactive_freedom && hold_satisfied &&
             ((at_upper && vm[i] > vm_set + vm_tol) ||
              (at_lower && vm[i] < vm_set - vm_tol));
         if (can_restore) {
@@ -1364,6 +1399,7 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
           mode = BusControlState::PVActive;
           any_switched = true;
           out.profiling.pq_to_pv_switches += 1;
+          last_control_change_iteration[static_cast<size_t>(i)] = total_iters;
         }
       }
     }
@@ -1379,9 +1415,30 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
       ropts.ptc_dt_max,
       ropts.ptc_gamma);
   double prev_resid = kInf;
-  double resid_ncp_initial = -1.0;   // first residual seen with NCP active (Gap 2)
+  double prev_ncp_resid = kInf;
+  double resid_ncp_initial = -1.0;
+  const bool smooth_ncp_active = smooth_ncp_data != nullptr;
+  const double ncp_mu_min = std::max(0.0, ropts.ncp_mu_min);
+  auto reduce_ncp_mu = [&](double requested_factor) {
+    if (!smooth_ncp_active || smooth_ncp_data->ncp_mu <= ncp_mu_min) {
+      return false;
+    }
+    // A continuation factor outside (0, 1) cannot make progress. Clamp it to
+    // a contracting range while retaining a conservative upper endpoint.
+    const double factor = std::clamp(requested_factor, 1e-6, 0.999);
+    const double old_mu = smooth_ncp_data->ncp_mu;
+    smooth_ncp_data->ncp_mu = std::max(old_mu * factor, ncp_mu_min);
+    if (smooth_ncp_data->ncp_mu < old_mu) {
+      out.profiling.smooth_ncp_continuation_updates += 1;
+      out.profiling.smooth_ncp_final_mu = smooth_ncp_data->ncp_mu;
+      return true;
+    }
+    return false;
+  };
 
-  for (int outer = 0; outer < kMaxOuterLoops; ++outer) {
+  int outer = 0;
+  for (; outer < max_outer_loops; ++outer) {
+    out.profiling.pv_pq_outer_iterations = outer + 1;
     // Rebuild Jacobian context for current bus types.
     jac_ctx = build_jacobian_context(ac_buses, ndc, slack, dc_slacks, &data, &converters);
     resize_for_context();
@@ -1471,6 +1528,10 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
 
       const bool use_scaled_convergence = opt.robust_nonlinear.enable_residual_scaling;
       const double convergence_resid = use_scaled_convergence ? scaled_resid : resid;
+      if (smooth_ncp_active && resid_ncp_initial < 0.0) {
+        resid_ncp_initial = convergence_resid;
+        out.profiling.smooth_ncp_final_mu = smooth_ncp_data->ncp_mu;
+      }
 
       const bool use_scaled_linear_system =
           opt.robust_nonlinear.enable_jacobian_row_col_equilibration &&
@@ -1512,6 +1573,13 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
       }
 
       if (convergence_resid < opt.tol) {
+        // Convergence of F_mu is not convergence of the target NCP while mu is
+        // still above its requested floor. Reduce mu, then reassemble both the
+        // residual and Jacobian at the unchanged state before another solve.
+        if (reduce_ncp_mu(ropts.ncp_mu_factor)) {
+          prev_ncp_resid = convergence_resid;
+          continue;
+        }
         inner_converged = true;
         break;
       }
@@ -1521,23 +1589,20 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
         nm_linesearch.push_merit(0.5 * rhs_for_linear.squaredNorm());
       }
 
-      // ── Phase 2: Anneal smooth-NCP μ when semi-smooth Newton is active ──
-      if (data.enable_semi_smooth_newton && ropts.enable_smooth_ncp) {
-        auto& mut_data = const_cast<powerflow::SolverData&>(data);
-        if (mut_data.ncp_mu <= 0.0) {
-          mut_data.ncp_mu = ropts.ncp_mu0;
-          resid_ncp_initial = resid;  // record baseline for two-phase schedule
-        } else if (resid < prev_resid * 0.9) {
-          // Two-phase annealing (Gap 2): use a slower factor during the coarse
-          // phase (active-set not yet determined) to prevent μ from dropping
-          // too fast near strongly active Q limits, which causes oscillation.
-          const double mu_factor =
-              (resid_ncp_initial > 0.0 &&
-               resid > resid_ncp_initial * ropts.ncp_mu_phase_transition)
-                  ? ropts.ncp_mu_factor_coarse   // coarse phase: slow annealing
-                  : ropts.ncp_mu_factor;          // fine phase:  fast annealing
-          mut_data.ncp_mu =
-              std::max(mut_data.ncp_mu * mu_factor, ropts.ncp_mu_min);
+      // Anneal only after measurable progress. Changing mu changes the
+      // nonlinear equation, so reassemble immediately instead of taking a
+      // Newton step with the Jacobian from the previous continuation level.
+      if (smooth_ncp_active && std::isfinite(prev_ncp_resid) &&
+          convergence_resid < prev_ncp_resid * 0.9) {
+        const double mu_factor =
+            (resid_ncp_initial > 0.0 &&
+             convergence_resid >
+                 resid_ncp_initial * ropts.ncp_mu_phase_transition)
+                ? ropts.ncp_mu_factor_coarse
+                : ropts.ncp_mu_factor;
+        if (reduce_ncp_mu(mu_factor)) {
+          prev_ncp_resid = convergence_resid;
+          continue;
         }
       }
 
@@ -1780,6 +1845,7 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
       }
 
       prev_resid = resid;
+      prev_ncp_resid = convergence_resid;
 
       out.profiling.linear_solve_ms_total += linear_ms_this_iter;
       out.profiling.line_search_ms_total += ls_ms_this_iter;
@@ -1800,19 +1866,6 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
       va = va_best;
       vdc = vdc_best;
 
-      // Per-iteration PV→PQ enforcement: only when residual is small
-      // enough that Q estimates are reliable.  At large residuals the
-      // intermediate Q values are inaccurate and premature switching
-      // destroys the convergence basin (observed on case118 basin tests).
-      // The outer loop handles post-convergence Q-limit enforcement
-      // unconditionally, so skipping here is safe.
-      if (opt.enable_pv_pq_conversion && !data.enable_semi_smooth_newton && resid < 1e-3) {
-        if (check_q_limits_and_switch(/*allow_restore=*/false)) {
-          jac_ctx = build_jacobian_context(ac_buses, ndc, slack, dc_slacks, &data, &converters);
-          resize_for_context();
-          ensure_pattern();
-        }
-      }
     }  // end inner Newton loop
 
     total_iters += inner_iters;
@@ -1830,24 +1883,53 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
       // without ever converging (observed as 48–264 spurious switches on
       // case118 basin tests).
       if (out.residual > 0.1 ||
-          !check_q_limits_and_switch(/*allow_restore=*/false)) {
+          !check_q_limits_and_switch(/*allow_restore=*/false,
+                                     /*entry_margin_pu=*/0.0)) {
         break;  // No reliable switches possible — give up.
       }
       continue;  // Re-run Newton with updated bus types.
     }
 
-    // Post-convergence: enforce Q limits on PV buses.
-    // Switch violated PV buses to PQ and re-run Newton.
-    if (check_q_limits_and_switch(/*allow_restore=*/false)) {
+    std::string active_set_signature;
+    active_set_signature.reserve(static_cast<size_t>(n));
+    for (const auto state : bus_control) {
+      active_set_signature.push_back(
+          static_cast<char>('0' + static_cast<int>(state)));
+    }
+    if (!converged_active_sets.insert(active_set_signature).second) {
+      out.profiling.pv_pq_repeated_active_sets += 1;
+      out.reactive_limits.active_set_cycle_detected = true;
+    }
+
+    // Hintermüller, Ito & Kunisch (2002), primal-dual active sets: add every
+    // constraint that is violated at the converged fixed-set point in one
+    // batch.  Entry has no dead band because that would hide a physical Q
+    // violation; Schmitt hysteresis belongs only to the optional release.
+    if (check_q_limits_and_switch(/*allow_restore=*/false,
+                                  /*entry_margin_pu=*/0.0)) {
       continue;  // Re-run Newton with PV→PQ switches applied.
     }
 
-    // All PV buses within limits. Try restoring PQ-limited buses to PV.
-    if (!check_q_limits_and_switch(/*allow_restore=*/true)) {
-      break;  // No more switching needed — final solution found.
+    // A restoration audit is attempted at most once.  This separates the
+    // monotone PV→PQ phase from optional PQ→PV release and makes a two-cycle
+    // impossible: a released bus that violates Q is clamped again, but cannot
+    // be released for a second time in the same solve.
+    if (!restoration_attempted) {
+      restoration_attempted = true;
+      if (check_q_limits_and_switch(/*allow_restore=*/true,
+                                    /*entry_margin_pu=*/0.0)) {
+        continue;
+      }
     }
-    // Some buses restored PQ→PV — re-run Newton to verify.
+    break;
   }  // end outer PV/PQ loop
+
+  if (outer == max_outer_loops) {
+    out.reactive_limits.outer_iteration_limit_reached = true;
+    out.diagnostics.warnings.push_back(
+        "[PF-Q-LIMIT-01] PV/PQ active-set outer-iteration budget exhausted; "
+        "the returned electrical root is not Q-limit certified.");
+  }
 
   if (!skip_vac_enforcement) enforce_vac_setpoints(converters, vm);
   out.residual = evaluate_residual_only(data,
@@ -1890,6 +1972,47 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
   out.converged = ((opt.robust_nonlinear.enable_residual_scaling
                         ? out.profiling.scaled_residual_norm
                         : out.residual) < opt.tol);
+
+  out.reactive_limits.enforcement_requested =
+      opt.enable_pv_pq_conversion || data.enable_semi_smooth_newton;
+  for (int i = 0; i < n; ++i) {
+    if (!gen_limits.has_generator[static_cast<size_t>(i)] ||
+        !gen_limits.has_finite_q_limits[static_cast<size_t>(i)] ||
+        i == slack ||
+        ac_buses[static_cast<size_t>(i)].bus_type == BusType::SLACK ||
+        bus_control[static_cast<size_t>(i)] == BusControlState::FixedPQ) {
+      continue;
+    }
+    const double qload_pu =
+        ac_buses[static_cast<size_t>(i)].qd_mvar / data.base_mva;
+    const double qconv = q_spec[i] - (qg_state[i] - qload_pu);
+    const double qg_implied = qcalc[i] + qload_pu - qconv;
+    const double upper_violation =
+        qg_implied - gen_limits.qmax_pu[static_cast<size_t>(i)];
+    const double lower_violation =
+        gen_limits.qmin_pu[static_cast<size_t>(i)] - qg_implied;
+    out.reactive_limits.max_violation_pu = std::max(
+        out.reactive_limits.max_violation_pu,
+        std::max({0.0, upper_violation, lower_violation}));
+    if (bus_control[static_cast<size_t>(i)] == BusControlState::PQLimited) {
+      out.reactive_limits.active_limited_buses += 1;
+    }
+  }
+  const double q_certificate_tolerance =
+      std::max(1e-10, 10.0 * std::numeric_limits<double>::epsilon());
+  out.reactive_limits.certified =
+      out.reactive_limits.enforcement_requested && out.converged &&
+      !out.reactive_limits.outer_iteration_limit_reached &&
+      out.reactive_limits.max_violation_pu <= q_certificate_tolerance;
+  if (out.reactive_limits.enforcement_requested && out.converged &&
+      !out.reactive_limits.certified &&
+      !out.reactive_limits.outer_iteration_limit_reached) {
+    out.diagnostics.warnings.push_back(
+        "[PF-Q-LIMIT-02] The converged electrical root retains a generator "
+        "reactive-limit violation of " +
+        std::to_string(out.reactive_limits.max_violation_pu) +
+        " pu; Q-limit certification failed.");
+  }
 
   for (int i = 0; i < n; ++i) {
     out.vm[static_cast<size_t>(i)] = vm[i];

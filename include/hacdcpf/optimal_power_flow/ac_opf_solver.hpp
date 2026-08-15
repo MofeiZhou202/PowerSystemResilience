@@ -5,11 +5,37 @@
 /// Forward declarations of AC OPF solver entry points.
 /// Replaces: optimal_power_flow/ac_opf.hpp
 
+#include <memory>
+
 #include "hacdcpf/model/hybrid_power_system.hpp"
 #include "hacdcpf/optimal_power_flow/opf_options.hpp"
 #include "hacdcpf/optimal_power_flow/opf_result.hpp"
 
 namespace hacdcpf::opf {
+
+/// Owning repeated-solve context for a fixed-layout native Parity ACOPF.
+///
+/// The session keeps the assembled formulation and sparse symbolic ordering
+/// alive across calls.  A complete native-IPM continuation state is carried
+/// only when the exact variable/equality/inequality/bound layout signature
+/// matches.  Structural changes invalidate the cached assets and rebuild them.
+class PreparedACOPFSession {
+ public:
+  explicit PreparedACOPFSession(ACOPFOptions options = {});
+  ~PreparedACOPFSession();
+
+  PreparedACOPFSession(const PreparedACOPFSession&) = delete;
+  PreparedACOPFSession& operator=(const PreparedACOPFSession&) = delete;
+  PreparedACOPFSession(PreparedACOPFSession&&) noexcept;
+  PreparedACOPFSession& operator=(PreparedACOPFSession&&) noexcept;
+
+  ACOPFResult solve(const HybridPowerSystem& sys);
+  void reset();
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
 
 /// Solve the AC optimal power flow problem for a hybrid AC/DC system.
 ///

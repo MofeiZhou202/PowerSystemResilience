@@ -778,4 +778,9 @@ TEST_CASE("Integration: islanded 9-bus → adaptive solver → power balance",
     REQUIRE(result.vm.size() == 9);
     REQUIRE(result.va.size() == 9);
     REQUIRE(result.islands.size() == 2);
+    REQUIRE(result.reactive_limits.enforcement_requested);
+    REQUIRE(result.reactive_limits.certified);
+    REQUIRE_FALSE(result.reactive_limits.active_set_cycle_detected);
+    REQUIRE_FALSE(result.reactive_limits.outer_iteration_limit_reached);
+    REQUIRE(result.profiling.pv_pq_outer_iterations >= 2);
 }

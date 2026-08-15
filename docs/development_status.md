@@ -1,6 +1,6 @@
 # Development Status
 
-Updated: 2026-08-14
+Updated: 2026-08-15
 
 This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
@@ -10,13 +10,13 @@ the current Git worktrees remain authoritative.
 
 | Scope | Result |
 |---|---|
-| Required MIPSolvers source | Current pin `adfc98f3bd4721682f72f65ba030a18cfad1749d` on MIPSolvers `main`; the full regressions below were established at the older `60f8bc4e4eeb58c239f83b7ff0fde1be75cd05b0` baseline |
+| Required MIPSolvers source | Current pin `5a5fad013ec561c9e6d0ecfdf60afdb97ad1a5f8` on clean MIPSolvers `main`; the full regressions below were established at the older `60f8bc4e4eeb58c239f83b7ff0fde1be75cd05b0` baseline |
 | `full-dev` regression | 1430/1430 registered tests completed without failure; 3 condition-dependent tests skipped |
 | `macos-release` regression | 1425/1425 registered tests completed without failure; 3 condition-dependent tests skipped |
 | Graph ASan/UBSan subset | 28 cases, 113 assertions passed after the iterative Tarjan fix |
 | Reliability ASan/UBSan | Complete three-stage suite 25 cases/1339 assertions; `case33mg_acdc` 477 assertions and five consecutive parallel repeats passed; `test_1_no_sop` 79 assertions |
 | Market ASan/UBSan | Complete suite 22 cases/845 assertions; focused initial root-cut case 1/42 |
-| Other sanitizer subsets | Thread pool 4 cases/6 assertions; `test_hacdcpf` 26/89; `test_acopf_dcopf_crossval` 10/84; `test_power_flow_math_audit` 40/204 |
+| Other sanitizer subsets | Thread pool 4 cases/6 assertions; `test_hacdcpf` 26/89; `test_acopf_dcopf_crossval` 13/119; `test_power_flow_math_audit` 42/231 |
 
 ## Trial edition integration
 
@@ -54,59 +54,324 @@ unverified.
 The two full CTest results establish the normal build baseline. They do not
 claim that every sanitizer entry point is green.
 
-## Three-phase hybrid OPF Phase I/II integration
+## OPF Phase I/II integration and performance
 
-The dependency pin now advances to MIPSolvers `adfc98f`. For the monolithic
-three-phase hybrid OPF NativeIPM path, Phase I restores a primal point in the
-assembled OPF coordinates and generates equality multipliers, positive
-inequality multipliers, and positive slacks. Restoration uses a declared sparse
-state/basic Newton system when available and SparseQR otherwise; it no longer
-materializes a dense Jacobian or forms `J J^T`. Iteration, total primal-plus-
-dual factorization, and per-iteration backtrack caps are hard work bounds. The
-wall-clock deadline is cooperative because an in-flight sparse factorization
-cannot be interrupted. Finite-budget Phase I never invokes Ipopt. The
-`NLPModel` exposes an
-independent original-per-unit maximum violation callback. Phase II requests
-MIPSolvers' `primal_feasible_start` and `preserve_initial_point` policies; the
-adapter preserves the point only when its independent constraint and variable-
-bound audit is finite and no greater than `tol_primal`. Otherwise its ordinary
-infeasible-start interiorization remains active. Public results report the
-Phase I certificate, budget consumption and termination, whether dual
-initialization completed, whether Phase II requested and accepted the start,
-and the selected linear backend. Dual quality is the state/basic stationarity
-fit (or SparseQR normal residual), not full-space stationarity: Phase I leaves
-the reduced gradient for Phase II instead of duplicating optimization. A Phase II
-zero-iteration termination honestly reports `unselected` because no KKT
-factorization occurred.
+The checked-in dependency pin is MIPSolvers `5a5fad0`; its clean `main`
+contains the audited central warm-start and NativeLCQP cooperative-deadline
+contracts used by this HySim change. Bounded Phase I fronts balanced Parity Native IPM (pure AC
+and hybrid AC/DC) and monolithic three-phase hybrid NativeIPM. Pure AC keeps
+the state/basic PF-Newton basis. Hybrid models first eliminate converter
+`Pdc` directions and solve the DC-conductance/converter Schur block, then use
+the same state/basic fallback when the global admission test passes. It applies sparse
+constraint Newton steps in assembled OPF coordinates, then performs one
+equality-dual and positive inequality-dual/slack fit. A declared state/basic
+square Jacobian uses SparseLU; unusual component mixes or active nonlinear
+inequalities fall back to direct SparseQR. No dense Jacobian, `J J^T`, barrier
+schedule, filter, Hessian solve, second-order correction, elastic variable, or
+Ipopt call is part of finite-budget Phase I.
 
-On AppleClang 21, arm64 macOS, Release, the rebuilt MIPSolvers
-`test_ipm_solver --rng-seed 1` passed 30 cases and 203 assertions. The rebuilt
-HySim `test_three_phase_hybrid_opf --rng-seed 1 --reporter compact` passed 11
-cases and 139 assertions. The focused graph-reduced-to-Full primal-dual transport passed 16
-assertions: the Full Phase I violation was approximately `8.08e-15`, Phase II
-requested and accepted the preserved point, and final primal/dual/
-complementarity residuals were approximately `8.08e-15`, `2.56e-7`, and
-`1.00e-7`. This small case terminated before a Phase II KKT factorization, so
-the backend correctly reported `unselected`. The added O(rows + variables)
-audit was not timed against a disabled-audit baseline, so the predeclared
-under-1% performance prediction remains unverified.
+The coordinated defaults are `mu0 = 0.1`, admission ratio `eta_a = 1.0`,
+primal handoff ratio `eta_p = 0.1`, and centrality tolerance `eta_c = 0.5`.
+Thus Phase I is attempted only when the original-coordinate violation is at
+most `eta_a * mu0 = 1e-1`; its finite-accuracy handoff target is
+`max(final_primal_tolerance, eta_p * mu0) = 1e-2`. Phase II's final primal,
+dual, and complementarity tolerances are unchanged. A handoff may therefore be
+inside the Phase I corridor without satisfying the final solution tolerance;
+`phase_one_in_handoff_corridor` and `phase_one_primal_feasible` report these
+facts separately.
 
-The added sparse large-case regression has 360 three-phase buses, 1080 phase
-nodes, and 2175 OPF variables. With two Newton iterations, five total
-factorizations, four backtracks per iteration, and a 5000 ms cooperative time
-budget, Phase I used SparseQR and three total factorizations. It reduced the
-original-coordinate violation from `1.0e-3` to `2.66788e-9` in approximately
-1539 ms and produced a `7.81839e-15` dual-fit residual. The full-space
-stationarity was `2.2572`, as expected for a feasible but non-optimal point.
-The zero-factorization and zero-backtracking tests also passed. The
-predeclared `>=2x` restoration-speed prediction has not been measured against
-the removed old path and remains unverified. The rebuilt production
-`run_gui_server` target compiles and exports the Phase I diagnostics, but no
-monolithic phase-hybrid HTTP E2E currently exercises that route. A manual
-probe loaded the three-bus `td_coordination_all_components` fixture, but its
-monolithic OPF request returned the server's generic `Unknown server error`,
-so the runtime JSON contract is not claimed as verified. No full CTest,
-sanitizer run, or Windows package validation was performed for this increment.
+MIPSolvers accepts the handoff only under filter globalization with complete,
+finite primal/equality-dual/inequality-dual/slack vectors, positive inequality
+duals and slacks, original and perturbed primal residuals within the corridor,
+`mu0 <= 0.1`, centrality
+`max_i |s_i z_i / mu0 - 1| <= eta_c`, and maximum inequality dual at most
+`1e4`. Full dual residual is diagnostic rather than an admission gate because
+Phase I deliberately leaves the reduced gradient to Phase II. Rejection is
+all-or-nothing: every warm vector is cleared and ordinary interiorization is
+used. Diagnostics include the audit residuals and reason plus first accepted
+step lengths and barrier-objective change. Fixed-variable reduction preserves
+the nonlinear, nonfixed-lower-bound, then nonfixed-upper-bound row order.
+
+Iteration, total primal-plus-dual factorization, and per-iteration backtrack
+caps are hard work bounds. The wall-clock deadline is cooperative because an
+in-flight sparse factorization cannot be interrupted. The corridor-aware slack
+floor `max(2e-10, (epsilon_p - violation) / 2)` keeps `s_i z_i = mu0` without
+creating the extreme multipliers observed with a uniform `2e-10` floor. That
+original construction increased Phase II from 17 to 35 iterations on case30
+and from 13 to 35 on the hybrid microgrid; the revised scaling removed the
+regression.
+
+The reproducible `phase_one_restoration_benchmark` protocol uses two warmups
+and five timed repetitions. On AppleClang 21, arm64 macOS, Release, case30 AC
+improved from `4.458 ms` off to `4.225 ms` on (`1.055x`), while Phase II fell
+from 17 to 16 iterations and from 16 to 15 factorizations; Phase I reduced
+violation `3.106e-2 -> 4.030e-4` with centrality `2.22e-16`. The 360-bus
+three-phase case has 1080 phase nodes and 2175 variables: its `1e-3` point was
+already inside the corridor, so Phase I used no primal-restoration iteration
+and one dual-fit factorization, reached dual-fit residual `8.33e-15`, and had a
+`5.438 ms` median.
+
+Admission prevents wasted full-model sparse work outside the local basin. The
+Hybrid Schur step is audited by its own DC-balance/converter/reference norm but
+may not bypass the global admission threshold. At the production default, the
+microgrid (`0.144 > 0.1`) and case300 ACDC (`1.129 > 0.1`) therefore retain
+their exact cold Phase-II starts after the bounded structural probe. With the
+research setting `phase_one_admission_mu_factor = 2`, the microgrid Schur block
+is accepted and state/basic Newton reaches `1.689e-5`; the central handoff is
+certified. The same bypass was deliberately rejected for case300: it incurred
+about 160 ms of full-model QR while only reaching `1.100`, so the global gate
+remains authoritative.
+
+DCOPF now has a separate affine structural start for NativeLCQP: each energized
+component is power-balanced within generator/load-shed bounds, one angle
+reference is selected, and a reduced Laplacian projects angles/flows before the
+QP IPM. MIPSolvers `QPModel::x0` audits size/finiteness and reports actual use
+and initial primal residual; rejection is exactly the deterministic cold
+initialization. In the same two-warmup/five-repeat Release protocol, case57
+improved from 29 to 18 iterations and `1.934` to `1.284` ms (`1.506x`), case118
+from 43 to 18 iterations and `5.841` to `2.766` ms (`2.112x`), and case300
+from 68 to 19 iterations and `33.360` to `10.636` ms (`3.137x`). The
+original equality residuals were respectively `6.11e-15`, `1.53e-14`, and
+`9.13e-14`; solver initial residual was `0.01` after positive bound-slack
+initialization, versus cold `2.60`, `4.03`, and `12.00`. The residual,
+iteration, and end-to-end predictions therefore held on all three cases.
+
+Large pure-AC Parity solves can additionally compose those structures as an
+opt-in dispatch Phase I: ordinary AC PF is evaluated first, and only a poor
+full-model initial dual residual triggers a five-iteration compact NativeLCQP
+DCOPF. The DC dispatch and reduced-Laplacian angles are replayed through AC PF;
+the candidate is admitted only after evaluating the actual Parity initial
+primal/dual metrics, and every failure retains the original formulation and PF
+point. This is a dispatch warm start rather than a central-state certificate:
+on `case9241pegase`, candidate dual residual improved `838.166 -> 236.753`
+while the maximum full-model primal metric increased `1.601e-3 -> 1.506e-1`.
+The final Native IPM therefore remains responsible for the unchanged KKT
+certificate.
+
+The fixed Release/KLU protocol used one warmup and three timed repetitions on
+`case9241pegase`. Ordinary AC-PF start measured `12.657 s` median, 77
+iterations, and 76 Phase-II factorizations; the structured dispatch start
+measured `11.088 s`, 56 iterations, and 55 factorizations. End-to-end median
+fell `12.4%` and Phase-II factorizations fell `27.6%`, exceeding the fixed
+10%/15% acceptance thresholds. Objectives were `315911.571480` and
+`315911.571406`; final primal/dual residuals were respectively
+`6.49e-8/4.66e-7` and `5.78e-8/3.05e-7`. On `case13659pegase`, baseline dual
+residual `1.970` passed the prefilter, so no DC work ran; the guard retained
+138 iterations, 137 factorizations, objective `386116.837520`, primal
+`2.05e-7`, and dual `5.89e-9` in `21.506 s`.
+
+The DC Phase-I default wall budget is `2000 ms` end to end: canonical
+projection, compact formulation, connected-component/reduced-Laplacian seed,
+symbolic analysis, and numeric iterations are all charged. Sparse
+factorizations are cooperative indivisible units, so diagnostics report any
+overshoot. On case9241 the DC work used `1638 ms`, did not exhaust the budget,
+and performed one NativeLCQP symbolic analysis. Baseline and candidate share
+one Parity formulation (`parity_formulation_builds=1`); only mutable authored
+operating-point seeds are refreshed before candidate slack construction. On
+case13659 the prefilter performed zero DC symbolic analyses.
+
+The 20k-class validation uses the 25,000-bus ACTIVSg25k case (4,834
+generators and 32,230 AC branches) with Release/KLU on the same AppleClang 21
+arm64 host. The fixed protocol parses once, then runs one warmup and three
+timed solves. The ordinary AC-PF start samples were `183.967`, `182.383`, and
+`183.808 s` (median `183.808 s`); every solve converged in 66 iterations and
+65 Phase-II factorizations to objective `6252070.20694`, primal
+`3.239e-7`, and dual `1.004e-7`. The process peak RSS was `5.13 GiB`.
+
+With only the default 2-second DC Phase-I budget changed, samples were
+`186.588`, `184.993`, and `187.476 s` (median `186.588 s`, 1.51% slower).
+The DC path performed one symbolic analysis and two iterations, exhausted the
+budget in `2064 ms` with `64 ms` cooperative overshoot, produced no admissible
+iterate, and retained the exact baseline start. Phase II therefore remained
+66 iterations/65 factorizations with bit-identical objective and KKT metrics;
+`parity_formulation_builds` remained one. Full-solve peak RSS was `4.48 GiB`;
+the difference from the baseline peak is allocator/run variability and is not
+claimed as a memory reduction.
+
+A predeclared budget sweep explains why increasing the DC-IPM allowance is not
+the remedy for this case. A 5-second embedded run completed five DC iterations
+but still produced no iterate within the `1e-2` handoff tolerance. DC-only
+residuals were `3.639e-2` after
+`10.55 s/10` iterations, `1.146e-2` after `20.27 s/17`, and `8.767e-4`
+after `31.05 s/25`; peak RSS rose from `2.12` to `3.84` and `5.49 GiB`.
+The 30-second embedded run reached that last DC residual but its AC replay
+changed the actual Parity primal metric from `3.929e-4` to `9.786e-2` and
+improved dual only `468.107 -> 448.664` (4.15%, below the fixed 20% gate).
+It was correctly rejected and finished in `215.012 s`, 16.98% slower than the
+baseline, with unchanged Phase-II work.
+
+The original `O(n^1.5)` nested-dissection estimate predicted 45--90 seconds
+from case9241 and was violated. Re-derivation found a machine/cost-model and
+input-assumption error rather than implementation infidelity: bus count alone
+does not determine KLU fill, elimination-tree separators, generator/bound-row
+density, or memory traffic across PEGASE and ACTIVS families. The benchmark
+now reports buses, generators, branches, controllable DC budget/iterations,
+all handoff diagnostics, and POSIX peak RSS. The verified conclusion is that
+the current solver can complete this 25k ACOPF with a final KKT certificate,
+but the current compact DC Phase I does not accelerate ACTIVSg25k. Future 20k
+work should target a cheaper dispatch/dual predictor or symbolic reuse across
+repeated operating points, not a more accurate auxiliary DC IPM.
+
+The first zero-factorization dual-predictor probe is now implemented as an
+experimental, default-off option. It forms one active/reactive balance price
+per conductive AC component from the median stationarity of interior
+generators. The candidate reuses the Jacobians that Phase II already assembles,
+performs no symbolic or numeric factorization, and is accepted only if both the
+raw and multiplier-normalized full stationarity residual improve by at least
+`phase_one_dispatch_dual_min_improvement` (default 5%). Rejection leaves the
+ordinary zero equality-dual start bit-for-bit intact. The JSON and `/api/v1`
+diagnostics report attempted/accepted, runtime, both residual pairs, and status.
+
+On ACTIVSg25k, the single Release/KLU research probe cost `1.978 ms` but changed
+raw stationarity only `47278.840 -> 47276.850` and normalized stationarity only
+`468.10733 -> 468.08762`, a `0.0042%` improvement. The candidate was therefore
+rejected; the solve completed in `184.344 s` with the unchanged 66 iterations,
+65 Phase-II factorizations, objective, and final KKT residuals. Case30 also
+worsened and was rejected; case118 improved about 2% but remained below the
+fixed 5% production gate. This falsifies the prediction that an island-common
+partial dual would remove one KKT factorization on the 25k case. The dominant
+stationarity entries lie outside the free-generator price subspace, especially
+in bound/inequality and uncovered variable families.
+
+Current research evidence supports the following priority order:
+
+| Direction | Extra factorization | Memory lifetime | Valid after data/topology change | Measured/expected value |
+|---|---:|---|---|---|
+| Component dispatch/dual predictor | 0 | `O(nb + ng)` for one initialization | Recompute after either change | Dual-only probe is negligible on ACTIVSg25k; a primal dispatch reshape still needs AC-PF replay and end-to-end validation |
+| AC-PF adjoint dual seed | One transpose solve only if the final PF factorization is retained; otherwise one new factorization | PF reduced Jacobian and factors must survive into OPF | Numeric reuse only for unchanged values; symbolic reuse requires unchanged PV/PQ and topology pattern | Deliberately excluded: the reduced PV/PQ PF Jacobian does not directly cover the full OPF equality/bound multiplier layout |
+| Repeated-solve continuation plus prepared symbolic cache | 0 extra symbolic analyses after a compatible first solve; numeric KKT factorization remains per IPM iteration | Prepared formulation, maps, sparse pattern/order, and last complete `(x,lambda,z,mu)` state persist across solves | Full continuation requires identical layout; symbolic ordering survives parameter changes with fixed pattern; topology/layout changes invalidate it | Highest priority for time series/contingency batches because HySim already validates and reuses a complete continuation state within one compatible formulation |
+
+That highest-priority path is now implemented as the non-copyable, movable
+`opf::PreparedACOPFSession`. Its exact compatibility key covers variable and
+constraint blocks, bound-row finiteness/order, component maps, reference rows,
+limited-device row membership, energy-router port order, and Ybus/Gdc sparse
+patterns. LCC stable identity, AC/DC terminals, resolved commutation bus, and
+energy-router port stable identity are included because they select KKT row,
+column, or public mapping semantics. Identical inputs reuse the owning
+`parity::Problem`; compatible load,
+cost, setpoint, and limit changes refresh canonical numeric `SolverData` and
+derived coefficients without rebuilding OPF maps. A failed structural audit
+rebuilds the formulation, clears the KKT symbolic cache, and prevents opaque
+state reuse on that solve. The four continuation blocks are all-or-nothing and
+still pass the native positivity, centrality, and residual admission checks.
+Each sparse backend additionally keys its symbolic analysis by an FNV-1a scan
+of every compressed KKT coordinate, not only dimension and nonzero count; an
+equal-size, equal-nnz graph with different coordinates is therefore reanalyzed.
+
+On the fixed case118 Release/KLU protocol, three standalone Phase-I solves
+measured `22.199/16.407/14.786 ms` (median `16.407 ms`), 27 iterations, 26
+factorizations, and 2 symbolic analyses. One prepared session measured
+`18.524/7.163/6.760 ms` (median `7.163 ms`), with the repeated solve at 2
+iterations, 1 factorization, and 0 analyses. The prepared
+`0,+0.5,-0.5,+2,-2%` load sequence measured
+`24.907/8.833/7.859/8.374/8.434 ms` (median `8.434 ms`); the final -2% point
+used 7 iterations, 6 factorizations, and 0 analyses. Thus the fixed prediction
+of at least 25% Phase-II iteration reduction is met on this oracle. Final
+objectives and KKT residuals remain within the existing solver tolerances.
+After the exact KKT-coordinate cache audit, a two-warmup/ten-repeat case118
+prepared-session check measured `6.121 ms` median, 2 iterations, 1 fresh
+numeric factorization, and 0 symbolic analyses. This corrected the initial
+three-sample timing concern (`8.501 ms` median): the longer sequence showed no
+stable regression relative to the earlier `7.163 ms` result.
+
+The 20k-class acceptance run used ACTIVSg25k (25,000 buses, 4,834 generators,
+32,230 branches) with `prepared-power-flow`, no warmup, and two solves in one
+Release/KLU session. The first solve took `184645.248 ms`, 66 iterations, and
+65 factorizations. The compatible repeated solve took `8666.249 ms`, 4
+iterations, 3 fresh numeric factorizations, and zero symbolic analyses: a
+`95.31%` wall-clock reduction while improving final primal/dual residuals to
+`3.389e-8/2.092e-8`. Its objective `6252069.93711` is within the established
+large-case tolerance of the first-solve/reference objective. Peak process RSS
+was `4709.6 MiB`; therefore the session closes the repeated-solve time target
+at 25k but does not close the memory-efficiency target for larger batches.
+
+Numeric-factor reuse remains deliberately unsupported; ordinary
+`factorize()` is not labelled as reuse. The current Eigen SuiteSparse adapters and MIPSolvers
+MUMPS wrapper expose persistent symbolic analysis followed by fresh numeric
+factorization, but no distinct cross-solve factor object with pre-use matrix
+drift and post-use backward-residual/refinement audit. Enabling
+`prepared_numeric_refactor` therefore returns an explicit `unsupported` status
+and performs ordinary numeric factorization. AC-PF adjoint dual seeding also
+remains excluded: its reduced PV/PQ Jacobian does not match the full OPF
+equality/bound multiplier layout, and without a retained PF factor it adds a
+factorization rather than removing one.
+
+The literature check is consistent with these measurements. Baker,
+*Learning Warm-Start Points for AC Optimal Power Flow* (2019,
+doi:10.1109/MLSP.2019.8918690), and Cao et al., *Fast and explainable
+warm-start point learning for AC Optimal Power Flow using decision tree*
+(2023, doi:10.1016/j.ijepes.2023.109369), predict primal operating points but
+require offline data and distribution-shift controls. Park et al., *Compact
+Optimization Learning for AC Optimal Power Flow* (arXiv:2301.08840), reports
+learned warm starts up to 30,000 buses, again with an offline model. More
+directly relevant, Taheri and Molzahn, *Not All Warm Starts Help: Benchmarking
+Primal-Dual Initializations for ACOPF Algorithms* (arXiv:2606.08984), tests
+systems up to 30,000 buses and finds most partial primal-plus-dual restarts
+slower or less reliable; complete coverage is the robust case, and DC seeding
+loses statistical significance after presolve cost. WARP
+(arXiv:2605.05728) likewise identifies the complete `(x,lambda,z,mu)` state as
+the useful IPM target. Gondosiswanto and Pulsipher
+(arXiv:2606.04725) demonstrate the analogous parametric-NLP benefit of keeping
+structure-dependent symbolic work across repeated solves. These results do not
+justify a learned model in the production path today; they justify a prepared
+OPF session with exact compatibility keys, complete-state audit, and symbolic
+cache invalidation before attempting numeric refactor reuse.
+
+The formal runs are reproducible with:
+
+```bash
+cmake --build build/macos-release --target opf_numerical_benchmark -j4
+./build/macos-release/opf_numerical_benchmark \
+  external_data/matpower/case_ACTIVSg25k.m --mode power-flow \
+  --warmups 1 --repeats 3 --max-iterations 300
+./build/macos-release/opf_numerical_benchmark \
+  external_data/matpower/case_ACTIVSg25k.m --mode structured-power-flow \
+  --warmups 1 --repeats 3 --max-iterations 300 \
+  --dc-max-iterations 5 --dc-time-limit-ms 2000
+./build/macos-release/opf_numerical_benchmark \
+  external_data/matpower/case_ACTIVSg25k.m --mode power-flow-phase-one \
+  --warmups 0 --repeats 1 --max-iterations 300
+./build/macos-release/opf_numerical_benchmark \
+  external_data/matpower/case118.m --mode prepared-session \
+  --warmups 0 --repeats 3 --max-iterations 300
+./build/macos-release/opf_numerical_benchmark \
+  external_data/matpower/case118.m --mode prepared-sweep \
+  --warmups 0 --repeats 5 --max-iterations 300
+./build/macos-release/opf_numerical_benchmark \
+  external_data/matpower/case_ACTIVSg25k.m --mode prepared-power-flow \
+  --warmups 0 --repeats 2 --max-iterations 300
+```
+
+The enhanced diagnostic target rebuilt in both `macos-release` and the local
+ASan/UBSan configuration. Focused Release and sanitizer runs each passed the
+four prepared-session cases with 46 assertions and the eight combined
+warm-start/Phase-I cases with 120 assertions. These include Hybrid AC/DC
+numeric refresh and LCC numeric-versus-structural mapping coverage. The 25k
+timing protocol itself was Release-only and preceded the final KKT-coordinate
+fingerprint hardening; it was not rerun after that `O(nnz)` safety scan. No 25k
+sanitizer or full CTest claim is made.
+
+Library JSON, the GUI response, and `/api/v1` now preserve the Phase-I
+baseline/candidate residuals, budgets, admission status, and warm-start-only
+DC contract. The AC request surface accepts bounded central Phase-I and large
+pure-AC DC-dispatch controls; callers must still opt into `ac_pf_warm_start`,
+and the DC path defaults to pure AC networks with at least 5000 buses.
+
+A barrier sweep put case30 outside admission at `mu0 = 0.03` and `0.01`,
+supporting the retained `mu0 = 0.1` default. Current verification passed
+MIPSolvers Native IPM 34 cases/246 assertions, HySim
+three-phase hybrid OPF 11/145, and ACOPF/DCOPF cross-validation 13/119. The
+complete OPF backend binary passed 22/24 cases and 639/644 assertions; both
+failed cases are Ipopt or Auto-to-Ipopt iteration-limit stalls that bypass
+Native Phase I. The focused `/api/v1` runtime E2E passed. The earlier rebuilt
+GUI/API E2E passed 68/69 checks; its sole failure is the same Auto-to-Ipopt
+showcase stall. DCOPF remains affine and pays only
+the connected-component/reduced-Laplacian projection when NativeLCQP is
+selected. Focused ASan/UBSan verification
+passed balanced Phase I 3 cases/45 assertions, three-phase Native coverage 5
+cases/54 assertions (6 Ipopt-dependent cases skipped by that build), and
+ACOPF/DCOPF cross-validation 13 cases/119 assertions. No full CTest, Windows,
+or browser-layout E2E claim is made for this increment.
 
 ## DER control and reliability-method comparison
 
@@ -406,10 +671,8 @@ on this list.
   and native B&C solve state across contingency workers; the native fallback
   uses one internal thread. Solver-bearing reliability workers request a 4 MiB
   POSIX stack through the optional `ThreadPool` stack-size parameter.
-- The sibling MIPSolvers worktree has two uncommitted HiGHS changes: hash
-  non-finite cut bounds from their IEEE-754 representation, and allow an
-  initial root user-cut pool before the first restart. Both changes were rebuilt;
-  focused and complete market sanitizer regressions pass.
+- The sibling MIPSolvers worktree is clean at `5a5fad0`. Earlier local HiGHS
+  experiments are no longer described as pending worktree state here.
 
 The apparent `HPresolve::changeImplColUpper` container corruption in
 `case33mg_acdc` was a downstream symptom of worker stack overflow, not a
@@ -423,10 +686,12 @@ cross-check produced SAIFI 0.7787, SAIDI 10.60, and EENS 570.3.
 
 ## Performance closure
 
-The dirty MIPSolvers Release binary was compared with a clean export of the
-pinned commit on the same arm64 host using an A/B/C sandwich: 24 NETLIB cases,
-Native and HiGHS, 3 repeats, single-threaded HiGHS, and a 30 second solve limit.
-Every run was accurate (72/72 for each solver in each leg).
+An earlier pre-cleanup MIPSolvers Release experiment compared the modified
+binary with a clean export of the pinned commit on the same arm64 host using an
+A/B/C sandwich: 24 NETLIB cases, Native and HiGHS, 3 repeats, single-threaded
+HiGHS, and a 30 second solve limit. Every run was accurate (72/72 for each
+solver in each leg). This is retained as historical performance evidence, not
+as a statement that the current sibling worktree is dirty.
 
 | Leg | Native geometric mean |
 |---|---:|
@@ -440,6 +705,80 @@ Dirty versus sandwich control was -0.0426%, within the predeclared absolute
 records matched exactly across A/B/C, including status, objective, feasibility,
 iterations, and dual-pivot counts. The raw reports are
 `/private/tmp/hysim_native_dual_{control_a,experiment_b,control_c}_repeat3.{csv,json}`.
+
+## PV/PQ reactive-limit switching
+
+Balanced Newton PF now performs generator Q-limit conversion only around
+fixed-active-set converged points. All violated PV buses enter their Q bounds
+in one batch. PQ-to-PV restoration is audited at most once and requires the
+configured hold count plus the existing voltage-direction margin. Converged
+active-set signatures, outer-budget exhaustion, final Q violation, and an
+explicit certificate are returned. The GUI defaults to fast screening with
+conversion disabled and labels Q-limit certification separately.
+
+Smooth NCP now uses the implemented CHKS median smoothing rather than ignoring
+`mu`. Continuation owns a local `SolverData` copy, initializes `mu` before the
+first evaluation, reassembles residual and Jacobian after every reduction, and
+cannot terminate until `ncp_mu_min` is reached. The result profiles continuation
+updates and final `mu`.
+
+Release verification rebuilt `test_power_flow_math_audit`,
+`matpower_pf_compare`, and `run_gui_server`. The full math audit passed 49 cases
+and 275 assertions. The ASan/UBSan build passed its configured 42 cases and 231
+assertions; LeakSanitizer is unavailable in the macOS runtime. JavaScript syntax
+and `git diff --check` passed.
+
+On `case6515rte`, Q-limit enforcement converged in 9 Newton iterations and 8
+factorizations, with 74 PV-to-PQ switches, no restoration, no repeated active
+set, and a certified maximum Q violation of `4.22e-11 pu`. The latest
+five-repeat Release run measured `49.90--51.65 ms` with a `50.64 ms` median.
+Fast screening previously used 4 iterations and 3 factorizations with a median
+of approximately 21.2 ms.
+
+The original `data/云南案例.json` exposed a distinct input/projection defect,
+not active-set oscillation. It contains 587 legacy BPA zero-data L-card ties
+encoded as physical `x=1e-4 pu` branches. Conflicting PV setpoints across those
+rows produced `O(Delta V/x)` reactive circulation; the old solve reached about
+`410 pu` residual and `8736 pu` maximum Q violation without repeating an active
+set. BPA import now marks exact-zero L cards as ideal connectivity. JSON round
+trip preserves that provenance, and a strict BPA-schema migration recognizes
+the legacy encoding while excluding ordinary short physical lines. Canonical
+projection performs 585 effective merges, reducing 4512 authored buses to 3927
+canonical buses before Ybus and PV/PQ construction.
+
+With the unmodified Yunnan JSON loaded through the rebuilt Release GUI server,
+Q-limit enforcement converged and certified in 19 total Newton iterations and
+5 outer solves: 218 PV-to-PQ entries, 3 restorations, 215 final limited buses,
+no repeated active set or cycle, `7.28e-12` electrical residual, and
+`2.27e-13 pu` maximum Q violation. Cold solver/presentation/total-before-
+serialization timings were `71.9/224.2/296.8 ms`; five warm compact Q-limit
+solves had a `47.3 ms` median. Q-disabled screening measured `18.3 ms`.
+
+Release verification additionally passed `test_io_json` (41 cases, 398
+assertions, one data-dependent skip), `test_bpa_io` (25/885),
+`test_component_models_math_audit` (15/111), `test_power_flow_math_audit`
+(49/275), and `test_advanced_pf` (30/218). The rebuilt `run_gui_server` is the
+binary used for the full Yunnan request.
+
+The GUI/API E2E passed all PF Q-certificate and fast-screening assertions, but
+the complete run was 70/71 because the separate Hybrid Auto OPF check reached
+the Ipopt iteration limit. Browser E2E passed the new default/control assertion
+and all large-system PF checks; it remained non-green because two existing
+multiscale comprehensive-OPF assertions failed. No all-suite green claim is
+made for those OPF paths.
+
+The 82,000-bus `case_SyntheticUSA.m` exposed a separate GUI orchestration
+regression. The `ac_newton` route detected three solvable AC islands, ran the
+adaptive island solver, and then ran a second full-network Newton solely to
+populate display/cache data. The second solve has been removed. Adaptive
+results now aggregate per-island Q-limit certificates and profiling and are
+used directly for branch-flow reconstruction, compact presentation, and PF
+cache state. The exact Release GUI request with PV/PQ conversion enabled
+converged in 2.58 seconds with 4,820 PV-to-PQ switches, 76 restorations, no
+repeated active set, and maximum Q violation `1.34e-11 pu`. The former double
+solve took approximately 5.80 seconds on the same server. Focused Release
+adaptive tests passed 30 cases/218 assertions; the ASan/UBSan integration and
+adaptive selection passed 4 cases/23 assertions.
 
 ## Fast orientation
 

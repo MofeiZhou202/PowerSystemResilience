@@ -494,7 +494,7 @@ TEST_CASE("Native Full certifies a graph-reduced primal-dual transport",
         options.phase_one_max_iterations *
             options.phase_one_max_backtracks);
   CHECK(full.phase_one_runtime_ms >= 0.0);
-  CHECK(full.phase_one_termination == "certified");
+  CHECK(full.phase_one_termination == "central-corridor-certified");
   CHECK(full.phase_two_start_requested);
   CHECK(full.phase_two_start_accepted);
   CHECK_FALSE(full.phase_two_linear_solver_backend.empty());
@@ -517,6 +517,7 @@ TEST_CASE("Native Phase I obeys a zero-factorization hard budget",
   options.tolerance = 1e-7;
   options.phase_one_max_iterations = 12;
   options.phase_one_max_factorizations = 0;
+  options.phase_one_admission_mu_factor = 100.0;
   options.phase_one_max_backtracks = 4;
   options.phase_one_time_limit_ms = 1000.0;
 
@@ -524,7 +525,8 @@ TEST_CASE("Native Phase I obeys a zero-factorization hard budget",
   CHECK(result.phase_one_factorizations == 0);
   CHECK(result.phase_one_iterations == 0);
   CHECK(result.phase_one_budget_exhausted);
-  CHECK(result.phase_one_termination == "factorization-budget");
+  CHECK(result.phase_one_in_handoff_corridor);
+  CHECK(result.phase_one_termination == "factorization-budget-after-primal");
   CHECK_FALSE(result.phase_one_dual_initialized);
   CHECK(result.phase_two_start_requested);
   CHECK_FALSE(result.phase_two_start_accepted);
@@ -546,11 +548,12 @@ TEST_CASE("Native Phase I permits a full step with no backtracking budget",
   options.phase_one_time_limit_ms = 1000.0;
 
   const auto result = solve_three_phase_hybrid_opf(c, options);
-  CHECK(result.phase_one_iterations == 1);
+  CHECK(result.phase_one_iterations == 0);
   CHECK(result.phase_one_backtracks == 0);
   CHECK(result.phase_one_factorizations <= 3);
-  CHECK(result.phase_one_constraint_violation <
-        result.phase_one_initial_violation);
+  CHECK(result.phase_one_in_handoff_corridor);
+  CHECK(result.phase_one_constraint_violation ==
+        Catch::Approx(result.phase_one_initial_violation));
 }
 
 TEST_CASE("Large Native Phase I remains sparse and budget bounded",
@@ -585,14 +588,19 @@ TEST_CASE("Large Native Phase I remains sparse and budget bounded",
   CHECK(result.phase_one_iterations <= options.phase_one_max_iterations);
   CHECK(result.phase_one_factorizations <=
         options.phase_one_max_factorizations);
-  CHECK((result.phase_one_linear_solver == "sparse-basis-lu" ||
-         result.phase_one_linear_solver == "sparse-qr"));
+  CHECK(result.phase_one_linear_solver == "sparse-basis-lu");
   CHECK(std::isfinite(result.phase_one_constraint_violation));
   CHECK(result.phase_one_constraint_violation <=
         result.phase_one_initial_violation);
-  CHECK(result.phase_one_primal_feasible);
+  CHECK_FALSE(result.phase_one_primal_feasible);
+  CHECK(result.phase_one_in_handoff_corridor);
   CHECK(result.phase_one_dual_initialized);
   CHECK(result.phase_one_dual_fit_residual <= 1e-6);
+  CHECK(result.phase_one_perturbed_primal_residual <=
+        result.phase_one_handoff_primal_tolerance);
+  CHECK(result.phase_one_centrality <=
+        options.phase_one_centrality_tolerance);
+  CHECK(result.phase_two_start_accepted);
 }
 
 TEST_CASE("Exact constraint oracle preserves the graph-reduced OPF solution",

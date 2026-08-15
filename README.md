@@ -22,11 +22,38 @@
   `full-dev` 同时构建两仓库完整测试树；该历史升级回归 1429/1429 个已注册
   测试通过，3 个缺少外部运行时或条件不满足的用例明确跳过。当前 Trial
   Trial 集成先将依赖 pin 更新到 MIPSolvers `7b4cba8`；当前 pin 为
-  `adfc98f`，加入 Native IPM 的原坐标可行起点审计、方向性变量界契约和
-  滤波器诊断。三相混合 OPF 的 Phase I 现在构造可行原始点及对偶/松弛状态，
-  Phase II 仅在 MIPSolvers 独立审计接受后保留该起点。MIPSolvers IPM 30 个
-  用例/203 个断言与 HySim 三相混合 OPF 8 个用例/112 个断言通过；新的完整
-  双仓库回归仍待运行。
+  `5a5fad0`，加入 Native IPM 的原坐标可行起点审计、方向性变量界契约、
+  central warm-start 审计与 NativeLCQP 协作式墙钟截止。有限预算
+  的稀疏 Phase I 已覆盖纯 AC、平衡 Hybrid AC/DC 与三相混合 OPF，在
+  `mu0 = 0.1` 下以 `1e-1` 为 admission 门槛、`1e-2` 为 primal handoff
+  corridor，并构造 central dual/slack；DCOPF 的 NativeLCQP 路径另采用逐连通
+  分量功率配平与约化 Laplacian 初值。Phase II 最终容差不变，只有完整状态
+  通过 MIPSolvers 独立审计后才使用，未接受时严格回到普通冷启动。新的完整双仓库
+  CTest 仍待运行。大型纯 AC 可在 AC-PF 启动前条件式运行 5 次 compact DCOPF；
+  DC 总预算覆盖 projection/formulation/symbolic/numeric，候选与 baseline 复用
+  单个 Parity formulation：`case9241pegase` 的 Release/KLU 固定协议将端到端
+  中位数降低 12.4%，Phase-II
+  分解降低 27.6%，并保持最终 objective 与 primal/dual KKT；`case13659pegase`
+  由 baseline-dual 预筛选零成本跳过。25,000-bus `ACTIVSg25k` 的同一
+  Release/KLU 协议验证了可扩展性边界：普通 AC-PF 启动以 66 次迭代、65 次
+  分解和 `183.808 s` 中位数稳定收敛，最终 primal/dual 为
+  `3.24e-7/1.00e-7`；默认 2 秒 DC Phase I 因无法形成合格候选而诚实回退，
+  中位数为 `186.588 s`（慢 1.51%），不能宣称该算例获得 Phase I 加速。
+  零分解的分量 dispatch-dual predictor 也仅把初始 normalized dual
+  `468.10733 -> 468.08762`（改善 0.0042%），被 5% 审计门槛拒绝；该研究路径
+  默认关闭。现已加入显式 RAII `PreparedACOPFSession`：同一输入复用完整
+  Parity formulation/maps，固定布局的参数变化只刷新 canonical numeric data，
+  并以完整 KKT 坐标指纹审计后跨求解保留稀疏 symbolic ordering；只有布局签名完全一致时才整体复用
+  `(x,lambda,mu,z)`，拓扑/服务状态/约束 family 变化会清空缓存。case118 Release
+  固定协议中，普通 Phase I 三次中位数为 `16.407 ms`、27 次迭代、2 次 symbolic
+  analyze；prepared 同实例为 `7.163 ms`、2 次迭代、0 次 analyze，五点
+  `0/+0.5/-0.5/+2/-2%` 负荷序列中位数为 `8.434 ms`，末点 7 次迭代、0 次
+  analyze。25,000-bus ACTIVSg25k 的两次同 session Release/KLU 验证为：首轮
+  `184.645 s`、66 次迭代、65 次分解；第二轮 `8.666 s`、4 次迭代、3 次分解、
+  0 次 symbolic analyze，墙钟下降 `95.31%`，最终 primal/dual 为
+  `3.39e-8/2.09e-8`，峰值 RSS `4709.6 MiB`。当前后端仍逐次重算 numeric
+  factor；请求 numeric reuse 时明确报告 unsupported，不虚报复用。AC-PF
+  adjoint dual seed 仍不实施。
 - 2026-07-28 增加 IEC-CGE 注释配电单线图 SVG 导入：从
   `cge:psr_ref` 与几何端点恢复导线、母线、开关、母联和配变拓扑，按
   `BestEffort` 口径补齐缺失电气参数，源外孤岛保持隔离；两个真实馈线
@@ -88,7 +115,7 @@ powershell -ExecutionPolicy Bypass -File tools/package_trial_windows.ps1
 | 能力域 | 当前状态 | 说明 |
 |---|---|---|
 | 混合 AC/DC 潮流与聚合建模 | 已实现并持续回归 | 覆盖 canonical projection、AC/DC 潮流、换流器协调与图分析链路；统一 Newton 完整消费原生 LCC 的 AC P/Q、DC 注入及 `Vm/Vdc` 交叉 Jacobian。FDPF、自适应分岛和独立 DC solver 不宣称等价 LCC 覆盖。 |
-| OPF 与约束优化 | 已实现并持续回归 | AC OPF / DC OPF / RPO（含 OLTC 离散档位控制）已集成。含在役 LCC 的平衡聚合 OPF 强制走共享 Parity/Ipopt NLP，控制指令与 tap 作为固定输入；EconomicDispatch、DC OPF、实验 AML 和三相适配路径不支持时显式拒绝。 |
+| OPF 与约束优化 | 已实现并持续回归 | AC OPF / Hybrid AC/DC OPF 的 Parity Native IPM 前置有界稀疏 Phase I，认证 primal/dual warm start 后交给 Phase II；DC OPF / RPO（含 OLTC 离散档位控制）已集成。含在役 LCC 的平衡聚合 OPF 强制走共享 Parity/Ipopt NLP，控制指令与 tap 作为固定输入；不支持路径显式拒绝。 |
 | 三相混合 PF / OPF | 活跃研发中，GUI 已接入 | `powerflow::solve_three_phase_hybrid_pf` 与 `opf::phase_hybrid` 已接入 `/xjtu/` 潮流/OPF 工具栏；OPF 提供 Full 与 GraphReduced（稀疏 Kron 降阶）、Ipopt/NativeIPM 双后端。GUI rich-model 适配范围见下文。 |
 | 电压稳定 | 已实现 | 连续潮流（CPF）采用增广 `[state, lambda]` 弧长预测-校正，可越过 P-V 鼻点并保留下支采样；输出 P-V 曲线与 VSI 指标。 |
 | 图建模、网络降阶、重构 | 已实现并持续回归 | 支持连通性、开关收缩、Kron/series/pendant/sparse-Kron reduction、ONR。 |
@@ -135,7 +162,7 @@ powershell -ExecutionPolicy Bypass -File tools/package_trial_windows.ps1
 - 对暂态/谐波/跨引擎一致性类结论，建议标注“持续增强中”，避免描述为已完全定型。
 - 电力市场已覆盖 DC 母线/支路/固定资源、VSC、DC/DC 双向传输、DC 储能跨期优化和 AC/DC LMP；N-1 覆盖发电机、AC/DC 支路、VSC、DC/DC 与两类 DC 储能，但只有 AC 支路 LODF 割进入定价 LP，其余采用固定组合纠正式 SCED 校核。DC 支路商业网损、换流器报价、母线/负荷/开关与保护故障仍未建模，外部电网和能量路由器仍显式拒绝。
 - 省级市场规模尚无无条件在线时延承诺：SCUC 已注入机组时序/容量/备用/报价结构、经固定整数 LP 验证的 MIP start 和分支优先级；大型模型自适应使用 StrictHiGHS，并在当前分支树内尝试提交 AC 基态热限全局割，最终执行全候选复核，未完成时拒绝定价。不能通过 presolve 精确投影的热限进入外层轮次，并复用原空间根割、配套 root basis 和伪成本；新增热限后的旧开放节点树不直接沿用。默认显式 1% MIP gap 与 120 s 总时限，并返回实际 gap、树内提交、状态复用、树重建、候选/激活/剩余超限和证明口径。大型定价 LP 按变量阈值直达 HiGHS；LODF 使用稀疏因子复用与候选列按需计算，全元件事故 SCED 使用默认 4-worker 有界并行。异步取消、滚动时域、跨运行 artifact 缓存、可认证树 checkpoint 和注册规模基准仍是生产化缺口；大系统应限制 `n1_max_contingencies` 并分层运行。
-- OPF 结果按实际路径声明有效边界：DC OPF 的凸二次成本在 LP 回退时使用 `pwl_segments` 分段，QP 路径回显有效分段为 0；节点 LMP 与支路拥塞 `mu` 分开认证，当前支路 `mu` 始终未认证。AC OPF 是非凸局部 KKT 求解，Ipopt 适配器不返回乘子因而无 LMP；RPO 是受时限/评估预算约束的离散邻域搜索，不提供全局 MINLP 证书。三相混合 NativeIPM 采用有迭代/分解/回溯预算的稀疏 Phase I 构造 primal 和 dual warm start，再由 MIPSolvers Native IPM 执行 Phase II；Phase I 的 dual-fit 证书不等同于完整 stationarity。快照 OPF 不含跨时段 SOC，能量路由器端口守恒不含内部损耗。AML builders 标记为实验链路，其中 AML SCUC 无网络约束且 MILP 价格未认证。`HACDCPF_OPF_*` 环境变量仅为调试通道，不是稳定 API。
+- OPF 结果按实际路径声明有效边界：DC OPF 的凸二次成本在 LP 回退时使用 `pwl_segments` 分段，QP 路径回显有效分段为 0；节点 LMP 与支路拥塞 `mu` 分开认证，当前支路 `mu` 始终未认证。AC OPF 是非凸局部 KKT 求解，Ipopt 适配器不返回乘子因而无 LMP；RPO 是受时限/评估预算约束的离散邻域搜索，不提供全局 MINLP 证书。纯 AC、平衡 Hybrid AC/DC 与三相混合 NativeIPM 采用有迭代/分解/回溯预算的稀疏 Phase I；它只需进入与 `mu0` 协调的 primal/central corridor，不追求 Phase II 最终精度。完整 primal/equality-dual/positive inequality-dual/slack 状态通过 MIPSolvers 审计后才进入 Phase II，未接受状态严格退回普通冷启动；Phase I dual-fit 也不等同于完整 stationarity。默认 admission 会让初始违反度超过 `0.1` 的算例零分解跳过，因此该局部 Newton 恢复不会保证每个算例都发生，也不保证端到端加速。大型纯 AC 的可选 DC-dispatch Phase I 使用真实 Parity 初始残差比较候选与 baseline；它可能以更大的不等式 primal metric 换取更好的 dispatch dual，因此不冒充 central-state 证书，最终 KKT 仍完全由 Phase II 认证。快照 OPF 不含跨时段 SOC，能量路由器端口守恒不含内部损耗。AML builders 标记为实验链路，其中 AML SCUC 无网络约束且 MILP 价格未认证。`HACDCPF_OPF_*` 环境变量仅为调试通道，不是稳定 API。
 - 三相混合 OPF 与 SPPT 层属活跃研发/论文验证性质，接口与产物格式仍可能调整。
 - 当文档、报告、UI 文案与实现不一致时，以本仓库 `src/`、`include/`、`tests/` 与 CMake 配置为最终依据。
 
@@ -245,7 +272,7 @@ Canonical 层的一个重要设计原则是：求解器只看到必要的数学�
 | 高级/回退潮流求解器 | `HelmSolver`、`HomotopyContinuationSolver`、`NewtonKrylovSolver`、`AdaptiveSolver`（`solver_factory.hpp`，`PowerFlowMethod`） | 全纯嵌入、同伦延拓、GMRES+Schur 预条件 | 难收敛算例的回退求解路径与诊断 |
 | 三相潮流 | `analysis::solve_three_phase_nr` | `ThreePhaseACSystem` | abc 相电压、电流和三相收敛信息 |
 | 三相混合 PF | `powerflow::solve_three_phase_hybrid_pf` | 原生相域 AC + DC 节点平衡 + equal-phase/GFL/GFM 变换器稳态闭合 | AC/DC 电压、逐相变换器功率/电流、VUF、分域物理残差；可从工程初值独立复核三相混合 OPF 点 |
-| OPF | `solve_ac_opf`, `solve_dc_opf`, `solve_rpo` | AC/IPM、DC LP/QP、无功优化模型（RPO 含 OLTC 离散档位邻域搜索） | Parity/Ipopt 对在役 LCC 返回稳定 ID 的 `lcc_transfers` 并闭合 AC/DC KCL；不支持的线性路径拒绝。其余输出含调度、目标值、节点 LMP、约束诊断、solver path、audit/infeasibility hints 与 `converter_model_scope` |
+| OPF | `solve_ac_opf`, `solve_dc_opf`, `solve_rpo` | AC/Hybrid AC/DC Parity IPM（含有界 Phase I）、DC LP/QP、无功优化模型（RPO 含 OLTC 离散档位邻域搜索） | Parity/Ipopt 对在役 LCC 返回稳定 ID 的 `lcc_transfers` 并闭合 AC/DC KCL；Native 路径另返回 Phase I primal/dual-fit/预算/接受诊断。不支持的线性路径拒绝。其余输出含调度、目标值、节点 LMP、约束诊断、solver path 与审计 |
 | 三相混合 OPF | `opf::phase_hybrid::solve_three_phase_hybrid_opf`（Full / GraphReduced 变体，Ipopt / NativeIPM 后端） | 相域 AC + DC 混合 OPF，可选稀疏 Kron 降阶；NativeIPM 前置有硬工作预算的稀疏 Phase I | 三相调度、约束诊断、Phase I primal/dual-fit/预算证书与同模型 PF 回放（活跃研发中） |
 | 电压稳定 | `CpfSolver`、`compute_vsi`（`power_flow/voltage_stability.hpp`） | 连续潮流（CPF） | P-V 曲线、VSI 指标 |
 | 网络重构 | `solve_optimal_reconfiguration`, `run_topology_reconfiguration` | LinDistFlow MILP + graph connectivity | 开/合支路集合、损耗 proxy、PF 校验 |
@@ -312,6 +339,8 @@ import/load system
 对于可靠性、弹性和网络重构这类组合优化任务，还应把求解器状态、MIP gap、time limit、模型规模和 fallback 状态写入结果对象，避免把启发式、近似可行和最优解混为一谈。
 
 潮流结果的 `SolverDiagnostics` 还会携带 `converter_coordination`、结构闭合扫描、自动提升的 VSC 索引和 `effective_converters`。下游报告应优先解释这些最终生效的换流器状态，而不是只看输入 JSON 中的原始控制模式。
+
+平衡 Newton 潮流将 PV/PQ 转换作为有界活动集过程：在固定活动集收敛后批量钳位全部 Q 越限 PV 节点，只执行一次带保持时间和电压方向死区的 PQ→PV 恢复审计，并返回 `reactive_limits.certified`、重复活动集和外层预算诊断。GUI 默认关闭该校核以进行快速筛查；需要工程 Q 限值结论时必须显式启用并检查证书。理论与性能边界见 [PV/PQ 无功限值切换契约](docs/pv_pq_switching_contract.md)。
 
 换流器容量圆、AC/DC 电流、调制比和 DC/DC 占空比在确定型 PF 中没有可自动重调度的自由量。默认模式保持兼容口径（数值根收敛并发出 `ACDC-PHYS-*` / `DCDC-PHYS-*` 告警）；启用 `PowerFlowOptions::enforce_converter_physical_limits` 后，任何超限根会被硬性拒绝并报告物理不可行。需要在约束下调整 P/Q 或电压设定时应使用 OPF，而不是由 PF 静默改写设定值。
 

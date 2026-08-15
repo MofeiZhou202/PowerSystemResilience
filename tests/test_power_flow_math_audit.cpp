@@ -815,7 +815,80 @@ TEST_CASE("Audit C1: PV-to-PQ switching does not hide a sub-hysteresis Q violati
             sys.base_mva <
         limited_options.pv_q_hysteresis_pu);
   CHECK(limited.profiling.pv_to_pq_switches >= 1);
+  CHECK(limited.profiling.pq_to_pv_switches == 0);
+  CHECK(limited.profiling.pv_pq_repeated_active_sets == 0);
+  CHECK(limited.reactive_limits.enforcement_requested);
+  CHECK(limited.reactive_limits.certified);
+  CHECK_FALSE(limited.reactive_limits.active_set_cycle_detected);
+  CHECK_FALSE(limited.reactive_limits.outer_iteration_limit_reached);
+  CHECK(limited.reactive_limits.active_limited_buses == 1);
+  CHECK(limited.reactive_limits.max_violation_pu <= 1e-10);
   CHECK(limited.vm[1] < controlled.vg_pu);
+
+  PowerFlowOptions bounded_options = limited_options;
+  bounded_options.pv_pq_max_outer_iterations = 1;
+  const auto bounded = solve_power_flow(sys, bounded_options);
+  CHECK(bounded.reactive_limits.enforcement_requested);
+  CHECK_FALSE(bounded.reactive_limits.certified);
+  CHECK(bounded.reactive_limits.outer_iteration_limit_reached);
+  CHECK(bounded.profiling.pv_pq_outer_iterations == 1);
+  CHECK(bounded.profiling.pv_to_pq_switches >= 1);
+
+  PowerFlowOptions smooth_options;
+  smooth_options.max_iter = 100;
+  smooth_options.enable_pv_pq_conversion = false;
+  smooth_options.enable_semi_smooth_newton = true;
+  smooth_options.enable_solver_profiling = true;
+  smooth_options.robust_nonlinear.enable_smooth_ncp = true;
+  smooth_options.robust_nonlinear.ncp_mu0 = 1e-3;
+  smooth_options.robust_nonlinear.ncp_mu_min = 1e-10;
+  const auto smooth = solve_power_flow(sys, smooth_options);
+  REQUIRE(smooth.converged);
+  CHECK(smooth.profiling.smooth_ncp_continuation_updates >= 1);
+  CHECK(smooth.profiling.smooth_ncp_final_mu == Approx(1e-10));
+  CHECK(smooth.reactive_limits.enforcement_requested);
+  CHECK(smooth.reactive_limits.certified);
+  CHECK(smooth.reactive_limits.max_violation_pu <= 1e-10);
+}
+
+TEST_CASE("Audit C1b: disabled Q-limit enforcement is explicit and uncertified",
+          "[power_flow][math_audit][C1]") {
+  HybridPowerSystem system;
+  system.base_mva = 100.0;
+  system.ac.base_mva = 100.0;
+  ACBus slack;
+  slack.index = 1;
+  slack.bus_type = BusType::SLACK;
+  slack.in_service = true;
+  ACBus load;
+  load.index = 2;
+  load.bus_type = BusType::PQ;
+  load.pd_mw = 25.0;
+  load.qd_mvar = 8.0;
+  load.in_service = true;
+  system.ac.buses = {slack, load};
+  ACBranch branch;
+  branch.index = 1;
+  branch.from_bus = 1;
+  branch.to_bus = 2;
+  branch.r_pu = 0.01;
+  branch.x_pu = 0.10;
+  branch.in_service = true;
+  system.ac.branches = {branch};
+  Generator generator;
+  generator.index = 1;
+  generator.bus = 1;
+  generator.is_slack = true;
+  generator.in_service = true;
+  system.ac.generators = {generator};
+  PowerFlowOptions options;
+  options.enable_pv_pq_conversion = false;
+  const auto result = solve_power_flow(system, options);
+  REQUIRE(result.converged);
+  CHECK_FALSE(result.reactive_limits.enforcement_requested);
+  CHECK_FALSE(result.reactive_limits.certified);
+  CHECK(result.profiling.pv_to_pq_switches == 0);
+  CHECK(result.profiling.pq_to_pv_switches == 0);
 }
 
 TEST_CASE("Audit C2: DC-DC droop is negative feedback and its Jacobian matches FD",
@@ -1405,6 +1478,35 @@ TEST_CASE("Audit B4: median NCP contains all three PV/PQ physical branches",
   CHECK(pv_pq_ncp(qmin, qmin, qmax, 1.05, vset) == Approx(0.0).margin(1e-14));
   CHECK(std::abs(pv_pq_ncp(qmax, qmin, qmax, 1.05, vset)) > 1e-3);
   CHECK(std::abs(pv_pq_ncp(qmin, qmin, qmax, 0.95, vset)) > 1e-3);
+}
+
+TEST_CASE("Audit B4b: CHKS-smoothed PV/PQ median has a consistent Jacobian",
+          "[power_flow][math_audit][B4]") {
+  using hacdcpf::powerflow::pv_pq_ncp;
+  using hacdcpf::powerflow::pv_pq_smooth_ncp;
+  using hacdcpf::powerflow::pv_pq_smooth_ncp_jacobian;
+  constexpr double qmin = -0.2;
+  constexpr double qmax = 0.3;
+  constexpr double qg = 0.295;
+  constexpr double vm = 0.997;
+  constexpr double vset = 1.0;
+  constexpr double mu = 1e-3;
+  constexpr double step = 1e-7;
+
+  const auto [dq, dv] =
+      pv_pq_smooth_ncp_jacobian(qg, qmin, qmax, vm, vset, mu);
+  const double fd_q =
+      (pv_pq_smooth_ncp(qg + step, qmin, qmax, vm, vset, mu) -
+       pv_pq_smooth_ncp(qg - step, qmin, qmax, vm, vset, mu)) /
+      (2.0 * step);
+  const double fd_v =
+      (pv_pq_smooth_ncp(qg, qmin, qmax, vm + step, vset, mu) -
+       pv_pq_smooth_ncp(qg, qmin, qmax, vm - step, vset, mu)) /
+      (2.0 * step);
+  CHECK(dq == Approx(fd_q).margin(2e-8));
+  CHECK(dv == Approx(fd_v).margin(2e-8));
+  CHECK(pv_pq_smooth_ncp(qg, qmin, qmax, vm, vset, 1e-10) ==
+        Approx(pv_pq_ncp(qg, qmin, qmax, vm, vset)).margin(2e-9));
 }
 
 TEST_CASE("Audit A9/B17: distributed slack uses unified ZIP component injections",

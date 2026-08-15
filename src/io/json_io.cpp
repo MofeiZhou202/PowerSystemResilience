@@ -336,6 +336,7 @@ static json ac_branch_to_json(const ACBranch& br) {
   j["n_parallel"] = br.n_parallel;
   j["in_service"] = br.in_service;
   j["name"] = br.name;
+  j["ideal_connectivity"] = br.ideal_connectivity;
   const bool transformer_like =
       br.name.rfind("T_", 0) == 0 || br.vn_hv_kv > 0.0 ||
       br.vn_lv_kv > 0.0 || br.sn_mva > 0.0 ||
@@ -380,6 +381,7 @@ static ACBranch ac_branch_from_json(const json& j) {
   br.n_parallel = jget(j, "n_parallel", 1);
   br.in_service = jget(j, "in_service", true);
   br.name = jget<std::string>(j, "name", "");
+  br.ideal_connectivity = jget(j, "ideal_connectivity", false);
   br.length_km = jget(j, "length_km", 0.0);
   br.r_ohm_per_km = jget(j, "r_ohm_per_km", 0.0);
   br.x_ohm_per_km = jget(j, "x_ohm_per_km", 0.0);
@@ -401,6 +403,64 @@ static ACBranch ac_branch_from_json(const json& j) {
   br.sn_mva = jget(j, "sn_mva", 0.0);
   br.dynamic_rl = jget(j, "dynamic_rl", false);
   return br;
+}
+
+static void tag_legacy_bpa_numerical_ties(const json& root,
+                                          HybridPowerSystem& sys) {
+  if (!root.contains("ac") || !root["ac"].is_object()) return;
+  const auto& ac = root["ac"];
+  if (!ac.contains("generators") || !ac["generators"].is_array()) return;
+
+  // Legacy BPA JSON exports did not retain branch provenance, but did retain
+  // BPA-only generator fields. Restrict migration to that schema fingerprint;
+  // ordinary JSON models with 1e-4 pu physical lines must remain untouched.
+  const bool has_bpa_metadata = std::any_of(
+      ac["generators"].begin(), ac["generators"].end(), [](const json& gen) {
+        return gen.is_object() &&
+               (gen.contains("bpa_is_bq") || gen.contains("bpa_source_order"));
+      });
+  if (!has_bpa_metadata) return;
+
+  std::unordered_map<int, double> base_kv_by_bus;
+  base_kv_by_bus.reserve(sys.ac.buses.size());
+  for (const auto& bus : sys.ac.buses) {
+    base_kv_by_bus.emplace(bus.index, bus.base_kv);
+  }
+
+  constexpr double kDspNumericalFloorPu = 1e-4;
+  constexpr double kExactTolerance = 1e-12;
+  for (auto& branch : sys.ac.branches) {
+    if (branch.ideal_connectivity || !branch.in_service ||
+        branch.name.rfind("L_", 0) != 0 ||
+        std::abs(branch.r_pu) > kExactTolerance ||
+        std::abs(std::abs(branch.x_pu) - kDspNumericalFloorPu) >
+            kExactTolerance ||
+        std::abs(branch.b_pu) > kExactTolerance ||
+        std::abs(branch.tap - 1.0) > kExactTolerance ||
+        std::abs(branch.shift_deg) > kExactTolerance ||
+        std::abs(branch.length_km) > kExactTolerance ||
+        std::abs(branch.rate_a_mva) > kExactTolerance ||
+        std::abs(branch.rate_b_mva) > kExactTolerance ||
+        std::abs(branch.rate_c_mva) > kExactTolerance ||
+        std::abs(branch.r_ohm_per_km) > kExactTolerance ||
+        std::abs(branch.x_ohm_per_km) > kExactTolerance ||
+        std::abs(branch.b_us_per_km) > kExactTolerance ||
+        !branch.conductor_model.empty() || !branch.line_type.empty() ||
+        !branch.parameter_source.empty() || branch.parameters_inferred) {
+      continue;
+    }
+    const auto from = base_kv_by_bus.find(branch.from_bus);
+    const auto to = base_kv_by_bus.find(branch.to_bus);
+    if (from == base_kv_by_bus.end() || to == base_kv_by_bus.end()) continue;
+    const double voltage_scale =
+        std::max({1.0, std::abs(from->second), std::abs(to->second)});
+    if (std::abs(from->second - to->second) >
+        kExactTolerance * voltage_scale) {
+      continue;
+    }
+    branch.ideal_connectivity = true;
+    branch.parameter_source = "legacy_bpa_dsp_numerical_tie";
+  }
 }
 
 static json dc_bus_to_json(const DCBus& b) {
@@ -3243,6 +3303,8 @@ HybridPowerSystem from_json(const std::string& json_str) {
       for (const auto& j : ac["chargers"]) sys.ac.chargers.push_back(charger_from_json(j));
     if (ac.contains("motors"))
       for (const auto& j : ac["motors"]) sys.ac.motors.push_back(asynchronous_motor_from_json(j));
+
+    tag_legacy_bpa_numerical_ties(root, sys);
   }
 
   if (root.contains("dc")) {
@@ -3704,6 +3766,113 @@ std::string opf_result_to_json(const opf::ACOPFResult& result, int indent) {
   prof["total_iterations"] = result.profiling.total_iterations;
   prof["accepted_steps"] = result.profiling.accepted_steps;
   prof["rejected_steps"] = result.profiling.rejected_steps;
+  prof["backend_escalations"] = result.profiling.backend_escalations;
+  prof["scaling_rebuilds"] = result.profiling.scaling_rebuilds;
+  prof["warm_start_used"] = result.profiling.warm_start_used;
+  prof["prepared_session_used"] = result.profiling.prepared_session_used;
+  prof["formulation_reused"] = result.profiling.formulation_reused;
+  prof["mapping_reused"] = result.profiling.mapping_reused;
+  prof["symbolic_reused"] = result.profiling.symbolic_reused;
+  prof["continuation_state_reused"] =
+      result.profiling.continuation_state_reused;
+  prof["numeric_refactor_attempted"] =
+      result.profiling.numeric_refactor_attempted;
+  prof["numeric_refactor_accepted"] =
+      result.profiling.numeric_refactor_accepted;
+  prof["numeric_refactor_relative_drift"] =
+      result.profiling.numeric_refactor_relative_drift;
+  prof["numeric_refactor_backward_error"] =
+      result.profiling.numeric_refactor_backward_error;
+  prof["numeric_refactor_status"] =
+      result.profiling.numeric_refactor_status;
+  prof["prepared_session_invalidation_reason"] =
+      result.profiling.prepared_session_invalidation_reason;
+  prof["initial_primal_residual"] =
+      result.profiling.initial_primal_residual;
+  prof["initial_dual_residual"] = result.profiling.initial_dual_residual;
+  prof["dc_phase_one_requested"] =
+      result.profiling.dc_phase_one_requested;
+  prof["dc_phase_one_accepted"] = result.profiling.dc_phase_one_accepted;
+  prof["dc_phase_one_iterations"] =
+      result.profiling.dc_phase_one_iterations;
+  prof["dc_phase_one_runtime_ms"] =
+      result.profiling.dc_phase_one_runtime_ms;
+  prof["dc_phase_one_time_limit_ms"] =
+      result.profiling.dc_phase_one_time_limit_ms;
+  prof["dc_phase_one_budget_exhausted"] =
+      result.profiling.dc_phase_one_budget_exhausted;
+  prof["dc_phase_one_budget_overshoot_ms"] =
+      result.profiling.dc_phase_one_budget_overshoot_ms;
+  prof["dc_phase_one_symbolic_analyze_calls"] =
+      result.profiling.dc_phase_one_symbolic_analyze_calls;
+  prof["parity_formulation_builds"] =
+      result.profiling.parity_formulation_builds;
+  prof["dc_phase_one_residual"] = result.profiling.dc_phase_one_residual;
+  prof["dc_phase_one_candidate_primal"] =
+      result.profiling.dc_phase_one_candidate_primal;
+  prof["dc_phase_one_candidate_dual"] =
+      result.profiling.dc_phase_one_candidate_dual;
+  prof["dc_phase_one_baseline_primal"] =
+      result.profiling.dc_phase_one_baseline_primal;
+  prof["dc_phase_one_baseline_dual"] =
+      result.profiling.dc_phase_one_baseline_dual;
+  prof["dc_phase_one_status"] = result.profiling.dc_phase_one_status;
+  prof["phase_one_initial_violation"] =
+      result.profiling.phase_one_initial_violation;
+  prof["phase_one_constraint_violation"] =
+      result.profiling.phase_one_constraint_violation;
+  prof["phase_one_dual_fit_residual"] =
+      result.profiling.phase_one_dual_fit_residual;
+  prof["phase_one_primal_feasible"] =
+      result.profiling.phase_one_primal_feasible;
+  prof["phase_one_in_handoff_corridor"] =
+      result.profiling.phase_one_in_handoff_corridor;
+  prof["phase_one_dual_initialized"] =
+      result.profiling.phase_one_dual_initialized;
+  prof["phase_one_handoff_primal_tolerance"] =
+      result.profiling.phase_one_handoff_primal_tolerance;
+  prof["phase_one_perturbed_primal_residual"] =
+      result.profiling.phase_one_perturbed_primal_residual;
+  prof["phase_one_centrality"] = result.profiling.phase_one_centrality;
+  prof["phase_one_barrier_mu"] = result.profiling.phase_one_barrier_mu;
+  prof["phase_one_budget_exhausted"] =
+      result.profiling.phase_one_budget_exhausted;
+  prof["phase_one_iterations"] = result.profiling.phase_one_iterations;
+  prof["phase_one_factorizations"] =
+      result.profiling.phase_one_factorizations;
+  prof["phase_one_backtracks"] = result.profiling.phase_one_backtracks;
+  prof["phase_one_structural_step_attempted"] =
+      result.profiling.phase_one_structural_step_attempted;
+  prof["phase_one_structural_step_accepted"] =
+      result.profiling.phase_one_structural_step_accepted;
+  prof["phase_one_structural_factorizations"] =
+      result.profiling.phase_one_structural_factorizations;
+  prof["phase_one_structural_violation"] =
+      result.profiling.phase_one_structural_violation;
+  prof["phase_one_structure"] = result.profiling.phase_one_structure;
+  prof["phase_one_runtime_ms"] = result.profiling.phase_one_runtime_ms;
+  prof["phase_one_termination"] = result.profiling.phase_one_termination;
+  prof["phase_one_linear_solver"] = result.profiling.phase_one_linear_solver;
+  prof["dispatch_dual_predictor_attempted"] =
+      result.profiling.dispatch_dual_predictor_attempted;
+  prof["dispatch_dual_predictor_accepted"] =
+      result.profiling.dispatch_dual_predictor_accepted;
+  prof["dispatch_dual_predictor_runtime_ms"] =
+      result.profiling.dispatch_dual_predictor_runtime_ms;
+  prof["dispatch_dual_predictor_baseline_raw"] =
+      result.profiling.dispatch_dual_predictor_baseline_raw;
+  prof["dispatch_dual_predictor_candidate_raw"] =
+      result.profiling.dispatch_dual_predictor_candidate_raw;
+  prof["dispatch_dual_predictor_baseline_normalized"] =
+      result.profiling.dispatch_dual_predictor_baseline_normalized;
+  prof["dispatch_dual_predictor_candidate_normalized"] =
+      result.profiling.dispatch_dual_predictor_candidate_normalized;
+  prof["dispatch_dual_predictor_status"] =
+      result.profiling.dispatch_dual_predictor_status;
+  prof["phase_two_start_accepted"] =
+      result.profiling.phase_two_start_accepted;
+  prof["phase_two_start_rejection_reason"] =
+      result.profiling.phase_two_start_rejection_reason;
   prof["final_barrier_mu"] = result.profiling.final_barrier_mu;
   j["profiling"] = prof;
 
@@ -3723,6 +3892,21 @@ std::string dc_opf_result_to_json(const opf::DCOPFResult& result, int indent) {
   // Solver-path audit fields — the primary new data that callers care about.
   j["solver_chain"]   = result.solver_chain;
   j["objective_model"] = result.objective_model;
+  j["structural_warm_start_requested"] = result.structural_warm_start_requested;
+  j["structural_warm_start_built"] = result.structural_warm_start_built;
+  j["structural_warm_start_used"] = result.structural_warm_start_used;
+  j["structural_warm_start_components"] = result.structural_warm_start_components;
+  j["structural_warm_start_factorizations"] = result.structural_warm_start_factorizations;
+  j["structural_warm_start_residual"] = result.structural_warm_start_residual;
+  j["solver_initial_primal_residual"] = result.solver_initial_primal_residual;
+  j["structural_warm_start_status"] = result.structural_warm_start_status;
+  j["phase_one_warm_start_only"] = result.phase_one_warm_start_only;
+  j["phase_one_budget_exhausted"] = result.phase_one_budget_exhausted;
+  j["phase_one_budget_overshoot_ms"] =
+      result.phase_one_budget_overshoot_ms;
+  j["native_qp_symbolic_analyze_calls"] =
+      result.native_qp_symbolic_analyze_calls;
+  j["phase_one_iterate_residual"] = result.phase_one_iterate_residual;
 
   j["lmp"]                = result.lmp;
   j["branch_mu_lower"]    = result.branch_mu_lower;
@@ -3748,6 +3932,25 @@ opf::DCOPFResult dc_opf_result_from_json(const std::string& json_str) {
   r.total_load_shedding_mw = jget(j, "total_load_shedding_mw", 0.0);
   r.branch_mu_valid = jget(j, "branch_mu_valid", false);
   r.objective_model = jget<std::string>(j, "objective_model", "");
+  r.structural_warm_start_requested = jget<bool>(j, "structural_warm_start_requested", false);
+  r.structural_warm_start_built = jget<bool>(j, "structural_warm_start_built", false);
+  r.structural_warm_start_used = jget<bool>(j, "structural_warm_start_used", false);
+  r.structural_warm_start_components = jget<int>(j, "structural_warm_start_components", 0);
+  r.structural_warm_start_factorizations = jget<int>(j, "structural_warm_start_factorizations", 0);
+  r.structural_warm_start_residual = jget<double>(j, "structural_warm_start_residual", std::numeric_limits<double>::infinity());
+  r.solver_initial_primal_residual = jget<double>(j, "solver_initial_primal_residual", std::numeric_limits<double>::infinity());
+  r.structural_warm_start_status = jget<std::string>(j, "structural_warm_start_status", "not-requested");
+  r.phase_one_warm_start_only =
+      jget<bool>(j, "phase_one_warm_start_only", false);
+  r.phase_one_budget_exhausted =
+      jget<bool>(j, "phase_one_budget_exhausted", false);
+  r.phase_one_budget_overshoot_ms =
+      jget<double>(j, "phase_one_budget_overshoot_ms", 0.0);
+  r.native_qp_symbolic_analyze_calls =
+      jget<int>(j, "native_qp_symbolic_analyze_calls", 0);
+  r.phase_one_iterate_residual = jget<double>(
+      j, "phase_one_iterate_residual",
+      std::numeric_limits<double>::infinity());
 
   if (j.contains("solver_chain")) r.solver_chain = j["solver_chain"].get<std::vector<std::string>>();
   if (j.contains("lmp")) r.lmp = j["lmp"].get<std::vector<double>>();
@@ -3873,6 +4076,137 @@ opf::ACOPFResult opf_result_from_json(const std::string& json_str) {
     r.profiling.total_iterations = jget(p, "total_iterations", 0);
     r.profiling.accepted_steps = jget(p, "accepted_steps", 0);
     r.profiling.rejected_steps = jget(p, "rejected_steps", 0);
+    r.profiling.backend_escalations = jget(p, "backend_escalations", 0);
+    r.profiling.scaling_rebuilds = jget(p, "scaling_rebuilds", 0);
+    r.profiling.warm_start_used = jget(p, "warm_start_used", false);
+    r.profiling.prepared_session_used =
+        jget(p, "prepared_session_used", false);
+    r.profiling.formulation_reused = jget(p, "formulation_reused", false);
+    r.profiling.mapping_reused = jget(p, "mapping_reused", false);
+    r.profiling.symbolic_reused = jget(p, "symbolic_reused", false);
+    r.profiling.continuation_state_reused =
+        jget(p, "continuation_state_reused", false);
+    r.profiling.numeric_refactor_attempted =
+        jget(p, "numeric_refactor_attempted", false);
+    r.profiling.numeric_refactor_accepted =
+        jget(p, "numeric_refactor_accepted", false);
+    r.profiling.numeric_refactor_relative_drift = jget(
+        p, "numeric_refactor_relative_drift",
+        std::numeric_limits<double>::infinity());
+    r.profiling.numeric_refactor_backward_error = jget(
+        p, "numeric_refactor_backward_error",
+        std::numeric_limits<double>::infinity());
+    r.profiling.numeric_refactor_status = jget<std::string>(
+        p, "numeric_refactor_status", "not-requested");
+    r.profiling.prepared_session_invalidation_reason = jget<std::string>(
+        p, "prepared_session_invalidation_reason", "not-prepared");
+    r.profiling.initial_primal_residual =
+        jget(p, "initial_primal_residual", 0.0);
+    r.profiling.initial_dual_residual =
+        jget(p, "initial_dual_residual", 0.0);
+    r.profiling.dc_phase_one_requested =
+        jget(p, "dc_phase_one_requested", false);
+    r.profiling.dc_phase_one_accepted =
+        jget(p, "dc_phase_one_accepted", false);
+    r.profiling.dc_phase_one_iterations =
+        jget(p, "dc_phase_one_iterations", 0);
+    r.profiling.dc_phase_one_runtime_ms =
+        jget(p, "dc_phase_one_runtime_ms", 0.0);
+    r.profiling.dc_phase_one_time_limit_ms =
+        jget(p, "dc_phase_one_time_limit_ms", 0.0);
+    r.profiling.dc_phase_one_budget_exhausted =
+        jget(p, "dc_phase_one_budget_exhausted", false);
+    r.profiling.dc_phase_one_budget_overshoot_ms =
+        jget(p, "dc_phase_one_budget_overshoot_ms", 0.0);
+    r.profiling.dc_phase_one_symbolic_analyze_calls =
+        jget(p, "dc_phase_one_symbolic_analyze_calls", 0);
+    r.profiling.parity_formulation_builds =
+        jget(p, "parity_formulation_builds", 0);
+    r.profiling.dc_phase_one_residual = jget(
+        p, "dc_phase_one_residual", std::numeric_limits<double>::infinity());
+    r.profiling.dc_phase_one_candidate_primal = jget(
+        p, "dc_phase_one_candidate_primal",
+        std::numeric_limits<double>::infinity());
+    r.profiling.dc_phase_one_candidate_dual = jget(
+        p, "dc_phase_one_candidate_dual",
+        std::numeric_limits<double>::infinity());
+    r.profiling.dc_phase_one_baseline_primal = jget(
+        p, "dc_phase_one_baseline_primal",
+        std::numeric_limits<double>::infinity());
+    r.profiling.dc_phase_one_baseline_dual = jget(
+        p, "dc_phase_one_baseline_dual",
+        std::numeric_limits<double>::infinity());
+    r.profiling.dc_phase_one_status =
+        jget<std::string>(p, "dc_phase_one_status", "not-requested");
+    r.profiling.phase_one_initial_violation = jget(
+        p, "phase_one_initial_violation",
+        std::numeric_limits<double>::infinity());
+    r.profiling.phase_one_constraint_violation = jget(
+        p, "phase_one_constraint_violation",
+        std::numeric_limits<double>::infinity());
+    r.profiling.phase_one_dual_fit_residual = jget(
+        p, "phase_one_dual_fit_residual",
+        std::numeric_limits<double>::infinity());
+    r.profiling.phase_one_primal_feasible =
+        jget(p, "phase_one_primal_feasible", false);
+    r.profiling.phase_one_in_handoff_corridor =
+        jget(p, "phase_one_in_handoff_corridor", false);
+    r.profiling.phase_one_dual_initialized =
+        jget(p, "phase_one_dual_initialized", false);
+    r.profiling.phase_one_handoff_primal_tolerance =
+        jget(p, "phase_one_handoff_primal_tolerance", 0.0);
+    r.profiling.phase_one_perturbed_primal_residual = jget(
+        p, "phase_one_perturbed_primal_residual",
+        std::numeric_limits<double>::infinity());
+    r.profiling.phase_one_centrality = jget(
+        p, "phase_one_centrality", std::numeric_limits<double>::infinity());
+    r.profiling.phase_one_barrier_mu = jget(p, "phase_one_barrier_mu", 0.0);
+    r.profiling.phase_one_budget_exhausted =
+        jget(p, "phase_one_budget_exhausted", false);
+    r.profiling.phase_one_iterations = jget(p, "phase_one_iterations", 0);
+    r.profiling.phase_one_factorizations =
+        jget(p, "phase_one_factorizations", 0);
+    r.profiling.phase_one_backtracks = jget(p, "phase_one_backtracks", 0);
+    r.profiling.phase_one_structural_step_attempted =
+        jget(p, "phase_one_structural_step_attempted", false);
+    r.profiling.phase_one_structural_step_accepted =
+        jget(p, "phase_one_structural_step_accepted", false);
+    r.profiling.phase_one_structural_factorizations =
+        jget(p, "phase_one_structural_factorizations", 0);
+    r.profiling.phase_one_structural_violation = jget(
+        p, "phase_one_structural_violation",
+        std::numeric_limits<double>::infinity());
+    r.profiling.phase_one_structure =
+        jget<std::string>(p, "phase_one_structure", "ac-state-basic");
+    r.profiling.phase_one_runtime_ms = jget(p, "phase_one_runtime_ms", 0.0);
+    r.profiling.phase_one_termination =
+        jget<std::string>(p, "phase_one_termination", "not-run");
+    r.profiling.phase_one_linear_solver =
+        jget<std::string>(p, "phase_one_linear_solver", "unselected");
+    r.profiling.dispatch_dual_predictor_attempted =
+        jget(p, "dispatch_dual_predictor_attempted", false);
+    r.profiling.dispatch_dual_predictor_accepted =
+        jget(p, "dispatch_dual_predictor_accepted", false);
+    r.profiling.dispatch_dual_predictor_runtime_ms =
+        jget(p, "dispatch_dual_predictor_runtime_ms", 0.0);
+    r.profiling.dispatch_dual_predictor_baseline_raw = jget(
+        p, "dispatch_dual_predictor_baseline_raw",
+        std::numeric_limits<double>::infinity());
+    r.profiling.dispatch_dual_predictor_candidate_raw = jget(
+        p, "dispatch_dual_predictor_candidate_raw",
+        std::numeric_limits<double>::infinity());
+    r.profiling.dispatch_dual_predictor_baseline_normalized = jget(
+        p, "dispatch_dual_predictor_baseline_normalized",
+        std::numeric_limits<double>::infinity());
+    r.profiling.dispatch_dual_predictor_candidate_normalized = jget(
+        p, "dispatch_dual_predictor_candidate_normalized",
+        std::numeric_limits<double>::infinity());
+    r.profiling.dispatch_dual_predictor_status = jget<std::string>(
+        p, "dispatch_dual_predictor_status", "not-attempted");
+    r.profiling.phase_two_start_accepted =
+        jget(p, "phase_two_start_accepted", false);
+    r.profiling.phase_two_start_rejection_reason = jget<std::string>(
+        p, "phase_two_start_rejection_reason", "");
     r.profiling.final_barrier_mu = jget(p, "final_barrier_mu", 0.0);
   }
 

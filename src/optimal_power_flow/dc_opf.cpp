@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <numeric>
 #include <optional>
 #include <stdexcept>
 #include <unordered_map>
@@ -13,6 +14,7 @@
 
 #include <Eigen/Core>
 #include <Eigen/Sparse>
+#include <Eigen/SparseLU>
 #include <spdlog/spdlog.h>
 
 #include "hacdcpf/engine/kernel/lp_kernel/dual_simplex.hpp"
@@ -109,6 +111,13 @@ struct DCOPFFormulation {
   
   // Bus map: bus_id -> position
   std::unordered_map<int, int> bus_map;
+
+  // Connected-component structure used both to fix one angle reference per
+  // island and to build the reduced-Laplacian NativeLCQP start.
+  std::vector<int> component_of_bus;
+  std::vector<std::vector<int>> component_buses;
+  std::vector<int> component_references;
+  std::vector<double> pd_pu;
   
   // Store base_mva for result extraction
   double base_mva{100.0};
@@ -134,6 +143,48 @@ DCOPFFormulation build_dc_opf_lp(const HybridPowerSystem& sys,
   
   if (form.nb == 0 || form.slack < 0) {
     return form;
+  }
+
+  // Zimmerman et al. (2011), MATPOWER DC model: each energized connected
+  // component has a one-dimensional angle nullspace, so fix exactly one
+  // reference before forming any reduced Laplacian projection.
+  std::vector<int> parent(static_cast<std::size_t>(form.nb));
+  std::iota(parent.begin(), parent.end(), 0);
+  const auto root = [&](int node) {
+    int r = node;
+    while (parent[static_cast<std::size_t>(r)] != r)
+      r = parent[static_cast<std::size_t>(r)];
+    while (parent[static_cast<std::size_t>(node)] != node) {
+      const int next = parent[static_cast<std::size_t>(node)];
+      parent[static_cast<std::size_t>(node)] = r;
+      node = next;
+    }
+    return r;
+  };
+  for (const auto& br : branches) {
+    if (!br.in_service) continue;
+    const auto from = form.bus_map.find(br.from_bus);
+    const auto to = form.bus_map.find(br.to_bus);
+    if (from == form.bus_map.end() || to == form.bus_map.end()) continue;
+    const int rf = root(from->second);
+    const int rt = root(to->second);
+    if (rf != rt) parent[static_cast<std::size_t>(rt)] = rf;
+  }
+  std::unordered_map<int, int> root_to_component;
+  form.component_of_bus.resize(static_cast<std::size_t>(form.nb));
+  for (int bus = 0; bus < form.nb; ++bus) {
+    const int r = root(bus);
+    auto [it, inserted] = root_to_component.emplace(
+        r, static_cast<int>(root_to_component.size()));
+    if (inserted) form.component_buses.emplace_back();
+    form.component_of_bus[static_cast<std::size_t>(bus)] = it->second;
+    form.component_buses[static_cast<std::size_t>(it->second)].push_back(bus);
+  }
+  form.component_references.reserve(form.component_buses.size());
+  for (const auto& component : form.component_buses) {
+    const auto slack_it = std::find(component.begin(), component.end(), form.slack);
+    form.component_references.push_back(
+        slack_it != component.end() ? form.slack : component.front());
   }
   
   // Count active generators
@@ -165,15 +216,17 @@ DCOPFFormulation build_dc_opf_lp(const HybridPowerSystem& sys,
   form.pwl_point_count_by_gen.assign(static_cast<size_t>(form.ng), 0);
   const int requested_segments = std::clamp(opt.pwl_segments, 1, 1000);
   int n_pwl_vars = 0;
-  for (int k = 0; k < form.ng; ++k) {
-    const auto& gen = gens[static_cast<size_t>(form.gen_map[k])];
-    if (gen.cost_c2 <= 1e-12 || !(gen.pmax_mw > gen.pmin_mw)) continue;
-    const int point_count = requested_segments + 1;
-    form.pwl_point_offset_by_gen[static_cast<size_t>(k)] =
-        form.pwl_offset + n_pwl_vars;
-    form.pwl_point_count_by_gen[static_cast<size_t>(k)] = point_count;
-    n_pwl_vars += point_count;
-    form.pwl_segments_effective = requested_segments;
+  if (!opt.compact_quadratic_model) {
+    for (int k = 0; k < form.ng; ++k) {
+      const auto& gen = gens[static_cast<size_t>(form.gen_map[k])];
+      if (gen.cost_c2 <= 1e-12 || !(gen.pmax_mw > gen.pmin_mw)) continue;
+      const int point_count = requested_segments + 1;
+      form.pwl_point_offset_by_gen[static_cast<size_t>(k)] =
+          form.pwl_offset + n_pwl_vars;
+      form.pwl_point_count_by_gen[static_cast<size_t>(k)] = point_count;
+      n_pwl_vars += point_count;
+      form.pwl_segments_effective = requested_segments;
+    }
   }
   form.nvar = form.pwl_offset + n_pwl_vars;
   
@@ -207,9 +260,12 @@ DCOPFFormulation build_dc_opf_lp(const HybridPowerSystem& sys,
   // --------------------------------------------------------------------------
   form.lp.vars.resize(form.nvar);
   
-  // Theta bounds: slack fixed to 0, others free (±π)
+  // Theta bounds: one reference per connected component fixed to zero.
+  std::vector<unsigned char> is_reference(static_cast<std::size_t>(form.nb), 0);
+  for (int ref : form.component_references)
+    is_reference[static_cast<std::size_t>(ref)] = 1;
   for (int i = 0; i < form.nb; ++i) {
-    if (i == form.slack) {
+    if (is_reference[static_cast<std::size_t>(i)] != 0) {
       form.lp.vars[form.i_theta(i)] = {engine::VarType::Continuous, 0.0, 0.0, ""};
     } else {
       form.lp.vars[form.i_theta(i)] = {engine::VarType::Continuous, -kPi, kPi, ""};
@@ -295,6 +351,7 @@ DCOPFFormulation build_dc_opf_lp(const HybridPowerSystem& sys,
     if (it == form.bus_map.end()) continue;
     pd_pu[it->second] -= st.p_mw / base_mva;
   }
+  form.pd_pu = pd_pu;
 
   // --------------------------------------------------------------------------
   // Load shedding variables: dpd (one per bus)
@@ -454,16 +511,13 @@ DCOPFFormulation build_dc_opf_lp(const HybridPowerSystem& sys,
     for (int i = 0; i < form.nb; ++i) {
       const int eq_row = balance_row[i];
       
-      // Diagonal: B_ii * θ_i  (zero for slack since θ_slack = 0, but harmless to add)
-      if (i != form.slack) {
-        eq_trips.emplace_back(eq_row, form.i_theta(i), B_diag[i]);
-      }
+      // Reference columns may remain in Aeq because their variable bounds fix
+      // them to zero; retaining the full block keeps all components symmetric.
+      eq_trips.emplace_back(eq_row, form.i_theta(i), B_diag[i]);
       
       // Off-diagonal: B_ij * θ_j  (skip j==slack since θ_slack = 0)
       for (const auto& [j, bij] : B_entries[i]) {
-        if (j != form.slack) {
-          eq_trips.emplace_back(eq_row, form.i_theta(j), bij);
-        }
+        eq_trips.emplace_back(eq_row, form.i_theta(j), bij);
       }
     }
   }
@@ -565,6 +619,225 @@ void build_dc_opf_qp(DCOPFFormulation& form, const HybridPowerSystem& sys) {
   form.qp.Q.makeCompressed();
 }
 
+struct DCStructuralWarmStart {
+  Eigen::VectorXd x;
+  bool built{false};
+  int factorizations{0};
+  double equality_residual{std::numeric_limits<double>::infinity()};
+  std::string status{"not-built"};
+};
+
+DCStructuralWarmStart build_dc_structural_warm_start(
+    const DCOPFFormulation& form,
+    const HybridPowerSystem& sys) {
+  DCStructuralWarmStart warm;
+  if (form.nvar <= 0 || form.pd_pu.size() != static_cast<std::size_t>(form.nb)) {
+    warm.status = "invalid-formulation";
+    return warm;
+  }
+
+  warm.x = Eigen::VectorXd::Zero(form.nvar);
+  const auto& gens = sys.ac.generators;
+  const auto& branches = sys.ac.branches;
+  const bool include_pf =
+      !form.branch_map.empty() && form.pf_offset < form.shed_offset;
+
+  std::vector<std::vector<int>> generators_by_component(
+      form.component_buses.size());
+  for (int k = 0; k < form.ng; ++k) {
+    const auto bus_it = form.bus_map.find(
+        gens[static_cast<std::size_t>(form.gen_map[static_cast<std::size_t>(k)])].bus);
+    if (bus_it == form.bus_map.end()) continue;
+    const int component =
+        form.component_of_bus[static_cast<std::size_t>(bus_it->second)];
+    generators_by_component[static_cast<std::size_t>(component)].push_back(k);
+    const auto& bounds = form.lp.vars[static_cast<std::size_t>(form.i_pg(k))];
+    warm.x[form.i_pg(k)] = std::clamp(
+        gens[static_cast<std::size_t>(form.gen_map[static_cast<std::size_t>(k)])].pg_mw /
+            form.base_mva,
+        bounds.lb, bounds.ub);
+  }
+
+  // Per-island bounded balancing removes the Laplacian compatibility mode
+  // before factorization: 1' (Pg + shed - Pd) = 0. This is the range
+  // condition for a graph Laplacian (Zimmerman et al., 2011, DC model).
+  for (int component = 0;
+       component < static_cast<int>(form.component_buses.size()); ++component) {
+    double demand = 0.0;
+    for (int bus : form.component_buses[static_cast<std::size_t>(component)])
+      demand += form.pd_pu[static_cast<std::size_t>(bus)];
+    double generation = 0.0;
+    for (int k : generators_by_component[static_cast<std::size_t>(component)])
+      generation += warm.x[form.i_pg(k)];
+    double remaining = demand - generation;
+
+    if (remaining > 0.0) {
+      for (int k : generators_by_component[static_cast<std::size_t>(component)]) {
+        const int col = form.i_pg(k);
+        const double room = form.lp.vars[static_cast<std::size_t>(col)].ub - warm.x[col];
+        const double delta = std::min(remaining, std::max(0.0, room));
+        warm.x[col] += delta;
+        remaining -= delta;
+        if (remaining <= 1e-12) break;
+      }
+      if (remaining > 1e-12 && form.n_shed > 0) {
+        for (int bus : form.component_buses[static_cast<std::size_t>(component)]) {
+          const int col = form.i_dpd(bus);
+          const double room = form.lp.vars[static_cast<std::size_t>(col)].ub;
+          const double delta = std::min(remaining, std::max(0.0, room));
+          warm.x[col] = delta;
+          remaining -= delta;
+          if (remaining <= 1e-12) break;
+        }
+      }
+    } else if (remaining < 0.0) {
+      double excess = -remaining;
+      for (int k : generators_by_component[static_cast<std::size_t>(component)]) {
+        const int col = form.i_pg(k);
+        const double room = warm.x[col] - form.lp.vars[static_cast<std::size_t>(col)].lb;
+        const double delta = std::min(excess, std::max(0.0, room));
+        warm.x[col] -= delta;
+        excess -= delta;
+        if (excess <= 1e-12) break;
+      }
+      remaining = -excess;
+    }
+    if (std::abs(remaining) > 1e-9) {
+      warm.status = "component-power-balance-infeasible";
+      return warm;
+    }
+  }
+
+  for (int component = 0;
+       component < static_cast<int>(form.component_buses.size()); ++component) {
+    const auto& buses = form.component_buses[static_cast<std::size_t>(component)];
+    const int reference =
+        form.component_references[static_cast<std::size_t>(component)];
+    if (buses.size() <= 1) continue;
+    std::vector<int> reduced_index(static_cast<std::size_t>(form.nb), -1);
+    int reduced_size = 0;
+    for (int bus : buses) {
+      if (bus != reference)
+        reduced_index[static_cast<std::size_t>(bus)] = reduced_size++;
+    }
+    std::vector<Eigen::Triplet<double>> trips;
+    Eigen::VectorXd rhs = Eigen::VectorXd::Zero(reduced_size);
+    std::vector<double> supply(static_cast<std::size_t>(form.nb), 0.0);
+    for (int bus : buses) {
+      supply[static_cast<std::size_t>(bus)] =
+          (form.n_shed > 0 ? warm.x[form.i_dpd(bus)] : 0.0) -
+          form.pd_pu[static_cast<std::size_t>(bus)];
+    }
+    for (int k : generators_by_component[static_cast<std::size_t>(component)]) {
+      const int gi = form.gen_map[static_cast<std::size_t>(k)];
+      const int bus = form.bus_map.at(gens[static_cast<std::size_t>(gi)].bus);
+      supply[static_cast<std::size_t>(bus)] += warm.x[form.i_pg(k)];
+    }
+    for (int bus : buses) {
+      if (bus == reference) continue;
+      const int row = reduced_index[static_cast<std::size_t>(bus)];
+      rhs[row] = include_pf ? supply[static_cast<std::size_t>(bus)]
+                            : -supply[static_cast<std::size_t>(bus)];
+    }
+    for (const auto& br : branches) {
+      if (!br.in_service) continue;
+      const auto from_it = form.bus_map.find(br.from_bus);
+      const auto to_it = form.bus_map.find(br.to_bus);
+      if (from_it == form.bus_map.end() || to_it == form.bus_map.end()) continue;
+      const int from = from_it->second;
+      const int to = to_it->second;
+      if (form.component_of_bus[static_cast<std::size_t>(from)] != component ||
+          form.component_of_bus[static_cast<std::size_t>(to)] != component)
+        continue;
+      double reactance = br.x_pu;
+      if (std::abs(reactance) < 1e-12) reactance = 1e-6;
+      const double b = 1.0 / reactance;
+      const int rf = reduced_index[static_cast<std::size_t>(from)];
+      const int rt = reduced_index[static_cast<std::size_t>(to)];
+      if (rf >= 0) trips.emplace_back(rf, rf, b);
+      if (rt >= 0) trips.emplace_back(rt, rt, b);
+      if (rf >= 0 && rt >= 0) {
+        trips.emplace_back(rf, rt, -b);
+        trips.emplace_back(rt, rf, -b);
+      }
+    }
+    Eigen::SparseMatrix<double> reduced_laplacian(reduced_size, reduced_size);
+    reduced_laplacian.setFromTriplets(trips.begin(), trips.end());
+    reduced_laplacian.makeCompressed();
+    Eigen::SparseLU<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>> lu;
+    lu.analyzePattern(reduced_laplacian);
+    lu.factorize(reduced_laplacian);
+    ++warm.factorizations;
+    if (lu.info() != Eigen::Success) {
+      warm.status = "reduced-laplacian-factorization-failed";
+      return warm;
+    }
+    const Eigen::VectorXd theta = lu.solve(rhs);
+    if (lu.info() != Eigen::Success || !theta.allFinite()) {
+      warm.status = "reduced-laplacian-solve-failed";
+      return warm;
+    }
+    warm.x[form.i_theta(reference)] = 0.0;
+    for (int bus : buses) {
+      if (bus != reference)
+        warm.x[form.i_theta(bus)] =
+            theta[reduced_index[static_cast<std::size_t>(bus)]];
+    }
+  }
+
+  if (include_pf) {
+    for (int k = 0; k < static_cast<int>(form.branch_map.size()); ++k) {
+      const auto& br = branches[static_cast<std::size_t>(form.branch_map[static_cast<std::size_t>(k)])];
+      const int from = form.bus_map.at(br.from_bus);
+      const int to = form.bus_map.at(br.to_bus);
+      double reactance = br.x_pu;
+      if (std::abs(reactance) < 1e-12) reactance = 1e-6;
+      warm.x[form.i_pf(k)] =
+          (warm.x[form.i_theta(from)] - warm.x[form.i_theta(to)]) / reactance;
+    }
+  }
+
+  // The LP formulation retains PWL interpolation rows even when NativeLCQP
+  // uses the exact quadratic objective. Populate the two adjacent breakpoints
+  // so Aeq*x0=beq remains a complete contract.
+  for (int k = 0; k < form.ng; ++k) {
+    const int count = form.pwl_point_count_by_gen[static_cast<std::size_t>(k)];
+    if (count == 0) continue;
+    const auto& gen = gens[static_cast<std::size_t>(form.gen_map[static_cast<std::size_t>(k)])];
+    const double lo = gen.pmin_mw / form.base_mva;
+    const double hi = gen.pmax_mw / form.base_mva;
+    const double position = hi > lo
+        ? std::clamp((warm.x[form.i_pg(k)] - lo) / (hi - lo), 0.0, 1.0)
+        : 0.0;
+    const double scaled = position * static_cast<double>(count - 1);
+    const int left = std::min(count - 1, static_cast<int>(std::floor(scaled)));
+    const int right = std::min(count - 1, left + 1);
+    const double right_weight = scaled - static_cast<double>(left);
+    warm.x[form.i_pwl(k, left)] = 1.0 - right_weight;
+    warm.x[form.i_pwl(k, right)] += right_weight;
+  }
+
+  // Fraction-free box projection is deliberate here: LCQP initializes its
+  // own positive bound slacks. Phase I supplies a finite bounded primal point,
+  // not a second barrier state (Nocedal--Wright, 2006, Section 16.1).
+  for (int col = 0; col < form.nvar; ++col) {
+    const auto& var = form.lp.vars[static_cast<std::size_t>(col)];
+    if (std::isfinite(var.lb)) warm.x[col] = std::max(warm.x[col], var.lb);
+    if (std::isfinite(var.ub)) warm.x[col] = std::min(warm.x[col], var.ub);
+  }
+  if (!warm.x.allFinite()) {
+    warm.status = "nonfinite-projection";
+    return warm;
+  }
+  warm.equality_residual = form.lp.Aeq.rows() > 0
+      ? (form.lp.Aeq * warm.x - form.lp.beq).lpNorm<Eigen::Infinity>() : 0.0;
+  warm.built = std::isfinite(warm.equality_residual);
+  warm.status = warm.equality_residual <= 1e-9
+      ? "component-balanced-reduced-laplacian"
+      : "bounded-near-feasible-projection";
+  return warm;
+}
+
 // --------------------------------------------------------------------------
 // Compute QP objective value: 0.5*x'Qx + c'x + constant
 // --------------------------------------------------------------------------
@@ -604,6 +877,8 @@ engine::SolveResult to_solve_result(const engine::api::Result& api_res) {
   out.stats.primal_feas = api_res.stats.primal_feas;
   out.stats.dual_feas = api_res.stats.dual_feas;
   out.stats.complementarity = api_res.stats.complementarity;
+  out.stats.initial_primal_feas = api_res.stats.initial_primal_feas;
+  out.stats.warm_start_used = api_res.stats.warm_start_used;
   out.stats.mip_gap = api_res.stats.mip_gap;
   out.stats.runtime_sec = api_res.stats.runtime_sec;
   out.stats.status = api_res.stats.status;
@@ -807,7 +1082,19 @@ DCOPFResult extract_dc_opf_result(const DCOPFFormulation& form,
 // --------------------------------------------------------------------------
 DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
                          const DCOPFOptions& opt) {
-  auto start_time = std::chrono::high_resolution_clock::now();
+  const auto start_time = std::chrono::steady_clock::now();
+  const bool bounded_phase_one = opt.accept_phase_one_iterate &&
+      opt.phase_one_time_limit_ms > 0.0 &&
+      std::isfinite(opt.phase_one_time_limit_ms);
+  const auto elapsed_ms = [&]() {
+    return std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - start_time).count();
+  };
+  const auto remaining_phase_one_sec = [&]() {
+    if (!bounded_phase_one) return 0.0;
+    return std::max(0.0,
+                    (opt.phase_one_time_limit_ms - elapsed_ms()) / 1000.0);
+  };
 
   DCOPFResult result;
   if (std::any_of(sys_in.lcc_converters.begin(),
@@ -820,7 +1107,7 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
     result.model_limitations.push_back(
         "No optimization was run because DC OPF omits the physical DC network and LCC converter equations.");
     result.runtime_sec = std::chrono::duration<double>(
-        std::chrono::high_resolution_clock::now() - start_time).count();
+        std::chrono::steady_clock::now() - start_time).count();
     return result;
   }
   // DC OPF must consume the same canonical topology as AC OPF/PF. In
@@ -923,10 +1210,20 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
     const auto g    = gr::build_power_system_graph(sys);
     const auto topo = gr::analyze_topology(g);
     if (!topo.all_islands_valid) {
+      std::unordered_set<int> dispatchable_source_buses;
+      for (const auto& gen : sys.ac.generators) {
+        if (gen.in_service) dispatchable_source_buses.insert(gen.bus);
+      }
+      const auto island_has_dispatchable_source = [&](const gr::IslandInfo& island) {
+        return std::any_of(
+            island.ac_bus_ids.begin(), island.ac_bus_ids.end(),
+            [&](int bus) { return dispatchable_source_buses.count(bus) != 0; });
+      };
       std::unordered_set<int> dead_buses;
       for (const auto& isl : topo.islands) {
         if (isl.status == gr::IslandStatus::IsolatedLoad ||
-            isl.status == gr::IslandStatus::NoSlack) {
+            (isl.status == gr::IslandStatus::NoSlack &&
+             !island_has_dispatchable_source(isl))) {
           dead_buses.insert(isl.ac_bus_ids.begin(), isl.ac_bus_ids.end());
         }
       }
@@ -949,8 +1246,9 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
       }
       const bool has_valid = std::any_of(
           topo.islands.begin(), topo.islands.end(),
-          [](const gr::IslandInfo& i) {
-            return i.status == gr::IslandStatus::Valid;
+          [&](const gr::IslandInfo& i) {
+            return i.status == gr::IslandStatus::Valid ||
+                   island_has_dispatchable_source(i);
           });
       if (!has_valid) {
         if (opt.verbose)
@@ -1020,6 +1318,18 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
   
   // Build QP model with true quadratic costs
   build_dc_opf_qp(form, *sys_ptr);
+  result.structural_warm_start_requested = opt.structural_warm_start;
+  result.structural_warm_start_components =
+      static_cast<int>(form.component_buses.size());
+  DCStructuralWarmStart structural_start;
+  if (opt.structural_warm_start) {
+    structural_start = build_dc_structural_warm_start(form, *sys_ptr);
+    result.structural_warm_start_built = structural_start.built;
+    result.structural_warm_start_factorizations = structural_start.factorizations;
+    result.structural_warm_start_residual = structural_start.equality_residual;
+    result.structural_warm_start_status = structural_start.status;
+    if (structural_start.built) form.qp.x0 = structural_start.x;
+  }
   
   if (opt.verbose) {
     spdlog::info("DC OPF: {} buses, {} generators, {} branches, {} variables",
@@ -1045,17 +1355,56 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
   // subsequent LP fallback would otherwise be reported with QP objective
   // semantics.
   auto try_native_qp = [&]() -> bool {
+    if (bounded_phase_one && remaining_phase_one_sec() <= 0.0) {
+      sol.stats.solver_name = "NativeLCQP";
+      sol.stats.status = "TimeLimit (before numeric solve)";
+      result.phase_one_budget_exhausted = true;
+      record_chain("NativeLCQP", false, sol.stats.status);
+      return true;
+    }
     engine::LCQPOptions qp_opt;
     qp_opt.max_iter = opt.max_iterations;
     qp_opt.tol_primal = opt.feasibility_tol;
     qp_opt.tol_dual = opt.optimality_tol;
     qp_opt.tol_gap = opt.optimality_tol;
+    qp_opt.time_limit_sec = remaining_phase_one_sec();
     qp_opt.verbose = opt.verbose;
     
     engine::NativeLCQPAdapter lcqp(qp_opt);
     sol = lcqp.solve_qp(form.qp);
     sol.stats.solver_name = "NativeLCQP";
+    result.native_qp_symbolic_analyze_calls =
+        sol.stats.symbolic_analyze_calls;
+    const bool native_time_limit = sol.stats.status == "TimeLimit";
+    result.phase_one_budget_exhausted = native_time_limit ||
+        (bounded_phase_one && elapsed_ms() >= opt.phase_one_time_limit_ms);
+    if (!sol.stats.success && opt.accept_phase_one_iterate &&
+        sol.x.size() == form.nvar && sol.x.allFinite()) {
+      double residual = form.qp.Aeq.rows() > 0
+          ? (form.qp.Aeq * sol.x - form.qp.beq)
+                .lpNorm<Eigen::Infinity>()
+          : 0.0;
+      for (int col = 0; col < form.nvar; ++col) {
+        const auto& variable = form.qp.vars[static_cast<std::size_t>(col)];
+        if (std::isfinite(variable.lb))
+          residual = std::max(residual, variable.lb - sol.x[col]);
+        if (std::isfinite(variable.ub))
+          residual = std::max(residual, sol.x[col] - variable.ub);
+      }
+      result.phase_one_iterate_residual = residual;
+      const double tolerance =
+          std::max(0.0, opt.phase_one_iterate_tolerance);
+      if (std::isfinite(residual) && residual <= tolerance) {
+        result.phase_one_warm_start_only = true;
+        sol.stats.success = true;
+        sol.stats.status = native_time_limit
+            ? "Phase-I usable time-limited iterate (not DCOPF optimal)"
+            : "Phase-I usable iterate (not DCOPF optimal)";
+      }
+    }
     use_qp = sol.stats.success;
+    result.structural_warm_start_used = sol.stats.warm_start_used;
+    result.solver_initial_primal_residual = sol.stats.initial_primal_feas;
     record_chain("NativeLCQP", sol.stats.success, sol.stats.status);
     return true;
   };
@@ -1080,23 +1429,29 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
   // hint still causes HiGHS to handle LP/MILP sub-problems within that backend
   // where applicable.
   auto try_highs = [&]() -> bool {
-    // Single QP attempt through SolverEngine with HiGHS preference.
-    // A previous version had two back-to-back calls with identical options;
-    // the first success path skipped solver_chain recording and the duplicate
-    // call was redundant.  Now: one call, record result, fall through to LP.
-    engine::SolverEngine eng;
-    engine::SolveOptions solve_opt;
-    solve_opt.preferred_solver = "HiGHS";
-    solve_opt.allow_fallback = true;
-    auto qp_res = to_solve_result(eng.solve_qp(form.qp, solve_opt));
-    if (qp_res.stats.success) {
-      sol = qp_res;
-      use_qp = true;
-      record_chain("HiGHS-routed-QP", true, sol.stats.status);
-      return true;
+    if (!opt.phase_one_linear_relaxation) {
+      // Single QP attempt through SolverEngine with HiGHS preference.
+      // A previous version had two back-to-back calls with identical options;
+      // the first success path skipped solver_chain recording and the duplicate
+      // call was redundant.  Now: one call, record result, fall through to LP.
+      engine::SolverEngine eng;
+      engine::SolveOptions solve_opt;
+      solve_opt.preferred_solver = "HiGHS";
+      solve_opt.allow_fallback = true;
+      auto qp_res = to_solve_result(eng.solve_qp(form.qp, solve_opt));
+      if (qp_res.stats.success) {
+        sol = qp_res;
+        use_qp = true;
+        record_chain("HiGHS-routed-QP", true, sol.stats.status);
+        return true;
+      }
+      record_chain("HiGHS-routed-QP", false, qp_res.stats.status);
     }
-    record_chain("HiGHS-routed-QP", false, qp_res.stats.status);
 
+    // Stott, Jardim & Alsac, IEEE TPS 2009, "DC Power Flow Revisited": the
+    // linear network model preserves component balance and branch congestion.
+    // For Phase I its PWL cost is sufficient; Phase II certifies the nonlinear
+    // AC objective/KKT point, so paying for an exact QP here is unnecessary.
     engine::HighsAdapter highs;
     if (highs.available()) {
       sol = highs.solve_lp(form.lp);
@@ -1140,8 +1495,9 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
   switch (opt.solver) {
     case DCOPFSolverBackend::NativeQP:
       solved = try_native_qp();
-      // Fallback to native simplex if IPM did not converge.
-      if (!sol.stats.success) {
+      // Warm-start-only Phase I has a strict wall budget; an unconstrained
+      // simplex fallback would violate it and cannot improve the AC certificate.
+      if (!sol.stats.success && !opt.accept_phase_one_iterate) {
         solved = try_native_simplex();
       }
       break;
@@ -1189,8 +1545,21 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
       break;
   }
   
-  auto end_time = std::chrono::high_resolution_clock::now();
+  const auto end_time = std::chrono::steady_clock::now();
   double runtime_sec = std::chrono::duration<double>(end_time - start_time).count();
+  if (bounded_phase_one) {
+    result.phase_one_budget_exhausted =
+        result.phase_one_budget_exhausted ||
+        runtime_sec * 1000.0 >= opt.phase_one_time_limit_ms;
+    result.phase_one_budget_overshoot_ms = std::max(
+        0.0, runtime_sec * 1000.0 - opt.phase_one_time_limit_ms);
+  }
+  result.structural_warm_start_used =
+      use_qp && sol.stats.success && sol.stats.warm_start_used;
+  result.solver_initial_primal_residual =
+      use_qp && sol.stats.success
+          ? sol.stats.initial_primal_feas
+          : std::numeric_limits<double>::infinity();
 
   // Supporting LP for dual extraction (LMPs) — skip when not requested.
   if (opt.compute_lmp) {
@@ -1201,8 +1570,43 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
   // the solver_chain we accumulated during the fallback sequence and restore
   // it afterwards.
   std::vector<std::string> chain_snapshot = std::move(solver_chain);
+  const bool structural_requested = result.structural_warm_start_requested;
+  const bool structural_built = result.structural_warm_start_built;
+  const bool structural_used = result.structural_warm_start_used;
+  const int structural_components = result.structural_warm_start_components;
+  const int structural_factorizations = result.structural_warm_start_factorizations;
+  const double structural_residual = result.structural_warm_start_residual;
+  const double solver_initial_residual = result.solver_initial_primal_residual;
+  const bool phase_one_warm_start_only = result.phase_one_warm_start_only;
+  const bool phase_one_budget_exhausted =
+      result.phase_one_budget_exhausted;
+  const double phase_one_budget_overshoot_ms =
+      result.phase_one_budget_overshoot_ms;
+  const int native_qp_symbolic_analyze_calls =
+      result.native_qp_symbolic_analyze_calls;
+  const double phase_one_iterate_residual = result.phase_one_iterate_residual;
+  std::string structural_status = std::move(result.structural_warm_start_status);
   result = extract_dc_opf_result(form, sol, *sys_ptr, runtime_sec);
   result.solver_chain = std::move(chain_snapshot);
+  result.structural_warm_start_requested = structural_requested;
+  result.structural_warm_start_built = structural_built;
+  result.structural_warm_start_used = structural_used;
+  result.structural_warm_start_components = structural_components;
+  result.structural_warm_start_factorizations = structural_factorizations;
+  result.structural_warm_start_residual = structural_residual;
+  result.solver_initial_primal_residual = solver_initial_residual;
+  result.structural_warm_start_status = std::move(structural_status);
+  result.phase_one_warm_start_only = phase_one_warm_start_only;
+  result.phase_one_budget_exhausted = phase_one_budget_exhausted;
+  result.phase_one_budget_overshoot_ms = phase_one_budget_overshoot_ms;
+  result.native_qp_symbolic_analyze_calls =
+      native_qp_symbolic_analyze_calls;
+  result.phase_one_iterate_residual = phase_one_iterate_residual;
+  if (phase_one_warm_start_only) {
+    result.converged = false;
+    result.model_limitations.push_back(
+        "The NativeQP iteration-limited primal is certified only for Phase-I warm-start use; it is not a DCOPF optimum.");
+  }
   if (!opt.compute_lmp) {
     result.lmp.clear();
     result.lmp_valid = false;
@@ -1213,7 +1617,7 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
   // For QP solvers, recompute the true quadratic objective including constant
   // terms. `objective_model` records which cost model the reported objective
   // corresponds to, disambiguating QP-vs-LP semantics across fallback paths.
-  if (use_qp && result.converged && sol.x.size() >= form.nvar) {
+  if (use_qp && sol.stats.success && sol.x.size() >= form.nvar) {
     result.objective = compute_qp_objective(form, sol.x, *sys_ptr);
     result.objective_model = "QP";
     result.pwl_segments_effective = 0;

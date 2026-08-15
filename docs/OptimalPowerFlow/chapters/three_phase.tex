@@ -408,8 +408,9 @@ $\to$ 结果归因与 KKT 审计。这里的 Phase I/II 是“可行原--对偶�
 
 \subsubsection*{后端：NativeIPM 与 Ipopt}
 \fld{SolverBackend::NativeIPM} 走 MIPSolvers 原生内点核：滤波器全局化、关闭
-问题缩放、原始容差收紧到 $\min(\mathrm{tol},10^{-7})$（opf.cpp:2640--2648，
-适配器 \srcpath{engine::NativeIPMAdapter}，求解调用:2682--2684；核头文件引入
+问题缩放，Phase II 的 primal/dual/complementarity 始终使用
+\fld{options.tolerance} 最终容差；Phase I 只构造 central corridor。适配器为
+\srcpath{engine::NativeIPMAdapter}，求解调用:2682--2684；核头文件引入
 见 opf.cpp:20--21）。该路径先做原始可行性恢复
 \srcpath{restore\_primal\_feasibility}。若模型声明了自由控制列 $F$，其补集为
 state/basic 列 $B$，每轮只解稀疏方阵 Newton 校正
@@ -430,10 +431,15 @@ Phase I 同时受迭代、稀疏数值分解和回溯三个硬预算约束。墙
 $\fld{phase\_one\_time\_limit\_ms}>0$ 时绝不调用 Ipopt；旧
 \fld{warm\_start\_with\_ipopt} 只在显式无限预算（该字段 $\le0$）时保留为兼容
 路径。
-Phase I 在原始 pu 坐标下重新计算最大约束违反量，并请求 MIPSolvers 的
-\fld{primal\_feasible\_start}/\fld{preserve\_initial\_point} 契约；Phase II 仅当
-独立审计（含变量界）不超过同一个 \fld{tol\_primal} 时原样保留 $x_0$，否则自动
-回到普通 infeasible-start interiorization。审计请求/接受状态和实际稀疏线性求解
+默认 $\mu_0=0.1$、$\eta_a=1$、$\eta_p=0.1$、$\eta_c=0.5$。初始违反量高于
+$\eta_a\mu_0$ 时以零分解退出 Phase I；否则恢复到
+$\epsilon_p=\max(\mathrm{tol},\eta_p\mu_0)$。slack floor 使用剩余 primal
+corridor 的一半，并令 $\nu_i=\mu_0/s_i$，同时控制扰动 primal residual、乘子
+尺度和中心性。Phase I 在原始 pu 坐标下重新审计，并请求 MIPSolvers 独立的
+\fld{central\_warm\_start} 契约；它不同于最终可行的
+\fld{primal\_feasible\_start}。只有完整 primal/dual/slack、原坐标与扰动 primal
+residual、中心性及乘子尺度全部通过才保留 $x_0$，否则自动回到普通冷初始化。
+审计请求/接受状态和实际稀疏线性求解
 后端分别由 \fld{phase\_two\_start\_requested}、
 \fld{phase\_two\_start\_accepted} 与
 \fld{phase\_two\_linear\_solver\_backend} 返回。
@@ -446,7 +452,7 @@ Phase I 在原始 pu 坐标下重新计算最大约束违反量，并请求 MIPS
 
 \subsubsection*{对偶初始化与拉格朗日黑塞}
 NativeIPM 路径的对偶初值由 \srcpath{initialize\_primal\_dual\_start} 构造：
-仅当初点原始邻域不超过 $10^{-5}$ 时启用；
+仅当初点不超过上述 $\epsilon_p$ corridor 时启用；
 松弛变量由 $s=-h(x_0)$ 截断生成（:1836--1843），不等式乘子按障碍参数
 $\mu/s$ 恢复（:1844--1863）；等式乘子优先利用
 \fld{equality\_free\_columns} 划分做基解（仅当 $n_{\mathrm{var}}-n_{\mathrm{eq}}=n_c$
@@ -471,6 +477,12 @@ $\|J_g r_{\mathrm{stat}}\|_\infty$ 的同尺度值。结果中的
 拉格朗日黑塞 \srcpath{lagrangian\_hessian}（opf.cpp:1133--1258）按目标黑塞、
 潮流等式双线性项（:1157--1183）、换流器控制等式项（:1184--1241）与参数化
 不等式模板（:1244--1254）装配。
+
+在 360 个三相母线、1080 个相节点、2175 个变量的稀疏回归上，初始违反量
+$10^{-3}$ 已在默认 $10^{-2}$ corridor 内，因此 primal Newton 为 0 次，只做
+一次 sparse-basis dual fit；dual-fit 为 $8.33\times10^{-15}$，五次计时中位数
+为 5.438~ms。相较旧的严格 Phase I（两次 Newton、三次总分解），这里消除了
+两次不必要的 primal 分解而不放宽 Phase II 最终证书。
 
 \subsubsection*{KKT 审计与收敛口径}
 求解器报成功后，模块在解点上\textbf{重新}评估物理等式与\textbf{全部}不等式
@@ -658,6 +670,10 @@ $t_g\ge 2c_2'p_0p-c_2'p_0^2$ 在 $[p_{\min},p_{\max}]$ 上均匀布点低估
 \fld{phase\_one\_max\_iterations} & — & — & $\ge0$ & 12 & Phase I Newton 迭代硬上限\\
 \fld{phase\_one\_max\_factorizations} & — & — & $\ge0$ & 14 & primal 恢复与 dual 恢复共用的稀疏数值分解硬上限\\
 \fld{phase\_one\_max\_backtracks} & — & — & $\ge0$ & 12 & 每次 Newton 全步之外允许的阻尼回溯数\\
+\fld{phase\_one\_barrier\_mu} & $\mu_0$ & — & $(0,0.1]$ & 0.1 & Phase-I central target\\
+\fld{phase\_one\_admission\_mu\_factor} & $\eta_a$ & — & $\ge0$ & 1.0 & 局部 Phase I 准入半径 $\eta_a\mu_0$\\
+\fld{phase\_one\_primal\_mu\_factor} & $\eta_p$ & — & $\ge0$ & 0.1 & handoff primal corridor $\eta_p\mu_0$\\
+\fld{phase\_one\_centrality\_tolerance} & $\eta_c$ & — & $\ge0$ & 0.5 & 最大相对中心乘积偏差\\
 \fld{warm\_start\_with\_ipopt} & — & — & true/false & false & 仅无限墙钟预算下启用的旧 Ipopt 可行性热解兼容路径\\
 \fld{verify\_derivatives} & — & — & true/false & false & 中心差分校核雅可比/黑塞（opf.cpp:2783--2851）\\
 \fld{verbose} & — & — & true/false & false & 输出阶段日志与初始化诊断\\
@@ -691,11 +707,15 @@ $t_g\ge 2c_2'p_0p-c_2'p_0^2$ 在 $[p_{\min},p_{\max}]$ 上均匀布点低估
 \fld{initial\_primal\_residual} / \fld{initial\_dual\_residual} & — & — & — & 0 & 初值原始/对偶残差（对偶初始化后评估）\\
 \fld{phase\_one\_initial\_violation} / \fld{phase\_one\_constraint\_violation} & — & pu & — & $+\infty$ & Phase I 前后原坐标最大约束/变量界违反量\\
 \fld{phase\_one\_dual\_fit\_residual} & — & — & — & $+\infty$ & 式~\eqref{eq:phase-one-dual-fit} 的 basic-fit 或 SparseQR 正规残差；不是完整 stationarity\\
-\fld{phase\_one\_primal\_feasible} / \fld{phase\_one\_dual\_initialized} & — & — & true/false & false & primal 独立审计与 dual-fit/正性/维度证书\\
+\fld{phase\_one\_primal\_feasible} / \fld{phase\_one\_in\_handoff\_corridor} & — & — & true/false & false & 最终容差可行 / 有限精度 central handoff 邻域；二者不可混用\\
+\fld{phase\_one\_dual\_initialized} & — & — & true/false & false & dual-fit/正性/维度证书\\
+\fld{phase\_one\_handoff\_primal\_tolerance} / \fld{phase\_one\_perturbed\_primal\_residual} & — & pu & — & 0 / $+\infty$ & central primal 门槛与实测值\\
+\fld{phase\_one\_centrality} / \fld{phase\_one\_barrier\_mu} & — & — & — & $+\infty$ / 0 & 相对中心偏差与目标障碍参数\\
 \fld{phase\_one\_budget\_exhausted} / \fld{phase\_one\_termination} & — & — & — & false / not-run & 预算耗尽标记与停止原因\\
 \fld{phase\_one\_iterations} / \fld{phase\_one\_factorizations} / \fld{phase\_one\_backtracks} & — & — & — & 0 & Phase I 实际硬预算消耗\\
 \fld{phase\_one\_runtime\_ms} / \fld{phase\_one\_linear\_solver} & — & ms / — & — & 0 / unselected & Phase I 耗时与 SparseLU/SparseQR 路径\\
-\fld{phase\_two\_start\_requested} / \fld{phase\_two\_start\_accepted} & — & — & true/false & false & Phase II 是否请求并通过独立 primal 审计保留起点\\
+\fld{phase\_two\_start\_requested} / \fld{phase\_two\_start\_accepted} & — & — & true/false & false & Phase II 是否请求并通过独立 central warm-start 审计保留起点\\
+\fld{phase\_two\_start\_rejection\_reason} & — & — & — & 空 & central 合同未接受原因\\
 \fld{phase\_two\_linear\_solver\_backend} & — & — & — & unselected & Phase II 实际 KKT 后端；零迭代时可保持 unselected\\
 \fld{initial\_worst\_equality} / \fld{initial\_worst\_inequality} & — & — & — & $-1$ & 初值最差等式/不等式行号\\
 \fld{primal\_residual} / \fld{dual\_residual} / \fld{complementarity} & — & — & — & 0 & 解点 KKT 残差（解点重评估口径）\\
@@ -843,7 +863,8 @@ $\eta=0.98$、$s_{\max}=0.25$（:95--100）。除注明外各用例后端为 Ipo
         （relaxation.cpp:437--448）；外逼近轮数耗尽时
         \fld{soc\_outer\_approximation\_converged} 为假，下界仍有效但松弛间隙
         未闭合；LP 解不保证交流可实施。
-  \item \textbf{验证覆盖}：OPF 级测试仅覆盖三母线合成算例；IEEE 123 规模仅
-        adapter 装配校验与实验工具；尚无外部工具 OPF 对照与更大规模的默认
-        回归。
+  \item \textbf{验证覆盖}：完整 OPF/KKT 功能测试仍以三母线合成算例为主；
+        另有 360 个三相母线的 Phase I 稀疏规模/预算回归。IEEE 123 规模仅
+        adapter 装配校验与实验工具；尚无外部工具 OPF 对照或大规模完整
+        Phase II 收敛回归。
 \end{itemize}

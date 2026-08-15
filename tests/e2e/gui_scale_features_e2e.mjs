@@ -137,6 +137,15 @@ async function main() {
       'browser title uses the HySim-XJTU-HRPES brand');
     check((brand || '').replace(/\s+/g, '') === 'HySimXJTU-HRPES',
       'top toolbar displays the HySim-XJTU-HRPES brand');
+    const qLimitDefaults = await page.evaluate(() => ({
+      enabled: document.getElementById('pfPvPqConversion')?.checked,
+      antiChatter: document.getElementById('pfPvPqAntiChatter')?.checked,
+      holdIterations: Number(document.getElementById('pfPvPqHoldIter')?.value),
+      outerIterations: Number(document.getElementById('pfPvPqOuterIter')?.value),
+    }));
+    check(qLimitDefaults.enabled === false && qLimitDefaults.antiChatter === true &&
+          qLimitDefaults.holdIterations === 3 && qLimitDefaults.outerIterations === 30,
+      'GUI defaults to fast screening while retaining bounded anti-chatter Q-limit controls');
     const initialTask = await page.evaluate(() => App.getTaskStatus());
     check(initialTask?.schema === 'hysim_task_status_v1' &&
           Number.isInteger(initialTask.model_revision),

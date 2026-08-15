@@ -559,6 +559,8 @@ PowerFlowOptions power_flow_options(const json& request) {
   set_if_int(body, "fdpf_max_iter", options.fdpf_max_iter);
   set_if_bool(body, "enable_pv_pq_conversion",
               options.enable_pv_pq_conversion);
+  set_if_int(body, "pv_pq_max_outer_iterations",
+             options.pv_pq_max_outer_iterations);
   set_if_bool(body, "enable_auto_swing_selection",
               options.enable_auto_swing_selection);
   set_if_bool(body, "enable_converter_mode_switching",
@@ -577,6 +579,8 @@ PowerFlowOptions power_flow_options(const json& request) {
   set_if_int(body, "ac_eval_threads", options.ac_eval_threads);
   set_if_bool(body, "verbose", options.verbose);
   options.max_iter = std::clamp(options.max_iter, 1, 100000);
+  options.pv_pq_max_outer_iterations =
+      std::clamp(options.pv_pq_max_outer_iterations, 1, 1000);
   options.tol = std::clamp(options.tol, 1.0e-14, 1.0);
   options.ac_eval_threads = std::clamp(options.ac_eval_threads, 1, 1024);
   return options;
@@ -643,6 +647,30 @@ json serialize_power_flow(const HybridPowerSystem& system,
          {"loss_mw", transfer.loss_mw}});
   }
   const json scope = converter_scope_json(result.converter_model_scope);
+  json validity_flags = scope.at("validity_flags");
+  validity_flags["generator_reactive_limits_enforced"] =
+      result.reactive_limits.enforcement_requested;
+  validity_flags["generator_reactive_limits_certified"] =
+      result.reactive_limits.certified;
+  const json reactive_limits{
+      {"enforcement_requested",
+       result.reactive_limits.enforcement_requested},
+      {"certified", result.reactive_limits.certified},
+      {"active_set_cycle_detected",
+       result.reactive_limits.active_set_cycle_detected},
+      {"outer_iteration_limit_reached",
+       result.reactive_limits.outer_iteration_limit_reached},
+      {"active_limited_buses",
+       result.reactive_limits.active_limited_buses},
+      {"max_violation_pu", result.reactive_limits.max_violation_pu},
+      {"outer_iterations", result.profiling.pv_pq_outer_iterations},
+      {"pv_to_pq_switches", result.profiling.pv_to_pq_switches},
+      {"pq_to_pv_switches", result.profiling.pq_to_pv_switches},
+      {"repeated_active_sets",
+       result.profiling.pv_pq_repeated_active_sets},
+      {"smooth_ncp_continuation_updates",
+       result.profiling.smooth_ncp_continuation_updates},
+      {"smooth_ncp_final_mu", result.profiling.smooth_ncp_final_mu}};
   json lcc = lcc_transfers_json(result.lcc_transfers);
   return json{{"schema", "power_flow_result_v1"},
               {"method", method},
@@ -660,8 +688,9 @@ json serialize_power_flow(const HybridPowerSystem& system,
                {"ac_branch_results", std::move(branches)},
                {"vsc_transfers", std::move(vsc)},
                {"lcc_transfers", std::move(lcc)},
+               {"reactive_limits", reactive_limits},
                {"model_scope", scope.at("model_scope")},
-              {"validity_flags", scope.at("validity_flags")}};
+              {"validity_flags", std::move(validity_flags)}};
 }
 
 json opf_audit_json(const opf::OpfAudit& audit) {
@@ -676,6 +705,103 @@ json opf_audit_json(const opf::OpfAudit& audit) {
               {"max_gen_limit_violation_mw", audit.max_gen_limit_violation_mw},
               {"objective_discrepancy_pct", audit.objective_discrepancy_pct},
               {"violations", audit.violations}};
+}
+
+json ac_opf_profiling_json(const opf::ACOPFResult& result) {
+  const auto& p = result.profiling;
+  return json{{"warm_start_used", p.warm_start_used},
+              {"prepared_session_used", p.prepared_session_used},
+              {"formulation_reused", p.formulation_reused},
+              {"mapping_reused", p.mapping_reused},
+              {"symbolic_reused", p.symbolic_reused},
+              {"continuation_state_reused", p.continuation_state_reused},
+              {"numeric_refactor_attempted", p.numeric_refactor_attempted},
+              {"numeric_refactor_accepted", p.numeric_refactor_accepted},
+              {"numeric_refactor_relative_drift",
+               p.numeric_refactor_relative_drift},
+              {"numeric_refactor_backward_error",
+               p.numeric_refactor_backward_error},
+              {"numeric_refactor_status", p.numeric_refactor_status},
+              {"prepared_session_invalidation_reason",
+               p.prepared_session_invalidation_reason},
+              {"initial_primal_residual", p.initial_primal_residual},
+              {"initial_dual_residual", p.initial_dual_residual},
+              {"dc_phase_one_requested", p.dc_phase_one_requested},
+              {"dc_phase_one_accepted", p.dc_phase_one_accepted},
+              {"dc_phase_one_iterations", p.dc_phase_one_iterations},
+              {"dc_phase_one_runtime_ms", p.dc_phase_one_runtime_ms},
+              {"dc_phase_one_time_limit_ms", p.dc_phase_one_time_limit_ms},
+              {"dc_phase_one_budget_exhausted",
+               p.dc_phase_one_budget_exhausted},
+              {"dc_phase_one_budget_overshoot_ms",
+               p.dc_phase_one_budget_overshoot_ms},
+              {"dc_phase_one_symbolic_analyze_calls",
+               p.dc_phase_one_symbolic_analyze_calls},
+              {"parity_formulation_builds", p.parity_formulation_builds},
+              {"dc_phase_one_residual", p.dc_phase_one_residual},
+              {"dc_phase_one_candidate_primal",
+               p.dc_phase_one_candidate_primal},
+              {"dc_phase_one_candidate_dual", p.dc_phase_one_candidate_dual},
+              {"dc_phase_one_baseline_primal",
+               p.dc_phase_one_baseline_primal},
+              {"dc_phase_one_baseline_dual", p.dc_phase_one_baseline_dual},
+              {"dc_phase_one_status", p.dc_phase_one_status},
+              {"phase_one_initial_violation", p.phase_one_initial_violation},
+              {"phase_one_constraint_violation",
+               p.phase_one_constraint_violation},
+              {"phase_one_dual_fit_residual", p.phase_one_dual_fit_residual},
+              {"phase_one_primal_feasible", p.phase_one_primal_feasible},
+              {"phase_one_in_handoff_corridor",
+               p.phase_one_in_handoff_corridor},
+              {"phase_one_dual_initialized", p.phase_one_dual_initialized},
+              {"phase_one_handoff_primal_tolerance",
+               p.phase_one_handoff_primal_tolerance},
+              {"phase_one_perturbed_primal_residual",
+               p.phase_one_perturbed_primal_residual},
+              {"phase_one_centrality", p.phase_one_centrality},
+              {"phase_one_barrier_mu", p.phase_one_barrier_mu},
+              {"phase_one_budget_exhausted", p.phase_one_budget_exhausted},
+              {"phase_one_iterations", p.phase_one_iterations},
+              {"phase_one_factorizations", p.phase_one_factorizations},
+              {"phase_one_backtracks", p.phase_one_backtracks},
+              {"phase_one_structural_step_attempted",
+               p.phase_one_structural_step_attempted},
+              {"phase_one_structural_step_accepted",
+               p.phase_one_structural_step_accepted},
+              {"phase_one_structural_factorizations",
+               p.phase_one_structural_factorizations},
+              {"phase_one_structural_violation",
+               p.phase_one_structural_violation},
+              {"phase_one_structure", p.phase_one_structure},
+              {"phase_one_runtime_ms", p.phase_one_runtime_ms},
+              {"phase_one_termination", p.phase_one_termination},
+              {"phase_one_linear_solver", p.phase_one_linear_solver},
+              {"dispatch_dual_predictor_attempted",
+               p.dispatch_dual_predictor_attempted},
+              {"dispatch_dual_predictor_accepted",
+               p.dispatch_dual_predictor_accepted},
+              {"dispatch_dual_predictor_runtime_ms",
+               p.dispatch_dual_predictor_runtime_ms},
+              {"dispatch_dual_predictor_baseline_raw",
+               p.dispatch_dual_predictor_baseline_raw},
+              {"dispatch_dual_predictor_candidate_raw",
+               p.dispatch_dual_predictor_candidate_raw},
+              {"dispatch_dual_predictor_baseline_normalized",
+               p.dispatch_dual_predictor_baseline_normalized},
+              {"dispatch_dual_predictor_candidate_normalized",
+               p.dispatch_dual_predictor_candidate_normalized},
+              {"dispatch_dual_predictor_status",
+               p.dispatch_dual_predictor_status},
+              {"phase_two_start_accepted", p.phase_two_start_accepted},
+              {"phase_two_start_rejection_reason",
+               p.phase_two_start_rejection_reason},
+              {"symbolic_analyze_calls", p.analyze_calls},
+              {"factorization_calls", p.factorization_calls},
+              {"linear_solve_calls", p.linear_solve_calls},
+              {"accepted_steps", p.accepted_steps},
+              {"rejected_steps", p.rejected_steps},
+              {"backend_escalations", p.backend_escalations},
+              {"scaling_rebuilds", p.scaling_rebuilds}};
 }
 
 json serialize_ac_opf(const HybridPowerSystem& system,
@@ -721,6 +847,7 @@ json serialize_ac_opf(const HybridPowerSystem& system,
                result.max_constraint_violation},
               {"max_stationarity", result.max_stationarity},
               {"solver_backend", result.profiling.linear_solver_backend},
+              {"ipm_profiling", ac_opf_profiling_json(result)},
                {"infeasibility_hints", result.infeasibility_hints},
                {"model_limitations", result.model_limitations},
                {"audit", opf_audit_json(result.audit)},
@@ -771,6 +898,32 @@ json serialize_dc_opf(const HybridPowerSystem& system,
               {"solver_backend", result.solver_name},
               {"solver_chain", result.solver_chain},
               {"objective_model", result.objective_model},
+              {"structural_warm_start_requested",
+               result.structural_warm_start_requested},
+              {"structural_warm_start_built",
+               result.structural_warm_start_built},
+              {"structural_warm_start_used",
+               result.structural_warm_start_used},
+              {"structural_warm_start_components",
+               result.structural_warm_start_components},
+              {"structural_warm_start_factorizations",
+               result.structural_warm_start_factorizations},
+              {"structural_warm_start_residual",
+               result.structural_warm_start_residual},
+              {"solver_initial_primal_residual",
+               result.solver_initial_primal_residual},
+              {"structural_warm_start_status",
+               result.structural_warm_start_status},
+              {"phase_one_warm_start_only",
+               result.phase_one_warm_start_only},
+              {"phase_one_budget_exhausted",
+               result.phase_one_budget_exhausted},
+              {"phase_one_budget_overshoot_ms",
+               result.phase_one_budget_overshoot_ms},
+              {"native_qp_symbolic_analyze_calls",
+               result.native_qp_symbolic_analyze_calls},
+              {"phase_one_iterate_residual",
+               result.phase_one_iterate_residual},
               {"runtime_sec", result.runtime_sec},
               {"branch_mu_valid", result.branch_mu_valid},
               {"total_load_shedding_mw", result.total_load_shedding_mw},
@@ -813,6 +966,40 @@ opf::ACOPFOptions ac_opf_options(const json& request) {
   set_if_double(options, "regularization", value.regularization);
   set_if_int(options, "ac_eval_threads", value.ac_eval_threads);
   set_if_bool(options, "allow_fallback", value.allow_fallback);
+  set_if_bool(options, "ac_pf_warm_start", value.ac_pf_warm_start);
+  set_if_bool(options, "enable_phase_one", value.enable_phase_one);
+  set_if_double(options, "phase_one_time_limit_ms",
+                value.phase_one_time_limit_ms);
+  set_if_int(options, "phase_one_max_iterations",
+             value.phase_one_max_iterations);
+  set_if_int(options, "phase_one_max_factorizations",
+             value.phase_one_max_factorizations);
+  set_if_int(options, "phase_one_max_backtracks",
+             value.phase_one_max_backtracks);
+  set_if_double(options, "phase_one_barrier_mu", value.phase_one_barrier_mu);
+  set_if_double(options, "phase_one_admission_mu_factor",
+                value.phase_one_admission_mu_factor);
+  set_if_double(options, "phase_one_primal_mu_factor",
+                value.phase_one_primal_mu_factor);
+  set_if_double(options, "phase_one_centrality_tolerance",
+                value.phase_one_centrality_tolerance);
+  set_if_bool(options, "phase_one_dispatch_dual_predictor",
+              value.phase_one_dispatch_dual_predictor);
+  set_if_double(options, "phase_one_dispatch_dual_min_improvement",
+                value.phase_one_dispatch_dual_min_improvement);
+  set_if_bool(options, "ac_pf_dc_phase_one", value.ac_pf_dc_phase_one);
+  set_if_int(options, "ac_pf_dc_phase_one_min_buses",
+             value.ac_pf_dc_phase_one_min_buses);
+  set_if_int(options, "ac_pf_dc_phase_one_max_iterations",
+             value.ac_pf_dc_phase_one_max_iterations);
+  set_if_double(options, "ac_pf_dc_phase_one_time_limit_ms",
+                value.ac_pf_dc_phase_one_time_limit_ms);
+  set_if_double(options, "ac_pf_dc_phase_one_tolerance",
+                value.ac_pf_dc_phase_one_tolerance);
+  set_if_double(options, "ac_pf_dc_phase_one_min_dual_improvement",
+                value.ac_pf_dc_phase_one_min_dual_improvement);
+  set_if_double(options, "ac_pf_dc_phase_one_baseline_dual_threshold",
+                value.ac_pf_dc_phase_one_baseline_dual_threshold);
   set_if_bool(options, "verbose", value.verbose);
   const json constraints = request.value("constraints", json::object());
   set_if_bool(constraints, "branch_limits", value.enforce_branch_limits);
@@ -826,6 +1013,36 @@ opf::ACOPFOptions ac_opf_options(const json& request) {
   value.max_outer_iterations = std::clamp(value.max_outer_iterations, 1, 10000);
   value.feasibility_tol = std::clamp(value.feasibility_tol, 1.0e-12, 1.0);
   value.stationarity_tol = std::clamp(value.stationarity_tol, 1.0e-12, 1.0);
+  value.phase_one_time_limit_ms =
+      std::clamp(value.phase_one_time_limit_ms, -1.0, 3600000.0);
+  value.phase_one_max_iterations =
+      std::clamp(value.phase_one_max_iterations, 0, 10000);
+  value.phase_one_max_factorizations =
+      std::clamp(value.phase_one_max_factorizations, 0, 10000);
+  value.phase_one_max_backtracks =
+      std::clamp(value.phase_one_max_backtracks, 0, 100);
+  value.phase_one_barrier_mu =
+      std::clamp(value.phase_one_barrier_mu, 1.0e-12, 0.1);
+  value.phase_one_admission_mu_factor =
+      std::clamp(value.phase_one_admission_mu_factor, 0.0, 100.0);
+  value.phase_one_primal_mu_factor =
+      std::clamp(value.phase_one_primal_mu_factor, 0.0, 10.0);
+  value.phase_one_centrality_tolerance =
+      std::clamp(value.phase_one_centrality_tolerance, 0.0, 10.0);
+  value.phase_one_dispatch_dual_min_improvement = std::clamp(
+      value.phase_one_dispatch_dual_min_improvement, 0.0, 1.0);
+  value.ac_pf_dc_phase_one_min_buses =
+      std::clamp(value.ac_pf_dc_phase_one_min_buses, 0, 100000000);
+  value.ac_pf_dc_phase_one_max_iterations =
+      std::clamp(value.ac_pf_dc_phase_one_max_iterations, 1, 10000);
+  value.ac_pf_dc_phase_one_time_limit_ms = std::clamp(
+      value.ac_pf_dc_phase_one_time_limit_ms, -1.0, 3600000.0);
+  value.ac_pf_dc_phase_one_tolerance =
+      std::clamp(value.ac_pf_dc_phase_one_tolerance, 0.0, 1.0);
+  value.ac_pf_dc_phase_one_min_dual_improvement = std::clamp(
+      value.ac_pf_dc_phase_one_min_dual_improvement, 0.0, 1.0);
+  value.ac_pf_dc_phase_one_baseline_dual_threshold = std::clamp(
+      value.ac_pf_dc_phase_one_baseline_dual_threshold, 0.0, 1.0e12);
   return value;
 }
 

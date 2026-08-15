@@ -2,10 +2,12 @@
 #include "hacdcpf/detail/core_compat.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <complex>
 #include <limits>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -100,6 +102,155 @@ double converter_smax_pu(const Problem& prob, int conv_data_idx) {
                      1e-6});
   }
   return smax / prob.data.base_mva;
+}
+
+template <typename Matrix>
+bool same_sparse_pattern(const Matrix& lhs, const Matrix& rhs) {
+  if (lhs.rows() != rhs.rows() || lhs.cols() != rhs.cols() ||
+      lhs.nonZeros() != rhs.nonZeros()) return false;
+  for (int col = 0; col < lhs.outerSize(); ++col) {
+    typename Matrix::InnerIterator a(lhs, col);
+    typename Matrix::InnerIterator b(rhs, col);
+    for (; a && b; ++a, ++b) {
+      if (a.row() != b.row() || a.col() != b.col()) return false;
+    }
+    if (a || b) return false;
+  }
+  return true;
+}
+
+bool same_solver_data_structure(const powerflow::SolverData& lhs,
+                                const powerflow::SolverData& rhs,
+                                const ParityOptions& options) {
+  const auto same_size = [](const auto& a, const auto& b) {
+    return a.size() == b.size();
+  };
+  if (!same_size(lhs.ac_buses, rhs.ac_buses) ||
+      !same_size(lhs.ac_branches, rhs.ac_branches) ||
+      !same_size(lhs.dc_buses, rhs.dc_buses) ||
+      !same_size(lhs.dc_branches, rhs.dc_branches) ||
+      !same_size(lhs.generators, rhs.generators) ||
+      !same_size(lhs.converters, rhs.converters) ||
+      !same_size(lhs.lcc_converters, rhs.lcc_converters) ||
+      !same_size(lhs.dcdc_converters, rhs.dcdc_converters) ||
+      !same_size(lhs.energy_routers, rhs.energy_routers) ||
+      !same_size(lhs.renewable_gens, rhs.renewable_gens) ||
+      !same_size(lhs.pv_systems, rhs.pv_systems) ||
+      !same_size(lhs.storage_units, rhs.storage_units) ||
+      !same_size(lhs.dc_storage, rhs.dc_storage) ||
+      !same_size(lhs.flexible_loads, rhs.flexible_loads) ||
+      !same_sparse_pattern(lhs.ybus, rhs.ybus) ||
+      !same_sparse_pattern(lhs.gdc, rhs.gdc)) return false;
+  for (size_t i = 0; i < lhs.ac_buses.size(); ++i) {
+    const auto& a = lhs.ac_buses[i];
+    const auto& b = rhs.ac_buses[i];
+    if (a.index != b.index || a.bus_type != b.bus_type ||
+        a.in_service != b.in_service) return false;
+  }
+  for (size_t i = 0; i < lhs.ac_branches.size(); ++i) {
+    const auto& a = lhs.ac_branches[i];
+    const auto& b = rhs.ac_branches[i];
+    if (a.index != b.index || a.from_bus != b.from_bus ||
+        a.to_bus != b.to_bus || a.in_service != b.in_service ||
+        (options.enforce_branch_limits &&
+         ((a.rate_a_mva > 0.0) != (b.rate_a_mva > 0.0)))) return false;
+  }
+  for (size_t i = 0; i < lhs.dc_buses.size(); ++i) {
+    const auto& a = lhs.dc_buses[i];
+    const auto& b = rhs.dc_buses[i];
+    if (a.index != b.index || a.bus_type != b.bus_type ||
+        a.in_service != b.in_service) return false;
+  }
+  for (size_t i = 0; i < lhs.dc_branches.size(); ++i) {
+    const auto& a = lhs.dc_branches[i];
+    const auto& b = rhs.dc_branches[i];
+    if (a.index != b.index || a.from_bus != b.from_bus ||
+        a.to_bus != b.to_bus || a.in_service != b.in_service ||
+        (options.enforce_branch_limits &&
+         ((a.rate_a_mva > 0.0) != (b.rate_a_mva > 0.0)))) return false;
+  }
+  for (size_t i = 0; i < lhs.generators.size(); ++i) {
+    const auto& a = lhs.generators[i];
+    const auto& b = rhs.generators[i];
+    if (a.index != b.index || a.bus != b.bus ||
+        a.in_service != b.in_service || a.is_slack != b.is_slack) return false;
+  }
+  for (size_t i = 0; i < lhs.converters.size(); ++i) {
+    const auto& a = lhs.converters[i];
+    const auto& b = rhs.converters[i];
+    const auto membership = [&](const VSCConverter& c) {
+      const bool iac = options.enforce_converter_current_limits &&
+                       std::isfinite(c.i_ac_max_pu) && c.i_ac_max_pu > 0.0;
+      const bool mod = options.enforce_converter_modulation_limits &&
+                       c.k_m_modulation > 0.0 && c.vn_ac_kv > 0.0 &&
+                       c.vn_dc_kv > 0.0;
+      return std::array<bool, 3>{iac, mod && c.m_max > 0.0,
+                                mod && c.m_min > 0.0};
+    };
+    if (a.index != b.index || a.bus_ac != b.bus_ac || a.bus_dc != b.bus_dc ||
+        a.in_service != b.in_service || membership(a) != membership(b))
+      return false;
+  }
+  for (size_t i = 0; i < lhs.lcc_converters.size(); ++i) {
+    const auto& a = lhs.lcc_converters[i];
+    const auto& b = rhs.lcc_converters[i];
+    // LCC injections add no primal block, but their terminal and commutation
+    // buses select the balance rows and voltage columns in the full-space
+    // Jacobian/Hessian (docs/OptimalPowerFlow/chapters/parity_ipm.tex).
+    if (a.index != b.index || a.ac_bus != b.ac_bus || a.dc_bus != b.dc_bus ||
+        a.in_service != b.in_service ||
+        powerflow::lcc_commutation_ac_bus(lhs, a) !=
+            powerflow::lcc_commutation_ac_bus(rhs, b)) {
+      return false;
+    }
+  }
+  const auto same_selected = [](const auto& a, const auto& b, auto selected) {
+    for (size_t i = 0; i < a.size(); ++i) {
+      if (a[i].index != b[i].index || a[i].bus != b[i].bus ||
+          selected(a[i]) != selected(b[i])) return false;
+    }
+    return true;
+  };
+  if (!same_selected(lhs.renewable_gens, rhs.renewable_gens,
+                     [](const RenewableGen& r) {
+                       return r.in_service && r.curtailable;
+                     }) ||
+      !same_selected(lhs.pv_systems, rhs.pv_systems,
+                     [](const PVSystem& p) {
+                       return p.in_service && p.controllable;
+                     }) ||
+      !same_selected(lhs.storage_units, rhs.storage_units,
+                     [](const Storage& s) { return s.in_service; }) ||
+      !same_selected(lhs.dc_storage, rhs.dc_storage,
+                     [](const Storage& s) { return s.in_service; }) ||
+      !same_selected(lhs.flexible_loads, rhs.flexible_loads,
+                     [](const FlexibleLoad& f) {
+                       return f.in_service && f.controllable;
+                     })) return false;
+  for (size_t i = 0; i < lhs.dcdc_converters.size(); ++i) {
+    const auto& a = lhs.dcdc_converters[i];
+    const auto& b = rhs.dcdc_converters[i];
+    const auto duty = [&](const DCDCConverter& c) {
+      return options.enforce_converter_modulation_limits &&
+             c.topology != DCDCTopology::Generic && c.d_max > 0.0 &&
+             c.d_max < 1.0 + 1e-12 && c.d_min >= 0.0 && c.d_min < c.d_max;
+    };
+    if (a.index != b.index || a.bus_in != b.bus_in || a.bus_out != b.bus_out ||
+        a.in_service != b.in_service || duty(a) != duty(b)) return false;
+  }
+  for (size_t i = 0; i < lhs.energy_routers.size(); ++i) {
+    const auto& a = lhs.energy_routers[i];
+    const auto& b = rhs.energy_routers[i];
+    if (a.index != b.index || a.in_service != b.in_service ||
+        a.ports.size() != b.ports.size()) return false;
+    for (size_t p = 0; p < a.ports.size(); ++p) {
+      if (a.ports[p].index != b.ports[p].index ||
+          a.ports[p].bus != b.ports[p].bus ||
+          a.ports[p].port_type != b.ports[p].port_type ||
+          a.ports[p].in_service != b.ports[p].in_service) return false;
+    }
+  }
+  return true;
 }
 
 }  // namespace
@@ -660,6 +811,261 @@ Problem build_problem(const HybridPowerSystem& sys, const ParityOptions& opt) {
   }
 
   return prob;
+}
+
+bool refresh_problem_numeric_data(Problem& prob,
+                                  const HybridPowerSystem& sys) {
+  powerflow::SolverData refreshed =
+      core::make_solver_data(sys, LossModelType::Linear);
+  if (!same_solver_data_structure(prob.data, refreshed, prob.options)) {
+    return false;
+  }
+  prob.data = std::move(refreshed);
+  const int nb = static_cast<int>(prob.data.ac_buses.size());
+  const int ndc = static_cast<int>(prob.data.dc_buses.size());
+
+  prob.pd_demand_pu = Eigen::VectorXd::Zero(nb);
+  prob.qd_demand_pu = Eigen::VectorXd::Zero(nb);
+  if (prob.data.has_component_loads) {
+    prob.pd_demand_pu = prob.data.pd_pu;
+    prob.qd_demand_pu = prob.data.qd_pu;
+  } else {
+    for (int i = 0; i < nb; ++i) {
+      prob.pd_demand_pu[i] =
+          prob.data.ac_buses[static_cast<size_t>(i)].pd_mw / prob.data.base_mva;
+      prob.qd_demand_pu[i] =
+          prob.data.ac_buses[static_cast<size_t>(i)].qd_mvar / prob.data.base_mva;
+    }
+  }
+  prob.zip_pp = Eigen::VectorXd::Ones(nb);
+  prob.zip_ip = Eigen::VectorXd::Zero(nb);
+  prob.zip_zp = Eigen::VectorXd::Zero(nb);
+  prob.zip_pq = Eigen::VectorXd::Ones(nb);
+  prob.zip_iq = Eigen::VectorXd::Zero(nb);
+  prob.zip_zq = Eigen::VectorXd::Zero(nb);
+  if (prob.data.has_component_loads && prob.data.bus_zip_pp.size() == nb) {
+    prob.zip_pp = prob.data.bus_zip_pp;
+    prob.zip_ip = prob.data.bus_zip_ip;
+    prob.zip_zp = prob.data.bus_zip_zp;
+    prob.zip_pq = prob.data.bus_zip_pq;
+    prob.zip_iq = prob.data.bus_zip_iq;
+    prob.zip_zq = prob.data.bus_zip_zq;
+  } else if (!prob.data.has_component_loads) {
+    for (int i = 0; i < nb; ++i) {
+      prob.zip_pp[i] = prob.data.zip_pw[0];
+      prob.zip_ip[i] = prob.data.zip_pw[1];
+      prob.zip_zp[i] = prob.data.zip_pw[2];
+      prob.zip_pq[i] = prob.data.zip_qw[0];
+      prob.zip_iq[i] = prob.data.zip_qw[1];
+      prob.zip_zq[i] = prob.data.zip_qw[2];
+    }
+  }
+  for (const auto& fl : prob.data.flexible_loads) {
+    if (!fl.in_service || !fl.controllable) continue;
+    const int bus = fl.bus - 1;
+    if (bus < 0 || bus >= nb) continue;
+    const double baseline = std::max(0.0, fl.p_mw / prob.data.base_mva);
+    if (baseline <= 0.0) continue;
+    const double old_demand = std::max(0.0, prob.pd_demand_pu[bus]);
+    const double new_demand = std::max(0.0, old_demand - baseline);
+    if (old_demand > 1e-20 && new_demand > 1e-20) {
+      prob.zip_pp[bus] =
+          std::max(0.0, prob.zip_pp[bus] * old_demand - baseline) / new_demand;
+      prob.zip_ip[bus] = prob.zip_ip[bus] * old_demand / new_demand;
+      prob.zip_zp[bus] = prob.zip_zp[bus] * old_demand / new_demand;
+      const double sum = prob.zip_pp[bus] + prob.zip_ip[bus] + prob.zip_zp[bus];
+      if (sum > 1e-20) {
+        prob.zip_pp[bus] /= sum;
+        prob.zip_ip[bus] /= sum;
+        prob.zip_zp[bus] /= sum;
+      }
+    } else if (new_demand <= 1e-20) {
+      prob.zip_pp[bus] = 1.0;
+      prob.zip_ip[bus] = 0.0;
+      prob.zip_zp[bus] = 0.0;
+    }
+    prob.pd_demand_pu[bus] = new_demand;
+  }
+
+  double max_pd = 1.0;
+  double max_qd = 1.0;
+  for (int i = 0; i < nb; ++i) {
+    max_pd = std::max(max_pd, std::abs(prob.pd_demand_pu[i]));
+    max_qd = std::max(max_qd, std::abs(prob.qd_demand_pu[i]));
+  }
+  prob.scale_p = 1.0 / max_pd;
+  prob.scale_q = 1.0 / max_qd;
+  prob.voll_effective = resolve_voll_auto(prob);
+  prob.g_diag = Eigen::VectorXd::Zero(nb);
+  prob.b_diag = Eigen::VectorXd::Zero(nb);
+  for (int i = 0; i < nb; ++i) {
+    const auto yii = prob.data.ybus.coeff(i, i);
+    prob.g_diag[i] = yii.real();
+    prob.b_diag[i] = yii.imag();
+  }
+  prob.dc_volt_anchor.clear();
+  std::vector<unsigned char> dc_observable(static_cast<size_t>(ndc), 0);
+  for (int col = 0; col < prob.data.gdc.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(prob.data.gdc, col); it;
+         ++it) {
+      if (it.row() != it.col())
+        dc_observable[static_cast<size_t>(it.row())] = 1;
+    }
+  }
+  for (int k = 0; k < ndc; ++k) {
+    if (dc_observable[static_cast<size_t>(k)] == 0)
+      prob.dc_volt_anchor.push_back(k);
+  }
+
+  prob.p_fixed_inj = Eigen::VectorXd::Zero(nb);
+  prob.q_fixed_inj = Eigen::VectorXd::Zero(nb);
+  const auto add_fixed = [&](int bus_number, double p_mw, double q_mvar) {
+    const int bus = bus_number - 1;
+    if (bus < 0 || bus >= nb) return;
+    prob.p_fixed_inj[bus] += p_mw / prob.data.base_mva;
+    prob.q_fixed_inj[bus] += q_mvar / prob.data.base_mva;
+  };
+  for (const auto& sg : prob.data.static_generators) {
+    if (sg.in_service)
+      add_fixed(sg.bus, sg.p_mw * sg.scaling, sg.q_mvar * sg.scaling);
+  }
+  for (const auto& rg : prob.data.renewable_gens) {
+    if (rg.in_service && !rg.curtailable)
+      add_fixed(rg.bus, rg.p_mw, rg.q_mvar);
+  }
+  for (const auto& pv : prob.data.pv_systems) {
+    if (pv.in_service && !pv.controllable)
+      add_fixed(pv.bus, powerflow::compute_pv_power_mw(pv), pv.q_mvar);
+  }
+  for (const auto& vpp : prob.data.vpps) {
+    if (vpp.in_service)
+      add_fixed(vpp.pcc_bus, vpp.p_output_mw, vpp.q_output_mvar);
+  }
+  for (const auto& mg : prob.data.microgrids) {
+    if (mg.in_service && mg.operating_mode == MicrogridMode::GridConnected)
+      add_fixed(mg.pcc_bus, mg.p_exchange_mw, 0.0);
+  }
+  for (const auto& ms : prob.data.mobile_storage) {
+    if (ms.in_service && ms.status != MobileStorageStatus::InTransit)
+      add_fixed(ms.bus, ms.p_mw, ms.q_mvar);
+  }
+  return true;
+}
+
+std::uint64_t problem_layout_signature(const Problem& prob) {
+  // FNV-1a over every semantic ordering that enters the full-space KKT.  A
+  // dimension-only check is insufficient: two topologies can have identical
+  // (n, meq, niq, nnz) while assigning multipliers to different buses/limits.
+  std::uint64_t hash = 1469598103934665603ULL;
+  auto add = [&](std::uint64_t value) {
+    hash ^= value;
+    hash *= 1099511628211ULL;
+  };
+  const auto add_ints = [&](const auto& values) {
+    add(static_cast<std::uint64_t>(values.size()));
+    for (const auto value : values) {
+      add(static_cast<std::uint64_t>(static_cast<std::int64_t>(value)));
+    }
+  };
+  const auto add_sparse_pattern = [&](const auto& matrix) {
+    add(static_cast<std::uint64_t>(matrix.rows()));
+    add(static_cast<std::uint64_t>(matrix.cols()));
+    add(static_cast<std::uint64_t>(matrix.nonZeros()));
+    for (int col = 0; col < matrix.outerSize(); ++col) {
+      for (typename std::decay_t<decltype(matrix)>::InnerIterator it(matrix, col);
+           it; ++it) {
+        add(static_cast<std::uint64_t>(it.row()));
+        add(static_cast<std::uint64_t>(it.col()));
+      }
+    }
+  };
+
+  const auto& v = prob.vidx;
+  const int var_layout[] = {
+      v.n_va, v.n_vm, v.n_pg, v.n_qg, v.n_vdc, v.n_pac, v.n_qac,
+      v.n_pdc, v.n_dpd, v.n_dqd, v.n_pren, v.n_qren, v.n_pstor,
+      v.n_qstor, v.n_pstordc, v.n_pdcdc, v.n_pflex, v.n_erp, v.n_erq,
+      v.n_total, v.i_va, v.i_vm, v.i_pg, v.i_qg, v.i_vdc, v.i_pac,
+      v.i_qac, v.i_pdc, v.i_dpd, v.i_dqd, v.i_pren, v.i_qren,
+      v.i_pstor, v.i_qstor, v.i_pstordc, v.i_pdcdc, v.i_pflex,
+      v.i_erp, v.i_erq};
+  for (const int value : var_layout) add(static_cast<std::uint64_t>(value));
+
+  const auto& c = prob.cidx;
+  const int constraint_layout[] = {
+      c.n_pbal_ac, c.n_qbal_ac, c.n_pbal_dc, c.n_conv_bal,
+      c.n_dcdc_bal, c.n_er_bal, c.n_ac_ref, c.n_dc_ref, c.n_eq_total,
+      c.i_pbal_ac, c.i_qbal_ac, c.i_pbal_dc, c.i_conv_bal,
+      c.i_dcdc_bal, c.i_er_bal, c.i_ac_ref, c.i_dc_ref, c.n_sf, c.n_st,
+      c.n_sconv, c.n_sdc, c.n_iac, c.n_mmax, c.n_mmin,
+      c.n_dcdc_duty, c.n_ineq_nonlin};
+  for (const int value : constraint_layout) add(static_cast<std::uint64_t>(value));
+
+  add_ints(prob.gen_var_to_data);
+  add_ints(prob.conv_var_to_data);
+  add_ints(prob.branch_limited);
+  add_ints(prob.dc_branch_limited);
+  add_ints(prob.conv_iac_limited);
+  add_ints(prob.conv_mmax_limited);
+  add_ints(prob.conv_mmin_limited);
+  add_ints(prob.dcdc_duty_limited);
+  add_ints(prob.gen_bus);
+  add_ints(prob.conv_ac_bus);
+  add_ints(prob.conv_dc_bus);
+  add_ints(prob.ac_angle_reference_buses);
+  add_ints(prob.dc_voltage_reference_buses);
+  add_ints(prob.ren_var_to_data);
+  add_ints(prob.ren_source);
+  add_ints(prob.ren_bus);
+  add_ints(prob.stor_var_to_data);
+  add_ints(prob.stor_bus);
+  add_ints(prob.stor_dc_var_to_data);
+  add_ints(prob.stor_dc_bus);
+  add_ints(prob.dcdc_var_to_data);
+  add_ints(prob.dcdc_bus_in);
+  add_ints(prob.dcdc_bus_out);
+  add_ints(prob.dc_volt_anchor);
+  add_ints(prob.flex_var_to_data);
+  add_ints(prob.flex_bus);
+  add_ints(prob.er_router_to_data);
+  add(static_cast<std::uint64_t>(prob.er_ports.size()));
+  for (const auto& port : prob.er_ports) {
+    add(static_cast<std::uint64_t>(port.router_idx));
+    add(static_cast<std::uint64_t>(port.port_idx));
+    add(static_cast<std::uint64_t>(port.bus));
+    add(static_cast<std::uint64_t>(port.is_ac));
+    add(static_cast<std::uint64_t>(port.pvar));
+    add(static_cast<std::uint64_t>(static_cast<std::int64_t>(port.qvar)));
+  }
+  add(static_cast<std::uint64_t>(prob.data.lcc_converters.size()));
+  for (const auto& lcc : prob.data.lcc_converters) {
+    add(static_cast<std::uint64_t>(static_cast<std::int64_t>(lcc.index)));
+    add(static_cast<std::uint64_t>(static_cast<std::int64_t>(lcc.ac_bus)));
+    add(static_cast<std::uint64_t>(static_cast<std::int64_t>(lcc.dc_bus)));
+    add(static_cast<std::uint64_t>(lcc.in_service));
+    add(static_cast<std::uint64_t>(static_cast<std::int64_t>(
+        powerflow::lcc_commutation_ac_bus(prob.data, lcc))));
+  }
+  for (const auto& router : prob.data.energy_routers) {
+    add(static_cast<std::uint64_t>(router.ports.size()));
+    for (const auto& port : router.ports) {
+      add(static_cast<std::uint64_t>(static_cast<std::int64_t>(port.index)));
+    }
+  }
+  add_sparse_pattern(prob.data.ybus);
+  add_sparse_pattern(prob.data.gdc);
+
+  // Bounds are represented as inequality rows by the native IPM. Numeric bound
+  // values may change in a prepared parameter sweep, but finite/infinite row
+  // membership and ordering may not.
+  Eigen::VectorXd xmin;
+  Eigen::VectorXd xmax;
+  build_variable_bounds(prob, xmin, xmax);
+  for (Eigen::Index i = 0; i < xmin.size(); ++i) {
+    add(static_cast<std::uint64_t>(std::isfinite(xmin[i])));
+    add(static_cast<std::uint64_t>(std::isfinite(xmax[i])));
+  }
+  return hash == 0 ? 1 : hash;
 }
 
 void build_variable_bounds(const Problem& prob, Eigen::VectorXd& xmin, Eigen::VectorXd& xmax) {

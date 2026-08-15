@@ -104,6 +104,73 @@ def main() -> int:
         ):
             print("FAIL: one of the isolated PF jobs did not converge", file=sys.stderr)
             return 1
+        reactive_limits = first_result.data.get("reactive_limits", {})
+        validity_flags = first_result.data.get("validity_flags", {})
+        if not (
+            reactive_limits.get("enforcement_requested") is True
+            and reactive_limits.get("certified") is True
+            and reactive_limits.get("active_set_cycle_detected") is False
+            and reactive_limits.get("outer_iteration_limit_reached") is False
+            and validity_flags.get("generator_reactive_limits_certified") is True
+        ):
+            print(
+                f"FAIL: versioned PF Q-limit certificate is incomplete: {reactive_limits}",
+                file=sys.stderr,
+            )
+            return 1
+
+        opf_job = first.optimal_power_flow(
+            {
+                "solver": "parity",
+                "network_model": "balanced_aggregate",
+                "options": {
+                    "max_inner_iterations": 300,
+                    "allow_fallback": False,
+                    "enable_phase_one": False,
+                    "ac_pf_warm_start": False,
+                    "ac_pf_dc_phase_one": True,
+                    "ac_pf_dc_phase_one_min_buses": 0,
+                    "ac_pf_dc_phase_one_time_limit_ms": 1234.0,
+                },
+            }
+        )
+        jobs.append(opf_job)
+        opf_job.wait(timeout=60.0)
+        opf_result = opf_job.result().data
+        profiling = opf_result.get("ipm_profiling", {})
+        if not opf_result.get("converged"):
+            print("FAIL: v1 parity OPF contract probe did not converge", file=sys.stderr)
+            return 1
+        if profiling.get("phase_one_termination") != "disabled":
+            print("FAIL: v1 enable_phase_one=false was not applied", file=sys.stderr)
+            return 1
+        if profiling.get("dc_phase_one_requested") is not False:
+            print("FAIL: v1 reported a DC Phase I without an AC-PF start", file=sys.stderr)
+            return 1
+        if profiling.get("dc_phase_one_time_limit_ms") != 1234.0:
+            print("FAIL: v1 did not apply the DC Phase-I wall budget", file=sys.stderr)
+            return 1
+        required_profiling = {
+            "initial_primal_residual",
+            "initial_dual_residual",
+            "dc_phase_one_status",
+            "dc_phase_one_budget_exhausted",
+            "dc_phase_one_symbolic_analyze_calls",
+            "parity_formulation_builds",
+            "prepared_session_used",
+            "formulation_reused",
+            "mapping_reused",
+            "symbolic_reused",
+            "continuation_state_reused",
+            "numeric_refactor_status",
+            "prepared_session_invalidation_reason",
+            "phase_one_factorizations",
+            "phase_two_start_accepted",
+            "factorization_calls",
+        }
+        if not required_profiling.issubset(profiling):
+            print("FAIL: v1 OPF profiling contract is incomplete", file=sys.stderr)
+            return 1
 
         topology = first.topology_chunk(lod=2, limit=10_000)
         topology_nodes = topology.nodes
@@ -176,6 +243,7 @@ def main() -> int:
                     "revisions": [first.model_revision, second.model_revision],
                     "etag_conflict": conflict.status_code,
                     "jobs": [first_job.state, second_job.state],
+                    "opf_phase_one_disabled": True,
                     "stale_after_update": True,
                     "topology_nodes": len(topology_nodes),
                     "topology_pages": (topology.total_nodes + 4) // 5,

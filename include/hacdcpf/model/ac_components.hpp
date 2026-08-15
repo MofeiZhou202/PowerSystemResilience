@@ -72,6 +72,12 @@ struct ACBranch {
   bool in_service{true};
   std::string name;
 
+  // True only when the source model declares this row to be an ideal
+  // connectivity relation rather than a physical series branch. Canonical
+  // projection contracts such rows before Ybus assembly; a small impedance
+  // alone is never sufficient evidence for contraction.
+  bool ideal_connectivity{false};
+
   double rate_b_mva{0.0};
   double rate_c_mva{0.0};
 

@@ -368,7 +368,7 @@
       </div>
       <div class="pf-option-group" data-pf-model="balanced">
         <div class="pf-option-title">开关</div>
-        <label class="sub-label sub-checkbox"><input id="pfPvPqConversion" type="checkbox" checked/><span>PV/PQ</span></label>
+        <label class="sub-label sub-checkbox"><input id="pfPvPqConversion" type="checkbox"/><span>Q限值校核（PV→PQ）</span></label>
         <label class="sub-label sub-checkbox"><input id="pfAutoSwing" type="checkbox" checked/><span>自动平衡</span></label>
         <label class="sub-label sub-checkbox"><input id="pfConverterModeSwitch" type="checkbox" checked/><span>换流器模式</span></label>
         <label class="sub-label sub-checkbox"><input id="pfRigidVdcFormer" type="checkbox"/><span>刚性Vdc源</span></label>
@@ -380,6 +380,9 @@
         <div class="pf-option-title">换流器</div>
         <label class="sub-label">Q滞环<input id="pfPvQHysteresis" type="number" step="0.001" value="0.01"/></label>
         <label class="sub-label">恢复V差<input id="pfPvRecoverVmTol" type="number" step="0.001" value="0.01"/></label>
+        <label class="sub-label">Q外层上限<input id="pfPvPqOuterIter" type="number" min="1" max="1000" step="1" value="30"/></label>
+        <label class="sub-label">状态保持<input id="pfPvPqHoldIter" type="number" min="0" max="1000" step="1" value="3"/></label>
+        <label class="sub-label sub-checkbox"><input id="pfPvPqAntiChatter" type="checkbox" checked/><span>防震荡</span></label>
         <label class="sub-label">Vdc高阈<input id="pfVdcSwitchHigh" type="number" step="0.001" value="0.03"/></label>
         <label class="sub-label">Vdc低阈<input id="pfVdcSwitchLow" type="number" step="0.001" value="0.01"/></label>
         <label class="sub-label">模式滞后<input id="pfModeHysteresis" type="number" min="0" step="1" value="2"/></label>

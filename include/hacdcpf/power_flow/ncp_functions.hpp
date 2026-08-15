@@ -78,7 +78,7 @@ inline std::pair<double, double> pv_pq_ncp_jacobian(double qg,
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Phase 2: Smooth (μ-perturbed) Fischer–Burmeister NCP continuation
+// Phase 2: smooth NCP continuation primitives
 // ═══════════════════════════════════════════════════════════════════════
 //
 // φ_μ(a, b) = √(a² + b² + 2μ) − a − b,   μ > 0
@@ -109,16 +109,32 @@ inline std::pair<double, double> smooth_fb_derivatives(double a, double b, doubl
   return {a / safe_r - 1.0, b / safe_r - 1.0};
 }
 
-/// Semismooth median residual. The median formulation already has the required
-/// physical zero set for every iterate, so continuation does not perturb it.
+/// CHKS-smoothed median residual.
+///
+/// Chen, Harker, Kanzow and Smale smoothing replaces
+///   max(a,b) by 0.5 * (a+b+sqrt((a-b)^2+4*mu^2))
+/// and min analogously. Applying it to
+///   max(min(V-Vset, Q-Qmin), Q-Qmax)
+/// preserves a fixed equation layout and converges to the exact median NCP as
+/// mu -> 0 without a discrete PV/PQ pattern change.
 inline double pv_pq_smooth_ncp(double qg,
                                 double qmin,
                                 double qmax,
                                 double vm,
                                 double vm_set,
                                 double mu) {
-  (void)mu;
-  return pv_pq_ncp(qg, qmin, qmax, vm, vm_set);
+  if (mu <= 0.0) return pv_pq_ncp(qg, qmin, qmax, vm, vm_set);
+  const double voltage_error = vm - vm_set;
+  const double lower_gap = qg - qmin;
+  const double upper_gap = qg - qmax;
+  const double inner_delta = voltage_error - lower_gap;
+  const double inner = 0.5 *
+      (voltage_error + lower_gap -
+       std::sqrt(inner_delta * inner_delta + 4.0 * mu * mu));
+  const double outer_delta = inner - upper_gap;
+  return 0.5 *
+      (inner + upper_gap +
+       std::sqrt(outer_delta * outer_delta + 4.0 * mu * mu));
 }
 
 /// Jacobian of smooth PV/PQ NCP w.r.t. (Qg, Vm).
@@ -129,8 +145,27 @@ inline std::pair<double, double> pv_pq_smooth_ncp_jacobian(double qg,
                                                              double vm,
                                                              double vm_set,
                                                              double mu) {
-  (void)mu;
-  return pv_pq_ncp_jacobian(qg, qmin, qmax, vm, vm_set);
+  if (mu <= 0.0) {
+    return pv_pq_ncp_jacobian(qg, qmin, qmax, vm, vm_set);
+  }
+  const double voltage_error = vm - vm_set;
+  const double lower_gap = qg - qmin;
+  const double upper_gap = qg - qmax;
+  const double inner_delta = voltage_error - lower_gap;
+  const double inner_radius =
+      std::sqrt(inner_delta * inner_delta + 4.0 * mu * mu);
+  const double inner =
+      0.5 * (voltage_error + lower_gap - inner_radius);
+  const double inner_dq = 0.5 * (1.0 + inner_delta / inner_radius);
+  const double inner_dv = 0.5 * (1.0 - inner_delta / inner_radius);
+
+  const double outer_delta = inner - upper_gap;
+  const double outer_radius =
+      std::sqrt(outer_delta * outer_delta + 4.0 * mu * mu);
+  const double inner_weight = 0.5 * (1.0 + outer_delta / outer_radius);
+  const double upper_weight = 1.0 - inner_weight;
+  return {inner_weight * inner_dq + upper_weight,
+          inner_weight * inner_dv};
 }
 
 }  // namespace hacdcpf::powerflow

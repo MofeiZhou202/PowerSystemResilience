@@ -21,6 +21,7 @@
 /// equality/inequality row block.
 /// Replaces: optimal_power_flow/parity_formulation.hpp.
 
+#include <cstdint>
 #include <vector>
 
 #include <Eigen/Core>
@@ -231,6 +232,17 @@ struct EvalWorkspace {
 /// @return Problem containing canonical data, variable layout, constraint
 /// layout, maps, and precomputed coefficients.
 Problem build_problem(const HybridPowerSystem& sys, const ParityOptions& opt = {});
+
+/// Refresh parameter-dependent SolverData and objective/residual coefficients
+/// while preserving every OPF variable/constraint map. Returns false when the
+/// newly projected system changes any structural selection or sparse pattern.
+bool refresh_problem_numeric_data(Problem& prob,
+                                  const HybridPowerSystem& sys);
+
+/// Exact structural identity of the native-IPM variable, row, bound-row, map,
+/// and sparse-network layout. Numeric demands, setpoints, costs, and limits are
+/// deliberately excluded unless they change row-family membership.
+std::uint64_t problem_layout_signature(const Problem& prob);
 
 /// Build lower and upper bounds for every variable block.
 ///

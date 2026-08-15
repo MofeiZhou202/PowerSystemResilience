@@ -331,6 +331,25 @@ TEST_CASE("BPA import: line continuations and order-independent bus binding",
             imported.system.ac.branches[0].to_bus);
   }
 
+  SECTION("zero-data L cards retain ideal-connectivity provenance") {
+    const std::string content =
+        card("BS", "BUS500A", "525.") + "\n" +
+        card("B ", "BUS500B", "525.") + "\n" +
+        card("L ", "BUS500A", "525.", "BUS500B", "525.") +
+        "\n(END)\n";
+
+    const auto imported = hacdcpf::io::parse_bpa_dat_string(content);
+    REQUIRE_FALSE(imported.report.has_errors());
+    REQUIRE(imported.system.ac.branches.size() == 1);
+    CHECK(imported.system.ac.branches.front().ideal_connectivity);
+    CHECK(imported.system.ac.branches.front().parameter_source ==
+          "bpa_dsp_ideal_connectivity");
+    const auto projected =
+        hacdcpf::project_to_canonical_models(imported.system, false);
+    CHECK(projected.ac.buses.size() == 1);
+    CHECK(projected.ac.branches.empty());
+  }
+
   SECTION("L+ terminal reactor values become fixed inductive shunts") {
     std::string line = card("L ", "BUS500A", "525.", "BUS500B", "525.", "1");
     line.replace(38, 4, "1000");
@@ -371,6 +390,7 @@ TEST_CASE("BPA import: line continuations and order-independent bus binding",
     REQUIRE(imported.system.ac.branches.size() == 1);
     REQUIRE_THAT(imported.system.ac.branches.front().x_pu,
                  WithinAbs(0.0001, 1e-12));
+    CHECK_FALSE(imported.system.ac.branches.front().ideal_connectivity);
     REQUIRE(std::any_of(
         imported.report.records.begin(), imported.report.records.end(),
         [](const auto& record) {

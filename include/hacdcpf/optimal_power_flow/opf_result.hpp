@@ -5,6 +5,8 @@
 /// Result types for AC OPF, DC OPF, and parity IPM.
 /// Consolidates: ac_opf.hpp (ACOPFResult) + dc_opf.hpp (DCOPFResult).
 
+#include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -55,8 +57,84 @@ struct ACOPFProfiling {
   int backend_escalations{0};
   int scaling_rebuilds{0};
   bool warm_start_used{false};
+  bool prepared_session_used{false};
+  bool formulation_reused{false};
+  bool mapping_reused{false};
+  bool symbolic_reused{false};
+  bool continuation_state_reused{false};
+  bool numeric_refactor_attempted{false};
+  bool numeric_refactor_accepted{false};
+  double numeric_refactor_relative_drift{
+      std::numeric_limits<double>::infinity()};
+  double numeric_refactor_backward_error{
+      std::numeric_limits<double>::infinity()};
+  std::string numeric_refactor_status{"not-requested"};
+  std::string prepared_session_invalidation_reason{"not-prepared"};
   double initial_primal_residual{0.0};
   double initial_dual_residual{0.0};
+  bool dc_phase_one_requested{false};
+  bool dc_phase_one_accepted{false};
+  int dc_phase_one_iterations{0};
+  double dc_phase_one_runtime_ms{0.0};
+  double dc_phase_one_time_limit_ms{0.0};
+  bool dc_phase_one_budget_exhausted{false};
+  double dc_phase_one_budget_overshoot_ms{0.0};
+  int dc_phase_one_symbolic_analyze_calls{0};
+  /// The AC baseline and DC candidate share this immutable formulation.
+  int parity_formulation_builds{0};
+  double dc_phase_one_residual{
+      std::numeric_limits<double>::infinity()};
+  double dc_phase_one_candidate_primal{
+      std::numeric_limits<double>::infinity()};
+  double dc_phase_one_candidate_dual{
+      std::numeric_limits<double>::infinity()};
+  double dc_phase_one_baseline_primal{
+      std::numeric_limits<double>::infinity()};
+  double dc_phase_one_baseline_dual{
+      std::numeric_limits<double>::infinity()};
+  std::string dc_phase_one_status{"not-requested"};
+  double phase_one_initial_violation{
+      std::numeric_limits<double>::infinity()};
+  double phase_one_constraint_violation{
+      std::numeric_limits<double>::infinity()};
+  double phase_one_dual_fit_residual{
+      std::numeric_limits<double>::infinity()};
+  bool phase_one_primal_feasible{false};
+  bool phase_one_in_handoff_corridor{false};
+  bool phase_one_dual_initialized{false};
+  double phase_one_handoff_primal_tolerance{0.0};
+  double phase_one_perturbed_primal_residual{
+      std::numeric_limits<double>::infinity()};
+  double phase_one_centrality{
+      std::numeric_limits<double>::infinity()};
+  double phase_one_barrier_mu{0.0};
+  bool phase_one_budget_exhausted{false};
+  int phase_one_iterations{0};
+  int phase_one_factorizations{0};
+  int phase_one_backtracks{0};
+  bool phase_one_structural_step_attempted{false};
+  bool phase_one_structural_step_accepted{false};
+  int phase_one_structural_factorizations{0};
+  double phase_one_structural_violation{
+      std::numeric_limits<double>::infinity()};
+  std::string phase_one_structure{"ac-state-basic"};
+  double phase_one_runtime_ms{0.0};
+  std::string phase_one_termination{"not-run"};
+  std::string phase_one_linear_solver{"unselected"};
+  bool dispatch_dual_predictor_attempted{false};
+  bool dispatch_dual_predictor_accepted{false};
+  double dispatch_dual_predictor_runtime_ms{0.0};
+  double dispatch_dual_predictor_baseline_raw{
+      std::numeric_limits<double>::infinity()};
+  double dispatch_dual_predictor_candidate_raw{
+      std::numeric_limits<double>::infinity()};
+  double dispatch_dual_predictor_baseline_normalized{
+      std::numeric_limits<double>::infinity()};
+  double dispatch_dual_predictor_candidate_normalized{
+      std::numeric_limits<double>::infinity()};
+  std::string dispatch_dual_predictor_status{"not-attempted"};
+  bool phase_two_start_accepted{false};
+  std::string phase_two_start_rejection_reason;
   double max_ac_p_balance_residual_pu{0.0};
   double max_ac_q_balance_residual_pu{0.0};
   double max_dc_balance_residual_pu{0.0};
@@ -114,6 +192,9 @@ struct ACOPFResult {
   std::vector<double> ipm_equality_dual_state;
   std::vector<double> ipm_inequality_dual_state;
   std::vector<double> ipm_slack_state;
+  /// Exact native-IPM layout identity. It is process-local metadata used to
+  /// prevent dimension-compatible but semantically misaligned dual reuse.
+  std::uint64_t ipm_layout_signature{0};
 
   /// Optional Davidenko homotopy tangent dw/dt at the returned point
   /// (primal, slack, equality-dual, inequality-dual), populated when
@@ -195,6 +276,25 @@ struct DCOPFResult {
   std::string status;
   std::string solver_name;
   double runtime_sec{0.0};
+
+  /// Structure-aware NativeLCQP initialization diagnostics. The projection is
+  /// built in original DCOPF coordinates before Ruiz scaling.
+  bool structural_warm_start_requested{false};
+  bool structural_warm_start_built{false};
+  bool structural_warm_start_used{false};
+  int structural_warm_start_components{0};
+  int structural_warm_start_factorizations{0};
+  double structural_warm_start_residual{
+      std::numeric_limits<double>::infinity()};
+  double solver_initial_primal_residual{
+      std::numeric_limits<double>::infinity()};
+  std::string structural_warm_start_status{"not-requested"};
+  bool phase_one_warm_start_only{false};
+  bool phase_one_budget_exhausted{false};
+  double phase_one_budget_overshoot_ms{0.0};
+  int native_qp_symbolic_analyze_calls{0};
+  double phase_one_iterate_residual{
+      std::numeric_limits<double>::infinity()};
 
   std::vector<double> lmp;
   std::vector<double> branch_mu_lower;

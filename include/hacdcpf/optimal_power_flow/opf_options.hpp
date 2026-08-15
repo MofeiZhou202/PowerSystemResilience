@@ -79,6 +79,36 @@ struct ACOPFOptions {
   bool allow_fallback{true};
   bool verbose{false};
 
+  /// Bounded Phase I for the native parity IPM. It restores primal
+  /// feasibility and fits one dual/slack start without running barrier or
+  /// Hessian steps. A compatible full continuation state bypasses Phase I.
+  bool enable_phase_one{true};
+  double phase_one_time_limit_ms{5000.0};
+  int phase_one_max_iterations{12};
+  int phase_one_max_factorizations{14};
+  int phase_one_max_backtracks{12};
+  double phase_one_barrier_mu{0.1};
+  double phase_one_admission_mu_factor{1.0};
+  double phase_one_primal_mu_factor{0.1};
+  double phase_one_centrality_tolerance{0.5};
+
+  /// Zero-factorization dual predictor used when a primal warm start is
+  /// available but the central Phase-I contract is not accepted. It estimates
+  /// one active/reactive balance price per conductive AC component from
+  /// interior generator stationarity, then keeps the complete vector only if
+  /// the exact raw and normalized dual residuals both improve by this fraction.
+  bool phase_one_dispatch_dual_predictor{false};
+  double phase_one_dispatch_dual_min_improvement{0.05};
+
+  /// Prepared-session numeric-factor reuse is intentionally default-off.
+  /// A backend may attempt it only for a fixed sparse pattern and sufficiently
+  /// small matrix-value drift, and must accept it only after scaled backward-
+  /// residual plus iterative-refinement audits. Unsupported backends fail
+  /// closed and continue with fresh numeric factorization.
+  bool prepared_numeric_refactor{false};
+  double prepared_numeric_max_relative_drift{1e-3};
+  double prepared_numeric_backward_error_tolerance{1e-8};
+
   /// Optional non-owning warm start from a previous compatible OPF solve.
   /// The pointed result must remain alive until solve_ac_opf() returns.  Each
   /// variable family is mapped independently; incompatible/missing families
@@ -94,6 +124,21 @@ struct ACOPFOptions {
   /// physics-informed initial point is faster (centrality beats exact
   /// feasibility at init), so this is opt-in, not default.
   bool ac_pf_warm_start{false};
+
+  /// For large pure-AC cases, seed the AC PF with a bounded NativeQP DCOPF
+  /// iterate before handing the PF state to the parity IPM. The auxiliary QP
+  /// is warm-start-only: no shedding/LMP solve, and a residual or mapping
+  /// failure falls back to the ordinary AC-PF start.
+  bool ac_pf_dc_phase_one{true};
+  int ac_pf_dc_phase_one_min_buses{5000};
+  int ac_pf_dc_phase_one_max_iterations{5};
+  /// End-to-end DC Phase-I wall budget, including projection, formulation,
+  /// structural initialization, symbolic analysis, and numeric iterations.
+  /// Sparse factorizations are cooperative/indivisible; <= 0 is unlimited.
+  double ac_pf_dc_phase_one_time_limit_ms{2000.0};
+  double ac_pf_dc_phase_one_tolerance{1e-2};
+  double ac_pf_dc_phase_one_min_dual_improvement{0.2};
+  double ac_pf_dc_phase_one_baseline_dual_threshold{100.0};
 
   /// When true, compute the Davidenko objective-homotopy tangent dw/dt at
   /// the returned point (one extra inertia-controlled KKT solve) and expose
@@ -157,6 +202,34 @@ struct DCOPFOptions {
   // prices).  Set to false when only the primal dispatch is needed and the
   // extra LP solve overhead should be avoided.
   bool compute_lmp{true};
+
+  /// Seed NativeLCQP with a connected-component power balance followed by a
+  /// reduced-Laplacian angle projection. Other backends ignore this option.
+  bool structural_warm_start{true};
+
+  /// Phase-I-only convex relaxation: with the HiGHS backend, solve the
+  /// piecewise-linear DCOPF directly instead of routing the quadratic model
+  /// to another QP backend. The returned point is a warm start, not an exact
+  /// quadratic-cost DCOPF certificate; the subsequent ACOPF must establish
+  /// the requested objective and KKT tolerances.
+  bool phase_one_linear_relaxation{false};
+
+  /// Build the exact quadratic DCOPF without the LP-only piecewise-linear
+  /// cost lambda variables and interpolation rows. Intended for a bounded
+  /// Phase-I QP where load shedding is disabled and failure falls back to the
+  /// caller's normal initial point.
+  bool compact_quadratic_model{false};
+
+  /// On a NativeQP iteration limit, expose the last primal only when its
+  /// equality and bound residual is below this explicit Phase-I threshold.
+  /// The DCOPF result remains non-converged and is marked warm-start-only.
+  bool accept_phase_one_iterate{false};
+  double phase_one_iterate_tolerance{0.1};
+
+  /// End-to-end budget used only by the warm-start-only NativeQP path.
+  /// Formulation work is charged before the remaining time is passed to
+  /// NativeLCQP. One in-flight sparse factorization may overshoot the limit.
+  double phase_one_time_limit_ms{0.0};
 };
 
 }  // namespace hacdcpf::opf

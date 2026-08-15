@@ -360,6 +360,31 @@ AML 建模层。平台另有一套基于 MIPSolvers AML 的 DC OPF 实现
 （第\ref{sec:parityipm}章）或 AML 层的 acdcopf builder
 （第\ref{sec:powermodels}章）。
 
+\subsection{NativeLCQP 的结构化初值}
+
+对每个在役 AC 支路连通分量 $\mathcal C$，先在发电上下界内调整 $P_g$，不足
+部分再由允许的 $\Delta P_d$ 补足，使
+\begin{equation}
+\sum_{i\in\mathcal C}(P_{g,i}+\Delta P_{d,i}-P_{d,i})=0.
+\end{equation}
+每个分量选择一个参考角并删除其行列，求约化 Laplacian
+$B_{\mathcal C,r}\theta_r=p_{\mathcal C,r}$；随后由
+$P_{f,ij}=(\theta_i-\theta_j)/x_{ij}$ 回填显式支路流，并补齐 PWL convexity/
+interpolation 变量。因此连通分量功率和是 Laplacian 可解性的兼容条件，而非
+额外优化问题。生成点经过变量盒界与 $\|A_{eq}x_0-b_{eq}\|_\infty$ 审计后，
+只通过 \fld{QPModel::x0} 交给 NativeLCQP；其他后端不消费该初值，构建失败则
+精确回到确定性冷初始化。该步骤复杂度为图遍历线性工作加各分量一次约化
+Laplacian 稀疏分解，不运行非线性 Phase I。
+
+作为 ACOPF warm-start-only 子问题时，
+\fld{phase\_one\_time\_limit\_ms} 从 \srcpath{solve\_dc\_opf} 入口开始计时，
+因此 canonical projection、formulation、上述结构初值、symbolic analyze 与
+numeric iteration 都计入总预算。NativeLCQP 在迭代/分解边界协作式检查截止；
+一个已经开始的稀疏分解不可中断，允许完成后报告
+\fld{phase\_one\_budget\_overshoot\_ms}。超时迭代仍须通过显式原坐标残差门槛
+才可作为 warm start，且不声明 DCOPF 最优；有限预算耗尽后不再运行 simplex
+fallback。
+
 \subsection{选项：DCOPFOptions}
 
 \compmeta{DCOPFOptions}{\srcpath{include/hacdcpf/optimal\_power\_flow/opf\_options.hpp}}
@@ -378,6 +403,11 @@ AML 建模层。平台另有一套基于 MIPSolvers AML 的 DC OPF 实现
 \fld{load\_shedding} & — & — & true/false & true & 是否引入每母线削减变量 $\Delta P_d$\\
 \fld{voll} & VOLL & —/MWh & $\ge 0$ & 0.0 & 失负荷价值；$\le 0$ 时按 $\max(100,\,1.1\times$最高边际成本$)$ 自动取值（:305--316）\\
 \fld{compute\_lmp} & — & — & true/false & true & 主解后是否追加支撑 LP 回收对偶；false 时 \fld{lmp} 清空并注明原因（:1195--1198、:1206--1211）\\
+\fld{structural\_warm\_start} & — & — & true/false & true & 为 NativeLCQP 构造逐分量功率配平与约化 Laplacian 初值；LP/外部后端忽略\\
+\fld{compact\_quadratic\_model} & — & — & true/false & false & Phase-I QP 省略仅供 LP-PWL 使用的插值变量与行\\
+\fld{accept\_phase\_one\_iterate} & — & — & true/false & false & 允许非最优 NativeLCQP 末迭代经显式残差门槛成为 warm-start-only 结果\\
+\fld{phase\_one\_iterate\_tolerance} & $\varepsilon_I$ & pu & $\ge0$ & 0.1 & warm-start-only 末迭代的 equality/box 最大残差门槛\\
+\fld{phase\_one\_time\_limit\_ms} & $T_I$ & ms & $\le0$ 或 $>0$ & 0 & warm-start-only 端到端协作式墙钟预算；$\le0$ 不限时\\
 \end{paramtable}
 
 \subsection{结果字段：DCOPFResult}
@@ -401,6 +431,12 @@ AML 建模层。平台另有一套基于 MIPSolvers AML 的 DC OPF 实现
 \fld{status} & — & — & — & 空 & 后端状态串或拒绝/失败原因（如 \texttt{"HiGHS not available"}）\\
 \fld{solver\_name} & — & — & — & 空 & 实际收敛后端名（可能含 \fld{(QP-fallback)} 后缀）\\
 \fld{runtime\_sec} & — & s & — & 0.0 & 含投影与预检的端到端耗时（:1192--1193）\\
+\fld{structural\_warm\_start\_*} & — & pu/计数/布尔 & — & inf/0/false & 请求、构建、实际消费、分量/分解数、原坐标 equality residual 与状态原因\\
+\fld{solver\_initial\_primal\_residual} & — & 缩放坐标 & $\ge0$ & inf & NativeLCQP 第 0 次迭代的 primal residual；含严格正 bound-slack 残差\\
+\fld{phase\_one\_warm\_start\_only} & — & — & true/false & false & 末迭代只获准供上层 warm start 使用，不是 DCOPF 最优证书\\
+\fld{phase\_one\_budget\_exhausted} & — & — & true/false & false & formulation 或 LCQP 阶段达到有限墙钟预算\\
+\fld{phase\_one\_budget\_overshoot\_ms} & — & ms & $\ge0$ & 0 & 不可中断在途工作造成的预算超时\\
+\fld{native\_qp\_symbolic\_analyze\_calls} & — & 次 & 0--1 & 0 & 本次 NativeLCQP KKT 稀疏模式分析次数；每轮 numeric factorization 复用该模式\\
 \fld{lmp} & $\lambda_i$ & —/MWh & $\ge 0$（无罚项时） & 空 & 节点边际电价：平衡行对偶除以 $S_{\mathrm{base}}$（:746--759）\\
 \fld{branch\_mu\_lower} & $\mu^{-}$ & —/MWh & — & 空 & 支路下界盒对偶/$S_{\mathrm{base}}$；当前\textbf{不可靠}（:769--779）\\
 \fld{branch\_mu\_upper} & $\mu^{+}$ & —/MWh & — & 空 & 支路上界盒对偶/$S_{\mathrm{base}}$；当前\textbf{不可靠}（:769--779）\\

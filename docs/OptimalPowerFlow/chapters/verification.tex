@@ -224,6 +224,24 @@ $<10^{30}$——注释明确“该难例在迭代预算内不期望收敛”，�
 下发散到 NaN（目标约 $-3\times10^{48}$）的稳健性守卫，不是收敛性声明。
 文档另记录 case9241/13659 的参考目标 315837/386107 与 KLU 后端实测
 （\srcpath{docs/large\_hybrid\_ipm\_diagnostics.md}:263--269，文档实测）。
+诊断目标 \srcpath{opf\_numerical\_benchmark} 另对 25,000-bus ACTIVSg25k 执行
+一次预热加三次计时的 Release/KLU 协议：普通 AC-PF 启动中位数为
+$183.808\,\mathrm{s}$，66 次迭代、65 次分解，primal/dual 为
+$3.239\times10^{-7}/1.004\times10^{-7}$；默认 $2\,\mathrm{s}$ DC Phase I
+未形成可接纳候选，精确回退后中位数为 $186.588\,\mathrm{s}$，慢 $1.51\%$。
+这是可求解性和预算失败语义的性能验证，不是 25k 加速声明；该长时诊断不注册到
+常规 CTest。
+同一目标的实验性零分解 component dispatch-dual predictor 仅把 normalized dual
+$468.10733\to468.08762$（$0.0042\%$），未通过固定 $5\%$ exact residual 审计，
+以 $1.978\,\mathrm{ms}$ 成本回退；单次总时长 $184.344\,\mathrm{s}$ 且 Phase II
+仍为 66 次迭代、65 次分解。因此它默认关闭，结果支持优先研究完整 continuation
+state 与跨重复求解 symbolic pattern 复用，而非 partial dual 或更精确的辅助 DC-IPM。
+同一 ACTIVSg25k 的 prepared-session 两轮 Release/KLU 验证进一步给出：首轮
+$184.645\,\mathrm{s}$/66 次迭代/65 次分解，第二轮
+$8.666\,\mathrm{s}$/4/3，且 0 次 symbolic analyze；最终 primal/dual 为
+$3.389\times10^{-8}/2.092\times10^{-8}$，峰值 RSS $4709.6\,\mathrm{MiB}$。
+这是完整状态与 symbolic reuse 的重复求解收益；第二轮 3 次分解均为新 numeric
+factorization，不是旧数值因子的无审计复用。
 
 \subsubsection*{已知偏差}
 综合对比用例（\srcpath{tests/test\_acopf\_dcopf\_crossval.cpp}:554--694）跳过全部
@@ -705,7 +723,9 @@ Ipopt 适配器 &
         文档实测 case2869/9241/13659 收敛到参考目标值 133999/315837/386107；
   \item \textbf{交直流混合 Parity IPM}：case300\_acdc（四种线性代数后端）与
         case2000\_acdc（2000 节点 + 多端直流 + 8 VSC）有默认断言与文档实测残差；
-        暖启动、filter 回溯、稀疏 KKT 路径均有针对断言；
+        暖启动、filter 回溯、稀疏 KKT 路径均有针对断言；有界 Phase I 在
+        小型 Hybrid 上认证 primal/dual，在 case300/case2000 严重冷启动上
+        只保证单调/预算/诚实非接受，未接受状态不改变 Phase II 起点；
   \item \textbf{DC OPF}：MATPOWER 小算例收敛、限值、孤岛削减、LMP 符号/均匀性/
         拥塞经济性断言完整。
 \end{itemize}
@@ -715,7 +735,8 @@ Ipopt 适配器 &
   \item \textbf{LCC OPF}：2 个 BPA DAT 算例 + DSP 外部参考 + 有限差分导数 + 固定
         tap 回放；多端、定电流/定 $\alpha$ 控制组合、tap 联合优化未覆盖；
   \item \textbf{三相混合 OPF}：9 相节点手组算例上的 Full/归约/松弛/oracle/动态
-        平衡全链断言；无大规模三相算例证据；
+        平衡全链断言；另有 360 个三相母线、2175 变量的 Phase I 稀疏预算与
+        primal/dual-fit 证书，但无同规模完整 Phase II 或外部工具 OPF 对照；
   \item \textbf{RPO}：case9 单元断言 + case2869 authored 文档实测；全局最优性
         明确不声称，大电网电压偏差改善幅度有限；
   \item \textbf{夜间/外部电网 OPF}：2 个工程算例 + 3 个微系统；

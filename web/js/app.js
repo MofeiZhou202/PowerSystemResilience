@@ -4870,7 +4870,7 @@ const App = (() => {
       tol: pfNumber('pfTol', 1e-8),
       fdpf_max_iter: pfInteger('pfFdpfMaxIter', 1000),
       verbose: pfBool('pfVerbose', false),
-      enable_pv_pq_conversion: pfBool('pfPvPqConversion', true),
+      enable_pv_pq_conversion: pfBool('pfPvPqConversion', false),
       enable_auto_swing_selection: pfBool('pfAutoSwing', true),
       enable_converter_mode_switching: pfBool('pfConverterModeSwitch', true),
       enable_converter_coordination_check: pfBool('pfCoordCheck', true),
@@ -4878,6 +4878,7 @@ const App = (() => {
       loss_model: document.getElementById('pfLossModel')?.value || 'linear',
       pv_q_hysteresis_pu: pfNumber('pfPvQHysteresis', 0.01),
       pv_recover_vm_tol_pu: pfNumber('pfPvRecoverVmTol', 0.01),
+      pv_pq_max_outer_iterations: pfInteger('pfPvPqOuterIter', 30),
       converter_vdc_switch_high_pu: pfNumber('pfVdcSwitchHigh', 0.03),
       converter_vdc_switch_low_pu: pfNumber('pfVdcSwitchLow', 0.01),
       mode_hysteresis_iters: pfInteger('pfModeHysteresis', 2),
@@ -4915,6 +4916,7 @@ const App = (() => {
         enable_jacobian_row_col_equilibration: pfBool('pfRobustEquilibration', true),
         enable_condition_monitor: pfBool('pfRobustCondition', true),
         enable_nonmonotone_linesearch: pfBool('pfRobustNonmonotone', true),
+        enable_activity_hysteresis: pfBool('pfPvPqAntiChatter', true),
         enable_auto_fallback_scheduling: pfBool('pfRobustAutoFallback', false),
         enable_homotopy: pfBool('pfRobustHomotopy', true),
         enable_newton_krylov_fallback: pfBool('pfRobustKrylov', false),
@@ -4926,6 +4928,7 @@ const App = (() => {
         gmres_restart: pfInteger('pfGmresRestart', 30),
         gmres_max_outer: pfInteger('pfGmresMaxOuter', 10),
         gmres_tol: pfNumber('pfGmresTol', 1e-10),
+        min_active_set_hold_iters: pfInteger('pfPvPqHoldIter', 3),
       },
       helm: {
         max_coef: pfInteger('pfHelmMaxCoef', 100),
@@ -11392,6 +11395,7 @@ const App = (() => {
       : '';
     const phaseOpt = opt.three_phase || {};
     const voltageQuality = data.voltage_qualification || {};
+    const reactiveLimits = data.reactive_limits || {};
     const voltageQualityText = voltageQuality.rate_pct != null && Number.isFinite(Number(voltageQuality.rate_pct))
       ? `${Number(voltageQuality.rate_pct).toFixed(2)}% (${voltageQuality.qualified_samples}/${voltageQuality.total_samples})`
       : '—';
@@ -11428,6 +11432,8 @@ const App = (() => {
         <span class="result-value">${voltageQualityText}</span></div>
       <div class="result-item"><span class="result-label">求解 / 总计</span>
         <span class="result-value">${executionTimeText}</span></div>
+      <div class="result-item"><span class="result-label">发电机Q限值</span>
+        <span class="result-value ${reactiveLimits.certified ? 'result-converged' : 'result-failed'}">${reactiveLimits.certified ? `✓ 已认证（限值节点${reactiveLimits.active_limited_buses || 0}）` : (reactiveLimits.enforcement_requested ? '✗ 校核未认证' : '快速筛查：未校核')}</span></div>
       ${solverCards}
     `;
 

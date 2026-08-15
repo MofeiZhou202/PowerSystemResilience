@@ -813,6 +813,8 @@ void apply_power_flow_request_options(const json& root, hacdcpf::PowerFlowOption
 
   set_if_double(*o, "pv_q_hysteresis_pu", opt.pv_q_hysteresis_pu);
   set_if_double(*o, "pv_recover_vm_tol_pu", opt.pv_recover_vm_tol_pu);
+  set_if_int(*o, "pv_pq_max_outer_iterations",
+             opt.pv_pq_max_outer_iterations);
   set_if_double(*o, "max_delta_va_rad", opt.max_delta_va_rad);
   set_if_double(*o, "max_delta_vm_pu", opt.max_delta_vm_pu);
   set_if_double(*o, "max_delta_vdc_pu", opt.max_delta_vdc_pu);
@@ -862,6 +864,10 @@ void apply_power_flow_request_options(const json& root, hacdcpf::PowerFlowOption
   if (o->contains("robust_nonlinear") && (*o)["robust_nonlinear"].is_object()) {
     apply_pf_robust_options((*o)["robust_nonlinear"], opt.robust_nonlinear);
   }
+  opt.pv_pq_max_outer_iterations =
+      std::clamp(opt.pv_pq_max_outer_iterations, 1, 1000);
+  opt.robust_nonlinear.min_active_set_hold_iters =
+      std::clamp(opt.robust_nonlinear.min_active_set_hold_iters, 0, 1000);
 }
 
 json pf_robust_options_to_json(const hacdcpf::powerflow::RobustNonlinearOptions& opt) {
@@ -937,6 +943,7 @@ json power_flow_options_to_json(const hacdcpf::PowerFlowOptions& opt) {
       {"ac_eval_threads", opt.ac_eval_threads},
       {"pv_q_hysteresis_pu", opt.pv_q_hysteresis_pu},
       {"pv_recover_vm_tol_pu", opt.pv_recover_vm_tol_pu},
+      {"pv_pq_max_outer_iterations", opt.pv_pq_max_outer_iterations},
       {"max_delta_va_rad", opt.max_delta_va_rad},
       {"max_delta_vm_pu", opt.max_delta_vm_pu},
       {"max_delta_vdc_pu", opt.max_delta_vdc_pu},
@@ -7974,6 +7981,74 @@ json opf_ipm_profiling_json(const hacdcpf::opf::ACOPFResult& r) {
   return json{{"warm_start_used", r.profiling.warm_start_used},
               {"initial_primal_residual", r.profiling.initial_primal_residual},
               {"initial_dual_residual", r.profiling.initial_dual_residual},
+              {"dc_phase_one_requested",
+               r.profiling.dc_phase_one_requested},
+              {"dc_phase_one_accepted", r.profiling.dc_phase_one_accepted},
+              {"dc_phase_one_iterations",
+               r.profiling.dc_phase_one_iterations},
+              {"dc_phase_one_runtime_ms",
+               r.profiling.dc_phase_one_runtime_ms},
+              {"dc_phase_one_time_limit_ms",
+               r.profiling.dc_phase_one_time_limit_ms},
+              {"dc_phase_one_budget_exhausted",
+               r.profiling.dc_phase_one_budget_exhausted},
+              {"dc_phase_one_budget_overshoot_ms",
+               r.profiling.dc_phase_one_budget_overshoot_ms},
+              {"dc_phase_one_symbolic_analyze_calls",
+               r.profiling.dc_phase_one_symbolic_analyze_calls},
+              {"parity_formulation_builds",
+               r.profiling.parity_formulation_builds},
+              {"dc_phase_one_residual", r.profiling.dc_phase_one_residual},
+              {"dc_phase_one_candidate_primal",
+               r.profiling.dc_phase_one_candidate_primal},
+              {"dc_phase_one_candidate_dual",
+               r.profiling.dc_phase_one_candidate_dual},
+              {"dc_phase_one_baseline_primal",
+               r.profiling.dc_phase_one_baseline_primal},
+              {"dc_phase_one_baseline_dual",
+               r.profiling.dc_phase_one_baseline_dual},
+              {"dc_phase_one_status", r.profiling.dc_phase_one_status},
+              {"phase_one_initial_violation",
+               r.profiling.phase_one_initial_violation},
+              {"phase_one_constraint_violation",
+               r.profiling.phase_one_constraint_violation},
+              {"phase_one_dual_fit_residual",
+               r.profiling.phase_one_dual_fit_residual},
+              {"phase_one_primal_feasible",
+               r.profiling.phase_one_primal_feasible},
+              {"phase_one_in_handoff_corridor",
+               r.profiling.phase_one_in_handoff_corridor},
+              {"phase_one_dual_initialized",
+               r.profiling.phase_one_dual_initialized},
+              {"phase_one_handoff_primal_tolerance",
+               r.profiling.phase_one_handoff_primal_tolerance},
+              {"phase_one_perturbed_primal_residual",
+               r.profiling.phase_one_perturbed_primal_residual},
+              {"phase_one_centrality", r.profiling.phase_one_centrality},
+              {"phase_one_barrier_mu", r.profiling.phase_one_barrier_mu},
+              {"phase_one_budget_exhausted",
+               r.profiling.phase_one_budget_exhausted},
+              {"phase_one_iterations", r.profiling.phase_one_iterations},
+              {"phase_one_factorizations",
+               r.profiling.phase_one_factorizations},
+              {"phase_one_backtracks", r.profiling.phase_one_backtracks},
+              {"phase_one_structural_step_attempted",
+               r.profiling.phase_one_structural_step_attempted},
+              {"phase_one_structural_step_accepted",
+               r.profiling.phase_one_structural_step_accepted},
+              {"phase_one_structural_factorizations",
+               r.profiling.phase_one_structural_factorizations},
+              {"phase_one_structural_violation",
+               r.profiling.phase_one_structural_violation},
+              {"phase_one_structure", r.profiling.phase_one_structure},
+              {"phase_one_runtime_ms", r.profiling.phase_one_runtime_ms},
+              {"phase_one_termination", r.profiling.phase_one_termination},
+              {"phase_one_linear_solver",
+               r.profiling.phase_one_linear_solver},
+              {"phase_two_start_accepted",
+               r.profiling.phase_two_start_accepted},
+              {"phase_two_start_rejection_reason",
+               r.profiling.phase_two_start_rejection_reason},
               {"symbolic_analyze_calls", r.profiling.analyze_calls},
               {"factorization_calls", r.profiling.factorization_calls},
               {"linear_solve_calls", r.profiling.linear_solve_calls},
@@ -12393,6 +12468,46 @@ int main(int argc, char** argv) {
         out["promoted_vsc_indices"] = diag.promoted_vsc_indices;
       };
 
+      auto add_reactive_limit_diagnostics =
+          [&](const hacdcpf::PowerFlowResult& pf) {
+        out["reactive_limits"] = json{
+            {"enforcement_requested",
+             pf.reactive_limits.enforcement_requested},
+            {"certified", pf.reactive_limits.certified},
+            {"active_set_cycle_detected",
+             pf.reactive_limits.active_set_cycle_detected},
+            {"outer_iteration_limit_reached",
+             pf.reactive_limits.outer_iteration_limit_reached},
+            {"active_limited_buses",
+             pf.reactive_limits.active_limited_buses},
+            {"max_violation_pu",
+             pf.reactive_limits.max_violation_pu},
+            {"outer_iterations",
+             pf.profiling.pv_pq_outer_iterations},
+            {"pv_to_pq_switches", pf.profiling.pv_to_pq_switches},
+            {"pq_to_pv_switches", pf.profiling.pq_to_pv_switches},
+            {"repeated_active_sets",
+             pf.profiling.pv_pq_repeated_active_sets},
+            {"smooth_ncp_continuation_updates",
+             pf.profiling.smooth_ncp_continuation_updates},
+            {"smooth_ncp_final_mu",
+             pf.profiling.smooth_ncp_final_mu}};
+        out["validity_flags"]["generator_reactive_limits_enforced"] =
+            pf.reactive_limits.enforcement_requested;
+        out["validity_flags"]["generator_reactive_limits_certified"] =
+            pf.reactive_limits.certified;
+        if (!pf.reactive_limits.enforcement_requested) {
+          out["model_limitations"].push_back(
+              "Generator reactive-power limits were not enforced; this is a "
+              "fast-screening electrical root, not a Q-limit-certified "
+              "operating point.");
+        } else if (!pf.reactive_limits.certified) {
+          out["model_limitations"].push_back(
+              "Generator reactive-power limit enforcement did not produce a "
+              "certificate within the active-set work bounds.");
+        }
+      };
+
       // Helper to compute DC branch flows from DC bus voltages
       auto add_dc_branch_flows = [&]() {
         if (out.contains("geo_dc_branches") && out["geo_dc_branches"].is_array() &&
@@ -15115,6 +15230,23 @@ int main(int argc, char** argv) {
           add_solver_diagnostics(pf.diagnostics);
         }
         add_converter_coordination(pf);
+        add_reactive_limit_diagnostics(pf);
+      };
+
+      auto power_flow_from_adaptive =
+          [](hacdcpf::AdaptiveSolveResult&& adaptive) {
+        hacdcpf::PowerFlowResult pf;
+        pf.vm = std::move(adaptive.vm);
+        pf.va = std::move(adaptive.va);
+        pf.vdc = std::move(adaptive.vdc);
+        pf.branch_flows = std::move(adaptive.branch_flows);
+        pf.converged = adaptive.converged;
+        pf.iterations = adaptive.iterations;
+        pf.residual = adaptive.residual;
+        pf.diagnostics = std::move(adaptive.diagnostics);
+        pf.profiling = std::move(adaptive.profiling);
+        pf.reactive_limits = adaptive.reactive_limits;
+        return pf;
       };
 
       const auto analysis_started = std::chrono::steady_clock::now();
@@ -15188,7 +15320,8 @@ int main(int argc, char** argv) {
         if (solvable_islands > 1 && !dc_coupled) {
           // Multiple solvable islands: use adaptive solver which
           // extracts and solves each island independently.
-          auto pf = hacdcpf::solve_power_flow_adaptive(sys, opt);
+          auto pf = power_flow_from_adaptive(
+              hacdcpf::solve_power_flow_adaptive(sys, opt));
           out["converged"] = pf.converged;
           out["iterations"] = pf.iterations;
           out["residual"] = pf.residual;
@@ -15197,13 +15330,13 @@ int main(int argc, char** argv) {
           out["vdc"] = pf.vdc;
           for (const auto& bf : pf.branch_flows) out["branch_abs"].push_back(std::abs(bf.pf_mw));
           out["method_actual"] = "adaptive (auto island)";
-          auto ac_pf = hacdcpf::solve_power_flow(sys, opt);
-          if (ac_pf.converged) {
-            add_transfers(ac_pf);
-            add_geo_data(ac_pf);
-            std::lock_guard<std::mutex> lk(g_session.mu);
-            cache_last_power_flow(g_session, ac_pf, method, sys);
+          if (pf.converged) {
+            add_geo_data(pf);
+            store_last_pf(&pf);
+          } else {
+            add_solver_diagnostics(pf.diagnostics);
           }
+          add_reactive_limit_diagnostics(pf);
         } else {
           auto pf = hacdcpf::solve_power_flow(sys, opt);
           out["converged"] = pf.converged;
@@ -15224,6 +15357,7 @@ int main(int argc, char** argv) {
             add_solver_diagnostics(pf.diagnostics);
           }
           add_converter_coordination(pf);
+          add_reactive_limit_diagnostics(pf);
         }
       } else if (method == "pure_ac") {
         // Pure AC Newton-Raphson: strip DC buses, DC branches, converters
@@ -15248,6 +15382,7 @@ int main(int argc, char** argv) {
         out["vdc"] = json::array();
         for (const auto& bf : pf.branch_flows) out["branch_abs"].push_back(std::abs(bf.pf_mw));
         add_geo_data(pf);
+        add_reactive_limit_diagnostics(pf);
         {
           std::lock_guard<std::mutex> lk(g_session.mu);
           cache_last_power_flow(g_session, pf, method, ac_sys);
@@ -15297,6 +15432,7 @@ int main(int argc, char** argv) {
         for (const auto& bf : pf.branch_flows) out["branch_abs"].push_back(std::abs(bf.pf_mw));
         add_transfers(pf);
         add_geo_data(pf);
+        add_reactive_limit_diagnostics(pf);
         {
           std::lock_guard<std::mutex> lk(g_session.mu);
           cache_last_power_flow(g_session, pf, method, sys);
@@ -16784,6 +16920,18 @@ int main(int argc, char** argv) {
 	            0, 10000);
 	        phase_opt.phase_one_max_backtracks = std::clamp(
 	            phase_request.value("phase_one_max_backtracks", 12), 0, 100);
+	        phase_opt.phase_one_barrier_mu = std::clamp(
+	            phase_request.value("phase_one_barrier_mu", 0.1),
+	            1.0e-12, 0.1);
+	        phase_opt.phase_one_admission_mu_factor = std::clamp(
+	            phase_request.value("phase_one_admission_mu_factor", 1.0),
+	            0.0, 100.0);
+	        phase_opt.phase_one_primal_mu_factor = std::clamp(
+	            phase_request.value("phase_one_primal_mu_factor", 0.1),
+	            0.0, 10.0);
+	        phase_opt.phase_one_centrality_tolerance = std::clamp(
+	            phase_request.value("phase_one_centrality_tolerance", 0.5),
+	            0.0, 10.0);
 	        phase_opt.verbose = opf_request_options.value("verbose", false);
 	        phase_opt.verify_derivatives =
 	            phase_request.value("verify_derivatives", false);
@@ -16829,7 +16977,15 @@ int main(int argc, char** argv) {
 	                 {"full_stationarity", phase_result.initial_dual_residual},
 	                 {"dual_fit_residual", phase_result.phase_one_dual_fit_residual},
 	                 {"primal_feasible", phase_result.phase_one_primal_feasible},
+	                 {"in_handoff_corridor",
+	                  phase_result.phase_one_in_handoff_corridor},
 	                 {"dual_initialized", phase_result.phase_one_dual_initialized},
+	                 {"handoff_primal_tolerance",
+	                  phase_result.phase_one_handoff_primal_tolerance},
+	                 {"perturbed_primal_residual",
+	                  phase_result.phase_one_perturbed_primal_residual},
+	                 {"centrality", phase_result.phase_one_centrality},
+	                 {"barrier_mu", phase_result.phase_one_barrier_mu},
 	                 {"budget_exhausted", phase_result.phase_one_budget_exhausted},
 	                 {"termination", phase_result.phase_one_termination},
 	                 {"linear_solver", phase_result.phase_one_linear_solver},
@@ -16840,7 +16996,9 @@ int main(int argc, char** argv) {
 	                 {"phase_two_start_requested",
 	                  phase_result.phase_two_start_requested},
 	                 {"phase_two_start_accepted",
-	                  phase_result.phase_two_start_accepted}};
+	                  phase_result.phase_two_start_accepted},
+	                 {"phase_two_start_rejection_reason",
+	                  phase_result.phase_two_start_rejection_reason}};
 	        out["vdc"] = phase_result.dc_voltage;
 	        out["dc_bus_results"] = gui_phase_hybrid_dc_bus_results(
 	            phase_model, phase_result.dc_voltage);
@@ -16988,6 +17146,14 @@ int main(int argc, char** argv) {
 	                  phase_opt.phase_one_max_factorizations},
 	                 {"phase_one_max_backtracks",
 	                  phase_opt.phase_one_max_backtracks},
+	                 {"phase_one_barrier_mu",
+	                  phase_opt.phase_one_barrier_mu},
+	                 {"phase_one_admission_mu_factor",
+	                  phase_opt.phase_one_admission_mu_factor},
+	                 {"phase_one_primal_mu_factor",
+	                  phase_opt.phase_one_primal_mu_factor},
+	                 {"phase_one_centrality_tolerance",
+	                  phase_opt.phase_one_centrality_tolerance},
 	                 {"variant", out["analysis_scope"]["phase_graph_variant"]},
 	                 {"backend", out["solver_backend"]},
 	                 {"warm_start_with_ipopt_requested",
@@ -17064,6 +17230,8 @@ int main(int argc, char** argv) {
 	        set_if_bool(opf_request_options, "load_shedding", opt.load_shedding);
 	        set_if_double(opf_request_options, "voll", opt.voll);
 	        set_if_bool(opf_request_options, "compute_lmp", opt.compute_lmp);
+	        set_if_bool(opf_request_options, "structural_warm_start",
+	                    opt.structural_warm_start);
 	        set_if_bool(opf_request_options, "verbose", opt.verbose);
 	        opt.feasibility_tol = std::clamp(opt.feasibility_tol, 1.0e-12, 1.0);
 	        opt.max_iterations = std::clamp(opt.max_iterations, 1, 1000000);
@@ -17078,6 +17246,7 @@ int main(int argc, char** argv) {
 	                 {"load_shedding", opt.load_shedding},
 	                 {"voll", opt.voll},
 	                 {"compute_lmp", opt.compute_lmp},
+	                 {"structural_warm_start", opt.structural_warm_start},
 	                 {"verbose", opt.verbose}};
 	        auto r = timed_core_solve([&] { return hacdcpf::solve_dc_opf(sys, opt); });
 	        out["converged"]=r.converged; out["iterations"]=r.iterations;
@@ -17094,6 +17263,14 @@ int main(int argc, char** argv) {
 	        out["branch_mu_validity_reason"] = r.branch_mu_validity_reason;
 	        out["objective_model"] = r.objective_model;
 	        out["pwl_segments_effective"] = r.pwl_segments_effective;
+	        out["structural_warm_start_requested"] = r.structural_warm_start_requested;
+	        out["structural_warm_start_built"] = r.structural_warm_start_built;
+	        out["structural_warm_start_used"] = r.structural_warm_start_used;
+	        out["structural_warm_start_components"] = r.structural_warm_start_components;
+	        out["structural_warm_start_factorizations"] = r.structural_warm_start_factorizations;
+	        out["structural_warm_start_residual"] = r.structural_warm_start_residual;
+	        out["solver_initial_primal_residual"] = r.solver_initial_primal_residual;
+	        out["structural_warm_start_status"] = r.structural_warm_start_status;
 	        out["options_effective"]["pwl_segments_requested"] = opt.pwl_segments;
 	        out["options_effective"]["pwl_segments"] = r.pwl_segments_effective;
 	        out["options_effective"]["objective_model"] = r.objective_model;
@@ -17166,8 +17343,43 @@ int main(int argc, char** argv) {
 	        set_if_double(opf_request_options, "step_backoff", opt.step_backoff);
 	        set_if_double(opf_request_options, "interior_fraction", opt.interior_fraction);
         set_if_int(opf_request_options, "ac_eval_threads", opt.ac_eval_threads);
-        set_if_bool(opf_request_options, "allow_fallback", opt.allow_fallback);
+	        set_if_bool(opf_request_options, "allow_fallback", opt.allow_fallback);
         set_if_bool(opf_request_options, "ac_pf_warm_start", opt.ac_pf_warm_start);
+	        set_if_bool(opf_request_options, "enable_phase_one", opt.enable_phase_one);
+	        set_if_double(opf_request_options, "phase_one_time_limit_ms",
+	                      opt.phase_one_time_limit_ms);
+	        set_if_int(opf_request_options, "phase_one_max_iterations",
+	                   opt.phase_one_max_iterations);
+	        set_if_int(opf_request_options, "phase_one_max_factorizations",
+	                   opt.phase_one_max_factorizations);
+	        set_if_int(opf_request_options, "phase_one_max_backtracks",
+	                   opt.phase_one_max_backtracks);
+	        set_if_double(opf_request_options, "phase_one_barrier_mu",
+	                      opt.phase_one_barrier_mu);
+	        set_if_double(opf_request_options, "phase_one_admission_mu_factor",
+	                      opt.phase_one_admission_mu_factor);
+	        set_if_double(opf_request_options, "phase_one_primal_mu_factor",
+	                      opt.phase_one_primal_mu_factor);
+	        set_if_double(opf_request_options, "phase_one_centrality_tolerance",
+	                      opt.phase_one_centrality_tolerance);
+	        set_if_bool(opf_request_options, "ac_pf_dc_phase_one",
+	                    opt.ac_pf_dc_phase_one);
+	        set_if_int(opf_request_options, "ac_pf_dc_phase_one_min_buses",
+	                   opt.ac_pf_dc_phase_one_min_buses);
+	        set_if_int(opf_request_options,
+	                   "ac_pf_dc_phase_one_max_iterations",
+	                   opt.ac_pf_dc_phase_one_max_iterations);
+	        set_if_double(opf_request_options,
+	                      "ac_pf_dc_phase_one_time_limit_ms",
+	                      opt.ac_pf_dc_phase_one_time_limit_ms);
+	        set_if_double(opf_request_options, "ac_pf_dc_phase_one_tolerance",
+	                      opt.ac_pf_dc_phase_one_tolerance);
+	        set_if_double(opf_request_options,
+	                      "ac_pf_dc_phase_one_min_dual_improvement",
+	                      opt.ac_pf_dc_phase_one_min_dual_improvement);
+	        set_if_double(opf_request_options,
+	                      "ac_pf_dc_phase_one_baseline_dual_threshold",
+	                      opt.ac_pf_dc_phase_one_baseline_dual_threshold);
         set_if_bool(opf_request_options, "objective_homotopy", opt.objective_homotopy);
         set_if_double(opf_request_options, "homotopy_dt0", opt.homotopy_dt0);
         set_if_bool(opf_request_options, "verbose", opt.verbose);
@@ -17197,6 +17409,34 @@ int main(int argc, char** argv) {
         opt.interior_fraction = std::clamp(opt.interior_fraction, 1.0e-6, 0.999999);
         opt.homotopy_dt0 = std::clamp(opt.homotopy_dt0, 1.0e-3, 1.0);
         opt.ac_eval_threads = std::clamp(opt.ac_eval_threads, 1, 1024);
+	        opt.phase_one_time_limit_ms =
+	            std::clamp(opt.phase_one_time_limit_ms, -1.0, 3600000.0);
+	        opt.phase_one_max_iterations =
+	            std::clamp(opt.phase_one_max_iterations, 0, 10000);
+	        opt.phase_one_max_factorizations =
+	            std::clamp(opt.phase_one_max_factorizations, 0, 10000);
+	        opt.phase_one_max_backtracks =
+	            std::clamp(opt.phase_one_max_backtracks, 0, 100);
+	        opt.phase_one_barrier_mu =
+	            std::clamp(opt.phase_one_barrier_mu, 1.0e-12, 0.1);
+	        opt.phase_one_admission_mu_factor =
+	            std::clamp(opt.phase_one_admission_mu_factor, 0.0, 100.0);
+	        opt.phase_one_primal_mu_factor =
+	            std::clamp(opt.phase_one_primal_mu_factor, 0.0, 10.0);
+	        opt.phase_one_centrality_tolerance =
+	            std::clamp(opt.phase_one_centrality_tolerance, 0.0, 10.0);
+	        opt.ac_pf_dc_phase_one_min_buses =
+	            std::clamp(opt.ac_pf_dc_phase_one_min_buses, 0, 100000000);
+	        opt.ac_pf_dc_phase_one_max_iterations =
+	            std::clamp(opt.ac_pf_dc_phase_one_max_iterations, 1, 10000);
+	        opt.ac_pf_dc_phase_one_time_limit_ms = std::clamp(
+	            opt.ac_pf_dc_phase_one_time_limit_ms, -1.0, 3600000.0);
+	        opt.ac_pf_dc_phase_one_tolerance =
+	            std::clamp(opt.ac_pf_dc_phase_one_tolerance, 0.0, 1.0);
+	        opt.ac_pf_dc_phase_one_min_dual_improvement = std::clamp(
+	            opt.ac_pf_dc_phase_one_min_dual_improvement, 0.0, 1.0);
+	        opt.ac_pf_dc_phase_one_baseline_dual_threshold = std::clamp(
+	            opt.ac_pf_dc_phase_one_baseline_dual_threshold, 0.0, 1.0e12);
         opt.enforce_branch_limits = en_branch;
         opt.enforce_converter_capacity = en_cap;
         opt.enforce_converter_current_limits = en_iac;
@@ -17221,9 +17461,38 @@ int main(int argc, char** argv) {
 	                 {"step_backoff", opt.step_backoff},
 	                 {"interior_fraction", opt.interior_fraction},
 		                 {"ac_eval_threads", opt.ac_eval_threads},
-		                 {"allow_fallback", opt.allow_fallback},
-		                 {"ac_pf_warm_start", opt.ac_pf_warm_start},
-		                 {"objective_homotopy", opt.objective_homotopy},
+			                 {"allow_fallback", opt.allow_fallback},
+			                 {"ac_pf_warm_start", opt.ac_pf_warm_start},
+			                 {"enable_phase_one", opt.enable_phase_one},
+			                 {"phase_one_time_limit_ms",
+			                  opt.phase_one_time_limit_ms},
+			                 {"phase_one_max_iterations",
+			                  opt.phase_one_max_iterations},
+			                 {"phase_one_max_factorizations",
+			                  opt.phase_one_max_factorizations},
+			                 {"phase_one_max_backtracks",
+			                  opt.phase_one_max_backtracks},
+			                 {"phase_one_barrier_mu", opt.phase_one_barrier_mu},
+			                 {"phase_one_admission_mu_factor",
+			                  opt.phase_one_admission_mu_factor},
+			                 {"phase_one_primal_mu_factor",
+			                  opt.phase_one_primal_mu_factor},
+			                 {"phase_one_centrality_tolerance",
+			                  opt.phase_one_centrality_tolerance},
+			                 {"ac_pf_dc_phase_one", opt.ac_pf_dc_phase_one},
+			                 {"ac_pf_dc_phase_one_min_buses",
+			                  opt.ac_pf_dc_phase_one_min_buses},
+			                 {"ac_pf_dc_phase_one_max_iterations",
+			                  opt.ac_pf_dc_phase_one_max_iterations},
+			                 {"ac_pf_dc_phase_one_time_limit_ms",
+			                  opt.ac_pf_dc_phase_one_time_limit_ms},
+			                 {"ac_pf_dc_phase_one_tolerance",
+			                  opt.ac_pf_dc_phase_one_tolerance},
+			                 {"ac_pf_dc_phase_one_min_dual_improvement",
+			                  opt.ac_pf_dc_phase_one_min_dual_improvement},
+			                 {"ac_pf_dc_phase_one_baseline_dual_threshold",
+			                  opt.ac_pf_dc_phase_one_baseline_dual_threshold},
+			                 {"objective_homotopy", opt.objective_homotopy},
 		                 {"homotopy_dt0", opt.homotopy_dt0},
 		                 {"verbose", opt.verbose}};
         auto r = timed_core_solve([&] { return hacdcpf::solve_ac_opf(sys, opt); });

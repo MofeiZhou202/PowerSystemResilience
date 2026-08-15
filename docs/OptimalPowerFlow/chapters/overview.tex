@@ -309,8 +309,19 @@ legacy 标志继续控制路径选择（字段注释，
 \fld{use\_parity\_ipm} & — & — & true/false & false & legacy 标志：选用 Parity 全空间建模\\
 \fld{allow\_fallback} & — & — & true/false & true & 允许 Auto 模式在不收敛时回退（Ipopt 或同伦末段全目标重试）\\
 \fld{verbose} & — & — & true/false & false & 迭代日志\\
+\fld{enable\_phase\_one} & — & — & true/false & true & Parity Native IPM 的有界 primal/dual warm-start 构造\\
+\fld{phase\_one\_time\_limit\_ms} & — & ms & $>0$ 协作截止；$\le0$ 不限 & 5000 & Phase I 墙钟预算\\
+\fld{phase\_one\_max\_iterations} & — & — & $\ge0$ & 12 & Phase I Newton 迭代硬上限\\
+\fld{phase\_one\_max\_factorizations} & — & — & $\ge0$ & 14 & Phase I primal/dual 共用分解上限\\
+\fld{phase\_one\_max\_backtracks} & — & — & $\ge0$ & 12 & 每次 Phase I 步的回溯上限\\
+\fld{phase\_one\_barrier\_mu} / \fld{phase\_one\_admission\_mu\_factor} & $\mu_0,\eta_a$ & — & $(0,0.1]$ / $\ge0$ & 0.1 / 1.0 & central warm-start 的障碍尺度与原坐标准入比例\\
+\fld{phase\_one\_primal\_mu\_factor} / \fld{phase\_one\_centrality\_tolerance} & $\eta_p,\eta_c$ & — & $\ge0$ & 0.1 / 0.5 & primal handoff corridor 与 $\max_i|s_i z_i/\mu_0-1|$ 门限\\
 \fld{warm\_start} & — & — & 指针/nullptr & nullptr & 指向前次 \fld{ACOPFResult} 的非拥有暖启动指针；维度不兼容的变量族各自回退物理初值（字段注释，opf\_options.hpp:82--86）\\
 \fld{ac\_pf\_warm\_start} & — & — & true/false & false & 先解一次混合潮流，以 AC 可行点初始化 Parity IPM（字段注释：PEGASE 受压算例由此解锁，:88--96；实现 ac\_opf.cpp:2562--2578）\\
+\fld{ac\_pf\_dc\_phase\_one} & — & — & true/false & true & 已启用 AC-PF warm start 时，对至少 5000 母线的纯 AC 模型按 baseline-dual 预筛选运行有限步 compact NativeLCQP dispatch seed\\
+\fld{ac\_pf\_dc\_phase\_one\_time\_limit\_ms} & $T_{\mathrm{DC},I}$ & ms & $>0$ 协作截止；$\le0$ 不限 & 2000 & DC Phase I 端到端预算，含 projection/formulation/structural/symbolic/numeric；允许一个在途稀疏分解超时\\
+\fld{ac\_pf\_dc\_phase\_one\_max\_iterations} / \fld{ac\_pf\_dc\_phase\_one\_tolerance} & — & — / pu & $\ge1$ / $\ge0$ & 5 / $10^{-2}$ & DC warm-start-only 迭代预算与可用残差门限\\
+\fld{ac\_pf\_dc\_phase\_one\_min\_dual\_improvement} / \fld{ac\_pf\_dc\_phase\_one\_baseline\_dual\_threshold} & — & — & $[0,1]$ / $\ge0$ & 0.2 / 100 & 候选 dual 最小相对改善与是否支付 DC Phase I 的 baseline 门限\\
 \fld{compute\_homotopy\_tangent} & — & — & true/false & false & 在返回点计算 Davidenko 目标同伦切向量 $\mathrm{d}w/\mathrm{d}t$（一次额外惯性受控 KKT 解，:98--103）\\
 \fld{homotopy\_t} & $t$ & — & $(0,1]$ & 1.0 & 所解问题的成本尺度 $t$（切向量右端为 $\nabla f/t$）\\
 \fld{objective\_homotopy} & — & — & true/false & false & 两阶段目标同伦求解（$t:0\to1$，:106--113；实现 ac\_opf.cpp:3352--3482）\\
@@ -343,6 +354,7 @@ $\to$ NativeDualSimplex
 \fld{load\_shedding} & — & — & true/false & true & 是否启用切负荷松弛变量\\
 \fld{voll} & VOLL & — & $\ge 0$ & 0.0 & 失负荷价值（成本币种未定）；$\le 0$ 时按 $\max(100,\,1.1\times$ 最大边际成本$)$ 自动折算（\srcpath{dc\_opf.cpp}:306--315）\\
 \fld{compute\_lmp} & — & — & true/false & true & 是否在主解后补解支撑 LP 以恢复约束对偶（LMP 与阻塞价格）；关闭可省一次 LP（字段注释，opf\_options.hpp:155--159；实现 dc\_opf.cpp:1195--1198）\\
+\fld{structural\_warm\_start} & — & — & true/false & true & NativeLCQP 的逐连通分量配平与约化 Laplacian 初值；其他后端忽略\\
 \end{paramtable}
 
 \subsection{结果类型与诚实口径}\label{subsec:overview-result}
@@ -400,7 +412,7 @@ $\to$ NativeDualSimplex
 \fld{max\_stationarity} & — & pu & $\ge 0$ & 0 & 返回点驻点残差\\
 \fld{status} & — & — & — & 空 & 人读状态串（引擎标签原样保留，如 ``Ipopt: \ldots''）\\
 \fld{solver\_path} & — & — & Unknown/\allowbreak NativeAC/\allowbreak ParityIPM & Unknown & 求解路径枚举（opf\_result.hpp:38--42）。注意 Ipopt 解也记 \fld{ParityIPM}，真实内层引擎见 \fld{profiling.linear\_solver\_backend}（ac\_opf.cpp:2670）；经济调度快速路径不置该字段，保持 \fld{Unknown}\\
-\fld{profiling} & — & — & — & 默认 & 求解剖析（\fld{ACOPFProfiling}，opf\_result.hpp:47--67；parity 路径填充于 ac\_opf.cpp:2672--2683、2978--2995）\\
+\fld{profiling} & — & — & — & 默认 & 求解剖析；含 KKT 计数/残差及 Phase I 前后 violation、dual-fit、预算、终止、线性后端与 Phase II 接受状态\\
 \fld{infeasibility\_hints} & — & — & — & 空 & 不可行/不收敛的可能原因（\fld{converged=false} 时由求解器和/或 \srcpath{verify\_opf\_result} 填充，opf\_result.hpp:150--152）\\
 \fld{audit} & — & — & — & 默认 & 独立求解后校核（\fld{OpfAudit}，见下表）\\
 \fld{converter\_model\_scope} & — & — & — & 默认 & 换流器模型保真度声明（见下“诚实口径”）\\
@@ -454,6 +466,7 @@ consistency”，但当前实现仅覆盖电压限值、发电机限值与目标
 \fld{status} & — & — & — & 空 & 人读状态串\\
 \fld{solver\_name} & — & — & — & 空 & 实际求解后端名（如 \fld{NativeLCQP}、\fld{HiGHS-LP(QP-fallback)}，dc\_opf.cpp:1057、1105）\\
 \fld{runtime\_sec} & — & s & $\ge 0$ & 0 & 墙钟耗时\\
+\fld{structural\_warm\_start\_*} / \fld{solver\_initial\_primal\_residual} & — & pu/计数/布尔 & — & inf/0/false & NativeLCQP 结构初值的请求、构建、消费、分量/分解、原坐标 residual 和第 0 次迭代 residual\\
 \fld{lmp} & $\lambda$ & — & — & 空 & 节点电价（等式行对偶恢复）\\
 \fld{branch\_mu\_lower} / \fld{branch\_mu\_upper} & $\mu^-,\mu^+$ & — & — & 空 & 支路限值对偶（当前不可靠，见 \fld{branch\_mu\_valid}）\\
 \fld{branch\_mu\_valid} & — & — & true/false & false & 恒为 false：原生支撑 LP 不能稳健恢复盒式变量对偶（字段注释 opf\_result.hpp:202--205；实现 dc\_opf.cpp:680--682、780--786，设计说明 :621--634）\\

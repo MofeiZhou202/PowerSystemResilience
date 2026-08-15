@@ -114,6 +114,10 @@ struct ThreePhaseHybridOPFOptions {
   int phase_one_max_iterations{12};
   int phase_one_max_factorizations{14};
   int phase_one_max_backtracks{12};
+  double phase_one_barrier_mu{0.1};
+  double phase_one_admission_mu_factor{1.0};
+  double phase_one_primal_mu_factor{0.1};
+  double phase_one_centrality_tolerance{0.5};
   /// Legacy unlimited-budget fallback. It is considered only when
   /// phase_one_time_limit_ms <= 0; finite-budget Phase I never invokes Ipopt.
   bool warm_start_with_ipopt{false};
@@ -174,7 +178,14 @@ struct ThreePhaseHybridOPFResult {
   double phase_one_dual_fit_residual{
       std::numeric_limits<double>::infinity()};
   bool phase_one_primal_feasible{false};
+  bool phase_one_in_handoff_corridor{false};
   bool phase_one_dual_initialized{false};
+  double phase_one_handoff_primal_tolerance{0.0};
+  double phase_one_perturbed_primal_residual{
+      std::numeric_limits<double>::infinity()};
+  double phase_one_centrality{
+      std::numeric_limits<double>::infinity()};
+  double phase_one_barrier_mu{0.0};
   bool phase_one_budget_exhausted{false};
   int phase_one_iterations{0};
   int phase_one_factorizations{0};
@@ -184,6 +195,7 @@ struct ThreePhaseHybridOPFResult {
   std::string phase_one_linear_solver{"unselected"};
   bool phase_two_start_requested{false};
   bool phase_two_start_accepted{false};
+  std::string phase_two_start_rejection_reason;
   /// Numeric KKT backend selected by Phase II. "unselected" is valid when
   /// the accepted Phase I point satisfies termination before factorization.
   std::string phase_two_linear_solver_backend{"unselected"};

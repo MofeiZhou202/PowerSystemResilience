@@ -1034,18 +1034,32 @@ def main() -> int:
             "PF Canvas payload contains Grid 1 attribution",
         )
         pf_timing = pf.get("timing", {})
+        reactive_limits = pf.get("reactive_limits", {})
         chk.check(
             pf_timing.get("solve_ms", -1) >= 0 and
             pf_timing.get("presentation_ms", -1) >= 0 and
             pf_timing.get("total_before_serialize_ms", -1) >= 0,
             "power-flow response separates solver and GUI presentation timing",
         )
+        chk.check(
+            reactive_limits.get("enforcement_requested") is True and
+            reactive_limits.get("certified") is True and
+            reactive_limits.get("active_set_cycle_detected") is False and
+            reactive_limits.get("outer_iteration_limit_reached") is False and
+            reactive_limits.get("max_violation_pu", 1.0) <= 1.0e-10 and
+            pf.get("validity_flags", {}).get(
+                "generator_reactive_limits_certified") is True,
+            f"power-flow Q-limit certificate={reactive_limits}",
+        )
         st, compact_pf = c.post_json(
             "/api/session/pf",
             {
                 "method": "ac_newton",
                 "response_detail": "compact",
-                "options": {"enable_converter_coordination_check": False},
+                "options": {
+                    "enable_converter_coordination_check": False,
+                    "enable_pv_pq_conversion": False,
+                },
             },
         )
         chk.check(
@@ -1056,6 +1070,16 @@ def main() -> int:
             not compact_pf.get("component_results") and
             compact_pf.get("presentation_omitted", {}).get("rich_attribution") is True,
             "compact PF preserves numerical vectors and omits presentation attribution",
+        )
+        compact_reactive = compact_pf.get("reactive_limits", {})
+        chk.check(
+            compact_reactive.get("enforcement_requested") is False and
+            compact_reactive.get("certified") is False and
+            compact_pf.get("validity_flags", {}).get(
+                "generator_reactive_limits_enforced") is False and
+            any("fast-screening" in str(item)
+                for item in compact_pf.get("model_limitations", [])),
+            f"compact fast-screening PF declares Q-limit limitation={compact_reactive}",
         )
         chk.check(
             pf_cb34 is not None

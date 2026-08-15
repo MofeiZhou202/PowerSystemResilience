@@ -518,6 +518,8 @@ struct Importer {
     br.to_bus = ensure_ac_bus(n2, kv2, locator);
     br.r_pu = num_rx(field(line, 39, 44), present);
     br.x_pu = num_rx(field(line, 45, 50), present);
+    const double source_r_pu = br.r_pu;
+    const double source_x_pu = br.x_pu;
     if (std::abs(br.x_pu) > 0.0 &&
         std::abs(br.x_pu) < kBpaMinLineReactancePu) {
       const double source_x = br.x_pu;
@@ -547,6 +549,16 @@ struct Importer {
     if (n_par > 0.0) br.n_parallel = static_cast<int>(std::lround(n_par));
     const std::string ckt = field(line, 32, 32);
     br.name = "L_" + n1 + "_" + n2 + (ckt.empty() ? "" : "_" + ckt);
+    // A BPA L card with no series/shunt/rating/length data is an ideal
+    // connectivity relation. Preserve that source semantics explicitly so
+    // canonical projection contracts it instead of injecting an arbitrary
+    // 1/x numerical coupling into Ybus. Nonzero values coerced to the DSP
+    // 1e-4 pu floor remain physical branches.
+    if (source_r_pu == 0.0 && source_x_pu == 0.0 && g_half == 0.0 &&
+        br.b_pu == 0.0 && br.length_km == 0.0 && br.rate_a_mva == 0.0) {
+      br.ideal_connectivity = true;
+      br.parameter_source = "bpa_dsp_ideal_connectivity";
+    }
     result.system.ac.branches.push_back(std::move(br));
   }
 

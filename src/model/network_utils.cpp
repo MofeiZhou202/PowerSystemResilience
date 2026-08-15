@@ -2568,6 +2568,18 @@ static void project_in_place(HybridPowerSystem& out,
       }
     }
   }
+  // Exact ideal-connectivity provenance is stronger than an impedance
+  // threshold. This is the quotient-graph operation V/~ for electrically
+  // identical nodes: aggregate their extensive injections first, then build
+  // Ybus and the PV/PQ active set on the reduced node space. In particular,
+  // BPA numerical ties must not create O(1/x) reactive circulation between
+  // conflicting voltage setpoints. Unmarked short physical lines are excluded.
+  for (const auto& branch : out.ac.branches) {
+    if (branch.in_service && branch.ideal_connectivity) {
+      switch_merge_branch_semantics[branch.index] =
+          MergeSemantics::ExactIdeal;
+    }
+  }
   if (!bmap.empty()) out.branch_expand_map = std::move(bmap);
 
   // Remove rich elements that are fully represented by their canonical

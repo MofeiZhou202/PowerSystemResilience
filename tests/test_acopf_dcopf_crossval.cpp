@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "hacdcpf/api/hacdcpf.hpp"
+#include "hacdcpf/io/json_io.hpp"
 #include "hacdcpf/io/matpower_parser.hpp"
 #include "hacdcpf/optimal_power_flow/ac_opf_solver.hpp"
 #include "hacdcpf/optimal_power_flow/dc_opf_solver.hpp"
@@ -345,6 +346,127 @@ TEST_CASE("DC OPF solution feasibility", "[integration][opf][dcopf]") {
   CHECK(feasible);
 }
 
+TEST_CASE("DC OPF structural start balances every energized component",
+          "[integration][opf][dcopf][phase_one]") {
+  using namespace hacdcpf;
+  HybridPowerSystem sys;
+  sys.ac.base_mva = 100.0;
+  for (int id = 1; id <= 4; ++id) {
+    ACBus bus;
+    bus.index = id;
+    bus.bus_type = id == 1 ? BusType::SLACK : BusType::PQ;
+    bus.pd_mw = (id == 2 ? 40.0 : (id == 4 ? 25.0 : 0.0));
+    bus.base_kv = 110.0;
+    bus.in_service = true;
+    sys.ac.buses.push_back(bus);
+  }
+  for (int k = 0; k < 2; ++k) {
+    ACBranch branch;
+    branch.index = k + 1;
+    branch.from_bus = 1 + 2 * k;
+    branch.to_bus = 2 + 2 * k;
+    branch.x_pu = 0.1;
+    branch.rate_a_mva = 100.0;
+    branch.in_service = true;
+    sys.ac.branches.push_back(branch);
+    Generator generator;
+    generator.index = k + 1;
+    generator.bus = 1 + 2 * k;
+    generator.pg_mw = k == 0 ? 35.0 : 20.0;
+    generator.pmin_mw = 0.0;
+    generator.pmax_mw = 100.0;
+    generator.cost_c2 = 0.01;
+    generator.cost_c1 = 1.0 + k;
+    generator.in_service = true;
+    sys.ac.generators.push_back(generator);
+  }
+  opf::DCOPFOptions options;
+  options.solver = opf::DCOPFSolverBackend::NativeQP;
+  options.compute_lmp = false;
+  const opf::DCOPFResult result = opf::solve_dc_opf(sys, options);
+
+  INFO("status=" << result.status
+       << " warm_status=" << result.structural_warm_start_status
+       << " residual=" << result.structural_warm_start_residual);
+  REQUIRE(result.converged);
+  CHECK(result.structural_warm_start_requested);
+  CHECK(result.structural_warm_start_built);
+  CHECK(result.structural_warm_start_used);
+  CHECK(result.structural_warm_start_components == 2);
+  CHECK(result.structural_warm_start_factorizations == 2);
+  CHECK(result.structural_warm_start_residual <= 1e-9);
+  REQUIRE(result.va.size() == 4);
+  CHECK(result.va[0] == Catch::Approx(0.0).margin(1e-10));
+  CHECK(result.va[2] == Catch::Approx(0.0).margin(1e-10));
+  REQUIRE(result.pg_mw.size() == 2);
+  CHECK(result.pg_mw[0] == Catch::Approx(40.0).margin(1e-4));
+  CHECK(result.pg_mw[1] == Catch::Approx(25.0).margin(1e-4));
+}
+
+TEST_CASE("DCOPF iteration-limited Phase I iterate is not reported optimal",
+          "[integration][opf][dcopf][phase_one][contract]") {
+  const auto sys = hacdcpf::io::parse_matpower(
+      get_matpower_data_dir() + "/case9.m");
+  hacdcpf::opf::DCOPFOptions options;
+  options.solver = hacdcpf::opf::DCOPFSolverBackend::NativeQP;
+  options.max_iterations = 1;
+  options.compute_lmp = false;
+  options.load_shedding = false;
+  options.compact_quadratic_model = true;
+  options.accept_phase_one_iterate = true;
+  options.phase_one_iterate_tolerance = 1e6;
+
+  const auto result = hacdcpf::opf::solve_dc_opf(sys, options);
+  INFO("status=" << result.status
+                 << " residual=" << result.phase_one_iterate_residual);
+  CHECK_FALSE(result.converged);
+  CHECK(result.phase_one_warm_start_only);
+  CHECK(std::isfinite(result.phase_one_iterate_residual));
+  CHECK(result.va.size() == sys.ac.buses.size());
+  CHECK(result.pg_mw.size() == sys.ac.generators.size());
+  CHECK(result.objective_model == "QP");
+  CHECK(result.status.find("not DCOPF optimal") != std::string::npos);
+
+  const std::string serialized = hacdcpf::io::dc_opf_result_to_json(result, -1);
+  const auto round_trip = hacdcpf::io::dc_opf_result_from_json(serialized);
+  CHECK_FALSE(round_trip.converged);
+  CHECK(round_trip.phase_one_warm_start_only);
+  CHECK(round_trip.phase_one_budget_exhausted ==
+        result.phase_one_budget_exhausted);
+  CHECK(round_trip.native_qp_symbolic_analyze_calls ==
+        result.native_qp_symbolic_analyze_calls);
+  CHECK(round_trip.phase_one_iterate_residual ==
+        Catch::Approx(result.phase_one_iterate_residual));
+}
+
+TEST_CASE("DCOPF Phase I wall budget includes formulation and forbids fallback",
+          "[integration][opf][dcopf][phase_one][time-limit]") {
+  const auto sys = hacdcpf::io::parse_matpower(
+      get_matpower_data_dir() + "/case9.m");
+  hacdcpf::opf::DCOPFOptions options;
+  options.solver = hacdcpf::opf::DCOPFSolverBackend::NativeQP;
+  options.max_iterations = 100;
+  options.compute_lmp = false;
+  options.load_shedding = false;
+  options.compact_quadratic_model = true;
+  options.accept_phase_one_iterate = true;
+  options.phase_one_time_limit_ms = 1e-9;
+
+  const auto result = hacdcpf::opf::solve_dc_opf(sys, options);
+  INFO("status=" << result.status << " chain="
+                 << (result.solver_chain.empty()
+                         ? std::string("empty")
+                         : result.solver_chain.back()));
+  CHECK_FALSE(result.converged);
+  CHECK(result.phase_one_budget_exhausted);
+  CHECK(result.phase_one_budget_overshoot_ms >= 0.0);
+  CHECK(result.native_qp_symbolic_analyze_calls <= 1);
+  REQUIRE(result.solver_chain.size() == 1);
+  CHECK(result.solver_chain.front().find("NativeLCQP:fail(TimeLimit") == 0);
+  CHECK(result.solver_name == "NativeLCQP");
+  CHECK(result.status.find("TimeLimit") != std::string::npos);
+}
+
   TEST_CASE("DC OPF isolated-island shedding is reported per bus",
         "[opf][dcopf][regression]") {
     using namespace hacdcpf;
@@ -391,7 +513,7 @@ TEST_CASE("DC OPF solution feasibility", "[integration][opf][dcopf]") {
     CHECK(result.total_load_shedding_mw == Catch::Approx(5.0).margin(1e-8));
   }
 
-  TEST_CASE("DC OPF prunes dead-island generators and branches before LP solve",
+  TEST_CASE("DC OPF preserves a source-capable island without an authored slack",
         "[opf][dcopf][regression]") {
     using namespace hacdcpf;
 
@@ -439,8 +561,10 @@ TEST_CASE("DC OPF solution feasibility", "[integration][opf][dcopf]") {
     const opf::DCOPFResult result = opf::solve_dc_opf(sys, opt);
     REQUIRE(result.converged);
     REQUIRE(result.load_shedding_mw.size() == sys.ac.buses.size());
-    CHECK(result.load_shedding_mw[2] == Catch::Approx(5.0).margin(1e-8));
-    CHECK(result.total_load_shedding_mw == Catch::Approx(5.0).margin(1e-8));
+    CHECK(result.load_shedding_mw[2] == Catch::Approx(0.0).margin(1e-8));
+    CHECK(result.total_load_shedding_mw == Catch::Approx(0.0).margin(1e-8));
+    REQUIRE(result.pg_mw.size() == 2);
+    CHECK(result.pg_mw[1] == Catch::Approx(5.0).margin(1e-6));
   }
 
   TEST_CASE("DC OPF feasibility check includes slack-bus balance",

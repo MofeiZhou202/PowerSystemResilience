@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -102,6 +103,14 @@ TEST_CASE("AC OPF converges on internal hybrid case300_acdc", "[opf][acdc]") {
        << " linear_solve_calls=" << r.profiling.linear_solve_calls
        << " accepted_steps=" << r.profiling.accepted_steps
        << " rejected_steps=" << r.profiling.rejected_steps);
+  INFO("phase_one=" << r.profiling.phase_one_initial_violation << " -> "
+       << r.profiling.phase_one_constraint_violation
+       << " dual_fit=" << r.profiling.phase_one_dual_fit_residual
+       << " iterations=" << r.profiling.phase_one_iterations
+       << " factorizations=" << r.profiling.phase_one_factorizations
+       << " backtracks=" << r.profiling.phase_one_backtracks
+       << " solver=" << r.profiling.phase_one_linear_solver
+       << " termination=" << r.profiling.phase_one_termination);
   CHECK(r.converged);
   CHECK(r.solver_path == opf::OPFSolverPath::ParityIPM);
   CHECK(r.objective > 0.0);
@@ -109,6 +118,83 @@ TEST_CASE("AC OPF converges on internal hybrid case300_acdc", "[opf][acdc]") {
   CHECK(r.profiling.accepted_steps > 0);
   CHECK(r.profiling.accepted_steps <= r.iterations);
   CHECK(r.profiling.rejected_steps > 0);
+  CHECK(std::isfinite(r.profiling.phase_one_initial_violation));
+  CHECK(std::isfinite(r.profiling.phase_one_constraint_violation));
+  CHECK(r.profiling.phase_one_constraint_violation <=
+        r.profiling.phase_one_initial_violation);
+  CHECK(r.profiling.phase_one_iterations <= opt.phase_one_max_iterations);
+  CHECK(r.profiling.phase_one_factorizations <=
+        opt.phase_one_max_factorizations);
+  opf::ACOPFOptions phase_one_disabled = opt;
+  phase_one_disabled.enable_phase_one = false;
+  const opf::ACOPFResult baseline =
+      opf::solve_ac_opf(sys, phase_one_disabled);
+  REQUIRE(baseline.converged);
+  CHECK_FALSE(r.profiling.phase_two_start_accepted);
+  CHECK(std::abs(r.profiling.initial_primal_residual -
+                 baseline.profiling.initial_primal_residual) <= 1e-12);
+}
+
+TEST_CASE("Bounded Phase I certifies a pure AC OPF warm start",
+          "[opf][ac][phase_one]") {
+  const HybridPowerSystem sys = io::parse_matpower(data_path("case30.m"));
+  REQUIRE(sys.dc.buses.empty());
+
+  opf::ACOPFOptions opt;
+  opt.ac_solver_backend = opf::ACOPFSolverBackend::ParityIPM;
+  opt.allow_fallback = false;
+  opt.max_inner_iterations = 200;
+  const opf::ACOPFResult r = opf::solve_ac_opf(sys, opt);
+
+  INFO("status=" << r.status
+       << " phase_one=" << r.profiling.phase_one_initial_violation << " -> "
+       << r.profiling.phase_one_constraint_violation
+       << " dual_fit=" << r.profiling.phase_one_dual_fit_residual
+       << " iterations=" << r.profiling.phase_one_iterations
+       << " factorizations=" << r.profiling.phase_one_factorizations
+       << " backtracks=" << r.profiling.phase_one_backtracks
+       << " solver=" << r.profiling.phase_one_linear_solver
+       << " termination=" << r.profiling.phase_one_termination);
+  CHECK(r.converged);
+  CHECK_FALSE(r.profiling.phase_one_primal_feasible);
+  CHECK(r.profiling.phase_one_in_handoff_corridor);
+  CHECK(r.profiling.phase_one_dual_initialized);
+  CHECK(r.profiling.phase_one_constraint_violation <=
+        r.profiling.phase_one_handoff_primal_tolerance);
+  CHECK(r.profiling.phase_one_perturbed_primal_residual <=
+        r.profiling.phase_one_handoff_primal_tolerance);
+  CHECK(r.profiling.phase_one_centrality <=
+        opt.phase_one_centrality_tolerance);
+  CHECK(r.profiling.phase_one_dual_fit_residual <= 1e-6);
+  CHECK(r.profiling.phase_one_iterations <= opt.phase_one_max_iterations);
+  CHECK(r.profiling.phase_one_factorizations <=
+        opt.phase_one_max_factorizations);
+  CHECK(r.profiling.phase_one_structure == "ac-state-basic");
+  CHECK_FALSE(r.profiling.phase_one_structural_step_attempted);
+  CHECK(r.profiling.phase_one_backtracks <=
+        opt.phase_one_max_iterations * opt.phase_one_max_backtracks);
+  CHECK(r.profiling.phase_two_start_accepted);
+}
+
+TEST_CASE("Parity Phase I obeys a zero-factorization budget",
+          "[opf][acdc][phase_one][budget]") {
+  const HybridPowerSystem sys = io::build_case300_acdc();
+  opf::ACOPFOptions opt;
+  opt.ac_solver_backend = opf::ACOPFSolverBackend::ParityIPM;
+  opt.allow_fallback = false;
+  opt.max_inner_iterations = 1;
+  opt.max_outer_iterations = 1;
+  opt.phase_one_max_factorizations = 0;
+  opt.phase_one_admission_mu_factor = 20.0;
+  opt.phase_one_max_backtracks = 4;
+  opt.phase_one_time_limit_ms = 1000.0;
+  const opf::ACOPFResult r = opf::solve_ac_opf(sys, opt);
+
+  CHECK(r.profiling.phase_one_factorizations == 0);
+  CHECK(r.profiling.phase_one_iterations == 0);
+  CHECK(r.profiling.phase_one_budget_exhausted);
+  CHECK_FALSE(r.profiling.phase_one_dual_initialized);
+  CHECK_FALSE(r.profiling.phase_two_start_accepted);
 }
 
 TEST_CASE("case300_acdc forwards iteration and tolerance options to Ipopt",
@@ -172,11 +258,151 @@ TEST_CASE("case300_acdc reuses a compatible primal OPF warm start",
        << " initial_primal=" << warm.profiling.initial_primal_residual);
   REQUIRE(warm.converged);
   CHECK(warm.profiling.warm_start_used);
+  CHECK(warm.profiling.phase_one_termination ==
+        "continuation-state-preserved");
+  CHECK(warm.profiling.phase_two_start_accepted);
   CHECK(warm.profiling.initial_primal_residual <=
         cold.profiling.initial_primal_residual + 1e-10);
   CHECK(warm.iterations <= cold.iterations);
   CHECK(std::abs(warm.objective - cold.objective) <=
         1e-5 * std::max(1.0, std::abs(cold.objective)));
+}
+
+TEST_CASE("Prepared ACOPF session reuses exact formulation and compatible full state",
+          "[opf][prepared-session][warm-start]") {
+  HybridPowerSystem sys = io::parse_matpower(data_path("case118.m"));
+  opf::ACOPFOptions options;
+  options.ac_solver_backend = opf::ACOPFSolverBackend::ParityIPM;
+  options.allow_fallback = false;
+  options.max_inner_iterations = 300;
+  options.prepared_numeric_refactor = true;
+  opf::PreparedACOPFSession session(options);
+
+  const opf::ACOPFResult first = session.solve(sys);
+  REQUIRE(first.converged);
+  CHECK(first.profiling.prepared_session_used);
+  CHECK_FALSE(first.profiling.formulation_reused);
+  CHECK(first.profiling.parity_formulation_builds == 1);
+  CHECK(first.ipm_layout_signature != 0);
+
+  const opf::ACOPFResult repeated = session.solve(sys);
+  REQUIRE(repeated.converged);
+  CHECK(repeated.profiling.formulation_reused);
+  CHECK(repeated.profiling.mapping_reused);
+  CHECK(repeated.profiling.parity_formulation_builds == 0);
+  CHECK(repeated.profiling.continuation_state_reused);
+  CHECK(repeated.ipm_layout_signature == first.ipm_layout_signature);
+  CHECK_FALSE(repeated.profiling.numeric_refactor_attempted);
+  CHECK_FALSE(repeated.profiling.numeric_refactor_accepted);
+  CHECK(repeated.profiling.numeric_refactor_status.find("unsupported") !=
+        std::string::npos);
+  CHECK(std::abs(repeated.objective - first.objective) <=
+        1e-5 * std::max(1.0, std::abs(first.objective)));
+
+  for (auto& bus : sys.ac.buses) {
+    bus.pd_mw *= 1.005;
+    bus.qd_mvar *= 1.005;
+  }
+  for (auto& load : sys.ac.loads) {
+    load.p_mw *= 1.005;
+    load.q_mvar *= 1.005;
+  }
+  const opf::ACOPFResult perturbed = session.solve(sys);
+  REQUIRE(perturbed.converged);
+  CHECK(perturbed.profiling.formulation_reused);
+  CHECK(perturbed.profiling.mapping_reused);
+  CHECK(perturbed.profiling.parity_formulation_builds == 0);
+  CHECK(perturbed.ipm_layout_signature == first.ipm_layout_signature);
+  CHECK(perturbed.profiling.continuation_state_reused);
+  CHECK(perturbed.profiling.prepared_session_invalidation_reason.find(
+            "numeric-parameters-refreshed") != std::string::npos);
+  if (perturbed.profiling.factorization_calls > 0) {
+    CHECK(perturbed.profiling.symbolic_reused);
+    CHECK(perturbed.profiling.analyze_calls == 0);
+  }
+}
+
+TEST_CASE("Prepared ACOPF session invalidates opaque state on layout change",
+          "[opf][prepared-session][layout]") {
+  HybridPowerSystem sys = io::parse_matpower(data_path("case30.m"));
+  opf::ACOPFOptions options;
+  options.ac_solver_backend = opf::ACOPFSolverBackend::ParityIPM;
+  options.allow_fallback = false;
+  options.max_inner_iterations = 250;
+  opf::PreparedACOPFSession session(options);
+
+  const opf::ACOPFResult baseline = session.solve(sys);
+  REQUIRE(baseline.converged);
+  REQUIRE_FALSE(sys.ac.branches.empty());
+  sys.ac.branches.front().in_service = false;
+
+  const opf::ACOPFResult changed = session.solve(sys);
+  CHECK(changed.ipm_layout_signature != 0);
+  CHECK(changed.ipm_layout_signature != baseline.ipm_layout_signature);
+  CHECK_FALSE(changed.profiling.continuation_state_reused);
+  CHECK(changed.profiling.prepared_session_invalidation_reason ==
+        "layout-signature-changed");
+}
+
+TEST_CASE("Prepared ACOPF session refreshes a hybrid AC/DC operating point",
+          "[opf][acdc][prepared-session][warm-start]") {
+  HybridPowerSystem sys = io::build_hybrid_acdc_microgrid_island();
+  opf::ACOPFOptions options;
+  options.ac_solver_backend = opf::ACOPFSolverBackend::ParityIPM;
+  options.allow_fallback = false;
+  options.max_inner_iterations = 400;
+  options.phase_one_admission_mu_factor = 2.0;
+  opf::PreparedACOPFSession session(options);
+
+  const opf::ACOPFResult first = session.solve(sys);
+  REQUIRE(first.converged);
+  REQUIRE(first.ipm_layout_signature != 0);
+
+  REQUIRE(sys.ac.buses.size() > 3);
+  sys.ac.buses[3].pd_mw *= 1.002;
+  sys.ac.buses[3].qd_mvar *= 1.002;
+  const opf::ACOPFResult refreshed = session.solve(sys);
+
+  REQUIRE(refreshed.converged);
+  CHECK(refreshed.profiling.formulation_reused);
+  CHECK(refreshed.profiling.mapping_reused);
+  CHECK(refreshed.profiling.parity_formulation_builds == 0);
+  CHECK(refreshed.profiling.continuation_state_reused);
+  CHECK(refreshed.ipm_layout_signature == first.ipm_layout_signature);
+  CHECK(refreshed.profiling.prepared_session_invalidation_reason.find(
+            "numeric-parameters-refreshed") != std::string::npos);
+  if (refreshed.profiling.linear_solver_backend.find("sparse") !=
+      std::string::npos) {
+    CHECK(refreshed.profiling.symbolic_reused);
+    CHECK(refreshed.profiling.analyze_calls == 0);
+  }
+}
+
+TEST_CASE("Prepared parity structure distinguishes LCC mappings from parameters",
+          "[opf][acdc][lcc][prepared-session][layout]") {
+  const auto imported = io::parse_bpa_dat(HACDCPF_TEST_DATA_DIR "/dsp/2DC.dat");
+  REQUIRE_FALSE(imported.report.has_errors());
+  REQUIRE_FALSE(imported.system.lcc_converters.empty());
+
+  opf::parity::Problem problem = opf::parity::build_problem(imported.system);
+  const std::uint64_t baseline_signature =
+      opf::parity::problem_layout_signature(problem);
+
+  HybridPowerSystem numeric_change = imported.system;
+  numeric_change.lcc_converters.front().p_set_mw *= 0.999;
+  CHECK(opf::parity::refresh_problem_numeric_data(problem, numeric_change));
+  CHECK(opf::parity::problem_layout_signature(problem) == baseline_signature);
+
+  HybridPowerSystem terminal_change = numeric_change;
+  terminal_change.lcc_converters.front().ac_bus =
+      terminal_change.lcc_converters.back().ac_bus;
+  CHECK_FALSE(opf::parity::refresh_problem_numeric_data(problem,
+                                                        terminal_change));
+
+  HybridPowerSystem identity_change = numeric_change;
+  ++identity_change.lcc_converters.front().index;
+  CHECK_FALSE(opf::parity::refresh_problem_numeric_data(problem,
+                                                        identity_change));
 }
 
 TEST_CASE("Hybrid microgrid OPF fixes DC reference voltage and balances DC generation",
@@ -189,8 +415,18 @@ TEST_CASE("Hybrid microgrid OPF fixes DC reference voltage and balances DC gener
   opt.ac_solver_backend = opf::ACOPFSolverBackend::ParityIPM;
   opt.max_inner_iterations = 400;
   opt.allow_fallback = false;
+  // The production admission remains mu_0. This explicit research setting
+  // exercises the audited structured corridor up to 2*mu_0.
+  opt.phase_one_admission_mu_factor = 2.0;
   const opf::ACOPFResult r = opf::solve_ac_opf(sys, opt);
 
+  INFO("phase_one=" << r.profiling.phase_one_initial_violation << " -> "
+       << r.profiling.phase_one_constraint_violation
+       << " dual_fit=" << r.profiling.phase_one_dual_fit_residual
+       << " structure=" << r.profiling.phase_one_structure
+       << " structural_violation="
+       << r.profiling.phase_one_structural_violation
+       << " termination=" << r.profiling.phase_one_termination);
   REQUIRE(r.converged);
   REQUIRE(r.vm.size() == sys.ac.buses.size());
   REQUIRE(r.vdc.size() == sys.dc.buses.size());
@@ -202,6 +438,23 @@ TEST_CASE("Hybrid microgrid OPF fixes DC reference voltage and balances DC gener
   // the static-generator sign was incorrectly treated as additional demand.
   CHECK(std::abs(r.pac_mw[0]) < 0.5);
   CHECK(r.max_constraint_violation < 1e-5);
+  CHECK(r.profiling.phase_one_structural_step_attempted);
+  CHECK(r.profiling.phase_one_structural_step_accepted);
+  CHECK(r.profiling.phase_one_structural_factorizations == 1);
+  CHECK(r.profiling.phase_one_structure == "hybrid-dc-converter-schur");
+  CHECK(r.profiling.phase_one_structural_violation <
+        r.profiling.phase_one_initial_violation);
+  CHECK_FALSE(r.profiling.phase_one_primal_feasible);
+  CHECK(r.profiling.phase_one_in_handoff_corridor);
+  CHECK(r.profiling.phase_one_dual_initialized);
+  CHECK(r.profiling.phase_one_constraint_violation <=
+        r.profiling.phase_one_handoff_primal_tolerance);
+  CHECK(r.profiling.phase_one_perturbed_primal_residual <=
+        r.profiling.phase_one_handoff_primal_tolerance);
+  CHECK(r.profiling.phase_one_centrality <=
+        opt.phase_one_centrality_tolerance);
+  CHECK(r.profiling.phase_one_dual_fit_residual <= 1e-6);
+  CHECK(r.profiling.phase_two_start_accepted);
 }
 
 TEST_CASE("Market 5-bus AC/DC toy OPF preserves 1-based DC references",
@@ -223,6 +476,161 @@ TEST_CASE("Market 5-bus AC/DC toy OPF preserves 1-based DC references",
                   << r.profiling.linear_solver_backend);
   CHECK(r.converged);
   CHECK(r.solver_path == opf::OPFSolverPath::ParityIPM);
+}
+
+TEST_CASE("ACOPF skips DC Phase I when baseline PF dual is acceptable",
+          "[opf][ac][phase_one][admission]") {
+  const HybridPowerSystem sys = io::parse_matpower(data_path("case9.m"));
+  opf::ACOPFOptions options;
+  options.ac_solver_backend = opf::ACOPFSolverBackend::ParityIPM;
+  options.allow_fallback = false;
+  options.ac_pf_warm_start = true;
+  options.ac_pf_dc_phase_one = true;
+  options.ac_pf_dc_phase_one_min_buses = 0;
+  options.ac_pf_dc_phase_one_baseline_dual_threshold =
+      std::numeric_limits<double>::infinity();
+  options.max_inner_iterations = 200;
+
+  const opf::ACOPFResult result = opf::solve_ac_opf(sys, options);
+  INFO("status=" << result.status
+                 << " phase_one=" << result.profiling.dc_phase_one_status);
+  CHECK(result.converged);
+  CHECK(result.profiling.dc_phase_one_requested);
+  CHECK_FALSE(result.profiling.dc_phase_one_accepted);
+  CHECK(result.profiling.dc_phase_one_iterations == 0);
+  CHECK(result.profiling.dc_phase_one_runtime_ms == 0.0);
+  CHECK(result.profiling.parity_formulation_builds == 1);
+  CHECK(result.profiling.dc_phase_one_symbolic_analyze_calls == 0);
+  CHECK(result.profiling.dc_phase_one_status.find("skipped") !=
+        std::string::npos);
+}
+
+TEST_CASE("AC-PF dispatch dual predictor is factorization-free and audited",
+          "[opf][ac][phase_one][dual_predictor]") {
+  const HybridPowerSystem sys = io::parse_matpower(data_path("case118.m"));
+  opf::ACOPFOptions options;
+  options.ac_solver_backend = opf::ACOPFSolverBackend::ParityIPM;
+  options.allow_fallback = false;
+  options.ac_pf_warm_start = true;
+  options.ac_pf_dc_phase_one = false;
+  options.phase_one_admission_mu_factor = 0.0;
+  options.phase_one_dispatch_dual_predictor = true;
+  options.phase_one_dispatch_dual_min_improvement = 0.0;
+  options.max_inner_iterations = 300;
+
+  const opf::ACOPFResult result = opf::solve_ac_opf(sys, options);
+  INFO("status=" << result.status
+                 << " predictor="
+                 << result.profiling.dispatch_dual_predictor_status
+                 << " raw="
+                 << result.profiling.dispatch_dual_predictor_baseline_raw
+                 << " -> "
+                 << result.profiling.dispatch_dual_predictor_candidate_raw);
+  REQUIRE(result.converged);
+  CHECK(result.profiling.phase_one_factorizations == 0);
+  CHECK(result.profiling.dispatch_dual_predictor_attempted);
+  CHECK(result.profiling.dispatch_dual_predictor_accepted);
+  CHECK(result.profiling.dispatch_dual_predictor_runtime_ms >= 0.0);
+  CHECK(result.profiling.dispatch_dual_predictor_candidate_raw <=
+        result.profiling.dispatch_dual_predictor_baseline_raw);
+  CHECK(result.profiling.dispatch_dual_predictor_candidate_normalized <=
+        result.profiling.dispatch_dual_predictor_baseline_normalized);
+  CHECK_FALSE(result.profiling.phase_two_start_accepted);
+}
+
+TEST_CASE("ACOPF Phase I profiling survives JSON round trip",
+          "[opf][ac][phase_one][json]") {
+  opf::ACOPFResult result;
+  result.profiling.warm_start_used = true;
+  result.profiling.prepared_session_used = true;
+  result.profiling.formulation_reused = true;
+  result.profiling.mapping_reused = true;
+  result.profiling.symbolic_reused = true;
+  result.profiling.continuation_state_reused = true;
+  result.profiling.numeric_refactor_attempted = true;
+  result.profiling.numeric_refactor_accepted = false;
+  result.profiling.numeric_refactor_relative_drift = 5e-4;
+  result.profiling.numeric_refactor_backward_error = 2e-9;
+  result.profiling.numeric_refactor_status = "rejected: audit";
+  result.profiling.prepared_session_invalidation_reason = "none";
+  result.profiling.initial_primal_residual = 0.125;
+  result.profiling.initial_dual_residual = 42.0;
+  result.profiling.dc_phase_one_requested = true;
+  result.profiling.dc_phase_one_accepted = true;
+  result.profiling.dc_phase_one_iterations = 5;
+  result.profiling.dc_phase_one_runtime_ms = 17.5;
+  result.profiling.dc_phase_one_time_limit_ms = 2000.0;
+  result.profiling.dc_phase_one_budget_exhausted = true;
+  result.profiling.dc_phase_one_budget_overshoot_ms = 3.5;
+  result.profiling.dc_phase_one_symbolic_analyze_calls = 1;
+  result.profiling.parity_formulation_builds = 1;
+  result.profiling.dc_phase_one_residual = 2.5e-4;
+  result.profiling.dc_phase_one_candidate_primal = 0.15;
+  result.profiling.dc_phase_one_candidate_dual = 12.0;
+  result.profiling.dc_phase_one_baseline_primal = 1.0e-3;
+  result.profiling.dc_phase_one_baseline_dual = 84.0;
+  result.profiling.dc_phase_one_status = "usable warm-start-only iterate";
+  result.profiling.phase_one_in_handoff_corridor = true;
+  result.profiling.phase_one_centrality = 0.25;
+  result.profiling.phase_one_structure = "ac-state-basic";
+  result.profiling.dispatch_dual_predictor_attempted = true;
+  result.profiling.dispatch_dual_predictor_accepted = true;
+  result.profiling.dispatch_dual_predictor_runtime_ms = 0.75;
+  result.profiling.dispatch_dual_predictor_baseline_raw = 100.0;
+  result.profiling.dispatch_dual_predictor_candidate_raw = 80.0;
+  result.profiling.dispatch_dual_predictor_baseline_normalized = 10.0;
+  result.profiling.dispatch_dual_predictor_candidate_normalized = 8.0;
+  result.profiling.dispatch_dual_predictor_status = "accepted";
+  result.profiling.phase_two_start_accepted = true;
+
+  const auto round_trip =
+      io::opf_result_from_json(io::opf_result_to_json(result, -1));
+  const auto& profiling = round_trip.profiling;
+  CHECK(profiling.warm_start_used);
+  CHECK(profiling.prepared_session_used);
+  CHECK(profiling.formulation_reused);
+  CHECK(profiling.mapping_reused);
+  CHECK(profiling.symbolic_reused);
+  CHECK(profiling.continuation_state_reused);
+  CHECK(profiling.numeric_refactor_attempted);
+  CHECK_FALSE(profiling.numeric_refactor_accepted);
+  CHECK(profiling.numeric_refactor_relative_drift == Catch::Approx(5e-4));
+  CHECK(profiling.numeric_refactor_backward_error == Catch::Approx(2e-9));
+  CHECK(profiling.numeric_refactor_status == "rejected: audit");
+  CHECK(profiling.prepared_session_invalidation_reason == "none");
+  CHECK(profiling.initial_primal_residual == Catch::Approx(0.125));
+  CHECK(profiling.initial_dual_residual == Catch::Approx(42.0));
+  CHECK(profiling.dc_phase_one_requested);
+  CHECK(profiling.dc_phase_one_accepted);
+  CHECK(profiling.dc_phase_one_iterations == 5);
+  CHECK(profiling.dc_phase_one_runtime_ms == Catch::Approx(17.5));
+  CHECK(profiling.dc_phase_one_time_limit_ms == Catch::Approx(2000.0));
+  CHECK(profiling.dc_phase_one_budget_exhausted);
+  CHECK(profiling.dc_phase_one_budget_overshoot_ms == Catch::Approx(3.5));
+  CHECK(profiling.dc_phase_one_symbolic_analyze_calls == 1);
+  CHECK(profiling.parity_formulation_builds == 1);
+  CHECK(profiling.dc_phase_one_residual == Catch::Approx(2.5e-4));
+  CHECK(profiling.dc_phase_one_candidate_primal == Catch::Approx(0.15));
+  CHECK(profiling.dc_phase_one_candidate_dual == Catch::Approx(12.0));
+  CHECK(profiling.dc_phase_one_baseline_primal == Catch::Approx(1.0e-3));
+  CHECK(profiling.dc_phase_one_baseline_dual == Catch::Approx(84.0));
+  CHECK(profiling.dc_phase_one_status == "usable warm-start-only iterate");
+  CHECK(profiling.phase_one_in_handoff_corridor);
+  CHECK(profiling.phase_one_centrality == Catch::Approx(0.25));
+  CHECK(profiling.phase_one_structure == "ac-state-basic");
+  CHECK(profiling.dispatch_dual_predictor_attempted);
+  CHECK(profiling.dispatch_dual_predictor_accepted);
+  CHECK(profiling.dispatch_dual_predictor_runtime_ms == Catch::Approx(0.75));
+  CHECK(profiling.dispatch_dual_predictor_baseline_raw ==
+        Catch::Approx(100.0));
+  CHECK(profiling.dispatch_dual_predictor_candidate_raw ==
+        Catch::Approx(80.0));
+  CHECK(profiling.dispatch_dual_predictor_baseline_normalized ==
+        Catch::Approx(10.0));
+  CHECK(profiling.dispatch_dual_predictor_candidate_normalized ==
+        Catch::Approx(8.0));
+  CHECK(profiling.dispatch_dual_predictor_status == "accepted");
+  CHECK(profiling.phase_two_start_accepted);
 }
 
 TEST_CASE("GUI Auto recovers the two built-in hybrid showcase OPFs",
@@ -916,6 +1324,13 @@ TEST_CASE("AC OPF converges on internal hybrid case2000_acdc", "[opf][acdc]") {
   CHECK(r.objective > 0.0);
   CHECK(r.max_constraint_violation < 1e-5);
   CHECK(r.iterations < 160);
+  CHECK(std::isfinite(r.profiling.phase_one_initial_violation));
+  CHECK(std::isfinite(r.profiling.phase_one_constraint_violation));
+  CHECK(r.profiling.phase_one_constraint_violation <=
+        r.profiling.phase_one_initial_violation);
+  CHECK(r.profiling.phase_one_iterations <= opt.phase_one_max_iterations);
+  CHECK(r.profiling.phase_one_factorizations <=
+        opt.phase_one_max_factorizations);
 }
 
 TEST_CASE("case2000 AC/DC Ipopt bounded performance benchmark",

@@ -115,6 +115,26 @@ int main(int argc, char** argv) {
               << ",\"line_search_ms_total\":" << pf.profiling.line_search_ms_total
               << ",\"pv_to_pq_switches\":" << pf.profiling.pv_to_pq_switches
               << ",\"pq_to_pv_switches\":" << pf.profiling.pq_to_pv_switches
+              << ",\"pv_pq_outer_iterations\":"
+              << pf.profiling.pv_pq_outer_iterations
+              << ",\"pv_pq_repeated_active_sets\":"
+              << pf.profiling.pv_pq_repeated_active_sets
+              << ",\"smooth_ncp_continuation_updates\":"
+              << pf.profiling.smooth_ncp_continuation_updates
+              << ",\"smooth_ncp_final_mu\":"
+              << pf.profiling.smooth_ncp_final_mu
+              << ",\"q_limit_enforcement_requested\":"
+              << (pf.reactive_limits.enforcement_requested ? "true" : "false")
+              << ",\"q_limit_certified\":"
+              << (pf.reactive_limits.certified ? "true" : "false")
+              << ",\"q_limit_cycle_detected\":"
+              << (pf.reactive_limits.active_set_cycle_detected ? "true" : "false")
+              << ",\"q_limit_outer_limit_reached\":"
+              << (pf.reactive_limits.outer_iteration_limit_reached ? "true" : "false")
+              << ",\"q_limit_active_buses\":"
+              << pf.reactive_limits.active_limited_buses
+              << ",\"q_limit_max_violation_pu\":"
+              << pf.reactive_limits.max_violation_pu
               << ",\"bus_ids\":[";
     // parse_matpower renumbers buses to 1..N in .index and stores the
     // original MATPOWER bus number in .name as "Bus<id>"; report the

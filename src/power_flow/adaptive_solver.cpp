@@ -118,6 +118,68 @@ void set_dead_island_zero(const IslandInfo& island,
   }
 }
 
+void merge_island_diagnostics(const PowerFlowResult& local,
+                              size_t island_index,
+                              AdaptiveSolveResult& global) {
+  global.profiling.jacobian_pattern_rebuilds +=
+      local.profiling.jacobian_pattern_rebuilds;
+  global.profiling.jacobian_analyze_calls +=
+      local.profiling.jacobian_analyze_calls;
+  global.profiling.factorization_calls += local.profiling.factorization_calls;
+  global.profiling.linear_solve_calls += local.profiling.linear_solve_calls;
+  global.profiling.regularization_attempts +=
+      local.profiling.regularization_attempts;
+  global.profiling.line_search_evaluations +=
+      local.profiling.line_search_evaluations;
+  global.profiling.rejected_steps += local.profiling.rejected_steps;
+  global.profiling.pv_to_pq_switches += local.profiling.pv_to_pq_switches;
+  global.profiling.pq_to_pv_switches += local.profiling.pq_to_pv_switches;
+  global.profiling.pv_pq_outer_iterations +=
+      local.profiling.pv_pq_outer_iterations;
+  global.profiling.pv_pq_repeated_active_sets +=
+      local.profiling.pv_pq_repeated_active_sets;
+  global.profiling.smooth_ncp_continuation_updates +=
+      local.profiling.smooth_ncp_continuation_updates;
+  global.profiling.smooth_ncp_final_mu = std::max(
+      global.profiling.smooth_ncp_final_mu,
+      local.profiling.smooth_ncp_final_mu);
+  global.profiling.converter_mode_switches +=
+      local.profiling.converter_mode_switches;
+  global.profiling.eval_jacobian_ms_total +=
+      local.profiling.eval_jacobian_ms_total;
+  global.profiling.linear_solve_ms_total +=
+      local.profiling.linear_solve_ms_total;
+  global.profiling.line_search_ms_total +=
+      local.profiling.line_search_ms_total;
+  global.profiling.raw_residual_norm = std::max(
+      global.profiling.raw_residual_norm,
+      local.profiling.raw_residual_norm);
+  global.profiling.scaled_residual_norm = std::max(
+      global.profiling.scaled_residual_norm,
+      local.profiling.scaled_residual_norm);
+  global.profiling.condition_estimate = std::max(
+      global.profiling.condition_estimate,
+      local.profiling.condition_estimate);
+
+  global.reactive_limits.active_set_cycle_detected |=
+      local.reactive_limits.active_set_cycle_detected;
+  global.reactive_limits.outer_iteration_limit_reached |=
+      local.reactive_limits.outer_iteration_limit_reached;
+  global.reactive_limits.active_limited_buses +=
+      local.reactive_limits.active_limited_buses;
+  global.reactive_limits.max_violation_pu = std::max(
+      global.reactive_limits.max_violation_pu,
+      local.reactive_limits.max_violation_pu);
+  if (global.reactive_limits.enforcement_requested) {
+    global.reactive_limits.certified &= local.reactive_limits.certified;
+  }
+
+  for (const auto& warning : local.diagnostics.warnings) {
+    global.diagnostics.warnings.push_back(
+        "Island " + std::to_string(island_index) + ": " + warning);
+  }
+}
+
 HybridPowerSystem apply_reactive_limit_overrides(
     const HybridPowerSystem& sys,
     const std::unordered_map<int, ReactiveLimit>& q_limits) {
@@ -170,6 +232,10 @@ AdaptiveSolveResult AdaptiveSolver::solve(const HybridPowerSystem& sys,
   out.converged = true;
   out.iterations = 0;
   out.residual = 0.0;
+  out.reactive_limits.enforcement_requested =
+      opt.enable_pv_pq_conversion || opt.enable_semi_smooth_newton;
+  out.reactive_limits.certified =
+      out.reactive_limits.enforcement_requested;
 
   for (int i = 0; i < nac; ++i) {
     out.vm[static_cast<size_t>(i)] = working.ac.buses[static_cast<size_t>(i)].vm_pu;
@@ -208,6 +274,9 @@ AdaptiveSolveResult AdaptiveSolver::solve(const HybridPowerSystem& sys,
     out.converged = r.converged;
     out.iterations = r.iterations;
     out.residual = r.residual;
+    out.diagnostics = r.diagnostics;
+    out.profiling = r.profiling;
+    out.reactive_limits = r.reactive_limits;
     return out;
   }
 
@@ -279,6 +348,7 @@ AdaptiveSolveResult AdaptiveSolver::solve(const HybridPowerSystem& sys,
       if (!r.converged) out.converged = false;
       out.iterations += r.iterations;
       out.residual = std::max(out.residual, r.residual);
+      merge_island_diagnostics(r, task.island_idx, out);
       map_island_result_back(out.islands[task.island_idx], r, ac_id_to_pos, dc_id_to_pos, out);
     }
   } else {
@@ -301,6 +371,7 @@ AdaptiveSolveResult AdaptiveSolver::solve(const HybridPowerSystem& sys,
       if (!r.converged) out.converged = false;
       out.iterations += r.iterations;
       out.residual = std::max(out.residual, r.residual);
+      merge_island_diagnostics(r, tasks[ti].island_idx, out);
       map_island_result_back(out.islands[tasks[ti].island_idx], r, ac_id_to_pos, dc_id_to_pos, out);
     }
   }

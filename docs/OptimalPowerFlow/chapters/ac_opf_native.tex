@@ -679,6 +679,13 @@ $\max(\lVert g\rVert_\infty,\max h^{+},\text{界违反})$ 汇总
 \fld{use\_parity\_ipm} & — & — & true/false & false & legacy 标志：改用 Parity 全空间建模\\
 \fld{allow\_fallback} & — & — & true/false & true & 允许 Ipopt/ED+PF 回退与同伦末段挽救\\
 \fld{verbose} & — & — & true/false & false & 迭代日志\\
+\fld{enable\_phase\_one} & — & — & true/false & true & Parity Native IPM 的有界 primal/dual warm-start 构造$\dagger$\\
+\fld{phase\_one\_time\_limit\_ms} & — & ms & $>0$ 协作截止；$\le0$ 不限 & 5000 & Phase I 墙钟预算；单次稀疏分解不可中断$\dagger$\\
+\fld{phase\_one\_max\_iterations} & — & — & $\ge0$ & 12 & Phase I Newton 迭代硬上限$\dagger$\\
+\fld{phase\_one\_max\_factorizations} & — & — & $\ge0$ & 14 & primal/dual 共用稀疏分解硬上限$\dagger$\\
+\fld{phase\_one\_max\_backtracks} & — & — & $\ge0$ & 12 & 每次 Phase I 步的回溯上限$\dagger$\\
+\fld{phase\_one\_dispatch\_dual\_predictor} & — & — & true/false & false & 实验性零分解连通分量 dispatch-price dual 候选$\dagger$\\
+\fld{phase\_one\_dispatch\_dual\_min\_improvement} & — & — & 0--1 & 0.05 & raw 与 normalized dual residual 必须同时达到的改善比例$\dagger$\\
 \fld{warm\_start} & — & — & 指针/null & null & 上次兼容结果的非拥有指针，求解期间须存活\\
 \fld{ac\_pf\_warm\_start} & — & — & true/false & false & 先做混合潮流并映射为暖启动（默认关，注释称良态算例物理初值更快）\\
 \fld{compute\_homotopy\_tangent} & — & — & true/false & false & 返回点计算 Davidenko 切向$\dagger$\\
@@ -716,6 +723,8 @@ $\max(\lVert g\rVert_\infty,\max h^{+},\text{界违反})$ 汇总
 \fld{solver\_path} & — & — & NativeAC/\allowbreak ParityIPM & Unknown & 实际求解路径标记\\
 \fld{profiling.linear\_solver\_backend} & — & — & 后端名字符串 & 空 & KKT 线性代数路径\\
 \fld{profiling.\allowbreak factorization\_calls} 等计数 & — & — & $\ge0$ & 0 & 分解/回代/接受/拒绝/分析/升级/缩放重建计数\\
+\fld{profiling.phase\_one\_*} & — & pu/ms/计数 & — & inf/0/not-run & Phase I 前后违反量、dual-fit、预算消耗、终止/线性后端及 Phase II 接受状态\\
+\fld{profiling.dispatch\_dual\_predictor\_*} & — & ms/残差/布尔 & — & inf/0/not-attempted & 零分解 dual predictor 的尝试、接受、成本及 exact residual 审计\\
 \fld{profiling.max\_*\_residual\_pu} & — & pu & — & 0 & 分族终态残差（P/Q/DC/Conv/其他/非线性不等式）\\
 \fld{profiling.final\_barrier\_mu} & $\mu$ & — & — & 0 & 终态障碍参数（Parity 路径记录的是互补度）\\
 \fld{infeasibility\_hints} & — & — & — & 空 & 不可行/不收敛的可能原因\\
@@ -758,6 +767,54 @@ $\max(\lVert g\rVert_\infty,\max h^{+},\text{界违反})$ 汇总
         case13659pegase 经暖启动以 189 次迭代收敛于参考最优、同伦延续认证
         2869 节点精确解与 9241 节点 $-0.013\%$ 偏差
         （\srcpath{opf\_options.hpp}:88--114）。这些数字为注释记载、非本章实测复核。
+  \item \textbf{万节点结构化启动实测}：Release/KLU、一次预热加三次计时的固定协议下，
+        case9241pegase 从普通 AC-PF 启动的 $12.657\,\mathrm{s}$/77 次迭代/76 次
+        Phase-II 分解，降至 compact DCOPF dispatch seed 的
+        $11.088\,\mathrm{s}$/56/55；端到端中位数下降 $12.4\%$，分解下降
+        $27.6\%$。两者目标分别为 315911.571480 与 315911.571406，终态
+        primal/dual 均低于 $5\times10^{-7}$。case13659pegase 的 baseline dual
+        为 1.970，预筛选零成本跳过 DC，保持 138 次迭代、137 次分解、目标
+        386116.837520 及 $2.05\times10^{-7}/5.89\times10^{-9}$ 的最终证书。
+        该路径按真实 Parity 初始指标选择 dispatch 点；9241 的 dual
+        $838.166\to236.753$，但最大 primal metric
+        $1.601\times10^{-3}\to1.506\times10^{-1}$，故它是 dual-dispatch
+        warm start 而非 central-state 证书，最终 KKT 仍由 Phase II 独立认证。
+        DC Phase I 的 $2000\,\mathrm{ms}$ 默认墙钟预算覆盖投影、formulation、
+        结构初值、symbolic 与 numeric 工作；本例耗时 $1638\,\mathrm{ms}$、一次
+        DC symbolic analyze，且 baseline/candidate 只共享构建一次的 Parity
+        formulation。稀疏分解不可中断，故允许一个在途分解造成的可诊断超时。
+  \item \textbf{两万节点级边界实测}：25,000-bus ACTIVSg25k（4,834 台发电机、
+        32,230 条交流支路）在同一 Release/KLU 主机上按一次预热加三次计时协议，
+        普通 AC-PF 启动的样本为 $183.967/182.383/183.808\,\mathrm{s}$，中位数
+        $183.808\,\mathrm{s}$；三次均以 66 次迭代、65 次 Phase-II 分解收敛，
+        目标为 6252070.20694，primal/dual 为
+        $3.239\times10^{-7}/1.004\times10^{-7}$。默认 $2\,\mathrm{s}$ DC Phase I
+        的中位数为 $186.588\,\mathrm{s}$（慢 $1.51\%$）：一次 symbolic、两次
+        迭代后以 $2064\,\mathrm{ms}$ 超时（overshoot $64\,\mathrm{ms}$），未形成
+        合格候选并精确回退，故 Phase II 工作量与最终 KKT 不变。
+        将 DC 预算扩大到 $30\,\mathrm{s}$ 虽把 DC 残差降至
+        $8.767\times10^{-4}$，但真实 Parity primal 从
+        $3.929\times10^{-4}$ 恶化到 $9.786\times10^{-2}$，dual 仅改善
+        $4.15\%$，仍被固定 admission gate 拒绝，总时长反而增至
+        $215.012\,\mathrm{s}$。因此当前实现已验证能求解该 25k ACOPF，但不能
+        声称结构化 DC Phase I 在该算例上加速；继续提高辅助 DC-IPM 精度不是
+        合理方向。
+  \item \textbf{零分解 dual predictor 负结果}：实验模式按交流导通分量从未贴界
+        机组 stationarity 中位数构造共同 $P/Q$ 平衡乘子，不增加 symbolic/numeric
+        分解，并要求 raw 与 normalized full dual residual 均改善至少 $5\%$。
+        ACTIVSg25k 单次 Release/KLU 探针仅以 $1.978\,\mathrm{ms}$ 将二者从
+        $47278.840/468.10733$ 改为 $47276.850/468.08762$（约 $0.0042\%$），
+        因而拒绝；总时长 $184.344\,\mathrm{s}$，Phase II 仍为 66 次迭代、
+        65 次分解。该选项默认关闭，不能作为 25k 加速声明。
+  \item \textbf{25k prepared-session 重复求解}：同一 ACTIVSg25k 在一个
+        \srcpath{PreparedACOPFSession} 内连续求解两次，首轮 AC-PF 启动耗时
+        $184.645\,\mathrm{s}$、66 次迭代、65 次 numeric 分解；第二轮复用
+        formulation/maps、symbolic ordering 与完整 continuation state，耗时
+        $8.666\,\mathrm{s}$、4 次迭代、3 次新 numeric 分解、0 次 symbolic
+        analyze，墙钟降低 $95.31\%$。第二轮目标 6252069.93711，primal/dual
+        为 $3.389\times10^{-8}/2.092\times10^{-8}$；峰值 RSS 为
+        $4709.6\,\mathrm{MiB}$。因此 25k 重复求解加速已验证，但内存效率仍是
+        更大批处理的边界；该结果不表示复用了旧 numeric factors。
 \end{itemize}
 
 \subsection{边界与局限}\label{subsec:acopfnative:limitations}

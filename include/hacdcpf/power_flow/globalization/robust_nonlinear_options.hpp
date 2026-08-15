@@ -70,10 +70,10 @@ struct RobustNonlinearOptions {
   /// Maximum number of backtrack trials before the step is rejected.
   int max_line_search_trials{12};
 
-  // ── Phase 2: Smooth Fischer–Burmeister NCP continuation ───────────
-  /// Use the μ-perturbed smooth-FB function φ_μ(a,b) = √(a²+b²+2μ)−a−b
-  /// for PV/PQ complementarity.  μ is annealed from ncp_mu0 → ncp_mu_min
-  /// as the residual decreases, driving toward the exact NCP solution.
+  // ── Phase 2: Smooth CHKS NCP continuation ─────────────────────────
+  /// Use CHKS-smoothed min/max operators for PV/PQ complementarity. mu is
+  /// annealed from ncp_mu0 to ncp_mu_min as the residual decreases, driving
+  /// toward the exact median-NCP solution without changing equation layout.
   /// Disabled by default to preserve the original semi-smooth Newton behavior;
   /// enable explicitly for difficult cases with near-active Q limits.
   bool enable_smooth_ncp{false};

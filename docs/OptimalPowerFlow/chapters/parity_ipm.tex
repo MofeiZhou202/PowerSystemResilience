@@ -113,6 +113,7 @@ Parity IPM 核是平台 AC OPF 三条非线性求解路线之一（另两条为
 \fld{scaling\_rebuilds}）、英文状态串 \fld{status}、实际 KKT 后端标签
 \fld{linear\_solver}（\fld{dense\_lu}/\fld{sparse\_umfpack}/
 \fld{sparse\_klu}/\fld{sparse\_eigen\_lu}/\fld{sparse}，:2126--2135）
+、Phase I 前后违反量/dual-fit/预算/终止原因、Phase II 接受标志，
 与最终原始-对偶状态 $(x,\lambda,\mu,z)$。状态串的可取值全集见
 \ref{subsec:pipm-errors}~节的状态串表。
 
@@ -163,6 +164,80 @@ $z_i=\max(|h_i(x_0)|,\,1)$（$h_i\ge0$）或 $\max(-h_i,\,10^{-2})$
 $\mu_i z_i\approx1$；等式乘子 $\lambda=0$（:921--945）。热启动四元组
 仅在维度、有限性与正性检查全部通过时整体采用（:910--919）。
 $\tau$ 取 \fld{alpha\_max}（:947）。
+
+\subsubsection*{有界 Phase I 原--对偶起点构造}
+在没有兼容完整四元组且 \fld{enable\_phase\_one=true} 时，核先运行局部约束
+Newton 恢复。标准 AC 潮流分区把电压作为 state/basic 列；发电机母线以一个
+$Q_g$ 替代对应 $V_m$，参考母线再以一个 $P_g$ 完成方阵。Hybrid AC/DC 的
+$V_{dc}$、换流器/DC/DC/能量路由器平衡列按同一规则补齐。若当前没有违反的
+非线性不等式且方阵可分解，求
+\begin{equation}
+ J_B(x_k)\Delta x_B=-g(x_k),\qquad \Delta x_F=0;
+\end{equation}
+否则把所有 $h_i(x_k)>\varepsilon_p$ 行追加到残差，对未固定在界上的列做一次
+变量区间缩放后的 SparseQR。该构造对应 Nocedal--Wright（2006）第 7.5、
+11.1 与 16.5 节的缩放约束 Newton/基变量思想；线搜索按 Deuflhard（2011）
+第 2.2--2.3 节只接受原 pu 坐标最大违反量严格下降的步。
+
+Hybrid AC/DC 在上述全模型恢复前先利用 DC 电导块做一次结构步。对换流器行
+$g_c$ 与 DC 平衡行 $g_d$ 的线性化写成
+\begin{align}
+J_{dv}\Delta V_{dc}+J_{dp}\Delta P_{dc}&=-g_d,\\
+J_{cp}\Delta P_{dc}+J_{ca}\Delta P_{ac}&=-g_c.
+\end{align}
+先由第二式消去局部 $\Delta P_{dc}$，得到只含
+$[\Delta V_{dc},\Delta P_{ac}]$ 的 Schur 系统；DC reference 行直接追加。
+这一步只分解约 $n_{dc}+n_{conv}$ 的稀疏块，不形成 OPF Hessian/KKT。接受准则
+要求 DC balance/converter/reference 子块无穷范数严格下降，且全模型原坐标
+违反量不增；全局 admission 仍然独立生效，因此局部 DC 改善不能强迫远离
+可行域的 case300 进入昂贵全模型 QR。诊断字段
+\fld{phase\_one\_structural\_*} 与 \fld{phase\_one\_structure} 区分该步、
+后续 state/basic Newton 和普通回退。
+
+Phase I 与 Phase II 的默认耦合参数为
+$\mu_0=0.1$、$\eta_a=1$、$\eta_p=0.1$、$\eta_c=0.5$。只有初始违反量满足
+$\|r_p(x_0)\|_\infty\le\eta_a\mu_0$ 才进入局部恢复；否则以
+\fld{outside-phase-one-admission} 零分解退出，且不改变 Phase II 冷起点。
+恢复在 $\epsilon_p=\max(\mathrm{tol}_p,\eta_p\mu_0)$ 停止，而不是追到最终
+精度。令 $v=\max(0,\max_i h_i)$，松弛下限取
+$s_{\min}=\max(2\times10^{-10},(\epsilon_p-v)/2)$，于是
+$h_i+s_i\le(\epsilon_p+v)/2\le\epsilon_p$；再置
+$\nu_i=\mu_0/s_i$，避免仅用机器下限造成巨大乘子，同时精确保持中心乘积。
+移交还要求 $\max_i|s_i\nu_i/\mu_0-1|\le\eta_c$。
+
+Phase I 只有迭代、稀疏分解、回溯与协作式墙钟预算，不含障碍序列、filter、
+Hessian、二阶校正或弹性变量。原始点认证后只做一次 $J_g^T\lambda$ 对偶拟合，
+\fld{phase\_one\_dual\_fit\_residual} 报告 basic 列 stationarity（或 SparseQR
+正规残差）的缩放范数，保留自由控制列的 reduced gradient 给 Phase II。
+完整 continuation state 直接绕过 Phase I。\fld{phase\_one\_primal\_feasible}
+仍专指达到最终容差；\fld{phase\_one\_in\_handoff\_corridor} 才表示达到上述
+有限精度移交邻域。若 primal/dual/centrality 证书任一失败，
+Phase II 精确恢复进入 Phase I 之前的原始点以及普通冷启动 slack/dual；因此
+\fld{phase\_two\_start\_accepted=false} 的试探轨迹不会改变最优性求解。
+这一区分使 Phase I 保持 warm-start producer，而不是第二套 infeasible-start IPM。
+
+\subsubsection*{Prepared OPF session 与完整状态延续}
+公开 RAII 类型 \srcpath{PreparedACOPFSession} 为重复 Parity ACOPF 保留
+formulation、组件/行映射、稀疏 pattern 的 symbolic ordering，以及上一轮完整
+$(x,\lambda,\mu,z)$。兼容键不是维数检查，而是覆盖变量块、等式/不等式块、
+有限 bound-row 顺序、reference row、受限设备集合、energy-router port 顺序与
+$Y_{bus}/G_{dc}$ 非零 pattern 的 64 位签名；LCC 的稳定 ID、AC/DC 端点、解析后的
+换流母线以及 energy-router port 稳定 ID 同样进入语义映射审计。参数变化先重新投影 canonical numeric
+\srcpath{SolverData}；若结构审计通过，只刷新负荷/ZIP、固定注入、目标/界与矩阵
+数值，保留 OPF maps 和 symbolic ordering。拓扑、服务状态、PV/PQ/reference、
+constraint-family 或 row membership 改变时完整 rebuild，并在该次求解禁止 opaque
+continuation state。linear backend 还对压缩 KKT 的全部行列坐标计算 pattern 指纹；
+维数和非零元个数相同但坐标不同仍强制重新 symbolic analyze。
+
+四块状态必须同时存在、签名相同、维数正确、数值有限且 slack/inequality dual
+为正，随后仍通过本节 Phase-II residual/centrality 审计；任一条件失败时只允许
+公共物理变量映射，不允许“维数碰巧相同”的 dual row 复用。当前 SuiteSparse
+adapter 与 MIPSolvers MUMPS wrapper 只支持复用 symbolic 后重新 numeric factorize，
+没有可按矩阵漂移、scaled backward residual 与 refinement 独立审计的跨求解
+numeric-factor 对象。因此 \fld{prepared\_numeric\_refactor} 默认关闭；即使开启也
+返回 \fld{unsupported} 并做新 numeric factorization，不虚报 numeric reuse。
+AC-PF adjoint dual seed 未实现，因为 reduced PV/PQ Jacobian 与 full-space OPF
+equality/bound multiplier 布局不兼容，且未保留 PF factor 时仍需额外分解。
 
 \subsubsection*{预测--校正与中心路径参数更新}
 每次迭代先对 $z,\mu$ 施加 $10^{-12}$ 下限保护并构成障碍比
@@ -547,6 +622,11 @@ $1000\times$ 容忍带（互补另取 $10^{-2}$ 工程下限）时仍按收敛�
 \fld{regularization} & $\delta_0$ & — & — & $10^{-8}$ & \textbf{本核未读取}；正则化梯级硬编码（:22，:1459--1464）\\
 \fld{alpha\_max} & $\tau$ & — & 0.9--0.9999（经验值） & 0.95 & fraction-to-boundary 因子；驱动层把 \fld{interior\_fraction} 经 clamp 夹到 $[0.5,\,0.9999]$，默认 0.995（:23，:947，ac\_opf.cpp:2550）\\
 \fld{verbose} & — & — & true/false & false & 逐迭代调试日志（:24，:1155--1160）\\
+\fld{enable\_phase\_one} & — & — & true/false & true & 无兼容完整状态时运行有界 primal/dual 起点构造\\
+\fld{phase\_one\_time\_limit\_ms} & — & ms & $>0$ 协作截止；$\le0$ 不限 & 5000 & 在稀疏分解之间检查，单次分解不可中断\\
+\fld{phase\_one\_max\_iterations} & — & — & $\ge0$ & 12 & 约束 Newton 迭代硬上限\\
+\fld{phase\_one\_max\_factorizations} & — & — & $\ge0$ & 14 & primal 恢复与一次 dual fit 共用的数值分解硬上限\\
+\fld{phase\_one\_max\_backtracks} & — & — & $\ge0$ & 12 & 每次 Newton 步的回溯上限\\
 \fld{primal\_start} & $x_0$ & — & — & nullptr & 热启动原始点（当前 Problem 布局），须全有限（:26，:864--885）\\
 \fld{equality\_dual\_start} & $\lambda_0$ & — & — & nullptr & 热启动等式乘子，与下两项同时通过检查才启用（:29，:910--919）\\
 \fld{inequality\_dual\_start} & $\mu_0$ & — & — & nullptr & 热启动不等式乘子，须严格为正（:30，:918）\\
@@ -595,7 +675,10 @@ $1000\times$ 容忍带（互补另取 $10^{-2}$ 工程下限）时仍按收敛�
   \item \textbf{单元/回归测试}：\srcpath{tests/test\_opf\_solver\_backends.cpp}
         以 \fld{ACOPFSolverBackend::ParityIPM} 覆盖后端分派、
         \fld{solver\_path} 标记、热启动状态回灌、不可行诊断与
-        \fld{profiling} 计数（如 :92--106、:629--641、:743--767）；
+        \fld{profiling} 计数；另覆盖纯 AC case30 和 Hybrid microgrid 的
+        primal/dual 证书、零分解预算、兼容状态绕过，以及 case300/case2000
+        的单调有界非认证路径。case300 还断言未接受 Phase I 时 Phase II 的
+        初始残差与关闭 Phase I 完全一致；
         \srcpath{tests/test\_multiscale\_comprehensive.cpp} 与
         \srcpath{tests/test\_nighttime\_opf.cpp} 亦引用本路径；
   \item \textbf{基准算例}：源码注释记录了 case2000\_acdc（约 2~s）、
@@ -605,6 +688,16 @@ $1000\times$ 容忍带（互补另取 $10^{-2}$ 工程下限）时仍按收敛�
   \item \textbf{雅可比正确性}：Parity 建模层的解析导数经有限差分核对
         （见 \ref{sec:parityform}~节），本核的 KKT 右端与恢复公式与其
         共享同一组回调（:989--1008、1683--1696）。
+  \item \textbf{性能口径}：\srcpath{phase\_one\_restoration\_benchmark}
+        固定两次预热、五次计时。默认参数下 case30 从
+        $3.1061\times10^{-2}$ 恢复到 $4.0305\times10^{-4}$，Phase II 从
+        17/16 次迭代/分解降到 16/15，端到端中位数
+        $4.458\to4.225$~ms（$1.055\times$）。Hybrid microgrid 的初始违反量
+        $0.144>\mu_0$，case300 为 $1.129>\mu_0$，二者均由 admission gate
+        以零分解跳过；Phase II 的迭代、分解与最终残差和关闭 Phase I 完全一致，
+        结构探针中位成本分别约 $0.008$ 与 $0.124$~ms；对应端到端开/关
+        中位数为 $0.235/0.228$~ms 与 $230.058/230.462$~ms。降低 $\mu_0$ 到
+        0.03/0.01 会使 case30 也在 admission 外，因此默认 0.1 保留。
 \end{itemize}
 
 \subsection{边界与局限}\label{subsec:pipm-limits}

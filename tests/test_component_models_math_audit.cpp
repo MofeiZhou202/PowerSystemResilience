@@ -7,6 +7,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <nlohmann/json.hpp>
 
+#include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/io/json_io.hpp"
 #include "hacdcpf/model/device_control_role.hpp"
 #include "hacdcpf/model/effective_capacity.hpp"
@@ -413,6 +414,74 @@ TEST_CASE("zero-impedance merge protects ideal transformers and preserves shunt 
   const auto attribution = evaluate_attribution(
       original, merged, ObservableKind::ACBranchTerminalFlow);
   CHECK_FALSE(attribution.total());
+}
+
+TEST_CASE("provenance-marked numerical ties form a canonical quotient without merging short lines",
+          "[model_audit][projection][merge][power_flow]") {
+  HybridPowerSystem sys;
+  sys.base_mva = sys.ac.base_mva = 100.0;
+  auto slack = make_bus(1, BusType::SLACK);
+  auto pv1 = make_bus(2, BusType::PV);
+  auto pv2 = make_bus(3, BusType::PV);
+  slack.vm_pu = 1.0;
+  pv1.vm_pu = 0.98;
+  pv2.vm_pu = 1.02;
+  pv1.pd_mw = 20.0;
+  pv1.qd_mvar = 5.0;
+  sys.ac.buses = {slack, pv1, pv2};
+
+  ACBranch feeder;
+  feeder.index = 1;
+  feeder.from_bus = 1;
+  feeder.to_bus = 2;
+  feeder.r_pu = 0.01;
+  feeder.x_pu = 0.10;
+  ACBranch numerical_tie;
+  numerical_tie.index = 2;
+  numerical_tie.from_bus = 2;
+  numerical_tie.to_bus = 3;
+  numerical_tie.x_pu = 1e-4;
+  numerical_tie.ideal_connectivity = true;
+  sys.ac.branches = {feeder, numerical_tie};
+
+  Generator grid;
+  grid.index = 1;
+  grid.bus = 1;
+  grid.is_slack = true;
+  grid.qmin_mvar = -100.0;
+  grid.qmax_mvar = 100.0;
+  Generator g1;
+  g1.index = 2;
+  g1.bus = 2;
+  g1.pg_mw = 10.0;
+  g1.vg_pu = 0.98;
+  g1.qmin_mvar = -20.0;
+  g1.qmax_mvar = 20.0;
+  Generator g2 = g1;
+  g2.index = 3;
+  g2.bus = 3;
+  g2.vg_pu = 1.02;
+  sys.ac.generators = {grid, g1, g2};
+
+  const auto projected = project_to_canonical_models(sys, false);
+  REQUIRE(projected.ac.buses.size() == 2);
+  REQUIRE(projected.ac.branches.size() == 1);
+  REQUIRE(projected.bus_merge_map.has_value());
+  CHECK(projected.bus_merge_map->merge_records.size() == 1);
+
+  PowerFlowOptions options;
+  options.enable_pv_pq_conversion = true;
+  options.tol = 1e-10;
+  const auto result = solve_power_flow(sys, options);
+  REQUIRE(result.converged);
+  CHECK(result.reactive_limits.certified);
+  CHECK(result.reactive_limits.max_violation_pu <= 1e-10);
+
+  auto physical_short_line = sys;
+  physical_short_line.ac.branches.back().ideal_connectivity = false;
+  const auto unmerged = project_to_canonical_models(physical_short_line, false);
+  CHECK(unmerged.ac.buses.size() == 3);
+  CHECK(unmerged.ac.branches.size() == 2);
 }
 
 TEST_CASE("device residual is complete and shared across ambiguous parallel devices",

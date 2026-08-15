@@ -1,6 +1,6 @@
 # Projection and Result Attribution Contract
 
-Updated: 2026-07-12
+Updated: 2026-08-15
 
 Rich engineering components are converted to canonical solver objects by
 `projection::RichToCanonicalOperator`. Solver observables return to authored
@@ -19,12 +19,24 @@ identity through `projection::CanonicalToRichOperator`.
    canonical sources, recovery class, and terminal sign convention.
 7. Size mismatches are diagnostics; consumers must not silently pad result
    vectors into another index space.
+8. Small impedance alone is not evidence of node identity. A physical branch
+   is contracted only when exact switch/breaker semantics or explicit
+   `ACBranch::ideal_connectivity` provenance places it on the merge whitelist.
 
 ## Operators and provenance
 
 `ProjectionBundle` contains the canonical system, component mappings,
 projection report, and certificate. `BusMergeMap`, branch provenance maps, and
 component expansion records carry authored-to-canonical relationships.
+
+An in-service `ACBranch` marked `ideal_connectivity` represents the equivalence
+relation `u ~ v`, not a series admittance. Projection union-finds these rows
+before Ybus assembly, aggregates extensive bus injections and control limits,
+and records the authored-to-canonical bus map. Solved intensive values such as
+voltage are broadcast back to every authored member. This exact contraction is
+appropriate for source-declared ideal connectivity, including BPA zero-data L
+cards. Unmarked low-impedance lines remain explicit branches, so their series
+flow, charging, rating, and attribution are not discarded.
 
 `RichResultAttribution` classifies recovered values as strong, approximate,
 audit-only, or unsupported. A total rich identity does not imply that every
@@ -62,4 +74,3 @@ Projection metamorphic tests cover idempotence, merge/delete composition, and
 result recovery. `tools/gui_api_e2e.py` additionally checks `power_system.json`
 for Grid attribution, source-side and feeder CB P/Q, PF/OPF consistency, TSPF
 frames, and Bus 1 P/Q closure.
-
