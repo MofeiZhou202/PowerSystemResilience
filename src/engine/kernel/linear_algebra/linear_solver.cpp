@@ -194,6 +194,14 @@ bool EigenKluSolver::factorize(const Eigen::SparseMatrix<double>& a) {
   return impl_->solver.info() == Eigen::Success;
 }
 
+bool EigenKluSolver::refactorize(const Eigen::SparseMatrix<double>& a) {
+  empty_system_ = is_empty_square_system(a);
+  if (empty_system_) return true;
+  if (!impl_) return false;
+  impl_->solver.refactorize(a);
+  return impl_->solver.info() == Eigen::Success;
+}
+
 bool EigenKluSolver::solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) {
   if (empty_system_) {
     if (rhs.size() != 0) return false;

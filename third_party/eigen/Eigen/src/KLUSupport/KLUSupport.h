@@ -55,6 +55,18 @@ inline klu_numeric* klu_factor(int Ap[], int Ai[], std::complex<double> Ax[], kl
    return klu_z_factor(Ap, Ai, &numext::real_ref(Ax[0]), Symbolic, Common);
 }
 
+inline int klu_refactor(int Ap[], int Ai[], double Ax[], klu_symbolic *Symbolic,
+                        klu_numeric *Numeric, klu_common *Common, double) {
+   return ::klu_refactor(Ap, Ai, Ax, Symbolic, Numeric, Common);
+}
+
+inline int klu_refactor(int Ap[], int Ai[], std::complex<double> Ax[],
+                        klu_symbolic *Symbolic, klu_numeric *Numeric,
+                        klu_common *Common, std::complex<double>) {
+   return ::klu_z_refactor(Ap, Ai, &numext::real_ref(Ax[0]), Symbolic, Numeric,
+                           Common);
+}
+
 
 template<typename _MatrixType>
 class KLU : public SparseSolverBase<KLU<_MatrixType> >
@@ -207,6 +219,25 @@ class KLU : public SparseSolverBase<KLU<_MatrixType> >
       grab(matrix.derived());
 
       factorize_impl();
+    }
+
+    /** Reuses the existing KLU pivot order for a numeric-only refactorization.
+      * The sparsity pattern must match analyzePattern() and factorize() exactly.
+      */
+    template<typename InputMatrixType>
+    void refactorize(const InputMatrixType& matrix)
+    {
+      eigen_assert(m_analysisIsOk && m_factorizationIsOk && m_numeric &&
+                   "KLU: refactorize requires an existing numeric factorization");
+      grab(matrix.derived());
+      const int ok = Eigen::klu_refactor(
+          const_cast<StorageIndex*>(mp_matrix.outerIndexPtr()),
+          const_cast<StorageIndex*>(mp_matrix.innerIndexPtr()),
+          const_cast<Scalar*>(mp_matrix.valuePtr()), m_symbolic, m_numeric,
+          &m_common, Scalar());
+      m_info = ok ? Success : NumericalIssue;
+      m_factorizationIsOk = ok ? 1 : 0;
+      m_extractedDataAreDirty = true;
     }
 
     /** \internal */

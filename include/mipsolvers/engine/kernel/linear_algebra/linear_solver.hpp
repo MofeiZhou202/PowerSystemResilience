@@ -16,6 +16,10 @@ class SparseLinearSolver {
   virtual const char* backend_name() const = 0;
   virtual void analyze_pattern(const Eigen::SparseMatrix<double>& a) = 0;
   virtual bool factorize(const Eigen::SparseMatrix<double>& a) = 0;
+  virtual bool supports_numeric_refactor() const { return false; }
+  virtual bool refactorize(const Eigen::SparseMatrix<double>& a) {
+    return factorize(a);
+  }
   virtual bool solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) = 0;
   /// Number of pivots perturbed by the last numerical factorization.
   virtual int perturbed_pivots() const { return -1; }
@@ -71,6 +75,8 @@ class EigenKluSolver final : public SparseLinearSolver {
   const char* backend_name() const override;
   void analyze_pattern(const Eigen::SparseMatrix<double>& a) override;
   bool factorize(const Eigen::SparseMatrix<double>& a) override;
+  bool supports_numeric_refactor() const override { return true; }
+  bool refactorize(const Eigen::SparseMatrix<double>& a) override;
   bool solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) override;
   bool solve_many(const Eigen::MatrixXd& rhs, Eigen::MatrixXd& x) override;
 
