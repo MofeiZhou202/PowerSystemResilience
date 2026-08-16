@@ -13,8 +13,9 @@ For a fixed PV/PQ active set `A`, Newton solves a smooth system
 F_A(theta, V) = 0.
 ```
 
-Changing a PV bus to PQ changes the voltage variables, Q equations, sparse
-Jacobian pattern, symbolic analysis, and numeric factorization. If switching
+In the legacy reduced layout, changing a PV bus to PQ changes the voltage
+variables, Q equations, sparse Jacobian pattern, symbolic analysis, and numeric
+factorization. If switching
 is performed from unconverged intermediate iterates, the implied generator Q
 is not yet an accurate limit test. Bilateral PV-to-PQ and PQ-to-PV decisions
 can then revisit the same active set. The cost is dominated by repeated sparse
@@ -49,8 +50,8 @@ power flow.
 
 ## Fixed superset Jacobian layout
 
-`RobustNonlinearOptions::enable_fixed_pv_pq_layout` is an opt-in structural
-optimization for the same outer active-set policy. It allocates one voltage
+`RobustNonlinearOptions::enable_fixed_pv_pq_layout` is the default structural
+layout for the same outer active-set policy. It allocates one voltage
 magnitude column and one reactive-balance row for every non-slack, non-reference
 AC bus, in stable canonical bus-position order. At each residual/Jacobian
 evaluation:
@@ -121,6 +122,31 @@ only after `mu` reaches `ncp_mu_min`. The result reports the number of
 continuation updates and final `mu` for audit. This is the Chen-Harker-Kanzow-
 Smale smoothing construction applied to the median NCP.
 
+## Default numerical escalation
+
+The public balanced PF facade escalates only a numerically failed,
+structurally closed solve. The order is fixed:
+
+1. direct fixed-layout active-set Newton;
+2. semi-smooth NCP from the caller/authored state;
+3. linearized-DC AC-angle seed plus fixed-layout active-set Newton;
+4. the same DC-angle seed plus semi-smooth NCP;
+5. homotopy continuation as the final fallback.
+
+The linearized-DC stage supplies only AC angles. AC and DC voltage magnitudes
+come from the canonical authored profile. Each direct retry uses private solver
+data and a private Newton solver, so NCP/active-set state cannot alter the
+facade's cached pattern. If the caller disabled generator-Q enforcement, NCP
+stages are skipped rather than silently changing the requested model. LCC tap
+control retains its dedicated outer loop. Successful results report
+`successful_fallback_stage`; attempted NCP, DC seed, and homotopy stages and
+their aggregate work remain visible in `SolverProfiling` and runtime JSON.
+
+The five-case flat-start acceptance suite is `case1888rte`, `case3375wp`,
+`case6468rte`, `case6515rte`, and `case_ACTIVSg10k`. Release/KLU verification
+converged and Q-certified all five without reaching homotopy: `case3375wp`
+used NCP, and the other four used the DC-angle/fixed-active-set stage.
+
 ## Result semantics
 
 `PowerFlowResult::reactive_limits` is the authoritative certificate:
@@ -133,6 +159,11 @@ Smale smoothing construction applied to the median NCP.
 | `outer_iteration_limit_reached` | The bounded outer work budget was exhausted. |
 | `active_limited_buses` | Number of buses held at a Q limit by active-set conversion. |
 | `max_violation_pu` | Maximum final generator Q-bound violation on system base. |
+
+The certificate tolerance is `max(1e-10, PowerFlowOptions::tol)`. At a bus
+held on a reactive limit, its apparent remaining Q violation is the final Q-row
+mismatch, so a certificate cannot honestly claim accuracy tighter than the
+root used to compute it.
 
 When enforcement is disabled, convergence is an electrical power-flow result,
 not a generator-Q-limit certificate. The GUI therefore defaults to the faster
@@ -161,6 +192,21 @@ and certified Q limit; the five-repeat median fell `261.1 -> 152.0 ms`
 (`42%`). Measurements used AppleClang 21 arm64 macOS, Release/KLU, at working
 tree `3cc92658373a`; they are a local regression boundary, not a portable
 hardware guarantee.
+
+With the fixed pattern in place, KLU numeric refactorization reuses the prior
+pivot order between Newton iterations. Each candidate is accepted only when
+its normwise backward error is within the configured tolerance; otherwise the
+solver performs a fresh numeric factorization with pivoting. A five-repeat
+Release protocol on warm `case_ACTIVSg10k` reduced median total solve time from
+`154.032` to `104.024 ms` and final-solve linear time from `98.549` to
+`54.699 ms`; all 24 candidates were accepted with maximum backward error
+`2.29e-17`. These measurements use the pinned MIPSolvers `3bf1e66` KLU adapter.
+
+Repeated compatible solves can use `PreparedPowerFlowSession` to retain the
+canonical projection, assembled matrices, fixed pattern, and symbolic analysis.
+Load/setpoint-only changes refresh numeric data; topology or network-parameter
+changes trigger a conservative rebuild. This is an explicit lifecycle API, not
+an unsafe implicit cache behind `solve_power_flow`.
 
 The original `data/云南案例.json` has 4512 authored AC buses. Its legacy BPA
 encoding contains 587 provenance-recognized numerical ties, producing 585

@@ -1,6 +1,6 @@
 # Documentation Index
 
-Updated: 2026-08-15
+Updated: 2026-08-16
 
 This is the canonical entry point for active project documentation. Runtime
 behavior is defined by `include/`, `src/`, `tests/run_gui_server.cpp`, `web/`,
@@ -46,7 +46,7 @@ source-backed defects.
 | Rich-to-canonical projection and result recovery | Contract | [Projection and result attribution](projection_and_results.md) | Component and power-flow manuals |
 | Graph topology, reduction, and recovery | Contract | [Graph and reduction runtime](graph_runtime_contract.md) | Projection and result attribution |
 | Editable parameters and effective values | Contract | [Registered parameter system](parameter_system.md) | [Distribution parameter standards](distribution_parameter_completion_standards.md) |
-| AC/DC and three-phase power flow | Implementation reference | [Power-flow manual source](PowerFlow/power_flow_manual1.tex) | [PV/PQ reactive-limit switching contract](pv_pq_switching_contract.md), [Harmonic verification](harmonics_analysis/harmonic_verification.md) |
+| AC/DC and three-phase power flow | Implementation reference | [Power-flow manual source](PowerFlow/power_flow_manual1.tex) | [Cross-module model/data/result semantics](model_data_semantics_contract.md), [VSC current-limit NCP contract](vsc_limit_ncp_power_flow_contract.md), [PV/PQ reactive-limit switching contract](pv_pq_switching_contract.md), [Harmonic verification](harmonics_analysis/harmonic_verification.md) |
 | AC/DC, DC, parity, three-phase OPF, and RPO | Implementation reference | [OPF manual source](OptimalPowerFlow/opf_manual.tex) | Registered OPF and RPO tests |
 | Network reconfiguration | Implementation reference | [Network reconfiguration models](network_reconfiguration_models.md) | [Certified restoration runtime](certified_restoration_runtime.md) |
 | Hosting capacity | Implementation reference | [DL/T 2041-2025 implementation](capacity_analysis_implementation.md) | [Multidimensional weak-link identification](multidimensional_weak_link_identification.md) |
@@ -95,6 +95,13 @@ directory when a rendered copy is needed:
 - `PowerFlow/power_flow_manual1.tex`
 - `OptimalPowerFlow/opf_manual.tex`
 
+The tracked research manuscript
+[`latex/paper/structure_preserving_semismooth_acdc_pf/main.tex`](latex/paper/structure_preserving_semismooth_acdc_pf/main.tex)
+develops the balanced hybrid AC/DC VSC-limit formulation, semismooth Newton
+method, local-block Schur elimination, convergence conditions, and preliminary
+production evidence. Its claims remain bounded by the current VSC NCP contract
+and development status.
+
 The old component-only PDF had no tracked editable source and was removed.
 
 ## Archive and local-only material
@@ -104,8 +111,9 @@ The old component-only PDF had no tracked editable source and was removed.
   intentionally absent from the active topic tables above.
 - `docs/generated/` is ignored Doxygen output. Regenerate it from source; do
   not cite it as a canonical contract.
-- `docs/latex/` is an ignored local research workspace. Files below it are not
-  available in a clean clone and cannot satisfy a tracked documentation gap.
+- `docs/latex/` is generally an ignored local research workspace. Only
+  explicitly unignored manuscript directories listed above are tracked and
+  available in a clean clone.
 - LaTeX auxiliary files and rendered PDFs are build products and must remain
   untracked.
 

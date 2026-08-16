@@ -10,6 +10,7 @@
 #include <Eigen/SparseLU>
 
 #include "hacdcpf/dynamics/DynamicSystem.hpp"
+#include "hacdcpf/model/defaults.hpp"
 
 namespace hacdcpf::dynamics::detail {
 
@@ -30,7 +31,7 @@ inline bool numerical_state_jacobian(DynamicSystem& system,
   const Eigen::Index n = state.size();
   jac = Eigen::MatrixXd::Zero(n, n);
   if (n == 0) return true;
-  const double eps0 = std::sqrt(std::numeric_limits<double>::epsilon());
+  constexpr double eps0 = NumericalConstants::kSqrtMachineEpsilon;
   for (Eigen::Index col = 0; col < n; ++col) {
     Eigen::VectorXd perturbed = state;
     const double h = eps0 * std::max(1.0, std::abs(state[col]));

@@ -14,6 +14,7 @@
 #include "hacdcpf/dynamics/DynamicModelBuilder.hpp"
 #include "hacdcpf/dynamics/DynamicFrequency.hpp"
 #include "hacdcpf/dynamics/SmallSignal.hpp"
+#include "hacdcpf/model/defaults.hpp"
 
 namespace hacdcpf::dynamics {
 namespace {
@@ -729,7 +730,7 @@ bool numerical_state_jacobian(DynamicSystem& sys,
   const Eigen::Index n = state.size();
   jac = Eigen::MatrixXd::Zero(n, n);
   if (n == 0) return true;
-  const double eps0 = std::sqrt(std::numeric_limits<double>::epsilon());
+  constexpr double eps0 = NumericalConstants::kSqrtMachineEpsilon;
   for (Eigen::Index col = 0; col < n; ++col) {
     Eigen::VectorXd perturbed = state;
     const double h = eps0 * std::max(1.0, std::abs(state[col]));
@@ -1224,7 +1225,7 @@ bool dae_build_and_factor_jacobian(DynamicSystem& sys,
                                    DaeNewtonCache& cache,
                                    StepOutcome& outcome,
                                    std::string& error) {
-  const double eps = std::sqrt(std::numeric_limits<double>::epsilon());
+  constexpr double eps = NumericalConstants::kSqrtMachineEpsilon;
   std::vector<Eigen::Triplet<double>> triplets;
   triplets.reserve(static_cast<std::size_t>(L.n) * 8);
   Eigen::SparseMatrix<std::complex<double>> Yac;

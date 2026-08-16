@@ -6426,6 +6426,176 @@ TEST_CASE("Updated GFM inverter stamps Norton voltage source and droop telemetry
   CHECK(it->values.count("p_filtered_mw") == 1);
 }
 
+TEST_CASE("Balanced GFM limit-NCP certificate initializes the transient Norton port",
+          "[dynamics][gfm][initialization][power_flow]") {
+  auto sys = make_hybrid_dc_case();
+  auto& converter = sys.vsc_converters.front();
+  converter.bus_dc = 2;
+  converter.ac_grid_forming = true;
+  converter.grid_forming = false;
+  converter.control_mode = ConverterMode::AC_GRID_FORMING;
+  converter.enable_limit_ncp = true;
+  converter.current_limit_priority = VSCCurrentLimitPriority::Magnitude;
+  converter.i_ac_max_pu = 0.55;
+  converter.gfm_internal_voltage_set_pu = 1.08;
+  converter.gfm_internal_angle_set_deg = 10.0;
+  converter.gfm_virtual_r_pu = 0.03;
+  converter.gfm_virtual_x_pu = 0.18;
+  converter.k_p = 0.02;
+  converter.k_q = 0.08;
+
+  auto options = fast_options();
+  options.run_power_flow_initialization = true;
+  options.trim_dynamic_initial_conditions = false;
+  options.use_consistent_dynamic_initialization = false;
+  options.power_flow_options.tol = 1e-10;
+  options.power_flow_options.max_iter = 100;
+  DynamicModelBuilder builder;
+  DynamicSystem dynamic_system = builder.build(sys, options);
+
+  REQUIRE(dynamic_system.initial_power_flow.converged);
+  REQUIRE(dynamic_system.initial_power_flow.vsc_limit_states.size() == 1);
+  const auto& certificate =
+      dynamic_system.initial_power_flow.vsc_limit_states.front();
+  REQUIRE(certificate.gfm_norton_model);
+  const auto device = std::find_if(
+      dynamic_system.devices.begin(), dynamic_system.devices.end(),
+      [](const std::unique_ptr<DynamicDevice>& item) {
+        return item->type() == "VSCGridForming" && item->componentIndex() == 1;
+      });
+  REQUIRE(device != dynamic_system.devices.end());
+  const auto output = (*device)->output(dynamic_system.x, dynamic_system.y);
+  const std::complex<double> internal{
+      certificate.internal_voltage_real_pu,
+      certificate.internal_voltage_imag_pu};
+  const std::complex<double> current{
+      certificate.terminal_current_real_pu,
+      certificate.terminal_current_imag_pu};
+  CHECK(dynamic_system.initialization.gfm_pf_seed_checked);
+  CHECK(dynamic_system.initialization.gfm_pf_seed_certified);
+  CHECK(dynamic_system.initialization.gfm_pf_seed_devices == 1);
+  CHECK(dynamic_system.initialization.gfm_pf_seed_internal_voltage_error_pu <= 1e-8);
+  CHECK(dynamic_system.initialization.gfm_pf_seed_current_error_pu <= 1e-8);
+  CHECK(dynamic_system.initialization.gfm_pf_seed_power_error_pu <= 1e-8);
+  CHECK(output.values.at("virtual_r_pu") == Catch::Approx(0.03));
+  CHECK(output.values.at("virtual_x_pu") == Catch::Approx(0.18));
+  CHECK(output.values.at("e_internal_pu") ==
+        Catch::Approx(std::abs(internal)).margin(1e-8));
+  CHECK(output.values.at("angle_rad") ==
+        Catch::Approx(std::arg(internal)).margin(1e-8));
+  CHECK(output.values.at("current_limit_pu") == Catch::Approx(0.55));
+}
+
+TEST_CASE("Slackless GFM island initializes the transient Norton port without a terminal slack",
+          "[dynamics][gfm][initialization][power_flow][island]") {
+  auto sys = make_hybrid_dc_case();
+  sys.ac.buses.front().bus_type = BusType::PQ;
+  sys.ac.generators.clear();
+  auto& converter = sys.vsc_converters.front();
+  converter.index = 47;
+  converter.bus_dc = 2;
+  converter.ac_grid_forming = true;
+  converter.control_mode = ConverterMode::AC_GRID_FORMING;
+  converter.enable_limit_ncp = true;
+  converter.current_limit_priority = VSCCurrentLimitPriority::Magnitude;
+  converter.i_ac_max_pu = 1.2;
+  converter.gfm_internal_voltage_set_pu = 1.08;
+  converter.gfm_internal_angle_set_deg = 10.0;
+  converter.gfm_virtual_r_pu = 0.03;
+  converter.gfm_virtual_x_pu = 0.18;
+
+  Storage dc_source;
+  dc_source.index = 501;
+  dc_source.bus = 1;
+  dc_source.p_rated_mw = 200.0;
+  dc_source.pmin_mw = -200.0;
+  dc_source.pmax_mw = 200.0;
+  dc_source.e_rated_mwh = 1000.0;
+  dc_source.soc_init = 0.5;
+  dc_source.soc_min = 0.1;
+  dc_source.soc_max = 0.9;
+  dc_source.controllable = true;
+  sys.dc.storage.push_back(dc_source);
+
+  auto options = fast_options();
+  options.run_power_flow_initialization = true;
+  options.trim_dynamic_initial_conditions = false;
+  options.use_consistent_dynamic_initialization = false;
+  options.power_flow_options.tol = 1e-10;
+  options.power_flow_options.max_iter = 100;
+  options.power_flow_options.enable_converter_coordination_check = true;
+  DynamicModelBuilder builder;
+  DynamicSystem dynamic_system = builder.build(sys, options);
+
+  REQUIRE(dynamic_system.initial_power_flow.converged);
+  CHECK(dynamic_system.initial_power_flow.diagnostics
+            .gfm_island_reference_vsc_indices == std::vector<int>{47});
+  CHECK(dynamic_system.initialization.gfm_pf_seed_checked);
+  CHECK(dynamic_system.initialization.gfm_pf_seed_certified);
+  CHECK(dynamic_system.initialization.gfm_pf_seed_devices == 1);
+  CHECK(dynamic_system.initialization.gfm_pf_seed_internal_voltage_error_pu <=
+        1e-8);
+  CHECK(dynamic_system.initialization.gfm_pf_seed_current_error_pu <= 1e-8);
+  CHECK(dynamic_system.initialization.gfm_pf_seed_power_error_pu <= 1e-8);
+}
+
+TEST_CASE("Transient GFM resolution preserves legacy fallback and discloses profile overrides",
+          "[dynamics][gfm][initialization][contract]") {
+  auto sys = make_hybrid_dc_case();
+  auto& converter = sys.vsc_converters.front();
+  converter.bus_dc = 2;
+  converter.ac_grid_forming = true;
+  converter.grid_forming = false;
+  converter.control_mode = ConverterMode::AC_GRID_FORMING;
+  converter.enable_limit_ncp = true;
+  converter.i_ac_max_pu = 0.55;
+  converter.v_ac_set_pu = 1.08;
+  converter.v_ac_angle_set_deg = 10.0;
+  converter.r_conv_ac_pu = 0.03;
+  converter.x_sc_pu = 0.18;
+  converter.gfm_internal_voltage_set_pu = 0.0;
+  converter.gfm_internal_angle_set_deg = 0.0;
+  converter.gfm_virtual_r_pu = 0.0;
+  converter.gfm_virtual_x_pu = 0.0;
+
+  auto options = fast_options();
+  options.run_power_flow_initialization = true;
+  options.trim_dynamic_initial_conditions = false;
+  options.use_consistent_dynamic_initialization = false;
+  options.power_flow_options.tol = 1e-10;
+  options.power_flow_options.max_iter = 100;
+  DynamicModelBuilder builder;
+
+  DynamicSystem fallback_system = builder.build(sys, options);
+  REQUIRE(fallback_system.initial_power_flow.converged);
+  REQUIRE(fallback_system.initialization.gfm_pf_seed_checked);
+  CHECK(fallback_system.initialization.gfm_pf_seed_certified);
+  const auto fallback_device = std::find_if(
+      fallback_system.devices.begin(), fallback_system.devices.end(),
+      [](const std::unique_ptr<DynamicDevice>& item) {
+        return item->type() == "VSCGridForming" && item->componentIndex() == 1;
+      });
+  REQUIRE(fallback_device != fallback_system.devices.end());
+  const auto fallback_output =
+      (*fallback_device)->output(fallback_system.x, fallback_system.y);
+  CHECK(fallback_output.values.at("virtual_r_pu") == Catch::Approx(0.03));
+  CHECK(fallback_output.values.at("virtual_x_pu") == Catch::Approx(0.18));
+
+  converter.dynamic_model.parameters["virtual_x_pu"] = 0.12;
+  DynamicSystem override_system = builder.build(sys, options);
+  REQUIRE(override_system.initial_power_flow.converged);
+  REQUIRE(override_system.initialization.gfm_pf_seed_checked);
+  CHECK_FALSE(override_system.initialization.gfm_pf_seed_certified);
+  CHECK(override_system.initialization.gfm_pf_seed_current_error_pu > 1e-8);
+  CHECK(std::any_of(
+      override_system.initialization.warnings.begin(),
+      override_system.initialization.warnings.end(),
+      [](const std::string& warning) {
+        return warning.find("PF-to-transient Norton seed certification failed") !=
+               std::string::npos;
+      }));
+}
+
 TEST_CASE("Updated GFM inverter exposes dynamic DC-link telemetry",
           "[dynamics][gfm][dc_link]") {
   auto sys = make_hybrid_dc_case();

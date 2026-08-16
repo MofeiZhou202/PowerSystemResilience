@@ -15,6 +15,7 @@
 #include "hacdcpf/dynamics/devices/BasicDynamicDevices.hpp"
 #include "hacdcpf/model/device_control_role.hpp"
 #include "hacdcpf/model/enums.hpp"
+#include "hacdcpf/model/gfm_norton_contract.hpp"
 #include "hacdcpf/power_flow/newton_solver.hpp"
 #include "hacdcpf/projection/result_attribution.hpp"
 
@@ -2475,9 +2476,25 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
       p.p_ref_mw = conv.p_schedule_mw != 0.0 ? conv.p_schedule_mw : conv.p_set_mw;
       p.q_ref_mvar = conv.q_set_mvar;
       p.v_ref_pu = positive_or(conv.v_ac_set_pu, positive_or(conv.v_ref_pu, 1.0));
-      p.angle_ref_rad = conv.v_ac_angle_set_deg * kDegToRad;
-      p.virtual_r_pu = positive_or(conv.r_conv_ac_pu, 0.0);
-      p.virtual_x_pu = options.inverter_virtual_reactance_pu;
+      const auto gfm = model::resolve_gfm_norton_parameters(conv);
+      p.v_ref_pu = gfm.internal_voltage_pu;
+      p.angle_ref_rad = gfm.internal_angle_rad;
+      p.virtual_r_pu = gfm.virtual_r_pu;
+      p.virtual_x_pu = gfm.virtual_x_pu;
+      switch (conv.current_limit_priority) {
+        case VSCCurrentLimitPriority::Magnitude:
+          p.limiter_kind = CurrentLimiterKind::Magnitude;
+          p.reactive_current_priority = false;
+          break;
+        case VSCCurrentLimitPriority::ActivePower:
+          p.limiter_kind = CurrentLimiterKind::ActivePriority;
+          p.reactive_current_priority = false;
+          break;
+        case VSCCurrentLimitPriority::ReactivePower:
+          p.limiter_kind = CurrentLimiterKind::ReactivePriority;
+          p.reactive_current_priority = true;
+          break;
+      }
       p.f_ref_hz = positive_or(conv.f_ref_hz, network.frequency_hz);
       p.current_limit_pu = conv.i_ac_max_pu;
       p.pmax_mw = conv.pmax_mw > 0.0 ? conv.pmax_mw

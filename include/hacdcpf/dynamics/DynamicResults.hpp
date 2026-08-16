@@ -85,6 +85,12 @@ struct DynamicInitializationSummary {
   double max_ac_voltage_pu{0.0};
   double min_dc_voltage_pu{0.0};
   double max_dc_voltage_pu{0.0};
+  bool gfm_pf_seed_checked{false};
+  bool gfm_pf_seed_certified{false};
+  int gfm_pf_seed_devices{0};
+  double gfm_pf_seed_internal_voltage_error_pu{0.0};
+  double gfm_pf_seed_current_error_pu{0.0};
+  double gfm_pf_seed_power_error_pu{0.0};
   std::vector<DynamicResidualDiagnostic> dynamic_residual_diagnostics;
   std::vector<std::string> warnings;
 };

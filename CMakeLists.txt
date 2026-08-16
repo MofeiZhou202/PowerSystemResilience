@@ -374,6 +374,7 @@ endif()
 set(HACDCPF_SOURCES
   # ── model ────────────────────────────────────────────────────────────────
   src/model/network_utils.cpp
+  src/model/model_semantics.cpp
   src/model/result_attribution.cpp
   src/model/standard_parameter_library.cpp
   src/model/unit_conversion.cpp
@@ -392,6 +393,7 @@ set(HACDCPF_SOURCES
   src/power_flow/branch_flow.cpp
   src/power_flow/converter_coordination.cpp
   src/power_flow/converter_model.cpp
+  src/power_flow/vsc_limit_ncp.cpp
   src/power_flow/dc.cpp
   src/power_flow/dc_solver.cpp
   src/power_flow/distributed_slack_solver.cpp
@@ -410,6 +412,7 @@ set(HACDCPF_SOURCES
   src/power_flow/pf_injection_assembly.cpp
   src/power_flow/residual_evaluator.cpp
   src/power_flow/robust_nonlinear_options.cpp
+  src/power_flow/vsc_local_schur.cpp
   src/power_flow/solver_data.cpp
   src/power_flow/solver_interface.cpp
   src/power_flow/voltage_stability.cpp
@@ -761,6 +764,16 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/opf_numerical_benchmark.cpp")
     $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3 -DNDEBUG -Wall -Wextra -Wpedantic>
     $<$<CXX_COMPILER_ID:MSVC>:/O2 /DNDEBUG /W4>)
   hacdcpf_copy_opendss_runtime(opf_numerical_benchmark)
+endif()
+
+# Fixed-protocol local-VSC Schur benchmark. This is intentionally not a CTest:
+# it performs repeated Release solves and emits machine-readable evidence.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/vsc_schur_benchmark.cpp")
+  add_executable(vsc_schur_benchmark tools/vsc_schur_benchmark.cpp)
+  target_link_libraries(vsc_schur_benchmark PRIVATE hacdcpf::hacdcpf)
+  target_compile_options(vsc_schur_benchmark PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall;-Wextra;-Wpedantic>)
+  hacdcpf_copy_opendss_runtime(vsc_schur_benchmark)
 endif()
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/matpower_pf_compare.cpp")

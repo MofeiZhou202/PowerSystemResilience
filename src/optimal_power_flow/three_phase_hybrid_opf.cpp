@@ -68,6 +68,7 @@ struct ConverterMap {
   double p_droop_pu{0.01};
   double q_droop_pu{0.05};
   double voltage_reference_pu{1.0};
+  double voltage_reference_angle_rad{0.0};
   double voltage_integral_gain{10.0};
 };
 
@@ -450,6 +451,8 @@ std::shared_ptr<ModelData> build_model_data(
     map.p_droop_pu = converter.p_droop_pu;
     map.q_droop_pu = converter.q_droop_pu;
     map.voltage_reference_pu = converter.voltage_reference_pu;
+    map.voltage_reference_angle_rad =
+        converter.voltage_reference_angle_rad;
     map.voltage_integral_gain = converter.voltage_integral_gain;
     if (converter.control_mode == PhaseVSCControlMode::GridFormingDroop) {
       map.gfm_var_position = gfm_var++;
@@ -1595,6 +1598,13 @@ Eigen::VectorXd build_initial_point(const ModelData& d) {
     const double pac = -pdc /
         (converter.efficiency * converter.phase_var_positions.size());
     for (int pos : converter.phase_var_positions) x[l.i_pac + pos] = pac;
+    if (converter.control_mode == PhaseVSCControlMode::GridFormingDroop) {
+      const Complex internal = std::polar(
+          converter.voltage_reference_pu,
+          converter.voltage_reference_angle_rad);
+      x[l.i_gfm_e + converter.gfm_var_position] = std::real(internal);
+      x[l.i_gfm_f + converter.gfm_var_position] = std::imag(internal);
+    }
   }
 
   initialize_ac_power_flow(d, x);

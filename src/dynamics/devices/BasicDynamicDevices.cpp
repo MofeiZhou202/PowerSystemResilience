@@ -12,6 +12,8 @@
 #include <Eigen/Sparse>
 #include <Eigen/SparseLU>
 
+#include "hacdcpf/model/defaults.hpp"
+
 namespace hacdcpf::dynamics {
 namespace {
 
@@ -1378,7 +1380,7 @@ Eigen::VectorXd solve_onedoneq_initial_conditions(const OneDOneQParams& p,
   Eigen::VectorXd best = z;
   double best_norm =
       onedoneq_initial_residual(p, v, p0, q0, z).lpNorm<Eigen::Infinity>();
-  const double eps = std::sqrt(std::numeric_limits<double>::epsilon());
+  constexpr double eps = NumericalConstants::kSqrtMachineEpsilon;
   for (int iter = 0; iter < 30; ++iter) {
     const Eigen::VectorXd r = onedoneq_initial_residual(p, v, p0, q0, z);
     const double norm = r.lpNorm<Eigen::Infinity>();
@@ -1539,7 +1541,7 @@ Eigen::VectorXd solve_simple_marconato_initial_conditions(const SimpleMarconatoP
   Eigen::VectorXd best = z;
   double best_norm =
       simple_marconato_initial_residual(p, v, p0, q0, z).lpNorm<Eigen::Infinity>();
-  const double eps = std::sqrt(std::numeric_limits<double>::epsilon());
+  constexpr double eps = NumericalConstants::kSqrtMachineEpsilon;
   for (int iter = 0; iter < 30; ++iter) {
     const Eigen::VectorXd r = simple_marconato_initial_residual(p, v, p0, q0, z);
     const double norm = r.lpNorm<Eigen::Infinity>();
@@ -1649,7 +1651,7 @@ Eigen::VectorXd solve_marconato_initial_conditions(const SimpleMarconatoParams& 
   Eigen::VectorXd best = z;
   double best_norm =
       marconato_initial_residual(p, v, p0, q0, z).lpNorm<Eigen::Infinity>();
-  const double eps = std::sqrt(std::numeric_limits<double>::epsilon());
+  constexpr double eps = NumericalConstants::kSqrtMachineEpsilon;
   for (int iter = 0; iter < 40; ++iter) {
     const Eigen::VectorXd r = marconato_initial_residual(p, v, p0, q0, z);
     const double norm = r.lpNorm<Eigen::Infinity>();
@@ -1812,7 +1814,7 @@ Eigen::VectorXd solve_sauerpai_initial_conditions(const SauerPaiParams& p,
   Eigen::VectorXd best = z;
   double best_norm =
       sauerpai_initial_residual(p, v, p0, q0, z).lpNorm<Eigen::Infinity>();
-  const double eps = std::sqrt(std::numeric_limits<double>::epsilon());
+  constexpr double eps = NumericalConstants::kSqrtMachineEpsilon;
   for (int iter = 0; iter < 50; ++iter) {
     const Eigen::VectorXd r = sauerpai_initial_residual(p, v, p0, q0, z);
     const double norm = r.lpNorm<Eigen::Infinity>();
@@ -1931,7 +1933,7 @@ Eigen::VectorXd solve_genrou_initial_conditions(const GenrouParams& p,
   Eigen::VectorXd best = z;
   double best_norm =
       genrou_initial_residual(p, v, p0, q0, z).lpNorm<Eigen::Infinity>();
-  const double eps = std::sqrt(std::numeric_limits<double>::epsilon());
+  constexpr double eps = NumericalConstants::kSqrtMachineEpsilon;
   for (int iter = 0; iter < 30; ++iter) {
     const Eigen::VectorXd r = genrou_initial_residual(p, v, p0, q0, z);
     const double norm = r.lpNorm<Eigen::Infinity>();
@@ -2117,7 +2119,7 @@ Eigen::VectorXd solve_salient_initial_conditions(const SalientParams& p,
   Eigen::VectorXd best = z;
   double best_norm =
       salient_initial_residual(p, v, p0, q0, z).lpNorm<Eigen::Infinity>();
-  const double eps = std::sqrt(std::numeric_limits<double>::epsilon());
+  constexpr double eps = NumericalConstants::kSqrtMachineEpsilon;
   for (int iter = 0; iter < 30; ++iter) {
     const Eigen::VectorXd r = salient_initial_residual(p, v, p0, q0, z);
     const double norm = r.lpNorm<Eigen::Infinity>();
@@ -5677,19 +5679,50 @@ void GridFormingInverter::assignStateIndices(int& offset) {
 void GridFormingInverter::initializeFromPowerFlow(const PowerFlowResult& pf,
                                                  DynamicState& x,
                                                  NetworkState& y) {
+  const auto equilibrium = std::find_if(
+      pf.vsc_limit_states.begin(), pf.vsc_limit_states.end(),
+      [&](const VSCLimitStateResult& state) {
+        return state.index == params_.component_index && state.gfm_norton_model;
+      });
+  has_pf_gfm_equilibrium_ = equilibrium != pf.vsc_limit_states.end();
+  if (has_pf_gfm_equilibrium_) {
+    pf_internal_voltage_real_pu_ = equilibrium->internal_voltage_real_pu;
+    pf_internal_voltage_imag_pu_ = equilibrium->internal_voltage_imag_pu;
+    pf_active_power_pu_ = equilibrium->p_ac_pu;
+    pf_reactive_power_pu_ = equilibrium->q_ac_pu;
+    params_.p_ref_mw = pf_active_power_pu_ * safe_base(params_.base_mva);
+    const Eigen::Vector3cd vabc = bus_voltage(y, params_.bus_pos);
+    const double terminal_voltage = std::max(kMinVoltage, avg_voltage_mag(vabc));
+    const double q_reference = std::abs(params_.q_droop_pu) > 1e-12
+        ? pf_reactive_power_pu_ -
+              (params_.v_ref_pu - terminal_voltage) / params_.q_droop_pu
+        : pf_reactive_power_pu_;
+    params_.q_ref_mvar = q_reference * safe_base(params_.base_mva);
+  }
   double angle = params_.angle_ref_rad;
   if (params_.bus_pos >= 0 && params_.bus_pos < static_cast<int>(pf.va.size())) {
     angle = pf.va[static_cast<std::size_t>(params_.bus_pos)];
   }
+  if (has_pf_gfm_equilibrium_) {
+    angle = std::atan2(pf_internal_voltage_imag_pu_,
+                       pf_internal_voltage_real_pu_);
+  }
   x.x[state_index(range_, 0)] = angle;
-  x.x[state_index(range_, 1)] = std::clamp(params_.v_ref_pu,
+  const double internal_magnitude = has_pf_gfm_equilibrium_
+      ? std::hypot(pf_internal_voltage_real_pu_,
+                   pf_internal_voltage_imag_pu_)
+      : params_.v_ref_pu;
+  x.x[state_index(range_, 1)] = std::clamp(internal_magnitude,
                                            params_.vmin_internal_pu,
                                            params_.vmax_internal_pu);
   x.x[state_index(range_, 2)] =
       params_.control_kind == GridFormingControlKind::VirtualInertia
           ? 1.0
-          : params_.p_ref_mw / safe_base(params_.base_mva);
-  x.x[state_index(range_, 3)] = params_.q_ref_mvar / safe_base(params_.base_mva);
+          : (has_pf_gfm_equilibrium_ ? pf_active_power_pu_
+                                     : params_.p_ref_mw / safe_base(params_.base_mva));
+  x.x[state_index(range_, 3)] = has_pf_gfm_equilibrium_
+      ? pf_reactive_power_pu_
+      : params_.q_ref_mvar / safe_base(params_.base_mva);
   x.x[state_index(range_, 4)] = 0.0;
   x.x[state_index(range_, 5)] = 0.0;
   if (range_.size > 6) {
@@ -5707,16 +5740,18 @@ bool GridFormingInverter::trimToNetworkEquilibrium(DynamicState& x, NetworkState
   const Eigen::Vector3cd vabc = bus_voltage(y, params_.bus_pos);
   const Complex v = positive_sequence_voltage(vabc);
   const double vt = std::max(kMinVoltage, avg_voltage_mag(vabc));
-  const double p_ref = params_.p_ref_mw / safe_base(params_.base_mva);
+  const double p_ref = has_pf_gfm_equilibrium_
+      ? pf_active_power_pu_ : params_.p_ref_mw / safe_base(params_.base_mva);
   const double q_ref = params_.q_ref_mvar / safe_base(params_.base_mva);
   // A grid-connected GFM source generally exchanges reactive power to satisfy
   // its Q-V droop equilibrium.  Forcing q_filtered=q_ref leaves the voltage
   // integrator with a permanent residual whenever the live bus differs from
   // v_ref.  Solve the algebraic droop relation for the equilibrium Q instead.
-  const double q_equilibrium =
-      std::abs(params_.q_droop_pu) > 1e-12
+  const double q_equilibrium = has_pf_gfm_equilibrium_
+      ? pf_reactive_power_pu_
+      : (std::abs(params_.q_droop_pu) > 1e-12
           ? q_ref + (params_.v_ref_pu - vt) / params_.q_droop_pu
-          : q_ref;
+          : q_ref);
   const Complex z(params_.virtual_r_pu, std::max(1e-5, params_.virtual_x_pu));
   const Complex yv = Complex(1.0, 0.0) / z;
   const Complex s_ref(p_ref, q_equilibrium);
@@ -5728,10 +5763,13 @@ bool GridFormingInverter::trimToNetworkEquilibrium(DynamicState& x, NetworkState
     denominator += vabc[phase] * std::conj(rotation[phase]);
     voltage_norm_sum += std::norm(vabc[phase]);
   }
-  const Complex e = std::abs(denominator) > 1e-12
+  const Complex e_from_network = std::abs(denominator) > 1e-12
       ? std::conj((3.0 * std::conj(z) * s_ref + voltage_norm_sum) /
                   denominator)
       : v;
+  const Complex e = has_pf_gfm_equilibrium_
+      ? Complex{pf_internal_voltage_real_pu_, pf_internal_voltage_imag_pu_}
+      : e_from_network;
   const double e_mag =
       clamp_voltage_window(std::abs(e), params_.vmin_internal_pu, params_.vmax_internal_pu);
   const double theta = std::arg(e);

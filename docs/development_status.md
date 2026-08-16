@@ -10,13 +10,105 @@ the current Git worktrees remain authoritative.
 
 | Scope | Result |
 |---|---|
-| Required MIPSolvers source | Current pin `5a5fad013ec561c9e6d0ecfdf60afdb97ad1a5f8` on clean MIPSolvers `main`; the full regressions below were established at the older `60f8bc4e4eeb58c239f83b7ff0fde1be75cd05b0` baseline |
+| Required MIPSolvers source | Current pin `3bf1e66749e3b3e0bbd57696a7d4f43ecf09218c`; the clean sibling worktree matches it and includes the PF KLU numeric-refactor interface/adapter. The PF regressions below used the same three-file dependency content before it was committed. The earlier general full-regression baseline was established at `60f8bc4e4eeb58c239f83b7ff0fde1be75cd05b0`. |
 | `full-dev` regression | 1430/1430 registered tests completed without failure; 3 condition-dependent tests skipped |
 | `macos-release` regression | 1425/1425 registered tests completed without failure; 3 condition-dependent tests skipped |
 | Graph ASan/UBSan subset | 28 cases, 113 assertions passed after the iterative Tarjan fix |
 | Reliability ASan/UBSan | Complete three-stage suite 25 cases/1339 assertions; `case33mg_acdc` 477 assertions and five consecutive parallel repeats passed; `test_1_no_sop` 79 assertions |
 | Market ASan/UBSan | Complete suite 22 cases/845 assertions; focused initial root-cut case 1/42 |
 | Other sanitizer subsets | Thread pool 4 cases/6 assertions; `test_hacdcpf` 26/89; `test_acopf_dcopf_crossval` 13/119; `test_power_flow_math_audit` 42/231 |
+
+## Balanced VSC current-limit NCP
+
+The production unified Newton path now has an opt-in fixed six-state local
+block per supported `PQ_MODE`, `VDC_Q`, or grid-connected `AC_GRID_FORMING`
+converter. The shared `(Pac,Qac,Pdc,Er,Ei,lambda)` layout uses identity internal-
+voltage slots for power-port modes and an explicit internal voltage behind
+virtual impedance for GFM. It enforces the AC current disk,
+Magnitude/P-first/Q-first policy, energy balance, and saturated Vdc-droop
+command. Network and local generalized Jacobians, including terminal-angle
+derivatives, are analytic and retain one fixed sparse layout across activation.
+
+The complete Release `test_vsc_limit_ncp` target passes 45 cases and 540
+assertions. It covers three priorities, the full local/terminal Jacobian
+finite-difference check, two simultaneous GFM limits, zero-radius priority
+ties, weak-grid and infeasible points, three-step quasi-steady replay, balanced
+OPF dispatch replay, two-level OpenDSS validation, legacy power-port oracles,
+nonbinding equivalence, Vdc saturation, structural admission, standard/JPC
+round trips, stable identity, shared parameter precedence, the production
+demo, sole/multiple slackless GFM islands, adaptive island extraction, and the
+case300/ACTIVSg2000 families. Exact FB now satisfies the biactive origin rather
+than adding a hidden epsilon. Optional smooth FB/CHKS continuation covers all
+three power-port priorities and all three current-limited GFM priorities; the
+measured solves took 16--25 iterations with 11 continuation updates, retained
+one Jacobian pattern build, and returned exact residual certificates between
+`1.0e-12` and `3.6e-10`. The three-phase hybrid OPF target
+passes 12 cases/152 assertions, including rich-to-phase GFM parameter mapping.
+
+The focused transient initialization contract passes 4 cases and 51
+assertions. Its primary 15-assertion case certifies the stable-ID PF-to-dynamic
+Norton seed before network trimming: internal voltage, current, and power
+errors are each at most `1e-8`. A companion executable guard proves that the
+legacy authored fallback resolves identically across PF and dynamics, while an
+explicit transient profile override invalidates that continuity certificate
+and emits a warning. This seed certificate is distinct from the later
+full-dynamic equilibrium, which may move when dynamic device equivalents do
+not reproduce the PF slack dispatch. The added case starts without a terminal
+SLACK and certifies the stable GFM Norton seed through dynamic construction.
+
+The full `tools/gui_api_e2e.py` run passed all new production GFM/NCP HTTP
+checks, including the Schur-policy request/effective-options round trip. The
+`gfm_norton_limit_demo` built-in case loads with 2 AC buses, 2 DC
+buses, and 2 VSCs; it preserves all four authored Norton fields through GUI
+editing and returns stable Canvas references, local certificates, and the GFM
+validity flags. The complete script finished 68/69 checks; its unrelated
+existing hybrid Auto OPF check reached Ipopt's iteration limit with violation
+`1.51e-4`. No GFM/NCP HTTP check failed.
+
+Two versioned MTDC/PQ-Vdc-Q benchmark builders prevent pure-AC evidence from
+being misreported as converter-limit scalability. The registered case300 solve
+has 300 AC buses, 6 DC buses, and 6 explicit VSC blocks; ACTIVSg2000 has 2000
+AC buses, 8 DC buses, and 8 explicit blocks. Each has four simultaneous
+power-port limits. Separate GFM builders solve that real MTDC benchmark first,
+retain its voltage state as an explicit continuation seed, and add one
+nonbinding Norton GFM block; their focused tests each pass 13 assertions. They
+prove fixed sparse structure on real hybrid networks, not GFM flat-start
+robustness, large-scale simultaneous GFM binding, or GPU acceleration.
+
+The fixed two-warmup/five-repeat Release/KLU Schur benchmark was rerun after
+centralizing the numerical policy. Forced case300 Schur reduced dimension
+`640 -> 604` and structural nonzeros `4820 -> 4502`, but increased median
+linear time `40.9%` and wall time `15.7%`; the production default therefore
+keeps this case on full LU. ACTIVSg2000 reduced `4054 -> 4006` and
+`29806 -> 29382`, with median linear and wall reductions of `14.0%` and
+`12.5%`. The Schur enable flag, network-dimension admission, local `rcond`,
+and backward-error tolerances now round-trip through the production PF HTTP
+configuration. Invalid dimensionless tolerances restore named defaults; the
+global machine epsilon remains read-only.
+
+The admitted GFM scope is balanced positive-sequence steady/quasi-steady
+operation. A slackless island retains all terminal `Vm/Va` variables and is
+anchored by one or more authored fixed internal GFM Norton phasors; no terminal
+SLACK is manufactured. Strict coordination still requires physical DC-side
+voltage/power support, and the local Newton method does not claim uniqueness
+across high- and low-voltage basins. Balanced OPF does not put the
+GFM internal-voltage/priority NCP inside its KKT system: the production PF
+`post_pf` replay preserves GFM mode and provides the certificate. OpenDSS
+independently reproduces the nonbinding Thevenin root; at a binding point it
+freezes the HySim internal voltage and re-solves the circuit with native
+terminal-power KCL residual at most `1e-6 pu`, which is not presented as an
+independent mode-selection oracle. GPU assembly/factorization remains
+unimplemented. The concrete authored/canonical/solver/result/replay ownership
+rules are in `docs/model_data_semantics_contract.md`; the equations and
+numerical boundaries are in `docs/vsc_limit_ncp_power_flow_contract.md`.
+
+The repository-wide semantics guard `test_model_semantics_contract` passes 5
+cases and 1531 assertions. It pairs all 43 component I/O collections with
+runtime identity/unit/sign/model-fidelity contracts, covers all 22 top-level
+production source modules, and locks shared `DCStorage`/`StaticGeneratorDC`
+execution views plus additive bus/component demand. This audit found and fixed
+loss of `StaticGeneratorDC.cost_c1` in both SolverData construction paths. The
+existing component I/O registry also passes 14 cases and 373 assertions.
 
 ## Trial edition integration
 
@@ -56,9 +148,10 @@ claim that every sanitizer entry point is green.
 
 ## OPF Phase I/II integration and performance
 
-The checked-in dependency pin is MIPSolvers `5a5fad0`; its clean `main`
+The checked-in dependency pin is MIPSolvers `3bf1e66`; its clean `main`
 contains the audited central warm-start and NativeLCQP cooperative-deadline
-contracts used by this HySim change. Bounded Phase I fronts balanced Parity Native IPM (pure AC
+contracts used by this HySim change, plus the guarded KLU numeric-refactor
+adapter used by PF. Bounded Phase I fronts balanced Parity Native IPM (pure AC
 and hybrid AC/DC) and monolithic three-phase hybrid NativeIPM. Pure AC keeps
 the state/basic PF-Newton basis. Hybrid models first eliminate converter
 `Pdc` directions and solve the DC-conductance/converter Schur block, then use
@@ -671,8 +764,8 @@ on this list.
   and native B&C solve state across contingency workers; the native fallback
   uses one internal thread. Solver-bearing reliability workers request a 4 MiB
   POSIX stack through the optional `ThreadPool` stack-size parameter.
-- The sibling MIPSolvers worktree is clean at `5a5fad0`. Earlier local HiGHS
-  experiments are no longer described as pending worktree state here.
+- At that closure point, the sibling MIPSolvers worktree was clean at
+  `5a5fad0`. Earlier local HiGHS experiments are not pending worktree state.
 
 The apparent `HPresolve::changeImplColUpper` container corruption in
 `case33mg_acdc` was a downstream symptom of worker stack overflow, not a
@@ -716,15 +809,17 @@ active-set signatures, outer-budget exhaustion, final Q violation, and an
 explicit certificate are returned. The GUI defaults to fast screening with
 conversion disabled and labels Q-limit certification separately.
 
-Smooth NCP now uses the implemented CHKS median smoothing rather than ignoring
-`mu`. Continuation owns a local `SolverData` copy, initializes `mu` before the
-first evaluation, reassembles residual and Jacobian after every reduction, and
-cannot terminate until `ncp_mu_min` is reached. The result profiles continuation
-updates and final `mu`.
+Smooth NCP uses CHKS median smoothing for PV/PQ and priority projections plus
+Kanzow smooth-FB for magnitude-priority VSC blocks. Continuation owns a local
+`SolverData` copy, initializes `mu` before the first evaluation, reassembles
+residual and Jacobian after every reduction, and cannot terminate until
+`ncp_mu_min` is reached. VSC continuation can be enabled without the generator
+PV/PQ NCP option. Public converter certificates are re-evaluated against the
+exact `mu=0` equations.
 
 Release verification rebuilt `test_power_flow_math_audit`,
-`matpower_pf_compare`, and `run_gui_server`. The full math audit passed 49 cases
-and 304 assertions. The ASan/UBSan build passed its configured 42 cases and 260
+`matpower_pf_compare`, and `run_gui_server`. The full math audit passed 50 cases
+and 305 assertions. The ASan/UBSan build passed its configured 42 cases and 260
 assertions; LeakSanitizer is unavailable in the macOS runtime. JavaScript syntax
 and `git diff --check` passed.
 
@@ -845,8 +940,8 @@ adaptive selection passed 4 cases/23 assertions.
 
 ## Power-flow flat-start robustness follow-up
 
-The dirty worktree closes two correctness defects from the large-case PF
-evaluation. Reactive-limit certification now uses
+The committed PF follow-up closes two correctness defects from the large-case
+PF evaluation. Reactive-limit certification now uses
 `max(1e-10, PowerFlowOptions::tol)`: the limited-bus Q violation is the
 remaining Q-row mismatch and cannot be certified more tightly than the root
 that produced it. The focused regression deliberately converges with a
@@ -859,20 +954,21 @@ reports its analyses, factorizations, solves, and elapsed linear time.
 Default line-search Newton now detects only high-residual stagnation: the best
 residual must fail to improve by 10% over 15 iterations while remaining above
 `1.0`. Near-root damped progress retains the caller's full iteration budget.
-An opt-in `enable_homotopy_fallback_on_failure` retries a numerically failed
-solve and reports attempted/succeeded provenance in C++, the runtime JSON, and
-`matpower_pf_compare`. Intermediate continuation points follow the smooth
-unlimited PV equations; the original Q-limit formulation is solved and
-certified separately at `lambda=1`. Caller-supplied failed initial states are
-not reused as the zero-injection path seed.
+For a structurally closed numerical failure, the public default escalation is
+now deterministic: direct fixed-layout Newton, semi-smooth NCP, linearized-DC
+angle seed plus fixed-layout active set, DC-seeded NCP, then homotopy as the
+final fallback. Internal retries own their `SolverData` and `NewtonSolver`, do
+not recurse through the facade, preserve the caller's Q-enforcement semantics,
+and aggregate their work/provenance in `SolverProfiling`. LCC transformer tap
+control retains its dedicated outer loop and is not bypassed by direct retries.
 
-The opt-in `enable_fixed_pv_pq_layout` now embeds every non-slack AC bus's
-`Vm/Q` coordinates in one stable canonical bus-position order. PV rows become
-`Vm` identity rows while Q-limited rows retain physical Q balance; the outer
-active-set timing and certificate semantics are unchanged. Semi-smooth NCP
-remains mutually exclusive and wins with an explicit warning when both options
-are requested. Row nonzero indices are precomputed once, making active-row
-replacement `O(nnz(row))` rather than a full compressed-matrix scan.
+`enable_fixed_pv_pq_layout` is now the C++ default. It embeds every non-slack
+AC bus's `Vm/Q` coordinates in one stable canonical bus-position order. PV rows
+become `Vm` identity rows while Q-limited rows retain physical Q balance; the
+outer active-set timing and certificate semantics are unchanged. Semi-smooth
+NCP remains mutually exclusive and wins with an explicit warning when both
+options are requested. Row nonzero indices are precomputed once, making
+active-row replacement `O(nnz(row))` rather than a full compressed-matrix scan.
 
 On AppleClang 21 arm64 macOS, Release/KLU, working tree `3cc92658373a`,
 `case6515rte` reduced Jacobian pattern rebuilds/analyses from `3/3` to `1/1`
@@ -880,27 +976,59 @@ with unchanged 9 Newton iterations, 8 factorizations, 74 PV-to-PQ switches,
 and Q certificate (`4.22e-11 pu`); five-repeat median solve time was
 `58.7 -> 40.9 ms` (`30%`). `case_ACTIVSg10k` reduced `10/10 -> 1/1` with
 unchanged 26 iterations, 25 factorizations, 1151 entries, 40 restorations,
-and certificate; its median was `261.1 -> 152.0 ms` (`42%`). The feature is
-still opt-in and does not claim to reduce outer Newton iterations.
+and certificate; its median was `261.1 -> 152.0 ms` (`42%`). The default fixed
+layout does not claim to reduce the number of outer active-set solves.
 
-Release/KLU verification rebuilt the core library, `run_gui_server`,
-`matpower_pf_compare`, and the three focused suites. Results were
-`test_power_flow_math_audit` 49 cases/304 assertions,
-`test_homotopy_continuation` 5/34, and `test_advanced_pf` 30/218. The
-ASan/UBSan build (SuiteSparse disabled) passed 42/260, 5/34, and 30/218
-respectively with leak detection disabled because the macOS runtime does not
-provide LeakSanitizer. `git diff --check` and the new-code marker scan passed.
+The hard flat-start acceptance set is closed without homotopy tuning. Release/
+KLU default solves converged and Q-certified as follows: `case1888rte` used the
+DC-angle/fixed-active-set stage in 21 iterations, `case3375wp` used semi-smooth
+NCP in 9, `case6468rte` used DC-angle/fixed in 21, `case6515rte` used
+DC-angle/fixed in 30, and `case_ACTIVSg10k` used DC-angle/fixed in 29. None
+reached homotopy. Flat-start `case118` stayed on direct Newton and converged in
+18 iterations both with and without the outer ladder; warm `case3375wp` stayed
+at 7 iterations and warm `ACTIVSg10k` at 26, with zero escalation attempts.
 
-The hard flat-start acceptance set remains open. With the final Release tool,
-stagnation stopped `case1888rte`, `case3375wp`, `case6468rte`, and
-`case6515rte` after 17, 65, 20, and 18 iterations rather than consuming all 80;
-none converged. Opt-in homotopy also remained non-converged: the first, third,
-and fourth cases could not establish the zero-injection base point, while
-`case3375wp` reached the unlimited `lambda=1` root in three accepted steps but
-its final Q-limit endpoint solve failed. Warm-started `case3375wp` still
-converged and certified in 7 iterations; flat-start `case118` converged and
-certified in 18. No claim is made that the present escalation ladder repairs
-the four hard flat starts.
+`PreparedPowerFlowSession` now caches canonical projection, `SolverData`, the
+fixed Jacobian pattern, and symbolic analysis across compatible solves. A
+same-layout authored load/setpoint change refreshes numeric values without
+projection or assembly; topology/network-parameter changes rebuild
+conservatively. On `case6515rte`, five Release repeats had medians of
+`28.962 ms` through the ordinary facade and `16.463 ms` through one prepared
+session (`43.2%` lower); prepared repeats reported zero projection, assembly,
+and symbolic-analysis work.
+
+The PF linear path now requests KLU numeric refactorization only after an
+existing factorization with an unchanged pattern. Every candidate solve is
+guarded by a normwise backward-error audit and falls back to fresh pivoting on
+failure or excess error. On warm `case_ACTIVSg10k`, a five-repeat Release
+protocol reduced median total time from `154.032` to `104.024 ms` (`32.5%`)
+and final-solve linear time from `98.549` to `54.699 ms` (`44.5%`); all 24
+refactors were accepted and maximum backward error was `2.29e-17`. A zero
+tolerance regression forces every candidate through the full-factorization
+fallback and still converges.
+
+Profiling now covers residual evaluation, Jacobian scaling, active-set scans,
+projection, assembly, result derivation, solver-core/facade totals, unclassified
+remainders, prepared-session reuse, and escalation provenance. The W4 sweep is
+also closed: FDPF voltage division uses the configured floor, GFM derivatives
+use `min_vm_pu`, the Newton-Krylov Schur preconditioner reuses symbolic analysis,
+and the standalone DC solver uses an analytic sparse Jacobian/SparseLU instead
+of dense finite differences and `FullPivLU`.
+
+Release/KLU focused verification passed `test_power_flow_math_audit` 50 cases/
+305 assertions, `test_advanced_pf` 30/218, `test_homotopy_continuation` 5/36,
+`test_newton_krylov` 5/30, `test_hacdcpf` 27/117, and the flat-start/KLU
+MATPOWER filter 3/45. ASan/UBSan with SuiteSparse disabled and leak detection
+disabled passed 43/261, 30/218, 5/36, 5/30, the prepared-session filter 1/28,
+and the MATPOWER filter 3/41. The complete `macos-release` CTest then ran all
+1492 registered tests: 1482 passed, 7 failed, and 3 condition-dependent tests
+were skipped. Every PF/MATPOWER test passed. The seven failures were confined
+to existing OPF/RPO boundaries: multiscale/case300/GUI Auto Ipopt iteration
+limits, one authored-order OPF value at `10.0100145` just outside a `10.0 +/-
+0.01` assertion, the GUI multiscale/Auto OPF checks, and the case300 RPO
+cross-validation tolerance. No all-suite green claim is made. The main
+repository implementation is at `684de1ee`; the clean MIPSolvers dependency is
+at the pinned `3bf1e66`.
 
 ## Fast orientation
 

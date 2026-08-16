@@ -987,6 +987,11 @@ class GridFormingInverter : public DynamicDevice {
   InverterInnerVariableBus inner_vars_;
   IEEE1547RuntimeState protection_state_;
   SmartInverterState smart_state_;
+  bool has_pf_gfm_equilibrium_{false};
+  double pf_internal_voltage_real_pu_{0.0};
+  double pf_internal_voltage_imag_pu_{0.0};
+  double pf_active_power_pu_{0.0};
+  double pf_reactive_power_pu_{0.0};
 };
 
 struct GridFollowingInverterParams {
@@ -1128,6 +1133,9 @@ class GridFollowingInverter : public DynamicDevice {
 };
 
 struct VSCConverterDynamicParams : public GridFollowingInverterParams {
+  // Runtime copy resolved from the rich VSC contract, then optionally
+  // overridden by an explicit transient DynamicModelProfile. It is not an
+  // independent steady-state parameter source.
   bool grid_forming{false};
   std::string model_name{"GridFormingNortonDroop"};
   GridFormingControlKind control_kind{GridFormingControlKind::Droop};

@@ -4282,14 +4282,20 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
         sys_pf.ac.generators[gi].qg_mvar = opf_res.qg_mvar[gi];
       }
 
-      // Set VSC converter dispatch from OPF (PQ mode)
+      // Replay OPF dispatch only into converters whose authored control role is
+      // PQ. A grid-forming converter keeps its internal-voltage/virtual-
+      // impedance equations; changing it to PQ here would bypass the production
+      // GFM limit-NCP contract during quasi-steady validation.
       size_t conv_k = 0;
       for (size_t ci = 0; ci < sys_pf.vsc_converters.size(); ++ci) {
         if (!sys_pf.vsc_converters[ci].in_service) continue;
         if (conv_k < opf_res.pac_mw.size()) {
-          sys_pf.vsc_converters[ci].p_set_mw = opf_res.pac_mw[conv_k];
-          sys_pf.vsc_converters[ci].q_set_mvar = opf_res.qac_mvar[conv_k];
-          sys_pf.vsc_converters[ci].control_mode = ConverterMode::PQ_MODE;
+          auto& converter = sys_pf.vsc_converters[ci];
+          if (converter.control_mode != ConverterMode::AC_GRID_FORMING) {
+            converter.p_set_mw = opf_res.pac_mw[conv_k];
+            converter.q_set_mvar = opf_res.qac_mvar[conv_k];
+            converter.control_mode = ConverterMode::PQ_MODE;
+          }
           ++conv_k;
         }
       }

@@ -3,6 +3,7 @@
 #include "hacdcpf/power_flow/ac_kernel_impl.hpp"
 
 #include <cmath>
+#include <stdexcept>
 #include <vector>
 
 #include "hacdcpf/model/effective_capacity.hpp"
@@ -10,6 +11,7 @@
 #include "hacdcpf/power_flow/lcc_model.hpp"
 #include "hacdcpf/power_flow/ncp_functions.hpp"
 #include "hacdcpf/power_flow/pf_utils.hpp"
+#include "hacdcpf/power_flow/vsc_limit_ncp.hpp"
 
 namespace hacdcpf::powerflow {
 
@@ -24,6 +26,7 @@ void reset_or_resize(Eigen::VectorXd& v, int n) {
 }
 
 void build_power_spec(const SolverData& data,
+                      const JacobianContext& ctx,
                       const std::vector<ACBus>& ac_buses,
                       const std::vector<VSCConverter>& converters,
                       const Eigen::VectorXd& pg,
@@ -31,6 +34,7 @@ void build_power_spec(const SolverData& data,
                       const Eigen::VectorXd& vm,
                       const Eigen::VectorXd& va,
                       const Eigen::VectorXd& vdc,
+                      const Eigen::VectorXd& vsc_limit_state,
                       const Eigen::VectorXd& pcalc,
                       double min_vm_pu,
                       Eigen::VectorXd& p_spec,
@@ -135,12 +139,44 @@ void build_power_spec(const SolverData& data,
     }
   }
 
-  for (const auto& conv : converters) {
+  std::vector<int> converter_to_limit_block(converters.size(), -1);
+  for (int block_index = 0;
+       block_index < static_cast<int>(ctx.vsc_limit_blocks.size());
+       ++block_index) {
+    const int converter_position =
+        ctx.vsc_limit_blocks[static_cast<size_t>(block_index)].converter_position;
+    if (converter_position >= 0 &&
+        converter_position < static_cast<int>(converter_to_limit_block.size())) {
+      converter_to_limit_block[static_cast<size_t>(converter_position)] = block_index;
+    }
+  }
+
+  for (int converter_position = 0;
+       converter_position < static_cast<int>(converters.size());
+       ++converter_position) {
+    const auto& conv = converters[static_cast<size_t>(converter_position)];
     if (!conv.in_service) {
       continue;
     }
     const int ac_bus = conv.bus_ac - 1;
     const int dc_bus = conv.bus_dc - 1;
+    const int limit_block =
+        converter_to_limit_block[static_cast<size_t>(converter_position)];
+    if (limit_block >= 0) {
+      const int local_offset = limit_block * kVSCLimitStateSize;
+      if (local_offset + kVSCLimitStateSize > vsc_limit_state.size()) {
+        throw std::invalid_argument(
+            "VSC limit-NCP state does not match the Jacobian context");
+      }
+      if (ac_bus >= 0 && ac_bus < n) {
+        p_spec[ac_bus] += vsc_limit_state[local_offset];
+        q_spec[ac_bus] += vsc_limit_state[local_offset + 1];
+      }
+      if (dc_bus >= 0 && dc_bus < ndc) {
+        pdc_spec[dc_bus] += vsc_limit_state[local_offset + 2];
+      }
+      continue;
+    }
     if (ac_bus >= 0 && ac_bus < n) {
       const auto [pac, qac] =
           converter_ac_injection(conv, vm, va, vdc, data.base_mva, data.loss_model);
@@ -208,6 +244,7 @@ double evaluate_residual_impl(const SolverData& data,
                               const Eigen::VectorXd& vm,
                               const Eigen::VectorXd& va,
                               const Eigen::VectorXd& vdc,
+                              const Eigen::VectorXd& vsc_limit_state,
                               Eigen::VectorXd& pcalc,
                               Eigen::VectorXd& qcalc,
                               Eigen::VectorXd& p_spec,
@@ -222,6 +259,12 @@ double evaluate_residual_impl(const SolverData& data,
   const int n = ctx.n;
   const int ndc = ctx.ndc;
   const int nvar = ctx.nvar;
+  const int expected_limit_state_size =
+      static_cast<int>(ctx.vsc_limit_blocks.size()) * kVSCLimitStateSize;
+  if (vsc_limit_state.size() != expected_limit_state_size) {
+    throw std::invalid_argument(
+        "VSC limit-NCP state size does not match the active converter blocks");
+  }
 
   reset_or_resize(pcalc, n);
   reset_or_resize(qcalc, n);
@@ -301,8 +344,9 @@ double evaluate_residual_impl(const SolverData& data,
     }
   }
 
-  build_power_spec(data, ac_buses, converters, pg, qg, vm, va, vdc, pcalc,
-                   ctx.min_vm_pu, p_spec, q_spec, pdc_spec);
+  build_power_spec(data, ctx, ac_buses, converters, pg, qg, vm, va, vdc,
+                   vsc_limit_state, pcalc, ctx.min_vm_pu, p_spec, q_spec,
+                   pdc_spec);
 
   pdc_linear = data.gdc * vdc;
   pdc_calc = vdc.array() * pdc_linear.array();
@@ -381,7 +425,7 @@ double evaluate_residual_impl(const SolverData& data,
     //
     // Sign convention: J += -(∂spec/∂x)  (mismatch = spec - calc, so J = ∂(spec-calc)/∂x).
     for (const auto& conv : converters) {
-      if (!conv.in_service) continue;
+      if (!conv.in_service || supports_vsc_limit_ncp(conv)) continue;
       const int dc_bus = conv.bus_dc - 1;
       if (dc_bus < 0 || dc_bus >= ctx.ndc) continue;
       const int nz = pattern.dc_vdc_diag_nz[static_cast<size_t>(dc_bus)];
@@ -470,6 +514,45 @@ double evaluate_residual_impl(const SolverData& data,
   for (int row = 0; row < ctx.ndc_eq; ++row) {
     const int i = ctx.dc_non_slack[static_cast<size_t>(row)];
     mismatch[ctx.np + ctx.nq + row] = pdc_spec[i] - pdc_calc[i];
+  }
+
+  // Facchinei & Pang (2003), vol. I, sec. 9.1, and Qi & Sun (1993): the
+  // semismooth Newton system uses one generalized-Jacobian element of the NCP
+  // residual. Network rows retain the solver convention J=d(calc-spec)/dx,
+  // rhs=spec-calc, while local rows use J=dF/dx, rhs=-F.
+  for (const auto& entry : pattern.vsc_limit_entries) {
+    const auto& block =
+        ctx.vsc_limit_blocks[static_cast<size_t>(entry.block_index)];
+    const auto& converter =
+        converters[static_cast<size_t>(block.converter_position)];
+    const int local_offset = entry.block_index * kVSCLimitStateSize;
+    const Eigen::Matrix<double, kVSCLimitStateSize, 1> local_state =
+        vsc_limit_state.segment<kVSCLimitStateSize>(local_offset);
+    const VSCLimitEvaluation evaluation = evaluate_vsc_limit_ncp(
+        converter, vm[block.ac_bus], va[block.ac_bus], vdc[block.dc_bus], data.base_mva,
+        data.loss_model, local_state, data.ncp_mu);
+
+    for (int row = 0; row < kVSCLimitStateSize; ++row) {
+      mismatch[block.offset + row] = -evaluation.equation[row];
+    }
+    if (build_jacobian && values != nullptr) {
+      if (entry.p_network_nz >= 0) values[entry.p_network_nz] = -1.0;
+      if (entry.q_network_nz >= 0) values[entry.q_network_nz] = -1.0;
+      if (entry.dc_network_nz >= 0) values[entry.dc_network_nz] = -1.0;
+      for (int row = 0; row < kVSCLimitStateSize; ++row) {
+        for (int col = 0; col < kVSCLimitStateSize; ++col) {
+          const int nz = entry.local_nz[static_cast<size_t>(
+              row * kVSCLimitStateSize + col)];
+          if (nz >= 0) values[nz] = evaluation.jacobian(row, col);
+        }
+        const int vm_nz = entry.vm_nz[static_cast<size_t>(row)];
+        const int va_nz = entry.va_nz[static_cast<size_t>(row)];
+        const int vdc_nz = entry.vdc_nz[static_cast<size_t>(row)];
+        if (vm_nz >= 0) values[vm_nz] = evaluation.derivative_vm[row];
+        if (va_nz >= 0) values[va_nz] = evaluation.derivative_va[row];
+        if (vdc_nz >= 0) values[vdc_nz] = evaluation.derivative_vdc[row];
+      }
+    }
   }
 
   // Superset active-set formulation: all non-slack buses retain Vm/Q
@@ -622,6 +705,32 @@ double evaluate_residual_and_jacobian(const SolverData& data,
                                       Eigen::VectorXd& mismatch,
                                       JacobianPattern& pattern,
                                       int ac_eval_threads) {
+  return evaluate_residual_and_jacobian(
+      data, ctx, ac_buses, converters, pg, qg, vm, va, vdc, Eigen::VectorXd{},
+      pcalc, qcalc, p_spec, q_spec, pdc_linear, pdc_calc, pdc_spec, mismatch,
+      pattern, ac_eval_threads);
+}
+
+double evaluate_residual_and_jacobian(const SolverData& data,
+                                      const JacobianContext& ctx,
+                                      const std::vector<ACBus>& ac_buses,
+                                      const std::vector<VSCConverter>& converters,
+                                      const Eigen::VectorXd& pg,
+                                      const Eigen::VectorXd& qg,
+                                      const Eigen::VectorXd& vm,
+                                      const Eigen::VectorXd& va,
+                                      const Eigen::VectorXd& vdc,
+                                      const Eigen::VectorXd& vsc_limit_state,
+                                      Eigen::VectorXd& pcalc,
+                                      Eigen::VectorXd& qcalc,
+                                      Eigen::VectorXd& p_spec,
+                                      Eigen::VectorXd& q_spec,
+                                      Eigen::VectorXd& pdc_linear,
+                                      Eigen::VectorXd& pdc_calc,
+                                      Eigen::VectorXd& pdc_spec,
+                                      Eigen::VectorXd& mismatch,
+                                      JacobianPattern& pattern,
+                                      int ac_eval_threads) {
   return evaluate_residual_impl(data,
                                 ctx,
                                 ac_buses,
@@ -631,6 +740,7 @@ double evaluate_residual_and_jacobian(const SolverData& data,
                                 vm,
                                 va,
                                 vdc,
+                                vsc_limit_state,
                                 pcalc,
                                 qcalc,
                                 p_spec,
@@ -663,6 +773,32 @@ double evaluate_residual_only(const SolverData& data,
                               Eigen::VectorXd& mismatch,
                               const JacobianPattern& pattern,
                               int ac_eval_threads) {
+  return evaluate_residual_only(
+      data, ctx, ac_buses, converters, pg, qg, vm, va, vdc, Eigen::VectorXd{},
+      pcalc, qcalc, p_spec, q_spec, pdc_linear, pdc_calc, pdc_spec, mismatch,
+      pattern, ac_eval_threads);
+}
+
+double evaluate_residual_only(const SolverData& data,
+                              const JacobianContext& ctx,
+                              const std::vector<ACBus>& ac_buses,
+                              const std::vector<VSCConverter>& converters,
+                              const Eigen::VectorXd& pg,
+                              const Eigen::VectorXd& qg,
+                              const Eigen::VectorXd& vm,
+                              const Eigen::VectorXd& va,
+                              const Eigen::VectorXd& vdc,
+                              const Eigen::VectorXd& vsc_limit_state,
+                              Eigen::VectorXd& pcalc,
+                              Eigen::VectorXd& qcalc,
+                              Eigen::VectorXd& p_spec,
+                              Eigen::VectorXd& q_spec,
+                              Eigen::VectorXd& pdc_linear,
+                              Eigen::VectorXd& pdc_calc,
+                              Eigen::VectorXd& pdc_spec,
+                              Eigen::VectorXd& mismatch,
+                              const JacobianPattern& pattern,
+                              int ac_eval_threads) {
   // build_jacobian=false: the impl will never call valuePtr() or write through
   // the values pointer, so casting away const is safe here.
   return evaluate_residual_impl(data,
@@ -674,6 +810,7 @@ double evaluate_residual_only(const SolverData& data,
                                 vm,
                                 va,
                                 vdc,
+                                vsc_limit_state,
                                 pcalc,
                                 qcalc,
                                 p_spec,

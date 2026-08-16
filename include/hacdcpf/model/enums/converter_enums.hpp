@@ -22,6 +22,15 @@ enum class ConverterMode {
   DC_V_DROOP_AC_V,
 };
 
+// Steady-state VSC AC-current limiting policy.  These policies are part of the
+// balanced positive-sequence power-flow contract and are intentionally kept
+// separate from the transient CurrentLimiterKind taxonomy.
+enum class VSCCurrentLimitPriority {
+  Magnitude = 0,
+  ActivePower = 1,
+  ReactivePower = 2,
+};
+
 // VSC seven-mode control taxonomy (multi-converter model r1 §6.1).  This is the
 // human-facing classification of the seven typical VSC steady-state control
 // modes; each maps onto a ConverterMode + AC-bus treatment for the power flow.

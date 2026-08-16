@@ -24,6 +24,7 @@
 #include "hacdcpf/power_flow/homotopy_continuation.hpp"
 #include "hacdcpf/power_flow/newton_solver.hpp"
 #include "hacdcpf/power_flow/pf_injection_assembly.hpp"
+#include "hacdcpf/power_flow/vsc_limit_ncp.hpp"
 #include "hacdcpf/assembly/solver_data.hpp"
 #include "hacdcpf/power_flow/adaptive_solver.hpp"
 #include "hacdcpf/power_flow/distributed_slack_solver.hpp"
@@ -153,6 +154,15 @@ std::uint64_t hash_system_signature(const HybridPowerSystem& sys, LossModelType 
     // so they must invalidate the cached SolverData when changed.
     h = hash_combine(h, hash_double(c.r_conv_ac_pu));
     h = hash_combine(h, hash_double(c.i_ac_max_pu));
+    h = hash_combine(h, static_cast<std::uint64_t>(c.enable_limit_ncp));
+    h = hash_combine(
+        h, static_cast<std::uint64_t>(c.current_limit_priority));
+    h = hash_combine(h, hash_double(c.droop_p_min_mw));
+    h = hash_combine(h, hash_double(c.droop_p_max_mw));
+    h = hash_combine(h, hash_double(c.gfm_internal_voltage_set_pu));
+    h = hash_combine(h, hash_double(c.gfm_internal_angle_set_deg));
+    h = hash_combine(h, hash_double(c.gfm_virtual_r_pu));
+    h = hash_combine(h, hash_double(c.gfm_virtual_x_pu));
     h = hash_combine(h, hash_double(c.i_dc_max_pu));
     h = hash_combine(h, hash_double(c.k_m_modulation));
     h = hash_combine(h, hash_double(c.m_min));
@@ -633,6 +643,81 @@ void merge_solver_profiling(SolverProfiling& total,
   total.max_refactor_backward_error = std::max(
       total.max_refactor_backward_error,
       attempt.max_refactor_backward_error);
+  total.vsc_schur_attempts += attempt.vsc_schur_attempts;
+  total.vsc_schur_accepted += attempt.vsc_schur_accepted;
+  total.vsc_schur_fallbacks += attempt.vsc_schur_fallbacks;
+  total.vsc_schur_local_factorizations +=
+      attempt.vsc_schur_local_factorizations;
+  total.vsc_schur_sparse_factorizations +=
+      attempt.vsc_schur_sparse_factorizations;
+  total.vsc_schur_numeric_refactor_attempts +=
+      attempt.vsc_schur_numeric_refactor_attempts;
+  total.vsc_schur_numeric_refactor_accepted +=
+      attempt.vsc_schur_numeric_refactor_accepted;
+  total.vsc_schur_local_regular_rejections +=
+      attempt.vsc_schur_local_regular_rejections;
+  total.vsc_schur_reduced_solve_rejections +=
+      attempt.vsc_schur_reduced_solve_rejections;
+  total.vsc_schur_full_backward_error_rejections +=
+      attempt.vsc_schur_full_backward_error_rejections;
+  total.vsc_schur_local_blocks = std::max(
+      total.vsc_schur_local_blocks, attempt.vsc_schur_local_blocks);
+  total.vsc_schur_full_dimension = std::max(
+      total.vsc_schur_full_dimension, attempt.vsc_schur_full_dimension);
+  total.vsc_schur_reduced_dimension = std::max(
+      total.vsc_schur_reduced_dimension, attempt.vsc_schur_reduced_dimension);
+  total.vsc_schur_full_structural_nnz = std::max(
+      total.vsc_schur_full_structural_nnz,
+      attempt.vsc_schur_full_structural_nnz);
+  total.vsc_schur_reduced_structural_nnz = std::max(
+      total.vsc_schur_reduced_structural_nnz,
+      attempt.vsc_schur_reduced_structural_nnz);
+  if (attempt.vsc_schur_reduced_factor_nonzeros >= 0) {
+    total.vsc_schur_reduced_factor_nonzeros =
+        attempt.vsc_schur_reduced_factor_nonzeros;
+  }
+  if (attempt.vsc_schur_reduced_factor_work >= 0) {
+    total.vsc_schur_reduced_factor_work =
+        attempt.vsc_schur_reduced_factor_work;
+  }
+  if (attempt.full_lu_factor_nonzeros >= 0) {
+    total.full_lu_factor_nonzeros = attempt.full_lu_factor_nonzeros;
+  }
+  if (attempt.full_lu_factor_work >= 0) {
+    total.full_lu_factor_work = attempt.full_lu_factor_work;
+  }
+  if (attempt.vsc_schur_minimum_local_rcond > 0.0) {
+    total.vsc_schur_minimum_local_rcond =
+        total.vsc_schur_minimum_local_rcond > 0.0
+            ? std::min(total.vsc_schur_minimum_local_rcond,
+                       attempt.vsc_schur_minimum_local_rcond)
+            : attempt.vsc_schur_minimum_local_rcond;
+  }
+  if (attempt.vsc_schur_minimum_accepted_local_rcond > 0.0) {
+    total.vsc_schur_minimum_accepted_local_rcond =
+        total.vsc_schur_minimum_accepted_local_rcond > 0.0
+            ? std::min(total.vsc_schur_minimum_accepted_local_rcond,
+                       attempt.vsc_schur_minimum_accepted_local_rcond)
+            : attempt.vsc_schur_minimum_accepted_local_rcond;
+  }
+  total.max_vsc_schur_reduced_backward_error = std::max(
+      total.max_vsc_schur_reduced_backward_error,
+      attempt.max_vsc_schur_reduced_backward_error);
+  total.max_vsc_schur_full_backward_error = std::max(
+      total.max_vsc_schur_full_backward_error,
+      attempt.max_vsc_schur_full_backward_error);
+  total.vsc_schur_assembly_factor_ms_total +=
+      attempt.vsc_schur_assembly_factor_ms_total;
+  total.semismooth_rate_samples += attempt.semismooth_rate_samples;
+  if (attempt.semismooth_rate_samples > 0) {
+    total.semismooth_last_residual_ratio =
+        attempt.semismooth_last_residual_ratio;
+    total.semismooth_last_quadratic_ratio =
+        attempt.semismooth_last_quadratic_ratio;
+  }
+  if (attempt.vsc_schur_status != "not_attempted") {
+    total.vsc_schur_status = attempt.vsc_schur_status;
+  }
   total.linear_solve_calls += attempt.linear_solve_calls;
   total.regularization_attempts += attempt.regularization_attempts;
   total.line_search_evaluations += attempt.line_search_evaluations;
@@ -1153,6 +1238,18 @@ void populate_derived_results(const powerflow::SolverData& data,
   auto is_promoted = [&promoted](int ci) {
     return std::find(promoted.begin(), promoted.end(), ci) != promoted.end();
   };
+  std::unordered_map<int, const VSCLimitStateResult*> limit_state_by_index;
+  limit_state_by_index.reserve(result.vsc_limit_states.size());
+  for (const auto& state : result.vsc_limit_states) {
+    const auto [iterator, inserted] =
+        limit_state_by_index.emplace(state.index, &state);
+    if (!inserted) {
+      throw std::runtime_error(
+          "populate_derived_results: duplicate stable VSC limit-state index " +
+          std::to_string(state.index));
+    }
+    (void)iterator;
+  }
 
   // AC bus-attribution converters: an AC_PV converter's AC bus is voltage-
   // controlled (PV) and an AC_GRID_FORMING converter's AC bus is a slack, so in
@@ -1225,7 +1322,16 @@ void populate_derived_results(const powerflow::SolverData& data,
     double p_ac_pu_out = p_ac_pu;
     double q_ac_pu_out = q_ac_pu;
     double p_dc_pu_out = p_dc_pu;
-    if (conv.control_mode == ConverterMode::AC_PV &&
+    const auto limit_state_iterator = limit_state_by_index.find(conv.index);
+    const VSCLimitStateResult* limit_state =
+        limit_state_iterator != limit_state_by_index.end()
+            ? limit_state_iterator->second
+            : nullptr;
+    if (limit_state != nullptr) {
+      p_ac_pu_out = limit_state->p_ac_pu;
+      q_ac_pu_out = limit_state->q_ac_pu;
+      p_dc_pu_out = limit_state->p_dc_pu;
+    } else if (conv.control_mode == ConverterMode::AC_PV &&
         ybus_current.size() == vm.size()) {
       const int aci = ac_pos(conv.bus_ac);
       if (aci >= 0 && aci < static_cast<int>(vm.size())) {
@@ -1279,6 +1385,27 @@ void populate_derived_results(const powerflow::SolverData& data,
     tr.q_ac_mvar = q_ac_pu_out * data.base_mva;
     tr.p_dc_mw = p_dc_pu_out * data.base_mva;
     tr.loss_mw = -(tr.p_ac_mw + tr.p_dc_mw);
+    tr.limit_ncp_enabled = limit_state != nullptr;
+    tr.current_limit_active =
+        limit_state != nullptr && limit_state->current_limit_active;
+    tr.droop_saturated =
+        limit_state != nullptr && limit_state->droop_saturated;
+    tr.current_limit_priority =
+        limit_state != nullptr ? limit_state->current_limit_priority : "none";
+    tr.effective_mode = converter_mode_str(conv.control_mode);
+    tr.ac_current_pu =
+        limit_state != nullptr ? limit_state->current_pu : 0.0;
+    tr.current_margin_pu =
+        limit_state != nullptr ? limit_state->current_margin_pu : 0.0;
+    tr.complementarity_residual =
+        limit_state != nullptr ? limit_state->complementarity_residual : 0.0;
+    if (limit_state != nullptr) {
+      tr.internal_voltage_real_pu = limit_state->internal_voltage_real_pu;
+      tr.internal_voltage_imag_pu = limit_state->internal_voltage_imag_pu;
+      tr.terminal_current_real_pu = limit_state->terminal_current_real_pu;
+      tr.terminal_current_imag_pu = limit_state->terminal_current_imag_pu;
+      tr.gfm_norton_model = limit_state->gfm_norton_model;
+    }
     result.vsc_transfers.push_back(tr);
 
     // ── Post-solve converter physical-limit feasibility (multi-converter model
@@ -1484,6 +1611,51 @@ void populate_derived_results(const powerflow::SolverData& data,
           "gamma/alpha is reported instead.");
     }
   }
+}
+
+void populate_newton_converter_scope(const powerflow::SolverData& data,
+                                     PowerFlowResult& result,
+                                     const PowerFlowOptions& options,
+                                     bool lcc_tap_control_active = false) {
+  auto& scope = result.converter_model_scope;
+  const bool has_active_lcc = std::any_of(
+      data.lcc_converters.begin(), data.lcc_converters.end(),
+      [](const LCCConverter& converter) { return converter.in_service; });
+  const bool has_vsc_limit_ncp = !result.vsc_limit_states.empty();
+  scope.model_scope = !has_active_lcc
+                          ? "steady-state-newton:vsc-3mode+dcdc-power-transfer"
+                          : "steady-state-newton:vsc-3mode+dcdc-power-transfer+lcc-quasi-steady";
+  if (lcc_tap_control_active) {
+    scope.model_scope += "+r-card-transformer-tap-control";
+  }
+  if (has_vsc_limit_ncp) {
+    scope.model_scope += "+vsc-current-limit-ncp";
+  }
+  scope.validity.vsc_loss_modelled = true;
+  scope.validity.vsc_ac_conduction_loss_modelled = true;
+  scope.validity.vsc_vdc_control_modelled = true;
+  scope.validity.dcdc_loss_modelled = true;
+  scope.validity.vsc_capacity_circle_enforced =
+      options.enforce_converter_physical_limits;
+  scope.validity.vsc_current_limits_enforced =
+      options.enforce_converter_physical_limits || has_vsc_limit_ncp;
+  scope.validity.vsc_gfm_norton_modelled = std::any_of(
+      result.vsc_limit_states.begin(), result.vsc_limit_states.end(),
+      [](const VSCLimitStateResult& state) { return state.gfm_norton_model; });
+  scope.validity.vsc_gfm_priority_limit_enforced =
+      scope.validity.vsc_gfm_norton_modelled && has_vsc_limit_ncp;
+  scope.validity.vsc_gfm_island_reference_modelled =
+      !result.diagnostics.gfm_island_reference_vsc_indices.empty();
+  scope.validity.vsc_modulation_limits_enforced =
+      options.enforce_converter_physical_limits;
+  scope.validity.lcc_quasi_steady_modelled = has_active_lcc;
+  scope.validity.lcc_transformer_tap_control_modelled =
+      lcc_tap_control_active;
+  scope.validity.dc_multisource_coordination_modelled = true;
+  scope.validity.dcdc_duty_ratio_enforced =
+      options.enforce_converter_physical_limits;
+  scope.validity.equation_closure_checked =
+      result.diagnostics.equation_closure_checked;
 }
 
 void restore_original_vsc_bus_ac(PowerFlowResult& result,
@@ -1799,7 +1971,11 @@ PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOp
   }
 
   // ── Graph topology pre-check ──────────────────────────────────────────────
-  // Return immediately (before Y-bus assembly) if no island has a slack bus.
+  // A GFM Norton internal phasor is an AC angle anchor even though its terminal
+  // bus intentionally remains PQ. Preserve the legacy fast admission when any
+  // graph island is valid; otherwise admit only when every AC NoSlack island
+  // contains an enabled GFM-NCP port. Canonical Newton planning performs the
+  // authoritative per-island check after projection.
   if (!sys.ac.buses.empty()) {
     namespace gr = hacdcpf::graph;
     const auto g    = gr::build_power_system_graph(sys);
@@ -1807,10 +1983,29 @@ PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOp
     const bool has_valid = std::any_of(
         topo.islands.begin(), topo.islands.end(),
         [](const gr::IslandInfo& i) { return i.status == gr::IslandStatus::Valid; });
-    if (!has_valid) {
+    const bool all_no_slack_ac_islands_have_gfm = std::all_of(
+        topo.islands.begin(), topo.islands.end(), [&](const gr::IslandInfo& island) {
+          if (island.ac_bus_ids.empty() ||
+              island.status != gr::IslandStatus::NoSlack) {
+            return true;
+          }
+          const std::unordered_set<int> ac_bus_ids(
+              island.ac_bus_ids.begin(), island.ac_bus_ids.end());
+          return std::any_of(
+              sys.vsc_converters.begin(), sys.vsc_converters.end(),
+              [&](const VSCConverter& converter) {
+                return converter.in_service && converter.enable_limit_ncp &&
+                       converter.i_ac_max_pu > 0.0 &&
+                       converter.control_mode == ConverterMode::AC_GRID_FORMING &&
+                       ac_bus_ids.count(converter.bus_ac) != 0;
+              });
+        });
+    if (!has_valid && !all_no_slack_ac_islands_have_gfm) {
       PowerFlowResult result;
       result.converged = false;
-      result.diagnostics.termination_reason = "No AC island with slack bus (graph pre-check)";
+      result.diagnostics.termination_reason =
+          "No AC island with terminal slack or GFM Norton internal reference "
+          "(graph pre-check)";
       for (const auto& diag : topo.diagnostics)
         result.diagnostics.warnings.push_back(diag.message);
       return result;
@@ -2054,39 +2249,11 @@ PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOp
     result.ac_circuit_breaker_flows = std::move(df.ac_circuit_breakers);
   }
 
-  // Declare which parts of the unified converter model this snapshot Newton
-  // solve honored (historical theory: docs/archive/theory/multiple_converter.md).
-  {
-    auto& sc = result.converter_model_scope;
-    const bool has_active_lcc = std::any_of(
-        sys.lcc_converters.begin(), sys.lcc_converters.end(),
-        [](const LCCConverter& lcc) { return lcc.in_service; });
-    const bool has_lcc_tap_control = std::any_of(
-        lcc_tap_statuses.begin(), lcc_tap_statuses.end(),
-        [](const auto& item) { return item.second.active; });
-    sc.model_scope = !has_active_lcc
-                         ? "steady-state-newton:vsc-3mode+dcdc-power-transfer"
-                         : "steady-state-newton:vsc-3mode+dcdc-power-transfer+lcc-quasi-steady";
-    if (has_lcc_tap_control) {
-      sc.model_scope += "+r-card-transformer-tap-control";
-    }
-    sc.validity.vsc_loss_modelled = true;
-    sc.validity.vsc_ac_conduction_loss_modelled = true;  // r_conv_ac_pu coupling (opt-in)
-    sc.validity.vsc_vdc_control_modelled = true;          // VDC_Q/VDC_VAC + stiff droop forming
-    sc.validity.dcdc_loss_modelled = true;
-    // Strict PF enforcement is an acceptance guard rather than redispatch: a
-    // violating Newton root is rejected. OPF remains the path for finding a new
-    // feasible setpoint under these inequalities.
-    sc.validity.vsc_capacity_circle_enforced = opt.enforce_converter_physical_limits;
-    sc.validity.vsc_current_limits_enforced = opt.enforce_converter_physical_limits;
-    sc.validity.vsc_modulation_limits_enforced = opt.enforce_converter_physical_limits;
-    sc.validity.lcc_quasi_steady_modelled = has_active_lcc;
-    sc.validity.lcc_transformer_tap_control_modelled =
-        has_lcc_tap_control;
-    sc.validity.dc_multisource_coordination_modelled = true;  // is_master + participation in solve
-    sc.validity.dcdc_duty_ratio_enforced = opt.enforce_converter_physical_limits;
-    sc.validity.equation_closure_checked = result.diagnostics.equation_closure_checked;
-  }
+  const bool has_lcc_tap_control = std::any_of(
+      lcc_tap_statuses.begin(), lcc_tap_statuses.end(),
+      [](const auto& item) { return item.second.active; });
+  populate_newton_converter_scope(
+      data, result, opt, has_lcc_tap_control);
   result.profiling.projection_ms_total += projection_ms;
   result.profiling.assembly_ms_total += assembly_ms;
   result.profiling.result_derivation_ms_total +=
@@ -2270,6 +2437,11 @@ PowerFlowResult solve_handle(SolverHandle* handle, const PowerFlowOptions& opt) 
     }
     trim_internal_dc_bus_results(result,
                                  controlled_data.projection_certificate);
+    const bool has_lcc_tap_control = std::any_of(
+        tap_statuses.begin(), tap_statuses.end(),
+        [](const auto& item) { return item.second.active; });
+    populate_newton_converter_scope(
+        controlled_data, result, opt, has_lcc_tap_control);
     finish_profiling(
         result,
         std::chrono::duration<double, std::milli>(
@@ -2297,6 +2469,7 @@ PowerFlowResult solve_handle(SolverHandle* handle, const PowerFlowOptions& opt) 
     result.branch_flows.resize(handle->authored_ac_branch_count);
   }
   trim_internal_dc_bus_results(result, handle->data.projection_certificate);
+  populate_newton_converter_scope(handle->data, result, opt);
   finish_profiling(
       result,
       std::chrono::duration<double, std::milli>(

@@ -1,6 +1,10 @@
 #pragma once
 
+#include <algorithm>
+#include <cmath>
 #include <string>
+
+#include "hacdcpf/model/defaults.hpp"
 
 namespace hacdcpf::powerflow {
 
@@ -60,6 +64,28 @@ struct RobustNonlinearOptions {
   /// Maximum accepted normwise backward error for a refactorized solve.
   double refactor_backward_error_tolerance{1e-8};
 
+  /// Eliminate fixed six-state VSC limit blocks before sparse factorization.
+  /// Every accepted step is checked against the complete Newton system; a
+  /// failed local-regularity or backward-error certificate falls back to the
+  /// ordinary full sparse LU path.
+  bool enable_vsc_local_schur{true};
+
+  /// Minimum network-only Newton dimension admitted to the production Schur
+  /// path. Set to zero only for research ablation on small systems.
+  int vsc_schur_min_network_dimension{
+      Defaults::kVSCSchurMinNetworkDimension};
+
+  /// Minimum reciprocal condition estimate accepted for each selected 6x6
+  /// local generalized-Jacobian block D_i.
+  /// Higham (2002), sec. 2.2: sqrt(machine epsilon) is the scale at which a
+  /// first-order computation begins losing about half the working digits.
+  double vsc_schur_local_rcond_tolerance{Defaults::kVSCSchurLocalRcondTol};
+
+  /// Maximum normwise backward error for both the reduced and reconstructed
+  /// complete Newton solves.
+  double vsc_schur_backward_error_tolerance{
+      Defaults::kVSCSchurBackwardErrorTol};
+
   // ── Phase 2: Nonmonotone line search ──────────────────────────────
   /// Replace standard monotone backtracking with a nonmonotone Armijo search
   /// (Grippo–Lampariello–Lucidi style).  Accepts a step if the merit function
@@ -79,9 +105,10 @@ struct RobustNonlinearOptions {
   int max_line_search_trials{12};
 
   // ── Phase 2: Smooth CHKS NCP continuation ─────────────────────────
-  /// Use CHKS-smoothed min/max operators for PV/PQ complementarity. mu is
-  /// annealed from ncp_mu0 to ncp_mu_min as the residual decreases, driving
-  /// toward the exact median-NCP solution without changing equation layout.
+  /// Use smooth FB/CHKS operators for PV/PQ and VSC current-limit
+  /// complementarity. mu is annealed from ncp_mu0 to ncp_mu_min as the
+  /// residual decreases, driving toward the exact NCP solution without
+  /// changing equation layout.
   /// Disabled by default to preserve the original semi-smooth Newton behavior;
   /// enable explicitly for difficult cases with near-active Q limits.
   bool enable_smooth_ncp{false};
@@ -256,6 +283,34 @@ struct RobustNonlinearOptions {
   /// Relative residual tolerance for GMRES convergence ‖r‖/‖b‖ < tol.
   double gmres_tol{1e-10};
 };
+
+/// Normalize the configurable VSC-Schur policy at every production boundary.
+///
+/// Machine epsilon remains a read-only representation constant. These fields
+/// are algorithmic policy and may be overridden by callers, but reciprocal
+/// condition estimates and normwise backward errors are dimensionless values
+/// in [0, 1]. Invalid floating-point inputs restore the cited production
+/// defaults instead of leaking NaNs into admission or certificate checks.
+/// Higham (2002), Accuracy and Stability of Numerical Algorithms, secs. 2.2,
+/// 7.1; derivation and benchmark admission in
+/// docs/vsc_limit_ncp_power_flow_contract.md.
+inline void normalize_vsc_schur_policy(
+    RobustNonlinearOptions& options) noexcept {
+  options.vsc_schur_min_network_dimension =
+      std::max(0, options.vsc_schur_min_network_dimension);
+  if (!std::isfinite(options.vsc_schur_local_rcond_tolerance) ||
+      options.vsc_schur_local_rcond_tolerance < 0.0 ||
+      options.vsc_schur_local_rcond_tolerance > 1.0) {
+    options.vsc_schur_local_rcond_tolerance =
+        Defaults::kVSCSchurLocalRcondTol;
+  }
+  if (!std::isfinite(options.vsc_schur_backward_error_tolerance) ||
+      options.vsc_schur_backward_error_tolerance < 0.0 ||
+      options.vsc_schur_backward_error_tolerance > 1.0) {
+    options.vsc_schur_backward_error_tolerance =
+        Defaults::kVSCSchurBackwardErrorTol;
+  }
+}
 
 /// Solver strategy mode (for logging strategy switches).
 enum class NonlinearSolveMode {

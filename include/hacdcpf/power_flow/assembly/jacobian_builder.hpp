@@ -5,6 +5,7 @@
 
 #include "hacdcpf/assembly/solver_data.hpp"
 
+#include <array>
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
@@ -18,6 +19,7 @@ struct JacobianContext {
   int nq{0};
   int ndc_eq{0};
   int nvar{0};
+  int network_nvar{0};
 
   std::vector<int> non_slack;
   std::vector<int> pq;
@@ -30,6 +32,15 @@ struct JacobianContext {
   std::vector<int> va_col;
   std::vector<int> vm_col;
   std::vector<int> vdc_col;
+
+  struct VSCLimitBlock {
+    int converter_position{0};
+    int ac_bus{0};
+    int dc_bus{0};
+    int offset{0};
+    bool operator==(const VSCLimitBlock&) const = default;
+  };
+  std::vector<VSCLimitBlock> vsc_limit_blocks;
 
   // Superset PV/PQ layout: every non-slack AC bus owns a Vm column and Q row;
   // PV rows are replaced by Vm-setpoint identities at evaluation time.
@@ -150,6 +161,17 @@ struct JacobianPattern {
     int dc_vm_comm_nz{-1};  // DC-row(dc_bus) → Vm-col(commutation_ac_bus)
   };
 
+  struct VSCLimitEntry {
+    int block_index{0};
+    int p_network_nz{-1};
+    int q_network_nz{-1};
+    int dc_network_nz{-1};
+    std::array<int, 36> local_nz{};
+    std::array<int, 6> vm_nz{};
+    std::array<int, 6> va_nz{};
+    std::array<int, 6> vdc_nz{};
+  };
+
   Eigen::SparseMatrix<double> matrix;
   std::unordered_map<std::uint64_t, int> entry_to_nz;
   std::vector<ACEntry> ac_entries;
@@ -159,6 +181,7 @@ struct JacobianPattern {
   std::vector<DCDCCouplingEntry> dcdc_coupling_entries;
   std::vector<DCDroopEntry> dcdc_droop_entries;  ///< always built; droop diagonal + cross-term
   std::vector<LCCEntry> lcc_entries;  ///< always built; LCC AC↔DC coupling
+  std::vector<VSCLimitEntry> vsc_limit_entries;
   /// Compressed-column nonzero indices grouped by row. This makes active-row
   /// replacement O(nnz(row)) instead of rescanning every matrix column.
   std::vector<std::vector<int>> row_nz;
@@ -197,6 +220,27 @@ double evaluate_residual_and_jacobian(const SolverData& data,
                                       JacobianPattern& pattern,
                                       int ac_eval_threads);
 
+double evaluate_residual_and_jacobian(const SolverData& data,
+                                      const JacobianContext& ctx,
+                                      const std::vector<ACBus>& ac_buses,
+                                      const std::vector<VSCConverter>& converters,
+                                      const Eigen::VectorXd& pg,
+                                      const Eigen::VectorXd& qg,
+                                      const Eigen::VectorXd& vm,
+                                      const Eigen::VectorXd& va,
+                                      const Eigen::VectorXd& vdc,
+                                      const Eigen::VectorXd& vsc_limit_state,
+                                      Eigen::VectorXd& pcalc,
+                                      Eigen::VectorXd& qcalc,
+                                      Eigen::VectorXd& p_spec,
+                                      Eigen::VectorXd& q_spec,
+                                      Eigen::VectorXd& pdc_linear,
+                                      Eigen::VectorXd& pdc_calc,
+                                      Eigen::VectorXd& pdc_spec,
+                                      Eigen::VectorXd& mismatch,
+                                      JacobianPattern& pattern,
+                                      int ac_eval_threads);
+
 double evaluate_residual_only(const SolverData& data,
                               const JacobianContext& ctx,
                               const std::vector<ACBus>& ac_buses,
@@ -206,6 +250,27 @@ double evaluate_residual_only(const SolverData& data,
                               const Eigen::VectorXd& vm,
                               const Eigen::VectorXd& va,
                               const Eigen::VectorXd& vdc,
+                              Eigen::VectorXd& pcalc,
+                              Eigen::VectorXd& qcalc,
+                              Eigen::VectorXd& p_spec,
+                              Eigen::VectorXd& q_spec,
+                              Eigen::VectorXd& pdc_linear,
+                              Eigen::VectorXd& pdc_calc,
+                              Eigen::VectorXd& pdc_spec,
+                              Eigen::VectorXd& mismatch,
+                              const JacobianPattern& pattern,
+                              int ac_eval_threads);
+
+double evaluate_residual_only(const SolverData& data,
+                              const JacobianContext& ctx,
+                              const std::vector<ACBus>& ac_buses,
+                              const std::vector<VSCConverter>& converters,
+                              const Eigen::VectorXd& pg,
+                              const Eigen::VectorXd& qg,
+                              const Eigen::VectorXd& vm,
+                              const Eigen::VectorXd& va,
+                              const Eigen::VectorXd& vdc,
+                              const Eigen::VectorXd& vsc_limit_state,
                               Eigen::VectorXd& pcalc,
                               Eigen::VectorXd& qcalc,
                               Eigen::VectorXd& p_spec,

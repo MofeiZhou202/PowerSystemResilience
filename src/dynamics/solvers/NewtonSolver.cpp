@@ -9,6 +9,8 @@
 #include <Eigen/Sparse>
 #include <Eigen/SparseLU>
 
+#include "hacdcpf/model/defaults.hpp"
+
 namespace hacdcpf::dynamics {
 
 namespace {
@@ -20,7 +22,7 @@ bool numerical_jacobian(const NewtonSolver::ResidualFunction& residual,
                         std::string& error) {
   const Eigen::Index n = x.size();
   jac = Eigen::MatrixXd::Zero(n, n);
-  const double eps0 = std::sqrt(std::numeric_limits<double>::epsilon());
+  constexpr double eps0 = NumericalConstants::kSqrtMachineEpsilon;
   for (Eigen::Index col = 0; col < n; ++col) {
     Eigen::VectorXd trial = x;
     const double h = eps0 * std::max(1.0, std::abs(x[col]));

@@ -8,6 +8,7 @@
 #include "hacdcpf/power_flow/power_flow_options.hpp"
 #include "hacdcpf/power_flow/power_flow_result.hpp"
 #include "hacdcpf/power_flow/newton_krylov.hpp"
+#include "hacdcpf/power_flow/solvers/vsc_local_schur.hpp"
 #include "hacdcpf/power_flow/workspace.hpp"
 
 namespace hacdcpf::engine {
@@ -43,6 +44,7 @@ class NewtonSolver {
     JacobianPattern pattern;
     std::unique_ptr<SparseLinearSolver> solver;
     std::unique_ptr<powerflow::SchurBlockPreconditioner> schur_preconditioner;
+    std::unique_ptr<powerflow::VSCLocalSchurSolver> vsc_local_schur_solver;
     bool has_numeric_factorization{false};
   };
 

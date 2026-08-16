@@ -128,7 +128,7 @@ include。）算法语义见第~\ref{sec:robust}~章，此处仅列字段契约�
 \fld{armijo\_c} & $c_1$ & --- & $(0,1)$ & $10^{-4}$ & Armijo 充分下降常数（newton\_solver.cpp:1037, 1193）\\
 \fld{line\_search\_beta} & $\beta$ & --- & $(0,1)$ & 0.5 & 回溯缩减因子（newton\_solver.cpp:1038）\\
 \fld{max\_line\_search\_trials} & --- & 次 & 5--30 & 12 & 非单调搜索最大试探数；\textbf{当前未接线}（实际试探数由 \fld{max\_line\_search\_steps} 控制）\\
-\fld{enable\_smooth\_ncp} & --- & --- & true/false & false &光滑 Fischer--Burmeister $\varphi_\mu$ NCP 延拓开关；需\fld{enable\_semi\_smooth\_newton} 同时打开（newton\_solver.cpp:1465）\\
+\fld{enable\_smooth\_ncp} & --- & --- & true/false & false &PV/PQ 与 VSC 限流块的光滑 FB/CHKS 延拓；VSC 局部块可独立启用，不要求\fld{enable\_semi\_smooth\_newton}（newton\_solver.cpp）\\
 \fld{ncp\_mu0} & $\mu_0$ & --- & $10^{-4}$--$10^{-1}$ & $10^{-2}$ &NCP 平滑参数初值（newton\_solver.cpp:1468）\\
 \fld{ncp\_mu\_min} & $\mu_{\min}$ & --- & $10^{-14}$--$10^{-8}$ & $10^{-12}$ &平滑参数下限（newton\_solver.cpp:1480）\\
 \fld{ncp\_mu\_factor} / \fld{ncp\_mu\_factor\_coarse} & --- & --- & 0.05--0.9 & 0.1 / 0.5 & 精细/粗糙阶段退火因子（newton\_solver.cpp:1477--1478）\\
@@ -136,6 +136,10 @@ include。）算法语义见第~\ref{sec:robust}~章，此处仅列字段契约�
 \fld{enable\_activity\_hysteresis} & --- & --- & true/false & true &PV/PQ 活跃集保持防抖；\textbf{当前未接线}（仅 GUI/服务器层暴露）\\
 \fld{min\_active\_set\_hold\_iters} & --- & 次 & 1--10 & 3 &活跃集最小保持迭代数；\textbf{当前未接线}\\
 \fld{q\_limit\_hysteresis} & --- & pu & $10^{-5}$--$10^{-2}$ & $10^{-4}$ &Q 限值邻近迟滞带；\textbf{当前未接线}（实际迟滞用\fld{pv\_q\_hysteresis\_pu}）\\
+\fld{enable\_vsc\_local\_schur} & --- & --- & true/false & true &VSC 六状态局部块精确 Schur 消元；每个候选步通过局部条件与完整后向误差守卫，失败回退 full sparse LU\\
+\fld{vsc\_schur\_min\_network\_dimension} & $n_{\min}$ & 维 & $\ge0$ & 1000 &生产复杂度准入；小于阈值保留 full LU，0 仅用于研究消融\\
+\fld{vsc\_schur\_local\_rcond\_tolerance} & $\rho_D$ & --- & $>0$ & $\sqrt{\epsilon_{mach}}$ &所选 $6\times6$ 局部广义 Jacobian 块最小 reciprocal-condition 门槛；默认来自全局 \fld{NumericalConstants}\\
+\fld{vsc\_schur\_backward\_error\_tolerance} & $\eta_b$ & --- & $>0$ & $10^{-12}$ &reduced solve 与完整重构 Newton 步的范数后向误差上限\\
 \end{paramtable}
 
 \subsubsection*{Phase 3：LM 信赖域与 PTC-SER}

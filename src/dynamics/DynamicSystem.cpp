@@ -13,6 +13,7 @@
 #include <Eigen/SparseLU>
 
 #include "hacdcpf/dynamics/solvers/SparseLinearSolver.hpp"
+#include "hacdcpf/model/defaults.hpp"
 
 namespace hacdcpf::dynamics {
 
@@ -199,7 +200,7 @@ bool numerical_masked_dynamic_jacobian(DynamicSystem& sys,
   const Eigen::Index n = state.size();
   jac = Eigen::MatrixXd::Zero(n, n);
   if (n == 0) return true;
-  const double eps0 = std::sqrt(std::numeric_limits<double>::epsilon());
+  constexpr double eps0 = NumericalConstants::kSqrtMachineEpsilon;
   for (Eigen::Index col = 0; col < n; ++col) {
     Eigen::VectorXd trial = state;
     const double h = eps0 * std::max(1.0, std::abs(state[col]));
@@ -476,6 +477,61 @@ void DynamicSystem::initializeStatesFromPowerFlow() {
   }
   for (auto& device : devices) {
     device->initializeFromPowerFlow(initial_power_flow, x, y);
+  }
+
+  // Internal contract docs/vsc_limit_ncp_power_flow_contract.md: validate the
+  // PF -> transient Norton mapping before any algebraic-network re-solve moves
+  // the operating point to satisfy the complete dynamic device set.
+  initialization.gfm_pf_seed_checked = false;
+  initialization.gfm_pf_seed_devices = 0;
+  initialization.gfm_pf_seed_internal_voltage_error_pu = 0.0;
+  initialization.gfm_pf_seed_current_error_pu = 0.0;
+  initialization.gfm_pf_seed_power_error_pu = 0.0;
+  for (const auto& certificate : initial_power_flow.vsc_limit_states) {
+    if (!certificate.gfm_norton_model) continue;
+    const auto device = std::find_if(
+        devices.begin(), devices.end(), [&](const auto& item) {
+          return item->componentIndex() == certificate.index &&
+                 item->type() == "VSCGridForming";
+        });
+    if (device == devices.end()) continue;
+    const DynamicDeviceOutput seed = (*device)->output(x, y);
+    const std::complex<double> expected_internal{
+        certificate.internal_voltage_real_pu,
+        certificate.internal_voltage_imag_pu};
+    const std::complex<double> expected_current{
+        certificate.terminal_current_real_pu,
+        certificate.terminal_current_imag_pu};
+    const std::complex<double> actual_internal = std::polar(
+        seed.values.at("e_internal_pu"), seed.values.at("angle_rad"));
+    initialization.gfm_pf_seed_internal_voltage_error_pu = std::max(
+        initialization.gfm_pf_seed_internal_voltage_error_pu,
+        std::abs(actual_internal - expected_internal));
+    initialization.gfm_pf_seed_current_error_pu = std::max(
+        initialization.gfm_pf_seed_current_error_pu,
+        std::abs(seed.values.at("i_positive_sequence_pu") -
+                 std::abs(expected_current)));
+    initialization.gfm_pf_seed_power_error_pu = std::max(
+        initialization.gfm_pf_seed_power_error_pu,
+        std::max(std::abs(seed.values.at("p_mw") / network.base_mva -
+                          certificate.p_ac_pu),
+                 std::abs(seed.values.at("q_mvar") / network.base_mva -
+                          certificate.q_ac_pu)));
+    initialization.gfm_pf_seed_devices += 1;
+  }
+  initialization.gfm_pf_seed_checked =
+      initialization.gfm_pf_seed_devices > 0;
+  constexpr double kGfmSeedTolerance = 1e-8;
+  initialization.gfm_pf_seed_certified =
+      initialization.gfm_pf_seed_checked &&
+      initialization.gfm_pf_seed_internal_voltage_error_pu <= kGfmSeedTolerance &&
+      initialization.gfm_pf_seed_current_error_pu <= kGfmSeedTolerance &&
+      initialization.gfm_pf_seed_power_error_pu <= kGfmSeedTolerance;
+  if (initialization.gfm_pf_seed_checked &&
+      !initialization.gfm_pf_seed_certified) {
+    initialization.warnings.push_back(
+        "GFM PF-to-transient Norton seed certification failed before dynamic "
+        "network trimming");
   }
 
   const bool has_dynamic_rl_line =
@@ -967,7 +1023,7 @@ bool DynamicSystem::solveNetworkNewton(double t, std::string& error) {
   };
 
   const double tol = std::max(1e-12, options.algebraic_network_tol);
-  const double fd_eps = std::sqrt(std::numeric_limits<double>::epsilon());
+  constexpr double fd_eps = NumericalConstants::kSqrtMachineEpsilon;
   const int max_iters = 25;
   Eigen::VectorXd R0;
   Eigen::VectorXd Rp;

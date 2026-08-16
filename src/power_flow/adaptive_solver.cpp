@@ -121,11 +121,104 @@ void set_dead_island_zero(const IslandInfo& island,
 void merge_island_diagnostics(const PowerFlowResult& local,
                               size_t island_index,
                               AdaptiveSolveResult& global) {
+  global.diagnostics.gfm_island_reference_vsc_indices.insert(
+      global.diagnostics.gfm_island_reference_vsc_indices.end(),
+      local.diagnostics.gfm_island_reference_vsc_indices.begin(),
+      local.diagnostics.gfm_island_reference_vsc_indices.end());
   global.profiling.jacobian_pattern_rebuilds +=
       local.profiling.jacobian_pattern_rebuilds;
   global.profiling.jacobian_analyze_calls +=
       local.profiling.jacobian_analyze_calls;
   global.profiling.factorization_calls += local.profiling.factorization_calls;
+  global.profiling.vsc_schur_attempts += local.profiling.vsc_schur_attempts;
+  global.profiling.vsc_schur_accepted += local.profiling.vsc_schur_accepted;
+  global.profiling.vsc_schur_fallbacks += local.profiling.vsc_schur_fallbacks;
+  global.profiling.vsc_schur_local_factorizations +=
+      local.profiling.vsc_schur_local_factorizations;
+  global.profiling.vsc_schur_sparse_factorizations +=
+      local.profiling.vsc_schur_sparse_factorizations;
+  global.profiling.vsc_schur_numeric_refactor_attempts +=
+      local.profiling.vsc_schur_numeric_refactor_attempts;
+  global.profiling.vsc_schur_numeric_refactor_accepted +=
+      local.profiling.vsc_schur_numeric_refactor_accepted;
+  global.profiling.vsc_schur_local_regular_rejections +=
+      local.profiling.vsc_schur_local_regular_rejections;
+  global.profiling.vsc_schur_reduced_solve_rejections +=
+      local.profiling.vsc_schur_reduced_solve_rejections;
+  global.profiling.vsc_schur_full_backward_error_rejections +=
+      local.profiling.vsc_schur_full_backward_error_rejections;
+  global.profiling.vsc_schur_local_blocks +=
+      local.profiling.vsc_schur_local_blocks;
+  global.profiling.vsc_schur_full_dimension +=
+      local.profiling.vsc_schur_full_dimension;
+  global.profiling.vsc_schur_reduced_dimension +=
+      local.profiling.vsc_schur_reduced_dimension;
+  global.profiling.vsc_schur_full_structural_nnz +=
+      local.profiling.vsc_schur_full_structural_nnz;
+  global.profiling.vsc_schur_reduced_structural_nnz +=
+      local.profiling.vsc_schur_reduced_structural_nnz;
+  if (local.profiling.vsc_schur_reduced_factor_nonzeros >= 0) {
+    if (global.profiling.vsc_schur_reduced_factor_nonzeros < 0) {
+      global.profiling.vsc_schur_reduced_factor_nonzeros = 0;
+    }
+    global.profiling.vsc_schur_reduced_factor_nonzeros +=
+        local.profiling.vsc_schur_reduced_factor_nonzeros;
+  }
+  if (local.profiling.vsc_schur_reduced_factor_work >= 0) {
+    if (global.profiling.vsc_schur_reduced_factor_work < 0) {
+      global.profiling.vsc_schur_reduced_factor_work = 0;
+    }
+    global.profiling.vsc_schur_reduced_factor_work +=
+        local.profiling.vsc_schur_reduced_factor_work;
+  }
+  if (local.profiling.full_lu_factor_nonzeros >= 0) {
+    if (global.profiling.full_lu_factor_nonzeros < 0) {
+      global.profiling.full_lu_factor_nonzeros = 0;
+    }
+    global.profiling.full_lu_factor_nonzeros +=
+        local.profiling.full_lu_factor_nonzeros;
+  }
+  if (local.profiling.full_lu_factor_work >= 0) {
+    if (global.profiling.full_lu_factor_work < 0) {
+      global.profiling.full_lu_factor_work = 0;
+    }
+    global.profiling.full_lu_factor_work +=
+        local.profiling.full_lu_factor_work;
+  }
+  if (local.profiling.vsc_schur_minimum_local_rcond > 0.0) {
+    global.profiling.vsc_schur_minimum_local_rcond =
+        global.profiling.vsc_schur_minimum_local_rcond > 0.0
+            ? std::min(global.profiling.vsc_schur_minimum_local_rcond,
+                       local.profiling.vsc_schur_minimum_local_rcond)
+            : local.profiling.vsc_schur_minimum_local_rcond;
+  }
+  if (local.profiling.vsc_schur_minimum_accepted_local_rcond > 0.0) {
+    global.profiling.vsc_schur_minimum_accepted_local_rcond =
+        global.profiling.vsc_schur_minimum_accepted_local_rcond > 0.0
+            ? std::min(
+                  global.profiling.vsc_schur_minimum_accepted_local_rcond,
+                  local.profiling.vsc_schur_minimum_accepted_local_rcond)
+            : local.profiling.vsc_schur_minimum_accepted_local_rcond;
+  }
+  global.profiling.max_vsc_schur_reduced_backward_error = std::max(
+      global.profiling.max_vsc_schur_reduced_backward_error,
+      local.profiling.max_vsc_schur_reduced_backward_error);
+  global.profiling.max_vsc_schur_full_backward_error = std::max(
+      global.profiling.max_vsc_schur_full_backward_error,
+      local.profiling.max_vsc_schur_full_backward_error);
+  global.profiling.vsc_schur_assembly_factor_ms_total +=
+      local.profiling.vsc_schur_assembly_factor_ms_total;
+  global.profiling.semismooth_rate_samples +=
+      local.profiling.semismooth_rate_samples;
+  if (local.profiling.semismooth_rate_samples > 0) {
+    global.profiling.semismooth_last_residual_ratio =
+        local.profiling.semismooth_last_residual_ratio;
+    global.profiling.semismooth_last_quadratic_ratio =
+        local.profiling.semismooth_last_quadratic_ratio;
+  }
+  if (local.profiling.vsc_schur_status != "not_attempted") {
+    global.profiling.vsc_schur_status = local.profiling.vsc_schur_status;
+  }
   global.profiling.linear_solve_calls += local.profiling.linear_solve_calls;
   global.profiling.regularization_attempts +=
       local.profiling.regularization_attempts;
@@ -307,7 +400,8 @@ AdaptiveSolveResult AdaptiveSolver::solve(const HybridPowerSystem& sys,
       continue;
     }
     int slack_override = 0;
-    if (opt.enable_auto_swing_selection && !out.islands[ii].has_ac_slack) {
+    if (opt.enable_auto_swing_selection &&
+        !out.islands[ii].has_ac_angle_reference) {
       slack_override = auto_select_swing_bus(working, out.islands[ii], ac_id_to_pos);
     }
     tasks.push_back({ii, slack_override});

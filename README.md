@@ -5,7 +5,7 @@
 
 本文档面向工程使用者和开发者，说明 HySim-XJTU-HRPES 从“工程场景建模”到“规范模型求解”、再到“结果回投”的完整链路。当前合同与实现参考统一从 `docs/README.md` 进入；历史审计、理论提案和旧技术总笔记隔离在 `docs/archive/`，不代表当前行为。
 
-## 文档同步状态（2026-08-14）
+## 文档同步状态（2026-08-16）
 
 - `docs/README.md` 是当前文档的唯一导航入口，明确区分运行契约与理论参考。
 - `main` 提供统一 Trial 能力清单、后端 fail-closed 403 防绕过、五阶段
@@ -16,20 +16,27 @@
 - `AGENTS.md`、`CLAUDE.md` 与项目级 `manage-codebase-context` skill
   为不同编码代理提供统一入口；动态验证基线和未闭环调试集中维护在
   `docs/development_status.md`，不再依赖按日期堆积的审计快照。
+- 平衡 Newton 潮流默认使用固定 PV/PQ superset Jacobian、KLU 后向误差守卫的
+  numeric refactor，以及“直接 Newton -> 半光滑 NCP -> DC 相角种子活动集 ->
+  DC 种子 NCP -> 同伦”的数值升级梯级；五个困难平启动 MATPOWER 算例均已
+  收敛并通过 Q 证书。重复求解可使用 `PreparedPowerFlowSession` 复用 projection、
+  assembly、固定 pattern 与 symbolic analysis。依赖侧 KLU adapter 已提交至
+  `../MIPSolvers` 的 `3bf1e66`，主仓库依赖 pin 已同步推进。
 - 2026-08-08 将 MIPSolvers 固定到 `60f8bc4`：纳入系统更新后的 native
   dual simplex（分区 PRICE、驻留 pivot workspace、warm re-optimization）、
   LP IPM Gondzio multiple centrality correctors、MILP B&C 拆分与跨平台构建修复。
   `full-dev` 同时构建两仓库完整测试树；该历史升级回归 1429/1429 个已注册
   测试通过，3 个缺少外部运行时或条件不满足的用例明确跳过。当前 Trial
   Trial 集成先将依赖 pin 更新到 MIPSolvers `7b4cba8`；当前 pin 为
-  `5a5fad0`，加入 Native IPM 的原坐标可行起点审计、方向性变量界契约、
+  `3bf1e66`，加入 Native IPM 的原坐标可行起点审计、方向性变量界契约、
   central warm-start 审计与 NativeLCQP 协作式墙钟截止。有限预算
   的稀疏 Phase I 已覆盖纯 AC、平衡 Hybrid AC/DC 与三相混合 OPF，在
   `mu0 = 0.1` 下以 `1e-1` 为 admission 门槛、`1e-2` 为 primal handoff
   corridor，并构造 central dual/slack；DCOPF 的 NativeLCQP 路径另采用逐连通
   分量功率配平与约化 Laplacian 初值。Phase II 最终容差不变，只有完整状态
-  通过 MIPSolvers 独立审计后才使用，未接受时严格回到普通冷启动。新的完整双仓库
-  CTest 仍待运行。大型纯 AC 可在 AC-PF 启动前条件式运行 5 次 compact DCOPF；
+  通过 MIPSolvers 独立审计后才使用，未接受时严格回到普通冷启动。当前代码的
+  `macos-release` 全量 CTest 为 1482/1492 通过、7 个 OPF/RPO 失败、3 个条件跳过，
+  不作全绿声明。大型纯 AC 可在 AC-PF 启动前条件式运行 5 次 compact DCOPF；
   DC 总预算覆盖 projection/formulation/symbolic/numeric，候选与 baseline 复用
   单个 Parity formulation：`case9241pegase` 的 Release/KLU 固定协议将端到端
   中位数降低 12.4%，Phase-II
@@ -114,7 +121,7 @@ powershell -ExecutionPolicy Bypass -File tools/package_trial_windows.ps1
 
 | 能力域 | 当前状态 | 说明 |
 |---|---|---|
-| 混合 AC/DC 潮流与聚合建模 | 已实现并持续回归 | 覆盖 canonical projection、AC/DC 潮流、换流器协调与图分析链路；统一 Newton 完整消费原生 LCC 的 AC P/Q、DC 注入及 `Vm/Vdc` 交叉 Jacobian。FDPF、自适应分岛和独立 DC solver 不宣称等价 LCC 覆盖。 |
+| 混合 AC/DC 潮流与聚合建模 | 已实现并持续回归 | 覆盖 canonical projection、AC/DC 潮流、换流器协调与图分析链路；统一 Newton 默认采用固定 PV/PQ superset pattern、后向误差守卫的 KLU refactor 和 NCP/DC-seed/homotopy 升级梯级，`PreparedPowerFlowSession` 支持兼容快照重复求解。平衡正序 PQ/Vdc-Q/GFM VSC 可选显式六变量限流 NCP 块，支持电流圆、Magnitude/P-first/Q-first、Vdc droop 饱和，以及 GFM 内部电势/角度和虚拟阻抗 Norton 端口；无 terminal SLACK 的 GFM 岛由固定内部相量锚定，保留全部终端电压未知量，支持多 Norton GFM、自适应分岛与暂态初始化。局部 Schur 的准入、rcond 与后向误差策略由具名默认值统一管理，并可经 C++/HTTP 覆盖和回显；机器 epsilon 只读。GPU 路径尚未实现。原生 LCC 的 AC P/Q、DC 注入及 `Vm/Vdc` 交叉 Jacobian 由统一 Newton 消费；FDPF 和独立 DC solver 不宣称等价覆盖。 |
 | OPF 与约束优化 | 已实现并持续回归 | AC OPF / Hybrid AC/DC OPF 的 Parity Native IPM 前置有界稀疏 Phase I，认证 primal/dual warm start 后交给 Phase II；DC OPF / RPO（含 OLTC 离散档位控制）已集成。含在役 LCC 的平衡聚合 OPF 强制走共享 Parity/Ipopt NLP，控制指令与 tap 作为固定输入；不支持路径显式拒绝。 |
 | 三相混合 PF / OPF | 活跃研发中，GUI 已接入 | `powerflow::solve_three_phase_hybrid_pf` 与 `opf::phase_hybrid` 已接入 `/xjtu/` 潮流/OPF 工具栏；OPF 提供 Full 与 GraphReduced（稀疏 Kron 降阶）、Ipopt/NativeIPM 双后端。GUI rich-model 适配范围见下文。 |
 | 电压稳定 | 已实现 | 连续潮流（CPF）采用增广 `[state, lambda]` 弧长预测-校正，可越过 P-V 鼻点并保留下支采样；输出 P-V 曲线与 VSI 指标。 |
@@ -342,7 +349,7 @@ import/load system
 
 平衡 Newton 潮流将 PV/PQ 转换作为有界活动集过程：在固定活动集收敛后批量钳位全部 Q 越限 PV 节点，只执行一次带保持时间和电压方向死区的 PQ→PV 恢复审计，并返回 `reactive_limits.certified`、重复活动集和外层预算诊断。GUI 默认关闭该校核以进行快速筛查；需要工程 Q 限值结论时必须显式启用并检查证书。理论与性能边界见 [PV/PQ 无功限值切换契约](docs/pv_pq_switching_contract.md)。
 
-换流器容量圆、AC/DC 电流、调制比和 DC/DC 占空比在确定型 PF 中没有可自动重调度的自由量。默认模式保持兼容口径（数值根收敛并发出 `ACDC-PHYS-*` / `DCDC-PHYS-*` 告警）；启用 `PowerFlowOptions::enforce_converter_physical_limits` 后，任何超限根会被硬性拒绝并报告物理不可行。需要在约束下调整 P/Q 或电压设定时应使用 OPF，而不是由 PF 静默改写设定值。
+换流器调制比、DC 电流和 DC/DC 占空比默认仍采用收敛后物理审计；启用 `PowerFlowOptions::enforce_converter_physical_limits` 后，超限根会被硬性拒绝。平衡正序 `PQ_MODE` / `VDC_Q` / `AC_GRID_FORMING` VSC 可通过设备级 `enable_limit_ncp` 与正 `i_ac_max_pu` 启用固定六变量局部块，在统一 Newton 内求解电流圆、P/Q priority、Vdc droop 饱和及 GFM 内部电势—虚拟阻抗 Norton 端口，而非事后改写结果。目标方程使用精确 Fischer–Burmeister/中值 NCP；困难退化工况可选择固定结构的光滑 FB/CHKS `mu` 延拓，最终结果重新按精确方程认证。无 terminal SLACK 的 AC 岛保留全部母线 `Vm/θ` 与 P/Q 平衡，由 authored GFM 内部相量消除全局旋转零模；多个 Norton GFM 可共存，但严格协调要求 DC 侧有物理电压/功率支撑。该半光滑 Newton 是局部方法，远初值可能进入低压数学根。平衡 OPF 本体不含 GFM priority-NCP KKT 约束，最终由保留控制模式的 `post_pf` 回放认证。数学、接口和验证门槛见 [VSC 电流限值 NCP 潮流契约](docs/vsc_limit_ncp_power_flow_contract.md)。
 
 ## 7. Projection Back 与结果归因
 

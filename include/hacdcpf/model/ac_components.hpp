@@ -1320,6 +1320,10 @@ struct ThreePhaseBusResult {
 struct IslandInfo {
   int id{0};
   bool has_ac_slack{false};
+  // A solved AC angle can be anchored either by a terminal SLACK/external
+  // grid or by one or more fixed internal GFM Norton phasors. Keep this
+  // distinct from has_ac_slack: the latter remains a terminal-bus property.
+  bool has_ac_angle_reference{false};
   bool has_dc_slack{false};
   int ac_slack_bus{0};
   int dc_slack_bus{0};
@@ -1328,6 +1332,7 @@ struct IslandInfo {
   std::vector<int> ac_buses;
   std::vector<int> dc_buses;
   std::vector<int> converters;
+  std::vector<int> gfm_reference_vsc_indices;
 };
 
 }  // namespace hacdcpf

@@ -632,7 +632,8 @@ void evaluate_ac_island_rules(const HybridPowerSystem& sys,
 
   struct ACIslandRef {
     int slack_count{0};
-    int ac_gfm_count{0};
+    int rigid_terminal_gfm_count{0};
+    int norton_gfm_count{0};
     bool has_external_grid{false};
     bool has_active_source{false};
     bool energized{false};
@@ -694,7 +695,14 @@ void evaluate_ac_island_rules(const HybridPowerSystem& sys,
     const bool ac_gfm = conv.ac_grid_forming ||
                         conv.control_mode == ConverterMode::AC_GRID_FORMING;
     if (ac_gfm) {
-      islands[static_cast<size_t>(c)].ac_gfm_count += 1;
+      const bool norton_gfm =
+          conv.control_mode == ConverterMode::AC_GRID_FORMING &&
+          conv.enable_limit_ncp && conv.i_ac_max_pu > 0.0;
+      if (norton_gfm) {
+        islands[static_cast<size_t>(c)].norton_gfm_count += 1;
+      } else {
+        islands[static_cast<size_t>(c)].rigid_terminal_gfm_count += 1;
+      }
       islands[static_cast<size_t>(c)].has_active_source = true;
     }
   }
@@ -702,8 +710,9 @@ void evaluate_ac_island_rules(const HybridPowerSystem& sys,
   for (int c = 0; c < n_islands; ++c) {
     const auto& s = islands[static_cast<size_t>(c)];
     if (!s.energized) continue;
-    const int rigid = s.slack_count + s.ac_gfm_count;
-    const bool has_reference = rigid > 0 || s.has_external_grid;
+    const int rigid = s.slack_count + s.rigid_terminal_gfm_count;
+    const bool has_reference = rigid > 0 || s.norton_gfm_count > 0 ||
+                               s.has_external_grid;
     if (!has_reference) {
       add_issue(report,
                 CoordinationSeverity::Warning,
@@ -724,8 +733,10 @@ void evaluate_ac_island_rules(const HybridPowerSystem& sys,
                 c,
                 c,
                 "AC island " + std::to_string(c) + " has " + std::to_string(rigid) +
-                    " rigid AC angle references (slack buses and/or AC grid-forming "
-                    "converters). Without an explicit coordination (P-f droop or "
+                    " rigid terminal AC angle references (slack buses and/or "
+                    "terminal-forming converters). GFM Norton internal phasors are "
+                    "not counted as terminal constraints. Without an explicit "
+                    "coordination (P-f droop or "
                     "virtual synchronous control) they over-determine the angle "
                     "reference.");
     }

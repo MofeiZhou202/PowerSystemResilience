@@ -12,6 +12,7 @@
 
 #include <Eigen/Sparse>
 
+#include "hacdcpf/model/defaults.hpp"
 #include "hacdcpf/model/effective_capacity.hpp"
 #include "hacdcpf/power_flow/converter_model.hpp"
 #include "hacdcpf/power_flow/lcc_model.hpp"
@@ -21,6 +22,7 @@
 #include "hacdcpf/power_flow/lm_trust_region.hpp"
 #include "hacdcpf/power_flow/newton_krylov.hpp"
 #include "hacdcpf/power_flow/pf_utils.hpp"
+#include "hacdcpf/power_flow/vsc_limit_ncp.hpp"
 #include "hacdcpf/engine/kernel/globalization/globalization.hpp"
 
 namespace hacdcpf::engine {
@@ -45,13 +47,102 @@ void reset_or_resize(Eigen::VectorXd& v, int n) {
   }
 }
 
-int first_slack_or_default(const std::vector<ACBus>& ac_buses) {
+int first_slack_or_none(const std::vector<ACBus>& ac_buses) {
   for (int i = 0; i < static_cast<int>(ac_buses.size()); ++i) {
     if (ac_buses[static_cast<size_t>(i)].bus_type == BusType::SLACK) {
       return i;
     }
   }
-  return ac_buses.empty() ? -1 : 0;
+  return -1;
+}
+
+std::vector<int> plan_gfm_ac_island_references(
+    const SolverData& data,
+    const std::vector<ACBus>& ac_buses,
+    const std::vector<VSCConverter>& converters) {
+  const int n = static_cast<int>(ac_buses.size());
+  std::vector<std::vector<int>> adjacency(static_cast<size_t>(n));
+  for (int col = 0; col < data.ybus.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<std::complex<double>>::InnerIterator it(data.ybus, col);
+         it;
+         ++it) {
+      const int row = static_cast<int>(it.row());
+      if (row == col || std::abs(it.value()) == 0.0) continue;
+      adjacency[static_cast<size_t>(row)].push_back(col);
+    }
+  }
+
+  std::vector<int> component(static_cast<size_t>(n), -1);
+  int component_count = 0;
+  for (int start = 0; start < n; ++start) {
+    if (!ac_buses[static_cast<size_t>(start)].in_service ||
+        component[static_cast<size_t>(start)] >= 0) {
+      continue;
+    }
+    std::vector<int> stack{start};
+    component[static_cast<size_t>(start)] = component_count;
+    while (!stack.empty()) {
+      const int bus = stack.back();
+      stack.pop_back();
+      for (int neighbor : adjacency[static_cast<size_t>(bus)]) {
+        if (!ac_buses[static_cast<size_t>(neighbor)].in_service ||
+            component[static_cast<size_t>(neighbor)] >= 0) {
+          continue;
+        }
+        component[static_cast<size_t>(neighbor)] = component_count;
+        stack.push_back(neighbor);
+      }
+    }
+    component_count += 1;
+  }
+
+  std::unordered_map<int, int> bus_position;
+  bus_position.reserve(static_cast<size_t>(n));
+  std::vector<int> slack_count(static_cast<size_t>(component_count), 0);
+  std::vector<std::vector<int>> gfm_ids(static_cast<size_t>(component_count));
+  for (int position = 0; position < n; ++position) {
+    bus_position.emplace(ac_buses[static_cast<size_t>(position)].index, position);
+    const int island = component[static_cast<size_t>(position)];
+    if (island >= 0 &&
+        ac_buses[static_cast<size_t>(position)].bus_type == BusType::SLACK) {
+      slack_count[static_cast<size_t>(island)] += 1;
+    }
+  }
+  for (const auto& converter : converters) {
+    if (!powerflow::uses_gfm_limit_ncp(converter)) continue;
+    const auto position = bus_position.find(converter.bus_ac);
+    if (position == bus_position.end()) {
+      throw std::invalid_argument(
+          "GFM limit-NCP converter " + std::to_string(converter.index) +
+          " references an unknown AC bus");
+    }
+    const int ac_bus = position->second;
+    if (ac_buses[static_cast<size_t>(ac_bus)].bus_type == BusType::SLACK) {
+      throw std::invalid_argument(
+          "GFM limit-NCP converter " + std::to_string(converter.index) +
+          " cannot use a fixed terminal SLACK bus; its terminal Vm/Va must "
+          "remain network variables");
+    }
+    const int island = component[static_cast<size_t>(ac_bus)];
+    if (island >= 0) {
+      gfm_ids[static_cast<size_t>(island)].push_back(converter.index);
+    }
+  }
+
+  std::vector<int> island_reference_ids;
+  for (int island = 0; island < component_count; ++island) {
+    if (slack_count[static_cast<size_t>(island)] > 0) continue;
+    const auto& anchors = gfm_ids[static_cast<size_t>(island)];
+    if (anchors.empty()) {
+      throw std::invalid_argument(
+          "AC island " + std::to_string(island) +
+          " has no terminal SLACK and no GFM Norton internal-voltage "
+          "reference; the absolute voltage angle is unanchored");
+    }
+    island_reference_ids.insert(
+        island_reference_ids.end(), anchors.begin(), anchors.end());
+  }
+  return island_reference_ids;
 }
 
 /**
@@ -703,7 +794,26 @@ JacobianContext build_jacobian_context(const std::vector<ACBus>& ac_buses,
   const int np = static_cast<int>(non_slack.size());
   const int nq = static_cast<int>(pq.size());
   const int ndc_eq = static_cast<int>(dc_non_slack.size());
-  const int nvar = np + nq + ndc_eq;
+  const int network_nvar = np + nq + ndc_eq;
+  std::vector<JacobianContext::VSCLimitBlock> vsc_limit_blocks;
+  if (data != nullptr && converters_ptr != nullptr) {
+    for (int converter_position = 0;
+         converter_position < static_cast<int>(converters_ptr->size());
+         ++converter_position) {
+      const auto& converter =
+          (*converters_ptr)[static_cast<size_t>(converter_position)];
+      if (!powerflow::supports_vsc_limit_ncp(converter)) continue;
+      vsc_limit_blocks.push_back({converter_position,
+                                  converter.bus_ac - 1,
+                                  converter.bus_dc - 1,
+                                  network_nvar +
+                                      static_cast<int>(vsc_limit_blocks.size()) *
+                                          powerflow::kVSCLimitStateSize});
+    }
+  }
+  const int nvar = network_nvar +
+      static_cast<int>(vsc_limit_blocks.size()) *
+          powerflow::kVSCLimitStateSize;
 
   std::vector<int> va_col(static_cast<size_t>(n), -1);
   std::vector<int> vm_col(static_cast<size_t>(n), -1);
@@ -736,6 +846,7 @@ JacobianContext build_jacobian_context(const std::vector<ACBus>& ac_buses,
   jac_ctx.nq = nq;
   jac_ctx.ndc_eq = ndc_eq;
   jac_ctx.nvar = nvar;
+  jac_ctx.network_nvar = network_nvar;
   jac_ctx.non_slack = std::move(non_slack);
   jac_ctx.pq = std::move(pq);
   jac_ctx.dc_non_slack = std::move(dc_non_slack);
@@ -745,6 +856,7 @@ JacobianContext build_jacobian_context(const std::vector<ACBus>& ac_buses,
   jac_ctx.va_col = std::move(va_col);
   jac_ctx.vm_col = std::move(vm_col);
   jac_ctx.vdc_col = std::move(vdc_col);
+  jac_ctx.vsc_limit_blocks = std::move(vsc_limit_blocks);
 
   if (jac_ctx.fixed_pv_pq_layout) {
     for (int bus : jac_ctx.pq) {
@@ -825,10 +937,13 @@ JacobianContext build_jacobian_context(const std::vector<ACBus>& ac_buses,
 
 bool same_context_layout(const JacobianContext& a, const JacobianContext& b) {
   return a.n == b.n && a.ndc == b.ndc && a.np == b.np && a.nq == b.nq && a.ndc_eq == b.ndc_eq &&
-         a.nvar == b.nvar && a.non_slack == b.non_slack && a.pq == b.pq &&
+         a.nvar == b.nvar && a.network_nvar == b.network_nvar &&
+         a.non_slack == b.non_slack && a.pq == b.pq &&
          a.dc_non_slack == b.dc_non_slack && a.p_row == b.p_row && a.q_row == b.q_row &&
          a.dc_row == b.dc_row && a.va_col == b.va_col && a.vm_col == b.vm_col &&
-         a.vdc_col == b.vdc_col && a.fixed_pv_pq_layout == b.fixed_pv_pq_layout;
+         a.vdc_col == b.vdc_col &&
+         a.vsc_limit_blocks == b.vsc_limit_blocks &&
+         a.fixed_pv_pq_layout == b.fixed_pv_pq_layout;
 }
 
 struct GeneratorLimitData {
@@ -912,7 +1027,7 @@ bool apply_converter_mode_switching(std::vector<VSCConverter>& converters,
   const double low = std::max(0.0, opt.converter_vdc_switch_low_pu);
   for (size_t idx = 0; idx < converters.size(); ++idx) {
     auto& conv = converters[idx];
-    if (!conv.in_service) {
+    if (!conv.in_service || conv.enable_limit_ncp) {
       high_count[idx] = 0;
       low_count[idx] = 0;
       continue;
@@ -982,7 +1097,8 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
     out.profiling.unclassified_core_ms_total =
         std::max(0.0, out.profiling.solver_core_ms_total - classified);
   };
-  const auto& ropts = opt.robust_nonlinear;
+  auto ropts = opt.robust_nonlinear;
+  powerflow::normalize_vsc_schur_policy(ropts);
 
   const bool has_vdc_vac = std::any_of(
       input_data.converters.begin(), input_data.converters.end(), [](const VSCConverter& conv) {
@@ -1002,8 +1118,14 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
   // Smooth complementarity continuation changes only the NCP parameter, not
   // the caller-owned formulation. Keep that mutable scalar in a local copy so
   // residual/Jacobian evaluations always see a coherent mu without const_cast.
+  const bool has_vsc_limit_ncp = std::any_of(
+      input_data.converters.begin(), input_data.converters.end(),
+      [](const VSCConverter& converter) {
+        return powerflow::supports_vsc_limit_ncp(converter);
+      });
   std::unique_ptr<SolverData> smooth_ncp_data;
-  if (input_data.enable_semi_smooth_newton && ropts.enable_smooth_ncp) {
+  if (ropts.enable_smooth_ncp &&
+      (input_data.enable_semi_smooth_newton || has_vsc_limit_ncp)) {
     smooth_ncp_data = std::make_unique<SolverData>(input_data);
     const double mu_min = std::max(0.0, ropts.ncp_mu_min);
     const double mu_start =
@@ -1037,6 +1159,22 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
   std::vector<VSCConverter> converters = data.converters;
   const int n = static_cast<int>(ac_buses.size());
   const int ndc = static_cast<int>(data.dc_buses.size());
+
+  for (const auto& converter : converters) {
+    if (!converter.in_service || !converter.enable_limit_ncp) continue;
+    if (!(converter.i_ac_max_pu > 0.0)) {
+      throw std::invalid_argument(
+          "VSC limit-NCP requires i_ac_max_pu > 0 for converter " +
+          std::to_string(converter.index));
+    }
+    if (!powerflow::supports_vsc_limit_ncp(converter)) {
+      throw std::invalid_argument(
+          "VSC limit-NCP supports only balanced PQ_MODE, VDC_Q, and "
+          "AC_GRID_FORMING converters; "
+          "converter " + std::to_string(converter.index) +
+          " requested an unsupported control mode");
+    }
+  }
 
   out.vm.assign(static_cast<size_t>(n), 1.0);
   out.va.assign(static_cast<size_t>(n), 0.0);
@@ -1083,7 +1221,14 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
 
   powerflow::load_dc_initial_state(init, data.dc_buses, vdc);
 
-  const int slack = first_slack_or_default(ac_buses);
+  // Kundur (1994), ch. 12: a fixed internal voltage behind impedance is an
+  // absolute phasor reference. In an island without a terminal SLACK, retain
+  // every bus P/Q equation and every Vm/Va variable; the GFM local equations
+  // break the global rotational nullspace. No artificial terminal angle is
+  // fixed, because doing so would remove a physical network equation.
+  const int slack = first_slack_or_none(ac_buses);
+  out.diagnostics.gfm_island_reference_vsc_indices =
+      plan_gfm_ac_island_references(data, ac_buses, converters);
   // Translate multi-source DC coordination metadata into the solve (multi-converter
   // model §6.6–6.7): participation factors reshape the group's droop sharing, and
   // a declared master is preferred when forming a reference (handled inside
@@ -1129,6 +1274,18 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
       ac_buses, ndc, slack, dc_slacks, &data, &converters,
       fixed_pv_pq_layout, &vm);
   jac_ctx.min_vm_pu = opt.robust_nonlinear.min_vm_pu;
+  for (const auto& block : jac_ctx.vsc_limit_blocks) {
+    if (block.ac_bus < 0 || block.ac_bus >= n || block.dc_bus < 0 ||
+        block.dc_bus >= ndc || jac_ctx.p_row[static_cast<size_t>(block.ac_bus)] < 0 ||
+        jac_ctx.q_row[static_cast<size_t>(block.ac_bus)] < 0 ||
+        jac_ctx.dc_row[static_cast<size_t>(block.dc_bus)] < 0) {
+      const auto& converter =
+          converters[static_cast<size_t>(block.converter_position)];
+      throw std::invalid_argument(
+          "VSC limit-NCP converter " + std::to_string(converter.index) +
+          " requires non-reference AC P/Q and DC power-balance rows");
+    }
+  }
   if (jac_ctx.nvar == 0) {
     out.converged = true;
     for (int i = 0; i < n; ++i) {
@@ -1174,7 +1331,9 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
   Eigen::VectorXd pdc_linear = Eigen::VectorXd::Zero(ndc);
   Eigen::VectorXd pdc_calc = Eigen::VectorXd::Zero(ndc);
   Eigen::VectorXd pdc_spec = Eigen::VectorXd::Zero(ndc);
-  workspace.prepare_equations(jac_ctx.np, jac_ctx.nq, jac_ctx.ndc_eq);
+  workspace.prepare_equations(
+      jac_ctx.np, jac_ctx.nq, jac_ctx.ndc_eq,
+      jac_ctx.nvar - jac_ctx.network_nvar);
   Eigen::VectorXd& mismatch = workspace.residual;
   Eigen::VectorXd mismatch_scaled = Eigen::VectorXd::Zero(jac_ctx.nvar);
 
@@ -1186,6 +1345,23 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
   Eigen::VectorXd vm_trial = vm;
   Eigen::VectorXd va_trial = va;
   Eigen::VectorXd vdc_trial = vdc;
+  Eigen::VectorXd vsc_limit_state = Eigen::VectorXd::Zero(
+      static_cast<int>(jac_ctx.vsc_limit_blocks.size()) *
+      powerflow::kVSCLimitStateSize);
+  for (int block_index = 0;
+       block_index < static_cast<int>(jac_ctx.vsc_limit_blocks.size());
+       ++block_index) {
+    const auto& block =
+        jac_ctx.vsc_limit_blocks[static_cast<size_t>(block_index)];
+    vsc_limit_state.segment<powerflow::kVSCLimitStateSize>(
+        block_index * powerflow::kVSCLimitStateSize) =
+        powerflow::initialize_vsc_limit_state(
+            converters[static_cast<size_t>(block.converter_position)],
+            vm[block.ac_bus], va[block.ac_bus], vdc[block.dc_bus], data.base_mva,
+            data.loss_model);
+  }
+  Eigen::VectorXd vsc_limit_state_best = vsc_limit_state;
+  Eigen::VectorXd vsc_limit_state_trial = vsc_limit_state;
   Eigen::VectorXd pcalc_trial = Eigen::VectorXd::Zero(n);
   Eigen::VectorXd qcalc_trial = Eigen::VectorXd::Zero(n);
   Eigen::VectorXd p_spec_trial = Eigen::VectorXd::Zero(n);
@@ -1204,6 +1380,9 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
       ropts.line_search_beta);
 
   auto resize_for_context = [&]() {
+    workspace.prepare_equations(
+        jac_ctx.np, jac_ctx.nq, jac_ctx.ndc_eq,
+        jac_ctx.nvar - jac_ctx.network_nvar);
     reset_or_resize(mismatch, jac_ctx.nvar);
     reset_or_resize(mismatch_scaled, jac_ctx.nvar);
     reset_or_resize(dx, jac_ctx.nvar);
@@ -1228,6 +1407,18 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
         cache_.data_build_id == data.build_id &&
         same_matrix_storage && same_context_layout(cache_.ctx, jac_ctx);
     if (reuse_cached_pattern) {
+      if (ropts.enable_vsc_local_schur &&
+          jac_ctx.network_nvar >=
+              std::max(0, ropts.vsc_schur_min_network_dimension) &&
+          !jac_ctx.vsc_limit_blocks.empty() &&
+          !cache_.vsc_local_schur_solver) {
+        auto schur_solver =
+            std::make_unique<powerflow::VSCLocalSchurSolver>();
+        if (schur_solver->initialize(cache_.pattern, cache_.ctx)) {
+          cache_.vsc_local_schur_solver = std::move(schur_solver);
+          out.profiling.jacobian_analyze_calls += 1;
+        }
+      }
       return;
     }
     cache_.valid = true;
@@ -1250,16 +1441,33 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
     cache_.solver = make_default_sparse_solver();
     cache_.schur_preconditioner =
         std::make_unique<powerflow::SchurBlockPreconditioner>();
+    cache_.vsc_local_schur_solver.reset();
     cache_.solver->analyze_pattern(cache_.pattern.matrix);
     cache_.has_numeric_factorization = false;
     cache_.pattern.analyzed = true;
     out.profiling.jacobian_pattern_rebuilds += 1;
     out.profiling.jacobian_analyze_calls += 1;
+    if (ropts.enable_vsc_local_schur &&
+        jac_ctx.network_nvar >=
+            std::max(0, ropts.vsc_schur_min_network_dimension) &&
+        !jac_ctx.vsc_limit_blocks.empty()) {
+      auto schur_solver =
+          std::make_unique<powerflow::VSCLocalSchurSolver>();
+      if (schur_solver->initialize(cache_.pattern, cache_.ctx)) {
+        cache_.vsc_local_schur_solver = std::move(schur_solver);
+        out.profiling.jacobian_analyze_calls += 1;
+      } else {
+        out.diagnostics.warnings.push_back(
+            "[PF-VSC-SCHUR-01] Local VSC Schur pattern construction failed; "
+            "the solve will use the complete sparse Newton system.");
+      }
+    }
   };
 
   auto evaluate_trial_state = [&](const Eigen::VectorXd& vm_state,
                                   const Eigen::VectorXd& va_state,
-                                  const Eigen::VectorXd& vdc_state) -> double {
+                                  const Eigen::VectorXd& vdc_state,
+                                  const Eigen::VectorXd& limit_state) -> double {
     return evaluate_residual_only(data,
                                   jac_ctx,
                                   ac_buses,
@@ -1269,6 +1477,7 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
                                   vm_state,
                                   va_state,
                                   vdc_state,
+                                  limit_state,
                                   pcalc_trial,
                                   qcalc_trial,
                                   p_spec_trial,
@@ -1293,6 +1502,7 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
     vm_best = vm;
     va_best = va;
     vdc_best = vdc;
+    vsc_limit_state_best = vsc_limit_state;
     const int ls_steps = std::max(1, opt.max_line_search_steps);
     const double phi_current = 0.5 * rhs.squaredNorm();
     Eigen::VectorXd direction_for_jacobian = direction;
@@ -1320,6 +1530,7 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
       vm_trial = vm;
       va_trial = va;
       vdc_trial = vdc;
+      vsc_limit_state_trial = vsc_limit_state;
 
       for (int k = 0; k < jac_ctx.np; ++k) {
         const int bus = jac_ctx.non_slack[static_cast<size_t>(k)];
@@ -1334,9 +1545,19 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
         vdc_trial[bus] =
             std::max(vdc_trial[bus] + alpha * direction[jac_ctx.np + jac_ctx.nq + k], kMinVm);
       }
+      for (int block_index = 0;
+           block_index < static_cast<int>(jac_ctx.vsc_limit_blocks.size());
+           ++block_index) {
+        const int local_offset = block_index * powerflow::kVSCLimitStateSize;
+        const int global_offset =
+            jac_ctx.vsc_limit_blocks[static_cast<size_t>(block_index)].offset;
+        vsc_limit_state_trial.segment<powerflow::kVSCLimitStateSize>(local_offset) +=
+            alpha * direction.segment<powerflow::kVSCLimitStateSize>(global_offset);
+      }
 
       if (!skip_vac_enforcement) enforce_vac_setpoints(converters, vm_trial);
-      const double trial_resid = evaluate_trial_state(vm_trial, va_trial, vdc_trial);
+      const double trial_resid = evaluate_trial_state(
+          vm_trial, va_trial, vdc_trial, vsc_limit_state_trial);
       eval_count += 1;
       if (!std::isfinite(trial_resid)) {
         return kInf;
@@ -1354,6 +1575,7 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
       vm_best = vm_trial;
       va_best = va_trial;
       vdc_best = vdc_trial;
+      vsc_limit_state_best = vsc_limit_state_trial;
     }
 
     auto t1 = Clock::now();
@@ -1370,6 +1592,93 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
     SparseLinearSolver* sparse_solver = cache_.solver.get();
     if (sparse_solver == nullptr) {
       return false;
+    }
+    if (ropts.enable_vsc_local_schur &&
+        jac_ctx.network_nvar >=
+            std::max(0, ropts.vsc_schur_min_network_dimension) &&
+        cache_.vsc_local_schur_solver &&
+        !jac_ctx.vsc_limit_blocks.empty()) {
+      powerflow::VSCLocalSchurReport schur_report;
+      out.profiling.vsc_schur_attempts += 1;
+      const bool schur_ok = cache_.vsc_local_schur_solver->solve(
+          jac, rhs, ropts.enable_klu_numeric_refactor,
+          ropts.vsc_schur_local_rcond_tolerance,
+          ropts.vsc_schur_backward_error_tolerance, direction, schur_report);
+      out.profiling.vsc_schur_local_factorizations +=
+          schur_report.local_factorization_attempts;
+      out.profiling.vsc_schur_sparse_factorizations +=
+          schur_report.sparse_factorization_attempts;
+      out.profiling.factorization_calls +=
+          schur_report.sparse_factorization_attempts;
+      out.profiling.linear_solve_calls += schur_report.sparse_solve_attempts;
+      out.profiling.vsc_schur_numeric_refactor_attempts +=
+          schur_report.numeric_refactor_attempted ? 1 : 0;
+      out.profiling.vsc_schur_numeric_refactor_accepted +=
+          schur_report.numeric_refactor_accepted ? 1 : 0;
+      out.profiling.vsc_schur_local_blocks = schur_report.local_blocks;
+      out.profiling.vsc_schur_full_dimension = schur_report.full_dimension;
+      out.profiling.vsc_schur_reduced_dimension =
+          schur_report.reduced_dimension;
+      out.profiling.vsc_schur_full_structural_nnz =
+          schur_report.full_structural_nnz;
+      out.profiling.vsc_schur_reduced_structural_nnz =
+          schur_report.reduced_structural_nnz;
+      out.profiling.vsc_schur_reduced_factor_nonzeros =
+          schur_report.reduced_factor_nonzeros;
+      out.profiling.vsc_schur_reduced_factor_work =
+          schur_report.reduced_factor_work;
+      if (schur_report.minimum_local_rcond > 0.0 &&
+          std::isfinite(schur_report.minimum_local_rcond)) {
+        if (out.profiling.vsc_schur_minimum_local_rcond == 0.0) {
+          out.profiling.vsc_schur_minimum_local_rcond =
+              schur_report.minimum_local_rcond;
+        } else {
+          out.profiling.vsc_schur_minimum_local_rcond = std::min(
+              out.profiling.vsc_schur_minimum_local_rcond,
+              schur_report.minimum_local_rcond);
+        }
+      }
+      out.profiling.vsc_schur_status = schur_report.status;
+      out.profiling.vsc_schur_assembly_factor_ms_total +=
+          std::chrono::duration<double, std::milli>(Clock::now() - t0)
+              .count();
+      if (schur_ok) {
+        out.profiling.vsc_schur_accepted += 1;
+        if (schur_report.minimum_local_rcond > 0.0 &&
+            std::isfinite(schur_report.minimum_local_rcond)) {
+          if (out.profiling.vsc_schur_minimum_accepted_local_rcond == 0.0) {
+            out.profiling.vsc_schur_minimum_accepted_local_rcond =
+                schur_report.minimum_local_rcond;
+          } else {
+            out.profiling.vsc_schur_minimum_accepted_local_rcond = std::min(
+                out.profiling.vsc_schur_minimum_accepted_local_rcond,
+                schur_report.minimum_local_rcond);
+          }
+        }
+        if (std::isfinite(schur_report.reduced_backward_error)) {
+          out.profiling.max_vsc_schur_reduced_backward_error = std::max(
+              out.profiling.max_vsc_schur_reduced_backward_error,
+              schur_report.reduced_backward_error);
+        }
+        if (std::isfinite(schur_report.full_backward_error)) {
+          out.profiling.max_vsc_schur_full_backward_error = std::max(
+              out.profiling.max_vsc_schur_full_backward_error,
+              schur_report.full_backward_error);
+        }
+        out.profiling.linear_solver_status = "vsc_local_schur_ok";
+        elapsed_ms = std::chrono::duration<double, std::milli>(
+                         Clock::now() - t0)
+                         .count();
+        return true;
+      }
+      out.profiling.vsc_schur_fallbacks += 1;
+      if (schur_report.status == "local_block_not_regular") {
+        out.profiling.vsc_schur_local_regular_rejections += 1;
+      } else if (schur_report.status == "full_backward_error_failed") {
+        out.profiling.vsc_schur_full_backward_error_rejections += 1;
+      } else {
+        out.profiling.vsc_schur_reduced_solve_rejections += 1;
+      }
     }
     if (ropts.enable_klu_numeric_refactor &&
         cache_.has_numeric_factorization &&
@@ -1390,6 +1699,9 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
                 std::max(0.0, ropts.refactor_backward_error_tolerance)) {
           out.profiling.numeric_refactor_accepted += 1;
           out.profiling.linear_solver_status = "klu_refactor_ok";
+          out.profiling.full_lu_factor_nonzeros =
+              sparse_solver->factor_nonzeros();
+          out.profiling.full_lu_factor_work = sparse_solver->factor_work();
           elapsed_ms = std::chrono::duration<double, std::milli>(
                            Clock::now() - t0)
                            .count();
@@ -1409,6 +1721,8 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
       return false;
     }
     cache_.has_numeric_factorization = true;
+    out.profiling.full_lu_factor_nonzeros = sparse_solver->factor_nonzeros();
+    out.profiling.full_lu_factor_work = sparse_solver->factor_work();
     out.profiling.linear_solve_calls += 1;
     const bool ok = sparse_solver->solve(rhs, direction) && direction.allFinite();
     out.profiling.linear_solver_status = ok ? "ok" : "solve_failed";
@@ -1637,6 +1951,7 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
                                                           vm,
                                                           va,
                                                           vdc,
+                                                          vsc_limit_state,
                                                           pcalc,
                                                           qcalc,
                                                           p_spec,
@@ -1678,6 +1993,18 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
       if (smooth_ncp_active && resid_ncp_initial < 0.0) {
         resid_ncp_initial = convergence_resid;
         out.profiling.smooth_ncp_final_mu = smooth_ncp_data->ncp_mu;
+      }
+      // Qi & Sun (1993), Thm. 3.2: under BD-regularity, semismooth Newton is
+      // locally superlinear; strong semismoothness gives the quadratic case.
+      // These quotients are measured evidence only, not a proof that every
+      // nearby Clarke generalized-Jacobian element is nonsingular.
+      if (!smooth_ncp_active && !jac_ctx.vsc_limit_blocks.empty() &&
+          std::isfinite(prev_resid) && prev_resid > 0.0 &&
+          std::isfinite(resid)) {
+        out.profiling.semismooth_rate_samples += 1;
+        out.profiling.semismooth_last_residual_ratio = resid / prev_resid;
+        out.profiling.semismooth_last_quadratic_ratio =
+            resid / (prev_resid * prev_resid);
       }
 
       const bool use_scaled_linear_system =
@@ -1842,7 +2169,10 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
           }
 
           // Apply trial step.
-          vm_trial = vm; va_trial = va; vdc_trial = vdc;
+          vm_trial = vm;
+          va_trial = va;
+          vdc_trial = vdc;
+          vsc_limit_state_trial = vsc_limit_state;
           for (int k = 0; k < jac_ctx.np; ++k) {
             va_trial[jac_ctx.non_slack[static_cast<size_t>(k)]] += step[k];
           }
@@ -1854,8 +2184,20 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
             const int bus = jac_ctx.dc_non_slack[static_cast<size_t>(k)];
             vdc_trial[bus] = std::max(vdc_trial[bus] + step[jac_ctx.np + jac_ctx.nq + k], kMinVm);
           }
+          for (int block_index = 0;
+               block_index < static_cast<int>(jac_ctx.vsc_limit_blocks.size());
+               ++block_index) {
+            const int local_offset =
+                block_index * powerflow::kVSCLimitStateSize;
+            const int global_offset =
+                jac_ctx.vsc_limit_blocks[static_cast<size_t>(block_index)].offset;
+            vsc_limit_state_trial.segment<powerflow::kVSCLimitStateSize>(
+                local_offset) +=
+                step.segment<powerflow::kVSCLimitStateSize>(global_offset);
+          }
           if (!skip_vac_enforcement) enforce_vac_setpoints(converters, vm_trial);
-          const double trial_resid = evaluate_trial_state(vm_trial, va_trial, vdc_trial);
+          const double trial_resid = evaluate_trial_state(
+              vm_trial, va_trial, vdc_trial, vsc_limit_state_trial);
           ls_evals_this_iter += 1;
 
           (void)trial_resid;
@@ -1871,7 +2213,10 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
           accepted_step = trust_region_update(f_sq, f_new_sq, pred_red,
                                                tr_delta, step_scaled.norm(), opt.trust_region_max);
           if (accepted_step) {
-            vm_best = vm_trial; va_best = va_trial; vdc_best = vdc_trial;
+            vm_best = vm_trial;
+            va_best = va_trial;
+            vdc_best = vdc_trial;
+            vsc_limit_state_best = vsc_limit_state_trial;
           }
         }
       } else if (opt.globalization == GS::PseudoTransient) {
@@ -1890,7 +2235,10 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
           dx = use_scaled_linear_system ? scaling.unscale_step(dx_scaled) : dx_scaled;
           clip_step(dx, jac_ctx, opt);
           // PTC: accept step unconditionally.
-          vm_best = vm; va_best = va; vdc_best = vdc;
+          vm_best = vm;
+          va_best = va;
+          vdc_best = vdc;
+          vsc_limit_state_best = vsc_limit_state;
           for (int k = 0; k < jac_ctx.np; ++k) {
             va_best[jac_ctx.non_slack[static_cast<size_t>(k)]] += dx[k];
           }
@@ -1901,6 +2249,17 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
           for (int k = 0; k < jac_ctx.ndc_eq; ++k) {
             const int bus = jac_ctx.dc_non_slack[static_cast<size_t>(k)];
             vdc_best[bus] = std::max(vdc_best[bus] + dx[jac_ctx.np + jac_ctx.nq + k], kMinVm);
+          }
+          for (int block_index = 0;
+               block_index < static_cast<int>(jac_ctx.vsc_limit_blocks.size());
+               ++block_index) {
+            const int local_offset =
+                block_index * powerflow::kVSCLimitStateSize;
+            const int global_offset =
+                jac_ctx.vsc_limit_blocks[static_cast<size_t>(block_index)].offset;
+            vsc_limit_state_best.segment<powerflow::kVSCLimitStateSize>(
+                local_offset) +=
+                dx.segment<powerflow::kVSCLimitStateSize>(global_offset);
           }
           if (!skip_vac_enforcement) enforce_vac_setpoints(converters, vm_best);
           accepted_step = true;
@@ -2045,7 +2404,10 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
             clip_step(ptc_dx, jac_ctx, opt);
             // PTC step: accept unconditionally (same as the PTC globalization branch).
             dx = ptc_dx;
-            vm_best = vm; va_best = va; vdc_best = vdc;
+            vm_best = vm;
+            va_best = va;
+            vdc_best = vdc;
+            vsc_limit_state_best = vsc_limit_state;
             for (int k = 0; k < jac_ctx.np; ++k) {
               va_best[jac_ctx.non_slack[static_cast<size_t>(k)]] += dx[k];
             }
@@ -2056,6 +2418,17 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
             for (int k = 0; k < jac_ctx.ndc_eq; ++k) {
               const int bus = jac_ctx.dc_non_slack[static_cast<size_t>(k)];
               vdc_best[bus] = std::max(vdc_best[bus] + dx[jac_ctx.np + jac_ctx.nq + k], kMinVm);
+            }
+            for (int block_index = 0;
+                 block_index < static_cast<int>(jac_ctx.vsc_limit_blocks.size());
+                 ++block_index) {
+              const int local_offset =
+                  block_index * powerflow::kVSCLimitStateSize;
+              const int global_offset =
+                  jac_ctx.vsc_limit_blocks[static_cast<size_t>(block_index)].offset;
+              vsc_limit_state_best.segment<powerflow::kVSCLimitStateSize>(
+                  local_offset) +=
+                  dx.segment<powerflow::kVSCLimitStateSize>(global_offset);
             }
             if (!skip_vac_enforcement) enforce_vac_setpoints(converters, vm_best);
             accepted_step = true;
@@ -2085,6 +2458,7 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
       vm = vm_best;
       va = va_best;
       vdc = vdc_best;
+      vsc_limit_state = vsc_limit_state_best;
 
     }  // end inner Newton loop
 
@@ -2162,6 +2536,7 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
                                         vm,
                                         va,
                                         vdc,
+                                        vsc_limit_state,
                                         pcalc,
                                         qcalc,
                                         p_spec,
@@ -2230,7 +2605,7 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
   // decertifies converged roots whose largest mismatch happens to sit on a
   // limited bus; the certificate accuracy is the solve accuracy.
   const double q_certificate_tolerance =
-      std::max({1e-10, 10.0 * std::numeric_limits<double>::epsilon(), opt.tol});
+      std::max({1e-10, 10.0 * NumericalConstants::kMachineEpsilon, opt.tol});
   out.reactive_limits.certified =
       out.reactive_limits.enforcement_requested && out.converged &&
       !out.reactive_limits.outer_iteration_limit_reached &&
@@ -2251,6 +2626,50 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
   }
   for (int i = 0; i < ndc; ++i) {
     out.vdc[static_cast<size_t>(i)] = vdc[i];
+  }
+
+  out.vsc_limit_states.clear();
+  out.vsc_limit_states.reserve(jac_ctx.vsc_limit_blocks.size());
+  for (int block_index = 0;
+       block_index < static_cast<int>(jac_ctx.vsc_limit_blocks.size());
+       ++block_index) {
+    const auto& block =
+        jac_ctx.vsc_limit_blocks[static_cast<size_t>(block_index)];
+    const auto& converter =
+        converters[static_cast<size_t>(block.converter_position)];
+    const Eigen::Matrix<double, powerflow::kVSCLimitStateSize, 1> local_state =
+        vsc_limit_state.segment<powerflow::kVSCLimitStateSize>(
+            block_index * powerflow::kVSCLimitStateSize);
+    const auto evaluation = powerflow::evaluate_vsc_limit_ncp(
+        converter, vm[block.ac_bus], va[block.ac_bus], vdc[block.dc_bus], data.base_mva,
+        data.loss_model, local_state);
+    VSCLimitStateResult result;
+    result.index = converter.index;
+    result.p_ac_pu = local_state[0];
+    result.q_ac_pu = local_state[1];
+    result.p_dc_pu = local_state[2];
+    result.multiplier = local_state[5];
+    result.current_pu = evaluation.current_pu;
+    result.current_margin_pu = evaluation.current_margin_pu;
+    result.complementarity_residual = evaluation.complementarity_residual;
+    result.current_limit_active = evaluation.current_limit_active;
+    result.droop_saturated = evaluation.droop_saturated;
+    result.current_limit_priority =
+        powerflow::vsc_current_limit_priority_str(
+            converter.current_limit_priority);
+    result.internal_voltage_real_pu = local_state[3];
+    result.internal_voltage_imag_pu = local_state[4];
+    result.gfm_norton_model = powerflow::uses_gfm_limit_ncp(converter);
+    const std::complex<double> terminal_voltage =
+        std::polar(vm[block.ac_bus], va[block.ac_bus]);
+    const std::complex<double> terminal_power{local_state[0], local_state[1]};
+    if (std::abs(terminal_voltage) > 1e-12) {
+      const std::complex<double> terminal_current =
+          std::conj(terminal_power / terminal_voltage);
+      result.terminal_current_real_pu = terminal_current.real();
+      result.terminal_current_imag_pu = terminal_current.imag();
+    }
+    out.vsc_limit_states.push_back(std::move(result));
   }
 
   // Post-solve DC voltage-limit check.  A weak converter droop (small k_vdc) can

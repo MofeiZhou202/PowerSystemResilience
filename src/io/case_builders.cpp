@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <limits>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -541,6 +542,109 @@ void attach_case2000_style_mtdc(HybridPowerSystem& sys) {
     c.name = "VSC" + std::to_string(i + 1);
     sys.vsc_converters.push_back(std::move(c));
   }
+}
+
+void configure_vsc_limit_ncp_benchmark(HybridPowerSystem& sys) {
+  std::vector<int> used_ac_buses;
+  used_ac_buses.reserve(sys.vsc_converters.size());
+
+  for (size_t converter_position = 0;
+       converter_position < sys.vsc_converters.size();
+       ++converter_position) {
+    auto& converter = sys.vsc_converters[converter_position];
+    const auto authored_bus = std::find_if(
+        sys.ac.buses.begin(), sys.ac.buses.end(),
+        [&](const ACBus& bus) { return bus.index == converter.bus_ac; });
+    const int authored_area = authored_bus != sys.ac.buses.end()
+                                  ? authored_bus->area
+                                  : 1;
+
+    const ACBus* terminal = nullptr;
+    int best_distance = std::numeric_limits<int>::max();
+    for (const auto& bus : sys.ac.buses) {
+      if (!bus.in_service || bus.bus_type != BusType::PQ ||
+          bus.area != authored_area ||
+          std::find(used_ac_buses.begin(), used_ac_buses.end(), bus.index) !=
+              used_ac_buses.end()) {
+        continue;
+      }
+      const int distance = std::abs(bus.index - converter.bus_ac);
+      if (distance < best_distance) {
+        terminal = &bus;
+        best_distance = distance;
+      }
+    }
+    if (terminal == nullptr) {
+      throw std::runtime_error(
+          "VSC limit-NCP benchmark requires one distinct in-service PQ terminal per converter");
+    }
+    converter.bus_ac = terminal->index;
+    used_ac_buses.push_back(terminal->index);
+
+    converter.enable_limit_ncp = true;
+    converter.current_limit_priority = static_cast<VSCCurrentLimitPriority>(
+        converter_position % 3);
+    converter.q_set_mvar =
+        ((converter_position % 2 == 0) ? 0.35 : -0.35) * sys.base_mva;
+    converter.i_ac_max_pu =
+        converter.control_mode == ConverterMode::PQ_MODE ? 0.45 : 1.25;
+
+    if (converter.control_mode == ConverterMode::VDC_Q) {
+      converter.k_vdc = 20.0;
+      converter.droop_p_min_mw = -1.5 * sys.base_mva;
+      converter.droop_p_max_mw = 1.5 * sys.base_mva;
+    }
+  }
+
+  for (auto& bus : sys.dc.buses) {
+    if (bus.in_service) bus.bus_type = DCBusType::DC_P;
+  }
+
+}
+
+void embed_benchmark_gfm_operating_point(HybridPowerSystem& sys,
+                                         int expected_ac_bus,
+                                         double terminal_voltage_pu,
+                                         double terminal_angle_deg) {
+  if (sys.vsc_converters.empty()) {
+    throw std::runtime_error(
+        "GFM benchmark embedding requires an existing MTDC station");
+  }
+  auto terminal = std::find_if(
+      sys.ac.buses.begin(), sys.ac.buses.end(),
+      [&](const ACBus& bus) { return bus.index == expected_ac_bus; });
+  if (terminal == sys.ac.buses.end()) {
+    throw std::runtime_error(
+        "GFM benchmark embedding cannot find the certified AC terminal");
+  }
+  terminal->vm_pu = terminal_voltage_pu;
+  terminal->va_deg = terminal_angle_deg;
+  VSCConverter converter;
+  converter.index = std::max_element(
+      sys.vsc_converters.begin(), sys.vsc_converters.end(),
+      [](const VSCConverter& lhs, const VSCConverter& rhs) {
+        return lhs.index < rhs.index;
+      })->index + 1;
+  converter.bus_ac = expected_ac_bus;
+  converter.bus_dc = sys.vsc_converters.front().bus_dc;
+  converter.in_service = true;
+  converter.control_mode = ConverterMode::AC_GRID_FORMING;
+  converter.enable_limit_ncp = true;
+  converter.current_limit_priority = VSCCurrentLimitPriority::Magnitude;
+  converter.i_ac_max_pu = 1.25;
+  converter.gfm_internal_voltage_set_pu = terminal_voltage_pu;
+  converter.gfm_internal_angle_set_deg = terminal_angle_deg;
+  converter.gfm_virtual_r_pu = 0.04;
+  converter.gfm_virtual_x_pu = 0.20;
+  converter.eta = 1.0;
+  converter.loss_percent = 0.0;
+  converter.loss_mw = 0.0;
+  converter.pmax_mw = 5.0 * sys.base_mva;
+  converter.pmin_mw = -5.0 * sys.base_mva;
+  converter.qmax_mvar = 5.0 * sys.base_mva;
+  converter.qmin_mvar = -5.0 * sys.base_mva;
+  converter.name = "GFM Norton operating-point embedding";
+  sys.vsc_converters.push_back(std::move(converter));
 }
 
 HybridPowerSystem parse_case_with_overlay(const std::string& file,
@@ -1251,6 +1355,71 @@ HybridPowerSystem build_case69_acdc() {
   return parse_case_with_overlay("case69.m", "case69 AC/DC", 1, 35);
 }
 
+HybridPowerSystem build_gfm_norton_limit_demo() {
+  HybridPowerSystem sys;
+  sys.name = "Grid-connected GFM Norton current-limit demo";
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = sys.base_mva;
+  sys.dc.base_mva = sys.base_mva;
+  sys.ac.buses = {
+      make_ac_bus(1, BusType::SLACK, 0.0, 0.0, 1.0, 0.0),
+      make_ac_bus(2, BusType::PQ, 0.0, 0.0, 1.0, 0.0)};
+  sys.ac.branches = {make_ac_branch(11, 1, 2, 0.02, 0.15, 0.0, 1.0)};
+  Generator source;
+  source.index = 21;
+  source.bus = 1;
+  source.is_slack = true;
+  source.in_service = true;
+  source.name = "Independent AC angle reference";
+  sys.ac.generators = {source};
+
+  sys.dc.buses = {
+      DCBus{.index = 1, .bus_type = DCBusType::DC_V, .vm_pu = 1.0,
+            .in_service = true, .name = "DC reference"},
+      DCBus{.index = 2, .bus_type = DCBusType::DC_P, .vm_pu = 1.0,
+            .in_service = true, .name = "GFM DC terminal"}};
+  sys.dc.branches = {
+      DCBranch{.index = 31, .from_bus = 1, .to_bus = 2, .r_pu = 0.08,
+               .in_service = true, .name = "DC link"}};
+
+  VSCConverter converter;
+  converter.index = 91;
+  converter.bus_ac = 2;
+  converter.bus_dc = 2;
+  converter.in_service = true;
+  converter.control_mode = ConverterMode::AC_GRID_FORMING;
+  converter.enable_limit_ncp = true;
+  converter.current_limit_priority = VSCCurrentLimitPriority::Magnitude;
+  converter.i_ac_max_pu = 0.8;
+  converter.gfm_internal_voltage_set_pu = 1.08;
+  converter.gfm_internal_angle_set_deg = 12.0;
+  converter.gfm_virtual_r_pu = 0.04;
+  converter.gfm_virtual_x_pu = 0.20;
+  converter.eta = 0.98;
+  converter.pmax_mw = 200.0;
+  converter.pmin_mw = -200.0;
+  converter.qmax_mvar = 200.0;
+  converter.qmin_mvar = -200.0;
+  converter.name = "GFM Norton VSC";
+  VSCConverter dc_former;
+  dc_former.index = 90;
+  dc_former.bus_ac = 1;
+  dc_former.bus_dc = 1;
+  dc_former.in_service = true;
+  dc_former.control_mode = ConverterMode::VDC_Q;
+  dc_former.v_dc_set_pu = 1.0;
+  dc_former.q_set_mvar = 0.0;
+  dc_former.k_vdc = 20.0;
+  dc_former.pmax_mw = 200.0;
+  dc_former.pmin_mw = -200.0;
+  dc_former.qmax_mvar = 200.0;
+  dc_former.qmin_mvar = -200.0;
+  dc_former.eta = 0.98;
+  dc_former.name = "DC voltage-forming VSC";
+  sys.vsc_converters = {dc_former, converter};
+  return sys;
+}
+
 HybridPowerSystem build_case300_acdc() {
   HybridPowerSystem sys = parse_matpower(data_file_path("case300.m").string());
   sys.name = "case300 AC/DC";
@@ -1270,6 +1439,21 @@ HybridPowerSystem build_case300_acdc() {
     transformer.tap_step_percent = 1.25;
   }
   attach_case300_style_mtdc(sys);
+  return sys;
+}
+
+HybridPowerSystem build_case300_acdc_vsc_limit_ncp() {
+  HybridPowerSystem sys = build_case300_acdc();
+  sys.name = "case300 AC/DC VSC limit-NCP benchmark";
+  configure_vsc_limit_ncp_benchmark(sys);
+  return sys;
+}
+
+HybridPowerSystem build_case300_acdc_gfm_limit_ncp() {
+  HybridPowerSystem sys = build_case300_acdc_vsc_limit_ncp();
+  sys.name = "case300 AC/DC GFM limit-NCP benchmark";
+  embed_benchmark_gfm_operating_point(
+      sys, 7, 0.99374670898282691, 6.862679381194545);
   return sys;
 }
 
@@ -1560,6 +1744,25 @@ HybridPowerSystem build_case2000_acdc() {
   HybridPowerSystem sys = parse_matpower(case2000_path.string());
   sys.name = "case2000 AC/DC";
   attach_case2000_style_mtdc(sys);
+  return sys;
+}
+
+HybridPowerSystem build_case2000_acdc_vsc_limit_ncp() {
+  HybridPowerSystem sys = build_case2000_acdc();
+  if (sys.ac.buses.size() != 2000) {
+    throw std::runtime_error(
+        "case2000 VSC limit-NCP benchmark requires the real 2000-bus source case");
+  }
+  sys.name = "case2000 AC/DC VSC limit-NCP benchmark";
+  configure_vsc_limit_ncp_benchmark(sys);
+  return sys;
+}
+
+HybridPowerSystem build_case2000_acdc_gfm_limit_ncp() {
+  HybridPowerSystem sys = build_case2000_acdc_vsc_limit_ncp();
+  sys.name = "case2000 AC/DC GFM limit-NCP benchmark";
+  embed_benchmark_gfm_operating_point(
+      sys, 32, 1.018100512256215, -10.694775032472544);
   return sys;
 }
 

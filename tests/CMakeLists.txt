@@ -77,6 +77,7 @@ hacdcpf_add_test(test_external_grid_io    test_external_grid_io.cpp)
 # I/O: explicit rich-component coverage contract for internal JSON, canonical
 # native models, GridLAB-D text snapshots, and OpenDSS text snapshots.
 hacdcpf_add_test(test_component_io_mapping test_component_io_mapping.cpp)
+hacdcpf_add_test(test_model_semantics_contract test_model_semantics_contract.cpp)
 
 # Dynamics: single-source parameter catalog stays aligned with the builder.
 hacdcpf_add_test(test_dynamic_model_catalog test_dynamic_model_catalog.cpp)
@@ -149,6 +150,7 @@ hacdcpf_add_test(test_sppt_agent           test_sppt_agent.cpp)
 # Multi-converter control-mode feasibility checks based on the coordination
 # theory document.
 hacdcpf_add_test(test_converter_coordination test_converter_coordination.cpp)
+hacdcpf_add_test(test_vsc_limit_ncp test_vsc_limit_ncp.cpp)
 
 # Three-phase power flow: data model, projection-based solve, meshed/multi-source
 # topologies, transformer, distribution PF stub, and JSON round-trip.

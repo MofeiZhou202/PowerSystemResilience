@@ -404,6 +404,138 @@ def main() -> int:
             f"residual={pf.get('residual')}",
         )
 
+        print("1c. balanced VSC current-limit NCP production path")
+        st, gfm_body = c.post_json(
+            "/api/session/load_builtin",
+            {"case": "gfm_norton_limit_demo"},
+        )
+        gfm_counts = gfm_body.get("counts", {})
+        st_gfm_pf, gfm_pf = c.post_json(
+            "/api/session/pf",
+            {
+                "method": "ac_newton",
+                "options": {
+                    "max_iter": 100,
+                    "tol": 1e-10,
+                    "robust_nonlinear": {
+                        "enable_vsc_local_schur": False,
+                        "vsc_schur_min_network_dimension": 321,
+                        "vsc_schur_local_rcond_tolerance": 1e-7,
+                        "vsc_schur_backward_error_tolerance": 2e-11,
+                    },
+                },
+            },
+        )
+        gfm_rows = [row for row in gfm_pf.get("vsc_transfers", [])
+                    if row.get("gfm_norton_model") is True]
+        gfm_row = gfm_rows[0] if gfm_rows else {}
+        gfm_flags = gfm_pf.get("validity_flags", {})
+        gfm_schur_options = (gfm_pf.get("options_effective", {})
+                             .get("robust_nonlinear", {}))
+        chk.check(
+            st == 200 and st_gfm_pf == 200 and
+            gfm_counts.get("ac_buses") == 2 and
+            gfm_counts.get("dc_buses") == 2 and
+            gfm_counts.get("vsc_converters") == 2 and
+            gfm_pf.get("converged") is True and len(gfm_rows) == 1 and
+            gfm_row.get("index") == 91 and
+            gfm_row.get("canvas_type") == "vsc_converter" and
+            gfm_row.get("canvas_index") == 91 and
+            all(field in gfm_row for field in (
+                "internal_voltage_real_pu", "internal_voltage_imag_pu",
+                "terminal_current_real_pu", "terminal_current_imag_pu")) and
+            gfm_flags.get("vsc_gfm_norton_modelled") is True and
+            gfm_flags.get("vsc_gfm_priority_limit_enforced") is True and
+            gfm_flags.get("vsc_gfm_island_reference_modelled") is False and
+            gfm_pf.get("gfm_island_reference_vsc_indices") == [] and
+            gfm_schur_options.get("enable_vsc_local_schur") is False and
+            gfm_schur_options.get("vsc_schur_min_network_dimension") == 321 and
+            gfm_schur_options.get("vsc_schur_local_rcond_tolerance") == 1e-7 and
+            gfm_schur_options.get("vsc_schur_backward_error_tolerance") == 2e-11,
+            "GFM Norton builtin PF -> "
+            f"converged={gfm_pf.get('converged')} rows={len(gfm_rows)} "
+            f"flags={gfm_flags}",
+        )
+
+        st, body = c.post_json(
+            "/api/session/load_builtin",
+            {"case": "case300_acdc_vsc_limit_ncp"},
+        )
+        counts = body.get("counts", {})
+        chk.check(
+            st == 200 and counts.get("ac_buses") == 300 and
+            counts.get("dc_buses") == 6 and counts.get("vsc_converters") == 6,
+            "case300 limit-NCP load -> "
+            f"AC={counts.get('ac_buses')} DC={counts.get('dc_buses')} "
+            f"VSC={counts.get('vsc_converters')}",
+        )
+        st, limit_pf = c.post_json(
+            "/api/session/pf",
+            {
+                "method": "ac_newton",
+                "options": {"max_iter": 120, "tol": 1e-10},
+            },
+        )
+        vsc_rows = limit_pf.get("vsc_transfers", [])
+        active_rows = [row for row in vsc_rows
+                       if row.get("current_limit_active") is True]
+        max_ncp = max((float(row.get("complementarity_residual", float("inf")))
+                       for row in vsc_rows), default=float("inf"))
+        certificate_fields = {
+            "limit_ncp_enabled", "current_limit_active",
+            "droop_saturated",
+            "current_limit_priority", "effective_mode", "ac_current_pu",
+            "current_margin_pu", "complementarity_residual", "canvas_type",
+            "canvas_index",
+        }
+        chk.check(
+            st == 200 and limit_pf.get("converged") is True and
+            len(vsc_rows) == 6 and len(active_rows) == 4 and max_ncp <= 1e-9 and
+            limit_pf.get("validity_flags", {}).get(
+                "vsc_current_limits_enforced") is True and
+            all(certificate_fields.issubset(row) and
+                row.get("canvas_type") == "vsc_converter" and
+                row.get("canvas_index") == row.get("index")
+                for row in vsc_rows),
+            "case300 limit-NCP PF -> "
+            f"converged={limit_pf.get('converged')} VSC={len(vsc_rows)} "
+            f"active={len(active_rows)} max_ncp={max_ncp}",
+        )
+
+        st, exported = c.post_json("/api/session/export_json")
+        exported_system = json.loads(exported.get("json_string", "{}"))
+        editable_vscs = exported_system.get("vsc_converters", [])
+        edited_vsc_id = editable_vscs[0].get("index") if editable_vscs else None
+        if editable_vscs:
+            editable_vscs[0].update({
+                "gfm_internal_voltage_set_pu": 1.07,
+                "gfm_internal_angle_set_deg": 8.5,
+                "gfm_virtual_r_pu": 0.035,
+                "gfm_virtual_x_pu": 0.18,
+            })
+        st_update, updated = c.post_json(
+            "/api/session/update_components",
+            {"vsc_converters": editable_vscs},
+        )
+        st_export, edited_export = c.post_json("/api/session/export_json")
+        edited_system = json.loads(edited_export.get("json_string", "{}"))
+        edited_rows = [row for row in edited_system.get("vsc_converters", [])
+                       if row.get("index") == edited_vsc_id]
+        edited = edited_rows[0] if edited_rows else {}
+        chk.check(
+            st == 200 and st_update == 200 and st_export == 200 and
+            edited.get("gfm_internal_voltage_set_pu") == 1.07 and
+            edited.get("gfm_internal_angle_set_deg") == 8.5 and
+            edited.get("gfm_virtual_r_pu") == 0.035 and
+            edited.get("gfm_virtual_x_pu") == 0.18,
+            "GFM parameter edit round-trip -> "
+            f"id={edited_vsc_id} values="
+            f"{edited.get('gfm_internal_voltage_set_pu')}/"
+            f"{edited.get('gfm_internal_angle_set_deg')}/"
+            f"{edited.get('gfm_virtual_r_pu')}/"
+            f"{edited.get('gfm_virtual_x_pu')}",
+        )
+
         print("2. load built-in ieee14_acdc")
         st, body = c.post_json("/api/session/load_builtin", {"case": "ieee14_acdc"})
         counts = body.get("counts", {})

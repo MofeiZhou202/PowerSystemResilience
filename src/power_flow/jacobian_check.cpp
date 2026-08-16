@@ -7,6 +7,8 @@
 #include <cmath>
 #include <limits>
 
+#include "hacdcpf/model/defaults.hpp"
+
 namespace hacdcpf {
 
 // ── Sparse overload ──────────────────────────────────────────────────────────
@@ -29,7 +31,7 @@ JacobianCheckReport check_jacobian(
     report.absolute_tolerance = atol;
     report.relative_tolerance = rtol;
 
-    constexpr double eps = std::numeric_limits<double>::epsilon();
+    constexpr double eps = NumericalConstants::kMachineEpsilon;
 
     for (int j = 0; j < n; ++j) {
         Eigen::VectorXd xp = x0; xp[j] += h;

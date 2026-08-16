@@ -10,6 +10,8 @@
 
 #include "hacdcpf/dynamics/NetworkState.hpp"
 #include "hacdcpf/dynamics/devices/BasicDynamicDevices.hpp"
+#include "hacdcpf/io/case_builders.hpp"
+#include "hacdcpf/optimal_power_flow/three_phase_hybrid_adapter.hpp"
 #include "hacdcpf/optimal_power_flow/three_phase_hybrid_opf.hpp"
 #include "hacdcpf/optimal_power_flow/three_phase_hybrid_relaxation.hpp"
 #include "hacdcpf/power_flow/power_flow_result.hpp"
@@ -180,6 +182,33 @@ ThreePhaseHybridOPFCase make_large_sparse_hybrid_case(int bus_count) {
 }
 
 }  // namespace
+
+TEST_CASE("Three-phase OPF adapter preserves shared GFM Norton references",
+          "[opf][three_phase][hybrid][adapter][gfm]") {
+  auto system = hacdcpf::io::build_urban_lvn_primary_secondary();
+  REQUIRE_FALSE(system.vsc_converters.empty());
+  system.dc.dcdc_converters.clear();
+  system.dc.dc_static_generators.clear();
+  system.dc.pv_arrays.clear();
+  system.dc.dc_storage.clear();
+  system.energy_routers.clear();
+  auto& source = system.vsc_converters.front();
+  source.control_mode = hacdcpf::ConverterMode::AC_GRID_FORMING;
+  source.gfm_internal_voltage_set_pu = 1.071;
+  source.gfm_internal_angle_set_deg = 8.25;
+  source.gfm_virtual_r_pu = 0.037;
+  source.gfm_virtual_x_pu = 0.19;
+
+  const auto model = build_three_phase_hybrid_model(system);
+  REQUIRE_FALSE(model.opf.converters.empty());
+  const auto& mapped = model.opf.converters.front();
+  CHECK(mapped.control_mode == PhaseVSCControlMode::GridFormingDroop);
+  CHECK(mapped.voltage_reference_pu == Catch::Approx(1.071));
+  CHECK(mapped.voltage_reference_angle_rad ==
+        Catch::Approx(8.25 * M_PI / 180.0));
+  CHECK(mapped.virtual_r_pu == Catch::Approx(0.037));
+  CHECK(mapped.virtual_x_pu == Catch::Approx(0.19));
+}
 
 TEST_CASE("Monolithic phase hybrid OPF Full and GR recover the same solution",
           "[opf][three_phase][hybrid][kron]") {

@@ -19,6 +19,10 @@
 namespace hacdcpf::powerflow {
 
 struct SolverData {
+  // Canonical numerical copies, not a second authored model. Public identity
+  // and result recovery remain owned by the rich model and projection maps;
+  // solver code must not reinterpret or persist these vector positions as
+  // stable component IDs.
   std::vector<ACBus> ac_buses;
   std::vector<ACBranch> ac_branches;
   std::vector<DCBus> dc_buses;

@@ -8,6 +8,7 @@
 #include "hacdcpf/dynamics/dynamics.hpp"
 #include "hacdcpf/ev_power_traffic/ev_power_traffic_simulation.hpp"
 #include "hacdcpf/model/hybrid_power_system.hpp"
+#include "hacdcpf/model/model_semantics.hpp"
 #include "hacdcpf/optimal_power_flow/opf_options.hpp"
 #include "hacdcpf/optimal_power_flow/opf_result.hpp"
 #include "hacdcpf/optimal_power_flow/opf_solver_interface.hpp"

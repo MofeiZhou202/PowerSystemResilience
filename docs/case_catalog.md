@@ -37,7 +37,8 @@
 | 场景生成与台风 | dist33_microgrid_der / five_province_acdc | 聚类缩减输出；Holland 风场故障序列非空（GIS 驱动） |
 | 碳流追踪 | ieee24_3area_acdc_expanded | 节点碳势 > 0，源荷平衡残差 ≈ 0 |
 | 真实区域电网 + GIS | five_province_acdc | FDPF 收敛，电压分布健康（NR 刚性已标注） |
-| 性能基准 | case2000_acdc | 2000 节点纯 AC NR 收敛（约 12 迭代 / 秒级） |
+| VSC 限值 NCP 规模基准 | case300_acdc_vsc_limit_ncp / case2000_acdc_vsc_limit_ncp | 真实 300/2000 AC + 6/8 DC，逐 VSC 显式 NCP；两例均 4 台同时限流、单次 Jacobian pattern 构建 |
+| GFM Norton 生产演示 | gfm_norton_limit_demo | 2 AC + 2 DC + 2 VSC；独立 AC 角参考、VDC-Q 直流支撑和显式 GFM `E∠δ/Zv` 限流证书 |
 
 
 ## 快速上手与综合展示
@@ -160,11 +161,32 @@
 - 推荐演示：大系统 RPO（OLTC + 固定并联）、OPF 多后端对比。
 - 构建：`build_case300_acdc()`（case_builders.cpp:1254）。
 
+### gfm_norton_limit_demo — GFM Norton 限流演示 · 2 AC + 2 DC
+- 可从 authored/平坦初值直接求解；一台 VDC-Q 站提供真实 DC 电压与能量支撑，一台并网 GFM 使用内部电势/角度、虚拟阻抗和固定六槽限流 NCP。
+- 推荐演示：GUI 四参数编辑与 JSON round-trip、PF 证书、OPF post-PF replay、PF→暂态 Norton seed。
+- 构建：`build_gfm_norton_limit_demo()`。
+
+### case300_acdc_vsc_limit_ncp — IEEE300 VSC 限值基准 · 300 AC + 6 DC
+- 在 case300 六端环网 MTDC 上启用每站六槽固定 NCP 块、三种 priority 与 Vdc droop 饱和；非 GFM 站的两个内部电势槽使用恒等约束。
+- 注册回归中 6 台 VSC 全部进入扩展块、4 台同时触发电流圆，NCP 残差不超过 `1e-9`，pattern 只构建一次。
+- 构建：`build_case300_acdc_vsc_limit_ncp()`。
+
 ### case2000_acdc — ACTIVSg2000 性能旗舰 · 2000 AC + 8 DC
 - 2000 节点 544 机 + 149 并联母线 + 8 端 MTDC（按 area 自动选网孔最强的机端母线挂接）。
 - 性能参考：纯 AC 牛顿潮流约 12 迭代、服务端约 2s（`method=pure_ac`；FDPF 亦可）。
   注意：统一混合 NR 对 MTDC 下垂参数敏感（DC 电压偏弱告警），属既有案例数据限制，求解器侧待改进。
 - 构建：`build_case2000_acdc()`（case_builders.cpp:1552）。
+
+### case2000_acdc_vsc_limit_ncp — ACTIVSg2000 VSC 限值基准 · 2000 AC + 8 DC
+- 使用仓库内真实 ACTIVSg2000 数据和按区域构造的八端 MTDC；不是纯 AC 结果，也不接受 case300 surrogate。
+- 注册回归中 8 台 VSC 全部进入扩展块、4 台同时触发电流圆，NCP 残差不超过 `1e-9`，pattern 只构建一次。
+- 该结果只证明当前 CPU 稀疏 MTDC/PQ-Vdc-Q 生产路径；GFM 证据来自专用并网双机、弱网、OPF/时序/暂态与 OpenDSS 测试，不作为大规模 GFM 或 GPU 加速证据。
+- 构建：`build_case2000_acdc_vsc_limit_ncp()`。
+
+### case300/case2000 GFM continuation 数据集
+- `build_case300_acdc_gfm_limit_ncp()` / `build_case2000_acdc_gfm_limit_ncp()` 在对应真实 MTDC 限值基准上附加一台非绑定 GFM Norton 块。
+- 注册测试先求原 MTDC 工况，再以其 `Vm/Va/Vdc` 作为公开 `InitialState` 求解 GFM 扩展；这是准稳态/OPF replay 型 continuation 证据，不是平坦启动证据。
+- 该证据覆盖真实 300/2000 AC + 6/8 DC 的固定稀疏结构；多 GFM 同时绑定仍由小系统测试覆盖，GPU 未实现。
 
 ## 备注
 

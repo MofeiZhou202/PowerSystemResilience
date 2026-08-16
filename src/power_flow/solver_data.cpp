@@ -12,6 +12,7 @@
 #include "hacdcpf/model/enums/storage_enums.hpp"
 #include "hacdcpf/power_flow/admittance_builder.hpp"
 #include "hacdcpf/power_flow/pv_power_curve.hpp"
+#include "hacdcpf/power_flow/vsc_limit_ncp.hpp"
 
 namespace hacdcpf::powerflow {
 
@@ -410,6 +411,13 @@ static void apply_acpv_voltage_control(SolverData& data) {
     auto& bus = data.ac_buses[static_cast<size_t>(idx)];
 
     if (forms_ac) {
+      if (uses_gfm_limit_ncp(conv)) {
+        // The internal-voltage/Norton NCP owns E and the terminal injection.
+        // Its terminal voltage must remain a solved network state; an existing
+        // independent slack remains the island angle reference.
+        if (bus.bus_type != BusType::SLACK) bus.bus_type = BusType::PQ;
+        continue;
+      }
       // Grid-forming: promote to SLACK and pin the reference angle + magnitude.
       if (bus.bus_type != BusType::SLACK) {
         bus.bus_type = BusType::SLACK;
@@ -456,19 +464,8 @@ SolverData make_solver_data(const HybridPowerSystem& sys, LossModelType loss_mod
   data.dc_storage = std::move(projected.dc.storage);
   data.dc_static_generators = std::move(projected.dc.static_generators);
   // Also convert StaticGeneratorDC entries into StaticGenerator format
-  for (auto& sgdc : projected.dc.dc_static_generators) {
-    StaticGenerator sg;
-    sg.index = sgdc.index;
-    sg.bus = sgdc.bus;
-    sg.in_service = sgdc.in_service;
-    sg.name = std::move(sgdc.name);
-    sg.p_mw = sgdc.p_set_mw;
-    sg.scaling = sgdc.scaling;
-    sg.pmax_mw = sgdc.pmax_mw;
-    sg.pmin_mw = sgdc.pmin_mw;
-    sg.co2_emission_rate = sgdc.emission_factor_tco2_mwh;
-    sg.controllable = sgdc.controllable;
-    data.dc_static_generators.push_back(std::move(sg));
+  for (const auto& source : projected.dc.dc_static_generators) {
+    data.dc_static_generators.push_back(dc_static_generator_pf_view(source));
   }
   data.dc_pv_arrays = std::move(projected.dc.pv_arrays);
   data.shunts = std::move(projected.ac.shunts);
@@ -538,19 +535,8 @@ SolverData make_solver_data_projected(HybridPowerSystem&& projected, LossModelTy
   data.dc_loads = std::move(projected.dc.loads);
   data.dc_storage = std::move(projected.dc.storage);
   data.dc_static_generators = std::move(projected.dc.static_generators);
-  for (auto& sgdc : projected.dc.dc_static_generators) {
-    StaticGenerator sg;
-    sg.index = sgdc.index;
-    sg.bus = sgdc.bus;
-    sg.in_service = sgdc.in_service;
-    sg.name = std::move(sgdc.name);
-    sg.p_mw = sgdc.p_set_mw;
-    sg.scaling = sgdc.scaling;
-    sg.pmax_mw = sgdc.pmax_mw;
-    sg.pmin_mw = sgdc.pmin_mw;
-    sg.co2_emission_rate = sgdc.emission_factor_tco2_mwh;
-    sg.controllable = sgdc.controllable;
-    data.dc_static_generators.push_back(std::move(sg));
+  for (const auto& source : projected.dc.dc_static_generators) {
+    data.dc_static_generators.push_back(dc_static_generator_pf_view(source));
   }
   data.dc_pv_arrays = std::move(projected.dc.pv_arrays);
   data.shunts = std::move(projected.ac.shunts);

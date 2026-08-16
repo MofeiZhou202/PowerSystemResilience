@@ -30,7 +30,7 @@ NonlinearScaling build_nonlinear_scaling(
     const Eigen::VectorXd& vdc,
     const RobustNonlinearOptions& options) {
 
-  const int nvar = ctx.np + ctx.nq + ctx.ndc_eq;
+  const int nvar = ctx.nvar;
   if (nvar == 0) return NonlinearScaling{};
 
   const double lo = options.min_scale;
@@ -95,4 +95,3 @@ NonlinearScaling build_nonlinear_scaling(
 }
 
 }  // namespace hacdcpf::powerflow
-

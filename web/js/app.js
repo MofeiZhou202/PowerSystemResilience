@@ -10642,6 +10642,12 @@ const App = (() => {
             `Qac=${fmtQ(v?.q_ac_mvar, 3)}`,
             `Pdc=${fmtP(v?.p_dc_mw, 3)}`,
             `Loss=${fmtP(v?.loss_mw, 3)}`,
+            v?.limit_ncp_enabled ? `限流=${v.current_limit_active ? '激活' : '未激活'}, 优先级=${v.current_limit_priority || '-'}` : '',
+            v?.limit_ncp_enabled ? `Vdc droop饱和=${v.droop_saturated ? '是' : '否'}` : '',
+            v?.limit_ncp_enabled ? `Iac=${fmt(v.ac_current_pu, 6)} pu, 裕度=${fmt(v.current_margin_pu, 6)} pu` : '',
+            v?.limit_ncp_enabled ? `NCP残差=${fmt(v.complementarity_residual, 9)}` : '',
+            v?.gfm_norton_model ? `GFM Norton: E=(${fmt(v.internal_voltage_real_pu, 6)}, ${fmt(v.internal_voltage_imag_pu, 6)}) pu` : '',
+            v?.gfm_norton_model ? `I=(${fmt(v.terminal_current_real_pu, 6)}, ${fmt(v.terminal_current_imag_pu, 6)}) pu` : '',
             !v ? `P计算=${fmtP(p.p_set_mw, 3)}` : '',
             !v ? `Q计算=${fmtQ(p.q_set_mvar, 3)}` : '',
           ];
@@ -11790,13 +11796,17 @@ const App = (() => {
     const vscRows = firstNonEmptyArray(data.vsc_transfers, data.geo_vsc);
     if (vscRows.length > 0) {
       vscSec.style.display = '';
-      let html = `<table><thead><tr><th>#</th><th>AC Bus</th><th>DC Bus</th><th>Pac(${pUnit()})</th><th>Qac(${qUnit()})</th><th>Pdc(${pUnit()})</th><th>Loss(${pUnit()})</th></tr></thead><tbody>`;
+      let html = `<table><thead><tr><th>#</th><th>AC Bus</th><th>DC Bus</th><th>Pac(${pUnit()})</th><th>Qac(${qUnit()})</th><th>Pdc(${pUnit()})</th><th>Loss(${pUnit()})</th><th>模型</th><th>限流</th><th>Droop饱和</th><th>优先级</th><th>Iac(pu)</th><th>裕度(pu)</th><th>NCP残差</th></tr></thead><tbody>`;
       vscRows.forEach((v, i) => {
         const attr = resultRowAttr({ ...v, canvas_type: v.canvas_type || 'vsc_converter', canvas_index: v.canvas_index ?? v.index, position: v.position ?? i },
           busMap.vsc ? (busMap.vsc[v.index] ?? busMap.vsc[i]) : undefined);
         html += `<tr${attr}><td>${v.index ?? i}</td><td>${v.bus_ac}</td><td>${v.bus_dc}</td>
                  <td>${v.p_ac_mw != null ? pFmt(v.p_ac_mw, 3) : '0'}</td><td>${v.q_ac_mvar != null ? qFmt(v.q_ac_mvar, 3) : '0'}</td>
-                 <td>${v.p_dc_mw != null ? pFmt(v.p_dc_mw, 3) : '0'}</td><td>${v.loss_mw != null ? pFmt(v.loss_mw, 3) : '0'}</td></tr>`;
+                 <td>${v.p_dc_mw != null ? pFmt(v.p_dc_mw, 3) : '0'}</td><td>${v.loss_mw != null ? pFmt(v.loss_mw, 3) : '0'}</td>
+                 <td>${v.gfm_norton_model ? 'GFM Norton' : '功率端口'}</td><td>${v.limit_ncp_enabled ? (v.current_limit_active ? '激活' : '未激活') : '-'}</td><td>${v.limit_ncp_enabled ? (v.droop_saturated ? '是' : '否') : '-'}</td><td>${escapeHtml(v.current_limit_priority || '-')}</td>
+                 <td>${Number.isFinite(Number(v.ac_current_pu)) ? Number(v.ac_current_pu).toFixed(6) : '-'}</td>
+                 <td>${Number.isFinite(Number(v.current_margin_pu)) ? Number(v.current_margin_pu).toFixed(6) : '-'}</td>
+                 <td>${Number.isFinite(Number(v.complementarity_residual)) ? Number(v.complementarity_residual).toExponential(3) : '-'}</td></tr>`;
       });
       html += '</tbody></table>';
       vscDiv.innerHTML = html;

@@ -5,6 +5,7 @@
 /// Power flow result types and solver diagnostics.
 /// Replaces: model/results.hpp + model/diagnostics.hpp.
 
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -88,6 +89,11 @@ struct SolverDiagnostics {
   // DC island had no voltage reference (indices into the solver's converter list).
   std::vector<int>               promoted_vsc_indices;
 
+  // Stable VSCConverter.index values whose fixed internal GFM Norton phasors
+  // anchor AC islands that have no terminal SLACK bus. Empty for ordinary
+  // slack-referenced islands and grid-connected GFM ports.
+  std::vector<int>               gfm_island_reference_vsc_indices;
+
   // The solver's final converter list after auto-promotion, stiff-gain Vdc
   // forming and any in-iteration mode switching.  Post-solve result
   // reconstruction (AC/DC transfers, losses) must use these — not the input
@@ -109,6 +115,34 @@ struct SolverProfiling {
   int numeric_refactor_accepted{0};
   int numeric_refactor_fallbacks{0};
   double max_refactor_backward_error{0.0};
+  int vsc_schur_attempts{0};
+  int vsc_schur_accepted{0};
+  int vsc_schur_fallbacks{0};
+  int vsc_schur_local_factorizations{0};
+  int vsc_schur_sparse_factorizations{0};
+  int vsc_schur_numeric_refactor_attempts{0};
+  int vsc_schur_numeric_refactor_accepted{0};
+  int vsc_schur_local_regular_rejections{0};
+  int vsc_schur_reduced_solve_rejections{0};
+  int vsc_schur_full_backward_error_rejections{0};
+  int vsc_schur_local_blocks{0};
+  int vsc_schur_full_dimension{0};
+  int vsc_schur_reduced_dimension{0};
+  std::int64_t vsc_schur_full_structural_nnz{0};
+  std::int64_t vsc_schur_reduced_structural_nnz{0};
+  std::int64_t vsc_schur_reduced_factor_nonzeros{-1};
+  std::int64_t vsc_schur_reduced_factor_work{-1};
+  std::int64_t full_lu_factor_nonzeros{-1};
+  std::int64_t full_lu_factor_work{-1};
+  double vsc_schur_minimum_local_rcond{0.0};
+  double vsc_schur_minimum_accepted_local_rcond{0.0};
+  double max_vsc_schur_reduced_backward_error{0.0};
+  double max_vsc_schur_full_backward_error{0.0};
+  double vsc_schur_assembly_factor_ms_total{0.0};
+  int semismooth_rate_samples{0};
+  double semismooth_last_residual_ratio{0.0};
+  double semismooth_last_quadratic_ratio{0.0};
+  std::string vsc_schur_status{"not_attempted"};
   int linear_solve_calls{0};
   int regularization_attempts{0};
   int line_search_evaluations{0};
@@ -203,6 +237,38 @@ struct VSCTransfer {
   double q_ac_mvar{0.0};
   double p_dc_mw{0.0};
   double loss_mw{0.0};
+  bool limit_ncp_enabled{false};
+  bool current_limit_active{false};
+  bool droop_saturated{false};
+  std::string current_limit_priority;
+  std::string effective_mode;
+  double ac_current_pu{0.0};
+  double current_margin_pu{0.0};
+  double complementarity_residual{0.0};
+  double internal_voltage_real_pu{0.0};
+  double internal_voltage_imag_pu{0.0};
+  double terminal_current_real_pu{0.0};
+  double terminal_current_imag_pu{0.0};
+  bool gfm_norton_model{false};
+};
+
+struct VSCLimitStateResult {
+  int index{0};
+  double p_ac_pu{0.0};
+  double q_ac_pu{0.0};
+  double p_dc_pu{0.0};
+  double multiplier{0.0};
+  double current_pu{0.0};
+  double current_margin_pu{0.0};
+  double complementarity_residual{0.0};
+  bool current_limit_active{false};
+  bool droop_saturated{false};
+  std::string current_limit_priority;
+  double internal_voltage_real_pu{0.0};
+  double internal_voltage_imag_pu{0.0};
+  double terminal_current_real_pu{0.0};
+  double terminal_current_imag_pu{0.0};
+  bool gfm_norton_model{false};
 };
 
 // LCC (line-commutated converter) quasi-steady station result (dat manual
@@ -304,6 +370,7 @@ struct PowerFlowResult {
   // this snapshot without rebuilding the network or recomputing branch flows.
   std::vector<BranchFlow> canonical_branch_flows;
   std::vector<VSCTransfer> vsc_transfers;
+  std::vector<VSCLimitStateResult> vsc_limit_states;
   std::vector<LCCTransfer> lcc_transfers;
   std::vector<DCDCTransfer> dcdc_transfers;
   std::vector<Trafo3WFlow> trafo3w_flows;

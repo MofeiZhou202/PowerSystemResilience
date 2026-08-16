@@ -7,6 +7,7 @@
 #include <Eigen/Sparse>
 
 #include "hacdcpf/power_flow/lcc_model.hpp"
+#include "hacdcpf/power_flow/vsc_limit_ncp.hpp"
 
 namespace hacdcpf::powerflow {
 
@@ -230,6 +231,33 @@ JacobianPattern build_jacobian_pattern(const SolverData& data, const JacobianCon
     add_pattern_position(dc_row, commutation_vm_col, triplets, seen);
   }
 
+  for (const auto& block : ctx.vsc_limit_blocks) {
+    const int p_row = ctx.p_row[static_cast<size_t>(block.ac_bus)];
+    const int q_row = ctx.q_row[static_cast<size_t>(block.ac_bus)];
+    const int dc_row = ctx.dc_row[static_cast<size_t>(block.dc_bus)];
+    add_pattern_position(p_row, block.offset, triplets, seen);
+    add_pattern_position(q_row, block.offset + 1, triplets, seen);
+    add_pattern_position(dc_row, block.offset + 2, triplets, seen);
+    for (int row = 0; row < kVSCLimitStateSize; ++row) {
+      const int global_row = block.offset + row;
+      for (int col = 0; col < kVSCLimitStateSize; ++col) {
+        add_pattern_position(global_row, block.offset + col, triplets, seen);
+      }
+      add_pattern_position(global_row,
+                           ctx.vm_col[static_cast<size_t>(block.ac_bus)],
+                           triplets,
+                           seen);
+      add_pattern_position(global_row,
+                           ctx.va_col[static_cast<size_t>(block.ac_bus)],
+                           triplets,
+                           seen);
+      add_pattern_position(global_row,
+                           ctx.vdc_col[static_cast<size_t>(block.dc_bus)],
+                           triplets,
+                           seen);
+    }
+  }
+
   pattern.matrix.setFromTriplets(triplets.begin(), triplets.end());
   pattern.matrix.makeCompressed();
   build_entry_to_nz(pattern);
@@ -277,6 +305,49 @@ JacobianPattern build_jacobian_pattern(const SolverData& data, const JacobianCon
     if (dc_row >= 0 && vdc_col >= 0) {
       pattern.dc_vdc_diag_nz[static_cast<size_t>(i)] = lookup_nz(pattern, dc_row, vdc_col);
     }
+  }
+
+  pattern.vsc_limit_entries.clear();
+  pattern.vsc_limit_entries.reserve(ctx.vsc_limit_blocks.size());
+  for (int block_index = 0;
+       block_index < static_cast<int>(ctx.vsc_limit_blocks.size());
+       ++block_index) {
+    const auto& block =
+        ctx.vsc_limit_blocks[static_cast<size_t>(block_index)];
+    JacobianPattern::VSCLimitEntry entry;
+    entry.block_index = block_index;
+    entry.local_nz.fill(-1);
+    entry.vm_nz.fill(-1);
+    entry.va_nz.fill(-1);
+    entry.vdc_nz.fill(-1);
+    const int p_row = ctx.p_row[static_cast<size_t>(block.ac_bus)];
+    const int q_row = ctx.q_row[static_cast<size_t>(block.ac_bus)];
+    const int dc_row = ctx.dc_row[static_cast<size_t>(block.dc_bus)];
+    if (p_row >= 0) entry.p_network_nz = lookup_nz(pattern, p_row, block.offset);
+    if (q_row >= 0) entry.q_network_nz = lookup_nz(pattern, q_row, block.offset + 1);
+    if (dc_row >= 0) entry.dc_network_nz = lookup_nz(pattern, dc_row, block.offset + 2);
+    const int vm_col = ctx.vm_col[static_cast<size_t>(block.ac_bus)];
+    const int va_col = ctx.va_col[static_cast<size_t>(block.ac_bus)];
+    const int vdc_col = ctx.vdc_col[static_cast<size_t>(block.dc_bus)];
+    for (int row = 0; row < kVSCLimitStateSize; ++row) {
+      for (int col = 0; col < kVSCLimitStateSize; ++col) {
+        entry.local_nz[static_cast<size_t>(row * kVSCLimitStateSize + col)] =
+            lookup_nz(pattern, block.offset + row, block.offset + col);
+      }
+      if (vm_col >= 0) {
+        entry.vm_nz[static_cast<size_t>(row)] =
+            lookup_nz(pattern, block.offset + row, vm_col);
+      }
+      if (va_col >= 0) {
+        entry.va_nz[static_cast<size_t>(row)] =
+            lookup_nz(pattern, block.offset + row, va_col);
+      }
+      if (vdc_col >= 0) {
+        entry.vdc_nz[static_cast<size_t>(row)] =
+            lookup_nz(pattern, block.offset + row, vdc_col);
+      }
+    }
+    pattern.vsc_limit_entries.push_back(entry);
   }
 
   // Always-built: DCDC droop entries (not gated by enable_coupled_jacobian).
@@ -417,7 +488,7 @@ JacobianPattern build_jacobian_pattern(const SolverData& data, const JacobianCon
   if (data.enable_coupled_jacobian) {
     for (size_t ci = 0; ci < data.converters.size(); ++ci) {
       const auto& conv = data.converters[ci];
-      if (!conv.in_service) continue;
+      if (!conv.in_service || supports_vsc_limit_ncp(conv)) continue;
       const int ac_bus = conv.bus_ac - 1;
       const int dc_bus = conv.bus_dc - 1;
       if (ac_bus < 0 || ac_bus >= ctx.n || dc_bus < 0 || dc_bus >= ctx.ndc) continue;

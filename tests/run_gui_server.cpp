@@ -59,6 +59,7 @@
 #include "hacdcpf/io/powersimulationsdynamics_io.hpp"
 #include "hacdcpf/model/enum_strings.hpp"
 #include "hacdcpf/model/device_control_role.hpp"
+#include "hacdcpf/model/gfm_norton_contract.hpp"
 #include "hacdcpf/model/standard_parameter_library.hpp"
 #include "hacdcpf/power_flow/three_phase.hpp"
 #include "hacdcpf/power_flow/three_phase_hybrid.hpp"
@@ -736,6 +737,9 @@ void apply_pf_robust_options(const json& o,
   set_if_bool(o, "enable_jacobian_row_col_equilibration",
               opt.enable_jacobian_row_col_equilibration);
   set_if_bool(o, "enable_condition_monitor", opt.enable_condition_monitor);
+  set_if_bool(o, "enable_klu_numeric_refactor",
+              opt.enable_klu_numeric_refactor);
+  set_if_bool(o, "enable_vsc_local_schur", opt.enable_vsc_local_schur);
   set_if_bool(o, "enable_nonmonotone_linesearch", opt.enable_nonmonotone_linesearch);
   set_if_bool(o, "enable_smooth_ncp", opt.enable_smooth_ncp);
   set_if_bool(o, "enable_activity_hysteresis", opt.enable_activity_hysteresis);
@@ -764,6 +768,14 @@ void apply_pf_robust_options(const json& o,
   set_if_double(o, "min_branch_x_pu", opt.min_branch_x_pu);
   set_if_double(o, "bad_condition_threshold", opt.bad_condition_threshold);
   set_if_double(o, "tiny_pivot_threshold", opt.tiny_pivot_threshold);
+  set_if_double(o, "refactor_backward_error_tolerance",
+                opt.refactor_backward_error_tolerance);
+  set_if_int(o, "vsc_schur_min_network_dimension",
+             opt.vsc_schur_min_network_dimension);
+  set_if_double(o, "vsc_schur_local_rcond_tolerance",
+                opt.vsc_schur_local_rcond_tolerance);
+  set_if_double(o, "vsc_schur_backward_error_tolerance",
+                opt.vsc_schur_backward_error_tolerance);
   set_if_int(o, "nonmonotone_window", opt.nonmonotone_window);
   set_if_double(o, "armijo_c", opt.armijo_c);
   set_if_double(o, "line_search_beta", opt.line_search_beta);
@@ -880,6 +892,7 @@ void apply_power_flow_request_options(const json& root, hacdcpf::PowerFlowOption
       std::clamp(opt.pv_pq_max_outer_iterations, 1, 1000);
   opt.robust_nonlinear.min_active_set_hold_iters =
       std::clamp(opt.robust_nonlinear.min_active_set_hold_iters, 0, 1000);
+  hacdcpf::powerflow::normalize_vsc_schur_policy(opt.robust_nonlinear);
 }
 
 json pf_robust_options_to_json(const hacdcpf::powerflow::RobustNonlinearOptions& opt) {
@@ -889,6 +902,8 @@ json pf_robust_options_to_json(const hacdcpf::powerflow::RobustNonlinearOptions&
       {"enable_jacobian_row_col_equilibration",
        opt.enable_jacobian_row_col_equilibration},
       {"enable_condition_monitor", opt.enable_condition_monitor},
+      {"enable_klu_numeric_refactor", opt.enable_klu_numeric_refactor},
+      {"enable_vsc_local_schur", opt.enable_vsc_local_schur},
       {"enable_nonmonotone_linesearch", opt.enable_nonmonotone_linesearch},
       {"enable_smooth_ncp", opt.enable_smooth_ncp},
       {"enable_activity_hysteresis", opt.enable_activity_hysteresis},
@@ -910,6 +925,14 @@ json pf_robust_options_to_json(const hacdcpf::powerflow::RobustNonlinearOptions&
       {"min_branch_x_pu", opt.min_branch_x_pu},
       {"bad_condition_threshold", opt.bad_condition_threshold},
       {"tiny_pivot_threshold", opt.tiny_pivot_threshold},
+      {"refactor_backward_error_tolerance",
+       opt.refactor_backward_error_tolerance},
+      {"vsc_schur_min_network_dimension",
+       opt.vsc_schur_min_network_dimension},
+      {"vsc_schur_local_rcond_tolerance",
+       opt.vsc_schur_local_rcond_tolerance},
+      {"vsc_schur_backward_error_tolerance",
+       opt.vsc_schur_backward_error_tolerance},
       {"nonmonotone_window", opt.nonmonotone_window},
       {"armijo_c", opt.armijo_c},
       {"line_search_beta", opt.line_search_beta},
@@ -3924,6 +3947,8 @@ GuiPhaseHybridModel build_gui_phase_hybrid_model(
       throw std::invalid_argument(
           "Sequence-aware monolithic hybrid VSC terminals require phases A/B/C");
     }
+    const auto gfm =
+        hacdcpf::model::resolve_gfm_norton_parameters(converter);
     PhaseVSC opf_converter;
     opf_converter.phase_nodes = phase_nodes;
     opf_converter.dc_terminal = dc_bus->second;
@@ -3942,12 +3967,10 @@ GuiPhaseHybridModel build_gui_phase_hybrid_model(
                                              hacdcpf::ConverterMode::AC_GRID_FORMING
                                      ? PhaseVSCControlMode::GridFormingDroop
                                      : PhaseVSCControlMode::EqualPhasePower;
-    opf_converter.virtual_r_pu = converter.r_conv_ac_pu > 0.0
-                                     ? converter.r_conv_ac_pu : 0.01;
-    opf_converter.virtual_x_pu = converter.x_sc_pu > 0.0
-                                     ? converter.x_sc_pu : 0.10;
-    opf_converter.voltage_reference_pu = converter.v_ac_set_pu > 0.0
-                                              ? converter.v_ac_set_pu : 1.0;
+    opf_converter.virtual_r_pu = gfm.virtual_r_pu;
+    opf_converter.virtual_x_pu = gfm.virtual_x_pu;
+    opf_converter.voltage_reference_pu = gfm.internal_voltage_pu;
+    opf_converter.voltage_reference_angle_rad = gfm.internal_angle_rad;
     opf.converters.push_back(opf_converter);
 
     ThreePhaseHybridPFConverter pf_converter;
@@ -3960,9 +3983,7 @@ GuiPhaseHybridModel build_gui_phase_hybrid_model(
                                    ? converter.v_dc_set_pu : opf.v_dc_start[dc_bus->second];
     pf_converter.virtual_r_pu = opf_converter.virtual_r_pu;
     pf_converter.virtual_x_pu = opf_converter.virtual_x_pu;
-    pf_converter.internal_voltage_positive = std::polar(
-        converter.v_ac_set_pu > 0.0 ? converter.v_ac_set_pu : 1.0,
-        converter.v_ac_angle_set_deg * M_PI / 180.0);
+    pf_converter.internal_voltage_positive = gfm.internal_voltage();
     const bool vdc_control =
         converter.grid_forming || converter.control_mode == hacdcpf::ConverterMode::VDC_Q ||
         converter.control_mode == hacdcpf::ConverterMode::VDC_VAC ||
@@ -5380,6 +5401,12 @@ json dynamic_results_to_json(
            {"max_ac_voltage_pu", result.initialization.max_ac_voltage_pu},
            {"min_dc_voltage_pu", result.initialization.min_dc_voltage_pu},
            {"max_dc_voltage_pu", result.initialization.max_dc_voltage_pu},
+           {"gfm_pf_seed_checked", result.initialization.gfm_pf_seed_checked},
+           {"gfm_pf_seed_certified", result.initialization.gfm_pf_seed_certified},
+           {"gfm_pf_seed_devices", result.initialization.gfm_pf_seed_devices},
+           {"gfm_pf_seed_internal_voltage_error_pu", result.initialization.gfm_pf_seed_internal_voltage_error_pu},
+           {"gfm_pf_seed_current_error_pu", result.initialization.gfm_pf_seed_current_error_pu},
+           {"gfm_pf_seed_power_error_pu", result.initialization.gfm_pf_seed_power_error_pu},
            {"dynamic_residual_diagnostics", residual_diagnostics},
            {"warnings", result.initialization.warnings}};
 
@@ -5714,7 +5741,20 @@ json time_series_canvas_frame(const hacdcpf::TimeSeriesPFResult& result,
     vsc.push_back(json{{"index", row.index}, {"canvas_index", row.index},
                        {"bus_ac", row.bus_ac}, {"bus_dc", row.bus_dc},
                        {"p_ac_mw", row.p_ac_mw}, {"q_ac_mvar", row.q_ac_mvar},
-                       {"p_dc_mw", row.p_dc_mw}, {"loss_mw", row.loss_mw}});
+                       {"p_dc_mw", row.p_dc_mw}, {"loss_mw", row.loss_mw},
+                       {"limit_ncp_enabled", row.limit_ncp_enabled},
+                       {"current_limit_active", row.current_limit_active},
+                       {"droop_saturated", row.droop_saturated},
+                       {"current_limit_priority", row.current_limit_priority},
+                       {"effective_mode", row.effective_mode},
+                       {"ac_current_pu", row.ac_current_pu},
+                       {"current_margin_pu", row.current_margin_pu},
+                       {"complementarity_residual", row.complementarity_residual},
+                       {"gfm_norton_model", row.gfm_norton_model},
+                       {"internal_voltage_real_pu", row.internal_voltage_real_pu},
+                       {"internal_voltage_imag_pu", row.internal_voltage_imag_pu},
+                       {"terminal_current_real_pu", row.terminal_current_real_pu},
+                       {"terminal_current_imag_pu", row.terminal_current_imag_pu}});
   frame["geo_vsc"] = vsc;
   frame["vsc_transfers"] = vsc;
   json dcdc = json::array();
@@ -9845,6 +9885,8 @@ const std::vector<CaseInfo>& case_catalog() {
        "33 节点 + 3 条微网记录（自动汇总负荷/装机/储能容量）", false},
       {"case69_acdc", "IEEE69 配电混合", "配电网与 DER", "69 AC + 2 DC",
        "69 节点径向配网 + 双端 DC：中等规模配网潮流", false},
+      {"gfm_norton_limit_demo", "GFM Norton 限流演示", "微网与暂态动态", "2 AC + 2 DC",
+       "并网 GFM 内部电势/角度 + 虚拟阻抗 + 电流限值 NCP；可直接用于稳态、OPF 后验与暂态初始化"},
       {"dist33_microgrid_der", "Dist33 DER 可靠性·弹性旗舰", "配电网与 DER", "33 AC + 2 DC",
        "3 微网多类 DER + 需求响应 + 自动化开关：可靠性 SAIDI/SAIFI 与弹性恢复演示"},
       {"dist33_tie_demo", "Dist33 联络重构专用", "配电网与 DER", "33 AC 纯交流",
@@ -9870,8 +9912,12 @@ const std::vector<CaseInfo>& case_catalog() {
        "118 节点 54 机 + 6 端 DC：中大型 OPF/潮流基准", false},
       {"case300_acdc", "IEEE300 + MTDC", "输电网与性能基准", "300 AC + 6 DC",
        "300 节点 + 6 端环网 MTDC + 3 台 OLTC：大系统 RPO/OPF 基准", false},
+      {"case300_acdc_vsc_limit_ncp", "IEEE300 VSC 限值 NCP", "输电网与性能基准", "300 AC + 6 DC",
+       "6 台显式 VSC 局部块，覆盖电流圆、三种 priority 与 Vdc droop 饱和", false},
       {"case2000_acdc", "ACTIVSg2000 性能旗舰", "输电网与性能基准", "2000 AC + 8 DC",
        "2000 节点 544 机 + 8 端 MTDC：纯 AC 牛顿潮流 12 迭代约 2.3s；混合 NR 对 MTDC 下垂参数敏感，推荐 pure_ac/FDPF"},
+      {"case2000_acdc_vsc_limit_ncp", "ACTIVSg2000 VSC 限值 NCP", "输电网与性能基准", "2000 AC + 8 DC",
+       "真实 2000 节点 + 8 端 MTDC 显式 NCP 规模回归，不使用纯 AC 或 case300 surrogate", false},
   };
   return kCatalog;
 }
@@ -9892,8 +9938,15 @@ hacdcpf::HybridPowerSystem build_case(const std::string& name) {
   if (name == "case33bw_acdc") return build_case33bw_acdc();
   if (name == "case33mg_acdc") return build_case33mg_acdc();
   if (name == "case69_acdc") return build_case69_acdc();
+  if (name == "gfm_norton_limit_demo") return build_gfm_norton_limit_demo();
   if (name == "case300_acdc") return build_case300_acdc();
+  if (name == "case300_acdc_vsc_limit_ncp") {
+    return build_case300_acdc_vsc_limit_ncp();
+  }
   if (name == "case2000_acdc") return build_case2000_acdc();
+  if (name == "case2000_acdc_vsc_limit_ncp") {
+    return build_case2000_acdc_vsc_limit_ncp();
+  }
   if (name == "demo_multizone_acdc") return build_demo_multizone_acdc();
   if (name == "dist33_microgrid_der") return build_dist33_microgrid_der();
   if (name == "urban_lvn_primary_secondary") {
@@ -12326,7 +12379,18 @@ int main(int argc, char** argv) {
       auto add_transfers = [&](const hacdcpf::PowerFlowResult& pf) {
         for (const auto& v : pf.vsc_transfers)
           out["vsc_transfers"].push_back(json{{"index",v.index},{"bus_ac",v.bus_ac},{"bus_dc",v.bus_dc},
-            {"p_ac_mw",v.p_ac_mw},{"q_ac_mvar",v.q_ac_mvar},{"p_dc_mw",v.p_dc_mw},{"loss_mw",v.loss_mw}});
+            {"p_ac_mw",v.p_ac_mw},{"q_ac_mvar",v.q_ac_mvar},{"p_dc_mw",v.p_dc_mw},{"loss_mw",v.loss_mw},
+            {"limit_ncp_enabled",v.limit_ncp_enabled},{"current_limit_active",v.current_limit_active},
+            {"droop_saturated",v.droop_saturated},
+            {"current_limit_priority",v.current_limit_priority},{"effective_mode",v.effective_mode},
+            {"ac_current_pu",v.ac_current_pu},{"current_margin_pu",v.current_margin_pu},
+            {"complementarity_residual",v.complementarity_residual},
+            {"gfm_norton_model",v.gfm_norton_model},
+            {"internal_voltage_real_pu",v.internal_voltage_real_pu},
+            {"internal_voltage_imag_pu",v.internal_voltage_imag_pu},
+            {"terminal_current_real_pu",v.terminal_current_real_pu},
+            {"terminal_current_imag_pu",v.terminal_current_imag_pu},
+            {"canvas_type","vsc_converter"},{"canvas_index",v.index}});
         for (const auto& t : pf.lcc_transfers)
           out["lcc_transfers"].push_back(json{{"index",t.index},{"bus_ac",t.bus_ac},{"bus_dc",t.bus_dc},
             {"station_role",t.station_role},{"control_mode",t.control_mode},
@@ -12354,6 +12418,12 @@ int main(int argc, char** argv) {
              validity.vsc_capacity_circle_enforced},
             {"vsc_current_limits_enforced",
              validity.vsc_current_limits_enforced},
+            {"vsc_gfm_norton_modelled",
+             validity.vsc_gfm_norton_modelled},
+            {"vsc_gfm_priority_limit_enforced",
+             validity.vsc_gfm_priority_limit_enforced},
+            {"vsc_gfm_island_reference_modelled",
+             validity.vsc_gfm_island_reference_modelled},
             {"vsc_modulation_limits_enforced",
              validity.vsc_modulation_limits_enforced},
             {"vsc_vdc_control_modelled", validity.vsc_vdc_control_modelled},
@@ -12486,10 +12556,51 @@ int main(int argc, char** argv) {
         out["warnings"] = warns;
         out["termination_reason"] = diag.termination_reason;
         out["promoted_vsc_indices"] = diag.promoted_vsc_indices;
+        out["gfm_island_reference_vsc_indices"] =
+            diag.gfm_island_reference_vsc_indices;
       };
 
       auto add_reactive_limit_diagnostics =
           [&](const hacdcpf::PowerFlowResult& pf) {
+        out["linear_structure"] = json{
+            {"vsc_schur_status", pf.profiling.vsc_schur_status},
+            {"vsc_schur_attempts", pf.profiling.vsc_schur_attempts},
+            {"vsc_schur_accepted", pf.profiling.vsc_schur_accepted},
+            {"vsc_schur_fallbacks", pf.profiling.vsc_schur_fallbacks},
+            {"local_regular_rejections",
+             pf.profiling.vsc_schur_local_regular_rejections},
+            {"reduced_solve_rejections",
+             pf.profiling.vsc_schur_reduced_solve_rejections},
+            {"full_backward_error_rejections",
+             pf.profiling.vsc_schur_full_backward_error_rejections},
+            {"local_blocks", pf.profiling.vsc_schur_local_blocks},
+            {"full_dimension", pf.profiling.vsc_schur_full_dimension},
+            {"reduced_dimension", pf.profiling.vsc_schur_reduced_dimension},
+            {"full_structural_nnz",
+             pf.profiling.vsc_schur_full_structural_nnz},
+            {"reduced_structural_nnz",
+             pf.profiling.vsc_schur_reduced_structural_nnz},
+            {"reduced_factor_nonzeros",
+             pf.profiling.vsc_schur_reduced_factor_nonzeros},
+            {"reduced_factor_work",
+             pf.profiling.vsc_schur_reduced_factor_work},
+            {"full_lu_factor_nonzeros",
+             pf.profiling.full_lu_factor_nonzeros},
+            {"full_lu_factor_work", pf.profiling.full_lu_factor_work},
+            {"minimum_local_rcond",
+             pf.profiling.vsc_schur_minimum_local_rcond},
+            {"minimum_accepted_local_rcond",
+             pf.profiling.vsc_schur_minimum_accepted_local_rcond},
+            {"max_reduced_backward_error",
+             pf.profiling.max_vsc_schur_reduced_backward_error},
+            {"max_full_backward_error",
+             pf.profiling.max_vsc_schur_full_backward_error},
+            {"semismooth_rate_samples",
+             pf.profiling.semismooth_rate_samples},
+            {"semismooth_last_residual_ratio",
+             pf.profiling.semismooth_last_residual_ratio},
+            {"semismooth_last_quadratic_ratio",
+             pf.profiling.semismooth_last_quadratic_ratio}};
         out["nonlinear_recovery"] = json{
             {"stagnation_detected", pf.profiling.stagnation_detected},
             {"stagnation_exit_iteration",
@@ -13153,7 +13264,18 @@ int main(int argc, char** argv) {
             {"bus_ac", v.bus_ac}, {"bus_dc", v.bus_dc},
             {"ac_lat", ac_it->second.first}, {"ac_lon", ac_it->second.second},
             {"dc_lat", dc_it->second.first}, {"dc_lon", dc_it->second.second},
-            {"p_ac_mw", v.p_ac_mw}, {"q_ac_mvar", v.q_ac_mvar}, {"p_dc_mw", v.p_dc_mw}, {"loss_mw", v.loss_mw}
+            {"p_ac_mw", v.p_ac_mw}, {"q_ac_mvar", v.q_ac_mvar}, {"p_dc_mw", v.p_dc_mw}, {"loss_mw", v.loss_mw},
+            {"limit_ncp_enabled", v.limit_ncp_enabled}, {"current_limit_active", v.current_limit_active},
+            {"droop_saturated", v.droop_saturated},
+            {"current_limit_priority", v.current_limit_priority}, {"effective_mode", v.effective_mode},
+            {"ac_current_pu", v.ac_current_pu}, {"current_margin_pu", v.current_margin_pu},
+            {"complementarity_residual", v.complementarity_residual},
+            {"gfm_norton_model", v.gfm_norton_model},
+            {"internal_voltage_real_pu", v.internal_voltage_real_pu},
+            {"internal_voltage_imag_pu", v.internal_voltage_imag_pu},
+            {"terminal_current_real_pu", v.terminal_current_real_pu},
+            {"terminal_current_imag_pu", v.terminal_current_imag_pu},
+            {"canvas_type", "vsc_converter"}, {"canvas_index", v.index}
           });
         }
 
@@ -15262,9 +15384,8 @@ int main(int argc, char** argv) {
           add_transfers(pf);
           add_geo_data(pf);
           store_last_pf(&pf);
-        } else {
-          add_solver_diagnostics(pf.diagnostics);
         }
+        add_solver_diagnostics(pf.diagnostics);
         add_converter_coordination(pf);
         add_reactive_limit_diagnostics(pf);
       };
@@ -15369,9 +15490,8 @@ int main(int argc, char** argv) {
           if (pf.converged) {
             add_geo_data(pf);
             store_last_pf(&pf);
-          } else {
-            add_solver_diagnostics(pf.diagnostics);
           }
+          add_solver_diagnostics(pf.diagnostics);
           add_reactive_limit_diagnostics(pf);
         } else {
           auto pf = hacdcpf::solve_power_flow(sys, opt);
@@ -15389,9 +15509,8 @@ int main(int argc, char** argv) {
             add_transfers(pf);
             add_geo_data(pf);
             store_last_pf(&pf);
-          } else {
-            add_solver_diagnostics(pf.diagnostics);
           }
+          add_solver_diagnostics(pf.diagnostics);
           add_converter_coordination(pf);
           add_reactive_limit_diagnostics(pf);
         }
@@ -17586,6 +17705,11 @@ int main(int argc, char** argv) {
         out["scope"] = {{"model_scope", r.converter_model_scope.model_scope},
                         {"capacity", v.vsc_capacity_circle_enforced},
                         {"current", v.vsc_current_limits_enforced},
+                        {"gfm_norton", v.vsc_gfm_norton_modelled},
+                        {"gfm_priority_limit",
+                         v.vsc_gfm_priority_limit_enforced},
+                        {"gfm_island_reference",
+                         v.vsc_gfm_island_reference_modelled},
                         {"modulation", v.vsc_modulation_limits_enforced},
                         {"dcdc_duty", v.dcdc_duty_ratio_enforced},
                         {"vdc_control", v.vsc_vdc_control_modelled},
@@ -17946,7 +18070,17 @@ int main(int argc, char** argv) {
             json vtr = json::array();
             for (const auto& v : ac_pf.vsc_transfers)
               vtr.push_back(json{{"index",v.index},{"bus_ac",v.bus_ac},{"bus_dc",v.bus_dc},
-                {"p_ac_mw",v.p_ac_mw},{"q_ac_mvar",v.q_ac_mvar},{"p_dc_mw",v.p_dc_mw},{"loss_mw",v.loss_mw}});
+                {"p_ac_mw",v.p_ac_mw},{"q_ac_mvar",v.q_ac_mvar},{"p_dc_mw",v.p_dc_mw},{"loss_mw",v.loss_mw},
+                {"limit_ncp_enabled",v.limit_ncp_enabled},{"current_limit_active",v.current_limit_active},
+                {"droop_saturated",v.droop_saturated},
+                {"current_limit_priority",v.current_limit_priority},{"effective_mode",v.effective_mode},
+                {"ac_current_pu",v.ac_current_pu},{"current_margin_pu",v.current_margin_pu},
+                {"complementarity_residual",v.complementarity_residual},
+                {"gfm_norton_model",v.gfm_norton_model},
+                {"internal_voltage_real_pu",v.internal_voltage_real_pu},
+                {"internal_voltage_imag_pu",v.internal_voltage_imag_pu},
+                {"terminal_current_real_pu",v.terminal_current_real_pu},
+                {"terminal_current_imag_pu",v.terminal_current_imag_pu}});
             post_pf["vsc_transfers"] = vtr;
             json ltr = json::array();
             for (const auto& t : ac_pf.lcc_transfers)
@@ -18033,7 +18167,17 @@ int main(int argc, char** argv) {
 	                {"lcc_quasi_steady_modelled",
 	                 post_pf_validity.lcc_quasi_steady_modelled},
 	                {"lcc_transformer_tap_control_modelled",
-	                 post_pf_validity.lcc_transformer_tap_control_modelled}};
+	                 post_pf_validity.lcc_transformer_tap_control_modelled},
+	                {"vsc_current_limits_enforced",
+	                 post_pf_validity.vsc_current_limits_enforced},
+	                {"vsc_gfm_norton_modelled",
+	                 post_pf_validity.vsc_gfm_norton_modelled},
+	                {"vsc_gfm_priority_limit_enforced",
+	                 post_pf_validity.vsc_gfm_priority_limit_enforced},
+	                {"vsc_gfm_island_reference_modelled",
+	                 post_pf_validity.vsc_gfm_island_reference_modelled}};
+	            post_pf["gfm_island_reference_vsc_indices"] =
+	                ac_pf.diagnostics.gfm_island_reference_vsc_indices;
 	            json branch_abs = json::array();
 	            for (const auto& f : ac_pf.branch_flows)
 	              branch_abs.push_back(std::abs(f.pf_mw));

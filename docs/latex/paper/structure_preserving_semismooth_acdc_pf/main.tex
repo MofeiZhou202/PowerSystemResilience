@@ -1,0 +1,98 @@
+\documentclass[journal,10pt]{IEEEtran}
+
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage{amsthm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{algorithm2e}
+\usepackage{cite}
+\usepackage[hidelinks]{hyperref}
+\usepackage{xcolor}
+
+\newcommand{\RR}{\mathbb{R}}
+\newcommand{\CC}{\mathbb{C}}
+\newcommand{\ac}{\mathrm{ac}}
+\newcommand{\dc}{\mathrm{dc}}
+\newcommand{\gfm}{\mathrm{GFM}}
+\newcommand{\vsc}{\mathrm{VSC}}
+\newcommand{\diag}{\operatorname{diag}}
+\newcommand{\clip}{\operatorname{clip}}
+\newcommand{\median}{\operatorname{mid}}
+\newcommand{\nnz}{\operatorname{nnz}}
+\newcommand{\Bsub}{\partial_B}
+\newcommand{\Clarke}{\partial_C}
+
+\newtheorem{assumption}{Assumption}
+\newtheorem{proposition}{Proposition}
+\newtheorem{theorem}{Theorem}
+\newtheorem{corollary}{Corollary}
+\newtheorem{remark}{Remark}
+
+\title{Structure-Preserving Semismooth Newton Method for Large-Scale Hybrid AC/DC Power Flow With Converter Limit-Induced Mode Switching}
+
+\author{Tianyang~Zhao}
+
+\markboth{Initial Research Manuscript}%
+{Zhao: Structure-Preserving Semismooth Newton Hybrid AC/DC Power Flow}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Converter-dominated hybrid ac/dc grids exhibit operating-mode changes when
+voltage-source converters reach ac-current, active-power, reactive-power, or
+dc-voltage-control limits. Conventional power-flow implementations commonly
+handle these events by external if--else switching, which changes equation
+semantics and may rebuild the sparse Newton system. This paper develops a
+fixed-dimension complementarity formulation and a structure-preserving
+semismooth Newton method for balanced positive-sequence hybrid ac/dc power
+flow. Each limited converter owns six explicit local variables representing
+ac active and reactive power, dc power, internal-voltage components, and a
+complementarity multiplier. The formulation covers current-magnitude scaling,
+active- or reactive-power priority, saturated dc-voltage droop, and a
+grid-forming Norton source behind virtual impedance. An exact local-block
+Schur elimination removes the converter variables before sparse network
+factorization without forming dense inverses. Local reciprocal-condition and
+reduced/full-system backward-error certificates guard every Schur step and
+trigger a complete sparse-LU fallback when necessary. Conditional local
+superlinear and quadratic convergence results are stated under BD-regularity
+and strong semismoothness, while runtime diagnostics deliberately certify only
+the selected generalized-Jacobian element. Preliminary production results on
+hybridized case300 and ACTIVSg2000 systems show exact full/Schur root agreement
+within $10^{-8}$ p.u. The reduced formulation decreases dimension from 4054
+to 4006 on ACTIVSg2000 and lowers median linear-solve and end-to-end times by
+14.0\% and 12.5\%, respectively. The same method is exercised under
+simultaneous converter limiting, degenerate intersections, weak grids,
+infeasible operating points, grid-forming islands, OpenDSS circuit replay,
+optimal-power-flow replay, and transient initialization.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Complementarity constraints, grid-forming converter, hybrid ac/dc power flow,
+mode switching, semismooth Newton method, Schur complement, voltage-source
+converter.
+\end{IEEEkeywords}
+
+\input{introduction.tex}
+\input{model.tex}
+\input{semismooth_newton.tex}
+\input{schur_elimination.tex}
+\input{convergence_conditions.tex}
+\input{preliminary_results.tex}
+
+\section{Current Scope and Next Experimental Closures}
+The present manuscript establishes the balanced positive-sequence model and
+the CPU sparse-solver contribution. It does not claim GPU assembly or GPU
+factorization. The large hybrid benchmarks contain simultaneous binding
+power-port converters, whereas their added large-scale GFM blocks are
+currently nonbinding continuation cases. A complete active-mode enumeration
+oracle, systematic continuation to the voltage-stability nose, and independent
+external selection of the binding GFM priority mode remain required before the
+experimental section is considered final. Balanced OPF currently preserves
+the authored GFM mode and certifies its dispatch by post-OPF power-flow replay;
+the priority NCP is not yet embedded in the OPF KKT system.
+
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+\end{document}

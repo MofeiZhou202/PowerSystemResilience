@@ -11,6 +11,7 @@
 #include <Eigen/Sparse>
 
 #include "hacdcpf/power_flow/distribution_power_flow.hpp"
+#include "hacdcpf/model/gfm_norton_contract.hpp"
 
 namespace hacdcpf::opf::phase_hybrid {
 namespace {
@@ -422,6 +423,7 @@ ThreePhaseHybridModel build_three_phase_hybrid_model(
       continue;
     }
     PhaseVSC item;
+    const auto gfm = model::resolve_gfm_norton_parameters(converter);
     for (int phase = 0; phase < 3; ++phase) {
       const int node = model.bus_phase_nodes[
           static_cast<std::size_t>(ac_bus->second)]
@@ -450,12 +452,10 @@ ThreePhaseHybridModel build_three_phase_hybrid_model(
                 converter.control_mode == ConverterMode::AC_GRID_FORMING
             ? PhaseVSCControlMode::GridFormingDroop
             : PhaseVSCControlMode::EqualPhasePower;
-    item.virtual_r_pu =
-        converter.r_conv_ac_pu > 0.0 ? converter.r_conv_ac_pu : 0.01;
-    item.virtual_x_pu =
-        converter.x_sc_pu > 0.0 ? converter.x_sc_pu : 0.10;
-    item.voltage_reference_pu =
-        converter.v_ac_set_pu > 0.0 ? converter.v_ac_set_pu : 1.0;
+    item.virtual_r_pu = gfm.virtual_r_pu;
+    item.virtual_x_pu = gfm.virtual_x_pu;
+    item.voltage_reference_pu = gfm.internal_voltage_pu;
+    item.voltage_reference_angle_rad = gfm.internal_angle_rad;
     opf.converters.push_back(std::move(item));
     model.vsc_component_indices.push_back(converter.index);
   }

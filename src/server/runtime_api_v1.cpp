@@ -487,6 +487,11 @@ json converter_scope_json(const ConverterModelScope& scope) {
         {"vsc_capacity_circle_enforced",
          value.vsc_capacity_circle_enforced},
         {"vsc_current_limits_enforced", value.vsc_current_limits_enforced},
+        {"vsc_gfm_norton_modelled", value.vsc_gfm_norton_modelled},
+        {"vsc_gfm_priority_limit_enforced",
+         value.vsc_gfm_priority_limit_enforced},
+        {"vsc_gfm_island_reference_modelled",
+         value.vsc_gfm_island_reference_modelled},
         {"vsc_modulation_limits_enforced",
          value.vsc_modulation_limits_enforced},
         {"vsc_vdc_control_modelled", value.vsc_vdc_control_modelled},
@@ -578,11 +583,30 @@ PowerFlowOptions power_flow_options(const json& request) {
   set_if_bool(body, "enable_iteration_log", options.enable_iteration_log);
   set_if_int(body, "ac_eval_threads", options.ac_eval_threads);
   set_if_bool(body, "verbose", options.verbose);
+  if (body.contains("robust_nonlinear") &&
+      body.at("robust_nonlinear").is_object()) {
+    const auto& robust = body.at("robust_nonlinear");
+    set_if_bool(robust, "enable_klu_numeric_refactor",
+                options.robust_nonlinear.enable_klu_numeric_refactor);
+    set_if_double(
+        robust, "refactor_backward_error_tolerance",
+        options.robust_nonlinear.refactor_backward_error_tolerance);
+    set_if_bool(robust, "enable_vsc_local_schur",
+                options.robust_nonlinear.enable_vsc_local_schur);
+    set_if_int(robust, "vsc_schur_min_network_dimension",
+               options.robust_nonlinear.vsc_schur_min_network_dimension);
+    set_if_double(robust, "vsc_schur_local_rcond_tolerance",
+                  options.robust_nonlinear.vsc_schur_local_rcond_tolerance);
+    set_if_double(
+        robust, "vsc_schur_backward_error_tolerance",
+        options.robust_nonlinear.vsc_schur_backward_error_tolerance);
+  }
   options.max_iter = std::clamp(options.max_iter, 1, 100000);
   options.pv_pq_max_outer_iterations =
       std::clamp(options.pv_pq_max_outer_iterations, 1, 1000);
   options.tol = std::clamp(options.tol, 1.0e-14, 1.0);
   options.ac_eval_threads = std::clamp(options.ac_eval_threads, 1, 1024);
+  powerflow::normalize_vsc_schur_policy(options.robust_nonlinear);
   return options;
 }
 
@@ -644,7 +668,15 @@ json serialize_power_flow(const HybridPowerSystem& system,
          {"p_ac_mw", transfer.p_ac_mw},
          {"q_ac_mvar", transfer.q_ac_mvar},
          {"p_dc_mw", transfer.p_dc_mw},
-         {"loss_mw", transfer.loss_mw}});
+         {"loss_mw", transfer.loss_mw},
+         {"limit_ncp_enabled", transfer.limit_ncp_enabled},
+         {"current_limit_active", transfer.current_limit_active},
+         {"droop_saturated", transfer.droop_saturated},
+         {"current_limit_priority", transfer.current_limit_priority},
+         {"effective_mode", transfer.effective_mode},
+         {"ac_current_pu", transfer.ac_current_pu},
+         {"current_margin_pu", transfer.current_margin_pu},
+         {"complementarity_residual", transfer.complementarity_residual}});
   }
   const json scope = converter_scope_json(result.converter_model_scope);
   json validity_flags = scope.at("validity_flags");
@@ -671,6 +703,43 @@ json serialize_power_flow(const HybridPowerSystem& system,
       {"smooth_ncp_continuation_updates",
        result.profiling.smooth_ncp_continuation_updates},
       {"smooth_ncp_final_mu", result.profiling.smooth_ncp_final_mu}};
+  const json linear_structure{
+      {"vsc_schur_status", result.profiling.vsc_schur_status},
+      {"vsc_schur_attempts", result.profiling.vsc_schur_attempts},
+      {"vsc_schur_accepted", result.profiling.vsc_schur_accepted},
+      {"vsc_schur_fallbacks", result.profiling.vsc_schur_fallbacks},
+      {"local_regular_rejections",
+       result.profiling.vsc_schur_local_regular_rejections},
+      {"reduced_solve_rejections",
+       result.profiling.vsc_schur_reduced_solve_rejections},
+      {"full_backward_error_rejections",
+       result.profiling.vsc_schur_full_backward_error_rejections},
+      {"local_blocks", result.profiling.vsc_schur_local_blocks},
+      {"full_dimension", result.profiling.vsc_schur_full_dimension},
+      {"reduced_dimension", result.profiling.vsc_schur_reduced_dimension},
+      {"full_structural_nnz",
+       result.profiling.vsc_schur_full_structural_nnz},
+      {"reduced_structural_nnz",
+       result.profiling.vsc_schur_reduced_structural_nnz},
+      {"reduced_factor_nonzeros",
+       result.profiling.vsc_schur_reduced_factor_nonzeros},
+      {"reduced_factor_work", result.profiling.vsc_schur_reduced_factor_work},
+      {"full_lu_factor_nonzeros", result.profiling.full_lu_factor_nonzeros},
+      {"full_lu_factor_work", result.profiling.full_lu_factor_work},
+      {"minimum_local_rcond",
+       result.profiling.vsc_schur_minimum_local_rcond},
+      {"minimum_accepted_local_rcond",
+       result.profiling.vsc_schur_minimum_accepted_local_rcond},
+      {"max_reduced_backward_error",
+       result.profiling.max_vsc_schur_reduced_backward_error},
+      {"max_full_backward_error",
+       result.profiling.max_vsc_schur_full_backward_error},
+      {"semismooth_rate_samples",
+       result.profiling.semismooth_rate_samples},
+      {"semismooth_last_residual_ratio",
+       result.profiling.semismooth_last_residual_ratio},
+      {"semismooth_last_quadratic_ratio",
+       result.profiling.semismooth_last_quadratic_ratio}};
   json lcc = lcc_transfers_json(result.lcc_transfers);
   return json{{"schema", "power_flow_result_v1"},
               {"method", method},
@@ -679,6 +748,8 @@ json serialize_power_flow(const HybridPowerSystem& system,
               {"iterations", result.iterations},
               {"residual", result.residual},
               {"termination_reason", result.diagnostics.termination_reason},
+              {"gfm_island_reference_vsc_indices",
+               result.diagnostics.gfm_island_reference_vsc_indices},
               {"warnings", result.diagnostics.warnings},
               {"vm", result.vm},
               {"va", result.va},
@@ -688,7 +759,8 @@ json serialize_power_flow(const HybridPowerSystem& system,
                {"ac_branch_results", std::move(branches)},
                {"vsc_transfers", std::move(vsc)},
                {"lcc_transfers", std::move(lcc)},
-               {"reactive_limits", reactive_limits},
+              {"reactive_limits", reactive_limits},
+              {"linear_structure", linear_structure},
                {"model_scope", scope.at("model_scope")},
               {"validity_flags", std::move(validity_flags)}};
 }

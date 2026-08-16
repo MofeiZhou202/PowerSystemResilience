@@ -43,10 +43,19 @@ struct VSCConverter {
   double q_set_mvar{0.0};
   double v_dc_set_pu{1.0};
   double v_ac_set_pu{1.0};
-  // AC terminal angle reference (degrees) used when the converter forms the AC
-  // voltage reference (AC_GRID_FORMING / Mode 1).  Defines the slack angle of
-  // the AC island it energizes; ignored by every other control mode.
+  // Legacy AC voltage-angle reference in degrees. For the balanced GFM Norton
+  // contract this is only the fallback internal-source angle; terminal Va is a
+  // solved network state. New GFM data should use gfm_internal_angle_set_deg.
   double v_ac_angle_set_deg{0.0};
+
+  // Authoritative balanced positive-sequence GFM port behind a virtual
+  // impedance. PF, OPF adapters, and transient initialization resolve these
+  // fields through model::resolve_gfm_norton_parameters. Zero values retain
+  // the documented legacy fallback; module-local defaults are not permitted.
+  double gfm_internal_voltage_set_pu{0.0};
+  double gfm_internal_angle_set_deg{0.0};
+  double gfm_virtual_r_pu{0.0};
+  double gfm_virtual_x_pu{0.0};
 
   double eta{0.99};
   double loss_percent{0.0};
@@ -72,6 +81,18 @@ struct VSCConverter {
   double k_m_modulation{0.0};
   double m_min{0.0};
   double m_max{0.0};
+
+  // Opt-in production power-flow complementarity model.  When enabled with a
+  // positive i_ac_max_pu, the balanced Newton solve allocates a fixed local VSC
+  // block and solves the current-limit operating point instead of merely
+  // auditing the unconstrained root after convergence.
+  bool enable_limit_ncp{false};
+  VSCCurrentLimitPriority current_limit_priority{
+      VSCCurrentLimitPriority::Magnitude};
+  // Optional saturation of the Vdc-droop active-power command.  A zero lower
+  // and upper pair means that pmin_mw/pmax_mw provide the effective bounds.
+  double droop_p_min_mw{0.0};
+  double droop_p_max_mw{0.0};
 
   double k_p{0.0};
   double k_q{0.0};

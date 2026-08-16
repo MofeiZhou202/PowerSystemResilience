@@ -31,6 +31,9 @@ enum class PhaseVSCControlMode {
 };
 
 struct PhaseVSC {
+  // Adapter DTO in phase-node coordinates. The rich VSCConverter remains the
+  // authored source of truth; GFM reference and impedance fields are populated
+  // through model::resolve_gfm_norton_parameters.
   std::vector<int> phase_nodes;
   int dc_terminal{-1};
   double efficiency{0.98};
@@ -46,6 +49,7 @@ struct PhaseVSC {
   double p_droop_pu{0.01};
   double q_droop_pu{0.05};
   double voltage_reference_pu{1.0};
+  double voltage_reference_angle_rad{0.0};
   double voltage_integral_gain{10.0};
 };
 

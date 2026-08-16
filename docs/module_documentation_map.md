@@ -1,6 +1,6 @@
 # Module Documentation Map
 
-Updated: 2026-08-11
+Updated: 2026-08-16
 
 This living map evaluates documentation coverage, not implementation quality.
 Source, registered tests, and runtime responses remain authoritative. Update
@@ -31,9 +31,9 @@ Their source-backed review and closure evidence remain in the
 
 | Source module | Coverage | Canonical documentation | Assessment |
 |---|---|---|---|
-| `model/`, `validation/` | Focused | [Component-model audit](ComponentModels/component_models_math_audit.tex), [parameter system](parameter_system.md) | Strong field/model coverage. Rendered PDFs are local build artifacts and are not tracked. |
+| `model/`, `validation/` | Focused | [Component-model audit](ComponentModels/component_models_math_audit.tex), [parameter system](parameter_system.md), [cross-module semantics](model_data_semantics_contract.md) | The executable registry covers every I/O component collection and top-level source module; tests fail when a collection/module lacks identity, unit, sign, input/output, or fidelity semantics. |
 | `projection/`, `assembly/` | Focused | [Projection and result attribution](projection_and_results.md), [power-flow manual](PowerFlow/power_flow_manual1.tex) | Contracts cover index spaces, recovery classes, SolverData, and matrix assembly. Preserve AC/DC domain-qualified maps in future examples. |
-| `power_flow/` | Focused | [Power-flow manual](PowerFlow/power_flow_manual1.tex), [PV/PQ switching contract](pv_pq_switching_contract.md) | The broad manual remains active; the focused contract owns Q-limit active-set, smooth-NCP, certificate, and GUI screening semantics. The point-in-time mathematical audit is archived; open defects belong in the living code audit and tests. |
+| `power_flow/` | Focused | [Power-flow manual](PowerFlow/power_flow_manual1.tex), [cross-module model/data/result semantics](model_data_semantics_contract.md), [VSC current-limit NCP contract](vsc_limit_ncp_power_flow_contract.md), [PV/PQ switching contract](pv_pq_switching_contract.md) | The broad manual remains active. The semantic contract owns cross-module identity, units, precedence, and replay boundaries; focused numerical contracts own VSC and generator complementarity behavior. |
 | `optimal_power_flow/` | Focused | [OPF manual](OptimalPowerFlow/opf_manual.tex) | Native, parity, DC, RPO, and three-phase paths are separated. Point-in-time IPM diagnostics and RPO validation are archived. |
 | `power_models/` | Focused | OPF manual chapter `chapters/power_models.tex` | AML builders are documented inside the OPF manual; a separate document is unnecessary while that ownership stays clear. |
 | `graph/` | Focused | [Graph and reduction runtime](graph_runtime_contract.md) | Stable/domain-qualified IDs, graph positions, reduction mappings, approximation boundaries, and recovery are explicit. |

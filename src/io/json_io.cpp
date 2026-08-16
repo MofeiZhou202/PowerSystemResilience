@@ -15,6 +15,7 @@
 #include "hacdcpf/optimal_power_flow/opf_options.hpp"
 #include "hacdcpf/optimal_power_flow/dc_opf_solver.hpp"
 #include "hacdcpf/power_flow/converter_coordination.hpp"
+#include "hacdcpf/power_flow/vsc_limit_ncp.hpp"
 #include "hacdcpf/time_series/time_series_pf.hpp"
 
 using json = nlohmann::json;
@@ -1067,6 +1068,10 @@ static json vsc_to_json(const VSCConverter& c) {
   j["v_dc_set_pu"] = c.v_dc_set_pu;
   j["v_ac_set_pu"] = c.v_ac_set_pu;
   j["v_ac_angle_set_deg"] = c.v_ac_angle_set_deg;
+  j["gfm_internal_voltage_set_pu"] = c.gfm_internal_voltage_set_pu;
+  j["gfm_internal_angle_set_deg"] = c.gfm_internal_angle_set_deg;
+  j["gfm_virtual_r_pu"] = c.gfm_virtual_r_pu;
+  j["gfm_virtual_x_pu"] = c.gfm_virtual_x_pu;
   j["eta"] = c.eta;
   j["loss_percent"] = c.loss_percent;
   j["loss_mw"] = c.loss_mw;
@@ -1083,6 +1088,11 @@ static json vsc_to_json(const VSCConverter& c) {
   j["x2_sc_pu"] = c.x2_sc_pu;
   j["i_max_pu"] = c.i_max_pu;
   j["i_ac_max_pu"] = c.i_ac_max_pu;
+  j["enable_limit_ncp"] = c.enable_limit_ncp;
+  j["current_limit_priority"] =
+      powerflow::vsc_current_limit_priority_str(c.current_limit_priority);
+  j["droop_p_min_mw"] = c.droop_p_min_mw;
+  j["droop_p_max_mw"] = c.droop_p_max_mw;
   j["i_dc_max_pu"] = c.i_dc_max_pu;
   j["k_m_modulation"] = c.k_m_modulation;
   j["m_min"] = c.m_min;
@@ -1117,6 +1127,12 @@ static VSCConverter vsc_from_json(const json& j) {
   c.v_dc_set_pu = jget(j, "v_dc_set_pu", 1.0);
   c.v_ac_set_pu = jget(j, "v_ac_set_pu", 1.0);
   c.v_ac_angle_set_deg = jget(j, "v_ac_angle_set_deg", 0.0);
+  c.gfm_internal_voltage_set_pu =
+      jget(j, "gfm_internal_voltage_set_pu", 0.0);
+  c.gfm_internal_angle_set_deg =
+      jget(j, "gfm_internal_angle_set_deg", 0.0);
+  c.gfm_virtual_r_pu = jget(j, "gfm_virtual_r_pu", 0.0);
+  c.gfm_virtual_x_pu = jget(j, "gfm_virtual_x_pu", 0.0);
   c.eta = jget(j, "eta", 0.99);
   c.loss_percent = jget(j, "loss_percent", 0.0);
   c.loss_mw = normalize_loss_mw_from_json(j);
@@ -1133,6 +1149,12 @@ static VSCConverter vsc_from_json(const json& j) {
   c.x2_sc_pu = jget(j, "x2_sc_pu", 0.0);
   c.i_max_pu = jget(j, "i_max_pu", 1.0);
   c.i_ac_max_pu = jget(j, "i_ac_max_pu", 0.0);
+  c.enable_limit_ncp = jget(j, "enable_limit_ncp", false);
+  c.current_limit_priority =
+      powerflow::vsc_current_limit_priority_from_str(
+          jget<std::string>(j, "current_limit_priority", "magnitude"));
+  c.droop_p_min_mw = jget(j, "droop_p_min_mw", 0.0);
+  c.droop_p_max_mw = jget(j, "droop_p_max_mw", 0.0);
   c.i_dc_max_pu = jget(j, "i_dc_max_pu", 0.0);
   c.k_m_modulation = jget(j, "k_m_modulation", 0.0);
   c.m_min = jget(j, "m_min", 0.0);
@@ -3641,6 +3663,19 @@ std::string power_flow_result_to_json(const HybridPowerSystem& sys,
         {"q_ac_mvar", transfer.q_ac_mvar},
         {"p_dc_mw", transfer.p_dc_mw},
         {"loss_mw", std::max(transfer.loss_mw, 0.0)},
+        {"limit_ncp_enabled", transfer.limit_ncp_enabled},
+        {"current_limit_active", transfer.current_limit_active},
+        {"droop_saturated", transfer.droop_saturated},
+        {"current_limit_priority", transfer.current_limit_priority},
+        {"effective_mode", transfer.effective_mode},
+        {"ac_current_pu", transfer.ac_current_pu},
+        {"current_margin_pu", transfer.current_margin_pu},
+        {"complementarity_residual", transfer.complementarity_residual},
+        {"gfm_norton_model", transfer.gfm_norton_model},
+        {"internal_voltage_real_pu", transfer.internal_voltage_real_pu},
+        {"internal_voltage_imag_pu", transfer.internal_voltage_imag_pu},
+        {"terminal_current_real_pu", transfer.terminal_current_real_pu},
+        {"terminal_current_imag_pu", transfer.terminal_current_imag_pu},
     });
   }
   root["vsc_transfers"] = std::move(vsc_transfers);
@@ -4778,6 +4813,9 @@ static int converter_mode_to_jpc(ConverterMode mode) {
     case ConverterMode::PQ_MODE:  return 1;
     case ConverterMode::VDC_Q:    return 2;
     case ConverterMode::VDC_VAC:  return 3;
+    case ConverterMode::AC_PV: return 4;
+    case ConverterMode::AC_GRID_FORMING: return 5;
+    case ConverterMode::DC_V_DROOP_AC_V: return 6;
     default:                      return 1;
   }
 }
@@ -4788,6 +4826,9 @@ static ConverterMode jpc_to_converter_mode(int mode) {
     case 1:  return ConverterMode::PQ_MODE;
     case 2:  return ConverterMode::VDC_Q;
     case 3:  return ConverterMode::VDC_VAC;
+    case 4:  return ConverterMode::AC_PV;
+    case 5:  return ConverterMode::AC_GRID_FORMING;
+    case 6:  return ConverterMode::DC_V_DROOP_AC_V;
     default: return ConverterMode::PQ_MODE;
   }
 }
@@ -4988,6 +5029,15 @@ std::string to_jpc_json(const HybridPowerSystem& sys, int indent) {
       obj["t_scheduled_hr"]     = c.t_scheduled_hr;
       obj["r_conv_ac_pu"]       = c.r_conv_ac_pu;
       obj["i_ac_max_pu"]        = c.i_ac_max_pu;
+      obj["enable_limit_ncp"]    = c.enable_limit_ncp;
+      obj["current_limit_priority"] =
+          powerflow::vsc_current_limit_priority_str(c.current_limit_priority);
+      obj["droop_p_min_mw"]     = c.droop_p_min_mw;
+      obj["droop_p_max_mw"]     = c.droop_p_max_mw;
+      obj["gfm_internal_voltage_set_pu"] = c.gfm_internal_voltage_set_pu;
+      obj["gfm_internal_angle_set_deg"] = c.gfm_internal_angle_set_deg;
+      obj["gfm_virtual_r_pu"] = c.gfm_virtual_r_pu;
+      obj["gfm_virtual_x_pu"] = c.gfm_virtual_x_pu;
       obj["i_dc_max_pu"]        = c.i_dc_max_pu;
       obj["k_m_modulation"]     = c.k_m_modulation;
       obj["m_min"]              = c.m_min;
@@ -5362,6 +5412,20 @@ HybridPowerSystem from_jpc_json(const std::string& json_str) {
       c.t_scheduled_hr     = jget<double>(j, "t_scheduled_hr", c.t_scheduled_hr);
       c.r_conv_ac_pu       = jget<double>(j, "r_conv_ac_pu", c.r_conv_ac_pu);
       c.i_ac_max_pu        = jget<double>(j, "i_ac_max_pu", c.i_ac_max_pu);
+      c.enable_limit_ncp    = jget<bool>(j, "enable_limit_ncp", c.enable_limit_ncp);
+      c.current_limit_priority =
+          powerflow::vsc_current_limit_priority_from_str(
+              jget<std::string>(j, "current_limit_priority", "magnitude"));
+      c.droop_p_min_mw     = jget<double>(j, "droop_p_min_mw", c.droop_p_min_mw);
+      c.droop_p_max_mw     = jget<double>(j, "droop_p_max_mw", c.droop_p_max_mw);
+      c.gfm_internal_voltage_set_pu = jget<double>(
+          j, "gfm_internal_voltage_set_pu", c.gfm_internal_voltage_set_pu);
+      c.gfm_internal_angle_set_deg = jget<double>(
+          j, "gfm_internal_angle_set_deg", c.gfm_internal_angle_set_deg);
+      c.gfm_virtual_r_pu =
+          jget<double>(j, "gfm_virtual_r_pu", c.gfm_virtual_r_pu);
+      c.gfm_virtual_x_pu =
+          jget<double>(j, "gfm_virtual_x_pu", c.gfm_virtual_x_pu);
       c.i_dc_max_pu        = jget<double>(j, "i_dc_max_pu", c.i_dc_max_pu);
       c.k_m_modulation     = jget<double>(j, "k_m_modulation", c.k_m_modulation);
       c.m_min              = jget<double>(j, "m_min", c.m_min);

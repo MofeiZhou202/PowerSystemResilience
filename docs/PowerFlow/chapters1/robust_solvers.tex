@@ -146,59 +146,107 @@ $\delta t\leftarrow\mathrm{clamp}(\delta t(r_{k-1}/r_k)^\gamma,
 $\times$ 8 种配置（含 TR、PTC）打印迭代对照表。自动恢复调度（默认关）无
 专门回归用例。
 
-\subsection{NCP 半光滑 Newton（PV 无功限值光滑化）}\label{sec:robust:ncp}
+\subsection{结构保持 NCP 半光滑 Newton}\label{sec:robust:ncp}
 
-\compmeta{powerflow::pv\_pq\_ncp 等内联函数族}{\srcpath{include/hacdcpf/power\_flow/ncp\_functions.hpp}}
-\paragraph{功能说明} 把 PV 母线的无功限值互补约束写成 Fischer--Burmeister
-NCP 方程直接嵌入 Newton 系统，替代 MATPOWER 风格 PV$\leftrightarrow$PQ 离散
-外环（第~\ref{sec:newton}~章）。全部函数为
-\srcpath{include/hacdcpf/power\_flow/ncp\_functions.hpp} 内联实现；由
-\fld{enable\_semi\_smooth\_newton}（默认 false，
-\srcpath{power\_flow\_options.hpp:151}；SolverData 侧镜像
-\srcpath{solver\_data.hpp:69}）开启。
-\paragraph{数学模型与算法} 近零扰动 FB 函数
-（\srcpath{ncp\_functions.hpp:14--25}）：
+\compmeta{powerflow::pv\_pq\_ncp、fischer\_burmeister 与 evaluate\_vsc\_limit\_ncp}{\srcpath{include/hacdcpf/power\_flow/ncp\_functions.hpp}；\srcpath{src/power\_flow/vsc\_limit\_ncp.cpp}}
+\paragraph{功能说明} 生产 Newton 路径包含两类固定维度非光滑块：传统发电机
+PV/PQ 无功限值使用中值 NCP；VSC 电流圆、P/Q priority、Vdc droop 饱和和
+GFM Norton 端口使用每台设备六状态局部块。活动状态只改变数值，不改变行列
+坐标，因此符号分解可跨限值激活复用。PV/PQ 块由
+\fld{enable\_semi\_smooth\_newton} 开启；VSC 块由设备字段
+\fld{enable\_limit\_ncp} 与正 \fld{i\_ac\_max\_pu} 独立开启。
+
+\paragraph{精确目标方程} 标量互补关系采用严格 Fischer--Burmeister 映射
 \[
-\phi(a,b)=\sqrt{a^2+b^2+\varepsilon}-a-b,\qquad \varepsilon=10^{-14},
-\qquad \partial_a\phi=a/r-1,\ \partial_b\phi=b/r-1
+\phi(a,b)=\sqrt{a^2+b^2}-a-b,
+\qquad \phi(a,b)=0\Longleftrightarrow a\ge0,\ b\ge0,\ ab=0.
 \]
-PV 母线全部转 PQ（$V_m$ 自由，newton\_solver.cpp:599--605），其 Q 行替换为
-（:669--699 汇集同母线发电机限值，无穷限取 $\pm10^{6}$，:684--693）：
+实现不加入隐藏 $\varepsilon$，故双活跃交点满足 $\phi(0,0)=0$。原点处选择
+Clarke 广义雅可比的对称元素
+$\partial_a\phi=\partial_b\phi=1/\sqrt{2}-1$。PV/PQ 行使用
 \[
-F_{\mathrm{ncp}}=\phi\big(Q_{\max}-Q_g,\ V_m-V_{\mathrm{set}}\big)
-                 +\phi\big(Q_g-Q_{\min},\ V_{\mathrm{set}}-V_m\big)
+F_Q=\operatorname{mid}(V_m-V_{set},\ Q_g-Q_{max},\ Q_g-Q_{min}),
 \]
-（\srcpath{pv\_pq\_ncp}，ncp\_functions.hpp:42--45）。限内时迫使 $V_m=V_{set}$
-（PV 行为），触限时钉住 $Q_g$ 并放开 $V_m$。行装配在
-\srcpath{src/power\_flow/jacobian\_builder.cpp:433--487}：隐含无功
-$Q_g=Q^{\mathrm{calc}}+Q^{\mathrm{load}}$（:440--444，\fld{has\_component\_loads}
-为真时 $Q^{\mathrm{load}}$ 取逐母线 \fld{qd\_pu}，否则取母线级 \fld{qd\_mvar}），
-失配行直接写
-$F_{\mathrm{ncp}}$（:446--453）；雅可比行按链式
-$J_{\mathrm{ncp}}=-(\partial F/\partial Q_g)\,dQ^{\mathrm{calc}}/dx
--(\partial F/\partial V_m)\,\partial V_m/\partial x$ 改写（:455--487）。
-可选光滑延拓（Phase 2，\fld{enable\_smooth\_ncp} 默认关，
-\srcpath{robust\_nonlinear\_options.hpp:79}）：
-$\phi_\mu(a,b)=\sqrt{a^2+b^2+2\mu}-a-b$（ncp\_functions.hpp:79--93），
-$\mu$ 随残差退火：初值 \fld{ncp\_mu0}，残差每降 10\% 按两阶段因子缩减——
-粗阶段（resid $>0.1\times$初值）用 \fld{ncp\_mu\_factor\_coarse}$=0.5$，
-细阶段用 \fld{ncp\_mu\_factor}$=0.1$，下限 \fld{ncp\_mu\_min}
-（newton\_solver.cpp:1464--1482）。
+限内恢复 PV 电压控制，触及上下界时恢复 PQ 限值行为。Magnitude-priority
+VSC 使用 $0\le\lambda\perp g(I,V)\ge0$；P-first/Q-first 使用嵌套中值投影。
+网络行保持 $J=d(\mathrm{calc}-\mathrm{spec})/dx$，局部块存储 $dF/dx$，统一
+线性系统右端分别为 $\mathrm{spec}-\mathrm{calc}$ 与 $-F$。
+
+\paragraph{可选光滑延拓} \fld{enable\_smooth\_ncp} 启用后，magnitude 块采用
+Kanzow 平滑半径
+\[
+\phi_\mu(a,b)=\sqrt{a^2+b^2+2\mu^2}-a-b,
+\]
+中值块采用 CHKS 光滑 min/max。VSC continuation 不要求同时打开 PV/PQ
+半光滑开关；两类 NCP 共存时共享同一 $\mu$。$\mu$ 从
+\fld{ncp\_mu0} 按粗/细两阶段因子降至 \fld{ncp\_mu\_min}，每次缩减后在
+原状态重新装配残差与 Jacobian。公开 VSC 结果使用 $\mu=0$ 重新计算证书，
+不把光滑代理根冒充精确互补解。
+
+\paragraph{局部 VSC 块 Schur 消元与 BD-regular 条件}
+将网络变量记为 $x$、每台 VSC 的六维局部变量合并为 $z$，则所选广义
+Jacobian 元素具有
+\[
+J=\begin{bmatrix}A&B\\C&D\end{bmatrix},\qquad
+D=\operatorname{blkdiag}(D_1,\ldots,D_m),\quad D_i\in\mathbb R^{6\times6}.
+\]
+生产实现 \srcpath{powerflow::VSCLocalSchurSolver} 不形成显式逆，而以每个
+$D_i$ 的一次稠密分解同时求 $D_i^{-1}[C_i,r_i]$，构造
+\[
+S=A-BD^{-1}C,\qquad \widehat r_x=r_x-BD^{-1}r_z,
+\]
+解 $S\Delta x=\widehat r_x$ 后回代
+$\Delta z=D^{-1}(r_z-C\Delta x)$。每块只连接本机端口
+$V_a/V_m/V_{dc}$ 与 P/Q/DC 三行，故 Schur 更新最多九个固定坐标。局部阶数
+$s=6$、端口宽度 $c\le3$ 时，附加工作为
+$O(ms^3+ms^2(c+1))=O(m)$；总维度由 $n_x+6m$ 降至 $n_x$。完整固定模式
+每块含 $36+18+3=57$ 个局部相关结构项，reduced 模式最多新增 9 项，因此
+结构非零至少减少 $48m$。稀疏 LU 的 fill 仍取决于图与排序，本文不以母线数
+直接套用未经测量的 $O(n^{1.5})$。
+
+若全部 $D_i$ 与 $S$ 非奇异，则块 Gaussian 消元保证当前所选 $J$ 非奇异。
+这只是可执行的单元素证书；BD-regular 要求解邻域内 B-subdifferential 的全部
+相关元素一致可逆。在该条件与半光滑性成立时，Qi--Sun 半光滑 Newton 局部
+超线性；强半光滑时得到标准二次局部率。程序报告
+$\lVert F_{k+1}\rVert/\lVert F_k\rVert$ 与
+$\lVert F_{k+1}\rVert/\lVert F_k\rVert^2$，但不把有限样本冒充 BD-regular
+证明。
+
+数值准入使用统一 \srcpath{NumericalConstants::kSqrtMachineEpsilon} 派生的
+局部 reciprocal-condition 阈值，并对 reduced 与完整重构步执行 Higham
+范数后向误差检查。任一检查失败即回退完整 sparse LU。生产默认仅在网络维度
+不少于 \fld{Defaults::kVSCSchurMinNetworkDimension}$=1000$ 时启用；小系统可将
+阈值置零做论文消融。两次 warmup、五次交替 A/B 的 Release/KLU 协议显示，
+强制 case300 Schur 虽将维度 $640\to604$、结构非零 $4820\to4502$，但固定开销
+使线性/总时长增加 $40.9\%/15.7\%$，故默认拒绝；ACTIVSg2000 将
+$4054\to4006$、$29806\to29382$，线性/总时长降低 $14.0\%/12.5\%$，进入
+生产准入。准入维度、局部 rcond 与后向误差门槛均可经 C++ 及生产 HTTP
+配置并回显；机器 epsilon 保持只读。KLU 适配器当前不返回 factor nnz/work，
+结果明确记为 unavailable。
+
 \paragraph{参数表}
 \begin{paramtable}
-\fld{enable\_semi\_smooth\_newton} & — & — & on/off & false & NCP 模式总开关（\texttt{PowerFlowOptions}，GUI 暴露于 \srcpath{tests/run\_gui\_server.cpp:697}）\\
-\fld{enable\_smooth\_ncp} & — & — & on/off & false & $\mu$ 光滑 FB 延拓开关\\
+\fld{enable\_semi\_smooth\_newton} & — & — & on/off & false & 发电机 PV/PQ 中值 NCP 开关\\
+\fld{enable\_smooth\_ncp} & — & — & on/off & false & PV/PQ 与 VSC 的 $\mu$ 光滑 FB/CHKS 延拓开关\\
 \fld{ncp\_mu0} & $\mu_0$ & — & $10^{-3}$--$10^{-1}$ & $10^{-2}$ & 初始光滑参数\\
 \fld{ncp\_mu\_min} & $\mu_{\min}$ & — & $10^{-14}$--$10^{-10}$ & $10^{-12}$ & 退火下限（趋近精确 NCP）\\
 \fld{ncp\_mu\_factor(\_coarse)} & — & — & — & 0.1/0.5 & 细/粗两阶段退火因子；\fld{ncp\_mu\_phase\_transition}$=0.1$ 为切换残差比\\
 \fld{enable\_activity\_hysteresis} 等 & — & — & — & true / 3 / $10^{-4}$ & 迟滞三字段（预留，未消费）\\
+\fld{enable\_vsc\_local\_schur} & — & — & on/off & true & VSC 六维局部块精确 Schur 消元；证书失败回退 full LU\\
+\fld{vsc\_schur\_min\_network\_dimension} & $n_{\min}$ & 维 & $\ge0$ & 1000 & 生产复杂度准入；0 仅用于小系统消融\\
+\fld{vsc\_schur\_local\_rcond\_tolerance} & $\rho_D$ & — & $>0$ & $\sqrt{\epsilon_{mach}}$ & 当前所选 $D_i$ 的最小 reciprocal-condition 门槛\\
+\fld{vsc\_schur\_backward\_error\_tolerance} & $\eta_b$ & — & $>0$ & $10^{-12}$ & reduced 与完整重构步最大范数后向误差\\
 \end{paramtable}
-\paragraph{验证与校核} \srcpath{tests/test\_unified\_pf\_upgrade.cpp}：
-IEEE 118 收紧无功限值算例，NCP 一遍求解、\fld{pv\_to\_pq\_switches}$=0$ 且
-残差 $<2\times10^{-3}$，而启发式外环需多次切换（:709--739）；case30/57/118
-（Q 限 $\times0.9$）NCP 与启发式对照表（:827--884）；5 压力算例含
-\texttt{ncp} 配置的全对比（:890--961）。如实说明：$\mu$ 光滑延拓（默认关）
-无单独回归用例。
+\paragraph{验证与校核} \srcpath{tests/test\_vsc\_limit\_ncp.cpp} 覆盖精确 FB
+原点、平滑导数有限差分、三种 power-port priority、三种限流 GFM priority、
+多换流器同时激活、退化交点、弱网、不可行点以及 case300/ACTIVSg2000。
+光滑算例均保持一次 Jacobian pattern build，$\mu$ 降至 $10^{-12}$ 后按精确
+方程复核，证书残差不超过 $10^{-9}$。PV/PQ CHKS 数学恒等式与有限差分由
+\srcpath{tests/test\_power\_flow\_math\_audit.cpp} 守卫。Schur/full-LU 小型代数
+oracle 的步相对误差不超过 $10^{-10}$、完整后向误差不超过 $10^{-12}$；
+case300/ACTIVSg2000 的 $V_m/V_a/V_{dc}$ 根差不超过 $10^{-8}$，并锁定
+$6m$ 维度与至少 $48m$ 结构非零缩减。可复现实验入口为
+\srcpath{tools/vsc\_schur\_benchmark.cpp}。
 
 \subsection{HELM 全纯嵌入}\label{sec:robust:helm}
 

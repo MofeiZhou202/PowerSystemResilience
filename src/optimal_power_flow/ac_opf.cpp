@@ -3636,6 +3636,18 @@ ACOPFResult solve_ac_opf_impl(const HybridPowerSystem& sys,
       result.model_limitations.push_back(
           "Energy-router port balance is lossless; internal router conversion losses are not represented.");
     }
+    if (std::any_of(sys.vsc_converters.begin(), sys.vsc_converters.end(),
+                    [](const VSCConverter& converter) {
+                      return converter.in_service &&
+                             converter.control_mode ==
+                                 ConverterMode::AC_GRID_FORMING;
+                    })) {
+      result.model_limitations.push_back(
+          "Balanced AC OPF treats grid-forming VSCs as free P/Q converter "
+          "ports with the selected engineering inequalities; internal voltage, "
+          "virtual impedance, and priority NCP are certified only by the "
+          "post-dispatch power-flow replay and are not OPF KKT constraints.");
+    }
     if (!result.lmp_valid && result.lmp_validity_reason.empty()) {
       result.lmp_validity_reason =
           "The selected OPF path did not provide certified nodal-price multipliers.";

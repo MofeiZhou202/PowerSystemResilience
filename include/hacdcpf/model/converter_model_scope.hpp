@@ -34,6 +34,15 @@ struct ConverterModelScope {
     bool vsc_capacity_circle_enforced{false};
     /// AC and/or DC current limits enforced as constraints (not post-hoc only).
     bool vsc_current_limits_enforced{false};
+    /// A grid-forming VSC internal voltage behind virtual impedance was an
+    /// explicit solved Norton/Thevenin port, rather than a terminal-bus source.
+    bool vsc_gfm_norton_modelled{false};
+    /// P/Q-priority current limiting changed the solved GFM operating point
+    /// through the nonsmooth equation block (not a post-solve projection).
+    bool vsc_gfm_priority_limit_enforced{false};
+    /// At least one AC island without a terminal SLACK was angle-anchored by
+    /// fixed GFM internal-voltage phasor(s), with every terminal Vm/Va retained.
+    bool vsc_gfm_island_reference_modelled{false};
     /// Modulation-index feasibility (m_min <= m <= m_max, Vac = Km*m*Vdc).
     bool vsc_modulation_limits_enforced{false};
     /// VDC_Q / VDC_VAC DC-voltage control (equality or stiff droop) honored.

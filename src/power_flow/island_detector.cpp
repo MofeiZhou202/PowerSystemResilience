@@ -6,6 +6,8 @@
 #include <unordered_set>
 #include <vector>
 
+#include "hacdcpf/power_flow/vsc_limit_ncp.hpp"
+
 namespace hacdcpf::powerflow {
 
 std::vector<IslandInfo> detect_islands(const HybridPowerSystem& sys) {
@@ -210,6 +212,7 @@ std::vector<IslandInfo> detect_islands(const HybridPowerSystem& sys) {
     std::unordered_set<int> dc_set(dc_buses.begin(), dc_buses.end());
 
     std::vector<int> converters;
+    std::vector<int> gfm_reference_vsc_indices;
     converters.reserve(sys.vsc_converters.size());
     for (int i = 0; i < static_cast<int>(sys.vsc_converters.size()); ++i) {
       const auto& conv = sys.vsc_converters[static_cast<size_t>(i)];
@@ -218,6 +221,9 @@ std::vector<IslandInfo> detect_islands(const HybridPowerSystem& sys) {
       }
       if (ac_set.count(conv.bus_ac) != 0 || dc_set.count(conv.bus_dc) != 0) {
         converters.push_back(i + 1);
+      }
+      if (ac_set.count(conv.bus_ac) != 0 && uses_gfm_limit_ncp(conv)) {
+        gfm_reference_vsc_indices.push_back(conv.index);
       }
     }
 
@@ -289,6 +295,12 @@ std::vector<IslandInfo> detect_islands(const HybridPowerSystem& sys) {
         has_generators = true;
         break;
       }
+    }
+    if (!has_generators) {
+      // A fixed internal GFM Norton phasor is a physical source even when its
+      // authored P setpoint is zero. Its delivered power follows from
+      // I=(E*-V)/Zv rather than from p_set_mw.
+      has_generators = !gfm_reference_vsc_indices.empty();
     }
     if (!has_generators) {
       for (const auto& st : sys.dc.storage) {
@@ -385,6 +397,8 @@ std::vector<IslandInfo> detect_islands(const HybridPowerSystem& sys) {
     IslandInfo island;
     island.id = static_cast<int>(islands.size()) + 1;
     island.has_ac_slack = has_ac_slack;
+    island.has_ac_angle_reference =
+        has_ac_slack || !gfm_reference_vsc_indices.empty();
     island.has_dc_slack = has_dc_slack;
     island.ac_slack_bus = ac_slack_bus;
     island.dc_slack_bus = dc_slack_bus;
@@ -392,6 +406,8 @@ std::vector<IslandInfo> detect_islands(const HybridPowerSystem& sys) {
     island.ac_buses = std::move(ac_buses);
     island.dc_buses = std::move(dc_buses);
     island.converters = std::move(converters);
+    island.gfm_reference_vsc_indices =
+        std::move(gfm_reference_vsc_indices);
     islands.push_back(std::move(island));
   }
 
@@ -474,7 +490,6 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
       continue;
     }
     ACBranch copy = br;
-    copy.index = static_cast<int>(sub.ac.branches.size()) + 1;
     copy.from_bus = itf->second;
     copy.to_bus = itt->second;
     sub.ac.branches.push_back(std::move(copy));
@@ -490,7 +505,6 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
     const auto itt = ac_map.find(sw.bus_to);
     if (itf == ac_map.end() || itt == ac_map.end()) continue;
     Switch copy = sw;
-    copy.index = static_cast<int>(sub.ac.switches.size()) + 1;
     copy.bus_from = itf->second;
     copy.bus_to = itt->second;
     sub.ac.switches.push_back(std::move(copy));
@@ -500,7 +514,6 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
     const auto itt = ac_map.find(cb.bus_to);
     if (itf == ac_map.end() || itt == ac_map.end()) continue;
     CircuitBreaker copy = cb;
-    copy.index = static_cast<int>(sub.ac.circuit_breakers.size()) + 1;
     copy.bus_from = itf->second;
     copy.bus_to = itt->second;
     sub.ac.circuit_breakers.push_back(std::move(copy));
@@ -515,7 +528,6 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
     const auto itt = ac_map.find(tr.lv_bus);
     if (itf == ac_map.end() || itt == ac_map.end()) continue;
     Transformer2W copy = tr;
-    copy.index = static_cast<int>(sub.ac.transformers_2w.size()) + 1;
     copy.hv_bus = itf->second;
     copy.lv_bus = itt->second;
     sub.ac.transformers_2w.push_back(std::move(copy));
@@ -527,7 +539,6 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
     const auto itl = ac_map.find(tr.lv_bus);
     if (ith == ac_map.end() || itm == ac_map.end() || itl == ac_map.end()) continue;
     Transformer3W copy = tr;
-    copy.index = static_cast<int>(sub.ac.transformers_3w.size()) + 1;
     copy.hv_bus = ith->second;
     copy.mv_bus = itm->second;
     copy.lv_bus = itl->second;
@@ -543,7 +554,6 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
       continue;
     }
     Generator copy = gen;
-    copy.index = static_cast<int>(sub.ac.generators.size()) + 1;
     copy.bus = it->second;
     sub.ac.generators.push_back(std::move(copy));
   }
@@ -570,7 +580,6 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
       continue;
     }
     DCBranch copy = br;
-    copy.index = static_cast<int>(sub.dc.branches.size()) + 1;
     copy.from_bus = itf->second;
     copy.to_bus = itt->second;
     sub.dc.branches.push_back(std::move(copy));
@@ -586,7 +595,9 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
       continue;
     }
     VSCConverter copy = conv;
-    copy.index = static_cast<int>(sub.vsc_converters.size()) + 1;
+    // Converter result certificates and PF-to-transient seeds use the stable
+    // authored component ID, not the local vector position.
+    copy.index = conv.index;
     copy.bus_ac = it_ac->second;
     copy.bus_dc = it_dc->second;
     sub.vsc_converters.push_back(std::move(copy));
@@ -598,7 +609,6 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
     const auto it_dc = dc_map.find(lcc.dc_bus);
     if (it_ac == ac_map.end() || it_dc == dc_map.end()) continue;
     LCCConverter copy = lcc;
-    copy.index = static_cast<int>(sub.lcc_converters.size()) + 1;
     copy.ac_bus = it_ac->second;
     copy.dc_bus = it_dc->second;
     sub.lcc_converters.push_back(std::move(copy));
@@ -607,7 +617,6 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
   for (const auto& er : sys.energy_routers) {
     if (!er.in_service) continue;
     EnergyRouter copy = er;
-    copy.index = static_cast<int>(sub.energy_routers.size()) + 1;
     copy.ports.clear();
     for (const auto& port : er.ports) {
       if (!port.in_service) continue;
@@ -635,7 +644,6 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
     const auto it = ac_map.find(ld.bus);
     if (it == ac_map.end()) continue;
     Load copy = ld;
-    copy.index = static_cast<int>(sub.ac.loads.size()) + 1;
     copy.bus = it->second;
     sub.ac.loads.push_back(std::move(copy));
   }
@@ -644,7 +652,6 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
     const auto it = ac_map.find(sg.bus);
     if (it == ac_map.end()) continue;
     StaticGenerator copy = sg;
-    copy.index = static_cast<int>(sub.ac.static_generators.size()) + 1;
     copy.bus = it->second;
     sub.ac.static_generators.push_back(std::move(copy));
   }
@@ -653,7 +660,6 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
     const auto it = ac_map.find(rg.bus);
     if (it == ac_map.end()) continue;
     RenewableGen copy = rg;
-    copy.index = static_cast<int>(sub.ac.renewable_gens.size()) + 1;
     copy.bus = it->second;
     sub.ac.renewable_gens.push_back(std::move(copy));
   }
@@ -662,7 +668,6 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
     const auto it = ac_map.find(pv.bus);
     if (it == ac_map.end()) continue;
     PVSystem copy = pv;
-    copy.index = static_cast<int>(sub.ac.pv_systems.size()) + 1;
     copy.bus = it->second;
     sub.ac.pv_systems.push_back(std::move(copy));
   }
@@ -671,7 +676,6 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
     const auto it = ac_map.find(st.bus);
     if (it == ac_map.end()) continue;
     Storage copy = st;
-    copy.index = static_cast<int>(sub.ac.storage.size()) + 1;
     copy.bus = it->second;
     sub.ac.storage.push_back(std::move(copy));
   }
@@ -680,7 +684,6 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
     const auto it = ac_map.find(sh.bus);
     if (it == ac_map.end()) continue;
     Shunt copy = sh;
-    copy.index = static_cast<int>(sub.ac.shunts.size()) + 1;
     copy.bus = it->second;
     sub.ac.shunts.push_back(std::move(copy));
   }
@@ -689,7 +692,6 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
     const auto it = ac_map.find(cs.bus);
     if (it == ac_map.end()) continue;
     ChargingStation copy = cs;
-    copy.index = static_cast<int>(sub.ac.charging_stations.size()) + 1;
     copy.bus = it->second;
     sub.ac.charging_stations.push_back(std::move(copy));
   }
@@ -698,7 +700,6 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
     const auto it = ac_map.find(eg.bus);
     if (it == ac_map.end()) continue;
     ExternalGrid copy = eg;
-    copy.index = static_cast<int>(sub.ac.external_grids.size()) + 1;
     copy.bus = it->second;
     sub.ac.external_grids.push_back(std::move(copy));
   }
@@ -707,7 +708,6 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
     const auto it = ac_map.find(fl.bus);
     if (it == ac_map.end()) continue;
     FlexibleLoad copy = fl;
-    copy.index = static_cast<int>(sub.ac.flexible_loads.size()) + 1;
     copy.bus = it->second;
     sub.ac.flexible_loads.push_back(std::move(copy));
   }
@@ -716,7 +716,6 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
     const auto it = ac_map.find(al.bus);
     if (it == ac_map.end()) continue;
     AsymmetricLoad copy = al;
-    copy.index = static_cast<int>(sub.ac.asymmetric_loads.size()) + 1;
     copy.bus = it->second;
     sub.ac.asymmetric_loads.push_back(std::move(copy));
   }
@@ -725,7 +724,6 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
     const auto it = ac_map.find(m.bus);
     if (it == ac_map.end()) continue;
     AsynchronousMotor copy = m;
-    copy.index = static_cast<int>(sub.ac.motors.size()) + 1;
     copy.bus = it->second;
     sub.ac.motors.push_back(std::move(copy));
   }
@@ -736,7 +734,6 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
     const auto it = dc_map.find(st.bus);
     if (it == dc_map.end()) continue;
     Storage copy = st;
-    copy.index = static_cast<int>(sub.dc.storage.size()) + 1;
     copy.bus = it->second;
     sub.dc.storage.push_back(std::move(copy));
   }
@@ -745,7 +742,6 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
     const auto it = dc_map.find(st.bus);
     if (it == dc_map.end()) continue;
     DCStorage copy = st;
-    copy.index = static_cast<int>(sub.dc.dc_storage.size()) + 1;
     copy.bus = it->second;
     sub.dc.dc_storage.push_back(std::move(copy));
   }
@@ -754,7 +750,6 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
     const auto it = dc_map.find(sg.bus);
     if (it == dc_map.end()) continue;
     StaticGenerator copy = sg;
-    copy.index = static_cast<int>(sub.dc.static_generators.size()) + 1;
     copy.bus = it->second;
     sub.dc.static_generators.push_back(std::move(copy));
   }
@@ -763,7 +758,6 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
     const auto it = dc_map.find(ld.bus);
     if (it == dc_map.end()) continue;
     DCLoad copy = ld;
-    copy.index = static_cast<int>(sub.dc.loads.size()) + 1;
     copy.bus = it->second;
     sub.dc.loads.push_back(std::move(copy));
   }
@@ -772,7 +766,6 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
     const auto it = dc_map.find(sg.bus);
     if (it == dc_map.end()) continue;
     StaticGeneratorDC copy = sg;
-    copy.index = static_cast<int>(sub.dc.dc_static_generators.size()) + 1;
     copy.bus = it->second;
     sub.dc.dc_static_generators.push_back(std::move(copy));
   }
@@ -781,7 +774,6 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
     const auto it = dc_map.find(pv.bus);
     if (it == dc_map.end()) continue;
     PVArrayDC copy = pv;
-    copy.index = static_cast<int>(sub.dc.pv_arrays.size()) + 1;
     copy.bus = it->second;
     sub.dc.pv_arrays.push_back(std::move(copy));
   }
@@ -790,7 +782,6 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
     const auto itt = dc_map.find(cb.bus_to);
     if (itf == dc_map.end() || itt == dc_map.end()) continue;
     DCCircuitBreaker copy = cb;
-    copy.index = static_cast<int>(sub.dc.dc_circuit_breakers.size()) + 1;
     copy.bus_from = itf->second;
     copy.bus_to = itt->second;
     sub.dc.dc_circuit_breakers.push_back(std::move(copy));
@@ -803,7 +794,6 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
     const auto ito = dc_map.find(dc.bus_out);
     if (iti == dc_map.end() || ito == dc_map.end()) continue;
     DCDCConverter copy = dc;
-    copy.index = static_cast<int>(sub.dc.dcdc_converters.size()) + 1;
     copy.bus_in = iti->second;
     copy.bus_out = ito->second;
     sub.dc.dcdc_converters.push_back(std::move(copy));
@@ -815,7 +805,6 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
     const auto it = ac_map.find(vpp.pcc_bus);
     if (it == ac_map.end()) continue;
     VirtualPowerPlant copy = vpp;
-    copy.index = static_cast<int>(sub.vpps.size()) + 1;
     copy.pcc_bus = it->second;
     sub.vpps.push_back(std::move(copy));
   }
@@ -824,7 +813,6 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
     const auto it = ac_map.find(mg.pcc_bus);
     if (it == ac_map.end()) continue;
     Microgrid copy = mg;
-    copy.index = static_cast<int>(sub.microgrids.size()) + 1;
     copy.pcc_bus = it->second;
     sub.microgrids.push_back(std::move(copy));
   }
@@ -833,21 +821,8 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
     const auto it = ac_map.find(ms.bus);
     if (it == ac_map.end()) continue;
     MobileStorage copy = ms;
-    copy.index = static_cast<int>(sub.mobile_storage.size()) + 1;
     copy.bus = it->second;
     sub.mobile_storage.push_back(std::move(copy));
-  }
-
-  bool has_slack = false;
-  for (const auto& bus : sub.ac.buses) {
-    if (bus.bus_type == BusType::SLACK) {
-      has_slack = true;
-      break;
-    }
-  }
-  if (!has_slack && !sub.ac.buses.empty()) {
-    sub.ac.buses.front().bus_type = BusType::SLACK;
-    sub.ac.buses.front().va_deg = 0.0;
   }
 
   return sub;

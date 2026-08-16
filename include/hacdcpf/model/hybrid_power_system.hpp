@@ -199,50 +199,75 @@ struct HybridPowerSystem {
 // engines pick the DC storage up with no further changes. It is idempotent
 // (an empty `dc_storage` is a no-op), so it is safe to call at multiple solver
 // entry points.
+inline Storage dc_storage_execution_view(const DCStorage& source) {
+  Storage storage;
+  storage.index = source.index;
+  storage.bus = source.bus;
+  storage.in_service = source.in_service;
+  storage.name = source.name;
+  storage.type = source.type;
+  storage.p_mw = source.p_mw;
+  storage.q_mvar = 0.0;
+  storage.p_rated_mw = source.p_rated_mw;
+  storage.pmax_mw = source.pmax_mw;
+  storage.pmin_mw = source.pmin_mw;
+  storage.qmax_mvar = 0.0;
+  storage.qmin_mvar = 0.0;
+  storage.e_rated_mwh = source.e_rated_mwh;
+  storage.soc_init = source.soc_init;
+  storage.soc_min = source.soc_min;
+  storage.soc_max = source.soc_max;
+  storage.soc_carbon_intensity_tco2_mwh =
+      source.soc_carbon_intensity_tco2_mwh;
+  storage.eta_charge = source.eta_charge;
+  storage.eta_discharge = source.eta_discharge;
+  storage.self_discharge_pct = source.self_discharge_pct;
+  storage.max_cycles = source.max_cycles;
+  storage.current_cycles = source.current_cycles;
+  storage.soh = source.soh;
+  storage.l_calendar_yr = source.l_calendar_yr;
+  storage.eol_percent = source.eol_percent;
+  storage.replacement_cost = source.replacement_cost;
+  storage.e_mwh = source.e_mwh;
+  storage.profile_id = source.profile_id;
+  storage.controllable = source.controllable;
+  storage.charge_bid_price = source.charge_bid_price;
+  storage.discharge_bid_price = source.discharge_bid_price;
+  storage.daily_cycle_limit = source.daily_cycle_limit;
+  storage.forced_outage_rate = source.forced_outage_rate;
+  storage.mttr_hr = source.mttr_hr;
+  storage.t_scheduled_hr = source.t_scheduled_hr;
+  storage.cap_charging_strategy = source.cap_charging_strategy;
+  storage.cap_static_charging_mw = source.cap_static_charging_mw;
+  storage.dynamic_model = source.dynamic_model;
+  return storage;
+}
+
+// StaticGeneratorDC remains the persistent native DC type. Balanced PF uses
+// this deliberately lossy active-injection view; profile, technology and
+// reliability metadata remain owned by the rich source object.
+inline StaticGenerator dc_static_generator_pf_view(
+    const StaticGeneratorDC& source) {
+  StaticGenerator generator;
+  generator.index = source.index;
+  generator.bus = source.bus;
+  generator.in_service = source.in_service;
+  generator.name = source.name;
+  generator.p_mw = source.p_set_mw;
+  generator.scaling = source.scaling;
+  generator.pmax_mw = source.pmax_mw;
+  generator.pmin_mw = source.pmin_mw;
+  generator.co2_emission_rate = source.emission_factor_tco2_mwh;
+  generator.cost_c1 = source.cost_c1;
+  generator.controllable = source.controllable;
+  return generator;
+}
+
 inline void materialize_dc_storage(HybridPowerSystem& sys) {
   if (sys.dc.dc_storage.empty()) return;
   sys.dc.storage.reserve(sys.dc.storage.size() + sys.dc.dc_storage.size());
-  for (const auto& d : sys.dc.dc_storage) {
-    Storage st;
-    st.index = d.index;
-    st.bus = d.bus;
-    st.in_service = d.in_service;
-    st.name = d.name;
-    st.type = d.type;
-    st.p_mw = d.p_mw;
-    st.q_mvar = 0.0;
-    st.p_rated_mw = d.p_rated_mw;
-    st.pmax_mw = d.pmax_mw;
-    st.pmin_mw = d.pmin_mw;
-    st.qmax_mvar = 0.0;
-    st.qmin_mvar = 0.0;
-    st.e_rated_mwh = d.e_rated_mwh;
-    st.soc_init = d.soc_init;
-    st.soc_min = d.soc_min;
-    st.soc_max = d.soc_max;
-    st.soc_carbon_intensity_tco2_mwh = d.soc_carbon_intensity_tco2_mwh;
-    st.eta_charge = d.eta_charge;
-    st.eta_discharge = d.eta_discharge;
-    st.self_discharge_pct = d.self_discharge_pct;
-    st.max_cycles = d.max_cycles;
-    st.current_cycles = d.current_cycles;
-    st.soh = d.soh;
-    st.l_calendar_yr = d.l_calendar_yr;
-    st.eol_percent = d.eol_percent;
-    st.replacement_cost = d.replacement_cost;
-    st.e_mwh = d.e_mwh;
-    st.profile_id = d.profile_id;
-    st.controllable = d.controllable;
-    st.charge_bid_price = d.charge_bid_price;
-    st.discharge_bid_price = d.discharge_bid_price;
-    st.daily_cycle_limit = d.daily_cycle_limit;
-    st.forced_outage_rate = d.forced_outage_rate;
-    st.mttr_hr = d.mttr_hr;
-    st.t_scheduled_hr = d.t_scheduled_hr;
-    st.cap_charging_strategy = d.cap_charging_strategy;
-    st.cap_static_charging_mw = d.cap_static_charging_mw;
-    st.dynamic_model = d.dynamic_model;
-    sys.dc.storage.push_back(std::move(st));
+  for (const auto& source : sys.dc.dc_storage) {
+    sys.dc.storage.push_back(dc_storage_execution_view(source));
   }
   sys.dc.dc_storage.clear();
 }
