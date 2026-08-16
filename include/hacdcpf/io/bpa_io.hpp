@@ -48,6 +48,13 @@ enum class BpaLccModel {
   LccQuasiSteady = 1,
 };
 
+/// How fixed-column BPA/DSP branch reactances below DSP's numerical floor are
+/// represented during import. PreserveSource is intended for audits only.
+enum class BpaSmallReactanceMode {
+  DspCompatible = 0,
+  PreserveSource = 1,
+};
+
 /// Options controlling BPA/DSP import.
 struct BpaImportOptions {
   /// Strict rejects the import when any record is coerced / skipped;
@@ -80,6 +87,18 @@ BpaImportResult parse_bpa_dat(const std::string& filepath,
 /// Parse BPA/DSP card text held in memory (used by the REST import path).
 BpaImportResult parse_bpa_dat_string(const std::string& content,
                                      const BpaImportOptions& options = {});
+
+/// Parse with an explicit L/T small-reactance policy without changing the
+/// layout of BpaImportOptions. The two-argument overload above always uses
+/// DSP-compatible preprocessing.
+BpaImportResult parse_bpa_dat_string(const std::string& content,
+                                     const BpaImportOptions& options,
+                                     BpaSmallReactanceMode reactance_mode);
+
+/// File-path counterpart of the explicit small-reactance policy overload.
+BpaImportResult parse_bpa_dat(const std::string& filepath,
+                              const BpaImportOptions& options,
+                              BpaSmallReactanceMode reactance_mode);
 
 /// Export the BPA-representable steady-state subset as fixed-column card text.
 ///

@@ -840,9 +840,8 @@ GeneratorLimitData build_generator_limit_data(const SolverData& data,
 
   // Preserve every authored bus/branch, but identify equivalence classes of
   // BPA BQ controllers connected through DSP's 0.0001 pu short-link scale.
-  // Card order is relevant only when at least two controllers also have a
-  // non-short external connection and share voltage targets and Q limits;
-  // all other PV buses retain the generic severity rule.
+  // The group identity is diagnostic only: every controller still enters its
+  // own Q limit from its own converged implied-Q violation.
   constexpr double kBpaStrongLinkMaxPu = 1.01e-4;
   constexpr double kBpaControlEqualityTol = 1e-10;
   std::vector<int> parent(static_cast<size_t>(n));
@@ -1497,6 +1496,13 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
                     << " name=" << ac_buses[static_cast<size_t>(bus)].name
                     << " q=" << fixed_q << '\n';
         }
+        if (opt.enable_iteration_log) {
+          std::ostringstream trace;
+          trace << "[PF-PVPQ-TRACE] PV->fixed-PQ bus="
+                << ac_buses[static_cast<size_t>(bus)].name
+                << " q=" << fixed_q << " reason=zero_width_bq";
+          out.diagnostics.warnings.push_back(trace.str());
+        }
         ac_buses[static_cast<size_t>(bus)].bus_type = BusType::PQ;
         qg_state[bus] = fixed_q;
         bus_control[static_cast<size_t>(bus)] = BusControlState::BQFixedPQ;
@@ -1528,21 +1534,6 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
       if (mode != BusControlState::PVActive || !std::isfinite(qg_implied)) {
         continue;
       }
-      const int candidate_group =
-          gen_limits.bpa_strong_group[static_cast<size_t>(i)];
-      if (candidate_group >= 0) {
-        bool group_already_limited = false;
-        for (size_t pos = 0; pos < bus_control.size(); ++pos) {
-          const BusControlState state = bus_control[pos];
-          if (gen_limits.bpa_strong_group[pos] == candidate_group &&
-              state != BusControlState::PVActive &&
-              state != BusControlState::FixedPQ) {
-            group_already_limited = true;
-            break;
-          }
-        }
-        if (group_already_limited) continue;
-      }
       double violation = 0.0;
       double limited_q = 0.0;
       BusControlState candidate_state = BusControlState::FixedPQ;
@@ -1572,39 +1563,6 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
       }
     }
 
-    // Legacy BPA compatibility heuristic for equivalent controllers on very
-    // short station links. Once a group member violates in one direction,
-    // apply that limit to the still-active BQ with the latest source position.
-    // This is deliberately BPA-only and must not be interpreted as an
-    // identified DSP station-level allocation law.
-    if (selected_bus >= 0) {
-      const int group =
-          gen_limits.bpa_strong_group[static_cast<size_t>(selected_bus)];
-      if (group >= 0) {
-        int latest_bus = selected_bus;
-        int latest_order =
-            gen_limits.bpa_source_order[static_cast<size_t>(selected_bus)];
-        for (int i = 0; i < n; ++i) {
-          if (gen_limits.bpa_strong_group[static_cast<size_t>(i)] != group ||
-              bus_control[static_cast<size_t>(i)] !=
-                  BusControlState::PVActive) {
-            continue;
-          }
-          const int order =
-              gen_limits.bpa_source_order[static_cast<size_t>(i)];
-          if (order > latest_order) {
-            latest_bus = i;
-            latest_order = order;
-          }
-        }
-        selected_bus = latest_bus;
-        selected_q =
-            selected_state == BusControlState::PQLimitedMax
-                ? gen_limits.qmax_pu[static_cast<size_t>(selected_bus)]
-                : gen_limits.qmin_pu[static_cast<size_t>(selected_bus)];
-      }
-    }
-
     if (selected_bus >= 0) {
       if (opt.verbose) {
         std::cerr << "[PF-PVPQ] PV->PQ bus="
@@ -1617,6 +1575,19 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
                           : "Qmin")
                   << " q=" << selected_q
                   << " severity=" << selected_severity << '\n';
+      }
+      if (opt.enable_iteration_log) {
+        std::ostringstream trace;
+        trace << "[PF-PVPQ-TRACE] PV->PQ bus="
+              << ac_buses[static_cast<size_t>(selected_bus)].name
+              << " limit="
+              << (selected_state == BusControlState::PQLimitedMax ? "Qmax"
+                                                                    : "Qmin")
+              << " q=" << selected_q
+              << " severity=" << selected_severity
+              << " source_order="
+              << gen_limits.bpa_source_order[static_cast<size_t>(selected_bus)];
+        out.diagnostics.warnings.push_back(trace.str());
       }
       ac_buses[static_cast<size_t>(selected_bus)].bus_type = BusType::PQ;
       qg_state[selected_bus] = selected_q;
@@ -1668,7 +1639,14 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
                   << ac_buses[static_cast<size_t>(selected_bus)].index
                   << " name="
                   << ac_buses[static_cast<size_t>(selected_bus)].name
-                  << " voltage_violation=" << selected_violation << '\n';
+                    << " voltage_violation=" << selected_violation << '\n';
+      }
+      if (opt.enable_iteration_log) {
+        std::ostringstream trace;
+        trace << "[PF-PVPQ-TRACE] PQ->PV bus="
+              << ac_buses[static_cast<size_t>(selected_bus)].name
+              << " voltage_violation=" << selected_violation;
+        out.diagnostics.warnings.push_back(trace.str());
       }
       ac_buses[static_cast<size_t>(selected_bus)].bus_type = BusType::PV;
       vm[selected_bus] =

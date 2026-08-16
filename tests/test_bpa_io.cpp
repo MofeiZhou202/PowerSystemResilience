@@ -432,6 +432,39 @@ TEST_CASE("BPA import: line continuations and order-independent bus binding",
         }));
   }
 
+  SECTION("zero L-card reactance with other parameters uses the DSP floor") {
+    std::string line = card("L ", "BUS500A", "525.", "BUS500B", "525.");
+    line.replace(38, 6, ".0002");
+    line.replace(44, 6, "0.");
+    line.replace(56, 6, ".001");
+    const std::string content =
+        card("BS", "BUS500A", "525.") + "\n" +
+        card("B ", "BUS500B", "525.") + "\n" + line + "\n(END)\n";
+
+    const auto imported = hacdcpf::io::parse_bpa_dat_string(content);
+    REQUIRE_FALSE(imported.report.has_errors());
+    REQUIRE(imported.system.ac.branches.size() == 1);
+    REQUIRE_THAT(imported.system.ac.branches.front().x_pu,
+                 WithinAbs(0.0001, 1e-12));
+    CHECK_FALSE(imported.system.ac.branches.front().ideal_connectivity);
+    REQUIRE(std::any_of(
+        imported.report.records.begin(), imported.report.records.end(),
+        [](const auto& record) {
+          return record.disposition ==
+                     hacdcpf::io::ImportDisposition::Coerced &&
+                 record.reason_code ==
+                     hacdcpf::io::ImportReasonCode::RangeCoerced;
+        }));
+
+    hacdcpf::io::BpaImportOptions preserve_options;
+    const auto preserved = hacdcpf::io::parse_bpa_dat_string(
+        content, preserve_options,
+        hacdcpf::io::BpaSmallReactanceMode::PreserveSource);
+    REQUIRE_FALSE(preserved.report.has_errors());
+    REQUIRE_THAT(preserved.system.ac.branches.front().x_pu,
+                 WithinAbs(0.00001, 1e-12));
+  }
+
   SECTION("T-card impedance is referred to the second winding bus base") {
     std::string transformer =
         card("T ", "BUS230A", "230.", "BUS035B", "35.");
@@ -454,6 +487,39 @@ TEST_CASE("BPA import: line continuations and order-independent bus binding",
                  WithinAbs(0.06621 * ratio2 * ratio2, 1e-12));
     REQUIRE_THAT(imported.system.ac.branches.front().tap,
                  WithinAbs(1.0 / ratio2, 1e-12));
+  }
+
+  SECTION("T-card reactance below the DSP floor is coerced") {
+    std::string transformer =
+        card("T ", "BUS525A", "525.", "BUS525B", "525.");
+    transformer.replace(44, 6, ".00001");
+    const std::string content =
+        card("BS", "BUS525A", "525.") + "\n" +
+        card("B ", "BUS525B", "525.") + "\n" + transformer +
+        "\n(END)\n";
+
+    const auto imported = hacdcpf::io::parse_bpa_dat_string(content);
+    REQUIRE_FALSE(imported.report.has_errors());
+    REQUIRE(imported.system.ac.branches.size() == 1);
+    REQUIRE_THAT(imported.system.ac.branches.front().x_pu,
+                 WithinAbs(0.0001, 1e-12));
+    REQUIRE(std::any_of(
+        imported.report.records.begin(), imported.report.records.end(),
+        [](const auto& record) {
+          return record.disposition ==
+                     hacdcpf::io::ImportDisposition::Coerced &&
+                 record.reason_code ==
+                     hacdcpf::io::ImportReasonCode::RangeCoerced &&
+                 record.message.find("T-card reactance") != std::string::npos;
+        }));
+
+    hacdcpf::io::BpaImportOptions preserve_options;
+    const auto preserved = hacdcpf::io::parse_bpa_dat_string(
+        content, preserve_options,
+        hacdcpf::io::BpaSmallReactanceMode::PreserveSource);
+    REQUIRE_FALSE(preserved.report.has_errors());
+    REQUIRE_THAT(preserved.system.ac.branches.front().x_pu,
+                 WithinAbs(0.00001, 1e-12));
   }
 }
 

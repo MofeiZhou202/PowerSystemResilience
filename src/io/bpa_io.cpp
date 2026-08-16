@@ -386,9 +386,13 @@ struct PendingLineShunt {
 };
 
 struct Importer {
-  explicit Importer(const BpaImportOptions& opt) : options(opt) {}
+  explicit Importer(const BpaImportOptions& opt,
+                    BpaSmallReactanceMode reactance_mode)
+      : options(opt), small_reactance_mode(reactance_mode) {}
 
   BpaImportOptions options;
+  BpaSmallReactanceMode small_reactance_mode{
+      BpaSmallReactanceMode::DspCompatible};
   BpaImportResult result;
   bool names_need_gbk{false};
   double mva_base{100.0};
@@ -616,17 +620,6 @@ struct Importer {
     br.x_pu = num_rx(field(line, 45, 50), present);
     const double source_r_pu = br.r_pu;
     const double source_x_pu = br.x_pu;
-    if (std::abs(br.x_pu) > 0.0 &&
-        std::abs(br.x_pu) < kBpaMinLineReactancePu) {
-      const double source_x = br.x_pu;
-      br.x_pu = std::copysign(kBpaMinLineReactancePu, source_x);
-      std::ostringstream msg;
-      msg << "L-card reactance " << source_x
-          << " pu is below the DSP numerical floor; coerced to "
-          << br.x_pu << " pu.";
-      warn(ImportDisposition::Coerced, ImportReasonCode::RangeCoerced,
-           locator, msg.str());
-    }
     const double g_half = num_gb(field(line, 51, 56), present);
     const double b_half = num_gb(field(line, 57, 62), present);
     br.b_pu = 2.0 * b_half;  // card stores B/2 per side; model stores total.
@@ -645,13 +638,28 @@ struct Importer {
     if (n_par > 0.0) br.n_parallel = static_cast<int>(std::lround(n_par));
     const std::string ckt = field(line, 32, 32);
     br.name = "L_" + n1 + "_" + n2 + (ckt.empty() ? "" : "_" + ckt);
+    const bool ideal_source =
+        source_r_pu == 0.0 && source_x_pu == 0.0 && g_half == 0.0 &&
+        br.b_pu == 0.0 && br.length_km == 0.0 && br.rate_a_mva == 0.0;
+    if (small_reactance_mode == BpaSmallReactanceMode::DspCompatible &&
+        std::abs(br.x_pu) < kBpaMinLineReactancePu && !ideal_source) {
+      const double source_x = br.x_pu;
+      br.x_pu = source_x == 0.0
+                    ? kBpaMinLineReactancePu
+                    : std::copysign(kBpaMinLineReactancePu, source_x);
+      std::ostringstream msg;
+      msg << "L-card reactance " << source_x
+          << " pu is below the DSP numerical floor; coerced to "
+          << br.x_pu << " pu.";
+      warn(ImportDisposition::Coerced, ImportReasonCode::RangeCoerced,
+           locator, msg.str());
+    }
     // A BPA L card with no series/shunt/rating/length data is an ideal
     // connectivity relation. Preserve that source semantics explicitly so
     // canonical projection contracts it instead of injecting an arbitrary
-    // 1/x numerical coupling into Ybus. Nonzero values coerced to the DSP
+    // 1/x numerical coupling into Ybus. Non-ideal values coerced to the DSP
     // 1e-4 pu floor remain physical branches.
-    if (source_r_pu == 0.0 && source_x_pu == 0.0 && g_half == 0.0 &&
-        br.b_pu == 0.0 && br.length_km == 0.0 && br.rate_a_mva == 0.0) {
+    if (ideal_source) {
       br.ideal_connectivity = true;
       br.parameter_source = "bpa_dsp_ideal_connectivity";
     }
@@ -747,6 +755,19 @@ struct Importer {
     br.to_bus = ensure_ac_bus(n2, kv2, locator);
     br.r_pu = num_rx(field(line, 39, 44), present);
     br.x_pu = num_rx(field(line, 45, 50), present);
+    if (small_reactance_mode == BpaSmallReactanceMode::DspCompatible &&
+        std::abs(br.x_pu) < kBpaMinLineReactancePu) {
+      const double source_x = br.x_pu;
+      br.x_pu = source_x == 0.0
+                    ? kBpaMinLineReactancePu
+                    : std::copysign(kBpaMinLineReactancePu, source_x);
+      std::ostringstream msg;
+      msg << "T-card reactance " << source_x
+          << " pu is below the DSP numerical floor; coerced to "
+          << br.x_pu << " pu.";
+      warn(ImportDisposition::Coerced, ImportReasonCode::RangeCoerced,
+           locator, msg.str());
+    }
     const double g_exc = num_gb(field(line, 51, 56), present);
     const double b_exc = num_gb(field(line, 57, 62), present);
     if ((std::abs(g_exc) > 0.0 || std::abs(b_exc) > 0.0) &&
@@ -2319,13 +2340,27 @@ struct Importer {
 
 BpaImportResult parse_bpa_dat_string(const std::string& content,
                                      const BpaImportOptions& options) {
-  Importer imp(options);
+  return parse_bpa_dat_string(content, options,
+                              BpaSmallReactanceMode::DspCompatible);
+}
+
+BpaImportResult parse_bpa_dat_string(
+    const std::string& content, const BpaImportOptions& options,
+    BpaSmallReactanceMode reactance_mode) {
+  Importer imp(options, reactance_mode);
   imp.run(content);
   return std::move(imp.result);
 }
 
 BpaImportResult parse_bpa_dat(const std::string& filepath,
                               const BpaImportOptions& options) {
+  return parse_bpa_dat(filepath, options,
+                       BpaSmallReactanceMode::DspCompatible);
+}
+
+BpaImportResult parse_bpa_dat(const std::string& filepath,
+                              const BpaImportOptions& options,
+                              BpaSmallReactanceMode reactance_mode) {
   std::ifstream in(filepath, std::ios::binary);
   if (!in) {
     BpaImportResult res;
@@ -2335,7 +2370,8 @@ BpaImportResult parse_bpa_dat(const std::string& filepath,
   }
   std::ostringstream ss;
   ss << in.rdbuf();
-  BpaImportResult res = parse_bpa_dat_string(ss.str(), options);
+  BpaImportResult res =
+      parse_bpa_dat_string(ss.str(), options, reactance_mode);
   if (res.system.name == "BPA case") {
     // Fall back to the file stem; on a GBK-locale Windows host argv arrives
     // in the ANSI codepage, so re-encode to UTF-8 for the JSON output.

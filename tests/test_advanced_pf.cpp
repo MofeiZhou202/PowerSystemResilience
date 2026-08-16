@@ -230,8 +230,8 @@ static HybridPowerSystem build_strongly_coupled_pv_network() {
 
 // BPA BQ3 is connected to the grid and initially carries the group's Q
 // requirement; BQ4 is a later, otherwise equivalent card behind a 0.0001 pu
-// station link. When BQ4 also has an external branch, both cards participate
-// in DSP card-order compatibility. A dangling BQ4 must not displace BQ3.
+// station link. Card order is retained for diagnostics but must not reassign
+// BQ3's actual violation to BQ4.
 static HybridPowerSystem build_bpa_card_order_network(bool connect_bq4_externally) {
     HybridPowerSystem sys;
     sys.base_mva = 100.0;
@@ -882,7 +882,7 @@ TEST_CASE("PV/PQ conversion re-solves strongly coupled controls one at a time",
     CHECK(*std::min_element(r.vm.begin(), r.vm.end()) > 0.9);
 }
 
-TEST_CASE("BPA BQ strong groups use source card order without merging buses",
+TEST_CASE("BPA BQ strong groups limit the actually violated controller",
           "[advanced_pf][pvpq][bpa][regression]") {
     const auto sys = build_bpa_card_order_network(true);
     PowerFlowOptions opt;
@@ -896,10 +896,37 @@ TEST_CASE("BPA BQ strong groups use source card order without merging buses",
     REQUIRE(r.converged);
     CHECK(r.profiling.pv_to_pq_switches == 1);
     REQUIRE(r.vm.size() == 4);
-    CHECK(std::abs(r.vm[2] - 1.0) < 1e-9);
-    CHECK(std::abs(r.vm[3] - 1.0) > 1e-6);
+    CHECK(std::abs(r.vm[2] - 1.0) > 1e-6);
+    CHECK(std::abs(r.vm[3] - 1.0) < 1e-9);
     REQUIRE(r.branch_flows.size() == 4);
     CHECK(std::abs(r.branch_flows[2].qf_mvar) > 1.0);
+}
+
+TEST_CASE("BPA BQ strong groups do not hide a second member Q violation",
+          "[advanced_pf][pvpq][bpa][regression]") {
+    auto sys = build_bpa_card_order_network(true);
+    sys.ac.buses[2].qd_mvar = 50.0;
+    sys.ac.buses[3].qd_mvar = 50.0;
+    sys.ac.generators[1].qmin_mvar = -5.0;
+    sys.ac.generators[1].qmax_mvar = 5.0;
+    sys.ac.generators[2].qmin_mvar = -5.0;
+    sys.ac.generators[2].qmax_mvar = 5.0;
+
+    PowerFlowOptions opt;
+    opt.enable_pv_pq_conversion = true;
+    opt.pv_q_hysteresis_pu = 0.0;
+    opt.tol = 1e-10;
+    opt.max_iter = 80;
+
+    const auto r = solve_power_flow(sys, opt);
+
+    REQUIRE(r.converged);
+    CHECK(r.profiling.pv_to_pq_switches == 2);
+    CHECK(r.reactive_limits.certified);
+    CHECK(r.reactive_limits.max_violation_pu < 1e-10);
+    REQUIRE(r.vm.size() == 4);
+    CHECK(std::abs(r.vm[2] - 1.0) > 1e-5);
+    CHECK(std::abs(r.vm[3] - 1.0) > 1e-5);
 }
 
 TEST_CASE("BPA BQ card order excludes a controller with only a short station link",
