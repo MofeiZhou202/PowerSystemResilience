@@ -233,6 +233,16 @@ JacobianPattern build_jacobian_pattern(const SolverData& data, const JacobianCon
   pattern.matrix.setFromTriplets(triplets.begin(), triplets.end());
   pattern.matrix.makeCompressed();
   build_entry_to_nz(pattern);
+  pattern.row_nz.assign(static_cast<size_t>(ctx.nvar), {});
+  {
+    const int* outer = pattern.matrix.outerIndexPtr();
+    const int* inner = pattern.matrix.innerIndexPtr();
+    for (int col = 0; col < pattern.matrix.outerSize(); ++col) {
+      for (int nz = outer[col]; nz < outer[col + 1]; ++nz) {
+        pattern.row_nz[static_cast<size_t>(inner[nz])].push_back(nz);
+      }
+    }
+  }
 
   pattern.p_va_diag_nz.assign(static_cast<size_t>(ctx.n), -1);
   pattern.p_vm_diag_nz.assign(static_cast<size_t>(ctx.n), -1);

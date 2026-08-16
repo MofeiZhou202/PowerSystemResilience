@@ -47,6 +47,35 @@ sets; see Hintermueller, Ito, and Kunisch, *SIAM Journal on Optimization*,
 13(3), 2002. It is adapted here to the expensive sparse-pattern changes of AC
 power flow.
 
+## Fixed superset Jacobian layout
+
+`RobustNonlinearOptions::enable_fixed_pv_pq_layout` is an opt-in structural
+optimization for the same outer active-set policy. It allocates one voltage
+magnitude column and one reactive-balance row for every non-slack, non-reference
+AC bus, in stable canonical bus-position order. At each residual/Jacobian
+evaluation:
+
+- a currently active PV bus replaces its Q-balance row with
+  `Vset - Vm = 0` and an identity `Vm` column;
+- a Q-limited PQ bus retains the physical Q-balance row;
+- PV-to-PQ and the bounded restoration audit still happen only at a converged
+  outer point, so the certificate and switch semantics are unchanged.
+
+The stable bus-position order is part of the layout contract. Grouping current
+PV buses before current PQ buses would permute coordinates after a partial
+switch and would still invalidate symbolic analysis. The implementation
+precomputes compressed nonzero indices by row, so row replacement is
+`O(nnz(row))`; the symbolic pattern is built and analyzed once per solve. The
+option is mutually exclusive with semi-smooth NCP: when both are requested,
+NCP owns the Q-row equations and the fixed-layout request is ignored with an
+explicit diagnostic warning.
+
+The fixed layout is algebraically an embedding of each existing fixed-active-set
+Newton system, not a new Q-limit model. PV identity targets follow the current
+Newton voltage state: either the authored/caller initial value or the `Vg`
+installed by a PQ-to-PV restoration. This matches the value held outside the
+reduced system rather than silently changing the fixed-active-set equation.
+
 ## Ideal connectivity must be removed before switching
 
 Active-set safeguards cannot repair an inconsistent network representation.
@@ -120,13 +149,18 @@ T = Nfactor * Cfactor(pattern) + Nsolve * Ctriangular + Neval * Ceval.
 ```
 
 Preventing extra active-set batches matters more than making the scalar Q-limit
-test cheaper. On the Release `case6515rte` regression, fast screening used 4
-Newton iterations and 3 factorizations with a repeated-solve median of about
-21.2 ms. Certified Q-limit handling used 9 iterations, 8 factorizations, one
-74-bus PV-to-PQ batch, no restoration, no repeated active set, and a repeated-
-solve median of 50.6 ms in the latest five-repeat run. The certificate
-violation was `4.22e-11 pu`. These values are a local regression boundary, not
-a portable hardware guarantee.
+test cheaper. With ordinary reduced layouts, the Release/KLU `case6515rte`
+regression used 3 pattern rebuilds/analyses, 9 Newton iterations, 8
+factorizations, one 74-bus PV-to-PQ batch, no restoration, and a five-repeat
+median of `58.7 ms`. Enabling the fixed layout kept the same switch trajectory,
+iterations, factorizations, certificate, and final voltages while reducing the
+pattern rebuilds/analyses to `1/1` and the median to `40.9 ms` (`30%` lower).
+On generator-rich `case_ACTIVSg10k`, rebuilds/analyses fell `10/10 -> 1/1`
+with the same 26 iterations, 25 factorizations, 1151 entries, 40 restorations,
+and certified Q limit; the five-repeat median fell `261.1 -> 152.0 ms`
+(`42%`). Measurements used AppleClang 21 arm64 macOS, Release/KLU, at working
+tree `3cc92658373a`; they are a local regression boundary, not a portable
+hardware guarantee.
 
 The original `data/云南案例.json` has 4512 authored AC buses. Its legacy BPA
 encoding contains 587 provenance-recognized numerical ties, producing 585

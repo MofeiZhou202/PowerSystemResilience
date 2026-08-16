@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <vector>
 
 #include <Eigen/Core>
 #include <Eigen/Sparse>
@@ -73,6 +74,9 @@ class SchurBlockPreconditioner {
   Eigen::VectorXd apply(const Eigen::VectorXd& r) const;
 
   bool is_valid() const noexcept { return valid_; }
+  int symbolic_analysis_count() const noexcept {
+    return symbolic_analysis_count_;
+  }
 
  private:
   int n_ac_{0};  ///< np + nq
@@ -81,6 +85,11 @@ class SchurBlockPreconditioner {
   Eigen::SparseLU<Eigen::SparseMatrix<double>> lu_A_;  ///< Factor of AC block A
   Eigen::SparseLU<Eigen::SparseMatrix<double>> lu_D_;  ///< Factor of DC block D
   Eigen::SparseMatrix<double> B_;                      ///< AC-DC coupling block
+  std::vector<int> a_outer_;
+  std::vector<int> a_inner_;
+  std::vector<int> d_outer_;
+  std::vector<int> d_inner_;
+  int symbolic_analysis_count_{0};
 
   bool valid_{false};
 };
@@ -110,6 +119,7 @@ NKLinearResult newton_krylov_step(const Eigen::SparseMatrix<double>& jacobian,
                                    bool use_schur,
                                    int gmres_restart,
                                    int gmres_max_outer,
-                                   double gmres_tol);
+                                   double gmres_tol,
+                                   SchurBlockPreconditioner* schur_cache = nullptr);
 
 }  // namespace hacdcpf::powerflow

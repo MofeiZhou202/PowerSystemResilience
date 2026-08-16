@@ -806,6 +806,7 @@ TEST_CASE("Audit C1: PV-to-PQ switching does not hide a sub-hysteresis Q violati
   sys.ac.generators[1].qmax_mvar = qg_required_mvar - 0.5;
 
   PowerFlowOptions limited_options;
+  limited_options.robust_nonlinear.enable_fixed_pv_pq_layout = false;
   limited_options.enable_solver_profiling = true;
   const auto limited = solve_power_flow(sys, limited_options);
   REQUIRE(limited.converged);
@@ -824,6 +825,70 @@ TEST_CASE("Audit C1: PV-to-PQ switching does not hide a sub-hysteresis Q violati
   CHECK(limited.reactive_limits.active_limited_buses == 1);
   CHECK(limited.reactive_limits.max_violation_pu <= 1e-10);
   CHECK(limited.vm[1] < controlled.vg_pu);
+
+  PowerFlowOptions fixed_layout_options = limited_options;
+  fixed_layout_options.robust_nonlinear.enable_fixed_pv_pq_layout = true;
+  const auto fixed_layout = solve_power_flow(sys, fixed_layout_options);
+  REQUIRE(fixed_layout.converged);
+  CHECK(fixed_layout.reactive_limits.certified);
+  CHECK(fixed_layout.reactive_limits.active_limited_buses == 1);
+  CHECK(fixed_layout.profiling.pv_to_pq_switches >= 1);
+  CHECK(fixed_layout.profiling.jacobian_pattern_rebuilds == 1);
+  CHECK(limited.profiling.jacobian_pattern_rebuilds >= 2);
+  CHECK(fixed_layout.vm[1] == Approx(limited.vm[1]).margin(1e-8));
+  CHECK(fixed_layout.va[1] == Approx(limited.va[1]).margin(1e-8));
+
+  // A partial switch must not permute superset coordinates. The remaining PV
+  // bus sorts before/after the limited bus differently in a type-grouped
+  // layout, so this three-bus case detects dimension-only "fixed" patterns.
+  HybridPowerSystem multi_pv_sys = sys;
+  ACBus second_pv = pv;
+  second_pv.index = 3;
+  second_pv.pd_mw = 10.0;
+  second_pv.qd_mvar = 2.0;
+  multi_pv_sys.ac.buses.push_back(second_pv);
+  ACBranch second_line = line;
+  second_line.index = 2;
+  second_line.to_bus = 3;
+  multi_pv_sys.ac.branches.push_back(second_line);
+  Generator second_controlled = controlled;
+  second_controlled.index = 3;
+  second_controlled.bus = 3;
+  second_controlled.pg_mw = 10.0;
+  second_controlled.vg_pu = 1.02;
+  second_controlled.qmin_mvar = -500.0;
+  second_controlled.qmax_mvar = 500.0;
+  multi_pv_sys.ac.generators.push_back(second_controlled);
+
+  const auto multi_baseline =
+      solve_power_flow(multi_pv_sys, limited_options);
+  REQUIRE(multi_baseline.converged);
+  REQUIRE(multi_baseline.reactive_limits.certified);
+  CHECK(multi_baseline.reactive_limits.active_limited_buses == 1);
+  const auto multi_fixed =
+      solve_power_flow(multi_pv_sys, fixed_layout_options);
+  REQUIRE(multi_fixed.converged);
+  CHECK(multi_fixed.reactive_limits.certified);
+  CHECK(multi_fixed.reactive_limits.active_limited_buses == 1);
+  CHECK(multi_fixed.profiling.jacobian_pattern_rebuilds == 1);
+  CHECK(multi_fixed.profiling.jacobian_analyze_calls == 1);
+  CHECK(multi_baseline.profiling.jacobian_pattern_rebuilds >= 2);
+  CHECK(multi_fixed.vm[1] == Approx(multi_baseline.vm[1]).margin(1e-8));
+  CHECK(multi_fixed.va[1] == Approx(multi_baseline.va[1]).margin(1e-8));
+  CHECK(multi_fixed.vm[2] == Approx(multi_baseline.vm[2]).margin(1e-8));
+  CHECK(multi_fixed.va[2] == Approx(multi_baseline.va[2]).margin(1e-8));
+
+  // The Q certificate is bounded by the root accuracy: at a clamped bus its
+  // apparent Q-limit violation is the remaining Q-row mismatch.
+  PowerFlowOptions finite_accuracy_options = limited_options;
+  finite_accuracy_options.tol = 1e-3;
+  const auto finite_accuracy =
+      solve_power_flow(sys, finite_accuracy_options);
+  REQUIRE(finite_accuracy.converged);
+  CHECK(finite_accuracy.reactive_limits.certified);
+  CHECK(finite_accuracy.reactive_limits.max_violation_pu > 1e-10);
+  CHECK(finite_accuracy.reactive_limits.max_violation_pu <=
+        finite_accuracy_options.tol);
 
   PowerFlowOptions bounded_options = limited_options;
   bounded_options.pv_pq_max_outer_iterations = 1;
@@ -849,6 +914,19 @@ TEST_CASE("Audit C1: PV-to-PQ switching does not hide a sub-hysteresis Q violati
   CHECK(smooth.reactive_limits.enforcement_requested);
   CHECK(smooth.reactive_limits.certified);
   CHECK(smooth.reactive_limits.max_violation_pu <= 1e-10);
+
+  PowerFlowOptions conflicting_options = smooth_options;
+  conflicting_options.robust_nonlinear.enable_fixed_pv_pq_layout = true;
+  const auto conflicting = solve_power_flow(sys, conflicting_options);
+  REQUIRE(conflicting.converged);
+  CHECK(conflicting.reactive_limits.certified);
+  CHECK(conflicting.vm[1] == Approx(smooth.vm[1]).margin(1e-10));
+  CHECK(std::any_of(conflicting.diagnostics.warnings.begin(),
+                    conflicting.diagnostics.warnings.end(),
+                    [](const std::string& warning) {
+                      return warning.find("PF-JAC-SUPERSET-01") !=
+                             std::string::npos;
+                    }));
 }
 
 TEST_CASE("Audit C1b: disabled Q-limit enforcement is explicit and uncertified",
@@ -2177,6 +2255,81 @@ TEST_CASE("Audit D8: standalone DC Newton includes voltage-dependent injections"
   REQUIRE(result.vdc.size() == 2);
   // At V2=1: mismatch=0.1 and d(calc-spec)/dV2=10-(-2)=12.
   CHECK(result.vdc[1] == Approx(1.0 + 0.1 / 12.0).margin(1e-9));
+}
+
+TEST_CASE("Audit D8b: standalone DC analytic Jacobian matches finite difference",
+          "[power_flow][math_audit][D8]") {
+  hacdcpf::powerflow::SolverData data;
+  data.base_mva = 100.0;
+  DCBus reference;
+  reference.index = 1;
+  reference.bus_type = DCBusType::DC_V;
+  reference.vm_pu = 1.0;
+  reference.in_service = true;
+  DCBus bus2 = reference;
+  bus2.index = 2;
+  bus2.bus_type = DCBusType::DC_P;
+  DCBus bus3 = bus2;
+  bus3.index = 3;
+  data.dc_buses = {reference, bus2, bus3};
+  DCBranch branch12;
+  branch12.index = 1;
+  branch12.from_bus = 1;
+  branch12.to_bus = 2;
+  branch12.r_pu = 0.1;
+  branch12.in_service = true;
+  DCBranch branch23 = branch12;
+  branch23.index = 2;
+  branch23.from_bus = 2;
+  branch23.to_bus = 3;
+  branch23.r_pu = 0.2;
+  data.dc_branches = {branch12, branch23};
+  data.gdc = hacdcpf::powerflow::build_dc_conductance(data);
+
+  DCDCConverter converter;
+  converter.index = 1;
+  converter.bus_in = 2;
+  converter.bus_out = 3;
+  converter.control_mode = DCDCControlMode::Droop;
+  converter.p_ref_mw = 8.0;
+  converter.v_ref_pu = 1.0;
+  converter.k_droop = 1.7;
+  converter.eta = 0.96;
+  converter.r_eq_pu = 0.015;
+  converter.in_service = true;
+  data.dcdc_converters = {converter};
+
+  const Eigen::VectorXd vm;
+  const Eigen::VectorXd va;
+  Eigen::VectorXd vdc(3);
+  vdc << 1.0, 0.97, 1.03;
+  const std::vector<int> non_slack{1, 2};
+  const Eigen::MatrixXd analytic = Eigen::MatrixXd(
+      hacdcpf::powerflow::build_dc_newton_jacobian(
+          data, vm, va, vdc, non_slack));
+
+  auto calc_minus_spec = [&](const Eigen::VectorXd& voltage) {
+    Eigen::VectorXd spec = Eigen::VectorXd::Zero(3);
+    hacdcpf::powerflow::assemble_dc_injections(
+        data, vm, va, voltage, spec);
+    const Eigen::VectorXd calc =
+        voltage.array() * (data.gdc * voltage).array();
+    Eigen::VectorXd reduced(2);
+    reduced << calc[1] - spec[1], calc[2] - spec[2];
+    return reduced;
+  };
+  Eigen::MatrixXd finite_difference(2, 2);
+  for (int col = 0; col < 2; ++col) {
+    const int bus = non_slack[static_cast<size_t>(col)];
+    const double h = 1e-6;
+    Eigen::VectorXd plus = vdc;
+    Eigen::VectorXd minus = vdc;
+    plus[bus] += h;
+    minus[bus] -= h;
+    finite_difference.col(col) =
+        (calc_minus_spec(plus) - calc_minus_spec(minus)) / (2.0 * h);
+  }
+  CHECK((analytic - finite_difference).cwiseAbs().maxCoeff() < 1e-6);
 }
 
 TEST_CASE("Audit D11: three-phase PV generator voltage setpoint is enforced",

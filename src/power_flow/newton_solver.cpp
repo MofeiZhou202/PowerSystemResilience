@@ -564,12 +564,40 @@ double estimate_condition_proxy(const Eigen::SparseMatrix<double>& j) {
   return (row_max / row_min) * (col_max / col_min);
 }
 
+double normwise_backward_error(const Eigen::SparseMatrix<double>& matrix,
+                               const Eigen::VectorXd& rhs,
+                               const Eigen::VectorXd& solution) {
+  if (!solution.allFinite()) return kInf;
+  Eigen::VectorXd row_sum = Eigen::VectorXd::Zero(matrix.rows());
+  for (int col = 0; col < matrix.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(matrix, col); it; ++it) {
+      row_sum[it.row()] += std::abs(it.value());
+    }
+  }
+  const double matrix_inf =
+      row_sum.size() == 0 ? 0.0 : row_sum.maxCoeff();
+  const double rhs_inf =
+      rhs.size() == 0 ? 0.0 : rhs.cwiseAbs().maxCoeff();
+  const double solution_inf =
+      solution.size() == 0 ? 0.0 : solution.cwiseAbs().maxCoeff();
+  const double residual_inf =
+      rhs.size() == 0
+          ? 0.0
+          : (rhs - matrix * solution).cwiseAbs().maxCoeff();
+  // Higham (2002), Accuracy and Stability of Numerical Algorithms, sec. 7.1:
+  // normwise relative backward error for Ax=b.
+  const double denominator = matrix_inf * solution_inf + rhs_inf;
+  return denominator > 0.0 ? residual_inf / denominator : residual_inf;
+}
+
 JacobianContext build_jacobian_context(const std::vector<ACBus>& ac_buses,
                                        int ndc,
                                        int slack,
                                        const std::vector<int>& dc_slacks,
                                        const SolverData* data = nullptr,
-                                       const std::vector<VSCConverter>* converters_ptr = nullptr) {
+                                       const std::vector<VSCConverter>* converters_ptr = nullptr,
+                                       bool fixed_pv_pq_layout = false,
+                                       const Eigen::VectorXd* vm_state = nullptr) {
   JacobianContext jac_ctx;
   const int n = static_cast<int>(ac_buses.size());
 
@@ -634,6 +662,28 @@ JacobianContext build_jacobian_context(const std::vector<ACBus>& ac_buses,
     pv.clear();
   }
 
+  // Fixed superset layout (MATPOWER active-set Newton; Hintermüller, Ito &
+  // Kunisch 2002): reserve a Vm/Q coordinate for every non-slack bus, then
+  // switch only the row equation between Q-balance and Vm-setpoint identity.
+  // NCP owns the same row semantics, so the two formulations are exclusive.
+  if (fixed_pv_pq_layout &&
+      (data == nullptr || !data->enable_semi_smooth_newton)) {
+    // The coordinate order must also be independent of the active set. A
+    // current-PV-then-current-PQ order has fixed dimensions but still
+    // permutes rows/columns after a partial PV-to-PQ switch, invalidating the
+    // symbolic factorization. Stable SolverData bus positions are the
+    // structure key for this solve.
+    pq.clear();
+    for (int bus = 0; bus < n; ++bus) {
+      if (bus != slack &&
+          ac_buses[static_cast<size_t>(bus)].bus_type != BusType::SLACK) {
+        pq.push_back(bus);
+      }
+    }
+    pv.clear();
+    jac_ctx.fixed_pv_pq_layout = true;
+  }
+
   non_slack = pv;
   non_slack.insert(non_slack.end(), pq.begin(), pq.end());
 
@@ -695,6 +745,26 @@ JacobianContext build_jacobian_context(const std::vector<ACBus>& ac_buses,
   jac_ctx.va_col = std::move(va_col);
   jac_ctx.vm_col = std::move(vm_col);
   jac_ctx.vdc_col = std::move(vdc_col);
+
+  if (jac_ctx.fixed_pv_pq_layout) {
+    for (int bus : jac_ctx.pq) {
+      if (ac_buses[static_cast<size_t>(bus)].bus_type != BusType::PV) {
+        continue;
+      }
+      jac_ctx.fixed_pv_buses.push_back(bus);
+      // Match the reduced active-set Newton exactly: a PV bus has no Vm
+      // coordinate there, so its current Vm remains fixed. This includes a
+      // caller-supplied initial state and the Vg value installed by a PQ-to-PV
+      // restoration. The superset formulation must not solve a different
+      // fixed-active-set equation.
+      const bool has_vm_state =
+          vm_state != nullptr &&
+          static_cast<Eigen::Index>(bus) < vm_state->size();
+      jac_ctx.fixed_pv_targets.push_back(
+          has_vm_state ? (*vm_state)[bus]
+                       : ac_buses[static_cast<size_t>(bus)].vm_pu);
+    }
+  }
 
   // NCP bus data (Direction 3): record limits and setpoints for NCP-handled PV buses.
   if (data != nullptr && data->enable_semi_smooth_newton && !ncp_pv_buses.empty()) {
@@ -758,7 +828,7 @@ bool same_context_layout(const JacobianContext& a, const JacobianContext& b) {
          a.nvar == b.nvar && a.non_slack == b.non_slack && a.pq == b.pq &&
          a.dc_non_slack == b.dc_non_slack && a.p_row == b.p_row && a.q_row == b.q_row &&
          a.dc_row == b.dc_row && a.va_col == b.va_col && a.vm_col == b.vm_col &&
-         a.vdc_col == b.vdc_col;
+         a.vdc_col == b.vdc_col && a.fixed_pv_pq_layout == b.fixed_pv_pq_layout;
 }
 
 struct GeneratorLimitData {
@@ -897,7 +967,21 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
                                     const PowerFlowOptions& opt,
                                     const InitialState* init) const {
   using Clock = std::chrono::steady_clock;
+  const auto core_start = Clock::now();
   PowerFlowResult out;
+  const auto finish_core_profiling = [&]() {
+    out.profiling.solver_core_ms_total =
+        std::chrono::duration<double, std::milli>(Clock::now() - core_start)
+            .count();
+    const double classified = out.profiling.eval_jacobian_ms_total +
+                              out.profiling.linear_solve_ms_total +
+                              out.profiling.line_search_ms_total +
+                              out.profiling.residual_evaluation_ms_total +
+                              out.profiling.scaling_ms_total +
+                              out.profiling.active_set_scan_ms_total;
+    out.profiling.unclassified_core_ms_total =
+        std::max(0.0, out.profiling.solver_core_ms_total - classified);
+  };
   const auto& ropts = opt.robust_nonlinear;
 
   const bool has_vdc_vac = std::any_of(
@@ -964,6 +1048,7 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
 
   if (n == 0 && ndc == 0) {
     out.converged = true;
+    finish_core_profiling();
     return out;
   }
 
@@ -1033,7 +1118,16 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
   }
   out.diagnostics.promoted_vsc_indices = dc_plan.promoted_converter_idx;
   for (auto& w : dc_plan.warnings) out.diagnostics.warnings.push_back(std::move(w));
-  JacobianContext jac_ctx = build_jacobian_context(ac_buses, ndc, slack, dc_slacks, &data, &converters);
+  const bool fixed_pv_pq_layout =
+      ropts.enable_fixed_pv_pq_layout && !data.enable_semi_smooth_newton;
+  if (ropts.enable_fixed_pv_pq_layout && data.enable_semi_smooth_newton) {
+    out.diagnostics.warnings.push_back(
+        "[PF-JAC-SUPERSET-01] Fixed PV/PQ layout was ignored because "
+        "semi-smooth NCP owns the same Q-row equations.");
+  }
+  JacobianContext jac_ctx = build_jacobian_context(
+      ac_buses, ndc, slack, dc_slacks, &data, &converters,
+      fixed_pv_pq_layout, &vm);
   jac_ctx.min_vm_pu = opt.robust_nonlinear.min_vm_pu;
   if (jac_ctx.nvar == 0) {
     out.converged = true;
@@ -1045,6 +1139,7 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
       out.vdc[static_cast<size_t>(i)] = vdc[i];
     }
     out.diagnostics.effective_converters = converters;
+    finish_core_profiling();
     return out;
   }
 
@@ -1153,7 +1248,10 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
     cache_.ctx = jac_ctx;
     cache_.pattern = build_jacobian_pattern(data, cache_.ctx);
     cache_.solver = make_default_sparse_solver();
+    cache_.schur_preconditioner =
+        std::make_unique<powerflow::SchurBlockPreconditioner>();
     cache_.solver->analyze_pattern(cache_.pattern.matrix);
+    cache_.has_numeric_factorization = false;
     cache_.pattern.analyzed = true;
     out.profiling.jacobian_pattern_rebuilds += 1;
     out.profiling.jacobian_analyze_calls += 1;
@@ -1273,14 +1371,44 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
     if (sparse_solver == nullptr) {
       return false;
     }
+    if (ropts.enable_klu_numeric_refactor &&
+        cache_.has_numeric_factorization &&
+        sparse_solver->supports_numeric_refactor()) {
+      out.profiling.numeric_refactor_attempts += 1;
+      out.profiling.factorization_calls += 1;
+      if (sparse_solver->refactorize(jac)) {
+        out.profiling.linear_solve_calls += 1;
+        const bool refactor_solved =
+            sparse_solver->solve(rhs, direction) && direction.allFinite();
+        const double backward_error =
+            refactor_solved ? normwise_backward_error(jac, rhs, direction)
+                            : kInf;
+        out.profiling.max_refactor_backward_error = std::max(
+            out.profiling.max_refactor_backward_error, backward_error);
+        if (refactor_solved &&
+            backward_error <=
+                std::max(0.0, ropts.refactor_backward_error_tolerance)) {
+          out.profiling.numeric_refactor_accepted += 1;
+          out.profiling.linear_solver_status = "klu_refactor_ok";
+          elapsed_ms = std::chrono::duration<double, std::milli>(
+                           Clock::now() - t0)
+                           .count();
+          return true;
+        }
+      }
+      out.profiling.numeric_refactor_fallbacks += 1;
+    }
+
     out.profiling.factorization_calls += 1;
     if (!sparse_solver->factorize(jac)) {
+      cache_.has_numeric_factorization = false;
       out.profiling.linear_solver_status = "factorization_failed";
       auto t1 = Clock::now();
       elapsed_ms = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(t1 - t0)
                        .count();
       return false;
     }
+    cache_.has_numeric_factorization = true;
     out.profiling.linear_solve_calls += 1;
     const bool ok = sparse_solver->solve(rhs, direction) && direction.allFinite();
     out.profiling.linear_solver_status = ok ? "ok" : "solve_failed";
@@ -1307,7 +1435,7 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
     powerflow::NKLinearResult nk = powerflow::newton_krylov_step(
         jac, rhs, jac_ctx,
         ropts.enable_schur_preconditioner,
-        restart, max_outer, tol);
+        restart, max_outer, tol, cache_.schur_preconditioner.get());
 
     auto t1 = Clock::now();
     elapsed_ms =
@@ -1342,6 +1470,7 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
   // allow_restore=true: also PQ→PV restoration (post-convergence only).
   auto check_q_limits_and_switch = [&](bool allow_restore,
                                        double entry_margin_pu) -> bool {
+    const auto scan_start = Clock::now();
     bool any_switched = false;
     const double q_hys = std::max(0.0, opt.pv_q_hysteresis_pu);
     const double vm_tol = std::max(0.0, opt.pv_recover_vm_tol_pu);
@@ -1403,6 +1532,9 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
         }
       }
     }
+    out.profiling.active_set_scan_ms_total +=
+        std::chrono::duration<double, std::milli>(Clock::now() - scan_start)
+            .count();
     return any_switched;
   };
 
@@ -1417,6 +1549,13 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
   double prev_resid = kInf;
   double prev_ncp_resid = kInf;
   double resid_ncp_initial = -1.0;
+  // Stagnation anchor: the best convergence residual and the inner iteration
+  // at which it last improved by >= stagnation_min_rel_improvement.  Reset to
+  // kInf whenever the nonlinear equations change (outer active-set loop, NCP
+  // mu reduction, converter mode switch) so a plateau is only declared against
+  // a fixed equation set.
+  double stag_anchor_resid = kInf;
+  int stag_anchor_iter = 0;
   const bool smooth_ncp_active = smooth_ncp_data != nullptr;
   const double ncp_mu_min = std::max(0.0, ropts.ncp_mu_min);
   auto reduce_ncp_mu = [&](double requested_factor) {
@@ -1431,6 +1570,9 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
     if (smooth_ncp_data->ncp_mu < old_mu) {
       out.profiling.smooth_ncp_continuation_updates += 1;
       out.profiling.smooth_ncp_final_mu = smooth_ncp_data->ncp_mu;
+      // The smoothed equations changed; a stagnation plateau measured against
+      // the previous mu level is no longer meaningful.
+      stag_anchor_resid = kInf;
       return true;
     }
     return false;
@@ -1440,7 +1582,9 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
   for (; outer < max_outer_loops; ++outer) {
     out.profiling.pv_pq_outer_iterations = outer + 1;
     // Rebuild Jacobian context for current bus types.
-    jac_ctx = build_jacobian_context(ac_buses, ndc, slack, dc_slacks, &data, &converters);
+    jac_ctx = build_jacobian_context(
+        ac_buses, ndc, slack, dc_slacks, &data, &converters,
+        fixed_pv_pq_layout, &vm);
     resize_for_context();
     ensure_pattern();
 
@@ -1468,6 +1612,8 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
     // Inner Newton loop — solve with fixed bus types.
     bool inner_converged = false;
     bool inner_failed = false;
+    stag_anchor_resid = kInf;
+    stag_anchor_iter = 0;
     int inner_iters = 0;
     for (; inner_iters < opt.max_iter; ++inner_iters) {
       if (!skip_vac_enforcement) {
@@ -1510,6 +1656,7 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
       out.iterations = total_iters + inner_iters + 1;
       out.residual = resid;
 
+      const auto scaling_start = Clock::now();
       const auto scaling = powerflow::build_nonlinear_scaling(jac_ctx,
                                                                data,
                                                                p_spec,
@@ -1540,6 +1687,9 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
       const Eigen::SparseMatrix<double> jac_for_linear =
           use_scaled_linear_system ? scaling.apply_jacobian_scaling(cache_.pattern.matrix)
                                    : cache_.pattern.matrix;
+      out.profiling.scaling_ms_total +=
+          std::chrono::duration<double, std::milli>(Clock::now() - scaling_start)
+              .count();
       const Eigen::VectorXd& rhs_for_linear =
           use_scaled_linear_system ? mismatch_scaled : mismatch;
 
@@ -1569,6 +1719,9 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
                                          out.profiling,
                                          promotion_lock)) {
         if (!skip_vac_enforcement) enforce_vac_setpoints(converters, vm);
+        // Converter mode switching changes the equations; restart the
+        // stagnation plateau measurement.
+        stag_anchor_resid = kInf;
         continue;
       }
 
@@ -1603,6 +1756,45 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
         if (reduce_ncp_mu(mu_factor)) {
           prev_ncp_resid = convergence_resid;
           continue;
+        }
+      }
+
+      // ── Stagnation detection: honest early exit ─────────────────────
+      // Dennis & Schnabel (1996), sec. 6.3.2: lack of progress is a global
+      // termination signal, but it is not a local convergence test. Screen
+      // only high-residual plateaus; near-root damped progress still receives
+      // the caller's full iteration budget.
+      if (ropts.enable_stagnation_detection &&
+          opt.globalization == GS::LineSearch) {
+        const double stagnation_threshold =
+            std::max(opt.tol, ropts.stagnation_residual_threshold);
+        const double minimum_improvement =
+            std::clamp(ropts.stagnation_min_rel_improvement, 1e-6, 0.99);
+        if (convergence_resid <= stagnation_threshold) {
+          stag_anchor_resid = kInf;
+          stag_anchor_iter = inner_iters;
+        } else if (convergence_resid <
+                   stag_anchor_resid * (1.0 - minimum_improvement)) {
+          stag_anchor_resid = convergence_resid;
+          stag_anchor_iter = inner_iters;
+        } else if (inner_iters - stag_anchor_iter >=
+                   std::max(1, ropts.stagnation_window)) {
+          if (!out.profiling.stagnation_detected) {
+            out.profiling.stagnation_detected = true;
+            out.profiling.stagnation_exit_iteration = out.iterations;
+            out.diagnostics.warnings.push_back(
+                "[PF-STAGNATION-01] Newton residual stalled at " +
+                std::to_string(convergence_resid) + " (best " +
+                std::to_string(stag_anchor_resid) + " did not improve by " +
+                std::to_string(100.0 * minimum_improvement) +
+                "% over " + std::to_string(ropts.stagnation_window) +
+                " iterations above residual threshold " +
+                std::to_string(stagnation_threshold) +
+                "); stopping early instead of exhausting the "
+                "iteration budget. Consider a better initial state or "
+                "enable_homotopy_fallback_on_failure.");
+          }
+          break;
         }
       }
 
@@ -1783,18 +1975,38 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
           ropts.enable_auto_fallback_scheduling) {
         // ── LM recovery step ────────────────────────────────────────────
         if (!accepted_step && ropts.enable_lm_trust_region_fallback) {
-          double lm_lambda = ropts.lm_lambda0;
+          // Nocedal & Wright (2006), sec. 10.3: the LM normal equations are
+          // (J^T J + lambda I) dx = J^T(-F). J^T J generally has a denser
+          // pattern than J, so it must not be factorized through cache_.solver,
+          // whose symbolic analysis was computed for J's pattern. Use a
+          // dedicated solver; the pattern is identical across the lambda
+          // attempts, so analyze once here and only
+          // refactorize per attempt.
+          const double lm_lambda_min = std::max(1e-16, ropts.lm_lambda_min);
+          const double lm_lambda_max =
+              std::max(lm_lambda_min, ropts.lm_lambda_max);
+          double lm_lambda =
+              std::clamp(ropts.lm_lambda0, lm_lambda_min, lm_lambda_max);
+          auto lm_solver = make_default_sparse_solver();
+          Eigen::SparseMatrix<double> JtJ =
+              (jac_for_linear.transpose() * jac_for_linear).pruned(0.0);
+          JtJ.diagonal().array() += lm_lambda;
+          const Eigen::VectorXd lm_rhs =
+              jac_for_linear.transpose() * rhs_for_linear;
+          if (lm_solver) {
+            lm_solver->analyze_pattern(JtJ);
+            out.profiling.jacobian_analyze_calls += 1;
+          }
           for (int lm_attempt = 0; lm_attempt < 4 && !accepted_step; ++lm_attempt) {
-            // Form JᵀJ + λI (normal equations with Tikhonov regularisation).
-            Eigen::SparseMatrix<double> JtJ =
-                (jac_for_linear.transpose() * jac_for_linear).pruned(0.0);
-            JtJ.diagonal().array() += lm_lambda;
-            // J stores -F', so J^T F is the negative merit gradient.
-            const Eigen::VectorXd lm_rhs =
-                jac_for_linear.transpose() * rhs_for_linear;
+            const auto lm_t0 = Clock::now();
             Eigen::VectorXd lm_dx;
-            if (cache_.solver->factorize(JtJ) &&
-                cache_.solver->solve(lm_rhs, lm_dx) && lm_dx.allFinite()) {
+            out.profiling.factorization_calls += 1;
+            const bool lm_factorized = lm_solver && lm_solver->factorize(JtJ);
+            if (lm_factorized) {
+              out.profiling.linear_solve_calls += 1;
+            }
+            if (lm_factorized && lm_solver->solve(lm_rhs, lm_dx) &&
+                lm_dx.allFinite()) {
               if (use_scaled_linear_system) {
                 lm_dx = scaling.unscale_step(lm_dx);
               }
@@ -1808,7 +2020,15 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
                 out.profiling.linear_solver_status = "lm_recovery";
               }
             }
-            lm_lambda = std::min(lm_lambda * 10.0, ropts.lm_lambda_max);
+            const auto lm_t1 = Clock::now();
+            linear_ms_this_iter +=
+                std::chrono::duration_cast<
+                    std::chrono::duration<double, std::milli>>(lm_t1 - lm_t0)
+                    .count();
+            const double next_lambda =
+                std::min(lm_lambda * 10.0, lm_lambda_max);
+            JtJ.diagonal().array() += next_lambda - lm_lambda;
+            lm_lambda = next_lambda;
           }
         }
         // ── PTC recovery step ────────────────────────────────────────────
@@ -1932,6 +2152,7 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
   }
 
   if (!skip_vac_enforcement) enforce_vac_setpoints(converters, vm);
+  const auto final_residual_start = Clock::now();
   out.residual = evaluate_residual_only(data,
                                         jac_ctx,
                                         ac_buses,
@@ -1951,6 +2172,9 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
                                         mismatch,
                                         cache_.pattern,
                                         out.profiling.ac_eval_threads);
+  out.profiling.residual_evaluation_ms_total +=
+      std::chrono::duration<double, std::milli>(Clock::now() - final_residual_start)
+          .count();
   out.profiling.raw_residual_norm = out.residual;
   {
     const auto scaling = powerflow::build_nonlinear_scaling(jac_ctx,
@@ -1998,8 +2222,15 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
       out.reactive_limits.active_limited_buses += 1;
     }
   }
+  // Higham (2002), sec. 1.6: a posteriori acceptance cannot claim accuracy
+  // stricter than the computed root. At a PQ-limited bus the implied-Qg
+  // violation is identically that bus's
+  // Q-row mismatch, which a fixed-active-set Newton solve only resolves to
+  // opt.tol.  A certificate threshold tighter than opt.tol therefore
+  // decertifies converged roots whose largest mismatch happens to sit on a
+  // limited bus; the certificate accuracy is the solve accuracy.
   const double q_certificate_tolerance =
-      std::max(1e-10, 10.0 * std::numeric_limits<double>::epsilon());
+      std::max({1e-10, 10.0 * std::numeric_limits<double>::epsilon(), opt.tol});
   out.reactive_limits.certified =
       out.reactive_limits.enforcement_requested && out.converged &&
       !out.reactive_limits.outer_iteration_limit_reached &&
@@ -2047,6 +2278,7 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
   // powers consistent with the solved network state.
   out.diagnostics.effective_converters = converters;
 
+  finish_core_profiling();
   return out;
 }
 

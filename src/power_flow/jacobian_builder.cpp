@@ -32,6 +32,7 @@ void build_power_spec(const SolverData& data,
                       const Eigen::VectorXd& va,
                       const Eigen::VectorXd& vdc,
                       const Eigen::VectorXd& pcalc,
+                      double min_vm_pu,
                       Eigen::VectorXd& p_spec,
                       Eigen::VectorXd& q_spec,
                       Eigen::VectorXd& pdc_spec) {
@@ -166,7 +167,7 @@ void build_power_spec(const SolverData& data,
             converter_loss(conv, p_ac, vdc_bus, data.base_mva, data.loss_model);
         double pdc = -(p_ac + ploss);
         if (conv.r_conv_ac_pu > 0.0) {
-          const double vm_ac = std::max(vm[ac_bus], 0.1);
+          const double vm_ac = std::max(std::abs(vm[ac_bus]), min_vm_pu);
           pdc -= conv.r_conv_ac_pu * p_ac * p_ac / (vm_ac * vm_ac);
         }
         pdc_spec[dc_bus] += pdc;
@@ -300,7 +301,8 @@ double evaluate_residual_impl(const SolverData& data,
     }
   }
 
-  build_power_spec(data, ac_buses, converters, pg, qg, vm, va, vdc, pcalc, p_spec, q_spec, pdc_spec);
+  build_power_spec(data, ac_buses, converters, pg, qg, vm, va, vdc, pcalc,
+                   ctx.min_vm_pu, p_spec, q_spec, pdc_spec);
 
   pdc_linear = data.gdc * vdc;
   pdc_calc = vdc.array() * pdc_linear.array();
@@ -321,7 +323,8 @@ double evaluate_residual_impl(const SolverData& data,
       const auto [dloss_dp, dloss_dvdc] = converter_loss_jacobian(
           conv, p_ac, vdc[ge.dc_bus], data.base_mva, data.loss_model);
       (void)dloss_dvdc;
-      const double vm_ac = std::max(vm[ge.ac_bus], 0.1);
+      const double vm_ac =
+          std::max(std::abs(vm[ge.ac_bus]), ctx.min_vm_pu);
       const double conduit_factor =
           1.0 + dloss_dp +
           2.0 * conv.r_conv_ac_pu * p_ac / (vm_ac * vm_ac);
@@ -469,6 +472,29 @@ double evaluate_residual_impl(const SolverData& data,
     mismatch[ctx.np + ctx.nq + row] = pdc_spec[i] - pdc_calc[i];
   }
 
+  // Superset active-set formulation: all non-slack buses retain Vm/Q
+  // coordinates. A PV bus replaces its Q-balance row with Vm = Vset; a
+  // Q-limited bus is typed PQ and therefore retains the physical Q row.
+  // This is algebraically the same fixed-active-set system embedded in a
+  // pattern that does not change when the active set changes.
+  if (ctx.fixed_pv_pq_layout) {
+    for (size_t k = 0; k < ctx.fixed_pv_buses.size(); ++k) {
+      const int bus = ctx.fixed_pv_buses[k];
+      const int q_row = ctx.q_row[static_cast<size_t>(bus)];
+      if (q_row < 0) continue;
+      mismatch[q_row] = ctx.fixed_pv_targets[k] - vm[bus];
+      if (build_jacobian && values != nullptr) {
+        for (int nz : pattern.row_nz[static_cast<size_t>(q_row)]) {
+          values[nz] = 0.0;
+        }
+        const int diag_nz = pattern.q_vm_diag_nz[static_cast<size_t>(bus)];
+        if (diag_nz >= 0) {
+          values[diag_nz] = 1.0;
+        }
+      }
+    }
+  }
+
   // Augmented equations (Direction 2): override selected Q/DC rows.
   if (data.enable_augmented_equations) {
     for (size_t k = 0; k < ctx.augmented_q_buses.size(); ++k) {
@@ -480,16 +506,8 @@ double evaluate_residual_impl(const SolverData& data,
       mismatch[q_row] = ctx.augmented_q_targets[k] - vm[bus];
       // Zero out Jacobian row and set diagonal to 1.
       if (build_jacobian && values != nullptr) {
-        const int nnz = static_cast<int>(pattern.matrix.nonZeros());
-        const int* outer = pattern.matrix.outerIndexPtr();
-        const int* inner = pattern.matrix.innerIndexPtr();
-        // Zero all entries in this row.
-        for (int col = 0; col < pattern.matrix.outerSize(); ++col) {
-          for (int nz = outer[col]; nz < outer[col + 1]; ++nz) {
-            if (inner[nz] == q_row) {
-              values[nz] = 0.0;
-            }
-          }
+        for (int nz : pattern.row_nz[static_cast<size_t>(q_row)]) {
+          values[nz] = 0.0;
         }
         // Set diagonal: q_row → vm_col[bus]
         const int vm_col = ctx.vm_col[static_cast<size_t>(bus)];
@@ -499,7 +517,6 @@ double evaluate_residual_impl(const SolverData& data,
             values[diag_nz] = 1.0;
           }
         }
-        (void)nnz;
       }
     }
     for (size_t k = 0; k < ctx.augmented_dc_buses.size(); ++k) {
@@ -510,18 +527,14 @@ double evaluate_residual_impl(const SolverData& data,
       mismatch[dc_row] = ctx.augmented_dc_targets[k] - vdc[bus];
       // Zero out Jacobian row and set diagonal to 1.
       if (build_jacobian && values != nullptr) {
-        const int* outer = pattern.matrix.outerIndexPtr();
-        const int* inner = pattern.matrix.innerIndexPtr();
-        for (int col = 0; col < pattern.matrix.outerSize(); ++col) {
-          for (int nz = outer[col]; nz < outer[col + 1]; ++nz) {
-            if (inner[nz] == dc_row) {
-              values[nz] = 0.0;
-            }
-          }
+        for (int nz : pattern.row_nz[static_cast<size_t>(dc_row)]) {
+          values[nz] = 0.0;
         }
         const int vdc_col = ctx.vdc_col[static_cast<size_t>(bus)];
         if (vdc_col >= 0) {
           // Find the nz for (dc_row, vdc_col) — it's on the diagonal of DC block.
+          const int* outer = pattern.matrix.outerIndexPtr();
+          const int* inner = pattern.matrix.innerIndexPtr();
           for (int nz = outer[vdc_col]; nz < outer[vdc_col + 1]; ++nz) {
             if (inner[nz] == dc_row) {
               values[nz] = 1.0;
@@ -569,14 +582,8 @@ double evaluate_residual_impl(const SolverData& data,
         //
         // So J_ncp_row = -dF_dQg * dQcalc/d(var)  (scale existing entries by -dF_dQg)
         //              + -dF_dVm on the Vm diagonal.
-        const int* outer = pattern.matrix.outerIndexPtr();
-        const int* inner = pattern.matrix.innerIndexPtr();
-        for (int col = 0; col < pattern.matrix.outerSize(); ++col) {
-          for (int nz = outer[col]; nz < outer[col + 1]; ++nz) {
-            if (inner[nz] == q_row) {
-              values[nz] *= -dF_dQg;
-            }
-          }
+        for (int nz : pattern.row_nz[static_cast<size_t>(q_row)]) {
+          values[nz] *= -dF_dQg;
         }
 
         // Add -dF/dVm contribution on the Vm diagonal.

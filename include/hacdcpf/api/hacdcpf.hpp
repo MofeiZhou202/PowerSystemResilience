@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <vector>
 
 #include "hacdcpf/api/solver_capabilities.hpp"
@@ -36,6 +37,28 @@
 namespace hacdcpf {
 
 struct SolverHandle;
+
+/// Owning repeated-solve context for compatible power-flow snapshots.
+/// Identical snapshots reuse projection, assembly and symbolic analysis. Direct
+/// canonical models with unchanged network structure may also refresh only
+/// injections/setpoints between solves.
+class PreparedPowerFlowSession {
+ public:
+  explicit PreparedPowerFlowSession(PowerFlowOptions options = {});
+  ~PreparedPowerFlowSession();
+
+  PreparedPowerFlowSession(const PreparedPowerFlowSession&) = delete;
+  PreparedPowerFlowSession& operator=(const PreparedPowerFlowSession&) = delete;
+  PreparedPowerFlowSession(PreparedPowerFlowSession&&) noexcept;
+  PreparedPowerFlowSession& operator=(PreparedPowerFlowSession&&) noexcept;
+
+  PowerFlowResult solve(const HybridPowerSystem& sys);
+  void reset();
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
 // ── Capabilities ──────────────────────────────────────────────────────────────────
 
 // get_solver_capabilities() is declared in api/solver_capabilities.hpp

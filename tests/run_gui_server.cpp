@@ -739,9 +739,15 @@ void apply_pf_robust_options(const json& o,
   set_if_bool(o, "enable_nonmonotone_linesearch", opt.enable_nonmonotone_linesearch);
   set_if_bool(o, "enable_smooth_ncp", opt.enable_smooth_ncp);
   set_if_bool(o, "enable_activity_hysteresis", opt.enable_activity_hysteresis);
+  set_if_bool(o, "enable_fixed_pv_pq_layout",
+              opt.enable_fixed_pv_pq_layout);
   set_if_bool(o, "enable_lm_trust_region_fallback",
               opt.enable_lm_trust_region_fallback);
   set_if_bool(o, "enable_ptc_ser", opt.enable_ptc_ser);
+  set_if_bool(o, "enable_stagnation_detection",
+              opt.enable_stagnation_detection);
+  set_if_bool(o, "enable_homotopy_fallback_on_failure",
+              opt.enable_homotopy_fallback_on_failure);
   set_if_bool(o, "enable_homotopy", opt.enable_homotopy);
   set_if_bool(o, "enable_log_voltage", opt.enable_log_voltage);
   set_if_bool(o, "auto_enable_log_voltage_on_failure",
@@ -779,6 +785,11 @@ void apply_pf_robust_options(const json& o,
   set_if_double(o, "ptc_dt_min", opt.ptc_dt_min);
   set_if_double(o, "ptc_dt_max", opt.ptc_dt_max);
   set_if_double(o, "ptc_gamma", opt.ptc_gamma);
+  set_if_int(o, "stagnation_window", opt.stagnation_window);
+  set_if_double(o, "stagnation_min_rel_improvement",
+                opt.stagnation_min_rel_improvement);
+  set_if_double(o, "stagnation_residual_threshold",
+                opt.stagnation_residual_threshold);
   set_if_double(o, "homotopy_step0", opt.homotopy_step0);
   set_if_double(o, "homotopy_step_min", opt.homotopy_step_min);
   set_if_double(o, "homotopy_step_max", opt.homotopy_step_max);
@@ -881,8 +892,12 @@ json pf_robust_options_to_json(const hacdcpf::powerflow::RobustNonlinearOptions&
       {"enable_nonmonotone_linesearch", opt.enable_nonmonotone_linesearch},
       {"enable_smooth_ncp", opt.enable_smooth_ncp},
       {"enable_activity_hysteresis", opt.enable_activity_hysteresis},
+      {"enable_fixed_pv_pq_layout", opt.enable_fixed_pv_pq_layout},
       {"enable_lm_trust_region_fallback", opt.enable_lm_trust_region_fallback},
       {"enable_ptc_ser", opt.enable_ptc_ser},
+      {"enable_stagnation_detection", opt.enable_stagnation_detection},
+      {"enable_homotopy_fallback_on_failure",
+       opt.enable_homotopy_fallback_on_failure},
       {"enable_homotopy", opt.enable_homotopy},
       {"enable_log_voltage", opt.enable_log_voltage},
       {"auto_enable_log_voltage_on_failure", opt.auto_enable_log_voltage_on_failure},
@@ -916,6 +931,10 @@ json pf_robust_options_to_json(const hacdcpf::powerflow::RobustNonlinearOptions&
       {"ptc_dt_min", opt.ptc_dt_min},
       {"ptc_dt_max", opt.ptc_dt_max},
       {"ptc_gamma", opt.ptc_gamma},
+      {"stagnation_window", opt.stagnation_window},
+      {"stagnation_min_rel_improvement",
+       opt.stagnation_min_rel_improvement},
+      {"stagnation_residual_threshold", opt.stagnation_residual_threshold},
       {"homotopy_step0", opt.homotopy_step0},
       {"homotopy_step_min", opt.homotopy_step_min},
       {"homotopy_step_max", opt.homotopy_step_max},
@@ -12471,6 +12490,22 @@ int main(int argc, char** argv) {
 
       auto add_reactive_limit_diagnostics =
           [&](const hacdcpf::PowerFlowResult& pf) {
+        out["nonlinear_recovery"] = json{
+            {"stagnation_detected", pf.profiling.stagnation_detected},
+            {"stagnation_exit_iteration",
+             pf.profiling.stagnation_exit_iteration},
+            {"homotopy_fallback_attempted",
+             pf.profiling.homotopy_fallback_attempted},
+            {"homotopy_fallback_succeeded",
+             pf.profiling.homotopy_fallback_succeeded},
+            {"nonlinear_escalation_attempts",
+             pf.profiling.nonlinear_escalation_attempts},
+            {"ncp_fallback_attempted",
+             pf.profiling.ncp_fallback_attempted},
+            {"dc_angle_seed_attempted",
+             pf.profiling.dc_angle_seed_attempted},
+            {"successful_fallback_stage",
+             pf.profiling.successful_fallback_stage}};
         out["reactive_limits"] = json{
             {"enforcement_requested",
              pf.reactive_limits.enforcement_requested},

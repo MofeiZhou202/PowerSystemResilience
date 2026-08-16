@@ -1,6 +1,6 @@
 # Development Status
 
-Updated: 2026-08-15
+Updated: 2026-08-16
 
 This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
@@ -724,14 +724,15 @@ updates and final `mu`.
 
 Release verification rebuilt `test_power_flow_math_audit`,
 `matpower_pf_compare`, and `run_gui_server`. The full math audit passed 49 cases
-and 275 assertions. The ASan/UBSan build passed its configured 42 cases and 231
+and 304 assertions. The ASan/UBSan build passed its configured 42 cases and 260
 assertions; LeakSanitizer is unavailable in the macOS runtime. JavaScript syntax
 and `git diff --check` passed.
 
 On `case6515rte`, Q-limit enforcement converged in 9 Newton iterations and 8
 factorizations, with 74 PV-to-PQ switches, no restoration, no repeated active
-set, and a certified maximum Q violation of `4.22e-11 pu`. The latest
-five-repeat Release run measured `49.90--51.65 ms` with a `50.64 ms` median.
+set, and a certified maximum Q violation of `4.22e-11 pu`. The ordinary-layout
+five-repeat Release run measured `56.4--61.2 ms` with a `58.7 ms` median; the
+fixed-layout comparison is recorded in the flat-start follow-up below.
 Fast screening previously used 4 iterations and 3 factorizations with a median
 of approximately 21.2 ms.
 
@@ -757,7 +758,7 @@ solves had a `47.3 ms` median. Q-disabled screening measured `18.3 ms`.
 Release verification additionally passed `test_io_json` (41 cases, 398
 assertions, one data-dependent skip), `test_bpa_io` (25/885),
 `test_component_models_math_audit` (15/111), `test_power_flow_math_audit`
-(49/275), and `test_advanced_pf` (30/218). The rebuilt `run_gui_server` is the
+(49/304), and `test_advanced_pf` (30/218). The rebuilt `run_gui_server` is the
 binary used for the full Yunnan request.
 
 The production-HTTP Yunnan capability audit is reproducible with
@@ -841,6 +842,65 @@ repeated active set, and maximum Q violation `1.34e-11 pu`. The former double
 solve took approximately 5.80 seconds on the same server. Focused Release
 adaptive tests passed 30 cases/218 assertions; the ASan/UBSan integration and
 adaptive selection passed 4 cases/23 assertions.
+
+## Power-flow flat-start robustness follow-up
+
+The dirty worktree closes two correctness defects from the large-case PF
+evaluation. Reactive-limit certification now uses
+`max(1e-10, PowerFlowOptions::tol)`: the limited-bus Q violation is the
+remaining Q-row mismatch and cannot be certified more tightly than the root
+that produced it. The focused regression deliberately converges with a
+violation above `1e-10` and below `1e-3`, and remains certified. The optional
+Levenberg-Marquardt recovery no longer factorizes `J^T J + lambda I` through
+the symbolic analysis for `J`; it owns a separate sparse solver, analyzes its
+normal-equation pattern once, reuses that pattern across damping attempts, and
+reports its analyses, factorizations, solves, and elapsed linear time.
+
+Default line-search Newton now detects only high-residual stagnation: the best
+residual must fail to improve by 10% over 15 iterations while remaining above
+`1.0`. Near-root damped progress retains the caller's full iteration budget.
+An opt-in `enable_homotopy_fallback_on_failure` retries a numerically failed
+solve and reports attempted/succeeded provenance in C++, the runtime JSON, and
+`matpower_pf_compare`. Intermediate continuation points follow the smooth
+unlimited PV equations; the original Q-limit formulation is solved and
+certified separately at `lambda=1`. Caller-supplied failed initial states are
+not reused as the zero-injection path seed.
+
+The opt-in `enable_fixed_pv_pq_layout` now embeds every non-slack AC bus's
+`Vm/Q` coordinates in one stable canonical bus-position order. PV rows become
+`Vm` identity rows while Q-limited rows retain physical Q balance; the outer
+active-set timing and certificate semantics are unchanged. Semi-smooth NCP
+remains mutually exclusive and wins with an explicit warning when both options
+are requested. Row nonzero indices are precomputed once, making active-row
+replacement `O(nnz(row))` rather than a full compressed-matrix scan.
+
+On AppleClang 21 arm64 macOS, Release/KLU, working tree `3cc92658373a`,
+`case6515rte` reduced Jacobian pattern rebuilds/analyses from `3/3` to `1/1`
+with unchanged 9 Newton iterations, 8 factorizations, 74 PV-to-PQ switches,
+and Q certificate (`4.22e-11 pu`); five-repeat median solve time was
+`58.7 -> 40.9 ms` (`30%`). `case_ACTIVSg10k` reduced `10/10 -> 1/1` with
+unchanged 26 iterations, 25 factorizations, 1151 entries, 40 restorations,
+and certificate; its median was `261.1 -> 152.0 ms` (`42%`). The feature is
+still opt-in and does not claim to reduce outer Newton iterations.
+
+Release/KLU verification rebuilt the core library, `run_gui_server`,
+`matpower_pf_compare`, and the three focused suites. Results were
+`test_power_flow_math_audit` 49 cases/304 assertions,
+`test_homotopy_continuation` 5/34, and `test_advanced_pf` 30/218. The
+ASan/UBSan build (SuiteSparse disabled) passed 42/260, 5/34, and 30/218
+respectively with leak detection disabled because the macOS runtime does not
+provide LeakSanitizer. `git diff --check` and the new-code marker scan passed.
+
+The hard flat-start acceptance set remains open. With the final Release tool,
+stagnation stopped `case1888rte`, `case3375wp`, `case6468rte`, and
+`case6515rte` after 17, 65, 20, and 18 iterations rather than consuming all 80;
+none converged. Opt-in homotopy also remained non-converged: the first, third,
+and fourth cases could not establish the zero-injection base point, while
+`case3375wp` reached the unlimited `lambda=1` root in three accepted steps but
+its final Q-limit endpoint solve failed. Warm-started `case3375wp` still
+converged and certified in 7 iterations; flat-start `case118` converged and
+certified in 18. No claim is made that the present escalation ladder repairs
+the four hard flat starts.
 
 ## Fast orientation
 

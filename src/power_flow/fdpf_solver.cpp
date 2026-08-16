@@ -205,14 +205,18 @@ PowerFlowResult FDPFSolver::solve(const SolverData& data,
     Eigen::VectorXd P_mis(npvpq);
     for (int k = 0; k < npvpq; ++k) {
       const int i = non_slack[static_cast<size_t>(k)];
-      P_mis[k] = (p_spec[i] - pcalc[i]) / vm[i];
+      const double vm_safe =
+          std::max(std::abs(vm[i]), opt.robust_nonlinear.min_vm_pu);
+      P_mis[k] = (p_spec[i] - pcalc[i]) / vm_safe;
     }
 
     // Q mismatch (divided by Vm).
     Eigen::VectorXd Q_mis(npq);
     for (int k = 0; k < npq; ++k) {
       const int i = pq[static_cast<size_t>(k)];
-      Q_mis[k] = (q_spec[i] - qcalc[i]) / vm[i];
+      const double vm_safe =
+          std::max(std::abs(vm[i]), opt.robust_nonlinear.min_vm_pu);
+      Q_mis[k] = (q_spec[i] - qcalc[i]) / vm_safe;
     }
 
     const double normP = (npvpq > 0) ? P_mis.cwiseAbs().maxCoeff() : 0.0;

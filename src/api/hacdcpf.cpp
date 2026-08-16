@@ -2,6 +2,7 @@
 #include "hacdcpf/optimal_power_flow/ac_opf_solver.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -44,6 +45,13 @@ struct SolverHandle {
   std::vector<ACBranch> authored_ac_branches;
   double authored_base_mva{100.0};
   size_t authored_ac_branch_count{0};
+  std::uint64_t system_signature{0};
+  double pending_projection_ms{0.0};
+  double pending_assembly_ms{0.0};
+  int prepared_rebuilds{0};
+  int prepared_reuses{0};
+  int prepared_numeric_refreshes{0};
+  bool report_build_cost{false};
 };
 
 namespace {
@@ -465,13 +473,32 @@ bool same_storage_view(const SolverDataCache::StorageView& cached, const HybridP
          cached.vsc_converters_size == sys.vsc_converters.size();
 }
 
-powerflow::SolverData& get_cached_solver_data(const HybridPowerSystem& sys, LossModelType loss_model) {
+powerflow::SolverData& get_cached_solver_data(const HybridPowerSystem& sys,
+                                               LossModelType loss_model,
+                                               double* projection_ms = nullptr,
+                                               double* assembly_ms = nullptr) {
   thread_local SolverDataCache cache;
   // The facade accepts a mutable rich model by const reference. A handwritten
   // field hash cannot prove that every assembly-relevant field is unchanged,
   // so implicit reuse risks solving stale Ybus/injection data. Performance
   // callers use the explicit SolverHandle lifecycle instead.
-  cache.data = powerflow::make_solver_data(sys, loss_model);
+  const auto projection_start = std::chrono::steady_clock::now();
+  HybridPowerSystem projected =
+      projection::RichToCanonicalOperator::apply(sys).canonical;
+  const auto projection_end = std::chrono::steady_clock::now();
+  cache.data =
+      powerflow::make_solver_data_projected(std::move(projected), loss_model);
+  const auto assembly_end = std::chrono::steady_clock::now();
+  if (projection_ms != nullptr) {
+    *projection_ms = std::chrono::duration<double, std::milli>(
+                         projection_end - projection_start)
+                         .count();
+  }
+  if (assembly_ms != nullptr) {
+    *assembly_ms = std::chrono::duration<double, std::milli>(
+                       assembly_end - projection_end)
+                       .count();
+  }
   cache.signature = hash_system_signature(sys, loss_model);
   cache.loss_model = loss_model;
   cache.valid = true;
@@ -509,7 +536,22 @@ void rebuild_handle_data(SolverHandle& handle,
       sys.base_mva > 0.0
           ? sys.base_mva
           : (sys.ac.base_mva > 0.0 ? sys.ac.base_mva : 100.0);
-  handle.data = powerflow::make_solver_data(sys, loss_model);
+  const auto projection_start = std::chrono::steady_clock::now();
+  HybridPowerSystem projected =
+      projection::RichToCanonicalOperator::apply(sys).canonical;
+  const auto projection_end = std::chrono::steady_clock::now();
+  handle.data =
+      powerflow::make_solver_data_projected(std::move(projected), loss_model);
+  const auto assembly_end = std::chrono::steady_clock::now();
+  handle.pending_projection_ms =
+      std::chrono::duration<double, std::milli>(projection_end - projection_start)
+          .count();
+  handle.pending_assembly_ms =
+      std::chrono::duration<double, std::milli>(assembly_end - projection_end)
+          .count();
+  handle.report_build_cost = true;
+  handle.system_signature = hash_system_signature(sys, loss_model);
+  handle.prepared_rebuilds += 1;
   handle.configured_loss_model = loss_model;
 }
 
@@ -573,6 +615,134 @@ void apply_zip_weights(powerflow::SolverData& data, const PowerFlowOptions& opt)
   data.enable_coupled_jacobian = opt.enable_coupled_jacobian;
   data.enable_augmented_equations = opt.enable_augmented_equations;
   data.enable_semi_smooth_newton = opt.enable_semi_smooth_newton;
+}
+
+void merge_solver_profiling(SolverProfiling& total,
+                            const SolverProfiling& attempt) {
+  if (!attempt.linear_solver_backend.empty()) {
+    total.linear_solver_backend = attempt.linear_solver_backend;
+  }
+  total.ac_eval_threads = std::max(total.ac_eval_threads,
+                                   attempt.ac_eval_threads);
+  total.jacobian_pattern_rebuilds += attempt.jacobian_pattern_rebuilds;
+  total.jacobian_analyze_calls += attempt.jacobian_analyze_calls;
+  total.factorization_calls += attempt.factorization_calls;
+  total.numeric_refactor_attempts += attempt.numeric_refactor_attempts;
+  total.numeric_refactor_accepted += attempt.numeric_refactor_accepted;
+  total.numeric_refactor_fallbacks += attempt.numeric_refactor_fallbacks;
+  total.max_refactor_backward_error = std::max(
+      total.max_refactor_backward_error,
+      attempt.max_refactor_backward_error);
+  total.linear_solve_calls += attempt.linear_solve_calls;
+  total.regularization_attempts += attempt.regularization_attempts;
+  total.line_search_evaluations += attempt.line_search_evaluations;
+  total.rejected_steps += attempt.rejected_steps;
+  total.pv_to_pq_switches += attempt.pv_to_pq_switches;
+  total.pq_to_pv_switches += attempt.pq_to_pv_switches;
+  total.pv_pq_outer_iterations += attempt.pv_pq_outer_iterations;
+  total.pv_pq_repeated_active_sets += attempt.pv_pq_repeated_active_sets;
+  total.smooth_ncp_continuation_updates +=
+      attempt.smooth_ncp_continuation_updates;
+  total.smooth_ncp_final_mu = attempt.smooth_ncp_final_mu;
+  total.converter_mode_switches += attempt.converter_mode_switches;
+  total.residual_by_iter.insert(total.residual_by_iter.end(),
+                                attempt.residual_by_iter.begin(),
+                                attempt.residual_by_iter.end());
+  total.line_search_evals_by_iter.insert(
+      total.line_search_evals_by_iter.end(),
+      attempt.line_search_evals_by_iter.begin(),
+      attempt.line_search_evals_by_iter.end());
+  total.eval_jacobian_ms_by_iter.insert(
+      total.eval_jacobian_ms_by_iter.end(),
+      attempt.eval_jacobian_ms_by_iter.begin(),
+      attempt.eval_jacobian_ms_by_iter.end());
+  total.linear_solve_ms_by_iter.insert(
+      total.linear_solve_ms_by_iter.end(),
+      attempt.linear_solve_ms_by_iter.begin(),
+      attempt.linear_solve_ms_by_iter.end());
+  total.line_search_ms_by_iter.insert(
+      total.line_search_ms_by_iter.end(),
+      attempt.line_search_ms_by_iter.begin(),
+      attempt.line_search_ms_by_iter.end());
+  total.eval_jacobian_ms_total += attempt.eval_jacobian_ms_total;
+  total.linear_solve_ms_total += attempt.linear_solve_ms_total;
+  total.line_search_ms_total += attempt.line_search_ms_total;
+  total.residual_evaluation_ms_total +=
+      attempt.residual_evaluation_ms_total;
+  total.scaling_ms_total += attempt.scaling_ms_total;
+  total.active_set_scan_ms_total += attempt.active_set_scan_ms_total;
+  total.projection_ms_total += attempt.projection_ms_total;
+  total.assembly_ms_total += attempt.assembly_ms_total;
+  total.result_derivation_ms_total += attempt.result_derivation_ms_total;
+  total.solver_core_ms_total += attempt.solver_core_ms_total;
+  total.unclassified_core_ms_total += attempt.unclassified_core_ms_total;
+  total.facade_ms_total += attempt.facade_ms_total;
+  total.unclassified_facade_ms_total += attempt.unclassified_facade_ms_total;
+  total.prepared_session_rebuilds += attempt.prepared_session_rebuilds;
+  total.prepared_session_reuses += attempt.prepared_session_reuses;
+  total.prepared_session_numeric_refreshes +=
+      attempt.prepared_session_numeric_refreshes;
+  total.raw_residual_norm = attempt.raw_residual_norm;
+  total.scaled_residual_norm = attempt.scaled_residual_norm;
+  total.condition_estimate = attempt.condition_estimate;
+  total.regularization_count += attempt.regularization_count;
+  total.linear_solver_status = attempt.linear_solver_status;
+  if (attempt.stagnation_detected && !total.stagnation_detected) {
+    total.stagnation_exit_iteration = attempt.stagnation_exit_iteration;
+  }
+  total.stagnation_detected =
+      total.stagnation_detected || attempt.stagnation_detected;
+  total.homotopy_fallback_attempted =
+      total.homotopy_fallback_attempted ||
+      attempt.homotopy_fallback_attempted;
+  total.homotopy_fallback_succeeded =
+      total.homotopy_fallback_succeeded ||
+      attempt.homotopy_fallback_succeeded;
+  total.nonlinear_escalation_attempts +=
+      attempt.nonlinear_escalation_attempts;
+  total.ncp_fallback_attempted =
+      total.ncp_fallback_attempted || attempt.ncp_fallback_attempted;
+  total.dc_angle_seed_attempted =
+      total.dc_angle_seed_attempted || attempt.dc_angle_seed_attempted;
+  if (!attempt.successful_fallback_stage.empty()) {
+    total.successful_fallback_stage = attempt.successful_fallback_stage;
+  }
+}
+
+bool eligible_for_nonlinear_escalation(const PowerFlowResult& result) {
+  return !result.converged && result.iterations > 0 &&
+         (!result.diagnostics.equation_closure_checked ||
+          result.diagnostics.equation_closure_ok);
+}
+
+InitialState make_dc_angle_initial_state(
+    const powerflow::SolverData& data,
+    const powerflow::ACLinearizedDCResult& dc_seed) {
+  InitialState initial;
+  initial.va = dc_seed.va;
+  initial.vm.reserve(data.ac_buses.size());
+  for (const auto& bus : data.ac_buses) {
+    initial.vm.push_back(bus.vm_pu);
+  }
+  initial.vdc.reserve(data.dc_buses.size());
+  for (const auto& bus : data.dc_buses) {
+    initial.vdc.push_back(bus.vm_pu);
+  }
+  return initial;
+}
+
+PowerFlowResult solve_isolated_newton_attempt(
+    const powerflow::SolverData& base_data,
+    PowerFlowOptions attempt_options,
+    const InitialState* initial_state,
+    bool enable_ncp) {
+  powerflow::SolverData attempt_data = base_data;
+  attempt_options.enable_semi_smooth_newton = enable_ncp;
+  attempt_options.robust_nonlinear.enable_fixed_pv_pq_layout = !enable_ncp;
+  attempt_options.robust_nonlinear.enable_homotopy_fallback_on_failure = false;
+  attempt_data.enable_semi_smooth_newton = enable_ncp;
+  powerflow::NewtonSolver attempt_solver;
+  return attempt_solver.solve(attempt_data, attempt_options, initial_state);
 }
 
 struct LCCTapControlStatus {
@@ -1530,6 +1700,7 @@ Result<PowerFlowResult> safe_solve_power_flow(
 }
 
 PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOptions& opt) {
+  const auto facade_start = std::chrono::steady_clock::now();
   const auto reference_validation =
       validation::validate_reference_bus_eligibility(sys);
   if (reference_validation.has_errors()) {
@@ -1645,8 +1816,10 @@ PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOp
       return result;
     }
   }
+  double projection_ms = 0.0;
+  double assembly_ms = 0.0;
   powerflow::SolverData& cached_data =
-      get_cached_solver_data(sys, opt.loss_model);
+      get_cached_solver_data(sys, opt.loss_model, &projection_ms, &assembly_ms);
   const bool requests_lcc_tap_control =
       solver_data_requests_lcc_tap_control(cached_data);
   std::optional<powerflow::SolverData> controlled_data;
@@ -1672,6 +1845,138 @@ PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOp
     static thread_local powerflow::NewtonSolver solver;
     result = solver.solve(data, opt, init_ptr);
   }
+
+  // Allgower & Georg (1990), sec. 2.1, and Facchinei & Pang (2003),
+  // sec. 9.1: escalate a structurally closed but numerically failed root solve
+  // through formulations with different basins before invoking continuation.
+  // The DC seed changes only the initial AC angles; voltage magnitudes retain
+  // the authored canonical profile. Every direct retry owns SolverData and a
+  // NewtonSolver so active-set/NCP state cannot pollute the facade cache.
+  SolverProfiling escalation_profile;
+  merge_solver_profiling(escalation_profile, result.profiling);
+  const PowerFlowResult direct_failure = result;
+  const bool escalation_enabled =
+      opt.robust_nonlinear.enable_homotopy_fallback_on_failure;
+  if (escalation_enabled && !requests_lcc_tap_control &&
+      eligible_for_nonlinear_escalation(result)) {
+    int escalation_attempts = 0;
+    const bool ncp_allowed =
+        opt.enable_pv_pq_conversion || opt.enable_semi_smooth_newton;
+    const auto accept_direct_retry = [&](PowerFlowResult attempt,
+                                         const char* stage,
+                                         const char* description) {
+      merge_solver_profiling(escalation_profile, attempt.profiling);
+      escalation_attempts += 1;
+      escalation_profile.nonlinear_escalation_attempts = escalation_attempts;
+      escalation_profile.ncp_fallback_attempted =
+          escalation_profile.ncp_fallback_attempted ||
+          std::string(stage).find("ncp") != std::string::npos;
+      escalation_profile.dc_angle_seed_attempted =
+          escalation_profile.dc_angle_seed_attempted ||
+          std::string(stage).find("dc_angle") != std::string::npos;
+      if (attempt.converged) {
+        escalation_profile.successful_fallback_stage = stage;
+        attempt.profiling = escalation_profile;
+        attempt.diagnostics.warnings.push_back(
+            "[PF-ESCALATION-01] Direct Newton did not converge (residual " +
+            std::to_string(direct_failure.residual) + " after " +
+            std::to_string(direct_failure.iterations) + " iterations" +
+            (direct_failure.profiling.stagnation_detected
+                 ? ", stagnation detected"
+                 : "") +
+            "); " + description + " converged to the requested full-system "
+            "root.");
+      }
+      return attempt;
+    };
+
+    if (ncp_allowed && !opt.enable_semi_smooth_newton) {
+      PowerFlowResult ncp_attempt = solve_isolated_newton_attempt(
+          data, opt, init_ptr, /*enable_ncp=*/true);
+      ncp_attempt = accept_direct_retry(
+          std::move(ncp_attempt), "semi_smooth_ncp",
+          "the semi-smooth NCP retry");
+      if (ncp_attempt.converged) {
+        result = std::move(ncp_attempt);
+      }
+    }
+
+    std::optional<InitialState> dc_initial;
+    if (!result.converged) {
+      const powerflow::ACLinearizedDCResult dc_seed =
+          powerflow::solve_ac_linearized_dc(data);
+      if (dc_seed.success && dc_seed.va.size() == data.ac_buses.size()) {
+        dc_initial = make_dc_angle_initial_state(data, dc_seed);
+        PowerFlowResult fixed_attempt = solve_isolated_newton_attempt(
+            data, opt, &*dc_initial, /*enable_ncp=*/false);
+        fixed_attempt = accept_direct_retry(
+            std::move(fixed_attempt), "dc_angle_fixed_active_set",
+            "the linearized-DC angle seed plus fixed-layout active-set retry");
+        if (fixed_attempt.converged) {
+          result = std::move(fixed_attempt);
+        }
+      }
+    }
+
+    if (!result.converged && dc_initial && ncp_allowed) {
+      PowerFlowResult dc_ncp_attempt = solve_isolated_newton_attempt(
+          data, opt, &*dc_initial, /*enable_ncp=*/true);
+      dc_ncp_attempt = accept_direct_retry(
+          std::move(dc_ncp_attempt), "dc_angle_semi_smooth_ncp",
+          "the linearized-DC angle seed plus semi-smooth NCP retry");
+      if (dc_ncp_attempt.converged) {
+        result = std::move(dc_ncp_attempt);
+      }
+    }
+  }
+
+  // Final escalation stage: ramp injections from a zero-injection base point
+  // to lambda=1. Each nested solve disables this outer ladder, preventing
+  // recursive NCP/DC/homotopy dispatch.
+  if (escalation_enabled && eligible_for_nonlinear_escalation(result)) {
+    PowerFlowOptions fallback_opt = opt;
+    fallback_opt.robust_nonlinear.enable_homotopy_fallback_on_failure = false;
+    const powerflow::HomotopyContinuationSolver homotopy_solver;
+    powerflow::HomotopyState homotopy_state;
+    PowerFlowResult escalated =
+        homotopy_solver.solve(sys, fallback_opt, homotopy_state);
+    merge_solver_profiling(escalation_profile, escalated.profiling);
+    escalation_profile.nonlinear_escalation_attempts += 1;
+    escalation_profile.homotopy_fallback_attempted = true;
+    if (escalated.converged) {
+      escalation_profile.homotopy_fallback_succeeded = true;
+      escalation_profile.successful_fallback_stage = "homotopy";
+      escalated.profiling = escalation_profile;
+      escalated.diagnostics.converter_coordination = coordination;
+      escalated.diagnostics.warnings.push_back(
+          "[PF-ESCALATION-02] The direct Newton/NCP/DC-seed attempts did not "
+          "converge "
+          "(residual " + std::to_string(result.residual) + " after " +
+          std::to_string(result.iterations) + " iterations" +
+          (result.profiling.stagnation_detected ? ", stagnation detected"
+                                                : "") +
+          "); homotopy continuation reached lambda=1 in " +
+          std::to_string(homotopy_state.accepted_steps) + " accepted / " +
+          std::to_string(homotopy_state.rejected_steps) +
+          " rejected steps. The returned solution is the full-system "
+          "(lambda=1) root.");
+      return escalated;
+    }
+    result = direct_failure;
+    result.profiling = escalation_profile;
+    result.diagnostics.warnings.push_back(
+        "[PF-ESCALATION-03] NCP, DC-angle seed, and homotopy fallbacks failed; "
+        "homotopy stopped at "
+        "lambda=" + std::to_string(homotopy_state.lambda) +
+        " (accepted=" + std::to_string(homotopy_state.accepted_steps) +
+        ", rejected=" + std::to_string(homotopy_state.rejected_steps) +
+        "); the operating point is likely infeasible at full loading or "
+        "requires a problem-specific initial state.");
+  } else if (!result.converged && escalation_enabled) {
+    result = direct_failure;
+    result.profiling = escalation_profile;
+  }
+
   result.diagnostics.converter_coordination = coordination;
   if (coordination.enabled) {
     for (const auto& issue : coordination.issues) {
@@ -1681,6 +1986,7 @@ PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOp
       }
     }
   }
+  const auto derivation_start = std::chrono::steady_clock::now();
   populate_derived_results(data, result, opt.loss_model,
                            &lcc_tap_statuses);
   // Post-solve DC/DC duty-ratio feasibility (multi-converter §3.2): a converged
@@ -1781,6 +2087,22 @@ PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOp
     sc.validity.dcdc_duty_ratio_enforced = opt.enforce_converter_physical_limits;
     sc.validity.equation_closure_checked = result.diagnostics.equation_closure_checked;
   }
+  result.profiling.projection_ms_total += projection_ms;
+  result.profiling.assembly_ms_total += assembly_ms;
+  result.profiling.result_derivation_ms_total +=
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - derivation_start)
+          .count();
+  result.profiling.facade_ms_total +=
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - facade_start)
+          .count();
+  const double classified_facade = result.profiling.solver_core_ms_total +
+                                   result.profiling.projection_ms_total +
+                                   result.profiling.assembly_ms_total +
+                                   result.profiling.result_derivation_ms_total;
+  result.profiling.unclassified_facade_ms_total =
+      std::max(0.0, result.profiling.facade_ms_total - classified_facade);
   return result;
 }
 
@@ -1892,6 +2214,30 @@ PowerFlowResult solve_handle(SolverHandle* handle, const PowerFlowOptions& opt) 
   if (handle == nullptr) {
     throw std::invalid_argument("solve_handle: handle is null.");
   }
+  const auto facade_start = std::chrono::steady_clock::now();
+  const auto finish_profiling = [&](PowerFlowResult& result,
+                                    double derivation_ms) {
+    result.profiling.result_derivation_ms_total += derivation_ms;
+    if (handle->report_build_cost) {
+      result.profiling.projection_ms_total += handle->pending_projection_ms;
+      result.profiling.assembly_ms_total += handle->pending_assembly_ms;
+      handle->report_build_cost = false;
+    }
+    result.profiling.prepared_session_rebuilds = handle->prepared_rebuilds;
+    result.profiling.prepared_session_reuses = handle->prepared_reuses;
+    result.profiling.prepared_session_numeric_refreshes =
+        handle->prepared_numeric_refreshes;
+    result.profiling.facade_ms_total +=
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - facade_start)
+            .count();
+    const double classified = result.profiling.solver_core_ms_total +
+                              result.profiling.projection_ms_total +
+                              result.profiling.assembly_ms_total +
+                              result.profiling.result_derivation_ms_total;
+    result.profiling.unclassified_facade_ms_total =
+        std::max(0.0, result.profiling.facade_ms_total - classified);
+  };
   handle->configured_loss_model = opt.loss_model;
   const InitialState* init_ptr = opt.initial_state ? &*opt.initial_state : nullptr;
 
@@ -1906,6 +2252,7 @@ PowerFlowResult solve_handle(SolverHandle* handle, const PowerFlowOptions& opt) 
     LCCTapControlStatusMap tap_statuses;
     PowerFlowResult result = solve_newton_with_lcc_tap_control(
         controlled_data, controlled_solver, opt, init_ptr, tap_statuses);
+    const auto derivation_start = std::chrono::steady_clock::now();
     populate_derived_results(controlled_data, result, opt.loss_model,
                              &tap_statuses);
     restore_original_vsc_bus_ac(result, handle->original_vsc_bus_ac);
@@ -1923,6 +2270,11 @@ PowerFlowResult solve_handle(SolverHandle* handle, const PowerFlowOptions& opt) 
     }
     trim_internal_dc_bus_results(result,
                                  controlled_data.projection_certificate);
+    finish_profiling(
+        result,
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - derivation_start)
+            .count());
     return result;
   }
 
@@ -1930,6 +2282,7 @@ PowerFlowResult solve_handle(SolverHandle* handle, const PowerFlowOptions& opt) 
   apply_zip_weights(handle->data, opt);
   PowerFlowResult result =
       handle->newton_solver.solve(handle->data, opt, init_ptr);
+  const auto derivation_start = std::chrono::steady_clock::now();
   populate_derived_results(handle->data, result, opt.loss_model);
   restore_original_vsc_bus_ac(result, handle->original_vsc_bus_ac);
   restore_original_lcc_bus_ac(result, handle->original_lcc_bus_ac);
@@ -1944,6 +2297,11 @@ PowerFlowResult solve_handle(SolverHandle* handle, const PowerFlowOptions& opt) 
     result.branch_flows.resize(handle->authored_ac_branch_count);
   }
   trim_internal_dc_bus_results(result, handle->data.projection_certificate);
+  finish_profiling(
+      result,
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - derivation_start)
+          .count());
   return result;
 }
 
@@ -1964,6 +2322,47 @@ DCPowerFlowResult solve_dc_handle(SolverHandle* handle, const PowerFlowOptions& 
 
 void destroy_solver_handle(SolverHandle* handle) {
   delete handle;
+}
+
+struct PreparedPowerFlowSession::Impl {
+  explicit Impl(PowerFlowOptions options_in)
+      : options(std::move(options_in)) {}
+
+  PowerFlowOptions options;
+  std::unique_ptr<SolverHandle> handle;
+};
+
+PreparedPowerFlowSession::PreparedPowerFlowSession(PowerFlowOptions options)
+    : impl_(std::make_unique<Impl>(std::move(options))) {}
+PreparedPowerFlowSession::~PreparedPowerFlowSession() = default;
+PreparedPowerFlowSession::PreparedPowerFlowSession(
+    PreparedPowerFlowSession&&) noexcept = default;
+PreparedPowerFlowSession& PreparedPowerFlowSession::operator=(
+    PreparedPowerFlowSession&&) noexcept = default;
+
+PowerFlowResult PreparedPowerFlowSession::solve(
+    const HybridPowerSystem& sys) {
+  const std::uint64_t signature =
+      hash_system_signature(sys, impl_->options.loss_model);
+  if (!impl_->handle) {
+    impl_->handle.reset(create_solver_handle(sys, impl_->options.loss_model));
+  } else if (impl_->handle->system_signature == signature) {
+    impl_->handle->prepared_reuses += 1;
+  } else if (powerflow::refresh_solver_data_values(impl_->handle->data, sys)) {
+    impl_->handle->system_signature = signature;
+    impl_->handle->authored_ac_branches = sys.ac.branches;
+    impl_->handle->authored_ac_branch_count = sys.ac.branches.size();
+    impl_->handle->prepared_reuses += 1;
+    impl_->handle->prepared_numeric_refreshes += 1;
+  } else {
+    rebuild_handle_data(*impl_->handle, sys, impl_->options.loss_model);
+  }
+  return solve_handle(impl_->handle.get(), impl_->options);
+}
+
+void PreparedPowerFlowSession::reset() {
+  PowerFlowOptions options = impl_->options;
+  impl_ = std::make_unique<Impl>(std::move(options));
 }
 
 PowerFlowResult solve_power_flow_fdpf(const HybridPowerSystem& sys,

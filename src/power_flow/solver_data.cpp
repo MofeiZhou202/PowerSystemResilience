@@ -247,6 +247,142 @@ void rebuild_matrices(SolverData& data) {
   ++data.build_id;
 }
 
+bool refresh_solver_data_values(SolverData& data,
+                                const HybridPowerSystem& sys) {
+  // Rich-device expansion and bus merging require authored-to-canonical
+  // mapping updates. Keep those cases on the conservative full rebuild path;
+  // the direct MATPOWER/time-series layout below is one-to-one.
+  if (data.bus_merge_map || !sys.ac.transformers_2w.empty() ||
+      !sys.ac.transformers_3w.empty() || !sys.ac.switches.empty() ||
+      !sys.ac.circuit_breakers.empty() || !sys.energy_routers.empty() ||
+      !sys.ac.external_grids.empty() || !sys.vsc_converters.empty() ||
+      !sys.lcc_converters.empty() || !sys.dc.dcdc_converters.empty() ||
+      !sys.dc.dc_storage.empty() || sys.three_phase_ac.has_value()) {
+    return false;
+  }
+  if (data.base_mva != sys.base_mva ||
+      data.ac_buses.size() != sys.ac.buses.size() ||
+      data.ac_branches.size() != sys.ac.branches.size() ||
+      data.generators.size() != sys.ac.generators.size() ||
+      data.loads.size() != sys.ac.loads.size() ||
+      data.flexible_loads.size() != sys.ac.flexible_loads.size() ||
+      data.static_generators.size() != sys.ac.static_generators.size() ||
+      data.renewable_gens.size() != sys.ac.renewable_gens.size() ||
+      data.pv_systems.size() != sys.ac.pv_systems.size() ||
+      data.storage_units.size() != sys.ac.storage.size() ||
+      data.shunts.size() != sys.ac.shunts.size() ||
+      data.charging_stations.size() != sys.ac.charging_stations.size() ||
+      data.chargers.size() != sys.ac.chargers.size() ||
+      data.dc_buses.size() != sys.dc.buses.size() ||
+      data.dc_branches.size() != sys.dc.branches.size() ||
+      data.dc_loads.size() != sys.dc.loads.size() ||
+      data.dc_storage.size() != sys.dc.storage.size() ||
+      data.dc_static_generators.size() != sys.dc.static_generators.size() ||
+      data.dc_pv_arrays.size() != sys.dc.pv_arrays.size() ||
+      data.vpps.size() != sys.vpps.size() ||
+      data.microgrids.size() != sys.microgrids.size() ||
+      data.mobile_storage.size() != sys.mobile_storage.size()) {
+    return false;
+  }
+
+  for (size_t i = 0; i < data.ac_buses.size(); ++i) {
+    const auto& old_bus = data.ac_buses[i];
+    const auto& new_bus = sys.ac.buses[i];
+    if (old_bus.index != new_bus.index || old_bus.bus_type != new_bus.bus_type ||
+        old_bus.in_service != new_bus.in_service) {
+      return false;
+    }
+  }
+  for (size_t i = 0; i < data.dc_buses.size(); ++i) {
+    const auto& old_bus = data.dc_buses[i];
+    const auto& new_bus = sys.dc.buses[i];
+    if (old_bus.index != new_bus.index || old_bus.bus_type != new_bus.bus_type ||
+        old_bus.in_service != new_bus.in_service) {
+      return false;
+    }
+  }
+  for (size_t i = 0; i < data.ac_branches.size(); ++i) {
+    const auto& old_branch = data.ac_branches[i];
+    const auto& new_branch = sys.ac.branches[i];
+    if (old_branch.index != new_branch.index ||
+        old_branch.from_bus != new_branch.from_bus ||
+        old_branch.to_bus != new_branch.to_bus ||
+        old_branch.in_service != new_branch.in_service ||
+        old_branch.r_pu != new_branch.r_pu ||
+        old_branch.x_pu != new_branch.x_pu ||
+        old_branch.b_pu != new_branch.b_pu ||
+        old_branch.tap != new_branch.tap ||
+        old_branch.shift_deg != new_branch.shift_deg) {
+      return false;
+    }
+  }
+  for (size_t i = 0; i < data.dc_branches.size(); ++i) {
+    const auto& old_branch = data.dc_branches[i];
+    const auto& new_branch = sys.dc.branches[i];
+    if (old_branch.index != new_branch.index ||
+        old_branch.from_bus != new_branch.from_bus ||
+        old_branch.to_bus != new_branch.to_bus ||
+        old_branch.in_service != new_branch.in_service ||
+        old_branch.r_pu != new_branch.r_pu) {
+      return false;
+    }
+  }
+  for (size_t i = 0; i < data.shunts.size(); ++i) {
+    const auto& old_shunt = data.shunts[i];
+    const auto& new_shunt = sys.ac.shunts[i];
+    if (old_shunt.index != new_shunt.index || old_shunt.bus != new_shunt.bus ||
+        old_shunt.in_service != new_shunt.in_service ||
+        old_shunt.gs_mw != new_shunt.gs_mw ||
+        old_shunt.bs_mvar != new_shunt.bs_mvar ||
+        old_shunt.current_step != new_shunt.current_step) {
+      return false;
+    }
+  }
+  for (size_t i = 0; i < data.generators.size(); ++i) {
+    const auto& old_gen = data.generators[i];
+    const auto& new_gen = sys.ac.generators[i];
+    if (old_gen.index != new_gen.index || old_gen.bus != new_gen.bus ||
+        old_gen.is_slack != new_gen.is_slack ||
+        old_gen.in_service != new_gen.in_service) {
+      return false;
+    }
+  }
+
+  // In-place assignments preserve vector and sparse-matrix storage, so the
+  // Newton pattern and symbolic factorization remain valid. Only aggregated
+  // specified injections are recomputed.
+  std::copy(sys.ac.buses.begin(), sys.ac.buses.end(), data.ac_buses.begin());
+  std::copy(sys.ac.branches.begin(), sys.ac.branches.end(), data.ac_branches.begin());
+  std::copy(sys.ac.generators.begin(), sys.ac.generators.end(), data.generators.begin());
+  std::copy(sys.ac.loads.begin(), sys.ac.loads.end(), data.loads.begin());
+  std::copy(sys.ac.flexible_loads.begin(), sys.ac.flexible_loads.end(),
+            data.flexible_loads.begin());
+  std::copy(sys.ac.static_generators.begin(), sys.ac.static_generators.end(),
+            data.static_generators.begin());
+  std::copy(sys.ac.renewable_gens.begin(), sys.ac.renewable_gens.end(),
+            data.renewable_gens.begin());
+  std::copy(sys.ac.pv_systems.begin(), sys.ac.pv_systems.end(),
+            data.pv_systems.begin());
+  std::copy(sys.ac.storage.begin(), sys.ac.storage.end(), data.storage_units.begin());
+  std::copy(sys.ac.charging_stations.begin(), sys.ac.charging_stations.end(),
+            data.charging_stations.begin());
+  std::copy(sys.ac.chargers.begin(), sys.ac.chargers.end(), data.chargers.begin());
+  std::copy(sys.dc.buses.begin(), sys.dc.buses.end(), data.dc_buses.begin());
+  std::copy(sys.dc.branches.begin(), sys.dc.branches.end(), data.dc_branches.begin());
+  std::copy(sys.dc.loads.begin(), sys.dc.loads.end(), data.dc_loads.begin());
+  std::copy(sys.dc.storage.begin(), sys.dc.storage.end(), data.dc_storage.begin());
+  std::copy(sys.dc.static_generators.begin(), sys.dc.static_generators.end(),
+            data.dc_static_generators.begin());
+  std::copy(sys.dc.pv_arrays.begin(), sys.dc.pv_arrays.end(), data.dc_pv_arrays.begin());
+  std::copy(sys.vpps.begin(), sys.vpps.end(), data.vpps.begin());
+  std::copy(sys.microgrids.begin(), sys.microgrids.end(), data.microgrids.begin());
+  std::copy(sys.mobile_storage.begin(), sys.mobile_storage.end(),
+            data.mobile_storage.begin());
+  aggregate_generation(data);
+  aggregate_load_demand(data);
+  return true;
+}
+
 // AC-side voltage-forming converters (multi-converter model r1 §1/§2/§4.2/§4.7).
 // Three control modes pin the AC terminal voltage of their bus:
 //   * AC_PV (Mode 2) and DC_V_DROOP_AC_V (Mode 6) hold the AC voltage magnitude,

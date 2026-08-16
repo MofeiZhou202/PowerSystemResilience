@@ -6,8 +6,10 @@
 #include <string>
 #include <vector>
 
-#include <Eigen/LU>
+#include <Eigen/SparseLU>
 
+#include "hacdcpf/power_flow/converter_model.hpp"
+#include "hacdcpf/power_flow/lcc_model.hpp"
 #include "hacdcpf/power_flow/pf_injection_assembly.hpp"
 #include "hacdcpf/power_flow/pf_utils.hpp"
 
@@ -18,6 +20,77 @@ namespace {
 constexpr double kMinVdc = 0.05;
 
 }  // namespace
+
+Eigen::SparseMatrix<double> build_dc_newton_jacobian(
+    const SolverData& data,
+    const Eigen::VectorXd& vm,
+    const Eigen::VectorXd& va,
+    const Eigen::VectorXd& vdc,
+    const std::vector<int>& dc_non_slack) {
+  (void)va;
+  const int ndc = static_cast<int>(data.dc_buses.size());
+  const int neq = static_cast<int>(dc_non_slack.size());
+  std::vector<int> reduced(static_cast<size_t>(ndc), -1);
+  for (int k = 0; k < neq; ++k) {
+    reduced[static_cast<size_t>(dc_non_slack[static_cast<size_t>(k)])] = k;
+  }
+
+  // Pcalc = diag(V) G V, so dPcalc/dV = diag(GV) + diag(V)G.
+  // Device terms then apply J = d(Pcalc - Pspec)/dV exactly.
+  const Eigen::VectorXd gdc_v = data.gdc * vdc;
+  std::vector<Eigen::Triplet<double>> triplets;
+  triplets.reserve(static_cast<size_t>(data.gdc.nonZeros() + neq * 3));
+  for (int col = 0; col < data.gdc.outerSize(); ++col) {
+    const int reduced_col = reduced[static_cast<size_t>(col)];
+    if (reduced_col < 0) continue;
+    for (Eigen::SparseMatrix<double>::InnerIterator it(data.gdc, col); it; ++it) {
+      const int reduced_row = reduced[static_cast<size_t>(it.row())];
+      if (reduced_row < 0) continue;
+      double value = vdc[it.row()] * it.value();
+      if (it.row() == col) value += gdc_v[it.row()];
+      triplets.emplace_back(reduced_row, reduced_col, value);
+    }
+  }
+
+  const auto add = [&](int row_bus, int col_bus, double value) {
+    if (row_bus < 0 || row_bus >= ndc || col_bus < 0 || col_bus >= ndc ||
+        value == 0.0) {
+      return;
+    }
+    const int row = reduced[static_cast<size_t>(row_bus)];
+    const int col = reduced[static_cast<size_t>(col_bus)];
+    if (row >= 0 && col >= 0) triplets.emplace_back(row, col, value);
+  };
+
+  for (const auto& conv : data.converters) {
+    if (!conv.in_service) continue;
+    const int bus = conv.bus_dc - 1;
+    const double dspec = converter_dc_jacobian_vdc(
+        conv, vdc, data.base_mva, data.loss_model).dpdc_dvdc;
+    add(bus, bus, -dspec);
+  }
+  for (const auto& lcc : data.lcc_converters) {
+    if (!lcc.in_service) continue;
+    const int bus = lcc.dc_bus - 1;
+    add(bus, bus, -lcc_dc_jacobian_vdc(data, lcc, vm, vdc));
+  }
+  for (const auto& dcdc : data.dcdc_converters) {
+    if (!dcdc.in_service) continue;
+    const int bin = dcdc.bus_in - 1;
+    const int bout = dcdc.bus_out - 1;
+    const auto jac = dcdc_jacobian_vdc(dcdc, vdc, data.base_mva);
+    // Pspec,in = -Pin and Pspec,out = +Pout.
+    add(bin, bin, jac.dpin_dvdc_in);
+    add(bin, bout, jac.dpin_dvdc_out);
+    add(bout, bin, -jac.dpout_dvdc_in);
+    add(bout, bout, -jac.dpout_dvdc_out);
+  }
+
+  Eigen::SparseMatrix<double> jacobian(neq, neq);
+  jacobian.setFromTriplets(triplets.begin(), triplets.end());
+  jacobian.makeCompressed();
+  return jacobian;
+}
 
 DCPowerFlowResult DCSolver::solve(const SolverData& data,
                                   const PowerFlowOptions& opt,
@@ -83,7 +156,6 @@ DCPowerFlowResult DCSolver::solve(const SolverData& data,
   Eigen::VectorXd pdc_linear = Eigen::VectorXd::Zero(ndc);
   Eigen::VectorXd pdc_calc = Eigen::VectorXd::Zero(ndc);
   Eigen::VectorXd pdc_spec = Eigen::VectorXd::Zero(ndc);
-  Eigen::MatrixXd jac = Eigen::MatrixXd::Zero(ndc_eq, ndc_eq);
 
   auto eval = [&](const Eigen::VectorXd& vdc_state, Eigen::VectorXd& mismatch_out) {
     assemble_dc_injections(data, vm_dummy, va_dummy, vdc_state, pdc_spec);
@@ -106,52 +178,18 @@ DCPowerFlowResult DCSolver::solve(const SolverData& data,
       break;
     }
 
-    jac.setZero();
-    for (int rk = 0; rk < ndc_eq; ++rk) {
-      const int k = dc_non_slack[static_cast<size_t>(rk)];
-      for (int rl = 0; rl < ndc_eq; ++rl) {
-        const int l = dc_non_slack[static_cast<size_t>(rl)];
-        if (k == l) {
-          jac(rk, rl) = pdc_linear[k] + data.gdc.coeff(k, k) * vdc[k];
-        } else {
-          jac(rk, rl) = data.gdc.coeff(k, l) * vdc[k];
-        }
-      }
-    }
-
-    // The network block above is d(V .* Gdc*V)/dV. Subtract the complete
-    // derivative of pdc_spec(V) so J = d(calc-spec)/dV, matching
-    // J*dx = spec-calc. A central difference deliberately reuses the single
-    // injection assembler and therefore covers VSC, LCC, DCDC and future
-    // voltage-dependent DC devices without solver-specific drift.
-    Eigen::VectorXd pdc_spec_plus = Eigen::VectorXd::Zero(ndc);
-    Eigen::VectorXd pdc_spec_minus = Eigen::VectorXd::Zero(ndc);
-    for (int rl = 0; rl < ndc_eq; ++rl) {
-      const int l = dc_non_slack[static_cast<size_t>(rl)];
-      const double h = 1e-6 * std::max(1.0, std::abs(vdc[l]));
-      Eigen::VectorXd plus = vdc;
-      Eigen::VectorXd minus = vdc;
-      plus[l] += h;
-      minus[l] -= h;
-      assemble_dc_injections(
-          data, vm_dummy, va_dummy, plus, pdc_spec_plus);
-      assemble_dc_injections(
-          data, vm_dummy, va_dummy, minus, pdc_spec_minus);
-      for (int rk = 0; rk < ndc_eq; ++rk) {
-        const int k = dc_non_slack[static_cast<size_t>(rk)];
-        jac(rk, rl) -=
-            (pdc_spec_plus[k] - pdc_spec_minus[k]) / (2.0 * h);
-      }
-    }
-
-    Eigen::FullPivLU<Eigen::MatrixXd> lu(jac);
-    if (!lu.isInvertible()) {
+    const Eigen::SparseMatrix<double> jac = build_dc_newton_jacobian(
+        data, vm_dummy, va_dummy, vdc, dc_non_slack);
+    Eigen::SparseLU<Eigen::SparseMatrix<double>> lu;
+    lu.analyzePattern(jac);
+    lu.factorize(jac);
+    if (lu.info() != Eigen::Success) {
       out.converged = false;
       break;
     }
 
     const Eigen::VectorXd dx = lu.solve(mismatch);
-    if (!dx.allFinite()) {
+    if (lu.info() != Eigen::Success || !dx.allFinite()) {
       out.converged = false;
       break;
     }

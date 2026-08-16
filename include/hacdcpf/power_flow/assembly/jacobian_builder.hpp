@@ -31,6 +31,12 @@ struct JacobianContext {
   std::vector<int> vm_col;
   std::vector<int> vdc_col;
 
+  // Superset PV/PQ layout: every non-slack AC bus owns a Vm column and Q row;
+  // PV rows are replaced by Vm-setpoint identities at evaluation time.
+  bool fixed_pv_pq_layout{false};
+  std::vector<int> fixed_pv_buses;
+  std::vector<double> fixed_pv_targets;
+
   // Augmented equation tracking (Direction 2).
   // Q-rows replaced with Vm setpoint equations.
   std::vector<int> augmented_q_buses;
@@ -153,6 +159,9 @@ struct JacobianPattern {
   std::vector<DCDCCouplingEntry> dcdc_coupling_entries;
   std::vector<DCDroopEntry> dcdc_droop_entries;  ///< always built; droop diagonal + cross-term
   std::vector<LCCEntry> lcc_entries;  ///< always built; LCC AC↔DC coupling
+  /// Compressed-column nonzero indices grouped by row. This makes active-row
+  /// replacement O(nnz(row)) instead of rescanning every matrix column.
+  std::vector<std::vector<int>> row_nz;
   std::vector<int> p_va_diag_nz;
   std::vector<int> p_vm_diag_nz;
   std::vector<int> q_va_diag_nz;

@@ -95,4 +95,10 @@ void aggregate_generation(SolverData& data);
 void aggregate_load_demand(SolverData& data);
 void rebuild_matrices(SolverData& data);
 
+/// Refresh injection/control values without rebuilding network matrices.
+/// Returns false unless the rich model maps one-to-one to the existing direct
+/// canonical layout and all topology/network parameters are unchanged.
+bool refresh_solver_data_values(SolverData& data,
+                                const HybridPowerSystem& sys);
+
 }  // namespace hacdcpf::powerflow

@@ -105,6 +105,10 @@ struct SolverProfiling {
   int jacobian_pattern_rebuilds{0};
   int jacobian_analyze_calls{0};
   int factorization_calls{0};
+  int numeric_refactor_attempts{0};
+  int numeric_refactor_accepted{0};
+  int numeric_refactor_fallbacks{0};
+  double max_refactor_backward_error{0.0};
   int linear_solve_calls{0};
   int regularization_attempts{0};
   int line_search_evaluations{0};
@@ -124,12 +128,39 @@ struct SolverProfiling {
   double eval_jacobian_ms_total{0.0};
   double linear_solve_ms_total{0.0};
   double line_search_ms_total{0.0};
+  double residual_evaluation_ms_total{0.0};
+  double scaling_ms_total{0.0};
+  double active_set_scan_ms_total{0.0};
+  double projection_ms_total{0.0};
+  double assembly_ms_total{0.0};
+  double result_derivation_ms_total{0.0};
+  double solver_core_ms_total{0.0};
+  double unclassified_core_ms_total{0.0};
+  double facade_ms_total{0.0};
+  double unclassified_facade_ms_total{0.0};
+  int prepared_session_rebuilds{0};
+  int prepared_session_reuses{0};
+  int prepared_session_numeric_refreshes{0};
 
   double raw_residual_norm{0.0};
   double scaled_residual_norm{0.0};
   double condition_estimate{0.0};
   int regularization_count{0};
   std::string linear_solver_status{"not_run"};
+
+  // Honest failure diagnosis: the inner Newton loop stopped early because the
+  // residual stalled (see RobustNonlinearOptions::enable_stagnation_detection).
+  bool stagnation_detected{false};
+  // Total iteration count at the stagnation exit (-1 when no stagnation).
+  int stagnation_exit_iteration{-1};
+  // solve_power_flow reached the homotopy stage of the nonlinear escalation
+  // ladder (enable_homotopy_fallback_on_failure).
+  bool homotopy_fallback_attempted{false};
+  bool homotopy_fallback_succeeded{false};
+  int nonlinear_escalation_attempts{0};
+  bool ncp_fallback_attempted{false};
+  bool dc_angle_seed_attempted{false};
+  std::string successful_fallback_stage;
 };
 
 struct ReactiveLimitDiagnostics {

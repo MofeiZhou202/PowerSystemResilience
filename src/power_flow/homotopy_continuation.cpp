@@ -144,21 +144,30 @@ hacdcpf::PowerFlowResult HomotopyContinuationSolver::solve(
   // Disable homotopy recursion in sub-solves (avoid infinite recursion).
   hacdcpf::PowerFlowOptions sub_opt = opt;
   sub_opt.robust_nonlinear.enable_homotopy = false;
+  sub_opt.robust_nonlinear.enable_homotopy_fallback_on_failure = false;
+  sub_opt.initial_state.reset();
 
   // Use a tighter iteration budget per homotopy step to keep total time
-  // bounded.  The full budget is used for the final λ = 1 solve.
+  // bounded. Intermediate continuation points solve the smooth PV/PQ
+  // electrical equations without changing the Q-limit active set. The
+  // caller's complete Q-limit formulation and full budget are restored for
+  // the final lambda = 1 solve, so only the requested endpoint can be
+  // certified. See Allgower & Georg (1990), sec. 2.1, on regular homotopy
+  // paths: discontinuous active-set changes are deferred to the endpoint.
   hacdcpf::PowerFlowOptions step_opt = sub_opt;
   step_opt.max_iter = std::max(10, opt.max_iter / 2);
+  step_opt.enable_pv_pq_conversion = false;
+  step_opt.enable_semi_smooth_newton = false;
 
-  // Initial state: flat start (all voltages = 1.0, zero injections).
-  // λ = 0 is trivially solved by the existing solver.
+  // Initial state: use the authored voltage profile at zero injections. Do not
+  // inherit a caller-supplied failed state; continuation owns its path seed.
   hacdcpf::PowerFlowResult current;
   {
     hacdcpf::HybridPowerSystem base = sys;
     detail::scale_system_by_lambda(base, 0.0);  // zero all injections
-    current = solve_hybrid(base, sub_opt);
-    // For a zero-injection system the solver always converges trivially.
-    // If it doesn't, something is structurally wrong; bail out early.
+    current = solve_hybrid(base, step_opt);
+    // If the unconstrained electrical base point does not converge, the
+    // continuation path cannot be initialized; bail out early.
     if (!current.converged) {
       homotopy_out.failed = true;
       return current;
@@ -166,6 +175,7 @@ hacdcpf::PowerFlowResult HomotopyContinuationSolver::solve(
   }
 
   homotopy_out.lambda = 0.0;
+  bool endpoint_certification_failed = false;
 
   while (homotopy_out.lambda < 1.0 - 1e-12) {
     if (homotopy_out.accepted_steps + homotopy_out.rejected_steps >=
@@ -186,8 +196,7 @@ hacdcpf::PowerFlowResult HomotopyContinuationSolver::solve(
     detail::scale_system_by_lambda(trial_sys, lambda_next);
 
     // Warm-start from the last accepted solution.
-    hacdcpf::PowerFlowOptions trial_opt =
-        (lambda_next >= 1.0 - 1e-12) ? sub_opt : step_opt;
+    hacdcpf::PowerFlowOptions trial_opt = step_opt;
     trial_opt.initial_state =
         hacdcpf::InitialState{current.vm, current.va, current.vdc};
 
@@ -208,14 +217,29 @@ hacdcpf::PowerFlowResult HomotopyContinuationSolver::solve(
   }
 
   if (!homotopy_out.failed && std::abs(homotopy_out.lambda - 1.0) < 1e-12) {
-    // Final solve at full loading (possibly already done above if the last
-    // step landed exactly at λ = 1).
+    // The regular path reaches the unconstrained full-loading root first.
+    // Activate Q limits only as a separate endpoint solve so a rejected
+    // active-set step cannot masquerade as a failed continuation increment.
+    hacdcpf::PowerFlowOptions endpoint_opt = sub_opt;
+    endpoint_opt.initial_state =
+        hacdcpf::InitialState{current.vm, current.va, current.vdc};
+    current = solve_hybrid(sys, endpoint_opt);
     if (!current.converged) {
+      endpoint_certification_failed = true;
       homotopy_out.failed = true;
     }
   }
 
-  if (homotopy_out.failed || homotopy_out.lambda < 1.0 - 1e-12) {
+  if (endpoint_certification_failed) {
+    current.converged = false;
+    current.diagnostics.converged = false;
+    current.diagnostics.termination_reason =
+        "Homotopy reached lambda=1, but the Q-limit endpoint solve did not "
+        "converge";
+    current.diagnostics.warnings.push_back(
+        "The unconstrained full-loading root was reached, but the returned "
+        "state is not a Q-limit-certified solution of the requested system.");
+  } else if (homotopy_out.failed || homotopy_out.lambda < 1.0 - 1e-12) {
     current.converged = false;
     current.residual = std::numeric_limits<double>::infinity();
     current.diagnostics.converged = false;

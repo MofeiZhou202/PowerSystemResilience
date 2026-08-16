@@ -14,6 +14,30 @@
 
 namespace hacdcpf::powerflow {
 
+namespace {
+
+bool same_sparse_pattern(const Eigen::SparseMatrix<double>& matrix,
+                         const std::vector<int>& outer,
+                         const std::vector<int>& inner) {
+  if (outer.size() != static_cast<size_t>(matrix.outerSize() + 1) ||
+      inner.size() != static_cast<size_t>(matrix.nonZeros())) {
+    return false;
+  }
+  return std::equal(outer.begin(), outer.end(), matrix.outerIndexPtr()) &&
+         std::equal(inner.begin(), inner.end(), matrix.innerIndexPtr());
+}
+
+void capture_sparse_pattern(const Eigen::SparseMatrix<double>& matrix,
+                            std::vector<int>& outer,
+                            std::vector<int>& inner) {
+  outer.assign(matrix.outerIndexPtr(),
+               matrix.outerIndexPtr() + matrix.outerSize() + 1);
+  inner.assign(matrix.innerIndexPtr(),
+               matrix.innerIndexPtr() + matrix.nonZeros());
+}
+
+}  // namespace
+
 // ─── GMRES(m) ─────────────────────────────────────────────────────────────
 
 GmresStats gmres_solve(
@@ -160,7 +184,12 @@ bool SchurBlockPreconditioner::build(const Eigen::SparseMatrix<double>& jacobian
   // Factor AC block A = J[0:n_ac_, 0:n_ac_].
   if (n_ac_ > 0) {
     Eigen::SparseMatrix<double> A = jacobian.topLeftCorner(n_ac_, n_ac_);
-    lu_A_.analyzePattern(A);
+    A.makeCompressed();
+    if (!same_sparse_pattern(A, a_outer_, a_inner_)) {
+      lu_A_.analyzePattern(A);
+      capture_sparse_pattern(A, a_outer_, a_inner_);
+      ++symbolic_analysis_count_;
+    }
     lu_A_.factorize(A);
     if (lu_A_.info() != Eigen::Success) {
       return false;
@@ -170,7 +199,12 @@ bool SchurBlockPreconditioner::build(const Eigen::SparseMatrix<double>& jacobian
   // Factor DC block D = J[n_ac_:, n_ac_:].
   if (n_dc_ > 0) {
     Eigen::SparseMatrix<double> D = jacobian.bottomRightCorner(n_dc_, n_dc_);
-    lu_D_.analyzePattern(D);
+    D.makeCompressed();
+    if (!same_sparse_pattern(D, d_outer_, d_inner_)) {
+      lu_D_.analyzePattern(D);
+      capture_sparse_pattern(D, d_outer_, d_inner_);
+      ++symbolic_analysis_count_;
+    }
     lu_D_.factorize(D);
     if (lu_D_.info() != Eigen::Success) {
       return false;
@@ -218,7 +252,8 @@ NKLinearResult newton_krylov_step(const Eigen::SparseMatrix<double>& jacobian,
                                    bool use_schur,
                                    int gmres_restart,
                                    int gmres_max_outer,
-                                   double gmres_tol) {
+                                   double gmres_tol,
+                                   SchurBlockPreconditioner* schur_cache) {
   NKLinearResult result;
   result.step = Eigen::VectorXd::Zero(rhs.size());
 
@@ -228,7 +263,9 @@ NKLinearResult newton_krylov_step(const Eigen::SparseMatrix<double>& jacobian,
   };
 
   // Build preconditioner.
-  SchurBlockPreconditioner schur_prec;
+  SchurBlockPreconditioner local_schur_prec;
+  SchurBlockPreconditioner& schur_prec =
+      schur_cache != nullptr ? *schur_cache : local_schur_prec;
   std::function<Eigen::VectorXd(const Eigen::VectorXd&)> prec_solve;
 
   if (use_schur && schur_prec.build(jacobian, ctx)) {

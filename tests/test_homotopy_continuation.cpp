@@ -2,6 +2,7 @@
 #include <catch2/catch_approx.hpp>
 
 #include "hacdcpf/power_flow/homotopy_continuation.hpp"
+#include "hacdcpf/api/hacdcpf.hpp"
 #include "power_flow_solver_test_utils.hpp"
 
 TEST_CASE("Homotopy continuation reaches the full loading endpoint",
@@ -103,4 +104,55 @@ TEST_CASE("Homotopy class interface fails honestly before full loading",
   CHECK(std::isinf(result.residual));
   CHECK(result.diagnostics.termination_reason.find("lambda=1") !=
         std::string::npos);
+}
+
+TEST_CASE("Public power-flow escalation accepts the earliest successful stage",
+          "[power_flow][escalation][fallback]") {
+  auto sys = hacdcpf::test::make_two_bus_voltage_stability_case();
+  sys.ac.buses[1].pd_mw = 60.0;
+  sys.ac.buses[1].qd_mvar = 24.0;
+  hacdcpf::PowerFlowOptions options;
+  options.max_iter = 5;
+  options.tol = 1e-10;
+  options.initial_state = hacdcpf::InitialState{{1.0, 100.0}, {0.0, 100.0}, {}};
+  options.robust_nonlinear.enable_homotopy_fallback_on_failure = true;
+  options.enable_pv_pq_conversion = false;
+  options.robust_nonlinear.homotopy_step0 = 0.1;
+  options.robust_nonlinear.homotopy_step_max = 0.25;
+  options.robust_nonlinear.homotopy_max_steps = 30;
+
+  const auto result = hacdcpf::solve_power_flow(sys, options);
+
+  REQUIRE(result.converged);
+  REQUIRE(result.profiling.nonlinear_escalation_attempts >= 1);
+  CHECK(result.profiling.successful_fallback_stage ==
+        "dc_angle_fixed_active_set");
+  CHECK_FALSE(result.profiling.ncp_fallback_attempted);
+  CHECK_FALSE(result.profiling.homotopy_fallback_attempted);
+  CHECK(result.diagnostics.warnings.back().find("[PF-ESCALATION-01]") !=
+        std::string::npos);
+}
+
+TEST_CASE("LM recovery analyzes the normal-equation pattern independently",
+          "[power_flow][lm][fallback]") {
+  const auto sys = hacdcpf::test::make_two_bus_voltage_stability_case();
+  hacdcpf::PowerFlowOptions options;
+  options.max_iter = 1;
+  options.max_line_search_steps = 1;
+  options.max_regularization_steps = 0;
+  options.enable_pv_pq_conversion = false;
+  options.initial_state =
+      hacdcpf::InitialState{{1.0, 0.2}, {0.0, 3.0}, {}};
+  options.robust_nonlinear.armijo_c = 0.999999;
+  options.robust_nonlinear.enable_auto_fallback_scheduling = true;
+  options.robust_nonlinear.enable_lm_trust_region_fallback = true;
+  options.robust_nonlinear.enable_ptc_ser = false;
+  options.robust_nonlinear.enable_homotopy_fallback_on_failure = false;
+
+  const auto result = hacdcpf::solve_power_flow(sys, options);
+
+  CHECK(result.profiling.jacobian_pattern_rebuilds == 1);
+  CHECK(result.profiling.jacobian_analyze_calls == 2);
+  CHECK(result.profiling.factorization_calls >= 2);
+  CHECK(result.profiling.linear_solve_calls >= 2);
 }

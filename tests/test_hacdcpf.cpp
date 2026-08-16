@@ -365,6 +365,61 @@ TEST_CASE("Solver handle: reset and re-solve", "[power_flow][handle]") {
   destroy_solver_handle(h);
 }
 
+TEST_CASE("Prepared PF session reuses structure and rebuilds on network change",
+          "[power_flow][prepared_session]") {
+  using namespace hacdcpf;
+
+  auto sys = make_simple_ac_system();
+  PowerFlowOptions options;
+  options.enable_solver_profiling = true;
+  options.robust_nonlinear.enable_fixed_pv_pq_layout = true;
+  PreparedPowerFlowSession session(options);
+
+  const auto first = session.solve(sys);
+  REQUIRE(first.converged);
+  CHECK(first.profiling.prepared_session_rebuilds == 1);
+  CHECK(first.profiling.projection_ms_total >= 0.0);
+  CHECK(first.profiling.assembly_ms_total >= 0.0);
+
+  const auto repeated = session.solve(sys);
+  REQUIRE(repeated.converged);
+  CHECK(repeated.profiling.prepared_session_reuses == 1);
+  CHECK(repeated.profiling.projection_ms_total == 0.0);
+  CHECK(repeated.profiling.assembly_ms_total == 0.0);
+  CHECK(repeated.profiling.jacobian_pattern_rebuilds == 0);
+  REQUIRE(repeated.vm.size() == first.vm.size());
+  for (size_t i = 0; i < first.vm.size(); ++i) {
+    CHECK(repeated.vm[i] == Catch::Approx(first.vm[i]).margin(1e-8));
+  }
+
+  sys.ac.buses.back().pd_mw *= 1.01;
+  const auto refreshed = session.solve(sys);
+  REQUIRE(refreshed.converged);
+  CHECK(refreshed.profiling.prepared_session_numeric_refreshes == 1);
+  CHECK(refreshed.profiling.projection_ms_total == 0.0);
+  CHECK(refreshed.profiling.assembly_ms_total == 0.0);
+  CHECK(refreshed.profiling.jacobian_pattern_rebuilds == 0);
+  const auto direct_refreshed = solve_power_flow(sys, options);
+  REQUIRE(direct_refreshed.converged);
+  REQUIRE(refreshed.vm.size() == direct_refreshed.vm.size());
+  for (size_t i = 0; i < refreshed.vm.size(); ++i) {
+    CHECK(refreshed.vm[i] ==
+          Catch::Approx(direct_refreshed.vm[i]).margin(1e-10));
+    CHECK(refreshed.va[i] ==
+          Catch::Approx(direct_refreshed.va[i]).margin(1e-10));
+  }
+  CHECK(refreshed.profiling.solver_core_ms_total >=
+        refreshed.profiling.eval_jacobian_ms_total);
+  CHECK(refreshed.profiling.facade_ms_total >=
+        refreshed.profiling.solver_core_ms_total);
+
+  sys.ac.branches.front().x_pu *= 1.01;
+  const auto rebuilt = session.solve(sys);
+  REQUIRE(rebuilt.converged);
+  CHECK(rebuilt.profiling.prepared_session_rebuilds == 2);
+  CHECK(rebuilt.profiling.jacobian_pattern_rebuilds == 1);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Tests: DC OPF
 // ═══════════════════════════════════════════════════════════════════════════════

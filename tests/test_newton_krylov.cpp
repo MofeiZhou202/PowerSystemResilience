@@ -34,6 +34,33 @@ TEST_CASE("Newton-Krylov GMRES solves a coupled AC-DC block system",
   CHECK((result.step - expected).lpNorm<Eigen::Infinity>() < 1e-10);
 }
 
+TEST_CASE("Newton-Krylov Schur preconditioner reuses symbolic analysis",
+          "[power_flow][newton_krylov][performance]") {
+  Eigen::SparseMatrix<double> jacobian(3, 3);
+  jacobian.insert(0, 0) = 4.0;
+  jacobian.insert(0, 1) = 1.0;
+  jacobian.insert(0, 2) = 0.5;
+  jacobian.insert(1, 0) = 1.0;
+  jacobian.insert(1, 1) = 3.0;
+  jacobian.insert(1, 2) = 0.25;
+  jacobian.insert(2, 2) = 2.0;
+  jacobian.makeCompressed();
+
+  hacdcpf::powerflow::JacobianContext context;
+  context.np = 1;
+  context.nq = 1;
+  context.ndc_eq = 1;
+  hacdcpf::powerflow::SchurBlockPreconditioner preconditioner;
+  REQUIRE(preconditioner.build(jacobian, context));
+  CHECK(preconditioner.symbolic_analysis_count() == 2);
+
+  for (int k = 0; k < jacobian.nonZeros(); ++k) {
+    jacobian.valuePtr()[k] *= 1.01;
+  }
+  REQUIRE(preconditioner.build(jacobian, context));
+  CHECK(preconditioner.symbolic_analysis_count() == 2);
+}
+
 TEST_CASE("GMRES never accepts a small preconditioned residual as a true solution",
           "[power_flow][newton_krylov][math_audit][B7]") {
   const double scale = 1e6;

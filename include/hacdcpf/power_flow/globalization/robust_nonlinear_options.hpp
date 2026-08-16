@@ -52,6 +52,14 @@ struct RobustNonlinearOptions {
   /// separately via PowerFlowOptions::regularization_lambda0).
   double tiny_pivot_threshold{1e-12};
 
+  /// Reuse KLU's existing pivot order for numeric-only refactorization when
+  /// the Jacobian pattern is unchanged. Every candidate solve is guarded by a
+  /// normwise backward-error test and falls back to fresh pivoting on failure.
+  bool enable_klu_numeric_refactor{true};
+
+  /// Maximum accepted normwise backward error for a refactorized solve.
+  double refactor_backward_error_tolerance{1e-8};
+
   // ── Phase 2: Nonmonotone line search ──────────────────────────────
   /// Replace standard monotone backtracking with a nonmonotone Armijo search
   /// (Grippo–Lampariello–Lucidi style).  Accepts a step if the merit function
@@ -111,6 +119,12 @@ struct RobustNonlinearOptions {
   /// Hysteresis band on Q-limit proximity (pu) before switching PV→PQ.
   double q_limit_hysteresis{1e-4};
 
+  // Allocate a superset AC Jacobian with Vm/Q coordinates for every non-slack
+  // bus. PV rows are pinned to Vm setpoints; PQ rows retain Q-balance
+  // equations. This preserves sparse coordinates across Q-limit switches.
+  // Mutually exclusive with semi-smooth NCP in the current implementation.
+  bool enable_fixed_pv_pq_layout{true};
+
   // ── Phase 3: Levenberg–Marquardt trust-region fallback ────────────
   /// When the Newton line search fails (or the Jacobian is flagged bad),
   /// compute an LM step that minimises ½‖F‖₂² via (JᵀJ + λI)Δx = −JᵀF.
@@ -151,9 +165,44 @@ struct RobustNonlinearOptions {
   /// SER exponent γ: δt_{k+1} = δt_k · (r_{k-1}/r_k)^γ.
   double ptc_gamma{0.7};
 
+  // ── Stagnation detection and failure escalation ───────────────────
+  /// Stop the inner Newton loop early when the best convergence residual has
+  /// not improved by at least stagnation_min_rel_improvement (cumulatively)
+  /// over the last stagnation_window iterations while it remains above
+  /// stagnation_residual_threshold. Applies only to the default LineSearch
+  /// globalization: TrustRegion and PseudoTransient are explicitly chosen
+  /// slow-but-robust modes where long residual plateaus are expected.
+  bool enable_stagnation_detection{true};
+
+  /// Iterations without sufficient cumulative improvement before the inner
+  /// Newton loop is declared stagnant.
+  int stagnation_window{15};
+
+  /// Minimum cumulative relative improvement of the best residual required
+  /// within each stagnation_window (0.10 = the best residual must fall by at
+  /// least 10% every stagnation_window iterations).
+  double stagnation_min_rel_improvement{0.10};
+
+  /// Only classify a plateau as failure while its scaled/raw convergence
+  /// residual exceeds this value. Near-root slow progress remains governed by
+  /// max_iter because local Newton convergence may legitimately take several
+  /// small or damped steps.
+  double stagnation_residual_threshold{1.0};
+
+  /// When the direct Newton attempt ends non-converged for numerical reasons
+  /// (stagnation, divergence, or iteration-budget exhaustion) and the
+  /// equation set is structurally closed, solve_power_flow runs the default
+  /// escalation ladder: semi-smooth NCP, network-aware DC-angle seed with the
+  /// fixed-layout active set, DC-angle-seeded NCP, then homotopy continuation.
+  /// Each attempted stage is reported in SolverProfiling. Disable this field
+  /// to benchmark the direct Newton path in isolation.
+  bool enable_homotopy_fallback_on_failure{true};
+
   // ── Phase 4: Homotopy continuation compatibility fields ──────────
-  /// Reserved for callers that explicitly invoke HomotopyContinuationSolver.
-  /// NewtonSolver does not automatically dispatch to homotopy when it fails.
+  /// Used by callers that explicitly invoke HomotopyContinuationSolver.
+  /// NewtonSolver does not automatically dispatch to homotopy when it fails;
+  /// the solve_power_flow escalation ladder is controlled separately by
+  /// enable_homotopy_fallback_on_failure above.
   bool enable_homotopy{true};
 
   /// Initial homotopy parameter increment Δλ ∈ (0, 1].
@@ -189,7 +238,7 @@ struct RobustNonlinearOptions {
   /// fallbacks were only available when opt.globalization was set explicitly to
   /// TrustRegion or PseudoTransient.
   /// Requires enable_lm_trust_region_fallback or enable_ptc_ser to be true.
-  bool enable_auto_fallback_scheduling{false};
+  bool enable_auto_fallback_scheduling{true};
 
   // ── Phase 5: Newton-Krylov parameters ────────────────────────────
   /// Proxy condition number above which the NK-GMRES fallback is triggered

@@ -422,6 +422,82 @@ TEST_CASE("Tier3 MATPOWER: case_ACTIVSg10k converges", "[matpower][tier3][power_
     REQUIRE(r.converged);
 }
 
+TEST_CASE("Hard MATPOWER flat starts use the default nonlinear escalation ladder",
+          "[matpower][power_flow][flat_start][large]") {
+    struct AcceptanceCase {
+        const char* filename;
+        const char* expected_stage;
+    };
+    const std::vector<AcceptanceCase> cases{
+        {"case1888rte.m", "dc_angle_fixed_active_set"},
+        {"case3375wp.m", "semi_smooth_ncp"},
+        {"case6468rte.m", "dc_angle_fixed_active_set"},
+        {"case6515rte.m", "dc_angle_fixed_active_set"},
+        {"case_ACTIVSg10k.m", "dc_angle_fixed_active_set"},
+    };
+
+    for (const auto& acceptance : cases) {
+        DYNAMIC_SECTION(acceptance.filename) {
+            auto sys = load_case(acceptance.filename);
+            for (auto& bus : sys.ac.buses) {
+                bus.vm_pu = 1.0;
+                bus.va_deg = 0.0;
+            }
+            PowerFlowOptions options;
+            options.max_iter = 80;
+            options.tol = 1e-8;
+            const auto result = solve_power_flow(sys, options);
+
+            REQUIRE(result.converged);
+            CHECK(result.reactive_limits.certified);
+            CHECK(result.reactive_limits.max_violation_pu <= options.tol);
+            CHECK(result.profiling.nonlinear_escalation_attempts >= 1);
+            CHECK(result.profiling.ncp_fallback_attempted);
+            CHECK(result.profiling.successful_fallback_stage ==
+                  acceptance.expected_stage);
+            CHECK_FALSE(result.profiling.homotopy_fallback_attempted);
+        }
+    }
+}
+
+TEST_CASE("Well-behaved flat start stays on direct fixed-layout Newton",
+          "[matpower][power_flow][flat_start][tier1]") {
+    auto sys = load_case("case118.m");
+    for (auto& bus : sys.ac.buses) {
+        bus.vm_pu = 1.0;
+        bus.va_deg = 0.0;
+    }
+    PowerFlowOptions options;
+    options.max_iter = 80;
+    options.tol = 1e-8;
+    const auto result = solve_power_flow(sys, options);
+
+    REQUIRE(result.converged);
+    CHECK(result.reactive_limits.certified);
+    CHECK(result.iterations <= 19);
+    CHECK(result.profiling.nonlinear_escalation_attempts == 0);
+    CHECK(result.profiling.successful_fallback_stage.empty());
+}
+
+TEST_CASE("KLU refactor audit falls back to fresh pivoting when rejected",
+          "[matpower][power_flow][klu][refactor]") {
+    const auto sys = load_case("case118.m");
+    PowerFlowOptions options;
+    options.tol = 1e-8;
+    options.robust_nonlinear.enable_homotopy_fallback_on_failure = false;
+    options.robust_nonlinear.refactor_backward_error_tolerance = 0.0;
+    const auto result = solve_power_flow(sys, options);
+
+    REQUIRE(result.converged);
+    if (result.profiling.linear_solver_backend.find("KLU") != std::string::npos) {
+        REQUIRE(result.profiling.numeric_refactor_attempts > 0);
+        CHECK(result.profiling.numeric_refactor_fallbacks ==
+              result.profiling.numeric_refactor_attempts);
+        CHECK(result.profiling.numeric_refactor_accepted == 0);
+        CHECK(result.profiling.factorization_calls > result.iterations - 1);
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Tier 2 – additional small/medium cases (≤3000 buses)
 // ─────────────────────────────────────────────────────────────────────────────
