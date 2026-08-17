@@ -1661,6 +1661,14 @@ static void merge_zero_impedance_buses_impl(
         const auto candidate = merge_branch_semantics->find(br.index);
         if (candidate == merge_branch_semantics->end()) continue;
         semantics = candidate->second;
+      } else if (br.ideal_connectivity) {
+        // Standalone-utility path only (project_to_canonical_models always
+        // passes a provenance whitelist). Honor the authored equivalence-relation
+        // flag so this entry point agrees with the projection path on ideal
+        // connectivity even when authored r/x are at/above the numeric threshold
+        // (R-04, docs/data_structure_design_review.md). The threshold branch
+        // below is retained for backward-compatible ideal-transformer contraction.
+        semantics = MergeSemantics::ExactIdeal;
       } else if (br.r_pu == 0.0 && br.x_pu == 0.0) {
         semantics = MergeSemantics::ExactIdeal;
       }
@@ -1917,6 +1925,13 @@ static void merge_zero_impedance_buses_impl(
 }
 
 void merge_zero_impedance_buses(HybridPowerSystem& sys, bool allow_merge) {
+  // Standalone utility. Policy (R-04, docs/data_structure_design_review.md):
+  // contracts exactly-zero branches and ACBranch::ideal_connectivity rows
+  // (regardless of magnitude), plus a backward-compatible numeric-threshold
+  // contraction of tiny-impedance branches with no charging and unit tap. This
+  // threshold behavior is intentional and covered by test_component_models_math_
+  // audit; the stricter provenance-whitelist policy lives in
+  // project_to_canonical_models, which never uses this nullptr path.
   merge_zero_impedance_buses_impl(sys, allow_merge, nullptr,
                                   kBusMergeZThreshold, nullptr);
 }
@@ -2340,6 +2355,97 @@ static void expand_energy_routers(
   sys.energy_routers.clear();
 }
 
+// Detect DC buses with no connectivity path to any DC source, mirroring the AC
+// strip_dead_islands source test on the DC side. Projection does NOT remove DC
+// dead islands here (DC bus renumbering is owned by canonicalize_dc_bus_indices);
+// this detection records the offending DC bus IDs so the projection boundary is
+// auditable (R-01/R-02, docs/data_structure_design_review.md). AC strip can also
+// orphan a DC bus by removing the converter that fed it.
+static std::vector<int> detect_dc_dead_buses(const HybridPowerSystem& sys) {
+  const int n = static_cast<int>(sys.dc.buses.size());
+  if (n == 0) return {};
+  std::unordered_map<int, int> idx_to_pos;
+  idx_to_pos.reserve(static_cast<size_t>(n));
+  for (int i = 0; i < n; ++i)
+    idx_to_pos[sys.dc.buses[static_cast<size_t>(i)].index] = i;
+
+  std::vector<std::vector<int>> adj(static_cast<size_t>(n));
+  auto connect = [&](int a, int b) {
+    const auto ia = idx_to_pos.find(a);
+    const auto ib = idx_to_pos.find(b);
+    if (ia == idx_to_pos.end() || ib == idx_to_pos.end()) return;
+    adj[static_cast<size_t>(ia->second)].push_back(ib->second);
+    adj[static_cast<size_t>(ib->second)].push_back(ia->second);
+  };
+  for (const auto& br : sys.dc.branches)
+    if (br.in_service) connect(br.from_bus, br.to_bus);
+  // DCDC converters couple their two DC terminals into one connectivity island.
+  for (const auto& c : sys.dc.dcdc_converters)
+    if (c.in_service) connect(c.bus_in, c.bus_out);
+
+  std::vector<int> comp_id(static_cast<size_t>(n), -1);
+  std::vector<std::vector<int>> components;
+  for (int i = 0; i < n; ++i) {
+    if (comp_id[static_cast<size_t>(i)] >= 0) continue;
+    const int cid = static_cast<int>(components.size());
+    components.emplace_back();
+    std::queue<int> q;
+    q.push(i);
+    comp_id[static_cast<size_t>(i)] = cid;
+    while (!q.empty()) {
+      const int cur = q.front();
+      q.pop();
+      components.back().push_back(cur);
+      for (int nb : adj[static_cast<size_t>(cur)]) {
+        if (comp_id[static_cast<size_t>(nb)] >= 0) continue;
+        comp_id[static_cast<size_t>(nb)] = cid;
+        q.push(nb);
+      }
+    }
+  }
+
+  std::vector<std::unordered_set<int>> comp_buses(components.size());
+  for (size_t c = 0; c < components.size(); ++c)
+    for (int pos : components[c])
+      comp_buses[c].insert(sys.dc.buses[static_cast<size_t>(pos)].index);
+
+  // A component is alive if any member bus is or hosts a DC source: a DC_V
+  // (voltage-forming) bus, an in-service DC source with positive output, or an
+  // in-service converter that injects into the DC bus (VSC bus_dc / LCC dc_bus).
+  auto has_source = [&](size_t c) -> bool {
+    const auto& bset = comp_buses[c];
+    for (int pos : components[c]) {
+      const auto& bus = sys.dc.buses[static_cast<size_t>(pos)];
+      if (bus.in_service && bus.bus_type == DCBusType::DC_V) return true;
+    }
+    for (const auto& g : sys.dc.static_generators)
+      if (g.in_service && bset.count(g.bus) && g.p_mw * g.scaling > 1e-9)
+        return true;
+    for (const auto& g : sys.dc.dc_static_generators)
+      if (g.in_service && bset.count(g.bus) && g.p_set_mw * g.scaling > 1e-9)
+        return true;
+    for (const auto& a : sys.dc.pv_arrays)
+      if (a.in_service && bset.count(a.bus) && a.p_set_mw > 1e-9) return true;
+    for (const auto& s : sys.dc.storage)
+      if (s.in_service && bset.count(s.bus) && s.p_mw > 1e-9) return true;
+    for (const auto& s : sys.dc.dc_storage)
+      if (s.in_service && bset.count(s.bus) && s.p_mw > 1e-9) return true;
+    for (const auto& v : sys.vsc_converters)
+      if (v.in_service && bset.count(v.bus_dc)) return true;
+    for (const auto& l : sys.lcc_converters)
+      if (l.in_service && bset.count(l.dc_bus)) return true;
+    return false;
+  };
+
+  std::vector<int> dead;
+  for (size_t c = 0; c < components.size(); ++c)
+    if (!has_source(c))
+      for (int pos : components[c])
+        dead.push_back(sys.dc.buses[static_cast<size_t>(pos)].index);
+  std::sort(dead.begin(), dead.end());
+  return dead;
+}
+
 // Internal helper: project a mutable HybridPowerSystem in place.
 static void project_in_place(HybridPowerSystem& out,
                              const ProjectionOptions& options) {
@@ -2611,6 +2717,25 @@ static void project_in_place(HybridPowerSystem& out,
   // Reconfiguration skips this so open ties into de-energised sections
   // remain valid reconnection candidates.
   if (options.strip_dead_islands) strip_dead_islands(out);
+
+  // R-01/R-02: report (do not remove) DC-side dead islands so the projection
+  // boundary is auditable. AC strip above can also orphan a DC bus by removing
+  // the converter that fed it. See docs/data_structure_design_review.md.
+  {
+    const std::vector<int> dc_dead = detect_dc_dead_buses(out);
+    if (!dc_dead.empty()) {
+      std::string msg = "DC dead-island detection: " +
+                        std::to_string(dc_dead.size()) +
+                        " DC bus(es) have no source path and are NOT stripped"
+                        " (indices:";
+      for (int id : dc_dead) msg += " " + std::to_string(id);
+      msg +=
+          "); validate DC source connectivity or expect a singular DC "
+          "conductance matrix.";
+      projection_certificate.diagnostics.push_back(std::move(msg));
+    }
+  }
+
   if (out.bus_merge_map) {
     out.bus_merge_map->projection_mode = options.mode;
     out.bus_merge_map->impedance_threshold = options.impedance_threshold;

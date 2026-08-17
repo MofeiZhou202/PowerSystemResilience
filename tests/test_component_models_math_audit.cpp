@@ -2,6 +2,8 @@
 #include <cmath>
 #include <limits>
 #include <string>
+#include <type_traits>
+#include <unordered_map>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
@@ -14,6 +16,7 @@
 #include "hacdcpf/model/enum_strings.hpp"
 #include "hacdcpf/model/standard_parameter_library.hpp"
 #include "hacdcpf/model/typical_parameters.hpp"
+#include "hacdcpf/model/typed_ids.hpp"
 #include "hacdcpf/model/unit_conversion.hpp"
 #include "hacdcpf/optimal_power_flow/formulation.hpp"
 #include "hacdcpf/projection/project_to_canonical.hpp"
@@ -736,4 +739,90 @@ TEST_CASE("typical and standard parameter paths preserve authored operating stat
                     matrix_report.diagnostics.end(), [](const auto& item) {
                       return item.code == "three_phase_line_zero_series_impedance";
                     }));
+}
+
+TEST_CASE("R-01/R-02: DC dead islands are detected and reported in the certificate",
+          "[model_audit][projection][dc][dead_island]") {
+  HybridPowerSystem sys;
+  sys.base_mva = sys.ac.base_mva = sys.dc.base_mva = 100.0;
+  // A healthy AC island with a slack source keeps AC strip from firing.
+  sys.ac.buses = {make_bus(1, BusType::SLACK), make_bus(2, BusType::PQ)};
+  ACBranch line;
+  line.index = 1;
+  line.from_bus = 1;
+  line.to_bus = 2;
+  line.r_pu = 0.01;
+  line.x_pu = 0.10;
+  sys.ac.branches = {line};
+  ExternalGrid grid;
+  grid.index = 1;
+  grid.bus = 1;
+  sys.ac.external_grids = {grid};
+
+  // A DC bus with no source, no branch, and no converter feeding it: a DC dead
+  // island the projection reports (but does not strip).
+  DCBus orphan;
+  orphan.index = 5;
+  orphan.bus_type = DCBusType::DC_P;
+  orphan.base_kv = 0.75;
+  sys.dc.buses = {orphan};
+
+  const auto projected = project_to_canonical_models(sys);
+  REQUIRE(projected.projection_certificate.has_value());
+  const auto& diags = projected.projection_certificate->diagnostics;
+  const bool reported =
+      std::any_of(diags.begin(), diags.end(), [](const std::string& d) {
+        return d.find("DC dead-island") != std::string::npos;
+      });
+  CHECK(reported);
+}
+
+TEST_CASE("R-04: standalone merge honors ideal_connectivity above the numeric threshold",
+          "[model_audit][projection][merge]") {
+  // Impedance well ABOVE kBusMergeZThreshold (1e-4): only the authored
+  // ideal_connectivity flag — not the magnitude — may trigger contraction.
+  HybridPowerSystem ideal;
+  ideal.base_mva = ideal.ac.base_mva = 100.0;
+  ideal.ac.buses = {make_bus(1, BusType::SLACK), make_bus(2, BusType::PQ)};
+  ACBranch tie;
+  tie.index = 1;
+  tie.from_bus = 1;
+  tie.to_bus = 2;
+  tie.r_pu = 0.02;
+  tie.x_pu = 0.05;
+  tie.ideal_connectivity = true;
+  ideal.ac.branches = {tie};
+  merge_zero_impedance_buses(ideal);
+  CHECK(ideal.ac.buses.size() == 1);
+
+  // Same impedance but NOT marked ideal: a real short line must remain a branch.
+  HybridPowerSystem control;
+  control.base_mva = control.ac.base_mva = 100.0;
+  control.ac.buses = {make_bus(1, BusType::SLACK), make_bus(2, BusType::PQ)};
+  ACBranch real_line = tie;
+  real_line.ideal_connectivity = false;
+  control.ac.branches = {real_line};
+  merge_zero_impedance_buses(control);
+  CHECK(control.ac.buses.size() == 2);
+}
+
+TEST_CASE("typed IDs keep the three index spaces separate at compile time",
+          "[model_audit][typed_ids]") {
+  // Iron rule #2: the three integer index spaces must not be interchangeable.
+  static_assert(!std::is_convertible_v<StableBusId, VectorPos>);
+  static_assert(!std::is_convertible_v<VectorPos, NodeIdx>);
+  static_assert(!std::is_convertible_v<NodeIdx, StableBusId>);
+  static_assert(!std::is_convertible_v<int, StableBusId>);  // explicit only
+
+  const StableBusId a{3};
+  const StableBusId b{3};
+  const VectorPos p{2};
+  CHECK(a == b);
+  CHECK(a.value() == 3);
+  CHECK(p.value() == 2);
+  CHECK_FALSE(StableBusId{}.valid());  // default is the invalid sentinel
+
+  std::unordered_map<StableBusId, int> by_id;
+  by_id[a] = 7;
+  CHECK(by_id.at(b) == 7);
 }

@@ -43,6 +43,7 @@ source-backed defects.
 | Topic | Class | Primary document | Companion material |
 |---|---|---|---|
 | Component models and validation | Implementation reference | [Component-model audit source](ComponentModels/component_models_math_audit.tex) | [Registered parameter system](parameter_system.md) |
+| Core data structures, relations, and API contract | Contract | [Data structure and API contract (数据结构与 API 契约)](data_structure_api_contract.md) | [Design review (设计评审与缺陷清单)](data_structure_design_review.md), [per-module internal structures (各模块内部数据结构)](module_data_structures.md) |
 | Rich-to-canonical projection and result recovery | Contract | [Projection and result attribution](projection_and_results.md) | Component and power-flow manuals |
 | Graph topology, reduction, and recovery | Contract | [Graph and reduction runtime](graph_runtime_contract.md) | Projection and result attribution |
 | Editable parameters and effective values | Contract | [Registered parameter system](parameter_system.md) | [Distribution parameter standards](distribution_parameter_completion_standards.md) |
