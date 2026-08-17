@@ -1,0 +1,67 @@
+% 第 7 章：选项与结果数据结构
+\section{选项与结果数据结构}\label{sec:res-io}
+
+\subsection{弹性研究选项 \texttt{DistributionResilienceOptions}}
+\compmeta{DistributionResilienceOptions}{include/hacdcpf/resilience/resilience\_assessment.hpp:180}
+\begin{paramtable}
+\fld{model} & — & — & 枚举 & Heuristic & 恢复模型选择（3 选 1）\\
+\fld{horizon\_hours} & $T$ & 小时 & $24\sim168$ & 48 & 研究时域\\
+\fld{time\_step\_hr} & $\Delta t$ & 小时 & $0.5\sim1$ & 1.0 & 时步长\\
+\fld{load\_scale\_factor} & — & — & $\ge1$ & 1.0 & 负荷加压系数\\
+\fld{allow\_reconfiguration} & — & — & 布尔 & true & 允许开关重构\\
+\fld{allow\_mess\_dispatch} & — & — & 布尔 & true & 允许 MESS 调度\\
+\fld{max\_reconfig\_iterations} & — & — & 整数 & 50 & 贪心重构每步迭代上限\\
+\fld{mess\_travel\_speed\_kmph} & $v$ & km/h & $20\sim60$ & 40 & MESS 行驶速度\\
+\fld{default\_fault\_count} & — & — & 整数 & 2 & 自动生成故障数\\
+\fld{default\_repair\_time\_hr} & $\tau_{rep}$ & 小时 & — & 6 & 默认修复时长\\
+\fld{run\_power\_flow} & — & — & 布尔 & false & 逐步跑完整潮流校验\\
+\fld{enable\_disaster\_stages} & — & — & 布尔 & false & 启用分阶段灾害隔离/重构\\
+\fld{post\_fault\_reconfig\_window\_hr} & — & 小时 & — & 2.0 & 灾后重构窗口\\
+\fld{use\_strict\_mip\_for\_mess} & — & — & 布尔 & true & MESS 专用严格 MILP\\
+\end{paramtable}
+
+\subsection{恢复 MILP 选项 \texttt{DistributionResilienceMIPOptions}}
+\compmeta{DistributionResilienceMIPOptions}{include/hacdcpf/resilience/resilience\_assessment.hpp:36}
+\begin{paramtable}
+\fld{v\_min\_pu}/\fld{v\_max\_pu} & $\underline v,\overline v$ & pu & $0.95/1.05$ & 0.95/1.05 & 电压包络\\
+\fld{big\_m\_voltage} & $M$ & — & — & 4.0 & LinDistFlow 压降 big-M\\
+\fld{default\_branch\_rate\_mva} & $\bar S_e$ & MVA & — & 10.0 & 缺省支路容量\\
+\fld{shed\_penalty\_critical} & $\pi$ & — & — & $10^6$ & 关键负荷切负荷罚权\\
+\fld{shed\_penalty\_high} & $\pi$ & — & — & $10^4$ & 高优先级罚权\\
+\fld{shed\_penalty\_medium} & $\pi$ & — & — & $10^2$ & 中优先级罚权\\
+\fld{shed\_penalty\_low} & $\pi$ & — & — & 1 & 低优先级罚权\\
+\fld{switching\_cost} & $c_{sw}$ & — & — & 5.0 & 单次开关操作代价\\
+\fld{mess\_travel\_cost\_per\_km} & $c_{mess}$ & — & — & 0.1 & MESS 行驶代价\\
+\fld{renewable\_curtailment\_cost} & $c_{curt}$ & — & — & 10.0 & 弃风光代价\\
+\fld{mip\_gap} & — & — & $0\sim0.05$ & 0.02 & MILP 相对间隙\\
+\fld{max\_time\_s} & — & 秒 & — & 120 & 求解时限\\
+\fld{max\_nodes} & — & — & — & 50000 & B\&C 节点上限\\
+\fld{solver} & — & — & 枚举 & Native & MILP 后端\\
+\fld{enable\_cglp\_cuts} & — & — & 布尔 & false & CGLP 提升-投影割\\
+\end{paramtable}
+
+\subsection{动态证书选项 \texttt{MultiFidelityCertificateOptions}}
+\compmeta{MultiFidelityCertificateOptions}{include/hacdcpf/resilience/certified\_restoration.hpp}
+\begin{paramtable}
+\fld{min\_frequency\_hz} & — & Hz & — & 49.0 & L3 频率下限阈值\\
+\fld{max\_rocof\_hz\_s} & — & Hz/s & — & 1.0 & L3 RoCoF 上限\\
+\fld{min\_ac\_voltage\_pu} & — & pu & — & 0.90 & L3 AC 电压下限\\
+\fld{require\_converter\_current\_observation} & — & — & 布尔 & true & L3 换流器电流观测门\\
+\fld{jacobian\_tube\_factor} & — & — & — & 1.25 & 雅可比管因子\\
+\fld{dense\_jacobian\_dimension\_limit} & — & — & — & 400 & 稠密雅可比维度上限\\
+\fld{level1\_step\_multiplier} & — & — & — & 4.0 & L1 步长倍数\\
+\fld{level2\_step\_multiplier} & — & — & — & 2.0 & L2 步长倍数\\
+\fld{max\_initial\_dynamic\_residual} & — & — & — & $10^{-6}$ & 初始动态残差上限\\
+\end{paramtable}
+
+\subsection{结果结构摘要}
+\begin{itemize}
+  \item \fld{DistributionResilienceResult}（:413）：逐步 \fld{steps}、\fld{fault\_sequence}、
+        \fld{total\_served\_mwh}/\fld{total\_shed\_mwh}/\fld{weighted\_unserved\_mwh}、
+        \fld{resilience\_index}、\fld{mess\_energy\_delivered\_mwh}、\fld{model\_stats}；
+  \item \fld{DistributionResilienceStepResult}（:332）：\fld{restoration\_ratio}、
+        \fld{shed\_by\_priority}、开关动作、\fld{mess\_states}、桥/割点、可选潮流校验；
+  \item \fld{DistributionResilienceModelStats}（:69）：MILP 规模/状态与 \fld{ValidityFlags}（20+ 标志）；
+  \item \fld{CertifiedRestorationResult}：\fld{optimality\_proven\_over\_catalog}、\fld{no\_good\_cuts}、
+        逐轮 \fld{iterations} 与 \fld{MultiFidelityCertificate}。
+\end{itemize}

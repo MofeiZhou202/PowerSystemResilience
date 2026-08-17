@@ -20,6 +20,87 @@ the current Git worktrees remain authoritative.
 | Market ASan/UBSan | Complete suite 22 cases/845 assertions; focused initial root-cut case 1/42 |
 | Other sanitizer subsets | Thread pool 4 cases/6 assertions; `test_hacdcpf` 26/89; `test_acopf_dcopf_crossval` 13/119; `test_power_flow_math_audit` 42/231 |
 
+## GUI scale-out: persistent indexes, SoA WebGL overview, session sharing, topology window
+
+Four-part scalability enhancement landed in the working tree (uncommitted):
+
+1. `web/js/canvas.js` gained persistent indexes: `state.componentById` (Map,
+   maintained in add/remove/clear/load paths) and `state.connectionsByEndpoint`
+   (per-`compId`/`compId:portId` buckets). `getComponent` is O(1); connection
+   rescans in add-connection dedup, `syncConnectivity`, `buildSystemJson`,
+   drag re-routing, and the visualization layer now use bucket lookups (drag
+   re-route is O(degree) per frame instead of O(E)). `getCompBusMap()` is
+   cached with lazy invalidation on topology edits; `resultRowsByIndexOrOrder`
+   pre-builds key→row-queue maps (O(C+R)).
+2. `web/js/core/network_overview.js` is SoA: preallocated `Float32Array`
+   node/line/transformer buffers with 2× geometric growth; selection updates
+   merge dirty slots into a single `gl.bufferSubData` (no full
+   `rebuildBuffers` on click); hit-testing uses a uniform grid (~4× mean
+   spacing, ≤256 cells/axis) keeping the LOD2-only pick semantics and the
+   `{domain, index}` identity contract.
+3. `tests/run_gui_server.cpp` Session now holds
+   `std::shared_ptr<const HybridPowerSystem>`; all 14 whole-system assignment
+   sites funnel through `session_replace_system()`, which atomically swaps the
+   pointer, rebuilds the resident `PowerSystemGraph` and bus uniform-grid
+   spatial index, and invalidates the compact-JSON serialization cache.
+   `/api/session/pf` keeps a request-private copy (it must mutate) but copies
+   outside the lock; `parameter_library/apply`, `design_handbook/apply+preview`,
+   `update_carbon_factors`, and `set_ts_config` materialize-then-replace. All
+   16 `_raw_json` embeds were verified to be on frontend-consumed paths and
+   kept, now served from the cache; `io::to_json_dom()` eliminates the
+   `to_json`→`json::parse` double conversion in `system_summary` and friends.
+4. New `POST /api/session/topology_window` (schema `topology_window_v1`):
+   bbox query over WGS84 coordinates with optional `lod` 0/1/2 aligned
+   line-by-line with the frontend `aggregate()` semantics; responses carry
+   `units`, `coordinate_coverage`, and `model_limitations` (missing-coordinate
+   buses are declared, never silently dropped). `/api/session/status`
+   capabilities report `topology_window_v1: true`.
+
+Verification: `node --check` on all touched JS; vm-based canvas index smoke
+plus 500 randomized `resultRowsByIndexOrOrder` equivalence cases;
+stub-WebGL2 overview smoke (selection = 0 `bufferData` + 1 `bufferSubData`);
+`cmake --build --preset macos-release --target run_gui_server` clean;
+`ctest -R 'gui_api|topology_window|runtime_api_v1'` 3/3, `ctest -R gui` 9/9,
+JSON round-trip subset 74/74. Browser-interaction E2E (chromium) not yet run
+for the new index/overview paths.
+
+Follow-up (same session): the remaining ~40 analysis endpoints were audited
+one by one — 23 verified read-only (const-ref solver signatures, compile-
+verified zero mutation) now bind the shared snapshot with no copy;
+18 endpoints that genuinely mutate a working copy (`solve_power_flow`'s
+in-place canonical projection, grid-forming converter translation,
+`assign_available_default_profiles`, template reliability data application,
+operating-point write-back in opf_ac/parity/dc, etc.) copy from the snapshot
+after releasing the lock; `run_carbon` now computes off-lock and
+`last_pf_system` is itself a shared snapshot; `export_json` serializes
+off-lock with the response byte-identical (indent=2). `DCBus.area/zone` now
+round-trip through `io::to_json`/`from_json` (defaults 0), so
+`topology_window` lod=1 DC groups key by real values; the E2E assertion was
+updated accordingly. The v1 multi-session API (`src/server/runtime_api_v1.cpp`)
+cannot share the GUI session's resident indexes — its `ApiSession` store is a
+separate, revision-tracked model space — so it instead caches the LOD2
+topology DOM per session, invalidated by `revision`; `/topology` and
+`/subgraph` no longer re-serialize the model per request. Still open: the v1
+job-frame viewport filter (`frame_chunk`) rebuilds LOD2 positions per request
+when a viewport is supplied (job-level cache not added); browser E2E
+(chromium) still not run for the new paths.
+
+Follow-up (result window): new `POST /api/session/result_window` (schema
+`result_window_v1`) serves per-element PF results inside a WGS84 bbox from the
+cached `last_pf_result` + `last_pf_system` — both now shared snapshots, so the
+route copies nothing.  Session gains `system_revision`/`last_pf_revision`;
+the route reports `result_matches_current_system` and declares a lag in
+`model_limitations` when the model changed after the solve (the window then
+falls back to a linear scan of the solved system's own coordinates instead of
+the resident spatial index).  409 `no_cached_power_flow` when no PF exists.
+Units/limits are declared in `units`/`model_limitations` (vm/vdc pu, va rad,
+MW/MVAr, AC branches only).  Measured on ACTIVSg25k with synthesized
+coordinates: world window (25,000 nodes + 32,230 branches) 78.6 ms/10.7 MB —
+vs 3.4 s/106 MB for the full PF response — and a ~2% viewport 1.8 ms/65 KB.
+E2E: `tools/gui_result_window_e2e.py` (23 assertions: 409, bbox filter,
+coverage declaration, sampled value identity with the full PF response, stale
+flagging, hybrid DC nodes).
+
 ## Balanced VSC current-limit NCP
 
 The ordinary `case2000_acdc` built-in now sizes its four Vdc-Q stations from

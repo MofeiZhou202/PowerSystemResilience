@@ -1,13 +1,18 @@
 % !TEX program = xelatex
-% 编译方式：把本文件夹整包复制到纯 ASCII 路径后，执行两遍 xelatex（详见 docs/_manual_common/README.md）。
-% 首版骨架：内容取自 src/reliability/ 与 include/hacdcpf/reliability/、include/hacdcpf/analysis/
-%           three_stage_reliability.hpp 源码，公式与参数以代码为准。
-\documentclass[UTF8,fontset=windows,a4paper,11pt]{ctexart}
+% 编译方式：在本目录执行两遍 xelatex（详见 docs/_manual_common/README.md）。
+% 章节源文件位于 chapters/，由本文件 \input 引入，各章不含导言区。
+% 源码依据（行号以 2026-08-17 检出为准）：
+%   include/hacdcpf/reliability/reliability_assessment.hpp
+%   include/hacdcpf/reliability/failure_mode.hpp
+%   include/hacdcpf/analysis/three_stage_reliability.hpp
+%   src/reliability/{reliability_assessment,failure_mode,reliability_data,three_stage_reliability}.cpp
+%   docs/reliability_mathematical_models_and_intelligent_cyber_physical_assessment.md（数学模型对照）
+\documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
 \usepackage{hysim_manual}
 
 \title{\textbf{交直流混合高弹性能源电力系统仿真平台}\\[0.5em]
        {\Large 可靠性评估技术手册}\\[0.3em]
-       {\large 数学模型、接口参数与验证校核（首版骨架）}}
+       {\large 数学模型、评估方法、接口参数与验证校核}}
 \author{HySim-XJTU-HRPES（西安交通大学 HRPES 团队）}
 \date{\today}
 
@@ -15,193 +20,37 @@
 \maketitle
 \begin{abstract}
 \noindent 本手册依据 HySim-XJTU-HRPES 平台可靠性评估模块
-（\srcpath{src/reliability/}、\srcpath{include/hacdcpf/reliability/} 及
-\srcpath{include/hacdcpf/analysis/three\_stage\_reliability.hpp}）整理，覆盖五类方法：
-非序贯（状态抽样）蒙特卡洛、序贯（逐时）蒙特卡洛、确定性 N-1 分布网 FMEA、
-以失效模式为中心的 FMEA（含 N-2 与信息物理 L1）、频率-持续时间解析法（COPT），
-以及以 JSON 算例为输入的三阶段（隔离/重构/修复）恢复 MILP。全部结论以源码为准。
-\textbf{诚实口径}：蒙特卡洛与 FMEA 评估器为 AC-only 的 DC-OPF 内核
-（\fld{model\_scope}=\texttt{"ac-only-dcopf"}），EENS/LOLE 不含直流负荷中断；
-\srcpath{run\_three\_stage\_reliability} 的输入是 JSON 算例路径/字符串，而非
-\texttt{HybridPowerSystem} 对象。文档版式与《碳流追踪与碳排放核算技术手册》一致。
+（\srcpath{src/reliability/} 与 \srcpath{include/hacdcpf/reliability/}，
+以及位于 \srcpath{include/hacdcpf/analysis/three\_stage\_reliability.hpp} 的三阶段
+恢复评估器）整理，覆盖统一可靠性参数解析器、非序贯/序贯蒙特卡洛、元件级 FMEA 与
+故障模式级 FMEA（含信息物理 L1 扩展）、三阶段故障恢复 MILP、频率-持续时间解析法，
+以及尾部风险与配电可靠性指标。每个方法给出功能定位、完整数学模型（公式对照
+源码与
+\srcpath{docs/reliability\_mathematical\_models\_and\_intelligent\_cyber\_physical\_assessment.md}）、
+全部选项与结果字段的单位制和默认值、验证依据及已知局限。文档风格与《潮流计算技术
+手册》《最优潮流技术手册》一致，全部公式逐条注明源码出处（文件:行号）。
+
+\smallskip
+\noindent\textbf{核心口径}：蒙特卡洛与 FMEA 的最小切负荷评估在纯交流系统上为
+\emph{AC-only DC-OPF}（\fld{model\_scope}=\texttt{"ac-only-dcopf"}），\textbf{不计} DC
+负荷中断，故对含直流分量的混合系统会低估切负荷；三阶段模型为耦合交直流
+LinDistFlow 恢复 MILP。全部近似、回退与模型覆盖不足均写入结果的 \fld{model\_scope}、
+\fld{model\_limitations} 与 \fld{ValidityFlags}。
 \end{abstract}
 
 \tableofcontents
 \newpage
 
-\section{阅读指南与约定}
-\subsection{数据来源}
-\begin{itemize}
-  \item \srcpath{include/hacdcpf/reliability/reliability\_assessment.hpp} —— 蒙特卡洛/FMEA/频率-持续时间接口、
-        \texttt{ReliabilityOptions}/\texttt{ReliabilityResult} 与统一参数解算器声明；
-  \item \srcpath{include/hacdcpf/reliability/failure\_mode.hpp} —— 失效模式目录与失效模式 FMEA 接口；
-  \item \srcpath{include/hacdcpf/analysis/three\_stage\_reliability.hpp} —— 三阶段恢复 MILP 接口（JSON 算例输入）；
-  \item \srcpath{src/reliability/reliability\_assessment.cpp}、\srcpath{failure\_mode.cpp}、
-        \srcpath{reliability\_data.cpp}、\srcpath{three\_stage\_reliability.cpp} —— 上述方法实现与数据播种；
-  \item \srcpath{tests/test\_reliability\_resolver.cpp}、\srcpath{tests/test\_three\_stage\_reliability.cpp} —— 验证依据。
-\end{itemize}
-可靠性入口族的命名空间为 \texttt{hacdcpf::analysis}（如
-\srcpath{hacdcpf::analysis::resolve\_reliability\_params}）。
+\input{chapters/overview}
+\input{chapters/parameter_model}
+\input{chapters/consequence}
+\input{chapters/monte_carlo}
+\input{chapters/fmea}
+\input{chapters/three_stage}
+\input{chapters/frequency_duration}
+\input{chapters/options_results}
+\input{chapters/verification}
 
-\subsection{单位制与索引空间}
-概率能量不足 EENS/年电量不足单位 MWh/yr（三阶段以 kWh/yr 输出），失负荷时间期望
-LOLE 单位 h/yr，失负荷频率 LOLF 单位 次/yr，功率 MW，时长 h。节点级 EENS
-(\fld{nodal\_eens\_mwh\_yr}) 与分布指标向量遵循 \texttt{[AC 母线 | DC 母线]} 的拼接布局
-（当节点长度超过 AC 母线数时追加 DC 母线客户）。失效模式阶数 \fld{max\_order} 取值
-$\{1,2\}$ 对应 N-1/N-2 枚举。
+\input{../_manual_common/industrial_evaluation}
 
-\subsection{诚实口径}
-所有入口显式声明模型口径，不以单一“成功”布尔量掩盖近似：
-\begin{itemize}
-  \item 蒙特卡洛/FMEA：\fld{model\_scope}=\texttt{"ac-only-dcopf"}，
-        \fld{ValidityFlags} 中 \fld{dc\_load\_curtailment\_included}、
-        \fld{vsc\_dc\_power\_flow\_modelled}、
-        \fld{ac\_voltage\_reactive\_feasibility\_certified} 均为 false；
-  \item \fld{critical\_components} 的重要度为“共现归因”，可累加超过 100\%，
-        并非边际 Birnbaum 重要度；
-  \item 信息物理为 L1 标量“接口矩阵”，无通信拓扑、无保护 FRT；
-  \item 三阶段以 JSON 算例路径为输入，LCC 换流器/多端口能量路由器不支持时清除 \fld{ok}。
-\end{itemize}
-
-\section{功能定位与架构}
-\subsection{公共入口族}
-\begin{center}\footnotesize
-\begin{tabular}{@{}L{6.6cm}L{3.0cm}L{5.4cm}@{}}
-\toprule
-入口 & 定义位置 & 说明\\
-\midrule
-\srcpath{run\_nonsequential\_mc(sys, options)} & reliability\_assessment.hpp & 状态抽样（伯努利）蒙特卡洛 + DC-OPF 最小切负荷\\
-\srcpath{run\_sequential\_mc(sys, load\_profile, options)} & 同上 & 逐时时序蒙特卡洛，附加 LOLF\\
-\srcpath{run\_distribution\_fmea(sys, options)} & 同上 & 确定性 N-1 失效模式枚举，含开关+修复两阶段\\
-\srcpath{run\_frequency\_duration\_analysis(sys, peak\_load\_mw)} & 同上 & 解析 COPT/LOLP/LOLE/LOLF（无仿真）\\
-\srcpath{run\_failure\_mode\_fmea(sys, options)} & failure\_mode.hpp & 以失效模式为中心的 FMEA，支持 N-2\\
-\srcpath{build\_failure\_mode\_catalog(sys, options, data\_policy)} & 同上 & 由富组件展开失效模式目录\\
-\srcpath{run\_three\_stage\_reliability(case\_json\_path, options)} & three\_stage\_reliability.hpp & 隔离/重构/修复三阶段恢复 MILP（JSON 算例输入）\\
-\srcpath{resolve\_reliability\_params(raw, policy, ...)} & reliability\_assessment.hpp & $\lambda$/修复/不可用度的唯一规范解算器\\
-\bottomrule
-\end{tabular}
-\end{center}
-数据播种器 \srcpath{apply\_ieee24\_reliability\_data}、
-\srcpath{apply\_comprehensive\_reliability\_data}、
-\srcpath{build\_ieee\_rts24\_load\_profile} 提供命名模板与 RTS-24 负荷曲线（默认 opt-in）。
-
-\subsection{关键数据结构}
-\compmeta{ReliabilityResult}{include/hacdcpf/reliability/reliability\_assessment.hpp}
-主要字段：\fld{eens\_mwh\_yr}、\fld{lole\_hr\_yr}、\fld{lolf\_occ\_yr}、\fld{plc}、
-\fld{nodal\_eens\_mwh\_yr}、\fld{critical\_components}（共现重要度）、\fld{model\_scope}，
-以及 \fld{ValidityFlags}、\fld{TailRiskMetrics}、\fld{DistributionIndices}。
-\compmeta{FailureModeFMEAResult}{include/hacdcpf/reliability/failure\_mode.hpp}
-承载 \texttt{FailureModeReliability}（激活方式 \texttt{Passive}/\texttt{ActiveOnDemand}、
-诱因、\texttt{FailureConsequenceKind}）与 \texttt{ConsequenceModelCapabilities}。
-\compmeta{ThreeStageReliabilityResult}{include/hacdcpf/analysis/three\_stage\_reliability.hpp}
-字段 \fld{saifi}、\fld{saidi\_min}、\fld{eens\_kwh\_yr} 及逐故障 \texttt{ThreeStageFaultDetail}
-（$\tau_{\text{iso}}/\tau_{\text{sw}}/\tau_{\text{rep}}$、分阶段切负荷），
-\fld{model\_scope}=\texttt{"coupled-acdc-lindistflow-restoration-milp"}。
-
-\section{核心数学模型}
-组件可靠性字段先由唯一解算器 \srcpath{resolve\_reliability\_params} 归一为规范三元组
-（故障率 $\lambda$、修复时间 $r$、不可用度 $U$），再进入各评估器。
-
-\subsection{参数归一化与不可用度}
-\begin{equation}
-\lambda = \frac{1}{\text{MTBF}},\qquad r = \text{MTTR},\qquad
-U = \frac{\lambda\, r}{8760 + \lambda\, r},
-\end{equation}
-数据来源由 \fld{data\_policy} 决定：\texttt{StrictCaseDataOnly}（仅算例数据）、
-\texttt{UseNamedTemplateForMissingOnly}（仅补缺）、\texttt{OverwriteWithNamedTemplate}（模板覆盖）。
-
-\subsection{非序贯蒙特卡洛与 DC-OPF 最小切负荷}
-每次抽样对各元件按 $\Pr[\text{停运}]=U$ 独立伯努利采样得到系统状态 $s$，在该状态下解
-最小切负荷 DC-OPF：
-\begin{equation}
-\min \ \sum_i c_i^{\text{shed}} \quad\text{s.t.}\quad
-\text{DC 功率平衡},\;\; |P_{ij}| \le \bar P_{ij}\,x_{ij},\;\; 0 \le c_i^{\text{shed}} \le P_{d,i}.
-\end{equation}
-EENS 由蒙特卡洛期望外推到年电量，收敛以估计量变异系数 $\beta$ 判据：
-\begin{equation}
-\widehat{\text{EENS}} = \frac{T}{N}\sum_{s=1}^{N}\sum_i c_i^{\text{shed}}(s),
-\qquad
-\beta = \frac{\sqrt{\operatorname{Var}[\,\cdot\,]/N}}{\mathbb{E}[\,\cdot\,]} \le \beta^{\ast},
-\end{equation}
-其中 $T$=\fld{hours\_per\_year}，$\beta^{\ast}$=\fld{cov\_threshold}，
-切负荷小于 \fld{curtail\_threshold\_mw} 的事件不计为失负荷。
-
-\subsection{序贯蒙特卡洛}
-沿 IEEE RTS-24 逐时负荷曲线做时序状态转移仿真，除 EENS/LOLE 外还统计失负荷频率
-\begin{equation}
-\text{LOLF} = \frac{\#\{\text{进入失负荷状态的次数}\}}{\text{仿真年数}}.
-\end{equation}
-
-\subsection{FMEA（两阶段时长）}
-枚举每个 N-1（可选 N-2）失效模式 $k$，映射为网络“后果补丁”，以频率 $f_k=\lambda_k$
-加权累计开关隔离与修复两阶段的失负荷电量：
-\begin{equation}
-\text{EENS} = \sum_{k} f_k\left(P_{\text{shed},k}^{\text{sw}}\,\tau_{\text{sw}}
-             + P_{\text{shed},k}^{\text{rep}}\,\tau_{\text{rep}}\right),
-\end{equation}
-$\tau_{\text{sw}}$=\fld{switching\_time\_hr}，修复时长取自解算器归一的 $r$。
-
-\subsection{频率-持续时间法（COPT）}
-逐台机组递归构建停运容量概率表（COPT）：
-\begin{equation}
-p(X{=}x) = (1-U)\,p_{\text{prev}}(x) + U\,p_{\text{prev}}(x-c),
-\end{equation}
-并解析给出可靠性指标
-\begin{equation}
-\text{LOLP} = \!\!\sum_{C_j < L}\!\! p_j,\qquad
-\text{LOLE} = \text{LOLP}\times T,\qquad
-\text{LOLF} = \!\!\sum_{j}\!\! p_j\,(\text{频率贡献}).
-\end{equation}
-
-\subsection{三阶段恢复 MILP}
-以 LinDistFlow 恢复子问题求解 Stage-1 故障隔离、Stage-2 开关重构、Stage-3 保持修复窗口，
-输出 SAIFI/SAIDI/EENS：
-\begin{equation}
-\text{SAIFI} = \frac{\sum_i \lambda_i N_i}{\sum_i N_i},\qquad
-\text{SAIDI} = \frac{\sum_i U_i N_i}{\sum_i N_i},
-\end{equation}
-$N_i$ 为节点客户数。该入口以 JSON 算例路径为输入（\srcpath{\_from\_string} 重载接受字符串）。
-
-\section{接口与参数}
-\begin{paramtable}
-\fld{max\_iterations} & $N_{\max}$ & — & 整数 & — & 蒙特卡洛最大抽样次数\\
-\fld{cov\_threshold} & $\beta^{\ast}$ & — & 小正数 & — & 收敛判据：估计量变异系数上限\\
-\fld{curtail\_threshold\_mw} & — & MW & $\ge 0$ & — & 计为失负荷事件的最小切负荷量\\
-\fld{hours\_per\_year} & $T$ & h & — & $8736$ & 年运行小时数（指标外推基准）\\
-\fld{data\_policy} & — & — & 枚举 & 补缺 & 可靠性数据来源策略（严格/补缺/覆盖）\\
-\fld{compute\_tail\_risk} & — & — & 布尔 & false & 是否计算 VaR/CVaR 尾部风险\\
-\fld{var\_confidence} & — & — & $0\sim1$ & — & 尾部风险置信度\\
-\fld{switching\_time\_hr} & $\tau_{\mathrm{sw}}$ & h & $\ge 0$ & — & FMEA 开关隔离阶段时长\\
-\fld{voll} & — & 元/MWh & $>0$ & $10000$ & 失负荷价值（FMEA 成本折算）\\
-\fld{enable\_microgrid\_islanding} & — & — & 布尔 & — & FMEA 是否允许微网孤岛支撑\\
-\fld{max\_order} & — & — & $\{1,2\}$ & $1$ & 失效模式枚举阶数（N-1/N-2）\\
-\fld{include\_dc\_power\_flow} & — & — & 布尔 & true & 三阶段恢复子问题是否含 DC 潮流\\
-\end{paramtable}
-\texttt{ReliabilityDataPolicy} 另含 \fld{template\_name}、
-\fld{fail\_on\_missing\_required\_data} 与 \fld{mtbf\_convention}；FMEA 的信息物理选项位于
-\texttt{CyberPhysicalFMEAOptions}（\fld{cyber\_physical}）。
-
-\section{验证与边界局限}
-\subsection{验证与校核}
-注册测试：\srcpath{test\_reliability\_resolver}（覆盖蒙特卡洛、FMEA、失效模式 FMEA、
-参数解算器、数据策略与信息物理）、\srcpath{test\_three\_stage\_reliability}；
-另有 \srcpath{test\_resilience\_assessment} 交叉调用 \srcpath{run\_sequential\_mc} 与
-\srcpath{run\_distribution\_fmea}。
-
-\subsection{边界与局限（如实标注）}
-\begin{itemize}
-  \item 蒙特卡洛/FMEA 为 AC-only DC-OPF（\fld{model\_scope}=\texttt{"ac-only-dcopf"}）：
-        \fld{dc\_load\_curtailment\_included}、\fld{vsc\_dc\_power\_flow\_modelled}、
-        \fld{ac\_voltage\_reactive\_feasibility\_certified} 皆为 false，EENS/LOLE
-        \textbf{不含直流负荷中断}，对混合系统偏于乐观（低估）；
-  \item \fld{critical\_components} 的重要度是共现归因（可累加超过 100\%），非边际 Birnbaum；
-  \item 信息物理为 L1 标量接口矩阵，不含通信拓扑与保护穿越（FRT）建模；
-  \item 三阶段：LCC 换流器/多端口能量路由器不支持（清除 \fld{ok}）；VSC/DC-DC 仅常效率
-        （无固定/二次损耗）；发电机/变压器/换流器/开关故障为 opt-in；
-  \item \srcpath{run\_three\_stage\_reliability} 以 \textbf{JSON 算例路径/字符串}为输入，
-        而非 \texttt{HybridPowerSystem} 对象。
-\end{itemize}
-规范文档：\srcpath{docs/reliability\_mathematical\_models\_and\_intelligent\_cyber\_physical\_assessment.md}、
-\srcpath{docs/reliability\_calculation\_workflow\_and\_case\_guide.md}、
-\srcpath{docs/reliability\_assessment\_models.md}。
 \end{document}

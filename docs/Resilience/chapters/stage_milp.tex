@@ -1,0 +1,30 @@
+% 第 5 章：RA 式分阶段灾害 MILP
+\section{RA 式分阶段灾害 MILP}\label{sec:res-stage}
+
+\subsection{功能定位}
+\fld{RAStyleStageMILP}（\srcpath{run\_distribution\_resilience\_stage\_milp\_assessment}，
+\srcpath{resilience\_assessment.hpp:463}；由 \fld{use\_ra\_style\_stage\_milp} 或首选开关
+\fld{enable\_disaster\_stages} 触发）以“灾害隔离 + 灾后重构”两阶段、开关约束的拓扑 MILP
+求解，阶段语义见 \fld{DistributionDisasterStage}（:137）：
+\texttt{Normal} $\to$ \texttt{DisasterIsolation} $\to$ \texttt{DisasterPostFaultReconfig}
+$\to$ \texttt{PostDisasterRepair}。
+
+\subsection{分阶段模型}
+\begin{itemize}
+  \item \textbf{阶段 1 灾害隔离}：以开关隔离受灾支路
+        （\fld{use\_switch\_based\_fault\_isolation}=true，\fld{allow\_stage1\_open\_switches}），
+        非故障支路的操作须有开关（\fld{require\_switch\_for\_nonfault\_branch\_operation}），
+        默认禁止无开关直接操作支路（\fld{allow\_branch\_operation\_without\_switch}=false）；
+  \item \textbf{阶段 2 灾后重构}：在 \fld{post\_fault\_reconfig\_window\_hr}（默认 2h）内闭合联络
+        （\fld{allow\_stage2\_close\_ties}）以恢复负荷，可限 \fld{use\_remote\_switch\_only}；
+  \item 每阶段的网络物理与第~\ref{sec:res-mip}~章一致（LinDistFlow/有功、辐射、切负荷）。
+\end{itemize}
+MESS 既可由专用严格 MILP（\fld{use\_strict\_mip\_for\_mess}）也可阶段内调度并在失败时回退
+（\fld{fallback\_to\_stage\_mess\_dispatch}）。逐步结果记灾害阶段 \fld{disaster\_stage}、隔离性开断
+\fld{isolation\_open\_ac\_branch\_ids}/\fld{isolation\_open\_dc\_branch\_ids} 与重构性合断，并区分
+\fld{isolation\_switch\_actions} 与 \fld{reconfiguration\_switch\_actions}。
+
+\subsection{与其他模型的关系}
+三种模型互斥选择、共享同一逐步结果结构与弹性指标；启发式最快、多时段 MILP 全局协调、
+RA 式分阶段贴合灾害隔离-重构的工程流程。三者的能力边界均由 \fld{ValidityFlags} 显式声明，
+求解失败显式反映，绝不静默降级。

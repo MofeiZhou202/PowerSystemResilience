@@ -476,6 +476,8 @@ static json dc_bus_to_json(const DCBus& b) {
   j["emission_factor_tco2_mwh"] = b.emission_factor_tco2_mwh;
   j["in_service"] = b.in_service;
   j["name"] = b.name;
+  j["area"] = b.area;
+  j["zone"] = b.zone;
   j["latitude"] = b.latitude;
   j["longitude"] = b.longitude;
   return j;
@@ -494,6 +496,8 @@ static DCBus dc_bus_from_json(const json& j) {
       jget(j, "emission_factor_tco2_mwh", 0.0);
   b.in_service = jget(j, "in_service", true);
   b.name = jget<std::string>(j, "name", "");
+  b.area = jget(j, "area", 0);
+  b.zone = jget(j, "zone", 0);
   b.latitude = jget_alias(j, "latitude", "lat", 0.0);
   b.longitude = jget_alias(j, "longitude", "lon", 0.0);
   return b;
@@ -3123,7 +3127,7 @@ TelemetrySection telemetry_section_from_json(const json& j) {
 
 }  // namespace
 
-std::string to_json(const HybridPowerSystem& sys, int indent) {
+json to_json_dom(const HybridPowerSystem& sys) {
   json root;
   root["schema_version"] = kCurrentSchemaVersion;  // §3.3 on-disk contract stamp
   root["name"] = sys.name;
@@ -3261,7 +3265,11 @@ std::string to_json(const HybridPowerSystem& sys, int indent) {
     root["telemetry"] = telemetry_section_to_json(*sys.telemetry);
   }
 
-  return root.dump(indent);
+  return root;
+}
+
+std::string to_json(const HybridPowerSystem& sys, int indent) {
+  return to_json_dom(sys).dump(indent);
 }
 
 void save_json(const HybridPowerSystem& sys, const std::string& path,

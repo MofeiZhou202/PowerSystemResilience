@@ -1,0 +1,42 @@
+% 第 6 章：三阶段故障恢复 MILP
+\section{三阶段故障恢复 MILP}\label{sec:rel-3stage}
+
+\subsection{三阶段框架}
+\srcpath{run\_three\_stage\_reliability}（\srcpath{three\_stage\_reliability.hpp:292}）按 IEEE
+Std 1366-2012 / DL/T 836 的三窗口求解每个故障（入口\textbf{接受 JSON 算例路径/字符串}，
+非 \texttt{HybridPowerSystem} 对象；另有 \srcpath{run\_three\_stage\_reliability\_from\_string}，:297）：
+\begin{itemize}
+  \item 阶段 1 $[0,\tau_{iso}]$：故障隔离，保护健康区；
+  \item 阶段 2 $[\tau_{iso},\tau_{sw}]$：故障后重构，尽量转供恢复负荷；
+  \item 阶段 3 $[\tau_{sw},\tau_{rep}]$：修复窗口——故障元件\textbf{仍停运}（$\tau_{rep}\approx$MTTR），
+        并\textbf{保持}阶段 2 的重构；开关无法恢复的负荷在整个长窗口被切。
+\end{itemize}
+每阶段解一个 LinDistFlow 恢复子问题：交直流有功/无功平衡、域内平方电压界、严格辐射
+森林、支路潮流限、连续切负荷、双向 VSC/DC-DC 恒效率传输与储能时序。
+
+\subsection{分阶段能量不供与指标}
+对故障 $k$、阶段切负荷 $\mathrm{pls}_{k,s}$（kW）与阶段时长 $\tau_{k,s}$（\fld{ThreeStageFaultDetail}
+的 \fld{pls\_stage1..3}/\fld{tau\_iso\_hr}/\fld{tau\_sw\_hr}/\fld{tau\_rep\_hr}，:54 起）：
+\begin{equation}
+\mathrm{ENS}_k=\sum_{s\in\{1,2,3\}}\mathrm{pls}_{k,s}\,\tau_{k,s},\qquad
+\mathrm{EENS}=\sum_k \lambda_k\,\mathrm{ENS}_k,
+\end{equation}
+切负荷经 N-0 资格化（\fld{raw\_pls} 与 \fld{n0\_pls} 之差，扣除健康态本就存在的切负荷）。
+系统级输出 \fld{ThreeStageReliabilityResult}（:132）给 \fld{saifi}、\fld{saidi\_min}（分/年）、
+\fld{eens\_kwh\_yr} 及逐负荷点 \fld{nodal\_cif}/\fld{nodal\_cid\_min}。阶段 1$\to$2$\to$3 在
+每个故障内串行（阶段 3 保持阶段 2 开关方案），故障间可并行。
+
+\subsection{保护情景与故障集}
+会话保护定义（\fld{reliability\_configuration}）经解析生成互斥的保护条件情景
+（primary/backup/unresolved，见 \S\ref{sec:rel-param} 事件树），主/备清除时间替换阶段 1
+隔离时间而总隔离/开关/修复时长守恒。默认 N-1 集枚举在运 ACBranch 与 DCBranch 停运
+（\fld{include\_dc\_power\_flow} 默认 true）；发电机、双绕组变压器、VSC/DC-DC、开关/断路器
+故障为选入项（\fld{include\_generator\_faults} 等，:222 起）。
+
+\subsection{有效性与拒绝}
+\fld{model\_scope} 纯交流为 \texttt{"ac-lindistflow-milp"}、混合为
+\texttt{"coupled-acdc-\allowbreak lindistflow-\allowbreak restoration-milp"}。
+\fld{ValidityFlags}（:195）逐项声明
+是否强制支路潮流/电压/辐射/DC 潮流等。LCC 换流器与多端口能量路由器在线性阶段模型
+之外，其存在\textbf{清} \fld{ok} 并置物理有效性标志为假（\fld{model\_limitations} 说明）；
+求解失败显式反映为 \fld{ok}=false，绝不静默回退。

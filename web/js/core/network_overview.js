@@ -5,12 +5,30 @@
 'use strict';
 
 const NetworkOverview = (() => {
+  // Viewport-driven fetching: after pan/zoom settles for this long, the
+  // viewport is re-evaluated for an LOD switch or a topology_window fetch.
+  const WINDOW_DEBOUNCE_MS = 250;
+  // Each fetch requests the viewport grown by this fraction on every side, so
+  // small pans stay inside the already-fetched window (prefetch margin).
+  const WINDOW_PREFETCH_MARGIN = 0.4;
+  // Auto-LOD thresholds on the estimated number of visible (geo-referenced)
+  // nodes: at most this many for per-bus LOD2, then aggregated LOD1, else LOD0.
+  const AUTO_LOD2_MAX_VISIBLE = 2500;
+  const AUTO_LOD1_MAX_VISIBLE = 30000;
+  // Minimum share of buses with non-default coordinates required before the
+  // backend topology_window service drives rendering (mirrors the geographic
+  // layout rule in layoutGraph).
+  const GEO_COVERAGE_MIN = 0.8;
+
   const state = {
     active: false,
     system: null,
     full: null,
     graph: null,
     lod: 2,
+    // Auto LOD (zoom-driven) is only used in windowed mode; the local
+    // fallback keeps the historical manual behavior.
+    lodAuto: false,
     selected: null,
     centerX: 0,
     centerY: 0,
@@ -26,6 +44,53 @@ const NetworkOverview = (() => {
     lineCount: 0,
     transformerCount: 0,
     nodeCount: 0,
+    // SoA render store: preallocated interleaved [x, y, r, g, b, a] vertex
+    // data plus parallel identity arrays. Capacity grows x2 so LOD rebuilds
+    // and selection updates avoid per-change allocation.
+    soa: {
+      nodeData: null,
+      nodeDomains: [],
+      nodeIndices: [],
+      nodeSlotByKey: new Map(),
+      lineData: null,
+      lineEndpoints: null,
+      // Per-drawn-edge bookkeeping for result recoloring: vertex float offset
+      // in lineData, stable identity, and the structural base color to restore
+      // when no loading value applies.
+      lineEdgeInfo: [],
+      transformerData: null,
+    },
+    colors: null,
+    selectedSlot: -1,
+    dirtyMin: -1,
+    dirtyMax: -1,
+    lineDirtyMin: -1,
+    lineDirtyMax: -1,
+    grid: null,
+    // Viewport-driven backend topology_window mode.
+    fetchWindow: null,   // injected async (body) => topology_window_v1 | null
+    // Injected async (body) => result_window_v1 | {empty:true} (409: no cached
+    // PF) | null (transport/other error). Result coloring only exists in
+    // windowed mode; the local fallback path is unaffected.
+    fetchResultWindow: null,
+    result: {
+      seq: 0,            // bumped per result request; stale replies dropped
+      active: false,     // result coloring currently applied
+      nodeVm: null,      // Map<`${domain}:${index}`, vm_pu>
+      branchLoading: null, // Map<`${domain}:${index}`, loading_pct>
+      meta: null,        // result_meta verbatim (source/method/converged/...)
+      limitations: [],
+    },
+    windowed: false,
+    fullBounds: null,    // world-space bounds of the full network
+    window: {
+      timer: 0,
+      seq: 0,            // bumped per request; stale responses are dropped
+      bbox: null,        // last fetched expanded world-space bbox
+      lod: -1,
+      limitations: [],
+      coverage: null,
+    },
     resizeObserver: null,
   };
 
@@ -290,10 +355,19 @@ const NetworkOverview = (() => {
     };
   }
 
-  function pushVertex(target, node, color) {
-    target.push(node.x, node.y, color[0], color[1], color[2], color[3]);
+  function ensureCapacity(current, needed, Type) {
+    if (current && current.length >= needed) return current;
+    let capacity = current ? current.length : 256;
+    while (capacity < needed) capacity *= 2;
+    const next = new Type(capacity);
+    if (current) next.set(current);
+    return next;
   }
 
+  // Structural rebuild (new system or LOD switch): fills the preallocated
+  // interleaved vertex arrays from the current graph, uploads the used prefix
+  // of each GL buffer, and rebuilds the uniform grid. Selection and other
+  // color-only changes never reach this path; they use markNodeDirty instead.
   function rebuildBuffers() {
     if (!state.gl || !state.graph) return;
     const gl = state.gl;
@@ -301,40 +375,558 @@ const NetworkOverview = (() => {
     colors.edge[3] = 0.22;
     colors.hybrid[3] = 0.7;
     colors.transformer[3] = 0.85;
-    const byKey = new Map(state.graph.nodes.map(node => [node.key, node]));
-    const lines = [];
-    const transformerPoints = [];
-    state.graph.edges.forEach(edge => {
-      const a = byKey.get(edge.source);
-      const b = byKey.get(edge.target);
-      if (!a || !b) return;
-      const color = edge.kind === 'transformer'
-        ? colors.transformer
-        : (edge.domain === 'hybrid' ? colors.hybrid : colors.edge);
-      pushVertex(lines, a, color);
-      pushVertex(lines, b, color);
-      if (edge.kind === 'transformer') {
-        pushVertex(transformerPoints, {
-          x: (a.x + b.x) / 2,
-          y: (a.y + b.y) / 2,
-        }, colors.transformer);
-      }
-    });
-    const points = [];
-    state.graph.nodes.forEach(node => {
+    state.colors = colors;
+
+    const nodes = state.graph.nodes;
+    const nodeCount = nodes.length;
+    const nodeData = ensureCapacity(state.soa.nodeData, nodeCount * 6, Float32Array);
+    const slotByKey = state.soa.nodeSlotByKey;
+    slotByKey.clear();
+    state.soa.nodeDomains.length = nodeCount;
+    state.soa.nodeIndices.length = nodeCount;
+    state.selectedSlot = -1;
+    for (let i = 0; i < nodeCount; i += 1) {
+      const node = nodes[i];
+      const offset = i * 6;
       const selected = state.selected && node.domain === state.selected.domain &&
         Number(node.index) === Number(state.selected.index);
-      pushVertex(points, node, selected ? colors.selected : (colors[node.domain] || colors.ac));
+      state.soa.nodeDomains[i] = node.domain;
+      state.soa.nodeIndices[i] = node.index;
+      slotByKey.set(node.key, i);
+      if (selected) state.selectedSlot = i;
+      // Result coloring (when active) is the base color; selection wins.
+      const color = selected ? colors.selected : nodeBaseColor(i);
+      nodeData[offset] = node.x;
+      nodeData[offset + 1] = node.y;
+      nodeData[offset + 2] = color[0];
+      nodeData[offset + 3] = color[1];
+      nodeData[offset + 4] = color[2];
+      nodeData[offset + 5] = color[3];
+    }
+
+    // Line endpoints reference node slots, so edge identity survives
+    // color-only updates; only structural rebuilds rewrite these arrays.
+    const edges = state.graph.edges;
+    const lineData = ensureCapacity(state.soa.lineData, edges.length * 12, Float32Array);
+    const lineEndpoints = ensureCapacity(state.soa.lineEndpoints, edges.length * 2, Int32Array);
+    const transformerData = ensureCapacity(state.soa.transformerData, edges.length * 6, Float32Array);
+    let lineFloats = 0;
+    let linePairs = 0;
+    let transformerFloats = 0;
+    const lineEdgeInfo = state.soa.lineEdgeInfo;
+    lineEdgeInfo.length = 0;
+    edges.forEach(edge => {
+      const source = slotByKey.get(edge.source);
+      const target = slotByKey.get(edge.target);
+      if (source == null || target == null) return;
+      const baseColor = edge.kind === 'transformer'
+        ? colors.transformer
+        : (edge.domain === 'hybrid' ? colors.hybrid : colors.edge);
+      const info = {
+        offset: lineFloats,
+        domain: edge.domain,
+        index: edge.index != null ? Number(edge.index) : null,
+        base: baseColor,
+      };
+      lineEdgeInfo.push(info);
+      const color = edgeBaseColor(info);
+      [source, target].forEach(slot => {
+        const from = slot * 6;
+        lineData[lineFloats] = nodeData[from];
+        lineData[lineFloats + 1] = nodeData[from + 1];
+        lineData[lineFloats + 2] = color[0];
+        lineData[lineFloats + 3] = color[1];
+        lineData[lineFloats + 4] = color[2];
+        lineData[lineFloats + 5] = color[3];
+        lineFloats += 6;
+      });
+      lineEndpoints[linePairs] = source;
+      lineEndpoints[linePairs + 1] = target;
+      linePairs += 2;
+      if (edge.kind === 'transformer') {
+        transformerData[transformerFloats] = (nodeData[source * 6] + nodeData[target * 6]) / 2;
+        transformerData[transformerFloats + 1] = (nodeData[source * 6 + 1] + nodeData[target * 6 + 1]) / 2;
+        transformerData[transformerFloats + 2] = colors.transformer[0];
+        transformerData[transformerFloats + 3] = colors.transformer[1];
+        transformerData[transformerFloats + 4] = colors.transformer[2];
+        transformerData[transformerFloats + 5] = colors.transformer[3];
+        transformerFloats += 6;
+      }
     });
+
+    state.soa.nodeData = nodeData;
+    state.soa.lineData = lineData;
+    state.soa.lineEndpoints = lineEndpoints;
+    state.soa.transformerData = transformerData;
+    state.lineCount = lineFloats / 6;
+    state.transformerCount = transformerFloats / 6;
+    state.nodeCount = nodeCount;
+    state.dirtyMin = -1;
+    state.dirtyMax = -1;
+    state.lineDirtyMin = -1;
+    state.lineDirtyMax = -1;
+
+    // DYNAMIC_DRAW: node colors are patched in place via bufferSubData on
+    // selection changes; bufferData reallocates only on structural rebuilds.
     gl.bindBuffer(gl.ARRAY_BUFFER, state.lineBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(lines), gl.STATIC_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER, lineData.subarray(0, lineFloats), gl.DYNAMIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, state.transformerBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(transformerPoints), gl.STATIC_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER, transformerData.subarray(0, transformerFloats), gl.DYNAMIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, state.nodeBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(points), gl.STATIC_DRAW);
-    state.lineCount = lines.length / 6;
-    state.transformerCount = transformerPoints.length / 6;
-    state.nodeCount = points.length / 6;
+    gl.bufferData(gl.ARRAY_BUFFER, nodeData.subarray(0, nodeCount * 6), gl.DYNAMIC_DRAW);
+
+    buildGrid();
+  }
+
+  // Uniform grid over node positions, rebuilt together with the buffers.
+  // Cell size starts at 4x the average node spacing estimated from the
+  // bounding-box area, then each axis is capped at 256 cells so a single
+  // distant outlier cannot shrink cells below usefulness.
+  function buildGrid() {
+    const data = state.soa.nodeData;
+    const count = state.nodeCount;
+    if (!data || !count) {
+      state.grid = null;
+      return;
+    }
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (let i = 0; i < count; i += 1) {
+      const x = data[i * 6];
+      const y = data[i * 6 + 1];
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+    const width = Math.max(maxX - minX, 1e-6);
+    const height = Math.max(maxY - minY, 1e-6);
+    const spacing = Math.sqrt((width * height) / count);
+    const cols = Math.min(256, Math.max(1, Math.ceil(width / (spacing * 4))));
+    const rows = Math.min(256, Math.max(1, Math.ceil(height / (spacing * 4))));
+    const cellW = width / cols;
+    const cellH = height / rows;
+    const cells = new Map();
+    for (let i = 0; i < count; i += 1) {
+      const cx = Math.min(cols - 1, Math.floor((data[i * 6] - minX) / cellW));
+      const cy = Math.min(rows - 1, Math.floor((data[i * 6 + 1] - minY) / cellH));
+      const key = cy * cols + cx;
+      let bucket = cells.get(key);
+      if (!bucket) {
+        bucket = [];
+        cells.set(key, bucket);
+      }
+      bucket.push(i);
+    }
+    state.grid = { minX, minY, cellW, cellH, cols, rows, cells };
+  }
+
+  // Color-only update path: rewrites the rgba slots of the affected nodes and
+  // uploads the merged dirty range [dirtyMin, dirtyMax] with bufferSubData.
+  function markNodeDirty(slot, color) {
+    const data = state.soa.nodeData;
+    const offset = slot * 6 + 2;
+    data[offset] = color[0];
+    data[offset + 1] = color[1];
+    data[offset + 2] = color[2];
+    data[offset + 3] = color[3];
+    if (state.dirtyMin < 0 || slot < state.dirtyMin) state.dirtyMin = slot;
+    if (slot > state.dirtyMax) state.dirtyMax = slot;
+  }
+
+  function writeNodeColorIfChanged(slot, color) {
+    const data = state.soa.nodeData;
+    const offset = slot * 6 + 2;
+    if (data[offset] === color[0] && data[offset + 1] === color[1] &&
+        data[offset + 2] === color[2] && data[offset + 3] === color[3]) return;
+    markNodeDirty(slot, color);
+  }
+
+  // Same dirty-range mechanism for the line buffer, tracked in float offsets
+  // (vertex-aligned, 6 floats per vertex, 2 vertices per edge).
+  function markLineDirty(floatOffset) {
+    if (state.lineDirtyMin < 0 || floatOffset < state.lineDirtyMin) state.lineDirtyMin = floatOffset;
+    if (floatOffset > state.lineDirtyMax) state.lineDirtyMax = floatOffset;
+  }
+
+  function writeEdgeColorIfChanged(floatOffset, color) {
+    const data = state.soa.lineData;
+    if (!data) return;
+    for (let v = 0; v < 2; v += 1) {
+      const base = floatOffset + v * 6;
+      if (data[base + 2] === color[0] && data[base + 3] === color[1] &&
+          data[base + 4] === color[2] && data[base + 5] === color[3]) continue;
+      data[base + 2] = color[0];
+      data[base + 3] = color[1];
+      data[base + 4] = color[2];
+      data[base + 5] = color[3];
+      markLineDirty(base);
+    }
+  }
+
+  function flushDirtyRanges() {
+    const gl = state.gl;
+    if (state.dirtyMin >= 0 && state.dirtyMax >= state.dirtyMin) {
+      const start = state.dirtyMin * 6;
+      const end = (state.dirtyMax + 1) * 6;
+      gl.bindBuffer(gl.ARRAY_BUFFER, state.nodeBuffer);
+      gl.bufferSubData(gl.ARRAY_BUFFER, start * 4, state.soa.nodeData.subarray(start, end));
+      state.dirtyMin = -1;
+      state.dirtyMax = -1;
+    }
+    if (state.lineDirtyMin >= 0 && state.lineDirtyMax >= state.lineDirtyMin) {
+      const start = state.lineDirtyMin;
+      const end = state.lineDirtyMax + 6;
+      gl.bindBuffer(gl.ARRAY_BUFFER, state.lineBuffer);
+      gl.bufferSubData(gl.ARRAY_BUFFER, start * 4, state.soa.lineData.subarray(start, end));
+      state.lineDirtyMin = -1;
+      state.lineDirtyMax = -1;
+    }
+  }
+
+  // Voltage band colors mirror the SVG result overlay (canvas.js
+  // showPowerFlowResults): <0.95 pu red #e06c75, >1.05 pu orange #d19a66,
+  // in-band green #98c379 for AC and cyan #56b6c2 for DC.
+  function voltageColor(vm, domain) {
+    if (vm < 0.95) return [0.878, 0.424, 0.459, 1];
+    if (vm > 1.05) return [0.820, 0.604, 0.400, 1];
+    return domain === 'dc'
+      ? [0.337, 0.714, 0.761, 1]
+      : [0.596, 0.765, 0.475, 1];
+  }
+
+  // Branch loading ramp mirrors canvas.js loadingColor(): green → yellow at
+  // 50% → red at 100%, clamped at 150%. Alpha 0.9 so loaded lines stand out
+  // over the 0.22-alpha structural edge color.
+  function loadingColorFloat(pct) {
+    const p = Math.max(0, Math.min(Number(pct) || 0, 150)) / 100;
+    let r;
+    let g;
+    let b;
+    if (p <= 0.5) {
+      const t = p * 2;
+      r = 76 + (255 - 76) * t;
+      g = 175 + (235 - 175) * t;
+      b = 80 + (59 - 80) * t;
+    } else {
+      const t = Math.min((p - 0.5) * 2, 1);
+      r = 255 + (244 - 255) * t;
+      g = 235 + (67 - 235) * t;
+      b = 59 + (54 - 59) * t;
+    }
+    return [r / 255, g / 255, b / 255, 0.9];
+  }
+
+  // Base color of a node slot: result voltage color when result coloring is
+  // active and the bus has a vm value, otherwise the structural domain color.
+  function nodeBaseColor(slot) {
+    const domain = state.soa.nodeDomains[slot];
+    const vm = state.result.active && state.result.nodeVm
+      ? state.result.nodeVm.get(keyOf(domain, state.soa.nodeIndices[slot]))
+      : undefined;
+    if (vm != null && Number.isFinite(vm)) return voltageColor(vm, domain);
+    return state.colors[domain] || state.colors.ac;
+  }
+
+  // Base color of a drawn edge: loading ramp when result coloring has a value
+  // for this stable edge identity, otherwise the structural color recorded at
+  // rebuild time.
+  function edgeBaseColor(info) {
+    const loading = state.result.active && state.result.branchLoading && info.index != null
+      ? state.result.branchLoading.get(`${info.domain}:${info.index}`)
+      : undefined;
+    if (loading != null && Number.isFinite(loading)) return loadingColorFloat(loading);
+    return info.base;
+  }
+
+  // Bulk pass after a result_window payload arrives or is cleared. The
+  // selected slot keeps its selection color (restored to the result color on
+  // deselection via nodeBaseColor in applySelection).
+  function applyResultColors() {
+    if (!state.soa.nodeData || !state.colors) return;
+    for (let i = 0; i < state.nodeCount; i += 1) {
+      if (i === state.selectedSlot) continue;
+      writeNodeColorIfChanged(i, nodeBaseColor(i));
+    }
+    state.soa.lineEdgeInfo.forEach(info => {
+      writeEdgeColorIfChanged(info.offset, edgeBaseColor(info));
+    });
+    flushDirtyRanges();
+  }
+
+  function applySelection() {
+    const colors = state.colors;
+    if (!colors || !state.soa.nodeData) return;
+    const previous = state.selectedSlot;
+    const next = state.selected
+      ? state.soa.nodeSlotByKey.get(keyOf(state.selected.domain, state.selected.index))
+      : undefined;
+    if (previous >= 0 && previous !== next) {
+      markNodeDirty(previous, nodeBaseColor(previous));
+    }
+    if (next != null && next !== previous) markNodeDirty(next, colors.selected);
+    state.selectedSlot = next != null ? next : -1;
+    flushDirtyRanges();
+  }
+
+  function boundsOfNodes(nodes) {
+    if (!nodes?.length) return null;
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    nodes.forEach(node => {
+      if (node.x < minX) minX = node.x;
+      if (node.x > maxX) maxX = node.x;
+      if (node.y < minY) minY = node.y;
+      if (node.y > maxY) maxY = node.y;
+    });
+    return { minX, minY, maxX, maxY };
+  }
+
+  // Share of buses carrying real (non-default 0,0) coordinates; the backend
+  // window service can only return geo-referenced buses, so below the
+  // threshold the overview stays on the local full-system path.
+  function geoCoverage(nodes) {
+    if (!nodes?.length) return 0;
+    const withCoords = nodes.filter(node => node.latitude !== 0 || node.longitude !== 0).length;
+    return withCoords / nodes.length;
+  }
+
+  // Zoom-driven LOD from the estimated number of visible nodes, using the
+  // full-network density over its bounding box. Deterministic and cheap; the
+  // manual LOD select overrides it (state.lodAuto = false).
+  function autoLod() {
+    if (!state.fullBounds || !state.full?.nodes.length || !canvas) return state.lod;
+    const spanX = Math.max(state.fullBounds.maxX - state.fullBounds.minX, 1e-6);
+    const spanY = Math.max(state.fullBounds.maxY - state.fullBounds.minY, 1e-6);
+    const density = state.full.nodes.length / (spanX * spanY);
+    const rect = canvas.getBoundingClientRect();
+    const visible = density *
+      (rect.width / Math.max(state.scale, 1e-6)) * (rect.height / Math.max(state.scale, 1e-6));
+    if (visible <= AUTO_LOD2_MAX_VISIBLE) return 2;
+    if (visible <= AUTO_LOD1_MAX_VISIBLE) return 1;
+    return 0;
+  }
+
+  function viewportWorldBounds() {
+    const rect = canvas.getBoundingClientRect();
+    const halfW = rect.width / 2 / Math.max(state.scale, 1e-6);
+    const halfH = rect.height / 2 / Math.max(state.scale, 1e-6);
+    return {
+      minX: state.centerX - halfW, maxX: state.centerX + halfW,
+      minY: state.centerY - halfH, maxY: state.centerY + halfH,
+    };
+  }
+
+  function scheduleViewportUpdate(delay = WINDOW_DEBOUNCE_MS) {
+    if (state.window.timer) clearTimeout(state.window.timer);
+    state.window.timer = setTimeout(() => {
+      state.window.timer = 0;
+      onViewportSettled();
+    }, delay);
+  }
+
+  function onViewportSettled() {
+    if (!state.active || !state.windowed) return;
+    if (state.lodAuto) {
+      const next = autoLod();
+      if (next !== state.lod) {
+        state.lod = next;
+        state.window.bbox = null;
+      }
+    }
+    fetchWindowIfNeeded();
+  }
+
+  // Viewport grown by the prefetch margin, in world coordinates.
+  function expandedViewportBounds() {
+    const view = viewportWorldBounds();
+    const marginX = (view.maxX - view.minX) * WINDOW_PREFETCH_MARGIN;
+    const marginY = (view.maxY - view.minY) * WINDOW_PREFETCH_MARGIN;
+    return {
+      minX: view.minX - marginX, maxX: view.maxX + marginX,
+      minY: view.minY - marginY, maxY: view.maxY + marginY,
+    };
+  }
+
+  // World y grows downward (y = -latitude * 100), x = longitude * 100.
+  function windowBody(expanded) {
+    return {
+      min_x: expanded.minX / 100,
+      max_x: expanded.maxX / 100,
+      min_y: -expanded.maxY / 100,
+      max_y: -expanded.minY / 100,
+    };
+  }
+
+  // Fetch the current viewport (grown by the prefetch margin) unless it is
+  // already covered by the previously fetched window at the same LOD. The
+  // response sequence guard drops replies that arrive after a newer request.
+  function fetchWindowIfNeeded() {
+    if (!state.windowed || typeof state.fetchWindow !== 'function') return;
+    const view = viewportWorldBounds();
+    const cached = state.window.bbox;
+    if (cached && state.window.lod === state.lod &&
+        cached.minX <= view.minX && cached.maxX >= view.maxX &&
+        cached.minY <= view.minY && cached.maxY >= view.maxY) {
+      updateStatus();
+      return;
+    }
+    const expanded = expandedViewportBounds();
+    const body = { ...windowBody(expanded), lod: state.lod };
+    const seq = ++state.window.seq;
+    Promise.resolve(state.fetchWindow(body)).then(payload => {
+      if (seq !== state.window.seq || !state.active || !state.windowed) return;
+      if (!payload || payload.error || !Array.isArray(payload.nodes)) {
+        if (!state.graph) {
+          // First fetch failed: degrade to the local full-system path rather
+          // than showing an empty canvas.
+          state.windowed = false;
+          state.lodAuto = false;
+          applyLocalLod(state.full.nodes.length > 12000 ? 1 : 2);
+        } else {
+          updateStatus('拓扑窗口数据不可用，保留当前视图');
+        }
+        return;
+      }
+      state.window.bbox = expanded;
+      state.window.lod = state.lod;
+      state.window.limitations = Array.isArray(payload.model_limitations)
+        ? payload.model_limitations.map(String) : [];
+      state.window.coverage = payload.coordinate_coverage || null;
+      state.graph = adaptWindowGraph(payload);
+      rebuildBuffers();
+      draw();
+      updateStatus();
+    }).catch(() => {
+      if (seq === state.window.seq) updateStatus('拓扑窗口数据不可用，保留当前视图');
+    });
+    // Result coloring follows the same window: same bbox (no lod field).
+    fetchResultWindow(windowBody(expanded));
+  }
+
+  // result_window fetch with its own sequence guard so it never invalidates a
+  // pending topology fetch. The injected fetcher normalizes transport: payload
+  // on success, {empty:true} on 409 no_cached_power_flow, null otherwise.
+  function fetchResultWindow(body) {
+    if (!state.windowed || typeof state.fetchResultWindow !== 'function') return;
+    const seq = ++state.result.seq;
+    Promise.resolve(state.fetchResultWindow(body)).then(outcome => {
+      if (seq !== state.result.seq || !state.active || !state.windowed) return;
+      if (!outcome) return;  // transport/other error: keep current coloring
+      if (outcome.empty) {
+        clearResultColors();
+        return;
+      }
+      if (outcome.error || !Array.isArray(outcome.nodes)) return;
+      state.result.nodeVm = new Map();
+      state.result.branchLoading = new Map();
+      outcome.nodes.forEach(node => {
+        const vm = Number(node.vm_pu);
+        if (Number.isFinite(vm)) {
+          state.result.nodeVm.set(
+            keyOf(String(node.domain || '').toLowerCase(), Number(node.index)), vm);
+        }
+      });
+      (Array.isArray(outcome.branches) ? outcome.branches : []).forEach(branch => {
+        const loading = Number(branch.loading_pct);
+        if (Number.isFinite(loading)) {
+          state.result.branchLoading.set(
+            `${String(branch.domain || '').toLowerCase()}:${Number(branch.index)}`, loading);
+        }
+      });
+      state.result.meta = outcome.result_meta || null;
+      state.result.limitations = Array.isArray(outcome.model_limitations)
+        ? outcome.model_limitations.map(String) : [];
+      state.result.active = true;
+      applyResultColors();
+      draw();
+      updateStatus();
+    }).catch(() => {});
+  }
+
+  function clearResultColors() {
+    const had = state.result.active;
+    state.result.active = false;
+    state.result.nodeVm = null;
+    state.result.branchLoading = null;
+    state.result.meta = null;
+    state.result.limitations = [];
+    if (had) {
+      applyResultColors();
+      draw();
+    }
+    updateStatus();
+  }
+
+  // Exported hook for "a new PF result is cached on the backend": refetch the
+  // result layer for the current window. No-op outside windowed mode.
+  function refreshResults() {
+    if (!state.active || !state.windowed ||
+        typeof state.fetchResultWindow !== 'function') return false;
+    fetchResultWindow(windowBody(expandedViewportBounds()));
+    return true;
+  }
+
+  // topology_window_v1 -> internal graph shape. Backend coordinates are WGS84
+  // degrees; the overview world uses x = longitude * 100, y = -latitude * 100
+  // (same scaling as the geographic branch of layoutGraph). Node identity
+  // stays {domain, index} at LOD2 and the backend group key at LOD0/1.
+  function adaptWindowGraph(payload) {
+    const lod = Number(payload.lod);
+    const nodes = [];
+    const edges = [];
+    (Array.isArray(payload.nodes) ? payload.nodes : []).forEach(node => {
+      const domain = String(node.domain || '').toLowerCase();
+      const x = Number(node.x) * 100;
+      const y = -Number(node.y) * 100;
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+      if (lod === 2) {
+        const index = Number(node.index);
+        nodes.push({
+          key: keyOf(domain, index), domain, index, x, y,
+          name: `${domain.toUpperCase()} ${index}`,
+          inService: node.in_service !== false,
+        });
+      } else {
+        nodes.push({
+          key: String(node.key), domain, index: undefined, x, y,
+          name: String(node.name || node.key),
+          count: Number(node.count) || 0, inService: true,
+        });
+      }
+    });
+    (Array.isArray(payload.edges) ? payload.edges : []).forEach(edge => {
+      if (lod === 2) {
+        const fromDomain = String(edge.from_domain || '').toLowerCase();
+        const toDomain = String(edge.to_domain || '').toLowerCase();
+        edges.push({
+          source: keyOf(fromDomain, Number(edge.from)),
+          target: keyOf(toDomain, Number(edge.to)),
+          domain: fromDomain !== toDomain ? 'hybrid' : fromDomain,
+          kind: edge.category === 'AC_Transformer' ? 'transformer' : 'branch',
+          index: Number(edge.index),
+        });
+      } else {
+        edges.push({
+          source: String(edge.source), target: String(edge.target),
+          domain: String(edge.domain || '').toLowerCase(), kind: 'aggregate',
+        });
+      }
+    });
+    return { nodes, edges };
+  }
+
+  // Local (non-windowed) LOD application: the historical full-system path.
+  function applyLocalLod(lod) {
+    state.lod = Math.max(0, Math.min(2, lod));
+    state.graph = aggregate(state.full, state.lod);
+    rebuildBuffers();
+    fit();
+    updateStatus();
   }
 
   function resize() {
@@ -366,6 +958,13 @@ const NetworkOverview = (() => {
 
   function draw() {
     if (!state.active || !state.gl || !state.graph) return;
+    // Full drawArrays for every primitive. Vertex data is uploaded once per
+    // structural rebuild, so the per-frame cost of off-screen points/lines is
+    // small next to pan/zoom; at the targeted system sizes (tens of thousands
+    // of buses) culling is not the bottleneck — picking is, which the uniform
+    // grid in hitTest covers. If far larger systems need viewport culling,
+    // bucket line/node vertices by grid cell at rebuild time and draw only
+    // the ranges of intersecting cells.
     const gl = state.gl;
     const bg = palette().background;
     gl.viewport(0, 0, canvas.width, canvas.height);
@@ -387,21 +986,44 @@ const NetworkOverview = (() => {
   }
 
   function fit() {
-    if (!state.graph?.nodes.length || !canvas) return;
-    const xs = state.graph.nodes.map(node => node.x);
-    const ys = state.graph.nodes.map(node => node.y);
-    const minX = Math.min(...xs), maxX = Math.max(...xs);
-    const minY = Math.min(...ys), maxY = Math.max(...ys);
-    state.centerX = (minX + maxX) / 2;
-    state.centerY = (minY + maxY) / 2;
+    if (!canvas) return;
+    // In windowed mode the current graph only holds the fetched window, so
+    // fit always targets the full-network bounds; the local path sees the
+    // same bounds as before (full graph at LOD2, centroids otherwise).
+    const bounds = state.fullBounds || boundsOfNodes(state.graph?.nodes);
+    if (!bounds) return;
+    state.centerX = (bounds.minX + bounds.maxX) / 2;
+    state.centerY = (bounds.minY + bounds.maxY) / 2;
     const rect = canvas.getBoundingClientRect();
-    state.scale = Math.max(0.02, Math.min((rect.width - 60) / Math.max(1, maxX - minX),
-      (rect.height - 60) / Math.max(1, maxY - minY)));
+    state.scale = Math.max(0.02, Math.min((rect.width - 60) / Math.max(1, bounds.maxX - bounds.minX),
+      (rect.height - 60) / Math.max(1, bounds.maxY - bounds.minY)));
     draw();
+    scheduleViewportUpdate(0);
   }
 
+  // Manual LOD override ('auto' re-enables zoom-driven selection). In windowed
+  // mode an LOD change invalidates the fetched window and refetches; the local
+  // path re-aggregates as before.
   function setLod(value) {
+    if (String(value) === 'auto') {
+      if (!state.windowed) {
+        applyLocalLod(state.full?.nodes.length > 12000 ? 1 : 2);
+        if (lodSelect) lodSelect.value = String(state.lod);
+        return;
+      }
+      state.lodAuto = true;
+      state.lod = autoLod();
+      state.window.bbox = null;
+      scheduleViewportUpdate(0);
+      return;
+    }
+    state.lodAuto = false;
     state.lod = Math.max(0, Math.min(2, Number(value) || 0));
+    if (state.windowed) {
+      state.window.bbox = null;
+      scheduleViewportUpdate(0);
+      return;
+    }
     state.graph = aggregate(state.full, state.lod);
     rebuildBuffers();
     fit();
@@ -409,10 +1031,26 @@ const NetworkOverview = (() => {
   }
 
   function updateStatus(extra) {
-    if (!status || !state.graph) return;
+    if (!status) return;
+    if (!state.graph && !extra) return;
     const selected = state.selected ? ` · 已选 ${state.selected.domain.toUpperCase()} ${state.selected.index}` : '';
+    // Result honesty first (stale/unconverged), then backend-declared
+    // limitations (topology window, then result window), surfaced verbatim.
+    const meta = state.result.active ? state.result.meta : null;
+    let warning = '';
+    if (meta && meta.result_matches_current_system === false) {
+      warning = '结果滞后于当前模型，请重跑潮流';
+    } else if (meta && meta.converged === false) {
+      warning = '潮流结果未收敛';
+    } else if (state.window.limitations.length) {
+      warning = state.window.limitations[0];
+    } else if (state.result.active && state.result.limitations.length) {
+      warning = state.result.limitations[0];
+    }
+    const limitation = warning ? ` · ⚠ ${warning}` : '';
+    const autoTag = state.lodAuto && state.windowed ? '自动 ' : '';
     status.textContent = extra ||
-      `LOD${state.lod} · ${state.graph.nodes.length.toLocaleString()} 节点 · ${state.graph.edges.length.toLocaleString()} 连边${selected}`;
+      `${autoTag}LOD${state.lod} · ${(state.graph?.nodes.length || 0).toLocaleString()} 节点 · ${(state.graph?.edges.length || 0).toLocaleString()} 连边${selected}${limitation}`;
   }
 
   function worldAt(event) {
@@ -424,24 +1062,49 @@ const NetworkOverview = (() => {
   }
 
   function hitTest(event) {
+    // Precise picking stays LOD2-only; coarser LODs show aggregated groups.
     if (state.lod !== 2) return null;
+    const data = state.soa.nodeData;
+    if (!data || !state.nodeCount) return null;
     const point = worldAt(event);
     const maxDistance = 14 / Math.max(state.scale, 0.0001);
-    let best = null;
+    let best = -1;
     let bestD2 = maxDistance * maxDistance;
-    state.graph.nodes.forEach(node => {
-      const dx = node.x - point.x;
-      const dy = node.y - point.y;
+    const consider = slot => {
+      const dx = data[slot * 6] - point.x;
+      const dy = data[slot * 6 + 1] - point.y;
       const d2 = dx * dx + dy * dy;
-      if (d2 < bestD2) { bestD2 = d2; best = node; }
-    });
-    return best;
+      if (d2 < bestD2) {
+        bestD2 = d2;
+        best = slot;
+      }
+    };
+    const grid = state.grid;
+    if (grid) {
+      // Only scan cells intersecting the pick circle's bounding box.
+      const clampX = x => Math.max(0, Math.min(grid.cols - 1, Math.floor((x - grid.minX) / grid.cellW)));
+      const clampY = y => Math.max(0, Math.min(grid.rows - 1, Math.floor((y - grid.minY) / grid.cellH)));
+      const cx0 = clampX(point.x - maxDistance);
+      const cx1 = clampX(point.x + maxDistance);
+      const cy0 = clampY(point.y - maxDistance);
+      const cy1 = clampY(point.y + maxDistance);
+      for (let cy = cy0; cy <= cy1; cy += 1) {
+        for (let cx = cx0; cx <= cx1; cx += 1) {
+          const bucket = grid.cells.get(cy * grid.cols + cx);
+          if (bucket) bucket.forEach(consider);
+        }
+      }
+    } else {
+      for (let i = 0; i < state.nodeCount; i += 1) consider(i);
+    }
+    if (best < 0) return null;
+    return { domain: state.soa.nodeDomains[best], index: state.soa.nodeIndices[best] };
   }
 
   function selectNode(node, openLocal) {
     if (!node || node.index == null) return;
     state.selected = { domain: node.domain, index: Number(node.index) };
-    rebuildBuffers();
+    applySelection();
     draw();
     updateStatus();
     window.dispatchEvent(new CustomEvent('hysim:network-selection', {
@@ -465,6 +1128,7 @@ const NetworkOverview = (() => {
       state.centerX = state.start.centerX - dx / state.scale;
       state.centerY = state.start.centerY - dy / state.scale;
       draw();
+      scheduleViewportUpdate();
     });
     canvas.addEventListener('pointerup', event => {
       if (!state.moved) selectNode(hitTest(event), false);
@@ -480,6 +1144,7 @@ const NetworkOverview = (() => {
       state.centerX += before.x - after.x;
       state.centerY += before.y - after.y;
       draw();
+      scheduleViewportUpdate();
     }, { passive: false });
     document.getElementById('btnOverviewFit')?.addEventListener('click', fit);
     document.getElementById('btnOverviewLocal')?.addEventListener('click', () => {
@@ -511,24 +1176,70 @@ const NetworkOverview = (() => {
     return true;
   }
 
-  function show(system) {
+  function show(system, options = {}) {
     if (!root && !init()) return false;
     if (!state.gl) return false;
     state.system = system;
+    state.fetchWindow = typeof options.fetchTopologyWindow === 'function'
+      ? options.fetchTopologyWindow : null;
+    state.fetchResultWindow = typeof options.fetchResultWindow === 'function'
+      ? options.fetchResultWindow : null;
     state.full = layoutGraph(buildFullGraph(system || {}));
+    state.fullBounds = boundsOfNodes(state.full.nodes);
+    // Windowed mode requires a backend fetcher and enough geo-referenced
+    // buses; anything else stays on the local full-system rendering path.
+    state.windowed = !!(state.fetchWindow && state.fullBounds &&
+      geoCoverage(state.full.nodes) >= GEO_COVERAGE_MIN);
+    // Drop the previous system's rendered graph; a first-fetch failure in
+    // windowed mode detects the empty graph and degrades to the local path.
+    state.graph = null;
+    state.result.seq += 1;
+    state.result.active = false;
+    state.result.nodeVm = null;
+    state.result.branchLoading = null;
+    state.result.meta = null;
+    state.result.limitations = [];
+    state.window.bbox = null;
+    state.window.lod = -1;
+    state.window.limitations = [];
+    state.window.coverage = null;
+    state.window.seq += 1;  // invalidate in-flight fetches for the old system
+    if (state.window.timer) {
+      clearTimeout(state.window.timer);
+      state.window.timer = 0;
+    }
     state.active = true;
     document.body.classList.add('network-overview-active');
     document.body.classList.remove('network-overview-table');
     root.hidden = false;
-    const initialLod = state.full.nodes.length > 12000 ? 1 : 2;
-    if (lodSelect) lodSelect.value = String(initialLod);
-    setLod(initialLod);
     resize();
+    if (state.windowed) {
+      state.lodAuto = true;
+      if (lodSelect) lodSelect.value = 'auto';
+      fit();               // full-network bounds; establishes view + scale
+      state.lod = autoLod();
+      if (state.window.timer) {
+        clearTimeout(state.window.timer);
+        state.window.timer = 0;
+      }
+      onViewportSettled(); // first fetch for the fitted viewport, no debounce
+    } else {
+      state.lodAuto = false;
+      const initialLod = state.full.nodes.length > 12000 ? 1 : 2;
+      if (lodSelect) lodSelect.value = String(initialLod);
+      applyLocalLod(initialLod);
+    }
     return true;
   }
 
   function hide() {
     state.active = false;
+    state.window.seq += 1;  // drop any in-flight window response
+    state.result.seq += 1;
+    if (state.window.timer) {
+      clearTimeout(state.window.timer);
+      state.window.timer = 0;
+    }
     document.body.classList.remove('network-overview-active', 'network-overview-table');
     if (root) root.hidden = true;
   }
@@ -540,7 +1251,7 @@ const NetworkOverview = (() => {
       lodSelect.value = '2';
       setLod(2);
     } else {
-      rebuildBuffers();
+      applySelection();
       draw();
       updateStatus();
     }
@@ -554,13 +1265,22 @@ const NetworkOverview = (() => {
     });
     return {
       schema: 'hysim_network_overview_v1', active: state.active, lod: state.lod,
+      lod_auto: state.lodAuto,
+      windowed: state.windowed,
       nodes: state.graph?.nodes.length || 0, edges: state.graph?.edges.length || 0,
       edge_kinds: edgeKinds,
       transformer_edges: edgeKinds.transformer || 0,
       webgl2: !!state.gl, selected: state.selected ? { ...state.selected } : null,
+      coordinate_coverage: state.window.coverage,
+      model_limitations: [...state.window.limitations],
+      result_active: state.result.active,
+      result_meta: state.result.meta ? { ...state.result.meta } : null,
+      result_nodes: state.result.nodeVm ? state.result.nodeVm.size : 0,
+      result_branches: state.result.branchLoading ? state.result.branchLoading.size : 0,
+      result_limitations: [...state.result.limitations],
       canvas_pixels: canvas ? canvas.width * canvas.height : 0,
     };
   }
 
-  return { init, show, hide, fit, setLod, selectRef, stats, get active() { return state.active; } };
+  return { init, show, hide, fit, setLod, selectRef, refreshResults, stats, get active() { return state.active; } };
 })();

@@ -43,6 +43,11 @@ const Canvas = (() => {
   const state = {
     components: [],       // {id, type, x, y, params, el}
     connections: [],      // {id, from:{compId, portId}, to:{compId, portId}, el}
+    // Write-through indexes over the two arrays above. Maintained by every
+    // mutation path (add/remove/clear); bulk loads go through the same
+    // addComponent/addConnection paths, so building them stays O(n) overall.
+    componentById: new Map(),          // compId -> component
+    connectionsByEndpoint: new Map(),  // compId | "compId:portId" -> connection[] (live buckets, insertion order)
     nextId: 1,
     selectedId: null,
     selectedConnectionId: null,  // selected connection line
@@ -76,6 +81,11 @@ const Canvas = (() => {
   };
 
   let _preservedModelBlocks = {};
+
+  // getCompBusMap() cache: rebuilt lazily on next call, invalidated on every
+  // topology or component-parameter change (add/remove/clear/rerender).
+  let _compBusMapCache = null;
+  function invalidateCompBusMap() { _compBusMapCache = null; }
 
   // Above these limits a freshly loaded system enters headless (no-canvas) mode.
   // Either a large bus count or a large total-element count triggers it; users
@@ -469,6 +479,8 @@ const Canvas = (() => {
 
     const comp = { id, type, x: snapToGrid(x), y: snapToGrid(y), rotation: rotation || 0, params: p, el: null };
     state.components.push(comp);
+    state.componentById.set(id, comp);
+    invalidateCompBusMap();
     renderComponent(comp);
     updateInfo();
     return comp;
@@ -482,12 +494,15 @@ const Canvas = (() => {
     state.connections = state.connections.filter(conn => {
       if (conn.from.compId === id || conn.to.compId === id) {
         conn.el?.remove();
+        unindexConnection(conn);
         return false;
       }
       return true;
     });
     comp.el?.remove();
     state.components.splice(idx, 1);
+    state.componentById.delete(id);
+    invalidateCompBusMap();
     if (state.selectedId === id) {
       state.selectedId = null;
       if (typeof App !== 'undefined') App.onSelectionChanged(null);
@@ -500,8 +515,11 @@ const Canvas = (() => {
   function removeConnection(connId) {
     const idx = state.connections.findIndex(c => c.id === connId);
     if (idx < 0) return;
-    state.connections[idx].el?.remove();
+    const conn = state.connections[idx];
+    conn.el?.remove();
     state.connections.splice(idx, 1);
+    unindexConnection(conn);
+    invalidateCompBusMap();
     if (state.selectedConnectionId === connId) {
       state.selectedConnectionId = null;
     }
@@ -527,8 +545,46 @@ const Canvas = (() => {
     }
   }
 
+  // ========== Resident index maintenance ==========
+  // connectionsByEndpoint keys: a bare compId (number) indexes every wire
+  // touching that component; "compId:portId" (string) narrows to one port.
+  function indexConnection(conn) {
+    const seenKeys = new Set();  // guard: identical endpoints must not double-register
+    for (const end of [conn.from, conn.to]) {
+      for (const key of [end.compId, end.compId + ':' + end.portId]) {
+        if (seenKeys.has(key)) continue;
+        seenKeys.add(key);
+        const bucket = state.connectionsByEndpoint.get(key);
+        if (bucket) bucket.push(conn);
+        else state.connectionsByEndpoint.set(key, [conn]);
+      }
+    }
+  }
+
+  function unindexConnection(conn) {
+    const seenKeys = new Set();
+    for (const end of [conn.from, conn.to]) {
+      for (const key of [end.compId, end.compId + ':' + end.portId]) {
+        if (seenKeys.has(key)) continue;
+        seenKeys.add(key);
+        const bucket = state.connectionsByEndpoint.get(key);
+        if (!bucket) continue;
+        const i = bucket.indexOf(conn);
+        if (i >= 0) bucket.splice(i, 1);
+        if (bucket.length === 0) state.connectionsByEndpoint.delete(key);
+      }
+    }
+  }
+
+  // Connections touching compId (optionally one specific port), in the same
+  // relative order as state.connections. Returns the live index bucket —
+  // callers must treat it as read-only.
+  function connectionsOf(compId, portId) {
+    return state.connectionsByEndpoint.get(portId == null ? compId : compId + ':' + portId) || [];
+  }
+
   function getComponent(id) {
-    return state.components.find(c => c.id === id);
+    return state.componentById.get(id);
   }
 
   function selectComponent(id) {
@@ -638,12 +694,11 @@ const Canvas = (() => {
     if (comp.id === state.selectedId) {
       comp.el.classList.add('selected');
     }
+    // Property-panel edits mutate comp.params directly and land here — the
+    // comp-bus map may depend on them, so drop the cached copy.
+    invalidateCompBusMap();
     // Re-render connections
-    state.connections.forEach(conn => {
-      if (conn.from.compId === comp.id || conn.to.compId === comp.id) {
-        rerenderConnection(conn);
-      }
-    });
+    connectionsOf(comp.id).forEach(conn => rerenderConnection(conn));
   }
 
   function clearSolvedGeneratorDisplays() {
@@ -668,22 +723,51 @@ const Canvas = (() => {
     const out = [];
     const list = Array.isArray(rows) ? rows : [];
     const used = new Set();
+    // Pre-index rows once (key -> queue of row positions) so each component
+    // lookup is O(1) instead of re-scanning the whole rows array.
+    const byIndex = new Map(), byCanvasIndex = new Map(), byPosition = new Map();
+    list.forEach((r, i) => {
+      const pushIdx = (m, k) => {
+        if (!Number.isFinite(k)) return;
+        if (!m.has(k)) m.set(k, []);
+        m.get(k).push(i);
+      };
+      pushIdx(byIndex, Number(r?.index));
+      pushIdx(byCanvasIndex, Number(r?.canvas_index));
+      pushIdx(byPosition, Number(r?.position));
+    });
+    const takeFrom = (m, k) => {
+      const queue = m.get(k);
+      if (!queue) return null;
+      while (queue.length && used.has(queue[0])) queue.shift();
+      if (!queue.length) return null;
+      const i = queue.shift();
+      used.add(i);
+      return list[i];
+    };
+    let nextFree = 0;
+    const takeAny = () => {
+      while (nextFree < list.length && used.has(nextFree)) nextFree++;
+      if (nextFree >= list.length) return null;
+      const i = nextFree++;
+      used.add(i);
+      return list[i];
+    };
     comps.forEach((comp, order) => {
       const idx = Number(comp.params?.index);
       let row = null;
       if (Number.isFinite(idx)) {
-        row = list.find((r, i) => !used.has(i) && Number(r.index) === idx) || null;
+        row = takeFrom(byIndex, idx);
       }
       if (!row && Number.isFinite(idx)) {
-        row = list.find((r, i) => !used.has(i) && Number(r.canvas_index) === idx) || null;
+        row = takeFrom(byCanvasIndex, idx);
       }
       if (!row) {
-        row = list.find((r, i) => !used.has(i) && Number(r.position) === order) || null;
+        row = takeFrom(byPosition, order);
       }
       if (!row) {
-        row = list.find((r, i) => !used.has(i)) || null;
+        row = takeAny();
       }
-      if (row) used.add(list.indexOf(row));
       out.push(row);
     });
     return out;
@@ -740,7 +824,7 @@ const Canvas = (() => {
     const acComps = [], dcComps = [];
     breakerComps.forEach(comp => {
       const busTypes = [];
-      state.connections.forEach(conn => {
+      connectionsOf(comp.id).forEach(conn => {
         let otherId = null;
         if (conn.from.compId === comp.id) otherId = conn.to.compId;
         else if (conn.to.compId === comp.id) otherId = conn.from.compId;
@@ -1277,8 +1361,9 @@ const Canvas = (() => {
     fromPortId = normalizePortId(fromCompId, fromPortId);
     toPortId = normalizePortId(toCompId, toPortId);
 
-    // Check if connection already exists
-    const exists = state.connections.some(c =>
+    // Check if connection already exists (adjacency bucket: only wires
+    // touching the from-endpoint can duplicate this one, either direction)
+    const exists = connectionsOf(fromCompId, fromPortId).some(c =>
       (c.from.compId === fromCompId && c.from.portId === fromPortId &&
        c.to.compId === toCompId && c.to.portId === toPortId) ||
       (c.from.compId === toCompId && c.from.portId === toPortId &&
@@ -1294,6 +1379,8 @@ const Canvas = (() => {
       el: null
     };
     state.connections.push(conn);
+    indexConnection(conn);
+    invalidateCompBusMap();
     renderConnection(conn);
     updateInfo();
     return conn;
@@ -1481,10 +1568,8 @@ const Canvas = (() => {
       comp.el.setAttribute('transform', `translate(${comp.x}, ${comp.y}) rotate(${comp.rotation || 0})`);
       // Update connections — cheap (orthogonal) routing keeps the drag smooth;
       // a full avoid-route runs once on mouse-up.
-      state.connections.forEach(conn => {
-        if (conn.from.compId === comp.id || conn.to.compId === comp.id) {
-          rerenderConnection(conn, { cheap: true });
-        }
+      connectionsOf(comp.id).forEach(conn => {
+        rerenderConnection(conn, { cheap: true });
       });
       // Update result overlays (voltage text + visualization)
       updateResultsOnDrag(comp.id);
@@ -1590,10 +1675,8 @@ const Canvas = (() => {
       // the drag is over — live drag used the cheap orthogonal route.
       if (dragged && state.connectionStyle === 'avoid') {
         buildRouteContext();
-        state.connections.forEach(conn => {
-          if (conn.from.compId === dragged.id || conn.to.compId === dragged.id) {
-            rerenderConnection(conn);
-          }
+        connectionsOf(dragged.id).forEach(conn => {
+          rerenderConnection(conn);
         });
       }
       // Final refresh of visualization overlay after drag ends
@@ -2869,7 +2952,7 @@ const Canvas = (() => {
     const dcMap = assignBusIndices('dc_bus');
     const busesOf = (compId) => {
       const out = [];
-      for (const conn of state.connections) {
+      for (const conn of connectionsOf(compId)) {
         let other = null;
         if (conn.from.compId === compId) other = conn.to.compId;
         else if (conn.to.compId === compId) other = conn.from.compId;
@@ -2882,7 +2965,7 @@ const Canvas = (() => {
     // Resolve the bus wired to a specific named port (for same-domain ports that
     // busesOf() cannot disambiguate, e.g. a DC/DC's 'in'/'out').
     const busByPort = (compId, portId) => {
-      for (const conn of state.connections) {
+      for (const conn of connectionsOf(compId, portId)) {
         let other = null;
         if (conn.from.compId === compId && conn.from.portId === portId) other = conn.to.compId;
         else if (conn.to.compId === compId && conn.to.portId === portId) other = conn.from.compId;
@@ -3054,7 +3137,7 @@ const Canvas = (() => {
     // programmatically to the JSON, never hand-wired on the canvas) keeps its intended
     // bus instead of silently collapsing onto bus 1.
     function findBusIndex(compId, fallback = 1) {
-      for (const conn of state.connections) {
+      for (const conn of connectionsOf(compId)) {
         if (conn.from.compId === compId) {
           const idx = compBusMap[conn.to.compId];
           if (idx !== undefined) return idx;
@@ -3070,7 +3153,7 @@ const Canvas = (() => {
     // Find two connected bus indices (for branches, transformers)
     function findTwoBusIndices(compId) {
       const indices = [];
-      for (const conn of state.connections) {
+      for (const conn of connectionsOf(compId)) {
         let busCompId = null;
         if (conn.from.compId === compId) busCompId = conn.to.compId;
         if (conn.to.compId === compId) busCompId = conn.from.compId;
@@ -3086,7 +3169,7 @@ const Canvas = (() => {
     // DC/DC converter whose 'in' and 'out' ports are BOTH on the DC side, or a
     // VSC's 'ac'/'dc' ports. Returns 0 when the port is unwired.
     function findBusIndexByPort(compId, portId) {
-      for (const conn of state.connections) {
+      for (const conn of connectionsOf(compId, portId)) {
         if (conn.from.compId === compId && conn.from.portId === portId) {
           const idx = compBusMap[conn.to.compId];
           if (idx !== undefined) return idx;
@@ -3100,7 +3183,7 @@ const Canvas = (() => {
     }
 
     function findBusByPort(compId, portId) {
-      for (const conn of state.connections) {
+      for (const conn of connectionsOf(compId, portId)) {
         let busCompId = null;
         if (conn.from.compId === compId && conn.from.portId === portId) {
           busCompId = conn.to.compId;
@@ -3510,7 +3593,7 @@ const Canvas = (() => {
         }
         case 'static_generator': {
           const busIdx = findBusIndex(comp.id);
-          const isDcStaticGen = state.connections.some(conn => {
+          const isDcStaticGen = connectionsOf(comp.id).some(conn => {
             const otherId = conn.from.compId === comp.id ? conn.to.compId
               : (conn.to.compId === comp.id ? conn.from.compId : null);
             return otherId != null && compBusDomainMap[otherId] === 'DC';
@@ -3743,7 +3826,7 @@ const Canvas = (() => {
         }
         case 'circuit_breaker': {
           const busConns = [];
-          for (const conn of state.connections) {
+          for (const conn of connectionsOf(comp.id)) {
             let otherCompId = null;
             if (conn.from.compId === comp.id) otherCompId = conn.to.compId;
             else if (conn.to.compId === comp.id) otherCompId = conn.from.compId;
@@ -3869,7 +3952,7 @@ const Canvas = (() => {
         }
         case 'transformer_3w': {
           const ports3w = [];
-          for (const conn of state.connections) {
+          for (const conn of connectionsOf(comp.id)) {
             let busCompId = null;
             if (conn.from.compId === comp.id) busCompId = conn.to.compId;
             if (conn.to.compId === comp.id) busCompId = conn.from.compId;
@@ -4367,9 +4450,7 @@ const Canvas = (() => {
       if (!busComp) return null;
 
       // Count existing devices on this bus to offset horizontally
-      const existingDevices = state.connections.filter(c =>
-        c.from.compId === busCompId || c.to.compId === busCompId
-      ).length;
+      const existingDevices = connectionsOf(busCompId).length;
 
       const offsetX = (existingDevices % 5 - 2) * 80;
       const comp = addComponent(type, busComp.x + offsetX, busComp.y + yOffset, params);
@@ -5417,7 +5498,7 @@ const Canvas = (() => {
     const compToBus = {};
     for (const [idx, cid] of Object.entries(busMap.ac)) compToBus[cid] = parseInt(idx);
     for (const [idx, cid] of Object.entries(busMap.dc)) compToBus[cid] = parseInt(idx);
-    for (const conn of state.connections) {
+    for (const conn of connectionsOf(comp.id)) {
       let busCompId = null, portOfComp = null;
       if (conn.from.compId === comp.id) {
         busCompId = conn.to.compId;
@@ -5447,6 +5528,11 @@ const Canvas = (() => {
 
     // Store last PF result for visualization mode changes
     _lastPfResult = result;
+    // Notify the WebGL overview so windowed mode can pull the matching
+    // result_window from the backend cache (no-op in local/fallback mode).
+    if (typeof NetworkOverview !== 'undefined' && NetworkOverview.refreshResults) {
+      NetworkOverview.refreshResults();
+    }
     if (state.headless) return;
     applySolvedGeneratorDisplays(result);
     applySolvedGridAndBreakerDisplays(result);
@@ -5967,7 +6053,7 @@ const Canvas = (() => {
 
       // Find the two connected buses via connections
       let fromBusCompId = null, toBusCompId = null;
-      for (const conn of state.connections) {
+      for (const conn of connectionsOf(comp.id)) {
         let otherCompId = null;
         if (conn.from.compId === comp.id) otherCompId = conn.to.compId;
         if (conn.to.compId === comp.id) otherCompId = conn.from.compId;
@@ -6004,7 +6090,7 @@ const Canvas = (() => {
       // Determine endpoints: the branch component is between its two buses
       // Draw the viz on the connections between this branch comp and its buses
       const connPairs = [];
-      for (const conn of state.connections) {
+      for (const conn of connectionsOf(comp.id)) {
         let busCompId = null, portOfBranch = null;
         if (conn.from.compId === comp.id) { busCompId = conn.to.compId; portOfBranch = conn.from.portId; }
         if (conn.to.compId === comp.id) { busCompId = conn.from.compId; portOfBranch = conn.to.portId; }
@@ -6143,7 +6229,7 @@ const Canvas = (() => {
       if (busConns.length < 2) {
         if (sw.flow?.source !== 'same_bus_external_grid_cut') return;
         const inlineConnections = [];
-        state.connections.forEach(conn => {
+        connectionsOf(comp.id).forEach(conn => {
           let otherId = null;
           if (conn.from.compId === comp.id) otherId = conn.to.compId;
           else if (conn.to.compId === comp.id) otherId = conn.from.compId;
@@ -6229,7 +6315,7 @@ const Canvas = (() => {
 
         // Find the 3 bus connections
         const busConns = [];
-        for (const c of state.connections) {
+        for (const c of connectionsOf(comp.id)) {
           let otherCompId = null;
           if (c.from.compId === comp.id) otherCompId = c.to.compId;
           else if (c.to.compId === comp.id) otherCompId = c.from.compId;
@@ -6366,7 +6452,7 @@ const Canvas = (() => {
 
         // Find a connection from this component to a bus
         let conn = null, busCompId = null;
-        for (const c of state.connections) {
+        for (const c of connectionsOf(comp.id)) {
           let otherCompId = null;
           if (c.from.compId === comp.id) otherCompId = c.to.compId;
           else if (c.to.compId === comp.id) otherCompId = c.from.compId;
@@ -6459,7 +6545,7 @@ const Canvas = (() => {
 
         // Find two connected DC buses
         let fromBusCompId = null, toBusCompId = null;
-        for (const c of state.connections) {
+        for (const c of connectionsOf(comp.id)) {
           let otherCompId = null;
           if (c.from.compId === comp.id) otherCompId = c.to.compId;
           if (c.to.compId === comp.id) otherCompId = c.from.compId;
@@ -6489,7 +6575,7 @@ const Canvas = (() => {
 
         if (showFlow) {
           const connPairs = [];
-          for (const c of state.connections) {
+          for (const c of connectionsOf(comp.id)) {
             let busCompId = null;
             if (c.from.compId === comp.id) busCompId = c.to.compId;
             if (c.to.compId === comp.id) busCompId = c.from.compId;
@@ -6574,7 +6660,7 @@ const Canvas = (() => {
 
         // Find ALL bus connections (AC and DC)
         const busConns = [];
-        for (const c of state.connections) {
+        for (const c of connectionsOf(comp.id)) {
           let otherCompId = null;
           if (c.from.compId === comp.id) otherCompId = c.to.compId;
           else if (c.to.compId === comp.id) otherCompId = c.from.compId;
@@ -6735,7 +6821,7 @@ const Canvas = (() => {
         if (!dd) return;
 
         const busConns = [];
-        for (const c of state.connections) {
+        for (const c of connectionsOf(comp.id)) {
           let otherCompId = null;
           if (c.from.compId === comp.id) otherCompId = c.to.compId;
           else if (c.to.compId === comp.id) otherCompId = c.from.compId;
@@ -6831,7 +6917,7 @@ const Canvas = (() => {
 
         // Find ALL bus connections from this ER
         const busConns = [];
-        for (const c of state.connections) {
+        for (const c of connectionsOf(comp.id)) {
           let otherCompId = null;
           if (c.from.compId === comp.id) otherCompId = c.to.compId;
           else if (c.to.compId === comp.id) otherCompId = c.from.compId;
@@ -7479,6 +7565,9 @@ const Canvas = (() => {
     state.connections.forEach(c => c.el?.remove());
     state.components = [];
     state.connections = [];
+    state.componentById.clear();
+    state.connectionsByEndpoint.clear();
+    invalidateCompBusMap();
     state.selectedId = null;
     state.nextId = 1;
     // Leaving headless mode: drop the stored system and hide the overview.
@@ -7519,7 +7608,25 @@ const Canvas = (() => {
     const host = document.getElementById('canvasContainer');
     if (!host) return;
     if (typeof NetworkOverview !== 'undefined' &&
-        NetworkOverview.show(state.headlessSystem || {})) {
+        NetworkOverview.show(state.headlessSystem || {}, {
+          // Viewport-driven topology windows come from the backend session;
+          // without a session the overview degrades to the local full-system
+          // path inside show().
+          fetchTopologyWindow: body =>
+            (typeof App !== 'undefined' && App.sessionPostQuiet)
+              ? App.sessionPostQuiet('/api/session/topology_window', body)
+              : Promise.resolve(null),
+          // Result coloring reads the cached last PF. Normalize transport for
+          // the overview: payload on success, {empty:true} when the backend
+          // declares 409 no_cached_power_flow, null on any other failure.
+          fetchResultWindow: async body => {
+            if (typeof App === 'undefined' || !App.sessionPostQuietResult) return null;
+            const res = await App.sessionPostQuietResult('/api/session/result_window', body);
+            if (!res) return null;
+            if (!res.ok) return res.error === 'no_cached_power_flow' ? { empty: true } : null;
+            return res.data;
+          },
+        })) {
       if (svg) svg.hidden = true;
       const fallback = document.getElementById('canvasHeadlessOverlay');
       if (fallback) fallback.style.display = 'none';
@@ -7626,6 +7733,7 @@ const Canvas = (() => {
    *           branch: { branchIndex -> compId }, gen: { genIndex -> compId } }
    */
   function getCompBusMap() {
+    if (_compBusMapCache) return _compBusMapCache;
 	    const maps = { ac: {}, dc: {}, branch: {}, gen: {}, load: {}, trafo: {},
 	      extGrid: {}, storage: {}, pv: {}, renGen: {}, sgen: {}, dcSgen: {}, sw: {}, cb: {}, dcCb: {},
 	      motor: {}, dcLoad: {}, dcBranch: {}, vsc: {}, lcc: {}, shunt: {}, trafo3w: {},
@@ -7682,7 +7790,7 @@ const Canvas = (() => {
 	        case 'dc_pv_array': putIndexed('dcPv', comp, idx.dcpv++); break;
 	        case 'renewable_gen': putIndexed('renGen', comp, idx.ren++); break;
         case 'static_generator': {
-          const isDcSgen = state.connections.some(conn => {
+          const isDcSgen = connectionsOf(comp.id).some(conn => {
             const otherId = conn.from.compId === comp.id ? conn.to.compId
               : (conn.to.compId === comp.id ? conn.from.compId : null);
             return otherId != null && getComponent(otherId)?.type === 'dc_bus';
@@ -7693,7 +7801,7 @@ const Canvas = (() => {
 	        }
 	        case 'switch_comp': putIndexed('sw', comp, idx.sw++); break;
         case 'circuit_breaker': {
-          const isDcCb = state.connections.some(conn => {
+          const isDcCb = connectionsOf(comp.id).some(conn => {
             const otherId = conn.from.compId === comp.id ? conn.to.compId
               : (conn.to.compId === comp.id ? conn.from.compId : null);
             return otherId != null && getComponent(otherId)?.type === 'dc_bus';
@@ -7722,6 +7830,7 @@ const Canvas = (() => {
       }
     });
 
+    _compBusMapCache = maps;
     return maps;
   }
 

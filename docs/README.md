@@ -1,132 +1,80 @@
-# Documentation Index
+# HySim-XJTU-HRPES 文档中心
 
-Updated: 2026-08-17
+最后核实：2026-08-18
 
-This is the canonical entry point for active project documentation. Runtime
-behavior is defined by `include/`, `src/`, `tests/run_gui_server.cpp`, `web/`,
-and registered tests. Documentation describes that behavior; it does not
-override it.
+本文件是仓库文档的唯一导航入口。运行行为以 `include/`、`src/`、
+`tests/run_gui_server.cpp`、`web/` 与已注册测试为准；文档用于解释实现，不覆盖实现。
 
-Historical audits, design proposals, and broad snapshots are isolated under
-[`archive/`](archive/README.md). Archived material may explain prior decisions,
-but it must not be used as evidence of current behavior.
+本次整理采用**非破坏式分类**：现有契约、论文和测试引用仍保留原路径，新的分类目录提供
+稳定入口与归属台账。这样既建立层级，又避免搬移文件造成的链接失效。逐文件归属见
+[文档分类台账](document_catalog.md)，模块覆盖状态见
+[模块文档地图](module_documentation_map.md)。
 
-## Document classes
+## 文档层级
 
-| Class | Meaning |
+| 层级 | 入口 | 用途 |
+|---|---|---|
+| 仓库总览 | [总览](overview/README.md) | 项目范围、能力边界、当前状态与阅读路径 |
+| 用户指南 | [用户指南](guides/README.md) | 算例、参数、工作流、部署与使用说明 |
+| 开发者指南 | [开发者指南](developer/README.md) | 架构、数据语义、开发约束与维护流程 |
+| 理论与模型 | [理论与模型](theory/README.md) | 数学推导、模型契约与有效边界 |
+| 模块文档 | [模块手册](modules/README.md) | 源码模块到中文 LaTeX 技术手册的映射 |
+| API 文档 | [API 文档](reference/README.md) | C++ 门面、HTTP、Python 与数据交换契约 |
+| 示例与教程 | [示例与教程](tutorials/README.md) | 可复现实例、场景格式与操作路径 |
+| 测试与验证 | [测试与验证](validation/README.md) | 测试基线、交叉验证与文档验收 |
+| 部署与运维 | [部署与运维](operations/README.md) | 构建、依赖、版本能力与运行边界 |
+| 研究资料 | [研究资料](research/README.md) | 论文、理论资料、复现实验与归档 |
+| 规划与演进 | [规划与演进](planning/README.md) | 文档缺口、代码审计与受控改进项 |
+
+## 文档等级
+
+| 等级 | 含义 |
 |---|---|
-| **Status** | Volatile build, test, dependency, and active-work evidence. |
-| **Contract** | Current public behavior, inputs, outputs, limitations, and failure semantics. |
-| **Implementation reference** | Source-backed derivation, manual, or verification material. Recheck line-level details after code changes. |
-| **Archive** | Historical evidence or theory retained for provenance only. Not a current contract. |
+| 状态 | 易变的构建、测试、依赖与当前工作证据 |
+| 契约 | 当前公共行为、输入输出、限制和失败语义 |
+| 实现参考 | 由源码支撑的推导、手册或验证材料；代码变化后需复核 |
+| 研究资料 | 论文、理论探索与复现实验，不自动构成运行时承诺 |
+| 归档 | 历史审计或旧设计，仅保留决策溯源价值 |
 
-The [module documentation map](module_documentation_map.md) evaluates coverage
-across all major source modules and records missing focused contracts. The
-[module code audit](module_code_audit.md) records review depth and open
-source-backed defects.
+## 首要入口
 
-## Start here
-
-| Need | Class | Document |
+| 需求 | 等级 | 文档 |
 |---|---|---|
-| Current verified builds, dependency state, and active engineering work | Status | [Development status](development_status.md) |
-| Cross-platform offline build and dependency profiles | Contract | [Cross-platform build](cross_platform_build.md) |
-| Trial edition capabilities, enforcement, tests, and packaging | Contract | [Trial edition](trial_edition_design.md) |
-| Runtime HTTP routes and response boundaries | Contract | [Runtime API](runtime_api.md) |
-| Built-in cases and capability-oriented examples | Contract | [Case catalog](case_catalog.md) |
-| Python client and AI integration boundary | Contract | [Python API](python_api.md) |
-| Module ownership and documentation gaps | Status | [Module documentation map](module_documentation_map.md) |
-| Open code findings and module review depth | Status | [Module code audit](module_code_audit.md) |
+| 当前构建、测试、依赖与未闭环工作 | 状态 | [开发状态](development_status.md) |
+| 跨平台离线构建与依赖配置 | 契约 | [跨平台构建](cross_platform_build.md) |
+| 组件模型与参数 | 实现参考 | [元件模型手册](ComponentModels/component_models_math_audit.tex) |
+| 交直流与三相潮流 | 实现参考 | [潮流计算手册](PowerFlow/power_flow_manual1.tex) |
+| AC/DC、混合与三相 OPF | 实现参考 | [最优潮流手册](OptimalPowerFlow/opf_manual.tex) |
+| 全部源码模块技术手册 | 实现参考 | [模块手册索引](modules/README.md) |
+| HTTP 路由与响应边界 | 契约 | [运行时 API](runtime_api.md) |
+| 内置算例与能力示例 | 契约 | [算例目录](case_catalog.md) |
+| Python 客户端边界 | 契约 | [Python API](python_api.md) |
+| 模块文档覆盖与缺口 | 状态 | [模块文档地图](module_documentation_map.md) |
+| 代码审计深度与开放问题 | 状态 | [模块代码审计](module_code_audit.md) |
 
-## Core modeling and solvers
+## 工业级 LaTeX 手册
 
-| Topic | Class | Primary document | Companion material |
-|---|---|---|---|
-| Component models and validation | Implementation reference | [Component-model audit source](ComponentModels/component_models_math_audit.tex) | [Registered parameter system](parameter_system.md) |
-| Core data structures, relations, and API contract | Contract | [Data structure and API contract (数据结构与 API 契约)](data_structure_api_contract.md) | [Design review (设计评审与缺陷清单)](data_structure_design_review.md), [per-module internal structures (各模块内部数据结构)](module_data_structures.md) |
-| Rich-to-canonical projection and result recovery | Contract | [Projection and result attribution](projection_and_results.md) | Component and power-flow manuals |
-| Graph topology, reduction, and recovery | Contract | [Graph and reduction runtime](graph_runtime_contract.md) | Projection and result attribution |
-| Editable parameters and effective values | Contract | [Registered parameter system](parameter_system.md) | [Distribution parameter standards](distribution_parameter_completion_standards.md) |
-| AC/DC and three-phase power flow | Implementation reference | [Power-flow manual source](PowerFlow/power_flow_manual1.tex) | [Cross-module model/data/result semantics](model_data_semantics_contract.md), [VSC current-limit NCP contract](vsc_limit_ncp_power_flow_contract.md), [PV/PQ reactive-limit switching contract](pv_pq_switching_contract.md), [Harmonic verification](harmonics_analysis/harmonic_verification.md) |
-| AC/DC, DC, parity, three-phase OPF, and RPO | Implementation reference | [OPF manual source](OptimalPowerFlow/opf_manual.tex) | Registered OPF and RPO tests |
-| Network reconfiguration | Implementation reference | [Network reconfiguration models](network_reconfiguration_models.md) | [Certified restoration runtime](certified_restoration_runtime.md) |
-| Hosting capacity | Implementation reference | [DL/T 2041-2025 implementation](capacity_analysis_implementation.md) | [Multidimensional weak-link identification](multidimensional_weak_link_identification.md) |
-
-## Operations and planning
-
-| Topic | Class | Primary document | Companion material |
-|---|---|---|---|
-| Time-series UC -> OPF -> PF | Implementation reference | [Time-series power-flow models](time_series_power_flow_models.md) | [Rich component models](sequential_production_simulation_rich_models.md) |
-| Annual production and lifecycle | Implementation reference | [Annual simulation models](annual_simulation_models.md) | Time-series documents above |
-| Scenario generation and typhoon impacts | Contract | [Scenario generation runtime](scenario_generation_contract.md) | [Case catalog](case_catalog.md) |
-| Carbon tracing, annual inventory, and GEC | Contract | [Carbon analysis runtime](carbon_analysis_contract.md) | Time-series documents above |
-| Campus integrated energy | Contract | [Campus integrated energy runtime](integrated_energy_contract.md) | Current headers and registered tests |
-| Day-ahead and real-time market | Contract | [Market runtime](market_simulation_runtime.md) | [Implemented mathematical model](market_simulation_mathematical_models.md) |
-| Reliability | Implementation reference | [Consolidated reliability model](reliability_mathematical_models_and_intelligent_cyber_physical_assessment.md) | [Calculation workflow and case guide](reliability_calculation_workflow_and_case_guide.md), [canonical reliability methods](reliability_assessment_models.md), [runtime configuration API](runtime_api.md#reliability-and-protection-configuration) |
-| Resilience and restoration | Contract | [Certified restoration runtime](certified_restoration_runtime.md) | [Network reconfiguration models](network_reconfiguration_models.md) |
-| EV and traffic inputs | Contract | [EV/traffic scenario format](ev_traffic_scenario_format.md) | Current headers and registered tests |
-| SPPT executable verification | Contract | [SPPT executable runtime](sppt_runtime_contract.md) | [Projection and result attribution](projection_and_results.md) |
-
-## Dynamics, faults, and power quality
-
-| Topic | Class | Primary document | Companion material |
-|---|---|---|---|
-| Electromechanical transient runtime | Contract | [Transient runtime](transient_runtime.md) | Current dynamics headers and tests |
-| Rich AC/DC short circuit | Implementation reference | [Short-circuit derivation and audit](short_circuit_rich_acdc_derivation.md) | Current headers under `include/hacdcpf/analysis/` |
-| Harmonic power flow | Implementation reference | [Correctness verification](harmonics_analysis/harmonic_verification.md) | Current harmonic header and registered tests |
-
-## Data, integration, and GUI
-
-| Topic | Class | Document |
-|---|---|---|
-| IO governance and digital-twin readiness | Contract + labeled roadmap | [Digital-twin data/IO architecture](digital_twin_data_io_architecture.md) |
-| CIM/CGMES 3.0 fields and round trip | Contract | [CIM/CGMES crosswalk](cim_cgmes3_crosswalk.md) |
-| IEC-CGE distribution SVG import/export | Contract | [SVG distribution import](svg_distribution_import.md) |
-| BPA/DSP cards and LCC integration | Implementation reference | [BPA/DSP component mapping](bpa_dsp_component_mapping.md) |
-| Canvas rendering and result playback | Contract | [Canvas runtime](gui_canvas_runtime.md) |
-| Commenting conventions | Contract | [Commenting guide](commenting_guide.md) |
-
-## LaTeX manuals
-
-The repository tracks editable `.tex` sources, not rendered PDFs or LaTeX
-intermediates. Build and visually verify a PDF locally from the corresponding
-directory when a rendered copy is needed:
+保留并作为写作标杆的手册：
 
 - `ComponentModels/component_models_math_audit.tex`
 - `PowerFlow/power_flow_manual1.tex`
 - `OptimalPowerFlow/opf_manual.tex`
 
-The tracked research manuscript
-[`latex/paper/structure_preserving_semismooth_acdc_pf/main.tex`](latex/paper/structure_preserving_semismooth_acdc_pf/main.tex)
-develops the balanced hybrid AC/DC VSC-limit formulation, semismooth Newton
-method, local-block Schur elimination, convergence conditions, and preliminary
-production evidence. Its claims remain bounded by the current VSC NCP contract
-and development status.
+本次补齐的 18 个源码模块手册均为中文、具有独立目录和主 `.tex`，统一覆盖功能定位、输入输出、
+符号、数学模型、约束、算法、稳定性、复杂度、异常、接口、数据结构、验证、指标与局限。完整清单、
+源码映射和编译入口见 [模块手册索引](modules/README.md)，统一编译方法见
+[LaTeX 文档说明](latex/README.md)。
 
-The old component-only PDF had no tracked editable source and was removed.
+## 文档政策
 
-## Archive and local-only material
+- 更新现有活文档，不新增带日期的审计快照。
+- 易变的构建和测试证据只写入 `development_status.md`。
+- 路线图、假设、回退和归档材料不得表述为当前实现。
+- 所有公共结果向量必须声明索引空间与单位。
+- 近似、回退、时限和模型覆盖不足必须声明有效边界及结果标志。
+- HTTP 示例必须使用 `tests/run_gui_server.cpp` 中的生产路由。
+- LaTeX 只提交可编辑源文件；PDF、`.aux`、`.log` 等构建产物不作为规范源。
+- 新增文档必须登记到本索引与 [文档分类台账](document_catalog.md)，不得形成孤儿文件。
 
-- [`archive/README.md`](archive/README.md) inventories retained theory,
-  historical audits, and the legacy technical notebook. Archive links are
-  intentionally absent from the active topic tables above.
-- `docs/generated/` is ignored Doxygen output. Regenerate it from source; do
-  not cite it as a canonical contract.
-- `docs/latex/` is generally an ignored local research workspace. Only
-  explicitly unignored manuscript directories listed above are tracked and
-  available in a clean clone.
-- LaTeX auxiliary files and rendered PDFs are build products and must remain
-  untracked.
-
-## Documentation policy
-
-- Update a living contract instead of adding a dated audit snapshot.
-- Keep volatile build and test evidence in `development_status.md`.
-- Do not publish a roadmap, proposal, fallback, or archived audit as current
-  behavior.
-- Every public result vector must declare its index space and units.
-- Every approximation must state its validity boundary and result flags.
-- Runtime endpoint examples must use routes from `tests/run_gui_server.cpp`.
-- Add new canonical documents here and update
-  `module_documentation_map.md`; local, generated, or historical material stays
-  outside the active index.
+历史审计、旧设计与理论资料统一由 [归档索引](archive/README.md) 管理。归档可解释历史决策，
+但不得作为当前行为证据。

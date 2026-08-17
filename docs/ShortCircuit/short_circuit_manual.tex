@@ -1,140 +1,48 @@
 % !TEX program = xelatex
-% 编译方式：把本文件夹整包复制到纯 ASCII 路径后，执行两遍 xelatex（详见 docs/_manual_common/README.md）。
-% 首版骨架：内容取自 src/short_circuit/ 与 include/hacdcpf/analysis/ 源码
-%           （short_circuit.hpp / dc_short_circuit.hpp），公式与参数以代码为准。
-\documentclass[UTF8,fontset=windows,a4paper,11pt]{ctexart}
+% 编译方式：在本目录执行两遍 xelatex（详见 docs/_manual_common/README.md）。
+% 章节源文件位于 chapters/，由本文件 \input 引入。
+% 源码依据（行号以 2026-08-17 检出为准）：
+%   include/hacdcpf/analysis/short_circuit.hpp、dc_short_circuit.hpp
+%   src/short_circuit/{short_circuit,dc_short_circuit}.cpp
+%   docs/short_circuit_rich_acdc_derivation.md（IEC 60909 推导对照）
+\documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
 \usepackage{hysim_manual}
 
 \title{\textbf{交直流混合高弹性能源电力系统仿真平台}\\[0.5em]
-       {\Large 短路计算技术手册（IEC 60909 与直流故障水平）}\\[0.3em]
-       {\large 数学模型、接口参数与验证校核（首版骨架）}}
+       {\Large 短路计算技术手册}\\[0.3em]
+       {\large IEC 60909 交流短路、直流故障水平、换流器贡献与验证}}
 \author{HySim-XJTU-HRPES（西安交通大学 HRPES 团队）}
 \date{\today}
 
 \begin{document}
 \maketitle
 \begin{abstract}
-\noindent 本手册依据 HySim-XJTU-HRPES 平台短路模块
-（\srcpath{src/short\_circuit/}、公共头 \srcpath{include/hacdcpf/analysis/short\_circuit.hpp} 与
-\srcpath{dc\_short\_circuit.hpp}）整理，覆盖两条路径：交流侧基于 IEC 60909 等效电压源的
-序网 Z-bus 方法（概览与详细），给出 $I_k''$、峰值 $i_p$、开断 $I_b$、稳态 $I_k$、热等效
-$I_{th}$ 及换流器贡献；直流侧为电阻性刚性源螺栓短路的保守上界估计。全部结论以源码与
-\srcpath{docs/short\_circuit\_rich\_acdc\_derivation.md} 为准：交流分析在
-\srcpath{project\_to\_canonical\_models(sys)} 之后进行；本模块不是保护配合仿真器。
-文档版式与《碳流追踪与碳排放核算技术手册》一致。
+\noindent 本手册依据 HySim-XJTU-HRPES 平台短路计算模块
+（\srcpath{src/short\_circuit/} 与公共头 \srcpath{include/hacdcpf/analysis/short\_circuit.hpp}、
+\srcpath{dc\_short\_circuit.hpp}）整理，覆盖基于 IEC 60909 等效电压源与序网法的交流三相/
+不平衡母线短路（概览 Z-bus 法与详细 IEC 60909 法）、初始对称短路电流 $I_k''$ 与峰值 $i_p$、
+开断电流 $I_b$、稳态 $I_k$、热等效 $I_{th}$，换流器短路模型（跟网电流源/构网电压源），以及
+电阻性直流母线金属性故障水平估计。每个公式对照 \srcpath{docs/short\_circuit\_rich\_acdc\_derivation.md}
+与源码逐条注明出处。文档风格与《潮流计算技术手册》《最优潮流技术手册》一致。
+
+\smallskip
+\noindent\textbf{核心口径}：详细与概览 AC 路径均在 \srcpath{project\_to\_canonical\_models(sys)}
+之后进行；概览路径对不平衡故障采用简化 $Z_1{=}Z_2{=}Z_0$ 近似，详细路径构建真序网。直流路径
+为电阻性刚性源上界，\textbf{不}含换流器限流、电容放电暂态与直流保护跳闸。本模块是故障水平
+估计器，\textbf{非}保护配合仿真器。
 \end{abstract}
 
 \tableofcontents
 \newpage
 
-\section{阅读指南与约定}
-\subsection{数据来源}
-\begin{itemize}
-  \item \srcpath{include/hacdcpf/analysis/short\_circuit.hpp}、
-        \srcpath{src/short\_circuit/short\_circuit.cpp} —— 交流短路接口与实现；
-  \item \srcpath{include/hacdcpf/analysis/dc\_short\_circuit.hpp}、
-        \srcpath{src/short\_circuit/dc\_short\_circuit.cpp} —— 直流故障水平；
-  \item \srcpath{docs/short\_circuit\_rich\_acdc\_derivation.md} —— 交直流短路推导契约；
-  \item \srcpath{tests/test\_short\_circuit\_iec60909\_4.cpp} 等 —— 验证依据。
-\end{itemize}
+\input{chapters/overview}
+\input{chapters/ac_sequence}
+\input{chapters/iec60909_detailed}
+\input{chapters/converter_contributions}
+\input{chapters/dc_fault}
+\input{chapters/options_results}
+\input{chapters/verification}
 
-\subsection{单位制与索引空间}
-电流以标幺值（pu）与 kA 并列输出（\fld{i\_fault\_pu}/\fld{ikpp\_ka}、\fld{i\_fault\_ka}），
-短路容量 $S_k$ 单位 MVA，阻抗/电阻标幺化，时间 \fld{ith\_duration\_s}/\fld{breaking\_time\_s}
-单位 s。交流结果索引空间与规范化后的母线一致（分析前先做
-\srcpath{project\_to\_canonical\_models}）；直流结果以 \texttt{DC\_V} 源母线为戴维南参考。
+\input{../_manual_common/industrial_evaluation}
 
-\subsection{诚实口径}
-概览交流路径（\srcpath{compute\_short\_circuit}）对不平衡故障采用简化的 $Z_1=Z_2=Z_0$ 假设
-（负序取正序、零序未建模）；详细路径构造真实正/负/零序矩阵，但三绕组零序默认以正序代入
-（未建向量组）。直流路径\textbf{不}在计算内部建模断路器开合状态、换流器限流、电容放电暂态
-与保护动作，仅给出受线路电阻限制的保守上界，用于断路器/电缆选型筛查。相关限制在 \S 5.2
-如实列出。
-
-\section{功能定位与架构}
-\subsection{公共入口族}
-\begin{center}\footnotesize
-\begin{tabular}{@{}L{6.8cm}L{3.0cm}L{5.2cm}@{}}
-\toprule
-入口 & 定义位置 & 说明\\
-\midrule
-\srcpath{compute\_short\_circuit(sys, opt)} & short\_circuit.hpp & 全母线 Z-bus 概览短路\\
-\srcpath{compute\_fault\_at\_bus(sys, bus\_id, opt)} & 同上 & 单母线故障查询\\
-\srcpath{run\_short\_circuit\_detailed(sys, bus, opt)} & 同上 & 详细 IEC 60909（$I_k''$/$i_p$/$I_b$/$I_k$/$I_{th}$）\\
-\srcpath{run\_short\_circuit\_detailed\_batch(...)} & 同上 & 多母线详细计算\\
-\srcpath{dc\_bus\_fault\_level(sys, dc\_bus\_id, opt)} & dc\_short\_circuit.hpp & 直流螺栓短路电阻性估计\\
-\srcpath{get\_voltage\_factor\_sc / calculate\_kappa\_basic\_sc} & short\_circuit.hpp & IEC 电压系数与 $\kappa$ 辅助函数\\
-\bottomrule
-\end{tabular}
-\end{center}
-
-\subsection{关键数据结构}
-\compmeta{SCDetailedResult}{include/hacdcpf/analysis/short\_circuit.hpp}
-主要字段：\fld{fault\_bus\_id}、\fld{solved}、\fld{bus\_results}
-（\texttt{SCDetailedBusResult}：\fld{ikss\_ka}、\fld{ip\_ka}、\fld{ib\_ka}、\fld{ik\_ka}、
-\fld{ith\_ka}、\fld{v\_remaining\_pu} 及各源贡献）、\fld{branch\_results}、
-\fld{converter\_contributions}。概览结果 \texttt{SCResult}/\texttt{BusFaultResult} 含
-\fld{z\_thevenin}、\fld{i\_fault\_pu}、\fld{sk\_mva}、\fld{ikpp\_ka}。
-
-\compmeta{DCFaultResult}{include/hacdcpf/analysis/dc\_short\_circuit.hpp}
-主要字段：\fld{solved}、\fld{v\_prefault\_pu}、\fld{r\_thevenin\_pu}、\fld{i\_fault\_pu}、
-\fld{i\_fault\_ka}、\fld{breaker\_duties}（\texttt{DCBreakerDutyResult}）。
-
-\section{核心数学模型}
-\subsection{交流 IEC 60909 序网 Z-bus}
-以等效电压源法（电压校正系数 $c$）在序网上做 Z-bus 计算，复导纳矩阵经 Eigen 复数
-\texttt{SparseLU} 分解。母线 $k$ 的初始对称短路电流为
-\begin{equation}
-I_k'' = \frac{c\,U_n}{\sqrt{3}\,\lvert Z_{kk}\rvert},
-\end{equation}
-峰值电流由冲击系数 $\kappa$ 给出，$\kappa$ 随 $R/X$ 衰减
-\begin{equation}
-i_p = \kappa\,\sqrt{2}\,I_k'', \qquad \kappa = 1.02 + 0.98\,e^{-3R/X},
-\end{equation}
-热等效电流由因子 $m,n$ 合成
-\begin{equation}
-I_{th} = I_k''\sqrt{m+n}.
-\end{equation}
-换流器短路模型：并网跟随型取受限电流源 $I_{sc}=k\,I_{\text{rated}}$，构网型取阻抗后电压源。
-
-\subsection{直流螺栓短路（电阻性上界）}
-直流侧以电阻性刚性源近似，母线 $k$ 螺栓短路电流为
-\begin{equation}
-I_f = \frac{V_k}{R_{kk} + R_f},
-\end{equation}
-其中 $R_{kk}$ 为到 \texttt{DC\_V} 源母线的戴维南电阻、$R_f$（\fld{fault\_resistance\_pu}）为
-故障电阻。该式给出受线路电阻限制的保守上界，用于断路器分断/电缆热定值筛查。
-
-\section{接口与参数}
-\begin{paramtable}
-\fld{c\_factor} & $c$ & — & $1.0\sim1.1$ & $1.1$ & IEC 电压校正系数\\
-\fld{default\_xdpp} & $X_d''$ & pu & — & $0.2$ & 默认次暂态电抗\\
-\fld{compute\_all\_buses} & — & 布尔 & — & \texttt{true} & 是否计算全部母线\\
-\fld{inverse\_rhs\_batch\_size} & — & — & 整数 & $32$ & 逆求解右端批大小\\
-\fld{ith\_duration\_s} & $T_k$ & s & — & $1.0$ & 热等效电流持续时间\\
-\fld{breaking\_time\_s} & $t_{\min}$ & s & — & $0.10$ & 断路器最小分断时间\\
-\fld{fault\_resistance\_pu} & $R_f$ & pu & $\ge 0$ & $0$ & 直流故障电阻\\
-\fld{source\_voltage\_pu} & — & pu & $\ge 0$ & $0$ & 直流源电压（$0$=取预故障）\\
-\fld{min\_closed\_breaker\_resistance\_pu} & — & pu & 小正数 & $10^{-6}$ & 闭合直流断路器最小电阻\\
-\end{paramtable}
-详细路径 \srcpath{run\_short\_circuit\_detailed} 通过 \texttt{SCDetailedOptions} 选择
-\fld{calc\_type}（\texttt{Max}/\texttt{Min}）、\fld{kappa\_method}（A/B/C）、\fld{topology}
-（\texttt{Radial}/\texttt{Meshed}）与 \fld{apply\_iec\_transformer\_correction}；直流侧
-\fld{consider\_dc\_breakers}/\fld{dc\_breakers\_control\_branches} 控制断路器支路处理。
-
-\section{验证与边界局限}
-\subsection{验证与校核}
-注册测试：\srcpath{test\_short\_circuit\_crossval}（Z-bus 戴维南交叉校核与 IEC 检查，
-兼测 \srcpath{run\_short\_circuit\_detailed}）、\srcpath{test\_dc\_short\_circuit}、
-\srcpath{test\_short\_circuit\_iec60909\_4}（IEC TR 60909-4:2021 §6.2 参考算例），并被
-\srcpath{test\_io\_etap} 引用。
-
-\subsection{边界与局限（如实标注）}
-\begin{itemize}
-  \item 概览交流路径对不平衡故障用简化 $Z_1=Z_2=Z_0$（负序取正序、零序未建模）；详细路径
-        建真实序网，但三绕组零序默认以正序代入（未建向量组）；
-  \item 直流路径不在计算内部建模断路器开合状态、换流器限流、电容放电暂态与保护动作，
-        仅为受线路电阻限制的保守上界，用于断路器/电缆选型筛查；
-  \item 非保护配合仿真器：无动作时间曲线、电弧模型或跳闸后拓扑更新。
-\end{itemize}
 \end{document}

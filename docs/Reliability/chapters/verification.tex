@@ -1,0 +1,44 @@
+% 第 9 章：验证与边界局限
+\section{验证与边界局限}\label{sec:rel-verify}
+
+\subsection{注册测试}
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{5.2cm}L{4.0cm}L{5.2cm}@{}}
+\toprule
+测试目标 & 注册位置 & 覆盖\\
+\midrule
+\srcpath{test\_reliability\_resolver} & tests/CMakeLists.txt:394 & MC、FMEA、故障模式 FMEA、解析器、数据策略、信息物理\\
+\srcpath{test\_three\_stage\_reliability} & tests/CMakeLists.txt:388 & 三阶段隔离/重构/修复与指标\\
+\srcpath{test\_resilience\_assessment} & tests/CMakeLists.txt:272 & 交叉调用 \srcpath{run\_sequential\_mc}/\srcpath{run\_distribution\_fmea}\\
+\srcpath{reliability\_workflow\_e2e} & GUI E2E & FLISR 案例三向敏感性（负荷/信息服务/故障率）\\
+\bottomrule
+\end{tabular}
+\end{center}
+\srcpath{reliability\_workflow\_e2e} 的三向检查为方法内敏感性（负荷加压$\Rightarrow$EENS 增、
+失自动化$\Rightarrow$EENS 增且保留时延与冻结控制分量、正被动故障率增$\Rightarrow$模式频率与
+总 EENS 增），\textbf{不}主张不同后果引擎的 EENS 数值可直接互比。
+
+\subsection{边界与局限（如实标注）}
+\begin{itemize}
+  \item \textbf{AC-only DC-OPF 口径}：MC/FMEA 在纯交流上 \fld{model\_scope}=\texttt{"ac-only-dcopf"}，
+        \fld{validity.dc\_load\_curtailment\_included}=false、\fld{vsc\_dc\_power\_flow\_modelled}=false、
+        \fld{ac\_voltage\_reactive\_feasibility\_certified}=false——EENS/LOLE \textbf{不含} DC 负荷中断，
+        对含直流分量系统低估切负荷；
+  \item \textbf{重要度语义}：\fld{critical\_components.importance} 是共现/归因秩（多故障态整体切负荷
+        归给每个停运元件，可相加超 100\%），\textbf{非} Birnbaum 边际重要度 $\partial\mathrm{EENS}/\partial U_c$；
+  \item \textbf{收敛判据}：CoV 仅对 $\bar S>0$ 有定义，零损失运行跑满迭代且记录零 CoV 不代表收敛；
+  \item \textbf{尾部风险}：非序贯 VaR/CVaR 为 iid 小时近似，低估天气/修复/储能持续性引致的离散度；
+  \item \textbf{信息物理 L1}：标量接口矩阵，无通信拓扑、无保护 FRT 轨迹、无类间联合依赖，
+        保护误动占位项恒为 0；
+  \item \textbf{三阶段范围}：耦合 LinDistFlow（线性化损耗），LCC 与多端口能量路由器被拒
+        （清 \fld{ok}）；VSC/DC-DC 恒效率（无固定/二次损耗）；发电机/变压器/换流器/开关故障为选入项；
+  \item \textbf{保护事件树}：静态事件树，非时限-电流/选择性/FRT 仿真；瞬时重合不计入 SAIFI/SAIDI/EENS。
+\end{itemize}
+
+\subsection{加深与后续}
+本手册为对照 2026-08-17 检出的实现修订；行号引用如与后续代码变更不符，以
+\srcpath{include/hacdcpf/reliability/}、\srcpath{include/hacdcpf/analysis/three\_stage\_reliability.hpp}
+与注册测试为准。数学模型对照见
+\srcpath{docs/reliability\_mathematical\_models\_and\_intelligent\_cyber\_physical\_assessment.md}、
+\srcpath{docs/reliability\_calculation\_workflow\_and\_case\_guide.md}、
+\srcpath{docs/reliability\_assessment\_models.md}。

@@ -1,13 +1,13 @@
 % !TEX program = xelatex
-% 编译方式：把本文件夹整包复制到纯 ASCII 路径后，执行两遍 xelatex（详见 docs/_manual_common/README.md）。
-% 首版骨架：内容取自 src/sppt/ 与 include/hacdcpf/sppt/ 源码及 docs/sppt_runtime_contract.md，
+% 编译方式：在本目录执行两遍 xelatex（详见 docs/_manual_common/README.md）。
+% 源码依据：src/sppt/ 与 include/hacdcpf/sppt/ 源码及 docs/sppt_runtime_contract.md，
 %           公式与参数以代码为准。
-\documentclass[UTF8,fontset=windows,a4paper,11pt]{ctexart}
+\documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
 \usepackage{hysim_manual}
 
 \title{\textbf{交直流混合高弹性能源电力系统仿真平台}\\[0.5em]
        {\Large 语义保持投影理论（SPPT）验证层技术手册}\\[0.3em]
-       {\large 数学模型、接口参数与验证校核（首版骨架）}}
+       {\large 数学模型、接口参数、验证校核与工业级评价}}
 \author{HySim-XJTU-HRPES（西安交通大学 HRPES 团队）}
 \date{\today}
 
@@ -140,4 +140,6 @@ SPPT 把语义保持投影理论的定理转成可计算的通过/残差检查
   \item 智能仿真门从不执行物理控制，证据完整至多返回 \texttt{RequireHumanReview}；
   \item 权威文档 \srcpath{docs/sppt\_runtime\_contract.md}，理论 \srcpath{docs/latex/sppt\_theory.tex}。
 \end{itemize}
+\input{../_manual_common/industrial_evaluation}
+
 \end{document}

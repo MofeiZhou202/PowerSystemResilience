@@ -1,94 +1,87 @@
-# Module Documentation Map
+# 模块文档覆盖地图
 
-Updated: 2026-08-16
+最后核实：2026-08-18
 
-This living map evaluates documentation coverage, not implementation quality.
-Source, registered tests, and runtime responses remain authoritative. Update
-this file in place when module ownership or canonical documents change; do not
-create dated copies.
+本文件评价文档覆盖，不评价实现质量。源码、公共头文件、注册测试和运行时响应始终是行为权威。
+模块所有权或主文档变化时应原地更新本文件，不新增日期化快照。
 
-## Coverage labels
+## 覆盖等级
 
-| Label | Meaning |
+| 等级 | 含义 |
 |---|---|
-| **Focused** | A dedicated current contract or implementation manual exists. |
-| **Distributed** | Useful active material exists, but the contract is spread across adjacent module documents. |
-| **Theory-heavy** | Detailed derivation exists, but current runtime coverage is narrower or requires a separate contract. |
-| **Uncovered** | No tracked, dedicated module document was found. Source headers and tests are the only reliable entry points. |
+| 完整手册 | 具有独立中文 LaTeX 主文档，覆盖模型、接口、算法、验证、工业指标和局限 |
+| 专项契约 | 具有面向当前运行行为的独立契约或实现说明 |
+| 分散资料 | 信息散布在相邻模块文档，尚无单一所有者 |
+| 研究资料 | 详细推导存在，但运行时覆盖更窄，不构成当前契约 |
 
-These labels do not mean that a solver is correct, complete, or production
-ready. They describe how efficiently a maintainer can discover its current
-contract and limitations.
+覆盖等级不表示求解器正确、完整或生产就绪，只表示维护者定位当前模型与边界的效率。
 
-## Focused contracts added
+## 核心模型与求解模块
 
-The formerly uncovered `graph/`, `scenario_generation/`, `carbon_analysis/`,
-`integrated_energy/`, and `sppt/` modules now have tracked runtime contracts.
-Their source-backed review and closure evidence remain in the
-[module code audit](module_code_audit.md).
-
-## Module coverage
-
-| Source module | Coverage | Canonical documentation | Assessment |
+| 源码模块 | 覆盖 | 主文档 | 说明 |
 |---|---|---|---|
-| `model/`, `validation/` | Focused | [Component-model audit](ComponentModels/component_models_math_audit.tex), [parameter system](parameter_system.md), [cross-module semantics](model_data_semantics_contract.md) | The executable registry covers every I/O component collection and top-level source module; tests fail when a collection/module lacks identity, unit, sign, input/output, or fidelity semantics. |
-| `projection/`, `assembly/` | Focused | [Projection and result attribution](projection_and_results.md), [power-flow manual](PowerFlow/power_flow_manual1.tex), [data structure & API contract](data_structure_api_contract.md), [data structure design review](data_structure_design_review.md) | Contracts cover index spaces, recovery classes, SolverData, and matrix assembly. Preserve AC/DC domain-qualified maps in future examples. The data-structure contract adds whole-repo structural relations (Mermaid) and API stability tiers; the review ledger tracks findings R-01..R-08. |
-| `power_flow/` | Focused | [Power-flow manual](PowerFlow/power_flow_manual1.tex), [cross-module model/data/result semantics](model_data_semantics_contract.md), [VSC current-limit NCP contract](vsc_limit_ncp_power_flow_contract.md), [PV/PQ switching contract](pv_pq_switching_contract.md) | The broad manual remains active. The semantic contract owns cross-module identity, units, precedence, and replay boundaries; focused numerical contracts own VSC and generator complementarity behavior. |
-| `optimal_power_flow/` | Focused | [OPF manual](OptimalPowerFlow/opf_manual.tex) | Native, parity, DC, RPO, and three-phase paths are separated. Point-in-time IPM diagnostics and RPO validation are archived. |
-| `power_models/` | Focused | OPF manual chapter `chapters/power_models.tex` | AML builders are documented inside the OPF manual; a separate document is unnecessary while that ownership stays clear. |
-| `graph/` | Focused | [Graph and reduction runtime](graph_runtime_contract.md) | Stable/domain-qualified IDs, graph positions, reduction mappings, approximation boundaries, and recovery are explicit. |
-| `network_reconfiguration/` | Focused | [Network reconfiguration models](network_reconfiguration_models.md), [certified restoration runtime](certified_restoration_runtime.md) | Canonical-space ONR and certified restoration are distinguished. |
-| `reliability/` | Focused | [Consolidated reliability model](reliability_mathematical_models_and_intelligent_cyber_physical_assessment.md), [calculation workflow and case guide](reliability_calculation_workflow_and_case_guide.md), [canonical methods](reliability_assessment_models.md) | The consolidated document owns current status, while the workflow guide owns reproducible GUI calculation and result interpretation. Focused derivations must not compete with those roles. |
-| `resilience/` | Distributed | [Certified restoration runtime](certified_restoration_runtime.md) | One restoration workflow is well specified; heuristic, multi-period MIP, staged MILP, and MESS routing lack a single module-wide result contract. |
-| `analysis/` | Distributed | [Hosting capacity](capacity_analysis_implementation.md), [weak-link identification](multidimensional_weak_link_identification.md) | Major analyses have focused notes, but there is no umbrella contract for shared validity and attribution conventions. |
-| `scenario_generation/` | Focused | [Scenario generation runtime](scenario_generation_contract.md) | Regular, reliability, resilience, typhoon, traffic-impact, reproducibility, and fallback contracts are explicit. |
-| `short_circuit/` | Focused | [Short-circuit derivation and audit](short_circuit_rich_acdc_derivation.md) | AC and DC approximation boundaries are explicit; remember that public headers live under `include/hacdcpf/analysis/`. |
-| `harmonics_power_flow/` | Distributed | [Correctness verification](harmonics_analysis/harmonic_verification.md) | The five theory notes are archived. A runtime contract should enumerate active algorithms, inputs, outputs, standards checks, and unsupported couplings. |
-| `dynamics/` | Focused | [Transient runtime](transient_runtime.md) | The active runtime contract owns shipped behavior. Broader design and optional PSD interop material is archived. |
-| `time_series/` | Focused | [Time-series PF](time_series_power_flow_models.md), [rich UC models](sequential_production_simulation_rich_models.md), [annual/lifecycle](annual_simulation_models.md) | Coverage is strong but overlapping. Each document now has a distinct owner: pipeline, component extensions, and annual/lifecycle orchestration. |
-| `carbon_analysis/` | Focused | [Carbon analysis runtime](carbon_analysis_contract.md) | Snapshot/annual/GEC inputs, units, source IDs, AC/DC identity, and validity gates are explicit. |
-| `ev_power_traffic/` | Distributed | [Scenario format](ev_traffic_scenario_format.md) | The active input schema is concise, while Formulations A-H and runtime result boundaries lack a focused implementation contract. The broad theory chapter is archived. |
-| `integrated_energy/` | Focused | [Campus integrated energy runtime](integrated_energy_contract.md) | Carrier units, aggregate PCC scope, efficiencies, solver fallback, validity, and result mapping are explicit. |
-| `market/` | Focused | [Market runtime](market_simulation_runtime.md), [mathematical model](market_simulation_mathematical_models.md) | Runtime and derivation are separated; AC-only and fallback boundaries must remain explicit. |
-| `sppt/` | Focused | [SPPT executable runtime](sppt_runtime_contract.md) | MR observation semantics, certificates, guards, attribution, authority, benchmarks, and ablations are explicit. |
-| `io/` | Focused | [Digital-twin architecture](digital_twin_data_io_architecture.md), [CIM/CGMES](cim_cgmes3_crosswalk.md), [SVG](svg_distribution_import.md), [BPA/DSP](bpa_dsp_component_mapping.md) | Broad format coverage exists. Contract/status/roadmap tags in the digital-twin document are essential because it mixes normative and proposed material. |
-| `api/`, `src/server/`, `web/` | Focused | [Runtime API](runtime_api.md), [Python API](python_api.md), [Canvas runtime](gui_canvas_runtime.md), [case catalog](case_catalog.md) | User-visible routes and GUI contracts have focused entry points. Route examples must continue to match `tests/run_gui_server.cpp`. |
+| `model/`、`validation/` | 完整手册 | [元件模型手册](ComponentModels/component_models_math_audit.tex) | 配合[参数系统](parameter_system.md)和[跨模块语义](model_data_semantics_contract.md)使用 |
+| `projection/`、`assembly/` | 专项契约 | [投影与结果恢复](projection_and_results.md) | 与潮流手册共同规定索引、装配和恢复 |
+| `power_flow/` | 完整手册 | [潮流手册](PowerFlow/power_flow_manual1.tex) | 覆盖平衡、三相、鲁棒求解、CPF 与换流器限制 |
+| `optimal_power_flow/` | 完整手册 | [OPF 手册](OptimalPowerFlow/opf_manual.tex) | 覆盖 Native、Parity、DC、RPO 与三相路径 |
+| `power_models/` | 完整手册 | [AML 建模层手册](PowerModels/power_models_manual.tex) | 明确实验性建模层与生产路径边界 |
+| `graph/` | 完整手册 | [图模块手册](Graph/graph_manual.tex) | 覆盖域限定 ID、拓扑、降阶和结果恢复 |
+| `network_reconfiguration/` | 完整手册 | [网络重构手册](NetworkReconfiguration/network_reconfiguration_manual.tex) | 区分混合重构 MILP 与 AC-only ONR |
 
-## Consolidation decisions
+## 分析、规划与运行模块
 
-- `docs/README.md` owns navigation and document classification.
-- `development_status.md` owns volatile build, test, dependency, and active
-  investigation evidence.
-- Focused contracts own current user-visible behavior. The legacy technical
-  notebook and theory proposals are isolated under `docs/archive/` and must
-  not be treated as active documentation.
-- The consolidated reliability document owns current reliability status;
-  smaller reliability documents retain focused derivations and rationale.
-- The time-series documents own separate layers: pipeline, rich component
-  formulations, and annual/lifecycle orchestration.
-- Ignored `docs/generated/` and `docs/latex/` trees are not canonical sources
-  and must not be the only target of a tracked link.
+| 源码模块 | 覆盖 | 主文档 | 说明 |
+|---|---|---|---|
+| `analysis/` | 完整手册 | [分析手册](Analysis/analysis_manual.tex) | 承载力、薄弱环节与反事实规划统一归口 |
+| `reliability/` | 完整手册 | [可靠性手册](Reliability/reliability_manual.tex) | MC、FMEA、三阶段和频率—持续时间分章说明 |
+| `resilience/` | 完整手册 | [弹性手册](Resilience/resilience_manual.tex) | 启发式、恢复 MILP、MESS 与认证恢复统一归口 |
+| `scenario_generation/` | 完整手册 | [场景生成手册](ScenarioGeneration/scenario_generation_manual.tex) | 覆盖三类场景、台风和交通影响 |
+| `time_series/` | 完整手册 | [时序手册](TimeSeries/time_series_manual.tex) | 覆盖 UC→OPF→PF、年度与生命周期 |
+| `carbon_analysis/` | 完整手册 | [碳分析手册](CarbonAnalysis/carbon_analysis_manual.tex) | 覆盖快照碳流、年度核算与 GEC |
+| `ev_power_traffic/` | 完整手册 | [电—交通手册](EvPowerTraffic/ev_power_traffic_manual.tex) | 覆盖 A–H 层级并明确启发式/认证边界 |
+| `integrated_energy/` | 完整手册 | [综合能源手册](IntegratedEnergy/integrated_energy_manual.tex) | 明确园区聚合多能流而非 AC 网络模型 |
+| `market/` | 完整手册 | [市场手册](Market/market_manual.tex) | 覆盖日前、实时、安全和结算，保持 AC-only 口径 |
 
-## Documentation priorities
+## 动态、故障与电能质量模块
 
-This is a documentation backlog, not a product roadmap.
+| 源码模块 | 覆盖 | 主文档 | 说明 |
+|---|---|---|---|
+| `dynamics/` | 完整手册 | [动力学手册](Dynamics/dynamics_manual.tex) | 覆盖相量域 DAE、设备、积分器与小信号 |
+| `short_circuit/` | 完整手册 | [短路手册](ShortCircuit/short_circuit_manual.tex) | 覆盖 IEC 60909、序网、换流器和直流故障 |
+| `harmonics_power_flow/` | 完整手册 | [谐波手册](HarmonicsPowerFlow/harmonics_power_flow_manual.tex) | 覆盖频域、三相、NIC 与标准校核 |
 
-| Priority | Work | Completion criterion |
+## 数据、接口与可执行验证模块
+
+| 源码模块 | 覆盖 | 主文档 | 说明 |
+|---|---|---|---|
+| `io/` | 完整手册 | [I/O 手册](IO/io_manual.tex) | 覆盖格式映射、导入报告、可选后端和往返 |
+| `api/` | 完整手册 | [公共 API 手册](Api/api_manual.tex) | C++ 门面；HTTP/Python 由专项契约补充 |
+| `sppt/` | 完整手册 | [SPPT 手册](SPPT/sppt_manual.tex) | MR1–MR8、证书、独立残差、守卫和代理循环 |
+| `src/server/`、`web/` | 专项契约 | [运行时 API](runtime_api.md)、[Canvas 运行时](gui_canvas_runtime.md) | 不属于本次要求的独立源码模块手册清单 |
+
+## 文档所有权决策
+
+- `docs/README.md` 是唯一导航入口和分类政策所有者。
+- `document_catalog.md` 是 Markdown 与 LaTeX 资产归属台账。
+- `development_status.md` 独占易变的构建、测试、依赖和当前工作证据。
+- [模块手册索引](modules/README.md) 独占 18 部新增手册与 3 部标杆手册的映射。
+- 专项 Markdown 契约描述公共运行行为；LaTeX 手册负责完整数学模型、算法、数据和工业评价。
+- `archive/` 与 `latex/paper/` 分别管理历史资料和研究论文，不得自动升级为生产契约。
+
+## 维护优先级
+
+| 优先级 | 工作 | 完成条件 |
 |---|---|---|
-| P0 | Keep the canonical index clean-clone-safe. | Every local link from `docs/README.md` resolves to a tracked file. |
-| P1 | Add a concise harmonic runtime contract. | Implemented algorithms and standards checks are separated from the five theory notes. |
-| P1 | Complete module-wide result contracts for `resilience` and `ev_power_traffic`. | Every public result identifies scope, validity/fallback state, units, and authored/canonical index space. |
-| P2 | Reduce status duplication in reliability and time-series documents. | Exactly one document owns current status for each workflow; companions link to it. |
-| P2 | Define a reproducible build/refresh command for each LaTeX manual. | A maintainer can regenerate and visually verify each untracked PDF from tracked sources. |
+| P0 | 保持索引在干净检出中可用 | `docs/README.md` 的本地链接全部存在 |
+| P0 | 保持 18 部手册与源码同步 | 每部主 `.tex` 可编译，模型范围、字段和测试引用无漂移 |
+| P1 | 补齐公开结构体字段表 | 每个公共输入/结果字段均有单位、默认值、索引和语义 |
+| P1 | 深化模块专用定量阈值 | 工业指标具有算例、阈值、失败处置与可复现命令 |
+| P2 | 控制长文重复 | 同一运行状态只有一个所有者，伴随文档只做链接 |
 
-## Update checklist
+## 更新检查表
 
-1. Inspect the relevant headers, implementations, registered tests, and CMake
-   declarations before changing a coverage label.
-2. Put current behavior in a focused contract and proposals in an explicitly
-   marked theory section or theory document.
-3. Declare result index spaces, units, fallback behavior, and unsupported
-   coverage.
-4. Add or change the primary link in `docs/README.md` and this map together.
-5. Update `module_code_audit.md` when review depth or an open finding changes.
-6. Run the repository link check, `git diff --check`, and a placeholder scan.
+1. 修改覆盖等级前核实公共头、实现、注册测试和 CMake 声明。
+2. 当前行为写入契约；方案和假设明确标成研究或规划。
+3. 声明结果索引、单位、回退、后端与不支持范围。
+4. 同步更新 `docs/README.md`、`document_catalog.md` 与本文件。
+5. 执行链接检查、占位符扫描、`git diff --check` 和相关 LaTeX 编译。

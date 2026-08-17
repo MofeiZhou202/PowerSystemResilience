@@ -1,0 +1,79 @@
+% 第 8 章：选项与结果数据结构
+\section{选项与结果数据结构}\label{sec:rel-io}
+
+\subsection{蒙特卡洛选项 \texttt{ReliabilityOptions}}
+\compmeta{ReliabilityOptions}{include/hacdcpf/reliability/reliability\_assessment.hpp:143}
+\begin{paramtable}
+\fld{max\_iterations} & $n_{max}$ & — & $10^3\sim10^5$ & 10000 & 非序贯采样数上限 / 序贯年数上限\\
+\fld{cov\_threshold} & — & — & $0.01\sim0.1$ & 0.05 & 变异系数收敛阈值\\
+\fld{curtail\_threshold\_mw} & $\varepsilon$ & MW & 小正数 & 0.01 & 判定失负荷事件的切负荷阈值\\
+\fld{seed} & — & — & 整数 & 0 & 随机种子（0=非确定）\\
+\fld{load\_scale\_factor} & $\rho^\star$ & — & $\ge1$ & 1.0 & 负荷加压系数（$>1$ 降裕度）\\
+\fld{hours\_per\_year} & $H$ & 小时/年 & 8736/8760 & 8736 & 序贯年报告小时数\\
+\fld{data\_policy} & — & — & 枚举 & 见 \S\ref{sec:rel-param} & 缺失数据处理策略\\
+\fld{opf\_options} & — & — & 结构 & 见 OPF 手册 & 状态评估 DC-OPF 选项\\
+\fld{compute\_tail\_risk} & — & — & 布尔 & true & 是否计算 VaR/CVaR\\
+\fld{var\_confidence} & — & — & $0\sim1$ & 0.95 & VaR/CVaR 置信水平\\
+\fld{compute\_distribution\_indices} & — & — & 布尔 & false & 是否算 SAIFI/SAIDI/ASAI\\
+\fld{use\_importance\_sampling} & — & — & 布尔 & false & 重要抽样方差缩减（实验）\\
+\fld{importance\_lambda} & — & — & $>0$ & 2.0 & 重要抽样扭曲因子\\
+\fld{enable\_parallel} & — & — & 布尔 & true & 独立状态/年并行\\
+\fld{parallel\_threads} & — & — & 整数 & 0 & 0=硬件并发数\\
+\end{paramtable}
+
+\subsection{元件 FMEA 选项 \texttt{FMEAOptions}}
+\compmeta{FMEAOptions}{include/hacdcpf/reliability/reliability\_assessment.hpp:428}
+\begin{paramtable}
+\fld{load\_scale\_factor} & $\rho^\star$ & — & $\ge1$ & 1.0 & 负荷加压系数\\
+\fld{switching\_time\_hr} & $\tau_{sw}$ & 小时 & $0.1\sim2$ & 0.5 & 默认开关/隔离时间\\
+\fld{voll} & — & \$/MWh & — & 10000 & 失负荷价值（仅破平）\\
+\fld{enable\_microgrid\_islanding} & — & — & 布尔 & true & 隔离后按孤岛评估\\
+\fld{enable\_repair\_reconfiguration} & — & — & 布尔 & true & 修复阶段提升本地 DER\\
+\fld{enable\_switch\_reconfiguration} & — & — & 布尔 & true & 修复阶段显式开关重构\\
+\fld{max\_repair\_switch\_actions} & — & — & 整数 & 2 & 同时考虑的开关动作数上限\\
+\fld{max\_repair\_opf\_calls} & — & — & 整数 & 200 & 修复搜索 OPF 预算（0=不限）\\
+\fld{enable\_storage\_dispatch} & — & — & 布尔 & true & 储能作可调急救源\\
+\fld{enable\_grid\_forming\_vsc\_support} & — & — & 布尔 & true & 构网 VSC 锚定孤岛\\
+\fld{data\_policy} & — & — & 枚举 & 补缺 & 缺失数据策略\\
+\fld{cyber\_physical} & — & — & 结构 & disabled & 信息物理 L1 条件\\
+\end{paramtable}
+
+\subsection{故障模式 FMEA 选项 \texttt{FailureModeFMEAOptions}}
+\compmeta{FailureModeFMEAOptions}{include/hacdcpf/reliability/failure\_mode.hpp:410}
+\begin{paramtable}
+\fld{max\_order} & $k$ & — & 1/2 & 1 & 最高同时故障阶数（2=N-2）\\
+\fld{min\_pair\_unavailability} & — & — & 小正数 & $10^{-10}$ & 舍弃可忽略共故障对的阈值\\
+\fld{max\_pairs\_evaluated} & — & — & 整数 & 50000 & 对枚举硬上限\\
+\fld{curtail\_threshold\_mw} & $\varepsilon$ & MW & 小正数 & 0.01 & 失负荷阈值\\
+\fld{catalog} & — & — & 结构 & — & 目录过滤（激活/成因/元件类）\\
+\fld{capabilities} & — & — & 结构 & — & 后果引擎能力声明\\
+\fld{enable\_parallel} & — & — & 布尔 & true & 独立模式/对并行\\
+\end{paramtable}
+
+\subsection{三阶段选项 \texttt{ThreeStageReliabilityOptions}}
+\compmeta{ThreeStageReliabilityOptions}{include/hacdcpf/analysis/three\_stage\_reliability.hpp:222}
+\begin{paramtable}
+\fld{max\_switch\_operations} & — & — & $1\sim5$/不限 & INT\_MAX & 阶段 2 允许闭合联络开关数\\
+\fld{unavailable\_tie\_switch\_ids} & — & — & id 列表 & 空 & 拒合联络（评估拒合影响）\\
+\fld{include\_dc\_power\_flow} & — & — & 布尔 & true & 同阶段纳入 DC LinDistFlow/DER\\
+\fld{include\_generator\_faults} & — & — & 布尔 & false & 纳入发电机停运\\
+\fld{include\_transformer\_faults} & — & — & 布尔 & false & 纳入双绕组变压器停运\\
+\fld{include\_converter\_faults} & — & — & 布尔 & false & 纳入 VSC/DC-DC 停运\\
+\fld{include\_switch\_faults} & — & — & 布尔 & false & 纳入开关/断路器停运\\
+\fld{revalidate\_stage3\_plan} & — & — & 布尔 & false & 固定阶段 2 二元量重解阶段 3\\
+\fld{reliability\_configuration} & — & — & 结构 & 空 & 会话保护定义\\
+\end{paramtable}
+
+\subsection{结果结构摘要}
+\begin{itemize}
+  \item \fld{ReliabilityResult}（:240）：\fld{eens\_mwh\_yr}、\fld{lole\_hr\_yr}、
+        \fld{lolf\_occ\_yr}（序贯）、\fld{plc}、\fld{nodal\_eens\_mwh\_yr}、
+        \fld{critical\_components}（共现归因秩）、\fld{tail\_risk}、\fld{distribution\_idx}、
+        \fld{model\_scope}/\fld{validity}/\fld{data\_quality}；
+  \item \fld{FMEAResult}（:598）：系统级指标 + 逐条 \fld{contingencies}（按 EENS 贡献降序）
+        + \fld{cyber\_physical} + \fld{ValidityFlags}（15 个能力标志，:626）；
+  \item \fld{FailureModeFMEAResult}（\srcpath{failure\_mode.hpp:447}）：\fld{contingencies} 与
+        \fld{co\_contingencies}（N-2）、\fld{coverage}、\fld{n\_pairs\_evaluated}；
+  \item \fld{ThreeStageReliabilityResult}（:132）：\fld{saifi}/\fld{saidi\_min}/\fld{eens\_kwh\_yr}、
+        逐故障 \fld{faults}（含 \fld{switching\_sequence}）、网络计数、\fld{validity}。
+\end{itemize}

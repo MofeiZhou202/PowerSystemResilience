@@ -1,0 +1,84 @@
+% 第 2 章：统一可靠性参数模型
+\section{统一可靠性参数模型}\label{sec:rel-param}
+
+\subsection{单一解析器}
+异构的元件可靠性字段（\srcpath{ACBranch::failure\_rate}、
+\srcpath{Generator::forced\_outage\_rate}、MTBF/MTTR、VSC/Storage FOR……）由
+唯一解析器 \srcpath{resolve\_reliability\_params}（\srcpath{reliability\_assessment.hpp:114}）
+归一化为规范参数组 $\{\lambda,r,U,\mathrm{MTTF}\}$，保证 MC、FMEA、三阶段对同一元件
+消费同一参数。原始字段与规范输出分别见 \fld{ReliabilityRawFields}（:59）与
+\fld{ReliabilityParams}（:80）。
+
+\subsection{两态可修复元件}
+设年报告小时数 $H$（\fld{hours\_per\_year}，通常 8760 或 8736），上态故障强度
+$\lambda$（occ/上态年）、修复时长 $r$。修复率 $\mu=H/r$，稳态不可用度
+\begin{equation}
+U=\frac{\lambda}{\lambda+\mu}=\frac{\lambda r}{\lambda r+H}.
+\end{equation}
+若给定 MTTF 与 $r$：$\lambda=H/\mathrm{MTTF}$，$U=r/(\mathrm{MTTF}+r)$。
+若给定强迫停运率 $f$（视作稳态不可用度）：
+\begin{equation}
+U=f,\qquad \mathrm{MTTF}=\frac{r(1-f)}{f},\qquad \lambda=\frac{fH}{(1-f)r}.
+\end{equation}
+最一般的依据是\textbf{交替更新过程}：以更新-回报定理，长期不可用度
+$U=\mathbb E[T^\downarrow]/(\mathbb E[T^\uparrow]+\mathbb E[T^\downarrow])
+=\mathrm{MTTR}/(\mathrm{MTTF}+\mathrm{MTTR})$，不要求指数型持续时间。仅当解释为
+两态连续时间 Markov 链时才需指数假设，此时以小时转移强度 $\alpha=\lambda/H$、$\beta=1/r$
+得 $U=\alpha/(\alpha+\beta)=\lambda r/(H+\lambda r)$。
+
+\subsection{上态强度与日历频率之别}
+若输入是\textbf{日历年}故障计数 $f_{cal}$（而非上态强度），更新-回报给出
+$U_{cal}=f_{cal}r/H$，二者关系为 $f_{cal}=(1-U)\lambda$，等效上态强度
+$\lambda_{up}=f_{cal}/(1-f_{cal}r/H)$。当前解析器把 failure-rate 输入解释为上态强度
+$\lambda$；采用日历频率的研究须换算或注明稀有事件近似 $U\approx\lambda r/H\ (\lambda r\ll H)$。
+多模式、部分降容、非指数老化、天气时变、相依故障或共享修复资源均须多态/半 Markov/
+时序模型，而非本两态元组。
+
+\subsection{按需动作模式}
+保护、开关等被需求功能采用失败-需求频率
+\begin{equation}
+\lambda_m^{act}=\nu_m\,p_m^d,\qquad
+\left[\tfrac{\text{需求}}{\text{年}}\right]\!\left[\tfrac{\text{失败}}{\text{需求}}\right]
+=\left[\tfrac{\text{失败}}{\text{年}}\right],
+\end{equation}
+其中 $\nu_m$ 为年需求频率、$p_m^d$ 为每次需求失败概率（\fld{ReliabilityRawFields}
+的 \fld{demand\_frequency\_per\_year}/\fld{probability\_per\_demand}，:59 起）。这是\emph{期望
+失败操作数}，非年概率、非 MTTF、非“被需求时不可用概率”。若需求为泊松过程且各次独立以
+$p_m^d$ 失败，泊松稀释给出年内至少一次失败概率 $1-\exp(-\nu_m p_m^d)$，仅在稀有近似下
+$\approx\nu_m p_m^d$。给定恢复时长 $r_m$ 时解析器另计恢复占用
+$U_m^{recovery}=\lambda_m^{act}r_m/(H+\lambda_m^{act}r_m)$，只能读作失败后恢复态时间占比，
+\textbf{不是} $p_m^d$ 或 $\mathrm{PFD}_{avg}$。
+
+\subsection{数据来源与 MTBF 约定}
+每个解析参数标记 \fld{data\_source}$\in\{$\texttt{case},\texttt{template},\texttt{default},\texttt{missing}$\}$。
+策略对象 \fld{ReliabilityDataPolicy}（:45）的 \fld{default\_policy} 取
+\fld{StrictCaseDataOnly}（只用算例数据，缺失如实上报）、
+\texttt{UseNamedTemplateFor\allowbreak MissingOnly}（仅补缺，默认）或
+\texttt{OverwriteWithNamed\allowbreak Template}。
+遗留 \fld{mtbf\_hours} 按 \fld{MtbfConvention}（:38）解释：\fld{MtbfAsMttf}（$\mathrm{MTTF}=\mathrm{MTBF}$）
+或 \fld{MtbfAsCycleTime}（$\mathrm{MTTF}=\max(\mathrm{MTBF}-\mathrm{MTTR},0)$）；后者的
+$\max(\cdot,0)$ 是输入兼容规则而非统计定理，激活时须上报。
+
+\subsection{配置覆盖与优先级}
+\fld{ReliabilityConfiguration}（\srcpath{failure\_mode.hpp:202}）是会话/模型级覆盖层，
+不复制到每个富元件 POD。任一可选故障模式字段按
+\begin{equation}
+\theta_m^{eff}=\operatorname{first}\!\big(
+\theta_m^{mode\text{-}user},\theta_m^{prot\text{-}user},\theta_m^{case},
+\theta_m^{template},\theta_m^{policy}\big)
+\end{equation}
+解析（\fld{FailureModeParameterOverride}，:158）。非法单位、非有限值、冲突危险率形式、
+越界概率、悬空 mode ID 在保存/执行前被拒（\srcpath{validate\_reliability\_configuration}）。
+
+\subsection{保护重合闸事件树}
+对成功自动重合概率 $r$ 与失败率 $q_j=1-(1-p_j^{trip})(1-p_j^{open})$，初始元件频率
+$\lambda$ 生成互斥事件频率
+\begin{equation}
+\begin{aligned}
+\lambda^{transient}&=\lambda r, & \lambda^{primary}&=\lambda(1-r)(1-q_1),\\
+\lambda^{backup}&=\lambda(1-r)q_1(1-q_2), & \lambda^{unresolved}&=\lambda(1-r)q_1q_2,
+\end{aligned}
+\end{equation}
+四者之和恰为 $\lambda$。成功重合为瞬时事件，不计入 IEEE 1366 的 SAIFI/SAIDI/EENS。
+这是静态事件树（\fld{ProtectionConfiguration}，:177），\textbf{非}时限-电流或保护/FRT
+轨迹仿真：不推导启动值、方向/距离/差动选择性，也不耦合 DER-FRT 动态。

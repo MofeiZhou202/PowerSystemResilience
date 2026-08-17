@@ -1,0 +1,49 @@
+% 第 3 章：公共后果模型
+\section{公共后果模型}\label{sec:rel-consequence}
+
+\subsection{故障模式后果算子}
+一个故障模式不等于一次元件停运，而是经算子映射为网络/控制突变
+（\srcpath{build\_consequence\_patch}，\srcpath{failure\_mode.hpp:371}）：
+\begin{equation}
+G_m=\Phi_m(G_0,x_m),
+\end{equation}
+$G_0$ 为健康富系统，$x_m$ 为模式严重度/状态。突变按六类组织
+（\fld{MutationCategory}/\fld{MutationKind}，:333/:344）：
+\begin{itemize}
+  \item 拓扑（Topology）：强迫停运、卡开、强迫切负荷；
+  \item 容量（Capacity）：按残余容量系数 \fld{residual\_capacity\_factor} 降容；
+  \item 控制（Control）：设定值冻结、失去可控性、失去构网能力；
+  \item 保护（Protection）：拒动/拒分后保护区扩大；
+  \item 观测（Observation）：量测/通信退化；
+  \item 恢复（Restoration）：某开合动作被禁（如拒合）。
+\end{itemize}
+优先级：硬停运支配同目标的降容与失控；不相容的强迫开/合报为冲突
+（\srcpath{compose\_consequence\_patches}，:387）。选定物理引擎无法表达的突变标记为
+\emph{unsupported}（\fld{ConsequencePatch::representable\_by\_selected\_model}），而\textbf{不}
+被赋予人为零后果。
+
+\subsection{最小切负荷后果}
+对失效状态 $x$，各方法最终求解最小切负荷
+\begin{equation}
+S(x)=\min_{y\in\mathcal F(G_x)}\sum_i w_i\,p_i^{sh},
+\end{equation}
+$\mathcal F(G_x)$ 为选定物理模型的可行运行/恢复域。实现把 VOLL 设得远高于可行机组
+边际成本，使成本项仅在最小切负荷解间破平；可靠性结果读取 $S$ 与逐点 $s_i$，
+\textbf{非}经济目标值。共享后果引擎入口为 \srcpath{evaluate\_failed\_network\_state}
+（\srcpath{reliability\_assessment.hpp:723}），返回 \fld{NetworkShedResult}（:711），其
+\fld{nodal\_shed\_mw} 采用 \texttt{[AC 母线 | DC 母线]} 索引布局。
+
+\subsection{后果引擎与调用者}
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{3.4cm}L{4.6cm}L{6.2cm}@{}}
+\toprule
+引擎 & 主要物理 & 使用方法\\
+\midrule
+AC DC-OPF & $P=B\theta$、节点平衡、机组/支路限、切负荷 & 纯交流 \srcpath{run\_nonsequential\_mc}/\srcpath{run\_sequential\_mc}/\srcpath{run\_distribution\_fmea}\\
+混合 AC/DC 网络 LP & AC 角度潮流 + DC 平衡 + 有界 VSC/DC-DC 传输 + 储能/DER & 混合 MC、元件 FMEA、\srcpath{run\_failure\_mode\_fmea}\\
+耦合 LinDistFlow 恢复 MILP & 交直流平衡、域内平方电压、辐射森林、开关决策、储能时序 & \srcpath{run\_three\_stage\_reliability}\\
+\bottomrule
+\end{tabular}
+\end{center}
+所有引擎的公共结果均声明 \fld{model\_scope}/\fld{model\_limitations}/有效性标志，构成
+后果模型有效边界的一部分。

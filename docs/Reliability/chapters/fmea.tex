@@ -1,0 +1,45 @@
+% 第 5 章：FMEA 故障枚举评估
+\section{FMEA 故障枚举评估}\label{sec:rel-fmea}
+
+\subsection{元件级 FMEA（两阶段）}
+\srcpath{run\_distribution\_fmea}（\srcpath{reliability\_assessment.hpp:702}）确定性枚举每个
+N-1 停运，按开关（隔离/转供）与修复两阶段以 DC-OPF/混合 LP 求最小切负荷，逐条记入
+\fld{FMEAContingencyDetail}（:490）。对故障 $k$、频率 $\lambda_k$、阶段 $s\in\{sw,rep\}$、
+阶段时长 $\tau_{k,s}$、阶段切负荷 $\mathrm{shed}_{k,s}$：
+\begin{equation}
+\mathrm{ENS}_{k,s}=\mathrm{shed}_{k,s}\,\tau_{k,s},\qquad
+\mathrm{EENS}=\sum_k\lambda_k\big(\mathrm{ENS}_{k,sw}+\mathrm{ENS}_{k,rep}\big),
+\end{equation}
+\begin{equation}
+\mathrm{LOLE}=\sum_k\lambda_k\sum_s\tau_{k,s}\,\mathbf 1[\mathrm{shed}_{k,s}>0].
+\end{equation}
+修复阶段可显式搜索自动开关/联络重构（\fld{enable\_switch\_reconfiguration}、
+\fld{max\_repair\_switch\_actions}、\fld{max\_repair\_opf\_calls}），预算耗尽置
+\fld{repair\_search\_truncated}=true；储能作可调急救源、构网 VSC 可锚定孤岛
+（\fld{enable\_storage\_dispatch}/\fld{enable\_grid\_forming\_vsc\_support}）。混合系统
+\fld{model\_scope} 升为 \texttt{"hybrid-acdc-network-lp"}。
+
+\subsection{故障模式级 FMEA}
+\srcpath{run\_failure\_mode\_fmea}（\srcpath{failure\_mode.hpp:473}）以“富元件$\to$故障模式
+目录$\to$后果补丁$\to$切负荷引擎”链条评估（\fld{FailureModeFMEAOptions}，:410；
+逐行结果 \fld{FailureModeContingency}，:395）。对模式 $m$、频率 $f_m$（被动取 $\lambda$，
+主动取 $\nu_m p_m^d$）、事件时长 $d_m=\tau_{iso}+\tau_{sw}+\tau_{rep}$、切负荷 $S_m$：
+\begin{equation}
+\mathrm{EENS}_m=f_m\,d_m\,S_m,\qquad \mathrm{LOLE}_m=f_m\,d_m\,\mathbf 1[S_m>\varepsilon].
+\end{equation}
+\fld{max\_order}=2 时枚举成对共故障（\fld{FailureModeCoContingency}，:434），以独立二阶
+重叠概率加权：
+\begin{equation}
+\mathrm{EENS}_{ij}=U_i U_j\,H\,S_{ij},\qquad
+\text{仅当 } U_iU_j\ge\text{\fld{min\_pair\_unavailability}},
+\end{equation}
+并受 \fld{max\_pairs\_evaluated} 上限保护。目录覆盖枚举全部富设备清单，不可表达的三相/
+LCC/纯控制突变以显式 unsupported 保留（\fld{FailureModeCoverage}，:266），\textbf{不}赋零切负荷。
+
+\subsection{信息物理 L1 扩展}
+\fld{CyberPhysicalFMEAOptions}（\srcpath{reliability\_assessment.hpp:392}）把信息物理状态
+约化为“自动化可用/不可用”两后果等价类（标量接口矩阵模型），类切换时间\emph{替换}全局
+\fld{switching\_time\_hr}。系统级归因与界对见 \fld{CyberPhysicalReliabilityMetrics}（:557），
+给出完美信息物理界 $\mathrm{EENS}_{perfect}$ 与无自动化界 $\mathrm{EENS}_{noAuto}$ 及自动化
+效能 $\eta=(\mathrm{EENS}_{noAuto}-\mathrm{EENS})/(\mathrm{EENS}_{noAuto}-\mathrm{EENS}_{perfect})\in[0,1]$。
+它\textbf{不}建模通信拓扑、保护 FRT 轨迹或类间联合依赖；保护误动占位项在 L1 恒为 0。

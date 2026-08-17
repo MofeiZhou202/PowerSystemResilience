@@ -1,0 +1,32 @@
+% 第 5 章：直流故障水平
+\section{直流故障水平}\label{sec:sc-dc}
+
+\subsection{电阻性刚性源模型}
+\srcpath{dc\_bus\_fault\_level}（\srcpath{dc\_short\_circuit.hpp}）给出直流母线金属性故障的稳态
+电流估计：把直流网络化简为其支路电阻图，电压参考（\texttt{DC\_V}）母线视作理想电压源。对
+非源母线 $k$：
+\begin{equation}
+I_f=\frac{V_k}{R_{kk}+R_f},
+\end{equation}
+其中 $R_{kk}$ 为从母线 $k$ 到源的戴维南电阻（\fld{r\_thevenin\_pu}），$R_f$ 为故障路径电阻
+（\fld{fault\_resistance\_pu}，默认 0 即金属性故障）。这是\textbf{线路电阻限制}的故障水平，是
+适用于直流断路器/电缆选型筛查的保守上界。
+
+\subsection{直流断路器参与}
+选项 \fld{DCFaultOptions} 控制断路器如何进入电导图：
+\begin{itemize}
+  \item \fld{consider\_dc\_breakers}：将 \texttt{DCCircuitBreaker} 纳入电导图；
+  \item \fld{dc\_breakers\_control\_branches}：匹配的断路器控制对应 \texttt{DCBranch}——断开阻断支路、
+        闭合串入接触电阻；
+  \item \fld{add\_unassigned\_closed\_breaker\_edges}：未指派的闭合断路器作独立导电边；
+  \item \fld{min\_closed\_breaker\_resistance\_pu}（默认 $10^{-6}$）：理想闭合断路器最小电阻，避免奇异图。
+\end{itemize}
+逐断路器故障责任记于 \fld{DCBreakerDutyResult}：\fld{i\_duty\_ka}、\fld{i\_breaking\_ka}、
+\fld{breaking\_rating\_ok}、\fld{controls\_branch} 与 \fld{r\_pu}。结果 \fld{DCFaultResult} 另记
+\fld{v\_prefault\_pu}、边计数（\fld{dc\_branch\_edges\_used}/\fld{dccb\_edges\_used}）与
+\fld{dccb\_open\_count}/\fld{dccb\_blocked\_branch\_count}。
+
+\subsection{边界}
+本估计\textbf{不}建模换流器限流、电容放电暂态、源内阻抗与直流保护跳闸，因此是保守上界：
+真实峰值放电电流可能更高（电容），而稳态受控电流可能更低（换流器限流）。需要暂态峰值或
+受控稳态时应改用暂态仿真（\srcpath{docs/transient\_runtime.md}）。

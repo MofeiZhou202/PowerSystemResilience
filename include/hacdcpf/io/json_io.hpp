@@ -1,6 +1,8 @@
 #pragma once
 #include <string>
 
+#include <nlohmann/json.hpp>
+
 #include "hacdcpf/carbon_analysis/carbon_analysis.hpp"
 #include "hacdcpf/time_series/time_series_pf.hpp"
 #include "hacdcpf/model/defaults.hpp"
@@ -33,6 +35,12 @@ Result<bool> check_schema_version(const std::string& json_str);
 // ── HybridPowerSystem serialisation ──────────────────────────────────────────
 
 std::string to_json(const HybridPowerSystem& sys, int indent = 2);
+
+/// Serialise to a JSON DOM without the intermediate string round-trip.
+/// `to_json(sys, indent)` is exactly `to_json_dom(sys).dump(indent)`; callers
+/// that need a DOM (patching, field extraction) must use this instead of
+/// `json::parse(to_json(sys))`.
+nlohmann::json to_json_dom(const HybridPowerSystem& sys);
 
 HybridPowerSystem from_json(const std::string& json_str);
 

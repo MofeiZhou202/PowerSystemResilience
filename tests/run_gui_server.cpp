@@ -2778,7 +2778,7 @@ json parameter_model_instances_json(const hacdcpf::HybridPowerSystem* system,
                                     const hacdcpf::StandardParameterLibrary& library) {
   json instances = json::array();
   if (system == nullptr) return instances;
-  const json root = json::parse(hacdcpf::io::to_json(*system, -1));
+  const json root = hacdcpf::io::to_json_dom(*system);
 
   const auto append = [&](const ParameterModelDescriptor& descriptor,
                           const json& authored, size_t position,
@@ -2944,7 +2944,12 @@ hacdcpf::StandardParameterLibrary parameter_library_from_json(
 
 struct Session {
   std::mutex mu;
-  std::optional<hacdcpf::HybridPowerSystem> current_system;
+  // Current system held as a read-shared immutable snapshot.  Request handlers
+  // copy this shared_ptr under a short lock (read sharing); writers build a new
+  // system and atomically replace the pointer via session_replace_system
+  // (copy-on-write), so heavy requests no longer deep-copy the whole system
+  // while holding the session mutex.
+  std::shared_ptr<const hacdcpf::HybridPowerSystem> current_system;
   std::string current_name{"(none)"};
   std::optional<hacdcpf::ThreePhaseACSystem> preserved_three_phase_ac;
   std::string preserved_three_phase_source_path;
@@ -2952,9 +2957,15 @@ struct Session {
   std::atomic<bool> busy{false};       // true while a heavy computation runs
   std::atomic<bool> cancel{false};     // set by cancel endpoint
   // Last power flow result for carbon analysis reuse
-  std::optional<hacdcpf::PowerFlowResult> last_pf_result;
-  std::optional<hacdcpf::HybridPowerSystem> last_pf_system;
+  std::shared_ptr<const hacdcpf::PowerFlowResult> last_pf_result;
+  std::shared_ptr<const hacdcpf::HybridPowerSystem> last_pf_system;
   std::string last_pf_method;
+  // Monotonic model revision, incremented by session_replace_system (the only
+  // current_system write path).  last_pf_revision records the revision the
+  // cached power flow was solved against; result_window compares the two to
+  // declare whether the cached result may lag behind current edits.
+  std::uint64_t system_revision{0};
+  std::uint64_t last_pf_revision{0};
   std::optional<hacdcpf::TimeSeriesPFResult> last_tspf_result;
   hacdcpf::TimeSeriesData last_tspf_data;
   bool last_tspf_skip_uc{true};
@@ -2992,8 +3003,145 @@ struct Session {
   hacdcpf::StandardParameterLibrary parameter_library{
       hacdcpf::make_standard_parameter_library()};
   hacdcpf::analysis::ReliabilityConfiguration reliability_configuration{};
+  // Derived per-system state, rebuilt by session_replace_system on every write
+  // and immutable afterwards (shared read handle, same lifetime discipline as
+  // current_system):
+  // - topology_graph: resident PowerSystemGraph reused by topology endpoints
+  //   instead of rebuilding the graph per request.
+  // - bus_spatial_index: uniform grid over geo-referenced buses (lon/lat),
+  //   backing /api/session/topology_window bbox queries.
+  // - cached_raw_json: lazy compact serialization reused by every load-path
+  //   response that embeds _raw_json.
+  std::shared_ptr<const hacdcpf::graph::PowerSystemGraph> topology_graph;
+  struct BusSpatialIndex {
+    // A bus counts as geo-referenced iff (latitude, longitude) != (0, 0), the
+    // model-default sentinel for "no coordinates".
+    int ac_total{0};
+    int ac_with_coords{0};
+    int dc_total{0};
+    int dc_with_coords{0};
+    bool complete() const {
+      return ac_total == ac_with_coords && dc_total == dc_with_coords;
+    }
+    // Bounds of the geo-referenced buses only; valid when nx > 0.
+    double min_x{0.0}, min_y{0.0}, max_x{0.0}, max_y{0.0};
+    int nx{0}, ny{0};  // grid resolution; 0 when no bus has coordinates
+    double cell_x{1.0}, cell_y{1.0};
+    struct Entry {
+      int node_idx;  // index into PowerSystemGraph::nodes
+      double x;      // longitude
+      double y;      // latitude
+      int area;
+      int zone;
+    };
+    // cell (row-major, ny rows of nx) -> geo-referenced nodes inside it
+    std::vector<std::vector<Entry>> cells;
+  };
+  std::shared_ptr<const BusSpatialIndex> bus_spatial_index;
+  std::shared_ptr<const std::string> cached_raw_json;
 };
 Session g_session;
+
+// Caller must hold s.mu.  Installs `sys` as the current system, builds the
+// resident topology graph and bus spatial index once, and drops the stale
+// serialization cache.  This is the ONLY write path for current_system.
+void session_replace_system(Session& s, hacdcpf::HybridPowerSystem sys) {
+  auto shared = std::make_shared<hacdcpf::HybridPowerSystem>(std::move(sys));
+  ++s.system_revision;
+  s.topology_graph = std::make_shared<const hacdcpf::graph::PowerSystemGraph>(
+      hacdcpf::graph::build_power_system_graph(*shared));
+  const auto& graph = *s.topology_graph;
+
+  auto spatial = std::make_shared<Session::BusSpatialIndex>();
+  struct GeoBus {
+    int node_idx;
+    double x;
+    double y;
+    int area;
+    int zone;
+  };
+  std::vector<GeoBus> geo;
+  auto collect = [&](const auto& buses, bool dc_domain) {
+    for (const auto& b : buses) {
+      if (dc_domain) {
+        ++spatial->dc_total;
+      } else {
+        ++spatial->ac_total;
+      }
+      if (b.latitude == 0.0 && b.longitude == 0.0) continue;
+      const int node_idx = dc_domain ? graph.dc_node_idx(b.index)
+                                     : graph.ac_node_idx(b.index);
+      if (node_idx < 0) continue;
+      if (dc_domain) {
+        ++spatial->dc_with_coords;
+      } else {
+        ++spatial->ac_with_coords;
+      }
+      geo.push_back({node_idx, b.longitude, b.latitude, b.area, b.zone});
+    }
+  };
+  collect(shared->ac.buses, false);
+  collect(shared->dc.buses, true);
+  if (!geo.empty()) {
+    spatial->min_x = spatial->max_x = geo.front().x;
+    spatial->min_y = spatial->max_y = geo.front().y;
+    for (const auto& g : geo) {
+      spatial->min_x = std::min(spatial->min_x, g.x);
+      spatial->max_x = std::max(spatial->max_x, g.x);
+      spatial->min_y = std::min(spatial->min_y, g.y);
+      spatial->max_y = std::max(spatial->max_y, g.y);
+    }
+    // Uniform grid: ~sqrt(N) cells per axis, clamped; degenerate (identical)
+    // bounds fall back to a single cell on that axis.
+    const int target =
+        std::clamp(static_cast<int>(std::ceil(std::sqrt(
+                       static_cast<double>(geo.size())))),
+                   1, 128);
+    const double span_x = spatial->max_x - spatial->min_x;
+    const double span_y = spatial->max_y - spatial->min_y;
+    spatial->nx = span_x > 0.0 ? target : 1;
+    spatial->ny = span_y > 0.0 ? target : 1;
+    spatial->cell_x = span_x > 0.0 ? span_x / spatial->nx : 1.0;
+    spatial->cell_y = span_y > 0.0 ? span_y / spatial->ny : 1.0;
+    spatial->cells.resize(static_cast<size_t>(spatial->nx) * spatial->ny);
+    for (const auto& g : geo) {
+      int cx = span_x > 0.0
+                   ? static_cast<int>((g.x - spatial->min_x) / spatial->cell_x)
+                   : 0;
+      int cy = span_y > 0.0
+                   ? static_cast<int>((g.y - spatial->min_y) / spatial->cell_y)
+                   : 0;
+      cx = std::min(cx, spatial->nx - 1);
+      cy = std::min(cy, spatial->ny - 1);
+      spatial->cells[static_cast<size_t>(cy) * spatial->nx + cx].push_back(
+          {g.node_idx, g.x, g.y, g.area, g.zone});
+    }
+  }
+  s.bus_spatial_index = std::move(spatial);
+
+  s.cached_raw_json.reset();
+  s.current_system = std::move(shared);
+}
+
+// Compact (un-indented) serialization of the current system, built once per
+// system version and reused by every load-path response.  Caller holds s.mu.
+const std::string& session_raw_json(Session& s) {
+  if (!s.cached_raw_json) {
+    if (!s.current_system) throw std::runtime_error("No system loaded");
+    s.cached_raw_json = std::make_shared<const std::string>(
+        hacdcpf::io::to_json(*s.current_system, -1));
+  }
+  return *s.cached_raw_json;
+}
+
+// Snapshot the shared system handle under a short lock; throws when no system
+// is loaded.  Handlers that must mutate the model deep-copy from the returned
+// snapshot AFTER releasing the lock; read-only handlers use it directly.
+std::shared_ptr<const hacdcpf::HybridPowerSystem> session_system_snapshot() {
+  std::lock_guard<std::mutex> lk(g_session.mu);
+  if (!g_session.current_system) throw std::runtime_error("No system loaded");
+  return g_session.current_system;
+}
 
 void clear_cached_analysis(Session& s) {
   s.last_pf_result.reset();
@@ -3007,13 +3155,15 @@ void clear_cached_analysis(Session& s) {
   s.last_transient_result.reset();
 }
 
+// Caller must hold s.mu (all call sites lock around this function).
 void cache_last_power_flow(Session& s,
                            const hacdcpf::PowerFlowResult& pf,
                            const std::string& method,
                            const hacdcpf::HybridPowerSystem& sys) {
-  s.last_pf_result = pf;
-  s.last_pf_system = sys;
+  s.last_pf_result = std::make_shared<const hacdcpf::PowerFlowResult>(pf);
+  s.last_pf_system = std::make_shared<const hacdcpf::HybridPowerSystem>(sys);
   s.last_pf_method = method;
+  s.last_pf_revision = s.system_revision;
 }
 
 void clear_preserved_three_phase(Session& s) {
@@ -10007,7 +10157,7 @@ std::vector<std::string> list_matpower_files(const std::string& dir) {
 json system_summary(const hacdcpf::HybridPowerSystem& sys,
                     bool include_component_arrays = true,
                     bool include_system_json = false) {
-  json root = json::parse(hacdcpf::io::to_json(sys, 2));
+  json root = hacdcpf::io::to_json_dom(sys);
   json s;
   s["name"] = sys.name;
   s["base_mva"] = sys.base_mva;
@@ -10493,16 +10643,15 @@ int main(int argc, char** argv) {
         twin_criteria.push_back(digital_twin_criterion_to_json(criterion));
       }
       out["digital_twin_criteria"] = twin_criteria;
-      hacdcpf::HybridPowerSystem sys;
-      bool has_system = false;
+      // Read-only analyses run on the shared immutable snapshot — no copy.
+      std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snapshot;
       {
         std::lock_guard<std::mutex> lk(g_session.mu);
-        if (g_session.current_system) {
-          sys = *g_session.current_system;
-          has_system = true;
-        }
+        sys_snapshot = g_session.current_system;
       }
+      const bool has_system = sys_snapshot != nullptr;
       if (has_system) {
+        const hacdcpf::HybridPowerSystem& sys = *sys_snapshot;
         const auto report = hacdcpf::io::analyze_component_io_coverage(sys);
         json coverage = json::array();
         for (const auto& item : report.items) {
@@ -10761,11 +10910,16 @@ int main(int argc, char** argv) {
       if (!g_session.current_system) {
         throw std::runtime_error("No system loaded");
       }
+      // Copy-on-write: apply the library on a private copy, then atomically
+      // replace the shared session system (rebuilds the resident graph and
+      // invalidates the JSON cache).
+      hacdcpf::HybridPowerSystem sys = *g_session.current_system;
       const auto applied = hacdcpf::apply_standard_parameter_library(
-          *g_session.current_system, g_session.parameter_library);
+          sys, g_session.parameter_library);
+      session_replace_system(g_session, std::move(sys));
       clear_cached_analysis(g_session);
       auto out = system_summary(*g_session.current_system);
-      out["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+      out["_raw_json"] = session_raw_json(g_session);
       out["parameter_apply"] =
           json{{"fields_changed", applied.fields_changed},
                {"applied_rule_ids", applied.applied_rule_ids}};
@@ -10798,8 +10952,11 @@ int main(int argc, char** argv) {
       if (!g_session.current_system)
         throw std::runtime_error("No system loaded");
       auto options = design_handbook_options_from_json(body, false);
+      // Preview must not touch the session system; the completion API takes a
+      // mutable system, so run it on a discarded private copy.
+      hacdcpf::HybridPowerSystem sys = *g_session.current_system;
       const auto report = hacdcpf::complete_design_handbook_parameters(
-          *g_session.current_system, options);
+          sys, options);
       res.set_content(design_handbook_report_to_json(report).dump(),
                       "application/json");
     } catch (const std::exception& e) {
@@ -10816,11 +10973,15 @@ int main(int argc, char** argv) {
       if (!g_session.current_system)
         throw std::runtime_error("No system loaded");
       auto options = design_handbook_options_from_json(body, true);
+      // Copy-on-write: complete parameters on a private copy, then atomically
+      // replace the shared session system.
+      hacdcpf::HybridPowerSystem sys = *g_session.current_system;
       const auto report = hacdcpf::complete_design_handbook_parameters(
-          *g_session.current_system, options);
+          sys, options);
+      session_replace_system(g_session, std::move(sys));
       clear_cached_analysis(g_session);
       auto out = system_summary(*g_session.current_system);
-      out["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+      out["_raw_json"] = session_raw_json(g_session);
       out["handbook_completion"] = design_handbook_report_to_json(report);
       res.set_content(out.dump(), "application/json");
     } catch (const std::exception& e) {
@@ -10837,14 +10998,14 @@ int main(int argc, char** argv) {
       std::string name = j.value("case", "ieee24_3area_acdc_expanded");
       auto sys = build_case(name);
 	      std::lock_guard<std::mutex> lk(g_session.mu);
-	      g_session.current_system = std::move(sys);
+	      session_replace_system(g_session, std::move(sys));
 	      g_session.current_name = name;
 	      g_session.reliability_configuration = {};
 	      clear_preserved_three_phase(g_session);
 	      g_session.external_grid_carbon_profiles.clear();
 	      clear_cached_analysis(g_session);
       auto summary = system_summary(*g_session.current_system);
-      summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+      summary["_raw_json"] = session_raw_json(g_session);
       res.set_content(summary.dump(), "application/json");
     } catch (const std::exception& e) {
       res.status = 400;
@@ -10868,7 +11029,7 @@ int main(int argc, char** argv) {
       auto sys = hacdcpf::io::parse_matpower(fpath.string());
       sys.name = filename;
 	      std::lock_guard<std::mutex> lk(g_session.mu);
-	      g_session.current_system = std::move(sys);
+	      session_replace_system(g_session, std::move(sys));
 	      g_session.current_name = filename;
 	      g_session.reliability_configuration = {};
 	      clear_preserved_three_phase(g_session);
@@ -10884,8 +11045,7 @@ int main(int argc, char** argv) {
                          ? system_summary(*g_session.current_system, false, true)
                          : system_summary(*g_session.current_system);
       if (!compact_load) {
-        summary["_raw_json"] =
-            hacdcpf::io::to_json(*g_session.current_system, 2);
+        summary["_raw_json"] = session_raw_json(g_session);
       }
       res.set_content(summary.dump(), "application/json");
     } catch (const std::exception& e) {
@@ -10927,14 +11087,14 @@ int main(int argc, char** argv) {
       }
 
       std::lock_guard<std::mutex> lk(g_session.mu);
-      g_session.current_system = std::move(imported.system);
+      session_replace_system(g_session, std::move(imported.system));
       g_session.current_name = g_session.current_system->name;
       g_session.reliability_configuration = {};
       clear_preserved_three_phase(g_session);
       g_session.external_grid_carbon_profiles.clear();
       clear_cached_analysis(g_session);
       auto summary = system_summary(*g_session.current_system);
-      summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+      summary["_raw_json"] = session_raw_json(g_session);
       summary["_io_warnings"] = std::move(warnings);
       summary["_bpa_import_report"] = {
           {"binding_level", hacdcpf::io::to_string(imported.report.binding_level)},
@@ -10969,14 +11129,14 @@ int main(int argc, char** argv) {
 	      } else {
 	        clear_preserved_three_phase(g_session);
 	      }
-	      g_session.current_system = std::move(sys);
+	      session_replace_system(g_session, std::move(sys));
 	      g_session.current_name = g_session.current_system->name;
 	      if (!preserve_reliability_configuration)
 	        g_session.reliability_configuration = {};
 	      g_session.external_grid_carbon_profiles.clear();
       clear_cached_analysis(g_session);
       auto summary = system_summary(*g_session.current_system);
-      summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+      summary["_raw_json"] = session_raw_json(g_session);
       res.set_content(summary.dump(), "application/json");
     } catch (const std::exception& e) {
       res.status = 400;
@@ -11016,14 +11176,13 @@ int main(int argc, char** argv) {
       } else {
         clear_preserved_three_phase(g_session);
       }
-      g_session.current_system = std::move(sys);
+      session_replace_system(g_session, std::move(sys));
       g_session.current_name = g_session.current_system->name;
       g_session.reliability_configuration = {};
       g_session.external_grid_carbon_profiles.clear();
       clear_cached_analysis(g_session);
       auto summary = system_summary(*g_session.current_system);
-      summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
-      // Surface non-fatal import notes (LCC approximation, skipped cards).
+      summary["_raw_json"] = session_raw_json(g_session);
       json notes = json::array();
       for (const auto& rec : imported.report.records)
         if (rec.severity != hacdcpf::io::ImportSeverity::Info)
@@ -11045,13 +11204,13 @@ int main(int argc, char** argv) {
       sys.ac.base_mva = 100.0;
       sys.dc.base_mva = 100.0;
 	      std::lock_guard<std::mutex> lk(g_session.mu);
-	      g_session.current_system = std::move(sys);
+	      session_replace_system(g_session, std::move(sys));
 	      g_session.current_name = "New System";
 	      g_session.reliability_configuration = {};
 	      clear_preserved_three_phase(g_session);
 	      clear_cached_analysis(g_session);
       auto summary = system_summary(*g_session.current_system);
-      summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+      summary["_raw_json"] = session_raw_json(g_session);
       res.set_content(summary.dump(), "application/json");
     } catch (const std::exception& e) {
       res.status = 400;
@@ -11062,11 +11221,20 @@ int main(int argc, char** argv) {
   svr.Post("/api/session/export_json",
            [](const httplib::Request&, httplib::Response& res) {
     try {
-      std::lock_guard<std::mutex> lk(g_session.mu);
-      if (!g_session.current_system) throw std::runtime_error("No system loaded");
+      // Serialize off-lock: take the shared snapshot, then build the
+      // pretty-printed download payload after releasing the session mutex.
+      // Response content is unchanged (indent=2 rich-model JSON).
+      std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
+      std::string name;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (!g_session.current_system) throw std::runtime_error("No system loaded");
+        sys_snap = g_session.current_system;
+        name = g_session.current_name;
+      }
       json out;
-      out["json_string"] = hacdcpf::io::to_json(*g_session.current_system, 2);
-      out["name"] = g_session.current_name;
+      out["json_string"] = hacdcpf::io::to_json(*sys_snap, 2);
+      out["name"] = name;
       res.set_content(out.dump(), "application/json");
     } catch (const std::exception& e) {
       res.status = 400;
@@ -11392,7 +11560,7 @@ int main(int argc, char** argv) {
       } else {
         clear_preserved_three_phase(g_session);
       }
-      g_session.current_system = std::move(sys);
+      session_replace_system(g_session, std::move(sys));
       g_session.current_name = g_session.current_system->name.empty()
                                    ? "PSD Julia import"
                                    : g_session.current_system->name;
@@ -11400,7 +11568,7 @@ int main(int argc, char** argv) {
       g_session.external_grid_carbon_profiles.clear();
       clear_cached_analysis(g_session);
       auto summary = system_summary(*g_session.current_system);
-      summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+      summary["_raw_json"] = session_raw_json(g_session);
       summary["_io_warnings"] = json::array(
           {"PSD.jl 文件通过嵌入的 HACDCPF_RICH_MODEL_JSON 恢复 rich model；"
            "HACDCPF_PSD_SNAPSHOT_JSON 保留为 Julia/PSD 动态验证 manifest。"});
@@ -11465,7 +11633,7 @@ int main(int argc, char** argv) {
       options.default_base_mva = 10.0;
       auto report = hacdcpf::io::from_gridlabd_with_report(glm, options);
 	      std::lock_guard<std::mutex> lk(g_session.mu);
-	      g_session.current_system = std::move(report.system);
+	      session_replace_system(g_session, std::move(report.system));
 	      g_session.current_name = g_session.current_system->name.empty()
 	                                   ? "GridLAB-D import"
 	                                   : g_session.current_system->name;
@@ -11473,7 +11641,7 @@ int main(int argc, char** argv) {
 	      clear_preserved_three_phase(g_session);
 	      clear_cached_analysis(g_session);
       auto summary = system_summary(*g_session.current_system);
-      summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+      summary["_raw_json"] = session_raw_json(g_session);
       summary["_io_warnings"] = report.warnings;
       summary["_io_skipped"] = report.skipped;
       res.set_content(summary.dump(), "application/json");
@@ -11580,7 +11748,7 @@ int main(int argc, char** argv) {
 	      }
 
 	      std::lock_guard<std::mutex> lk(g_session.mu);
-	      g_session.current_system = std::move(imported);
+	      session_replace_system(g_session, std::move(imported));
 	      g_session.current_name = g_session.current_system->name.empty()
 	                                   ? "OpenDSS import"
 	                                   : g_session.current_system->name;
@@ -11593,7 +11761,7 @@ int main(int argc, char** argv) {
 	      }
 	      clear_cached_analysis(g_session);
 	      auto summary = system_summary(*g_session.current_system);
-	      summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+	      summary["_raw_json"] = session_raw_json(g_session);
 	      summary["_io_warnings"] = warnings;
 	      summary["_io_skipped"] = skipped;
 		      summary["_opendss_import_mode"] =
@@ -11635,12 +11803,12 @@ int main(int argc, char** argv) {
       std::filesystem::remove(tmp, ec);
 
       std::lock_guard<std::mutex> lk(g_session.mu);
-      g_session.current_system = std::move(sys);
+      session_replace_system(g_session, std::move(sys));
       g_session.current_name = g_session.current_system->name;
       g_session.reliability_configuration = {};
       clear_cached_analysis(g_session);
       auto summary = system_summary(*g_session.current_system);
-      summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+      summary["_raw_json"] = session_raw_json(g_session);
       summary["_etap_warnings"] = rep.warnings;
       res.set_content(summary.dump(), "application/json");
     } catch (const std::exception& e) {
@@ -11686,14 +11854,14 @@ int main(int argc, char** argv) {
       }
 
       std::lock_guard<std::mutex> lk(g_session.mu);
-      g_session.current_system = std::move(imported.system);
+      session_replace_system(g_session, std::move(imported.system));
       g_session.current_name = g_session.current_system->name.empty()
                                    ? "配电台区 CIM"
                                    : g_session.current_system->name;
       g_session.reliability_configuration = {};
       clear_cached_analysis(g_session);
       auto summary = system_summary(*g_session.current_system);
-      summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+      summary["_raw_json"] = session_raw_json(g_session);
       summary["_cim_warnings"] = imported.warnings;
       summary["_cim_file_count"] = xml_documents.size();
       summary["_cim_import_mode"] =
@@ -11766,7 +11934,7 @@ int main(int argc, char** argv) {
       }
 
       std::lock_guard<std::mutex> lk(g_session.mu);
-      g_session.current_system = std::move(imported.system);
+      session_replace_system(g_session, std::move(imported.system));
       g_session.current_name = g_session.current_system->name.empty()
                                    ? "配电 IEC-CGE SVG"
                                    : g_session.current_system->name;
@@ -11775,8 +11943,7 @@ int main(int argc, char** argv) {
       g_session.external_grid_carbon_profiles.clear();
       clear_cached_analysis(g_session);
       auto summary = system_summary(*g_session.current_system);
-      summary["_raw_json"] =
-          hacdcpf::io::to_json(*g_session.current_system, 2);
+      summary["_raw_json"] = session_raw_json(g_session);
       summary["_svg_warnings"] = imported.warnings;
       summary["_svg_source_lines"] = imported.source_line_objects;
       summary["_svg_source_switches"] = imported.source_switch_objects;
@@ -11837,15 +12004,16 @@ int main(int argc, char** argv) {
            [](const httplib::Request& req, httplib::Response& res) {
     try {
       const auto j = json::parse(req.body.empty() ? "{}" : req.body);
-      hacdcpf::HybridPowerSystem system;
+      std::shared_ptr<const hacdcpf::HybridPowerSystem> system_snap;
       std::string name;
       {
         std::lock_guard<std::mutex> lk(g_session.mu);
         if (!g_session.current_system)
           throw std::runtime_error("No system loaded");
-        system = *g_session.current_system;
+        system_snap = g_session.current_system;
         name = g_session.current_name;
       }
+      const hacdcpf::HybridPowerSystem& system = *system_snap;  // zero-copy read of the shared immutable snapshot
 
       hacdcpf::io::SvgDistributionExportOptions opts;
       opts.title = j.value("title", name);
@@ -11918,14 +12086,14 @@ int main(int argc, char** argv) {
       std::filesystem::remove(tmp, ec);
 
       std::lock_guard<std::mutex> lk(g_session.mu);
-      g_session.current_system = std::move(sys);
+      session_replace_system(g_session, std::move(sys));
       g_session.current_name = g_session.current_system->name.empty()
                                    ? "ETAP workbook"
                                    : g_session.current_system->name;
       g_session.reliability_configuration = {};
       clear_cached_analysis(g_session);
       auto summary = system_summary(*g_session.current_system);
-      summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+      summary["_raw_json"] = session_raw_json(g_session);
       summary["_etap_warnings"] = rep.warnings;
       res.set_content(summary.dump(), "application/json");
     } catch (const std::exception& e) {
@@ -12020,7 +12188,7 @@ int main(int argc, char** argv) {
       std::lock_guard<std::mutex> lk(g_session.mu);
       if (!g_session.current_system) throw std::runtime_error("No system loaded");
 
-      json root = json::parse(hacdcpf::io::to_json(*g_session.current_system, 2));
+      json root = hacdcpf::io::to_json_dom(*g_session.current_system);
 
       auto put_array = [&](const std::string& top,
                            const std::string& key,
@@ -12088,12 +12256,12 @@ int main(int argc, char** argv) {
         if (j.contains("tp_external_grids") && j["tp_external_grids"].is_array()) root["three_phase_ac"]["external_grids"] = j["tp_external_grids"];
       }
 
-      g_session.current_system = hacdcpf::io::from_json(root.dump());
+      session_replace_system(g_session, hacdcpf::io::from_json(root.dump()));
       g_session.current_name = g_session.current_system->name;
       g_session.reliability_configuration = {};
       clear_cached_analysis(g_session);
       auto summary = system_summary(*g_session.current_system);
-      summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+      summary["_raw_json"] = session_raw_json(g_session);
       res.set_content(summary.dump(), "application/json");
     } catch (const std::exception& e) {
       res.status = 400;
@@ -12107,7 +12275,9 @@ int main(int argc, char** argv) {
       const auto j = json::parse(req.body.empty() ? "{}" : req.body);
       std::lock_guard<std::mutex> lk(g_session.mu);
       if (!g_session.current_system) throw std::runtime_error("No system loaded");
-      auto& sys = *g_session.current_system;
+      // Copy-on-write: update emission factors on a private copy, then
+      // atomically replace the shared session system.
+      hacdcpf::HybridPowerSystem sys = *g_session.current_system;
 
       auto matches = [](const json& row, int index, int bus, const std::string& name) {
         if (row.contains("index") && row["index"].is_number_integer() &&
@@ -12182,6 +12352,7 @@ int main(int argc, char** argv) {
         }
       }
 
+      session_replace_system(g_session, std::move(sys));
       json out;
       out["updated_generators"] = gen_updated;
       out["updated_static_generators"] = sgen_updated;
@@ -12211,7 +12382,9 @@ int main(int argc, char** argv) {
     out["capabilities"] = json{
         {"pf_compact_response_v1", true},
         {"large_matpower_structured_load_v1", true},
-        {"analysis_server_timing_v1", true}};
+        {"analysis_server_timing_v1", true},
+        {"topology_window_v1", true},
+        {"result_window_v1", true}};
     res.set_content(out.dump(), "application/json");
   });
 
@@ -12225,13 +12398,9 @@ int main(int argc, char** argv) {
            [](const httplib::Request& req, httplib::Response& res) {
     (void)req;
     try {
-      hacdcpf::HybridPowerSystem sys;
-      {
-        std::lock_guard<std::mutex> lk(g_session.mu);
-        if (!g_session.current_system) throw std::runtime_error("No system loaded");
-        sys = *g_session.current_system;
-      }
-      const hacdcpf::sppt::GuardVerdict v = hacdcpf::sppt::guard_system(sys);
+      const auto sys_snapshot = session_system_snapshot();
+      const hacdcpf::sppt::GuardVerdict v =
+          hacdcpf::sppt::guard_system(*sys_snapshot);
       json out;
       out["accepted"] = v.accepted;
       out["reason"] = v.reason;
@@ -12253,14 +12422,12 @@ int main(int argc, char** argv) {
            [](const httplib::Request& req, httplib::Response& res) {
     (void)req;
     try {
-      hacdcpf::HybridPowerSystem sys;
-      {
-        std::lock_guard<std::mutex> lk(g_session.mu);
-        if (!g_session.current_system) throw std::runtime_error("No system loaded");
-        sys = *g_session.current_system;
-      }
+      // run_agent_loop takes the seed by const ref, so the shared immutable
+      // snapshot is used directly — no per-request deep copy.
+      const auto sys_snapshot = session_system_snapshot();
       const hacdcpf::sppt::AgentTrajectory traj =
-          hacdcpf::sppt::run_agent_loop(sys, hacdcpf::sppt::default_agent_script());
+          hacdcpf::sppt::run_agent_loop(*sys_snapshot,
+                                        hacdcpf::sppt::default_agent_script());
       json steps = json::array();
       for (const auto& s : traj.steps) {
         steps.push_back(json{
@@ -12296,13 +12463,13 @@ int main(int argc, char** argv) {
     try {
       const auto request_started = std::chrono::steady_clock::now();
       double presentation_ms = 0.0;
-      // Copy system under short lock, then release
-      hacdcpf::HybridPowerSystem sys;
-      {
-        std::lock_guard<std::mutex> lk(g_session.mu);
-        if (!g_session.current_system) throw std::runtime_error("No system loaded");
-        sys = *g_session.current_system;
-      }
+      // Take the shared snapshot under a short lock, then make the
+      // request-local mutable copy AFTER releasing the lock: solve_power_flow
+      // runs canonical projection in place and the grid-forming translation
+      // below mutates converters, so this endpoint still needs its own copy —
+      // just not while holding the session mutex.
+      const auto sys_snapshot = session_system_snapshot();
+      hacdcpf::HybridPowerSystem sys = *sys_snapshot;
       const auto snapshot_finished = std::chrono::steady_clock::now();
       if (g_session.busy.exchange(true)) {
         res.status = 409;
@@ -16051,16 +16218,18 @@ int main(int argc, char** argv) {
   svr.Post("/api/session/run_transient",
            [](const httplib::Request& req, httplib::Response& res) {
     try {
+      std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
       hacdcpf::HybridPowerSystem sys;
-      std::optional<hacdcpf::PowerFlowResult> cached_pf;
+      std::shared_ptr<const hacdcpf::PowerFlowResult> cached_pf;
       std::string cached_pf_method;
       {
         std::lock_guard<std::mutex> lk(g_session.mu);
         if (!g_session.current_system) throw std::runtime_error("No system loaded");
-        sys = *g_session.current_system;
+        sys_snap = g_session.current_system;
         cached_pf = g_session.last_pf_result;
         cached_pf_method = g_session.last_pf_method;
       }
+      sys = *sys_snap;  // request-local mutable copy, made after releasing the session lock
       if (g_session.busy.exchange(true)) {
         res.status = 409;
         res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
@@ -16354,12 +16523,13 @@ int main(int argc, char** argv) {
   svr.Post("/api/session/small_signal",
            [](const httplib::Request& req, httplib::Response& res) {
     try {
-      hacdcpf::HybridPowerSystem sys;
+      std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
       {
         std::lock_guard<std::mutex> lk(g_session.mu);
         if (!g_session.current_system) throw std::runtime_error("No system loaded");
-        sys = *g_session.current_system;
+        sys_snap = g_session.current_system;
       }
+      const hacdcpf::HybridPowerSystem& sys = *sys_snap;  // zero-copy read of the shared immutable snapshot
       const json j = json::parse(req.body.empty() ? "{}" : req.body);
       hacdcpf::dynamics::DynamicSolverOptions opt;
       opt.t_start_s = j.value("t_start_s", 0.0);
@@ -16432,11 +16602,16 @@ int main(int argc, char** argv) {
   svr.Post("/api/session/topology",
            [](const httplib::Request&, httplib::Response& res) {
     try {
-      hacdcpf::HybridPowerSystem sys;
+      // Read-shared snapshot + resident topology graph: no per-request system
+      // deep copy and no per-request graph rebuild.  Both are immutable and
+      // replaced atomically when the session system changes.
+      std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snapshot;
+      std::shared_ptr<const hacdcpf::graph::PowerSystemGraph> resident_graph;
       {
         std::lock_guard<std::mutex> lk(g_session.mu);
         if (!g_session.current_system) throw std::runtime_error("No system loaded");
-        sys = *g_session.current_system;
+        sys_snapshot = g_session.current_system;
+        resident_graph = g_session.topology_graph;
       }
       if (g_session.busy.exchange(true)) {
         res.status = 409;
@@ -16446,7 +16621,8 @@ int main(int argc, char** argv) {
       g_session.cancel.store(false);
 
       namespace gr = hacdcpf::graph;
-      const gr::PowerSystemGraph graph = gr::build_power_system_graph(sys);
+      const hacdcpf::HybridPowerSystem& sys = *sys_snapshot;
+      const gr::PowerSystemGraph& graph = *resident_graph;
       const gr::TopologyReport report = gr::analyze_topology(graph);
 
       // ── Enum → string helpers ──────────────────────────────────────
@@ -16600,6 +16776,570 @@ int main(int argc, char** argv) {
   });
 
   // ──────────────────────────────────────────────────────────────────
+  // Topology window: lightweight bounding-box query over the resident
+  // uniform-grid spatial index (built once per system by
+  // session_replace_system).  Returns only the buses/edges inside the window
+  // — never the full component parameter set — so large-model viewport
+  // rendering does not pay for a whole-system serialization.
+  //
+  // Request body: {"min_x","min_y","max_x","max_y","lod"?}
+  //   Coordinates are WGS84 degrees in the API layout space: x = longitude,
+  //   y = latitude.  lod: 0 = aggregate by electrical domain, 1 = aggregate
+  //   by domain/area/zone, 2 (default) = full per-bus detail; the semantics
+  //   match web/js/core/network_overview.js aggregate().
+  // Buses without coordinates (model-default lat/lon 0,0) cannot be placed in
+  // the window; they are excluded from nodes/edges and declared via
+  // coordinate_coverage instead of silently returning an empty view.
+  svr.Post("/api/session/topology_window",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+      auto get_coord = [&](const char* key) -> double {
+        if (!j.contains(key) || !j[key].is_number())
+          throw std::runtime_error(
+              std::string("topology_window requires numeric '") + key + "'");
+        return j[key].get<double>();
+      };
+      const double min_x = get_coord("min_x");
+      const double min_y = get_coord("min_y");
+      const double max_x = get_coord("max_x");
+      const double max_y = get_coord("max_y");
+      if (!(min_x <= max_x) || !(min_y <= max_y))
+        throw std::runtime_error(
+            "topology_window requires min_x <= max_x and min_y <= max_y");
+      const int lod = j.value("lod", 2);
+      if (lod < 0 || lod > 2)
+        throw std::runtime_error("topology_window lod must be 0, 1, or 2");
+
+      std::shared_ptr<const hacdcpf::graph::PowerSystemGraph> graph_ptr;
+      std::shared_ptr<const Session::BusSpatialIndex> spatial_ptr;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (!g_session.current_system) throw std::runtime_error("No system loaded");
+        graph_ptr = g_session.topology_graph;
+        spatial_ptr = g_session.bus_spatial_index;
+      }
+      namespace gr = hacdcpf::graph;
+      const gr::PowerSystemGraph& graph = *graph_ptr;
+      const Session::BusSpatialIndex& spatial = *spatial_ptr;
+
+      auto edge_cat_str = [](gr::EdgeCategory c) -> const char* {
+        switch (c) {
+          case gr::EdgeCategory::AC_Line:        return "AC_Line";
+          case gr::EdgeCategory::AC_Transformer: return "AC_Transformer";
+          case gr::EdgeCategory::Switch:         return "Switch";
+          case gr::EdgeCategory::Breaker:        return "Breaker";
+          case gr::EdgeCategory::DC_Line:        return "DC_Line";
+          case gr::EdgeCategory::DC_Switch:      return "DC_Switch";
+          case gr::EdgeCategory::VSC_Coupling:   return "VSC_Coupling";
+          case gr::EdgeCategory::DCDC_Coupling:  return "DCDC_Coupling";
+        }
+        return "Unknown";
+      };
+
+      json out;
+      out["schema"] = "topology_window_v1";
+      out["lod"] = lod;
+      out["units"] = json{
+          {"coordinates", "WGS84 degrees; x = longitude, y = latitude"}};
+      out["bbox"] = json{{"min_x", min_x}, {"min_y", min_y},
+                         {"max_x", max_x}, {"max_y", max_y}};
+      out["model_scope"] = json{
+          {"analysis", "topology_window"},
+          {"index_space",
+           "stable component .index, domain-qualified (AC/DC bus ids may "
+           "collide across domains)"}};
+      out["coordinate_coverage"] = json{
+          {"ac_buses_total", spatial.ac_total},
+          {"ac_buses_with_coordinates", spatial.ac_with_coords},
+          {"dc_buses_total", spatial.dc_total},
+          {"dc_buses_with_coordinates", spatial.dc_with_coords},
+          {"complete", spatial.complete()}};
+      out["model_limitations"] = json::array();
+      if (!spatial.complete()) {
+        const int missing =
+            (spatial.ac_total - spatial.ac_with_coords) +
+            (spatial.dc_total - spatial.dc_with_coords);
+        const int total = spatial.ac_total + spatial.dc_total;
+        out["model_limitations"].push_back(
+            std::to_string(missing) + " of " + std::to_string(total) +
+            " buses have no coordinates (model-default lat/lon 0,0) and are "
+            "excluded from window nodes and edges.");
+      }
+      out["model_limitations"].push_back(
+          "An edge is returned only when both endpoint buses are inside the "
+          "window.");
+
+      // ── Collect in-window geo-referenced buses via the uniform grid ──
+      // in_window[node_idx] = position in `hits`, or -1.
+      std::vector<int> in_window(static_cast<size_t>(graph.node_count()), -1);
+      struct Hit {
+        int node_idx;
+        double x, y;
+        int area, zone;
+      };
+      std::vector<Hit> hits;
+      if (spatial.nx > 0 && max_x >= spatial.min_x && min_x <= spatial.max_x &&
+          max_y >= spatial.min_y && min_y <= spatial.max_y) {
+        auto cell_range = [](double lo, double hi, double origin, double cell,
+                             int n) {
+          int c0 = static_cast<int>(std::floor((lo - origin) / cell));
+          int c1 = static_cast<int>(std::floor((hi - origin) / cell));
+          return std::pair<int, int>{std::clamp(c0, 0, n - 1),
+                                     std::clamp(c1, 0, n - 1)};
+        };
+        const auto [cx0, cx1] =
+            cell_range(min_x, max_x, spatial.min_x, spatial.cell_x, spatial.nx);
+        const auto [cy0, cy1] =
+            cell_range(min_y, max_y, spatial.min_y, spatial.cell_y, spatial.ny);
+        for (int cy = cy0; cy <= cy1; ++cy) {
+          for (int cx = cx0; cx <= cx1; ++cx) {
+            for (const auto& e :
+                 spatial.cells[static_cast<size_t>(cy) * spatial.nx + cx]) {
+              if (e.x < min_x || e.x > max_x || e.y < min_y || e.y > max_y)
+                continue;
+              if (in_window[static_cast<size_t>(e.node_idx)] >= 0) continue;
+              in_window[static_cast<size_t>(e.node_idx)] =
+                  static_cast<int>(hits.size());
+              hits.push_back({e.node_idx, e.x, e.y, e.area, e.zone});
+            }
+          }
+        }
+      }
+
+      if (lod == 2) {
+        json nodes = json::array();
+        for (const auto& h : hits) {
+          const auto& node = graph.nodes[static_cast<size_t>(h.node_idx)];
+          const bool is_dc = (node.domain == gr::NodeDomain::DC);
+          nodes.push_back(json{
+              {"domain", is_dc ? "DC" : "AC"},
+              {"index", node.bus_id},
+              {"x", h.x},
+              {"y", h.y},
+              {"type", is_dc ? hacdcpf::dc_bus_type_str(node.dc_bus_type)
+                             : hacdcpf::bus_type_str(node.ac_bus_type)},
+              {"area", h.area},
+              {"zone", h.zone},
+              {"in_service", node.in_service}});
+        }
+        out["nodes"] = std::move(nodes);
+
+        json edges = json::array();
+        for (const auto& e : graph.edges) {
+          if (e.from_node < 0 || e.from_node >= graph.node_count() ||
+              e.to_node < 0 || e.to_node >= graph.node_count())
+            continue;
+          if (in_window[static_cast<size_t>(e.from_node)] < 0 ||
+              in_window[static_cast<size_t>(e.to_node)] < 0)
+            continue;
+          const bool from_dc =
+              graph.nodes[static_cast<size_t>(e.from_node)].domain ==
+              gr::NodeDomain::DC;
+          const bool to_dc =
+              graph.nodes[static_cast<size_t>(e.to_node)].domain ==
+              gr::NodeDomain::DC;
+          edges.push_back(json{
+              {"category", edge_cat_str(e.category)},
+              {"index", e.comp_index},
+              {"from_domain", from_dc ? "DC" : "AC"},
+              {"from", e.from_bus_id},
+              {"to_domain", to_dc ? "DC" : "AC"},
+              {"to", e.to_bus_id},
+              {"in_service", e.in_service}});
+        }
+        out["edges"] = std::move(edges);
+      } else {
+        // Aggregated view, mirroring web/js/core/network_overview.js
+        // aggregate(): lod 0 groups by electrical domain, lod 1 by
+        // domain/area/zone; group coordinate is the member centroid.
+        struct Group {
+          std::string key;
+          std::string domain;
+          int area{0};
+          int zone{0};
+          double sum_x{0.0}, sum_y{0.0};
+          int count{0};
+          int index{-1};  // position in the groups vector
+        };
+        std::vector<Group> groups;
+        std::unordered_map<std::string, int> group_pos;
+        // node_idx -> group position, -1 when not in the window
+        std::vector<int> node_group(in_window);
+        for (size_t i = 0; i < hits.size(); ++i) {
+          const auto& h = hits[i];
+          const auto& node = graph.nodes[static_cast<size_t>(h.node_idx)];
+          const char* domain =
+              (node.domain == gr::NodeDomain::DC) ? "DC" : "AC";
+          const std::string key =
+              lod == 0
+                  ? std::string(domain)
+                  : std::string(domain) + ":area:" + std::to_string(h.area) +
+                        ":zone:" + std::to_string(h.zone);
+          auto it = group_pos.find(key);
+          if (it == group_pos.end()) {
+            Group g;
+            g.key = key;
+            g.domain = domain;
+            g.area = h.area;
+            g.zone = h.zone;
+            g.index = static_cast<int>(groups.size());
+            group_pos.emplace(key, g.index);
+            groups.push_back(std::move(g));
+            it = group_pos.find(key);
+          }
+          Group& g = groups[static_cast<size_t>(it->second)];
+          g.sum_x += h.x;
+          g.sum_y += h.y;
+          ++g.count;
+          node_group[static_cast<size_t>(h.node_idx)] = g.index;
+        }
+
+        json nodes = json::array();
+        for (const auto& g : groups) {
+          nodes.push_back(json{
+              {"key", g.key},
+              {"domain", g.domain},
+              {"area", lod == 0 ? json(nullptr) : json(g.area)},
+              {"zone", lod == 0 ? json(nullptr) : json(g.zone)},
+              {"name", lod == 0
+                           ? g.domain + " 网络"
+                           : g.domain + " 区域 " + std::to_string(g.area) +
+                                 "/" + std::to_string(g.zone)},
+              {"x", g.count > 0 ? g.sum_x / g.count : 0.0},
+              {"y", g.count > 0 ? g.sum_y / g.count : 0.0},
+              {"count", g.count},
+              {"in_service", true}});
+        }
+        out["nodes"] = std::move(nodes);
+
+        // Aggregate edges between distinct groups, counting collapsed edges.
+        struct AggEdge {
+          int source, target;
+          std::string domain;
+          int count{0};
+        };
+        std::map<std::pair<int, int>, AggEdge> agg_edges;
+        for (const auto& e : graph.edges) {
+          if (e.from_node < 0 || e.from_node >= graph.node_count() ||
+              e.to_node < 0 || e.to_node >= graph.node_count())
+            continue;
+          const int gs = node_group[static_cast<size_t>(e.from_node)];
+          const int gt = node_group[static_cast<size_t>(e.to_node)];
+          if (gs < 0 || gt < 0 || gs == gt) continue;
+          const auto key = std::minmax(gs, gt);
+          auto& agg = agg_edges[key];
+          agg.source = key.first;
+          agg.target = key.second;
+          if (agg.domain.empty()) {
+            const bool from_dc =
+                graph.nodes[static_cast<size_t>(e.from_node)].domain ==
+                gr::NodeDomain::DC;
+            const bool to_dc =
+                graph.nodes[static_cast<size_t>(e.to_node)].domain ==
+                gr::NodeDomain::DC;
+            agg.domain = (from_dc && to_dc)   ? "DC"
+                         : (!from_dc && !to_dc) ? "AC"
+                                                : "Hybrid";
+          }
+          ++agg.count;
+        }
+        json edges = json::array();
+        for (const auto& [key, agg] : agg_edges) {
+          edges.push_back(json{
+              {"key", groups[static_cast<size_t>(agg.source)].key + "->" +
+                          groups[static_cast<size_t>(agg.target)].key},
+              {"source", groups[static_cast<size_t>(agg.source)].key},
+              {"target", groups[static_cast<size_t>(agg.target)].key},
+              {"domain", agg.domain},
+              {"kind", "aggregate"},
+              {"count", agg.count},
+              {"in_service", true}});
+        }
+        out["edges"] = std::move(edges);
+        out["model_limitations"].push_back(
+            "Aggregated view: nodes are groups with centroid coordinates and "
+            "member counts; edge count is the number of collapsed edges.");
+      }
+
+      res.set_content(out.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  // ──────────────────────────────────────────────────────────────────
+  // Result window: per-element power-flow results inside a geographic
+  // viewport, served from the cached last power flow without re-serializing
+  // the whole model.  Large systems can thus be result-coloured from a
+  // bounded payload instead of the full /api/session/pf response.
+  //
+  // Request body: {"min_x","min_y","max_x","max_y"} — same WGS84 bbox
+  // contract and validation as /api/session/topology_window.
+  // Data source: last_pf_result + last_pf_system (the solved system copy).
+  // vm/va align by position with last_pf_system->ac.buses; vdc with dc.buses;
+  // branch_flows with ac.branches.  Values are identical to the full PF
+  // response: vm/vdc in pu, va in radians, branch flows in MW/MVAr.
+  // 409 when no usable PF result is cached.
+  svr.Post("/api/session/result_window",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+      auto get_coord = [&](const char* key) -> double {
+        if (!j.contains(key) || !j[key].is_number())
+          throw std::runtime_error(
+              std::string("result_window requires numeric '") + key + "'");
+        return j[key].get<double>();
+      };
+      const double min_x = get_coord("min_x");
+      const double min_y = get_coord("min_y");
+      const double max_x = get_coord("max_x");
+      const double max_y = get_coord("max_y");
+      if (!(min_x <= max_x) || !(min_y <= max_y))
+        throw std::runtime_error(
+            "result_window requires min_x <= max_x and min_y <= max_y");
+
+      std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
+      std::shared_ptr<const hacdcpf::PowerFlowResult> pf_snap;
+      std::shared_ptr<const hacdcpf::graph::PowerSystemGraph> graph_snap;
+      std::shared_ptr<const Session::BusSpatialIndex> spatial_snap;
+      std::string method;
+      std::uint64_t pf_revision = 0, system_revision = 0;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (!g_session.last_pf_result) {
+          res.status = 409;
+          res.set_content(
+              json{{"error", "no_cached_power_flow"},
+                   {"message",
+                    "No power-flow result is cached; run /api/session/pf first"},
+                   {"hint", "result_window serves the most recent power flow "
+                            "and never solves on demand"}}
+                  .dump(),
+              "application/json");
+          return;
+        }
+        sys_snap = g_session.last_pf_system ? g_session.last_pf_system
+                                            : g_session.current_system;
+        if (!sys_snap) {
+          res.status = 409;
+          res.set_content(
+              json{{"error", "no_system"},
+                   {"message", "No system is loaded for the cached result"}}
+                  .dump(),
+              "application/json");
+          return;
+        }
+        pf_snap = g_session.last_pf_result;
+        method = g_session.last_pf_method;
+        pf_revision = g_session.last_pf_revision;
+        system_revision = g_session.system_revision;
+        graph_snap = g_session.topology_graph;
+        spatial_snap = g_session.bus_spatial_index;
+      }
+      const hacdcpf::HybridPowerSystem& sys = *sys_snap;
+      const hacdcpf::PowerFlowResult& pf = *pf_snap;
+      // The resident graph/spatial index are built from current_system; they
+      // describe the solved system only when the model has not been replaced
+      // since the solve.  Otherwise fall back to a linear scan of the solved
+      // system's own coordinates (still O(N), no full serialization).
+      const bool same_system = (pf_revision == system_revision);
+
+      json out;
+      out["schema"] = "result_window_v1";
+      out["units"] = json{
+          {"coordinates", "WGS84 degrees; x = longitude, y = latitude"},
+          {"vm_pu", "per-unit voltage magnitude (DC buses: vdc in pu)"},
+          {"va_rad", "AC voltage angle in radians (same as /api/session/pf)"},
+          {"branch_flows",
+           "MW / MVAr; loading_pct = 100 * max(|S_from|, |S_to|) / rate_a_mva "
+           "(same formula as the full PF response geo_ac_branches)"}};
+      out["bbox"] = json{{"min_x", min_x}, {"min_y", min_y},
+                         {"max_x", max_x}, {"max_y", max_y}};
+      out["model_scope"] = json{
+          {"analysis", "result_window"},
+          {"index_space",
+           "stable component .index, domain-qualified; result vectors align "
+           "by vector position with the solved system"}};
+      out["result_meta"] = json{
+          {"source", "last_power_flow"},
+          {"method", method},
+          {"converged", pf.converged},
+          {"iterations", pf.iterations},
+          {"residual", pf.residual},
+          {"result_matches_current_system", same_system}};
+      out["model_limitations"] = json::array();
+      if (!pf.converged) {
+        out["model_limitations"].push_back(
+            "The cached power flow did not converge; values are the final "
+            "iterate, not a solved operating point.");
+      }
+      if (!same_system) {
+        out["model_limitations"].push_back(
+            "The model was replaced or edited after this power flow was "
+            "solved; results may lag behind current edits.");
+      }
+      out["model_limitations"].push_back(
+          "AC branches only: DC branch flows and converter transfers are not "
+          "part of result_window_v1; a branch is returned only when both "
+          "endpoint buses are inside the window.");
+
+      // Bus index -> vector position in the solved system (domain-qualified).
+      std::unordered_map<int, int> ac_pos, dc_pos;
+      for (size_t i = 0; i < sys.ac.buses.size(); ++i)
+        ac_pos[sys.ac.buses[i].index] = static_cast<int>(i);
+      for (size_t i = 0; i < sys.dc.buses.size(); ++i)
+        dc_pos[sys.dc.buses[i].index] = static_cast<int>(i);
+
+      auto in_window = [&](double lon, double lat) {
+        return lon >= min_x && lon <= max_x && lat >= min_y && lat <= max_y;
+      };
+      // In-window markers keyed by vector position in the solved system.
+      std::vector<char> ac_in(sys.ac.buses.size(), 0);
+      std::vector<char> dc_in(sys.dc.buses.size(), 0);
+      int ac_total = 0, ac_geo = 0, dc_total = 0, dc_geo = 0;
+      json nodes = json::array();
+      auto emit_ac = [&](int pos, double lon, double lat) {
+        const auto& b = sys.ac.buses[static_cast<size_t>(pos)];
+        json node{{"domain", "AC"}, {"index", b.index}, {"x", lon}, {"y", lat}};
+        if (pos < static_cast<int>(pf.vm.size()))
+          node["vm_pu"] = pf.vm[static_cast<size_t>(pos)];
+        if (pos < static_cast<int>(pf.va.size()))
+          node["va_rad"] = pf.va[static_cast<size_t>(pos)];
+        nodes.push_back(std::move(node));
+        ac_in[static_cast<size_t>(pos)] = 1;
+      };
+      auto emit_dc = [&](int pos, double lon, double lat) {
+        const auto& b = sys.dc.buses[static_cast<size_t>(pos)];
+        json node{{"domain", "DC"}, {"index", b.index}, {"x", lon}, {"y", lat}};
+        node["vm_pu"] = (pos < static_cast<int>(pf.vdc.size()))
+                            ? pf.vdc[static_cast<size_t>(pos)]
+                            : b.vm_pu;
+        nodes.push_back(std::move(node));
+        dc_in[static_cast<size_t>(pos)] = 1;
+      };
+
+      if (same_system && spatial_snap && graph_snap && spatial_snap->nx > 0) {
+        // Fast path: uniform-grid query over the resident index; graph nodes
+        // resolve each entry back to its domain-qualified bus identity.
+        ac_total = spatial_snap->ac_total;
+        ac_geo = spatial_snap->ac_with_coords;
+        dc_total = spatial_snap->dc_total;
+        dc_geo = spatial_snap->dc_with_coords;
+        if (max_x >= spatial_snap->min_x && min_x <= spatial_snap->max_x &&
+            max_y >= spatial_snap->min_y && min_y <= spatial_snap->max_y) {
+          auto cell_range = [](double lo, double hi, double origin,
+                               double cell, int n) {
+            int c0 = static_cast<int>(std::floor((lo - origin) / cell));
+            int c1 = static_cast<int>(std::floor((hi - origin) / cell));
+            return std::pair<int, int>{std::clamp(c0, 0, n - 1),
+                                       std::clamp(c1, 0, n - 1)};
+          };
+          const auto [cx0, cx1] = cell_range(min_x, max_x, spatial_snap->min_x,
+                                             spatial_snap->cell_x,
+                                             spatial_snap->nx);
+          const auto [cy0, cy1] = cell_range(min_y, max_y, spatial_snap->min_y,
+                                             spatial_snap->cell_y,
+                                             spatial_snap->ny);
+          std::vector<char> seen(static_cast<size_t>(graph_snap->node_count()),
+                                 0);
+          for (int cy = cy0; cy <= cy1; ++cy) {
+            for (int cx = cx0; cx <= cx1; ++cx) {
+              for (const auto& e : spatial_snap->cells[static_cast<size_t>(cy) *
+                                                       spatial_snap->nx + cx]) {
+                if (!in_window(e.x, e.y)) continue;
+                if (e.node_idx < 0 || e.node_idx >= graph_snap->node_count() ||
+                    seen[static_cast<size_t>(e.node_idx)])
+                  continue;
+                seen[static_cast<size_t>(e.node_idx)] = 1;
+                const auto& node =
+                    graph_snap->nodes[static_cast<size_t>(e.node_idx)];
+                if (node.domain == hacdcpf::graph::NodeDomain::DC) {
+                  const auto it = dc_pos.find(node.bus_id);
+                  if (it != dc_pos.end()) emit_dc(it->second, e.x, e.y);
+                } else {
+                  const auto it = ac_pos.find(node.bus_id);
+                  if (it != ac_pos.end()) emit_ac(it->second, e.x, e.y);
+                }
+              }
+            }
+          }
+        }
+      } else {
+        // Fallback: linear scan of the solved system's own coordinates.
+        for (size_t i = 0; i < sys.ac.buses.size(); ++i) {
+          const auto& b = sys.ac.buses[i];
+          ++ac_total;
+          if (b.latitude == 0.0 && b.longitude == 0.0) continue;
+          ++ac_geo;
+          if (in_window(b.longitude, b.latitude))
+            emit_ac(static_cast<int>(i), b.longitude, b.latitude);
+        }
+        for (size_t i = 0; i < sys.dc.buses.size(); ++i) {
+          const auto& b = sys.dc.buses[i];
+          ++dc_total;
+          if (b.latitude == 0.0 && b.longitude == 0.0) continue;
+          ++dc_geo;
+          if (in_window(b.longitude, b.latitude))
+            emit_dc(static_cast<int>(i), b.longitude, b.latitude);
+        }
+      }
+      out["coordinate_coverage"] = json{
+          {"ac_buses_total", ac_total},
+          {"ac_buses_with_coordinates", ac_geo},
+          {"dc_buses_total", dc_total},
+          {"dc_buses_with_coordinates", dc_geo},
+          {"complete", ac_total == ac_geo && dc_total == dc_geo}};
+      if (ac_total != ac_geo || dc_total != dc_geo) {
+        out["model_limitations"].push_back(
+            "Buses without coordinates (model-default lat/lon 0,0) are "
+            "excluded from window results; see coordinate_coverage.");
+      }
+      out["nodes"] = std::move(nodes);
+
+      // AC branches with both endpoint buses inside the window; flows mapped
+      // positionally from pf.branch_flows (same alignment as the full PF
+      // response), loading formula identical to geo_ac_branches.
+      json branches = json::array();
+      for (size_t i = 0; i < sys.ac.branches.size(); ++i) {
+        const auto& br = sys.ac.branches[i];
+        const auto fi = ac_pos.find(br.from_bus);
+        const auto ti = ac_pos.find(br.to_bus);
+        if (fi == ac_pos.end() || ti == ac_pos.end()) continue;
+        if (!ac_in[static_cast<size_t>(fi->second)] ||
+            !ac_in[static_cast<size_t>(ti->second)])
+          continue;
+        json row{{"domain", "AC"}, {"index", br.index},
+                 {"from", br.from_bus}, {"to", br.to_bus},
+                 {"in_service", br.in_service}};
+        if (i < pf.branch_flows.size()) {
+          const auto& f = pf.branch_flows[i];
+          row["pf_mw"] = f.pf_mw;
+          row["qf_mvar"] = f.qf_mvar;
+          row["pt_mw"] = f.pt_mw;
+          row["qt_mvar"] = f.qt_mvar;
+          row["loss_mw"] = f.pf_mw + f.pt_mw;
+          if (br.rate_a_mva > 0.0) {
+            const double smax =
+                std::max(std::hypot(f.pf_mw, f.qf_mvar),
+                         std::hypot(f.pt_mw, f.qt_mvar));
+            row["loading_pct"] = 100.0 * smax / br.rate_a_mva;
+          }
+          row["rate_mva"] = br.rate_a_mva;
+        }
+        branches.push_back(std::move(row));
+      }
+      out["branches"] = std::move(branches);
+
+      res.set_content(out.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  // ──────────────────────────────────────────────────────────────────
   // Network reduction (graph reduction pipeline — before/after view).
   // Runs switch contraction → series reduction → (optional) pendant folding
   // and reports, for every original bus, what it collapses into.  Kron-
@@ -16610,12 +17350,13 @@ int main(int argc, char** argv) {
            [](const httplib::Request& req, httplib::Response& res) {
     try {
       json body = req.body.empty() ? json::object() : json::parse(req.body);
-      hacdcpf::HybridPowerSystem sys;
+      std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
       {
         std::lock_guard<std::mutex> lk(g_session.mu);
         if (!g_session.current_system) throw std::runtime_error("No system loaded");
-        sys = *g_session.current_system;
+        sys_snap = g_session.current_system;
       }
+      const hacdcpf::HybridPowerSystem& sys = *sys_snap;  // zero-copy read of the shared immutable snapshot
       if (g_session.busy.exchange(true)) {
         res.status = 409;
         res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
@@ -16946,14 +17687,16 @@ int main(int argc, char** argv) {
     try {
       const auto request_started = std::chrono::steady_clock::now();
       double core_solver_ms = 0.0;
+      std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
       hacdcpf::HybridPowerSystem sys;
       std::string dss_source_path;
       {
         std::lock_guard<std::mutex> lk(g_session.mu);
         if (!g_session.current_system) throw std::runtime_error("No system loaded");
-        sys = *g_session.current_system;
+        sys_snap = g_session.current_system;
         dss_source_path = g_session.preserved_three_phase_source_path;
       }
+      sys = *sys_snap;  // request-local mutable copy, made after releasing the session lock
       const auto snapshot_finished = std::chrono::steady_clock::now();
       if (g_session.busy.exchange(true)) {
         res.status = 409;
@@ -18375,12 +19118,14 @@ int main(int argc, char** argv) {
   svr.Post("/api/session/opf_ac",
            [](const httplib::Request& req, httplib::Response& res) {
     try {
+      std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
       hacdcpf::HybridPowerSystem sys;
       {
         std::lock_guard<std::mutex> lk(g_session.mu);
         if (!g_session.current_system) throw std::runtime_error("No system loaded");
-        sys = *g_session.current_system;
+        sys_snap = g_session.current_system;
       }
+      sys = *sys_snap;  // request-local mutable copy, made after releasing the session lock
       if (g_session.busy.exchange(true)) {
         res.status = 409;
         res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
@@ -18451,12 +19196,14 @@ int main(int argc, char** argv) {
   svr.Post("/api/session/opf_parity",
            [](const httplib::Request&, httplib::Response& res) {
     try {
+      std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
       hacdcpf::HybridPowerSystem sys;
       {
         std::lock_guard<std::mutex> lk(g_session.mu);
         if (!g_session.current_system) throw std::runtime_error("No system loaded");
-        sys = *g_session.current_system;
+        sys_snap = g_session.current_system;
       }
+      sys = *sys_snap;  // request-local mutable copy, made after releasing the session lock
       if (g_session.busy.exchange(true)) {
         res.status = 409;
         res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
@@ -18505,12 +19252,14 @@ int main(int argc, char** argv) {
   svr.Post("/api/session/opf_dc",
            [](const httplib::Request&, httplib::Response& res) {
     try {
+      std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
       hacdcpf::HybridPowerSystem sys;
       {
         std::lock_guard<std::mutex> lk(g_session.mu);
         if (!g_session.current_system) throw std::runtime_error("No system loaded");
-        sys = *g_session.current_system;
+        sys_snap = g_session.current_system;
       }
+      sys = *sys_snap;  // request-local mutable copy, made after releasing the session lock
       if (g_session.busy.exchange(true)) {
         res.status = 409;
         res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
@@ -18548,12 +19297,13 @@ int main(int argc, char** argv) {
   svr.Post("/api/session/sc",
            [](const httplib::Request& req, httplib::Response& res) {
     try {
-      hacdcpf::HybridPowerSystem sys;
+      std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
       {
         std::lock_guard<std::mutex> lk(g_session.mu);
         if (!g_session.current_system) throw std::runtime_error("No system loaded");
-        sys = *g_session.current_system;
+        sys_snap = g_session.current_system;
       }
+      const hacdcpf::HybridPowerSystem& sys = *sys_snap;  // zero-copy read of the shared immutable snapshot
       if (g_session.busy.exchange(true)) {
         res.status = 409;
         res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
@@ -18607,12 +19357,13 @@ int main(int argc, char** argv) {
   svr.Post("/api/session/harmonics",
            [](const httplib::Request& req, httplib::Response& res) {
     try {
-      hacdcpf::HybridPowerSystem sys;
+      std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
       {
         std::lock_guard<std::mutex> lk(g_session.mu);
         if (!g_session.current_system) throw std::runtime_error("No system loaded");
-        sys = *g_session.current_system;
+        sys_snap = g_session.current_system;
       }
+      const hacdcpf::HybridPowerSystem& sys = *sys_snap;  // zero-copy read of the shared immutable snapshot
       if (g_session.busy.exchange(true)) {
         res.status = 409;
         res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
@@ -18739,12 +19490,13 @@ int main(int argc, char** argv) {
   svr.Post("/api/session/harmonics_freqscan",
            [](const httplib::Request& req, httplib::Response& res) {
     try {
-      hacdcpf::HybridPowerSystem sys;
+      std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
       {
         std::lock_guard<std::mutex> lk(g_session.mu);
         if (!g_session.current_system) throw std::runtime_error("No system loaded");
-        sys = *g_session.current_system;
+        sys_snap = g_session.current_system;
       }
+      const hacdcpf::HybridPowerSystem& sys = *sys_snap;  // zero-copy read of the shared immutable snapshot
       if (g_session.busy.exchange(true)) {
         res.status = 409;
         res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
@@ -18817,12 +19569,13 @@ int main(int argc, char** argv) {
   svr.Post("/api/session/harmonics_3ph",
            [](const httplib::Request& req, httplib::Response& res) {
     try {
-      hacdcpf::HybridPowerSystem sys;
+      std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
       {
         std::lock_guard<std::mutex> lk(g_session.mu);
         if (!g_session.current_system) throw std::runtime_error("No system loaded");
-        sys = *g_session.current_system;
+        sys_snap = g_session.current_system;
       }
+      const hacdcpf::HybridPowerSystem& sys = *sys_snap;  // zero-copy read of the shared immutable snapshot
       if (!sys.three_phase_ac) {
         res.status = 400;
         res.set_content(json{{"error","This case has no three-phase (abc) model; "
@@ -18918,12 +19671,13 @@ int main(int argc, char** argv) {
   svr.Post("/api/session/harmonics_metrics",
            [](const httplib::Request& req, httplib::Response& res) {
     try {
-      hacdcpf::HybridPowerSystem sys;
+      std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
       {
         std::lock_guard<std::mutex> lk(g_session.mu);
         if (!g_session.current_system) throw std::runtime_error("No system loaded");
-        sys = *g_session.current_system;
+        sys_snap = g_session.current_system;
       }
+      const hacdcpf::HybridPowerSystem& sys = *sys_snap;  // zero-copy read of the shared immutable snapshot
       if (g_session.busy.exchange(true)) {
         res.status = 409;
         res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
@@ -18989,12 +19743,13 @@ int main(int argc, char** argv) {
   svr.Post("/api/session/harmonics_newton",
            [](const httplib::Request& req, httplib::Response& res) {
     try {
-      hacdcpf::HybridPowerSystem sys;
+      std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
       {
         std::lock_guard<std::mutex> lk(g_session.mu);
         if (!g_session.current_system) throw std::runtime_error("No system loaded");
-        sys = *g_session.current_system;
+        sys_snap = g_session.current_system;
       }
+      const hacdcpf::HybridPowerSystem& sys = *sys_snap;  // zero-copy read of the shared immutable snapshot
       if (g_session.busy.exchange(true)) {
         res.status = 409;
         res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
@@ -19063,12 +19818,13 @@ int main(int argc, char** argv) {
            [](const httplib::Request& req, httplib::Response& res) {
     try {
       const auto request_started = std::chrono::steady_clock::now();
-      hacdcpf::HybridPowerSystem sys;
+      std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
       {
         std::lock_guard<std::mutex> lk(g_session.mu);
         if (!g_session.current_system) throw std::runtime_error("No system loaded");
-        sys = *g_session.current_system;
+        sys_snap = g_session.current_system;
       }
+      const hacdcpf::HybridPowerSystem& sys = *sys_snap;  // zero-copy read of the shared immutable snapshot
       if (g_session.busy.exchange(true)) {
         res.status = 409;
         res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
@@ -19096,12 +19852,13 @@ int main(int argc, char** argv) {
     svr.Post("/api/session/sc_detailed",
              [](const httplib::Request& req, httplib::Response& res) {
       try {
-        hacdcpf::HybridPowerSystem sys;
+        std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
         {
           std::lock_guard<std::mutex> lk(g_session.mu);
           if (!g_session.current_system) throw std::runtime_error("No system loaded");
-          sys = *g_session.current_system;
+          sys_snap = g_session.current_system;
         }
+        const hacdcpf::HybridPowerSystem& sys = *sys_snap;  // zero-copy read of the shared immutable snapshot
         if (g_session.busy.exchange(true)) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
@@ -19184,12 +19941,13 @@ int main(int argc, char** argv) {
     svr.Post("/api/session/dc_sc",
              [](const httplib::Request& req, httplib::Response& res) {
       try {
-        hacdcpf::HybridPowerSystem sys;
+        std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
         {
           std::lock_guard<std::mutex> lk(g_session.mu);
           if (!g_session.current_system) throw std::runtime_error("No system loaded");
-          sys = *g_session.current_system;
+          sys_snap = g_session.current_system;
         }
+        const hacdcpf::HybridPowerSystem& sys = *sys_snap;  // zero-copy read of the shared immutable snapshot
         if (g_session.busy.exchange(true)) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
@@ -19411,8 +20169,12 @@ int main(int argc, char** argv) {
         g_session.ts_binding = spec;
 
         if (g_session.current_system) {
+          // Copy-on-write: bind profiles on a private copy, then atomically
+          // replace the shared session system.
+          hacdcpf::HybridPowerSystem sys = *g_session.current_system;
           n_loads_materialized = materialize_loads_and_apply_binding(
-              *g_session.current_system, spec);
+              sys, spec);
+          session_replace_system(g_session, std::move(sys));
           // Count actual mapped loads (those whose profile_id matches the spec).
           for (const auto& ld : g_session.current_system->ac.loads)
             if (ld.profile_id >= 0) ++n_load_mapped;
@@ -19450,6 +20212,7 @@ int main(int argc, char** argv) {
         Session::TsBindingSpec spec;
         bool annual_day_drilldown = false;
         bool annual_day_uses_session_ts = false;
+        std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_ts_snap;
         {
           std::lock_guard<std::mutex> lk(g_session.mu);
           if (!g_session.current_system) throw std::runtime_error("No system loaded");
@@ -19477,10 +20240,11 @@ int main(int argc, char** argv) {
             ts_data = g_session.ts_data;
             fit_ts_data_to_steps(ts_data, ns);
           }
-          sys_ts = *g_session.current_system;
+          sys_ts_snap = g_session.current_system;
           if (!annual_day_drilldown || annual_day_uses_session_ts)
             spec = g_session.ts_binding;
         }
+        sys_ts = *sys_ts_snap;  // request-local mutable copy, made after releasing the session lock
         // Re-apply persistent binding to the per-call sys copy. This
         // protects against the common GUI flow where a canvas re-sync
         // (load_json_string) replaces current_system between set_ts_config
@@ -20303,6 +21067,7 @@ int main(int argc, char** argv) {
     svr.Post("/api/session/run_uc",
              [](const httplib::Request& req, httplib::Response& res) {
       try {
+        std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_ts_snap;
         hacdcpf::HybridPowerSystem sys_ts;
         hacdcpf::TimeSeriesData ts_data;
         {
@@ -20312,9 +21077,10 @@ int main(int argc, char** argv) {
           const int ns = j2.value("num_steps", 24);
           if (g_session.ts_data.num_steps != ns || g_session.ts_data.profiles.empty())
             g_session.ts_data = make_default_ts_data(ns);
-          sys_ts = *g_session.current_system;
+          sys_ts_snap = g_session.current_system;
           ts_data = g_session.ts_data;
         }
+        sys_ts = *sys_ts_snap;  // request-local mutable copy, made after releasing the session lock
         if (g_session.busy.exchange(true)) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
@@ -20359,12 +21125,14 @@ int main(int argc, char** argv) {
     svr.Post("/api/session/run_market_clearing",
              [](const httplib::Request& req, httplib::Response& res) {
       try {
+        std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
         hacdcpf::HybridPowerSystem sys;
         {
           std::lock_guard<std::mutex> lk(g_session.mu);
           if (!g_session.current_system) throw std::runtime_error("No system loaded");
-          sys = *g_session.current_system;
+          sys_snap = g_session.current_system;
         }
+        sys = *sys_snap;  // request-local mutable copy, made after releasing the session lock
 
         if (g_session.busy.exchange(true)) {
           res.status = 409;
@@ -20976,14 +21744,16 @@ int main(int argc, char** argv) {
     svr.Post("/api/session/run_real_time_market",
              [](const httplib::Request& req, httplib::Response& res) {
       try {
+        std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
         hacdcpf::HybridPowerSystem sys;
         {
           std::lock_guard<std::mutex> lk(g_session.mu);
           if (!g_session.current_system) {
             throw std::runtime_error("No system loaded");
           }
-          sys = *g_session.current_system;
+          sys_snap = g_session.current_system;
         }
+        sys = *sys_snap;  // request-local mutable copy, made after releasing the session lock
         if (g_session.busy.exchange(true)) {
           res.status = 409;
           res.set_content(
@@ -21040,14 +21810,16 @@ int main(int argc, char** argv) {
     svr.Post("/api/session/run_repeated_market_game",
              [](const httplib::Request& req, httplib::Response& res) {
       try {
+        std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
         hacdcpf::HybridPowerSystem sys;
         {
           std::lock_guard<std::mutex> lk(g_session.mu);
           if (!g_session.current_system) {
             throw std::runtime_error("No system loaded");
           }
-          sys = *g_session.current_system;
+          sys_snap = g_session.current_system;
         }
+        sys = *sys_snap;  // request-local mutable copy, made after releasing the session lock
         if (g_session.busy.exchange(true)) {
           res.status = 409;
           res.set_content(
@@ -21117,12 +21889,6 @@ int main(int argc, char** argv) {
              [](const httplib::Request&, httplib::Response& res) {
       try {
         const auto request_started = std::chrono::steady_clock::now();
-        hacdcpf::HybridPowerSystem sys;
-        {
-          std::lock_guard<std::mutex> lk(g_session.mu);
-          if (!g_session.current_system) throw std::runtime_error("No system loaded");
-          sys = *g_session.current_system;
-        }
         if (g_session.busy.exchange(true)) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
@@ -21130,24 +21896,31 @@ int main(int argc, char** argv) {
         }
         g_session.cancel.store(false);
         hacdcpf::analysis::CarbonAnalysisOptions ca_opt; ca_opt.verbose = false;
-        hacdcpf::analysis::CarbonAnalysisResult carbon;
+        // Snapshot the shared handles under a short lock, then compute
+        // off-lock: the carbon analysis reads the solved PF operating point
+        // and never mutates the model.
+        std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
+        std::shared_ptr<const hacdcpf::PowerFlowResult> pf_result;
+        std::string pf_method;
         {
           std::lock_guard<std::mutex> lk(g_session.mu);
           if (!g_session.last_pf_result || !g_session.last_pf_result->converged) {
             throw std::runtime_error(
                 "请先运行潮流计算，并确保潮流收敛后再进行静态碳流分析");
           }
-          if (g_session.last_pf_system) {
-            sys = *g_session.last_pf_system;
-          }
-          carbon = hacdcpf::analysis::compute_carbon_analysis(
-              sys, *g_session.last_pf_result, ca_opt);
+          // Prefer the solved PF system (post-projection operating point);
+          // fall back to the current session system.
+          sys_snap = g_session.last_pf_system ? g_session.last_pf_system
+                                              : g_session.current_system;
+          if (!sys_snap) throw std::runtime_error("No system loaded");
+          pf_result = g_session.last_pf_result;
+          pf_method = g_session.last_pf_method;
         }
-        json out = carbon_analysis_to_json(sys, carbon);
-        { std::lock_guard<std::mutex> lk(g_session.mu);
-          out["pf_source"] = g_session.last_pf_method;
-          out["requires_pf"] = true;
-        }
+        const auto carbon = hacdcpf::analysis::compute_carbon_analysis(
+            *sys_snap, *pf_result, ca_opt);
+        json out = carbon_analysis_to_json(*sys_snap, carbon);
+        out["pf_source"] = pf_method;
+        out["requires_pf"] = true;
         out["execution_time_sec"] = elapsed_seconds(request_started);
         res.set_content(out.dump(), "application/json");
         g_session.busy.store(false);
@@ -21166,7 +21939,7 @@ int main(int argc, char** argv) {
         const auto request_started = std::chrono::steady_clock::now();
         hacdcpf::TimeSeriesData ts_data;
         hacdcpf::TimeSeriesPFResult ts_result;
-        hacdcpf::HybridPowerSystem current_sys;
+        std::shared_ptr<const hacdcpf::HybridPowerSystem> current_sys_snap;
         bool skip_uc = true;
         bool run_opf = false;
         int n_remat = 0;
@@ -21181,7 +21954,7 @@ int main(int argc, char** argv) {
         {
           std::lock_guard<std::mutex> lk(g_session.mu);
           if (!g_session.current_system) throw std::runtime_error("No system loaded");
-          current_sys = *g_session.current_system;
+          current_sys_snap = g_session.current_system;
           if (use_last_tspf) {
             if (!g_session.last_tspf_result) {
               throw std::runtime_error(
@@ -21200,6 +21973,7 @@ int main(int argc, char** argv) {
           }
           grid_carbon_profiles = g_session.external_grid_carbon_profiles;
         }
+        const hacdcpf::HybridPowerSystem& current_sys = *current_sys_snap;  // zero-copy read of the shared immutable snapshot
 
         if (g_session.busy.exchange(true)) {
           res.status = 409;
@@ -21209,6 +21983,7 @@ int main(int argc, char** argv) {
         g_session.cancel.store(false);
 
         if (!use_last_tspf) {
+          std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_ts_snap;
           hacdcpf::HybridPowerSystem sys_ts;
           Session::TsBindingSpec spec;
           {
@@ -21217,10 +21992,11 @@ int main(int argc, char** argv) {
             const int ns = request_has_num_steps ? requested_num_steps : 24;
             if (g_session.ts_data.num_steps != ns || g_session.ts_data.profiles.empty())
               g_session.ts_data = make_default_ts_data(ns);
-            sys_ts = *g_session.current_system;
+            sys_ts_snap = g_session.current_system;
             ts_data = g_session.ts_data;
             spec = g_session.ts_binding;
           }
+          sys_ts = *sys_ts_snap;  // request-local mutable copy, made after releasing the session lock
           n_remat = materialize_loads_and_apply_binding(sys_ts, spec);
           ts_binding_active = spec.valid;
           skip_uc = j.value("skip_uc", false);
@@ -21313,13 +22089,14 @@ int main(int argc, char** argv) {
     svr.Post("/api/session/rpo_inputs",
              [](const httplib::Request& req, httplib::Response& res) {
       try {
-        hacdcpf::HybridPowerSystem sys;
+        std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
         {
           std::lock_guard<std::mutex> lk(g_session.mu);
           if (!g_session.current_system)
             throw std::runtime_error("No system loaded");
-          sys = *g_session.current_system;
+          sys_snap = g_session.current_system;
         }
+        const hacdcpf::HybridPowerSystem& sys = *sys_snap;  // zero-copy read of the shared immutable snapshot
         const auto j = json::parse(req.body.empty() ? "{}" : req.body);
         hacdcpf::opf::RPOOptions opt;
         opt.max_tap_move = std::clamp(j.value("max_tap_move", 2), -1, 1000);
@@ -21343,12 +22120,13 @@ int main(int argc, char** argv) {
     svr.Post("/api/session/run_rpo",
              [](const httplib::Request& req, httplib::Response& res) {
       try {
-        hacdcpf::HybridPowerSystem sys;
+        std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
         {
           std::lock_guard<std::mutex> lk(g_session.mu);
           if (!g_session.current_system) throw std::runtime_error("No system loaded");
-          sys = *g_session.current_system;
+          sys_snap = g_session.current_system;
         }
+        const hacdcpf::HybridPowerSystem& sys = *sys_snap;  // zero-copy read of the shared immutable snapshot
         if (g_session.busy.exchange(true)) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
@@ -21833,6 +22611,7 @@ int main(int argc, char** argv) {
     svr.Post("/api/session/run_reconfig",
              [](const httplib::Request& req, httplib::Response& res) {
       try {
+        std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_tr_snap;
         hacdcpf::HybridPowerSystem sys_tr;
         hacdcpf::TimeSeriesData ts_data;
         {
@@ -21842,9 +22621,10 @@ int main(int argc, char** argv) {
           const int ns = j2.value("num_steps", 4);
           if (g_session.ts_data.num_steps != ns || g_session.ts_data.profiles.empty())
             g_session.ts_data = make_default_ts_data(ns);
-          sys_tr = *g_session.current_system;
+          sys_tr_snap = g_session.current_system;
           ts_data = g_session.ts_data;
         }
+        sys_tr = *sys_tr_snap;  // request-local mutable copy, made after releasing the session lock
         if (g_session.busy.exchange(true)) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
@@ -22471,14 +23251,16 @@ int main(int argc, char** argv) {
 
         hacdcpf::evpt::EVPowerTrafficProblem problem;
         if (scenario_source == "custom") {
+          std::shared_ptr<const hacdcpf::HybridPowerSystem> problem_system_snap;
           {
             std::lock_guard<std::mutex> lk(g_session.mu);
             if (!g_session.current_system) {
               throw std::runtime_error(
                   "Custom EV-traffic scenarios require a power system in the GUI session");
             }
-            problem.system = *g_session.current_system;
+            problem_system_snap = g_session.current_system;
           }
+          problem.system = *problem_system_snap;  // request-local mutable copy, made after releasing the session lock
           if (!j.contains("scenario") || !j.at("scenario").is_object()) {
             throw std::runtime_error("Custom EV-traffic scenario JSON is missing");
           }
@@ -22657,18 +23439,20 @@ int main(int argc, char** argv) {
             (j.value("resolution", std::string("6h")) == "1h") ? 1.0 : 6.0;
         const bool use_session_ts =
             j.value("use_session_time_series", false);
+        std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_ann_snap;
         hacdcpf::HybridPowerSystem sys_ann;
         hacdcpf::TimeSeriesData session_ts;
         Session::TsBindingSpec session_binding;
         {
           std::lock_guard<std::mutex> lk(g_session.mu);
           if (!g_session.current_system) throw std::runtime_error("No system loaded");
-          sys_ann = *g_session.current_system;
+          sys_ann_snap = g_session.current_system;
           if (use_session_ts) {
             session_ts = g_session.ts_data;
             session_binding = g_session.ts_binding;
           }
         }
+        sys_ann = *sys_ann_snap;  // request-local mutable copy, made after releasing the session lock
         if (g_session.busy.exchange(true)) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
@@ -23080,12 +23864,14 @@ int main(int argc, char** argv) {
     svr.Post("/api/session/run_lifecycle_sim",
              [](const httplib::Request& req, httplib::Response& res) {
       try {
+        std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_lc_snap;
         hacdcpf::HybridPowerSystem sys_lc;
         {
           std::lock_guard<std::mutex> lk(g_session.mu);
           if (!g_session.current_system) throw std::runtime_error("No system loaded");
-          sys_lc = *g_session.current_system;
+          sys_lc_snap = g_session.current_system;
         }
+        sys_lc = *sys_lc_snap;  // request-local mutable copy, made after releasing the session lock
         if (g_session.busy.exchange(true)) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
@@ -23221,12 +24007,14 @@ int main(int argc, char** argv) {
     svr.Post("/api/session/run_lifecycle_compare",
              [](const httplib::Request& req, httplib::Response& res) {
       try {
+        std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_base_snap;
         hacdcpf::HybridPowerSystem sys_base;
         {
           std::lock_guard<std::mutex> lk(g_session.mu);
           if (!g_session.current_system) throw std::runtime_error("No system loaded");
-          sys_base = *g_session.current_system;
+          sys_base_snap = g_session.current_system;
         }
+        sys_base = *sys_base_snap;  // request-local mutable copy, made after releasing the session lock
         if (g_session.busy.exchange(true)) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
@@ -23307,12 +24095,14 @@ int main(int argc, char** argv) {
     svr.Post("/api/session/run_reliability_nsq",
              [](const httplib::Request& req, httplib::Response& res) {
       try {
+        std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
         hacdcpf::HybridPowerSystem sys;
         {
           std::lock_guard<std::mutex> lk(g_session.mu);
           if (!g_session.current_system) throw std::runtime_error("No system loaded");
-          sys = *g_session.current_system;
+          sys_snap = g_session.current_system;
         }
+        sys = *sys_snap;  // request-local mutable copy, made after releasing the session lock (parse_reliability_data_policy may apply template data)
         if (g_session.busy.exchange(true)) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
@@ -23398,12 +24188,14 @@ int main(int argc, char** argv) {
     svr.Post("/api/session/run_reliability_seq",
              [](const httplib::Request& req, httplib::Response& res) {
       try {
+        std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
         hacdcpf::HybridPowerSystem sys;
         {
           std::lock_guard<std::mutex> lk(g_session.mu);
           if (!g_session.current_system) throw std::runtime_error("No system loaded");
-          sys = *g_session.current_system;
+          sys_snap = g_session.current_system;
         }
+        sys = *sys_snap;  // request-local mutable copy, made after releasing the session lock (parse_reliability_data_policy may apply template data)
         if (g_session.busy.exchange(true)) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
@@ -23491,12 +24283,14 @@ int main(int argc, char** argv) {
     svr.Post("/api/session/run_reliability_fmea",
              [](const httplib::Request& req, httplib::Response& res) {
       try {
+        std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
         hacdcpf::HybridPowerSystem sys;
         {
           std::lock_guard<std::mutex> lk(g_session.mu);
           if (!g_session.current_system) throw std::runtime_error("No system loaded");
-          sys = *g_session.current_system;
+          sys_snap = g_session.current_system;
         }
+        sys = *sys_snap;  // request-local mutable copy, made after releasing the session lock (parse_reliability_data_policy may apply template data)
         if (g_session.busy.exchange(true)) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
@@ -23658,12 +24452,13 @@ int main(int argc, char** argv) {
     svr.Post("/api/session/generate_scenarios",
              [](const httplib::Request& req, httplib::Response& res) {
       try {
-        hacdcpf::HybridPowerSystem sys;
+        std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
         {
           std::lock_guard<std::mutex> lk(g_session.mu);
           if (!g_session.current_system) throw std::runtime_error("No system loaded");
-          sys = *g_session.current_system;
+          sys_snap = g_session.current_system;
         }
+        const hacdcpf::HybridPowerSystem& sys = *sys_snap;  // zero-copy read of the shared immutable snapshot
         if (g_session.busy.exchange(true)) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
@@ -23720,12 +24515,13 @@ int main(int argc, char** argv) {
     svr.Post("/api/session/generate_typhoon_faults",
              [](const httplib::Request& req, httplib::Response& res) {
       try {
-        hacdcpf::HybridPowerSystem sys;
+        std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
         {
           std::lock_guard<std::mutex> lk(g_session.mu);
           if (!g_session.current_system) throw std::runtime_error("No system loaded");
-          sys = *g_session.current_system;
+          sys_snap = g_session.current_system;
         }
+        const hacdcpf::HybridPowerSystem& sys = *sys_snap;  // zero-copy read of the shared immutable snapshot
         const auto j = json::parse(req.body.empty() ? "{}" : req.body);
         hacdcpf::analysis::TyphoonScenarioOptions typhoon_opts;
         typhoon_opts.horizon_hours = j.value("horizon_hours", 48);
@@ -23811,12 +24607,14 @@ int main(int argc, char** argv) {
     svr.Post("/api/session/run_distribution_resilience",
              [](const httplib::Request& req, httplib::Response& res) {
       try {
+        std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
         hacdcpf::HybridPowerSystem sys;
         {
           std::lock_guard<std::mutex> lk(g_session.mu);
           if (!g_session.current_system) throw std::runtime_error("No system loaded");
-          sys = *g_session.current_system;
+          sys_snap = g_session.current_system;
         }
+        sys = *sys_snap;  // request-local mutable copy, made after releasing the session lock
         if (g_session.busy.exchange(true)) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
@@ -24557,12 +25355,14 @@ int main(int argc, char** argv) {
     svr.Post("/api/session/run_reliability_fd",
              [](const httplib::Request& req, httplib::Response& res) {
       try {
+        std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
         hacdcpf::HybridPowerSystem sys;
         {
           std::lock_guard<std::mutex> lk(g_session.mu);
           if (!g_session.current_system) throw std::runtime_error("No system loaded");
-          sys = *g_session.current_system;
+          sys_snap = g_session.current_system;
         }
+        sys = *sys_snap;  // request-local mutable copy, made after releasing the session lock (parse_reliability_data_policy may apply template data)
         const auto j = json::parse(req.body.empty() ? "{}" : req.body);
         
         // Reliability data policy (templates are opt-in — Finding 2).
@@ -24624,14 +25424,16 @@ int main(int argc, char** argv) {
     svr.Post("/api/session/run_reliability_three_stage",
              [](const httplib::Request& req, httplib::Response& res) {
       try {
+        std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
         hacdcpf::HybridPowerSystem sys;
         hacdcpf::analysis::ReliabilityConfiguration reliability_configuration;
         {
           std::lock_guard<std::mutex> lk(g_session.mu);
           if (!g_session.current_system) throw std::runtime_error("No system loaded");
-          sys = *g_session.current_system;
+          sys_snap = g_session.current_system;
           reliability_configuration = g_session.reliability_configuration;
         }
+        sys = *sys_snap;  // request-local mutable copy, made after releasing the session lock (parse_reliability_data_policy may apply template data)
         if (g_session.busy.exchange(true)) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
@@ -24703,14 +25505,16 @@ int main(int argc, char** argv) {
              [](const httplib::Request& req, httplib::Response& res) {
       try {
         const auto request_started = std::chrono::steady_clock::now();
+        std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
         hacdcpf::HybridPowerSystem sys;
         hacdcpf::analysis::ReliabilityConfiguration reliability_configuration;
         {
           std::lock_guard<std::mutex> lk(g_session.mu);
           if (!g_session.current_system) throw std::runtime_error("No system loaded");
-          sys = *g_session.current_system;
+          sys_snap = g_session.current_system;
           reliability_configuration = g_session.reliability_configuration;
         }
+        sys = *sys_snap;  // request-local mutable copy, made after releasing the session lock
         if (g_session.busy.exchange(true)) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
@@ -25416,12 +26220,13 @@ int main(int argc, char** argv) {
            [](const httplib::Request& req, httplib::Response& res) {
     bool busy_acquired = false;
     try {
-      hacdcpf::HybridPowerSystem sys;
+      std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
       {
         std::lock_guard<std::mutex> lk(g_session.mu);
         if (!g_session.current_system) throw std::runtime_error("No system loaded");
-        sys = *g_session.current_system;
+        sys_snap = g_session.current_system;
       }
+      const hacdcpf::HybridPowerSystem& sys = *sys_snap;  // zero-copy read of the shared immutable snapshot
       if (g_session.busy.exchange(true)) {
         res.status = 409;
         res.set_content(json{{"error", "Another analysis is already running"}}.dump(),

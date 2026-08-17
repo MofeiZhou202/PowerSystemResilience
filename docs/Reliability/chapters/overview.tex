@@ -1,0 +1,80 @@
+% 第 1 章：架构总览与方法族
+\section{架构总览与方法族}\label{sec:rel-overview}
+
+\subsection{功能定位}
+可靠性评估模块回答“系统在元件随机故障下少供多少电、失负荷多频繁多久”。全部方法
+遵循同一建模主线（\srcpath{docs/reliability\_mathematical\_models\_and\_intelligent\_cyber\_physical\_assessment.md}
+第 1 节的中心原理）：
+\begin{equation}
+\text{可靠性}=\text{事件频率}\times\text{类条件后果}\times\text{持续时间}.
+\end{equation}
+命名空间为 \texttt{hacdcpf::analysis}。
+
+\subsection{统一数据流}
+\begin{figure}[H]\centering
+\begin{tikzpicture}[font=\footnotesize,
+  box/.style={draw,rounded corners,minimum height=0.95cm,align=center,inner sep=3pt},
+  arr/.style={->,thick}]
+  \node[box] (rich) at (0,0) {\texttt{HybridPowerSystem}\\富语义模型};
+  \node[box] (res) at (3.5,0) {参数解析器\\\srcpath{resolve\_reliability\_params}};
+  \node[box] (enum) at (7.4,0) {状态/故障枚举\\采样·N-1·故障模式目录};
+  \node[box] (patch) at (11.1,0) {后果算子\\$G_m=\Phi_m(G_0,x_m)$};
+  \node[box] (shed) at (3.5,-2.2) {切负荷引擎\\DC-OPF / 混合网络 LP / MILP};
+  \node[box] (metric) at (7.6,-2.2) {指标聚合\\EENS·LOLE·LOLF·SAIDI};
+  \node[box] (audit) at (11.2,-2.2) {口径审计\\\fld{model\_scope}·\fld{validity}};
+  \draw[arr] (rich)--(res); \draw[arr] (res)--(enum); \draw[arr] (enum)--(patch);
+  \draw[arr] (patch.south) |- (shed.west); \draw[arr] (shed)--(metric); \draw[arr] (metric)--(audit);
+\end{tikzpicture}
+\caption{可靠性评估统一数据流：解析$\to$枚举$\to$后果映射$\to$切负荷求解$\to$指标$\to$口径审计}
+\end{figure}
+
+\subsection{公共入口族}
+全部入口位于命名空间 \texttt{hacdcpf::analysis}，行号以 2026-08-17 检出为准：
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{5.4cm}L{5.4cm}L{3.6cm}@{}}
+\toprule
+入口 & 定义位置 & 方法族\\
+\midrule
+\srcpath{resolve\_reliability\_params} & reliability\_assessment.hpp:114 & 参数解析（全方法共用）\\
+\srcpath{run\_nonsequential\_mc} & reliability\_assessment.hpp:346 & 非序贯 MC\\
+\srcpath{run\_sequential\_mc} & reliability\_assessment.hpp:354 & 序贯 MC（含 LOLF）\\
+\srcpath{run\_distribution\_fmea} & reliability\_assessment.hpp:702 & 元件级 FMEA\\
+\srcpath{run\_failure\_mode\_fmea} & failure\_mode.hpp:473 & 故障模式级 FMEA（N-2）\\
+\srcpath{run\_three\_stage\_reliability} & three\_stage\_reliability.hpp:292 & 三阶段恢复 MILP\\
+\srcpath{run\_frequency\_duration\_analysis} & reliability\_assessment.hpp:666 & 频率-持续时间解析\\
+\srcpath{build\_failure\_mode\_catalog} & failure\_mode.hpp:285 & 故障模式目录\\
+\srcpath{evaluate\_failed\_network\_state} & reliability\_assessment.hpp:723 & 后果引擎入口\\
+\srcpath{compute\_distribution\_indices} & reliability\_assessment.hpp:679 & SAIFI/SAIDI/ASAI\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{物理后果引擎阶梯}
+不同方法调用不同保真度的切负荷引擎（\srcpath{docs/reliability\_mathematical\_models\_and\_intelligent\_cyber\_physical\_assessment.md}
+第 4.3 节）：
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{3.6cm}L{4.2cm}L{6.4cm}@{}}
+\toprule
+引擎 & 使用者 & 有效边界\\
+\midrule
+AC DC-OPF & 纯交流 MC/FMEA & 无电压幅值/无功可行性（$P=B\theta$）\\
+混合 AC/DC 网络 LP & 混合 MC、元件/故障模式 FMEA & DC 传输线性稳态；无非线性 AC 校验\\
+耦合 LinDistFlow 恢复 MILP & 三阶段模型 & 线性化损耗；拒绝 LCC 与多端口能量路由器\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{诚实结果口径}
+每个结果对象都暴露 \fld{model\_scope}、\fld{model\_limitations} 与 \fld{ValidityFlags}，
+是数学结果的组成部分，下游 API 必须保留：
+\begin{itemize}
+  \item MC/FMEA 在纯交流上为 \texttt{"ac-only-dcopf"}，
+        \fld{validity.dc\_load\_curtailment\_included}=false——EENS/LOLE 不含 DC 负荷中断；
+  \item 混合系统 FMEA 升级为 \texttt{"hybrid-acdc-network-lp"}；
+  \item 三阶段模型为
+        \texttt{"coupled-acdc-\allowbreak lindistflow-\allowbreak restoration-milp"}，
+        含 LCC/能量路由器
+        时清 \fld{ok} 并置物理有效性标志为假；
+  \item \fld{critical\_components.importance} 是共现归因（可相加超 100\%），\textbf{非} Birnbaum
+        边际重要度（\srcpath{reliability\_assessment.hpp} \fld{ReliabilityResult} 注释，:240 起）。
+\end{itemize}

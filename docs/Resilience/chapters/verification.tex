@@ -1,0 +1,46 @@
+% 第 8 章：验证与边界局限
+\section{验证与边界局限}\label{sec:res-verify}
+
+\subsection{注册测试与复现}
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{5.6cm}L{4.0cm}L{5.0cm}@{}}
+\toprule
+测试/目标 & 注册位置 & 覆盖\\
+\midrule
+\srcpath{test\_resilience\_assessment} & tests/CMakeLists.txt:272 & 三种恢复模型、MESS、指标、有效性\\
+\srcpath{test\_transient\_dynamics} & tests/ & \srcpath{CertifiedRestorationCoordinator}、可执行性、MESS/信息物理阻断\\
+\srcpath{cyber\_dynamic\_safe\_restoration\_small} & 可执行目标 & 认证恢复小案例复现\\
+\srcpath{cyber\_dynamic\_safe\_restoration\_scale} & 可执行目标 & 认证恢复规模复现\\
+\bottomrule
+\end{tabular}
+\end{center}
+复现命令（\srcpath{docs/certified\_restoration\_runtime.md}）：
+\begin{quote}\footnotesize
+\texttt{cmake --build build/macos-release --target}\\
+\srcpath{cyber\_dynamic\_safe\_restoration\_small}\\
+\srcpath{cyber\_dynamic\_safe\_restoration\_scale}
+\end{quote}
+
+\subsection{边界与局限（如实标注）}
+\begin{itemize}
+  \item \textbf{LinDistFlow/有功口径}：恢复 MILP \fld{model\_scope}=\texttt{"hybrid-acdc-restoration-milp"}，
+        默认不强制 DC 支路流限、换流器传输限、换流器损耗与无功
+        （\fld{ValidityFlags}，:88），强制辐射拓扑；
+  \item \textbf{近似最优}：\fld{mip\_gap\_within\_tolerance}=true 只表示与已知界的间隙在容差内，
+        \textbf{非}全局最优；准确间隙见 \fld{model\_stats.mip\_gap}；
+  \item \textbf{认证 L1/L2}：采样雅可比“管”诊断，\fld{constants\_are\_global\_bounds}=false，
+        须以验证包络替换采样量后方为解析剪枝证明；
+  \item \textbf{认证 L3}：\fld{proof\_valid} 只在已仿真情景/阈值/模型/时域内成立，\textbf{非}全局
+        暂态稳定证明；目录最优性仅覆盖有限目录内动作；
+  \item \textbf{事件映射}：VSC/DC-DC 闭合、LCC 拓扑变化、独立 DC 断路器动作无精确动态事件，
+        \fld{require\_supported\_transitions}=true 时标 \texttt{unresolved} 且不能置 \fld{proof\_valid}；
+  \item \textbf{MESS}：行程动态不在亚秒 DAE 时间轴积分，到达/行程能量为主问题级前提；
+  \item \textbf{桥接器}：仅重放拓扑驱动的带电，不回填完整 MIP 运行点，聚合出力不分配到单个
+        动态器件（\fld{DistributionResilienceDAECertificateResult::limitations}）。
+\end{itemize}
+
+\subsection{加深与后续}
+行号以 2026-08-17 检出为准，如与后续变更不符以
+\srcpath{include/hacdcpf/resilience/} 与注册测试为准。数学与运行契约对照
+\srcpath{docs/certified\_restoration\_runtime.md}；网络重构建模见
+\srcpath{docs/network\_reconfiguration\_models.md}。

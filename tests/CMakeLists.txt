@@ -488,6 +488,20 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
               --data-dir "${CMAKE_SOURCE_DIR}/data")
     set_tests_properties(runtime_api_v1_e2e PROPERTIES
       LABELS "api;v1;e2e" TIMEOUT 120)
+    add_test(NAME gui_topology_window_e2e
+      COMMAND "${Python3_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/tools/gui_topology_window_e2e.py"
+              --server "$<TARGET_FILE:run_gui_server>"
+              --data-dir "${CMAKE_SOURCE_DIR}/data")
+    set_tests_properties(gui_topology_window_e2e PROPERTIES
+      LABELS "gui;api;e2e" TIMEOUT 120)
+    add_test(NAME gui_result_window_e2e
+      COMMAND "${Python3_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/tools/gui_result_window_e2e.py"
+              --server "$<TARGET_FILE:run_gui_server>"
+              --data-dir "${CMAKE_SOURCE_DIR}/data")
+    set_tests_properties(gui_result_window_e2e PROPERTIES
+      LABELS "gui;api;e2e" TIMEOUT 120)
     if(HACDCPF_TRIAL_EDITION)
       add_test(NAME trial_edition_api_e2e
         COMMAND "${Python3_EXECUTABLE}"

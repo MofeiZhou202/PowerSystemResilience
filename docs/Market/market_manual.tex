@@ -1,13 +1,13 @@
 % !TEX program = xelatex
-% 编译方式：把本文件夹整包复制到纯 ASCII 路径后，执行两遍 xelatex（详见 docs/_manual_common/README.md）。
-% 首版骨架：内容取自 src/market/ 与 include/hacdcpf/market/market_simulation.hpp 源码及
+% 编译方式：在本目录执行两遍 xelatex（详见 docs/_manual_common/README.md）。
+% 源码依据：src/market/ 与 include/hacdcpf/market/market_simulation.hpp 源码及
 %           docs/market_simulation_runtime.md，公式与参数以代码为准。
-\documentclass[UTF8,fontset=windows,a4paper,11pt]{ctexart}
+\documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
 \usepackage{hysim_manual}
 
 \title{\textbf{交直流混合高弹性能源电力系统仿真平台}\\[0.5em]
        {\Large 电力市场仿真技术手册}\\[0.3em]
-       {\large 数学模型、接口参数与验证校核（首版骨架）}}
+       {\large 数学模型、接口参数、验证校核与工业级评价}}
 \author{HySim-XJTU-HRPES（西安交通大学 HRPES 团队）}
 \date{\today}
 
@@ -145,7 +145,8 @@ P_\ell^{(k)}=P_\ell+\text{LODF}_{\ell,k}\,P_k\le\bar P_\ell,\qquad \forall\,\tex
 \fld{withholding\_step\_fraction} & — & — & $0\sim1$ & $0.05$ & 重复博弈容量扣留步长\\
 \end{paramtable}
 参与者策略 \texttt{ParticipantBehavior} 的 \fld{BehaviorPolicyType} 可取
-\texttt{CostBased}/\texttt{FixedMarkup}/\texttt{CapacityWithholding}/\texttt{MarkupAndWithholding}；
+\texttt{CostBased}/\allowbreak\texttt{FixedMarkup}/\allowbreak
+\texttt{CapacityWithholding}/\allowbreak\texttt{MarkupAndWithholding}；
 实时侧辅助服务参数位于 \texttt{AncillaryServiceOptions}。
 
 \section{验证与边界局限}
@@ -165,4 +166,6 @@ P_\ell^{(k)}=P_\ell+\text{LODF}_{\ell,k}\,P_k\le\bar P_\ell,\qquad \forall\,\tex
 \end{itemize}
 规范文档：\srcpath{docs/market\_simulation\_runtime.md}、
 \srcpath{docs/market\_simulation\_mathematical\_models.md}。
+\input{../_manual_common/industrial_evaluation}
+
 \end{document}

@@ -1,0 +1,47 @@
+% 第 2 章：交流序网法与故障类型
+\section{交流序网法与故障类型}\label{sec:sc-ac}
+
+\subsection{序阻抗矩阵}
+IEC 60909 以故障处等效电压源替代故障前网络；非旋转负荷除非带显式电机短路数据否则忽略，
+旋转机与构网源以内阻抗表示。对故障母线 $k$，构建序导纳矩阵 $Y_1,Y_2,Y_0$ 并求
+序母线阻抗对角
+\begin{equation}
+Z_{1k}=Z_1(k,k),\quad Z_{2k}=Z_2(k,k),\quad Z_{0k}=Z_0(k,k),\qquad Z_s=Y_s^{-1}.
+\end{equation}
+故障阻抗在当前选项中为实值标幺电阻 $Z_f=R_f+j0$（\fld{fault\_impedance\_pu}）。故障类型由
+\fld{FaultType}（\srcpath{short\_circuit.hpp:22}）选择。
+
+\subsection{三相故障}
+仅用正序网：
+\begin{equation}
+I_{k3}''=\frac{c}{Z_{1k}+Z_f}I_b,\qquad Z_{k,3}=Z_{1k}+Z_f,\qquad |I_{k3}''|=\frac{c}{|Z_{k,3}|}I_b.
+\end{equation}
+三相短路功率 $S_k''=\sqrt3\,U_b\,|I_{k3}''|$（\fld{BusFaultResult.sk\_mva}，:49）。
+
+\subsection{单相接地故障}
+序网串联：
+\begin{equation}
+I_{k1}''=\frac{3c}{Z_{1k}+Z_{2k}+Z_{0k}+3Z_f}I_b,\qquad
+Z_{k,1}=\frac{Z_{1k}+Z_{2k}+Z_{0k}+3Z_f}{3}.
+\end{equation}
+当零序路径低阻时 $|(Z_1{+}Z_2{+}Z_0)/3|<|Z_1|$，故 $|I_{k1}''|>|I_{k3}''|$——有效接地系统
+（强中性点或接地变路径）中单相电流可高于三相，非数值缺陷。
+
+\subsection{两相故障}
+\begin{equation}
+I_{k2}''=\frac{\sqrt3\,c}{Z_{1k}+Z_{2k}}I_b,\qquad Z_{k,2}=\frac{Z_{1k}+Z_{2k}}{\sqrt3}.
+\end{equation}
+
+\subsection{两相接地故障}
+实现用正序等效的紧致工程近似：
+\begin{equation}
+Z_{k,2E}=Z_{1k}+\big(Z_{2k}\parallel Z_{0k}\big)+Z_f,\quad
+Z_{2k}\parallel Z_{0k}=\frac{Z_{2k}Z_{0k}}{Z_{2k}+Z_{0k}},\quad
+|I_{k2E}''|=\frac{c}{|Z_{k,2E}|}I_b.
+\end{equation}
+若需相分解电流 $I_{L2}/I_{L3}$ 与地电流，须扩展为完整序电流重构（当前只给有效电流幅值）。
+
+\subsection{概览路径与近似}
+概览 \srcpath{compute\_short\_circuit}（:212）用 Eigen 复数 SparseLU 分解序导纳矩阵，对不平衡
+故障采用简化 $Z_1{=}Z_2{=}Z_0$（负序=正序、零序未建模）；详细路径（第~\ref{sec:sc-detailed}~章）
+构建真正/负/零序矩阵。

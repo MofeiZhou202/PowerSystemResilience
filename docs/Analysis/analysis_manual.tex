@@ -1,13 +1,13 @@
 % !TEX program = xelatex
-% 编译方式：把本文件夹整包复制到纯 ASCII 路径后，执行两遍 xelatex（详见 docs/_manual_common/README.md）。
-% 首版骨架：内容取自 src/analysis/ 与 include/hacdcpf/analysis/ 源码
-%           （hosting_capacity / multidimensional_weak_link / counterfactual_planning），公式与参数以代码为准。
-\documentclass[UTF8,fontset=windows,a4paper,11pt]{ctexart}
+% 编译方式：在本目录执行两遍 xelatex（详见 docs/_manual_common/README.md）。
+% 源码依据：src/analysis/ 与 include/hacdcpf/analysis/
+%   （hosting_capacity / multidimensional_weak_link / counterfactual_planning），公式与参数以代码为准。
+\documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
 \usepackage{hysim_manual}
 
 \title{\textbf{交直流混合高弹性能源电力系统仿真平台}\\[0.5em]
        {\Large 承载力与薄弱环节分析技术手册}\\[0.3em]
-       {\large 数学模型、接口参数与验证校核（首版骨架）}}
+       {\large 数学模型、约束、算法流程、数值稳定性与工业级评估}}
 \author{HySim-XJTU-HRPES（西安交通大学 HRPES 团队）}
 \date{\today}
 
@@ -16,11 +16,13 @@
 \begin{abstract}
 \noindent 本手册依据 HySim-XJTU-HRPES 平台分析模块
 （\srcpath{src/analysis/}、\srcpath{include/hacdcpf/analysis/}）整理，覆盖三类面向
-规划与评估的后处理方法：依据《DL/T 2041-2025》的设备级承载力评估、多维度薄弱环节
-筛查、反事实规划措施评估。全部结论以源码为准：承载力校核默认关闭（仅做规划筛查），
-薄弱环节为非补偿式多准则筛查与决策路由（不宣称归因量等于反事实投资收益、缺失维度不
-补零），反事实措施施加于系统副本、经济/可靠性/弹性指标使用选项给定的有界预算与时窗。
-命名空间为 \texttt{hacdcpf::analysis}。文档版式与《碳流追踪与碳排放核算技术手册》一致。
+规划与评估的后处理方法：依据《DL/T 2041-2025》的设备级分布式资源承载力评估、时空
+多维度薄弱环节筛查、反事实规划措施评估。全部结论以源码为准：承载力工程校验默认关闭
+（仅做规划筛查），薄弱环节为非补偿式多准则筛查与决策路由（不宣称归因量等于反事实投资
+收益、缺失维度不补零），反事实措施施加于系统副本、经济/可靠性/弹性指标使用选项给定
+的有界预算与时窗。命名空间为 \texttt{hacdcpf::analysis}。文档风格、参数表体例与符号
+约定与《潮流计算技术手册》《最优潮流技术手册》完全一致，全部近似、回退与模型覆盖
+边界均如实标注。
 \end{abstract}
 
 \tableofcontents
@@ -28,6 +30,7 @@
 
 \section{阅读指南与约定}
 \subsection{数据来源}
+本手册全部内容取自以下源代码与既有契约文档，公式与参数均以代码为准：
 \begin{itemize}
   \item \srcpath{include/hacdcpf/analysis/hosting\_capacity.hpp}、
         \srcpath{src/analysis/hosting\_capacity.cpp} —— 承载力评估接口与实现；
@@ -38,40 +41,80 @@
   \item \srcpath{docs/capacity\_analysis\_implementation.md}、
         \srcpath{docs/multidimensional\_weak\_link\_identification.md} —— 既有契约文档。
 \end{itemize}
-以上头文件与 \srcpath{include/hacdcpf/analysis/} 同目录，其余同名头文件
+上述头文件与 \srcpath{include/hacdcpf/analysis/} 同目录，其余同名头文件
 （\srcpath{short\_circuit.hpp}、\srcpath{scenario\_generation.hpp} 等）实现于兄弟模块，
-不属于本手册范围。
+不属于本手册范围。文中“\texttt{文件:行号}”引用基于当前检出，代码演进后行号可能漂移，
+函数名与文件路径保持稳定。
 
 \subsection{单位制与索引空间}
 承载力 $S_d$ 单位 MVA/MW，功率因数 $\cos\theta$ 无量纲；薄弱环节压力量归一化后无量纲，
 时间维度以选项声明的评估周期为索引空间；反事实四维收益向量的物理量分别为经济运行成本
-（\$/yr）、碳排放（tCO\textsubscript{2}/yr）、可靠性 EENS（MWh/yr）与弹性加权失负荷 ENS（MWh）。
-承载力评估以变压器下游供电区（BFS）为索引，结果按 \fld{transformers} 与 \fld{areas} 分列。
+（\$/yr）、碳排放（tCO\textsubscript{2}/yr）、可靠性 EENS（MWh/yr）与弹性加权失负荷 ENS
+（MWh）。承载力评估以变压器下游供电区（BFS 展开）为索引，结果按 \fld{transformers} 与
+\fld{areas} 分列；区域聚合以 \fld{bus.area}（县域）为索引空间。
+
+\subsection{符号约定}
+\begin{itemize}
+  \item $S$：变压器额定容量（MVA），并联时乘 \fld{n\_parallel}；$P$：供电区聚合负荷；
+        $P_G$：区内常规（非分布式）发电；$\beta$：最大反向负载率；$\tau_{\max}$：最大出力
+        系数；$P_{\text{ESS}},\Delta P_{\text{ESS}}$：现有/预期储能充电功率。
+  \item $x_{ik}$：实体 $i$ 在维度 $k$ 的原始压力证据；$\tau_k$：维度 $k$ 的工程目标阈值；
+        $p_{ik}$：无量纲越限比；$\sigma_i,c_i,d_i$：瓶颈严重度、共识度、维度分歧。
+  \item $\mathbf{m}=(C_{\text{op}},E_{\mathrm{CO_2}},\text{EENS},\text{ENS})^\top$：
+        反事实四维度量向量；$\Delta\mathbf{m}$：相对基线收益。
+\end{itemize}
 
 \subsection{诚实口径}
 三类分析均为规划/评估后处理，不改变调度：承载力 \fld{enable\_verification} 默认为
 \texttt{false}，即默认只给规划筛查值、不回跑潮流/短路/谐波引擎校核；薄弱环节为非补偿式
 筛查，缺失维度不被当作零、也不宣称归因排放/失负荷等于反事实投资收益；反事实措施施加于
 系统副本，经济/可靠性/弹性指标使用 \fld{reliability\_physical\_budget}、
-\fld{resilience\_horizon\_hours} 等有界预算与时窗。相关限制在 \S 5.2 如实列出。
+\fld{resilience\_horizon\_hours} 等有界预算与时窗。相关限制在第~\ref{sec:limits}~节集中列出。
 
-\section{功能定位与架构}
-\subsection{公共入口族}
-\begin{center}\footnotesize
-\begin{tabular}{@{}L{6.6cm}L{3.0cm}L{5.4cm}@{}}
-\toprule
-入口 & 定义位置 & 说明\\
-\midrule
-\srcpath{assess\_hosting\_capacity(sys, opt)} & hosting\_capacity.hpp & 依《DL/T 2041-2025》做设备级承载力评估（可选校核）\\
-\srcpath{hosting\_capacity\_result\_to\_json(r)} & 同上 & 承载力结果 JSON 序列化\\
-\srcpath{run\_multidimensional\_weak\_link\_assessment(...)} & multidimensional\_weak\_link.hpp & 四维薄弱环节筛查（entities/periods/options）\\
-\srcpath{generate\_counterfactual\_measures(system, options)} & counterfactual\_planning.hpp & 候选措施生成（线路/储能/联络开关/自动化/DER）\\
-\srcpath{apply\_counterfactual\_measure(system, measure)} & 同上 & 将单条措施施加到系统副本\\
-\srcpath{run\_counterfactual\_planning\_assessment(...)} & 同上 & 基线 + 逐措施 + 两两协同评估\\
-\bottomrule
-\end{tabular}
-\end{center}
+\section{模块定位与工程应用场景}\label{sec:scope}
+\subsection{功能定位}
+分析模块位于求解引擎之上、GUI 之下，是\textbf{面向规划与评估的后处理层}：它调用潮流、
+短路、谐波、可靠性、弹性、碳流等引擎产生的证据，输出可供决策的分级、排序与措施收益，
+但\textbf{不}参与实时调度，也\textbf{不}回写系统状态。三条子线各自独立：
+\begin{enumerate}
+  \item \textbf{承载力评估}：回答“某台配电变压器下游还能接入多少分布式资源”，按
+        《DL/T 2041-2025》给出设备级绿/黄/红分级与可选工程校验；
+  \item \textbf{多维薄弱环节筛查}：在经济、碳、可靠性、弹性四个维度上做非补偿式脆弱性
+        筛查，定位需优先加固/改造的空间实体与关键时段；
+  \item \textbf{反事实规划}：对候选工程措施（增容、储能、联络开关、自动化、DER）在系统
+        副本上逐条评估四维收益并度量两两协同，为投资排序提供依据。
+\end{enumerate}
 
+\subsection{工程应用场景}
+典型场景包括：配电网分布式光伏/储能接入的规划审查（承载力）；县域—馈线两级的迎峰度夏
+薄弱点排查（薄弱环节 \texttt{operation} 模式）；五年规划投资组合的措施比选与协同分析
+（反事实 \texttt{planning} 模式）。三者可串联使用：薄弱环节筛查定位问题实体 $\to$ 反事实
+评估比选措施 $\to$ 承载力评估复核接入余量。
+
+\section{输入、输出与边界条件}
+\subsection{输入}
+\begin{itemize}
+  \item \textbf{公共输入}：已装配的 \texttt{HybridPowerSystem}（工程语义层）与对应选项结构体；
+        承载力另需变压器/储能上的 \fld{cap\_*} 前缀属性（随算例往返保存）。
+  \item \textbf{承载力}：全局默认参数（$\cos\theta,\tau_{\max},\beta$、N-1 上限、工程校验开关、
+        电压偏差限、THD 限）；元件级 \fld{cap\_*} 属性优先于全局默认。
+  \item \textbf{薄弱环节}：来自经济/碳/可靠性/弹性四引擎的原始压力证据 $x_{ik}$、阈值 $\tau_k$、
+        决策模式（\texttt{planning}/\texttt{operation}）、时段集合。
+  \item \textbf{反事实}：措施族启用开关、预算/时窗上界、能量折价。
+\end{itemize}
+
+\subsection{输出}
+承载力输出 \fld{transformers[]}（每台 $S_d,C_{d1},C_{d2}$ 区间与分级）、\fld{areas[]}
+（县域聚合与分级）、\fld{warnings[]}、\fld{verification\{\}}；薄弱环节输出实体排序、
+关键时段、Pareto 前沿计数与冲突/兼容计数；反事实输出基线度量、逐措施收益与两两协同项。
+全部结果可 JSON 序列化并经 GUI 渲染。
+
+\subsection{边界条件}
+承载力要求供电区可由“同压支路邻接 + 变压器边界”BFS 明确划分，孤立/失电母线不计入下游区；
+薄弱环节要求实体具有相同的可优化组件组与相同覆盖集方可 Pareto 比较，缺失维度落在 $K_i$ 之外；
+反事实要求措施可在系统副本上物理施加且引擎可解，不可解措施记为无效并跳过。
+
+\section{变量、参数与符号定义}
 \subsection{关键数据结构}
 \compmeta{HostingCapacityResult}{include/hacdcpf/analysis/hosting\_capacity.hpp}
 主要字段：\fld{standard}（默认 \texttt{"DL/T 2041-2025"}）、\fld{transformers}
@@ -87,42 +130,7 @@
 \fld{measures}、\fld{interactions}、\fld{methodology}；度量向量为经济运行成本、碳、可靠性
 EENS、弹性加权 ENS 四维。
 
-\section{核心数学模型}
-\subsection{设备级承载力（DL/T 2041-2025）}
-对每台变压器的下游供电区（BFS 展开），分布式电源可接入容量 $S_d$ 由代数公式
-\begin{equation}
-S_d = \frac{P - P_G + \beta\,S\cos\theta + P_{\text{ESS}} + \Delta P_{\text{ESS}}}{\tau_{\max}},
-\end{equation}
-其中 $P$ 为下游负荷，$P_G$ 为既有电源出力，$\beta$（\fld{single\_transformer\_beta}）为
-单变压器可用容量系数，$S\cos\theta$ 为按功率因数折算的视在容量，$P_{\text{ESS}}$ 与
-$\Delta P_{\text{ESS}}$ 为储能贡献，$\tau_{\max}$（\fld{n1\_loading\_limit}）为 N-1 负载率上限。
-当 \fld{enable\_verification} 打开时，规范 §12 校核复用潮流、短路与谐波引擎（谐波为尽力而为）。
-
-\subsection{多维薄弱环节筛查}
-对实体 $i$、维度 $k=1,\dots,4$，先做阈值归一化，再取 Chebyshev 瓶颈严重度、最大最小共识度
-与分歧度：
-\begin{align}
-p_{ik} &= \frac{\max(x_{ik},\,0)}{\tau_k}, \\
-\sigma_i &= \max_k p_{ik}, \qquad
-c_i = \min_k p_{ik}, \qquad
-d_i = \max_k p_{ik} - \min_k p_{ik},
-\end{align}
-其中 $\tau_k$ 由 \fld{high\_pressure\_threshold} 等阈值给定，$\sigma_i$ 为瓶颈严重度、
-$c_i$ 为共识度、$d_i$ 为维度分歧（range）。在此之上叠加 Pareto 偏序（\fld{pareto\_count}）
-与时间维度风险投影（\fld{critical\_periods}）。该筛查为非补偿式：任一维度不达标不能被其他
-维度补偿。
-
-\subsection{反事实规划措施评估}
-生成候选措施集合后，对每条措施 $j$ 施加到系统副本并重算四维度量向量
-$\mathbf{m} = (C_{\text{op}},\, E_{\text{CO}_2},\, \text{EENS},\, \text{ENS})^\top$，收益为相对基线的差
-\begin{equation}
-\Delta\mathbf{m}_j = \mathbf{m}_{\text{base}} - \mathbf{m}_j,
-\end{equation}
-两两协同项由 $\Delta\mathbf{m}_{jl} - (\Delta\mathbf{m}_j + \Delta\mathbf{m}_l)$ 度量并写入
-\fld{interactions}。经济/可靠性/弹性度量分别使用 \fld{energy\_price\_per\_mwh}、
-\fld{reliability\_physical\_budget}、\fld{resilience\_horizon\_hours} 给定的有界口径。
-
-\section{接口与参数}
+\subsection{参数字典}
 \begin{paramtable}
 \fld{default\_power\_factor} & $\cos\theta$ & — & $0\sim1$ & $0.95$ & 承载力默认功率因数\\
 \fld{single\_transformer\_beta} & $\beta$ & — & $0\sim1$ & $0.80$ & 单变压器可用容量系数\\
@@ -130,9 +138,9 @@ $\mathbf{m} = (C_{\text{op}},\, E_{\text{CO}_2},\, \text{EENS},\, \text{ENS})^\t
 \fld{enable\_verification} & — & 布尔 & — & \texttt{false} & 是否启用 §12 引擎校核\\
 \fld{thd\_limit\_pct} & — & \% & — & $5.0$ & 谐波总畸变（THD）限值\\
 \fld{top\_k} & $k$ & — & 整数 & $15$ & 输出前 $k$ 个薄弱环节\\
-\fld{high\_pressure\_threshold} & $\tau$ & — & $0\sim1$ & $0.75$ & 高压力维度判定阈值\\
-\fld{compatibility\_threshold} & — & — & $0\sim1$ & $0.50$ & 措施兼容判定阈值\\
-\fld{conflict\_gap\_threshold} & — & — & $0\sim1$ & $0.60$ & 冲突间隙判定阈值\\
+\fld{high\_pressure\_threshold} & $h$ & — & $0\sim1$ & $0.75$ & 高压力维度判定阈值\\
+\fld{compatibility\_threshold} & $c$ & — & $0\sim1$ & $0.50$ & 措施兼容判定阈值\\
+\fld{conflict\_gap\_threshold} & $g$ & — & $0\sim1$ & $0.60$ & 冲突间隙判定阈值\\
 \fld{max\_measures} & — & — & 整数 & $5$ & 反事实候选措施上限\\
 \fld{reliability\_physical\_budget} & — & — & 整数 & $40$ & 可靠性评估物理预算\\
 \fld{resilience\_horizon\_hours} & — & h & — & $12$ & 弹性评估时窗\\
@@ -142,21 +150,168 @@ $\mathbf{m} = (C_{\text{op}},\, E_{\text{CO}_2},\, \text{EENS},\, \text{ENS})^\t
 \fld{enable\_automation}、\fld{enable\_der} 控制候选措施族的启用；薄弱环节 \fld{mode} 取
 \texttt{Planning}/\texttt{Operation}，\fld{target\_pressure} 为四维目标压力向量。
 
-\section{验证与边界局限}
-\subsection{验证与校核}
+\section{数学模型与约束条件}
+\subsection{设备级承载力（DL/T 2041-2025）}
+对每台变压器的下游供电区（BFS 展开），分布式电源可接入容量 $S_d$ 由代数公式给出
+（规范 §7.4/§7.5）：
+\begin{equation}
+S_d = \frac{P - P_G + \beta\,S\cos\theta + P_{\text{ESS}} + \Delta P_{\text{ESS}}}{\tau_{\max}},
+\qquad S_d \ge 0,
+\end{equation}
+其中 $\beta$ 的选取（§7.6/§7.7）：手动 \fld{cap\_max\_reverse\_load\_rate}$>0$ 直接采用；
+否则自动——单台 $\beta=0.8$，$n$ 台并联 $\beta=\frac{n-1}{n}\times$负载上限。可接入能力与
+备案余量（§10）为
+\begin{equation}
+C_{d1}=S_d-\text{已接入DR},\qquad C_{d2}=C_{d1}-\text{已备案DR},
+\end{equation}
+$C_{d2}$ 允许为负。变压器分级取区间下限（§11）：$C_{d2,\min}>0$ 绿；
+$C_{d2,\min}\le 0$ 且 $C_{d1,\min}>0$ 黄；$C_{d1,\min}\le 0$ 红。区域（县域）聚合
+$C_{s1}/C_{s2}$ 同法分级（§8/§11.1），并按“下级服从上级”（§11.2）从 330\,kV 到 10\,kV
+逐级修正。
+
+\subsection{多维薄弱环节筛查}
+对实体 $i$、维度 $k\in\{$经济,碳,可靠性,弹性$\}$，先做阈值归一化，再取 Chebyshev
+瓶颈严重度、最大最小共识度与分歧度：
+\begin{align}
+p_{ik} &= \frac{\max(x_{ik},\,0)}{\tau_k}, \\
+\sigma_i = \max_{k\in K_i} p_{ik}, \quad
+c_i &= \min_{k\in K_i} p_{ik}, \quad
+d_i = \sigma_i - c_i,
+\end{align}
+其中 $K_i$ 为实体 $i$ 的可用维度集合，缺失维度\textbf{不}补零而是排除在 $K_i$ 之外。
+三条不变量：单调性（增大任一可用压力不减 $\sigma_i$）、非补偿性（降低他维不能掩盖最大
+压力）、共弱保护（单一极端维度不能抬高 $c_i$）。分类为确定性决策划分（默认 $h=0.75$、
+$c=0.50$、$g=0.60$）：兼容 $|K_i|\ge3\wedge c_i\ge c$；冲突 $|K_i|\ge2\wedge\sigma_i\ge
+h\wedge d_i\ge g$；单维 $\sigma_i\ge h$；观察 有证据但未达高压；证据不足 $|K_i|$ 低于要求。
+Pareto 弱前沿：仅在\textbf{相同可优化组件组且相同覆盖集}下比较，$j$ 弱支配 $i$ 当且仅当
+$p_{jk}\ge p_{ik}\,\forall k\in K_i$ 且至少一维严格。最终排序为字典序：Pareto 成员优先，
+再按 $\sigma_i$、$c_i$ 降序与稳定键。
+
+\subsection{反事实规划措施评估}
+对每条措施 $j$ 施加到系统副本并重算四维度量向量
+$\mathbf{m}_j=(C_{\text{op}},E_{\mathrm{CO_2}},\text{EENS},\text{ENS})^\top$，收益为相对基线的差
+\begin{equation}
+\Delta\mathbf{m}_j = \mathbf{m}_{\text{base}} - \mathbf{m}_j,
+\end{equation}
+两两协同项由 $\Delta\mathbf{m}_{jl} - (\Delta\mathbf{m}_j + \Delta\mathbf{m}_l)$ 度量并写入
+\fld{interactions}：正值为协同增益、负值为相互抵消。经济/可靠性/弹性度量分别使用
+\fld{energy\_price\_per\_mwh}、\fld{reliability\_physical\_budget}、
+\fld{resilience\_horizon\_hours} 给定的有界口径。
+
+\section{算法流程}
+\subsection{承载力评估主流程}
+\begin{figure}[H]\centering
+\begin{tikzpicture}[font=\footnotesize,
+  box/.style={draw,rounded corners,minimum height=0.85cm,align=center,inner sep=3pt},arr/.style={->,thick}]
+  \node[box](agg) at (0,0){母线聚合\\$P,P_G$,DR,$P_{\text{ESS}}$};
+  \node[box](bfs) at (3.4,0){供电区 BFS\\同压邻接+变压器边界};
+  \node[box](sd) at (6.8,0){设备级 $S_d$\\$\beta$ 自动/手动};
+  \node[box](cap) at (10.2,0){$C_{d1},C_{d2}$\\变压器分级};
+  \node[box](area) at (3.4,-1.9){区域聚合\\县域 $C_{s1}/C_{s2}$};
+  \node[box](sub) at (6.8,-1.9){下级服从上级\\330→10\,kV};
+  \node[box](ver) at (10.2,-1.9){工程校验(可选)\\潮流/短路/谐波};
+  \draw[arr](agg)--(bfs);\draw[arr](bfs)--(sd);\draw[arr](sd)--(cap);
+  \draw[arr](cap.south)|-(area.east);\draw[arr](area)--(sub);\draw[arr](sub)--(ver);
+\end{tikzpicture}
+\caption{承载力评估流程（工程校验默认关闭）}
+\end{figure}
+
+\subsection{薄弱环节筛查伪码}
+\begin{quote}\footnotesize\ttfamily
+for each entity i:\\
+\hspace*{1em}collect available dims K\_i; skip if |K\_i| < min\_evidence\\
+\hspace*{1em}p\_ik = max(x\_ik,0)/tau\_k for k in K\_i\\
+\hspace*{1em}severity = max p\_ik; consensus = min p\_ik; disagreement = severity-consensus\\
+\hspace*{1em}classify(compatible|conflict|single|watch|insufficient)\\
+compute Pareto weak frontier within equal (component-group, coverage)\\
+sort lexicographic(Pareto, -severity, -consensus, key); take top\_k
+\end{quote}
+
+\subsection{反事实评估}
+\begin{quote}\footnotesize\ttfamily
+base = metrics(system)\\
+for each measure j (enabled families, up to max\_measures):\\
+\hspace*{1em}sys\_j = apply(copy(system), j); m\_j = metrics(sys\_j); dm\_j = base - m\_j\\
+for each pair (j,l): interaction = metrics(apply(apply(copy,j),l)) vs dm\_j+dm\_l\\
+report baseline, measures[], interactions[]
+\end{quote}
+
+\section{工程假设与数值稳定性分析}
+\subsection{工程假设}
+承载力假设供电区可由同压支路邻接明确划分、变压器为区域边界、并联变压器容量线性叠加；
+薄弱环节假设四维证据已归一化到可比阈值、缺失即真缺失（非零）；反事实假设措施在副本上
+的物理施加不破坏引擎可解性。三者均为\textbf{稳态/统计后处理}，不含时步积分。
+
+\subsection{数值稳定性}
+承载力为代数闭式求解，唯一数值风险是 $\tau_{\max}\to0$ 时的除零，实现按下界钳位规避；
+分级用区间下限，避免边界抖动导致等级翻转。薄弱环节的 $\max/\min$ 聚合对量纲敏感，
+故先做阈值归一化 $p_{ik}=x_{ik}/\tau_k$ 使各维可比；非补偿聚合天然对单点异常鲁棒
+（一个坏维度不会被平均掉，也不会污染 $c_i$）。反事实的稳定性取决于底层引擎——单条措施
+不可解时记为无效并跳过，不影响其余措施。
+
+\section{复杂度分析}
+设供电区变压器数 $N_T$、母线数 $N$、实体数 $M$、维度数 $D=4$、措施数 $J$。承载力主体为
+每台变压器一次下游 BFS，总计 $O(N_T\cdot(N+E))$（$E$ 为支路数），工程校验开启时另加
+一次潮流/短路的引擎成本。薄弱环节筛查为 $O(M D)$ 归一化 + $O(M^2 D)$ Pareto 两两比较
+（同组内），实践中 $M$ 为受关注实体数、规模可控。反事实为 $O(J)$ 次单措施引擎求解 +
+$O(J^2)$ 次两两协同求解，是三者中最重的，故 \fld{max\_measures} 默认限为 5。
+
+\section{异常工况处理}
+\begin{itemize}
+  \item \textbf{无下游供电区/孤立母线}：该变压器 $S_d$ 记为不可评估，写入 \fld{warnings}；
+        孤立/失电母线不计入任何下游区聚合。
+  \item \textbf{$\tau_{\max}$ 或容量为零}：按下界钳位，避免除零；结果标注为退化。
+  \item \textbf{维度证据缺失}：排除出 $K_i$，$|K_i|$ 低于要求时判“证据不足”，不参与排序。
+  \item \textbf{反事实措施不可施加/不可解}：跳过该措施并在 \fld{methodology} 记录，
+        不阻断其余措施与协同分析。
+  \item \textbf{工程校验引擎失败}：谐波校核为尽力而为（best-effort），失败不阻断潮流/短路
+        主校核，仅在 \fld{verification} 标注缺项。
+\end{itemize}
+
+\section{与其他模块的接口关系}
+承载力工程校验复用潮流（\srcpath{hacdcpf::solve\_power\_flow}）、详细短路批处理
+（\srcpath{analysis::run\_short\_circuit\_detailed\_batch}）与谐波潮流
+（\srcpath{harmonics::solve\_harmonic\_power\_flow}）；薄弱环节消费经济（市场/时序）、
+碳（\srcpath{carbon\_analysis}）、可靠性（\srcpath{reliability}）、弹性
+（\srcpath{resilience}）四引擎的输出证据；反事实经 \srcpath{apply\_counterfactual\_measure}
+在系统副本上施加措施后调用同一批引擎。HTTP 侧新增
+\texttt{POST /api/session/run\_hosting\_capacity}（\srcpath{tests/run\_gui\_server.cpp}），
+序列化经 \srcpath{src/io/json\_io.cpp} 的 \fld{cap\_*} 编解码器往返。
+
+\section{测试与验证建议}
 注册测试：\srcpath{test\_hosting\_capacity}、\srcpath{test\_multidimensional\_weak\_link}、
 \srcpath{test\_counterfactual\_planning}，以及浏览器端 E2E
-\srcpath{multidimensional\_weak\_link\_gui\_test}，覆盖承载力公式、四维筛查排序与反事实措施
-评估的一致性。
+\srcpath{multidimensional\_weak\_link\_gui\_test}，覆盖承载力公式、四维筛查排序与反事实
+措施评估的一致性。建议补充：$\tau_{\max}\to0$、并联变压器 $\beta$ 自动分支、单维/冲突/兼容
+分类边界（$h,c,g$ 邻域）、Pareto 覆盖集不一致时的比较拒绝、以及反事实协同项符号
+（增益 vs 抵消）的对照断言。
 
-\subsection{边界与局限（如实标注）}
+\section{工业级评估指标}
+建议以下指标纳入工程验收：承载力分级与人工审查的一致率（绿/黄/红混淆矩阵）、工程校验
+开启前后接入建议的翻转率；薄弱环节 Top-$k$ 命中率（与事后实际故障/整改清单对照）、
+分类稳定性（阈值 $\pm5\%$ 扰动下等级不变比例）；反事实收益排序与实际投资后验收益的
+秩相关（Spearman $\rho$）、协同项预测符号准确率。全部指标应在固定算例族上可复现。
+
+\section{适用范围与局限性}\label{sec:limits}
 \begin{itemize}
   \item 承载力：规范 §5/§6/§9 的系统级生产模拟、县域分解与系统—设备协调\textbf{未}实现；
         \fld{enable\_verification} 默认关闭，即默认仅规划筛查；谐波潮流校核为尽力而为；
   \item 薄弱环节：仅做筛查与决策路由，\textbf{不}宣称归因排放/停电量等于反事实投资收益；
-        缺失维度不被当作零；
+        缺失维度不被当作零；Pareto 仅在同组同覆盖集内成立；
   \item 反事实：措施施加于系统副本，经济/可靠性/弹性指标使用选项给定的有界预算与时窗，
         非全时序生产模拟；
   \item 反事实规划暂无独立契约文档，口径以源码与本手册为准。
 \end{itemize}
+
+\section{后续改进方向}
+\begin{enumerate}
+  \item 承载力向规范 §5/§6/§9 扩展：接入 8760\,h 分区数据与县域分解，形成系统—设备协调；
+  \item 薄弱环节引入时段间的风险传播（马尔可夫/生存分析）替代当前逐时段独立投影；
+  \item 反事实从两两协同扩展到三阶及以上组合，并以代理模型（surrogate）降低 $O(J^2)$ 引擎
+        调用成本；
+  \item 为反事实规划补齐独立契约文档，统一四维度量的口径与单位声明。
+\end{enumerate}
+
+\input{../_manual_common/industrial_evaluation}
+
 \end{document}

@@ -2,7 +2,44 @@
 
 For large models the main viewport is no longer an empty headless surface.
 `web/js/core/network_overview.js` renders the full bus/primary-edge graph with
-WebGL2 and LOD0/1/2 aggregation while creating no per-bus SVG DOM. The existing
+WebGL2 and LOD0/1/2 aggregation while creating no per-bus SVG DOM. Render state
+lives in preallocated typed-array vertex stores: selection changes patch node
+colors through a merged `bufferSubData` dirty range instead of rebuilding the
+buffers, and LOD2 picking uses a uniform-grid spatial index over node
+positions rather than a linear scan.
+
+When enough buses carry real coordinates (≥80% non-default lat/lon) the
+overview switches to viewport-driven fetching: it requests
+`POST /api/session/topology_window` for the current viewport grown by a 40%
+prefetch margin on each side, debounced 250 ms after pan/zoom, and skips the
+request entirely while the viewport stays inside the already-fetched window at
+the same LOD. LOD selection is automatic from the estimated visible-node count
+(≤2,500 → LOD2, ≤30,000 → LOD1, else LOD0) unless the user pins a level in the
+LOD select (the `自动` entry re-enables auto). Buses without coordinates are
+excluded by the backend; its `coordinate_coverage` and `model_limitations` are
+surfaced verbatim in the overview status line and in `stats()`. Systems with
+insufficient coordinate coverage — or a failed first window fetch — fall back
+to the historical local full-system rendering with the manual 12,000-bus LOD
+heuristic.
+
+Windowed mode also overlays the cached last power-flow result: alongside each
+topology window it requests `POST /api/session/result_window` for the same
+bbox (no LOD field; the response is always per-bus/per-branch), and
+`Canvas.showPowerFlowResults` triggers a result-only refetch when a new PF
+completes. LOD2 nodes are colored by `vm_pu` with the same bands as the SVG
+result overlay (<0.95 pu red, >1.05 pu orange, in-band green/cyan), and
+branches by `loading_pct` with the same green→yellow→red ramp as the heatmap
+(clamped at 150%). Result colors are written into the SoA color slots and
+uploaded through merged `bufferSubData` dirty ranges; a selected bus keeps its
+selection color and falls back to its result color on deselection. A `409
+no_cached_power_flow` response silently clears the coloring back to structural
+domain colors. `result_meta.converged = false` or
+`result_matches_current_system = false` is declared in the status line and in
+`stats()`; aggregated LOD0/1 views keep structural colors because the result
+window carries no group-level aggregates. The local fallback path never
+fetches or applies result colors.
+
+The existing
 SVG canvas remains authoritative for normal-size authored diagrams. Large-model
 selection uses one `{domain,index}` bus reference across WebGL, the virtualized
 topology tables, result navigation, and the bounded local SVG subgraph.
@@ -63,12 +100,14 @@ without rebuilding the Canvas model or changing result identity.
 
 The intended division of work is:
 
-- WebGL: pan, zoom, hit-test, and inspect the full network.
+- WebGL: pan, zoom, hit-test, and inspect the full network; with coordinate
+  coverage it fetches only the visible topology window from the backend.
 - Local SVG: inspect/select a bounded k-hop neighborhood.
 - Virtual tables: edit the complete authored model without materializing rows.
 - Charts: browse downsampled time windows while retaining complete export data.
-- Backend chunks: serve topology LOD, spatial windows, time frames, and worst
-  violations through `/api/v1`.
+- Backend chunks: serve topology spatial windows (`/api/session/topology_window`,
+  consumed by the overview) plus playback time frames and analysis-scoped
+  result subsets through `/api/v1`.
 
 Updated: 2026-08-17
 

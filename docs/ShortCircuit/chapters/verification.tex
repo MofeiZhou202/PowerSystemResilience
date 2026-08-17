@@ -1,0 +1,36 @@
+% 第 7 章：验证与边界局限
+\section{验证与边界局限}\label{sec:sc-verify}
+
+\subsection{注册测试}
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{5.4cm}L{3.8cm}L{5.4cm}@{}}
+\toprule
+测试目标 & 注册位置 & 覆盖\\
+\midrule
+\srcpath{test\_short\_circuit\_crossval} & tests/CMakeLists.txt:206 & Z-bus 戴维南交叉校核 + IEC 检查，兼测详细路径\\
+\srcpath{test\_dc\_short\_circuit} & tests/CMakeLists.txt:207 & 直流金属性故障水平与断路器责任\\
+\srcpath{test\_short\_circuit\_iec60909\_4} & tests/CMakeLists.txt:210 & IEC TR 60909-4:2021 §6.2 参考算例\\
+\bottomrule
+\end{tabular}
+\end{center}
+概览法以已知网络的解析戴维南阻抗交叉验证；详细法以 IEC TR 60909-4 参考算例校核
+$I_k''/i_p/I_b/I_k/I_{th}$。
+
+\subsection{边界与局限（如实标注）}
+\begin{itemize}
+  \item \textbf{概览不平衡近似}：\srcpath{compute\_short\_circuit} 对不平衡故障用简化
+        $Z_1{=}Z_2{=}Z_0$（负序=正序、零序未建模）；详细路径建真序网，但三绕组变压器零序
+        默认以正序代入（未建矢量组）；
+  \item \textbf{直流上界}：\srcpath{dc\_bus\_fault\_level} 为电阻性刚性源估计，\textbf{不}含换流器限流、
+        电容放电暂态、源内阻抗与直流保护跳闸——是线路电阻限制的保守上界；
+  \item \textbf{两相接地}：仅给正序等效的有效电流幅值，未做相分解电流 $I_{L2}/I_{L3}$ 与地电流重构；
+  \item \textbf{非保护配合器}：无跳闸时限曲线、方向/距离/差动选择性、电弧模型与跳闸后拓扑更新；
+  \item \textbf{换流器}：跟网/构网为稳态/准稳态故障水平，不含控制环动态、FRT 轨迹与限流器切换时序；
+  \item \textbf{投影前置}：AC 短路在 \srcpath{project\_to\_canonical\_models} 后进行，富设备被展平，
+        结果 ID 已在规范空间。
+\end{itemize}
+
+\subsection{加深与后续}
+行号以 2026-08-17 检出为准，如与后续变更不符以
+\srcpath{include/hacdcpf/analysis/short\_circuit.hpp}、\srcpath{dc\_short\_circuit.hpp} 与注册测试
+为准。IEC 60909 推导与富模型映射对照 \srcpath{docs/short\_circuit\_rich\_acdc\_derivation.md}。

@@ -1,0 +1,54 @@
+% 第 1 章：架构总览与基准约定
+\section{架构总览与基准约定}\label{sec:sc-overview}
+
+\subsection{功能定位与投影}
+短路模块估计设备选型所需的故障水平。命名空间 \texttt{hacdcpf::analysis}。详细与概览 AC 路径
+均在 \srcpath{project\_to\_canonical\_models(sys)} 之后进行：变压器、开关、AC 断路器、电机、VPP、
+微网、移动储能被展平为规范元件，母线 ID 译入规范空间后再建序矩阵。本模块\textbf{不是}保护
+配合仿真器——不含跳闸时限曲线、动态换流器控制、电弧模型、直流电容放电与跳闸后拓扑更新。
+
+\subsection{公共入口族}
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{5.6cm}L{4.6cm}L{4.6cm}@{}}
+\toprule
+入口 & 定义位置 & 用途\\
+\midrule
+\srcpath{compute\_short\_circuit} & short\_circuit.hpp:212 & 概览：全母线 Z-bus 等效故障\\
+\srcpath{compute\_fault\_at\_bus} & short\_circuit.hpp:216 & 概览：单母线查询\\
+\srcpath{run\_short\_circuit\_detailed} & short\_circuit.hpp:199 & 详细 IEC 60909（单母线）\\
+\srcpath{run\_short\_circuit\_detailed\_batch} & short\_circuit.hpp:203 & 详细 IEC 60909（多母线）\\
+\srcpath{dc\_bus\_fault\_level} & dc\_short\_circuit.hpp & 直流母线金属性故障水平\\
+\bottomrule
+\end{tabular}
+\end{center}
+IEC 辅助函数：\srcpath{get\_voltage\_factor\_sc}（:181）、\srcpath{calculate\_kappa\_basic\_sc}（:182）、
+\srcpath{calculate\_generator\_correction\_factor\_sc}、\srcpath{calculate\_transformer\_correction\_factor\_sc}。
+
+\subsection{基准量}
+交流母线（线电压基准 $U_b$ kV、系统基准功率 $S_b$ MVA）：
+\begin{equation}
+I_b=\frac{S_b}{\sqrt3\,U_b}\ [\mathrm{kA}],\qquad Z_b=\frac{U_b^2}{S_b}\ [\Omega],\qquad
+Z_{pu}=Z_\Omega/Z_b.
+\end{equation}
+直流母线（极间基准 $U_{dc,b}$ kV）：$I_{dc,b}=S_b/U_{dc,b}\ [\mathrm{kA}]$。
+
+\subsection{IEC 电压因子}
+电压因子 $c$（\srcpath{get\_voltage\_factor\_sc}，:181；\fld{SCCalcType}，:71）：
+\begin{equation}
+c=\begin{cases}
+\text{显式 \fld{c\_factor}}, & \fld{c\_factor}>0\\
+c_{\max}(U_n), & \text{最大计算（\fld{Max}）}\\
+c_{\min}(U_n), & \text{最小计算（\fld{Min}）}
+\end{cases}
+\end{equation}
+实现约取：最大 $U_n>1$ kV 为 $1.10$、低压 $1.10$、极低压 $1.05$；最小 $U_n>1$ kV 为 $1.00$、
+低压 $0.90$、极低压 $0.95$。概览路径默认 \fld{SCOptions.c\_factor}=1.1（:33）。
+
+\subsection{诚实口径}
+\begin{itemize}
+  \item 概览 \srcpath{compute\_short\_circuit} 对不平衡故障用简化 $Z_1{=}Z_2{=}Z_0$；详细路径建真序网；
+  \item 三绕组变压器零序默认以正序代入（未建矢量组）；
+  \item 直流路径为电阻性刚性源上界，不含换流器限流/电容放电/直流保护跳闸；
+  \item 结果 \fld{SCDetailedResult}（:156）的 \fld{solved} 标志与逐母线/支路/换流器贡献分列，
+        便于按 IEC 60909 逐项校核。
+\end{itemize}

@@ -1,0 +1,53 @@
+% 第 6 章：选项与结果数据结构
+\section{选项与结果数据结构}\label{sec:sc-io}
+
+\subsection{概览选项 \texttt{SCOptions}}
+\compmeta{SCOptions}{include/hacdcpf/analysis/short\_circuit.hpp:33}
+\begin{paramtable}
+\fld{fault\_type} & — & — & 枚举 & ThreePhase & 故障类型（3ph/SLG/LL/LLG）\\
+\fld{c\_factor} & $c$ & — & $0.9\sim1.1$ & 1.1 & IEC 电压校正因子 $c_{max}$\\
+\fld{default\_xdpp} & $x_d''$ & pu & $0.1\sim0.3$ & 0.2 & 缺省次暂态电抗\\
+\fld{compute\_all\_buses} & — & — & 布尔 & true & 全母线计算（否则用单母线接口）\\
+\fld{inverse\_rhs\_batch\_size} & — & — & 整数 & 32 & 选择性逆对角提取的 RHS 块列数\\
+\end{paramtable}
+
+\subsection{详细选项 \texttt{SCDetailedOptions}}
+\compmeta{SCDetailedOptions}{include/hacdcpf/analysis/short\_circuit.hpp:93}
+\begin{paramtable}
+\fld{fault\_type} & — & — & 枚举 & ThreePhase & 故障类型\\
+\fld{calc\_type} & — & — & Max/Min & Max & 最大/最小短路计算口径\\
+\fld{kappa\_method} & — & — & A/B/C & C & 冲击系数 $\kappa$ 方法\\
+\fld{topology} & — & — & Radial/Meshed & Meshed & 网络拓扑（影响衰减）\\
+\fld{c\_factor} & $c$ & — & $\ge0$ & 0.0 & 显式电压因子（$\le0$ 用口径推定）\\
+\fld{fault\_impedance\_pu} & $R_f$ & pu & $\ge0$ & 0.0 & 故障路径电阻\\
+\fld{breaking\_time\_s} & $t_b$ & 秒 & — & 0.10 & 开断时间（$I_b$）\\
+\fld{base\_frequency\_hz} & $f$ & Hz & 50/60 & 50 & 基频\\
+\fld{default\_xdpp} & $x_d''$ & pu & — & 0.2 & 缺省次暂态电抗\\
+\fld{apply\_iec\_transformer\_correction} & $K_T$ & — & 布尔 & true & 施加 IEC 变压器阻抗校正\\
+\fld{compute\_branch\_flows} & — & — & 布尔 & true & 计算支路故障电流/功率\\
+\fld{compute\_ith} & — & — & 布尔 & true & 计算热等效电流 $I_{th}$\\
+\fld{ith\_duration\_s} & $T_k$ & 秒 & — & 1.0 & $I_{th}$ 计算历时\\
+\fld{inverse\_rhs\_batch\_size} & — & — & 整数 & 32 & 选择性逆 RHS 块列数\\
+\end{paramtable}
+
+\subsection{直流故障选项 \texttt{DCFaultOptions}}
+\compmeta{DCFaultOptions}{include/hacdcpf/analysis/dc\_short\_circuit.hpp}
+\begin{paramtable}
+\fld{fault\_resistance\_pu} & $R_f$ & pu & $\ge0$ & 0.0 & 故障路径电阻（0=金属性）\\
+\fld{source\_voltage\_pu} & — & pu & — & 0.0 & DC\_V 源电压（0=用各源自身 vm\_pu）\\
+\fld{consider\_dc\_breakers} & — & — & 布尔 & true & 断路器纳入电导图\\
+\fld{dc\_breakers\_control\_branches} & — & — & 布尔 & true & 断路器控制对应支路\\
+\fld{add\_unassigned\_closed\_breaker\_edges} & — & — & 布尔 & true & 未指派闭合断路器作独立边\\
+\fld{min\_closed\_breaker\_resistance\_pu} & — & pu & 小正数 & $10^{-6}$ & 理想闭合断路器最小电阻\\
+\end{paramtable}
+
+\subsection{结果结构摘要}
+\begin{itemize}
+  \item \fld{BusFaultResult}（:49）/\fld{SCResult}（:61）：概览 $Z_{thevenin}$、$I_{fault}$、
+        \fld{sk\_mva}、\fld{ikpp\_ka}；
+  \item \fld{SCDetailedResult}（:156）：\fld{solved}、逐母线 \fld{SCDetailedBusResult}（:114，
+        $I_k''/i_p/I_b/I_k/I_{th}$ 及分源贡献）、逐支路 \fld{SCDetailedBranchResult}（:134）、
+        换流器贡献 \fld{SCConverterContributionResult}（:144）；
+  \item \fld{DCFaultResult}：\fld{i\_fault\_ka}、\fld{r\_thevenin\_pu}、\fld{breaker\_duties}
+        （\fld{DCBreakerDutyResult}）。
+\end{itemize}

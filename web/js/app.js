@@ -23847,6 +23847,13 @@ const App = (() => {
       openSubDiagramFor(domain, Number(index), Number(hops) || 2);
     },
     cancelActiveTask,
+    // Quiet unmanaged POST for high-frequency session reads (e.g. the WebGL
+    // overview's viewport-driven topology_window fetches): no task-status UI,
+    // no analysis dedup, no console log noise.
+    sessionPostQuiet: (path, body = {}) => apiPost(path, body, { quiet: true }),
+    // Detailed variant ({ok, data, error}) so callers can distinguish backend
+    // declared states like 409 no_cached_power_flow from transport errors.
+    sessionPostQuietResult: (path, body = {}) => apiPostResult(path, body, { quiet: true }),
   };
 })();
 

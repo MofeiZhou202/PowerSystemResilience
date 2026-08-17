@@ -151,6 +151,7 @@ docs/latex/paper/ev_power_traffic_joint_opt/*
 
 # Tracked manuscript: structure-preserving semismooth hybrid AC/DC PF.
 !docs/latex/
+!docs/latex/README.md
 !docs/latex/paper/
 !docs/latex/paper/structure_preserving_semismooth_acdc_pf/
 !docs/latex/paper/structure_preserving_semismooth_acdc_pf/*.tex

@@ -348,10 +348,18 @@ json aggregate_topology(const json& full, int lod) {
   return json{{"nodes", std::move(nodes)}, {"edges", std::move(edges)}};
 }
 
-json topology_chunk(const HybridPowerSystem& system,
+json topology_chunk(const json& full_topology,
                     const httplib::Request& request) {
   const int lod = query_int(request, "lod", 2, 0, 2);
-  json topology = aggregate_topology(topology_lod2(system), lod);
+  // LOD2 reads the cached full topology DOM by reference; only coarser LODs
+  // pay for an aggregated copy.
+  json aggregated;
+  const json* topology_ptr = &full_topology;
+  if (lod < 2) {
+    aggregated = aggregate_topology(full_topology, lod);
+    topology_ptr = &aggregated;
+  }
+  const json& topology = *topology_ptr;
   const auto xmin = query_double(request, "xmin");
   const auto ymin = query_double(request, "ymin");
   const auto xmax = query_double(request, "xmax");
@@ -404,7 +412,7 @@ json topology_chunk(const HybridPowerSystem& system,
               {"edges", std::move(edges)}};
 }
 
-json topology_subgraph(const HybridPowerSystem& system,
+json topology_subgraph(const json& full,
                        const httplib::Request& request) {
   const std::string domain =
       request.has_param("domain") ? request.get_param_value("domain") : "ac";
@@ -419,7 +427,6 @@ json topology_subgraph(const HybridPowerSystem& system,
                               std::numeric_limits<int>::max());
   const int depth = query_int(request, "depth", 2, 0, 8);
   const int max_nodes = query_int(request, "max_nodes", 500, 1, 5000);
-  json full = topology_lod2(system);
   const std::string center = bus_key(domain, index);
   std::unordered_map<std::string, std::vector<std::string>> adjacency;
   for (const auto& node : full.at("nodes")) {
@@ -1211,7 +1218,22 @@ struct ApiSession {
   std::string created_at;
   std::string updated_at;
   bool deleting{false};
+  // Cached LOD2 topology DOM backing /topology and /subgraph chunks, rebuilt
+  // only when the model revision changes.  Guarded by `mutex`.
+  std::uint64_t topology_cache_revision{0};
+  std::shared_ptr<const json> topology_lod2_cache;
 };
+
+// Caller must hold session.mutex and ensure session.system is loaded.
+const json& session_topology_lod2(ApiSession& session) {
+  if (!session.topology_lod2_cache ||
+      session.topology_cache_revision != session.revision) {
+    session.topology_lod2_cache =
+        std::make_shared<const json>(topology_lod2(*session.system));
+    session.topology_cache_revision = session.revision;
+  }
+  return *session.topology_lod2_cache;
+}
 
 json session_json(const ApiSession& session) {
   json body{{"schema", "hysim_session_v1"},
@@ -1862,7 +1884,7 @@ void RuntimeApiV1::register_routes(httplib::Server& server) {
       }
       if (check_if_none_match(request, response, *session)) return;
       set_model_headers(response, *session);
-      json body = topology_chunk(*session->system, request);
+      json body = topology_chunk(session_topology_lod2(*session), request);
       body["session_id"] = session->id;
       body["model_revision"] = session->revision;
       set_json(response, body);
@@ -1885,7 +1907,7 @@ void RuntimeApiV1::register_routes(httplib::Server& server) {
       }
       if (check_if_none_match(request, response, *session)) return;
       set_model_headers(response, *session);
-      json body = topology_subgraph(*session->system, request);
+      json body = topology_subgraph(session_topology_lod2(*session), request);
       body["session_id"] = session->id;
       body["model_revision"] = session->revision;
       set_json(response, body);
