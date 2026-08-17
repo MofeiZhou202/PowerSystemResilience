@@ -36,3 +36,16 @@ follow it for all algorithmic/numerical work.
   pure-performance changes; full-suite accuracy gates for algorithmic ones).
 - Report benchmark results as measured-vs-predicted, with the command,
   build flags, and commit hash.
+
+## Documentation layout
+
+- `docs/manual/` is the maintained user-facing documentation (industrial
+  application manual, 11 chapters); user-visible behavior changes must be
+  reflected there.
+- `docs/archive/` holds the frozen pre-manual originals and the dated
+  derivation/design records. The derivation documents referenced by the
+  rules above live there (see `docs/manual/11-theory-references.md` for the
+  index); write mismatch findings back into the relevant file under
+  `docs/archive/`.
+- `docs/todo/` contains unfinished research notes and is not a source of
+  truth for current behavior.

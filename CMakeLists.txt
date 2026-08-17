@@ -740,7 +740,7 @@ target_link_libraries(mipsolvers PUBLIC
 # libraries (SuiteSparse when not vendored, OpenBLAS, Gurobi,
 # gfortran/quadmath on non-Apple, Accelerate) cannot be merged into a static
 # archive and must still be provided by the consumer at link time; see
-# docs/build_and_deploy.md for the full consumer link line.
+# docs/manual/02-installation-deploy.md for the full consumer link line.
 option(MIPSOLVERS_BUILD_BUNDLED_ARCHIVE
   "Produce a single bundled static archive (libmipsolvers_bundled.a)" ON)
 if(MIPSOLVERS_BUILD_BUNDLED_ARCHIVE)
@@ -1242,9 +1242,15 @@ install(FILES
 
 install(FILES
   docs/README.md
-  docs/user_manual.md
-  docs/solvers.md
-  docs/testing.md
-  docs/numerical_methods.md
-  docs/build_and_deploy.md
+  docs/manual/01-overview.md
+  docs/manual/02-installation-deploy.md
+  docs/manual/03-quickstart.md
+  docs/manual/04-modeling-aml.md
+  docs/manual/05-solvers-engines.md
+  docs/manual/06-numerical-methods.md
+  docs/manual/07-api-reference.md
+  docs/manual/08-industrial-applications.md
+  docs/manual/09-testing-benchmarks.md
+  docs/manual/10-troubleshooting.md
+  docs/manual/11-theory-references.md
   DESTINATION ${CMAKE_INSTALL_DATADIR}/mipsolvers/docs)

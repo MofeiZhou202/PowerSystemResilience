@@ -1,0 +1,7 @@
+C:/Users/matri/Codes/MIPSolvers/third_party/zlib-install/lib/zlib.lib
+C:/Users/matri/Codes/MIPSolvers/third_party/zlib-install/bin/zlib.dll
+C:/Users/matri/Codes/MIPSolvers/third_party/zlib-install/lib/zlibstatic.lib
+C:/Users/matri/Codes/MIPSolvers/third_party/zlib-install/include/zconf.h
+C:/Users/matri/Codes/MIPSolvers/third_party/zlib-install/include/zlib.h
+C:/Users/matri/Codes/MIPSolvers/third_party/zlib-install/share/man/man3/zlib.3
+C:/Users/matri/Codes/MIPSolvers/third_party/zlib-install/share/pkgconfig/zlib.pc

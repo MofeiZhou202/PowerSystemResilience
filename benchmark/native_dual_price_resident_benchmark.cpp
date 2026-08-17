@@ -1,6 +1,6 @@
 /// native_dual_price_resident_benchmark.cpp
 ///
-/// S2 independent-kernel harness (see docs/solvers.md section 5.2) for the
+/// S2 independent-kernel harness (see docs/archive/solvers.md section 5.2) for the
 /// row_ep PRICE/dot-error-bound consumer.
 ///
 /// The dual pivot's leaving-row BTRAN result `row_ep` is produced densely by

@@ -1236,7 +1236,7 @@ struct AtomicBCStats {
 /// Arcs are globally valid iff derived from constraints visible to every
 /// explorer (root rows + shared conflict clauses). All learned 2-literal
 /// binary conflicts satisfy this; see
-/// `docs/solvers.md`, section 8.
+/// `docs/archive/solvers.md`, section 8.
 class SharedImplicationGraph {
  public:
   struct Arc {

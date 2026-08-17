@@ -349,7 +349,7 @@ struct SCUCOutput {
 // Public API
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Parse SCUCInput from a JSON string (see docs/data_format_spec.md).
+/// Parse SCUCInput from a JSON string (see docs/archive/data_format_spec.md).
 SCUCInput scuc_from_json(const std::string& json_str);
 
 /// Solve the full SCUC → SCED → LMP pipeline.

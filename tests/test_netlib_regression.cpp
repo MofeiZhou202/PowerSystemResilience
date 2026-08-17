@@ -149,7 +149,7 @@ SolveOptions pinned(const std::string& solver_name) {
 
 // Per-solver capability on the five problems, from measured behavior.
 // PDLP and LCQP have documented robustness gaps on harder/degenerate LPs
-// (see docs/testing.md); those are reported, not enforced.
+// (see docs/archive/testing.md); those are reported, not enforced.
 bool solver_is_strict(const std::string& solver, const std::string& problem) {
   if (solver == "HiGHS") return true;
   if (solver == "NativeIPMLP") return problem != "adlittle";

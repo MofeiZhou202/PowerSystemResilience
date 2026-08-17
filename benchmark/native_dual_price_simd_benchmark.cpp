@@ -1,6 +1,6 @@
 /// native_dual_price_simd_benchmark.cpp
 ///
-/// S7 independent-kernel harness (see docs/solvers.md section 5.2) for the
+/// S7 independent-kernel harness (see docs/archive/solvers.md section 5.2) for the
 /// PRICE step `pivot_row = A^T * r_EP`, the
 /// single largest per-pivot bucket on the fleet's dominant case (d2q06c:
 /// price(A^T*rEP) ~= 27% of wall; DR-3).

@@ -237,7 +237,7 @@ struct BCOptions {
   int auto_parallel_min_threads{2};
   int auto_parallel_max_threads{0};
 
-  // Parallel cross-thread info sharing; see docs/solvers.md section 8.
+  // Parallel cross-thread info sharing; see docs/archive/solvers.md section 8.
   /// @brief Master switch for cross-thread conflict-clause / conflict-cut /
   /// binary-implication sharing. Keep OFF by default: these propagate any
   /// subtle scoping mistake across the whole forest and can cause a parallel

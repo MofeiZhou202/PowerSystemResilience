@@ -400,6 +400,16 @@ $\bar\mu$ 后，下限不变，故 $s_i\mu_i$ 不再按同一比例变化。
 稳定化下限。这是按约束来源分块，不是案例路由。对应单元测试同时验证大松弛
 非线性行的中心乘积和上下界行的稳定化乘积。
 
+**2026-08-18 修订（去超参数化后续）**：`133bf359`/`b14082d2` 的冷启动重写
+用 `initialize_cold_primal_dual_state` 取代了上述分块规则。两处方差异需要
+记录：(1) $\bar\mu$ 不再取 `max(mu_init, 0.1*tol_complementarity)` 的抬升值，
+`mu_init>0` 时逐行保持 $s_i\mu_i=\bar\mu=$ `mu_init`（仅含 $O(\sqrt\epsilon)$
+的 product-weight 摆动），这比旧分块乘积更中心；(2) box rows 的 `[1e-4,1e4]`
+截断也被移除，所有行统一使用 stationarity-invisible 可表示性下限
+（`sqrt(min_normal)` 量级），§8.1 对绝对下限破坏缩放协变性的论证同样适用于
+盒行下限。`test_numerical_stability` 的 centrality 用例已更新为验证均匀乘积
+$s_i\mu_i=$ `mu_init` 与非线性行无下限抬升（`mu_ineq[0] < 1e-4`）。
+
 ### 8.2 路径入口与恢复候选必须在一致坐标中处理
 
 缩放模型为 $f_s=s_f f$。`mu_init`、`mu_min` 与 complementarity tolerance
@@ -415,6 +425,18 @@ $\arg\min_{\bar\mu}\|\nabla f+J_h^TS^{-1}e\bar\mu\|_2$，结果为 case30
 选择 `0.0537`、case118/300 选择 `0.1`，hybrid2000 反而只选 `0.00201`。
 两项实验均已撤销。说明路径入口还必须包含等式流形/normal-step 信息，不能只
 依据目标缩放、primal 标量或未投影 stationarity。
+
+**2026-08-18 观测（自动选择器的退化情形）**：`b14082d2` 把默认
+`mu_init` 改为 0（自动 stationarity 选择器）后，若冷启动点恰好是
+stationarity 退化点（`grad(x0)=0` 且存在被违反的不等式），投影 stationarity
+无信号，选择器给出可表示性下限量级的 $\bar\mu\approx 10^{-154}$。无屏障压力
+时被违反行的松弛在第一步跌出内部，fraction-to-boundary 把步长冻结在
+$10^{-8}$ 量级，restoration 关闭时 filter 报 accepted-step collapse
+（`test_numerical_stability` 的 augmented/condensed 用例实测复现；显式
+`mu_init=0.1` 时两种 Newton 形式均正常收敛且一致）。生产路径依赖
+restoration phase 从此类坍缩中恢复；该用例已改为显式固定 `mu_init=0.1`，
+因为它的目的是验证 augmented 与 condensed 形式等价，而不是检验自动选择器。
+自动选择器是否需要纳入 normal-step 信息仍是上文未决的设计问题。
 
 ### 8.3 Filter 的全局区与局部区必须使用不同接受信息
 

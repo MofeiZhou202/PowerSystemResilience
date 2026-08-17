@@ -272,9 +272,19 @@ int main(int argc, char** argv) {
       "samples=%d\n",
       count, repeats, sample_count);
 #if defined(__aarch64__)
-  std::printf("architecture=aarch64 compiler=%s\n", __VERSION__);
+  constexpr const char* kArchitecture = "aarch64";
 #else
-  std::printf("architecture=non-aarch64 compiler=%s\n", __VERSION__);
+  constexpr const char* kArchitecture = "non-aarch64";
+#endif
+  // __VERSION__ is GCC/Clang-only; MSVC reports the compiler version through
+  // _MSC_FULL_VER instead.
+#if defined(_MSC_VER)
+  std::printf("architecture=%s compiler=MSVC %d\n", kArchitecture,
+              _MSC_FULL_VER);
+#elif defined(__VERSION__)
+  std::printf("architecture=%s compiler=%s\n", kArchitecture, __VERSION__);
+#else
+  std::printf("architecture=%s compiler=unknown\n", kArchitecture);
 #endif
   std::printf("correctness=exact checksum=%llu reference_record_bytes=%zu\n",
               static_cast<unsigned long long>(checksum),

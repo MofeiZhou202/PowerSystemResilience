@@ -25,7 +25,7 @@
 ///  - Equality rows are OFF by default (--with-equalities opts in).  With
 ///    equalities present the reduced KKT is indefinite and used to fall back
 ///    to MUMPS; since the corrector-division fix and the simplicial-LDLT
-///    KKT path (see docs/conic_sdp.md §6.4, §7.3), these cases converge in
+///    KKT path (see docs/archive/conic_sdp.md §6.4, §7.3), these cases converge in
 ///    5-11 iterations like the no-equality ones.  The flag keeps a
 ///    dedicated reproducer/regression for that path.
 ///  - SDP G gets >= 5 nonzeros per column (SOCP keeps ~1% density).  With

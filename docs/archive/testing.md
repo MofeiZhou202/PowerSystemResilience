@@ -124,10 +124,11 @@ python tools/run_netlib_isolated.py `
 
 ### 3.4 构建状态
 
-核心库和上述 18 个测试/基准目标均在当前工作树重新编译成功。无目标过滤的
-全量构建仍失败于独立基准 `native_dual_bfrt_simd_benchmark.cpp:277`：MSVC
-下使用了 GCC 专有的 `__VERSION__` 宏。该问题不影响核心库和本次 CTest，仍是
-发布构建需要修复的阻塞项。
+核心库和上述 18 个测试/基准目标均在当前工作树重新编译成功。此前独立基准
+`native_dual_bfrt_simd_benchmark.cpp:277` 在 MSVC 下使用 GCC 专有
+`__VERSION__` 宏导致的构建失败已修复（MSVC 改用 `_MSC_FULL_VER` 报告编译器
+版本，与 `miplib2017_benchmark.cpp`、`netlib_solver_benchmark.cpp` 中既有
+的守护方式一致），当前无目标过滤的全量构建可通过。
 
 ## 4. 推荐验证命令
 

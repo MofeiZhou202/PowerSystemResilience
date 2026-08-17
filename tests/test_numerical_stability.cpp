@@ -664,6 +664,14 @@ TEST_CASE("Augmented Newton path matches condensed path on inequality NLP",
     NLPModel nlp = make_nlp();
     IPMOptions options;
     options.max_iter = 100;
+    // Pin the entry barrier to the Wächter–Biegler 2006 default instead of
+    // the automatic stationarity selector (mu_init=0). This case starts at
+    // the unconstrained minimizer with a violated inequality, so the
+    // stationarity projection carries no signal and the selector collapses
+    // to the representability floor; production runs recover through the
+    // restoration phase, which this formulation-equivalence case disables
+    // on purpose. See docs/archive/opf_native_ipm_structural_derivation.md §8.2.
+    options.mu_init = 0.1;
     options.tol_primal = 1e-8;
     options.tol_dual = 1e-8;
     options.tol_complementarity = 1e-8;
@@ -788,9 +796,16 @@ TEST_CASE("Native NLP nonlinear multiplier initialization preserves centrality",
   REQUIRE(detail.mu_ineq.size() == detail.z_slack.size());
   const Eigen::VectorXd products =
       detail.z_slack.cwiseProduct(detail.mu_ineq);
-  CHECK(products[0] == Approx(2e-2).epsilon(1e-12));
-  CHECK(products[1] == Approx(0.1).epsilon(1e-12));
-  CHECK(products[2] == Approx(0.1).epsilon(1e-12));
+  // Current contract (docs/archive/opf_native_ipm_structural_derivation.md §8.1):
+  // a positive requested mu_init is reproduced row-wise as s_i*mu_i = mu_init
+  // up to the O(sqrt(eps)) product-weight wiggle in
+  // initialize_cold_primal_dual_state; no 0.1*tol_complementarity barrier lift
+  // and no [1e-4,1e4] box-row clamp remain after the hyperparameter-free
+  // cold-init rework. Uniform products are exactly the centrality this case
+  // guards; the wiggle is bounded by mu_init*sqrt(eps) ~ 1.5e-11.
+  CHECK(products[0] == Approx(options.mu_init).margin(1e-10));
+  CHECK(products[1] == Approx(options.mu_init).margin(1e-10));
+  CHECK(products[2] == Approx(options.mu_init).margin(1e-10));
   CHECK(detail.mu_ineq[0] < 1e-4);
 }
 

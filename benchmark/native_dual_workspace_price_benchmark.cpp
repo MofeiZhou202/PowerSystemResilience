@@ -1,6 +1,6 @@
 /// native_dual_workspace_price_benchmark.cpp
 ///
-/// P1+P2 independent-kernel harness; see docs/solvers.md section 5.2.
+/// P1+P2 independent-kernel harness; see docs/archive/solvers.md section 5.2.
 ///
 /// The analysis argues the native cold per-pivot gap is six distributed taxes
 /// (T1-T6) that only clear wall-clock resolution when rebuilt TOGETHER, so a
