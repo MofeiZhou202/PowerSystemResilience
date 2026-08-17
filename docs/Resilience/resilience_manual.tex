@@ -1,0 +1,174 @@
+% !TEX program = xelatex
+% 编译方式：把本文件夹整包复制到纯 ASCII 路径后，执行两遍 xelatex（详见 docs/_manual_common/README.md）。
+% 首版骨架：内容取自 src/resilience/ 与 include/hacdcpf/resilience/ 源码及
+%           docs/certified_restoration_runtime.md，公式与参数以代码为准。
+\documentclass[UTF8,fontset=windows,a4paper,11pt]{ctexart}
+\usepackage{hysim_manual}
+
+\title{\textbf{交直流混合高弹性能源电力系统仿真平台}\\[0.5em]
+       {\Large 弹性评估与恢复技术手册}\\[0.3em]
+       {\large 数学模型、接口参数与验证校核（首版骨架）}}
+\author{HySim-XJTU-HRPES（西安交通大学 HRPES 团队）}
+\date{\today}
+
+\begin{document}
+\maketitle
+\begin{abstract}
+\noindent 本手册依据 HySim-XJTU-HRPES 平台弹性评估与恢复模块
+（\srcpath{src/resilience/}、\srcpath{include/hacdcpf/resilience/}）整理，覆盖三类可互换的
+恢复模型：启发式逐时重构、严格多时段 LinDistFlow 恢复 MILP、RA 式分阶段灾害隔离与
+灾后重构 MILP，以及移动储能（MESS）时空路由与\textbf{认证恢复}（有限动作主问题 +
+信息物理/MESS 可执行性 + 多保真动态证书）。全部结论以源码与既有契约
+\srcpath{docs/certified\_restoration\_runtime.md} 为准。\textbf{诚实口径}：恢复 MILP 为
+LinDistFlow/有功模型（\fld{model\_scope}=\texttt{"hybrid-acdc-restoration-milp"}），
+默认不建模换流器损耗、无功与保护逻辑；\fld{mip\_gap\_within\_tolerance} 不等于已证全局最优。
+文档版式与《碳流追踪与碳排放核算技术手册》一致。
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{阅读指南与约定}
+\subsection{数据来源}
+\begin{itemize}
+  \item \srcpath{include/hacdcpf/resilience/resilience\_assessment.hpp} —— 三类恢复模型顶层驱动与选项/结果；
+  \item \srcpath{include/hacdcpf/resilience/certified\_restoration.hpp} —— 认证恢复引擎、协调器与证书结构；
+  \item \srcpath{include/hacdcpf/resilience/resilience\_dynamic\_certification.hpp} —— 动态证书（DAE 阈值判据）；
+  \item \srcpath{src/resilience/resilience\_assessment.cpp}、
+        \srcpath{resilience\_restoration\_mip.cpp}、\srcpath{resilience\_stage\_milp.cpp}、
+        \srcpath{certified\_restoration.cpp}、
+        \srcpath{resilience\_dynamic\_certification.inc} —— 上述模型实现；
+  \item \srcpath{tests/test\_resilience\_assessment.cpp}、
+        \srcpath{tests/test\_transient\_dynamics.cpp} —— 验证依据。
+\end{itemize}
+恢复入口族定义于 \srcpath{include/hacdcpf/resilience/}。
+
+\subsection{单位制与索引空间}
+时域 \fld{horizon\_hours} 单位 h（默认 48），切负荷电量 \fld{total\_shed\_mwh} 与
+MESS 交付电量 \fld{mess\_energy\_delivered\_mwh} 单位 MWh，功率 MW，电压 pu，
+MESS 行驶成本 元/km。逐步结果 \fld{steps}（\texttt{DistributionResilienceStepResult}）
+与 MESS 状态 \texttt{MESSStateStep}（\fld{storage\_index}、\fld{bus}、\fld{target\_bus}、
+\fld{dispatch\_mw}、\fld{soc}、\fld{arrival\_time\_hr}、\fld{remaining\_travel\_hr}）
+按时间步索引。
+
+\subsection{诚实口径}
+恢复统计通过 \fld{model\_stats}（\texttt{DistributionResilienceModelStats}）暴露口径：
+\fld{model\_scope}、\fld{mip\_gap} 与 \fld{ValidityFlags}。默认关闭的建模项包括
+\fld{dc\_network\_modelled}、\fld{vsc\_dispatch\_modelled}、\fld{converter\_losses\_modelled}、
+\fld{reactive\_power\_modelled}；\fld{mip\_gap\_within\_tolerance} 仅表示达到间隙目标，
+\textbf{非已证全局最优}。认证恢复的 L3 \fld{proof\_valid} 只覆盖“所仿真场景/阈值/时域”，
+不承诺全局稳定；目录最优只在有限动作集内成立。
+
+\section{功能定位与架构}
+\subsection{公共入口族}
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{7.2cm}L{2.6cm}L{5.2cm}@{}}
+\toprule
+入口 & 定义位置 & 说明\\
+\midrule
+\srcpath{run\_distribution\_resilience\_assessment(sys, opts)} & resilience\_assessment.hpp & 顶层多时段驱动（默认启发式逐时）\\
+\srcpath{run\_distribution\_resilience\_mip\_assessment(sys, opts)} & 同上 & 严格多时段 LinDistFlow 恢复 MILP\\
+\srcpath{run\_distribution\_resilience\_stage\_milp\_assessment(sys, opts)} & 同上 & RA 式分阶段隔离 + 灾后重构 MILP\\
+\srcpath{apply\_distribution\_resilience\_demo\_data(sys)} & 同上 & 填充演示用弹性字段\\
+\srcpath{MultiFidelityCertificateEngine::evaluate(action, fidelity\_level)} & certified\_restoration.hpp & L1/L2 采样雅可比 + L3 全 DAE 阈值判据\\
+\srcpath{MultiFidelityCertificateEngine::checkExecutability(action)} & 同上 & 信息物理命令链 + MESS 可执行性\\
+\srcpath{CertifiedRestorationCoordinator::solve(actions)} & 同上 & 有限动作主 MIP + 证书环（no-good 割）\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{关键数据结构}
+\compmeta{DistributionResilienceResult}{include/hacdcpf/resilience/resilience\_assessment.hpp}
+主要字段：\fld{steps}、\fld{resilience\_index}、\fld{total\_shed\_mwh}、
+\fld{mess\_energy\_delivered\_mwh}、\fld{mess\_dispatch\_model}、\fld{model\_stats}。
+\compmeta{DistributionResilienceModelStats}{include/hacdcpf/resilience/resilience\_assessment.hpp}
+含 \fld{model\_scope}、\fld{mip\_gap} 与 \fld{ValidityFlags}（\fld{dc\_network\_modelled}、
+\fld{vsc\_dispatch\_modelled}、\fld{converter\_losses\_modelled}、\fld{reactive\_power\_modelled}、
+\fld{mip\_gap\_within\_tolerance} 等）。
+\compmeta{CertifiedRestorationResult}{include/hacdcpf/resilience/certified\_restoration.hpp}
+承载 \texttt{MultiFidelityCertificate}、\texttt{CertificateLabel}$\in$\{Safe,Unsafe,Unresolved,Failed\}
+与 MESS 合同（\fld{mess\_travel\_time\_s}、\fld{mess\_connection\_deadline\_s}、
+\fld{mess\_required\_energy\_mwh}/\fld{mess\_available\_energy\_mwh}）。
+
+\section{核心数学模型}
+三类恢复模型可互换：(1) 贪心逐时重构；(2) 严格多时段 LinDistFlow MILP；(3) RA 式两阶段
+灾害 MILP（开关约束的故障隔离 + 灾后联络重构）。以下给出多时段 MILP 与认证恢复的核心式。
+
+\subsection{恢复目标（优先级切负荷 + 开关 + MESS）}
+\begin{equation}
+\min\; \sum_{t}\sum_{i}\pi_i\, s_{i,t}\,\Delta t
+      \;+\; \sum_{t}\sum_{(i,j)} c^{\text{sw}}\,\lvert z_{ij,t}-z_{ij,t-1}\rvert
+      \;+\; c^{\text{mess}}\!\!\sum_{m} d_m,
+\end{equation}
+惩罚 $\pi_i$ 按关键度分档（\fld{shed\_penalty\_critical}/\texttt{high}/\texttt{medium}/\texttt{low}），
+$z_{ij,t}\in\{0,1\}$ 为支路开关，$d_m$ 为 MESS 行驶里程。
+
+\subsection{LinDistFlow 网络、能量化与径向约束}
+\begin{equation}
+\sum_{j:(i,j)}P_{ij,t}-\sum_{k:(k,i)}P_{ki,t}=p_{i,t}-s_{i,t},\qquad
+V_{j,t}=V_{i,t}-2\big(r_{ij}P_{ij,t}+x_{ij}Q_{ij,t}\big),
+\end{equation}
+配合母线能量化二元变量、单商品流与生成森林约束保证\textbf{径向}
+（\fld{radial\_topology\_enforced}=true），电压满足
+$\underline V\le V_{i,t}\le\overline V$（\fld{v\_min\_pu}/\fld{v\_max\_pu}）。
+
+\subsection{MESS 时空路由与 SOC}
+\begin{equation}
+\tau_m^{\text{travel}}=\frac{\text{dist}}{v},\qquad
+\text{SOC}_{m,t+1}=\text{SOC}_{m,t}+\eta\,P^{\text{ch}}_{m,t}\Delta t-\frac{P^{\text{dis}}_{m,t}}{\eta}\,\Delta t,
+\end{equation}
+在道路/电气图传输网络上按行驶时间与可用窗口约束到站与并网时刻。
+
+\subsection{弹性指标}
+\begin{equation}
+R=\frac{\sum_{t}\sum_i \pi_i\,(P_{d,i,t}-s_{i,t})}{\sum_{t}\sum_i \pi_i\,P_{d,i,t}},
+\end{equation}
+即优先级加权的“已恢复供电量 / 总需求量”，记入 \fld{resilience\_index}。
+
+\subsection{认证恢复：有限动作主问题 + 多保真证书}
+把恢复表述为有限动作主 MIP，每个候选动作 $a$ 须同时通过信息物理/MESS 可执行性与
+多保真动态证书；L3 为全 DAE 阈值判据
+\begin{equation}
+\text{Safe}(a)\iff
+\max_t\lvert\Delta f_t\rvert\le\overline{\Delta f},\;
+\max_t\lvert\text{RoCoF}_t\rvert\le\overline{\text{RoCoF}},\;
+V_t\in[\underline V,\overline V],
+\end{equation}
+不满足则加入 no-good 割并重解主 MIP，直至给出证书标签 \texttt{CertificateLabel}。
+
+\section{接口与参数}
+\begin{paramtable}
+\fld{horizon\_hours} & — & h & 整数 & $48$ & 恢复评估时域\\
+\fld{model} & — & — & 枚举 & 启发式 & 恢复模型（启发式/多时段 MIP/RA 分阶段 MILP）\\
+\fld{allow\_reconfiguration} & — & — & 布尔 & — & 是否允许联络开关重构\\
+\fld{allow\_mess\_dispatch} & — & — & 布尔 & — & 是否允许移动储能调度\\
+\fld{shed\_penalty\_critical} & $\pi_{\mathrm{crit}}$ & — & $>0$ & — & 关键负荷切除惩罚（分档最高）\\
+\fld{switching\_cost} & $c^{\mathrm{sw}}$ & — & $\ge 0$ & — & 单次开关操作成本\\
+\fld{mess\_travel\_cost\_per\_km} & $c^{\mathrm{mess}}$ & 元/km & $\ge 0$ & — & MESS 单位里程行驶成本\\
+\fld{mip\_gap} & — & — & $0\sim1$ & $0.02$ & 恢复 MILP 相对间隙目标\\
+\fld{max\_time\_s} & — & s & $>0$ & $120$ & MILP 求解时限\\
+\fld{v\_min\_pu} & $\underline V$ & pu & — & — & LinDistFlow 电压下限\\
+\fld{v\_max\_pu} & $\overline V$ & pu & — & — & LinDistFlow 电压上限\\
+\end{paramtable}
+求解器后端 \fld{solver} 可取 \texttt{Native}/\texttt{HiGHS}/\texttt{Gurobi}；灾害分阶段
+由 \fld{enable\_disaster\_stages} 开启，故障与传输边分别由 \fld{faults}/\fld{transport\_edges} 提供。
+
+\section{验证与边界局限}
+\subsection{验证与校核}
+注册测试：\srcpath{test\_resilience\_assessment}（三类恢复模型与 MESS 路由）；
+认证恢复在 \srcpath{test\_transient\_dynamics} 中通过 \texttt{CertifiedRestorationCoordinator}
+验证可执行性、MESS/信息物理受阻动作与证书环。
+
+\subsection{边界与局限（如实标注）}
+\begin{itemize}
+  \item 恢复 MILP 为 LinDistFlow/有功模型：\fld{dc\_branch\_flow\_limits\_enforced}、
+        \fld{converter\_transfer\_limits\_enforced}、\fld{converter\_losses\_modelled}、
+        \fld{reactive\_power\_modelled}、\fld{protection\_logic\_modelled}、
+        \fld{transient\_limits\_modelled} 默认为 false，\fld{radial\_topology\_enforced}=true；
+  \item \fld{mip\_gap\_within\_tolerance} 表示达到间隙目标，\textbf{非已证全局最优}（非零间隙近似证书）；
+  \item 认证恢复 L1/L2 为粗粒度“采样雅可比管道”诊断，在以严格包络替换常数前偏保守；
+  \item L3 \fld{proof\_valid} 仅覆盖所仿真场景/阈值/时域，\textbf{非全局稳定}；目录最优仅在有限动作集内；
+  \item LP 规模路径中 MESS 迁移时序为外生输入，仅在 opt-in 模式下与恢复协同优化。
+\end{itemize}
+规范文档：\srcpath{docs/certified\_restoration\_runtime.md}。
+\end{document}

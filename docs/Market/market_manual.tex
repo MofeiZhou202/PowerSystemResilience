@@ -1,0 +1,168 @@
+% !TEX program = xelatex
+% 编译方式：把本文件夹整包复制到纯 ASCII 路径后，执行两遍 xelatex（详见 docs/_manual_common/README.md）。
+% 首版骨架：内容取自 src/market/ 与 include/hacdcpf/market/market_simulation.hpp 源码及
+%           docs/market_simulation_runtime.md，公式与参数以代码为准。
+\documentclass[UTF8,fontset=windows,a4paper,11pt]{ctexart}
+\usepackage{hysim_manual}
+
+\title{\textbf{交直流混合高弹性能源电力系统仿真平台}\\[0.5em]
+       {\Large 电力市场仿真技术手册}\\[0.3em]
+       {\large 数学模型、接口参数与验证校核（首版骨架）}}
+\author{HySim-XJTU-HRPES（西安交通大学 HRPES 团队）}
+\date{\today}
+
+\begin{document}
+\maketitle
+\begin{abstract}
+\noindent 本手册依据 HySim-XJTU-HRPES 平台电力市场仿真模块
+（\srcpath{src/market/}、\srcpath{include/hacdcpf/market/market\_simulation.hpp}）整理，
+覆盖日前市场全链路（报价$\to$SCUC$\to$固定组合 SCED/LMP$\to$LODF N-1 割$\to$AC 认证$\to$结算）、
+实时两结算市场（再调度 + 偏差结算 + 辅助/不平衡）与同步局部最优响应的重复博弈。
+全部结论以源码与既有契约 \srcpath{docs/market\_simulation\_runtime.md} 为准。
+\textbf{诚实口径（AC-only）}：出清刻意只对 AC 网络子集定价
+（\fld{model\_scope}=\texttt{"ac-dc-linear-v1"}，\fld{dc\_network\_modelled}=false），
+公式无法表示的在役资产以 \texttt{UnsupportedMarketAsset} \textbf{显式退回而非静默简化}。
+文档版式与《碳流追踪与碳排放核算技术手册》一致。
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{阅读指南与约定}
+\subsection{数据来源}
+\begin{itemize}
+  \item \srcpath{include/hacdcpf/market/market\_simulation.hpp} —— 日前/实时/重复博弈接口、
+        \texttt{MarketOptions}/\texttt{MarketResult}/\texttt{MarketModelScope} 定义；
+  \item \srcpath{src/market/market\_simulation.cpp} —— 出清流水线、SCED/LMP、N-1 割、AC 认证与结算实现；
+  \item \srcpath{src/market/participant\_behavior.cpp} —— 参与者报价策略（加价/扣留）与所有权解析；
+  \item \srcpath{tests/test\_market\_simulation.cpp} —— 验证依据（目标 \texttt{hacdcpf\_test\_market\_simulation}）。
+\end{itemize}
+入口族定义于 \srcpath{include/hacdcpf/market/market\_simulation.hpp}。
+
+\subsection{单位制与索引空间}
+价格 LMP 单位 元/MWh，功率 MW，时段为整数小时索引。\fld{lmp\_per\_mwh} 按 AC 母线顺序，
+\fld{branch\_flow\_mw} 按 AC 支路顺序；\fld{dc\_lmp\_per\_mwh}、\fld{vsc\_ac\_injection\_mw}/
+\fld{vsc\_dc\_injection\_mw} 为诊断性输出（直流网络未参与定价）。机组组合结果
+\fld{commitment}（\texttt{UCSchedule}）与逐时段定价 \fld{pricing}（\texttt{PricingPeriod}）
+共享时段索引空间。
+
+\subsection{诚实口径}
+\fld{model\_scope}（\texttt{MarketModelScope}）显式声明：\fld{ac\_network\_modelled}=true、
+\fld{dc\_network\_modelled}=false、\fld{vsc\_bidirectional\_efficiency\_modelled}=false、
+\fld{hybrid\_n1\_modelled}=false，且 \fld{energy\_prices\_valid} 在通过校核前为 false。
+在役但公式无法表示的资产以 \fld{unsupported\_assets}（\texttt{UnsupportedMarketAsset}）退回。
+\fld{scuc\_mip\_relative\_gap}=$10^{-2}$ 意味着 SCUC 为近似解，除非 \fld{scuc\_optimality\_proven}
+置真；AC 应急校核为 opt-in，失败在 \texttt{SecurityResult} 中保持显式（不静默修复）。
+
+\section{功能定位与架构}
+\subsection{公共入口族}
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{6.6cm}L{3.0cm}L{5.4cm}@{}}
+\toprule
+入口 & 定义位置 & 说明\\
+\midrule
+\srcpath{run\_day\_ahead\_market(system, time\_series, options)} & market\_simulation.hpp & 报价$\to$SCUC$\to$固定组合 SCED/定价$\to$LODF N-1$\to$AC 认证$\to$结算\\
+\srcpath{run\_real\_time\_market(system, da\_ts, realized\_ts, da\_result, options)} & 同上 & 再调度 + 两结算偏差 + 辅助/不平衡\\
+\srcpath{run\_repeated\_market\_game(system, da\_ts, realized\_ts, options)} & 同上 & 同步局部最优响应重复博弈\\
+\srcpath{make\_cost\_based\_offers(system, segment\_count)} & 同上 & 由成本曲线生成真实分段线性报价\\
+\srcpath{submit\_participant\_offers(system, participants, segment\_count)} & 同上 & 所有权解析与报价审计\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{关键数据结构}
+\compmeta{MarketResult}{include/hacdcpf/market/market\_simulation.hpp}
+主要字段：\fld{commitment}、\fld{pricing}、\fld{ac\_validation}、\fld{generator\_settlement}、
+\fld{participant\_settlement}、\fld{market\_power}（\texttt{MarketPowerMetrics}，HHI）、
+\fld{security}、\fld{settlement}、\fld{model\_scope}、\fld{unsupported\_assets}。
+\compmeta{PricingPeriod}{include/hacdcpf/market/market\_simulation.hpp}
+含 \fld{generator\_dispatch\_mw}、\fld{lmp\_per\_mwh}、\fld{branch\_flow\_mw}、
+\fld{dc\_lmp\_per\_mwh}、\fld{reserve\_requirement\_mw}、\fld{objective}。
+\compmeta{MarketModelScope}{include/hacdcpf/market/market\_simulation.hpp}
+以 \fld{model\_scope}=\texttt{"ac-dc-linear-v1"} 与各布尔 \fld{ValidityFlags}、\fld{limitations}
+声明模型覆盖边界。
+
+\section{核心数学模型}
+日前流水线严格分层：真实成本报价 $\to$ SCUC 固定机组组合 $\to$ 固定组合 SCED $\to$
+以母线平衡对偶给出 LMP $\to$（可选）迭代 LODF N-1 割 $\to$ 非线性 AC 潮流认证 $\to$ 结算。
+
+\subsection{报价（分段线性、成本基）}
+由机组成本曲线 $C_g(\cdot)$ 生成分段线性报价，可选加价 $\mu_g$ 与容量扣留 $\omega_g$：
+\begin{equation}
+\text{offer}_g(P)\approx \text{PWL}\{C_g\}\times(1+\mu_g),\qquad
+\bar P_g^{\text{avail}}=\bar P_g\,(1-\omega_g),
+\end{equation}
+分段数为 \fld{energy\_offer\_segments}（默认 8）。
+
+\subsection{SCUC（机组组合 MILP）}
+\begin{equation}
+\min\;\sum_{g,t}\big(C_g(p_{g,t})+S_g\,v_{g,t}\big)\quad\text{s.t.}\;
+\text{功率平衡、最小启停、爬坡、备用},
+\end{equation}
+$u_{g,t}\in\{0,1\}$ 为开机状态、$v_{g,t}$ 为启动，相对间隙由 \fld{scuc\_mip\_relative\_gap} 控制。
+
+\subsection{固定组合 SCED 与 LMP（对偶定价）}
+固定 $u_{g,t}$ 后逐时段求解经济调度 LP，LMP 取母线平衡对偶 $\lambda$ 与阻塞分量之和：
+\begin{equation}
+\min\sum_{g,t}c_g\,p_{g,t}\;\;\text{s.t.}\;\;
+\textstyle\sum_g p_{g,t}-\sum_i d_{i,t}=0\;(\lambda_t),\;\; |P_{\ell,t}|\le\bar P_\ell\;(\mu_{\ell,t}),
+\end{equation}
+\begin{equation}
+\text{LMP}_{i,t}=\lambda_t+\sum_{\ell}\text{GSF}_{\ell,i}\,\mu_{\ell,t}.
+\end{equation}
+
+\subsection{预防式 N-1（LODF 割）}
+按转移分布因子迭代加入价格可用的预防式安全割：
+\begin{equation}
+P_\ell^{(k)}=P_\ell+\text{LODF}_{\ell,k}\,P_k\le\bar P_\ell,\qquad \forall\,\text{已识别的}~k,
+\end{equation}
+仅对 AC 支路，且由 \fld{enable\_n1\_security} 开关（默认 false）。
+
+\subsection{AC 认证与两结算}
+出清后对清算调度做非线性 AC 潮流认证（\fld{ac\_validation}，失败保持显式）。实时市场采用标准
+两结算恒等式：
+\begin{equation}
+\text{结算}_g=P_g^{\text{DA}}\,\pi^{\text{DA}}+\big(P_g^{\text{RT}}-P_g^{\text{DA}}\big)\,\pi^{\text{RT}},
+\end{equation}
+叠加辅助服务/不平衡费用。市场力以 HHI 度量 $\text{HHI}=\sum_g \text{share}_g^2$。
+
+\subsection{重复博弈}
+以同步、步长有界的局部最优响应更新各参与者加价/扣留（\fld{markup\_step\_fraction}、
+\fld{withholding\_step\_fraction}），至多 \fld{max\_rounds} 轮或 \fld{converged} 为真。
+
+\section{接口与参数}
+\begin{paramtable}
+\fld{energy\_offer\_segments} & — & — & 整数 & $8$ & 能量报价分段数\\
+\fld{upward\_reserve\_fraction} & — & — & $0\sim1$ & $0.05$ & 上调备用需求占负荷比例\\
+\fld{value\_of\_lost\_load\_per\_mwh} & VOLL & 元/MWh & $>0$ & $10000$ & 失负荷价值\\
+\fld{scuc\_mip\_relative\_gap} & — & — & $0\sim1$ & $0.01$ & SCUC 相对间隙\\
+\fld{scuc\_time\_limit\_sec} & — & s & $>0$ & $120$ & SCUC 求解时限\\
+\fld{enable\_n1\_security} & — & — & 布尔 & false & 是否启用预防式 N-1 割\\
+\fld{run\_ac\_validation} & — & — & 布尔 & true & 是否对出清结果做 AC 认证\\
+\fld{optimize\_dc\_storage} & — & — & 布尔 & true & 是否优化直流侧储能\\
+\fld{max\_rounds} & — & — & 整数 & $8$ & 重复博弈最大轮数\\
+\fld{markup\_step\_fraction} & — & — & $0\sim1$ & $0.05$ & 重复博弈加价步长\\
+\fld{withholding\_step\_fraction} & — & — & $0\sim1$ & $0.05$ & 重复博弈容量扣留步长\\
+\end{paramtable}
+参与者策略 \texttt{ParticipantBehavior} 的 \fld{BehaviorPolicyType} 可取
+\texttt{CostBased}/\texttt{FixedMarkup}/\texttt{CapacityWithholding}/\texttt{MarkupAndWithholding}；
+实时侧辅助服务参数位于 \texttt{AncillaryServiceOptions}。
+
+\section{验证与边界局限}
+\subsection{验证与校核}
+注册测试：\srcpath{test\_market\_simulation}（目标 \texttt{hacdcpf\_test\_market\_simulation}），
+覆盖日前流水线、定价对偶、结算与市场力度量。
+
+\subsection{边界与局限（如实标注）}
+\begin{itemize}
+  \item 出清\textbf{面向 AC 网络子集}：混合 AC/DC 市场协同优化被\textbf{显式拒绝}而非静默简化；
+        \fld{model\_scope}=\texttt{"ac-dc-linear-v1"}，\fld{dc\_network\_modelled}=false，
+        换流器效率/损耗标志为 false，\fld{hybrid\_n1\_modelled}=false；
+  \item 公式无法表示的在役资产以 \texttt{UnsupportedMarketAsset} 退回（不静默丢弃）；
+  \item N-1 为 AC 支路上的预防式 LODF；AC 应急校核为 opt-in，失败在 \texttt{SecurityResult} 中保持显式；
+  \item \fld{scuc\_mip\_relative\_gap}=$10^{-2}$：SCUC 为近似解，除非 \fld{scuc\_optimality\_proven}；
+  \item \fld{energy\_prices\_valid} 在通过校核前为 false，直流 LMP 仅作诊断。
+\end{itemize}
+规范文档：\srcpath{docs/market\_simulation\_runtime.md}、
+\srcpath{docs/market\_simulation\_mathematical\_models.md}。
+\end{document}

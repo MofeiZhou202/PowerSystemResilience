@@ -1,0 +1,169 @@
+% !TEX program = xelatex
+% 编译方式：把本文件夹整包复制到纯 ASCII 路径后，执行两遍 xelatex（详见 docs/_manual_common/README.md）。
+% 首版骨架：内容取自 src/api/ 与 include/hacdcpf/api/ 源码及
+%           docs/runtime_api.md，公式与参数以代码为准。
+\documentclass[UTF8,fontset=windows,a4paper,11pt]{ctexart}
+\usepackage{hysim_manual}
+
+\title{\textbf{交直流混合高弹性能源电力系统仿真平台}\\[0.5em]
+       {\Large 公共 API 门面技术手册}\\[0.3em]
+       {\large 求解入口族、能力门控与验证校核（首版骨架）}}
+\author{HySim-XJTU-HRPES（西安交通大学 HRPES 团队）}
+\date{\today}
+
+\begin{document}
+\maketitle
+\begin{abstract}
+\noindent 本手册依据 HySim-XJTU-HRPES 平台公共 API 门面
+（\srcpath{include/hacdcpf/api/hacdcpf.hpp}、\srcpath{solver\_capabilities.hpp}，
+实现于 \srcpath{src/api/hacdcpf.cpp}）整理。门面在命名空间 \texttt{hacdcpf} 下以稳定
+自由函数聚合全库的潮流（PF）、最优潮流（OPF）、动态、碳流、市场、可靠性、弹性、
+时序与校验子系统，并经 \srcpath{get\_solver\_capabilities()} 在运行期报告后端可用性。
+可选后端由能力标志门控，缺失后端如实报告不可用而非静默降级；\srcpath{verify\_opf\_result}
+为独立的解后审计，不改变求解本身。GUI/自动化 HTTP 面属独立层
+（\srcpath{tests/run\_gui\_server.cpp}），不在 \srcpath{src/api}。全部结论以源码为准；版式
+与《碳流追踪与碳排放核算技术手册》《潮流计算技术手册》一致。命名空间为 \texttt{hacdcpf}。
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{阅读指南与约定}
+\subsection{数据来源}
+\begin{itemize}
+  \item \srcpath{include/hacdcpf/api/hacdcpf.hpp} —— 门面自由函数与会话/句柄类型；
+  \item \srcpath{include/hacdcpf/api/solver\_capabilities.hpp} —— \texttt{SolverCapabilities}
+        与运行期能力查询；
+  \item \srcpath{src/api/hacdcpf.cpp} —— 门面与能力查询的实现；
+  \item \srcpath{docs/runtime\_api.md} —— HTTP/GUI \texttt{/api/v1} 服务契约（位于
+        \srcpath{tests/run\_gui\_server.cpp}）；
+  \item \srcpath{docs/python\_api.md} —— Python 绑定面；
+  \item \srcpath{tests/test\_hacdcpf.cpp}、\srcpath{tests/test\_solver\_capabilities.cpp}
+        —— 验证依据。
+\end{itemize}
+命名空间为 \texttt{hacdcpf}。
+
+\subsection{单位制与索引空间}
+门面不改变各子系统的单位与索引口径：潮流量以 MW/Mvar/标幺电压表达，结果向量的索引
+空间与对应求解器一致（详见各专项手册）。组件对外以稳定 \texttt{.index} 标识；AC/DC 域
+分开，门面不引入新的跨域裸 ID。所有返回结构沿用子系统既有的有效性/诚实字段。
+
+\subsection{诚实口径}
+门面是薄封装：能力标志如实反映\textbf{编译期}后端可用性，运行期查询不会“凭空”启用缺失
+后端；\srcpath{solve\_power\_flow\_helm} 仅支持 AC（混合 AC/DC 与电压相关 ZIP 负荷被显式
+拒绝并给出诊断）；\srcpath{safe\_solve\_power\_flow} 在 \fld{validate\_input}=true 时先校验再
+求解，而抛异常版 \srcpath{solve\_power\_flow} 不校验；\srcpath{verify\_opf\_result} 是独立的
+解后审计，不改变求解结果本身。
+
+\section{功能定位与架构}
+\subsection{公共入口族：潮流族}
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{6.4cm}L{2.8cm}L{5.6cm}@{}}
+\toprule
+入口 & 定义位置 & 说明\\
+\midrule
+\srcpath{get\_solver\_capabilities()} & solver\_capabilities.hpp & 运行期后端可用性查询\\
+\srcpath{solve\_power\_flow} / \srcpath{safe\_solve\_power\_flow} & hacdcpf.hpp & NR 潮流；safe 变体返回 \texttt{Result<PowerFlowResult>} 并校验\\
+\srcpath{solve\_dc\_power\_flow} & 同上 & 直流潮流\\
+\srcpath{solve\_power\_flow\_adaptive} & 同上 & 自适应孤岛潮流\\
+\srcpath{solve\_power\_flow\_islanded} & 同上 & 孤岛潮流\\
+\srcpath{solve\_power\_flow\_distributed\_slack} & 同上 & 分布式松弛潮流\\
+\srcpath{solve\_power\_flow\_fdpf} & 同上 & 快速解耦潮流（FDPF）\\
+\srcpath{solve\_power\_flow\_helm} & 同上 & HELM 潮流（\textbf{仅 AC}）\\
+\srcpath{solve\_power\_flow\_homotopy} & 同上 & 同伦延拓潮流\\
+\srcpath{solve\_power\_flow\_newton\_krylov} & 同上 & Newton--Krylov 潮流\\
+\srcpath{solve\_ac\_dc\_power\_flow} & 同上 & 交直流混合潮流\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{公共入口族：OPF、分析与复用}
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{6.4cm}L{2.8cm}L{5.6cm}@{}}
+\toprule
+入口 & 定义位置 & 说明\\
+\midrule
+\srcpath{solve\_ac\_opf} / \srcpath{solve\_dc\_opf} / \srcpath{solve\_rpo} & hacdcpf.hpp & AC/DC OPF 与无功优化\\
+\srcpath{verify\_opf\_result} & 同上 & OPF 解后独立可行性审计\\
+\srcpath{run\_transient\_simulation} & 同上 & 机电暂态仿真\\
+\srcpath{run\_distribution\_resilience\_assessment} & 同上 & 配电弹性评估\\
+\srcpath{validate\_full} & 同上 & 全量输入校验\\
+\srcpath{create\_solver\_handle} / \srcpath{solve\_handle} / \srcpath{destroy\_solver\_handle} & 同上 & C 风格可复用 PF/DC 句柄\\
+\texttt{PreparedPowerFlowSession} & 同上 & 重复求解复用会话（move-only）\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{关键数据结构}
+\compmeta{SolverCapabilities}{include/hacdcpf/api/solver\_capabilities.hpp}
+线性代数后端 \fld{has\_sparse\_lu}（恒 true）/\fld{has\_klu}/\fld{has\_umfpack}/\fld{has\_accelerate}；
+MIP/NLP 后端 \fld{has\_highs}/\fld{has\_gurobi}/\fld{has\_ipopt}/\fld{has\_scip}/\fld{has\_native\_ipm}
+（恒 true）；I/O 能力 \fld{has\_excel}/\fld{has\_opendss}；特性标志
+\fld{supports\_integer\_variables}、\fld{supports\_ac\_opf}（true）、\fld{supports\_dc\_opf}（true）、
+\fld{supports\_three\_phase}（true）。
+
+\compmeta{PreparedPowerFlowSession}{include/hacdcpf/api/hacdcpf.hpp}
+持有型重复求解上下文，成员 \srcpath{solve(sys)}、\srcpath{reset()}；move-only（拷贝已删除），
+采用 pimpl \texttt{Impl}。另有前置声明的不透明句柄 \texttt{SolverHandle}，提供 C 风格可复用
+PF/DC 句柄。
+
+\section{核心机制：门面分派与能力门控}
+\subsection{门面分派}
+门面头文件汇入 PF/OPF/动态/碳流/市场/可靠性/弹性/时序/校验/EV/综合能源各子系统，并在
+命名空间 \texttt{hacdcpf} 下以稳定自由函数再导出其求解入口。调用方无需了解投影、装配与
+符号分析细节；\texttt{PreparedPowerFlowSession} 与 \texttt{SolverHandle} 在兼容快照之间复用
+投影/装配/符号分析结果，摊薄重复求解开销。
+
+\subsection{能力门控}
+\srcpath{get\_solver\_capabilities()} 在运行期返回编译期后端可用性。可选特性按下述逻辑
+门控（$\vee$ 为逻辑或）：
+\[
+\texttt{supports\_integer\_variables}\;\Longleftrightarrow\;
+\texttt{has\_highs}\ \vee\ \texttt{has\_gurobi}\ \vee\ \texttt{has\_scip}.
+\]
+ETAP I/O 可用当且仅当 \fld{has\_excel} 为真；OpenDSS I/O 可用当且仅当 \fld{has\_opendss}
+为真。\fld{has\_sparse\_lu} 与 \fld{has\_native\_ipm} 恒为 true（内置），因此稀疏直接解与
+原生 IPM 在任意构型下均可用；其余后端缺失时相应入口如实报告不可用而非静默降级。
+
+\section{接口与参数}
+下表列出 \texttt{SolverCapabilities} 的关键能力标志（“默认值”列中“编译期”表示由构建
+配置决定，“派生”表示由其他标志推导）。
+\begin{paramtable}
+\fld{has\_sparse\_lu} & — & — & true/false & true & 内置稀疏 LU（恒可用）\\
+\fld{has\_klu} & — & — & true/false & 编译期 & KLU 稀疏后端\\
+\fld{has\_umfpack} & — & — & true/false & 编译期 & UMFPACK 稀疏后端\\
+\fld{has\_accelerate} & — & — & true/false & 编译期 & Apple Accelerate 稀疏后端\\
+\fld{has\_highs} & — & — & true/false & 编译期 & HiGHS LP/MILP 后端\\
+\fld{has\_gurobi} & — & — & true/false & 编译期 & Gurobi 后端\\
+\fld{has\_ipopt} & — & — & true/false & 编译期 & Ipopt NLP 后端\\
+\fld{has\_scip} & — & — & true/false & 编译期 & SCIP 后端\\
+\fld{has\_native\_ipm} & — & — & true/false & true & 内置原生 IPM（恒可用）\\
+\fld{has\_excel} & — & — & true/false & 编译期 & OpenXLSX/ETAP I/O 能力\\
+\fld{has\_opendss} & — & — & true/false & 编译期 & OpenDSS 桥接能力\\
+\fld{supports\_integer\_variables} & — & — & true/false & 派生 & 需 HiGHS/Gurobi/SCIP 之一\\
+\fld{supports\_ac\_opf} & — & — & true/false & true & AC OPF 支持\\
+\fld{supports\_dc\_opf} & — & — & true/false & true & DC OPF 支持\\
+\fld{supports\_three\_phase} & — & — & true/false & true & 三相支持\\
+\end{paramtable}
+潮流/OPF 入口的求解选项与结果字段沿用各专项子系统定义，门面只做转发，不重新定义其
+单位与索引口径。
+
+\section{验证与边界局限}
+\subsection{验证与校核}
+注册测试：\srcpath{test\_hacdcpf}、\srcpath{test\_solver\_capabilities}、\srcpath{test\_hacdcdss}，
+覆盖门面入口、运行期能力查询与端到端装配。
+
+\subsection{边界与局限（如实标注）}
+\begin{itemize}
+  \item \srcpath{solve\_power\_flow\_helm} 仅支持 AC；混合 AC/DC 与电压相关 ZIP 负荷被
+        显式拒绝并给出诊断；
+  \item \srcpath{safe\_solve\_power\_flow} 在 \fld{validate\_input}=true 时先校验，抛异常版
+        \srcpath{solve\_power\_flow} 不校验；
+  \item 能力标志门控可选特性：\fld{supports\_integer\_variables} 需 HiGHS/Gurobi/SCIP
+        之一，\fld{has\_excel}/\fld{has\_opendss} 门控 ETAP/OpenDSS I/O；
+  \item \srcpath{verify\_opf\_result} 为独立解后可行性审计（功率平衡、电压/支路/机组
+        限值、目标一致性），结果写入 \fld{result.audit}，与求解过程解耦；
+  \item GUI/自动化 HTTP 面在 \srcpath{tests/run\_gui\_server.cpp}，非 \srcpath{src/api}；
+        门面本身不含网络层。
+\end{itemize}
+\end{document}

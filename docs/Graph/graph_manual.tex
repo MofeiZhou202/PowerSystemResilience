@@ -1,0 +1,155 @@
+% !TEX program = xelatex
+% 编译方式：把本文件夹整包复制到纯 ASCII 路径后，执行两遍 xelatex（详见 docs/_manual_common/README.md）。
+% 首版骨架：内容取自 src/graph/ 与 include/hacdcpf/graph/ 源码
+%           （topology_analysis / switch_contraction / series_reduction / kron_reduction / result_recovery），公式与参数以代码为准。
+\documentclass[UTF8,fontset=windows,a4paper,11pt]{ctexart}
+\usepackage{hysim_manual}
+
+\title{\textbf{交直流混合高弹性能源电力系统仿真平台}\\[0.5em]
+       {\Large 图建模、拓扑分析与网络降阶技术手册}\\[0.3em]
+       {\large 数学模型、接口参数与验证校核（首版骨架）}}
+\author{HySim-XJTU-HRPES（西安交通大学 HRPES 团队）}
+\date{\today}
+
+\begin{document}
+\maketitle
+\begin{abstract}
+\noindent 本手册依据 HySim-XJTU-HRPES 平台图模块
+（\srcpath{src/graph/}、\srcpath{include/hacdcpf/graph/}）整理，覆盖从
+\texttt{HybridPowerSystem} 到 \texttt{PowerSystemGraph} 的图建模、拓扑分析（孤岛/辐射性/
+回路/桥/割点），以及零阻抗合并与开关收缩、串联/悬垂降阶、稠密与稀疏 Kron/Schur 补降阶，
+并为每类降阶保留映射以恢复被消去母线的状态。全部结论以源码为准：Kron 仅对无源/线性内部
+节点精确，悬垂折叠为近似；AC/DC 母线共享整数 ID 时须使用 domain-qualified 映射
+（\fld{ac\_bus\_id\_to\_node\_idx}/\fld{dc\_bus\_id\_to\_node\_idx}）。伞形头文件为
+\srcpath{hacdcpf/graph/graph.hpp}。文档版式与《碳流追踪与碳排放核算技术手册》一致。
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{阅读指南与约定}
+\subsection{数据来源}
+\begin{itemize}
+  \item \srcpath{include/hacdcpf/graph/power\_system\_graph.hpp} —— 图建模与
+        \texttt{PowerSystemGraph}/\texttt{GraphNode}/\texttt{GraphEdge}；
+  \item \srcpath{include/hacdcpf/graph/topology\_analysis.hpp} —— 拓扑分析与
+        \texttt{TopologyReport}；
+  \item \srcpath{include/hacdcpf/graph/switch\_contraction.hpp}、
+        \srcpath{series\_reduction.hpp}、\srcpath{kron\_reduction.hpp}、
+        \srcpath{sparse\_kron\_reduction.hpp} —— 各类降阶；
+  \item \srcpath{include/hacdcpf/graph/reduction\_plan.hpp}、
+        \srcpath{reduction\_mapping.hpp}、\srcpath{result\_recovery.hpp} —— 降阶计划、映射与状态恢复；
+  \item \srcpath{docs/graph\_runtime\_contract.md} —— 既有运行时契约。
+\end{itemize}
+
+\subsection{单位制与索引空间}
+支路参数 $r/x/b/\text{tap}$ 为标幺值（pu）；本模块严格区分三类 ID：组件
+\fld{comp\_index}（对外稳定）、\fld{edge\_id}（0-based 位置索引）与图 node/edge 临时索引。
+AC 与 DC 母线各自经 \fld{ac\_bus\_id\_to\_node\_idx}/\fld{dc\_bus\_id\_to\_node\_idx} 映射到
+node 下标，恢复结果 \texttt{FullNetworkVoltages} 按 \fld{ac\_bus\_voltage}/\fld{dc\_bus\_voltage}
+分列。零阻抗判定阈值为 \fld{zero\_impedance\_threshold}（默认 $10^{-8}$）。
+
+\subsection{诚实口径}
+每类降阶都记录一份映射以支持 \srcpath{recover\_*} 状态恢复：Kron 仅对无源/线性内部节点严格
+精确，恒功率内部节点为工作点相关的近似；填充比守卫 \fld{max\_fill\_ratio} 与奇异
+$Y_{\beta\beta}$ 主元守卫可拒绝降阶；悬垂折叠为近似（取 $|V_{\text{parent}}|=1.0$ pu，迭代恢复
+不单独报告收敛标志）。旧式扁平映射（\fld{bus\_id\_to\_node\_idx}、\texttt{IslandInfo::bus\_ids}
+等）在 AC/DC 同号 ID 时含糊，须改用 domain-qualified 映射。
+
+\section{功能定位与架构}
+\subsection{公共入口族}
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{6.8cm}L{3.2cm}L{5.0cm}@{}}
+\toprule
+入口 & 定义位置 & 说明\\
+\midrule
+\srcpath{build\_power\_system\_graph(system, thr=1e-8)} & power\_system\_graph.hpp & 系统 $\to$ \texttt{PowerSystemGraph}\\
+\srcpath{analyze\_topology(graph)} & topology\_analysis.hpp & 孤岛/辐射性/回路/桥/割点/诊断\\
+\srcpath{contract\_zero\_impedance\_edges(...)} & switch\_contraction.hpp & 闭合开关/零阻抗超节点合并\\
+\srcpath{make\_reduction\_plan(...)} & reduction\_plan.hpp & 可审计降阶计划（分类候选）\\
+\srcpath{apply\_series\_reduction/apply\_pendant\_reduction(...)} & series\_reduction.hpp & 串联/悬垂降阶\\
+\srcpath{apply\_kron\_reduction(...)} & kron\_reduction.hpp & 稠密 Kron/Schur 补 + 电压恢复\\
+\srcpath{reduce\_sparse\_kron(ybus, eligible, options)} & sparse\_kron\_reduction.hpp & 稀疏 Kron 降阶\\
+\srcpath{recover\_switch\_contracted\_buses(...)} & result\_recovery.hpp & 恢复被消去母线电压\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{关键数据结构}
+\compmeta{PowerSystemGraph}{include/hacdcpf/graph/power\_system\_graph.hpp}
+主要字段：\fld{nodes}（\texttt{GraphNode}）、\fld{edges}（\texttt{GraphEdge}：\fld{comp\_index}、
+\fld{edge\_id}、\fld{r\_pu}/\fld{x\_pu}/\fld{b\_pu}/\fld{tap}、\fld{is\_zero\_impedance}）、
+\fld{ac\_bus\_id\_to\_node\_idx}、\fld{dc\_bus\_id\_to\_node\_idx}、\fld{adj}。
+
+\compmeta{TopologyReport}{include/hacdcpf/graph/topology\_analysis.hpp}
+主要字段：\fld{islands}、\fld{is\_connected}、\fld{is\_radial}、\fld{cycle\_count}、
+\fld{bridge\_edge\_ids}、\fld{cut\_vertices}、\fld{fundamental\_cycles}、\fld{diagnostics}。
+
+\compmeta{GraphReductionOptions}{include/hacdcpf/graph/reduction\_plan.hpp}
+主要字段：\fld{enable\_switch\_contraction}/\fld{enable\_series\_reduction}/
+\fld{enable\_pendant\_reduction}/\fld{enable\_kron\_reduction}、\fld{zero\_impedance\_threshold}、
+\fld{max\_fill\_ratio}、\fld{mode}（\texttt{Safe}/\texttt{Moderate}/\texttt{Aggressive}）。
+降阶结果映射为 \texttt{ReductionMapping}，恢复输出为 \texttt{FullNetworkVoltages}。
+
+\section{核心数学模型}
+\subsection{图建模与拓扑量}
+系统被建为无向图：AC/DC 母线为节点，支路/开关/断路器/VSC/DC-DC 耦合为边。桥与割点用
+Tarjan DFS 求取，回路基由基本圈给出，独立回路数（圈复杂度）为
+\begin{equation}
+\mu = E - N + p,
+\end{equation}
+其中 $E$ 为边数、$N$ 为节点数、$p$ 为连通分量数。辐射性即 $\mu=0$ 且连通。
+
+\subsection{零阻抗合并、串联与悬垂降阶}
+闭合开关/零阻抗支路满足 $Z_{ij}\to 0$，即两端等电位并入超节点：
+\begin{equation}
+Z_{ij}\to 0 \;\Rightarrow\; V_i = V_j .
+\end{equation}
+无源度-2 节点做串联合并（等值阻抗为两段之和）
+\begin{equation}
+Z_{ik} = Z_{ij} + Z_{jk},
+\end{equation}
+悬垂叶节点做近似折叠（迭代恢复时取 $|V_{\text{parent}}|=1.0$ pu）。
+
+\subsection{Kron/Schur 补降阶与状态恢复}
+将母线导纳矩阵按保留集 $\alpha$ 与消去集 $\beta$ 分块，取 Schur 补
+\begin{equation}
+Y_{\text{red}} = Y_{\alpha\alpha} - Y_{\alpha\beta}\,Y_{\beta\beta}^{-1}\,Y_{\beta\alpha},
+\end{equation}
+求解后由记录映射恢复被消去母线电压
+\begin{equation}
+V_\beta = -\,Y_{\beta\beta}^{-1}\left(Y_{\beta\alpha}\,V_\alpha - I_\beta\right),
+\end{equation}
+$I_\beta$ 为消去节点注入（\srcpath{apply\_kron\_reduction\_with\_injection} 提供）。稀疏路径
+（\srcpath{reduce\_sparse\_kron}）在保持稀疏结构下做同一 Schur 补，受 \fld{max\_fill\_ratio} 守卫。
+
+\section{接口与参数}
+\begin{paramtable}
+\fld{zero\_impedance\_threshold} & — & pu & 小正数 & $10^{-8}$ & 零阻抗/闭合开关判定阈值\\
+\fld{max\_fill\_ratio} & — & — & $\ge 1$ & $2.0$ & Kron 填充比上限（超限拒绝）\\
+\fld{enable\_switch\_contraction} & — & 布尔 & — & \texttt{true} & 是否启用开关/零阻抗收缩\\
+\fld{enable\_series\_reduction} & — & 布尔 & — & — & 是否启用串联降阶\\
+\fld{enable\_pendant\_reduction} & — & 布尔 & — & — & 是否启用悬垂折叠（近似）\\
+\fld{enable\_kron\_reduction} & — & 布尔 & — & — & 是否启用 Kron/Schur 补降阶\\
+\fld{mode} & — & — & Safe/Moderate/Aggressive & \texttt{Safe} & 降阶激进程度\\
+\fld{allow\_multi\_slack\_merge} & — & 布尔 & — & \texttt{false} & 是否允许多平衡节点合并\\
+\end{paramtable}
+\srcpath{build\_power\_system\_graph} 的 \fld{zero\_impedance\_threshold} 参数默认 $10^{-8}$；
+\fld{preserve\_*} 系列标志用于强制保留指定母线/支路不被降阶。
+
+\section{验证与边界局限}
+\subsection{验证与校核}
+注册测试：\srcpath{test\_graph}（拓扑、开关收缩、串联/悬垂）、
+\srcpath{test\_graph\_kron}（Schur 补与电压恢复）、
+\srcpath{test\_graph\_roundtrip}（聚合前后 PF/OPF 一致性 round-trip）。
+
+\subsection{边界与局限（如实标注）}
+\begin{itemize}
+  \item Kron 仅对无源/线性内部节点精确；恒功率内部节点为工作点相关的近似；
+        \fld{max\_fill\_ratio} 填充守卫与奇异 $Y_{\beta\beta}$ 主元守卫可拒绝降阶；
+  \item 悬垂折叠为近似（取 $|V_{\text{parent}}|=1.0$ pu；迭代恢复不单独报告收敛标志）；
+  \item 旧式扁平映射（\fld{bus\_id\_to\_node\_idx}、\texttt{IslandInfo::bus\_ids}、
+        \texttt{ReductionMapping} 扁平映射）在 AC/DC 同号 ID 时含糊，须用 domain-qualified 映射；
+  \item 多平衡节点合并默认拒绝，除非 \fld{allow\_multi\_slack\_merge}；两端电压基须在容差内一致。
+\end{itemize}
+\end{document}

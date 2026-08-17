@@ -1,0 +1,173 @@
+% !TEX program = xelatex
+% 编译方式：把本文件夹整包复制到纯 ASCII 路径后，执行两遍 xelatex（详见 docs/_manual_common/README.md）。
+% 首版骨架：内容取自 src/time_series/ 与 include/hacdcpf/time_series/ 源码及
+%           docs/time_series_power_flow_models.md 等，公式与参数以代码为准。
+\documentclass[UTF8,fontset=windows,a4paper,11pt]{ctexart}
+\usepackage{hysim_manual}
+
+\title{\textbf{交直流混合高弹性能源电力系统仿真平台}\\[0.5em]
+       {\Large 时序生产模拟技术手册}\\[0.3em]
+       {\large 数学模型、接口参数与验证校核（首版骨架）}}
+\author{HySim-XJTU-HRPES（西安交通大学 HRPES 团队）}
+\date{\today}
+
+\begin{document}
+\maketitle
+\begin{abstract}
+\noindent 本手册依据 HySim-XJTU-HRPES 平台时序生产模拟模块
+（\srcpath{src/time\_series/}、\srcpath{include/hacdcpf/time\_series/}）整理，覆盖单步
+UC$\to$OPF$\to$PF 流水线、分层（L0$\to$L1$\to$L2$\to$L3）年度生产模拟（含按日并行）
+与多年生命周期仿真（退化/降额 + 误差界 + NPV）。全部结论以源码为准。
+\textbf{诚实口径}：机组组合采用\textbf{无损 DC 潮流}——\fld{UCObjective}::\texttt{MinLoss}
+仅为“最小化发电”的代理；开启 \fld{enable\_dc\_network\_constraints} 时\textbf{不追加显式
+DC 支路热限}（仅经各换流器功率变量界隐式约束）。文档版式与《碳流追踪与碳排放核算技术手册》一致。
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{阅读指南与约定}
+\subsection{数据来源}
+\begin{itemize}
+  \item \srcpath{include/hacdcpf/time\_series/time\_series\_pf.hpp} —— UC$\to$OPF$\to$PF 流水线接口与
+        \texttt{TimeSeriesPFOptions}/\texttt{UCSchedule}/\texttt{TimeSeriesPFResult}；
+  \item \srcpath{include/hacdcpf/time\_series/annual\_production\_sim.hpp} —— 分层年度生产模拟接口；
+  \item \srcpath{include/hacdcpf/time\_series/lifecycle\_simulation.hpp} —— 多年生命周期仿真与误差界；
+  \item \srcpath{src/time\_series/time\_series\_pf.cpp}、\srcpath{annual\_production\_sim.cpp}、
+        \srcpath{lifecycle\_simulation.cpp} —— 上述实现；
+  \item \srcpath{tests/test\_distribution\_pipeline.cpp}、\srcpath{tests/test\_nighttime\_opf.cpp}、
+        \srcpath{tests/test\_multiscale\_comprehensive.cpp} —— 验证依据。
+\end{itemize}
+入口族定义于 \srcpath{include/hacdcpf/time\_series/}。
+
+\subsection{单位制与索引空间}
+功率 MW，电量/缺供电量 MWh，成本与 NPV 为货币量，时段为整数小时索引。
+\texttt{UCSchedule} 的 \fld{gen\_dispatch}[g][t]、\fld{gen\_commit}[g][t]、
+\fld{ess\_dispatch}/\fld{ess\_soc}、\fld{renewable\_dispatch}、\fld{vsc\_dispatch}、
+\fld{dcdc\_dispatch} 按 \texttt{[机组索引][时段]} 排列，与逐步 \fld{opf\_results}/
+\fld{pf\_results}/\fld{rich\_results}（\texttt{RichResultAttribution}）时段索引一致。
+生命周期以年为外层索引（\fld{year\_results}）。
+
+\subsection{诚实口径}
+UC 的可行性/最优性通过 \fld{feasible}、\fld{mip\_gap}、\fld{optimality\_proven}（及年度
+\fld{mip\_gap\_target\_met}）暴露；逐步 PF 与 UC/OPF 的交叉核对记入 \fld{crossval}
+（\texttt{CrossValStep}）。生命周期碳精度由显式 \texttt{YearlyErrorBounds}（调度界、
+分层抽样界、储能碳 Lipschitz 界）声明，而非隐式保证。
+
+\section{功能定位与架构}
+\subsection{公共入口族}
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{6.8cm}L{2.8cm}L{5.4cm}@{}}
+\toprule
+入口 & 定义位置 & 说明\\
+\midrule
+\srcpath{solve\_time\_series\_pf(sys, ts\_data, opts)} & time\_series\_pf.hpp & 完整 UC$\to$OPF$\to$PF-校核流水线（逐步）\\
+\srcpath{solve\_unit\_commitment(sys, ts\_data, opts)} & 同上 & 第二相 DC 潮流 MILP 机组组合\\
+\srcpath{build\_time\_series\_system\_snapshot(...)} & 同上 & 逐步缩放后的系统快照\\
+\srcpath{solve\_annual\_production\_simulation(sys, ts\_data, opts)} & annual\_production\_sim.hpp & 分层 L0$\to$L1$\to$L2$\to$L3 年度模拟（或按日并行）\\
+\srcpath{run\_lifecycle\_simulation(sys, ts\_data, opts)} & lifecycle\_simulation.hpp & 多年退化/降额 + 误差界 + NPV\\
+\srcpath{run\_lifecycle\_comparison(...)} & 同上 & 容量扫描对比\\
+\bottomrule
+\end{tabular}
+\end{center}
+并行辅助 \srcpath{resolve\_parallel\_daily\_uc\_solver}、
+\srcpath{uc\_solver\_allows\_parallel\_daily}、\srcpath{resolve\_parallel\_worker\_count}
+决定按日并行的可用性与工作线程数。
+
+\subsection{关键数据结构}
+\compmeta{TimeSeriesPFResult}{include/hacdcpf/time\_series/time\_series\_pf.hpp}
+主要字段：\fld{uc\_schedule}、\fld{opf\_results}、\fld{pf\_results}、\fld{rich\_results}、
+\fld{crossval}、\fld{total\_generation\_cost}、\fld{parallel\_execution}。
+\compmeta{AnnualProductionSimResult}{include/hacdcpf/time\_series/annual\_production\_sim.hpp}
+含 \fld{annual\_plan}（L0）、\fld{weekly\_schedules}（L2）、\fld{step\_results}、
+\fld{monthly\_summaries}、\fld{total\_cost}、\fld{total\_ens\_mwh}。
+\compmeta{LifecycleSimResult}{include/hacdcpf/time\_series/lifecycle\_simulation.hpp}
+含 \fld{year\_results}（\texttt{YearResult} 内嵌 \texttt{YearlyErrorBounds}）、
+\fld{npv\_total\_cost}、\fld{all\_replacements}。
+
+\section{核心数学模型}
+每个时间步的核心链为 UC $\to$ OPF $\to$ PF：DC 潮流 MILP 机组组合设定 $u_{g,t}$/出力，
+逐步 AC-OPF 在 UC 解的跟踪带内再调度，最后全 AC/混合潮流做校核与交叉验证。
+
+\subsection{机组组合（无损 DC 潮流 MILP）}
+\begin{equation}
+\min\;\sum_{g,t}\big(C_g(p_{g,t})+S_g\,v_{g,t}\big)\quad\text{s.t.}\;
+P_{ij,t}=B_{ij}(\theta_{i,t}-\theta_{j,t}),\;\;\textstyle\sum_g p_{g,t}=\sum_i d_{i,t},
+\end{equation}
+并含最小启停、爬坡与备用约束；\fld{objective\_mode} 可切换 Cost/Carbon/MinCurtailment/
+MinLoss/Weighted。可选节点网络约束（\fld{enable\_network\_constraints}）与 DC 换流器耦合
+（\fld{enable\_dc\_network\_constraints}）。
+
+\subsection{逐步 OPF（跟踪带）}
+在 UC 解附近以跟踪带约束再调度：
+\begin{equation}
+\big|\,p_{g,t}^{\text{OPF}}-p_{g,t}^{\text{UC}}\,\big|\le \Delta_g^{\text{band}},
+\end{equation}
+由 \fld{enable\_uc\_opf\_tracking\_band} 控制。随后全潮流校核并写入 \fld{crossval}。
+
+\subsection{分层年度生产模拟}
+分层时间分解：L0 年度计划（检修/能量预算）$\to$ L1/L2 月/周滚动 UC $\to$ L3 逐日 UC+OPF/PF；
+或按日并行——每个日历日作为\textbf{能量中性、循环 SOC} 的独立时域并发求解：
+\begin{equation}
+\text{SOC}_{d,T}=\text{SOC}_{d,0}\quad(\text{每日终端荷电循环闭合}).
+\end{equation}
+日内模式 \fld{daily\_mode} 取 \texttt{SCUC}/\texttt{DynamicSCED}/\texttt{DynamicOPF}，
+分块 \fld{block\_type} 取 \texttt{Monthly}/\texttt{Weekly}。
+
+\subsection{多年生命周期（退化/降额 + NPV）}
+逐年串接年度模拟，叠加电池日历+循环老化、PV 降额与负荷增长，做 NPV 折现：
+\begin{equation}
+d_y=d_0(1+g)^y,\qquad
+\text{SOH}_y=1-\delta_{\text{cal}}\,y-\!\!\sum_{\text{cycles}}\!\!\delta_{\text{cyc}}(\text{DoD}),\qquad
+\text{NPV}=\sum_{y=1}^{Y}\frac{\text{Cost}_y}{(1+r)^y},
+\end{equation}
+碳误差以三条理论界（调度、分层抽样、储能碳 Lipschitz）记入 \texttt{YearlyErrorBounds}。
+
+\section{接口与参数}
+\begin{paramtable}
+\fld{uc\_solver} & — & — & 枚举 & Auto & UC 求解器后端（Auto/Native/HiGHS/SCIP/Gurobi）\\
+\fld{run\_opf} & — & — & 布尔 & true & UC 后是否逐步 OPF 再调度\\
+\fld{skip\_uc} & — & — & 布尔 & false & 跳过 UC（直接 OPF/PF）\\
+\fld{enable\_network\_constraints} & — & — & 布尔 & — & UC 是否加节点网络约束\\
+\fld{enable\_dc\_network\_constraints} & — & — & 布尔 & — & UC 是否加 DC 换流器耦合约束\\
+\fld{objective\_mode} & — & — & 枚举 & Cost & UC 目标（Cost/Carbon/MinCurtailment/MinLoss/Weighted）\\
+\fld{parallel\_daily} & — & — & 布尔 & — & 年度模拟按日并行\\
+\fld{num\_years} & $Y$ & yr & 整数 & $20$ & 生命周期年数\\
+\fld{discount\_rate} & $r$ & — & $0\sim1$ & $0.05$ & NPV 折现率\\
+\fld{load\_growth\_rate} & $g$ & — & $0\sim1$ & $0.02$ & 年负荷增长率\\
+\fld{ens\_penalty} & — & 元/MWh & $>0$ & $10000$ & 缺供电量惩罚\\
+\fld{pf\_snapshot\_interval} & — & h & 整数 & $24$ & 年度 PF 快照间隔\\
+\end{paramtable}
+时序特性开关（opt-in）包括 \fld{enable\_demand\_response}、\fld{enable\_dispatchable\_pv}、
+\fld{enable\_microgrid}、\fld{enable\_mobile\_storage}、\fld{enable\_vpp}、
+\fld{enable\_energy\_router}、\fld{enable\_storage\_degradation}；生命周期含
+\fld{pv\_annual\_derating}、\fld{calendar\_degradation}/\fld{cycle\_degradation}、
+\fld{tier2\_samples\_per\_stratum}。
+
+\section{验证与边界局限}
+\subsection{验证与校核}
+注册测试：\srcpath{test\_distribution\_pipeline}、\srcpath{test\_nighttime\_opf}、
+\srcpath{test\_multiscale\_comprehensive}（年度/多尺度）；UC 特性套件包括
+\srcpath{test\_uc\_dc\_branch\_flows}、\srcpath{test\_uc\_demand\_response}、
+\srcpath{test\_uc\_dispatchable\_pv}、\srcpath{test\_uc\_energy\_router}、
+\srcpath{test\_uc\_external\_grid}、\srcpath{test\_uc\_microgrid}、
+\srcpath{test\_uc\_mobile\_storage}、\srcpath{test\_uc\_storage\_degradation}、
+\srcpath{test\_uc\_storage\_efficiency}、\srcpath{test\_uc\_vpp}。
+\srcpath{run\_lifecycle\_simulation} 无专用单测，经 GUI 服务器/多尺度路径间接覆盖。
+
+\subsection{边界与局限（如实标注）}
+\begin{itemize}
+  \item UC 采用\textbf{无损 DC 潮流}：\fld{objective\_mode}=\texttt{MinLoss} 仅为“最小化发电”的
+        代理（真实网损需显式 DC 模型）；
+  \item 开启 \fld{enable\_dc\_network\_constraints} 时\textbf{不追加显式 DC 支路热限}，
+        仅经各换流器功率变量界隐式约束；
+  \item MILP 受 \fld{mip\_gap}/时限约束（以 \fld{optimality\_proven}/\fld{mip\_gap\_target\_met} 标注）；
+  \item 按日并行仅对 \fld{skip\_uc} 或 Native 分支定界无锁分派（每日一工作线程），外部全局调度器
+        MILP 后端退化为顺序日循环；按日独立性依赖循环终端 SOC
+        （\fld{enforce\_terminal\_soc\_cyclic}/\fld{enforce\_daily\_cyclic\_soc}）；
+  \item 生命周期默认 \fld{step\_duration\_hr}=$6.0$（为提速偏粗），碳精度以 \texttt{YearlyErrorBounds} 为准。
+\end{itemize}
+规范文档：\srcpath{docs/time\_series\_power\_flow\_models.md}、
+\srcpath{docs/sequential\_production\_simulation\_rich\_models.md}、
+\srcpath{docs/annual\_simulation\_models.md}。
+\end{document}

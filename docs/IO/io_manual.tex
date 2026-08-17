@@ -1,0 +1,175 @@
+% !TEX program = xelatex
+% 编译方式：把本文件夹整包复制到纯 ASCII 路径后，执行两遍 xelatex（详见 docs/_manual_common/README.md）。
+% 首版骨架：内容取自 src/io/ 与 include/hacdcpf/io/ 源码及
+%           docs/digital_twin_data_io_architecture.md，字段与契约以代码为准。
+\documentclass[UTF8,fontset=windows,a4paper,11pt]{ctexart}
+\usepackage{hysim_manual}
+
+\title{\textbf{交直流混合高弹性能源电力系统仿真平台}\\[0.5em]
+       {\Large 数据接口与格式适配技术手册}\\[0.3em]
+       {\large 格式适配器、导入报告契约与验证校核（首版骨架）}}
+\author{HySim-XJTU-HRPES（西安交通大学 HRPES 团队）}
+\date{\today}
+
+\begin{document}
+\maketitle
+\begin{abstract}
+\noindent 本手册依据 HySim-XJTU-HRPES 平台数据接口模块
+（\srcpath{include/hacdcpf/io/}、\srcpath{src/io/}）整理，覆盖平台与外部工具之间的
+格式适配：JSON、MATPOWER、CIM/CGMES 3.0、GridLAB-D、OpenDSS、BPA/DSP、ETAP、
+PSD.jl、SVG 配电单线图与 TNTP 交通网。所有导入器统一发出机器可读的导入报告
+（\texttt{ImportReport}，§8 契约），如实声明每条记录的处置、原因码、绑定层级与
+单位来源。本模块仅做外部文件与 \texttt{HybridPowerSystem} 之间的映射，不改变
+电气语义、不替代校核；近似、估算与降级一律显式标注。全部结论以源码为准；
+版式与《碳流追踪与碳排放核算技术手册》《潮流计算技术手册》一致。命名空间为
+\texttt{hacdcpf::io}。
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{阅读指南与约定}
+\subsection{数据来源}
+\begin{itemize}
+  \item \srcpath{include/hacdcpf/io/import\_report.hpp} —— 统一导入报告结构与枚举（§8 契约）；
+  \item \srcpath{include/hacdcpf/io/json\_io.hpp}、\srcpath{matpower\_parser.hpp}、
+        \srcpath{cim\_io.hpp}、\srcpath{cim\_dist\_io.hpp} —— JSON/MATPOWER/CIM 适配器接口；
+  \item \srcpath{include/hacdcpf/io/external\_grid\_io.hpp}、\srcpath{bpa\_io.hpp}、
+        \srcpath{etap\_io.hpp}、\srcpath{svg\_distribution\_io.hpp}、\srcpath{tntp\_parser.hpp}、
+        \srcpath{powersimulationsdynamics\_io.hpp}、\srcpath{gridlabd\_bridge.hpp} —— 其余格式；
+  \item \srcpath{src/io/external\_grid\_io.cpp} —— GridLAB-D/OpenDSS 文本读写实现；
+  \item \srcpath{docs/digital\_twin\_data\_io\_architecture.md} —— 主契约（§3.2/§6.3/§8）；
+  \item \srcpath{docs/cim\_cgmes3\_crosswalk.md}、\srcpath{docs/svg\_distribution\_import.md}、
+        \srcpath{docs/bpa\_dsp\_component\_mapping.md} —— 分格式映射细则；
+  \item \srcpath{tests/test\_io\_roundtrip.cpp} 等 —— 验证依据。
+\end{itemize}
+命名空间为 \texttt{hacdcpf::io}。
+
+\subsection{单位制与索引空间}
+导入结果统一装配为 \texttt{HybridPowerSystem}：功率 MW/Mvar、容量 MVA、电压标幺或 kV、
+阻抗标幺（基准容量 \fld{base\_mva}）。组件对外以稳定 \texttt{.index} 标识；AC 与 DC 集合
+分开保存，导入器不跨域混用裸 \texttt{bus\_id}。导入报告中的 \fld{binding\_level} 区分
+“富语义（Rich）”与“规范投影（Canonical）”两种落库层级，明确该批数据保留了工程语义
+还是已投影到规范模型。
+
+\subsection{诚实口径}
+导入是否“成功”不是单一布尔量，而由 \srcpath{passes\_mode()} 依据模式判定：Strict 模式
+要求无拒绝记录且无任何强制/推断；Permissive 模式允许尽力而为的估算但逐条留痕。配电类
+导入（\srcpath{cim\_dist\_io}、\srcpath{svg\_distribution\_io}）对缺失的需量/阻抗由变压器
+容量与表计数估算，均记为 Coerced/BestEffort，不伪装为量测值。所有 XML 读取器均为
+自包含且经 XXE 加固，不解析外部实体。
+
+\section{功能定位与架构}
+\subsection{公共入口族}
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{2.7cm}L{7.6cm}L{5.0cm}@{}}
+\toprule
+格式 & 入口函数 & 定义位置\\
+\midrule
+JSON & \srcpath{to\_json}/\srcpath{from\_json}/\srcpath{save\_json}/\srcpath{load\_json}（含 JPC 变体 \srcpath{to\_jpc\_json}/\srcpath{from\_jpc\_json}） & json\_io.hpp\\
+MATPOWER & \srcpath{parse\_matpower}（可带 \texttt{options} 重载） & matpower\_parser.hpp\\
+CIM/CGMES 3.0 & \srcpath{to\_cim}/\srcpath{save\_cim} & cim\_io.hpp\\
+CIM 配电/RDF & \srcpath{from\_cim\_dist}/\srcpath{load\_cim\_dist} & cim\_dist\_io.hpp\\
+GridLAB-D & \srcpath{to\_gridlabd}/\srcpath{save\_gridlabd}/\srcpath{from\_gridlabd}/\srcpath{load\_gridlabd\_with\_report} & external\_grid\_io.hpp\\
+GridLAB-D 引擎桥 & \srcpath{export\_gridlabd\_snapshot} & gridlabd\_bridge.hpp\\
+OpenDSS & \srcpath{import\_opendss\_text} & external\_grid\_io.cpp / opendss\_bridge.hpp\\
+BPA/DSP \texttt{.dat} & \srcpath{parse\_bpa\_dat}/\srcpath{parse\_bpa\_dat\_string} & bpa\_io.hpp\\
+ETAP（OpenXLSX） & \srcpath{load\_etap}/\srcpath{load\_etap\_xml}/\srcpath{save\_etap} & etap\_io.hpp\\
+PSD.jl & \srcpath{to\_powersimulationsdynamics\_json}/\srcpath{save\_powersimulationsdynamics\_json} & powersimulationsdynamics\_io.hpp\\
+SVG 配电单线图 & \srcpath{from\_svg\_distribution}/\srcpath{load\_svg\_distribution} & svg\_distribution\_io.hpp\\
+TNTP 交通网 & \srcpath{parse\_tntp\_network} & tntp\_parser.hpp\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{关键数据结构}
+\compmeta{ImportReport}{include/hacdcpf/io/import\_report.hpp}
+逐条记录 \fld{records}（\texttt{ImportRecord}：\fld{source\_locator}、\fld{target\_ref}、
+\fld{disposition}、\fld{reason\_code}、\fld{severity}），汇总 \fld{summary}
+（\texttt{ImportSummary}：\fld{accepted}/\fld{coerced}/\fld{rejected}/\fld{skipped} 计数），
+报告级 \fld{binding\_level}（Rich/Canonical）与 \fld{unit\_assertion}
+（Asserted/Inferred/BestEffort）；枚举 \texttt{ImportMode}\{Strict,Permissive\}、
+\texttt{ImportDisposition}、\texttt{ImportReasonCode}。
+
+\compmeta{CimDistImportResult}{include/hacdcpf/io/cim\_dist\_io.hpp}
+含 \fld{system}、\fld{report}、\fld{warnings} 与可见诊断 \fld{source\_load\_objects}、
+\fld{inferred\_load\_objects}、\fld{has\_explicit\_phase\_data}、\fld{is\_unbalanced}；
+对应选项 \texttt{CimDistImportOptions} 携 \fld{load\_factor}、\fld{power\_factor}、
+\fld{base\_mva}、\fld{min\_segment\_length\_m}、\fld{auto\_add\_external\_grid}。
+
+\compmeta{SvgDistributionImportResult}{include/hacdcpf/io/svg\_distribution\_io.hpp}
+含 \fld{system}、\fld{report}、\fld{recovered\_nodes}、\fld{unresolved\_objects}、
+\fld{synthetic\_external\_grids}、\fld{isolated\_components}、
+\fld{parameter\_completion\_applied}。此外，\texttt{MatpowerImportResult}、
+\texttt{BpaImportResult}、\texttt{EtapIoReport}、\texttt{ExternalGridImportReport}、
+\texttt{TNTPNetworkData}、\texttt{GridLABDExportedSnapshot} 分列于各自头文件。
+
+\section{核心数据契约：统一导入报告（§8）}
+所有导入器（无论格式）都返回或填充统一的 \texttt{ImportReport}，把“读到了什么、
+怎么落库、为什么”变成机器可读记录，使孪生/自动化流水线可据此判定可用性，而非
+依赖控制台文字。
+
+\subsection{记录级字段（\texttt{ImportRecord}）}
+\begin{itemize}
+  \item \fld{source\_locator} —— 源文件中的定位（行号/对象名/RDF ID）；
+  \item \fld{target\_ref} —— 落库后的目标组件引用（稳定 \texttt{.index} 或类型+ID）；
+  \item \fld{disposition} —— 处置：Accepted / Coerced / Rejected / Skipped；
+  \item \fld{reason\_code} —— 机器可读原因码（\texttt{ImportReasonCode}）；
+  \item \fld{severity} —— 严重度（info / warning / error）。
+\end{itemize}
+
+\subsection{汇总与层级}
+\texttt{ImportSummary} 累计 \fld{accepted}/\fld{coerced}/\fld{rejected}/\fld{skipped} 计数。
+报告级 \fld{binding\_level} 声明落库层级：Rich（保留工程语义）或 Canonical（已投影到
+规范模型，即“诚实上限”映射）。\fld{unit\_assertion} 声明单位来源：Asserted（源文件明确
+给出）、Inferred（由上下文推断）、BestEffort（启发式估算）。
+
+\subsection{模式门控}
+导入模式 \texttt{ImportMode} 取 Strict 或 Permissive，是否通过由谓词判定（$\wedge$ 为逻辑与）：
+\[
+\texttt{passes\_mode(Strict)}\;\Longleftrightarrow\;
+(n_{\text{rejected}}=0)\ \wedge\ (n_{\text{coerced}}=0)\ \wedge\ (n_{\text{inferred}}=0).
+\]
+即 Strict 模式下任何强制（Coerced）或推断（Inferred）都会使导入判为不通过；Permissive
+模式允许上述情形但逐条留痕。孪生安全路径进一步禁止 BestEffort 单位启发式，保证落库
+数据的单位来源全部可追溯。
+
+\section{接口与参数}
+下表列出跨格式的关键导入选项（以 \srcpath{cim\_dist\_io.hpp}、\srcpath{matpower\_parser.hpp}
+为主，其余格式选项字段命名一致）。
+\begin{paramtable}
+\fld{mode} & — & — & Strict/Permissive & Permissive & 导入模式；Strict 拒绝任何强制/推断\\
+\fld{best\_effort\_import} & — & — & true/false & false & 允许尽力而为的单位/阻抗启发式\\
+\fld{load\_factor} & — & — & $0\sim1$ & $0.4$ & 配电缺省需量估计负荷率\\
+\fld{power\_factor} & $\cos\varphi$ & — & $0\sim1$ & $0.9$ & 配电缺省功率因数\\
+\fld{base\_mva} & $S_B$ & MVA & 正数 & $1.0$ & 标幺基准容量\\
+\fld{min\_segment\_length\_m} & — & m & 正数 & — & 线段最小长度阈值（短段合并）\\
+\fld{auto\_add\_external\_grid} & — & — & true/false & — & 无源网时自动补充外部电网\\
+\end{paramtable}
+配电与 SVG 导入结果另含可见诊断字段：\fld{source\_load\_objects}、\fld{inferred\_load\_objects}、
+\fld{has\_explicit\_phase\_data}、\fld{is\_unbalanced}（\texttt{CimDistImportResult}）与
+\fld{recovered\_nodes}、\fld{unresolved\_objects}、\fld{synthetic\_external\_grids}、
+\fld{isolated\_components}、\fld{parameter\_completion\_applied}（\texttt{SvgDistributionImportResult}），
+供调用方判断估算范围与网络完整性。
+
+\section{验证与边界局限}
+\subsection{验证与校核}
+注册测试覆盖各格式往返与算例比对：\srcpath{test\_io\_json}、\srcpath{test\_io\_matpower}、
+\srcpath{test\_matpower\_cases}、\srcpath{test\_bpa\_io}、\srcpath{test\_bpa\_dsp\_compare}、
+\srcpath{test\_io\_cim}、\srcpath{test\_io\_svg\_distribution}、\srcpath{test\_external\_grid\_io}、
+\srcpath{test\_component\_io\_mapping}、\srcpath{test\_io\_roundtrip}、\srcpath{test\_tntp\_parser}；
+\srcpath{test\_io\_etap}（受 \texttt{HACDCPF\_ENABLE\_ETAP} 门控）、\srcpath{test\_gridlabd\_compare}、
+\srcpath{test\_gridlabd\_failure\_matrix}、\srcpath{test\_opendss\_pf\_compare}（受能力门控）。
+
+\subsection{边界与局限（如实标注）}
+\begin{itemize}
+  \item \srcpath{cim\_io.hpp} 仅覆盖 CGMES 3.0 EQ+SSH 的\textbf{有界子集}；配电类
+        （\texttt{ConnectivityNode}、\texttt{LVBuilding}、\texttt{Meter} 等）明确不在范围内，
+        仅由 \srcpath{cim\_dist\_io.hpp} 以 Canonical 绑定层级承接（“诚实上限”映射）；
+  \item MATPOWER 导出为有界 AC 子集；
+  \item SVG 与 \srcpath{cim\_dist} 的需量/阻抗为估算启发式（BestEffort），非量测；
+  \item ETAP 需 OpenXLSX（\fld{has\_excel} 能力）；OpenDSS 桥接可选（\fld{has\_opendss}）；
+  \item 导入是否通过由 \srcpath{passes\_mode()} 门控（Strict：无错误且无任何强制/推断）；
+  \item 本模块只做格式映射，不校核电气可解性、不修复失败工况。
+\end{itemize}
+\end{document}
