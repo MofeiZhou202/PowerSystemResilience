@@ -4,9 +4,11 @@ Updated: 2026-08-17
 Class: Implementation reference（源代码派生；行级细节在代码变更后需复核）
 
 本文件在 [数据结构与 API 契约](data_structure_api_contract.md)（核心骨干）之上，逐个
-深入六大分析/求解模块的**内部公共数据结构**（选项 / 结果 / 记录 / DTO），说明它们如何
+深入十二个**分析/求解/数据模块**的**内部公共数据结构**（选项 / 结果 / 记录 / DTO），说明它们如何
 引用核心 `HybridPowerSystem`，以及贯穿全部模块的三大横切约定。这是"逐模块内部数据结构"
-的落地参考。设计评审见 [数据结构设计评审](data_structure_design_review.md)。
+的落地参考。§1–§6 为求解型模块（dynamics/opf/time_series/reliability/resilience/market），
+§7–§12 为图/数据/耦合模块（graph/io/scenario_generation/carbon_analysis/ev_power_traffic/
+integrated_energy），§13 汇总三大横切约定。设计评审见 [数据结构设计评审](data_structure_design_review.md)。
 
 ## 0. 分析模块如何消费核心模型
 
@@ -28,6 +30,44 @@ flowchart TD
     RES -. branch_index + AC/DC 限定 .-> OUT
     MKT -. position + index 双键 .-> OUT
 ```
+
+上图是**求解型模块（§1–6）**的"消费—回溯"关系。**图/数据/耦合模块（§7–12）**与核心模型的
+关系形态不同——`io` **生产** HPS、`graph` **变换** HPS、`scenario_generation` **喂养**求解层、
+`carbon_analysis` **消费**潮流结果、`ev_power_traffic` 与交通图**双向耦合**、`integrated_energy`
+基本**解耦**（仅 `pcc_ac_bus` 归因）：
+
+```mermaid
+flowchart LR
+    EXT["外部格式<br/>MATPOWER/CIM/GridLAB-D/<br/>OpenDSS/ETAP/JSON"]
+    IO["io (§8)<br/>ImportReport / ComponentIOPolicy"]
+    HPS["HybridPowerSystem<br/>(稳定 .index)"]
+    GRAPH["graph (§7)<br/>PowerSystemGraph / ReductionMapping"]
+    SOLVER["求解层<br/>power_flow / opf / §1–6"]
+    PF["PowerFlowResult"]
+    SCEN["scenario_generation (§9)<br/>ScenarioCandidate"]
+    CARBON["carbon_analysis (§10)<br/>CarbonSourceResult (is_dc)"]
+    EVPT["ev_power_traffic (§11)<br/>EVPowerTrafficProblem"]
+    TRAF["TrafficGraph<br/>(独立 index 空间)"]
+    IES["integrated_energy (§12)<br/>CampusIESData → CampusIESResult"]
+
+    EXT <-->|"往返 + binding_level"| IO
+    IO -->|"产出富模型"| HPS
+    HPS -->|"投影/降阶"| GRAPH
+    GRAPH -->|"edge comp_index 停用 / 逆映射恢复"| SOLVER
+    SOLVER --> PF
+    HPS --> SCEN
+    SCEN -.->|"TimeSeriesData 喂给 §3–5"| SOLVER
+    PF --> CARBON
+    HPS --> CARBON
+    HPS --> EVPT
+    TRAF <-->|"station_id 耦合"| EVPT
+    EVPT -->|"final_system 回写"| HPS
+    IES -.->|"仅 pcc_ac_bus 归因·不接电网"| HPS
+```
+
+> 两图共享同一条铁律 #1/#2：无论生产、变换还是消费，跨层身份一律经稳定 `.index`/`comp_index`
+> 回溯，临时 index（graph 位、traffic index）绝不外泄。`integrated_energy` 的虚线刻意表达
+> `CampusIESValidity` 对电网建模的逐项否认（honest scope）。
 
 ---
 
@@ -139,19 +179,139 @@ flowchart TD
 
 ---
 
-## 7. 三大横切约定（跨全部模块）
+## 7. graph（图建模 / 拓扑 / 降阶）
 
-评审确认以下三条约定在六大模块中一致落地，是全仓数据结构最值得保留的工程规范：
+头文件：[power_system_graph.hpp](../include/hacdcpf/graph/power_system_graph.hpp)、
+[reduction_mapping.hpp](../include/hacdcpf/graph/reduction_mapping.hpp)、
+[topology_analysis.hpp](../include/hacdcpf/graph/topology_analysis.hpp)、
+[result_recovery.hpp](../include/hacdcpf/graph/result_recovery.hpp)
+
+| 结构 | 角色 | 身份 / 耦合 |
+|---|---|---|
+| `PowerSystemGraph` | HPS→图：`nodes`（AC/DC 母线）+ `edges`（支路/开关/断路器/变压器/VSC/DCDC 虚边）+ 邻接表 | 域限定 `ac_bus_id_to_node_idx`/`dc_bus_id_to_node_idx` 权威；`bus_id_to_node_idx` 仅 AC-only 遗留 |
+| `GraphNode` | 一个 AC/DC 母线节点 + 注入/设备标志 | `bus_id`（原始）+ `domain`（AC/DC）；`has_generator`/`has_load`/`has_vsc_ac`/`has_vsc_dc`/`has_dcdc`… |
+| `GraphEdge` | 一条支路/耦合边 | **`edge_id`（图内位序 0…E-1，第三类 ID）vs `comp_index`（源模型 `.index`）**——降阶器按 `comp_index` 停用模型组件，**绝不用 `edge_id`**；`from_node`/`to_node`（图位）+ `from_bus_id`/`to_bus_id`（原始） |
+| `ReductionMapping` | 全降阶步骤的可逆映射（结果恢复基础） | 双域母线映射 `ac_/dc_original_to_reduced_bus`；`original_to_reduced_branch`（-1=消除）；四类记录 Switch/Series/Pendant/Kron |
+| `SeriesReductionRecord` / `PendantReductionRecord` | 串联消去 / 悬挂消去记录（带 `domain` AC/DC） | `r_eq/x_eq/b_eq` 或 `p/q_load_absorbed`；结果恢复靠这些记录逆运算 |
+
+> 关键：图层是**第三类 ID**（graph node/edge index）的唯一合法居所——临时、投影后即弃；
+> 对外一律经 `comp_index`/`bus_id` 回稳定空间。降阶铁律：按 `comp_index` 停用组件，
+> 结果经 `ReductionMapping` 逆映射恢复到原始拓扑。
+
+---
+
+## 8. io（导入导出 / 往返 / 数字孪生）
+
+头文件：[import_report.hpp](../include/hacdcpf/io/import_report.hpp)、
+[component_io_mapping.hpp](../include/hacdcpf/io/component_io_mapping.hpp)、
+[roundtrip.hpp](../include/hacdcpf/io/roundtrip.hpp)、
+[schema_version.hpp](../include/hacdcpf/io/schema_version.hpp)
+
+| 结构 | 角色 | 身份 / 耦合 |
+|---|---|---|
+| `ImportReport` | **统一机读导入诊断契约**（JSON/MATPOWER/GridLAB-D/OpenDSS/ETAP/CIM 共用） | `binding_level`（Rich/Canonical）诚实声明是否重建富结构；`unit_assertion`（Asserted/Inferred/BestEffort）降级 provenance |
+| `ImportRecord` | 单条源对象诊断 | `source_locator`（行/表格/xpath）+ `target_ref`（组件引用，拒绝时空）+ `disposition`/`reason_code`/`severity` 全枚举 |
+| `ImportMode` | Strict / Permissive | Strict：未知字段/无效枚举/强制转换即拒绝导入 |
+| `ComponentIOPolicy` 家族 | 每组件类型 × 目标格式的语义保持策略 | Exact/Equivalent/Aggregated/BoundaryInjection/Projected/InternalOnly/Unsupported + `NumericalVerificationScope` 声明验证证据 |
+| `ComponentStandardFamily` | 标准/规范族标注 | HACDCPF/IEC61970CIM/IEC61850/IEC60909/IEEE1547/… |
+
+> 关键：IO 层把"外部 ID → 稳定 `.index`"的绑定与"绑定层级/单位来源/语义保持策略"全部**机读化**，
+> 是数字孪生诚实口径的入口（`binding_level=Canonical` 降级、`unit=BestEffort` 降级 provenance）。
+
+---
+
+## 9. scenario_generation（场景生成 / 聚类）
+
+头文件：[scenario_generation.hpp](../include/hacdcpf/analysis/scenario_generation.hpp)（注意：头文件位于 `analysis/`）
+
+| 结构 | 角色 | 身份 / 耦合 |
+|---|---|---|
+| `ScenarioGenerationOptions` | 三族（Regular/Reliability/Resilience）+ 扰动 + 台风影响 + 聚类 配置 | 内嵌各族 options + `ScenarioFamily` |
+| `ScenarioCandidate` | 单条候选场景 | `id` + `family` + `probability` + `TimeSeriesData` + 可选 `ContingencyDefinition`/`ResilienceEventDefinition` + `outage_signature` + `features` |
+| `ContingencyDefinition` | 一个故障定义 | `ContingencyComponentType`（AC/DC 限定，20+ 类型）+ `component_index`（稳定）+ `affected_*` 稳定 ID 字符串列表 |
+| `ResilienceEventDefinition` | 台风事件（Holland 风场采样） | 故障集 `DistributionResilienceFault` + 轨迹/风险 + 多源乘子曲线；`used_category_fallback`/`used_approximate_repair_order` 诚实标注 |
+| `ScenarioCluster` | 聚类代表 | `representative`（medoid）+ `member_ids` + 概率；`tail_anchor`/`frozen_medoid` 尾部锚定 |
+| `RegularScenarioResult` / `ReliabilityScenarioResult` / `ResilienceScenarioResult` | 三族结果 | 各带 `audit` JSON 可追溯 |
+
+> 关键：场景族刻意**对齐已实现的** reliability FMEA 目录与 resilience 台风能力（options 里的
+> `include_*` 兼容位不扩目录）；聚类保留尾部 5% 锚点、概率守恒。
+
+---
+
+## 10. carbon_analysis（碳流追踪）
+
+头文件：[carbon_analysis.hpp](../include/hacdcpf/carbon_analysis/carbon_analysis.hpp)、
+[annual_carbon_analysis.hpp](../include/hacdcpf/carbon_analysis/annual_carbon_analysis.hpp)
+
+| 结构 | 角色 | 身份 / 耦合 |
+|---|---|---|
+| `CarbonAnalysisOptions` | 比例追踪（BFS）+ 矩阵法 配置 | `loss_allocation_alpha`（损耗碳发/收侧分配）+ `max_matrix_condition_estimate` 病态门 |
+| `CarbonSourceResult` | 一个碳源（发电/外部网） | `source_id` + `source_type` + `component_index`（稳定）+ `is_dc`（域）+ `emission_factor` + `is_balancing` |
+| `LoadCarbonResult` | 负荷碳 | `load_index` + `bus` + `carbon_intensity` + `generator_supply_mw`（碳源 ID→MW 溯源） |
+| `BranchCarbonResult` | 支路损耗碳 | `branch_index` + `generator_loss_mw`（碳源 ID→MW 溯源） |
+| `EmissionsSummary` / `NodePowerBalanceError` | 全网排放平衡 / 节点不平衡诊断 | `balance_error_tco2`/`balance_error_pct` 诚实残差；`mismatch_mw`（负=缺源，正=缺汇）+ `is_dc` |
+
+> 关键：碳流需**已收敛** `PowerFlowResult` + HPS 排放因子；溯源用碳源 ID（稳定），
+> 母线/支路结果带 `is_dc` 域限定；平衡误差显式暴露而非隐藏。
+
+---
+
+## 11. ev_power_traffic（EV-交通耦合 Formulation A–H）
+
+头文件：[types.hpp](../include/hacdcpf/ev_power_traffic/types.hpp)、
+[simulation.hpp](../include/hacdcpf/ev_power_traffic/simulation.hpp)、
+[ltm_network.hpp](../include/hacdcpf/ev_power_traffic/ltm_network.hpp)、
+[options.hpp](../include/hacdcpf/ev_power_traffic/options.hpp)
+
+| 结构 | 角色 | 身份 / 耦合 |
+|---|---|---|
+| `EVPowerTrafficProblem` | 顶层耦合问题：`HybridPowerSystem system` + `TrafficGraph traffic` + routes/demands/sessions/prices | **双网并置**：电力网（稳定 `.index`）与交通网（TrafficNode/Link index）经充电站 `station_id` 耦合 |
+| `TrafficGraph` / `TrafficNode` / `TrafficLink` | 交通网（BPR 延迟、CTM 元胞） | 交通侧**独立 index 空间**；`drive_energy_kwh_per_veh_km` 连接 SOC |
+| `EVDemand` / `ICVDemand` | OD 需求（EV 带 SOC / ICV 多类共享路容） | `candidate_route_indices`；SOC/reserve 能量约束；`VehicleClass` |
+| `ChargingStationParams` | 充电站（排队/服务/回溢） | `id`（站）+ `access_link_id`（交通链）；站↔电力母线经 HPS 充电站组件 |
+| `EVPowerTrafficResult` | 聚合结果 + 逐步 + 回写系统 | `final_system`/`system_by_step`（耦合后 HPS 快照）；**诚实验证**：`mathematical_model_verified` + `mathematical_model_verification_status`（"simulation 入口含启发式/分解层→未验证"）+ `optimization_is_mip`/`proven_optimal` |
+
+> 关键：EVPT 是全仓唯一"**电力网 + 交通网双图**"模块；耦合面是充电站（power 侧 `ChargingStation`
+> 组件 ↔ traffic 侧 `station_id`/`access_link`）。simulation 顶层入口刻意声明含启发式层"未数学验证"，
+> 精确研究走 `SystemOptimalLP`/`MILP` 或 `solve_joint_social_welfare`。
+
+---
+
+## 12. integrated_energy（园区电-热-氢多能流 MILP）
+
+头文件：[integrated_energy_system.hpp](../include/hacdcpf/integrated_energy/integrated_energy_system.hpp)、
+[integrated_energy_options.hpp](../include/hacdcpf/integrated_energy/integrated_energy_options.hpp)、
+[integrated_energy_result.hpp](../include/hacdcpf/integrated_energy/integrated_energy_result.hpp)
+
+| 结构 | 角色 | 身份 / 耦合 |
+|---|---|---|
+| `CampusIESData` | 园区多能流输入（电/热/氢/燃料负荷 + DER + 三级氢储 + 效率/CCUS/碳预算） | 扁平 POD；`pcc_ac_bus` **仅用于归因 PCC 交换，solve 不接电网**；`fixed_power_factor` 保留（≠1 拒绝） |
+| `CampusIESResult` | 多载体调度结果 | 逐时向量：电/热/氢/燃料/交通 + 三级氢储（日/周/季）+ CCUS + `sankey_flows` |
+| `CampusIESValidity` | **诚实能力声明** | `electrical_network_coupled=false`/`reactive_power_modelled=false`/`voltage_and_branch_limits_enforced=false` 明示不建模电网 |
+| `CampusIESSankeyFlow` | 能流桑基图边 | `source`/`target`/`carrier` |
+
+> 关键：`model_scope="isolated-campus-multi-carrier-milp"`——多载体能量平衡 + 聚合 PCC 有功，
+> 但**显式不耦合电气网络**（无无功/电压/支路约束）。三级氢储（日→周→季）用效率损耗建模
+> 跨时间尺度转移。这是"honest scope"典范：结果结构自带 `CampusIESValidity` 逐项否认电网建模。
+
+---
+
+## 13. 三大横切约定（跨全部模块）
+
+评审确认以下三条约定在全部模块中一致落地，是全仓数据结构最值得保留的工程规范：
 
 1. **位 + 稳定索引双键**：`reliability::ComponentRef`（`element_index`+`component_index`+`stable_id`）、
    `market::GeneratorOffer`/结算族（`*_position`+`*_index`）、`opf::ACOPFResult::ComponentRef`
-   （`original_index`+`source_type`）。凡对外报告一律用稳定键，向量位仅内部。对应
+   （`original_index`+`source_type`）、`graph::GraphEdge`（`edge_id` 图位 + `comp_index` 稳定，
+   降阶器按 `comp_index` 停用组件）。凡对外报告一律用稳定键，向量位/图位仅内部。对应
    [铁律 #2](data_structure_api_contract.md#4-三类-id-与域限定映射)。
 
 2. **诚实能力声明**：`resilience::ValidityFlags`+`model_scope`、`market::MarketModelScope`
    +`UnsupportedMarketAsset`、`opf` 的 `lmp_valid`/`lmp_validity_reason`、
-   `reliability` 的 `data_source`/`ReliabilityDataQuality`、`dynamics` 的 `DynamicModalSummary`。
-   近似/覆盖不足写进结果而非隐藏。对应
+   `reliability` 的 `data_source`/`ReliabilityDataQuality`、`dynamics` 的 `DynamicModalSummary`、
+   `io::ImportReport`（`binding_level`/`unit_assertion`）、`integrated_energy::CampusIESValidity`
+   （逐项否认电网建模）、`ev_power_traffic` 的 `mathematical_model_verified` + 验证状态串、
+   `carbon` 的 `balance_error_pct`。近似/覆盖不足写进结果而非隐藏。对应
    [铁律 #3](data_structure_api_contract.md#1-分层数据架构总览)。
 
 3. **非拥有调度/热启动指针**：`opf::ACOPFOptions::warm_start`、
@@ -161,4 +321,5 @@ flowchart TD
 
 此外，**域限定**在中间层同样贯穿：`dynamics` 的 `ac_bus_pos_by_id`/`dc_bus_pos_by_id`、
 `resilience` 负荷曲线的 `by_position`/`by_index`/`by_bus` 三套映射、`market`/`opf` 结果向量
-的 AC/DC 分列，均遵循[铁律 #1](data_structure_api_contract.md#1-分层数据架构总览)。
+的 AC/DC 分列、`graph` 的 `ac_bus_id_to_node_idx`/`dc_bus_id_to_node_idx`、`carbon`/`scenario`
+结果的 `is_dc` 与 AC/DC 限定故障类型，均遵循[铁律 #1](data_structure_api_contract.md#1-分层数据架构总览)。

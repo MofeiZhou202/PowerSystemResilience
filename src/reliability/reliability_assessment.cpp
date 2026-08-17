@@ -2035,6 +2035,10 @@ TailRiskMetrics compute_tail_risk(
   std::vector<double> sorted_eens = eens_samples;
   std::vector<double> sorted_lole = lole_samples.empty() ? 
       std::vector<double>(n, 0.0) : lole_samples;
+  // RL-01: the VaR/percentile indices below are derived from the EENS sample
+  // count n; align the LOLE series to n so paired indexing can never read out of
+  // bounds when a caller passes a different-length LOLE vector.
+  if (sorted_lole.size() != n) sorted_lole.resize(n, 0.0);
   
   std::sort(sorted_eens.begin(), sorted_eens.end());
   std::sort(sorted_lole.begin(), sorted_lole.end());
@@ -2342,7 +2346,9 @@ DistributionIndices compute_distribution_indices(
   idx.caidi = (idx.saifi > 0) ? idx.saidi / idx.saifi : 0.0;
   
   // ASAI = 1 - SAIDI / (hours_per_year)
-  idx.asai = 1.0 - (idx.saidi / hours_per_year);
+  // RL-02: SAIDI can exceed one reporting year under repeated/overlapping
+  // interruptions; clamp the availability index to [0,1] for reporting.
+  idx.asai = std::clamp(1.0 - (idx.saidi / hours_per_year), 0.0, 1.0);
   idx.asui = 1.0 - idx.asai;
   
   spdlog::info("Distribution indices: SAIFI={:.4f} int/cust/yr, SAIDI={:.4f} hr/cust/yr, ASAI={:.6f}",

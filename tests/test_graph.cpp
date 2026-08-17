@@ -1124,3 +1124,29 @@ TEST_CASE("DC_ISOLATED bus is excluded from graph topology and islands",
   for (const auto& d : rep.diagnostics)
     REQUIRE(d.code != DiagCode::GraphNoDCVoltageRef);
 }
+
+TEST_CASE("Typed-ID graph lookups map StableBusId to NodeIdx", "[graph][typed_ids]") {
+  HybridPowerSystem sys;
+  sys.base_mva = sys.ac.base_mva = sys.dc.base_mva = 100.0;
+  ACBus a1; a1.index = 7; a1.bus_type = BusType::SLACK; a1.in_service = true;
+  ACBus a2; a2.index = 8; a2.bus_type = BusType::PQ;    a2.in_service = true;
+  sys.ac.buses = {a1, a2};
+  ACBranch br; br.index = 1; br.from_bus = 7; br.to_bus = 8; br.x_pu = 0.1;
+  br.in_service = true;
+  sys.ac.branches = {br};
+  // Same numeric id (7) as an AC bus: the typed, domain-qualified lookups must
+  // not confuse the two.
+  DCBus d1; d1.index = 7; d1.bus_type = DCBusType::DC_V; d1.in_service = true;
+  sys.dc.buses = {d1};
+
+  const auto g = build_power_system_graph(sys);
+
+  const NodeIdx ac7 = g.ac_node_idx(StableBusId{7});
+  const NodeIdx dc7 = g.dc_node_idx(StableBusId{7});
+  CHECK(ac7.valid());
+  CHECK(dc7.valid());
+  CHECK(ac7.value() == g.ac_node_idx(7));
+  CHECK(dc7.value() == g.dc_node_idx(7));
+  CHECK(ac7.value() != dc7.value());          // AC bus 7 and DC bus 7 differ
+  CHECK_FALSE(g.ac_node_idx(StableBusId{999}).valid());  // absent -> invalid
+}

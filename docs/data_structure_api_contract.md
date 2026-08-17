@@ -233,6 +233,10 @@ flowchart LR
 存量代码保持 `int` 并可渐进迁移。隔离性由 `[typed_ids]` 回归（`static_assert` 不可隐式
 转换）保障。默认值为负值"未设"哨兵，`valid()` 判定 `>=0`。
 
+**首个已落地边界**：`PowerSystemGraph` 新增 `ac_node_idx(StableBusId)` / `dc_node_idx(StableBusId)`
+重载，返回 `NodeIdx`（附加式，不改动既有 `int` 重载）。回归 `test_graph [typed_ids]` 用
+AC/DC 同号母线（id=7）验证域限定不混淆。
+
 ---
 
 ## 5. 投影与溯源类型

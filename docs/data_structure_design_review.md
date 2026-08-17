@@ -59,6 +59,13 @@ Class: Status（评审记录；行级细节在代码变更后需复核，缺陷�
 7. **无异常边界**：`Result<T>` + `ErrorCode` 分段编码，适配外部集成。
 8. **防御性求解守卫**：DC-OPF 在反投影前校验 `va.size()==n_merged`，避免用成功路径契约
    掩盖原始不可行（[dc_opf.cpp#L1158](../src/optimal_power_flow/dc_opf.cpp#L1158)）。
+9. **市场定价“母线不过滤”不变量**：SCED/LMP 定价装配中 `build.B == system.ac.buses.size()`、
+   `build.D == system.dc.buses.size()`（[market_simulation.cpp#L958](../src/market/market_simulation.cpp#L958)），
+   母线**从不**按投运状态过滤。因此 `extract_pricing` 里 `lmp_per_mwh[b]`/`load_shedding_mw[b]`/
+   `dc_lmp_per_mwh[d]` 直接以循环下标 `b`/`d` 索引即等于**授权母线位序**——这是发电机/支路
+   （经 `active_*_positions` 过滤，需 `*_positions[·]` 重映射）**有意的不对称**。**未来若对母线
+   引入任何过滤/重排，必须同步把定价结果切回 `*_positions[·]` 重映射**，否则 LMP 会静默错配到
+   错误母线。见 AUD-017（[模块代码审计](module_code_audit.md)）与下述第 8 节。
 
 ---
 
@@ -255,3 +262,34 @@ flowchart LR
 其中 DC 剥离判据经两个真实跨套件
 回归收紧（停运换流器保留、闭合 DC 断路器连通）。数据结构与 API 契约的固化见
 [数据结构与 API 契约](data_structure_api_contract.md)。
+
+**逐模块深度评审（item 5，reliability → dynamics → market）**：在核心投影/ID 评审之外，
+本迭代对三个求解型模块做了同深度评审并登记于 [模块代码审计](module_code_audit.md)：
+**AUD-015**（reliability，RL-01 尾部风险越界 + RL-02 ASAI 越界钳制）、**AUD-016**（dynamics，
+DY-01 缺陷雅可比下参与因子回退右特征向量幅值）均已修复并回归；**AUD-017**（market，位/索引
+双键 + LMP 对偶提取 + N-1 割迭代）经深审**未发现缺陷**，四个“看似不对称”处均确认正确，
+并把“母线不过滤 ⇒ LMP 授权位序”不变量登记为须保留的设计约束（见第 1 节第 9 条与下节）。
+
+---
+
+## 8. 市场定价索引空间评审（AUD-017，位/索引双键 · LMP 对偶 · N-1）
+
+市场 SCUC→SCED→LMP→结算 全链路是**位（authored position）与稳定索引（stable index）双键**、
+以及**对偶价格块定位**最密集的地方，也是最容易“误 refactor”的地方。本节把四个**看似有缺陷、
+实则正确**的点逐一锚定，作为未来重构的护栏。评审方法：`extract_pricing` / `PricingBuild` 行偏移 /
+结算逐函数源审 + 现有测试交叉验证（[market_simulation.cpp](../src/market/market_simulation.cpp)）。
+
+| # | 看似可疑 | 判定 | 证据 |
+|---|---|---|---|
+| 8.1 | LMP 直接下标 `lmp_per_mwh[b]`（发电/支路却经 `*_positions[·]` 重映射，母线不重映射） | **正确** | `build.B == buses.size()`、母线从不过滤 ⇒ `b ≡ 授权母线位序`（[#L958](../src/market/market_simulation.cpp#L958)） |
+| 8.2 | balance/reserve/dc_balance 对偶按 `constraint_duals[inequality_rows + row]` 读取（reserve 形似不等式） | **正确** | 三者与 flow/offer 同在**等式块**内顺序串接（[#L2758](../src/market/market_simulation.cpp#L2758)）；若错放，flow/offer 等式对偶也会同时错乱、LMP 测试必挂 |
+| 8.3 | 结算里位/索引两个键并存 | **正确** | 定价结果向量按**授权位序**索引，结算同时记录 `generator_position`（授权）与 `generator_index`（稳定 ID）（[#L4519](../src/market/market_simulation.cpp#L4519)） |
+| 8.4 | N-1 迭代割生成可能不收敛 | **正确** | `cut_keys`（`set<tuple>`）跨迭代去重、`added==0` 立即 break、`max_iterations` 上界；不可行/建模异常写诚实 status 并提前返回（[#L5049](../src/market/market_simulation.cpp#L5049)） |
+
+**结论**：market 模块在上述四个高危子系统中均**成熟且正确**，与 reliability/dynamics 不同，
+未发现可修复缺陷。唯一须警惕的是 8.1 的**隐式不变量**——LMP/切负荷/弃电的直接下标**静默依赖**
+“AC/DC 母线永不过滤”。发电与支路已经过 `active_*_positions` 过滤并重映射，故若未来有人对母线
+引入同类过滤/重排而**忘记**把定价结果切回 `*_positions[·]` 重映射，LMP 会静默错配到错误母线。
+该不变量已登记为第 1 节第 9 条的“应保留约束”与 AUD-017。现有回归 `test_market_simulation`
+的结算用例（逐授权母线 `lmp_per_mwh[b]` × 需求 交叉核对）与 hybrid-DC 用例（`dc_*[0]`/`[1]`
+按授权位序断言）已从行为侧固化该属性。

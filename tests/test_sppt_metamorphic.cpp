@@ -480,3 +480,74 @@ TEST_CASE("MR1-DC: DC dead-island strip is idempotent",
   for (size_t i = 0; i < once.dc.buses.size(); ++i)
     CHECK(twice.dc.buses[i].index == once.dc.buses[i].index);
 }
+
+TEST_CASE("MR-ext: generation-extensive reprojection conserves and splits by generation",
+          "[sppt][metamorphic][reprojection][regression]") {
+  BusMergeMap map;
+  map.n_original = 3;
+  map.n_merged = 2;
+  map.ext_to_int = {{1, 0}, {2, 0}, {3, 1}};
+  map.ext_to_orig_pos = {{1, 0}, {2, 1}, {3, 2}};
+  map.generation_participation = {{1, 0.25}, {2, 0.75}, {3, 1.0}};
+
+  const auto gen = unproject_bus_vector({8.0, 5.0}, map,
+                                        BusVectorSemantics::ExtensiveGeneration);
+  CHECK(gen == std::vector<double>{2.0, 6.0, 5.0});
+  // Conservation across the merged group {1, 2}.
+  CHECK(std::abs(gen[0] + gen[1] - 8.0) < 1e-12);
+}
+
+TEST_CASE("MR-compose: AC merge and DC dead-island strip compose in one projection",
+          "[sppt][metamorphic][dc][merge][regression]") {
+  HybridPowerSystem sys;
+  sys.base_mva = sys.ac.base_mva = sys.dc.base_mva = 100.0;
+  // AC: slack + two PQ buses; buses 2 and 3 tied by an ideal-connectivity branch
+  // that projection merges.
+  sys.ac.buses = {make_bus(1, BusType::SLACK), make_bus(2, BusType::PQ),
+                  make_bus(3, BusType::PQ)};
+  ExternalGrid grid;
+  grid.index = 1;
+  grid.bus = 1;
+  sys.ac.external_grids = {grid};
+  ACBranch feeder;
+  feeder.index = 1;
+  feeder.from_bus = 1;
+  feeder.to_bus = 2;
+  feeder.r_pu = 0.01;
+  feeder.x_pu = 0.10;
+  ACBranch tie;
+  tie.index = 2;
+  tie.from_bus = 2;
+  tie.to_bus = 3;
+  tie.ideal_connectivity = true;  // merged by projection
+  sys.ac.branches = {feeder, tie};
+  // DC: one live island (DC_V + branch) plus one dead bus.
+  DCBus dcv;
+  dcv.index = 1;
+  dcv.bus_type = DCBusType::DC_V;
+  dcv.base_kv = 0.75;
+  DCBus dcp;
+  dcp.index = 2;
+  dcp.bus_type = DCBusType::DC_P;
+  dcp.base_kv = 0.75;
+  DCBus dead;
+  dead.index = 5;
+  dead.bus_type = DCBusType::DC_P;
+  dead.base_kv = 0.75;
+  sys.dc.buses = {dcv, dcp, dead};
+  DCBranch dcbr;
+  dcbr.index = 1;
+  dcbr.from_bus = 1;
+  dcbr.to_bus = 2;
+  dcbr.r_pu = 0.02;
+  sys.dc.branches = {dcbr};
+
+  const auto proj = project_to_canonical_models(sys);
+  // AC merge and DC strip are independently recorded on the same projection.
+  REQUIRE(proj.bus_merge_map.has_value());
+  CHECK(proj.bus_merge_map->has_merges());
+  CHECK(proj.ac.buses.size() == 2);  // buses 2 and 3 merged
+  REQUIRE(proj.projection_certificate.has_value());
+  CHECK(proj.projection_certificate->has_dc_strip());
+  CHECK(proj.dc.buses.size() == 2);  // dead DC bus stripped
+}

@@ -416,6 +416,11 @@ SmallSignalResult small_signal_analysis(DynamicSystem& system,
   const Eigen::VectorXcd lambda = es.eigenvalues();
   const Eigen::MatrixXcd R = es.eigenvectors();          // right eigenvectors (columns)
   const Eigen::MatrixXcd Linv = R.inverse();             // left eigenvectors (rows)
+  // DY-01: R is singular for a defective (non-diagonalizable) reduced Jacobian
+  // — e.g. repeated eigenvalues from identical parallel machines — so R.inverse()
+  // yields non-finite left eigenvectors. Detect this and fall back to a finite
+  // right-eigenvector-magnitude participation instead of emitting NaN factors.
+  const bool participation_degraded = !Linv.allFinite();
 
   result.participation.resize(nd, nd);
   const double osc_threshold = 1e-6;
@@ -430,11 +435,14 @@ SmallSignalResult small_signal_analysis(DynamicSystem& system,
     m.oscillatory = std::abs(m.eigen_imag) > osc_threshold;
     if (m.eigen_real > result.stability_margin) result.stable = false;
 
-    // Participation p_{ki} = |R(k,i)| * |Linv(i,k)|, normalized over k.
+    // Participation p_{ki} = |R(k,i)| * |Linv(i,k)|, normalized over k. DY-01:
+    // when R is defective (Linv non-finite) fall back to |R(k,i)|^2 so the
+    // factors stay finite instead of NaN.
     double sum = 0.0;
     Eigen::VectorXd p(nd);
     for (int k = 0; k < nd; ++k) {
-      p[k] = std::abs(R(k, i)) * std::abs(Linv(i, k));
+      const double rk = std::abs(R(k, i));
+      p[k] = participation_degraded ? rk * rk : rk * std::abs(Linv(i, k));
       sum += p[k];
     }
     if (sum > 0.0) p /= sum;
@@ -466,7 +474,12 @@ SmallSignalResult small_signal_analysis(DynamicSystem& system,
   result.participation = std::move(sorted_part);
 
   result.success = true;
-  result.message = "Small-signal analysis completed";
+  result.message =
+      participation_degraded
+          ? "Small-signal analysis completed; reduced Jacobian is defective "
+            "(repeated eigenvalues), participation uses a right-eigenvector "
+            "magnitude fallback"
+          : "Small-signal analysis completed";
   return result;
 }
 

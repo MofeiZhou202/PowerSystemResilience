@@ -1543,6 +1543,34 @@ TEST_CASE("metrics: AC-only caller is unaffected by DC presence (backward compat
   CHECK(idx.saidi == Approx(12.0));
 }
 
+TEST_CASE("RL-02: ASAI is clamped to [0,1] when SAIDI exceeds a reporting year",
+          "[reliability][metrics][regression]") {
+  HybridPowerSystem sys = make_ac_dc_customer_system();
+  std::vector<double> nodal_cif = {1.0};
+  std::vector<double> nodal_cid = {20000.0};  // > 8760 hr/customer
+  DistributionIndices idx =
+      compute_distribution_indices(sys, nodal_cif, nodal_cid, 8760);
+  CHECK(idx.asai >= 0.0);
+  CHECK(idx.asai <= 1.0);
+  CHECK(idx.asui >= 0.0);
+  CHECK(idx.asui <= 1.0);
+}
+
+TEST_CASE("RL-01: compute_tail_risk tolerates a shorter LOLE series without OOB",
+          "[reliability][tail_risk][regression]") {
+  std::vector<double> eens(100);
+  for (int i = 0; i < 100; ++i)
+    eens[static_cast<size_t>(i)] = static_cast<double>(i);
+  std::vector<double> lole(50, 1.0);  // deliberately shorter than eens
+  const TailRiskMetrics m = compute_tail_risk(eens, lole, 0.95);
+  CHECK(std::isfinite(m.eens_var));
+  CHECK(std::isfinite(m.lole_var));
+  CHECK(std::isfinite(m.eens_cvar));
+  CHECK(std::isfinite(m.lole_cvar));
+  CHECK(m.eens_percentiles.size() == 5);
+  CHECK(m.lole_percentiles.size() == 5);
+}
+
 TEST_CASE("metrics: explicit DCLoad.n_customers weights DC interruptions",
           "[reliability][metrics][dc]") {
   HybridPowerSystem sys;

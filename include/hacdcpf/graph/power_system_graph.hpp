@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "hacdcpf/model/hybrid_power_system.hpp"
+#include "hacdcpf/model/typed_ids.hpp"
 
 namespace hacdcpf::graph {
 
@@ -150,6 +151,16 @@ struct PowerSystemGraph {
   int dc_node_idx(int bus_id) const {
     auto it = dc_bus_id_to_node_idx.find(bus_id);
     return (it == dc_bus_id_to_node_idx.end()) ? -1 : it->second;
+  }
+
+  /// Strong-typed overloads (model/typed_ids.hpp): adopt StableBusId -> NodeIdx
+  /// at this public graph boundary so a bus id cannot be silently used as a node
+  /// index. An absent bus yields an invalid NodeIdx (value() == -1).
+  NodeIdx ac_node_idx(StableBusId bus_id) const {
+    return NodeIdx{ac_node_idx(bus_id.value())};
+  }
+  NodeIdx dc_node_idx(StableBusId bus_id) const {
+    return NodeIdx{dc_node_idx(bus_id.value())};
   }
 };
 
