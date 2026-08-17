@@ -1524,11 +1524,15 @@ DynamicDCBranch make_dc_branch(const DCBranch& branch,
 }
 
 PowerFlowResult nominal_power_flow(const HybridPowerSystem& sys,
-                                   const DynamicSolverOptions& options,
-                                   bool already_canonical) {
+                                   const DynamicSolverOptions& options) {
   if (options.run_power_flow_initialization) {
+    // The PF facade owns rich-to-canonical projection and authored-space result
+    // recovery. DynamicSolverOptions::project_to_canonical controls only the
+    // later dynamic-network representation. A carried ProjectionCertificate is
+    // the explicit proof that direct SolverData assembly is legal; without it,
+    // bypassing the facade would reinterpret stable bus IDs as vector positions.
     PowerFlowResult pf;
-    if (already_canonical) {
+    if (sys.projection_certificate.has_value()) {
       auto data = powerflow::make_solver_data_projected(
           HybridPowerSystem(sys), options.power_flow_options.loss_model);
       powerflow::NewtonSolver solver;
@@ -1680,8 +1684,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
           ? projection::RichToCanonicalOperator::apply(sys).canonical
           : sys;
   dyn.initial_power_flow = nominal_power_flow(
-      options.project_to_canonical ? sys : dyn.canonical_system,
-      options, !options.project_to_canonical);
+      options.project_to_canonical ? sys : dyn.canonical_system, options);
   dyn.initialization = make_initialization_summary(options, dyn.initial_power_flow);
 
   // Multi-machine rule (PSD semantics): with >= 2 in-service synchronous

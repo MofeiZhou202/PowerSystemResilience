@@ -208,11 +208,15 @@ tolerances restore their named defaults at every production boundary.
 
 This guard is evidence-based: forced Schur on
 case300 reduces dimension `640 -> 604` and structural nonzeros `4820 -> 4502`
-but increases the fixed-protocol median linear/wall time by `40.9%/15.7%`
-because local certificate overhead dominates a small KLU factorization.
+but increases the current fixed-protocol median linear/wall time by
+`31.36%/32.94%` because local certificate overhead dominates a small KLU
+factorization.
 ACTIVSg2000 reduces `4054 -> 4006` and `29806 -> 29382`, with median
-linear/wall reductions of `14.0%/12.5%`; it is admitted by the production
-default.
+linear/wall reductions of `13.75%/10.55%`; it is admitted by the production
+default. Relative to the preceding `13.85%/11.99%` result, the current
+large-case speedups are lower by 0.10/1.44 percentage points; this small
+regression does not change sign or trigger the fixed 50%-mismatch
+re-derivation threshold.
 
 Every candidate checks each selected `D_i` reciprocal condition estimate,
 the reduced normwise backward error, and the reconstructed complete-system
@@ -348,6 +352,12 @@ certificate.
 `vsc_schur_benchmark` is the non-CTest Release benchmark. Its fixed protocol is
 two warmups and five alternating full/Schur repetitions. It labels case300 as
 a forced research ablation and records why production admission excludes it.
+On the current macOS 26.5.2 / Apple M4 Max clean Release/KLU build at repository
+`1773aa0e75d7` and MIPSolvers `3bf1e66749e3`, case300 measured
+`0.524958/0.689582 ms` full/Schur linear time and `2.522875/3.353792 ms`
+full/Schur wall time. ACTIVSg2000 measured `31.979500/27.581291 ms` linear and
+`47.372583/42.373500 ms` wall time, with 33 attempted, 19 accepted, and 14
+fallback Schur steps.
 The current KLU adapter returns `-1` for factor nonzeros/work, so the benchmark
 sets `factor_statistics_available=false` rather than fabricating fill data.
 

@@ -11,8 +11,10 @@ the current Git worktrees remain authoritative.
 | Scope | Result |
 |---|---|
 | Required MIPSolvers source | Current pin `3bf1e66749e3b3e0bbd57696a7d4f43ecf09218c`; the clean sibling worktree matches it and includes the PF KLU numeric-refactor interface/adapter. The PF regressions below used the same three-file dependency content before it was committed. The earlier general full-regression baseline was established at `60f8bc4e4eeb58c239f83b7ff0fde1be75cd05b0`. |
+| Current clean `macos-release` build | At repository `1773aa0e75d7` with MIPSolvers `3bf1e66749e3`, `cmake --preset macos-release` followed by `cmake --build --preset macos-release --clean-first` completed successfully on macOS 26.5.2 / Apple M4 Max. The precompiled MIPSolvers dependency manifest did not match the active ABI, so configuration correctly used the repository-vendored HiGHS, SCIP, Ipopt, and SuiteSparse instead. |
+| Current complete `macos-release` regression | After the fixes recorded below, `cmake --build --preset macos-release -j8` completed and `ctest --preset macos-release --output-on-failure` ran all 1549 registered tests in 178.49 s with 0 failures: 1546 passed and 3 were conditionally skipped. The skips are one unavailable formal-SOC JSON input and two unavailable external GridLAB-D comparisons. |
 | `full-dev` regression | 1430/1430 registered tests completed without failure; 3 condition-dependent tests skipped |
-| `macos-release` regression | 1425/1425 registered tests completed without failure; 3 condition-dependent tests skipped |
+| Earlier green `macos-release` regression | 1425/1425 registered tests completed without failure; 3 condition-dependent tests skipped |
 | Graph ASan/UBSan subset | 28 cases, 113 assertions passed after the iterative Tarjan fix |
 | Reliability ASan/UBSan | Complete three-stage suite 25 cases/1339 assertions; `case33mg_acdc` 477 assertions and five consecutive parallel repeats passed; `test_1_no_sop` 79 assertions |
 | Market ASan/UBSan | Complete suite 22 cases/845 assertions; focused initial root-cut case 1/42 |
@@ -70,14 +72,15 @@ full-dynamic equilibrium, which may move when dynamic device equivalents do
 not reproduce the PF slack dispatch. The added case starts without a terminal
 SLACK and certifies the stable GFM Norton seed through dynamic construction.
 
-The full `tools/gui_api_e2e.py` run passed all new production GFM/NCP HTTP
+The full `tools/gui_api_e2e.py` run passed all production GFM/NCP HTTP
 checks, including the Schur-policy request/effective-options round trip. The
 `gfm_norton_limit_demo` built-in case loads with 2 AC buses, 2 DC
 buses, and 2 VSCs; it preserves all four authored Norton fields through GUI
 editing and returns stable Canvas references, local certificates, and the GFM
-validity flags. The complete script finished 68/69 checks; its unrelated
-existing hybrid Auto OPF check reached Ipopt's iteration limit with violation
-`1.51e-4`. No GFM/NCP HTTP check failed.
+validity flags. The current registered GUI API E2E test passes, including
+hybrid Auto OPF recovery, the GFM demo, and case300 NCP solves. Four
+simultaneous converter limits are active and the maximum reported NCP residual
+is `1.5543e-15`.
 
 The balanced-PF GUI now exposes smooth-NCP continuation and local-VSC Schur
 admission in an expert advanced group. Blank controls preserve backend-owned
@@ -112,12 +115,20 @@ prove fixed sparse structure on real hybrid networks, not GFM flat-start
 robustness, large-scale simultaneous GFM binding, or GPU acceleration.
 
 The fixed two-warmup/five-repeat Release/KLU Schur benchmark was rerun after
-centralizing the numerical policy. Forced case300 Schur reduced dimension
-`640 -> 604` and structural nonzeros `4820 -> 4502`, but increased median
-linear time `40.9%` and wall time `15.7%`; the production default therefore
-keeps this case on full LU. ACTIVSg2000 reduced `4054 -> 4006` and
-`29806 -> 29382`, with median linear and wall reductions of `14.0%` and
-`12.5%`. The Schur enable flag, network-dimension admission, local `rcond`,
+the final all-suite fixes. Forced case300 Schur reduced dimension `640 -> 604`
+and structural nonzeros `4820 -> 4502`, but increased median linear time from
+`0.524958` to `0.689582 ms` (`31.36%`) and wall time from `2.522875` to
+`3.353792 ms` (`32.94%`); the production default therefore correctly keeps
+this case on full LU. Relative to the preceding run, the linear penalty is
+1.64 percentage points smaller and the wall penalty is 15.48 points larger.
+ACTIVSg2000 reduced `4054 -> 4006` and `29806 -> 29382`; median linear time
+fell from `31.979500` to `27.581291 ms` (`13.75%`) and wall time from
+`47.372583` to `42.373500 ms` (`10.55%`). Relative to the preceding run, these
+speedups are 0.10 and 1.44 percentage points lower. The large-case benefit
+keeps the predicted sign, and no measurement deviates by the predefined 50%
+re-derivation threshold; the small-case wall overhead remains an explicitly
+excluded ablation rather than a production regression. The Schur enable flag,
+network-dimension admission, local `rcond`,
 and backward-error tolerances now round-trip through the production PF HTTP
 configuration. Invalid dimensionless tolerances restore named defaults; the
 global machine epsilon remains read-only.
@@ -1056,15 +1067,25 @@ Release/KLU focused verification passed `test_power_flow_math_audit` 50 cases/
 `test_newton_krylov` 5/30, `test_hacdcpf` 27/117, and the flat-start/KLU
 MATPOWER filter 3/45. ASan/UBSan with SuiteSparse disabled and leak detection
 disabled passed 43/261, 30/218, 5/36, 5/30, the prepared-session filter 1/28,
-and the MATPOWER filter 3/41. The complete `macos-release` CTest then ran all
-1492 registered tests: 1482 passed, 7 failed, and 3 condition-dependent tests
-were skipped. Every PF/MATPOWER test passed. The seven failures were confined
-to existing OPF/RPO boundaries: multiscale/case300/GUI Auto Ipopt iteration
-limits, one authored-order OPF value at `10.0100145` just outside a `10.0 +/-
-0.01` assertion, the GUI multiscale/Auto OPF checks, and the case300 RPO
-cross-validation tolerance. No all-suite green claim is made. The main
-repository implementation is at `684de1ee`; the clean MIPSolvers dependency is
-at the pinned `3bf1e66`.
+and the MATPOWER filter 3/41. The eight subsequently observed Release failures
+are now closed. Hybrid OPF tests 34, 62, 73 and their GUI/RPO consequences
+1531, 1538, and 1548 use Ipopt limited-memory Hessian approximation whenever
+DC/VSC variables are present; pure-AC problems retain the audited exact
+Lagrangian Hessian. This avoids consuming an incomplete hybrid second-order
+block without claiming that block is certified. Test 904 now checks its actual
+authored-order contract while accounting for the positive loss of the
+`r=0.01 pu` branch. Dynamic initialization test 1127 now routes rich systems
+through the production PF projection facade instead of interpreting stable bus
+IDs as canonical positions. The first complete rerun exposed the related
+canonical-input test 1148; an explicit `projection_certificate` split now
+prevents re-projecting already-canonical systems, and focused tests 1127/1148
+both pass. The final `macos-release` CTest ran all 1549 registered tests in
+178.49 s with 0 failures: 1546 passed and 3 condition-dependent tests were
+skipped. The skips comprise one unavailable formal SOC JSON input and two
+unavailable external GridLAB-D comparisons. The focused NCP/Schur GUI test,
+Canvas/WebGL linking, hybrid Auto OPF, and RPO cross-validation all pass. The
+main repository is at `1773aa0e75d7`; the clean MIPSolvers dependency is at the
+pinned `3bf1e66749e3`.
 
 ## Fast orientation
 

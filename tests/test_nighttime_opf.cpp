@@ -305,7 +305,11 @@ TEST_CASE("AC OPF generator results remain in authored order after island stripp
   REQUIRE(result.gen_map.size() == 2);
   CHECK(result.gen_map[0].original_index == 0);
   CHECK(result.gen_map[1].original_index == 1);
-  CHECK_THAT(result.pg_mw[0], Catch::Matchers::WithinAbs(10.0, 1e-2));
+  // The live generator supplies the 10 MW demand plus the positive loss of the
+  // r=0.01 pu branch; authored ordering is certified by gen_map and the exact
+  // zero restored for the stripped generator, not by assuming a lossless grid.
+  CHECK(result.pg_mw[0] > load.p_mw);
+  CHECK(result.pg_mw[0] - load.p_mw < 0.02);
   CHECK(result.pg_mw[1] == 0.0);
 }
 

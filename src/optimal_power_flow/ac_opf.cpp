@@ -2427,12 +2427,21 @@ ParityNLPInput build_parity_nlp_input(const parity::Problem& prob,
                        Eigen::SparseMatrix<double>& J) {
     parity::nonlinear_inequality_jacobian(prob, x, J);
   };
-  nlp.lagrangian_hess = [&prob](const Eigen::VectorXd& x,
-                                const Eigen::VectorXd& lambda,
-                                const Eigen::VectorXd* nu,
-                                Eigen::SparseMatrix<double>& H) {
-    parity::lagrangian_hessian(prob, x, lambda, nu, H, 0.0);
-  };
+  // Wächter and Biegler (2006), Sec. 2: Ipopt's limited-memory mode requires
+  // consistent first derivatives but does not consume an exact Lagrangian
+  // Hessian. Keep hybrid DC/VSC models on that path until every converter and
+  // DC-network second-order block has a complete directional-derivative
+  // certificate; pure-AC models retain the audited exact Hessian.
+  const bool hybrid_problem = prob.vidx.n_vdc > 0 || prob.vidx.n_pac > 0 ||
+                              prob.vidx.n_pdcdc > 0;
+  if (!hybrid_problem) {
+    nlp.lagrangian_hess = [&prob](const Eigen::VectorXd& x,
+                                  const Eigen::VectorXd& lambda,
+                                  const Eigen::VectorXd* nu,
+                                  Eigen::SparseMatrix<double>& H) {
+      parity::lagrangian_hessian(prob, x, lambda, nu, H, 0.0);
+    };
+  }
   return input;
 }
 #endif
