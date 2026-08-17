@@ -1628,6 +1628,23 @@ void strip_dead_islands(HybridPowerSystem& sys) {
   }
 }
 
+// R-08: effective demand (kW) of a charging station for the merge participation
+// basis. In-service detailed Charger rows override the authored station total
+// (matching project_chargers_into_stations, which resets p_total_kw to the
+// charger sum), so the participation basis reflects post-fold demand.
+static double charging_station_effective_kw(const ACSystem& ac,
+                                            const ChargingStation& station) {
+  double charger_kw = 0.0;
+  bool has_detailed = false;
+  for (const auto& ch : ac.chargers) {
+    if (ch.in_service && ch.station_id == station.index) {
+      charger_kw += std::max(0.0, ch.p_ch_max_kw);
+      has_detailed = true;
+    }
+  }
+  return has_detailed ? charger_kw : station.p_total_kw;
+}
+
 // merge_zero_impedance_buses
 static void merge_zero_impedance_buses_impl(
     HybridPowerSystem& sys,
@@ -1749,9 +1766,24 @@ static void merge_zero_impedance_buses_impl(
   for (const auto& station : sys.ac.charging_stations) {
     if (station.in_service) {
       extensive_basis[station.bus] +=
-          std::max(0.0, station.p_total_kw / 1000.0);
+          std::max(0.0, charging_station_effective_kw(sys.ac, station) / 1000.0);
     }
   }
+
+  // Generation basis for generation-extensive unprojection (R-03). Keyed by
+  // authored bus index; only positive injection contributes.
+  std::unordered_map<int, double> generation_basis;
+  for (const auto& g : sys.ac.generators)
+    if (g.in_service) generation_basis[g.bus] += std::max(0.0, g.pg_mw);
+  for (const auto& sg : sys.ac.static_generators)
+    if (sg.in_service)
+      generation_basis[sg.bus] += std::max(0.0, sg.p_mw * sg.scaling);
+  for (const auto& rg : sys.ac.renewable_gens)
+    if (rg.in_service) generation_basis[rg.bus] += std::max(0.0, rg.p_mw);
+  for (const auto& pv : sys.ac.pv_systems)
+    if (pv.in_service) generation_basis[pv.bus] += std::max(0.0, pv.p_mw);
+  for (const auto& st : sys.ac.storage)
+    if (st.in_service) generation_basis[st.bus] += std::max(0.0, st.p_mw);
 
   // new_pos: representative position 鈫?new sequential position
   std::vector<int> old_pos_to_new(static_cast<size_t>(n), -1);
@@ -1776,6 +1808,7 @@ static void merge_zero_impedance_buses_impl(
     if (members.size() > 1) {
       double pd = 0.0, qd = 0.0, gs = 0.0, bs = 0.0;
       int total_customers = 0;
+      double max_importance = merged.importance;
       for (int m : members) {
         const auto& b = buses[static_cast<size_t>(m)];
         pd += b.pd_mw;
@@ -1783,12 +1816,16 @@ static void merge_zero_impedance_buses_impl(
         gs += b.gs_mw;
         bs += b.bs_mvar;
         total_customers += b.n_customers;
+        max_importance = std::max(max_importance, b.importance);
       }
       merged.pd_mw = pd;
       merged.qd_mvar = qd;
       merged.gs_mw = gs;
       merged.bs_mvar = bs;
       merged.n_customers = total_customers;
+      // R-06: keep the strongest planning importance across the merge group so
+      // resilience/planning weighting is not silently lost at the representative.
+      merged.importance = max_importance;
     }
 
     // Assign new contiguous index (1-based)
@@ -1798,8 +1835,11 @@ static void merge_zero_impedance_buses_impl(
     std::vector<int> group_ext;
     group_ext.reserve(members.size());
     double group_basis = 0.0;
+    double group_gen_basis = 0.0;
     for (int m : members) {
-      group_basis += extensive_basis[buses[static_cast<size_t>(m)].index];
+      const int ext_m = buses[static_cast<size_t>(m)].index;
+      group_basis += extensive_basis[ext_m];
+      group_gen_basis += generation_basis[ext_m];
     }
     for (int m : members) {
       old_pos_to_new[static_cast<size_t>(m)] = new_pos;
@@ -1808,6 +1848,10 @@ static void merge_zero_impedance_buses_impl(
       merge_map.extensive_participation[ext] =
           group_basis > 1e-12
               ? extensive_basis[ext] / group_basis
+              : 1.0 / static_cast<double>(members.size());
+      merge_map.generation_participation[ext] =
+          group_gen_basis > 1e-12
+              ? generation_basis[ext] / group_gen_basis
               : 1.0 / static_cast<double>(members.size());
     }
     merge_map.groups.push_back(std::move(group_ext));
@@ -2009,6 +2053,15 @@ std::vector<double> unproject_bus_vector(
         " does not match BusMergeMap.n_merged " + std::to_string(map.n_merged) +
         " (canonical/original index-space mismatch)");
   }
+  // R-07: an unbuilt/identity map (n_merged==0) carries no canonical space, so a
+  // non-empty input is an index-space misuse rather than a silent empty result.
+  // Guard on map.ext_to_int.empty() before calling for genuine identity cases.
+  if (map.n_merged <= 0 && !merged.empty()) {
+    throw std::invalid_argument(
+        "unproject_bus_vector: non-empty input (" +
+        std::to_string(merged.size()) +
+        ") against an empty/unbuilt BusMergeMap (n_merged=0)");
+  }
   std::vector<double> out(static_cast<size_t>(map.n_original), 0.0);
   for (const auto& [ext_bus, int_pos] : map.ext_to_int) {
     if (int_pos < 0 || int_pos >= static_cast<int>(merged.size())) continue;
@@ -2019,9 +2072,16 @@ std::vector<double> unproject_bus_vector(
     }
     if (orig_pos < 0 || orig_pos >= map.n_original) continue;
     double value = merged[static_cast<size_t>(int_pos)];
-    if (semantics == BusVectorSemantics::Extensive) {
-      const auto weight = map.extensive_participation.find(ext_bus);
-      if (weight == map.extensive_participation.end()) {
+    if (semantics == BusVectorSemantics::Extensive ||
+        semantics == BusVectorSemantics::ExtensiveGeneration) {
+      // ExtensiveDemand (== Extensive) splits by load basis; ExtensiveGeneration
+      // splits by generation basis (R-03).
+      const auto& participation =
+          semantics == BusVectorSemantics::ExtensiveGeneration
+              ? map.generation_participation
+              : map.extensive_participation;
+      const auto weight = participation.find(ext_bus);
+      if (weight == participation.end()) {
         throw std::invalid_argument(
             "unproject_bus_vector: extensive quantity has no participation "
             "factor for original bus " + std::to_string(ext_bus));
@@ -2029,6 +2089,36 @@ std::vector<double> unproject_bus_vector(
       value *= weight->second;
     }
     out[static_cast<size_t>(orig_pos)] = value;
+  }
+  return out;
+}
+
+// Expand a DC bus result vector from the post-strip survivor space back to the
+// pre-strip DC space, filling 0.0 for buses removed as dead islands (R-01/R-02).
+// Identity (returns the input) when no DC strip occurred. The caller then drops
+// any energy-router-internal DC buses to reach the authored DC bus count.
+std::vector<double> unproject_dc_bus_vector(
+    const std::vector<double>& survivor, const ProjectionCertificate& cert) {
+  if (!cert.has_dc_strip()) return survivor;
+  int n_surv = 0;
+  for (int s : cert.dc_prestrip_to_survivor)
+    if (s >= 0) ++n_surv;
+  // A failed solve leaves an empty vector even though survivors exist; pass it
+  // through. When every DC bus was stripped (n_surv==0) the sizes still match
+  // and the loop below yields an all-zero authored-space vector.
+  if (survivor.empty() && n_surv > 0) return survivor;
+  if (static_cast<int>(survivor.size()) != n_surv) {
+    throw std::invalid_argument(
+        "unproject_dc_bus_vector: input size " +
+        std::to_string(survivor.size()) + " does not match DC survivor count " +
+        std::to_string(n_surv));
+  }
+  std::vector<double> out(
+      static_cast<size_t>(cert.n_prestrip_dc_buses), 0.0);
+  for (int pre = 0; pre < cert.n_prestrip_dc_buses; ++pre) {
+    const int surv = cert.dc_prestrip_to_survivor[static_cast<size_t>(pre)];
+    if (surv >= 0 && surv < static_cast<int>(survivor.size()))
+      out[static_cast<size_t>(pre)] = survivor[static_cast<size_t>(surv)];
   }
   return out;
 }
@@ -2382,6 +2472,9 @@ static std::vector<int> detect_dc_dead_buses(const HybridPowerSystem& sys) {
   // DCDC converters couple their two DC terminals into one connectivity island.
   for (const auto& c : sys.dc.dcdc_converters)
     if (c.in_service) connect(c.bus_in, c.bus_out);
+  // Closed DC circuit breakers are connectivity paths, like AC switches.
+  for (const auto& cb : sys.dc.dc_circuit_breakers)
+    if (cb.in_service && cb.closed) connect(cb.bus_from, cb.bus_to);
 
   std::vector<int> comp_id(static_cast<size_t>(n), -1);
   std::vector<std::vector<int>> components;
@@ -2430,10 +2523,16 @@ static std::vector<int> detect_dc_dead_buses(const HybridPowerSystem& sys) {
       if (s.in_service && bset.count(s.bus) && s.p_mw > 1e-9) return true;
     for (const auto& s : sys.dc.dc_storage)
       if (s.in_service && bset.count(s.bus) && s.p_mw > 1e-9) return true;
+    // Any attached converter (in service or not) marks the DC bus as authored
+    // coupled infrastructure the formulation still allocates, so it is not a
+    // dead island. R-02's genuinely orphaned bus has had its converter removed
+    // from the vector by AC strip, so it is not matched here.
     for (const auto& v : sys.vsc_converters)
-      if (v.in_service && bset.count(v.bus_dc)) return true;
+      if (bset.count(v.bus_dc)) return true;
     for (const auto& l : sys.lcc_converters)
-      if (l.in_service && bset.count(l.dc_bus)) return true;
+      if (bset.count(l.dc_bus)) return true;
+    for (const auto& c : sys.dc.dcdc_converters)
+      if (bset.count(c.bus_in) || bset.count(c.bus_out)) return true;
     return false;
   };
 
@@ -2444,6 +2543,113 @@ static std::vector<int> detect_dc_dead_buses(const HybridPowerSystem& sys) {
         dead.push_back(sys.dc.buses[static_cast<size_t>(pos)].index);
   std::sort(dead.begin(), dead.end());
   return dead;
+}
+
+// Strip DC dead islands: remove DC buses (and the DC-only components attached to
+// them) that have no connectivity path to any DC source, mirroring
+// strip_dead_islands on the DC side (R-01/R-02). By construction a dead DC
+// island contains no VSC/LCC — a converter makes its DC bus sourced — so this is
+// a pure DC-domain operation with no AC coupling. The prestrip->survivor
+// position map is recorded on the certificate so DC result vectors recover to
+// authored space. No-op with an empty map when nothing is dead.
+static void strip_dead_dc_islands(HybridPowerSystem& sys,
+                                  ProjectionCertificate& cert) {
+  const int n = static_cast<int>(sys.dc.buses.size());
+  if (n == 0) return;
+  const std::vector<int> dead_idx = detect_dc_dead_buses(sys);
+  if (dead_idx.empty()) return;
+  const std::unordered_set<int> dead(dead_idx.begin(), dead_idx.end());
+
+  std::unordered_map<int, int> old_index_to_new;  // survivor old .index -> new
+  std::vector<int> prestrip_to_survivor(static_cast<size_t>(n), -1);
+  std::vector<DCBus> survivors;
+  survivors.reserve(sys.dc.buses.size() - dead.size());
+  for (int i = 0; i < n; ++i) {
+    auto& bus = sys.dc.buses[static_cast<size_t>(i)];
+    if (dead.count(bus.index) != 0U) continue;
+    const int new_pos = static_cast<int>(survivors.size());
+    prestrip_to_survivor[static_cast<size_t>(i)] = new_pos;
+    old_index_to_new[bus.index] = new_pos + 1;
+    bus.index = new_pos + 1;
+    survivors.push_back(std::move(bus));
+  }
+  sys.dc.buses = std::move(survivors);
+
+  auto remap = [&](int old_bus) -> int {
+    const auto it = old_index_to_new.find(old_bus);
+    return it != old_index_to_new.end() ? it->second : 0;  // 0 => dead/unknown
+  };
+  auto is_dead_bus = [&](int bus) { return dead.count(bus) != 0U; };
+
+  {
+    std::vector<DCBranch> kept;
+    kept.reserve(sys.dc.branches.size());
+    for (auto& br : sys.dc.branches) {
+      if (is_dead_bus(br.from_bus) || is_dead_bus(br.to_bus)) continue;
+      br.from_bus = remap(br.from_bus);
+      br.to_bus = remap(br.to_bus);
+      if (br.from_bus == 0 || br.to_bus == 0) continue;
+      kept.push_back(std::move(br));
+    }
+    sys.dc.branches = std::move(kept);
+  }
+
+  auto filter_remap = [&](auto& vec) {
+    using T = typename std::decay_t<decltype(vec)>::value_type;
+    std::vector<T> kept;
+    kept.reserve(vec.size());
+    for (auto& item : vec) {
+      if (is_dead_bus(item.bus)) continue;
+      item.bus = remap(item.bus);
+      if (item.bus == 0) continue;
+      kept.push_back(std::move(item));
+    }
+    vec = std::move(kept);
+  };
+  filter_remap(sys.dc.loads);
+  filter_remap(sys.dc.storage);
+  filter_remap(sys.dc.dc_storage);
+  filter_remap(sys.dc.static_generators);
+  filter_remap(sys.dc.dc_static_generators);
+  filter_remap(sys.dc.pv_arrays);
+
+  {
+    std::vector<DCDCConverter> kept;
+    for (auto& c : sys.dc.dcdc_converters) {
+      if (is_dead_bus(c.bus_in) || is_dead_bus(c.bus_out)) continue;
+      c.bus_in = remap(c.bus_in);
+      c.bus_out = remap(c.bus_out);
+      if (c.bus_in == 0 || c.bus_out == 0) continue;
+      kept.push_back(std::move(c));
+    }
+    sys.dc.dcdc_converters = std::move(kept);
+  }
+  {
+    std::vector<DCCircuitBreaker> kept;
+    for (auto& cb : sys.dc.dc_circuit_breakers) {
+      if (is_dead_bus(cb.bus_from) || is_dead_bus(cb.bus_to)) continue;
+      cb.bus_from = remap(cb.bus_from);
+      cb.bus_to = remap(cb.bus_to);
+      if (cb.bus_from == 0 || cb.bus_to == 0) continue;
+      kept.push_back(std::move(cb));
+    }
+    sys.dc.dc_circuit_breakers = std::move(kept);
+  }
+
+  // Converters reference only surviving DC buses (dead islands host none), so
+  // renumber their DC terminals to the survivor space.
+  for (auto& v : sys.vsc_converters)
+    if (!is_dead_bus(v.bus_dc)) v.bus_dc = remap(v.bus_dc);
+  for (auto& l : sys.lcc_converters)
+    if (!is_dead_bus(l.dc_bus)) l.dc_bus = remap(l.dc_bus);
+  for (auto& er : sys.energy_routers)
+    for (auto& p : er.ports)
+      if (p.port_type == ERPortType::DC && !is_dead_bus(p.bus))
+        p.bus = remap(p.bus);
+
+  cert.n_prestrip_dc_buses = n;
+  cert.dc_prestrip_to_survivor = std::move(prestrip_to_survivor);
+  cert.dc_dead_bus_indices = dead_idx;
 }
 
 // Internal helper: project a mutable HybridPowerSystem in place.
@@ -2718,20 +2924,18 @@ static void project_in_place(HybridPowerSystem& out,
   // remain valid reconnection candidates.
   if (options.strip_dead_islands) strip_dead_islands(out);
 
-  // R-01/R-02: report (do not remove) DC-side dead islands so the projection
-  // boundary is auditable. AC strip above can also orphan a DC bus by removing
-  // the converter that fed it. See docs/data_structure_design_review.md.
-  {
-    const std::vector<int> dc_dead = detect_dc_dead_buses(out);
-    if (!dc_dead.empty()) {
-      std::string msg = "DC dead-island detection: " +
-                        std::to_string(dc_dead.size()) +
-                        " DC bus(es) have no source path and are NOT stripped"
-                        " (indices:";
-      for (int id : dc_dead) msg += " " + std::to_string(id);
-      msg +=
-          "); validate DC source connectivity or expect a singular DC "
-          "conductance matrix.";
+  // R-01/R-02: strip DC-side dead islands (buses with no source path), which AC
+  // strip can also create by removing the converter that fed a DC bus. The
+  // prestrip->survivor map is recorded on the certificate for DC result
+  // recovery. Skipped with reconfiguration, matching AC strip.
+  if (options.strip_dead_islands) {
+    strip_dead_dc_islands(out, projection_certificate);
+    if (!projection_certificate.dc_dead_bus_indices.empty()) {
+      std::string msg = "DC dead-island strip: removed " +
+                        std::to_string(
+                            projection_certificate.dc_dead_bus_indices.size()) +
+                        " unsourced DC bus(es); voltages recover to 0 pu at "
+                        "their authored positions.";
       projection_certificate.diagnostics.push_back(std::move(msg));
     }
   }

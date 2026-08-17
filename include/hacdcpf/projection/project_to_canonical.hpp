@@ -116,13 +116,21 @@ ObservableAttribution evaluate_attribution(
 
 enum class BusVectorSemantics {
   Intensive,
-  Extensive,
+  Extensive,            ///< demand-extensive: split by load-basis participation
+  ExtensiveDemand = Extensive,  ///< explicit alias for the load-basis split
+  ExtensiveGeneration,  ///< generation-extensive: split by generation-basis participation
 };
 
 std::vector<double> unproject_bus_vector(
     const std::vector<double>& merged,
     const BusMergeMap& map,
     BusVectorSemantics semantics);
+
+// Expand a DC bus result vector from the post-dead-island-strip survivor space
+// back to the pre-strip DC space (0.0 for stripped buses). Identity when the
+// certificate carries no DC strip. See project_to_canonical_models / R-01/R-02.
+std::vector<double> unproject_dc_bus_vector(
+    const std::vector<double>& survivor, const ProjectionCertificate& cert);
 
 // ═══════════════════════════════════════════════════════════════════════
 // Device terminal flows (switches / circuit breakers)

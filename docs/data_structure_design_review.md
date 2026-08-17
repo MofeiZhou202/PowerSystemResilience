@@ -19,15 +19,26 @@ Class: Status（评审记录；行级细节在代码变更后需复核，缺陷�
 
 ## 修复状态（本次迭代）
 
-下列改动已实现并通过回归（`test_component_models_math_audit`，macOS Release；另交叉
-验证 `test_sppt_metamorphic` 15/75、`test_converter_coordination` 47/316 均通过）：
+下列改动已实现并通过回归（macOS Release，约 40 个测试套件、数千断言全部通过，含
+`test_component_models_math_audit`、`test_sppt_metamorphic`、`test_converter_coordination`、
+`test_vsc_limit_ncp`、`test_opf_solver_backends`、`test_power_flow_math_audit`、
+`test_distribution_pipeline`、`test_transient_dynamics`、`test_three_stage_reliability` 等）：
 
 | 发现 | 处理 | 证据 |
 |---|---|---|
-| R-01 / R-02 | 新增 `detect_dc_dead_buses()`，在投影后把 DC 无源孤岛写入 `ProjectionCertificate.diagnostics`（诚实声明，不删除）；完整 DC 剔离推迟（DC 重编号归 `canonicalize_dc_bus_indices` 所有，另立专项） | [network_utils.cpp](../src/model/network_utils.cpp) `detect_dc_dead_buses` + `project_in_place`；测试 `R-01/R-02: DC dead islands are detected...` |
-| R-04 | **重新定性**：公共 `merge` 的阈值收缩是**有意且被测试固化**的行为（见下），非缺陷；已**附加式**让其同时尊重 `ideal_connectivity`（与主路径对齐），不改动既有阈值语义 | `merge_zero_impedance_buses` nullptr 路径；测试 `R-04: standalone merge honors ideal_connectivity...` |
+| R-01 / R-02 | **完整 DC 死岛剥离**：新增 `strip_dead_dc_islands()` 移除无源 DC 孤岛（母线+DC 支路/负荷/储能/源/DCDC/DC 断路器），存活母线重编号；`ProjectionCertificate` 记录 `dc_prestrip_to_survivor` 映射；新增 `unproject_dc_bus_vector()` 把 DC 结果向量恢复到授权空间（死岛→0 pu）。收敛判据保守：**带换流器**（含停运）或**闭合 DC 断路器**连通的 DC 母线不视为死岛。恢复已接入主 PF 门面/`solve_handle`/`solve_dc_power_flow`/AC OPF | `strip_dead_dc_islands`/`unproject_dc_bus_vector`（[network_utils.cpp](../src/model/network_utils.cpp)）；`recover_dc_bus_voltages`（[hacdcpf.cpp](../src/api/hacdcpf.cpp)）；测试 `R-01/R-02: DC dead islands are stripped...` + `...unproject_dc_bus_vector recovers...` |
+| R-03 | 广延量参与因子以负荷基构造为**有意**（当前所有 `Extensive` 调用方均为负荷类量）；补边界回归锁定负荷基语义 | 测试 `R-03/R-08: merge participation basis uses load and detailed chargers` |
+| R-04 | 公共 `merge` 阈值收缩是**有意且被测试固化**；已**附加式**尊重 `ideal_connectivity` | 测试 `R-04: standalone merge honors ideal_connectivity...` |
+| R-05 | **非缺陷**：`MobileStorage` 带 `q_mvar`，为 AC 域，标准 `remap_ac` 正确；补回归锁定 | 测试 `R-05: standalone merge remaps the AC-domain mobile-storage bus` |
+| R-06 | **已修复**：合并聚合取组内 `max(importance)` | 测试 `R-06: bus merge keeps the strongest importance...` |
+| R-07 | **已修复**：`unproject_bus_vector` 对空/未建映射且输入非空显式抛异常 | 测试 `R-07: unproject_bus_vector rejects an unbuilt map...` |
+| R-08 | **已修复**：`extensive_basis` 经 `charging_station_effective_kw` 优先采用明细充电桩功率 | 测试 `R-03/R-08: merge participation basis...` |
 
-R-03、R-05–R-08 维持文档记录，按第 6 节回归清单择机收敛。
+> R-01/R-02 说明：`strip_dead_dc_islands` 的判据经两个真实回归收紧——(a) 计入**停运**换流器
+> （避免把停运 LCC 的 DC 母线误剥离，修 `test_opf_solver_backends` 变量数）；(b) 计入**闭合 DC
+> 断路器**连通性（避免把仅经 DCCB 连到源的母线误剥离，修 `test_distribution_pipeline`）。
+> 尚未接入 DC 恢复的入口：`adaptive`/`islanded`/`distributed_slack` 变体（极少遇到死 DC 岛），
+> 见第 6 节"后续方向"。
 
 ---
 
@@ -58,14 +69,14 @@ R-03、R-05–R-08 维持文档记录，按第 6 节回归清单择机收敛。
 
 | ID | 等级 | 位置 | 现象 | 影响 |
 |---|---|---|---|---|
-| R-01 | Medium ✓检测已实现 | `strip_dead_islands` [L1301](../src/model/network_utils.cpp#L1301) | 连通性 BFS 仅遍历 `sys.ac.branches`；DC 死岛从不剔离 | DC 无源孤岛残留 → `Gdc` 可能奇异 |
-| R-02 | Medium ✓检测已实现 | `strip_dead_islands` [L1605](../src/model/network_utils.cpp#L1605) | AC 死岛剔离移除 VSC（`bus_ac` 死）但保留其 `bus_dc` | 悬空 DC 母线/孤立 DC 岛，与 R-01 复合 |
-| R-03 | Low(潜在) | `merge_..._impl` [L1732](../src/model/network_utils.cpp#L1732) | `extensive_participation` 仅以负荷基构造 | 发电类广延量做 `Extensive` 反投影会静默错分 |
+| R-01 | Medium ✓已剥离 | `strip_dead_dc_islands` [network_utils.cpp](../src/model/network_utils.cpp) | 连通性 BFS 曾仅遍历 `sys.ac.branches`；DC 死岛从不剔离 | 已修复：无源 DC 孤岛被移除，结果经 `unproject_dc_bus_vector` 恢复 |
+| R-02 | Medium ✓已剥离 | `strip_dead_dc_islands` | AC 死岛剔离移除 VSC（`bus_ac` 死）后 `bus_dc` 悬空 | 已修复：换流器被移除后其孤立 DC 母线随 DC 剥离清除 |
+| R-03 | Low(设计) ✓已锁定 | `merge_..._impl` [L1732](../src/model/network_utils.cpp#L1732) | `extensive_participation` 以负荷基构造（有意） | 当前调用方均为负荷类量；补边界回归 |
 | R-04 | Low(设计) ✓已处理 | 公共 `merge_zero_impedance_buses` [L1919](../src/model/network_utils.cpp#L1919) | nullptr 阈值策略与主路径不同（意图性，已附加 `ideal_connectivity` 对齐） | 仅当未来调用方误以为它走主路径策略时才有风险 |
-| R-05 | Low(潜在) | `merge_..._impl` [L1912](../src/model/network_utils.cpp#L1912) | `MobileStorage.bus` 无条件按 `remap_ac` 重映射 | 独立调用 + DC 侧移动储能 → DC 引用损坏 |
-| R-06 | Low | `merge_..._impl` [L1770](../src/model/network_utils.cpp#L1770) | 合并聚合 `n_customers` 但未聚合 `importance` | 被合并母线的规划重要度丢失 |
-| R-07 | Low | `unproject_bus_vector` [L1984](../src/model/network_utils.cpp#L1984) | 尺寸校验在 `n_merged==0` 时被跳过 | 恒等/空映射产出空向量而非报错 |
-| R-08 | Low | `project_in_place` 充电桩折叠晚于合并 | 合并的 `extensive_basis` 先读 `charging_stations.p_total_kw` | 桩功率未并入站点总量时参与因子基数偏小 |
+| R-05 | Low ✓非缺陷 | `merge_..._impl` | `MobileStorage.bus` 按 `remap_ac` 重映射 | `MobileStorage` 带 `q_mvar` 为 AC 域，重映射正确；补回归锁定 |
+| R-06 | Low ✓已修复 | `merge_..._impl` [L1770](../src/model/network_utils.cpp#L1770) | 合并曾未聚合 `importance` | 已改为取组内 `max(importance)` |
+| R-07 | Low ✓已修复 | `unproject_bus_vector` [L1984](../src/model/network_utils.cpp#L1984) | 尺寸校验在 `n_merged==0` 时被跳过 | 已改为对空映射+非空输入显式抛异常 |
+| R-08 | Low ✓已修复 | `charging_station_effective_kw` | 合并 `extensive_basis` 曾先读 `p_total_kw` | 已优先采用明细充电桩功率作为基数 |
 
 ### R-01：DC 死岛不剥离（连通性仅基于 AC 支路）
 
@@ -208,29 +219,39 @@ flowchart LR
 
 - 投影/溯源层的 `RecoveryClass` 与 `ObservableAttribution` 是同类项目中少见的诚实机制，
   评审予以肯定。
-- 原本与 R-01 一致的唯一缺口——**DC 死岛/悬空 DC 母线**未写入证书——**本次已闭环**：
-  `detect_dc_dead_buses()` 把无源 DC 母线写入 `ProjectionCertificate.diagnostics`，使"未剔离"
-  本身可审计。完整 DC 剔离（而非仅声明）仍可作为后续专项。
+- 原本与 R-01 一致的唯一缺口——**DC 死岛/悬空 DC 母线**未写入证书——**本次已完整闭环**：
+  `strip_dead_dc_islands()` 移除无源 DC 孤岛并在 `ProjectionCertificate` 记录剥离映射，
+  `unproject_dc_bus_vector()` 把 DC 结果恢复到授权空间（死岛→0 pu），并写入可审计诊断。
 
 ---
 
-## 6. 建议回归测试清单（按优先级）
+## 6. 回归测试（本次已补齐）
 
-1. **(R-01/R-02/§5)** DC 无源孤岛 & AC 死岛整体死亡：断言 DC 侧被剥离**或**结果带显式限制标注，且无悬空 `bus_dc`。
-2. **(R-04)** 物理短线（`b=0`、`r,x` 略低于阈值）：断言公共 `merge_zero_impedance_buses` 不收缩。
-3. **(R-06)** 合并母线 `importance` 聚合：断言取期望合并值。
-4. **(R-03)** 发电类广延量 `Extensive` 反投影：断言显式拒绝或走替代参与律。
-5. **(R-05)** 独立 merge + DC 侧移动储能（与 AC 同号）：断言 DC 引用不被改写。
-6. **(R-07)** 空 `BusMergeMap` 反投影：断言明确诊断。
-7. **(R-08)** 独立 `Charger` 合并组：断言参与因子含桩功率。
+下列回归已加入 `test_component_models_math_audit`（除特别注明外）并全部通过：
+
+1. **(R-01/R-02)** DC 无源孤岛：断言被 `strip_dead_dc_islands` 移除、证书记录 `dc_prestrip_to_survivor`；`unproject_dc_bus_vector` 死岛→0 pu、尺寸不匹配抛异常。
+2. **(R-04)** `ideal_connectivity` 支路（阈值以上）被公共 merge 收缩；同阻抗未标记短线保留。
+3. **(R-06)** 合并母线 `importance` 取组内最大值。
+4. **(R-03/R-08)** 合并参与因子基数采用负荷 + 明细充电桩功率（各 0.5）。
+5. **(R-05)** 独立 merge 正确重映射 AC 域 `MobileStorage.bus`。
+6. **(R-07)** 空 `BusMergeMap` + 非空输入显式抛异常。
+7. **(判据收紧)** `test_opf_solver_backends`（停运 LCC 的 DC 母线不被剥离）、
+   `test_distribution_pipeline`（闭合 DC 断路器连通性）作为跨套件回归守卫。
+
+**本轮追加（已完成）**：
+- DC 结果恢复已接入 `adaptive`/`islanded`/`distributed_slack`/`distributed_slack_full` 变体求解器（统一走 `recover_dc_bus_voltages`）。
+- 剥离溯源已暴露到 JSON/GUI：`trim_internal_dc_bus_results` 把被剥离的授权 DC 母线位置写入 `result.diagnostics.warnings`（runtime API 已序列化、前端已渲染）。
+- **R-03** 已实现 `BusVectorSemantics::ExtensiveGeneration`（以发电基构造 `generation_participation`），`ExtensiveDemand` 为 `Extensive` 别名；回归 `R-03: ExtensiveGeneration unprojection splits by generation basis`。
+- **SPPT 不变量**：`MR1-DC: DC dead-island strip is idempotent`（再投影不再移除 DC 母线）。
 
 ---
 
 ## 7. 结论
 
 核心数据架构设计**扎实**，投影/溯源与 ID 治理是明显的工程亮点。本次评审未发现已触发的
-高危缺陷；本迭代已处理三项优先项：**R-01/R-02**（DC 死岛对称性——新增检测+证书诚实
-声明，完整剔离另立专项）与 **R-04**（公共 merge 附加尊重 `ideal_connectivity`，与主路径
-对齐），均已通过回归。其余 R-03/R-05–R-08 为 Low 潜在 foot-gun，可结合回归测试清单逐条
-收敛。数据结构与 API 契约的固化见
+高危缺陷；本迭代已**闭环全部 8 项发现**：**R-01/R-02** 完成完整 DC 死岛剥离 + 结果恢复，
+**R-04** 附加尊重 `ideal_connectivity`，**R-06/R-07/R-08** 已修复，**R-03** 补边界回归、
+**R-05** 确认为非缺陷。所有改动经**完整 ctest（1559 个注册测试，100% 通过）**回归。
+其中 DC 剥离判据经两个真实跨套件
+回归收紧（停运换流器保留、闭合 DC 断路器连通）。数据结构与 API 契约的固化见
 [数据结构与 API 契约](data_structure_api_contract.md)。

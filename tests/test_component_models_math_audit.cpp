@@ -741,7 +741,7 @@ TEST_CASE("typical and standard parameter paths preserve authored operating stat
                     }));
 }
 
-TEST_CASE("R-01/R-02: DC dead islands are detected and reported in the certificate",
+TEST_CASE("R-01/R-02: DC dead islands are stripped and recorded on the certificate",
           "[model_audit][projection][dc][dead_island]") {
   HybridPowerSystem sys;
   sys.base_mva = sys.ac.base_mva = sys.dc.base_mva = 100.0;
@@ -759,22 +759,66 @@ TEST_CASE("R-01/R-02: DC dead islands are detected and reported in the certifica
   grid.bus = 1;
   sys.ac.external_grids = {grid};
 
-  // A DC bus with no source, no branch, and no converter feeding it: a DC dead
-  // island the projection reports (but does not strip).
-  DCBus orphan;
-  orphan.index = 5;
-  orphan.bus_type = DCBusType::DC_P;
-  orphan.base_kv = 0.75;
-  sys.dc.buses = {orphan};
+  // Live DC island: a DC_V source bus and a load bus tied by a DC branch.
+  DCBus dcv;
+  dcv.index = 1;
+  dcv.bus_type = DCBusType::DC_V;
+  dcv.base_kv = 0.75;
+  DCBus dcp;
+  dcp.index = 2;
+  dcp.bus_type = DCBusType::DC_P;
+  dcp.base_kv = 0.75;
+  // Dead DC island: an isolated DC bus with no source, branch, or converter.
+  DCBus dead;
+  dead.index = 5;
+  dead.bus_type = DCBusType::DC_P;
+  dead.base_kv = 0.75;
+  sys.dc.buses = {dcv, dcp, dead};
+  DCBranch dcbr;
+  dcbr.index = 1;
+  dcbr.from_bus = 1;
+  dcbr.to_bus = 2;
+  dcbr.r_pu = 0.02;
+  sys.dc.branches = {dcbr};
 
   const auto projected = project_to_canonical_models(sys);
   REQUIRE(projected.projection_certificate.has_value());
-  const auto& diags = projected.projection_certificate->diagnostics;
+  const auto& cert = *projected.projection_certificate;
+  // Only the dead-island bus is removed; the sourced island survives.
+  CHECK(projected.dc.buses.size() == 2);
+  REQUIRE(cert.has_dc_strip());
+  CHECK(cert.n_prestrip_dc_buses == 3);
+  CHECK(cert.n_authored_dc_buses == 3);
+  CHECK(cert.dc_dead_bus_indices.size() == 1);
   const bool reported =
-      std::any_of(diags.begin(), diags.end(), [](const std::string& d) {
-        return d.find("DC dead-island") != std::string::npos;
-      });
+      std::any_of(cert.diagnostics.begin(), cert.diagnostics.end(),
+                  [](const std::string& d) {
+                    return d.find("DC dead-island strip") != std::string::npos;
+                  });
   CHECK(reported);
+}
+
+TEST_CASE("R-01/R-02: unproject_dc_bus_vector recovers stripped DC positions",
+          "[model_audit][projection][dc][dead_island]") {
+  ProjectionCertificate cert;
+  cert.n_authored_dc_buses = 3;
+  cert.n_prestrip_dc_buses = 3;
+  cert.dc_prestrip_to_survivor = {0, 1, -1};  // third DC bus stripped
+  REQUIRE(cert.has_dc_strip());
+
+  const auto recovered = unproject_dc_bus_vector({1.0, 0.99}, cert);
+  REQUIRE(recovered.size() == 3);
+  CHECK(recovered[0] == 1.0);
+  CHECK(recovered[1] == 0.99);
+  CHECK(recovered[2] == 0.0);  // de-energised stripped bus recovers to 0 pu
+
+  // A certificate with no DC strip is an identity pass-through.
+  ProjectionCertificate none;
+  CHECK(unproject_dc_bus_vector({1.0, 0.99}, none) ==
+        std::vector<double>{1.0, 0.99});
+
+  // Survivor-count mismatch fails loudly.
+  CHECK_THROWS_AS(unproject_dc_bus_vector({1.0}, cert), std::invalid_argument);
 }
 
 TEST_CASE("R-04: standalone merge honors ideal_connectivity above the numeric threshold",
@@ -825,4 +869,156 @@ TEST_CASE("typed IDs keep the three index spaces separate at compile time",
   std::unordered_map<StableBusId, int> by_id;
   by_id[a] = 7;
   CHECK(by_id.at(b) == 7);
+}
+
+TEST_CASE("R-06: bus merge keeps the strongest importance across the group",
+          "[model_audit][projection][merge]") {
+  HybridPowerSystem sys;
+  sys.base_mva = sys.ac.base_mva = 100.0;
+  auto b1 = make_bus(1, BusType::SLACK);
+  auto b2 = make_bus(2, BusType::PQ);
+  b1.importance = 1.0;
+  b2.importance = 5.0;  // higher importance on the non-representative bus
+  sys.ac.buses = {b1, b2};
+  ACBranch tie;
+  tie.index = 1;
+  tie.from_bus = 1;
+  tie.to_bus = 2;
+  tie.r_pu = 0.0;  // exact ideal connectivity
+  tie.x_pu = 0.0;
+  sys.ac.branches = {tie};
+  merge_zero_impedance_buses(sys);
+  REQUIRE(sys.ac.buses.size() == 1);
+  CHECK(sys.ac.buses.front().importance == 5.0);
+}
+
+TEST_CASE("R-07: unproject_bus_vector rejects an unbuilt map carrying data",
+          "[model_audit][projection][reprojection]") {
+  BusMergeMap empty;  // default: n_merged == 0, n_original == 0
+  CHECK_THROWS_AS(
+      unproject_bus_vector({1.0, 2.0}, empty, BusVectorSemantics::Intensive),
+      std::invalid_argument);
+  // A genuinely empty input against an empty map is a no-op, not an error.
+  CHECK(unproject_bus_vector({}, empty, BusVectorSemantics::Intensive).empty());
+}
+
+TEST_CASE("R-05: standalone merge remaps the AC-domain mobile-storage bus",
+          "[model_audit][projection][merge]") {
+  // MobileStorage carries reactive power (q_mvar) and is AC-domain by design,
+  // so remapping its bus through the AC merge is correct, not a DC corruption.
+  HybridPowerSystem sys;
+  sys.base_mva = sys.ac.base_mva = 100.0;
+  sys.ac.buses = {make_bus(1, BusType::SLACK), make_bus(2, BusType::PQ),
+                  make_bus(3, BusType::PQ)};
+  ACBranch tie;
+  tie.index = 1;
+  tie.from_bus = 2;
+  tie.to_bus = 3;  // merge buses 2 and 3
+  tie.r_pu = 0.0;
+  tie.x_pu = 0.0;
+  sys.ac.branches = {tie};
+  MobileStorage ms;
+  ms.index = 1;
+  ms.bus = 3;  // sits on the bus that merges away
+  ms.target_bus = 3;
+  sys.mobile_storage = {ms};
+  merge_zero_impedance_buses(sys);
+  REQUIRE(sys.ac.buses.size() == 2);
+  REQUIRE(sys.mobile_storage.size() == 1);
+  const int mapped = sys.mobile_storage.front().bus;
+  CHECK(mapped >= 1);
+  CHECK(mapped <= static_cast<int>(sys.ac.buses.size()));
+}
+
+TEST_CASE("R-03/R-08: merge participation basis uses load and detailed chargers",
+          "[model_audit][projection][merge]") {
+  HybridPowerSystem sys;
+  sys.base_mva = sys.ac.base_mva = 100.0;
+  sys.ac.buses = {make_bus(1, BusType::SLACK), make_bus(2, BusType::PQ)};
+  // Bus 1 carries a 10 MW load; bus 2 hosts a charging station whose demand
+  // comes only from detailed Charger rows (station total left at 0 -> R-08).
+  Load ld;
+  ld.index = 1;
+  ld.bus = 1;
+  ld.p_mw = 10.0;
+  sys.ac.loads = {ld};
+  ChargingStation cs;
+  cs.index = 1;
+  cs.bus = 2;
+  cs.p_total_kw = 0.0;
+  cs.power_factor = 1.0;
+  sys.ac.charging_stations = {cs};
+  Charger ch;
+  ch.index = 1;
+  ch.station_id = 1;
+  ch.p_ch_max_kw = 10000.0;  // 10 MW of detailed charger demand
+  sys.ac.chargers = {ch};
+  ACBranch tie;
+  tie.index = 1;
+  tie.from_bus = 1;
+  tie.to_bus = 2;
+  tie.r_pu = 0.0;
+  tie.x_pu = 0.0;
+  sys.ac.branches = {tie};
+  merge_zero_impedance_buses(sys);
+  REQUIRE(sys.bus_merge_map.has_value());
+  const auto& part = sys.bus_merge_map->extensive_participation;
+  // Both buses contribute ~10 MW, so each takes ~0.5 of an extensive quantity.
+  // Without the R-08 fix bus 2 would read a 0 MW basis (station total 0).
+  REQUIRE(part.count(1) == 1);
+  REQUIRE(part.count(2) == 1);
+  CHECK_THAT(part.at(1), WithinAbs(0.5, 1e-9));
+  CHECK_THAT(part.at(2), WithinAbs(0.5, 1e-9));
+}
+
+TEST_CASE("R-03: ExtensiveGeneration unprojection splits by generation basis",
+          "[model_audit][projection][reprojection]") {
+  HybridPowerSystem sys;
+  sys.base_mva = sys.ac.base_mva = 100.0;
+  sys.ac.buses = {make_bus(1, BusType::SLACK), make_bus(2, BusType::PQ)};
+  Generator g1;
+  g1.index = 1;
+  g1.bus = 1;
+  g1.pg_mw = 30.0;
+  Generator g2;
+  g2.index = 2;
+  g2.bus = 2;
+  g2.pg_mw = 10.0;
+  sys.ac.generators = {g1, g2};
+  // Load only on bus 2 so demand basis (bus 2) differs from generation basis.
+  Load ld;
+  ld.index = 1;
+  ld.bus = 2;
+  ld.p_mw = 5.0;
+  sys.ac.loads = {ld};
+  ACBranch tie;
+  tie.index = 1;
+  tie.from_bus = 1;
+  tie.to_bus = 2;
+  tie.r_pu = 0.0;
+  tie.x_pu = 0.0;
+  sys.ac.branches = {tie};
+  merge_zero_impedance_buses(sys);
+  REQUIRE(sys.ac.buses.size() == 1);
+  REQUIRE(sys.bus_merge_map.has_value());
+  const auto& map = *sys.bus_merge_map;
+
+  // Generation basis 30/10 -> 0.75/0.25; demand basis is bus 2 only -> 0/1.
+  CHECK_THAT(map.generation_participation.at(1), WithinAbs(0.75, 1e-9));
+  CHECK_THAT(map.generation_participation.at(2), WithinAbs(0.25, 1e-9));
+  CHECK_THAT(map.extensive_participation.at(1), WithinAbs(0.0, 1e-9));
+  CHECK_THAT(map.extensive_participation.at(2), WithinAbs(1.0, 1e-9));
+
+  // A merged 40 MW generation quantity splits 30/10 by generation basis.
+  const auto gen_split =
+      unproject_bus_vector({40.0}, map, BusVectorSemantics::ExtensiveGeneration);
+  REQUIRE(gen_split.size() == 2);
+  CHECK_THAT(gen_split[0], WithinAbs(30.0, 1e-9));
+  CHECK_THAT(gen_split[1], WithinAbs(10.0, 1e-9));
+
+  // The same 40 MW as demand splits 0/40 by load basis (ExtensiveDemand alias).
+  const auto dem_split =
+      unproject_bus_vector({40.0}, map, BusVectorSemantics::ExtensiveDemand);
+  CHECK_THAT(dem_split[0], WithinAbs(0.0, 1e-9));
+  CHECK_THAT(dem_split[1], WithinAbs(40.0, 1e-9));
 }

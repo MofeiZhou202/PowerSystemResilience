@@ -39,6 +39,21 @@ struct ProjectionCertificate {
   std::vector<MergeRecord> merge_records;
   std::vector<std::string> diagnostics;
 
+  // DC dead-island strip provenance (design review R-01/R-02). Populated only
+  // when project_to_canonical_models removes unsourced DC islands; empty in the
+  // common case, which makes DC result recovery a no-op.
+  //   * n_prestrip_dc_buses     — DC bus count at strip entry (authored + ER).
+  //   * dc_prestrip_to_survivor — prestrip DC position -> survivor position, or
+  //                               -1 for a stripped dead-island bus.
+  //   * dc_dead_bus_indices     — prestrip DC .index of each removed bus.
+  int n_prestrip_dc_buses{0};
+  std::vector<int> dc_prestrip_to_survivor;
+  std::vector<int> dc_dead_bus_indices;
+
+  [[nodiscard]] bool has_dc_strip() const noexcept {
+    return !dc_prestrip_to_survivor.empty();
+  }
+
   [[nodiscard]] int exact_merge_count() const noexcept {
     int n = 0;
     for (const auto& record : merge_records)
@@ -130,8 +145,12 @@ struct BusMergeMap {
   std::unordered_map<int, int> branch_orig_to_proj;
 
   // Original-bus participation used to recover extensive quantities. Values
-  // sum to one within each surviving merge group.
+  // sum to one within each surviving merge group. `extensive_participation`
+  // is demand-weighted (load basis); `generation_participation` is
+  // generation-weighted, used to split generation-extensive quantities. Both
+  // fall back to an equal split when their basis is zero across the group.
   std::unordered_map<int, double> extensive_participation;
+  std::unordered_map<int, double> generation_participation;
 
   /// Projection policy and the physical edges that induced each contraction.
   ProjectionMode projection_mode{ProjectionMode::ThresholdApproximate};

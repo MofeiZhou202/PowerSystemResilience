@@ -663,6 +663,16 @@ TEST_CASE("Audit B18: DC factory solves AC B-theta and does not fabricate voltag
   dc_bus.index = 1;
   dc_bus.in_service = true;
   sys.dc.buses = {dc_bus};
+  // Couple the DC bus through a VSC so it is genuine hybrid content that
+  // survives dead-island projection. A bare, unsourced, unconnected DC bus is
+  // now stripped as a DC dead island (R-01/R-02), which would otherwise leave
+  // an AC-only projected system that the linearized DC method solves normally.
+  VSCConverter hybrid_link;
+  hybrid_link.index = 1;
+  hybrid_link.bus_ac = 1;
+  hybrid_link.bus_dc = 1;
+  hybrid_link.in_service = true;
+  sys.vsc_converters = {hybrid_link};
   const auto hybrid_problem = build_power_flow_problem(sys);
   const auto rejected = solver->solve(hybrid_problem);
   CHECK_FALSE(rejected.converged);

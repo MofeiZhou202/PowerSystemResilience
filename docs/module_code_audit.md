@@ -25,17 +25,18 @@ and existing executable tests.
 
 ## Open findings
 
-Data-structure review findings R-03, R-05–R-08 (Low, latent foot-guns) are
-tracked in [data structure design review](data_structure_design_review.md) §2
-and remain open pending the prioritized regression list there. AUD-001 through
-AUD-011 remain closed.
+All data-structure review findings R-01–R-08
+([data structure design review](data_structure_design_review.md) §2) are closed
+or reclassified this iteration; see the table below. AUD-001 through AUD-011
+remain closed.
 
 Addressed this iteration:
 
 | ID | Finding | Closure | Regression |
 |---|---|---|---|
-| AUD-012 | DC-side dead islands were never detected or declared (review R-01/R-02): AC-only strip could leave an unsourced or orphaned DC bus, risking a singular `Gdc`. | `detect_dc_dead_buses()` reports unsourced DC buses into `ProjectionCertificate.diagnostics` after strip (honest boundary; full DC removal deferred to a focused change since DC renumbering is owned by `canonicalize_dc_bus_indices`). | `test_component_models_math_audit` "R-01/R-02: DC dead islands are detected..." |
+| AUD-012 | DC-side dead islands were never stripped (review R-01/R-02): AC-only strip could leave an unsourced or orphaned DC bus, risking a singular `Gdc`. | `strip_dead_dc_islands()` removes unsourced DC islands and records `dc_prestrip_to_survivor` on the certificate; `unproject_dc_bus_vector()` recovers DC voltages to authored space (0 pu at a stripped bus). Recovery is wired into the PF facade, `solve_handle`, `solve_dc_power_flow`, and AC OPF. The strip criterion keeps DC buses reached by an out-of-service converter or a closed DC breaker. | `test_component_models_math_audit` "R-01/R-02: DC dead islands are stripped..." and "...unproject_dc_bus_vector recovers..."; cross-suite guards `test_opf_solver_backends`, `test_distribution_pipeline` |
 | AUD-013 | Standalone `merge_zero_impedance_buses` ignored `ACBranch::ideal_connectivity` (review R-04), diverging from the projection whitelist path. | The nullptr path now contracts `ideal_connectivity` branches regardless of magnitude, additively, without changing its tested numeric-threshold behavior. | `test_component_models_math_audit` "R-04: standalone merge honors ideal_connectivity..." |
+| AUD-014 | Merge dropped `ACBus::importance` (R-06); `unproject_bus_vector` silently returned empty for an unbuilt map (R-07); merge participation basis ignored detailed `Charger` rows (R-08). | Merge aggregates `max(importance)`; `unproject_bus_vector` throws on a non-empty input against an `n_merged==0` map; `charging_station_effective_kw` prefers detailed charger demand. R-03 (load-basis participation) and R-05 (`MobileStorage` is AC-domain) are confirmed by-design with locking regressions. | `test_component_models_math_audit` R-03/R-05/R-06/R-07/R-08 cases |
 
 ## Closed findings
 

@@ -290,12 +290,20 @@ classDiagram
 **语义要点**（与 [projection_and_results.md](projection_and_results.md) 的 8 条不变量一致）：
 
 - **强度量（intensive，如电压）** 在合并后**广播**回每个原始成员母线。
-- **广延量（extensive，如切负荷）** 用 `extensive_participation` 权重**拆分**，绝不盲目广播。
-  权重当前以**负荷基**（`pd_mw`+`Load`+充电站）构造——见评审文档 R-03 关于其适用边界。
+- **广延量（extensive）** 按参与因子**拆分**，绝不盲目广播。`BusVectorSemantics` 提供两种
+  广延语义：`ExtensiveDemand`（= `Extensive`，负荷基 `extensive_participation`，如切负荷）与
+  `ExtensiveGeneration`（发电基 `generation_participation`，如机组出力再分配）；两者基数为零时
+  退化为等分。
 - **小阻抗不构成节点同一性**：仅当开关/断路器语义或 `ACBranch::ideal_connectivity`
   显式声明时才收缩（投影主路径）。
 - **尺寸不匹配是诊断**：`unproject_bus_vector` 在输入尺寸 ≠ `n_merged` 时抛异常，
   不做静默补零。
+- **DC 死岛剥离与恢复**：`strip_dead_dc_islands` 移除无源 DC 孤岛（无换流器、无源、无
+  连通路径的 DC 母线；停运换流器与闭合 DC 断路器仍算连通/保留），并在
+  `ProjectionCertificate`（`n_prestrip_dc_buses` / `dc_prestrip_to_survivor` /
+  `dc_dead_bus_indices` / `has_dc_strip()`）记录映射。`unproject_dc_bus_vector` 把 DC 结果
+  向量恢复到授权 DC 母线序（被剥离母线→0 pu）；恢复已接入主 PF 门面、`solve_handle`、
+  `solve_dc_power_flow` 与 AC OPF。无死岛时为恒等无操作。
 
 结果回投影（[result_attribution.hpp](../include/hacdcpf/projection/result_attribution.hpp)）：
 `RichToCanonicalOperator`（Π：Rich→Canonical，返回 `ProjectionBundle`）与

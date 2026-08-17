@@ -428,3 +428,55 @@ TEST_CASE("SPPT core suite runs and reports on a hybrid case",
     CHECK(r.passed);
   }
 }
+
+TEST_CASE("MR1-DC: DC dead-island strip is idempotent",
+          "[sppt][metamorphic][mr1][dc][regression]") {
+  HybridPowerSystem sys;
+  sys.base_mva = sys.ac.base_mva = sys.dc.base_mva = 100.0;
+  sys.ac.buses = {make_bus(1, BusType::SLACK), make_bus(2, BusType::PQ)};
+  ACBranch line;
+  line.index = 1;
+  line.from_bus = 1;
+  line.to_bus = 2;
+  line.r_pu = 0.01;
+  line.x_pu = 0.10;
+  sys.ac.branches = {line};
+  ExternalGrid grid;
+  grid.index = 1;
+  grid.bus = 1;
+  sys.ac.external_grids = {grid};
+
+  // Live DC island (DC_V source + load via DC branch) plus one dead DC bus.
+  DCBus dcv;
+  dcv.index = 1;
+  dcv.bus_type = DCBusType::DC_V;
+  dcv.base_kv = 0.75;
+  DCBus dcp;
+  dcp.index = 2;
+  dcp.bus_type = DCBusType::DC_P;
+  dcp.base_kv = 0.75;
+  DCBus dead;
+  dead.index = 5;
+  dead.bus_type = DCBusType::DC_P;
+  dead.base_kv = 0.75;
+  sys.dc.buses = {dcv, dcp, dead};
+  DCBranch dcbr;
+  dcbr.index = 1;
+  dcbr.from_bus = 1;
+  dcbr.to_bus = 2;
+  dcbr.r_pu = 0.02;
+  sys.dc.branches = {dcbr};
+
+  const HybridPowerSystem once = project_to_canonical_models(sys);
+  const HybridPowerSystem twice = project_to_canonical_models(once);
+
+  // First projection strips exactly the one dead DC island.
+  REQUIRE(once.dc.buses.size() == 2);
+  REQUIRE(once.projection_certificate.has_value());
+  CHECK(once.projection_certificate->has_dc_strip());
+
+  // Re-projecting the canonical model removes nothing further (idempotent).
+  REQUIRE(twice.dc.buses.size() == once.dc.buses.size());
+  for (size_t i = 0; i < once.dc.buses.size(); ++i)
+    CHECK(twice.dc.buses[i].index == once.dc.buses[i].index);
+}

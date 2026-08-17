@@ -99,6 +99,10 @@ void trim_internal_dc_bus_results(
     ACOPFResult& out,
     const std::optional<ProjectionCertificate>& certificate) {
   if (!certificate || certificate->n_authored_dc_buses < 0) return;
+  // Recover DC voltages stripped as dead islands to authored positions (0 pu)
+  // before dropping ER-internal buses (R-01/R-02).
+  if (certificate->has_dc_strip())
+    out.vdc = unproject_dc_bus_vector(out.vdc, *certificate);
   const size_t authored =
       static_cast<size_t>(certificate->n_authored_dc_buses);
   if (out.vdc.size() > authored) out.vdc.resize(authored);

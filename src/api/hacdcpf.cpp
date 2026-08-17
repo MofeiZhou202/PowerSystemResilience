@@ -1810,13 +1810,43 @@ void unproject_pf_result(PowerFlowResult& result, const BusMergeMap& map,
                                     result.vm);
 }
 
+// Recover DC bus voltages after a possible dead-island strip, then drop
+// energy-router-internal DC buses, leaving the vector in authored DC bus order.
+// A no-op resize when no DC strip occurred (identity unproject).
+void recover_dc_bus_voltages(
+    std::vector<double>& vdc,
+    const std::optional<ProjectionCertificate>& certificate) {
+  if (!certificate || certificate->n_authored_dc_buses < 0) return;
+  if (certificate->has_dc_strip())
+    vdc = unproject_dc_bus_vector(vdc, *certificate);
+  const size_t authored =
+      static_cast<size_t>(certificate->n_authored_dc_buses);
+  if (vdc.size() > authored) vdc.resize(authored);
+}
+
 void trim_internal_dc_bus_results(
     PowerFlowResult& result,
     const std::optional<ProjectionCertificate>& certificate) {
-  if (!certificate || certificate->n_authored_dc_buses < 0) return;
-  const size_t authored =
-      static_cast<size_t>(certificate->n_authored_dc_buses);
-  if (result.vdc.size() > authored) result.vdc.resize(authored);
+  recover_dc_bus_voltages(result.vdc, certificate);
+  // Surface stripped DC dead islands on the honest diagnostics.warnings channel
+  // (serialized by the runtime API, rendered by the GUI) so consumers can flag
+  // the affected authored DC bus positions.
+  if (certificate && certificate->has_dc_strip()) {
+    const auto& prestrip = certificate->dc_prestrip_to_survivor;
+    const int authored = certificate->n_authored_dc_buses;
+    std::string msg = "DC dead-island strip: authored DC bus position(s)";
+    bool any = false;
+    for (int p = 0; p < static_cast<int>(prestrip.size()) && p < authored; ++p) {
+      if (prestrip[static_cast<size_t>(p)] < 0) {
+        msg += " " + std::to_string(p + 1);
+        any = true;
+      }
+    }
+    if (any) {
+      msg += " removed as unsourced islands; reported as 0 pu.";
+      result.diagnostics.warnings.push_back(std::move(msg));
+    }
+  }
 }
 
 std::vector<double> project_intensive_bus_vector(
@@ -2281,9 +2311,7 @@ DCPowerFlowResult solve_dc_power_flow(const HybridPowerSystem& sys,
   powerflow::SolverData& data = get_cached_solver_data(sys, opt.loss_model);
   static thread_local powerflow::DCSolver solver;
   auto result = solver.solve(data, opt, nullptr);
-  if (result.vdc.size() > sys.dc.buses.size()) {
-    result.vdc.resize(sys.dc.buses.size());
-  }
+  recover_dc_bus_voltages(result.vdc, data.projection_certificate);
   return result;
 }
 
@@ -2316,9 +2344,9 @@ AdaptiveSolveResult solve_power_flow_adaptive(const HybridPowerSystem& sys,
     }
     result.branch_flows = std::move(physical.branch_flows);
   }
-  if (result.vdc.size() > sys.dc.buses.size()) {
-    result.vdc.resize(sys.dc.buses.size());
-  }
+  recover_dc_bus_voltages(
+      result.vdc,
+      get_cached_solver_data(sys, opt.loss_model).projection_certificate);
   return result;
 }
 
@@ -2330,9 +2358,9 @@ IslandedSolveResult solve_power_flow_islanded(const HybridPowerSystem& sys,
   result.vm = adaptive.vm;
   result.va = adaptive.va;
   result.vdc = adaptive.vdc;
-  if (result.vdc.size() > sys.dc.buses.size()) {
-    result.vdc.resize(sys.dc.buses.size());
-  }
+  recover_dc_bus_voltages(
+      result.vdc,
+      get_cached_solver_data(sys, opt.loss_model).projection_certificate);
   result.converged = adaptive.converged;
   result.iterations = adaptive.iterations;
   result.residual = adaptive.residual;
@@ -2345,9 +2373,9 @@ DistributedSlackResult solve_power_flow_distributed_slack(const HybridPowerSyste
                                                           const PowerFlowOptions& opt) {
   powerflow::DistributedSlackSolver solver;
   auto result = solver.solve_simplified(sys, slack_cfg, opt);
-  if (result.vdc.size() > sys.dc.buses.size()) {
-    result.vdc.resize(sys.dc.buses.size());
-  }
+  recover_dc_bus_voltages(
+      result.vdc,
+      get_cached_solver_data(sys, opt.loss_model).projection_certificate);
   return result;
 }
 
@@ -2356,9 +2384,9 @@ DistributedSlackResult solve_power_flow_distributed_slack_full(const HybridPower
                                                                const PowerFlowOptions& opt) {
   powerflow::DistributedSlackSolver solver;
   auto result = solver.solve_full_jacobian(sys, slack_cfg, opt);
-  if (result.vdc.size() > sys.dc.buses.size()) {
-    result.vdc.resize(sys.dc.buses.size());
-  }
+  recover_dc_bus_voltages(
+      result.vdc,
+      get_cached_solver_data(sys, opt.loss_model).projection_certificate);
   return result;
 }
 
