@@ -135,7 +135,7 @@ tests/*
 _deps/
 third_party/build/
 third_party/install/
-third_party/oneapi-mkl/
+# third_party/oneapi-mkl/
 
 # Root in-source build remnants (kept on disk, ignored by git)
 /CMakeCache.txt
