@@ -114,14 +114,14 @@ struct RobustNonlinearOptions {
   bool enable_smooth_ncp{false};
 
   /// Initial smoothing parameter μ₀ ≫ 0.
-  double ncp_mu0{1e-2};
+  double ncp_mu0{Defaults::kNcpMu0};
 
   /// Minimum smoothing parameter (limit of the continuation).
-  double ncp_mu_min{1e-12};
+  double ncp_mu_min{Defaults::kNcpMuMin};
 
   /// Multiplicative reduction applied to μ when the residual decreases
   /// sufficiently (see implementation for the exact schedule).
-  double ncp_mu_factor{0.1};
+  double ncp_mu_factor{Defaults::kNcpMuFactor};
 
   /// Slower annealing factor used in the coarse phase (residual still large).
   /// A two-phase schedule is applied:
@@ -130,11 +130,11 @@ struct RobustNonlinearOptions {
   /// Larger value (e.g. 0.5) keeps μ larger during early iterations when the
   /// active-set structure has not yet stabilised, preventing oscillation near
   /// strongly active Q limits.
-  double ncp_mu_factor_coarse{0.5};
+  double ncp_mu_factor_coarse{Defaults::kNcpMuFactorCoarse};
 
   /// Fraction of the initial residual below which μ annealing switches from
   /// the coarse factor to the fine (fast) factor.
-  double ncp_mu_phase_transition{0.1};
+  double ncp_mu_phase_transition{Defaults::kNcpMuPhaseTransition};
 
   /// Prevent chattering by holding the PV/PQ active set for at least
   /// min_active_set_hold_iters iterations before allowing a switch.
@@ -284,7 +284,8 @@ struct RobustNonlinearOptions {
   double gmres_tol{1e-10};
 };
 
-/// Normalize the configurable VSC-Schur policy at every production boundary.
+/// Normalize configurable VSC Schur and smooth-NCP policy at every production
+/// boundary.
 ///
 /// Machine epsilon remains a read-only representation constant. These fields
 /// are algorithmic policy and may be overridden by callers, but reciprocal
@@ -294,7 +295,7 @@ struct RobustNonlinearOptions {
 /// Higham (2002), Accuracy and Stability of Numerical Algorithms, secs. 2.2,
 /// 7.1; derivation and benchmark admission in
 /// docs/vsc_limit_ncp_power_flow_contract.md.
-inline void normalize_vsc_schur_policy(
+inline void normalize_vsc_numerical_policy(
     RobustNonlinearOptions& options) noexcept {
   options.vsc_schur_min_network_dimension =
       std::max(0, options.vsc_schur_min_network_dimension);
@@ -309,6 +310,34 @@ inline void normalize_vsc_schur_policy(
       options.vsc_schur_backward_error_tolerance > 1.0) {
     options.vsc_schur_backward_error_tolerance =
         Defaults::kVSCSchurBackwardErrorTol;
+  }
+  // Kanzow (1996), smooth NCP continuation: a positive contraction factor
+  // guarantees decreasing smoothing levels. The production schedule and
+  // parameter precedence are specified in
+  // docs/vsc_limit_ncp_power_flow_contract.md.
+  if (!std::isfinite(options.ncp_mu0) || options.ncp_mu0 < 0.0) {
+    options.ncp_mu0 = Defaults::kNcpMu0;
+  }
+  if (!std::isfinite(options.ncp_mu_min) || options.ncp_mu_min < 0.0) {
+    options.ncp_mu_min = Defaults::kNcpMuMin;
+  }
+  if (options.ncp_mu0 < options.ncp_mu_min) {
+    options.ncp_mu0 = Defaults::kNcpMu0;
+    options.ncp_mu_min = Defaults::kNcpMuMin;
+  }
+  const auto valid_contraction = [](double value) {
+    return std::isfinite(value) && value > 0.0 && value < 1.0;
+  };
+  if (!valid_contraction(options.ncp_mu_factor)) {
+    options.ncp_mu_factor = Defaults::kNcpMuFactor;
+  }
+  if (!valid_contraction(options.ncp_mu_factor_coarse)) {
+    options.ncp_mu_factor_coarse = Defaults::kNcpMuFactorCoarse;
+  }
+  if (!std::isfinite(options.ncp_mu_phase_transition) ||
+      options.ncp_mu_phase_transition <= 0.0 ||
+      options.ncp_mu_phase_transition > 1.0) {
+    options.ncp_mu_phase_transition = Defaults::kNcpMuPhaseTransition;
   }
 }
 

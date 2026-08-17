@@ -43,8 +43,25 @@ Compile the manuscript with the repository's available TeX Live installation:
 ```sh
 python3 /Users/tianyangzhao/.codex/plugins/cache/openai-bundled/latex/0.2.4/scripts/compile_latex.py \
   "$PWD/docs/latex/paper/structure_preserving_semismooth_acdc_pf/main.tex" \
-  --compiler texlive
+  --compiler texlive \
+  --output-directory \
+  "$PWD/docs/latex/paper/structure_preserving_semismooth_acdc_pf"
 ```
 
-Rendered PDFs and LaTeX intermediate files remain build products and are not
-tracked.
+The compiled manuscript is retained as `main.pdf` in the paper directory.
+LaTeX auxiliary files remain ignored build products.
+
+## Reproduce Figures
+
+The quantitative figure data are versioned separately from the plotting code
+in `figures/figure_data.json`. Regenerate the vector figures with:
+
+```sh
+MPLCONFIGDIR=/tmp/hysim-matplotlib \
+python3 figures/generate_figures.py
+```
+
+The script produces `problem_method_overview.pdf`, `priority_geometry.pdf`,
+and `benchmark_results.pdf` beside the data file. The benchmark panels report
+the same fixed-protocol values as `tools/vsc_schur_benchmark.cpp`,
+`docs/development_status.md`, and the manuscript tables.

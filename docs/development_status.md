@@ -1,6 +1,6 @@
 # Development Status
 
-Updated: 2026-08-16
+Updated: 2026-08-17
 
 This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
@@ -20,6 +20,20 @@ the current Git worktrees remain authoritative.
 
 ## Balanced VSC current-limit NCP
 
+The ordinary `case2000_acdc` built-in now sizes its four Vdc-Q stations from
+the aggregate four-by-0.5 pu fixed-P transfer and the centralized 5% Vdc droop
+band instead of the infeasible authored `k_vdc=0.1`. With automatic fallback
+explicitly disabled, the registered production hybrid Newton regression
+converges in 37 iterations with residual `7.263e-9` and DC voltages
+`0.9491--0.9499 pu`; pure-AC convergence is not accepted. The rebuilt browser
+test also loads the ordinary built-in and clicks the normal PF button. Its
+sparse `后端默认` request omits the fallback override, the backend resolves it
+to enabled, and the observed solve converged in 5 iterations with residual
+`7.633e-10` and 100% voltage qualification. The same test continues to cover
+the GFM NCP/Schur expert controls. The focused Release target now passes 47
+cases and 563 assertions, and the registered browser E2E passes with no page
+overflow.
+
 The production unified Newton path now has an opt-in fixed six-state local
 block per supported `PQ_MODE`, `VDC_Q`, or grid-connected `AC_GRID_FORMING`
 converter. The shared `(Pac,Qac,Pdc,Er,Ei,lambda)` layout uses identity internal-
@@ -29,7 +43,7 @@ Magnitude/P-first/Q-first policy, energy balance, and saturated Vdc-droop
 command. Network and local generalized Jacobians, including terminal-angle
 derivatives, are analytic and retain one fixed sparse layout across activation.
 
-The complete Release `test_vsc_limit_ncp` target passes 45 cases and 540
+The complete Release `test_vsc_limit_ncp` target passes 46 cases and 550
 assertions. It covers three priorities, the full local/terminal Jacobian
 finite-difference check, two simultaneous GFM limits, zero-radius priority
 ties, weak-grid and infeasible points, three-step quasi-steady replay, balanced
@@ -64,6 +78,28 @@ editing and returns stable Canvas references, local certificates, and the GFM
 validity flags. The complete script finished 68/69 checks; its unrelated
 existing hybrid Auto OPF check reached Ipopt's iteration limit with violation
 `1.51e-4`. No GFM/NCP HTTP check failed.
+
+The balanced-PF GUI now exposes smooth-NCP continuation and local-VSC Schur
+admission in an expert advanced group. Blank controls preserve backend-owned
+defaults; completed solves render normalized effective values and a separate
+`linear_structure` certificate with admission/fallback status, dimension and
+structural-nonzero reduction, `rcond`, backward errors, and local rate samples.
+The versioned `/api/v1` PF path accepts and echoes the same policy. The focused
+Release `test_vsc_limit_ncp` rebuild passes 46 cases and 550 assertions after
+adding legal/invalid smooth-policy normalization. The registered Playwright
+`pf_ncp_schur_gui_e2e` passes against the rebuilt Release server: it drives the
+real GFM case through the GUI, verifies sparse blank-field request semantics,
+effective-policy echo, the runtime certificate and VSC NCP table, and observes
+zero page-level overflow at both 1440x1000 and 390x844. It now also edits the
+expert policy after a completed solve and verifies that the previous
+certificate becomes explicitly stale, then reruns Schur-on and Schur-off to
+observe fresh `7 / 7 / 0` and `0 / 0 / 0` certificates. On the ordinary
+`case2000_acdc` WebGL path it clicks an AC topology row plus AC-bus, DC-bus,
+and VSC result rows and verifies domain-qualified overview selections. The
+focused rebuilt Release browser set
+`pf_ncp_schur_gui_e2e|topology_transformer_link_e2e` passes 2/2. The rebuilt versioned
+Runtime API v1 E2E also passes its complete session/job/topology workflow with
+the same effective policy round trip.
 
 Two versioned MTDC/PQ-Vdc-Q benchmark builders prevent pure-AC evidence from
 being misreported as converter-limit scalability. The registered case300 solve

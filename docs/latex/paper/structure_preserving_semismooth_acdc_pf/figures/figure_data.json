@@ -1,0 +1,71 @@
+{
+  "schema": "semismooth_acdc_paper_figures_v1",
+  "evidence_sources": [
+    "docs/development_status.md",
+    "docs/vsc_limit_ncp_power_flow_contract.md",
+    "tools/vsc_schur_benchmark.cpp"
+  ],
+  "benchmark_protocol": {
+    "build": "AppleClang 21 arm64 macOS Release with KLU",
+    "warmups": 2,
+    "repeats": 5,
+    "aggregation": "median",
+    "ordering": "alternating full and Schur solves"
+  },
+  "benchmarks": [
+    {
+      "label": "case300",
+      "ac_buses": 300,
+      "dc_buses": 6,
+      "vsc_blocks": 6,
+      "binding_power_ports": 4,
+      "full_dimension": 640,
+      "reduced_dimension": 604,
+      "full_structural_nnz": 4820,
+      "reduced_structural_nnz": 4502,
+      "full_iterations": 11,
+      "schur_iterations": 11,
+      "full_linear_ms": 0.491,
+      "schur_linear_ms": 0.692,
+      "linear_change_pct": 40.9,
+      "full_wall_ms": 2.675,
+      "schur_wall_ms": 3.094,
+      "wall_change_pct": 15.7,
+      "schur_attempts": 10,
+      "schur_accepted": 10,
+      "local_regular_rejections": 0,
+      "full_backward_error_rejections": 0
+    },
+    {
+      "label": "ACTIVSg2000",
+      "ac_buses": 2000,
+      "dc_buses": 8,
+      "vsc_blocks": 8,
+      "binding_power_ports": 4,
+      "full_dimension": 4054,
+      "reduced_dimension": 4006,
+      "full_structural_nnz": 29806,
+      "reduced_structural_nnz": 29382,
+      "full_iterations": 45,
+      "schur_iterations": 34,
+      "full_linear_ms": 31.561,
+      "schur_linear_ms": 27.135,
+      "linear_change_pct": -14.0,
+      "full_wall_ms": 47.391,
+      "schur_wall_ms": 41.486,
+      "wall_change_pct": -12.5,
+      "schur_attempts": 33,
+      "schur_accepted": 19,
+      "local_regular_rejections": 10,
+      "full_backward_error_rejections": 4
+    }
+  ],
+  "verification": {
+    "vsc_limit_cases": 45,
+    "vsc_limit_assertions": 540,
+    "transient_initialization_cases": 4,
+    "transient_initialization_assertions": 51,
+    "three_phase_opf_cases": 12,
+    "three_phase_opf_assertions": 152
+  }
+}

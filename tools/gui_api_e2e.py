@@ -422,6 +422,12 @@ def main() -> int:
                         "vsc_schur_min_network_dimension": 321,
                         "vsc_schur_local_rcond_tolerance": 1e-7,
                         "vsc_schur_backward_error_tolerance": 2e-11,
+                        "enable_smooth_ncp": True,
+                        "ncp_mu0": 2e-3,
+                        "ncp_mu_min": 3e-11,
+                        "ncp_mu_factor": 0.2,
+                        "ncp_mu_factor_coarse": 0.7,
+                        "ncp_mu_phase_transition": 0.25,
                     },
                 },
             },
@@ -451,7 +457,14 @@ def main() -> int:
             gfm_schur_options.get("enable_vsc_local_schur") is False and
             gfm_schur_options.get("vsc_schur_min_network_dimension") == 321 and
             gfm_schur_options.get("vsc_schur_local_rcond_tolerance") == 1e-7 and
-            gfm_schur_options.get("vsc_schur_backward_error_tolerance") == 2e-11,
+            gfm_schur_options.get("vsc_schur_backward_error_tolerance") == 2e-11 and
+            gfm_schur_options.get("enable_smooth_ncp") is True and
+            gfm_schur_options.get("ncp_mu0") == 2e-3 and
+            gfm_schur_options.get("ncp_mu_min") == 3e-11 and
+            gfm_schur_options.get("ncp_mu_factor") == 0.2 and
+            gfm_schur_options.get("ncp_mu_factor_coarse") == 0.7 and
+            gfm_schur_options.get("ncp_mu_phase_transition") == 0.25 and
+            isinstance(gfm_pf.get("linear_structure"), dict),
             "GFM Norton builtin PF -> "
             f"converged={gfm_pf.get('converged')} rows={len(gfm_rows)} "
             f"flags={gfm_flags}",

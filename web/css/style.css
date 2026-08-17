@@ -1179,6 +1179,27 @@ body[data-active-result-group="parameterLibrary"] #rightPanel {
   padding-left: 24px;
 }
 .pf-warning-results li + li { margin-top: 6px; }
+.pf-solver-structure-section {
+  border-left: 3px solid var(--accent2);
+}
+.pf-solver-structure-section.solver-certificate-stale {
+  border-left-color: var(--status-stale);
+}
+.solver-certificate-stale-message {
+  margin: 0;
+  padding: 9px 10px;
+  color: var(--status-stale);
+  background: color-mix(in srgb, var(--status-stale) 10%, var(--surface-raised));
+  border: 1px solid color-mix(in srgb, var(--status-stale) 36%, transparent);
+  border-radius: 5px;
+  line-height: 1.5;
+}
+.pf-solver-structure-section .solver-certificate-note {
+  margin: 7px 0 0;
+  color: var(--ink2);
+  line-height: 1.45;
+  white-space: normal;
+}
 .reliability-kpi-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
@@ -3498,6 +3519,22 @@ tr.topo-clickable:focus-visible {
   font-size: 12px;
   font-weight: 700;
   white-space: nowrap;
+}
+.pf-option-note {
+  flex: 1 1 100%;
+  color: var(--sub-bar-text);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.pf-option-note span {
+  display: block;
+  margin-top: 3px;
+  color: var(--accent2);
+  font-family: "IBM Plex Mono", monospace;
+  overflow-wrap: anywhere;
+}
+.pf-ncp-schur-options .sub-label input {
+  width: 118px;
 }
 .model-io-sub-section {
   align-items: stretch;

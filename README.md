@@ -5,7 +5,7 @@
 
 本文档面向工程使用者和开发者，说明 HySim-XJTU-HRPES 从“工程场景建模”到“规范模型求解”、再到“结果回投”的完整链路。当前合同与实现参考统一从 `docs/README.md` 进入；历史审计、理论提案和旧技术总笔记隔离在 `docs/archive/`，不代表当前行为。
 
-## 文档同步状态（2026-08-16）
+## 文档同步状态（2026-08-17）
 
 - `docs/README.md` 是当前文档的唯一导航入口，明确区分运行契约与理论参考。
 - `main` 提供统一 Trial 能力清单、后端 fail-closed 403 防绕过、五阶段
@@ -121,7 +121,7 @@ powershell -ExecutionPolicy Bypass -File tools/package_trial_windows.ps1
 
 | 能力域 | 当前状态 | 说明 |
 |---|---|---|
-| 混合 AC/DC 潮流与聚合建模 | 已实现并持续回归 | 覆盖 canonical projection、AC/DC 潮流、换流器协调与图分析链路；统一 Newton 默认采用固定 PV/PQ superset pattern、后向误差守卫的 KLU refactor 和 NCP/DC-seed/homotopy 升级梯级，`PreparedPowerFlowSession` 支持兼容快照重复求解。平衡正序 PQ/Vdc-Q/GFM VSC 可选显式六变量限流 NCP 块，支持电流圆、Magnitude/P-first/Q-first、Vdc droop 饱和，以及 GFM 内部电势/角度和虚拟阻抗 Norton 端口；无 terminal SLACK 的 GFM 岛由固定内部相量锚定，保留全部终端电压未知量，支持多 Norton GFM、自适应分岛与暂态初始化。局部 Schur 的准入、rcond 与后向误差策略由具名默认值统一管理，并可经 C++/HTTP 覆盖和回显；机器 epsilon 只读。GPU 路径尚未实现。原生 LCC 的 AC P/Q、DC 注入及 `Vm/Vdc` 交叉 Jacobian 由统一 Newton 消费；FDPF 和独立 DC solver 不宣称等价覆盖。 |
+| 混合 AC/DC 潮流与聚合建模 | 已实现并持续回归 | 覆盖 canonical projection、AC/DC 潮流、换流器协调与图分析链路；统一 Newton 默认采用固定 PV/PQ superset pattern、后向误差守卫的 KLU refactor 和 NCP/DC-seed/homotopy 升级梯级，`PreparedPowerFlowSession` 支持兼容快照重复求解。普通 `case2000_acdc` 的 Vdc-Q droop 由额定传输和统一 5% 电压带宽推导，并由关闭 fallback 的真实混合 NR 与浏览器默认按钮回归。平衡正序 PQ/Vdc-Q/GFM VSC 可选显式六变量限流 NCP 块，支持电流圆、Magnitude/P-first/Q-first、Vdc droop 饱和，以及 GFM 内部电势/角度和虚拟阻抗 Norton 端口；无 terminal SLACK 的 GFM 岛由固定内部相量锚定，保留全部终端电压未知量，支持多 Norton GFM、自适应分岛与暂态初始化。局部 Schur 与平滑 NCP 的准入/延拓策略由具名默认值统一管理，并可经 C++、HTTP 与 GUI 高级潮流覆盖；结果回显后端有效值和实际 Schur 证书，机器 epsilon 只读。该 GUI 数值策略不表示 NCP 已进入 OPF KKT，也不覆盖暂态设备参数。GPU 路径尚未实现。原生 LCC 的 AC P/Q、DC 注入及 `Vm/Vdc` 交叉 Jacobian 由统一 Newton 消费；FDPF 和独立 DC solver 不宣称等价覆盖。 |
 | OPF 与约束优化 | 已实现并持续回归 | AC OPF / Hybrid AC/DC OPF 的 Parity Native IPM 前置有界稀疏 Phase I，认证 primal/dual warm start 后交给 Phase II；DC OPF / RPO（含 OLTC 离散档位控制）已集成。含在役 LCC 的平衡聚合 OPF 强制走共享 Parity/Ipopt NLP，控制指令与 tap 作为固定输入；不支持路径显式拒绝。 |
 | 三相混合 PF / OPF | 活跃研发中，GUI 已接入 | `powerflow::solve_three_phase_hybrid_pf` 与 `opf::phase_hybrid` 已接入 `/xjtu/` 潮流/OPF 工具栏；OPF 提供 Full 与 GraphReduced（稀疏 Kron 降阶）、Ipopt/NativeIPM 双后端。GUI rich-model 适配范围见下文。 |
 | 电压稳定 | 已实现 | 连续潮流（CPF）采用增广 `[state, lambda]` 弧长预测-校正，可越过 P-V 鼻点并保留下支采样；输出 P-V 曲线与 VSI 指标。 |

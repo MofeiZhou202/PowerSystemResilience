@@ -266,13 +266,44 @@ TEST_CASE("VSC Schur policy rejects invalid hard-coded numerical values",
       std::numeric_limits<double>::quiet_NaN();
   options.vsc_schur_backward_error_tolerance = 2.0;
 
-  hacdcpf::powerflow::normalize_vsc_schur_policy(options);
+  hacdcpf::powerflow::normalize_vsc_numerical_policy(options);
 
   CHECK(options.vsc_schur_min_network_dimension == 0);
   CHECK(options.vsc_schur_local_rcond_tolerance ==
         hacdcpf::Defaults::kVSCSchurLocalRcondTol);
   CHECK(options.vsc_schur_backward_error_tolerance ==
         hacdcpf::Defaults::kVSCSchurBackwardErrorTol);
+}
+
+TEST_CASE("Smooth NCP policy has one normalized production contract",
+          "[numerics][defaults][ncp][configuration]") {
+  hacdcpf::powerflow::RobustNonlinearOptions valid;
+  valid.ncp_mu0 = 2e-3;
+  valid.ncp_mu_min = 3e-11;
+  valid.ncp_mu_factor = 0.2;
+  valid.ncp_mu_factor_coarse = 0.7;
+  valid.ncp_mu_phase_transition = 0.25;
+  hacdcpf::powerflow::normalize_vsc_numerical_policy(valid);
+  CHECK(valid.ncp_mu0 == 2e-3);
+  CHECK(valid.ncp_mu_min == 3e-11);
+  CHECK(valid.ncp_mu_factor == 0.2);
+  CHECK(valid.ncp_mu_factor_coarse == 0.7);
+  CHECK(valid.ncp_mu_phase_transition == 0.25);
+
+  hacdcpf::powerflow::RobustNonlinearOptions invalid;
+  invalid.ncp_mu0 = -1.0;
+  invalid.ncp_mu_min = std::numeric_limits<double>::quiet_NaN();
+  invalid.ncp_mu_factor = 1.0;
+  invalid.ncp_mu_factor_coarse = 0.0;
+  invalid.ncp_mu_phase_transition = 2.0;
+  hacdcpf::powerflow::normalize_vsc_numerical_policy(invalid);
+  CHECK(invalid.ncp_mu0 == hacdcpf::Defaults::kNcpMu0);
+  CHECK(invalid.ncp_mu_min == hacdcpf::Defaults::kNcpMuMin);
+  CHECK(invalid.ncp_mu_factor == hacdcpf::Defaults::kNcpMuFactor);
+  CHECK(invalid.ncp_mu_factor_coarse ==
+        hacdcpf::Defaults::kNcpMuFactorCoarse);
+  CHECK(invalid.ncp_mu_phase_transition ==
+        hacdcpf::Defaults::kNcpMuPhaseTransition);
 }
 
 hacdcpf::HybridPowerSystem make_hybrid_case(
@@ -1563,6 +1594,47 @@ TEST_CASE("Production Schur admission keeps small hybrid systems on full LU",
   REQUIRE(result.converged);
   CHECK(result.profiling.vsc_schur_attempts == 0);
   CHECK(result.profiling.vsc_schur_status == "not_attempted");
+}
+
+TEST_CASE("case2000 built-in MTDC droop is feasible in the production hybrid path",
+          "[power_flow][converter][benchmark][case2000][gui_builtin]") {
+  const auto system = hacdcpf::io::build_case2000_acdc();
+  REQUIRE(system.ac.buses.size() == 2000);
+  REQUIRE(system.dc.buses.size() == 8);
+  REQUIRE(system.vsc_converters.size() == 8);
+
+  const double rated_squared_voltage_deviation =
+      1.0 - std::pow(
+                1.0 - hacdcpf::Defaults::kVdcDroopRatedVoltageDeviation, 2);
+  const double expected_droop_gain = 0.5 / rated_squared_voltage_deviation;
+  CHECK(std::count_if(system.vsc_converters.begin(),
+                      system.vsc_converters.end(),
+                      [](const VSCConverter& converter) {
+                        return converter.control_mode == ConverterMode::VDC_Q;
+                      }) == 4);
+  for (const auto& converter : system.vsc_converters) {
+    if (converter.control_mode == ConverterMode::VDC_Q) {
+      CHECK(converter.k_vdc == Catch::Approx(expected_droop_gain).epsilon(1e-12));
+    }
+  }
+
+  hacdcpf::PowerFlowOptions options;
+  options.tol = 1e-8;
+  options.max_iter = 100;
+  options.enable_converter_coordination_check = true;
+  options.robust_nonlinear.enable_auto_fallback_scheduling = false;
+  const auto result = hacdcpf::solve_power_flow(system, options);
+  INFO("termination=" << result.diagnostics.termination_reason
+                       << " residual=" << result.residual
+                       << " iterations=" << result.iterations);
+  for (const auto& warning : result.diagnostics.warnings) INFO(warning);
+  REQUIRE(result.converged);
+  CHECK(result.residual <= options.tol);
+  REQUIRE(result.vdc.size() == system.dc.buses.size());
+  CHECK(*std::min_element(result.vdc.begin(), result.vdc.end()) >=
+        hacdcpf::Defaults::kDCVoltageMinPu);
+  CHECK(*std::max_element(result.vdc.begin(), result.vdc.end()) <=
+        hacdcpf::Defaults::kDCVoltageMaxPu);
 }
 
 TEST_CASE("case300 limit-NCP benchmark is genuinely hybrid and structurally fixed",

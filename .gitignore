@@ -156,3 +156,8 @@ docs/latex/paper/ev_power_traffic_joint_opt/*
 !docs/latex/paper/structure_preserving_semismooth_acdc_pf/*.tex
 !docs/latex/paper/structure_preserving_semismooth_acdc_pf/*.bib
 !docs/latex/paper/structure_preserving_semismooth_acdc_pf/README.md
+!docs/latex/paper/structure_preserving_semismooth_acdc_pf/main.pdf
+!docs/latex/paper/structure_preserving_semismooth_acdc_pf/figures/
+!docs/latex/paper/structure_preserving_semismooth_acdc_pf/figures/*.json
+!docs/latex/paper/structure_preserving_semismooth_acdc_pf/figures/*.py
+!docs/latex/paper/structure_preserving_semismooth_acdc_pf/figures/*.pdf

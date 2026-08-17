@@ -67,6 +67,7 @@ const App = (() => {
 
   // Cache for re-rendering on unit change without re-running solver
   let _lastPfData = null;
+  let _pfNumericalControlsDirty = false;
   let _lastOpfData = null;
   let _opfParameterContract = null;
   let _lastRpoData = null;
@@ -605,6 +606,24 @@ const App = (() => {
     updateDependencyChips();
   }
 
+  function invalidatePfNumericalCertificate() {
+    if (_pfNumericalControlsDirty) return;
+    _pfNumericalControlsDirty = true;
+    const effectiveSummary = document.getElementById('pfNcpSchurEffective');
+    if (effectiveSummary) {
+      effectiveSummary.textContent = _lastPfData
+        ? '参数已修改；上次实际生效值和求解证书已失效，请重新运行潮流。'
+        : '参数已修改；运行潮流后显示后端实际生效值和本次求解证书。';
+    }
+    const section = document.getElementById('pfSolverStructureSection');
+    const results = document.getElementById('pfSolverStructureResults');
+    if (section && results && results.textContent.trim()) {
+      section.style.display = '';
+      section.classList.add('solver-certificate-stale');
+      results.innerHTML = '<p class="solver-certificate-stale-message">参数已修改。下表属于上次求解，已失效；请重新运行潮流生成与当前 NCP / Schur 参数一致的证书。</p>';
+    }
+  }
+
   function resetReliabilityConfigurationEditor() {
     _reliabilityConfigurationData = null;
     _reliabilityConfigurationDirty = false;
@@ -895,7 +914,7 @@ const App = (() => {
     if (bucket === 'ac') return { domain: 'ac', index: Number(item.index) };
     if (bucket === 'dc') return { domain: 'dc', index: Number(item.index) };
     const dcDomain = row.source.domain === 'dc';
-    const bus = item.bus ?? item.from_bus ?? item.bus_ac ?? item.pcc_bus ?? item.hv_bus ?? item.port1_bus;
+    const bus = item.bus ?? item.from_bus ?? item.bus_ac ?? item.pcc_bus ?? item.hv_bus ?? item.bus_in ?? item.port1_bus;
     if (bus === undefined || bus === null || bus === '') return null;
     return { domain: dcDomain ? 'dc' : 'ac', index: Number(bus) };
   }
@@ -1781,15 +1800,22 @@ const App = (() => {
 
   function canvasRowAttr(row, maps, options = {}) {
     const compId = rowCanvasCompId(row, maps, options);
-    if (compId === undefined) return '';
+    const headless = !!(typeof Canvas !== 'undefined' && Canvas.isHeadless && Canvas.isHeadless());
+    if (compId === undefined && !headless) return '';
     const type = row?.canvas_type ?? row?.component_type ?? row?.type ?? options.canvasType ?? '';
-    const indexKeys = ['canvas_index', 'index', 'id', 'component_index', 'position'];
+    const indexKeys = ['canvas_index', 'index', 'id'];
     const indexKey = indexKeys.find(key => Number.isFinite(Number(row?.[key])));
     const canvasIndex = indexKey ? Number(row[indexKey]) : '';
+    const positionKeys = ['component_position', 'position', 'canvas_position', 'row_position'];
+    const positionKey = positionKeys.find(key => Number.isInteger(Number(row?.[key])));
+    const canvasPosition = positionKey ? Number(row[positionKey]) : '';
+    if (compId === undefined && (type === '' || (canvasIndex === '' && canvasPosition === ''))) return '';
     const classes = ['topo-clickable', options.className].filter(Boolean).join(' ');
     const typeAttr = type !== '' ? ` data-canvas-type="${escapeHtml(String(type))}"` : '';
     const indexAttr = canvasIndex !== '' ? ` data-canvas-index="${canvasIndex}"` : '';
-    return ` class="${escapeHtml(classes)}" data-result-ref="hysim_canvas_ref_v1"${typeAttr}${indexAttr} data-comp-id="${compId}" role="button" tabindex="0"`;
+    const positionAttr = canvasPosition !== '' ? ` data-canvas-position="${canvasPosition}"` : '';
+    const compAttr = compId !== undefined ? ` data-comp-id="${compId}"` : '';
+    return ` class="${escapeHtml(classes)}" data-result-ref="hysim_canvas_ref_v1"${typeAttr}${indexAttr}${positionAttr}${compAttr} role="button" tabindex="0"`;
   }
 
   function positiveDemandMw(row) {
@@ -4864,6 +4890,25 @@ const App = (() => {
     return el ? !!el.checked : fallback;
   }
 
+  function pfOptionalNumber(id) {
+    const el = document.getElementById(id);
+    if (!el || String(el.value).trim() === '') return undefined;
+    const value = Number(el.value);
+    return Number.isFinite(value) ? value : undefined;
+  }
+
+  function pfOptionalInteger(id) {
+    const value = pfOptionalNumber(id);
+    return value === undefined ? undefined : Math.trunc(value);
+  }
+
+  function pfOptionalBool(id) {
+    const value = document.getElementById(id)?.value;
+    if (value === 'true') return true;
+    if (value === 'false') return false;
+    return undefined;
+  }
+
   function readPowerFlowOptions() {
     return {
       max_iter: pfInteger('pfMaxIter', 100),
@@ -4917,7 +4962,7 @@ const App = (() => {
         enable_condition_monitor: pfBool('pfRobustCondition', true),
         enable_nonmonotone_linesearch: pfBool('pfRobustNonmonotone', true),
         enable_activity_hysteresis: pfBool('pfPvPqAntiChatter', true),
-        enable_auto_fallback_scheduling: pfBool('pfRobustAutoFallback', false),
+        enable_auto_fallback_scheduling: pfOptionalBool('pfRobustAutoFallback'),
         enable_homotopy: pfBool('pfRobustHomotopy', true),
         enable_newton_krylov_fallback: pfBool('pfRobustKrylov', false),
         min_vm_pu: pfNumber('pfRobustMinVm', 1e-8),
@@ -4929,6 +4974,16 @@ const App = (() => {
         gmres_max_outer: pfInteger('pfGmresMaxOuter', 10),
         gmres_tol: pfNumber('pfGmresTol', 1e-10),
         min_active_set_hold_iters: pfInteger('pfPvPqHoldIter', 3),
+        enable_smooth_ncp: pfOptionalBool('pfSmoothNcpMode'),
+        enable_vsc_local_schur: pfOptionalBool('pfVscSchurMode'),
+        vsc_schur_min_network_dimension: pfOptionalInteger('pfVscSchurMinDimension'),
+        vsc_schur_local_rcond_tolerance: pfOptionalNumber('pfVscSchurRcondTol'),
+        vsc_schur_backward_error_tolerance: pfOptionalNumber('pfVscSchurBackwardErrorTol'),
+        ncp_mu0: pfOptionalNumber('pfNcpMu0'),
+        ncp_mu_min: pfOptionalNumber('pfNcpMuMin'),
+        ncp_mu_factor: pfOptionalNumber('pfNcpMuFactor'),
+        ncp_mu_factor_coarse: pfOptionalNumber('pfNcpMuFactorCoarse'),
+        ncp_mu_phase_transition: pfOptionalNumber('pfNcpMuPhaseTransition'),
       },
       helm: {
         max_coef: pfInteger('pfHelmMaxCoef', 100),
@@ -5019,6 +5074,7 @@ const App = (() => {
         // Display results.  Always replace the previous GUI cache, including after
         // a failed run, so a later successful run is never masked by stale arrays.
         _lastPfData = pfData;
+        _pfNumericalControlsDirty = false;
         _pfInvalidated = false;
         _lastInvalidationReason = '';
         updateDependencyChips();
@@ -9948,7 +10004,7 @@ const App = (() => {
     return rowCanvasCompId(c, maps);
   }
 
-  function reliabilitySystemSearchRow(result) {
+  function systemSearchRowForResult(result) {
     if (!result || typeof Canvas === 'undefined' || !Canvas.buildSystemJson) return null;
     const bucketMaps = Object.fromEntries(SYSTEM_SEARCH_SOURCES.map(source => [source.bucket, {}]));
     const row = HACDCSearch.resultRow(
@@ -9963,7 +10019,7 @@ const App = (() => {
       Canvas.panToComponent(Number(compId));
       return true;
     }
-    const searchRow = reliabilitySystemSearchRow(result);
+    const searchRow = systemSearchRowForResult(result);
     if (!searchRow) return false;
     navigateToSearchResult(searchRow);
     const bus = resolveBusFromRow(searchRow) ||
@@ -11376,8 +11432,10 @@ const App = (() => {
     div.innerHTML = status + sourceHint + imbalanceTable + sourceTable;
   }
 
-  function showPowerFlowResultsTables(data) {
+  function showPowerFlowResultsTables(data, options = {}) {
     data = normalizePowerFlowResult(data);
+    const preserveCertificateStale = options.preserveCertificateStale === true &&
+      _pfNumericalControlsDirty;
     document.getElementById('resultsEmpty').style.display = 'none';
     document.getElementById('resultsContent').style.display = 'block';
     setActiveResultGroup('powerFlow');
@@ -11402,6 +11460,8 @@ const App = (() => {
     const phaseOpt = opt.three_phase || {};
     const voltageQuality = data.voltage_qualification || {};
     const reactiveLimits = data.reactive_limits || {};
+    const robustOpt = opt.robust_nonlinear || {};
+    const linearStructure = data.linear_structure || {};
     const voltageQualityText = voltageQuality.rate_pct != null && Number.isFinite(Number(voltageQuality.rate_pct))
       ? `${Number(voltageQuality.rate_pct).toFixed(2)}% (${voltageQuality.qualified_samples}/${voltageQuality.total_samples})`
       : '—';
@@ -11442,6 +11502,68 @@ const App = (() => {
         <span class="result-value ${reactiveLimits.certified ? 'result-converged' : 'result-failed'}">${reactiveLimits.certified ? `✓ 已认证（限值节点${reactiveLimits.active_limited_buses || 0}）` : (reactiveLimits.enforcement_requested ? '✗ 校核未认证' : '快速筛查：未校核')}</span></div>
       ${solverCards}
     `;
+
+    const effectiveSummary = document.getElementById('pfNcpSchurEffective');
+    if (effectiveSummary && !isThreePhase && !preserveCertificateStale) {
+      const effectiveNumber = (value) => Number.isFinite(Number(value))
+        ? Number(value).toExponential(3) : '-';
+      effectiveSummary.textContent =
+        `实际生效：自动回退=${boolLabel(robustOpt.enable_auto_fallback_scheduling === true)}，` +
+        `平滑NCP=${boolLabel(robustOpt.enable_smooth_ncp === true)}，` +
+        `局部Schur=${boolLabel(robustOpt.enable_vsc_local_schur === true)}，` +
+        `最小网络维数=${robustOpt.vsc_schur_min_network_dimension ?? '-'}，` +
+        `rcond≥${effectiveNumber(robustOpt.vsc_schur_local_rcond_tolerance)}，` +
+        `后向误差≤${effectiveNumber(robustOpt.vsc_schur_backward_error_tolerance)}，` +
+        `μ=${effectiveNumber(robustOpt.ncp_mu0)}→${effectiveNumber(robustOpt.ncp_mu_min)}。`;
+    }
+
+    const structureSection = document.getElementById('pfSolverStructureSection');
+    const structureResults = document.getElementById('pfSolverStructureResults');
+    if (!preserveCertificateStale) structureSection?.classList.remove('solver-certificate-stale');
+    if (!preserveCertificateStale && structureSection && structureResults && !isThreePhase &&
+        Object.keys(linearStructure).length > 0) {
+      const integer = (value) => Number.isFinite(Number(value)) ? Math.trunc(Number(value)) : 0;
+      const scalar = (value) => Number.isFinite(Number(value))
+        ? Number(value).toExponential(3) : '-';
+      const fullDimension = integer(linearStructure.full_dimension);
+      const reducedDimension = integer(linearStructure.reduced_dimension);
+      const fullNnz = integer(linearStructure.full_structural_nnz);
+      const reducedNnz = integer(linearStructure.reduced_structural_nnz);
+      const dimensionReduction = fullDimension > 0
+        ? `${fullDimension} → ${reducedDimension}（-${fullDimension - reducedDimension}）`
+        : '未形成约化系统';
+      const nnzReduction = fullNnz > 0
+        ? `${fullNnz} → ${reducedNnz}（-${fullNnz - reducedNnz}）`
+        : '未形成约化系统';
+      const statusLabels = {
+        not_attempted: '未尝试（关闭、未达规模门槛或无可消元局部块）',
+        invalid_layout: '布局不满足消元条件，已回退完整LU',
+        local_block_not_regular: '局部块正则性证书失败，已回退完整LU',
+        local_block_solve_failed: '局部块求解失败，已回退完整LU',
+        reduced_factorization_failed: '约化系统分解失败，已回退完整LU',
+        reduced_backward_error_failed: '约化方向后向误差超限，已回退完整LU',
+        full_backward_error_failed: '重构完整方向后向误差超限，已回退完整LU',
+        accepted: '证书通过并采用局部Schur',
+        accepted_fresh_factorization: '证书通过并采用局部Schur（新数值分解）',
+        accepted_numeric_refactor: '证书通过并采用局部Schur（数值重分解复用）',
+      };
+      const rawStatus = String(linearStructure.vsc_schur_status || 'not_attempted');
+      const status = statusLabels[rawStatus] || rawStatus;
+      structureSection.style.display = '';
+      structureResults.innerHTML = `
+        <table><tbody>
+          <tr><th>实际状态</th><td>${escapeHtml(status)}</td><th>局部块数</th><td>${integer(linearStructure.local_blocks)}</td></tr>
+          <tr><th>尝试 / 接受 / 回退</th><td>${integer(linearStructure.vsc_schur_attempts)} / ${integer(linearStructure.vsc_schur_accepted)} / ${integer(linearStructure.vsc_schur_fallbacks)}</td><th>拒绝分类</th><td>局部正则=${integer(linearStructure.local_regular_rejections)}；约化求解=${integer(linearStructure.reduced_solve_rejections)}；完整误差=${integer(linearStructure.full_backward_error_rejections)}</td></tr>
+          <tr><th>Newton维数</th><td>${dimensionReduction}</td><th>结构非零元</th><td>${nnzReduction}</td></tr>
+          <tr><th>最小局部 rcond</th><td>${scalar(linearStructure.minimum_local_rcond)}</td><th>最小已接受 rcond</th><td>${scalar(linearStructure.minimum_accepted_local_rcond)}</td></tr>
+          <tr><th>最大后向误差</th><td>约化=${scalar(linearStructure.max_reduced_backward_error)}</td><th>重构完整方向</th><td>${scalar(linearStructure.max_full_backward_error)}</td></tr>
+          <tr><th>平滑NCP延拓</th><td>${integer(reactiveLimits.smooth_ncp_continuation_updates)} 次；最终μ=${scalar(reactiveLimits.smooth_ncp_final_mu)}</td><th>局部收敛率样本</th><td>${integer(linearStructure.semismooth_rate_samples)}；ρ=${scalar(linearStructure.semismooth_last_residual_ratio)}；q=${scalar(linearStructure.semismooth_last_quadratic_ratio)}</td></tr>
+        </tbody></table>
+        <p class="solver-certificate-note">证书针对本次迭代选取并组装的广义雅可比元素及其 Newton 方向；它不是整个 Clarke/B-子微分均非奇异的证明。Schur 被拒绝时求解器回退完整稀疏 LU，不把回退报告为加速成功。</p>`;
+    } else if (!preserveCertificateStale && structureSection && structureResults) {
+      structureSection.style.display = 'none';
+      structureResults.innerHTML = '';
+    }
 
     const warningSection = document.getElementById('pfWarningSection');
     const warningResults = document.getElementById('pfWarningResults');
@@ -11715,7 +11837,7 @@ const App = (() => {
       // Fallback: old branch_abs (|P| only)
       let html = `<table><thead><tr><th>Branch</th><th>|P|(${pUnit()})</th></tr></thead><tbody>`;
       data.branch_abs.forEach((p, i) => {
-        const attr = resultRowAttr({ canvas_type: 'ac_branch', index: i, position: i }, busMap.branch ? busMap.branch[i] : undefined);
+        const attr = resultRowAttr({ canvas_type: 'ac_branch', position: i }, busMap.branch ? busMap.branch[i] : undefined);
         html += `<tr${attr}><td>${i}</td><td>${pFmt(p, 4)}</td></tr>`;
       });
       html += '</tbody></table>';
@@ -12881,13 +13003,33 @@ const App = (() => {
       if (raf) return;
       raf = requestAnimationFrame(() => { raf = null; paintVirtualTable(wrap); });
     });
-    // Delegated single-click → pan to the canvas glyph (canvas mode only).
+    // Delegated single-click uses a Canvas glyph for SVG systems and the
+    // domain-qualified stable model reference for headless/WebGL systems.
     wrap.addEventListener('click', (ev) => {
       if (ev.target.tagName === 'INPUT') return;
-      const tr = ev.target.closest('tr[data-comp-id]');
+      const tr = ev.target.closest('tr[data-row]');
       if (!tr) return;
       const cid = Number(tr.dataset.compId);
-      if (Number.isFinite(cid) && !(Canvas.isHeadless && Canvas.isHeadless())) Canvas.panToComponent(cid);
+      const headless = !!(Canvas.isHeadless && Canvas.isHeadless());
+      if (Number.isFinite(cid) && !headless) {
+        Canvas.panToComponent(cid);
+        return;
+      }
+      const table = wrap.querySelector('table');
+      const ctx = table && table.__vctx;
+      const position = Number(tr.dataset.row);
+      if (!headless || !ctx?.source || !Number.isInteger(position) || !ctx.items[position]) return;
+      const item = ctx.items[position] || {};
+      const row = {
+        source: ctx.source,
+        item,
+        position,
+        compId: undefined,
+        ids: rowSearchIds(item, position, ctx.source),
+        title: searchItemTitle(item, ctx.source, position),
+        text: rowSearchText(item, ctx.source, position),
+      };
+      navigateToSearchResult(row);
     });
     // Delegated double-click on an editable cell → inline editor.
     wrap.addEventListener('dblclick', (ev) => {
@@ -13006,7 +13148,7 @@ const App = (() => {
       }
       const table = body.closest('table');
       const colspan = table?.querySelector('thead tr')?.children.length || 12;
-      const source = editTableId ? sourceByTableId(editTableId) : null;
+      const source = sourceByTableId(editTableId || table?.id || '');
       renderVirtualTable(bodyId, items, mapObj, rowFn, colspan, source);
     }
 
@@ -17696,6 +17838,16 @@ const App = (() => {
       panel.toggleAttribute('hidden', !nextOpen);
       btn.classList.toggle('active', nextOpen);
       btn.setAttribute('aria-expanded', nextOpen ? 'true' : 'false');
+    });
+    const ncpSchurControlIds = [
+      'pfRobustAutoFallback', 'pfSmoothNcpMode', 'pfVscSchurMode',
+      'pfVscSchurMinDimension', 'pfVscSchurRcondTol',
+      'pfVscSchurBackwardErrorTol', 'pfNcpMu0', 'pfNcpMuMin',
+      'pfNcpMuFactor', 'pfNcpMuFactorCoarse', 'pfNcpMuPhaseTransition',
+    ];
+    ncpSchurControlIds.forEach(id => {
+      const control = document.getElementById(id);
+      control?.addEventListener('input', invalidatePfNumericalCertificate);
     });
     document.getElementById('btnRunOpf')?.addEventListener('click', runOpf);
     document.getElementById('btnRunRpo')?.addEventListener('click', runRpo);
@@ -23422,7 +23574,7 @@ const App = (() => {
     if (pfDisplayUnit) {
       pfDisplayUnit.addEventListener('change', () => {
         if (_lastPfData) {
-          showPowerFlowResultsTables(_lastPfData);
+          showPowerFlowResultsTables(_lastPfData, { preserveCertificateStale: true });
         }
         if (_lastOpfData) {
           showOpfResults(_lastOpfData);
@@ -23560,7 +23712,7 @@ const App = (() => {
       const compEl = ev.target.closest('[data-comp-id]');
       if (compEl && compEl.dataset.compId !== '') {
         const cid = parseInt(compEl.dataset.compId, 10);
-        if (Number.isInteger(cid) && Canvas.panToComponent) {
+        if (Number.isInteger(cid) && Canvas.panToComponent && !(Canvas.isHeadless && Canvas.isHeadless())) {
           Canvas.panToComponent(cid);
           const activeGroup = document.getElementById('resultsContent')?.dataset.activeGroup || '';
           const explicitContext = compEl.dataset.curveContext;
@@ -23571,6 +23723,22 @@ const App = (() => {
           }
         }
       }
+      const stableEl = ev.target.closest('[data-result-ref="hysim_canvas_ref_v1"]');
+      if (stableEl && Canvas.isHeadless && Canvas.isHeadless()) {
+        const canvasIndex = Number(stableEl.dataset.canvasIndex);
+        const canvasPosition = Number(stableEl.dataset.canvasPosition);
+        const resultRef = { canvas_type: stableEl.dataset.canvasType || '' };
+        if (Number.isFinite(canvasIndex)) resultRef.canvas_index = canvasIndex;
+        if (Number.isInteger(canvasPosition)) resultRef.component_position = canvasPosition;
+        const row = systemSearchRowForResult(resultRef);
+        const stableBus = resolveBusFromRow(row);
+        if (row && stableBus && Number.isFinite(stableBus.index) && Canvas.selectStableRef?.(stableBus)) {
+          highlightVisibleTopologyRow(row);
+          setStatus(`已在 WebGL 全网视图定位 ${row.title}`);
+          log(`WebGL定位：${row.title} -> ${stableBus.domain.toUpperCase()} Bus ${stableBus.index}`, 'info');
+          return;
+        }
+      }
       const busEl = ev.target.closest('[data-bus]');
       if (busEl && busEl.dataset.bus !== '') {
         const bid = parseInt(busEl.dataset.bus, 10);
@@ -23579,7 +23747,7 @@ const App = (() => {
     });
     document.getElementById('resultsContent')?.addEventListener('keydown', (ev) => {
       if (ev.key !== 'Enter' && ev.key !== ' ') return;
-      const target = ev.target.closest('[data-comp-id], [data-bus], [data-reliability-ref]');
+      const target = ev.target.closest('[data-result-ref], [data-comp-id], [data-bus], [data-reliability-ref]');
       if (!target) return;
       ev.preventDefault();
       target.click();

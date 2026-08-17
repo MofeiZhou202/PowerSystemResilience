@@ -173,8 +173,8 @@
 
 ### case2000_acdc — ACTIVSg2000 性能旗舰 · 2000 AC + 8 DC
 - 2000 节点 544 机 + 149 并联母线 + 8 端 MTDC（按 area 自动选网孔最强的机端母线挂接）。
-- 性能参考：纯 AC 牛顿潮流约 12 迭代、服务端约 2s（`method=pure_ac`；FDPF 亦可）。
-  注意：统一混合 NR 对 MTDC 下垂参数敏感（DC 电压偏弱告警），属既有案例数据限制，求解器侧待改进。
+- 四台固定 P 站各传输 0.5 pu，四台 Vdc-Q 站按统一 5% Vdc droop 带宽分担；`k_vdc` 由平方电压控制律反算，不使用案例内裸调参。
+- 注册生产回归使用统一混合 NR、`tol=1e-8`、`max_iter=100`，并显式关闭自动 fallback；实测 37 次、残差 `7.263e-9`、DC 电压 0.9491–0.9499 pu。该证据不接受 `pure_ac` 替代。
 - 构建：`build_case2000_acdc()`（case_builders.cpp:1552）。
 
 ### case2000_acdc_vsc_limit_ncp — ACTIVSg2000 VSC 限值基准 · 2000 AC + 8 DC

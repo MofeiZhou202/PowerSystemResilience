@@ -34,6 +34,24 @@ P_{ref}=\operatorname{clip}(P_{raw},P_{min},P_{max}).
 back to `pmin_mw/pmax_mw`. The saturated derivative is zero outside the open
 interval and `2*k_vdc*Vdc` inside it.
 
+### Droop sizing for authored benchmark data
+
+For the production squared-voltage law, a station expected to regulate
+`P_rated_pu` at a voltage-magnitude droop band `Delta V` uses
+
+\[
+k_{vdc}=\frac{P_{rated,pu}}{1-(1-\Delta V)^2}.
+\]
+
+`Defaults::kVdcDroopRatedVoltageDeviation=0.05` is the single source for the
+standard authored-data band. In `case2000_acdc`, four fixed-P stations each
+draw `0.5 pu` and four Vdc-Q stations share that transfer, hence each regulator
+uses `k_vdc=0.5/[1-(1-0.05)^2]`. Converter and line losses may move the solved
+voltage slightly beyond the nominal 5% point, while the registered case still
+requires every DC voltage to remain inside the production `[0.9,1.1] pu`
+qualification interval. This sizing is case-data construction, not an
+iteration-dependent solver override.
+
 The AC current disk is
 
 \[
@@ -319,6 +337,13 @@ are certified from the corresponding solved MTDC state as explicit
 continuation datasets. They prevent pure-AC scalability evidence from being
 misreported, but do not prove flat-start robustness, large-scale simultaneous
 GFM binding, or GPU acceleration.
+
+The ordinary `build_case2000_acdc()` built-in is separately registered against
+the non-NCP production hybrid Newton path. With GUI-equivalent `tol=1e-8`,
+`max_iter=100`, converter coordination enabled, and automatic fallback
+explicitly disabled, it must converge with residual at most `1e-8` and all DC
+voltages in `[0.9,1.1] pu`. Pure-AC convergence is not accepted as this
+certificate.
 
 `vsc_schur_benchmark` is the non-CTest Release benchmark. Its fixed protocol is
 two warmups and five alternating full/Schur repetitions. It labels case300 as

@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "hacdcpf/io/matpower_parser.hpp"
+#include "hacdcpf/model/defaults.hpp"
 
 namespace hacdcpf::io {
 
@@ -472,6 +473,25 @@ void attach_case2000_style_mtdc(HybridPowerSystem& sys) {
   }
 
   const int n_areas = static_cast<int>(conv_ac_buses.size());
+  const int pq_station_count = (n_areas + 1) / 2;
+  const int vdc_station_count = n_areas / 2;
+  const double scheduled_pq_transfer_pu = 0.50;
+  // VDC_Q uses P=k_vdc*(Vdc^2-Vset^2). Allocate the aggregate fixed-P
+  // transfer evenly across the regulating stations and size k_vdc so the
+  // rated allocation fits inside the centralized squared-voltage droop band.
+  // Derivation: docs/vsc_limit_ncp_power_flow_contract.md, "Droop sizing".
+  const double regulated_transfer_per_station_pu =
+      vdc_station_count > 0
+          ? scheduled_pq_transfer_pu * static_cast<double>(pq_station_count) /
+                static_cast<double>(vdc_station_count)
+          : 0.0;
+  const double minimum_rated_vdc_pu =
+      1.0 - Defaults::kVdcDroopRatedVoltageDeviation;
+  const double rated_squared_voltage_deviation =
+      1.0 - minimum_rated_vdc_pu * minimum_rated_vdc_pu;
+  const double vdc_droop_gain =
+      regulated_transfer_per_station_pu /
+      rated_squared_voltage_deviation;
 
   sys.dc.base_mva = sys.base_mva;
   sys.dc.name = sys.name + " MTDC";
@@ -527,14 +547,14 @@ void attach_case2000_style_mtdc(HybridPowerSystem& sys) {
     c.bus_dc = i + 1;
     c.in_service = true;
     c.control_mode = vdc_q_mode ? ConverterMode::VDC_Q : ConverterMode::PQ_MODE;
-    c.p_set_mw = (vdc_q_mode ? 0.0 : 0.50) * sys.base_mva;
+    c.p_set_mw = (vdc_q_mode ? 0.0 : scheduled_pq_transfer_pu) * sys.base_mva;
     c.q_set_mvar = 0.0;
     c.v_dc_set_pu = 1.0;
     c.v_ac_set_pu = sys.ac.buses[static_cast<size_t>(ac_bus - 1)].vm_pu;
     c.eta = 0.999;           // 1 - Ploss_c (Ploss_c = 0.001)
     c.loss_percent = 1.0;    // Ploss_b = 0.01 p.u.
     c.loss_mw = 0.1;         // Ploss_a = 0.001 p.u. on 100 MVA
-    c.k_vdc = 0.1;
+    if (vdc_q_mode) c.k_vdc = vdc_droop_gain;
     c.pmax_mw = 5.0 * sys.base_mva;
     c.pmin_mw = -5.0 * sys.base_mva;
     c.qmax_mvar = 5.0 * sys.base_mva;

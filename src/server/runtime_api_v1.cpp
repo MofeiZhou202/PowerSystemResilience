@@ -600,19 +600,30 @@ PowerFlowOptions power_flow_options(const json& request) {
     set_if_double(
         robust, "vsc_schur_backward_error_tolerance",
         options.robust_nonlinear.vsc_schur_backward_error_tolerance);
+    set_if_bool(robust, "enable_smooth_ncp",
+                options.robust_nonlinear.enable_smooth_ncp);
+    set_if_double(robust, "ncp_mu0", options.robust_nonlinear.ncp_mu0);
+    set_if_double(robust, "ncp_mu_min", options.robust_nonlinear.ncp_mu_min);
+    set_if_double(robust, "ncp_mu_factor",
+                  options.robust_nonlinear.ncp_mu_factor);
+    set_if_double(robust, "ncp_mu_factor_coarse",
+                  options.robust_nonlinear.ncp_mu_factor_coarse);
+    set_if_double(robust, "ncp_mu_phase_transition",
+                  options.robust_nonlinear.ncp_mu_phase_transition);
   }
   options.max_iter = std::clamp(options.max_iter, 1, 100000);
   options.pv_pq_max_outer_iterations =
       std::clamp(options.pv_pq_max_outer_iterations, 1, 1000);
   options.tol = std::clamp(options.tol, 1.0e-14, 1.0);
   options.ac_eval_threads = std::clamp(options.ac_eval_threads, 1, 1024);
-  powerflow::normalize_vsc_schur_policy(options.robust_nonlinear);
+  powerflow::normalize_vsc_numerical_policy(options.robust_nonlinear);
   return options;
 }
 
 json serialize_power_flow(const HybridPowerSystem& system,
                           const PowerFlowResult& result,
-                          const std::string& method) {
+                          const std::string& method,
+                          const PowerFlowOptions& options) {
   json ac_buses = json::array();
   for (std::size_t i = 0; i < system.ac.buses.size(); ++i) {
     const auto& bus = system.ac.buses[i];
@@ -740,6 +751,25 @@ json serialize_power_flow(const HybridPowerSystem& system,
        result.profiling.semismooth_last_residual_ratio},
       {"semismooth_last_quadratic_ratio",
        result.profiling.semismooth_last_quadratic_ratio}};
+  const auto& robust = options.robust_nonlinear;
+  const json options_effective{
+      {"max_iter", options.max_iter},
+      {"tol", options.tol},
+      {"enable_semi_smooth_newton", options.enable_semi_smooth_newton},
+      {"robust_nonlinear",
+       {{"enable_vsc_local_schur", robust.enable_vsc_local_schur},
+        {"vsc_schur_min_network_dimension",
+         robust.vsc_schur_min_network_dimension},
+        {"vsc_schur_local_rcond_tolerance",
+         robust.vsc_schur_local_rcond_tolerance},
+        {"vsc_schur_backward_error_tolerance",
+         robust.vsc_schur_backward_error_tolerance},
+        {"enable_smooth_ncp", robust.enable_smooth_ncp},
+        {"ncp_mu0", robust.ncp_mu0},
+        {"ncp_mu_min", robust.ncp_mu_min},
+        {"ncp_mu_factor", robust.ncp_mu_factor},
+        {"ncp_mu_factor_coarse", robust.ncp_mu_factor_coarse},
+        {"ncp_mu_phase_transition", robust.ncp_mu_phase_transition}}}};
   json lcc = lcc_transfers_json(result.lcc_transfers);
   return json{{"schema", "power_flow_result_v1"},
               {"method", method},
@@ -761,6 +791,7 @@ json serialize_power_flow(const HybridPowerSystem& system,
                {"lcc_transfers", std::move(lcc)},
               {"reactive_limits", reactive_limits},
               {"linear_structure", linear_structure},
+              {"options_effective", options_effective},
                {"model_scope", scope.at("model_scope")},
               {"validity_flags", std::move(validity_flags)}};
 }
@@ -1147,8 +1178,9 @@ json execute_analysis(const HybridPowerSystem& system,
       throw std::invalid_argument(
           "v1 power_flow currently supports method=ac_newton");
     }
-    const auto result = solve_power_flow(system, power_flow_options(request));
-    return serialize_power_flow(system, result, method);
+    const auto options = power_flow_options(request);
+    const auto result = solve_power_flow(system, options);
+    return serialize_power_flow(system, result, method, options);
   }
   if (analysis == "optimal_power_flow") {
     const std::string network_model =

@@ -892,7 +892,7 @@ void apply_power_flow_request_options(const json& root, hacdcpf::PowerFlowOption
       std::clamp(opt.pv_pq_max_outer_iterations, 1, 1000);
   opt.robust_nonlinear.min_active_set_hold_iters =
       std::clamp(opt.robust_nonlinear.min_active_set_hold_iters, 0, 1000);
-  hacdcpf::powerflow::normalize_vsc_schur_policy(opt.robust_nonlinear);
+  hacdcpf::powerflow::normalize_vsc_numerical_policy(opt.robust_nonlinear);
 }
 
 json pf_robust_options_to_json(const hacdcpf::powerflow::RobustNonlinearOptions& opt) {

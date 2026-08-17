@@ -89,9 +89,22 @@ def main() -> int:
             print("FAIL: session IDs are not unique", file=sys.stderr)
             return 1
 
-        request = PowerFlowRequest(
-            options=PowerFlowOptions(max_iter=100, tol=1.0e-8)
-        )
+        request = PowerFlowRequest(options=PowerFlowOptions(
+            max_iter=100,
+            tol=1.0e-8,
+            robust_nonlinear={
+                "enable_vsc_local_schur": False,
+                "vsc_schur_min_network_dimension": 321,
+                "vsc_schur_local_rcond_tolerance": 1.0e-7,
+                "vsc_schur_backward_error_tolerance": 2.0e-11,
+                "enable_smooth_ncp": True,
+                "ncp_mu0": 2.0e-3,
+                "ncp_mu_min": 3.0e-11,
+                "ncp_mu_factor": 0.2,
+                "ncp_mu_factor_coarse": 0.7,
+                "ncp_mu_phase_transition": 0.25,
+            },
+        ))
         first_job = first.power_flow(request)
         second_job = second.power_flow(request)
         jobs.extend([first_job, second_job])
@@ -106,12 +119,25 @@ def main() -> int:
             return 1
         reactive_limits = first_result.data.get("reactive_limits", {})
         validity_flags = first_result.data.get("validity_flags", {})
+        effective_robust = first_result.data.get("options_effective", {}).get(
+            "robust_nonlinear", {}
+        )
         if not (
             reactive_limits.get("enforcement_requested") is True
             and reactive_limits.get("certified") is True
             and reactive_limits.get("active_set_cycle_detected") is False
             and reactive_limits.get("outer_iteration_limit_reached") is False
             and validity_flags.get("generator_reactive_limits_certified") is True
+            and effective_robust.get("enable_vsc_local_schur") is False
+            and effective_robust.get("vsc_schur_min_network_dimension") == 321
+            and effective_robust.get("vsc_schur_local_rcond_tolerance") == 1.0e-7
+            and effective_robust.get("vsc_schur_backward_error_tolerance") == 2.0e-11
+            and effective_robust.get("enable_smooth_ncp") is True
+            and effective_robust.get("ncp_mu0") == 2.0e-3
+            and effective_robust.get("ncp_mu_min") == 3.0e-11
+            and effective_robust.get("ncp_mu_factor") == 0.2
+            and effective_robust.get("ncp_mu_factor_coarse") == 0.7
+            and effective_robust.get("ncp_mu_phase_transition") == 0.25
         ):
             print(
                 f"FAIL: versioned PF Q-limit certificate is incomplete: {reactive_limits}",

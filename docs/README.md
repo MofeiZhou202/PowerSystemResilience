@@ -1,6 +1,6 @@
 # Documentation Index
 
-Updated: 2026-08-16
+Updated: 2026-08-17
 
 This is the canonical entry point for active project documentation. Runtime
 behavior is defined by `include/`, `src/`, `tests/run_gui_server.cpp`, `web/`,

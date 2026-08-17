@@ -55,6 +55,10 @@ struct Defaults {
     static constexpr double kVoltageMaxPu   = 1.1;   ///< AC bus upper bound (pu)
     static constexpr double kDCVoltageMinPu = 0.9;   ///< DC bus lower bound (pu)
     static constexpr double kDCVoltageMaxPu = 1.1;   ///< DC bus upper bound (pu)
+    /// Rated transfer at the edge of the standard Vdc-droop voltage band.
+    /// The squared-voltage converter law derives its denominator from this
+    /// voltage magnitude deviation; see the model contract derivation.
+    static constexpr double kVdcDroopRatedVoltageDeviation = 0.05;
 
     // ── Branch π-model ────────────────────────────────────────────────────────
     static constexpr double kTapRatio       = 1.0;   ///< Transformer tap ratio (pu)
@@ -80,6 +84,13 @@ struct Defaults {
     /// benchmark protocol. Smaller systems retain full sparse LU because the
     /// O(m) local certificate overhead dominates their factorization latency.
     static constexpr int kVSCSchurMinNetworkDimension = 1000;
+    /// Kanzow (1996), smooth NCP continuation; production schedule validated
+    /// in docs/vsc_limit_ncp_power_flow_contract.md.
+    static constexpr double kNcpMu0 = 1e-2;
+    static constexpr double kNcpMuMin = 1e-12;
+    static constexpr double kNcpMuFactor = 0.1;
+    static constexpr double kNcpMuFactorCoarse = 0.5;
+    static constexpr double kNcpMuPhaseTransition = 0.1;
 
     // ── Scaling ───────────────────────────────────────────────────────────────
     static constexpr double kCostScaleFactor = 1.0;  ///< Objective cost scale ($/h)

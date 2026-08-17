@@ -1,6 +1,6 @@
 # Runtime API Contract
 
-Updated: 2026-08-14
+Updated: 2026-08-17
 
 The GUI server is implemented in `tests/run_gui_server.cpp`. Session endpoints
 operate on one loaded `HybridPowerSystem`; a model-changing request clears
@@ -129,6 +129,15 @@ is dirty. Result playback never synchronizes or changes the model.
 | `POST /api/session/run_reliability*` | Non-sequential, sequential, FMEA, feeder, and three-stage reliability. |
 | `POST /api/session/run_reconfig` | Topology reconfiguration. |
 
+Power-flow numerical overrides are sparse intent. In particular, omitting
+`options.robust_nonlinear.enable_auto_fallback_scheduling` preserves the C++
+backend default; the GUI's `后端默认` selection deliberately omits that key.
+An explicit `true` or `false` overrides it for the request. Every PF response
+returns the resolved value under
+`options_effective.robust_nonlinear.enable_auto_fallback_scheduling`; clients
+must display that effective value instead of inferring it from an unchecked or
+missing control.
+
 Balanced Newton PF accepts `enable_pv_pq_conversion` and the bounded
 `pv_pq_max_outer_iterations` control. The response `reactive_limits` object
 reports whether generator Q-limit enforcement was requested and certified,
@@ -140,6 +149,30 @@ The corresponding validity flags are
 conversion disabled; a converged screening result must not be interpreted as a
 Q-limit-certified engineering result. The switching and smooth-NCP theory is
 specified in [the PV/PQ contract](pv_pq_switching_contract.md).
+
+Balanced Newton PF also accepts the following research-grade numerical policy
+under `options.robust_nonlinear` on both `/api/session/pf` and `/api/v1`:
+
+| Field | Type and effective domain | Meaning |
+|---|---|---|
+| `enable_smooth_ncp` | boolean | Use smooth FB/CHKS continuation without changing the fixed equation layout. |
+| `ncp_mu0`, `ncp_mu_min` | finite, nonnegative; `mu0 >= mu_min` | Initial and terminal smoothing levels. |
+| `ncp_mu_factor`, `ncp_mu_factor_coarse` | finite values strictly between 0 and 1 | Fine- and coarse-phase multiplicative reductions. |
+| `ncp_mu_phase_transition` | finite value in `(0,1]` | Relative residual threshold between the coarse and fine schedules. |
+| `enable_vsc_local_schur` | boolean | Admit exact elimination of supported fixed six-state VSC local blocks. |
+| `vsc_schur_min_network_dimension` | integer, normalized to at least zero | Production scale crossover below which complete sparse LU is retained. |
+| `vsc_schur_local_rcond_tolerance` | finite value in `[0,1]` | Minimum accepted reciprocal condition estimate for every local block. |
+| `vsc_schur_backward_error_tolerance` | finite value in `[0,1]` | Maximum reduced and reconstructed full-system normwise backward error. |
+
+Invalid dimensionless policy values restore the named C++ defaults. Machine
+epsilon is a read-only representation constant and is not an API parameter.
+The response returns the normalized policy under
+`options_effective.robust_nonlinear`. `linear_structure` separately reports
+whether Schur was actually attempted and accepted, its dimensions and
+structural nonzeros, rejection/fallback counts, local `rcond`, backward errors,
+and sampled semismooth rates. An enabled option is not evidence that the path
+was admitted. These runtime values certify the selected generalized-Jacobian
+element assembled during the solve, not every element of the B-subdifferential.
 
 Specialized production routes for resilience, hosting capacity, campus IES,
 EV traffic, lifecycle, scenario generation, and SPPT remain discoverable in

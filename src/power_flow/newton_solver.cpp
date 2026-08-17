@@ -1098,7 +1098,7 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
         std::max(0.0, out.profiling.solver_core_ms_total - classified);
   };
   auto ropts = opt.robust_nonlinear;
-  powerflow::normalize_vsc_schur_policy(ropts);
+  powerflow::normalize_vsc_numerical_policy(ropts);
 
   const bool has_vdc_vac = std::any_of(
       input_data.converters.begin(), input_data.converters.end(), [](const VSCConverter& conv) {

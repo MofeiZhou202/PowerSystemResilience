@@ -70,7 +70,7 @@ The intended division of work is:
 - Backend chunks: serve topology LOD, spatial windows, time frames, and worst
   violations through `/api/v1`.
 
-Updated: 2026-08-10
+Updated: 2026-08-17
 
 The authored model lives in `Canvas.state`, while analysis results live in SVG
 result overlays. These states must remain separate.
@@ -81,6 +81,38 @@ result overlays. These states must remain separate.
 It can refresh solved component displays and the visualization overlay.
 PF and OPF post-PF payloads share authored-space component keys and terminal
 flow fields.
+
+The balanced-PF advanced panel exposes smooth-NCP continuation and local-VSC
+Schur admission as expert controls. Its tri-state switches and blank numeric
+fields preserve sparse intent: blank means that the browser omits the field
+and the backend resolves its authoritative default. After a solve, the panel
+shows `options_effective.robust_nonlinear`; it never derives an effective
+tolerance from a JavaScript default.
+
+The PF result group renders `linear_structure` as a solver certificate. It
+distinguishes disabled/not-admitted, accepted, and rejected-with-full-LU-
+fallback states and shows dimension/structural-nonzero reduction, local-block
+regularity, backward error, smooth continuation updates, and local-rate
+samples. Device rows continue to own physical current-limit activity, margin,
+priority, and exact NCP residual. The advanced numerical controls apply only
+to balanced positive-sequence steady/quasi-steady PF: they do not claim that
+the GFM priority NCP is inside the OPF KKT system and do not overwrite the
+shared GFM parameters consumed by transient initialization.
+
+Changing any NCP/Schur expert control invalidates the displayed effective
+policy and solver certificate immediately. The GUI labels the old certificate
+as stale and requires a new PF run; it never presents a previous generalized-
+Jacobian certificate as evidence for newly edited numerical controls.
+
+Topology and result-table navigation has two explicit identity paths. Normal
+SVG systems use the internal Canvas component identifier only for immediate
+glyph selection. Headless/WebGL systems recover the authored component from
+`canvas_type` plus stable `.index` (or explicitly named component position as
+a compatibility fallback), resolve its connected bus, and call the
+domain-qualified `{domain, index}` overview selector. AC and DC buses with the
+same integer index therefore remain distinct. Topology rows also retain their
+search-registry source so a WebGL selection can visibly highlight the matching
+virtualized row.
 
 ## Time playback
 

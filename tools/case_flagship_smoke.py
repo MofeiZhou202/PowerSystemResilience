@@ -114,13 +114,25 @@ vm_ok = vm and 0.9 <= min(vm) and max(vm) <= 1.1
 check('five_province FDPF', fp.get('converged') is True and vm_ok,
       f"converged={fp.get('converged')} vm=[{min(vm):.4f},{max(vm):.4f}]" if vm else f"converged={fp.get('converged')}")
 
-# 8. case2000 性能旗舰纯 AC NR 计时（混合 NR 对 MTDC 下垂敏感，属既有案例数据限制）
+# 8. case2000 性能旗舰混合 AC/DC NR 计时
 load('case2000_acdc')
 t0 = time.time()
-c2k = post('/api/session/pf', {'method': 'pure_ac', 'options': {'max_iter': 200}}, timeout=600)
+c2k = post('/api/session/pf', {'method': 'ac_newton', 'options': {
+    'max_iter': 100, 'tol': 1e-8,
+    'enable_converter_coordination_check': True,
+    'robust_nonlinear': {'enable_auto_fallback_scheduling': False}}}, timeout=600)
 dt = time.time() - t0
-check('case2000 纯AC NR 性能', c2k.get('converged') is True,
-      f"converged={c2k.get('converged')} iter={c2k.get('iterations')} 墙钟={dt:.2f}s 服务端={c2k.get('execution_time_sec')}s")
+vdc = c2k.get('vdc') or []
+hybrid_ok = (c2k.get('converged') is True and
+             c2k.get('method_actual') == 'hybrid_ac_dc_newton' and
+             float(c2k.get('residual', 1.0)) <= 1e-8 and
+             vdc and min(vdc) >= 0.9 and max(vdc) <= 1.1)
+check('case2000 混合AC/DC NR 性能', hybrid_ok,
+      f"converged={c2k.get('converged')} method={c2k.get('method_actual')} "
+      f"iter={c2k.get('iterations')} residual={c2k.get('residual')} "
+      f"Vdc=[{min(vdc):.4f},{max(vdc):.4f}] 墙钟={dt:.2f}s "
+      f"服务端={c2k.get('execution_time_sec')}s" if vdc else
+      f"converged={c2k.get('converged')} method={c2k.get('method_actual')} 无Vdc结果")
 
 print()
 print(f'{len(fails)} 项失败' if fails else '全部通过')

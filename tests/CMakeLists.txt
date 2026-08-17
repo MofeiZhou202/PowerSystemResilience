@@ -525,6 +525,13 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
     set_tests_properties(top_toolbar_semantics_test PROPERTIES
       LABELS "gui;unit;layout;semantics")
 
+    add_test(NAME pf_ncp_schur_gui_e2e
+      COMMAND "${HACDCPF_NODE_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/tests/e2e/pf_ncp_schur_gui_e2e.mjs"
+              --server "$<TARGET_FILE:run_gui_server>")
+    set_tests_properties(pf_ncp_schur_gui_e2e PROPERTIES
+      LABELS "gui;e2e;browser;power_flow;ncp;schur" TIMEOUT 120)
+
     add_test(NAME workspace_layout_e2e
       COMMAND "${HACDCPF_NODE_EXECUTABLE}"
               "${CMAKE_SOURCE_DIR}/tests/e2e/workspace_layout_e2e.mjs"

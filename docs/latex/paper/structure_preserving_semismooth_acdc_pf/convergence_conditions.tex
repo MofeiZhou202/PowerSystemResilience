@@ -1,0 +1,107 @@
+\section{Regularity and Local Convergence Conditions}\label{sec:convergence}
+
+\subsection{Semismoothness assumptions}
+
+The following statements concern the exact target residual $H$ with $\mu=0$.
+
+\begin{assumption}[Local model regularity]\label{ass:model-regularity}
+The smooth ac/dc network, loss, and droop functions are continuously
+differentiable in a neighborhood of a solution $w^*$. Terminal voltage
+magnitudes and dc voltages remain inside the domain on which their physical
+equations and derivatives are finite, and each admitted GFM virtual impedance
+is nonzero.
+\end{assumption}
+
+\begin{assumption}[BD-regular solution]\label{ass:bd-regular}
+The exact residual $H$ is semismooth at $w^*$ and every matrix
+$J\in\Bsub H(w^*)$ is nonsingular.
+\end{assumption}
+
+The Fischer--Burmeister map and piecewise-affine median projection are
+strongly semismooth. Their composition with the smooth network and converter
+functions preserves local semismoothness under
+Assumption~\ref{ass:model-regularity}. At a zero remaining-current radius, the
+square-root radius in the priority model requires the explicitly selected
+finite generalized branch used by the implementation. Such a selection makes
+one Newton step well defined, but it does not by itself prove
+Assumption~\ref{ass:bd-regular} for all neighboring selections.
+
+\begin{theorem}[Conditional local rate]\label{thm:local-rate}
+Let $w^*$ solve $H(w)=0$. Under
+Assumptions~\ref{ass:model-regularity} and~\ref{ass:bd-regular}, the exact
+semismooth Newton iteration \eqref{eq:newton-step}, started sufficiently close
+to $w^*$ and eventually accepting the full step, is well defined and converges
+superlinearly to $w^*$. If $H$ is strongly semismooth at $w^*$, the local rate
+is quadratic.
+\end{theorem}
+
+\begin{proof}
+The result is the standard semismooth Newton theorem applied to the square
+locally Lipschitz residual $H$. BD-regularity gives uniformly bounded inverses
+for the relevant B-subdifferential elements near $w^*$, while semismoothness
+makes the linearization remainder $o(\|w-w^*\|)$. Strong semismoothness improves
+the remainder to $O(\|w-w^*\|^2)$
+\cite{qi1993nonsmooth,facchinei2003complementarity}.
+\end{proof}
+
+\subsection{Block nonsingularity condition}
+
+\begin{proposition}[Selected-element block certificate]
+Consider one selected generalized-Jacobian element $J$ partitioned as in
+\eqref{eq:block-newton}. If every $D_c$ is nonsingular, then
+\begin{equation}
+ J\ \text{is nonsingular}
+ \quad\Longleftrightarrow\quad
+ S=A-BD^{-1}C\ \text{is nonsingular}.
+ \label{eq:block-regularity}
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+Block Gaussian elimination factors $J$ into nonsingular unit triangular
+factors and $\diag(S,D)$. The determinant and null-space equivalence follow
+immediately \cite{golub2013matrix}.
+\end{proof}
+
+Equation~\eqref{eq:block-regularity} is the theoretical basis of the runtime
+Schur certificate. Local $D_c$ condition estimates, successful sparse
+factorization of $S$, and the complete backward-error test provide numerical
+evidence for the current selected element. They do not enumerate
+$\Bsub H(w^*)$ and therefore must not be reported as a proof of BD-regularity.
+
+\subsection{Measured local-rate diagnostics}
+
+For accepted iterates with residual norm $r_k=\|H(w_k)\|$, the implementation
+reports
+\begin{equation}
+ q_k^{(1)}=\frac{r_{k+1}}{r_k},\qquad
+ q_k^{(2)}=\frac{r_{k+1}}{r_k^2}.
+ \label{eq:rate-diagnostics}
+\end{equation}
+A decreasing $q_k^{(1)}$ is consistent with superlinear behavior, while a
+bounded $q_k^{(2)}$ in the asymptotic regime is consistent with quadratic
+behavior. These finite samples are diagnostic evidence only. Damped steps,
+smoothing-parameter reductions, mode-degenerate iterations, and full-LU
+fallbacks can occur outside the final local regime and should be excluded from
+any empirical rate fit.
+
+\subsection{Smoothing and globalization boundary}
+
+The smooth continuation in \eqref{eq:smooth-fb} improves path following but
+does not replace Theorem~\ref{thm:local-rate}. The final state is accepted only
+after evaluation of the exact $\mu=0$ residual. Likewise, line search and
+fallback scheduling improve robustness but do not establish global
+convergence or uniqueness. Hybrid power-flow equations may possess both high-
+and low-voltage mathematical roots, and a distant initial point may converge
+to a different basin. Infeasible operating points must be reported as
+nonconverged rather than converted into a plausible result.
+
+\subsection{Numerical-policy separation}
+
+Machine epsilon is a single read-only representation constant. Nonlinear
+tolerances, the local $rcond$ threshold, the backward-error threshold, and the
+Schur crossover dimension are named algorithmic policy. They are configurable
+and validated separately. This prevents a hardware-scale constant from being
+reused as a physical feasibility tolerance and prevents empirical admission
+settings from becoming hidden universal assumptions.
+

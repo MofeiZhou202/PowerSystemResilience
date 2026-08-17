@@ -416,10 +416,45 @@
         <label class="sub-label sub-checkbox"><input id="pfRobustEquilibration" type="checkbox" checked/><span>行列均衡</span></label>
         <label class="sub-label sub-checkbox"><input id="pfRobustCondition" type="checkbox" checked/><span>条件监测</span></label>
         <label class="sub-label sub-checkbox"><input id="pfRobustNonmonotone" type="checkbox" checked/><span>非单调线搜索</span></label>
-        <label class="sub-label sub-checkbox"><input id="pfRobustAutoFallback" type="checkbox"/><span>自动回退</span></label>
+        <label class="sub-label">自动回退
+          <select id="pfRobustAutoFallback" title="留空采用后端默认；仅显式选择时覆盖求解器策略">
+            <option value="" selected>后端默认</option>
+            <option value="true">开启</option>
+            <option value="false">关闭</option>
+          </select>
+        </label>
         <label class="sub-label sub-checkbox"><input id="pfRobustHomotopy" type="checkbox" checked/><span>同伦</span></label>
         <label class="sub-label sub-checkbox"><input id="pfRobustKrylov" type="checkbox"/><span>Krylov</span></label>
         <label class="sub-label">最低Vm<input id="pfRobustMinVm" type="number" step="1e-8" value="1e-8"/></label>
+      </div>
+      <div class="pf-option-group pf-ncp-schur-options" data-pf-model="balanced">
+        <div class="pf-option-title">NCP / Schur</div>
+        <label class="sub-label">平滑NCP
+          <select id="pfSmoothNcpMode" title="留空采用后端默认；开启后对互补方程使用平滑延拓">
+            <option value="" selected>后端默认</option>
+            <option value="true">开启</option>
+            <option value="false">关闭</option>
+          </select>
+        </label>
+        <label class="sub-label">局部Schur
+          <select id="pfVscSchurMode" title="留空采用后端默认；仅在网络维数和局部正则性证书均满足时执行">
+            <option value="" selected>后端默认</option>
+            <option value="true">开启</option>
+            <option value="false">关闭</option>
+          </select>
+        </label>
+        <label class="sub-label">Schur最小网络维数<input id="pfVscSchurMinDimension" type="number" min="0" step="1" placeholder="后端默认" title="网络变量维数低于该值时保留完整稀疏LU"/></label>
+        <label class="sub-label">局部rcond下限<input id="pfVscSchurRcondTol" type="number" min="0" max="1" step="any" placeholder="后端默认" title="每个6×6局部广义雅可比块的最小互条件数证书，无量纲"/></label>
+        <label class="sub-label">后向误差上限<input id="pfVscSchurBackwardErrorTol" type="number" min="0" max="1" step="any" placeholder="后端默认" title="约化和重构完整Newton方向的最大范数后向误差，无量纲"/></label>
+        <label class="sub-label">μ0<input id="pfNcpMu0" type="number" min="0" step="any" placeholder="后端默认" title="平滑NCP延拓的初始参数"/></label>
+        <label class="sub-label">μmin<input id="pfNcpMuMin" type="number" min="0" step="any" placeholder="后端默认" title="平滑NCP延拓的最小参数，必须不大于μ0"/></label>
+        <label class="sub-label">精细缩减<input id="pfNcpMuFactor" type="number" min="0" max="1" step="any" placeholder="后端默认" title="近收敛阶段的μ乘法缩减因子，取值0到1之间"/></label>
+        <label class="sub-label">粗略缩减<input id="pfNcpMuFactorCoarse" type="number" min="0" max="1" step="any" placeholder="后端默认" title="远离解时的μ乘法缩减因子，取值0到1之间"/></label>
+        <label class="sub-label">阶段阈值<input id="pfNcpMuPhaseTransition" type="number" min="0" max="1" step="any" placeholder="后端默认" title="相对初始残差低于该比例后切换到精细缩减"/></label>
+        <div class="pf-option-note">
+          留空字段由后端权威默认值解析。该组仅控制平衡正序稳态/准稳态潮流；不表示 GFM 限流 NCP 已嵌入 OPF KKT，也不改写暂态设备参数。机器精度为只读全局常量。
+          <span id="pfNcpSchurEffective" aria-live="polite">实际生效值将在潮流求解后显示。</span>
+        </div>
       </div>
       <div id="pfHelmOptions" class="pf-option-group" data-pf-model="balanced" hidden>
         <div class="pf-option-title">HELM</div>
@@ -2779,6 +2814,10 @@
         <div class="topo-section pf-warning-section" id="pfWarningSection" style="display:none">
           <h4>潮流警告与终止信息</h4>
           <div id="pfWarningResults" class="pf-warning-results"></div>
+        </div>
+        <div class="topo-section pf-solver-structure-section" id="pfSolverStructureSection" style="display:none">
+          <h4>半光滑 NCP / VSC 局部 Schur 求解证书</h4>
+          <div id="pfSolverStructureResults" class="topo-table-wrap"></div>
         </div>
         <div class="topo-section" id="pfBalanceSection" style="display:none">
           <h4>潮流结果 — 节点功率平衡诊断</h4>
