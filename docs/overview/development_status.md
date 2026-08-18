@@ -857,7 +857,7 @@ run was performed for this frontend-only change.
 
 ## Active module audit
 
-The living [module code audit](module_code_audit.md) records the current
+The living [module code audit](../testing/module_code_audit.md) records the current
 source-backed findings and audit depth. AUD-001 through AUD-011 are closed.
 Focused runtime contracts now cover `graph/`, `scenario_generation/`,
 `carbon_analysis/`, `integrated_energy/`, and `sppt/`; the canonical links are
@@ -1180,5 +1180,5 @@ ctest --preset macos-release
 ```
 
 Use [README.md](../README.md) for the user-facing capability baseline,
-[AGENTS.md](../AGENTS.md) for architecture and invariants, and
+[AGENTS.md](../../AGENTS.md) for architecture and invariants, and
 [docs/README.md](README.md) for topic documentation.

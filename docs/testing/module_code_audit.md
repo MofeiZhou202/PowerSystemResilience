@@ -7,7 +7,7 @@ source-backed defects and audit coverage; it is not a dated snapshot and does
 not replace issue tracking. Runtime behavior remains authoritative in
 `include/`, `src/`, `tests/run_gui_server.cpp`, `web/`, and registered tests.
 Documentation coverage is tracked separately in the
-[module documentation map](module_documentation_map.md).
+[模块文档地图](../overview/module_documentation_map.md)。
 
 ## Audit interpretation
 
@@ -26,7 +26,7 @@ and existing executable tests.
 ## Open findings
 
 All data-structure review findings R-01–R-08
-([data structure design review](data_structure_design_review.md) §2) are closed
+（[数据结构设计评审](../developer/data_structure_design_review.md) §2）已关闭
 or reclassified this iteration; see the table below. AUD-001 through AUD-011
 remain closed.
 

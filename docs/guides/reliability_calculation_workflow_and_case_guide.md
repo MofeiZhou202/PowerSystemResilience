@@ -6,13 +6,13 @@
 
 本文描述当前实现，不替代以下专项材料：
 
-- [可靠性数学模型与信息物理智能评估](reliability_mathematical_models_and_intelligent_cyber_physical_assessment.md)
+- [可靠性数学模型与信息物理智能评估](../theory/reliability_mathematical_models_and_intelligent_cyber_physical_assessment.md)
   给出完整推导、覆盖状态和理论边界；
-- [可靠性评估方法](reliability_assessment_models.md) 保留各算法的详细推导与历史
+- [可靠性评估方法](../theory/reliability_assessment_models.md) 保留各算法的详细推导与历史
   校核；
-- [运行时 API](runtime_api.md#reliability-and-protection-configuration) 定义配置和结果
+- [运行时 API](../reference/runtime_api.md#reliability-and-protection-configuration) 定义配置和结果
   JSON 契约；
-- [内置案例目录](case_catalog.md) 定义案例用途和能力边界。
+- [内置案例目录](../overview/case_catalog.md) 定义案例用途和能力边界。
 
 ## 1. 先明确计算问题
 

@@ -168,7 +168,7 @@ The corresponding validity flags are
 `generator_reactive_limits_certified`. The GUI default is fast screening with
 conversion disabled; a converged screening result must not be interpreted as a
 Q-limit-certified engineering result. The switching and smooth-NCP theory is
-specified in [the PV/PQ contract](pv_pq_switching_contract.md).
+specified in [the PV/PQ contract](../theory/pv_pq_switching_contract.md).
 
 Balanced Newton PF also accepts the following research-grade numerical policy
 under `options.robust_nonlinear` on both `/api/session/pf` and `/api/v1`:

@@ -5,8 +5,8 @@
 
 | 内容 | 文档 |
 |---|---|
-| 当前构建与回归基线 | [开发状态](../development_status.md) |
-| 模块审计深度与缺陷 | [模块代码审计](../module_code_audit.md) |
+| 当前构建与回归基线 | [开发状态](../overview/development_status.md) |
+| 模块审计深度与缺陷 | [模块代码审计](module_code_audit.md) |
 | 谐波跨引擎校核 | [谐波正确性验证](../modules/harmonics_power_flow/harmonic_verification.md) |
 | OPF、PF 与模块验证矩阵 | [模块手册索引](../modules/README.md) |
 | 研究复现与数值证据 | [论文工作区](../latex/paper/README.md) |

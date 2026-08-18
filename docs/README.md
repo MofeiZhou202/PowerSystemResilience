@@ -7,8 +7,8 @@
 
 本次整理采用**非破坏式分类**：现有契约、论文和测试引用仍保留原路径，新的分类目录提供
 稳定入口与归属台账。这样既建立层级，又避免搬移文件造成的链接失效。逐文件归属见
-[文档分类台账](document_catalog.md)，模块覆盖状态见
-[模块文档地图](module_documentation_map.md)。
+[文档分类台账](overview/document_catalog.md)，模块覆盖状态见
+[模块文档地图](overview/module_documentation_map.md)。
 
 ## 文档层级
 
@@ -40,17 +40,17 @@
 
 | 需求 | 等级 | 文档 |
 |---|---|---|
-| 当前构建、测试、依赖与未闭环工作 | 状态 | [开发状态](development_status.md) |
-| 跨平台离线构建与依赖配置 | 契约 | [跨平台构建](cross_platform_build.md) |
+| 当前构建、测试、依赖与未闭环工作 | 状态 | [开发状态](overview/development_status.md) |
+| 跨平台离线构建与依赖配置 | 契约 | [跨平台构建](operations/cross_platform_build.md) |
 | 组件模型与参数 | 实现参考 | [模型手册](modules/model/model_manual.tex) |
 | 交直流与三相潮流 | 实现参考 | [潮流计算手册](modules/power_flow/power_flow_manual.tex) |
 | AC/DC、混合与三相 OPF | 实现参考 | [最优潮流手册](modules/optimal_power_flow/opf_manual.tex) |
 | 全部源码模块技术手册 | 实现参考 | [模块手册索引](modules/README.md) |
-| HTTP 路由与响应边界 | 契约 | [运行时 API](runtime_api.md) |
-| 内置算例与能力示例 | 契约 | [算例目录](case_catalog.md) |
-| Python 客户端边界 | 契约 | [Python API](python_api.md) |
-| 模块文档覆盖与缺口 | 状态 | [模块文档地图](module_documentation_map.md) |
-| 代码审计深度与开放问题 | 状态 | [模块代码审计](module_code_audit.md) |
+| HTTP 路由与响应边界 | 契约 | [运行时 API](reference/runtime_api.md) |
+| 内置算例与能力示例 | 契约 | [算例目录](overview/case_catalog.md) |
+| Python 客户端边界 | 契约 | [Python API](reference/python_api.md) |
+| 模块文档覆盖与缺口 | 状态 | [模块文档地图](overview/module_documentation_map.md) |
+| 代码审计深度与开放问题 | 状态 | [模块代码审计](testing/module_code_audit.md) |
 
 ## 工业级 LaTeX 手册
 
@@ -65,13 +65,13 @@
 ## 文档政策
 
 - 更新现有活文档，不新增带日期的审计快照。
-- 易变的构建和测试证据只写入 `development_status.md`。
+- 易变的构建和测试证据只写入 `overview/development_status.md`。
 - 路线图、假设、回退和归档材料不得表述为当前实现。
 - 所有公共结果向量必须声明索引空间与单位。
 - 近似、回退、时限和模型覆盖不足必须声明有效边界及结果标志。
 - HTTP 示例必须使用 `tests/run_gui_server.cpp` 中的生产路由。
 - LaTeX 只提交可编辑源文件；PDF、`.aux`、`.log` 等构建产物不作为规范源。
-- 新增文档必须登记到本索引与 [文档分类台账](document_catalog.md)，不得形成孤儿文件。
+- 新增文档必须登记到本索引与 [文档分类台账](overview/document_catalog.md)，不得形成孤儿文件。
 
 历史审计、旧设计与理论资料统一由 [归档索引](archive/README.md) 管理。归档可解释历史决策，
 但不得作为当前行为证据。

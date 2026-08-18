@@ -9,7 +9,7 @@ Class: Status（评审记录；行级细节在代码变更后需复核，缺陷�
 
 评审方法：公共头文件通读 + 投影实现（[network_utils.cpp](../src/model/network_utils.cpp)）
 逐函数源审 + 调用点核实 + 现有测试与契约交叉验证。基线与已闭环审计见
-[模块代码审计](module_code_audit.md)（AUD-001…011 均已闭环）。
+[模块代码审计](../testing/module_code_audit.md)（AUD-001…011 均已闭环）。
 
 > 结论提要：核心数据结构设计**成熟且自洽**，投影/溯源层有一套罕见地严谨的证据体系。
 > 下列发现以 **Low / Medium** 为主，多为**潜在 foot-gun** 或**设计不对称**，无当前
@@ -65,7 +65,7 @@ Class: Status（评审记录；行级细节在代码变更后需复核，缺陷�
    `dc_lmp_per_mwh[d]` 直接以循环下标 `b`/`d` 索引即等于**授权母线位序**——这是发电机/支路
    （经 `active_*_positions` 过滤，需 `*_positions[·]` 重映射）**有意的不对称**。**未来若对母线
    引入任何过滤/重排，必须同步把定价结果切回 `*_positions[·]` 重映射**，否则 LMP 会静默错配到
-   错误母线。见 AUD-017（[模块代码审计](module_code_audit.md)）与下述第 8 节。
+错误母线。见 AUD-017（[模块代码审计](../testing/module_code_audit.md)）与下述第 8 节。
 
 ---
 
@@ -264,7 +264,7 @@ flowchart LR
 [数据结构与 API 契约](data_structure_api_contract.md)。
 
 **逐模块深度评审（item 5，reliability → dynamics → market）**：在核心投影/ID 评审之外，
-本迭代对三个求解型模块做了同深度评审并登记于 [模块代码审计](module_code_audit.md)：
+本迭代对三个求解型模块做了同深度评审并登记于 [模块代码审计](../testing/module_code_audit.md)：
 **AUD-015**（reliability，RL-01 尾部风险越界 + RL-02 ASAI 越界钳制）、**AUD-016**（dynamics，
 DY-01 缺陷雅可比下参与因子回退右特征向量幅值）均已修复并回归；**AUD-017**（market，位/索引
 双键 + LMP 对偶提取 + N-1 割迭代）经深审**未发现缺陷**，四个“看似不对称”处均确认正确，

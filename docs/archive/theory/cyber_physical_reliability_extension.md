@@ -7,7 +7,7 @@
 > in `include/hacdcpf/reliability/reliability_assessment.hpp`, evaluated in
 > `run_distribution_fmea`, exposed via the GUI server (`cyber_physical` request
 > block) and the reliability panel. Levels 2–4 remain design-only. Companion to
-> [`reliability_assessment_models.md`](../../reliability_assessment_models.md)
+> [`reliability_assessment_models.md`](../../theory/reliability_assessment_models.md)
 > (the implemented physical baseline, whose §5 documents the shipped Level-1
 > conditioning). Source of truth: src/, include/, tests/.
 >
@@ -122,7 +122,7 @@ engine cannot represent must be reported `unsupported`, never silently zeroed
 
 ## 2. Baseline: what the module already does, precisely
 
-From [`reliability_assessment_models.md`](../../reliability_assessment_models.md):
+From [`reliability_assessment_models.md`](../../theory/reliability_assessment_models.md):
 
 - **Methods:** non-sequential MC (state sampling), sequential MC (chronological,
   exponential sojourns, valid tail risk), analytical F&D/COPT, deterministic
@@ -571,6 +571,6 @@ of the interface-matrix boundary (§3.3).
   and DER control, i.e. why C2/C3 are not optional in modern feeders.
 
 Cross-references: physical baseline and finding numbers —
-[`reliability_assessment_models.md`](../../reliability_assessment_models.md);
-restoration kernel — [`network_reconfiguration_models.md`](../../network_reconfiguration_models.md);
+[`reliability_assessment_models.md`](../../theory/reliability_assessment_models.md);
+restoration kernel — [`network_reconfiguration_models.md`](../../theory/network_reconfiguration_models.md);
 hazard scenario machinery — `src/scenario_generation/typhoon_resilience.cpp`.

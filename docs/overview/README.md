@@ -5,9 +5,9 @@
 | 文档 | 作用 |
 |---|---|
 | [文档中心](../README.md) | 全部文档的唯一导航入口 |
-| [开发状态](../development_status.md) | 最近验证的构建、测试、依赖和未闭环工作 |
-| [模块文档地图](../module_documentation_map.md) | 源码模块、手册与契约覆盖关系 |
-| [模块代码审计](../module_code_audit.md) | 代码审阅深度和开放问题 |
-| [算例目录](../case_catalog.md) | 内置系统、规模、用途和能力边界 |
+| [开发状态](development_status.md) | 最近验证的构建、测试、依赖和未闭环工作 |
+| [模块文档地图](module_documentation_map.md) | 源码模块、手册与契约覆盖关系 |
+| [模块代码审计](../testing/module_code_audit.md) | 代码审阅深度和开放问题 |
+| [算例目录](case_catalog.md) | 内置系统、规模、用途和能力边界 |
 
 建议新读者依次阅读文档中心、开发状态、模块文档地图，再进入具体模块手册。

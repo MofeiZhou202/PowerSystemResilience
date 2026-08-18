@@ -33,6 +33,25 @@ docs/
 └── _manual_common/           模块手册共享样式与工业评价章节
 ```
 
+## Markdown 归类结果
+
+Markdown 已完成物理归类，`docs/` 根目录仅保留总入口 `docs/README.md`。当前分类文件清单如下：
+
+| 分类目录 | 已归类文件 |
+|---|---|
+| `overview/` | `README.md`、`case_catalog.md`、`development_status.md`、`document_catalog.md`、`module_documentation_map.md` |
+| `guides/` | `README.md`、`distribution_parameter_completion_standards.md`、`ev_traffic_scenario_format.md`、`parameter_system.md`、`reliability_calculation_workflow_and_case_guide.md` |
+| `developer/` | `README.md`、`commenting_guide.md`、`data_structure_api_contract.md`、`data_structure_design_review.md`、`graph_runtime_contract.md`、`gui_canvas_runtime.md`、`model_data_semantics_contract.md`、`module_data_structures.md`、`projection_and_results.md` |
+| `theory/` | `README.md`、`annual_simulation_models.md`、`capacity_analysis_implementation.md`、`carbon_analysis_contract.md`、`certified_restoration_runtime.md`、`integrated_energy_contract.md`、`market_simulation_mathematical_models.md`、`multidimensional_weak_link_identification.md`、`network_reconfiguration_models.md`、`pv_pq_switching_contract.md`、`reliability_assessment_models.md`、`reliability_mathematical_models_and_intelligent_cyber_physical_assessment.md`、`scenario_generation_contract.md`、`sequential_production_simulation_rich_models.md`、`short_circuit_rich_acdc_derivation.md`、`sppt_runtime_contract.md`、`time_series_power_flow_models.md`、`transient_runtime.md`、`vsc_limit_ncp_power_flow_contract.md` |
+| `reference/` | `README.md`、`bpa_dsp_component_mapping.md`、`cim_cgmes3_crosswalk.md`、`digital_twin_data_io_architecture.md`、`market_simulation_runtime.md`、`python_api.md`、`runtime_api.md`、`svg_distribution_import.md` |
+| `testing/` | `README.md`、`module_code_audit.md` |
+| `operations/` | `README.md`、`cross_platform_build.md`、`trial_edition_design.md` |
+| `tutorials/`、`research/`、`planning/` | 各目录保留各自 `README.md` 与已登记的专题材料 |
+| `modules/<module>/` | 23 个模块 README；谐波材料统一归入 `modules/harmonics_power_flow/` |
+| `archive/`、`latex/`、`_manual_common/` | 历史归档、论文/专题材料和手册维护材料，均有对应入口 |
+
+分类后的本地文档链接已执行语法感知扫描：共检查 291 个 Markdown、LaTeX、图片和 PDF 目标，缺失链接为 0。
+
 模块目录严格为：
 
 ```text
@@ -45,7 +64,7 @@ time_series validation
 
 ## 已归类文件列表
 
-根目录 Markdown 的逐文件主要归属记录在 [文档分类台账](../document_catalog.md)：
+Markdown 的分类归属记录在 [文档分类台账](../overview/document_catalog.md)：
 
 - 仓库总览：`README.md`、`development_status.md`、`case_catalog.md`、模块地图和分类台账；
 - 用户指南：参数系统、配网参数补全、可靠性工作流、电动汽车场景格式；
@@ -182,6 +201,18 @@ time_series validation
 - 下一步计划：把语法感知的链接检查接入 CI。
 - 风险等级：低。
 
+### DOC-107
+
+- 问题编号：DOC-107
+- 问题标题：Markdown 文件物理归类与迁移后链接修复
+- 当前状态：已完成
+- 涉及路径：`docs/overview/`、`docs/guides/`、`docs/developer/`、`docs/theory/`、`docs/reference/`、`docs/testing/`、`docs/operations/`、`docs/planning/`
+- 已完成工作：根目录 Markdown 已迁移到维护分类目录，根目录仅保留 `docs/README.md`；修复总览、台账、模块地图、开发者、可靠性、测试、理论和归档文档中的相对路径。
+- 存在问题：历史归档中仍保留部分英文正文和英文交叉引用文字，这是历史材料属性，不作为当前实现契约。
+- 改进方向：将语法感知链接检查器接入文档 CI，并逐步翻译历史归档正文。
+- 下一步计划：文档新增或移动时同步更新分类台账和入口 README。
+- 风险等级：低。
+
 ## 问题卡汇总表
 
 | 问题编号 | 问题标题 | 当前状态 | 风险等级 |
@@ -191,3 +222,4 @@ time_series validation
 | DOC-104 | OPF 内重复维护 power_models 数学规范 | 已完成 | 高风险已关闭 |
 | DOC-105 | 23 部 LaTeX 编译与交叉引用验证 | 已完成 | 低 |
 | DOC-106 | 导航旧路径与 README 契约漂移 | 已完成 | 低 |
+| DOC-107 | Markdown 文件物理归类与迁移后链接修复 | 已完成 | 低 |

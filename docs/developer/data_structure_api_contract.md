@@ -10,10 +10,12 @@ API/不变量来消费它们。运行时行为以 `include/`、`src/`、`tests/r
 
 配套文档：
 
-- 设计评审与潜在缺陷清单：[数据结构设计评审](data_structure_design_review.md)- 各分析模块内部数据结构（深化）：[各模块内部数据结构](module_data_structures.md)- 跨层"同一含义"语义契约：[模型/数据/结果语义契约](model_data_semantics_contract.md)
+- 设计评审与潜在缺陷清单：[数据结构设计评审](data_structure_design_review.md)
+- 各分析模块内部数据结构（深化）：[各模块内部数据结构](module_data_structures.md)
+- 跨层“同一含义”语义契约：[模型/数据/结果语义契约](model_data_semantics_contract.md)
 - 投影与结果溯源：[投影与结果归因](projection_and_results.md)
 - 图与降阶：[图与降阶运行时契约](graph_runtime_contract.md)
-- 可编辑参数：[参数系统](parameter_system.md)
+- 可编辑参数：[参数系统](../guides/parameter_system.md)
 
 ---
 
@@ -54,7 +56,7 @@ flowchart TD
     HPS -. 图视图 .-> GRAPH["PowerSystemGraph<br/>域限定 node/edge 索引"]
 ```
 
-三条贯穿全仓的**铁律**（见 [AGENTS.md](../AGENTS.md)）：
+三条贯穿全仓的**铁律**（见 [AGENTS.md](../../AGENTS.md)）：
 
 1. **AC/DC 域使用域限定映射**（`ac_bus_id_to_node_idx` / `dc_bus_id_to_node_idx`），
    禁止用裸 `int bus_id` 跨域传递。

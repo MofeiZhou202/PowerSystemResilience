@@ -335,7 +335,7 @@ are consistent.
 > `switching_time_hr`, and the automation-unavailable class keeps crew-based
 > switch reconfiguration in the repair stage but freezes DER/storage/
 > grid-forming/islanding dispatch. Model, decomposition, and metric definitions:
-> archived [cyber-physical fidelity ladder](archive/theory/cyber_physical_reliability_extension.md)
+> archived [cyber-physical fidelity ladder](../archive/theory/cyber_physical_reliability_extension.md)
 > §4.1/§6 (implemented at Level 1 for this method only).
 
 > ⚠ **F12.** Grid-forming support is modeled by promoting the device's bus to a
