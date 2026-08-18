@@ -106,6 +106,10 @@ SolveResult NativeAutoLPAdapter::solve_lp(const LPModel& prob) const {
     SolveResult r;
     try {
       IPMLPOptions opt;  // defaults == native-ipm-direct
+      // P1 keeps the selector's IPM arm on the pre-P1 direct path; the
+      // design (native_presolve_lp_2026-08-18.md §3.1) enables native
+      // presolve here only with the P4 acceptance.
+      opt.presolve = false;
       opt.time_limit_sec = tl;
       opt.cancel_flag = &slot->cancel;
       r = NativeIPMLPAdapter(opt).solve_lp(lp);
@@ -123,6 +127,7 @@ SolveResult NativeAutoLPAdapter::solve_lp(const LPModel& prob) const {
     // Thread creation failed: fall back to a synchronous IPM solve (the prior
     // default LP path). Any worker already launched publishes harmlessly.
     IPMLPOptions opt;
+    opt.presolve = false;  // same pre-P1 selector path as ipm_worker above
     opt.time_limit_sec = tl;
     return NativeIPMLPAdapter(opt).solve_lp(prob);
   }

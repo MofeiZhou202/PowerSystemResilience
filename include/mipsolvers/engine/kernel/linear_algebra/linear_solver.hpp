@@ -36,6 +36,15 @@ class SparseLinearSolver {
   /// The default preserves source compatibility for third-party backends by
   /// dispatching one column at a time; native backends override this method.
   virtual bool solve_many(const Eigen::MatrixXd& rhs, Eigen::MatrixXd& x);
+  /// Raise the pivot-perturbation level of pivoting factorizations
+  /// (PARDISO iparm[9] semantics: perturbation = 10^-exponent).  Unlike
+  /// diagonal regularization this biases only the factor, not the system;
+  /// iterative refinement removes the perturbation error
+  /// (Schenk & Gärtner 2006, ETNA 23 §4).  No-op on backends without pivot
+  /// perturbation.
+  virtual void set_pivot_perturbation_exponent(int exponent) {
+    (void)exponent;
+  }
 };
 
 class EigenSparseLUSolver final : public SparseLinearSolver {
@@ -117,6 +126,7 @@ class MKLPardisoSolver final : public SparseLinearSolver {
   bool solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) override;
   bool solve_many(const Eigen::MatrixXd& rhs, Eigen::MatrixXd& x) override;
   int perturbed_pivots() const override;
+  void set_pivot_perturbation_exponent(int exponent) override;
   std::int64_t factor_nonzeros() const override;
   std::int64_t factor_work() const override;
 
@@ -138,6 +148,7 @@ class MKLPardisoLLTSolver final : public SparseLinearSolver {
   bool solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) override;
   bool solve_many(const Eigen::MatrixXd& rhs, Eigen::MatrixXd& x) override;
   int perturbed_pivots() const override;
+  void set_pivot_perturbation_exponent(int exponent) override;
   std::int64_t factor_nonzeros() const override;
   std::int64_t factor_work() const override;
 
@@ -160,6 +171,7 @@ class MKLPardisoLDLTSolver final : public SparseLinearSolver {
   bool solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) override;
   bool solve_many(const Eigen::MatrixXd& rhs, Eigen::MatrixXd& x) override;
   int perturbed_pivots() const override;
+  void set_pivot_perturbation_exponent(int exponent) override;
   std::int64_t factor_nonzeros() const override;
   std::int64_t factor_work() const override;
   int negative_eigenvalues() const override;
@@ -183,6 +195,7 @@ class MKLPardisoAdaptiveSolver final : public SparseLinearSolver {
   bool factorize(const Eigen::SparseMatrix<double>& a) override;
   bool solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) override;
   int perturbed_pivots() const override;
+  void set_pivot_perturbation_exponent(int exponent) override;
   std::int64_t factor_nonzeros() const override;
   std::int64_t factor_work() const override;
  private:

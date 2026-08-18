@@ -8,6 +8,7 @@
 #include "ipm_lp_solver_internal.hpp"
 
 #include "mipsolvers/engine/kernel/lp_kernel/dual_simplex.hpp"
+#include "mipsolvers/engine/presolve/lp_presolve.hpp"
 
 namespace mipsolvers::engine {
 
@@ -213,18 +214,44 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
         std::chrono::steady_clock::now() - solve_start).count();
     return std::max(0.0, opt_.time_limit_sec - elapsed);
   };
+  // Presolve telemetry accumulators (SolveStats, §3.2 of the design doc
+  // referenced in `finish`).  Defaults encode "no presolve ran".
+  double presolve_ms = 0.0;
+  long presolve_orig_rows = -1;
+  long presolve_orig_cols = -1;
+  long presolve_orig_nnz = -1;
+  long presolve_reduced_rows = -1;
+  long presolve_reduced_cols = -1;
+  long presolve_reduced_nnz = -1;
+  int presolve_used = 0;
   auto finish = [&](SolveResult result) {
     result.stats.runtime_sec = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - solve_start).count();
+    // Presolve telemetry applies to every return path of this solve
+    // (native_presolve_lp_2026-08-18.md §3.2); pure telemetry, never read by
+    // any termination or correctness decision.
+    result.stats.presolve_ms = presolve_ms;
+    result.stats.presolve_orig_rows = presolve_orig_rows;
+    result.stats.presolve_orig_cols = presolve_orig_cols;
+    result.stats.presolve_orig_nnz = presolve_orig_nnz;
+    result.stats.presolve_reduced_rows = presolve_reduced_rows;
+    result.stats.presolve_reduced_cols = presolve_reduced_cols;
+    result.stats.presolve_reduced_nnz = presolve_reduced_nnz;
+    result.stats.presolve_used = presolve_used;
     return result;
   };
 
   // Direct solve with the standard Ruiz-escalation robustness ladder.
+  // `speculative` marks a solve whose failure is cheap to abandon (the
+  // presolve-reduced model): an early structural failure then skips the
+  // augmented escalation ladder entirely.
   auto direct_solve = [this, &remaining_time, has_deadline](
                           const LPModel& p,
                           const Eigen::VectorXd& start,
                           AugmentedBackendPolicy backend_policy,
-                          IPMNewtonFormulation formulation) -> SolveResult {
+                          IPMNewtonFormulation formulation,
+                          double publication_tol_scale = 1.0,
+                          bool speculative = false) -> SolveResult {
     auto run_variant = [&](int rounds, IPMNewtonFormulation form,
                            const Eigen::VectorXd* override_start = nullptr) {
       const double budget = has_deadline ? remaining_time() : 0.0;
@@ -235,7 +262,8 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
         return timed_out;
       }
       return solve_lp_impl(p, override_start ? *override_start : start,
-                           rounds, budget, backend_policy, form);
+                           rounds, budget, backend_policy, form,
+                           publication_tol_scale);
     };
     auto merit = [](const SolveResult& result) {
       if (result.stats.success) return 0.0;
@@ -287,6 +315,24 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
                         normal_stalled;
       keep_better(res, std::move(raw_normal));
     }
+    // Speculative-solve guard (native_presolve_lp_2026-08-18.md §6, P1
+    // second mismatch round): a first-formulation failure within the first
+    // few iterations is a cold-start structural failure — the factorization
+    // never produced a usable direction.  The augmented escalation retries
+    // the same cold start on the same structure and, observed on the
+    // fffff800 reduced model, grinds to max_iter three times (~5.4s, pinned
+    // at the same blocking components) without recovering, while the
+    // original model's own full ladder solves in ~0.1s.  A speculative
+    // model has no intrinsic value, so bail out and let the caller fall
+    // back to the original model immediately.  The threshold 8 is far
+    // below any observed successful trajectory (NETLIB IPM convergences
+    // are 20-80+ iterations) and far above the 0-2 iterations these
+    // structural rejections take.
+    constexpr int kSpeculativeEarlyFailureIters = 8;
+    if (speculative && !res.stats.success &&
+        res.stats.iterations <= kSpeculativeEarlyFailureIters) {
+      return res;
+    }
     if (!res.stats.success && formulation == IPMNewtonFormulation::Auto &&
         !explicit_normal_env && normal_rejected &&
         (!has_deadline || remaining_time() > 0.0)) {
@@ -334,19 +380,125 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
     return res;
   };
 
+  // Native LP presolve, phase P1 (native_presolve_lp_2026-08-18.md §4):
+  // zero-fill rules (A&A §2.1-2.3) with a postsolve stack.  opt_.presolve is
+  // the programmatic master switch (§3.1); the MIPSOLVERS_NATIVE_PRESOLVE*
+  // env vars overlay it.  A reduced model is solved with the same
+  // three-level fallback semantics as the HiGHS bridge below (§3.1): reduced
+  // direct_solve -> postsolve -> original-model residual audit -> direct
+  // fallback on any failure, so a wrong or infeasible answer is never
+  // published (§2.3 P-精度).
+  bool reduced_kernel_failed = false;
+  bool reduced_postsolve_failed = false;
+  {
+    LpPresolveConfig ncfg;
+    ncfg.enabled = opt_.presolve;  // P1: programmatic switch live (§3.1)
+    ncfg = lp_presolve_config_from_env(ncfg);
+    if (ncfg.enabled && !has_warm_start) {
+      const LpPresolveResult nps = lp_presolve_run(prob, ncfg);
+      presolve_used = 1;
+      presolve_ms = nps.presolve_ms;
+      presolve_orig_rows = nps.orig_rows;
+      presolve_orig_cols = nps.orig_cols;
+      presolve_orig_nnz = nps.orig_nnz;
+      presolve_reduced_rows = nps.reduced_rows;
+      presolve_reduced_cols = nps.reduced_cols;
+      presolve_reduced_nnz = nps.reduced_nnz;
+      if (nps.infeasible) {
+        SolveResult r;
+        r.stats.solver_name = name();
+        r.stats.success = false;
+        r.stats.status = "Infeasible (presolve)";
+        return finish(std::move(r));
+      }
+      if (nps.use_reduced) {
+        Eigen::VectorXd x_reduced;
+        int iters = 0;
+        bool reduced_ok = true;
+        if (nps.reduced.c.size() > 0) {
+          static const Eigen::VectorXd empty;
+          // The reduced solve must publish strictly inside the wiring's
+          // original-model audit envelope.  That envelope is relative to the
+          // ORIGINAL side scale, while the kernel's publication audit is
+          // relative to the REDUCED side scale — and fixed-column
+          // substitution can inflate reduced row sides far beyond any
+          // original side, loosening the reduced audit in original-row
+          // absolute terms (native_presolve_lp_2026-08-18.md §6 P1 mismatch
+          // note).  The policy function cancels exactly that inflation
+          // (scale <= orig/reduced with a 0.9 margin); it tightens only as
+          // much as the scale ratio requires — an unconditional extra decade
+          // proved unreachable on zero-inflation models and sent the
+          // escalation ladder into multi-second augmented grinds (§6, P1
+          // second mismatch round).
+          const double pub_scale =
+              lp_presolve_publication_tol_scale(prob, nps.reduced);
+          if (std::getenv("MIPSOLVERS_NATIVE_PRESOLVE_VERBOSE")) {
+            std::fprintf(stderr,
+                         "[NATIVE-PRESOLVE] pub_scale=%.6g\n",
+                         pub_scale);
+          }
+          SolveResult rr = direct_solve(
+              nps.reduced, empty,
+              AugmentedBackendPolicy::StructurePreserving,
+              opt_.newton_formulation, pub_scale, /*speculative=*/true);
+          reduced_ok = rr.stats.success;
+          x_reduced = std::move(rr.x);
+          iters = rr.stats.iterations;
+        }  // else: reduced-to-empty -> postsolve an empty primal.
+        if (reduced_ok) {
+          const Eigen::VectorXd x_orig = postsolve_primal(nps, x_reduced);
+          const double audit_tol =
+              std::max(1e-10, 10.0 * std::max(0.0, opt_.tol_primal));
+          if (x_orig.size() == prob.c.size() &&
+              lp_solution_residual_acceptable(prob, x_orig, audit_tol)) {
+            SolveResult r;
+            r.x = std::move(x_orig);
+            r.stats.solver_name = name();
+            r.stats.success = true;
+            r.stats.status = "Optimal";
+            r.stats.objective = prob.c.dot(r.x);
+            r.stats.iterations = iters;
+            return finish(std::move(r));
+          }
+        }
+        // Postsolve/audit/reduced-solve failure: fall through to a direct
+        // solve via the shared fallback branches below.
+        reduced_kernel_failed = !reduced_ok;
+        reduced_postsolve_failed = reduced_ok;
+      }
+      // nps.unbounded_candidate: presolve does not conclude unboundedness
+      // (§4 P1); control falls through to the authoritative direct solve.
+    }
+  }
+
   // Adaptive HiGHS presolve (opt-in via IPMLPOptions::use_highs_presolve or the
   // MIPSOLVERS_PRESOLVE env var).  Solve the reduced LP with the IPM, then
   // postsolve the primal to original space.  Only on cold solves (a warm start
   // refers to the original variable space).  Any failure falls through to a
   // direct solve, so a wrong or infeasible answer is never published.
-  bool reduced_kernel_failed = false;
-  bool reduced_postsolve_failed = false;
   {
     HighsLpPresolveConfig pcfg;
     pcfg.enabled = opt_.use_highs_presolve;
     pcfg = highs_lp_presolve_config_from_env(pcfg);
     if (pcfg.enabled && !has_warm_start) {
       HighsLpPresolveResult ps = highs_presolve_lp(prob, pcfg);
+      if (ps.attempted && presolve_used == 0) {
+        // The bridge previously kept its presolve cost invisible (§3.2);
+        // publish it through the same telemetry as the native arm.  When the
+        // native arm already ran (presolve_used != 0) its numbers win: the
+        // bridge runs after it as a second chance, and letting the bridge
+        // overwrite the fields reported the bridge's own mapping-unavailable
+        // "rows -> 0" as if the native pass had reduced the model to nothing
+        // (§6, P1 second mismatch round — fffff800 telemetry artifact).
+        presolve_used = 2;
+        presolve_ms = ps.presolve_ms;
+        presolve_orig_rows = ps.orig_rows;
+        presolve_orig_cols = ps.orig_cols;
+        presolve_orig_nnz = ps.orig_nnz;
+        presolve_reduced_rows = ps.reduced_rows;
+        presolve_reduced_cols = ps.reduced_cols;
+        presolve_reduced_nnz = ps.reduced_nnz;
+      }
       if (ps.infeasible) {
         SolveResult r;
         r.stats.solver_name = name();
@@ -395,12 +547,14 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
   if (reduced_kernel_failed) {
     // AUDIT-NAV: reduced KKT 数值失败后必须从原始初始点重启另一条完整 barrier
     // 轨迹；禁止按模型维数路由，也禁止在已分叉的轨迹中途替换线性后端。
+    presolve_used = 3;  // presolve ran, but the solve fell back to direct.
     return finish(direct_solve(
         prob, x0, AugmentedBackendPolicy::PivotingPortfolio,
         opt_.newton_formulation));
   }
 
   if (reduced_postsolve_failed) {
+    presolve_used = 3;  // presolve ran, but the solve fell back to direct.
     SolveResult pivoting = direct_solve(
         prob, x0, AugmentedBackendPolicy::PivotingPortfolio,
         opt_.newton_formulation);
@@ -447,7 +601,8 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
                                                AugmentedBackendPolicy
                                                    backend_policy,
                                                IPMNewtonFormulation
-                                                   formulation) const {
+                                                   formulation,
+                                               double publication_tol_scale) const {
   const bool has_warm_start = (x0.size() == prob.c.size());
   const bool ipm_verbose_env = (std::getenv("MIPSOLVERS_IPM_VERBOSE") != nullptr);
   SolveResult out;
@@ -1035,10 +1190,14 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
               append_probe(nn + A_i[p]);
               ++probe_pos;
             }
-            for (int p = Aeq_o[j]; p < Aeq_o[j + 1]; ++p) {
-              append_probe(nn + mi + Aeq_i[p]);
-              ++probe_pos;
-            }
+            // Aeq_o/Aeq_i are null when me == 0 (e.g. presolve-reduced
+            // models, which carry all rows in A); guard like every other
+            // Aeq access in this file.
+            if (me > 0)
+              for (int p = Aeq_o[j]; p < Aeq_o[j + 1]; ++p) {
+                append_probe(nn + mi + Aeq_i[p]);
+                ++probe_pos;
+              }
           } else {
             append_probe(nn + (j - n_orig));
             ++probe_pos;
@@ -1091,14 +1250,16 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
             int row2 = -1;
             if (j < n_orig) {
               const int a_degree = A_o[j + 1] - A_o[j];
-              const int eq_degree = Aeq_o[j + 1] - Aeq_o[j];
+              // Null when me == 0; see the augmented probe above.
+              const int eq_degree = me > 0 ? Aeq_o[j + 1] - Aeq_o[j] : 0;
               degree = a_degree + eq_degree;
               if (degree == 2) {
                 int seen = 0;
                 for (int p = A_o[j]; p < A_o[j + 1]; ++p)
                   (seen++ == 0 ? row1 : row2) = A_i[p];
-                for (int p = Aeq_o[j]; p < Aeq_o[j + 1]; ++p)
-                  (seen++ == 0 ? row1 : row2) = mi + Aeq_i[p];
+                if (me > 0)
+                  for (int p = Aeq_o[j]; p < Aeq_o[j + 1]; ++p)
+                    (seen++ == 0 ? row1 : row2) = mi + Aeq_i[p];
               }
             }
             const bool condensable =
@@ -1124,9 +1285,10 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
               for (int p = A_o[j]; p < A_o[j + 1]; ++p)
                 hybrid_triplets.emplace_back(hybrid_primal_dim + A_i[p],
                                              reduced, 1.0);
-              for (int p = Aeq_o[j]; p < Aeq_o[j + 1]; ++p)
-                hybrid_triplets.emplace_back(
-                    hybrid_primal_dim + mi + Aeq_i[p], reduced, 1.0);
+              if (me > 0)
+                for (int p = Aeq_o[j]; p < Aeq_o[j + 1]; ++p)
+                  hybrid_triplets.emplace_back(
+                      hybrid_primal_dim + mi + Aeq_i[p], reduced, 1.0);
             } else {
               hybrid_triplets.emplace_back(
                   hybrid_primal_dim + (j - n_orig), reduced, 1.0);
@@ -1358,6 +1520,10 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
   };
 
   // Initial point from least-squares (cold) or warm-start (from x0)
+  const double t_coldstart_begin_ms =
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - t0)
+          .count();
   {
     if (has_warm_start) {
       // Warm-start: use provided x0 as initial primal point.
@@ -1876,8 +2042,10 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
             };
             for (int p = A_o[j]; p < A_o[j + 1]; ++p)
               append_incidence(A_i[p], -A_v[p]);
-            for (int p = Aeq_o[j]; p < Aeq_o[j + 1]; ++p)
-              append_incidence(mi + Aeq_i[p], -Aeq_v[p]);
+            // Null when me == 0; see the augmented probe above.
+            if (me > 0)
+              for (int p = Aeq_o[j]; p < Aeq_o[j + 1]; ++p)
+                append_incidence(mi + Aeq_i[p], -Aeq_v[p]);
           }
         }
         const bool has_barrier_curvature = flb[j] != 0.0 || fub[j] != 0.0;
@@ -2102,6 +2270,16 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
           ? std::sqrt(std::numeric_limits<double>::epsilon())
           : std::numeric_limits<double>::epsilon();
   double reg = reg_floor;
+  // Direction-overflow escalation (IP-PMM budget raise): a factorization that
+  // "succeeds" yet yields a non-finite direction is the same ill-conditioning
+  // the dynamic factorization retry below handles — it must raise the reg
+  // budget and refactorize instead of aborting the barrier trajectory.  The
+  // boost decays ÷10 per finite iteration back toward 1 (×100 up / ÷10 down
+  // hysteresis against oscillation), restoring the IP-PMM contract that the
+  // regularization vanishes with mu rather than persisting as state.
+  // (docs/archive/lp_tail_elimination_2026-08-18.md §10-11, H5+H6;
+  //  Pougkakiotis–Gondzio 2021, SIAM J. Optim. 31(3) §2-3.)
+  double reg_direction_boost = 1.0;
   const int max_iter = std::max(0, opt_.max_iter);
   const double effective_time_limit =
       time_limit_sec >= 0.0 ? time_limit_sec : opt_.time_limit_sec;
@@ -2511,11 +2689,14 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
   for (double value : b) scaled_rhs_norm = std::max(scaled_rhs_norm, std::abs(value));
   for (double value : c) scaled_cost_norm = std::max(scaled_cost_norm, std::abs(value));
   const double publication_primal_tol =
-      std::max(1e-10, 10.0 * std::max(0.0, opt_.tol_primal));
+      std::max(1e-10, 10.0 * std::max(0.0, opt_.tol_primal)) *
+      publication_tol_scale;
   const double publication_dual_tol =
-      std::max(1e-10, 10.0 * std::max(0.0, opt_.tol_dual));
+      std::max(1e-10, 10.0 * std::max(0.0, opt_.tol_dual)) *
+      publication_tol_scale;
   const double publication_gap_tol =
-      std::max(1e-10, 10.0 * std::max(0.0, opt_.tol_gap));
+      std::max(1e-10, 10.0 * std::max(0.0, opt_.tol_gap)) *
+      publication_tol_scale;
   const bool termination_enabled = opt_.tol_primal >= 0.0 &&
                                    opt_.tol_dual >= 0.0 &&
                                    opt_.tol_gap >= 0.0;
@@ -2607,10 +2788,18 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
         std::max(opt_.tol_dual, publication_dual_tol);
     const double candidate_gap_tol =
         std::max(opt_.tol_gap, publication_gap_tol);
+    // The relative gate is a cheap trigger for the authoritative original-LP
+    // audit.  A trigger must never lock out an iterate the audit would pass:
+    // on FP64-noise-floor instances (greenbea) the scaled pf can stall just
+    // above 1x tol in a limit cycle while the original-model audit is the
+    // only correct judge.  Open at 100x and let the audit decide; the audit
+    // does not mutate the iterate, so trajectories are unchanged and the only
+    // cost is O(nnz) residual evaluations near convergence.
+    // (docs/archive/lp_tail_elimination_2026-08-18.md §12, H7.)
     const bool relative_candidate =
-        pfeas / (1.0 + scaled_rhs_norm) < candidate_primal_tol &&
-        dfeas / (1.0 + scaled_cost_norm) < candidate_dual_tol &&
-        relative_mu < candidate_gap_tol;
+        pfeas / (1.0 + scaled_rhs_norm) < 100.0 * candidate_primal_tol &&
+        dfeas / (1.0 + scaled_cost_norm) < 100.0 * candidate_dual_tol &&
+        relative_mu < 100.0 * candidate_gap_tol;
     const bool absolute_candidate = pfeas < candidate_primal_tol &&
                                     dfeas < candidate_dual_tol &&
                                     mu < candidate_gap_tol;
@@ -2683,6 +2872,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
               ? reg_floor
               : std::clamp(std::min(1e-6 * mu, regularization_budget),
                            reg_floor, 1e-2);
+    if (reg_direction_boost > 1.0) reg *= reg_direction_boost;
     MIPSOLVERS_OMP_PARALLEL_IF(nn > MIPSOLVERS_OMP_THRESHOLD)
     for (int j = 0; j < nn; ++j) {
       if (j < n_orig && is_fixed[j]) {
@@ -3117,9 +3307,37 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
       for (int i = 0; i < m; ++i)
         if (!std::isfinite(dy_d[i])) { step_finite = false; break; }
     if (!step_finite) {
+      // A non-finite direction from a "successful" factorization is the same
+      // ill-conditioning the dynamic factorization retry handles: raise the
+      // regularization budget and refactorize instead of abandoning a
+      // converging barrier trajectory (§10 H5).  The boost is capped at 1e8
+      // (four ×100 steps, matching the factorization retry ladder); the ÷10
+      // decay below recharges the ladder as finite iterations resume.
+      if (reg_direction_boost < 1e8) {
+        reg_direction_boost *= 100.0;
+        if (use_augmented && aug_use_pardiso && aug_cache.solver) {
+          // H8: stabilize the factor itself via PARDISO pivot perturbation.
+          // Unlike diagonal reg this biases only the factorization; the
+          // perturbation error is removed by refinement, so the direction
+          // stays unbiased and the pf floor is not raised (§13).
+          aug_cache.solver->set_pivot_perturbation_exponent(
+              reg_direction_boost >= 1e4 ? 8 : 10);
+        }
+        if (opt_.verbose || ipm_verbose_env) {
+          fprintf(stderr,
+                  "IPM-LP non-finite direction iter=%d; reg boost x%.0e\n",
+                  iter, reg_direction_boost);
+        }
+        continue;
+      }
       out.stats.status = "NumericalError";
       out.stats.iterations = iter;
       break;
+    }
+    // Finite iteration: relax the escalation toward the unboosted budget so
+    // the regularization can vanish with mu again (§11 H6).
+    if (reg_direction_boost > 1.0) {
+      reg_direction_boost = std::max(1.0, reg_direction_boost / 10.0);
     }
 
     // ---- Update (SIMD-accelerated) ----
@@ -3148,6 +3366,8 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
            use_banded ? "BANDED" : (use_dense ? "DENSE" : (use_augmented ? "AUGMENTED" : "SPARSE")));
     printf("    init=%.3f resid=%.3f setup=%.3f pred=%.3f corr=%.3f update=%.3f\n",
            t_init_overhead, t_resid, t_setup, t_pred, t_corr, t_update);
+    printf("    init_sub: pre_coldstart=%.3f coldstart_and_symbolic=%.3f\n",
+           t_coldstart_begin_ms, t_init_overhead - t_coldstart_begin_ms);
     printf("    setup_sub: fill=%.3f factor=%.3f\n", t_fill, t_factor);
 #if MIPSOLVERS_HAVE_CHOLMOD
     if (cholmod_ok) {

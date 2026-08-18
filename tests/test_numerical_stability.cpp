@@ -115,6 +115,9 @@ TEST_CASE("Sparse normal equations use the Ruiz-scaled operator",
   IPMLPOptions opt;
   opt.ruiz_rounds = 10;
   opt.max_iter = 200;
+  // This test pins the Ruiz-scaled normal-equations kernel; native presolve
+  // (P1, default-on) would bypass that kernel, so it is disabled here.
+  opt.presolve = false;
   opt.newton_formulation = IPMNewtonFormulation::ForceNormal;
   const SolveResult result = NativeIPMLPAdapter(opt).solve_lp(lp);
 
@@ -413,6 +416,9 @@ TEST_CASE("Fresh IPM honors iteration limits above 200 and reports residuals",
   opt.max_iter = 205;
   opt.ruiz_rounds = 0;
   opt.max_correctors = 0;
+  // Kernel iteration-limit test; native presolve (P1) would solve this
+  // row-less model to empty before the kernel runs.
+  opt.presolve = false;
   // Negative tolerances intentionally make convergence impossible while the
   // zero KKT system keeps every iteration finite and deterministic.
   opt.tol_primal = -1.0;
@@ -443,6 +449,9 @@ TEST_CASE("Fresh IPM scaling retries share one wall-clock limit",
   opt.time_limit_sec = 0.05;
   opt.ruiz_rounds = 10;
   opt.max_correctors = 0;
+  // Kernel wall-clock-limit test; native presolve (P1) would solve this
+  // row-less model to empty before the kernel runs.
+  opt.presolve = false;
   opt.tol_primal = -1.0;
   opt.tol_dual = -1.0;
   opt.tol_gap = -1.0;

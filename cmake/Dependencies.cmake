@@ -145,6 +145,45 @@ if(NOT MIPSOLVERS_FORCE_VENDORED_BLAS)
   endif()
 endif()
 
+# Windows: without a system BLAS, fall back to the staged oneMKL static bundle
+# (mkl_intel_lp64 + threading layer + mkl_core provide both BLAS and LAPACK
+# symbols). The threading layer follows MIPSOLVERS_MKL_THREADING: INTEL links
+# mkl_intel_thread plus the Intel OpenMP runtime (libiomp5md), SEQUENTIAL links
+# mkl_sequential. Without this the vendored CHOLMOD degrades to NSUPERNODAL,
+# which cost the Native IPM LP path ~3x on NETLIB (see
+# docs/archive/lp_tail_elimination_2026-08-18.md, hypothesis H1; the threading
+# switch is hypothesis H4 in the same document).
+if(WIN32 AND NOT MIPSOLVERS_BLAS_LIBRARIES AND
+   NOT MIPSOLVERS_FORCE_VENDORED_BLAS AND
+   MIPSOLVERS_MKL_ROOT AND
+   EXISTS "${MIPSOLVERS_MKL_ROOT}/lib/mkl_intel_lp64.lib" AND
+   EXISTS "${MIPSOLVERS_MKL_ROOT}/lib/mkl_core.lib")
+  if(MIPSOLVERS_MKL_THREADING STREQUAL "INTEL")
+    set(_MIPSOLVERS_MKL_BLAS_THREAD_LIB "mkl_intel_thread")
+  else()
+    set(_MIPSOLVERS_MKL_BLAS_THREAD_LIB "mkl_sequential")
+  endif()
+  if(EXISTS "${MIPSOLVERS_MKL_ROOT}/lib/${_MIPSOLVERS_MKL_BLAS_THREAD_LIB}.lib")
+    set(MIPSOLVERS_BLAS_LIBRARIES
+      "${MIPSOLVERS_MKL_ROOT}/lib/mkl_intel_lp64.lib"
+      "${MIPSOLVERS_MKL_ROOT}/lib/${_MIPSOLVERS_MKL_BLAS_THREAD_LIB}.lib"
+      "${MIPSOLVERS_MKL_ROOT}/lib/mkl_core.lib")
+    if(MIPSOLVERS_MKL_THREADING STREQUAL "INTEL")
+      if(NOT EXISTS "${MIPSOLVERS_MKL_ROOT}/lib/libiomp5md.lib")
+        message(FATAL_ERROR
+          "MIPSOLVERS_MKL_THREADING=INTEL requires libiomp5md.lib in the "
+          "staged oneMKL bundle. Re-run third_party/stage_onemkl.ps1 with "
+          "-Threading intel or both.")
+      endif()
+      list(APPEND MIPSOLVERS_BLAS_LIBRARIES
+        "${MIPSOLVERS_MKL_ROOT}/lib/libiomp5md.lib")
+    endif()
+    set(_MIPSOLVERS_BLAS_SOURCE
+      "staged oneMKL ${_MIPSOLVERS_MKL_BLAS_THREAD_LIB} (${MIPSOLVERS_MKL_ROOT})")
+  endif()
+  unset(_MIPSOLVERS_MKL_BLAS_THREAD_LIB)
+endif()
+
 if(WIN32 AND NOT MIPSOLVERS_BLAS_LIBRARIES AND
    NOT MIPSOLVERS_FORCE_VENDORED_BLAS)
   message(STATUS

@@ -69,6 +69,21 @@ else()
 endif()
 include(cmake/Dependencies.cmake)
 
+# Intel threading layer runtime: libiomp5md.dll must sit next to the test and
+# benchmark executables (their RUNTIME_OUTPUT_DIRECTORY is tests/<config> in
+# the source tree). Copy it at configure time; the DLL content is static.
+if(WIN32 AND MIPSOLVERS_MKL_RUNTIME_DLLS)
+  foreach(_mipsolvers_runtime_cfg IN ITEMS Debug Release RelWithDebInfo MinSizeRel)
+    set(_mipsolvers_runtime_dir
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/${_mipsolvers_runtime_cfg}")
+    file(MAKE_DIRECTORY "${_mipsolvers_runtime_dir}")
+    file(COPY ${MIPSOLVERS_MKL_RUNTIME_DLLS}
+      DESTINATION "${_mipsolvers_runtime_dir}")
+  endforeach()
+  unset(_mipsolvers_runtime_cfg)
+  unset(_mipsolvers_runtime_dir)
+endif()
+
 # ── Third-party-only mode: install the vendored deps and stop ────────────────
 # No mipsolvers library, tests, tools, benchmarks, SCUC apps, bundled archive
 # or python bindings are defined in this mode; `cmake --install` produces the
@@ -87,6 +102,7 @@ add_library(mipsolvers STATIC
   src/engine/strategy/presolve_manager.cpp
   src/engine/strategy/postsolve_manager.cpp
   src/engine/strategy/papilo_presolve.cpp
+  src/engine/presolve/lp_presolve.cpp
   src/engine/solver/solver_adapter.cpp
   src/engine/solver/adapter_registry.cpp
   src/engine/solver/native/native_adapters.cpp
@@ -886,6 +902,7 @@ if(MIPSOLVERS_BUILD_TESTS)
   mipsolvers_add_test(test_problem_validation  TIER unit)
   mipsolvers_add_test(test_adapter_registry    TIER unit)
   mipsolvers_add_test(test_presolve            TIER unit)
+  mipsolvers_add_test(test_lp_presolve         TIER unit)
   mipsolvers_add_test(test_l2o_trace           TIER unit)
   mipsolvers_add_test(test_numerical_stability TIER unit)
   mipsolvers_add_test(test_netlib_regression   TIER integration)

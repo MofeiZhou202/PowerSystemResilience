@@ -76,6 +76,20 @@ struct SolveStats {
   /// only by the native dual-simplex kernel; `objective` on an interrupted
   /// result remains the (uncertified) working-cost value.
   double certified_dual_bound{std::numeric_limits<double>::quiet_NaN()};
+
+  // LP presolve telemetry (design: docs/archive/native_presolve_lp_2026-08-18.md
+  // §3.2).  Pure telemetry: these fields never participate in termination or
+  // correctness decisions.  A dimension of -1 means "presolve did not run".
+  // presolve_used: 0 = none, 1 = native, 2 = highs bridge, 3 = fallback_direct
+  // (a presolve ran but the solve fell back to the original-model direct path).
+  double presolve_ms{0.0};
+  long presolve_orig_rows{-1};
+  long presolve_orig_cols{-1};
+  long presolve_orig_nnz{-1};
+  long presolve_reduced_rows{-1};
+  long presolve_reduced_cols{-1};
+  long presolve_reduced_nnz{-1};
+  int presolve_used{0};
 };
 
 struct SolveResult {

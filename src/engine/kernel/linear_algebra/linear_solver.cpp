@@ -350,6 +350,10 @@ int MKLPardisoSolver::perturbed_pivots() const {
                : -1;
 }
 
+void MKLPardisoSolver::set_pivot_perturbation_exponent(int exponent) {
+  if (impl_) impl_->solver.pardisoParameterArray()[9] = exponent;
+}
+
 std::int64_t MKLPardisoSolver::factor_nonzeros() const {
   return impl_ ? static_cast<std::int64_t>(
                      impl_->solver.pardisoParameterArray()[17])
@@ -422,6 +426,10 @@ int MKLPardisoLLTSolver::perturbed_pivots() const {
                : -1;
 }
 
+void MKLPardisoLLTSolver::set_pivot_perturbation_exponent(int exponent) {
+  if (impl_) impl_->solver.pardisoParameterArray()[9] = exponent;
+}
+
 std::int64_t MKLPardisoLLTSolver::factor_nonzeros() const {
   return impl_ ? static_cast<std::int64_t>(
                      impl_->solver.pardisoParameterArray()[17])
@@ -492,6 +500,10 @@ bool MKLPardisoLDLTSolver::solve_many(const Eigen::MatrixXd& rhs,
 int MKLPardisoLDLTSolver::perturbed_pivots() const {
   return impl_ ? static_cast<int>(impl_->solver.pardisoParameterArray()[13])
                : -1;
+}
+
+void MKLPardisoLDLTSolver::set_pivot_perturbation_exponent(int exponent) {
+  if (impl_) impl_->solver.pardisoParameterArray()[9] = exponent;
 }
 
 std::int64_t MKLPardisoLDLTSolver::factor_nonzeros() const {
@@ -737,6 +749,12 @@ int MKLPardisoAdaptiveSolver::perturbed_pivots() const {
   if (impl_->selected == Impl::Backend::LU)
     return impl_->lu.perturbed_pivots();
   return -1;
+}
+
+void MKLPardisoAdaptiveSolver::set_pivot_perturbation_exponent(int exponent) {
+  if (!impl_) return;
+  impl_->lu.set_pivot_perturbation_exponent(exponent);
+  impl_->ldlt.set_pivot_perturbation_exponent(exponent);
 }
 
 std::int64_t MKLPardisoAdaptiveSolver::factor_nonzeros() const {

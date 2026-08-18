@@ -77,6 +77,17 @@ SolverEngine -> StrategyDispatcher -> PresolveManager
   或 Gurobi。
 - `IPMLPOptions::centrality_step_control=false` 只为复现旧的固定步长
   A/B 保留，不建议生产使用。
+- `IPMLPOptions::presolve`（默认 `true`）自 2026-08 P1 阶段起是活的：
+  原生 LP presolve（Andersen & Andersen 1995 §2.1-2.3 零填充规则：空行/
+  空列/固定列/冗余行/singleton 行）在冷启动求解前运行，reduced 模型
+  求解后经 postsolve + 原模型残差审计发布，任何一步失败都回退原模型
+  direct 求解，因此不会发布错误或更松的解。环境变量
+  `MIPSOLVERS_NATIVE_PRESOLVE=0` 强制关闭（其他任何值强制开启），
+  `MIPSOLVERS_NATIVE_PRESOLVE_VERBOSE` 打印 `[NATIVE-PRESOLVE]` 汇总，
+  `MIPSOLVERS_NATIVE_PRESOLVE_TIME_BOX` 改内部时间盒（默认 2s，超盒
+  返回未缩减模型）。Auto 选择器（§3）的 IPM 臂本阶段不走 presolve；
+  设计与分阶段验收见
+  `docs/archive/native_presolve_lp_2026-08-18.md`。
 
 ### 2.2 MILP
 

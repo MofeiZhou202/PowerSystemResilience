@@ -193,11 +193,16 @@ class NativeIPMLPAdapter final : public SolverAdapter {
   /// Core solve with an explicit Ruiz round count.  The public entry points
   /// retry with scaling disabled when a scaled solve fails to converge
   /// (scaling helps most problems but stalls some degenerate ones).
+  /// publication_tol_scale tightens the original-model publication audit
+  /// below the user's tolerance contract; the native presolve wiring uses it
+  /// so a reduced-model solution publishes strictly inside the outer
+  /// original-model audit envelope (native_presolve_lp_2026-08-18.md §6 P1).
   SolveResult solve_lp_impl(const LPModel& prob, const Eigen::VectorXd& x0,
                             int ruiz_rounds,
                             double time_limit_sec,
                             AugmentedBackendPolicy backend_policy,
-                            IPMNewtonFormulation formulation) const;
+                            IPMNewtonFormulation formulation,
+                            double publication_tol_scale = 1.0) const;
 
   IPMLPOptions opt_;
   mutable std::unique_ptr<AccelSparseCache> accel_cache_;

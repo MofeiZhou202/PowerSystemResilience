@@ -70,6 +70,34 @@ ctest --test-dir build/windows-msvc-release -C Release --output-on-failure -j 2
 
 结果：**18/18 全部通过**（unit 13 + integration 3 + benchmark 2），标签耗时 benchmark 0.39 s、integration 1.13 s、unit 1.37 s（processor time）。
 
+同日 NETLIB 90 性能工作（推导记录见
+`docs/archive/lp_tail_elimination_2026-08-18.md`）：修复了 Windows 构建中
+CHOLMOD 因缺少 BLAS 降级为 simplicial（`NSUPERNODAL`）的问题——CMake 现在
+在无系统 BLAS 时回落到 `third_party/oneapi-mkl` 的静态 MKL（H1），
+supernodal 内核恢复。
+
+随后完成线程化升级（H4，用户批准的非对称硬件利用）：MKL 包重 stage 为
+`mkl_intel_thread` + `libiomp5md`（`third_party/stage_onemkl.ps1 -Threading
+both`），`MIPSOLVERS_MKL_THREADING=INTEL` 重 configure，BLAS 回落块跟随
+线程层，OpenMP 运行时 DLL 在 configure 时自动复制到 `tests/<config>/`。
+实测要点：dfl001 分解段 6.18s→1.64s（16 线程 3.8x），总时间 10.25s→2.66s；
+`MKL_CBWR=AUTO/AVX2` 会使 PARDISO 求解段劣化 4-5 倍，**不得启用**——
+线程化下的复现性依赖固定线程数（迭代数逐位一致，目标值 run-to-run 相对差
+~4e-13）。同日还修复了增广路径的鲁棒性缺陷（H5-H7）："分解成功但方向
+溢出"不再直接中止，而是按 IP-PMM 契约升级正则化预算并重分解
+（×100 升级 / ÷10 衰减滞后环），收敛候选门放宽至 100x 并由原模型审计
+权威裁决。
+
+Native IPM direct 由 89/90 success（greenbea 超时）恢复
+为 **90/90 success + 90/90 accurate**（h7 轮最终口径，ctest 18/18）。
+性能演进：H1 后全量总时间 31.44s → 24.48s；H4 线程化后（h7 轮、机器
+凉态）Native-IPM 15.63s vs 同轮 HiGHS-ipm 8.08s；配对几何均值 vs
+HiGHS-ipm 为 Native-Auto 1.354x / Native IPM 1.275x。
+残余长尾（dfl001 1.5x、maros-r7 3.8x、greenbea ~20x，均对同轮
+HiGHS-ipm）的根因与后续方向记录在该推导文档中；greenbea 与 maros-r7
+的 1.2x 口径差距来自 HiGHS 的 presolve 级模型缩减，direct 契约下
+不可达，达成前提是原生 presolve 项目（用户决策项）。
+
 历史对照：2026-08-06 的记录为 16/18，当时两个失败项为：
 
 1. `test_milp_solver`：求解器结果与用例内部穷举 oracle 一致（均为 `-10`），但断言硬编码为 `-6`，属测试期望与测试数据不一致。

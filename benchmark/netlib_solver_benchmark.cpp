@@ -122,6 +122,16 @@ struct RunResult {
   double relative_dual_residual{std::numeric_limits<double>::quiet_NaN()};
   double relative_gap{std::numeric_limits<double>::quiet_NaN()};
   double dual_objective{std::numeric_limits<double>::quiet_NaN()};
+  // LP presolve telemetry (SolveStats; design §3.2).  -1 = presolve did not
+  // run; presolve_used: 0 none, 1 native, 2 highs bridge, 3 fallback direct.
+  double presolve_ms{0.0};
+  long presolve_orig_rows{-1};
+  long presolve_orig_cols{-1};
+  long presolve_orig_nnz{-1};
+  long presolve_reduced_rows{-1};
+  long presolve_reduced_cols{-1};
+  long presolve_reduced_nnz{-1};
+  int presolve_used{0};
   std::string status;
   Eigen::VectorXd x;
 };
@@ -675,6 +685,11 @@ RunResult run_adapter(const CaseInfo& kase, const std::string& solver,
     eng::IPMLPOptions opt;
     opt.max_iter = std::min(cfg.max_iterations, 2000);
     opt.time_limit_sec = cfg.time_limit_sec;
+    // P1: native-ipm opts into the native presolve explicitly
+    // (native_presolve_lp_2026-08-18.md §4); native-ipm-direct stays
+    // presolve-free as the h8-comparable control arm. Env
+    // MIPSOLVERS_NATIVE_PRESOLVE=0 force-disables per run.
+    opt.presolve = solver != "native-ipm-direct";
     opt.use_highs_presolve = solver != "native-ipm-direct";
     opt.centrality_step_control = solver != "native-ipm-legacy-step";
     result = eng::NativeIPMLPAdapter(opt).solve_lp(kase.lp);
@@ -682,8 +697,8 @@ RunResult run_adapter(const CaseInfo& kase, const std::string& solver,
       row.solver = "Native-IPM[centrality-step,direct]";
     } else {
       row.solver = opt.centrality_step_control
-                       ? "Native-IPM[centrality-step](+HiGHS-presolve)"
-                       : "Native-IPM[legacy-step](+HiGHS-presolve)";
+                       ? "Native-IPM[centrality-step](+native-presolve)"
+                       : "Native-IPM[legacy-step](+native-presolve)";
     }
   } else if (solver == "native-auto") {
     eng::NativeAutoLPAdapter adapter(cfg.time_limit_sec);
@@ -741,6 +756,14 @@ RunResult run_adapter(const CaseInfo& kase, const std::string& solver,
     row.relative_dual_residual = result.stats.relative_dual_residual;
     row.relative_gap = result.stats.relative_gap;
     row.dual_objective = result.stats.dual_objective;
+    row.presolve_ms = result.stats.presolve_ms;
+    row.presolve_orig_rows = result.stats.presolve_orig_rows;
+    row.presolve_orig_cols = result.stats.presolve_orig_cols;
+    row.presolve_orig_nnz = result.stats.presolve_orig_nnz;
+    row.presolve_reduced_rows = result.stats.presolve_reduced_rows;
+    row.presolve_reduced_cols = result.stats.presolve_reduced_cols;
+    row.presolve_reduced_nnz = result.stats.presolve_reduced_nnz;
+    row.presolve_used = result.stats.presolve_used;
     if (row.dual_pivots > 0) {
       row.native_kernel_ms_per_dual_pivot =
           std::max(0.0, row.native_kernel_ms - row.dse_initialization_ms) /
@@ -989,6 +1012,14 @@ void write_json(const fs::path& path, const Config& cfg,
         {"relative_dual_residual", finite_or_null(r.relative_dual_residual)},
         {"relative_gap", finite_or_null(r.relative_gap)},
         {"dual_objective", finite_or_null(r.dual_objective)},
+        {"presolve_ms", r.presolve_ms},
+        {"presolve_orig_rows", r.presolve_orig_rows},
+        {"presolve_orig_cols", r.presolve_orig_cols},
+        {"presolve_orig_nnz", r.presolve_orig_nnz},
+        {"presolve_reduced_rows", r.presolve_reduced_rows},
+        {"presolve_reduced_cols", r.presolve_reduced_cols},
+        {"presolve_reduced_nnz", r.presolve_reduced_nnz},
+        {"presolve_used", r.presolve_used},
         {"status", r.status}});
   }
   for (const auto& s : summaries) {

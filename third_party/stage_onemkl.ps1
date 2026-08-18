@@ -6,6 +6,10 @@ Stage a relocatable static oneMKL bundle for hermetic Windows builds.
 Copies the complete oneMKL header tree, the LP64/sequential/core static
 libraries, and the controlling license material into third_party/oneapi-mkl.
 The resulting bundle contains no machine-specific absolute paths.
+With -Threading intel or both, the Intel threading layer (mkl_intel_thread)
+and the Intel OpenMP runtime (libiomp5md import library + DLL) are staged as
+well; the DLL is required at runtime by executables linked against
+mkl_intel_thread.
 
 .EXAMPLE
 .\third_party\stage_onemkl.ps1 -SourceRoot $env:MKLROOT -Force
@@ -22,6 +26,9 @@ param(
     [string]$Destination = "",
     [string]$Version = "",
     [string]$LicensePath = "",
+    [string]$CompilerRoot = "",
+    [ValidateSet("sequential", "intel", "both")]
+    [string]$Threading = "sequential",
     [switch]$Force
 )
 
@@ -57,9 +64,14 @@ $LibraryDirs = @(
 )
 $RequiredLibraries = @(
     "mkl_intel_lp64.lib",
-    "mkl_sequential.lib",
     "mkl_core.lib"
 )
+if ($Threading -in @("sequential", "both")) {
+    $RequiredLibraries += "mkl_sequential.lib"
+}
+if ($Threading -in @("intel", "both")) {
+    $RequiredLibraries += "mkl_intel_thread.lib"
+}
 $LibrarySources = @{}
 foreach ($LibraryName in $RequiredLibraries) {
     $ResolvedLibrary = $null
@@ -74,6 +86,45 @@ foreach ($LibraryName in $RequiredLibraries) {
         throw "Required static oneMKL library '$LibraryName' was not found under $SourceRoot."
     }
     $LibrarySources[$LibraryName] = $ResolvedLibrary
+}
+
+$OpenMpRuntime = $null
+if ($Threading -in @("intel", "both")) {
+    # mkl_intel_thread needs the Intel OpenMP runtime: the import library at
+    # link time and the DLL at run time. Both live under the oneAPI compiler
+    # installation, which is a sibling of the MKL installation.
+    if ([string]::IsNullOrWhiteSpace($CompilerRoot)) {
+        $OneApiRoot = Split-Path -Parent (Split-Path -Parent $SourceRoot)
+        $CompilerCandidates = @(
+            $env:INTEL_COMPILER_ROOT,
+            (Join-Path $OneApiRoot "compiler\latest"),
+            "C:\Program Files (x86)\Intel\oneAPI\compiler\latest",
+            "C:\Program Files\Intel\oneAPI\compiler\latest"
+        )
+        $CompilerRoot = $CompilerCandidates |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and
+                (Test-Path -LiteralPath (Join-Path $_ "lib\libiomp5md.lib") -PathType Leaf) } |
+            Select-Object -First 1
+    }
+    if ([string]::IsNullOrWhiteSpace($CompilerRoot)) {
+        throw "Threading '$Threading' requires libiomp5md; no oneAPI compiler installation found. Pass -CompilerRoot explicitly."
+    }
+    $CompilerRoot = (Resolve-Path -LiteralPath $CompilerRoot).Path
+    $OpenMpImportLibrary = Join-Path $CompilerRoot "lib\libiomp5md.lib"
+    $OpenMpDllCandidates = @(
+        (Join-Path $CompilerRoot "bin\libiomp5md.dll"),
+        (Join-Path $CompilerRoot "redist\intel64\compiler\libiomp5md.dll")
+    )
+    $OpenMpDll = $OpenMpDllCandidates |
+        Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+        Select-Object -First 1
+    if (-not $OpenMpDll) {
+        throw "libiomp5md.dll was not found under $CompilerRoot."
+    }
+    $OpenMpRuntime = @{
+        ImportLibrary = $OpenMpImportLibrary
+        Dll = $OpenMpDll
+    }
 }
 
 if ([string]::IsNullOrWhiteSpace($LicensePath)) {
@@ -133,6 +184,14 @@ foreach ($LibraryName in $RequiredLibraries) {
     Copy-Item -LiteralPath $LibrarySources[$LibraryName] `
         -Destination (Join-Path $LibraryDestination $LibraryName) -Force
 }
+if ($OpenMpRuntime) {
+    $BinDestination = Join-Path $Destination "bin"
+    New-Item -ItemType Directory -Path $BinDestination -Force | Out-Null
+    Copy-Item -LiteralPath $OpenMpRuntime.ImportLibrary `
+        -Destination (Join-Path $LibraryDestination "libiomp5md.lib") -Force
+    Copy-Item -LiteralPath $OpenMpRuntime.Dll `
+        -Destination (Join-Path $BinDestination "libiomp5md.dll") -Force
+}
 if (Test-Path -LiteralPath $LicensePath -PathType Container) {
     Copy-Item -Path (Join-Path $LicensePath "*") -Destination $LicenseDestination -Recurse -Force
 } else {
@@ -146,7 +205,7 @@ $ManifestLines = @(
     ('set(MIPSOLVERS_LOCAL_MKL_VERSION "{0}")' -f $Version),
     'set(MIPSOLVERS_LOCAL_MKL_ARCHITECTURE "x64")',
     'set(MIPSOLVERS_LOCAL_MKL_LINKAGE "static")',
-    'set(MIPSOLVERS_LOCAL_MKL_THREADING "sequential")'
+    ('set(MIPSOLVERS_LOCAL_MKL_THREADING "{0}")' -f $Threading)
 )
 [System.IO.File]::WriteAllLines(
     $ManifestPath, $ManifestLines, [System.Text.Encoding]::ASCII)
