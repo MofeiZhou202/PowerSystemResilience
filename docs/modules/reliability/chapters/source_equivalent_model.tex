@@ -129,8 +129,16 @@ $\lambda(ENS_{sw}+ENS_{rep})$ 只有在 \texttt{automatic.ens\_mwh} 恰按该方
 
 \subsection{三阶段结果聚合}
 
-每个故障先对三个阶段的节点切负荷逐点扣除健康态并截为非负，汇总为
-$P_1,P_2,P_3$（kW）。源码逐故障赋值
+每个故障先对三个阶段的节点切负荷逐点扣除健康态并截为非负
+$p^{raw}_{ki}=\max(0,\texttt{shed\_by\_load}^{fault}_{ki}-\texttt{shed\_by\_load}^{healthy}_{ki})$，
+再按阶段总量缺口重标定：令
+$\Delta=\max(0,\texttt{shed\_kw}^{fault}-\texttt{shed\_kw}^{healthy})$，
+\begin{equation}
+ p^{inc}_{ki}=p^{raw}_{ki}\cdot\frac{\Delta}{\sum_j p^{raw}_{kj}}
+ \quad\left(\sum_j p^{raw}_{kj}\le10^{-12}\ \text{时整段置零}\right),
+\end{equation}
+汇总为 $P_1,P_2,P_3$（kW）。依据为
+\srcpath{three\_stage\_reliability.cpp:3445--3462}。源码逐故障赋值
 \begin{align}
  \texttt{ens\_kwh}&=P_1\tau_{iso}+P_2\tau_{sw}+P_3\tau_{rep},\\
  d&=[P_1>10^{-6}]\tau_{iso}+[P_2>10^{-6}]\tau_{sw}

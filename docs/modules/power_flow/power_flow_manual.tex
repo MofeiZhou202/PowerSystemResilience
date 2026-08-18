@@ -89,7 +89,7 @@ LM 信赖域、伪瞬态延拓、NCP 半光滑 Newton、HELM、同伦延拓、Ne
 \smallskip
 \noindent\textbf{修订版 1 说明}：本版对照 2026-07-22 代码库修订，相对初版的主要变化为——
 CPF 求解器重写为默认弧长延拓（可翻越鼻点）；FDPF 与残差求值器注入计算稀疏化并支持
-逐母线 ZIP；LCC 换流站模型整体移除；\fld{PowerFlowOptions} 新增
+逐母线 ZIP；\fld{PowerFlowOptions} 新增
 \fld{enforce\_converter\_physical\_limits} 硬约束选项；\fld{SolverWorkspace} 落地并被
 Newton 求解器复用；求解器工厂层经新增的 \srcpath{solver\_interface.cpp} 完整接线；
 HELM/同伦/Newton--Krylov/CPF 新增专项回归测试。全部受影响行号引用已逐一重新核实。
@@ -217,10 +217,13 @@ CPF & \srcpath{CpfSolver::solve} & 混合 AC/DC & 电压稳定/负荷裕度\\
         实现 \srcpath{build\_power\_flow\_problem} 与六个工厂求解器；
         但生产门面仍直连 thread\_local \srcpath{engine::NewtonSolver}，
         不经过工厂层。
-  \item \textbf{LCC 换流站模型已整体移除}（\srcpath{lcc\_model.cpp/.hpp}、
-        \fld{SolverData::lcc\_converters}、API 结果字段 \fld{lcc\_transfers}），
-        残差、雅可比与 DC 岛参考规划中相应分支一并删除；混合交直流建模仅剩
-        VSC 与 DC/DC 两条路径（见第~6~章）。
+  \item \textbf{LCC 换流站稳态模型已落地}（\srcpath{src/power\_flow/lcc\_model.cpp/.hpp}）：
+        \fld{SolverData::lcc\_converters}（solver\_data.hpp:31）参与统一 Newton
+        残差（jacobian\_builder.cpp:217--235）与雅可比（jacobian\_builder.cpp:451--488），
+        特征控制站锚定 DC 岛电压（dc\_solver.cpp:72--76、
+        newton\_solver.cpp:406--428），求解后经 API 结果字段
+        \fld{lcc\_transfers} 输出完整运行点（hacdcpf.cpp:1525--1576）；
+        混合交直流建模现有 VSC、DC/DC 与 LCC 三条路径（见第~6~章）。
 \end{enumerate}
 
 \newpage

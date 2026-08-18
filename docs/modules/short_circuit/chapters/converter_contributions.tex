@@ -10,7 +10,8 @@
         \begin{equation}
         I_{source}=k\frac{\fld{p\_rated\_mw}}{\sqrt3U_{bus}}.
         \end{equation}
-        当 \fld{p\_rated\_mw}$<10^{-12}$ 时贡献保持零。源到故障点的传递还乘
+        当 \fld{p\_rated\_mw}$\le10^{-6}$ 时视为缺额定（\texttt{...\_missing\_rating}）、
+        贡献保持零（\srcpath{short\_circuit.cpp:1477--1484}）。源到故障点的传递还乘
         $|Z_{k,xfer}|/|Z_k|$ 及两端电流基准换算；
   \item \textbf{AC 构网 VSC}：代码使用电压源阻抗
         \begin{equation}

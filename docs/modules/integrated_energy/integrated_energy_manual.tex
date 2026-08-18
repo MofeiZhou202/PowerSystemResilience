@@ -44,7 +44,8 @@
 氢/燃料以等效 MW/MWh 计、距离 km、碳量 tCO\textsubscript{2}、电价 \$/MWh。所有平衡按
 时间步索引，各能量载体（电/热/氢/燃料/交通/储能）分别守恒；\fld{pcc\_ac\_bus} 仅为
 归因标签，\textbf{不}进入任何交流网络求解，并网点仅有单一聚合进出功率
-$p^{pcc}_t=p^{imp}_t-p^{exp}_t$。
+$p^{pcc}_t=p^{exp}_t-p^{imp}_t$
+（实现：\srcpath{integrated\_energy\_optimizer.cpp:845--849}，export 减 import）。
 
 \subsection{诚实口径}
 求解结果的 \fld{model\_scope} 固定为 \texttt{isolated-campus-multi-carrier-milp}，

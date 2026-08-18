@@ -19,9 +19,13 @@
 覆盖日前市场全链路（报价$\to$SCUC$\to$固定组合 SCED/LMP$\to$LODF N-1 割$\to$AC 认证$\to$结算）、
 实时两结算市场（再调度 + 偏差结算 + 辅助/不平衡）与同步局部最优响应的重复博弈。
 全部结论以源码与既有契约 \srcpath{docs/market\_simulation\_runtime.md} 为准。
-\textbf{诚实口径（AC-only）}：出清刻意只对 AC 网络子集定价
-（\fld{model\_scope}=\texttt{"ac-dc-linear-v1"}，\fld{dc\_network\_modelled}=false），
-公式无法表示的在役资产以 \texttt{UnsupportedMarketAsset} \textbf{显式退回而非静默简化}。
+\textbf{诚实口径（线性化全混合）}：SCUC/SCED 对混合 AC/DC 系统联合出清，
+直流网络以线性化直流电压参与定价、VSC 与 DC/DC 换流器按双向效率建模；
+\fld{model\_scope} 与各 \fld{ValidityFlags} 在运行时按系统组成改写
+（混合为 \texttt{"ac-dc-linear-v1:dc-voltage+bidirectional-converters"}，
+纯 AC 为 \texttt{"ac-only-dc-power-flow"}），
+仅在役的 external\_grid 与 energy\_router 以
+\texttt{UnsupportedMarketAsset} \textbf{显式退回而非静默简化}。
 文档版式与《碳流追踪与碳排放核算技术手册》一致。
 \end{abstract}
 
@@ -41,8 +45,9 @@
 
 \subsection{单位制与索引空间}
 价格 LMP 单位 元/MWh，功率 MW，时段为整数小时索引。\fld{lmp\_per\_mwh} 按 AC 母线顺序，
-\fld{branch\_flow\_mw} 按 AC 支路顺序；\fld{dc\_lmp\_per\_mwh}、\fld{vsc\_ac\_injection\_mw}/
-\fld{vsc\_dc\_injection\_mw} 为诊断性输出（直流网络未参与定价）。机组组合结果
+\fld{branch\_flow\_mw} 按 AC 支路顺序；\fld{dc\_lmp\_per\_mwh} 按 DC 母线顺序，
+取自 DC 母线平衡约束的对偶（参与直流侧定价）；
+\fld{vsc\_ac\_injection\_mw}/\fld{vsc\_dc\_injection\_mw} 为换流器端口注入输出。机组组合结果
 \fld{commitment}（\texttt{UCSchedule}）与逐时段定价 \fld{pricing}（\texttt{PricingPeriod}）
 共享时段索引空间。
 

@@ -133,8 +133,9 @@ EENS、弹性加权 ENS 四维。
 \subsection{参数字典}
 \begin{paramtable}
 \fld{default\_power\_factor} & $\cos\theta$ & — & $0\sim1$ & $0.95$ & 承载力默认功率因数\\
-\fld{single\_transformer\_beta} & $\beta$ & — & $0\sim1$ & $0.80$ & 单变压器可用容量系数\\
-\fld{n1\_loading\_limit} & $\tau_{\max}$ & — & $0\sim1$ & $1.0$ & N-1 负载率上限\\
+\fld{default\_dr\_max\_output\_coeff} & $\tau_{\max}$ & — & $\ge10^{-9}$ & $1.0$ & 分布式电源最大出力系数默认\\
+\fld{single\_transformer\_beta} & $\beta$ & — & $\ge0$ & $0.80$ & 单变压器可用容量系数\\
+\fld{n1\_loading\_limit} & — & — & $\ge0$ & $1.0$ & N-1 负载率上限\\
 \fld{enable\_verification} & — & 布尔 & — & \texttt{false} & 是否启用 §12 引擎校核\\
 \fld{thd\_limit\_pct} & — & \% & — & $5.0$ & 谐波总畸变（THD）限值\\
 \fld{top\_k} & $k$ & — & 整数 & $15$ & 输出前 $k$ 个薄弱环节\\

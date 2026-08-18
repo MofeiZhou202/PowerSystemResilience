@@ -30,9 +30,15 @@ P_{raw}=k_{vdc}(V_{dc}^2-(V_{dc}^{set})^2),\qquad
 P_{ref}=\operatorname{clip}(P_{raw},P_{min},P_{max}).
 \]
 
-`droop_p_min_mw` and `droop_p_max_mw` are preferred; an unordered pair falls
-back to `pmin_mw/pmax_mw`. The saturated derivative is zero outside the open
-interval and `2*k_vdc*Vdc` inside it.
+The `droop_p_min_mw`/`droop_p_max_mw` pair is used whenever either entry is
+nonzero; only an all-zero droop pair falls back to `pmin_mw/pmax_mw`
+(`effective_lower_mw`/`effective_upper_mw`,
+`src/power_flow/vsc_limit_ncp.cpp:90-102`). The clip is applied only when the
+effective upper bound exceeds the lower one; an unordered or zero-width
+effective pair disables clamping and passes `P_ref=P_raw` through unclamped
+(`vsc_limit_command`, `src/power_flow/vsc_limit_ncp.cpp:205-210`). The
+saturated derivative is zero outside the open interval and `2*k_vdc*Vdc`
+inside it.
 
 ### Droop sizing for authored benchmark data
 

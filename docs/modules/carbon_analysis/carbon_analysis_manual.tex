@@ -89,8 +89,11 @@ $P_{ki}/P_i^{\text{in}}$，则母线碳强度 $\rho_i$ 满足比例混合律
 \rho_i = \frac{\sum_{k\in\mathcal{I}(i)} P_{ki}\,\rho_k + \sum_{g\in i} P_{g}\,e_{g}}
               {\sum_{k\in\mathcal{I}(i)} P_{ki} + \sum_{g\in i} P_{g}},
 \end{equation}
-其中 $e_g$ 为机组排放强度。负荷排放 $=\rho_i P_{d,i}$；支路损耗排放按
-\fld{loss\_allocation\_alpha}（$0.5$ 均分，$1$ 送端、$0$ 受端）在两端分摊。
+其中 $e_g$ 为机组排放强度。负荷排放 $=\rho_i P_{d,i}$；支路损耗排放全额
+计入送端节点（即 $C_{es}^{loss}=P_e^{loss}F_{f(e),s}$，
+\srcpath{proportional\_tracing}，carbon\_analysis.cpp:1523--1536），不经
+\fld{loss\_allocation\_alpha} 分摊——该系数仅作用于下节的矩阵法
+（\srcpath{solve\_carbon\_matrix}，carbon\_analysis.cpp:1735--1738）。
 
 \subsection{碳排放流矩阵法}
 在标准碳排放流理论（Kang 等）下，节点碳势向量 $\mathbf{w}$ 满足稀疏线性方程
@@ -105,7 +108,7 @@ $P_{ki}/P_i^{\text{in}}$，则母线碳强度 $\rho_i$ 满足比例混合律
 \section{接口与参数}
 \begin{paramtable}
 \fld{min\_contribution\_mw} & $P_{\min}$ & MW & $0\sim1$ & — & 追踪贡献下限，低于则忽略\\
-\fld{loss\_allocation\_alpha} & $\alpha$ & — & $0\sim1$ & $0.5$ & 损耗排放送/受端分摊系数\\
+\fld{loss\_allocation\_alpha} & $\alpha$ & — & $0\sim1$ & $0.5$ & 损耗排放送/受端分摊系数（仅矩阵法与损耗强度后处理；BFS 追踪恒归送端）\\
 \fld{regularization\_eps} & $\varepsilon$ & — & 小正数 & — & 矩阵正则化项\\
 \fld{max\_matrix\_condition\_estimate} & — & — & — & — & 条件数上限（超限告警）\\
 \fld{verification\_tol} & — & — & 小正数 & — & 平衡校核容差\\

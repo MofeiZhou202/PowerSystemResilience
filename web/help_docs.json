@@ -7,76 +7,487 @@
       "id": "guides",
       "title": "用户指南",
       "entries": [
-        { "title": "文档中心总览", "path": "overview/README.md", "tags": ["导航", "入门"] },
-        { "title": "参数系统", "path": "guides/parameter_system.md", "tags": ["参数", "默认值"], "modules": ["parameterLibrary"] },
-        { "title": "GUI Canvas 运行时", "path": "developer/gui_canvas_runtime.md", "tags": ["GUI", "画布", "工作流"] },
-        { "title": "跨平台构建", "path": "operations/cross_platform_build.md", "tags": ["构建", "部署", "依赖"] }
+        {
+          "title": "文档中心总览",
+          "path": "overview/README.md",
+          "tags": [
+            "导航",
+            "入门"
+          ]
+        },
+        {
+          "title": "参数系统",
+          "path": "guides/parameter_system.zh.md",
+          "tags": [
+            "参数",
+            "默认值"
+          ],
+          "modules": [
+            "parameterLibrary"
+          ]
+        },
+        {
+          "title": "GUI Canvas 运行时",
+          "path": "developer/gui_canvas_runtime.zh.md",
+          "tags": [
+            "GUI",
+            "画布",
+            "工作流"
+          ]
+        },
+        {
+          "title": "跨平台构建",
+          "path": "operations/cross_platform_build.zh.md",
+          "tags": [
+            "构建",
+            "部署",
+            "依赖"
+          ]
+        }
       ]
     },
     {
       "id": "tutorials",
       "title": "示例教程",
       "entries": [
-        { "title": "内置算例目录", "path": "overview/case_catalog.md", "tags": ["算例", "测试系统"], "modules": ["modelIO"] },
-        { "title": "可靠性计算与算例指南", "path": "guides/reliability_calculation_workflow_and_case_guide.md", "tags": ["可靠性", "工作流"], "modules": ["reliability"] },
-        { "title": "电动汽车交通场景格式", "path": "guides/ev_traffic_scenario_format.md", "tags": ["EV", "交通", "场景"], "modules": ["evTraffic"] },
-        { "title": "配电参数补全标准", "path": "guides/distribution_parameter_completion_standards.md", "tags": ["参数", "配电"], "modules": ["parameterLibrary"] }
+        {
+          "title": "内置算例目录",
+          "path": "overview/case_catalog.md",
+          "tags": [
+            "算例",
+            "测试系统"
+          ],
+          "modules": [
+            "modelIO"
+          ]
+        },
+        {
+          "title": "可靠性计算与算例指南",
+          "path": "guides/reliability_calculation_workflow_and_case_guide.md",
+          "tags": [
+            "可靠性",
+            "工作流"
+          ],
+          "modules": [
+            "reliability"
+          ]
+        },
+        {
+          "title": "电动汽车交通场景格式",
+          "path": "guides/ev_traffic_scenario_format.zh.md",
+          "tags": [
+            "EV",
+            "交通",
+            "场景"
+          ],
+          "modules": [
+            "evTraffic"
+          ]
+        },
+        {
+          "title": "配电参数补全标准",
+          "path": "guides/distribution_parameter_completion_standards.zh.md",
+          "tags": [
+            "参数",
+            "配电"
+          ],
+          "modules": [
+            "parameterLibrary"
+          ]
+        }
       ]
     },
     {
       "id": "modules",
       "title": "模块手册",
       "entries": [
-        { "title": "模块手册索引", "path": "modules/README.md", "tags": ["索引", "手册"] },
-        { "title": "潮流计算", "path": "modules/power_flow/README.md", "tags": ["潮流", "NR", "ACDC"], "modules": ["powerFlow"] },
-        { "title": "最优潮流", "path": "modules/optimal_power_flow/README.md", "tags": ["OPF", "RPO", "无功"], "modules": ["opf", "rpo"] },
-        { "title": "短路计算", "path": "modules/short_circuit/README.md", "tags": ["短路", "IEC60909"], "modules": ["shortCircuit"] },
-        { "title": "谐波潮流", "path": "modules/harmonics_power_flow/README.md", "tags": ["谐波", "频域"], "modules": ["harmonics"] },
-        { "title": "机电暂态", "path": "modules/dynamics/README.md", "tags": ["暂态", "DAE", "小信号"], "modules": ["transient"] },
-        { "title": "可靠性分析", "path": "modules/reliability/README.md", "tags": ["可靠性", "MC", "FMEA"], "modules": ["reliability"] },
-        { "title": "弹性恢复", "path": "modules/resilience/README.md", "tags": ["弹性", "恢复", "MESS"], "modules": ["resilience"] },
-        { "title": "网络重构", "path": "modules/network_reconfiguration/README.md", "tags": ["重构", "ONR", "MILP"], "modules": ["topology"] },
-        { "title": "图与拓扑", "path": "modules/graph/README.md", "tags": ["图", "拓扑", "降阶"], "modules": ["topologyAnalysis"] },
-        { "title": "时序模拟", "path": "modules/time_series/README.md", "tags": ["时序", "年度", "生产模拟"], "modules": ["tspf", "timeSeries"] },
-        { "title": "电力市场", "path": "modules/market/README.md", "tags": ["市场", "出清", "结算", "LMP"], "modules": ["marketBehavior", "marketBoundary", "market", "marketSecurity", "marketSettlement"] },
-        { "title": "园区综合能源", "path": "modules/integrated_energy/README.md", "tags": ["综合能源", "电氢热"], "modules": ["integratedEnergy"] },
-        { "title": "电力-交通耦合", "path": "modules/ev_power_traffic/README.md", "tags": ["EV", "交通", "CTM"], "modules": ["evTraffic"] },
-        { "title": "碳流分析", "path": "modules/carbon_analysis/README.md", "tags": ["碳", "GEC"], "modules": ["carbonFlow"] },
-        { "title": "场景生成", "path": "modules/scenario_generation/README.md", "tags": ["场景", "台风"], "modules": ["scenarioGeneration"] },
-        { "title": "规划分析", "path": "modules/analysis/README.md", "tags": ["承载力", "薄弱环节"], "modules": ["hosting", "weakLinks"] }
+        {
+          "title": "模块手册索引",
+          "path": "modules/README.zh.md",
+          "tags": [
+            "索引",
+            "手册"
+          ]
+        },
+        {
+          "title": "潮流计算",
+          "path": "modules/power_flow/README.md",
+          "tags": [
+            "潮流",
+            "NR",
+            "ACDC"
+          ],
+          "modules": [
+            "powerFlow"
+          ]
+        },
+        {
+          "title": "最优潮流",
+          "path": "modules/optimal_power_flow/README.md",
+          "tags": [
+            "OPF",
+            "RPO",
+            "无功"
+          ],
+          "modules": [
+            "opf",
+            "rpo"
+          ]
+        },
+        {
+          "title": "短路计算",
+          "path": "modules/short_circuit/README.md",
+          "tags": [
+            "短路",
+            "IEC60909"
+          ],
+          "modules": [
+            "shortCircuit"
+          ]
+        },
+        {
+          "title": "谐波潮流",
+          "path": "modules/harmonics_power_flow/README.md",
+          "tags": [
+            "谐波",
+            "频域"
+          ],
+          "modules": [
+            "harmonics"
+          ]
+        },
+        {
+          "title": "机电暂态",
+          "path": "modules/dynamics/README.md",
+          "tags": [
+            "暂态",
+            "DAE",
+            "小信号"
+          ],
+          "modules": [
+            "transient"
+          ]
+        },
+        {
+          "title": "可靠性分析",
+          "path": "modules/reliability/README.md",
+          "tags": [
+            "可靠性",
+            "MC",
+            "FMEA"
+          ],
+          "modules": [
+            "reliability"
+          ]
+        },
+        {
+          "title": "弹性恢复",
+          "path": "modules/resilience/README.md",
+          "tags": [
+            "弹性",
+            "恢复",
+            "MESS"
+          ],
+          "modules": [
+            "resilience"
+          ]
+        },
+        {
+          "title": "网络重构",
+          "path": "modules/network_reconfiguration/README.md",
+          "tags": [
+            "重构",
+            "ONR",
+            "MILP"
+          ],
+          "modules": [
+            "topology"
+          ]
+        },
+        {
+          "title": "图与拓扑",
+          "path": "modules/graph/README.md",
+          "tags": [
+            "图",
+            "拓扑",
+            "降阶"
+          ],
+          "modules": [
+            "topologyAnalysis"
+          ]
+        },
+        {
+          "title": "时序模拟",
+          "path": "modules/time_series/README.md",
+          "tags": [
+            "时序",
+            "年度",
+            "生产模拟"
+          ],
+          "modules": [
+            "tspf",
+            "timeSeries"
+          ]
+        },
+        {
+          "title": "电力市场",
+          "path": "modules/market/README.md",
+          "tags": [
+            "市场",
+            "出清",
+            "结算",
+            "LMP"
+          ],
+          "modules": [
+            "marketBehavior",
+            "marketBoundary",
+            "market",
+            "marketSecurity",
+            "marketSettlement"
+          ]
+        },
+        {
+          "title": "园区综合能源",
+          "path": "modules/integrated_energy/README.md",
+          "tags": [
+            "综合能源",
+            "电氢热"
+          ],
+          "modules": [
+            "integratedEnergy"
+          ]
+        },
+        {
+          "title": "电力-交通耦合",
+          "path": "modules/ev_power_traffic/README.md",
+          "tags": [
+            "EV",
+            "交通",
+            "CTM"
+          ],
+          "modules": [
+            "evTraffic"
+          ]
+        },
+        {
+          "title": "碳流分析",
+          "path": "modules/carbon_analysis/README.md",
+          "tags": [
+            "碳",
+            "GEC"
+          ],
+          "modules": [
+            "carbonFlow"
+          ]
+        },
+        {
+          "title": "场景生成",
+          "path": "modules/scenario_generation/README.zh.md",
+          "tags": [
+            "场景",
+            "台风"
+          ],
+          "modules": [
+            "scenarioGeneration"
+          ]
+        },
+        {
+          "title": "规划分析",
+          "path": "modules/analysis/README.md",
+          "tags": [
+            "承载力",
+            "薄弱环节"
+          ],
+          "modules": [
+            "hosting",
+            "weakLinks"
+          ]
+        }
       ]
     },
     {
       "id": "api",
       "title": "API 契约",
       "entries": [
-        { "title": "运行时 HTTP API", "path": "reference/runtime_api.md", "tags": ["HTTP", "路由", "API"] },
-        { "title": "CIM/CGMES 映射", "path": "reference/cim_cgmes3_crosswalk.md", "tags": ["CIM", "导入"], "modules": ["modelIO"] },
-        { "title": "BPA/DSP 元件映射", "path": "reference/bpa_dsp_component_mapping.md", "tags": ["BPA", "导入"], "modules": ["modelIO"] },
-        { "title": "SVG 配电图导入", "path": "reference/svg_distribution_import.md", "tags": ["SVG", "导入"], "modules": ["modelIO"] }
+        {
+          "title": "运行时 HTTP API",
+          "path": "reference/runtime_api.zh.md",
+          "tags": [
+            "HTTP",
+            "路由",
+            "API"
+          ]
+        },
+        {
+          "title": "CIM/CGMES 映射",
+          "path": "reference/cim_cgmes3_crosswalk.zh.md",
+          "tags": [
+            "CIM",
+            "导入"
+          ],
+          "modules": [
+            "modelIO"
+          ]
+        },
+        {
+          "title": "BPA/DSP 元件映射",
+          "path": "reference/bpa_dsp_component_mapping.md",
+          "tags": [
+            "BPA",
+            "导入"
+          ],
+          "modules": [
+            "modelIO"
+          ]
+        },
+        {
+          "title": "SVG 配电图导入",
+          "path": "reference/svg_distribution_import.zh.md",
+          "tags": [
+            "SVG",
+            "导入"
+          ],
+          "modules": [
+            "modelIO"
+          ]
+        }
       ]
     },
     {
       "id": "theory",
       "title": "理论模型",
       "entries": [
-        { "title": "VSC 限值 NCP 潮流契约", "path": "theory/vsc_limit_ncp_power_flow_contract.md", "tags": ["VSC", "NCP", "潮流"], "modules": ["powerFlow"] },
-        { "title": "交直流短路推导", "path": "theory/short_circuit_rich_acdc_derivation.md", "tags": ["短路", "推导"], "modules": ["shortCircuit"] },
-        { "title": "市场数学模型", "path": "theory/market_simulation_mathematical_models.md", "tags": ["市场", "SCUC", "SCED"], "modules": ["marketBehavior", "marketBoundary", "market", "marketSecurity", "marketSettlement"] },
-        { "title": "综合能源契约", "path": "theory/integrated_energy_contract.md", "tags": ["综合能源", "MILP"], "modules": ["integratedEnergy"] },
-        { "title": "碳分析契约", "path": "theory/carbon_analysis_contract.md", "tags": ["碳流", "模型"], "modules": ["carbonFlow"] },
-        { "title": "网络重构模型", "path": "theory/network_reconfiguration_models.md", "tags": ["重构", "模型"], "modules": ["topology"] },
-        { "title": "承载力分析实现", "path": "theory/capacity_analysis_implementation.md", "tags": ["承载力", "DL/T 2041"], "modules": ["hosting"] },
-        { "title": "多维薄弱环节识别", "path": "theory/multidimensional_weak_link_identification.md", "tags": ["薄弱", "规划"], "modules": ["weakLinks"] },
-        { "title": "暂态运行时", "path": "theory/transient_runtime.md", "tags": ["暂态", "运行时"], "modules": ["transient"] }
+        {
+          "title": "VSC 限值 NCP 潮流契约",
+          "path": "theory/vsc_limit_ncp_power_flow_contract.zh.md",
+          "tags": [
+            "VSC",
+            "NCP",
+            "潮流"
+          ],
+          "modules": [
+            "powerFlow"
+          ]
+        },
+        {
+          "title": "交直流短路推导",
+          "path": "theory/short_circuit_rich_acdc_derivation.zh.md",
+          "tags": [
+            "短路",
+            "推导"
+          ],
+          "modules": [
+            "shortCircuit"
+          ]
+        },
+        {
+          "title": "市场数学模型",
+          "path": "theory/market_simulation_mathematical_models.md",
+          "tags": [
+            "市场",
+            "SCUC",
+            "SCED"
+          ],
+          "modules": [
+            "marketBehavior",
+            "marketBoundary",
+            "market",
+            "marketSecurity",
+            "marketSettlement"
+          ]
+        },
+        {
+          "title": "综合能源契约",
+          "path": "theory/integrated_energy_contract.zh.md",
+          "tags": [
+            "综合能源",
+            "MILP"
+          ],
+          "modules": [
+            "integratedEnergy"
+          ]
+        },
+        {
+          "title": "碳分析契约",
+          "path": "theory/carbon_analysis_contract.zh.md",
+          "tags": [
+            "碳流",
+            "模型"
+          ],
+          "modules": [
+            "carbonFlow"
+          ]
+        },
+        {
+          "title": "网络重构模型",
+          "path": "theory/network_reconfiguration_models.zh.md",
+          "tags": [
+            "重构",
+            "模型"
+          ],
+          "modules": [
+            "topology"
+          ]
+        },
+        {
+          "title": "承载力分析实现",
+          "path": "theory/capacity_analysis_implementation.md",
+          "tags": [
+            "承载力",
+            "DL/T 2041"
+          ],
+          "modules": [
+            "hosting"
+          ]
+        },
+        {
+          "title": "多维薄弱环节识别",
+          "path": "theory/multidimensional_weak_link_identification.zh.md",
+          "tags": [
+            "薄弱",
+            "规划"
+          ],
+          "modules": [
+            "weakLinks"
+          ]
+        },
+        {
+          "title": "暂态运行时",
+          "path": "theory/transient_runtime.zh.md",
+          "tags": [
+            "暂态",
+            "运行时"
+          ],
+          "modules": [
+            "transient"
+          ]
+        }
       ]
     },
     {
       "id": "testing",
       "title": "测试验证",
       "entries": [
-        { "title": "开发状态与验证基线", "path": "overview/development_status.md", "tags": ["状态", "基线", "测试"] },
-        { "title": "谐波正确性验证", "path": "modules/harmonics_power_flow/harmonic_verification.md", "tags": ["谐波", "交叉验证"], "modules": ["harmonics"] }
+        {
+          "title": "开发状态与验证基线",
+          "path": "overview/development_status.zh.md",
+          "tags": [
+            "状态",
+            "基线",
+            "测试"
+          ]
+        },
+        {
+          "title": "谐波正确性验证",
+          "path": "modules/harmonics_power_flow/harmonic_verification.zh.md",
+          "tags": [
+            "谐波",
+            "交叉验证"
+          ],
+          "modules": [
+            "harmonics"
+          ]
+        }
       ]
     }
   ]

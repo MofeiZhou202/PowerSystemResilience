@@ -24764,7 +24764,17 @@ const App = (() => {
     const btn = document.getElementById('btnHelp');
     const menu = document.getElementById('helpMenu');
     if (!btn || !menu) return;
-    const openMenu = () => { menu.hidden = false; btn.setAttribute('aria-expanded', 'true'); };
+    const openMenu = () => {
+      // .top-toolbar has overflow-x:auto which forces overflow-y:hidden and
+      // clips absolutely-positioned descendants — position the dropdown fixed
+      // against the viewport so it escapes the toolbar's clip box.
+      const rect = btn.getBoundingClientRect();
+      menu.style.position = 'fixed';
+      menu.style.top = `${rect.bottom + 4}px`;
+      menu.style.right = `${Math.max(8, window.innerWidth - rect.right)}px`;
+      menu.hidden = false;
+      btn.setAttribute('aria-expanded', 'true');
+    };
     const closeMenu = () => { menu.hidden = true; btn.setAttribute('aria-expanded', 'false'); };
     btn.addEventListener('click', () => { if (menu.hidden) openMenu(); else closeMenu(); });
     document.addEventListener('click', (ev) => {

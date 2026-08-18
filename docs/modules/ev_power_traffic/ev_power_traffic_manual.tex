@@ -117,7 +117,8 @@
 \fld{alpha} & $\alpha$ & — & — & $0.15$ & BPR 阻抗系数\\
 \fld{beta} & $\beta$ & — & — & $4$ & BPR 阻抗指数\\
 \fld{k\_shortest\_paths} & $K$ & — & 整数 & — & 候选路径 K-最短路数\\
-\fld{allow\_v2g} & — & — & 布尔 & false & 是否允许 V2G 反向馈电\\
+\fld{allow\_v2g}（\texttt{EVPowerTrafficOptions}） & — & — & 布尔 & true & 是否允许 V2G 反向馈电（\srcpath{options.hpp:32}）\\
+\fld{allow\_v2g}（\texttt{JointOptimizerOptions}） & — & — & 布尔 & false & 是否允许 V2G 反向馈电（Formulation D LP 放电列；false 时放电列上界为零，\srcpath{options.hpp:285}）\\
 \fld{mip\_gap} & — & — & $\ge0$ & — & MILP 相对间隙容差\\
 \fld{time\_limit\_sec} & — & s & 正数 & — & 求解时限\\
 \fld{full\_joint\_ltm\_pwl\_segments} & — & — & 整数 & — & LTM 全联合 PWL 分段数\\

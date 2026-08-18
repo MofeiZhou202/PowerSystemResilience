@@ -25,9 +25,21 @@
 \begin{itemize}
   \item \textbf{初始对称短路电流} $I_k''$（\fld{ikss\_ka}），并分列发电机/电机/静止发电机/外网/
         换流器贡献（\fld{ikss\_gen\_contrib\_ka} 等）与去电机值 \fld{ikss\_no\_motor\_ka}；
-  \item \textbf{峰值电流} $i_p=\kappa\sqrt2\,I_k''$，冲击系数
+  \item \textbf{峰值电流} $i_p$：故障母线按 IEC 60909-0 (59) 逐贡献求和
+        \begin{equation}
+        i_p=\sqrt2\Bigl(\kappa_{net}\,I_{net}''+\textstyle\sum_i \kappa_i I_i''
+        +I_{sgen}''+I_{conv,CS}''\Bigr),
+        \end{equation}
+        其中网络部分 $I_{net}''$ 用不含机组并联支路的网络 Thevenin 阻抗求 $\kappa_{net}$，
+        各电压源贡献（发电机、电机、构网换流器）取各自 $R/X$ 的
+        $\kappa_i=\mathrm{clamp}\bigl(1.02+0.98\,e^{-3R/X},\,1,\,2\bigr)$，电流源贡献
+        （静止发电机、跟网换流器）无衰减直流分量、以 $\kappa=1$ 计入
+        （\srcpath{short\_circuit.cpp:1690--1766}）；非故障母线保留单 $\kappa$ 近似
+        $i_p=\sqrt2\,(\kappa\,I_{k,1}''+I_{CS})$。基础冲击系数
         $\kappa=1.02+0.98\,e^{-3R/X}$（\srcpath{calculate\_kappa\_basic\_sc}，:182；方法选择
-        \fld{SCKappaMethod} A/B/C，:76）；
+        \fld{SCKappaMethod} A/B/C，:76），非故障母线所用 $\kappa$ 在方法 B 且 \fld{Meshed}
+        时取 $\kappa\leftarrow\min(1.8,\,1.15\kappa)$，否则 $\mathrm{clamp}$ 到 $[1,2]$
+        （\srcpath{short\_circuit.cpp:1703--1707}）；
   \item \textbf{开断电流} $I_b$（\fld{ib\_ka}，按 \fld{breaking\_time\_s} 计及发电机贡献衰减 $\mu$）；
   \item \textbf{稳态电流} $I_k$（\fld{ik\_ka}，发电机改用 $x_d$）；
   \item \textbf{热等效电流}：源码固定 $n=1$。若 $|R/X|<10^{-12}$ 或
@@ -42,4 +54,6 @@
 
 \subsection{计算口径}
 \fld{SCCalcType}（\fld{Max}/\fld{Min}，:71）选择 $c_{\max}/c_{\min}$ 与相应机组数据；
-\fld{SCTopology}（\fld{Radial}/\fld{Meshed}，:82）影响 $\kappa$ 与开断电流的网状衰减处理。
+\fld{SCTopology}（\fld{Radial}/\fld{Meshed}，:82）仅影响 $\kappa$：方法 B 且 \fld{Meshed}
+时取 $\kappa\leftarrow\min(1.8,\,1.15\kappa)$（\srcpath{short\_circuit.cpp:1703--1707}，
+全模块唯一消费点），开断电流 $I_b$ 不区分拓扑、无网状衰减分支。

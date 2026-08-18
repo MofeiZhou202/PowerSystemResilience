@@ -130,8 +130,10 @@ $\operatorname{clamp}(SOC^{init},SOC^{min},SOC^{max})$。依据：
 \end{equation}
 启用退化且 \texttt{daily\_cycle\_limit}$>0$ 时，再加入
 \begin{equation}
- \sum_tg_{k,t}\Delta t\le2\,daily\_cycle\_limit_k\,E'_k.
+ \sum_tg_{k,t}\Delta t\le2\,daily\_cycle\_limit_k\,\tilde E_k,
 \end{equation}
+其中 $\tilde E_k=E_k$ 当 $E_k>10^{-9}$，否则 $\tilde E_k=1$；此守卫阈值为 $10^{-9}$，
+与 SOC 式中 $E'$ 的 $10^{-12}$ 不同。
 依据：\srcpath{src/time\_series/time\_series\_pf.cpp:2710--2739}。
 
 \subsection{功率平衡与网络约束边界}
@@ -199,7 +201,8 @@ AC 储能的两个健康度分量及合成值是
  SOH_y^{cyc}&=\max(0,1-d_{cyc}N_{cycles}),\\
  SOH_y&=\min(SOH_y^{cal},SOH_y^{cyc}).
 \end{align}
-当 $SOH_y\le\operatorname{clamp}(EOL,0,1)$ 时，代码立即记录更换并将两个分量、合成值置为 $1$，
+EOL 阈值先做百分数归一化：$EOL'=EOL/100$ 当 $EOL>1$（视为百分数），否则 $EOL'=EOL$；
+当 $SOH_y\le\operatorname{clamp}(EOL',0,1)$ 时，代码立即记录更换并将两个分量、合成值置为 $1$，
 循环数置零；随后令 $E_y^{rated}=E_0^{rated}SOH_y$、$E_y=E_y^{rated}SOC^{init}$。
 更换成本精确为 \texttt{replacement\_cost}$\times E_0^{rated}\times1000$。依据：
 \srcpath{src/time\_series/lifecycle\_simulation.cpp:462--513}。
