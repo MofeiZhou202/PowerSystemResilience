@@ -120,11 +120,12 @@
         Tier2 批量 54 算例（case533mt\_hi/lo 因解析器不支持算术表达式允许
         skip 不计失败）批收敛率 $\ge 85\%$；Tier3 大系统 14 算例至
         case\_SyntheticUSA（约 8.2 万节点，先关 PV--PQ 切换求解、失败再回退
-        全开，:504--515）；
+        全开，:solve\_tier3）；
   \item \textbf{\srcpath{opendss\_ieee\_pes/}}：IEEE PES 测试馈线，
         \texttt{extracted/} 含 13/34/123 节点原始资料，
         \texttt{opendss\_reference/13\_node/official\_full/IEEE13Nodeckt.dss}
-        是相域对照的官方基准（\srcpath{tests/CMakeLists.txt:250}）；
+        是相域对照的官方基准（\srcpath{tests/CMakeLists.txt} 中
+        \texttt{IEEE13Nodeckt.dss} 存在性门控）；
   \item \textbf{\srcpath{profiles/}}：\texttt{case33bw} 与
         \texttt{nansha\_network} 两套 8760 小时负荷/辐照/电价时序
         （时序生产模拟用）；
@@ -152,13 +153,15 @@
         \srcpath{HACDCPF\_HAVE\_OPENDSS}（CMakeLists.txt:265--334），再派生
         \srcpath{HACDCPF\_HAVE\_OPENDSS\_COMPARE}（:solve\_once（lambda））；
         \srcpath{tests/test\_opendss\_pf\_compare.cpp}（3717 行）仅在后者为真时
-        编译（\srcpath{tests/CMakeLists.txt:254--257}），覆盖单相/三相桥对照、
+        编译（\srcpath{tests/CMakeLists.txt} 中 \texttt{test\_opendss\_pf\_compare}
+        注册块），覆盖单相/三相桥对照、
         case33bw 全三相 vs BFS 单相等值、调压器闭环与变压器分接头投影，
         接受层回归时对照门返回退出码 2；
   \item \textbf{GridLAB-D}：\srcpath{tests/test\_gridlabd\_compare.cpp} 目标
         始终构建，外部对照在运行时按 \texttt{HACDCPF\_GRIDLABD\_BIN}/
         \texttt{GRIDLABD\_BIN}/PATH/兄弟构建目录顺序探测可执行文件，缺失则
-        干净 skip（\srcpath{tests/CMakeLists.txt:229--234}）；PV 母线电压调节
+        干净 skip（\srcpath{tests/CMakeLists.txt} 中 \texttt{test\_gridlabd\_compare}
+        注册块）；PV 母线电压调节
         不精确是已记录的 diagnostic 用例而非 pass；
   \item \textbf{解析解与雅可比中心差分}：
         \srcpath{src/power\_flow/jacobian\_check.cpp}（75 行）对任意
@@ -167,7 +170,7 @@
         以稀疏复数形式 $S=V\cdot\overline{Y_{bus}V}$ 独立重算注入残差
         （不再转致密矩阵，仅用于校核），被
         \srcpath{test\_powerflow\_performance.cpp} 以 $<10^{-6}$ 门槛复算
-        每个收敛解（PV--PQ 切换或多岛算例因指定量不同显式跳过复算，:163--193）；
+        每个收敛解（PV--PQ 切换或多岛算例因指定量不同显式跳过复算，:run\_case）；
   \item \textbf{能力合同与 GUI E2E}：
         \srcpath{tools/validate\_case\_capabilities.py}（698 行）对 19 个能力域
         逐一发 HTTP 断言，输出 \texttt{output/capability\_coverage.md}
@@ -176,7 +179,8 @@
         \texttt{run\_gui\_server} 走 REST 全链路（装载算例$\to$ETAP 导出/再导入
         $\to$潮流$\to$短路），注册为 ctest 用例 \texttt{gui\_api\_e2e}
         （标签 \texttt{gui;e2e}、超时 120~s，由 \texttt{HACDCPF\_ENABLE\_ETAP}
-        与 Python3 双重门控，\srcpath{tests/CMakeLists.txt:423--433}）。
+        与 Python3 双重门控，\srcpath{tests/CMakeLists.txt} 中
+        \texttt{gui\_api\_e2e} 注册块）。
 \end{itemize}
 
 \subsection{已知边界与覆盖缺口}
@@ -187,7 +191,9 @@
         \srcpath{src/power\_flow/helm\_solver.cpp}、
         \srcpath{homotopy\_continuation.cpp}、\srcpath{voltage\_stability.cpp}、
         \srcpath{newton\_krylov.cpp}；NEW 起四者均有专属 Catch2 目标
-        （\srcpath{tests/CMakeLists.txt:122--125}）：
+        （\srcpath{tests/CMakeLists.txt}：\texttt{test\_helm\_solver}、
+        \texttt{test\_homotopy\_continuation}、\texttt{test\_voltage\_stability}、
+        \texttt{test\_newton\_krylov}）：
         \srcpath{test\_helm\_solver.cpp}（HELM 与 Newton 在两母线算例上
         $|V|$/$|\theta|$ 一致至 $2\times10^{-5}$，另含 FDPF 稀疏注入与组件负荷
         聚合两条回归）、\srcpath{test\_homotopy\_continuation.cpp}
@@ -212,13 +218,13 @@
         如实标记各限值已强制（:solve\_newton\_with\_lcc\_tap\_control）；默认仍为仅告警模式。
         覆盖边界经 \fld{converter\_model\_scope} 声明（回归：
         \srcpath{test\_converter\_coordination.cpp} 的
-        “Power-flow result declares its converter model scope”，:652）；
+        “Power-flow result declares its converter model scope”，:TEST\_CASE("Power-flow result declares its converter model scope")）；
   \item \textbf{FDPF 注入已稀疏化}：\srcpath{src/power\_flow/fdpf\_solver.cpp}
         的注入计算改为稀疏复数形式 $S=V\cdot\overline{Y_{bus}V}$
-        （\srcpath{compute\_power\_injections}，:19--35），不再转致密矩阵，
+        （\srcpath{compute\_power\_injections}，:compute\_power\_injections），不再转致密矩阵，
         原稠密 $O(n^2)$ 双重循环性能项随之消除；指定注入在
         \fld{has\_component\_loads} 时改用逐母线 ZIP 系数
-        （\srcpath{compute\_specified\_injections}，:38--71）。回归：
+        （\srcpath{compute\_specified\_injections}，:compute\_specified\_injections）。回归：
         \srcpath{tests/test\_helm\_solver.cpp} 的 “FDPF sparse injection
         path remains numerically consistent” 与 “FDPF uses aggregated
         component loads”（与 NR 结果差 $<2\times10^{-4}$/$<3\times10^{-4}$）；
@@ -228,14 +234,14 @@
         $\lambda$ 作为增广未知量，可翻越鼻点并保留下支
         \fld{lower\_branch\_steps\{2\}}（:CpfOptions）个点；置 false 时保留自然
         参数化旧模式（\srcpath{src/power\_flow/voltage\_stability.cpp:record（lambda）}）。
-        \fld{CpfPoint} 新增 \fld{vdc}、\fld{va} 单位改为弧度（hpp:118--124）；
-        鼻点摘要取迹线 $\lambda$ 最大点而非末点（cpp:495--500）。回归：
+        \fld{CpfPoint} 新增 \fld{vdc}、\fld{va} 单位改为弧度（:CpfPoint）；
+        鼻点摘要取迹线 $\lambda$ 最大点而非末点（:solve）。回归：
         \srcpath{tests/test\_voltage\_stability.cpp}（模型细节见
         第~\ref{sec:cpf}~章）；
   \item \textbf{\srcpath{workspace.hpp} 已落地为真实工作区}：
         \srcpath{include/hacdcpf/power\_flow/workspace.hpp} 新增
         \srcpath{prepare\_state}/\srcpath{prepare\_equations}/%
-        \srcpath{reset\_iteration}（:35--42，实现
+        \srcpath{reset\_iteration}（:prepare\_state、:prepare\_equations，实现
         \srcpath{src/power\_flow/workspace.cpp:prepare\_state}）；
         \srcpath{NewtonSolver} 复用每实例 \texttt{SolverWorkspace}，并以
         \fld{workspace\_in\_use\_} 递归守卫防止嵌套求解互踩

@@ -27,7 +27,7 @@
   \item \textbf{按相存在的节点}。装配层只为“母线在运且该相存在”的
         $(\text{母线},\varphi)$ 对分配相节点，\fld{phase\_mask} 不含某相时该相
         根本不进入问题，因而单相/两相分支自然得到少于 $3\times n_{\mathrm{bus}}$
-        的节点集（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_adapter.cpp}:96--111）。
+        的节点集（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_adapter.cpp:build\_three\_phase\_hybrid\_model}）。
         节点的相归属记录在 \fld{ac\_phase\_index}（同一文件:139、162）。
   \item \textbf{分相负荷与分相电源}。母线三相负荷 \fld{pd\_a\_mw}/\fld{pd\_b\_mw}/%
         \fld{pd\_c\_mw}（无功同理）按相累加到对应节点的恒功率注入
@@ -37,17 +37,17 @@
         直接进入相域导纳矩阵 \fld{y\_ac}（同一文件:113--132），因此相间互感、
         不平衡潮流分布无需任何序网假设。
   \item \textbf{不平衡度约束}。对三相齐全的母线显式施加负序/正序电压幅值比
-        （VUF）上限（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp}:884--888），
+        （VUF）上限（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:evaluate\_inequalities}），
         这是序分量在模块中的唯一显式用途（另见换流器正序电流控制）。
   \item \textbf{换流器相域控制}。VSC 换流器在相域内可选择均分相功率、
         跟网型正序电流、构网型下垂三种控制方程
-        （\srcpath{include/hacdcpf/optimal\_power\_flow/three\_phase\_hybrid\_opf.hpp}:26--31），
+        （\srcpath{include/hacdcpf/optimal\_power\_flow/three\_phase\_hybrid\_opf.hpp:PhaseVSCControlMode}），
         支撑不平衡接入下的逆变器调度研究。
 \end{itemize}
 
 \subsubsection*{适用范围（按装配层校验）}
 装配入口 \srcpath{build\_three\_phase\_hybrid\_model} 对输入系统做硬性校验
-（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_adapter.cpp}:63--78）：
+（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_adapter.cpp:build\_three\_phase\_hybrid\_model}）：
 必须含 \fld{three\_phase\_ac} 子系统、至少一个 DC 母线与一台 VSC 换流器；
 \textbf{不支持} DC/DC 变换器与能量路由器，遇到即抛 \fld{std::invalid\_argument}。
 此外还要求：至少一个在运相节点（同一文件:108--111）、至少一个交流参考源
@@ -90,8 +90,8 @@ MIPSolvers 的 NLP 与 LP 求解通道}
 \subsubsection*{装配层（adapter）}
 \compmeta{ThreePhaseHybridModel}{\srcpath{include/hacdcpf/optimal\_power\_flow/three\_phase\_hybrid\_adapter.hpp}}
 入口函数 \srcpath{build\_three\_phase\_hybrid\_model}
-（头文件声明：\srcpath{include/hacdcpf/optimal\_power\_flow/three\_phase\_hybrid\_adapter.hpp}:49--52；
-实现：\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_adapter.cpp}:60--478）。
+（头文件声明：\srcpath{include/hacdcpf/optimal\_power\_flow/three\_phase\_hybrid\_adapter.hpp:build\_three\_phase\_hybrid\_model}；
+实现：\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_adapter.cpp:build\_three\_phase\_hybrid\_model}）。
 输出结构 \fld{ThreePhaseHybridModel}（头文件:30--43）内嵌装配完成的
 \fld{ThreePhaseHybridOPFCase}，并保留稳定组件 ID 与求解位置的映射：
 \fld{ac\_bus\_ids}、\fld{bus\_phase\_nodes}（每母线三相的节点号，缺相为 $-1$）、
@@ -118,7 +118,7 @@ $\to$ KKT 审计与结果归因。
 \subsubsection*{松弛/凸化层（relaxation）}
 \compmeta{ThreePhaseHybridRelaxationResult}{\srcpath{include/hacdcpf/optimal\_power\_flow/three\_phase\_hybrid\_relaxation.hpp}}
 入口 \srcpath{solve\_three\_phase\_hybrid\_opf\_relaxation}
-（头文件:58--60；实现：\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_relaxation.cpp}:424--930），
+（头文件:58--60；实现：\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_relaxation.cpp:solve\_three\_phase\_hybrid\_opf\_relaxation}），
 以及同选项序列求解 \srcpath{solve\_three\_phase\_hybrid\_opf\_relaxation\_sequence}
 （src/optimal\_power\_flow/three\_phase\_hybrid\_relaxation.cpp:solve\_three\_phase\_hybrid\_opf\_relaxation\_sequence）。头文件注释明确了该层性质：对相域 AC/DC SOCP 松弛做
 多面体外逼近，每一条锥割都是 SOCP 可行集的必要条件，因此每一轮 LP 都保持为原
@@ -209,7 +209,7 @@ $r_v=0.01$、$x_v=0.10$~pu（:build\_three\_phase\_hybrid\_model）；电压参�
 
 \subsubsection*{决策变量与布局}
 OPF 本体采用\textbf{直角坐标}电压表示：相节点 $k$ 的电压
-$V_k=e_k+\mathrm{j}f_k$（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp}:520--527，
+$V_k=e_k+\mathrm{j}f_k$（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:model\_voltage}，
 函数 \srcpath{model\_voltage}）。原始决策向量按
 \begin{align*}
 x=\bigl[e;\,f;\,p_g;\,q_g;\,u;\,p^{ac};\,q^{ac};\,e^{gfm};\,f^{gfm};\,p^{dc}\bigr]
@@ -219,7 +219,7 @@ x=\bigl[e;\,f;\,p_g;\,q_g;\,u;\,p^{ac};\,q^{ac};\,e^{gfm};\,f^{gfm};\,p^{dc}\big
 为换流器分相交流功率，$e^{gfm},f^{gfm}\in\mathbb{R}^{n_{gfm}}$ 为构网型换流器 A 相
 内电势，$p^{dc}\in\mathbb{R}^{n_c}$ 为换流器直流功率（布局结构 \fld{Layout} 与各段
 偏移：src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:Layout、482--499）。维度计数为
-（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp}:500--513）：
+（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:build\_model\_data}）：
 \begin{align*}
 n_{\mathrm{var}} &= 2n_v+2n_g+n_{dc}+2n_{cp}+2n_{gfm}+n_c,\\
 n_{\mathrm{eq}} &= 2n_v+n_{dc}+n_c+n_{\mathrm{dcref}}+n_{\mathrm{ctrl}}+2n_{\mathrm{ref}},\\
@@ -231,7 +231,7 @@ $n_{3\varphi}$ 为三相齐全母线数。所有变量均为连续量，默认�
 随后按物理意义收紧：$e,f\in[-1.2,1.2]$，$p_g,q_g$ 取机组界，
 $u\in[\fld{v\_dc\_min\_pu},\fld{v\_dc\_max\_pu}]$，$p^{ac},q^{ac}\in[-s_{\max},s_{\max}]$
 （定单位功率因数时 $q^{ac}=0$），$e^{gfm},f^{gfm}\in[-1.5,1.5]$，
-$p^{dc}\in[-s_{\max},s_{\max}]$（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp}:1671--1710，
+$p^{dc}\in[-s_{\max},s_{\max}]$（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:build\_nlp}，
 函数 \srcpath{build\_nlp}）。
 
 \subsubsection*{三相支路模型与节点功率平衡}
@@ -242,7 +242,7 @@ I &= Y_{ac}\,V + i_{\mathrm{fix}}, &
 S_k &= V_k\,\overline{I_k},
 \end{align*}
 其中 $i_{\mathrm{fix}}$ 为固定电流注入向量 \fld{i\_ac\_fixed}（装配层恒零；
-\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp}:539、541--543，
+\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:evaluate\_equalities}，
 函数 \srcpath{evaluate\_equalities}）。每个相节点的有功/无功平衡等式为
 \begin{align*}
 g_k &= \operatorname{Re}\{S_k\} + p^{\mathrm{load}}_k
@@ -251,7 +251,7 @@ g_{n_v+k} &= \operatorname{Im}\{S_k\} + q^{\mathrm{load}}_k
   - \sum_{g\in\mathcal{G}(k)} q_{g} - \sum_{c\in\mathcal{C}(k)} q^{ac}_{c,\varphi(k)} = 0,
 \end{align*}
 $\mathcal{G}(k)$、$\mathcal{C}(k)$ 分别为挂在节点 $k$ 的发电机与换流器相端口
-（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp}:541--561；
+（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:evaluate\_equalities}；
 发电机项:548--552，换流器项:553--561）。解析雅可比按 $S_k$ 对 $(e,f)$ 的偏导
 展开装配（\srcpath{equality\_jacobian}，src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:equality\_jacobian，其中导纳块偏导:658--677）。
 
@@ -262,7 +262,7 @@ u_k\,(G_{dc}\,u)_k + p^{\mathrm{dc,load}}_k - \sum_{c\in\mathcal{C}_{dc}(k)} p^{
 p^{dc}_c + \eta_c \sum_{\varphi} p^{ac}_{c,\varphi} &= 0,
 \end{align*}
 即直流注入等于电阻网络功率加换流器抽取，换流器直流功率与三相交流有功之和
-以效率 $\eta_c$ 闭合（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp}:563--576；
+以效率 $\eta_c$ 闭合（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:evaluate\_equalities}；
 直流参考电压锚定 $u_t=u_{\mathrm{ref},t}$ 见:578--583）。该耦合为单效率近似，
 不区分运行点的损耗曲线。
 
@@ -275,7 +275,7 @@ p^{dc}_c + \eta_c \sum_{\varphi} p^{ac}_{c,\varphi} &= 0,
 p^{ac}_{\varphi} - p^{ac}_{a} = 0,\qquad
 q^{ac}_{\varphi} - q^{ac}_{a} = 0,\qquad \varphi\neq a
 \end{align*}
-（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp}:621--637）。
+（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:evaluate\_equalities}）。
 
 （ii）\textbf{跟网型正序电流}（\fld{GridFollowingPLL}，别名
 \fld{PositiveSequenceCurrent}）：记 $a=e^{\mathrm{j}2\pi/3}$，对
@@ -286,7 +286,7 @@ r_b=a,\; r_c=a^{2},
 \end{align*}
 其中 $s_\varphi=p^{ac}_\varphi+\mathrm{j}q^{ac}_\varphi=V_\varphi\overline{I_\varphi}$。
 在电压非零时该式等价于 $I_\varphi=\overline{r_\varphi}\,I_a$，即换流器只输出
-正序电流（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp}:605--620；
+正序电流（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:evaluate\_equalities}；
 雅可比:752--778；拉格朗日黑塞:1215--1236）。
 
 （iii）\textbf{构网型下垂}（\fld{GridFormingDroop}）：引入 A 相内电势
@@ -297,7 +297,7 @@ $E_\varphi\in\{E_a,\,a^{2}E_a,\,aE_a\}$，对每相施加
 \qquad z_v = r_v + \mathrm{j}x_v,
 \end{align*}
 在 $V_\varphi\neq 0$ 时等价于诺顿等值 $E_\varphi = V_\varphi + z_v I_\varphi$
-（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp}:584--604；
+（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:evaluate\_equalities}；
 雅可比:720--751）。校验要求构网型换流器虚拟阻抗非零（\srcpath{validate\_case}，
 src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:validate\_case），序感知控制（后两种）要求三端子恰为相 A/B/C 且
 \fld{ac\_phase\_index} 完整（src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:validate\_case）。
@@ -315,12 +315,12 @@ src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:validate\_case），序�
 V_1 = \tfrac{1}{3}\bigl(V_a + aV_b + a^{2}V_c\bigr),\qquad
 V_2 = \tfrac{1}{3}\bigl(V_a + a^{2}V_b + aV_c\bigr)
 \end{align*}
-定义（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp}:861--869，
+定义（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:sequence\_components}，
 函数 \srcpath{sequence\_components}），并对每座三相母线施加
 \begin{align*}
 |V_2|^{2} \;\le\; \varepsilon_{\mathrm{vuf}}^{2}\,|V_1|^{2},
 \end{align*}
-$\varepsilon_{\mathrm{vuf}}$ 即 \fld{vuf\_max}（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp}:884--888，
+$\varepsilon_{\mathrm{vuf}}$ 即 \fld{vuf\_max}（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:evaluate\_inequalities}，
 函数 \srcpath{evaluate\_inequalities}；雅可比:986--1005）。该约束只施加于
 \fld{three\_phase\_bus\_nodes} 中登记的齐全三相母线，两相/单相分支不参与。
 
@@ -341,12 +341,12 @@ $\varepsilon_{\mathrm{vuf}}$ 即 \fld{vuf\_max}（\srcpath{src/optimal\_power\_f
 & &\forall\,c,\varphi,
 \end{align*}
 依次为相节点电压幅值平方窗口（:evaluate\_inequalities）、VUF（:evaluate\_inequalities）、换流器三相总
-视在功率（:evaluate\_inequalities）、换流器分相电流（:897--912；由 $p^2+q^2\le i_{\max}^2|V|^2$
+视在功率（:evaluate\_inequalities）、换流器分相电流（:evaluate\_inequalities；由 $p^2+q^2\le i_{\max}^2|V|^2$
 给出，$|V|$ 为恢复后的全节点电压）。变量界见决策变量一节。换流器相电流上限
 未配置时回退 $s_{\max}/\sqrt{n_{\varphi}}$（src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:build\_model\_data）。
 
 \subsubsection*{目标函数}
-目标为发电成本加小幅正则化（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp}:1039--1055，
+目标为发电成本加小幅正则化（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:objective}，
 函数 \srcpath{objective}）：
 \begin{align*}
 f = \sum_{g}\Bigl[c_{2,g}\bigl(S_{\mathrm{base}}p_g\bigr)^{2}
@@ -363,7 +363,7 @@ f = \sum_{g}\Bigl[c_{2,g}\bigl(S_{\mathrm{base}}p_g\bigr)^{2}
 \subsubsection*{图降阶与电压恢复}
 \fld{ModelVariant::GraphReduced} 下，所有无注入的纯传输相节点经稀疏 Kron
 （Schur 补）降阶消去：带负荷/固定电流注入、发电机、换流器端子、参考节点
-一律保留（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp}:362--386，
+一律保留（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:build\_model\_data}，
 函数 \srcpath{build\_model\_data}；降阶核为
 \srcpath{graph::reduce\_sparse\_kron}，受 \fld{reduction\_options} 控制）。
 \fld{ModelVariant::Full} 下保留全部节点，恢复算子取单位阵（:identity\_recovery）。
@@ -371,7 +371,7 @@ f = \sum_{g}\Bigl[c_{2,g}\bigl(S_{\mathrm{base}}p_g\bigr)^{2}
 \begin{align*}
 V_{\mathrm{full}} = R\,V_{\mathrm{model}}
 \end{align*}
-（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp}:529--531，
+（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:full\_voltage}，
 函数 \srcpath{full\_voltage}；恢复行缓存:409--416）。任一全节点的恢复行为空
 表明该节点与参考源电气脱开，此时抛运行错误并提示先移除无源组件
 （:build\_model\_data）。消去节点数记入结果 \fld{eliminated\_phase\_nodes}（:solve\_three\_phase\_hybrid\_opf\_impl）。
@@ -387,9 +387,9 @@ V_{\mathrm{full}} = R\,V_{\mathrm{model}}
 交流潮流初始化 \srcpath{initialize\_ac\_power\_flow}（src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:initialize\_ac\_power\_flow）先尝试
 直接牛顿法（至多 20 次迭代，线搜索要求全节点电压落在 $(0.5,1.3)$~pu，
 :1353--1445）；失败则回退 $x$ 并改用 Z-bus 不动点延拓（20 个负荷步、每步
-至多 80 次迭代，电压幅值下限保护 0.2~pu，:1446--1507）。存在非参考节点上的
-发电机时初始化直接跳过（返回 false，:1274--1278；调用方忽略该返回值并继续，
-:1602--1606——属已知粗糙点）。换流器控制投影
+至多 80 次迭代，电压幅值下限保护 0.2~pu，:initialize\_ac\_power\_flow）。存在非参考节点上的
+发电机时初始化直接跳过（返回 false，:initialize\_ac\_power\_flow；调用方忽略该返回值并继续，
+:build\_initial\_point——属已知粗糙点）。换流器控制投影
 \srcpath{project\_converter\_control}（src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:project\_converter\_control）按控制律把当前总功率
 重分配到各相：构网型反解 $E_a$ 并按 $I_\varphi=(E_\varphi-V_\varphi)/z_v$
 重算相功率（:project\_converter\_control），跟网型按 $I_a=\overline{S_{\mathrm{tot}}}/(3V_1)$
@@ -447,7 +447,7 @@ residual、中心性及乘子尺度全部通过才保留 $x_0$，否则自动回
 \srcpath{engine::IpoptAdapter}（src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:solve\_three\_phase\_hybrid\_opf\_impl）。\textbf{门控说明}：Ipopt
 后端依赖嵌入式 Ipopt（宏 \srcpath{HACDCPF\_HAVE\_IPOPT}）；未编译时适配器不抛错，
 而是返回 \fld{Unavailable:} 前缀的失败状态（
-\srcpath{MIPSolvers/src/engine/solver/external/adapters.cpp}:2033--2037），结果即
+\srcpath{MIPSolvers/src/engine/solver/external/adapters.cpp:IpoptAdapter::available}），结果即
 不收敛。默认后端为 Ipopt（头文件:106）。
 
 \subsubsection*{对偶初始化与拉格朗日黑塞}
@@ -488,11 +488,11 @@ $10^{-3}$ 已在默认 $10^{-2}$ corridor 内，因此 primal Newton 为 0 次�
 求解器报成功后，模块在解点上\textbf{重新}评估物理等式与\textbf{全部}不等式
 （含被预言机省略者），并施加审计阈值：原始/对偶/互补残差、电压越限、换流器
 越限均不超过 $10^{-6}$ 才把 \fld{converged} 置真（
-\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp}:2887--2934，
+\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:solve\_three\_phase\_hybrid\_opf\_impl}，
 审计条件:2928--2934）。即求解器自身成功只是必要条件。
 \fld{verify\_derivatives} 为真时另做中心差分（步长 $10^{-5}$）校核等式/不等式
-雅可比与拉格朗日黑塞，误差上界写入结果（:2783--2851；乘子取固定的伪随机模式
-:2816--2823）。
+雅可比与拉格朗日黑塞，误差上界写入结果（:solve\_three\_phase\_hybrid\_opf\_impl；乘子取固定的伪随机模式
+:solve\_three\_phase\_hybrid\_opf\_impl）。
 
 \subsubsection*{约束预言机}
 \fld{use\_constraint\_oracle} 为真时启用精确约束预言机
@@ -501,14 +501,14 @@ $10^{-3}$ 已在默认 $10^{-2}$ corridor 内，因此 primal Newton 为 0 次�
 （:solve\_three\_phase\_hybrid\_opf\_impl）；每轮求解受限问题后在全量不等式上筛查，把
 $h_j(x)\ge -m_{\mathrm{act}}$ 的行补入（:solve\_three\_phase\_hybrid\_opf\_impl）；
 \fld{oracle\_probe\_iterations} 为正值时先跑“预测轮”（限迭代数），活跃集
-稳定后再跑精确校正轮（:2398--2403、2465--2491）；相邻轮之间传递原始点与对偶
+稳定后再跑精确校正轮（:solve\_three\_phase\_hybrid\_opf\_impl）；相邻轮之间传递原始点与对偶
 （:solve\_three\_phase\_hybrid\_opf\_impl）。达到 \fld{oracle\_max\_rounds} 仍有新增行时判不收敛
 （:solve\_three\_phase\_hybrid\_opf\_impl）。被省略行的最大违反量记入 \fld{max\_omitted\_inequality}
 （:solve\_three\_phase\_hybrid\_opf\_impl），作为近似口径的公开声明。
 
 \subsubsection*{序列与分支求解}
 \srcpath{solve\_three\_phase\_hybrid\_opf\_sequence}（src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:solve\_three\_phase\_hybrid\_opf\_sequence）要求各
-时段网络与设备拓扑完全一致（否则抛错，:3030--3040），用各时段最大负荷构造一次
+时段网络与设备拓扑完全一致（否则抛错，:solve\_three\_phase\_hybrid\_opf\_sequence），用各时段最大负荷构造一次
 共享 \fld{ModelData}（:solve\_three\_phase\_hybrid\_opf\_sequence），逐时段传递上一步的原始点、等式/不等式对偶
 与松弛作为热启动，并把上一步强制行集作为预言机种子（:solve\_three\_phase\_hybrid\_opf\_sequence）。
 \srcpath{solve\_three\_phase\_hybrid\_opf\_branches}（src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:solve\_three\_phase\_hybrid\_opf\_branches）从已认证的
@@ -536,7 +536,7 @@ $W_{kk}=|V_k|^2$，对每对相关联节点引入
 $W_{ij}=V_i\overline{V_j}=W^{R}_{ij}+\mathrm{j}W^{I}_{ij}$（$i<j$）；
 直流侧引入 $X_{kk}=u_k^2$ 与 $X_{ij}=u_i u_j$。关联节点对取自 \fld{y\_ac} 非零
 模式、三相齐全母线的相两两组合、PSD 团（clique）候选与参考节点两两组合
-（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_relaxation.cpp}:456--513；
+（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_relaxation.cpp:solve\_three\_phase\_hybrid\_opf\_relaxation}；
 团候选由导纳矩阵列邻居与三相母线生成并剔除被包含者:469--505）。
 变量界为 $W_{kk}\in[\underline{v}_k^2,\overline{v}_k^2]$（参考节点固定为
 $|V_{\mathrm{ref}}|^2$）、$W^{R/I}_{ij}\in[-\overline{v}_i\overline{v}_j,\,
@@ -558,7 +558,7 @@ $q^{ac}=0$）与 $p^{dc}$（:solve\_three\_phase\_hybrid\_opf\_relaxation）。
   - \sum_{c\in\mathcal{C}_{dc}(k)} p^{dc}_c &= 0,
 \end{align*}
 装配时按 $i<j$ 定向修正 $W^{I}$ 项符号（
-\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_relaxation.cpp}:652--726；
+\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_relaxation.cpp:solve\_three\_phase\_hybrid\_opf\_relaxation}；
 定向处理:671--682）。换流器耦合 $p^{dc}_c+\eta_c\sum_\varphi p^{ac}_{c,\varphi}=0$
 与均分相功率等式按原样保留（:solve\_three\_phase\_hybrid\_opf\_relaxation）。VUF 约束对 $W=VV^{H}$ 是线性的：
 $|V_2|^2-\varepsilon_{\mathrm{vuf}}^2|V_1|^2=\mathrm{tr}\bigl((n_2n_2^{H}-
@@ -566,42 +566,42 @@ $|V_2|^2-\varepsilon_{\mathrm{vuf}}^2|V_1|^2=\mathrm{tr}\bigl((n_2n_2^{H}-
 系数向量（:solve\_three\_phase\_hybrid\_opf\_relaxation）。若 \fld{y\_ac}（厄米特部最小特征值不小于
 $-10^{-8}\cdot\max(1,\lVert Y\rVert)$）或 \fld{g\_dc} 通过无源性检查
 （:ac\_admittance\_is\_passive），各加一条聚合网损非负割：发电与换流器注入之和不小于总负荷
-（:759--788；未通过检查时放弃该割并登记 \fld{model\_limitations}）。
+（:solve\_three\_phase\_hybrid\_opf\_relaxation；未通过检查时放弃该割并登记 \fld{model\_limitations}）。
 
 \subsubsection*{锥割与外逼近循环}
 精确条件 $|W_{ij}|^2\le W_{ii}W_{jj}$（交流）、$X_{ij}^2\le X_{ii}X_{jj}$
 （直流）、$\sum_\varphi(p^2+q^2)\le s_{\max}^2$ 与
 $p_\varphi^2+q_\varphi^2\le i_{\max}^2 W_{nn}$ 均为旋转二阶锥约束；松弛层不调用
 锥求解器，而是在每个 LP 解点上对违例锥生成支撑超平面割（
-\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_relaxation.cpp}:311--420，
+\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_relaxation.cpp:violated\_cone\_cuts}，
 函数 \srcpath{violated\_cone\_cuts}）：交流提升锥
 $\lVert(2W^{R},2W^{I},W_{ii}-W_{jj})\rVert_2\le W_{ii}+W_{jj}$（:append\_if\_violated（lambda））、
-PSD 团最小特征向量的秩一割（\srcpath{append\_ac\_psd\_cuts}，:211--249）、
+PSD 团最小特征向量的秩一割（\srcpath{append\_ac\_psd\_cuts}）、
 直流提升锥（:append\_if\_violated（lambda））、换流器视在功率锥（:append\_if\_violated（lambda））、换流器相电流锥
 （:append\_if\_violated（lambda））。外逼近循环至多 \fld{max\_outer\_approximation\_rounds}$+1$ 轮，
 每轮把累积割并入 LP 交 HiGHS 求解，无违例割时置
-\fld{soc\_outer\_approximation\_converged} 并退出（:855--902；HiGHS 不可用直接
-返回:850--854）。
+\fld{soc\_outer\_approximation\_converged} 并退出（:solve\_three\_phase\_hybrid\_opf\_relaxation；HiGHS 不可用直接
+返回 :solve\_three\_phase\_hybrid\_opf\_relaxation）。
 
 \subsubsection*{目标与对偶下界}
 LP 目标为 $\sum_g[c_{1,g}S_{\mathrm{base}}p_g + t_g]$，二次成本
 $c_2'(p)=c_2S_{\mathrm{base}}^2p^2$ 以 \fld{cost\_tangent\_points} 条支撑切线
 $t_g\ge 2c_2'p_0p-c_2'p_0^2$ 在 $[p_{\min},p_{\max}]$ 上均匀布点低估
-（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_relaxation.cpp}:821--842）。
-无功正则项与换流器正则项从目标中省略（:843--845 登记的
+（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_relaxation.cpp:solve\_three\_phase\_hybrid\_opf\_relaxation}）。
+无功正则项与换流器正则项从目标中省略（:solve\_three\_phase\_hybrid\_opf\_relaxation 登记的
 \fld{model\_limitations}）。每轮 LP 的对偶按下式构造有效下界：不等式对偶截断到
 非正锥后，在变量盒界上逐变量最小化拉格朗日函数（
-\srcpath{evaluate\_lp\_dual\_bound}，:256--286）；各轮取最大写入
-\fld{round\_lower\_bounds} 与 \fld{objective\_lower\_bound}（:875--882、909--914）。
+\srcpath{evaluate\_lp\_dual\_bound}）；各轮取最大写入
+\fld{round\_lower\_bounds} 与 \fld{objective\_lower\_bound}（:solve\_three\_phase\_hybrid\_opf\_relaxation）。
 由于每条割都是必要条件、成本被低估，该下界对原非凸 OPF 成立
-（\fld{outer\_relaxation\_valid} 标记，:904--905）。
+（\fld{outer\_relaxation\_valid} 标记，:solve\_three\_phase\_hybrid\_opf\_relaxation）。
 
 \subsubsection*{输入拒绝与已知省略（诚实口径）}
-以下输入被显式拒绝：选项非法（轮数负、切点数 $<2$、容差非正，:432--436）；
-\fld{i\_ac\_fixed} 非零（固定电流注入需要增广电压提升，未实现，:437--442）；
-负二次成本（非凸，:443--448）。以下模型成分被显式省略并登记：序感知换流器
+以下输入被显式拒绝：选项非法（轮数负、切点数 $<2$、容差非正，:solve\_three\_phase\_hybrid\_opf\_relaxation）；
+\fld{i\_ac\_fixed} 非零（固定电流注入需要增广电压提升，未实现，:solve\_three\_phase\_hybrid\_opf\_relaxation）；
+负二次成本（非凸，:solve\_three\_phase\_hybrid\_opf\_relaxation）。以下模型成分被显式省略并登记：序感知换流器
 （跟网/构网）控制等式为非凸，从下界模型中剔除（:solve\_three\_phase\_hybrid\_opf\_relaxation）；目标正则项省略
-（:solve\_three\_phase\_hybrid\_opf\_relaxation）；无源性检查失败时聚合网损割不施加（:770--775、783--788）。
+（:solve\_three\_phase\_hybrid\_opf\_relaxation）；无源性检查失败时聚合网损割不施加（:solve\_three\_phase\_hybrid\_opf\_relaxation）。
 因此松弛层输出仅是下界证书与诊断，不给出可行运行点；其
 \fld{generator\_active\_power\_pu} 等向量是 LP 解的对应分量，不保证交流可实施。
 
@@ -774,8 +774,8 @@ $t_g\ge 2c_2'p_0p-c_2'p_0^2$ 在 $[p_{\min},p_{\max}]$ 上均匀布点低估
 \subsection{验证与校核}\label{subsec:tp-verify}
 
 模块测试目标为 \fld{test\_three\_phase\_hybrid\_opf}（注册于
-\srcpath{tests/CMakeLists.txt}:282），全部算例共用一个三母线九节点合成混合系统
-（\srcpath{tests/test\_three\_phase\_hybrid\_opf.cpp}:24--102，
+\srcpath{tests/CMakeLists.txt:test\_three\_phase\_hybrid\_opf}），全部算例共用一个三母线九节点合成混合系统
+（\srcpath{tests/test\_three\_phase\_hybrid\_opf.cpp:make\_small\_hybrid\_case}，
 \srcpath{make\_small\_hybrid\_case}）：三母线全相齐全，支路阻抗角一致的串联
 导纳 $y=8-\mathrm{j}16$ 与 $y=6-\mathrm{j}12$（:make\_small\_hybrid\_case）；末母线分相负荷
 $p=0.08+0.01\varphi$、$q=0.025+0.005\varphi$（:make\_small\_hybrid\_case）；电压窗口
@@ -828,10 +828,10 @@ $\eta=0.98$、$s_{\max}=0.25$（:make\_small\_hybrid\_case）。除注明外各�
 另有两条模块级验证通道：其一，Sioux Falls 交通网 + IEEE 123 节点馈线联合算例
 校验 adapter 装配规模与 ID 归因（$\ge 120$ 座三相母线、$\ge 250$ 个相节点、
 4 条直流母线、4 台 VSC、$\ge 15$ 台分相机组，\fld{vuf\_max} 选项透传；
-\srcpath{tests/test\_sioux\_falls\_ieee123\_case.cpp}:29--56、244）；其二，
+\srcpath{tests/test\_sioux\_falls\_ieee123\_case.cpp:TEST\_CASE("Sioux Falls--IEEE 123 case preserves public networks and assumptions")}、:TEST\_CASE("Sioux Falls--IEEE 123 stress controls preserve charging injection")）；其二，
 论文复现实验工具 \fld{phase\_hybrid\_opf\_benchmark} 与
 \fld{sioux\_falls\_ieee123\_experiment}（后者由 \srcpath{HACDCPF\_HAVE\_OPENDSS}
-门控，\srcpath{CMakeLists.txt}:900--929、950--952）提供更大规模的基准与审计，
+门控，\srcpath{CMakeLists.txt:phase\_hybrid\_opf\_benchmark、sioux\_falls\_ieee123\_experiment}）提供更大规模的基准与审计，
 但不属于默认 ctest 套件。截至当前代码，模块尚无 OpenDSS 等外部工具的 OPF 级
 对照算例（潮流层对照不属于本章范围）。
 
@@ -840,7 +840,7 @@ $\eta=0.98$、$s_{\max}=0.25$（:make\_small\_hybrid\_case）。除注明外各�
 \begin{itemize}
   \item \textbf{活跃研发}：模块接口与覆盖范围仍在演进；默认后端 Ipopt 受嵌入式
         编译门控，未编译时仅返回 \fld{Unavailable:} 状态（
-        \srcpath{MIPSolvers/src/engine/solver/external/adapters.cpp}:2033--2037）。
+        \srcpath{MIPSolvers/src/engine/solver/external/adapters.cpp:IpoptAdapter::available}）。
   \item \textbf{网络覆盖}：adapter 不支持 DC/DC 变换器、能量路由器与可控 DC 静态
         发电机（遇之抛错，src/optimal\_power\_flow/three\_phase\_hybrid\_adapter.cpp:build\_three\_phase\_hybrid\_model、391--395）；DC 支路仅电阻型；
         无线路潮流约束、无 OLTC/分接头与并联补偿调节变量；换流器损耗仅单效率

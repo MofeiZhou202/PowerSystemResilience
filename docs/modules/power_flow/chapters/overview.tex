@@ -46,12 +46,12 @@
         按 DC 电压岛汇总电压源与功率平衡裕度，Error/Fatal 级问题阻断求解
         （规则目录见第~\ref{sec:hybrid}~章）；
   \item \textbf{图拓扑预检}（:solve\_power\_flow）：无任何带 slack 的合法 AC 岛时直接返回失败；
-  \item \textbf{SolverData 获取与缓存}：\srcpath{get\_cached\_solver\_data}（:923，
-        thread\_local 缓存，指针+存储视图+哈希签名三重匹配，:373--452）；
+  \item \textbf{SolverData 获取与缓存}：\srcpath{get\_cached\_solver\_data}（调用点 :solve\_power\_flow，
+        thread\_local 缓存，指针+存储视图+哈希签名三重匹配，:get\_cached\_solver\_data）；
         未命中时 \srcpath{make\_solver\_data} 重建
         （\srcpath{src/power\_flow/solver\_data.cpp:make\_solver\_data}）；
   \item \textbf{ZIP 权重应用}：\srcpath{apply\_zip\_weights}（\srcpath{src/api/hacdcpf.cpp:apply\_zip\_weights}）；
-  \item \textbf{Newton 求解}：\srcpath{engine::NewtonSolver::solve}（:925--927，
+  \item \textbf{Newton 求解}：\srcpath{engine::NewtonSolver::solve}（调用点 :solve\_power\_flow，
         实现 \srcpath{src/power\_flow/newton\_solver.cpp:solve}）；
   \item \textbf{派生结果回算}：\srcpath{populate\_derived\_results}（\srcpath{src/api/hacdcpf.cpp:populate\_derived\_results}），
         含支路潮流 \srcpath{compute\_branch\_flows} 与换流器传输功率/损耗/限值校核；
@@ -97,7 +97,7 @@ SolverHandle 族 & \srcpath{make\_solver\_handle} 等 & 符号分解/模式跨�
 \subsection{求解器抽象层与工厂}
 抽象接口 \srcpath{IPowerFlowSolver}（\srcpath{include/hacdcpf/power\_flow/solver\_interface.hpp:IPowerFlowSolver}）
 声明 \texttt{solve(problem)}/\texttt{name()} 两方法及 6 个子类
-（\texttt{NewtonHybridSolver}/\allowbreak\texttt{FDPFSolver}/\allowbreak\texttt{DCPowerFlowSolver} 等，:35--74）；
+（\texttt{NewtonHybridSolver}/\allowbreak\texttt{FDPFSolver}/\allowbreak\texttt{DCPowerFlowSolver} 等，:NewtonHybridSolver、:FDPFSolver、:DCPowerFlowSolver、:AdaptiveHybridSolver、:ContinuationPowerFlowSolver、:NewtonKrylovSolver）；
 问题描述符 \srcpath{PowerFlowProblem}（\srcpath{include/hacdcpf/power\_flow/power\_flow\_problem.hpp:PowerFlowProblem}）携带
 SolverData、选项与规模摘要，工厂 \srcpath{build\_power\_flow\_problem}
 （声明 \srcpath{include/hacdcpf/power\_flow/power\_flow\_problem.hpp:build\_power\_flow\_problem}，实现

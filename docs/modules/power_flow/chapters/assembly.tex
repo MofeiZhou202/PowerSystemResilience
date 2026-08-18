@@ -43,10 +43,10 @@ canonical 投影后，全部网络、设备、预聚合注入与矩阵以 0-base
 （\srcpath{src/power\_flow/solver\_data.cpp:make\_solver\_data}），步骤：
 \begin{enumerate}
   \item rich$\to$canonical 投影 \srcpath{projection::RichToCanonicalOperator::apply}
-        （:268--269，含开关/零阻抗合并）；
+        （:make\_solver\_data，含开关/零阻抗合并）；
   \item \srcpath{materialize\_dc\_storage} 与逐字段 move；\texttt{StaticGeneratorDC}
         转换为 \texttt{StaticGenerator}（:make\_solver\_data）；
-  \item \fld{build\_id} 取自原子计数器（:266,319），作为全部缓存的失效标记；
+  \item \fld{build\_id} 取自原子计数器（:make\_solver\_data、:make\_solver\_data\_projected），作为全部缓存的失效标记；
   \item \textbf{ExternalGrid 处理}（:make\_solver\_data）：把母线 \fld{vm\_pu}/\fld{va\_deg}
         写为外部电网整定，并将该母线 PQ 提升为 SLACK；
   \item \textbf{成网换流器提升} \srcpath{apply\_acpv\_voltage\_control}（:apply\_acpv\_voltage\_control）：
@@ -71,8 +71,8 @@ PV（经功率曲线 \srcpath{compute\_pv\_power\_mw}，见第~\ref{sec:distribu
 Load 表为空（且无充电站）时 \fld{has\_component\_loads}=false，回退母线级
 \fld{pd\_mw}/\fld{qd\_mvar}；否则以母线级需求为底（恒定功率，ZIP 种子 $(1,0,0)$），
 叠加 $p_{\mathrm{mw}}\cdot$\fld{scaling} 的分量负荷，并按 $|P|/|Q|$ 加权平均
-归一化出每母线 ZIP 系数（:160--168, 193--211）。充电站恒功率叠加
-（kW$\to$MW，:173--188）。潮流方程中的指定注入为
+归一化出每母线 ZIP 系数（:aggregate\_load\_demand）。充电站恒功率叠加
+（kW$\to$MW，:aggregate\_load\_demand）。潮流方程中的指定注入为
 （\srcpath{src/power\_flow/jacobian\_builder.cpp:build\_power\_spec}）：
 \begin{align*}
 P_i^{\mathrm{spec}} &= P_{g,i}-p_{d,i}\big(w_{p0}+w_{p1}V_i+w_{p2}V_i^2\big)\\
@@ -96,7 +96,7 @@ Y_{tf} = -\frac{y_s}{\hat{t}}
 对角元累加 $Y_{ii}\leftarrow Y_{ii}+Y_{ff}$、$Y_{jj}\leftarrow Y_{jj}+y_{tt}$，
 非对角元 $Y_{ij}=Y_{ft}$、$Y_{ji}=Y_{tf}$（:build\_admittance\_matrix）。装配层为 fail-close 口径：
 $|z|$ 非有限或 $\le\texttt{kMinSeriesImpedancePu}=10^{-12}$ 即抛
-\texttt{std::runtime\_error}（:50--55，阈值 :15）；\fld{tap} 非有限或
+\texttt{std::runtime\_error}（:build\_admittance\_matrix，阈值 :kMinSeriesImpedancePu）；\fld{tap} 非有限或
 $\le 10^{-12}$ 同样抛出（:build\_admittance\_matrix）——零阻抗支路须在投影层先行合并，
 装配层不做静默回退。母线对地并联（$V=1.0$~pu 功率口径，
 MATPOWER 惯例）直接入对角（:build\_admittance\_matrix）：
@@ -110,7 +110,7 @@ Y_{ii}\leftarrow Y_{ii}+\frac{g_s+\mathrm{j}b_s}{S_{\mathrm{base}}}
 \subsection{直流电导阵 $G_{dc}$}
 \srcpath{build\_dc\_conductance(data)}（src/power\_flow/admittance\_builder.cpp:build\_dc\_conductance）：
 正对角 Laplacian。对在运 DC 支路取（$r_{pu}$ 非有限或 $\le 10^{-12}$ 即抛
-\texttt{std::runtime\_error}，fail-close，:128--132）
+\texttt{std::runtime\_error}，fail-close，:build\_dc\_conductance）
 \[
 g=\frac{1}{r_{pu}},\qquad G_{ii}\leftarrow G_{ii}+g,\qquad G_{ij}=G_{ji}=-g
 \]
@@ -133,10 +133,10 @@ $-\mathrm{Im}(Y^{\mathrm{mod}}_{ij})$，构型由 \texttt{BpBuildFlags} 控制
 \subsection{DC 注入装配与残差独立复算}
 \srcpath{assemble\_dc\_injections(data, vm, va, vdc, pdc\_spec)}
 （\srcpath{src/power\_flow/pf\_injection\_assembly.cpp:assemble\_dc\_injections}），净注入约定发电为正：
-DC 负荷为负（Load 表空时回退母线 \fld{pd\_mw}，:25--37）、DC 储能放电为正、
+DC 负荷为负（Load 表空时回退母线 \fld{pd\_mw}，:assemble\_dc\_injections）、DC 储能放电为正、
 静态发电机 $p\cdot$\fld{scaling}、PV 阵列 \fld{p\_set}、VSC 经
 \srcpath{converter\_dc\_injection}、DC/DC（入端 $-P_{in}$、出端 $+P_{out}$，
-含 $I^2R$ 损耗，:79--88）、能量路由器 DC 端口。DC 参考选择
+含 $I^2R$ 损耗，:assemble\_dc\_injections）、能量路由器 DC 端口。DC 参考选择
 \srcpath{first\_dc\_slack\_or\_default}（\srcpath{include/hacdcpf/power\_flow/pf\_utils.hpp:first\_dc\_slack\_or\_default}）。
 
 \srcpath{evaluate\_power\_flow\_residual}（\srcpath{src/power\_flow/residual\_evaluator.cpp:evaluate\_power\_flow\_residual}）
@@ -144,7 +144,7 @@ DC 负荷为负（Load 表空时回退母线 \fld{pd\_mw}，:25--37）、DC 储�
 供诊断与测试交叉校验。交流注入采用\textbf{稀疏复数形式}
 \srcpath{compute\_ac\_power\_injections}（:compute\_ac\_power\_injections）：$\mathbf V=\mathrm{polar}(V_m,\theta)$，
 $\mathbf I=Y_{bus}\mathbf V$ 为一次稀疏矩阵-向量乘，$S_i=V_i\,\overline{I_i}$
-（:23--32，调用点 :72），复杂度 $O(\mathrm{nnz}(Y_{bus}))$，不再把 $Y_{bus}$
+（:compute\_ac\_power\_injections，调用点 :evaluate\_power\_flow\_residual），复杂度 $O(\mathrm{nnz}(Y_{bus}))$，不再把 $Y_{bus}$
 稠密化后做 $O(n^2)$ 双重循环（数学上与逐元素 $g\cos\theta+b\sin\theta$ 求和等价）。
 其母线分类用
 \srcpath{classify\_ac\_buses}（\srcpath{include/hacdcpf/power\_flow/pf\_utils.hpp:classify\_ac\_buses}，额外 SLACK 归 PV），

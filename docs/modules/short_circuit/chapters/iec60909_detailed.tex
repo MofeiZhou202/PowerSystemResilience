@@ -32,28 +32,32 @@
         \end{equation}
         其中网络部分 $I_{net}''$ 用不含机组并联支路的网络 Thevenin 阻抗求 $\kappa_{net}$，
         各电压源贡献（发电机、电机、构网换流器）取各自 $R/X$ 的
-        $\kappa_i=\mathrm{clamp}\bigl(1.02+0.98\,e^{-3R/X},\,1,\,2\bigr)$，电流源贡献
+        $\kappa_i$，电流源贡献
         （静止发电机、跟网换流器）无衰减直流分量、以 $\kappa=1$ 计入
-        （\srcpath{src/short\_circuit/short\_circuit.cpp:current\_source\_contribution\_ka（lambda）}）；非故障母线保留单 $\kappa$ 近似
+        （\srcpath{src/short\_circuit/short\_circuit.cpp:run\_short\_circuit\_detailed\_impl} 的
+        \texttt{vs\_peak\_contribs} 求和处）；非故障母线保留单 $\kappa$ 近似
         $i_p=\sqrt2\,(\kappa\,I_{k,1}''+I_{CS})$。基础冲击系数
-        $\kappa=1.02+0.98\,e^{-3R/X}$（\srcpath{calculate\_kappa\_basic\_sc}，:182；方法选择
-        \fld{SCKappaMethod} A/B/C，:76），非故障母线所用 $\kappa$ 在方法 B 且 \fld{Meshed}
+        $\kappa=1.02+0.98\,e^{-3R/X}$（\srcpath{src/short\_circuit/short\_circuit.cpp:calculate\_kappa\_basic\_sc}；方法选择
+        \fld{SCKappaMethod} A/B/C，\srcpath{include/hacdcpf/analysis/short\_circuit.hpp:SCKappaMethod}）。同一条钳制规则统一作用于所有
+        $\kappa$（故障点 $\kappa_{net}$、逐贡献 $\kappa_i$ 与非故障母线单 $\kappa$）：方法 B 且 \fld{Meshed}
         时取 $\kappa\leftarrow\min(1.8,\,1.15\kappa)$，否则 $\mathrm{clamp}$ 到 $[1,2]$
-        （\srcpath{src/short\_circuit/short\_circuit.cpp:current\_source\_contribution\_ka（lambda）}）；
+        （\srcpath{src/short\_circuit/short\_circuit.cpp:kappa\_of（lambda）}）；
   \item \textbf{开断电流} $I_b$（\fld{ib\_ka}，按 \fld{breaking\_time\_s} 计及发电机贡献衰减 $\mu$）；
   \item \textbf{稳态电流} $I_k$（\fld{ik\_ka}，发电机改用 $x_d$）；
   \item \textbf{热等效电流}：源码固定 $n=1$。若 $|R/X|<10^{-12}$ 或
         $T_k<10^{-12}$，令 $m=1$；否则当
         $a=4\pi fT_k|R/X|>10^{-6}$ 时令
         $m=(2fT_k)^{-1}(1-e^{-a})/a$，最后
-        $I_{th}=I_k''\sqrt{m+n}$。小 $a$ 分支保留源码在
-        \srcpath{src/short\_circuit/short\_circuit.cpp:kappa\_of（lambda）} 的前一项赋值；完整实现见
-        \srcpath{src/short\_circuit/short\_circuit.cpp:kappa\_of（lambda）}；
-  \item \textbf{剩余电压} \fld{v\_remaining\_pu} 与逐支路故障电流 \fld{SCDetailedBranchResult}（:TransformerBranchCorrection）。
+        $I_{th}=I_k''\sqrt{m+n}$。当 $a\le10^{-6}$ 时保留前一项赋值
+        $m=(2fT_k)^{-1}\bigl(1-e^{-2T_k/\tau}\bigr)/(2/\tau)+1$（$\tau=1/(\omega\,R/X)$）；
+        完整实现见
+        \srcpath{src/short\_circuit/short\_circuit.cpp:run\_short\_circuit\_detailed\_impl}（热等效电流段）；
+  \item \textbf{剩余电压} \fld{v\_remaining\_pu} 与逐支路故障电流 \fld{SCDetailedBranchResult}（\srcpath{src/short\_circuit/short\_circuit.cpp:TransformerBranchCorrection}）。
 \end{itemize}
 
 \subsection{计算口径}
-\fld{SCCalcType}（\fld{Max}/\fld{Min}，:71）选择 $c_{\max}/c_{\min}$ 与相应机组数据；
-\fld{SCTopology}（\fld{Radial}/\fld{Meshed}，:82）仅影响 $\kappa$：方法 B 且 \fld{Meshed}
-时取 $\kappa\leftarrow\min(1.8,\,1.15\kappa)$（\srcpath{src/short\_circuit/short\_circuit.cpp:current\_source\_contribution\_ka（lambda）}，
-全模块唯一消费点），开断电流 $I_b$ 不区分拓扑、无网状衰减分支。
+\fld{SCCalcType}（\fld{Max}/\fld{Min}，\srcpath{include/hacdcpf/analysis/short\_circuit.hpp:SCCalcType}）选择 $c_{\max}/c_{\min}$ 与相应机组数据；
+\fld{SCTopology}（\fld{Radial}/\fld{Meshed}，\srcpath{include/hacdcpf/analysis/short\_circuit.hpp:SCTopology}）仅影响 $\kappa$：方法 B 且 \fld{Meshed}
+时取 $\kappa\leftarrow\min(1.8,\,1.15\kappa)$（消费点为
+\srcpath{src/short\_circuit/short\_circuit.cpp:run\_short\_circuit\_detailed\_impl} 的 \texttt{kappa} 与
+\texttt{kappa\_of}），开断电流 $I_b$ 不区分拓扑、无网状衰减分支。

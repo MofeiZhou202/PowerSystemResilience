@@ -577,3 +577,14 @@ TEST_CASE("Validation regression: IEEE118 builder always validates clean", "[val
     INFO(report.summary());
     CHECK(report.ok());
 }
+
+TEST_CASE("Validation regression: radial AC/DC builders have nondegenerate voltage limits",
+          "[validation][regression][case_builder]") {
+    for (const auto& sys : {io::build_case33bw_acdc(), io::build_case69_acdc()}) {
+        const auto report = val::validate(sys);
+        INFO(sys.name << ": " << report.summary());
+        CHECK(report.ok());
+        for (const auto& bus : sys.ac.buses)
+            CHECK(bus.vmax_pu > bus.vmin_pu);
+    }
+}

@@ -693,7 +693,7 @@ I_{f,kA} = I_{f,pu} \frac{S_b}{U_{dc,b}}
 i_p = \sqrt{2}\Big(\kappa_{net} I_{k,net}'' + \sum_i \kappa_i I_{k,i}''\Big)
 ```
 
-其中每个贡献的系数为
+其中每个贡献的系数（未取下文所述钳制前）为
 
 ```math
 \kappa_i = 1.02 + 0.98e^{-3R_i/X_i}
@@ -716,10 +716,12 @@ i_p = \sqrt{2}\Big(\kappa_{net} I_{k,net}'' + \sum_i \kappa_i I_{k,i}''\Big)
 i_p = \kappa \sqrt{2} I_{k,1}''
 ```
 
-其中 κ 使用故障点的 R/X 比；对于网状网络中的方法 B，代码乘以 `1.15`
-并将结果封顶为 `1.8`（`κ = min(1.8, 1.15κ)`，无下限钳制），而其余
-方法/拓扑组合均钳制到 `1.0 ≤ κ ≤ 2.0`
-（`src/short_circuit/short_circuit.cpp:current_source_contribution_ka（lambda）-1707`）。
+其中 κ 使用故障点的 R/X 比。同一条钳制规则统一作用于本步的所有 κ——
+故障母线的 `kappa_net`、逐贡献的 `kappa_of(z_src)` 以及非故障母线的单
+κ：对于网状网络中的方法 B，代码乘以 `1.15` 并将结果封顶为 `1.8`
+（`κ = min(1.8, 1.15κ)`，无下限钳制），而其余方法/拓扑组合均钳制到
+`1.0 ≤ κ ≤ 2.0`（`src/short_circuit/short_circuit.cpp:kappa_of（lambda）`，
+以及 `run_short_circuit_detailed_impl` 中相邻的非故障母线 κ）。
 
 ### 9.2 开断电流
 

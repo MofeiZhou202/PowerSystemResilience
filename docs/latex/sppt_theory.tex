@@ -1,0 +1,420 @@
+\documentclass[review,12pt]{elsarticle}
+\usepackage{amsmath,amssymb,bm,mathtools}
+\usepackage{booktabs,array,tabularx,graphicx,microtype}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\usepackage[dvipsnames,table]{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,calc,shapes.geometric}
+\usepackage{enumitem}
+\usepackage[switch]{lineno}
+\usepackage[hidelinks]{hyperref}
+\usepackage[nameinlink,capitalize]{cleveref}
+\definecolor{spptBlue}{HTML}{356E9F}
+\definecolor{spptGreen}{HTML}{3B8A68}
+\definecolor{spptOrange}{HTML}{D8872A}
+\definecolor{spptRed}{HTML}{B84A3A}
+\definecolor{spptLight}{HTML}{EDF2F5}
+\newcommand{\Rmap}{\mathcal R}
+\newcommand{\Proj}{\Pi}
+\newcommand{\Adm}{\operatorname{Adm}}
+\newcommand{\Valid}{\operatorname{Valid}}
+\newcommand{\WP}{\operatorname{WP}}
+\newcommand{\Attrib}{\operatorname{Attrib}}
+\journal{Applied Energy}
+
+\begin{document}
+\begin{frontmatter}
+\title{Trustworthy AI-Assisted Modeling and Analysis of
+Converter-Dominated Hybrid AC/DC Distribution Systems}
+\author[xjtu]{High-Resilience Power \& Energy Systems Group}
+\affiliation[xjtu]{organization={School of Electrical Engineering,
+Xi'an Jiaotong University},city={Xi'an},country={China}}
+\begin{abstract}
+Converter-dominated hybrid AC/DC distribution systems are emerging as
+distributed energy resources, storage, DC loads, microgrids, and
+power-electronic interfaces become integral to modern energy networks.
+Heterogeneous engineering files and AI-assisted modeling can accelerate their
+analysis, but syntactic conversion or solver convergence alone cannot establish
+physical validity, numerical well-posedness, or device-level attribution. This
+paper proposes a trustworthy AI-assisted framework based on
+semantics-preserving projection from rich engineering models to a canonical
+hybrid AC/DC nodal substrate. The framework reconstructs model provenance,
+types converter control roles, and applies validation, well-posedness,
+attribution, and independent-residual guards. AI or agent operations are
+restricted to typed, auditable actions evaluated on a candidate model before
+any state is committed or solved. Numerical evidence combines seven public
+GridLAB-D distribution feeders with fully disclosed AC/DC overlays, fixed-seed
+fault injection, load and converter stress sweeps, staged three-phase studies,
+OpenDSS/GridLAB-D scope checks, layer ablations, and scripted agent-edit tests.
+Across 1575 model variants spanning 32--6986 AC buses, the complete framework
+detects and localizes all 1050 injected structural faults without rejecting 175
+admissible permutations, whereas solver-only admission misses several
+converter-terminal, DC-support, and efficiency faults. Typed-agent experiments
+further verify reject-without-commit and post-rejection recovery on every public
+hybrid feeder. Plausible but incorrect setpoints remain structurally admissible,
+which defines the complementary need for telemetry and intent validation. The
+framework therefore provides a verification layer for trustworthy AI-assisted
+analysis of converter-dominated hybrid AC/DC distribution systems.
+\end{abstract}
+\begin{keyword}
+Hybrid AC/DC distribution systems \sep Trustworthy artificial intelligence \sep
+Semantics-preserving projection \sep Converter control \sep Model validation \sep
+Large language model agents
+\end{keyword}
+\end{frontmatter}
+\linenumbers
+
+\section{Introduction}\label{sec:introduction}
+
+Distribution networks are evolving from predominantly passive AC feeders into
+converter-dominated hybrid AC/DC systems. Photovoltaic generation, battery
+storage, electric-vehicle charging, data-center loads, DC microgrids, and energy
+routers introduce regulated DC buses and multiple voltage-forming mechanisms at
+the distribution level. Recent \emph{Applied Energy} studies have addressed
+hybrid AC/DC reconstruction for electric-vehicle integration~\cite{yu2023ev},
+outage restoration with mobile storage~\cite{zhang2023outage}, and renewable
+dispatchable regions with soft open points~\cite{li2024dispatchable}. These
+applications show the operational value of hybrid architectures, but also
+increase the consequences of incorrectly represented converter terminals and
+control roles.
+
+Distribution models are becoming more heterogeneous. Asset databases, planning
+tools, OpenDSS and GridLAB-D files, geographic information, and operator
+instructions often describe the same system at different levels of detail.
+Digital-twin research has used learning to recover distribution-network
+structures and operating patterns~\cite{hua2023dt}, while experimentally
+validated microgrid twins combine physical and virtual representations
+~\cite{sifat2025dt}. Model conversion is therefore not a neutral file operation:
+it decides which device semantics reach the equations, which quantities are
+approximated, and whether results return to the originating asset.
+
+Artificial intelligence adds both opportunity and risk. LLMs have automated
+building-energy modeling~\cite{jiang2024eplusllm} and recently assisted state
+estimation on a 2135-node distribution feeder~\cite{li2026llm}.
+Reinforcement-learning applications in AC, DC, and hybrid microgrids are also
+expanding~\cite{nasir2025rlreview}. Yet predictive accuracy or a successful tool
+call does not answer a more basic question: does an edited engineering model
+still denote a physically meaningful and numerically well-posed hybrid network?
+Trustworthy-AI studies similarly show that apparently useful explanations must
+themselves be evaluated~\cite{liao2024xai}. For power-system modeling, the
+analogous requirement is to verify the model transformation and attribution
+path, rather than trusting plausible text or solver convergence.
+
+Existing approaches leave three gaps. Conventional validation checks data
+types, ranges, and connectivity, but rarely verifies that each AC island has an
+angle reference and each DC island has a physical voltage-forming role.
+Canonical nodal solvers aggregate, expand, or merge devices without necessarily
+preserving a device-level reconstruction map. Finally, LLM demonstrations often
+evaluate prompt-to-output behavior without transactional edits, so an invalid
+proposal may alter the current model before diagnosis. These gaps differ from
+outlier detection: anomaly detection challenges whether a value is likely,
+whereas the present work verifies whether the transformation, control assignment,
+and reported result are internally meaningful. The functions are complementary.
+
+This paper develops semantics-preserving projection theory (SPPT) as a verified
+device-to-solver and solver-to-device consistency framework. Its contributions
+are:
+\begin{enumerate}[leftmargin=1.7em,itemsep=2pt]
+\item A rich-to-canonical projection that retains provenance and classifies
+exact, bounded-approximate, auditable, and nonrecoverable observables.
+\item Converter control-role typing and island-level admissibility conditions
+that distinguish AC-angle support, DC-voltage support, regulated quantities,
+and balancing quantities before solution.
+\item A transactional AI workflow in which typed actions are checked on a
+candidate model and committed only after validation, well-posedness, and
+attribution requirements pass.
+\item A distribution-focused evaluation using seven public GridLAB-D feeders
+with disclosed AC/DC overlays, 1575 fixed-seed variants, ablations, physical
+impact studies, and a visible typed-agent campaign.
+\end{enumerate}
+The remainder formulates the trust problem in \cref{sec:problem}, develops the
+projection in \cref{sec:projection}, presents converter typing and the AI
+workflow in \cref{sec:workflow}, evaluates the framework in
+\cref{sec:numerical}, and closes with discussion and conclusions.
+
+\section{Problem formulation and trust requirements}\label{sec:problem}
+
+\subsection{Rich and canonical hybrid AC/DC models}
+
+Let $S$ contain AC and DC buses, lines, transformers, switches, loads,
+distributed resources, storage, VSCs, DC/DC converters, units, phase labels,
+controls, and stable device identifiers. The canonical model $C=\Proj(S)$
+retains the nodal variables and terminal-equivalent components required by a
+declared analysis. Its balanced AC equations are
+\begin{align}
+P_i^{\rm sp}-\Re\{V_i\sum_jY_{ij}^{*}V_j^{*}\}&=0,\\
+Q_i^{\rm sp}-\Im\{V_i\sum_jY_{ij}^{*}V_j^{*}\}&=0,
+\label{eq:acbalance}
+\end{align}
+and the DC equation is
+\begin{equation}
+P_k^{\rm sp}-v_k\sum_{\ell}G_{k\ell}v_{\ell}=0.
+\label{eq:dcbalance}
+\end{equation}
+A VSC couples the domains through selected control equations and
+\begin{equation}
+P_{{\rm ac},c}+P_{{\rm dc},c}+P_{{\rm loss},c}=0,
+\qquad P_{{\rm loss},c}\ge0.
+\label{eq:vscbalance}
+\end{equation}
+The canonical substrate is deliberately smaller than the engineering model.
+This supports robust assembly but obliges the transformation to record what was
+expanded, aggregated, merged, approximated, or excluded.
+
+\subsection{Why convergence is not a trust criterion}
+
+A nonlinear solver establishes that an assembled residual is small. It does not
+establish that every authored terminal exists, that an efficiency is physical,
+that a DC voltage is controlled by a real device, or that a canonical injection
+can be attributed to an asset. \Cref{tab:trust-layers} separates these questions.
+
+\begin{table}[t]
+\centering
+\caption{Evidence layers required before an AI-assisted result is trusted.}
+\label{tab:trust-layers}
+\small
+\begin{tabularx}{\linewidth}{@{}p{0.20\linewidth}p{0.32\linewidth}X@{}}
+\toprule
+Layer & Question & Representative failure \\
+\midrule
+Boundary validity & Are identities, units, terminals, and ranges coherent? & A VSC points to a nonexistent AC bus. \\
+Physical role & Does each island have required voltage/angle support? & A DC island contains only fixed-power devices. \\
+Attribution & Can each result return to a stable engineering identity? & An aggregate has no declared origin. \\
+Numerical evidence & Did the solver and an independent equation check agree? & A low internal residual hides assembly error. \\
+Intent evidence & Is an admissible value the intended value? & A plausible load is assigned to the wrong asset. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+For requested observables $\mathcal O$, admission is
+\begin{equation}
+\Adm(S,\mathcal O)=\Valid(S)\wedge\WP(\Proj(S))
+\wedge\Attrib(\Rmap_S,\mathcal O).
+\label{eq:admission}
+\end{equation}
+The three terms check model boundaries, structural well-posedness from island
+roles, and total reconstruction for the requested outputs. Solver and
+independent-residual checks follow admission. Intent evidence remains an
+external layer based on telemetry, asset records, state estimation, or review.
+
+\section{Semantics-preserving projection and provenance}\label{sec:projection}
+
+\Cref{fig:framework} shows the verification layer. Heterogeneous files and AI
+actions populate the rich model; projection constructs canonical equations and
+a provenance certificate. AI-generated voltages or flows cannot bypass analysis.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/sppt_mechanism_overview.pdf}
+\caption{Mechanism of trustworthy AI-assisted modeling. Rich distribution-system
+semantics are projected to a canonical hybrid AC/DC substrate while a provenance
+certificate records every transformation. Boundary validity, structural
+well-posedness, and attribution remain coupled to the physical equations, so
+invalid actions are blocked and accepted observables return to stable device
+identities.}
+\label{fig:framework}
+\end{figure}
+
+The projection is
+\begin{equation}
+\Proj=\mathcal D\circ\mathcal M\circ\mathcal E\circ\mathcal U,
+\label{eq:projection}
+\end{equation}
+where $\mathcal U$ normalizes units, $\mathcal E$ expands macro devices into
+terminal equivalents, $\mathcal M$ contracts declared ideal connections, and
+$\mathcal D$ separates de-energized islands. Each stage appends a provenance
+relation. Contracting a small nonzero impedance is permitted only when its
+threshold and affected observables are certified.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/sppt_mechanism_projection.pdf}
+\caption{Semantics-preserving projection and reconstruction. (a) Engineering
+converter semantics expand into explicit AC, DC, and coupling equations without
+losing terminal origins. (b) Topology normalization records merge classes and
+energized scope. (c) The reverse map returns canonical observables to distinct
+engineering assets and exposes unsupported quantities.}
+\label{fig:projection}
+\end{figure}
+
+For exactly preserved observables, the semantic contract is
+\begin{equation}
+\Rmap_S\!\left(A_C(\Proj(S))\right)=A_S(S).
+\label{eq:commuting}
+\end{equation}
+For reduced models, equality becomes the observable-specific bound
+\begin{equation}
+\left\|\Rmap_S\!\left(A_C(\Proj(S))\right)-A_S(S)\right\|\le\epsilon_{\Pi}.
+\label{eq:approximate-contract}
+\end{equation}
+Four classes prevent
+overclaiming: strongly recoverable quantities; bounded-approximate quantities;
+auditable but nonunique allocations for which only origin and conservation are
+asserted; and nonrecoverable quantities reported as unsupported.
+
+\section{Converter-role typing and trustworthy AI workflow}\label{sec:workflow}
+
+Converter modes determine which equations constrain the system and which
+variables power balance must recover. A $P$--$Q$ converter is grid-following
+and contributes no voltage reference; a $V_{dc}$--$Q$ or DC-droop converter
+anchors DC potential; and an AC grid-forming role supplies the island angle
+reference. The guard uses these physical roles rather than device-class names.
+
+For every energized AC island $\mathcal I_a$ and DC island $\mathcal I_d$,
+\begin{equation}
+n_{\theta}(\mathcal I_a)=1,\qquad n_v(\mathcal I_d)\ge1,
+\label{eq:rolecondition}
+\end{equation}
+where $n_{\theta}$ counts compatible angle-forming roles and $n_v$ counts
+physical DC voltage or droop support. Multiple rigid references require an
+explicit coordination law. These conditions are necessary role-closure tests:
+they do not guarantee Jacobian nonsingularity away from the operating point,
+distance from voltage collapse, or satisfaction of converter limits.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/sppt_mechanism_converter_roles.pdf}
+\caption{Converter-role mechanism for structural well-posedness. (a) Compatible
+AC angle and DC voltage roles assign reference and balancing quantities.
+(b) Fixed-power converter roles alone leave DC-voltage regulation and balancing
+power without compatible assignments. (c) The structural incidence between
+role equations and variables therefore lacks full rank. (d) Provenance
+identifies the responsible converter and supports a role-specific repair before
+solving.}
+\label{fig:roles}
+\end{figure}
+
+The AI assistant may classify an input, extract a parameter with provenance,
+select a whitelisted transformation, or propose a repair. Each proposal becomes
+a typed action $a=(\text{verb},\text{target},\text{field},\text{value},
+\text{authority})$. It is applied to a candidate $S'=a(S)$ and evaluated using
+\cref{eq:admission}. Rejection discards $S'$; acceptance commits it and invokes
+analysis. Thus a failed proposal cannot contaminate the last admitted model.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/sppt_mechanism_agent.pdf}
+\caption{Transactional AI-assisted model editing. (a) Natural-language intent
+is converted to a typed, authority-bounded action. (b) The edit is applied only
+to an isolated candidate state. (c) A candidate crosses the admission boundary
+only after all evidence passes; rejection discards the candidate and preserves
+the previously admitted state.}
+\label{fig:agent-workflow}
+\end{figure}
+
+The authority field separates read-only analysis, model editing, advisory
+decisions, and physical control. The present study evaluates the first two.
+Passing structural guards neither authorizes autonomous control nor proves that
+a plausible value reflects operator intent.
+
+\section{Numerical studies}\label{sec:numerical}
+\input{sppt_campaign_study}
+
+\section{Discussion}\label{sec:discussion}
+
+The evidence changes the interpretation of model validation in three ways.
+First, convergence is a weak admission proxy. Converter-terminal, DC-support,
+and efficiency faults can retain a solvable algebraic problem after an incorrect
+component is ignored or misinterpreted. A small residual then certifies only the
+altered problem. Validation and role typing are prerequisites, not diagnostics
+after a failed solve.
+
+Second, provenance has operational value beyond reproducibility. It turns a
+generic rejection into an actionable diagnosis and links abnormal voltage or
+converter transfer to the engineering device and transformation responsible.
+Without stable attribution, an AI repair would act on an ambiguous canonical
+index.
+
+Third, SPPT and anomaly detection address different uncertainty classes. SPPT
+rejects internally invalid, underdetermined, or unattributable models. It
+intentionally admits a physically plausible load change when structural
+conditions remain satisfied. Whether that change is true requires telemetry,
+state estimation, parameter provenance, and operator intent. A deployment
+should place semantic verification below a data-consistency layer rather than
+claiming that either replaces the other.
+
+The conclusions are bounded. The primary campaign uses a balanced steady-state
+subset because complete unbalanced GridLAB-D control semantics are outside the
+import boundary. Three-phase and external-engine studies are scope checks, not
+a universal hybrid oracle. Structural reference conditions do not exclude
+voltage collapse, active-set changes, or saturation. Some aggregate allocations
+remain auditable but not physically unique. Finally, scripted typed actions
+verify the safety state machine, not arbitrary language understanding. A small
+local LLM test demonstrates interface feasibility only and cannot establish LLM
+reliability.
+
+\section{Conclusions}\label{sec:conclusion}
+
+This paper presented a verification layer for trustworthy AI-assisted modeling
+of converter-dominated hybrid AC/DC distribution systems. Semantics-preserving
+projection connects engineering devices to canonical equations, provenance
+returns observables to stable identities, and converter-role typing detects
+missing AC-angle or DC-voltage support before solution. Typed AI actions are
+evaluated transactionally so rejected candidates cannot modify the admitted
+model.
+
+The fixed-seed study contains 1575 variants of seven public 32--6986-bus
+distribution feeders with disclosed AC/DC overlays. The complete guard detects
+and localizes all 1050 structural faults and rejects none of 175 admissible
+permutations, while solver-only admission misses several fault classes. A
+separate typed-agent campaign verifies reject-without-commit and recovery after
+rejection across the same feeders. Physical-impact studies show that
+structurally valid but incorrect loads and converter setpoints can materially
+change results.
+
+Verified projection, role typing, and attribution prevent internally incoherent
+AI-assisted models from being trusted, but they cannot infer data truth or user
+intent. Future work should combine this semantic layer with telemetry-driven
+state and parameter estimation, calibrated uncertainty, broader phase-domain
+conversion, and human review for actions with operational authority.
+
+\section*{Declaration of competing interest}
+The authors declare no known competing financial interests or personal
+relationships that could have influenced this work.
+
+\section*{Data availability}
+The study uses public GridLAB-D taxonomy feeders and fully disclosed,
+deterministic AC/DC modifications. Machine-readable protocols, manifests, and
+aggregate result tables can accompany the article as supplementary material. No
+proprietary utility data are used.
+
+\begin{thebibliography}{99}
+\bibitem{yu2023ev} H.~Yu et al., ``Enhancing electric vehicle penetration and
+grid operation performance in old residential communities through hybrid AC/DC
+microgrid reconstruction,'' \emph{Applied Energy}, vol.~347, 121459, 2023.
+\bibitem{zhang2023outage} L.~Zhang et al., ``Outage management of hybrid AC/DC
+distribution systems: Co-optimize service restoration with repair crew and
+mobile energy storage system dispatch,'' \emph{Applied Energy}, vol.~335,
+120422, 2023.
+\bibitem{li2024dispatchable} S.~Li et al., ``Dispatchable region for distributed
+renewable energy generation in reconfigurable AC--DC distribution networks with
+soft open points,'' \emph{Applied Energy}, vol.~371, 123704, 2024.
+\bibitem{hua2023dt} W.~Hua et al., ``Digital twin based reinforcement learning
+for extracting network structures and load patterns in planning and operation
+of distribution systems,'' \emph{Applied Energy}, vol.~342, 121128, 2023.
+\bibitem{sifat2025dt} M.~M.~H.~Sifat et al., ``Novel abstractions and
+experimental validation for digital twin microgrid design,'' \emph{Applied
+Energy}, vol.~377, 124621, 2025.
+\bibitem{jiang2024eplusllm} G.~Jiang et al., ``EPlus-LLM: A large language
+model-based computing platform for automated building energy modeling,''
+\emph{Applied Energy}, vol.~367, 123431, 2024.
+\bibitem{li2026llm} Y.~Li et al., ``In-context learning enhanced large language
+model for robust distribution system state estimation,'' \emph{Applied Energy},
+vol.~407, 127344, 2026.
+\bibitem{nasir2025rlreview} M.~Nasir et al., ``Reinforcement learning algorithms
+in AC, DC, and hybrid microgrids applications: A comprehensive review,''
+\emph{Applied Energy}, vol.~401, 126724, 2025.
+\bibitem{liao2024xai} W.~Liao et al., ``Can we trust explainable artificial
+intelligence in wind power forecasting?'' \emph{Applied Energy}, vol.~376,
+124273, 2024.
+\bibitem{gridlabd} D.~P.~Chassin et al., ``GridLAB-D: An open-source power
+systems modeling and simulation environment,'' in \emph{Proc. IEEE PES T\&D},
+2008.
+\bibitem{opendss} R.~C.~Dugan and T.~E.~McDermott, ``An open source platform for
+collaborating on smart grid research,'' in \emph{Proc. IEEE PES General Meeting},
+2011.
+\bibitem{pmd} D.~M.~Fobes et al., ``PowerModelsDistribution.jl: An open-source
+framework for exploring distribution power flow formulations,'' \emph{Electric
+Power Systems Research}, vol.~189, 106664, 2020.
+\end{thebibliography}
+\end{document}

@@ -25,7 +25,7 @@
 \begin{itemize}
   \item \textbf{LinDistFlow/有功口径}：恢复 MILP \fld{model\_scope}=\texttt{"hybrid-acdc-restoration-milp"}，
         默认不强制 DC 支路流限、换流器传输限、换流器损耗与无功
-        （\fld{ValidityFlags}，:88），强制辐射拓扑；
+        （\fld{ValidityFlags}，:ValidityFlags），强制辐射拓扑；
   \item \textbf{近似最优}：\fld{mip\_gap\_within\_tolerance}=true 只表示与已知界的间隙在容差内，
         \textbf{非}全局最优；准确间隙见 \fld{model\_stats.mip\_gap}；
   \item \textbf{认证 L1/L2}：采样雅可比“管”诊断，\fld{constants\_are\_global\_bounds}=false，

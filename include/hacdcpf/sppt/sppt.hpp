@@ -11,6 +11,7 @@
 #include "hacdcpf/sppt/agent.hpp"
 #include "hacdcpf/sppt/benchmark.hpp"
 #include "hacdcpf/sppt/certificate.hpp"
+#include "hacdcpf/sppt/fault_campaign.hpp"
 #include "hacdcpf/sppt/guard.hpp"
 #include "hacdcpf/sppt/intelligent_simulation.hpp"
 #include "hacdcpf/sppt/metamorphic.hpp"

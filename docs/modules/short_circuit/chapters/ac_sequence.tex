@@ -24,7 +24,7 @@ I_{k3}''=\frac{c}{Z_{1k}+Z_f}I_b,\qquad Z_{k,3}=Z_{1k}+Z_f,\qquad |I_{k3}''|=\fr
 \end{equation}
 详细入口最终先令 $I_{k,pu}''=c/|Z_{k,3}|$，再乘
 $S_b/(\sqrt3U_{fault})$；见 \srcpath{src/short\_circuit/short\_circuit.cpp:ext\_bus\_id（lambda）}。
-三相短路功率 $S_k''=\sqrt3\,U_b\,|I_{k3}''|$（\fld{BusFaultResult.sk\_mva}，:49）。
+三相短路功率 $S_k''=\sqrt3\,U_b\,|I_{k3}''|$（\fld{BusFaultResult.sk\_mva}，:BusFaultResult）。
 
 \subsection{单相接地故障}
 序网串联：

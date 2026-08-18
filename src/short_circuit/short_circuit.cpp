@@ -376,6 +376,13 @@ class SparseInverseSolver {
         }
       }
     }
+    if (matrix.nonZeros() == 0) {
+      // Nothing to factor (e.g. a network-only matrix with no
+      // branches/external grids). KLU's analyzePattern fails on an empty
+      // pattern and its factorize()/info() then assert in debug builds,
+      // so bail out here and leave the solver invalid.
+      return;
+    }
     lu_.analyzePattern(matrix);
     lu_.factorize(matrix);
     valid_ = lu_.info() == Eigen::Success;
@@ -1149,9 +1156,13 @@ BusFaultResult compute_fault_at_bus(const HybridPowerSystem& sys,
 
   SpMat Y_fault = build_fault_ybus(ac, id_map, n, opt);
   SpLU lu;
-  lu.analyzePattern(Y_fault);
-  lu.factorize(Y_fault);
-  if (lu.info() != Eigen::Success)
+  bool factored = false;
+  if (Y_fault.nonZeros() > 0) {
+    lu.analyzePattern(Y_fault);
+    lu.factorize(Y_fault);
+    factored = lu.info() == Eigen::Success;
+  }
+  if (!factored)
     throw std::runtime_error("compute_fault_at_bus: Y_fault factorisation failed");
 
   double base_kv = ac.buses[k].base_kv;
@@ -1694,23 +1705,33 @@ SCDetailedResult run_short_circuit_detailed_impl(
   // current sources (static generators, grid-following converters) have no
   // decaying DC component and are added without κ. Non-fault buses keep the
   // single-κ approximation on the transferred current (method A/B).
+  // Method B in meshed networks (IEC 60909-0): κ = min(1.8, 1.15·κ_b); all
+  // other method/topology combinations clamp to [1.0, 2.0]. This rule is
+  // applied uniformly — to the fault-bus per-contribution κ values
+  // (kappa_net and each kappa_of(z_src)) as well as to the single-κ
+  // approximation at non-fault buses.
+  const bool method_b_meshed =
+      (opt.kappa_method == SCKappaMethod::B &&
+       opt.topology == SCTopology::Meshed);
   Cx Z_k_kappa = compute_Zk(opt.fault_type,
                             Z1_fault, Z2_fault, Z0_fault, Zf);
   double rx_ratio = (std::abs(std::imag(Z_k_kappa)) > 1e-15)
                         ? std::abs(std::real(Z_k_kappa) / std::imag(Z_k_kappa))
                         : 0.0;
   double kappa = calculate_kappa_basic_sc(rx_ratio);
-  if (opt.kappa_method == SCKappaMethod::B && opt.topology == SCTopology::Meshed) {
+  if (method_b_meshed) {
     kappa = std::min(1.8, 1.15 * kappa);
   } else {
     kappa = std::clamp(kappa, 1.0, 2.0);
   }
 
-  auto kappa_of = [](Cx z) {
+  auto kappa_of = [method_b_meshed](Cx z) {
     const double rx = (std::abs(std::imag(z)) > 1e-15)
                           ? std::abs(std::real(z) / std::imag(z))
                           : 0.0;
-    return std::clamp(calculate_kappa_basic_sc(rx), 1.0, 2.0);
+    const double k = calculate_kappa_basic_sc(rx);
+    return method_b_meshed ? std::min(1.8, 1.15 * k)
+                           : std::clamp(k, 1.0, 2.0);
   };
 
   // Network-only Thevenin impedance (branches + external grids, no machine

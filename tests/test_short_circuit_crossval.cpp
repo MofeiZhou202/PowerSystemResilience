@@ -723,9 +723,10 @@ TEST_CASE("SC detailed: fault-bus peak uses formula (59) per-contribution kappa"
           "[short_circuit][iec60909][peak]") {
   // Network-only fault (no machine shunts): the peak at the fault bus is
   // sqrt(2)·kappa_net·I"k with kappa_net from the network R/X ratio. For
-  // R/X -> 0 the basic kappa saturates at its 2.0 clamp; the method-B 1.15
-  // factor no longer applies at the fault bus (it still applies to
-  // transferred currents at non-fault buses).
+  // R/X -> 0 the basic kappa saturates near 2.0; the method-B meshed rule
+  // kappa = min(1.8, 1.15·kappa) applies uniformly — to the fault-bus
+  // per-contribution kappas as well as to transferred currents at non-fault
+  // buses — so kappa_net lands on the 1.8 cap.
   HybridPowerSystem sys;
   sys.base_mva = 100.0;
   sys.ac.base_mva = 100.0;
@@ -748,8 +749,9 @@ TEST_CASE("SC detailed: fault-bus peak uses formula (59) per-contribution kappa"
   const auto result = run_short_circuit_detailed(sys, 1, opt);
   REQUIRE(result.solved);
   const auto& row = fault_row(result);
-  // R/X = 1e-8 (not exactly 0), so the basic kappa is 2.0 - O(1e-8).
-  CHECK(row.ip_ka == Catch::Approx(2.0 * std::sqrt(2.0) * row.ikss_ka)
+  // R/X = 1e-8 (not exactly 0), so the basic kappa is 2.0 - O(1e-8) and
+  // min(1.8, 1.15·kappa) lands exactly on the 1.8 cap.
+  CHECK(row.ip_ka == Catch::Approx(1.8 * std::sqrt(2.0) * row.ikss_ka)
                          .epsilon(1e-6));
 }
 

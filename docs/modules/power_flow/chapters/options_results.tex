@@ -94,9 +94,9 @@ DC 初值由 \srcpath{load\_dc\_initial\_state} 应用（src/power\_flow/newton\
 \end{paramtable}
 
 同头文件另有两个辅助结构（如实列出，本章不展开）：\fld{ReactiveLimit}
-（\fld{qmin}$=-0.5$、\fld{qmax}$=0.5$，:25--28）与 \fld{DistributedSlack}
-（参与母线/因子/参考母线/参与上限，:30--35）；以及 7 个分组子结构
-（\fld{ConvergenceOptions} 等，:41--95），字段与默认值同平铺字段一一对应，
+（\fld{qmin}$=-0.5$、\fld{qmax}$=0.5$，:ReactiveLimit）与 \fld{DistributedSlack}
+（参与母线/因子/参考母线/参与上限，:DistributedSlack）；以及 7 个分组子结构
+（\fld{ConvergenceOptions} 等，:ConvergenceOptions），字段与默认值同平铺字段一一对应，
 由 \srcpath{from\_parts} 展开装配（例外：\fld{enforce\_converter\_physical\_limits}
 仅存在于平铺层，分组子结构未收录）。
 
@@ -181,7 +181,7 @@ include。）算法语义见第~\ref{sec:robust}~章，此处仅列字段契约�
 
 同头文件还定义策略切换日志类型：枚举 \texttt{NonlinearSolveMode}（ScaledNewton /
 DampedNewton / NonmonotoneLineSearch / LMTrustRegion / PtcSer / Homotopy /
-NewtonKrylovFallback，:213--221）与记录结构 \fld{SolverModeSwitchRecord}
+NewtonKrylovFallback，:NonlinearSolveMode）与记录结构 \fld{SolverModeSwitchRecord}
 \{\fld{iteration}, \fld{from}, \fld{to}, \fld{reason}\}（:SolverModeSwitchRecord）。
 
 \subsection{PowerFlowProblem：求解任务描述符}
@@ -209,7 +209,7 @@ NewtonKrylovFallback，:213--221）与记录结构 \fld{SolverModeSwitchRecord}
 索引空间总约定：求解器内部向量为 canonical 位置（0-based）；API 出口经
 \srcpath{unproject\_pf\_result}（src/api/hacdcpf.cpp:unproject\_pf\_result，调用点 :solve\_power\_flow）广播回
 \textbf{原始母线编号空间}，内部辅助 DC 母线经
-\srcpath{trim\_internal\_dc\_bus\_results}（:819--826，调用点 :985）裁剪。\fld{va} 以\textbf{弧度}
+\srcpath{trim\_internal\_dc\_bus\_results}（:trim\_internal\_dc\_bus\_results，调用点 :solve\_power\_flow）裁剪。\fld{va} 以\textbf{弧度}
 存储，展示层转换为度（tests/run\_gui\_server.cpp:publish\_balanced\_pf（lambda））。
 \begin{paramtable}
 \fld{vm} & $V_m$ & pu & $[0.5,1.5]$ & 1.0 & AC 母线电压幅值；索引=原始 AC母线向量位置（0-based），长度=原始 AC 母线数\\
@@ -375,7 +375,7 @@ NewtonKrylovFallback，:213--221）与记录结构 \fld{SolverModeSwitchRecord}
 \texttt{ConverterCoordinationReport}（include/hacdcpf/power\_flow/converter\_coordination.hpp:ConverterCoordinationReport）：
 \fld{enabled}、\fld{feasible}、\fld{issues}（严重度 Info/Warning/Error/Fatal、
 \fld{rule\_id}、组件 .index、岛号、消息）与逐 DC 岛摘要 \fld{dc\_islands}
-（\texttt{DCIslandCoordinationSummary}，:40--63）。
+（\texttt{DCIslandCoordinationSummary}，:DCIslandCoordinationSummary）。
 
 \subsection{ConverterModelScope：模型覆盖声明}\label{subsec:scope}
 

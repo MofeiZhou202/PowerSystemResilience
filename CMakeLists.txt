@@ -546,6 +546,7 @@ set(HACDCPF_SOURCES
   #    admissibility guard); operationalizes docs/latex/sppt_theory.tex ──────
   src/sppt/metamorphic.cpp
   src/sppt/certificate.cpp
+  src/sppt/fault_campaign.cpp
   src/sppt/independent_residual.cpp
   src/sppt/intelligent_simulation.cpp
   src/sppt/guard.cpp
@@ -887,6 +888,19 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/sppt_benchmark.cpp")
     $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3 -DNDEBUG>
     $<$<CXX_COMPILER_ID:MSVC>:/O2 /DNDEBUG>)
   hacdcpf_copy_opendss_runtime(sppt_benchmark)
+endif()
+
+# Reproducible multi-scale statistical fault-injection campaign for the SPPT paper.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/sppt_scale_fault_campaign.cpp")
+  add_executable(sppt_scale_fault_campaign
+    tools/sppt_scale_fault_campaign.cpp)
+  target_link_libraries(sppt_scale_fault_campaign PRIVATE hacdcpf::hacdcpf)
+  target_compile_definitions(sppt_scale_fault_campaign PRIVATE
+    HACDCPF_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+  target_compile_options(sppt_scale_fault_campaign PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3 -DNDEBUG>
+    $<$<CXX_COMPILER_ID:MSVC>:/O2 /DNDEBUG>)
+  hacdcpf_copy_opendss_runtime(sppt_scale_fault_campaign)
 endif()
 
 # ── Native hybrid AC/DC PF evidence generator for SPPT paper ─────────────────

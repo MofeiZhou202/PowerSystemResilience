@@ -143,7 +143,7 @@ DC 支路损耗不进入商业出清、在非线性认证中校核；VSC 固定/
         \srcpath{src/market/market\_simulation.cpp:run\_day\_ahead\_market}）；
   \item 公式无法表示的在役资产（目前仅 external\_grid、energy\_router）以
         \texttt{UnsupportedMarketAsset} 退回（不静默丢弃，
-        \srcpath{src/market/market\_simulation.cpp:unsupported\_market\_assets,4750--4757}）；
+        \srcpath{src/market/market\_simulation.cpp:unsupported\_market\_assets}）；
   \item N-1：预防式 LODF 割覆盖 AC 支路；机组、DC 支路、换流器与 DC 储能停用在启用
         N-1 时以校正性固定组合 SCED 校核（\fld{hybrid\_n1\_modelled}，
         \srcpath{src/market/market\_simulation.cpp:pricing\_objective（lambda）}）；AC 应急校核为 opt-in，

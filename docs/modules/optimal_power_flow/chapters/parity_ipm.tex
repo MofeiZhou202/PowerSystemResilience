@@ -21,18 +21,18 @@ Parity IPM 核是平台 AC OPF 三条非线性求解路线之一（另两条为
 “外层障碍参数 $+$ 内层牛顿”两层结构不同，本核在 Parity 建模层给出的
 全空间问题上直接运行 Mehrotra 预测--校正原始对偶内点法：所有变量块与
 约束行在 \srcpath{Problem::vidx}/\srcpath{Problem::cidx} 中显式编号
-（\srcpath{include/hacdcpf/optimal\_power\_flow/formulation.hpp}:66--123），
+（\srcpath{include/hacdcpf/optimal\_power\_flow/formulation.hpp:VarIndex、:ConstraintIndex}），
 核不再做任何设备级聚合或惩罚逼近，因此它是混合 AC/DC 统一建模的
-首选审查路径（\srcpath{include/hacdcpf/optimal\_power\_flow/parity\_ipm\_solver.hpp}:17--28
+首选审查路径（\srcpath{include/hacdcpf/optimal\_power\_flow/parity\_ipm\_solver.hpp:solve\_ac\_opf\_parity}
 头文件注释）。核的公开入口为
 \srcpath{solve\_primal\_dual\_ipm}（声明
-\srcpath{native\_ipm\_solver.hpp}:90，定义 :852--2140），配套的同伦切线
+\srcpath{native\_ipm\_solver.hpp:solve\_primal\_dual\_ipm}，定义 :solve\_primal\_dual\_ipm），配套的同伦切线
 例程 \srcpath{homotopy\_tangent} 复用同一套 KKT 机器为 Davidenko 目标
-同伦提供路径切向量（声明 \srcpath{native\_ipm\_solver.hpp}:104--113，
-定义 :2145--2248）。
+同伦提供路径切向量（声明 \srcpath{native\_ipm\_solver.hpp:homotopy\_tangent}，
+定义 :homotopy\_tangent）。
 
 \subsubsection*{调用链与驱动层}
-头文件 \srcpath{parity\_ipm\_solver.hpp}:29--30 声明了高层驱动
+头文件 \srcpath{parity\_ipm\_solver.hpp:solve\_ac\_opf\_parity} 声明了高层驱动
 \srcpath{solve\_ac\_opf\_parity}，但该声明在本检出处\textbf{没有对应定义}
 （全仓检索仅命中声明本身），属悬置声明；实际驱动是
 \srcpath{ac\_opf.cpp} 中的文件静态函数 \srcpath{solve\_with\_parity\_ipm}
@@ -93,18 +93,18 @@ Parity IPM 核是平台 AC OPF 三条非线性求解路线之一（另两条为
 \end{figure}
 
 \subsubsection*{选项与结果结构体}
-\compmeta{IPMOptions}{\srcpath{include/hacdcpf/optimal\_power\_flow/native\_ipm\_solver.hpp}:35--73}
+\compmeta{IPMOptions}{\srcpath{include/hacdcpf/optimal\_power\_flow/native\_ipm\_solver.hpp:IPMOptions}}
 \fld{IPMOptions} 承载迭代上限、三类容忍度、正则化基数、fraction-to-boundary
 因子 $\tau$ 与可选的完整热启动状态（原始点、等式/不等式乘子、松弛）；
 全字段见 \ref{subsec:pipm-params}~节参数表。如实说明两点：其一，
 \fld{tol\_complementarity} 与 \fld{regularization} 两个字段在本核实现中
-\textbf{从未被读取}（:852--2140 内仅出现 \fld{tol\_primal}、\fld{tol\_dual}、
+\textbf{从未被读取}（:solve\_primal\_dual\_ipm 内仅出现 \fld{tol\_primal}、\fld{tol\_dual}、
 \fld{alpha\_max}、\fld{max\_iter} 与 \fld{verbose}），互补容忍度由
 \fld{tol\_primal} 派生、正则化梯级为硬编码常数（见
 \ref{subsec:pipm-conv}、\ref{subsec:pipm-kkt}~节）；其二，\fld{tol\_dual}
 不进入收敛判据本身，仅用于滤波器线搜索的平稳性守卫（:solve\_primal\_dual\_ipm）。
 
-\compmeta{IPMResult}{\srcpath{include/hacdcpf/optimal\_power\_flow/native\_ipm\_solver.hpp}:34--59}
+\compmeta{IPMResult}{\srcpath{include/hacdcpf/optimal\_power\_flow/native\_ipm\_solver.hpp:IPMResult}}
 \fld{IPMResult} 返回收敛标志、迭代数、三类归一化残差
 （\fld{primal\_inf}/\fld{dual\_inf}/\fld{complementarity}）、初值残差、
 热启动标记、线性代数计数（\fld{factorization\_calls}、
@@ -112,7 +112,7 @@ Parity IPM 核是平台 AC OPF 三条非线性求解路线之一（另两条为
 \fld{symbolic\_analyze\_calls}、\fld{backend\_escalations}、
 \fld{scaling\_rebuilds}）、英文状态串 \fld{status}、实际 KKT 后端标签
 \fld{linear\_solver}（\fld{dense\_lu}/\fld{sparse\_umfpack}/
-\fld{sparse\_klu}/\fld{sparse\_eigen\_lu}/\fld{sparse}，:2126--2135）
+\fld{sparse\_klu}/\fld{sparse\_eigen\_lu}/\fld{sparse}，:solve\_primal\_dual\_ipm）
 、Phase I 前后违反量/dual-fit/预算/终止原因、Phase II 接受标志，
 与最终原始-对偶状态 $(x,\lambda,\mu,z)$。状态串的可取值全集见
 \ref{subsec:pipm-errors}~节的状态串表。
@@ -121,7 +121,7 @@ Parity IPM 核是平台 AC OPF 三条非线性求解路线之一（另两条为
 
 \subsubsection*{障碍问题与松弛化}
 核求解的问题是 Parity 建模层装配的非线性规划（头文件问题声明
-\srcpath{native\_ipm\_solver.hpp}:61--90）：
+\srcpath{native\_ipm\_solver.hpp:solve\_primal\_dual\_ipm}）：
 \begin{align*}
 \min_{x}\; & f(x)\\
 \text{s.t.}\; & g(x) = 0,\quad h(x) \le 0,\quad x_{\min} \le x \le x_{\max}
@@ -134,7 +134,7 @@ Parity IPM 核是平台 AC OPF 三条非线性求解路线之一（另两条为
 核在入口处把变量上下界改写为两行一组的一次不等式并入 $h$：对每个有限下界
 列 $c$ 追加 $x_{\min,c}-x_c\le 0$（雅可比行仅含 $-1$），对每个有限上界列
 追加 $x_c-x_{\max,c}\le 0$（仅含 $+1$）（\srcpath{assemble\_inequalities}，
-:799--844，界列扫描 :887--899）。合并后的不等式总数记
+界列扫描 :solve\_primal\_dual\_ipm）。合并后的不等式总数记
 $m=n_{iq}=m_{nl}+n_{lb}+n_{ub}$；若 $n_{iq}=0$ 直接抛异常
 （:solve\_primal\_dual\_ipm）。引入松弛 $z>0$ 与不等式乘子 $\mu>0$ 后，核迭代求解
 扰动 KKT 系统
@@ -144,12 +144,12 @@ g(x) &= 0\\
 h(x) + z &= 0\\
 Z\mu &= \gamma\, e
 \end{align*}
-（\srcpath{native\_ipm\_solver.hpp}:72--83 文档注释与 :1452--1535 的
+（\srcpath{native\_ipm\_solver.hpp:solve\_primal\_dual\_ipm} 文档注释与 :solve\_primal\_dual\_ipm 的
 右端组装一致；$Z=\mathrm{diag}(z)$，$e$ 为全 1 向量，$\gamma>0$ 为当前
 障碍目标）。建模层对目标梯度作工程缩放：当
 $\lVert\nabla f\rVert_\infty>100$ 时取
 $\omega_f=\min(1,\,100/\lVert\nabla f\rVert_\infty)$ 统一缩小目标及其
-对角 Hessian，把拉氏梯度与最优乘子压回 $O(1)$ 量级（:957--987，参考
+对角 Hessian，把拉氏梯度与最优乘子压回 $O(1)$ 量级（:solve\_primal\_dual\_ipm、:apply\_obj\_scale\_hessian（lambda），参考
 Ipopt \fld{nlp\_scaling\_method} 的做法）；下文 $\tilde f=\omega_f f$，
 $\tilde\nabla f$、$\nabla^2\tilde f$ 同义。
 
@@ -158,7 +158,7 @@ $\tilde\nabla f$、$\nabla^2\tilde f$ 同义。
 （:solve\_primal\_dual\_ipm）$\varepsilon=\min(\,10^{-6}\max(1,\mathrm{width}),$
 $0.49\,\mathrm{width}\,)$；无热启动时由建模层 \srcpath{build\_initial\_point}
 给点
-（\srcpath{formulation.hpp}:267--270）。冷启动松弛取
+（\srcpath{formulation.hpp:build\_initial\_point}）。冷启动松弛取
 $z_i=\max(|h_i(x_0)|,\,1)$（$h_i\ge0$）或 $\max(-h_i,\,10^{-2})$
 （$h_i<0$），乘子取 $\mu_i=\max(1/z_i,\,10^{-2})$ 以维持
 $\mu_i z_i\approx1$；等式乘子 $\lambda=0$（:solve\_primal\_dual\_ipm）。热启动四元组
@@ -245,13 +245,13 @@ $\Sigma=\mathrm{diag}(\mu_i/z_i)$（:solve\_primal\_dual\_ipm），随后执行
 Mehrotra 预测--校正。预测步以 $\gamma=0$ 解牛顿系统得仿射方向
 $(\Delta x^{\mathrm{aff}},\Delta\lambda^{\mathrm{aff}},
 \Delta z^{\mathrm{aff}},\Delta\mu^{\mathrm{aff}})$，并以 $\tau=1$ 探测
-仿射步长（凝集形式 :1449--1489，增广形式 :1316--1331）：
+仿射步长（凝集与增广形式均见 :solve\_primal\_dual\_ipm）：
 \begin{align*}
 \alpha_p^{\mathrm{aff}} &= \min\{\mathrm{ftb}(z,\Delta z^{\mathrm{aff}},1),\,1\},
 &
 \alpha_d^{\mathrm{aff}} &= \min\{\mathrm{ftb}(\mu,\Delta\mu^{\mathrm{aff}},1),\,1\}
 \end{align*}
-对偶间隙与仿射间隙为（凝集 :1492--1495，增广 :1332、1352--1354）
+对偶间隙与仿射间隙为（凝集与增广均见 :solve\_primal\_dual\_ipm）
 \begin{align*}
 \bar\mu &= \frac{z^{\top}\mu}{n_{iq}},
 &
@@ -259,7 +259,7 @@ $(\Delta x^{\mathrm{aff}},\Delta\lambda^{\mathrm{aff}},
 \frac{(z+\alpha_p^{\mathrm{aff}}\Delta z^{\mathrm{aff}})^{\top}
       (\mu+\alpha_d^{\mathrm{aff}}\Delta\mu^{\mathrm{aff}})}{n_{iq}}
 \end{align*}
-定心参数取立方律并截断（凝集 :1496--1498，增广 :1355--1357）：
+定心参数取立方律并截断（凝集与增广均见 :solve\_primal\_dual\_ipm）：
 \begin{align*}
 \sigma &= \left(\mathrm{clamp}\!\left(
   \frac{\bar\mu_{\mathrm{aff}}}{\bar\mu+10^{-16}},\,0,\,1\right)\right)^{3},
@@ -268,7 +268,7 @@ $(\Delta x^{\mathrm{aff}},\Delta\lambda^{\mathrm{aff}},
 \end{align*}
 校正步右端补入 Mehrotra 二阶交叉项
 $c_i=\mathrm{clamp}(\Delta\mu_i^{\mathrm{aff}}\Delta z_i^{\mathrm{aff}},
-\,\pm 0.1\gamma)$（:1504--1509 与 :1360--1364）。凝集形式的校正右端为
+\,\pm 0.1\gamma)$（:solve\_primal\_dual\_ipm）。凝集形式的校正右端为
 （:solve\_primal\_dual\_ipm）
 \begin{align*}
 N_{\mathrm{corr}} &= \nabla\tilde f + J_g^{\top}\lambda + J_h^{\top}\mu
@@ -283,15 +283,15 @@ N_{\mathrm{corr}} &= \nabla\tilde f + J_g^{\top}\lambda + J_h^{\top}\mu
 \end{align*}
 此后可追加至多 2 次 Gondzio 额外校正：对试步互补对
 $\tilde z_i\tilde\mu_i$ 低于 $0.1\gamma$ 的分量以零等式残差右端再解一次
-同分解方程并累加方向（凝集 :1542--1582，增广 :1400--1432，阈值
+同分解方程并累加方向（凝集与增广均见 :solve\_primal\_dual\_ipm，阈值
 $10^{-12}\gamma$）。增广形式另有两条防线：当 fraction-to-boundary 步长
 被压到 $10^{-9}$ 以下时判定方向数值爆炸，把 $\gamma$ 提升到
 $\max(\gamma,\,0.5\bar\mu)$ 并清零交叉项后重解校正，至多 2 次
-（重新定心，:1434--1441）；滤波器全拒时还可以 $\gamma\leftarrow\max(\gamma,\bar\mu)$
-的纯定心步整体重跑一次线搜索（中心性恢复重试，:1874--1898）。
+（重新定心，:solve\_primal\_dual\_ipm）；滤波器全拒时还可以 $\gamma\leftarrow\max(\gamma,\bar\mu)$
+的纯定心步整体重跑一次线搜索（中心性恢复重试，:solve\_primal\_dual\_ipm）。
 
 环境变量 \srcpath{HACDCPF\_OPF\_MU\_STRATEGY=abo}（仅增广形式生效，
-:1092--1095）把立方律换成 Armand--Benoist--Orban 动态 $\mu$：以
+:solve\_primal\_dual\_ipm）把立方律换成 Armand--Benoist--Orban 动态 $\mu$：以
 $\mu^{+}=\mu_{\mathrm{dyn}}^{2}/\mu_0$ 为更新函数、
 \begin{align*}
 \gamma &= \mathrm{clamp}\!\left(
@@ -306,8 +306,8 @@ $\mu_{\mathrm{dyn}}$（:solve\_primal\_dual\_ipm）。默认 \fld{mehrotra}。
 \subsection{KKT 系统组装与线性求解}\label{subsec:pipm-kkt}
 
 \subsubsection*{两种牛顿系统形式}
-核提供两种 KKT 组装形式（枚举 \fld{KktForm}，:178；环境变量
-\srcpath{HACDCPF\_OPF\_KKT\_FORM}，默认 \fld{condensed}，:188--199）：
+核提供两种 KKT 组装形式（枚举 \fld{KktForm}；环境变量
+\srcpath{HACDCPF\_OPF\_KKT\_FORM}，默认 \fld{condensed}，:kkt\_form\_preference）：
 \begin{itemize}
   \item \textbf{凝集式（condensed，生产默认）}：把不等式乘子消入
         $(1,1)$ 块，
@@ -335,8 +335,8 @@ $\mu_{\mathrm{dyn}}$（:solve\_primal\_dual\_ipm）。默认 \fld{mehrotra}。
         \begin{bmatrix}\Delta x\\ \Delta\lambda\\ \Delta\mu\end{bmatrix}
         = \begin{bmatrix}-\tilde L_x\\ -g\\ r_3\end{bmatrix}
         \end{align*}
-        （块结构注释 :562--571，装配 \srcpath{factor\_kkt\_sparse\_augmented}
-        :572--629；$(3,3)$ 块 $-z_i/\mu_i$ :622--626）。条件数对障碍比为
+        （块结构注释、装配与 $(3,3)$ 块 $-z_i/\mu_i$ 均见
+        \srcpath{factor\_kkt\_sparse\_augmented}）。条件数对障碍比为
         线性，且对称不定分解可精确核对惯性：约化 Hessian 正定时惯性应为
         $(n,\;m_{eq}+n_{iq},\;0)$。
 \end{itemize}
@@ -365,17 +365,17 @@ MUMPS 在本检出处不可用（见下），$\delta_W$ 校正在实际构建中
 分析：每次求解先对 KKT 做对称 Ruiz 平衡——迭代至多 5 轮、每轮把
 $D_i$ 除以当前行 $\infty$-范数的平方根、行失衡偏差 $|\log r_{\max}|<10^{-3}$
 即停（:compute\_ruiz\_scaling）——得到 $D\!KD$，此后求解按
-$(D\!KD)\,y=D\,b$、$x=D\,y$ 进行（:639--643、685）。平衡矩阵默认整个
+$(D\!KD)\,y=D\,b$、$x=D\,y$ 进行（:kkt\_solve\_scaled）。平衡矩阵默认整个
 求解过程只算一次并冻结（\srcpath{HACDCPF\_OPF\_RESCALE\_PER\_ITER=1}
-恢复逐迭代重算，:503--511）；注释记录了冻结缩放把 IEEE24 三区域扩展
+恢复逐迭代重算，:factor\_assembled\_kkt）；注释记录了冻结缩放把 IEEE24 三区域扩展
 算例从 640 迭代停滞修复为 36 迭代收敛的教训（:factor\_assembled\_kkt）。
 回代自带至多 2 步迭代精化，且仅当校正\textbf{确实减小}残差时才采纳
-（防数值奇异 KKT 上精化发散，:649--671）。
+（防数值奇异 KKT 上精化发散，:kkt\_solve\_scaled）。
 
-线性后端按结构感知顺序选取（\srcpath{backend\_order}，:268--327）：
+线性后端按结构感知顺序选取（\srcpath{backend\_order}）：
 \begin{itemize}
   \item 纯 AC 问题（无 DC 母线/支路、VSC、DC/DC、能量路由器，判定
-        :1076--1080）：KLU $\to$ MUMPS $\to$ UMFPACK $\to$ Eigen
+        :solve\_primal\_dual\_ipm）：KLU $\to$ MUMPS $\to$ UMFPACK $\to$ Eigen
         SparseLU（:backend\_order）。KLU 的块三角分解匹配电网 KKT 的近块三角
         结构，注释给出 case2869 分解 0.006~s 对 MUMPS 0.015~s、端到端
         5.97~s 对 12.05~s 且目标值一致的实测（:backend\_order）；
@@ -385,11 +385,11 @@ $(D\!KD)\,y=D\,b$、$x=D\,y$ 进行（:639--643、685）。平衡矩阵默认整
 \end{itemize}
 活动后端具有粘性；仅当 Eigen SparseLU 回代残差超过
 $10^{-6}\lVert b\rVert_\infty$ 时置 \fld{solve\_degraded}，下次分解沿候选
-序列升级一档（:677--683、527--534）；UMFPACK/KLU 的告警残差不触发降级
-（注释 :672--676）。每个后端按 $(\dim,\mathrm{nnz})$ 缓存各自的符号分析，
-模式不变即复用（:233--234、546--552）。$n+m_{eq}\le512$ 的小系统改走
-稠密 \fld{Eigen::PartialPivLU}（阈值 \fld{kDenseAutoKktDim}，:1061--1069；
-稠密装配/分解 :729--769，同样带 2 步精化 :782--793），环境变量
+序列升级一档（:kkt\_solve\_scaled、:factor\_assembled\_kkt）；UMFPACK/KLU 的告警残差不触发降级
+（注释 :kkt\_solve\_scaled）。每个后端按 $(\dim,\mathrm{nnz})$ 缓存各自的符号分析，
+模式不变即复用（:SparseKKTCache、:factor\_assembled\_kkt）。$n+m_{eq}\le512$ 的小系统改走
+稠密 \fld{Eigen::PartialPivLU}（阈值 \fld{kDenseAutoKktDim}，:solve\_primal\_dual\_ipm；
+稠密装配/分解 :factor\_kkt\_dense，同样带 2 步精化 :kkt\_solve\_dense），环境变量
 \srcpath{HACDCPF\_OPF\_LINEAR\_SOLVER}（旧拼写
 \srcpath{HACDCPF\_OPF\_SPARSE\_SOLVER} 兼容）可强制
 \fld{dense}/\fld{mumps}/\fld{umfpack}/\fld{klu}/\fld{eigen}/\fld{auto}
@@ -397,13 +397,13 @@ $10^{-6}\lVert b\rVert_\infty$ 时置 \fld{solve\_degraded}，下次分解沿候
 
 \subsubsection*{稀疏库的编译期门控与回退}
 UMFPACK/KLU 支持由 \srcpath{HACDCPF\_OPF\_HAVE\_UMFPACK} 与
-\srcpath{HACDCPF\_OPF\_HAVE\_KLU} 门控（:25--30、215--220）：CMake 在
+\srcpath{HACDCPF\_OPF\_HAVE\_KLU} 门控（:SparseKKTCache、:backend\_order）：CMake 在
 \srcpath{HACDCPF\_USE\_SUITESPARSE=ON}（默认 ON，CMakeLists.txt:69--70）
 下优先链接 MIPSolvers 内置的 \fld{umfpack\_vendored}/\fld{klu\_vendored}
 目标并定义两宏（CMakeLists.txt:597--612），否则回退系统 SuiteSparse 探测
 （CMakeLists.txt:613--698）；两级都找不到时两个宏不定义，稀疏路径只剩
-Eigen \fld{SparseLU}（COLAMD 排序，:221、364--370）。MUMPS 分支由
-\srcpath{HACDCPF\_HAVE\_MUMPS} 门控（:37--39、222--224），:36 注释称该宏
+Eigen \fld{SparseLU}（COLAMD 排序，:SparseKKTCache、:sparse\_factorize\_active）。MUMPS 分支由
+\srcpath{HACDCPF\_HAVE\_MUMPS} 门控（:SparseKKTCache、:backend\_order），文件头注释称该宏
 “继承自 mipsolvers 目标的公共编译定义”；但本检出处 MIPSolvers 的 CMake
 从不定义该宏（全仓检索仅在 parity\_ipm.cpp 内部出现），且其所引用的
 \srcpath{mipsolvers::engine::MumpsSolver} 类在当前 MIPSolvers 头文件树中
@@ -415,7 +415,7 @@ Eigen \fld{SparseLU}（COLAMD 排序，:221、364--370）。MUMPS 分支由
 
 \subsubsection*{fraction-to-boundary 与空步判定}
 原始/对偶步长分别由 fraction-to-boundary 规则给出
-（\srcpath{ftb}，:52--63）：
+（\srcpath{ftb}）：
 \begin{align*}
 \alpha(v,\Delta v,\tau) &= \min\!\left\{1,\;
 \min_{i:\,\Delta v_i<0}\frac{-\tau\, v_i}{\Delta v_i}\right\}
@@ -424,15 +424,15 @@ Eigen \fld{SparseLU}（COLAMD 排序，:221、364--370）。MUMPS 分支由
 $\alpha_d$ 同理（:solve\_primal\_dual\_ipm）。当 $\min(\alpha_p,\alpha_d)<10^{-7}$
 时判定该方向为空步（vacuous step）：滤波器的进步余量
 $\eta\alpha$、$\gamma_\theta\theta$ 已数值失效，直接放弃线搜索进入
-异常路径（:1591--1599；注释记录了 case13659 在 $\alpha\sim10^{-9}$
+异常路径（:solve\_primal\_dual\_ipm；注释记录了 case13659 在 $\alpha\sim10^{-9}$
 “被接受”步上随机游走数百迭代的事故）。
 
 \subsubsection*{回溯线搜索与 $(\theta,\varphi)$ 滤波器}
 线搜索对试步 $(x+\alpha_p\Delta x,\;z+\alpha_p\Delta z,\;
 \mu+\alpha_d\Delta\mu,\;\lambda+\alpha_d\Delta\lambda)$ 重估全部非线性
 残差并做接受测试，拒绝则 $\alpha\leftarrow0.5\alpha$，至多 14 次回溯
-（\fld{kMaxBacktracks}/\fld{kBacktrack}，:1616--1617；主循环
-\srcpath{run\_backtracks} :1803--1871）。接受准则有两层：
+（\fld{kMaxBacktracks}/\fld{kBacktrack}，:solve\_primal\_dual\_ipm；主循环
+\srcpath{run\_backtracks}（lambda））。接受准则有两层：
 \begin{enumerate}
   \item \textbf{遗留三轴准则}：可行轴要求
         $\theta_t\le(1-\eta\bar\alpha_p)\theta$ 且对偶两轴不放大超 100 倍；
@@ -447,11 +447,11 @@ $\eta\alpha$、$\gamma_\theta\theta$ 已数值失效，直接放弃线搜索进�
         默认常数）：$\varphi_\gamma(x,z)=\tilde f(x)-\gamma\sum_i\ln z_i$，
         试点须相对当前对与\textbf{全部历史对}在
         $\theta$ 上占优（$\theta_t\le(1-\gamma_\theta)\theta$）或在
-        $\varphi$ 上至少降 $\gamma_\varphi\theta$（支配记忆，
-        :1732--1760，历史入栈 :1831）；近可行且方向为真实 $\varphi$ 下降
+        $\varphi$ 上至少降 $\gamma_\varphi\theta$（支配记忆见
+        :eval\_and\_test\_trial（lambda），历史入栈 :run\_backtracks（lambda））；近可行且方向为真实 $\varphi$ 下降
         时追加 Armijo 条件
         $\varphi_t\le\varphi_k+\eta_\varphi\bar\alpha\, d\varphi$
-        （switching 条件 :1726--1729，Armijo :1764--1766）。常数
+        （switching 条件与 Armijo 均见 :eval\_and\_test\_trial（lambda））。常数
         $\gamma_\theta=\gamma_\varphi=10^{-5}$、$\delta_s=1.0$、
         $s_\theta=1.1$、$\eta_\varphi=10^{-8}$、$\theta_{\min}=10^{-4}$
         （:solve\_primal\_dual\_ipm）；另有绝对天花板
@@ -459,12 +459,12 @@ $\eta\alpha$、$\gamma_\theta\theta$ 已数值失效，直接放弃线搜索进�
 \end{enumerate}
 滤波器机制本身即非单调策略：接受只要求相对历史包络的进步，允许单轴
 短期恶化，因此目标与残差沿轨迹均不单调；核另以 best-iterate 档案兜底
-（:1047--1059、1983--1996）。如实说明：只有当 $n+m_{eq}\ge512$ 或
+（:solve\_primal\_dual\_ipm）。如实说明：只有当 $n+m_{eq}\ge512$ 或
 \srcpath{HACDCPF\_OPF\_FILTER\_ALL=1} 时线搜索才真正执行（:solve\_primal\_dual\_ipm）；
 小 KKT 系统在 \srcpath{eval\_and\_test\_trial} 内无条件接受首个有限试步
 （:eval\_and\_test\_trial（lambda）），即小算例走的是无阻尼全步牛顿轨迹，发散风险由后续异常路径
 承担。诊断开关 \srcpath{HACDCPF\_OPF\_STRICT\_THETA=1} 把接受准则收紧为
-纯可行下降（:1645--1646、1775--1778）。
+纯可行下降（:solve\_primal\_dual\_ipm、:eval\_and\_test\_trial（lambda））。
 
 \subsubsection*{二阶校正、中心性恢复与恢复阶段}
 三个逐级升级的全局化补救（均仅增广式；凝集式失败后直接进入异常路径）：
@@ -472,10 +472,10 @@ $\eta\alpha$、$\gamma_\theta\theta$ 已数值失效，直接放弃线搜索进�
   \item \textbf{二阶校正（SOC）}：首轮试步因可行性恶化被拒时，用同一
         分解把等式块右端换成 $-(\alpha_p g+g(x+\alpha_p\Delta x))$ 再解
         一次并尝试复合步，抵消 Maratos 效应的一阶残差上升，每迭代至多
-        一次（:1791--1799 注释，实现 :1835--1865）；
+        一次（:solve\_primal\_dual\_ipm 注释，实现 :run\_backtracks（lambda））；
   \item \textbf{中心性恢复重试}：滤波器全拒但首轮可行性尚可时，以
         $\gamma\leftarrow\max(\gamma,\bar\mu)$、交叉项清零重解校正方向
-        并再跑一次线搜索（Gondzio--Grothey 式定心步，:1874--1898）；
+        并再跑一次线搜索（Gondzio--Grothey 式定心步，:solve\_primal\_dual\_ipm）；
   \item \textbf{恢复阶段}：以上均失败时，把 $(1,1)$ 块换成
         $\rho I$（$\rho=10^{-8}\lVert L_{xx}\rVert$）做一步 Gauss-Newton
         型可行性步，$\alpha$ 折半至多 8 次，接受首个
@@ -487,7 +487,7 @@ $\eta\alpha$、$\gamma_\theta\theta$ 已数值失效，直接放弃线搜索进�
 \subsection{收敛判据}\label{subsec:pipm-conv}
 
 \subsubsection*{归一化残差度量}
-核以四个归一化量度量收敛（\srcpath{compute\_convergence}，:1014--1027）：
+核以四个归一化量度量收敛（\srcpath{compute\_convergence}）：
 \begin{align*}
 \theta &= \frac{\max(\lVert g\rVert_\infty,\,\max_i h_i^{+})}
                {1+\max(\lVert x\rVert_\infty,\lVert z\rVert_\infty)},
@@ -506,11 +506,11 @@ $\eta\alpha$、$\gamma_\theta\theta$ 已数值失效，直接放弃线搜索进�
 下表“典型范围”列填判据的不等式形式，“默认值”列填默认容忍度，“说明”列
 末注源码行号（均为 \srcpath{parity\_ipm.cpp}）。
 \begin{paramtable}
-原始可行（归一化） & $\theta$ & — & $<\varepsilon_p=\fld{tol\_primal}$ & $10^{-6}$ & 驱动层取 $\max(\fld{feasibility\_tol},10^{-10})$（src/optimal\_power\_flow/ac\_opf.cpp:solve\_with\_parity\_ipm；:1032、1037）\\
-原始可行（原始量纲） & $\theta_{\mathrm{raw}}$ & — & $<\varepsilon_p$ & $10^{-6}$ & 与归一化值同时要求，防大 $\lVert x\rVert$ 稀释（:1019、1037）\\
-对偶可行（平稳性） & $\kappa_d$ & — & $<\varepsilon_p$ & $10^{-6}$ & 注意：比较的是 $\varepsilon_p$ 而非 $\varepsilon_d$；$\fld{tol\_dual}$ 只进滤波器守卫（:1022、1037、1701）\\
+原始可行（归一化） & $\theta$ & — & $<\varepsilon_p=\fld{tol\_primal}$ & $10^{-6}$ & 驱动层取 $\max(\fld{feasibility\_tol},10^{-10})$（src/optimal\_power\_flow/ac\_opf.cpp:solve\_with\_parity\_ipm；:compute\_convergence（lambda）、:solve\_primal\_dual\_ipm）\\
+原始可行（原始量纲） & $\theta_{\mathrm{raw}}$ & — & $<\varepsilon_p$ & $10^{-6}$ & 与归一化值同时要求，防大 $\lVert x\rVert$ 稀释（:compute\_convergence（lambda）、:solve\_primal\_dual\_ipm）\\
+对偶可行（平稳性） & $\kappa_d$ & — & $<\varepsilon_p$ & $10^{-6}$ & 注意：比较的是 $\varepsilon_p$ 而非 $\varepsilon_d$；$\fld{tol\_dual}$ 只进滤波器守卫（:compute\_convergence（lambda）、:solve\_primal\_dual\_ipm、:eval\_and\_test\_trial（lambda））\\
 互补间隙 & $\kappa_c$ & — & $<\max(10\varepsilon_p,\,2\times10^{-3})$ & $2\times10^{-3}$ & 大算例障碍病态下平均 $z\mu/n_{iq}$ 常停在 $10^{-3}$ 级，故设工程下限；\fld{tol\_complementarity} 字段未被读取（:solve\_primal\_dual\_ipm）\\
-迭代上限 & — & — & $\fld{max\_iter}$ & 640 & 驱动层折算为内、外上限乘积 $80\times8$（src/optimal\_power\_flow/ac\_opf.cpp:solve\_with\_parity\_ipm；:1149）\\
+迭代上限 & — & — & $\fld{max\_iter}$ & 640 & 驱动层折算为内、外上限乘积 $80\times8$（src/optimal\_power\_flow/ac\_opf.cpp:solve\_with\_parity\_ipm；:solve\_primal\_dual\_ipm）\\
 可接受级收敛 & — & — & $\theta,\theta_{\mathrm{raw}},\kappa_d<100\,\varepsilon_p$ 且 $\kappa_c$ 达标 & $100\times$ & 取当前点或 best-iterate 中更优者，状态串如实标注 acceptable（Ipopt \fld{Solved\_To\_Acceptable\_Level} 惯例）（:solve\_primal\_dual\_ipm）\\
 目标停滞早停 & — & — & $\theta_{\mathrm{raw}}<10^{-4}$、$\kappa_c$ 达标、$|\Delta \tilde f|\le10^{-6}(1+|\tilde f|)$ 连续 20 次 & 20 次 & 早停后状态为 \texttt{objective-stagnant (dual-polish certification pending)}，交由对偶抛光认证（:solve\_primal\_dual\_ipm）\\
 对偶最小二乘认证 & — & — & 终点 $\theta,\theta_{\mathrm{raw}},\kappa_c$ 达 acceptable 且抛光后 $\kappa_d<100\,\varepsilon_p$ & $100\times$ & 解 $\min_{\lambda,\mu}\tfrac12\lVert\tilde\nabla f+J_g^{\top}\lambda+J_h^{\top}\mu\rVert^2$ 的 KKT 系统（$(1,1)$ 块取 $I$），$\mu$ 截断非负；状态串 \texttt{converged (dual least-squares certified)}（:solve\_primal\_dual\_ipm）\\
@@ -518,7 +518,7 @@ $\eta\alpha$、$\gamma_\theta\theta$ 已数值失效，直接放弃线搜索进�
 
 严格判据为 $\theta<\varepsilon_p$、$\theta_{\mathrm{raw}}<\varepsilon_p$、
 $\kappa_d<\varepsilon_p$、$\kappa_c<\kappa_c^{tol}$ 四者同时成立
-（:1037--1038 初判，:2020--2026 迭代内判定，置 \fld{converged} 与状态
+（:solve\_primal\_dual\_ipm 初判与迭代内判定，置 \fld{converged} 与状态
 \fld{"converged"}）。对偶抛光只在 $\kappa_d$ 不劣于轨迹自身乘子时采纳
 抛光乘子（:solve\_primal\_dual\_ipm）。
 
@@ -526,22 +526,22 @@ $\kappa_d<\varepsilon_p$、$\kappa_c<\kappa_c^{tol}$ 四者同时成立
 
 \subsubsection*{核内状态串全集}
 \fld{IPMResult::status} 的全部可取值及其触发位置如下（默认初值
-\texttt{"maximum iterations reached"}，:1041；“说明”列末注源码行号）：
+\texttt{"maximum iterations reached"}，:solve\_primal\_dual\_ipm；“说明”列末注源码行号）：
 \begin{paramtable}
 \fld{converged} & — & — & — & — & 严格判据满足（:solve\_primal\_dual\_ipm）\\
 \texttt{converged (acceptable tolerance, best iterate)} & — & — & — & — & best-iterate 达 $100\times$ 容忍度（:solve\_primal\_dual\_ipm）\\
 \texttt{converged (acceptable tolerance, final iterate)} & — & — & — & — & 终点达 $100\times$ 容忍度（:solve\_primal\_dual\_ipm）\\
 \texttt{converged (dual least-squares certified)} & — & — & — & — & 对偶抛光认证通过（:solve\_primal\_dual\_ipm）\\
 \texttt{objective-stagnant (dual-polish certification pending)} & — & — & — & — & 目标停滞窗口触发；随后若抛光认证失败则保持未收敛（:solve\_primal\_dual\_ipm）\\
-\texttt{maximum iterations reached} & — & — & — & — & 迭代耗尽（:1041 默认值）\\
-\texttt{KKT factorization failed} & — & — & — & — & 正则化梯级/惯性校正全败（:1477--1480 凝集、:1311--1314 增广）\\
-\texttt{predictor back-solve failed} & — & — & — & — & 预测步回代失败（:1321--1326，仅增广）\\
-\texttt{NaN in corrector step} & — & — & — & — & 校正方向出现非有限值（:1394--1398、:1537--1540）\\
+\texttt{maximum iterations reached} & — & — & — & — & 迭代耗尽（:solve\_primal\_dual\_ipm 默认值）\\
+\texttt{KKT factorization failed} & — & — & — & — & 正则化梯级/惯性校正全败（:solve\_primal\_dual\_ipm 凝集与增广两支）\\
+\texttt{predictor back-solve failed} & — & — & — & — & 预测步回代失败（:solve\_primal\_dual\_ipm，仅增广）\\
+\texttt{NaN in corrector step} & — & — & — & — & 校正方向出现非有限值（:solve\_primal\_dual\_ipm）\\
 \texttt{NaN in corrector step} & — & — & — & — & 校正方向出现非有限值（:build\_kkt\_workspace、:solve\_economic\_dispatch）\\
 \texttt{filter line search failed} & — & — & — & — & 回溯耗尽且恢复阶段失败（:solve\_primal\_dual\_ipm）\\
 \end{paramtable}
 两条硬异常在入口处抛出 \fld{std::runtime\_error}：问题规模非法
-（$n\le0$ 或 $m_{eq}<0$，:855--857）与装配后无不等式（:solve\_primal\_dual\_ipm）。
+（$n\le0$ 或 $m_{eq}<0$，:solve\_primal\_dual\_ipm）与装配后无不等式（:solve\_primal\_dual\_ipm）。
 
 \subsubsection*{向 ACOPFResult 的映射（诚实口径）}
 驱动层把核结果翻译为公共结果（src/optimal\_power\_flow/ac\_opf.cpp:solve\_with\_parity\_ipm）：
@@ -555,7 +555,7 @@ $\kappa_d<\varepsilon_p$、$\kappa_c<\kappa_c^{tol}$ 四者同时成立
   \item 计数与残差进 \fld{ACOPFProfiling}：线性后端标签、分解/回代/
         接受/拒绝步数、符号分析次数、后端升级次数、缩放重建次数、热启动
         标记与初值残差（src/optimal\_power\_flow/ac\_opf.cpp:solve\_with\_parity\_ipm；结构体
-        \srcpath{opf\_result.hpp}:47--67）；
+        \srcpath{opf\_result.hpp:ACOPFProfiling}）；
   \item 原始解不存在或含非有限值时 \fld{objective} 与
         \fld{max\_constraint\_violation} 置 $+\infty$，跳过全部状态提取
         （src/optimal\_power\_flow/ac\_opf.cpp:solve\_with\_parity\_ipm）；
@@ -615,7 +615,7 @@ $1000\times$ 容忍带（互补另取 $10^{-2}$ 工程下限）时仍按收敛�
 
 \subsubsection*{IPMOptions 字段}
 \begin{paramtable}
-\fld{verbose} & — & — & true/false & false & 逐迭代调试日志（:24，:1155--1160）\\
+\fld{verbose} & — & — & true/false & false & 逐迭代调试日志（:IPMOptions，:solve\_primal\_dual\_ipm）\\
 \fld{tol\_primal} & $\varepsilon_p$ & — & $10^{-8}$--$10^{-5}$（经验值） & $10^{-6}$ & 原始可行与平稳性判据容忍度；驱动层取 $\max(\fld{feasibility\_tol},10^{-10})$（\srcpath{native\_ipm\_solver.hpp}:IPMOptions，src/optimal\_power\_flow/ac\_opf.cpp:solve\_with\_parity\_ipm）\\
 \fld{tol\_dual} & $\varepsilon_d$ & — & $10^{-8}$--$10^{-5}$（经验值） & $10^{-6}$ & 不进收敛判据；仅滤波器平稳守卫 $\max(10\varepsilon_d,1.02\kappa_d)$（\srcpath{native\_ipm\_solver.hpp}:IPMOptions，src/optimal\_power\_flow/parity\_ipm.cpp:solve\_primal\_dual\_ipm）\\
 \fld{tol\_complementarity} & $\varepsilon_c$ & — & — & $10^{-6}$ & \textbf{本核未读取}；互补阈值固定为 $\max(10\varepsilon_p,2\times10^{-3})$（\srcpath{native\_ipm\_solver.hpp}:IPMOptions，src/optimal\_power\_flow/parity\_ipm.cpp:solve\_primal\_dual\_ipm）\\
@@ -627,17 +627,17 @@ $1000\times$ 容忍带（互补另取 $10^{-2}$ 工程下限）时仍按收敛�
 \fld{phase\_one\_max\_iterations} & — & — & $\ge0$ & 12 & 约束 Newton 迭代硬上限\\
 \fld{phase\_one\_max\_factorizations} & — & — & $\ge0$ & 14 & primal 恢复与一次 dual fit 共用的数值分解硬上限\\
 \fld{phase\_one\_max\_backtracks} & — & — & $\ge0$ & 12 & 每次 Newton 步的回溯上限\\
-\fld{phase\_one\_dispatch\_dual\_min\_improvement} & — & — & 0--1 & 0.05 & raw 与 normalized dual residual 必须同时达到的改善比例（:56，:2245）\\
+\fld{phase\_one\_dispatch\_dual\_min\_improvement} & — & — & 0--1 & 0.05 & raw 与 normalized dual residual 必须同时达到的改善比例（:IPMOptions，:solve\_primal\_dual\_ipm）\\
 \fld{phase\_one\_admission\_mu\_factor} & — & — & $\ge0$ & 1.0 & Phase I 准入要求 violation $\le$ 因子$\times\mu_I$，否则记 \texttt{outside-phase-one-admission}；非有限回退 1.0（:inf\_norm，:elapsed\_ms（lambda））\\
 \fld{phase\_one\_primal\_mu\_factor} & — & — & $\ge0$ & 0.1 & 交接 primal 容差 $\max(\varepsilon_p,\text{因子}\times\mu_I)$；非有限回退 0.1（:inf\_norm，:restore\_phase\_one\_primal）\\
 \fld{phase\_one\_centrality\_tolerance} & $\eta_c$ & — & $\ge0$ & 0.5 & 中心性门槛（$\max_i|z_i\mu_i/\mu_0-1|$ 判据）；非有限回退 0.5（:ftb，:initialize\_phase\_one\_duals）\\
 \fld{phase\_one\_dispatch\_dual\_predictor} & — & — & true/false & false & 实验性零分解连通分量 dispatch-price dual 候选（:ftb，:apply\_obj\_scale\_hessian（lambda））\\
 \fld{phase\_one\_dispatch\_dual\_min\_improvement} & — & — & 0--1 & 0.05 & raw 与 normalized dual residual 必须同时达到的改善比例（:ftb，:apply\_obj\_scale\_hessian（lambda））\\
-\fld{prepared\_state} & — & — & 指针/null & null & 跨求解保有 KKT 符号分析的所有者；\fld{layout\_signature} 变化时调用方须 \texttt{reset}（:66，:2385--2386、3466--3469）\\
-\fld{prepared\_numeric\_refactor} & — & — & true/false & false & 实验性数值重分解请求；当前后端无独立可审计 refactor 对象，fail-closed 报 \texttt{unsupported} 并总是新算数值因子（:70，:3473--3482）\\
-\fld{prepared\_numeric\_max\_relative\_drift} & — & — & $\ge0$ & $10^{-3}$ & 数值重分解允许的矩阵值相对漂移上限（:71；当前后端不消费，见上行）\\
-\fld{prepared\_numeric\_backward\_error\_tolerance} & — & — & $\ge0$ & $10^{-8}$ & 数值重分解的后向误差审计门槛（:72；当前后端不消费，见上行）\\
-\fld{slack\_start} & $z_0$ & — & — & nullptr & 热启动松弛，须严格为正（:31，:919）\\
+\fld{prepared\_state} & — & — & 指针/null & null & 跨求解保有 KKT 符号分析的所有者；\fld{layout\_signature} 变化时调用方须 \texttt{reset}（:IPMOptions，:solve\_primal\_dual\_ipm）\\
+\fld{prepared\_numeric\_refactor} & — & — & true/false & false & 实验性数值重分解请求；当前后端无独立可审计 refactor 对象，fail-closed 报 \texttt{unsupported} 并总是新算数值因子（:IPMOptions，:solve\_primal\_dual\_ipm）\\
+\fld{prepared\_numeric\_max\_relative\_drift} & — & — & $\ge0$ & $10^{-3}$ & 数值重分解允许的矩阵值相对漂移上限（:IPMOptions；当前后端不消费，见上行）\\
+\fld{prepared\_numeric\_backward\_error\_tolerance} & — & — & $\ge0$ & $10^{-8}$ & 数值重分解的后向误差审计门槛（:IPMOptions；当前后端不消费，见上行）\\
+\fld{slack\_start} & $z_0$ & — & — & nullptr & 热启动松弛，须严格为正（:IPMOptions，:solve\_primal\_dual\_ipm）\\
 \fld{equality\_dual\_start} & $\lambda_0$ & — & — & nullptr & 热启动等式乘子，与下两项同时通过检查才启用（\srcpath{native\_ipm\_solver.hpp}:IPMOptions，src/optimal\_power\_flow/parity\_ipm.cpp:solve\_primal\_dual\_ipm）\\
 \fld{inequality\_dual\_start} & $\mu_0$ & — & — & nullptr & 热启动不等式乘子，须严格为正（\srcpath{native\_ipm\_solver.hpp}:IPMOptions，src/optimal\_power\_flow/parity\_ipm.cpp:solve\_primal\_dual\_ipm）\\
 \fld{slack\_start} & $z_0$ & — & — & nullptr & 热启动松弛，须严格为正（\srcpath{native\_ipm\_solver.hpp}:IPMOptions，src/optimal\_power\_flow/parity\_ipm.cpp:solve\_primal\_dual\_ipm）\\
@@ -649,11 +649,11 @@ $1000\times$ 容忍带（互补另取 $10^{-2}$ 工程下限）时仍按收敛�
 \srcpath{HACDCPF\_OPF\_KKT\_FORM} & — & — & condensed/\allowbreak augmented & condensed & 牛顿系统形式；condensed 为生产默认，augmented 供刚性模型（:kkt\_form\_preference）\\
 \srcpath{HACDCPF\_OPF\_MU\_STRATEGY} & — & — & mehrotra/abo & mehrotra & 中心路径参数策略（ABO 仅增广式）（:solve\_primal\_dual\_ipm）\\
 \srcpath{HACDCPF\_OPF\_DELTA\_C} & $\delta_C$ & — & $10^{-10}$--$10^{-6}$（经验值） & $10^{-8}\lVert L_{xx}\rVert$ & 增广式 $(2,2)$ 块正则（绝对值）（:solve\_primal\_dual\_ipm）\\
-\srcpath{HACDCPF\_OPF\_INERTIA\_GATE} & $N_{ig}$ & — & 0--20 & 0（关） & 纯 AC KLU 路径每 $N$ 次分解用 MUMPS 复检惯性；默认关闭（效果算例相关，注释 :1235--1246），且依赖本检出处不可用的 MUMPS（:solve\_primal\_dual\_ipm）\\
+\srcpath{HACDCPF\_OPF\_INERTIA\_GATE} & $N_{ig}$ & — & 0--20 & 0（关） & 纯 AC KLU 路径每 $N$ 次分解用 MUMPS 复检惯性；默认关闭（效果算例相关，注释 :solve\_primal\_dual\_ipm），且依赖本检出处不可用的 MUMPS（:solve\_primal\_dual\_ipm）\\
 \srcpath{HACDCPF\_OPF\_RESCALE\_PER\_ITER} & — & — & 置位/未置位 & 未置位 & 置 1 恢复逐迭代 Ruiz 重平衡（默认冻结）（:factor\_assembled\_kkt）\\
 \srcpath{HACDCPF\_OPF\_FILTER\_ALL} & — & — & 置位/未置位 & 未置位 & 对任意规模强制启用残差滤波器（默认仅 $n+m_{eq}\ge512$）（:solve\_primal\_dual\_ipm）\\
-\srcpath{HACDCPF\_OPF\_STRICT\_THETA} & — & — & 置位/未置位 & 未置位 & 诊断：仅按纯可行下降接受（:1645--1646、1775--1778）\\
-\srcpath{HACDCPF\_OPF\_NO\_LEGACY} & — & — & 置位/未置位 & 未置位 & 诊断：关闭遗留三轴接受路径（:1647--1648、1784--1786）\\
+\srcpath{HACDCPF\_OPF\_STRICT\_THETA} & — & — & 置位/未置位 & 未置位 & 诊断：仅按纯可行下降接受（:solve\_primal\_dual\_ipm、:eval\_and\_test\_trial（lambda））\\
+\srcpath{HACDCPF\_OPF\_NO\_LEGACY} & — & — & 置位/未置位 & 未置位 & 诊断：关闭遗留三轴接受路径（:solve\_primal\_dual\_ipm、:eval\_and\_test\_trial（lambda））\\
 \srcpath{HACDCPF\_OPF\_PROF} & — & — & 置位/未置位 & 未置位 & 进程级分解/回代/装配耗时剖析，退出时打印（:IpmProf）\\
 \srcpath{HACDCPF\_DISABLE\_IPOPT\_OPF} & — & — & 置位/未置位 & 未置位 & 运行期强制禁用嵌入式 Ipopt（src/optimal\_power\_flow/ac\_opf.cpp:solve\_parity\_with\_ipopt）\\
 \end{paramtable}
@@ -664,18 +664,18 @@ $1000\times$ 容忍带（互补另取 $10^{-2}$ 工程下限）时仍按收敛�
 \fld{kLargeKktFilterThreshold} & — & — & — & 512 & 启用残差滤波器的 KKT 维数下限（:solve\_primal\_dual\_ipm）\\
 \fld{kMaxBacktracks} & — & — & — & 14 & 主线搜索最大回溯次数（:solve\_primal\_dual\_ipm）\\
 \fld{kBacktrack} & — & — & — & 0.5 & 回溯折半因子（:solve\_primal\_dual\_ipm）\\
-\fld{kFilterEta} & $\eta$ & — & — & $10^{-4}$ & 遗留三轴进步余量（:1618、1698--1699）\\
+\fld{kFilterEta} & $\eta$ & — & — & $10^{-4}$ & 遗留三轴进步余量（:solve\_primal\_dual\_ipm、:eval\_and\_test\_trial（lambda））\\
 \fld{kGammaTheta}/\fld{kGammaPhi} & $\gamma_\theta$/$\gamma_\varphi$ & — & — & $10^{-5}$ & 滤波器占优余量（:solve\_primal\_dual\_ipm）\\
 \fld{kDelta}\allowbreak /\fld{kSTheta}\allowbreak /\fld{kEtaPhi}\allowbreak /\fld{kThetaMin} & $\delta_s$/$s_\theta$/$\eta_\varphi$/$\theta_{\min}$ & — & — & 1.0/\allowbreak 1.1/\allowbreak $10^{-8}$/\allowbreak $10^{-4}$ & switching 与 Armijo 常数（:solve\_primal\_dual\_ipm）\\
 \fld{kRegLevels} & $\delta$ & — & — & 见说明 & 凝集式渐进正则化梯级 $\{0,\,10^{-8},\,10^{-6},\,10^{-4}\}\lVert W\rVert$（:solve\_primal\_dual\_ipm）\\
 — & $\delta_W$ & — & — & $10^{-8}\lVert L_{xx}\rVert$ 起、$\times8$、封顶 $10^{-2}\lVert L_{xx}\rVert$ & 增广式惯性校正（仅 MUMPS；本检出处不生效）（:solve\_primal\_dual\_ipm）\\
 — & — & — & — & $10^{-12}$ & $z,\mu$ 下限保护（:solve\_primal\_dual\_ipm）与步长下限 $10^{-10}$（:solve\_primal\_dual\_ipm）\\
 — & — & — & — & $10^{-7}$ & 空步判定阈值（:solve\_primal\_dual\_ipm）\\
-\fld{kBetaGC} & $\beta_{gc}$ & — & — & 0.1 & Gondzio 额外校正目标 $0.1\gamma$（:1546、1402）\\
+\fld{kBetaGC} & $\beta_{gc}$ & — & — & 0.1 & Gondzio 额外校正目标 $0.1\gamma$（:solve\_primal\_dual\_ipm）\\
 \fld{kStagnationWindow} & — & — & — & 20 & 目标停滞早停窗口（:solve\_primal\_dual\_ipm）\\
 — & — & — & — & $100\times$ & 可接受级收敛的容忍度倍率（:solve\_primal\_dual\_ipm）\\
-— & — & — & — & 5 & Ruiz 平衡最大轮数、$10^{-3}$ 停则（:415、435）\\
-— & — & — & — & 2 & KKT 迭代精化步数（:655、783）；Gondzio 校正次数上限（:1547、1403）\\
+— & — & — & — & 5 & Ruiz 平衡最大轮数、$10^{-3}$ 停则（:compute\_ruiz\_scaling）\\
+— & — & — & — & 2 & KKT 迭代精化步数（:kkt\_solve\_scaled、:kkt\_solve\_dense）；Gondzio 校正次数上限（:solve\_primal\_dual\_ipm）\\
 — & — & — & — & 100 & 目标梯度缩放参考范数 $\lVert\nabla f\rVert_\infty$（:solve\_primal\_dual\_ipm）\\
 \end{paramtable}
 
@@ -693,11 +693,11 @@ $1000\times$ 容忍带（互补另取 $10^{-2}$ 工程下限）时仍按收敛�
         \srcpath{tests/test\_nighttime\_opf.cpp} 亦引用本路径；
   \item \textbf{基准算例}：源码注释记录了 case2000\_acdc（约 2~s）、
         case2869pegase（Release 54 迭代）、case13659 等 PEGASE/大电网
-        算例的实测轨迹（:182--187、248--262），手算 OPF 算例与跨引擎
+        算例的实测轨迹（:kkt\_form\_preference、:backend\_order），手算 OPF 算例与跨引擎
         对照通道见 \ref{sec:verification}~节；
   \item \textbf{雅可比正确性}：Parity 建模层的解析导数经有限差分核对
         （见 \ref{sec:parityform}~节），本核的 KKT 右端与恢复公式与其
-        共享同一组回调（:989--1008、1683--1696）。
+        共享同一组回调（:solve\_primal\_dual\_ipm、:eval\_and\_test\_trial（lambda））。
   \item \textbf{性能口径}：\srcpath{phase\_one\_restoration\_benchmark}
         固定两次预热、五次计时。默认参数下 case30 从
         $3.1061\times10^{-2}$ 恢复到 $4.0305\times10^{-4}$，Phase II 从
@@ -731,15 +731,15 @@ $1000\times$ 容忍带（互补另取 $10^{-2}$ 工程下限）时仍按收敛�
         故“收敛”不保证紧互补；严格 KKT 点需依赖对偶最小二乘认证或
         acceptable 级判据的对偶分量。
   \item \textbf{单线程}：核为单线程实现，剖析器按此假设设计
-        （:114--118 注释）。
+        （:IpmProf 注释）。
   \item \textbf{凝集式条件数}：默认凝集形式的 $\kappa(W)$ 随障碍比平方
         增长，刚性混合算例可能出现“精确求解但方向错误”的停滞；增广式
-        可缓解但需自行开启（:167--177、180--199）。
+        可缓解但需自行开启（:KktForm、:kkt\_form\_preference）。
   \item \textbf{Ipopt 路径的平台限制与口径差异}：嵌入式 Ipopt 仅 macOS
         可构建（CMakeLists.txt:122--127）；其 acceptable 判据（$1000\times$）
         比本核（$100\times$）宽松，且不返回约束乘子，LMP 在该路径不可用
         （src/optimal\_power\_flow/ac\_opf.cpp:solve\_parity\_with\_ipopt）。
-  \item \textbf{悬置声明}：\srcpath{parity\_ipm\_solver.hpp}:29--30 的
+  \item \textbf{悬置声明}：\srcpath{parity\_ipm\_solver.hpp:solve\_ac\_opf\_parity} 的
         \srcpath{solve\_ac\_opf\_parity} 无定义，调用入口实为
         \srcpath{solve\_ac\_opf} 内的静态驱动（src/optimal\_power\_flow/ac\_opf.cpp:solve\_with\_parity\_ipm）。
   \item 恢复阶段与中心性恢复仅存在于增广形式；默认凝集形式在滤波器

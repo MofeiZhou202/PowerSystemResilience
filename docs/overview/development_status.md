@@ -6,6 +6,58 @@ This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
 
+## SPPT Applied Energy manuscript and fault campaign
+
+`docs/latex/sppt_theory.tex` is now the sole Applied Energy-oriented SPPT
+manuscript source. Its research question is the verifiable safety boundary of
+automated hybrid AC/DC digital-twin construction, rather than a generic
+AI-assisted software framework. The rewritten abstract, related-work positioning,
+contributions, numerical study, discussion, and conclusion use a fixed-seed
+statistical campaign instead of the previous six scripted edits as primary
+evidence. `docs/latex/sppt_campaign_study.tex` records the protocol and results.
+
+The new reusable `sppt::run_fault_campaign` implementation and
+`sppt_scale_fault_campaign` target import seven public GridLAB-D r5643
+distribution feeders and attach the same fully disclosed two-terminal DC/VSC
+overlay. The resulting 32--6986-AC-bus variants evaluate nine edit classes,
+five detector chains, localization, 95% Wilson
+intervals, independent residuals, physical AC/DC consequences, and stage timing.
+The completed seed-20260818 run contains 1,575 samples: 175 randomized valid
+controls, 1,050 structural faults, and 350 plausible intention errors. Full SPPT
+detected/localized 1,050/1,050 structural faults (pooled 95% Wilson lower bound
+0.9964) and rejected 0/175 controls. Solver-only missed all tested dangling VSC
+terminal, missing-DC-support, and invalid-efficiency faults and detected 4.0% of
+duplicate identities in its prespecified 32/78/330-bus scope. The 200
+intention-error samples solved through the 823-bus variant produced maxima of
+0.00424 p.u. AC-voltage deviation, 0.526 MW branch-flow deviation, and 0.0322 MW
+VSC-transfer deviation. The VSC fault generator selects
+only in-service PQ controls and applies a nonzero signed perturbation, so no
+no-op setpoint samples inflate the count. These results explicitly bound
+SPPT: structurally consistent but incorrect parameters require telemetry,
+parameter provenance, state estimation, or human confirmation.
+
+The final seed-20260818 campaign was run twice: all 1,575 non-timing rows matched
+field-for-field, while the four wall-clock columns were excluded from the
+determinism comparison. Publication figures are regenerated directly from the
+CSV and manifest by `tools/sppt_campaign_plots.py`, whose data assertions cover
+case count, bus ladder, solver scope, structural rates, and impact statistics.
+
+The initial campaign exposed degenerate `vmin_pu == vmax_pu == 1.0` slack-bus
+limits in the case33bw/case69 hybrid builders. `parse_case_with_overlay` now
+expands only degenerate imported intervals around the authored setpoint; the
+dedicated validation target passes 178 assertions. The campaign regression
+passes 19 assertions. Full campaign correctness was exercised in an independent
+Debug build with ETAP, Ipopt, and SuiteSparse disabled because the local sibling
+MIPSolvers worktree is dirty; therefore the recorded Debug timings are diagnostic
+only and no reproducible Release-performance claim is made. The manuscript
+and six-page Elsevier-style supplement compile under TeX Live 2026 without
+undefined references. Rendered inspection covers the first page, all three
+main-text numerical figures, the public-case manifest, the paginated
+theory-to-code crosswalk, and the complete landscape fault table; no figure or
+table is clipped. Existing overfull diagnostics in the long theory sections do
+not originate from the new numerical study and remain a later manuscript-
+compression task.
+
 ## 技术委托要求文档
 
 已根据当前源码、公共接口、GUI、数据交换能力和已验证测试基线完成

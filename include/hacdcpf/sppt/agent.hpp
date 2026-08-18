@@ -47,7 +47,8 @@ struct AgentTrajectory {
 /// Run the guarded loop: apply only guard-admissible edits, analyze each
 /// committed state, and score the guard against the edits' labels.
 AgentTrajectory run_agent_loop(const HybridPowerSystem& seed,
-                               const std::vector<AgentEdit>& edits);
+                               const std::vector<AgentEdit>& edits,
+                               bool run_analysis = true);
 
 /// Stable action identifiers exposed to tool-calling LLM adapters.
 std::vector<std::string> agent_action_ids();

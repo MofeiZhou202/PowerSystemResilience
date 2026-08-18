@@ -21,12 +21,12 @@ RPO 解决的是电压/无功协调优化问题：以母线电压偏差与系统
 无功、储能无功、VSC 交流无功、母线电压幅值）与\textbf{离散调压设备}（两绕组
 有载调压变压器 OLTC 档位、可投切并联补偿步数）。平台将该问题建模为混合整数
 非线性规划（MINLP），并采用“外层离散坐标搜索 + 内层连续 AC/DC OPF 补全”的
-双层结构求解（\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp}:293--304，
+双层结构求解（\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp:solve\_rpo}，
 函数 \srcpath{solve\_rpo} 的文档注释）。
 
 与 AC OPF 各章的分工如下：RPO 不重新实现连续优化，而是把每一个离散配置
 $(t,s)$ 的连续补全委托给通用 AC OPF 求解器 \srcpath{solve\_ac\_opf}
-（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:366，函数
+（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:solve\_opf\_inplace}，函数
 \srcpath{solve\_opf\_inplace} 内调用）。内层默认后端为 Parity 全空间 IPM
 （见第~\ref{sec:parityipm}~节），建模层为 Parity formulation
 （见第~\ref{sec:parityform}~节），备选后端为嵌入式 Ipopt
@@ -36,21 +36,21 @@ $(t,s)$ 的连续补全委托给通用 AC OPF 求解器 \srcpath{solve\_ac\_opf}
 
 \subsubsection*{最优性口径（诚实声明）}
 求解器返回的是\textbf{经连续 OPF 补全的可行局部最优点}，不是全局 MINLP 证书
-（\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp}:301--304）。
+（\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp:solve\_rpo}）。
 结果中 \fld{globally\_certified} 恒为 false、\fld{optimality\_gap\_available}
 恒为 false、\fld{gap} 恒为占位值 1.0
-（\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp}:246--255；
-\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:1335），
+（\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp:RPOResult}；
+\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:solve\_rpo}），
 并且每次求解都在 \fld{model\_limitations} 中显式写入该声明
-（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:1301--1302）。
+（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:solve\_rpo}）。
 算法标识字符串固定为
 \srcpath{discrete\_coordinate\_search\_with\_ac\_opf}
-（\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp}:253）。
+（\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp:RPOResult}）。
 
 \subsubsection*{元件利用审计}
 按验证文档的口径，系统元件在 RPO 中分四类处理
 （\srcpath{docs/archive/audits/reactive\_power\_optimization\_validation.md} 第 3 节；
-GUI 覆盖审计实现于 \srcpath{tests/run\_gui\_server.cpp}:19686--19799）：
+GUI 覆盖审计实现于 \srcpath{tests/run\_gui\_server.cpp:add\_coverage（lambda）}）：
 \begin{enumerate}
   \item \textbf{直接离散优化}：两绕组 OLTC（档位）、可投切并联补偿（步数）；
   \item \textbf{连续协同优化}：机组 $P_g/Q_g$、可控新能源/光伏 $P/Q$、储能无功、
@@ -86,15 +86,15 @@ x(y) &= \arg\min_{x\in\mathcal{F}(y)}\; f_{\mathrm{inner}}(x)
 \end{align*}
 其中 $\mathcal{Y}$ 为离散可行集（档位窗口与步数界）。代码按此结构组织：
 外层是 \srcpath{solve\_rpo} 的坐标搜索
-（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:1015--1293），
+（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:solve\_rpo}），
 内层是 \srcpath{solve\_opf\_inplace} 对 \srcpath{solve\_ac\_opf} 的封装
-（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:312--403）。
+（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:solve\_opf\_inplace}）。
 
 \subsubsection*{RPO 排名目标（外层评估口径）}
 RPO 排名目标\textbf{始终由返回的潮流事后评估}，与内层 NLP 实际最小化的目标
-解耦（\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp}:19--24）。
+解耦（\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp:RPOInnerObjective}）。
 评估函数 \srcpath{rpo\_objective} 按所选目标叠加两项
-（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:269--285）：
+（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:rpo\_objective}）：
 \begin{align*}
 f_V &= w_V\sum_{i\in\mathcal{B}_{ac}} \bigl(V_{m,i}-V^{*}\bigr)^{2}
    && \text{（MinVoltageDeviation / Combined）}\\
@@ -110,13 +110,13 @@ f_{\mathrm{RPO}} &=
 其中 $V_{m,i}$ 取内层 OPF 结果向量 \fld{vm}（标幺值），$V^{*}$ 为
 \fld{v\_target}（默认 1.0 pu），$w_V$、$w_L$ 为 \fld{vdev\_weight} 与
 \fld{loss\_weight}（默认均为 1.0）。目标枚举 \srcpath{RPOObjective} 定义于
-\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp}:13--17。
+\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp:RPOObjective}。
 代码中\textbf{没有}“档位动作代价”项：离散动作不直接进入目标，仅通过改善
 $f_V$/$f_L$ 体现价值；\fld{gap\_tol} 只是坐标下降判定“本轮有改进”的阈值
 （见算法流程），并非动作成本。
 
 网损 $P_{\mathrm{loss}}$ 采用\textbf{全系统电源与物理需求的有功差额}台账
-（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:189--266，函数
+（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:compute\_loss}，函数
 \srcpath{compute\_loss}）：
 \begin{align*}
 P_{\mathrm{loss}} &= \sum_{\text{全部电源}} P - \sum_{\text{全部需求}} P
@@ -125,20 +125,20 @@ P_{\mathrm{loss}} &= \sum_{\text{全部电源}} P - \sum_{\text{全部需求}} P
 可弃新能源 \fld{pren\_mw}、储能放电 \fld{pstor\_mw}、在运静态发电机
 （\fld{p\_mw}$\times$\fld{scaling}）、不可弃新能源、不可控光伏、直流侧
 静态电源/光伏、移动储能、虚拟电厂，并减去微网交换功率
-（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:193--231）；
+（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:compute\_loss}）；
 需求侧计列：母线挂接负荷、交流负荷、不对称负荷三相总量、柔性负荷
 （优先取 OPF 调度 \fld{pflex\_mw}）、充电站与电动机折算有功、直流母线与
 直流负荷，并减去切负荷量 \fld{dpd\_mw} 的非负部分
-（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:233--264）。
+（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:compute\_loss}）。
 VSC、DC/DC 与能量路由器端口属\textbf{内部传输}，不计入电源台账
 （同文件:compute\_loss 注释），其损耗已隐含在差额中。当
 \fld{loss\_weight}$=1$ 时 MinActiveLoss 的 \fld{objective} 在数值上等于
 物理网损 MW（单元测试断言此性质，
-\srcpath{tests/test\_reactive\_power\_opt.cpp}:41）。
+\srcpath{tests/test\_reactive\_power\_opt.cpp:TEST\_CASE("RPO reports an honest local certificate and a physical loss ledger")}）。
 
 \subsubsection*{内层连续 NLP 目标（MatchRPO 与 LossEconomic）}
 内层 NLP 目标由枚举 \srcpath{RPOInnerObjective} 选择
-（\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp}:25--34），
+（\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp:RPOInnerObjective}），
 与外层排名目标解耦的原因写在头文件注释中：精简的物理目标（电压偏差/网损）
 在大型僵硬电网上会使 Parity IPM 停滞，而单位边际成本经济调度继承经济路径的
 稳健机制且收敛（同文件:RPOInnerObjective）。
@@ -147,8 +147,8 @@ VSC、DC/DC 与能量路由器端口属\textbf{内部传输}，不计入电源�
   \item \textbf{MatchRPO（默认）}：内层直接最小化 RPO 目标。映射关系为
         MinVoltageDeviation $\to$ \srcpath{ACOPFObjective::\allowbreak VoltageDeviation}，
         Combined $\to$ \srcpath{ACOPFObjective::\allowbreak VoltageDeviation\allowbreak AndLoss}
-        （\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:344--348；
-        目标枚举见 \srcpath{include/hacdcpf/optimal\_power\_flow/opf\_options.hpp}:39--43）。
+        （\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:solve\_opf\_inplace}；
+        目标枚举见 \srcpath{include/hacdcpf/optimal\_power\_flow/opf\_options.hpp:ACOPFObjective}）。
         Parity 装配的目标为
         \begin{align*}
         f_{\mathrm{inner}} &= w_V\sum_{i}\bigl(V_{m,i}-V^{*}\bigr)^{2}
@@ -158,7 +158,7 @@ VSC、DC/DC 与能量路由器端口属\textbf{内部传输}，不计入电源�
         其中 $P_{\mathrm{loss}}^{\mathrm{var}}$ 只含变量部分
         （$P_g$、$P_{\mathrm{ren}}$、$P_{\mathrm{stor}}$、直流储能、减柔性负荷、
         加切负荷），固定注入/需求为常数不影响极小解，报告网损时再补回
-        （\srcpath{src/optimal\_power\_flow/parity\_formulation.cpp}:1204--1237）。
+        （\srcpath{src/optimal\_power\_flow/parity\_formulation.cpp:objective}）。
         末项是 $10^{-6}$ 权重的发电经济性\textbf{择优项}
         （\srcpath{kRpoEconomicTieBreak}），仅用于在等价有功调度方向中选定一个
         并改善 KKT 数值条件，不作用于 $V_m/Q$ 变量、不替代主 RPO 目标
@@ -172,7 +172,7 @@ VSC、DC/DC 与能量路由器端口属\textbf{内部传输}，不计入电源�
         \min P_{\mathrm{loss}} \equiv \min \sum P_g
         \end{align*}
         即全体常规机组成本改写为 $c_1=1,\;c_2=c_0=0$ 的经济调度
-        （\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:687--711，
+        （\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:apply\_unit\_costs（lambda）}，
         函数 \srcpath{apply\_unit\_costs}；目标映射同文件:solve\_opf\_inplace）。
         报告网损仍由 \srcpath{compute\_loss} 按潮流重算，与成本数值无关。
         \textbf{MinActiveLoss 恒走此路径}；MinVoltageDeviation/Combined 在
@@ -186,7 +186,7 @@ VSC、DC/DC 与能量路由器端口属\textbf{内部传输}，不计入电源�
 OLTC 档位 $t_k$ 取整数值，铭牌范围为 $[t_k^{\min},t_k^{\max}]$
 （字段 \fld{tap\_min}/\fld{tap\_max}），相对中性档 \fld{tap\_neutral}
 （$t_{\mathrm{neutral}}$）的\textbf{相对变比}为
-（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:80--82，
+（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:tap\_ratio}，
 函数 \srcpath{tap\_ratio}）：
 \begin{align*}
 r(t) &= 1 + (t - t_{\mathrm{neutral}})\cdot \frac{\Delta_{\%}}{100}
@@ -194,23 +194,23 @@ r(t) &= 1 + (t - t_{\mathrm{neutral}})\cdot \frac{\Delta_{\%}}{100}
 其中 $\Delta_{\%}$ 为 \fld{tap\_step\_percent}（每档步长百分数）。
 \fld{max\_tap\_move}（记 $m_{\mathrm{tap}}$）把每台已选 OLTC 的本次优化窗口
 限制在当前档位 $t_k^{0}$ 上下 $m_{\mathrm{tap}}$ 档以内
-（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:541--547）：
+（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:inspect\_rpo\_controls}）：
 \begin{align*}
 t_k &\in [t_k^{\min},t_k^{\max}]\cap
         [\,t_k^{0}-m_{\mathrm{tap}},\;t_k^{0}+m_{\mathrm{tap}}\,]
 \end{align*}
 $m_{\mathrm{tap}}=-1$ 暴露完整铭牌范围（库默认值），$m_{\mathrm{tap}}=0$
 保持所有 OLTC 固定；GUI 显式默认 $m_{\mathrm{tap}}=2$
-（\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp}:137--141；
-\srcpath{tests/run\_gui\_server.cpp}:19410--19411）。
+（\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp:RPOOptions}；
+\srcpath{tests/run\_gui\_server.cpp:main（lambda）}）。
 \fld{restrict\_tap\_indices} 与 \fld{enabled\_tap\_indices} 提供逐台参与
 控制：开启后只有列入 vector position 的设备进入离散决策向量
-（\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp}:143--147；
-\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:529--534）。
+（\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp:RPOOptions}；
+\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:inspect\_rpo\_controls}）。
 
 对带 \fld{source\_branch\_idx} 的变压器（MATPOWER 导入链），档位动作按
 相对变比同步缩放原始交流支路的电气变比 $\tau$（字段 \fld{branch.tap}；
-\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:94--104，函数
+\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:set\_transformer\_tap\_position}，函数
 \srcpath{set\_transformer\_tap\_position}）：
 \begin{align*}
 \tau &\leftarrow \tau\cdot \frac{r(t^{\mathrm{new}})}{r(t^{\mathrm{old}})}
@@ -222,7 +222,7 @@ $\tau_{\mathrm{before}}\cdot r_{\mathrm{after}}/r_{\mathrm{before}}$
 换算，同文件:solve\_rpo）。
 
 可投切并联补偿步数 $s_j\in\{0,1,\ldots,n_j\}$（$n_j$ 为 \fld{n\_steps}），
-当前电纳按（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:302--307，
+当前电纳按（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:apply\_settings}，
 函数 \srcpath{apply\_settings}）：
 \begin{align*}
 B_{s,j} &= b_{\mathrm{step}}\cdot s_j
@@ -233,7 +233,7 @@ B_{s,j} &= b_{\mathrm{step}}\cdot s_j
 设备入选资格由排除原因函数给出（空串即入选）：变压器要求投运、铭牌上限
 大于下限（\fld{tap\_max} $>$ \fld{tap\_min}）、\fld{tap\_step\_percent}
 有限且为正、
-当前档位在铭牌范围内（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:108--116，
+当前档位在铭牌范围内（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:tap\_exclusion\_reason}，
 函数 \srcpath{tap\_exclusion\_reason}，排除原因串为
 \fld{not\_in\_service}/\allowbreak\fld{fixed\_or\_invalid\_tap\_range}/\allowbreak
 \fld{non\_positive\_tap\_step}/\allowbreak\fld{current\_tap\_out\_of\_range}）；
@@ -245,7 +245,7 @@ MATPOWER 支路只提供当前连续变比，不提供 OLTC 可控标志、档�
 步长，因此导入器保留精确变比但\textbf{不}伪造 OLTC：导入设备的
 \fld{tap\_min}=\fld{tap\_max}=\fld{tap\_pos}=0、\fld{tap\_step\_percent}=0，
 按固定变比处理（单元测试断言，
-\srcpath{tests/test\_reactive\_power\_opt.cpp}:184--211）。
+\srcpath{tests/test\_reactive\_power\_opt.cpp:TEST\_CASE("MATPOWER fixed tap ratios are not invented as 4001-position OLTCs")}）。
 
 \subsubsection*{连续约束与切负荷口径}
 连续可行集 $\mathcal{F}(y)$ 由内层 AC/DC OPF 的约束族构成：交流/直流节点
@@ -255,13 +255,13 @@ MATPOWER 支路只提供当前连续变比，不提供 OLTC 可控标志、档�
 \fld{enforce\_branch\_limits}、\fld{enforce\_converter\_capacity}、
 \fld{enforce\_converter\_current\_limits}、
 \fld{enforce\_converter\_modulation\_limits}（默认全为 true，
-\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp}:151--154；
-透传于 \srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:358--363）。
+\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp:RPOOptions}；
+透传于 \srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:solve\_opf\_inplace}）。
 
 切负荷口径需要精确说明：Parity 装配按目标类型决定是否生成切负荷变量——
 仅当 \fld{objective} 为 \srcpath{ACOPFObjective::Economic} 时
 \fld{load\_shedding} 取真
-（\srcpath{src/optimal\_power\_flow/ac\_opf.cpp}:2526--2539，注释明确
+（\srcpath{src/optimal\_power\_flow/ac\_opf.cpp:solve\_with\_parity\_ipm}，注释明确
 “RPO objectives must not improve voltage/loss by dropping demand”）。
 即电压偏差/网损/组合目标下\textbf{没有}切负荷变量，RPO 不能通过少供电
 获得虚假的电压或网损改善；而 LossEconomic 内层（Economic 目标）保留
@@ -273,18 +273,18 @@ VOLL 兜底的切负荷作为可行性逃生阀。这与验证文档“RPO 模�
 \fld{vm\_max\_pu}）作为硬约束处理（见第~\ref{sec:parityform}~节），RPO
 本身不另设电压界参数；\fld{v\_target} 只是偏差惩罚的目标值而非约束。
 GUI 展示层固定以 $[0.95,1.05]$ pu 作为电压合格带的显示常量
-（\srcpath{tests/run\_gui\_server.cpp}:19634--19635，输出字段
+（\srcpath{tests/run\_gui\_server.cpp:main（lambda）}，输出字段
 \fld{v\_min}/\fld{v\_max}），与求解约束无关。结果指标
 \fld{max\_vdev\_before}/\fld{max\_vdev\_after} 为
 $\max_i |V_{m,i}-V^{*}|$
-（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:287--291，
+（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:max\_voltage\_deviation}，
 函数 \srcpath{max\_voltage\_deviation}）。
 
 \subsection{算法流程}
 
 \subsubsection*{总览}
 求解入口 \srcpath{solve\_rpo}
-（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:621--1386）
+（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:solve\_rpo}）
 按图~\ref{fig:rpo-flow} 组织：先做控制清单审计与基线连续 OPF，再执行
 四个阶段的离散搜索，最后归因结果并写入局限声明。阶段划分与文件头注释
 一致（同文件）。
@@ -326,7 +326,7 @@ $\max_i |V_{m,i}-V^{*}|$
 $10^{-6}$ 的较小者；大电网（达到
 \fld{robust\_inner\_min\_buses}）直接启用经济目标同伦，直接种子不收敛且
 \fld{seed\_homotopy\_on\_failure} 为真时再同伦重解一次
-（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:737--782）。
+（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:run\_baseline（lambda）}）。
 随后在当前离散配置下解基线 OPF（“优化前”状态），以种子结果暖启动
 （同文件:run\_baseline（lambda））。基线接受判据是\textbf{实测容差收敛}：
 \begin{align*}
@@ -344,7 +344,7 @@ $\epsilon_p$、$\epsilon_d$ 为 \fld{ipm\_tol} 与
 
 \subsubsection*{候选评估管线}
 所有搜索阶段共用评估函数 \srcpath{evaluate}
-（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:898--941），
+（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:evaluate（lambda）}），
 要点如下。
 \begin{enumerate}
   \item \textbf{解缓存}：以 $(t,s)$ 拼接向量为键的 \fld{eval\_cache} 避免
@@ -352,12 +352,11 @@ $\epsilon_p$、$\epsilon_d$ 为 \fld{ipm\_tol} 与
   \item \textbf{预算检查}：每次求解前检查墙钟时间 \fld{time\_limit\_sec} 与
         累计内层求解次数 \fld{max\_nodes}；预算只能在\textbf{两次求解之间}
         检查，无法中断一次进行中的 IPM（同文件:budget\_ok（lambda）；
-        另见 \srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp}:110--117
+        另见 \srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp:RPOOptions}
         注释）。
   \item \textbf{原位修改}：候选配置直接写入可变系统副本 \fld{mut\_sys}，
         求解后还原原始档位，避免深拷贝（
-        \srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:294--308、
-        400--401）。
+        \srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:apply\_settings}、:solve\_opf\_inplace）。
   \item \textbf{暖启动链}：候选以当前在位可行点 \fld{incumbent\_result}
         暖启动（同文件:evaluate（lambda））；实测 3000 节点电网上好的候选 2--7 次
         迭代即收敛（\srcpath{docs/archive/audits/reactive\_power\_optimization\_validation.md}
@@ -366,21 +365,20 @@ $\epsilon_p$、$\epsilon_d$ 为 \fld{ipm\_tol} 与
         \fld{search\_ipm\_iter}（默认 200），超限候选按不可行拒绝
         （目标取 $10^{30}$），且不再启用第二后端；混合 AC/DC 电网保留完整
         预算与 Ipopt 第二腿——其电压偏差渐近行为合理需要它
-        （\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:909--920；
+        （\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:evaluate（lambda）}；
         纯交流/混合判定同文件:solve\_rpo）。第二腿在另一后端上重解并按实测
         质量取优（同文件:solve\_opf\_inplace）。
   \item \textbf{并行波评估}：\fld{num\_threads}$>1$ 时一批独立候选按
         Jacobi 波形并行求解（动态工作窃取，每线程一次深拷贝），波间推进
-        在位点（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:418--486、
-        952--1001）。混合 AC/DC 强制串行：MUMPS 路径由进程级互斥锁串行化，
+        在位点（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:evaluate\_batch\_parallel}、:evaluate\_wave（lambda））。混合 AC/DC 强制串行：MUMPS 路径由进程级互斥锁串行化，
         多线程只增开销；纯交流用 KLU，线程安全（同文件:solve\_rpo；
-        \srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp}:84--96）。
+        \srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp:RPOOptions}）。
 \end{enumerate}
 
 \subsubsection*{Phase 0：灵敏度排序}
 每个离散变量在基线处做 $\pm1$ 扰动（每变量至多 2 次求解），取
 $|\Delta f_{\mathrm{RPO}}|$ 作为灵敏度，按降序确定后续所有阶段的处理次序
-——最有影响的变量先优化（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:1015--1092）。
+——最有影响的变量先优化（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:solve\_rpo}）。
 同时按有限差分梯度
 $g_k=(f(y_k+d)-f(y_k))/d$ 记录一维局部灵敏度面（同文件:solve\_rpo）。并行实现为一次 Jacobi 波（同文件:evaluate\_wave（lambda）），串行实现为
 Gauss--Seidel 顺序（同文件:solve\_rpo）。
@@ -390,7 +388,7 @@ Gauss--Seidel 顺序（同文件:solve\_rpo）。
 网格三分搜索：区间 $[lo,hi]$ 内取
 $m_1=lo+\lfloor(hi-lo)/3\rfloor$、$m_2=hi-\lfloor(hi-lo)/3\rfloor$，
 比较 $f(m_1)$ 与 $f(m_2)$ 后收缩区间，直到 $hi-lo\le 2$，再对残余小窗口
-穷举（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:1094--1167）。
+穷举（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:solve\_rpo}）。
 单变量评估量由 $O(R)$ 降为 $O(\log R)$（$R$ 为档位数）。该阶段刻意保持
 Gauss--Seidel 结构：跨变量 Jacobi 化实测会丢失定向优化能力、降低解质量
 （同文件:solve\_rpo 注释）。近似单峰性是启发假设，非凸问题上不保证成立，
@@ -400,7 +398,7 @@ Gauss--Seidel 结构：跨变量 Jacobi 化实测会丢失定向优化能力、�
 对每个变量（仍按灵敏度序）穷举其全部可取值，遇更优即更新在位点；整轮
 无超过 \fld{gap\_tol}（默认 $10^{-4}$）的改进即停止，至多
 \srcpath{kMaxCDCycles}${}=3$ 轮
-（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:1171--1234，
+（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:solve\_rpo}，
 轮数上限同文件:solve\_rpo）。局部灵敏度面在此阶段继续累积但\textbf{从不用于
 剪枝}——注释明确：非凸 MINLP 上局部线性面不是全局有效下界
 （同文件:LocalSensitivityPlane 注释；灵敏度面结构
@@ -409,14 +407,14 @@ Gauss--Seidel 结构：跨变量 Jacobi 化实测会丢失定向优化能力、�
 \subsubsection*{Phase 3：变量对邻域精化}
 对所有变量对 $(v_i,v_j)$ 检查围绕在位点的 $\pm1$ 联合扰动（每对至多 4 个
 组合），捕捉坐标下降可能遗漏的双变量交互
-（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:1236--1293）。
+（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:solve\_rpo}）。
 并行为一次 Jacobi 精化波（同文件:evaluate\_wave（lambda）），串行为双重循环
 （同文件:solve\_rpo）。
 
 \subsubsection*{终止与结果归因}
 搜索结束后按预算消耗置 \fld{terminated\_by\_time\_limit}/
 \fld{terminated\_by\_evaluation\_limit}，并向 \fld{model\_limitations}
-追加相应说明（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:1295--1315）。
+追加相应说明（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:solve\_rpo}）。
 在位点可行（目标 $<10^{20}$）时 \fld{converged}=true，状态串区分
 “Feasible local optimum (heuristic search)”/“Feasible incumbent at time
 limit”/“Feasible incumbent at evaluation limit”
@@ -428,9 +426,9 @@ limit”/“Feasible incumbent at evaluation limit”
 \fld{bc\_stats} 为遗留统计信封：\fld{nodes\_explored} 记候选评估数、
 \fld{lp\_solves} 实际记 NLP 求解次数、\fld{cuts\_added} 记灵敏度面数量，
 \textbf{不是}分支定界或全局间隙证书（同文件:solve\_rpo；
-\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp}:284--286）。
+\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp:RPOResult}）。
 环境变量 \srcpath{HACDCPF\_RPO\_PROF}${}=1$ 可打开分阶段墙钟计时输出
-（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:42--54）。
+（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:rpo\_prof\_enabled}、:rpo\_phase\_log）。
 
 \subsection{公开接口与参数}
 
@@ -439,20 +437,20 @@ limit”/“Feasible incumbent at evaluation limit”
 \begin{itemize}
   \item \texttt{solve\_rpo(sys, opt)}：求解 RPO（MINLP），返回
         \srcpath{RPOResult}（声明与决策变量说明见
-        \srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp}:293--305；
-        实现 \srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:621--1386）；
+        \srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp:solve\_rpo}；
+        实现 \srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:solve\_rpo}）；
   \item \texttt{inspect\_rpo\_controls(sys, opt)}：逐设备审计全部候选离散
         控制，含被排除设备及确切排除原因；求解器与 GUI 输入预览共用这一
-        入选合同（\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp}:234--237；
-        实现 \srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:512--601）；
+        入选合同（\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp:inspect\_rpo\_controls}；
+        实现 \srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:inspect\_rpo\_controls}）；
   \item \texttt{apply\_rpo\_discrete\_solution(sys, result)}：把解出的离散
         点写回 authored 系统（含联动 MATPOWER 支路变比与并联电纳），供独立
-        OPF/PF 回放（\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp}:239--242；
-        实现 \srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:603--619）。
+        OPF/PF 回放（\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp:apply\_rpo\_discrete\_solution}；
+        实现 \srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:apply\_rpo\_discrete\_solution}）。
 \end{itemize}
 GUI 通过 \srcpath{/api/session/rpo\_inputs} 与 \srcpath{/api/session/run\_rpo}
 两个路由使用该接口；\fld{relax\_only} 请求把 \fld{max\_nodes} 压为 1，只做
-基线（根松弛）评估（\srcpath{tests/run\_gui\_server.cpp}:19393--19430）。
+基线（根松弛）评估（\srcpath{tests/run\_gui\_server.cpp:main（lambda）}）。
 
 \subsubsection*{求解选项（RPOOptions）}
 \begin{paramtable}
@@ -474,7 +472,7 @@ GUI 通过 \srcpath{/api/session/rpo\_inputs} 与 \srcpath{/api/session/run\_rpo
 \fld{search\_ipm\_iter} & $K_{\mathrm{s}}^{\max}$ & 次 & 50--500（经验值） & 200 & 搜索评估的失败快速迭代上限（仅纯交流生效）；$\le 0$ 表示不设上限\\
 \fld{ipm\_tol} & $\epsilon_p$ & pu 等 & $10^{-9}$--$10^{-4}$（经验值） & $10^{-6}$ & 内层可行性（最大约束违反）容差，兼作实测收敛判据\\
 \fld{stationarity\_tol} & $\epsilon_d$ & — & $10^{-6}$--$10^{-2}$（经验值） & $10^{-3}$ & scaled KKT 平稳性容差，与可行性容差分列\\
-\fld{inner\_solver\_backend} & — & — & ParityIPM/\allowbreak Ipopt/\allowbreak Auto/\allowbreak EconomicDispatch & ParityIPM & 全部内层 AC OPF 评估的后端（\srcpath{ACOPFSolverBackend}，见 \srcpath{include/hacdcpf/optimal\_power\_flow/opf\_options.hpp}:28--33）\\
+\fld{inner\_solver\_backend} & — & — & ParityIPM/\allowbreak Ipopt/\allowbreak Auto/\allowbreak EconomicDispatch & ParityIPM & 全部内层 AC OPF 评估的后端（\srcpath{ACOPFSolverBackend}，见 \srcpath{include/hacdcpf/optimal\_power\_flow/opf\_options.hpp:ACOPFSolverBackend}）\\
 \fld{seed\_homotopy\_on\_failure} & — & — & true/false & true & 大/僵硬电网经济种子不收敛时，沿经济目标同伦一次性兜底\\
 \fld{max\_tap\_move} & $m_{\mathrm{tap}}$ & 档 & $-1$--$1000$ & $-1$ & 每台已选 OLTC 距当前档位的最大移动档数；$-1$=完整铭牌范围，0=全部固定；GUI 显式默认 2\\
 \fld{restrict\_tap\_indices} & — & — & true/false & false & true 时仅 \fld{enabled\_tap\_indices} 列出的 vector position 进入离散决策向量\\
@@ -529,18 +527,18 @@ GUI 通过 \srcpath{/api/session/rpo\_inputs} 与 \srcpath{/api/session/run\_rpo
 \fld{bs\_mvar\_before}/\allowbreak\fld{bs\_mvar\_after} & $B_s$ & MVAr & — & 0.0 & 优化前/后电纳（等于 \fld{bs\_per\_step} 乘以步数 $s_j$）\\
 \end{paramtable}
 （结构体定义：
-\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp}:158--177；
-结果装配：\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:1347--1371。
+\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp:TapResult}、:ShuntResult；
+结果装配：\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:solve\_rpo}。
 表中 \textbackslash midrule 上半为 \srcpath{TapResult}，下半为
 \srcpath{ShuntResult}。）
 
 \subsubsection*{控制清单审计（RPOTapControlInput / RPOShuntControlInput）}
 \srcpath{inspect\_rpo\_controls} 返回 \srcpath{RPOControlInventory}
 （\fld{taps} 与 \fld{shunts} 两个向量，
-\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp}:227--230），
+\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp:RPOControlInventory}），
 是求解器与 GUI 输入预览共用的入选合同。OLTC 行字段如下
 （同文件:RPOTapControlInput；装配实现
-\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:512--577）：
+\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:inspect\_rpo\_controls}）：
 \begin{paramtable}
 \fld{trafo\_index} & — & — & — & 0 & 在 \fld{ac.transformers\_2w} 的 vector position\\
 \fld{authored\_index} & — & — & — & 0 & 用户侧稳定元件编号 \fld{Transformer2W::index}\\
@@ -563,8 +561,8 @@ GUI 通过 \srcpath{/api/session/rpo\_inputs} 与 \srcpath{/api/session/run\_rpo
 \fld{electrical\_tap\_current}/\allowbreak\fld{electrical\_tap\_min}/\allowbreak\fld{electrical\_tap\_max} & $\tau$ & pu & — & 1.0 & 联动支路当前/最小/最大电气变比\\
 \end{paramtable}
 可投切并联行字段如下
-（\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp}:211--225；
-装配实现 \srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:579--599）：
+（\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp:RPOShuntControlInput}；
+装配实现 \srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:inspect\_rpo\_controls}）：
 \begin{paramtable}
 \fld{shunt\_index} & — & — & — & 0 & 在 \fld{ac.shunts} 的 vector position\\
 \fld{authored\_index} & — & — & — & 0 & 用户侧稳定元件编号 \fld{Shunt::index}\\
@@ -585,13 +583,13 @@ GUI 通过 \srcpath{/api/session/rpo\_inputs} 与 \srcpath{/api/session/run\_rpo
 
 \subsubsection*{全过程交叉验证（GUI 服务层）}
 验证文档第 4 节规定的全过程交叉验证在 GUI 服务层固定执行
-（\srcpath{tests/run\_gui\_server.cpp}:19432--19684），步骤为：
+（\srcpath{tests/run\_gui\_server.cpp:main（lambda）}），步骤为：
 \begin{enumerate}
   \item 保存 RPO 内层最优连续点与离散档位（\fld{optimized\_opf}）；
   \item 用 \srcpath{apply\_rpo\_discrete\_solution} 把档位写入独立系统副本，
         按 \fld{effective\_inner\_nlp\_objective} 复刻单位成本改写后重解
         \textbf{独立 AC/DC OPF}（后端 Auto，非 RPO 内层管线，
-        \srcpath{tests/run\_gui\_server.cpp}:19434--19484）；
+        \srcpath{tests/run\_gui\_server.cpp:main（lambda）}）；
   \item 比较两次 OPF 的目标值、最大 $|\Delta V_m|$、$|\Delta P_g|$、
         $|\Delta Q_g|$（同文件:run\_rpo（lambda））；
   \item 把优化调度（$P_g/Q_g$、新能源、储能、柔性负荷、$V_m/\theta$）写入
@@ -608,7 +606,7 @@ GUI 通过 \srcpath{/api/session/rpo\_inputs} 与 \srcpath{/api/session/run\_rpo
 \end{enumerate}
 非凸 OPF 可能存在目标等价但 $P/Q$ 控制分配不同的局部点，故
 $|\Delta P_g|$/$|\Delta Q_g|$ 完整展示但不单独触发失败
-（\srcpath{tests/run\_gui\_server.cpp}:19584--19587 注释）。
+（\srcpath{tests/run\_gui\_server.cpp:main（lambda）} 注释）。
 
 \subsubsection*{自动测试矩阵}
 \begin{paramtable}
@@ -621,8 +619,8 @@ $|\Delta P_g|$/$|\Delta Q_g|$ 完整展示但不单独触发失败
 \fld{tests/e2e/rpo\_gui\_e2e.mjs}:63--267 & case24/\allowbreak case9/\allowbreak case300\_acdc & 浏览器 E2E & — & — & case24 五个固定变比 $1.03/1.02$ 不被识别为 OLTC；case9 全过程交叉验证通过；case300 混合回归（62 台变压器/3 台可调、\fld{pf\_check\_applicable}=false 部分覆盖）\\
 \end{paramtable}
 （说明栏为本章概括，非表字段；该表借用 paramtable 版式。）
-测试注册：\srcpath{tests/CMakeLists.txt}:34（单元测试）、
-\srcpath{tests/CMakeLists.txt}:532--537（\srcpath{rpo\_gui\_e2e}，标签
+测试注册：\srcpath{tests/CMakeLists.txt:hacdcpf\_add\_test(test\_reactive\_power\_opt)}（单元测试）、
+\srcpath{tests/CMakeLists.txt:rpo\_gui\_e2e}（\srcpath{rpo\_gui\_e2e}，标签
 \srcpath{gui;e2e;browser;rpo;cross\_validation}，需 chromium，超时 180 s）。
 
 \subsubsection*{大规模可扩展性实测（文档存档）}
@@ -644,8 +642,8 @@ $|\Delta P_g|$/$|\Delta Q_g|$ 完整展示但不单独触发失败
 \textbf{如实说明}：上述数字是验证文档记录的实测存档，本章在 \srcpath{tests/}
 全库检索（133999、1561.8、19.22、36.45 等）未发现对应的自动断言——相关
 自动测试只覆盖 case2869 的潮流/OPF 收敛性
-（\srcpath{tests/test\_matpower\_cases.cpp}:336--337、
-\srcpath{tests/test\_opf\_solver\_backends.cpp}:1154--1156），RPO 大算例
+（\srcpath{tests/test\_matpower\_cases.cpp:TEST\_CASE("Tier2 MATPOWER: case2869pegase converges")}、
+\srcpath{tests/test\_opf\_solver\_backends.cpp:TEST\_CASE("Large OPF takes the sparse KKT path and converges (case2869pegase)")}），RPO 大算例
 指标未纳入默认 ctest 回归，复现需按文档口径自建 authored 算例。
 
 \subsection{边界与局限}
@@ -655,11 +653,10 @@ $|\Delta P_g|$/$|\Delta Q_g|$ 完整展示但不单独触发失败
         成对邻域精化的局部启发式；\fld{globally\_certified}/
         \fld{optimality\_gap\_available} 恒为 false，\fld{gap} 恒为占位
         1.0，\fld{bc\_stats} 不是分支定界证书
-        （\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:1301--1302、
-        1335、1373--1383）。
+        （\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:solve\_rpo}）。
   \item \textbf{启发假设}：Phase 1 依赖目标对单变量的近似单峰性，非凸问题
         不保证；局部灵敏度面不作为全局下界，从不用于剪枝
-        （同文件:solve\_rpo、1171--1175）。
+        （同文件:solve\_rpo）。
   \item \textbf{LossEconomic 内层不直接优化电压}：稳健内层按网损最优分配
         机组无功；实测 case2869 上 vdev RPO 虽收敛，离散设备未能抵消网损
         最优无功分配对电压的不利影响（vdev 0.1392 $\to$ 0.1401）。如需机组
@@ -667,30 +664,29 @@ $|\Delta P_g|$/$|\Delta Q_g|$ 完整展示但不单独触发失败
         （\srcpath{docs/archive/audits/reactive\_power\_optimization\_validation.md} 第 5.5 节；
         结果字段 \fld{effective\_inner\_nlp\_objective} 与相应
         \fld{model\_limitations} 条目如实披露该路径，
-        \srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:1311--1315）。
+        \srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:solve\_rpo}）。
   \item \textbf{预算粒度}：时间与评估预算只能在两次内层求解之间检查，
         单次 IPM 可能超出剩余预算；\fld{search\_ipm\_iter} 是唯一的单次
         求解护栏，且只对纯交流电网生效
-        （\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp}:110--117）。
+        （\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp:RPOOptions}）。
   \item \textbf{并行语义}：\fld{num\_threads}$>1$ 把搜索从 Gauss--Seidel
         变为 Jacobi（在位点波间推进），轨迹与所得局部解可能与串行不同；
         混合 AC/DC 强制串行（MUMPS 互斥锁）
-        （\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp}:84--96）。
+        （\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp:RPOOptions}）。
   \item \textbf{未覆盖设备}：三绕组变压器分接头、独立调压控制器
         （\fld{regulator\_controls}）、单体三相不平衡 RPO 不进入离散决策
         向量；移动储能/虚拟电厂/微网为固定或投影注入
-        （\srcpath{tests/run\_gui\_server.cpp}:19781--19796；
+        （\srcpath{tests/run\_gui\_server.cpp:add\_coverage（lambda）}；
         \srcpath{docs/archive/audits/reactive\_power\_optimization\_validation.md} 第 3 节）。
   \item \textbf{混合 AC/DC 回放部分覆盖}：富混合元件的 authored-space PF
         调度回放尚未完整映射，交叉验证对此标注“部分覆盖”而非数值不一致
-        （\srcpath{tests/run\_gui\_server.cpp}:19581--19583、19677--19684）。
+        （\srcpath{tests/run\_gui\_server.cpp:main（lambda）}）。
   \item \textbf{MATPOWER 导入链}：导入支路变比一律按固定电气变比处理，
         只有算例或用户显式给出有效档位范围与步长后才进入 RPO
-        （\srcpath{tests/test\_reactive\_power\_opt.cpp}:184--211）。
+        （\srcpath{tests/test\_reactive\_power\_opt.cpp:TEST\_CASE("MATPOWER fixed tap ratios are not invented as 4001-position OLTCs")}）。
   \item \textbf{保留字段}：\fld{int\_tol}、\fld{branching}、\fld{node\_sel}
         为兼容旧 B\&B 构建而保留，当前局部搜索不消费
-        （\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp}:80--81、
-        98--101）。
+        （\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp:RPOOptions}）。
   \item \textbf{目标侧无档位动作代价}：频繁调档的机械寿命成本未建模；
         \fld{max\_tap\_move} 窗口与 \fld{gap\_tol} 改进阈值是仅有的动作
         抑制手段（本章数学模型小节）。

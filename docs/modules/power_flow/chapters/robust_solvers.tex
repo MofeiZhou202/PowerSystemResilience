@@ -27,7 +27,7 @@ NCP 半光滑 Newton、HELM 全纯嵌入、同伦延拓与 Newton--Krylov 内迭
 行缩放 $D_F$（src/power\_flow/nonlinear\_scaling.cpp:build\_nonlinear\_scaling）：P/Q/DC 三类方程行分别取
 $D_{F,i}=1/\max(|F_i^{\mathrm{spec}}|,1)$，经 \srcpath{clamp\_inv\_scale}（:clamp\_inv\_scale）
 钳制到 $[\,$\fld{min\_scale},\fld{max\_scale}$\,]$。列缩放 $D_x$（:build\_nonlinear\_scaling）：
-$\theta$ 列取 $\pi$；$V_m$ 列取当前 $V_m$（$>10^{-3}$ 时，否则取 1，:81--85）；
+$\theta$ 列取 $\pi$；$V_m$ 列取当前 $V_m$（$>10^{-3}$ 时，否则取 1，:build\_nonlinear\_scaling）；
 $V_{dc}$ 列同规则（:build\_nonlinear\_scaling）。施加方式：残差逐元乘、雅可比遍历非零元行乘列除、
 物理步长逐元除恢复（头 :44--73）。主循环挂接
 （\srcpath{src/power\_flow/newton\_solver.cpp:NewtonSolver::solve}）：每次迭代重建缩放；
@@ -35,7 +35,7 @@ $V_{dc}$ 列同规则（:build\_nonlinear\_scaling）。施加方式：残差逐
 （:NewtonSolver::solve）；仅当 equilibration 开\textbf{且}至少一个缩放开关开时才替换
 线性系统（:NewtonSolver::solve）。条件数代理
 $\kappa=(\max/\min$ 行$\ell_1$范数$)\times(\max/\min$ 列$\ell_1$范数$)$
-（\srcpath{estimate\_condition\_proxy}，:494--535）在
+（\srcpath{estimate\_condition\_proxy}，:estimate\_condition\_proxy）在
 \fld{enable\_condition\_monitor} 或 NK 回退开启时每轮写入
 \fld{profiling.condition\_estimate}（:NewtonSolver::solve）。
 \paragraph{参数表}
@@ -64,7 +64,7 @@ header-only 实现（\srcpath{src/power\_flow/nonmonotone\_linesearch.cpp} 仅�
 （\srcpath{NonmonotoneLineSearch::search}）。
 \paragraph{数学模型与算法} Merit 函数 $\phi(x)=\tfrac12\lVert F(x)\rVert_2^2$，
 滑动窗口参考 $\varphi_k^{\max}=\max_{0\le j\le M-1}\phi_{k-j}$，接受条件
-（\srcpath{include/hacdcpf/power\_flow/nonmonotone\_linesearch.hpp, 84--94}）：
+（\srcpath{include/hacdcpf/power\_flow/globalization/nonmonotone\_linesearch.hpp:NonmonotoneLineSearch}）：
 \[
 \phi(x+\alpha\,\Delta x)\le \varphi_k^{\max}+c_1\,\alpha\,\nabla\phi(x)^{\mathsf T}\Delta x,
 \qquad \alpha\leftarrow\beta\alpha
@@ -140,10 +140,10 @@ $J+I/\delta t$ 并以 \texttt{update()} 逐步更新伪时间步
 \paragraph{参数表}
 \begin{paramtable}
 \fld{enable\_lm\_trust\_region\_fallback} & — & — & on/off & true & 允许 LM 恢复步（仅在自动调度开启时生效）\\
-\fld{lm\_lambda0}/\fld{lm\_lambda\_max} & $\lambda$ & — & — & $10^{-4}$/$10^{8}$ & LM 初始阻尼与上限（:1662--1684 使用）\\
+\fld{lm\_lambda0}/\fld{lm\_lambda\_max} & $\lambda$ & — & — & $10^{-4}$/$10^{8}$ & LM 初始阻尼与上限（:NewtonSolver::solve 使用）\\
 \fld{enable\_ptc\_ser} & — & — & on/off & true & 允许 PTC 恢复步（仅在自动调度开启时生效）\\
 \fld{ptc\_dt0} 等四字段 & $\delta t$ 族 & — & — & 0.1 / $10^{-4}$ / $10^{6}$ / 0.7 & SER 控制器步长参数，已接线：PTC 分支以其构造 \texttt{PtcSerController}（\fld{ptc\_dt\_min}/\fld{\_max}/\fld{ptc\_gamma}；src/power\_flow/newton\_solver.cpp:NewtonSolver::solve）\\
-\fld{trust\_region\_radius0} & $\Delta_0$ & — & 0.1--2 & 1.0 & 信赖域初始半径（\texttt{PowerFlowOptions}，:1321）\\
+\fld{trust\_region\_radius0} & $\Delta_0$ & — & 0.1--2 & 1.0 & 信赖域初始半径（\texttt{PowerFlowOptions}，:PowerFlowOptions）\\
 \fld{trust\_region\_max} & $\Delta_{\max}$ & — & 5--50 & 10.0 & 信赖域半径上限\\
 \fld{enable\_auto\_fallback\_scheduling} & — & — & on/off & true & 失败时自动追加 LM/PTC 恢复（src/power\_flow/newton\_solver.cpp:NewtonSolver::solve）\\
 \end{paramtable}
@@ -268,24 +268,24 @@ DCPF/Gauss--Seidel 暖启动（)。纯 AC（只用 AC 子系统，头文件
 :97--100），编译进 \texttt{hacdcpf} 库（\srcpath{CMakeLists.txt}）。
 \paragraph{数学模型与算法}
 \begin{itemize}
-  \item \textbf{导纳分解}（\srcpath{build\_ytrans\_yshunt}，:105--153）：
+  \item \textbf{导纳分解}（\srcpath{build\_ytrans\_yshunt}，:build\_ytrans\_yshunt）：
         串联支路按 $\pi$ 模型生成 $Y_{\mathrm{trans}}$（$y_{ff}=y_s/|\tau|^2$ 等
-        四元组，:131--139），对地支路 $jb/2$ 与母线 $G_s+jB_s$ 入
+        四元组，:build\_ytrans\_yshunt），对地支路 $jb/2$ 与母线 $G_s+jB_s$ 入
         $Y_{\mathrm{shunt}}$（:build\_ytrans\_yshunt）；
   \item \textbf{修正导纳阵} $Y_{\mathrm{mod}}\in\mathbb R^{2N\times2N}$
-        （\srcpath{build\_ymod}，:159--196）：slack 置单位行；PQ 行写
+        （\srcpath{build\_ymod}，:build\_ymod）：slack 置单位行；PQ 行写
         $\Re/\Im$ 2$\times$2 块；PV 用 Model 2——P 行取实部、第 $2i{+}1$ 行写
         $|V|^2$ 约束（:build\_ymod）；
   \item \textbf{系数递推}（:HelmSolver::solve）：每阶解一次
-        $Y_{\mathrm{mod}}\,c^{[n]}=\mathrm{rhs}$（共享一次 LU 分解，:475--484）。
+        $Y_{\mathrm{mod}}\,c^{[n]}=\mathrm{rhs}$（共享一次 LU 分解，:HelmSolver::solve）。
         PQ 右端 $\overline{S_i}\,\overline{W_i^{[n-1]}}-Y_{\mathrm{sh},i}V_i^{[n-1]}$
         （:HelmSolver::solve）；PV 的 $|V|^2$ 行右端 $V\!V/2$（:HelmSolver::solve）、P 平衡行经
         $CC$ 缓存的卷积递推（:HelmSolver::solve）；$W=1/V$ 逆元递推
         $W^{[n]}=-\sum_{k<n}W^{[k]}V^{[n-k]}$（:HelmSolver::solve）；
-  \item \textbf{Padé 求值与外环}（\srcpath{pade\_at\_one}，:50--97）：$[L/L]$
+  \item \textbf{Padé 求值与外环}（\srcpath{pade\_at\_one}，:pade\_at\_one）：$[L/L]$
         矩阵法，解 Toeplitz 方程得分母系数、卷积得分子系数，$s=1$ 处取
         $\sum a/\sum b$；每 2 阶做一次收敛检查（幅值/相角变化
-        $<$\fld{mismatch}，:610--627），终值提取 :635--653；无功限值外环至多
+        $<$\fld{mismatch}，:HelmSolver::solve），终值提取 :HelmSolver::solve；无功限值外环至多
         10 次 PV$\to$PQ 切换、越限 $10^{-6}$ 判据、Q 注入钉限
         （:verify\_physical\_residual（lambda）, :verify\_physical\_residual（lambda））；暖启动 DCPF 角度基线（:dcpf\_warmstart）/GS 预迭代
         （:gauss\_seidel\_warmstart）；K 因子在 PV+SLACK 间分摊不平衡（:apply\_distributed\_slack）。
@@ -320,7 +320,7 @@ $\lambda\in[0,1]$ 从平启动零注入基态缓步爬升到目标值，每步�
 \texttt{HomotopyState\{lambda, step, accepted\_steps, rejected\_steps, failed\}}
 （\srcpath{include/hacdcpf/power\_flow/continuation\_solver.hpp:HomotopyState}）。
 \paragraph{数学模型与算法} 嵌入构造
-（\srcpath{scale\_system\_by\_lambda}，:14--84）：AC/DC 母线集总负荷、显式
+（\srcpath{scale\_system\_by\_lambda}，:scale\_system\_by\_lambda）：AC/DC 母线集总负荷、显式
 负荷、发电机/储能/可再生/静态发电机有功无功、VSC $P_{set}$、DC/DC $P_{ref}$、
 移动储能等全部注入 $\times\lambda$；电压设定与网络参数不变。路径跟踪
 （:HomotopyContinuationSolver::solve）：子求解关闭同伦递归（:HomotopyContinuationSolver::solve），中间步迭代预算
@@ -362,13 +362,13 @@ LU 求解 Newton 线性系统，并配 Schur 补 AC/DC 块预条件器，面向�
 （\fld{enable\_newton\_krylov\_fallback}=false），仅在条件数代理越限时可选回退。
 \paragraph{数学模型与算法}
 \begin{itemize}
-  \item \textbf{GMRES($m$)}（\srcpath{gmres\_solve}，:19--140）：左预条件
+  \item \textbf{GMRES($m$)}（\srcpath{gmres\_solve}，:gmres\_solve）：左预条件
         重启型；MGS 正交化（:gmres\_solve）、Givens 旋转消 Hessenberg 次对角
         （:gmres\_solve）、估计残差 $|\,g_{j+1}\,|/\lVert b\rVert$（:gmres\_solve）；每轮
         重启后以真残差复判（:gmres\_solve）；
   \item \textbf{Schur 块预条件}（\srcpath{SchurBlockPreconditioner}，
         :144--207）：利用 $J=\big[\begin{smallmatrix}A&B\\0&D\end{smallmatrix}\big]$
-        块上三角结构（AC 块 $A$、DC 块 $D$ 各作 SparseLU 分解，:156--174），
+        块上三角结构（AC 块 $A$、DC 块 $D$ 各作 SparseLU 分解，:SchurBlockPreconditioner::build），
         $P^{-1}r$：$z_{dc}=D^{-1}r_{dc}$，$z_{ac}=A^{-1}(r_{ac}-Bz_{dc})$
         （:apply）；任一块分解失败则退化为单位预条件（:newton\_krylov\_step）；
   \item \textbf{接受准则}（:newton\_krylov\_step）：GMRES 收敛，或最终相对残差
@@ -378,7 +378,7 @@ LU 求解 Newton 线性系统，并配 Schur 补 AC/DC 块预条件器，面向�
         三种全局化分支均可受益（:run\_line\_search（lambda）, :run\_line\_search（lambda）, :run\_line\_search（lambda）），
         默认分支 NK 失败或步不被接受时回落标准 LU（:NewtonSolver::solve）；状态写入
         \fld{profiling.linear\_solver\_status}（\texttt{nk\_gmres}/
-        \texttt{nk\_gmres\_schur}/\texttt{nk\_gmres\_failed}，:1250--1255）。
+        \texttt{nk\_gmres\_schur}/\texttt{nk\_gmres\_failed}，:solve\_linear\_nk（lambda））。
 \end{itemize}
 \paragraph{参数表}
 \begin{paramtable}
@@ -425,8 +425,10 @@ $<10^{-10}$（:TEST\_CASE）；(ii) \srcpath{PowerFlowSolverFactory} 对含
 \fld{tiny\_pivot\_threshold} 等当前未消费字段）见第~\ref{sec:options}~章完整字段表。
 \paragraph{验证与校核总览} 本章组件的回归矩阵汇总：缩放与条件监控——
 \srcpath{tests/test\_scaling\_regression.cpp}（6 用例）；NCP 半光滑与信赖域/
-PTC 全局化——\srcpath{tests/test\_unified\_pf\_upgrade.cpp}（:709--961 四个
-用例）；GLL 随默认配置被上述用例间接覆盖；HELM、同伦延拓、Newton--Krylov
+PTC 全局化——\srcpath{tests/test\_unified\_pf\_upgrade.cpp}（四个用例：「Semi-smooth Newton
+suppresses outer PV/PQ loops on IEEE 118」、「Globalization improves flat-start
+convergence」、「MATPOWER cases: semi-smooth Newton vs heuristic PV/PQ」、
+「Full comparison: all enhancements across stress cases」）；GLL 随默认配置被上述用例间接覆盖；HELM、同伦延拓、Newton--Krylov
 现各有专项冒烟回归——\srcpath{tests/test\_helm\_solver.cpp}（HELM 对 Newton
 两节点对照）、\srcpath{tests/test\_homotopy\_continuation.cpp}（端点到达）、
 \srcpath{tests/test\_newton\_krylov.cpp}（GMRES/Schur 精度与求解器工厂接线），

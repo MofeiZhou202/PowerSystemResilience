@@ -39,3 +39,31 @@ Fandol 中文字体集，避免依赖 Windows 字体；不得为了通过编译�
 4. 结果向量声明单位与索引空间；AC/DC 同号 ID 不使用裸整数跨域传递。
 5. 近似、回退、时限、后端缺失和模型覆盖不足均有显式标志或限制说明。
 6. PDF、`.aux`、`.log`、`.out`、`.synctex.gz` 等构建产物不作为规范源提交。
+
+## SPPT Applied Energy 母稿
+
+`sppt_theory.tex` 是 SPPT 唯一主稿，面向 Applied Energy 的当前版本以
+“自动化混合 AC/DC 数字孪生的可验证安全边界”为主问题；数值主线由
+`sppt_campaign_study.tex` 承载。实验生成器 `sppt_scale_fault_campaign`
+使用固定种子 20260818，通过现有 GridLAB-D 接口导入 7 个公开配电 feeder，
+并按统一、完全披露的双端 DC/VSC 规则构造 32--6986 AC 母线的混合变种。
+每个系统执行 9 类编辑、每类 25 次，输出逐样本 CSV、汇总 CSV、公开案例
+manifest 与 LaTeX 表；`tools/sppt_campaign_plots.py` 由这些 CSV 生成三组主文图。
+主稿严格区分结构缺陷检出与“结构合法但用户意图错误”的物理影响，不把后者
+计作守卫漏检，也不把 Debug timing 当作投稿性能结论。
+
+复现实验与编译：
+
+```bash
+cmake --build <build-dir> --target sppt_scale_fault_campaign
+<build-dir>/sppt_scale_fault_campaign <output-dir> 25 20260818
+python3 tools/sppt_campaign_plots.py <output-dir> docs/latex/figures
+python3 <latex-plugin>/scripts/compile_latex.py \
+  "$PWD/docs/latex/sppt_theory.tex" --compiler texlive \
+  --output-directory <latex-output-dir>
+```
+
+正式投稿前须在干净、固定版本的 MIPSolvers 依赖和优化构建上重跑 timing，并补全
+作者、CRediT、基金与公共归档信息；当前 1575 行固定种子结果已通过独立复跑，
+除 wall-clock 字段外逐字段一致。结构检出率、Wilson 区间和物理偏差不依赖
+Debug/Release timing。

@@ -673,6 +673,12 @@ HybridPowerSystem parse_case_with_overlay(const std::string& file,
                                           int ac_bus_2) {
   HybridPowerSystem sys = parse_matpower(data_file_path(file).string());
   sys.name = name;
+  for (auto& bus : sys.ac.buses) {
+    if (bus.vmax_pu <= bus.vmin_pu) {
+      bus.vmin_pu = std::min(0.9, bus.vm_pu - 0.1);
+      bus.vmax_pu = std::max(1.1, bus.vm_pu + 0.1);
+    }
+  }
   attach_two_terminal_dc(sys, ac_bus_1, ac_bus_2);
   return sys;
 }

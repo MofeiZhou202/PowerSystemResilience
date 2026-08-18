@@ -303,12 +303,6 @@ std::vector<CaseSpec> build_cases(const fs::path& root) {
   cases.push_back({"hybrid-microgrid", "builder: islanding microgrid",
                    hacdcpf::io::build_hybrid_acdc_microgrid_island()});
 
-  const fs::path nansha =
-      root / "external_data/classical_example/nansha_full_network.json";
-  if (fs::exists(nansha)) {
-    cases.push_back({"nansha-json", "JSON: Nansha full network",
-                     load_json_case(root, "external_data/classical_example/nansha_full_network.json")});
-  }
   return cases;
 }
 

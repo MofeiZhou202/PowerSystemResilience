@@ -37,6 +37,41 @@ AgentEdit make_remove_ac_references() {
           /*expected_admissible=*/false};
 }
 
+AgentEdit make_hallucinate_vsc_ac_terminal() {
+  return {"assign a VSC to a nonexistent AC terminal",
+          [](HybridPowerSystem& s) {
+            if (!s.vsc_converters.empty()) s.vsc_converters.front().bus_ac = 100000001;
+          },
+          /*expected_admissible=*/false};
+}
+
+AgentEdit make_hallucinate_vsc_dc_terminal() {
+  return {"assign a VSC to a nonexistent DC terminal",
+          [](HybridPowerSystem& s) {
+            if (!s.vsc_converters.empty()) s.vsc_converters.front().bus_dc = 200000001;
+          },
+          /*expected_admissible=*/false};
+}
+
+AgentEdit make_remove_dc_voltage_support() {
+  return {"remove physical DC-voltage support",
+          [](HybridPowerSystem& s) {
+            for (auto& converter : s.vsc_converters) converter.in_service = false;
+            for (auto& storage : s.dc.storage) storage.in_service = false;
+            for (auto& storage : s.dc.dc_storage) storage.in_service = false;
+            for (auto& converter : s.dc.dcdc_converters) converter.in_service = false;
+          },
+          /*expected_admissible=*/false};
+}
+
+AgentEdit make_invalid_vsc_efficiency() {
+  return {"set VSC efficiency above unity",
+          [](HybridPowerSystem& s) {
+            if (!s.vsc_converters.empty()) s.vsc_converters.front().eta = 1.10;
+          },
+          /*expected_admissible=*/false};
+}
+
 AgentEdit make_restore_slack_reference() {
   return {"restore a slack reference at the first bus",
           [](HybridPowerSystem& s) {
@@ -68,7 +103,8 @@ AgentEdit make_no_op() {
 }  // namespace
 
 AgentTrajectory run_agent_loop(const HybridPowerSystem& seed,
-                               const std::vector<AgentEdit>& edits) {
+                               const std::vector<AgentEdit>& edits,
+                               bool run_analysis) {
   AgentTrajectory traj;
   HybridPowerSystem current = seed;
 
@@ -95,10 +131,12 @@ AgentTrajectory run_agent_loop(const HybridPowerSystem& seed,
       // Commit and analyze (Alg. 2, lines 8-9).
       current = candidate;
       step.applied = true;
-      const PowerFlowResult pf = solve_power_flow(current);
-      step.analysis_ran = true;
-      step.analysis_converged = pf.converged;
-      step.attributed_buses = static_cast<int>(pf.vm.size());
+      if (run_analysis) {
+        const PowerFlowResult pf = solve_power_flow(current);
+        step.analysis_ran = true;
+        step.analysis_converged = pf.converged;
+        step.attributed_buses = static_cast<int>(pf.vm.size());
+      }
     }
 
     // Loop soundness (Thm. 8.9): a committed step must be admissible, and any
@@ -114,7 +152,11 @@ AgentTrajectory run_agent_loop(const HybridPowerSystem& seed,
 
 std::vector<std::string> agent_action_ids() {
   return {"scale_loads_10pct",
+          "hallucinate_vsc_ac_terminal",
+          "hallucinate_vsc_dc_terminal",
           "remove_ac_references",
+          "remove_dc_voltage_support",
+          "invalid_vsc_efficiency",
           "restore_slack_reference",
           "trim_generation_headroom_5pct",
           "no_op"};
@@ -122,7 +164,14 @@ std::vector<std::string> agent_action_ids() {
 
 AgentEdit agent_edit_from_action_id(const std::string& id) {
   if (id == "scale_loads_10pct") return make_scale_loads_10pct();
+  if (id == "hallucinate_vsc_ac_terminal")
+    return make_hallucinate_vsc_ac_terminal();
+  if (id == "hallucinate_vsc_dc_terminal")
+    return make_hallucinate_vsc_dc_terminal();
   if (id == "remove_ac_references") return make_remove_ac_references();
+  if (id == "remove_dc_voltage_support")
+    return make_remove_dc_voltage_support();
+  if (id == "invalid_vsc_efficiency") return make_invalid_vsc_efficiency();
   if (id == "restore_slack_reference") return make_restore_slack_reference();
   if (id == "trim_generation_headroom_5pct")
     return make_trim_generation_headroom_5pct();

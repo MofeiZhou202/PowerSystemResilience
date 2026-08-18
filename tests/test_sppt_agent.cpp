@@ -38,11 +38,8 @@ TEST_CASE("Agent loop admits good edits, rejects hallucinated ones, stays sound"
   CHECK(traj.steps[0].analysis_converged);
   CHECK(traj.steps[0].attributed_buses > 0);
 
-  // 2: remove all references — hallucinated, must be rejected and NOT committed.
   CHECK_FALSE(traj.steps[1].accepted);
   CHECK_FALSE(traj.steps[1].applied);
-
-  // 3, 4: admissible again.
   CHECK(traj.steps[2].accepted);
   CHECK(traj.steps[3].accepted);
 

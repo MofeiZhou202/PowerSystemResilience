@@ -145,6 +145,7 @@ hacdcpf_add_test(test_sppt_guard           test_sppt_guard.cpp)
 hacdcpf_add_test(test_sppt_dae_wellposedness test_sppt_dae_wellposedness.cpp)
 hacdcpf_add_test(test_sppt_ablation        test_sppt_ablation.cpp)
 hacdcpf_add_test(test_sppt_benchmark       test_sppt_benchmark.cpp)
+hacdcpf_add_test(test_sppt_fault_campaign  test_sppt_fault_campaign.cpp)
 hacdcpf_add_test(test_sppt_agent           test_sppt_agent.cpp)
 
 # Multi-converter control-mode feasibility checks based on the coordination

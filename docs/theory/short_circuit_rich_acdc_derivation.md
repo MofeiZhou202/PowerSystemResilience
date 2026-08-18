@@ -740,7 +740,7 @@ sum of the per-contribution peaks,
 i_p = \sqrt{2}\Big(\kappa_{net} I_{k,net}'' + \sum_i \kappa_i I_{k,i}''\Big)
 ```
 
-with a per-contribution factor
+with a per-contribution factor (before the clamping described below)
 
 ```math
 \kappa_i = 1.02 + 0.98e^{-3R_i/X_i}
@@ -764,11 +764,14 @@ At non-fault buses the transferred current keeps the single-κ approximation
 i_p = \kappa \sqrt{2} I_{k,1}''
 ```
 
-where κ uses the fault-point R/X ratio; for method B in a meshed network the
-code multiplies by `1.15` and caps the result at `1.8`
-(`κ = min(1.8, 1.15κ)`, no lower clamp), while every other
+where κ uses the fault-point R/X ratio. One clamping rule applies uniformly
+to every κ in this step — the fault-bus `kappa_net` and per-contribution
+`kappa_of(z_src)` values as well as the non-fault-bus single κ: for method B
+in a meshed network the code multiplies by `1.15` and caps the result at
+`1.8` (`κ = min(1.8, 1.15κ)`, no lower clamp), while every other
 method/topology combination clamps `1.0 ≤ κ ≤ 2.0`
-(`src/short_circuit/short_circuit.cpp:current_source_contribution_ka（lambda）-1707`).
+(`src/short_circuit/short_circuit.cpp:kappa_of（lambda）`, and the adjacent
+non-fault-bus κ in `run_short_circuit_detailed_impl`).
 
 ### 9.2 Breaking Current
 
