@@ -242,8 +242,7 @@
         第~\ref{sec:cpf}~章）；
   \item \textbf{\srcpath{workspace.hpp} 已落地为真实工作区}：
         \srcpath{include/hacdcpf/power\_flow/workspace.hpp} 新增
-        \srcpath{prepare\_state}/\srcpath{prepare\_equations}/%
-        \srcpath{reset\_iteration}（:prepare\_state、:prepare\_equations，实现
+        \srcpath{prepare\_state}/\srcpath{prepare\_equations}（实现
         \srcpath{src/power\_flow/workspace.cpp:prepare\_state}）；
         \srcpath{NewtonSolver} 复用每实例 \texttt{SolverWorkspace}，并以
         \fld{workspace\_in\_use\_} 递归守卫防止嵌套求解互踩

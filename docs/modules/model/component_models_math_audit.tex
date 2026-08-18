@@ -229,11 +229,18 @@ g_i = p_{calc} - p_{gen} - \cdots + {\color{hyred}p_d} - \Delta p_d + {\color{hy
 \label{sec:a2}
 
 \begin{itemize}
-  \item \textbf{位置}：合成路径 \file{src/model/network\_utils.cpp:connect（lambda）}（\texttt{cs.bus = 0} 于 \file{:connect（lambda）}，预累加 \texttt{cs.p\_total\_kw += ch->p\_ch\_max\_kw} 于 \file{:connect（lambda）}）；聚合 \file{:project\_chargers\_into\_stations}（\texttt{cs.p\_total\_kw += p\_kw} 于 \file{:project\_chargers\_into\_stations}、\texttt{cs.num\_chargers += 1} 于 \file{:project\_chargers\_into\_stations}）；丢弃点 \file{src/power\_flow/solver\_data.cpp:normalized\_zip（lambda）}。
+  \item \textbf{位置}：合成路径（修复前）\file{src/model/network\_utils.cpp} 的 connect（lambda）
+        （\texttt{cs.bus = 0} 与预累加 \texttt{cs.p\_total\_kw += ch->p\_ch\_max\_kw} 均在其中）；
+        聚合 \file{:project\_chargers\_into\_stations}（\texttt{cs.p\_total\_kw += p\_kw}、
+        \texttt{cs.num\_chargers += 1} 均在其中）；丢弃点 \file{src/power\_flow/solver\_data.cpp:normalized\_zip（lambda）}。
+        \textbf{当前代码已 fail-close}：无 ChargingStation 时
+        \file{src/model/network\_utils.cpp:project\_in\_place} 抛出 \texttt{std::invalid\_argument}
+        （"Charger rows do not carry a bus..."），connect（lambda）合成路径已移除，聚合仅剩
+        \file{:project\_chargers\_into\_stations} 单一路径，双倍计数与静默丢失均不可复现。
   \item \textbf{复核状态}：主审已逐行复核；两路独立审计通道分别给出实测（链接 \file{libhacdcpf.a}）：两台 60+40 kW 充电机 $\to$ \texttt{p\_total\_kw=200}、\texttt{num\_chargers=4}（应为 100/2）；120 kW 单台 $\to$ 240 kW。
 \end{itemize}
 
-\textbf{机理。}无 ChargingStation 时投影先自动建站并累加一遍 $\sum P_{ch}$（\file{:connect（lambda）}），随后无条件调用 \file{project\_chargers\_into\_stations} 再对同一批充电机累加一遍 P（并首次累加 Q、台数再 $+1$/台）：
+\textbf{机理（修复前行为，现已不可复现）。}无 ChargingStation 时投影先自动建站并累加一遍 $\sum P_{ch}$（修复前的 connect（lambda）），随后无条件调用 \file{project\_chargers\_into\_stations} 再对同一批充电机累加一遍 P（并首次累加 Q、台数再 $+1$/台）：
 \begin{equation}
 P = 2\sum P_{ch},\qquad Q = 1\sum P_{ch}\tan\varphi,\qquad N = 2N_{ch},
 \end{equation}
@@ -321,7 +328,7 @@ P/Q 口径自相矛盾（隐含功率因数被篡改）。更致命的是 Charge
 
 \subsubsection*{B9　\texttt{compute\_device\_terminal\_flows} 残差口径三项缺陷，``exactly'' 声明不实（归因层继承并标 Strong）}
 \begin{itemize}
-  \item \textbf{位置}：\file{src/model/network\_utils.cpp:connect（lambda）}（多开关）、\file{:compute\_device\_terminal\_flows}（注入枚举）、\file{:compute\_device\_terminal\_flows}（署名值）；继承方 \file{src/model/result\_attribution.cpp:apply}。\textbf{主审已复核 (a)(b) 两处。}
+  \item \textbf{位置}：\file{src/model/network\_utils.cpp:add\_equivalent\_branch\_from\_switch}（多开关）、\file{:compute\_device\_terminal\_flows}（注入枚举）、\file{:compute\_device\_terminal\_flows}（署名值）；继承方 \file{src/model/result\_attribution.cpp:apply}。\textbf{主审已复核 (a)(b) 两处。}
   \item \textbf{机理}：(a) 同一受端母线 $N$ 台闭合开关\textbf{各自分得全额残差}（实证：两台开关各报 $-40$ MW，合计 $-80\neq-40$），KCL 在归因层被破坏；(b) 注入枚举不含 motors/shunts/母线 gs/bs/external\_grids/VSC/LCC/VPP/微网/ER 端口，且 \textbf{renewable 只加 P 漏 Q}（\file{:compute\_device\_terminal\_flows}）——实证 renewable 发 $1.0+j0.5$ 经开关送出，归因 $p=1.0$（对）$q=0$（应 0.5）；(c) 发电机按署名 \texttt{pg\_mw} 而非求解输出计入，slack 拾取量与 PV 无功全部残差化到开关潮流。
   \item \textbf{影响}：变电站母联/分段开关潮流与 \texttt{loading\_pct} 在含电机、并联补偿、外网、换流器的典型工业拓扑下系统性失真，可误导 N-1 与重构决策；注释自称 ``\textbf{exactly} the collapsed device's terminal injection'' 不成立。修复：枚举完备化（或用求解注入）、多设备共母线声明``仅总和可恢复''并降级 Approximate。
 \end{itemize}

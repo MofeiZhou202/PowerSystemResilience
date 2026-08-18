@@ -43,7 +43,12 @@
         时取 $\kappa\leftarrow\min(1.8,\,1.15\kappa)$，否则 $\mathrm{clamp}$ 到 $[1,2]$
         （\srcpath{src/short\_circuit/short\_circuit.cpp:kappa\_of（lambda）}）；
   \item \textbf{开断电流} $I_b$（\fld{ib\_ka}，按 \fld{breaking\_time\_s} 计及发电机贡献衰减 $\mu$）；
-  \item \textbf{稳态电流} $I_k$（\fld{ik\_ka}，发电机改用 $x_d$）；
+  \item \textbf{稳态电流} $I_k$（\fld{ik\_ka}）：发电机稳态贡献按 IEC 60909 的
+        $\lambda_{\max}$ 系数放大额定电流——$x_d/x_q\le1.2$ 取 $2.8$，$\ge1.5$ 取 $5.0$，
+        其间线性插值（\fld{xd\_xq} 缺省 $1.0$），再乘转移比 $|Z_{s,gi}|/|Z_{k,s}|$ 计
+        $I_{k,G}=\lambda_{\max} I_{rG}\,(\,|Z_{s,gi}|/|Z_{k,s}|\,)$；网络部分由稳态
+        Zbus 求取（发电机改用 $x_d$ 并联支路，电机不计入），见
+        \srcpath{src/short\_circuit/short\_circuit.cpp:run\_short\_circuit\_detailed\_impl}（Step 7）；
   \item \textbf{热等效电流}：源码固定 $n=1$。若 $|R/X|<10^{-12}$ 或
         $T_k<10^{-12}$，令 $m=1$；否则当
         $a=4\pi fT_k|R/X|>10^{-6}$ 时令

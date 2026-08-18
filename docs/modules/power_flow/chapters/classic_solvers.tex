@@ -335,7 +335,7 @@ $|P_{set}|$、静态/可再生/PV/储能/VPP、外部电网，:detect\_islands�
         \fld{enable\_auto\_swing\_selection} 时自动选摇摆母线
         （\srcpath{auto\_select\_swing\_bus}：SLACK $\to$ 最大 $P_g$ $\to$
         PV $\to$ 首母线；覆盖在抽取时提升为 SLACK 且 $\theta=0$，
-        src/power\_flow/island\_detector.cpp:extract\_island\_subsystem；无 slack 兜底首母线，:764--767）；
+        src/power\_flow/island\_detector.cpp:extract\_island\_subsystem）；
   \item 每岛 \srcpath{extract\_island\_subsystem} 重编号抽取（src/power\_flow/island\_detector.cpp:extract\_island\_subsystem，
         含开关/变压器/换流器与全部组件表），独立 Newton $+$ 平启动重试
         （src/power\_flow/adaptive\_solver.cpp:solve）；

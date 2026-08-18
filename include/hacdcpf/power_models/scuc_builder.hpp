@@ -48,10 +48,12 @@ struct SCUCData {
   std::map<std::string, double> pmax_MW;
 
   /// Ramp-up limit [MW/h], keyed by generator_id.
-  /// If absent or 0, no ramp-up constraint is imposed.
+  /// If absent, defaults to 1e6 MW/h (nominally non-binding); an explicit
+  /// 0 forbids ramping up.
   std::map<std::string, double> ramp_up_MW;
 
   /// Ramp-down limit [MW/h], keyed by generator_id.
+  /// Same defaulting rule as ramp_up_MW (absent → 1e6 MW/h).
   std::map<std::string, double> ramp_dn_MW;
 
   /// Startup cost [$], keyed by generator_id.

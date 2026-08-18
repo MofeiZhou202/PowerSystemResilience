@@ -40,9 +40,9 @@ $x_{\min}\le x\le x_{\max}$ 以盒式约束单独处理，不计入 $h(x)$。
 相对照的全空间路径"（\srcpath{docs/archive/reference/technical\_notebook/\allowbreak sections/11c\_native\_ipm\_vs\_parity\_ipm.tex}）。git 历史显示该文件最初
 由团队内部 Julia 原型逐方程移植而来：初始提交（\texttt{de00140}，
 2026-05-12）中 \srcpath{clamp\_interior} 与直流预热启动处留有
-"matching Julia"、"Julia :clamp\_1pct" 等注释；当前检出处这些注释已删除，
-但 \srcpath{src/optimal\_power\_flow/parity\_ipm.cpp}:1184 仍留有
-"the reference formulation stores dg as n x neq" 的对照痕迹。因此本章对
+"matching Julia"、"Julia :clamp\_1pct" 等注释，\srcpath{src/optimal\_power\_flow/parity\_ipm.cpp}
+也曾留有 "the reference formulation stores dg as n x neq" 的对照痕迹；
+当前检出处这些注释均已删除。因此本章对
 "对齐对象"的表述以可核实材料为限：Parity 建模层是\textbf{与参考实现
 （内部 Julia 原型）逐方程对齐的全空间 AC OPF 建模}，其当前工程含义是
 统一交直流的显式全空间 NLP；它与潮流方程的口径一致性由

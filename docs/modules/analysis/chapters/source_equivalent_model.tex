@@ -98,6 +98,41 @@ $B=P-P_G+P_{rev}+P_{ESS}$，代码分别计算
 之后才截断 top-k。依据为 \srcpath{src/analysis/multidimensional\_weak\_link.cpp:coverage\_mask} 和
 \srcpath{src/analysis/multidimensional\_weak\_link.cpp:run\_multidimensional\_weak\_link\_assessment}。
 
+\subsection{决策路由（decision hint）}
+
+每个实体的 \fld{decision\_hint} 由确定性路由给出（
+\srcpath{src/analysis/multidimensional\_weak\_link.cpp:decision\_hint}）。先把四维归一化
+压力聚成两侧：运行侧 $o=\max(q_{\mathrm{economic}},q_{\mathrm{carbon}})$，安全侧
+$s=\max(q_{\mathrm{reliability}},q_{\mathrm{resilience}})$；证据不足一律
+\texttt{complete\_evidence}。之后按 \fld{WeakLinkDecisionMode} 分流，两侧压差阈值均为
+$0.25$：
+\begin{itemize}
+  \item \textbf{Operation}：先按 comparison group 直派——\texttt{network} 且
+        $s>o+0.25$ 为 \texttt{network\_emergency\_reconfiguration}，\texttt{conversion}
+        为 \texttt{converter\_control\_coordination}，\texttt{supply} 为
+        \texttt{economic\_low\_carbon\_redispatch}，\texttt{flexibility} 为
+        \texttt{flexibility\_dispatch}，\texttt{demand} 为
+        \texttt{demand\_response\_and\_priority\_service}，\texttt{protection} 为
+        \texttt{automation\_and\_flisr}；无组命中时 \texttt{compatible} 关系为
+        \texttt{coordinated\_dispatch}，$s>o+0.25$ 为 \texttt{emergency\_reconfiguration}，
+        $o>s+0.25$ 为 \texttt{redispatch\_and\_demand\_response}，\texttt{conflict} 关系为
+        \texttt{operational\_pareto\_review}，兜底 \texttt{enhanced\_monitoring}。
+  \item \textbf{Planning}：\texttt{network} 组内 $s>o+0.25$ 为
+        \texttt{network\_hardening\_and\_redundancy}、$o>s+0.25$ 为
+        \texttt{capacity\_and\_loss\_upgrade}，否则按关系给 \texttt{network\_pareto\_review}
+        （conflict）或 \texttt{targeted\_network\_upgrade}；\texttt{conversion} 按
+        $o\ge s$ 分 \texttt{converter\_efficiency\_upgrade} 与
+        \texttt{converter\_redundancy\_upgrade}；\texttt{supply}/\texttt{flexibility}/
+        \texttt{demand}/\texttt{protection}/\texttt{node} 分别直派
+        \texttt{economic\_low\_carbon\_supply\_upgrade}、\texttt{storage\_and\_flexibility\_upgrade}、
+        \texttt{demand\_efficiency\_and\_service\_upgrade}、\texttt{automation\_and\_protection\_upgrade}、
+        \texttt{voltage\_and\_topology\_support}；无组命中时 \texttt{compatible} 为
+        \texttt{integrated\_upgrade}，$s>o+0.25$ 为 \texttt{hardening\_and\_redundancy}，
+        $o>s+0.25$ 为 \texttt{dispatch\_and\_loss\_reduction}，\texttt{conflict} 为
+        \texttt{pareto\_tradeoff\_review}，兜底 \texttt{monitor\_and\_targeted\_upgrade}。
+\end{itemize}
+hint 只是路由标签，不构成投资或操作证书；反事实量化见下节。
+
 \subsection{反事实规划指标和收益}
 
 经济或碳指标启用时先以 \fld{max\_iter=100}、\fld{tol=$10^{-7}$} 求潮流。

@@ -67,7 +67,7 @@ D_i(V)= (YV-I^{src})_i+g_{2,i}V_i^2=0.
 \end{equation}
 初值是 $YV^0=I^{src}$ 的线性解，Jacobian 仅修改对角元：
 \begin{equation}
-J_{ii}=Y_{ii}+2g_{2,i}V_i,qquad J_{ij}=Y_{ij}\ (i\ne j).
+J_{ii}=Y_{ii}+2g_{2,i}V_i,\qquad J_{ij}=Y_{ij}\ (i\ne j).
 \end{equation}
 每步直接执行 $V\leftarrow V+J^{-1}(-D)$，代码没有阻尼或线搜索。残差是
 $\max_i|D_i|$，严格小于 \fld{newton\_tol} 才收敛；达到迭代上限或 LU 失败令全局
@@ -110,15 +110,17 @@ THD=\begin{cases}
 0,&\text{否则。}
 \end{cases}
 \end{equation}
-\srcpath{harmonic\_metrics}（2789--2849 行）忽略 tap 与 charging，只用
+\srcpath{src/harmonics\_power\_flow/harmonics\_power\_flow.cpp:harmonic\_metrics} 忽略 tap 与 charging，只用
 $I_h=|(V_{f,h}-V_{t,h})/(R(h)+jhX)|$，并返回
 \begin{align}
 I_{rms}&=\sqrt{\sum_hI_h^2},&
-THD_I&=100\sqrt{\sum_{h\ne1}I_h^2}/I_1,\\
-TDD&=100\sqrt{\sum_{h\ne1}I_h^2}/I_{dem},&
+THD_I&=\begin{cases}100\sqrt{\sum_{h\ne1}I_h^2}/I_1,&I_1>10^{-12},\\0,&\text{否则，}\end{cases}\\
+TDD&=\begin{cases}100\sqrt{\sum_{h\ne1}I_h^2}/I_{dem},&I_{dem}>10^{-12},\\0,&\text{否则，}\end{cases}&
 K&=\begin{cases}\sum_hh^2I_h^2/\sum_hI_h^2,&\sum_hI_h^2>10^{-12},\\1,&\text{否则。}\end{cases}
 \end{align}
-若用户的 \fld{i\_demand\_pu}$\le10^{-12}$，$I_{dem}$ 回退为 $I_1$。标准校核只覆盖 AC 电压；
+若用户的 \fld{i\_demand\_pu}$\le10^{-12}$，$I_{dem}$ 先回退为 $I_1$（回退后仍
+$\le10^{-12}$ 则 TDD 取 0）；母线指标与 AC/DC 支路 \fld{thd\_i\_pct} 使用同一
+$10^{-12}$ 基波零守卫。标准校核只覆盖 AC 电压；
 THD 与各次 IHD 均允许 $10^{-9}$ 数值裕量。频扫共振候选仅是相邻三点局部极值，不是稳定性证书。
 
 \subsection{复杂度和失败语义}

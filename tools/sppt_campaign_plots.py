@@ -23,7 +23,7 @@ FAULT_LABELS = {
 }
 DETECTOR_LABELS = {
     "validation": "Boundary validation",
-    "solver_only": "Solver only",
+    "solver_only": "Convergence only",
     "full_sppt": "Full SPPT",
 }
 EDIT_LABELS = {
@@ -32,7 +32,7 @@ EDIT_LABELS = {
 }
 AGENT_LABELS = {
     "scale_loads_10pct": "Scale loads\n+10%",
-    "no_op": "Identity\naction",
+    "no_op": "Unchanged\nmodel",
     "hallucinate_vsc_ac_terminal": "Invalid VSC\nAC terminal",
     "hallucinate_vsc_dc_terminal": "Invalid VSC\nDC terminal",
     "remove_dc_voltage_support": "Remove DC\nsupport",
@@ -46,6 +46,11 @@ COLORS = {
     "slate": "#637181",
     "light": "#E8EDF2",
     "ink": "#26323F",
+}
+THREE_PHASE_LABELS = {
+    "abc-balanced-radial": "Balanced radial",
+    "abc-unbalanced-lateral": "Unbalanced lateral",
+    "abc-meshed-der": "Unbalanced meshed with DER",
 }
 
 
@@ -234,7 +239,7 @@ def plot_detection(summary_rows: list[dict[str, str]], output_dir: Path) -> None
     axis.text(
         0.0,
         -0.28,
-        "Full SPPT also localized 175/175 injections in every class; solver-only scope: 32, 78, and 330 AC buses.",
+        "Full SPPT also localized 175/175 injections in every class; convergence-only scope: 32, 78, and 330 AC buses.",
         transform=axis.transAxes,
         fontsize=7.3,
         va="top",
@@ -342,31 +347,72 @@ def plot_agent_campaign(agent_rows: list[dict[str, str]], output_dir: Path) -> N
     figure, axes = plt.subplots(1, 2, figsize=(7.15, 3.55), layout="constrained")
     cmap = LinearSegmentedColormap.from_list("agent", [COLORS["red"], "#F4F5F6", COLORS["green"]])
     axes[0].imshow(verdict, cmap=cmap, vmin=-1, vmax=1, aspect="auto")
-    axes[0].set_title("(a) Candidate action verdict and commit", loc="left")
+    axes[0].set_title("(a) Assessment of proposed modifications", loc="left")
     axes[0].set_xticks(range(len(actions)), [AGENT_LABELS[action] for action in actions])
     axes[0].set_yticks(range(len(systems)), [name.replace("-ACDC", "") for name in systems])
     axes[0].tick_params(axis="x", rotation=30)
     for row_index in range(len(systems)):
         for column_index in range(len(actions)):
             axes[0].text(column_index, row_index,
-                         "accept\ncommit" if verdict[row_index, column_index] > 0 else "reject\nno commit",
+                         "accepted\nadopted" if verdict[row_index, column_index] > 0 else "refused\nunchanged",
                          ha="center", va="center", fontsize=6.3, color="white")
 
-    stages = ["Typed action", "Guard", "Commit", "Solve", "Attribute", "Recovery"]
+    stages = ["Proposed\nchange", "Physical\nchecks", "Model\nselection", "Power\nflow", "Device\nassociation", "Unchanged\nmodel check"]
     accepted_path = [1, 1, 1, 1, 1, 1]
     rejected_path = [1, 1, 0, 0, 0, 1]
     positions = np.arange(len(stages))
-    axes[1].plot(positions, accepted_path, marker="o", linewidth=2, color=COLORS["green"], label="Admissible action")
-    axes[1].plot(positions, rejected_path, marker="s", linewidth=2, color=COLORS["red"], label="Inadmissible action")
+    axes[1].plot(positions, accepted_path, marker="o", linewidth=2, color=COLORS["green"], label="Physically admissible modification")
+    axes[1].plot(positions, rejected_path, marker="s", linewidth=2, color=COLORS["red"], label="Physically inadmissible modification")
     axes[1].set_xticks(positions, stages, rotation=30, ha="right")
     axes[1].set_yticks([0, 1], ["not executed", "completed"])
     axes[1].set_ylim(-0.15, 1.15)
     axes[1].grid(axis="y", color=COLORS["light"], linewidth=0.7)
-    axes[1].set_title("(b) Transactional execution path", loc="left")
+    axes[1].set_title("(b) Sequential physical assessment", loc="left")
     axes[1].legend(frameon=False, loc="lower left")
-    axes[1].text(0.02, 0.04, "All 28 rejected actions preserved the model;\nall 42 recovery actions were admitted.",
+    axes[1].text(0.02, 0.04, "All 28 refused modifications preserved the model;\nall 42 subsequent unchanged-model checks were accepted.",
                  transform=axes[1].transAxes, fontsize=7.0)
     save_figure(figure, output_dir, "sppt_agent_public_campaign")
+
+
+def plot_three_phase_stress(stress_rows: list[dict[str, str]], output_dir: Path) -> None:
+    assert len(stress_rows) == 18
+    assert set(row["case"] for row in stress_rows) == set(THREE_PHASE_LABELS)
+    series_colors = [COLORS["blue"], COLORS["orange"], COLORS["green"]]
+    series_markers = ["o", "s", "^"]
+
+    figure, axes = plt.subplots(1, 3, figsize=(7.15, 2.75), layout="constrained")
+    for (case, label), color, marker in zip(THREE_PHASE_LABELS.items(), series_colors, series_markers):
+        rows = sorted((row for row in stress_rows if row["case"] == case), key=lambda row: float(row["scale"]))
+        scales = np.array([float(row["scale"]) for row in rows])
+        ac_vmin = np.array([float(row["abc_vmin"]) for row in rows])
+        vuf = np.array([float(row["abc_vuf_pct"]) for row in rows])
+        dc_ok = np.array([row["boundary_converged"] == "yes" for row in rows])
+        dc_vmin = np.array([float(row["vdc_min"]) for row in rows])
+
+        axes[0].plot(scales, ac_vmin, color=color, marker=marker, linewidth=1.5, markersize=4, label=label)
+        axes[1].plot(scales, vuf, color=color, marker=marker, linewidth=1.5, markersize=4, label=label)
+        axes[2].plot(scales[dc_ok], dc_vmin[dc_ok], color=color, marker=marker, linewidth=1.5, markersize=4, label=label)
+        if np.any(~dc_ok):
+            axes[2].scatter(scales[~dc_ok], np.full(np.count_nonzero(~dc_ok), 0.24),
+                            color=COLORS["red"], marker="x", s=28, linewidth=1.2, zorder=4)
+
+    panel_settings = [
+        (axes[0], "(a) AC phase-domain response", r"Minimum $|V_{abc}|$ (p.u.)", (0.94, 1.005)),
+        (axes[1], "(b) Voltage unbalance", "Maximum VUF (%)", (-0.02, 0.90)),
+        (axes[2], "(c) Coupled DC boundary", r"Minimum $v_{dc}$ (p.u.)", (0.22, 0.91)),
+    ]
+    for axis, title, ylabel, ylim in panel_settings:
+        axis.set_title(title, loc="left")
+        axis.set_xlabel("Load multiplier")
+        axis.set_ylabel(ylabel)
+        axis.set_xticks([0.5, 1.0, 1.5, 2.0])
+        axis.set_ylim(*ylim)
+        axis.grid(color=COLORS["light"], linewidth=0.7)
+        axis.set_axisbelow(True)
+    axes[2].text(1.98, 0.245, "not converged", ha="right", va="bottom", color=COLORS["red"], fontsize=6.8)
+    handles, labels = axes[0].get_legend_handles_labels()
+    figure.legend(handles, labels, loc="outside upper center", ncols=3, frameon=False)
+    save_figure(figure, output_dir, "sppt_three_phase_stress")
 
 
 def main() -> None:
@@ -380,6 +426,7 @@ def main() -> None:
     summary = read_csv(args.input_dir / "sppt_fault_campaign_summary.csv")
     samples = read_csv(args.input_dir / "sppt_fault_campaign_samples.csv")
     agents = read_csv(args.input_dir / "sppt_agent_public_campaign.csv")
+    stress = read_csv(args.input_dir / "sppt_three_phase_hybrid_pf_stress.csv")
     assert len(samples) == 1575
 
     configure_style()
@@ -387,7 +434,8 @@ def main() -> None:
     plot_detection(summary, args.output_dir)
     plot_intent_impacts(samples, args.output_dir)
     plot_agent_campaign(agents, args.output_dir)
-    print(f"Generated four SPPT figure pairs in {args.output_dir}")
+    plot_three_phase_stress(stress, args.output_dir)
+    print(f"Generated five SPPT figure pairs in {args.output_dir}")
 
 
 if __name__ == "__main__":

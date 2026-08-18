@@ -13,7 +13,7 @@
 \definecolor{spptLight}{HTML}{EDF2F5}
 \newcommand{\Rmap}{\mathcal R}
 \newcommand{\Proj}{\Pi}
-\newcommand{\Adm}{\operatorname{Adm}}
+\newcommand{\Accept}{\operatorname{Accept}}
 \newcommand{\Valid}{\operatorname{Valid}}
 \newcommand{\WP}{\operatorname{WP}}
 \newcommand{\Attrib}{\operatorname{Attrib}}
@@ -60,7 +60,7 @@ converter-dominated distribution systems.
 \begin{keyword}
 Hybrid AC/DC distribution systems \sep Trustworthy artificial intelligence \sep
 Semantics-preserving projection \sep Converter control \sep Model verification \sep
-Artificial intelligence
+Distribution-system digital twin
 \end{keyword}
 \end{frontmatter}
 
@@ -89,6 +89,21 @@ from an internally consistent description. This assumption is reasonable for a
 single benchmark prepared by the analyst, but it becomes restrictive when the
 same study must combine utility data, public feeder models, manufacturer data,
 and automatically generated modifications.
+
+Recent reviews of hybrid AC/DC distribution optimization organize the field
+around nodal formulations, converter-loss representations, operational
+objectives, and solution methods~\cite{altorok2024opf}. Universal AC/DC branch
+models have further reduced the differences between line representations in
+joint optimization~\cite{shahbazi2025branch}, while energy-router formulations
+have extended coordinated operation to networks with several conversion
+interfaces~\cite{zhu2024router}. At the distribution level, reviews of hybrid
+AC/DC planning, energy management, control, and protection show that converter
+mode selection is central to both normal and disturbed operation
+~\cite{abdelwanis2024review}. These studies substantially advance physical
+analysis after a network model has been formed. They do not, however, make the
+conversion from heterogeneous device descriptions to the adopted equations an
+explicit object of assessment. Consequently, a valid formulation can still be
+applied to an incomplete or incorrectly associated engineering model.
 
 Distribution-system descriptions are inherently heterogeneous. Geographic and
 asset databases emphasize location, ownership, and equipment ratings; planning
@@ -128,6 +143,19 @@ quantity whose physical origin is ambiguous. A nonlinear calculation can still
 converge after some of these errors because the assembled equations describe a
 different, incomplete system.
 
+The same distinction appears in recent AI studies. Reviews of AI-based
+hierarchical microgrid control emphasize forecasting, secondary control,
+energy management, and coordinated decision making~\cite{gutierrez2024ai},
+whereas recent assessments of large language models in smart grids focus on
+information access, operational assistance, and the risks of unverified
+responses~\cite{madani2025llm,ruan2024security,zhang2025llmreview}. These
+applications require reliable physical models but generally evaluate the AI
+output rather than the device-to-equation transformation on which subsequent
+analysis depends. The present work addresses this preceding modeling stage:
+AI may interpret and propose an engineering change, while acceptance is
+determined by the electrical model and the calculated quantities are obtained
+from the power-system equations.
+
 Existing model checks address only part of this problem. Data validation can
 identify invalid identifiers, ranges, and terminal references, but it does not
 necessarily determine whether the converter controls close the physical degrees
@@ -148,6 +176,17 @@ plausible. A 10\% load increase may be statistically reasonable and physically
 solvable but assigned to the wrong asset; conversely, a missing converter
 terminal is invalid regardless of its statistical frequency. The two forms of
 assessment are therefore complementary rather than interchangeable.
+
+This positioning is also consistent with recent anomaly-detection research.
+Physics-informed detection combines learned patterns with physical residuals
+to identify abnormal measurements or equipment behavior
+~\cite{wu2024piml,guato2024anomaly}. Such methods require measurements,
+historical samples, or a reference distribution. A missing terminal, duplicate
+identity, or incompatible converter role is instead a defect in model
+formation and can be identified before measurements are available. Conversely,
+a plausible but incorrect load value may pass the proposed structural
+assessment and must be examined using measurement-based methods. The numerical
+study therefore evaluates both classes and reports their boundary explicitly.
 
 This paper develops semantics-preserving projection theory (SPPT) as a
 device-to-equation and equation-to-device consistency framework for hybrid
@@ -178,9 +217,9 @@ Sections~5 and 6 present the evaluation design and numerical results,
 respectively. Section~7 discusses the scope and limitations, and Section~8
 draws the conclusions.
 
-\section{Problem formulation and trust requirements}\label{sec:problem}
+\section{Formulation of the modeling consistency problem}\label{sec:problem}
 
-\subsection{Rich and canonical hybrid AC/DC models}
+\subsection{Hybrid AC/DC nodal equations}
 
 Let $S$ contain AC and DC buses, lines, transformers, switches, loads,
 distributed resources, storage, VSCs, DC/DC converters, units, phase labels,
@@ -203,108 +242,398 @@ P_{{\rm ac},c}+P_{{\rm dc},c}+P_{{\rm loss},c}=0,
 \qquad P_{{\rm loss},c}\ge0.
 \label{eq:vscbalance}
 \end{equation}
-The canonical substrate is deliberately smaller than the engineering model.
-This supports robust assembly but obliges the transformation to record what was
-expanded, aggregated, merged, approximated, or excluded.
+The converter loss can be represented by a constant efficiency or a current-
+dependent characteristic. For a converter transferring power from the AC to
+the DC side under the constant-efficiency representation,
+\begin{equation}
+ P_{{\rm dc},c}=-\eta_c P_{{\rm ac},c}, \qquad
+ 0<\eta_c\le 1,
+ \label{eq:efficiency}
+\end{equation}
+with the signs reversed consistently for the opposite direction. Equation
+\eqref{eq:vscbalance} is retained explicitly because an incorrect sign or an
+efficiency greater than unity can otherwise introduce artificial generation.
+
+Let $\bm{x}_{\rm ac}=[\bm{\theta},\bm{|V|},\bm{P}_{\rm bal},
+\bm{Q}_{\rm bal}]$ and $\bm{x}_{\rm dc}=[\bm{v},\bm{P}_{\rm dc,bal}]$ denote
+the AC and DC unknowns after the controlled quantities have been removed. The
+converter control equations are collected in $\bm{h}_c$. The complete nodal
+problem is written as
+\begin{equation}
+ \bm{F}(\bm{x};S)=
+ \begin{bmatrix}
+ \bm{F}_{\rm ac}(\bm{x}_{\rm ac})\\
+ \bm{F}_{\rm dc}(\bm{x}_{\rm dc})\\
+ \bm{F}_{\rm c}(\bm{x}_{\rm ac},\bm{x}_{\rm dc})\\
+ \bm{h}_{\rm c}(\bm{x})
+ \end{bmatrix}=\bm{0},
+ \label{eq:complete-residual}
+\end{equation}
+where $S$ denotes the engineering model from which the equation set is formed.
+The dimension and physical interpretation of $\bm{x}$ depend on the converter
+roles. A $P$--$Q$ device specifies active and reactive exchange and leaves its
+DC-side transfer to the coupling equation. A $V_{dc}$--$Q$ device specifies DC
+voltage and reactive power and therefore supplies the balancing active power.
+An AC grid-forming converter specifies voltage magnitude and angle, whereas a
+droop-controlled device introduces a relation between voltage and power rather
+than a rigid reference.
+
+The distinction between specified and balancing quantities is important. Two
+devices with the same electrical terminals but different controls do not
+produce the same equation set. Similarly, assigning the numerical value
+$v=1.0$~p.u. as an initial condition does not create a physical DC-voltage
+reference. The model must contain a device whose control law supplies that
+role. These observations motivate a consistency assessment that is performed
+before evaluating \eqref{eq:complete-residual}.
+
+\subsection{Engineering and canonical representations}
+
+The engineering model $S$ contains devices rather than only nodal injections.
+For each component $d\in\mathcal D_S$, it records a stable identity, electrical
+domain, terminals, phase connection, units, operating status, control mode, and
+applicable limits. Transformers, multi-terminal converters, switches, and
+energy routers can therefore contain more information than is required by a
+particular steady-state calculation. The canonical representation
+$C=\Proj(S)$ contains the buses, branches, injections, and control equations
+needed to evaluate \eqref{eq:complete-residual}.
+
+The reduction in description is useful but creates two obligations. First,
+every canonical component must originate from one or more engineering devices.
+Second, every requested calculated quantity must have a defined relation to the
+engineering model. These obligations are expressed using a component relation
+\begin{equation}
+ \Gamma_S\subseteq \mathcal D_S\times\mathcal D_C,
+ \label{eq:component-relation}
+\end{equation}
+where $(d_s,d_c)\in\Gamma_S$ means that canonical component $d_c$ contains a
+declared contribution from engineering device $d_s$. The relation is generally
+many-to-many: one converter may expand into several terminal components, and
+several buses may be merged across an ideal closed switch. The associated
+weights must satisfy conservation for extensive quantities such as active
+power, whereas intensive quantities such as voltage are broadcast only within
+an electrically merged class.
+
+Let $A_C$ denote an analysis performed on $C$ and let $\Rmap_S$ denote the
+reverse device association induced by $\Gamma_S$. A result is meaningful only
+if its identity space, units, electrical domain, and approximation level are
+known. Reporting ``bus 17 voltage'' without stating whether 17 is an AC bus, a
+DC bus, an internal nodal position, or an engineering identifier is therefore
+not accepted. This requirement is independent of the numerical method used to
+solve \eqref{eq:complete-residual}.
 
 \subsection{Why convergence is not a trust criterion}
 
-A nonlinear solver establishes that an assembled residual is small. It does not
-establish that every authored terminal exists, that an efficiency is physical,
-that a DC voltage is controlled by a real device, or that a canonical injection
-can be attributed to an asset. \Cref{tab:trust-layers} separates these questions.
+A nonlinear solution establishes that the residual of the assembled equation
+set is small. It does not establish that every authored terminal exists, that
+an efficiency is physical, that a DC voltage is controlled by a real device, or
+that a canonical injection can be associated with an asset. For example, an
+unresolved converter can be omitted during conversion, after which the reduced
+AC system may still converge. The numerical result is valid for the altered
+equation set but not for the authored hybrid network. \Cref{tab:trust-layers}
+separates the required forms of evidence.
 
-\begin{table}[t]
+\begin{table*}[t]
 \centering
-\caption{Evidence layers required before an AI-assisted result is trusted.}
+\caption{Evidence required for a trustworthy AI-assisted distribution-system model.}
 \label{tab:trust-layers}
 \small
-\begin{tabularx}{\linewidth}{@{}p{0.20\linewidth}p{0.32\linewidth}X@{}}
+\begin{tabularx}{\textwidth}{@{}p{0.17\textwidth}p{0.29\textwidth}p{0.25\textwidth}X@{}}
 \toprule
-Layer & Question & Representative failure \\
+Assessment & Physical question & Representative failure & Required evidence \\
 \midrule
-Boundary validity & Are identities, units, terminals, and ranges coherent? & A VSC points to a nonexistent AC bus. \\
-Physical role & Does each island have required voltage/angle support? & A DC island contains only fixed-power devices. \\
-Attribution & Can each result return to a stable engineering identity? & An aggregate has no declared origin. \\
-Numerical evidence & Did the solver and an independent equation check agree? & A low internal residual hides assembly error. \\
-Intent evidence & Is an admissible value the intended value? & A plausible load is assigned to the wrong asset. \\
+Model integrity & Are identities, units, terminals, domains, and ranges physically coherent? & A VSC refers to a nonexistent AC terminal. & Component and field identified before equation formation. \\
+Control-role closure & Does every energized island contain compatible reference and balancing devices? & A DC island contains only fixed-power devices. & Island composition and regulated/balancing quantities stated. \\
+Device association & Can each requested result be returned to a stable engineering identity? & An aggregate has no declared physical origin. & Reverse relation, units, domain, and allocation rule available. \\
+Numerical consistency & Do the primary calculation and an independently formed residual agree? & A small internal residual hides an equation-assembly error. & Finite solution and independent residual below the declared tolerance. \\
+Operating intent & Is a physically admissible value the value intended by the operator? & A plausible load is assigned to the wrong asset. & Telemetry, asset records, state estimation, or operator confirmation. \\
 \bottomrule
 \end{tabularx}
-\end{table}
+\end{table*}
 
-For requested observables $\mathcal O$, admission is
+For requested observables $\mathcal O$, the model is accepted when
 \begin{equation}
-\Adm(S,\mathcal O)=\Valid(S)\wedge\WP(\Proj(S))
+\Accept(S,\mathcal O)=\Valid(S)\wedge\WP(\Proj(S))
 \wedge\Attrib(\Rmap_S,\mathcal O).
-\label{eq:admission}
+\label{eq:model-acceptance}
 \end{equation}
-The three terms check model boundaries, structural well-posedness from island
-roles, and total reconstruction for the requested outputs. Solver and
-independent-residual checks follow admission. Intent evidence remains an
-external layer based on telemetry, asset records, state estimation, or review.
+The three terms assess engineering-model integrity, structural closure of the
+island roles, and complete device association for the requested outputs. The
+numerical solution and independently formed residual are evaluated only after
+these conditions have been satisfied. Operating intent remains an external
+requirement because it cannot be inferred from one internally consistent model.
 
-\section{Semantics-preserving projection and provenance}\label{sec:projection}
+Equation~\eqref{eq:model-acceptance} is a necessary condition for using the model in
+the declared analysis, not a universal proof of system security. It does not
+guarantee that the operating point is sufficiently far from voltage collapse,
+that converter current limits remain inactive, or that uncertain parameters
+match field measurements. These properties require continuation analysis,
+limit handling, estimation, or uncertainty quantification in addition to the
+model-consistency assessment developed here.
 
-\Cref{fig:framework} shows the verification layer. Heterogeneous files and AI
-actions populate the rich model; projection constructs canonical equations and
-a provenance certificate. AI-generated voltages or flows cannot bypass analysis.
+\section{Semantics-preserving projection and device association}\label{sec:projection}
 
-\begin{figure}[t]
+\Cref{fig:framework} presents the overall concept. Heterogeneous engineering
+data and AI-proposed modifications first define a detailed device model. The
+projection then forms the nodal equations while retaining the correspondence
+between each transformation and the affected physical devices. Calculated
+voltages and powers are obtained only from the physical equations; AI-generated
+numerical values cannot replace the power-flow solution.
+
+\begin{figure*}[t]
 \centering
-\includegraphics[width=\linewidth]{figures/sppt_mechanism_overview.pdf}
+\includegraphics[width=\textwidth]{figures/sppt_mechanism_overview.pdf}
 \caption{Mechanism of trustworthy AI-assisted modeling. Rich distribution-system
-semantics are projected to a canonical hybrid AC/DC substrate while a provenance
-certificate records every transformation. Boundary validity, structural
-well-posedness, and attribution remain coupled to the physical equations, so
-invalid actions are blocked and accepted observables return to stable device
-identities.}
+semantics are projected to a canonical hybrid AC/DC nodal representation while
+an engineering correspondence record retains the effect of each transformation.
+Model integrity, control-role closure, and device association remain coupled to
+the physical equations, so inadmissible modifications are refused and accepted
+observables return to stable device identities.}
 \label{fig:framework}
-\end{figure}
+\end{figure*}
+
+\subsection{Sequence of physical transformations}
 
 The projection is
 \begin{equation}
 \Proj=\mathcal D\circ\mathcal M\circ\mathcal E\circ\mathcal U,
 \label{eq:projection}
 \end{equation}
-where $\mathcal U$ normalizes units, $\mathcal E$ expands macro devices into
-terminal equivalents, $\mathcal M$ contracts declared ideal connections, and
-$\mathcal D$ separates de-energized islands. Each stage appends a provenance
-relation. Contracting a small nonzero impedance is permitted only when its
-threshold and affected observables are certified.
+where $\mathcal U$ normalizes units and bases, $\mathcal E$ expands compound
+devices into terminal equivalents, $\mathcal M$ treats declared ideal
+connections, and $\mathcal D$ separates de-energized islands. The order is
+important. A device must first be expressed on a common electrical base before
+its terminals can be compared; expansion must precede topology treatment so
+that an internal transformer or converter terminal is not merged as if it were
+an external bus.
 
-\begin{figure}[t]
+Unit normalization $\mathcal U$ converts dimensional quantities to a declared
+system base while preserving the authored value and unit. For a branch with
+dimensional impedance $Z_{ij}$ at voltage base $V_b$ and power base $S_b$,
+\begin{equation}
+ z_{ij}^{\rm pu}=Z_{ij}\frac{S_b}{V_b^2}.
+ \label{eq:unit-normalization}
+\end{equation}
+The AC and DC domains use their own voltage bases. A common numerical bus index
+is therefore insufficient to identify a voltage base; the domain and nominal
+voltage must accompany the identity.
+
+Device expansion $\mathcal E$ replaces a compound device by the smallest set of
+terminal components required by the selected analysis. A two-terminal VSC, for
+example, contributes an AC terminal, a DC terminal, the coupling balance in
+\eqref{eq:vscbalance}, and the equations associated with its control mode. The
+engineering identity remains common to these canonical components through
+$\Gamma_S$. A transformer or energy router is treated similarly. Expansion is
+exact for the variables represented by the selected steady-state model; omitted
+dynamic, harmonic, protection, or manufacturer-control quantities are reported
+outside the analysis scope.
+
+Topology treatment $\mathcal M$ contracts only connections declared ideal for
+the selected analysis. Let $\sim_0$ denote the equivalence relation generated by
+closed switches and branches whose impedance is exactly zero. The canonical bus
+associated with bus $i$ is the equivalence class
+\begin{equation}
+ [i]_0=\{j\,|\,j\sim_0 i\}.
+ \label{eq:merge-class}
+\end{equation}
+Contracting a small but nonzero impedance is an approximation rather than an
+identity. It is allowed only when the threshold, affected branches, and
+observable-dependent error limit are stated. This distinction prevents a
+convenient numerical tolerance from being presented as an exact physical
+connection.
+
+Finally, $\mathcal D$ identifies connected components after the switching state
+and terminal expansion have been applied. De-energized components are retained
+in the engineering description but excluded from an energized power-flow
+equation set. Their voltages and flows are reported as unavailable rather than
+set silently to zero. Energized AC and DC islands proceed to the control-role
+assessment described in Section~\ref{sec:ai-modification}.
+
+\begin{figure*}[t]
 \centering
-\includegraphics[width=\linewidth]{figures/sppt_mechanism_projection.pdf}
+\includegraphics[width=\textwidth]{figures/sppt_mechanism_projection.pdf}
 \caption{Semantics-preserving projection and reconstruction. (a) Engineering
 converter semantics expand into explicit AC, DC, and coupling equations without
 losing terminal origins. (b) Topology normalization records merge classes and
 energized scope. (c) The reverse map returns canonical observables to distinct
 engineering assets and exposes unsupported quantities.}
 \label{fig:projection}
-\end{figure}
+\end{figure*}
 
-For exactly preserved observables, the semantic contract is
+\subsection{Observable-dependent preservation}
+
+Preservation is defined for an observable, not for the model as an undivided
+object. Let $\mathcal O$ be the set of requested quantities and partition it as
 \begin{equation}
-\Rmap_S\!\left(A_C(\Proj(S))\right)=A_S(S).
+ \mathcal O=\mathcal O_{\rm ex}\cup\mathcal O_{\rm ap}
+ \cup\mathcal O_{\rm co}\cup\mathcal O_{\rm un},
+ \label{eq:observable-partition}
+\end{equation}
+where the four subsets denote exact, bounded-approximate,
+conservation-associated, and unsupported quantities, respectively. The subsets
+are disjoint for a declared analysis and projection setting.
+
+For $o\in\mathcal O_{\rm ex}$, the engineering and canonical evaluations agree
+after reverse association:
+\begin{equation}
+\Rmap_S\!\left(A_C(\Proj(S));o\right)=A_S(S;o).
 \label{eq:commuting}
 \end{equation}
-For reduced models, equality becomes the observable-specific bound
+Examples include voltage magnitude at buses joined by an ideal connection and
+the total active power of an exactly expanded converter. Exactness does not mean
+that every internal device variable is available; it applies only to the
+declared observable.
+
+For $o\in\mathcal O_{\rm ap}$, equality is replaced by
 \begin{equation}
-\left\|\Rmap_S\!\left(A_C(\Proj(S))\right)-A_S(S)\right\|\le\epsilon_{\Pi}.
+\left\|\Rmap_S\!\left(A_C(\Proj(S));o\right)-A_S(S;o)\right\|
+\le\epsilon_{\Pi,o}.
 \label{eq:approximate-contract}
 \end{equation}
-Four classes prevent
-overclaiming: strongly recoverable quantities; bounded-approximate quantities;
-auditable but nonunique allocations for which only origin and conservation are
-asserted; and nonrecoverable quantities reported as unsupported.
+The tolerance $\epsilon_{\Pi,o}$ is attached to the physical quantity and unit.
+A voltage error bound cannot be reused as a branch-power bound. Approximate
+contraction is therefore accepted only for observables for which a meaningful
+bound can be stated.
 
-\section{Converter-role typing and trustworthy AI workflow}\label{sec:workflow}
+For $o\in\mathcal O_{\rm co}$, several engineering devices contribute to one
+canonical result and no unique physical split exists. In this case the method
+asserts origin and conservation,
+\begin{equation}
+ \sum_{d\in\mathcal D_o} \widehat{o}_d=o_C,
+ \qquad (d,d_C)\in\Gamma_S,
+ \label{eq:conservation-association}
+\end{equation}
+but does not claim that a participation-based allocation is a measured device
+value. Quantities in $\mathcal O_{\rm un}$ are returned as unsupported. This is
+preferable to assigning a plausible value without a physical reconstruction
+rule.
+
+\subsection{Composition and device-level reconstruction}
+
+The correspondence record is updated after every transformation. Unit changes
+store the original and normalized quantities; expansion records the parent
+device of every terminal component; topology treatment records each bus class
+and branch origin; island separation records whether an object participates in
+the energized equation set. The combined relation provides the reverse map
+$\Rmap_S$ used in \eqref{eq:commuting}--\eqref{eq:conservation-association}.
+
+Two reconstruction rules are required. Intensive quantities are broadcast only
+when the transformation imposes equality. If buses $i$ and $j$ belong to the
+same ideal merge class, their reconstructed voltage is the canonical class
+voltage. Extensive quantities are allocated according to declared physical
+origins or participation factors whose sum is unity. Mixing these rules would,
+for example, duplicate total power when a canonical injection is returned to
+several original devices.
+
+The reverse relation also supports diagnosis. When a canonical equation cannot
+be formed, the responsible engineering device and field are obtained through
+$\Gamma_S$. When a requested result has no reverse relation, the quantity is
+rejected before reporting. Thus device association is evaluated both in the
+forward direction, where devices must reach the intended equations, and in the
+reverse direction, where calculated quantities must return to engineering
+identities.
+
+Three quantitative indices are used in the numerical assessment. The device
+association coverage for a requested output set is
+\begin{equation}
+ \kappa_{\mathcal O}=
+ \frac{|\mathcal O_{\rm ex}|+|\mathcal O_{\rm ap}|+|\mathcal O_{\rm co}|}
+ {|\mathcal O|}.
+ \label{eq:association-coverage}
+\end{equation}
+A result set is reported as fully associated only when
+$\kappa_{\mathcal O}=1$; unsupported quantities remain visible in the
+denominator rather than being removed. For a conservation-associated
+quantity, the normalized reconstruction discrepancy is
+\begin{equation}
+ \delta_o=\frac{|\sum_{d\in\mathcal D_o}\widehat{o}_d-o_C|}
+ {\max(|o_C|,o_{\rm base})},
+ \label{eq:reconstruction-error}
+\end{equation}
+where $o_{\rm base}$ prevents an ill-conditioned relative error near zero. The
+declared conservation tolerance is applied to $\delta_o$, while an approximate
+observable is assessed against its quantity-specific bound in
+\eqref{eq:approximate-contract}.
+
+Finally, the ordering of component records must not change either the calculated
+quantity or its engineering identity. Let $\sigma(S)$ denote a permutation of
+component records that leaves all identities and physical data unchanged. The required
+invariance is
+\begin{equation}
+ \Rmap_{\sigma(S)}A_C\Proj(\sigma(S))
+ =\Rmap_S A_C\Proj(S)
+ \quad\text{on }\mathcal O_{\rm ex}.
+ \label{eq:permutation-invariance}
+\end{equation}
+This condition is stronger than comparing two unlabeled voltage vectors: it
+requires equality after both vectors have been returned to the same stable
+engineering identities. The 175 valid permutations in the numerical campaign
+evaluate this requirement across all seven public feeders.
+
+\section{Converter-role closure and constrained AI modification}\label{sec:ai-modification}
+
+\subsection{Converter control roles}
 
 Converter modes determine which equations constrain the system and which
 variables power balance must recover. A $P$--$Q$ converter is grid-following
 and contributes no voltage reference; a $V_{dc}$--$Q$ or DC-droop converter
 anchors DC potential; and an AC grid-forming role supplies the island angle
-reference. The guard uses these physical roles rather than device-class names.
+reference. The assessment uses these physical roles rather than device-class
+names because identical converter hardware can operate under different controls.
+
+For converter $c$, define the role description
+\begin{equation}
+ \rho_c=(\mathcal Y_c,\mathcal X_c,\mathcal R_c),
+ \label{eq:role-tuple}
+\end{equation}
+where $\mathcal Y_c$ contains regulated quantities, $\mathcal X_c$ contains
+quantities recovered from power balance, and $\mathcal R_c$ contains the AC or
+DC reference contribution. For example,
+\begin{align}
+ \rho_c^{P-Q}&=(\{P_{ac},Q_{ac}\},\{P_{dc}\},\varnothing),\\
+ \rho_c^{V_{dc}-Q}&=(\{v_{dc},Q_{ac}\},\{P_{ac},P_{dc}\},\{v_{dc}\}).
+ \label{eq:role-examples}
+\end{align}
+The sets are interpreted together with \eqref{eq:vscbalance}; specifying both
+AC and DC active powers independently would generally overconstrain the loss
+balance, whereas specifying neither side leaves the balancing exchange
+unassigned.
+
+\Cref{tab:converter-roles} summarizes the role assignment used in the
+assessment. The table separates voltage-magnitude regulation from an angle or
+frequency reference because the former does not remove the rotational degree
+of freedom of an AC island. It also separates a fixed DC-voltage setpoint from
+DC droop. Both provide voltage support, but the droop-controlled devices share
+the balancing duty through their slopes rather than imposing several identical
+voltage equations. The assignment is made from the active control mode and
+connection status, not from the hardware nameplate.
+
+\begin{table*}[t]
+\centering
+\caption{Physical role assignment for representative converter controls.}
+\label{tab:converter-roles}
+\footnotesize
+\begin{tabularx}{\textwidth}{@{}p{0.13\textwidth}p{0.18\textwidth}p{0.18\textwidth}p{0.11\textwidth}p{0.11\textwidth}X@{}}
+\toprule
+Active control & Regulated quantities & Quantities recovered from balance & AC reference & DC-voltage support & Condition examined before calculation \\
+\midrule
+$P$--$Q$ & $P_{ac}$ and $Q_{ac}$ & $P_{dc}$ and conversion loss & None & None & A DC island containing only fixed-power devices has no voltage-forming role. \\
+$V_{dc}$--$Q$ & $v_{dc}$ and $Q_{ac}$ & $P_{ac}$, $P_{dc}$, and conversion loss & None & Direct & The controlled DC terminal must be energized and belong to the stated island. \\
+$P$--$|V_{ac}|$ & $P_{ac}$ and $|V_{ac}|$ & $Q_{ac}$, $P_{dc}$, and conversion loss & Magnitude only & None & A separate angle- or frequency-forming device is still required. \\
+AC grid forming & $|V_{ac}|$ and $\theta_{ac}$ at steady state & AC and DC balancing powers subject to the selected secondary control & Angle and magnitude & None unless coupled & Multiple rigid angle references require a declared sharing or synchronization relation. \\
+DC droop & $P_{dc}-P_{dc}^{0}+k_v(v_{dc}-v_{dc}^{0})=0$ & Converter power and loss & None & Distributed & At least one nonzero droop slope is required on each supported DC island. \\
+AC frequency droop & Active-power--frequency and voltage--reactive-power relations & Converter active and reactive powers & Distributed & None unless coupled & The island-level frequency reference and participation convention must be defined. \\
+Blocked or disconnected & None & None & None & None & The converter contributes no reference or balancing role to either island. \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+The role description is evaluated after the switching state and energized
+islands have been determined. A converter disconnected on either side does not
+contribute a reference to that island. Similarly, a voltage limit, initial
+value, or nominal rating does not contribute to $\mathcal R_c$ unless it is part
+of an active physical control law.
+
+\subsection{Island-level structural closure}
 
 For every energized AC island $\mathcal I_a$ and DC island $\mathcal I_d$,
 \begin{equation}
@@ -317,102 +646,253 @@ explicit coordination law. These conditions are necessary role-closure tests:
 they do not guarantee Jacobian nonsingularity away from the operating point,
 distance from voltage collapse, or satisfaction of converter limits.
 
-\begin{figure}[t]
+The role counts are supplemented by an equation--variable incidence test. Let
+$\mathcal F_{\mathcal I}$ and $\mathcal X_{\mathcal I}$ denote the equations and
+unknowns associated with an energized island. The structural incidence matrix
+is
+\begin{equation}
+ B_{pq}=\begin{cases}
+ 1,&\partial F_p/\partial x_q\not\equiv0,\\
+ 0,&\text{otherwise},
+ \end{cases}
+ \quad F_p\in\mathcal F_{\mathcal I},\ x_q\in\mathcal X_{\mathcal I}.
+ \label{eq:structural-incidence}
+\end{equation}
+After the reference variables have been removed, a necessary closure condition
+is
+\begin{equation}
+ \operatorname{sprank}(\bm{B}_{\mathcal I})
+ =|\mathcal X_{\mathcal I}|.
+ \label{eq:structural-rank}
+\end{equation}
+Here $\operatorname{sprank}$ is the maximum matching size of the bipartite graph
+between equations and variables. This test identifies a missing control
+equation without relying on a particular initial point. It is followed, rather
+than replaced, by a numerical Jacobian check at the calculated operating point.
+
+An island can fail in three distinct ways. With no compatible reference, at
+least one voltage or angle variable remains unmatched. With multiple rigid
+references and no coordination law, the equation set can be overconstrained.
+With a formally complete role assignment, the numerical Jacobian can still
+become ill-conditioned near voltage collapse or a converter limit. Separating
+these cases improves interpretation: the first two are model-formation errors,
+whereas the third is an operating-condition property.
+
+\begin{figure*}[t]
 \centering
-\includegraphics[width=\linewidth]{figures/sppt_mechanism_converter_roles.pdf}
+\includegraphics[width=\textwidth]{figures/sppt_mechanism_converter_roles.pdf}
 \caption{Converter-role mechanism for structural well-posedness. (a) Compatible
 AC angle and DC voltage roles assign reference and balancing quantities.
 (b) Fixed-power converter roles alone leave DC-voltage regulation and balancing
 power without compatible assignments. (c) The structural incidence between
-role equations and variables therefore lacks full rank. (d) Provenance
-identifies the responsible converter and supports a role-specific repair before
+role equations and variables therefore lacks full rank. (d) Device-origin
+reconstruction identifies the responsible converter and supports a role-specific repair before
 solving.}
 \label{fig:roles}
-\end{figure}
+\end{figure*}
 
-The AI assistant may classify an input, extract a parameter with provenance,
-select a whitelisted transformation, or propose a repair. Each proposal becomes
-a typed action $a=(\text{verb},\text{target},\text{field},\text{value},
-\text{authority})$. It is applied to a candidate $S'=a(S)$ and evaluated using
-\cref{eq:admission}. Rejection discards $S'$; acceptance commits it and invokes
-analysis. Thus a failed proposal cannot contaminate the last admitted model.
+\subsection{Constrained AI-assisted model modification}
 
-\begin{figure}[t]
+The role of AI is limited to interpreting an engineering request and proposing a
+model modification. It does not generate an accepted voltage, current, or power
+result. Each proposal is represented by
+\begin{equation}
+ m=(\text{operation},\text{asset},\text{quantity},\text{value},
+ \text{permitted use},\text{evidence}),
+ \label{eq:structured-modification}
+\end{equation}
+where the asset must resolve to a stable engineering identity and the quantity
+must be applicable to that device type. The permitted use distinguishes a
+read-only analysis request, an engineering-model modification, an advisory
+operating proposal, and a direct physical control request. The present study
+evaluates only the first two categories.
+
+Let $S_k$ be the most recent accepted model. The proposed model is formed as
+$S'_k=m_k(S_k)$ without altering $S_k$. Define $\chi(S'_k,\mathcal O)=1$ when
+the model-integrity, role-closure, device-association, and numerical conditions
+for observables $\mathcal O$ have been satisfied. The accepted sequence is
+\begin{equation}
+ S_{k+1}=\begin{cases}
+ S'_k,&\chi(S'_k,\mathcal O)=1,\\
+ S_k,&\chi(S'_k,\mathcal O)=0.
+ \end{cases}
+ \label{eq:model-update}
+\end{equation}
+Consequently, an inadmissible proposal cannot alter the model used by the next
+analysis. The associated diagnosis identifies the physical asset, field, or
+island condition responsible for refusal. This property is assessed explicitly
+in the numerical study by applying a valid modification after every rejected
+proposal.
+
+\begin{figure*}[t]
 \centering
-\includegraphics[width=\linewidth]{figures/sppt_mechanism_agent.pdf}
-\caption{Transactional AI-assisted model editing. (a) Natural-language intent
-is converted to a typed, authority-bounded action. (b) The edit is applied only
-to an isolated candidate state. (c) A candidate crosses the admission boundary
-only after all evidence passes; rejection discards the candidate and preserves
-the previously admitted state.}
-\label{fig:agent-workflow}
-\end{figure}
+\includegraphics[width=\textwidth]{figures/sppt_mechanism_agent.pdf}
+\caption{Constrained AI-assisted model modification. (a) A natural-language
+request is converted into an engineering modification with a resolved asset,
+quantity, magnitude, and permitted use. (b) The modification is evaluated on an
+isolated copy of the accepted model. (c) The proposed model replaces the
+accepted model only after the physical and numerical assessments are satisfied;
+otherwise the previous model is retained.}
+\label{fig:ai-modification}
+\end{figure*}
 
-The authority field separates read-only analysis, model editing, advisory
-decisions, and physical control. The present study evaluates the first two.
-Passing structural guards neither authorizes autonomous control nor proves that
-a plausible value reflects operator intent.
+Equation~\eqref{eq:model-update} does not authorize autonomous physical
+control. A model modification can be internally consistent while still being
+based on an incorrect operating instruction. Direct control therefore requires
+additional authorization, telemetry consistency, operating limits, and human
+oversight outside the scope of the present work.
 
-\section{Numerical studies}\label{sec:numerical}
+\section{Evaluation design and numerical studies}\label{sec:numerical}
 \input{sppt_campaign_study}
 
 \section{Discussion}\label{sec:discussion}
 
-The evidence changes the interpretation of model validation in three ways.
-First, convergence is a weak admission proxy. Converter-terminal, DC-support,
-and efficiency faults can retain a solvable algebraic problem after an incorrect
-component is ignored or misinterpreted. A small residual then certifies only the
-altered problem. Validation and role typing are prerequisites, not diagnostics
-after a failed solve.
+\subsection{Why convergence is insufficient}
 
-Second, provenance has operational value beyond reproducibility. It turns a
-generic rejection into an actionable diagnosis and links abnormal voltage or
-converter transfer to the engineering device and transformation responsible.
-Without stable attribution, an AI repair would act on an ambiguous canonical
-index.
+The results change the interpretation of model verification in
+converter-dominated distribution systems. Convergence-based screening detects
+the missing AC angle reference because this error directly affects the numerical
+degrees of freedom. It does not detect missing converter terminals, missing DC
+support, or an efficiency above unity in the tested cases. These errors either
+remove a component from the assembled equations or leave a smooth but
+physically incorrect equation set. A small residual consequently demonstrates
+consistency between a numerical solution and the equations that were actually
+formed; it does not demonstrate consistency between those equations and the
+engineering system that was intended.
 
-Third, SPPT and anomaly detection address different uncertainty classes. SPPT
-rejects internally invalid, underdetermined, or unattributable models. It
-intentionally admits a physically plausible load change when structural
-conditions remain satisfied. Whether that change is true requires telemetry,
-state estimation, parameter provenance, and operator intent. A deployment
-should place semantic verification below a data-consistency layer rather than
-claiming that either replaces the other.
+This distinction becomes more important as the share of power-electronic
+equipment increases. In a passive AC feeder, a missing branch commonly changes
+connectivity and may cause an obvious island. In a hybrid AC/DC network, a
+converter can be connected topologically while its control role is inconsistent
+with the balancing requirements. The network graph alone is therefore
+insufficient. Model-integrity checks, converter-role closure, and numerical
+solution address different failure mechanisms and must be applied in that
+order.
 
-The conclusions are bounded. The primary campaign uses a balanced steady-state
-subset because complete unbalanced GridLAB-D control semantics are outside the
-import boundary. Three-phase and external-engine studies are scope checks, not
-a universal hybrid oracle. Structural reference conditions do not exclude
-voltage collapse, active-set changes, or saturation. Some aggregate allocations
-remain auditable but not physically unique. Finally, scripted typed actions
-verify the safety state machine, not arbitrary language understanding. A small
-local LLM test demonstrates interface feasibility only and cannot establish LLM
-reliability.
+The layer-removal results support this interpretation quantitatively. Removing
+the role assessment produces a complete blind spot for 175 missing-DC-support
+cases. Removing the engineering checks and retaining convergence creates four
+complete blind spots and detects only 3 of 75 duplicate-identity cases. The
+independent residual does not change the structural-fault count because those
+models are refused before calculation, but it provides a separate check against
+errors in equation formation for accepted models. No single layer reproduces
+the complete result.
+
+\subsection{Value of device-level association}
+
+Device association has practical value beyond reproducibility. A generic
+message that a nodal equation cannot be formed does not identify the converter,
+terminal, or control quantity that must be corrected. The forward relation
+$\Gamma_S$ locates the engineering origin of the failed equation, while the
+reverse relation $\Rmap_S$ associates calculated voltages and powers with stable
+asset identities. This is required for any subsequent planning or operating
+decision because a canonical bus position is not itself an engineering asset.
+
+The distinction between exact, approximate, conservation-associated, and
+unsupported quantities also prevents overinterpretation of reduced models.
+Exact bus-voltage reconstruction across an ideal merge class is fundamentally
+different from allocating an aggregate power among several devices. The latter
+may satisfy conservation without representing a measured device value. Stating
+this difference is particularly important when AI is used to summarize results,
+because fluent language can otherwise hide the physical nonuniqueness of an
+allocation.
+
+\subsection{Relation to anomaly detection and state estimation}
+
+SPPT and anomaly detection address different uncertainty classes. SPPT refuses
+models that are internally invalid, structurally incomplete, or incapable of
+returning a requested result to an engineering device. It intentionally accepts
+a physically plausible load or converter-setpoint change when the structural
+conditions remain satisfied. Whether that change is true cannot be determined
+from the model alone.
+
+The 350 plausible parameter modifications demonstrate this boundary. Every
+modification passes the structural assessment, yet the maximum AC-voltage and
+branch-power deviations reach $4.239\times10^{-3}$~p.u. and 0.526~MW,
+respectively. These values are not structural failures; they are the physical
+consequences of uncertain operating data. Telemetry comparison, state and
+parameter estimation, historical anomaly detection, and operator confirmation
+are appropriate for this second layer. The proposed method should therefore be
+combined with, rather than presented as a replacement for, measurement-based
+assessment.
+
+\subsection{Implications for AI-assisted energy analysis}
+
+The AI contribution in this study is deliberately limited. AI interprets a
+request and proposes a structured engineering modification, while the accepted
+electrical quantities remain outputs of the physical model. This division avoids
+using language-model confidence as a substitute for power-system evidence. The
+42 public-feeder modification combinations show that admissible changes can be
+adopted and inadmissible changes can be refused without altering the previously
+accepted model. The subsequent valid assessment in every case provides direct
+evidence that refusal does not damage the model used for later analysis.
+
+These results should not be interpreted as a statistical evaluation of general
+language-model reliability. The optional five-request local trial only
+demonstrates that a language request can be expressed using the constrained
+modification variables in \eqref{eq:structured-modification}. Reliability under
+arbitrary prompts, model versions, languages, or adversarial instructions would
+require a substantially larger and separately designed study. The contribution
+here is the physical assessment that remains applicable regardless of which AI
+method proposes the modification.
+
+\subsection{Scope and limitations}
+
+The primary campaign uses a balanced steady-state subset because the public
+GridLAB-D conversion does not retain every unbalanced control and protection
+quantity. The staged three-phase cases extend the assessment to balanced,
+unbalanced radial, and unbalanced meshed conditions, but they do not establish
+equivalence between the positive-sequence and phase-domain models. Likewise,
+the GridLAB-D and OpenDSS comparisons are limited to physical quantities shared
+by the participating models. Neither external engine is treated as a reference
+for the added DC network and converter controls.
+
+The island role counts and structural incidence test are necessary formation
+conditions, not sufficient operating-security conditions. They do not exclude
+voltage collapse, converter saturation, protection operation, discrete control
+changes, or dynamic instability. These phenomena require continuation power
+flow, complementarity or active-set treatment, dynamic simulation, and
+protection models. The framework can carry the corresponding device association
+into those analyses, but the present numerical evidence is centered on
+steady-state model formation.
+
+Finally, perfect detection in the six injected structural classes is not a
+universal completeness result. Correlated parameter errors, time-varying data
+drift, malicious measurement changes, and undocumented manufacturer controls
+remain outside the tested population. The fixed campaign and disclosed public
+systems provide a reproducible comparison, while broader field validation will
+be required before operational use.
 
 \section{Conclusions}\label{sec:conclusion}
 
-This paper presented a verification layer for trustworthy AI-assisted modeling
-of converter-dominated hybrid AC/DC distribution systems. Semantics-preserving
-projection connects engineering devices to canonical equations, provenance
-returns observables to stable identities, and converter-role typing detects
-missing AC-angle or DC-voltage support before solution. Typed AI actions are
-evaluated transactionally so rejected candidates cannot modify the admitted
-model.
+This paper developed a verification framework for AI-assisted modeling of
+converter-dominated hybrid AC/DC distribution systems. The framework projects
+detailed engineering devices to a canonical nodal representation, retains the
+forward and reverse device correspondence, classifies converter control roles,
+and evaluates island-level structural closure before nonlinear calculation.
+AI-proposed modifications are assessed on an isolated model and replace the
+accepted model only when the declared physical and numerical conditions are
+satisfied.
 
-The fixed-seed study contains 1575 variants of seven public 32--6986-bus
-distribution feeders with disclosed AC/DC overlays. The complete guard detects
-and localizes all 1050 structural faults and rejects none of 175 admissible
-permutations, while solver-only admission misses several fault classes. A
-separate typed-agent campaign verifies reject-without-commit and recovery after
-rejection across the same feeders. Physical-impact studies show that
-structurally valid but incorrect loads and converter setpoints can materially
-change results.
+The evaluation contains 1575 fixed-seed variants of seven public distribution
+feeders with 32--6986 AC buses and fully disclosed AC/DC additions. The complete
+method detects and localizes all 1050 structural faults and refuses none of the
+175 admissible permutations. Convergence-based screening misses all tested
+missing-terminal, missing-DC-support, and invalid-efficiency cases and detects
+only 3 of 75 duplicate-identity cases. The constrained AI experiment correctly
+accepts 14 admissible modifications, refuses 28 inadmissible modifications, and
+retains a usable accepted model after every refusal. Three-phase stress studies
+and GridLAB-D/OpenDSS comparisons further define the range of the evaluation.
 
-Verified projection, role typing, and attribution prevent internally incoherent
-AI-assisted models from being trusted, but they cannot infer data truth or user
-intent. Future work should combine this semantic layer with telemetry-driven
-state and parameter estimation, calibrated uncertainty, broader phase-domain
-conversion, and human review for actions with operational authority.
+The parameter-error study establishes an equally important limitation:
+internally consistent but incorrect loads and converter setpoints remain
+admissible and can produce material voltage and power deviations. Trustworthy
+AI-assisted analysis therefore requires two complementary forms of evidence.
+The proposed framework establishes physical model consistency and device-level
+association, while telemetry, estimation, and operator review establish whether
+the numerical data represent the intended operating system. Future work will
+extend this combination to broader phase-domain conversion, converter limits,
+dynamic models, and uncertainty-aware operating decisions.
 
 \section*{Declaration of competing interest}
 The authors declare no known competing financial interests or personal
@@ -453,6 +933,39 @@ in AC, DC, and hybrid microgrids applications: A comprehensive review,''
 \bibitem{liao2024xai} W.~Liao et al., ``Can we trust explainable artificial
 intelligence in wind power forecasting?'' \emph{Applied Energy}, vol.~376,
 124273, 2024.
+\bibitem{altorok2024opf} M.~Altorok and A.~Ukil, ``Review on optimal power flow
+in a hybrid AC/DC distribution network,'' \emph{Electric Power Systems
+Research}, vol.~236, 110956, 2024.
+\bibitem{shahbazi2025branch} M.~Shahbazi et al., ``An efficient universal AC/DC
+branch model for optimal power flow studies in hybrid AC/DC systems,''
+\emph{IEEE Transactions on Power Systems}, vol.~40, pp.~3211--3221, 2025.
+\bibitem{zhu2024router} X.~Zhu et al., ``Optimal power flow research
+of AC--DC hybrid grid with multiple energy routers,'' \emph{Electric Power
+Systems Research}, vol.~228, 110090, 2024.
+\bibitem{abdelwanis2024review} E.~Abdelwanis et al., ``A
+comprehensive review of hybrid AC/DC networks: insights into system planning,
+energy management, control, and protection,'' \emph{Neural Computing and
+Applications}, vol.~36, pp.~17961--17977, 2024.
+\bibitem{gutierrez2024ai} A.~Gutierrez-Escalona et al.,
+``Artificial intelligence in the hierarchical control of AC, DC, and hybrid
+AC/DC microgrids: A review,'' \emph{IEEE Access}, vol.~12,
+pp.~157227--157246, 2024.
+\bibitem{madani2025llm} S.~Madani et al., ``Large language
+models integration in smart grids,'' \emph{Energy Reports}, vol.~14,
+pp.~1562--1577, 2025.
+\bibitem{ruan2024security} G.~Ruan et al., ``Applying large
+language models to power systems: Potential security threats,'' \emph{IEEE
+Transactions on Smart Grid}, vol.~15, pp.~3333--3336, 2024.
+\bibitem{zhang2025llmreview} Y.~Zhang et al., ``Review on application
+and challenges of large language models in power grids,'' \emph{IEEE Access},
+vol.~13, pp.~106932--106941, 2025.
+\bibitem{wu2024piml} R.~Wu et al., ``Physics-informed machine
+learning: A comprehensive review on applications in anomaly detection and
+condition monitoring,'' \emph{Expert Systems with Applications}, vol.~255,
+124678, 2024.
+\bibitem{guato2024anomaly} D.~A.~Guato Burgos et al., ``A review
+of smart grid anomaly detection approaches pertaining to artificial
+intelligence,'' \emph{Applied Sciences}, vol.~14, 1194, 2024.
 \bibitem{gridlabd} D.~P.~Chassin et al., ``GridLAB-D: An open-source power
 systems modeling and simulation environment,'' in \emph{Proc. IEEE PES T\&D},
 2008.

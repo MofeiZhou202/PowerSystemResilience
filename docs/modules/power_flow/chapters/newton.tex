@@ -139,7 +139,9 @@ CMake 选项 \srcpath{HACDCPF\_USE\_SUITESPARSE}，缺失回退 Eigen SparseLU�
 \subsection{PV$\leftrightarrow$PQ 外环}
 MATPOWER 风格无功限值切换（src/power\_flow/newton\_solver.cpp:solve）：外环上限 30 次；
 内层收敛后检查隐含无功 $Q_g^{\mathrm{implied}}=Q^{\mathrm{calc}}+Q^{\mathrm{load}}-Q^{\mathrm{conv}}$
-越限（迟滞 \fld{pv\_q\_hysteresis\_pu}=0.01），越限则转 PQ 并把 \fld{qg} 钉在限值；
+是否越限（进入侧无边距：各调用点 \texttt{entry\_margin\_pu=0.0}），越限则转 PQ 并把 \fld{qg}
+钉在限值；\fld{pv\_q\_hysteresis\_pu}=0.01 只作用于恢复侧——判定 \fld{qg} 是否仍钉在限值的
+容差 $\texttt{limit\_tol}=\max(10^{-10},\,\fld{pv\_q\_hysteresis\_pu}\times10^{-6})$，
 全部限内后尝试恢复 PV（\fld{pv\_recover\_vm\_tol\_pu}=0.01）。切换\textbf{只在外环}
 发起，迭代内不做切换：内层 Newton 收敛后统一检查越限（:solve）；内层未收敛时
 仅当残差 $\le 0.1$ 才允许按当前 $Q$ 估计切换重试（:solve，守卫避免大残差下

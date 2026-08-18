@@ -141,7 +141,7 @@ def overview():
     ax.text(.30, 1.12, "heterogeneous files", fontsize=5.8, color=C["muted"])
     for i, text in enumerate(("GLM", "DSS", "JSON")):
         x=.35+i*.58; box(ax, (x, .58), .46, .38, "white", C["line"], .035, .7); ax.text(x+.23, .77, text, ha="center", va="center", fontsize=5.1, color=C["muted"])
-    ax.text(2.40, .79, "+", fontsize=7, color=C["muted"], ha="center"); chip(ax, 3.45, .78, "typed AI action", C["sem"], 1.55)
+    ax.text(2.40, .79, "+", fontsize=7, color=C["muted"], ha="center"); chip(ax, 3.45, .78, "AI modification", C["sem"], 1.55)
     ax.add_patch(Rectangle((5.25, .55), 3.20, 5.95, facecolor=C["semp"], edgecolor="none", alpha=.42))
     ax.text(6.85, 6.12, "Semantic projection", ha="center", fontsize=7.8, weight="bold", color=C["sem"])
     for i, (symbol, caption) in enumerate((("U","units"),("E","terminals"),("M","topology"),("D","scope"))):
@@ -149,7 +149,7 @@ def overview():
         ax.text(x,4.35,rf"$\mathcal{{{symbol}}}$",ha="center",va="center",fontsize=7.2,color=C["sem"]); ax.text(x,3.93,caption,ha="center",va="top",fontsize=5.1,color=C["muted"])
         if i<3: arrow(ax,(x+.25,4.35),(x+.46,4.35),C["sem"],.8)
     for i,x in enumerate(np.linspace(5.7,7.95,8)): ax.add_patch(Circle((x,2.55),.055+i*.004,facecolor=C["guard"],edgecolor="none",alpha=.55+.05*i))
-    ax.text(6.85,2.20,"provenance certificate",ha="center",fontsize=5.8,color=C["guard"],weight="bold")
+    ax.text(6.85,2.20,"correspondence record",ha="center",fontsize=5.8,color=C["guard"],weight="bold")
     ax.add_patch(Circle((6.05,1.20),.12,facecolor=C["bad"],edgecolor="none")); arrow(ax,(5.15,1.20),(5.88,1.20),C["bad"],1)
     ax.plot([6.25,6.47],[1,1.40],color=C["bad"],lw=1.25); ax.text(6.70,1.19,"invalid terminal / role",va="center",fontsize=5.4,color=C["bad"])
     ax.add_patch(Rectangle((8.45,.55),7.55,5.95,facecolor="#FAFBFB",edgecolor="none")); ax.text(8.78,6.12,"Canonical hybrid AC/DC substrate",fontsize=7.8,weight="bold",color=C["ink"])
@@ -188,7 +188,7 @@ def projection():
     ax.plot([6.23,7.11],[6.45]*2,color=C["ac"],lw=1.4); ax.plot([7.79,8.67],[6.45]*2,color=C["dc"],lw=1.4)
     ax.text(6.05,5.70,r"$(V,\theta)$",ha="center",fontsize=6.1,color=C["ac"]); ax.text(7.45,4.92,r"$P_{ac}+P_{dc}+P_{loss}=0$",ha="center",fontsize=5.7,color=C["sem"]); ax.text(8.85,5.70,r"$v$",ha="center",fontsize=6.1,color=C["dc"])
     for x,color,name in [(6.05,C["ac"],"B-204"),(7.45,C["sem"],"VSC-17"),(8.85,C["dc"],"D-08")]: ax.plot([x,x],[5.35,2.55],color=color,lw=.9,alpha=.7); chip(ax,x,2.2,name,color,1.2)
-    ax.text(7.45,1.15,"origin relation retained",ha="center",fontsize=5.7,color=C["guard"],weight="bold")
+    ax.text(7.45,1.15,"device origin retained",ha="center",fontsize=5.7,color=C["guard"],weight="bold")
     ax=axs[1]; ax.text(2.2,8.2,"engineering topology",ha="center",fontsize=6,color=C["muted"])
     rich=[(1,6.8),(2,7.3),(3,6.5),(4,7.1)]
     for p,q in zip(rich[:-1],rich[1:]): ax.plot([p[0],q[0]],[p[1],q[1]],color=C["ac"],lw=1.25)
@@ -202,7 +202,7 @@ def projection():
     for p,q in zip(can[:-1],can[1:]): ax.plot([p[0],q[0]],[p[1],q[1]],color=C["ac"],lw=1.4)
     for x,y in can: ac_bus(ax,x,y,.17)
     ax.add_patch(Circle((7.45,7.15),.32,fill=False,edgecolor=C["guard"],lw=1,linestyle=(0,(2,1.5)))); ax.text(7.45,5.6,"merge class",ha="center",fontsize=5.6,color=C["guard"],weight="bold"); ax.text(7.45,4.95,r"$\{B_2,B_3\}\mapsto n_2$",ha="center",fontsize=6.1)
-    box(ax,(5.85,2.35),3.35,1.12,C["guardp"],C["guard"],.12,.8); ax.text(7.525,2.92,"certificate",ha="center",va="center",fontsize=6.1,color=C["guard"],weight="bold"); ax.text(7.525,2.5,"merge + energized scope",ha="center",va="center",fontsize=5.3)
+    box(ax,(5.85,2.35),3.35,1.12,C["guardp"],C["guard"],.12,.8); ax.text(7.525,2.92,"transformation record",ha="center",va="center",fontsize=5.8,color=C["guard"],weight="bold"); ax.text(7.525,2.5,"merge + energized scope",ha="center",va="center",fontsize=5.3)
     ax=axs[2]; ax.text(2.05,8.2,"canonical observables",ha="center",fontsize=6,color=C["muted"])
     obs=[(1,r"$V_2$",C["ac"]),(2.05,r"$P_{23}$",C["sem"]),(3.1,r"$v_4$",C["dc"]),(4.15,r"$P_c$",C["guard"])]
     for x,text,color in obs: ax.add_patch(Circle((x,6.55),.25,facecolor="white",edgecolor=color,lw=1.1)); ax.text(x,6.55,text,ha="center",va="center",fontsize=6)
@@ -239,7 +239,7 @@ def roles():
     ax.text(3.85,.75,"missing role equation leaves an unmatched variable",ha="center",fontsize=5.5,color=C["bad"],weight="bold")
     arrow(ax,(6.20,2.70),(6.85,2.70),C["bad"],1.0); ax.text(8.10,3.20,r"$\mathrm{rank}(J_r)<n_r$",ha="center",fontsize=7.0,color=C["sem"]); ax.text(8.10,2.35,"structurally singular",ha="center",fontsize=5.8,color=C["bad"])
     ax=axs[3]; ax.add_patch(Arc((2,2.85),2.35,2.35,theta1=0,theta2=360,edgecolor=C["bad"],lw=1.1,linestyle=(0,(3,2)))); dc_bus(ax,1.45,2.85,.17); dc_bus(ax,2.55,2.85,.17); converter(ax,2,1.7,1,"VSC-17",C["badp"],C["bad"]); ax.plot([1.45,2.55],[2.85]*2,color=C["dc"],lw=1.2); ax.plot([2,2],[2.68,1.92],color=C["dc"],lw=1); ax.text(2,4.35,"DC island D-2",ha="center",fontsize=6.1,weight="bold")
-    arrow(ax,(3.4,2.75),(4.45,2.75),C["guard"],1.1); shield(ax,5.35,2.75,.78); ax.text(5.35,2.91,"role",ha="center",fontsize=5.5,color=C["guard"],weight="bold"); ax.text(5.35,2.55,"guard",ha="center",fontsize=5.5,color=C["guard"],weight="bold"); arrow(ax,(6.22,2.75),(7.05,2.75),C["bad"],1.1)
+    arrow(ax,(3.4,2.75),(4.45,2.75),C["guard"],1.1); shield(ax,5.35,2.75,.78); ax.text(5.35,2.91,"role",ha="center",fontsize=5.5,color=C["guard"],weight="bold"); ax.text(5.35,2.55,"check",ha="center",fontsize=5.5,color=C["guard"],weight="bold"); arrow(ax,(6.22,2.75),(7.05,2.75),C["bad"],1.1)
     for y,text,color,weight in [(3.77,"missing support",C["bad"],"bold"),(3.2,"device: VSC-17",C["ink"],"normal"),(2.73,r"role: $P$-$Q$",C["ink"],"normal"),(2.26,r"repair: $V_{dc}$ or droop",C["sem"],"normal"),(1.44,"reject before solve",C["bad"],"bold")]: ax.text(7.35,y,text,fontsize=5.9 if weight=="bold" else 5.6,color=color,weight=weight)
     save(fig,"sppt_mechanism_converter_roles")
 
@@ -247,23 +247,23 @@ def roles():
 def agent():
     fig=plt.figure(figsize=(7.15,3.30)); grid=fig.add_gridspec(1,3,left=.025,right=.985,bottom=.06,top=.98,width_ratios=[.95,1.12,1.10],wspace=.1); axs=[fig.add_subplot(grid[0,i]) for i in range(3)]
     for ax in axs: clean(ax)
-    panel(axs[0],"a","Intent becomes a typed action"); panel(axs[1],"b","Candidate-state isolation"); panel(axs[2],"c","Only verified state can cross")
+    panel(axs[0],"a","Request becomes an engineering modification"); panel(axs[1],"b","Isolated model assessment"); panel(axs[2],"c","Acceptance requires physical evidence")
     ax=axs[0]; box(ax,(.65,6.35),3.5,1.35,C["semp"],C["sem"],.18,.9); ax.text(2.4,7.02,'"Scale all loads',ha="center",fontsize=6); ax.text(2.4,6.61,'by 1.10"',ha="center",fontsize=6); ax.text(2.4,5.82,"untrusted intent",ha="center",fontsize=5.4,color=C["muted"]); arrow(ax,(4.28,7.02),(5.25,7.02),C["sem"],1.15)
-    box(ax,(5.38,4.55),4,4.55,"white",C["sem"],.16,1); ax.text(7.38,8.62,"typed action",ha="center",fontsize=6.7,color=C["sem"],weight="bold")
-    for i,(key,val) in enumerate((("verb","scale"),("target","loads/*"),("factor","1.10"),("authority","model edit"),("source","user request"))):
+    box(ax,(5.38,4.55),4,4.55,"white",C["sem"],.16,1); ax.text(7.38,8.62,"structured modification",ha="center",fontsize=6.2,color=C["sem"],weight="bold")
+    for i,(key,val) in enumerate((("operation","scale"),("asset","all loads"),("magnitude","1.10"),("use","model change"),("evidence","user request"))):
         y=8-i*.64; ax.text(6.88,y,key,fontsize=4.9,color=C["muted"],va="center",ha="right"); ax.text(7.08,y,val,fontsize=5.4,va="center",ha="left");
         if i<4: ax.plot([5.78,8.95],[y-.32]*2,color=C["line"],lw=.55)
-    shield(ax,7.35,2.5,.88,C["semp"],C["sem"]); ax.text(7.35,2.52,"schema",ha="center",va="center",fontsize=5.4,color=C["sem"],weight="bold",zorder=6); ax.text(7.35,1.22,"LLM selects; schema constrains",ha="center",fontsize=5.5,color=C["muted"])
-    ax=axs[1]; ax.add_patch(Rectangle((.25,5.05),9.4,3.95,facecolor=C["dcp"],edgecolor="none",alpha=.8)); ax.add_patch(Rectangle((.25,.65),9.4,3.95,facecolor=C["semp"],edgecolor="none",alpha=.8)); ax.text(.55,8.55,r"admitted state  $S$",fontsize=6.6,weight="bold",color=C["dc"]); ax.text(.55,4.15,r"isolated candidate  $S'$",fontsize=6.6,weight="bold",color=C["sem"]); feeder(ax,.75,6.75,.65); feeder(ax,.75,2.35,.65,"load"); ax.plot([.25,9.65],[4.82]*2,color=C["sem"],lw=1.2,linestyle=(0,(4,2))); ax.text(8.4,5.02,"isolation boundary",fontsize=5.2,color=C["sem"],ha="center"); arrow(ax,(8.6,6.25),(8.6,3.05),C["sem"],.9,"arc3,rad=.35"); ax.text(9.13,4.64,"copy",fontsize=5.3,color=C["sem"],rotation=-90,va="center"); chip(ax,7.05,1.25,"load factor = 1.10",C["sem"],2.2); ax.text(4.95,.18,"mutation exists only below the boundary",ha="center",fontsize=5.4,color=C["muted"])
-    ax=axs[2]; ax.text(1.55,8.85,"candidate evidence",ha="center",fontsize=5.7,color=C["muted"]); evidence=[(8,"boundary",C["ac"]),(7,"role/rank",C["guard"]),(6,"attribution",C["sem"])]
+    shield(ax,7.35,2.5,.88,C["semp"],C["sem"]); ax.text(7.35,2.52,"allowed",ha="center",va="center",fontsize=5.2,color=C["sem"],weight="bold",zorder=6); ax.text(7.35,1.22,"AI proposes; admissible set constrains",ha="center",fontsize=5.4,color=C["muted"])
+    ax=axs[1]; ax.add_patch(Rectangle((.25,5.05),9.4,3.95,facecolor=C["dcp"],edgecolor="none",alpha=.8)); ax.add_patch(Rectangle((.25,.65),9.4,3.95,facecolor=C["semp"],edgecolor="none",alpha=.8)); ax.text(.55,8.55,r"accepted model  $S$",fontsize=6.6,weight="bold",color=C["dc"]); ax.text(.55,4.15,r"proposed model  $S'$",fontsize=6.6,weight="bold",color=C["sem"]); feeder(ax,.75,6.75,.65); feeder(ax,.75,2.35,.65,"load"); ax.plot([.25,9.65],[4.82]*2,color=C["sem"],lw=1.2,linestyle=(0,(4,2))); ax.text(8.4,5.02,"assessment boundary",fontsize=5.2,color=C["sem"],ha="center"); arrow(ax,(8.6,6.25),(8.6,3.05),C["sem"],.9,"arc3,rad=.35"); ax.text(9.13,4.64,"derive",fontsize=5.3,color=C["sem"],rotation=-90,va="center"); chip(ax,7.05,1.25,"load factor = 1.10",C["sem"],2.2); ax.text(4.95,.18,"modification is evaluated only in the proposed model",ha="center",fontsize=5.2,color=C["muted"])
+    ax=axs[2]; ax.text(1.55,8.85,"physical evidence",ha="center",fontsize=5.7,color=C["muted"]); evidence=[(8,"model integrity",C["ac"]),(7,"role closure",C["guard"]),(6,"device relation",C["sem"])]
     for y,text,color in evidence: ax.add_patch(Circle((1.1,y),.16,facecolor=color,edgecolor="none")); ax.text(1.48,y,text,va="center",fontsize=5.6)
     ax.plot([3.05]*2,[4.35,8.6],color=C["guard"],lw=2.2,alpha=.75)
     for y in np.linspace(4.75,8.2,6): ax.add_patch(Circle((3.05,y),.11,facecolor=C["guardp"],edgecolor=C["guard"],lw=.7))
-    ax.text(3.05,9.02,"admission",ha="center",fontsize=6.2,color=C["guard"],weight="bold")
+    ax.text(3.05,9.02,"assessment",ha="center",fontsize=6.2,color=C["guard"],weight="bold")
     for y,_,color in evidence: arrow(ax,(2.45,y),(2.85,y),color,.9)
-    arrow(ax,(3.25,7.2),(5.1,7.2),C["dc"],1.4); ax.add_patch(Circle((5.5,7.2),.32,facecolor=C["dcp"],edgecolor=C["dc"],lw=1.1)); ax.text(5.5,7.2,r"$S'$",ha="center",va="center",fontsize=6.1,color=C["dc"]); arrow(ax,(5.85,7.2),(7.1,7.2),C["dc"],1.2); ax.text(7.3,7.2,r"$S\leftarrow S'$",va="center",fontsize=7.1,color=C["dc"],weight="bold"); ax.text(6.65,6.48,"atomic commit",ha="center",fontsize=5.5,color=C["dc"])
+    arrow(ax,(3.25,7.2),(5.1,7.2),C["dc"],1.4); ax.add_patch(Circle((5.5,7.2),.32,facecolor=C["dcp"],edgecolor=C["dc"],lw=1.1)); ax.text(5.5,7.2,r"$S'$",ha="center",va="center",fontsize=6.1,color=C["dc"]); arrow(ax,(5.85,7.2),(7.1,7.2),C["dc"],1.2); ax.text(7.3,7.2,r"$S\leftarrow S'$",va="center",fontsize=7.1,color=C["dc"],weight="bold"); ax.text(6.65,6.48,"adopt model",ha="center",fontsize=5.5,color=C["dc"])
     arrow(ax,(2.85,5.2),(2.15,3.85),C["bad"],1.1,"arc3,rad=.15"); ax.add_patch(Circle((1.9,3.42),.28,facecolor=C["badp"],edgecolor=C["bad"],lw=1)); ax.text(1.9,3.42,r"$S'$",ha="center",va="center",fontsize=6,color=C["bad"]); ax.plot([1.62,2.18],[3.14,3.7],color=C["bad"],lw=1); ax.plot([1.62,2.18],[3.7,3.14],color=C["bad"],lw=1); ax.text(1.9,2.78,"discard",ha="center",fontsize=5.4,color=C["bad"])
-    ax.plot([4,8.85],[3.35]*2,color=C["dc"],lw=1.3); ax.scatter([4,8.85],[3.35]*2,s=20,color=C["dc"],zorder=5); ax.text(4,3.78,r"$S_{before}$",ha="center",fontsize=5.7,color=C["dc"]); ax.text(8.85,3.78,r"$S_{after}$",ha="center",fontsize=5.7,color=C["dc"]); ax.text(6.43,2.78,r"rejection: $S_{after}=S_{before}$",ha="center",fontsize=6.3,weight="bold"); ax.text(6.43,2.1,"solver not invoked; next valid action remains executable",ha="center",fontsize=5.2,color=C["muted"])
+    ax.plot([4,8.85],[3.35]*2,color=C["dc"],lw=1.3); ax.scatter([4,8.85],[3.35]*2,s=20,color=C["dc"],zorder=5); ax.text(4,3.78,r"$S_{before}$",ha="center",fontsize=5.7,color=C["dc"]); ax.text(8.85,3.78,r"$S_{after}$",ha="center",fontsize=5.7,color=C["dc"]); ax.text(6.43,2.78,r"refusal: $S_{after}=S_{before}$",ha="center",fontsize=6.3,weight="bold"); ax.text(6.43,2.1,"the accepted model remains available for subsequent analysis",ha="center",fontsize=5.2,color=C["muted"])
     save(fig,"sppt_mechanism_agent")
 
 

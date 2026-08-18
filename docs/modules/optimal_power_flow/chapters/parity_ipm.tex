@@ -5,10 +5,10 @@
 本章给出交直流混合 OPF（第~\ref{sec:parityform}~章建模）的自研原始对偶内点
 求解核（下称 Parity IPM 核）的数值口径：它以 Parity 建模层装配出的
 \srcpath{parity::Problem} 为输入，在同一个牛顿框架内同时推进原始变量、
-松弛变量与全部乘子，输出收敛证书、状态向量与诊断计数。全章行号均指
-\srcpath{src/optimal\_power\_flow/parity\_ipm.cpp}（共 2250 行）与
+松弛变量与全部乘子，输出收敛证书、状态向量与诊断计数。全章符号锚点均指
+\srcpath{src/optimal\_power\_flow/parity\_ipm.cpp} 与
 \srcpath{include/hacdcpf/optimal\_power\_flow/native\_ipm\_solver.hpp}
-（IPMOptions/IPMResult 类型定义），驱动层行号指
+（IPMOptions/IPMResult 类型定义），驱动层锚点指
 \srcpath{src/optimal\_power\_flow/ac\_opf.cpp}。核内全部方程为标幺值
 （$S_{\mathrm{base}}=100$~MVA，见 \ref{sec:parityform}~节）；成本币种未定。
 
@@ -584,12 +584,14 @@ Parity 问题同时可交由嵌入式 Ipopt 求解（适配器
 （src/optimal\_power\_flow/ac\_opf.cpp:build\_parity\_nlp\_input 注释）。门控分两层：
 \begin{itemize}
   \item 编译期 \srcpath{HACDCPF\_HAVE\_IPOPT}（src/optimal\_power\_flow/ac\_opf.cpp:solve\_parity\_with\_ipopt）：
-        平台选项 \srcpath{HACDCPF\_ENABLE\_IPOPT} 仅 macOS 默认 ON，非
-        Apple 平台显式开启直接 \fld{FATAL\_ERROR}（\srcpath{CMakeLists.txt:HACDCPF\_ENABLE\_IPOPT}、
-        122--127）；MIPSolvers 侧仅在以内嵌 Ipopt 源码构建出
-        \fld{ipopt\_local} 时置 \fld{MIPSOLVERS\_HAVE\_IPOPT} 并透传
+        平台选项 \srcpath{HACDCPF\_ENABLE\_IPOPT} 仅 Apple 默认 ON、其余平台默认
+        OFF（\srcpath{CMakeLists.txt:HACDCPF\_ENABLE\_IPOPT}，任何平台均可显式开启），
+        并强制透传为 \fld{MIPSOLVERS\_BUILD\_LOCAL\_IPOPT}；MIPSolvers 侧仅在以内嵌
+        Ipopt 源码构建出 \fld{ipopt\_local} 时置 \fld{MIPSOLVERS\_HAVE\_IPOPT} 并透传
         \srcpath{HACDCPF\_HAVE\_IPOPT=1}（\srcpath{MIPSolvers/cmake/Dependencies.cmake:MIPSOLVERS\_HAVE\_IPOPT}、
-        \srcpath{MIPSolvers/CMakeLists.txt:HACDCPF\_HAVE\_IPOPT}）。未编译入时适配器返回
+        \srcpath{MIPSolvers/CMakeLists.txt:HACDCPF\_HAVE\_IPOPT}）——开启但内嵌
+        \texttt{ipopt/} 源码缺失时在 MIPSolvers 侧 \fld{FATAL\_ERROR}（必须用仓库内
+        Ipopt 源码，不用系统 Ipopt）。未编译入时适配器返回
         \fld{available=false}、状态 \texttt{"Ipopt not compiled in"}
         （src/optimal\_power\_flow/ac\_opf.cpp:solve\_parity\_with\_ipopt）；
   \item 运行期 \srcpath{HACDCPF\_DISABLE\_IPOPT\_OPF}：设置即强制不可用，
@@ -735,8 +737,9 @@ $1000\times$ 容忍带（互补另取 $10^{-2}$ 工程下限）时仍按收敛�
   \item \textbf{凝集式条件数}：默认凝集形式的 $\kappa(W)$ 随障碍比平方
         增长，刚性混合算例可能出现“精确求解但方向错误”的停滞；增广式
         可缓解但需自行开启（:KktForm、:kkt\_form\_preference）。
-  \item \textbf{Ipopt 路径的平台限制与口径差异}：嵌入式 Ipopt 仅 macOS
-        可构建（CMakeLists.txt:122--127）；其 acceptable 判据（$1000\times$）
+  \item \textbf{Ipopt 路径的平台限制与口径差异}：嵌入式 Ipopt 的可用性取决于
+        MIPSolvers 检出是否含可构建的内嵌 \texttt{ipopt/} 源码（见本章门控节，
+        默认仅 Apple 开启）；其 acceptable 判据（$1000\times$）
         比本核（$100\times$）宽松，且不返回约束乘子，LMP 在该路径不可用
         （src/optimal\_power\_flow/ac\_opf.cpp:solve\_parity\_with\_ipopt）。
   \item \textbf{悬置声明}：\srcpath{parity\_ipm\_solver.hpp:solve\_ac\_opf\_parity} 的

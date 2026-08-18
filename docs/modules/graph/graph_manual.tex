@@ -201,7 +201,8 @@ AC/DC 同号 ID 的 domain-qualified 恢复对照、多级降阶复合映射逆�
 \section{后续改进方向}
 \begin{enumerate}
   \item 为恒功率内部节点的 Kron 近似提供工作点相关的误差界估计并写入结果；
-  \item 悬垂折叠改为带父节点实际电压的迭代恢复，并报告恢复收敛标志；
+  \item 悬垂折叠的迭代恢复已实现（带父节点实际电压，\srcpath{result\_recovery.cpp}），
+        剩余工作是把恢复收敛标志写入结果并上报；
   \item 引入基于最小度/近似最小填充（AMD）的消去排序以进一步压低稀疏 Kron 填充；
   \item 统一淘汰旧式扁平映射，全平台强制 domain-qualified 接口。
 \end{enumerate}

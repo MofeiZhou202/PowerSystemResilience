@@ -13,13 +13,13 @@ NCP 半光滑 Newton、HELM 全纯嵌入、同伦延拓与 Newton--Krylov 内迭
 \compmeta{powerflow::NonlinearScaling}{\srcpath{include/hacdcpf/power\_flow/globalization/nonlinear\_scaling.hpp}}
 \paragraph{功能说明} 对 Newton 方程做行/列对角平衡，使缩放后残差与步长均为
 无量纲 $O(1)$ 量，收敛判据与病态探测都作用在缩放系统上。类只存两个向量并
-施加逐元运算（\srcpath{include/hacdcpf/power\_flow/nonlinear\_scaling.hpp}），构造由自由函数
+施加逐元运算（\srcpath{include/hacdcpf/power\_flow/globalization/nonlinear\_scaling.hpp}），构造由自由函数
 \srcpath{build\_nonlinear\_scaling} 完成（\srcpath{src/power\_flow/nonlinear\_scaling.cpp:build\_nonlinear\_scaling}）；
 三个开关 \fld{enable\_residual\_scaling}/\fld{enable\_variable\_scaling}/
 \fld{enable\_jacobian\_row\_col\_equilibration} 默认全开
-（\srcpath{include/hacdcpf/power\_flow/robust\_nonlinear\_options.hpp}）。
+（\srcpath{include/hacdcpf/power\_flow/globalization/robust\_nonlinear\_options.hpp}）。
 \paragraph{数学模型与算法} 缩放系统（头文件契约注释
-\srcpath{include/hacdcpf/power\_flow/nonlinear\_scaling.hpp}）：
+\srcpath{include/hacdcpf/power\_flow/globalization/nonlinear\_scaling.hpp}）：
 \[
 \hat F=D_F F,\qquad \hat J=D_F\,J\,D_x^{-1},\qquad
 \Delta\hat x=D_x\,\Delta x,\qquad \Delta x=D_x^{-1}\Delta\hat x
@@ -77,7 +77,7 @@ merit 每轮压入窗口（:NewtonSolver::solve）；回溯 $\alpha\leftarrow\be
 （:run\_line\_search（lambda））。如实说明：生产回溯次数由 \fld{max\_line\_search\_steps}
 （默认 10）控制；折减系数即 \fld{line\_search\_beta}（默认 0.5，经构造函数传入，
 :run\_line\_search（lambda））；类自带的 \fld{max\_line\_search\_trials}$=12$
-（include/hacdcpf/power\_flow/robust\_nonlinear\_options.hpp）当前未被主循环消费，为保留字段。
+（include/hacdcpf/power\_flow/globalization/robust\_nonlinear\_options.hpp）当前未被主循环消费，为保留字段。
 \paragraph{参数表}
 \begin{paramtable}
 \fld{enable\_nonmonotone\_linesearch} & — & — & on/off & true & GLL 参考窗口与非单调接受开关（关则退化为 $M=1$ 单调 Armijo）\\
@@ -130,7 +130,7 @@ $J+I/\delta t$ 并以 \texttt{update()} 逐步更新伪时间步
         \fld{ptc\_dt\_min}$=10^{-4}$、\fld{ptc\_dt\_max}$=10^{6}$
         （\srcpath{include/hacdcpf/power\_flow/globalization/robust\_nonlinear\_options.hpp:RobustNonlinearOptions}）。
   \item \textbf{LM/PTC 自动恢复}（\fld{enable\_auto\_fallback\_scheduling}，
-        默认\textbf{开}，\srcpath{include/hacdcpf/power\_flow/robust\_nonlinear\_options.hpp}；
+        默认\textbf{开}，\srcpath{include/hacdcpf/power\_flow/globalization/robust\_nonlinear\_options.hpp}；
         src/power\_flow/newton\_solver.cpp:NewtonSolver::solve）：线搜索与正则化全部失败后，LM 恢复解
         $(J^{\mathsf T}J+\lambda I)\Delta x=-J^{\mathsf T}F$（:NewtonSolver::solve），
         最多 4 次尝试、$\lambda$ 自 \fld{lm\_lambda0} 起 $\times10$ 增至
@@ -290,7 +290,7 @@ DCPF/Gauss--Seidel 暖启动（)。纯 AC（只用 AC 子系统，头文件
         （:verify\_physical\_residual（lambda）, :verify\_physical\_residual（lambda））；暖启动 DCPF 角度基线（:dcpf\_warmstart）/GS 预迭代
         （:gauss\_seidel\_warmstart）；K 因子在 PV+SLACK 间分摊不平衡（:apply\_distributed\_slack）。
 \end{itemize}
-\paragraph{参数表（\texttt{HelmOptions}，include/hacdcpf/power\_flow/helm\_solver.hpp）}
+\paragraph{参数表（\texttt{HelmOptions}，include/hacdcpf/power\_flow/solvers/helm\_solver.hpp）}
 \begin{paramtable}
 \fld{max\_coef} & $n_{\max}$ & 阶 & 50--200 & 100 & 幂级数最大系数数\\
 \fld{mismatch} & $\varepsilon$ & pu/rad & $10^{-8}$--$10^{-4}$ & $10^{-6}$ & Padé 收敛容差（幅值与相角）\\
@@ -404,7 +404,7 @@ $<10^{-10}$（:TEST\_CASE）；(ii) \srcpath{PowerFlowSolverFactory} 对含
 
 \compmeta{powerflow::RobustNonlinearOptions}{\srcpath{include/hacdcpf/power\_flow/globalization/robust\_nonlinear\_options.hpp}}
 \paragraph{功能说明与接线状态} \texttt{RobustNonlinearOptions}
-（\srcpath{include/hacdcpf/power\_flow/robust\_nonlinear\_options.hpp}，经
+（\srcpath{include/hacdcpf/power\_flow/globalization/robust\_nonlinear\_options.hpp}，经
 \fld{PowerFlowOptions::robust\_nonlinear} 挂载）按 Phase 1--5 组织全部鲁棒
 组件开关与参数；\texttt{NonlinearSolveMode} 枚举与
 \texttt{SolverModeSwitchRecord}（)为策略切换的诊断记录类型。
