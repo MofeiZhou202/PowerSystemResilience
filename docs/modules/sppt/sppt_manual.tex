@@ -1,0 +1,123 @@
+% !TEX program = xelatex
+% 编译方式：在本目录执行两遍 xelatex（详见 docs/_manual_common/README.md）。
+% 源码依据：src/sppt/ 与 include/hacdcpf/sppt/ 源码及 docs/sppt_runtime_contract.md，
+%           公式与参数以代码为准。
+\documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
+\usepackage{../../_manual_common/hysim_manual}
+
+\title{\textbf{交直流混合高弹性能源电力系统仿真平台}\\[0.5em]
+       {\Large 语义保持投影理论（SPPT）验证层技术手册}\\[0.3em]
+       {\large 数学模型、接口参数、验证校核与工业级评价}}
+\author{HySim-XJTU-HRPES（西安交通大学 HRPES 团队）}
+\date{\today}
+
+\begin{document}
+\maketitle
+\begin{abstract}
+\noindent 本手册依据 HySim-XJTU-HRPES 平台语义保持投影理论（SPPT）验证层
+（\srcpath{src/sppt/}、\srcpath{include/hacdcpf/sppt/}，总入口头 \srcpath{sppt.hpp}）整理，命名空间
+\texttt{hacdcpf::sppt}。该层把 SPPT 定理转成可计算的通过/残差检查：蜕变关系 MR1–MR8、MR3 证书语料、
+独立残差审计、三门准入守卫与受守卫约束的智能建模循环。全部结论以源码与
+\srcpath{docs/sppt\_runtime\_contract.md} 契约为准：SPPT 不替代物理求解器，也不在被测系统、可观测量、
+容差与后端之外证明正确性。版式与《碳流追踪与碳排放核算技术手册》一致。
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{阅读指南与约定}
+\subsection{数据来源}
+\begin{itemize}
+  \item \srcpath{include/hacdcpf/sppt/sppt.hpp} —— 模块总入口头；
+  \item \srcpath{include/hacdcpf/sppt/metamorphic.hpp}、\srcpath{src/sppt/metamorphic.cpp} ——
+        MR1–MR8 可执行蜕变检查；
+  \item \srcpath{include/hacdcpf/sppt/certificate.hpp}、\srcpath{src/sppt/certificate.cpp}、
+        \srcpath{independent\_residual.cpp} —— MR3 证书语料与独立残差；
+  \item \srcpath{include/hacdcpf/sppt/guard.hpp}、\srcpath{src/sppt/guard.cpp} —— 三门准入守卫；
+  \item \srcpath{include/hacdcpf/sppt/agent.hpp}、\srcpath{src/sppt/agent.cpp} ——
+        受守卫约束的智能建模循环；
+  \item \srcpath{benchmark.cpp}、\srcpath{ablation.cpp}、\srcpath{intelligent\_simulation.cpp} ——
+        基准/消融/智能仿真契约；
+  \item \srcpath{docs/sppt\_runtime\_contract.md} —— 运行时契约与边界。
+\end{itemize}
+命名空间为 \texttt{hacdcpf::sppt}。
+
+\subsection{单位制与索引空间}
+SPPT 层度量为无量纲残差与布尔判定：\fld{residual}/\fld{tolerance}（$\ge 0$）、
+\fld{passed}/\fld{accepted}/\fld{sound}（布尔）、\fld{attribution\_total}（$[0,1]$ 归因完整度）、
+混淆计数 \fld{tp}/\fld{fp}/\fld{tn}/\fld{fn}。蜕变编号 \fld{id} 取 \texttt{MR1}…\texttt{MR8}；证书残差
+分列潮流、独立、OPF 对偶与归因。索引空间沿用被投影系统的规范映射，不另定义。
+
+\subsection{诚实口径}
+\fld{passed}=true 仅在 \fld{observation}=Observed 时有意义；不收敛即失败；\fld{tolerance} 为调用方
+输入，并非通用认证阈值。独立残差 \fld{supported}=false 或 \fld{converged}=false 表示“证据不可得”，
+而非零残差。智能仿真门从不执行物理控制：即使控制请求证据完整，至多给出 \texttt{RequireHumanReview}。
+SPPT 不替代物理求解器，也不在被测系统/可观测量/容差/后端之外证明正确性。
+
+\section{功能定位与架构}
+\subsection{公共入口族}
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{6.6cm}L{3.0cm}L{5.4cm}@{}}
+\toprule
+入口 & 定义位置 & 说明\\
+\midrule
+\srcpath{mr1\_projection\_idempotence} … \srcpath{mr7\_wellposedness\_gate} & sppt/metamorphic.hpp & 可执行 MR1–MR7（含 MR3d/MR3t 暂态）\\
+\srcpath{run\_core\_metamorphic\_suite} & 同上 & 一次运行核心蜕变套件\\
+\srcpath{certify\_case} / \srcpath{certify\_corpus} / \srcpath{certify\_systems} & sppt/certificate.hpp & MR3 证书语料（CSV/LaTeX 导出）\\
+\srcpath{certify\_independent\_hybrid\_residual} & 同上 & 收敛态对作者原语 AC/DC/VSC 方程的独立审计\\
+\srcpath{guard\_system} / \srcpath{evaluate\_guard} & sppt/guard.hpp & 三门准入裁决\\
+\srcpath{run\_agent\_loop} + \srcpath{default\_agent\_script} & sppt/agent.hpp & 受守卫约束的智能建模循环\\
+\srcpath{run\_benchmark} / \srcpath{run\_ablation\_study} & sppt/benchmark.hpp 等 & 基准/消融/智能仿真契约\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{关键数据结构}
+\compmeta{MetamorphicResult}{include/hacdcpf/sppt/metamorphic.hpp}
+主要字段：\fld{id}（\texttt{MR1}…\texttt{MR8}）、\fld{passed}、\fld{observation}
+（Observed/NotObserved）、\fld{residual}、\fld{tolerance}、\fld{detail}。
+
+\compmeta{GuardVerdict}{include/hacdcpf/sppt/guard.hpp}
+主要字段：\fld{accepted}、\fld{validation\_ok}/\fld{well\_posed}/\fld{attribution\_total}、
+\fld{reason}、\fld{attribution}（\texttt{ObservableAttribution}）。守卫指标 \texttt{GuardMetrics} 含
+\fld{tp}/\fld{fp}/\fld{tn}/\fld{fn} 与 \fld{precision}/\fld{recall}/\fld{catch\_rate}。
+
+\compmeta{Certificate}{include/hacdcpf/sppt/certificate.hpp}
+行 \texttt{CertificateRow} 含 \fld{pf\_residual}/\fld{pf\_pass}、\fld{independent\_residual}、
+\fld{opf\_dual\_residual}、\fld{attribution\_total}；语料支持 \fld{all\_pass}、\fld{to\_csv}、
+\fld{to\_latex}。独立残差证书 \texttt{IndependentResidualCertificate} 含 \fld{ac\_residual}、
+\fld{dc\_residual}、\fld{converter\_balance\_residual}、\fld{total\_residual}。代理轨迹
+\texttt{AgentTrajectory} 含 \fld{steps}、\fld{metrics}、\fld{sound}。
+
+\input{chapters/source_equivalent_relations}
+
+\section{接口与参数}
+\begin{paramtable}
+\fld{tol} & $\varepsilon$ & — & 小正数 & — & MR3/证书残差容差（调用方输入，非通用阈值）\\
+\fld{passed} & — & — & 布尔 & — & 该 MR 是否通过（仅 Observed 时有意义）\\
+\fld{observation} & — & — & 枚举 & — & Observed / NotObserved（证据是否可得）\\
+\fld{residual} & $r$ & — & $\ge 0$ & — & 度量残差\\
+\fld{attribution\_total} & — & — & $[0,1]$ & — & 归因完整度（=1 方可接纳）\\
+\fld{accepted} & — & — & 布尔 & — & 守卫裁决：三门全过为真\\
+\fld{sound} & — & — & 布尔 & — & 代理循环仅提交可接纳编辑\\
+\end{paramtable}
+
+\section{验证与边界局限}
+\subsection{验证与校核}
+注册测试（\srcpath{tests/CMakeLists.txt}）：\srcpath{test\_sppt\_metamorphic}、
+\srcpath{test\_sppt\_certificate}、\srcpath{test\_sppt\_guard}、
+\srcpath{test\_sppt\_dae\_wellposedness}、\srcpath{test\_sppt\_ablation}、
+\srcpath{test\_sppt\_benchmark}、\srcpath{test\_sppt\_agent}。
+
+\subsection{边界与局限（如实标注）}
+\begin{itemize}
+  \item 不替代物理求解器，也不在被测系统、可观测量、容差与后端之外证明正确性；
+  \item \fld{passed}=true 仅当 \fld{observation}=Observed；不收敛即失败；容差为调用方输入，非通用
+        认证阈值；
+  \item 独立残差 \fld{supported}=false 或 \fld{converged}=false 表示证据不可得，而非零残差；
+  \item 智能仿真门从不执行物理控制，证据完整至多返回 \texttt{RequireHumanReview}；
+  \item 权威文档 \srcpath{docs/sppt\_runtime\_contract.md}，理论 \srcpath{docs/latex/sppt\_theory.tex}。
+\end{itemize}
+\input{../../_manual_common/industrial_evaluation}
+
+\end{document}

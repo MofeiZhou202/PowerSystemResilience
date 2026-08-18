@@ -1,0 +1,75 @@
+\section{源码等价图算法}
+
+本章只描述当前图实现实际计算的量，不用理论上更完整的降阶式替换代码接口。
+
+\subsection{拓扑量}
+
+\srcpath{src/graph/topology\_analysis.cpp:136--164} 只统计 in-service 节点和边。
+空节点图的 \srcpath{is\_radial} 返回真；非空图只有在 \srcpath{count\_islands()==1} 且
+$E=N-1$ 时返回真。完整报告先以 DFS 得到分量数 $p$，再赋值
+\begin{equation}
+ \fld{cycle\_count}=\max(0,E-N+p),\qquad
+ \fld{is\_radial}=(p=1)\land(\fld{cycle\_count}=0).
+\end{equation}
+AC/DC 混合岛只要包含任何 AC 节点就归为 AC 岛；AC 岛要求 AC slack，纯 DC 岛要求 DC 电压参考。
+桥判据为 DFS 子节点 $v$ 满足 $low[v]>disc[parent]$；非根割点为
+$low[v]\ge disc[parent]$，根割点要求 DFS 子树数大于 1。
+依据为 \srcpath{topology\_analysis.cpp:70--128} 和
+\srcpath{topology\_analysis.cpp:296--423}。
+
+\subsection{稠密 Kron 降阶}
+
+\srcpath{src/graph/kron\_reduction.cpp:90--173} 把输入稀疏矩阵累加到四个稠密块。
+消去集为空时仅抽取 retained 子矩阵并直接标记 valid。
+否则使用 \srcpath{FullPivLU::isInvertible()} 拒绝奇异 $Y_{\beta\beta}$，再计算
+\begin{align}
+ K&=Y_{\beta\beta}^{-1}Y_{\beta\alpha},\\
+ Y_{red}&=Y_{\alpha\alpha}-Y_{\alpha\beta}K.
+\end{align}
+代码还显式计算并保存 $Y_{\alpha\beta}Y_{\beta\beta}^{-1}$。
+非零数用 $|x|>10^{-15}$ 计数，填充比为
+\begin{equation}
+ r_{fill}=\begin{cases}
+ nnz(Y_{red})/nnz(Y_{full}),&nnz(Y_{full})>0,\\1,&nnz(Y_{full})=0.
+ \end{cases}
+\end{equation}
+只有 $r_{fill}\le\fld{max\_fill\_ratio}$ 才输出 reduced 矩阵并标记 valid。
+
+带注入入口在上述 valid 后计算
+\begin{equation}
+ I_{red}=I_\alpha-\left(Y_{\alpha\beta}Y_{\beta\beta}^{-1}\right)I_\beta,
+\end{equation}
+见 \srcpath{kron\_reduction.cpp:179--200}。但是当前恢复 API
+\srcpath{recover\_eliminated\_voltages} 不接收 $I_\beta$，实际只返回
+\begin{equation}
+ V_\beta=-K V_\alpha.
+\end{equation}
+invalid 或 $K$ 行数为零时返回空向量，见 \srcpath{kron\_reduction.cpp:207--216}。
+因此不能声称当前 API 已实现含非零 $I_\beta$ 的完整电压恢复式。
+
+\subsection{稀疏逐节点 Kron}
+
+\srcpath{src/graph/sparse\_kron\_reduction.cpp:87--123} 对节点 $k$ 的每个列邻居 $i$、行邻居 $j$
+执行
+\begin{equation}
+ Y_{ij}\leftarrow Y_{ij}-\frac{Y_{ik}Y_{kj}}{Y_{kk}},
+\end{equation}
+并保存恢复系数 $-Y_{kj}/Y_{kk}$。任何更新值绝对值不大于
+\fld{drop\_tolerance} 就从 row/column map 中删除。
+
+候选节点按 $\max(n_{row},n_{col})$ 的 front size 最小优先；弹出时若 front 已变化则重新入队。
+只有 front 不超过 \fld{max\_front}、$|Y_{kk}|$ 严格大于 \fld{pivot\_tolerance}，且预测消去后
+非零数不超过
+\begin{equation}
+ \left\lceil\fld{max\_nnz\_ratio}\cdot nnz(Y_{initial})\right\rceil
+\end{equation}
+才消去。选项要求 max front 非负、max nnz ratio 至少 1、两个 tolerance 非负；否则返回 error。
+依据为 \srcpath{sparse\_kron\_reduction.cpp:190--260}。
+
+\subsection{串联、悬垂与映射覆盖边界}
+
+串联和悬垂降阶不是单一 $Z_1+Z_2$ 公式：代码还受设备类别、保留集合、注入、状态和映射
+可恢复性约束。其当前实现分别位于 \srcpath{src/graph/series\_reduction.cpp}、
+\srcpath{src/graph/reduction\_plan.cpp} 与 \srcpath{src/graph/result\_recovery.cpp}。
+本章未逐分支展开这些文件，因此不提供“等值阻抗相加”或“叶节点固定 1 pu”等概括式，也不声称
+这些路径已完成数学逐式覆盖。

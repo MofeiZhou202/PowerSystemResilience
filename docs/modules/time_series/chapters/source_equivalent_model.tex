@@ -1,0 +1,219 @@
+\section{源码等价的时序优化与生命周期模型}
+\label{sec:time-series-source-equivalent}
+
+本章只描述 \srcpath{src/time\_series/} 当前执行的模型。主调度模型由
+\texttt{build\_uc\_milp} 构造；它不是单一的教材 SCUC，而是由选项门控的线性混合整数模型。
+令 $T=\texttt{num\_steps}$、$\Delta t=\texttt{step\_duration\_hr}$。当 $T>0$ 时，代码要求
+$\Delta t$ 为有限正数；配置含重复 profile id 或非有限 profile 值时直接抛出异常。依据：
+\srcpath{src/time\_series/time\_series\_pf.cpp:39--93}。
+
+\subsection{模型启用条件与变量块}
+代码中的三个主要门控谓词为
+\begin{align}
+ use_{acnet}&=\texttt{enable\_network\_constraints}\land(n_{acbus}>1),\\
+ use_{dcnet}&=use_{acnet}\land\texttt{enable\_dc\_network\_constraints}
+ \land(n_{dcbus}>0)\land(C>0),\\
+ use_{shift}&=\texttt{enable\_demand\_response}\land(F>0)\land
+ \texttt{dr\_shiftable}.
+\end{align}
+依据：\srcpath{src/time\_series/time\_series\_pf.cpp:772--790}。
+
+变量按源码固定顺序拼接。基础块为发电出力 $p_g$、二进制开机 $u_g$、启动费用变量 $s_g$、
+AC/DC 储能净出力及期末 SOC、可再生出力；可选块包括外部电网、需求响应升降量、可再生削减、
+静态电源、微网交换与状态、DC 运输流、储能吞吐、VPP、电能路由器、移动储能、充电量与模式、
+非平衡母线相角、VSC 和 DC--DC 功率。每块维数及偏移严格见
+\srcpath{src/time\_series/time\_series\_pf.cpp:1018--1152}，本章不改变这一索引空间。
+
+\subsection{目标函数的实际权重}
+模型始终最小化 $\mathbf c^T\mathbf x$。目标模式只按下式设置四个权重：
+\begin{equation}
+ (w_c,w_e,w_l,w_r)=
+ \begin{cases}
+ (1,0,0,0),&\texttt{Cost},\\
+ (0,1,0,1),&\texttt{Carbon},\\
+ (10^{-3},0,0,1),&\texttt{MinCurtailment},\\
+ (0,0,1,1),&\texttt{MinLoss},\\
+ (\texttt{w\_cost},\texttt{w\_carbon},\texttt{w\_loss},
+  \texttt{w\_curtailment}),&\texttt{Weighted}.
+ \end{cases}
+\end{equation}
+对常规机组，逐时系数精确为
+\begin{align}
+ c(p_{g,t})&=(w_c c_{1,g}+w_e e_g+w_l)\Delta t,\\
+ c(u_{g,t})&=w_c\max(0,c_{0,g})\Delta t,\\
+ c(s_{g,t})&=w_c.
+\end{align}
+固定 DC 电源、PV 和未调度静态电源的费用进入 \texttt{obj\_offset}，因此求解器目标并不等于
+最终报告目标；报告值加回该常数。依据：
+\srcpath{src/time\_series/time\_series\_pf.cpp:1154--1228}。
+
+可再生机组变量范围与系数为
+\begin{equation}
+ 0\le p_{r,t}\le profile_{r,t}P_r^{rated},\qquad
+ c(p_{r,t})=[w_c c_{1,r}-(w_c c^{curt}_r+w_r)]\Delta t.
+\end{equation}
+外部电网变量范围为 $[-\max(1,\texttt{external\_grid\_cap\_mw}),
++\max(1,\texttt{external\_grid\_cap\_mw})]$，价格 profile 存在时直接使用该绝对价格，否则用
+\texttt{cost\_c1}。需求响应的上下调容量分别为
+\begin{equation}
+ \bar p^{up}=\max(0,flex^{up})a,\qquad
+ \bar p^{dn}=\min(\max(0,flex^{dn})a,\max(0,p_0)),\quad
+ a=\operatorname{clamp}(availability/100,0,1),
+\end{equation}
+且两者系数均为 $\max(0,\texttt{w\_demand\_response})\Delta t$。依据：
+\srcpath{src/time\_series/time\_series\_pf.cpp:1328--1385}。
+
+\subsection{机组约束}
+出力边界由两行线性不等式实现：
+\begin{equation}
+ p_{g,t}-P_g^{max}u_{g,t}\le0,\qquad
+ -p_{g,t}+P_g^{min}u_{g,t}\le0.
+\end{equation}
+爬坡上、下限分别为
+\begin{align}
+ p_{g,t}-p_{g,t-1}&\le R_g^{up}\Delta t\,60,\\
+ p_{g,t-1}-p_{g,t}&\le R_g^{dn}\Delta t\,60.
+\end{align}
+若计算出的任一爬坡限值非正，代码将其替换为 $P_g^{max}$，并非删除该约束。启动费用变量满足
+\begin{align}
+ -s_{g,0}+C_g^{start}u_{g,0}&\le C_g^{start}u_g^{init},
+ \quad u_g^{init}=\mathbb 1[p_g^{initial}>10^{-6}],\\
+ -s_{g,t}+C_g^{start}(u_{g,t}-u_{g,t-1})&\le0\quad(t\ge1).
+\end{align}
+依据：\srcpath{src/time\_series/time\_series\_pf.cpp:2483--2548}。
+
+令 $N_g^{up}=\lceil T_g^{up}/\Delta t\rceil$。仅当 $N_g^{up}\ge2$ 时，对
+$t\ge1$ 和 $1\le k\le\min(N_g^{up}-1,T-1-t)$ 加入
+\begin{equation}
+ u_{g,t}-u_{g,t-1}-u_{g,t+k}\le0.
+\end{equation}
+最小停机时间同理，以
+\begin{equation}
+ u_{g,t-1}-u_{g,t}+u_{g,t+k}\le1
+\end{equation}
+实现。依据：\srcpath{src/time\_series/time\_series\_pf.cpp:2580--2621}。
+
+\subsection{储能净出力拆分与 SOC}
+代码定义有符号净出力 $p=p^{dis}-p^{ch}$，其中 $p^{ch}\ge0$；实际线性约束为
+\begin{align}
+ -p-p^{ch}&\le0,\\
+ p+p^{ch}-\bar P^{dis}z&\le0,\\
+ p^{ch}+\bar P^{ch}z&\le\bar P^{ch}.
+\end{align}
+只有充、放两个方向容量均大于 $10^{-9}$，且任一效率与 $1$ 相差超过 $10^{-12}$ 时，$z$ 才是
+二进制变量；否则它是 $[0,1]$ 连续变量。依据：
+\srcpath{src/time\_series/time\_series\_pf.cpp:1298--1325}、
+\srcpath{src/time\_series/time\_series\_pf.cpp:2551--2577}。
+
+自放电保持率不是线性近似，而是
+\begin{equation}
+ \rho=\left[\operatorname{clamp}(1-self\_discharge\_pct/100,0,1)\right]^
+ {\max(0,\Delta t)}.
+\end{equation}
+令 $E'=E$ 当 $E\ge10^{-12}$，否则 $E'=1$；
+$\eta_c,\eta_d$ 分别截断到 $[10^{-6},1]$。AC 与 DC 储能均使用同一行：
+\begin{equation}
+ SOC_t+\frac{\Delta t}{\eta_dE'}p_t+
+ \frac{\Delta t}{E'}(\eta_d^{-1}-\eta_c)p_t^{ch}
+ -\rho SOC_{t-1}=0,
+\end{equation}
+其中 $t=0$ 时删除上一状态项并令右端为 $\rho SOC^{init}$。若启用循环边界，最后一个
+SOC 变量的上下界同时固定为
+$\operatorname{clamp}(SOC^{init},SOC^{min},SOC^{max})$。依据：
+\srcpath{src/time\_series/time\_series\_pf.cpp:58--63}、
+\srcpath{src/time\_series/time\_series\_pf.cpp:1261--1295}、
+\srcpath{src/time\_series/time\_series\_pf.cpp:2309--2365}。
+
+吞吐辅助量只在退化或储能报价需要时创建，并满足
+\begin{equation}
+ p_{k,t}-g_{k,t}\le0,\qquad-p_{k,t}-g_{k,t}\le0.
+\end{equation}
+启用退化且 \texttt{daily\_cycle\_limit}$>0$ 时，再加入
+\begin{equation}
+ \sum_tg_{k,t}\Delta t\le2\,daily\_cycle\_limit_k\,E'_k.
+\end{equation}
+依据：\srcpath{src/time\_series/time\_series\_pf.cpp:2710--2739}。
+
+\subsection{功率平衡与网络约束边界}
+当 $use_{acnet}=false$ 时，代码使用一条铜板平衡。其左端按源码符号累加：常规机组、AC/DC 储能、
+可再生、外部电网、需求响应下调、静态电源、微网出口、VPP、路由器净输出和已连接移动储能为正；
+需求响应上调、可再生削减和路由器输入为负；右端为 \texttt{total\_load[t]}。完整项见
+\srcpath{src/time\_series/time\_series\_pf.cpp:1937--1995}。
+
+当 $use_{acnet}=true$ 时，逐 AC 母线装配同类平衡，并使用非平衡母线相角。投运、额定值为正、
+$|x|\ge10^{-12}$ 且两端有效的 AC 支路才加入限额：
+\begin{equation}
+ -S_{ij}^{max}\le\frac{S_{base}}{x_{ij}}(\theta_i-\theta_j)
+ \le S_{ij}^{max}.
+\end{equation}
+依据：\srcpath{src/time\_series/time\_series\_pf.cpp:1997--2255}、
+\srcpath{src/time\_series/time\_series\_pf.cpp:2623--2654}。
+
+DC 网络模型没有 DC 电压变量。启用显式 DC 运输流时，每条合格支路只创建
+$f_{ij,t}\in[-rate_{ij},rate_{ij}]$ 并进入节点平衡；否则代码明确令
+\texttt{n\_ineq\_dc\_line}=0，依赖换流器变量边界，不能把它写成电阻潮流或独立 DC 支路热约束。
+依据：\srcpath{src/time\_series/time\_series\_pf.cpp:884--906}、
+\srcpath{src/time\_series/time\_series\_pf.cpp:1699--1703}、
+\srcpath{src/time\_series/time\_series\_pf.cpp:2656--2673}。
+
+\subsection{UC 到逐步 OPF 的真实跟踪带}
+仅在应用 UC 日程、机组在役且 \texttt{enable\_uc\_opf\_tracking\_band} 为真时修改 OPF 边界。
+对非松弛机组可切换到专用相对/绝对参数；实际带宽是
+\begin{equation}
+ b_g=\max\left(abs_g,rel_g\max(|p_g^{UC}|,1)\right),
+\end{equation}
+并赋值
+\begin{equation}
+ P_g^{min,new}=\max(P_g^{min},p_g^{UC}-b_g),\qquad
+ P_g^{max,new}=\min(P_g^{max},p_g^{UC}+b_g).
+\end{equation}
+若新上界小于新下界，两者都固定到
+$\operatorname{clamp}(p_g^{UC},P_g^{min},P_g^{max})$。依据：
+\srcpath{src/time\_series/time\_series\_pf.cpp:3335--3380}。
+
+\subsection{按日并行的实际配置}
+日模式只按下列赋值切换：\texttt{SCUC} 为
+\texttt{skip\_uc=false, run\_opf=true, fix\_commitment=false}；
+\texttt{DynamicSCED} 为 \texttt{false,false,true}；
+\texttt{DynamicOPF} 为 \texttt{true,true,false}。并行模式强制 AC OPF 后端为
+\texttt{ParityIPM}。每日末 SOC 是否固定，完全由
+\texttt{enforce\_daily\_cyclic\_soc} 传给
+\texttt{enforce\_terminal\_soc\_cyclic}，不是无条件成立。依据：
+\srcpath{src/time\_series/annual\_production\_sim.cpp:1069--1101}。
+
+\subsection{生命周期赋值式}
+生命周期循环的年序号从 $y=1$ 开始。负荷和 PV 使用
+\begin{align}
+ factor_y^{load}&=(1+g)^{y-1},\\
+ factor_y^{pv}&=(1-d_{pv})^{y-1},\\
+ p_{load,y}&=p_{load,0}factor_y^{load},\quad
+ q_{load,y}=q_{load,0}factor_y^{load},\\
+ P_{pv,y}^{max}&=P_{pv,0}^{max}factor_y^{pv},\quad
+ p_{pv,y}=\min(p_{pv,y},P_{pv,y}^{max}).
+\end{align}
+依据：\srcpath{src/time\_series/lifecycle\_simulation.cpp:415--460}。
+
+AC 储能的两个健康度分量及合成值是
+\begin{align}
+ SOH_y^{cal}&=\max(0,1-d_{cal}(y-1)),\\
+ SOH_y^{cyc}&=\max(0,1-d_{cyc}N_{cycles}),\\
+ SOH_y&=\min(SOH_y^{cal},SOH_y^{cyc}).
+\end{align}
+当 $SOH_y\le\operatorname{clamp}(EOL,0,1)$ 时，代码立即记录更换并将两个分量、合成值置为 $1$，
+循环数置零；随后令 $E_y^{rated}=E_0^{rated}SOH_y$、$E_y=E_y^{rated}SOC^{init}$。
+更换成本精确为 \texttt{replacement\_cost}$\times E_0^{rated}\times1000$。依据：
+\srcpath{src/time\_series/lifecycle\_simulation.cpp:462--513}。
+
+年度成本和当年更换成本使用同一折现因子
+\begin{equation}
+ d_y=(1+r)^{-(y-1)},\qquad
+ NPV\leftarrow NPV+d_y\left(C_y+\sum_{e\in replacements_y}C_e\right).
+\end{equation}
+碳量只累加，不折现。依据：
+\srcpath{src/time\_series/lifecycle\_simulation.cpp:619--633}。
+
+\subsection{覆盖边界}
+本章逐式覆盖主 MILP 的核心变量、目标、机组约束、储能与网络门控、OPF 跟踪带、按日模式和
+生命周期状态更新。能量路由器、VPP、移动储能、微网、需求响应等可选块的完整逐行矩阵仍以
+\srcpath{src/time\_series/time\_series\_pf.cpp:2367--2476} 与
+\srcpath{src/time\_series/time\_series\_pf.cpp:2689--2829} 为准；本章没有用通用模型补写未展开的行。

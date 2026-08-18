@@ -1,0 +1,128 @@
+\section{源码等价数学模型}
+本章对应单一实现文件 \srcpath{src/harmonics\_power\_flow/harmonics\_power\_flow.cpp}。
+不同公开入口的方程并不相同，以下分别转写，不能合并成一个更一般的谐波平衡模型。
+
+\subsection{集肤函数和交流支路印章}
+函数 \srcpath{skin\_r}（71--76 行）严格返回
+\begin{equation}
+R(h)=\begin{cases}
+R_1,&h\le1\lor R_1=0\lor model=None,\\
+R_1\sqrt h,&model=SqrtOrder,\\
+R_1(1+k_s\sqrt h),&model=ProportionalSqrt.
+\end{cases}
+\end{equation}
+\srcpath{ac\_branch\_stamp}（83--97 行）定义
+\begin{align}
+z_h&=R(h)+jhX_1,&
+y_s&=\begin{cases}1/z_h,&|z_h|>10^{-12},\\0,&\text{否则，}\end{cases}\\
+y_c&=jhB_1,&
+\tau&=\begin{cases}tap,&tap>10^{-9},\\1,&\text{否则，}\end{cases},\\
+t&=\tau e^{j\phi\pi/180},
+\end{align}
+并返回
+\begin{equation}
+Y_{ff}=\frac{y_s+y_c/2}{\tau^2},\quad
+Y_{ft}=-\frac{y_s}{t^*},\quad
+Y_{tf}=-\frac{y_s}{t},\quad
+Y_{tt}=y_s+y_c/2.
+\end{equation}
+
+\subsection{交流与直流网络的实际附加导纳}
+\srcpath{build\_ac\_ybus}（163--284 行）对母线/并联器件加入
+$g+jhb$。负荷仅在 \fld{include\_load\_impedance}=true 时加入
+\begin{equation}
+y_l(h)=\frac{P_l\,scaling_l/base}{|V_{1,i}|^2}
+-j\frac{Q_l\,scaling_l/base}{h|V_{1,i}|^2},
+\end{equation}
+其中若 $|V_{1,i}|<10^{-6}$，分母电压改为 1。电源接地导纳为
+$1/(R+jhX'')$；若 $X''\le10^{-9}$，使用 \fld{default\_source\_xpp\_pu}。每个节点无条件再加
+\fld{min\_shunt\_pu}，停运/隔离节点额外加
+$1/\max(\fld{min\_shunt\_pu},10^{-12})$。
+
+\srcpath{build\_dc\_ybus}（291--344 行）对 DC 支路使用
+\begin{equation}
+z_r=R+jrX_{override},
+\end{equation}
+未提供 override 时 $X_{override}=0$；若 $|z_r|<10^{-12}$，代码把它替换为 $10^{-6}+j0$。
+DC\_V 和传入的 NIC grid-forming 节点各加
+$1/\max(\fld{dc\_source\_impedance\_pu},10^{-9})$，bus override 电纳为 $jrB_{override}$，
+并应用与交流相同的最小并联接地逻辑。
+
+\subsection{工作点回退和逐阶线性解}
+\srcpath{extract\_operating\_point}（123--158 行）仅在基频潮流
+\fld{converged}=true 时使用其向量；否则使用母线存储值。AC 幅值 $\le10^{-9}$ 或 DC 绝对值
+$\le10^{-9}$ 时强制改为 1。结果同步记录
+\fld{used\_stored\_operating\_point}=!\fld{base\_pf\_converged}。
+线性入口对每个 $h>1$ 或 $r>0$ 独立求
+\begin{equation}
+Y_hV_h=I_h
+\end{equation}
+并以 \texttt{SparseLU} 的 factor/solve 状态决定该次数是否 solved。三相入口只是把矩阵维数改为 $3n$；
+裸 \texttt{ThreePhaseACSystem} 只采用显式 NIC，不自动从 VSC 生成 NIC。
+
+\subsection{逐阶复数 Newton 路径}
+\srcpath{solve\_harmonic\_power\_flow\_newton}（1799--1896 行）对每个次数独立求
+\begin{equation}
+D_i(V)= (YV-I^{src})_i+g_{2,i}V_i^2=0.
+\end{equation}
+初值是 $YV^0=I^{src}$ 的线性解，Jacobian 仅修改对角元：
+\begin{equation}
+J_{ii}=Y_{ii}+2g_{2,i}V_i,qquad J_{ij}=Y_{ij}\ (i\ne j).
+\end{equation}
+每步直接执行 $V\leftarrow V+J^{-1}(-D)$，代码没有阻尼或线搜索。残差是
+$\max_i|D_i|$，严格小于 \fld{newton\_tol} 才收敛；达到迭代上限或 LU 失败令全局
+\fld{converged}=false，但函数末尾仍把 \fld{ok}=true，调用方必须同时检查两个字段。
+
+\subsection{实数 Newton 的恒功率项}
+\srcpath{solve\_harmonic\_power\_flow\_newton\_real}（2058--2193 行）把
+$V_i=a_i+jb_i$ 展开为 $2n$ 实变量。源码注释和残差实现规定恒功率负荷项进入
+\begin{equation}
+D_i=(YV-I^{src})_i+\frac{c_i}{V_i^*}.
+\end{equation}
+网络常数块是
+$\left[\begin{smallmatrix}G&-B\\B&G\end{smallmatrix}\right]$；
+$c/(a-jb)=c(a+jb)/(a^2+b^2)$ 的四个偏导由函数体逐项加入。实现用自己的小分母保护和
+\texttt{SparseLU}，每步仍无阻尼。该入口不能与前一入口的 $g_2V^2$ 模型混称。
+
+\subsection{跨次数和混合 AC/DC 耦合}
+\srcpath{solve\_harmonic\_power\_flow\_newton\_coupled}（2196--2318 行）先把各次 $Y_h$ 组成
+块对角 $Y_B$，只保留输入、输出三个次数都存在的 mixing term。对 term
+$m=(o,p,q,i,k)$，残差和 Jacobian 贡献严格为
+\begin{align}
+D_{o,i}&\mathrel{+}=kV_{p,i}V_{q,i},\\
+J_{(o,i),(p,i)}&\mathrel{+}=kV_{q,i},&
+J_{(o,i),(q,i)}&\mathrel{+}=kV_{p,i}.
+\end{align}
+当 $p=q$ 时两次 triplet 由 Eigen 求和，等价于 $2kV_{p,i}$。
+
+\srcpath{solve\_harmonic\_power\_flow\_hybrid\_newton}（2866--3014 行）使用同一形式，但全局向量按
+\begin{equation}
+V=[V_{ac,h_1},\ldots,V_{ac,h_H},V_{dc,r_1},\ldots,V_{dc,r_R}]
+\end{equation}
+排列，bilinear term 的输出、$a$、$b$ 可分别属于 AC 或 DC。代码没有额外端口能量守恒式；未由
+\fld{inputs.bilinear} 提供的 AC/DC 耦合不会自动生成。因此本文不声称该入口自动完成物理 NIC 建模。
+
+\subsection{THD、电流指标和标准判据}
+\srcpath{thd\_from\_orders}（346--353 行）精确计算
+\begin{equation}
+THD=\begin{cases}
+100\sqrt{\sum_{h\ne h_0}|V_h|^2}/V_{fund},&V_{fund}\ge10^{-12},\\
+0,&\text{否则。}
+\end{cases}
+\end{equation}
+\srcpath{harmonic\_metrics}（2789--2849 行）忽略 tap 与 charging，只用
+$I_h=|(V_{f,h}-V_{t,h})/(R(h)+jhX)|$，并返回
+\begin{align}
+I_{rms}&=\sqrt{\sum_hI_h^2},&
+THD_I&=100\sqrt{\sum_{h\ne1}I_h^2}/I_1,\\
+TDD&=100\sqrt{\sum_{h\ne1}I_h^2}/I_{dem},&
+K&=\begin{cases}\sum_hh^2I_h^2/\sum_hI_h^2,&\sum_hI_h^2>10^{-12},\\1,&\text{否则。}\end{cases}
+\end{align}
+若用户的 \fld{i\_demand\_pu}$\le10^{-12}$，$I_{dem}$ 回退为 $I_1$。标准校核只覆盖 AC 电压；
+THD 与各次 IHD 均允许 $10^{-9}$ 数值裕量。频扫共振候选仅是相邻三点局部极值，不是稳定性证书。
+
+\subsection{复杂度和失败语义}
+独立次数路径执行 $H+R$ 次稀疏 LU；耦合路径对维数
+$M=Hn_{ac}+Rn_{dc}$ 的复稀疏 Jacobian重复分解。复杂度由填充决定。基础潮流回退、次数矩阵奇异、
+Newton 未收敛、输入次数缺失和最小 shunt 正则化均必须由结果字段解释；\fld{ok}=true 不等价于
+\fld{converged}=true。

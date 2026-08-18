@@ -1,0 +1,220 @@
+% !TEX program = xelatex
+% 编译方式：在本目录执行两遍 xelatex（详见 docs/_manual_common/README.md）。
+% 源码依据：src/api/ 与 include/hacdcpf/api/（hacdcpf.hpp / solver_capabilities.hpp）及 docs/runtime_api.md。
+\documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
+\usepackage{../../_manual_common/hysim_manual}
+
+\title{\textbf{交直流混合高弹性能源电力系统仿真平台}\\[0.5em]
+       {\Large 公共 API 门面技术手册}\\[0.3em]
+       {\large 求解入口族、能力门控、异常语义与工业级评估}}
+\author{HySim-XJTU-HRPES（西安交通大学 HRPES 团队）}
+\date{\today}
+
+\begin{document}
+\maketitle
+\begin{abstract}
+\noindent 本手册依据 HySim-XJTU-HRPES 平台公共 API 门面
+（\srcpath{include/hacdcpf/api/hacdcpf.hpp}、\srcpath{solver\_capabilities.hpp}，
+实现于 \srcpath{src/api/hacdcpf.cpp}）整理。门面在命名空间 \texttt{hacdcpf} 下以稳定
+自由函数聚合全库的潮流（PF）、最优潮流（OPF）、动态、碳流、市场、可靠性、弹性、
+时序与校验子系统，并经 \srcpath{get\_solver\_capabilities()} 在运行期报告后端可用性。
+可选后端由能力标志门控，缺失后端如实报告不可用而非静默降级；\srcpath{verify\_opf\_result}
+为独立的解后审计，不改变求解本身。GUI/自动化 HTTP 面属独立层
+（\srcpath{tests/run\_gui\_server.cpp}），不在 \srcpath{src/api}。全部结论以源码为准；版式
+与《潮流计算技术手册》《最优潮流技术手册》一致。命名空间为 \texttt{hacdcpf}。
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{阅读指南与约定}
+\subsection{数据来源}
+\begin{itemize}
+  \item \srcpath{include/hacdcpf/api/hacdcpf.hpp} —— 门面自由函数与会话/句柄类型；
+  \item \srcpath{include/hacdcpf/api/solver\_capabilities.hpp} —— \texttt{SolverCapabilities}
+        与运行期能力查询；
+  \item \srcpath{src/api/hacdcpf.cpp} —— 门面与能力查询的实现；
+  \item \srcpath{docs/runtime\_api.md} —— HTTP/GUI \texttt{/api/v1} 服务契约（位于
+        \srcpath{tests/run\_gui\_server.cpp}）；
+  \item \srcpath{docs/python\_api.md} —— Python 绑定面；
+  \item \srcpath{tests/test\_hacdcpf.cpp}、\srcpath{tests/test\_solver\_capabilities.cpp}
+        —— 验证依据。
+\end{itemize}
+
+\subsection{单位制与索引空间}
+门面不改变各子系统的单位与索引口径：潮流量以 MW/Mvar/标幺电压表达，结果向量的索引
+空间与对应求解器一致（详见各专项手册）。组件对外以稳定 \texttt{.index} 标识；AC/DC 域
+分开，门面不引入新的跨域裸 ID。所有返回结构沿用子系统既有的有效性/诚实字段。
+
+\subsection{符号与命名约定}
+门面函数名以子系统语义前缀区分（\srcpath{solve\_power\_flow\_*}、\srcpath{solve\_*\_opf}、
+\srcpath{run\_*}、\srcpath{verify\_*}、\srcpath{validate\_*}）；\texttt{safe\_} 前缀表示
+返回 \texttt{Result<T>} 且可选先校验；能力标志以 \fld{has\_*}（后端存在）与
+\fld{supports\_*}（特性可用）两族命名。
+
+\subsection{诚实口径}
+门面是薄封装：能力标志如实反映\textbf{编译期}后端可用性，运行期查询不会“凭空”启用缺失
+后端；\srcpath{solve\_power\_flow\_helm} 仅支持 AC（混合 AC/DC 与电压相关 ZIP 负荷被显式
+拒绝并给出诊断）；\srcpath{safe\_solve\_power\_flow} 在 \fld{validate\_input}=true 时先校验再
+求解，而抛异常版 \srcpath{solve\_power\_flow} 不校验；\srcpath{verify\_opf\_result} 是独立的
+解后审计，不改变求解结果本身。
+
+\section{模块定位与工程应用场景}
+\subsection{功能定位}
+API 门面是全平台\textbf{唯一稳定的对外调用面}：它对投影、装配、符号分析、求解器工厂等
+内部细节做封装，把 PF/OPF/动态/碳/市场/可靠性/弹性/时序/校验各子系统的入口以命名空间
+\texttt{hacdcpf} 下的自由函数再导出，并以 \texttt{SolverCapabilities} 报告可选后端。它是
+GUI 后端、Python 绑定、批处理工具与回归测试共同依赖的接口边界。
+
+\subsection{工程应用场景}
+典型场景：GUI/HTTP 后端按 \texttt{method} 分派到门面求解入口；Python 客户端经绑定调用
+\srcpath{solve\_power\_flow}/\srcpath{solve\_ac\_opf} 做批量算例；时序生产模拟经
+\texttt{PreparedPowerFlowSession}/\texttt{SolverHandle} 在时间轴上复用符号分解；工具链在
+运行期查询 \srcpath{get\_solver\_capabilities()} 以决定是否启用 MILP/ETAP/OpenDSS 路径。
+
+\section{输入、输出与边界条件}
+\subsection{输入}
+已装配的 \texttt{HybridPowerSystem} 与对应子系统的选项结构体（\texttt{PowerFlowOptions}、
+\texttt{OPFOptions} 等）；\texttt{safe\_} 变体额外接受 \fld{validate\_input} 开关；句柄/会话
+接口接受兼容性快照签名以判定复用。
+
+\subsection{输出}
+各子系统既有结果结构（\texttt{PowerFlowResult}、\texttt{OPFResult} 等）；\texttt{safe\_} 变体
+返回 \texttt{Result<T>}（成功值或错误）；\srcpath{get\_solver\_capabilities()} 返回
+\texttt{SolverCapabilities}；\srcpath{verify\_opf\_result} 把审计写入 \fld{result.audit}。
+
+\subsection{边界条件}
+门面不校验（除 \texttt{safe\_} 变体）；HELM 仅 AC；句柄复用要求拓扑与后端签名兼容
+（否则重建）；能力门控特性在后端缺失时相应入口返回不可用错误而非降级近似。
+
+\section{变量、参数与符号定义}
+\subsection{关键数据结构}
+\compmeta{SolverCapabilities}{include/hacdcpf/api/solver\_capabilities.hpp}
+线性代数后端 \fld{has\_sparse\_lu}（恒 true）/\fld{has\_klu}/\fld{has\_umfpack}/\fld{has\_accelerate}；
+MIP/NLP 后端 \fld{has\_highs}/\fld{has\_gurobi}/\fld{has\_ipopt}/\fld{has\_scip}/\fld{has\_native\_ipm}
+（恒 true）；I/O 能力 \fld{has\_excel}/\fld{has\_opendss}；特性标志
+\fld{supports\_integer\_variables}、\fld{supports\_ac\_opf}（true）、\fld{supports\_dc\_opf}（true）、
+\fld{supports\_three\_phase}（true）。
+
+\compmeta{PreparedPowerFlowSession}{include/hacdcpf/api/hacdcpf.hpp}
+持有型重复求解上下文，成员 \srcpath{solve(sys)}、\srcpath{reset()}；move-only（拷贝已删除），
+采用 pimpl \texttt{Impl}。另有前置声明的不透明句柄 \texttt{SolverHandle}，提供 C 风格可复用
+PF/DC 句柄。
+
+\subsection{参数字典}
+下表列出 \texttt{SolverCapabilities} 的关键能力标志（“默认值”列“编译期”表示由构建
+配置决定，“派生”表示由其他标志推导）。
+\begin{paramtable}
+\fld{has\_sparse\_lu} & — & — & true/false & true & 内置稀疏 LU（恒可用）\\
+\fld{has\_klu} & — & — & true/false & 编译期 & KLU 稀疏后端\\
+\fld{has\_umfpack} & — & — & true/false & 编译期 & UMFPACK 稀疏后端\\
+\fld{has\_accelerate} & — & — & true/false & 编译期 & Apple Accelerate 稀疏后端\\
+\fld{has\_highs} & — & — & true/false & 编译期 & HiGHS LP/MILP 后端\\
+\fld{has\_gurobi} & — & — & true/false & 编译期 & Gurobi 后端\\
+\fld{has\_ipopt} & — & — & true/false & 编译期 & Ipopt NLP 后端\\
+\fld{has\_scip} & — & — & true/false & 编译期 & SCIP 后端\\
+\fld{has\_native\_ipm} & — & — & true/false & true & 内置原生 IPM（恒可用）\\
+\fld{has\_excel} & — & — & true/false & 编译期 & OpenXLSX/ETAP I/O 能力\\
+\fld{has\_opendss} & — & — & true/false & 编译期 & OpenDSS 桥接能力\\
+\fld{supports\_integer\_variables} & — & — & true/false & 派生 & 需 HiGHS/Gurobi/SCIP 之一\\
+\fld{supports\_ac\_opf} & — & — & true/false & true & AC OPF 支持\\
+\fld{supports\_dc\_opf} & — & — & true/false & true & DC OPF 支持\\
+\fld{supports\_three\_phase} & — & — & true/false & true & 三相支持\\
+\end{paramtable}
+
+\section{数学模型与约束条件：能力门控}
+门面本身不含数学模型，其“模型”是\textbf{能力门控的布尔代数}。可选特性按下述逻辑
+门控（$\vee$ 为逻辑或）：
+\[
+\texttt{supports\_integer\_variables}\;\Longleftrightarrow\;
+\texttt{has\_highs}\ \vee\ \texttt{has\_gurobi}\ \vee\ \texttt{has\_scip}.
+\]
+ETAP I/O 可用当且仅当 \fld{has\_excel} 为真；OpenDSS I/O 可用当且仅当 \fld{has\_opendss}
+为真。约束：\fld{has\_sparse\_lu} 与 \fld{has\_native\_ipm} 恒为 true（内置），故稀疏直接解
+与原生 IPM 在任意构型下均可用；其余后端缺失时相应入口如实报告不可用而非静默降级。
+
+\section{算法流程：门面分派}
+\begin{figure}[H]\centering
+\begin{tikzpicture}[font=\footnotesize,
+  box/.style={draw,rounded corners,minimum height=0.85cm,align=center,inner sep=3pt},arr/.style={->,thick}]
+  \node[box](call) at (0,0){调用方\\GUI/Python/工具};
+  \node[box](fac) at (3.4,0){门面自由函数\\hacdcpf::solve\_*};
+  \node[box](cap) at (7.0,0){能力门控\\get\_solver\_capabilities};
+  \node[box](sub) at (10.4,0){子系统求解器\\PF/OPF/…};
+  \node[box](sess) at (3.4,-1.9){会话/句柄\\符号分解复用};
+  \node[box](res) at (7.0,-1.9){结果结构\\子系统既有口径};
+  \node[box](aud) at (10.4,-1.9){解后审计(可选)\\verify\_opf\_result};
+  \draw[arr](call)--(fac);\draw[arr](fac)--(cap);\draw[arr](cap)--(sub);
+  \draw[arr](fac.south)|-(sess.east);\draw[arr](sub)--(res);\draw[arr](res)--(aud);
+\end{tikzpicture}
+\caption{门面分派与能力门控（会话/句柄在兼容快照间复用符号分析）}
+\end{figure}
+调用方无需了解投影、装配与符号分析细节；\texttt{PreparedPowerFlowSession} 与
+\texttt{SolverHandle} 在兼容快照之间复用投影/装配/符号分析结果，摊薄重复求解开销。
+
+\section{工程假设与数值稳定性分析}
+\subsection{工程假设}
+门面假设子系统各自维护其数值与收敛口径，门面层只做转发与门控，不叠加额外近似；假设
+能力标志在进程生命周期内不变（编译期决定）。
+
+\subsection{数值稳定性}
+门面不引入新的数值误差；数值稳定性完全由被调子系统决定（见各专项手册）。会话/句柄复用
+符号分解时，若拓扑签名不匹配则强制重建，避免使用过期的符号模式导致错误分解。
+
+\section{复杂度分析}
+门面转发为 $O(1)$ 额外开销；能力查询为常数时间的标志读取。真正的计算复杂度由被调求解器
+决定。会话/句柄的价值在于把符号分析成本（一次 $O(\text{nnz})$ 的 \texttt{analyzePattern}）
+摊薄到时间轴上的多次数值分解，时序生产模拟因此显著提速。
+
+\section{异常工况处理}
+\begin{itemize}
+  \item \textbf{输入非法}：\texttt{safe\_} 变体在 \fld{validate\_input}=true 时返回错误
+        \texttt{Result}；抛异常版直接抛出，调用方需自行捕获；
+  \item \textbf{后端缺失}：门控特性入口返回不可用错误，不静默降级为近似方法；
+  \item \textbf{HELM 遇混合/ZIP}：显式拒绝并诊断，不尝试不支持的求解；
+  \item \textbf{句柄/会话签名不兼容}：自动重建符号分解，保证正确性优先于复用；
+  \item \textbf{求解不收敛}：透传子系统的收敛标志与诊断，门面不掩盖失败。
+\end{itemize}
+
+\section{与其他模块的接口关系}
+门面头文件汇入 PF/OPF/动态/碳流/市场/可靠性/弹性/时序/校验/EV/综合能源各子系统，是它们
+对外的统一出口；GUI 后端（\srcpath{tests/run\_gui\_server.cpp}）与 Python 绑定
+（\srcpath{docs/python\_api.md}）均建立在门面之上；\srcpath{verify\_opf\_result} 与 OPF
+子系统解耦，作为独立审计层。门面不含网络层，HTTP 面属独立可执行。
+
+\section{测试与验证建议}
+注册测试：\srcpath{test\_hacdcpf}、\srcpath{test\_solver\_capabilities}、\srcpath{test\_hacdcdss}，
+覆盖门面入口、运行期能力查询与端到端装配。建议补充：能力门控真值表（各后端组合下
+\fld{supports\_integer\_variables} 等派生标志）、\texttt{safe\_} 与抛异常版的行为对照、
+HELM 拒绝混合/ZIP 的诊断断言、以及会话/句柄在拓扑变更时的重建正确性。
+
+\section{工业级评估指标}
+建议纳入：门面转发开销（应为纳秒级，可忽略）；会话/句柄复用带来的时序仿真加速比；
+能力查询与实际后端行为的一致率（门控真值表 100\% 匹配）；\texttt{safe\_} 变体对非法输入
+的拦截率与误报率；解后审计 \srcpath{verify\_opf\_result} 对已知不可行解的检出率。
+
+\section{适用范围与局限性}
+\begin{itemize}
+  \item \srcpath{solve\_power\_flow\_helm} 仅支持 AC；混合 AC/DC 与电压相关 ZIP 负荷被
+        显式拒绝并给出诊断；
+  \item \srcpath{safe\_solve\_power\_flow} 在 \fld{validate\_input}=true 时先校验，抛异常版
+        \srcpath{solve\_power\_flow} 不校验；
+  \item 能力标志门控可选特性：\fld{supports\_integer\_variables} 需 HiGHS/Gurobi/SCIP
+        之一，\fld{has\_excel}/\fld{has\_opendss} 门控 ETAP/OpenDSS I/O；
+  \item \srcpath{verify\_opf\_result} 为独立解后可行性审计（功率平衡、电压/支路/机组
+        限值、目标一致性），结果写入 \fld{result.audit}，与求解过程解耦；
+  \item GUI/自动化 HTTP 面在 \srcpath{tests/run\_gui\_server.cpp}，非 \srcpath{src/api}；
+        门面本身不含网络层。
+\end{itemize}
+
+\section{后续改进方向}
+\begin{enumerate}
+  \item 将求解器工厂层（\srcpath{solver\_interface.cpp}）与门面对接，令生产路径经统一抽象；
+  \item 为 \texttt{safe\_} 族补齐全子系统覆盖，逐步收敛抛异常版为内部实现；
+  \item 扩展 \texttt{SolverCapabilities} 报告运行期资源（线程数、内存上限）以支持自适应调度；
+  \item 将 \srcpath{verify\_opf\_result} 式解后审计推广到 PF/动态等其他子系统。
+\end{enumerate}
+
+\input{../../_manual_common/industrial_evaluation}
+
+\end{document}

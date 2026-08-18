@@ -1,0 +1,167 @@
+\section{源码等价数学实现}\label{sec:res-source-model}
+
+本章只覆盖可由当前实现逐行重建的启发式供电计算和严格多时段 MIP。认证恢复的动态证书由
+\srcpath{src/resilience/resilience\_dynamic\_certification.inc} 实现；在未完成逐式审计前，本手册
+不复述其理论误差界。
+
+\subsection{启发式岛内供电分配}
+
+若岛含电网源，\srcpath{evaluate\_component} 直接令供电等于总需求，切负荷为零；否则先把岛内
+发电机、静止发电机、可再生和光伏容量相加为 $P_{avail}$。固定储能和 MESS 只放电、不充电，
+对每个资源依次计算
+\begin{align}
+ P_{deliver}&=\min\!\left(P_{max},
+ \max\!\left(0,\frac{(E-E_{min})\eta_{dis}}{\Delta t}\right)\right),\\
+ P_{dispatch}&=\min(P_{remaining},P_{deliver}),
+\end{align}
+MESS 还必须已到外部可用时刻、非在途且位于该岛。然后
+\begin{equation}
+ P_{served}=\min(P_{demand},P_{avail}),\qquad
+ P_{shed}=\max(0,P_{demand}-P_{served}).
+\end{equation}
+负荷按 \fld{importance} 降序、需求降序分配供电；每条负荷的加权切负荷为
+$P_{shed,i}\texttt{importance}_i$。重要度阈值按 $4-10^{-9}$、$2.5-10^{-9}$、
+$1.5-10^{-9}$ 划入关键、高、中、低四档。依据为
+\srcpath{src/resilience/resilience\_assessment.cpp:620--732}。
+
+资源状态更新只有放电项：
+\begin{equation}
+ E\leftarrow\max(E_{min},E-P_{dispatch}\Delta t/\eta_{dis}).
+\end{equation}
+代码没有启发式充电变量，旧手册中的
+$E_{t+1}=E_t+(\eta_{ch}P^{ch}-P^{dis}/\eta_{dis})\Delta t$ 不是该入口行为。
+依据为 \srcpath{resilience\_assessment.cpp:735--753}。
+
+\subsection{启发式 MESS 路由}
+
+候选目标只来自“无电网源且切负荷大于 $10^{-9}$”的岛，其缺额使用
+\fld{weighted\_shed\_mw}。每个空闲 MESS 对 Dijkstra 最短路执行以下资格判断：路由至少两个
+节点，距离有限且大于 $10^{-9}$，累计距离不超过上限加 $10^{-9}$，并满足
+$E-d e_{travel}>E_{min}+10^{-9}$。速度为
+$\max(\fld{mess\_travel\_speed\_kmph},1)$，选择分数为
+\begin{equation}
+ score=\frac{\texttt{target.deficit}}
+ {1+(d/v)/\max(\Delta t,10^{-9})}.
+\end{equation}
+仅在分数比当前最佳值大 $10^{-9}$ 时替换目标。每完成一段距离 $d_l$，状态执行
+$E\leftarrow\max(E_{min},E-d_le_{travel})$；行程时间逐段按 $d_l/v$ 扣减。
+依据为 \srcpath{resilience\_assessment.cpp:768--936}。
+
+\subsection{启发式指标聚合}
+
+每步汇总需求、供电、切负荷与加权切负荷，并计算
+$r_t=P_{served,t}/P_{demand,t}$；当需求不大于 $10^{-9}$ 时 $r_t=1$。结果执行
+\begin{align}
+ E_{demand}&=\sum_tP_{demand,t}\Delta t,&
+ E_{served}&=\sum_tP_{served,t}\Delta t,\\
+ E_{shed}&=\sum_tP_{shed,t}\Delta t,&
+ E_{weighted}&=\sum_tP_{weighted\ shed,t}\Delta t,\\
+ RI&=\begin{cases}E_{served}/E_{demand},&E_{demand}>10^{-9},\\1,&\text{否则},\end{cases}&
+ \overline r&=|T|^{-1}\sum_tr_t.
+\end{align}
+兼容字段 \fld{total\_ens\_mwh} 被直接设为 \fld{total\_shed\_mwh}，
+\fld{restoration\_time\_hr} 被设为最后一步的 hour，而不是首次完全恢复时刻。
+依据为 \srcpath{resilience\_assessment.cpp:1339--1407}。
+
+\subsection{严格 MIP 的实际变量}
+
+\srcpath{build\_mip\_skeleton} 每个支路和时步创建：状态 $z_{bt}$、开/合动作
+$y^{on}_{bt},y^{off}_{bt}$、有功 $p_{bt}$、商品流 $f_{bt}$；每个母线创建平方电压 $v_{it}$、
+带电状态 $u_{it}$、根 $r_{it}$、基础根 $r^{base}_{it}$、根商品流、基础源出力、切负荷、
+已用新能源和可调发电。固定储能只创建放电、能量和构网根；MESS 创建能量、位置、构网根、
+放电和时空弧变量。当前文件没有无功 $Q_{bt}$ 或充电变量。
+精确索引见 \srcpath{src/resilience/resilience\_restoration\_mip.cpp:279--330} 和
+\srcpath{resilience\_restoration\_mip.cpp:1071--1225}。
+
+\subsection{严格 MIP 的目标系数}
+
+线性目标只有以下非零系数：
+\begin{align}
+ c(y^{on}_{bt})=c(y^{off}_{bt})&=\fld{switching\_cost},\\
+ c(s_{it})&=\pi_i\Delta t,\\
+ c(P^{MESS}_{mit})&=10^{-4}\Delta t,\\
+ c(a_{ma})&=\begin{cases}0,&\text{停留弧},\\
+ \fld{mess\_travel\_cost\_per\_km}d_a+10^{-4},&\text{移动弧}.
+ \end{cases}
+\end{align}
+$\pi_i$ 按四级优先级返回对应 \fld{shed\_penalty\_*}。当前
+\fld{renewable\_curtailment\_cost} 未进入本文件的目标系数，不能写入现行目标。
+依据为 \srcpath{resilience\_restoration\_mip.cpp:29--34}、
+\srcpath{resilience\_restoration\_mip.cpp:91--99} 和
+\srcpath{resilience\_restoration\_mip.cpp:1098--1222}。
+
+\subsection{支路动作、流限与电压行}
+
+初始时步与后续时步分别创建
+\begin{align}
+ z_{b0}-y^{on}_{b0}+y^{off}_{b0}&=z_b^{initial},\\
+ z_{bt}-z_{b,t-1}-y^{on}_{bt}+y^{off}_{bt}&=0,\quad t>0,\\
+ y^{on}_{bt}+y^{off}_{bt}&\le1,\\
+ -\bar P_bz_{bt}\le p_{bt}&\le\bar P_bz_{bt},\\
+ -n_bz_{bt}\le f_{bt}&\le n_bz_{bt},\\
+ z_{bt}&\le u_{from,t},\quad z_{bt}\le u_{to,t}.
+\end{align}
+只对 \fld{enforce\_voltage\_drop}=true 的边创建
+\begin{equation}
+ |v_{to,t}-v_{from,t}+2r_bp_{bt}|\le
+ \fld{big\_m\_voltage}(1-z_{bt}).
+\end{equation}
+没有 $x_bQ_{bt}$ 项。依据为
+\srcpath{resilience\_restoration\_mip.cpp:1251--1282}。
+
+\subsection{母线平衡与森林行}
+
+每时步只创建一次全网森林基数等式：
+\begin{equation}
+ \sum_bz_{bt}+\sum_ir_{it}-\sum_iu_{it}=0.
+\end{equation}
+母线有功行的源码符号为
+\begin{equation}
+ P^{base}_{it}+P^{gen}_{it}+P^{ren}_{it}+s_{it}
+ +\sum_{b:to=i}p_{bt}-\sum_{b:from=i}p_{bt}
+ +\sum_{s@i}P^{fs}_{st}+\sum_mP^{MESS}_{mit}=D_{it}.
+\end{equation}
+商品流行是
+$F^{root}_{it}-u_{it}+\sum_{to=i}f_{bt}-\sum_{from=i}f_{bt}=0$。
+另有 $u_i-r_i-\sum_{b\ni i}z_b\le0$、$r_i\le u_i$、基础源/发电/新能源的带电上界，
+以及 $s_{it}\ge D_{it}(1-u_{it})$。根电压通过两条 big-M 行固定到 1，带电电压下界为
+$v_{it}\ge v_{min}^{2}u_{it}$；变量自身上界为 $v_{max}^{2}$，代码未创建
+$v_{it}\le v_{max}^{2}u_{it}$。依据为
+\srcpath{resilience\_restoration\_mip.cpp:1284--1343}。
+
+\subsection{储能和 MESS 能量行}
+
+固定储能初值固定为 $E_{s0}=E_s^{init}$，并创建
+\begin{align}
+ P^{fs}_{st}&\le P_s^{max}u_{i(s),t},\\
+ (\Delta t/\max(\eta_{dis},10^{-6}))P^{fs}_{st}-E_{st}&\le-E_s^{min},\\
+ E_{st}-E_{s,t-1}+(\Delta t/\max(\eta_{dis},10^{-6}))P^{fs}_{s,t-1}&=0.
+\end{align}
+最后一式仅对 $t>0$ 创建，因此当前时步 $t$ 的放电从下一时步能量中扣除。
+
+MESS 同样固定 $E_{m0}$，每步位置满足 $\sum_ix_{mit}=1$，放电满足位置上界，能量可用行是
+\begin{equation}
+ -E_{mt}+\frac{\Delta t}{\max(\eta_{dis},10^{-6})}\sum_iP^{MESS}_{mit}
+ \le-E_m^{min}.
+\end{equation}
+$t>0$ 的递推还将上一时步出发的移动弧能耗加入：
+\begin{equation}
+ E_{mt}-E_{m,t-1}+\frac{\Delta t}{\max(\eta_{dis},10^{-6})}
+ \sum_iP^{MESS}_{mi,t-1}+\sum_{a:\,depart=t-1}e_a a_{ma}=0.
+\end{equation}
+位置转移用“每个位置恰选一条出发弧”和“每个位置由到达弧确定”两组等式；见
+\srcpath{resilience\_restoration\_mip.cpp:1346--1430}。
+
+\subsection{求解结果真实性}
+
+返回可行不仅依赖后端 success，还要求解向量长度正确，变量界、不等式、等式、整数性最大违反
+均不超过 $10^{-6}$；若所有目标系数不小于 $-10^{-9}$，重算目标还必须不小于 $-10^{-6}$。
+\fld{mip\_gap\_within\_tolerance} 使用
+$\texttt{success}\land gap\le\fld{mip\_gap}+10^{-9}$。依据为
+\srcpath{resilience\_restoration\_mip.cpp:1622--1647}。
+
+\subsection{覆盖边界}
+
+RA 式分阶段入口由 \srcpath{src/resilience/resilience\_stage\_milp.cpp} 单独构建，不能假定与本章
+严格多时段矩阵完全相同。其隔离、重构和 MESS 回退语义由
+\fld{model\_scope}、\fld{mess\_dispatch\_model} 及有效性标志报告；本章不以严格 MIP 公式代替它。

@@ -1,0 +1,194 @@
+\section{源码等价数学实现}\label{sec:rel-source-model}
+
+本章按入口分别转写当前代码。不同入口对基线切负荷、时间尺度和事件频率的处理不同，公式不得
+跨入口复用。所有路径均位于 \srcpath{src/reliability/}。
+
+\subsection{统一参数解析器的实际优先级}
+
+\srcpath{resolve\_reliability\_params} 先将非有限或非正数视为“未提供”；
+\fld{forced\_outage\_rate} 仅在 $0<f<1$ 有效，按需失败概率仅在 $0<p_d\le1$ 有效。
+报告小时数 $H$ 仅在策略值有限且为正时采用，否则固定回退 8760。已知年故障强度
+$\lambda$ 与修复时长 $r$ 时，公共收尾函数执行
+\begin{equation}
+ \mu=H/r,\qquad U=\begin{cases}\lambda/(\lambda+\mu),&r>0,\\0,&r\le0,
+ \end{cases}\qquad \texttt{mttf\_hr}=\begin{cases}H/\lambda,&\lambda>0,\\0,&\text{否则}.
+ \end{cases}
+\end{equation}
+实际解析顺序为：
+\begin{enumerate}
+ \item 有效的主动按需数据：$\lambda=\nu_dp_d$，修复时长优先
+ \fld{cyber\_recovery\_hr}，其次 \fld{mttr\_hr}，再次 \fld{mttr\_hours}；
+ \item \fld{failure\_rate\_per\_year}+\fld{mttr\_hr}；
+ \item 显式 \fld{mttf\_hours}，有修复时额外覆盖 $U=r/(\texttt{mttf\_hours}+r)$；
+ \item \fld{mtbf\_hours}，循环时长约定下先令
+ $\texttt{mttf}=\max(\texttt{mtbf\_hours}-\texttt{mttr\_hours},0)$，否则直接使用 MTBF；
+ \item FOR 与修复时长：$U=f$、$\lambda=fH/((1-f)r)$、MTTF$=r(1-f)/f$；
+ \item 仅 FOR，或仅故障率；缺失量保持未确定并记录警告；
+ \item 策略允许且模板的 $\lambda,r$ 均为正时，只填补缺失项，再执行公共收尾函数。
+\end{enumerate}
+依据为 \srcpath{reliability\_assessment.cpp:40--219}。这是一组控制流，不可改写为无优先级的
+对称参数换算表。
+
+\subsection{非序贯 MC}
+
+每个有效元件独立比较均匀随机数与解析不可用度：
+$X_c=[U(0,1)<U_c]$；基态已停运元件的 $U_c$ 被置零，严格数据策略下缺少算例可靠性数据的
+$U_c$ 也被置零。依据为 \srcpath{reliability\_assessment.cpp:1106--1114} 和
+\srcpath{reliability\_assessment.cpp:1193--1211}。
+
+对第 $q$ 个状态，令 $D_q$ 为后果引擎切负荷，$D_0$ 为预计算健康态切负荷，源码累加
+\begin{align}
+ D_q^{inc}&=\max(0,D_q-D_0),\\
+ \texttt{edns}&=\frac1n\sum_qD_q,&
+ \texttt{eens}&=8760\,\texttt{edns},\\
+ \texttt{incremental\_edns}&=\frac1n\sum_qD_q^{inc},&
+ \texttt{incremental\_eens}&=8760\,\texttt{incremental\_edns},\\
+ \texttt{plc}&=\frac1n\sum_q[D_q^{inc}>\varepsilon],&
+ \texttt{lole}&=8760\,\texttt{plc}.
+\end{align}
+注意原始 \fld{eens\_mwh\_yr} 使用 $D_q$，而失负荷判断、节点 EENS、收敛历史与尾部样本使用
+$D_q^{inc}$。方差按总体二阶矩
+$v=n^{-1}\sum(D_q^{inc})^2-(\overline D^{inc})^2$，仅在
+$n>1$、均值正且 $v>0$ 时令
+$\texttt{cov}=\sqrt v/(\overline D^{inc}\sqrt n)$。只有
+$n>100$、CoV$>0$ 且小于阈值才提前收敛。
+依据为 \srcpath{reliability\_assessment.cpp:1271--1383} 和
+\srcpath{reliability\_assessment.cpp:1529--1547}。
+
+尾部风险不是直接对单小时乘 8760。源码以有放回方式，每个合成年抽取 8760 个
+$D_q^{inc}$，合成年数为
+$\min(\max(200,n),2000)$，再把年 EENS/LOLE 传给尾部函数；见
+\srcpath{reliability\_assessment.cpp:1586--1613}。
+
+\subsection{序贯 MC}
+
+严格数据策略下缺数据元件的 MTTF 被置为 $10^{15}$ 小时。每个在运元件从上态开始，源码用
+\begin{equation}
+ T_{up}=-\texttt{mttf}[c]\ln u,qquad
+ T_{down}=-\texttt{mttr}[c]\ln u,qquad u\sim U(0,1)
+\end{equation}
+交替填充小时状态矩阵，见 \srcpath{reliability\_assessment.cpp:1672--1689} 和
+\srcpath{reliability\_assessment.cpp:1762--1793}。每一失负荷小时直接累加该小时后果引擎返回的
+\fld{curtailment\_mw}；代码没有在序贯年汇总中扣除对应小时的 N-0 切负荷。对每年得到
+$E_y$、失负荷小时 $L_y$，并由布尔失负荷序列的 false$\to$true 回合数得到 $F_y$。最终
+\begin{equation}
+ \texttt{eens}=N_y^{-1}\sum_yE_y,\quad
+ \texttt{lole}=N_y^{-1}\sum_yL_y,\quad
+ \texttt{lolf}=N_y^{-1}\sum_yF_y,
+\end{equation}
+$\texttt{edns}=\texttt{eens}/\fld{hours\_per\_year}$，
+$\texttt{plc}=\texttt{lole}/\fld{hours\_per\_year}$。CoV 使用年 EENS 的总体二阶矩，收敛条件与
+非序贯相同。依据为 \srcpath{reliability\_assessment.cpp:1869--1965}。
+
+\subsection{元件 FMEA 与信息物理混合}
+
+每个元件的自动化和人工路径先分别生成阶段 ENS 与失负荷持续时间。未启用信息物理时
+\begin{equation}
+ EENS_k=\lambda_k\,\texttt{automatic.ens\_mwh}.
+\end{equation}
+启用后，令 $p_{down}=1-p_{auto}$，源码分解为
+\begin{align}
+ E_{perfect}&=\lambda E_{auto},\\
+ \Delta E_{duration}&=\lambda p_{down}(E_{durationOnly}-E_{auto}),\\
+ \Delta E_{control}&=\lambda p_{down}(E_{manual}-E_{durationOnly}),\\
+ EENS_k&=E_{perfect}+\Delta E_{duration}+\Delta E_{control},\\
+ LOLE_k&=\lambda\left(p_{auto}T_{auto}+p_{down}T_{manual}\right).
+\end{align}
+失负荷频率为
+$\lambda(p_{auto}[auto\ causes\ loss]+p_{down}[manual\ causes\ loss])$。
+系统值直接累加逐元件值。依据为
+\srcpath{reliability\_assessment.cpp:4681--4706} 和
+\srcpath{reliability\_assessment.cpp:4835--4861}。因此旧式
+$\lambda(ENS_{sw}+ENS_{rep})$ 只有在 \texttt{automatic.ens\_mwh} 恰按该方式构成时才成立，
+不能替代当前信息物理分支。
+
+\subsection{故障模式 FMEA 与二阶共故障}
+
+单模式持续时间与频率直接赋为
+\begin{align}
+ d_m&=\texttt{isolation\_hr}+\texttt{switching\_hr}
+ +\max(\texttt{params.repair\_hr},\texttt{mode.repair\_hr}),\\
+ f_m&=\texttt{params.lambda\_per\_year},\\
+ EENS_m&=f_md_mS_m,\qquad LOLE_m=[S_m>\varepsilon]f_md_m.
+\end{align}
+主动模式的 $f_m=\nu_dp_d$ 已在解析器中完成；当前评估器没有再乘
+\fld{probability\_given\_initiated}。不支持的后果补丁被记录但贡献保持零。
+依据为 \srcpath{failure\_mode.cpp:1952--2005}。
+
+二阶入口仅缓存不同组件、$f_m>0$ 且 $d_m>0$ 的支持模式，并令
+\begin{align}
+ U_m&=\min(1,f_md_m/8760),& U_{ij}&=U_iU_j,\\
+ EENS_{ij}&=U_{ij}\,8760\,S_{ij},& LOLE_{ij}&=U_{ij}\,8760,\\
+ f_{ij}&=f_if_j(d_i+d_j)/8760,&
+ d_{ij}&=\begin{cases}d_id_j/(d_i+d_j),&d_i+d_j>0,\\0,&\text{否则}.
+ \end{cases}
+\end{align}
+同组件模式、$U_{ij}$ 小于阈值、硬冲突补丁或零切负荷对均不贡献；枚举受
+\fld{max\_pairs\_evaluated} 限制。依据为 \srcpath{failure\_mode.cpp:2008--2016} 和
+\srcpath{failure\_mode.cpp:2084--2175}。
+
+\subsection{三阶段结果聚合}
+
+每个故障先对三个阶段的节点切负荷逐点扣除健康态并截为非负，汇总为
+$P_1,P_2,P_3$（kW）。源码逐故障赋值
+\begin{align}
+ \texttt{ens\_kwh}&=P_1\tau_{iso}+P_2\tau_{sw}+P_3\tau_{rep},\\
+ d&=[P_1>10^{-6}]\tau_{iso}+[P_2>10^{-6}]\tau_{sw}
+ +[P_3>10^{-6}]\tau_{rep},\\
+ \texttt{eens\_contribution\_mwh\_yr}&=\lambda\,
+ \texttt{ens\_kwh}/1000,\\
+ \texttt{lole\_contribution\_hr\_yr}&=\lambda d,\qquad
+ \texttt{lolf\_contribution\_occ\_yr}=[d>0]\lambda.
+\end{align}
+系统 \fld{eens\_kwh\_yr} 不是简单累加逐故障字段后再乘一次：代码按负荷点直接累加
+\begin{equation}
+ \sum_{k,i}\lambda_k
+ (p_{ki1}^{inc}\tau_{k,iso}+p_{ki2}^{inc}\tau_{k,sw}+p_{ki3}^{inc}\tau_{k,rep}).
+\end{equation}
+SAIFI/SAIDI 只要某负荷点任一阶段增量超过 $10^{-6}$ 就将该故障频率计入中断次数，并按各阶段
+阈值分别累计持续时间。依据为
+\srcpath{three\_stage\_reliability.cpp:3500--3558} 和
+\srcpath{three\_stage\_reliability.cpp:3826--3852}。
+
+\subsection{频率--持续时间递推}
+
+该入口只读取在运 AC 发电机，容量为 \fld{pmax\_mw}。MTTR 缺失时固定回退 50 小时；有效 FOR
+$q\in(0,1)$ 时 $p=1-q$、$\mu=1/r$、$\lambda=q/((1-q)r)$，否则按完美元件
+$p=1,q=0,\lambda=0,\mu=1$。容量离散步长固定为 10 MW，容量步数用整数截断
+$c=\lfloor C/10\rfloor$；$c\le0$ 的机组不进入递推。
+
+数组初值为 $P_0[0]=1$、其余 $P_0,F_0$ 为零。代码存储的是累积数组，并逐级执行
+\begin{align}
+ P_{new}[x]&=pP[x]+qP[x-c],\\
+ F_{new}[x]&=pF[x]+qF[x-c]+\lambda p(P[x-c]-P[x]),
+\end{align}
+其中 $x<c$ 时硬编码 $P[x-c]=1,F[x-c]=0$。备用索引先取
+$r=\operatorname{clamp}(\lfloor(C_{tot}-L)/10\rfloor,0,n-1)$，再用 $r+1$ 读取
+LOLP 与频率：
+\begin{equation}
+ LOLP=P[r+1],\quad LOLF=8760F[r+1],\quad LOLE=8760LOLP,\quad
+ LOLD=\begin{cases}LOLE/LOLF,&LOLF>0,\\0,&\text{否则}.
+ \end{cases}
+\end{equation}
+越过数组上界时 LOLP/LOLF 均为零。依据为
+\srcpath{reliability\_assessment.cpp:2089--2223}。
+
+\subsection{VaR、CVaR 与配电指标}
+
+尾部函数以 EENS 样本数 $n$ 为基准；LOLE 长度不等时 resize 到 $n$ 并以零补齐。排序后
+$i_{VaR}=\min(\lceil\alpha n\rceil-1,n-1)$，CVaR 是从该索引到末尾的算术平均，包含 VaR
+样本本身。五个报告分位数使用
+$\min(\lfloor pn\rfloor,n-1)$，而不是同一个 ceil 规则。依据为
+\srcpath{reliability\_assessment.cpp:2024--2082}。
+
+配电指标的客户数优先取 AC 负荷 \fld{n\_customers}，否则取
+$\max(1,10p_{MW})$；没有显式负荷但有 \fld{pd\_mw} 的 AC 母线同样回退。DC 仅在 CIF/CID
+向量长度超过 AC 母线数时加入，依次优先母线客户数、负荷客户数、
+$\max(1,10(\sum|p_{load}|+\max(0,pd)))$。客户总数小于 1 时返回零结构。
+具体权重与索引布局见 \srcpath{reliability\_assessment.cpp:2230--2355}。
+
+\subsection{覆盖边界}
+
+本章只保证所列聚合式与当前代码一致。切负荷后果引擎内部的 AC-only DC-OPF、混合 AC/DC LP
+和三阶段恢复 MILP 是不同模型；其覆盖范围由结果的 \fld{model\_scope}、
+\fld{model\_limitations} 与有效性标志限定，不能仅凭“EENS”字段名互相替代。

@@ -1,0 +1,132 @@
+% !TEX program = xelatex
+% 编译方式：在本目录执行两遍 xelatex（详见 docs/_manual_common/README.md）。
+% 源码依据：src/power_models/ 与 include/hacdcpf/power_models/；公式与参数以代码为准。
+\documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
+\usepackage{../../_manual_common/hysim_manual}
+
+\title{\textbf{交直流混合高弹性能源电力系统仿真平台}\\[0.5em]
+       {\Large 求解器无关建模层（power\_models / AML）技术手册}\\[0.3em]
+       {\large 数学模型、接口参数、验证校核与工业级评价}}
+\author{HySim-XJTU-HRPES（西安交通大学 HRPES 团队）}
+\date{\today}
+
+\begin{document}
+\maketitle
+\begin{abstract}
+\noindent 本手册依据 HySim-XJTU-HRPES 平台求解器无关建模层
+（\srcpath{src/power\_models/}、\srcpath{include/hacdcpf/power\_models/}）整理，命名空间
+\texttt{hacdcpf::power\_models}，经 AML 桥 \texttt{hacdcpf::aml} 转发到 \texttt{mipsolvers::aml}。
+该层把工程系统翻译为 \texttt{aml::Model} 的集合/参数/变量/目标/约束对象，按问题类（LP/QP/MILP/NLP）
+派发到原生核或可选 HiGHS/Ipopt/SCIP/Gurobi，覆盖极坐标 ACOPF、交直流混合 OPF、DCOPF、LinDistFlow
+与 SCUC。全部结论以本模块源码及逐式核验章为准：AML 通道为
+实验性建模通道，\fld{model\_scope} 固定为 experimental-aml-builder:not-production-runtime，不被生产
+运行时使用。版式与《碳流追踪与碳排放核算技术手册》一致。
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{阅读指南与约定}
+\subsection{数据来源}
+\begin{itemize}
+  \item \srcpath{include/hacdcpf/power\_models/ac\_pf\_model\_builder.hpp}、
+        \srcpath{src/power\_models/acopf\_builder.cpp} —— 极坐标 ACOPF；
+  \item \srcpath{include/hacdcpf/power\_models/hybrid\_opf\_model\_builder.hpp}、
+        \srcpath{acdcopf\_builder.cpp} —— 交直流混合 OPF（VSC + DC/DC）；
+  \item \srcpath{include/hacdcpf/power\_models/dc\_opf\_model\_builder.hpp}、
+        \srcpath{dc\_opf\_builder.cpp} —— DCOPF（LP，返回 LMP）；
+  \item \srcpath{include/hacdcpf/power\_models/lindistflow\_builder.hpp}、
+        \srcpath{scuc\_builder.hpp} —— LinDistFlow 与 SCUC；
+  \item \srcpath{include/hacdcpf/power\_models/aml\_build\_result.hpp} —— 统一结果与诚实口径；
+  \item \srcpath{chapters/source\_equivalent\_builders.tex} —— 逐式绑定源码的唯一数学规范。
+\end{itemize}
+命名空间为 \texttt{hacdcpf::power\_models}。
+
+\subsection{单位制与索引空间}
+功率基准 \fld{base\_mva}（MVA），电压/电抗以标幺 pu，费用系数为发电费用多项式系数，价格以 \$/MWh。
+输入以规范数据结构给出（\texttt{ACOPFData}/\texttt{ACDCOPFData}/\texttt{DCOPFData}/\texttt{SCUCData}/
+\texttt{LinDistFlowData}），结果索引与其内部母线/机组/支路编号一致，映射字段如 \fld{vm\_pu}/\fld{pg\_mw}
+以名称键给出。
+
+\subsection{诚实口径}
+AML 路径为实验性建模通道：\fld{model\_scope} 固定为
+experimental-aml-builder:not-production-runtime，明确“不被生产 \srcpath{solve\_ac\_opf}/
+\srcpath{solve\_dc\_opf} 使用”；生产混合 OPF 采用对等（parity）表述。SCUC 仅系统级平衡、无网络，其
+MILP 平衡对偶非认证市场出清价（\fld{price\_valid}=false）。混合 OPF 的 DC/DC 采用光滑前向传输效率
+/$I^2r$ 模型，不表示双向符号切换。
+
+\section{功能定位与架构}
+\subsection{公共入口族}
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{6.6cm}L{3.0cm}L{5.4cm}@{}}
+\toprule
+入口 & 定义位置 & 说明\\
+\midrule
+\srcpath{to\_acopf\_data} + \srcpath{solve\_acopf} & power\_models/ac\_pf\_model\_builder.hpp & 极坐标交流 OPF（NLP）\\
+\srcpath{to\_acdcopf\_data} + \srcpath{solve\_acdcopf} & power\_models/hybrid\_opf\_model\_builder.hpp & 交直流混合 OPF：VSC + DC/DC（NLP）\\
+\srcpath{solve\_dc\_opf} & power\_models/dc\_opf\_model\_builder.hpp & 直流 OPF（LP，返回 LMP）；区别于生产 \srcpath{opf::solve\_dc\_opf}\\
+\srcpath{solve\_lindistflow} & power\_models/lindistflow\_builder.hpp & 辐射状 LinDistFlow（LP）\\
+\srcpath{solve\_scuc} & power\_models/scuc\_builder.hpp & 安全约束机组组合（MILP）\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{关键数据结构}
+\compmeta{ACOPFData}{include/hacdcpf/power\_models/ac\_pf\_model\_builder.hpp}
+主要字段：\fld{base\_mva}；母线 \texttt{ACOPFBusData}（\fld{vm\_min}/\fld{vm\_max}、\fld{is\_ref}）；
+机组 \texttt{ACOPFGenData}（\fld{pg\_min}/\fld{pg\_max}、\fld{cost\_c2}/\fld{cost\_c1}/\fld{cost\_c0}）；
+支路 \texttt{ACOPFBranchData}（\fld{r\_pu}/\fld{x\_pu}/\fld{bc\_pu}/\fld{tap}/\fld{rate\_a\_pu}）。
+
+\compmeta{ACDCOPFData}{include/hacdcpf/power\_models/hybrid\_opf\_model\_builder.hpp}
+换流器 \texttt{ACDCOPFConverterData}（损耗 \fld{a\_pu}/\fld{b\_loss}/\fld{c\_loss}、
+\fld{is\_vdc\_slack}）；DC/DC \texttt{ACDCOPFDCDCData}（\fld{control\_mode}：Voltage/Power/Droop、
+\fld{eta}、\fld{k\_droop}）。
+
+\compmeta{AMLBuildResult}{include/hacdcpf/power\_models/aml\_build\_result.hpp}
+主要字段：\fld{model\_scope}（固定 experimental-aml-builder:not-production-runtime）、
+\fld{model\_limitations}、\fld{solve\_result}、\fld{obj\_per\_h}、\fld{max\_p\_viol\_pu}，以及
+\fld{vm\_pu}/\fld{pg\_mw} 映射。另有 \texttt{DCOPFResult}（\fld{gen\_dispatch\_MW}、\fld{lmp\_per\_MWh}、
+\fld{branch\_flow\_MW}）、\texttt{SCUCResult}（\fld{commitment}、\fld{dispatch\_MW}、\fld{price\_valid}）
+与 \texttt{LinDistFlowResult}（\fld{voltage\_sq\_pu}、\fld{branch\_p\_mw}）。
+
+\input{chapters/source_equivalent_builders}
+
+\section{接口与参数}
+\begin{paramtable}
+\fld{base\_mva} & $S_B$ & MVA & — & — & 系统功率基准（ACOPFData）\\
+\fld{cost\_c2} & $c_2$ & — & — & — & 机组二次费用系数（另有 \fld{cost\_c1}、\fld{cost\_c0}）\\
+\fld{pg\_max} & $\overline P_g$ & pu & — & — & 机组有功上限（另有 \fld{pg\_min}）\\
+\fld{vm\_min} & $\underline V$ & pu & $0.9\sim1.1$ & — & 母线电压下限（另有 \fld{vm\_max}）\\
+\fld{a\_pu} & $a$ & pu & — & — & VSC 换流损耗常数项（另有 \fld{b\_loss}、\fld{c\_loss}）\\
+\fld{control\_mode} & — & — & 枚举 & — & DC/DC 控制模式：Voltage/Power/Droop\\
+\fld{spinning\_reserve\_MW} & $R$ & MW & — & — & SCUC 旋转备用需求\\
+\fld{v\_max\_pu\_sq} & $\overline u$ & pu$^2$ & — & — & LinDistFlow 平方电压上界（另有 \fld{v\_min\_pu\_sq}）\\
+\fld{lmp\_per\_MWh} & $\lambda$ & \$/MWh & — & — & 结果：DCOPF 节点边际电价（平衡对偶）\\
+\fld{price\_valid} & — & — & 布尔 & false & 结果：SCUC 平衡对偶非认证出清价\\
+\fld{model\_scope} & — & — & 固定 & 固定 & 结果口径固定为 experimental-aml-builder:not-production-runtime\\
+\end{paramtable}
+
+\section{验证与边界局限}
+\subsection{验证与校核}
+无专用 \srcpath{test\_power\_models} 文件；AML 建模器经由其它测试间接覆盖：
+\srcpath{to\_acopf\_data}/\srcpath{to\_acdcopf\_data}/\srcpath{solve\_acdcopf} 见
+\srcpath{tests/test\_converter\_coordination.cpp}，\srcpath{to\_acdcopf\_data} 见
+\srcpath{tests/test\_hacdcpf.cpp}。交叉校核目标 \srcpath{test\_acopf\_dcopf\_crossval} 检验的是生产
+\srcpath{opf::solve\_dc\_opf}，而非 AML 的 \srcpath{power\_models::solve\_dc\_opf}。AML 变体
+\srcpath{solve\_lindistflow}/\srcpath{solve\_scuc}/\srcpath{solve\_acopf} 在 \srcpath{tests/} 中暂无引用。
+
+\subsection{边界与局限（如实标注）}
+\begin{itemize}
+  \item AML 通道为实验性建模通道：\fld{model\_scope} 固定为
+        experimental-aml-builder:not-production-runtime，明确“不被生产 \srcpath{solve\_ac\_opf}/
+        \srcpath{solve\_dc\_opf} 使用”；生产混合 OPF 采用对等（parity）表述；
+  \item 混合 OPF：DC/DC 采用光滑前向传输效率/$I^2r$ 模型，不表示双向符号切换；
+  \item SCUC 范围 \texttt{experimental-aml-scuc:system-balance-no-network}：仅系统级功率平衡、
+        无输/配电网络；MILP 平衡对偶非认证市场出清价（\fld{price\_valid}=false）；
+  \item LinDistFlow：仅固定负荷（无 DG/可控源/切负荷变量），忽略 $I^2r$ 损耗，热限近似；
+  \item 本手册的 \srcpath{chapters/source\_equivalent\_builders.tex} 是本模块唯一数学规范；
+        OPF 手册只记录跨模块接口，不复制本模块公式。
+\end{itemize}
+\input{../../_manual_common/industrial_evaluation}
+
+\end{document}

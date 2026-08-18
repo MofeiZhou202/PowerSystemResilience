@@ -1,0 +1,719 @@
+% 交直流混合最优潮流：Parity 建模层（全空间 NLP 的变量/约束布局、目标组装与 KKT 求值）
+% 本章文件由 \input 引入，不含导言区。
+\section{交直流混合最优潮流：Parity 建模层}\label{sec:parityform}
+
+本章与第~\ref{sec:parityipm}~章合起来给出平台的\textbf{交直流混合最优潮流}
+（AC/DC hybrid OPF）本体：统一入口 \srcpath{opf::solve\_ac\_opf} 在 Auto 后端下
+检测到任何 DC/VSC/LCC 组件时，即把算例分派到本章建模 + 下章求解核的路线
+（分派规则见第~\ref{sec:acopfnative}~章；纯交流算例是本模型的直流块为零的
+退化情形，亦可走第~\ref{sec:acopfnative}~章的紧致路径）。本章给出该建模层的
+完整口径：它把富语义 \fld{HybridPowerSystem} 经 canonical 投影装配为一个
+全空间（full-space）非线性规划（NLP），并暴露目标值、目标梯度/对角 Hessian、
+等式残差、非线性不等式、两套稀疏雅可比与拉格朗日 Hessian 共七类 KKT 求值函数。
+该建模层是 Parity IPM 求解核（第~\ref{sec:parityipm}~节）与嵌入式 Ipopt 路径共用
+的同一份问题定义；本章只覆盖建模与求值，迭代算法本身见
+第~\ref{sec:parityipm}~节。全部论述以
+\srcpath{include/hacdcpf/optimal\_power\_flow/formulation.hpp}（447 行）
+与 \srcpath{src/optimal\_power\_flow/parity\_formulation.cpp}（2831 行）
+为准。
+
+\subsection{建模层定位与求解路径}
+
+\subsubsection*{全空间 NLP 声明}
+Parity 建模层装配的 NLP 形如（
+\srcpath{include/hacdcpf/optimal\_power\_flow/formulation.hpp}:8--14）：
+\begin{align*}
+\min_{x}\; f(x)\quad
+\text{s.t.}\quad g(x)=0,\quad h(x)\le 0,\quad
+x_{\min}\le x\le x_{\max}
+\end{align*}
+与 Native 精简空间路径（第~\ref{sec:acopfnative}~节）不同，这里所有交流
+母线相角、电压幅值、发电机 $P/Q$、换流器三端口功率、可控资源与可选切负荷
+变量都保留为显式原变量，约束全部写成显式行块；头文件注释明确说明这一
+布局"刻意便于审查"：\fld{VarIndex} 给出每个变量块、\fld{ConstraintIndex}
+给出每个等式/不等式行块的起止（同文件:17--21）。变量界
+$x_{\min}\le x\le x_{\max}$ 以盒式约束单独处理，不计入 $h(x)$。
+
+\subsubsection*{命名与对齐对象（如实考证）}
+"Parity"（对齐）一名在当前代码注释中未再展开定义，现存表述只有
+"Parity full-space OPF formulation"（同文件:5）与"与 Native 精简空间路径
+相对照的全空间路径"（\srcpath{docs/technical\_notebook/\allowbreak
+sections/11c\_native\_ipm\_vs\_parity\_ipm.tex}）。git 历史显示该文件最初
+由团队内部 Julia 原型逐方程移植而来：初始提交（\texttt{de00140}，
+2026-05-12）中 \srcpath{clamp\_interior} 与直流预热启动处留有
+"matching Julia"、"Julia :clamp\_1pct" 等注释；当前检出处这些注释已删除，
+但 \srcpath{src/optimal\_power\_flow/parity\_ipm.cpp}:1184 仍留有
+"the reference formulation stores dg as n x neq" 的对照痕迹。因此本章对
+"对齐对象"的表述以可核实材料为限：Parity 建模层是\textbf{与参考实现
+（内部 Julia 原型）逐方程对齐的全空间 AC OPF 建模}，其当前工程含义是
+统一交直流的显式全空间 NLP；它与潮流方程的口径一致性由
+第~\ref{subsec:parity-pf-consistency}~小节逐条说明。同一份
+\fld{parity::Problem} 同时服务两个求解后端：自研 Parity IPM 与嵌入式
+Ipopt（"applied to the same parity formulation"，
+\srcpath{include/hacdcpf/optimal\_power\_flow/opf\_options.hpp}:19--25
+注释）。
+
+\subsubsection*{与潮流共享 canonical 数据}
+\begin{sloppypar}
+装配入口 \srcpath{build\_problem} 的第一步调用
+\fld{core::make\_solver\_data(sys,\allowbreak}\allowbreak\ \fld{LossModelType::Linear)}，
+完成富系统到 canonical \fld{SolverData} 的投影（
+\srcpath{src/optimal\_power\_flow/parity\_formulation.cpp}:109--112；
+投影与装配机制见第~\ref{sec:overview}~节）。因此 Parity NLP 的
+$Y_{\mathrm{bus}}$、直流电导矩阵 $G^{dc}$、基准容量 \fld{base\_mva} 与
+混合潮流完全同源；\fld{LossModelType} 仅作为字段存入 \fld{SolverData}
+（\srcpath{src/power\_flow/solver\_data.cpp}:324），Parity 换流器耦合行
+不读取该字段，而是自行按 $a+bI+cI^2$ 计损耗（见后文换流器耦合约束）。
+随后 \srcpath{build\_problem} 依次完成：逐母线负荷/ZIP 系数预取
+（:117--161）、各组件族的变量映射筛选（:163--327）、交流岛相角参考与
+DC\_V 电压参考选择（:329--395）、变量块与约束行块计数及偏移
+（:397--528）、行缩放因子（:530--537）、$Y_{\mathrm{bus}}$ 对角元与
+$G^{dc}$ 稠密副本缓存（:540--549）、不可观测直流母线锚点检测
+（:551--561）、固定注入汇总（:563--625）。
+\end{sloppypar}
+
+\subsubsection*{装配入口与数据流}
+建模层对外暴露的函数链为 \srcpath{build\_problem} $\to$
+\srcpath{build\_variable\_bounds} $\to$ \srcpath{build\_initial\_point}
+$\to$ 七个 KKT 求值函数（声明见
+\srcpath{include/hacdcpf/optimal\_power\_flow/formulation.hpp}:234--270、
+287--311、354--367、391--402、419--445）。数据流如图~\ref{fig:parity-flow}
+所示。
+
+\begin{figure}[H]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\small,
+  box/.style={draw, rectangle, minimum height=0.9cm, inner sep=4pt, align=center},
+  arr/.style={-{Stealth[length=2.5mm]}, thick}]
+  \node[box] (rich) {富语义系统\\\fld{HybridPowerSystem}};
+  \node[box, right=0.9cm of rich] (sd) {canonical 投影\\\srcpath{make\_solver\_data}};
+  \node[box, right=0.9cm of sd] (prob) {\fld{parity::Problem}\\\srcpath{build\_problem}};
+  \node[box, right=0.9cm of prob] (kkt) {KKT 求值族\\objective / $g$ / $h$ / $J_g$ / $J_h$ / $\nabla^2 L$};
+  \node[box, right=0.9cm of kkt] (ipm) {求解核\\Parity IPM / Ipopt};
+  \draw[arr] (rich) -- (sd);
+  \draw[arr] (sd) -- (prob);
+  \draw[arr] (prob) -- node[above, font=\footnotesize]{bounds, $x_0$} (kkt);
+  \draw[arr] (kkt) -- (ipm);
+\end{tikzpicture}}
+\caption{Parity 建模层数据流：富系统经 canonical 投影装配为
+\fld{parity::Problem}，向 Parity IPM（第~\ref{sec:parityipm}~节）或
+嵌入式 Ipopt 提供统一 KKT 求值接口}
+\label{fig:parity-flow}
+\end{figure}
+
+\subsubsection*{运行期选项}
+\fld{ParityOptions} 控制切负荷、目标类型与四个约束族开关（定义于
+\srcpath{include/hacdcpf/optimal\_power\_flow/formulation.hpp}:35--49）。
+约束族开关默认全部打开（always-enforce），调用方（如 GUI）可逐族关闭以
+松弛问题；关闭只是不生成对应行块或把容量圆半径放到 $10^{12}$，不改变
+其余方程。
+
+\begin{paramtable}
+\fld{load\_shedding} & — & — & true/false & true & 是否为每交流母线分配切负荷变量 $\Delta P^d,\Delta Q^d$（false 时两块长度为 0）\\
+\fld{voll} & VOLL & — & $>0$ & 0.0 & 失负荷价值；0 表示按最大发电边际成本自动取值（见目标函数节）\\
+\fld{eps\_iac} & $\varepsilon_I$ & pu & $10^{-12}$--$10^{-4}$（经验值） & 1e-6 & 换流器电流 $|I_{ac}|=\sqrt{P^2+Q^2+\varepsilon_I}/V_m$ 的平滑项\\
+\fld{objective} & — & — & Economic/\allowbreak VoltageDeviation/\allowbreak ActiveLoss/\allowbreak VoltageDeviation\allowbreak AndLoss & Economic & 连续目标类型（\fld{ACOPFObjective} 枚举，\srcpath{opf\_options.hpp}:39--44）；后三者服务 RPO（第~\ref{sec:rpo}~节）\\
+\fld{voltage\_target\_pu} & $V^{\mathrm{ref}}$ & pu & 0.95--1.05（经验值） & 1.0 & 电压偏差目标的参考电压\\
+\fld{voltage\_deviation\_weight} & $w_V$ & — & $>0$ & 1.0 & 电压偏差项权重\\
+\fld{active\_loss\_weight} & $w_L$ & — & $>0$ & 1.0 & 有功网损项权重\\
+\fld{enforce\_branch\_limits} & — & — & true/false & true & 是否生成 AC/DC 支路容量不等式行\\
+\fld{enforce\_converter\_capacity} & — & — & true/false & true & 是否按容量圆约束换流器视在功率（false 时半径取 $10^{12}$）\\
+\fld{enforce\_converter\_current\_limits} & — & — & true/false & true & 是否生成换流器交流电流不等式行\\
+\fld{enforce\_converter\_modulation\_limits} & — & — & true/false & true & 是否生成 VSC 调制窗口与 DC/DC 占空比线性不等式行（同一开关门控两族）\\
+\end{paramtable}
+
+\subsection{决策变量向量布局}\label{subsec:parity-varlayout}
+
+\subsubsection*{块序与偏移}
+原变量向量按 17 个连续块排列（文档注释见
+\srcpath{include/hacdcpf/optimal\_power\_flow/formulation.hpp}:51--65；
+块长赋值见 \srcpath{src/optimal\_power\_flow/parity\_formulation.cpp}:397--423，
+起始偏移累加见同文件:425--464）：
+\begin{align*}
+x = [\,&\theta,\; V,\; P^g,\; Q^g,\; V^{dc},\; P^{ac}_c,\; Q^{ac}_c,\; P^{dc}_c,\;
+\Delta P^d,\; \Delta Q^d,\; P^{ren},\; Q^{ren},\\
+&P^{stor},\; Q^{stor},\; P^{stor,dc},\; P^{dcdc},\; P^{flex},\; P^{er},\; Q^{er}\,]
+\end{align*}
+能量路由器端口块 $P^{er},Q^{er}$ 在头文件公式注释之后补入
+\fld{VarIndex}（同文件:73--77、86：\fld{n\_erp}/\fld{n\_erq} 与
+\fld{i\_erp}/\fld{i\_erq}），实现中位于 $P^{flex}$ 之后
+（parity\_formulation.cpp:460--463）。空组件族块长为 0，但仍保留等于
+下一块起点的有效偏移（formulation.hpp:63--65）。各块长度、含义与
+组件筛选口径如下表（筛选循环见 parity\_formulation.cpp:163--327）：
+
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}l l L{4.6cm} L{6.2cm}@{}}
+\toprule
+块符号 & 长度字段 & 块内容（单位均为标幺） & 组件筛选口径\\
+\midrule
+$\theta$ & \fld{n\_va}$=n_b$ & 交流母线电压相角（rad） & 全部交流母线\\
+$V$ & \fld{n\_vm}$=n_b$ & 交流母线电压幅值 & 全部交流母线\\
+$P^g,Q^g$ & \fld{n\_pg} & 发电机有功/无功 & 全部母线有效的发电机（含退运，退运机由界钉定）\\
+$V^{dc}$ & \fld{n\_vdc}$=n_{dc}$ & 直流母线电压 & 全部直流母线\\
+$P^{ac}_c,Q^{ac}_c,P^{dc}_c$ & \fld{n\_pac} & VSC 交流有功/无功、直流有功 & 在役且两端母线有效的换流器\\
+$\Delta P^d,\Delta Q^d$ & \fld{n\_dpd} & 切负荷量 & \fld{load\_shedding}=true 时每交流母线一个，否则 0\\
+$P^{ren},Q^{ren}$ & \fld{n\_pren} & 可控可再生有功/无功 & 可削减 \fld{RenewableGen}（\fld{curtailable}）与可控 \fld{PVSystem}（\fld{controllable}），以 \fld{ren\_source}=0/1 区分\\
+$P^{stor},Q^{stor}$ & \fld{n\_pstor} & 交流储能有功/无功 & 在役 \fld{StorageUnit}\\
+$P^{stor,dc}$ & \fld{n\_pstordc} & 直流储能有功 & 在役 \fld{DCStorage}\\
+$P^{dcdc}$ & \fld{n\_pdcdc} & DC/DC 输入侧有功 $p_{in}$ & 在役且两端口母线有效的 DC/DC\\
+$P^{flex}$ & \fld{n\_pflex} & 柔性负荷实际需求 & 在役且可控 \fld{FlexibleLoad}\\
+$P^{er},Q^{er}$ & \fld{n\_erp},\fld{n\_erq} & 能量路由器端口有功/无功 & 在役路由器的在役端口；仅交流端口有无功变量\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsubsection*{索引映射}
+\fld{Problem} 保存从紧凑变量位置回到 canonical 组件数组的全部映射
+（\srcpath{include/hacdcpf/optimal\_power\_flow/formulation.hpp}:131--192）：
+\fld{gen\_var\_to\_data}\allowbreak/\fld{gen\_bus}、
+\fld{conv\_var\_to\_data}\allowbreak/\fld{conv\_ac\_bus}\allowbreak/\fld{conv\_dc\_bus}、
+\fld{ren\_var\_to\_data}/\fld{ren\_source}/\fld{ren\_bus}、
+\fld{stor\_var\_to\_data}、\fld{stor\_dc\_var\_to\_data}、
+\fld{dcdc\_var\_to\_data}/\fld{dcdc\_bus\_in}/\fld{dcdc\_bus\_out}、
+\fld{flex\_var\_to\_data}/\fld{flex\_bus}、
+\fld{er\_ports}（\fld{ERPortInfo}：路由器号、端口号、母线、交/直标志、
+块内列偏移，同文件:181--189）以及受限组件清单
+\fld{branch\_limited}、\fld{dc\_branch\_limited}、
+\fld{conv\_iac\_limited}、\fld{conv\_mmax\_limited}、
+\fld{conv\_mmin\_limited}、\fld{dcdc\_duty\_limited}。结果归因回原始组件
+由求解驱动层使用这些映射完成（第~\ref{sec:parityipm}~节）。
+
+\subsubsection*{固定注入与负荷预取}
+不进入决策向量的注入在装配期汇总为逐母线常量
+\fld{p\_fixed\_inj}/\fld{q\_fixed\_inj}（
+\srcpath{src/optimal\_power\_flow/parity\_formulation.cpp}:563--625）：
+\fld{StaticGenerator}（恒固定，:568--574）、不可削减
+\fld{RenewableGen}（:577--585）、不可控 \fld{PVSystem}（有功经
+\srcpath{compute\_pv\_power\_mw} 曲线折算，:587--597）、\fld{VPP}
+（:600--606）、并网 \fld{Microgrid} 交换功率（:609--615）与就地
+\fld{MobileStorage}（:618--625）。交流负荷需求优先取
+\fld{SolverData::pd\_pu}/\fld{qd\_pu}（分量负荷存在时），否则回退母线
+\fld{pd\_mw}/\fld{qd\_mvar} 字段（:117--132）；ZIP 权重按母线加权限值
+或全局权重填入 \fld{zip\_pp}$\sim$\fld{zip\_zq} 六个向量，缺省为恒功率
+（:134--161）。
+
+\subsection{目标函数组装}
+
+\subsubsection*{经济目标（默认）}
+经济目标为发电机二次成本、VSC 无功设定点正则、切负荷惩罚与可再生削减
+成本之和（\srcpath{src/optimal\_power\_flow/parity\_formulation.cpp}:1204--1306，
+函数 \srcpath{objective}）：
+\begin{align*}
+f(x)=\;&\sum_{g}\Big(c_{2g}\,(S_{\mathrm{base}}\,p_g)^2
+       +c_{1g}\,(S_{\mathrm{base}}\,p_g)+c_{0g}\Big)
+ +k_{Q}\sum_{c}\Big(S_{\mathrm{base}}\,q^{ac}_c-q^{set}_c\Big)^2\\
+ &+\mathrm{VOLL}\sum_{i}S_{\mathrm{base}}\,(\Delta p^d_i+\Delta q^d_i)
+ +\sum_{r}\Big(c_{1r}\,S_{\mathrm{base}}\,p^{ren}_r
+ +c^{curt}_r\,(p^{rated}_r-S_{\mathrm{base}}\,p^{ren}_r)^+\Big)
+ +C_{\mathrm{const}}
+\end{align*}
+其中 $p_g$、$q^{ac}_c$、$p^{ren}_r$ 为标幺变量，成本系数
+\fld{cost\_c2}/\fld{cost\_c1}/\fld{cost\_c0} 以工程单位（MW、MVAr）存储，
+装配时乘 $S_{\mathrm{base}}$=\fld{base\_mva} 化为有名值再代入
+（:1253--1257；头文件说明见 formulation.hpp:272--286）。币种未在代码中
+固定，目标值量纲随成本系数币种而定。
+
+各分项出处：发电机二次成本 :1253--1257；VSC 无功设定点正则
+$k_{Q}=10^{-3}$（常量 \srcpath{kReactiveSetpointRegularization}，:29；
+装配 :1258--1265），其动机按注释是消除无功无直接成本造成的"平方向"，
+防止不受约束的 VSC 吸收任意无功（:24--28 注释）；切负荷惩罚 :1283--1290；
+可再生削减成本仅对 \fld{RenewableGen} 源生效
+（\fld{cost\_curtail\_mwh}$>0$ 且存在削减量时，:1291--1299），光伏源只有
+线性 $c_1$ 项（:1300--1303）。$C_{\mathrm{const}}$ 为固定注入的线性成本
+常数（在役 \fld{StaticGenerator}、直流静态机、不可削减可再生、不可控
+光伏、直流光伏，:1266--1282）——它是常量，不影响极小点，只影响报告
+目标值。
+
+\subsubsection*{标幺换算与梯度/对角 Hessian}
+IPM 需要对标幺变量的导数。对发电机成本
+$c_2(S_{\mathrm{base}}p_g)^2+c_1(S_{\mathrm{base}}p_g)+c_0$（
+\srcpath{include/hacdcpf/optimal\_power\_flow/formulation.hpp}:289--306）：
+\begin{align*}
+\frac{\partial f}{\partial p_g}
+ =2c_{2g}S_{\mathrm{base}}^2\,p_g+c_{1g}S_{\mathrm{base}},\qquad
+\frac{\partial^2 f}{\partial p_g^2}=2c_{2g}S_{\mathrm{base}}^2
+\end{align*}
+（实现于 \srcpath{src/optimal\_power\_flow/parity\_formulation.cpp}:1356--1363，
+函数 \srcpath{objective\_gradient\_hessian\_diag}）。同理 VSC 正则项
+梯度 $2k_{Q}S_{\mathrm{base}}(S_{\mathrm{base}}q^{ac}_c-q^{set}_c)$、
+对角曲率 $2k_{Q}S_{\mathrm{base}}^2$（:1364--1374）；切负荷梯度
+$\mathrm{VOLL}\cdot S_{\mathrm{base}}$（:1375--1383）；可再生梯度
+$(c_{1r}-\max(0,c^{curt}_r))S_{\mathrm{base}}$ 或 $c_1 S_{\mathrm{base}}$
+（:1384--1394）。该函数只填可分目标项，其余分量梯度为零
+（formulation.hpp:291--292 注释）。
+
+\subsubsection*{VOLL 自动取值}
+\fld{voll}$=0$ 时按下式自动取值（
+\srcpath{src/optimal\_power\_flow/parity\_formulation.cpp}:65--84，函数
+\srcpath{resolve\_voll\_auto}）：
+\begin{align*}
+\mathrm{VOLL}=\max\Big\{100,\;\max_{l}\,\fld{cost\_mw}_l,\;
+1.1\max_{g}\big|c_{1g}+2c_{2g}\max(P^{\max}_g,P^{\min}_g)\big|\Big\}
+\end{align*}
+即不低于 100、不低于任何负荷申报的 \fld{cost\_mw}、并高于最高发电边际
+成本斜率的 1.1 倍，保证切负荷恒劣于发电调度。结果存入
+\fld{voll\_effective}（:538）。
+
+\subsubsection*{RPO 目标族}
+\fld{objective} 非 Economic 时（服务无功优化，见第~\ref{sec:rpo}~节），
+目标换为电压偏差与/或可变部分有功网损（:1204--1251）：
+\begin{align*}
+f_{V}&=w_V\sum_{i}\big(V_i-V^{\mathrm{ref}}\big)^2\\
+f_{L}&=w_L\,S_{\mathrm{base}}\Big(\sum p_g+\sum p^{ren}+\sum p^{stor}
++\sum p^{stor,dc}-\sum p^{flex}+\sum \Delta p^d\Big)
+\end{align*}
+（电压偏差 :1215--1220；网损账本 :1221--1237）。注释明确：固定注入与
+需求为常量、不影响极小点，RPO 报告口径的网损在目标之外补回常数
+（:1200--1203 注释）。非经济目标还叠加 $10^{-6}$ 量级的经济平局项以
+选定唯一调度并改善 KKT 条件数（常量 \fld{kRpoEconomicTieBreak}，
+:1207、1238--1251），随后提前返回，不再计入 VOLL 与削减成本。
+
+\subsection{等式约束}
+
+\subsubsection*{行块布局}
+等式残差 $g(x)$ 按 8 个行块排列（文档注释见
+\srcpath{include/hacdcpf/optimal\_power\_flow/formulation.hpp}\allowbreak :89--98；
+计数与偏移见 \srcpath{src/optimal\_power\_flow/parity\_formulation.cpp}\allowbreak :467--488）：
+\begin{align*}
+g(x)=\big[\,g^P_{ac},\; g^Q_{ac},\; g^P_{dc},\; g^{vsc},\;
+g^{dcdc},\; g^{er},\; g^{\theta\text{-ref}},\; g^{vdc\text{-ref}}\,\big]
+\end{align*}
+其中 DC/DC 平衡块 \fld{n\_dcdc\_bal} 恒为 0：$p_{in}$ 直接折入两个直流
+节点平衡行，注释说明"分配了行块却不填充会留下空行使 KKT 结构奇异"
+（:472--475）。残差求值入口为 \srcpath{equality\_constraints}
+（:1401--1666），约定 AC 行用"网络注入加需求减可控供给"符号、DC 行用
+"负荷加电导潮流减注入"符号（:1397--1400 注释）。
+
+\subsubsection*{交流节点功率平衡}
+交流网络注入取极坐标潮流方程（初始化对角项 :1433--1438，非对角遍历
+$Y_{\mathrm{bus}}$ 非零元 :1439--1455；公式注释见
+formulation.hpp:328--336）：
+\begin{align*}
+P^{net}_i&=V_i\sum_{j}V_j\big(G_{ij}\cos\theta_{ij}+B_{ij}\sin\theta_{ij}\big)\\
+Q^{net}_i&=V_i\sum_{j}V_j\big(G_{ij}\sin\theta_{ij}-B_{ij}\cos\theta_{ij}\big)
+\end{align*}
+负荷按 ZIP 电压依赖模型取值，与潮流求解器口径一致（:1496--1498）：
+\begin{align*}
+P^d_i(V_i)&=P^d_i\,\big(w^{P}_0+w^{P}_1 V_i+w^{P}_2 V_i^2\big)\\
+Q^d_i(V_i)&=Q^d_i\,\big(w^{Q}_0+w^{Q}_1 V_i+w^{Q}_2 V_i^2\big)
+\end{align*}
+平衡行（:1492--1507；符号约定注释见 formulation.hpp:313--325）：
+\begin{align*}
+g^P_i&=s_P\Big(P^{net}_i-P^g_i-P^{fix}_i-P^{ren}_i-P^{stor}_i
+      +P^d_i(V_i)-\Delta P^d_i+P^{flex}_i-P^{ac}_i\Big)\\
+g^Q_i&=s_Q\Big(Q^{net}_i-Q^g_i-Q^{fix}_i-Q^{ren}_i-Q^{stor}_i
+      +Q^d_i(V_i)-\Delta Q^d_i-Q^{ac}_i\Big)
+\end{align*}
+式中 $P^g_i,P^{ren}_i,P^{stor}_i,P^{ac}_i$ 等为按母线累加的分量注入
+（:1457--1488）；$s_P=1/\max(1,\max_i|P^d_i|)$、$s_Q$ 同理，为逐行常数
+缩放（:530--537、1505--1506），用以平衡残差量级；DC 行与换流器行
+不缩放。
+
+\subsubsection*{直流节点功率平衡}
+直流侧按电导矩阵取潮流，与潮流定义逐字一致（注释
+"Match the PF definition exactly"，:1509--1512）：
+\begin{align*}
+g^{P,dc}_k=P^{d,dc}_k+V^{dc}_k\sum_{m}G^{dc}_{km}V^{dc}_m-P^{dc,conv}_k
+\end{align*}
+（:1509--1524）。$G^{dc}$ 对角为正、非对角为负，故高压发送端注入为正；
+$P^{d,dc}_k$ 在无分量 \fld{DCLoad} 时取母线 \fld{pd\_mw}$/S_{\mathrm{base}}$，
+否则逐负荷以 \srcpath{effective\_load\_p\_mw}（含 \fld{scaling}）累加
+（:1519--1522、1528--1537）。直流静态机、直流光伏、直流储能分别以
+固定负注入与变量注入进入（:1538--1554）。
+
+\subsubsection*{VSC 换流器耦合约束}
+每台 VSC 贡献一行能量平衡（:1604--1618；公式注释见
+formulation.hpp:347--352）：
+\begin{align*}
+g^{vsc}_c=P^{ac}_c+P^{dc}_c+a_c+b_c I^{ac}_c+c_c\,(I^{ac}_c)^2=0,\qquad
+I^{ac}_c=\frac{\sqrt{(P^{ac}_c)^2+(Q^{ac}_c)^2+\varepsilon_I}}{V_{m,ac}}
+\end{align*}
+其中 $a_c=$\fld{loss\_mw}$/S_{\mathrm{base}}$（固定损耗）、
+$b_c=$\fld{loss\_percent}$/100$（比例损耗）、$c_c=1-\eta$（导通损耗），
+$\varepsilon_I$=\fld{eps\_iac} 为 $|I_{ac}|$ 在原点处的可微平滑；
+$V_{m,ac}$ 取下限 $10^{-8}$（:1608）。两侧功率均为"注入为正"约定，
+故无损耗时 $P^{dc}_c=-P^{ac}_c$。
+
+\subsubsection*{DC/DC 变换器折叠}
+DC/DC 不设独立平衡行，输入侧变量 $p_{in}$ 直接折入两个直流平衡行
+（:1578--1602，注释 :1620--1626）：输入母线行加 $p_{in}$（抽取），输出
+母线行减 $p_{out}$（注入），即
+\begin{align*}
+g^{P,dc}_{in}&\;\leftarrow\;g^{P,dc}_{in}+p_{in},
+&g^{P,dc}_{out}&\;\leftarrow\;g^{P,dc}_{out}-p_{out}\\
+p_{out}&=\begin{cases}p_{in}\,\eta,&p_{in}\ge 0\\ p_{in}/\eta,&p_{in}<0\end{cases}
+&p_{out}&\;\leftarrow\;p_{out}-r_{eq}\,\frac{p_{in}^2}{\max(V^{dc}_{in},\,0.1)^2}
+\end{align*}
+正方向约定为 $p_{in}>0$ 表示正向传输（$\mathrm{bus}_{in}\to\mathrm{bus}_{out}$）；效率
+$\eta$ 被钳到 $[0.01,1]$；$r_{eq}>0$ 时叠加 $I^2R$ 导通损耗
+（:1594--1600）。注意 OPF 变量是\textbf{输入侧}口径，而潮流
+\fld{p\_ref\_mw} 是输出侧口径，二者经 $\eta$ 换算（注释 :1579--1583；
+预热启动换算 :1070--1078）。
+
+\subsubsection*{LCC 换流站注入}
+在役 LCC 以"定阶、状态依赖"注入进入交直流平衡：不产生 OPF 决策变量，
+直接在当前 $(V_m,V_{dc})$ 迭代点上调用与混合潮流同一套准稳态特性
+\srcpath{lcc\_ac\_injection}/\srcpath{lcc\_dc\_injection} 求值并从平衡行
+减去（:1556--1576；换相母线由 \srcpath{lcc\_commutation\_ac\_bus} 判定，
+:1562--1563）。换流变分接头因此在 Parity NLP 中不可优化。
+
+\subsubsection*{能量路由器}
+每个在役端口的有功（交流端口另有无功）为决策变量，按注入为正从母线
+平衡行减去（交流行与 DC 行的缩放口径分别对齐，:1628--1644）；每台在役
+路由器再配一行有功守恒（:1645--1654）：
+\begin{align*}
+g^{er}_r=\sum_{p\in r}P^{er}_p=0
+\end{align*}
+即设备只"路由"不"产生"功率。当前为\textbf{无损}守恒，注释声明
+\fld{loss\_percent} 精确化留作后续（"refinement deferred"，:1651--1652）。
+
+\subsubsection*{参考行}
+每个导电交流岛锚定一个相角参考（DFS 划岛，优先 \fld{BusType::SLACK}
+母线，其次在役 \fld{is\_slack} 发电机所在母线，否则取岛首母线，
+:329--385），参考行 $g^{\theta\text{-ref}}_r=\theta_{\mathrm{bus}}-\theta^{set}$
+（:1655--1660）；每个在役 \fld{DCBusType::DC\_V} 直流母线锚定电压
+$g^{vdc\text{-ref}}_r=V^{dc}_{\mathrm{bus}}-V^{set}_{dc}$（:387--395、1661--1665）。
+交流岛间无相角耦合，必须逐岛接地（:329--331 注释）。
+
+\subsection{变量界（盒式约束）}
+
+$x_{\min}\le x\le x_{\max}$ 由 \srcpath{build\_variable\_bounds} 装配
+（\srcpath{src/optimal\_power\_flow/parity\_formulation.cpp}:630--815；
+声明注释见 formulation.hpp:236--247）。初始为 $\pm\infty$，逐块覆盖：
+
+\begin{center}
+\footnotesize
+\begin{tabular}{lll}
+\toprule
+变量块 & 界（标幺，MW 系量除 $S_{\mathrm{base}}$） & 出处\\
+\midrule
+$\theta_i$ & $[-\pi,\;\pi]$ & :635--638\\
+$V_i$ & $[$\fld{vmin\_pu}$,$\fld{vmax\_pu}$]$ & :639--643\\
+$P^g_k$ & $[$\fld{pmin\_mw}$, $\fld{pmax\_mw}$]/S_{\mathrm{base}}$；退运机钉定 \fld{pg\_mw}$\pm10^{-8}$ & :645--660\\
+$Q^g_k$ & $[$\fld{qmin\_mvar}$, $\fld{qmax\_mvar}$]/S_{\mathrm{base}}$；退运同上 & :651--660\\
+$V^{dc}_k$ & $[$\fld{vmin\_pu}$,$\fld{vmax\_pu}$]$，非法时回退 $[0.8,1.2]$ & :663--673\\
+$P^{ac}_c,Q^{ac}_c$ & \fld{pmin}/\fld{pmax}、\fld{qmin}/\fld{qmax} 换算 & :690--695\\
+$P^{dc}_c$ & $\pm S^{\max}_c$（容量圆半径，见下节） & :696--698\\
+$\Delta P^d_i,\Delta Q^d_i$ & $[0,\max(P^d_i,\,0.01/S_{\mathrm{base}})]$（无功取绝对值） & :701--708\\
+$P^{ren}_k$ & $[0,\min(P^{rated},\,P^{avail})]$，$P^{avail}$ 取日程 \fld{p\_mw} & :712--732\\
+$Q^{ren}_k$ & \fld{qmin}/\fld{qmax} 换算 & :722--723、730--731\\
+$P^{stor}_k$ & 钉定于日程 \fld{p\_mw}$\pm 10^{-4}/S_{\mathrm{base}}$ 并夹到 \fld{pmin}/\fld{pmax} & :740--758\\
+$Q^{stor}_k$ & \fld{qmin}/\fld{qmax} 换算 & :756--757\\
+$P^{stor,dc}_k$ & 同交流储能钉定口径 & :760--778\\
+$P^{dcdc}_k$ & $[$\fld{pmin\_mw}$,$\fld{pmax\_mw}$]$；\fld{pmax} 缺省回退 \fld{sn\_mva}，\fld{pmin} 回退 $-p_{\max}$ & :780--788\\
+$P^{flex}_k$ & $[$\fld{p\_mw}$-$\fld{flex\_down\_mw}$, $\fld{p\_mw}$+$\fld{flex\_up\_mw}$]$ & :790--795\\
+$P^{er},Q^{er}$ & 端口 \fld{pmin}/\fld{pmax}、\fld{qmin}/\fld{qmax}，非法回退 $\pm10^{6}$ & :797--814\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+三点需要说明。其一，\textbf{发电机无功仅为盒式界}：当前实现不含无功
+能力曲线（$P$--$Q$ 能力图）约束，$Q^g$ 上下界直接取自
+\fld{qmin\_mvar}/\fld{qmax\_mvar}（:651--652）。其二，储能钉定源于单
+时段口径：逐时段 OPF 无跨时段 SOC 状态转移，放开储能会每个时段都以最
+大功率放电、无视 UC 日程，故以 $\pm 10^{-4}/S_{\mathrm{base}}$ 容差带
+钉定（:735--739 注释）；\fld{cap\_charging\_strategy}=\texttt{"static"}
+的承载力静态储能完全固定于 $-$\fld{cap\_static\_charging\_mw}
+（:743--752、767--772）。其三，\textbf{不可观测直流母线}（无任何导电
+直流支路相连，:551--561 检测）通过把盒式界收紧到 \fld{vm\_pu} 的
+$\pm\varepsilon$ 邻域钉定（:678--688），注释明确禁止改用"电压偏差项
+并入有功平衡"的做法（那会等效为虚构源，:674--677）；头文件
+formulation.hpp:173--176 关于"软并联锚定项"的表述与当前实现不符，
+以紧界实现为准。
+
+\subsection{非线性不等式约束}
+
+\subsubsection*{行块布局与门控}
+不等式统一采用 $h(x)\le 0$ 约定，行序为：AC 支路 from 端、AC 支路 to
+端、VSC 视在功率、DC 支路功率、VSC 交流电流、调制上限、调制下限、
+DC/DC 占空比（文档注释见
+\srcpath{include/hacdcpf/optimal\_power\_flow/formulation.hpp}:100--103；
+计数见 \srcpath{src/optimal\_power\_flow/parity\_formulation.cpp}:489--527；
+求值见 \srcpath{nonlinear\_inequality\_constraints}，:1958--2059）。
+各族的生成门控：AC/DC 支路要求 \fld{enforce\_branch\_limits} 且在役、
+\fld{rate\_a\_mva}$>0$（:197--217）；VSC 电流要求
+\fld{enforce\_converter\_current\_limits} 且 \fld{i\_ac\_max\_pu}$>0$
+（:499--501）；调制窗口要求
+\fld{enforce\_converter\_modulation\_limits} 且
+\fld{k\_m\_modulation}、\fld{vn\_ac\_kv}、\fld{vn\_dc\_kv} 均正，
+\fld{m\_max}/\fld{m\_min}$>0$ 分别生成上/下行（:503--506）；DC/DC 占空
+比要求非 Generic 拓扑且 $0\le d_{\min}<d_{\max}\le 1$（:511--525）。
+未声明限值的组件不产生行（"unconstrained converters add no rows"，
+formulation.hpp:115--117）。
+
+\subsubsection*{AC 支路两端容量}
+对每条受限支路，以 $\pi$ 等值计算两端潮流（:1970--1995）。记串联导纳
+$y_s=1/(r+jx)=g_s+jb_s$、半充电 $b_c=b/2$、固定变比 $t$ 与固定移相角
+$\varphi$（\fld{tap}、\fld{shift\_deg} 为\textbf{参数}而非变量，$|t|<10^{-12}$
+时回退 $t=1$，:1974--1980），$\theta=\theta_i-\theta_j-\varphi$：
+\begin{align*}
+P^{f}&=\frac{g_s}{t^2}V_i^2-\frac{g_s\cos\theta+b_s\sin\theta}{t}V_iV_j
+&Q^{f}&=-\Big(\frac{b_s}{t^2}+b_c\Big)V_i^2-\frac{g_s\sin\theta-b_s\cos\theta}{t}V_iV_j\\
+P^{t}&=g_sV_j^2-\frac{g_s\cos\theta-b_s\sin\theta}{t}V_iV_j
+&Q^{t}&=-(b_s+b_c)V_j^2+\frac{g_s\sin\theta+b_s\cos\theta}{t}V_iV_j
+\end{align*}
+容量约束取视在功率平方口径（$S_{\max}=$\fld{rate\_a\_mva}$/S_{\mathrm{base}}$，
+:1985--1986）：
+\begin{align*}
+h^{Sf}&=(P^{f})^2+(Q^{f})^2-S_{\max}^2\le 0
+&h^{St}&=(P^{t})^2+(Q^{t})^2-S_{\max}^2\le 0
+\end{align*}
+即 from/to 两端各一行、共用同一 $S_{\max}$（\fld{n\_sf}$=$\fld{n\_st}，
+:489--490）。变压器分接头与移相器只以固定 $t$、$\varphi$ 进入本式与
+$Y_{\mathrm{bus}}$，Parity NLP 不优化档位；离散档位优化属于 RPO 层
+（第~\ref{sec:rpo}~节）。
+
+\subsubsection*{VSC 容量圆与交流电流}
+容量圆（:1996--2001）：
+\begin{align*}
+h^{Sconv}_c=(P^{ac}_c)^2+(Q^{ac}_c)^2-(S^{\max}_c)^2\le 0
+\end{align*}
+半径 $S^{\max}_c=$\fld{p\_rated\_mw}$/S_{\mathrm{base}}$；额定缺失或非正
+时回退 $\max(|P_{\max}|,|P_{\min}|,|Q_{\max}|,|Q_{\min}|,10^{-6})/
+S_{\mathrm{base}}$；\fld{enforce\_converter\_capacity}=false 时半径取
+$10^{12}$ 使约束恒松弛（函数 \srcpath{converter\_smax\_pu}，:86--102）。交流电流限
+（:2015--2024，"multi-converter model §3.1.5"）：
+\begin{align*}
+h^{Iac}_c=(P^{ac}_c)^2+(Q^{ac}_c)^2-I^{2}_{ac,\max}\,V_{m,ac}^2\le 0
+\end{align*}
+即 $I_{ac}=|S_{ac}|/V_m\le$\fld{i\_ac\_max\_pu} 的平方等价形（系统基准
+标幺）。
+
+\subsubsection*{DC 支路功率限}
+\begin{align*}
+h^{Sdc}_{km}=\Big[g_{km}V^{dc}_k\big(V^{dc}_k-V^{dc}_m\big)\Big]^2-P_{\max}^2\le 0
+\end{align*}
+其中 $g_{km}=1/$\fld{r\_pu}（$|r|<10^{-14}$ 时取 0），
+$P_{\max}=$\fld{rate\_a\_mva}$/S_{\mathrm{base}}$（:2003--2013）。
+注意这是\textbf{功率}平方口径，且只按 from 端计一行。
+
+\subsubsection*{VSC 调制窗口（线性不等式）}
+调制度 $m=\dfrac{V_{m,ac}\,V_{N,ac}}{K_m\,V_{dc}\,V_{N,dc}}$ 的两个界
+关于 $(V_{m,ac},V_{dc})$ 均为线性，以两行放入同一非线性不等式向量，
+使 IPM 只面对一个不等式接口（:2025--2042；线性行与 Jacobian 常系数见
+:2161--2181）：
+\begin{align*}
+h^{mmax}_c&=V_{m,ac}\,V_{N,ac}-m_{\max}K_mV_{N,dc}\,V^{dc}\le 0\\
+h^{mmin}_c&=m_{\min}K_mV_{N,dc}\,V^{dc}-V_{m,ac}\,V_{N,ac}\le 0
+\end{align*}
+（$V_{N,ac}$=\fld{vn\_ac\_kv}，$V_{N,dc}$=\fld{vn\_dc\_kv}，
+$K_m$=\fld{k\_m\_modulation}；门控 :503--506）。潮流后校验口径的同一
+窗口见《元件模型技术手册》VSC 节；此处为优化内嵌形式。
+
+\subsubsection*{DC/DC 占空比窗口（线性不等式）}
+非 Generic 拓扑的 DC/DC 由理想 CCM 电压变换律把占空比 $D$ 表为两端口
+直流电压的线性关系，$d_{\min}\le D\le d_{\max}$ 化作两行线性不等式
+（\srcpath{dcdc\_duty\_rows}，:1931--1952；行生成 :2043--2058）：
+\begin{align*}
+\text{Buck:}\;&{-d_{\max}}V_{N,in}V_{in}+V_{N,out}V_{out}\le 0,\quad
+ d_{\min}V_{N,in}V_{in}-V_{N,out}V_{out}\le 0\\
+\text{Boost:}\;&{-V_{N,in}V_{in}}+(1-d_{\max})V_{N,out}V_{out}\le 0,\quad
+ V_{N,in}V_{in}-(1-d_{\min})V_{N,out}V_{out}\le 0\\
+\text{BuckBoost:}\;&{-d_{\max}V_{N,in}V_{in}}+(1-d_{\max})V_{N,out}V_{out}\le 0,\quad
+ d_{\min}V_{N,in}V_{in}-(1-d_{\min})V_{N,out}V_{out}\le 0\\
+\text{Isolated:}\;&{-d_{\max}nV_{N,in}V_{in}}+V_{N,out}V_{out}\le 0,\quad
+ d_{\min}nV_{N,in}V_{in}-V_{N,out}V_{out}\le 0
+\end{align*}
+对应电压律依次为 $V_{out}=DV_{in}$、$V_{out}=V_{in}/(1-D)$、
+$V_{out}=\tfrac{D}{1-D}V_{in}$、$V_{out}=DnV_{in}$（$n$=\fld{n\_ratio}，
+缺省 1）；端口额定 $V_N$ 取 \fld{vn\_in\_kv}/\fld{vn\_out\_kv}，缺省回退
+母线 \fld{base\_kv}、再回退 1.0（\srcpath{dcdc\_port\_nominal\_kv}，
+:1925--1929）。Generic 拓扑不产生行（:518--523）。
+
+\subsection{初值构造}
+
+\srcpath{build\_initial\_point} 生成严格内点暖启动（
+\srcpath{src/optimal\_power\_flow/parity\_formulation.cpp}\allowbreak :985--1198；
+声明注释见 formulation.hpp:249--270），分五步：
+
+\begin{enumerate}
+\item \textbf{物理初值}：$\theta$ 取母线 \fld{va\_deg} 化弧度、$V$ 取
+  \fld{vm\_pu}（:991--996）；发电机取 \fld{pg\_mw}/\fld{qg\_mvar}
+  （:997--1001）；当大量发电机 $P_g=0$（MATPOWER CDF 换算算例常见）时，
+  把功率缺额按 $P_{\max}$ 比例摊到零值机上，给直流预热启动一个现实的
+  分布式调度（"smart dispatch balancing"，:1003--1032）。$V^{dc}$ 取
+  直流母线 \fld{vm\_pu}；VSC 取 $P^{ac}=$\fld{p\_set\_mw}、
+  $Q^{ac}=$\fld{q\_set\_mvar}、$P^{dc}\approx-P^{ac}$（:1034--1044）；
+  DER 各块取当前运行点（:1046--1095）。
+\item \textbf{直流暖启动}：在每个交流岛接地后组装降阶 $B'$（取自
+  $Y_{\mathrm{bus}}$ 虚部），解 $B'_{\mathrm{red}}\theta=-P_{\mathrm{inj}}$ 得与有功调度
+  一致的相角（\srcpath{dc\_warm\_start}，:817--923）。采用稀疏 LU
+  （COLAMD 排序）而非稠密 LU——注释记录了 13659 母线规模下稠密暖启动
+  曾占全部求解时间 90\% 以上的教训（:867--871、900--912）。
+\item \textbf{无功暖启动}：由 $Q^{net}(V,\theta)+Q^d(V)$ 估算母线无功
+  需求，按母线上发电机数均分后夹到界内（\srcpath{qg\_warm\_start}，
+  :925--983）。
+\item \textbf{切负荷暖启动}：令 $\Delta P^d,\Delta Q^d$ 吸收逐母线残差
+  使 $g^P=g^Q=0$，再夹到界内（:1103--1161）。
+\item \textbf{最小二乘可行性修正}：解正规方程
+  $(J_gJ_g^{\mathsf{T}})v=-g$、$\Delta x=J_g^{\mathsf{T}}v$，以 0.8 阻尼
+  修正 $x_0$；分解失败时保留未修正点（:1163--1192）。最后全向量经
+  \srcpath{clamp\_interior} 钳到界的内部（:1194--1197）。
+\end{enumerate}
+
+\srcpath{clamp\_interior}（:37--55）把 $x$ 钳入
+$[l+\varepsilon,\,u-\varepsilon]$，$\varepsilon=\min(\max(10^{-9},0.01w),
+0.49w)$、$w=u-l$；$l>u$ 时先交换，零宽度区间取中点。这保证 IPM 初始点
+不立即违反界松弛（formulation.hpp:249--261 注释）。
+
+\subsection{雅可比与稀疏结构组装}
+
+\subsubsection*{等式雅可比}
+\srcpath{equality\_jacobian}（
+\srcpath{src/optimal\_power\_flow/parity\_formulation.cpp}:1668--1914）
+以三元组累加、\fld{setFromTriplets} 汇总重复项成形
+$n_{eq}\times n$ 稀疏矩阵（:1686--1688、1911--1913）。前置条件：工作区
+\fld{ws.p\_calc}/\fld{ws.q\_calc} 须已由同一点的
+\srcpath{equality\_constraints} 调用填好，本函数不重算（:1677--1678
+注释）。
+
+交流块对角元利用恒等式（:1690--1708）：
+\begin{align*}
+\frac{\partial g^P_i}{\partial\theta_i}&=s_P\big({-Q^{net}_i}-B_{ii}V_i^2\big)
+&\frac{\partial g^Q_i}{\partial\theta_i}&=s_Q\big(P^{net}_i-G_{ii}V_i^2\big)\\
+\frac{\partial g^P_i}{\partial V_i}&=s_P\Big(\frac{P^{net}_i}{V_i}+G_{ii}V_i
+ +P^d_i\big(w^{P}_1+2w^{P}_2V_i\big)\Big)
+&\frac{\partial g^Q_i}{\partial V_i}&=s_Q\Big(\frac{Q^{net}_i}{V_i}-B_{ii}V_i
+ +Q^d_i\big(w^{Q}_1+2w^{Q}_2V_i\big)\Big)
+\end{align*}
+非对角元遍历 $Y_{\mathrm{bus}}$（:1710--1735）：
+\begin{align*}
+\frac{\partial P^{net}_i}{\partial\theta_j}&=V_iV_j\big(G_{ij}\sin\theta_{ij}-B_{ij}\cos\theta_{ij}\big)
+&\frac{\partial P^{net}_i}{\partial V_j}&=V_i\big(G_{ij}\cos\theta_{ij}+B_{ij}\sin\theta_{ij}\big)\\
+\frac{\partial Q^{net}_i}{\partial\theta_j}&=-V_iV_j\big(G_{ij}\cos\theta_{ij}+B_{ij}\sin\theta_{ij}\big)
+&\frac{\partial Q^{net}_i}{\partial V_j}&=V_i\big(G_{ij}\sin\theta_{ij}-B_{ij}\cos\theta_{ij}\big)
+\end{align*}
+分量列（发电机、VSC、切负荷、DER、能量路由器）为 $-s_P$/$-s_Q$/$-1$
+常数元（:1737--1754、1831--1899）；直流块
+$\partial g^{P,dc}_k/\partial V^{dc}_m=V^{dc}_kG^{dc}_{km}
++\delta_{km}\sum_lG^{dc}_{kl}V^{dc}_l$（:1756--1765）；VSC 耦合行的损耗
+导数（:1807--1829）：
+\begin{align*}
+\frac{\partial g^{vsc}_c}{\partial P^{ac}_c}=1+(b_c+2c_cI^{ac}_c)\frac{\partial I}{\partial P},\quad
+\frac{\partial I}{\partial P}=\frac{P^{ac}_c}{S^{ac}_cV_m},\quad
+\frac{\partial I}{\partial V_m}=-\frac{S^{ac}_c}{V_m^2}
+\end{align*}
+（$S^{ac}_c=\sqrt{(P^{ac}_c)^2+(Q^{ac}_c)^2+\varepsilon_I}$）；DC/DC 折入
+导数含 $\eta$ 方向切换与 $I^2R$ 项（:1852--1875）；LCC 行的解析一阶导由
+\srcpath{lcc\_ac\_dc\_jacobian} 提供并冠以负注入号（:1772--1805）；
+参考行为单位元（:1900--1909）。
+
+\subsubsection*{不等式雅可比}
+\srcpath{nonlinear\_inequality\_jacobian}（:2061--2205）按同一行序填
+$h(x)$ 的导数：支路容量行取 $2(P\,\partial P+Q\,\partial Q)$ 链式形式，
+from/to 两端各 4 个非零元（:2074--2124）；VSC 容量圆 $2P,2Q$
+（:2126--2130）；DC 支路 $2P^{flow}\partial P^{flow}$（:2132--2147）；
+VSC 电流行 $\partial h/\partial V_m=-2I_{ac,\max}^2V_m$（:2149--2160）；
+调制与占空比两族为常系数线性行（:2161--2200）。行序与求值函数严格
+一致，使 IPM 对偶 $\mu$ 可按 \fld{ConstraintIndex} 计数解释
+（formulation.hpp:395--399 注释）。
+
+\subsubsection*{拉格朗日 Hessian}
+\srcpath{lagrangian\_hessian}（:2221--2829）组装
+$\nabla^2_{xx}L=\nabla^2f+\sum_i\lambda_i\nabla^2g_i+\sum_j\nu_j\nabla^2h_j$：
+对称三plet 累加（同一非零元同时写入 $(r,c)$ 与 $(c,r)$，
+:2250--2260），最终 \fld{setFromTriplets} 求和成形 $n\times n$ 对称
+稀疏矩阵（:2825--2828）。分块构成：
+
+\begin{itemize}
+\item \textbf{目标曲率}：仅对角——发电机成本 $2c_{2g}S_{\mathrm{base}}^2$
+  与 VSC 无功正则 $2k_QS_{\mathrm{base}}^2$（:2262--2272）。
+\item \textbf{交流平衡曲率}：遍历 $Y_{\mathrm{bus}}$ 非对角元累积
+  $\theta$--$\theta$、$V$--$V$、$\theta$--$V$ 交叉项，对角元含
+  $2G_{ii}$/$-2B_{ii}$ 与 ZIP 二阶项 $2P^d_iw^{P}_2$、$2Q^d_iw^{Q}_2$；
+  每行乘 $\lambda_i$ 并带上行缩放 $s_P$/$s_Q$（:2280--2378）。
+\item \textbf{直流平衡曲率}：$\lambda_k\big(2G^{dc}_{kk}\big)$ 对角与
+  $\lambda_kG^{dc}_{km}$ 交叉（:2380--2398）。
+\item \textbf{LCC 曲率（有限差分）}：LCC 等式曲率不是解析式——对解析
+  一阶雅可比做中心差分，步长 $10^{-5}\max(1,|v|)$，并在额定电流切换
+  拐点处只取留在当前活跃集内的扰动方向，避免人为 $O(1/h)$ 曲率拖住
+  KKT 步（:2400--2533，注释 :2400--2408；活跃集守护
+  :2485--2496）。这是建模层中唯一数值微分部分。
+\item \textbf{VSC 损耗曲率}：$I^{ac}$ 平滑后的全部二阶导
+  （:2535--2586）。
+\item \textbf{DC/DC $I^2R$ 曲率}：仅 $r_{eq}>0$ 时非零，
+  $\partial^2/\partial p_{in}^2=2r/V^2$ 等（:2588--2620）。
+\item \textbf{不等式曲率}：支路容量行完整二阶展开（:2626--2768）；
+  VSC 容量圆 $2\nu$ 对角（:2770--2777）；DC 支路（:2780--2802）；VSC
+  电流（:2804--2816）；调制与占空比为线性行、曲率为零，仅推进对偶
+  游标保持对齐（:2817--2822）。
+\end{itemize}
+
+稠密版本 \srcpath{lagrangian\_hessian\_dense} 只是稀疏结果的转换包装，
+供诊断与稠密实验使用，生产路径应走稀疏重载（:2207--2216；
+formulation.hpp:404--418 注释）。参数 \fld{drop\_tol} 目前保留未实现，
+仅为 API 兼容（formulation.hpp:438--439；实现中形参未命名，:2226）。
+
+\subsection{与潮流方程口径的一致性}\label{subsec:parity-pf-consistency}
+
+Parity 建模层与混合潮流共享同一份 canonical 数据与网络方程，一致性
+可逐条核实：
+
+\begin{itemize}
+\item \textbf{同源装配}：\srcpath{build\_problem} 与潮流一样经
+  \srcpath{make\_solver\_data} 投影，$Y_{\mathrm{bus}}$、$G^{dc}$、
+  \fld{base\_mva} 完全同源（:111）。
+\item \textbf{交流注入}：$P^{net}$/$Q^{net}$ 极坐标方程与潮流失配式
+  同形（:1433--1455）；ZIP 负荷注释明确"consistent with PF solver"
+  （:1496）。
+\item \textbf{直流平衡}：注释明确"Match the PF definition exactly:
+  $Pcalc_k=V_k(G_{dc}V)_k$"（:1510--1512）；DC/DC 折入注释说明镜像
+  \srcpath{residual\_evaluator.cpp} 的做法（:1526--1527）。
+\item \textbf{VSC 损耗}：$a+bI+cI^2$ 与潮流换流器损耗分段口径同形，
+  系数 $a=$\fld{loss\_mw}$/S_{\mathrm{base}}$、$b=$\fld{loss\_percent}$/100$、
+  $c=1-\eta$ 一致（:1613--1616；潮流侧见
+  \srcpath{src/power\_flow/converter\_model.cpp}）。
+\item \textbf{LCC}：直接复用潮流模块的
+  \srcpath{lcc\_ac\_injection}/\srcpath{lcc\_dc\_injection}/
+  \srcpath{lcc\_ac\_dc\_jacobian}（:1569--1572、1784--1785；
+  \srcpath{include/hacdcpf/power\_flow/lcc\_model.hpp}:120--163），
+  模型本体只有一份。
+\item \textbf{符号约定差异（显式声明）}：DC/DC 的 OPF 变量为输入侧
+  $p_{in}$，潮流 \fld{p\_ref\_mw} 为输出侧，二者经 $\eta$ 换算
+  （:1579--1583）；能量路由器端口"注入为正"与潮流
+  \fld{p\_spec}/\fld{pdc\_spec} 约定一致（:1628--1631）。
+\item \textbf{解后回代}：Parity OPF 收敛后驱动层在调度点重跑一次
+  潮流并返回 \fld{post\_pf} 支路潮流/换流器量（公共路由行为，见
+  第~\ref{sec:overview}~节），交叉验证优化点的潮流可行性；系统化
+  数值校核见第~\ref{sec:verification}~节。
+\end{itemize}
+
+\subsection{边界与局限}
+
+按诚实口径列明当前实现的近似与未覆盖项（出处见前文各节）：
+
+\begin{enumerate}
+\item \textbf{单时段口径}：无跨时段 SOC，储能变量以 $\pm10^{-4}/
+  S_{\mathrm{base}}$ 容差钉定于日程出力（:735--758）；静态承载力储能
+  完全固定。多时段能量调度需上层 UC/日程给定。
+\item \textbf{无功能力曲线未实现}：发电机 $Q$ 仅为盒式界
+  （:651--652），不随 $P$ 收缩；VSC 亦只有盒式 $P$/$Q$ 界加容量圆。
+\item \textbf{分接头/移相角不可优化}：$t$、$\varphi$ 在支路容量式与
+  $Y_{\mathrm{bus}}$ 中为固定参数（:1974--1980）；LCC 换流变 tap 同样
+  不进决策向量（:1556--1558）。离散档位优化在 RPO 层外环完成
+  （第~\ref{sec:rpo}~节）。
+\item \textbf{LCC 为准稳态固定阶注入}：不占决策变量，其功率随
+  $(V_m,V_{dc})$ 被动变化；Hessian 贡献为有限差分而非解析
+  （:2400--2533），拐点处依赖活跃集守护。
+\item \textbf{能量路由器无损}：端口有功严格守恒，\fld{loss\_percent}
+  损耗精确化注释声明留作后续（:1651--1652）。
+\item \textbf{近似与平滑}：$|I_{ac}|$ 以 $\varepsilon_I$ 平滑
+  （\fld{eps\_iac} 默认 $10^{-6}$）；$V_m$ 在换流器行取下限 $10^{-8}$、
+  DC/DC 损耗取下限 0.1（:1608、1597）；容量圆半径在额定缺失时回退
+  四界最大值（:94--100）。
+\item \textbf{行缩放的对偶口径}：AC 平衡行乘 $s_P$/$s_Q$
+  （:530--537），故对应拉格朗日乘子需除以缩放因子才是功率量纲的
+  影子价格；Hessian 组装已带同一缩放（:2321--2322）。
+\item \textbf{文档/实现不一致两处}：头文件关于不可观测直流母线"软
+  并联锚定项"的表述（formulation.hpp\allowbreak :173--176）与紧界实现
+  （:678--688）不符；\fld{drop\_tol} 参数保留未实现
+  （formulation.hpp:438--439）。
+\item \textbf{目标的常数项}：固定注入的线性成本与 RPO 网损账本中的
+  常量不影响极小点，只影响报告值（:1200--1203、1266--1282）。
+\item \textbf{暖启动不保证可行}：最小二乘修正分解失败时保留未修正
+  点（:1189--1191）；可行性由 IPM 迭代自行恢复
+  （第~\ref{sec:parityipm}~节）。
+\end{enumerate}

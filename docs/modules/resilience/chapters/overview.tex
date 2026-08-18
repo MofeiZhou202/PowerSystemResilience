@@ -1,0 +1,61 @@
+% 第 1 章：架构总览与恢复模型族
+\section{架构总览与恢复模型族}\label{sec:res-overview}
+
+\subsection{功能定位}
+弹性恢复模块回答“扰动/灾害致多重故障后，如何在多时段内以开关重构、DER/储能调度与
+移动储能路由最大限度恢复供电，以及所选恢复动作在动态上是否安全”。命名空间
+\texttt{hacdcpf::analysis}。三种可互换恢复模型由枚举 \fld{DistributionResilienceModel}
+（\srcpath{resilience\_assessment.hpp:16}）选择：
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{4.6cm}L{5.0cm}L{4.4cm}@{}}
+\toprule
+模型 & 方法 & 入口\\
+\midrule
+\fld{HeuristicSequential} & 贪心时序重构（默认） & \srcpath{run\_distribution\_resilience\_assessment}\\
+\fld{MultiPeriodMIPLinDistFlow} & 严格多时段恢复 MILP & \srcpath{run\_distribution\_resilience\_mip\_assessment}\\
+\fld{RAStyleStageMILP} & 分阶段灾害隔离/重构 MILP & \srcpath{run\_distribution\_resilience\_stage\_milp\_assessment}\\
+\bottomrule
+\end{tabular}
+\end{center}
+入口行号：\srcpath{run\_distribution\_resilience\_assessment}（:468）、
+\srcpath{run\_distribution\_resilience\_mip\_assessment}（:458）、
+\srcpath{run\_distribution\_resilience\_stage\_milp\_assessment}（:463）、
+\srcpath{apply\_distribution\_resilience\_demo\_data}（:452）。未经本轮逐式核验的认证恢复推导
+不纳入主手册数学章节。
+
+\subsection{时序数据流}
+\begin{figure}[H]\centering
+\begin{tikzpicture}[font=\footnotesize,
+  box/.style={draw,rounded corners,minimum height=0.9cm,align=center,inner sep=3pt},
+  arr/.style={->,thick}]
+  \node[box] (fault) at (0,0) {故障序列\\\fld{DistributionResilienceFault}};
+  \node[box] (step) at (3.7,0) {逐时步\\负荷/RES 曲线};
+  \node[box] (rec) at (7.0,0) {重构/调度\\贪心 或 MILP};
+  \node[box] (mess) at (10.4,0) {MESS 路由\\时空+SOC};
+  \node[box] (idx) at (3.7,-2.1) {弹性指标\\恢复比·加权失供};
+  \node[box] (cert) at (7.6,-2.1) {动态认证\\L1/L2/L3 证书（可选）};
+  \draw[arr] (fault)--(step); \draw[arr] (step)--(rec); \draw[arr] (rec)--(mess);
+  \draw[arr] (rec.south) |- (idx.west); \draw[arr] (idx)--(cert);
+\end{tikzpicture}
+\caption{弹性恢复时序数据流：故障序列$\to$逐时步$\to$重构/调度$\to$MESS 路由$\to$指标（$\to$动态认证）}
+\end{figure}
+
+\subsection{弹性指标}
+聚合结果 \fld{DistributionResilienceResult}（:413）给出恢复度量。设时步 $t$ 需求 $D_t$、
+供电 $P_t^{srv}$、恢复比 $\gamma_t=P_t^{srv}/D_t$，则总量与面积型弹性指数
+\begin{equation}
+\text{加权失供}=\sum_t \Big(\sum_{i}w_i\,s_{i,t}\Big)\Delta t,\qquad
+\fld{resilience\_index}\ \sim\ \frac{\sum_t P_t^{srv}\Delta t}{\sum_t D_t\Delta t},
+\end{equation}
+对应 \fld{weighted\_unserved\_mwh}、\fld{total\_served\_mwh}/\fld{total\_demand\_mwh}、
+\fld{resilience\_index}、\fld{avg\_restoration\_ratio}、\fld{peak\_shed\_mw}，切负荷按优先级
+四级分解 \fld{shed\_by\_priority}=[Critical, High, Medium, Low]。
+
+\subsection{诚实口径}
+恢复 MILP 的能力由 \fld{DistributionResilienceModelStats::ValidityFlags}（:88）逐项声明。
+默认 \fld{model\_scope}=\texttt{"hybrid-acdc-restoration-milp"}；典型缺省下
+\fld{dc\_branch\_flow\_limits\_enforced}=false、\fld{converter\_transfer\_limits\_enforced}=false、
+\fld{converter\_losses\_modelled}=false、\fld{reactive\_power\_modelled}=false、
+\fld{protection\_logic\_modelled}=false、\fld{transient\_limits\_modelled}=false，而
+\fld{radial\_topology\_enforced}=true。\fld{mip\_gap\_within\_tolerance} 只表示与已知界的相对
+间隙在容差内，\textbf{不}等于全局最优（准确间隙见 \fld{model\_stats.mip\_gap}）。

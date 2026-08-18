@@ -1,0 +1,173 @@
+% !TEX program = xelatex
+% 编译方式：xelatex opf_manual.tex （需两遍以生成目录）
+% 注意：MiKTeX 在含中文的路径下编译会崩溃，请复制到纯英文路径（如 C:\latex_build\）后编译。
+\documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
+
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs,longtable,array}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=black,urlcolor=blue}
+
+% ── 统一参数表环境 ────────────────────────────────────────────────
+% 六列：字段名 | 符号 | 单位 | 典型范围 | 默认值 | 说明
+\emergencystretch=3em
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newenvironment{paramtable}{%
+  \begin{footnotesize}
+  \begin{longtable}{@{}L{3.2cm}L{1.3cm}L{1.6cm}L{2.3cm}L{1.5cm}L{4.3cm}@{}}
+  \toprule
+  \textbf{字段名} & \textbf{符号} & \textbf{单位} & \textbf{典型范围} & \textbf{默认值} & \textbf{说明}\\
+  \midrule
+  \endfirsthead
+  \multicolumn{6}{@{}l}{\footnotesize（续表）}\\
+  \toprule
+  \textbf{字段名} & \textbf{符号} & \textbf{单位} & \textbf{典型范围} & \textbf{默认值} & \textbf{说明}\\
+  \midrule
+  \endhead
+  \midrule
+  \multicolumn{6}{r@{}}{\footnotesize（接下页）}\\
+  \endfoot
+  \bottomrule
+  \endlastfoot
+}{%
+  \end{longtable}
+  \end{footnotesize}
+}
+
+% 字段名排版（下划线需转义后传入；\_ 处允许换行以防超长字段名溢出版心）
+\makeatletter
+\newcommand{\fld}[1]{\texttt{\fld@scan#1\fld@stop}}
+\def\fld@scan#1{%
+  \ifx#1\fld@stop
+  \else
+    \ifx#1\_\_\allowbreak\else#1\fi
+    \expandafter\fld@scan
+  \fi}
+\makeatother
+% 元件元信息行：#1=结构体/类名  #2=头文件路径
+\newcommand{\compmeta}[2]{\noindent\textbf{代码结构体：}\texttt{#1}\hfill
+  \textbf{定义位置：}\texttt{#2}\par\smallskip}
+
+% 可断行的源码路径/函数名（/ 与 \_ 处允许换行）
+\makeatletter
+\newcommand{\srcpath}[1]{\texttt{\src@scan#1\src@stop}}
+\def\src@scan#1{%
+  \ifx#1\src@stop
+  \else
+    \ifx#1\_\_\allowbreak\else
+    \ifx#1/#1\allowbreak\else
+    #1\fi\fi
+    \expandafter\src@scan
+  \fi}
+\makeatother
+
+\title{\textbf{交直流混合高弹性能源电力系统仿真平台}\\[0.5em]
+       {\Large 最优潮流（OPF）技术手册}\\[0.3em]
+       {\large 数学模型、求解算法、接口参数与验证}}
+\author{HySim-XJTU-HRPES（西安交通大学 HRPES 团队）}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+\begin{abstract}
+\noindent 本手册依据 HySim-XJTU-HRPES 平台 C++ 源代码中的最优潮流模块
+（\texttt{src/\allowbreak optimal\_\allowbreak power\_\allowbreak flow/} 与
+\texttt{include/\allowbreak hacdcpf/\allowbreak optimal\_\allowbreak power\_\allowbreak flow/}）
+整理，按三个主类组织：
+\textbf{AC OPF}（Native IPM 紧致路径）、\textbf{DC OPF}（无损线性化 LP/QP）、
+\textbf{交直流混合 OPF}（Parity 全空间建模层 + Parity IPM / 嵌入式 Ipopt 求解核，
+承载含 DC/VSC/LCC 的算例）；另含两个专项——含 OLTC 离散档位的无功优化（RPO）与
+三相混合 OPF（相域）。每个求解器给出功能定位、
+完整数学模型（目标函数与约束逐条注明源码出处）、算法流程、全部选项与结果字段的
+单位制和默认值、验证与校核依据及已知局限。文档风格与《元件模型技术手册》一致。
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{阅读指南与约定}
+
+\subsection{数据来源}
+本手册全部模型、算法与参数取自以下源代码文件，参数表覆盖每个公开结构体的
+\textbf{全部对外字段}：
+\begin{itemize}
+  \item \texttt{src/optimal\_power\_flow/} 与
+        \texttt{include/hacdcpf/optimal\_power\_flow/} —— OPF 求解器本体
+        （AC/DC/RPO/三相混合）；
+  \item \texttt{tests/} 下 OPF 相关测试与 \texttt{docs/} 下 OPF 相关设计/验证文档
+        —— 验证与校核一章的对照依据。
+\end{itemize}
+
+\subsection{单位制约定}
+与《元件模型技术手册》一致：平台统一采用 MW·kV·MVA 单位制配合标幺值，系统基准功率
+$S_{\mathrm{base}}=100$~MVA（\texttt{Defaults::kBaseMva}），基准频率 50~Hz。
+OPF 内部方程一律以标幺值组装；目标函数中的成本项按有名值（MW、MVAr）计价后求和，
+量纲在相应章节注明。布尔量、枚举量、计数型整数及 ID 引用等无量纲参数，单位列填
+“—”；成本/价格类参数的币种在代码中未固定，单位列填“—”。
+
+\subsection{求解器家族与选择逻辑}
+平台 OPF 按建模口径分为三个主类与三个专项：
+\begin{enumerate}
+  \item \textbf{AC OPF}（纯交流，第\ref{sec:acopfnative}章）：Native IPM 紧致变量
+        路径（极坐标 $V/\theta$，障碍--罚混合原生内点循环），入口
+        \srcpath{opf::solve\_ac\_opf}；
+  \item \textbf{DC OPF}（第\ref{sec:dcopf}章）：无损线性化 LP/QP（纯交流口径，
+        不建直流电网，遇 LCC 直接拒绝），入口 \srcpath{opf::solve\_dc\_opf}；
+  \item \textbf{交直流混合 OPF}（第\ref{sec:parityform}--\ref{sec:parityipm}章）：
+        Parity 全空间建模层（显式直流电压块、VSC 三端口耦合、DC/DC、LCC 准稳态、
+        能量路由器）+ Parity IPM 或嵌入式 Ipopt 求解核；统一入口
+        \srcpath{opf::solve\_ac\_opf} 在 Auto 后端下检测到任何 DC/VSC/LCC 组件时
+        一律分派到此路径，显式选择不兼容后端则拒绝而非静默丢弃直流网络；
+  \item \textbf{专项}：含 OLTC 离散档位的无功优化 RPO（第\ref{sec:rpo}章）与
+        相域三相混合 OPF（第\ref{sec:threephase}章，活跃研发）。基于
+        MIPSolvers AML 的求解器无关建模层属于独立的 \srcpath{power\_models}
+        模块，其源码等价公式仅在
+        \srcpath{docs/modules/power\_models/power\_models\_manual.tex} 维护。
+\end{enumerate}
+运行时可用后端由 \srcpath{include/hacdcpf/api/solver\_capabilities.hpp} 查询；
+嵌入式 Ipopt 仅在编译期开启 CMake 选项 \srcpath{HACDCPF\_ENABLE\_IPOPT}
+（仅 macOS 默认 ON，映射为编译宏 \srcpath{HACDCPF\_HAVE\_IPOPT}）时可用。
+
+\subsection{诚实结果口径}
+平台铁律：近似、fallback、time-limit、模型覆盖不足必须写进结果的
+\fld{model\_scope}、\fld{ValidityFlags} 或 \fld{model\_\allowbreak limitations} 字段。
+各章“边界与局限”小节如实列出当前实现的已知近似与未覆盖项，不以后续路线图代替
+现状描述。
+
+\subsection{验证通道总览}
+OPF 模块的验证通道（细节见第\ref{sec:verification}章）：
+\begin{itemize}
+  \item \textbf{手算解析解算例}：\srcpath{external\_data/opf\_hand\_cases/} 小型
+        AC/DC OPF 手算基准（当前作为 GUI 人工校核材料保存，未接入 ctest，
+        见第\ref{sec:verification}章）；
+  \item \textbf{MATPOWER 算例}：标准算例潮流/OPF 基准对照；
+  \item \textbf{跨求解器交叉验证}：Native IPM、Parity IPM、AML/Ipopt 三路结果互相比对
+        （\srcpath{tests/test\_acopf\_dcopf\_crossval.cpp}、
+        \srcpath{tests/test\_opf\_solver\_backends.cpp}）；
+  \item \textbf{BPA/DSP 算例}：LCC 直流算例的 OPF 对照报告
+        （\srcpath{docs/lcc\_dat\_opf\_report/}）；
+  \item \textbf{专项验证文档}：无功优化验证（\srcpath{docs/reactive\_\allowbreak
+        power\_\allowbreak optimization\_\allowbreak validation.md}）、大规模混合 IPM
+        诊断（\srcpath{docs/large\_\allowbreak hybrid\_\allowbreak ipm\_\allowbreak
+        diagnostics.md}）。
+\end{itemize}
+
+\newpage
+\input{chapters/overview}
+\input{chapters/ac_opf_native}
+\input{chapters/dc_opf}
+\input{chapters/parity_formulation}
+\input{chapters/parity_ipm}
+\input{chapters/rpo}
+\input{chapters/three_phase}
+\input{chapters/verification}
+\input{../../_manual_common/industrial_evaluation}
+
+\end{document}

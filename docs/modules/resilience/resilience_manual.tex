@@ -1,0 +1,46 @@
+% !TEX program = xelatex
+% 编译方式：在本目录执行两遍 xelatex（详见 docs/_manual_common/README.md）。
+% 章节源文件位于 chapters/，由本文件 \input 引入。
+% 源码依据（行号以 2026-08-17 检出为准）：
+%   include/hacdcpf/resilience/{resilience_assessment,certified_restoration,resilience_dynamic_certification}.hpp
+%   src/resilience/{resilience_assessment,resilience_restoration_mip,resilience_stage_milp,certified_restoration}.cpp
+\documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
+\usepackage{../../_manual_common/hysim_manual}
+
+\title{\textbf{交直流混合高弹性能源电力系统仿真平台}\\[0.5em]
+       {\Large 弹性恢复技术手册}\\[0.3em]
+       {\large 数学模型、恢复算法、认证机制与接口参数}}
+\author{HySim-XJTU-HRPES（西安交通大学 HRPES 团队）}
+\date{\today}
+
+\begin{document}
+\maketitle
+\begin{abstract}
+\noindent 本手册依据 HySim-XJTU-HRPES 平台弹性恢复模块
+（\srcpath{src/resilience/} 与 \srcpath{include/hacdcpf/resilience/}）整理，覆盖三种可互换的
+配电弹性恢复模型——启发式时序重构、严格多时段 LinDistFlow 恢复 MILP、RA 式分阶段灾害
+MILP——以及移动储能（MESS）时空路由、有限动作认证恢复（主问题 MIP + 信息物理/MESS
+可执行性 + 多保真动态 DAE 证书）。每个方法给出功能定位、源码等价数学实现、全部选项与结果字段的单位制和
+默认值、验证依据及已知局限。文档风格与《潮流计算技术手册》《最优潮流技术手册》一致。
+
+\smallskip
+\noindent\textbf{核心口径}：恢复 MILP 为 LinDistFlow/有功口径，\fld{model\_scope}=
+\texttt{"hybrid-acdc-restoration-milp"}；\fld{mip\_gap\_within\_tolerance} \emph{不等于}全局最优；
+认证恢复的 L3 \fld{proof\_valid} 只在“已仿真情景/阈值/模型/时域”范围内成立，\textbf{非}全局
+暂态稳定证明；L1/L2 常量为采样估计（\fld{constants\_are\_global\_bounds}=false）。全部近似与
+回退写入 \fld{model\_scope}、\fld{model\_limitations} 与 \fld{ValidityFlags}。
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\input{chapters/overview}
+\input{chapters/heuristic}
+\input{chapters/source_equivalent_model}
+\input{chapters/stage_milp}
+\input{chapters/options_results}
+\input{chapters/verification}
+
+\input{../../_manual_common/industrial_evaluation}
+
+\end{document}

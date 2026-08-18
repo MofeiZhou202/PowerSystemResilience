@@ -1,0 +1,132 @@
+% !TEX program = xelatex
+% 编译方式：在本目录执行两遍 xelatex（详见 docs/_manual_common/README.md）。
+% 源码依据：src/carbon_analysis/ 与 include/hacdcpf/carbon_analysis/ 源码及
+%           docs/carbon_analysis_contract.md，公式与参数以代码为准。
+\documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
+\usepackage{../../_manual_common/hysim_manual}
+
+\title{\textbf{交直流混合高弹性能源电力系统仿真平台}\\[0.5em]
+       {\Large 碳流追踪与碳排放核算技术手册}\\[0.3em]
+       {\large 数学模型、接口参数、验证校核与工业级评价}}
+\author{HySim-XJTU-HRPES（西安交通大学 HRPES 团队）}
+\date{\today}
+
+\begin{document}
+\maketitle
+\begin{abstract}
+\noindent 本手册依据 HySim-XJTU-HRPES 平台碳流分析模块
+（\srcpath{src/carbon\_analysis/}、\srcpath{include/hacdcpf/carbon\_analysis/}）整理，
+覆盖两类基于已收敛潮流结果的后处理方法：比例功率追踪法（BFS 碳流追踪）与
+碳排放流矩阵法，以及年度碳核算与用户/节点绿证（GEC）核算。全部结论以源码与
+既有契约 \srcpath{docs/carbon\_analysis\_contract.md} 为准；碳流分析为纯后处理，
+不改变调度、不修复失败潮流。文档版式与《潮流计算技术手册》《最优潮流技术手册》一致。
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{阅读指南与约定}
+\subsection{数据来源}
+\begin{itemize}
+  \item \srcpath{include/hacdcpf/carbon\_analysis/carbon\_analysis.hpp}、
+        \srcpath{annual\_carbon\_analysis.hpp} —— 快照/年度碳分析接口与结果结构；
+  \item \srcpath{src/carbon\_analysis/carbon\_analysis.cpp}、
+        \srcpath{annual\_carbon\_analysis.cpp} —— 追踪法与矩阵法实现；
+  \item \srcpath{docs/carbon\_analysis\_contract.md} —— 输入/单位/源 ID/交直流身份与
+        有效性门控契约；
+  \item \srcpath{tests/test\_carbonflow\_tracing.cpp} 等 —— 验证依据。
+\end{itemize}
+命名空间为 \texttt{hacdcpf::analysis}。
+
+\subsection{单位制与索引空间}
+排放量单位 tCO\textsubscript{2}（年度量为 tCO\textsubscript{2}/yr），碳强度单位
+tCO\textsubscript{2}/MWh，功率 MW。AC 与 DC 集合分开核算：结果向量分别对应
+\fld{load\_carbon}/\fld{dc\_load\_carbon}、\fld{branch\_carbon}/\fld{dc\_branch\_carbon}、
+\fld{bus\_carbon}/\fld{dc\_bus\_carbon}，索引空间与对应潮流结果一致。
+
+\subsection{诚实口径}
+碳流分析不含单一“成功”布尔量；调用方须检查 \fld{power\_balance\_verified}、
+\fld{matrix\_solved}/\fld{matrix\_rank}/\fld{matrix\_relative\_residual}、
+\fld{tracing\_verified}。潮流未收敛时输出默认“未验证”结果；奇异/病态矩阵保持可见
+（不会被伪装为零碳）。\fld{loss\_allocation\_alpha} 只重新分配损耗排放的归属责任，
+不改变物理损耗。
+
+\section{功能定位与架构}
+\subsection{公共入口族}
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{6.6cm}L{3.0cm}L{5.4cm}@{}}
+\toprule
+入口 & 定义位置 & 说明\\
+\midrule
+\srcpath{compute\_carbon\_analysis(sys, pf\_result, opt)} & carbon\_analysis.hpp & 由已收敛潮流结果做快照追踪+矩阵碳核算\\
+\srcpath{compute\_carbon\_analysis(sys, pf\_opt, ca\_opt)} & 同上 & 便捷重载：先跑潮流再核算\\
+\srcpath{run\_carbon\_analysis(sys, opt)} & 同上 & 向后兼容包装（默认潮流后核算）\\
+\srcpath{compute\_annual\_carbon\_analysis(...)} & annual\_carbon\_analysis.hpp & 年度碳（静态/逐步系统/\fld{TimeSeriesPFResult} 四重载）\\
+\srcpath{compute\_annual\_user\_gec\_accounting(...)} & 同上 & 用户级绿证净排放核算\\
+\srcpath{compute\_annual\_node\_gec\_accounting(...)} & 同上 & 母线级绿证核算\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{关键数据结构}
+\compmeta{CarbonAnalysisResult}{include/hacdcpf/carbon\_analysis/carbon\_analysis.hpp}
+主要字段：\fld{carbon\_sources}、\fld{load\_carbon}/\fld{dc\_load\_carbon}、
+\fld{branch\_carbon}/\fld{dc\_branch\_carbon}、\fld{bus\_carbon}/\fld{dc\_bus\_carbon}、
+\fld{vsc\_carbon}、\fld{storage\_carbon}，以及有效性字段 \fld{tracing\_verified}、
+\fld{matrix\_solved}、\fld{matrix\_rank}、\fld{matrix\_relative\_residual}、
+\fld{power\_balance\_verified}。\texttt{EmissionsSummary} 汇总发电/负荷/损耗排放与
+平衡误差 \fld{balance\_error\_tco2}/\fld{balance\_error\_pct}。
+
+\section{核心数学模型}
+碳流分析建立在已收敛潮流的支路有功流向之上，把每个碳源（发电机、外部电网、
+可再生、储能作为碳汇/源、换流器与能量路由器）的排放沿潮流方向分摊到负荷与
+支路损耗，AC/DC 集合分开处理。
+
+\subsection{比例功率追踪法（BFS）}
+对母线 $i$，令流入功率来自集合 $\mathcal{I}(i)$，其中源母线 $k$ 的贡献占比为
+$P_{ki}/P_i^{\text{in}}$，则母线碳强度 $\rho_i$ 满足比例混合律
+\begin{equation}
+\rho_i = \frac{\sum_{k\in\mathcal{I}(i)} P_{ki}\,\rho_k + \sum_{g\in i} P_{g}\,e_{g}}
+              {\sum_{k\in\mathcal{I}(i)} P_{ki} + \sum_{g\in i} P_{g}},
+\end{equation}
+其中 $e_g$ 为机组排放强度。负荷排放 $=\rho_i P_{d,i}$；支路损耗排放按
+\fld{loss\_allocation\_alpha}（$0.5$ 均分，$1$ 送端、$0$ 受端）在两端分摊。
+
+\subsection{碳排放流矩阵法}
+在标准碳排放流理论（Kang 等）下，节点碳势向量 $\mathbf{w}$ 满足稀疏线性方程
+\begin{equation}
+\mathbf{A}\,\mathbf{w} = \mathbf{b},
+\end{equation}
+其中 $\mathbf{A}$ 为节点入流/支路分配算子、$\mathbf{b}$ 为发电碳注入。实现不构造
+稠密 $n\times n$ 矩阵：追踪势用稀疏 LU 一次分解，节点势用秩揭示的稀疏 QR
+（\srcpath{SparseQR}）求解，从而对奇异/病态情形保持可见诊断
+（\fld{matrix\_rank}、\fld{matrix\_relative\_residual}）。
+
+\section{接口与参数}
+\begin{paramtable}
+\fld{min\_contribution\_mw} & $P_{\min}$ & MW & $0\sim1$ & — & 追踪贡献下限，低于则忽略\\
+\fld{loss\_allocation\_alpha} & $\alpha$ & — & $0\sim1$ & $0.5$ & 损耗排放送/受端分摊系数\\
+\fld{regularization\_eps} & $\varepsilon$ & — & 小正数 & — & 矩阵正则化项\\
+\fld{max\_matrix\_condition\_estimate} & — & — & — & — & 条件数上限（超限告警）\\
+\fld{verification\_tol} & — & — & 小正数 & — & 平衡校核容差\\
+\fld{max\_tracing\_depth} & — & — & 整数 & — & BFS 追踪最大深度\\
+\end{paramtable}
+年度接口 \srcpath{compute\_annual\_carbon\_analysis} 逐步累计排放，非收敛步的小时
+矩阵以 NaN 占位；动态储能碳需为每个潮流步提供一份 \fld{pf\_system\_snapshots[t]}。
+
+\section{验证与边界局限}
+\subsection{验证与校核}
+注册测试：\srcpath{test\_carbonflow\_tracing}、\srcpath{test\_carbonflow\_dynamic\_storage}、
+\srcpath{test\_carbonflow\_case\_validation}，覆盖追踪一致性、动态储能碳与算例校核。
+
+\subsection{边界与局限（如实标注）}
+\begin{itemize}
+  \item 纯后处理：不重新调度、不修复失败潮流；非收敛输入 $\to$ 默认非验证输出；
+  \item 无单一隐式成功标志，须逐项检查有效性字段；
+  \item 静态年度重载仅在调度/负荷/储能状态恒定时精确，动态储能碳须逐步快照；
+  \item \fld{loss\_allocation\_alpha} 重分配的是责任而非物理损耗。
+\end{itemize}
+\input{chapters/source_equivalent_model}
+\input{../../_manual_common/industrial_evaluation}
+
+\end{document}

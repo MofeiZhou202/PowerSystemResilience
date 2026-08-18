@@ -1,0 +1,157 @@
+% !TEX program = xelatex
+% 编译方式：在本目录执行两遍 xelatex（详见 docs/_manual_common/README.md）。
+% 源码依据：src/ev_power_traffic/ 与 include/hacdcpf/ev_power_traffic/ 源码及
+%           docs/ev_traffic_scenario_format.md，公式与参数以代码为准。
+\documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
+\usepackage{../../_manual_common/hysim_manual}
+
+\title{\textbf{交直流混合高弹性能源电力系统仿真平台}\\[0.5em]
+       {\Large 电动汽车-交通-电力耦合技术手册}\\[0.3em]
+       {\large 数学模型、接口参数、验证校核与工业级评价}}
+\author{HySim-XJTU-HRPES（西安交通大学 HRPES 团队）}
+\date{\today}
+
+\begin{document}
+\maketitle
+\begin{abstract}
+\noindent 本手册依据 HySim-XJTU-HRPES 平台电动汽车-交通-电力耦合模块
+（\srcpath{src/ev\_power\_traffic/}、\srcpath{include/hacdcpf/ev\_power\_traffic/}）整理，
+覆盖 A--H 八个建模层级：元胞传输模型（CTM）/连接传输模型（LTM）交通流、动态用户均衡（DUE）、
+联合社会福利 LP/MILP/MPEC、充电站选址定容 MILP 与滚动时域 MPC，命名空间 \texttt{hacdcpf::evpt}。
+诚实口径为本手册核心：顶层入口 \srcpath{simulate\_ev\_power\_traffic} 明确为启发式/分解式，
+其 \fld{mathematical\_model\_verified}=false；每个选项结构均暴露 \fld{require\_exact\_mathematical\_model}，
+在开启时\textbf{拒绝}返回伪装成证明的启发式结果，而非默默降级。全部结论以源码与
+\srcpath{docs/ev\_traffic\_scenario\_format.md} 为准。文档版式与《碳流追踪与碳排放核算技术手册》一致。
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{阅读指南与约定}
+\subsection{数据来源}
+\begin{itemize}
+  \item \srcpath{include/hacdcpf/ev\_power\_traffic/simulation.hpp} —— A--H 各建模层入口；
+  \item \srcpath{types.hpp}、\srcpath{options.hpp}、\srcpath{joint\_social\_welfare.hpp}、
+        \srcpath{route\_generation.hpp}、\srcpath{ltm\_network.hpp} 及总入口
+        \srcpath{ev\_power\_traffic\_simulation.hpp} —— 类型、选项与子模型；
+  \item \srcpath{src/ev\_power\_traffic/}（\srcpath{ctm\_propagation.cpp}、\srcpath{ctm\_so\_lp.cpp}、
+        \srcpath{ctm\_due\_vi.cpp}、\srcpath{ltm\_propagation.cpp}、\srcpath{ltm\_so\_lp.cpp}、
+        \srcpath{ltm\_mpc.cpp}、\srcpath{joint\_optimizer.cpp}、
+        \srcpath{joint\_optimizer\_full\_nlp.cpp}、\srcpath{infra\_design\_milp.cpp} 等）—— 实现；
+  \item \srcpath{docs/ev\_traffic\_scenario\_format.md} —— 场景格式与口径契约；
+  \item \srcpath{tests/test\_ev\_power\_traffic*.cpp} 等 —— 验证依据。
+\end{itemize}
+命名空间为 \texttt{hacdcpf::evpt}。
+
+\subsection{单位制与索引空间}
+时间以小时为单位，CTM 步长 \fld{dt\_ctm\_hr} 受 CFL 条件约束；路段长度 km、
+容量 veh/hr、能耗 kWh/(veh$\cdot$km)、功率 MW、电价 \$/MWh。交通图（\texttt{TrafficGraph}）
+的元胞/路段索引与电网侧 \texttt{HybridPowerSystem} 的母线索引在 DC-OPF 耦合处按站-母线映射对齐；
+路径专属（route-specific）元胞在分流处保持出行（站点选择）身份，索引不跨域裸传。
+
+\subsection{诚实口径}
+顶层 \srcpath{simulate\_ev\_power\_traffic} 为启发式/分解式，
+\texttt{EVPowerTrafficResult.}\fld{mathematical\_model\_verified}=false，状态标注
+“simulation entry includes heuristic or decomposed layers”。DUE 以不动点/变分不等式（VI）
+残差判定收敛（\fld{relative\_gap}、\fld{vi\_gap}），非全局求解器证明；充电调度是否贪心由
+\fld{charging\_dispatch\_is\_greedy} 显式标注。认证型 MPEC-MILP 模式仅对其文档化的
+有限/线性/PWL 模型全局认证；\texttt{FullJoint*NLP} 模式仅携带局部驻点证书，在
+\fld{require\_global\_nonlinear\_certificate} 下返回不支持。聚合型 CTM/LTM 连接变量模式为
+降维松弛。开启 \fld{require\_exact\_mathematical\_model} 时，任何启发式/近似路径均被拒绝。
+
+\section{功能定位与架构}
+\subsection{公共入口族（建模层 A--H）}
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{6.8cm}L{2.4cm}L{5.8cm}@{}}
+\toprule
+入口 & 层级 & 说明\\
+\midrule
+\srcpath{simulate\_ev\_power\_traffic(problem, options)} & A & 顶层启发式/分解式（分配+充电+可选潮流）\\
+\srcpath{simulate\_ev\_power\_traffic\_ctm\_due(...)} & B & CTM + 动态用户均衡（MSA）\\
+\srcpath{simulate\_ev\_power\_traffic\_ctm\_joint(...)} & C & CTM-DUE $\leftrightarrow$ DC-OPF 的 LMP 价格协调\\
+\srcpath{solve\_joint\_optimizer(problem, options)} & D & 单一 LP/MILP（路径+充电/V2G+DC-OPF；认证 MPEC-MILP）\\
+\srcpath{solve\_ctm\_so\_lp(...)} / \srcpath{solve\_ltm\_so\_lp(...)} & E & 系统最优 CTM/LTM 线性规划\\
+\srcpath{solve\_ctm\_due\_vi(...)} & F & Beckmann Frank-Wolfe 的 DUE-VI\\
+\srcpath{solve\_infra\_design\_milp(...)} & G & 充电站选址/插座定容 MILP\\
+\srcpath{solve\_ltm\_mpc(...)} & H & LTM 滚动时域 MPC\\
+\srcpath{solve\_joint\_social\_welfare(problem, options)} & D & 社会福利联合优化\\
+\srcpath{generate\_candidate\_routes(...)} / \srcpath{simulate\_ltm\_network(...)} & — & 候选路径生成 / LTM 网络仿真\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{关键数据结构}
+\compmeta{EVPowerTrafficProblem}{include/hacdcpf/ev\_power\_traffic/simulation.hpp}
+主要字段：\fld{system}（\texttt{HybridPowerSystem}）、\fld{traffic}（\texttt{TrafficGraph}）、
+\fld{routes}、\fld{demands}、\fld{station\_prices}、\fld{icv\_demands}、\fld{station\_spillback}。
+
+\compmeta{EVPowerTrafficOptions}{include/hacdcpf/ev\_power\_traffic/options.hpp}
+主要字段：\fld{num\_steps}、\fld{assignment\_model}、\fld{allow\_v2g}、
+\fld{auto\_generate\_routes}/\fld{k\_shortest\_paths}、\fld{require\_exact\_mathematical\_model}；
+子结构 \texttt{CTMOptions}（\fld{dt\_ctm\_hr}、\fld{n\_cells\_per\_link}、
+\fld{route\_specific\_cells}、\fld{enable\_multiclass}+\fld{ev\_pce}/\fld{icv\_pce}、
+\fld{use\_aggregate\_link\_variables}）与 \texttt{JointOptimizerOptions}
+（\texttt{JointOptimizerMode}：\texttt{SocialWelfareMax}、\texttt{IntegerRouteMILP}、
+\texttt{CertifiedDynamicMPECMILP}、\texttt{CertifiedFullJointLtmPwlMILP}、
+\texttt{FullJointSocial\allowbreak WelfareNLP} 等；\fld{include\_dcopf}、
+\fld{allow\_v2g}、\fld{mip\_gap}、
+\fld{time\_limit\_sec}、\fld{full\_joint\_ltm\_pwl\_segments}）。
+
+\compmeta{TrafficLink}{include/hacdcpf/ev\_power\_traffic/types.hpp}
+主要字段：\fld{length\_km}、\fld{free\_flow\_time\_hr}、\fld{capacity\_veh\_per\_hr}、
+\fld{jam\_vehicles}、BPR \fld{alpha}=0.15/\fld{beta}=4、\fld{drive\_energy\_kwh\_per\_veh\_km}。
+结果结构 \texttt{CTMDUEResult}（\fld{converged}、\fld{relative\_gap}、\fld{vi\_gap}、
+\fld{mathematical\_model\_verified}、\fld{charging\_dispatch\_is\_greedy}、
+\fld{flow\_by\_demand\_route}）、\texttt{InfraDesignResult}（\fld{station\_open}、
+\fld{station\_plugs}、\fld{mip\_gap}）与 \texttt{LTMMPCResult}（\fld{admission}）。
+
+\input{chapters/source_equivalent_model}
+
+\section{接口与参数}
+\begin{paramtable}
+\fld{num\_steps} & $T$ & 步 & 整数 & — & 时域离散步数\\
+\fld{dt\_ctm\_hr} & $\Delta t$ & h & CFL 界内 & — & CTM 时间步（受 CFL 约束）\\
+\fld{n\_cells\_per\_link} & — & — & 整数 & — & 每条路段的元胞数\\
+\fld{ev\_pce} & — & — & 正数 & $1$ & EV 折算当量系数（PCE）\\
+\fld{icv\_pce} & — & — & 正数 & $1$ & 燃油车折算当量系数\\
+\fld{alpha} & $\alpha$ & — & — & $0.15$ & BPR 阻抗系数\\
+\fld{beta} & $\beta$ & — & — & $4$ & BPR 阻抗指数\\
+\fld{k\_shortest\_paths} & $K$ & — & 整数 & — & 候选路径 K-最短路数\\
+\fld{allow\_v2g} & — & — & 布尔 & false & 是否允许 V2G 反向馈电\\
+\fld{mip\_gap} & — & — & $\ge0$ & — & MILP 相对间隙容差\\
+\fld{time\_limit\_sec} & — & s & 正数 & — & 求解时限\\
+\fld{full\_joint\_ltm\_pwl\_segments} & — & — & 整数 & — & LTM 全联合 PWL 分段数\\
+\fld{drive\_energy\_kwh\_per\_veh\_km} & — & kWh/(veh$\cdot$km) & 正数 & — & 行驶单位能耗\\
+\fld{require\_exact\_mathematical\_model} & — & — & 布尔 & false & 拒绝启发式/近似的严格开关\\
+\end{paramtable}
+\fld{require\_exact\_mathematical\_model} 为跨全部选项结构的统一门控：开启后遇启发式/降维/
+局部证书路径即返回拒绝，绝不静默降级。
+
+\section{验证与边界局限}
+\subsection{验证与校核}
+注册测试覆盖各建模层与规模：\srcpath{test\_ev\_power\_traffic}、
+\srcpath{test\_ev\_power\_traffic\_ctm\_due}、\srcpath{test\_ev\_power\_traffic\_ctm\_joint}、
+\srcpath{test\_ev\_power\_traffic\_joint\_opt}、\srcpath{test\_ev\_power\_traffic\_joint\_opt\_d}、
+\srcpath{test\_ev\_power\_traffic\_formulations\_e\_f\_g\_h}、
+\srcpath{test\_ev\_power\_traffic\_phase1}、\srcpath{test\_ev\_power\_traffic\_largescale}、
+\srcpath{test\_evpt\_fidelity\_bound}、\srcpath{test\_evpt\_approximation\_error}、
+\srcpath{test\_ltm\_traffic}、\srcpath{test\_ctm\_ltm\_comparison}、
+\srcpath{test\_tntp\_parser}、\srcpath{test\_sioux\_falls\_ieee123\_case} 等。
+
+\subsection{边界与局限（如实标注）}
+\begin{itemize}
+  \item 顶层 \srcpath{simulate\_ev\_power\_traffic} 明确为启发式/分解式，
+        \fld{mathematical\_model\_verified}=false（状态注明含启发式/分解层）；
+  \item 每个选项结构均暴露 \fld{require\_exact\_mathematical\_model}，开启时\textbf{拒绝}
+        返回伪装成证明的启发式结果，而非默默降级；
+  \item DUE 以不动点/VI 残差判定，非全局求解器证明；充电调度贪心与否由
+        \fld{charging\_dispatch\_is\_greedy} 标注；
+  \item 认证 MPEC-MILP 仅对其文档化的有限/线性/PWL 模型全局认证；
+        \texttt{FullJoint*NLP} 仅携局部驻点证书，\fld{require\_global\_nonlinear\_certificate}
+        下返回不支持；
+  \item 聚合型 CTM/LTM 连接变量模式为降维松弛；混合车队 VI 默认仅覆盖 EV，
+        除非 \fld{include\_icv\_in\_due}。
+\end{itemize}
+\input{../../_manual_common/industrial_evaluation}
+
+\end{document}

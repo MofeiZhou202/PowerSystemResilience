@@ -1,48 +1,48 @@
-# 源码模块 LaTeX 技术手册索引
+# 源码模块技术手册索引
 
 最后核实：2026-08-18
 
-本目录索引 18 个此前缺少独立 LaTeX 说明结构的源码模块。每个模块均保留独立文件夹和主
-`.tex`，并与 `PowerFlow`、`OptimalPowerFlow` 的 `ctexart`、参数表、符号、源码引用和诚实结果
-口径保持一致。
+本目录与 `src/` 顶层目录执行严格的一一映射：目录名必须与源码模块名完全相同，每个模块只能有一个
+文档目录、一个 `README.md` 和一个主手册。章节文件可以位于该模块的 `chapters/`，但不得另建大小写、
+缩写或历史名称不同的平行目录。
 
-| 源码模块 | 手册目录 | 主文件 | 主要范围 |
+| 源码模块 | 唯一文档目录 | 主手册 | 实现范围 |
 |---|---|---|---|
-| `analysis` | `Analysis/` | [分析手册](../Analysis/analysis_manual.tex) | 承载力、薄弱环节、反事实规划 |
-| `api` | `Api/` | [API 手册](../Api/api_manual.tex) | C++ 门面、能力门控与异常语义 |
-| `carbon_analysis` | `CarbonAnalysis/` | [碳分析手册](../CarbonAnalysis/carbon_analysis_manual.tex) | 碳流、年度碳、用户/节点 GEC |
-| `dynamics` | `Dynamics/` | [动力学手册](../Dynamics/dynamics_manual.tex) | 机电暂态 DAE、设备与小信号 |
-| `ev_power_traffic` | `EvPowerTraffic/` | [电—交通手册](../EvPowerTraffic/ev_power_traffic_manual.tex) | CTM/LTM、联合优化与 MPC |
-| `graph` | `Graph/` | [图模块手册](../Graph/graph_manual.tex) | 拓扑、收缩、降阶与恢复 |
-| `harmonics_power_flow` | `HarmonicsPowerFlow/` | [谐波手册](../HarmonicsPowerFlow/harmonics_power_flow_manual.tex) | 频域、三相、NIC 与标准校核 |
-| `integrated_energy` | `IntegratedEnergy/` | [综合能源手册](../IntegratedEnergy/integrated_energy_manual.tex) | 园区电—热—氢 MILP |
-| `io` | `IO/` | [I/O 手册](../IO/io_manual.tex) | 多格式映射、报告与往返 |
-| `market` | `Market/` | [市场手册](../Market/market_manual.tex) | 日前、实时、N-1 与结算 |
-| `network_reconfiguration` | `NetworkReconfiguration/` | [网络重构手册](../NetworkReconfiguration/network_reconfiguration_manual.tex) | 混合重构 MILP 与 ONR |
-| `power_models` | `PowerModels/` | [建模层手册](../PowerModels/power_models_manual.tex) | AML ACOPF、ACDCOPF、DCOPF、SCUC |
-| `reliability` | `Reliability/` | [可靠性手册](../Reliability/reliability_manual.tex) | MC、FMEA、三阶段与 F&D |
-| `resilience` | `Resilience/` | [弹性手册](../Resilience/resilience_manual.tex) | 启发式、MILP、MESS 与认证恢复 |
-| `scenario_generation` | `ScenarioGeneration/` | [场景生成手册](../ScenarioGeneration/scenario_generation_manual.tex) | 常规、可靠性、弹性与台风 |
-| `short_circuit` | `ShortCircuit/` | [短路手册](../ShortCircuit/short_circuit_manual.tex) | IEC 60909、序网、换流器与直流故障 |
-| `sppt` | `SPPT/` | [SPPT 手册](../SPPT/sppt_manual.tex) | MR1–MR8、证书、守卫与代理循环 |
-| `time_series` | `TimeSeries/` | [时序手册](../TimeSeries/time_series_manual.tex) | UC→OPF→PF、年度与生命周期 |
+| `analysis` | `modules/analysis/` | [分析手册](analysis/analysis_manual.tex) | 承载力、薄弱环节、反事实规划 |
+| `api` | `modules/api/` | [公共 API 手册](api/api_manual.tex) | C++ 门面、能力门控、异常语义 |
+| `carbon_analysis` | `modules/carbon_analysis/` | [碳分析手册](carbon_analysis/carbon_analysis_manual.tex) | 碳流、年度碳、用户与节点 GEC |
+| `dynamics` | `modules/dynamics/` | [动力学手册](dynamics/dynamics_manual.tex) | 机电暂态 DAE、设备模型、小信号 |
+| `ev_power_traffic` | `modules/ev_power_traffic/` | [电—交通手册](ev_power_traffic/ev_power_traffic_manual.tex) | CTM/LTM、联合优化、MPC |
+| `graph` | `modules/graph/` | [图模块手册](graph/graph_manual.tex) | 拓扑、收缩、降阶、结果恢复 |
+| `harmonics_power_flow` | `modules/harmonics_power_flow/` | [谐波手册](harmonics_power_flow/harmonics_power_flow_manual.tex) | 频域、三相、AC/DC 耦合、标准校核 |
+| `integrated_energy` | `modules/integrated_energy/` | [综合能源手册](integrated_energy/integrated_energy_manual.tex) | 园区电—热—氢 MILP |
+| `io` | `modules/io/` | [输入输出手册](io/io_manual.tex) | 格式映射、导入报告、往返 |
+| `market` | `modules/market/` | [市场手册](market/market_manual.tex) | 日前、实时、安全校核、结算 |
+| `model` | `modules/model/` | [模型手册](model/model_manual.tex) | 组件 POD、系统容器、默认值、结果类型 |
+| `network_reconfiguration` | `modules/network_reconfiguration/` | [网络重构手册](network_reconfiguration/network_reconfiguration_manual.tex) | 混合重构 MILP、ONR |
+| `optimal_power_flow` | `modules/optimal_power_flow/` | [最优潮流手册](optimal_power_flow/opf_manual.tex) | Native、Parity、DC、RPO、三相 OPF |
+| `power_flow` | `modules/power_flow/` | [潮流计算手册](power_flow/power_flow_manual.tex) | AC/DC、三相、配网、CPF、鲁棒求解 |
+| `power_models` | `modules/power_models/` | [AML 建模层手册](power_models/power_models_manual.tex) | ACOPF、ACDCOPF、DCOPF、LinDistFlow、SCUC builder |
+| `reliability` | `modules/reliability/` | [可靠性手册](reliability/reliability_manual.tex) | MC、FMEA、三阶段、F\&D |
+| `resilience` | `modules/resilience/` | [弹性手册](resilience/resilience_manual.tex) | 启发式恢复、严格 MILP、MESS |
+| `scenario_generation` | `modules/scenario_generation/` | [场景生成手册](scenario_generation/scenario_generation_manual.tex) | 常规、可靠性、弹性、台风场景 |
+| `server` | `modules/server/` | [服务端手册](server/server_manual.tex) | `RuntimeApiV1` 与版本能力配置 |
+| `short_circuit` | `modules/short_circuit/` | [短路手册](short_circuit/short_circuit_manual.tex) | IEC 60909、序网、换流器、直流故障 |
+| `sppt` | `modules/sppt/` | [SPPT 手册](sppt/sppt_manual.tex) | MR1–MR8、证书、守卫、代理循环 |
+| `time_series` | `modules/time_series/` | [时序手册](time_series/time_series_manual.tex) | UC→OPF→PF、年度生产、生命周期 |
+| `validation` | `modules/validation/` | [静态校验手册](validation/validation_manual.tex) | Basic/Electrical/SolverReady/Strict 校验 |
 
-## 保留的标杆手册
+## 数学模型规范
 
-| 类别 | 主文件 |
-|---|---|
-| 元件模型 | [元件模型技术手册](../ComponentModels/component_models_math_audit.tex) |
-| 潮流计算 | [潮流计算技术手册](../PowerFlow/power_flow_manual1.tex) |
-| 最优潮流 | [最优潮流技术手册](../OptimalPowerFlow/opf_manual.tex) |
-
-## 统一内容要求
-
-每部手册至少覆盖：模块定位和场景、输入输出与边界、符号和数据结构、数学模型和约束、算法流程、
-工程假设、数值稳定性、复杂度、异常工况、模块接口、测试建议、工业指标、适用范围、局限与改进方向。
-近似、回退、时限与未覆盖模型必须以 `model_scope`、`ValidityFlags`、`model_limitations` 或等价字段
-如实说明。
+1. 公式只允许转写当前源码实际执行的赋值、残差、目标、约束、截断、阈值和条件分支。
+2. 每组公式必须给出实现函数及 `文件:行号`；源码变化后必须重新核验，行号不能代替语义核对。
+3. 不得用教材通式、理想模型或规划模型补齐代码未实现的内容。
+4. 代码未消费的字段、近似路径、回退、硬编码阈值和已知缺陷必须在相邻正文中明确声明。
+5. `src/power_models/` 的公式只在 `modules/power_models/` 维护；OPF 手册只描述跨模块接口，禁止复制。
 
 ## 编译与验收
 
-从相应模块目录使用 XeLaTeX 编译两遍，或使用仓库 LaTeX 编译工具。统一命令和验收清单见
-[LaTeX 文档说明](../latex/README.md)。构建产物不得作为规范源提交。
+全部主手册共享 `docs/_manual_common/hysim_manual.sty` 和
+`docs/_manual_common/industrial_evaluation.tex`。编译方法见
+[LaTeX 文档说明](../latex/README.md)，整理与验收结果见
+[文档重组报告](../planning/documentation_reorganization_report.md)。

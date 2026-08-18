@@ -7,8 +7,8 @@
 | 构建与环境 | [跨平台构建](../cross_platform_build.md) | [试用版设计](../trial_edition_design.md) |
 | 算例选择 | [算例目录](../case_catalog.md) | [场景生成契约](../scenario_generation_contract.md) |
 | 参数配置 | [参数系统](../parameter_system.md) | [配电参数补全标准](../distribution_parameter_completion_standards.md) |
-| 可靠性工作流 | [可靠性计算与算例指南](../reliability_calculation_workflow_and_case_guide.md) | [可靠性手册](../Reliability/reliability_manual.tex) |
+| 可靠性工作流 | [可靠性计算与算例指南](../reliability_calculation_workflow_and_case_guide.md) | [可靠性手册](../modules/reliability/reliability_manual.tex) |
 | GUI 使用边界 | [Canvas 运行时](../gui_canvas_runtime.md) | [运行时 API](../runtime_api.md) |
-| 电动汽车场景 | [电动汽车交通场景格式](../ev_traffic_scenario_format.md) | [耦合技术手册](../EvPowerTraffic/ev_power_traffic_manual.tex) |
+| 电动汽车场景 | [电动汽车交通场景格式](../ev_traffic_scenario_format.md) | [耦合技术手册](../modules/ev_power_traffic/ev_power_traffic_manual.tex) |
 
 具体算法的适用条件、近似和结果口径应以相应模块手册为准。

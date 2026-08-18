@@ -61,6 +61,8 @@ const Canvas = (() => {
     isDragging: false,
     dragTarget: null,
     dragOffset: null,
+    dragGroup: null,      // ids moved by the current drag (multi-select group or [dragTarget.id])
+    dragStartPos: null,   // Map id -> {x, y} at drag start (delta source + undo record)
     connectStart: null,   // {compId, portId, x, y}
     tempLine: null,
     isBoxSelecting: false,
@@ -482,6 +484,7 @@ const Canvas = (() => {
     state.componentById.set(id, comp);
     invalidateCompBusMap();
     renderComponent(comp);
+    recordOps([{ op: 'add_comp', comp: snapshotComponent(comp) }]);
     updateInfo();
     return comp;
   }
@@ -490,9 +493,12 @@ const Canvas = (() => {
     const idx = state.components.findIndex(c => c.id === id);
     if (idx < 0) return;
     const comp = state.components[idx];
-    // Remove associated connections
+    // Remove associated connections (snapshot first so a delete is undoable as
+    // ONE composite command: attached wires + the component itself).
+    const removedConns = [];
     state.connections = state.connections.filter(conn => {
       if (conn.from.compId === id || conn.to.compId === id) {
+        removedConns.push(conn);
         conn.el?.remove();
         unindexConnection(conn);
         return false;
@@ -507,6 +513,11 @@ const Canvas = (() => {
       state.selectedId = null;
       if (typeof App !== 'undefined') App.onSelectionChanged(null);
     }
+    // del_conn ops precede del_comp so undo restores the component first.
+    recordOps([
+      ...removedConns.map(c => ({ op: 'del_conn', conn: snapshotConnection(c) })),
+      { op: 'del_comp', comp: snapshotComponent(comp) },
+    ]);
     // Topology changed → clear stale PF results and visualization overlays
     clearResults();
     updateInfo();
@@ -516,6 +527,7 @@ const Canvas = (() => {
     const idx = state.connections.findIndex(c => c.id === connId);
     if (idx < 0) return;
     const conn = state.connections[idx];
+    recordOps([{ op: 'del_conn', conn: snapshotConnection(conn) }]);
     conn.el?.remove();
     state.connections.splice(idx, 1);
     unindexConnection(conn);
@@ -583,6 +595,242 @@ const Canvas = (() => {
     return state.connectionsByEndpoint.get(portId == null ? compId : compId + ':' + portId) || [];
   }
 
+  // ========== Undo / Redo (editor safety net) ==========
+  // Command stack over the structural mutation choke points
+  // (addComponent / removeComponent / addConnection / removeConnection) plus
+  // drag-move and rotate commits. A command is {label, ops:[primitive]}; undo
+  // applies the inverse of each op in reverse order, redo reapplies forward.
+  // clearAll()/loadFromSystemJson() empty the stack: a freshly loaded model
+  // must not be undoable back into the previous one.
+  // NOT covered: property-panel parameter edits (owned by app.js) — they
+  // mutate comp.params in place outside these choke points.
+  const UNDO_CAPACITY = 200;
+  const undoStack = [];
+  const redoStack = [];
+  let _undoDepth = 0;        // >0 while applying undo/redo or bulk-loading → no recording
+  let _compositeDepth = 0;   // >0 while a composite command (paste, multi-delete) is open
+  let _compositeOps = null;  // op accumulator for the open composite command
+
+  function snapshotComponent(comp) {
+    return {
+      id: comp.id, type: comp.type, x: comp.x, y: comp.y,
+      rotation: comp.rotation || 0,
+      params: cloneJsonBlock(comp.params) || {},
+    };
+  }
+
+  function snapshotConnection(conn) {
+    return {
+      id: conn.id,
+      from: { compId: conn.from.compId, portId: conn.from.portId },
+      to: { compId: conn.to.compId, portId: conn.to.portId },
+      // Preserve user-edited waypoints so a restored wire keeps its shape.
+      userPoints: conn.geom?.userPoints ? conn.geom.userPoints.map(p => ({ x: p.x, y: p.y })) : null,
+    };
+  }
+
+  function pushCommand(cmd) {
+    if (!cmd.ops.length) return;
+    undoStack.push(cmd);
+    if (undoStack.length > UNDO_CAPACITY) undoStack.shift();
+    redoStack.length = 0;  // a new edit invalidates the redo branch
+  }
+
+  function recordOps(ops) {
+    if (_undoDepth > 0 || !ops.length) return;
+    if (_compositeOps) { _compositeOps.push(...ops); return; }
+    pushCommand({ ops });
+  }
+
+  function beginComposite() {
+    _compositeDepth++;
+    if (_compositeOps === null) _compositeOps = [];
+  }
+
+  function endComposite(label) {
+    if (_compositeDepth > 0) _compositeDepth--;
+    if (_compositeDepth === 0 && _compositeOps) {
+      const ops = _compositeOps;
+      _compositeOps = null;
+      if (ops.length && _undoDepth === 0) pushCommand({ label, ops });
+    }
+  }
+
+  function clearUndoStacks() {
+    undoStack.length = 0;
+    redoStack.length = 0;
+  }
+
+  // Re-insert a component with its ORIGINAL id (undo of a delete): ids are
+  // stable outward-facing handles and surviving wires still reference them.
+  function insertComponentSnap(snap) {
+    if (!snap || getComponent(snap.id)) return null;
+    const comp = {
+      id: snap.id, type: snap.type, x: snap.x, y: snap.y,
+      rotation: snap.rotation || 0,
+      params: cloneJsonBlock(snap.params) || {},
+      el: null,
+    };
+    state.components.push(comp);
+    state.componentById.set(comp.id, comp);
+    if (state.nextId <= comp.id) state.nextId = comp.id + 1;
+    invalidateCompBusMap();
+    renderComponent(comp);
+    return comp;
+  }
+
+  function insertConnectionSnap(snap) {
+    if (!snap || snap.id == null) return null;
+    if (state.connections.some(c => c.id === snap.id)) return null;
+    if (!getComponent(snap.from.compId) || !getComponent(snap.to.compId)) return null;
+    // Skip if an identical wire already exists (either direction), mirroring
+    // the dedup rule in addConnection.
+    const dup = connectionsOf(snap.from.compId, snap.from.portId).some(c =>
+      (c.from.compId === snap.from.compId && c.from.portId === snap.from.portId &&
+       c.to.compId === snap.to.compId && c.to.portId === snap.to.portId) ||
+      (c.from.compId === snap.to.compId && c.from.portId === snap.to.portId &&
+       c.to.compId === snap.from.compId && c.to.portId === snap.from.portId));
+    if (dup) return null;
+    const conn = {
+      id: snap.id,
+      from: { compId: snap.from.compId, portId: snap.from.portId },
+      to: { compId: snap.to.compId, portId: snap.to.portId },
+      el: null,
+      geom: snap.userPoints ? { userPoints: snap.userPoints.map(p => ({ x: p.x, y: p.y })) } : null,
+    };
+    state.connections.push(conn);
+    indexConnection(conn);
+    // conn ids share the nextId counter ('conn_N') — keep it ahead.
+    const m = /^conn_(\d+)$/.exec(conn.id);
+    if (m) state.nextId = Math.max(state.nextId, Number(m[1]) + 1);
+    invalidateCompBusMap();
+    renderConnection(conn);
+    return conn;
+  }
+
+  function applyMoveOp(op, inverse) {
+    const comp = getComponent(op.id);
+    if (!comp) return;
+    const p = inverse ? op.from : op.to;
+    comp.x = p.x;
+    comp.y = p.y;
+    comp.el?.setAttribute('transform', `translate(${comp.x}, ${comp.y}) rotate(${comp.rotation || 0})`);
+    connectionsOf(comp.id).forEach(conn => rerenderConnection(conn));
+    updateResultsOnDrag(comp.id);
+  }
+
+  function applyRotateOp(op, inverse) {
+    const comp = getComponent(op.id);
+    if (!comp) return;
+    comp.rotation = inverse ? op.from : op.to;
+    rerenderComponent(comp);
+  }
+
+  function applyOp(op, inverse) {
+    switch (op.op) {
+      case 'add_comp': inverse ? removeComponent(op.comp.id) : insertComponentSnap(op.comp); break;
+      case 'del_comp': inverse ? insertComponentSnap(op.comp) : removeComponent(op.comp.id); break;
+      case 'add_conn': inverse ? removeConnection(op.conn.id) : insertConnectionSnap(op.conn); break;
+      case 'del_conn': inverse ? insertConnectionSnap(op.conn) : removeConnection(op.conn.id); break;
+      case 'move': applyMoveOp(op, inverse); break;
+      case 'rotate': applyRotateOp(op, inverse); break;
+    }
+  }
+
+  function finishUndoRedo() {
+    // Mutators above already refresh info/drop stale results; notify the shell.
+    updateInfo();
+    if (typeof App !== 'undefined' && App.onTopologyChanged) App.onTopologyChanged();
+  }
+
+  function undo() {
+    if (!undoStack.length) return false;
+    const cmd = undoStack.pop();
+    _undoDepth++;
+    try {
+      for (let i = cmd.ops.length - 1; i >= 0; i--) applyOp(cmd.ops[i], true);
+    } finally {
+      _undoDepth--;
+    }
+    redoStack.push(cmd);
+    finishUndoRedo();
+    return true;
+  }
+
+  function redo() {
+    if (!redoStack.length) return false;
+    const cmd = redoStack.pop();
+    _undoDepth++;
+    try {
+      for (const op of cmd.ops) applyOp(op, false);
+    } finally {
+      _undoDepth--;
+    }
+    undoStack.push(cmd);
+    finishUndoRedo();
+    return true;
+  }
+
+  function canUndo() { return undoStack.length > 0; }
+  function canRedo() { return redoStack.length > 0; }
+
+  // ========== Internal clipboard: copy / paste / duplicate ==========
+  // Module-level clipboard (NOT the OS clipboard): deep snapshots of the
+  // selected components plus every wire whose BOTH endpoints are selected.
+  // Headless large-system mode has no diagram — copy/paste no-ops there.
+  let _clipboard = null;  // { components: [compSnap], connections: [connSnap] }
+  let _pasteSerial = 0;   // consecutive-paste counter → cumulative +20px offset
+
+  function copySelection() {
+    if (state.headless) return false;
+    const ids = new Set(state.selectedIds);
+    if (state.selectedId !== null) ids.add(state.selectedId);
+    if (ids.size === 0) return false;
+    const comps = [];
+    ids.forEach(id => {
+      const comp = getComponent(id);
+      if (comp) comps.push(snapshotComponent(comp));
+    });
+    if (!comps.length) return false;
+    const conns = state.connections
+      .filter(c => ids.has(c.from.compId) && ids.has(c.to.compId))
+      .map(snapshotConnection);
+    _clipboard = { components: comps, connections: conns };
+    _pasteSerial = 0;
+    return true;
+  }
+
+  function pasteClipboard() {
+    if (state.headless || !_clipboard || !_clipboard.components.length) return false;
+    _pasteSerial += 1;
+    const d = 20 * _pasteSerial;  // one grid cell per consecutive paste
+    const idMap = new Map();      // clipboard compId -> new compId
+    beginComposite();
+    try {
+      _clipboard.components.forEach(snap => {
+        const comp = addComponent(snap.type, snap.x + d, snap.y + d,
+          cloneJsonBlock(snap.params) || {}, snap.rotation);
+        idMap.set(snap.id, comp.id);
+      });
+      _clipboard.connections.forEach(cs => {
+        const f = idMap.get(cs.from.compId);
+        const t = idMap.get(cs.to.compId);
+        if (f === undefined || t === undefined) return;
+        addConnection(f, cs.from.portId, t, cs.to.portId);
+      });
+    } finally {
+      endComposite('paste');
+    }
+    selectMultiple([...idMap.values()]);
+    updateInfo();
+    return true;
+  }
+
+  function duplicateSelection() {
+    if (!copySelection()) return false;
+    return pasteClipboard();
+  }
+
   function getComponent(id) {
     return state.componentById.get(id);
   }
@@ -633,7 +881,15 @@ const Canvas = (() => {
     const ids = [...state.selectedIds];
     if (ids.length === 0 && state.selectedId !== null) ids.push(state.selectedId);
     if (ids.length === 0) return;
-    ids.forEach(id => removeComponent(id));
+    // Whole multi-delete = one composite undo command (each removeComponent
+    // already bundles its attached wires; a wire between two selected comps is
+    // captured by whichever endpoint is processed first).
+    beginComposite();
+    try {
+      ids.forEach(id => removeComponent(id));
+    } finally {
+      endComposite('delete-selection');
+    }
     state.selectedIds.clear();
     state.selectedId = null;
     if (typeof App !== 'undefined') {
@@ -1382,6 +1638,7 @@ const Canvas = (() => {
     indexConnection(conn);
     invalidateCompBusMap();
     renderConnection(conn);
+    recordOps([{ op: 'add_conn', conn: snapshotConnection(conn) }]);
     updateInfo();
     return conn;
   }
@@ -1463,13 +1720,22 @@ const Canvas = (() => {
     const compEl = e.target.closest('.component');
     if (compEl && state.mode === 'select') {
       const compId = parseInt(compEl.dataset.compId);
-      selectComponent(compId);
+      // Pressing an already-selected member of a multi-selection keeps the
+      // group intact: the drag below then moves every selected component.
+      const groupDrag = state.selectedIds.size > 1 && state.selectedIds.has(compId);
+      if (!groupDrag) selectComponent(compId);
       // Start dragging
       const comp = getComponent(compId);
       if (comp) {
         state.isDragging = true;
         state.dragTarget = comp;
         state.dragOffset = { x: pt.x - comp.x, y: pt.y - comp.y };
+        state.dragGroup = groupDrag ? [...state.selectedIds] : [compId];
+        state.dragStartPos = new Map();
+        state.dragGroup.forEach(id => {
+          const c = getComponent(id);
+          if (c) state.dragStartPos.set(id, { x: c.x, y: c.y });
+        });
       }
       e.preventDefault();
       return;
@@ -1558,7 +1824,9 @@ const Canvas = (() => {
   function onMouseMove(e) {
     const pt = screenToSvg(e.clientX, e.clientY);
 
-    // Dragging component
+    // Dragging component(s): the primary dragTarget follows the pointer with
+    // grid + alignment snap; the rest of the drag group follows the same delta
+    // (snapping applies to the primary only).
     if (state.isDragging && state.dragTarget) {
       const comp = state.dragTarget;
       comp.x = snapToGrid(pt.x - state.dragOffset.x);
@@ -1566,11 +1834,32 @@ const Canvas = (() => {
       // Alignment snapping to nearby components (doc §18 Phase 4) — shows guides
       if (state.alignSnap) applyDragSnap(comp);
       comp.el.setAttribute('transform', `translate(${comp.x}, ${comp.y}) rotate(${comp.rotation || 0})`);
+      const p0 = state.dragStartPos ? state.dragStartPos.get(comp.id) : null;
+      const dx = p0 ? comp.x - p0.x : 0;
+      const dy = p0 ? comp.y - p0.y : 0;
       // Update connections — cheap (orthogonal) routing keeps the drag smooth;
-      // a full avoid-route runs once on mouse-up.
-      connectionsOf(comp.id).forEach(conn => {
+      // a full avoid-route runs once on mouse-up. Dedupe: a wire between two
+      // dragged components is touched from both endpoints.
+      const rerendered = new Set();
+      const cheapReroute = (id) => connectionsOf(id).forEach(conn => {
+        if (rerendered.has(conn.id)) return;
+        rerendered.add(conn.id);
         rerenderConnection(conn, { cheap: true });
       });
+      if (state.dragGroup && state.dragGroup.length > 1) {
+        state.dragGroup.forEach(id => {
+          if (id === comp.id) return;
+          const c = getComponent(id);
+          const s0 = state.dragStartPos.get(id);
+          if (!c || !s0) return;
+          c.x = s0.x + dx;
+          c.y = s0.y + dy;
+          c.el?.setAttribute('transform', `translate(${c.x}, ${c.y}) rotate(${c.rotation || 0})`);
+          cheapReroute(id);
+          updateResultsOnDrag(id);
+        });
+      }
+      cheapReroute(comp.id);
       // Update result overlays (voltage text + visualization)
       updateResultsOnDrag(comp.id);
       return;
@@ -1667,17 +1956,34 @@ const Canvas = (() => {
     // Stop dragging
     if (state.isDragging) {
       const dragged = state.dragTarget;
+      const group = state.dragGroup || (dragged ? [dragged.id] : []);
+      const startPos = state.dragStartPos;
       state.isDragging = false;
       state.dragTarget = null;
       state.dragOffset = null;
+      state.dragGroup = null;
+      state.dragStartPos = null;
       clearAlignGuides();
-      // Full (avoid-aware) re-route of the dragged component's wires now that
+      // Commit the whole drag (single or multi-select) as ONE undoable command.
+      if (startPos) {
+        const ops = [];
+        startPos.forEach((p0, id) => {
+          const c = getComponent(id);
+          if (!c || (c.x === p0.x && c.y === p0.y)) return;
+          ops.push({ op: 'move', id, from: { x: p0.x, y: p0.y }, to: { x: c.x, y: c.y } });
+        });
+        if (ops.length) pushCommand({ label: 'move', ops });
+      }
+      // Full (avoid-aware) re-route of every moved component's wires now that
       // the drag is over — live drag used the cheap orthogonal route.
       if (dragged && state.connectionStyle === 'avoid') {
         buildRouteContext();
-        connectionsOf(dragged.id).forEach(conn => {
+        const seen = new Set();
+        group.forEach(id => connectionsOf(id).forEach(conn => {
+          if (seen.has(conn.id)) return;
+          seen.add(conn.id);
           rerenderConnection(conn);
-        });
+        }));
       }
       // Final refresh of visualization overlay after drag ends
       if (_vizMode !== 'off' && _lastPfResult) {
@@ -1722,7 +2028,37 @@ const Canvas = (() => {
   }
 
   function onKeyDown(e) {
-    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
+    // Never hijack keys while the user is typing in a form field / editable area.
+    const t = e.target;
+    if (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA' || t.isContentEditable) return;
+
+    // Ctrl/Cmd combos first so they never fall through to single-letter modes
+    // (e.g. Ctrl+V must paste, not switch to select mode).
+    if (e.ctrlKey || e.metaKey) {
+      const k = (e.key || '').toLowerCase();
+      if (k === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) redo(); else undo();
+      } else if (k === 'y') {
+        e.preventDefault();
+        redo();
+      } else if (k === 'a') {
+        // Ctrl+A: select all
+        e.preventDefault();
+        const allIds = state.components.map(c => c.id);
+        if (allIds.length > 0) selectMultiple(allIds);
+      } else if (k === 'c') {
+        e.preventDefault();
+        copySelection();
+      } else if (k === 'v') {
+        e.preventDefault();
+        pasteClipboard();
+      } else if (k === 'd') {
+        e.preventDefault();
+        duplicateSelection();
+      }
+      return;
+    }
 
     if (e.key === 'Delete' || e.key === 'Backspace') {
       if (state.selectedConnectionId) {
@@ -1737,11 +2073,6 @@ const Canvas = (() => {
     } else if (e.key === 'Escape') {
       setMode('select');
       selectComponent(null);
-    } else if (e.key === 'a' && (e.ctrlKey || e.metaKey)) {
-      // Ctrl+A: select all
-      e.preventDefault();
-      const allIds = state.components.map(c => c.id);
-      if (allIds.length > 0) selectMultiple(allIds);
     } else if (e.key === 'v' || e.key === 'V') {
       setMode('select');
     } else if (e.key === 'c' || e.key === 'C') {
@@ -1756,8 +2087,12 @@ const Canvas = (() => {
     if (state.selectedId === null) return;
     const comp = getComponent(state.selectedId);
     if (!comp) return;
+    const from = comp.rotation || 0;
     comp.rotation = ((comp.rotation || 0) + angleDeg + 360) % 360;
     rerenderComponent(comp);
+    if (comp.rotation !== from) {
+      recordOps([{ op: 'rotate', id: comp.id, from, to: comp.rotation }]);
+    }
   }
 
   // ========== Mode ==========
@@ -4348,6 +4683,11 @@ const Canvas = (() => {
 	  function loadFromSystemJson(jsonSys, opts = {}) {
 	    // Clear canvas
 	    clearAll();
+	    // Bulk (re)load must not flood the undo stack — clearAll already emptied
+	    // it; suppress recording until the load completes (both exit paths
+	    // below decrement again; clearAll() hard-resets the counter in case a
+	    // failed load ever leaves it raised).
+	    _undoDepth++;
 	    _preservedModelBlocks = {};
 	    if (jsonSys?.three_phase_ac) {
 	      _preservedModelBlocks.three_phase_ac = cloneJsonBlock(jsonSys.three_phase_ac);
@@ -4377,6 +4717,7 @@ const Canvas = (() => {
       // "拓扑" tab still works. onSystemLoaded refreshes tables while keeping the
       // canvas clean, so the backend session stays authoritative (no resync).
       if (typeof App !== 'undefined' && App.onSystemLoaded) App.onSystemLoaded();
+      _undoDepth--;
       return;
     }
     state.headless = false;
@@ -5487,6 +5828,7 @@ const Canvas = (() => {
     } else {
       autoLayout();
     }
+    _undoDepth--;
     if (typeof App !== 'undefined' && App.onSystemLoaded) App.onSystemLoaded();
   }
 
@@ -7570,6 +7912,13 @@ const Canvas = (() => {
     invalidateCompBusMap();
     state.selectedId = null;
     state.nextId = 1;
+    // A new/empty model must not be undoable back into the old one. Also
+    // hard-reset the recording counters so a failed bulk load can never leave
+    // undo recording stuck off.
+    clearUndoStacks();
+    _undoDepth = 0;
+    _compositeDepth = 0;
+    _compositeOps = null;
     // Leaving headless mode: drop the stored system and hide the overview.
     state.headless = false;
     state.headlessSystem = null;
@@ -8055,6 +8404,13 @@ const Canvas = (() => {
     addConnection,
     removeComponent,
     removeSelected,
+    undo,
+    redo,
+    canUndo,
+    canRedo,
+    copySelection,
+    pasteClipboard,
+    duplicateSelection,
     getComponent,
     rerenderComponent,
     setMode,

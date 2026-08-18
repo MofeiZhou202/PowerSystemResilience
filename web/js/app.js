@@ -28,15 +28,22 @@ const App = (() => {
   let _canvasDirty = false;
 
   // ========== Console Logging ==========
-  function log(msg, level = 'info') {
+  function log(msg, level = 'info', options = {}) {
     const el = document.getElementById('consoleLog');
-    if (!el) return;
-    const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-    const div = document.createElement('div');
-    div.className = `log-${level}`;
-    div.innerHTML = `<span class="log-time">[${time}]</span>${escapeHtml(msg)}`;
-    el.appendChild(div);
-    el.scrollTop = el.scrollHeight;
+    if (el) {
+      const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+      const div = document.createElement('div');
+      div.className = `log-${level}`;
+      div.innerHTML = `<span class="log-time">[${time}]</span>${escapeHtml(msg)}`;
+      el.appendChild(div);
+      el.scrollTop = el.scrollHeight;
+    }
+    // Mirror the user-painful levels: warn/error also surface as toasts, and
+    // errors are collected in the Problems panel. Info chatter stays console-only.
+    if ((level === 'warn' || level === 'error') && !options.skipToast) toast(msg, level);
+    if (level === 'error' && !options.skipProblem) {
+      addProblemEntry({ level: 'error', message: msg });
+    }
   }
 
   function escapeHtml(str) {
@@ -46,6 +53,301 @@ const App = (() => {
   }
   function escapeAttr(str) {
     return escapeHtml(String(str ?? '')).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  // ========== Toast Notifications ==========
+  // Lightweight transient feedback stacked in the top-right corner. warn/error
+  // console entries are mirrored here (see log); info chatter stays console-only
+  // to avoid noise. Honor prefers-reduced-motion via the global CSS rule.
+  const TOAST_DURATIONS = { info: 4000, success: 4000, warn: 6000, error: 10000 };
+  const TOAST_LIMIT = 5;
+  const TOAST_DEDUPE_MS = 2000;
+  const _recentToasts = new Map();  // "level|message" -> timestamp
+
+  function toast(msg, level = 'info', options = {}) {
+    const container = document.getElementById('toastContainer');
+    if (!container) return;
+    const text = String(msg ?? '').trim();
+    if (!text) return;
+    const now = Date.now();
+    const key = `${level}|${text}`;
+    if (now - (_recentToasts.get(key) || 0) < TOAST_DEDUPE_MS) return;
+    _recentToasts.set(key, now);
+    if (_recentToasts.size > 50) {
+      for (const [k, t] of _recentToasts) if (now - t > 15000) _recentToasts.delete(k);
+    }
+    const el = document.createElement('div');
+    el.className = `toast toast-${level}`;
+    el.setAttribute('role', level === 'error' ? 'alert' : 'status');
+    const body = document.createElement('span');
+    body.className = 'toast-msg';
+    body.textContent = text;  // textContent only — never inject HTML
+    el.appendChild(body);
+    if (Array.isArray(options.actions)) {
+      const actions = document.createElement('span');
+      actions.className = 'toast-actions';
+      options.actions.forEach(action => {
+        if (!action || typeof action.onClick !== 'function') return;
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'toast-action';
+        btn.textContent = String(action.label ?? '');
+        btn.addEventListener('click', () => { dismissToast(el); action.onClick(); });
+        actions.appendChild(btn);
+      });
+      if (actions.children.length) el.appendChild(actions);
+    }
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'toast-close';
+    close.setAttribute('aria-label', '关闭通知');
+    close.textContent = '×';
+    close.addEventListener('click', () => dismissToast(el));
+    el.appendChild(close);
+    if (options.sticky) el.classList.add('toast-sticky');
+    container.appendChild(el);
+    // Cap the stack; sticky toasts (e.g. the draft-restore prompt) are never
+    // evicted by newer transient ones.
+    while (container.children.length > TOAST_LIMIT) {
+      const victim = [...container.children].find(c => !c.classList.contains('toast-sticky'));
+      if (!victim) break;
+      victim.remove();
+    }
+    if (!options.sticky) {
+      setTimeout(() => dismissToast(el), TOAST_DURATIONS[level] || TOAST_DURATIONS.info);
+    }
+  }
+
+  function dismissToast(el) {
+    if (!el || el.classList.contains('toast-out')) return;
+    el.classList.add('toast-out');
+    setTimeout(() => el.remove(), 160);
+  }
+
+  // ========== Problems Panel ==========
+  // Central, persistent list of validation failures / analysis errors, living in
+  // a tab next to the console. Error-level console entries are collected
+  // automatically; reportProblem() additionally attaches an optional canvas
+  // locate target (compId or bus) when the call site knows one.
+  const PROBLEM_LIMIT = 100;
+  const PROBLEM_DEDUPE_MS = 3000;
+  const _problems = [];
+  let _problemSeq = 0;
+  let _consoleView = 'log';  // 'log' | 'problems'
+
+  function addProblemEntry({ level = 'error', message, compId = null, bus = null }) {
+    const text = String(message ?? '').trim();
+    if (!text) return null;
+    const now = Date.now();
+    const last = _problems[_problems.length - 1];
+    // Consecutive duplicate (e.g. a setStatus+log pair reporting the same
+    // failure) collapses into the existing entry, keeping any locate target.
+    if (last && last.message === text && now - last.at < PROBLEM_DEDUPE_MS) return last;
+    const entry = { id: ++_problemSeq, at: now, level, message: text, compId, bus };
+    _problems.push(entry);
+    if (_problems.length > PROBLEM_LIMIT) _problems.shift();
+    renderProblemEntry(entry);
+    trimProblemList();
+    updateProblemBadge();
+    return entry;
+  }
+
+  function reportProblem({ level = 'error', message, compId = null, bus = null }) {
+    const entry = addProblemEntry({ level, message, compId, bus });
+    if (entry) toast(message, level === 'error' ? 'error' : 'warn');
+    return entry;
+  }
+
+  function renderProblemEntry(entry) {
+    const list = document.getElementById('problemList');
+    if (!list) return;
+    list.querySelector('.problem-empty')?.remove();
+    const row = document.createElement('div');
+    row.className = `problem-item problem-level-row-${entry.level}`;
+    const time = document.createElement('span');
+    time.className = 'problem-time';
+    time.textContent = `[${new Date(entry.at).toLocaleTimeString('zh-CN', { hour12: false })}]`;
+    const level = document.createElement('span');
+    level.className = `problem-level problem-level-${entry.level}`;
+    level.textContent = entry.level === 'error' ? '错误' : '警告';
+    const message = document.createElement('span');
+    message.className = 'problem-message';
+    message.textContent = entry.message;
+    row.append(time, level, message);
+    if (entry.compId != null || entry.bus != null) {
+      const locate = document.createElement('button');
+      locate.type = 'button';
+      locate.className = 'problem-locate';
+      locate.dataset.problemId = String(entry.id);
+      locate.textContent = '定位';
+      locate.title = '在画布上定位关联的元件/母线';
+      row.appendChild(locate);
+    }
+    list.appendChild(row);
+    list.scrollTop = list.scrollHeight;
+  }
+
+  function trimProblemList() {
+    const list = document.getElementById('problemList');
+    while (list && list.children.length > PROBLEM_LIMIT) list.firstElementChild.remove();
+  }
+
+  function updateProblemBadge() {
+    const badge = document.getElementById('problemCount');
+    if (!badge) return;
+    badge.hidden = _problems.length === 0;
+    badge.textContent = String(_problems.length);
+  }
+
+  function switchConsoleView(view) {
+    _consoleView = view === 'problems' ? 'problems' : 'log';
+    const logEl = document.getElementById('consoleLog');
+    const problemsEl = document.getElementById('problemList');
+    if (logEl) logEl.hidden = _consoleView !== 'log';
+    if (problemsEl) {
+      problemsEl.hidden = _consoleView !== 'problems';
+      if (_consoleView === 'problems' && !problemsEl.children.length) {
+        problemsEl.innerHTML = '<div class="problem-empty">暂无问题</div>';
+      }
+    }
+    document.getElementById('btnConsoleHeaderToggle')?.setAttribute(
+      'aria-selected', _consoleView === 'log' ? 'true' : 'false');
+    document.getElementById('btnProblemsTab')?.setAttribute(
+      'aria-selected', _consoleView === 'problems' ? 'true' : 'false');
+  }
+
+  function clearActiveConsoleView() {
+    if (_consoleView === 'problems') {
+      _problems.length = 0;
+      const list = document.getElementById('problemList');
+      if (list) list.innerHTML = '<div class="problem-empty">暂无问题</div>';
+      updateProblemBadge();
+    } else {
+      const logEl = document.getElementById('consoleLog');
+      if (logEl) logEl.innerHTML = '';
+    }
+  }
+
+  function locateProblemTarget(entry) {
+    if (typeof Canvas === 'undefined') return;
+    if (Canvas.isHeadless && Canvas.isHeadless()) {
+      toast('大规模系统 WebGL 总览模式不支持单元件定位', 'info');
+      return;
+    }
+    if (entry.compId != null) {
+      if (Canvas.getComponent && Canvas.getComponent(entry.compId)) {
+        Canvas.panToComponent?.(entry.compId);
+      } else {
+        toast('未找到定位对象（元件可能已被删除）', 'warn');
+      }
+    } else if (entry.bus != null && Canvas.panToBusId) {
+      Canvas.panToBusId(entry.bus);
+    }
+  }
+
+  // ========== Canvas Auto-Draft ==========
+  // Periodic localStorage snapshot of a dirty canvas so an accidental close or
+  // crash does not lose modeling work. Single-slot record:
+  //   { saved_at: <ISO string>, json: <stringified system JSON> }
+  // Skipped entirely in headless large-system mode (no SVG canvas state and the
+  // serialized system would blow the 5-10MB localStorage quota) and for any
+  // system serializing beyond DRAFT_MAX_CHARS.
+  const DRAFT_STORAGE_KEY = 'hysim.canvasDraft.v1';
+  const DRAFT_INTERVAL_MS = 30000;
+  const DRAFT_MAX_CHARS = 4 * 1024 * 1024;
+  let _draftOversizeNotified = false;
+
+  function writeCanvasDraft() {
+    if (document.visibilityState !== 'visible') return;
+    if (!_canvasDirty) return;
+    if (typeof Canvas === 'undefined' || !Canvas.buildSystemJson) return;
+    if (Canvas.isHeadless && Canvas.isHeadless()) return;
+    let jsonStr;
+    try {
+      jsonStr = JSON.stringify(Canvas.buildSystemJson());
+    } catch (err) {
+      return;
+    }
+    if (jsonStr.length > DRAFT_MAX_CHARS) {
+      if (!_draftOversizeNotified) {
+        _draftOversizeNotified = true;
+        log(`自动草稿已跳过：系统序列化约 ${(jsonStr.length / 1048576).toFixed(1)}MB，超过 4MB 上限，请手动导出 JSON 保存`, 'warn');
+      }
+      return;
+    }
+    try {
+      localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify({
+        saved_at: new Date().toISOString(),
+        json: jsonStr,
+      }));
+      _draftOversizeNotified = false;
+    } catch (err) {
+      if (!_draftOversizeNotified) {
+        _draftOversizeNotified = true;
+        log('自动草稿写入 localStorage 失败（可能超出配额），请手动导出 JSON 保存', 'warn');
+      }
+    }
+  }
+
+  function clearCanvasDraft() {
+    try { localStorage.removeItem(DRAFT_STORAGE_KEY); } catch (_) { /* persistence is optional */ }
+  }
+
+  function initCanvasDraft() {
+    setInterval(writeCanvasDraft, DRAFT_INTERVAL_MS);
+    checkCanvasDraft();
+  }
+
+  function checkCanvasDraft() {
+    let raw = null;
+    try { raw = localStorage.getItem(DRAFT_STORAGE_KEY); } catch (_) { return; }
+    if (!raw) return;
+    let draft = null;
+    try { draft = JSON.parse(raw); } catch (_) { /* corrupted record */ }
+    if (!draft || typeof draft.json !== 'string' || !draft.json) {
+      clearCanvasDraft();
+      return;
+    }
+    const when = draft.saved_at ? new Date(draft.saved_at).toLocaleString('zh-CN') : '未知时间';
+    // Sticky toast with explicit actions — never overwrite the current canvas
+    // silently.
+    toast(`检测到 ${when} 的未保存画布草稿（约 ${(draft.json.length / 1024).toFixed(0)}KB）`, 'warn', {
+      sticky: true,
+      actions: [
+        { label: '恢复草稿', onClick: () => { restoreCanvasDraft(draft); } },
+        { label: '丢弃', onClick: () => { clearCanvasDraft(); log('已丢弃自动草稿', 'info'); } },
+      ],
+    });
+  }
+
+  async function restoreCanvasDraft(draft) {
+    let sys = null;
+    try {
+      sys = JSON.parse(draft.json);
+    } catch (err) {
+      log(`草稿解析失败，已丢弃: ${err.message || err}`, 'error');
+      clearCanvasDraft();
+      return;
+    }
+    setStatus('正在恢复画布草稿...', 'busy');
+    // Same route as manual JSON import: backend adopts the system, then the
+    // canvas restores positions/connections from the local copy (which still
+    // carries the _canvas layout block the backend strips).
+    const data = await apiPost('/api/session/load_json_string', { json_string: draft.json });
+    if (!data) {
+      // Keep the draft so the user can retry after the backend recovers.
+      setStatus('草稿恢复失败', 'error');
+      log('草稿恢复失败：后端未接受该系统，草稿已保留', 'error');
+      return;
+    }
+    Canvas.loadFromSystemJson(sys);
+    _canvasDirty = false;  // backend already has the restored system
+    clearCanvasDraft();
+    resetReliabilityConfigurationEditor();
+    invalidateAnalysisResults('已恢复自动草稿，旧分析结果已失效');
+    const when = draft.saved_at ? new Date(draft.saved_at).toLocaleString('zh-CN') : '';
+    setStatus('草稿已恢复', 'success');
+    log(`已恢复 ${when} 的画布草稿`, 'success');
   }
 
   // ========== Display Unit Helpers ==========
@@ -2399,6 +2701,214 @@ const App = (() => {
     return `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
   }
 
+  // ========== Result table sort / filter / CSV export ==========
+  // Progressive enhancement layer for analysis result tables (power flow, OPF,
+  // short circuit, reliability, market). It wraps any well-formed
+  // <table><thead><tr><th>…</th></tr></thead><tbody>…</tbody></table> with:
+  //   (a) header-click sorting — numeric-aware, three-state (asc/desc/original
+  //       order), mirrored to aria-sort on the active <th>;
+  //   (b) a per-column contains-match filter row directly under the header
+  //       (debounced);
+  //   (c) an "导出 CSV" button exporting the *currently visible* (filtered)
+  //       rows, RFC-4180-escaped, with a UTF-8 BOM so Excel reads Chinese
+  //       headers correctly; the filename carries the module tag + timestamp.
+  // Tables that do not match the expected shape (missing thead/tbody, multi-row
+  // headers, colspan/rowspan rows, embedded form controls, virtualized tables)
+  // are skipped with a console.debug note — rendering is never broken.
+  const RT_FILTER_DEBOUNCE_MS = 200;
+
+  function rtCellText(cell) {
+    return (cell && cell.textContent ? cell.textContent : '').trim();
+  }
+
+  // Numeric-aware cell value: strip thousands separators and a trailing % so
+  // formatted columns ("1,234.5", "87.3%") still compare numerically.
+  function rtNumericValue(text) {
+    const cleaned = String(text).replace(/,/g, '').replace(/%$/, '').trim();
+    if (!cleaned) return null;
+    const n = Number(cleaned);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function rtCompareCells(aText, bText) {
+    const aNum = rtNumericValue(aText);
+    const bNum = rtNumericValue(bText);
+    if (aNum !== null && bNum !== null) return aNum - bNum;
+    if (aNum !== null) return -1;  // numbers sort before text
+    if (bNum !== null) return 1;
+    return String(aText).localeCompare(String(bText), 'zh-CN', { numeric: true });
+  }
+
+  function csvEscapeCell(text) {
+    const s = String(text ?? '');
+    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  }
+
+  function downloadTextFile(filename, text, mimeType) {
+    try {
+      const blob = new Blob([text], { type: mimeType });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      log(`已导出: ${filename}`, 'success');
+      return true;
+    } catch (e) {
+      log(`导出失败: ${e.message || e}`, 'error');
+      return false;
+    }
+  }
+
+  function enhanceResultTable(table, opts = {}) {
+    const skip = (reason) => {
+      console.debug('[result-table] 跳过增强:', reason);
+      return false;
+    };
+    try {
+      if (!table || table.tagName !== 'TABLE') return false;
+      if (table.dataset.rtEnhanced) return false;  // already enhanced
+      if (table.__vctx) return skip('虚拟滚动表格');
+      const thead = table.tHead;
+      const tbody = table.tBodies && table.tBodies[0];
+      if (!thead || !tbody) return skip('缺少 thead/tbody');
+      if (thead.rows.length !== 1) return skip('多行表头');
+      const headerRow = thead.rows[0];
+      const headers = [...headerRow.cells];
+      if (headers.length < 2) return skip('少于 2 列');
+      if (headers.some(h => h.tagName !== 'TH')) return skip('表头非 th');
+      const rows = [...tbody.rows];
+      if (!rows.length) return skip('空表体');
+      // Editable tables (e.g. cost/participant editors) would lose input state
+      // when rows are reordered — leave them alone.
+      if (tbody.querySelector('input, select, textarea')) return skip('表内含表单控件');
+      // colspan "empty-hint" rows and irregular grids would corrupt under sort.
+      if (rows.some(r => r.cells.length !== headers.length)) return skip('行单元格数与表头不一致');
+
+      table.dataset.rtEnhanced = 'true';
+      const moduleTag = String(opts.module || 'results').replace(/[^\w-]+/g, '_');
+      const headerLabels = headers.map(h => rtCellText(h));
+      const originalRows = rows.slice();
+      const state = { sortCol: -1, sortDir: 0 };  // dir: 0=原序 1=升序 2=降序
+
+      // --- toolbar above the table: CSV export + row count ---
+      const tools = document.createElement('div');
+      tools.className = 'result-table-tools';
+      tools.style.cssText = 'display:flex;align-items:center;gap:8px;margin:2px 0 4px;flex-wrap:wrap;';
+      const exportBtn = document.createElement('button');
+      exportBtn.type = 'button';
+      exportBtn.className = 'btn btn-xs';
+      exportBtn.textContent = '导出 CSV';
+      const count = document.createElement('span');
+      count.className = 'rt-count';  // styling lives in style.css .rt-count
+      tools.append(exportBtn, count);
+      table.parentNode.insertBefore(tools, table);
+
+      // --- filter row directly under the header ---
+      const filterRow = document.createElement('tr');
+      filterRow.className = 'rt-filter-row';
+      headerLabels.forEach(label => {
+        const th = document.createElement('th');
+        const input = document.createElement('input');
+        input.type = 'search';
+        input.className = 'rt-filter';
+        input.setAttribute('aria-label', `筛选列 ${label}`);
+        input.placeholder = '筛选';
+        input.style.cssText = 'width:100%;min-width:40px;box-sizing:border-box;font-size:11px;padding:1px 4px;font-weight:400;';
+        input.addEventListener('input', scheduleFilter);
+        th.appendChild(input);
+        filterRow.appendChild(th);
+      });
+      thead.appendChild(filterRow);
+
+      let filterTimer = 0;
+      function scheduleFilter() {
+        clearTimeout(filterTimer);
+        filterTimer = setTimeout(applyFilter, RT_FILTER_DEBOUNCE_MS);
+      }
+      function applyFilter() {
+        const queries = [...filterRow.cells].map(c => {
+          const q = c.querySelector('input');
+          return (q && q.value ? q.value : '').trim().toLowerCase();
+        });
+        let visible = 0;
+        rows.forEach(r => {
+          const show = queries.every((q, i) => !q ||
+            rtCellText(r.cells[i]).toLowerCase().includes(q));
+          r.style.display = show ? '' : 'none';
+          if (show) visible++;
+        });
+        const active = queries.some(q => q);
+        count.textContent = active ? `筛选: ${visible}/${rows.length} 行` : `${rows.length} 行`;
+      }
+
+      // --- three-state header sorting ---
+      const sortIndicators = [];
+      function applySort() {
+        sortIndicators.forEach((s, i) => {
+          const active = i === state.sortCol && state.sortDir !== 0;
+          s.indicator.textContent = active ? (state.sortDir === 1 ? '▲' : '▼') : '';
+          if (active) s.th.setAttribute('aria-sort', state.sortDir === 1 ? 'ascending' : 'descending');
+          else s.th.removeAttribute('aria-sort');
+        });
+        const ordered = state.sortDir === 0 ? originalRows.slice() : rows.slice().sort((ra, rb) => {
+          const cmp = rtCompareCells(rtCellText(ra.cells[state.sortCol]), rtCellText(rb.cells[state.sortCol]));
+          return state.sortDir === 1 ? cmp : -cmp;
+        });
+        ordered.forEach(r => tbody.appendChild(r));
+      }
+      headers.forEach((h, colIdx) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'rt-sort';
+        btn.style.cssText = 'all:unset;cursor:pointer;display:block;width:100%;';
+        while (h.firstChild) btn.appendChild(h.firstChild);  // keep existing header markup
+        const indicator = document.createElement('span');
+        indicator.className = 'rt-sort-indicator';
+        indicator.style.cssText = 'font-size:9px;margin-left:2px;';
+        btn.appendChild(indicator);
+        btn.setAttribute('aria-label', `按 ${headerLabels[colIdx]} 排序`);
+        h.appendChild(btn);
+        const cycle = () => {
+          if (state.sortCol === colIdx) state.sortDir = (state.sortDir + 1) % 3;
+          else { state.sortCol = colIdx; state.sortDir = 1; }
+          applySort();
+        };
+        btn.addEventListener('click', cycle);
+        sortIndicators.push({ th: h, indicator });
+      });
+
+      // --- CSV export of the currently visible (filtered) rows ---
+      exportBtn.addEventListener('click', () => {
+        const visibleRows = rows.filter(r => r.style.display !== 'none');
+        const lines = [headerLabels.map(csvEscapeCell).join(',')];
+        visibleRows.forEach(r => {
+          lines.push([...r.cells].map(c => csvEscapeCell(rtCellText(c))).join(','));
+        });
+        downloadTextFile(`${moduleTag}_results_${tsTagForFilename()}.csv`,
+          '\uFEFF' + lines.join('\r\n'), 'text/csv;charset=utf-8');
+      });
+
+      applyFilter();
+      return true;
+    } catch (err) {
+      log(`结果表增强失败（不影响结果展示）: ${err.message || err}`, 'warn');
+      return false;
+    }
+  }
+
+  // Enhance every not-yet-enhanced table under `root`. Returns the count.
+  function enhanceResultTablesIn(root, opts = {}) {
+    if (!root || !root.querySelectorAll) return 0;
+    let enhanced = 0;
+    root.querySelectorAll('table').forEach(table => {
+      if (enhanceResultTable(table, opts)) enhanced++;
+    });
+    return enhanced;
+  }
+
   function buildResultsExportBundle() {
     const results = {};
     const add = (key, value) => {
@@ -2741,6 +3251,10 @@ const App = (() => {
   }
 
   // ========== Status ==========
+  // Status texts that merely restate a failure already detailed via log('error');
+  // these are not re-reported to the toast/problems channels by setStatus.
+  const GENERIC_ERROR_STATUS_RE = /^(计算失败|请求失败|后端繁忙|加载失败|同步失败|导出失败|创建失败|导入失败|未收敛|定位失败|模型同步失败)$/;
+
   function taskStateFromLegacy(text, type) {
     const label = String(text || '');
     if (type === 'busy') return 'running';
@@ -2856,6 +3370,12 @@ const App = (() => {
     }
     clearInterval(_taskTicker);
     _taskTicker = state === 'running' ? setInterval(renderTaskStatus, 250) : null;
+    // Specific failure texts usually have no paired detailed log line, so mirror
+    // them to toast + the problems panel from here. Generic one-word failures
+    // are already covered by a nearby detailed log('error') call.
+    if (type === 'error' && text && !GENERIC_ERROR_STATUS_RE.test(String(text).trim())) {
+      reportProblem({ level: 'error', message: text });
+    }
     renderTaskStatus();
     updateDependencyChips();
   }
@@ -5881,6 +6401,8 @@ const App = (() => {
     } else if (postCbSec) {
       postCbSec.style.display = 'none';
     }
+    enhanceResultTablesIn(document.querySelector('[data-result-group="opf"]'),
+      { module: 'opf' });
   }
 
   // ========== Reactive Power Optimization ==========
@@ -6373,7 +6895,9 @@ const App = (() => {
     // longer "still calculate".
     const faultBus = parseInt(faultBusRaw, 10);
     if (!Number.isInteger(faultBus)) {
-      setStatus(`故障母线 ID “${faultBusRaw}” 无效，请输入整数母线编号。`, 'error');
+      const msg = `故障母线 ID “${faultBusRaw}” 无效，请输入整数母线编号。`;
+      reportProblem({ level: 'error', message: msg });
+      setStatus(msg, 'error');
       return;
     }
 
@@ -6387,6 +6911,7 @@ const App = (() => {
       const friendly = /not found/i.test(raw)
         ? `故障母线 ID ${faultBus} 不存在，请输入系统中真实存在的母线编号（与结果表 / 画布中显示的 Bus 编号一致）。`
         : (raw || '计算失败');
+      reportProblem({ level: 'error', message: friendly, bus: faultBus });
       setStatus(friendly, 'error');
       return;
     }
@@ -11639,6 +12164,8 @@ const App = (() => {
       });
       document.getElementById('scResults').innerHTML = '';
       document.getElementById('topoResults').innerHTML = '';
+      enhanceResultTablesIn(document.querySelector('[data-result-group="powerFlow"]'),
+        { module: 'power_flow' });
       return;
     }
 
@@ -11967,6 +12494,8 @@ const App = (() => {
     // Clear SC and topo results
     document.getElementById('scResults').innerHTML = '';
     document.getElementById('topoResults').innerHTML = '';
+    enhanceResultTablesIn(document.querySelector('[data-result-group="powerFlow"]'),
+      { module: 'power_flow' });
   }
 
   function scOpt(data, key, fallback = '') {
@@ -12021,6 +12550,7 @@ const App = (() => {
       html += '</tbody></table>';
       scDiv.innerHTML = html;
     }
+    if (scDiv) enhanceResultTablesIn(scDiv, { module: 'short_circuit' });
   }
 
   // Render a single-bus (validated) fault from /api/session/sc_detailed.
@@ -12111,6 +12641,7 @@ const App = (() => {
     });
     html += '</tbody></table>';
     scDiv.innerHTML = html;
+    enhanceResultTablesIn(scDiv, { module: 'short_circuit' });
   }
 
   function showDcShortCircuitResults(data, primaryFaultBus) {
@@ -12164,6 +12695,7 @@ const App = (() => {
       html += '</tbody></table>';
     }
     scDiv.innerHTML = html;
+    enhanceResultTablesIn(scDiv, { module: 'dc_short_circuit' });
   }
 
   // Render hybrid AC/DC harmonic power-flow results (/api/session/harmonics).
@@ -12930,6 +13462,8 @@ const App = (() => {
     // canvas is NOT dirty — this preserves the "backend already has it" fast path
     // (no forced resync) for both freshly loaded and force-rendered systems.
     _canvasDirty = false;
+    // Any previously stored auto-draft is stale once a model is (re)loaded.
+    clearCanvasDraft();
     _modelRevision += 1;
     if (_taskStatus.state !== 'running') _taskStatus.modelRevision = _modelRevision;
     renderTaskStatus();
@@ -13463,6 +13997,8 @@ const App = (() => {
           setParam(slot, isRoot, p.key, Number.isFinite(v) ? v : p.default);
           onChange(dm);
         });
+        // Immediate range check against the catalog's declared min/max.
+        attachNumberFieldValidation(input, { compId: comp.id, label: p.label || p.key });
       }
       f.appendChild(input);
       if (p.unit) { const u = document.createElement('span'); u.className = 'dyn-param-unit'; u.textContent = p.unit; f.appendChild(u); }
@@ -13764,6 +14300,113 @@ const App = (() => {
     return { details, body, count };
   }
 
+  // ========== Property panel: immediate validation & unit suffixes ==========
+  // Units recognized in the trailing "(...)" of COMP.fieldLabels entries. Only
+  // tokens in this whitelist are treated as units and moved to an input suffix;
+  // other parenthesized hints (e.g. "0=HV,1=LV", "opf/static", "JSON数组")
+  // stay in the label text — never invent units for fields that have none.
+  const PROPERTY_LABEL_UNITS = new Set([
+    'kV', 'MW', 'MVar', 'MVA', 'kW', 'pu', '°', 'deg', '%', 'h', 's', 'km',
+    'mm²', 'Ω', 'Ω/km', 'μS/km', 'nF/km', '次/年', '$/MWh', '$/h', '$/次',
+    'kg/MWh', 'tCO2/MWh', 'tCO2/h', 'MWh/tCO2', 'MWh/km', 'MW/min', 'km/h',
+    'W/m²', '℃', 'V', 'A', '%/℃', 'Hz', 'kA', 'MWh',
+  ]);
+
+  function splitPropertyLabelUnit(label) {
+    const m = String(label || '').match(/^(.*?)\(([^()]*)\)\s*$/);
+    if (m && PROPERTY_LABEL_UNITS.has(m[2].trim())) {
+      return { text: m[1].trim() || String(label), unit: m[2].trim() };
+    }
+    return { text: String(label || ''), unit: '' };
+  }
+
+  function makePropUnitSpan(unit) {
+    const span = document.createElement('span');
+    span.className = 'prop-unit';  // styling lives in style.css .prop-unit
+    span.textContent = unit;
+    return span;
+  }
+
+  // Visual validity: .prop-invalid (style.css) supplies border/background/
+  // focus-ring; the inline borderColor is kept as a fallback for hosts where
+  // the class rules do not apply. The original title is stashed so clearing
+  // the error restores it exactly.
+  function setFieldValidity(el, message) {
+    if (message) {
+      if (el.dataset.validTitle === undefined) el.dataset.validTitle = el.title || '';
+      el.classList.add('prop-invalid');
+      el.style.borderColor = 'var(--red, #e06c75)';
+      el.title = message;
+      el.setAttribute('aria-invalid', 'true');
+    } else {
+      el.classList.remove('prop-invalid');
+      el.style.borderColor = '';
+      el.removeAttribute('aria-invalid');
+      if (el.dataset.validTitle !== undefined) {
+        el.title = el.dataset.validTitle;
+        delete el.dataset.validTitle;
+      }
+    }
+  }
+
+  // Immediate numeric validation for property inputs: the input event marks
+  // the field red + title hint; the change event additionally reports to the
+  // Problems panel (same channel Apply uses). Ranges come from the element's
+  // own min/max attributes (backend schema / dyn-model catalog); when no range
+  // exists only numeric legality is checked — nothing is hardcoded here.
+  function attachNumberFieldValidation(input, { compId = null, label = '' } = {}) {
+    if (!input || input.type !== 'number') return;
+    const check = () => {
+      const raw = String(input.value ?? '').trim();
+      if (raw === '') return '';  // empty = neutral (e.g. clearing an override)
+      const value = Number(raw);
+      const name = label || '数值';
+      if (!Number.isFinite(value)) return `${name}: 请输入合法数值`;
+      const min = input.min !== '' && input.min != null ? Number(input.min) : null;
+      const max = input.max !== '' && input.max != null ? Number(input.max) : null;
+      if (min !== null && Number.isFinite(min) && value < min) {
+        return `${name}: 不能小于 ${min}`;
+      }
+      if (max !== null && Number.isFinite(max) && value > max) {
+        return `${name}: 不能大于 ${max}`;
+      }
+      return '';
+    };
+    input.addEventListener('input', () => setFieldValidity(input, check()));
+    input.addEventListener('change', () => {
+      const msg = check();
+      setFieldValidity(input, msg);
+      if (msg) reportProblem({ level: 'warn', message: msg, compId });
+    });
+  }
+
+  // Pre-validate JSON property textareas on blur so syntax errors surface
+  // immediately instead of at Apply time. Mirrors the Apply-time rules:
+  // dynamic_model must be an object, *_profile_values must be an array.
+  function validatePropJsonTextarea(txt, key, compId) {
+    const raw = String(txt.value || '').trim();
+    let message = '';
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (key === 'dynamic_model' &&
+            (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))) {
+          message = 'dynamic_model 必须是 JSON 对象';
+        } else if (/^_ies_.*profile.*values$/.test(key) && !Array.isArray(parsed)) {
+          message = '时序值必须是 JSON 数组';
+        }
+      } catch (err) {
+        message = `JSON 语法错误: ${err.message || err}`;
+      }
+    }
+    setFieldValidity(txt, message);
+    if (message && txt.dataset.lastJsonError !== message) {
+      reportProblem({ level: 'error', message: `JSON 字段无效: ${message}`, compId });
+    }
+    txt.dataset.lastJsonError = message;
+    return !message;
+  }
+
   const RELIABILITY_KIND_TO_CANVAS_BUCKET = {
     ac_bus: 'ac', ac_bus_load: 'ac', dc_bus: 'dc', dc_bus_load: 'dc',
     ac_generator: 'gen', ac_branch: 'branch', ac_load: 'load',
@@ -13886,7 +14529,7 @@ const App = (() => {
         const value = explicit ? override[field.name] : mode.resolved_parameters?.[field.name];
         const wrapper = document.createElement('label');
         const label = RELIABILITY_PROPERTY_FIELD_LABELS[field.name] || field.name;
-        wrapper.textContent = field.unit ? `${label} (${field.unit})` : label;
+        wrapper.textContent = label;
         const input = document.createElement('input');
         input.type = 'number';
         input.step = 'any';
@@ -13902,7 +14545,11 @@ const App = (() => {
           ? '当前用户覆盖值'
           : '当前后端解析值；只有修改后才保存为用户覆盖';
         input.addEventListener('input', () => markReliabilityPropertyInputEdited(input, row));
+        // Immediate numeric/range validation; min/max come from the backend
+        // reliability schema (field.minimum/maximum set above).
+        attachNumberFieldValidation(input, { compId: comp.id, label });
         wrapper.appendChild(input);
+        if (field.unit) wrapper.appendChild(makePropUnitSpan(field.unit));
         grid.appendChild(wrapper);
       });
       row.appendChild(grid);
@@ -14044,6 +14691,8 @@ const App = (() => {
         txt.title = key === 'dynamic_model'
           ? '统一动态模型 JSON：standard/model_name/parameter_set/parameters/components。会随系统 JSON 同步并用于暂态模型构建。'
           : '导入或手工编辑的时序数组，长度应与园区综合能源仿真步数一致。';
+        // Pre-validate JSON syntax on blur instead of only failing at Apply.
+        txt.addEventListener('blur', () => validatePropJsonTextarea(txt, key, comp.id));
         div.classList.add('prop-field-wide');
         if (key === 'dynamic_model') {
           // Structured catalog-driven editor on top; raw JSON collapsed below as
@@ -14199,7 +14848,26 @@ const App = (() => {
           inp.style.opacity = '0.65';
           inp.style.cursor = 'not-allowed';
         }
-        div.appendChild(inp);
+        // Immediate numeric validation (legality only — generic property
+        // fields carry no min/max in COMP.defaults, so no range is invented).
+        if (inp.type === 'number' && !inp.readOnly) {
+          attachNumberFieldValidation(inp, { compId: comp.id, label });
+        }
+        // Unit suffix: a recognized trailing "(unit)" in the label moves next
+        // to the input; unrecognized hints (JSON, 0=HV,1=LV, …) stay in the label.
+        const parsedLabel = splitPropertyLabelUnit(label);
+        if (parsedLabel.unit) {
+          lbl.textContent = parsedLabel.text;
+          const inputRow = document.createElement('div');
+          inputRow.style.cssText = 'display:flex;align-items:center;gap:6px;';
+          inp.style.flex = '1';
+          inp.style.minWidth = '0';
+          inputRow.appendChild(inp);
+          inputRow.appendChild(makePropUnitSpan(parsedLabel.unit));
+          div.appendChild(inputRow);
+        } else {
+          div.appendChild(inp);
+        }
       }
 
       sectionBodies.get(section)?.body.appendChild(div);
@@ -14264,8 +14932,8 @@ const App = (() => {
     });
     if (parseError) {
       const msg = `JSON 字段无效: ${parseError.message || parseError}`;
+      reportProblem({ level: 'error', message: msg, compId });
       setStatus(msg, 'error');
-      log(msg, 'error');
       return;
     }
     const reliabilityCandidate = componentReliabilityConfigurationCandidate();
@@ -14275,8 +14943,8 @@ const App = (() => {
       }, { quiet: true });
       if (!saved?.ok) {
         const msg = saved?.data?.error || '元件可靠性参数校验失败';
+        reportProblem({ level: 'error', message: msg, compId });
         setStatus(msg, 'error');
-        log(msg, 'error');
         return;
       }
       _reliabilityConfigurationData = saved.data;
@@ -15173,6 +15841,8 @@ const App = (() => {
     ];
     document.getElementById('marketSettlementResults').innerHTML =
       `<table><thead><tr><th>账本科目</th><th>金额</th></tr></thead><tbody>${ledgerRows.map(([label, value]) => `<tr><td>${label}</td><td>${marketFmt(value, 4)}</td></tr>`).join('')}</tbody></table>`;
+    enhanceResultTablesIn(document.querySelector('[data-result-group="market"]'),
+      { module: 'day_ahead_market' });
     requestAnimationFrame(() => renderMarketCharts(data));
   }
 
@@ -15333,6 +16003,8 @@ const App = (() => {
     ];
     document.getElementById('marketRealTimeLedgerResults').innerHTML =
       `<table><thead><tr><th>账本科目</th><th>金额</th></tr></thead><tbody>${ledgerRows.map(([label, value]) => `<tr><td>${label}</td><td>${marketFmt(value, 6)}</td></tr>`).join('')}</tbody></table>`;
+    enhanceResultTablesIn(document.querySelector('[data-result-group="market"]'),
+      { module: 'real_time_market' });
     requestAnimationFrame(() => renderRealTimeMarketCharts(data));
   }
 
@@ -15456,6 +16128,8 @@ const App = (() => {
     html += rounds.length ? '</tbody></table>' : '<tr><td colspan="12">无博弈结果</td></tr></tbody></table>';
     document.getElementById('marketGameRoundResults').innerHTML = html;
     requestAnimationFrame(() => renderMarketGameCharts(data));
+    enhanceResultTablesIn(document.querySelector('[data-result-group="market"]'),
+      { module: 'market_game' });
   }
 
   async function runMarketGame() {
@@ -17545,7 +18219,18 @@ const App = (() => {
       });
     });
     document.getElementById('btnConsoleHeaderToggle')?.addEventListener('click', () => {
+      // While the problems view is active, the console tab switches back to the
+      // log view instead of collapsing; collapse only applies to the log view.
+      if (_consoleView !== 'log') {
+        switchConsoleView('log');
+        if (_workspaceLayout?.consoleCollapsed) updateWorkspaceLayout({ consoleCollapsed: false });
+        return;
+      }
       updateWorkspaceLayout({ consoleCollapsed: !_workspaceLayout.consoleCollapsed });
+    });
+    document.getElementById('btnProblemsTab')?.addEventListener('click', () => {
+      switchConsoleView('problems');
+      if (_workspaceLayout?.consoleCollapsed) updateWorkspaceLayout({ consoleCollapsed: false });
     });
     document.addEventListener('keydown', event => {
       if (event.defaultPrevented || event.key.toLowerCase() !== 'f' || !event.shiftKey ||
@@ -20306,6 +20991,8 @@ const App = (() => {
 	        }
 	      }
 	      document.getElementById('reliabilityResults').innerHTML = html;
+	      enhanceResultTablesIn(document.getElementById('reliabilityResults'),
+	        { module: 'reliability' });
 	      drawReliabilityDashboard(data, method);
 	      if (typeof Canvas !== 'undefined' && Canvas.showReliabilityImpactResults) {
 	        Canvas.showReliabilityImpactResults(data);
@@ -23753,9 +24440,15 @@ const App = (() => {
       target.click();
     });
 
-    // Console clear
-    document.getElementById('btnClearConsole').addEventListener('click', () => {
-      document.getElementById('consoleLog').innerHTML = '';
+    // Console clear — clears whichever bottom view is active (log or problems)
+    document.getElementById('btnClearConsole').addEventListener('click', clearActiveConsoleView);
+
+    // Problems panel: delegated "定位" buttons reuse the canvas navigation APIs.
+    document.getElementById('problemList')?.addEventListener('click', (ev) => {
+      const btn = ev.target.closest('.problem-locate');
+      if (!btn) return;
+      const entry = _problems.find(p => String(p.id) === btn.dataset.problemId);
+      if (entry) locateProblemTarget(entry);
     });
 
     // Right panel resizer
@@ -23802,6 +24495,18 @@ const App = (() => {
     log('HySim-XJTU-HRPES 已启动', 'success');
     log('使用左侧元件库拖放元件到画布，或加载内置算例', 'info');
 
+    // Warn before leaving with unsaved canvas edits. The flag clears on any
+    // successful backend sync or fresh model load (see _canvasDirty writers),
+    // so the prompt only appears while there is real unsaved work.
+    window.addEventListener('beforeunload', (event) => {
+      if (!_canvasDirty) return;
+      event.preventDefault();
+      event.returnValue = '';
+    });
+    // Periodic localStorage draft of a dirty canvas + restore prompt if one
+    // exists from a previous session (skipped for headless large systems).
+    initCanvasDraft();
+
     // ---- Toolbar default state ----
     Canvas.setMode('select');
     setActiveCanvasTool('btnSelect');
@@ -23819,6 +24524,15 @@ const App = (() => {
     init,
     log,
     setStatus,
+    toast,
+    reportProblem,
+    // Result-table progressive enhancement + property-field validation helpers,
+    // exposed for node smoke tests (see tmp/result_table_smoke.mjs).
+    enhanceResultTable,
+    enhanceResultTablesIn,
+    splitPropertyLabelUnit,
+    attachNumberFieldValidation,
+    validatePropJsonTextarea,
     onSelectionChanged,
     onTopologyChanged,
     onSystemLoaded,

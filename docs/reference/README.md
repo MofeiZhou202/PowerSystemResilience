@@ -4,7 +4,7 @@
 
 | 范围 | 文档 |
 |---|---|
-| C++ 公共门面 | [公共 API 技术手册](../Api/api_manual.tex) |
+| C++ 公共门面 | [公共 API 技术手册](../modules/api/api_manual.tex) |
 | HTTP 与会话 API | [运行时 API](../runtime_api.md) |
 | Python 客户端 | [Python API](../python_api.md) |
 | 参数注册与生效值 | [参数系统](../parameter_system.md) |

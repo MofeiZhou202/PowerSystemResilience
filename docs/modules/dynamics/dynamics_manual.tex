@@ -1,0 +1,131 @@
+% !TEX program = xelatex
+% 编译方式：在本目录执行两遍 xelatex（详见 docs/_manual_common/README.md）。
+% 源码依据：src/dynamics/ 与 include/hacdcpf/dynamics/（含 devices/ integration/ solvers/）源码及
+%           docs/transient_runtime.md，公式与参数以代码为准。
+\documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
+\usepackage{../../_manual_common/hysim_manual}
+
+\title{\textbf{交直流混合高弹性能源电力系统仿真平台}\\[0.5em]
+       {\Large 机电暂态（动力学）技术手册}\\[0.3em]
+       {\large 数学模型、接口参数、验证校核与工业级评价}}
+\author{HySim-XJTU-HRPES（西安交通大学 HRPES 团队）}
+\date{\today}
+
+\begin{document}
+\maketitle
+\begin{abstract}
+\noindent 本手册依据 HySim-XJTU-HRPES 平台机电暂态（动力学）模块
+（\srcpath{src/dynamics/}、\srcpath{include/hacdcpf/dynamics/}，含 \srcpath{devices/}、
+\srcpath{integration/}、\srcpath{solvers/} 子目录）整理，命名空间 \texttt{hacdcpf::dynamics}，
+总入口头 \srcpath{include/hacdcpf/dynamics/dynamics.hpp}。手册覆盖相量域机电暂态稳定 DAE 的
+两类求解架构（分块积分与质量矩阵 DAE）、丰富设备模型库与小信号/模态分析。全部结论以源码与
+\srcpath{docs/transient\_runtime.md} 契约为准：暂态为相量域方法，支路 P/Q 仅在求解器记录端口
+电流后可用，电压健康失败与初始化不收敛保持为可见错误，不被改写为收敛。版式与《碳流追踪与碳排放
+核算技术手册》一致。
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{阅读指南与约定}
+\subsection{数据来源}
+\begin{itemize}
+  \item \srcpath{include/hacdcpf/dynamics/DynamicSolver.hpp} —— 暂态主入口、事件回放、小信号与
+        刚性求解器选择声明；
+  \item \srcpath{include/hacdcpf/dynamics/DynamicSolverOptions.hpp} —— 求解器类型、步长、容差、
+        雅可比模式等选项；
+  \item \srcpath{include/hacdcpf/dynamics/DynamicResults.hpp} —— 结果、快照、模态摘要与孤岛频率结构；
+  \item \srcpath{include/hacdcpf/dynamics/integration/}、\srcpath{solvers/} —— 显式/隐式积分器与
+        质量矩阵 DAE、稀疏牛顿求解；
+  \item \srcpath{include/hacdcpf/dynamics/devices/} —— 同步机、励磁、调速、构网/跟网逆变器、VSC、
+        电池、IEEE 1547 保护模型；
+  \item \srcpath{docs/transient\_runtime.md} —— 运行时契约与边界；
+  \item \srcpath{tests/test\_transient\_dynamics.cpp} 等 —— 验证依据。
+\end{itemize}
+命名空间为 \texttt{hacdcpf::dynamics}。
+
+\subsection{单位制与索引空间}
+时间单位 s、频率 Hz、ROCOF Hz/s、相角 rad、功率 MW（或标幺 pu）、电压相量 pu。状态向量
+\fld{state}（\texttt{VectorXd}）按设备状态排布；交流三相电压 \fld{vac\_abc}（\texttt{VectorXcd}）、
+直流电压 \fld{vdc} 分列；每个孤岛给出重心频率 \fld{coi\_frequency\_hz} 与 \fld{coi\_rocof\_hz\_s}，
+孤岛频率见 \fld{island\_frequencies}。索引空间与动态设备装配顺序一致。
+
+\subsection{诚实口径}
+暂态为相量域方法：暂态帧不得用静态潮流公式计算支路 P/Q，动态支路潮流只有在求解器记录端口
+电流/功率后才出现（此前 \texttt{capabilities.branch\_power=false}）。与 GridLAB-D/OpenDSS 的
+对比仅校核共享的平衡快照范围，并不认证逆变器、电机、直流环节、储能或事件方程。电压健康失败与
+初始化不收敛保持为可见错误，不得改写为收敛。
+
+\section{功能定位与架构}
+\subsection{公共入口族}
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{6.6cm}L{3.0cm}L{5.4cm}@{}}
+\toprule
+入口 & 定义位置 & 说明\\
+\midrule
+\srcpath{run\_transient\_simulation} & dynamics/DynamicSolver.hpp & 一次调用完成暂态仿真：建系、潮流初始化、时域积分\\
+\srcpath{DynamicSolver::solve} & 同上 & 在已建好的 \texttt{DynamicSystem} 上求解\\
+\srcpath{applyDynamicEventsThrough} & 同上 & 事件回放：按时刻施加扰动并记录\\
+\srcpath{summarize\_small\_signal} & 同上 & 当前工作点的小信号/模态筛查\\
+\srcpath{maybe\_auto\_select\_stiff\_solver} & 同上 & 成本排序的稳定积分器阶梯自动选择\\
+\srcpath{to\_csv} / \srcpath{to\_modal\_report} & dynamics/DynamicResults.hpp & 时序结果与模态报告渲染\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{关键数据结构}
+\compmeta{DynamicSolverOptions}{include/hacdcpf/dynamics/DynamicSolverOptions.hpp}
+主要字段：\fld{solver\_type}（\texttt{DynamicSolverType}：PartitionedEuler/Heun/RK4、
+BackwardEulerNewton、TrapezoidalNewton、RosenbrockEuler、MassMatrixDae）、
+\fld{t\_start\_s}/\fld{t\_end\_s}/\fld{dt\_s}、\fld{abs\_tol}/\fld{rel\_tol}/\fld{newton\_tol}、
+\fld{dae\_jacobian\_mode}（FiniteDifference/\allowbreak HybridAnalytic/\allowbreak HybridAnalyticColored）、
+\fld{auto\_select\_stiff\_solver}、\fld{compute\_small\_signal}、\fld{enable\_der\_protection}。
+
+\compmeta{DynamicResults}{include/hacdcpf/dynamics/DynamicResults.hpp}
+主要字段：\fld{success}、\fld{snapshots}（\texttt{DynamicSnapshot} 序列）、\fld{initialization}、
+\fld{modal}（\texttt{DynamicModalSummary}）、\fld{applied\_event\_records} 与求解统计
+\fld{newton\_iterations}、\fld{linear\_factorizations}、\fld{rejected\_steps}。快照
+\texttt{DynamicSnapshot} 含 \fld{time\_s}、\fld{state}、\fld{vac\_abc}、\fld{vdc}、
+\fld{coi\_frequency\_hz}、\fld{coi\_rocof\_hz\_s}、\fld{island\_frequencies}、\fld{device\_outputs}；
+模态摘要含特征值、\fld{damping\_ratio}、\fld{min\_damping\_ratio}、\fld{stable}；孤岛频率
+\texttt{DynamicIslandFrequency} 含各岛重心频率与 \fld{total\_inertia\_mws}。
+
+\input{chapters/source_equivalent_solver}
+
+\section{接口与参数}
+\begin{paramtable}
+\fld{solver\_type} & — & — & 见正文枚举 & — & 时域积分器（分块或质量矩阵 DAE）\\
+\fld{t\_start\_s} & $t_0$ & s & — & — & 仿真起始时刻（另有 \fld{t\_end\_s}）\\
+\fld{dt\_s} & $\Delta t$ & s & $10^{-3}\sim10^{-2}$ & — & 积分步长\\
+\fld{abs\_tol} & — & — & 小正数 & — & 绝对误差容差（另有 \fld{rel\_tol}）\\
+\fld{newton\_tol} & — & — & 小正数 & — & 隐式步牛顿收敛容差\\
+\fld{dae\_jacobian\_mode} & — & — & 枚举 & — & 有限差分/混合解析/着色混合解析\\
+\fld{auto\_select\_stiff\_solver} & — & — & 布尔 & — & 刚性时自动切换稳定积分器\\
+\fld{compute\_small\_signal} & — & — & 布尔 & — & 是否输出小信号/模态摘要\\
+\fld{enable\_der\_protection} & — & — & 布尔 & — & 启用 IEEE 1547 DER 保护\\
+\fld{success} & — & — & 布尔 & — & 结果：整体是否成功\\
+\fld{min\_damping\_ratio} & $\zeta_{\min}$ & — & — & — & 结果：最小阻尼比（模态摘要）\\
+\end{paramtable}
+求解统计 \fld{newton\_iterations}、\fld{linear\_factorizations}、\fld{rejected\_steps} 随结果返回，
+用于评估刚性与步长自适应表现。
+
+\section{验证与边界局限}
+\subsection{验证与校核}
+注册测试：\srcpath{test\_transient\_dynamics}（\srcpath{tests/test\_transient\_dynamics.cpp}）、
+\srcpath{test\_dynamic\_model\_catalog}（\srcpath{tests/test\_dynamic\_model\_catalog.cpp}），以及
+ctest 项 \srcpath{transient\_native\_disturbance\_matrix}（标签
+\texttt{dynamics;transient;validation}，来自目标 \srcpath{transient\_validation\_matrix}）。
+
+\subsection{边界与局限（如实标注）}
+\begin{itemize}
+  \item 仅相量域：暂态帧不得用静态潮流公式算支路 P/Q，动态支路潮流须待求解器记录端口电流/功率后
+        才可用（此前 \texttt{capabilities.branch\_power=false}）；
+  \item 与 GridLAB-D/OpenDSS 的对比仅校核共享的平衡快照范围，不认证逆变器、电机、直流环节、储能或
+        事件方程；
+  \item 电压健康失败与初始化不收敛保持为可见错误，不得改写为收敛；
+  \item 权威文档 \srcpath{docs/transient\_runtime.md}；历史理论见
+        \srcpath{docs/archive/theory/dynamics\_electromechanical\_transient\_design.md}。
+\end{itemize}
+\input{../../_manual_common/industrial_evaluation}
+
+\end{document}

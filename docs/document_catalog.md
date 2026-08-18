@@ -29,20 +29,19 @@
 | `modules/**/*.md` | 模块文档 | [模块手册](modules/README.md) |
 | `reference/**/*.md` | API 与数据参考 | [API 与数据参考](reference/README.md) |
 | `tutorials/**/*.md` | 示例与教程 | [示例与教程](tutorials/README.md) |
-| `validation/**/*.md`、`harmonics_analysis/**/*.md` | 测试与验证 | [测试与验证](validation/README.md) |
+| `testing/**/*.md` | 测试与验证 | [测试与验证](testing/README.md) |
 | `operations/**/*.md` | 部署与运维 | [部署与运维](operations/README.md) |
 | `research/**/*.md` | 研究资料 | [研究资料](research/README.md) |
 | `planning/**/*.md` | 规划与演进 | [规划与演进](planning/README.md) |
 | `_manual_common/**/*.md` | LaTeX 手册维护 | [_manual_common 说明](_manual_common/README.md) |
-| `Analysis/README.md`、`Api/README.md`、`CarbonAnalysis/README.md`、`Dynamics/README.md`、`EvPowerTraffic/README.md`、`Graph/README.md`、`HarmonicsPowerFlow/README.md`、`IntegratedEnergy/README.md`、`IO/README.md`、`Market/README.md`、`NetworkReconfiguration/README.md`、`PowerModels/README.md`、`Reliability/README.md`、`Resilience/README.md`、`ScenarioGeneration/README.md`、`ShortCircuit/README.md`、`SPPT/README.md`、`TimeSeries/README.md` | 模块文档 | [模块手册索引](modules/README.md) |
 | `archive/**/*.md` | 历史归档 | [归档索引](archive/README.md)；不得作为当前行为证据 |
 | `latex/paper/**/*.md` | 论文伴随材料 | [论文工作区索引](latex/paper/README.md)；由每篇论文 README 管理 |
 | `latex/**/*.md`（不含 `paper/`） | LaTeX 研究资料 | [LaTeX 文档说明](latex/README.md) |
 
 ## LaTeX 归属
 
-- 工业手册：`ComponentModels/`、`PowerFlow/`、`OptimalPowerFlow/` 以及
-  [18 个模块目录](modules/README.md)。
+- 工业手册：与 `src/` 顶层目录严格同名的
+  [23 个 `modules/<module>/` 目录](modules/README.md)。
 - 研究论文：`latex/paper/`，由 [论文工作区索引](latex/paper/README.md) 逐篇登记。
 - 专题长文、章节片段与生成证据：`latex/`，由 [LaTeX 文档说明](latex/README.md) 分类。
 - 历史 LaTeX 审计：`archive/`，由 [归档索引](archive/README.md) 管理。

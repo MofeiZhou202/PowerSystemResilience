@@ -1,0 +1,240 @@
+% !TEX program = xelatex
+% 编译方式：xelatex power_flow_manual.tex（需两遍以生成目录）
+% 修订版 1：依据 2026-07-22 代码库（tem_write）修订，章节源文件位于 chapters1/。
+\documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
+
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs,longtable,array}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage[european,straightvoltages]{circuitikz}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=black,urlcolor=blue}
+
+% ── 统一参数表环境 ────────────────────────────────────────────────
+% 六列：字段名 | 符号 | 单位 | 典型范围 | 默认值 | 说明
+\emergencystretch=3em
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newenvironment{paramtable}{%
+  \begin{footnotesize}
+  \begin{longtable}{@{}L{3.2cm}L{1.3cm}L{1.6cm}L{2.3cm}L{1.5cm}L{4.3cm}@{}}
+  \toprule
+  \textbf{字段名} & \textbf{符号} & \textbf{单位} & \textbf{典型范围} & \textbf{默认值} & \textbf{说明}\\
+  \midrule
+  \endfirsthead
+  \multicolumn{6}{@{}l}{\footnotesize（续表）}\\
+  \toprule
+  \textbf{字段名} & \textbf{符号} & \textbf{单位} & \textbf{典型范围} & \textbf{默认值} & \textbf{说明}\\
+  \midrule
+  \endhead
+  \midrule
+  \multicolumn{6}{r@{}}{\footnotesize（接下页）}\\
+  \endfoot
+  \bottomrule
+  \endlastfoot
+}{%
+  \end{longtable}
+  \end{footnotesize}
+}
+
+% 字段名排版（下划线需转义后传入；\_ 处允许换行以防超长字段名溢出版心）
+\makeatletter
+\newcommand{\fld}[1]{\texttt{\fld@scan#1\fld@stop}}
+\def\fld@scan#1{%
+  \ifx#1\fld@stop
+  \else
+    \ifx#1\_\_\allowbreak\else#1\fi
+    \expandafter\fld@scan
+  \fi}
+\makeatother
+% 模块元信息行：#1=求解器/类名  #2=头文件路径
+\newcommand{\compmeta}[2]{\noindent\textbf{代码结构体：}\texttt{#1}\hfill
+  \textbf{定义位置：}\texttt{#2}\par\smallskip}
+
+% 可断行的源码路径/函数名（/ 与 \_ 处允许换行）
+\makeatletter
+\newcommand{\srcpath}[1]{\texttt{\src@scan#1\src@stop}}
+\def\src@scan#1{%
+  \ifx#1\src@stop
+  \else
+    \ifx#1\_\_\allowbreak\else
+    \ifx#1/#1\allowbreak\else
+    #1\fi\fi
+    \expandafter\src@scan
+  \fi}
+\makeatother
+
+\title{\textbf{交直流混合高弹性能源电力系统仿真平台}\\[0.5em]
+       {\Large 潮流计算技术手册}\\[0.3em]
+       {\large 数学模型、算法流程、参数选项与验证校核}\\[0.3em]
+       {\large 修订版 1（依据 2026-07-22 代码库修订）}}
+\author{HySim-XJTU-HRPES（西安交通大学 HRPES 团队）}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+\begin{abstract}
+\noindent 本手册依据 HySim-XJTU-HRPES 平台 C++ 源代码中的潮流计算模块
+（\texttt{src/\allowbreak power\_flow/} 与 \texttt{include/\allowbreak hacdcpf/\allowbreak power\_flow/} 目录）
+整理，覆盖统一 Newton 混合交直流潮流核心、经典交流求解器（FDPF、线性化直流潮流、
+分布式松弛、自适应孤岛）、全局化与鲁棒求解器族（非线性缩放、非单调线搜索、
+LM 信赖域、伪瞬态延拓、NCP 半光滑 Newton、HELM、同伦延拓、Newton--Krylov）、
+直流网络与换流器稳态建模、配电网前推回代潮流、三相相域潮流与三相混合潮流、
+电压稳定连续潮流（CPF），并给出全部选项字段的默认值、结果与诊断数据结构、
+以及测试验证体系。文档风格与本平台《元件模型技术手册》一致，全部公式逐条注明
+源码出处（文件:行号）。
+
+\smallskip
+\noindent\textbf{修订版 1 说明}：本版对照 2026-07-22 代码库修订，相对初版的主要变化为——
+CPF 求解器重写为默认弧长延拓（可翻越鼻点）；FDPF 与残差求值器注入计算稀疏化并支持
+逐母线 ZIP；LCC 换流站模型整体移除；\fld{PowerFlowOptions} 新增
+\fld{enforce\_converter\_physical\_limits} 硬约束选项；\fld{SolverWorkspace} 落地并被
+Newton 求解器复用；求解器工厂层经新增的 \srcpath{solver\_interface.cpp} 完整接线；
+HELM/同伦/Newton--Krylov/CPF 新增专项回归测试。全部受影响行号引用已逐一重新核实。
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{阅读指南与约定}
+
+\subsection{数据来源}
+本手册全部内容取自以下源代码与文档，公式与参数均以代码为准：
+\begin{itemize}
+  \item \texttt{src/power\_flow/} —— 35 个实现文件，潮流求解器全部实现；
+  \item \texttt{include/hacdcpf/power\_flow/} —— 求解器头文件（含 \texttt{solvers/}、
+        \texttt{globalization/}、\texttt{assembly/} 三个子目录的规范头）；
+  \item \texttt{include/hacdcpf/assembly/} 与 \texttt{src/power\_flow/solver\_data.cpp} ——
+        SolverData 装配与索引映射；
+  \item \texttt{src/api/hacdcpf.cpp} —— 公共 API 门面（求解分发、缓存、结果回投影）；
+  \item \texttt{include/hacdcpf/engine/solver/native/nle/newton\_solver.hpp} ——
+        Newton 求解器规范头（\texttt{power\_flow/} 下同名头为转发层）；
+  \item \texttt{docs/technical\_notebook/sections/03\_power\_flow.tex}、
+        \texttt{05\_advanced\_pf.tex}、\texttt{12\_pf\_options\_results.tex} ——
+        既有技术笔记，本手册与之交叉核对；
+  \item \texttt{docs/multiple\_converter.md}、\texttt{docs/multiple\_converter\_r1.md} ——
+        多换流器建模设计文档；
+  \item \texttt{tests/} 与 \texttt{tools/} —— 验证与校核章节的测试矩阵来源。
+\end{itemize}
+文中所有“\texttt{文件:行号}”引用基于当前代码检出处，代码演进后行号可能漂移，
+但函数名与文件路径保持稳定。
+
+\subsection{单位制约定}
+平台统一采用 MW·kV·MVA 单位制配合标幺值：系统基准功率
+$S_{\mathrm{base}}=100$~MVA（\texttt{Defaults::kBaseMva}），基准频率 50~Hz。
+潮流方程内部一律以标幺值求解；对外结果中支路功率以 MW/Mvar 给出，
+母线电压幅值以 pu、相角以度（$^\circ$）给出。三相相域潮流采用每相基准
+$S_{\mathrm{base},1\phi}=S_{\mathrm{base}}/3$。ZIP 负荷权重三元组顺序为
+（恒功率、恒电流、恒阻抗），默认 $(1,0,0)$ 即纯恒功率。
+
+\subsection{编号与符号约定}
+\begin{itemize}
+  \item \textbf{失配约定}：全平台统一 $\mathrm{mismatch}=F^{\mathrm{spec}}-F^{\mathrm{calc}}$
+        （指定值减计算值），线性系统 $J\,\Delta x=\mathrm{mismatch}$ 中
+        $J=\partial F^{\mathrm{calc}}/\partial x$；对 $F=0$ 的标准 Newton 与此等价，
+        符号被吸进 $J$ 的装配。
+  \item \textbf{注入约定}：节点注入以\textbf{发电为正、负荷为负}；换流器端口注入为正时
+        满足 $P_{ac}+P_{dc}+P_{loss}=0$。
+  \item \textbf{三类 ID 纪律}：组件 \texttt{.index}（对外稳定）、向量下标（内部 0-based）、
+        图节点索引（临时）不混用；对外报告必须经映射回到稳定 ID。
+  \item \textbf{AC/DC 域隔离}：AC 与 DC 母线编号空间独立，跨域传递一律走
+        domain-qualified 映射（\fld{ac\_bus\_id\_to\_node\_idx} /
+        \fld{dc\_bus\_id\_to\_node\_idx}）。
+\end{itemize}
+
+\subsection{求解器家族总览}
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}llll@{}}
+\toprule
+求解器 & 入口函数 & 适用网络 & 定位\\
+\midrule
+统一 Newton & \srcpath{solve\_power\_flow} & 混合 AC/DC & \textbf{生产主路径}（联立 NR）\\
+FDPF & \srcpath{solve\_power\_flow\_fdpf} & 纯 AC & 快速解耦（FDXB 变体）\\
+线性化直流潮流 & \srcpath{solve\_ac\_linearized\_dc} & 纯 AC & $B\theta=P$ 一次求解\\
+DC 网络求解器 & \srcpath{solve\_dc\_power\_flow} & 纯 DC & $V\odot GV=P$ 非线性 Newton\\
+自适应孤岛 & \srcpath{solve\_power\_flow\_adaptive} & 混合 AC/DC & 分岛独立求解+死岛置零\\
+分布式松弛 & \srcpath{solve\_power\_flow\_distributed\_slack} & 混合 AC/DC & 不平衡按参与因子分摊\\
+HELM & \srcpath{HelmSolver::solve} & 纯 AC & 全纯嵌入，无初值依赖\\
+同伦延拓 & \srcpath{HomotopyContinuationSolver} & 混合 AC/DC & 收敛兜底（鲁棒管线 Phase 4）\\
+Newton--Krylov & （内嵌于 Newton 回退） & 混合 AC/DC & 病态雅可比的 GMRES 内迭代\\
+配网 BFS & \srcpath{analysis::solve\_distribution\_pf} & 辐射状 AC & 前推回代+调压器外环\\
+三相 NR & \srcpath{analysis::solve\_three\_phase\_nr} & 三相 AC & abc 相域极坐标 NR\\
+三相混合 & \srcpath{solve\_three\_phase\_hybrid\_pf} & 三相 AC+DC & 相域 AC 与 DC 联立\\
+CPF & \srcpath{CpfSolver::solve} & 混合 AC/DC & 电压稳定/负荷裕度\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{验证通道总览}
+各求解器节末的“验证与校核”小节给出具体对照依据，总体通道如下：
+\begin{itemize}
+  \item \textbf{MATPOWER 算例回归}：\srcpath{external\_data/matpower/} 85 个 .m 算例
+        分三档（Tier1 九算例逐案断言、Tier2 约 60 算例批收敛率、Tier3 大系统至
+        case\_SyntheticUSA 约 8.2 万节点），另有 \srcpath{tools/matpower\_benchmark.py}
+        与 \srcpath{tools/matpower\_pf\_compare.cpp} 的逐母线电压对照；
+  \item \textbf{OpenDSS}（dss\_capi 桥）：相域潮流 IEEE13/IEEE123/Step 系列教学算例、
+        配网 BFS 与 case33bw 全三相对照、调压器闭环；由
+        \srcpath{HACDCPF\_ENABLE\_OPENDSS(\_COMPARE)} 门控；
+  \item \textbf{GridLAB-D}：平衡馈线快照对照（运行时探测可执行文件，缺失自动 skip）；
+  \item \textbf{解析解与自建算例}：两节点解析解、雅可比中心差分校验
+        （\srcpath{src/power\_flow/jacobian\_check.cpp}）、独立残差复算
+        （\srcpath{src/power\_flow/residual\_evaluator.cpp}，稀疏复数形式）；
+  \item \textbf{能力合同与 GUI 端到端}：\srcpath{tools/validate\_case\_capabilities.py}
+        （NR/FDPF/DC 三法互验）与 \srcpath{tools/gui\_api\_e2e.py}。
+\end{itemize}
+
+\subsection{现状与诚实口径声明}
+以下事项在各章节均有对应标注，此处集中声明（如实）：
+\begin{enumerate}
+  \item \textbf{HELM、同伦延拓、CPF、Newton--Krylov 当前无生产 API 自动挂接}：
+        前三者由测试/GUI 直接驱动或作为选项层暴露的能力，Newton--Krylov 默认关闭、
+        仅在条件数代理越限时可选回退；四者现均已有专项冒烟回归
+        （\srcpath{test\_helm\_solver.cpp}、\srcpath{test\_homotopy\_continuation.cpp}、
+        \srcpath{test\_voltage\_stability.cpp}、\srcpath{test\_newton\_krylov.cpp}），
+        但大系统与生产路径回归仍缺，覆盖总体仍薄（见第~11~章）。
+  \item \textbf{换流器物理不等式约束（容量圆、交流/直流电流限、调制比、占空比）
+        未嵌入 Newton 方程}，默认仅做事后校核并按 \texttt{ACDC-PHYS-01..05}、
+        \texttt{DCDC-PHYS-01} 告警；新增 opt-in 选项
+        \fld{enforce\_converter\_physical\_limits} 可将越限 Newton 根判为物理不可行
+        （见第~6、10~章）；结果中的 \fld{converter\_model\_scope} 如实声明
+        模型覆盖边界。
+  \item \textbf{FDPF 注入计算已稀疏化}：注入按稀疏复数形式
+        $S_i=V_i\,\mathrm{conj}((Y_{bus}V)_i)$ 计算（$O(\mathrm{nnz})$），
+        指定注入在组件聚合负荷下采用逐母线 ZIP 系数；初版所述稠密 $O(n^2)$
+        双重循环已移除。
+  \item \textbf{CPF 默认启用弧长延拓}（\fld{enable\_arc\_length}=true）：
+        $\lambda$ 作为增广未知量参与校正，可翻越鼻点并按
+        \fld{lower\_branch\_steps} 保留若干下支点；\fld{enable\_arc\_length}=false
+        时保留初版所述自然参数化模式。电压稳定指标仍仅负荷裕度族，无 $L$ 指标。
+  \item \texttt{include/hacdcpf/power\_flow/workspace.hpp} 的
+        \texttt{SolverWorkspace} 已落地（\srcpath{prepare\_state} /
+        \srcpath{prepare\_equations} / \srcpath{reset\_iteration}），并被
+        Newton 求解器按实例复用（带递归守卫）；符号模式缓存仍靠 PatternCache。
+  \item 求解器抽象层已完整接线：\srcpath{src/power\_flow/solver\_interface.cpp}
+        实现 \srcpath{build\_power\_flow\_problem} 与六个工厂求解器；
+        但生产门面仍直连 thread\_local \srcpath{engine::NewtonSolver}，
+        不经过工厂层。
+  \item \textbf{LCC 换流站模型已整体移除}（\srcpath{lcc\_model.cpp/.hpp}、
+        \fld{SolverData::lcc\_converters}、API 结果字段 \fld{lcc\_transfers}），
+        残差、雅可比与 DC 岛参考规划中相应分支一并删除；混合交直流建模仅剩
+        VSC 与 DC/DC 两条路径（见第~6~章）。
+\end{enumerate}
+
+\newpage
+\input{chapters/overview}
+\input{chapters/assembly}
+\input{chapters/newton}
+\input{chapters/classic_solvers}
+\input{chapters/robust_solvers}
+\input{chapters/hybrid_acdc}
+\input{chapters/distribution}
+\input{chapters/three_phase}
+\input{chapters/cpf}
+\input{chapters/options_results}
+\input{chapters/validation}
+\input{../../_manual_common/industrial_evaluation}
+
+\end{document}

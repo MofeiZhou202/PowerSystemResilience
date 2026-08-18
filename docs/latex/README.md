@@ -4,7 +4,7 @@
 
 | 类型 | 位置 | 判定标准 |
 |---|---|---|
-| 工业技术手册 | `../ComponentModels/`、`../PowerFlow/`、`../OptimalPowerFlow/` 及 18 个模块目录 | 面向当前实现，覆盖接口、模型、算法、验证与局限 |
+| 工业技术手册 | `../modules/<module>/` 的 23 个模块目录 | 面向当前实现，覆盖接口、模型、算法、验证与局限 |
 | 完整研究论文 | `paper/<论文目录>/` | 有独立主文件、参考文献、图表与复现说明 |
 | 专题长文 | `platform_overview.tex`、`sppt_theory.tex`、`time_series_annual_simulation_zh.tex` | 跨模块综述或单专题完整推导 |
 | 章节片段 | `dr_effects_zh_part.tex`、`sppt_*_scope.tex` 等 | 由其他主文档 `\input`，不可独立构成契约 |
@@ -15,7 +15,7 @@
 
 ## 模块手册编译
 
-每个模块目录包含主 `.tex` 与 `hysim_manual.sty`。在模块目录执行：
+每个模块目录包含一个主 `.tex`，并引用 `../../_manual_common/hysim_manual.sty`。在模块目录执行：
 
 ```bash
 xelatex <module>_manual.tex
@@ -28,7 +28,7 @@ xelatex <module>_manual.tex
 python3 /path/to/compile_latex.py /absolute/path/to/<module>_manual.tex --engine xelatex
 ```
 
-第一次生成版面，第二次更新目录和交叉引用。18 部新增模块手册固定使用 TeX Live 随附的
+第一次生成版面，第二次更新目录和交叉引用。23 部模块手册固定使用 TeX Live 随附的
 Fandol 中文字体集，避免依赖 Windows 字体；不得为了通过编译而删除中文内容。
 
 ## 验收清单

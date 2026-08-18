@@ -1,73 +1,12 @@
-# 模块技术手册共享说明（HySim-XJTU-HRPES）
+# 模块技术手册共享资源
 
-本目录保存 18 个源码模块技术手册的**共享排版样式** `hysim_manual.sty`，
-版式规范来源为既有的两部标杆手册：
+本目录保存 23 部模块手册共用的排版和工业评价资源：
 
-- `docs/PowerFlow/power_flow_manual1.tex`（潮流计算技术手册）
-- `docs/OptimalPowerFlow/opf_manual.tex`（最优潮流技术手册）
+- `hysim_manual.sty`：中文字体、表格、源码路径和字段宏；
+- `industrial_evaluation.tex`：复杂度、数值稳定性、异常、测试和工业指标的统一章节框架。
 
-两部标杆手册把导言区（参数表环境 `paramtable`、字段宏 `\fld`、源码路径宏
-`\srcpath`、元信息宏 `\compmeta`）内嵌在各自主文件中。为保证 18 个新增模块
-手册版式**逐字节一致**，此处将该导言区抽取为唯一规范的样式包
-`hysim_manual.sty`，并在每个模块文件夹内保留一份逐字节相同的副本，使每个
-文件夹都能“整包复制到纯 ASCII 路径后独立编译”。
+所有模块从 `docs/modules/<module>/` 以 `../../_manual_common/...` 引用这些文件。共享资源只规定
+版式和评价结构，不提供物理公式；模块公式必须来自对应 `src/<module>/` 的当前实现。
 
-## 覆盖的模块手册（与 `src/` 模块一一对应）
-
-| 文件夹 | 源码模块 | 对应 `src/` 目录 |
-|---|---|---|
-| `docs/Analysis/` | 承载力·薄弱环节·反事实规划 | `src/analysis/` |
-| `docs/Api/` | 公共门面与能力查询 | `src/api/` |
-| `docs/CarbonAnalysis/` | 碳流追踪·年度碳·GEC | `src/carbon_analysis/` |
-| `docs/Dynamics/` | 机电暂态 DAE | `src/dynamics/` |
-| `docs/EvPowerTraffic/` | 电-交通耦合 A–H | `src/ev_power_traffic/` |
-| `docs/Graph/` | 图建模·拓扑·降阶 | `src/graph/` |
-| `docs/HarmonicsPowerFlow/` | 谐波潮流 | `src/harmonics_power_flow/` |
-| `docs/IntegratedEnergy/` | 园区综合能源 MILP | `src/integrated_energy/` |
-| `docs/IO/` | 数据接口与格式适配 | `src/io/` |
-| `docs/Market/` | 电力市场仿真 | `src/market/` |
-| `docs/NetworkReconfiguration/` | 网络重构 | `src/network_reconfiguration/` |
-| `docs/PowerModels/` | MIPSolvers AML 建模层 | `src/power_models/` |
-| `docs/Reliability/` | 可靠性评估 | `src/reliability/` |
-| `docs/Resilience/` | 弹性恢复 | `src/resilience/` |
-| `docs/ScenarioGeneration/` | 场景生成·台风 | `src/scenario_generation/` |
-| `docs/ShortCircuit/` | 短路计算 | `src/short_circuit/` |
-| `docs/SPPT/` | 语义保持投影理论验证层 | `src/sppt/` |
-| `docs/TimeSeries/` | 时序潮流·年度生产·全生命周期 | `src/time_series/` |
-
-## 每部手册的统一结构与写作规范
-
-与两部标杆手册一致，每节遵循：
-
-> 功能定位 → 数学模型/算法（公式逐条注明源码出处 文件:行号）→
-> 参数表（字段名｜符号｜单位｜典型范围｜默认值｜说明，六列）→
-> 验证与校核 → 边界与局限（如实标注近似/fallback/未实现项）。
-
-写作硬约束（继承仓库文档政策）：
-
-- 全部模型、参数、结论以源码为准（`include/`、`src/`、`tests/`）；
-- 每个公开结果向量必须声明索引空间与单位；
-- 每个近似/回退/时限/模型覆盖不足必须写入 `model_scope`／`ValidityFlags`／
-  `model_limitations` 的对应说明；
-- 不提交渲染 PDF、`.aux`、`.log` 等构建产物。
-
-## 本地编译
-
-18 部新增手册使用 TeX Live 随附的 Fandol 中文字体集，不依赖 Windows 的 SimSun。
-在模块目录执行两遍：
-
-```
-xelatex <module>_manual.tex
-xelatex <module>_manual.tex
-```
-
-第一遍排版、第二遍生成目录与交叉引用。生成后进行页面渲染检查；不要提交
-PDF、`.xdv` 或辅助文件。
-
-## 当前状态（工业评估版）
-
-18 部手册均已建立**源码支撑的工业评估结构**：包含功能定位、架构与入口族、核心数学
-模型、关键选项/结果参数表、验证与边界局限，并统一引入 `industrial_evaluation.tex`，
-覆盖输入输出、工程假设、数值稳定性、复杂度、异常工况、模块接口、测试建议、工业指标
-与改进闭环。篇幅较长的可靠性、弹性和短路手册已按 `chapters/` 拆章；其余手册保持
-单文件结构，后续仅在内容增长影响维护时拆分。
+目录与主手册清单见 [模块手册索引](../modules/README.md)。禁止把共享样式复制到模块目录，
+也禁止创建大小写或历史名称不同的第二套模块目录。

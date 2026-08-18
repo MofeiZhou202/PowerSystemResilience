@@ -1,0 +1,142 @@
+\section{源码等价分析模型}
+
+本章仅转写 \srcpath{src/analysis/hosting\_capacity.cpp}、
+\srcpath{multidimensional\_weak\_link.cpp} 与
+\srcpath{counterfactual\_planning.cpp} 当前实际执行的计算。规范名称只说明功能背景，
+不用于补充源码中不存在的公式。
+
+\subsection{承载力评估}
+
+\srcpath{hosting\_capacity\_options\_from\_json} 对参数执行以下截断：功率因数与
+$k_r$ 截断到 $[0,1]$，\fld{default\_dr\_max\_output\_coeff} 下限为 $10^{-9}$，
+其余 $\beta$、N-1 负载限值、电压偏差和 THD 限值下限为零
+（\srcpath{src/analysis/hosting\_capacity.cpp:59--80}）。
+
+代码只沿两端额定电压差小于 $10^{-3}$ kV 的在运 ACBranch 建立无向邻接；其余支路均作为
+变压器边界。由低压侧开始的 BFS 只访问在运母线，所得集合用于累加
+\begin{align}
+ P&=\sum_b\left[\max(0,P_{d,b})+sum_{l\in b}\max(0,P_l\,\fld{scaling}_l)\right],\\
+ P_G&=\sum_{g\in b,\,on}P_g,\\
+ P_{DR}&=\sum_{pv,rg\in b,\,on}P+
+          \sum_{sg\in b,\,on}\max(0,P_{sg}\,\fld{scaling}_{sg}),\\
+ P_{ESS}&=\sum_{s\in b,\,on}\begin{cases}
+ \max(0,\fld{cap\_static\_charging\_mw}_s),&\fld{cap\_charging\_strategy}=\texttt{static},\\
+ \max(0,-P_s),&\text{其他字符串}.
+ \end{cases}
+\end{align}
+依据为 \srcpath{hosting\_capacity.cpp:98--157}。
+
+每台设备取 $n=\max(1,\fld{n\_parallel})$。设备功率因数和最大出力系数仅在设备字段大于零时
+使用，否则采用选项默认值；若所得 $\tau\le0$，再强制为 1。若设备 $\beta>0$ 则直接使用，
+否则
+\begin{equation}
+ \beta=\begin{cases}
+ \fld{single\_transformer\_beta},&n\le1,\\
+ \dfrac{n-1}{n}\fld{n1\_loading\_limit},&n>1.
+ \end{cases}
+\end{equation}
+令 $S_{tot}=nS_N$、$P_{rev}=\beta S_{tot}pf$、
+$B=P-P_G+P_{rev}+P_{ESS}$，代码分别计算
+\begin{align}
+ S_{d,min}&=\max\left(0,\frac{B+\Delta P_{ESS,min}}{\tau}\right),\\
+ S_{d,max}&=\max\left(0,\frac{B+\Delta P_{ESS,max}}{\tau}\right),
+\end{align}
+若前者大于后者则交换。这里不额外限制 $S_N$、$pf$ 或 $\beta$ 的符号。
+对应源码为 \srcpath{hosting\_capacity.cpp:199--247}。
+
+设备余量按赋值顺序为
+\begin{align}
+ C_{grid,min/max}&=S_{d,min/max}-P_{DR},\\
+ C_{reg,min/max}&=C_{grid,min/max}-P_{registered}.
+\end{align}
+分级函数严格为：$C_{reg,min}>0$ 为 green；否则 $C_{grid,min}>0$ 为 yellow；否则 red。
+区域先逐设备求和 $S_d$、已接入和已备案量，再重复同一赋值和分级。
+最终设备等级只在所属区域为 red 时强制 red，区域 yellow 不覆盖设备自身等级。
+依据为 \srcpath{hosting\_capacity.cpp:249--298}。
+
+启用工程校核时，潮流固定使用 \fld{max\_iter=100}、\fld{tol=$10^{-8}$}。
+电压偏差为 $100(V_i-1)$，越过 $+\Delta U_H$ 或 $-\Delta U_L$ 才违规；
+支路只使用 from 端
+\begin{equation}
+ loading=100\frac{\sqrt{P_f^2+Q_f^2}}{\fld{rate\_a\_mva}},
+\end{equation}
+且只在大于 100 时违规。短路批处理异常被吞掉并保留初始通过状态；谐波异常只把
+\fld{harmonic\_evaluated} 设为假。推荐由违规字符串决定：存在 critical 为
+\texttt{suspend\_connection}，否则有任意违规为 \texttt{allow\_with\_mitigation}，否则
+\texttt{allow\_connection}。依据为 \srcpath{hosting\_capacity.cpp:300--401}。
+
+\subsection{多维薄弱环节}
+
+对维度 $d\in\{0,1,2,3\}$，只有 pressure 存在且有限时才标记可用。令
+\begin{equation}
+ x_d=\max(0,\fld{pressure}_d),\qquad
+ q_d=\frac{x_d}{\begin{cases}t_d,&t_d\text{ 有限且 }>0,\\1,&\text{否则}.
+ \end{cases}}
+\end{equation}
+缺失维度的存储分数为零，但不参与证据数、最小值和最大值。
+严重度是可用 $q_d$ 的最大值；共识度在有证据时为最小值，否则为零。
+主导维度只在严格大于当前最大值时更新，因此所有可用分数均为零时可保持空字符串。
+依据为 \srcpath{src/analysis/multidimensional\_weak\_link.cpp:12--42}。
+
+分歧度只在证据维数大于 1 时取 $\max q_d-\min q_d$，否则为零。关系按以下顺序判定，
+先命中的分支结束：
+\begin{enumerate}
+ \item 证据数小于 $\max(1,\fld{minimum\_dimensions})$：\texttt{insufficient\_evidence}；
+ \item 证据数至少 3 且共识度不小于 \fld{compatibility\_threshold}：\texttt{compatible}；
+ \item 证据数至少 2、严重度不小于 \fld{high\_pressure\_threshold}、分歧度不小于
+       \fld{conflict\_gap\_threshold}：\texttt{conflict}；
+ \item 严重度不小于高压阈值：\texttt{single\_dimension}；否则 \texttt{watch}。
+\end{enumerate}
+依据为 \srcpath{multidimensional\_weak\_link.cpp:125--173}。
+
+实体 $a$ 支配实体 $b$ 仅当 comparison group 与四位覆盖掩码相同，并且对每个可用维度
+\begin{equation}
+ q_{a,d}+10^{-12}\ge q_{b,d},
+\end{equation}
+且至少一维满足 $q_{a,d}>q_{b,d}+10^{-12}$。证据不足的实体不进入 Pareto 判定。
+排序先按 Pareto 真值，再在差值超过 $10^{-12}$ 时按严重度、共识度降序，最后按 key 升序；
+之后才截断 top-k。依据为 \srcpath{multidimensional\_weak\_link.cpp:44--65} 和
+\srcpath{multidimensional\_weak\_link.cpp:175--200}。
+
+\subsection{反事实规划指标和收益}
+
+经济或碳指标启用时先以 \fld{max\_iter=100}、\fld{tol=$10^{-7}$} 求潮流。
+经济指标优先取“收敛、目标有限且绝对值大于 $10^{-9}$”的 ACOPF 目标乘
+\fld{annual\_hours}。否则在潮流可用时计算
+\begin{equation}
+ L=\sum_{branch}\max(0,P_f+P_t)
+   +\sum_{vsc}\max(0,P_{loss})+\sum_{dcdc}\max(0,P_{loss}),
+\end{equation}
+并赋值 $L\cdot\fld{energy\_price\_per\_mwh}\cdot\fld{annual\_hours}$。
+碳指标选择 matrix solved 时的 matrix summary，否则选择 tracing summary，并把
+\fld{total\_generation\_emissions\_tco2} 乘 annual hours。
+可靠性固定配置确定性 FMEA；弹性固定使用 HeuristicSequential、1 h 步长和共同显式故障集。
+完整赋值见 \srcpath{src/analysis/counterfactual\_planning.cpp:120--239}。
+
+对每个存在且有限的维度，基线 $b_d$ 与反事实 $y_d$ 的收益和相对收益为
+\begin{align}
+ B_d&=b_d-y_d,\\
+ s_d&=\max(|b_d|,|y_d|,10^{-9}),\\
+ B_d^{rel}&=B_d/s_d.
+\end{align}
+只有 $B_d>10^{-9}s_d$ 才计为改善，$B_d<-10^{-9}s_d$ 才计为恶化。
+同时有改善和恶化为 \texttt{conflict}；否则改善维数至少 2 为 \texttt{compatible}，等于 1
+为 \texttt{single\_benefit}，仅有恶化为 \texttt{adverse}，其余为 \texttt{neutral}。
+依据为 \srcpath{counterfactual\_planning.cpp:254--280}。
+
+两措施协同只在组合收益和两个单措施收益三者均存在的维度上计算：
+\begin{align}
+ I_d&=B_{a+b,d}-B_{a,d}-B_{b,d},\\
+ s_d^I&=\max(|B_{a+b,d}|,|B_{a,d}|+|B_{b,d}|,10^{-9}),\\
+ I_d^{rel}&=I_d/s_d^I.
+\end{align}
+正负分类仍使用 $10^{-9}s_d^I$；同时有正负为 \texttt{mixed\_interaction}，仅正为
+\texttt{synergy}，仅负为 \texttt{redundancy\_or\_conflict}，否则为 \texttt{additive}。
+每个单措施和措施对都应用于同一基线的独立副本；措施对按先 $i$ 后 $j$ 的顺序应用。
+依据为 \srcpath{counterfactual\_planning.cpp:282--310} 和
+\srcpath{counterfactual\_planning.cpp:612--694}。
+
+\subsection{覆盖边界}
+
+候选措施生成和五类措施的结构体字段赋值属于工程启发式，不是连续优化数学模型；其完整常数和
+分支位于 \srcpath{counterfactual\_planning.cpp:337--610}。本章未用抽象投资优化模型替代这些赋值。

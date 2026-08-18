@@ -1,0 +1,87 @@
+% !TEX program = xelatex
+\documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
+\usepackage{../../_manual_common/hysim_manual}
+\title{\textbf{HySim-XJTU-HRPES}\\[0.4em]{\Large validation 模块静态校验手册}\\
+{\large 谓词、严重度、层级过滤与复杂度}}
+\author{西安交通大学 HRPES 团队}
+\date{\today}
+\begin{document}
+\maketitle
+\begin{abstract}
+本文档逐式对应 \srcpath{src/validation/validate\_system.cpp}、
+\srcpath{include/hacdcpf/validation/validate\_system.hpp} 与 \srcpath{validation\_report.hpp}。
+校验器产生结构化问题列表，不修复输入，也不证明数值求解收敛。
+\end{abstract}
+\tableofcontents
+
+\section{输入、输出与数据结构}
+输入为只读 \texttt{HybridPowerSystem} 和可选 \texttt{ValidationLevel}。输出
+$R=[q_1,\ldots,q_m]$，每个问题
+\begin{equation}
+q=(severity,component\_type,component\_id,field,message).
+\end{equation}
+严重度枚举实际包含 \texttt{Info}、\texttt{Warning}、\texttt{Error}
+（\srcpath{validation\_report.hpp:10--14}）。\texttt{count(s)} 在代码中统计“恰好等于” $s$
+（:48--53），并非注释所说的“at or above”；本文以函数体为准。
+
+\section{报告有效性谓词}
+\srcpath{ValidationReport::is\_valid}（\srcpath{validation\_report.hpp:31--36}）的精确谓词为
+\begin{equation}
+valid(R)\Longleftrightarrow\neg\exists q\in R:q.severity=Error.
+\end{equation}
+因此只有 Warning 的报告仍然有效；$\texttt{has\_errors}=\neg valid(R)$，
+$\texttt{has\_warnings}=\exists q:q.severity=Warning$，$\texttt{ok}=valid(R)$。Info 不影响这三个返回值。
+
+\section{校验层级的精确过滤}
+先令 $R_0=validate(sys)$。四级返回值由
+\srcpath{validate\_system.cpp:673--712} 的 switch 直接定义：
+\begin{align}
+R_{SolverReady}&=R_0,\\
+R_{Strict}&=\{promote(q):q\in R_0\},\\
+promote(q).severity&=\begin{cases}Error,&q.severity=Warning,\\q.severity,&\text{否则，}\end{cases}\\
+R_{Basic}&=\{q\in R_0:q.severity=Error\},\\
+R_{Electrical}&=\{q\in R_0:q.severity=Error\lor
+q.component\_type\in\{ACSystem,DCSystem\}\}.
+\end{align}
+因此 \texttt{Electrical} 并不是保留所有“拓扑相关” Warning，而是只按组件类型字符串保留
+\texttt{ACSystem}/\texttt{DCSystem} Warning；ACBus 孤立负荷 Warning 会被过滤。这是当前代码行为，本文
+不美化为更宽的语义。
+
+\section{结构和数值谓词}
+完整规则以 \srcpath{validate(sys)} 的顺序执行。代表性 helper 位于
+\srcpath{validate\_system.cpp:198--223}，与代码严格等价：
+\begin{align}
+require\_order(lo,hi)&\Rightarrow Error\quad\text{当且仅当 }lo>hi,\\
+require\_nonnegative(x)&\Rightarrow Error\quad\text{当且仅当 }x<0,\\
+require\_unit\_interval(x)&\Rightarrow Error\quad\text{当且仅当 }x<0\lor x>1,\\
+require\_efficiency(\eta)&\Rightarrow Error\quad\text{当且仅当 }\eta\le0\lor\eta>1.
+\end{align}
+母线 ID 在 AC 与 DC 各自集合内检查正数和唯一性；跨域同号不报重复。支路端点必须不同且存在于本域。
+AC/DC 母线均要求 $V_{min}>0$ 且 $V_{max}>V_{min}$。子系统与全局
+\fld{base\_mva} 的差值仅在 $|S_{sub}-S_{sys}|>0.1$ 时产生 Warning。
+
+\section{参考节点资格}
+AC 参考母线支持谓词是以下任一在役设备成立：外部电网、发电机、构网且可控且
+$P_{max}>P_{min}$ 的储能、控制角色提供 AC 角参考的 VSC。无支持时是 Error。DC 电压参考支持谓词是：
+可控且 $P_{max}>P_{min}$ 的 DC 储能、提供 DC 电压参考或 PQ 模式的 VSC、输出端为该母线且处于 Voltage
+或非零 droop 模式的可控 DC/DC、ConstantGamma/ConstantAlpha LCC。DC 无物理支持只产生 Warning，因为
+PF 可把它作为理想双向电压边界。
+
+\section{拓扑、算法流程与复杂度}
+完整校验先扫描容器与引用，再调用 \texttt{build\_power\_system\_graph} 和
+\texttt{analyze\_topology}。孤立负荷岛为每个 bus 添加 ACBus Warning；无 slack 的 AC 岛添加一个
+ACSystem Warning。哈希集合建立和引用检查平均 $O(C)$，图分析为 $O(N+E)$；参考设备资格当前对每个参考
+母线扫描多个设备容器，最坏 $O(N_{ref}C)$。
+
+\section{异常、接口和验证建议}
+校验器只追加问题，不抛出修复动作；NaN 的比较行为遵循 C++ 浮点比较，未被每个 helper 统一捕获，不能
+宣称所有非有限量必然拒绝。上游为 model/io，求解入口应在 SolverReady 或业务指定层级后决定是否继续。
+测试应逐条覆盖阈值两侧、四级过滤、AC/DC 同号 ID、无参考设备、理想 \texttt{DC\_V} Warning、孤岛类型和
+\texttt{count} 的精确计数语义。
+
+\section{工业指标、范围与改进}
+指标包括错误规则分支覆盖率、误报/漏报率、诊断稳定 ID 完整率和百万组件扫描耗时。本模块只验证静态结构；
+潮流残差、KKT、动态一致初值、I/O round-trip 和标准合规必须由对应模块验证。后续应把规则表生成化，并
+修正文档注释与 \texttt{count} 实现语义的不一致。
+\input{../../_manual_common/industrial_evaluation}
+\end{document}

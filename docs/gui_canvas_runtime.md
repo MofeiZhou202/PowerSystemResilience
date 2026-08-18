@@ -98,6 +98,50 @@ round trip through `hysimWorkspaceLayoutV1`; the shortcut is
 `Ctrl/Cmd+Shift+F`. Layout changes trigger chart and viewport resize handling
 without rebuilding the Canvas model or changing result identity.
 
+## User feedback and data protection
+
+Transient notifications use a stacked toast container (`#toastContainer`,
+`aria-live="polite"`, error toasts carry `role="alert"`) exposed as
+`App.toast(msg, level, {sticky, actions})`. `log()` mirrors warn/error console
+entries to toasts (info stays console-only); `setStatus(text, 'error')` reports
+specific failure texts and skips generic one-word statuses whose detail already
+went through `log('error')`. Both channels dedupe identical messages inside a
+2 s window.
+
+A persistent Problems tab (`#problemList`) shares the bottom console viewport
+with the log: every error-level console entry is collected automatically, and
+`App.reportProblem({level, message, compId?, bus?})` additionally attaches an
+optional Canvas locate target rendered as a keyboard-reachable 定位 button that
+reuses `panToComponent`/`panToBusId`. Entries carry time and level, dedupe
+consecutive identical messages within 3 s, and are capped at 100. Property-panel
+validation failures (JSON field parse, reliability configuration save) report
+with the edited component id; single-bus short-circuit failures report with the
+fault bus. Locate is disabled in headless WebGL overview mode.
+
+Property editing validates immediately, not only at Apply: numeric inputs mark
+a red border + `title` hint on `input` and report to the Problems panel on
+`change` (with the component id); ranges come from the element's own `min`/`max`
+attributes — populated by the backend reliability schema or the dynamic-model
+catalog — and generic fields without a declared range get legality-only checks
+(nothing is hardcoded). JSON textareas (`dynamic_model`, `*_profile_values`)
+pre-validate syntax and shape on `blur` under the same rules Apply enforces.
+Recognized units in `COMP.fieldLabels` trailing parentheses (whitelist in
+`splitPropertyLabelUnit`) move from the label into an input suffix span;
+unrecognized parenthesized hints (`0=HV,1=LV`, `JSON数组`, …) stay in the label
+— no units are invented.
+
+A `beforeunload` guard prompts whenever `_canvasDirty` is true; the flag clears
+on successful backend sync or fresh model load, so the prompt appears only with
+real unsaved work. While the canvas is dirty and the page is visible, an
+auto-draft timer (30 s) stores `Canvas.buildSystemJson()` in localStorage under
+`hysim.canvasDraft.v1` as `{saved_at, json}`. Drafts are skipped in headless
+large-system mode and when the serialized system exceeds 4 MB (notified once
+per session); on startup a sticky toast offers explicit 恢复草稿/丢弃 actions —
+the canvas is never overwritten silently. Restore posts the stored string to
+`/api/session/load_json_string` and then runs `Canvas.loadFromSystemJson` on
+the local copy, which still carries the `_canvas` layout block the backend
+strips. Loading any model clears a stored draft as stale.
+
 The intended division of work is:
 
 - WebGL: pan, zoom, hit-test, and inspect the full network; with coordinate
@@ -109,10 +153,55 @@ The intended division of work is:
   consumed by the overview) plus playback time frames and analysis-scoped
   result subsets through `/api/v1`.
 
-Updated: 2026-08-17
+Updated: 2026-08-17 (feedback/toast/problems/draft section; property-panel
+immediate validation + unit suffixes; result-table sort/filter/CSV layer)
 
 The authored model lives in `Canvas.state`, while analysis results live in SVG
 result overlays. These states must remain separate.
+
+## Editing safety net (SVG canvas)
+
+The SVG editor keeps a session-local undo/redo stack (capacity 200 commands)
+hooked at the structural mutation choke points in `web/js/canvas.js`
+(`addComponent` / `removeComponent` / `addConnection` / `removeConnection`).
+One command covers: component add; component delete (its attached wires are
+bundled into the same composite command); wire add/delete; a completed drag
+(recorded once at mouse-up, never per mousemove); rotation; paste; and
+multi-select move/delete. Undo restores deleted components and wires under
+their original ids, including user-edited wire waypoints. `clearAll()` and
+`loadFromSystemJson()` empty the stack — a freshly loaded model cannot be
+undone back into the previous one. Shortcuts: `Ctrl/Cmd+Z` undo,
+`Ctrl/Cmd+Shift+Z` or `Ctrl+Y` redo. `Canvas.undo()` / `Canvas.redo()` /
+`Canvas.canUndo()` / `Canvas.canRedo()` back the toolbar 撤销/重做 buttons
+(`#btnUndo` / `#btnRedo`, wired by `web/js/core/help_panel.js`; disabled
+state refreshes on every keyup/mouseup plus a 300 ms poll).
+Property-panel parameter edits (owned by `app.js`) are deliberately NOT
+undoable yet: they mutate `comp.params` in place outside the choke points.
+
+`Ctrl+C` copies the selected components plus every wire whose both endpoints
+are selected into an internal, session-local clipboard (not the OS clipboard)
+with deep-copied parameters. `Ctrl+V` pastes with fresh ids at a cumulative
++20 px grid-aligned offset per consecutive paste; `Ctrl+D` duplicates (copy +
+immediate paste). Paste lands as a single composite undo command and selects
+the new components. Dragging any member of a multi-selection moves the whole
+selection by the same delta; grid and alignment snapping apply to the pressed
+component only, the rest follow the delta. All editing shortcuts are ignored
+while an input/textarea/select or contentEditable element has focus. In
+headless large-system mode (>400 buses, no SVG diagram) copy/paste/duplicate
+no-op and the undo stack stays empty.
+
+`web/js/core/help_panel.js` owns the keyboard-shortcut cheat sheet
+(`#helpModal`): `?` (Shift+/) toggles it, Esc or a backdrop click closes it,
+and the same form-field guard as the canvas handler applies (INPUT/SELECT/
+TEXTAREA/contentEditable focus suppresses `?`). The content is generated from
+a static data array (groups 选择 / 编辑 / 视图 / 分析) via DOM building with
+`textContent`, and restates the headless large-system limitation (editing
+shortcuts unavailable, undo stack stays empty). The modal follows the
+`.modal` + `h3` convention, so `core/accessibility.js` automatically attaches
+`role="dialog"` / `aria-modal` / `aria-labelledby`. It is exposed as
+`HySimCore.HelpPanel` (`open` / `close` / `toggle` / `refreshUndoRedo` /
+`shortcutGroups`, schema `hysim_help_panel_v1`).
+
 
 ## Static results
 
@@ -152,6 +241,22 @@ domain-qualified `{domain, index}` overview selector. AC and DC buses with the
 same integer index therefore remain distinct. Topology rows also retain their
 search-registry source so a WebGL selection can visibly highlight the matching
 virtualized row.
+
+Result tables in the 结果 tab (power flow, OPF, short circuit, reliability, and
+the day-ahead / real-time / repeated-game market views) are progressively
+enhanced by `enhanceResultTablesIn(root, {module})` in `web/js/app.js` after
+each module renders: header-click three-state sorting (numeric-aware,
+`aria-sort` on the active `<th>`, third click restores the original row order),
+a per-column contains-match filter row directly under the header (200 ms
+debounce, case-insensitive), and an 导出 CSV toolbar button exporting only the
+currently visible rows (RFC-4180 escaping, UTF-8 BOM so Excel reads Chinese
+headers, filename `<module>_results_<timestamp>.csv`). Tables that do not fit
+the expected shape — missing thead/tbody, multi-row headers, colspan/irregular
+rows, embedded form controls (cost editor, market participant editor), or
+virtualized tables — are skipped with a `console.debug` note and rendering is
+never broken. Row-level `data-comp-id` canvas locate keeps working under
+sorting because the click delegation uses `closest('[data-comp-id]')` and
+sorting only reorders DOM rows. Covered by `tmp/result_table_smoke.mjs`.
 
 ## Time playback
 

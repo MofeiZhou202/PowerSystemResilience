@@ -1,0 +1,362 @@
+% 第 4 章：经典交流求解器族
+% 本章文件由 \input 引入，不含导言区。
+\section{经典交流求解器族}\label{sec:classic}
+
+本章覆盖四个经典交流求解器：FDPF 快速解耦、线性化直流潮流、分布式松弛与
+自适应孤岛。前两者直接以 \texttt{SolverData} 为输入，复用第~\ref{sec:assembly}~章的
+母线分类与 $B'/B''$ 电纳阵装配；后两者以 \texttt{HybridPowerSystem} 为输入，内部各自
+重建 SolverData 并委托统一 Newton 核心（第~\ref{sec:newton}~章）完成数值求解，自身
+只负责参与因子分摊与分岛调度。四者的公共入口在公共 API 族表（第~\ref{sec:overview}~章）
+中列出。
+
+\subsection{快速解耦潮流 FDPF（FDXB 变体）}
+
+\compmeta{powerflow::FDPFSolver}{\srcpath{include/hacdcpf/power\_flow/solvers/fdpf\_solver.hpp}}
+
+\subsubsection*{功能说明与入口}
+经典 FDXB 方案快速解耦潮流，\textbf{纯 AC}：不读取 DC 网络与换流器，
+\fld{vdc} 输出为空。入口签名（fdpf\_solver.hpp:9--11；实现
+\srcpath{src/power\_flow/fdpf\_solver.cpp:75}）：
+\begin{quote}\footnotesize
+\texttt{PowerFlowResult solve(const SolverData\& data, const PowerFlowOptions\& opt) const;}
+\end{quote}
+\srcpath{include/hacdcpf/power\_flow/fdpf\_solver.hpp} 是 3 行转发头，规范头在
+\texttt{solvers/} 子目录。公共 API \srcpath{solve\_power\_flow\_fdpf}
+（\srcpath{src/api/hacdcpf.cpp:1162}）经 SolverDataCache（见第~\ref{sec:overview}~章）
+取得装配数据、施加 ZIP 权重后调用本求解器，再统一做支路潮流回算与结果回投影
+（:1164--1176）。
+
+\subsubsection*{数学模型与算法}
+母线分类复用 \srcpath{classify\_ac\_buses}
+（\srcpath{include/hacdcpf/power\_flow/pf\_utils.hpp:80--98}）：首个 SLACK 为参考
+（\srcpath{first\_slack\_or\_default}，:21--28），\textbf{额外 SLACK 按 PV 处理}——
+与统一 Newton"额外 SLACK 整体剔除"的约定不同（见第~\ref{sec:newton}~章）。
+状态初值取母线记录 \fld{vm\_pu}/\fld{va\_deg}（fdpf\_solver.cpp:94--99）；
+PV 母线电压在 Q 步中不更新（Q 步仅作用 PQ 集合，:199--204），即 PV 幅值钉在
+母线记录初值，\textbf{不读取发电机 \fld{vg} 整定}。
+
+常量阵 $B'/B''$ 由 \srcpath{build\_susceptance\_matrix} 装配
+（实现 \srcpath{src/power\_flow/admittance\_builder.cpp:127--182}，
+取 $-\mathrm{Im}(Y^{\mathrm{mod}}_{ij})$，:162--165），构型由 \texttt{BpBuildFlags} 控制
+（\srcpath{include/hacdcpf/assembly/ybus\_builder.hpp:21--36}，详见第~\ref{sec:assembly}~章）：
+$B'$ 置 $R=0$、忽略充电、变比幅值取 1、相移取 0、不含母线并联（\srcpath{make\_bp\_flags}），
+并跳过 $|x|<\texttt{min\_x\_pu}$ 的支路；$B''$ 保留 $R$、充电与变比，相移取 0，
+加母线并联 $-B_s/S_{\mathrm{base}}$（\srcpath{make\_bpp\_flags}，:168--173）。
+两阵分别降阶至非 slack 全集与 PQ 集合并用 Eigen SparseLU \textbf{一次性分解}
+（fdpf\_solver.cpp:102--150），分解失败直接返回 \fld{converged}=false（:140--149）。
+
+每次迭代（:156--205）先以\textbf{稀疏复数形式}计算注入
+（\srcpath{compute\_power\_injections}，:19--36）：$V_i=\mathrm{polar}(V_{m,i},\theta_i)$，
+$\mathbf I=Y_{bus}\mathbf V$（稀疏矩阵--向量乘），$S_i=V_i\,\overline{I_i}$，
+\textbf{不再生成稠密} $Y_{bus}$：
+\begin{align*}
+P_i^{\mathrm{calc}}&=\sum_{j}V_iV_j\big(G_{ij}\cos\theta_{ij}+B_{ij}\sin\theta_{ij}\big)\\
+Q_i^{\mathrm{calc}}&=\sum_{j}V_iV_j\big(G_{ij}\sin\theta_{ij}-B_{ij}\cos\theta_{ij}\big)
+\end{align*}
+（与第~\ref{sec:newton}~章失配方程同式）。指定注入由
+\srcpath{compute\_specified\_injections}（:38--71）计算，含 ZIP 电压项
+（权重顺序恒功率/恒电流/恒阻抗，见第~\ref{sec:assembly}~章）：\fld{has\_component\_loads}
+为真时改用\textbf{逐母线} ZIP 系数（\fld{bus\_zip\_pp}/\fld{\_ip}/\fld{\_zp} 与
+\fld{bus\_zip\_pq}/\fld{\_iq}/\fld{\_zq}，配 \fld{pd\_pu}/\fld{qd\_pu}，:48--56；
+由 \srcpath{aggregate\_load\_demand} 装配，\srcpath{src/power\_flow/solver\_data.cpp:96--125}），
+否则沿用母线级 \fld{pd\_mw}/\fld{qd\_mvar} 加全局 \fld{zip\_pw}/\fld{zip\_qw}
+（:57--67）。如实说明：旧版 FDPF 只用全局 ZIP 权重，逐母线口径是本次的行为修正，
+使 FDPF 与统一 Newton 的负荷模型对齐。
+失配按 FDPF 惯例除以幅值：
+\[
+\Delta P_i/V_i=\big(P_i^{\mathrm{spec}}-P_i^{\mathrm{calc}}\big)/V_i,\qquad
+\Delta Q_i/V_i=\big(Q_i^{\mathrm{spec}}-Q_i^{\mathrm{calc}}\big)/V_i
+\]
+（:168--179）。收敛判据为
+$\max\big(\lVert\Delta P/V\rVert_\infty,\lVert\Delta Q/V\rVert_\infty\big)<\texttt{tol}$
+（:181--188）。校正分两步单序执行（每迭代 P 步、Q 步各一次）：
+\[
+B'\,\Delta\theta=\Delta P/V\;(:190\text{--}196),\qquad
+B''\,\Delta V=\Delta Q/V\;(:198\text{--}204)
+\]
+如实说明三处简化与缺陷：
+\begin{itemize}
+  \item \textbf{无全局化与限值逻辑}：无步长截断、无回退链（对照第~\ref{sec:newton}~章），
+        无 PV$\leftrightarrow$PQ 无功限值切换，发电机 Q 限值完全不参与；
+  \item \textbf{注入计算已稀疏化}（:19--36）：复杂度 $O(\mathrm{nnz}(Y_{bus}))$，
+        旧版的 $Y_{bus}$ 转稠密 $+O(n^2)$ 双重循环已移除（主文档诚实口径相应条目
+        随之过时，以本节为准）；
+  \item 未收敛时复用同一稀疏注入内核与指定注入函数复算最终残差写入 \fld{residual}
+        （跳过 slack 的 P 行与非 PQ 母线的 Q 行，:208--226）。
+\end{itemize}
+
+\subsubsection*{求解参数}
+\begin{paramtable}
+\fld{tol} & $\varepsilon$ & pu & $10^{-6}\sim10^{-10}$ & $10^{-8}$ &
+  收敛容差（$\Delta P/V$、$\Delta Q/V$ 的 $\ell_\infty$ 范数），
+  \texttt{Defaults::kPFTol}（\srcpath{include/hacdcpf/model/defaults.hpp:46}）\\
+\fld{fdpf\_max\_iter} & $k_{\max}$ & 次 & 50--5000 & 1000 &
+  最大迭代数（\srcpath{include/hacdcpf/power\_flow/power\_flow\_options.hpp:147}；
+  读于 fdpf\_solver.cpp:152）\\
+\fld{robust\_nonlinear.min\_branch\_x\_pu} & $x_{\min}$ & pu & --- & $10^{-20}$ &
+  $B'$ 装配的小电抗支路剔除阈值（真实头
+  \srcpath{include/hacdcpf/power\_flow/globalization/robust\_nonlinear\_options.hpp:44}；
+  传参于 fdpf\_solver.cpp:103；注意它\textbf{覆盖} \srcpath{make\_bp\_flags}
+  自带的 $10^{-6}$ 缺省）\\
+\end{paramtable}
+全局 ZIP 权重 \fld{zip\_pw}/\fld{zip\_qw} 与 \fld{loss\_model} 由 API 层在装配侧读取
+（\srcpath{apply\_zip\_weights}，hacdcpf.cpp:507--516，调用于 :1164--1165）；
+求解器核在 \fld{has\_component\_loads} 为真时改读逐母线 ZIP 系数
+（见上文算法小节），否则回退全局权重。
+
+\subsubsection*{验证与校核}
+\begin{itemize}
+  \item \textbf{冒烟}：\srcpath{tests/test\_hacdcpf.cpp:267--275} 两节点算例断言收敛；
+  \item \textbf{稀疏注入与逐母线负荷回归}：\srcpath{tests/test\_helm\_solver.cpp}
+        （注册于 \srcpath{tests/CMakeLists.txt:122}）——「FDPF sparse injection path」
+        两节点算例与 Newton 逐母线 $|V|/\theta$ 对照，容差 $2\times10^{-4}$（:32--47）；
+        「FDPF uses aggregated component loads」挂显式 \texttt{Load} 组件触发
+        \fld{has\_component\_loads} 逐母线 ZIP 路径，与 Newton 对照容差
+        $3\times10^{-4}$（:49--69）；
+  \item \textbf{与 Newton 对照}：\srcpath{tests/test\_matpower\_cases.cpp:197--209}
+        case30 下两法均收敛时逐母线 $|V|$ 对照，容差 \texttt{WithinAbs}$=10^{-3}$；
+        任一不收敛则 \texttt{SKIP}——\textbf{FDPF 无 Tier2/3 批量回归}，覆盖薄；
+  \item 能力合同工具 \srcpath{tools/validate\_case\_capabilities.py} 做
+        NR/FDPF/DC 三法互验（见第~\ref{sec:validation}~章）。
+\end{itemize}
+
+\subsection{线性化直流潮流（$B\theta=P$）}
+
+\compmeta{powerflow::solve\_ac\_linearized\_dc}{\srcpath{include/hacdcpf/power\_flow/ac\_linearized\_pf.hpp}}
+
+\subsubsection*{功能说明与入口}
+经典 DC 潮流：$|V|\equiv1$、忽略电阻与无功，角度方程一次线性求解。入口为自由函数
+（ac\_linearized\_pf.hpp:15；实现 \srcpath{src/power\_flow/ac\_linearized\_pf.cpp:12}）：
+\begin{quote}\footnotesize
+\texttt{ACLinearizedDCResult solve\_ac\_linearized\_dc(const SolverData\& data);}
+\end{quote}
+结果结构 \texttt{ACLinearizedDCResult\{va（弧度）, pf\_mw, success\}}
+（ac\_linearized\_pf.hpp:9--13）。公共 API \srcpath{solve\_ac\_dc\_power\_flow}
+（\srcpath{src/api/hacdcpf.cpp:1179}）负责回投影相角与支路功率到原始编号空间
+（:1181--1202）。如实说明：GUI 将该入口标为 \texttt{hybrid\_linearized}，但实现
+\textbf{只解 AC 相角}，不求解 DC 电压、无功与网损。
+
+\subsubsection*{数学模型与算法}
+slack 取首个 SLACK 母线，缺省回退 bus 0（:31--40）。对每条在运且
+$|x_{pu}|\ge10^{-20}$ 的支路（:53--56）取
+\[
+b_k=\frac{1}{x_{pu}\cdot t_k}\qquad(t_k=0\text{ 按 }1.0\text{ 处理})
+\]
+（:65--67），装配 Laplacian $B_{ii}\mathrel{+}=b_k$、$B_{ij}=-b_k$
+（:69--72, 83--89）。移相变压器以注入等效：from 端 $+b_k(-\varphi_k)$、to 端
+$-b_k(-\varphi_k)$（:74--80，$\varphi_k$ 为 \fld{shift\_deg} 化弧度）。代码先定义
+$P^{\mathrm{shift}}$，再严格按注释“$B\theta+P^{\mathrm{shift}}=P^{\mathrm{spec}}$”
+装配右端：
+\[
+P_i=P_{g,i}-P_{d,i}^{\mathrm{pu}}-P_i^{\mathrm{shift}}
+\]
+（:91--98；当 \fld{pd\_pu} 维数不匹配时才回退为
+$P_{d,i}^{\mathrm{pu}}=\fld{pd\_mw}/\fld{base\_mva}$，恒功率口径，
+\textbf{不含 ZIP 电压项}）。剔除 slack 行/列得降阶方程（:100--133），右端计入
+slack 相角：
+\[
+B_{\mathrm{red}}\,\theta_{\mathrm{red}}
+=\mathbf P_{\mathrm{red}}-\mathbf B_{\mathrm{red,slack}}\,\theta_{\mathrm{slack}}
+\]
+（:135--141），Eigen SparseLU 一次求解（:143--151）；分解或回代失败时
+\fld{success}=false 静默返回。解出全状态后，代码只在非参考节点计算
+$\max_i|(B\theta)_i-P_i|$ 并写入 \fld{residual\_pu}（:161--170），不检查参考节点
+平衡。支路有功回算
+\[
+P_{f,k}=b_k\big(\theta_i-\theta_j-\varphi_k\big)\cdot S_{\mathrm{base}}
+\]
+（:172--189，MW）。近似边界如实声明：电压幅值、无功、网损均不输出；
+$r_{pu}$、充电、并联全部忽略；多 slack 时仅首个被剔除，其余按普通母线计入
+$B$（与 Newton/FDPF 的分类约定均不同）。
+
+\subsubsection*{求解参数}
+本求解器\textbf{不读取任何} \texttt{PowerFlowOptions} 字段（函数签名无 \texttt{opt}，
+ac\_linearized\_pf.hpp:15），全部阈值为硬编码常数：
+\begin{paramtable}
+（内部常数）$|x_{pu}|$ 下限 & --- & pu & --- & $10^{-20}$ &
+  低于此值的支路视为零阻抗跳过（ac\_linearized\_pf.cpp:55, 178）\\
+（内部常数）$|t|$ 下限 & --- & pu & --- & $10^{-12}$ &
+  低于此值变比按 1.0 处理（ac\_linearized\_pf.cpp:65）\\
+\end{paramtable}
+
+\subsubsection*{验证与校核}
+\begin{itemize}
+  \item \textbf{冒烟}：\srcpath{tests/test\_hacdcpf.cpp:307--315} 两节点算例断言
+        相角向量非空；
+  \item \textbf{投影空间回归}：\srcpath{tests/test\_sppt\_metamorphic.cpp:293--301}
+        断言 \fld{va} 尺寸=原始母线数、\fld{pf\_mw} 尺寸=原始支路数、被合并支路
+        功率保持 0；
+  \item 覆盖薄弱如实说明：无对 MATPOWER \texttt{rundcpf} 的批量数值对照，
+        本求解器的正确性主要靠 $B\theta=P$ 公式简单性与上述结构断言背书。
+\end{itemize}
+
+\subsection{分布式松弛}
+
+\compmeta{powerflow::DistributedSlackSolver}{\srcpath{include/hacdcpf/power\_flow/solvers/distributed\_slack\_solver.hpp}}
+
+\subsubsection*{功能说明与入口}
+把 slack 吸收的不平衡功率按参与因子分摊到多台电源。两个入口
+（\srcpath{distributed\_slack\_solver.hpp:19--28}；实现
+\srcpath{src/power\_flow/distributed\_slack\_solver.cpp:280, 341}）：
+\begin{quote}\footnotesize
+\texttt{DistributedSlackResult solve\_simplified(const HybridPowerSystem\&, const DistributedSlack\&,\\
+\hspace*{2em}const PowerFlowOptions\&) const;}\\
+\texttt{DistributedSlackResult solve\_full\_jacobian(...同名参数...) const;}
+\end{quote}
+配套工厂 \srcpath{create\_participation\_factors}（hpp:13--17，实现 :212--278）
+按 \texttt{capacity}/\texttt{droop}/\texttt{equal} 三种方式生成配置结构
+\texttt{DistributedSlack}（四字段定义见
+\srcpath{include/hacdcpf/power\_flow/power\_flow\_options.hpp:30--35}，语义列于本节末）。
+公共 API \srcpath{solve\_power\_flow\_distributed\_slack}(\srcpath{\_full})
+（\srcpath{src/api/hacdcpf.cpp:1086, 1097}）。
+
+\subsubsection*{数学模型与算法}
+\textbf{参与因子}（:212--278）：默认参与母线为有实际发电（$P_g>0$）的 SLACK/PV
+母线（:219--227），空集抛 \texttt{invalid\_argument}（:240--241）；原始权重
+\[
+\alpha_i^{0}=\max(P_{g,i},10^{-4})\;(\text{capacity}),\qquad
+\alpha_i^{0}=1/R_i\;(\text{droop},\ R_i>0\text{ 否则取容量}),\qquad
+\alpha_i^{0}=1\;(\text{equal})
+\]
+（:250--268），统一归一化 $\sum_i\alpha_i=1$（:44--56, :270）；单机分摊上限分别为
+$1.5\,P_{g,i}$（capacity/droop）与 $10$~pu（equal）。\srcpath{sanitize\_slack\_cfg}
+（:58--70）：参与列表为空时自动按 capacity 生成；因子数不匹配时全置 1 再归一；
+\fld{reference\_bus}=0 时取首个参与母线。
+
+\textbf{简化变体} \srcpath{solve\_simplified}（:280--339）：先做换流器协调预校核
+（可阻断，:284--293），随后 \srcpath{make\_solver\_data} $+$ 统一 Newton 求基准解
+（:297--299，电压经 \srcpath{unproject\_bus\_vector} 回投影，:311--319）；
+基准解收敛后计算参与母线集合上的总不平衡
+\[
+\Delta P_{\Sigma}=\sum_{i\in\mathcal P}\big(P_i^{\mathrm{calc}}-P_i^{\mathrm{spec}}\big)
+\]
+（\srcpath{compute\_total\_participating\_mismatch\_pu}，:72--132；致密 $O(n^2)$ 复算，
+含换流器 AC 注入 \srcpath{converter\_ac\_injection}，:111--122），按
+$\Delta P_i=\alpha_i\,\Delta P_{\Sigma}$ 分摊输出（:331--337）。
+
+\textbf{限值变体} \srcpath{solve\_full\_jacobian}：每轮完整 Newton 求解后，用
+\srcpath{distribute\_with\_limits} 迭代裁剪重分摊——越限母线钉在发电机
+$P_{\min}/P_{\max}$ 与 \fld{max\_participation\_p} 的交集边界并计入
+\fld{hit\_limits}，再把修正写回发电机并重解；剩余失配小于
+$\max(10^{-10},\fld{tol})$ pu 时结束，最多 20 次完整求解。
+
+诚实口径（重要）：
+\begin{itemize}
+  \item 简化变体只做一次 Newton，\fld{distributed\_slack\_p} 是事后分摊；限值变体
+        会重调度并反复重解。兼容名称 \texttt{full\_jacobian} 不表示把参与因子作为
+        单个增广 Jacobian 未知量；
+  \item 失配复算复用统一 AC 注入装配，覆盖组件负荷、ZIP 电压项、VSC/LCC 与
+        energy-router 注入；网络功率仍由 Ybus 致密复算，复杂度为 $O(n^2)$；
+  \item \fld{reference\_bus} 会实际改写角度参考；输出
+        \fld{distributed\_slack\_p} 的单位是系统 \fld{base\_mva} 基准上的 pu，
+        不是 MW。
+\end{itemize}
+
+\subsubsection*{求解参数}
+\begin{paramtable}
+\fld{tol} & $\varepsilon$ & pu & $10^{-6}\sim10^{-10}$ & $10^{-8}$ &
+  基准 Newton 收敛容差（转发，见第~\ref{sec:newton}~章）\\
+\fld{max\_iter} & $k_{\max}$ & 次 & 20--300 & 50 &
+  基准 Newton 迭代上限（转发；\texttt{Defaults::kPFMaxIter}，
+  \srcpath{defaults.hpp:47}）\\
+\fld{enable\_converter\_coordination\_check} & --- & 布尔 & --- & false &
+  换流器协调预校核开关，阻断级问题直接返回失败
+  （distributed\_slack\_solver.cpp:284--293）\\
+\fld{loss\_model} & --- & 枚举 & --- & Linear &
+  换流器损耗模型（\srcpath{make\_solver\_data} 装配与注入复算共用，:118, :297）\\
+\end{paramtable}
+\texttt{DistributedSlack} 配置字段（\fld{participating\_buses}、
+\fld{participation\_factors}、\fld{reference\_bus}、\fld{max\_participation\_p}）
+不属于 \texttt{PowerFlowOptions}，语义见上文算法小节。
+
+\subsubsection*{验证与校核}
+\srcpath{tests/test\_advanced\_pf.cpp}（标签 \texttt{[distributed\_slack]}）：
+\begin{itemize}
+  \item \textbf{因子构造}：capacity/equal 因子归一化误差 $\le10^{-12}$（:562--600），
+        droop 因子随下垂系数严格递减（:582--590）；
+  \item \textbf{求解}：3 节点两变体收敛且电压在 $(0.85,1.15)$（:607--631）；
+        限值 $10^{-12}$ 强制触发 \fld{hit\_limits}（:633--651）；
+  \item \textbf{MATPOWER 回归}：case9 capacity、case14 两变体一致收敛、case30 droop
+        收敛（:653--693）；集成用例 case14 下 slack 电压保持 $(0.95,1.10)$
+        （:747--766）。
+\end{itemize}
+
+\subsection{自适应孤岛}
+
+\compmeta{powerflow::AdaptiveSolver}{\srcpath{include/hacdcpf/power\_flow/solvers/adaptive\_solver.hpp}}
+
+\subsubsection*{功能说明与入口}
+面向拓扑可能分裂的系统：先分岛，活岛各自独立求解，死岛电压置零。入口签名
+（adaptive\_solver.hpp:11--17；实现 \srcpath{src/power\_flow/adaptive\_solver.cpp:122}）：
+\begin{quote}\footnotesize
+\texttt{AdaptiveSolveResult solve(const HybridPowerSystem\& sys, const PowerFlowOptions\& opt,\\
+\hspace*{2em}const std::unordered\_map<int, ReactiveLimit>\& q\_limits = \{\}) const;}
+\end{quote}
+如实说明：\texttt{q\_limits} 形参当前\textbf{未接线}（\texttt{(void)q\_limits;}，
+adaptive\_solver.cpp:125）。岛描述结构 \texttt{IslandInfo}
+（\srcpath{include/hacdcpf/model/ac\_components.hpp:1298--1309}）。公共 API
+\srcpath{solve\_power\_flow\_adaptive}（\srcpath{src/api/hacdcpf.cpp:1036}）在收敛后
+于全系统 SolverData 上补算支路潮流（:1040--1061）；
+\srcpath{solve\_power\_flow\_islanded}（:1068）为薄包装。
+
+\subsubsection*{数学模型与算法}
+\textbf{分岛} \srcpath{detect\_islands}
+（\srcpath{src/power\_flow/island\_detector.cpp:11--352}）：AC/DC 母线合并为一张图，
+停运与 \texttt{ISOLATED}/\texttt{DC\_ISOLATED} 母线剔除（:21--31）；真实母线编号
+映射到数组位置，编号\textbf{不要求连续}（:44--66）。边集涵盖 AC 支路、闭合开关与
+断路器、2W/3W 变压器、DC 支路、闭合 DC 断路器、VSC、DCDC 与能量路由器端口链
+（:68--157），DFS 求连通分量（:159--186）。活岛判据 \fld{has\_generators} 只看
+\textbf{真实在运注入}（发电机 $P_g>10^{-9}$ 或 \fld{is\_slack}、换流器
+$|P_{set}|$、静态/可再生/PV/储能/VPP、外部电网，:221--289），明确不以 SLACK
+母线类型作代理（注释 :222--229）。如实说明：\textbf{纯 DC 岛（无 AC 母线）被丢弃}
+（:200--202），不出现在结果中。
+
+\textbf{求解流程}（adaptive\_solver.cpp:122--271）：
+\begin{enumerate}
+  \item 初值取母线记录（:130--143），调用 \srcpath{detect\_islands}（:145）；
+  \item \textbf{单岛快路径}：不做子系统抽取，直接全系统 Newton，失败则平启动重试
+        （:149--175）；
+  \item \textbf{多岛}：死岛（\fld{has\_generators}=false）立即置零
+        （:198--201，\srcpath{set\_dead\_island\_zero} :97--118）；活岛缺 AC slack 且
+        \fld{enable\_auto\_swing\_selection} 时自动选摇摆母线
+        （\srcpath{auto\_select\_swing\_bus}，:31--66：SLACK $\to$ 最大 $P_g$ $\to$
+        PV $\to$ 首母线；覆盖在抽取时提升为 SLACK 且 $\theta=0$，
+        island\_detector.cpp:413--416；无 slack 兜底首母线，:764--767）；
+  \item 每岛 \srcpath{extract\_island\_subsystem} 重编号抽取（island\_detector.cpp:354--770，
+        含开关/变压器/换流器与全部组件表），独立 Newton $+$ 平启动重试
+        （adaptive\_solver.cpp:211--235）；
+  \item \textbf{并行}：可解岛 $>1$ 时经 \srcpath{util::ThreadPool::global()} 并发，
+        每岛强制 \fld{ac\_eval\_threads}=1 防嵌套并行死锁（:246--258）；单可解岛保留
+        雅可比级并行（:237--245）；
+  \item 结果按排序母线序映射回全局向量（:68--95）；
+        \fld{converged} 取各岛合取、\fld{iterations} 求和、\fld{residual} 取 max
+        （:261--266）。
+\end{enumerate}
+
+\subsubsection*{求解参数}
+\begin{paramtable}
+\fld{enable\_auto\_swing\_selection} & --- & 布尔 & --- & true &
+  无 slack 活岛自动选摇摆母线（adaptive\_solver.cpp:204--206）\\
+\fld{ac\_eval\_threads} & $n_{thr}$ & 线程 & 0（自动） & 0 &
+  单可解岛的雅可比并行线程数；多岛时内部强制为 1（:249--250）\\
+\fld{tol}、\fld{max\_iter} & --- & --- & --- & $10^{-8}$/50 &
+  转发各岛 Newton（见第~\ref{sec:newton}~章）\\
+\fld{loss\_model} & --- & 枚举 & --- & Linear &
+  各岛 \srcpath{make\_solver\_data} 装配损耗模型（:151, :216--218）\\
+\end{paramtable}
+
+\subsubsection*{验证与校核}
+\srcpath{tests/test\_advanced\_pf.cpp}（标签 \texttt{[island]}/\texttt{[adaptive]}）：
+\begin{itemize}
+  \item \textbf{分岛检测}：9 母线网络断 1/2 条支路得 2/3 岛（:166--227）；
+        非连续编号回归（12 母线三馈线，断言恰为 3 岛且自适应求解后全部
+        $V>0.8$，:230--282）；case14/case118 单岛（:284--299）；
+  \item \textbf{孤岛求解}：2 岛下 DG 岛存活、死岛电压近零、活岛
+        $V\in(0.7,1.2)$（:341--383）；混合 AC/DC 微网"并网--孤岛--重并网"
+        全生命周期（:386--455）；网状微网选择性孤岛 4 岛与互济合并
+        （:457--524）；
+  \item \textbf{自适应求解}：14 母线 AC/DC 系统死母线 $|V_m|\le10^{-12}$
+        （:526--542）；case9 收敛且残差 $<10^{-4}$（:545--555）；
+        两岛集成用例功率平衡（:768--781）；另有两节点冒烟
+        （\srcpath{tests/test\_hacdcpf.cpp:281--301}）。
+\end{itemize}

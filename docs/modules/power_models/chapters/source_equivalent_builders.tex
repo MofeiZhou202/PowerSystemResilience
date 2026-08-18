@@ -1,0 +1,249 @@
+\section{源码等价数学模型}
+\label{sec:power-models-source-equivalent}
+
+本章只转写当前 AML 建模器实际创建的变量、目标和约束，不补充代码中不存在的物理条件。
+源码定位采用本次核验时的行号；后续修改源码后，应以函数名和约束名重新定位并复核行号。
+
+\subsection{极坐标 ACOPF 建模器}
+
+本节对应 \srcpath{src/power\_models/acopf\_builder.cpp:169} 的
+\srcpath{solve\_acopf} 和
+\srcpath{include/hacdcpf/power\_models/branch\_admittance.hpp:42} 的
+\srcpath{branch\_admittance}。
+
+若 \fld{base\_mva}>0，代码取 $S_B=\fld{base\_mva}$；否则取 $S_B=100$。
+变量及边界严格为
+\begin{align}
+ \fld{vm\_min}_i &\le V_i\le \fld{vm\_max}_i, &
+ -\pi&\le\theta_i\le\pi,\\
+ \fld{pg\_min\_pu}_g&\le p_g\le\fld{pg\_max\_pu}_g, &
+ \fld{qg\_min\_pu}_g&\le q_g\le\fld{qg\_max\_pu}_g .
+\end{align}
+对应源码为 \srcpath{acopf\_builder.cpp:209--238}。参考母线角度不是通过变量上下界固定，
+而是额外创建非线性等式 $\theta_{i_{\mathrm{ref}}}=0$；若输入转换阶段没有参考母线，
+\srcpath{to\_acopf\_data} 把第一个母线标记为参考母线
+（\srcpath{acopf\_builder.cpp:154--161}）。
+
+目标函数在标幺出力变量上装配，但费用以 MW 出力计算：
+\begin{equation}
+ \min \sum_g\left(c_{2,g}S_B^2p_g^2+c_{1,g}S_Bp_g+c_{0,g}\right).
+ \label{eq:aml-acopf-objective}
+\end{equation}
+仅当相应系数绝对值大于零时，代码才把一次项或二次项加入表达式；常数项始终加入。
+对应源码为 \srcpath{acopf\_builder.cpp:240--263}。
+
+对每条支路，代码先计算
+\begin{align}
+ z_2&=r^2+x^2,\\
+ d&=\begin{cases}10^{-6},&z_2<10^{-12},\\z_2,&z_2\ge 10^{-12},\end{cases}&
+ g_s&=r/d,&b_s&=-x/d .
+\end{align}
+注意：阈值是 $10^{-12}$，但被替换的分母是 $10^{-6}$，不是 $10^{-12}$。
+令变比为 $\tau$、相移为 $\phi$，源码直接赋值
+\begin{align}
+ G_{ff}&=g_s/\tau^2,&B_{ff}&=(b_s+b_c/2)/\tau^2,\\
+ G_{tt}&=g_s,&B_{tt}&=b_s+b_c/2,\\
+ G_{ft}&=-(g_s\cos\phi-b_s\sin\phi)/\tau,&
+ B_{ft}&=-(g_s\sin\phi+b_s\cos\phi)/\tau,\\
+ G_{tf}&=-(g_s\cos\phi+b_s\sin\phi)/\tau,&
+ B_{tf}&=(g_s\sin\phi-b_s\cos\phi)/\tau.
+\end{align}
+这些赋值对应 \srcpath{branch\_admittance.hpp:42--76}；代码未对 $\tau=0$ 增设保护分支。
+
+令 $\theta_{ft}=\theta_f-\theta_t$、$\theta_{tf}=\theta_t-\theta_f$，支路两端功率表达式为
+\begin{align}
+ P_f&=G_{ff}V_f^2+V_fV_t(G_{ft}\cos\theta_{ft}+B_{ft}\sin\theta_{ft}),\\
+ Q_f&=-B_{ff}V_f^2+V_fV_t(G_{ft}\sin\theta_{ft}-B_{ft}\cos\theta_{ft}),\\
+ P_t&=G_{tt}V_t^2+V_fV_t(G_{tf}\cos\theta_{tf}+B_{tf}\sin\theta_{tf}),\\
+ Q_t&=-B_{tt}V_t^2+V_fV_t(G_{tf}\sin\theta_{tf}-B_{tf}\cos\theta_{tf}).
+\end{align}
+对应源码为 \srcpath{acopf\_builder.cpp:347--412}。母线累加器按以下顺序构造：
+\begin{align}
+ P_i^{\mathrm{acc}}&=-P_{d,i}-G_{s,i}V_i^2
+ +\sum_{g\in\mathcal G_i}p_g-\sum_{\ell\in\delta(i)}P_{\ell,i},\\
+ Q_i^{\mathrm{acc}}&=-Q_{d,i}+B_{s,i}V_i^2
+ +\sum_{g\in\mathcal G_i}q_g-\sum_{\ell\in\delta(i)}Q_{\ell,i},
+\end{align}
+并创建 $P_i^{\mathrm{acc}}=0$、$Q_i^{\mathrm{acc}}=0$。
+不存在于 \fld{bus\_pos} 的机组母线、或任一端不存在的支路会被直接跳过。
+对应源码为 \srcpath{acopf\_builder.cpp:277--345} 和
+\srcpath{acopf\_builder.cpp:415--429}。
+
+仅当 \fld{rate\_a\_pu}>0 时，代码在支路两端分别创建
+\begin{equation}
+ P_f^2+Q_f^2\le \fld{rate\_a\_pu}^2,
+ \qquad P_t^2+Q_t^2\le \fld{rate\_a\_pu}^2 .
+\end{equation}
+否则不创建该支路热限，见 \srcpath{acopf\_builder.cpp:431--449}。
+
+\subsection{交直流 ACDCOPF 建模器}
+
+本节对应 \srcpath{src/power\_models/acdcopf\_builder.cpp:236} 的
+\srcpath{solve\_acdcopf}。AC 变量、目标、支路导纳、功率平衡和热限与上一节使用同一组表达式；
+VSC 的 $P_{ac,c}$、$Q_{ac,c}$ 按“注入 AC 母线为正”加入 AC 平衡累加器，
+即 $P_i^{\mathrm{acc}}\mathrel{+}=P_{ac,c}$、
+$Q_i^{\mathrm{acc}}\mathrel{+}=Q_{ac,c}$，见
+\srcpath{acdcopf\_builder.cpp:391--495}。
+
+DC 电压变量逐母线采用输入边界
+\begin{equation}
+ \fld{vdc\_min}_i\le V_i^{dc}\le\fld{vdc\_max}_i .
+\end{equation}
+固定 DC 负荷使累加器初始化为 $P_i^{dc,\mathrm{acc}}=-P_{d,i}^{dc}$。
+对代码接受的每条 DC 支路，未作零电阻保护而直接计算
+\begin{equation}
+ P_{ij}^{dc}=\frac{V_i^{dc}-V_j^{dc}}{r_{ij}},\qquad
+ P_i^{dc,\mathrm{acc}}\mathrel{-}=P_{ij}^{dc},\quad
+ P_j^{dc,\mathrm{acc}}\mathrel{+}=P_{ij}^{dc}.
+\end{equation}
+对应源码为 \srcpath{acdcopf\_builder.cpp:497--529}。
+
+VSC 电流和损耗不是抽象的二次损耗通式，而按源码表达式计算：
+\begin{align}
+ I_{ac,c}^2&=\frac{P_{ac,c}^2+Q_{ac,c}^2+10^{-12}}{V_{a(c)}^2},\\
+ I_{ac,c}&=\sqrt{I_{ac,c}^2},\\
+ P_{\mathrm{loss},c}&=a_c
+ +\mathbf 1_{|b_c|>10^{-12}}b_c I_{ac,c}
+ +\mathbf 1_{|c_c|>10^{-12}}c_c I_{ac,c}^2,\\
+ P_{dc,c}&=-(P_{ac,c}+P_{\mathrm{loss},c}).
+\end{align}
+$P_{dc,c}$ 直接加入相应 DC 母线累加器，没有单独创建换流器功率等式；
+源码位置为 \srcpath{acdcopf\_builder.cpp:531--571}。
+
+对 DC/DC 换流器，决策量 $P_{out}$ 先加入输出母线。代码先令
+\begin{equation}
+ P_{in}^{(0)}=\frac{P_{out}}{\eta},
+\end{equation}
+若且仅若 $r_{eq}>0$，再覆盖为
+\begin{equation}
+ P_{in}=P_{in}^{(0)}+
+ \frac{r_{eq}\left(P_{in}^{(0)}\right)^2}{\left(V_{in}^{dc}\right)^2};
+\end{equation}
+否则 $P_{in}=P_{in}^{(0)}$。输入母线累加器减去 $P_{in}$。
+代码未对 $\eta=0$ 或 $V_{in}^{dc}=0$ 增设本地保护。
+控制等式严格按枚举分支创建：
+\begin{align}
+ \texttt{Power}:&\quad P_{out}=p_{ref},\\
+ \texttt{Droop}:&\quad P_{out}+k_{droop}(V_{out}^{dc}-v_{ref})=p_{ref},\\
+ \texttt{Voltage}:&\quad V_{out}^{dc}=v_{ref},
+ \quad\text{仅当输出母线不是 VSC DC 电压参考母线。}
+\end{align}
+对应源码为 \srcpath{acdcopf\_builder.cpp:573--610}。最后对每个 DC 母线创建
+$P_i^{dc,\mathrm{acc}}=0$，并对每个 \fld{is\_vdc\_slack} 母线创建
+$V_i^{dc}=\fld{vdc\_set}_i$，见 \srcpath{acdcopf\_builder.cpp:612--625}。
+
+\subsection{线性 DCOPF 建模器}
+
+本节对应 \srcpath{src/power\_models/dc\_opf\_builder.cpp:76--165}。
+变量边界为
+\begin{equation}
+ \fld{pmin}_g\le p_g\le\fld{pmax}_g,
+ \qquad -10^6\le\theta_i\le10^6,
+ \qquad\theta_{\mathrm{slack}}=0,
+\end{equation}
+其中参考角通过 \srcpath{fix} 同时固定上下界。目标为
+\begin{equation}
+ \min\sum_g c_g p_g.
+\end{equation}
+令支路方向为 $f(\ell)\rightarrow t(\ell)$、输入系数为 $b_\ell$，节点平衡实际装配为
+\begin{equation}
+ \sum_{g\in\mathcal G_i}p_g-P_{d,i}
+ -\sum_{\ell:f(\ell)=i}b_\ell(\theta_i-\theta_{t(\ell)})
+ +\sum_{\ell:t(\ell)=i}b_\ell(\theta_{f(\ell)}-\theta_i)=0.
+\end{equation}
+当 \fld{flim}>0 时创建
+\begin{equation}
+ -\fld{flim}_\ell\le b_\ell(\theta_f-\theta_t)\le\fld{flim}_\ell.
+\end{equation}
+当 \fld{flim}$\le0$ 时，代码仍创建两条约束，内容分别是 $0\le1$ 和 $0\ge-1$；
+不能把这一分支描述为“删除热限”。
+
+\subsection{LinDistFlow 建模器}
+
+本节对应 \srcpath{src/power\_models/lindistflow\_builder.cpp:28--163}。
+支路变量初始边界为 $-10^{20}\le P_{ij},Q_{ij}\le10^{20}$，随后每条支路分别覆盖为
+\begin{equation}
+ -S_{ij}^{max}\le P_{ij}\le S_{ij}^{max},\qquad
+ -S_{ij}^{max}\le Q_{ij}\le S_{ij}^{max}.
+\end{equation}
+这不是 $P_{ij}^2+Q_{ij}^2\le(S_{ij}^{max})^2$。
+平方电压满足输入的统一上下界，根节点则通过上下界同时设为
+$v_{root}=\fld{root\_v\_sq\_pu}$。
+
+代码用 \srcpath{incoming\_branch[to] = branch\_key} 保存每个母线唯一的入支路；
+若输入对同一母线提供多条入支路，后写入者覆盖先写入者。
+对每个非根节点，实际平衡为
+\begin{align}
+ -P_{ki}+\sum_{j:(i,j)}P_{ij}&=-P_{d,i},\\
+ -Q_{ki}+\sum_{j:(i,j)}Q_{ij}&=-Q_{d,i},
+\end{align}
+其中不存在入支路或出支路时，相应项不加入。根节点不创建功率平衡。
+每条输入支路均创建电压降等式
+\begin{equation}
+ v_j-v_i+2r_{ij}P_{ij}+2x_{ij}Q_{ij}=0.
+\end{equation}
+目标函数严格为
+\begin{equation}
+ \min\left(-\sum_{i\ne root}v_i\right),
+\end{equation}
+即最大化非根节点平方电压之和；源码没有加入常数 $v_{max}$。
+
+\subsection{SCUC 建模器}
+
+本节对应 \srcpath{src/power\_models/scuc\_builder.cpp:24--307}。
+变量类型与范围为
+\begin{equation}
+ u_{g,t}\in\{0,1\},\qquad
+ 0\le p_{g,t}\le10^{20},\qquad
+ 0\le s_{g,t}\le10^{20}.
+\end{equation}
+$s_{g,t}$ 是连续非负变量，不是二进制启动变量。目标函数为
+\begin{equation}
+ \min\sum_{g,t}\left(c_gp_{g,t}+C_g^{start}s_{g,t}+C_g^{commit}u_{g,t}\right).
+\end{equation}
+逐时段系统平衡和逐机组容量约束为
+\begin{align}
+ \sum_g p_{g,t}&=D_t,\\
+ p_{g,t}-P_g^{max}u_{g,t}&\le0,\\
+ p_{g,t}-P_g^{min}u_{g,t}&\ge0.
+\end{align}
+仅对非首时段创建
+\begin{align}
+ p_{g,t}-p_{g,t-1}&\le R_g^{up},\\
+ p_{g,t-1}-p_{g,t}&\le R_g^{dn},\\
+ u_{g,t}-u_{g,t-1}-s_{g,t}&\le0.
+\end{align}
+因此首时段没有启动量与初始开机状态之间的启动约束。
+
+对最小开机时间 $T_g^{up}>1$，代码令
+$w=\min(t+T_g^{up}-1,n_T-1)$、$L=w-t+1$，并创建
+\begin{equation}
+ \sum_{j=t}^{w}u_{g,j}-L u_{g,t}+L u_{g,t-1}\ge0,
+\end{equation}
+首时段的 $u_{g,t-1}$ 用 \fld{initial\_commitment} 的值替代。
+对最小停机时间 $T_g^{dn}>1$，以相同方式截断窗口并创建
+\begin{equation}
+ \sum_{j=t}^{w}u_{g,j}+L u_{g,t-1}-L u_{g,t}\le L.
+\end{equation}
+对应源码为 \srcpath{scuc\_builder.cpp:153--253}。
+若 \fld{spinning\_reserve\_MW} 映射非空，代码只在映射中存在当前时段键时创建
+\begin{equation}
+ \sum_g P_g^{max}u_{g,t}\ge D_t+R_t.
+\end{equation}
+本建模器没有网络变量或网络约束。结果中的平衡对偶仅在后端返回对偶时提取，
+且结果契约不把 MILP 对偶认证为有效市场价格。
+
+\subsection{求解和异常语义}
+
+\srcpath{solve\_acopf} 与 \srcpath{solve\_acdcopf} 在调用方未指定求解器时选择
+\texttt{NativeIPM}，并强制 \fld{allow\_fallback=false}；没有原生 NLP 回退。
+ACOPF 输入母线为空或 ACDCOPF 的 AC 母线为空时抛出 \texttt{invalid\_argument}。
+DCOPF、LinDistFlow 和 SCUC 的输入完整性检查以各自函数开头的显式异常分支为准。
+所有结果只有在 \srcpath{has\_primal()} 为真时才提取原始变量；“调用返回”不能等同于“已有原始解”。
+
+\subsection{本章覆盖边界}
+
+本章覆盖五个 AML builder 在当前源码中创建的核心变量、目标、平衡、控制及限值约束。
+数据转换函数中的每个字段映射、AML 后端内部的 barrier/KKT 数值算法、以及生产运行时
+\srcpath{opf::solve\_ac\_opf} 和 \srcpath{opf::solve\_dc\_opf} 不属于本章模型。
+若这些实现发生变化，本章不能作为独立于源码的规范继续沿用，必须重新逐式审计。

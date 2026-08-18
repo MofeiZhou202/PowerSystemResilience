@@ -1,0 +1,212 @@
+\section{源码等价的求解与观测模型}
+\label{sec:dynamics-source-equivalent}
+
+本章只转写当前源码实际执行的离散方程、矩阵装配与判据。符号不用于替换代码中的分支：
+$n_x$、$n_{ac}$、$n_{dc}$ 分别对应 \texttt{DaeLayout::n\_x}、\texttt{n\_ac}、
+\texttt{n\_dc}；打包未知量严格按
+\begin{equation}
+ \mathbf u=[\mathbf x;\Re(\mathbf V_{ac});\Im(\mathbf V_{ac});\mathbf V_{dc}]
+ \in\mathbb R^{n_x+2n_{ac}+n_{dc}}
+\end{equation}
+排列。依据：\srcpath{src/dynamics/DynamicSolver.cpp:1014--1067} 与
+\srcpath{src/dynamics/SmallSignal.cpp:15--42}。
+
+\subsection{质量矩阵入口实际求解的残差}
+令 $\theta$ 对应 \texttt{DaeStepFormula::theta}，$\mathbf f^{-}$ 对应
+\texttt{f\_prev}。在 $t+\Delta t$ 处，每次牛顿迭代重新调用所有设备的
+\texttt{stamp} 与 \texttt{computeDerivatives}，然后构造
+\begin{align}
+ \mathbf R_x &=(\mathbf x-\mathbf x^{-})-\Delta t
+ \left[\theta\mathbf f(\mathbf x,\mathbf V,t+\Delta t)
+ +(1-\theta)\mathbf f^{-}\right],\\
+ \mathbf R_{ac} &=\mathbf I_{ac}-\mathbf Y_{ac}\mathbf V_{ac},\\
+ \mathbf R_{dc} &=\mathbf I_{dc}-\mathbf G_{dc}\mathbf V_{dc},\\
+ \mathbf R&=[\mathbf R_x;\Re(\mathbf R_{ac});\Im(\mathbf R_{ac});\mathbf R_{dc}].
+\end{align}
+这就是代码求解对象；本手册不另行引入连续质量矩阵方程。若 $\theta<1$ 且前一步导数为空或
+维数不等于 $n_x$，函数直接失败；任一导数或残差非有限也直接失败。依据：
+\srcpath{src/dynamics/DynamicSolver.cpp:1000--1067}。
+
+收敛条件只使用无穷范数：
+\begin{equation}
+ \|\mathbf R\|_\infty\leq\texttt{newton\_tol}.
+\end{equation}
+成功时迭代数记为当前零基循环下标加一；超过 \texttt{max\_newton\_iters} 返回“不收敛”。
+依据：\srcpath{src/dynamics/DynamicSolver.cpp:1463--1565}。
+
+\subsection{雅可比的实际装配}
+解析网络块不是抽象的 $\partial\mathbf g/\partial\mathbf V$ 占位符，而是将
+$\mathbf Y_{ac}=\mathbf G+\mathrm j\mathbf B$ 按代码写入实数矩阵：
+\begin{equation}
+ \mathbf J_{ac}=\begin{bmatrix}-\mathbf G&\mathbf B\\-\mathbf B&-\mathbf G\end{bmatrix},
+ \qquad \mathbf J_{dc}=-\mathbf G_{dc}.
+\end{equation}
+微分质量块仅在非纯有限差分模式下写入 $\mathbf I_{n_x}$；设备块来自每个设备的
+\texttt{addJacobian}。依据：\srcpath{src/dynamics/DynamicSolver.cpp:1112--1145}、
+\srcpath{src/dynamics/DynamicSolver.cpp:1237--1267}。
+
+未被解析块覆盖的列采用前向差分，步长逐列为
+\begin{equation}
+ h_j=\sqrt{\epsilon_{mach}}\max(1,|u_j|),\qquad
+ J_{ij}^{FD}=\frac{R_i(\mathbf u+h_j\mathbf e_j)-R_i(\mathbf u)}{h_j}.
+\end{equation}
+当启用着色有限差分时，同一组中解析行模式不相交的列同时扰动；代码仍按各列的 $h_j$ 回填其
+模式包含的行。解析值与差分值的差小于等于 $10^{-14}$ 时不追加稀疏元。依据：
+\srcpath{src/dynamics/DynamicSolver.cpp:1269--1331}。
+
+缓存雅可比及其 LU 只在以下条件全部成立时复用：选项开启、缓存有效、未强制重建、维数相同、
+\begin{align}
+ |\theta-\theta_{old}|&\leq10^{-14},\\
+ |\Delta t-\Delta t_{old}|&\leq10^{-12}
+ \max(1,|\Delta t_{old}|,|\Delta t|),\\
+ n_{accepted}&<\max(0,\texttt{dae\_jacobian\_max\_reuse\_steps}).
+\end{align}
+依据：\srcpath{src/dynamics/DynamicSolver.cpp:1091--1105}。
+
+\subsection{牛顿方向、回溯与最小二乘回退}
+常规方向由已分解的雅可比求解
+\begin{equation}
+ \mathbf J\Delta\mathbf u=-\mathbf R.
+\end{equation}
+回溯从 $\alpha=1$ 开始，每次乘 $0.5$，下限为
+$\max(10^{-9},\texttt{newton\_damping\_min})$；仅当
+\begin{equation}
+ \|\mathbf R(\mathbf u+\alpha\Delta\mathbf u)\|_\infty
+ \leq(1-10^{-4}\alpha)\max(\|\mathbf R(\mathbf u)\|_\infty,
+ \texttt{newton\_tol})
+\end{equation}
+时接受。依据：\srcpath{src/dynamics/DynamicSolver.cpp:1354--1394}。
+
+若回溯失败，代码最多十次尝试阻尼最小二乘方向：
+\begin{align}
+ d&=\max\left(1,\max_i |(\mathbf J^T\mathbf J)_{ii}|\right),\\
+ (\mathbf J^T\mathbf J+\lambda d\mathbf I)\Delta\mathbf u&=-\mathbf J^T\mathbf R,
+ \qquad \lambda\in\{10^{-8},10^{-7},\ldots,10^1\}.
+\end{align}
+每个方向仍必须通过上一条完全相同的回溯判据；分解、求解或回溯失败后才将 $\lambda$ 乘十。
+依据：\srcpath{src/dynamics/DynamicSolver.cpp:1396--1448}。
+
+\subsection{分块积分器的离散式}
+下列公式逐项对应 \texttt{system.x.x} 的赋值，不代表同名方法的其他变体。
+
+\paragraph{显式欧拉。}
+\begin{equation}
+ \mathbf k_1=\mathbf f(t,\mathbf x_0),\qquad
+ \mathbf x_1=\mathbf x_0+\Delta t\mathbf k_1,
+ \qquad \texttt{dxdt}=\mathbf k_1.
+\end{equation}
+随后在 $t+\Delta t$ 调用 \texttt{solveNetwork}。依据：
+\srcpath{src/dynamics/integration/ExplicitEuler.cpp:10--23}。
+
+\paragraph{四阶 Runge--Kutta。}
+\begin{align}
+ \mathbf k_1&=\mathbf f(t,\mathbf x_0),\\
+ \mathbf k_2&=\mathbf f(t+\tfrac12\Delta t,\mathbf x_0+\tfrac12\Delta t\mathbf k_1),\\
+ \mathbf k_3&=\mathbf f(t+\tfrac12\Delta t,\mathbf x_0+\tfrac12\Delta t\mathbf k_2),\\
+ \mathbf k_4&=\mathbf f(t+\Delta t,\mathbf x_0+\Delta t\mathbf k_3),\\
+ \mathbf x_1&=\mathbf x_0+\frac{\Delta t}{6}
+ (\mathbf k_1+2\mathbf k_2+2\mathbf k_3+\mathbf k_4),\\
+ \texttt{dxdt}&=(\mathbf k_1+2\mathbf k_2+2\mathbf k_3+\mathbf k_4)/6.
+\end{align}
+依据：\srcpath{src/dynamics/integration/RK4.cpp:10--35}。
+
+\paragraph{后向欧拉。}
+初值为 $\mathbf x=\mathbf x_0+\Delta t\mathbf f_0$，迭代残差和雅可比为
+\begin{equation}
+ \mathbf r=\mathbf x-\mathbf x_0-\Delta t\mathbf f(t+\Delta t,\mathbf x),
+ \qquad \mathbf J_r=\mathbf I-\Delta t\mathbf J_f.
+\end{equation}
+收敛、回溯系数与接受条件和前述 DAE 回溯完全相同，但状态雅可比由
+\texttt{numerical\_state\_jacobian} 提供。依据：
+\srcpath{src/dynamics/integration/BackwardEuler.cpp:13--69}。
+
+\paragraph{梯形法。}
+初值同后向欧拉，实际残差和雅可比为
+\begin{equation}
+ \mathbf r=\mathbf x-\mathbf x_0-	frac12\Delta t(\mathbf f_0+
+ \mathbf f(t+\Delta t,\mathbf x)),\qquad
+ \mathbf J_r=\mathbf I-	frac12\Delta t\mathbf J_f.
+\end{equation}
+其回溯流程与后向欧拉一致。依据：
+\srcpath{src/dynamics/integration/Trapezoidal.cpp:13--67}。
+
+\paragraph{源码中的 RosenbrockEuler。}
+当前实现只有一次线性求解：
+\begin{equation}
+ (\mathbf I-\Delta t\mathbf J_f)\Delta\mathbf x=\Delta t\mathbf f_0,
+ \qquad \mathbf x_1=\mathbf x_0+\Delta\mathbf x,
+ \qquad \texttt{dxdt}=\mathbf f(t+\Delta t,\mathbf x_1).
+\end{equation}
+本手册不把它扩写为多阶段 Rosenbrock 家族。依据：
+\srcpath{src/dynamics/integration/Rosenbrock.cpp:10--36}。
+
+\subsection{小信号模型的实际线性化}
+源码首先构造
+\begin{equation}
+ \mathbf F(\mathbf u)=
+ [\mathbf f;\Re(\mathbf I_{ac}-\mathbf Y_{ac}\mathbf V_{ac});
+ \Im(\mathbf I_{ac}-\mathbf Y_{ac}\mathbf V_{ac});
+ \mathbf I_{dc}-\mathbf G_{dc}\mathbf V_{dc}],
+\end{equation}
+再将 $\mathbf J=\partial\mathbf F/\partial\mathbf u$ 分块并消元：
+\begin{equation}
+ \mathbf A=\mathbf f_x-\mathbf f_y\mathbf g_y^{-1}\mathbf g_x.
+\end{equation}
+代码通过 SparseLU 解 $\mathbf g_y\mathbf Z=\mathbf g_x$，并执行
+$\mathbf A\leftarrow\mathbf f_x-\mathbf f_y\mathbf Z$，不显式形成逆矩阵。分解失败或解非有限即失败。
+依据：\srcpath{src/dynamics/SmallSignal.cpp:273--405}。
+
+即使解析装配成功，微分行仍对被设备触及的列用中心差分覆盖：
+\begin{equation}
+ h_j=10^{-3}\max(1,|u_j|),\qquad
+ \mathbf J_{f,j}=\frac{\mathbf f(\mathbf u+h_j\mathbf e_j)-
+ \mathbf f(\mathbf u-h_j\mathbf e_j)}{2h_j}.
+\end{equation}
+代码这样做是为了跨过摆动方程中 $|\text{power imbalance}|\leq10^{-4}$ 的平衡死区；解析装配失败时，
+整个 $\mathbf F$ 使用同一步长中心差分。依据：
+\srcpath{src/dynamics/SmallSignal.cpp:301--370}。
+
+对每个特征值 $\lambda_i$，源码输出
+\begin{align}
+ f_i&=|\Im\lambda_i|/(2\pi),\\
+ \zeta_i&=\begin{cases}-\Re\lambda_i/|\lambda_i|,&|\lambda_i|>10^{-12},\\
+ 1,&|\lambda_i|\leq10^{-12}\text{ 且 }\Re\lambda_i<0,\\
+ -1,&\text{其他情况},\end{cases}\\
+ \texttt{oscillatory}_i&=(|\Im\lambda_i|>10^{-6}),\\
+ \texttt{stable}&=\bigwedge_i(\Re\lambda_i\leq\texttt{stability\_margin}).
+\end{align}
+正常参与因子先计算 $p_{ki}=|R_{ki}|\,|(R^{-1})_{ik}|$；若 $R^{-1}$ 含非有限值，则改为
+$p_{ki}=|R_{ki}|^2$。两种情况都按 $\sum_kp_{ki}$ 归一化，并按阻尼比从小到大排序模态。
+依据：\srcpath{src/dynamics/SmallSignal.cpp:409--474}。
+
+\subsection{频率报告的代码分支}
+只使用投运 AC 支路按母线位置建立连通分量。对设备返回的
+\texttt{FrequencyParticipation}，惯量权重是 $w_i=H_iS_i$，锚点回退权重是 $S_i$。
+有惯量参与者时，岛内结果为
+\begin{equation}
+ f_{island}=f_n\frac{\sum_iH_iS_i\omega_i}{\sum_iH_iS_i},\qquad
+ \mathrm{ROCOF}_{island}=f_n\frac{\sum_iH_iS_i\dot\omega_i}{\sum_iH_iS_i}.
+\end{equation}
+若惯量和为零但锚点容量和大于零，将 $H_iS_i$ 全部替换为 $S_i$；两者均无时返回
+$f_n$ 和 $0$。没有源的连通分量不进入岛列表。系统级结果使用所有连通分量的相同累计量；标称频率
+非正时取 $50$。依据：\srcpath{src/dynamics/DynamicFrequency.cpp:57--172}。
+
+\subsection{设备方程覆盖边界}
+设备状态导数的权威实现集中在
+\srcpath{src/dynamics/devices/BasicDynamicDevices.cpp}。当前实现入口包括：
+\texttt{DynamicLoad:2227}、\texttt{DynamicRLLine:2387}、
+\texttt{ThreePhaseDynamicLoad:2513}、\texttt{DCDynamicLoad:2606}、
+\texttt{DCVoltageSourceDynamic:2674}、\texttt{SynchronousMachine:3214}、
+\texttt{FiveMassShaft:4067}、\texttt{Governor:4377}、\texttt{Exciter:4978}、
+\texttt{PowerSystemStabilizer:5465}、\texttt{GridFormingInverter:5833}、
+\texttt{GridFollowingInverter:6729}、\texttt{VSCConverterDynamic:7432}、
+\texttt{PeriodicVariableSourceDynamic:7559}、\texttt{CSVGN1Dynamic:7682}、
+\texttt{DERAADynamic:7881}、\texttt{REGCADynamic:8079}、
+\texttt{InductionMachineDynamic:8393}、\texttt{ActiveConstantPowerLoadDynamic:8573}、
+\texttt{FluxInductionMachineDynamic:8774}、\texttt{DCDCConverterDynamic:8903}、
+\texttt{BatteryDynamic:9025}、\texttt{PVDynamic:9208} 与
+\texttt{ProtectionRelay:9359}。
+
+本章尚未逐分支转写上述每一种设备的全部导数，因此不提供任何教材标准设备方程，也不声称这些设备
+已被本章逐式覆盖。读者必须以所列 \texttt{computeDerivatives}、对应 \texttt{stamp} 与
+\texttt{addJacobian} 为准；此边界用于阻止文档公式被误当作代码不存在的模型。

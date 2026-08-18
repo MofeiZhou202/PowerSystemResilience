@@ -1,0 +1,82 @@
+% !TEX program = xelatex
+\documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
+\usepackage{../../_manual_common/hysim_manual}
+\title{\textbf{HySim-XJTU-HRPES}\\[0.4em]{\Large server 模块运行时契约手册}\\
+{\large 会话修订、ETag、异步作业与版本路由}}
+\author{西安交通大学 HRPES 团队}
+\date{\today}
+\begin{document}
+\maketitle
+\begin{abstract}
+本文档对应 \srcpath{src/server/runtime\_api\_v1.cpp}、\srcpath{runtime\_api\_v1.hpp} 与
+\srcpath{edition\_profile.cpp}。本模块是 HTTP/JSON 编排层，不拥有新的电力系统数学模型；本文形式化的
+只有代码真实执行的修订一致性、缓存、作业和路由分类规则。
+\end{abstract}
+\tableofcontents
+
+\section{模块定位、输入输出与边界}
+\texttt{RuntimeApiV1} 接收案例构建器和工作线程数，向 \texttt{httplib::Server} 注册多会话接口。
+输入是 HTTP 请求、JSON 和当前会话；输出是带状态码、schema、revision 与有效性字段的 JSON。
+GUI 后端 \srcpath{tests/run\_gui\_server.cpp} 不属于本目录，二者不能共享会话或缓存。
+
+\section{会话修订和 ETag 的代码等价模型}
+每个 \texttt{ApiSession} 保存系统指针和无符号修订号 $r$，其默认值由
+\srcpath{runtime\_api\_v1.cpp:1213--1224} 初始化为 0。ETag 由
+\srcpath{model\_etag}（同文件:79--81）精确构造为
+\begin{equation}
+E(s,r)=\texttt{"hysim-}+s+\texttt{-r}+\operatorname{to\_string}(r)+\texttt{"}.
+\end{equation}
+创建会话时若请求体包含模型，代码把 $r$ 置为 $1$（:1790--1803）；PUT 成功替换模型后执行
+$r\leftarrow r+1$（:1926--1938）。读请求若 \texttt{If-None-Match}=E(s,r) 返回 304
+（:1703--1713）。写请求的前置条件由 \srcpath{require\_if\_match}（:1716--1738）实现：
+\begin{equation}
+\texttt{If-Match存在}\land \texttt{If-Match}=E(s,r).
+\end{equation}
+缺少头返回 428；值不相等返回 412；两种情况均不得修改系统或修订号。
+
+\section{拓扑缓存一致性}
+会话缓存保存 $r_c$ 与 LOD2 拓扑 DOM。\srcpath{session\_topology\_lod2}
+（\srcpath{runtime\_api\_v1.cpp:1227--1235}）的更新条件为
+\begin{equation}
+\texttt{cache为空}\lor r_c\ne r.
+\end{equation}
+条件为真时重新序列化并令 $r_c\leftarrow r$，否则按引用复用缓存。LOD0/1 从 LOD2 聚合；viewport 必须
+同时提供 $x_{min},y_{min},x_{max},y_{max}$，缺一即抛出无效参数。子图查询的
+\fld{max\_nodes} 由 \srcpath{query\_int} 钳制在 $[1,5000]$，默认 500
+（:429），BFS 达到该数量即停止扩张（:455--457）。
+
+\section{异步作业与陈旧结果}
+\texttt{ApiJob} 保存提交时的 $r_j$ 与系统快照（\srcpath{runtime\_api\_v1.cpp:1295--1311}）。
+\srcpath{job\_json}（:1317--1358）返回结果时执行
+\begin{equation}
+stale=(r_{current}\text{存在})\land(r_{current}\ne r_j).
+\end{equation}
+因此旧作业可以完成，但必须在响应中携带 \fld{model\_revision}、
+\fld{current\_model\_revision} 与陈旧标志；绝不能把旧结果标成当前模型结果。代码中的作业状态字符串和
+取消行为是权威状态机，HTTP 202 表示已接受而不是已完成，删除成功返回 204。
+
+\section{版本路由分类}
+\texttt{EditionRouteAccess} 的三个实际枚举值是 \texttt{Retained}、\texttt{Disabled}、
+\texttt{Unclassified}（\srcpath{edition\_profile.hpp:10}）。
+\srcpath{classify\_trial\_route}（\srcpath{edition\_profile.cpp:346--368}）依次处理 OPTIONS、
+非 API 静态内容、两组禁用路由、保留路由与 v1 模式；其余 API 返回
+\texttt{Unclassified}。\texttt{Disabled} 必须拒绝，\texttt{Unclassified} 不能自动当作
+\texttt{Retained}。版本 profile 不是授权系统，也不改变底层求解器能力。
+
+\section{算法、复杂度、异常与并发}
+会话/作业查找平均为哈希表 $O(1)$；拓扑全量序列化为 $O(N+E)$，子图 BFS 为 $O(N+E)$ 且受
+\fld{max\_nodes} 截断。互斥量保护会话修订和缓存；耗时分析使用提交时快照，避免持锁求解。不存在会话、
+模型为空、revision 冲突、参数缺失、作业不存在、后端不支持和求解失败分别使用代码定义的 HTTP 错误，
+不应统一伪装成 200。
+
+\section{接口关系、验证与工业指标}
+本模块依赖 model、io、api 和各分析模块；HTTP schema 不应反向渗透进求解核心。测试需覆盖 304、428、
+412、并发写冲突、缓存随 revision 失效、作业陈旧标记、取消竞争、LOD/viewport 边界和 disabled route。
+工业指标包括错误状态码准确率、陈旧结果漏报率（目标 0）、revision 单调性、并发数据竞争数（目标 0）、
+拓扑分页内存峰值与 P95 延迟。
+
+\section{适用范围与局限}
+本手册不描述 GUI 单会话路由，不承诺分布式持久化、跨进程作业恢复或身份认证。当前缓存仅属进程内会话；
+进程重启后的状态不在模型内。后续改进应由 OpenAPI/schema 测试自动生成字段矩阵，并对状态转换做属性测试。
+\input{../../_manual_common/industrial_evaluation}
+\end{document}

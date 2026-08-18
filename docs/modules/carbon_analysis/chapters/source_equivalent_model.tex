@@ -1,0 +1,131 @@
+\section{源码等价数学模型}
+本章只转写当前实现，不给出比代码更一般的碳流模型。行号对应本章编写时的工作树；函数名是长期定位锚点。
+
+\subsection{节点净源需求与校核}
+对应 \srcpath{src/carbon\_analysis/carbon\_analysis.cpp:compute\_node\_net\_source\_requirement}
+（1253--1280 行）。对节点 $i$，代码计算
+\begin{equation}
+R_i=\sum_{l:n(l)=i,\,P_l>kTol}P_l
++\sum_{e:f(e)=i}\max(P_e^{send},0)
+-\sum_{e:t(e)=i}\max(P_e^{recv},0).
+\end{equation}
+若 $|R_i|<10^{-7}$，代码把 $R_i$ 置零。函数参数
+\fld{loss\_allocation\_alpha} 在当前函数体中被显式 \texttt{(void)} 忽略；因此此处不得写入损耗分摊项。
+校核函数 \srcpath{verify\_node\_power\_balance}（1396--1438 行）计算
+\begin{align}
+G_i&=\sum_{g:n(g)=i}\max(P_g,0),\\
+e_i&=G_i-R_i,\\
+\epsilon_P&=\max\left(10^{-7},\ \fld{verification\_tol}\cdot
+\max\left(\sum_g\max(P_g,0)+\sum_l\max(P_l,0),1\right)\right),
+\end{align}
+并仅在 $\max_i|e_i|\le\epsilon_P$ 时令 \fld{power\_balance\_verified}=true。
+
+\subsection{比例追踪稀疏系统}
+对应 \srcpath{proportional\_tracing}（1441--1540 行）。代码先定义
+\begin{equation}
+T_i=\sum_{g:n(g)=i,\,P_g>kTol}P_g
++\sum_{e:t(e)=i}\max(P_e^{recv},0).
+\end{equation}
+分配矩阵 $M$ 和源注入矩阵 $B$ 的实际装配为
+\begin{align}
+M_{ii}&=\begin{cases}T_i,&T_i>kTol,\\1,&\text{否则，}\end{cases}\\
+M_{t(e),f(e)}&\mathrel{+}=-\max(P_e^{recv},0),\\
+B_{i,s}&\mathrel{+}=P_s\quad\text{仅当 }P_s>kTol\text{ 且 }n(s)=i.
+\end{align}
+使用 \texttt{SparseLU<COLAMD>} 求 $MF=B$。分解或求解失败、$F$ 含非有限值时直接返回未填充结果。
+只把 $-10^{-10}<F_{is}<0$ 的微小负数截成零；更大的负数不会在这里自动修正。负荷与损耗来源归属为
+\begin{align}
+C_{ls}&=P_lF_{n(l),s},\\
+C_{es}^{loss}&=P_e^{loss}F_{f(e),s},
+\end{align}
+且仅当贡献不小于 \fld{min\_contribution\_mw} 才写入结果。
+
+\subsection{碳势矩阵的实际装配}
+对应 \srcpath{solve\_carbon\_matrix}（1707--1870 行）。对有效边 $e=(i,j)$，代码先逐项截断
+\begin{align}
+s_e&=\max(P_e^{send},0),&r_e&=\max(P_e^{recv},0),\\
+\ell_e&=\operatorname{clamp}(\max(P_e^{loss},0),0,s_e),&
+\alpha&=\operatorname{clamp}(\fld{loss\_allocation\_alpha},0,1),\\
+q_e^{recv}&=(1-\alpha)\ell_e,&
+q_e^{transfer}&=r_e+\alpha\ell_e,\\
+q_e^{send}&=s_e+(2\alpha-1)\ell_e.
+\end{align}
+随后严格按代码累加
+\begin{align}
+P_i^{out}&\mathrel{+}=\max(q_e^{send},0),&
+P_j^{out}&\mathrel{+}=q_e^{recv},\\
+K_{ji}&\mathrel{+}=q_e^{transfer}\quad(q_e^{transfer}>kTol),&
+P_{n(l)}^{out}&\mathrel{+}=P_l\quad(P_l>kTol).
+\end{align}
+右端项为 $b_i=\sum_{g:n(g)=i}\gamma_gP_g$，这里对 $P_g$ 不做 \texttt{max}。普通行的矩阵为
+\begin{align}
+A_{ii}&=\begin{cases}P_i^{out},&|P_i^{out}|>\epsilon_r,\\\epsilon_r,&\text{否则，}\end{cases}\\
+A_{ji}&\mathrel{+}=-K_{ji}.
+\end{align}
+若一行同时满足负荷小于 $10^{-8}$、发电小于 $10^{-8}$ 且该行最大装配量小于 $10^{-6}$，代码把该行
+替换为 $A_{ii}=1,b_i=0$，并不写入该行的转移非对角项。
+
+\subsection{缩放、秩、条件估计与收敛判据}
+令 $d_i$ 为装配期间记录的行最大绝对量。代码仅在 $d_i>\max(\epsilon_r,10^{-15})$ 时执行
+\begin{equation}
+\widetilde A_{ij}=A_{ij}/d_i,\qquad \widetilde b_i=b_i/d_i.
+\end{equation}
+\texttt{SparseQR<COLAMD>} 的 pivot threshold 为 $\max(\epsilon_r,10^{-12})$。必须满足秩等于节点数，
+并以 $R$ 对角枢轴估计
+\begin{equation}
+\widehat\kappa=\frac{\max_i|R_{ii}|}{\min_i|R_{ii}|}
+\end{equation}
+有限且不超过 \fld{max\_matrix\_condition\_estimate}（当该上限大于零）。解中若
+$w_i<-\max(\epsilon_r,10^{-10})$ 立即失败；其余小负数置零。最终判据精确为
+\begin{align}
+r&=Aw-b,\\
+\rho&=\frac{\|r\|_2}{\max(\|A\|_F\|w\|_2+\|b\|_2,10^{-15})},\\
+solved&=\operatorname{finite}(\|r\|_2,\rho)\land
+\neg(\|r\|_2>\epsilon_r\land\rho>\fld{verification\_tol}).
+\end{align}
+注意逻辑连接是“绝对残差和相对残差同时超限才失败”，不是两者任一超限即失败。
+
+\subsection{损耗强度与储能快照结果}
+\srcpath{edge\_loss\_carbon\_intensity}（132--140 行）在 $P_e^{loss}>kTol$ 时返回
+\begin{equation}
+w_e^{loss}=\alpha w_{f(e)}+(1-\alpha)w_{t(e)},
+\end{equation}
+否则返回零。单步储能结果 \srcpath{build\_storage\_carbon\_result}（1654--1675 行）使用
+\begin{align}
+E_s&=\max(SOC_s,0)\max(E_s^{rated},0),\\
+(w_s,E_s^{CO2})&=\begin{cases}
+(w_{charging\_load},E_{charging\_load}^{CO2}),&P_s<-kTol\text{ 且存在充电负荷，}\\
+(w_s^{inventory},\max(P_s,0)w_s^{inventory}),&\text{否则。}
+\end{cases}
+\end{align}
+此处 \fld{total\_emissions\_tco2} 数值按 1 小时快照约定生成，函数体没有额外乘时长。
+
+\subsection{年度储能终端快照更新}
+对应 \srcpath{carry\_storage\_carbon\_state\_from\_terminal\_snapshot}
+（649--728 行）。实现定义
+\begin{align}
+\eta_c&=\operatorname{clamp}(\eta_c^{raw}>0?\eta_c^{raw}:1,10^{-6},1),\\
+\eta_d&=\operatorname{clamp}(\eta_d^{raw}>0?\eta_d^{raw}:1,10^{-6},1),\\
+\sigma&=\operatorname{clamp}(1-\max(sd,0)/100,0,1),\\
+E_c&=\max(-P_s,0)\Delta t,&E_c^{stored}&=E_c\eta_c,\\
+E_d&=\max(P_s,0)\Delta t,&E_d^{withdrawn}&=E_d/\eta_d,\\
+E_{sd}&=E_0(1-\sigma),&
+\widehat E_1&=E_0\sigma+E_c^{stored}-E_d^{withdrawn}.
+\end{align}
+能量误差保存为 $\widehat E_1-E_1$。碳损失和终端库存严格为
+\begin{align}
+C_c^{loss}&=(E_c-E_c^{stored})w_{bus},\\
+C_d^{loss}&=(E_d^{withdrawn}-E_d)w_0,\\
+C_{sd}^{loss}&=E_{sd}w_0,\\
+C_1&=E_0w_0+E_cw_{bus}-E_dw_0-C_c^{loss}-C_d^{loss}-C_{sd}^{loss},\\
+w_1&=\begin{cases}\max(C_1,0)/E_1,&E_1>kTol,\\0,&\text{否则。}\end{cases}
+\end{align}
+年度库存残差对应 \srcpath{finalize\_storage\_adjusted\_balance}（490--534 行）：
+\begin{equation}
+r_{inv}=C_0+C_c-C_d-(C_c^{loss}+C_d^{loss}+C_{sd}^{loss})-C_T.
+\end{equation}
+
+\subsection{复杂度与未实现语义}
+构图与装配为 $O(n+m+g+l)$；比例追踪一次稀疏 LU 后求多右端，碳势为一次稀疏 QR，实际复杂度取决于
+消元填充。\fld{max\_tracing\_depth} 当前不出现在上述矩阵追踪实现中，不能据字段名宣称存在深度截断。
+任何分解失败、秩亏、条件估计超限、显著负解或残差判据失败均保持 \fld{matrix\_solved}=false。

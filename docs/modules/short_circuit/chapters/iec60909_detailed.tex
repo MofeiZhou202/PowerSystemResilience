@@ -1,0 +1,45 @@
+% 第 3 章：详细 IEC 60909 计算
+\section{详细 IEC 60909 计算}\label{sec:sc-detailed}
+
+\subsection{序矩阵构建与选择性求逆}
+详细路径 \srcpath{run\_short\_circuit\_detailed}（\srcpath{short\_circuit.hpp:199}）在
+\srcpath{build\_sc\_admittance\_matrices} 中建稀疏序矩阵，\textbf{绝不}构造完整 $Z_{bus}$：对故障
+母线 $k$ 将每个所需序矩阵分解一次并解 $Y_s z_k=e_k$，$z_k$ 为所选逆列；非故障电流指标另需
+选择性逆对角元，以有界稠密 RHS 块提取并仅保留各块对角（\fld{inverse\_rhs\_batch\_size}，默认 32）。
+
+\subsection{元件序阻抗}
+\begin{itemize}
+  \item \textbf{无源支路}：$z_1=r+jx$、$y_1=1/z_1$；零序在有 \fld{r0\_pu}/\fld{x0\_pu} 时用 $z_0=r_0+jx_0$，
+        缺失则不提供零序路径（除非投影填回退值）；非标准变比 $t$ 以标准 pi/tap 块插入；
+  \item \textbf{外部电网}：由 \fld{ikq\_ka}+\fld{x\_r}、直接标幺 $r/x$、或短路功率给出——
+        $Z_{ext,\Omega}=cU_{nQ}/(\sqrt3 I_{kQ}'')$，或 $|Z_{ext,pu}|=cS_b/S_{sc}$；
+  \item \textbf{同步发电机}：$z_G''=(r_a+jx_d'')S_b/S_{rG}$，IEC 校正
+        $K_G=c/(1+x_d''\sin\varphi_r)$，$z_{G,corr}''=K_G z_G''$（稳态 $I_k$ 时 $x_d''\to x_d$）；
+        零序 $K_{G0}=c/(1+x_0\sin\varphi_r)$（\srcpath{calculate\_generator\_correction\_factor\_sc}）；
+  \item \textbf{变压器}：富两绕组变压器投影为等效 AC 支路，可选 IEC 校正 $K_T$
+        （\fld{apply\_iec\_transformer\_correction}，默认 true；\srcpath{calculate\_transformer\_correction\_factor\_sc}）。
+\end{itemize}
+
+\subsection{特征电流}
+详细结果 \fld{SCDetailedBusResult}（:114）给出 IEC 60909 全套特征电流：
+\begin{itemize}
+  \item \textbf{初始对称短路电流} $I_k''$（\fld{ikss\_ka}），并分列发电机/电机/静止发电机/外网/
+        换流器贡献（\fld{ikss\_gen\_contrib\_ka} 等）与去电机值 \fld{ikss\_no\_motor\_ka}；
+  \item \textbf{峰值电流} $i_p=\kappa\sqrt2\,I_k''$，冲击系数
+        $\kappa=1.02+0.98\,e^{-3R/X}$（\srcpath{calculate\_kappa\_basic\_sc}，:182；方法选择
+        \fld{SCKappaMethod} A/B/C，:76）；
+  \item \textbf{开断电流} $I_b$（\fld{ib\_ka}，按 \fld{breaking\_time\_s} 计及发电机贡献衰减 $\mu$）；
+  \item \textbf{稳态电流} $I_k$（\fld{ik\_ka}，发电机改用 $x_d$）；
+  \item \textbf{热等效电流}：源码固定 $n=1$。若 $|R/X|<10^{-12}$ 或
+        $T_k<10^{-12}$，令 $m=1$；否则当
+        $a=4\pi fT_k|R/X|>10^{-6}$ 时令
+        $m=(2fT_k)^{-1}(1-e^{-a})/a$，最后
+        $I_{th}=I_k''\sqrt{m+n}$。小 $a$ 分支保留源码在
+        \srcpath{short\_circuit.cpp:1996--2008} 的前一项赋值；完整实现见
+        \srcpath{short\_circuit.cpp:1974--2016}；
+  \item \textbf{剩余电压} \fld{v\_remaining\_pu} 与逐支路故障电流 \fld{SCDetailedBranchResult}（:134）。
+\end{itemize}
+
+\subsection{计算口径}
+\fld{SCCalcType}（\fld{Max}/\fld{Min}，:71）选择 $c_{\max}/c_{\min}$ 与相应机组数据；
+\fld{SCTopology}（\fld{Radial}/\fld{Meshed}，:82）影响 $\kappa$ 与开断电流的网状衰减处理。

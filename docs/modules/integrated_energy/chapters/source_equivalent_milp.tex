@@ -1,0 +1,153 @@
+\section{源码等价 MILP}
+
+本章逐式对应 \srcpath{src/integrated\_energy/integrated\_energy\_optimizer.cpp:405--777}。
+所有功率变量均为非负连续变量；库存变量含 $t=0,\ldots,n$，其余逐时变量含
+$t=0,\ldots,n-1$。未在下文展开的上界直接取同名输入字段；$P_{EV,V2G}$ 的上下界均为零，
+因此当前实现不允许 V2G（\srcpath{integrated\_energy\_optimizer.cpp:491--503}）。
+
+\subsection{输入归一化}
+
+步数必须为正，步长必须有限且大于零；固定功率因数必须在 $10^{-12}$ 内等于 1，原因是模型
+不含无功、电压或电网约束。非有限的一般非负参数通过
+$\max(0,x)$ 归零；被动效率与保持率必须有限且在 $(0,1]$，否则抛异常；热泵 COP 非有限或
+非正时改为 3.2。EV/HV/ICV 比例先取非负，和大于 $10^{-8}$ 时归一化为和为 1，否则设置为
+$(0,0,1)$。每条 profile 长度只能为 0、1 或 $n$；空 profile 使用源码字段对应的固定回退值，
+单值扩展为 $n$ 项。依据为 \srcpath{integrated\_energy\_optimizer.cpp:42--245}。
+
+\subsection{逐时载能平衡}
+
+令 $\Delta t=\fld{step\_duration\_hr}$。新能源可用量严格拆分为
+\begin{equation}
+ P_t^{solar}+P_t^{solar,curt}=\bar P_t^{solar},\qquad
+ P_t^{wind}+P_t^{wind,curt}=\bar P_t^{wind},
+\end{equation}
+且两个电解功率之和不超过同一电解槽功率上限。
+电平衡为
+\begin{align}
+ &P_t^{imp}-P_t^{exp}+P_t^{solar}+P_t^{wind}+P_t^{chp}+P_t^{fc}
+ +P_t^{es,dis}+P_t^{EV,V2G}\nonumber\\
+ &\quad=L_t^e+P_t^{ely,H2}+P_t^{ely,fuel}+P_t^{hp}+P_t^{es,ch}
+ +P_t^{EV,ch}+P_t^{CCUS}.
+\end{align}
+热平衡为
+\begin{equation}
+ Q_t^{chp}+Q_t^{hp}+Q_t^{ts,dis}+\eta_{wasteheat}P_t^{hp}
+ =L_t^h+Q_t^{ts,ch}.
+\end{equation}
+依据为 \srcpath{integrated\_energy\_optimizer.cpp:547--566}。
+
+启用分层储氢时，氢平衡为
+\begin{equation}
+ H_t^{ely}+H_t^{daily,dis}+H_t^{weekly,dis}+H_t^{seasonal,dis}
+ =L_t^{H2}+H_t^{fc}+H_t^{HV}+H_t^{daily,ch}+H_t^{weekly,ch}+H_t^{seasonal,ch}.
+\end{equation}
+关闭时，周/季层充放和四个层间转移变量分别以等式固定为零，并从上述供需式删除周/季充放项。
+燃料平衡始终为
+\begin{equation}
+ F_t^{external}+F_t^{synthetic}=F_t^{chp}+L_t^f+F_t^{ICV}.
+\end{equation}
+依据为 \srcpath{integrated\_energy\_optimizer.cpp:568--590}。
+
+\subsection{转换设备约束}
+
+代码创建以下等式或不等式：
+\begin{align}
+ H_t^{ely}&=\eta_{ely}P_t^{ely,H2},&
+ F_t^{synthetic}&=\eta_{p2f}P_t^{ely,fuel},\\
+ P_t^{fc}&=\eta_{fc}H_t^{fc},&
+ Q_t^{hp}&=COP\,P_t^{hp},\\
+ P_t^{chp}&\le\eta_{chp,e}F_t^{chp},&
+ Q_t^{chp}&\le\eta_{chp,h}F_t^{chp},\\
+ P_t^{chp}+Q_t^{chp}&\le\eta_{chp,total}F_t^{chp}.
+\end{align}
+CHP 的三条关系均为上界，不是固定热电比等式；见
+\srcpath{integrated\_energy\_optimizer.cpp:592--605}。
+
+\subsection{库存演化}
+
+电、热和日内氢库存分别为
+\begin{align}
+ E_{t+1}&=\rho_eE_t+\eta_{ch}\Delta t P_t^{es,ch}
+ -\frac{\Delta t}{\eta_{dis}}P_t^{es,dis},\\
+ Q_{t+1}^{store}&=\rho_qQ_t^{store}+\eta_{ch}\Delta t Q_t^{ts,ch}
+ -\frac{\Delta t}{\eta_{dis}}Q_t^{ts,dis},\\
+ H_{t+1}^{d}&=\rho_dH_t^d+\eta_{ch}\Delta t H_t^{d,ch}
+ -\frac{\Delta t}{\eta_{dis}}H_t^{d,dis}
+ +\Delta t\eta_{w2d}H_t^{w2d}-\Delta t H_t^{d2w}.
+\end{align}
+周、季库存为
+\begin{align}
+ H_{t+1}^{w}&=\rho_wH_t^w+\eta_{ch}\Delta t H_t^{w,ch}
+ -\frac{\Delta t}{\eta_{dis}}H_t^{w,dis}
+ +\Delta t\eta_{d2w}H_t^{d2w}+\Delta t\eta_{s2w}H_t^{s2w}
+ -\Delta t H_t^{w2d}-\Delta t H_t^{w2s},\\
+ H_{t+1}^{s}&=\rho_sH_t^s+\eta_{ch}\Delta t H_t^{s,ch}
+ -\frac{\Delta t}{\eta_{dis}}H_t^{s,dis}
+ +\Delta t\eta_{w2s}H_t^{w2s}-\Delta t H_t^{s2w}.
+\end{align}
+五类库存的初态均通过 fix 固定；启用循环末态时，五类末态也分别固定为各自初始输入。
+依据为 \srcpath{integrated\_energy\_optimizer.cpp:505--516} 和
+\srcpath{integrated\_energy\_optimizer.cpp:607--639}。
+
+\subsection{交通、碳和 CCUS}
+
+若关闭交通，代码把 $D_t$ 直接设为零；否则使用输入需求。车型里程不是优化分配，而固定为
+\begin{align}
+ D_t^{EV}&=r_{EV}D_t,&D_t^{HV}&=r_{HV}D_t,&D_t^{ICV}&=r_{ICV}D_t,\\
+ P_t^{EV,ch}&=\alpha_{EV}r_{EV}D_t/\Delta t,&
+ H_t^{HV}&=\alpha_{HV}r_{HV}D_t/\Delta t,&
+ F_t^{ICV}&=\alpha_{ICV}r_{ICV}D_t/\Delta t.
+\end{align}
+依据为 \srcpath{integrated\_energy\_optimizer.cpp:641--650}。
+
+碳变量按以下约束装配：
+\begin{align}
+ E_t^{CO2}&=g_t\Delta t P_t^{imp}+g_f\Delta t F_t^{external},\\
+ 0\le C_t&\le\phi E_t^{CO2},\\
+ R_t&\ge E_t^{CO2}-C_t,\\
+ P_t^{CCUS}&\ge(c_{power}/\Delta t)C_t.
+\end{align}
+$C_t$ 另有变量上界 \fld{ccus\_max\_tco2\_per\_h}$\cdot\Delta t$。
+若 \fld{eta\_carbon\_to\_fuel}>0，创建
+$F_t^{synthetic}\le\eta_{c2f}C_t$；否则固定 $F_t^{synthetic}=0$。
+注意 $R_t$ 只有下界而没有等式；其是否取紧由目标或碳预算决定。
+依据为 \srcpath{integrated\_energy\_optimizer.cpp:652--668}。
+
+\subsection{互斥、总量约束和目标}
+
+启用电网交换互斥时，以二进制 $z_t$ 创建
+\begin{equation}
+ P_t^{imp}\le\bar P^{imp}z_t,\qquad P_t^{exp}\le\bar P^{exp}(1-z_t).
+\end{equation}
+启用储能互斥时，电、热、日/周/季氢五类储能各有独立二进制充电模式，并分别创建
+$P^{ch}\le\bar P^{ch}z$、$P^{dis}\le\bar P^{dis}(1-z)$；层间转移没有方向互斥变量。
+依据为 \srcpath{integrated\_energy\_optimizer.cpp:518--533} 和
+\srcpath{integrated\_energy\_optimizer.cpp:670--708}。
+
+令
+\begin{align}
+ RENEW&=\sum_t\Delta t(P_t^{solar}+P_t^{wind}),\\
+ SUPPLY&=\sum_t\Delta t(P_t^{imp}+P_t^{solar}+P_t^{wind}+P_t^{chp}+P_t^{fc}),\\
+ CARBON&=\sum_tR_t,\\
+ CURT&=\sum_t\Delta t(P_t^{solar,curt}+P_t^{wind,curt}).
+\end{align}
+可再生比例大于零时创建 $RENEW\ge\fld{renewable\_mandate\_fraction}\,SUPPLY$；
+启用碳预算时创建 $CARBON\le\fld{co2\_budget\_tco2}$。
+
+成本 $COST$ 完全由 \srcpath{integrated\_energy\_optimizer.cpp:716--739} 的线性项组成：购电正、
+售电负，外购燃料、新能源/CHP/热泵/电解槽/燃料电池运维、所有储能吞吐、弃能、残余碳、捕集量
+和 CCUS 功率均按同名成本字段计价。四个目标分支严格为
+\begin{align}
+ \texttt{Cost}:&\ COST,\\
+ \texttt{Carbon}:&\ CARBON+10^{-6}COST,\\
+ \texttt{MinCurtailment}:&\ CURT+10^{-6}COST,\\
+ \texttt{Weighted}:&\ w_cCOST+w_eCARBON+w_uCURT.
+\end{align}
+依据为 \srcpath{integrated\_energy\_optimizer.cpp:710--767}。
+
+\subsection{结果语义}
+
+\fld{feasible} 仅等于 \srcpath{has\_primal()}；\fld{optimal} 还要求后端状态 optimal、gap 有限，
+且 $gap\le\fld{mip\_gap\_tol}+10^{-12}$。提取时绝对值小于 $10^{-7}$ 的变量置零。
+PCC 报告符号为 $P^{pcc}=P^{export}-P^{import}$，与旧手册中的相反符号概述不同。
+依据为 \srcpath{integrated\_energy\_optimizer.cpp:779--849}。

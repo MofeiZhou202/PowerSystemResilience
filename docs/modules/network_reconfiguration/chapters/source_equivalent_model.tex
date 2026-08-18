@@ -1,0 +1,120 @@
+\section{当前可达重构模型}
+
+本章只描述 \srcpath{src/network\_reconfiguration/topology\_reconfiguration.cpp:179} 的
+\srcpath{run\_topology\_reconfiguration}。历史入口
+\srcpath{solve\_optimal\_reconfiguration} 在
+\srcpath{topology\_analysis.cpp:165--266} 已提前包装并返回该混合求解器结果；其后保留的旧 AC MILP
+在当前控制流不可达，故不作为现行模型。
+
+\subsection{变量布局和边界传播}
+
+统一边序为 AC、DC、VSC。拓扑变量包括有符号虚拟流 $F_e\in[-n_b,n_b]$、
+源虚拟注入 $F_g\in[0,n_b]$、支路状态 $\beta_e$ 和根指示 $\gamma_g$。
+启用 PF 时再创建线路/VSC 的 $P,Q$、源 $P_g,Q_g$、平方电压 $v_i$、有功切负荷
+$s_i^P\ge0$、AC 无功切负荷 $s_i^Q\ge0$；仅在同时启用 loss aware 时创建
+$t_e\ge0$。准确偏移见 \srcpath{topology\_reconfiguration.cpp:117--172}。
+
+状态边界按以下分支执行：不参与拓扑的 overlay 边固定为原状态且虚拟流固定零；故障边
+$\zeta_e<0.5$ 固定 $\beta_e=F_e=0$；合法可切换边保留 $0\le\beta_e\le1$ 并成为二元变量；
+其余边固定为原状态，固定断开时同时固定 $F_e=0$。
+同一当前连通分量内部的断开 tie 即便此前自由，也会固定断开。
+依据为 \srcpath{topology\_reconfiguration.cpp:749--868}。
+
+\subsection{实际目标函数}
+
+对初始断开边，$\beta_e$ 的动作系数为 $+\lambda_{sw}c_e$；对初始闭合边为
+$-\lambda_{sw}c_e$，被省略的常数是 $\lambda_{sw}c_e$。因此目标中的动作部分等价于
+对状态变化计费，但存入 LP 的不是 $\lambda_{sw}\sum\beta_e$。
+损耗分支为
+\begin{equation}
+ L_e=\begin{cases}
+ \lambda_{loss}|r_e|t_e,&\fld{loss\_aware}\land\fld{enable\_pf},\\
+ \lambda_{loss}|r_e|\beta_e,&\text{否则}.
+ \end{cases}
+\end{equation}
+启用 PF 时再加 $\lambda_{shed}(\sum_i s_i^P+\sum_{i\in AC}s_i^Q)$；
+除 primary root 外的每个 $\gamma_g$ 加 $\lambda_{island}\gamma_g$。
+完整赋值位于 \srcpath{topology\_reconfiguration.cpp:995--1023}。
+
+\subsection{拓扑等式与不等式}
+
+统一树模式下，虚拟流平衡的矩阵符号为：from 端 $+F_e$、to 端 $-F_e$、源端
+$-F_g$，每个母线右端为 $-1$；即
+\begin{equation}
+ \sum_{e:f(e)=i}F_e-\sum_{e:t(e)=i}F_e-\sum_{g:i(g)=i}F_g=-1.
+\end{equation}
+分域树模式把所有 VSC 虚拟流固定为零，并分别在每个 AC/DC 连通分量代表节点把右端
+从 $-1$ 增加该分量母线数；见 \srcpath{topology\_reconfiguration.cpp:1062--1098}。
+
+统一模式的森林基数等式为
+\begin{equation}
+ \sum_{e\in\mathcal E_{participating}}\beta_e+\sum_g\gamma_g=n_b.
+\end{equation}
+分域模式不使用该等式，而对每个预计算 AC 分量固定
+$\sum_{e\in component}\beta_e=|V_{component}|-1$；仅当不允许 DC mesh 时，对每个 DC 分量
+也创建同式。VSC 不计入分域树边数。依据为
+\srcpath{topology\_reconfiguration.cpp:1100--1136}。
+
+仅对自由 $\beta_e$ 创建
+\begin{equation}
+ -n_b\beta_e\le F_e\le n_b\beta_e.
+\end{equation}
+每个源创建 $F_g\le n_b\gamma_g$，并创建 $\sum_g\gamma_g\ge1$。
+统一模式存在真实 DC 源时，另创建 DC 源集合上的 $\sum\gamma_g\ge1$。
+依据为 \srcpath{topology\_reconfiguration.cpp:1198--1235} 和
+\srcpath{topology\_reconfiguration.cpp:1335--1342}。
+
+\subsection{可选 LinDistFlow 约束}
+
+启用 PF 时，有功矩阵行采用 from $+P_e$、to $-P_e$、源 $-P_g$、切负荷 $-s_i^P$，
+右端为 $-P_{d,i}$；AC 无功采用相同符号，右端 $-Q_{d,i}$。
+这对应
+\begin{align}
+ \sum_{out}P_e-\sum_{in}P_e-\sum_gP_g-s_i^P&=-P_{d,i},\\
+ \sum_{out}Q_e-\sum_{in}Q_e-\sum_gQ_g-s_i^Q&=-Q_{d,i}\quad(i\in AC).
+\end{align}
+VSC $P$ 同时进入 AC/DC 两端；VSC $Q$ 只进入属于 AC 的端点。
+依据为 \srcpath{topology\_reconfiguration.cpp:1138--1188}。
+
+启用电压约束时，对 AC/DC 线路而非 VSC 创建
+\begin{equation}
+ |v_j-v_i+2r_eP_e+2x_eQ_e|\le M_e(1-\beta_e),
+\end{equation}
+DC 边没有 $Q$ 项。源码的支路大 M 为
+\begin{equation}
+ M_e=\min\!\left(\fld{big\_m\_v},
+ \max\left(0.1,|\Delta v_{span}|+2(|r_e|+|x_e|)\bar S_e\right)\right),
+\end{equation}
+其中 $\Delta v_{span}$ 取两种端点上下界差的较大者；见
+\srcpath{topology\_reconfiguration.cpp:1237--1275}。
+
+启用热限时，线路/VSC 有功均使用独立箱约束
+$|P_e|\le\bar S_e\beta_e$；AC 线路与 VSC 无功使用
+$|Q_e|\le\bar S_e\beta_e$。这不是圆形视在功率约束；DC 线路无 $Q$ 变量。
+loss aware 分支创建 $P_e-t_e\le0$ 和 $-P_e-t_e\le0$，故 $t_e\ge|P_e|$；
+注释称其为 $I^2R$ 代理，但实际目标是 $|r_e||P_e|$ 的线性代理。
+依据为 \srcpath{topology\_reconfiguration.cpp:1277--1313} 和
+\srcpath{topology\_reconfiguration.cpp:1344--1354}。
+
+\subsection{开关预算与结果语义}
+
+预算只计自由边，并乘设备动作成本 $c_e$：初始断开边贡献 $c_e\beta_e$，初始闭合边贡献
+$c_e(1-\beta_e)$。矩阵形式把闭合边常数移到右端：
+\begin{equation}
+ \sum_{e:\alpha_e=0}c_e\beta_e-
+ \sum_{e:\alpha_e=1}c_e\beta_e
+ \le N_{max}-\sum_{e:\alpha_e=1}c_e.
+\end{equation}
+仅当 \fld{max\_switch\_ops}>0 时创建，见
+\srcpath{topology\_reconfiguration.cpp:1315--1333}。
+
+旧手册给出的 $\sum r_eS_B$ 不是当前 loss aware 目标。结果的
+\fld{feasible}/\fld{optimal}/\fld{proven\_optimal} 还受后端状态字符串规范化和 primal 可用性影响；
+详细提取位于 \srcpath{topology\_reconfiguration.cpp:1760--1940}。
+
+\subsection{覆盖边界}
+
+本章覆盖当前可达 MILP 的变量、目标和带源码标签的 T/P/G 约束。源容量聚合、设备开断能力、
+overlay 去重、伪根生成、BFS 初解、后处理开关序列均是离散工程分支，源码区间分别为
+\srcpath{topology\_reconfiguration.cpp:247--744}、
+\srcpath{topology\_reconfiguration.cpp:1403--1759}；本章不以通用图论公式替代这些实现。

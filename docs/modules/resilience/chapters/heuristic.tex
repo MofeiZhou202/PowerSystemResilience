@@ -1,0 +1,31 @@
+% 第 2 章：启发式时序重构
+\section{启发式时序重构}\label{sec:res-heuristic}
+
+\subsection{功能定位}
+默认模型 \fld{HeuristicSequential}（\srcpath{run\_distribution\_resilience\_assessment}，
+\srcpath{resilience\_assessment.hpp:468}）在 \fld{horizon\_hours} 个时步上逐步演进：施加/修复
+故障、隔离故障区、贪心闭合联络开关以重新带电失电负荷、调度储能与 DER，并统计逐步供电
+与切负荷。它快速但不保证全局最优，适合大规模快速评估与作为 MILP 的对照基线。
+
+\subsection{逐步流程}
+第 $t$ 步（步长 \fld{time\_step\_hr}）：
+\begin{enumerate}
+  \item \textbf{负荷/资源缩放}：以 \fld{load\_profile} 与 \fld{renewable\_profile}
+        （或 \fld{pv\_profile}/\fld{wind\_profile}，缺省用内置 24h 曲线）得 $D_{i,t}$、$P^{res}_t$；
+  \item \textbf{故障演进}：更新在运故障集（\fld{outage\_start\_hr}$\to$\fld{repair\_duration\_hr}）；
+  \item \textbf{隔离}：以开关/断路器隔离故障区，得到带电子图；
+  \item \textbf{贪心重构}：按最多 \fld{max\_reconfig\_iterations} 次迭代，逐次闭合能连通失电
+        负荷且保持辐射的联络开关（受 \fld{allow\_reconfiguration} 控制）；
+  \item \textbf{调度}：储能/构网 VSC/DER 在带电岛内出力（\fld{enable\_storage\_dispatch}、
+        \fld{enable\_islanding}）；
+  \item \textbf{MESS}：以电气图作运输代理（\fld{use\_electrical\_graph\_as\_transport\_proxy}）
+        或显式 \fld{transport\_edges}，按 \fld{mess\_travel\_speed\_kmph} 路由；
+  \item \textbf{统计}：得 $P_t^{srv}$、$s_{i,t}$、\fld{restoration\_ratio}、拓扑桥/割点等。
+\end{enumerate}
+
+\subsection{每步产物}
+逐步结果 \fld{DistributionResilienceStepResult}（:332）记录带电/失电、开关动作
+（\fld{switch\_open\_actions}/\fld{switch\_close\_actions}）、故障区母线、MESS 状态
+\fld{mess\_states}、按优先级分解的 \fld{shed\_by\_priority}，以及拓扑韧性诊断
+\fld{cut\_vertex\_bus\_ids}（割点，优先派修）与 \fld{bridge\_branch\_ids}（桥，恢复后重连最大子树）。
+可选 \fld{run\_power\_flow}=true 时逐步跑完整潮流得电压/支路潮流（\fld{bus\_voltages}/\fld{branch\_flows}）。

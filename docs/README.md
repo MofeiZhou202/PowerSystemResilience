@@ -21,7 +21,7 @@
 | 模块文档 | [模块手册](modules/README.md) | 源码模块到中文 LaTeX 技术手册的映射 |
 | API 文档 | [API 文档](reference/README.md) | C++ 门面、HTTP、Python 与数据交换契约 |
 | 示例与教程 | [示例与教程](tutorials/README.md) | 可复现实例、场景格式与操作路径 |
-| 测试与验证 | [测试与验证](validation/README.md) | 测试基线、交叉验证与文档验收 |
+| 测试与验证 | [测试与验证](testing/README.md) | 测试基线、交叉验证与文档验收 |
 | 部署与运维 | [部署与运维](operations/README.md) | 构建、依赖、版本能力与运行边界 |
 | 研究资料 | [研究资料](research/README.md) | 论文、理论资料、复现实验与归档 |
 | 规划与演进 | [规划与演进](planning/README.md) | 文档缺口、代码审计与受控改进项 |
@@ -42,9 +42,9 @@
 |---|---|---|
 | 当前构建、测试、依赖与未闭环工作 | 状态 | [开发状态](development_status.md) |
 | 跨平台离线构建与依赖配置 | 契约 | [跨平台构建](cross_platform_build.md) |
-| 组件模型与参数 | 实现参考 | [元件模型手册](ComponentModels/component_models_math_audit.tex) |
-| 交直流与三相潮流 | 实现参考 | [潮流计算手册](PowerFlow/power_flow_manual1.tex) |
-| AC/DC、混合与三相 OPF | 实现参考 | [最优潮流手册](OptimalPowerFlow/opf_manual.tex) |
+| 组件模型与参数 | 实现参考 | [模型手册](modules/model/model_manual.tex) |
+| 交直流与三相潮流 | 实现参考 | [潮流计算手册](modules/power_flow/power_flow_manual.tex) |
+| AC/DC、混合与三相 OPF | 实现参考 | [最优潮流手册](modules/optimal_power_flow/opf_manual.tex) |
 | 全部源码模块技术手册 | 实现参考 | [模块手册索引](modules/README.md) |
 | HTTP 路由与响应边界 | 契约 | [运行时 API](runtime_api.md) |
 | 内置算例与能力示例 | 契约 | [算例目录](case_catalog.md) |
@@ -54,15 +54,12 @@
 
 ## 工业级 LaTeX 手册
 
-保留并作为写作标杆的手册：
+`src/` 的 23 个顶层模块均在 `docs/modules/<module>/` 中具有唯一中文手册目录。原
+`ComponentModels`、`PowerFlow`、`OptimalPowerFlow` 的材料已分别归并到 `model`、
+`power_flow`、`optimal_power_flow`，不再作为平行活目录。所有数学公式只描述源码实际实现，
+并要求绑定实现函数及行号；无法逐式核验的理论材料不得进入模块主手册。
 
-- `ComponentModels/component_models_math_audit.tex`
-- `PowerFlow/power_flow_manual1.tex`
-- `OptimalPowerFlow/opf_manual.tex`
-
-本次补齐的 18 个源码模块手册均为中文、具有独立目录和主 `.tex`，统一覆盖功能定位、输入输出、
-符号、数学模型、约束、算法、稳定性、复杂度、异常、接口、数据结构、验证、指标与局限。完整清单、
-源码映射和编译入口见 [模块手册索引](modules/README.md)，统一编译方法见
+完整清单、源码映射和编译入口见 [模块手册索引](modules/README.md)，统一编译方法见
 [LaTeX 文档说明](latex/README.md)。
 
 ## 文档政策
