@@ -40,9 +40,9 @@ assumptions), **◐ approximate** (sound but with a documented simplification),
 
 | # | Area | Verdict | Severity | Where |
 |---|------|---------|----------|-------|
-| F1 | Two-state unavailability / FOR↔λ↔MTTF conversions | ✓ rigorous | — | `reliability_assessment.cpp:70-217` |
-| F2 | F&D COPT probability+frequency recursion | ✓ rigorous (Billinton) | — | `reliability_assessment.cpp:2003-2056` |
-| F3 | Sequential MC chronological exponential sampling | ✓ rigorous | — | `reliability_assessment.cpp:1646-1678` |
+| F1 | Two-state unavailability / FOR↔λ↔MTTF conversions | ✓ rigorous | — | `src/reliability/reliability_assessment.cpp:resolve_reliability_params-217` |
+| F2 | F&D COPT probability+frequency recursion | ✓ rigorous (Billinton) | — | `src/reliability/reliability_assessment.cpp:eval_down_hours（lambda）-2056` |
+| F3 | Sequential MC chronological exponential sampling | ✓ rigorous | — | `src/reliability/reliability_assessment.cpp:run_sequential_mc-1678` |
 | F4 | MC convergence CoV (std-error-of-mean) | ✓ rigorous | — | `:1296-1304`, `:1751-1760` |
 | F5 | IEEE 1366 SAIFI/SAIDI/CAIDI/ASAI | ✓ rigorous | — | `:2165-2186` |
 | F6 | FMEA / 3-stage first-order `Σ λ·τ·shed` | ◐ first-order | low | `:3949-3976`, `three_stage…:1229-1234` |
@@ -54,7 +54,7 @@ assumptions), **◐ approximate** (sound but with a documented simplification),
 | F12 | FMEA grid-forming/microgrid support modeled as an unbounded slack (rating ignored) | ⚠ over-optimistic | medium | `:3095-3118`, `:2964-2986` |
 | F13 | Single load level in NSQ & F&D (no load-duration curve) | ◐ documented | low | `:1199-1208`, `:2049` |
 | F14 | Three-stage reactive demand rebuilt from PF=0.9 (ignores `q_mvar`) | ⚠ discards data | low | `three_stage…:548` |
-| F15 | Cyber/comm/control modes now drive EENS (comm-loss→frozen setpoint; data-driven derating) | ✓ fixed | low | `failure_mode.cpp:834-940` |
+| F15 | Cyber/comm/control modes now drive EENS (comm-loss→frozen setpoint; data-driven derating) | ✓ fixed | low | `src/reliability/failure_mode.cpp:demand_probability（lambda）-940` |
 | F16 | Component-importance = co-occurrence attribution, not a Birnbaum/marginal measure | ◐ heuristic | low | `:1282-1287`, `:1360-1390` |
 | F17 | `use_importance_sampling` option unimplemented | ⚠ dead option | low | header `:165-167` |
 
@@ -84,7 +84,7 @@ returns the *minimum* feasible shed.
 
 ## 2. The shared parameter model (resolver)  ✓ F1
 
-`resolve_reliability_params` (`reliability_assessment.cpp:35-217`) maps the
+`resolve_reliability_params` (`src/reliability/reliability_assessment.cpp:resolve_reliability_params-217`) maps the
 heterogeneous case fields into a canonical $\{\lambda, r, U, \text{MTTF}\}$ tuple.
 All conversions are the exact two-state-Markov forms and are **rigorous**:
 

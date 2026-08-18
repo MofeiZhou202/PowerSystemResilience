@@ -210,7 +210,7 @@ C20 & validation 强制 ZIP 各项有限、非负、和为 100；装配前按每
 \label{sec:a1}
 
 \begin{itemize}
-  \item \textbf{位置}：投影 \file{src/model/network\_utils.cpp:106--125}（\file{:115--116} \texttt{ld.p\_mw = fl.p\_mw}）；清除清单 \file{:2432--2436}（\textbf{不含} \texttt{flexible\_loads}）；装配 \file{src/power\_flow/solver\_data.cpp:293,321}（\texttt{data.loads} 与 \texttt{data.flexible\_loads} 同时搬入）；消费 \file{src/optimal\_power\_flow/parity\_formulation.cpp:126--127}（\texttt{pd\_demand\_pu = data.pd\_pu}，含等值 Load）、\file{:792--793}（\texttt{p\_flex} 界 $[P_0-\Delta P_{dn},\,P_0+\Delta P_{up}]$）、\file{:1517--1519}（平衡方程）。
+  \item \textbf{位置}：投影 \file{src/model/network\_utils.cpp:add\_equivalent\_load\_from\_flexible}（\file{:115--116} \texttt{ld.p\_mw = fl.p\_mw}）；清除清单 \file{:2432--2436}（\textbf{不含} \texttt{flexible\_loads}）；装配 \file{src/power\_flow/solver\_data.cpp:refresh\_solver\_data\_values,321}（\texttt{data.loads} 与 \texttt{data.flexible\_loads} 同时搬入）；消费 \file{src/optimal\_power\_flow/parity\_formulation.cpp:same\_size（lambda）}（\texttt{pd\_demand\_pu = data.pd\_pu}，含等值 Load）、\file{:792--793}（\texttt{p\_flex} 界 $[P_0-\Delta P_{dn},\,P_0+\Delta P_{up}]$）、\file{:1517--1519}（平衡方程）。
   \item \textbf{复核状态}：主审已逐行复核全部六处代码，机理链完整成立。
 \end{itemize}
 
@@ -229,7 +229,7 @@ g_i = p_{calc} - p_{gen} - \cdots + {\color{hyred}p_d} - \Delta p_d + {\color{hy
 \label{sec:a2}
 
 \begin{itemize}
-  \item \textbf{位置}：合成路径 \file{src/model/network\_utils.cpp:2466--2489}（\texttt{cs.bus = 0} 于 \file{:2480}，预累加 \texttt{cs.p\_total\_kw += ch->p\_ch\_max\_kw} 于 \file{:2483}）；聚合 \file{:615--637}（\texttt{cs.p\_total\_kw += p\_kw} 于 \file{:630}、\texttt{cs.num\_chargers += 1} 于 \file{:635}）；丢弃点 \file{src/power\_flow/solver\_data.cpp:175--176}。
+  \item \textbf{位置}：合成路径 \file{src/model/network\_utils.cpp:connect（lambda）}（\texttt{cs.bus = 0} 于 \file{:2480}，预累加 \texttt{cs.p\_total\_kw += ch->p\_ch\_max\_kw} 于 \file{:2483}）；聚合 \file{:615--637}（\texttt{cs.p\_total\_kw += p\_kw} 于 \file{:630}、\texttt{cs.num\_chargers += 1} 于 \file{:635}）；丢弃点 \file{src/power\_flow/solver\_data.cpp:normalized\_zip（lambda）}。
   \item \textbf{复核状态}：主审已逐行复核；两路独立审计通道分别给出实测（链接 \file{libhacdcpf.a}）：两台 60+40 kW 充电机 $\to$ \texttt{p\_total\_kw=200}、\texttt{num\_chargers=4}（应为 100/2）；120 kW 单台 $\to$ 240 kW。
 \end{itemize}
 
@@ -248,11 +248,11 @@ P/Q 口径自相矛盾（隐含功率因数被篡改）。更致命的是 Charge
 \label{sec:a3}
 
 \begin{itemize}
-  \item \textbf{位置}：端口划分 \file{src/model/network\_utils.cpp:1962--1970}（仅按 \texttt{port.side} 分侧，\textbf{不按} \texttt{port\_type} 分流）；VSC 创建 \file{:2020}（侧 A）与 \file{:2083--2086}（侧 B）：\texttt{vsc.bus\_ac = p->bus} 无条件执行。
+  \item \textbf{位置}：端口划分 \file{src/model/network\_utils.cpp:remap\_ac（lambda）}（仅按 \texttt{port.side} 分侧，\textbf{不按} \texttt{port\_type} 分流）；VSC 创建 \file{:2020}（侧 A）与 \file{:2083--2086}（侧 B）：\texttt{vsc.bus\_ac = p->bus} 无条件执行。
   \item \textbf{复核状态}：主审已逐行复核；端到端实证（投影产物检查 $+$ \file{solve\_power\_flow}）：AC 母线 1(SLACK)/2(PQ) $+$ DC 母线 1，ER 端口 A=AC bus2、端口 B=DC bus1 $\to$ 投影产物 \texttt{VSC bus\_ac=1 bus\_dc=3}（DC 母线号 1 被当成 AC 母线 1，恰为平衡母线），求解``收敛''且 \texttt{p\_ac=+1.0} MW 注入平衡母线，用户 DC 母线成为无源孤岛，\texttt{er\_port\_transfers} 为空，无任何报错。
 \end{itemize}
 
-\textbf{机理。}\texttt{EnergyRouterPort::bus} 的域由 \texttt{port\_type} 决定（\file{converter\_components.hpp:265}）。对 DC 端口，\texttt{p->bus} 是 DC 母线编号，却被赋给 VSC 的 AC 域字段 \texttt{bus\_ac}；物理上 DC 端口应直连内部 DC 母线（或经独立 DCDC），根本不该生成 VSC。这直接违反项目铁律~1（AC/DC 域用 domain-qualified map，不混用）。若 DC 编号与 AC 编号不碰撞（如 99），装配守卫 \texttt{ac\_bus >= n} 会\textbf{静默丢弃}该端口功率而 DC 侧仍从 dc\_$\beta$ 抽取，ER 沦为纯吸能黑箱——两种情形均无报错。手册 \S 6.3（图 29 明示 DC 端口存在）``每端口一台 VSC''的表述照抄了该错误语义且未声明 DC 端口限制。
+\textbf{机理。}\texttt{EnergyRouterPort::bus} 的域由 \texttt{port\_type} 决定（\file{include/hacdcpf/model/converter\_components.hpp:DCDCConverter}）。对 DC 端口，\texttt{p->bus} 是 DC 母线编号，却被赋给 VSC 的 AC 域字段 \texttt{bus\_ac}；物理上 DC 端口应直连内部 DC 母线（或经独立 DCDC），根本不该生成 VSC。这直接违反项目铁律~1（AC/DC 域用 domain-qualified map，不混用）。若 DC 编号与 AC 编号不碰撞（如 99），装配守卫 \texttt{ac\_bus >= n} 会\textbf{静默丢弃}该端口功率而 DC 侧仍从 dc\_$\beta$ 抽取，ER 沦为纯吸能黑箱——两种情形均无报错。手册 \S 6.3（图 29 明示 DC 端口存在）``每端口一台 VSC''的表述照抄了该错误语义且未声明 DC 端口限制。
 
 \textbf{工业影响。}含 DC 端口的能量路由器算例得到``收敛但物理错误''的潮流结果；错接功率可污染平衡母线功率平衡及全部下游分析（损耗、市场、可靠性）。
 
@@ -266,45 +266,45 @@ P/Q 口径自相矛盾（隐含功率因数被篡改）。更致命的是 Charge
 
 \subsubsection*{B1　\texttt{Transformer2W::n\_parallel} 在投影中被完全忽略}
 \begin{itemize}
-  \item \textbf{位置}：\file{network\_utils.cpp:155--235}（函数体零引用，已 grep 证实）；字段定义 \file{ac\_components.hpp:154}。\textbf{主审已复核。}
-  \item \textbf{机理}：$n$ 台并联应阻抗 $\div n$、容量 $\times n$——平台自身在 \file{unit\_conversion.cpp:44--45} 对 \texttt{ACBranch.n\_parallel} 正是如此兑现，且 canonical 层 \texttt{ACBranch.n\_parallel} 有真实消费方。2W 投影生成的等值支路既不除也不乘，\texttt{n\_parallel} 保持默认 1。
+  \item \textbf{位置}：\file{src/model/network\_utils.cpp:add\_equivalent\_branch\_from\_transformer2w}（函数体零引用，已 grep 证实）；字段定义 \file{include/hacdcpf/model/ac\_components.hpp:Transformer2W}。\textbf{主审已复核。}
+  \item \textbf{机理}：$n$ 台并联应阻抗 $\div n$、容量 $\times n$——平台自身在 \file{src/model/unit\_conversion.cpp:convert\_actual\_to\_per\_unit} 对 \texttt{ACBranch.n\_parallel} 正是如此兑现，且 canonical 层 \texttt{ACBranch.n\_parallel} 有真实消费方。2W 投影生成的等值支路既不除也不乘，\texttt{n\_parallel} 保持默认 1。
   \item \textbf{影响}：并列变压器台数 $>1$ 时阻抗高估 $n$ 倍、热稳容量低估 $n$ 倍，潮流/短路/OPF 全面偏差；手册 \S 2.3 仅列字段未声明``仅元数据''。
 \end{itemize}
 
 \subsubsection*{B2　异步电动机 \texttt{r\_pu/x\_pu} 单位语义三方矛盾（代码=欧姆，手册+参数库=标幺）}
 \begin{itemize}
-  \item \textbf{位置}：\file{network\_utils.cpp:487--494}（\texttt{ld.r\_sc\_pu = m.r\_pu / z\_base\_motor}，注释 ``convert from ohms to pu''）。\textbf{主审已复核。}
-  \item \textbf{机理}：手册 \S 3.6 声明 \texttt{r\_pu/x\_pu} 为额定基准标幺（典型 0.01--0.15/0.1--0.25），\file{typical\_parameters.hpp:832--835} 按 pu 量级填充（0.002/0.2）；而投影与短路专用路径（\file{short\_circuit.cpp:525--529}）均按\textbf{欧姆}消费（除以 $Z_{base}=V_n^2/S_n$）。IEC 60909-4 验证算例恰按欧姆填写，故验证通过而语义矛盾未暴露。
+  \item \textbf{位置}：\file{src/model/network\_utils.cpp:add\_equivalent\_branch\_from\_circuit\_breaker}（\texttt{ld.r\_sc\_pu = m.r\_pu / z\_base\_motor}，注释 ``convert from ohms to pu''）。\textbf{主审已复核。}
+  \item \textbf{机理}：手册 \S 3.6 声明 \texttt{r\_pu/x\_pu} 为额定基准标幺（典型 0.01--0.15/0.1--0.25），\file{include/hacdcpf/model/typical\_parameters.hpp:fill\_storage（lambda）} 按 pu 量级填充（0.002/0.2）；而投影与短路专用路径（\file{src/short\_circuit/short\_circuit.cpp:build\_sc\_admittance\_matrices}）均按\textbf{欧姆}消费（除以 $Z_{base}=V_n^2/S_n$）。IEC 60909-4 验证算例恰按欧姆填写，故验证通过而语义矛盾未暴露。
   \item \textbf{影响}：用户按手册填 0.025+j0.25 pu 时，阻抗被再除 $Z_{base}$（典型 6 倍），电机馈供短路电流同倍\textbf{高估}。修复需项目层面裁决单位制后统一改手册或代码。
 \end{itemize}
 
 \subsubsection*{B3　\texttt{Transformer3W} 投影缺电压基准折算（2W 有、3W 无）}
 \begin{itemize}
-  \item \textbf{位置}：\file{network\_utils.cpp:270--298}（仅 \texttt{rx\_from\_vk\_vkr(..., base\_mva, sn\_pair)} 容量折算）；对照 2W 的 \file{:177--187}（$(V_n/V_{base})^2$）与 \file{:199--207}（额定变比失配项）。\textbf{主审已复核。}
+  \item \textbf{位置}：\file{src/model/network\_utils.cpp:add\_equivalent\_branches\_from\_transformer3w}（仅 \texttt{rx\_from\_vk\_vkr(..., base\_mva, sn\_pair)} 容量折算）；对照 2W 的 \file{:177--187}（$(V_n/V_{base})^2$）与 \file{:199--207}（额定变比失配项）。\textbf{主审已复核。}
   \item \textbf{影响}：母线 \texttt{base\_kv} $\neq$ 绕组 \texttt{vn\_kv}（MATPOWER 导入常见）时，三绕组阻抗错 $(V_n/V_{base})^2$ 倍、变比缺失配项；校验层不查电压一致性，手册 \S 2.4 未声明``$V_n$ 须等于母线基准''。
 \end{itemize}
 
 \subsubsection*{B4　三相变压器 $\to$ Transformer2W 投影丢 \texttt{tap\_side}（及 \texttt{tap\_min/tap\_max}）}
 \begin{itemize}
-  \item \textbf{位置}：\file{network\_utils.cpp:698--721}（复制 \texttt{tap\_pos}、\texttt{tap\_neutral}、\texttt{tap\_step\_percent}、\texttt{shift\_deg}、\texttt{z0}，无 \texttt{tap\_side}）。\textbf{主审已复核。}
+  \item \textbf{位置}：\file{src/model/network\_utils.cpp:project\_three\_phase\_if\_needed}（复制 \texttt{tap\_pos}、\texttt{tap\_neutral}、\texttt{tap\_step\_percent}、\texttt{shift\_deg}、\texttt{z0}，无 \texttt{tap\_side}）。\textbf{主审已复核。}
   \item \textbf{影响}：\texttt{tap\_side=1}（低压侧分接头）的三相变压器按高压侧处理，变比方向（$t$ vs $1/t$）与阻抗 $t^2$ 归算同时错误。
 \end{itemize}
 
 \subsubsection*{B5　\texttt{ThreePhaseLoad}$\to$Load 电动机馈供字段错配（\texttt{x\_sub\_pu} $\leftarrow$ \texttt{x\_r\_ratio}）}
 \begin{itemize}
-  \item \textbf{位置}：\file{network\_utils.cpp:739--740}。\textbf{主审已复核。}
+  \item \textbf{位置}：\file{src/model/network\_utils.cpp:project\_three\_phase\_if\_needed}。\textbf{主审已复核。}
   \item \textbf{机理}：\texttt{Load.x\_sub\_pu} 是次暂态电抗 $X''$（pu，短路馈供用），\texttt{ThreePhaseLoad.x\_r\_ratio} 是无量纲 $X/R$ 比（典型 3--10）——量纲错配；\texttt{lrc\_pu}（$|Z|\approx 1/I_{LR}$ 的唯一来源）未折算，\texttt{eq.sn\_mva} 未赋值（默认 0）$\to$ 短路装配 \texttt{sn\_mva<=1e-6} 直接跳过，三相负荷电机馈供\textbf{静默缺失}；一旦补上 \texttt{sn\_mva}，又以 10--50 倍过大的``电抗''参与计算。正确形式：$X'' = 1/\texttt{lrc\_pu}$、$R = X''/\texttt{x\_r\_ratio}$，并携带容量基准。
 \end{itemize}
 
 \subsubsection*{B6　\texttt{project\_three\_phase\_if\_needed} 基准功率不自洽}
 \begin{itemize}
-  \item \textbf{位置}：\file{network\_utils.cpp:644}（\texttt{out.ac.base\_mva = tp.base\_mva ?: out.base\_mva}）vs \file{:681}（$Z_{base}=kV^2/\texttt{out.base\_mva}$）。
+  \item \textbf{位置}：\file{src/model/network\_utils.cpp:add\_equivalent\_storage\_from\_mobile\_storage}（\texttt{out.ac.base\_mva = tp.base\_mva ?: out.base\_mva}）vs \file{:681}（$Z_{base}=kV^2/\texttt{out.base\_mva}$）。
   \item \textbf{影响}：下游（短路/DC OPF/谐波/JSON）优先用 \texttt{ac.base\_mva}，而线路欧姆$\to$标幺用全局 \texttt{base\_mva}；两者不等时三相系统阻抗基准整体错位。默认两者均 100，属潜伏缺陷。
 \end{itemize}
 
 \subsubsection*{B7　ER 展开 DCDC Power 模式 \texttt{p\_ref} 启发式任意猜测，直接决定侧 B 构网/下垂端口运行点}
 \begin{itemize}
-  \item \textbf{位置}：\file{network\_utils.cpp:2151--2163}（\texttt{remaining * 0.5} 裕度猜测）。
+  \item \textbf{位置}：\file{src/model/network\_utils.cpp:expand\_energy\_routers}（\texttt{remaining * 0.5} 裕度猜测）。
   \item \textbf{机理}：DCDC 是 dc\_$\alpha\leftrightarrow$dc\_$\beta$ 唯一功率通道，Power 模式 \texttt{p\_ref} 固定后，侧 B 的 VF/Droop VSC 只能被动取 $p_{ref}-\sum p_{PQ}$——0.5 裕度猜测直接设定该端口物理传输功率；负 \texttt{p\_set}（受电）端口被排除在求和外，系统性偏置。手册 \S 6.3 未声明此启发式；现有测试只断言收敛从未断言 droop 端口功率。
 \end{itemize}
 
@@ -312,7 +312,7 @@ P/Q 口径自相矛盾（隐含功率因数被篡改）。更致命的是 Charge
 
 \subsubsection*{B8　公共零阻抗合并入口对含分接头/移相支路无任何防护（潜伏缺陷）}
 \begin{itemize}
-  \item \textbf{位置}：\file{network\_utils.cpp:1590--1593}（判据只查 $|r|,|x|,|b|$）；公共入口 \file{:1831--1834}。\textbf{主审已复核判据代码。}
+  \item \textbf{位置}：\file{src/model/network\_utils.cpp:filter\_remap\_2bus（lambda）}（判据只查 $|r|,|x|,|b|$）；公共入口 \file{:1831--1834}。\textbf{主审已复核判据代码。}
   \item \textbf{机理}：带非额定变比/相移的支路两端\textbf{不是等电位点}，并入同一等价类等于把理想变压器/移相器短接。实证：\texttt{tap=1.05}、$r=x=10^{-6}$ 支路经公共路径后两母线被收缩为 1 个。
   \item \textbf{暴露面校准}：投影主流水线走白名单（仅开关/断路器展开支路，恒为 tap=1/shift=0），\textbf{生产路径安全}；公共 API \file{merge\_zero\_impedance\_buses} 当前全仓库无生产调用点（已 grep 证实），属潜伏风险——任何外部调用方/后续模块用该 API 处理含低阻抗变压器的系统即静默得到错误拓扑。修复：补 \texttt{tap != 1.0 || shift\_deg != 0.0} 防护。
 \end{itemize}
@@ -321,15 +321,15 @@ P/Q 口径自相矛盾（隐含功率因数被篡改）。更致命的是 Charge
 
 \subsubsection*{B9　\texttt{compute\_device\_terminal\_flows} 残差口径三项缺陷，``exactly'' 声明不实（归因层继承并标 Strong）}
 \begin{itemize}
-  \item \textbf{位置}：\file{network\_utils.cpp:2505--2515}（多开关）、\file{:2545--2603}（注入枚举）、\file{:2570--2574}（署名值）；继承方 \file{result\_attribution.cpp:583--606}。\textbf{主审已复核 (a)(b) 两处。}
+  \item \textbf{位置}：\file{src/model/network\_utils.cpp:connect（lambda）}（多开关）、\file{:2545--2603}（注入枚举）、\file{:2570--2574}（署名值）；继承方 \file{src/model/result\_attribution.cpp:apply}。\textbf{主审已复核 (a)(b) 两处。}
   \item \textbf{机理}：(a) 同一受端母线 $N$ 台闭合开关\textbf{各自分得全额残差}（实证：两台开关各报 $-40$ MW，合计 $-80\neq-40$），KCL 在归因层被破坏；(b) 注入枚举不含 motors/shunts/母线 gs/bs/external\_grids/VSC/LCC/VPP/微网/ER 端口，且 \textbf{renewable 只加 P 漏 Q}（\file{:2580--2582}）——实证 renewable 发 $1.0+j0.5$ 经开关送出，归因 $p=1.0$（对）$q=0$（应 0.5）；(c) 发电机按署名 \texttt{pg\_mw} 而非求解输出计入，slack 拾取量与 PV 无功全部残差化到开关潮流。
   \item \textbf{影响}：变电站母联/分段开关潮流与 \texttt{loading\_pct} 在含电机、并联补偿、外网、换流器的典型工业拓扑下系统性失真，可误导 N-1 与重构决策；注释自称 ``\textbf{exactly} the collapsed device's terminal injection'' 不成立。修复：枚举完备化（或用求解注入）、多设备共母线声明``仅总和可恢复''并降级 Approximate。
 \end{itemize}
 
 \subsubsection*{B10　\texttt{asymmetric\_load} 归因漏乘 \texttt{scaling}，与投影端差一个因子}
 \begin{itemize}
-  \item \textbf{位置}：\file{result\_attribution.cpp:409--410}（不乘）；对照投影 \file{network\_utils.cpp:136--138}（乘）与开关残差法 \file{:2561}（乘）。\textbf{主审已复核两处。}
-  \item \textbf{实证}：scaling=2.0、三相和 2.0 MW $\to$ canonical 等值负荷 $p=4.0$，归因报 $p=2.0$。下游功率平衡诊断（\file{run\_gui\_server.cpp:282--288}）正是消费此值，制造虚假平衡残差。
+  \item \textbf{位置}：\file{src/model/result\_attribution.cpp:apply}（不乘）；对照投影 \file{src/model/network\_utils.cpp:add\_equivalent\_load\_from\_asymmetric}（乘）与开关残差法 \file{:2561}（乘）。\textbf{主审已复核两处。}
+  \item \textbf{实证}：scaling=2.0、三相和 2.0 MW $\to$ canonical 等值负荷 $p=4.0$，归因报 $p=2.0$。下游功率平衡诊断（\file{tests/run\_gui\_server.cpp:inject\_dc（lambda）}）正是消费此值，制造虚假平衡残差。
 \end{itemize}
 
 \subsubsection*{B11　\texttt{in\_service} 口径不一致：13 类退出运行元件归因非零铭牌/经验值}
@@ -340,7 +340,7 @@ P/Q 口径自相矛盾（隐含功率因数被篡改）。更致命的是 Charge
 
 \subsubsection*{B12　PF-only 路径下同母线源侧断路器静默归因 0 潮流且标 Strong}
 \begin{itemize}
-  \item \textbf{位置}：\file{result\_attribution.cpp:580--607}（设备流块）$+$ \file{:613--654}（修正启发式要求 \texttt{opf\_result} 非空，PF 生产调用点均传 \texttt{nullptr}）。
+  \item \textbf{位置}：\file{src/model/result\_attribution.cpp:apply}（设备流块）$+$ \file{:613--654}（修正启发式要求 \texttt{opf\_result} 非空，PF 生产调用点均传 \texttt{nullptr}）。
   \item \textbf{实证}：物理载 5 MW 的同母线断路器，归因 from/to $p=0$、recovery=\textbf{Strong}。GUI 潮流快照显示 0 MW/0\% 负载率，误导运行人员；按铁律应降级 AuditOnly 或注入诊断。
 \end{itemize}
 
@@ -348,25 +348,25 @@ P/Q 口径自相矛盾（隐含功率因数被篡改）。更致命的是 Charge
 
 \subsubsection*{B13　设计手册补全忽略 \texttt{n\_parallel}：阻抗放大 $n_p$ 倍、容量缩小 $n_p$ 倍}
 \begin{itemize}
-  \item \textbf{位置}：\file{standard\_parameter\_library.cpp:1229--1233}。\textbf{主审已复核。}
-  \item \textbf{机理}：\texttt{new\_r\_pu = resistance * length\_km / zbase} 未除 \texttt{n\_parallel}——同平台权威折算 \file{unit\_conversion.cpp:44--48} 明确 \texttt{/ n}；手册公式同为 $R'l/(n_p Z_{base})$。实证：$n_p=2$ 时补全 $r_{pu}=0.1282$ vs 正确 $0.0641$（恰 2 倍）。ETAP/BPA 导入模型带 \texttt{n\_parallel}（\file{etap\_io.cpp:831}、\file{bpa\_io.cpp:547}），双回线路经补全后压降/网损偏大 2 倍、OPF 容量偏紧 2 倍。三相同步段（\file{:1333--1341}）连带污染 $r_0/x_0$。
+  \item \textbf{位置}：\file{src/model/standard\_parameter\_library.cpp:fill\_storage\_reliability（lambda）}。\textbf{主审已复核。}
+  \item \textbf{机理}：\texttt{new\_r\_pu = resistance * length\_km / zbase} 未除 \texttt{n\_parallel}——同平台权威折算 \file{src/model/unit\_conversion.cpp:convert\_actual\_to\_per\_unit} 明确 \texttt{/ n}；手册公式同为 $R'l/(n_p Z_{base})$。实证：$n_p=2$ 时补全 $r_{pu}=0.1282$ vs 正确 $0.0641$（恰 2 倍）。ETAP/BPA 导入模型带 \texttt{n\_parallel}（\file{src/io/etap\_io.cpp:read\_branch\_sheet}、\file{src/io/bpa\_io.cpp:parse\_line\_card}），双回线路经补全后压降/网损偏大 2 倍、OPF 容量偏紧 2 倍。三相同步段（\file{:1333--1341}）连带污染 $r_0/x_0$。
 \end{itemize}
 
 \subsubsection*{B14　三相相矩阵线路的零阻抗校验存在掩盖漏洞（\texttt{std::max} 吞 NaN），且相矩阵元素从不做范围检查}
 \begin{itemize}
-  \item \textbf{位置}：\file{standard\_parameter\_library.cpp:822--841}。\textbf{主审已复核。}
+  \item \textbf{位置}：\file{src/model/standard\_parameter\_library.cpp:check\_mtbf\_pair（lambda）}。\textbf{主审已复核。}
   \item \textbf{机理}：(a) 校验量取 $\max(\texttt{hypot}(r_1,x_1),\ \texttt{hypot}(\text{各矩阵元}))$——\texttt{use\_phase\_matrix=true} 时求解器消费的是 9 元素相矩阵，与 $r_1/x_1$ 取 max 无物理意义；C++ 语义 \texttt{std::max(a, NaN)=a}，全零或含 NaN 的相矩阵被静默掩盖（已实测确认）；(b) \texttt{else if (!use\_phase\_matrix)} 使矩阵元素\textbf{从不进入} \texttt{check\_range}。误配置模型得到虚假``参数校验通过''，奇异相域导纳阵直到三相求解器才暴露。
 \end{itemize}
 
 \subsubsection*{B15　\texttt{ACBranch::failure\_rate} 单位语义手册与代码相反（per-km vs 绝对值/年）}
 \begin{itemize}
-  \item \textbf{位置}：字段 \file{ac\_components.hpp:95}；手册 \S 2.1 声明``次/(km·a)（乘长度）''；消费端 \file{reliability\_assessment.cpp:184}（直接作 \texttt{failure\_rate\_per\_year}）、\file{three\_stage\_reliability.cpp:324} 等\textbf{均不再乘长度}；仅填充路径 \file{standard\_parameter\_library.cpp:1002--1006} 做 $\lambda'\times l$。
+  \item \textbf{位置}：字段 \file{include/hacdcpf/model/ac\_components.hpp:ACBranch}；手册 \S 2.1 声明``次/(km·a)（乘长度）''；消费端 \file{src/reliability/reliability\_assessment.cpp:finalize\_from\_lambda\_repair（lambda）}（直接作 \texttt{failure\_rate\_per\_year}）、\file{src/reliability/three\_stage\_reliability.cpp:three\_stage\_zone\_kind\_supported} 等\textbf{均不再乘长度}；仅填充路径 \file{src/model/standard\_parameter\_library.cpp:apply\_standard\_parameter\_library} 做 $\lambda'\times l$。
   \item \textbf{影响}：按手册手填 per-km 值的用户，可靠性指标（SAIFI/SAIDI/EENS）被欠计线路长度倍（如 5 km 线路 5 倍），无任何诊断。修正对象主要是手册与字段注释（代码语义自洽：字段存绝对值/年）。
 \end{itemize}
 
 \subsubsection*{B16　\texttt{dc\_bus.base\_kv} 默认值在两条官方填充路径间相差 2 倍且未声明}
 \begin{itemize}
-  \item \textbf{位置}：\file{standard\_parameter\_library.cpp:409--412}（distribution 剖面 1.5 kV）vs \file{typical\_parameters.hpp:27}（一律 \texttt{kDCDistributionKv = 0.75}）。\textbf{主审已复核两处。}
+  \item \textbf{位置}：\file{src/model/standard\_parameter\_library.cpp:make\_standard\_parameter\_library}（distribution 剖面 1.5 kV）vs \file{include/hacdcpf/model/typical\_parameters.hpp:TypicalParameters}（一律 \texttt{kDCDistributionKv = 0.75}）。\textbf{主审已复核两处。}
   \item \textbf{影响}：同一稀疏模型经两条``标准''路径得到 $2\times$ 直流电压基准，DC 支路 $Z_{base}=V^2/S$ 随之相差 $4\times$，DC 潮流/短路结果不可比；手册 \S 1.3 把两者同列为``典型范围来源''未声明分歧。
 \end{itemize}
 
@@ -374,8 +374,8 @@ P/Q 口径自相矛盾（隐含功率因数被篡改）。更致命的是 Charge
 
 \subsubsection*{B17　\texttt{provides\_dc\_v\_reference} 对下垂模式无条件置真，与同文件 \texttt{forms\_dc\_voltage} 的 \texttt{k\_vdc} 门控直接矛盾}
 \begin{itemize}
-  \item \textbf{位置}：\file{device\_control\_role.hpp:81--99}（VDC\_Q/VDC\_VAC/DC\_V\_DROOP\_AC\_V 无条件置真）vs \file{:62--66}（\texttt{forms\_dc\_voltage} 要求 \texttt{k\_vdc != 0}）。\textbf{主审已复核。}
-  \item \textbf{影响}：\texttt{k\_vdc=0} 的 VDC\_Q 换流器：角色输出 \texttt{provides\_dc\_v\_reference=true} 且 \texttt{is\_dc\_grid\_forming=false}，同一函数自相矛盾；AC/DC OPF 装配（\file{acdcopf\_builder.cpp:118,161}）据其置 \texttt{is\_vdc\_slack}，而潮流协调校验（\file{converter\_coordination.cpp:385--399}）对同一换流器报 Error——两引擎对同一设备可行域结论相反。
+  \item \textbf{位置}：\file{include/hacdcpf/model/device\_control\_role.hpp:resolve\_device\_control\_role}（VDC\_Q/VDC\_VAC/DC\_V\_DROOP\_AC\_V 无条件置真）vs \file{:62--66}（\texttt{forms\_dc\_voltage} 要求 \texttt{k\_vdc != 0}）。\textbf{主审已复核。}
+  \item \textbf{影响}：\texttt{k\_vdc=0} 的 VDC\_Q 换流器：角色输出 \texttt{provides\_dc\_v\_reference=true} 且 \texttt{is\_dc\_grid\_forming=false}，同一函数自相矛盾；AC/DC OPF 装配（\file{src/power\_models/acdcopf\_builder.cpp:to\_acdcopf\_data,161}）据其置 \texttt{is\_vdc\_slack}，而潮流协调校验（\file{src/power\_flow/converter\_coordination.cpp:evaluate\_vsc\_device\_rules}）对同一换流器报 Error——两引擎对同一设备可行域结论相反。
 \end{itemize}
 
 \subsubsection*{B18　\texttt{effective\_capacity.hpp} 文件头契约与实现两处矛盾；\texttt{StaticGeneratorDC} 版忽略 \texttt{controllable}}
@@ -388,43 +388,43 @@ P/Q 口径自相矛盾（隐含功率因数被篡改）。更致命的是 Charge
 
 \subsubsection*{B19　\texttt{RenewableType::Hydro} 序列化往返损坏（Hydro $\to$ ``Wind''）}
 \begin{itemize}
-  \item \textbf{位置}：\file{enum\_strings.hpp:219--230}（无 Hydro 分支，default 落 ``Wind''）；枚举声明 \file{enums/renewable\_enums.hpp:10} \texttt{Hydro = 3}。\textbf{主审已复核两处。}
-  \item \textbf{影响}：\file{case\_builders.cpp:3014} 的内置算例真实使用 Hydro，JSON 导出被静默改写为 Wind，时序/碳核算分类统计被篡改（编译验证：\texttt{Hydro -> "Wind" -> Wind}，FAIL）。
+  \item \textbf{位置}：\file{include/hacdcpf/model/enum\_strings.hpp:renewable\_type\_str}（无 Hydro 分支，default 落 ``Wind''）；枚举声明 \file{include/hacdcpf/model/enums/renewable\_enums.hpp:RenewableType} \texttt{Hydro = 3}。\textbf{主审已复核两处。}
+  \item \textbf{影响}：\file{src/io/case\_builders.cpp:build\_comprehensive\_hybrid\_acdc} 的内置算例真实使用 Hydro，JSON 导出被静默改写为 Wind，时序/碳核算分类统计被篡改（编译验证：\texttt{Hydro -> "Wind" -> Wind}，FAIL）。
 \end{itemize}
 
 \subsubsection*{B20　\texttt{eol\_percent} 字段名（\% 后缀）与消费语义（小数）矛盾}
 \begin{itemize}
-  \item \textbf{位置}：\file{ac\_components.hpp:599}（\texttt{double eol\_percent\{0.8\}}，Storage/MobileStorage/DCStorage 三处）；消费方 \file{lifecycle\_simulation.cpp:476}（\texttt{soh <= eol\_percent}，SOH 为 0--1 小数）。\textbf{主审已复核。}
+  \item \textbf{位置}：\file{include/hacdcpf/model/ac\_components.hpp:Storage}（\texttt{double eol\_percent\{0.8\}}，Storage/MobileStorage/DCStorage 三处）；消费方 \file{src/time\_series/lifecycle\_simulation.cpp:OrigStorage}（\texttt{soh <= eol\_percent}，SOH 为 0--1 小数）。\textbf{主审已复核。}
   \item \textbf{影响}：手册 \S 3.5 自证矛盾（单位列 ``\%''、范围 ``60--90''、默认 0.8）；用户按字段名填 80 时 \texttt{soh $\le$ 80} 恒真，储能每年立即更换，寿命仿真结论被放大 100 倍。修复：更名 \texttt{eol\_fraction} 或消费方 \texttt{/100}。
 \end{itemize}
 
 \subsubsection*{B21　\texttt{mag0\_percent} 未除 100，与同结构体 \texttt{i0\_percent} 口径相反}
 \begin{itemize}
-  \item \textbf{位置}：消费方 \file{three\_phase\_nr.cpp:1275}（\texttt{mag0\_abs = |z0| * mag0\_percent} 直乘）vs \file{:1189}（\texttt{i0\_percent / 100.0}）。\textbf{主审已复核两处。}
+  \item \textbf{位置}：消费方 \file{src/power\_flow/three\_phase\_nr.cpp:build\_transformer\_zero\_sequence\_port\_admittance}（\texttt{mag0\_abs = |z0| * mag0\_percent} 直乘）vs \file{:1189}（\texttt{i0\_percent / 100.0}）。\textbf{主审已复核两处。}
   \item \textbf{影响}：同一结构体两个 \texttt{\_percent} 字段两种口径；手册 \S 8.3 以``已知边界''声明该怪癖但 JSON/schema 层无保护——按字段名填 2（\%）得到 200\% 零序励磁阻抗，接地故障研究可差 100 倍。
 \end{itemize}
 
 \subsubsection*{B22　\texttt{DCBus.pd\_mw} 手册声明与代码直接矛盾（``忽略'' vs 加性）}
 \begin{itemize}
-  \item \textbf{位置}：代码 \file{pf\_injection\_assembly.cpp:102--116}（注释 ``DC bus demand and explicit DCLoad records are additive''，无条件叠加）；手册 \S 5.1 声明``负荷表非空时 \texttt{pd\_mw} 被忽略（不与 DCLoad 叠加）''。
+  \item \textbf{位置}：代码 \file{src/power\_flow/pf\_injection\_assembly.cpp:assemble\_dc\_injections}（注释 ``DC bus demand and explicit DCLoad records are additive''，无条件叠加）；手册 \S 5.1 声明``负荷表非空时 \texttt{pd\_mw} 被忽略（不与 DCLoad 叠加）''。
   \item \textbf{影响}：二者必有一错。AC 侧经 H1 已是加性，代码注释表明 DC 加性为有意设计，手册按过时行为撰写；按手册建模（母线直挂 $+$ DCLoad 并存）的用户将被\textbf{重复计量直流负荷}。
 \end{itemize}
 
 \subsubsection*{B23　\texttt{LoadModel::Exponential} 为不可实现的死枚举值}
 \begin{itemize}
-  \item \textbf{位置}：\file{enums/load\_enums.hpp}；\texttt{Load} 无指数 $\alpha/\beta$ 字段；稳态电压依从完全由 \texttt{z/i/p\_percent} 驱动（\file{solver\_data.cpp:160--168}），不读 \texttt{model} 枚举；手册 \S 3.1 仍将 Exponential 列为可用模型。
+  \item \textbf{位置}：\file{enums/load\_enums.hpp}；\texttt{Load} 无指数 $\alpha/\beta$ 字段；稳态电压依从完全由 \texttt{z/i/p\_percent} 驱动（\file{src/power\_flow/solver\_data.cpp:aggregate\_load\_demand}），不读 \texttt{model} 枚举；手册 \S 3.1 仍将 Exponential 列为可用模型。
   \item \textbf{影响}：用户设 \texttt{model=Exponential} 得到的是恒功率（默认 ZIP 系数），无任何报错——电压依从研究可静默得出恒功率结论。
 \end{itemize}
 
 \subsubsection*{B24　\texttt{DCBranch.rate\_a\_mva} 与 \texttt{s\_max\_mva} 双额定字段跨模块优先级相反}
 \begin{itemize}
-  \item \textbf{位置}：\file{json\_io.cpp:48--53}（\texttt{s\_max} 优先）vs \file{market\_simulation.cpp:734--739}、\file{time\_series\_pf.cpp:894--895}、\file{three\_stage\_reliability.cpp:1775--1776} 等（均 \texttt{rate\_a} 优先）。
+  \item \textbf{位置}：\file{src/io/json\_io.cpp:pf\_ac\_branch\_rating\_mva}（\texttt{s\_max} 优先）vs \file{src/market/market\_simulation.cpp:dc\_branch\_rating\_mw}、\file{src/time\_series/time\_series\_pf.cpp:DcFlow}、\file{src/reliability/three\_stage\_reliability.cpp:DCEdgeInfo} 等（均 \texttt{rate\_a} 优先）。
   \item \textbf{影响}：两字段同义（手册 \S 5.2）且未声明优先级；同时填写且不等时，限值执行模块用 \texttt{rate\_a} 而报告 \texttt{loading\_pct} 用 \texttt{s\_max}——``执行未越限、报告越限''或反之。
 \end{itemize}
 
 \subsubsection*{B25　\texttt{self\_discharge\_pct} 时间基准跨模块歧义（每时段 vs 每小时）}
 \begin{itemize}
-  \item \textbf{位置}：\file{time\_series\_pf.cpp:2312--2313}（\texttt{retention = 1 - pct/100}，每时段一次、与 $\Delta t$ 无关）vs \file{BasicDynamicDevices.cpp:9000--9001}（\texttt{/3600}，即 \%/h 连续）；\file{case\_builders.cpp:4352} 注释 ``0.01\%/hr''；手册 \S 3.5/\S 5.4（``每时段''）。\textbf{主审已复核时序侧。}
+  \item \textbf{位置}：\file{src/time\_series/time\_series\_pf.cpp:stor\_power\_idx（lambda）}（\texttt{retention = 1 - pct/100}，每时段一次、与 $\Delta t$ 无关）vs \file{src/dynamics/devices/BasicDynamicDevices.cpp:output}（\texttt{/3600}，即 \%/h 连续）；\file{src/io/case\_builders.cpp:DCLinkDef} 注释 ``0.01\%/hr''；手册 \S 3.5/\S 5.4（``每时段''）。\textbf{主审已复核时序侧。}
   \item \textbf{影响}：同一字段三种口径并存；UC 步长 $\Delta t\neq 1$ h（如 15 min）时，时序层比暂态层衰减快 4 倍；$\Delta t=1$ h 时两者一致，故缺陷长期隐蔽。修复：字段或文档声明时间基准（建议 \%/h），时序层按 $(1-\texttt{pct}/100)^{\Delta t}$ 折算。
 \end{itemize}
 
@@ -442,26 +442,26 @@ P/Q 口径自相矛盾（隐含功率因数被篡改）。更致命的是 Charge
 \textbf{\#} & \textbf{位置} & \textbf{问题}\\
 \midrule
 \endhead
-C1 & \file{network\_utils.cpp:1304--1307} & 死岛判据 \texttt{|p\_mw|>1e-9} 把\textbf{纯充电储能}误判为电源（手册 \S 3.5：$p<0$ 为充电负荷）；潮流侧 \file{island\_detector.cpp:270} 为同一判据，两层口径一致地错。\\
-C2 & \file{network\_utils.cpp:1279--1283} & 死岛判据的 SLACK/PV 母线检查不验证 \texttt{in\_service}——停运 SLACK 母线使整岛判活，其负荷被装配静默置零且不在 \texttt{dead\_bus\_indices} 中，无诚实声明。\\
-C3 & \file{network\_utils.cpp:1755--1759} & 自环支路（真实线路被并联零阻抗路径短接）删除时丢失两端 $B/2$ 充电功率，未折算为母线并联。\\
-C4 & \file{network\_utils.cpp:935--1068} & \texttt{validate()} 放过 \texttt{bus.index}$\le 0$（下游按 \texttt{index-1} 寻址将越界）与自环支路；该版本无生产调用点（生产走四级 validation），但现代 validation 同样不查自环与 index$\le 0$。\\
-C5 & \file{network\_utils.cpp:2653--2659} & \texttt{evaluate\_attribution} 未排除 \texttt{branch\_orig\_to\_proj=-1}（已删除分支），误报可恢复/Strong（实证：被删线路仍计 attributed）。\\
-C6 & \file{network\_utils.cpp:2308--2320} & ER$\to$VSC/DCDC 溯源按名称前缀匹配，空名 ER（前缀 "\_"）或前缀包含关系导致交叉归因（仅溯源层面）。\\
+C1 & \file{src/model/network\_utils.cpp:strip\_dead\_islands} & 死岛判据 \texttt{|p\_mw|>1e-9} 把\textbf{纯充电储能}误判为电源（手册 \S 3.5：$p<0$ 为充电负荷）；潮流侧 \file{src/power\_flow/island\_detector.cpp:dc\_node（lambda）} 为同一判据，两层口径一致地错。\\
+C2 & \file{src/model/network\_utils.cpp:bus\_type\_priority} & 死岛判据的 SLACK/PV 母线检查不验证 \texttt{in\_service}——停运 SLACK 母线使整岛判活，其负荷被装配静默置零且不在 \texttt{dead\_bus\_indices} 中，无诚实声明。\\
+C3 & \file{src/model/network\_utils.cpp:merge\_zero\_impedance\_buses\_impl} & 自环支路（真实线路被并联零阻抗路径短接）删除时丢失两端 $B/2$ 充电功率，未折算为母线并联。\\
+C4 & \file{src/model/network\_utils.cpp:total\_load\_q\_mvar} & \texttt{validate()} 放过 \texttt{bus.index}$\le 0$（下游按 \texttt{index-1} 寻址将越界）与自环支路；该版本无生产调用点（生产走四级 validation），但现代 validation 同样不查自环与 index$\le 0$。\\
+C5 & \file{src/model/network\_utils.cpp:filter\_remap（lambda）} & \texttt{evaluate\_attribution} 未排除 \texttt{branch\_orig\_to\_proj=-1}（已删除分支），误报可恢复/Strong（实证：被删线路仍计 attributed）。\\
+C6 & \file{src/model/network\_utils.cpp:create\_internal\_dc\_bus（lambda）} & ER$\to$VSC/DCDC 溯源按名称前缀匹配，空名 ER（前缀 "\_"）或前缀包含关系导致交叉归因（仅溯源层面）。\\
 C7 & \file{standard\_parameter\_library.cpp:}\newline\file{581--866} & 校验规则覆盖缺口：\texttt{vsc.r\_sc/x\_sc/i\_max} 与全部 28 条可靠性规则定义后从不参与 \texttt{check\_range}，越界值无诊断。\\
-C8 & \file{standard\_parameter\_library.cpp:}\newline\file{423--428} & \texttt{vsc.r\_sc\_pu/x\_sc\_pu} 规则描述未声明标幺基准（消费端按换流器自身额定换算，\file{short\_circuit.cpp:604}）；按系统基准填写的用户短路贡献错 $S_{rated}/S_{base}$ 倍。\\
+C8 & \file{standard\_parameter\_library.cpp:}\newline\file{423--428} & \texttt{vsc.r\_sc\_pu/x\_sc\_pu} 规则描述未声明标幺基准（消费端按换流器自身额定换算，\file{src/short\_circuit/short\_circuit.cpp:build\_sc\_admittance\_matrices}）；按系统基准填写的用户短路贡献错 $S_{rated}/S_{base}$ 倍。\\
 C9 & \file{standard\_parameter\_library.cpp:}\newline\file{894--899} & \texttt{vmin$\ge$vmax} 修复无条件覆盖两个字段（超出``仅补缺''语义），authored 信息丢失。\\
 C10 & \file{standard\_parameter\_library.cpp:}\newline\file{1303} & 补全写回的 \texttt{r\_ohm\_per\_km} 为运行温度热态值（$+19.7\%$--$28.2\%$），与手册``20 \textcelsius{} 导线手册值''字段语义冲突（数值自洽，下游对照 GB/T 3956 时高估）。\\
 C11 & \file{standard\_parameter\_library.cpp:}\newline\file{1002--1006} & 可靠性长度暴露缺省 1 km 为隐式假设，未在报告中声明（短线路系统故障率系统性偏高）。\\
 C12 & \file{standard\_parameter\_library.cpp:}\newline\file{908--911,:924--933} & AC 支路阻抗``双缺才填''，单侧缺失留下 $x=0$ 空洞（DC 潮流 $B'$ 静默丢支路）；\texttt{vkr} 缺省回填可产生 \texttt{vkr>vk} 的物理不可能组合。\\
-C13 & \file{unit\_conversion.cpp:52--56} & \texttt{c\_nf\_per\_km} 在 C++ 模型层从不参与标幺换算（仅 JSON 读写），手册声明的换算路径不实——只给电容参数的算例静默丢失全部充电电纳。\\
-C14 & \file{typical\_parameters.hpp:801--804} & 充电站 \texttt{max\_power\_kw} 占位填充 $=$ 台数 $\times$ 慢充功率，忽略快充（2 台快充：14 kW vs 应 120 kW）。\\
-C15 & \file{typical\_parameters.hpp:842,}\newline\file{:628,:647} & 占位填充改写合法工程状态：shunt \texttt{current\_step=0}（全部切出）改投 1 档；负荷 \texttt{scaling=0}（停运）重置为 1 并重新注入——与 \file{effective\_capacity.hpp} 的``scaling$\le$0 按 0''契约直接冲突。\\
-C16 & \file{typical\_parameters.hpp:538--562} & DCStorage 填充路径缺 SOC 窗口倒挂修复（AC 侧 \file{:510--514} 有），倒挂输入窗口仍为空集。\\
-C17 & \file{result\_attribution.cpp:}\newline\file{93,:712--729} & coverage 指标退化：\texttt{add\_collection} 一律 AuditOnly、全文件无 Unsupported 赋值点 $\to$ \texttt{coverage.total()} 恒真（测试 \file{test\_result\_attribution.cpp:149} 把退化行为锁定）。\\
-C18 & \file{result\_attribution.cpp:641--652} & 同母线多断路器等分外部电网功率后标 Strong（理想化后电流分配本不确定，应标 Approximate 或声明约定）。\\
-C19 & \file{solver\_data.cpp:34,:151} vs\newline\file{pf\_injection\_assembly.cpp:}\newline\file{114,:132} & 负 \texttt{scaling} 清洗口径跨域不一致：AC 负荷/电源裸乘（反向注入）、DC 负荷置零、DC 电源裸乘、AsymmetricLoad 投影第三口径（$\le 0 \to 1.0$）。\\
-C20 & \file{solver\_data.cpp:160--168} & ZIP 系数之和不归一化、无校验（30/30/30 $\to$ $P(1.0)=0.9P_0$ 静默改变负荷量；手册声明``和应为 100''但代码不校验）。\\
+C13 & \file{src/model/unit\_conversion.cpp:convert\_actual\_to\_per\_unit} & \texttt{c\_nf\_per\_km} 在 C++ 模型层从不参与标幺换算（仅 JSON 读写），手册声明的换算路径不实——只给电容参数的算例静默丢失全部充电电纳。\\
+C14 & \file{include/hacdcpf/model/typical\_parameters.hpp:fill\_storage（lambda）} & 充电站 \texttt{max\_power\_kw} 占位填充 $=$ 台数 $\times$ 慢充功率，忽略快充（2 台快充：14 kW vs 应 120 kW）。\\
+C15 & \file{include/hacdcpf/model/typical\_parameters.hpp:fill\_storage（lambda）,}\newline\file{:628,:647} & 占位填充改写合法工程状态：shunt \texttt{current\_step=0}（全部切出）改投 1 档；负荷 \texttt{scaling=0}（停运）重置为 1 并重新注入——与 \file{effective\_capacity.hpp} 的``scaling$\le$0 按 0''契约直接冲突。\\
+C16 & \file{include/hacdcpf/model/typical\_parameters.hpp:fill\_storage（lambda）} & DCStorage 填充路径缺 SOC 窗口倒挂修复（AC 侧 \file{:510--514} 有），倒挂输入窗口仍为空集。\\
+C17 & \file{result\_attribution.cpp:}\newline\file{93,:712--729} & coverage 指标退化：\texttt{add\_collection} 一律 AuditOnly、全文件无 Unsupported 赋值点 $\to$ \texttt{coverage.total()} 恒真（测试 \file{tests/test\_result\_attribution.cpp:TEST\_CASE} 把退化行为锁定）。\\
+C18 & \file{src/model/result\_attribution.cpp:apply} & 同母线多断路器等分外部电网功率后标 Strong（理想化后电流分配本不确定，应标 Approximate 或声明约定）。\\
+C19 & \file{src/power\_flow/solver\_data.cpp:aggregate\_generation,:151} vs\newline\file{pf\_injection\_assembly.cpp:}\newline\file{114,:132} & 负 \texttt{scaling} 清洗口径跨域不一致：AC 负荷/电源裸乘（反向注入）、DC 负荷置零、DC 电源裸乘、AsymmetricLoad 投影第三口径（$\le 0 \to 1.0$）。\\
+C20 & \file{src/power\_flow/solver\_data.cpp:aggregate\_load\_demand} & ZIP 系数之和不归一化、无校验（30/30/30 $\to$ $P(1.0)=0.9P_0$ 静默改变负荷量；手册声明``和应为 100''但代码不校验）。\\
 \bottomrule
 \end{longtable}
 \end{footnotesize}
@@ -470,7 +470,7 @@ C20 & \file{solver\_data.cpp:160--168} & ZIP 系数之和不归一化、无校�
 \label{sec:obs}
 
 \begin{itemize}
-  \item \textbf{D1}　电机零序参数 \texttt{r0\_pu/x0\_pu} 投影丢失（\file{network\_utils.cpp:454--497} 未映射；接地故障下电机零序馈供消失，多数电机中性点不接地故实际影响有限）。
+  \item \textbf{D1}　电机零序参数 \texttt{r0\_pu/x0\_pu} 投影丢失（\file{src/model/network\_utils.cpp:add\_equivalent\_branch\_from\_circuit\_breaker} 未映射；接地故障下电机零序馈供消失，多数电机中性点不接地故实际影响有限）。
   \item \textbf{D2}　三绕组星形腿近零 fallback 丢弃相角（\file{:290--298}，$|z|\le10^{-12}$ 时取纯实数；极限情形数值验证仍收敛正确值）。
   \item \textbf{D3}　\file{rx\_from\_vk\_vkr} 对 \texttt{vkr>vk}/负值非法数据静默钳 \texttt{x=0}（\file{:78--81}）；\texttt{bus\_base\_kv\_or\_default} 对缺失 \texttt{base\_kv} 回退 1.0 kV 不告警（\file{:32--39}）。
   \item \textbf{D4}　2W 未给 \texttt{z0\_percent} 时回退 $Z_0=Z_1$（\file{:226--229}）——手册 \S 2.4 对三绕组声明该回退、\S 2.3 对双绕组未声明，声明缺口。
@@ -478,10 +478,10 @@ C20 & \file{solver\_data.cpp:160--168} & ZIP 系数之和不归一化、无校�
   \item \textbf{D6}　VSC``有源''判据过宽（\file{:1308--1311}：任何在役 VSC 挂接即电源，不看控制模式与 DC 侧支撑）；\file{strip\_dead\_islands} 头注释与实现判据措辞不一致（\file{:1209--1220} vs \file{:1286,:1306}）。
   \item \textbf{D7}　幂等重投影在非 canonical 母线编号下会覆盖既有 BusMergeMap provenance（\file{:1626--1828}，\textbf{待核实}可达性；canonical 编号下早退无此问题）。
   \item \textbf{D8}　ER 展开：VF 端口 PV 提升后 \texttt{q\_set\_mvar} 静默失效；\texttt{v\_set\_pu} 一参三用（DC 设定/AC PV/换流器 AC 设定）；侧 A 自动升格与头注释不一致，[PQ, Droop] 端口序产生双定压源；单侧 ER 产生悬空内部 DC 母线；\texttt{num\_ports} 与 \texttt{ports.size()} 无校验（\file{:1947--2163}）。
-  \item \textbf{D9}　\texttt{AttributedTerminal} 的 $p$ 符号双轨制（网络类``母线$\to$器件'' vs 源荷类``注入母线''）未在头文件声明；AC 母线 \texttt{recovery\_reason} 写 ``BusMergeMap voltage broadcast'' 但实际从不使用 BusMergeMap，占位值静默回退（\file{result\_attribution.cpp:238,:107--121}）。
+  \item \textbf{D9}　\texttt{AttributedTerminal} 的 $p$ 符号双轨制（网络类``母线$\to$器件'' vs 源荷类``注入母线''）未在头文件声明；AC 母线 \texttt{recovery\_reason} 写 ``BusMergeMap voltage broadcast'' 但实际从不使用 BusMergeMap，占位值静默回退（\file{src/model/result\_attribution.cpp:apply,:107--121}）。
   \item \textbf{D10}　DC 支路归因阈值（\texttt{r\_pu > 1e-12}）严于求解器（\texttt{r\_pu == 0} 跳过）；MATPOWER 提取的 2W 变压器在 ac\_branch 与 transformer\_2w 双重列报。
   \item \textbf{D11}　手册文档漂移：\S 6.3 对 \file{network\_utils.cpp} 的行号引用全部过期（约 72 行）；``48 条工程校验规则''实为 52 条；\S 2.1 默认值列（r\_pu 0.01/x\_pu 0.04、mttr 架空 8/电缆 24）与结构体初值 0.0 冲突；\S 5.1 \texttt{DCBus.pd\_mw} 按过时行为撰写（见 B22）。
-  \item \textbf{D12}　\texttt{defaults.hpp:56} \texttt{kPackageVersion="0.5.0"} 与 \file{CMakeLists.txt:3} \texttt{VERSION 0.1.0} 两套版本出处；\texttt{kGenPmax/kGenPmin/kGenQmax/kGenQmin} 为死常量（全库无消费方，``单一来源''声明失实）。
+  \item \textbf{D12}　\texttt{include/hacdcpf/model/defaults.hpp:Defaults} \texttt{kPackageVersion="0.5.0"} 与 \file{CMakeLists.txt:3} \texttt{VERSION 0.1.0} 两套版本出处；\texttt{kGenPmax/kGenPmin/kGenQmax/kGenQmin} 为死常量（全库无消费方，``单一来源''声明失实）。
   \item \textbf{D13}　\texttt{element\_type} 同名跨文件不同型（Switch 为 \texttt{int}、CircuitBreaker/DCCircuitBreaker 为 \texttt{std::string}）；\texttt{StaticGenerator::co2\_emission\_rate} 与 \texttt{emission\_factor\_tco2\_mwh} 同义异名；\texttt{VSCConverter::mtbf\_hr} 注释悬空引用不存在的 \texttt{Generator::mtbf\_hr}。
   \item \textbf{D14}　可靠性默认值在参数库与 TypicalParameters 间差异大（1 km 线路故障率相差 6 倍）；AC 支路 per-km$\times$长度 vs DC 支路固定 MTBF 的暴露建模不一致；架空线 0.50 occ/(km·yr) 高于教科书典型但来源如实声明。
   \item \textbf{D15}　\texttt{controls\_dc\_v\_rigid}/\texttt{dc\_p\_is\_free} 死字段（全库从未置真，Mode 4/5 刚性 Vdc 无法表达）；\texttt{k\_vdc != 0.0} 精确比较与协调侧 \texttt{|k\_vdc|>1e-9} 两容差（NaN 时结论相反）；\texttt{to\_acdc\_control\_mode} 下垂归类不对称。
@@ -499,15 +499,15 @@ C20 & \file{solver\_data.cpp:160--168} & ZIP 系数之和不归一化、无校�
 以下核心数学内容经\textbf{解析推导 $+$ 数值验证（含链接 \file{libhacdcpf.a} 的端到端复现）}为正确（逐项行号备查）：
 
 \begin{enumerate}
-  \item \textbf{参数换算三件套}：\file{rx\_from\_vk\_vkr}（$z=\frac{v_k}{100}\frac{S_b}{S_n}$、$x=\sqrt{z^2-r^2}$，\file{network\_utils.cpp:70--82}）、\file{rx\_from\_z\_percent\_x\_over\_r}（\file{:84--97}）、\file{tap\_from\_step}（\file{:99--104}）——数值验证正确。
+  \item \textbf{参数换算三件套}：\file{rx\_from\_vk\_vkr}（$z=\frac{v_k}{100}\frac{S_b}{S_n}$、$x=\sqrt{z^2-r^2}$，\file{src/model/network\_utils.cpp:rx\_from\_vk\_vkr}）、\file{rx\_from\_z\_percent\_x\_over\_r}（\file{:84--97}）、\file{tap\_from\_step}（\file{:99--104}）——数值验证正确。
   \item \textbf{Transformer2W 投影}（\file{:155--234}）：电压基准折算 $(V_n/V_{base})^2$、LV 分接头 $t\to 1/t$ 且 $Z\to Zt^2$ 归算、额定变比失配 $(V_{n,H}/V_{n,L})/(V_{base,H}/V_{base,L})$、零序路径与并联台数聚合——经传递矩阵恒等式与专用回归验证正确。
   \item \textbf{Transformer3W 投影}（\file{:237--365}）：绕组对容量取 $\min$、星形合成 $Z_H=\frac{1}{2}(Z_{HM}+Z_{HL}-Z_{ML})$、星$\to$三角 $y_{ss}/(y_w y_t)$（与经典变换及网络 Kron 约化数值差 $3.6\times10^{-15}$）、三对支路 $\tau$ 表、绕组电压基准与移相角分配 $\theta_{ML}=\theta_L-\theta_M$、负阻抗腿处理——正确。
   \item \textbf{开关/断路器等值}（\file{:367--444}）：$Z_{base}=kV^2/S_b$、$Z=\max(R_c,z)$、$x=\sqrt{Z^2-R_c^2}$、理想闭合补 $10^{-6}$、$S=\sqrt{3}\,kV\cdot kA$ 热稳定——与手册 \S 4.1/\S 4.2 逐式一致。
   \item \textbf{零阻抗合并主干}（\file{:1551--1829}）：并查集、代表选择（SLACK$>$PV$>$PQ）、母线 pd/qd/gs/bs 求和迁移、组件引用整体重映射、合并前后功率守恒、白名单防误并真实短线路、\texttt{extensive\_participation} 权重和恒为 1——26+ 项断言数值复核正确。
   \item \textbf{死岛剥离与编号规范化}（\file{:1222--1548}、\file{:1839--1891}）：BFS 仅以在役支路为边、删除后重编号 1..N、BusMergeMap \textbf{组合而非覆盖}、DC 编号重复抛异常、AC/DC 域严格分离——正确。
   \item \textbf{反投影}（\file{unproject\_bus\_vector}，\file{:1896--1931}）：Intensive 广播、Extensive 按权重拆分且总量守恒、死岛置 0、缺失权重抛异常——正确。
-  \item \textbf{单位换算}（\file{unit\_conversion.cpp:21--92}）：$Z_{base}=V^2/S$、串联 $r/x$ 除以 \texttt{n\_parallel}、电纳乘 \texttt{n\_parallel}、$B_{pu}=B_{S}\cdot Z_{base}$、DC 侧 $R_{base}=V^2/P$、幂等——与手册公式逐符号一致（\texttt{c\_nf} 缺陷另见 C13）。
-  \item \textbf{IEC 60228/GB/T 3956 电阻查表}（\file{standard\_parameter\_library.cpp:152--173}）：20 档铜 $+$ 17 档铝与公布最大直流电阻\textbf{逐位一致}；温度修正 $\alpha_{Cu}=0.00393/\alpha_{Al}=0.00403$、电阻率回退（声明为工程假设）、载流估算（声明为筛选常数）——正确。
+  \item \textbf{单位换算}（\file{src/model/unit\_conversion.cpp:convert\_actual\_to\_per\_unit}）：$Z_{base}=V^2/S$、串联 $r/x$ 除以 \texttt{n\_parallel}、电纳乘 \texttt{n\_parallel}、$B_{pu}=B_{S}\cdot Z_{base}$、DC 侧 $R_{base}=V^2/P$、幂等——与手册公式逐符号一致（\texttt{c\_nf} 缺陷另见 C13）。
+  \item \textbf{IEC 60228/GB/T 3956 电阻查表}（\file{src/model/standard\_parameter\_library.cpp:standard\_r20\_ohm\_per\_km}）：20 档铜 $+$ 17 档铝与公布最大直流电阻\textbf{逐位一致}；温度修正 $\alpha_{Cu}=0.00393/\alpha_{Al}=0.00403$、电阻率回退（声明为工程假设）、载流估算（声明为筛选常数）——正确。
   \item \textbf{可靠性物化}（\file{:987--1087}）：$\lambda=\lambda'\times l$ 与下游消费闭环、MTBF/MTTR 换算（$8760/175200=0.05$ 精确）——正确（缺省 1 km 声明缺口另见 C11）。
   \item \textbf{参数库骨架}：52 条规则默认值全部在 $[min,max]$ 内且 $min\le max$；\texttt{check\_opf\_decision\_bounds} 归一化与四类诊断；效率钳制 $\eta\in(0,1]$；SOC 窗口修复（AC 侧）——正确。
   \item \textbf{ER 展开主干}：增益整定 $k_{tight}=\max(100P_N,25)$、$k_{droop}=\max(P_N/0.1,1)$ 与手册 \S 6.3 及求解器同律；$\eta_{dcdc}=1-\texttt{loss}/100$ 与 0.98 回退；AC/DC 端口按域展开、控制模式映射、先展开后 canonicalize 的编号重映射及显式 provenance record——正确。

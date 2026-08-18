@@ -131,8 +131,8 @@ MinCurtailment/\allowbreak MinLoss/\allowbreak Weighted）\\
         （每日一工作线程），\texttt{Auto} 在该路径下优先解析为 SCIP；显式选择共享进程全局调度状态的
         外部 MILP 后端退化为顺序日循环；按日独立性依赖循环终端 SOC
         （\fld{enforce\_terminal\_soc\_cyclic}/\fld{enforce\_daily\_cyclic\_soc}）。依据：
-        \srcpath{src/time\_series/time\_series\_pf.cpp:3245--3264}、
-        \srcpath{src/time\_series/annual\_production\_sim.cpp:1170--1189}；
+        \srcpath{src/time\_series/time\_series\_pf.cpp:resolve\_parallel\_daily\_uc\_solver}、
+        \srcpath{src/time\_series/annual\_production\_sim.cpp:solve\_parallel\_daily}；
   \item 生命周期默认 \fld{step\_duration\_hr}=$6.0$（为提速偏粗），碳精度以 \texttt{YearlyErrorBounds} 为准。
 \end{itemize}
 规范文档：\srcpath{docs/theory/time\_series\_power\_flow\_models.md}、

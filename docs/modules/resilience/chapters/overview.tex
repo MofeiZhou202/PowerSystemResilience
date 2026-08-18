@@ -5,7 +5,7 @@
 弹性恢复模块回答“扰动/灾害致多重故障后，如何在多时段内以开关重构、DER/储能调度与
 移动储能路由最大限度恢复供电，以及所选恢复动作在动态上是否安全”。命名空间
 \texttt{hacdcpf::analysis}。三种可互换恢复模型由枚举 \fld{DistributionResilienceModel}
-（\srcpath{resilience\_assessment.hpp:16}）选择：
+（\srcpath{include/hacdcpf/resilience/resilience\_assessment.hpp:DistributionResilienceModel}）选择：
 \begin{center}\footnotesize
 \begin{tabular}{@{}L{4.6cm}L{5.0cm}L{4.4cm}@{}}
 \toprule
@@ -17,10 +17,10 @@
 \bottomrule
 \end{tabular}
 \end{center}
-入口行号：\srcpath{run\_distribution\_resilience\_assessment}（:468）、
-\srcpath{run\_distribution\_resilience\_mip\_assessment}（:458）、
-\srcpath{run\_distribution\_resilience\_stage\_milp\_assessment}（:463）、
-\srcpath{apply\_distribution\_resilience\_demo\_data}（:452）。未经本轮逐式核验的认证恢复推导
+入口行号：\srcpath{run\_distribution\_resilience\_assessment}（:run\_distribution\_resilience\_assessment）、
+\srcpath{run\_distribution\_resilience\_mip\_assessment}（:run\_distribution\_resilience\_mip\_assessment）、
+\srcpath{run\_distribution\_resilience\_stage\_milp\_assessment}（:run\_distribution\_resilience\_stage\_milp\_assessment）、
+\srcpath{apply\_distribution\_resilience\_demo\_data}（:apply\_distribution\_resilience\_demo\_data）。未经本轮逐式核验的认证恢复推导
 不纳入主手册数学章节。
 
 \subsection{时序数据流}
@@ -41,7 +41,7 @@
 \end{figure}
 
 \subsection{弹性指标}
-聚合结果 \fld{DistributionResilienceResult}（:413）给出恢复度量。设时步 $t$ 需求 $D_t$、
+聚合结果 \fld{DistributionResilienceResult}（:DistributionResilienceResult）给出恢复度量。设时步 $t$ 需求 $D_t$、
 供电 $P_t^{srv}$、恢复比 $\gamma_t=P_t^{srv}/D_t$，则总量与面积型弹性指数
 \begin{equation}
 \text{加权失供}=\sum_t \Big(\sum_{i}w_i\,s_{i,t}\Big)\Delta t,\qquad
@@ -52,7 +52,7 @@
 四级分解 \fld{shed\_by\_priority}=[Critical, High, Medium, Low]。
 
 \subsection{诚实口径}
-恢复 MILP 的能力由 \fld{DistributionResilienceModelStats::ValidityFlags}（:88）逐项声明。
+恢复 MILP 的能力由 \fld{DistributionResilienceModelStats::ValidityFlags}（:DistributionResilienceModelStats）逐项声明。
 默认 \fld{model\_scope}=\texttt{"hybrid-acdc-restoration-milp"}；典型缺省下
 \fld{dc\_branch\_flow\_limits\_enforced}=false、\fld{converter\_transfer\_limits\_enforced}=false、
 \fld{converter\_losses\_modelled}=false、\fld{reactive\_power\_modelled}=false、

@@ -3,9 +3,9 @@
 
 \subsection{功能定位}
 \fld{RAStyleStageMILP}（\srcpath{run\_distribution\_resilience\_stage\_milp\_assessment}，
-\srcpath{resilience\_assessment.hpp:463}；由 \fld{use\_ra\_style\_stage\_milp} 或首选开关
+\srcpath{include/hacdcpf/resilience/resilience\_assessment.hpp:run\_distribution\_resilience\_stage\_milp\_assessment}；由 \fld{use\_ra\_style\_stage\_milp} 或首选开关
 \fld{enable\_disaster\_stages} 触发）以“灾害隔离 + 灾后重构”两阶段、开关约束的拓扑 MILP
-求解，阶段语义见 \fld{DistributionDisasterStage}（:137）：
+求解，阶段语义见 \fld{DistributionDisasterStage}（:DistributionDisasterStage）：
 \texttt{Normal} $\to$ \texttt{DisasterIsolation} $\to$ \texttt{DisasterPostFaultReconfig}
 $\to$ \texttt{PostDisasterRepair}。
 

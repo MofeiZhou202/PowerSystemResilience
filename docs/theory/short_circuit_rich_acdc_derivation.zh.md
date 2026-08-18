@@ -719,7 +719,7 @@ i_p = \kappa \sqrt{2} I_{k,1}''
 其中 κ 使用故障点的 R/X 比；对于网状网络中的方法 B，代码乘以 `1.15`
 并将结果封顶为 `1.8`（`κ = min(1.8, 1.15κ)`，无下限钳制），而其余
 方法/拓扑组合均钳制到 `1.0 ≤ κ ≤ 2.0`
-（`src/short_circuit/short_circuit.cpp:1703-1707`）。
+（`src/short_circuit/short_circuit.cpp:current_source_contribution_ka（lambda）-1707`）。
 
 ### 9.2 开断电流
 

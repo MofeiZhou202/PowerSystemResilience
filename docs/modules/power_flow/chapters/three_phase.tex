@@ -4,7 +4,7 @@
 
 \subsection{功能定位与入口}
 
-\compmeta{analysis::solve\_three\_phase\_nr}{\srcpath{include/hacdcpf/power\_flow/distribution\_power\_flow.hpp:492--499}}
+\compmeta{analysis::solve\_three\_phase\_nr}{\srcpath{include/hacdcpf/power\_flow/distribution\_power\_flow.hpp:ThreePhaseNROptions}}
 
 相域（abc domain）潮流是平台处理\textbf{不平衡配电系统}的生产路径：不再把网络
 压缩为正序单相等值，而是直接在相节点上建立紧凑导纳矩阵并联立求解。与
@@ -12,7 +12,7 @@
 \texttt{ThreePhaseACSystem} 子系统（\fld{HybridPowerSystem::three\_phase\_ac}），
 支持辐射状与环网拓扑、多电源、全相域/序分量混合建模的线路、任意接线组变压器
 与外部电网 Norton 等值。入口两个重载
-（实现 \srcpath{src/power\_flow/three\_phase\_nr.cpp:5576} 与 :5915）：
+（实现 \srcpath{src/power\_flow/three\_phase\_nr.cpp:solve\_three\_phase\_nr\_snapshot} 与 :5915）：
 \begin{quote}\footnotesize
 \texttt{ThreePhaseDPFResult solve\_three\_phase\_nr(const ThreePhaseACSystem\& sys,\\
 \hspace*{2em}const ThreePhaseNROptions\& opt = \{\});}\\
@@ -20,22 +20,22 @@
 \hspace*{2em}const ThreePhaseNROptions\& opt = \{\});}
 \end{quote}
 \texttt{HybridPowerSystem} 重载仅转发到 \fld{three\_phase\_ac} 子系统，缺失时抛异常
-（three\_phase\_nr.cpp:5918--5921）。便捷包装
-\srcpath{powerflow::solve\_three\_phase}（\srcpath{include/hacdcpf/power\_flow/three\_phase.hpp:39--49}）
+（src/power\_flow/three\_phase\_nr.cpp:capture\_tap\_state（lambda））。便捷包装
+\srcpath{powerflow::solve\_three\_phase}（\srcpath{include/hacdcpf/power\_flow/three\_phase.hpp:solve\_three\_phase}）
 把 \fld{ThreePhaseFlowOptions} 转写为 NR 选项并回传简化结果；该头文件明确
-\textbf{不再暴露}前推回代式 legacy 接口（three\_phase.hpp:10--11，配网 BFS 见
+\textbf{不再暴露}前推回代式 legacy 接口（include/hacdcpf/power\_flow/three\_phase.hpp:ThreePhaseFlowOptions，配网 BFS 见
 第~\ref{sec:dist}~章）。求解前提是\textbf{至少一个 SLACK 母线或一台在运
-\texttt{external\_grid}}（three\_phase\_nr.cpp:5362--5365）。
+\texttt{external\_grid}}（src/power\_flow/three\_phase\_nr.cpp:finalize\_three\_phase\_result\_from\_state）。
 
 \subsection{相域网络模型}
 
 \paragraph{紧凑相节点索引} \srcpath{PhaseNodeIndexer::build}
-（three\_phase\_nr.cpp:64--89）按母线 \fld{phase\_mask} 只为\textbf{实际存在的相}
-分配节点号：三相母线占 3 个节点，单相支线占 1 个，空 mask 直接抛错（:72--76）。
+（src/power\_flow/three\_phase\_nr.cpp:build）按母线 \fld{phase\_mask} 只为\textbf{实际存在的相}
+分配节点号：三相母线占 3 个节点，单相支线占 1 个，空 mask 直接抛错（:build）。
 全 abc 网络的节点数为 $3N$，含单相/两相支线时严格小于 $3N$，不产生幻影节点。
 
 \paragraph{线路 3$\times$3 阻抗块} 线路有两种参数化
-（three\_phase\_nr.cpp:570--656）：
+（src/power\_flow/three\_phase\_nr.cpp:validate\_generator\_dispatch\_semantics）：
 \begin{itemize}
   \item \textbf{序分量参数}（\fld{r1\_pu}/\fld{x1\_pu}/\fld{r0\_pu}/\fld{x0\_pu}）：
         由对称分量变换合成循环对称的相域阻抗矩阵
@@ -53,7 +53,7 @@
 （\srcpath{build\_line\_primitive}，:1080--1121）。
 
 \paragraph{变压器与电源} 变压器以\textbf{绕组域原语}进入导纳矩阵：接线种类
-（GroundedWye/Wye/Delta，three\_phase\_nr.cpp:242--261）经连接嵌入矩阵把绕组量
+（GroundedWye/Wye/Delta，src/power\_flow/three\_phase\_nr.cpp:ThreePhaseSolveSnapshot）经连接嵌入矩阵把绕组量
 映射到相节点（\srcpath{build\_transformer\_connection\_embedding}，:1581；
 \srcpath{delta\_connection\_matrix}，:1377），支持钟点相移与显式
 \fld{\_winding\_topology}；接地星--接地星路径含零序磁化 T 模型
@@ -67,24 +67,24 @@
 $S_{base,1\phi}=S_{base}/3$：有名值 MW/MVAr 乘 $3/S_{base}$ 化为每相标幺
 （\srcpath{phase\_domain\_power\_base\_scale}，:3108--3114；
 \srcpath{stamp\_injection}，:2476--2482），支路功率回算时再乘回 $S_{base}/3$
-（:5537--5544）。\fld{base\_mva} 未设置时取 100（:5332）。
+（:solve\_three\_phase\_nr\_snapshot）。\fld{base\_mva} 未设置时取 100（:finalize\_three\_phase\_result\_from\_state）。
 
 \subsection{abc 极坐标 Newton：失配方程与雅可比}
 
-节点角色（\srcpath{build\_tp\_nr\_context}，three\_phase\_nr.cpp:3919--3974）：
+节点角色（\srcpath{build\_tp\_nr\_context}，src/power\_flow/three\_phase\_nr.cpp:compute\_phase\_spec）：
 SLACK 母线全部相的 $\theta$、$V_m$ 固定；PV 母线仅 $\theta$ 为未知量；
 PQ 母线 $\theta$、$V_m$ 皆未知。状态向量
 $x=[\theta_{n_p};\ V_{m,\,n_q}]$，$n_{\mathrm{var}}=n_p+n_q$。
 指定注入 $P^{spec}=P_{gen}-P_{load}$（注入为正，\srcpath{compute\_phase\_spec}，
 :3842--3916；发电机支持每相调度或总量按相均分 :3882--3912）。
 失配约定 $\mathrm{mismatch}=F^{spec}-F^{calc}$，每个相节点 $r$ 的注入
-（:4226--4232）：
+（:add\_delta\_load\_contributions）：
 \begin{align*}
 P_r^{calc}&=\sum_{s}V_rV_s\big(G_{rs}\cos\theta_{rs}+B_{rs}\sin\theta_{rs}\big)\\
 Q_r^{calc}&=\sum_{s}V_rV_s\big(G_{rs}\sin\theta_{rs}-B_{rs}\cos\theta_{rs}\big)
 \end{align*}
 其中 $r,s$ 遍历紧凑相节点，$G_{rs}+jB_{rs}$ 是含相间互耦的导纳块元素。
-Norton 源电流单独累加（:4331--4340）。
+Norton 源电流单独累加（:evaluate\_tp\_mismatch\_and\_jacobian）。
 
 雅可比非对角元（$r\neq s$，:4301--4326）与第~\ref{sec:newton}~章极坐标形式
 逐相同构：
@@ -94,7 +94,7 @@ Norton 源电流单独累加（:4331--4340）。
 \partial Q_r/\partial\theta_s&=-V_rV_s\big(G_{rs}\cos\theta_{rs}+B_{rs}\sin\theta_{rs}\big) &
 \partial Q_r/\partial V_s&=V_r\big(G_{rs}\sin\theta_{rs}-B_{rs}\cos\theta_{rs}\big)
 \end{align*}
-对角元（:4378--4421）：
+对角元（:evaluate\_tp\_mismatch\_and\_jacobian）：
 \begin{align*}
 \partial P_r/\partial\theta_r&=-Q_r^{calc}-B_{rr}V_r^2 &
 \partial P_r/\partial V_r&=P_r^{calc}/V_r+G_{rr}V_r\\
@@ -106,10 +106,10 @@ Norton 源电流单独累加（:4331--4340）。
 \srcpath{add\_delta\_load\_contributions}，:4119，含中性点漂移的链式求导）。
 
 \paragraph{求解循环与全局化} Newton 内核复用引擎层
-\srcpath{engine::NativeNewtonAdapter}（:5464--5474）：对角正则初值
+\srcpath{engine::NativeNewtonAdapter}（:find\_transformer\_position\_by\_index）：对角正则初值
 $\lambda_0=10^{-10}$、回溯线搜索步退 0.5、最多 20 步；投影算子把 $V_m$ 钳在
-下限 0.05（:5456--5462）。$n_{\mathrm{var}}=0$（全 SLACK）时直接判收敛（:5398--5401）。
-收敛后以末态残差与迭代数写入结果（:5481--5483），并计算电压不平衡度
+下限 0.05（:try\_factorize（lambda））。$n_{\mathrm{var}}=0$（全 SLACK）时直接判收敛（:finalize\_three\_phase\_result\_from\_state）。
+收敛后以末态残差与迭代数写入结果（:find\_transformer\_observation\_position），并计算电压不平衡度
 \[
 V_1=\tfrac{1}{3}\big(V_a+aV_b+a^2V_c\big),\qquad
 V_2=\tfrac{1}{3}\big(V_a+a^2V_b+aV_c\big),\qquad
@@ -117,45 +117,45 @@ V_2=\tfrac{1}{3}\big(V_a+a^2V_b+aV_c\big),\qquad
 \]
 取全 abc 母线上的最大值 \fld{max\_vuf\_percent}
 （\srcpath{compute\_max\_vuf}，:4433--4455）。结果结构
-\fld{ThreePhaseDPFResult}（distribution\_power\_flow.hpp:241--268）含分相母线电压、
+\fld{ThreePhaseDPFResult}（include/hacdcpf/power\_flow/distribution\_power\_flow.hpp:ThreePhaseDPFResult）含分相母线电压、
 分相支路功率、分相损耗与调压器轨迹，并带诚实口径字段
 \fld{primary\_solver}/\fld{solver\_used}/\fld{result\_source}。
 
 \paragraph{调压器外环} 存在启用的 \fld{regulator\_controls} 时，NR 解被包进
 离散档位外环（:5576--5910，上限 \fld{max\_control\_iter}）：每次内层收敛后按
 控制电压 $V_{ctl}=|V_{mon}|/\mathrm{PTRatio}+(I_{tap}/I_{CT})(R_{ldc}+jX_{ldc})$
-与死区 $\texttt{vreg}\pm\texttt{band}/2$ 决定升/降一档（:5750--5815），
-档位组合重复即判振荡失败（:5857--5876）。覆盖边界如实说明：仅支持
+与死区 $\texttt{vreg}\pm\texttt{band}/2$ 决定升/降一档（:runpf\_phase），
+档位组合重复即判振荡失败（:runpf\_phase）。覆盖边界如实说明：仅支持
 \textbf{单相}调压器、接地星--接地星零相移变压器、\fld{max\_tap\_change}=1，
-其余契约一律 fail-close 并记入 \fld{stop\_reason}（:5669--5708）。
+其余契约一律 fail-close 并记入 \fld{stop\_reason}（:runpf\_phase）。
 
 \begin{paramtable}
-\fld{max\_iter} & $k_{\max}$ & 次 & 30--100 & 50 & 内层 NR 迭代上限（distribution\_power\_flow.hpp:472）\\
-\fld{max\_control\_iter} & --- & 次 & 20--100 & 100 & 调压器档位外环上限（:473）\\
-\fld{tol} & $\varepsilon$ & pu & $10^{-8}\sim10^{-4}$ & $10^{-6}$ & $\max|\Delta P|,|\Delta Q|$ 失配容差（:474）\\
-\fld{verbose} & --- & bool & --- & false & 逐迭代打印残差（:475）\\
-\fld{include\_shunts} & --- & bool & --- & true & 是否在 $Y_{bus}$ 中含母线并纳（:476）\\
+\fld{max\_iter} & $k_{\max}$ & 次 & 30--100 & 50 & 内层 NR 迭代上限（include/hacdcpf/power\_flow/distribution\_power\_flow.hpp:solve\_three\_phase\_distribution\_pf）\\
+\fld{max\_control\_iter} & --- & 次 & 20--100 & 100 & 调压器档位外环上限（:solve\_three\_phase\_distribution\_pf）\\
+\fld{tol} & $\varepsilon$ & pu & $10^{-8}\sim10^{-4}$ & $10^{-6}$ & $\max|\Delta P|,|\Delta Q|$ 失配容差（:solve\_three\_phase\_distribution\_pf）\\
+\fld{verbose} & --- & bool & --- & false & 逐迭代打印残差（:ThreePhaseNROptions）\\
+\fld{include\_shunts} & --- & bool & --- & true & 是否在 $Y_{bus}$ 中含母线并纳（:ThreePhaseNROptions）\\
 \end{paramtable}
 
 \subsection{ZIP 与 Y/$\Delta$ 负荷相域建模}
 
 \paragraph{ZIP 权重} 权重顺序为\textbf{恒阻抗、恒电流、恒功率}（Z、I、P）：
-内部结构 \texttt{LoadZipWeights\{z,i,p\}}（three\_phase\_nr.cpp:161--165），
+内部结构 \texttt{LoadZipWeights\{z,i,p\}}（src/power\_flow/three\_phase\_nr.cpp:LoadNeutralKind），
 legacy 共享字段 \fld{const\_z\_percent}/\fld{const\_i\_percent}/\fld{const\_p\_percent}
-默认 $0/0/100$（纯恒功率，\srcpath{include/hacdcpf/model/ac\_components.hpp:1177--1179}）；
+默认 $0/0/100$（纯恒功率，\srcpath{include/hacdcpf/model/ac\_components.hpp:ThreePhaseRegulatorControl}）；
 另有不与 legacy 混用的 P/Q 分离六字段（默认 $-1$ 表示未设，
-ac\_components.hpp:1181--1186）。解析规则
+include/hacdcpf/model/ac\_components.hpp:ThreePhaseLoad）。解析规则
 （\srcpath{resolve\_active\_zip\_weights}/\srcpath{resolve\_reactive\_zip\_weights}，
-three\_phase\_nr.cpp:3008--3076）：显式六字段必须全设或全不设，且不得与非默认
+src/power\_flow/three\_phase\_nr.cpp:build\_phase\_network\_model）：显式六字段必须全设或全不设，且不得与非默认
 legacy 权重混用，否则抛错；任一权重为负或三者之和 $\neq100\%$ 抛错
-（:2989--3006）。OpenDSS \texttt{ZIPV} 导入同样按 Z-I-P 顺序映射
-（distribution\_power\_flow.cpp:3721--3732）。
+（:build\_phase\_network\_model）。OpenDSS \texttt{ZIPV} 导入同样按 Z-I-P 顺序映射
+（src/power\_flow/distribution\_power\_flow.cpp:load\_three\_phase\_system\_from\_opendss）。
 
 \paragraph{电压窗与 cutoff} 恒 Z 部分折算为导纳在装配期\textbf{直接并入}
 $Y_{bus}$（\srcpath{stamp\_prepared\_constant\_impedance\_loads}，:3398--3418）；
 恒 I、恒 P 部分为动态项，按窗 $[\fld{vmin\_pu},\fld{vmax\_pu}]$ 分段
 （\srcpath{evaluate\_dynamic\_load\_power}，:3444--3485，默认窗 $0.95\sim1.05$，
-ac\_components.hpp:1173--1174）：
+include/hacdcpf/model/ac\_components.hpp:ThreePhaseRegulatorControl）：
 \[
 S_{dyn}(v)=
 \begin{cases}
@@ -172,29 +172,29 @@ S_I^{nom}\dfrac{v^2}{v_{max}}+S_P^{nom}\dfrac{v^2}{v_{max}^2}, & v>v_{max}
 （\srcpath{resolve\_load\_neutral\_kind}，:3078--3088；中性阻抗按母线基准折算，
 :3138--3155）：浮中性点与阻抗接地时，每次求值以局部 $2\times2$ Newton 解
 中性点电位（\srcpath{solve\_local\_neutral\_state}，:3739），雅可比经中性点
-线性化链式求导（:4061--4093）。$\Delta$ 接负荷拆为相间支路（abc 三相时
+线性化链式求导（:IslandInfo）。$\Delta$ 接负荷拆为相间支路（abc 三相时
 ab/bc/ca 三条，两相时合并，:3375--3392），其恒阻抗部分按线电压基准折算
-$y_{branch}=S_Z^{*}/3$（:3358--3360），动态项以线电压除以 $\sqrt3$ 进窗
-（:4135），电流 $I=(S_{dyn}/V_{LL})^{*}$ 注入两端节点（:4149--4163）。
+$y_{branch}=S_Z^{*}/3$（:IslandInfo），动态项以线电压除以 $\sqrt3$ 进窗
+（:IslandInfo），电流 $I=(S_{dyn}/V_{LL})^{*}$ 注入两端节点（:IslandInfo）。
 
 \begin{paramtable}
-\fld{connection} & --- & --- & wye/delta & wye & 接线方式，其余取值抛错（ac\_components.hpp:1164；:3329--3333）\\
-\fld{grounded}/\fld{r\_neut\_ohm}/\fld{x\_neut\_ohm} & $Z_n$ & $\Omega$ & --- & true/0/0 & Y 接中性点接地方式与阻抗（:1165--1167）\\
-\fld{vmin\_pu}/\fld{vmax\_pu} & $v_{min},v_{max}$ & pu & 0.9--1.1 & 0.95/1.05 & ZIP 电压窗（:1173--1174）\\
-\fld{zipv\_cutoff\_pu} & $v_{cut}$ & pu & 0--0.9 & 0.0 & 低于该值动态负荷退出（:1175；OpenDSS 导入取 0.65，case\_builders.cpp:5147）\\
+\fld{connection} & --- & --- & wye/delta & wye & 接线方式，其余取值抛错（include/hacdcpf/model/ac\_components.hpp:ThreePhaseRegulatorControl；:3329--3333）\\
+\fld{grounded}/\fld{r\_neut\_ohm}/\fld{x\_neut\_ohm} & $Z_n$ & $\Omega$ & --- & true/0/0 & Y 接中性点接地方式与阻抗（:ThreePhaseRegulatorControl）\\
+\fld{vmin\_pu}/\fld{vmax\_pu} & $v_{min},v_{max}$ & pu & 0.9--1.1 & 0.95/1.05 & ZIP 电压窗（:ThreePhaseRegulatorControl）\\
+\fld{zipv\_cutoff\_pu} & $v_{cut}$ & pu & 0--0.9 & 0.0 & 低于该值动态负荷退出（:1175；OpenDSS 导入取 0.65，src/io/case\_builders.cpp:add\_pv（lambda））\\
 \fld{const\_z/i/p\_percent} & $w_z,w_i,w_p$ & \% & 0--100 & 0/0/100 & legacy 共享 ZIP 权重（Z-I-P 顺序，:1177--1179）\\
-\fld{p\_/q\_const\_z/i/p\_percent} & --- & \% & 0--100 & $-1$ & P/Q 分离显式权重，须六字段全设（:1181--1186）\\
+\fld{p\_/q\_const\_z/i/p\_percent} & --- & \% & 0--100 & $-1$ & P/Q 分离显式权重，须六字段全设（:add\_ac\_storage（lambda））\\
 \end{paramtable}
 
 \subsection{紧凑法与定点（fixed-point）法}
 
-\compmeta{analysis::solve\_three\_phase\_compact\_pf / solve\_three\_phase\_fixed\_point}{\srcpath{include/hacdcpf/power\_flow/distribution\_power\_flow.hpp:549--562}}
+\compmeta{analysis::solve\_three\_phase\_compact\_pf / solve\_three\_phase\_fixed\_point}{\srcpath{include/hacdcpf/power\_flow/distribution\_power\_flow.hpp:build\_compact\_pf\_data}}
 
 相域家族另有两个\textbf{电流失配不动点}求解器（实现同在
 \srcpath{src/power\_flow/three\_phase\_nr.cpp}），由
 \fld{PhaseDomainSolverAlgorithm} 枚举选择（Newton/FixedPoint/Compact/OpenDSS，
-distribution\_power\_flow.hpp:274--279），经 \srcpath{runpf\_phase} 统一分发
-（distribution\_power\_flow.cpp:4486--4501）。把节点分为固定电压集 $f$
+include/hacdcpf/power\_flow/distribution\_power\_flow.hpp:ThreePhaseDPFResult），经 \srcpath{runpf\_phase} 统一分发
+（src/power\_flow/distribution\_power\_flow.cpp:find\_bus（lambda））。把节点分为固定电压集 $f$
 （SLACK 与电源内节点）与变量集 $v$，不动点迭代为
 \[
 V_v^{(k+1)}\ \longleftarrow\ Y_{vv}^{-1}\Big(I\big(V^{(k)}\big)-Y_{vf}V_f\Big),
@@ -203,43 +203,43 @@ V_v^{(k+1)}\ \longleftarrow\ Y_{vv}^{-1}\Big(I\big(V^{(k)}\big)-Y_{vf}V_f\Big),
 电流注入由 \srcpath{evaluate\_fixed\_point\_current\_injections} 求值
 （:4842--4895，恒 PQ、Y/$\Delta$ 动态负荷与 Norton 源同式）。初值为一次
 稀疏 LU 解出的\textbf{空载电压}（compact :6014--6024；fixed-point :6176--6184），
-显式电压猜测可覆盖（:6025--6032）。收敛判据为 $\max_i|\Delta V_i|<\texttt{tol}$。
+显式电压猜测可覆盖（:runpf\_phase）。收敛判据为 $\max_i|\Delta V_i|<\texttt{tol}$。
 
 两变体差异（three\_phase\_nr.cpp）：
 \begin{itemize}
-  \item \textbf{紧凑法} \srcpath{solve\_three\_phase\_compact\_pf}（:5974--6112）：
+  \item \textbf{紧凑法} \srcpath{solve\_three\_phase\_compact\_pf}（:capture\_tap\_state（lambda））：
         在紧凑相节点空间求解，欠阻尼更新
         $V\leftarrow\alpha\hat V+(1-\alpha)V$，$\alpha$ 按迭代数 0.3/0.5/0.8 分级
-        （:6067）；要求 $k>1$ 才允许判收敛（:6072）；
-  \item \textbf{全维定点法} \srcpath{solve\_three\_phase\_fixed\_point}（:6124--6348）：
+        （:capture\_tap\_state（lambda））；要求 $k>1$ 才允许判收敛（:capture\_tap\_state（lambda））；
+  \item \textbf{全维定点法} \srcpath{solve\_three\_phase\_fixed\_point}（:capture\_tap\_state（lambda））：
         在全 $3N$ 节点空间求解（\srcpath{build\_full\_phase\_matrix\_model}，:4997），
         带\textbf{负荷延拓}：按 $\{0.05,0.1,0.2,0.3,0.5,0.7,1.0\}$ 逐级加载
-        （:6195），中间级迭代上限 $\min(500,\texttt{max\_iter})$（:6211--6212），
-        阻尼 $\alpha$ 分四级 0.2/0.3/0.5/0.7（:6253--6254），电压幅值钳制
-        $v_{min}$ 随延拓级 0.3/0.2/0.1 放松、$v_{max}=1.5$（:6258--6276）；
-        任一级不收敛即整体失败并报告最后收敛级（:6286--6294）。
+        （:build\_full\_ybus\_phase\_entries），中间级迭代上限 $\min(500,\texttt{max\_iter})$（:build\_full\_ybus\_phase\_entries），
+        阻尼 $\alpha$ 分四级 0.2/0.3/0.5/0.7（:validate\_fixed\_point\_contract），电压幅值钳制
+        $v_{min}$ 随延拓级 0.3/0.2/0.1 放松、$v_{max}=1.5$（:validate\_fixed\_point\_contract）；
+        任一级不收敛即整体失败并报告最后收敛级（:apply\_fixed\_point\_voltage\_validity）。
 \end{itemize}
 $Y_{vv}$ 分解失败时先试对角平移 $10^{-8}$ 再试 $10^{-4}$
 （\srcpath{factorize\_compact\_matrix}，:5270--5285，Eigen SparseLU）。
 
 \begin{paramtable}
-\fld{max\_iter} & $k_{\max}$ & 次 & 50--500 & 100 & 不动点迭代上限（distribution\_power\_flow.hpp:403）\\
-\fld{tol} & $\varepsilon$ & pu & $10^{-8}\sim10^{-4}$ & $10^{-6}$ & $\max|\Delta V|$ 收敛容差（:404）\\
-\fld{verbose} & --- & bool & --- & false & 打印迭代信息（:405）\\
-\fld{include\_shunts} & --- & bool & --- & true & 是否含母线并纳（:406）\\
-\fld{vmin\_pu} & --- & pu & --- & 0.95 & \textbf{注意}：由 \srcpath{runpf\_phase} 赋值（distribution\_power\_flow.cpp:4494），但两求解器内均未读取，实际无效（诚实口径）\\
+\fld{max\_iter} & $k_{\max}$ & 次 & 50--500 & 100 & 不动点迭代上限（include/hacdcpf/power\_flow/distribution\_power\_flow.hpp:ThreePhaseCompactPFData）\\
+\fld{tol} & $\varepsilon$ & pu & $10^{-8}\sim10^{-4}$ & $10^{-6}$ & $\max|\Delta V|$ 收敛容差（:ThreePhaseCompactPFData）\\
+\fld{verbose} & --- & bool & --- & false & 打印迭代信息（:ThreePhaseCompactPFData）\\
+\fld{include\_shunts} & --- & bool & --- & true & 是否含母线并纳（:ThreePhaseFixedPointOptions）\\
+\fld{vmin\_pu} & --- & pu & --- & 0.95 & \textbf{注意}：由 \srcpath{runpf\_phase} 赋值（src/power\_flow/distribution\_power\_flow.cpp:find\_bus（lambda）），但两求解器内均未读取，实际无效（诚实口径）\\
 \end{paramtable}
 
 \subsection{三相混合潮流（相域 AC + DC 联立）}
 
-\compmeta{powerflow::solve\_three\_phase\_hybrid\_pf}{\srcpath{include/hacdcpf/power\_flow/three\_phase\_hybrid.hpp:94--96}}
+\compmeta{powerflow::solve\_three\_phase\_hybrid\_pf}{\srcpath{include/hacdcpf/power\_flow/three\_phase\_hybrid.hpp:solve\_three\_phase\_hybrid\_pf}}
 
 这是与第~\ref{sec:hybrid}~章正序混合 Newton 不同的另一条路径：AC 侧为
 \textbf{相域复数电压}（非极坐标），DC 侧为电压幅值，二者与换流器控制变量在
 同一方程组、同一雅可比中联立（实现
-\srcpath{src/power\_flow/three\_phase\_hybrid.cpp:432}）。接口为\textbf{矩阵级 API}：
+\srcpath{src/power\_flow/three\_phase\_hybrid.cpp:solve\_three\_phase\_hybrid\_pf}）。接口为\textbf{矩阵级 API}：
 调用方自备 \fld{y\_ac}、\fld{i\_ac\_fixed}、\fld{p\_load\_pu}/\fld{q\_load\_pu}、
-\fld{g\_dc} 与换流器列表（\fld{ThreePhaseHybridPFCase}，three\_phase\_hybrid.hpp:38--54）。
+\fld{g\_dc} 与换流器列表（\fld{ThreePhaseHybridPFCase}，include/hacdcpf/power\_flow/three\_phase\_hybrid.hpp:ThreePhaseHybridPFCase）。
 状态布局 $x=[e;\ f;\ u;\ c]$（AC 电压实部、虚部、DC 电压、控制变量，
 :135--139）。残差（\srcpath{evaluate}，:278--331）：
 \begin{align*}
@@ -248,37 +248,37 @@ $Y_{vv}$ 分解失败时先试对角平移 $10^{-8}$ 再试 $10^{-4}$
 \text{DC 节点：}\quad & u_i\,(G_{dc}u)_i+p_{dc,i}^{load}+\eta\sum_{\phi}P_{cv,\phi}\\
 \text{控制方程：}\quad & u_{dc}-v_{dc}^{set}=0
 \end{align*}
-换流器六种控制模式（three\_phase\_hybrid.hpp:13--20，校验 :46--60, 96--134）：
+换流器六种控制模式（include/hacdcpf/power\_flow/three\_phase\_hybrid.hpp:ThreePhaseHybridPFControlMode，校验 :46--60, 96--134）：
 \begin{itemize}
   \item \textbf{等分 PQ / 等分 Vdc-Q}：每相 $S=(P_{set}/3,\ Q_{set}/3)$，
-        Vdc-Q 时 $P$ 由控制变量解出（:190--201）；
+        Vdc-Q 时 $P$ 由控制变量解出（:solve\_three\_phase\_hybrid\_pf）；
   \item \textbf{GFL-PQ / GFL-VdcQ}：跟网型正序电流注入
         $V_1=\frac13\sum_\phi a^{\phi}v_\phi$，$I_a^{*}=S_{set}/(3V_1)$，
-        各相电流随正序旋转对称分配（:203--233）；$|V_1|$ 低于
+        各相电流随正序旋转对称分配（:solve\_three\_phase\_hybrid\_pf）；$|V_1|$ 低于
         \fld{minimum\_positive\_sequence\_voltage\_pu} 即拒绝求值；
   \item \textbf{GFM-Voltage / GFM-Vdc}：构网型经虚拟阻抗
         $z_v=\fld{virtual\_r\_pu}+j\fld{virtual\_x\_pu}$ 注入
         $s_\phi=v_\phi\,\mathrm{conj}(e_\phi-v_\phi)/z_v^{*}$，
-        $e_\phi$ 为内电势 $E_1$ 的正序旋转（:235--266）；GFM-Vdc 的内电势角为
+        $e_\phi$ 为内电势 $E_1$ 的正序旋转（:solve\_three\_phase\_hybrid\_pf）；GFM-Vdc 的内电势角为
         控制变量。
 \end{itemize}
 约束：每台换流器恰好三相；每个 DC 端子至多一台电压控制换流器；存在 DC 网络
-时至少一台（:123--134）。求解为阻尼 Newton：Eigen SparseLU（COLAMD）分解
-雅可比（:468--479），Armijo 回溯线搜索（merit $\tfrac12\lVert r\rVert^2$，
+时至少一台（:solve\_three\_phase\_hybrid\_pf）。求解为阻尼 Newton：Eigen SparseLU（COLAMD）分解
+雅可比（:solve\_three\_phase\_hybrid\_pf），Armijo 回溯线搜索（merit $\tfrac12\lVert r\rVert^2$，
 接受条件 $\le(1-c_1\alpha)\cdot$merit，$\alpha$ 逐次减半，:480--495）。
 \textbf{诚实审计}：收敛后独立复算末态残差并分类报告
 \fld{ac\_active}/\fld{ac\_reactive}/\fld{dc\_balance}/\fld{converter\_coupling}，
-末态残差仍超容差则翻转为不收敛（:502--565）。
+末态残差仍超容差则翻转为不收敛（:solve\_three\_phase\_hybrid\_pf）。
 
 \begin{paramtable}
-\fld{max\_iterations} & $k_{\max}$ & 次 & 50--200 & 80 & Newton 迭代上限（three\_phase\_hybrid.hpp:57）\\
-\fld{max\_line\_search\_steps} & --- & 步 & 8--30 & 18 & Armijo 回溯上限（:58）\\
-\fld{tolerance} & $\varepsilon$ & pu & $10^{-10}\sim10^{-6}$ & $10^{-9}$ & $\lVert r\rVert_\infty$ 收敛容差（:59）\\
+\fld{max\_iterations} & $k_{\max}$ & 次 & 50--200 & 80 & Newton 迭代上限（include/hacdcpf/power\_flow/three\_phase\_hybrid.hpp:ThreePhaseHybridPFOptions）\\
+\fld{max\_line\_search\_steps} & --- & 步 & 8--30 & 18 & Armijo 回溯上限（:ThreePhaseHybridPFOptions）\\
+\fld{tolerance} & $\varepsilon$ & pu & $10^{-10}\sim10^{-6}$ & $10^{-9}$ & $\lVert r\rVert_\infty$ 收敛容差（:ThreePhaseHybridPFOptions）\\
 \fld{minimum\_dc\_voltage\_pu} & $\underline u$ & pu & --- & 0.05 & DC 电压下限，触及即中止（:60；:300）\\
 \fld{minimum\_positive\_sequence\_voltage\_pu} & $\underline V_1$ & pu & --- & $10^{-6}$ & GFL 正序电压门槛（:61；:209）\\
-\fld{armijo} & $c_1$ & --- & $10^{-4}$ & $10^{-4}$ & Armijo 充分下降系数（:62）\\
+\fld{armijo} & $c_1$ & --- & $10^{-4}$ & $10^{-4}$ & Armijo 充分下降系数（:ThreePhaseHybridPFOptions）\\
 \fld{efficiency} & $\eta$ & --- & 0.9--1.0 & 0.98 & 换流器效率，耦合项 $\eta P_{ac}$（:25；:326）\\
-\fld{virtual\_r\_pu}/\fld{virtual\_x\_pu} & $z_v$ & pu & --- & 0.01/0.10 & GFM 虚拟阻抗（:34--35）\\
+\fld{virtual\_r\_pu}/\fld{virtual\_x\_pu} & $z_v$ & pu & --- & 0.01/0.10 & GFM 虚拟阻抗（:ThreePhaseHybridPFConverter）\\
 \end{paramtable}
 
 \subsection{与正序模型的关系与回退}
@@ -286,20 +286,20 @@ $Y_{vv}$ 分解失败时先试对角平移 $10^{-8}$ 再试 $10^{-4}$
 \begin{itemize}
   \item \textbf{正序投影（向上回退）}：
         \srcpath{project\_three\_phase\_if\_needed}
-        （\srcpath{src/model/network\_utils.cpp:639}，投影管线调用点 :2177）在
+        （\srcpath{src/model/network\_utils.cpp:add\_equivalent\_storage\_from\_mobile\_storage}，投影管线调用点 :2177）在
         \fld{ac.buses} 为空时把 \fld{three\_phase\_ac} 折叠为正序单相等值：
-        负荷按相求和（:652--653）、电压取三相平均（:654）、线路仅取正序
+        负荷按相求和（:project\_chargers\_into\_stations）、电压取三相平均（:project\_chargers\_into\_stations）、线路仅取正序
         $r_1,x_1,b_1$（:676--678，零序量保留在 \fld{r0\_pu} 等字段供短路分析）、
-        变压器折叠为 \texttt{Transformer2W}（:698--721）。折叠后即可走
+        变压器折叠为 \texttt{Transformer2W}（:project\_three\_phase\_if\_needed）。折叠后即可走
         第~\ref{sec:newton}~章统一 Newton——这也是仅有 \fld{three\_phase\_ac} 的
         算例调用 \srcpath{solve\_power\_flow} 时的隐式路径；相间耦合与不平衡
         信息在折叠中\textbf{丢弃}，属近似口径。
   \item \textbf{GUI 分阶段混合（staged hybrid）}：\texttt{three\_phase} 路由（\srcpath{tests/run\_gui\_server.cpp}，:16904--16990）
         先以统一 Newton 解
         正序混合边界，再把 VSC 传输功率\textbf{三相平衡}注入相域 AC 网后求解
-        （:16944--16949）；返回中如实声明
+        （:cell\_range（lambda））；返回中如实声明
         \fld{coupling=one\_way\_vsc\_boundary\_injection} 与
-        \fld{monolithic\_abc\_dc\_jacobian=false}（:16983--16990）——即单向边界、
+        \fld{monolithic\_abc\_dc\_jacobian=false}（:Group）——即单向边界、
         非联立。真正联立的相域 AC+DC 仅由上节矩阵级 API（GUI
         \texttt{three\_phase\_hybrid} 路由组装调用，:16820 附近）提供。
 \end{itemize}
@@ -307,11 +307,11 @@ $Y_{vv}$ 分解失败时先试对角平移 $10^{-8}$ 再试 $10^{-4}$
 \subsection{验证与校核}
 
 \begin{itemize}
-  \item \textbf{OpenDSS IEEE13 对照}：\srcpath{tests/test\_phase\_domain\_ieee13.cpp:35--87}
+  \item \textbf{OpenDSS IEEE13 对照}：\srcpath{tests/test\_phase\_domain\_ieee13.cpp:main}
         载入官方 \texttt{IEEE13Nodeckt.dss}，紧凑法与 OpenDSS 官方快照逐相节点
         比对（$\ge30$ 个比对点）：$\max|\Delta V_m|<0.002$~pu、
         $\max|\Delta\theta|<0.2^\circ$；
-  \item \textbf{OpenDSS IEEE123 对照}：\srcpath{tests/test\_phase\_domain\_ieee123.cpp:22--43}：
+  \item \textbf{OpenDSS IEEE123 对照}：\srcpath{tests/test\_phase\_domain\_ieee123.cpp:main}：
         $\max|\Delta V_m|<0.001$~pu、$\max|\Delta\theta|<0.1^\circ$、$\ge270$ 点；
         另以 step8 组合算例交叉验证定点法与 OpenDSS YMatrix 路径（对紧凑法
         容差均为 2\%，:97--132）。两对照测试需 \texttt{HACDCPF\_HAVE\_OPENDSS}
@@ -325,11 +325,11 @@ $Y_{vv}$ 分解失败时先试对角平移 $10^{-8}$ 再试 $10^{-4}$
         （YNyn/Dyn/YNd/Yd/Dd 等 20 余接线组、零序磁化、外部电网 Norton）；
         \srcpath{test\_three\_phase\_nr\_regulator.cpp}（单相档位闭环、三相分调
         银行、远程 PTRatio+LDC、振荡与限值 fail-close）；
-  \item \textbf{混合潮流}：\srcpath{tests/test\_three\_phase\_hybrid\_pf.cpp:89--120}
+  \item \textbf{混合潮流}：\srcpath{tests/test\_three\_phase\_hybrid\_pf.cpp:options}
         两算例（GFL-VdcQ、GFM-Vdc）：残差与分类平衡残差 $<10^{-9}$，
         $V_{dc}$ 钉在设定值至 $10^{-10}$，GFM 下电流不平衡度 $>10^{-5}$
         如实体现；
-  \item \textbf{正序投影回归}：\srcpath{tests/test\_three\_phase\_pf.cpp:200--240}
+  \item \textbf{正序投影回归}：\srcpath{tests/test\_three\_phase\_pf.cpp:TEST\_CASE}
         投影后经 \srcpath{solve\_power\_flow} 收敛且 slack 电压保持；
   \item 已知边界：相域 NR 无 PV 无功限值切换与分布式松弛（PV 仅固定 $V_m$）；
         调压器仅单相、接地星--接地星零相移、单档步进；紧凑/定点法的基准

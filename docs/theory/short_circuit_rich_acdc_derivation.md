@@ -768,7 +768,7 @@ where κ uses the fault-point R/X ratio; for method B in a meshed network the
 code multiplies by `1.15` and caps the result at `1.8`
 (`κ = min(1.8, 1.15κ)`, no lower clamp), while every other
 method/topology combination clamps `1.0 ≤ κ ≤ 2.0`
-(`src/short_circuit/short_circuit.cpp:1703-1707`).
+(`src/short_circuit/short_circuit.cpp:current_source_contribution_ka（lambda）-1707`).
 
 ### 9.2 Breaking Current
 

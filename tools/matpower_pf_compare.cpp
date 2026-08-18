@@ -59,6 +59,10 @@ int main(int argc, char** argv) {
   bool unconstrained_seed = false;
   bool ncp = false;
   bool smooth_ncp = false;
+  bool no_condition_monitor = false;
+  bool no_equilibration = false;
+  bool no_linesearch = false;
+  bool no_scaling = false;
   double refactor_tol = 1e-8;
   int repeat = 0;
   for (int i = 2; i < argc; ++i) {
@@ -90,6 +94,14 @@ int main(int argc, char** argv) {
     } else if (a == "--smooth-ncp") {
       ncp = true;
       smooth_ncp = true;
+    } else if (a == "--no-condition-monitor") {
+      no_condition_monitor = true;
+    } else if (a == "--no-equilibration") {
+      no_equilibration = true;
+    } else if (a == "--no-linesearch") {
+      no_linesearch = true;
+    } else if (a == "--no-scaling") {
+      no_scaling = true;
     } else if (a == "--refactor-tol" && i + 1 < argc) {
       refactor_tol = std::stod(argv[++i]);
     } else if (a == "--repeat" && i + 1 < argc) {
@@ -129,6 +141,20 @@ int main(int argc, char** argv) {
     opt.robust_nonlinear.refactor_backward_error_tolerance = refactor_tol;
     opt.enable_semi_smooth_newton = ncp;
     opt.robust_nonlinear.enable_smooth_ncp = smooth_ncp;
+    if (no_condition_monitor) {
+      opt.robust_nonlinear.enable_condition_monitor = false;
+    }
+    if (no_equilibration) {
+      opt.robust_nonlinear.enable_jacobian_row_col_equilibration = false;
+    }
+    if (no_linesearch) {
+      opt.robust_nonlinear.enable_nonmonotone_linesearch = false;
+    }
+    if (no_scaling) {
+      opt.robust_nonlinear.enable_residual_scaling = false;
+      opt.robust_nonlinear.enable_variable_scaling = false;
+      opt.robust_nonlinear.enable_jacobian_row_col_equilibration = false;
+    }
     if (dc_angle_seed) {
       const auto dc_seed = hacdcpf::solve_ac_dc_power_flow(sys, opt);
       if (dc_seed.success && dc_seed.va.size() == sys.ac.buses.size()) {

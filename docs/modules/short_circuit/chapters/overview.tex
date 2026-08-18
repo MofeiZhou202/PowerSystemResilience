@@ -13,15 +13,15 @@
 \toprule
 入口 & 定义位置 & 用途\\
 \midrule
-\srcpath{compute\_short\_circuit} & short\_circuit.hpp:212 & 概览：全母线 Z-bus 等效故障\\
-\srcpath{compute\_fault\_at\_bus} & short\_circuit.hpp:216 & 概览：单母线查询\\
-\srcpath{run\_short\_circuit\_detailed} & short\_circuit.hpp:199 & 详细 IEC 60909（单母线）\\
-\srcpath{run\_short\_circuit\_detailed\_batch} & short\_circuit.hpp:203 & 详细 IEC 60909（多母线）\\
+\srcpath{compute\_short\_circuit} & include/hacdcpf/analysis/short\_circuit.hpp:compute\_short\_circuit & 概览：全母线 Z-bus 等效故障\\
+\srcpath{compute\_fault\_at\_bus} & include/hacdcpf/analysis/short\_circuit.hpp:compute\_fault\_at\_bus & 概览：单母线查询\\
+\srcpath{run\_short\_circuit\_detailed} & include/hacdcpf/analysis/short\_circuit.hpp:run\_short\_circuit\_detailed & 详细 IEC 60909（单母线）\\
+\srcpath{run\_short\_circuit\_detailed\_batch} & include/hacdcpf/analysis/short\_circuit.hpp:run\_short\_circuit\_detailed\_batch & 详细 IEC 60909（多母线）\\
 \srcpath{dc\_bus\_fault\_level} & dc\_short\_circuit.hpp & 直流母线金属性故障水平\\
 \bottomrule
 \end{tabular}
 \end{center}
-IEC 辅助函数：\srcpath{get\_voltage\_factor\_sc}（:181）、\srcpath{calculate\_kappa\_basic\_sc}（:182）、
+IEC 辅助函数：\srcpath{get\_voltage\_factor\_sc}（:dc\_bus\_fault\_level）、\srcpath{calculate\_kappa\_basic\_sc}（:dc\_bus\_fault\_level）、
 \srcpath{calculate\_generator\_correction\_factor\_sc}、\srcpath{calculate\_transformer\_correction\_factor\_sc}。
 
 \subsection{基准量}
@@ -42,13 +42,13 @@ c_{\min}(U_n), & \text{最小计算（\fld{Min}）}
 \end{cases}
 \end{equation}
 实现约取：最大 $U_n>1$ kV 为 $1.10$、低压 $1.10$、极低压 $1.05$；最小 $U_n>1$ kV 为 $1.00$、
-低压 $0.90$、极低压 $0.95$。概览路径默认 \fld{SCOptions.c\_factor}=1.1（:33）。
+低压 $0.90$、极低压 $0.95$。概览路径默认 \fld{SCOptions.c\_factor}=1.1（:DCFaultOptions）。
 
 \subsection{诚实口径}
 \begin{itemize}
   \item 概览 \srcpath{compute\_short\_circuit} 对不平衡故障用简化 $Z_1{=}Z_2{=}Z_0$；详细路径建真序网；
   \item 三绕组变压器零序默认以正序代入（未建矢量组）；
   \item 直流路径为电阻性刚性源上界，不含换流器限流/电容放电/直流保护跳闸；
-  \item 结果 \fld{SCDetailedResult}（:156）的 \fld{solved} 标志与逐母线/支路/换流器贡献分列，
+  \item 结果 \fld{SCDetailedResult}（:dc\_bus\_fault\_level）的 \fld{solved} 标志与逐母线/支路/换流器贡献分列，
         便于按 IEC 60909 逐项校核。
 \end{itemize}

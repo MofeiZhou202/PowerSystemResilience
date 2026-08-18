@@ -399,6 +399,18 @@ flowchart LR
 - **出口**：结果向量必须声明索引空间与单位；对外报告经 `unproject_bus_vector`
   （强度量 `Intensive`，广延量 `Extensive`）或 `CanonicalToRichOperator` 回到 `.index`。
 - **诚实**：近似/覆盖不足写入 result 的 `model_scope`/`ValidityFlags`/`RecoveryClass`。
+- **重复求解（固定拓扑）**：时间序列/逐步验证等**拓扑不变、仅注入变化**的循环，必须用
+  `PreparedPowerFlowSession`（循环外构造一次，循环内 `session.solve(step_sys)`）复用
+  canonical 投影、装配与符号分解；`solve()` 在拓扑变化时自动重建，结果与 `solve_power_flow`
+  一致。裸 `solve_power_flow` 每次都重投影+重装配+重符号分解（`get_cached_solver_data`
+  故意不隐式复用，规避陈旧 Ybus/注入风险）。已接线示例：`ev_power_traffic_simulation.cpp`
+  时间步循环（大网可省约 1/3 单步耗时）。N-1/重构等**改拓扑**循环不适用。
+- **线性/非线性求解诊断旋钮（默认行为不变，仅供基准/排障）**：环境变量
+  `MIPSOLVERS_LINEAR_BACKEND`（`klu|umfpack|eigen|superlu|pardiso`；默认 KLU，实测在
+  pegase 大网较 UMFPACK/Eigen 快约 3.5×，得益于数值再分解）与 `MIPSOLVERS_KLU_ORDERING`
+  （`0=AMD`（默认最优）`|1=COLAMD|3=CHOLMOD`）。复现基准见
+  [tools/pf_solver_benchmark.py](../tools/pf_solver_benchmark.py)（案例矩阵→CSV，支持
+  变体对比）与 `matpower_pf_compare` 的 `--no-condition-monitor` 等消融开关。
 
 ### 9.2 JSON 序列化 / GUI 前后端契约
 

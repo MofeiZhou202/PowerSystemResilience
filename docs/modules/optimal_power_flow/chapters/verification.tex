@@ -5,7 +5,7 @@
 本章汇总 OPF 模块的全部验证证据与已知局限。前面各章（第~\ref{sec:acopfnative}~--~\ref{sec:threephase}~节）
 给出各求解器的模型与算法，本章回答两个问题：\textbf{凭什么相信这些求解器的结果}，
 以及\textbf{在哪些规模、工况与元件组合下结果尚未被充分验证}。写作口径与
-《元件模型技术手册》一致：测试断言一律给出\texttt{文件:行号}，文档记录的实测数值
+《元件模型技术手册》一致：测试断言一律给出\texttt{文件:函数名}锚点（禁止行号，见模块手册索引的数学模型规范），文档记录的实测数值
 标注“文档实测”，被门控、被跳过、被降级为警告的条目如实列出，不以路线图代替现状。
 
 \subsection{验证体系与证据分级}\label{subsec:ver:layers}
@@ -77,12 +77,12 @@ MW/MVAr 有名值，角度容差为度或 rad（随测试原文注明），成�
 \begin{longtable}{@{}L{2.0cm}L{3.0cm}L{2.9cm}L{3.1cm}L{3.9cm}@{}}
 \caption{OPF 验证矩阵总表}\label{tab:ver:matrix}\\
 \toprule
-\textbf{验证通道} & \textbf{算例（规模）} & \textbf{对照基准} & \textbf{容差/通过准则} & \textbf{出处（文件:行号）}\\
+\textbf{验证通道} & \textbf{算例（规模）} & \textbf{对照基准} & \textbf{容差/通过准则} & \textbf{出处（文件:函数名）}\\
 \midrule
 \endfirsthead
 \multicolumn{5}{@{}l}{\footnotesize（续表）}\\
 \toprule
-\textbf{验证通道} & \textbf{算例（规模）} & \textbf{对照基准} & \textbf{容差/通过准则} & \textbf{出处（文件:行号）}\\
+\textbf{验证通道} & \textbf{算例（规模）} & \textbf{对照基准} & \textbf{容差/通过准则} & \textbf{出处（文件:函数名）}\\
 \midrule
 \endhead
 \midrule
@@ -182,17 +182,17 @@ README 中给出完整闭式推导，用于对照 GUI/API 的 DC OPF 路径（�
         f_{12}=\frac{\theta_1-\theta_2}{x_{12}}\,S_{\mathrm{base}}
         \end{align*}
         得 $\theta_2=-0.04$~rad$=-2.2918^\circ$，两侧 LMP 分别为 10 与 50
-        （同文件:65--124）；
+        （同文件:weekly\_profiles）；
   \item \textbf{03 负荷削减}：80~MW 负荷、50~MW 机组上限。默认 \fld{voll=0} 时求解器
         取有效 VOLL $=\max(100,\,1.1\,c_1)=100$，手算削减 30~MW、目标 4000
-        （同文件:126--174）；
+        （同文件:replay\_stats）；
   \item \textbf{04 二次成本的 GUI DC 口径}：README 明确当前 GUI DC 端点对二次成本按
         保守边际系数的 LP 线性化处理，
         \begin{align*}
         c_i^{LP}=c_{1i}+2c_{2i}P_i^{\max},
         \end{align*}
         手算 LP 调度 $(80,0)$~MW、目标 1120；真 QP 参考解 $(36.667,43.333)$~MW、
-        目标 815.333 仅供支持真 QP 的后端对照（同文件:176--296）。
+        目标 815.333 仅供支持真 QP 的后端对照（同文件:TEST\_CASE）。
 \end{itemize}
 
 \subsubsection*{已知偏差}
@@ -207,19 +207,19 @@ GUI/API 人工校核材料；算例 02 的 README 明确“支路对偶当前不
 
 \subsubsection*{小算例（$\le 57$ 节点）}
 \srcpath{tests/test\_acopf\_dcopf\_crossval.cpp}:52--54 固定 case5/9/14/30/39/57
-六个算例，AC OPF 走 NativeAC（\fld{use\_parity\_ipm=false}，同文件:117--130），
-DC OPF 走自研 NativeQP LCQP（同文件:132--144），两者均以可行性容差 $10^{-6}$ 调用；
+六个算例，AC OPF 走 NativeAC（\fld{use\_parity\_ipm=false}，同文件:run\_crossval），
+DC OPF 走自研 NativeQP LCQP（同文件:run\_crossval），两者均以可行性容差 $10^{-6}$ 调用；
 随后把 AC OPF 的 $P_g/Q_g/V_g$ 写回系统副本跑 Newton 潮流（容差 $10^{-8}$，
-同文件:151--183）。\srcpath{tests/test\_matpower\_cases.cpp}:618--638 另有两项
+同文件:TEST\_CASE）。\srcpath{tests/test\_matpower\_cases.cpp}:618--638 另有两项
 DC OPF 断言：case9 目标有限且 \fld{pg\_mw} 尺寸正确，case14 所有在役机组调度落在
 $[P_{\min}-10^{-3},\,P_{\max}+10^{-3}]$~MW 内。
 
 \subsubsection*{大算例（Parity IPM）}
 \srcpath{tests/test\_opf\_solver\_backends.cpp}:1058--1071 是 case2383wp（波兰冬季
 峰荷）的回归守卫：注释记录该算例在引入基于梯度的目标缩放前发散（迭代顶格时最大
-平稳性约 0.45），现断言收敛。同文件:1154--1176 断言 case2869pegase 收敛、迭代
+平稳性约 0.45），现断言收敛。同文件:TEST\_CASE 断言 case2869pegase 收敛、迭代
 $<100$ 且 KKT 维数超 1500 时实际使用稀疏分解后端（\fld{linear\_solver\_backend}
-含 \fld{sparse}）。同文件:1178--1196 对 case6515rte 只断言目标有限且
+含 \fld{sparse}）。同文件:TEST\_CASE 对 case6515rte 只断言目标有限且
 $<10^{30}$——注释明确“该难例在迭代预算内不期望收敛”，这是对此前 Eigen SparseLU
 下发散到 NaN（目标约 $-3\times10^{48}$）的稳健性守卫，不是收敛性声明。
 文档另记录 case9241/13659 的参考目标 315837/386107 与 KLU 后端实测
@@ -245,43 +245,43 @@ factorization，不是旧数值因子的无审计复用。
 
 \subsubsection*{已知偏差}
 综合对比用例（\srcpath{tests/test\_acopf\_dcopf\_crossval.cpp}:554--694）跳过全部
-$>1000$ 节点的算例（同文件:629--633）与 scenario/contab 文件（同文件:569--574），
+$>1000$ 节点的算例（同文件:TEST\_CASE）与 scenario/contab 文件（同文件:TEST\_CASE），
 且只统计收敛计数（\fld{acopf\_pass>0}），不对目标值与参考解逐一相等断言；
-case57 的 PF(DCOPF) 回放收敛被降级为 \texttt{WARN} 而非断言（同文件:273--282，
+case57 的 PF(DCOPF) 回放收敛被降级为 \texttt{WARN} 而非断言（同文件:TEST\_CASE，
 理由：DC OPF 不提供电压与无功，难例上不保证交流可行）。
 
 \subsection{跨求解器交叉验证}\label{subsec:ver:crossval}
 
 \subsubsection*{AC OPF vs DC OPF vs Newton PF}
 \srcpath{tests/test\_acopf\_dcopf\_crossval.cpp}:250--303 对六个小算例逐一断言：
-AC OPF 收敛则 PF(AC OPF 调度） 必收敛（同文件:268--271）；DC OPF 目标必须为正
-（同文件:287--291）。跨模块流水线测试进一步断言松弛性质
+AC OPF 收敛则 PF(AC OPF 调度） 必收敛（同文件:TEST\_CASE）；DC OPF 目标必须为正
+（同文件:TEST\_CASE）。跨模块流水线测试进一步断言松弛性质
 \begin{align*}
 C_{\mathrm{DCOPF}} \le 1.05\,C_{\mathrm{ACOPF}} + 1
 \end{align*}
 （\srcpath{tests/test\_crossmodule\_integration.cpp}:206--209，判据 P1-A4）、
-OPF 调度下 Newton PF 必收敛（P1-A6，同文件:232）以及逐母线电压一致
-$|V_m^{PF}-V_m^{OPF}|<0.05$~pu（P1-A7，同文件:234--246）。
+OPF 调度下 Newton PF 必收敛（P1-A6，同文件:TEST\_CASE）以及逐母线电压一致
+$|V_m^{PF}-V_m^{OPF}|<0.05$~pu（P1-A7，同文件:TEST\_CASE）。
 
 \subsubsection*{Native / Parity / Ipopt 三路}
 \srcpath{tests/test\_opf\_solver\_backends.cpp}:1075--1112 在 case30 上分别断言
 EconomicDispatch（merit-order + PF 捷径）、ParityIPM（全空间非线性 OPF）两后端收敛；
-同文件:1114--1130 断言真 OPF 目标不超过经济调度捷径的 $1.001$ 倍加 1。Ipopt 后端的
+同文件:TEST\_CASE 断言真 OPF 目标不超过经济调度捷径的 $1.001$ 倍加 1。Ipopt 后端的
 断言是\textbf{优雅降级}：注释声明嵌入式 Ipopt/MUMPS 默认被门控关闭，选择 Ipopt 时必须
-回退到 Parity IPM 且 \fld{solver\_path} 报告为 \fld{ParityIPM}（同文件:1100--1108；
+回退到 Parity IPM 且 \fld{solver\_path} 报告为 \fld{ParityIPM}（同文件:TEST\_CASE；
 编译期门控宏 \srcpath{HACDCPF\_HAVE\_IPOPT}，\srcpath{src/optimal\_power\_flow/ac\_opf.cpp}:33；
 CMake 选项 \srcpath{HACDCPF\_ENABLE\_IPOPT} 默认 OFF、macOS 默认 ON，见
 第~\ref{sec:overview}~节）。case300\_acdc 上另断言 Ipopt 迭代/容差选项透传生效：
 1 次迭代预算必须报 \texttt{Max iterations exceeded} 且不收敛，800 次预算收敛且
-违反 $<10^{-6}$（同文件:114--149）。
+违反 $<10^{-6}$（同文件:TEST\_CASE）。
 
 \subsubsection*{已知偏差}
 \begin{itemize}
   \item AC 与 DC 目标值\textbf{不做直接相等断言}：测试注释说明两者成本口径不同，
         直接比较无意义（\srcpath{tests/test\_acopf\_dcopf\_crossval.cpp}:284--291）；
-  \item AC OPF 结果不暴露支路潮流，$P_f$ 对比代码留空（同文件:222--227）；
+  \item AC OPF 结果不暴露支路潮流，$P_f$ 对比代码留空（同文件:run\_crossval）；
   \item “DC OPF 调度质量”判据宽松：相对调度差只要求 $<1.0$（即 100\%，
-        同文件:536--547；注意 546 行尾注释“Less than 50\%”与实际断言 \fld{rel\_diff<1.0}
+        同文件:TEST\_CASE；注意 546 行尾注释“Less than 50\%”与实际断言 \fld{rel\_diff<1.0}
         不一致，以断言为准）；
   \item 默认构建下 Ipopt 选择静默回退 Parity IPM，因此默认 ctest 中并不存在真正的
         三路目标值相等断言；Ipopt 侧的数值证据来自隐藏性能用例与文档实测
@@ -310,12 +310,12 @@ CMake 选项 \srcpath{HACDCPF\_ENABLE\_IPOPT} 默认 OFF、macOS 默认 ON，见
         平衡到 $10^{-3}$~MW（\srcpath{tests/test\_nighttime\_opf.cpp}:46--96）；
   \item \textbf{南沙全网}（\fld{nansha\_full\_network.json}，无常规机组、外部电网带
         成本）：夜间用例先断言前提（机组为空、至少一个外部电网成本为正），再断言
-        \fld{allow\_fallback=false} 下收敛；昼间对照用例同样收敛（同文件:164--209）；
+        \fld{allow\_fallback=false} 下收敛；昼间对照用例同样收敛（同文件:TEST\_CASE）；
   \item \textbf{同母线独立调度}：50~MW 负荷母线上同时挂 100 成本机组与 10 成本外部
         电网，断言机组 $P_g\approx0$、外部电网承担全部 50~MW（$10^{-2}$~MW），
-        AC 与 DC OPF 各一项（同文件:211--255、312--350）；
-  \item \textbf{投影正确性}：死岛剥离后发电机结果保持 authored 顺序（同文件:257--310）；
-        闭合开关合并母线后外部电网/机组/负荷全部保留并正确调度（同文件:352--409）。
+        AC 与 DC OPF 各一项（同文件:TEST\_CASE、312--350）；
+  \item \textbf{投影正确性}：死岛剥离后发电机结果保持 authored 顺序（同文件:TEST\_CASE）；
+        闭合开关合并母线后外部电网/机组/负荷全部保留并正确调度（同文件:TEST\_CASE）。
 \end{itemize}
 
 \subsubsection*{已知偏差}
@@ -337,13 +337,13 @@ CMake 选项 \srcpath{HACDCPF\_ENABLE\_IPOPT} 默认 OFF、macOS 默认 ON，见
         $(2\%,1\,\mathrm{MW})$；其工程语义是 OPF 只作类 AGC 再调度，吸收无损 UC
         看不见的网损与直流近似误差（\srcpath{docs/theory/time\_series\_power\_flow\_models.md}:284--300）；
   \item \textbf{降级路径}：某步 OPF 不收敛时，该步退回对原始 UC 快照直接跑 PF，
-        流水线不中断（同文件:307--308）；
+        流水线不中断（同文件:§3）；
   \item \textbf{交叉指标}：每步记录 $\max_b|V_{m,b}^{OPF}-V_{m,b}^{PF}|$ 与经首母线
-        参考对齐的相角差、双侧物理网损，作为流水线“信任证书”（同文件:323--339）；
+        参考对齐的相角差、双侧物理网损，作为流水线“信任证书”（同文件:§4）；
   \item \textbf{储能一致性}：OPF 故意不重调度储能，避免功率与 SOC 轨迹互相矛盾
-        （同文件:302--305）；
+        （同文件:§3）；
   \item \textbf{线程安全}：按日并行时逐步 OPF 被强制到线程安全的 Parity IPM，
-        不可重入的 Ipopt/MUMPS 路径不会并发进入（同文件:412--414）。
+        不可重入的 Ipopt/MUMPS 路径不会并发进入（同文件:§6）。
 \end{itemize}
 
 测试侧：\srcpath{tests/test\_nighttime\_opf.cpp}:125--162 断言画布系统 24 步动态
@@ -362,26 +362,26 @@ OPF 全部 24 步 OPF 与 PF 收敛，以及含 UC 的 4 步默认日生产路�
   \item \textbf{Full vs GraphReduced}：两种模型变体在同一算例上均收敛，目标相对差
         $\le10^{-6}$，全电压复数差 $<10^{-6}$，电压违反 $<10^{-8}$，VUF 不超过
         上限 $+10^{-7}$，换流器电流不平衡度一致到 $10^{-6}$
-        （同文件:106--143）；
+        （同文件:TEST\_CASE）；
   \item \textbf{图归约序列}：两断面序列求解与独立求解一致（目标 $10^{-7}$、电压
-        $10^{-6}$），归约不丢时变负荷节点（同文件:145--172）；
+        $10^{-6}$），归约不丢时变负荷节点（同文件:TEST\_CASE）；
   \item \textbf{GFL/GFM 动态平衡}：在 OPF 运行点上初始化 GFL（PLL）与 GFM（下垂）
         动态模型并 trim 到网络平衡，状态导数 $<10^{-7}$；解析等式 Jacobian 与
-        Lagrangian Hessian 误差均 $<10^{-5}$（同文件:174--282）；
+        Lagrangian Hessian 误差均 $<10^{-5}$（同文件:TEST\_CASE）；
   \item \textbf{独立耦合 PF 复现}：由 OPF 结果构造三相混合 PF 算例，独立 Newton
-        PF 复现电压到 $2\times10^{-6}$（同文件:284--317）；
+        PF 复现电压到 $2\times10^{-6}$（同文件:TEST\_CASE）；
   \item \textbf{Native Full 认证归约解}：把 GraphReduced 的原始--对偶点传输到 Full
         模型热启动，初始/最终原始与对偶残差、互补均 $\le10^{-6}$，目标一致到
-        $10^{-6}$（同文件:319--401）；
+        $10^{-6}$（同文件:SECTION）；
   \item \textbf{约束 oracle}：惰性不等式求解与全行求解目标一致到 $10^{-7}$，
-        被略去行的裕度满足激活阈值（同文件:403--461）；
+        被略去行的裕度满足激活阈值（同文件:TEST\_CASE）；
   \item \textbf{SOCP 松弛下界}：抬升松弛给出经对偶证书认证的目标下界，不超过
-        非线性解 $+10^{-7}$，外逼近轮次下界单调不降（同文件:463--510）。
+        非线性解 $+10^{-7}$，外逼近轮次下界单调不降（同文件:TEST\_CASE）。
 \end{itemize}
 
 \subsubsection*{已知偏差}
 算例规模极小（9 相节点），不构成大规模三相系统的性能证据；松弛路径对恒电流负荷
-显式拒绝并报告 \fld{model\_limitations}（同文件:512--522）；测试使用 AML 引擎层的
+显式拒绝并报告 \fld{model\_limitations}（同文件:TEST\_CASE）；测试使用 AML 引擎层的
 \fld{SolverBackend::Ipopt}/\fld{NativeIPM}，其可用性随 MIPSolvers 后端配置变化。
 
 
@@ -396,19 +396,19 @@ OPF 全部 24 步 OPF 与 PF 收敛，以及含 UC 的 4 步默认日生产路�
         \fld{globally\_certified=false}、\fld{optimality\_gap\_available=false}、
         \fld{model\_limitations} 非空，算法标识为
         \fld{discrete\_coordinate\_search\_with\_ac\_opf}；无可调离散设备时目标
-        等于基线网损（同文件:16--42）；
+        等于基线网损（同文件:TEST\_CASE）；
   \item \textbf{可投切并联}：case9 加 2 步电容器组后，电压偏差目标不差于基线
         （$+10^{-10}$），档位动作在铭牌范围内；\fld{gap} 恒为 1.0（不报告虚假
-        全局间隙，同文件:44--82）；
+        全局间隙，同文件:TEST\_CASE）；
   \item \textbf{控制清单}：\srcpath{inspect\_rpo\_controls} 对可调/固定/档位越界/
-        停运设备分别给出排除原因，档位窗口 \fld{max\_tap\_move} 生效（同文件:112--182）；
+        停运设备分别给出排除原因，档位窗口 \fld{max\_tap\_move} 生效（同文件:TEST\_CASE）；
   \item \textbf{MATPOWER 固定变比不伪造}：MATPOWER 导入的支路变比保持固定，
         不再虚构 4001 档 OLTC；\srcpath{case300\_acdc} 仅 authored 3 台
-        $[-4,4]$、每档 1.25\% 的 OLTC 可调（同文件:184--211）；
+        $[-4,4]$、每档 1.25\% 的 OLTC 可调（同文件:TEST\_CASE）；
   \item \textbf{档位动作联动}：带 \fld{source\_branch\_idx} 的 OLTC 动作按相对变比
         同步更新关联 AC 支路 \fld{tap}，保证 RPO 内层、独立 OPF 与 PF 回放使用
-        同一调压动作（同文件:213--243）；
-  \item case300 种子求解用例带 \fld{[.performance]} 标签，默认不运行（同文件:84--110）。
+        同一调压动作（同文件:TEST\_CASE）；
+  \item case300 种子求解用例带 \fld{[.performance]} 标签，默认不运行（同文件:TEST\_CASE）。
 \end{itemize}
 
 \subsubsection*{全过程交叉验证（文档口径）}
@@ -422,7 +422,7 @@ OPF 全部 24 步 OPF 与 PF 收敛，以及含 UC 的 4 步默认日生产路�
 其中 $\epsilon_d$、$\epsilon_p$ 分别为平稳性与可行性容差；非凸 OPF 可能存在目标
 等价但 P/Q 分配不同的局部点，故 P/Q 最大差异只展示、不触发假失败。纯 AC 的 PF
 电压差判据为 $10^{-3}$~pu；富混合 AC/DC 在 authored-space 调度未完整回写时显示
-“可用数值检查通过，PF 回放部分覆盖”（同文件:113--123）。
+“可用数值检查通过，PF 回放部分覆盖”（同文件:§4）。
 
 \subsubsection*{大规模实测（文档实测）}
 case2869 + 20 台 OLTC + 10 台并联的 authored 系统上：单位成本经济基线 74 次迭代
@@ -448,7 +448,7 @@ vdev RPO 虽收敛，但 vdev $0.1392\to0.1401$ 基本未降；3000+ 完整搜�
 \srcpath{src/optimal\_power\_flow/parity\_ipm.cpp}。修复后 case300\_acdc 原生 IPM
 42 次迭代收敛，最大约束残差约 $1.74\times10^{-7}$、平稳性约 $2.77\times10^{-7}$，
 41 接受步/17 回溯拒绝；强制 UMFPACK、KLU、Eigen SparseLU、Dense LU 四后端均通过
-同一算例（同文件:77--88，文档实测）。测试侧对应断言为
+同一算例（同文件:§5，文档实测）。测试侧对应断言为
 \srcpath{tests/test\_opf\_solver\_backends.cpp}:86--112（收敛、接受步 $>0$ 且
 $\le$ 迭代数、拒绝步 $>0$）。
 
@@ -458,27 +458,27 @@ $\le$ 迭代数、拒绝步 $>0$）。
 $3.49\times10^{-9}$、平稳性 $9.03\times10^{-7}$；内嵌 Ipopt + MUMPS 100 次预算
 48.15~s 后原始残差 $4.96\times10^{-4}$、对偶 1.49，未达停止判据。测试断言为
 \srcpath{tests/test\_opf\_solver\_backends.cpp}:880--912（Parity IPM 收敛、
-违反 $<10^{-5}$、迭代 $<160$）与同文件:914--943（Ipopt 有界基准，仅断言有限，
+违反 $<10^{-5}$、迭代 $<160$）与同文件:TEST\_CASE（Ipopt 有界基准，仅断言有限，
 隐藏性能用例）。据此文档建议 2000 节点级富混合系统优先使用原生 IPM，Ipopt 保留为
 小中型问题后端与交叉诊断路径。
 
 \subsubsection*{后端结构分工与暖启动}
-2026-07-19 更新的诊断结论（同文件:224--289，文档实测）：线性代数默认顺序
+2026-07-19 更新的诊断结论（同文件:“更新（2026-07-19）”节，文档实测）：线性代数默认顺序
 MUMPS $\to$ UMFPACK $\to$ KLU $\to$ Eigen；Newton 系统默认增广 KKT +
 W\"achter--Biegler $\delta_W$ 惯性校正；纯 AC 大算例自动走 KLU（BTF 预分解契合
 近块三角电网 KKT，2869/9241/13659 三案收敛到同一参考目标且更快），混合 AC/DC 因
 增广 KKT 惯性信息只有 MUMPS 报告而必须走 MUMPS——文档明确 KLU/LU 不报告惯性时
 混合算例失去正则而停滞。\fld{ac\_pf\_warm\_start} 选项使 case13659pegase 以 189 次
 迭代/约 41~s 收敛于参考目标 386107，但在良态算例上反而更慢、个别 rte 算例不收敛，
-因此是选择性启用而非默认（同文件:235--239）。
+因此是选择性启用而非默认（同文件:“更新（2026-07-19，其二）”节）。
 
 \subsubsection*{已知偏差}
 arm64 本地静态 MUMPS 5.7.3 在全部六类 NLP 测试中第 1 次迭代即
 \texttt{Ipopt restoration failed}，当前默认仍用 Homebrew MUMPS 动态库
-（同文件:111--116、190--193）；Jacobian 系数尺度达 $10^{12}$ 时默认 gradient
+（同文件:§10.2）；Jacobian 系数尺度达 $10^{12}$ 时默认 gradient
 scaling 会压小 scaled 对偶误差，适配器在启用未缩放分量门槛后明确返回
 \texttt{search direction too small} 而非假收敛——此类模型必须在建模层无量纲化
-（同文件:184--188）。
+（同文件:§10.2）。
 
 \subsection{BPA/DSP LCC 算例验证}\label{subsec:ver:lcc}
 
@@ -500,22 +500,22 @@ $I_d^2R=90$~MW（同报告 :982--1009）。\srcpath{data/dsp/2DC.dat} 为补充�
         $<2\times10^{-5}$，覆盖阀侧母线、换相母线与直流电压三类变量
         （\srcpath{tests/test\_opf\_solver\_backends.cpp}:310--422）；隔离 LCC 的
         局部 Hessian 对称性 $<10^{-10}$，对 Jacobian 差分相对容差 $5\times10^{-3}$
-        （同文件:424--598）；
+        （同文件:TEST\_CASE）；
   \item \textbf{raw CIGRE OPF}：原始 DAT 直接导入（BS 平衡机 $P_{\min}=-9999$~MW
         为卡片语义），Parity IPM 收敛，$P_g$ 复现 $1500/-1410$~MW $\pm2$、线损
         90~MW $\pm2$、违反 $<10^{-6}$；OPF 结果 JSON 双向往返不丢
-        \fld{lcc\_transfers}（同文件:600--671）；报告记录 7 次迭代收敛、
+        \fld{lcc\_transfers}（同文件:TEST\_CASE）；报告记录 7 次迭代收敛、
         primal/dual 残差 $1.7\times10^{-11}$/$6.0\times10^{-7}$（同报告 :1095--1108，
         文档实测）；
   \item \textbf{不可行变体安全失败}：受端 $P_{\min}=0$ 时模型真不可行，断言返回
         有限、可序列化的失败结果，不伪造无损直流解、不从错误尺寸 primal 提取物理
-        运行点（同文件:673--710）；
+        运行点（同文件:TEST\_CASE）；
   \item \textbf{固定 tap PF 回放}：把 OPF 调度写回副本（显式关闭 PF 专用 R 卡
         分接头外环以保证同一 Ybus），LCC 端口 $P/Q/P_{dc}$ 与 OPF 一致到
-        0.5~MW/MVAr（同文件:814--846）；
+        0.5~MW/MVAr（同文件:TEST\_CASE）；
   \item \textbf{后端守卫}：EconomicDispatch 后端对混合 AC/DC/LCC 显式拒绝；
         DC OPF 显式拒绝并打 \fld{dc-opf:rejected-lcc} 范围标签；不支持的控制模式
-        组合与缺失换相电抗在 readiness 检查即拒绝（同文件:848--877）。
+        组合与缺失换相电抗在 readiness 检查即拒绝（同文件:TEST\_CASE）。
 \end{itemize}
 
 \subsubsection*{当前验证状态（报告声明）}
@@ -529,8 +529,8 @@ $P_{\min}=0$ 不可行变体、浏览器 CIGRE E2E 均通过
 
 \subsubsection*{已知偏差}
 OPF 中换流变压器 tap 是固定 formulation 输入，不复现 DSP 的调档运行点；报告接受
-准则也不要求复现调档点（同文件:1036--1037、1086--1114）。2DC 卡片
-$P_{\min}=P_{\max}=0$，是 PF/Jacobian 参考而非 OPF-ready（测试同文件:712--715）。
+准则也不要求复现调档点（同文件:TEST\_CASE、1086--1114）。2DC 卡片
+$P_{\min}=P_{\max}=0$，是 PF/Jacobian 参考而非 OPF-ready（测试同文件:TEST\_CASE）。
 其余局限（准稳态、无换相重叠迭代、clamp 不可二阶光滑等）见
 \ref{subsec:ver:limitations} 节。
 
@@ -544,12 +544,12 @@ $P_{\min}=P_{\max}=0$，是 PF/Jacobian 参考而非 OPF-ready（测试同文件
   \item \textbf{混合系统禁 AC-only 回退}：含 DC 母线与 VSC 的系统在极端容差下
         不收敛时，状态不得含 \texttt{economic-dispatch + AC PF fallback}，且不可行
         提示中必须出现 \texttt{AC-only economic-dispatch fallback suppressed}
-        （同文件:241--302）；
+        （同文件:TEST\_CASE）；
   \item \textbf{能力标志与实际行为一致}：\fld{supports\_ac\_opf}/
-        \fld{supports\_dc\_opf} 恒真且实解收敛（同文件:135--156）；
+        \fld{supports\_dc\_opf} 恒真且实解收敛（同文件:TEST\_CASE）；
   \item \textbf{投影 round-trip}：纯 AC 重编号后 PF 与 AC OPF 结果向量尺寸与
         authored 母线一致（\srcpath{tests/test\_graph\_roundtrip.cpp}:223--258）；
-        串联归约前后 DC OPF 目标一致到 $10^{-3}$（同文件:671--705）；
+        串联归约前后 DC OPF 目标一致到 $10^{-3}$（同文件:TEST\_CASE）；
   \item \textbf{AML 数据装配}：孤立 DC 母线及其关联支路不进入 OPF 模型
         （\srcpath{tests/test\_hacdcpf.cpp}:234--261）；
   \item \textbf{全约束族冒烟}：多尺度综合算例在支路限值、换流器容量/电流/调制
@@ -572,12 +572,12 @@ $P_{\min}=P_{\max}=0$，是 PF/Jacobian 参考而非 OPF-ready（测试同文件
 \begin{longtable}{@{}L{4.2cm}L{1.9cm}L{5.2cm}L{4.0cm}@{}}
 \caption{OPF 模块已知局限汇总}\label{tab:ver:limitations}\\
 \toprule
-\textbf{局限} & \textbf{影响范围} & \textbf{表现/依据} & \textbf{出处（文件:行号）}\\
+\textbf{局限} & \textbf{影响范围} & \textbf{表现/依据} & \textbf{出处（文件:函数名）}\\
 \midrule
 \endfirsthead
 \multicolumn{4}{@{}l}{\footnotesize（续表）}\\
 \toprule
-\textbf{局限} & \textbf{影响范围} & \textbf{表现/依据} & \textbf{出处（文件:行号）}\\
+\textbf{局限} & \textbf{影响范围} & \textbf{表现/依据} & \textbf{出处（文件:函数名）}\\
 \midrule
 \endhead
 \midrule

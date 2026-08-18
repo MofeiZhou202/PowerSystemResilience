@@ -2,7 +2,7 @@
 \section{选项与结果数据结构}\label{sec:rel-io}
 
 \subsection{蒙特卡洛选项 \texttt{ReliabilityOptions}}
-\compmeta{ReliabilityOptions}{include/hacdcpf/reliability/reliability\_assessment.hpp:143}
+\compmeta{ReliabilityOptions}{include/hacdcpf/reliability/reliability\_assessment.hpp:ReliabilityOptions}
 \begin{paramtable}
 \fld{max\_iterations} & $n_{max}$ & — & $10^3\sim10^5$ & 10000 & 非序贯采样数上限 / 序贯年数上限\\
 \fld{cov\_threshold} & — & — & $0.01\sim0.1$ & 0.05 & 变异系数收敛阈值\\
@@ -22,7 +22,7 @@
 \end{paramtable}
 
 \subsection{元件 FMEA 选项 \texttt{FMEAOptions}}
-\compmeta{FMEAOptions}{include/hacdcpf/reliability/reliability\_assessment.hpp:428}
+\compmeta{FMEAOptions}{include/hacdcpf/reliability/reliability\_assessment.hpp:FMEAOptions}
 \begin{paramtable}
 \fld{load\_scale\_factor} & $\rho^\star$ & — & $\ge1$ & 1.0 & 负荷加压系数\\
 \fld{switching\_time\_hr} & $\tau_{sw}$ & 小时 & $0.1\sim2$ & 0.5 & 默认开关/隔离时间\\
@@ -39,7 +39,7 @@
 \end{paramtable}
 
 \subsection{故障模式 FMEA 选项 \texttt{FailureModeFMEAOptions}}
-\compmeta{FailureModeFMEAOptions}{include/hacdcpf/reliability/failure\_mode.hpp:410}
+\compmeta{FailureModeFMEAOptions}{include/hacdcpf/reliability/failure\_mode.hpp:FailureModeFMEAOptions}
 \begin{paramtable}
 \fld{max\_order} & $k$ & — & 1/2 & 1 & 最高同时故障阶数（2=N-2）\\
 \fld{min\_pair\_unavailability} & — & — & 小正数 & $10^{-10}$ & 舍弃可忽略共故障对的阈值\\
@@ -51,7 +51,7 @@
 \end{paramtable}
 
 \subsection{三阶段选项 \texttt{ThreeStageReliabilityOptions}}
-\compmeta{ThreeStageReliabilityOptions}{include/hacdcpf/analysis/three\_stage\_reliability.hpp:222}
+\compmeta{ThreeStageReliabilityOptions}{include/hacdcpf/analysis/three\_stage\_reliability.hpp:ThreeStageReliabilityOptions}
 \begin{paramtable}
 \fld{max\_switch\_operations} & — & — & $1\sim5$/不限 & INT\_MAX & 阶段 2 允许闭合联络开关数\\
 \fld{unavailable\_tie\_switch\_ids} & — & — & id 列表 & 空 & 拒合联络（评估拒合影响）\\
@@ -66,14 +66,14 @@
 
 \subsection{结果结构摘要}
 \begin{itemize}
-  \item \fld{ReliabilityResult}（:240）：\fld{eens\_mwh\_yr}、\fld{lole\_hr\_yr}、
+  \item \fld{ReliabilityResult}（:ThreeStageReliabilityOptions）：\fld{eens\_mwh\_yr}、\fld{lole\_hr\_yr}、
         \fld{lolf\_occ\_yr}（序贯）、\fld{plc}、\fld{nodal\_eens\_mwh\_yr}、
         \fld{critical\_components}（共现归因秩）、\fld{tail\_risk}、\fld{distribution\_idx}、
         \fld{model\_scope}/\fld{validity}/\fld{data\_quality}；
-  \item \fld{FMEAResult}（:598）：系统级指标 + 逐条 \fld{contingencies}（按 EENS 贡献降序）
+  \item \fld{FMEAResult}（:run\_three\_stage\_reliability\_from\_string）：系统级指标 + 逐条 \fld{contingencies}（按 EENS 贡献降序）
         + \fld{cyber\_physical} + \fld{ValidityFlags}（15 个能力标志，:626）；
-  \item \fld{FailureModeFMEAResult}（\srcpath{failure\_mode.hpp:447}）：\fld{contingencies} 与
+  \item \fld{FailureModeFMEAResult}（\srcpath{include/hacdcpf/reliability/failure\_mode.hpp:FailureModeFMEAResult}）：\fld{contingencies} 与
         \fld{co\_contingencies}（N-2）、\fld{coverage}、\fld{n\_pairs\_evaluated}；
-  \item \fld{ThreeStageReliabilityResult}（:132）：\fld{saifi}/\fld{saidi\_min}/\fld{eens\_kwh\_yr}、
+  \item \fld{ThreeStageReliabilityResult}（:FailureConsequenceKind）：\fld{saifi}/\fld{saidi\_min}/\fld{eens\_kwh\_yr}、
         逐故障 \fld{faults}（含 \fld{switching\_sequence}）、网络计数、\fld{validity}。
 \end{itemize}

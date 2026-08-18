@@ -306,10 +306,10 @@ VDGA。这里尚未覆盖的是 BM/LM 的卡片解析、站角色分配、R 记�
 - 物理结构（手册 + pfnt 字符串）：高/低两层换流器直流侧串联，Ud = Ud,H + Ud,L，
   Id 相同，存在中点节点 KCL；两层分别接不同交流母线。
 - HySim 现状（代码证据）：`LCCConverter` 只有单 `dc_bus`
-  （converter_components.hpp:145）；`lcc_eval_at_state` 以 `vdc[dc_pos]*base` 求
-  ud_kv（lcc_model.cpp:185）；`lcc_dc_injection` 返回标量、只注入单一节点
-  （jacobian_builder.cpp:196-198、pf_injection_assembly.cpp:83）；DC 雅可比只取
-  对角元 `dc_vdc_diag_nz`（jacobian_builder.cpp:364-374）；`DCBus` 电压一律对地
+  （include/hacdcpf/model/converter_components.hpp:VSCConverter）；`lcc_eval_at_state` 以 `vdc[dc_pos]*base` 求
+  ud_kv（src/power_flow/lcc_model.cpp:lcc_operating_point）；`lcc_dc_injection` 返回标量、只注入单一节点
+  （src/power_flow/jacobian_builder.cpp:build_power_spec-198、src/power_flow/pf_injection_assembly.cpp:assemble_ac_injections）；DC 雅可比只取
+  对角元 `dc_vdc_diag_nz`（src/power_flow/jacobian_builder.cpp:evaluate_residual_impl-374）；`DCBus` 电压一律对地
   参考。
 - 串联对（高端 +Id 取自利点 P、−Id 注入中点 M，端口电压 V_P−V_M）无法用"每节点
   对地注入"表达——需要换流器产生 DC 雅可比非对角耦合项，现有 pattern 不会生成。

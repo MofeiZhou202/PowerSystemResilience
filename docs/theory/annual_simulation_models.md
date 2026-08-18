@@ -34,9 +34,9 @@ On top sits a **multi-year lifecycle layer** (degradation, load growth,
 replacement economics, carbon accounting with *a-priori* error bounds).
 
 Entry points: `analysis::solve_annual_production_simulation()`
-(`src/time_series/annual_production_sim.cpp:1278`),
+(`src/time_series/annual_production_sim.cpp:solve_one_day（lambda）`),
 `analysis::run_lifecycle_simulation()`
-(`src/time_series/lifecycle_simulation.cpp:345`).
+(`src/time_series/lifecycle_simulation.cpp:run_lifecycle_simulation`).
 
 ---
 
@@ -241,7 +241,7 @@ if they matter physically.
 
 ## 5. Lifecycle simulation (multi-year layer)
 
-`run_lifecycle_simulation` (`lifecycle_simulation.cpp:345`) iterates years
+`run_lifecycle_simulation` (`src/time_series/lifecycle_simulation.cpp:run_lifecycle_simulation`) iterates years
 $y = 1..Y$ over a mutable working system.
 
 ### 5.1 State evolution
@@ -275,7 +275,7 @@ Each year runs a **Tier-1** annual simulation in schedule-only mode
 tier that makes $Y{=}20$ years × parameter sweeps tractable.
 
 Note that the lifecycle loop constructs its `AnnualProductionSimOptions`
-**fresh with defaults** (`lifecycle_simulation.cpp:517–521`): every opt-in UC
+**fresh with defaults** (`src/time_series/lifecycle_simulation.cpp:OrigStorage–521`): every opt-in UC
 block (`enable_network_constraints`, `enable_dc_network_constraints`,
 `enable_vpp`, `enable_microgrid`, `enable_energy_router`,
 `enable_mobile_storage`, `enable_demand_response`, …) is therefore **off** in

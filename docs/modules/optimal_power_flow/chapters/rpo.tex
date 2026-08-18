@@ -131,7 +131,7 @@ P_{\mathrm{loss}} &= \sum_{\text{全部电源}} P - \sum_{\text{全部需求}} P
 直流负荷，并减去切负荷量 \fld{dpd\_mw} 的非负部分
 （\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:233--264）。
 VSC、DC/DC 与能量路由器端口属\textbf{内部传输}，不计入电源台账
-（同文件:204--205 注释），其损耗已隐含在差额中。当
+（同文件:compute\_loss 注释），其损耗已隐含在差额中。当
 \fld{loss\_weight}$=1$ 时 MinActiveLoss 的 \fld{objective} 在数值上等于
 物理网损 MW（单元测试断言此性质，
 \srcpath{tests/test\_reactive\_power\_opt.cpp}:41）。
@@ -141,7 +141,7 @@ VSC、DC/DC 与能量路由器端口属\textbf{内部传输}，不计入电源�
 （\srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp}:25--34），
 与外层排名目标解耦的原因写在头文件注释中：精简的物理目标（电压偏差/网损）
 在大型僵硬电网上会使 Parity IPM 停滞，而单位边际成本经济调度继承经济路径的
-稳健机制且收敛（同文件:19--24）。
+稳健机制且收敛（同文件:RPOInnerObjective）。
 
 \begin{itemize}
   \item \textbf{MatchRPO（默认）}：内层直接最小化 RPO 目标。映射关系为
@@ -162,7 +162,7 @@ VSC、DC/DC 与能量路由器端口属\textbf{内部传输}，不计入电源�
         末项是 $10^{-6}$ 权重的发电经济性\textbf{择优项}
         （\srcpath{kRpoEconomicTieBreak}），仅用于在等价有功调度方向中选定一个
         并改善 KKT 数值条件，不作用于 $V_m/Q$ 变量、不替代主 RPO 目标
-        （同文件:1238--1250）。
+        （同文件:objective）。
   \item \textbf{LossEconomic}：内层改为单位边际成本经济调度
         （\srcpath{ACOPFObjective::Economic}）。理论依据是关键等价关系：
         功率平衡固定需求下
@@ -173,13 +173,13 @@ VSC、DC/DC 与能量路由器端口属\textbf{内部传输}，不计入电源�
         \end{align*}
         即全体常规机组成本改写为 $c_1=1,\;c_2=c_0=0$ 的经济调度
         （\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:687--711，
-        函数 \srcpath{apply\_unit\_costs}；目标映射同文件:339--343）。
+        函数 \srcpath{apply\_unit\_costs}；目标映射同文件:solve\_opf\_inplace）。
         报告网损仍由 \srcpath{compute\_loss} 按潮流重算，与成本数值无关。
         \textbf{MinActiveLoss 恒走此路径}；MinVoltageDeviation/Combined 在
         MatchRPO 基线不收敛且 \fld{robust\_inner\_on\_failure} 为真时自动升级
-        到此路径（同文件:807--818），或交流母线数达到
+        到此路径（同文件:run\_baseline（lambda）），或交流母线数达到
         \fld{robust\_inner\_min\_buses}（默认 1000）时直接以该路径起步
-        （同文件:712--724）。
+        （同文件:apply\_unit\_costs（lambda））。
 \end{itemize}
 
 \subsubsection*{离散变量与档位约束}
@@ -219,7 +219,7 @@ $m_{\mathrm{tap}}=-1$ 暴露完整铭牌范围（库默认值），$m_{\mathrm{t
 “实际支路 tap（电气变比）”在结果中分列（\fld{ratio\_after} 与
 \fld{electrical\_tap\_after}，后者按
 $\tau_{\mathrm{before}}\cdot r_{\mathrm{after}}/r_{\mathrm{before}}$
-换算，同文件:1357--1359）。
+换算，同文件:solve\_rpo）。
 
 可投切并联补偿步数 $s_j\in\{0,1,\ldots,n_j\}$（$n_j$ 为 \fld{n\_steps}），
 当前电纳按（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:302--307，
@@ -240,7 +240,7 @@ B_{s,j} &= b_{\mathrm{step}}\cdot s_j
 并联补偿要求投运、可投切（\fld{switchable}）、\fld{n\_steps} 大于 1、
 \fld{bs\_per\_step} 的绝对值大于 $10^{-12}$、当前步数位于 0 至
 \fld{n\_steps} 之间
-（同文件:118--127，函数 \srcpath{shunt\_exclusion\_reason}）。
+（同文件:shunt\_exclusion\_reason，函数 \srcpath{shunt\_exclusion\_reason}）。
 MATPOWER 支路只提供当前连续变比，不提供 OLTC 可控标志、档位上下限或每档
 步长，因此导入器保留精确变比但\textbf{不}伪造 OLTC：导入设备的
 \fld{tap\_min}=\fld{tap\_max}=\fld{tap\_pos}=0、\fld{tap\_step\_percent}=0，
@@ -287,7 +287,7 @@ $\max_i |V_{m,i}-V^{*}|$
 （\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:621--1386）
 按图~\ref{fig:rpo-flow} 组织：先做控制清单审计与基线连续 OPF，再执行
 四个阶段的离散搜索，最后归因结果并写入局限声明。阶段划分与文件头注释
-一致（同文件:1--20）。
+一致（同文件）。
 
 \begin{figure}[H]
 \centering
@@ -328,7 +328,7 @@ $10^{-6}$ 的较小者；大电网（达到
 \fld{seed\_homotopy\_on\_failure} 为真时再同伦重解一次
 （\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:737--782）。
 随后在当前离散配置下解基线 OPF（“优化前”状态），以种子结果暖启动
-（同文件:783--789）。基线接受判据是\textbf{实测容差收敛}：
+（同文件:run\_baseline（lambda））。基线接受判据是\textbf{实测容差收敛}：
 \begin{align*}
 \text{接受} &\iff \mathrm{conv}\;\lor\;
   \bigl(\mathrm{viol}\le\epsilon_p\;\land\;\mathrm{stat}\le\epsilon_d\bigr)
@@ -336,11 +336,11 @@ $10^{-6}$ 的较小者；大电网（达到
 其中 $\mathrm{conv}$、$\mathrm{viol}$、$\mathrm{stat}$ 分别为内层结果的
 \fld{converged}、\fld{max\_constraint\_violation} 与 \fld{max\_stationarity}，
 $\epsilon_p$、$\epsilon_d$ 为 \fld{ipm\_tol} 与
-\fld{stationarity\_tol}（同文件:794--796）；按实测容差接受的基线在
-\fld{status} 中附加说明（同文件:829--834）。MatchRPO 基线失败时的稳健升级见内层目标小节
-（同文件:807--818）；升级成功同样写入 \fld{status}
-（同文件:814--817）。基线失败则直接返回，仅写入局限声明
-（同文件:821--828）。
+\fld{stationarity\_tol}（同文件:run\_baseline（lambda））；按实测容差接受的基线在
+\fld{status} 中附加说明（同文件:run\_baseline（lambda））。MatchRPO 基线失败时的稳健升级见内层目标小节
+（同文件:run\_baseline（lambda））；升级成功同样写入 \fld{status}
+（同文件:run\_baseline（lambda））。基线失败则直接返回，仅写入局限声明
+（同文件:run\_baseline（lambda））。
 
 \subsubsection*{候选评估管线}
 所有搜索阶段共用评估函数 \srcpath{evaluate}
@@ -348,10 +348,10 @@ $\epsilon_p$、$\epsilon_d$ 为 \fld{ipm\_tol} 与
 要点如下。
 \begin{enumerate}
   \item \textbf{解缓存}：以 $(t,s)$ 拼接向量为键的 \fld{eval\_cache} 避免
-        重复 NLP 评估，基线先行入库（同文件:879--889）。
+        重复 NLP 评估，基线先行入库（同文件:run\_baseline（lambda））。
   \item \textbf{预算检查}：每次求解前检查墙钟时间 \fld{time\_limit\_sec} 与
         累计内层求解次数 \fld{max\_nodes}；预算只能在\textbf{两次求解之间}
-        检查，无法中断一次进行中的 IPM（同文件:891--896；
+        检查，无法中断一次进行中的 IPM（同文件:budget\_ok（lambda）；
         另见 \srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp}:110--117
         注释）。
   \item \textbf{原位修改}：候选配置直接写入可变系统副本 \fld{mut\_sys}，
@@ -359,7 +359,7 @@ $\epsilon_p$、$\epsilon_d$ 为 \fld{ipm\_tol} 与
         \srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:294--308、
         400--401）。
   \item \textbf{暖启动链}：候选以当前在位可行点 \fld{incumbent\_result}
-        暖启动（同文件:914--920）；实测 3000 节点电网上好的候选 2--7 次
+        暖启动（同文件:evaluate（lambda））；实测 3000 节点电网上好的候选 2--7 次
         迭代即收敛（\srcpath{docs/archive/audits/reactive\_power\_optimization\_validation.md}
         第 5.3 节）。
   \item \textbf{失败快速拒绝}：纯交流电网上搜索评估的迭代上限取
@@ -367,13 +367,13 @@ $\epsilon_p$、$\epsilon_d$ 为 \fld{ipm\_tol} 与
         （目标取 $10^{30}$），且不再启用第二后端；混合 AC/DC 电网保留完整
         预算与 Ipopt 第二腿——其电压偏差渐近行为合理需要它
         （\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:909--920；
-        纯交流/混合判定同文件:640--643）。第二腿在另一后端上重解并按实测
-        质量取优（同文件:368--398，函数 \srcpath{solve\_opf\_inplace} 内）。
+        纯交流/混合判定同文件:solve\_rpo）。第二腿在另一后端上重解并按实测
+        质量取优（同文件:solve\_opf\_inplace）。
   \item \textbf{并行波评估}：\fld{num\_threads}$>1$ 时一批独立候选按
         Jacobi 波形并行求解（动态工作窃取，每线程一次深拷贝），波间推进
         在位点（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:418--486、
         952--1001）。混合 AC/DC 强制串行：MUMPS 路径由进程级互斥锁串行化，
-        多线程只增开销；纯交流用 KLU，线程安全（同文件:943--950；
+        多线程只增开销；纯交流用 KLU，线程安全（同文件:solve\_rpo；
         \srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp}:84--96）。
 \end{enumerate}
 
@@ -382,9 +382,8 @@ $\epsilon_p$、$\epsilon_d$ 为 \fld{ipm\_tol} 与
 $|\Delta f_{\mathrm{RPO}}|$ 作为灵敏度，按降序确定后续所有阶段的处理次序
 ——最有影响的变量先优化（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:1015--1092）。
 同时按有限差分梯度
-$g_k=(f(y_k+d)-f(y_k))/d$ 记录一维局部灵敏度面（同文件:1003--1013、
-1052--1054）。并行实现为一次 Jacobi 波（同文件:1024--1058），串行实现为
-Gauss--Seidel 顺序（同文件:1059--1081）。
+$g_k=(f(y_k+d)-f(y_k))/d$ 记录一维局部灵敏度面（同文件:solve\_rpo）。并行实现为一次 Jacobi 波（同文件:evaluate\_wave（lambda）），串行实现为
+Gauss--Seidel 顺序（同文件:solve\_rpo）。
 
 \subsubsection*{Phase 1：逐变量整数三分搜索}
 对每个变量（按灵敏度序），利用 RPO 目标对单变量的\textbf{近似单峰性}做整数
@@ -394,7 +393,7 @@ $m_1=lo+\lfloor(hi-lo)/3\rfloor$、$m_2=hi-\lfloor(hi-lo)/3\rfloor$，
 穷举（\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:1094--1167）。
 单变量评估量由 $O(R)$ 降为 $O(\log R)$（$R$ 为档位数）。该阶段刻意保持
 Gauss--Seidel 结构：跨变量 Jacobi 化实测会丢失定向优化能力、降低解质量
-（同文件:1102--1112 注释）。近似单峰性是启发假设，非凸问题上不保证成立，
+（同文件:solve\_rpo 注释）。近似单峰性是启发假设，非凸问题上不保证成立，
 这也是本阶段之后仍需 Phase 2/3 的原因。
 
 \subsubsection*{Phase 2：坐标下降}
@@ -402,17 +401,17 @@ Gauss--Seidel 结构：跨变量 Jacobi 化实测会丢失定向优化能力、�
 无超过 \fld{gap\_tol}（默认 $10^{-4}$）的改进即停止，至多
 \srcpath{kMaxCDCycles}${}=3$ 轮
 （\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:1171--1234，
-轮数上限同文件:1177）。局部灵敏度面在此阶段继续累积但\textbf{从不用于
+轮数上限同文件:solve\_rpo）。局部灵敏度面在此阶段继续累积但\textbf{从不用于
 剪枝}——注释明确：非凸 MINLP 上局部线性面不是全局有效下界
-（同文件:1171--1175 注释；灵敏度面结构
-\srcpath{LocalSensitivityPlane} 见同文件:490--504）。
+（同文件:LocalSensitivityPlane 注释；灵敏度面结构
+\srcpath{LocalSensitivityPlane} 见同文件:LocalSensitivityPlane）。
 
 \subsubsection*{Phase 3：变量对邻域精化}
 对所有变量对 $(v_i,v_j)$ 检查围绕在位点的 $\pm1$ 联合扰动（每对至多 4 个
 组合），捕捉坐标下降可能遗漏的双变量交互
 （\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:1236--1293）。
-并行为一次 Jacobi 精化波（同文件:1242--1267），串行为双重循环
-（同文件:1268--1292）。
+并行为一次 Jacobi 精化波（同文件:evaluate\_wave（lambda）），串行为双重循环
+（同文件:solve\_rpo）。
 
 \subsubsection*{终止与结果归因}
 搜索结束后按预算消耗置 \fld{terminated\_by\_time\_limit}/
@@ -421,14 +420,14 @@ Gauss--Seidel 结构：跨变量 Jacobi 化实测会丢失定向优化能力、�
 在位点可行（目标 $<10^{20}$）时 \fld{converged}=true，状态串区分
 “Feasible local optimum (heuristic search)”/“Feasible incumbent at time
 limit”/“Feasible incumbent at evaluation limit”
-（同文件:1317--1335）；无可行配置时返回基线向量并标注
-“No feasible configuration found”（同文件:1336--1345）。
+（同文件:solve\_rpo）；无可行配置时返回基线向量并标注
+“No feasible configuration found”（同文件:solve\_rpo）。
 逐设备明细（档位/步数、相对变比、电气变比、电纳前后值）于
-同文件:1347--1371 装配。无可调离散设备时直接以基线为解并如实声明
-“结果只是连续 OPF 基线，非全局 MINLP 证书”（同文件:842--866）。
+同文件:solve\_rpo 装配。无可调离散设备时直接以基线为解并如实声明
+“结果只是连续 OPF 基线，非全局 MINLP 证书”（同文件:run\_baseline（lambda））。
 \fld{bc\_stats} 为遗留统计信封：\fld{nodes\_explored} 记候选评估数、
 \fld{lp\_solves} 实际记 NLP 求解次数、\fld{cuts\_added} 记灵敏度面数量，
-\textbf{不是}分支定界或全局间隙证书（同文件:1373--1383；
+\textbf{不是}分支定界或全局间隙证书（同文件:solve\_rpo；
 \srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp}:284--286）。
 环境变量 \srcpath{HACDCPF\_RPO\_PROF}${}=1$ 可打开分阶段墙钟计时输出
 （\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:42--54）。
@@ -540,7 +539,7 @@ GUI 通过 \srcpath{/api/session/rpo\_inputs} 与 \srcpath{/api/session/run\_rpo
 （\fld{taps} 与 \fld{shunts} 两个向量，
 \srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp}:227--230），
 是求解器与 GUI 输入预览共用的入选合同。OLTC 行字段如下
-（同文件:181--208；装配实现
+（同文件:RPOTapControlInput；装配实现
 \srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:512--577）：
 \begin{paramtable}
 \fld{trafo\_index} & — & — & — & 0 & 在 \fld{ac.transformers\_2w} 的 vector position\\
@@ -594,18 +593,18 @@ GUI 通过 \srcpath{/api/session/rpo\_inputs} 与 \srcpath{/api/session/run\_rpo
         \textbf{独立 AC/DC OPF}（后端 Auto，非 RPO 内层管线，
         \srcpath{tests/run\_gui\_server.cpp}:19434--19484）；
   \item 比较两次 OPF 的目标值、最大 $|\Delta V_m|$、$|\Delta P_g|$、
-        $|\Delta Q_g|$（同文件:19486--19508）；
+        $|\Delta Q_g|$（同文件:run\_rpo（lambda））；
   \item 把优化调度（$P_g/Q_g$、新能源、储能、柔性负荷、$V_m/\theta$）写入
-        PF 回放副本并运行非线性潮流（同文件:19510--19579）；
+        PF 回放副本并运行非线性潮流（同文件:run\_rpo（lambda））；
   \item 按判据给结论：独立 OPF 一致性要求双方收敛、审计可行，目标相对差
         不超过 $\max(10^{-3},\,10\epsilon_d)$、电压差不超过
-        $\max(5\times10^{-4},\,10\epsilon_p)$ pu（同文件:19588--19597）——
+        $\max(5\times10^{-4},\,10\epsilon_p)$ pu（同文件:run\_rpo（lambda））——
         与验证文档第 4 节的表述逐字相符（本章已抽查核实）；纯交流的 PF
-        电压差判据为 $10^{-3}$ pu（同文件:19598--19600）；
+        电压差判据为 $10^{-3}$ pu（同文件:run\_rpo（lambda））；
   \item 富混合 AC/DC（含直流网/VSC/DC-DC/能量路由器）的 authored-space
         调度回放尚未完整映射时，\fld{pf\_check\_applicable}=false，结论
         标注“可用数值检查通过；PF 回放部分覆盖”，不宣称完整 PF 等价
-        （同文件:19581--19583、19677--19684）。
+        （同文件:run\_rpo（lambda））。
 \end{enumerate}
 非凸 OPF 可能存在目标等价但 $P/Q$ 控制分配不同的局部点，故
 $|\Delta P_g|$/$|\Delta Q_g|$ 完整展示但不单独触发失败
@@ -660,7 +659,7 @@ $|\Delta P_g|$/$|\Delta Q_g|$ 完整展示但不单独触发失败
         1335、1373--1383）。
   \item \textbf{启发假设}：Phase 1 依赖目标对单变量的近似单峰性，非凸问题
         不保证；局部灵敏度面不作为全局下界，从不用于剪枝
-        （同文件:1094--1100、1171--1175）。
+        （同文件:solve\_rpo、1171--1175）。
   \item \textbf{LossEconomic 内层不直接优化电压}：稳健内层按网损最优分配
         机组无功；实测 case2869 上 vdev RPO 虽收敛，离散设备未能抵消网损
         最优无功分配对电压的不利影响（vdev 0.1392 $\to$ 0.1401）。如需机组

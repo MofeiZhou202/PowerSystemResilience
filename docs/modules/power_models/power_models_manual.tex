@@ -53,10 +53,10 @@ experimental-aml-scuc:system-balance-no-network，DCOPF/LinDistFlow 结果无该
 
 \subsection{诚实口径}
 AML 路径为实验性建模通道：\fld{model\_scope} 按结果类型区分——\texttt{AMLBuildResult} 固定为
-experimental-aml-builder:not-production-runtime（\srcpath{aml\_build\_result.hpp:17}），
+experimental-aml-builder:not-production-runtime（\srcpath{include/hacdcpf/power\_models/aml\_build\_result.hpp:AMLBuildResult}），
 明确“不被生产 \srcpath{solve\_ac\_opf}/
 \srcpath{solve\_dc\_opf} 使用”；混合 OPF 结果 \texttt{ACDCOPFBuilderResult} 为
-experimental-aml-hybrid-acdc-opf（\srcpath{hybrid\_opf\_model\_builder.hpp:83}），
+experimental-aml-hybrid-acdc-opf（\srcpath{include/hacdcpf/power\_models/hybrid\_opf\_model\_builder.hpp:ACDCOPFBuilderResult}），
 生产混合 OPF 采用对等（parity）表述。SCUC 仅系统级平衡、无网络，其
 MILP 平衡对偶非认证市场出清价（\fld{price\_valid}=false）。混合 OPF 的 DC/DC 采用光滑前向传输效率
 /$I^2r$ 模型，不表示双向符号切换。
@@ -124,10 +124,10 @@ MILP 平衡对偶非认证市场出清价（\fld{price\_valid}=false）。混合
 \subsection{边界与局限（如实标注）}
 \begin{itemize}
   \item AML 通道为实验性建模通道：\texttt{AMLBuildResult} 的 \fld{model\_scope} 固定为
-        experimental-aml-builder:not-production-runtime（\srcpath{aml\_build\_result.hpp:17}），
+        experimental-aml-builder:not-production-runtime（\srcpath{include/hacdcpf/power\_models/aml\_build\_result.hpp:AMLBuildResult}），
         明确“不被生产 \srcpath{solve\_ac\_opf}/
         \srcpath{solve\_dc\_opf} 使用”；混合 OPF 结果为
-        experimental-aml-hybrid-acdc-opf（\srcpath{hybrid\_opf\_model\_builder.hpp:83}），
+        experimental-aml-hybrid-acdc-opf（\srcpath{include/hacdcpf/power\_models/hybrid\_opf\_model\_builder.hpp:ACDCOPFBuilderResult}），
         生产混合 OPF 采用对等（parity）表述；\texttt{DCOPFResult}/\texttt{LinDistFlowResult}
         无 \fld{model\_scope} 字段；
   \item 混合 OPF：DC/DC 采用光滑前向传输效率/$I^2r$ 模型，不表示双向符号切换；

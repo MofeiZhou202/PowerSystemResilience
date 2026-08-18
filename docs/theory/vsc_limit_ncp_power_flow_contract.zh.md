@@ -35,9 +35,9 @@ P_{ref}=\operatorname{clip}(P_{raw},P_{min},P_{max}).
 只要 `droop_p_min_mw` 或 `droop_p_max_mw` 中任一非零就使用该下垂对；
 仅当下垂对全为零时才回退到 `pmin_mw/pmax_mw`
 （`effective_lower_mw`/`effective_upper_mw`，
-`src/power_flow/vsc_limit_ncp.cpp:90-102`）。仅当有效上限大于下限时才执行
+`src/power_flow/vsc_limit_ncp.cpp:effective_lower_mw-102`）。仅当有效上限大于下限时才执行
 clip；无序或零宽的有效上下限对会禁用钳制，`P_ref=P_raw` 原样通过
-（`vsc_limit_command`，`src/power_flow/vsc_limit_ncp.cpp:205-210`）。
+（`vsc_limit_command`，`src/power_flow/vsc_limit_ncp.cpp:vsc_limit_command-210`）。
 饱和导数在开区间之外为零，在区间之内为 `2*k_vdc*Vdc`。
 
 ### 面向内置基准数据的下垂参数整定

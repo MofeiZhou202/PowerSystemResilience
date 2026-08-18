@@ -21,11 +21,11 @@ $R=[q_1,\ldots,q_m]$，每个问题
 q=(severity,component\_type,component\_id,field,message).
 \end{equation}
 严重度枚举实际包含 \texttt{Info}、\texttt{Warning}、\texttt{Error}
-（\srcpath{validation\_report.hpp:10--14}）。\texttt{count(s)} 在代码中统计“恰好等于” $s$
-（:48--53），并非注释所说的“at or above”；本文以函数体为准。
+（\srcpath{include/hacdcpf/validation/validation\_report.hpp:Severity}）。\texttt{count(s)} 在代码中统计“恰好等于” $s$
+（:ValidationReport），并非注释所说的“at or above”；本文以函数体为准。
 
 \section{报告有效性谓词}
-\srcpath{ValidationReport::is\_valid}（\srcpath{validation\_report.hpp:31--36}）的精确谓词为
+\srcpath{ValidationReport::is\_valid}（\srcpath{include/hacdcpf/validation/validation\_report.hpp:ValidationReport}）的精确谓词为
 \begin{equation}
 valid(R)\Longleftrightarrow\neg\exists q\in R:q.severity=Error.
 \end{equation}
@@ -34,7 +34,7 @@ $\texttt{has\_warnings}=\exists q:q.severity=Warning$，$\texttt{ok}=valid(R)$�
 
 \section{校验层级的精确过滤}
 先令 $R_0=validate(sys)$。四级返回值由
-\srcpath{validate\_system.cpp:673--712} 的 switch 直接定义：
+\srcpath{src/validation/validate\_system.cpp:validate} 的 switch 直接定义：
 \begin{align}
 R_{SolverReady}&=R_0,\\
 R_{Strict}&=\{promote(q):q\in R_0\},\\
@@ -49,7 +49,7 @@ q.component\_type\in\{ACSystem,DCSystem\}\}.
 
 \section{结构和数值谓词}
 完整规则以 \srcpath{validate(sys)} 的顺序执行。代表性 helper 位于
-\srcpath{validate\_system.cpp:198--223}，与代码严格等价：
+\srcpath{src/validation/validate\_system.cpp:require\_order（lambda）}，与代码严格等价：
 \begin{align}
 require\_order(lo,hi)&\Rightarrow Error\quad\text{当且仅当 }lo>hi,\\
 require\_nonnegative(x)&\Rightarrow Error\quad\text{当且仅当 }x<0,\\

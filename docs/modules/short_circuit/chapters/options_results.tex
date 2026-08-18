@@ -2,7 +2,7 @@
 \section{选项与结果数据结构}\label{sec:sc-io}
 
 \subsection{概览选项 \texttt{SCOptions}}
-\compmeta{SCOptions}{include/hacdcpf/analysis/short\_circuit.hpp:33}
+\compmeta{SCOptions}{include/hacdcpf/analysis/short\_circuit.hpp:SCOptions}
 \begin{paramtable}
 \fld{fault\_type} & — & — & 枚举 & ThreePhase & 故障类型（3ph/SLG/LL/LLG）\\
 \fld{c\_factor} & $c$ & — & $0.9\sim1.1$ & 1.1 & IEC 电压校正因子 $c_{max}$\\
@@ -12,7 +12,7 @@
 \end{paramtable}
 
 \subsection{详细选项 \texttt{SCDetailedOptions}}
-\compmeta{SCDetailedOptions}{include/hacdcpf/analysis/short\_circuit.hpp:93}
+\compmeta{SCDetailedOptions}{include/hacdcpf/analysis/short\_circuit.hpp:SCDetailedOptions}
 \begin{paramtable}
 \fld{fault\_type} & — & — & 枚举 & ThreePhase & 故障类型\\
 \fld{calc\_type} & — & — & Max/Min & Max & 最大/最小短路计算口径\\
@@ -43,11 +43,11 @@
 
 \subsection{结果结构摘要}
 \begin{itemize}
-  \item \fld{BusFaultResult}（:49）/\fld{SCResult}（:61）：概览 $Z_{thevenin}$、$I_{fault}$、
+  \item \fld{BusFaultResult}（:DCBreakerDutyResult）/\fld{SCResult}（:DCFaultResult）：概览 $Z_{thevenin}$、$I_{fault}$、
         \fld{sk\_mva}、\fld{ikpp\_ka}；
-  \item \fld{SCDetailedResult}（:156）：\fld{solved}、逐母线 \fld{SCDetailedBusResult}（:114，
-        $I_k''/i_p/I_b/I_k/I_{th}$ 及分源贡献）、逐支路 \fld{SCDetailedBranchResult}（:134）、
-        换流器贡献 \fld{SCConverterContributionResult}（:144）；
+  \item \fld{SCDetailedResult}（:dc\_bus\_fault\_level）：\fld{solved}、逐母线 \fld{SCDetailedBusResult}（:114，
+        $I_k''/i_p/I_b/I_k/I_{th}$ 及分源贡献）、逐支路 \fld{SCDetailedBranchResult}（:dc\_bus\_fault\_level）、
+        换流器贡献 \fld{SCConverterContributionResult}（:dc\_bus\_fault\_level）；
   \item \fld{DCFaultResult}：\fld{i\_fault\_ka}、\fld{r\_thevenin\_pu}、\fld{breaker\_duties}
         （\fld{DCBreakerDutyResult}）。
 \end{itemize}

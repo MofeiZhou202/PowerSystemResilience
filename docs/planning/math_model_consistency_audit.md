@@ -34,10 +34,23 @@ theory md 的 VSC 无序 droop 对与 κ 上限两处改正且 .zh.md 译文同�
 - SC-N1：方法 B+Meshed 的 `min(1.8,1.15κ)` 实际只作用非故障母线单 κ 近似；若 IEC 本意应作用故障点，属代码口径问题（CODE-FIX 候选）。
 - REL-N1：无。PATH 类新发现已并入下方 PATH-1。
 
+### 锚点校对批次新发现的散文级候选卡（2026-08-18，未修）
+
+- PF-N3：`newton.tex` "迭代内仅在残差 <1e-3 时才允许 PV↔PQ 切换"已过时——当前无外环内切换，`check_q_limits_and_switch` 仅在外环结束后调用，守卫为残差 ≤0.1（`newton_solver.cpp:2484-2518`）。
+- PF-N4：`robust_solvers.tex` 称 `PtcSerController` 未被主循环调用——已接线（`newton_solver.cpp:1858`）；仅 `LMController` 闲置。另 `ptc_delta0`/`ptc_growth` 在 src/ 无读取点，已成死字段（候选代码清理）。
+- PF-N5：`classic_solvers.tex` 称自适应孤岛 `q_limits` 未接线——已接线（`adaptive_solver.cpp:316`）；同章"纯 DC 岛被丢弃"与 `detect_islands` 行为不符；分布式松弛失配公式口径应为全部 AC 母线求和（`distributed_slack_solver.cpp:210-214` 注释解释了原因）。
+- PF-N6：`distribution.tex` 诚实口径与代码相反——非连通/非辐射拓扑现显式 fail-close（`distribution_power_flow.cpp:510-520`）；ZIP 负荷已是电压依赖（`run_bfs_sweep` 经 `voltage_dependent_net_demand` 每迭代更新）。
+- PF-N7：`cpf.tex` 测试覆盖声明过时（现 5 个用例已含 PV 回退专项）；`overview.tex:133` "engine 规范头"表述与同文件自述矛盾（转发头 vs `engine/solver/native/nle/newton_solver.hpp`）；`hybrid_acdc.tex:32` 引用的 dc.hpp "linear approximation" 注释已改为 nonlinear。
+- OPF-N3：`ac_opf_native.tex:207` 散文裸函数名 `clamp_in_interior` 应为 `clamp_interior`；`external_data/opf_hand_cases/` 目录整体不存在，`verification.tex` 手算基准整节失去目标（需确认是否有底稿存档）。
+- OPF-N4：`overview.tex` L609-611 "非 Apple 平台开启 HACDCPF_ENABLE_IPOPT 直接 FATAL_ERROR" 与当前 CMakeLists 脱节。
+- OPF-N5：`parity_formulation.cpp:36-38` 悬置软锚注释与 `equality_jacobian`:2329 残留注释有误导性（代码注释清理）。
+- OPF-N6：`dc_opf.tex` "死岛剪枝"测试名与实际测试语义相反（测试验证的是有源孤岛保留）。
+- MISC-2：各手册/测试文件仍残留散文中的零散纯行号引用（未走锚点格式），量大、语义上下文弱，低优先级。
+
 ## 二、机械性漂移（不影响语义，批量修）
 
 - PATH-1【跨文档路径失效，docs 重组（5842164e）后未回改】——**已批量修复（2026-08-18）**：全量扫描 docs/ 下 tex/md 的 `docs/...` 引用，101 处唯一匹配的死链已按真实位置改写（tex 转义风格保留；规律主要为 `docs/X.md` → `docs/theory/X.md`，另有 developer/reference/guides/archive 归位），涉及 31 个文件。两个文件确认已从仓库删除且无替代（`docs/lcc_dat_opf_report/LCC_DAT_OPF_technical_report.tex` 10 处、`docs/numerical_methods.md` 1 处），引用处已就地标注"该文档已不在仓库中"——若这些验证报告另有存档，应恢复或改写对应段落。有意保留未改：`documentation_reorganization_report.md` 中的旧路径属历史叙述。
-- LINE-1【行号大面积漂移】：power_flow（newton_solver/jacobian_builder/fdpf_solver/dc_solver/defaults.hpp 引用普遍失效，集中在 2026-07-22 之后大改的文件；CPF 与 ac_linearized_pf 章基本准确）、optimal_power_flow（ac_opf.cpp 增约 700 行致 +2~+400 行漂移；dc_opf/parity_* 同病）、ev（:102 区间终点超文件末 20 行）、resilience/reliability/network_reconfiguration/dynamics 各 1-3 处 ±2~7 行。→ 以当前树重刷；长期建议手册构建加行号核验脚本，或只保留"文件+函数名"。
+- LINE-1【行号大面积漂移】——**已根治（2026-08-18）**：不再逐行重刷数字，而是全量迁移为"文件:函数名"符号锚点。迁移脚本 `tools/doc_anchor_symbolize.py`（可重跑，dry-run 默认）把 65 个文档文件中 2102 处行号锚点按当前代码解析为所属函数/结构体/lambda 锚点（含同文件/bare 简写与已改名文件 opf.cpp→three_phase_hybrid_opf.cpp 等的重定向）；46 处指向头文件注释区/转发头的锚点保留纯文件名。随后 8 路语义校对修正了约 600 处因行号漂移导致的错误符号（典型：ac_opf.cpp 大重构后旧行号落进 solve_with_parity_ipm 的 lambda 里）。规范条文已同步：docs/modules/README.md 数学模型规范第 2 条改为"必须给出实现函数及文件:函数名锚点，禁止行号"，各手册前言的"文件:行号"体例声明同步更新。仍残留：各章散文中未走锚点格式的零散纯行号引用（如 `:852--2140`），数量大且语义上下文弱，留作后续低优先级清理。
 - MISC-1：`harmonics_power_flow/source_equivalent_model.tex:70` LaTeX 排版缺陷 `,qquad` 漏反斜杠；`power_models` 顺带发现 `scuc_builder.hpp:51` 头文件注释与实现语义有张力（缺省 1e6 名义宽松 vs 注释"不施加"）；`graph_manual.tex:204` "改进方向"中"悬垂折叠迭代恢复"已实现（`result_recovery.cpp:276-301`），仅剩"报告收敛标志"未做。
 
 ## 三、审计覆盖说明

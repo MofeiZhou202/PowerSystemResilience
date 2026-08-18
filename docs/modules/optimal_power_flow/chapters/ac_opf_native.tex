@@ -38,9 +38,9 @@ Native IPM 是平台交直流混合 OPF 的自研引擎层，承担以下职责
 Ipopt 仅作为可选回退。代码自身把内嵌于 \srcpath{ac\_opf.cpp} 的紧致路径标记为
 legacy：结果中会写入建议改用 ParityIPM 的 \fld{model\_limitations} 条目
 （\srcpath{src/optimal\_power\_flow/ac\_opf.cpp}:3219--3222）。Ipopt 的可用性由
-编译宏 \srcpath{HACDCPF\_HAVE\_IPOPT} 门控（同文件:33--35、2267--2373），
+编译宏 \srcpath{HACDCPF\_HAVE\_IPOPT} 门控（同文件:solve\_parity\_with\_ipopt），
 并可用环境变量 \srcpath{HACDCPF\_DISABLE\_IPOPT\_OPF} 在运行时强制关闭
-（同文件:2391--2396）。
+（同文件:solve\_parity\_with\_ipopt）。
 
 \subsubsection*{求解路径选择}
 \fld{ACOPFOptions::ac\_solver\_backend}（枚举 \fld{ACOPFSolverBackend}，
@@ -56,11 +56,11 @@ legacy：结果中会写入建议改用 ParityIPM 的 \fld{model\_limitations} �
   \item \fld{EconomicDispatch}：清除 primal-dual 标志，强制纯电交流
         ``经济调度 + 单次 AC 潮流'' 快速路径；
   \item \fld{Auto}：保持调用方标志；只要算例含任何 DC/VSC/LCC 组件
-        （判定见 \srcpath{contains\_hybrid\_acdc\_components}，同文件:3022--3034）
-        或存在在运 LCC，即自动升级为 Parity 路径（同文件:3336--3350）。
-        纯 AC 且未显式开启 primal-dual 时走快速路径（同文件:3501--3526）；
+        （判定见 \srcpath{contains\_hybrid\_acdc\_components}，同文件:contains\_hybrid\_acdc\_components）
+        或存在在运 LCC，即自动升级为 Parity 路径（同文件:solve\_ac\_opf\_impl）。
+        纯 AC 且未显式开启 primal-dual 时走快速路径（同文件:solve\_ac\_opf\_impl）；
         纯 AC 且 \fld{enable\_primal\_dual=true}、\fld{use\_parity\_ipm=false}
-        时才进入本章重点描述的 legacy 原生内点循环（同文件:3528--4098）。
+        时才进入本章重点描述的 legacy 原生内点循环（同文件:solve\_ac\_opf\_impl）。
 \end{itemize}
 整体决策流程如图~\ref{fig:acopfnative:flow}~所示。
 
@@ -105,15 +105,15 @@ legacy：结果中会写入建议改用 ParityIPM 的 \fld{model\_limitations} �
   \item LCC 就绪性：对在运 LCC 逐一校验控制模式配对、\fld{n\_bridges} 与
         \fld{vn\_ac\_kv} 正值性、恒 $\alpha$/恒 $\gamma$ 控制的 \fld{x\_comm\_ohm}
         正值性、交流/直流端母线可解析、直流基准电压可得；任一失败即拒绝并写入
-        \fld{infeasibility\_hints}（同文件:3094--3140）。注释明确说明动机：潮流的
+        \fld{infeasibility\_hints}（同文件:reject\_lcc（lambda））。注释明确说明动机：潮流的
         LCC 注入助手对不可用站点返回零以便诊断，而 OPF 静默丢弃固定传输量会改变
-        可行性与最优解，故必须前置拒绝（同文件:3094--3098）；
+        可行性与最优解，故必须前置拒绝（同文件:reject\_lcc（lambda））；
   \item 参考母线资格：\srcpath{validation::validate\_reference\_bus\_eligibility}
         存在错误或``裸理想 DC\_V 边界''警告时拒绝，后者附加说明理想 DC\_V 边界
-        没有调度成本模型，优化需要显式可控的直流平衡设备（同文件:3142--3161）；
+        没有调度成本模型，优化需要显式可控的直流平衡设备（同文件:solve\_ac\_opf\_impl）；
   \item 图拓扑预检：\srcpath{graph::build\_power\_system\_graph} +
         \srcpath{analyze\_topology}，无任何含松弛母线的有效孤岛时判定不可行；
-        对无松弛孤岛写入不可服务提示（同文件:3280--3307）。
+        对无松弛孤岛写入不可服务提示（同文件:solve\_ac\_opf\_impl）。
 \end{enumerate}
 
 \subsubsection*{外部电网提升}
@@ -122,11 +122,11 @@ legacy：结果中会写入建议改用 ParityIPM 的 \fld{model\_limitations} �
 $\pm\max(1.0,\;$\fld{s\_sc\_max\_mva}$,\;$\fld{base\_mva}$)$~MW/MVAr，成本系数
 \fld{cost\_c0/c1/c2} 原样拷贝（\srcpath{src/optimal\_power\_flow/ac\_opf.cpp}:
 3163--3196）。代码注释如实声明：短路容量并非进口限值，只是一个``有用的有限
-尺度''，以防止过大的合成界使小算例的 KKT 系统病态（同文件:3173--3177）。
+尺度''，以防止过大的合成界使小算例的 KKT 系统病态（同文件:solve\_ac\_opf\_impl）。
 求解完成后由 \srcpath{separate\_external\_grid\_dispatch} 把合成机结果拆回
 \fld{external\_grid\_p\_mw}/\fld{external\_grid\_q\_mvar}，并把
 \fld{pg\_mw}/\fld{qg\_mvar}/\fld{gen\_map} 还原为仅含用户自建发电机的顺序
-（同文件:3203--3259）。
+（同文件:separate\_external\_grid\_dispatch（lambda））。
 
 \subsection{数学模型}\label{subsec:acopfnative:model}
 
@@ -151,24 +151,24 @@ x = \left[\,
 \underbrace{P_{dc}}_{n_c}
 \,\right]
 \end{align*}
-各块偏移由 \fld{i\_theta}=0、\fld{i\_vm}=$n_p$ 起顺序累加（同文件:273--274、
+各块偏移由 \fld{i\_theta}=0、\fld{i\_vm}=$n_p$ 起顺序累加（同文件:build\_index、
 326--332），总维数
 \begin{align*}
 n = n_p + n_q + 2n_g + n_{dc} + 3n_c
 \end{align*}
-（同文件:332）。其中 $n_p$ 为非松弛交流母线数、$n_q$ 为 PQ 母线数、$n_g$ 为
+（同文件:build\_index）。其中 $n_p$ 为非松弛交流母线数、$n_q$ 为 PQ 母线数、$n_g$ 为
 在运发电机数、$n_{dc}$ 为直流母线数、$n_c$ 为在运 VSC 换流器数。母线归属规则：
-松弛母线不设 $\theta$ 变量；仅 PQ 母线设 $V$ 变量（同文件:261--269）；未找到
+松弛母线不设 $\theta$ 变量；仅 PQ 母线设 $V$ 变量（同文件:build\_index）；未找到
 显式 SLACK 时退化取第 0 号母线为松弛（\srcpath{find\_slack\_bus}，
-同文件:178--185）。发电机与换流器仅在 \fld{in\_service} 且端母线可解析时进入
-变量集（同文件:287--318；组件 \fld{bus} 字段为 1-based，代码内统一减 1）。
+同文件:find\_slack\_bus）。发电机与换流器仅在 \fld{in\_service} 且端母线可解析时进入
+变量集（同文件:build\_index；组件 \fld{bus} 字段为 1-based，代码内统一减 1）。
 PV/松弛母线的电压幅值、松弛母线的相角不作为变量，而是由参考向量固定：
 \fld{vm\_reference\_by\_bus} 先取母线 \fld{vm\_pu}，再被该机端母线发电机的
-\fld{vg\_pu} 覆盖（同文件:243--256），解包时先铺参考值再覆盖变量块
-（\srcpath{unpack\_state}，同文件:466--538）。
+\fld{vg\_pu} 覆盖（同文件:build\_index），解包时先铺参考值再覆盖变量块
+（\srcpath{unpack\_state}，同文件:unpack\_state）。
 
 等式右端向量 $g(x)\in\mathbb{R}^{m}$ 的块布局为
-（同文件:334--338）：
+（同文件:build\_index）：
 \begin{align*}
 g = \left[\,
 \underbrace{g^{P}}_{n_p},\;
@@ -185,29 +185,28 @@ m = n_p + n_q + n_{dc} + n_c
 初值与盒式界由 \srcpath{initialize\_bounds\_and\_state} 给出
 （\srcpath{src/optimal\_power\_flow/ac\_opf.cpp}:366--464），所有界先经
 \srcpath{sanitize\_bounds} 清洗：非有限值回退默认、上下颠倒交换、宽度不足
-\fld{kMinInteriorWidth}=$10^{-6}$ 时以中点撑开（同文件:187--203，常数定义于
-:41--44）。分块口径：
+\fld{kMinInteriorWidth}=$10^{-6}$ 时以中点撑开（同文件:sanitize\_bounds）。分块口径：
 \begin{itemize}
   \item 相角 $\theta\in[-\pi,\pi]$（硬编码），初值取母线 \fld{va\_deg} 化弧度
-        （同文件:375--382）；
+        （同文件:initialize\_bounds\_and\_state）；
   \item 电压幅值 $V\in[$\fld{vmin\_pu}$,$\fld{vmax\_pu}$]$，缺省回退 $[0.5,1.5]$，
-        初值取 \fld{vm\_pu}（同文件:384--392）；
+        初值取 \fld{vm\_pu}（同文件:initialize\_bounds\_and\_state）；
   \item 发电机 $P_g\in[$\fld{pmin\_mw}$/S_{\mathrm{base}},\,$
         \fld{pmax\_mw}$/S_{\mathrm{base}}]$，$Q_g$ 同理取
         \fld{qmin\_mvar}/\fld{qmax\_mvar}，缺省回退 $\pm$\fld{kHugeBound}
-        （$10^4$），初值取 \fld{pg\_mw}/\fld{qg\_mvar}（同文件:394--413）；
+        （$10^4$），初值取 \fld{pg\_mw}/\fld{qg\_mvar}（同文件:initialize\_bounds\_and\_state）；
   \item 直流电压普通母线 $V_{dc}\in[0.8,1.2]$（硬编码），DC\_V 型母线收缩为
-        设定值 $\pm0.05$，初值取 \fld{vm\_pu}（同文件:415--428）；
+        设定值 $\pm0.05$，初值取 \fld{vm\_pu}（同文件:initialize\_bounds\_and\_state）；
   \item 换流器 $P_{ac}$、$Q_{ac}$ 取自身 \fld{pmin\_mw}/\fld{pmax\_mw}、
         \fld{qmin\_mvar}/\fld{qmax\_mvar}；$P_{dc}$ 为双向推断对称界
         $\pm\max(10^{-3},\;|\,$\fld{pmax\_mw}$|,|\,$\fld{pmin\_mw}$|,|\,$
-        \fld{qmax\_mvar}$|)/S_{\mathrm{base}}$（同文件:430--459）；三者初值均为
-        0 向界内的截断（同文件:456--458）。
+        \fld{qmax\_mvar}$|)/S_{\mathrm{base}}$（同文件:initialize\_bounds\_and\_state）；三者初值均为
+        0 向界内的截断（同文件:initialize\_bounds\_and\_state）。
 \end{itemize}
 最后全体变量经 \srcpath{clamp\_in\_interior} 压入严格内点：边距
 $\varepsilon=\min(\max(10^{-8},\,10^{-3}w),\;0.49w)$，$w$ 为该变量界宽
-（同文件:205--223、461--463）；无法构造严格内点时直接失败返回
-（同文件:3558--3562）。
+（同文件:clamp\_interior）；无法构造严格内点时直接失败返回
+（同文件:solve\_ac\_opf\_impl）。
 
 \subsubsection*{目标函数}
 目标为发电成本二次多项式之和，系数取自 canonical 发电机记录的
@@ -220,7 +219,7 @@ f = \sum_{k=1}^{n_g}\left(c_{2,k}\,P_{g,k}^{2} + c_{1,k}\,P_{g,k} + c_{0,k}\righ
 \qquad P_{g,k}\ \text{以 MW 计}
 \end{align*}
 内部变量 $P_g$ 为标幺值，故对 $x$ 的梯度与 Hessian 对角为
-（同文件:552--572，函数 \srcpath{accumulate\_objective\_grad\_hdiag}）：
+（同文件:accumulate\_objective\_grad\_hdiag，函数 \srcpath{accumulate\_objective\_grad\_hdiag}）：
 \begin{align*}
 \frac{\partial f}{\partial P_{g,k}} &=
   2c_{2,k}S_{\mathrm{base}}^{2}\,P_{g,k} + c_{1,k}S_{\mathrm{base}} &
@@ -234,9 +233,9 @@ f = \sum_{k=1}^{n_g}\left(c_{2,k}\,P_{g,k}^{2} + c_{1,k}\,P_{g,k} + c_{0,k}\righ
 （\srcpath{src/optimal\_power\_flow/ac\_opf.cpp}:708--775，函数
 \srcpath{assemble\_hybrid\_equalities}；潮流残差由
 \srcpath{core::evaluate\_residual\_and\_jacobian} 在\textbf{剔除换流器}的
-口径下计算，同文件:777--813）。
+口径下计算，同文件:evaluate\_hybrid\_equalities\_and\_pf\_jacobian）。
 
-(1) 交流节点有功/无功平衡（$n_p+n_q$ 行，同文件:724--739）：
+(1) 交流节点有功/无功平衡（$n_p+n_q$ 行，同文件:assemble\_hybrid\_equalities）：
 \begin{align*}
 g^{P}_i &= P^{g}_i - P^{d}_i - P^{calc}_i(V,\theta) - \sum_{k\in\mathcal{C}(i)} P_{ac,k}
  & i &\in \text{非松弛母线}\\
@@ -248,7 +247,7 @@ $Q^{calc}_i=V_i\sum_j V_j(G_{ij}\sin\theta_{ij}-B_{ij}\cos\theta_{ij})$ 由 Ybus
 直接求得（与 \srcpath{ac\_opf\_solver.hpp}:18--31 的文档式一致），
 $\mathcal{C}(i)$ 为交流侧挂于母线 $i$ 的换流器集合。
 
-(2) 直流节点平衡（$n_{dc}$ 行，同文件:741--755）：
+(2) 直流节点平衡（$n_{dc}$ 行，同文件:assemble\_hybrid\_equalities）：
 \begin{align*}
 g^{dc}_k &= \frac{P^{d}_{dc,k}}{S_{\mathrm{base}}}
   + V_{dc,k}\sum_{m} G^{dc}_{km}V_{dc,m} - \sum_{k'\in\mathcal{C}_{dc}(k)} P_{dc,k'}
@@ -256,7 +255,7 @@ g^{dc}_k &= \frac{P^{d}_{dc,k}}{S_{\mathrm{base}}}
 其中 $G^{dc}$ 为直流电导矩阵 \fld{gdc}，第一项为直流负荷，第二项为直流网络
 注入 $V_k(G^{dc}V)_k$，末项扣除换流器直流口功率。
 
-(3) 换流器交直流耦合（$n_c$ 行，同文件:757--772）：
+(3) 换流器交直流耦合（$n_c$ 行，同文件:assemble\_hybrid\_equalities）：
 \begin{align*}
 g^{conv}_k &= P_{ac,k} + P_{dc,k} + P_{loss,k} = 0\\
 P_{loss,k} &= a_k + b_k I_{ac,k} + c_k I_{ac,k}^{2}\\
@@ -266,11 +265,11 @@ I_{ac,k} &= \frac{\sqrt{\max(\varepsilon,\;P_{ac,k}^{2}+Q_{ac,k}^{2}+\varepsilon
 其中 $a_k=$~\fld{loss\_mw}$/S_{\mathrm{base}}$（固定损耗），
 $b_k=$~\fld{loss\_percent}$/100$（比例损耗），$c_k=1-\eta$（\fld{eta} 效率，
 导通损耗），数值软化常数 $\varepsilon=$~\fld{eps\_iac}=$10^{-6}$
-（同文件:757--770）。符号约定为 $P_{ac}$ 交流口输出为正、
+（同文件:assemble\_hybrid\_equalities）。符号约定为 $P_{ac}$ 交流口输出为正、
 $P_{dc}=-(P_{ac}+P_{loss})$，即损耗由直流侧承担；该口径下\textbf{不计}
 \fld{r\_conv\_ac\_pu} 交流侧导通损耗耦合（潮流模块才有该项），
 \fld{converter\_model\_scope} 中 \fld{vsc\_ac\_conduction\_loss\_modelled}
-保持 \fld{false}（同文件:3044--3050）。
+保持 \fld{false}（同文件:solve\_ac\_opf\_impl）。
 
 \subsubsection*{非线性不等式（外点罚口径）}
 紧致路径\textbf{不引入}不等式松弛与对应乘子，而是把支路热稳定界与换流器
@@ -282,16 +281,16 @@ $P_{dc}=-(P_{ac}+P_{loss})$，即损耗由直流侧承担；该口径下\textbf{
 \nabla\phi_{pen} &\mathrel{+}= \rho\,h\,\nabla h, &
 \mathrm{diag}\,H_{pen} &\mathrel{+}= \rho\,(\nabla h)^{2}
 \end{align*}
-（同文件:865--885；Hessian 项为 Gauss--Newton 对角近似，舍去
+（同文件:apply\_constraint（lambda）；Hessian 项为 Gauss--Newton 对角近似，舍去
 $\rho h\nabla^{2}h$）。罚权重 $\rho$ 随迭代自适应，见
 \ref{subsec:acopfnative:algorithm}~节。
 
-(1) 支路视在功率平方界（两端各一条，同文件:887--952）。对在运且
+(1) 支路视在功率平方界（两端各一条，同文件:accumulate\_nonlinear\_limit\_terms）。对在运且
 \fld{rate\_a\_mva}$>0$ 的交流支路，以
 $g_s=r/(r^{2}+x^{2})$、$b_s=-x/(r^{2}+x^{2})$、$b_c=b/2$、变比 $t$（0 回退 1）、
 移相角 $\varphi=$~\fld{shift\_deg} 化弧度、
 $\bar S^{2}=$(\fld{rate\_a\_mva}$/S_{\mathrm{base}})^{2}$
-（\srcpath{build\_nonlinear\_limit\_workspace}，同文件:663--706）：
+（\srcpath{build\_nonlinear\_limit\_workspace}，同文件:build\_nonlinear\_limit\_workspace）：
 \begin{align*}
 \theta &= \theta_i-\theta_j-\varphi\\
 P_f &= \frac{g_s}{t^{2}}V_i^{2} - \frac{g_s\cos\theta+b_s\sin\theta}{t}V_iV_j\\
@@ -302,19 +301,19 @@ P_t &= g_sV_j^{2} - \frac{g_s\cos\theta-b_s\sin\theta}{t}V_iV_j\\
 Q_t &= -(b_s+b_c)V_j^{2} + \frac{g_s\sin\theta+b_s\cos\theta}{t}V_iV_j\\
 h_t &= P_t^{2}+Q_t^{2}-\bar S^{2}\le 0
 \end{align*}
-（from 端：同文件:894--925；to 端：同文件:927--952；$\partial h/\partial x$
-的四个分量在同文件:903--911、919--924、930--938、946--951 解析给出）。
+（from 端：同文件:accumulate\_nonlinear\_limit\_terms；to 端：同文件:apply\_constraint（lambda）；$\partial h/\partial x$
+的四个分量在同文件:accumulate\_nonlinear\_limit\_terms 解析给出）。
 串联阻抗为零（$r^{2}+x^{2}\le 0$）或未给 \fld{rate\_a\_mva} 的支路\textbf{跳过}
-限值装配（同文件:667--678）。
+限值装配（同文件:build\_nonlinear\_limit\_workspace）。
 
-(2) 换流器容量圆（每换流器一条，同文件:955--960）：
+(2) 换流器容量圆（每换流器一条，同文件:apply\_constraint（lambda））：
 \begin{align*}
 h^{conv}_k &= P_{ac,k}^{2}+Q_{ac,k}^{2}-\bar S^{2}_{conv,k}\le 0
 \end{align*}
 其中 $\bar S_{conv,k}$ 并非铭牌视在功率字段，而是从 P/Q 界推断的
 $\max(|\,$\fld{pmax\_mw}$|,|\,$\fld{pmin\_mw}$|,|\,$\fld{qmax\_mvar}$|,|\,$
 \fld{qmin\_mvar}$|)$，全部不可得时回退 \fld{kHugeBound}
-（同文件:692--704）。
+（同文件:build\_nonlinear\_limit\_workspace）。
 
 \subsubsection*{变量界的对数障碍}
 盒式界经对数障碍进入目标（\srcpath{src/optimal\_power\_flow/ac\_opf.cpp}:
@@ -325,7 +324,7 @@ $\max(|\,$\fld{pmax\_mw}$|,|\,$\fld{pmin\_mw}$|,|\,$\fld{qmax\_mvar}$|,|\,$
 H_{\mu,ii} &= \frac{\mu}{(x_i-l_i)^{2}}+\frac{\mu}{(u_i-x_i)^{2}}
 \end{align*}
 任一分量触及或越出界时函数返回失败，主循环据以终止并报
-``left the interior of variable bounds''（同文件:3641--3646）。
+``left the interior of variable bounds''（同文件:solve\_ac\_opf\_impl）。
 
 \subsection{原生内点算法全流程}\label{subsec:acopfnative:algorithm}
 
@@ -335,11 +334,11 @@ H_{\mu,ii} &= \frac{\mu}{(x_i-l_i)^{2}}+\frac{\mu}{(u_i-x_i)^{2}}
 $\mu=\max($\fld{barrier\_mu0}$,$\fld{barrier\_mu\_min}$)$，
 正则化 $\delta=\max($\fld{regularization}$,\,10^{-9})$，
 罚权重 $\rho_{m}=\max($\fld{merit\_penalty}$,\,10)$，
-目标权重 $w_f=0.05$（同文件:3596--3607）。
+目标权重 $w_f=0.05$（同文件:solve\_ac\_opf\_impl）。
 
 \subsubsection*{障碍--罚混合子问题}
 每个内层迭代在当前 $(x,\mu,\rho_m,w_f)$ 下最小化
-（同文件:3635--3678）：
+（同文件:solve\_ac\_opf\_impl）：
 \begin{align*}
 F(x) = w_f f(x) + \phi_{\mu}(x) + \phi_{pen}(x;\rho_{nl})
        + \tfrac{1}{2}\rho_m\left(\lVert g(x)\rVert^{2}+\lVert h^{+}(x)\rVert^{2}\right)
@@ -348,14 +347,14 @@ F(x) = w_f f(x) + \phi_{\mu}(x) + \phi_{pen}(x;\rho_{nl})
 Gauss--Newton 近似），末项仅以 merit 形式参与线搜索判据；非线性罚权重取
 $\rho_{nl}=100\,\rho_m\cdot\mathrm{clamp}(10^{-2}/\max(\lVert g\rVert_{\infty},
 10^{-12}),\,10^{-3},1)$，即可行域附近满罚、远离可行域时降罚以防梯度淹没
-（同文件:3647--3650）。目标权重 $w_f$ 初值仅 0.05，在接近可行后逐步放大至
-上限 1（同文件:3601、4078--4080）——这意味着迭代前中期求解的是一个
+（同文件:solve\_ac\_opf\_impl）。目标权重 $w_f$ 初值仅 0.05，在接近可行后逐步放大至
+上限 1（同文件:solve\_ac\_opf\_impl）——这意味着迭代前中期求解的是一个
 ``可行性优先''的软化问题，判敛口径也随之针对障碍--罚子问题而非原始 KKT 系统。
 
 \subsubsection*{KKT 牛顿系统组装与稀疏求解}
 每次信赖尝试装配对称增广系统
 （结构 \srcpath{build\_kkt\_workspace}，\srcpath{src/optimal\_power\_flow/ac\_opf.cpp}:1323--1399；
-填值 \srcpath{update\_kkt\_values}，同文件:1401--1434）：
+填值 \srcpath{update\_kkt\_values}，同文件:update\_kkt\_values）：
 \begin{align*}
 \begin{bmatrix} H+\delta I & J^{T}\\ J & -\delta I\end{bmatrix}
 \begin{bmatrix}\Delta x\\ \Delta\lambda\end{bmatrix}
@@ -364,40 +363,40 @@ $\rho_{nl}=100\,\rho_m\cdot\mathrm{clamp}(10^{-2}/\max(\lVert g\rVert_{\infty},
 \end{align*}
 其中 $H$ 为目标+障碍+罚的对角 Hessian，$J=\partial g/\partial x$ 为等式雅可比，
 右端 $\nabla F$ 不含 $J^{T}\lambda$ 项——对偶量 $\lambda$ 不跨迭代保持
-（每次接受步后置零，同文件:4059），故该系统实质是``瞬时原始对偶''牛顿步；
+（每次接受步后置零，同文件:solve\_ac\_opf\_impl），故该系统实质是``瞬时原始对偶''牛顿步；
 解出的 $\Delta\lambda$ 仅随本步 merit 评估短暂留存，不作为对偶迭代量累积。
 雅可比填值规则：潮流块取共享装配器输出的\textbf{负值}
-（因 $g=$ 设定 $-$ 计算，注释见同文件:1236--1238）；发电机注入 $+1$、换流器
-交流注入 $-1$（同文件:1241--1260）；直流块非对角元 $G^{dc}_{km}V_{dc,k}$、
+（因 $g=$ 设定 $-$ 计算，注释见同文件:update\_jacobian\_values）；发电机注入 $+1$、换流器
+交流注入 $-1$（同文件:update\_jacobian\_values）；直流块非对角元 $G^{dc}_{km}V_{dc,k}$、
 对角元 $(G^{dc}V)_k+G^{dc}_{kk}V_{dc,k}$、$\partial g^{dc}/\partial P_{dc}=-1$
-（同文件:1262--1283）；换流器耦合行
+（同文件:update\_jacobian\_values）；换流器耦合行
 $\partial g/\partial P_{ac}=1+\partial P_{loss}/\partial P$、
 $\partial g/\partial Q_{ac}=\partial P_{loss}/\partial Q$、
 $\partial g/\partial P_{dc}=1$、$\partial g/\partial V_m=\partial P_{loss}/\partial V_m$，
 其中 $\partial I/\partial P=P/(S_{ac}V_m)$ 等链式项解析给出
-（同文件:1285--1320）。雅可比与 KKT 矩阵均采用``结构一次装配、非零元按索引
+（同文件:update\_jacobian\_values）。雅可比与 KKT 矩阵均采用``结构一次装配、非零元按索引
 映射原地填值''的工作区复用设计（\srcpath{JWorkspace}:144--166、
 \srcpath{KKTWorkspace}:168--176、\srcpath{build\_jacobian\_workspace}:968--1219）。
 线性求解器由 \srcpath{core::make\_default\_sparse\_solver} 创建
-（同文件:1397），后端按编译可用性取 KLU$\to$UMFPACK$\to$MKL
+（同文件:build\_kkt\_workspace），后端按编译可用性取 KLU$\to$UMFPACK$\to$MKL
 Pardiso$\to$SuperLU$\to$Eigen SparseLU 的优先级（
 \srcpath{MIPSolvers/src/engine/kernel/linear\_algebra/linear\_solver.cpp}:230--242），
-实际后端名记入 \fld{profiling.linear\_solver\_backend}（同文件:3551）。
+实际后端名记入 \fld{profiling.linear\_solver\_backend}（同文件:solve\_ac\_opf\_impl）。
 稀疏模式分析只做一次并缓存，分解或回代失败即将本轮正则化乘 10 重试
-（同文件:3694--3713、3835--3841）。
+（同文件:solve\_ac\_opf\_impl）。
 
 \subsubsection*{信赖尝试、步长截断与分数边界}
 单个内层迭代最多做 \fld{kTrustAttempts}=6 次信赖尝试，每次乘以 10 递增正则化；
 停滞计数 $\ge 3$ 且不可行度高于 $\max(10^{-3},\,10\,\varepsilon_{feas})$ 时跳过
-信赖尝试直接进入恢复阶段（同文件:3686--3691）。牛顿步先做三层截断
-（同文件:3715--3734）：
+信赖尝试直接进入恢复阶段（同文件:solve\_ac\_opf\_impl）。牛顿步先做三层截断
+（同文件:solve\_ac\_opf\_impl）：
 \begin{align*}
 |\Delta x_i| &\le 0.25\,(u_i-l_i) && \text{逐变量}\\
 \lVert\Delta x\rVert_{\infty} &\le 0.25 && \text{整体（\fld{kMaxDxInf}）}\\
 |\Delta\lambda_r| &\le 10^{3} && \text{（\fld{kMaxDlambdaAbs}）}
 \end{align*}
 随后按分数边界规则取最大可行步长
-（\srcpath{max\_feasible\_step}，同文件:1436--1454）：
+（\srcpath{max\_feasible\_step}，同文件:max\_feasible\_step）：
 \begin{align*}
 \alpha_0 = \min\left(1,\;\min_{i:\Delta x_i>0}\frac{\tau(u_i-x_i)}{\Delta x_i},\;
                          \min_{i:\Delta x_i<0}\frac{\tau(x_i-l_i)}{-\Delta x_i}\right),
@@ -408,8 +407,8 @@ Pardiso$\to$SuperLU$\to$Eigen SparseLU 的优先级（
 \subsubsection*{线搜索与接受判据}
 在 $\alpha\leftarrow\alpha\cdot$\fld{step\_backoff}（默认 0.5）的回退链上最多试
 \fld{max\_line\_search\_steps}（默认 20）个试验点，每个试验点要求严格内点、
-重估等式与罚项（同文件:3742--3815）。接受判据为不可行度充分下降
-\textbf{或}近可行时 merit 下降（同文件:3803--3812）：
+重估等式与罚项（同文件:solve\_ac\_opf\_impl）。接受判据为不可行度充分下降
+\textbf{或}近可行时 merit 下降（同文件:solve\_ac\_opf\_impl）：
 \begin{align*}
 \text{接受}\iff
 \underbrace{\varphi^{trial}_{inf} < (1-5\times10^{-3}\alpha)\,\varphi^{cur}_{inf}}_{\text{不可行度下降}}
@@ -421,23 +420,23 @@ Pardiso$\to$SuperLU$\to$Eigen SparseLU 的优先级（
 若回退链上没有严格满足判据的点，启用``最优 $\alpha$ 兜底''：全程最佳试验点
 在不可行度改善 $0.5\%$、或近可行且 merit 改善、或``近中性''（双指标恶化均
 不超过 $0.5\%$）时仍可接受，近中性情形步长钳到 $5\times10^{-3}$
-（同文件:3817--3833）。接受后正则化回收为
-$\max($\fld{regularization}$,\delta_{trial}/2)$（同文件:3835--3837）。
+（同文件:solve\_ac\_opf\_impl）。接受后正则化回收为
+$\max($\fld{regularization}$,\delta_{trial}/2)$（同文件:solve\_ac\_opf\_impl）。
 
 \subsubsection*{恢复阶段与梯度回退}
 信赖尝试全部失败时进入\textbf{恢复阶段}：最多 4 次尝试，Hessian 对角置零、
 右端仅取 $-g$（纯可行性牛顿方向），步长上限收紧为
 \fld{kMaxRestoreDxInf}=0.12 与逐变量 $0.10(u_i-l_i)$，接受判据放宽为
-$(1-10^{-3}\alpha)$ 倍不可行度下降（同文件:3843--3958）。恢复再失败则取
+$(1-10^{-3}\alpha)$ 倍不可行度下降（同文件:solve\_ac\_opf\_impl）。恢复再失败则取
 最速可行性方向 $\Delta x=-J^{T}g$，上限 \fld{kMaxGradFallbackInf}=0.08，
-判据 $(1-5\times10^{-4}\alpha)$ 或最佳点改善 $0.1\%$（同文件:3960--4035）。
+判据 $(1-5\times10^{-4}\alpha)$ 或最佳点改善 $0.1\%$（同文件:solve\_ac\_opf\_impl）。
 三级机制均失败即终止，报 ``globalization failed (no acceptable
-primal-dual/restoration step)''（同文件:4037--4041）。
+primal-dual/restoration step)''（同文件:solve\_ac\_opf\_impl）。
 
 \subsubsection*{步后更新与参数自适应}
 接受步后：$x$ 压回内点（受约束变量边距比例 $10^{-3}$、自由变量 $10^{-8}$，
-同文件:4043--4057）；$\lambda$ 置零（:4059）；按进展调整动态参数
-（同文件:4061--4080）：
+同文件:solve\_ac\_opf\_impl）；$\lambda$ 置零（:solve\_ac\_opf\_impl）；按进展调整动态参数
+（同文件:solve\_ac\_opf\_impl）：
 \begin{itemize}
   \item 恢复步：$\rho_m\leftarrow\min(10^{8},1.2\rho_m)$，
         $\delta\leftarrow\min(1,1.5\delta)$，$w_f\leftarrow\max(10^{-3},0.9w_f)$；
@@ -453,9 +452,9 @@ primal-dual/restoration step)''（同文件:4037--4041）。
 （$\varphi_{inf}\le\max(10^{-4},\,50\varepsilon_{feas})$）时，外层把障碍参数
 压向 $\mu\leftarrow\max(\mu\cdot$\fld{barrier\_mu\_reduction}$,\,$
 \fld{barrier\_mu\_min}$)$（默认缩减率 0.2、下限 $10^{-8}$）；否则改为加重
-$\rho_m\times1.5$、$\delta\times2$（同文件:4083--4098）。
+$\rho_m\times1.5$、$\delta\times2$（同文件:solve\_ac\_opf\_impl）。
 
-收敛判据（同文件:3667--3674）：当
+收敛判据（同文件:solve\_ac\_opf\_impl）：当
 \begin{align*}
 \max(\lVert g\rVert_{\infty},\;\max h^{+}) &\le \text{\fld{feasibility\_tol}}
 &&\text{且} &
@@ -466,23 +465,23 @@ s_{dual} &\le \text{\fld{stationarity\_tol}}
 当 $\varphi_{inf}\le10^{-3}$ 时改用其与最小二乘对偶估计
 $\lVert\nabla F+J^{T}\lambda_{ls}\rVert_{\infty}$ 的较小者，$\lambda_{ls}$
 由 $(JJ^{T}+10^{-8}I)\lambda_{ls}=-J\nabla F$ 经 \fld{SimplicialLDLT} 解得
-（同文件:3655--3661、599--627）。
+（同文件:dual\_least\_squares\_stationarity）。
 
 \subsubsection*{失败处理、诊断与回退}
-终态汇总（\srcpath{finalize} 段，同文件:4100--4208）重估全部残差，按
+终态汇总（\srcpath{finalize} 段，同文件:solve\_ac\_opf\_impl）重估全部残差，按
 $P/Q/DC/Conv$ 四族与 $\max h^{+}$ 分别报告，未收敛时 \fld{status} 携带各族
 最大残差与最差平稳性变量的具名信息
 （\srcpath{variable\_name}:1467--1499，状态串拼装:4196--4200）。失败原因枚举：
-迭代耗尽（默认 ``maximum iterations reached''，:3597）、离开界内部（:3643）、
-全局化失败（:4038）、初值非严格内点（:3558--3562）、维度退化或无在运发电机
-（:3530--3539）。若 \fld{allow\_fallback} 且算例\textbf{不含} DC/VSC/LCC 组件，
+迭代耗尽（默认 ``maximum iterations reached''，:3597）、离开界内部（:solve\_ac\_opf\_impl）、
+全局化失败（:solve\_ac\_opf\_impl）、初值非严格内点（:solve\_ac\_opf\_impl）、维度退化或无在运发电机
+（:solve\_ac\_opf\_impl）。若 \fld{allow\_fallback} 且算例\textbf{不含} DC/VSC/LCC 组件，
 未收敛时回退``经济调度 + AC 潮流''：先以 $\lambda$ 对分法做经济调度
 （\srcpath{solve\_economic\_dispatch}:1501--1615，80 次对分、含截断退化的
 最小平衡修正），再以牛顿潮流（80 次迭代、容差 $10^{-8}$）投影回交流可行域并
 按母线均分 P/Q 到各机（\srcpath{try\_dispatch\_pf\_fallback}:1764--1867）；
-混合算例则显式抑制该回退并写入提示（同文件:3266--3278、4189--4191）。
+混合算例则显式抑制该回退并写入提示（同文件:append\_hybrid\_fallback\_suppression（lambda））。
 显式 \fld{EconomicDispatch} 后端直接使用同一快速路径，同样仅限纯 AC
-（同文件:3501--3526）。
+（同文件:solve\_ac\_opf\_impl）。
 
 \subsubsection*{关键常数汇总}
 \begin{center}
@@ -518,30 +517,30 @@ PF 回退 & 80 次 / $10^{-8}$ & :1772--1773 & 回退潮流迭代与容差\\
 作用于 Parity 全空间问题的自研原始对偶内点核声明于
 \srcpath{include/hacdcpf/optimal\_power\_flow/native\_ipm\_solver.hpp}（命名空间
 \fld{hacdcpf::opf::parity}，与 \fld{parity\_ipm\_solver.hpp} 共享结果类型）。
-文档化的数学形式为（同文件:61--89）：
+文档化的数学形式为（同文件:solve\_primal\_dual\_ipm）：
 \begin{align*}
 \min_x\; f(x)\quad \text{s.t.}\quad g(x)=0,\quad h(x)\le 0,\quad x_{min}\le x\le x_{max}
 \end{align*}
 不等式与盒式界引入松弛后，对摄动 KKT 系统
 $\nabla f+J_g^{T}\lambda+J_h^{T}\mu+z^{+}-z^{-}=0$、$g=0$、$h+s=0$、$S\mu=\tau e$
 取牛顿步，步长采用分数边界控制；返回对偶按 \fld{Problem::cidx} 的行序排列。
-\fld{IPMOptions}（同文件:17--32）给出迭代上限 \fld{max\_iter}=400、三项容差
+\fld{IPMOptions}（同文件:IPMOptions）给出迭代上限 \fld{max\_iter}=400、三项容差
 \fld{tol\_primal}/\fld{tol\_dual}/\fld{tol\_complementarity}=$10^{-6}$、正则化
 $10^{-8}$、步长上限 \fld{alpha\_max}=0.95，以及可选的原始/等式对偶/不等式对偶/
 松弛暖启动指针（仅在全部维数与正性检查通过时采用）。\fld{IPMResult}
-（同文件:34--59）返回收敛标志、三项 KKT 残差及其初值、暖启动使用标记、
+（同文件:IPMResult）返回收敛标志、三项 KKT 残差及其初值、暖启动使用标记、
 分解/回代/接受/拒绝/符号分析/后端升级/缩放重建计数、具体线性代数路径字符串
 （如 \fld{dense\_lu}、\fld{sparse\_umfpack}、\fld{sparse\_klu}、
 \fld{sparse\_eigen\_lu}）与原始-对偶解向量。核内部实现位于
 \srcpath{src/optimal\_power\_flow/parity\_ipm.cpp}，细节见第~\ref{sec:parityipm}~章。
-此外 \srcpath{homotopy\_tangent}（同文件:92--113）给出目标同伦 $P(t)=\min t\,f(x)$
+此外 \srcpath{homotopy\_tangent}（同文件:homotopy\_tangent）给出目标同伦 $P(t)=\min t\,f(x)$
 在当前路径点的 Davidenko 切向：对增广系统右端取 $(-\nabla f/t,\,0,\,0)$ 复用
 IPM 自身的 LDL$^{T}$ 机构一次分解回代，得 $(dx/dt,dz/dt,d\lambda/dt,d\mu/dt)$，
 $t\approx0$、分解失败或非有限时返回 \fld{false}。
 
 \subsubsection*{选项映射与暖启动编排}
 \srcpath{solve\_with\_parity\_ipm}（\srcpath{src/optimal\_power\_flow/ac\_opf.cpp}:2486--3020）
-把 \fld{ACOPFOptions} 翻译为核选项（同文件:2544--2551）：
+把 \fld{ACOPFOptions} 翻译为核选项（同文件:solve\_with\_parity\_ipm）：
 \fld{max\_iter} 取内外层迭代上限之积；\fld{tol\_primal} 取
 $\max($\fld{feasibility\_tol}$,10^{-10})$；\fld{tol\_dual} 取
 $\max($\fld{stationarity\_tol}$,10^{-10})$；\fld{tol\_complementarity} 取
@@ -549,9 +548,9 @@ $\max($\fld{barrier\_mu\_min}$,10^{-10})$；\fld{regularization} 取
 $\max($\fld{regularization}$,10^{-12})$；\fld{alpha\_max} 取
 \fld{interior\_fraction} 钳于 $[0.5,0.9999]$。建模侧
 \fld{load\_shedding} 仅当目标为 \fld{Economic} 时开启且 \fld{voll} 显式置 0，
-四个 \fld{enforce\_*} 开关原样下传（同文件:2526--2540）。
+四个 \fld{enforce\_*} 开关原样下传（同文件:solve\_with\_parity\_ipm）。
 
-暖启动有两条独立来源（同文件:2557--2602）：
+暖启动有两条独立来源（同文件:solve\_with\_parity\_ipm）：
 \begin{itemize}
   \item \fld{ac\_pf\_warm\_start}（默认关）：先以混合潮流
         \srcpath{powerflow::solve\_hybrid}（开启换流器模式切换、PV-PQ 转换、
@@ -559,7 +558,7 @@ $\max($\fld{regularization}$,10^{-12})$；\fld{alpha\_max} 取
         \srcpath{build\_hybrid\_power\_flow\_warm\_start} 与
         \srcpath{recover\_power\_flow\_generator\_dispatch} 映射进 OPF 变量空间，
         其中发电机分派由潮流平衡残差在母线内按松弛优先重新分摊
-        （同文件:2057--2265）；
+        （同文件:recover\_power\_flow\_generator\_dispatch）；
   \item \fld{warm\_start}：把上一次兼容求解的 \fld{ACOPFResult} 逐变量族映射，
         优先采用不透明的 \fld{ipm\_primal\_state}（尺寸匹配且有限时），并以
         $10^{-8}$ 边距钳入界内；对偶与松弛状态仅在映射成功时一并传入
@@ -567,8 +566,8 @@ $\max($\fld{regularization}$,10^{-12})$；\fld{alpha\_max} 取
 \end{itemize}
 
 \subsubsection*{内层求解器选择与 Ipopt 回退}
-内层引擎按 \fld{ParityInnerSolver}（枚举于同文件:1869--1873）与选项组合
-（同文件:2604--2664）：
+内层引擎按 \fld{ParityInnerSolver}（枚举于同文件:ParityInnerSolver）与选项组合
+（同文件:solve\_with\_parity\_ipm）：
 \begin{itemize}
   \item \fld{Auto} 且 \fld{ac\_pf\_warm\_start} 且非同伦：先用 Ipopt（若编译入），
         其终止于 acceptable 带而未严格收敛时，把最末原始点连同对偶/松弛交给
@@ -581,47 +580,46 @@ Ipopt 适配（\srcpath{solve\_parity\_with\_ipopt}:2384--2484，仅在
 雅可比/拉格朗日 Hessian 回调一一挂到 \fld{engine::NLPModel}
 （\srcpath{build\_parity\_nlp\_input}:2275--2372），容差映射为：主容差取三项
 最小、acceptable 带取三项最大、acceptable 互补下限 $\max(10^{-2},100\,
-$\fld{tol\_complementarity}$)$（同文件:2321--2338）。结果接受口径除
+$\fld{tol\_complementarity}$)$（同文件:build\_parity\_nlp\_input）。结果接受口径除
 \fld{success} 外还接受``acceptable residuals''：原始残差
 $\le$\fld{tol\_primal}、对偶 $\le1000\,$\fld{tol\_dual}、互补
 $\le\max(10^{-2},1000\,$\fld{tol\_complementarity}$)$，状态串保留 Ipopt 原始终止码
-（同文件:2412--2428、2472--2475）。对偶重建时非线性不等式与盒式界乘子以
-$2\times10^{-12}$ 为下限拼回 \fld{mu}/\fld{z}（同文件:2435--2471）。
+（同文件:solve\_parity\_with\_ipopt）。对偶重建时非线性不等式与盒式界乘子以
+$2\times10^{-12}$ 为下限拼回 \fld{mu}/\fld{z}（同文件:solve\_parity\_with\_ipopt）。
 
 \subsubsection*{目标同伦延续}
 \fld{objective\_homotopy} 开启且内层非 Ipopt 时，进入两阶段延续
-（同文件:3352--3482；理论引用 docs/numerical\_methods.md（该文档已不在仓库中） §12--13）：沿
+（同文件:solve\_ac\_opf\_impl；理论引用 docs/numerical\_methods.md（该文档已不在仓库中） §12--13）：沿
 $P(t)=\min\,t\,f$ 从 $t=0$（纯可行性）到 $t=1$（全成本），成本系数与 RPO 目标
-权重同步乘 $t$（同文件:3371--3385）；最多 120 步，步长初值
+权重同步乘 $t$（同文件:solve\_ac\_opf\_impl）；最多 120 步，步长初值
 \fld{homotopy\_dt0}（默认 0.10），快收敛（$\le20$ 次迭代）步长加倍至上限 0.5、
-失败减半，$dt<0.005$ 判定进入最小违反域并停止（同文件:3367--3368、3395--3398、
-3437--3443）。相邻步之间用 Davidenko 切向做预测
+失败减半，$dt<0.005$ 判定进入最小违反域并停止（同文件:solve\_ac\_opf\_impl）。相邻步之间用 Davidenko 切向做预测
 $w_{pred}=w+h\,w'$，预测步长受参数度量信赖半径 $\kappa=0.05$ 约束
 $h=\min(dt,\kappa/\lVert dx/dt\rVert_\infty)$，松弛与不等式对偶以 $10^{-8}$ 为底
-（同文件:3399--3436）。$t=1$ 未达且 \fld{allow\_fallback} 时，从全新耦合潮流点
+（同文件:solve\_ac\_opf\_impl）。$t=1$ 未达且 \fld{allow\_fallback} 时，从全新耦合潮流点
 对全目标做最后一次独立求解，成功则标记
 ``converged (full objective after incomplete objective homotopy)''；否则诚实报告
-``not converged: objective homotopy stopped at t=...''（同文件:3451--3478）。
-显式 Ipopt 请求与同伦互斥：同伦标志被清除后做单次独立求解（同文件:3483--3488）。
+``not converged: objective homotopy stopped at t=...''（同文件:solve\_ac\_opf\_impl）。
+显式 Ipopt 请求与同伦互斥：同伦标志被清除后做单次独立求解（同文件:solve\_ac\_opf\_impl）。
 
 \subsubsection*{结果提取、LMP 与诊断量}
-求解返回后（同文件:2666--3019）：电压、发电、甩负荷、换流器、DER、储能、
+求解返回后（同文件:solve\_with\_parity\_ipm）：电压、发电、甩负荷、换流器、DER、储能、
 DC/DC、柔性负荷、能量路由器端口按块从原始向量提取并乘回 MW/MVAr
-（:2716--2852）；在运 LCC 在最优电压状态下重估准稳态工作点
+（:solve\_with\_parity\_ipm）；在运 LCC 在最优电压状态下重估准稳态工作点
 （$\alpha$/$\gamma$/$U_{d0}$/$I_d$/越限审计），触发角或熄弧角越窗时写入
-\fld{model\_limitations}（:2854--2926）；LMP 从等式对偶提取
+\fld{model\_limitations}（:solve\_with\_parity\_ipm）；LMP 从等式对偶提取
 $\lambda^{P}_i\cdot$\fld{scale\_p}$/S_{\mathrm{base}}$ 与
 $\lambda^{Q}_i\cdot$\fld{scale\_q}$/S_{\mathrm{base}}$，仅当对偶向量完整覆盖
 平衡行时置 \fld{lmp\_valid=true}，否则写明原因（Ipopt 适配器未返回约束乘子或
 对偶不完整，:2930--2952）；终态按平衡族报告 pu 残差并以
 $\max(\lVert g\rVert_\infty,\max h^{+},\text{界违反})$ 汇总
-\fld{max\_constraint\_violation}（:2954--2996）；原始/对偶/松弛终态存入
-\fld{ipm\_*\_state} 供续解（:2684--2695）；同伦切向存入 \fld{ipm\_tangent\_*}
-（:2697--2714）。最后按 \fld{bus\_merge\_map} 反投影到用户母线序并按投影证书
+\fld{max\_constraint\_violation}（:solve\_with\_parity\_ipm）；原始/对偶/松弛终态存入
+\fld{ipm\_*\_state} 供续解（:solve\_with\_parity\_ipm）；同伦切向存入 \fld{ipm\_tangent\_*}
+（:solve\_with\_parity\_ipm）。最后按 \fld{bus\_merge\_map} 反投影到用户母线序并按投影证书
 裁剪内部直流母线（:3011--3017；\srcpath{unproject\_per\_bus\_ac\_opf\_result}
-与 \srcpath{trim\_internal\_dc\_bus\_results}，同文件:46--77）。计数口径：
+与 \srcpath{trim\_internal\_dc\_bus\_results}，同文件:solve\_with\_parity\_ipm）。计数口径：
 \fld{iterations} 报告为 IPM 迭代数 $+1$、\fld{outer\_iterations} 恒为 1
-（:2667--2668）。
+（:solve\_with\_parity\_ipm）。
 
 \subsection{公共接口与门面}\label{subsec:acopfnative:api}
 
@@ -631,7 +629,7 @@ $\max(\lVert g\rVert_\infty,\max h^{+},\text{界违反})$ 汇总
   \item \texttt{opf::solve\_ac\_opf(sys, opt)}：主入口
         （\srcpath{include/hacdcpf/optimal\_power\_flow/ac\_opf\_solver.hpp}:42--43）；
   \item \texttt{opf::compute\_jacobian\_diagnostics(sys, opt)}：雅可比诊断声明
-        （同文件:54--55）。\textbf{注意}：该函数在当前检出处\textbf{只有声明、
+        （同文件:compute\_jacobian\_diagnostics）。\textbf{注意}：该函数在当前检出处\textbf{只有声明、
         没有定义}；\srcpath{ac\_opf.cpp}:4211 实现的是
         \srcpath{check\_ac\_opf\_jacobian\_fd}，且无任何调用方，两者均未接入
         构建产物（详见 \ref{subsec:acopfnative:verification}~节）；
@@ -757,7 +755,7 @@ $\max(\lVert g\rVert_\infty,\max h^{+},\text{界违反})$ 汇总
         $h=\min($\fld{fd\_eps}$\cdot\max(1,|x|),\;0.49\min(x-l,u-x))$，
         \fld{fd\_eps} 缺省 $10^{-6}$，逐元比较解析列与差分列，通过阈值为
         最大绝对误差 $\le5\times10^{-4}$ 或最大相对误差 $\le5\times10^{-3}$
-        （同文件:4319--4407）。\textbf{如实说明}：该函数在当前检出处没有任何
+        （同文件:check\_ac\_opf\_jacobian\_fd）。\textbf{如实说明}：该函数在当前检出处没有任何
         调用方；公共头声明的 \srcpath{compute\_jacobian\_diagnostics}
         （\srcpath{ac\_opf\_solver.hpp}:54--55）在 \srcpath{src/} 内无定义，
         两者名字不一致且均未接入默认测试目标，属已登记的存疑点。
@@ -839,45 +837,44 @@ $\max(\lVert g\rVert_\infty,\max h^{+},\text{界违反})$ 汇总
         全局最优——该语句作为 \fld{model\_limitations} 固定写入每次返回
         （\srcpath{src/optimal\_power\_flow/ac\_opf.cpp}:3205--3206）。
   \item \textbf{legacy 定位}：紧致 NativeAC 路径自述为旧式``外部障碍/罚循环''，
-        结果中建议生产环境改用 ParityIPM（同文件:3219--3222）。
+        结果中建议生产环境改用 ParityIPM（同文件:separate\_external\_grid\_dispatch（lambda））。
   \item \textbf{不等式非硬约束}：支路热稳定界与容量圆仅经外点二次罚进入目标，
         终解允许受罚权重控制的残余违反；罚 Hessian 为 Gauss--Newton 对角近似，
-        且罚权重在远离可行域时按门值降权（同文件:853--966、3647--3650）。
-  \item \textbf{无持续对偶迭代}：$\lambda$ 每次接受步后置零（同文件:4059），
+        且罚权重在远离可行域时按门值降权（同文件:accumulate\_nonlinear\_limit\_terms）。
+  \item \textbf{无持续对偶迭代}：$\lambda$ 每次接受步后置零（同文件:solve\_ac\_opf\_impl），
         平稳性判据针对障碍--罚软化子问题，近可行时才切换到最小二乘对偶估计；
         目标权重 $w_f$ 初值 0.05、随可行性爬坡，前中期迭代并非在解原始成本问题
-        （同文件:3601、3655--3661、4066--4080）。
+        （同文件:solve\_ac\_opf\_impl）。
   \item \textbf{换流器控制模式无关}：紧致路径把 VSC 处理为自由 $P_{ac}/Q_{ac}/P_{dc}$
         盒式变量，不锚定 VDC\_Q 直流电压、不实施电流/调制度窗口，
         \fld{vsc\_vdc\_control\_modelled=false}，scope 标签固定为
-        \fld{ac-opf-native:vsc-free-pq+capacity-circle}（同文件:3041--3050）；
+        \fld{ac-opf-native:vsc-free-pq+capacity-circle}（同文件:solve\_ac\_opf\_impl）；
         亦不计 \fld{r\_conv\_ac\_pu} 交流侧导通损耗。
   \item \textbf{推断界与硬编码界}：换流器容量圆半径与 $P_{dc}$ 界由 P/Q 界推断
-        而非铭牌视在功率（同文件:443--447、692--704）；$V_{dc}$ 界硬编码
-        $[0.8,1.2]$、DC\_V 型收缩为设定值 $\pm0.05$（:415--428）；$\theta$ 界
-        硬编码 $\pm\pi$（:378）；无显式 SLACK 时取第 0 号母线（:178--185）。
+        而非铭牌视在功率（同文件:build\_nonlinear\_limit\_workspace、initialize\_bounds\_and\_state）；$V_{dc}$ 界硬编码
+        $[0.8,1.2]$、DC\_V 型收缩为设定值 $\pm0.05$（:initialize\_bounds\_and\_state）；$\theta$ 界
+        硬编码 $\pm\pi$（:initialize\_bounds\_and\_state）；无显式 SLACK 时取第 0 号母线（:find\_slack\_bus）。
   \item \textbf{LCC 不进入紧致路径}：无 $V_{dc}$ 耦合列，凡在运 LCC 一律强制
-        Parity/Ipopt 路径（同文件:3343--3350）；Parity 路径中 LCC 的
+        Parity/Ipopt 路径（同文件:solve\_ac\_opf\_impl）；Parity 路径中 LCC 的
         $P/I/\alpha/\gamma$ 指令与换流变分接头为固定输入而非调度变量，额定电流
         饱和纳入模型而 $\alpha/\gamma$ 限值仅为求解后审计，换相重叠迭代、
         分接头控制与有功损耗未建模，等式二阶导用解析雅可比的局部有限差分且
-        额定电流转折不可微（同文件:2514--2523、2854--2926）。
+        额定电流转折不可微（同文件:solve\_with\_parity\_ipm）。
   \item \textbf{设备覆盖边界}：储能按单时段功率注入优化、不含跨时段 SOC 动态；
-        能量路由器端口平衡按无损处理（同文件:3207--3214）；支路限值仅取
-        \fld{rate\_a\_mva}（:667）；甩负荷仅 Economic 目标开启且 \fld{voll}
+        能量路由器端口平衡按无损处理（同文件:separate\_external\_grid\_dispatch（lambda））；支路限值仅取
+        \fld{rate\_a\_mva}（:build\_nonlinear\_limit\_workspace）；甩负荷仅 Economic 目标开启且 \fld{voll}
         置 0，其价格口径由 Parity 建模层决定（:2527--2531，见
         第~\ref{sec:parityform}~章）。
   \item \textbf{外部电网合成界}：短路容量并非进口限值，仅作有限尺度；该近似已在
-        代码注释中自述（同文件:3173--3189）。
-  \item \textbf{回退口径}：ED+PF 回退对混合算例显式抑制（同文件:3266--3278、
-        4189--4191）；回退成功时 \fld{max\_stationarity} 置 0、目标按钳制后出力
-        重算，属可行性投影而非优化解（:1832--1845）。
+        代码注释中自述（同文件:solve\_ac\_opf\_impl）。
+  \item \textbf{回退口径}：ED+PF 回退对混合算例显式抑制（同文件:append\_hybrid\_fallback\_suppression（lambda））；回退成功时 \fld{max\_stationarity} 置 0、目标按钳制后出力
+        重算，属可行性投影而非优化解（:run\_pf\_extract（lambda））。
   \item \textbf{门控依赖}：Ipopt 路径仅在 \srcpath{HACDCPF\_HAVE\_IPOPT} 编译时
         存在，且可被 \srcpath{HACDCPF\_DISABLE\_IPOPT\_OPF} 运行时关闭
-        （同文件:33--35、2388--2396）；未编译时 \fld{Auto} 的全部回退自动失效。
+        （同文件:solve\_parity\_with\_ipopt）；未编译时 \fld{Auto} 的全部回退自动失效。
   \item \textbf{已知不一致}：\srcpath{compute\_jacobian\_diagnostics} 有声明无定义、
         \srcpath{check\_ac\_opf\_jacobian\_fd} 有定义无调用方；
         \srcpath{rebalance\_pg\_within\_bus} 标记 \fld{[[maybe\_unused]]} 为死代码
-        （同文件:1617）；回退用 \srcpath{compute\_ac\_injections} 为稠密 Ybus
-        双重循环，仅小算例回退可接受（:1738--1762）。
+        （同文件:rebalance\_pg\_within\_bus）；回退用 \srcpath{compute\_ac\_injections} 为稠密 Ybus
+        双重循环，仅小算例回退可接受（:compute\_ac\_injections）。
 \end{enumerate}

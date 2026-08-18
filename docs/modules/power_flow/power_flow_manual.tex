@@ -84,7 +84,7 @@ LM 信赖域、伪瞬态延拓、NCP 半光滑 Newton、HELM、同伦延拓、Ne
 直流网络与换流器稳态建模、配电网前推回代潮流、三相相域潮流与三相混合潮流、
 电压稳定连续潮流（CPF），并给出全部选项字段的默认值、结果与诊断数据结构、
 以及测试验证体系。文档风格与本平台《元件模型技术手册》一致，全部公式逐条注明
-源码出处（文件:行号）。
+源码出处（文件:函数名锚点，禁止行号）。
 
 \smallskip
 \noindent\textbf{修订版 1 说明}：本版对照 2026-07-22 代码库修订，相对初版的主要变化为——
@@ -118,7 +118,7 @@ HELM/同伦/Newton--Krylov/CPF 新增专项回归测试。全部受影响行号�
         多换流器建模设计文档；
   \item \texttt{tests/} 与 \texttt{tools/} —— 验证与校核章节的测试矩阵来源。
 \end{itemize}
-文中所有“\texttt{文件:行号}”引用基于当前代码检出处，代码演进后行号可能漂移，
+文中所有“\texttt{文件:函数名}”锚点按当前代码检出处核验，禁止行号（易漂移），
 但函数名与文件路径保持稳定。
 
 \subsection{单位制约定}
@@ -220,11 +220,11 @@ CPF & \srcpath{CpfSolver::solve} & 混合 AC/DC & 电压稳定/负荷裕度\\
         但生产门面仍直连 thread\_local \srcpath{engine::NewtonSolver}，
         不经过工厂层。
   \item \textbf{LCC 换流站稳态模型已落地}（\srcpath{src/power\_flow/lcc\_model.cpp/.hpp}）：
-        \fld{SolverData::lcc\_converters}（solver\_data.hpp:31）参与统一 Newton
-        残差（jacobian\_builder.cpp:217--235）与雅可比（jacobian\_builder.cpp:451--488），
-        特征控制站锚定 DC 岛电压（dc\_solver.cpp:72--76、
-        newton\_solver.cpp:406--428），求解后经 API 结果字段
-        \fld{lcc\_transfers} 输出完整运行点（hacdcpf.cpp:1525--1576）；
+        \fld{SolverData::lcc\_converters}（include/hacdcpf/assembly/solver\_data.hpp:SolverData）参与统一 Newton
+        残差（src/power\_flow/jacobian\_builder.cpp:build\_power\_spec）与雅可比（src/power\_flow/jacobian\_builder.cpp:evaluate\_residual\_impl），
+        特征控制站锚定 DC 岛电压（src/power\_flow/dc\_solver.cpp:add（lambda）、
+        src/power\_flow/newton\_solver.cpp:plan\_dc\_island\_references），求解后经 API 结果字段
+        \fld{lcc\_transfers} 输出完整运行点（src/api/hacdcpf.cpp:is\_promoted（lambda））；
         混合交直流建模现有 VSC、DC/DC 与 LCC 三条路径（见第~6~章）。
 \end{enumerate}
 

@@ -22,7 +22,7 @@ MESS 还必须已到外部可用时刻、非在途且位于该岛。然后
 负荷按 \fld{importance} 降序、需求降序分配供电；每条负荷的加权切负荷为
 $P_{shed,i}\texttt{importance}_i$。重要度阈值按 $4-10^{-9}$、$2.5-10^{-9}$、
 $1.5-10^{-9}$ 划入关键、高、中、低四档。依据为
-\srcpath{src/resilience/resilience\_assessment.cpp:620--732}。
+\srcpath{src/resilience/resilience\_assessment.cpp:StepContext}。
 
 资源状态更新只有放电项：
 \begin{equation}
@@ -30,7 +30,7 @@ $1.5-10^{-9}$ 划入关键、高、中、低四档。依据为
 \end{equation}
 代码没有启发式充电变量，旧手册中的
 $E_{t+1}=E_t+(\eta_{ch}P^{ch}-P^{dis}/\eta_{dis})\Delta t$ 不是该入口行为。
-依据为 \srcpath{resilience\_assessment.cpp:735--753}。
+依据为 \srcpath{src/resilience/resilience\_assessment.cpp:apply\_dispatch\_to\_storage}。
 
 \subsection{启发式 MESS 路由}
 
@@ -45,7 +45,7 @@ $\max(\fld{mess\_travel\_speed\_kmph},1)$，选择分数为
 \end{equation}
 仅在分数比当前最佳值大 $10^{-9}$ 时替换目标。每完成一段距离 $d_l$，状态执行
 $E\leftarrow\max(E_{min},E-d_le_{travel})$；行程时间逐段按 $d_l/v$ 扣减。
-依据为 \srcpath{resilience\_assessment.cpp:768--936}。
+依据为 \srcpath{src/resilience/resilience\_assessment.cpp:mark\_mess\_deployed}。
 
 \subsection{启发式指标聚合}
 
@@ -61,7 +61,7 @@ $r_t=P_{served,t}/P_{demand,t}$；当需求不大于 $10^{-9}$ 时 $r_t=1$。结
 \end{align}
 兼容字段 \fld{total\_ens\_mwh} 被直接设为 \fld{total\_shed\_mwh}，
 \fld{restoration\_time\_hr} 被设为最后一步的 hour，而不是首次完全恢复时刻。
-依据为 \srcpath{resilience\_assessment.cpp:1339--1407}。
+依据为 \srcpath{src/resilience/resilience\_assessment.cpp:run\_distribution\_resilience\_assessment}。
 
 \subsection{严格 MIP 的实际变量}
 
@@ -70,8 +70,8 @@ $y^{on}_{bt},y^{off}_{bt}$、有功 $p_{bt}$、商品流 $f_{bt}$；每个母线
 带电状态 $u_{it}$、根 $r_{it}$、基础根 $r^{base}_{it}$、根商品流、基础源出力、切负荷、
 已用新能源和可调发电。固定储能只创建放电、能量和构网根；MESS 创建能量、位置、构网根、
 放电和时空弧变量。当前文件没有无功 $Q_{bt}$ 或充电变量。
-精确索引见 \srcpath{src/resilience/resilience\_restoration\_mip.cpp:279--330} 和
-\srcpath{resilience\_restoration\_mip.cpp:1071--1225}。
+精确索引见 \srcpath{src/resilience/resilience\_restoration\_mip.cpp:IndexMaps} 和
+\srcpath{src/resilience/resilience\_restoration\_mip.cpp:add\_var（lambda）}。
 
 \subsection{严格 MIP 的目标系数}
 
@@ -86,9 +86,9 @@ $y^{on}_{bt},y^{off}_{bt}$、有功 $p_{bt}$、商品流 $f_{bt}$；每个母线
 \end{align}
 $\pi_i$ 按四级优先级返回对应 \fld{shed\_penalty\_*}。当前
 \fld{renewable\_curtailment\_cost} 未进入本文件的目标系数，不能写入现行目标。
-依据为 \srcpath{resilience\_restoration\_mip.cpp:29--34}、
-\srcpath{resilience\_restoration\_mip.cpp:91--99} 和
-\srcpath{resilience\_restoration\_mip.cpp:1098--1222}。
+依据为 \srcpath{src/resilience/resilience\_restoration\_mip.cpp:resilience\_mip\_solver\_name}、
+\srcpath{src/resilience/resilience\_restoration\_mip.cpp:penalty\_from\_priority} 和
+\srcpath{src/resilience/resilience\_restoration\_mip.cpp:add\_var（lambda）}。
 
 \subsection{支路动作、流限与电压行}
 
@@ -107,7 +107,7 @@ $\pi_i$ 按四级优先级返回对应 \fld{shed\_penalty\_*}。当前
  \fld{big\_m\_voltage}(1-z_{bt}).
 \end{equation}
 没有 $x_bQ_{bt}$ 项。依据为
-\srcpath{resilience\_restoration\_mip.cpp:1251--1282}。
+\srcpath{src/resilience/resilience\_restoration\_mip.cpp:add\_le（lambda）}。
 
 \subsection{母线平衡与森林行}
 
@@ -127,7 +127,7 @@ $F^{root}_{it}-u_{it}+\sum_{to=i}f_{bt}-\sum_{from=i}f_{bt}=0$。
 以及 $s_{it}\ge D_{it}(1-u_{it})$。根电压通过两条 big-M 行固定到 1，带电电压下界为
 $v_{it}\ge v_{min}^{2}u_{it}$；变量自身上界为 $v_{max}^{2}$，代码未创建
 $v_{it}\le v_{max}^{2}u_{it}$。依据为
-\srcpath{resilience\_restoration\_mip.cpp:1284--1343}。
+\srcpath{src/resilience/resilience\_restoration\_mip.cpp:add\_le（lambda）}。
 
 \subsection{储能和 MESS 能量行}
 
@@ -150,7 +150,7 @@ $t>0$ 的递推还将上一时步出发的移动弧能耗加入：
  \sum_iP^{MESS}_{mi,t-1}+\sum_{a:\,depart=t-1}e_a a_{ma}=0.
 \end{equation}
 位置转移用“每个位置恰选一条出发弧”和“每个位置由到达弧确定”两组等式；见
-\srcpath{resilience\_restoration\_mip.cpp:1346--1430}。
+\srcpath{src/resilience/resilience\_restoration\_mip.cpp:add\_le（lambda）}。
 
 \subsection{求解结果真实性}
 
@@ -158,7 +158,7 @@ $t>0$ 的递推还将上一时步出发的移动弧能耗加入：
 均不超过 $10^{-6}$；若所有目标系数不小于 $-10^{-9}$，重算目标还必须不小于 $-10^{-6}$。
 \fld{mip\_gap\_within\_tolerance} 使用
 $\texttt{success}\land gap\le\fld{mip\_gap}+10^{-9}$。依据为
-\srcpath{resilience\_restoration\_mip.cpp:1622--1647}。
+\srcpath{src/resilience/resilience\_restoration\_mip.cpp:solve\_branch\_and\_cut\_isolated（lambda）}。
 
 \subsection{覆盖边界}
 

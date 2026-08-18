@@ -25,15 +25,15 @@ $l_k=P_g^{min}+kw$，价格为
  \pi_{gk}=\left[c_{1,g}+\max(0,c_{2,g})(l_k+l_k+w)\right](1+\mu_g).
 \end{equation}
 这是真实二次成本的弦斜率，并且负 $c_2$ 被截为零；依据为
-\srcpath{src/market/participant\_behavior.cpp:12--16} 和
-\srcpath{participant\_behavior.cpp:116--178}。
+\srcpath{src/market/participant\_behavior.cpp:cost\_secant\_slope} 和
+\srcpath{src/market/participant\_behavior.cpp:submit\_participant\_offers}。
 
 \subsection{SCUC 变量和报价目标}
 
 \srcpath{build\_market\_commitment\_model} 的变量块顺序严格为：机组出力、commitment、startup、
 shutdown、备用、能量分段、AC 相角/流/切负荷/弃注入、DC 电压/流/切负荷/弃注入、VSC 双向量与
 方向二元、DC/DC 双向量与方向二元、DC 储能充放/能量/方向二元、可选 N-1 总备用。
-偏移赋值见 \srcpath{src/market/market\_simulation.cpp:941--1017}。
+偏移赋值见 \srcpath{src/market/market\_simulation.cpp:build\_market\_commitment\_model}。
 
 机组目标系数不是抽象 $C_g(p)$，而是
 \begin{align}
@@ -44,7 +44,7 @@ shutdown、备用、能量分段、AC 相角/流/切负荷/弃注入、DC 电压
  c(p_{gtk}^{seg})&=\max(0,\pi_{gk})\Delta t.
 \end{align}
 切负荷和弃注入、DC 储能充放报价也直接写入同一线性目标；见
-\srcpath{market\_simulation.cpp:1025--1256}。
+\srcpath{src/market/market\_simulation.cpp:build\_market\_commitment\_model}。
 
 机组出力由
 \begin{align}
@@ -64,7 +64,7 @@ shutdown、备用、能量分段、AC 相角/流/切负荷/弃注入、DC 电压
  \sum_{\tau=\max(0,t-U+1)}^t y_{g\tau}&\le u_{gt},\\
  u_{gt}+\sum_{\tau=\max(0,t-D+1)}^t z_{g\tau}&\le1.
 \end{align}
-依据为 \srcpath{market\_simulation.cpp:1489--1588}。
+依据为 \srcpath{src/market/market\_simulation.cpp:add\_le（lambda）}。
 
 备用需求使用 AC 与 DC gross demand 之和：
 \begin{equation}
@@ -72,7 +72,7 @@ shutdown、备用、能量分段、AC 相角/流/切负荷/弃注入、DC 电压
  (D_t^{AC}+D_t^{DC}).
 \end{equation}
 启用 N-1 时定义 $R_t=\sum_gr_{gt}$，并对每台 outage 机组创建
-$p_{gt}+r_{gt}\le R_t$，见 \srcpath{market\_simulation.cpp:1591--1618}。
+$p_{gt}+r_{gt}\le R_t$，见 \srcpath{src/market/market\_simulation.cpp:add\_le（lambda）}。
 
 \subsection{AC/DC 网络平衡}
 
@@ -85,16 +85,16 @@ AC 线路流等式为
  =-\frac{S_B}{x_l\tau_l}\phi_l,
 \end{equation}
 其中 $|x_l|<10^{-12}$ 时替换为带原符号的 $10^{-6}$，$|\tau_l|\le10^{-12}$ 时取 1，
-$\phi_l$ 为弧度。依据为 \srcpath{market\_simulation.cpp:1281--1332}。
+$\phi_l$ 为弧度。依据为 \srcpath{src/market/market\_simulation.cpp:add\_le（lambda）}。
 
 DC 母线平衡的 VSC、DC/DC、储能和 DC 线路符号逐项见
-\srcpath{market\_simulation.cpp:1334--1379}。DC 线路实际采用
+\srcpath{src/market/market\_simulation.cpp:add\_le（lambda）}。DC 线路实际采用
 \begin{equation}
  f_{mt}=\frac{S_B^{dc}}{r_m}(V_{f,t}^{dc}-V_{t,t}^{dc}),
 \end{equation}
 当 $|r_m|<10^{-12}$ 时一律替换为正 $10^{-6}$，不保留负号。
 VSC 和 DC/DC 方向互斥、硬功率/电压/droop 等式以及 DC 储能状态式对应
-\srcpath{market\_simulation.cpp:1405--1487}。
+\srcpath{src/market/market\_simulation.cpp:add\_le（lambda）}。
 
 \subsection{LODF 和 N-1 筛查}
 
@@ -104,7 +104,7 @@ $|1-h_k|<10^{-7}$ 或非有限，则把该 outage 记为 islanding 并跳过。�
 \begin{equation}
  LODF_{lk}=\frac{h_l}{1-h_k},\qquad LODF_{kk}=-1.
 \end{equation}
-依据为 \srcpath{market\_simulation.cpp:3084--3237}。
+依据为 \srcpath{src/market/market\_simulation.cpp:build\_lodf\_model}。
 
 后果流严格为
 \begin{equation}
@@ -112,14 +112,14 @@ $|1-h_k|<10^{-7}$ 或非有限，则把该 outage 记为 islanding 并跳过。�
 \end{equation}
 限值为 $\max(0,\fld{n1\_emergency\_rating\_multiplier})\fld{rate\_a\_mva}_l$；
 只有 $|f_{l|k,t}|-limit$ 大于 \fld{n1\_violation\_tolerance\_mw} 才报告违规。
-依据为 \srcpath{market\_simulation.cpp:3264--3315}。
+依据为 \srcpath{src/market/market\_simulation.cpp:screen\_n1}。
 
 \subsection{结算赋值}
 
 日前客户能量付款按 AC/DC 已服务负荷乘各自 LMP 和 $\Delta t$；外生注入收入按
 $(injection-curtailment)\,LMP\,\Delta t$。客户总付款为能量、备用和 uplift charge 之和；
 资源总收入为能量、备用和 uplift revenue 之和；拥塞租为客户能量付款减资源能量收入。
-依据为 \srcpath{market\_simulation.cpp:4508--4664}。
+依据为 \srcpath{src/market/market\_simulation.cpp:settle\_market}。
 
 实时机组偏差收入不是把全量实时出力按实时价结算，而是
 \begin{equation}
@@ -132,21 +132,21 @@ $(injection-curtailment)\,LMP\,\Delta t$。客户总付款为能量、备用和 
 \end{align}
 备用交付量是指令乘 performance factor；机组惩罚偏差为
 $\max(0,|P^{RT}-P^{instruction}|-\rho\max(|P^{instruction}|,1))$。
-依据为 \srcpath{market\_simulation.cpp:5570--5628} 和
-\srcpath{market\_simulation.cpp:5734--5751}。
+依据为 \srcpath{src/market/market\_simulation.cpp:invalid\_nonnegative（lambda）} 和
+\srcpath{src/market/market\_simulation.cpp:invalid\_nonnegative（lambda）}。
 
 HHI 使用百分数份额而非 $[0,1]$ 份额：
 \begin{equation}
  HHI_{output}=\sum_p(100E_p/\sum_qE_q)^2,
 \end{equation}
 无总量时份额为零；收入 HHI 同理但负收入先截为零，见
-\srcpath{market\_simulation.cpp:4461--4498}。
+\srcpath{src/market/market\_simulation.cpp:aggregate\_participant\_settlement}。
 
 \subsection{覆盖边界}
 
 完整 SCUC 还包含 DC storage 日循环、网络限值动态激活、warm start 修复、跨轮求解器状态复用；
 固定组合 pricing 模型、对偶提取、AC 验证、重复博弈也各有独立分支。
-它们的权威实现分别位于 \srcpath{market\_simulation.cpp:941--3079}、
-\srcpath{market\_simulation.cpp:3317--4427}、
-\srcpath{market\_simulation.cpp:4681--5266}、
-\srcpath{market\_simulation.cpp:5861--6085}。本章不以标准 SCED 或博弈通式替代尚未逐式展开的代码。
+它们的权威实现分别位于 \srcpath{src/market/market\_simulation.cpp:build\_market\_commitment\_model}、
+\srcpath{src/market/market\_simulation.cpp:extract\_pricing}、
+\srcpath{src/market/market\_simulation.cpp:run\_day\_ahead\_market}、
+\srcpath{src/market/market\_simulation.cpp:run\_repeated\_market\_game}。本章不以标准 SCED 或博弈通式替代尚未逐式展开的代码。

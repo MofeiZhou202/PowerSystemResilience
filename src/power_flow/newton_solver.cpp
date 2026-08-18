@@ -2020,8 +2020,13 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
       const Eigen::VectorXd& rhs_for_linear =
           use_scaled_linear_system ? mismatch_scaled : mismatch;
 
-      if (opt.robust_nonlinear.enable_condition_monitor ||
-          ropts.enable_newton_krylov_fallback) {
+      // The condition proxy is an O(nnz) sweep. It only feeds the Newton path
+      // through the NK-GMRES trigger below, which is gated on
+      // enable_newton_krylov_fallback; when that is off the value is a pure
+      // diagnostic. So refresh it every inner iteration only when it can change
+      // control flow, otherwise once per outer PV/PQ pass (numerically inert).
+      if (ropts.enable_newton_krylov_fallback ||
+          (opt.robust_nonlinear.enable_condition_monitor && inner_iters == 0)) {
         out.profiling.condition_estimate = estimate_condition_proxy(jac_for_linear);
       }
 

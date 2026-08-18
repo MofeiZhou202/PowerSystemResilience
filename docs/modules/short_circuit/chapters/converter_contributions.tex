@@ -2,7 +2,7 @@
 \section{换流器短路贡献}\label{sec:sc-converter}
 
 \subsection{两类换流器短路模型}
-换流器短路行为由 \fld{SCConverterModel}（\srcpath{short\_circuit.hpp:88}）区分：
+换流器短路行为由 \fld{SCConverterModel}（\srcpath{include/hacdcpf/analysis/short\_circuit.hpp:SCConverterModel}）区分：
 \begin{itemize}
   \item \textbf{非 AC 构网 VSC}：受限电流源。源码先按
         \fld{i\_max\_pu}（非默认 1 优先）、\fld{i\_ac\_max\_pu}、
@@ -11,7 +11,7 @@
         I_{source}=k\frac{\fld{p\_rated\_mw}}{\sqrt3U_{bus}}.
         \end{equation}
         当 \fld{p\_rated\_mw}$\le10^{-6}$ 时视为缺额定（\texttt{...\_missing\_rating}）、
-        贡献保持零（\srcpath{short\_circuit.cpp:1477--1484}）。源到故障点的传递还乘
+        贡献保持零（\srcpath{src/short\_circuit/short\_circuit.cpp:current\_source\_contribution\_ka（lambda）}）。源到故障点的传递还乘
         $|Z_{k,xfer}|/|Z_k|$ 及两端电流基准换算；
   \item \textbf{AC 构网 VSC}：代码使用电压源阻抗
         \begin{equation}
@@ -22,14 +22,14 @@
         \end{equation}
         贡献按 $c/|z_{conv}|$ 和传递阻抗比计算。
 \end{itemize}
-上述实现见 \srcpath{src/short\_circuit/short\_circuit.cpp:1273--1279}、
-\srcpath{short\_circuit.cpp:1321--1342} 和 \srcpath{short\_circuit.cpp:1449--1496}。
+上述实现见 \srcpath{src/short\_circuit/short\_circuit.cpp:converter\_current\_multiplier（lambda）}、
+\srcpath{src/short\_circuit/short\_circuit.cpp:source\_transfer\_abs（lambda）} 和 \srcpath{src/short\_circuit/short\_circuit.cpp:current\_source\_contribution\_ka（lambda）}。
 
 \subsection{贡献结果}
-逐换流器贡献记于 \fld{SCConverterContributionResult}（:144）：\fld{converter\_index}、\fld{bus\_id}、
+逐换流器贡献记于 \fld{SCConverterContributionResult}（:bus\_kv（lambda））：\fld{converter\_index}、\fld{bus\_id}、
 \fld{model}（\texttt{grid\_following\_current\_source} / \texttt{ac\_grid\_forming\_voltage\_source}）、
 \fld{ac\_grid\_forming}/\fld{dc\_grid\_forming} 标志、\fld{p\_rated\_mw}、\fld{i\_limit\_pu} 与
-\fld{contribution\_ka}。该贡献并入故障母线 \fld{ikss\_converter\_contrib\_ka}（:114），与发电机/
+\fld{contribution\_ka}。该贡献并入故障母线 \fld{ikss\_converter\_contrib\_ka}（:load\_motor\_active\_power\_mw），与发电机/
 电机/外网贡献分列，便于按来源审计。
 
 \subsection{与旋转机的区别}

@@ -53,9 +53,9 @@
 
 \subsection{诚实口径}
 \fld{model\_scope}（\texttt{MarketModelScope}）的默认值声明于
-\srcpath{market\_simulation.hpp:120--136}（\fld{model\_scope}=\texttt{"ac-dc-linear-v1"}、
+\srcpath{include/hacdcpf/market/market\_simulation.hpp:MarketModelScope}（\fld{model\_scope}=\texttt{"ac-dc-linear-v1"}、
 各布尔标志 false），并在出清入口按系统组成运行时改写
-（\srcpath{market\_simulation.cpp:4725--4739}）：含 DC 母线/支路/换流器的混合系统置
+（\srcpath{src/market/market\_simulation.cpp:run\_day\_ahead\_market}）：含 DC 母线/支路/换流器的混合系统置
 \fld{model\_scope}=\texttt{"ac-dc-linear-v1:dc-voltage+bidirectional-converters"}、
 \fld{dc\_network\_modelled}=\fld{dc\_voltage\_linearized}=true，
 \fld{vsc\_bidirectional\_efficiency\_modelled} 与
@@ -63,15 +63,15 @@
 \fld{dc\_storage\_optimized} 系列按实际参与优化的 DC 储能置真；纯 AC 系统则为
 \texttt{"ac-only-dc-power-flow"} 且各 DC 标志保持 false。
 启用 N-1 时另置 \fld{hybrid\_n1\_modelled}=\fld{full\_component\_n1\_modelled}=true 并写入
-\fld{n1\_recourse\_policy}（\srcpath{market\_simulation.cpp:5170--5173}）。
-\fld{energy\_prices\_valid} 在基态定价成功前为 false（\srcpath{market\_simulation.cpp:4966}）。
-模型覆盖边界逐条写入 \fld{limitations}（\srcpath{market\_simulation.cpp:4740--4744}）：
+\fld{n1\_recourse\_policy}（\srcpath{src/market/market\_simulation.cpp:pricing\_objective（lambda）}）。
+\fld{energy\_prices\_valid} 在基态定价成功前为 false（\srcpath{src/market/market\_simulation.cpp:pricing\_objective（lambda）}）。
+模型覆盖边界逐条写入 \fld{limitations}（\srcpath{src/market/market\_simulation.cpp:run\_day\_ahead\_market}）：
 DC 支路损耗不进入商业出清、在非线性认证中校核；VSC 固定/电流相关损耗、容量圆、
 电流与调制限值不是商业约束。
 公式无法表示的在役资产——目前仅 external\_grid 与 energy\_router
-（\srcpath{market\_simulation.cpp:454--476}）——以 \fld{unsupported\_assets}
+（\srcpath{src/market/market\_simulation.cpp:unsupported\_market\_assets}）——以 \fld{unsupported\_assets}
 （\texttt{UnsupportedMarketAsset}）退回，此时状态为
-\texttt{"unsupported\_hybrid\_market\_assets"} 并直接返回（\srcpath{market\_simulation.cpp:4750--4757}）。
+\texttt{"unsupported\_hybrid\_market\_assets"} 并直接返回（\srcpath{src/market/market\_simulation.cpp:run\_day\_ahead\_market}）。
 \fld{scuc\_mip\_relative\_gap}=$10^{-2}$ 意味着 SCUC 为近似解，除非 \fld{scuc\_optimality\_proven}
 置真；AC 应急校核为 opt-in，失败在 \texttt{SecurityResult} 中保持显式（不静默修复）。
 
@@ -133,23 +133,23 @@ DC 支路损耗不进入商业出清、在非线性认证中校核；VSC 固定/
 \begin{itemize}
   \item 出清为\textbf{线性化全混合}：混合 AC/DC 系统的 DC 网络以线性化直流电压参与
         SCUC/SCED 定价（\fld{dc\_lmp\_per\_mwh} 取 DC 平衡约束对偶，
-        \srcpath{market\_simulation.cpp:3408--3412}），VSC/DC/DC 换流器按双向效率建模；
+        \srcpath{src/market/market\_simulation.cpp:extract\_pricing}），VSC/DC/DC 换流器按双向效率建模；
         \fld{model\_scope} 运行时按系统组成改写为
         \texttt{"ac-dc-linear-v1:dc-voltage+bidirectional-converters"} 或
         \texttt{"ac-only-dc-power-flow"}，效率/储能标志按在役设备条件化置真
-        （\srcpath{market\_simulation.cpp:4725--4739}）；
+        （\srcpath{src/market/market\_simulation.cpp:run\_day\_ahead\_market}）；
   \item DC 支路损耗不进入商业 SCUC/SCED、在非线性认证中校核；VSC 固定/电流相关损耗、
         容量圆、电流与调制限值不是商业约束（\fld{limitations}，
-        \srcpath{market\_simulation.cpp:4740--4744}）；
+        \srcpath{src/market/market\_simulation.cpp:run\_day\_ahead\_market}）；
   \item 公式无法表示的在役资产（目前仅 external\_grid、energy\_router）以
         \texttt{UnsupportedMarketAsset} 退回（不静默丢弃，
-        \srcpath{market\_simulation.cpp:454--476,4750--4757}）；
+        \srcpath{src/market/market\_simulation.cpp:unsupported\_market\_assets,4750--4757}）；
   \item N-1：预防式 LODF 割覆盖 AC 支路；机组、DC 支路、换流器与 DC 储能停用在启用
         N-1 时以校正性固定组合 SCED 校核（\fld{hybrid\_n1\_modelled}，
-        \srcpath{market\_simulation.cpp:5170--5173}）；AC 应急校核为 opt-in，
+        \srcpath{src/market/market\_simulation.cpp:pricing\_objective（lambda）}）；AC 应急校核为 opt-in，
         失败在 \texttt{SecurityResult} 中保持显式；
   \item \fld{scuc\_mip\_relative\_gap}=$10^{-2}$：SCUC 为近似解，除非 \fld{scuc\_optimality\_proven}；
-  \item \fld{energy\_prices\_valid} 在基态定价成功前为 false（\srcpath{market\_simulation.cpp:4966}）。
+  \item \fld{energy\_prices\_valid} 在基态定价成功前为 false（\srcpath{src/market/market\_simulation.cpp:pricing\_objective（lambda）}）。
 \end{itemize}
 规范文档：\srcpath{docs/reference/market\_simulation\_runtime.md}、
 \srcpath{docs/theory/market\_simulation\_mathematical\_models.md}。

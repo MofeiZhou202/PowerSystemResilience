@@ -27,8 +27,8 @@ $(\texttt{site\_lat},\texttt{site\_lon})$，代码依次计算
 返回值采用严格分支：当 \texttt{v10}<0.01 时返回 0，否则返回
 $\max(0,\texttt{v10})$。当前实现没有计算或返回气压廓线 $p(r)$，也没有把平移速度矢量叠加到
 \texttt{gradient}，因此本手册不写这两项。依据为
-\srcpath{src/scenario\_generation/typhoon\_resilience.cpp:441--451} 和
-\srcpath{typhoon\_resilience.cpp:780--789}。
+\srcpath{src/scenario\_generation/typhoon\_resilience.cpp:holland\_wind\_ms\_impl} 和
+\srcpath{src/scenario\_generation/typhoon\_resilience.cpp:holland\_wind\_ms}。
 
 \subsection{降雨实现}
 
@@ -49,7 +49,7 @@ $\max(0,\texttt{v10})$。当前实现没有计算或返回气压廓线 $p(r)$，
 \end{align}
 $m_s$ 完全按 \srcpath{rain\_sector\_multiplier} 的八分区和
 \texttt{translation\_speed\_kmph}/3.6 的 $<4$、$>8$ 分支选取；不是连续拟合函数。
-依据为 \srcpath{typhoon\_resilience.cpp:454--496}。
+依据为 \srcpath{src/scenario\_generation/typhoon\_resilience.cpp:bearing\_sector\_deg}。
 
 \subsection{架空段故障概率}
 
@@ -88,7 +88,7 @@ $m_s$ 完全按 \srcpath{rain\_sector\_multiplier} 的八分区和
  \end{cases}\\
  p_{over}&=\operatorname{clamp}(1-(1-p_{wind})(1-p_{seg}),0,1).
 \end{align}
-依据为 \srcpath{typhoon\_resilience.cpp:499--538}。
+依据为 \srcpath{src/scenario\_generation/typhoon\_resilience.cpp:normal\_cdf}。
 
 \subsection{电缆段故障概率与资产分支}
 
@@ -113,7 +113,7 @@ $m_s$ 完全按 \srcpath{rain\_sector\_multiplier} 的八分区和
 \end{align}
 \texttt{Cable} 直接返回 $p_{cable}$；\texttt{Mixed} 返回
 $\operatorname{clamp}(1-(1-p_{over})(1-p_{cable}),0,1)$；其他类型返回 $p_{over}$。
-依据为 \srcpath{typhoon\_resilience.cpp:540--573}。
+依据为 \srcpath{src/scenario\_generation/typhoon\_resilience.cpp:cable\_segment\_probability}。
 
 \subsection{支路聚合、抽样和修复}
 
@@ -132,7 +132,7 @@ $U<p_{branch,t}$ 即记录故障时刻。\fld{min\_fault\_probability} 不参与
  T_r&\leftarrow\operatorname{clamp}(T_r,
  \max(10^{-6},\texttt{time\_step\_hr}),\texttt{max\_repair\_time\_hr}).
 \end{align}
-依据为 \srcpath{typhoon\_resilience.cpp:1512--1593}。
+依据为 \srcpath{src/scenario\_generation/typhoon\_resilience.cpp:generate\_typhoon\_fault\_sequence}。
 
 启用分阶段修复时，准备时刻为“最后故障时刻加非负延迟”，每槽时间为
 $\max(\texttt{time\_step\_hr},\texttt{repair\_crew\_time\_per\_branch\_hr})$。
@@ -144,7 +144,7 @@ $\max(\texttt{time\_step\_hr},\texttt{repair\_crew\_time\_per\_branch\_hr})$。
 当故障数超过 \texttt{kMaxExactStagedRepairFaults} 时，改用源距离、故障时间、峰值概率、
 支路类型、稳定 ID 的顺序排序，并置
 \fld{used\_approximate\_repair\_order}=true。依据为
-\srcpath{typhoon\_resilience.cpp:1345--1448}。
+\srcpath{src/scenario\_generation/typhoon\_resilience.cpp:apply\_staged\_post\_disaster\_repairs}。
 
 \subsection{交通影响递推}
 
@@ -171,8 +171,8 @@ $\max(\texttt{time\_step\_hr},\texttt{repair\_crew\_time\_per\_branch\_hr})$。
 $V<\texttt{wind\_closure\_ms}$。时耗更新为
 $\texttt{base\_time\_hr}/\max(\texttt{minimum\_open\_speed\_factor},f_v)$；容量在可用时为
 $\texttt{base\_capacity}f_c$，否则为 0。依据为
-\srcpath{src/scenario\_generation/typhoon\_traffic\_impact.cpp:164--184} 和
-\srcpath{typhoon\_traffic\_impact.cpp:266--410}。
+\srcpath{src/scenario\_generation/typhoon\_traffic\_impact.cpp:wind\_capacity\_factor} 和
+\srcpath{src/scenario\_generation/typhoon\_traffic\_impact.cpp:apply\_typhoon\_traffic\_impact}。
 
 \subsection{候选距离与 medoid 更新}
 
@@ -190,7 +190,7 @@ $\texttt{base\_capacity}f_c$，否则为 0。依据为
 迭代上限是 $\max(1,\texttt{max\_iterations})$，无变化即提前停止。初始化的抽样权重是
 $\max(10^{-12},\pi_i)d_{nearest,i}^{2}$，并非普通无权 k-medoids。聚类概率先累加成员概率，
 当总和大于 $10^{-12}$ 时再除以总和。依据为
-\srcpath{src/scenario\_generation/scenario\_generation.cpp:1542--1654}。
+\srcpath{src/scenario\_generation/scenario\_generation.cpp:candidate\_distance}。
 
 \subsection{风险分数和尾部锚点的实际语义}
 
@@ -205,12 +205,12 @@ $\max(10^{-9},Q_{75}-Q_{25})$ 缩放。对候选的缩放值集合 $v_k$，源�
 \fld{coupling\_quantile} 时增加耦合尾标签。锚点集合还包含有故障的弹性候选以及每个
 \fld{regime\_label} 中风险最高的候选；若超过 $k$，优先保留有故障候选，再按
 \fld{risk\_score} 降序截断到 $k$。因此 \fld{tail\_fraction} 并未参与当前锚点选择，不能描述为
-“固定保留最高 5\%”。依据为 \srcpath{scenario\_generation.cpp:1460--1584}。
+“固定保留最高 5\%”。依据为 \srcpath{src/scenario\_generation/scenario\_generation.cpp:raw\_risk\_source\_scores}。
 
 \subsection{覆盖边界}
 
 本章覆盖当前实现中可独立核验的台风风雨、段/支路故障、修复、交通递推和聚类公式。
 常规、可靠性、弹性候选的概率在各生成分支中直接按有效候选数设为等概率；可靠性与弹性分支
-分别见 \srcpath{scenario\_generation.cpp:2211--2252}、
-\srcpath{scenario\_generation.cpp:2459--2640}。本章没有把配置字段名称转化为代码不存在的
+分别见 \srcpath{src/scenario\_generation/scenario\_generation.cpp:base\_load\_components（lambda）}、
+\srcpath{src/scenario\_generation/scenario\_generation.cpp:generate\_resilience\_scenarios}。本章没有把配置字段名称转化为代码不存在的
 随机分布、物理约束或跨族概率模型。

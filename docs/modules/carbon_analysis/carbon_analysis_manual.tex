@@ -91,9 +91,9 @@ $P_{ki}/P_i^{\text{in}}$，则母线碳强度 $\rho_i$ 满足比例混合律
 \end{equation}
 其中 $e_g$ 为机组排放强度。负荷排放 $=\rho_i P_{d,i}$；支路损耗排放全额
 计入送端节点（即 $C_{es}^{loss}=P_e^{loss}F_{f(e),s}$，
-\srcpath{proportional\_tracing}，carbon\_analysis.cpp:1523--1536），不经
+\srcpath{proportional\_tracing}，src/carbon\_analysis/carbon\_analysis.cpp:proportional\_tracing），不经
 \fld{loss\_allocation\_alpha} 分摊——该系数仅作用于下节的矩阵法
-（\srcpath{solve\_carbon\_matrix}，carbon\_analysis.cpp:1735--1738）。
+（\srcpath{solve\_carbon\_matrix}，src/carbon\_analysis/carbon\_analysis.cpp:solve\_carbon\_matrix）。
 
 \subsection{碳排放流矩阵法}
 在标准碳排放流理论（Kang 等）下，节点碳势向量 $\mathbf{w}$ 满足稀疏线性方程

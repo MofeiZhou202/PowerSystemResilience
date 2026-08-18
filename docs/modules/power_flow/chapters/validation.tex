@@ -115,7 +115,7 @@
   \item \textbf{\srcpath{matpower/}}：85 个 \texttt{.m} 文件，其中
         \texttt{contab\_*}（4 个）与 \texttt{scenarios\_*}（2 个）为扰动/场景
         辅助文件，潮流回归只取其余 79 个标准算例，分三档
-        （\srcpath{tests/test\_matpower\_cases.cpp:4--11}）：Tier1 九算例
+        （\srcpath{tests/test\_matpower\_cases.cpp}）：Tier1 九算例
         （case5/9/14/30/57/118/300/39/24\_ieee\_rts）逐案断言收敛与电压合理性；
         Tier2 批量 54 算例（case533mt\_hi/lo 因解析器不支持算术表达式允许
         skip 不计失败）批收敛率 $\ge 85\%$；Tier3 大系统 14 算例至
@@ -150,7 +150,7 @@
         \srcpath{HACDCPF\_ENABLE\_OPENDSS}（默认 OFF）与
         \srcpath{HACDCPF\_ENABLE\_OPENDSS\_COMPARE} 先生成内部变量
         \srcpath{HACDCPF\_HAVE\_OPENDSS}（CMakeLists.txt:265--334），再派生
-        \srcpath{HACDCPF\_HAVE\_OPENDSS\_COMPARE}（:349--351）；
+        \srcpath{HACDCPF\_HAVE\_OPENDSS\_COMPARE}（:solve\_once（lambda））；
         \srcpath{tests/test\_opendss\_pf\_compare.cpp}（3717 行）仅在后者为真时
         编译（\srcpath{tests/CMakeLists.txt:254--257}），覆盖单相/三相桥对照、
         case33bw 全三相 vs BFS 单相等值、调压器闭环与变压器分接头投影，
@@ -198,18 +198,18 @@
         仍缺；四者依旧由测试/GUI 直接驱动或作为选项层能力暴露。
         Newton--Krylov 回退默认关闭
         （\fld{enable\_newton\_krylov\_fallback\{false\}}，
-        \srcpath{include/hacdcpf/power\_flow/globalization/robust\_nonlinear\_options.hpp:181}），
-        仅在条件数代理越限时可选启用（newton\_solver.cpp:1225--1241）；
+        \srcpath{include/hacdcpf/power\_flow/globalization/robust\_nonlinear\_options.hpp:RobustNonlinearOptions}），
+        仅在条件数代理越限时可选启用（src/power\_flow/newton\_solver.cpp:WorkspaceGuard）；
   \item \textbf{换流器物理不等式默认仅事后校核}：容量圆、交/直流电流限、调制比、
         占空比不嵌入 Newton 方程，求解后由
-        \srcpath{src/api/hacdcpf.cpp:679--714} 发出
+        \srcpath{src/api/hacdcpf.cpp:merge\_solver\_profiling} 发出
         \texttt{ACDC-PHYS-01..05}、:945 发出 \texttt{DCDC-PHYS-01} 告警；
         NEW 新增可选硬约束模式
         \fld{enforce\_converter\_physical\_limits\{false\}}
-        （\srcpath{include/hacdcpf/power\_flow/power\_flow\_options.hpp:134}）：
+        （\srcpath{include/hacdcpf/power\_flow/power\_flow\_options.hpp:PowerFlowOptions}）：
         置 true 时带物理告警的 Newton 根被判不可行而非报收敛
-        （\srcpath{src/api/hacdcpf.cpp:957}），并在结果 \fld{validity} 中
-        如实标记各限值已强制（:1012--1016）；默认仍为仅告警模式。
+        （\srcpath{src/api/hacdcpf.cpp:solve\_newton\_with\_lcc\_tap\_control}），并在结果 \fld{validity} 中
+        如实标记各限值已强制（:solve\_newton\_with\_lcc\_tap\_control）；默认仍为仅告警模式。
         覆盖边界经 \fld{converter\_model\_scope} 声明（回归：
         \srcpath{test\_converter\_coordination.cpp} 的
         “Power-flow result declares its converter model scope”，:652）；
@@ -224,10 +224,10 @@
         component loads”（与 NR 结果差 $<2\times10^{-4}$/$<3\times10^{-4}$）；
   \item \textbf{CPF 默认弧长延拓}：NEW 起 \srcpath{CpfSolver} 默认以弧长增广
         求解（\fld{enable\_arc\_length\{true\}}，
-        \srcpath{include/hacdcpf/power\_flow/voltage\_stability.hpp:95}），
+        \srcpath{include/hacdcpf/power\_flow/voltage\_stability.hpp:CpfOptions}），
         $\lambda$ 作为增广未知量，可翻越鼻点并保留下支
-        \fld{lower\_branch\_steps\{2\}}（:100）个点；置 false 时保留自然
-        参数化旧模式（\srcpath{src/power\_flow/voltage\_stability.cpp:406--419}）。
+        \fld{lower\_branch\_steps\{2\}}（:CpfOptions）个点；置 false 时保留自然
+        参数化旧模式（\srcpath{src/power\_flow/voltage\_stability.cpp:record（lambda）}）。
         \fld{CpfPoint} 新增 \fld{vdc}、\fld{va} 单位改为弧度（hpp:118--124）；
         鼻点摘要取迹线 $\lambda$ 最大点而非末点（cpp:495--500）。回归：
         \srcpath{tests/test\_voltage\_stability.cpp}（模型细节见
@@ -236,20 +236,20 @@
         \srcpath{include/hacdcpf/power\_flow/workspace.hpp} 新增
         \srcpath{prepare\_state}/\srcpath{prepare\_equations}/%
         \srcpath{reset\_iteration}（:35--42，实现
-        \srcpath{src/power\_flow/workspace.cpp:7--31}）；
+        \srcpath{src/power\_flow/workspace.cpp:prepare\_state}）；
         \srcpath{NewtonSolver} 复用每实例 \texttt{SolverWorkspace}，并以
         \fld{workspace\_in\_use\_} 递归守卫防止嵌套求解互踩
-        （\srcpath{src/power\_flow/newton\_solver.cpp:875--884}）。回归：
+        （\srcpath{src/power\_flow/newton\_solver.cpp:build\_jacobian\_context}）。回归：
         \srcpath{tests/test\_newton\_krylov.cpp} 的 “SolverWorkspace resets
         values while retaining its layout”；
   \item \textbf{\srcpath{solver\_interface.hpp} 已接线}：NEW 新增
         \srcpath{src/power\_flow/solver\_interface.cpp}（137 行），实现
         \texttt{NewtonHybridSolver::solve} 等接口求解器与
         \srcpath{PowerFlowSolverFactory::create}
-        （\srcpath{include/hacdcpf/power\_flow/solver\_factory.hpp:41}）；
+        （\srcpath{include/hacdcpf/power\_flow/solver\_factory.hpp:PowerFlowSolverFactory}）；
         工厂对 Newton/FDPF/DC/Adaptive/Continuation/NewtonKrylov 六方法
         均可产出可求解实例（回归 “Unified solver factory returns linked,
-        callable solvers”，\srcpath{tests/test\_newton\_krylov.cpp:37--54}）。
+        callable solvers”，\srcpath{tests/test\_newton\_krylov.cpp:TEST\_CASE}）。
         生产 API 路径仍统一走 \srcpath{engine::NewtonSolver}
         （见第~\ref{sec:overview}~章求解器抽象层一节）。
 \end{enumerate}

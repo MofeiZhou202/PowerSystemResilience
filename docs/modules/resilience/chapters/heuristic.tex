@@ -3,7 +3,7 @@
 
 \subsection{功能定位}
 默认模型 \fld{HeuristicSequential}（\srcpath{run\_distribution\_resilience\_assessment}，
-\srcpath{resilience\_assessment.hpp:468}）在 \fld{horizon\_hours} 个时步上逐步演进：施加/修复
+\srcpath{include/hacdcpf/resilience/resilience\_assessment.hpp:run\_distribution\_resilience\_assessment}）在 \fld{horizon\_hours} 个时步上逐步演进：施加/修复
 故障、隔离故障区、贪心闭合联络开关以重新带电失电负荷、调度储能与 DER，并统计逐步供电
 与切负荷。它快速但不保证全局最优，适合大规模快速评估与作为 MILP 的对照基线。
 
@@ -24,7 +24,7 @@
 \end{enumerate}
 
 \subsection{每步产物}
-逐步结果 \fld{DistributionResilienceStepResult}（:332）记录带电/失电、开关动作
+逐步结果 \fld{DistributionResilienceStepResult}（:DistributionResilienceStepResult）记录带电/失电、开关动作
 （\fld{switch\_open\_actions}/\fld{switch\_close\_actions}）、故障区母线、MESS 状态
 \fld{mess\_states}、按优先级分解的 \fld{shed\_by\_priority}，以及拓扑韧性诊断
 \fld{cut\_vertex\_bus\_ids}（割点，优先派修）与 \fld{bridge\_branch\_ids}（桥，恢复后重连最大子树）。

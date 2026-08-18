@@ -36,29 +36,29 @@
 
 \subsection{生产主调用链}
 统一潮流主入口 \srcpath{hacdcpf::solve\_power\_flow}
-（\srcpath{src/api/hacdcpf.cpp:880}）的执行顺序如下，每一步均注明源码位置：
+（\srcpath{src/api/hacdcpf.cpp:solve\_power\_flow}）的执行顺序如下，每一步均注明源码位置：
 
 \begin{enumerate}
   \item \textbf{参考母线资格校验}：\srcpath{validate\_reference\_bus\_eligibility}
-        （hacdcpf.cpp:882），隔离/失电母线不得作 slack；
+        （src/api/hacdcpf.cpp:solve\_power\_flow），隔离/失电母线不得作 slack；
   \item \textbf{换流器协调预校核}（可选，默认关）：
-        \srcpath{powerflow::evaluate\_converter\_coordination}（:893），
+        \srcpath{powerflow::evaluate\_converter\_coordination}（:solve\_power\_flow），
         按 DC 电压岛汇总电压源与功率平衡裕度，Error/Fatal 级问题阻断求解
         （规则目录见第~\ref{sec:hybrid}~章）；
-  \item \textbf{图拓扑预检}（:907--922）：无任何带 slack 的合法 AC 岛时直接返回失败；
+  \item \textbf{图拓扑预检}（:solve\_power\_flow）：无任何带 slack 的合法 AC 岛时直接返回失败；
   \item \textbf{SolverData 获取与缓存}：\srcpath{get\_cached\_solver\_data}（:923，
         thread\_local 缓存，指针+存储视图+哈希签名三重匹配，:373--452）；
         未命中时 \srcpath{make\_solver\_data} 重建
-        （\srcpath{src/power\_flow/solver\_data.cpp:265}）；
-  \item \textbf{ZIP 权重应用}：\srcpath{apply\_zip\_weights}（:507）；
+        （\srcpath{src/power\_flow/solver\_data.cpp:make\_solver\_data}）；
+  \item \textbf{ZIP 权重应用}：\srcpath{apply\_zip\_weights}（\srcpath{src/api/hacdcpf.cpp:apply\_zip\_weights}）；
   \item \textbf{Newton 求解}：\srcpath{engine::NewtonSolver::solve}（:925--927，
-        实现 \srcpath{src/power\_flow/newton\_solver.cpp:866}）；
-  \item \textbf{派生结果回算}：\srcpath{populate\_derived\_results}（:937 起），
+        实现 \srcpath{src/power\_flow/newton\_solver.cpp:solve}）；
+  \item \textbf{派生结果回算}：\srcpath{populate\_derived\_results}（\srcpath{src/api/hacdcpf.cpp:populate\_derived\_results}），
         含支路潮流 \srcpath{compute\_branch\_flows} 与换流器传输功率/损耗/限值校核；
   \item \textbf{换流器物理限值强制}（可选，默认关）：
-        \fld{enforce\_converter\_physical\_limits} 开启时（:957--978），
+        \fld{enforce\_converter\_physical\_limits} 开启时（\srcpath{src/api/hacdcpf.cpp:solve\_power\_flow}），
         违反换流器不等式的 Newton 根被判物理不可行（详见第~\ref{sec:hybrid}~章）；
-  \item \textbf{结果回投影}：\srcpath{unproject\_pf\_result}（:980--985），
+  \item \textbf{结果回投影}：\srcpath{unproject\_pf\_result}（\srcpath{src/api/hacdcpf.cpp:unproject\_pf\_result}），
         把 canonical 解广播/归因回原始母线与支路编号空间，并恢复被合并开关/
         断路器的端子潮流。
 \end{enumerate}
@@ -78,72 +78,72 @@
 入口 & 求解器/路径 & 说明\\
 \midrule
 \srcpath{solve\_power\_flow} & 统一 Newton & 混合 AC/DC 主入口\\
-\srcpath{powerflow::solve\_ac} & $\to$ \srcpath{solve\_power\_flow} & 薄包装（\srcpath{src/power\_flow/ac.cpp:7}）\\
+\srcpath{powerflow::solve\_ac} & $\to$ \srcpath{solve\_power\_flow} & 薄包装（\srcpath{src/power\_flow/ac.cpp:solve\_ac}）\\
 \srcpath{powerflow::solve\_hybrid} & $\to$ \srcpath{solve\_power\_flow} & 薄包装（\srcpath{src/power\_flow/hybrid.cpp}）\\
 \srcpath{solve\_power\_flow\_fdpf} & \srcpath{FDPFSolver} & 快速解耦，纯 AC\\
-\srcpath{solve\_ac\_linearized\_dc} & $B\theta=P$ & 线性化角度潮流（\srcpath{ac\_linearized\_pf.cpp:12}）\\
-\srcpath{solve\_dc\_power\_flow} & \srcpath{DCSolver} & DC 网络电压 Newton（\srcpath{dc\_solver.cpp:22}）\\
-\srcpath{solve\_power\_flow\_adaptive} & \srcpath{AdaptiveSolver} & 分岛并行（\srcpath{adaptive\_solver.cpp:122}）\\
+\srcpath{solve\_ac\_linearized\_dc} & $B\theta=P$ & 线性化角度潮流（\srcpath{src/power\_flow/ac\_linearized\_pf.cpp:solve\_ac\_linearized\_dc}）\\
+\srcpath{solve\_dc\_power\_flow} & \srcpath{DCSolver} & DC 网络电压 Newton（\srcpath{src/power\_flow/dc\_solver.cpp:solve}）\\
+\srcpath{solve\_power\_flow\_adaptive} & \srcpath{AdaptiveSolver} & 分岛并行（\srcpath{src/power\_flow/adaptive\_solver.cpp:solve}）\\
 \srcpath{solve\_power\_flow\_distributed\_slack}(\srcpath{\_full}) & \srcpath{DistributedSlackSolver} & 分布式松弛两变体\\
 SolverHandle 族 & \srcpath{make\_solver\_handle} 等 & 符号分解/模式跨多次求解复用（时序仿真用）\\
-\srcpath{analysis::solve\_distribution\_pf} & BFS 前推回代 & 辐射状配网（\srcpath{distribution\_power\_flow.cpp:1041}）\\
-\srcpath{analysis::solve\_three\_phase\_nr} & 相域 NR & 三相不平衡（\srcpath{three\_phase\_nr.cpp:5576}）\\
-\srcpath{solve\_three\_phase\_hybrid\_pf} & 相域 AC+DC 联立 & 矩阵级 API（\srcpath{three\_phase\_hybrid.cpp:432}）\\
-\srcpath{CpfSolver::solve} & 连续潮流 & 电压稳定（\srcpath{voltage\_stability.cpp:287}）\\
+\srcpath{analysis::solve\_distribution\_pf} & BFS 前推回代 & 辐射状配网（\srcpath{src/power\_flow/distribution\_power\_flow.cpp:solve\_distribution\_pf}）\\
+\srcpath{analysis::solve\_three\_phase\_nr} & 相域 NR & 三相不平衡（\srcpath{src/power\_flow/three\_phase\_nr.cpp:solve\_three\_phase\_nr\_snapshot}）\\
+\srcpath{solve\_three\_phase\_hybrid\_pf} & 相域 AC+DC 联立 & 矩阵级 API（\srcpath{src/power\_flow/three\_phase\_hybrid.cpp:solve\_three\_phase\_hybrid\_pf}）\\
+\srcpath{CpfSolver::solve} & 连续潮流 & 电压稳定（\srcpath{src/power\_flow/voltage\_stability.cpp:solve}）\\
 \bottomrule
 \end{tabular}
 \end{center}
 
 \subsection{求解器抽象层与工厂}
-抽象接口 \srcpath{IPowerFlowSolver}（\srcpath{include/hacdcpf/power\_flow/solver\_interface.hpp:17--29}）
+抽象接口 \srcpath{IPowerFlowSolver}（\srcpath{include/hacdcpf/power\_flow/solver\_interface.hpp:IPowerFlowSolver}）
 声明 \texttt{solve(problem)}/\texttt{name()} 两方法及 6 个子类
 （\texttt{NewtonHybridSolver}/\allowbreak\texttt{FDPFSolver}/\allowbreak\texttt{DCPowerFlowSolver} 等，:35--74）；
-问题描述符 \srcpath{PowerFlowProblem}（\srcpath{power\_flow\_problem.hpp:23--32}）携带
+问题描述符 \srcpath{PowerFlowProblem}（\srcpath{include/hacdcpf/power\_flow/power\_flow\_problem.hpp:PowerFlowProblem}）携带
 SolverData、选项与规模摘要，工厂 \srcpath{build\_power\_flow\_problem}
-（声明 \srcpath{power\_flow\_problem.hpp:44--46}，实现
-\srcpath{src/power\_flow/solver\_interface.cpp:27--37}）装配。
+（声明 \srcpath{include/hacdcpf/power\_flow/power\_flow\_problem.hpp:build\_power\_flow\_problem}，实现
+\srcpath{src/power\_flow/solver\_interface.cpp:build\_power\_flow\_problem}）装配。
 \srcpath{solver\_factory.hpp} 提供 \texttt{PowerFlowMethod} 枚举（含
 \texttt{Continuation}）与显式 \texttt{create(PowerFlowMethod)}；六个子类的 \texttt{solve}
 与工厂实现同集中于新增的 \srcpath{src/power\_flow/solver\_interface.cpp}
-（:39--137）。算法选择须经 \texttt{PowerFlowMethod}\textbf{显式}进行；
+（:solve）。算法选择须经 \texttt{PowerFlowMethod}\textbf{显式}进行；
 \texttt{PowerFlowOptions} 只配置已选方法，不再提供会被忽略的工厂重载。
 如实说明：抽象层现已完整接线（\texttt{NewtonHybridSolver::\allowbreak solve}
-委托 \srcpath{powerflow::NewtonSolver}，\srcpath{solver\_interface.cpp:39--41}），
+委托 \srcpath{powerflow::NewtonSolver}，\srcpath{src/power\_flow/solver\_interface.cpp:solve}），
 但生产门面 \srcpath{solve\_power\_flow} 仍不经过该抽象层，直接持有
-thread\_local 的 \srcpath{engine::NewtonSolver}（hacdcpf.cpp:925--927；
+thread\_local 的 \srcpath{engine::NewtonSolver}（src/api/hacdcpf.cpp:solve\_power\_flow；
 规范头 \srcpath{include/hacdcpf/engine/solver/native/nle/newton\_solver.hpp}；
 \srcpath{power\_flow/newton\_solver.hpp} 与 \srcpath{power\_flow/solvers/newton\_solver.hpp}
 均为转发头）。
 
 \subsection{零阻抗合并对潮流装配的影响}
 母线合并发生在投影层（装配之前）：
-\srcpath{merge\_zero\_impedance\_buses\_impl}（\srcpath{src/model/network\_utils.cpp:1540}）
-以阈值 \fld{impedance\_threshold}=$10^{-4}$（\srcpath{include/hacdcpf/projection/project\_to\_canonical.hpp:27}）
+\srcpath{merge\_zero\_impedance\_buses\_impl}（\srcpath{src/model/network\_utils.cpp:merge\_zero\_impedance\_buses\_impl}）
+以阈值 \fld{impedance\_threshold}=$10^{-4}$（\srcpath{include/hacdcpf/projection/project\_to\_canonical.hpp:ProjectionOptions}）
 合并近零阻抗支路两端母线；闭合断路器先折叠为近零阻抗支路再被合并
-（network\_utils.cpp:407--434）。因此 SolverData 中只剩 canonical 母线，
-$Y_{bus}$ 装配时 $|z|=0$ 支路直接跳过（\srcpath{admittance\_builder.cpp:34}）。
+（src/model/network\_utils.cpp:add\_equivalent\_branch\_from\_switch）。因此 SolverData 中只剩 canonical 母线，
+$Y_{bus}$ 装配时 $|z|=0$ 支路直接跳过（\srcpath{src/power\_flow/admittance\_builder.cpp:build\_admittance\_matrix}）。
 合并映射 \fld{bus\_merge\_map} 随 SolverData 携带，求解后回投影恢复原始编号空间
 的结果与开关端子潮流。
 
 \subsection{缓存体系}
 两层缓存避免重复装配与重复符号分解：
 \begin{itemize}
-  \item \textbf{API 层 SolverDataCache}（thread\_local，hacdcpf.cpp:373--452）：
+  \item \textbf{API 层 SolverDataCache}（thread\_local，src/api/hacdcpf.cpp:SolverDataCache）：
         同一 \texttt{HybridPowerSystem} 对象且 \fld{loss\_model} 不变时直接复用；
-  \item \textbf{求解器层 PatternCache}（engine 规范头 newton\_solver.hpp:25--45）：
+  \item \textbf{求解器层 PatternCache}（engine 规范头 include/hacdcpf/power\_flow/newton\_solver.hpp）：
         缓存 \texttt{JacobianContext}、\texttt{JacobianPattern} 与稀疏线性求解器实例，
         键含数据指针、\fld{build\_id}（原子递增，缓存失效标记）与 Ybus/Gdc 存储地址；
         稀疏模式只在缓存失效时 \texttt{analyzePattern} 一次，之后每次迭代仅数值分解；
   \item \textbf{求解器状态工作区 SolverWorkspace}
-        （\srcpath{include/hacdcpf/power\_flow/workspace.hpp:10--47}，
+        （\srcpath{include/hacdcpf/power\_flow/workspace.hpp:SolverWorkspace}，
         实现 \srcpath{src/power\_flow/workspace.cpp}）：已不再是空脚手架——
         \texttt{prepare\_state}/\texttt{prepare\_equations}/\texttt{reset\_iteration}
         在维度不变时保留 Eigen 分配、仅重置数值。facade 的 thread\_local
         \texttt{NewtonSolver} 跨普通求解复用同一工作区
         （成员 \fld{workspace\_}/\fld{workspace\_in\_use\_}，engine 头 :47--48；
-        newton\_solver.cpp:872--884 的占用守卫使同伦递归的内层求解改用局部工作区，
-        避免覆盖外层状态），状态与方程向量经 \texttt{prepare\_state}（:904）/
-        \texttt{prepare\_equations}（:1010）挂接。
+        src/power\_flow/newton\_solver.cpp:solve 的占用守卫使同伦递归的内层求解改用局部工作区，
+        避免覆盖外层状态），状态与方程向量经 \texttt{prepare\_state}（:solve）/
+        \texttt{prepare\_equations}（:solve）挂接。
 \end{itemize}
 时序生产模拟（UC$\to$OPF$\to$PF 流水线）经 SolverHandle 族在整个时间轴上复用
 同一求解器实例，拓扑仅在 \fld{in\_service} 变化时重建

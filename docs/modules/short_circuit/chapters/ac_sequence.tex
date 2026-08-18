@@ -3,7 +3,7 @@
 
 本章公式只对应 \srcpath{compute\_Zk}，不得用于概览入口
 \srcpath{fault\_at\_bus\_with\_zkk}。详细入口的等效阻抗实现位于
-\srcpath{src/short\_circuit/short\_circuit.cpp:918--941}。
+\srcpath{src/short\_circuit/short\_circuit.cpp:compute\_Zk}。
 
 \subsection{序阻抗矩阵}
 IEC 60909 以故障处等效电压源替代故障前网络；非旋转负荷除非带显式电机短路数据否则忽略，
@@ -13,9 +13,9 @@ IEC 60909 以故障处等效电压源替代故障前网络；非旋转负荷除�
 Z_{1k}=Z_1(k,k),\quad Z_{2k}=Z_2(k,k),\quad Z_{0k}=Z_0(k,k),\qquad Z_s=Y_s^{-1}.
 \end{equation}
 详细入口通过 $Y_s z_k=e_k$ 取得所需逆列，而不是显式构造完整稠密 $Z_s$；批量逆对角提取见
-\srcpath{short\_circuit.cpp:357--423}。
+\srcpath{src/short\_circuit/short\_circuit.cpp:build\_fault\_ybus}。
 故障阻抗在当前选项中为实值标幺电阻 $Z_f=R_f+j0$（\fld{fault\_impedance\_pu}）。故障类型由
-\fld{FaultType}（\srcpath{short\_circuit.hpp:22}）选择。
+\fld{FaultType}（\srcpath{include/hacdcpf/analysis/short\_circuit.hpp:FaultType}）选择。
 
 \subsection{三相故障}
 仅用正序网：
@@ -23,7 +23,7 @@ Z_{1k}=Z_1(k,k),\quad Z_{2k}=Z_2(k,k),\quad Z_{0k}=Z_0(k,k),\qquad Z_s=Y_s^{-1}.
 I_{k3}''=\frac{c}{Z_{1k}+Z_f}I_b,\qquad Z_{k,3}=Z_{1k}+Z_f,\qquad |I_{k3}''|=\frac{c}{|Z_{k,3}|}I_b.
 \end{equation}
 详细入口最终先令 $I_{k,pu}''=c/|Z_{k,3}|$，再乘
-$S_b/(\sqrt3U_{fault})$；见 \srcpath{short\_circuit.cpp:1261--1312}。
+$S_b/(\sqrt3U_{fault})$；见 \srcpath{src/short\_circuit/short\_circuit.cpp:ext\_bus\_id（lambda）}。
 三相短路功率 $S_k''=\sqrt3\,U_b\,|I_{k3}''|$（\fld{BusFaultResult.sk\_mva}，:49）。
 
 \subsection{单相接地故障}
@@ -41,7 +41,7 @@ Z_{k,1}=\frac{Z_{1k}+Z_{2k}+Z_{0k}+3Z_f}{3}.
 I_{k2}''=\frac{\sqrt3\,c}{Z_{1k}+Z_{2k}}I_b,\qquad Z_{k,2}=\frac{Z_{1k}+Z_{2k}}{\sqrt3}.
 \end{equation}
 该 $\sqrt3$ 只属于详细入口。概览入口的实际代码为
-$V_0/(Z_{kk}+Z_{kk})$，见 \srcpath{short\_circuit.cpp:459--461}。
+$V_0/(Z_{kk}+Z_{kk})$，见 \srcpath{src/short\_circuit/short\_circuit.cpp:fault\_at\_bus\_with\_zkk}。
 
 \subsection{两相接地故障}
 实现用正序等效的紧致工程近似：
@@ -51,12 +51,12 @@ Z_{2k}\parallel Z_{0k}=\frac{Z_{2k}Z_{0k}}{Z_{2k}+Z_{0k}},\quad
 |I_{k2E}''|=\frac{c}{|Z_{k,2E}|}I_b.
 \end{equation}
 当 $|Z_2+Z_0|\le10^{-15}$ 时，源码把并联项直接置零；见
-\srcpath{short\_circuit.cpp:928--932}。
+\srcpath{src/short\_circuit/short\_circuit.cpp:compute\_Zk}。
 若需相分解电流 $I_{L2}/I_{L3}$ 与地电流，须扩展为完整序电流重构（当前只给有效电流幅值）。
 
 \subsection{概览路径与近似}
 概览 \srcpath{compute\_short\_circuit} 只构造一个 \texttt{Y\_fault}，其四种实际分支为
 $V_0/Z_{kk}$、$3V_0/(3Z_{kk})$、$V_0/(2Z_{kk})$、
-$V_0/(Z_{kk}+Z_{kk}/2)$；见 \srcpath{short\_circuit.cpp:435--477}。因此概览两相电流
+$V_0/(Z_{kk}+Z_{kk}/2)$；见 \srcpath{src/short\_circuit/short\_circuit.cpp:fault\_at\_bus\_with\_zkk}。因此概览两相电流
 不等于本章详细入口的两相公式。详细路径才分别构造正、负、零序矩阵，见
-\srcpath{short\_circuit.cpp:839--910}。
+\srcpath{src/short\_circuit/short\_circuit.cpp:build\_detailed\_sparse\_context}。

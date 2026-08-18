@@ -21,14 +21,14 @@ GUI 后端 \srcpath{tests/run\_gui\_server.cpp} 不属于本目录，二者不�
 
 \section{会话修订和 ETag 的代码等价模型}
 每个 \texttt{ApiSession} 保存系统指针和无符号修订号 $r$，其默认值由
-\srcpath{runtime\_api\_v1.cpp:1213--1224} 初始化为 0。ETag 由
-\srcpath{model\_etag}（同文件:79--81）精确构造为
+\srcpath{src/server/runtime\_api\_v1.cpp:ApiSession} 初始化为 0。ETag 由
+\srcpath{model\_etag}（同文件:model\_etag）精确构造为
 \begin{equation}
 E(s,r)=\texttt{"hysim-}+s+\texttt{-r}+\operatorname{to\_string}(r)+\texttt{"}.
 \end{equation}
-创建会话时若请求体包含模型，代码把 $r$ 置为 $1$（:1790--1803）；PUT 成功替换模型后执行
-$r\leftarrow r+1$（:1926--1938）。读请求若 \texttt{If-None-Match}=E(s,r) 返回 304
-（:1703--1713）。写请求的前置条件由 \srcpath{require\_if\_match}（:1716--1738）实现：
+创建会话时若请求体包含模型，代码把 $r$ 置为 $1$（:register\_routes）；PUT 成功替换模型后执行
+$r\leftarrow r+1$（:register\_routes）。读请求若 \texttt{If-None-Match}=E(s,r) 返回 304
+（:check\_if\_none\_match）。写请求的前置条件由 \srcpath{require\_if\_match}（:require\_if\_match）实现：
 \begin{equation}
 \texttt{If-Match存在}\land \texttt{If-Match}=E(s,r).
 \end{equation}
@@ -36,18 +36,18 @@ $r\leftarrow r+1$（:1926--1938）。读请求若 \texttt{If-None-Match}=E(s,r) 
 
 \section{拓扑缓存一致性}
 会话缓存保存 $r_c$ 与 LOD2 拓扑 DOM。\srcpath{session\_topology\_lod2}
-（\srcpath{runtime\_api\_v1.cpp:1227--1235}）的更新条件为
+（\srcpath{src/server/runtime\_api\_v1.cpp:ApiSession}）的更新条件为
 \begin{equation}
 \texttt{cache为空}\lor r_c\ne r.
 \end{equation}
 条件为真时重新序列化并令 $r_c\leftarrow r$，否则按引用复用缓存。LOD0/1 从 LOD2 聚合；viewport 必须
 同时提供 $x_{min},y_{min},x_{max},y_{max}$，缺一即抛出无效参数。子图查询的
 \fld{max\_nodes} 由 \srcpath{query\_int} 钳制在 $[1,5000]$，默认 500
-（:429），BFS 达到该数量即停止扩张（:455--457）。
+（:topology\_subgraph），BFS 达到该数量即停止扩张（:topology\_subgraph）。
 
 \section{异步作业与陈旧结果}
-\texttt{ApiJob} 保存提交时的 $r_j$ 与系统快照（\srcpath{runtime\_api\_v1.cpp:1295--1311}）。
-\srcpath{job\_json}（:1317--1358）返回结果时执行
+\texttt{ApiJob} 保存提交时的 $r_j$ 与系统快照（\srcpath{src/server/runtime\_api\_v1.cpp:ApiJob}）。
+\srcpath{job\_json}（:job\_json）返回结果时执行
 \begin{equation}
 stale=(r_{current}\text{存在})\land(r_{current}\ne r_j).
 \end{equation}
@@ -57,8 +57,8 @@ stale=(r_{current}\text{存在})\land(r_{current}\ne r_j).
 
 \section{版本路由分类}
 \texttt{EditionRouteAccess} 的三个实际枚举值是 \texttt{Retained}、\texttt{Disabled}、
-\texttt{Unclassified}（\srcpath{edition\_profile.hpp:10}）。
-\srcpath{classify\_trial\_route}（\srcpath{edition\_profile.cpp:346--368}）依次处理 OPTIONS、
+\texttt{Unclassified}（\srcpath{src/server/edition\_profile.hpp:EditionRouteAccess}）。
+\srcpath{classify\_trial\_route}（\srcpath{src/server/edition\_profile.cpp:classify\_trial\_route}）依次处理 OPTIONS、
 非 API 静态内容、两组禁用路由、保留路由与 v1 模式；其余 API 返回
 \texttt{Unclassified}。\texttt{Disabled} 必须拒绝，\texttt{Unclassified} 不能自动当作
 \texttt{Retained}。版本 profile 不是授权系统，也不改变底层求解器能力。

@@ -4,7 +4,7 @@
 
 \subsection{拓扑量}
 
-\srcpath{src/graph/topology\_analysis.cpp:136--164} 只统计 in-service 节点和边。
+\srcpath{src/graph/topology\_analysis.cpp:count\_islands} 只统计 in-service 节点和边。
 空节点图的 \srcpath{is\_radial} 返回真；非空图只有在 \srcpath{count\_islands()==1} 且
 $E=N-1$ 时返回真。完整报告先以 DFS 得到分量数 $p$，再赋值
 \begin{equation}
@@ -14,12 +14,12 @@ $E=N-1$ 时返回真。完整报告先以 DFS 得到分量数 $p$，再赋值
 AC/DC 混合岛只要包含任何 AC 节点就归为 AC 岛；AC 岛要求 AC slack，纯 DC 岛要求 DC 电压参考。
 桥判据为 DFS 子节点 $v$ 满足 $low[v]>disc[parent]$；非根割点为
 $low[v]\ge disc[parent]$，根割点要求 DFS 子树数大于 1。
-依据为 \srcpath{topology\_analysis.cpp:70--128} 和
-\srcpath{topology\_analysis.cpp:296--423}。
+依据为 \srcpath{src/graph/topology\_analysis.cpp:tarjan\_bridge\_ap} 和
+\srcpath{src/graph/topology\_analysis.cpp:analyze\_topology}。
 
 \subsection{稠密 Kron 降阶}
 
-\srcpath{src/graph/kron\_reduction.cpp:90--173} 把输入稀疏矩阵累加到四个稠密块。
+\srcpath{src/graph/kron\_reduction.cpp:apply\_kron\_reduction} 把输入稀疏矩阵累加到四个稠密块。
 消去集为空时仅抽取 retained 子矩阵并直接标记 valid。
 否则使用 \srcpath{FullPivLU::isInvertible()} 拒绝奇异 $Y_{\beta\beta}$，再计算
 \begin{align}
@@ -39,17 +39,17 @@ $low[v]\ge disc[parent]$，根割点要求 DFS 子树数大于 1。
 \begin{equation}
  I_{red}=I_\alpha-\left(Y_{\alpha\beta}Y_{\beta\beta}^{-1}\right)I_\beta,
 \end{equation}
-见 \srcpath{kron\_reduction.cpp:179--200}。但是当前恢复 API
+见 \srcpath{src/graph/kron\_reduction.cpp:apply\_kron\_reduction\_with\_injection}。但是当前恢复 API
 \srcpath{recover\_eliminated\_voltages} 不接收 $I_\beta$，实际只返回
 \begin{equation}
  V_\beta=-K V_\alpha.
 \end{equation}
-invalid 或 $K$ 行数为零时返回空向量，见 \srcpath{kron\_reduction.cpp:207--216}。
+invalid 或 $K$ 行数为零时返回空向量，见 \srcpath{src/graph/kron\_reduction.cpp:recover\_eliminated\_voltages}。
 因此不能声称当前 API 已实现含非零 $I_\beta$ 的完整电压恢复式。
 
 \subsection{稀疏逐节点 Kron}
 
-\srcpath{src/graph/sparse\_kron\_reduction.cpp:87--123} 对节点 $k$ 的每个列邻居 $i$、行邻居 $j$
+\srcpath{src/graph/sparse\_kron\_reduction.cpp:eliminate} 对节点 $k$ 的每个列邻居 $i$、行邻居 $j$
 执行
 \begin{equation}
  Y_{ij}\leftarrow Y_{ij}-\frac{Y_{ik}Y_{kj}}{Y_{kk}},
@@ -64,7 +64,7 @@ invalid 或 $K$ 行数为零时返回空向量，见 \srcpath{kron\_reduction.cp
  \left\lceil\fld{max\_nnz\_ratio}\cdot nnz(Y_{initial})\right\rceil
 \end{equation}
 才消去。选项要求 max front 非负、max nnz ratio 至少 1、两个 tolerance 非负；否则返回 error。
-依据为 \srcpath{sparse\_kron\_reduction.cpp:190--260}。
+依据为 \srcpath{src/graph/sparse\_kron\_reduction.cpp:reduce\_sparse\_kron}。
 
 \subsection{串联、悬垂与映射覆盖边界}
 

@@ -8,7 +8,7 @@
 
 配电网潮流族以辐射状馈线的\textbf{前推回代}（Backward-Forward Sweep, BFS；
 Shirmohammadi et al.\ 1988）为主路径，面向单相（正序）等值模型
-（distribution\_power\_flow.hpp:3--14）。两个重载入口（:434--440）：
+（include/hacdcpf/power\_flow/distribution\_power\_flow.hpp）。两个重载入口（:solve\_distribution\_pf）：
 \begin{quote}\footnotesize
 \texttt{DPFResult solve\_distribution\_pf(const ACSystem\& ac\_sys, const DPFOptions\& opt = \{\});}\\
 \texttt{DPFResult solve\_distribution\_pf(const HybridPowerSystem\& sys, const DPFOptions\& opt = \{\});}
@@ -36,7 +36,7 @@ Shirmohammadi et al.\ 1988）为主路径，面向单相（正序）等值模型
 \srcpath{build\_bfs\_tree}（cpp:74--117）从首个 SLACK 母线出发对在役支路
 邻接表做广度优先遍历，生成三个并行数组：BFS 访问序 \fld{order}、父母线
 \fld{parent\_bus}、父支路 \fld{parent\_branch} 及父侧方向标志
-\fld{parent\_is\_from\_side}（:67--72）。无 SLACK 直接抛异常（:420--422）。
+\fld{parent\_is\_from\_side}（:build\_bfs\_tree）。无 SLACK 直接抛异常（:solve\_distribution\_pf\_ac\_snapshot）。
 诚实口径：
 \begin{itemize}
   \item \textbf{辐射假设不强制校验}：头文件仅要求调用方先用
@@ -44,8 +44,8 @@ Shirmohammadi et al.\ 1988）为主路径，面向单相（正序）等值模型
         （hpp:429--430）；环网送入时 BFS 树按先访问者确定父支路，环路支路
         不参与扫描但仍出现在支路潮流回算中，结果\textbf{不报错也不保证正确}；
   \item \textbf{与根不连通的孤岛}：未进入 \fld{order} 的母线电压保持初值
-        （\fld{vm\_pu}、相角 $0$），不参与残差计算，结果中静默保留（:429--433）；
-  \item \textbf{多 SLACK}：只取首个 SLACK 为根（:413--419），其余 SLACK 母线
+        （\fld{vm\_pu}、相角 $0$），不参与残差计算，结果中静默保留（:solve\_distribution\_pf\_ac\_snapshot）；
+  \item \textbf{多 SLACK}：只取首个 SLACK 为根（:solve\_distribution\_pf\_ac\_snapshot），其余 SLACK 母线
         当作普通节点处理，其出力由 \fld{compute\_net\_injection} 按普通发电机
         扣减（:260--267 仅跳过根）。
 \end{itemize}
@@ -57,22 +57,22 @@ $S^{\mathrm{net}}_i=(S^{\mathrm{load}}_i-S^{\mathrm{gen}}_i)/S_{\mathrm{base}}$
 :208--225）、充电站（kW/kvar 换算，:228--235）、可选母线与可分组并联补偿
 （\fld{include\_shunts}，:238--257）、常规/静态/可再生发电机、PV（经功率曲线，
 :290--299，见本节下文）与储能（放电为正，:301--309），发电机侧一律跳过根节点。
-基准容量 \fld{base\_mva}$\le 0$ 时回退 $100$~MVA（:395）。注意 ZIP 负荷在此
+基准容量 \fld{base\_mva}$\le 0$ 时回退 $100$~MVA（:solve\_distribution\_pf\_ac\_snapshot）。注意 ZIP 负荷在此
 被\textbf{恒功率近似}（注释 :214--216），不随电压迭代更新。
 
-内层扫描 \srcpath{run\_bfs\_sweep}（:324--382）。记复变比
+内层扫描 \srcpath{run\_bfs\_sweep}（:run\_bfs\_sweep）。记复变比
 $t=|\mathrm{tap}|\angle\delta$（$|\mathrm{tap}|<10^{-12}$ 视为 $1$，:121--125），
 支路串联电流
 \[
 I_s=\big(V_f/t - V_t\big)/z,\qquad z=r+jx,\quad |z|<10^{-20}\Rightarrow I_s=0
 \quad(:127\text{--}135).
 \]
-\textbf{回推}（:336--355）：由 BFS 序逐点计算注入电流
+\textbf{回推}（:run\_bfs\_sweep）：由 BFS 序逐点计算注入电流
 $I_b=\overline{S^{\mathrm{net}}_j/V_j}$（$|V_j|\le10^{-12}$ 时取 $0$），再逆序
 把子支路电流累加进父支路，跨越变比时按父侧方向共轭折算：父在 from 侧
 $I_{\mathrm{up}}=I_{\mathrm{child}}/\overline{t}$，父在 to 侧
-$I_{\mathrm{up}}=\overline{t}\,I_{\mathrm{child}}$（:150--156）。
-\textbf{前推}（:357--366）沿 BFS 序更新电压：
+$I_{\mathrm{up}}=\overline{t}\,I_{\mathrm{child}}$（:branch\_subtree\_current\_seen\_from\_parent）。
+\textbf{前推}（:branch\_child\_voltage\_from\_parent）沿 BFS 序更新电压：
 \[
 V_j=\begin{cases}
 V_i/t - z\,I_b & \text{父在 from 侧}\\[2pt]
@@ -80,28 +80,28 @@ t\,\big(V_i - z\,\overline{t}\,I_b\big) & \text{父在 to 侧}
 \end{cases}
 \qquad(:158\text{--}168).
 \]
-收敛判据为全母线 $\max|\Delta V|<\texttt{opt.tol}$（:368--381）；初值取各母线
-\fld{vm\_pu}、相角 $0$ 的平启动（:429--433）。收敛后由
-\srcpath{compute\_single\_phase\_branch\_flow}（:178--193）回算两端功率
+收敛判据为全母线 $\max|\Delta V|<\texttt{opt.tol}$（:run\_bfs\_sweep）；初值取各母线
+\fld{vm\_pu}、相角 $0$ 的平启动（:solve\_distribution\_pf\_ac\_snapshot）。收敛后由
+\srcpath{compute\_single\_phase\_branch\_flow}（:compute\_single\_phase\_branch\_flow）回算两端功率
 $S_f=V_f\overline{I_f}\,S_{\mathrm{base}}$、$S_t$ 与损耗
 $S_{\mathrm{loss}}=S_f+S_t$，写入 \fld{p\_branch\_mw}/\fld{q\_branch\_mvar}
-与总损耗（:520--537）。
+与总损耗（:solve\_distribution\_pf\_ac\_snapshot）。
 
 可选\textbf{无功限值外环}（\fld{enforce\_q\_limits}，:438--507）：内层收敛后
 逐台发电机复算母线所需无功 $Q_{\mathrm{req}}$（由其相连支路潮流求和再扣回本地
 负荷，:457--476），越 \fld{qmax\_mvar}/\fld{qmin\_mvar} 则把 \fld{qg} 钉到限值、
 标记已钳位并重启平启动；外环上限 \fld{q\_limit\_max\_outer\_iter}=30 次，
-\fld{qmax}=\fld{qmin}=0 视为无限值跳过（:455）。钳位不可逆、无迟滞恢复，
+\fld{qmax}=\fld{qmin}=0 视为无限值跳过（:solve\_distribution\_pf\_ac\_snapshot）。钳位不可逆、无迟滞恢复，
 与统一 Newton 的 PV$\leftrightarrow$PQ 外环（第~\ref{sec:newton}~章）相比更简化。
 
 \begin{paramtable}
 \fld{max\_iter} & $N_{\mathrm{it}}$ & 次 & $50\sim500$ & 100 & BFS 内层迭代上限（hpp:65）\\
-\fld{max\_control\_iter} & $N_{\mathrm{ctl}}$ & 次 & $10\sim100$ & 100 & 调压器离散控制外环上限（:66）\\
-\fld{tol} & $\varepsilon$ & pu & $10^{-10}\sim10^{-6}$ & $10^{-6}$ & 收敛容差，$\max|\Delta V|$（:67）\\
-\fld{verbose} & --- & bool & --- & false & 打印逐迭代残差（:68）\\
-\fld{include\_shunts} & --- & bool & --- & true & 计入母线/补偿器 $g_s,b_s$（:69）\\
-\fld{enforce\_q\_limits} & --- & bool & --- & false & 启用发电机 Q 限值外环（:70）\\
-\fld{q\_limit\_max\_outer\_iter} & --- & 次 & $10\sim30$ & 30 & Q 限值外环上限（:71）\\
+\fld{max\_control\_iter} & $N_{\mathrm{ctl}}$ & 次 & $10\sim100$ & 100 & 调压器离散控制外环上限（:DPFOptions）\\
+\fld{tol} & $\varepsilon$ & pu & $10^{-10}\sim10^{-6}$ & $10^{-6}$ & 收敛容差，$\max|\Delta V|$（:DPFOptions）\\
+\fld{verbose} & --- & bool & --- & false & 打印逐迭代残差（:DPFOptions）\\
+\fld{include\_shunts} & --- & bool & --- & true & 计入母线/补偿器 $g_s,b_s$（:DPFOptions）\\
+\fld{enforce\_q\_limits} & --- & bool & --- & false & 启用发电机 Q 限值外环（:DPFOptions）\\
+\fld{q\_limit\_max\_outer\_iter} & --- & 次 & $10\sim30$ & 30 & Q 限值外环上限（:DPFOptions）\\
 \end{paramtable}
 
 \subsection{调压器（OLTC/稳压器）离散控制外环}
@@ -112,30 +112,30 @@ $S_{\mathrm{loss}}=S_f+S_t$，写入 \fld{p\_branch\_mw}/\fld{q\_branch\_mvar}
 
 \begin{enumerate}
   \item \textbf{监控电压}：默认监控 \fld{winding} 侧端母线，\fld{monitored\_bus}$\neq0$
-        时取远端母线（:1189--1195）；电压幅值乘 $U_{\mathrm{base}}=$
+        时取远端母线（:solve\_distribution\_pf）；电压幅值乘 $U_{\mathrm{base}}=$
         \fld{base\_kv}$\times1000$（:629--635, 1196--1202，缺 \fld{base\_kv} 抛异常）；
-        PT 变比远端时优先 \fld{remote\_ptratio}（:1203--1209）；
+        PT 变比远端时优先 \fld{remote\_ptratio}（:solve\_distribution\_pf）；
   \item \textbf{线路压降补偿（LDC）}：\fld{r\_volts}/\fld{x\_volts} 非零时
         要求 \fld{ct\_primary\_amps}$>0$，取调压绕组侧支路电流
         $I_w$（安培，基值 $I_{\mathrm{base}}=S_{\mathrm{base}}\!\times\!10^{3}/U_{\mathrm{base,kV}}$，
         :1238--1241），补偿相量
-        $\Delta U_c=(I_w/I_{\mathrm{ct}})\,(R+jX)$（:1211--1244）；
+        $\Delta U_c=(I_w/I_{\mathrm{ct}})\,(R+jX)$（:solve\_distribution\_pf）；
   \item \textbf{控制电压与死区}：
         $U_{\mathrm{ctl}}=\big|V_{\mathrm{mon}}/\mathrm{ptratio}+\Delta U_c\big|$
-        （:1246--1247）；$U_{\mathrm{ctl}}<U_{\mathrm{reg}}-B/2-10^{-6}$ 升压、
+        （:solve\_distribution\_pf）；$U_{\mathrm{ctl}}<U_{\mathrm{reg}}-B/2-10^{-6}$ 升压、
         $>U_{\mathrm{reg}}+B/2+10^{-6}$ 降压，否则 \texttt{within\_band} 停
         （:1248--1250, 1270--1299；$10^{-6}$~V 数值迟滞）；
   \item \textbf{档位动作}：连续变比
         $\mathrm{tap}_{\mathrm{pu}}=1+(\mathrm{tap\_pos}-\mathrm{tap\_neutral})\cdot s\%/100$
-        （:542--550）；单步动作
+        （:transformer\_tap\_pu）；单步动作
         $\Delta\mathrm{pos}=\pm\min(\texttt{max\_tap\_change},|\mathrm{tap\_max}-\mathrm{tap\_min}|)$，
         方向由 \fld{tap\_side} 决定（升压时 $=1$ 取 $+1$、$=0$ 取 $-1$，:567--569），
-        并钳位到 $[\mathrm{tap\_min},\mathrm{tap\_max}]$（:1272--1289）；触限即
+        并钳位到 $[\mathrm{tap\_min},\mathrm{tap\_max}]$（:solve\_distribution\_pf）；触限即
         fail-close（\texttt{tap\_limit\_reached\_*}）；
   \item \textbf{振荡防护与诚实停机}：以全体启用调压器的 \fld{tap\_pos} 向量
         做历史状态集，重复即 \texttt{cycle\_detected}；耗尽
         \fld{max\_control\_iter} 记 \texttt{max\_control\_iter\_reached}；两种情形
-        均置 \fld{control\_converged}=\fld{converged}=false（:1340--1379）。
+        均置 \fld{control\_converged}=\fld{converged}=false（:solve\_distribution\_pf）。
 \end{enumerate}
 不支持的模式\textbf{显式 fail-close} 而非静默近似（:1164--1187, 1309--1317）：
 \fld{reversible}、\fld{monitored\_node}$\neq1$、\fld{tap\_winding} 与
@@ -144,39 +144,39 @@ $S_{\mathrm{loss}}=S_f+S_t$，写入 \fld{p\_branch\_mw}/\fld{q\_branch\_mvar}
 （hpp:78--96），终态汇总 \fld{regulator\_states}（hpp:98--128）。
 
 \begin{paramtable}
-\fld{vreg\_volts} & $U_{\mathrm{reg}}$ & V & $115\sim125$ & 0 & 目标控制电压（ac\_components.hpp:1122）\\
-\fld{band\_volts} & $B$ & V & $1\sim4$ & 0 & 全死区宽度，半宽 $B/2$（:1123）\\
-\fld{ptratio} & $n_{\mathrm{PT}}$ & --- & $20\sim120$ & 0 & PT 变比；$\le10^{-12}$ 抛错（:1124）\\
-\fld{remote\_ptratio} & --- & --- & 同左 & 0 & 远端 PT 变比；$\le0$ 回退 \fld{ptratio}（:1125）\\
-\fld{ct\_primary\_amps} & $I_{\mathrm{ct}}$ & A & $100\sim1000$ & 0 & CT 一次电流，LDC 必填（:1126）\\
+\fld{vreg\_volts} & $U_{\mathrm{reg}}$ & V & $115\sim125$ & 0 & 目标控制电压（include/hacdcpf/model/ac\_components.hpp:RegulatorControl）\\
+\fld{band\_volts} & $B$ & V & $1\sim4$ & 0 & 全死区宽度，半宽 $B/2$（:RegulatorControl）\\
+\fld{ptratio} & $n_{\mathrm{PT}}$ & --- & $20\sim120$ & 0 & PT 变比；$\le10^{-12}$ 抛错（:RegulatorControl）\\
+\fld{remote\_ptratio} & --- & --- & 同左 & 0 & 远端 PT 变比；$\le0$ 回退 \fld{ptratio}（:RegulatorControl）\\
+\fld{ct\_primary\_amps} & $I_{\mathrm{ct}}$ & A & $100\sim1000$ & 0 & CT 一次电流，LDC 必填（:RegulatorControl）\\
 \fld{r\_volts}/\fld{x\_volts} & $R+jX$ & V & $0\sim30$ & 0 & LDC 补偿阻抗（伏特域，:1127--1128）\\
-\fld{max\_tap\_change} & --- & 档 & $1\sim4$ & 1 & 单轮最大动作档数；$<1$ 抛错（:1129）\\
-\fld{winding}/\fld{tap\_winding} & --- & 1|2 & --- & 0 & 监控/调档绕组（:1118--1119）\\
-\fld{monitored\_bus} & --- & id & --- & 0 & 0=监控绕组端母线（:1120）\\
-\fld{reversible} & --- & bool & --- & false & 逆功率模式；当前不支持（:1130）\\
+\fld{max\_tap\_change} & --- & 档 & $1\sim4$ & 1 & 单轮最大动作档数；$<1$ 抛错（:RegulatorControl）\\
+\fld{winding}/\fld{tap\_winding} & --- & 1|2 & --- & 0 & 监控/调档绕组（:RegulatorControl）\\
+\fld{monitored\_bus} & --- & id & --- & 0 & 0=监控绕组端母线（:RegulatorControl）\\
+\fld{reversible} & --- & bool & --- & false & 逆功率模式；当前不支持（:RegulatorControl）\\
 \end{paramtable}
 
 \subsection{PV 功率曲线}
 \compmeta{powerflow::compute\_pv\_power\_mw}{\srcpath{include/hacdcpf/power\_flow/pv\_power\_curve.hpp}}
 
-经验单二极管族曲线（纯头文件实现，pv\_power\_curve.hpp:13--22）：
+经验单二极管族曲线（纯头文件实现，include/hacdcpf/power\_flow/pv\_power\_curve.hpp:pv\_module\_current）：
 \[
 I(V)=I_{\mathrm{sc}}\Big(1-\big(V/V_{\mathrm{oc}}\big)^{a}\Big)^{b}
       \Big(1-c\big(V/V_{\mathrm{mpp}}\big)^{2}\Big),
 \qquad a=10.0,\ b=0.547596,\ c=0.023812 .
 \]
-阵列出力（:27--39）在 MPPT 点取值（$V=V_{\mathrm{mpp}}$）：
+阵列出力（:compute\_pv\_power\_mw）在 MPPT 点取值（$V=V_{\mathrm{mpp}}$）：
 \[
 P_{\mathrm{MW}}=I(V_{\mathrm{mpp}})\,V_{\mathrm{mpp}}\,
   N_{\mathrm{series}}N_{\mathrm{parallel}}\,
   \frac{G}{1000}\,\eta_{\mathrm{inv}}\times10^{-6}.
 \]
-\fld{voc}/\fld{isc}/\fld{vmpp} 任一 $\le0$ 时回退静态 \fld{p\_mw}（:28--30）。
-相关字段默认值（\srcpath{include/hacdcpf/model/ac\_components.hpp:412--446}）：
+\fld{voc}/\fld{isc}/\fld{vmpp} 任一 $\le0$ 时回退静态 \fld{p\_mw}（:compute\_pv\_power\_mw）。
+相关字段默认值（\srcpath{include/hacdcpf/model/ac\_components.hpp:PVSystem}）：
 \fld{inverter\_eff}=0.97、\fld{irradiance}=1000~W/m$^2$、串并联数
 \fld{num\_series}/\fld{num\_parallel} 默认 0（触发回退）。BFS 在净注入阶段调用
-（distribution\_power\_flow.cpp:290--299），GUI 时序仿真亦复用同一函数
-（\srcpath{tests/run\_gui\_server.cpp:20687}）。诚实口径：该模型是
+（src/power\_flow/distribution\_power\_flow.cpp:compute\_net\_injection），GUI 时序仿真亦复用同一函数
+（\srcpath{tests/run\_gui\_server.cpp:has\_profile（lambda）}）。诚实口径：该模型是
 \textbf{MPPT 单点估值}而非 $P(V)$ 电压依赖注入——潮流迭代中 PV 出力恒定，
 曲线自变量并不取端电压；\fld{alpha\_isc}/\fld{beta\_voc} 温度系数字段存在
 但此函数未使用。
@@ -185,19 +185,19 @@ P_{\mathrm{MW}}=I(V_{\mathrm{mpp}})\,V_{\mathrm{mpp}}\,
 两套支路回算并存，勿混淆：
 \begin{itemize}
   \item \textbf{BFS 内部回算} \srcpath{compute\_single\_phase\_branch\_flow}
-        （distribution\_power\_flow.cpp:178--193）：仅串联阻抗 + 复变比，
+        （src/power\_flow/distribution\_power\_flow.cpp:compute\_single\_phase\_branch\_flow）：仅串联阻抗 + 复变比，
         $S_f=V_f\overline{I_f}S_{\mathrm{base}}$，损耗 $=S_f+S_t$；
         不含对地支路充电 $b/2$——BFS 结果中的 \fld{q\_branch\_mvar} 与统一
         Newton 口径在高充电线路上存在系统性差异；
   \item \textbf{统一 Newton 回算} \srcpath{powerflow::compute\_branch\_flows}
-        （\srcpath{src/power\_flow/branch\_flow.cpp:8--72}，规范头
+        （\srcpath{src/power\_flow/branch\_flow.cpp:compute\_branch\_flows}，规范头
         \srcpath{include/hacdcpf/power\_flow/assembly/branch\_flow.hpp}，
         \srcpath{power\_flow/branch\_flow.hpp} 为转发头）：MATPOWER $\pi$ 模型
         $y_{ff}=(y_s+jb/2)/|t|^2$、$y_{ft}=-y_s/\overline{t}$、
-        $y_{tf}=-y_s/t$（:41--53），$|z|=0$ 与停运支路跳过，
+        $y_{tf}=-y_s/t$（:compute\_branch\_flows），$|z|=0$ 与停运支路跳过，
         供 \srcpath{solve\_power\_flow} 派生结果使用（见第~\ref{sec:newton}~章）。
 \end{itemize}
-输出 \fld{DPFResult}（distribution\_power\_flow.hpp:202--218）：
+输出 \fld{DPFResult}（include/hacdcpf/power\_flow/distribution\_power\_flow.hpp:DPFResult）：
 \fld{vm\_pu}/\fld{va\_deg}（相角单位\textbf{度}）、\fld{p\_branch\_mw}/
 \fld{q\_branch\_mvar}（送端 from 侧）、总损耗、\fld{converged}/
 \fld{control\_converged}、\fld{iterations}、\fld{residual}（末轮
@@ -205,30 +205,30 @@ $\max|\Delta V|$），以及调压器 \fld{regulator\_states}/\fld{regulator\_tr
 \fld{specialized\_path\_id} 记录三绕组三角等专属致密 NR 试验路径的触发与
 fail-close 原因（cpp:637--648, 995--996）。三相 BFS 的损耗回算保留
 $Z_{abc}$ 互耦交叉项（注释明确反对仅用自阻抗 $|I_p|^2$ 近似，
-distribution\_power\_flow.cpp:1755--1763）。
+src/power\_flow/distribution\_power\_flow.cpp:solve\_three\_phase\_distribution\_pf）。
 
 \subsection{验证与校核}
 全部 BFS/调压器对照集中在 \srcpath{tests/test\_opendss\_pf\_compare.cpp}
 （Catch2 + OpenDSS 桥，受 \srcpath{HACDCPF\_ENABLE\_OPENDSS\_COMPARE} 门控，
 \srcpath{tests/CMakeLists.txt:254--257}，OpenDSS 缺失时整组 skip）：
 \begin{itemize}
-  \item \textbf{3 母线 1ph 基线}（:1133--1191）：vs OpenDSS 快照，
+  \item \textbf{3 母线 1ph 基线}（:TEST\_CASE）：vs OpenDSS 快照，
         $|V|$ 容差 $10^{-3}$、相角 $0.1^\circ$、送端 $P/Q$ 各 $10^{-3}$、
-        总损耗 $10^{-3}$；并联补偿变体（:1193）与物理电容器 vs BFS 恒功率
-        并联近似的探索性对照（:1327）；
-  \item \textbf{case33bw 全馈线}（:1392--1497）：Baran \& Wu 33 节点平衡三相
+        总损耗 $10^{-3}$；并联补偿变体（:TEST\_CASE）与物理电容器 vs BFS 恒功率
+        并联近似的探索性对照（:TEST\_CASE）；
+  \item \textbf{case33bw 全馈线}（:TEST\_CASE）：Baran \& Wu 33 节点平衡三相
         OpenDSS 模型 vs BFS 单相等值，33 母线 $|V|$ 容差 $2\times10^{-3}$、
         相角 $0.2^\circ$，32 支路三相合计 $P/Q$ 各 $10^{-3}$，总损耗
         $5\times10^{-3}$；同测试含 OpenDSS 自相一致性回归（相间幅值差
         $<10^{-4}$、$\pm120^\circ$ 偏差 $<10^{-3}$~deg）；
-  \item \textbf{调压器闭环}（:1820--1843）：本地 PT、本地 PT+LDC、
+  \item \textbf{调压器闭环}（:TEST\_CASE）：本地 PT、本地 PT+LDC、
         RemotePTRatio 三算例，终态档位数与 OpenDSS \texttt{regcontrol}
         精确一致（容差 $10^{-12}$），控制电压与按 DSS 数据独立复算值差
-        $<0.2$~V（:753--757），终止原因 \texttt{within\_band}；另有运行时
+        $<0.2$~V（:verify\_regulator\_case\_matches\_repository），终止原因 \texttt{within\_band}；另有运行时
         语义矩阵（:1970，remote/local/LDC 组合逐场景核对 \fld{stop\_reason}
         与 DSS 桥一致）与带母线合并的失败路径索引回归（:2490, :2519）；
-  \item \textbf{固定档变压器}：1ph 直通变压器（:1616）、固定档 vs 变比感知
-        BFS（:1727）、LV 侧固定档端到端（:2580）。
+  \item \textbf{固定档变压器}：1ph 直通变压器（:TEST\_CASE）、固定档 vs 变比感知
+        BFS（:TEST\_CASE）、LV 侧固定档端到端（:TEST\_CASE）。
 \end{itemize}
 诚实边界：单相 BFS \textbf{没有}独立单元测试文件，全部覆盖经由上述
 OpenDSS 门控集成测试；环网/多 SLACK/死岛行为无测试；case33bw 对照为

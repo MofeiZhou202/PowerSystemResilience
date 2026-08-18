@@ -2,7 +2,7 @@
 \section{选项与结果数据结构}\label{sec:res-io}
 
 \subsection{弹性研究选项 \texttt{DistributionResilienceOptions}}
-\compmeta{DistributionResilienceOptions}{include/hacdcpf/resilience/resilience\_assessment.hpp:180}
+\compmeta{DistributionResilienceOptions}{include/hacdcpf/resilience/resilience\_assessment.hpp:DistributionResilienceOptions}
 \begin{paramtable}
 \fld{model} & — & — & 枚举 & Heuristic & 恢复模型选择（3 选 1）\\
 \fld{horizon\_hours} & $T$ & 小时 & $24\sim168$ & 48 & 研究时域\\
@@ -21,7 +21,7 @@
 \end{paramtable}
 
 \subsection{恢复 MILP 选项 \texttt{DistributionResilienceMIPOptions}}
-\compmeta{DistributionResilienceMIPOptions}{include/hacdcpf/resilience/resilience\_assessment.hpp:36}
+\compmeta{DistributionResilienceMIPOptions}{include/hacdcpf/resilience/resilience\_assessment.hpp:DistributionResilienceMIPOptions}
 \begin{paramtable}
 \fld{v\_min\_pu}/\fld{v\_max\_pu} & $\underline v,\overline v$ & pu & $0.95/1.05$ & 0.95/1.05 & 电压包络\\
 \fld{big\_m\_voltage} & $M$ & — & — & 4.0 & LinDistFlow 压降 big-M\\
@@ -56,12 +56,12 @@
 
 \subsection{结果结构摘要}
 \begin{itemize}
-  \item \fld{DistributionResilienceResult}（:413）：逐步 \fld{steps}、\fld{fault\_sequence}、
+  \item \fld{DistributionResilienceResult}（:CertifiedRestorationCoordinator）：逐步 \fld{steps}、\fld{fault\_sequence}、
         \fld{total\_served\_mwh}/\fld{total\_shed\_mwh}/\fld{weighted\_unserved\_mwh}、
         \fld{resilience\_index}、\fld{mess\_energy\_delivered\_mwh}、\fld{model\_stats}；
-  \item \fld{DistributionResilienceStepResult}（:332）：\fld{restoration\_ratio}、
+  \item \fld{DistributionResilienceStepResult}（:CertifiedRestorationCoordinator）：\fld{restoration\_ratio}、
         \fld{shed\_by\_priority}、开关动作、\fld{mess\_states}、桥/割点、可选潮流校验；
-  \item \fld{DistributionResilienceModelStats}（:69）：MILP 规模/状态与 \fld{ValidityFlags}（20+ 标志）；
+  \item \fld{DistributionResilienceModelStats}（:MultiFidelityCertificate）：MILP 规模/状态与 \fld{ValidityFlags}（20+ 标志）；
   \item \fld{CertifiedRestorationResult}：\fld{optimality\_proven\_over\_catalog}、\fld{no\_good\_cuts}、
         逐轮 \fld{iterations} 与 \fld{MultiFidelityCertificate}。
 \end{itemize}

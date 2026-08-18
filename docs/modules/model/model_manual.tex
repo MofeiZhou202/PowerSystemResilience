@@ -36,7 +36,7 @@
 
 \section{与代码逐式一致的代数规则}
 \subsection{缩放清洗和有效功率}
-\srcpath{include/hacdcpf/model/effective\_capacity.hpp:54--56} 的
+\srcpath{include/hacdcpf/model/effective\_capacity.hpp:sanitize\_scaling} 的
 \srcpath{sanitize\_scaling} 逐字等价于
 \begin{equation}
 s_{eff}=\begin{cases}s,&\operatorname{isfinite}(s)\land s>0,\\0,&\text{其他情况。}\end{cases}
@@ -51,7 +51,7 @@ P_{dcsg}^{eff}&=\begin{cases}P_{set}s_{eff},&\fld{in\_service}=true,\\0,&\text{�
 
 \subsection{有效容量回退}
 静态 AC 发电的实现分支位于
-\srcpath{include/hacdcpf/model/effective\_capacity.hpp:96--108}：
+\srcpath{include/hacdcpf/model/effective\_capacity.hpp:effective\_capacity\_mw}：
 \begin{equation}
 C_{sg}^{eff}=\begin{cases}
 0,&\neg in\_service\lor s_{eff}=0,\\
@@ -60,19 +60,19 @@ C_{sg}^{eff}=\begin{cases}
 \end{cases}
 \end{equation}
 其中 $P^{cap}=P_{max}$（若 $P_{max}>0$），否则用 $P_{rated}$（若 $P_{rated}>0$），再否则用 $P$。
-DC 静态发电同式，但最后一级只在 $P_{max}$ 与 $P_{set}$ 间选择（:118--127）。
-同步发电机容量（:134--138）为
+DC 静态发电同式，但最后一级只在 $P_{max}$ 与 $P_{set}$ 间选择（:effective\_capacity\_mw）。
+同步发电机容量（:effective\_capacity\_mw）为
 \begin{equation}
 C_g=\begin{cases}0,&\neg in\_service,\\P_{max},&P_{max}>0,\\\max(0,P_g),&\text{否则，}\end{cases}
 \end{equation}
-储能容量（:143--147）为
+储能容量（:effective\_capacity\_mw）为
 \begin{equation}
 C_s=\begin{cases}0,&\neg in\_service,\\P_{max},&P_{max}>0,\\\max(0,P_{rated}),&\text{否则。}\end{cases}
 \end{equation}
 
 \subsection{GFM Norton 参数选择}
 \srcpath{resolve\_gfm\_norton\_parameters}
-（\srcpath{include/hacdcpf/model/gfm\_norton\_contract.hpp:25--45}）的选择规则为
+（\srcpath{include/hacdcpf/model/gfm\_norton\_contract.hpp:resolve\_gfm\_norton\_parameters}）的选择规则为
 \begin{align}
 E&=\begin{cases}E_{gfm},&E_{gfm}>0,\\V_{ac,set},&\text{否则，}\end{cases}\\
 \theta&=\frac{\pi}{180}\begin{cases}

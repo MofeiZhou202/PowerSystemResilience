@@ -2,7 +2,7 @@
 
 本章只记录 \srcpath{src/sppt/metamorphic.cpp} 与
 \srcpath{src/sppt/guard.cpp} 当前执行的判定。头文件
-\srcpath{include/hacdcpf/sppt/metamorphic.hpp:5--20} 的注释列出 MR1--MR8，
+\srcpath{include/hacdcpf/sppt/metamorphic.hpp:MetamorphicObservation} 的注释列出 MR1--MR8，
 但当前公共声明和实现中不存在 MR8 函数；因此本章不把“DAE 指标 1”写成已实现关系。
 
 \subsection{公共差值算子}
@@ -12,10 +12,10 @@
  d_{\max}(a,b)=\max_{0\le i<\min(|a|,|b|)}|a_i-b_i|,
 \end{equation}
 空公共前缀返回零；该函数自身不报告长度不一致，见
-\srcpath{src/sppt/metamorphic.cpp:36--42}。
+\srcpath{src/sppt/metamorphic.cpp:max\_abs\_diff}。
 Ybus 差值先分别调用 \srcpath{make\_solver\_data\_projected}；维数不同返回无穷大，
 零维返回零，其余返回稠密差矩阵元素绝对值最大值，见
-\srcpath{metamorphic.cpp:44--55}。
+\srcpath{src/sppt/metamorphic.cpp:ybus\_max\_abs\_diff}。
 
 \subsection{MR1：投影幂等判定}
 
@@ -30,7 +30,7 @@ Ybus 最大差 $d_Y$。报告残差为
 \begin{equation}
  d_b=d_l=d_{load}=d_g=d_c=0,\quad d_P=d_Q=0,\quad d_Y\le10^{-12}.
 \end{equation}
-依据为 \srcpath{metamorphic.cpp:72--108}。
+依据为 \srcpath{src/sppt/metamorphic.cpp:mr1\_projection\_idempotence}。
 
 \subsection{MR2：归因往返判定}
 
@@ -40,7 +40,7 @@ Ybus 最大差 $d_Y$。报告残差为
 \begin{equation}
  r=\max_{e\in\mathcal E_{checked}}|v^{ext}_{pos(e)}-v^{int}_{map(e)}|,
 \end{equation}
-并以 $r\le\fld{tol}$ 通过，见 \srcpath{metamorphic.cpp:112--150}。
+并以 $r\le\fld{tol}$ 通过，见 \srcpath{src/sppt/metamorphic.cpp:mr2\_attribution\_roundtrip}。
 
 \subsection{MR3、MR3d 与 MR3t}
 
@@ -48,43 +48,43 @@ MR3 分别求解原系统和显式投影系统；任一未收敛即失败且残�
 若两个电压向量分别匹配各自 AC 母线数，代码按稳定母线 ID 比较投影系统中能在原系统找到的
 $V_m$ 和 $V_a$；否则只对投影结果的 $V_m$ 做 Intensive 反投影，长度仍不一致则残差固定为 1。
 DC 电压仅在两个向量均非空且长度相同时加入公共前缀最大差。最终以最大差
-$r\le\fld{tol}$ 通过，见 \srcpath{metamorphic.cpp:154--213}。
+$r\le\fld{tol}$ 通过，见 \srcpath{src/sppt/metamorphic.cpp:mr3\_semantic\_preservation\_pf}。
 
 MR3d 同样先要求两个 DCOPF 均收敛。任一 LMP 向量为空时，代码设置
 \fld{passed=false}、\fld{observation=NotObserved}、$r=0$；长度/母线数匹配时按 ID 比较，
 否则长度相同则按位置比较，再否则尝试 Intensive 反投影，反投影后长度仍不同则失败且 $r=1$。
-依据为 \srcpath{metamorphic.cpp:216--272}。
+依据为 \srcpath{src/sppt/metamorphic.cpp:mr3\_semantic\_preservation\_opf\_dual}。
 
 MR3t 固定设置 $t_{end}=0.10$、$\Delta t=0.005$，启用潮流初始化和一致动态初值。
 任一仿真失败或缺少末快照时失败且 $r=1$。否则残差取末快照最大/最小 AC 电压、频率、
 COI 频率四个绝对差，以及仅在尺寸相同且非空时加入的状态向量和 DC 电压向量最大差；
-以 $r\le\fld{tol}$ 通过，见 \srcpath{metamorphic.cpp:275--324}。
+以 $r\le\fld{tol}$ 通过，见 \srcpath{src/sppt/metamorphic.cpp:mr3\_semantic\_preservation\_transient}。
 
 \subsection{MR4--MR7}
 
 MR4 在没有非平凡合并时直接通过。否则对每个成员数至少为 2 的组，逐成员读取
 \fld{ext\_to\_int}，缺键视为 $-1$；与组内首成员内部索引不同即把违规数加一。
 残差就是违规数，通过条件为违规数等于零；输入的 \fld{tol} 不参与通过判定，见
-\srcpath{metamorphic.cpp:327--365}。
+\srcpath{src/sppt/metamorphic.cpp:mr4\_merged\_bus\_equipotential}。
 
 MR5 先求解原系统，再仅反转 AC 母线 vector 顺序后求解。任一未收敛或 $V_m$ 长度不等于相应
 母线数时失败且 $r=1$；否则按母线稳定 ID 比较能匹配的电压幅值，以最大差不超过
-\fld{tol} 通过，见 \srcpath{metamorphic.cpp:368--408}。
+\fld{tol} 通过，见 \srcpath{src/sppt/metamorphic.cpp:mr5\_relabel\_invariance}。
 
 MR6 所谓“不相交并”只拼接 AC 母线、AC 支路、发电机、负荷、并联元件、DC 母线和 DC 支路
 七类 vector，没有拼接其余组件。残差只统计投影后 AC/DC 母线数和支路数相对两个独立投影数量和
-的绝对差；通过条件为两项均为零，见 \srcpath{metamorphic.cpp:411--453}。
+的绝对差；通过条件为两项均为零，见 \srcpath{src/sppt/metamorphic.cpp:mr6\_compositionality}。
 
 MR7 将所有 AC SLACK 母线降为 PQ、清除发电机 \fld{is\_slack}、停运外部电网，并清除 VSC
 构网角色；随后调用 SolverReady 校验。只要任一 Error 消息不区分大小写包含
 \texttt{slack}、\texttt{reference} 或 \texttt{no swing} 即通过。其残差无论通过与否均为零，
-见 \srcpath{metamorphic.cpp:456--497}。
+见 \srcpath{src/sppt/metamorphic.cpp:mr7\_wellposedness\_gate}。
 
 \subsection{核心套件与未实现关系}
 
 \srcpath{run\_core\_metamorphic\_suite} 当前依次运行 MR1、MR2、MR3、MR3d、MR4、MR5、MR7；
 它不运行需要两个系统输入的 MR6，也不存在 MR8 调用，见
-\srcpath{metamorphic.cpp:499--509}。因此“核心套件通过”不能解释为 MR1--MR8 全部通过。
+\srcpath{src/sppt/metamorphic.cpp:mr7\_wellposedness\_gate}。因此“核心套件通过”不能解释为 MR1--MR8 全部通过。
 
 \subsection{守卫判定}
 
@@ -97,4 +97,4 @@ MR7 将所有 AC SLACK 母线降为 PQ、清除发电机 \fld{is\_slack}、停�
 \begin{equation}
  \fld{accepted}=\fld{validation\_ok}\land\fld{well\_posed}\land\fld{attribution\_total}.
 \end{equation}
-依据为 \srcpath{src/sppt/guard.cpp:29--108}。
+依据为 \srcpath{src/sppt/guard.cpp:guard\_system}。

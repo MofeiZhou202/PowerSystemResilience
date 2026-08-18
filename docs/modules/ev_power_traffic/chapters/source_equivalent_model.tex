@@ -4,7 +4,7 @@
 本章按公开入口分别记录实现，禁止把不同入口拼成一个不存在的统一优化模型。所有严格模式均保留源码
 拒绝语义：\texttt{simulate\_ev\_power\_traffic} 的路线分配、充电调度和电网验证不是一个全局认证
 程序，\texttt{require\_exact\_mathematical\_model=true} 时直接返回不支持。依据：
-\srcpath{src/ev\_power\_traffic/ev\_power\_traffic\_simulation.cpp:61--95}。
+\srcpath{src/ev\_power\_traffic/ev\_power\_traffic\_simulation.cpp:simulate\_ev\_power\_traffic}。
 
 \subsection{A：分解仿真入口}
 入口为 \texttt{simulate\_ev\_power\_traffic}。它先生成或读取候选路径，再按
@@ -12,14 +12,14 @@
 \texttt{feasible} 的源码谓词是：系统最优求解请求必须求解成功；若禁止未服务出行，则未服务车辆
 不超过 $10^{-7}$；若禁止未服务充电，则未服务电量不超过 $10^{-6}$；每步发电容量必须合格，且
 已经运行的潮流必须收敛。依据：
-\srcpath{src/ev\_power\_traffic/ev\_power\_traffic\_simulation.cpp:7--41}。
+\srcpath{src/ev\_power\_traffic/ev\_power\_traffic\_simulation.cpp:finalize\_status}。
 
 该入口不是单体数学规划，因此本章不为 A 添加联合目标函数。站点负荷写回只执行
 \begin{equation}
  p_s^{model}=p_s^{EV},\qquad q_s^{model}=q_s^{EV},\qquad
  utilization_s=\begin{cases}|p_s^{EV}|/P_s^{max},&P_s^{max}>10^{-9},\\0,&\text{否则。}\end{cases}
 \end{equation}
-依据：\srcpath{src/ev\_power\_traffic/ev\_power\_traffic\_simulation.cpp:46--58}。
+依据：\srcpath{src/ev\_power\_traffic/ev\_power\_traffic\_simulation.cpp:apply\_ev\_station\_loads}。
 
 \subsection{B/F：CTM 传播与 DUE--VI}
 对路段 $a$，若长度和 CTM 步长有效，元胞数为
@@ -38,7 +38,7 @@ $10^4$ veh/h。拥堵波速按
  \quad w=\begin{cases}q^{max}/(k^{jam}-k^{crit}),&k^{jam}>k^{crit}+10^{-9},\\
  w^{fallback},&\text{否则。}\end{cases}
 \end{equation}
-依据：\srcpath{src/ev\_power\_traffic/ctm\_propagation.cpp:40--103}。
+依据：\srcpath{src/ev\_power\_traffic/ctm\_propagation.cpp:link\_backward\_wave\_speed}。
 
 元胞发送、接收和内部边界流严格为
 \begin{align}
@@ -50,9 +50,9 @@ $10^4$ veh/h。拥堵波速按
 \end{align}
 路径专属元胞开启时，跨边界的各路径流按上游旧占有量比例分配，而非独立求最小值。节点合流/分流
 还有两阶段预算缩放，不能用上述内部元胞式替代；权威实现为
-\srcpath{src/ev\_power\_traffic/ctm\_propagation.cpp:401--752}。内部元胞依据：
-\srcpath{src/ev\_power\_traffic/ctm\_propagation.cpp:110--127}、
-\srcpath{src/ev\_power\_traffic/ctm\_propagation.cpp:313--385}。
+\srcpath{src/ev\_power\_traffic/ctm\_propagation.cpp:ctm\_forward\_pass}。内部元胞依据：
+\srcpath{src/ev\_power\_traffic/ctm\_propagation.cpp:build\_link\_state}、
+\srcpath{src/ev\_power\_traffic/ctm\_propagation.cpp:ctm\_forward\_pass}。
 
 F 入口为 \texttt{solve\_ctm\_due\_vi}。精确模型开关为真时直接拒绝，因为结果只给固定点残差，
 不是全局 VI/MPEC 证明。仿真步与 CTM 步的倍率是
@@ -63,8 +63,8 @@ F 入口为 \texttt{solve\_ctm\_due\_vi}。精确模型开关为真时直接拒�
 \begin{equation}
  x^{combined}_{k,r}=PCE_{EV}x^{EV}_{k,r}+PCE_{ICV}x^{ICV}_{k,r}.
 \end{equation}
-依据：\srcpath{src/ev\_power\_traffic/ctm\_due\_vi.cpp:66--106}、
-\srcpath{src/ev\_power\_traffic/ctm\_due\_vi.cpp:166--236}。
+依据：\srcpath{src/ev\_power\_traffic/ctm\_due\_vi.cpp:solve\_ctm\_due\_vi}、
+\srcpath{src/ev\_power\_traffic/ctm\_due\_vi.cpp:full\_due\_aon（lambda）}。
 
 每轮全有或全无方向为 $\mathbf d=\mathbf y-\mathbf x$。若
 \texttt{line\_search\_steps}>0，代码在 $[0,1]$ 上用黄金分割最小化 CTM 重放得到的
@@ -75,7 +75,7 @@ $TSTT=\sum x_{k,r}t_{k,r}$；否则
 这不是旧文档所写的 $1/i$。收敛先按 Wardrop 相对间隙小于
 \texttt{convergence\_tol} 判定；最终若 VI 证书可用，报告间隙还取既有报告、EV/ICV 间隙与
 归一化 VI 间隙的最大值。混合车流时 VI 证书只覆盖 EV 子博弈。依据：
-\srcpath{src/ev\_power\_traffic/ctm\_due\_vi.cpp:239--430}。
+\srcpath{src/ev\_power\_traffic/ctm\_due\_vi.cpp:make\_combined\_flow（lambda）}。
 
 \subsection{C：价格协调，不是单体最优}
 C 每轮先运行 CTM--DUE，再逐时把站点有功以 $p_s^{EV}/1000$ MW 加入母线负荷并求 DC--OPF。
@@ -92,14 +92,14 @@ OPF 失败的步保留旧价。收敛仅指
 它不证明社会福利最优。报告福利按代码后处理为
 $W=B_{EV}-C_{gen}-VOT\cdot TSTT$。禁用 DC--OPF 时固定价格且只运行一轮，结果被置为收敛；
 此时报告生成成本为零而不是静态估计值。依据：
-\srcpath{src/ev\_power\_traffic/ctm\_joint\_welfare.cpp:237--355}。
+\srcpath{src/ev\_power\_traffic/ctm\_joint\_welfare.cpp:add（lambda）}。
 
 \subsection{D：按模式分派的联合程序}
 入口 \texttt{solve\_joint\_optimizer} 根据 \texttt{JointOptimizerMode} 分派到不同模型：基础
 LP/MILP、有限路线 BPR NLP/MPEC、认证动态 MILP 或全联合 LTM--PWL MILP。它们的变量、约束和
 证书不同，不能共享一条目标式。基础模型的权威装配为
-\srcpath{src/ev\_power\_traffic/joint\_optimizer.cpp:1652--2644}；非线性模式为
-\srcpath{src/ev\_power\_traffic/joint\_optimizer\_full\_nlp.cpp:1760--1915}。
+\srcpath{src/ev\_power\_traffic/joint\_optimizer.cpp:solve\_native\_bc（lambda）}；非线性模式为
+\srcpath{src/ev\_power\_traffic/joint\_optimizer\_full\_nlp.cpp:decode\_solution}。
 
 结果字段已区分 \texttt{proven\_optimal}、\texttt{local\_optimum\_certificate}、
 \texttt{global\_optimum\_certificate}、\texttt{travel\_times\_are\_endogenous}、
@@ -108,8 +108,8 @@ LP/MILP、有限路线 BPR NLP/MPEC、认证动态 MILP 或全联合 LTM--PWL MI
 
 \subsection{E 与 E--LTM}
 \texttt{solve\_ctm\_so\_lp} 和 \texttt{solve\_ltm\_so\_lp} 是不同的系统最优 LP 入口，
-分别在 \srcpath{src/ev\_power\_traffic/ctm\_so\_lp.cpp:15} 与
-\srcpath{src/ev\_power\_traffic/ltm\_so\_lp.cpp:39} 装配。前者使用时间展开 CTM 节点/路径连续性；后者
+分别在 \srcpath{src/ev\_power\_traffic/ctm\_so\_lp.cpp:solve\_ctm\_so\_lp} 与
+\srcpath{src/ev\_power\_traffic/ltm\_so\_lp.cpp:solve\_ltm\_so\_lp} 装配。前者使用时间展开 CTM 节点/路径连续性；后者
 使用累积计数 LTM。由于两份装配的行结构不同，本章不使用 Beckmann 积分式替代其中任一实现。
 
 \subsection{G：约化选址定容 MILP}
@@ -129,7 +129,7 @@ $\max(0,VOT\,T)$。站点逐步功率和插头约束实际为
  \sum_{d,r\ni s}p^{default}h_{d,r}-P_s^{default}z_s&\le0,\\
  \sum_{d,r\ni s}h_{d,r}-B_s&\le0.
 \end{align}
-依据：\srcpath{src/ev\_power\_traffic/infra\_design\_milp.cpp:35--201}。
+依据：\srcpath{src/ev\_power\_traffic/infra\_design\_milp.cpp:solve\_infra\_design\_milp}。
 
 若启用道路容量，G 并未精确积分 BPR；它创建 $f_a,e_a$，使用固定
 $\alpha=0.15,\beta=4$ 和 $\alpha\beta=0.6$：
@@ -139,8 +139,8 @@ $\alpha=0.15,\beta=4$ 和 $\alpha\beta=0.6$：
 \end{align}
 并给 $f_a$、$e_a$ 分别赋 $VOT\,t_a^0\,scale$ 与其 $0.6$ 倍的线性系数。启用 LTM 动态行时，
 这些静态路径/BPR 代理系数被清零，改由累计计数 VHT 系数承载。依据：
-\srcpath{src/ev\_power\_traffic/infra\_design\_milp.cpp:203--288}、
-\srcpath{src/ev\_power\_traffic/infra\_design\_milp.cpp:290--370}。
+\srcpath{src/ev\_power\_traffic/infra\_design\_milp.cpp:ActiveRouteFlow}、
+\srcpath{src/ev\_power\_traffic/infra\_design\_milp.cpp:ActiveRouteFlow}。
 
 \subsection{H：滚动 LTM LP}
 H 每个仿真步只执行当前滚动窗 LP 的第一个控制量。对站点，队列、能量和 V2G 行为为
@@ -153,11 +153,11 @@ H 每个仿真步只执行当前滚动窗 LP 的第一个控制量。对站点�
 $N^{in}_{j+1}-N^{out}_{j+1}$ 加 \texttt{weight\_travel\_time}$\Delta t$，对 V2G 加
 $-\texttt{weight\_v2g}$。LTM 行包括累计计数单调、发送/接收时滞、逐步容量，以及
 $b_j\le N^{out}_{access,j+1}-N^{out}_{access,j}$。依据：
-\srcpath{src/ev\_power\_traffic/ltm\_mpc.cpp:216--419}。
+\srcpath{src/ev\_power\_traffic/ltm\_mpc.cpp:StationMPC}。
 
 H 优先使用 HiGHS LP，失败后用本地单纯形；只有求解成功才推进持久队列、SOC 和累计计数。
 \texttt{proven\_optimal} 还要求原始与整数残差均不超过 $10^{-7}$。依据：
-\srcpath{src/ev\_power\_traffic/ltm\_mpc.cpp:423--514}。
+\srcpath{src/ev\_power\_traffic/ltm\_mpc.cpp:add\_ineq（lambda）}。
 
 \subsection{覆盖边界}
 本章逐式覆盖 CTM 内部元胞、F 迭代、C 价格固定点、G 核心约束和 H 滚动行。D、E、E--LTM

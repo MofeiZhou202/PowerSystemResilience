@@ -12,7 +12,7 @@ I_f=\frac{V_N[k]}{(G_{NN}^{-1})_{kk}+\max(0,R_f)},
 其中 $R_{kk}$ 为从母线 $k$ 到源的戴维南电阻（\fld{r\_thevenin\_pu}），$R_f$ 为故障路径电阻
 （\fld{fault\_resistance\_pu}，默认 0 即金属性故障）。当分母不大于 $10^{-12}$、
 $G_{NN}$ 不可逆或故障母线本身是 \texttt{DC\_V} 时返回未求解。标幺电流乘
-$S_b/U_b$ 得 kA。依据为 \srcpath{src/short\_circuit/dc\_short\_circuit.cpp:167--227}。
+$S_b/U_b$ 得 kA。依据为 \srcpath{src/short\_circuit/dc\_short\_circuit.cpp:dc\_bus\_fault\_level}。
 这是\textbf{线路电阻限制}的故障水平，是
 适用于直流断路器/电缆选型筛查的保守上界。
 
@@ -28,7 +28,7 @@ $S_b/U_b$ 得 kA。依据为 \srcpath{src/short\_circuit/dc\_short\_circuit.cpp:
 逐断路器故障责任记于 \fld{DCBreakerDutyResult}：\fld{i\_duty\_ka}、\fld{i\_breaking\_ka}、
 \fld{breaking\_rating\_ok}、\fld{controls\_branch} 与 \fld{r\_pu}。当前实现没有计算各断路器的
 电流分配：所有在运、闭合且进入故障图的断路器均直接令 \fld{i\_duty\_ka} 等于母线故障电流；
-见 \srcpath{dc\_short\_circuit.cpp:229--266}。结果 \fld{DCFaultResult} 另记
+见 \srcpath{src/short\_circuit/dc\_short\_circuit.cpp:dc\_bus\_fault\_level}。结果 \fld{DCFaultResult} 另记
 \fld{v\_prefault\_pu}、边计数（\fld{dc\_branch\_edges\_used}/\fld{dccb\_edges\_used}）与
 \fld{dccb\_open\_count}/\fld{dccb\_blocked\_branch\_count}。
 

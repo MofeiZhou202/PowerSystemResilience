@@ -605,6 +605,11 @@ EVPowerTrafficResult simulate_ev_power_traffic(
   const double gen_cap_mw = total_generation_capacity_mw(problem.system, options);
   result.steps.reserve(static_cast<std::size_t>(T));
   result.system_by_step.reserve(static_cast<std::size_t>(T));
+  // The network topology is fixed across the horizon (only station loads change
+  // per step), so a prepared session reuses the canonical projection, solver
+  // assembly, and symbolic factorization across steps. solve() rebuilds
+  // automatically if a step ever changes topology, so results are unchanged.
+  PreparedPowerFlowSession pf_session(options.pf_options);
   for (int k = 0; k < T; ++k) {
     EVPowerTrafficStepResult step;
     step.step_index = k;
@@ -659,7 +664,7 @@ EVPowerTrafficResult simulate_ev_power_traffic(
     }
     if (options.run_power_flow_validation) {
       step.power.power_flow_ran = true;
-      const auto pf = solve_power_flow(step_system, options.pf_options);
+      const auto pf = pf_session.solve(step_system);
       step.power.power_flow_converged = pf.converged;
       if (!pf.vm.empty()) {
         step.power.min_vm_pu =

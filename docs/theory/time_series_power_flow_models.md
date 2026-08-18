@@ -33,7 +33,7 @@ cascade**, each stage validating and refining the previous one:
     solve_unit_commitment      opf::solve_ac_opf        solve_handle (Newton)
 ```
 
-Entry point: `solve_time_series_pf()` (`src/time_series/time_series_pf.cpp:3662`).
+Entry point: `solve_time_series_pf()` (`src/time_series/time_series_pf.cpp:slice_ts_window`).
 Stage 1 alone: `solve_unit_commitment()` (`:3471`). The per-step system state is
 materialised by `build_time_series_system_snapshot()` (`:3212`).
 
@@ -87,7 +87,7 @@ Opt-in blocks (demand response, PV curtailment claw-back, microgrid islanding,
 storage degradation, VPP, energy router, mobile storage with or without
 co-optimised relocation) each add their own variables; their derivations are
 in `sequential_production_simulation_rich_models.md` §4. The complete variable
-layout with offsets is documented at `time_series_pf.cpp:1010–1064`.
+layout with offsets is documented at `src/time_series/time_series_pf.cpp:MobStor–1064`.
 
 **Variable-count formula** (baseline, network + DC network on):
 
@@ -462,17 +462,17 @@ file, untouched by the UC.
 | **DC-DC converters** | ★ DC-network flag | ✅ extracted | ❌ **never applied** | ✅ `pdcdc` → replayed to PF | native model |
 | DC branch flows | ★ | ❌ discarded | — | real DC network | real DC network |
 | **Flexible loads (DR)** | ★ decision | ❌ discarded | baseline `p_mw` (no profile scaling) | OPF's own flex variables | ✅ `pflex` replayed |
-| **VPPs** | ★ decision | ❌ discarded | ❌ authored `p_output_mw` | **fixed injection** (`parity_formulation.cpp:539`) | fixed injection (`solver_data.cpp:67`) |
+| **VPPs** | ★ decision | ❌ discarded | ❌ authored `p_output_mw` | **fixed injection** (`src/optimal_power_flow/parity_formulation.cpp:build_problem`) | fixed injection (`src/power_flow/solver_data.cpp:aggregate_generation`) |
 | **Microgrids** | ★ exchange + islanding | ❌ discarded | ❌ authored `p_exchange_mw`, mode | **fixed injection** (`:548`) | fixed injection (`:77`) |
 | **Mobile storage** | ★ (± co-relocation MILP) | ❌ discarded | ❌ authored `p_mw`/status | **fixed injection** (`:557`) | fixed injection (`:86`) |
-| **Energy routers** | ★ port decision | ❌ discarded | ❌ | ✅ native port model (`parity_formulation.cpp:303`) | ✅ native Newton port model (`jacobian_builder.cpp:114`) |
+| **Energy routers** | ★ port decision | ❌ discarded | ❌ | ✅ native port model (`src/optimal_power_flow/parity_formulation.cpp:build_problem`) | ✅ native Newton port model (`src/power_flow/jacobian_builder.cpp:build_power_spec`) |
 
 Key readings of this table:
 
 - **Nothing disappears from the physics.** Every component type is present in
   the Stage-3 PF: converters and energy routers through their native nonlinear
   models, VPP/microgrid/mobile-storage as fixed authored injections
-  (`solver_data.cpp:66–93`). What is lost is *optimised scheduling*, not
+  (`src/power_flow/solver_data.cpp:aggregate_generation–93`). What is lost is *optimised scheduling*, not
   presence.
 - **VSC/DC-DC schedules are advisory.** The UC's converter series are
   extracted, concatenated, sliced by the annual layer, and serialised to JSON
