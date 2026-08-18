@@ -51,12 +51,14 @@ const NetworkOverview = (() => {
       nodeData: null,
       nodeDomains: [],
       nodeIndices: [],
+      nodeKeys: [],
       nodeSlotByKey: new Map(),
       lineData: null,
       lineEndpoints: null,
       // Per-drawn-edge bookkeeping for result recoloring: vertex float offset
       // in lineData, stable identity, and the structural base color to restore
-      // when no loading value applies.
+      // when no loading value applies. aggKey (order-independent group pair
+      // key) identifies collapsed LOD0/1 edges in the result maps.
       lineEdgeInfo: [],
       transformerData: null,
     },
@@ -76,8 +78,12 @@ const NetworkOverview = (() => {
     result: {
       seq: 0,            // bumped per result request; stale replies dropped
       active: false,     // result coloring currently applied
-      nodeVm: null,      // Map<`${domain}:${index}`, vm_pu>
-      branchLoading: null, // Map<`${domain}:${index}`, loading_pct>
+      // Map<node.key, vm> — per-bus `${domain}:${index}` at LOD2, backend
+      // group key at LOD0/1 (value = worst band deviation, else vm_avg).
+      nodeVm: null,
+      // Map<edge id, loading_pct> — `${domain}:${index}` at LOD2, the
+      // order-independent group-pair aggEdgeKey at LOD0/1.
+      branchLoading: null,
       meta: null,        // result_meta verbatim (source/method/converged/...)
       limitations: [],
     },
@@ -98,6 +104,7 @@ const NetworkOverview = (() => {
   let canvas;
   let status;
   let lodSelect;
+  let legend;
 
   const keyOf = (domain, index) => `${domain}:${index}`;
   const finite = value => Number.isFinite(Number(value));
@@ -384,6 +391,7 @@ const NetworkOverview = (() => {
     slotByKey.clear();
     state.soa.nodeDomains.length = nodeCount;
     state.soa.nodeIndices.length = nodeCount;
+    state.soa.nodeKeys.length = nodeCount;
     state.selectedSlot = -1;
     for (let i = 0; i < nodeCount; i += 1) {
       const node = nodes[i];
@@ -392,6 +400,7 @@ const NetworkOverview = (() => {
         Number(node.index) === Number(state.selected.index);
       state.soa.nodeDomains[i] = node.domain;
       state.soa.nodeIndices[i] = node.index;
+      state.soa.nodeKeys[i] = node.key;
       slotByKey.set(node.key, i);
       if (selected) state.selectedSlot = i;
       // Result coloring (when active) is the base color; selection wins.
@@ -426,6 +435,9 @@ const NetworkOverview = (() => {
         offset: lineFloats,
         domain: edge.domain,
         index: edge.index != null ? Number(edge.index) : null,
+        aggKey: edge.kind === 'aggregate'
+          ? aggEdgeKey(String(edge.source), String(edge.target))
+          : null,
         base: baseColor,
       };
       lineEdgeInfo.push(info);
@@ -586,58 +598,124 @@ const NetworkOverview = (() => {
     }
   }
 
-  // Voltage band colors mirror the SVG result overlay (canvas.js
-  // showPowerFlowResults): <0.95 pu red #e06c75, >1.05 pu orange #d19a66,
-  // in-band green #98c379 for AC and cyan #56b6c2 for DC.
+  // Result color scales — the single source of truth shared by the WebGL
+  // coloring and the legend overlay. Voltage band colors mirror the SVG
+  // result overlay (canvas.js showPowerFlowResults): <0.95 pu red #e06c75,
+  // >1.05 pu orange #d19a66, in-band green #98c379 for AC and cyan #56b6c2
+  // for DC. The loading ramp mirrors canvas.js loadingColor(): green →
+  // yellow at 50% → red at 100%, clamped at 150%.
+  const VM_BAND_LOW = 0.95;
+  const VM_BAND_HIGH = 1.05;
+  const VM_COLOR_LOW = [0.878, 0.424, 0.459, 1];    // #e06c75
+  const VM_COLOR_HIGH = [0.820, 0.604, 0.400, 1];   // #d19a66
+  const VM_COLOR_IN_AC = [0.596, 0.765, 0.475, 1];  // #98c379
+  const VM_COLOR_IN_DC = [0.337, 0.714, 0.761, 1];  // #56b6c2
+  const LOADING_CLAMP_PCT = 150;
+  const LOADING_RAMP = [
+    { pct: 0, rgb: [76, 175, 80] },     // green
+    { pct: 50, rgb: [255, 235, 59] },   // yellow
+    { pct: 100, rgb: [244, 67, 54] },   // red (held up to the clamp)
+  ];
+
   function voltageColor(vm, domain) {
-    if (vm < 0.95) return [0.878, 0.424, 0.459, 1];
-    if (vm > 1.05) return [0.820, 0.604, 0.400, 1];
-    return domain === 'dc'
-      ? [0.337, 0.714, 0.761, 1]
-      : [0.596, 0.765, 0.475, 1];
+    if (vm < VM_BAND_LOW) return VM_COLOR_LOW;
+    if (vm > VM_BAND_HIGH) return VM_COLOR_HIGH;
+    return domain === 'dc' ? VM_COLOR_IN_DC : VM_COLOR_IN_AC;
   }
 
-  // Branch loading ramp mirrors canvas.js loadingColor(): green → yellow at
-  // 50% → red at 100%, clamped at 150%. Alpha 0.9 so loaded lines stand out
-  // over the 0.22-alpha structural edge color.
+  // Alpha 0.9 so loaded lines stand out over the 0.22-alpha structural edge
+  // color.
   function loadingColorFloat(pct) {
-    const p = Math.max(0, Math.min(Number(pct) || 0, 150)) / 100;
-    let r;
-    let g;
-    let b;
-    if (p <= 0.5) {
-      const t = p * 2;
-      r = 76 + (255 - 76) * t;
-      g = 175 + (235 - 175) * t;
-      b = 80 + (59 - 80) * t;
-    } else {
-      const t = Math.min((p - 0.5) * 2, 1);
-      r = 255 + (244 - 255) * t;
-      g = 235 + (67 - 235) * t;
-      b = 59 + (54 - 59) * t;
-    }
-    return [r / 255, g / 255, b / 255, 0.9];
+    const p = Math.max(0, Math.min(Number(pct) || 0, LOADING_CLAMP_PCT));
+    const [a, b] = p <= LOADING_RAMP[1].pct
+      ? [LOADING_RAMP[0], LOADING_RAMP[1]]
+      : [LOADING_RAMP[1], LOADING_RAMP[2]];
+    const t = Math.min((p - a.pct) / (b.pct - a.pct), 1);
+    return [
+      (a.rgb[0] + (b.rgb[0] - a.rgb[0]) * t) / 255,
+      (a.rgb[1] + (b.rgb[1] - a.rgb[1]) * t) / 255,
+      (a.rgb[2] + (b.rgb[2] - a.rgb[2]) * t) / 255,
+      0.9,
+    ];
+  }
+
+  // Order-independent key for an aggregate edge between two group keys; the
+  // backend orders group pairs by first-encounter order, which differs
+  // between the topology and result windows, so both sides normalize.
+  const aggEdgeKey = (a, b) => (a < b ? `${a}->${b}` : `${b}->${a}`);
+
+  const rgbCss = rgb =>
+    `#${rgb.map(v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('')}`;
+  const floatCss = color => rgbCss(color.slice(0, 3).map(v => v * 255));
+
+  // Result-color legend overlay: shown only while result coloring is active.
+  // Created lazily with inline styles so no stylesheet/HTML change is needed;
+  // all colors come from the shared scales above.
+  function ensureLegend() {
+    if (legend || !root) return legend;
+    legend = document.createElement('div');
+    legend.setAttribute('aria-label', '结果着色图例');
+    const s = legend.style;
+    s.position = 'absolute';
+    s.right = '10px';
+    s.bottom = '10px';
+    s.zIndex = '2';
+    s.padding = '6px 8px';
+    s.borderRadius = '4px';
+    s.fontSize = '11px';
+    s.lineHeight = '1.6';
+    s.background = 'rgba(16, 20, 29, 0.88)';
+    s.border = '1px solid rgba(101, 112, 134, 0.6)';
+    s.color = '#c8d0e0';
+    s.pointerEvents = 'none';
+    s.display = 'none';
+    const swatch = color =>
+      `<span style="display:inline-block;width:10px;height:10px;border-radius:2px;` +
+      `background:${floatCss(color)};margin-right:4px;vertical-align:-1px;"></span>`;
+    const stops = LOADING_RAMP.map(stop =>
+      `${rgbCss(stop.rgb)} ${(stop.pct / LOADING_CLAMP_PCT) * 100}%`).join(', ');
+    legend.innerHTML =
+      '<div style="font-weight:600;">电压 (pu)</div>' +
+      `<div>${swatch(VM_COLOR_LOW)}&lt;${VM_BAND_LOW}　${swatch(VM_COLOR_HIGH)}&gt;${VM_BAND_HIGH}</div>` +
+      `<div>${swatch(VM_COLOR_IN_AC)}AC ${VM_BAND_LOW}–${VM_BAND_HIGH}　` +
+      `${swatch(VM_COLOR_IN_DC)}DC ${VM_BAND_LOW}–${VM_BAND_HIGH}</div>` +
+      '<div style="font-weight:600;margin-top:2px;">负载率</div>' +
+      `<div style="width:140px;height:8px;border-radius:2px;background:linear-gradient(90deg, ${stops});"></div>` +
+      `<div style="display:flex;justify-content:space-between;width:140px;">` +
+      `<span>0%</span><span>${LOADING_CLAMP_PCT}%+</span></div>`;
+    root.appendChild(legend);
+    return legend;
+  }
+
+  function updateLegend() {
+    if (!ensureLegend()) return;
+    legend.style.display = state.result.active ? 'block' : 'none';
   }
 
   // Base color of a node slot: result voltage color when result coloring is
-  // active and the bus has a vm value, otherwise the structural domain color.
+  // active and the slot's identity (per-bus key at LOD2, group key at LOD0/1)
+  // has a vm value, otherwise the structural domain color.
   function nodeBaseColor(slot) {
     const domain = state.soa.nodeDomains[slot];
     const vm = state.result.active && state.result.nodeVm
-      ? state.result.nodeVm.get(keyOf(domain, state.soa.nodeIndices[slot]))
+      ? state.result.nodeVm.get(state.soa.nodeKeys[slot])
       : undefined;
     if (vm != null && Number.isFinite(vm)) return voltageColor(vm, domain);
     return state.colors[domain] || state.colors.ac;
   }
 
   // Base color of a drawn edge: loading ramp when result coloring has a value
-  // for this stable edge identity, otherwise the structural color recorded at
-  // rebuild time.
+  // for this stable edge identity (per-branch key at LOD2, group-pair aggKey
+  // at LOD0/1), otherwise the structural color recorded at rebuild time.
   function edgeBaseColor(info) {
-    const loading = state.result.active && state.result.branchLoading && info.index != null
-      ? state.result.branchLoading.get(`${info.domain}:${info.index}`)
-      : undefined;
-    if (loading != null && Number.isFinite(loading)) return loadingColorFloat(loading);
+    if (state.result.active && state.result.branchLoading) {
+      const loading = info.aggKey != null
+        ? state.result.branchLoading.get(info.aggKey)
+        : (info.index != null
+          ? state.result.branchLoading.get(`${info.domain}:${info.index}`)
+          : undefined);
+      if (loading != null && Number.isFinite(loading)) return loadingColorFloat(loading);
+    }
     return info.base;
   }
 
@@ -804,8 +882,9 @@ const NetworkOverview = (() => {
     }).catch(() => {
       if (seq === state.window.seq) updateStatus('拓扑窗口数据不可用，保留当前视图');
     });
-    // Result coloring follows the same window: same bbox (no lod field).
-    fetchResultWindow(windowBody(expanded));
+    // Result coloring follows the same window: same bbox, same LOD (the
+    // backend aggregates group voltage statistics and max branch loading).
+    fetchResultWindow({ ...windowBody(expanded), lod: state.lod });
   }
 
   // result_window fetch with its own sequence guard so it never invalidates a
@@ -825,6 +904,23 @@ const NetworkOverview = (() => {
       state.result.nodeVm = new Map();
       state.result.branchLoading = new Map();
       outcome.nodes.forEach(node => {
+        if (node.group != null) {
+          // Aggregated group node (LOD0/1): color by the worst band
+          // deviation among members when any member leaves the
+          // [VM_BAND_LOW, VM_BAND_HIGH] band, otherwise by the group mean;
+          // the backend declares the statistics semantics in
+          // model_limitations, surfaced in the status line.
+          const vmin = Number(node.vm_min);
+          const vmax = Number(node.vm_max);
+          const vavg = Number(node.vm_avg);
+          const lowDev = Number.isFinite(vmin) ? VM_BAND_LOW - vmin : 0;
+          const highDev = Number.isFinite(vmax) ? vmax - VM_BAND_HIGH : 0;
+          const vm = Math.max(lowDev, highDev) > 0
+            ? (lowDev >= highDev ? vmin : vmax)
+            : vavg;
+          if (Number.isFinite(vm)) state.result.nodeVm.set(String(node.group), vm);
+          return;
+        }
         const vm = Number(node.vm_pu);
         if (Number.isFinite(vm)) {
           state.result.nodeVm.set(
@@ -833,10 +929,14 @@ const NetworkOverview = (() => {
       });
       (Array.isArray(outcome.branches) ? outcome.branches : []).forEach(branch => {
         const loading = Number(branch.loading_pct);
-        if (Number.isFinite(loading)) {
+        if (!Number.isFinite(loading)) return;
+        if (branch.kind === 'aggregate' && branch.source != null && branch.target != null) {
           state.result.branchLoading.set(
-            `${String(branch.domain || '').toLowerCase()}:${Number(branch.index)}`, loading);
+            aggEdgeKey(String(branch.source), String(branch.target)), loading);
+          return;
         }
+        state.result.branchLoading.set(
+          `${String(branch.domain || '').toLowerCase()}:${Number(branch.index)}`, loading);
       });
       state.result.meta = outcome.result_meta || null;
       state.result.limitations = Array.isArray(outcome.model_limitations)
@@ -867,7 +967,7 @@ const NetworkOverview = (() => {
   function refreshResults() {
     if (!state.active || !state.windowed ||
         typeof state.fetchResultWindow !== 'function') return false;
-    fetchResultWindow(windowBody(expandedViewportBounds()));
+    fetchResultWindow({ ...windowBody(expandedViewportBounds()), lod: state.lod });
     return true;
   }
 
@@ -1031,6 +1131,7 @@ const NetworkOverview = (() => {
   }
 
   function updateStatus(extra) {
+    updateLegend();
     if (!status) return;
     if (!state.graph && !extra) return;
     const selected = state.selected ? ` · 已选 ${state.selected.domain.toUpperCase()} ${state.selected.index}` : '';
@@ -1208,6 +1309,7 @@ const NetworkOverview = (() => {
       clearTimeout(state.window.timer);
       state.window.timer = 0;
     }
+    updateLegend();  // result state reset above: hide a stale legend
     state.active = true;
     document.body.classList.add('network-overview-active');
     document.body.classList.remove('network-overview-table');
@@ -1241,6 +1343,7 @@ const NetworkOverview = (() => {
       state.window.timer = 0;
     }
     document.body.classList.remove('network-overview-active', 'network-overview-table');
+    if (legend) legend.style.display = 'none';
     if (root) root.hidden = true;
   }
 

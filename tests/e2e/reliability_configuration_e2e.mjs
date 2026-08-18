@@ -69,6 +69,7 @@ async function main() {
     await waitUp(base);
     browser = await chromium.launch();
     const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+    await page.addInitScript(() => { try { localStorage.setItem('hysim.tourDone.v1', '1'); } catch {} });
     const pageErrors = [];
     page.on('pageerror', error => pageErrors.push(String(error?.stack || error)));
     await page.goto(`${base}/xjtu/`, { waitUntil: 'networkidle' });

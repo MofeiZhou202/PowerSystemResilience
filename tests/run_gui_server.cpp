@@ -17075,8 +17075,14 @@ int main(int argc, char** argv) {
   // the whole model.  Large systems can thus be result-coloured from a
   // bounded payload instead of the full /api/session/pf response.
   //
-  // Request body: {"min_x","min_y","max_x","max_y"} — same WGS84 bbox
-  // contract and validation as /api/session/topology_window.
+  // Request body: {"min_x","min_y","max_x","max_y","lod"?} — same WGS84 bbox
+  // contract and validation as /api/session/topology_window.  lod: 0 =
+  // aggregate by electrical domain, 1 = aggregate by domain/area/zone,
+  // 2 (default) = full per-bus detail; the grouping keys, centroid rule and
+  // intra-group edge collapse mirror topology_window exactly.  Aggregated
+  // nodes carry group voltage statistics (vm_avg/vm_min/vm_max); aggregated
+  // branches report the maximum loading_pct among the collapsed members
+  // (conservative), both declared in units/model_limitations.
   // Data source: last_pf_result + last_pf_system (the solved system copy).
   // vm/va align by position with last_pf_system->ac.buses; vdc with dc.buses;
   // branch_flows with ac.branches.  Values are identical to the full PF
@@ -17099,6 +17105,9 @@ int main(int argc, char** argv) {
       if (!(min_x <= max_x) || !(min_y <= max_y))
         throw std::runtime_error(
             "result_window requires min_x <= max_x and min_y <= max_y");
+      const int lod = j.value("lod", 2);
+      if (lod < 0 || lod > 2)
+        throw std::runtime_error("result_window lod must be 0, 1, or 2");
 
       std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
       std::shared_ptr<const hacdcpf::PowerFlowResult> pf_snap;
@@ -17148,6 +17157,7 @@ int main(int argc, char** argv) {
 
       json out;
       out["schema"] = "result_window_v1";
+      out["lod"] = lod;
       out["units"] = json{
           {"coordinates", "WGS84 degrees; x = longitude, y = latitude"},
           {"vm_pu", "per-unit voltage magnitude (DC buses: vdc in pu)"},
@@ -17155,6 +17165,15 @@ int main(int argc, char** argv) {
           {"branch_flows",
            "MW / MVAr; loading_pct = 100 * max(|S_from|, |S_to|) / rate_a_mva "
            "(same formula as the full PF response geo_ac_branches)"}};
+      if (lod < 2) {
+        out["units"]["vm_avg"] =
+            "mean of member-bus vm_pu inside the group (aggregated view)";
+        out["units"]["vm_min"] = "minimum member-bus vm_pu inside the group";
+        out["units"]["vm_max"] = "maximum member-bus vm_pu inside the group";
+        out["units"]["aggregated_loading_pct"] =
+            "maximum loading_pct among the collapsed branches between a group "
+            "pair (conservative); intra-group branches are not reported";
+      }
       out["bbox"] = json{{"min_x", min_x}, {"min_y", min_y},
                          {"max_x", max_x}, {"max_y", max_y}};
       out["model_scope"] = json{
@@ -17200,23 +17219,47 @@ int main(int argc, char** argv) {
       std::vector<char> dc_in(sys.dc.buses.size(), 0);
       int ac_total = 0, ac_geo = 0, dc_total = 0, dc_geo = 0;
       json nodes = json::array();
-      auto emit_ac = [&](int pos, double lon, double lat) {
+      // Aggregated path (lod 0/1): per-bus records grouped afterwards with the
+      // same keys as topology_window; vm uses the exact value the per-bus path
+      // would emit as vm_pu (NaN marks "no solved value").
+      struct Collected {
+        int pos;  // vector position in the solved system (domain-qualified)
+        bool is_dc;
+        double x, y;
+        int area, zone;
+        double vm;
+      };
+      std::vector<Collected> collected;
+      auto emit_ac = [&](int pos, double lon, double lat, int area, int zone) {
         const auto& b = sys.ac.buses[static_cast<size_t>(pos)];
-        json node{{"domain", "AC"}, {"index", b.index}, {"x", lon}, {"y", lat}};
-        if (pos < static_cast<int>(pf.vm.size()))
-          node["vm_pu"] = pf.vm[static_cast<size_t>(pos)];
-        if (pos < static_cast<int>(pf.va.size()))
-          node["va_rad"] = pf.va[static_cast<size_t>(pos)];
-        nodes.push_back(std::move(node));
+        if (lod < 2) {
+          collected.push_back(
+              {pos, false, lon, lat, area, zone,
+               pos < static_cast<int>(pf.vm.size())
+                   ? pf.vm[static_cast<size_t>(pos)]
+                   : std::numeric_limits<double>::quiet_NaN()});
+        } else {
+          json node{{"domain", "AC"}, {"index", b.index}, {"x", lon}, {"y", lat}};
+          if (pos < static_cast<int>(pf.vm.size()))
+            node["vm_pu"] = pf.vm[static_cast<size_t>(pos)];
+          if (pos < static_cast<int>(pf.va.size()))
+            node["va_rad"] = pf.va[static_cast<size_t>(pos)];
+          nodes.push_back(std::move(node));
+        }
         ac_in[static_cast<size_t>(pos)] = 1;
       };
-      auto emit_dc = [&](int pos, double lon, double lat) {
+      auto emit_dc = [&](int pos, double lon, double lat, int area, int zone) {
         const auto& b = sys.dc.buses[static_cast<size_t>(pos)];
-        json node{{"domain", "DC"}, {"index", b.index}, {"x", lon}, {"y", lat}};
-        node["vm_pu"] = (pos < static_cast<int>(pf.vdc.size()))
-                            ? pf.vdc[static_cast<size_t>(pos)]
-                            : b.vm_pu;
-        nodes.push_back(std::move(node));
+        const double vm = (pos < static_cast<int>(pf.vdc.size()))
+                              ? pf.vdc[static_cast<size_t>(pos)]
+                              : b.vm_pu;
+        if (lod < 2) {
+          collected.push_back({pos, true, lon, lat, area, zone, vm});
+        } else {
+          json node{{"domain", "DC"}, {"index", b.index}, {"x", lon}, {"y", lat}};
+          node["vm_pu"] = vm;
+          nodes.push_back(std::move(node));
+        }
         dc_in[static_cast<size_t>(pos)] = 1;
       };
 
@@ -17257,10 +17300,10 @@ int main(int argc, char** argv) {
                     graph_snap->nodes[static_cast<size_t>(e.node_idx)];
                 if (node.domain == hacdcpf::graph::NodeDomain::DC) {
                   const auto it = dc_pos.find(node.bus_id);
-                  if (it != dc_pos.end()) emit_dc(it->second, e.x, e.y);
+                  if (it != dc_pos.end()) emit_dc(it->second, e.x, e.y, e.area, e.zone);
                 } else {
                   const auto it = ac_pos.find(node.bus_id);
-                  if (it != ac_pos.end()) emit_ac(it->second, e.x, e.y);
+                  if (it != ac_pos.end()) emit_ac(it->second, e.x, e.y, e.area, e.zone);
                 }
               }
             }
@@ -17274,7 +17317,7 @@ int main(int argc, char** argv) {
           if (b.latitude == 0.0 && b.longitude == 0.0) continue;
           ++ac_geo;
           if (in_window(b.longitude, b.latitude))
-            emit_ac(static_cast<int>(i), b.longitude, b.latitude);
+            emit_ac(static_cast<int>(i), b.longitude, b.latitude, b.area, b.zone);
         }
         for (size_t i = 0; i < sys.dc.buses.size(); ++i) {
           const auto& b = sys.dc.buses[i];
@@ -17282,7 +17325,7 @@ int main(int argc, char** argv) {
           if (b.latitude == 0.0 && b.longitude == 0.0) continue;
           ++dc_geo;
           if (in_window(b.longitude, b.latitude))
-            emit_dc(static_cast<int>(i), b.longitude, b.latitude);
+            emit_dc(static_cast<int>(i), b.longitude, b.latitude, b.area, b.zone);
         }
       }
       out["coordinate_coverage"] = json{
@@ -17296,41 +17339,176 @@ int main(int argc, char** argv) {
             "Buses without coordinates (model-default lat/lon 0,0) are "
             "excluded from window results; see coordinate_coverage.");
       }
-      out["nodes"] = std::move(nodes);
-
-      // AC branches with both endpoint buses inside the window; flows mapped
-      // positionally from pf.branch_flows (same alignment as the full PF
-      // response), loading formula identical to geo_ac_branches.
-      json branches = json::array();
-      for (size_t i = 0; i < sys.ac.branches.size(); ++i) {
+      // loading_pct formula shared by the per-branch and aggregated paths;
+      // NaN marks "no solved flow or no rating".
+      auto ac_branch_loading = [&](size_t i) -> double {
         const auto& br = sys.ac.branches[i];
-        const auto fi = ac_pos.find(br.from_bus);
-        const auto ti = ac_pos.find(br.to_bus);
-        if (fi == ac_pos.end() || ti == ac_pos.end()) continue;
-        if (!ac_in[static_cast<size_t>(fi->second)] ||
-            !ac_in[static_cast<size_t>(ti->second)])
-          continue;
-        json row{{"domain", "AC"}, {"index", br.index},
-                 {"from", br.from_bus}, {"to", br.to_bus},
-                 {"in_service", br.in_service}};
-        if (i < pf.branch_flows.size()) {
-          const auto& f = pf.branch_flows[i];
-          row["pf_mw"] = f.pf_mw;
-          row["qf_mvar"] = f.qf_mvar;
-          row["pt_mw"] = f.pt_mw;
-          row["qt_mvar"] = f.qt_mvar;
-          row["loss_mw"] = f.pf_mw + f.pt_mw;
-          if (br.rate_a_mva > 0.0) {
-            const double smax =
-                std::max(std::hypot(f.pf_mw, f.qf_mvar),
-                         std::hypot(f.pt_mw, f.qt_mvar));
-            row["loading_pct"] = 100.0 * smax / br.rate_a_mva;
+        if (i >= pf.branch_flows.size() || br.rate_a_mva <= 0.0)
+          return std::numeric_limits<double>::quiet_NaN();
+        const auto& f = pf.branch_flows[i];
+        const double smax = std::max(std::hypot(f.pf_mw, f.qf_mvar),
+                                     std::hypot(f.pt_mw, f.qt_mvar));
+        return 100.0 * smax / br.rate_a_mva;
+      };
+
+      if (lod < 2) {
+        // Aggregated view: grouping keys identical to topology_window (lod 0
+        // by electrical domain, lod 1 by domain/area/zone), centroid
+        // coordinates, and voltage statistics over member buses.
+        struct RGroup {
+          std::string key;
+          std::string domain;
+          double sum_x{0.0}, sum_y{0.0};
+          int count{0};
+          double vm_sum{0.0};
+          double vm_min{std::numeric_limits<double>::infinity()};
+          double vm_max{-std::numeric_limits<double>::infinity()};
+          int vm_count{0};
+          int index{-1};  // position in the groups vector
+        };
+        std::vector<RGroup> groups;
+        std::unordered_map<std::string, int> group_pos;
+        // Vector position in the solved system -> group index (-1 outside the
+        // window), for branch aggregation.
+        std::vector<int> ac_group(sys.ac.buses.size(), -1);
+        std::vector<int> dc_group(sys.dc.buses.size(), -1);
+        for (const auto& c : collected) {
+          const char* domain = c.is_dc ? "DC" : "AC";
+          const std::string key =
+              lod == 0
+                  ? std::string(domain)
+                  : std::string(domain) + ":area:" + std::to_string(c.area) +
+                        ":zone:" + std::to_string(c.zone);
+          auto it = group_pos.find(key);
+          if (it == group_pos.end()) {
+            RGroup g;
+            g.key = key;
+            g.domain = domain;
+            g.index = static_cast<int>(groups.size());
+            group_pos.emplace(key, g.index);
+            groups.push_back(std::move(g));
+            it = group_pos.find(key);
           }
-          row["rate_mva"] = br.rate_a_mva;
+          RGroup& g = groups[static_cast<size_t>(it->second)];
+          g.sum_x += c.x;
+          g.sum_y += c.y;
+          ++g.count;
+          if (std::isfinite(c.vm)) {
+            g.vm_sum += c.vm;
+            g.vm_min = std::min(g.vm_min, c.vm);
+            g.vm_max = std::max(g.vm_max, c.vm);
+            ++g.vm_count;
+          }
+          (c.is_dc ? dc_group : ac_group)[static_cast<size_t>(c.pos)] = g.index;
         }
-        branches.push_back(std::move(row));
+
+        json agg_nodes = json::array();
+        for (const auto& g : groups) {
+          json node{{"group", g.key},
+                    {"domain", g.domain},
+                    {"x", g.count > 0 ? g.sum_x / g.count : 0.0},
+                    {"y", g.count > 0 ? g.sum_y / g.count : 0.0},
+                    {"count", g.count}};
+          if (g.vm_count > 0) {
+            node["vm_avg"] = g.vm_sum / g.vm_count;
+            node["vm_min"] = g.vm_min;
+            node["vm_max"] = g.vm_max;
+          }
+          agg_nodes.push_back(std::move(node));
+        }
+        out["nodes"] = std::move(agg_nodes);
+
+        // Aggregate AC branches between distinct groups; intra-group branches
+        // collapse exactly like topology_window edges.  loading_pct is the
+        // maximum among the collapsed members (conservative), declared in
+        // units and model_limitations.
+        struct AggBranch {
+          int source, target;
+          int count{0};
+          double loading_max{0.0};
+          bool has_loading{false};
+        };
+        std::map<std::pair<int, int>, AggBranch> agg_branches;
+        for (size_t i = 0; i < sys.ac.branches.size(); ++i) {
+          const auto& br = sys.ac.branches[i];
+          const auto fi = ac_pos.find(br.from_bus);
+          const auto ti = ac_pos.find(br.to_bus);
+          if (fi == ac_pos.end() || ti == ac_pos.end()) continue;
+          if (!ac_in[static_cast<size_t>(fi->second)] ||
+              !ac_in[static_cast<size_t>(ti->second)])
+            continue;
+          const int gs = ac_group[static_cast<size_t>(fi->second)];
+          const int gt = ac_group[static_cast<size_t>(ti->second)];
+          if (gs < 0 || gt < 0 || gs == gt) continue;
+          const auto key = std::minmax(gs, gt);
+          auto& agg = agg_branches[key];
+          agg.source = key.first;
+          agg.target = key.second;
+          ++agg.count;
+          const double loading = ac_branch_loading(i);
+          if (std::isfinite(loading)) {
+            agg.loading_max =
+                agg.has_loading ? std::max(agg.loading_max, loading) : loading;
+            agg.has_loading = true;
+          }
+        }
+        json branches = json::array();
+        for (const auto& [key, agg] : agg_branches) {
+          json row{
+              {"key", groups[static_cast<size_t>(agg.source)].key + "->" +
+                          groups[static_cast<size_t>(agg.target)].key},
+              {"source", groups[static_cast<size_t>(agg.source)].key},
+              {"target", groups[static_cast<size_t>(agg.target)].key},
+              {"domain", "AC"},
+              {"kind", "aggregate"},
+              {"count", agg.count},
+              {"in_service", true}};
+          if (agg.has_loading) row["loading_pct"] = agg.loading_max;
+          branches.push_back(std::move(row));
+        }
+        out["branches"] = std::move(branches);
+        out["model_limitations"].push_back(
+            "Aggregated result view: nodes are domain/area/zone groups with "
+            "centroid coordinates; vm_avg/vm_min/vm_max are statistics over "
+            "member bus voltages, not a solved group voltage.");
+        out["model_limitations"].push_back(
+            "Aggregated branch loading_pct is the maximum loading among the "
+            "collapsed branches between the group pair (conservative); "
+            "intra-group branches collapse into their group and are not "
+            "reported.");
+      } else {
+        out["nodes"] = std::move(nodes);
+
+        // AC branches with both endpoint buses inside the window; flows mapped
+        // positionally from pf.branch_flows (same alignment as the full PF
+        // response), loading formula identical to geo_ac_branches.
+        json branches = json::array();
+        for (size_t i = 0; i < sys.ac.branches.size(); ++i) {
+          const auto& br = sys.ac.branches[i];
+          const auto fi = ac_pos.find(br.from_bus);
+          const auto ti = ac_pos.find(br.to_bus);
+          if (fi == ac_pos.end() || ti == ac_pos.end()) continue;
+          if (!ac_in[static_cast<size_t>(fi->second)] ||
+              !ac_in[static_cast<size_t>(ti->second)])
+            continue;
+          json row{{"domain", "AC"}, {"index", br.index},
+                   {"from", br.from_bus}, {"to", br.to_bus},
+                   {"in_service", br.in_service}};
+          if (i < pf.branch_flows.size()) {
+            const auto& f = pf.branch_flows[i];
+            row["pf_mw"] = f.pf_mw;
+            row["qf_mvar"] = f.qf_mvar;
+            row["pt_mw"] = f.pt_mw;
+            row["qt_mvar"] = f.qt_mvar;
+            row["loss_mw"] = f.pf_mw + f.pt_mw;
+            const double loading = ac_branch_loading(i);
+            if (std::isfinite(loading)) row["loading_pct"] = loading;
+            row["rate_mva"] = br.rate_a_mva;
+          }
+          branches.push_back(std::move(row));
+        }
+        out["branches"] = std::move(branches);
       }
-      out["branches"] = std::move(branches);
 
       res.set_content(out.dump(), "application/json");
     } catch (const std::exception& e) {
@@ -26653,6 +26831,28 @@ int main(int argc, char** argv) {
 #endif
               << ".\n         The /xjtu/ canvas UI will be unavailable (404). "
                  "Launch from the repo root or pass a correct working directory.\n";
+  }
+
+  // Serve the curated documentation tree read-only so the in-GUI help center
+  // can fetch markdown sources. httplib mount points reject ".." traversal.
+  const auto docs_dir = [&]() -> std::string {
+    std::vector<fs::path> candidates = {
+        fs::current_path() / "docs",
+        fs::current_path() / ".." / "docs",
+        fs::current_path() / ".." / ".." / "docs",
+        fs::current_path() / ".." / ".." / ".." / "docs",
+    };
+#if defined(HACDCPF_PROJECT_ROOT) && !defined(HACDCPF_TRIAL_EDITION)
+    candidates.push_back(fs::path(HACDCPF_PROJECT_ROOT) / "docs");
+#endif
+    for (const auto& c : candidates) {
+      std::error_code ec;
+      if (fs::exists(c, ec) && !ec) return fs::canonical(c).string();
+    }
+    return (fs::current_path() / "docs").string();
+  }();
+  if (fs::exists(docs_dir)) {
+    svr.set_mount_point("/xjtu/docs", docs_dir);
   }
 
   // CORS headers for cross-origin access

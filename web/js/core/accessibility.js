@@ -57,6 +57,7 @@
     document.querySelectorAll('.modal').forEach((modal, index) => {
       modal.setAttribute('role', 'dialog');
       modal.setAttribute('aria-modal', 'true');
+      observeModal(modal);
       const heading = modal.querySelector('h1, h2, h3, [class*="title"]');
       if (heading) {
         if (!heading.id) heading.id = `hysim-dialog-title-${index + 1}`;
@@ -64,6 +65,81 @@
       }
       const visible = global.getComputedStyle(modal).display !== 'none' && !modal.hidden;
       modal.setAttribute('aria-hidden', visible ? 'false' : 'true');
+    });
+  }
+
+  // ---- Modal focus trap -----------------------------------------------------
+  // While a `.modal[role="dialog"]` is visible, Tab / Shift+Tab cycle through
+  // its focusable elements and can never leave the dialog. Esc handling stays
+  // with each modal's own logic (not duplicated here). When the modal closes,
+  // focus returns to the element that had it before opening — but only when
+  // focus is still stranded inside the closing modal (or on <body>); modals
+  // like the help panel that restore focus themselves are left alone.
+  // Attach/detach is driven by the MutationObserver → scheduleSync →
+  // syncNavigation pipeline; `trapMemory` records the pre-open focus per
+  // modal without pinning the modal element (WeakMap).
+  const FOCUSABLE_SELECTOR =
+    'a[href], button:not([disabled]), input:not([disabled]), ' +
+    'select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  const trapMemory = new WeakMap();   // modal → { restoreFocus }
+  const observedModals = new WeakSet();
+  let activeTrapModal = null;
+
+  function isModalOpen(modal) {
+    return !modal.hidden && global.getComputedStyle(modal).display !== 'none';
+  }
+
+  function focusableIn(modal) {
+    return Array.from(modal.querySelectorAll(FOCUSABLE_SELECTOR)).filter(isVisible);
+  }
+
+  function attachTrap(modal) {
+    if (activeTrapModal === modal) return;
+    if (activeTrapModal) detachTrap(activeTrapModal);
+    activeTrapModal = modal;
+    trapMemory.set(modal, { restoreFocus: document.activeElement || null });
+  }
+
+  function detachTrap(modal) {
+    if (activeTrapModal !== modal) return;
+    activeTrapModal = null;
+    const memory = trapMemory.get(modal);
+    trapMemory.delete(modal);
+    const previous = memory && memory.restoreFocus;
+    if (!previous || typeof previous.focus !== 'function') return;
+    const active = document.activeElement;
+    const stranded = !active || active === document.body || modal.contains(active);
+    if (stranded && document.contains(previous)) previous.focus();
+  }
+
+  function syncFocusTraps() {
+    const open = Array.from(document.querySelectorAll('.modal')).filter(isModalOpen);
+    if (activeTrapModal && open.includes(activeTrapModal)) return;  // still open
+    if (activeTrapModal) detachTrap(activeTrapModal);
+    if (open.length) attachTrap(open[open.length - 1]);
+  }
+
+  function handleTrapKeydown(event) {
+    if (!activeTrapModal || event.key !== 'Tab') return;
+    const items = focusableIn(activeTrapModal);
+    if (!items.length) { event.preventDefault(); return; }
+    const first = items[0];
+    const last = items[items.length - 1];
+    const active = document.activeElement;
+    const inside = !!active && activeTrapModal.contains(active);
+    if (event.shiftKey) {
+      if (!inside || active === first) { event.preventDefault(); last.focus(); }
+    } else if (!inside || active === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  function observeModal(modal) {
+    if (!observer || observedModals.has(modal)) return;
+    observedModals.add(modal);
+    observer.observe(modal, {
+      attributes: true, attributeFilter: ['class', 'hidden', 'style'],
     });
   }
 
@@ -77,6 +153,7 @@
       });
     });
     syncDialogs();
+    syncFocusTraps();
   }
 
   function scheduleSync() {
@@ -126,7 +203,8 @@
     if (main) { main.setAttribute('role', 'main'); main.tabIndex = -1; }
     const canvas = document.getElementById('canvas');
     if (canvas) {
-      canvas.setAttribute('aria-label', '交直流混合系统单线图画布');
+      canvas.setAttribute('aria-label',
+        '交直流混合系统单线图画布（选中元件后可用方向键按网格移动，Shift+方向键按 1px 微调）');
       canvas.tabIndex = 0;
     }
     const consoleLog = document.getElementById('consoleLog');
@@ -144,9 +222,14 @@
     navigationRoots.forEach(element => observer.observe(element, {
       subtree: true, attributes: true, attributeFilter: ['class', 'hidden'],
     }));
-    document.querySelectorAll('.modal').forEach(modal => observer.observe(modal, {
-      attributes: true, attributeFilter: ['class', 'hidden', 'style'],
-    }));
+    document.querySelectorAll('.modal').forEach(observeModal);
+    // Modals added after init: watch direct body children (modals are
+    // top-level elements) and attach the per-modal attribute observer from
+    // syncDialogs on the next scheduled sync.
+    if (document.body) observer.observe(document.body, { childList: true });
+    // Focus trap: one capture-phase listener is enough — it acts only while
+    // `activeTrapModal` is set and only on Tab.
+    document.addEventListener('keydown', handleTrapKeydown, true);
     return audit();
   }
 
@@ -154,6 +237,7 @@
     schema: 'hysim_accessibility_v1',
     init,
     syncNavigation,
+    syncFocusTraps,
     audit,
   });
 })(window);

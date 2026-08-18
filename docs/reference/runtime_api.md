@@ -1,10 +1,21 @@
 # Runtime API Contract
 
-Updated: 2026-08-17
+Updated: 2026-08-18 (result_window gains optional lod 0/1 aggregated results)
 
 The GUI server is implemented in `tests/run_gui_server.cpp`. Session endpoints
 operate on one loaded `HybridPowerSystem`; a model-changing request clears
 cached analysis results.
+
+## Static documentation mount
+
+`GET /xjtu/docs/<relative path>` serves markdown files from the repository
+`docs/` tree read-only (for example `/xjtu/docs/README.md`,
+`/xjtu/docs/overview/case_catalog.md`). Path traversal outside `docs/` is
+rejected with 404. The GUI documentation help center
+(`web/js/core/help_center.js`, manifest `web/help_docs.json` with schema
+`hysim_help_docs_v1`) renders these documents in-app; see
+[GUI Canvas runtime](../developer/gui_canvas_runtime.md) for the front-end
+contract.
 
 ## Version 1 multi-session API
 
@@ -127,7 +138,7 @@ serialization; the frontend parses it with `JSON.parse`.
 | Method and route | Contract |
 |---|---|
 | `POST /api/session/topology_window` | Bounding-box query over the resident uniform-grid spatial index. Body: required numeric `min_x,min_y,max_x,max_y` (WGS84 degrees; x=longitude, y=latitude; min<=max enforced) and optional `lod` (0=aggregate by electrical domain, 1=aggregate by domain/area/zone, 2=full per-bus detail, default 2; semantics mirror `web/js/core/network_overview.js` `aggregate()`). Response `topology_window_v1`: `nodes` carry domain-qualified stable `.index` (lod 2) or group `key`/centroid/`count` (lod 0/1); `edges` are included only when both endpoints are inside the window and carry `category` plus stable `index`. `coordinate_coverage` declares how many AC/DC buses lack coordinates (model-default lat/lon 0,0); such buses are excluded from window results and the exclusion is repeated in `model_limitations` rather than silently returning an empty view. The response never embeds the full component parameter set. |
-| `POST /api/session/result_window` | Viewport-scoped per-element power-flow results from the cached last PF (`last_pf_result` + `last_pf_system`). Same bbox body as `topology_window` (no `lod`). Returns `409` with `error=no_cached_power_flow` when no PF result is cached — never a silent empty view. Response `result_window_v1`: `nodes` = in-window geo-referenced buses `{domain,index,x,y,vm_pu,va_rad?}` (`vm_pu` in pu; `va_rad` in radians, AC only; DC buses carry `vm_pu` = vdc in pu); `branches` = AC branches with both endpoints in-window `{domain,index,from,to,in_service,pf_mw,qf_mvar,pt_mw,qt_mvar,loss_mw,loading_pct,rate_mva}` (MW/MVAr; `loading_pct = 100 * max(|S_from|,|S_to|)/rate_a_mva`, same as the full PF `geo_ac_branches`; DC branch flows and converter transfers are excluded and declared). `result_meta` reports `source`, `method`, `converged`, `iterations`, `residual`, and `result_matches_current_system` — when the model was replaced or edited after the solve, the flag is `false` and `model_limitations` declares the lag. `units`, `bbox`, and `coordinate_coverage` mirror `topology_window_v1`. |
+| `POST /api/session/result_window` | Viewport-scoped per-element power-flow results from the cached last PF (`last_pf_result` + `last_pf_system`). Same bbox body as `topology_window`, plus the same optional `lod` (default 2; 0/1 rejected values return 400). Returns `409` with `error=no_cached_power_flow` when no PF result is cached — never a silent empty view. Response `result_window_v1` (extended with `lod` and the aggregated node/branch shapes below): at lod 2, `nodes` = in-window geo-referenced buses `{domain,index,x,y,vm_pu,va_rad?}` (`vm_pu` in pu; `va_rad` in radians, AC only; DC buses carry `vm_pu` = vdc in pu); `branches` = AC branches with both endpoints in-window `{domain,index,from,to,in_service,pf_mw,qf_mvar,pt_mw,qt_mvar,loss_mw,loading_pct,rate_mva}` (MW/MVAr; `loading_pct = 100 * max(|S_from|,|S_to|)/rate_a_mva`, same as the full PF `geo_ac_branches`; DC branch flows and converter transfers are excluded and declared). At lod 0/1 the grouping keys, centroid coordinates, and intra-group edge collapse are identical to `topology_window`: `nodes` = `{group,domain,x,y,count,vm_avg,vm_min,vm_max}` where the vm fields are statistics over member bus voltages (not a solved group voltage), and `branches` = group-pair aggregate edges `{key,source,target,domain:"AC",kind:"aggregate",count,loading_pct,in_service}` whose `loading_pct` is the **maximum** among the collapsed members (conservative); both semantics are declared in `units` (`vm_avg`/`vm_min`/`vm_max`/`aggregated_loading_pct`) and `model_limitations`. `result_meta` reports `source`, `method`, `converged`, `iterations`, `residual`, and `result_matches_current_system` — when the model was replaced or edited after the solve, the flag is `false` and `model_limitations` declares the lag. `units`, `bbox`, and `coordinate_coverage` mirror `topology_window_v1`. |
 
 The GUI calls `syncToBackend()` before analyses when the authored Canvas model
 is dirty. Result playback never synchronizes or changes the model.

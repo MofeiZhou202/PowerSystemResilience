@@ -166,6 +166,7 @@ async function main() {
 
     browser = await chromium.launch();
     const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+    await page.addInitScript(() => { try { localStorage.setItem('hysim.tourDone.v1', '1'); } catch {} });
     await page.goto(`${base}/xjtu/`, { waitUntil: 'networkidle' });
     await page.evaluate(() => App.loadBuiltinCase('dist33_microgrid_der'));
     await page.evaluate(() => App.setActiveModule('parameterLibrary'));

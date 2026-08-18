@@ -48,6 +48,7 @@ async function main() {
     await waitUp(base);
     browser = await chromium.launch();
     const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
+    await page.addInitScript(() => { try { localStorage.setItem('hysim.tourDone.v1', '1'); } catch {} });
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
     await page.route('https://cdn.plot.ly/**', route => route.fulfill({

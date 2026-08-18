@@ -24,20 +24,29 @@ heuristic.
 
 Windowed mode also overlays the cached last power-flow result: alongside each
 topology window it requests `POST /api/session/result_window` for the same
-bbox (no LOD field; the response is always per-bus/per-branch), and
-`Canvas.showPowerFlowResults` triggers a result-only refetch when a new PF
-completes. LOD2 nodes are colored by `vm_pu` with the same bands as the SVG
-result overlay (<0.95 pu red, >1.05 pu orange, in-band green/cyan), and
-branches by `loading_pct` with the same green→yellow→red ramp as the heatmap
-(clamped at 150%). Result colors are written into the SoA color slots and
-uploaded through merged `bufferSubData` dirty ranges; a selected bus keeps its
-selection color and falls back to its result color on deselection. A `409
+bbox at the same LOD, and `Canvas.showPowerFlowResults` triggers a
+result-only refetch when a new PF completes. LOD2 nodes are colored by
+`vm_pu` with the same bands as the SVG result overlay (<0.95 pu red, >1.05 pu
+orange, in-band green/cyan), and branches by `loading_pct` with the same
+green→yellow→red ramp as the heatmap (clamped at 150%). At LOD0/1 the backend
+returns group-level aggregates: a group node is colored by the worst band
+deviation among its members (`vm_min`/`vm_max` outside [0.95, 1.05]) and
+otherwise by `vm_avg`, while an aggregate edge takes the maximum `loading_pct`
+of its collapsed branches — both semantics are declared by the backend in
+`units`/`model_limitations` and surface in the status line and `stats()`.
+Result colors are written into the SoA color slots and uploaded through
+merged `bufferSubData` dirty ranges; a selected bus keeps its selection color
+and falls back to its result color on deselection. A `409
 no_cached_power_flow` response silently clears the coloring back to structural
 domain colors. `result_meta.converged = false` or
 `result_matches_current_system = false` is declared in the status line and in
-`stats()`; aggregated LOD0/1 views keep structural colors because the result
-window carries no group-level aggregates. The local fallback path never
-fetches or applies result colors.
+`stats()`. While result coloring is active the overview shows a small legend
+overlay (created from JS with inline styles, `aria-label="结果着色图例"`):
+the three voltage bands plus the loading ramp with numeric annotations; it
+hides when no result is active. The voltage bands and loading ramp are
+defined once as shared constants in `network_overview.js` and consumed by
+both the WebGL coloring and the legend. The local fallback path never fetches
+or applies result colors.
 
 The existing
 SVG canvas remains authoritative for normal-size authored diagrams. Large-model
@@ -153,8 +162,67 @@ The intended division of work is:
   consumed by the overview) plus playback time frames and analysis-scoped
   result subsets through `/api/v1`.
 
-Updated: 2026-08-17 (feedback/toast/problems/draft section; property-panel
+Updated: 2026-08-18 (result_window LOD0/1 聚合结果色 + 结果着色图例；色阶抽为共享常量)
+此前：2026-08-17 (feedback/toast/problems/draft section; property-panel
 immediate validation + unit suffixes; result-table sort/filter/CSV layer)
+
+## Onboarding tour, help menu, documentation center, and example templates
+
+First-time sessions (no `hysim.tourDone.v1` in localStorage) auto-start a
+seven-step onboarding tour after a short settle delay: 元件库 → 画布拖放与连线
+→ 属性面板 → 运行潮流 → 结果浏览与定位 → 全局定位 → 帮助入口. The tour is pure
+DOM (spotlight ring with an oversized dimming `box-shadow` plus a clamped
+tooltip bubble, styles in `style.css` under "Onboarding Tour"); captions are
+assigned via `textContent` only. Steps whose target selector resolves to a
+missing or layout-less (collapsed/hidden) element are filtered out before
+starting and re-checked at each step, so an inactive module's run button or a
+collapsed panel simply drops its step. Esc exits at any time, ArrowRight/
+ArrowLeft step, and 上一步/下一步/跳过/完成 buttons are keyboard reachable
+(primary action receives focus per step); completing, skipping, or Esc all
+write `hysim.tourDone.v1=1` so the tour runs once per browser. Controls are
+exposed as `App.tour` for smoke tests (`tmp/tour_smoke.mjs`).
+
+A 帮助 button in the top toolbar aux cluster opens a dropdown menu: 文档中心
+(calls `HySimCore.HelpCenter.open()` behind a typeof guard; also bound to F1,
+which suppresses the browser default and is ignored while an editable control
+has focus), 新手引导 (replays the tour regardless of the done flag), 快捷键面板
+(calls `HySimCore.HelpPanel.open()` behind a typeof guard), and 示例模板
+(opens the case-load modal). The menu closes on outside click or Esc and
+returns focus to the button.
+
+The documentation center (`web/js/core/help_center.js`, schema
+`hysim_help_center_v1`) is a `.modal` with a sectioned navigation tree, a
+debounced title/tag search box, and a markdown content pane. Entries come
+from the manifest `web/help_docs.json` (schema `hysim_help_docs_v1`), grouped
+into 用户指南 / 示例教程 / 模块手册 / API 契约 / 理论模型 / 测试验证 sections;
+each entry may carry a `modules` list of GUI module ids (`.module-btn`
+`data-module` values), and matching entries are pinned to a 当前模块相关 block
+when that module tab is active. Documents are fetched read-only from the
+server mount `/xjtu/docs/<path>` (see [运行时 API](../reference/runtime_api.md)),
+rendered with the vendored marked (`web/vendor/marked.min.js`; raw HTML tokens
+escaped, with a minimal built-in renderer as fallback), and relative `.md`
+links are rewritten to in-center navigation while external/non-markdown links
+open in a new tab and relative image sources are repointed under
+`/xjtu/docs/`. Below 720px the navigation collapses into a drawer toggled by
+the 目录 button. Esc closes; ArrowUp/ArrowDown move within the visible
+navigation; the shared `.modal` focus trap applies. Manifest or document
+fetch failures render an explicit error panel (never a blank pane), and failed
+document fetches are not cached so reopening retries.
+
+Updated: 2026-08-18 (documentation help center; onboarding tour, help menu,
+example templates)
+
+The case-load modal additionally offers shipped JSON example templates from
+`web/examples/` (`EXAMPLE_TEMPLATES` manifest in `app.js`; the C++ server
+mounts `web/` at `/xjtu/`, so templates load via relative `fetch` and then
+follow the exact `importJson` path through `/api/session/load_json_string`,
+factoring the shared logic into `importSystemJson`). Current templates:
+`ac_radial_feeder_example.json` (5-bus 10 kV radial AC feeder, field sets
+copied from `data/simple_case.json` + `data/dsp/cigre.json`) and
+`hybrid_acdc_microgrid_example.json` (two-bus DC side with a DC branch and two
+PV arrays behind a VSC, derived from `data/simple_case.json`).
+`ev_traffic_scenario_template.json` is a separate EV-traffic scenario schema,
+not a network model, and is not listed in the case-load modal.
 
 The authored model lives in `Canvas.state`, while analysis results live in SVG
 result overlays. These states must remain separate.
@@ -190,6 +258,29 @@ while an input/textarea/select or contentEditable element has focus. In
 headless large-system mode (>400 buses, no SVG diagram) copy/paste/duplicate
 no-op and the undo stack stays empty.
 
+With the SVG canvas itself focused (`tabindex="0"`, set by both `canvas.js`
+init and `core/accessibility.js`; focus ring from the global
+`[tabindex]:focus-visible` rule), the arrow keys nudge every selected
+component by one grid step (20 px; 1 px with Shift for fine positioning). The
+branch only engages when the keydown target IS the canvas element, so arrow
+navigation in panels, tablists, and dialogs is never hijacked, and it is a
+no-op outside select mode and in headless mode. A burst of presses — key
+auto-repeat or quick taps — collapses into ONE composite `move` undo command,
+mirroring the drag mouse-up recording: start positions are captured on the
+first keydown, the burst extends while keydowns arrive within 500 ms, and it
+commits on the first arrow keyup, on the 500 ms pause timer, or eagerly when
+any other edit begins (mouse down, any non-arrow key such as Ctrl+Z or Delete,
+`clearUndoStacks`). Live nudges re-route wires with the cheap orthogonal
+router and skip alignment guides; the commit runs the full avoid-aware
+re-route and visualization refresh once.
+
+A zoom-percentage indicator (`#zoomIndicator`, e.g. "125%") sits in the
+canvas top-right corner. It is created lazily by `canvas.js` with inline
+styles (no stylesheet dependency), `aria-live="off"`, and refreshed from
+`updateViewBox()` — the single pan/zoom choke point — so wheel, toolbar
+buttons, fit-all, and minimap pans stay in sync. It is never created in
+headless large-system mode and is removed if a session switches into it.
+
 `web/js/core/help_panel.js` owns the keyboard-shortcut cheat sheet
 (`#helpModal`): `?` (Shift+/) toggles it, Esc or a backdrop click closes it,
 and the same form-field guard as the canvas handler applies (INPUT/SELECT/
@@ -198,7 +289,18 @@ a static data array (groups 选择 / 编辑 / 视图 / 分析) via DOM building 
 `textContent`, and restates the headless large-system limitation (editing
 shortcuts unavailable, undo stack stays empty). The modal follows the
 `.modal` + `h3` convention, so `core/accessibility.js` automatically attaches
-`role="dialog"` / `aria-modal` / `aria-labelledby`. It is exposed as
+`role="dialog"` / `aria-modal` / `aria-labelledby`. The same module also runs
+a focus trap for every visible `.modal`: while one is open, Tab / Shift+Tab
+cycle through its focusable elements and cannot leave the dialog (Esc stays
+with each modal's own logic); on close, focus returns to the pre-open element
+only when it is still stranded inside the closing modal or on `<body>`, so
+modals like the help panel that restore focus themselves are not overridden.
+Attach/detach is driven by the existing MutationObserver → scheduled sync
+pipeline (per-modal attribute observers plus a `body` childList observer for
+late-added modals), and the pre-open focus target is kept in a WeakMap. The
+trap is exposed as `HySimCore.Accessibility.syncFocusTraps`. The canvas
+`aria-label` (set in `core/accessibility.js` init) announces the arrow-key
+nudge. The help panel itself is exposed as
 `HySimCore.HelpPanel` (`open` / `close` / `toggle` / `refreshUndoRedo` /
 `shortcutGroups`, schema `hysim_help_panel_v1`).
 

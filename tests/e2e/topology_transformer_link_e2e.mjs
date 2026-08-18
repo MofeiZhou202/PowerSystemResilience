@@ -51,6 +51,7 @@ async function main() {
     const { chromium } = await import('playwright');
     browser = await chromium.launch();
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await page.addInitScript(() => { try { localStorage.setItem('hysim.tourDone.v1', '1'); } catch {} });
     await page.goto(`${base}/xjtu/`, { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => typeof App !== 'undefined' && typeof Canvas !== 'undefined');
 

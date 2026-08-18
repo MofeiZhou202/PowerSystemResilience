@@ -299,6 +299,15 @@ const Canvas = (() => {
 
     // Keyboard
     document.addEventListener('keydown', onKeyDown);
+    document.addEventListener('keyup', onKeyUp);
+
+    // The SVG surface itself is keyboard-focusable so arrow-key nudging and
+    // the editing shortcuts are reachable without a pointer.
+    // core/accessibility.js sets the same tabindex plus the aria-label; set it
+    // here too so the canvas stays operable even if that module never loads.
+    // The visible focus ring comes from the global `[tabindex]:focus-visible`
+    // rule in web/css/style.css (keyboard focus only, no mouse-click outline).
+    if (svg.getAttribute('tabindex') === null) svg.setAttribute('tabindex', '0');
 
     // Restore the persisted connection style (doc §10.2/§10.3).
     try {
@@ -315,6 +324,38 @@ const Canvas = (() => {
     svg.setAttribute('viewBox', `${viewBox.x} ${viewBox.y} ${viewBox.w} ${viewBox.h}`);
     scheduleViewportCulling();
     updateMinimapViewport();
+    updateZoomIndicator();
+  }
+
+  // ---- Zoom level indicator ------------------------------------------------
+  // Small corner overlay with the live zoom percentage (100% = the default
+  // 1200-unit-wide viewBox). Updated from updateViewBox() — the single choke
+  // point for pan/zoom — so wheel, toolbar buttons, fit-all and minimap pans
+  // all stay in sync. aria-live="off": the value changes far too often to
+  // announce. Created lazily by JS (inline styles, no stylesheet dependency);
+  // never created in headless large-system mode, and removed if a system
+  // switches into it (no SVG diagram to zoom there).
+  let _zoomIndicator = null;
+
+  function updateZoomIndicator() {
+    if (state.headless) {
+      if (_zoomIndicator) { _zoomIndicator.remove(); _zoomIndicator = null; }
+      return;
+    }
+    if (!_zoomIndicator) {
+      const host = document.getElementById('canvasContainer');
+      if (!host) return;
+      const el = document.createElement('div');
+      el.id = 'zoomIndicator';
+      el.setAttribute('aria-live', 'off');
+      el.style.cssText =
+        'position:absolute;top:10px;right:12px;z-index:22;pointer-events:none;' +
+        'padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;' +
+        'background:rgba(20,26,38,0.72);color:#dfe5ee;border:1px solid rgba(255,255,255,0.14);';
+      host.appendChild(el);
+      _zoomIndicator = el;
+    }
+    _zoomIndicator.textContent = Math.round(1200 / viewBox.w * 100) + '%';
   }
 
   // ========== Minimap (Phase 4) ==========
@@ -659,6 +700,10 @@ const Canvas = (() => {
   function clearUndoStacks() {
     undoStack.length = 0;
     redoStack.length = 0;
+    // A pending arrow-key burst must not commit a stale move into the freshly
+    // cleared stacks — drop it along with its timer.
+    _keyMoveStart = null;
+    if (_keyMoveTimer) { clearTimeout(_keyMoveTimer); _keyMoveTimer = 0; }
   }
 
   // Re-insert a component with its ORIGINAL id (undo of a delete): ids are
@@ -1692,6 +1737,8 @@ const Canvas = (() => {
 
   // ========== Event: Mouse ==========
   function onMouseDown(e) {
+    // A pointer interaction ends any pending arrow-key move burst.
+    commitKeyboardMove();
     const pt = screenToSvg(e.clientX, e.clientY);
 
     // Check if clicking on a port (for connection mode or starting connection)
@@ -2032,6 +2079,11 @@ const Canvas = (() => {
     const t = e.target;
     if (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA' || t.isContentEditable) return;
 
+    // Any non-arrow key ends a pending arrow-key burst — flush it BEFORE the
+    // edit below (Ctrl+Z undo, Delete, rotate, …) so the burst lands on the
+    // undo stack as its own command in the right order.
+    if (!(e.key || '').startsWith('Arrow')) commitKeyboardMove();
+
     // Ctrl/Cmd combos first so they never fall through to single-letter modes
     // (e.g. Ctrl+V must paste, not switch to select mode).
     if (e.ctrlKey || e.metaKey) {
@@ -2060,6 +2112,18 @@ const Canvas = (() => {
       return;
     }
 
+    // Arrow keys nudge the current selection by one grid step (Shift = 1 px
+    // fine-tune). Gated on the canvas surface itself having focus so arrow
+    // navigation in panels, tablists and dialogs is never hijacked.
+    if ((e.key || '').startsWith('Arrow')) {
+      if (!svg || t !== svg) return;
+      const step = e.shiftKey ? 1 : KEY_MOVE_STEP;
+      const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0;
+      const dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0;
+      if (moveSelectionBy(dx, dy)) e.preventDefault();
+      return;
+    }
+
     if (e.key === 'Delete' || e.key === 'Backspace') {
       if (state.selectedConnectionId) {
         removeConnection(state.selectedConnectionId);
@@ -2080,6 +2144,91 @@ const Canvas = (() => {
     } else if (e.key === 'r' || e.key === 'R') {
       rotateSelected(e.shiftKey ? -90 : 90);
     }
+  }
+
+  // ========== Arrow-key nudge (keyboard move) ==========
+  // With the canvas focused and a selection active, arrow keys move every
+  // selected component by one grid step (KEY_MOVE_STEP px; 1 px with Shift
+  // for fine positioning). A burst of presses — key auto-repeat or quick taps —
+  // collapses into ONE undoable composite move command, mirroring how a drag
+  // is recorded once at mouse-up: the burst starts on the first keydown
+  // (start positions captured), extends while keydowns keep arriving within
+  // KEY_MOVE_COMMIT_MS, and commits on the first arrow keyup, on the 500 ms
+  // pause timer, or eagerly when any other edit begins (onMouseDown, any
+  // non-arrow keydown, clearUndoStacks). Live moves re-route wires with the
+  // cheap orthogonal router and skip alignment guides (no guide noise while
+  // nudging); the commit runs the full avoid-aware re-route once, like
+  // drag mouse-up.
+  const KEY_MOVE_STEP = 20;          // matches the snapToGrid default
+  const KEY_MOVE_COMMIT_MS = 500;
+  let _keyMoveStart = null;          // Map<id, {x, y}> captured at burst start
+  let _keyMoveTimer = 0;
+
+  function moveSelectionBy(dx, dy) {
+    if (state.headless || state.mode !== 'select') return false;
+    if (state.selectedIds.size === 0) return false;
+    if (!_keyMoveStart) {
+      _keyMoveStart = new Map();
+      state.selectedIds.forEach(id => {
+        const c = getComponent(id);
+        if (c) _keyMoveStart.set(id, { x: c.x, y: c.y });
+      });
+      if (_keyMoveStart.size === 0) { _keyMoveStart = null; return false; }
+    }
+    const rerendered = new Set();
+    _keyMoveStart.forEach((p0, id) => {
+      const c = getComponent(id);
+      if (!c) return;
+      c.x += dx;
+      c.y += dy;
+      c.el?.setAttribute('transform', `translate(${c.x}, ${c.y}) rotate(${c.rotation || 0})`);
+      connectionsOf(id).forEach(conn => {
+        if (rerendered.has(conn.id)) return;
+        rerendered.add(conn.id);
+        rerenderConnection(conn, { cheap: true });
+      });
+      updateResultsOnDrag(id);
+    });
+    if (_keyMoveTimer) clearTimeout(_keyMoveTimer);
+    _keyMoveTimer = setTimeout(commitKeyboardMove, KEY_MOVE_COMMIT_MS);
+    return true;
+  }
+
+  // Commit the pending arrow-key burst as ONE composite move command (same op
+  // shape as the drag mouse-up command). Safe to call any time: no-op when no
+  // burst is pending.
+  function commitKeyboardMove() {
+    if (_keyMoveTimer) { clearTimeout(_keyMoveTimer); _keyMoveTimer = 0; }
+    if (!_keyMoveStart) return;
+    const startPos = _keyMoveStart;
+    _keyMoveStart = null;
+    const ops = [];
+    startPos.forEach((p0, id) => {
+      const c = getComponent(id);
+      if (!c || (c.x === p0.x && c.y === p0.y)) return;
+      ops.push({ op: 'move', id, from: { x: p0.x, y: p0.y }, to: { x: c.x, y: c.y } });
+    });
+    if (!ops.length) return;
+    pushCommand({ label: 'move', ops });
+    // Full (avoid-aware) re-route of every moved component's wires now that
+    // the burst is over — live nudges used the cheap orthogonal route.
+    if (state.connectionStyle === 'avoid') {
+      buildRouteContext();
+      const seen = new Set();
+      startPos.forEach((p0, id) => connectionsOf(id).forEach(conn => {
+        if (seen.has(conn.id)) return;
+        seen.add(conn.id);
+        rerenderConnection(conn);
+      }));
+    }
+    // Final refresh of the visualization overlay, mirroring drag mouse-up.
+    if (_vizMode !== 'off' && _lastPfResult) {
+      applyVisualizationOverlay();
+    }
+  }
+
+  function onKeyUp(e) {
+    if ((e.key || '').startsWith('Arrow')) commitKeyboardMove();
   }
 
   // ========== Rotation ==========

@@ -10,7 +10,12 @@ Covers the viewport-scoped power-flow result contract:
   - vm/va/branch-flow values identical to the full /api/session/pf response
     (sampled comparison);
   - result_meta: converged flag and result_matches_current_system, including
-    the lag declaration after the model is edited post-solve.
+    the lag declaration after the model is edited post-solve;
+  - optional lod (default 2, invalid rejected with 400): lod 0/1 aggregate
+    in-window nodes with the same group keys as topology_window, report
+    centroid + vm_avg/vm_min/vm_max member statistics, and collapse branches
+    into group-pair aggregate edges whose loading_pct is the maximum of the
+    collapsed members — all declared in units/model_limitations.
 
 No third-party dependencies (urllib + subprocess from the standard library).
 
@@ -260,6 +265,84 @@ def main() -> int:
         dc_ok = all("vm_pu" in n and "va_rad" not in n
                     for n in d.get("nodes", []) if n["domain"] == "DC")
         chk.check(dc_ok, "DC nodes carry vm_pu (vdc) and no va_rad")
+
+        print("8. lod validation: default is per-bus, bad lod -> 400")
+        st, d = c.post_json("/api/session/load_json_string",
+                            {"json_string": json.dumps(TEST_SYSTEM)})
+        chk.check(st == 200, f"reload authored system status {st}")
+        st, pf = c.post_json("/api/session/pf", {})
+        chk.check(st == 200 and pf.get("converged") is True,
+                  f"pf converged again (converged={pf.get('converged')})")
+        st, d = c.post_json("/api/session/result_window", FULL_BBOX)
+        chk.check(st == 200 and d.get("lod") == 2
+                  and all("index" in n for n in d.get("nodes", [])),
+                  "omitted lod defaults to 2 (per-bus detail)")
+        for bad in (-1, 3):
+            st, d = c.post_json("/api/session/result_window",
+                                {**FULL_BBOX, "lod": bad})
+            chk.check(st == 400, f"lod={bad} rejected (got {st})")
+
+        print("9. lod=1 aggregated results mirror topology_window grouping")
+        st, topo = c.post_json("/api/session/topology_window",
+                               {**FULL_BBOX, "lod": 1})
+        chk.check(st == 200, f"topology_window lod=1 status {st}")
+        topo_keys = {g["key"] for g in topo.get("nodes", [])}
+        st, d = c.post_json("/api/session/result_window",
+                            {**FULL_BBOX, "lod": 1})
+        chk.check(st == 200 and d.get("lod") == 1,
+                  f"result_window lod=1 status {st}")
+        groups = {g["group"]: g for g in d.get("nodes", [])}
+        chk.check(set(groups) == topo_keys
+                  and set(groups) == {"AC:area:1:zone:1", "AC:area:2:zone:1"},
+                  f"group keys identical to topology_window: {sorted(groups)}")
+        g11 = groups.get("AC:area:1:zone:1", {})
+        chk.check(g11.get("count") == 2
+                  and abs(g11.get("x", 0) - 108.05) < 1e-9
+                  and abs(g11.get("y", 0) - 34.05) < 1e-9,
+                  f"group centroid/count of buses 1+2: {g11}")
+        vm = pf["vm"]  # aligns by position with TEST_SYSTEM ac.buses
+        chk.check(abs(g11.get("vm_avg", -1) - (vm[0] + vm[1]) / 2) < 1e-12
+                  and abs(g11.get("vm_min", -1) - min(vm[0], vm[1])) < 1e-12
+                  and abs(g11.get("vm_max", -1) - max(vm[0], vm[1])) < 1e-12,
+                  "vm_avg/vm_min/vm_max are member statistics")
+        g21 = groups.get("AC:area:2:zone:1", {})
+        chk.check(g21.get("count") == 1
+                  and abs(g21.get("vm_avg", -1) - vm[2]) < 1e-12
+                  and g21.get("vm_min") == g21.get("vm_max"),
+                  f"single-member group statistics: {g21}")
+        agg = {(b["source"], b["target"]): b for b in d.get("branches", [])}
+        pair = ("AC:area:1:zone:1", "AC:area:2:zone:1")
+        chk.check(set(agg) == {pair},
+                  "intra-group branch 1 collapses; branch to coordinate-less "
+                  f"bus 4 excluded: {sorted(agg)}")
+        edge = agg.get(pair, {})
+        chk.check(edge.get("kind") == "aggregate" and edge.get("count") == 1,
+                  f"aggregate edge identity: {edge}")
+        # loading of branch 2 (from=2, to=3) recomputed from the lod=2 view.
+        st, d2 = c.post_json("/api/session/result_window", FULL_BBOX)
+        br2 = next(b for b in d2.get("branches", [])
+                   if b["from"] == 2 and b["to"] == 3)
+        chk.check(abs(edge.get("loading_pct", -1) - br2["loading_pct"]) < 1e-9,
+                  "aggregate loading_pct is the max of collapsed members")
+        lim = " ".join(d.get("model_limitations", []))
+        chk.check("statistics over" in lim and "maximum loading" in lim,
+                  "model_limitations declare the aggregation semantics")
+        chk.check("vm_avg" in d.get("units", {})
+                  and "aggregated_loading_pct" in d.get("units", {}),
+                  "units declare the aggregation semantics")
+
+        print("10. lod=0 aggregates by domain; all branches intra-group")
+        st, d = c.post_json("/api/session/result_window",
+                            {**FULL_BBOX, "lod": 0})
+        groups = {g["group"]: g for g in d.get("nodes", [])}
+        chk.check(st == 200 and set(groups) == {"AC"}
+                  and groups["AC"].get("count") == 3,
+                  f"lod=0 single AC domain group: {sorted(groups)}")
+        chk.check(d.get("branches") == [],
+                  "lod=0: all in-window branches collapse into the AC group")
+        exp_avg = (vm[0] + vm[1] + vm[2]) / 3
+        chk.check(abs(groups["AC"].get("vm_avg", -1) - exp_avg) < 1e-12,
+                  "lod=0 vm_avg over all three in-window buses")
 
         print(f"\n{chk.checks} checks, {chk.failures} failures")
         return 1 if chk.failures else 0

@@ -44,6 +44,7 @@ async function main() {
     await waitUp(base);
     browser = await chromium.launch();
     const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+    await page.addInitScript(() => { try { localStorage.setItem('hysim.tourDone.v1', '1'); } catch {} });
     await page.goto(`${base}/xjtu/`, { waitUntil: 'networkidle' });
     await page.waitForSelector('body[data-edition="trial"]');
     const expectedWorkflows = ['模型建立', '参数校核', '指标设计', '全景仿真', '薄弱辨识'];

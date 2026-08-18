@@ -102,6 +102,8 @@ async function main() {
   const browser = await chromium.launch();
   try {
     const page = await browser.newPage();
+
+    await page.addInitScript(() => { try { localStorage.setItem('hysim.tourDone.v1', '1'); } catch {} });
     await page.goto(base + '/xjtu/', { waitUntil: 'networkidle' });
     await page.waitForTimeout(400);
 

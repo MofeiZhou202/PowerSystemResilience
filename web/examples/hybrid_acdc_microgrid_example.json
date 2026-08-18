@@ -1,0 +1,228 @@
+{
+  "name": "AC/DC混合微网示例（VSC互联）",
+  "base_mva": 1,
+  "ac": {
+    "buses": [
+      {
+        "index": 1,
+        "bus_type": "SLACK",
+        "base_kv": 0.38,
+        "vm_pu": 1,
+        "va_deg": 0,
+        "pd_mw": 0,
+        "qd_mvar": 0,
+        "vmin_pu": 0.9,
+        "vmax_pu": 1.1,
+        "gs_mw": 0,
+        "bs_mvar": 0,
+        "in_service": true,
+        "area": 1,
+        "zone": 1,
+        "n_customers": 0,
+        "importance": 0
+      }
+    ],
+    "branches": [],
+    "generators": [],
+    "loads": [
+      {
+        "index": 0,
+        "bus": 1,
+        "p_mw": 0.05,
+        "q_mvar": 0.015,
+        "scaling": 1,
+        "model": "ConstantPower",
+        "z_percent_p": 0,
+        "i_percent_p": 0,
+        "p_percent_p": 100,
+        "z_percent_q": 0,
+        "i_percent_q": 0,
+        "p_percent_q": 100,
+        "controllable": false,
+        "p_min_mw": 0,
+        "cost_mw": 0,
+        "priority": "Medium",
+        "n_customers": 0,
+        "profile_id": -1,
+        "in_service": true
+      }
+    ],
+    "static_generators": [],
+    "storage": [
+      {
+        "index": 0,
+        "bus": 1,
+        "p_mw": 0,
+        "q_mvar": 0,
+        "p_rated_mw": 0.05,
+        "e_rated_mwh": 0.15,
+        "soc_init": 0.5,
+        "soc_min": 0.1,
+        "soc_max": 0.9,
+        "eta_charge": 0.95,
+        "eta_discharge": 0.95,
+        "pmax_mw": 0.05,
+        "pmin_mw": -0.05,
+        "qmax_mvar": 0.02,
+        "qmin_mvar": -0.02,
+        "self_discharge_pct": 0.02,
+        "profile_id": -1,
+        "in_service": true
+      }
+    ],
+    "renewable_gens": [],
+    "pv_systems": [],
+    "external_grids": [
+      {
+        "index": 0,
+        "name": "Grid 0.38kV",
+        "bus": 1,
+        "vm_pu": 1.02,
+        "va_deg": 0,
+        "s_sc_max_mva": 10,
+        "s_sc_min_mva": 5,
+        "rx_max": 0.1,
+        "rx_min": 0.1,
+        "r_pu": 0,
+        "x_pu": 0,
+        "r0_pu": 0,
+        "x0_pu": 0,
+        "vn_kv": 0.38,
+        "emission_factor_tco2_mwh": 0.55,
+        "controllable": false,
+        "in_service": true
+      }
+    ],
+    "transformers_2w": [],
+    "switches": [],
+    "circuit_breakers": [],
+    "motors": [],
+    "flexible_loads": [
+      {
+        "index": 0,
+        "bus": 1,
+        "p_mw": 0.02,
+        "q_mvar": 0.006,
+        "flex_up_mw": 0.005,
+        "flex_down_mw": 0.005,
+        "flex_duration_h": 4,
+        "response_time_s": 30,
+        "ramp_rate_mw_min": 0.02,
+        "availability_pct": 100,
+        "controllable": true,
+        "priority": "Medium",
+        "control_area": "",
+        "in_service": true
+      }
+    ],
+    "asymmetric_loads": [],
+    "shunts": [],
+    "transformers_3w": [],
+    "chargers": [],
+    "charging_stations": []
+  },
+  "dc": {
+    "buses": [
+      {
+        "index": 1,
+        "bus_type": "DC_P",
+        "base_kv": 0.38,
+        "vm_pu": 1,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "pd_mw": 0,
+        "in_service": true
+      },
+      {
+        "index": 2,
+        "bus_type": "DC_P",
+        "base_kv": 0.38,
+        "vm_pu": 1,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "pd_mw": 0,
+        "in_service": true
+      }
+    ],
+    "branches": [
+      {
+        "index": 0,
+        "name": "DC_L1",
+        "from_bus": 1,
+        "to_bus": 2,
+        "base_kv": 0.38,
+        "r_pu": 0.01,
+        "r_ohm_per_km": 0.02,
+        "length_km": 0.5,
+        "rate_a_mva": 0.1,
+        "in_service": true
+      }
+    ],
+    "loads": [],
+    "static_generators": [],
+    "pv_arrays": [
+      {
+        "index": 0,
+        "bus": 1,
+        "p_set_mw": 0.05,
+        "irradiance": 1000,
+        "temperature": 25,
+        "num_series": 10,
+        "num_parallel": 20,
+        "vmpp": 0.038,
+        "impp": 0.0105,
+        "voc": 0.046,
+        "isc": 0.011,
+        "alpha_isc": 0.0005,
+        "beta_voc": -0.0023,
+        "profile_id": -1,
+        "in_service": true
+      },
+      {
+        "index": 1,
+        "bus": 2,
+        "p_set_mw": 0.03,
+        "irradiance": 1000,
+        "temperature": 25,
+        "num_series": 10,
+        "num_parallel": 12,
+        "vmpp": 0.038,
+        "impp": 0.0105,
+        "voc": 0.046,
+        "isc": 0.011,
+        "alpha_isc": 0.0005,
+        "beta_voc": -0.0023,
+        "profile_id": -1,
+        "in_service": true
+      }
+    ]
+  },
+  "vsc_converters": [
+    {
+      "index": 0,
+      "bus_ac": 1,
+      "bus_dc": 1,
+      "control_mode": "AC_PQ",
+      "type": "two_level",
+      "p_set_mw": 0.06,
+      "q_set_mvar": 0,
+      "pmax_mw": 0.1,
+      "pmin_mw": -0.1,
+      "qmax_mvar": 0.05,
+      "qmin_mvar": -0.05,
+      "eta": 0.98,
+      "loss_percent": 2,
+      "loss_mw": 0,
+      "v_dc_set_pu": 1,
+      "v_ac_set_pu": 1,
+      "k_vdc": 0.1,
+      "p_rated_mw": 0.1,
+      "in_service": true
+    }
+  ],
+  "dcdc_converters": [],
+  "energy_routers": [],
+  "mobile_storage": [],
+  "vpps": [],
+  "microgrids": []
+}

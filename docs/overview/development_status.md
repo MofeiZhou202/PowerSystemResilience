@@ -1,10 +1,21 @@
 # Development Status
 
-Updated: 2026-08-17
+Updated: 2026-08-18
 
 This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
+
+## 技术委托要求文档
+
+已根据当前源码、公共接口、GUI、数据交换能力和已验证测试基线完成
+`技术委托要求V2_已填充.docx`。文档明确覆盖交直流及三相潮流、OPF、
+RPO、CPF、短路、谐波、动态、小信号、可靠性、弹性、重构、时序、市场、
+碳流、HTTP/Python 接口和 GUI，并对可选 ETAP/OpenDSS 依赖、近似模型与
+能力边界作出限定；未将 DLL 热插拔、PSCAD/PSASP 原生导入或通用自动参数
+辨识表述为现有功能。原始模板保持不变，填充副本经 OOXML 结构检查、
+占位符检查和 Microsoft Pages 全 16 页 A4 渲染复核，未发现裁切、重叠或
+表格破损。
 
 ## Verified baseline
 
@@ -100,6 +111,61 @@ vs 3.4 s/106 MB for the full PF response — and a ~2% viewport 1.8 ms/65 KB.
 E2E: `tools/gui_result_window_e2e.py` (23 assertions: 409, bbox filter,
 coverage declaration, sampled value identity with the full PF response, stale
 flagging, hybrid DC nodes).
+
+Follow-up (result_window aggregation + legend): `result_window` accepts an
+optional `lod` (default 2); lod 0/1 reuse the exact `topology_window` grouping
+keys/centroids and return aggregate nodes `{group, count, vm_avg, vm_min,
+vm_max}` and aggregate edges with `loading_pct` = max of collapsed members
+(conservative; declared in `units`/`model_limitations`). The overview now
+colors aggregate LOD0/1 views (worst-deviation vm per group) and shows a
+result legend; color scales were hoisted to shared single-source constants.
+`gui_result_window_e2e` grew to 42 assertions.
+
+## GUI usability rounds (P0/P1/P2)
+
+P0 (editing safety net): `canvas.js` gained an undo/redo command stack (6
+primitives + composite commands, capacity 200, structural edits only —
+property-panel edits are not undoable yet), component copy/paste/duplicate
+(Ctrl+C/V/D, internal clipboard, +20px grid-aligned paste offset), and
+multi-select group drag (one composite undo per gesture). `app.js` gained a
+toast system (`App.toast`), a problems panel (`App.reportProblem` with
+click-to-locate via the existing `panToComponent` infra), beforeunload
+protection on `_canvasDirty`, and a 30 s localStorage canvas draft
+(`hysim.canvasDraft.v1`, skipped in headless mode and above ~4 MB).
+
+P1 (data browsing): `enhanceResultTable` progressively upgrades result tables
+(power flow, OPF, short circuit, market, reliability) with three-state
+numeric-aware header sort, per-column filters, and CSV export of the filtered
+rows (RFC-4180 + BOM); editor tables and virtualized tables are skipped by
+rule. The property panel gained on-input numeric validation (ranges only from
+backend schema/catalog, never hard-coded), unit suffix spans from a whitelist
+derived from existing labels, and blur-time JSON pre-validation. A new
+`core/help_panel.js` provides a `?`-opened shortcut cheat sheet (cross-checked
+against the actual canvas keydown handler) and wires the toolbar undo/redo
+buttons.
+
+P2 (onboarding/a11y/result viz): first-visit 7-step onboarding tour
+(`hysim.tourDone.v1`, spotlight overlay, skip/Esc, missing-target step
+skipping), a top-bar help menu (replay tour, shortcut panel, example
+templates), and two example templates (`web/examples/ac_radial_feeder_example.json`,
+`hybrid_acdc_microgrid_example.json`, field sets copied verbatim from
+`data/simple_case.json` / `data/dsp/cigre.json` and verified loadable through
+`/api/session/load_json_string`). Arrow-key nudge on the focused canvas
+(20 px grid, Shift = 1 px, burst coalesced into one undo command), modal focus
+trapping in `core/accessibility.js`, and a live zoom-percentage indicator.
+
+Regression lesson: the tour's first-visit auto-start intercepted ArrowRight
+and pointer events in fresh Playwright contexts and broke 4 browser E2E
+(`pf_ncp_schur_gui_e2e`, `gui_scale_features_e2e`, `market_gui_e2e`,
+`rpo_gui_e2e`). All 15 browser E2E files now pin
+`localStorage['hysim.tourDone.v1']='1'` via `addInitScript` right after
+`newPage`; any future first-visit UX must be disabled the same way.
+`ctest -R e2e`: 17/17 after the fix.
+
+Verification (all three rounds): `node --check` on every touched JS file;
+8 node vm+DOM smoke harnesses under `tmp/` (undo, indexes, feedback, help
+panel, result table, tour, focus trap, WebGL SoA) all green; `ctest -R e2e`
+17/17; `ctest -R 'gui|topology_window|result_window'` 10/10.
 
 ## Balanced VSC current-limit NCP
 

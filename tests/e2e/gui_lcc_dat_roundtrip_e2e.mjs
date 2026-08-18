@@ -114,6 +114,8 @@ async function main() {
 
     browser = await launchBrowser(chromium);
     const page = await browser.newPage();
+
+    await page.addInitScript(() => { try { localStorage.setItem('hysim.tourDone.v1', '1'); } catch {} });
     const pageErrors = [];
     page.on('pageerror', error => pageErrors.push(error.message));
     await page.route('https://cdn.plot.ly/**', route => route.fulfill({

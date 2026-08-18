@@ -51,6 +51,7 @@ async function main() {
     const { chromium } = await import('playwright');
     browser = await chromium.launch();
     const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+    await page.addInitScript(() => { try { localStorage.setItem('hysim.tourDone.v1', '1'); } catch {} });
     const pageErrors = [];
     const pfRequests = [];
     page.on('pageerror', error => pageErrors.push(error.message));

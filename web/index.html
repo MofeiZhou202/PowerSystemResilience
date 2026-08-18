@@ -4,7 +4,7 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>HySim-XJTU-HRPES</title>
-<link rel="stylesheet" href="css/style.css?v=20260714-market-v1"/>
+<link rel="stylesheet" href="css/style.css?v=20260818-gui-tour-v1"/>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 </head>
 <body>
@@ -78,6 +78,15 @@
     <input type="file" id="fileImportSvgDistribution" accept=".svg,image/svg+xml" style="display:none"/>
     <input type="file" id="fileImportParameterLibrary" accept=".json,application/json" style="display:none"/>
     <button id="btnToggleTheme" class="btn btn-sm theme-toggle" title="切换浅色 / 深色背景主题" aria-label="切换浅色或深色背景主题">◐</button>
+    <div class="help-menu-wrap">
+      <button id="btnHelp" class="btn btn-sm" title="帮助：新手引导、快捷键面板与示例模板" aria-haspopup="menu" aria-expanded="false">帮助</button>
+      <div id="helpMenu" class="help-menu" role="menu" aria-label="帮助菜单" hidden>
+        <button id="btnHelpCenter" class="help-menu-item" role="menuitem" type="button">文档中心（F1）</button>
+        <button id="btnHelpTour" class="help-menu-item" role="menuitem" type="button">新手引导</button>
+        <button id="btnHelpShortcuts" class="help-menu-item" role="menuitem" type="button">快捷键面板（?）</button>
+        <button id="btnHelpExamples" class="help-menu-item" role="menuitem" type="button">示例模板</button>
+      </div>
+    </div>
     <span id="canvasInfo" class="canvas-info">0 元件 | 0 连接</span>
     <span id="layoutMetricChip" class="canvas-info" title="最近一次布局质量">布局: —</span>
     <span id="statusBadge" class="badge task-status" data-state="idle" role="status" aria-live="polite">
@@ -2428,6 +2437,10 @@
         <button id="btnImportJsonCase" class="case-modal-btn">导入Json文件</button>
       </div>
       <div class="case-modal-row">
+        <button id="btnLoadExampleTemplate" class="case-modal-btn">加载示例模板</button>
+        <select id="exampleTemplateSelect" class="case-modal-select"><option value="">-- 选择示例模板 --</option></select>
+      </div>
+      <div class="case-modal-row">
         <button id="btnImportEtapXlsxCase" class="case-modal-btn">导入ETAP工作簿 (.xlsx)</button>
         <input type="file" id="fileImportEtapXlsx" accept=".xlsx" style="display:none"/>
       </div>
@@ -3746,7 +3759,9 @@
   <script src="js/core/layout_engine.js?v=20260712-hysim-layout-v1"></script>
   <script src="js/core/accessibility.js?v=20260712-hysim-phase5-v1"></script>
   <script src="js/core/runtime_diagnostics.js?v=20260712-hysim-phase6-v1"></script>
-  <script src="js/app.js?v=20260817-gui-feedback-v1"></script>
+  <script src="js/app.js?v=20260818-gui-tour-v1"></script>
   <script src="js/core/help_panel.js?v=20260817-help-panel-v1"></script>
+  <script src="vendor/marked.min.js?v=15.0.12"></script>
+  <script src="js/core/help_center.js?v=20260818-help-center-v1"></script>
 </body>
 </html>

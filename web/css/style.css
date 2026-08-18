@@ -2891,6 +2891,217 @@ tr.topo-clickable:focus-visible {
   .help-modal-note { forced-color-adjust: auto; border-left-color: ButtonText; }
 }
 
+/* Documentation help center (core/help_center.js) */
+.help-center-content {
+  width: min(1080px, 94vw);
+  height: min(760px, 88vh);
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+.help-center-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.help-center-header h3.help-center-title {
+  margin: 0;
+  font-size: 15px;
+  white-space: nowrap;
+}
+.help-center-search {
+  flex: 1;
+  min-width: 120px;
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg3);
+  color: var(--ink);
+  font: inherit;
+}
+.help-center-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  position: relative;
+}
+.help-center-nav {
+  width: 250px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+  padding: 10px 10px 16px;
+  background: var(--bg);
+}
+.help-center-context {
+  margin-bottom: 10px;
+  padding: 8px;
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  background: var(--bg3);
+}
+.help-center-context:empty { display: none; }
+.help-center-context-title {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent2);
+}
+.help-center-section { margin-bottom: 10px; }
+.help-center-section-title {
+  margin: 8px 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink2);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 3px;
+}
+.help-center-entry {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 5px 8px;
+  margin: 1px 0;
+  border: none;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.help-center-entry:hover, .help-center-entry:focus-visible { background: var(--surface-hover); }
+.help-center-entry.active {
+  background: var(--bg3);
+  color: var(--accent);
+  font-weight: 600;
+}
+.help-center-empty {
+  margin: 12px 4px;
+  font-size: 12px;
+  color: var(--ink2);
+}
+.help-center-doc {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 16px 24px 32px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--ink);
+}
+.help-center-doc h1, .help-center-doc h2, .help-center-doc h3,
+.help-center-doc h4, .help-center-doc h5, .help-center-doc h6 {
+  color: var(--accent);
+  margin: 1.1em 0 0.5em;
+  line-height: 1.4;
+}
+.help-center-doc h1 { font-size: 20px; }
+.help-center-doc h2 { font-size: 17px; }
+.help-center-doc h3 { font-size: 15px; }
+.help-center-doc h4 { font-size: 13px; }
+.help-center-doc p { margin: 0.6em 0; }
+.help-center-doc a { color: var(--accent); }
+.help-center-doc a.help-center-blocked-link {
+  color: var(--ink2);
+  text-decoration: underline dotted;
+  cursor: default;
+}
+.help-center-doc code {
+  padding: 1px 5px;
+  border-radius: var(--radius);
+  background: var(--bg3);
+  font-size: 12px;
+}
+.help-center-doc pre {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  overflow-x: auto;
+}
+.help-center-doc pre code { padding: 0; background: transparent; }
+.help-center-doc table {
+  border-collapse: collapse;
+  margin: 0.8em 0;
+  max-width: 100%;
+  display: block;
+  overflow-x: auto;
+}
+.help-center-doc th, .help-center-doc td {
+  border: 1px solid var(--border2);
+  padding: 5px 10px;
+  text-align: left;
+  font-size: 12px;
+}
+.help-center-doc th { background: var(--bg3); color: var(--accent2); }
+.help-center-doc blockquote {
+  margin: 0.8em 0;
+  padding: 6px 12px;
+  border-left: 3px solid var(--border2);
+  background: var(--bg3);
+  color: var(--ink2);
+}
+.help-center-doc img { max-width: 100%; height: auto; }
+.help-center-doc hr { border: none; border-top: 1px solid var(--border); margin: 1.2em 0; }
+.help-center-loading { color: var(--ink2); }
+.help-center-error {
+  padding: 14px 16px;
+  border-left: 3px solid var(--status-danger);
+  background: var(--bg3);
+  border-radius: var(--radius);
+}
+.help-center-error h3 { margin: 0 0 6px; color: var(--status-danger); }
+.help-center-error p { margin: 0; color: var(--ink2); }
+.help-center-status {
+  padding: 6px 16px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--ink2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.help-center-status:empty { padding: 0; border-top: none; }
+.help-center-status-error { color: var(--status-danger); }
+.help-center-nav-toggle { display: none; }
+
+@media (max-width: 719px) {
+  .help-center-content { width: 96vw; height: 92vh; }
+  .help-center-nav-toggle { display: inline-block; }
+  .help-center-nav {
+    position: absolute;
+    top: 0; left: 0; bottom: 0;
+    z-index: 2;
+    width: min(280px, 82vw);
+    box-shadow: 8px 0 24px var(--shadow);
+    transition: transform 0.18s ease;
+  }
+  .help-center-modal.nav-collapsed .help-center-nav {
+    transform: translateX(-105%);
+    pointer-events: none;
+  }
+  .help-center-header h3.help-center-title { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .help-center-nav { transition: none; }
+}
+@media (forced-colors: active) {
+  .help-center-nav, .help-center-header, .help-center-status {
+    forced-color-adjust: auto;
+    border-color: ButtonText;
+  }
+  .help-center-entry.active { forced-color-adjust: auto; outline: 1px solid ButtonText; }
+  .help-center-doc th, .help-center-doc td, .help-center-doc pre {
+    forced-color-adjust: auto;
+    border-color: ButtonText;
+  }
+  .help-center-error { forced-color-adjust: auto; border-left-color: ButtonText; }
+}
+
 /* EV power-traffic scenario designer */
 .evpt-designer-modal {
   width: min(1280px, 96vw);
@@ -4879,4 +5090,97 @@ body[data-workspace-density="compact"] #rightPanel:not([style]) {
 .case-modal .case-modal-select:focus {
   outline: none;
   border-color: var(--tb-border-hover);
+}
+
+/* ===== Help menu (top toolbar) ===== */
+.help-menu-wrap { position: relative; }
+.help-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 2100;
+  min-width: 180px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg2);
+  color: var(--ink);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px var(--shadow);
+}
+.help-menu[hidden] { display: none; }
+.help-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 12px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--ink);
+  font: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.help-menu-item:hover { background: var(--surface-hover); }
+
+/* ===== Onboarding Tour ===== */
+/* Full-viewport click shield; the dimming itself comes from the spotlight's
+   oversized box-shadow so the highlighted target stays fully legible. */
+.tour-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 5000;  /* above modals (1200), below toasts (10000) */
+}
+.tour-spotlight {
+  position: absolute;
+  border: 2px solid var(--accent);
+  border-radius: 8px;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+  transition: left 0.25s ease, top 0.25s ease, width 0.25s ease, height 0.25s ease;
+}
+.tour-tooltip {
+  position: absolute;
+  max-width: min(320px, calc(100vw - 16px));
+  padding: 14px 16px;
+  background: var(--bg2);
+  color: var(--ink);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 32px var(--shadow);
+}
+.tour-tooltip h4 {
+  margin: 0 0 6px;
+  font-size: 14px;
+  color: var(--accent);
+}
+.tour-tooltip p {
+  margin: 0 0 10px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.tour-tooltip-progress {
+  margin-bottom: 8px;
+  font-size: 11px;
+  color: var(--ink2);
+}
+.tour-tooltip-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.tour-tooltip-spacer { flex: 1 1 auto; }
+
+@media (forced-colors: active) {
+  .help-menu, .tour-tooltip {
+    forced-color-adjust: auto;
+    border: 1px solid ButtonText;
+  }
+  .tour-spotlight {
+    box-shadow: none;
+    outline: 2px solid Highlight;
+  }
 }

@@ -120,6 +120,8 @@ async function main() {
   );
   try {
     const page = await browser.newPage();
+
+    await page.addInitScript(() => { try { localStorage.setItem('hysim.tourDone.v1', '1'); } catch {} });
     page.on('pageerror', (e) => { console.error('  [pageerror]', e.message); failures++; });
     // The GUI's optional Plotly CDN dependency is unavailable in offline CI.
     // These scalability checks do not inspect chart pixels, but some workflows

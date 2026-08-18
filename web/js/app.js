@@ -4278,47 +4278,75 @@ const App = (() => {
     }
   }
 
+  // Shared "system JSON object -> backend + canvas" import path, used by the
+  // file picker (importJson) and the shipped example templates
+  // (loadExampleTemplate). The backend strips unknown fields from the system
+  // JSON, so the _canvas layout block (added by Canvas.buildSystemJson) is
+  // lost on the round-trip — re-attach it from the caller's original object
+  // so loadFromSystemJson can restore positions / connections / viewport
+  // exactly instead of running autoLayout.
+  async function importSystemJson(sys, sourceLabel) {
+    const data = await apiPost('/api/session/load_json_string', {
+      json_string: JSON.stringify(sys)
+    });
+    if (!data) return;
+    resetReliabilityConfigurationEditor();
+    let loadedName = sys?.name || '';
+    if (data._raw_json) {
+      const raw = JSON.parse(data._raw_json);
+      if (sys && sys._canvas && !raw._canvas) {
+        raw._canvas = sys._canvas;
+      }
+      loadedName = raw?.name || loadedName;
+      Canvas.loadFromSystemJson(raw);
+    } else {
+      Canvas.loadFromSystemJson(sys);
+    }
+    _canvasDirty = false;  // backend already has the imported system
+    updateResilienceSwitchDefault();
+    invalidateAnalysisResults('系统已导入，旧潮流和碳流结果已失效');
+    log('已导入系统JSON', 'success');
+    showModelIoStatus('JSON 导入完成', [
+      ['文件', sourceLabel],
+      ['系统名', loadedName],
+    ], { subtitle: `JSON 已同步到后端${noteHeadlessAfterLoad() || '并恢复画布'}` });
+  }
+
   function importJson(file) {
     const reader = new FileReader();
-    reader.onload = async (e) => {
+    reader.onload = (e) => {
       try {
         const sys = JSON.parse(e.target.result);
-        // Send to backend
-        const data = await apiPost('/api/session/load_json_string', {
-          json_string: JSON.stringify(sys)
-        });
-        if (data) {
-	      resetReliabilityConfigurationEditor();
-          let loadedName = sys?.name || '';
-          if (data._raw_json) {
-            // The backend strips unknown fields from the system JSON, so the
-            // _canvas layout block (added by Canvas.buildSystemJson) is lost
-            // on the round-trip.  Re-attach it from the user's original
-            // upload so that loadFromSystemJson can restore positions /
-            // connections / viewport exactly instead of running autoLayout.
-            const raw = JSON.parse(data._raw_json);
-            if (sys && sys._canvas && !raw._canvas) {
-              raw._canvas = sys._canvas;
-            }
-            loadedName = raw?.name || loadedName;
-            Canvas.loadFromSystemJson(raw);
-          } else {
-            Canvas.loadFromSystemJson(sys);
-          }
-          _canvasDirty = false;  // backend already has the imported system
-          updateResilienceSwitchDefault();
-          invalidateAnalysisResults('系统已导入，旧潮流和碳流结果已失效');
-          log('已导入系统JSON', 'success');
-          showModelIoStatus('JSON 导入完成', [
-            ['文件', file.name],
-            ['系统名', loadedName],
-          ], { subtitle: `JSON 已同步到后端${noteHeadlessAfterLoad() || '并恢复画布'}` });
-        }
+        importSystemJson(sys, file.name).catch(err => log(`导入失败: ${err.message}`, 'error'));
       } catch (err) {
         log(`导入失败: ${err.message}`, 'error');
       }
     };
     reader.readAsText(file);
+  }
+
+  // Static manifest of the JSON example templates shipped under web/examples/.
+  // The C++ server mounts web/ at /xjtu/, so these load via plain relative
+  // fetches and then follow the same load_json_string path as a file import.
+  const EXAMPLE_TEMPLATES = [
+    { file: 'examples/ac_radial_feeder_example.json', label: '纯AC放射状配电网（5母线10kV）' },
+    { file: 'examples/hybrid_acdc_microgrid_example.json', label: 'AC/DC混合微网（VSC互联）' },
+  ];
+
+  async function loadExampleTemplate(file) {
+    if (!file) return;
+    setStatus('加载示例模板...', 'busy');
+    try {
+      const res = await fetch(encodeURI(file));
+      if (!res || !res.ok) throw new Error(`HTTP ${res ? res.status : 'fetch不可用'}`);
+      const sys = await res.json();
+      await importSystemJson(sys, file);
+      log(`已加载示例模板: ${file}`, 'success');
+      setStatus('就绪');
+    } catch (err) {
+      log(`示例模板加载失败: ${err.message}`, 'error');
+      setStatus('加载失败', 'error');
+    }
   }
 
   // ========== Sync Canvas to Backend ==========
@@ -18338,6 +18366,22 @@ const App = (() => {
     document.getElementById('btnCaseModalClose')?.addEventListener('click', hideCaseLoadModal);
     document.querySelector('#caseLoadModal .modal-backdrop')?.addEventListener('click', hideCaseLoadModal);
 
+    // Case-load modal: shipped JSON example templates (web/examples/).
+    fillSelectOptions('exampleTemplateSelect',
+      EXAMPLE_TEMPLATES.map(t => ({ value: t.file, label: t.label })), '-- 选择示例模板 --');
+    document.getElementById('btnLoadExampleTemplate')?.addEventListener('click', () => {
+      const file = document.getElementById('exampleTemplateSelect')?.value;
+      if (!file) {
+        log('请先在下拉框中选择一个示例模板', 'warn');
+        return;
+      }
+      hideCaseLoadModal();
+      loadExampleTemplate(file);
+    });
+
+    // Bar 1: 帮助 menu (replay tour / shortcut cheat sheet / example templates)
+    initHelpMenu();
+
     document.getElementById('btnNewSystem').addEventListener('click', createNewSystem);
     // Legacy buttons may have been replaced; guard with optional chaining.
     document.getElementById('btnLoadMatpower')?.addEventListener('click', () => {
@@ -24517,6 +24561,245 @@ const App = (() => {
       setActiveModule('powerFlow');  // default-activate Power Flow module
     }
     updateDependencyChips();
+
+    // First-visit onboarding tour (skipped once localStorage marks it done;
+    // replayable anytime from the 帮助 menu).
+    maybeStartTour();
+  }
+
+  // ========== Onboarding Tour & Help Menu ==========
+  // First-visit guided tour: a spotlight overlay plus a tooltip bubble, built
+  // purely with DOM APIs (no innerHTML for captions — escape-by-construction).
+  // Completion or any exit is remembered in localStorage so the tour runs once
+  // per browser; it can be replayed anytime from the 帮助 menu. Steps whose
+  // target element is missing or currently hidden (e.g. a collapsed panel or
+  // an inactive module's run button) are skipped silently.
+  const TOUR_STORAGE_KEY = 'hysim.tourDone.v1';
+  const TOUR_STEPS = [
+    { target: '#componentLib', placement: 'right', title: '元件库',
+      text: '从左侧元件库选择交流/直流母线、线路、负荷等元件，点击或拖放到画布。' },
+    { target: '#canvasContainer', placement: 'auto', title: '画布拖放与连线',
+      text: '在画布上放置元件后，切换到"连线"模式（快捷键 C）连接端口；拖动空白处可框选，滚轮缩放视图。' },
+    { target: '#rightPanel', placement: 'left', title: '属性面板',
+      text: '选中元件后，在右侧"属性"页查看并修改参数，点击"应用修改"使改动生效。' },
+    { target: '#btnPowerFlow', placement: 'bottom', title: '运行潮流',
+      text: '在"潮流计算"模块点击"运行潮流计算"，母线电压、支路潮流等结果会回写到画布和结果面板。' },
+    { target: '.panel-tab[data-tab="results"]', placement: 'bottom', title: '结果浏览与定位',
+      text: '在右侧"结果"页浏览母线电压、支路负载率等表格；点击表格行即可在画布上定位对应元件。' },
+    { target: '#globalElementSearch', placement: 'bottom', title: '全局定位',
+      text: '在定位框输入 "bus 3"、"dc bus 1"、"gen 2" 或元件名称，快速跳转到目标元件。' },
+    { target: '#btnHelp', placement: 'bottom', title: '帮助入口',
+      text: '点击"帮助"可随时重播本引导、打开快捷键面板（快捷键 ?）或加载示例模板。祝使用顺利！' },
+  ];
+
+  let _tourState = null;  // { steps, stepIndex, overlay, spotlight, tooltip, lastFocus }
+
+  function isTourDone() {
+    try { return localStorage.getItem(TOUR_STORAGE_KEY) === '1'; } catch (_) { return true; }
+  }
+  function markTourDone() {
+    try { localStorage.setItem(TOUR_STORAGE_KEY, '1'); } catch (_) { /* persistence is optional */ }
+  }
+
+  function tourTargetElement(selector) {
+    let el = null;
+    try { el = document.querySelector(selector); } catch (_) { return null; }
+    if (!el) return null;
+    // Hidden targets (collapsed panel, inactive module section, display:none)
+    // have no layout box; skip their step instead of spotlighting the void.
+    if (typeof el.getClientRects === 'function' && el.getClientRects().length === 0) return null;
+    return el;
+  }
+
+  function startTour() {
+    if (_tourState) return;
+    const steps = TOUR_STEPS.filter(step => tourTargetElement(step.target));
+    if (!steps.length) return;
+    const overlay = document.createElement('div');
+    overlay.className = 'tour-overlay';
+    const spotlight = document.createElement('div');
+    spotlight.className = 'tour-spotlight';
+    overlay.appendChild(spotlight);
+    const tooltip = document.createElement('div');
+    tooltip.className = 'tour-tooltip';
+    tooltip.setAttribute('role', 'dialog');
+    tooltip.setAttribute('aria-label', '新手引导');
+    overlay.appendChild(tooltip);
+    document.body.appendChild(overlay);
+    _tourState = {
+      steps, stepIndex: 0, overlay, spotlight, tooltip,
+      lastFocus: document.activeElement || null,
+    };
+    document.addEventListener('keydown', onTourKeyDown, true);
+    if (window.addEventListener) window.addEventListener('resize', repositionTourStep);
+    showTourStep(0);
+    log('新手引导已开始：按 Esc 或点击"跳过"可随时退出', 'info');
+  }
+
+  function endTour(reason = 'done') {
+    if (!_tourState) return;
+    const { overlay, lastFocus } = _tourState;
+    _tourState = null;
+    document.removeEventListener('keydown', onTourKeyDown, true);
+    if (window.removeEventListener) window.removeEventListener('resize', repositionTourStep);
+    if (overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay);
+    markTourDone();
+    if (lastFocus && typeof lastFocus.focus === 'function') lastFocus.focus();
+    log(reason === 'done' ? '新手引导已完成' : '已退出新手引导（可从"帮助"菜单重新播放）', 'info');
+  }
+
+  function makeTourButton(label, className, onClick) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = className;
+    btn.textContent = label;
+    btn.addEventListener('click', onClick);
+    return btn;
+  }
+
+  function showTourStep(index) {
+    if (!_tourState) return;
+    const { steps, tooltip, spotlight } = _tourState;
+    if (index < 0 || index >= steps.length) { endTour('done'); return; }
+    _tourState.stepIndex = index;
+    const step = steps[index];
+    const el = tourTargetElement(step.target);
+    if (!el) { showTourStep(index + 1); return; }  // target vanished mid-tour: skip ahead
+    const rect = el.getBoundingClientRect();
+    const pad = 6;
+    spotlight.style.left = `${rect.left - pad}px`;
+    spotlight.style.top = `${rect.top - pad}px`;
+    spotlight.style.width = `${rect.width + pad * 2}px`;
+    spotlight.style.height = `${rect.height + pad * 2}px`;
+
+    tooltip.textContent = '';
+    const title = document.createElement('h4');
+    title.textContent = step.title;
+    tooltip.appendChild(title);
+    const body = document.createElement('p');
+    body.textContent = step.text;
+    tooltip.appendChild(body);
+    const progress = document.createElement('div');
+    progress.className = 'tour-tooltip-progress';
+    progress.textContent = `${index + 1} / ${steps.length}`;
+    tooltip.appendChild(progress);
+    const actions = document.createElement('div');
+    actions.className = 'tour-tooltip-actions';
+    const isLast = index === steps.length - 1;
+    actions.appendChild(makeTourButton('上一步', 'btn btn-sm', () => showTourStep(index - 1)));
+    actions.children[0].disabled = index === 0;
+    const spacer = document.createElement('span');
+    spacer.className = 'tour-tooltip-spacer';
+    actions.appendChild(spacer);
+    actions.appendChild(makeTourButton('跳过', 'btn btn-sm', () => endTour('skipped')));
+    actions.appendChild(makeTourButton(isLast ? '完成' : '下一步', 'btn btn-sm btn-primary',
+      () => (isLast ? endTour('done') : showTourStep(index + 1))));
+    tooltip.appendChild(actions);
+    positionTourTooltip(rect, step.placement);
+    // Keyboard reachability: focus lands on the primary action each step.
+    const primary = actions.children[actions.children.length - 1];
+    if (primary && typeof primary.focus === 'function') primary.focus();
+  }
+
+  function positionTourTooltip(rect, placement = 'auto') {
+    if (!_tourState) return;
+    const tip = _tourState.tooltip;
+    const vw = window.innerWidth || 1024;
+    const vh = window.innerHeight || 768;
+    const tw = tip.offsetWidth || 320;
+    const th = tip.offsetHeight || 180;
+    const gap = 12;
+    const margin = 8;
+    const fits = (x, y) => x >= margin && y >= margin && x + tw <= vw - margin && y + th <= vh - margin;
+    const spots = {
+      bottom: () => [rect.left + rect.width / 2 - tw / 2, rect.bottom + gap],
+      top: () => [rect.left + rect.width / 2 - tw / 2, rect.top - th - gap],
+      right: () => [rect.right + gap, rect.top + rect.height / 2 - th / 2],
+      left: () => [rect.left - tw - gap, rect.top + rect.height / 2 - th / 2],
+    };
+    const order = placement !== 'auto' && spots[placement]
+      ? [placement, 'bottom', 'top', 'right', 'left']
+      : ['bottom', 'top', 'right', 'left'];
+    let pos = null;
+    for (const p of order) {
+      const candidate = spots[p]();
+      if (fits(candidate[0], candidate[1])) { pos = candidate; break; }
+      if (!pos) pos = candidate;  // remember first as clamping fallback
+    }
+    // Clamp into the viewport so narrow windows never lose the bubble.
+    const x = Math.max(margin, Math.min(pos[0], vw - tw - margin));
+    const y = Math.max(margin, Math.min(pos[1], vh - th - margin));
+    tip.style.left = `${x}px`;
+    tip.style.top = `${y}px`;
+  }
+
+  function repositionTourStep() {
+    if (_tourState) showTourStep(_tourState.stepIndex);
+  }
+
+  function onTourKeyDown(event) {
+    if (!_tourState) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      endTour('skipped');
+    } else if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      event.stopPropagation();
+      showTourStep(_tourState.stepIndex + 1);
+    } else if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      event.stopPropagation();
+      showTourStep(_tourState.stepIndex - 1);
+    }
+  }
+
+  function maybeStartTour() {
+    if (isTourDone()) return;
+    const delay = 600;  // let the workspace layout settle before measuring rects
+    setTimeout(() => { if (!_tourState && !isTourDone()) startTour(); }, delay);
+  }
+
+  function initHelpMenu() {
+    const btn = document.getElementById('btnHelp');
+    const menu = document.getElementById('helpMenu');
+    if (!btn || !menu) return;
+    const openMenu = () => { menu.hidden = false; btn.setAttribute('aria-expanded', 'true'); };
+    const closeMenu = () => { menu.hidden = true; btn.setAttribute('aria-expanded', 'false'); };
+    btn.addEventListener('click', () => { if (menu.hidden) openMenu(); else closeMenu(); });
+    document.addEventListener('click', (ev) => {
+      if (!menu.hidden && ev.target !== btn && !menu.contains(ev.target)) closeMenu();
+    });
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape' && !menu.hidden) {
+        closeMenu();
+        if (typeof btn.focus === 'function') btn.focus();
+      }
+    });
+    document.getElementById('btnHelpCenter')?.addEventListener('click', () => {
+      closeMenu();
+      if (typeof HySimCore !== 'undefined' && typeof HySimCore.HelpCenter?.open === 'function') {
+        HySimCore.HelpCenter.open();
+      } else {
+        log('文档帮助中心不可用（help_center.js 未加载）', 'warn');
+      }
+    });
+    document.getElementById('btnHelpTour')?.addEventListener('click', () => {
+      closeMenu();
+      startTour();
+    });
+    document.getElementById('btnHelpShortcuts')?.addEventListener('click', () => {
+      closeMenu();
+      if (typeof HySimCore !== 'undefined' && typeof HySimCore.HelpPanel?.open === 'function') {
+        HySimCore.HelpPanel.open();
+      } else {
+        log('快捷键面板不可用（help_panel.js 未加载）', 'warn');
+      }
+    });
+    document.getElementById('btnHelpExamples')?.addEventListener('click', () => {
+      closeMenu();
+      showCaseLoadModal();
+    });
   }
 
   // ========== Public API ==========
@@ -24544,6 +24827,18 @@ const App = (() => {
     loadBuiltinCase,
     loadMatpowerCase,
     loadBpaDat,
+    loadExampleTemplate,
+    // Onboarding tour controls, exposed for the 帮助 menu and node smoke tests
+    // (see tmp/tour_smoke.mjs).
+    tour: {
+      start: startTour,
+      end: endTour,
+      isActive: () => !!_tourState,
+      stepIndex: () => (_tourState ? _tourState.stepIndex : -1),
+      stepCount: () => (_tourState ? _tourState.steps.length : 0),
+      stepTitle: () => (_tourState ? _tourState.steps[_tourState.stepIndex].title : ''),
+      storageKey: TOUR_STORAGE_KEY,
+    },
     runPowerFlow,
     runThreePhaseHybridPowerFlow,
     runOpf,
