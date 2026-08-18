@@ -59,8 +59,8 @@ OPF 验证按四个层次组织（图~\ref{fig:ver:layers}）：
         （如 \srcpath{tests/test\_opf\_solver\_backends.cpp}:914--943、945--1024，
         \srcpath{tests/test\_reactive\_power\_opt.cpp}:84--110），默认测试运行不执行，
         其结果不构成逐轮回归判据；
-  \item \textbf{文档实测}：\srcpath{docs/large\_hybrid\_ipm\_diagnostics.md}、
-        \srcpath{docs/reactive\_power\_optimization\_validation.md}、
+  \item \textbf{文档实测}：\srcpath{docs/archive/audits/large\_hybrid\_ipm\_diagnostics.md}、
+        \srcpath{docs/archive/audits/reactive\_power\_optimization\_validation.md}、
         \srcpath{docs/lcc\_dat\_opf\_report/} 中记录的墙钟时间、迭代数与残差，
         是特定机器、特定构建下的一次性记录，引用时标“文档实测”。
 \end{itemize}
@@ -106,7 +106,7 @@ case2383wp、case2869pegase（2869 节点）、case6515rte（6515 节点） &
 Parity IPM 收敛/有限性；文档参考目标值 133999/386107 &
 case2869：收敛且迭代 $<100$、稀疏后端；case6515rte：仅断言有限 &
 \srcpath{tests/test\_opf\_solver\_backends.cpp}:1058--1071、1154--1196；
-\srcpath{docs/large\_hybrid\_ipm\_diagnostics.md}:263--269（文档实测）\\
+\srcpath{docs/archive/audits/large\_hybrid\_ipm\_diagnostics.md}:263--269（文档实测）\\
 AC/DC/PF 三路交叉 &
 MATPOWER 小算例；IEEE 14 节点 &
 AC OPF、DC OPF、Newton PF 三者一致性 &
@@ -118,7 +118,7 @@ case9、case30、case300\_acdc、case2000\_acdc &
 三后端同案收敛性；Ipopt 有界参数矩阵 &
 Parity 目标 $\le$ ED 目标 $\times 1.001+1$；Ipopt 预算内结果有限 &
 \srcpath{tests/test\_opf\_solver\_backends.cpp}:1075--1150；
-\srcpath{docs/large\_hybrid\_ipm\_diagnostics.md}:118--131、195--220（文档实测）\\
+\srcpath{docs/archive/audits/large\_hybrid\_ipm\_diagnostics.md}:118--131、195--220（文档实测）\\
 夜间工况 OPF &
 南沙全网 JSON、画布 \fld{power\_system.json}（无常规机组） &
 外部电网按成本提升为 OPF 变量后收敛 &
@@ -129,7 +129,7 @@ Parity 目标 $\le$ ED 目标 $\times 1.001+1$；Ipopt 预算内结果有限 &
 逐步 OPF 与 PF 均收敛；UC 可行 &
 24/24、4/4 步收敛 &
 \srcpath{tests/test\_nighttime\_opf.cpp}:125--162；
-\srcpath{docs/time\_series\_power\_flow\_models.md}:276--349\\
+\srcpath{docs/theory/time\_series\_power\_flow\_models.md}:276--349\\
 三相混合 OPF &
 手组 3 母线 9 相节点 + 2 直流节点 &
 Full 与 GraphReduced 一致；独立耦合 PF 复现；SOCP 松弛下界 &
@@ -140,19 +140,19 @@ case9；case2869 + 20 OLTC + 10 并联（authored）；case300\_acdc &
 独立 OPF 复算 + PF 回放 + 物理网损账 &
 目标相对差 $\le\max(10^{-3},10\epsilon_d)$；$|\Delta V|\le\max(5\times10^{-4},10\epsilon_p)$ &
 \srcpath{tests/test\_reactive\_power\_opt.cpp}:16--110；
-\srcpath{docs/reactive\_power\_optimization\_validation.md}:103--123、159--177（文档实测）\\
+\srcpath{docs/archive/audits/reactive\_power\_optimization\_validation.md}:103--123、159--177（文档实测）\\
 大规模混合 IPM 诊断 &
 case300\_acdc、case2000\_acdc（2000 节点 + 8 VSC）、2869/9241/13659 &
 UMFPACK/\allowbreak KLU/\allowbreak MUMPS/\allowbreak Eigen 多后端同一收敛；文档实测残差 &
 测试：违反 $<10^{-5}$、迭代上限；文档：$3.49\times10^{-9}$/$9.03\times10^{-7}$ &
 \srcpath{tests/test\_opf\_solver\_backends.cpp}:86--112、880--943、1132--1196；
-\srcpath{docs/large\_hybrid\_ipm\_diagnostics.md}:77--131、224--289（文档实测）\\
+\srcpath{docs/archive/audits/large\_hybrid\_ipm\_diagnostics.md}:77--131、224--289（文档实测）\\
 BPA/DSP LCC 算例 &
 \srcpath{2DC.dat}、\srcpath{cigre.dat}（6 交流母线、2 直流母线、2 台 LCC） &
 DSP SOL 外部参考；解析 Jacobian/Hessian 有限差分；固定 tap PF 回放 &
 $1500/1410$~MW $\pm2$；线损 90~MW $\pm2$；Jacobian $2\times10^{-5}$；回放 $0.5$~MW &
 \srcpath{tests/test\_opf\_solver\_backends.cpp}:310--422、424--598、600--878；
-\srcpath{docs/lcc\_dat\_opf\_report/LCC\_DAT\_OPF\_technical\_report.tex}:1039--1124\\
+\srcpath{docs/lcc\_dat\_opf\_report/LCC\_DAT\_OPF\_technical\_report.tex（该文档已不在仓库中）}:1039--1124\\
 结果审计、回放与投影 &
 case9、case14、IEEE14 AC/DC、4 母线串联归约 &
 \srcpath{verify\_opf\_result} 审计；归约/投影前后目标一致 &
@@ -223,7 +223,7 @@ $<100$ 且 KKT 维数超 1500 时实际使用稀疏分解后端（\fld{linear\_s
 $<10^{30}$——注释明确“该难例在迭代预算内不期望收敛”，这是对此前 Eigen SparseLU
 下发散到 NaN（目标约 $-3\times10^{48}$）的稳健性守卫，不是收敛性声明。
 文档另记录 case9241/13659 的参考目标 315837/386107 与 KLU 后端实测
-（\srcpath{docs/large\_hybrid\_ipm\_diagnostics.md}:263--269，文档实测）。
+（\srcpath{docs/archive/audits/large\_hybrid\_ipm\_diagnostics.md}:263--269，文档实测）。
 诊断目标 \srcpath{opf\_numerical\_benchmark} 另对 25,000-bus ACTIVSg25k 执行
 一次预热加三次计时的 Release/KLU 协议：普通 AC-PF 启动中位数为
 $183.808\,\mathrm{s}$，66 次迭代、65 次分解，primal/dual 为
@@ -285,7 +285,7 @@ CMake 选项 \srcpath{HACDCPF\_ENABLE\_IPOPT} 默认 OFF、macOS 默认 ON，见
         不一致，以断言为准）；
   \item 默认构建下 Ipopt 选择静默回退 Parity IPM，因此默认 ctest 中并不存在真正的
         三路目标值相等断言；Ipopt 侧的数值证据来自隐藏性能用例与文档实测
-        （\srcpath{docs/large\_hybrid\_ipm\_diagnostics.md}:195--220）；
+        （\srcpath{docs/archive/audits/large\_hybrid\_ipm\_diagnostics.md}:195--220）；
   \item 独立 \srcpath{power\_models} 模块的 OPF 交叉验证目前主要体现在
         三相混合 OPF 的 NativeIPM/Ipopt 适配器路径（见 \ref{subsec:ver:threephase} 节），
         AC OPF 的 AML builder 无独立对照测试；其源码等价模型见
@@ -326,7 +326,7 @@ CMake 选项 \srcpath{HACDCPF\_ENABLE\_IPOPT} 默认 OFF、macOS 默认 ON，见
 
 时序生产模拟的三阶段流水线（UC MILP $\to$ 逐步 AC OPF $\to$ 逐步混合潮流回放）
 模型细节属第~\ref{sec:overview}~节范围，此处只列与 OPF 可信性直接相关的校核机制
-（\srcpath{docs/time\_series\_power\_flow\_models.md}:276--349）：
+（\srcpath{docs/theory/time\_series\_power\_flow\_models.md}:276--349）：
 
 \begin{itemize}
   \item \textbf{跟踪带}：对每台在线机组，OPF 功率盒围绕 UC 基点收紧，
@@ -335,7 +335,7 @@ CMake 选项 \srcpath{HACDCPF\_ENABLE\_IPOPT} 默认 OFF、macOS 默认 ON，见
         \end{align*}
         松弛机 $(\beta^{rel},\beta^{abs})=(20\%,5\,\mathrm{MW})$，非松弛机
         $(2\%,1\,\mathrm{MW})$；其工程语义是 OPF 只作类 AGC 再调度，吸收无损 UC
-        看不见的网损与直流近似误差（\srcpath{docs/time\_series\_power\_flow\_models.md}:284--300）；
+        看不见的网损与直流近似误差（\srcpath{docs/theory/time\_series\_power\_flow\_models.md}:284--300）；
   \item \textbf{降级路径}：某步 OPF 不收敛时，该步退回对原始 UC 快照直接跑 PF，
         流水线不中断（同文件:307--308）；
   \item \textbf{交叉指标}：每步记录 $\max_b|V_{m,b}^{OPF}-V_{m,b}^{PF}|$ 与经首母线
@@ -413,7 +413,7 @@ OPF 全部 24 步 OPF 与 PF 收敛，以及含 UC 的 4 步默认日生产路�
 
 \subsubsection*{全过程交叉验证（文档口径）}
 每次 RPO 后固定执行“保存离散档位 $\to$ 独立 OPF 复算 $\to$ PF 回放 $\to$ 网损账”
-四步（\srcpath{docs/reactive\_power\_optimization\_validation.md}:103--123）。
+四步（\srcpath{docs/archive/audits/reactive\_power\_optimization\_validation.md}:103--123）。
 独立 OPF 一致性判据为
 \begin{align*}
 \frac{|f_1-f_2|}{\max(1,|f_1|)}\le\max(10^{-3},10\epsilon_d),\qquad
@@ -430,18 +430,18 @@ case2869 + 20 台 OLTC + 10 台并联的 authored 系统上：单位成本经济
 平均约 0.46~s/次；完整 MinActiveLoss RPO 动作 22 台设备，物理网损
 $1561.8\to1558.8$~MW。IEEE24 三区域回归中 vdev（MatchRPO 路径）与旧版逐位一致；
 loss 路径因改用等价经济基点，基线/最终网损均优于旧版，combined 正常收敛
-（\srcpath{docs/reactive\_power\_optimization\_validation.md}:159--177）。
+（\srcpath{docs/archive/audits/reactive\_power\_optimization\_validation.md}:159--177）。
 
 \subsubsection*{已知偏差}
 稳健内层 \fld{LossEconomic} 按网损最优分配机组无功、不直接为电压最优：case2869 上
 vdev RPO 虽收敛，但 vdev $0.1392\to0.1401$ 基本未降；3000+ 完整搜索深度受时间限
 （默认 120~s 内得可行改进点），离散评估并行化未完成
-（\srcpath{docs/reactive\_power\_optimization\_validation.md}:179--191）。
+（\srcpath{docs/archive/audits/reactive\_power\_optimization\_validation.md}:179--191）。
 
 \subsection{大规模混合 IPM 诊断证据}\label{subsec:ver:ipm}
 
 \subsubsection*{case300\_acdc 根因与修复}
-\srcpath{docs/large\_hybrid\_ipm\_diagnostics.md}:45--75 记录：故障并非模型不可行
+\srcpath{docs/archive/audits/large\_hybrid\_ipm\_diagnostics.md}:45--75 记录：故障并非模型不可行
 （Ipopt 可把原始残差压到 $2.5\times10^{-9}$），而是原生 IPM 全步更新缺全局化，
 轨迹进入病态区后所有稀疏分解失败。修复是对维数 $\ge512$ 的 KKT 增加残差 filter
 回溯（原始可行性/对偶平稳性/互补三轴，步长减半最多 14 次），位于
@@ -453,7 +453,7 @@ vdev RPO 虽收敛，但 vdev $0.1392\to0.1401$ 基本未降；3000+ 完整搜�
 $\le$ 迭代数、拒绝步 $>0$）。
 
 \subsubsection*{2000 节点富混合实测}
-\srcpath{docs/large\_hybrid\_ipm\_diagnostics.md}:118--131 记录（文档实测，Release）：
+\srcpath{docs/archive/audits/large\_hybrid\_ipm\_diagnostics.md}:118--131 记录（文档实测，Release）：
 原生 parity IPM + 稀疏 UMFPACK 90 次迭代/7.07~s 收敛，最大违反
 $3.49\times10^{-9}$、平稳性 $9.03\times10^{-7}$；内嵌 Ipopt + MUMPS 100 次预算
 48.15~s 后原始残差 $4.96\times10^{-4}$、对偶 1.49，未达停止判据。测试断言为
@@ -484,7 +484,7 @@ scaling 会压小 scaled 对偶误差，适配器在启用未缩放分量门槛�
 
 LCC 直流算例的 OPF 验证是平台唯一带\textbf{外部商业软件参考解}的 OPF 通道。
 完整证据链见专项报告
-\srcpath{docs/lcc\_dat\_opf\_report/LCC\_DAT\_OPF\_technical\_report.tex}，
+\srcpath{docs/lcc\_dat\_opf\_report/LCC\_DAT\_OPF\_technical\_report.tex（该文档已不在仓库中）}，
 此处汇总与本手册相关的部分。
 
 \subsubsection*{算例与基准}
@@ -522,7 +522,7 @@ $I_d^2R=90$~MW（同报告 :982--1009）。\srcpath{data/dsp/2DC.dat} 为补充�
 报告“当前验证状态”表声明：DAT 接口与 PF、DSP 对比、LCC OPF（175 项断言/4 个
 用例，含三变量 Jacobian/Hessian、raw CIGRE、固定 tap 回放与后端保护）、
 $P_{\min}=0$ 不可行变体、浏览器 CIGRE E2E 均通过
-（\srcpath{docs/lcc\_dat\_opf\_report/LCC\_DAT\_OPF\_technical\_report.tex}:1039--1060）。
+（\srcpath{docs/lcc\_dat\_opf\_report/LCC\_DAT\_OPF\_technical\_report.tex（该文档已不在仓库中）}:1039--1060）。
 同一节明确\textbf{完整 \srcpath{test\_opf\_solver\_backends} 不在该轮验收范围内}，
 且历史全量运行存在与 LCC 无关的后端/大算例基线失败，不能写成全绿（同文件
 :1058--1060）。
@@ -592,7 +592,7 @@ AC OPF 后端 &
 Ipopt 在 2000 节点混合算例预算内不达标 &
 大规模混合 &
 100 次预算后原始 $4.96\times10^{-4}$、对偶 1.49，未收敛；文档建议生产路径用原生 IPM &
-\srcpath{docs/large\_hybrid\_ipm\_diagnostics.md}:118--131、211--220（文档实测）\\
+\srcpath{docs/archive/audits/large\_hybrid\_ipm\_diagnostics.md}:118--131、211--220（文档实测）\\
 case6515rte 不期望收敛 &
 大 AC 算例 &
 测试仅断言目标有限（$<10^{30}$）与稀疏后端，注释明确不期望预算内收敛 &
@@ -632,7 +632,7 @@ DC OPF LMP &
 Ipopt 乘子不全时 LMP 标不可用 &
 AC OPF &
 适配器不返回完整约束乘子时 LMP 必须标为不可用 &
-\srcpath{docs/lcc\_dat\_opf\_report/LCC\_DAT\_OPF\_technical\_report.tex}:1227--1228\\
+\srcpath{docs/lcc\_dat\_opf\_report/LCC\_DAT\_OPF\_technical\_report.tex（该文档已不在仓库中）}:1227--1228\\
 混合系统抑制 AC-only 经济调度回退 &
 AC OPF &
 含 DC/LCC 时禁止丢弃混合网络；提示 \texttt{fallback suppressed} &
@@ -648,23 +648,23 @@ DC OPF &
 AML builder 不支持 LCC &
 AML 建模层 &
 入口/能力范围必须显式声明，不把 LCC 当 0 注入 &
-\srcpath{docs/lcc\_dat\_opf\_report/LCC\_DAT\_OPF\_technical\_report.tex}:954\\
+\srcpath{docs/lcc\_dat\_opf\_report/LCC\_DAT\_OPF\_technical\_report.tex（该文档已不在仓库中）}:954\\
 三相混合 OPF 不支持在役 LCC &
 三相 OPF &
 GUI/HTTP 入口显式拒绝并提示改用平衡 AC/DC Parity 或 Ipopt &
-\srcpath{docs/lcc\_dat\_opf\_report/LCC\_DAT\_OPF\_technical\_report.tex}:955\\
+\srcpath{docs/lcc\_dat\_opf\_report/LCC\_DAT\_OPF\_technical\_report.tex（该文档已不在仓库中）}:955\\
 LCC 换流变 tap 在 OPF 中为固定输入 &
 LCC OPF &
 结果须声明 \texttt{taps are fixed inputs} 与 \texttt{no tap-changer control}；联合优化需后续把 $t_k$ 纳入决策 &
-\srcpath{docs/lcc\_dat\_opf\_report/LCC\_DAT\_OPF\_technical\_report.tex}:1086--1114、1210--1212\\
+\srcpath{docs/lcc\_dat\_opf\_report/LCC\_DAT\_OPF\_technical\_report.tex（该文档已不在仓库中）}:1086--1114、1210--1212\\
 LCC 为快照准稳态模型 &
 LCC &
 不含换相重叠角显式迭代、换流失败、谐波、保护与控制动态；不能推断暂态安全 &
-\srcpath{docs/lcc\_dat\_opf\_report/LCC\_DAT\_OPF\_technical\_report.tex}:1206--1207\\
+\srcpath{docs/lcc\_dat\_opf\_report/LCC\_DAT\_OPF\_technical\_report.tex（该文档已不在仓库中）}:1206--1207\\
 LCC 额定电流 clamp 不可二阶光滑 &
 LCC OPF &
 活动区切换点非二阶光滑；应报告绑定状态，局部 KKT 非全局证书 &
-\srcpath{docs/lcc\_dat\_opf\_report/LCC\_DAT\_OPF\_technical\_report.tex}:1213--1214\\
+\srcpath{docs/lcc\_dat\_opf\_report/LCC\_DAT\_OPF\_technical\_report.tex（该文档已不在仓库中）}:1213--1214\\
 2DC 卡片非 OPF-ready &
 LCC 测试 &
 $P_{\min}=P_{\max}=0$，仅作 PF/Jacobian 参考 &
@@ -672,19 +672,19 @@ $P_{\min}=P_{\max}=0$，仅作 PF/Jacobian 参考 &
 完整 backends 测试目标存在历史基线失败 &
 测试套件 &
 LCC 报告声明完整 \srcpath{test\_opf\_solver\_backends} 不在该轮验收范围，历史全量有与 LCC 无关的后端/大算例失败 &
-\srcpath{docs/lcc\_dat\_opf\_report/LCC\_DAT\_OPF\_technical\_report.tex}:1058--1060\\
+\srcpath{docs/lcc\_dat\_opf\_report/LCC\_DAT\_OPF\_technical\_report.tex（该文档已不在仓库中）}:1058--1060\\
 RPO 不提供全局最优性证书 &
 RPO &
 \fld{globally\_certified=false}、\fld{gap=1.0}；局部灵敏度面不用于安全剪枝 &
-\srcpath{tests/test\_reactive\_power\_opt.cpp}:16--42、79--81；\srcpath{docs/reactive\_power\_optimization\_validation.md}:82--87\\
+\srcpath{tests/test\_reactive\_power\_opt.cpp}:16--42、79--81；\srcpath{docs/archive/audits/reactive\_power\_optimization\_validation.md}:82--87\\
 RPO 稳健内层不直接为电压最优 &
 RPO 大电网 &
 case2869 上 vdev RPO 收敛但 vdev 基本未降（$0.1392\to0.1401$） &
-\srcpath{docs/reactive\_power\_optimization\_validation.md}:179--191\\
+\srcpath{docs/archive/audits/reactive\_power\_optimization\_validation.md}:179--191\\
 RPO 富混合回放部分覆盖 &
 RPO &
 混合换流器调度未完整回写 authored-space PF 时标“部分覆盖”；三相单体 RPO 未覆盖 &
-\srcpath{docs/reactive\_power\_optimization\_validation.md}:95--99、113--123；\srcpath{docs/large\_hybrid\_ipm\_diagnostics.md}:133--138\\
+\srcpath{docs/archive/audits/reactive\_power\_optimization\_validation.md}:95--99、113--123；\srcpath{docs/archive/audits/large\_hybrid\_ipm\_diagnostics.md}:133--138\\
 三相松弛拒绝恒电流负荷 &
 三相 OPF &
 \fld{fixed-current} 显式拒绝并报告 \fld{model\_limitations} &
@@ -696,15 +696,15 @@ RPO &
 arm64 静态 MUMPS 数值/ABI 问题 &
 Ipopt 后端 &
 源码构建 MUMPS 5.7.3 全部用例第 1 次迭代 \texttt{restoration failed}；默认仍用 Homebrew 动态库 &
-\srcpath{docs/large\_hybrid\_ipm\_diagnostics.md}:111--116、190--193\\
+\srcpath{docs/archive/audits/large\_hybrid\_ipm\_diagnostics.md}:111--116、190--193\\
 尺度 $10^{12}$ 模型的缩放假象 &
 Ipopt 适配器 &
 默认 gradient scaling 压小 scaled 对偶误差；需建模层无量纲化，不能仅靠收紧 \fld{tol} &
-\srcpath{docs/large\_hybrid\_ipm\_diagnostics.md}:184--188\\
+\srcpath{docs/archive/audits/large\_hybrid\_ipm\_diagnostics.md}:184--188\\
 时序 OPF 单步失败时降级 &
 时序流水线 &
 该步退回 UC 快照直接 PF，结果精度由交叉指标揭示，不标记为 OPF 质量 &
-\srcpath{docs/time\_series\_power\_flow\_models.md}:307--308\\
+\srcpath{docs/theory/time\_series\_power\_flow\_models.md}:307--308\\
 外部电网夜间通道覆盖有限 &
 夜间 OPF &
 仅 2 个工程 JSON + 3 个微系统，无外部工具对照 &

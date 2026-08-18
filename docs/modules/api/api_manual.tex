@@ -1,6 +1,6 @@
 % !TEX program = xelatex
 % 编译方式：在本目录执行两遍 xelatex（详见 docs/_manual_common/README.md）。
-% 源码依据：src/api/ 与 include/hacdcpf/api/（hacdcpf.hpp / solver_capabilities.hpp）及 docs/runtime_api.md。
+% 源码依据：src/api/ 与 include/hacdcpf/api/（hacdcpf.hpp / solver_capabilities.hpp）及 docs/reference/runtime_api.md。
 \documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
 \usepackage{../../_manual_common/hysim_manual}
 
@@ -34,9 +34,9 @@
   \item \srcpath{include/hacdcpf/api/solver\_capabilities.hpp} —— \texttt{SolverCapabilities}
         与运行期能力查询；
   \item \srcpath{src/api/hacdcpf.cpp} —— 门面与能力查询的实现；
-  \item \srcpath{docs/runtime\_api.md} —— HTTP/GUI \texttt{/api/v1} 服务契约（位于
+  \item \srcpath{docs/reference/runtime\_api.md} —— HTTP/GUI \texttt{/api/v1} 服务契约（位于
         \srcpath{tests/run\_gui\_server.cpp}）；
-  \item \srcpath{docs/python\_api.md} —— Python 绑定面；
+  \item \srcpath{docs/reference/python\_api.md} —— Python 绑定面；
   \item \srcpath{tests/test\_hacdcpf.cpp}、\srcpath{tests/test\_solver\_capabilities.cpp}
         —— 验证依据。
 \end{itemize}
@@ -179,7 +179,7 @@ ETAP I/O 可用当且仅当 \fld{has\_excel} 为真；OpenDSS I/O 可用当且�
 \section{与其他模块的接口关系}
 门面头文件汇入 PF/OPF/动态/碳流/市场/可靠性/弹性/时序/校验/EV/综合能源各子系统，是它们
 对外的统一出口；GUI 后端（\srcpath{tests/run\_gui\_server.cpp}）与 Python 绑定
-（\srcpath{docs/python\_api.md}）均建立在门面之上；\srcpath{verify\_opf\_result} 与 OPF
+（\srcpath{docs/reference/python\_api.md}）均建立在门面之上；\srcpath{verify\_opf\_result} 与 OPF
 子系统解耦，作为独立审计层。门面不含网络层，HTTP 面属独立可执行。
 
 \section{测试与验证建议}

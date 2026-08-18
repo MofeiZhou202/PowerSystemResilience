@@ -1,7 +1,7 @@
 % !TEX program = xelatex
 % 编译方式：在本目录执行两遍 xelatex（详见 docs/_manual_common/README.md）。
 % 源码依据：src/ev_power_traffic/ 与 include/hacdcpf/ev_power_traffic/ 源码及
-%           docs/ev_traffic_scenario_format.md，公式与参数以代码为准。
+%           docs/guides/ev_traffic_scenario_format.md，公式与参数以代码为准。
 \documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
 \usepackage{../../_manual_common/hysim_manual}
 
@@ -21,7 +21,7 @@
 诚实口径为本手册核心：顶层入口 \srcpath{simulate\_ev\_power\_traffic} 明确为启发式/分解式，
 其 \fld{mathematical\_model\_verified}=false；每个选项结构均暴露 \fld{require\_exact\_mathematical\_model}，
 在开启时\textbf{拒绝}返回伪装成证明的启发式结果，而非默默降级。全部结论以源码与
-\srcpath{docs/ev\_traffic\_scenario\_format.md} 为准。文档版式与《碳流追踪与碳排放核算技术手册》一致。
+\srcpath{docs/guides/ev\_traffic\_scenario\_format.md} 为准。文档版式与《碳流追踪与碳排放核算技术手册》一致。
 \end{abstract}
 
 \tableofcontents
@@ -38,7 +38,7 @@
         \srcpath{ctm\_due\_vi.cpp}、\srcpath{ltm\_propagation.cpp}、\srcpath{ltm\_so\_lp.cpp}、
         \srcpath{ltm\_mpc.cpp}、\srcpath{joint\_optimizer.cpp}、
         \srcpath{joint\_optimizer\_full\_nlp.cpp}、\srcpath{infra\_design\_milp.cpp} 等）—— 实现；
-  \item \srcpath{docs/ev\_traffic\_scenario\_format.md} —— 场景格式与口径契约；
+  \item \srcpath{docs/guides/ev\_traffic\_scenario\_format.md} —— 场景格式与口径契约；
   \item \srcpath{tests/test\_ev\_power\_traffic*.cpp} 等 —— 验证依据。
 \end{itemize}
 命名空间为 \texttt{hacdcpf::evpt}。

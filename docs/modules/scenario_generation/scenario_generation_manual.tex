@@ -1,7 +1,7 @@
 % !TEX program = xelatex
 % 编译方式：在本目录执行两遍 xelatex（详见 docs/_manual_common/README.md）。
 % 源码依据：src/scenario_generation/ 与 include/hacdcpf/analysis/（scenario_generation.hpp、
-%           typhoon_resilience.hpp、typhoon_traffic_impact.hpp）源码及 docs/scenario_generation_contract.md，公式与参数以代码为准。
+%           typhoon_resilience.hpp、typhoon_traffic_impact.hpp）源码及 docs/theory/scenario_generation_contract.md，公式与参数以代码为准。
 \documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
 \usepackage{../../_manual_common/hysim_manual}
 
@@ -20,7 +20,7 @@
 弹性（台风类别驱动），并含基于 Holland 参数化风场的台风故障-修复序列生成。
 注意头文件位于 \srcpath{include/hacdcpf/analysis/}（\srcpath{scenario\_generation.hpp} 等），
 而非 \srcpath{include/hacdcpf/scenario\_generation/}（不存在），命名空间为 \texttt{hacdcpf::analysis}。
-全部结论以源码与既有契约 \srcpath{docs/scenario\_generation\_contract.md} 为准；台风风场、修复次序、
+全部结论以源码与既有契约 \srcpath{docs/theory/scenario\_generation\_contract.md} 为准；台风风场、修复次序、
 坐标与线段为参数化近似，弹性事件通过显式标志位（\fld{used\_catalog\_sample} 等）如实声明近似来源，
 候选概率仅在族内归一。文档版式与《碳流追踪与碳排放核算技术手册》一致。
 \end{abstract}
@@ -39,7 +39,7 @@
         耦合影响；
   \item \srcpath{src/scenario\_generation/scenario\_generation.cpp}、
         \srcpath{typhoon\_resilience.cpp}、\srcpath{typhoon\_traffic\_impact.cpp} —— 实现；
-  \item \srcpath{docs/scenario\_generation\_contract.md} —— 输入/概率口径/近似标志契约；
+  \item \srcpath{docs/theory/scenario\_generation\_contract.md} —— 输入/概率口径/近似标志契约；
   \item \srcpath{tests/test\_scenario\_generation.cpp} 等 —— 验证依据。
 \end{itemize}
 命名空间为 \texttt{hacdcpf::analysis}。
@@ -118,16 +118,18 @@ $\bigl(\sum_{c\in\mathcal{G}}\pi_c=1\bigr)$，聚类概率在聚合后归一，�
 \fld{intensity\_levels} & — & — & 整数 & — & 弹性族强度等级数\\
 \fld{horizon\_hours} & $H$ & h & 整数 & $48$ & 台风故障序列时域\\
 \fld{target\_segment\_length\_km} & — & km & 正数 & — & 线路自动分段目标长度\\
-\fld{min\_fault\_probability} & — & — & $0\sim1$ & — & 段失效概率下限（过滤）\\
+\fld{min\_fault\_probability} & — & — & $0\sim1$ & $0.05$ & 保留字段，当前未消费\\
 \fld{delta\_p\_hpa} & $\Delta p$ & hPa & 正数 & — & 台风中心气压亏损\\
-\fld{holland\_b} & $B$ & — & $1\sim2.5$ & — & Holland 风场形状参数\\
+\fld{holland\_b} & $B$ & — & $\ge0.5$ & — & Holland 风场形状参数（生成下钳 $0.8$、求值下钳 $0.5$，无上界）\\
 \fld{rmw\_km} & $R_{mw}$ & km & 正数 & — & 最大风速半径\\
 \fld{lognormal\_sigma} & $\sigma$ & — & 正数 & — & 对数正态易损度对数标准差\\
 \fld{seed} & — & — & 整数 & — & 随机种子（复现用）\\
 \end{paramtable}
 选项经 \srcpath{scenario\_generation\_options\_from\_json} 解析、结果经
-\srcpath{scenario\_generation\_result\_to\_json} 序列化；聚类方式固定为
-\texttt{hybrid\_kmedoids\_tail\_5pct}。
+\srcpath{scenario\_generation\_result\_to\_json} 序列化；聚类方式默认为
+\texttt{hybrid\_kmedoids\_tail\_5pct}，可经 JSON \fld{clustering.method} 覆盖：
+\texttt{hybrid\_kmedoids\_tail} 视为同一混合路径，其余取值回退
+\texttt{weighted\_k\_medoids}（\srcpath{scenario\_generation.cpp:1404--1406,1665,2832}）。
 
 \section{验证与边界局限}
 \subsection{验证与校核}

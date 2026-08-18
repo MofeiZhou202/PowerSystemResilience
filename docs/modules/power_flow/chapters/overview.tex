@@ -27,8 +27,8 @@
 供结果归因回原始组件编号空间）}
 \end{figure}
 
-投影与回投影的不变量（\srcpath{docs/projection\_and\_results.md} 与
-\srcpath{docs/technical\_notebook/sections/02e\_projection\_result\_contracts.tex}，
+投影与回投影的不变量（\srcpath{docs/developer/projection\_and\_results.md} 与
+\srcpath{docs/archive/reference/technical\_notebook/sections/02e\_projection\_result\_contracts.tex}，
 代码实现 \srcpath{src/model/network\_utils.cpp}）：强度量（电压、相角）穿越合并
 \textbf{广播}；广延量（功率、切负荷、能量）必须按参与语义\textbf{显式拆分}，
 绝不盲广播；合并/死岛删除映射是复合而非覆盖；恢复等级
@@ -147,4 +147,4 @@ $Y_{bus}$ 装配时 $|z|=0$ 支路直接跳过（\srcpath{admittance\_builder.cp
 \end{itemize}
 时序生产模拟（UC$\to$OPF$\to$PF 流水线）经 SolverHandle 族在整个时间轴上复用
 同一求解器实例，拓扑仅在 \fld{in\_service} 变化时重建
-（\srcpath{docs/time\_series\_power\_flow\_models.md}）。
+（\srcpath{docs/theory/time\_series\_power\_flow\_models.md}）。

@@ -8,7 +8,7 @@
 \srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}（1388 行）与
 \srcpath{include/hacdcpf/optimal\_power\_flow/reactive\_power\_opt.hpp}（307 行）
 逐行整理，验证素材取自
-\srcpath{docs/reactive\_power\_optimization\_validation.md} 并与
+\srcpath{docs/archive/audits/reactive\_power\_optimization\_validation.md} 并与
 \srcpath{tests/} 中的自动测试逐条核对。
 
 \subsection{功能定位与适用范围}
@@ -49,7 +49,7 @@ $(t,s)$ 的连续补全委托给通用 AC OPF 求解器 \srcpath{solve\_ac\_opf}
 
 \subsubsection*{元件利用审计}
 按验证文档的口径，系统元件在 RPO 中分四类处理
-（\srcpath{docs/reactive\_power\_optimization\_validation.md} 第 3 节；
+（\srcpath{docs/archive/audits/reactive\_power\_optimization\_validation.md} 第 3 节；
 GUI 覆盖审计实现于 \srcpath{tests/run\_gui\_server.cpp}:19686--19799）：
 \begin{enumerate}
   \item \textbf{直接离散优化}：两绕组 OLTC（档位）、可投切并联补偿（步数）；
@@ -360,7 +360,7 @@ $\epsilon_p$、$\epsilon_d$ 为 \fld{ipm\_tol} 与
         400--401）。
   \item \textbf{暖启动链}：候选以当前在位可行点 \fld{incumbent\_result}
         暖启动（同文件:914--920）；实测 3000 节点电网上好的候选 2--7 次
-        迭代即收敛（\srcpath{docs/reactive\_power\_optimization\_validation.md}
+        迭代即收敛（\srcpath{docs/archive/audits/reactive\_power\_optimization\_validation.md}
         第 5.3 节）。
   \item \textbf{失败快速拒绝}：纯交流电网上搜索评估的迭代上限取
         \fld{search\_ipm\_iter}（默认 200），超限候选按不可行拒绝
@@ -628,7 +628,7 @@ $|\Delta P_g|$/$|\Delta Q_g|$ 完整展示但不单独触发失败
 
 \subsubsection*{大规模可扩展性实测（文档存档）}
 验证文档第 5 节记录了内层目标重构前后的大算例实测
-（\srcpath{docs/reactive\_power\_optimization\_validation.md}）。关键数字：
+（\srcpath{docs/archive/audits/reactive\_power\_optimization\_validation.md}）。关键数字：
 \begin{itemize}
   \item \textbf{case2869（PEGASE，2869 节点 + 20 台可调 OLTC + 10 台可投切
         并联，authored 测试系统）}：基线（单位成本经济 + 同伦）74 次迭代 /
@@ -665,7 +665,7 @@ $|\Delta P_g|$/$|\Delta Q_g|$ 完整展示但不单独触发失败
         机组无功；实测 case2869 上 vdev RPO 虽收敛，离散设备未能抵消网损
         最优无功分配对电压的不利影响（vdev 0.1392 $\to$ 0.1401）。如需机组
         无功参与调压，仅中小电网用 MatchRPO
-        （\srcpath{docs/reactive\_power\_optimization\_validation.md} 第 5.5 节；
+        （\srcpath{docs/archive/audits/reactive\_power\_optimization\_validation.md} 第 5.5 节；
         结果字段 \fld{effective\_inner\_nlp\_objective} 与相应
         \fld{model\_limitations} 条目如实披露该路径，
         \srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp}:1311--1315）。
@@ -681,7 +681,7 @@ $|\Delta P_g|$/$|\Delta Q_g|$ 完整展示但不单独触发失败
         （\fld{regulator\_controls}）、单体三相不平衡 RPO 不进入离散决策
         向量；移动储能/虚拟电厂/微网为固定或投影注入
         （\srcpath{tests/run\_gui\_server.cpp}:19781--19796；
-        \srcpath{docs/reactive\_power\_optimization\_validation.md} 第 3 节）。
+        \srcpath{docs/archive/audits/reactive\_power\_optimization\_validation.md} 第 3 节）。
   \item \textbf{混合 AC/DC 回放部分覆盖}：富混合元件的 authored-space PF
         调度回放尚未完整映射，交叉验证对此标注“部分覆盖”而非数值不一致
         （\srcpath{tests/run\_gui\_server.cpp}:19581--19583、19677--19684）。

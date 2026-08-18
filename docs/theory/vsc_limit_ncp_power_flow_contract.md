@@ -109,7 +109,7 @@ transient initialization. Zero authored values retain the legacy
 `v_ac_set_pu`, `v_ac_angle_set_deg`, `r_conv_ac_pu`, and `x_sc_pu` fallbacks.
 All consumers call `model::resolve_gfm_norton_parameters`; the complete
 cross-module precedence, unit, identity, and result rules are defined in
-`docs/model_data_semantics_contract.md`.
+`docs/developer/model_data_semantics_contract.md`.
 
 Magnitude limiting uses the two-dimensional fallback
 

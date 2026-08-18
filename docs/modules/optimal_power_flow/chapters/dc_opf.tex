@@ -178,11 +178,12 @@ P_{f,k} - b_k\,(\theta_{\mathrm{from}(k)}-\theta_{\mathrm{to}(k)}) = 0,
 \fld{pmin\_mw}_k/S_{\mathrm{base}} \;\le\; P_{g,k} \;\le\;
 \fld{pmax\_mw}_k/S_{\mathrm{base}}
 \end{align*}
-并以 $\pm 10^{20}$ 截断防无界（:225--227）。相角参考节点由
-\srcpath{find\_slack\_bus} 选取：第一台 \fld{BusType::SLACK} 型母线，没有则
-退化为第 0 号母线（:54--61）；其相角以盒界 $[0,0]$ 钉死，其余节点自由于
-$[-\pi,\pi]$（:210--217）。$B\theta$ 路径中松弛列因 $\theta_{\mathrm{slack}}
-=0$ 而省略（:448--468）。
+并以 $\pm 10^{20}$ 截断防无界（:282--284）。相角参考按连通分量逐分量锚定：
+\srcpath{find\_slack\_bus} 先选出第一台 \fld{BusType::SLACK} 型母线，没有则
+退化为第 0 号母线（:56--63）；再以在运支路做并查集连通分量划分，含松弛母线
+的分量以松弛母线为参考，其余每个分量各自以分量内首母线为参考（:164--188）。
+各参考相角以盒界 $[0,0]$ 钉死，其余节点自由于 $[-\pi,\pi]$（:263--272）。
+$B\theta$ 路径保留参考列于等式约束中（其盒界已将其钉零，:511--522）。
 
 \subsubsection*{负荷削减变量与 VOLL}
 开启 \fld{load\_shedding} 时每母线一个削减变量
@@ -390,7 +391,7 @@ fallback。
 
 \compmeta{DCOPFOptions}{\srcpath{include/hacdcpf/optimal\_power\_flow/opf\_options.hpp}}
 
-全部字段如下（定义 :139--160）。
+全部字段如下（定义 :184--233）。
 
 \begin{paramtable}
 \fld{feasibility\_tol} & $\varepsilon_{\mathrm{f}}$ & — & $10^{-9}$--$10^{-4}$（经验值） & $10^{-6}$ & 原始可行性容差；传入 LCQP（\fld{tol\_primal}）与对偶单纯形\\
@@ -405,6 +406,7 @@ fallback。
 \fld{voll} & VOLL & —/MWh & $\ge 0$ & 0.0 & 失负荷价值；$\le 0$ 时按 $\max(100,\,1.1\times$最高边际成本$)$ 自动取值（:305--316）\\
 \fld{compute\_lmp} & — & — & true/false & true & 主解后是否追加支撑 LP 回收对偶；false 时 \fld{lmp} 清空并注明原因（:1195--1198、:1206--1211）\\
 \fld{structural\_warm\_start} & — & — & true/false & true & 为 NativeLCQP 构造逐分量功率配平与约化 Laplacian 初值；LP/外部后端忽略\\
+\fld{phase\_one\_linear\_relaxation} & — & — & true/false & false & 仅 HiGHS 后端的 Phase-I 凸松弛：直接解 LP-PWL 而非把二次模型路由到 QP 后端；返回点为 warm start，非二次成本 DCOPF 最优证书\\
 \fld{compact\_quadratic\_model} & — & — & true/false & false & Phase-I QP 省略仅供 LP-PWL 使用的插值变量与行\\
 \fld{accept\_phase\_one\_iterate} & — & — & true/false & false & 允许非最优 NativeLCQP 末迭代经显式残差门槛成为 warm-start-only 结果\\
 \fld{phase\_one\_iterate\_tolerance} & $\varepsilon_I$ & pu & $\ge0$ & 0.1 & warm-start-only 末迭代的 equality/box 最大残差门槛\\
@@ -422,7 +424,7 @@ fallback。
 \fld{sys.ac.external\_grids} 位置。
 
 \begin{paramtable}
-\fld{va} & $\theta_i$ & rad & $(-\pi,\pi)$ & 空 & 母线电压相角（\fld{BusType::SLACK} 处恒 0）\\
+\fld{va} & $\theta_i$ & rad & $(-\pi,\pi)$ & 空 & 母线电压相角（各连通分量参考母线处恒 0）\\
 \fld{pg\_mw} & $P_g$ & MW & \fld{pmin\_mw}--\fld{pmax\_mw} & 空 & 发电机有功调度（由标幺乘 $S_{\mathrm{base}}$ 还原，:707--713）\\
 \fld{external\_grid\_p\_mw} & $P_{\mathrm{ext}}$ & MW & $\pm 10^{5}$ & 空 & 外网（升格发电机）有功（:856--866）\\
 \fld{pf\_mw} & $P_f$ & MW & $\pm$\fld{rate\_a\_mva} & 空 & 支路有功，from$\to$to 为正；无显式 $P_f$ 时由 $(\theta_f-\theta_t)/x$ 回算（:715--744）\\

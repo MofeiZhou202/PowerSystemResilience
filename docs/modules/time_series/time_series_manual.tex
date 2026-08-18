@@ -1,7 +1,7 @@
 % !TEX program = xelatex
 % 编译方式：在本目录执行两遍 xelatex（详见 docs/_manual_common/README.md）。
 % 源码依据：src/time_series/ 与 include/hacdcpf/time_series/ 源码及
-%           docs/time_series_power_flow_models.md 等，公式与参数以代码为准。
+%           docs/theory/time_series_power_flow_models.md 等，公式与参数以代码为准。
 \documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
 \usepackage{../../_manual_common/hysim_manual}
 
@@ -127,14 +127,17 @@ MinCurtailment/\allowbreak MinLoss/\allowbreak Weighted）\\
   \item 开启 \fld{enable\_dc\_network\_constraints} 时\textbf{不追加显式 DC 支路热限}，
         仅经各换流器功率变量界隐式约束；
   \item MILP 受 \fld{mip\_gap}/时限约束（以 \fld{optimality\_proven}/\fld{mip\_gap\_target\_met} 标注）；
-  \item 按日并行仅对 \fld{skip\_uc} 或 Native 分支定界无锁分派（每日一工作线程），外部全局调度器
-        MILP 后端退化为顺序日循环；按日独立性依赖循环终端 SOC
-        （\fld{enforce\_terminal\_soc\_cyclic}/\fld{enforce\_daily\_cyclic\_soc}）；
+  \item 按日并行对无 MILP 的 \texttt{DynamicOPF} 模式、Native 与 SCIP（可用且支持 MILP 时）无锁分派
+        （每日一工作线程），\texttt{Auto} 在该路径下优先解析为 SCIP；显式选择共享进程全局调度状态的
+        外部 MILP 后端退化为顺序日循环；按日独立性依赖循环终端 SOC
+        （\fld{enforce\_terminal\_soc\_cyclic}/\fld{enforce\_daily\_cyclic\_soc}）。依据：
+        \srcpath{src/time\_series/time\_series\_pf.cpp:3245--3264}、
+        \srcpath{src/time\_series/annual\_production\_sim.cpp:1170--1189}；
   \item 生命周期默认 \fld{step\_duration\_hr}=$6.0$（为提速偏粗），碳精度以 \texttt{YearlyErrorBounds} 为准。
 \end{itemize}
-规范文档：\srcpath{docs/time\_series\_power\_flow\_models.md}、
-\srcpath{docs/sequential\_production\_simulation\_rich\_models.md}、
-\srcpath{docs/annual\_simulation\_models.md}。
+规范文档：\srcpath{docs/theory/time\_series\_power\_flow\_models.md}、
+\srcpath{docs/theory/sequential\_production\_simulation\_rich\_models.md}、
+\srcpath{docs/theory/annual\_simulation\_models.md}。
 \input{../../_manual_common/industrial_evaluation}
 
 \end{document}

@@ -109,7 +109,7 @@ I=(E-V)/Z_v,\qquad S_{ac}=VI^*=P_{ac}+jQ_{ac}.
 `v_ac_set_pu`、`v_ac_angle_set_deg`、`r_conv_ac_pu` 与 `x_sc_pu` 回退值。
 所有消费方调用 `model::resolve_gfm_norton_parameters`；完整的
 跨模块优先级、单位、恒等式与结果规则定义于
-`docs/model_data_semantics_contract.md`。
+`docs/developer/model_data_semantics_contract.md`。
 
 幅值限制使用二维回退形式
 

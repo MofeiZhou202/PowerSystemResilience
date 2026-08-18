@@ -82,7 +82,7 @@ Q_i^{\mathrm{spec}} &= Q_{g,i}-q_{d,i}\big(w_{q0}+w_{q1}V_i+w_{q2}V_i^2\big)
 \srcpath{converter\_ac\_injection} 加入 spec（jacobian\_builder.cpp:137--178）。
 
 \subsection{交流导纳阵 $Y_{bus}$}
-\srcpath{build\_admittance\_matrix(data)}（\srcpath{src/power\_flow/admittance\_builder.cpp:11--88}），
+\srcpath{build\_admittance\_matrix(data)}（\srcpath{src/power\_flow/admittance\_builder.cpp:28--110}），
 π 型支路 + 复变比（MATPOWER \texttt{makeYbus} 约定）。对在役支路 $i\to j$
 （\fld{from\_bus}/\fld{to\_bus} 为 1-based，代码中 $-1$）：
 \begin{align*}
@@ -94,23 +94,27 @@ Y_{ft} = -\frac{y_s}{\hat{t}^{*}},\qquad
 Y_{tf} = -\frac{y_s}{\hat{t}}
 \end{align*}
 对角元累加 $Y_{ii}\leftarrow Y_{ii}+Y_{ff}$、$Y_{jj}\leftarrow Y_{jj}+y_{tt}$，
-非对角元 $Y_{ij}=Y_{ft}$、$Y_{ji}=Y_{tf}$（:38--57）。\fld{tap}=0 按 1.0 处理；
-$|z|=0$ 支路跳过（:34，正常已被投影层合并）。母线对地并联（$V=1.0$~pu 功率口径，
-MATPOWER 惯例）直接入对角（:61--65）：
+非对角元 $Y_{ij}=Y_{ft}$、$Y_{ji}=Y_{tf}$（:71--78）。装配层为 fail-close 口径：
+$|z|$ 非有限或 $\le\texttt{kMinSeriesImpedancePu}=10^{-12}$ 即抛
+\texttt{std::runtime\_error}（:50--55，阈值 :15）；\fld{tap} 非有限或
+$\le 10^{-12}$ 同样抛出（:59--61）——零阻抗支路须在投影层先行合并，
+装配层不做静默回退。母线对地并联（$V=1.0$~pu 功率口径，
+MATPOWER 惯例）直接入对角（:83--87）：
 \[
 Y_{ii}\leftarrow Y_{ii}+\frac{g_s+\mathrm{j}b_s}{S_{\mathrm{base}}}
 \]
 独立 \texttt{Shunt} 表同样入对角；可投切并联按
-\fld{bs\_per\_step}$\times$\fld{current\_step} 取值（:68--80）。
+\fld{bs\_per\_step}$\times$\fld{current\_step} 取值（:89--102）。
 装配用三元组列表 + \texttt{setFromTriplets}。
 
 \subsection{直流电导阵 $G_{dc}$}
-\srcpath{build\_dc\_conductance(data)}（admittance\_builder.cpp:90--125）：
-正对角 Laplacian。对在运且 $r_{pu}\neq 0$ 的 DC 支路取
+\srcpath{build\_dc\_conductance(data)}（admittance\_builder.cpp:112--153）：
+正对角 Laplacian。对在运 DC 支路取（$r_{pu}$ 非有限或 $\le 10^{-12}$ 即抛
+\texttt{std::runtime\_error}，fail-close，:128--132）
 \[
 g=\frac{1}{r_{pu}},\qquad G_{ii}\leftarrow G_{ii}+g,\qquad G_{ij}=G_{ji}=-g
 \]
-（:101--117）。DC 节点功率方程为 $\mathbf p_{dc}=\mathbf v_{dc}\odot(G_{dc}\mathbf v_{dc})$
+（:140--145）。DC 节点功率方程为 $\mathbf p_{dc}=\mathbf v_{dc}\odot(G_{dc}\mathbf v_{dc})$
 （jacobian\_builder.cpp:285--286）。
 
 \subsection{FDPF 电纳阵 $B'/B''$}

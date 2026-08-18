@@ -172,7 +172,7 @@ include。）算法语义见第~\ref{sec:robust}~章，此处仅列字段契约�
 \fld{auto\_enable\_log\_voltage\_on\_failure} & --- & --- & true/false & false &失败后自动重试对数电压；\textbf{当前未接线}\\
 \fld{enable\_newton\_krylov\_fallback} & --- & --- & true/false & false &病态雅可比时 GMRES 内迭代回退（newton\_solver.cpp:1427--1428, 1497）\\
 \fld{enable\_schur\_preconditioner} & --- & --- & true/false & false &AC/DC 块 Schur 补预条件子（newton\_solver.cpp:1241）\\
-\fld{enable\_auto\_fallback\_scheduling} & --- & --- & true/false & false &线搜索耗尽后自动挂接 LM/PTC 恢复步（newton\_solver.cpp:1658--1661）；需 Phase 3 对应开关同时打开\\
+\fld{enable\_auto\_fallback\_scheduling} & --- & --- & true/false & true &线搜索耗尽后自动挂接 LM/PTC 恢复步（newton\_solver.cpp:2333--2334）；需 Phase 3 对应开关同时打开\\
 \fld{nk\_condition\_trigger} & --- & --- & $10^{4}$--$10^{10}$ & $10^{8}$ &NK-GMRES 触发的条件数代理阈值（newton\_solver.cpp:1498）\\
 \fld{gmres\_restart} & $m$ & 维 & 10--100 & 30 & GMRES($m$) 重启维数（newton\_solver.cpp:1234）\\
 \fld{gmres\_max\_outer} & --- & 轮 & 5--50 & 10 & GMRES 外重启轮数上限（newton\_solver.cpp:1235）\\

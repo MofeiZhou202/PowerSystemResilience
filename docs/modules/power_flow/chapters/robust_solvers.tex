@@ -60,29 +60,30 @@ case9/14/30/57/118 默认缩放开全部收敛且 \fld{scaled\_residual\_norm}/
 \paragraph{功能说明} Grippo--Lampariello--Lucidi（1986）非单调 Armijo 搜索，
 header-only 实现（\srcpath{src/power\_flow/nonmonotone\_linesearch.cpp} 仅为
 空壳翻译单元）。在 Newton 主循环中它维护最近 $M$ 轮 merit 历史、给出非单调
-参考值，并在单调回溯失败时做事后 GLL 接受判定。
+参考值，并对每个试探步长直接做 Armijo-GLL 接受判定
+（\srcpath{NonmonotoneLineSearch::search}）。
 \paragraph{数学模型与算法} Merit 函数 $\phi(x)=\tfrac12\lVert F(x)\rVert_2^2$，
 滑动窗口参考 $\varphi_k^{\max}=\max_{0\le j\le M-1}\phi_{k-j}$，接受条件
-（\srcpath{nonmonotone\_linesearch.hpp:21--27, 66--99}）：
+（\srcpath{nonmonotone\_linesearch.hpp:21--27, 84--94}）：
 \[
 \phi(x+\alpha\,\Delta x)\le \varphi_k^{\max}+c_1\,\alpha\,\nabla\phi(x)^{\mathsf T}\Delta x,
 \qquad \alpha\leftarrow\beta\alpha
 \]
 $M=1$ 退化为标准单调 Armijo。主循环中的实际形态
-（newton\_solver.cpp:1033--1038 构造、:1115--1197 搜索）：窗口每轮压入当前残差
-（:1461--1462）；回溯 $\alpha\leftarrow\alpha/2$、上限
-\fld{max\_line\_search\_steps}$=10$ 次（:1127, :1139--1173）；单调改善失败时先按残差
-分级放宽比（2.0/1.5/1.2/1.01，:1178--1188）再试，仍未改善时若最优试探残差
-$\le\varphi_k^{\max}(1+c_1)$ 则按 GLL 条件事后接受（:1189--1195）。如实说明：
-生产回溯次数由 \fld{max\_line\_search\_steps}（默认 10）控制、折半系数 0.5
-为硬编码；类自带的 \fld{max\_line\_search\_trials}$=12$ 当前未被主循环消费，
-\fld{line\_search\_beta} 仅作构造参数传入。
+（newton\_solver.cpp:1377--1380 构造、\srcpath{run\_line\_search} :1493--1585）：
+merit 每轮压入窗口（:2067--2070）；回溯 $\alpha\leftarrow\beta\alpha$、
+试探上限 \fld{max\_line\_search\_steps}$=10$ 次（:1506, :1525--1528）；
+\fld{enable\_nonmonotone\_linesearch}=false 时改用 $M=1$ 的单调搜索实例
+（:1517--1524）。如实说明：生产回溯次数由 \fld{max\_line\_search\_steps}
+（默认 10）控制；折减系数即 \fld{line\_search\_beta}（默认 0.5，经构造函数传入，
+:1377--1380）；类自带的 \fld{max\_line\_search\_trials}$=12$
+（robust\_nonlinear\_options.hpp:104--105）当前未被主循环消费，为保留字段。
 \paragraph{参数表}
 \begin{paramtable}
-\fld{enable\_nonmonotone\_linesearch} & — & — & on/off & true & GLL 参考窗口与事后接受开关（关则退化为单调）\\
+\fld{enable\_nonmonotone\_linesearch} & — & — & on/off & true & GLL 参考窗口与非单调接受开关（关则退化为 $M=1$ 单调 Armijo）\\
 \fld{nonmonotone\_window} & $M$ & — & 3--10 & 5 & 滑动窗口长度（\srcpath{nonmonotone\_linesearch.hpp:40}）\\
 \fld{armijo\_c} & $c_1$ & — & $10^{-5}$--$10^{-3}$ & $10^{-4}$ & Armijo 充分下降常数\\
-\fld{line\_search\_beta} & $\beta$ & — & 0.3--0.7 & 0.5 & 类的回溯折减系数\\
+\fld{line\_search\_beta} & $\beta$ & — & 0.3--0.7 & 0.5 & 回溯折减系数（主循环经构造函数消费，newton\_solver.cpp:1377--1380）\\
 \fld{max\_line\_search\_trials} & — & 次 & 8--20 & 12 & 类内试探上限（当前未被主循环消费，保留字段）\\
 \end{paramtable}
 \paragraph{验证与校核} 无独立单元测试；由
@@ -123,11 +124,12 @@ $\delta t\leftarrow\mathrm{clamp}(\delta t(r_{k-1}/r_k)^\gamma,
         \fld{ptc\_delta0}$=1.0$、增长 \fld{ptc\_growth}$=2.0$
         （:1322，\srcpath{power\_flow\_options.hpp:158--159}）。
   \item \textbf{LM/PTC 自动恢复}（\fld{enable\_auto\_fallback\_scheduling}，
-        默认关；:1651--1717）：线搜索、正则化与逃逸步全部失败后，LM 恢复解
-        $(J^{\mathsf T}J+\lambda I)\Delta x=-J^{\mathsf T}F$（:1660--1686），
+        默认\textbf{开}，\srcpath{robust\_nonlinear\_options.hpp:268}；
+        newton\_solver.cpp:2333--2437）：线搜索与正则化全部失败后，LM 恢复解
+        $(J^{\mathsf T}J+\lambda I)\Delta x=-J^{\mathsf T}F$（:2336--2392），
         最多 4 次尝试、$\lambda$ 自 \fld{lm\_lambda0} 起 $\times10$ 增至
-        \fld{lm\_lambda\_max}（:1662, :1684）；仍失败则以 $J+I/\delta t$ 做
-        PTC 恢复并无条件接受（:1687--1716）。
+        \fld{lm\_lambda\_max}（:2344--2348, :2387--2390）；仍失败则以 $J+I/\delta t$ 做
+        PTC 恢复并无条件接受（:2393--2437）。
 \end{itemize}
 \paragraph{参数表}
 \begin{paramtable}
@@ -137,13 +139,13 @@ $\delta t\leftarrow\mathrm{clamp}(\delta t(r_{k-1}/r_k)^\gamma,
 \fld{ptc\_dt0} 等四字段 & $\delta t$ 族 & — & — & 0.1 / $10^{-4}$ / $10^{6}$ / 0.7 & SER 控制器预留（\fld{ptc\_dt\_min}/\fld{\_max}/\fld{ptc\_gamma}；生产 PTC 用 \fld{opt.ptc\_delta0}/\fld{ptc\_growth}）\\
 \fld{trust\_region\_radius0} & $\Delta_0$ & — & 0.1--2 & 1.0 & 信赖域初始半径（\texttt{PowerFlowOptions}，:1321）\\
 \fld{trust\_region\_max} & $\Delta_{\max}$ & — & 5--50 & 10.0 & 信赖域半径上限\\
-\fld{enable\_auto\_fallback\_scheduling} & — & — & on/off & false & 失败时自动追加 LM/PTC 恢复（:1658--1659）\\
+\fld{enable\_auto\_fallback\_scheduling} & — & — & on/off & true & 失败时自动追加 LM/PTC 恢复（newton\_solver.cpp:2333--2334）\\
 \end{paramtable}
 \paragraph{验证与校核} \srcpath{tests/test\_unified\_pf\_upgrade.cpp}
 「Globalization improves flat-start convergence」（:747--820）：IEEE 118 混合
 算例、$\pm5\%$ 初值噪声、30 次试验，断言 LineSearch 30/30 收敛、TrustRegion
 与 PTC 各 $\ge50\%$；「Full comparison」（:890--961）在 5 个压力算例
-$\times$ 8 种配置（含 TR、PTC）打印迭代对照表。自动恢复调度（默认关）无
+$\times$ 8 种配置（含 TR、PTC）打印迭代对照表。自动恢复调度（默认开）无
 专门回归用例。
 
 \subsection{结构保持 NCP 半光滑 Newton}\label{sec:robust:ncp}

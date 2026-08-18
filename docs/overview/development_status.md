@@ -293,8 +293,8 @@ freezes the HySim internal voltage and re-solves the circuit with native
 terminal-power KCL residual at most `1e-6 pu`, which is not presented as an
 independent mode-selection oracle. GPU assembly/factorization remains
 unimplemented. The concrete authored/canonical/solver/result/replay ownership
-rules are in `docs/model_data_semantics_contract.md`; the equations and
-numerical boundaries are in `docs/vsc_limit_ncp_power_flow_contract.md`.
+rules are in `docs/developer/model_data_semantics_contract.md`; the equations and
+numerical boundaries are in `docs/theory/vsc_limit_ncp_power_flow_contract.md`.
 
 The repository-wide semantics guard `test_model_semantics_contract` passes 5
 cases and 1531 assertions. It pairs all 43 component I/O collections with

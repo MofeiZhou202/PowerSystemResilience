@@ -40,7 +40,7 @@ Rich HybridPowerSystem（工程语义层）
 
 1. **AC/DC 域用 domain-qualified map**（`ac_bus_id_to_node_idx` / `dc_bus_id_to_node_idx`），不要用裸 `int bus_id` 跨域传递。
 2. **三类 ID 不混用**：组件 `.index`（对外稳定）、vector position（内部 0-based）、graph node/edge index（临时）。对外报告必须经 mapping 回到稳定 ID（如 `BranchRef`）。
-3. **诚实结果口径**：近似/fallback/time-limit/模型覆盖不足必须写进 result 的 `model_scope`、`ValidityFlags` 或 `model_limitations`。新模块普遍遵循此模式（如市场 AC-only 拒绝混合资产、可靠性 `ac-only-dcopf` 声明）。
+3. **诚实结果口径**：近似/fallback/time-limit/模型覆盖不足必须写进 result 的 `model_scope`、`ValidityFlags` 或 `model_limitations`。新模块普遍遵循此模式（如市场运行时按资产组成改写 scope 字符串——混合系统为 `ac-dc-linear-v1:dc-voltage+bidirectional-converters`，仅 external_grid/energy_router 显式退回；可靠性 `ac-only-dcopf` 声明）。
 
 ## 目录地图（src/ ↔ include/hacdcpf/）
 
@@ -65,7 +65,7 @@ Rich HybridPowerSystem（工程语义层）
 | `carbon_analysis/` | 碳流追踪、年度碳、用户/节点 GEC |
 | `ev_power_traffic/` | EV-交通耦合 Formulation A–H（CTM/LTM、联合优化、选址定容、MPC） |
 | `integrated_energy/` | 园区电-热-氢多能流 MILP |
-| `market/` | 日前市场 SCUC→SCED/LMP→N-1 割→结算，实时双结算，重复博弈（AC-only） |
+| `market/` | 日前市场 SCUC→SCED/LMP→N-1 割→结算，实时双结算，重复博弈（DC 电压线性化的全混合出清；仅 external_grid/energy_router 退回） |
 | `sppt/` | 语义保持投影理论的可执行验证层：MR1–MR8、证书语料、准入守卫、agent 循环 |
 | `io/` | JSON、MATPOWER、CIM（CGMES3+配电）、GridLAB-D、PSD.jl、BPA/DSP dat（含 LCC 直流卡）；ETAP（OpenXLSX）与 OpenDSS（dss_capi）可选 |
 | `api/` | 公共门面 `hacdcpf.hpp` + `solver_capabilities.hpp`（运行时后端查询） |

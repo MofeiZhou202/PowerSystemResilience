@@ -765,7 +765,10 @@ i_p = \kappa \sqrt{2} I_{k,1}''
 ```
 
 where κ uses the fault-point R/X ratio; for method B in a meshed network the
-code multiplies by `1.15`, then clamps `1.0 ≤ κ ≤ 2.0`.
+code multiplies by `1.15` and caps the result at `1.8`
+(`κ = min(1.8, 1.15κ)`, no lower clamp), while every other
+method/topology combination clamps `1.0 ≤ κ ≤ 2.0`
+(`src/short_circuit/short_circuit.cpp:1703-1707`).
 
 ### 9.2 Breaking Current
 

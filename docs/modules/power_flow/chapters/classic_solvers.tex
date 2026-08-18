@@ -203,7 +203,7 @@ ac\_linearized\_pf.hpp:15），全部阈值为硬编码常数：
 \hspace*{2em}const PowerFlowOptions\&) const;}\\
 \texttt{DistributedSlackResult solve\_full\_jacobian(...同名参数...) const;}
 \end{quote}
-配套工厂 \srcpath{create\_participation\_factors}（hpp:13--17，实现 :212--278）
+配套工厂 \srcpath{create\_participation\_factors}（hpp:13--17，实现 :349--425）
 按 \texttt{capacity}/\texttt{droop}/\texttt{equal} 三种方式生成配置结构
 \texttt{DistributedSlack}（四字段定义见
 \srcpath{include/hacdcpf/power\_flow/power\_flow\_options.hpp:30--35}，语义列于本节末）。
@@ -211,17 +211,21 @@ ac\_linearized\_pf.hpp:15），全部阈值为硬编码常数：
 （\srcpath{src/api/hacdcpf.cpp:1086, 1097}）。
 
 \subsubsection*{数学模型与算法}
-\textbf{参与因子}（:212--278）：默认参与母线为有实际发电（$P_g>0$）的 SLACK/PV
-母线（:219--227），空集抛 \texttt{invalid\_argument}（:240--241）；原始权重
+\textbf{参与因子}（:349--425）：默认参与母线为有实际发电（$P_g>0$）的 SLACK/PV
+母线（:356--364），空集抛 \texttt{invalid\_argument}（:377--379）；原始权重
 \[
 \alpha_i^{0}=\max(P_{g,i},10^{-4})\;(\text{capacity}),\qquad
 \alpha_i^{0}=1/R_i\;(\text{droop},\ R_i>0\text{ 否则取容量}),\qquad
 \alpha_i^{0}=1\;(\text{equal})
 \]
-（:250--268），统一归一化 $\sum_i\alpha_i=1$（:44--56, :270）；单机分摊上限分别为
-$1.5\,P_{g,i}$（capacity/droop）与 $10$~pu（equal）。\srcpath{sanitize\_slack\_cfg}
-（:58--70）：参与列表为空时自动按 capacity 生成；因子数不匹配时全置 1 再归一；
-\fld{reference\_bus}=0 时取首个参与母线。
+（:387--401），统一归一化 $\sum_i\alpha_i=1$（:45--63, :417）；单机分摊上限
+与该母线机组群的调节裕度挂钩（三种模式同一口径），
+$\overline P_i=\max\big(|P_{\min,i}^{\Sigma}-P_{g,i}^{\mathrm{sched}}|,\,
+|P_{\max,i}^{\Sigma}-P_{g,i}^{\mathrm{sched}}|\big)/S_{\mathrm{base}}$
+（:403--414），写入 \fld{max\_participation\_p}（:423）。\srcpath{sanitize\_slack\_cfg}
+（:65--95）：参与列表为空时自动按 capacity 生成；因子数不匹配时全置 1 再归一；
+\fld{reference\_bus}=0 时取首个在运 SLACK 母线（无则抛
+\texttt{invalid\_argument}，:73--84），并校验其确为在运 AC 母线（:85--93）。
 
 \textbf{简化变体} \srcpath{solve\_simplified}（:280--339）：先做换流器协调预校核
 （可阻断，:284--293），随后 \srcpath{make\_solver\_data} $+$ 统一 Newton 求基准解

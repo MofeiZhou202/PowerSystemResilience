@@ -1,7 +1,7 @@
 % !TEX program = xelatex
 % 编译方式：在本目录执行两遍 xelatex（详见 docs/_manual_common/README.md）。
 % 源码依据：src/integrated_energy/ 与 include/hacdcpf/integrated_energy/ 源码及
-%           docs/integrated_energy_contract.md，公式与参数以代码为准。
+%           docs/theory/integrated_energy_contract.md，公式与参数以代码为准。
 \documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
 \usepackage{../../_manual_common/hysim_manual}
 
@@ -21,7 +21,7 @@
 \fld{model\_scope}=\texttt{isolated-campus-multi-carrier-milp}，\fld{electrical\_network\_coupled}=false，
 不含无功、电压、支路潮流或安全约束；并网点（PCC）交换为单一聚合进/出功率对，
 \fld{fixed\_power\_factor} 必须恰为 $1.0$（其余取值被拒绝）。全部结论以源码与契约
-\srcpath{docs/integrated\_energy\_contract.md} 为准。文档版式与《碳流追踪与碳排放核算技术手册》一致。
+\srcpath{docs/theory/integrated\_energy\_contract.md} 为准。文档版式与《碳流追踪与碳排放核算技术手册》一致。
 \end{abstract}
 
 \tableofcontents
@@ -34,7 +34,7 @@
   \item \srcpath{integrated\_energy\_options.hpp}、\srcpath{integrated\_energy\_result.hpp}、
         \srcpath{integrated\_energy\_system.hpp} —— 选项、结果与数据集结构；
   \item \srcpath{src/integrated\_energy/integrated\_energy\_optimizer.cpp} —— MILP 组装与求解实现；
-  \item \srcpath{docs/integrated\_energy\_contract.md} —— 建模范围/有效性/局限契约；
+  \item \srcpath{docs/theory/integrated\_energy\_contract.md} —— 建模范围/有效性/局限契约；
   \item \srcpath{tests/test\_integrated\_energy\_campus.cpp} —— 验证依据。
 \end{itemize}
 命名空间为 \texttt{hacdcpf::integrated\_energy}。
@@ -53,7 +53,9 @@ $p^{pcc}_t=p^{exp}_t-p^{imp}_t$
 \fld{aggregate\_pcc\_active\_power\_modelled}=true，而
 \fld{electrical\_network\_coupled}=false、\fld{reactive\_power\_modelled}=false、
 \fld{voltage\_and\_branch\_limits\_enforced}=false。\fld{fixed\_power\_factor} 必须恰为
-$1.0$，否则拒绝。被动效率须为 $(0,1]$ 内有限值，热泵 COP 可大于 1。历史输入的默默归一化
+$1.0$，否则拒绝。转换/储能效率与保持率须为 $(0,1]$ 内有限值，否则抛异常；
+\fld{eta\_wasteheat} 与 \fld{eta\_carbon\_to\_fuel} 不在校验之列（默认 0.0，按原值参与建模），
+校验字段清单见源码等价章；热泵 COP 可大于 1。历史输入的默默归一化
 （如负容量截断、COP 缺省回填为 3.2）不构成输入校验；Sankey 流为可视化产物，非额外平衡约束。
 
 \section{功能定位与架构}
@@ -129,7 +131,8 @@ CCUS（\fld{ccus\_capture\_fraction}、\fld{co2\_budget\_tco2}）。
         短路或安全约束；\fld{pcc\_ac\_bus} 仅为归因标签；
   \item \fld{fixed\_power\_factor} 必须恰为 $1.0$，其余取值被拒绝；建模范围在
         \fld{model\_scope}/\fld{validity}/\fld{model\_limitations} 中重申；
-  \item 被动效率须为 $(0,1]$ 内有限值，热泵 COP 可$>$1；
+  \item 转换/储能效率与保持率须为 $(0,1]$ 内有限值（\fld{eta\_wasteheat}、
+        \fld{eta\_carbon\_to\_fuel} 除外，二者不校验、按原值使用），热泵 COP 可$>$1；
   \item 历史输入的默默归一化（负容量截断、COP 回填为 3.2）不构成输入校验；
   \item Sankey 流（\texttt{CampusIESSankeyFlow}）为可视化产物，非新增平衡约束。
 \end{itemize}

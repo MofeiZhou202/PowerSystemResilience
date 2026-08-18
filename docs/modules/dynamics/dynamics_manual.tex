@@ -1,7 +1,7 @@
 % !TEX program = xelatex
 % 编译方式：在本目录执行两遍 xelatex（详见 docs/_manual_common/README.md）。
 % 源码依据：src/dynamics/ 与 include/hacdcpf/dynamics/（含 devices/ integration/ solvers/）源码及
-%           docs/transient_runtime.md，公式与参数以代码为准。
+%           docs/theory/transient_runtime.md，公式与参数以代码为准。
 \documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
 \usepackage{../../_manual_common/hysim_manual}
 
@@ -19,7 +19,7 @@
 \srcpath{integration/}、\srcpath{solvers/} 子目录）整理，命名空间 \texttt{hacdcpf::dynamics}，
 总入口头 \srcpath{include/hacdcpf/dynamics/dynamics.hpp}。手册覆盖相量域机电暂态稳定 DAE 的
 两类求解架构（分块积分与质量矩阵 DAE）、丰富设备模型库与小信号/模态分析。全部结论以源码与
-\srcpath{docs/transient\_runtime.md} 契约为准：暂态为相量域方法，支路 P/Q 仅在求解器记录端口
+\srcpath{docs/theory/transient\_runtime.md} 契约为准：暂态为相量域方法，支路 P/Q 仅在求解器记录端口
 电流后可用，电压健康失败与初始化不收敛保持为可见错误，不被改写为收敛。版式与《碳流追踪与碳排放
 核算技术手册》一致。
 \end{abstract}
@@ -39,7 +39,7 @@
         质量矩阵 DAE、稀疏牛顿求解；
   \item \srcpath{include/hacdcpf/dynamics/devices/} —— 同步机、励磁、调速、构网/跟网逆变器、VSC、
         电池、IEEE 1547 保护模型；
-  \item \srcpath{docs/transient\_runtime.md} —— 运行时契约与边界；
+  \item \srcpath{docs/theory/transient\_runtime.md} —— 运行时契约与边界；
   \item \srcpath{tests/test\_transient\_dynamics.cpp} 等 —— 验证依据。
 \end{itemize}
 命名空间为 \texttt{hacdcpf::dynamics}。
@@ -123,7 +123,7 @@ ctest 项 \srcpath{transient\_native\_disturbance\_matrix}（标签
   \item 与 GridLAB-D/OpenDSS 的对比仅校核共享的平衡快照范围，不认证逆变器、电机、直流环节、储能或
         事件方程；
   \item 电压健康失败与初始化不收敛保持为可见错误，不得改写为收敛；
-  \item 权威文档 \srcpath{docs/transient\_runtime.md}；历史理论见
+  \item 权威文档 \srcpath{docs/theory/transient\_runtime.md}；历史理论见
         \srcpath{docs/archive/theory/dynamics\_electromechanical\_transient\_design.md}。
 \end{itemize}
 \input{../../_manual_common/industrial_evaluation}

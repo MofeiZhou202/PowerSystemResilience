@@ -9,7 +9,18 @@ $t=0,\ldots,n-1$。未在下文展开的上界直接取同名输入字段；$P_{
 
 步数必须为正，步长必须有限且大于零；固定功率因数必须在 $10^{-12}$ 内等于 1，原因是模型
 不含无功、电压或电网约束。非有限的一般非负参数通过
-$\max(0,x)$ 归零；被动效率与保持率必须有限且在 $(0,1]$，否则抛异常；热泵 COP 非有限或
+$\max(0,x)$ 归零；以下效率与保持率字段经 \texttt{require\_unit\_efficiency} 校验，
+必须有限且在 $(0,1]$，否则抛异常：\fld{eta\_electrolysis}、\fld{eta\_power\_to\_fuel}、
+\fld{eta\_fuelcell}、\fld{eta\_chp\_elec}、\fld{eta\_chp\_heat}、\fld{eta\_chp\_total}、
+\fld{eta\_storage\_charge}、\fld{eta\_storage\_discharge}、五类储能保持率
+（\fld{electric\_}/\fld{thermal\_}/\fld{hydrogen\_}/\fld{weekly\_hydrogen\_}/%
+\fld{seasonal\_hydrogen\_storage\_retention}）与四个层间转移效率
+（\fld{eta\_daily\_to\_weekly}、\fld{eta\_weekly\_to\_daily}、
+\fld{eta\_weekly\_to\_seasonal}、\fld{eta\_seasonal\_to\_weekly}）
+（\srcpath{integrated\_energy\_optimizer.cpp:164--194}）。\fld{eta\_wasteheat} 与
+\fld{eta\_carbon\_to\_fuel} 不参与该校验也不做归一化，按原值直接进入模型
+（默认均为 0.0；分别见 \srcpath{integrated\_energy\_optimizer.cpp:564} 与
+\srcpath{integrated\_energy\_optimizer.cpp:663--664}）。热泵 COP 非有限或
 非正时改为 3.2。EV/HV/ICV 比例先取非负，和大于 $10^{-8}$ 时归一化为和为 1，否则设置为
 $(0,0,1)$。每条 profile 长度只能为 0、1 或 $n$；空 profile 使用源码字段对应的固定回退值，
 单值扩展为 $n$ 项。依据为 \srcpath{integrated\_energy\_optimizer.cpp:42--245}。

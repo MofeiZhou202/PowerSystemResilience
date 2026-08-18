@@ -111,10 +111,10 @@ HELM/同伦/Newton--Krylov/CPF 新增专项回归测试。全部受影响行号�
   \item \texttt{src/api/hacdcpf.cpp} —— 公共 API 门面（求解分发、缓存、结果回投影）；
   \item \texttt{include/hacdcpf/engine/solver/native/nle/newton\_solver.hpp} ——
         Newton 求解器规范头（\texttt{power\_flow/} 下同名头为转发层）；
-  \item \texttt{docs/technical\_notebook/sections/03\_power\_flow.tex}、
+  \item \texttt{docs/archive/reference/technical\_notebook/sections/03\_power\_flow.tex}、
         \texttt{05\_advanced\_pf.tex}、\texttt{12\_pf\_options\_results.tex} ——
         既有技术笔记，本手册与之交叉核对；
-  \item \texttt{docs/multiple\_converter.md}、\texttt{docs/multiple\_converter\_r1.md} ——
+  \item \texttt{docs/archive/theory/multiple\_converter.md}、\texttt{docs/archive/theory/multiple\_converter\_r1.md} ——
         多换流器建模设计文档；
   \item \texttt{tests/} 与 \texttt{tools/} —— 验证与校核章节的测试矩阵来源。
 \end{itemize}
@@ -207,7 +207,9 @@ CPF & \srcpath{CpfSolver::solve} & 混合 AC/DC & 电压稳定/负荷裕度\\
         双重循环已移除。
   \item \textbf{CPF 默认启用弧长延拓}（\fld{enable\_arc\_length}=true）：
         $\lambda$ 作为增广未知量参与校正，可翻越鼻点并按
-        \fld{lower\_branch\_steps} 保留若干下支点；\fld{enable\_arc\_length}=false
+        \fld{lower\_branch\_steps} 保留若干下支点；存在任一在运 PV 母线时
+        自动回退自然参数化并以 \fld{model\_scope} 如实声明；
+        \fld{enable\_arc\_length}=false
         时保留初版所述自然参数化模式。电压稳定指标仍仅负荷裕度族，无 $L$ 指标。
   \item \texttt{include/hacdcpf/power\_flow/workspace.hpp} 的
         \texttt{SolverWorkspace} 已落地（\srcpath{prepare\_state} /

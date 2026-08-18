@@ -384,7 +384,7 @@ no-op when none survive projection, preserving the exact baseline.
 `Shunt`, `Transformer3W`, `RegulatorControl`, `AsynchronousMotor` are reactive/voltage
 devices: they belong to the **per-step AC-OPF/PF** layer (§2.4), not the active-power UC.
 `Switch`, `CircuitBreaker`, `DCCircuitBreaker` are **topology** decisions owned by the
-network-reconfiguration / resilience modules (`docs/network_reconfiguration_models.md`).
+network-reconfiguration / resilience modules (`docs/theory/network_reconfiguration_models.md`).
 If co-optimised topology is wanted inside the production simulation, the line-status binary
 $z_{\ell,t}$ and big-M flow gating from that document can be imported — flagged as a larger
 follow-on (significantly bigger MILP).

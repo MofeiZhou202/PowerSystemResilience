@@ -257,8 +257,8 @@ AC 拓扑行以及 AC 母线、DC 母线和 VSC 结果行，并验证域限定�
 它冻结 HySim 内电势并以原生端子功率 KCL 残差至多 `1e-6 pu` 重解
 电路，这不作为独立的模式选择基准呈现。GPU 装配/分解仍未实现。
 具体的 authored/canonical/solver/result/replay 归属规则见
-`docs/model_data_semantics_contract.md`；方程与数值边界见
-`docs/vsc_limit_ncp_power_flow_contract.md`。
+`docs/developer/model_data_semantics_contract.md`；方程与数值边界见
+`docs/theory/vsc_limit_ncp_power_flow_contract.md`。
 
 全仓库语义守卫 `test_model_semantics_contract` 通过 5 个用例、1531 条
 断言。它将全部 43 个组件 I/O 集合与运行时身份/单位/符号/模型保真度

@@ -10,15 +10,22 @@
 沿给定的负荷/发电增长方向逐步加大系统负荷水平，追踪 P--V 鼻曲线。新版实现
 默认采用\textbf{弧长（arc-length）延拓}：延拓参数 $\lambda$ 在第一个延拓点
 之后成为增广方程组的未知量，求解器因而可以\textbf{翻越鼻点}并采样 P--V 曲线
-下支，而不仅仅是从上支逼近崩溃点。入口签名
-（voltage\_stability.hpp:200--201；实现
+下支，而不仅仅是从上支逼近崩溃点。\textbf{回退分支（诚实口径）}：弧长增广
+校正要求方程布局固定；只要存在任一在运 PV 母线，求解器即自动回退自然参数化
+（voltage\_stability.cpp:323--332），此时只能从上支逼近鼻点，结果以
+\fld{model\_scope}=\texttt{cpf:natural-parameterization+pv-pq-active-set}、
+\fld{model\_limitations} 与 \fld{warnings} 如实声明（:331--337），并以
+\fld{arc\_length\_used}=false 可机读地区分（:328--329；另两种口径为
+\texttt{cpf:arc-length-fixed-active-set} 与 \texttt{cpf:natural-parameterization}，
+:338--342）。入口签名
+（voltage\_stability.hpp:214--215；实现
 \srcpath{src/power\_flow/voltage\_stability.cpp:287}）：
 \begin{quote}\footnotesize
 \texttt{CpfResult solve(const SolverData\& base\_data,\\
 \hspace*{2em}const CpfDirection\& direction) const;}
 \end{quote}
 求解器选项挂在公开成员 \fld{CpfSolver::opts}（\fld{CpfOptions}，
-voltage\_stability.hpp:193）上。\textbf{接入口径（诚实声明）}：
+voltage\_stability.hpp:207）上。\textbf{接入口径（诚实声明）}：
 \fld{CpfSolver} 位于 \texttt{hacdcpf::powerflow} 命名空间，
 \textbf{未挂接}公共门面 \srcpath{include/hacdcpf/api/hacdcpf.hpp}，
 GUI 后端 \srcpath{tests/run\_gui\_server.cpp} 亦无对应 \texttt{method} 分发；
@@ -68,18 +75,19 @@ SolverData 的组件聚合结果——\fld{has\_component\_loads} 为真时取
 完整的、独立的 SolverData 潮流问题}。
 
 \subsection{弧长延拓预测--校正算法与自适应步长}
-默认模式（\fld{enable\_arc\_length}=true）的主流程
-（voltage\_stability.cpp:349--491）如下：
+默认模式（\fld{enable\_arc\_length}=true 且无在运 PV 母线；有在运 PV 母线时
+自动回退自然参数化，见第~\ref{sec:cpf}~章功能定位节）的主流程
+（voltage\_stability.cpp:344--534）如下：
 \begin{enumerate}
-  \item \textbf{基态求解}：先在 $\lambda=0$ 跑一次统一 NR（:352），
+  \item \textbf{基态求解}：先在 $\lambda=0$ 跑一次统一 NR（:376），
         不收敛即以 \texttt{"base case (lambda=0) did not converge"} 终止
-        （:353--356）；
+        （:377--380）；
   \item \textbf{首个延拓点（自然参数化）}：以 $\lambda=\texttt{step\_init}$
         施加方向后用普通 NR 求第二个点，失败则按 \fld{step\_shrink} 收缩
-        步长重试直至 \fld{step\_min}（:359--372）；仍不收敛则置
-        \fld{nose\_found}=true 并以
+        步长重试直至 \fld{step\_min}（:386--396）；仍不收敛则以
         \texttt{"no continuation step converged from base case"} 终止
-        （:373--375）。该点与基态共同确定第一条割线切向量；
+        （:397--398，\textbf{不置} \fld{nose\_found}）。该点与基态共同确定
+        第一条割线切向量；
   \item \textbf{增广状态空间}：此后所有步在增广状态
         \[
         y=\bigl[\theta_{\text{非 slack}},\;V_{m,\text{PQ}},\;
@@ -95,14 +103,18 @@ SolverData 的组件聚合结果——\fld{has\_component\_loads} 为真时取
   \item \textbf{预测步（割线切向量）}：取最近两个被接受增广解点的归一化
         割线作为切向量 $t=(y_{\mathrm{curr}}-y_{\mathrm{prev}})/
         \|y_{\mathrm{curr}}-y_{\mathrm{prev}}\|$，并与上一步切向量做符号
-        一致性校正（$t\cdot t_{\mathrm{prev}}<0$ 时反号，:438--442）；
-        预测点 $y_{\mathrm{pred}}=y_{\mathrm{curr}}+s\,t$（:444）。
+        一致性校正（$t\cdot t_{\mathrm{prev}}<0$ 时反号，:484）；
+        预测点 $y_{\mathrm{pred}}=y_{\mathrm{curr}}+s\,t$（:487）。
         弧长步长 $s$ 初值取首段割线长度并钳入
-        $[\texttt{step\_min},\texttt{step\_max}]$（:432）；
+        $[\texttt{step\_min},\texttt{step\_max}]$（:464；首段割线零范数或
+        非有限时以 \texttt{"arc-length initial secant is zero"} 终止，
+        :460--463）；
         \fld{use\_secant\_predictor}=false 时复用上一步切向量
-        （定方向预测，:438--440）。尚未进入下支时若预测 $\lambda$ 超过
+        （定方向预测，:474）；割线零范数或非有限（坍缩）时以
+        \texttt{"arc-length secant collapsed to zero"} 终止（:475--481）。
+        尚未进入下支时若预测 $\lambda$ 超过
         \fld{lambda\_max} 即以 \texttt{"lambda\_max reached"} 终止
-        （:445--448）；
+        （:488--491）；
   \item \textbf{校正步（弧长超平面）}：\srcpath{arc\_length\_correct}
         （:225--281）在预测点处求解增广系统
         \[
@@ -119,36 +131,42 @@ SolverData 的组件聚合结果——\fld{has\_component\_loads} 为真时取
         （:241），迭代上限 \fld{corrector\_max\_iter}（:234）；
   \item \textbf{接受、鼻点检测与下支停止}：校正收敛后先查电压下限
         （任一母线 $v_m<\,$\fld{vm\_min\_pu} 即以
-        \texttt{"voltage below vm\_min\_pu"} 终止，:462--467；
+        \texttt{"voltage below vm\_min\_pu"} 终止，:505--510；
         \textbf{注意此分支不置 \fld{nose\_found}}）；随后入 trace
-        （:469）。当接受点的 $\lambda$ 首次低于上一点（$\lambda$ 切向
+        （:512）。当接受点的 $\lambda$ 首次低于上一点（$\lambda$ 切向
         符号反转）时判定已翻越鼻点，置 \fld{nose\_found}=true 并进入
-        下支计数（:470--473）；再接受 \fld{lower\_branch\_steps} 个下支
+        下支计数（:513--516）；再接受 \fld{lower\_branch\_steps} 个下支
         点后以
         \texttt{"nose point passed by arc-length continuation"} 停止
-        （:482--485）。校正失败则 $s\leftarrow\texttt{step\_shrink}\cdot s$
+        （:525--528）。校正失败则 $s\leftarrow\texttt{step\_shrink}\cdot s$
         重试，$s<\texttt{step\_min}$ 时以
         \texttt{"arc-length corrector step below step\_min"} 终止
-        （:454--458）；成功则
+        （:497--502）；成功则
         $s\leftarrow\min(\texttt{step\_grow}\cdot s,\texttt{step\_max})$
-        （:480）。步数耗尽时报 \texttt{"max\_steps reached"}（:490--491）。
+        （:523）。步数耗尽时报 \texttt{"max\_steps reached"}（:533--534）。
 \end{enumerate}
 \textbf{legacy 模式}：\fld{enable\_arc\_length}=false 时保留旧的自然参数化
-实现（:406--430）——$\lambda$ 固定递增、上一解点暖启动 NR 校正、成败倍率
-步长；步长跌破 \fld{step\_min} 时置 \fld{nose\_found}=true 并以
-\texttt{"natural parameterization stalled"} 终止（:417--419），该模式只能
+实现（:434--458）——$\lambda$ 固定递增、上一解点暖启动 NR 校正、成败倍率
+步长；步长跌破 \fld{step\_min} 时以
+\texttt{"natural parameterization stalled; no lambda fold was observed"}
+终止（:443--449，\textbf{不置} \fld{nose\_found}），该模式只能
 从上支逼近鼻点，供需要严格递增 $\lambda$ 采样的调用方使用。
 
 终止原因（\fld{CpfResult::termination\_reason}）全集：
 \texttt{"empty system"}（:294）、
-\texttt{"base case (lambda=0) did not converge"}（:354）、
-\texttt{"no continuation step converged from base case"}（:375，置
-\fld{nose\_found}）、\texttt{"lambda\_max reached"}（:446，legacy 模式
-:430）、\texttt{"arc-length corrector step below step\_min"}（:456）、
-\texttt{"voltage below vm\_min\_pu"}（:465）、
-\texttt{"nose point passed by arc-length continuation"}（:483）、
-legacy 模式另有 \texttt{"natural parameterization stalled"}（:419，置
-\fld{nose\_found}）、兜底 \texttt{"max\_steps reached"}（:491）。
+\texttt{"base case (lambda=0) did not converge"}（:378）、
+\texttt{"no continuation step converged from base case"}（:398）、
+\texttt{"lambda\_max reached"}（:489，legacy 模式
+:457--458）、\texttt{"arc-length initial secant is zero"}（:462）、
+\texttt{"arc-length secant collapsed to zero"}（:479）、
+\texttt{"arc-length corrector step below step\_min"}（:499）、
+\texttt{"voltage below vm\_min\_pu"}（:508）、
+\texttt{"nose point passed by arc-length continuation"}（:526）、
+legacy 模式另有
+\texttt{"natural parameterization stalled; no lambda fold was observed"}
+（:446--447）、兜底 \texttt{"max\_steps reached"}（:533--534）。
+全集之中仅弧长模式翻越鼻点一分支置 \fld{nose\_found}=true（:515），
+其余终止分支均不置位。
 
 \textbf{能力边界（诚实口径）}：
 \begin{itemize}
@@ -162,18 +180,18 @@ legacy 模式另有 \texttt{"natural parameterization stalled"}（:419，置
         约 $O(n^3)$ 且不复用统一 NR 的稀疏解析雅可比与 PatternCache——
         因此该模式面向中小规模系统的电压稳定分析，大系统下校正步耗时
         会显著高于一次普通 NR；
-  \item \fld{nose\_found} 的语义在两种模式下不对称：弧长模式表示
-        \textbf{已观察到} $\lambda$ 符号反转（确实越过鼻点），legacy 模式
-        与首步失败分支仅表示\textbf{推断}到达鼻点（步长耗尽）；
-        电压下限停止（\texttt{"voltage below vm\_min\_pu"}）在两种模式
-        下都\textbf{不}置 \fld{nose\_found}；
+  \item \fld{nose\_found} 仅在弧长模式\textbf{已观察到} $\lambda$ 符号反转
+        （确实越过鼻点）时置位（:513--516）；首步失败、legacy 停滞、
+        电压下限停止（\texttt{"voltage below vm\_min\_pu"}）等其余终止分支
+        一律\textbf{不}置 \fld{nose\_found}——对这些分支调用方应读
+        \fld{termination\_reason} 而非 \fld{nose\_found}；
   \item 鼻点定位精度仍受 \fld{step\_min}/\fld{step\_max} 与
         \fld{corrector\_tol} 控制；弧长模式报告的是轨迹上 $\lambda$
         最大的采样点（见下节汇总口径），相邻采样点之间不做鼻点加密
         二分。
 \end{itemize}
 监控母线 \fld{monitor\_bus} 缺省自动选为基态有功负荷最大的母线
-（:306--319）。
+（基态负荷尊重组件聚合口径，:307--320）。
 
 \subsection{参数选项}
 \fld{CpfOptions}（voltage\_stability.hpp:47--101）全部字段与默认值如下
@@ -198,35 +216,40 @@ legacy 模式另有 \texttt{"natural parameterization stalled"}（:419，置
 \end{paramtable}
 
 \subsection{结果结构与电压稳定指标}
-每个被接受点记为 \fld{CpfPoint}（voltage\_stability.hpp:108--125）：
+每个被接受点记为 \fld{CpfPoint}（voltage\_stability.hpp:108--126）：
 \fld{lambda}、监控母线电压 \fld{vm\_monitor}、该 $\lambda$ 下的系统总负荷
 \fld{p\_total\_mw}/\fld{q\_total\_mvar}（由 \srcpath{total\_load} 按
 $P^0+\lambda\Delta P$ 复算，voltage\_stability.cpp:132--149），以及可选的
 全母线 \fld{vm}/\fld{va}/\fld{vdc}（\fld{trace\_all\_buses} 开启时填充）。
 \textbf{单位注意}：\fld{va} 为\textbf{弧度}（头文件注释
-voltage\_stability.hpp:118--120；统一 NR 的 \fld{PowerFlowResult::va}
+voltage\_stability.hpp:119--121；统一 NR 的 \fld{PowerFlowResult::va}
 同样为弧度，\srcpath{src/power\_flow/newton\_solver.cpp:929,970}），
-\fld{vdc} 为新增的全 DC 母线电压（pu，:122--124；弧长模式下经
-\srcpath{record\_state} 填充，cpp:387--404）。
-汇总结果 \fld{CpfResult}（hpp:128--152）含 \fld{trace}、鼻点摘要
+\fld{vdc} 为新增的全 DC 母线电压（pu，:123--125；弧长模式下经
+\srcpath{record\_state} 填充，cpp:410--432）。
+汇总结果 \fld{CpfResult}（hpp:129--166）含 \fld{trace}、鼻点摘要
 \fld{lambda\_max}/\fld{p\_max\_mw}/\fld{vm\_at\_nose}、\fld{nose\_found}、
-\fld{termination\_reason} 与校正求解计数 \fld{total\_pf\_solves}。
+\fld{termination\_reason}、监控母线 \fld{monitor\_bus}、诚实口径字段
+\fld{q\_limits\_enforced}/\fld{arc\_length\_used}/\fld{model\_scope}/%
+\fld{model\_limitations}/\fld{warnings}（hpp:148--159）与校正求解计数
+\fld{total\_pf\_solves}。
 \textbf{汇总口径}：三个鼻点摘要字段取 trace 中 $\lambda$ \textbf{最大}的
-点（\texttt{std::max\_element}，cpp:493--501）而非末点——弧长模式翻越鼻点
+点（\texttt{std::max\_element}，cpp:537--544）而非末点——弧长模式翻越鼻点
 后末点位于下支，此口径保证 $\lambda_{\max}$ 始终对应鼻点附近的最高负荷
 水平。
 
-指标族由自由函数 \srcpath{compute\_vsi}（声明 hpp:208--209；实现
-cpp:510--532）从一次完成的 \fld{CpfResult} 派生，输出
-\fld{VoltageStabilityIndex}（hpp:155--168）：
+指标族由自由函数 \srcpath{compute\_vsi}（声明 hpp:218--223；实现
+cpp:553--579）从一次完成的 \fld{CpfResult} 派生，输出
+\fld{VoltageStabilityIndex}（hpp:169--182）：
 \begin{itemize}
   \item \textbf{最大负荷因子} \fld{lambda\_max} 与鼻点总负荷
-        \fld{p\_max\_mw}（直接转录，:513--516）；
+        \fld{p\_max\_mw}（直接转录，:556--559）；
   \item \textbf{负荷裕度}
-        $\fld{p\_margin\_mw}=P_{\max}-\sum_i P_{L,i}^{0}$（MW，:518--521；
-        基态负荷按 \fld{ac\_buses} 的 \fld{pd\_mw} 求和）；
+        $\fld{p\_margin\_mw}=P_{\max}-\sum_i P_{L,i}^{0}$（MW，:561--568；
+        基态负荷尊重组件聚合口径：\fld{has\_component\_loads} 为真时取
+        \fld{pd\_pu} 求和$\times$\fld{base\_mva}（:563--564），否则按
+        \fld{ac\_buses} 的 \fld{pd\_mw} 求和（:565--567））；
   \item 监控母线鼻点电压 \fld{vm\_at\_nose} 与基态电压 \fld{vm\_base}
-        （:523--529；trace 非空时以首点监控电压为准）。
+        （:570--576；trace 非空时以首点监控电压为准）。
 \end{itemize}
 \textbf{指标边界（诚实口径）}：当前仅提供\textbf{负荷裕度族}指标
 （$\lambda_{\max}$、$P_{\max}$、$P_{\mathrm{margin}}$ 与监控母线电压），
@@ -241,8 +264,8 @@ cpp:510--532）从一次完成的 \fld{CpfResult} 派生，输出
         Newton 求解器：头文件 \srcpath{power\_flow/newton\_solver.hpp}
         为转发头，实际类为 \srcpath{engine::NewtonSolver}；
         \fld{CpfSolver::solve} 在栈上构造单个 \fld{NewtonSolver} 实例并
-        在整个求解过程复用（voltage\_stability.cpp:321--322），每次调用
-        经 \srcpath{run\_nr}（:324--329）并累计 \fld{total\_pf\_solves}。
+        在整个求解过程复用（voltage\_stability.cpp:344--345），每次调用
+        经 \srcpath{run\_nr}（:348--352）并累计 \fld{total\_pf\_solves}。
         校正选项由 \srcpath{make\_corrector\_opts}（:110--116）生成：
         仅覆写 \fld{max\_iter}$\leftarrow$\fld{corrector\_max\_iter}、
         \fld{tol}$\leftarrow$\fld{corrector\_tol}，并强制
@@ -277,7 +300,7 @@ cpp:510--532）从一次完成的 \fld{CpfResult} 派生，输出
         newton\_solver.cpp:873--884），可在维度不变时保留 Eigen 分配，
         但这不改变每步模式重建的事实；
   \item \fld{total\_pf\_solves} 只统计经 \srcpath{run\_nr} 的 NR 求解
-        （基态、首点与 legacy 校正步；弧长校正步在 cpp:451 处单独累加），
+        （基态、首点与 legacy 校正步；弧长校正步在 cpp:494 处单独累加），
         不能用它折算弧长模式的总耗时。
 \end{itemize}
 由于基态与首点就是标准 NR，第~\ref{sec:newton}~章的全部性质（混合 AC/DC
@@ -312,7 +335,8 @@ cpp:510--532）从一次完成的 \fld{CpfResult} 派生，输出
         （\srcpath{tests/CMakeLists.txt:123,125}），第~\ref{sec:robust}~章
         所述同伦求解器与 Newton--Krylov 的“无专项回归”状态同步解除；
   \item \textbf{仍未覆盖（诚实口径）}：混合 AC/DC 系统的 CPF（\fld{vdc}
-        轨迹与 DC slack 布局）、legacy 自然参数化模式、
+        轨迹与 DC slack 布局）、legacy 自然参数化模式、在运 PV 母线触发的
+        弧长$\to$自然参数化回退分支（voltage\_stability.cpp:323--342）、
         \fld{vm\_min\_pu} 电压下限停止分支、\srcpath{at\_buses} 方向、
         \srcpath{compute\_vsi} 指标派生以及多 slack 系统均无专项断言；
         纯 NR 求解器之外的 MATPOWER 大算例 CPF 基准也不存在。GUI 后端无
@@ -322,15 +346,15 @@ cpp:510--532）从一次完成的 \fld{CpfResult} 派生，输出
         第~\ref{sec:validation}~章）；弧长校正所依赖的残差求值器
         \srcpath{src/power\_flow/residual\_evaluator.cpp} 本身是独立致密
         残差复算通道，与 NR 内核互为对照。CPF 自身逻辑层约
-        530 行（voltage\_stability.cpp 全文件 534 行）；
+        560 行（voltage\_stability.cpp 全文件 581 行）；
   \item \textbf{文档对照}：技术笔记 Algorithm A13
-        （\srcpath{docs/technical\_notebook/sections/15\_algorithm\_index.tex:609--672}）
+        （\srcpath{docs/archive/reference/technical\_notebook/sections/15\_algorithm\_index.tex:609--672}）
         的伪代码仍是\textbf{自然参数化}版本（割线预测+固定 $\lambda$ 的
         NR 校正、\fld{step\_min} 判鼻），与当前默认弧长实现\textbf{不一致}，
         仅对应 \fld{enable\_arc\_length}=false 的 legacy 模式；阅读时应以
         本章与源码为准。另注意技术笔记 05 节把 CPF 实现位置误记为
         \srcpath{src/power\_flow/homotopy\_continuation.cpp}
-        （\srcpath{docs/technical\_notebook/sections/05\_advanced\_pf.tex:21}），
+        （\srcpath{docs/archive/reference/technical\_notebook/sections/05\_advanced\_pf.tex:21}），
         实际实现为 \srcpath{src/power\_flow/voltage\_stability.cpp}，
         同伦求解器（收敛兜底用，见第~\ref{sec:robust}~章）与 CPF 是两套
         独立代码；

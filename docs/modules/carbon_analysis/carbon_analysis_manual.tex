@@ -1,7 +1,7 @@
 % !TEX program = xelatex
 % 编译方式：在本目录执行两遍 xelatex（详见 docs/_manual_common/README.md）。
 % 源码依据：src/carbon_analysis/ 与 include/hacdcpf/carbon_analysis/ 源码及
-%           docs/carbon_analysis_contract.md，公式与参数以代码为准。
+%           docs/theory/carbon_analysis_contract.md，公式与参数以代码为准。
 \documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
 \usepackage{../../_manual_common/hysim_manual}
 
@@ -18,7 +18,7 @@
 （\srcpath{src/carbon\_analysis/}、\srcpath{include/hacdcpf/carbon\_analysis/}）整理，
 覆盖两类基于已收敛潮流结果的后处理方法：比例功率追踪法（BFS 碳流追踪）与
 碳排放流矩阵法，以及年度碳核算与用户/节点绿证（GEC）核算。全部结论以源码与
-既有契约 \srcpath{docs/carbon\_analysis\_contract.md} 为准；碳流分析为纯后处理，
+既有契约 \srcpath{docs/theory/carbon\_analysis\_contract.md} 为准；碳流分析为纯后处理，
 不改变调度、不修复失败潮流。文档版式与《潮流计算技术手册》《最优潮流技术手册》一致。
 \end{abstract}
 
@@ -32,7 +32,7 @@
         \srcpath{annual\_carbon\_analysis.hpp} —— 快照/年度碳分析接口与结果结构；
   \item \srcpath{src/carbon\_analysis/carbon\_analysis.cpp}、
         \srcpath{annual\_carbon\_analysis.cpp} —— 追踪法与矩阵法实现；
-  \item \srcpath{docs/carbon\_analysis\_contract.md} —— 输入/单位/源 ID/交直流身份与
+  \item \srcpath{docs/theory/carbon\_analysis\_contract.md} —— 输入/单位/源 ID/交直流身份与
         有效性门控契约；
   \item \srcpath{tests/test\_carbonflow\_tracing.cpp} 等 —— 验证依据。
 \end{itemize}

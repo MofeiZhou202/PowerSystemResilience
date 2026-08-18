@@ -1,6 +1,6 @@
 % !TEX program = xelatex
 % 编译方式：在本目录执行两遍 xelatex（详见 docs/_manual_common/README.md）。
-% 源码依据：src/sppt/ 与 include/hacdcpf/sppt/ 源码及 docs/sppt_runtime_contract.md，
+% 源码依据：src/sppt/ 与 include/hacdcpf/sppt/ 源码及 docs/theory/sppt_runtime_contract.md，
 %           公式与参数以代码为准。
 \documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
 \usepackage{../../_manual_common/hysim_manual}
@@ -18,7 +18,7 @@
 （\srcpath{src/sppt/}、\srcpath{include/hacdcpf/sppt/}，总入口头 \srcpath{sppt.hpp}）整理，命名空间
 \texttt{hacdcpf::sppt}。该层把 SPPT 定理转成可计算的通过/残差检查：蜕变关系 MR1–MR8、MR3 证书语料、
 独立残差审计、三门准入守卫与受守卫约束的智能建模循环。全部结论以源码与
-\srcpath{docs/sppt\_runtime\_contract.md} 契约为准：SPPT 不替代物理求解器，也不在被测系统、可观测量、
+\srcpath{docs/theory/sppt\_runtime\_contract.md} 契约为准：SPPT 不替代物理求解器，也不在被测系统、可观测量、
 容差与后端之外证明正确性。版式与《碳流追踪与碳排放核算技术手册》一致。
 \end{abstract}
 
@@ -38,7 +38,7 @@
         受守卫约束的智能建模循环；
   \item \srcpath{benchmark.cpp}、\srcpath{ablation.cpp}、\srcpath{intelligent\_simulation.cpp} ——
         基准/消融/智能仿真契约；
-  \item \srcpath{docs/sppt\_runtime\_contract.md} —— 运行时契约与边界。
+  \item \srcpath{docs/theory/sppt\_runtime\_contract.md} —— 运行时契约与边界。
 \end{itemize}
 命名空间为 \texttt{hacdcpf::sppt}。
 
@@ -116,7 +116,7 @@ SPPT 不替代物理求解器，也不在被测系统/可观测量/容差/后端
         认证阈值；
   \item 独立残差 \fld{supported}=false 或 \fld{converged}=false 表示证据不可得，而非零残差；
   \item 智能仿真门从不执行物理控制，证据完整至多返回 \texttt{RequireHumanReview}；
-  \item 权威文档 \srcpath{docs/sppt\_runtime\_contract.md}，理论 \srcpath{docs/latex/sppt\_theory.tex}。
+  \item 权威文档 \srcpath{docs/theory/sppt\_runtime\_contract.md}，理论 \srcpath{docs/latex/sppt\_theory.tex}。
 \end{itemize}
 \input{../../_manual_common/industrial_evaluation}
 

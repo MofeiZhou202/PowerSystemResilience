@@ -1,7 +1,7 @@
 % !TEX program = xelatex
 % 编译方式：在本目录执行两遍 xelatex（详见 docs/_manual_common/README.md）。
 % 源码依据：src/io/ 与 include/hacdcpf/io/ 源码及
-%           docs/digital_twin_data_io_architecture.md，字段与契约以代码为准。
+%           docs/reference/digital_twin_data_io_architecture.md，字段与契约以代码为准。
 \documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
 \usepackage{../../_manual_common/hysim_manual}
 
@@ -38,9 +38,9 @@ PSD.jl、SVG 配电单线图与 TNTP 交通网。所有导入器统一发出机�
         \srcpath{etap\_io.hpp}、\srcpath{svg\_distribution\_io.hpp}、\srcpath{tntp\_parser.hpp}、
         \srcpath{powersimulationsdynamics\_io.hpp}、\srcpath{gridlabd\_bridge.hpp} —— 其余格式；
   \item \srcpath{src/io/external\_grid\_io.cpp} —— GridLAB-D/OpenDSS 文本读写实现；
-  \item \srcpath{docs/digital\_twin\_data\_io\_architecture.md} —— 主契约（§3.2/§6.3/§8）；
-  \item \srcpath{docs/cim\_cgmes3\_crosswalk.md}、\srcpath{docs/svg\_distribution\_import.md}、
-        \srcpath{docs/bpa\_dsp\_component\_mapping.md} —— 分格式映射细则；
+  \item \srcpath{docs/reference/digital\_twin\_data\_io\_architecture.md} —— 主契约（§3.2/§6.3/§8）；
+  \item \srcpath{docs/reference/cim\_cgmes3\_crosswalk.md}、\srcpath{docs/reference/svg\_distribution\_import.md}、
+        \srcpath{docs/reference/bpa\_dsp\_component\_mapping.md} —— 分格式映射细则；
   \item \srcpath{tests/test\_io\_roundtrip.cpp} 等 —— 验证依据。
 \end{itemize}
 命名空间为 \texttt{hacdcpf::io}。

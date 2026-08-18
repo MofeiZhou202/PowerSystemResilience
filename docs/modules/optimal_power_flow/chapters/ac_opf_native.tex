@@ -590,7 +590,7 @@ $2\times10^{-12}$ 为下限拼回 \fld{mu}/\fld{z}（同文件:2435--2471）。
 
 \subsubsection*{目标同伦延续}
 \fld{objective\_homotopy} 开启且内层非 Ipopt 时，进入两阶段延续
-（同文件:3352--3482；理论引用 docs/numerical\_methods.md §12--13）：沿
+（同文件:3352--3482；理论引用 docs/numerical\_methods.md（该文档已不在仓库中） §12--13）：沿
 $P(t)=\min\,t\,f$ 从 $t=0$（纯可行性）到 $t=1$（全成本），成本系数与 RPO 目标
 权重同步乘 $t$（同文件:3371--3385）；最多 120 步，步长初值
 \fld{homotopy\_dt0}（默认 0.10），快收敛（$\le20$ 次迭代）步长加倍至上限 0.5、
@@ -652,7 +652,7 @@ $\max(\lVert g\rVert_\infty,\max h^{+},\text{界违反})$ 汇总
 \subsection{选项字段表}\label{subsec:acopfnative:options}
 
 下表给出本章引擎直接消费的 \fld{ACOPFOptions} 字段（定义于
-\srcpath{include/hacdcpf/optimal\_power\_flow/opf\_options.hpp}:49--123；
+\srcpath{include/hacdcpf/optimal\_power\_flow/opf\_options.hpp}:49--168；
 公共结果字段 \fld{converged}/\fld{objective}/\fld{status} 等的通用口径见
 第~\ref{sec:overview}~章）。``$\dagger$''标记仅 Parity 路径消费的字段。
 
@@ -684,10 +684,24 @@ $\max(\lVert g\rVert_\infty,\max h^{+},\text{界违反})$ 汇总
 \fld{phase\_one\_max\_iterations} & — & — & $\ge0$ & 12 & Phase I Newton 迭代硬上限$\dagger$\\
 \fld{phase\_one\_max\_factorizations} & — & — & $\ge0$ & 14 & primal/dual 共用稀疏分解硬上限$\dagger$\\
 \fld{phase\_one\_max\_backtracks} & — & — & $\ge0$ & 12 & 每次 Phase I 步的回溯上限$\dagger$\\
+\fld{phase\_one\_barrier\_mu} & $\mu_I$ & — & $>0$ & 0.1 & Phase I 屏障参数（clamp 至 $[10^{-12},0.1]$，翻译进 \fld{IPMOptions}）$\dagger$\\
+\fld{phase\_one\_admission\_mu\_factor} & — & — & $\ge0$ & 1.0 & Phase I 准入 violation $\le$ 因子$\times\mu_I$$\dagger$\\
+\fld{phase\_one\_primal\_mu\_factor} & — & — & $\ge0$ & 0.1 & 交接 primal 容差 $\max(\varepsilon_{feas},\text{因子}\times\mu_I)$$\dagger$\\
+\fld{phase\_one\_centrality\_tolerance} & $\eta_c$ & — & $\ge0$ & 0.5 & Phase I 中心性门槛$\dagger$\\
 \fld{phase\_one\_dispatch\_dual\_predictor} & — & — & true/false & false & 实验性零分解连通分量 dispatch-price dual 候选$\dagger$\\
 \fld{phase\_one\_dispatch\_dual\_min\_improvement} & — & — & 0--1 & 0.05 & raw 与 normalized dual residual 必须同时达到的改善比例$\dagger$\\
+\fld{prepared\_numeric\_refactor} & — & — & true/false & false & 实验性跨求解数值重分解请求；当前后端 fail-closed 报 \texttt{unsupported} 并总是新算数值因子$\dagger$\\
+\fld{prepared\_numeric\_max\_relative\_drift} & — & — & $\ge0$ & $10^{-3}$ & 数值重分解允许的矩阵值相对漂移上限$\dagger$\\
+\fld{prepared\_numeric\_backward\_error\_tolerance} & — & — & $\ge0$ & $10^{-8}$ & 数值重分解后向误差审计门槛$\dagger$\\
 \fld{warm\_start} & — & — & 指针/null & null & 上次兼容结果的非拥有指针，求解期间须存活\\
 \fld{ac\_pf\_warm\_start} & — & — & true/false & false & 先做混合潮流并映射为暖启动（默认关，注释称良态算例物理初值更快）\\
+\fld{ac\_pf\_dc\_phase\_one} & — & — & true/false & true & 大型纯 AC 算例先用有界 NativeQP DCOPF 迭代为 AC 潮流供种（warm-start-only；残差或映射失败回退普通 AC-PF 初值）\\
+\fld{ac\_pf\_dc\_phase\_one\_min\_buses} & — & 母线 & $\ge0$ & 5000 & 启用 DC Phase I 的母线数门槛\\
+\fld{ac\_pf\_dc\_phase\_one\_max\_iterations} & — & — & $\ge1$ & 5 & DC Phase I 的 NativeQP 迭代上限（取 $\max(1,\cdot)$）\\
+\fld{ac\_pf\_dc\_phase\_one\_time\_limit\_ms} & — & ms & $\le0$ 或 $>0$ & 2000 & DC Phase I 端到端墙钟预算（含投影/装配/分解）；$\le0$ 不限\\
+\fld{ac\_pf\_dc\_phase\_one\_tolerance} & — & pu & $\ge0$ & $10^{-2}$ & DC Phase I 末迭代显式残差接受门槛\\
+\fld{ac\_pf\_dc\_phase\_one\_min\_dual\_improvement} & — & — & 0--1（clamp） & 0.2 & 候选对偶残差降至基线 $(1-r)$ 倍以下视为对偶改善\\
+\fld{ac\_pf\_dc\_phase\_one\_baseline\_dual\_threshold} & — & — & $\ge0$ & 100.0 & 基线 AC-PF 对偶残差超过该阈值才触发 DC Phase I\\
 \fld{compute\_homotopy\_tangent} & — & — & true/false & false & 返回点计算 Davidenko 切向$\dagger$\\
 \fld{homotopy\_t} & $t$ & — & $(0,1]$ & 1.0 & 所解问题的成本标度（切向右端 $\nabla f/t$）$\dagger$\\
 \fld{objective\_homotopy} & — & — & true/false & false & 两阶段目标同伦延续；与 Ipopt 内层互斥\\

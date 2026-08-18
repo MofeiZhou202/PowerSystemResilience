@@ -19,7 +19,7 @@
 \srcpath{include/hacdcpf/network\_reconfiguration/}）整理，覆盖两条路径：面向交直流混合系统
 的故障后重构 MILP（\srcpath{run\_topology\_reconfiguration}）与面向配电网的最优网络重构
 ONR（\srcpath{solve\_optimal\_reconfiguration}，LinDistFlow MILP + 验证潮流）。全部结论以源码与
-\srcpath{docs/network\_reconfiguration\_models.md} 为准：LinDistFlow 为线性近似，
+\srcpath{docs/theory/network\_reconfiguration\_models.md} 为准：LinDistFlow 为线性近似，
 \fld{reconf\_loss\_mw} 为拓扑代理量而非潮流损耗；ONR 为 AC-only。两处公共符号位于命名空间
 \texttt{hacdcpf::analysis}。文档版式与《碳流追踪与碳排放核算技术手册》一致。
 \end{abstract}
@@ -34,7 +34,7 @@ ONR（\srcpath{solve\_optimal\_reconfiguration}，LinDistFlow MILP + 验证潮�
         \srcpath{src/network\_reconfiguration/topology\_reconfiguration.cpp} —— 交直流混合重构 MILP；
   \item \srcpath{include/hacdcpf/network\_reconfiguration/topology\_analysis.hpp}、
         \srcpath{src/network\_reconfiguration/topology\_analysis.cpp} —— 配电 ONR 与拓扑查询；
-  \item \srcpath{docs/network\_reconfiguration\_models.md} —— 既有模型契约。
+  \item \srcpath{docs/theory/network\_reconfiguration\_models.md} —— 既有模型契约。
 \end{itemize}
 
 \subsection{单位制与索引空间}

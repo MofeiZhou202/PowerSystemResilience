@@ -46,7 +46,7 @@ double positive_or_zero(double v) {
 double require_unit_efficiency(double value, const char* field_name) {
   // Passive conversion and storage factors obey 0 < eta <= 1. Heat-pump COP
   // is validated separately because it is a performance ratio, not eta.
-  // Contract and carrier-balance derivation: docs/integrated_energy_contract.md.
+  // Contract and carrier-balance derivation: docs/theory/integrated_energy_contract.md.
   if (!std::isfinite(value) || value <= 0.0 || value > 1.0) {
     throw std::invalid_argument(
         std::string("CampusIESData.") + field_name +

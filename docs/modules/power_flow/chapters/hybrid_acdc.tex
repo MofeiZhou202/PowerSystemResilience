@@ -6,8 +6,8 @@
 VSC 与 DC/DC 换流器稳态模型、DC 岛电压参考规划，以及换流器协调校核体系。
 统一 Newton 主循环（状态变量排序、全局化、收敛判定）见第~\ref{sec:newton}~章，
 本章只展开 DC 侧与换流器相关的部分。设计背景文档为
-\srcpath{docs/multiple\_converter.md}（多变换器统一模型）与
-\srcpath{docs/multiple\_converter\_r1.md}（AC 侧构网与七类控制模式补充）。
+\srcpath{docs/archive/theory/multiple\_converter.md}（多变换器统一模型）与
+\srcpath{docs/archive/theory/multiple\_converter\_r1.md}（AC 侧构网与七类控制模式补充）。
 
 \subsection{功能定位与入口}
 
@@ -38,14 +38,14 @@ DC 母线类型枚举 \texttt{DCBusType}（\srcpath{include/hacdcpf/model/enums/
 \compmeta{powerflow::DCSolver}{\srcpath{include/hacdcpf/power\_flow/solvers/dc\_solver.hpp}}
 
 \subsubsection*{功能说明}
-\texttt{DCSolver} 是独立纯 DC 求解器（实现 \srcpath{src/power\_flow/dc\_solver.cpp:22--178}）：
+\texttt{DCSolver} 是独立纯 DC 求解器（实现 \srcpath{src/power\_flow/dc\_solver.cpp:24--241}）：
 只解 DC 电压向量 $\mathbf v_{dc}$，AC 侧仅以其初始 $\fld{vm\_pu}$ 参与换流器注入求值
-（\texttt{va} 取 0，dc\_solver.cpp:72--80），不回代交流网络。输出
+（\texttt{va} 取 0，dc\_solver.cpp:145--153），不回代交流网络。输出
 \texttt{DCPowerFlowResult\{vdc, converged, iterations, residual\}}
 （\srcpath{include/hacdcpf/power\_flow/power\_flow\_result.hpp:228--233}）。
 
 \subsubsection*{数学模型与算法}
-DC 节点功率方程（注入发电为正）与失配（dc\_solver.cpp:88--98）：
+DC 节点功率方程（注入发电为正）与失配（dc\_solver.cpp:160--170）：
 \[
 p_{dc,i}^{\mathrm{calc}}=v_{dc,i}\sum_{j}g_{ij}v_{dc,j},\qquad
 F_i=p_{dc,i}^{\mathrm{spec}}-p_{dc,i}^{\mathrm{calc}}
@@ -57,22 +57,24 @@ F_i=p_{dc,i}^{\mathrm{spec}}-p_{dc,i}^{\mathrm{calc}}
 静态发电机与 PV 阵列（:48--64）、VSC 经 \srcpath{converter\_dc\_injection}（:66--74）、
 DC/DC 入端 $-P_{in}$、出端 $+P_{out}$（:76--88）、能量路由器 DC 端口（:90--100）。
 
-求解流程（Newton + 回溯线搜索，致密代数）：
+求解流程（Newton + 回溯线搜索，稀疏代数）：
 \begin{enumerate}
   \item \textbf{参考与方程集}：\srcpath{first\_dc\_slack\_or\_default}
         （\srcpath{include/hacdcpf/power\_flow/pf\_utils.hpp:34--46}）优先首个
         \texttt{DC\_V} 母线，否则首个非孤立母线；\texttt{DC\_ISOLATED} 母线钉住初值、
-        剔除出方程组（dc\_solver.cpp:40--56，避免零行/零列奇异）；方程数为 0 时
-        直接按 \fld{vm\_pu} 返回（:59--67）；
-  \item \textbf{雅可比}（:109--120）：
+        剔除出方程组（dc\_solver.cpp:113--129，避免零行/零列奇异）；方程数为 0 时
+        直接按 \fld{vm\_pu} 返回（:131--140）；
+  \item \textbf{雅可比}（\srcpath{build\_dc\_newton\_jacobian}，:24--93）：
         $J_{kk}=p_{dc,k}^{\mathrm{linear}}+g_{kk}v_{dc,k}$（$p^{\mathrm{linear}}=G_{dc}\mathbf v_{dc}$），
         $J_{kl}=g_{kl}v_{dc,k}\ (l\neq k)$；
-  \item \textbf{线性求解}：致密 \texttt{Eigen::FullPivLU}，不可逆或解含 NaN/Inf 即判失败
-        （:122--132）；
-  \item \textbf{回溯线搜索}（:134--164）：$\alpha$ 初值 1、最多 8 次减半，试验步满足
-        $v_{dc}\ge\texttt{kMinVdc}=0.05$（:18），残差改善即采纳最优试探；
+  \item \textbf{线性求解}：稀疏 \texttt{Eigen::SparseLU}（\texttt{\#include <Eigen/SparseLU>}，
+        :9），分解不可逆或解含 NaN/Inf 即判失败
+        （:181--195）；
+  \item \textbf{回溯线搜索}（:197--227）：$\alpha$ 初值 1、最多 8 次减半，试验步满足
+        $v_{dc}\ge\texttt{kMinVdc}=0.05$（:20）；有改善试探则采纳最优试探，
+        无改善时取全步（:220--227）；
   \item \textbf{收敛}：$\lVert F\rVert_\infty<\fld{opt.tol}$；结束后以末态残差重新判定
-        \fld{converged}（:167--171，与统一 Newton 的诚实收敛口径一致）。
+        \fld{converged}（:230--234，与统一 Newton 的诚实收敛口径一致）。
 \end{enumerate}
 
 \subsubsection*{参数表}
@@ -82,7 +84,7 @@ DC/DC 入端 $-P_{in}$、出端 $+P_{out}$（:76--88）、能量路由器 DC 端
 \fld{DCBus::vmax\_pu} / \fld{vmin\_pu} & --- & pu & --- & 1.1 / 0.9 & 仅事后越限告警（newton\_solver.cpp:1839--1857）\\
 \fld{DCBranch::r\_pu} & $r$ & pu & $10^{-4}$--$10^{-1}$ & 0.0 & 支路电阻，$g=1/r$（dc\_components.hpp:52）\\
 \fld{opt.tol} / \fld{opt.max\_iter} & $\varepsilon$ & pu/次 & --- & $10^{-8}$ / 50 & 收敛容差/迭代上限（同第~\ref{sec:newton}~章默认值）\\
-\texttt{kMinVdc} & --- & pu & --- & 0.05 & 线搜索电压下限（dc\_solver.cpp:18）\\
+\texttt{kMinVdc} & --- & pu & --- & 0.05 & 线搜索电压下限（dc\_solver.cpp:20）\\
 \end{paramtable}
 
 \subsubsection*{验证与校核}
@@ -164,7 +166,7 @@ VSC 是 AC/DC 双端口耦合设备，稳态模型在 \srcpath{src/power\_flow/c
 控制模式枚举 \texttt{ConverterMode} 共\textbf{六种}
 （\srcpath{include/hacdcpf/model/enums/converter\_enums.hpp:6--23}），
 对应七类典型控制分类 \texttt{ACDCControlMode}（:25--43，
-\srcpath{docs/multiple\_converter\_r1.md} §4）的 Mode 1--7
+\srcpath{docs/archive/theory/multiple\_converter\_r1.md} §4）的 Mode 1--7
 （$\delta_s{+}V_s$ / $P_s{+}V_s$ / $P_s{+}Q_s$ / $U_{dc}{+}Q_s$ / $U_{dc}{+}V_s$ /
 droop $U_{dc}{+}V_s$ / droop $U_{dc}{+}Q_s$）；控制角色统一由
 \srcpath{resolve\_device\_control\_role}（\srcpath{include/hacdcpf/model/device\_control\_role.hpp:62--118}）判定。
@@ -254,40 +256,40 @@ DC/DC 是两 DC 母线间的电力电子接口：耦合两侧功率但\textbf{�
 \subsubsection*{数学模型}
 符号约定：\fld{p\_ref\_mw} 为\textbf{输出侧}参考功率，正值表示 bus\_in$\to$bus\_out
 正向传输（\srcpath{src/power\_flow/pf\_injection\_assembly.cpp:76--88}）。
-效率 $\eta$ 钳制 $[0.01,1]$（converter\_model.cpp:239）。输出侧参考指令：
+效率 $\eta$ 钳制 $[0.01,1]$（converter\_model.cpp:245）。输出侧参考指令：
 \[
 P_{out}^{ref}=\begin{cases}
 p_{ref}/S_{base} & \text{Power（默认路径）}\\
-p_{ref}/S_{base}+k_{droop}\big(v_{dc,out}-v_{ref}\big) & \text{Droop（:241--244）}\\
--k_{form}\big(v_{dc,out}-v_{ref}\big) & \text{Voltage（:245--264）}
+p_{ref}/S_{base}-k_{droop}\big(v_{dc,out}-v_{ref}\big) & \text{Droop（:247--250）}\\
+-k_{form}\big(v_{dc,out}-v_{ref}\big) & \text{Voltage（:251--269）}
 \end{cases}
 \]
 Voltage 模式为真电压成形：刚性负反馈律，整定项 \fld{p\_ref\_mw} 故意不加；
 增益 $k_{form}=\max\big(p_{rated,pu}\cdot 100,\ 25\big)$，\fld{k\_droop}$\neq0$ 时再与
-$|k_{droop}|$ 取大（:255--263），$p_{rated,pu}$ 取 \fld{sn\_mva} 或
-$\max(|\fld{pmax\_mw}|,|\fld{pmin\_mw}|)$ 除以基准。功率反射与 $I^2R$ 损耗（:266--280）：
+$|k_{droop}|$ 取大（:260--267），$p_{rated,pu}$ 取 \fld{sn\_mva} 或
+$\max(|\fld{pmax\_mw}|,|\fld{pmin\_mw}|)$ 除以基准。功率反射与 $I^2R$ 损耗（:272--283）：
 \[
 P_{in}=P_{out}^{ref}\cdot\big(1/\eta\ \text{若}\ P_{out}^{ref}\ge 0\ \text{否则}\ \eta\big),\qquad
 P_{loss}^{I^2R}=r_{eq}\frac{P_{in}^{2}}{\max(v_{dc,in},0.1)^{2}},\qquad
 P_{out}=P_{out}^{ref}-P_{loss}^{I^2R}
 \]
 DC 注入：入端 $-P_{in}$、出端 $+P_{out}$（pf\_injection\_assembly.cpp:86--87）。
-雅可比由 \srcpath{dcdc\_jacobian\_vdc}（converter\_model.cpp:213--225）共享同一
+雅可比由 \srcpath{dcdc\_jacobian\_vdc}（converter\_model.cpp:219--231）共享同一
 transfer 结构给出 $\partial P_{in}/\partial v_{dc,out}$、$\partial P_{out}/\partial v_{dc,in}$、
 $\partial P_{out}/\partial v_{dc,out}$。
 
-\textbf{占空比反演} \srcpath{dcdc\_duty\_ratio}（:290--328）：端口 pu 电压乘
+\textbf{占空比反演} \srcpath{dcdc\_duty\_ratio}（:296--334）：端口 pu 电压乘
 \fld{vn\_in\_kv}/\fld{vn\_out\_kv}（缺省按 1.0）得名值后按理想 CCM 律反演：
 \[
 D=\begin{cases}
-V_{out}/V_{in} & \text{Buck（:303--306）}\\
-1-V_{in}/V_{out} & \text{Boost（:307--310）}\\
-V_{out}/(V_{in}+V_{out}) & \text{BuckBoost（:311--314）}\\
-V_{out}/(n\,V_{in}) & \text{Isolated（调制增益 }M\text{，:315--320）}
+V_{out}/V_{in} & \text{Buck（:309--312）}\\
+1-V_{in}/V_{out} & \text{Boost（:313--316）}\\
+V_{out}/(V_{in}+V_{out}) & \text{BuckBoost（:317--320）}\\
+V_{out}/(n\,V_{in}) & \text{Isolated（调制增益 }M\text{，:321--326）}
 \end{cases}
 \]
-\texttt{Generic} 拓扑不评估（\fld{defined}=false，:293）；
-可行性窗口 $D\in[\fld{d\_min},\fld{d\_max}]$，容差 $10^{-9}$（:325--326）。
+\texttt{Generic} 拓扑不评估（\fld{defined}=false，:299）；
+可行性窗口 $D\in[\fld{d\_min},\fld{d\_max}]$，容差 $10^{-9}$（:331--332）。
 
 \subsubsection*{参数表（converter\_components.hpp:133--173）}
 \begin{paramtable}
@@ -311,6 +313,61 @@ Voltage 模式输出成形与输入侧参考要求（:394、:419）；
 OPF 三模式建模见同文件 :1493；全组件回归
 \srcpath{tests/test\_all\_components\_pf.cpp:516--528}。
 
+\subsection{LCC 换流站稳态模型}\label{sec:hybrid-lcc}
+
+\compmeta{LCCConverter}{\srcpath{include/hacdcpf/model/converter\_components.hpp:162}}
+
+\subsubsection*{功能说明}
+LCC（电网换相换流器）站以准稳态模型接入统一 Newton 潮流（BPA/DSP dat 手册第 4 章
+BD/LD 卡），实现在 \srcpath{src/power\_flow/lcc\_model.cpp/.hpp}。与 VSC 注入助手一样，
+站在\textbf{当前 Newton 迭代点}求值；存在换流变时刻意区分两个交流电压量
+（lcc\_model.hpp:9--15）：$E_t$ 为带载阀侧母线线电压（用于基波电流无功关系），
+$E_0$ 为换流变漏抗后的理想空载阀侧电压（由一次侧母线电压与分接头求得，用于
+换相特性）。站数据经 \fld{SolverData::lcc\_converters}
+（solver\_data.hpp:31）进入残差与雅可比装配。
+
+\subsubsection*{数学模型：外特性与注入}
+$X_c$ 为每桥每相换相电抗，$n_b$ 为每极串联 6 脉动桥数（lcc\_model.hpp:16--21）：
+\[
+U_{d0}=\tfrac{3\sqrt{2}}{\pi}\,n_b\,E_0,\qquad
+U_d=\begin{cases}
+U_{d0}\cos\alpha-\tfrac{3}{\pi}n_b X_c I_d-n_b\,dU_v & \text{整流}\\
+U_{d0}\cos\gamma-\tfrac{3}{\pi}n_b X_c I_d+n_b\,dU_v & \text{逆变}
+\end{cases}
+\]
+无功 $Q=P\tan\varphi$，$\cos\varphi\approx U_d/U_{d0,t}$，
+$U_{d0,t}=\tfrac{3\sqrt{2}}{\pi}n_b E_t$。\srcpath{lcc\_operating\_point}
+（lcc\_model.hpp:80--91）按 \fld{station\_role}+\fld{control\_mode} 分派：
+整流 ConstantPower/ConstantCurrent/ConstantAlpha，逆变
+ConstantGamma/ConstantPower/ConstantCurrent；不支持组合返回 \fld{valid}=false，
+该站不注入（:75--79）。直流电流钳制 $[0,\fld{rated\_current\_a}]$：LCC 电流不可反号，
+钳制生效时 CEA/定 $\alpha$ 整定不再保持，站退化为恒流特性（$\gamma$ 保持在
+$\gamma_{\min}$ 以上），经 \fld{LCCTransfer::id\_at\_limit} 与
+\texttt{[LCC-PHYS-03]} 诊断如实报告（lcc\_model.hpp:30--36）。
+
+残差侧：AC 阀侧母线 P/Q 注入与 DC 母线注入由
+\srcpath{lcc\_ac\_injection}/\srcpath{lcc\_dc\_injection} 在当前迭代点求值
+（jacobian\_builder.cpp:217--235）。雅可比侧：CEA（ConstantGamma）逆变站的 DC 注入
+经外特性依赖端电压，$\partial p_{dc}/\partial v_{dc}$ 必须精确以使 DC Newton 方程收敛
+（jacobian\_builder.cpp:451--465）；AC$\leftrightarrow$DC 耦合块恒常装配
+（\srcpath{lcc\_ac\_dc\_jacobian}，jacobian\_builder.cpp:466--488），纯 DC 求解器
+同样取其对角元（dc\_solver.cpp:72--76）。
+
+\subsubsection*{分接头与 DC 岛参考}
+Newton 方程在固定分接头下求值；分接头不是 Newton 状态量，公共 PF API 可用
+R 卡外环包络：求解潮流→反推换相角→更新绑定 T 卡分接头→重建 Ybus→再求解
+（lcc\_model.hpp:23--28）。特征控制站（CEA 逆变/定 $\alpha$ 整流）经外特性
+锚定所在 DC 岛电压，作用等同下垂 VSC，无需钉母线或提升
+（\srcpath{lcc\_forms\_dc\_voltage}，lcc\_model.hpp:171--175；
+newton\_solver.cpp:406--428）。
+
+\subsubsection*{结果与诚实口径}
+求解后各站在收敛点重估并输出完整运行点（$\alpha$/$\gamma$/$U_{d0}$/$U_d$/$I_d$、
+AC/DC 侧功率、有效分接头与 R 卡外环状态）至 \fld{PowerFlowResult::lcc\_transfers}
+（\texttt{LCCTransfer}，power\_flow\_result.hpp:282；装配 hacdcpf.cpp:1525--1576）。
+$\alpha$/$\gamma$ 越限不静默：\texttt{[LCC-PHYS-01]} 等事后诊断写入
+\fld{diagnostics.warnings}（hacdcpf.cpp:1578 起）。
+
 \subsection{DC 岛参考规划}\label{sec:hybrid-dcref}
 
 \subsubsection*{功能说明}
@@ -328,7 +385,8 @@ VSC 与 DC/DC \textbf{不}构成连边（:86--90），与协调校核器的岛�
   \item 岛内有 \texttt{DC\_V} 母线 $\to$ 钉住该母线（:300--304）；
   \item 已有 \texttt{VDC\_Q}/\texttt{VDC\_VAC}/\texttt{DC\_V\_DROOP\_AC\_V} 换流器
         下垂持压（:264--275），或 droop/Voltage 模式 DC/DC 锚定其输出母线
-        （:283--298）$\to$ 无需钉母线；
+        （:283--298），或特征控制 LCC 站（CEA 逆变/定 $\alpha$ 整流）经外特性
+        锚定（:406--428）$\to$ 无需钉母线；
   \item 否则在岛内\textbf{最大额定}的在运 PQ 换流器中选候选
         （\fld{is\_master} 声明者优先，:310--327），分两路：
         \begin{itemize}

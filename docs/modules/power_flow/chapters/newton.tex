@@ -77,13 +77,13 @@ M_{ij}&\mathrel{+}=-V_iV_j\big(G_{ij}\cos\theta_{ij}+B_{ij}\sin\theta_{ij}\big)\
 N_{ij}&\mathrel{+}=V_i\big(G_{ij}\cos\theta_{ij}+B_{ij}\sin\theta_{ij}\big) &
 L_{ij}&\mathrel{+}=V_i\big(G_{ij}\sin\theta_{ij}-B_{ij}\cos\theta_{ij}\big)
 \end{align*}
-对角元（jacobian\_builder.cpp:232--281），含 ZIP 负荷导数，
+对角元（jacobian\_builder.cpp:296--343），含 ZIP 负荷导数，
 $\underline V=$ \fld{min\_vm\_pu}（默认 $10^{-8}$）：
 \begin{align*}
 H_{ii}&=-Q_i^{\mathrm{calc}}-B_{ii}V_i^2 &
 M_{ii}&=P_i^{\mathrm{calc}}-G_{ii}V_i^2\\
-N_{ii}&=\frac{P_i^{\mathrm{calc}}}{\max(|V_i|,\underline V)}+G_{ii}V_i-\big(p_dw_{p1}+2V_ip_dw_{p2}\big)\\
-L_{ii}&=\frac{Q_i^{\mathrm{calc}}}{\max(|V_i|,\underline V)}-B_{ii}V_i-\big(q_dw_{q1}+2V_iq_dw_{q2}\big)
+N_{ii}&=\frac{P_i^{\mathrm{calc}}}{\max(|V_i|,\underline V)}+G_{ii}V_i+\big(p_dw_{p1}+2V_ip_dw_{p2}\big)\\
+L_{ii}&=\frac{Q_i^{\mathrm{calc}}}{\max(|V_i|,\underline V)}-B_{ii}V_i+\big(q_dw_{q1}+2V_iq_dw_{q2}\big)
 \end{align*}
 DC 块：对角 $p_{dc,i}^{\mathrm{linear}}+g_{ii}v_{dc,i}$、非对角 $g_{ij}v_{dc,i}$
 （:288--293）。换流器导数分三档注入（详见第~\ref{sec:hybrid}~章）：DC 自洽导数
@@ -148,20 +148,30 @@ $<10^{-3}$ 时才允许切换（:1746--1752），未收敛时仅残差 $\le 0.1$
 
 \subsection{失败回退链与全局化}
 默认全局化策略为线搜索（\fld{globalization}=LineSearch），回退链依次为
-（newton\_solver.cpp:1581--1717）：
+（newton\_solver.cpp:2271--2455）：
 \begin{enumerate}
-  \item 回溯线搜索 $\alpha\leftarrow\alpha/2$（\fld{max\_line\_search\_steps}=10），
-        接受比随残差分级（2.0/1.5/1.2/1.01，:1178--1186）；
-        非单调 GLL 窗口 $M=5$、$c_1=10^{-4}$、$\beta=0.5$（默认启用，:1189--1195）；
-  \item 对角正则化 $J+\lambda I$（$\lambda_0=10^{-6}$、增长 $\times10$、最多 8 步）；
-  \item "逃逸步" $\alpha=0.5$（:1625--1648）；
-  \item 可选 LM 恢复 $(J^{\mathsf T}J+\lambda I)\Delta x=-J^{\mathsf T}F$ 与
-        PTC 恢复（:1651--1717，\fld{enable\_auto\_fallback\_scheduling} 默认关）。
+  \item 非单调 Armijo-GLL 线搜索（\srcpath{run\_line\_search}，
+        newton\_solver.cpp:1493--1585）：回溯 $\alpha\leftarrow\beta\alpha$、
+        上限 \fld{max\_line\_search\_steps}=10 次试探（:1506），接受条件
+        $\phi(x+\alpha\Delta x)\le\varphi_k^{\max}+c_1\,\alpha\,\nabla\phi(x)^{\mathsf T}\Delta x$
+        （\srcpath{nonmonotone\_linesearch.hpp:84--94}）；窗口 $M=5$、$c_1=10^{-4}$、
+        $\beta=0.5$（\fld{nonmonotone\_window}/\fld{armijo\_c}/\fld{line\_search\_beta}，
+        robust\_nonlinear\_options.hpp:93--102），merit 每轮压入窗口
+        （newton\_solver.cpp:2067--2070）；\fld{enable\_nonmonotone\_linesearch}=false
+        时以 $M=1$ 构造、退化为单调 Armijo（:1517--1524）；
+  \item 对角正则化 $J+\lambda I$（$\lambda_0=10^{-6}$、增长 $\times10$、最多 8 步），
+        每个正则化方向再经同一线搜索判定接受（:2299--2322）；
+  \item 自动恢复调度（\fld{enable\_auto\_fallback\_scheduling} 默认\textbf{开}，
+        robust\_nonlinear\_options.hpp:268）：LM 恢复
+        $(J^{\mathsf T}J+\lambda I)\Delta x=-J^{\mathsf T}F$，最多 4 次尝试、
+        $\lambda$ 自 \fld{lm\_lambda0} 起 $\times10$ 增至 \fld{lm\_lambda\_max}
+        （newton\_solver.cpp:2336--2392）；仍失败则以 $J+I/\delta t$ 做 PTC 恢复并
+        无条件接受（:2393--2437）；全部失败记 \fld{inner\_failed}（:2452--2455）。
 \end{enumerate}
 另两种全局化策略：信赖域 dogleg（半径 1.0$\to$10）与伪瞬态延拓
 （$J+I/\delta t$，SER 时间步；\fld{ptc\_delta0}=1.0、\fld{ptc\_growth}=2.0），
 由 \fld{opt.globalization} 三选一。完整算法伪代码见技术笔记
-\srcpath{docs/technical\_notebook/sections/03\_power\_flow.tex} 的 Algorithm PF-1；
+\srcpath{docs/archive/reference/technical\_notebook/sections/03\_power\_flow.tex} 的 Algorithm PF-1；
 五阶段鲁棒管线的组件细节见本手册第~\ref{sec:robust}~章。
 
 \subsection{结构闭合检查与结果}
