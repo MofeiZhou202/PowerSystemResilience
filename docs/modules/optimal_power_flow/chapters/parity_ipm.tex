@@ -398,10 +398,10 @@ $10^{-6}\lVert b\rVert_\infty$ 时置 \fld{solve\_degraded}，下次分解沿候
 \subsubsection*{稀疏库的编译期门控与回退}
 UMFPACK/KLU 支持由 \srcpath{HACDCPF\_OPF\_HAVE\_UMFPACK} 与
 \srcpath{HACDCPF\_OPF\_HAVE\_KLU} 门控（:SparseKKTCache、:backend\_order）：CMake 在
-\srcpath{HACDCPF\_USE\_SUITESPARSE=ON}（默认 ON，CMakeLists.txt:69--70）
+\srcpath{HACDCPF\_USE\_SUITESPARSE=ON}（默认 ON，\srcpath{CMakeLists.txt:HACDCPF\_USE\_SUITESPARSE}）
 下优先链接 MIPSolvers 内置的 \fld{umfpack\_vendored}/\fld{klu\_vendored}
-目标并定义两宏（CMakeLists.txt:597--612），否则回退系统 SuiteSparse 探测
-（CMakeLists.txt:613--698）；两级都找不到时两个宏不定义，稀疏路径只剩
+目标并定义两宏（\srcpath{CMakeLists.txt:HACDCPF\_OPF\_HAVE\_UMFPACK、:HACDCPF\_OPF\_HAVE\_KLU}），否则回退系统 SuiteSparse 探测
+（\srcpath{CMakeLists.txt:HACDCPF\_SUITESPARSE\_INCLUDE\_DIR}）；两级都找不到时两个宏不定义，稀疏路径只剩
 Eigen \fld{SparseLU}（COLAMD 排序，:SparseKKTCache、:sparse\_factorize\_active）。MUMPS 分支由
 \srcpath{HACDCPF\_HAVE\_MUMPS} 门控（:SparseKKTCache、:backend\_order），文件头注释称该宏
 “继承自 mipsolvers 目标的公共编译定义”；但本检出处 MIPSolvers 的 CMake
@@ -585,11 +585,11 @@ Parity 问题同时可交由嵌入式 Ipopt 求解（适配器
 \begin{itemize}
   \item 编译期 \srcpath{HACDCPF\_HAVE\_IPOPT}（src/optimal\_power\_flow/ac\_opf.cpp:solve\_parity\_with\_ipopt）：
         平台选项 \srcpath{HACDCPF\_ENABLE\_IPOPT} 仅 macOS 默认 ON，非
-        Apple 平台显式开启直接 \fld{FATAL\_ERROR}（CMakeLists.txt:60--68、
+        Apple 平台显式开启直接 \fld{FATAL\_ERROR}（\srcpath{CMakeLists.txt:HACDCPF\_ENABLE\_IPOPT}、
         122--127）；MIPSolvers 侧仅在以内嵌 Ipopt 源码构建出
         \fld{ipopt\_local} 时置 \fld{MIPSOLVERS\_HAVE\_IPOPT} 并透传
-        \srcpath{HACDCPF\_HAVE\_IPOPT=1}（MIPSolvers/cmake/Dependencies.cmake:131--163、
-        MIPSolvers/CMakeLists.txt:254--260）。未编译入时适配器返回
+        \srcpath{HACDCPF\_HAVE\_IPOPT=1}（\srcpath{MIPSolvers/cmake/Dependencies.cmake:MIPSOLVERS\_HAVE\_IPOPT}、
+        \srcpath{MIPSolvers/CMakeLists.txt:HACDCPF\_HAVE\_IPOPT}）。未编译入时适配器返回
         \fld{available=false}、状态 \texttt{"Ipopt not compiled in"}
         （src/optimal\_power\_flow/ac\_opf.cpp:solve\_parity\_with\_ipopt）；
   \item 运行期 \srcpath{HACDCPF\_DISABLE\_IPOPT\_OPF}：设置即强制不可用，

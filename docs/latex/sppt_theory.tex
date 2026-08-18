@@ -1,12 +1,9 @@
-\documentclass[review,12pt]{elsarticle}
+\documentclass[final,5p,times,twocolumn]{elsarticle}
 \usepackage{amsmath,amssymb,bm,mathtools}
 \usepackage{booktabs,array,tabularx,graphicx,microtype}
 \newcolumntype{Y}{>{\raggedright\arraybackslash}X}
 \usepackage[dvipsnames,table]{xcolor}
-\usepackage{tikz}
-\usetikzlibrary{arrows.meta,positioning,fit,calc,shapes.geometric}
 \usepackage{enumitem}
-\usepackage[switch]{lineno}
 \usepackage[hidelinks]{hyperref}
 \usepackage[nameinlink,capitalize]{cleveref}
 \definecolor{spptBlue}{HTML}{356E9F}
@@ -21,6 +18,10 @@
 \newcommand{\WP}{\operatorname{WP}}
 \newcommand{\Attrib}{\operatorname{Attrib}}
 \journal{Applied Energy}
+\setlength{\parskip}{0pt}
+\setlength{\textfloatsep}{8pt plus 2pt minus 2pt}
+\setlength{\floatsep}{7pt plus 2pt minus 2pt}
+\setlength{\intextsep}{7pt plus 2pt minus 2pt}
 
 \begin{document}
 \begin{frontmatter}
@@ -30,107 +31,152 @@ Converter-Dominated Hybrid AC/DC Distribution Systems}
 \affiliation[xjtu]{organization={School of Electrical Engineering,
 Xi'an Jiaotong University},city={Xi'an},country={China}}
 \begin{abstract}
-Converter-dominated hybrid AC/DC distribution systems are emerging as
-distributed energy resources, storage, DC loads, microgrids, and
-power-electronic interfaces become integral to modern energy networks.
-Heterogeneous engineering files and AI-assisted modeling can accelerate their
-analysis, but syntactic conversion or solver convergence alone cannot establish
-physical validity, numerical well-posedness, or device-level attribution. This
-paper proposes a trustworthy AI-assisted framework based on
-semantics-preserving projection from rich engineering models to a canonical
-hybrid AC/DC nodal substrate. The framework reconstructs model provenance,
-types converter control roles, and applies validation, well-posedness,
-attribution, and independent-residual guards. AI or agent operations are
-restricted to typed, auditable actions evaluated on a candidate model before
-any state is committed or solved. Numerical evidence combines seven public
-GridLAB-D distribution feeders with fully disclosed AC/DC overlays, fixed-seed
-fault injection, load and converter stress sweeps, staged three-phase studies,
-OpenDSS/GridLAB-D scope checks, layer ablations, and scripted agent-edit tests.
-Across 1575 model variants spanning 32--6986 AC buses, the complete framework
-detects and localizes all 1050 injected structural faults without rejecting 175
-admissible permutations, whereas solver-only admission misses several
-converter-terminal, DC-support, and efficiency faults. Typed-agent experiments
-further verify reject-without-commit and post-rejection recovery on every public
-hybrid feeder. Plausible but incorrect setpoints remain structurally admissible,
-which defines the complementary need for telemetry and intent validation. The
-framework therefore provides a verification layer for trustworthy AI-assisted
-analysis of converter-dominated hybrid AC/DC distribution systems.
+Converter-dominated hybrid AC/DC distribution systems are increasingly used to
+integrate distributed generation, energy storage, electric vehicles, DC loads,
+and networked microgrids. Their analysis frequently requires the conversion of
+heterogeneous engineering data and is therefore a natural application for
+artificial intelligence (AI). However, a successfully converted model or a
+converged power flow does not ensure that the resulting equations retain the
+authored network topology, converter controls, or device identities. This study
+develops a trustworthy AI-assisted modeling framework based on
+semantics-preserving projection from detailed engineering models to a canonical
+hybrid AC/DC nodal representation. The method establishes explicit
+correspondence between engineering devices and nodal equations, classifies
+converter control roles, verifies island reference conditions, and reconstructs
+calculated quantities at the device level. AI-proposed modifications are first
+applied to an isolated model and are adopted only after the physical,
+topological, and numerical conditions have been satisfied. The framework is
+evaluated using seven public GridLAB-D distribution feeders with disclosed
+AC/DC extensions, 1575 fixed-seed model variants, stress sweeps, three-phase
+studies, external-engine comparisons, ablation studies, and constrained AI
+modification tests. All 1050 structural faults are detected and localized,
+while none of the 175 admissible permutations is rejected. In contrast,
+convergence-based screening misses converter-terminal, DC-voltage-support, and
+efficiency faults. The results also show that physically plausible but
+incorrect setpoints require telemetry or operator confirmation. The proposed
+framework provides a verification layer for reliable AI-assisted analysis of
+converter-dominated distribution systems.
 \end{abstract}
 \begin{keyword}
 Hybrid AC/DC distribution systems \sep Trustworthy artificial intelligence \sep
-Semantics-preserving projection \sep Converter control \sep Model validation \sep
-Large language model agents
+Semantics-preserving projection \sep Converter control \sep Model verification \sep
+Artificial intelligence
 \end{keyword}
 \end{frontmatter}
-\linenumbers
 
 \section{Introduction}\label{sec:introduction}
 
 Distribution networks are evolving from predominantly passive AC feeders into
 converter-dominated hybrid AC/DC systems. Photovoltaic generation, battery
-storage, electric-vehicle charging, data-center loads, DC microgrids, and energy
-routers introduce regulated DC buses and multiple voltage-forming mechanisms at
-the distribution level. Recent \emph{Applied Energy} studies have addressed
-hybrid AC/DC reconstruction for electric-vehicle integration~\cite{yu2023ev},
-outage restoration with mobile storage~\cite{zhang2023outage}, and renewable
-dispatchable regions with soft open points~\cite{li2024dispatchable}. These
-applications show the operational value of hybrid architectures, but also
-increase the consequences of incorrectly represented converter terminals and
-control roles.
+storage, electric-vehicle charging, data-center demand, DC microgrids, and
+power-electronic transformers all increase the proportion of electricity that
+is processed through converters before reaching the final load. Compared with
+a conventional radial feeder, the resulting system contains several voltage
+levels, bidirectional AC/DC interfaces, and multiple devices capable of
+regulating AC voltage, DC voltage, active power, or reactive power. These
+features improve controllability but make the relation between an engineering
+model and its power-flow equations more difficult to establish.
 
-Distribution models are becoming more heterogeneous. Asset databases, planning
-tools, OpenDSS and GridLAB-D files, geographic information, and operator
-instructions often describe the same system at different levels of detail.
-Digital-twin research has used learning to recover distribution-network
-structures and operating patterns~\cite{hua2023dt}, while experimentally
-validated microgrid twins combine physical and virtual representations
-~\cite{sifat2025dt}. Model conversion is therefore not a neutral file operation:
-it decides which device semantics reach the equations, which quantities are
-approximated, and whether results return to the originating asset.
+The operational benefits of hybrid distribution systems have motivated a broad
+range of recent studies. Hybrid AC/DC reconstruction has been investigated for
+electric-vehicle integration~\cite{yu2023ev}; mobile storage has been coordinated
+with outage restoration~\cite{zhang2023outage}; and soft open points have been
+used to enlarge renewable dispatchable regions~\cite{li2024dispatchable}.
+Related studies consider converter coordination, voltage regulation, network
+reconfiguration, and resilience enhancement. Their optimization and control
+models generally assume that the network equations have already been assembled
+from an internally consistent description. This assumption is reasonable for a
+single benchmark prepared by the analyst, but it becomes restrictive when the
+same study must combine utility data, public feeder models, manufacturer data,
+and automatically generated modifications.
 
-Artificial intelligence adds both opportunity and risk. LLMs have automated
-building-energy modeling~\cite{jiang2024eplusllm} and recently assisted state
-estimation on a 2135-node distribution feeder~\cite{li2026llm}.
-Reinforcement-learning applications in AC, DC, and hybrid microgrids are also
-expanding~\cite{nasir2025rlreview}. Yet predictive accuracy or a successful tool
-call does not answer a more basic question: does an edited engineering model
-still denote a physically meaningful and numerically well-posed hybrid network?
-Trustworthy-AI studies similarly show that apparently useful explanations must
-themselves be evaluated~\cite{liao2024xai}. For power-system modeling, the
-analogous requirement is to verify the model transformation and attribution
-path, rather than trusting plausible text or solver convergence.
+Distribution-system descriptions are inherently heterogeneous. Geographic and
+asset databases emphasize location, ownership, and equipment ratings; planning
+models emphasize impedances and aggregated demand; and OpenDSS or GridLAB-D
+models may include phase connections, controls, protection devices, and
+technology-specific objects. The same transformer, switch, converter, or load
+can consequently have different names, units, and terminal descriptions in
+different data sources. Conversion between these representations is not merely
+a syntactic operation. It determines which terminals are retained, how ideal
+connections are treated, whether disconnected islands participate in the
+calculation, and how a calculated voltage or power is associated with the
+original device.
 
-Existing approaches leave three gaps. Conventional validation checks data
-types, ranges, and connectivity, but rarely verifies that each AC island has an
-angle reference and each DC island has a physical voltage-forming role.
-Canonical nodal solvers aggregate, expand, or merge devices without necessarily
-preserving a device-level reconstruction map. Finally, LLM demonstrations often
-evaluate prompt-to-output behavior without transactional edits, so an invalid
-proposal may alter the current model before diagnosis. These gaps differ from
-outlier detection: anomaly detection challenges whether a value is likely,
-whereas the present work verifies whether the transformation, control assignment,
-and reported result are internally meaningful. The functions are complementary.
+Digital-twin research has highlighted this modeling problem. Learning-based
+methods have been used to recover distribution-network structures and operating
+patterns~\cite{hua2023dt}, while experimentally validated microgrid studies have
+combined physical and virtual representations~\cite{sifat2025dt}. The accuracy
+of a digital representation nevertheless depends on more than the agreement of
+selected outputs. A model may reproduce a voltage profile while omitting a
+converter terminal, assigning an incorrect control role, or aggregating devices
+in a manner that prevents the calculated result from being returned to the
+physical asset. These errors are especially important in hybrid AC/DC systems,
+where the converter role determines both the governing equations and the source
+that balances losses.
 
-This paper develops semantics-preserving projection theory (SPPT) as a verified
-device-to-solver and solver-to-device consistency framework. Its contributions
-are:
+Artificial intelligence provides a new means of preparing and modifying such
+models. Large language models have been applied to building-energy model
+generation~\cite{jiang2024eplusllm} and to state-estimation assistance on a
+2135-node distribution feeder~\cite{li2026llm}. Reinforcement-learning
+applications in AC, DC, and hybrid microgrids are also increasing
+~\cite{nasir2025rlreview}. These studies demonstrate that AI can interpret
+engineering instructions and select analysis operations. However, language
+plausibility and predictive accuracy do not establish that a modified network
+remains physically meaningful. A proposed change may refer to a nonexistent
+terminal, remove the only DC-voltage-regulating device, or alter an aggregated
+quantity whose physical origin is ambiguous. A nonlinear calculation can still
+converge after some of these errors because the assembled equations describe a
+different, incomplete system.
+
+Existing model checks address only part of this problem. Data validation can
+identify invalid identifiers, ranges, and terminal references, but it does not
+necessarily determine whether the converter controls close the physical degrees
+of freedom of every energized island. Power-flow convergence verifies a root of
+the assembled equations, but not the correspondence between those equations and
+the authored devices. Model reduction and network equivalencing preserve
+selected electrical quantities, yet the reverse association from the reduced
+network to the original assets is often outside the formulation. Finally,
+general AI reliability tests quantify the quality of generated text or selected
+operations, whereas power-system analysis requires an independent physical
+assessment of every proposed model modification.
+
+This distinction also separates the present problem from anomaly or outlier
+detection. Anomaly detection evaluates whether a value is statistically
+unusual relative to measurements or historical data. The present study asks
+whether the model is internally consistent even when every numerical value is
+plausible. A 10\% load increase may be statistically reasonable and physically
+solvable but assigned to the wrong asset; conversely, a missing converter
+terminal is invalid regardless of its statistical frequency. The two forms of
+assessment are therefore complementary rather than interchangeable.
+
+This paper develops semantics-preserving projection theory (SPPT) as a
+device-to-equation and equation-to-device consistency framework for hybrid
+AC/DC distribution analysis. Its main contributions are:
 \begin{enumerate}[leftmargin=1.7em,itemsep=2pt]
-\item A rich-to-canonical projection that retains provenance and classifies
-exact, bounded-approximate, auditable, and nonrecoverable observables.
-\item Converter control-role typing and island-level admissibility conditions
-that distinguish AC-angle support, DC-voltage support, regulated quantities,
-and balancing quantities before solution.
-\item A transactional AI workflow in which typed actions are checked on a
-candidate model and committed only after validation, well-posedness, and
-attribution requirements pass.
-\item A distribution-focused evaluation using seven public GridLAB-D feeders
-with disclosed AC/DC overlays, 1575 fixed-seed variants, ablations, physical
-impact studies, and a visible typed-agent campaign.
+\item A projection from detailed engineering models to a canonical hybrid
+AC/DC nodal representation, together with a reverse relation that classifies
+calculated quantities as exactly recoverable, bounded approximations,
+conservation-based allocations, or unsupported quantities.
+\item A converter-role formulation that distinguishes specified variables,
+balancing variables, AC angle references, and DC-voltage-regulating devices.
+The resulting island conditions are evaluated before the nonlinear calculation.
+\item An AI-assisted modification procedure in which the proposed change is
+first evaluated on an isolated copy of the engineering model. Only modifications
+that satisfy the physical, topological, and device-association conditions are
+allowed to replace the accepted model.
+\item A distribution-focused evaluation comprising seven public GridLAB-D
+feeders with disclosed AC/DC additions, 1575 fixed-seed variants, six structural
+fault classes, two plausible parameter-error classes, layer-removal studies,
+three-phase stress tests, external-engine comparisons, and 42 AI-assisted
+modification cases.
 \end{enumerate}
-The remainder formulates the trust problem in \cref{sec:problem}, develops the
-projection in \cref{sec:projection}, presents converter typing and the AI
-workflow in \cref{sec:workflow}, evaluates the framework in
-\cref{sec:numerical}, and closes with discussion and conclusions.
+The remainder of this paper is organized as follows. Section~2 defines the
+hybrid AC/DC equations and the required consistency conditions. Section~3
+develops the projection and device-level reconstruction. Section~4 introduces
+converter-role closure and the constrained AI modification procedure.
+Sections~5 and 6 present the evaluation design and numerical results,
+respectively. Section~7 discusses the scope and limitations, and Section~8
+draws the conclusions.
 
 \section{Problem formulation and trust requirements}\label{sec:problem}
 

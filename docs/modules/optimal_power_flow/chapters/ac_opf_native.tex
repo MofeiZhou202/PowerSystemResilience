@@ -332,7 +332,7 @@ H_{\mu,ii} &= \frac{\mu}{(x_i-l_i)^{2}}+\frac{\mu}{(u_i-x_i)^{2}}
 
 紧致路径的主循环为``外层障碍参数 $\mu$ 递减 + 内层障碍--罚 merit 牛顿法''
 的双层结构（外层 \srcpath{src/optimal\_power\_flow/ac\_opf.cpp:solve\_ac\_opf\_impl}，
-内层 :3613--4081）。动态量初始化：
+内层 :solve\_ac\_opf\_impl）。动态量初始化：
 $\mu=\max($\fld{barrier\_mu0}$,$\fld{barrier\_mu\_min}$)$，
 正则化 $\delta=\max($\fld{regularization}$,\,10^{-9})$，
 罚权重 $\rho_{m}=\max($\fld{merit\_penalty}$,\,10)$，
@@ -492,23 +492,23 @@ $P/Q/DC/Conv$ 四族与 $\max h^{+}$ 分别报告，未收敛时 \fld{status} �
 \toprule
 常数 & 数值 & 出处（ac\_opf.cpp） & 含义\\
 \midrule
-\fld{kMinInteriorWidth} & $10^{-6}$ & :43 & 变量界最小宽度\\
-\fld{kHugeBound} & $10^{4}$ & :44 & 自由变量数值界（标幺）\\
-内点边距 & $\min(\max(10^{-8},10^{-3}w),0.49w)$ & :221 & 初值压入内点\\
-$w_f$ 初值 & 0.05 & :3601 & 目标动态权重初值\\
-$V_{dc}$ 界 & $[0.8,\,1.2]$ / DC\_V $\pm0.05$ & :418--423 & 直流电压硬编码界\\
-\fld{eps\_iac} & $10^{-6}$ & :757 & 换流器电流数值软化\\
-罚闸值 & $10^{-2}/\lVert g\rVert_\infty$ 钳于 $[10^{-3},1]$ & :3647 & 不等式罚自适应门\\
-\fld{kTrustAttempts} & 6 & :3686 & 单迭代信赖尝试上限\\
-\fld{kMaxDxInf} & 0.25 & :3687 & 原始步 $\infty$ 范数上限\\
-\fld{kMaxDlambdaAbs} & $10^{3}$ & :3688 & 对偶步幅值上限\\
-线搜索接受 & $(1-5\times10^{-3}\alpha)$ & :3804 & 不可行度充分下降系数\\
-\fld{kRestorationAttempts} & 4 & :3844 & 恢复尝试上限\\
-\fld{kMaxRestoreDxInf} & 0.12 & :3845 & 恢复步 $\infty$ 范数上限\\
-\fld{kMaxGradFallbackInf} & 0.08 & :3963 & 梯度回退步上限\\
-$JJ^{T}$ 正则 & $10^{-8}$ & :611 & 最小二乘对偶估计\\
-ED 对分 & 80 次 / $10^{-8}$ & :1573--1581 & 经济调度 $\lambda$ 对分\\
-PF 回退 & 80 次 / $10^{-8}$ & :1772--1773 & 回退潮流迭代与容差\\
+\fld{kMinInteriorWidth} & $10^{-6}$ & :kMinInteriorWidth & 变量界最小宽度\\
+\fld{kHugeBound} & $10^{4}$ & :kHugeBound & 自由变量数值界（标幺）\\
+内点边距 & $\min(\max(10^{-8},10^{-3}w),0.49w)$ & :clamp\_interior & 初值压入内点\\
+$w_f$ 初值 & 0.05 & :solve\_ac\_opf\_impl & 目标动态权重初值\\
+$V_{dc}$ 界 & $[0.8,\,1.2]$ / DC\_V $\pm0.05$ & :initialize\_bounds\_and\_state & 直流电压硬编码界\\
+\fld{eps\_iac} & $10^{-6}$ & :assemble\_hybrid\_equalities & 换流器电流数值软化\\
+罚闸值 & $10^{-2}/\lVert g\rVert_\infty$ 钳于 $[10^{-3},1]$ & :solve\_ac\_opf\_impl & 不等式罚自适应门\\
+\fld{kTrustAttempts} & 6 & :solve\_ac\_opf\_impl & 单迭代信赖尝试上限\\
+\fld{kMaxDxInf} & 0.25 & :solve\_ac\_opf\_impl & 原始步 $\infty$ 范数上限\\
+\fld{kMaxDlambdaAbs} & $10^{3}$ & :solve\_ac\_opf\_impl & 对偶步幅值上限\\
+线搜索接受 & $(1-5\times10^{-3}\alpha)$ & :solve\_ac\_opf\_impl & 不可行度充分下降系数\\
+\fld{kRestorationAttempts} & 4 & :solve\_ac\_opf\_impl & 恢复尝试上限\\
+\fld{kMaxRestoreDxInf} & 0.12 & :solve\_ac\_opf\_impl & 恢复步 $\infty$ 范数上限\\
+\fld{kMaxGradFallbackInf} & 0.08 & :solve\_ac\_opf\_impl & 梯度回退步上限\\
+$JJ^{T}$ 正则 & $10^{-8}$ & :dual\_least\_squares\_stationarity & 最小二乘对偶估计\\
+ED 对分 & 80 次 / $10^{-8}$ & :solve\_economic\_dispatch & 经济调度 $\lambda$ 对分\\
+PF 回退 & 80 次 / $10^{-8}$ & :try\_dispatch\_pf\_fallback & 回退潮流迭代与容差\\
 \bottomrule
 \end{tabular}
 \end{center}

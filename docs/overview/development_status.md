@@ -58,6 +58,15 @@ table is clipped. Existing overfull diagnostics in the long theory sections do
 not originate from the new numerical study and remain a later manuscript-
 compression task.
 
+The main manuscript now uses four generated mechanism figures rather than
+software-flow TikZ diagrams: physical rich-model semantics and canonical
+projection, provenance reconstruction, converter-role closure, and typed-agent
+candidate-state isolation. The converter-role mechanism was checked against the
+DC nodal equations and is described as a structural role-closure/rank condition,
+not as a universal voltage-shift invariance. The final 24-page PDF was compiled
+to `build/latex-sppt-new/sppt_theory.pdf`; figure pages 7--10 were rendered at
+publication scale and show no clipping or overlap.
+
 ## 技术委托要求文档
 
 已根据当前源码、公共接口、GUI、数据交换能力和已验证测试基线完成

@@ -26,11 +26,24 @@ theory md 的 VSC 无序 droop 对与 κ 上限两处改正且 .zh.md 译文同�
 - OPF-N1 ✅ FIXED（部分随迁移消解；parity_ipm.tex 逗号分隔表行 11 行手工改符号锚点——并发现迁移工具 BARE 正则不覆盖 `（:NN，…）` 逗号列表形式，工具缺陷待修）；OPF-N2 ✅ FIXED（dc_opf.cpp:518 注释改"slack 列保留但数值惰性"）。
 - MKT-N1 ✅ INVALID（market_simulation_mathematical_models.md 为中文主稿且已正确描述全混合口径）。
 - IE-N1 ✅ FIXED（契约 md + .zh.md 补 eta_wasteheat/eta_carbon_to_fuel 校验排除说明）；EV-N1 ✅ FIXED（num_steps 按结构分行 24/6）；SG-N1 ✅ FIXED（补录 holland_b 生成式与 rmw_from_delta_p 小节，xelatex 编译通过）。
-- CA-N1 ✅ 已随符号锚点迁移消解；SC-N1 保留（代码口径问题，需 IEC 60909 专业判断，见下）。
+- CA-N1 ✅ 已随符号锚点迁移消解；SC-N1 ✅ FIXED（2026-08-18，见第三批记录）。
 - PF-N3 ✅ FIXED（PV↔PQ 仅外环发起 + 残差≤0.1 守卫）；PF-N4 ✅ FIXED（PtcSerController 已接线、SER 公式按代码转写；死字段 ptc_delta0/ptc_growth 已加"保留兼容"注释，未删字段）。
 - PF-N5 ✅ FIXED（q_limits 已接线、纯 DC 岛不丢弃、分布式松弛全母线求和口径）；PF-N6 ✅ FIXED（fail-close 口径、ZIP 电压依赖）；PF-N7 ✅ FIXED（CPF 5 用例、转发头表述、dc.hpp nonlinear）。
 - OPF-N3 ✅ FIXED（clamp_interior 裸名改正；opf_hand_cases 四处引用就地标注"不在仓库检出中"，verification.tex 手算节加诚实声明——**若有底稿存档应恢复目录**）；OPF-N4 ✅ FIXED（IPOPT 平台口径按当前 CMake 改写）；OPF-N5 ✅ FIXED（软锚残留注释一删一改）；OPF-N6 ✅ FIXED（孤岛保留语义改写，判死/判活条件补齐）。
-- 新遗留（下批候选）：newton.tex 进入侧迟滞 `pv_q_hysteresis_pu` 口径疑似过时（代码 entry_margin_pu=0.0 无死区）；`options_results.tex:120` bad_condition_threshold"未接线"未核；parity_ipm.tex 等仍有逗号列表形式的裸行号锚点未迁移（工具缺陷）；MISC-2 零散行号清理仍为低优先级。
+- 新遗留（下批候选）：newton.tex 进入侧迟滞 `pv_q_hysteresis_pu` 口径疑似过时（代码 entry_margin_pu=0.0 无死区）；`options_results.tex:120` bad_condition_threshold"未接线"未核。
+
+### 第三批处置记录（2026-08-18，SC-N1 + MISC-2 清零）
+
+- **SC-N1 ✅ FIXED**：方法 B + 网状网的 κ 钳制 `min(1.8, 1.15κ)` 统一作用于故障点逐贡献 κ（`kappa_net`、`kappa_of(z_src)`）与非故障母线单 κ（`src/short_circuit/short_circuit.cpp:run_short_circuit_detailed_impl`，此前仅作用于非故障母线）。同步更新 `tests/test_short_circuit_crossval.cpp` 两个 method-B 用例期望（故障母线 κ_net 现落 1.8 封顶）与三份文档（`iec60909_detailed.tex`、`short_circuit_rich_acdc_derivation.md/.zh.md`）。Debug 构建验证 12/12 + `[peak]` 2/2 通过。顺带修复同文件潜伏缺陷：`SparseInverseSolver` 与 `compute_fault_at_bus` 在 KLU `analyzePattern` 失败（空稀疏模式，如无支路/外网的 network-only 矩阵）后仍调 `factorize`，Debug 下断言崩溃——加 `nonZeros()==0` 早退守卫（Release 下原表现为静默 invalid，行为不变）。
+- **MISC-2 ✅ FIXED**：五轮清零（8 路并行 + 主循环），共约 750 处行号引用迁移为符号锚点：① 170 处 `（:数字` 裸引用；② 约 230 处 `，:数字` 宽模式裸引用；③ 378 处 `\srcpath{文件}:行号`；④ 约 100 处 `同一文件:NN`/`头文件:NN`/`cpp:NN`/`\file{:NN}` 等变体；⑤ 约 50 处单行号表格/枚举残留。合理保留（不属缺陷）：verification.tex 中 13 处指向已不存在文档（LCC 技术报告、opf_hand_cases README）的存档引用；classic_solvers.tex:338 `:764--767`（指向已移除的旧兜底逻辑，散文待裁决）；component_models_math_audit.tex:383 文件头注释引用；parity_ipm.tex:589/739 `CMakeLists.txt:122--127`（目标已移除，见下条登记）。迁移工具 `tools/doc_anchor_symbolize.py` 此前已改为多条目仅记录 manual-review，本轮全部人工迁移并抽查核实。
+- **opf_hand_cases 结论**：无存档可恢复（git 全历史无记录），保留现有"不在仓库检出中"诚实标注，不再追。
+- 新登记的内容级问题（下批候选，均为散文事实性声明过时，非锚点问题）：
+  1. `parity_ipm.tex:588--592、739` 散文称"非 Apple 显式开启 HACDCPF_ENABLE_IPOPT 直接 FATAL_ERROR"与"嵌入式 Ipopt 仅 macOS 可构建"——该 FATAL_ERROR 已从根 CMakeLists.txt 移除，现为 Apple 默认 ON 的普通选项，Ipopt 检测在 `MIPSolvers/cmake/Dependencies.cmake`（MIPSOLVERS_HAVE_IPOPT）；
+  2. `parity_formulation.tex:44` 散文引用的 `parity_ipm.cpp` "the reference formulation stores dg as n x neq" 注释已不存在；
+  3. `power_flow/chapters/validation.tex:241--245` 散文称 `workspace.hpp` 新增 `reset_iteration`，代码中不存在（仅剩 prepare_state/prepare_equations）；
+  4. `parity_ipm.tex:9` "共 2250 行"与实际 3594 行不符（文件规模描述）；
+  5. `component_models_math_audit.tex` A2 条锚点沿用的 `connect（lambda）` 已不存在（charger-only 现于 `project_in_place` 抛异常），建议散文改写为"修复前 connect（lambda），现 project_in_place 拒绝"；
+  6. `robust_solvers.tex:32、:268` 等引用的 `include/hacdcpf/power_flow/nonlinear_scaling.hpp`、`helm_solver.hpp` 为 3 行转发头，可改 canonical 路径（`globalization/`、`solvers/` 子目录，低优先级）。
 
 ## 二、机械性漂移（不影响语义，批量修）
 

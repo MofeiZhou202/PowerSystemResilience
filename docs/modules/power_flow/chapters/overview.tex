@@ -142,7 +142,7 @@ $Y_{bus}$ 装配时 $|z|=0$ 支路直接跳过（\srcpath{src/power\_flow/admitt
         \texttt{prepare\_state}/\texttt{prepare\_equations}/\texttt{reset\_iteration}
         在维度不变时保留 Eigen 分配、仅重置数值。facade 的 thread\_local
         \texttt{NewtonSolver} 跨普通求解复用同一工作区
-        （成员 \fld{workspace\_}/\fld{workspace\_in\_use\_}，engine 头 :47--48；
+        （成员 \fld{workspace\_}/\fld{workspace\_in\_use\_}，engine 头 :NewtonSolver；
         src/power\_flow/newton\_solver.cpp:solve 的占用守卫使同伦递归的内层求解改用局部工作区，
         避免覆盖外层状态），状态与方程向量经 \texttt{prepare\_state}（:solve）/
         \texttt{prepare\_equations}（:solve）挂接。

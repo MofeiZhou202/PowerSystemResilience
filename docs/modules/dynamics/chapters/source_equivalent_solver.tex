@@ -194,18 +194,18 @@ $f_n$ 和 $0$。没有源的连通分量不进入岛列表。系统级结果使�
 \subsection{设备方程覆盖边界}
 设备状态导数的权威实现集中在
 \srcpath{src/dynamics/devices/BasicDynamicDevices.cpp}。当前实现入口包括：
-\texttt{DynamicLoad:2227}、\texttt{DynamicRLLine:2387}、
-\texttt{ThreePhaseDynamicLoad:2513}、\texttt{DCDynamicLoad:2606}、
-\texttt{DCVoltageSourceDynamic:2674}、\texttt{SynchronousMachine:3214}、
-\texttt{FiveMassShaft:4067}、\texttt{Governor:4377}、\texttt{Exciter:4978}、
-\texttt{PowerSystemStabilizer:5465}、\texttt{GridFormingInverter:5833}、
-\texttt{GridFollowingInverter:6729}、\texttt{VSCConverterDynamic:7432}、
-\texttt{PeriodicVariableSourceDynamic:7559}、\texttt{CSVGN1Dynamic:7682}、
-\texttt{DERAADynamic:7881}、\texttt{REGCADynamic:8079}、
-\texttt{InductionMachineDynamic:8393}、\texttt{ActiveConstantPowerLoadDynamic:8573}、
-\texttt{FluxInductionMachineDynamic:8774}、\texttt{DCDCConverterDynamic:8903}、
-\texttt{BatteryDynamic:9025}、\texttt{PVDynamic:9208} 与
-\texttt{ProtectionRelay:9359}。
+\texttt{DynamicLoad}、\texttt{DynamicRLLine}、
+\texttt{ThreePhaseDynamicLoad}、\texttt{DCDynamicLoad}、
+\texttt{DCVoltageSourceDynamic}、\texttt{SynchronousMachine}、
+\texttt{FiveMassShaft}、\texttt{Governor}、\texttt{Exciter}、
+\texttt{PowerSystemStabilizer}、\texttt{GridFormingInverter}、
+\texttt{GridFollowingInverter}、\texttt{VSCConverterDynamic}、
+\texttt{PeriodicVariableSourceDynamic}、\texttt{CSVGN1Dynamic}、
+\texttt{DERAADynamic}、\texttt{REGCADynamic}、
+\texttt{InductionMachineDynamic}、\texttt{ActiveConstantPowerLoadDynamic}、
+\texttt{FluxInductionMachineDynamic}、\texttt{DCDCConverterDynamic}、
+\texttt{BatteryDynamic}、\texttt{PVDynamic} 与
+\texttt{ProtectionRelay}。
 
 本章尚未逐分支转写上述每一种设备的全部导数，因此不提供任何教材标准设备方程，也不声称这些设备
 已被本章逐式覆盖。读者必须以所列 \texttt{computeDerivatives}、对应 \texttt{stamp} 与

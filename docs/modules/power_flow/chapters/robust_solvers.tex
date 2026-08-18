@@ -29,7 +29,7 @@ $D_{F,i}=1/\max(|F_i^{\mathrm{spec}}|,1)$，经 \srcpath{clamp\_inv\_scale}（:c
 钳制到 $[\,$\fld{min\_scale},\fld{max\_scale}$\,]$。列缩放 $D_x$（:build\_nonlinear\_scaling）：
 $\theta$ 列取 $\pi$；$V_m$ 列取当前 $V_m$（$>10^{-3}$ 时，否则取 1，:build\_nonlinear\_scaling）；
 $V_{dc}$ 列同规则（:build\_nonlinear\_scaling）。施加方式：残差逐元乘、雅可比遍历非零元行乘列除、
-物理步长逐元除恢复（头 :44--73）。主循环挂接
+物理步长逐元除恢复（头 :apply\_residual\_scaling、:apply\_jacobian\_scaling、:unscale\_step）。主循环挂接
 （\srcpath{src/power\_flow/newton\_solver.cpp:NewtonSolver::solve}）：每次迭代重建缩放；
 \fld{enable\_residual\_scaling} 开时以缩放残差的 $\ell_\infty$ 范数判定收敛
 （:NewtonSolver::solve）；仅当 equilibration 开\textbf{且}至少一个缩放开关开时才替换
@@ -70,13 +70,13 @@ header-only 实现（\srcpath{src/power\_flow/nonmonotone\_linesearch.cpp} 仅�
 \qquad \alpha\leftarrow\beta\alpha
 \]
 $M=1$ 退化为标准单调 Armijo。主循环中的实际形态
-（src/power\_flow/newton\_solver.cpp:NewtonSolver::solve 构造、\srcpath{run\_line\_search} :1493--1585）：
+（src/power\_flow/newton\_solver.cpp:NewtonSolver::solve 构造、\srcpath{run\_line\_search}（lambda））：
 merit 每轮压入窗口（:NewtonSolver::solve）；回溯 $\alpha\leftarrow\beta\alpha$、
 试探上限 \fld{max\_line\_search\_steps}$=10$ 次（:run\_line\_search（lambda）, :run\_line\_search（lambda））；
 \fld{enable\_nonmonotone\_linesearch}=false 时改用 $M=1$ 的单调搜索实例
 （:run\_line\_search（lambda））。如实说明：生产回溯次数由 \fld{max\_line\_search\_steps}
 （默认 10）控制；折减系数即 \fld{line\_search\_beta}（默认 0.5，经构造函数传入，
-:1377--1380）；类自带的 \fld{max\_line\_search\_trials}$=12$
+:run\_line\_search（lambda））；类自带的 \fld{max\_line\_search\_trials}$=12$
 （include/hacdcpf/power\_flow/robust\_nonlinear\_options.hpp）当前未被主循环消费，为保留字段。
 \paragraph{参数表}
 \begin{paramtable}
@@ -117,7 +117,7 @@ $J+I/\delta t$ 并以 \texttt{update()} 逐步更新伪时间步
         增益比 $\rho=\mathrm{ared}/\mathrm{pred}$：$\rho>0.75$ 且触界时
         $\Delta\leftarrow\min(2\Delta,\Delta_{\max})$，$\rho<0.25$ 时
         $\Delta\leftarrow\max(0.25\Delta,10^{-10})$，$\rho>0$ 才接受
-        （同文件 :62--80；调用 :1541--1542）。
+        （同文件 :trust\_region\_update；调用 :NewtonSolver::solve）。
   \item \textbf{PTC}（\fld{globalization}=PseudoTransient，
         src/power\_flow/newton\_solver.cpp:NewtonSolver::solve）：
         求解 $(J+I/\delta t)\Delta x=-F$，步\textbf{无条件接受}；
@@ -265,7 +265,7 @@ $6m$ 维度与至少 $48m$ 结构非零缩减。可复现实验入口为
 代码移植自 HELMpy 参考实现（AGPLv3，\srcpath{src/power\_flow/helm\_solver.cpp}），
 增强：稀疏 $Y_{\mathrm{trans}}$、多 slack、K 因子分布式松弛与
 DCPF/Gauss--Seidel 暖启动（)。纯 AC（只用 AC 子系统，头文件
-:97--100），编译进 \texttt{hacdcpf} 库（\srcpath{CMakeLists.txt}）。
+:HelmSolver::solve），编译进 \texttt{hacdcpf} 库（\srcpath{CMakeLists.txt}）。
 \paragraph{数学模型与算法}
 \begin{itemize}
   \item \textbf{导纳分解}（\srcpath{build\_ytrans\_yshunt}，:build\_ytrans\_yshunt）：
@@ -367,7 +367,7 @@ LU 求解 Newton 线性系统，并配 Schur 补 AC/DC 块预条件器，面向�
         （:gmres\_solve）、估计残差 $|\,g_{j+1}\,|/\lVert b\rVert$（:gmres\_solve）；每轮
         重启后以真残差复判（:gmres\_solve）；
   \item \textbf{Schur 块预条件}（\srcpath{SchurBlockPreconditioner}，
-        :144--207）：利用 $J=\big[\begin{smallmatrix}A&B\\0&D\end{smallmatrix}\big]$
+        :SchurBlockPreconditioner）：利用 $J=\big[\begin{smallmatrix}A&B\\0&D\end{smallmatrix}\big]$
         块上三角结构（AC 块 $A$、DC 块 $D$ 各作 SparseLU 分解，:SchurBlockPreconditioner::build），
         $P^{-1}r$：$z_{dc}=D^{-1}r_{dc}$，$z_{ac}=A^{-1}(r_{ac}-Bz_{dc})$
         （:apply）；任一块分解失败则退化为单位预条件（:newton\_krylov\_step）；

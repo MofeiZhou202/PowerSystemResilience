@@ -304,7 +304,7 @@ CMake 选项 \srcpath{HACDCPF\_ENABLE\_IPOPT} 默认 OFF、macOS 默认 ON，见
 \subsection{夜间工况 OPF 与外部电网提升}\label{subsec:ver:nighttime}
 
 \subsubsection*{回归起源}
-\srcpath{tests/test\_nighttime\_opf.cpp}:1--5 的文件头注释记录了本通道的回归起源：
+\srcpath{tests/test\_nighttime\_opf.cpp} 的文件头注释记录了本通道的回归起源：
 修复前 \srcpath{solve\_ac\_opf} 在 \fld{sys.ac.generators} 为空（$n_g=0$）时立即返回
 失败；修复后带正成本的外部电网被提升为 OPF 发电机变量，夜间（无光伏、无常规机组）
 工况得以收敛。

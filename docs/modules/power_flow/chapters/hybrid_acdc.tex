@@ -67,8 +67,7 @@ DC/DC 入端 $-P_{in}$、出端 $+P_{out}$（:assemble\_dc\_injections）、能�
   \item \textbf{雅可比}（\srcpath{build\_dc\_newton\_jacobian}，:build\_dc\_newton\_jacobian）：
         $J_{kk}=p_{dc,k}^{\mathrm{linear}}+g_{kk}v_{dc,k}$（$p^{\mathrm{linear}}=G_{dc}\mathbf v_{dc}$），
         $J_{kl}=g_{kl}v_{dc,k}\ (l\neq k)$；
-  \item \textbf{线性求解}：稀疏 \texttt{Eigen::SparseLU}（\texttt{\#include <Eigen/SparseLU>}，
-        :9），分解不可逆或解含 NaN/Inf 即判失败
+  \item \textbf{线性求解}：稀疏 \texttt{Eigen::SparseLU}（\texttt{\#include <Eigen/SparseLU>}），分解不可逆或解含 NaN/Inf 即判失败
         （:solve）；
   \item \textbf{回溯线搜索}（:solve）：$\alpha$ 初值 1、最多 8 次减半，试验步满足
         $v_{dc}\ge\texttt{kMinVdc}=0.05$（:solve）；有改善试探则采纳最优试探，
@@ -89,7 +88,7 @@ DC/DC 入端 $-P_{in}$、出端 $+P_{out}$（:assemble\_dc\_injections）、能�
 
 \subsubsection*{验证与校核}
 纯 DC 路径由 \srcpath{tests/test\_all\_components\_pf.cpp} 的 DC 组件族
-（DCBus、DCBranch、DCLoad、StaticGeneratorDC、PVArrayDC，文件头注释 :15--16）与
+（DCBus、DCBranch、DCLoad、StaticGeneratorDC、PVArrayDC，文件头注释）与
 \srcpath{tools/validate\_case\_capabilities.py} 的 NR/FDPF/DC 三法互验覆盖；
 DC 岛参考行为见第~\ref{sec:hybrid-dcref}~节。
 
@@ -104,7 +103,7 @@ DC 行列映射（偏移 $n_p+n_q$）见第~\ref{sec:newton}~章；本小节展�
 \subsubsection*{换流器注入与三档雅可比注入}
 残差与雅可比统一装配于 \srcpath{evaluate\_residual\_impl}（:evaluate\_residual\_impl，
 \srcpath{src/power\_flow/jacobian\_builder.cpp}）。换流器对指定注入的贡献在
-\srcpath{build\_power\_spec}（同文件 :25--178）：AC 侧
+\srcpath{build\_power\_spec}（同文件）：AC 侧
 $P^{\mathrm{spec}} \mathrel{+}=p_{ac}$、$Q^{\mathrm{spec}}\mathrel{+}=q_{ac}$
 （:build\_power\_spec）；DC 侧 \fld{pdc\_spec} 加 \srcpath{converter\_dc\_injection}（:build\_power\_spec）。
 DC 网络块与其雅可比（:evaluate\_residual\_impl）：
@@ -153,7 +152,7 @@ $+\partial p_{in}/\partial v_{dc,out}$（:evaluate\_residual\_impl）。
 （\fld{enable\_coupled\_jacobian}=true、\fld{loss\_model}=CurrentBased）
 对 $V_{dc}$ 列（耦合项）及前 10 个 $\theta/V_m$ 列做中心差分对拍：
 $\varepsilon=10^{-6}$，max\_rel\_error $<10^{-3}$、violations==0；
-同文件 :349 起的第二个用例证明耦合雅可比降低 $V_{dc}$ 扰动的 Taylor 模型误差。
+同文件 :TEST\_CASE("Coupled Jacobian reduces Taylor-model error for Vdc perturbations") 的第二个用例证明耦合雅可比降低 $V_{dc}$ 扰动的 Taylor 模型误差。
 \fld{r\_conv\_ac\_pu} 注入与导数由 \srcpath{tests/test\_converter\_coordination.cpp:TEST\_CASE}
 逐项精确断言（容差 $10^{-12}$）。
 
@@ -312,7 +311,7 @@ DC/DC 不合并电压岛（:TEST\_CASE("DC/DC converters do not merge DC voltage
 Buck 占空比反演与可行性（:TEST\_CASE）、droop 输出成岛参考（:TEST\_CASE）、
 Voltage 模式输出成形与输入侧参考要求（:TEST\_CASE("DC/DC Voltage mode forms its output voltage and is feasible with an input reference")、
 :TEST\_CASE("DC/DC Voltage mode needs an input-side voltage reference (DCDC-CTRL-03)")）；
-OPF 三模式建模见同文件 :1493；全组件回归
+OPF 三模式建模见同文件 :TEST\_CASE("Hybrid AC/DC OPF models DC/DC converters in all three control modes")；全组件回归
 \srcpath{tests/test\_all\_components\_pf.cpp:mk（lambda）}。
 
 \subsection{LCC 换流站稳态模型}\label{sec:hybrid-lcc}
@@ -374,7 +373,7 @@ $\alpha$/$\gamma$ 越限不静默：\texttt{[LCC-PHYS-01]} 等事后诊断写入
 
 \subsubsection*{功能说明}
 每个 DC 电压岛必须恰有一个电压参考，否则 DC 子块奇异。规划器
-（\srcpath{src/power\_flow/newton\_solver.cpp:plan\_dc\_island\_references}，求解开始时调用一次 :944--945）
+（\srcpath{src/power\_flow/newton\_solver.cpp:plan\_dc\_island\_references}，求解开始时调用一次 :solve）
 在求解器的换流器\textbf{可变副本}上工作：必要时把 PQ 换流器提升为电压成形，
 并产出 \texttt{DcSlackPlan\{dc\_slacks, promoted\_converter\_idx, rigid\_pins, warnings\}}
 （:plan\_dc\_island\_references）。岛识别 \srcpath{compute\_dc\_components}（:compute\_dc\_components）：
@@ -395,7 +394,7 @@ VSC 与 DC/DC \textbf{不}构成连边（:compute\_dc\_components），与协调
           \item \textbf{刚性 DC-slack 构网}（opt-in \fld{enable\_rigid\_vdc\_former}，
                 默认 false，\srcpath{include/hacdcpf/power\_flow/power\_flow\_options.hpp:PowerFlowOptions}）：仅当岛为
                 单非孤立母线、唯一 VSC 且无 DC/DC/ER 耦合时适用（:plan\_dc\_island\_references）——
-                母线钉于 $v_{set}$（初值种子 :950--952），换流器保持 PQ 并按线性损耗
+                母线钉于 $v_{set}$（初值种子 :plan\_dc\_island\_references），换流器保持 PQ 并按线性损耗
                 口径整定 $p_{set}$ 以恰好抵消岛固定注入（:plan\_dc\_island\_references）：
                 $\mathrm{net}\ge0$ 时 $p_{set}=\mathrm{net}/(2-\eta)$，
                 $\mathrm{net}<0$ 时 $p_{set}=\mathrm{net}/\eta$；
@@ -517,14 +516,14 @@ ACDC-PHYS 告警或占空比越窗，该 Newton 根被\textbf{拒绝为物理不
 DCISLAND-05 整定冲突判 Fatal（:TEST\_CASE）、
 MS/PARTICIPATION 系列（:TEST\_CASE）、ACISLAND 系列（:TEST\_CASE("AC island without an angle reference is flagged (ACISLAND-REF-01)")，
 :TEST\_CASE("Energized AC island with no active-power source raises ACISLAND-BALANCE-01")）；
-\fld{converter\_model\_scope} 声明与 PHYS-03 触发分别由 :652--669、:671--693 断言
-（后者证明限值越限时\textbf{仍收敛}、仅告警——默认模式行为）；方程闭合检查见 :695--711。
+\fld{converter\_model\_scope} 声明与 PHYS-03 触发分别由 :TEST\_CASE("Power-flow result declares its converter model scope")、:TEST\_CASE("Tight VSC DC-current limit raises an ACDC-PHYS-03 diagnostic") 断言
+（后者证明限值越限时\textbf{仍收敛}、仅告警——默认模式行为）；方程闭合检查见 :TEST\_CASE("Power-flow reports a structural equation-closure check")。
 
 \subsection{验证与校核汇总}
 本章各节的专项验证之外，统一交叉验证包括：\srcpath{tests/test\_unified\_pf\_upgrade.cpp}
 的耦合雅可比中心差分对拍（:TEST\_CASE("FD Jacobian: coupled cross-coupling derivatives are correct")，$\varepsilon=10^{-6}$，max\_rel\_error $<10^{-3}$）、
 \srcpath{tests/test\_all\_components\_pf.cpp} 的 29 类组件逐类禁用回归
-（混合族含 VSCConverter、DCDCConverter、EnergyRouter，文件头 :15--19）。
+（混合族含 VSCConverter、DCDCConverter、EnergyRouter，文件头注释）。
 \textbf{已知边界（如实）}：换流器不等式默认仅事后告警，硬可行性门卫需显式打开
 \fld{enforce\_converter\_physical\_limits}（第~\ref{sec:hybrid-coord}~节）；
 \fld{enable\_coupled\_jacobian} 默认关闭，交叉块导数需显式开启；

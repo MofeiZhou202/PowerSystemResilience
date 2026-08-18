@@ -41,7 +41,7 @@
 \begin{equation}
 s_{eff}=\begin{cases}s,&\operatorname{isfinite}(s)\land s>0,\\0,&\text{其他情况。}\end{cases}
 \end{equation}
-AC/DC 负荷和静态发电的返回值分别来自同文件 :63--70、:80--83、:113--116：
+AC/DC 负荷和静态发电的返回值分别来自同文件 :effective\_load\_p\_mw、:effective\_p\_mw（StaticGenerator）、:effective\_p\_mw（StaticGeneratorDC）：
 \begin{align}
 P_{load}^{eff}&=\begin{cases}P_{load}s_{eff},&\fld{in\_service}=true,\\0,&\text{否则，}\end{cases}\\
 P_{sg}^{eff}&=\begin{cases}P_{sg}s_{eff},&\fld{in\_service}=true,\\0,&\text{否则，}\end{cases}\\

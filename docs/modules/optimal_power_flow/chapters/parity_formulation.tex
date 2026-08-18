@@ -270,8 +270,8 @@ f_{L}&=w_L\,S_{\mathrm{base}}\Big(\sum p_g+\sum p^{ren}+\sum p^{stor}
 
 \subsubsection*{行块布局}
 等式残差 $g(x)$ 按 8 个行块排列（文档注释见
-\srcpath{include/hacdcpf/optimal\_power\_flow/formulation.hpp}\allowbreak :89--98；
-计数与偏移见 \srcpath{src/optimal\_power\_flow/parity\_formulation.cpp}\allowbreak :467--488）：
+\srcpath{include/hacdcpf/optimal\_power\_flow/formulation.hpp:ConstraintIndex}；
+计数与偏移见 \srcpath{src/optimal\_power\_flow/parity\_formulation.cpp:build\_problem}）：
 \begin{align*}
 g(x)=\big[\,g^P_{ac},\; g^Q_{ac},\; g^P_{dc},\; g^{vsc},\;
 g^{dcdc},\; g^{er},\; g^{\theta\text{-ref}},\; g^{vdc\text{-ref}}\,\big]
@@ -519,7 +519,7 @@ $V_{out}=\tfrac{D}{1-D}V_{in}$、$V_{out}=DnV_{in}$（$n$=\fld{n\_ratio}，
 \subsection{初值构造}
 
 \srcpath{build\_initial\_point} 生成严格内点暖启动（
-\srcpath{src/optimal\_power\_flow/parity\_formulation.cpp}\allowbreak :985--1198；
+\srcpath{src/optimal\_power\_flow/parity\_formulation.cpp:build\_initial\_point}；
 声明注释见 include/hacdcpf/optimal\_power\_flow/formulation.hpp:build\_initial\_point），分五步：
 
 \begin{enumerate}

@@ -100,7 +100,7 @@ B''\,\Delta V=\Delta Q/V\;(:solve)
   自带的 $10^{-6}$ 缺省）\\
 \end{paramtable}
 全局 ZIP 权重 \fld{zip\_pw}/\fld{zip\_qw} 与 \fld{loss\_model} 由 API 层在装配侧读取
-（\srcpath{apply\_zip\_weights}，src/api/hacdcpf.cpp:get\_cached\_solver\_data，调用于 :1164--1165）；
+（\srcpath{apply\_zip\_weights}，src/api/hacdcpf.cpp:get\_cached\_solver\_data，调用于 :solve\_power\_flow\_fdpf）；
 求解器核在 \fld{has\_component\_loads} 为真时改读逐母线 ZIP 系数
 （见上文算法小节），否则回退全局权重。
 
@@ -319,7 +319,7 @@ $\max(10^{-10},\fld{tol})$ pu 时结束，最多 20 次完整求解。
 （:detect\_islands），DFS 求连通分量（:detect\_islands）。活岛判据 \fld{has\_generators} 只看
 \textbf{真实在运注入}（发电机 $P_g>10^{-9}$ 或 \fld{is\_slack}、换流器
 $|P_{set}|$、静态/可再生/PV/储能/VPP、外部电网，:detect\_islands），明确不以 SLACK
-母线类型作代理（注释 :222--229）。如实说明：\textbf{每个连通分量都生成}
+母线类型作代理（注释 :detect\_islands）。如实说明：\textbf{每个连通分量都生成}
 \texttt{IslandInfo}（含纯 DC 岛，:detect\_islands）；无源岛（\fld{has\_generators}=false）
 不删除，而是在 \texttt{AdaptiveSolver::solve} 中按死岛处理、电压置零
 （\srcpath{src/power\_flow/adaptive\_solver.cpp:solve}，

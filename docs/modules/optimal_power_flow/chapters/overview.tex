@@ -47,7 +47,7 @@
         （\srcpath{include/hacdcpf/optimal\_power\_flow/dc\_opf\_solver.hpp:solve\_dc\_opf}；
         实现 \srcpath{src/optimal\_power\_flow/dc\_opf.cpp:solve\_dc\_opf}），另提供
         独立于求解的可行性复核 \srcpath{check\_dc\_opf\_feasibility}
-        （同头文件:22--25）。详见第\ref{sec:dcopf}节。
+        （同头文件:check\_dc\_opf\_feasibility）。详见第\ref{sec:dcopf}节。
   \item \textbf{RPO}：无功优化 MINLP（连续内层 NLP + 离散分接头/并联补偿
         搜索），入口 \srcpath{opf::solve\_rpo}
         （\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:solve\_rpo}；
@@ -82,7 +82,7 @@
 门面 \srcpath{solve\_ac\_opf} 在调用内核返回后，额外在 OPF 调度点上重算
 开关/断路器端潮流并写入 \fld{ac\_switch\_flows} 与
 \fld{ac\_circuit\_breaker\_flows}（\srcpath{src/api/hacdcpf.cpp:solve\_ac\_opf}，
-其中支路潮流经 \fld{bus\_merge\_map} 反投影回原始元件，见:1872--1884）；
+其中支路潮流经 \fld{bus\_merge\_map} 反投影回原始元件，见 :solve\_ac\_opf）；
 \srcpath{solve\_dc\_opf} 与 \srcpath{solve\_rpo} 门面是直接转发
 （同文件:solve\_dc\_opf）。
 
@@ -161,7 +161,7 @@ $\rightarrow$ 求解 $\rightarrow$ 结果反投影归因回原始组件稳定 ID
         \fld{use\_parity\_ipm}（除非显式选择了 \fld{EconomicDispatch} 后端），
         即传统 Native AC 路径实际上只服务纯交流算例
         （\srcpath{src/optimal\_power\_flow/ac\_opf.cpp:solve\_ac\_opf\_impl}；混合标志
-        计算于:3261--3265）。显式选择 \fld{EconomicDispatch} 的混合算例
+        计算于 :solve\_ac\_opf\_impl）。显式选择 \fld{EconomicDispatch} 的混合算例
         不会被静默降级，而是直接报错并给出提示
         （同文件:solve\_ac\_opf\_impl）。
   \item \textbf{AML 建模层与 Parity 建模层是两套独立装配}：Parity IPM 与
@@ -169,7 +169,7 @@ $\rightarrow$ 求解 $\rightarrow$ 结果反投影归因回原始组件稳定 ID
         模型（\srcpath{src/optimal\_power\_flow/ac\_opf.cpp:solve\_with\_parity\_ipm}），并不
         经过 \srcpath{src/power\_models/} 的 AML builder。
         （\srcpath{src/optimal\_power\_flow/ac\_opf.cpp:solve\_with\_parity\_ipm} 的注释
-        称“Parity-IPM uses the AML hybrid OPF builder”，与:2540 的实际
+        称“Parity-IPM uses the AML hybrid OPF builder”，与:solve\_with\_parity\_ipm 的实际
         调用不符，本章以代码为准。）
 \end{itemize}
 
@@ -186,7 +186,7 @@ Ipopt，滤波线搜索 NLP 求解器，作用于同一 Parity 建模）、
 \fld{enable\_primal\_dual}/\fld{use\_parity\_ipm} 与内部枚举
 \srcpath{ParityInnerSolver}
 （\srcpath{src/optimal\_power\_flow/ac\_opf.cpp:solve\_ac\_opf\_impl}；内部枚举定义于
-:1870--1873）。其中 Parity IPM 与嵌入式 Ipopt 作用于同一份 Parity 全空间
+:ParityInnerSolver）。其中 Parity IPM 与嵌入式 Ipopt 作用于同一份 Parity 全空间
 建模，是\textbf{交直流混合 OPF 的两条承载路线}；Native AC 紧致路径只承担
 纯交流算例。三条非线性引擎的对比见表~\ref{tab:overview-engines}。
 
@@ -255,7 +255,7 @@ VDC\_Q 直流电压等式恒强制，容量圆/电流/调制度约束族可开�
 \caption{三条 AC 非线性引擎对比。第四条路径 \fld{EconomicDispatch} 为
 merit-order 经济调度加一次牛顿 AC 潮流（实现
 \srcpath{src/optimal\_power\_flow/ac\_opf.cpp:try\_dispatch\_pf\_fallback}，入口
-:3325--3329、3520--3525），不是非线性优化，故不列入。}
+:solve\_ac\_opf\_impl），不是非线性优化，故不列入。}
 \label{tab:overview-engines}
 \end{table}
 
@@ -394,7 +394,7 @@ $\to$ NativeDualSimplex
 \fld{lmp\_q} & $\lambda^Q$ & — & — & 空 & AC 无功节点电价\\
 \fld{lmp\_valid} & — & — & true/false & false & 仅当价格来自本解所出建模的认证等式乘子时为真（字段注释，include/hacdcpf/optimal\_power\_flow/opf\_result.hpp:ACOPFResult）\\
 \fld{lmp\_validity\_reason} & — & — & — & 空 & \fld{lmp\_valid} 判定的人读原因\\
-\fld{ipm\_primal\_state} & $x$ & — & — & 空 & 原生 IPM 延拓状态（原始变量），供 \fld{warm\_start} 复用（字段注释 :109--112）\\
+\fld{ipm\_primal\_state} & $x$ & — & — & 空 & 原生 IPM 延拓状态（原始变量），供 \fld{warm\_start} 复用（字段注释 :ipm\_primal\_state）\\
 \fld{ipm\_equality\_dual\_state} & $\lambda$ & — & — & 空 & 延拓状态：等式对偶\\
 \fld{ipm\_inequality\_dual\_state} & $\mu$ & — & — & 空 & 延拓状态：不等式对偶\\
 \fld{ipm\_slack\_state} & $s$ & — & — & 空 & 延拓状态：松弛变量\\
@@ -473,14 +473,14 @@ consistency”，但当前实现仅覆盖电压限值、发电机限值与目标
 \fld{structural\_warm\_start\_*} / \fld{solver\_initial\_primal\_residual} & — & pu/计数/布尔 & — & inf/0/false & NativeLCQP 结构初值的请求、构建、消费、分量/分解、原坐标 residual 和第 0 次迭代 residual\\
 \fld{lmp} & $\lambda$ & — & — & 空 & 节点电价（等式行对偶恢复）\\
 \fld{branch\_mu\_lower} / \fld{branch\_mu\_upper} & $\mu^-,\mu^+$ & — & — & 空 & 支路限值对偶（当前不可靠，见 \fld{branch\_mu\_valid}）\\
-\fld{branch\_mu\_valid} & — & — & true/false & false & 恒为 false：原生支撑 LP 不能稳健恢复盒式变量对偶（字段注释 include/hacdcpf/optimal\_power\_flow/opf\_result.hpp:DCOPFResult；实现 src/optimal\_power\_flow/dc\_opf.cpp:extract\_dc\_opf\_result，设计说明 :621--634）\\
+\fld{branch\_mu\_valid} & — & — & true/false & false & 恒为 false：原生支撑 LP 不能稳健恢复盒式变量对偶（字段注释 include/hacdcpf/optimal\_power\_flow/opf\_result.hpp:DCOPFResult；实现 src/optimal\_power\_flow/dc\_opf.cpp:extract\_dc\_opf\_result，设计说明 :extract\_dc\_opf\_result）\\
 \fld{branch\_mu\_validity\_reason} & — & — & — & 空 & 上述判定的人读原因\\
 \fld{lmp\_valid} & — & — & true/false & false & \fld{lmp} 是否来自报告原始解的等式行对偶（不蕴含阻塞对偶有效）\\
 \fld{lmp\_validity\_reason} & — & — & — & 空 & 判定原因；\fld{compute\_lmp=false} 时注明被选项关闭（src/optimal\_power\_flow/dc\_opf.cpp:solve\_dc\_opf）\\
 \fld{load\_shedding\_mw} & $\Delta P^d$ & MW & $\ge 0$ & 空 & 各母线切负荷量（src/optimal\_power\_flow/dc\_opf.cpp:extract\_dc\_opf\_result）\\
 \fld{total\_load\_shedding\_mw} & — & MW & $\ge 0$ & 0 & 总切负荷量\\
 \fld{solver\_chain} & — & — & — & 空 & 依次尝试的后端链，形如 ``\textless backend\textgreater:\textless status\textgreater''（字段注释 include/hacdcpf/optimal\_power\_flow/opf\_result.hpp:DCOPFResult；记录点 src/optimal\_power\_flow/dc\_opf.cpp:solve\_dc\_opf）\\
-\fld{objective\_model} & — & — & QP/LP/LP-PWL & 空 & 上报目标实际使用的成本模型（实现 src/optimal\_power\_flow/dc\_opf.cpp:solve\_dc\_opf；头文件注释 :222--226 只列 ``QP''/``LP''，代码另发出 ``LP-PWL''，以代码为准）\\
+\fld{objective\_model} & — & — & QP/LP/LP-PWL & 空 & 上报目标实际使用的成本模型（实现 src/optimal\_power\_flow/dc\_opf.cpp:solve\_dc\_opf；头文件注释 :objective\_model 只列 ``QP''/``LP''，代码另发出 ``LP-PWL''，以代码为准）\\
 \fld{pwl\_segments\_effective} & — & — & $\ge 0$ & 0 & LP 近似实际使用的线性段数；0 表示真 QP 成本\\
 \fld{converter\_model\_scope} & — & — & — & 默认 & 恒为 ``dc-opf:linear-no-converter-model''，全部换流器标志为 false（字段注释 include/hacdcpf/optimal\_power\_flow/opf\_result.hpp:DCOPFResult；实现 src/optimal\_power\_flow/dc\_opf.cpp:extract\_dc\_opf\_result）\\
 \fld{model\_limitations} & — & — & — & 空 & 能力边界声明（见下）\\
@@ -514,7 +514,7 @@ AC OPF Parity 路径的标签\textbf{按本次运行实际强制的约束族拼�
   \item 非凸性声明：``AC OPF is a non-convex nonlinear program; convergence
         certifies a local KKT point, not a global optimum.''——所有 AC OPF
         收敛结果恒带（src/optimal\_power\_flow/ac\_opf.cpp:separate\_external\_grid\_dispatch（lambda））；
-  \item 储能为单时段功率注入、不建模跨时段 SOC 动态（AC：:3207--3210；
+  \item 储能为单时段功率注入、不建模跨时段 SOC 动态（AC：:separate\_external\_grid\_dispatch（lambda）；
         DC：src/optimal\_power\_flow/dc\_opf.cpp:extract\_dc\_opf\_result）；
   \item 能量路由器端口平衡为无损模型（src/optimal\_power\_flow/ac\_opf.cpp:separate\_external\_grid\_dispatch（lambda））；
   \item 传统 Native AC 路径经外部栅栏/罚环处理非线性工程限值，建议生产
@@ -526,8 +526,7 @@ AC OPF Parity 路径的标签\textbf{按本次运行实际强制的约束族拼�
         逆变站求解后触发角/关断角窗口违例时逐站追加（:solve\_with\_parity\_ipm）；
   \item DC OPF 无损线性化、不建模电压幅值/无功/换流器物理
         （src/optimal\_power\_flow/dc\_opf.cpp:extract\_dc\_opf\_result）；LCC 拒绝情形（:solve\_dc\_opf）；
-  \item LMP/阻塞对偶不可用时的原因说明（src/optimal\_power\_flow/ac\_opf.cpp:solve\_with\_parity\_ipm、
-        3215--3218；src/optimal\_power\_flow/dc\_opf.cpp:extract\_dc\_opf\_result）。
+  \item LMP/阻塞对偶不可用时的原因说明（src/optimal\_power\_flow/ac\_opf.cpp:solve\_with\_parity\_ipm；src/optimal\_power\_flow/dc\_opf.cpp:extract\_dc\_opf\_result）。
 \end{itemize}
 
 \subsection{问题描述与求解器接口}\label{subsec:overview-interface}
@@ -552,7 +551,7 @@ AC OPF Parity 路径的标签\textbf{按本次运行实际强制的约束族拼�
 适配生产入口：\fld{sys} 为空或 \fld{is\_ac==is\_dc} 时抛
 \fld{std::invalid\_argument}（:solve），否则按标志转发
 \srcpath{hacdcpf::solve\_ac\_opf} 或 \srcpath{hacdcpf::solve\_dc\_opf}
-（:solve）。该设计保证接口层与生产路径永远同源（头文件注释 :3--5）。
+（:solve）。该设计保证接口层与生产路径永远同源（头文件注释 :DefaultOPFSolver）。
 
 \subsubsection*{Parity 公共抽象层}
 
@@ -671,30 +670,30 @@ return constraint multipliers''（:solve\_with\_parity\_ipm）。Ipopt 终止时
         \srcpath{src/market/market\_simulation.cpp} \textbf{不调用}本章
         的 \srcpath{solve\_dc\_opf}/\srcpath{solve\_ac\_opf}，而是在
         engine 层自建 SCUC/SCED 模型并用原生 B\&C/HiGHS/SCIP/Gurobi
-        适配器求解（适配器选择 :803--839，SCED 装配与校验
-        :2440--2469）。二者同属 DC 线性近似家族，但实现独立，价格/结算
+        适配器求解（适配器选择 :create\_market\_milp\_adapter，SCED 装配与校验
+        :build\_pricing\_model）。二者同属 DC 线性近似家族，但实现独立，价格/结算
         口径以市场模块自身结果为准。
   \item \textbf{网络重构}：
         \srcpath{src/network\_reconfiguration/topology\_reconfiguration.cpp}
         同样不经过 OPF 模块：其 MILP 自带虚拟潮流变量布局（文件头注释
-        :9--17），经 engine 层 B\&C/MILP 适配器求解（:try\_native\_bc（lambda））。
+        :run\_topology\_reconfiguration 文件头注释），经 engine 层 B\&C/MILP 适配器求解（:try\_native\_bc（lambda））。
   \item \textbf{其他内部调用方}：可靠性评估以 DC OPF 做削负荷最小化
         （\srcpath{src/reliability/reliability\_assessment.cpp:evaluate\_state}）；
         EV-交通耦合的联合社会福利与 CTM 模型内嵌 DC OPF
         （\srcpath{src/ev\_power\_traffic/joint\_social\_welfare.cpp:solve\_joint\_social\_welfare}、
         \srcpath{src/ev\_power\_traffic/ctm\_joint\_welfare.cpp:simulate\_ev\_power\_traffic\_ctm\_joint}）；
         反事实规划调用 AC OPF
-        （\srcpath{src/analysis/counterfactual\_planning.cpp}\allowbreak :144）；
+        （\srcpath{src/analysis/counterfactual\_planning.cpp:evaluate\_system}）；
         SPPT 变形测试以 DC OPF 做投影前后对照
-        （\srcpath{src/sppt/metamorphic.cpp}\allowbreak :223--225）。
+        （\srcpath{src/sppt/metamorphic.cpp:mr3\_semantic\_preservation\_opf\_dual}）。
   \item \textbf{HTTP 运行时 API（v1）}：GUI/脚本经
         \texttt{POST /api/v1/sessions/\{id\}/jobs} 提交
         \fld{analysis="optimal\_power\_flow"} 任务
         （路由 \srcpath{src/server/runtime\_api\_v1.cpp:register\_routes}；
-        分派 :864--881）。请求体 \fld{solver} 字段映射为
+        分派 :execute\_analysis）。请求体 \fld{solver} 字段映射为
         \fld{ac\_solver\_backend}（\fld{parity}/\fld{ipopt}/\fld{auto}/
         \fld{dispatch}，:ac\_opf\_options）或 DC OPF（\fld{solver="dc"}，
-        :874--876）；\fld{network\_model} 当前仅支持
+        :execute\_analysis）；\fld{network\_model} 当前仅支持
         \fld{balanced\_aggregate}（:execute\_analysis）。AC 结果序列化前自动执行
         \srcpath{verify\_opf\_result} 审计（:serialize\_ac\_opf），响应携带
         \fld{model\_scope}、\fld{validity\_flags}、
@@ -710,7 +709,7 @@ return constraint multipliers''（:solve\_with\_parity\_ipm）。Ipopt 终止时
 \srcpath{hacdcpf::get\_solver\_capabilities()}（同头文件:44；实现
 \srcpath{src/api/hacdcpf.cpp:get\_solver\_capabilities}）返回按编译结果填充的能力结构，
 开销极小、可反复调用。恒真字段（内置 Eigen SparseLU、自研 IPM、AC/DC OPF、
-三相潮流、二次目标）在:1983--1988 直接置真；可选后端按
+三相潮流、二次目标）在 :get\_solver\_capabilities 直接置真；可选后端按
 \srcpath{HACDCPF\_HAVE\_*} 系列宏逐个置位（:get\_solver\_capabilities），这些宏由
 MIPSolvers 子项目在找到对应库时传播（如
 \srcpath{MIPSolvers/CMakeLists.txt:HACDCPF\_HAVE\_IPOPT} 对 Ipopt 的传播）。

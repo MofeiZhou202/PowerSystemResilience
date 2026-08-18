@@ -150,7 +150,9 @@
   \item \textbf{OpenDSS（dss\_capi 桥）}：三级门控——CMake 选项
         \srcpath{HACDCPF\_ENABLE\_OPENDSS}（默认 OFF）与
         \srcpath{HACDCPF\_ENABLE\_OPENDSS\_COMPARE} 先生成内部变量
-        \srcpath{HACDCPF\_HAVE\_OPENDSS}（CMakeLists.txt:265--334），再派生
+        \srcpath{HACDCPF\_HAVE\_OPENDSS}（\srcpath{tests/CMakeLists.txt} 的 OpenDSS 门控注册块：
+        \fld{HACDCPF\_HAVE\_OPENDSS} 门控 \fld{test\_phase\_domain\_ieee13}，
+        \fld{HACDCPF\_HAVE\_OPENDSS\_COMPARE} 门控 \fld{test\_opendss\_pf\_compare}），再派生
         \srcpath{HACDCPF\_HAVE\_OPENDSS\_COMPARE}（:solve\_once（lambda））；
         \srcpath{tests/test\_opendss\_pf\_compare.cpp}（3717 行）仅在后者为真时
         编译（\srcpath{tests/CMakeLists.txt} 中 \texttt{test\_opendss\_pf\_compare}
@@ -209,7 +211,7 @@
   \item \textbf{换流器物理不等式默认仅事后校核}：容量圆、交/直流电流限、调制比、
         占空比不嵌入 Newton 方程，求解后由
         \srcpath{src/api/hacdcpf.cpp:merge\_solver\_profiling} 发出
-        \texttt{ACDC-PHYS-01..05}、:945 发出 \texttt{DCDC-PHYS-01} 告警；
+        \texttt{ACDC-PHYS-01..05}、:solve\_power\_flow 发出 \texttt{DCDC-PHYS-01} 告警；
         NEW 新增可选硬约束模式
         \fld{enforce\_converter\_physical\_limits\{false\}}
         （\srcpath{include/hacdcpf/power\_flow/power\_flow\_options.hpp:PowerFlowOptions}）：

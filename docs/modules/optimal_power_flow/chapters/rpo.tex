@@ -610,13 +610,13 @@ $|\Delta P_g|$/$|\Delta Q_g|$ 完整展示但不单独触发失败
 
 \subsubsection*{自动测试矩阵}
 \begin{paramtable}
-\fld{tests/test\_reactive\_power\_opt.cpp}:16--42 & case9（MATPOWER）& MinActiveLoss & — & — & 断言收敛、\fld{globally\_certified}/\fld{optimality\_gap\_available} 为 false、\fld{model\_limitations} 非空、\fld{objective} 等于物理网损且 $0<P_{\mathrm{loss}}<50$ MW\\
-\fld{tests/test\_reactive\_power\_opt.cpp}:44--82 & case9 + 2 步电容器组 & MinVoltage\allowbreak Deviation & — & — & 断言离散步数动作落在 $[0,2]$、优化目标不差于基线、\fld{gap}=1.0（不报虚假 gap=0）\\
-\fld{tests/test\_reactive\_power\_opt.cpp}:84--110 & \srcpath{build\_case300\_acdc} & MinVoltage\allowbreak Deviation & — & — & 种子求解返回完整展示向量、已选 OLTC 数与清单一致；标记 \srcpath{[.performance]}，默认 ctest 不运行\\
-\fld{tests/test\_reactive\_power\_opt.cpp}:112--182 & 手工 4 台变压器 + 2 台并联 & 清单审计 & — & — & 逐条断言排除原因串、位置计数与 $\pm m_{\mathrm{tap}}$ 窗口、逐台选择开关\\
-\fld{tests/test\_reactive\_power\_opt.cpp}:184--211 & case300.m 导入链 & 清单审计 & — & — & MATPOWER 导入不虚构 4001 档 OLTC；\srcpath{build\_case300\_acdc} 恰 3 台 $[-4,4]$/1.25\% 可调\\
-\fld{tests/test\_reactive\_power\_opt.cpp}:213--243 & 手工联动支路 & 档位回写 & — & — & \srcpath{apply\_rpo\_discrete\_solution} 把档位写入变压器并按比率缩放 \fld{branch.tap}（$1.03\times1.025$）\\
-\fld{tests/e2e/rpo\_gui\_e2e.mjs}:63--267 & case24/\allowbreak case9/\allowbreak case300\_acdc & 浏览器 E2E & — & — & case24 五个固定变比 $1.03/1.02$ 不被识别为 OLTC；case9 全过程交叉验证通过；case300 混合回归（62 台变压器/3 台可调、\fld{pf\_check\_applicable}=false 部分覆盖）\\
+\fld{tests/test\_reactive\_power\_opt.cpp}:TEST\_CASE("RPO reports an honest local certificate and a physical loss ledger") & case9（MATPOWER）& MinActiveLoss & — & — & 断言收敛、\fld{globally\_certified}/\fld{optimality\_gap\_available} 为 false、\fld{model\_limitations} 非空、\fld{objective} 等于物理网损且 $0<P_{\mathrm{loss}}<50$ MW\\
+\fld{tests/test\_reactive\_power\_opt.cpp}:TEST\_CASE("RPO exposes switchable shunt actions without a false global gap") & case9 + 2 步电容器组 & MinVoltage\allowbreak Deviation & — & — & 断言离散步数动作落在 $[0,2]$、优化目标不差于基线、\fld{gap}=1.0（不报虚假 gap=0）\\
+\fld{tests/test\_reactive\_power\_opt.cpp}:TEST\_CASE("case300 RPO returns complete display vectors from a seeded solve") & \srcpath{build\_case300\_acdc} & MinVoltage\allowbreak Deviation & — & — & 种子求解返回完整展示向量、已选 OLTC 数与清单一致；标记 \srcpath{[.performance]}，默认 ctest 不运行\\
+\fld{tests/test\_reactive\_power\_opt.cpp}:TEST\_CASE("RPO control inventory explains adjustable and excluded inputs") & 手工 4 台变压器 + 2 台并联 & 清单审计 & — & — & 逐条断言排除原因串、位置计数与 $\pm m_{\mathrm{tap}}$ 窗口、逐台选择开关\\
+\fld{tests/test\_reactive\_power\_opt.cpp}:TEST\_CASE("MATPOWER fixed tap ratios are not invented as 4001-position OLTCs") & case300.m 导入链 & 清单审计 & — & — & MATPOWER 导入不虚构 4001 档 OLTC；\srcpath{build\_case300\_acdc} 恰 3 台 $[-4,4]$/1.25\% 可调\\
+\fld{tests/test\_reactive\_power\_opt.cpp}:TEST\_CASE("Applying an RPO tap action updates its linked electrical branch") & 手工联动支路 & 档位回写 & — & — & \srcpath{apply\_rpo\_discrete\_solution} 把档位写入变压器并按比率缩放 \fld{branch.tap}（$1.03\times1.025$）\\
+\fld{tests/e2e/rpo\_gui\_e2e.mjs}:main & case24/\allowbreak case9/\allowbreak case300\_acdc & 浏览器 E2E & — & — & case24 五个固定变比 $1.03/1.02$ 不被识别为 OLTC；case9 全过程交叉验证通过；case300 混合回归（62 台变压器/3 台可调、\fld{pf\_check\_applicable}=false 部分覆盖）\\
 \end{paramtable}
 （说明栏为本章概括，非表字段；该表借用 paramtable 版式。）
 测试注册：\srcpath{tests/CMakeLists.txt:hacdcpf\_add\_test(test\_reactive\_power\_opt)}（单元测试）、

@@ -19,7 +19,7 @@
 \subsection{收敛控制}
 \begin{paramtable}
 \fld{max\_iter} & $K_{\max}$ & 次 & 10--100 & 50 & Newton 内层迭代上限；\texttt{Defaults::kPFMaxIter}（include/hacdcpf/model/defaults.hpp:Defaults）；读取点\srcpath{src/power\_flow/newton\_solver.cpp:NewtonSolver::solve}\\
-\fld{tol} & $\varepsilon$ & pu & $10^{-10}$--$10^{-6}$ & $10^{-8}$ &缩放后 $\lVert F\rVert_\infty$ 收敛容差；\texttt{Defaults::kPFTol}（include/hacdcpf/model/defaults.hpp:Defaults）；判定点 src/power\_flow/newton\_solver.cpp:NewtonSolver::solve 与最终诚实重判 :1827--1829\\
+\fld{tol} & $\varepsilon$ & pu & $10^{-10}$--$10^{-6}$ & $10^{-8}$ &缩放后 $\lVert F\rVert_\infty$ 收敛容差；\texttt{Defaults::kPFTol}（include/hacdcpf/model/defaults.hpp:Defaults）；判定点 src/power\_flow/newton\_solver.cpp:NewtonSolver::solve 与最终诚实重判 :NewtonSolver::solve\\
 \fld{fdpf\_max\_iter} & --- & 次 & 100--5000 & 1000 & FDPF 专用迭代上限，仅 \srcpath{src/power\_flow/fdpf\_solver.cpp:solve} 读取（Newton 不用）\\
 \end{paramtable}
 
@@ -320,7 +320,7 @@ NewtonKrylovFallback，:NonlinearSolveMode）与记录结构 \fld{SolverModeSwit
 \fld{eval\_jacobian\_ms\_by\_iter} / \fld{linear\_solve\_ms\_by\_iter} / \fld{line\_search\_ms\_by\_iter} & --- & ms & --- & 空 & 逐迭代三段耗时（装配求值/线性求解/线搜索）\\
 \fld{eval\_jacobian\_ms\_total} / \fld{linear\_solve\_ms\_total} / \fld{line\_search\_ms\_total} & --- & ms & --- & 0 & 三段累计耗时\\
 \fld{raw\_residual\_norm} / \fld{scaled\_residual\_norm} & --- & pu & --- & 0 & 未缩放/缩放后残差范数（后者为收敛判定所用）\\
-\fld{condition\_estimate} & $\kappa$ 代理 & --- & --- & 0 &条件数 $\ell_1$ 行/列范数比代理（src/power\_flow/newton\_solver.cpp:NewtonSolver::solve 起；\fld{enable\_condition\_monitor} 控制，写入 :1429）\\
+\fld{condition\_estimate} & $\kappa$ 代理 & --- & --- & 0 &条件数 $\ell_1$ 行/列范数比代理（src/power\_flow/newton\_solver.cpp:NewtonSolver::solve 起；\fld{enable\_condition\_monitor} 控制，写入 :NewtonSolver::solve）\\
 \fld{regularization\_count} / \fld{linear\_solver\_status} & --- & 次/串 & --- & 0 / "not\_run" & 正则化累计次数；线性后端状态串\\
 \end{paramtable}
 
