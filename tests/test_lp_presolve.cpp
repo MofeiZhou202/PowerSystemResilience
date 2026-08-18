@@ -2,6 +2,7 @@
 /// Tests for the native LP presolve.
 /// P0: identity skeleton + env/telemetry contract.
 /// P1: zero-fill rules (A&A 1995 §2.1-2.3) + postsolve stack roundtrip.
+/// P2: equality substitution (A&A 1995 §2.4) + primal certificate undo.
 /// Design: docs/archive/native_presolve_lp_2026-08-18.md §4.
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
@@ -88,6 +89,24 @@ void set_ineq_rows(LPModel& lp,
 LpPresolveConfig enabled_cfg() {
   LpPresolveConfig cfg;
   cfg.enabled = true;
+  cfg.substitutions = false;
+  cfg.propagate_bounds = false;
+  return cfg;
+}
+
+LpPresolveConfig p2_cfg() {
+  LpPresolveConfig cfg;
+  cfg.enabled = true;
+  cfg.substitutions = true;
+  cfg.propagate_bounds = false;
+  return cfg;
+}
+
+LpPresolveConfig p3_cfg() {
+  LpPresolveConfig cfg;
+  cfg.enabled = true;
+  cfg.substitutions = false;
+  cfg.propagate_bounds = true;
   return cfg;
 }
 
@@ -778,13 +797,25 @@ TEST_CASE("lp_presolve_publication_tol_scale honors the audit-transfer "
     reduced.b[0] = 0.05;  // reduced max side 3.0 < original 4.0
     CHECK(lp_presolve_publication_tol_scale(orig, reduced) == Approx(1.0));
   }
-  // Beyond-cap inflation (defensive floor; unreachable under kSideShiftCap):
-  // the clamp floors at 1e-4 rather than returning 0 or NaN.
+  // Beyond-native-cap inflation (reachable through the HiGHS bridge) must not
+  // be floored above the ratio: that would violate the transfer invariant.
   {
     LPModel orig = make_small_lp();
     LPModel reduced = make_small_lp();
-    reduced.beq[0] = 4e8;  // ratio 1e-8 -> 0.9e-8, floored
-    CHECK(lp_presolve_publication_tol_scale(orig, reduced) == Approx(1e-4));
+    reduced.beq[0] = 4e8;  // ratio 1e-8 -> 0.9e-8
+    const double scale = lp_presolve_publication_tol_scale(orig, reduced);
+    CHECK(scale == Approx(0.9e-8));
+    CHECK(scale <= 1e-8);
+  }
+  // Equality RHS values have no no-bound sentinel: even values above 1e19
+  // remain part of the residual scale and therefore of the transfer ratio.
+  {
+    LPModel orig = make_small_lp();
+    LPModel reduced = make_small_lp();
+    reduced.beq[0] = 4e20;  // ratio 1e-20 -> 0.9e-20
+    const double scale = lp_presolve_publication_tol_scale(orig, reduced);
+    CHECK(scale == Approx(0.9e-20));
+    CHECK(scale <= 1e-20);
   }
   // No-bound sentinels (|side| >= 1e19, +/-inf) never enter the scale, on
   // either side of the comparison.
@@ -848,4 +879,204 @@ TEST_CASE("P1 meager-reduction gate: <1% row and column cuts are declined "
     CHECK(res.use_reduced);
     CHECK(res.reduced_rows == res.orig_rows - 4);
   }
+}
+
+TEST_CASE("P2 doubleton equation substitutes one column, transfers bounds, "
+          "and postsolves the primal (A&A 1995 §2.4)",
+          "[presolve][lp][p2][doubleton]") {
+  LPModel lp = make_blank_lp(3);
+  lp.c << 3.0, 4.0, -1.0;
+  lp.vars = {{VarType::Continuous, 1.0, 3.0},
+             {VarType::Continuous, -10.0, 10.0},
+             {VarType::Continuous, -10.0, 10.0}};
+  // 3*x0 + x1 = 7 -> x0 = (7-x1)/3.  Bounds 1 <= x0 <= 3 imply
+  // -2 <= x1 <= 4.  Two inequalities keep both equation columns above
+  // singleton degree so this specifically exercises the doubleton rule.
+  lp.Aeq.resize(1, 3);
+  lp.Aeq.insert(0, 0) = 3.0;
+  lp.Aeq.insert(0, 1) = 1.0;
+  lp.Aeq.makeCompressed();
+  lp.beq = (Eigen::VectorXd(1) << 7.0).finished();
+  set_ineq_rows(lp,
+                {Eigen::Triplet<double>(0, 1, 1.0),
+                 Eigen::Triplet<double>(0, 2, 1.0),
+                 Eigen::Triplet<double>(1, 0, 1.0),
+                 Eigen::Triplet<double>(1, 2, -1.0)},
+                (Eigen::VectorXd(2) << -1.0, -2.0).finished(),
+                (Eigen::VectorXd(2) << 4.0, 3.0).finished());
+
+  const LpPresolveResult res = lp_presolve_run(lp, p2_cfg());
+  REQUIRE(res.use_reduced);
+  CHECK(res.reduced_rows == 2);
+  CHECK(res.reduced_cols == 2);
+  CHECK(res.reduced.vars[0].lb == Approx(-2.0));
+  CHECK(res.reduced.vars[0].ub == Approx(4.0));
+  REQUIRE(res.postsolve_stack.size() == 1);
+  REQUIRE(std::get_if<LpPostsolveDoubletonEquation>(
+              &res.postsolve_stack.front()) != nullptr);
+
+  const Eigen::VectorXd x_red =
+      (Eigen::VectorXd(2) << 1.0, 0.0).finished();
+  const Eigen::VectorXd x = postsolve_primal(res, x_red);
+  REQUIRE(x.size() == 3);
+  CHECK(x[0] == Approx(2.0));
+  CHECK(x[1] == Approx(1.0));
+  CHECK((lp.Aeq * x)[0] == Approx(lp.beq[0]));
+  CHECK(lp.c.dot(x) ==
+        Approx(res.reduced.c.dot(x_red) + res.objective_offset));
+}
+
+TEST_CASE("P2 free-column substitution creates bounded fill-in and restores "
+          "the eliminated value (A&A 1995 §2.4)",
+          "[presolve][lp][p2][free-column]") {
+  LPModel lp = make_blank_lp(4);
+  lp.c << 2.0, 1.0, -1.0, 0.5;
+  lp.vars = {{VarType::Continuous, -kInf, kInf},
+             {VarType::Continuous, -10.0, 10.0},
+             {VarType::Continuous, -10.0, 10.0},
+             {VarType::Continuous, -10.0, 10.0}};
+  // x0 + 2*x1 - x2 = 6 eliminates the truly free x0.  In the second row,
+  // x0 is replaced by 6 - 2*x1 + x2, creating one controlled fill-in.
+  lp.Aeq.resize(1, 4);
+  lp.Aeq.insert(0, 0) = 1.0;
+  lp.Aeq.insert(0, 1) = 2.0;
+  lp.Aeq.insert(0, 2) = -1.0;
+  lp.Aeq.makeCompressed();
+  lp.beq = (Eigen::VectorXd(1) << 6.0).finished();
+  set_ineq_rows(lp,
+                {Eigen::Triplet<double>(0, 0, 1.0),
+                 Eigen::Triplet<double>(0, 1, 1.0),
+                 Eigen::Triplet<double>(0, 2, 1.0),
+                 Eigen::Triplet<double>(0, 3, 1.0)},
+                (Eigen::VectorXd(1) << -5.0).finished(),
+                (Eigen::VectorXd(1) << 12.0).finished());
+
+  const LpPresolveResult res = lp_presolve_run(lp, p2_cfg());
+  REQUIRE(res.use_reduced);
+  CHECK(res.reduced_rows == 1);
+  CHECK(res.reduced_cols == 3);
+  CHECK(res.reduced_nnz == 3);
+  REQUIRE(res.postsolve_stack.size() == 1);
+  REQUIRE(std::get_if<LpPostsolveFreeColSubstitution>(
+              &res.postsolve_stack.front()) != nullptr);
+
+  const Eigen::VectorXd x_red =
+      (Eigen::VectorXd(3) << 1.0, 2.0, 0.0).finished();
+  const Eigen::VectorXd x = postsolve_primal(res, x_red);
+  REQUIRE(x.size() == 4);
+  CHECK(x[0] == Approx(6.0));
+  CHECK((lp.Aeq * x)[0] == Approx(lp.beq[0]));
+  CHECK(lp.c.dot(x) ==
+        Approx(res.reduced.c.dot(x_red) + res.objective_offset));
+}
+
+TEST_CASE("P2 bounded singleton equality column projects its box to a ranged "
+          "row and postsolves exactly (A&A 1995 §2.4)",
+          "[presolve][lp][p2][singleton-column]") {
+  LPModel lp = make_blank_lp(3);
+  lp.c << 2.0, 1.0, -1.0;
+  lp.vars = {{VarType::Continuous, 0.0, kInf},
+             {VarType::Continuous, -10.0, 10.0},
+             {VarType::Continuous, -10.0, 10.0}};
+  // x0 + 2*x1 - x2 = 6 with x0 >= 0 projects to 2*x1-x2 <= 6.
+  // x0 occurs nowhere else, while the second row keeps x1/x2 active.
+  lp.Aeq.resize(1, 3);
+  lp.Aeq.insert(0, 0) = 1.0;
+  lp.Aeq.insert(0, 1) = 2.0;
+  lp.Aeq.insert(0, 2) = -1.0;
+  lp.Aeq.makeCompressed();
+  lp.beq = (Eigen::VectorXd(1) << 6.0).finished();
+  set_ineq_rows(lp,
+                {Eigen::Triplet<double>(0, 1, 1.0),
+                 Eigen::Triplet<double>(0, 2, 1.0)},
+                (Eigen::VectorXd(1) << -3.0).finished(),
+                (Eigen::VectorXd(1) << 5.0).finished());
+
+  const LpPresolveResult res = lp_presolve_run(lp, p2_cfg());
+  REQUIRE(res.use_reduced);
+  CHECK(res.reduced_rows == 2);
+  CHECK(res.reduced_cols == 2);
+  REQUIRE(res.postsolve_stack.size() == 1);
+  const auto* rec = std::get_if<LpPostsolveFreeColSubstitution>(
+      &res.postsolve_stack.front());
+  REQUIRE(rec != nullptr);
+  CHECK(rec->col == 0);
+
+  const Eigen::VectorXd x_red =
+      (Eigen::VectorXd(2) << 1.0, 2.0).finished();
+  const Eigen::VectorXd x = postsolve_primal(res, x_red);
+  REQUIRE(x.size() == 3);
+  CHECK(x[0] == Approx(6.0));
+  CHECK((lp.Aeq * x)[0] == Approx(lp.beq[0]));
+  CHECK(lp.c.dot(x) ==
+        Approx(res.reduced.c.dot(x_red) + res.objective_offset));
+}
+
+TEST_CASE("P2 rejects a bounded column that is not implied free",
+          "[presolve][lp][p2][implied-free][negative]") {
+  LPModel lp = make_blank_lp(3);
+  lp.c << 1.0, 1.0, 1.0;
+  lp.vars = {{VarType::Continuous, 0.0, 1.0},
+             {VarType::Continuous, 0.0, 1.0},
+             {VarType::Continuous, 0.0, 1.0}};
+  lp.Aeq.resize(1, 3);
+  lp.Aeq.insert(0, 0) = 1.0;
+  lp.Aeq.insert(0, 1) = 1.0;
+  lp.Aeq.insert(0, 2) = 1.0;
+  lp.Aeq.makeCompressed();
+  lp.beq = Eigen::VectorXd::Zero(1);
+  set_ineq_rows(lp,
+                {Eigen::Triplet<double>(0, 0, 1.0),
+                 Eigen::Triplet<double>(0, 1, 1.0),
+                 Eigen::Triplet<double>(0, 2, 1.0)},
+                (Eigen::VectorXd(1) << -kInf).finished(),
+                (Eigen::VectorXd(1) << 1.0).finished());
+
+  const LpPresolveResult res = lp_presolve_run(lp, p2_cfg());
+  CHECK(res.status == "no_reduction");
+  CHECK_FALSE(res.use_reduced);
+  CHECK(res.postsolve_stack.empty());
+}
+
+TEST_CASE("P3 row implied bounds handle coefficient signs and both row sides "
+          "(A&A 1995 §3)",
+          "[presolve][lp][p3][implied-bounds]") {
+  LPModel lp = make_blank_lp(2);
+  lp.c << 1.0, 1.0;
+  lp.vars = {{VarType::Continuous, 0.0, 10.0},
+             {VarType::Continuous, 1.0, 2.0}};
+  // 4 <= 2*x0 - 3*x1 <= 10 and 1 <= x1 <= 2 imply
+  // x0 >= (4 - max(-3*x1))/2 = 3.5 and
+  // x0 <= (10 - min(-3*x1))/2 = 8.
+  // The extra empty row makes the resulting bound-only reduction pass the
+  // existing 1% speculative-use gate, without contributing any bound.
+  set_ineq_rows(lp,
+                {Eigen::Triplet<double>(0, 0, 2.0),
+                 Eigen::Triplet<double>(0, 1, -3.0)},
+                (Eigen::VectorXd(2) << 4.0, -1.0).finished(),
+                (Eigen::VectorXd(2) << 10.0, 1.0).finished());
+
+  const LpPresolveResult res = lp_presolve_run(lp, p3_cfg());
+  REQUIRE(res.use_reduced);
+  REQUIRE(res.reduced_cols == 2);
+  CHECK(res.reduced.vars[0].lb == Approx(3.5));
+  CHECK(res.reduced.vars[0].ub == Approx(8.0));
+}
+
+TEST_CASE("P3 does not derive a bound from an unbounded residual activity",
+          "[presolve][lp][p3][implied-bounds][infinite]") {
+  LPModel lp = make_blank_lp(2);
+  lp.c << 0.0, 0.0;
+  lp.vars = {{VarType::Continuous, 0.0, 10.0},
+             {VarType::Continuous, -kInf, 2.0}};
+  // x0+x1 <= 5 cannot bound x0 above because x1 has no lower bound.
+  set_ineq_rows(lp,
+                {Eigen::Triplet<double>(0, 0, 1.0),
+                 Eigen::Triplet<double>(0, 1, 1.0)},
+                (Eigen::VectorXd(1) << -kInf).finished(),
+                (Eigen::VectorXd(1) << 5.0).finished());
+
+  const LpPresolveResult res = lp_presolve_run(lp, p3_cfg());
+  CHECK(res.status == "no_reduction");
+  CHECK_FALSE(res.use_reduced);
 }

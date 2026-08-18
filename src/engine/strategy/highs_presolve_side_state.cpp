@@ -204,12 +204,17 @@ LPModel convert_highs_presolved_lp_to_native(const HighsLp& presolved,
 
   std::vector<Eigen::Triplet<double>> row_trips;
   row_trips.reserve(static_cast<std::size_t>(presolved.a_matrix_.numNz()));
+  std::vector<Eigen::Triplet<double>> eq_trips;
+  eq_trips.reserve(static_cast<std::size_t>(presolved.a_matrix_.numNz()));
   std::vector<int> row_to_native(static_cast<std::size_t>(std::max(0, nrows)),
                                  -1);
+  std::vector<int> row_to_native_eq(
+      static_cast<std::size_t>(std::max(0, nrows)), -1);
   std::vector<int> highs_row_to_native_row(
       static_cast<std::size_t>(std::max(0, nrows)), -1);
   std::vector<double> row_lhs;
   std::vector<double> row_rhs;
+  std::vector<double> eq_rhs;
   row_lhs.reserve(static_cast<std::size_t>(std::max(0, nrows)));
   row_rhs.reserve(static_cast<std::size_t>(std::max(0, nrows)));
 
@@ -225,6 +230,12 @@ LPModel convert_highs_presolved_lp_to_native(const HighsLp& presolved,
     const bool has_lhs = highs_finite_lower(lhs);
     const bool has_rhs = highs_finite_upper(rhs);
     if (!has_lhs && !has_rhs) continue;
+    if (has_lhs && has_rhs && lhs == rhs) {
+      const int native_eq = static_cast<int>(eq_rhs.size());
+      row_to_native_eq[static_cast<std::size_t>(r)] = native_eq;
+      eq_rhs.push_back(rhs);
+      continue;
+    }
     const int native_row = static_cast<int>(row_rhs.size());
     highs_row_to_native_row[static_cast<std::size_t>(r)] = native_row;
     row_to_native[static_cast<std::size_t>(r)] = native_row;
@@ -249,6 +260,11 @@ LPModel convert_highs_presolved_lp_to_native(const HighsLp& presolved,
         const int native_row = row_to_native[static_cast<std::size_t>(row)];
         if (native_row >= 0) {
           row_trips.emplace_back(native_row, col, value);
+          continue;
+        }
+        const int native_eq = row_to_native_eq[static_cast<std::size_t>(row)];
+        if (native_eq >= 0) {
+          eq_trips.emplace_back(native_eq, col, value);
         }
       }
     }
@@ -264,8 +280,20 @@ LPModel convert_highs_presolved_lp_to_native(const HighsLp& presolved,
     out.row_lhs[r] = row_lhs[static_cast<std::size_t>(r)];
     out.b[r] = row_rhs[static_cast<std::size_t>(r)];
   }
-  out.Aeq.resize(0, ncols);
-  out.beq.resize(0);
+  const int m_eq = static_cast<int>(eq_rhs.size());
+  out.Aeq.resize(m_eq, ncols);
+  out.Aeq.setFromTriplets(eq_trips.begin(), eq_trips.end());
+  out.Aeq.makeCompressed();
+  out.beq.resize(m_eq);
+  for (int r = 0; r < m_eq; ++r)
+    out.beq[r] = eq_rhs[static_cast<std::size_t>(r)];
+  for (int r = 0; r < nrows; ++r) {
+    const int native_eq = row_to_native_eq[static_cast<std::size_t>(r)];
+    if (native_eq >= 0) {
+      highs_row_to_native_row[static_cast<std::size_t>(r)] =
+          m_rows + native_eq;
+    }
+  }
   out.highs_row_to_native_row = std::move(highs_row_to_native_row);
   HighsSparseMatrix row_matrix = presolved.a_matrix_;
   row_matrix.ensureRowwise();
@@ -1359,7 +1387,27 @@ HighsLpPresolveResult highs_presolve_lp(const LPModel& lp,
               side_state.presolved_col_linearly_transformable.size()) ==
               presolved.num_col_;
       if (!mapping_ok) {
-        out.status = "presolved_mapping_unavailable";
+        // Cold native LP solves need only the reduced LP and the retained
+        // HighsPostsolveStack: Highs::postsolve accepts a primal-only reduced
+        // solution for kReduced without a basis (Highs.cpp:3533-3565;
+        // HighsPostsolveStack.h:649-796).  The side-state affine map is a
+        // stricter forward-map/warm-start contract and is not an adoption
+        // prerequisite for this path.  Keep its vectors empty so any caller
+        // requesting forward projection still fails loudly.
+        out.status = "reduced_primal_postsolve_only";
+        out.reduced_rows =
+            static_cast<int>(reduced.A.rows() + reduced.Aeq.rows());
+        out.reduced_cols = static_cast<int>(reduced.vars.size());
+        out.reduced_nnz = reduced.A.nonZeros() + reduced.Aeq.nonZeros();
+        const bool worth_it =
+            cfg.min_shrink <= 0.0 ||
+            out.reduced_nnz < static_cast<long>(
+                                  cfg.min_shrink *
+                                  static_cast<double>(out.orig_nnz));
+        if (worth_it) {
+          out.reduced = std::move(reduced);
+          out.use_reduced = true;
+        }
         break;
       }
       out.reduced_to_orig_col.reserve(
@@ -1596,9 +1644,64 @@ bool highs_presolve_recover_primal(const LPModel& lp,
                                    Eigen::VectorXd& x_orig_out,
                                    double& objective_out) {
   Eigen::VectorXd x = highs_postsolve_primal(ps, x_reduced);
-  if (x.size() != static_cast<int>(lp.vars.size())) return false;
+  if (x.size() != static_cast<int>(lp.vars.size())) {
+    if (std::getenv("MIPSOLVERS_PRESOLVE_VERBOSE")) {
+      std::fprintf(stderr,
+                   "[HIGHS-PRESOLVE] primal_recovery postsolve_size=%lld "
+                   "expected=%lld\n",
+                   static_cast<long long>(x.size()),
+                   static_cast<long long>(lp.vars.size()));
+    }
+    return false;
+  }
 
-  if (!lp_solution_residual_acceptable(lp, x, audit_tol)) return false;
+  if (!lp_solution_residual_acceptable(lp, x, audit_tol)) {
+    if (std::getenv("MIPSOLVERS_PRESOLVE_VERBOSE")) {
+      // Diagnostic decomposition of the authoritative audit in
+      // dual_simplex.cpp:1852-1907.  It reports, but does not alter, the same
+      // sentinel-aware max violation and side scale used for publication.
+      constexpr double kSideSentinel = 1e19;
+      double row_violation = 0.0;
+      double equality_violation = 0.0;
+      double bound_violation = 0.0;
+      double scale = 1.0;
+      if (lp.A.rows() > 0) {
+        const Eigen::VectorXd ax = lp.A * x;
+        for (int i = 0; i < ax.size(); ++i) {
+          if (std::abs(lp.b[i]) < kSideSentinel) {
+            row_violation = std::max(row_violation, ax[i] - lp.b[i]);
+            scale = std::max(scale, std::abs(lp.b[i]));
+          }
+          const double lhs = lp_row_lhs_or_neg_inf(lp, i);
+          if (std::isfinite(lhs) && std::abs(lhs) < kSideSentinel) {
+            row_violation = std::max(row_violation, lhs - ax[i]);
+            scale = std::max(scale, std::abs(lhs));
+          }
+        }
+      }
+      if (lp.Aeq.rows() > 0) {
+        const Eigen::VectorXd eq_residual = lp.Aeq * x - lp.beq;
+        equality_violation = eq_residual.lpNorm<Eigen::Infinity>();
+        scale = std::max(scale, lp.beq.lpNorm<Eigen::Infinity>());
+      }
+      for (int j = 0; j < x.size(); ++j) {
+        const auto& var = lp.vars[static_cast<std::size_t>(j)];
+        if (std::isfinite(var.lb))
+          bound_violation = std::max(bound_violation, var.lb - x[j]);
+        if (std::isfinite(var.ub))
+          bound_violation = std::max(bound_violation, x[j] - var.ub);
+      }
+      const double violation =
+          std::max({0.0, row_violation, equality_violation, bound_violation});
+      std::fprintf(stderr,
+                   "[HIGHS-PRESOLVE] primal_recovery audit_rejected "
+                   "row=%.3e equality=%.3e bound=%.3e scale=%.3e "
+                   "relative=%.3e limit=%.3e\n",
+                   row_violation, equality_violation, bound_violation, scale,
+                   violation / scale, audit_tol);
+    }
+    return false;
+  }
 
   objective_out = lp.c.dot(x);
   x_orig_out = std::move(x);

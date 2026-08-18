@@ -507,6 +507,400 @@ P1 判定：**通过**，进入 P2。
 
 ---
 
+## P2 首次实现 mismatch：singleton 列不是 free 列（2026-08-19，未 commit）
+
+实现前固定预测为 greenbea 至少捕获既有探针锚点中的约 288 个
+singleton 列，行/列缩减率相较 P1 各再提升约 5%，耗时进入 1.0-2.5s；
+maros-r7 ≤900ms、dfl001 ≤2.5s。验证命令（HEAD `8d89b1cd`，MSVC Release，
+MKL/PARDISO，repeat 1 首探针）：
+
+```
+MIPSOLVERS_NATIVE_PRESOLVE=1 MIPSOLVERS_NATIVE_PRESOLVE_VERBOSE=1 \
+tests/Release/netlib_solver_benchmark.exe --data-dir tests/data \
+  --cases greenbea,maros-r7,dfl001 --solvers native-ipm --repeat 1 \
+  --time-limit 15 --max-iterations 100000
+```
+
+实测：greenbea P2 三类计数全部为 0（`doubleton_eq=0 singleton_cols=0
+free_col_subst=0`），仍为 2392→2315 行、5405→5276 列、
+30877→30231 nnz，presolve 3.3ms；maros-r7 与 dfl001 均 no_reduction。
+greenbea 求解落入既有增广轨迹长尾并在 21.6s 返回 Time limit；另两例
+分别 1476ms/3772ms accurate。结构缩减方向与预测相反，触发 §2.5。
+
+按 AGENTS.md §5 顺序重推导：
+
+1. **实现保真度错误（根因）**：首版只实现 doubleton equation 与
+   `isImpliedFree` 成立后的 equality substitution。附录 A.3 已记录 HiGHS
+   对 singleton column 的顺序是 dual fixing/stuffing/隐含界更新在先，
+   free substitution 在后；NETLIB MPS 列通常带默认下界 0，故
+   `singleton_cols=288` 从来不等价于 288 个 free/implied-free 候选。
+   把探针结构计数直接当作 free 代入计数是实现前语义映射错误。
+2. **成本模型**：未进入任何 P2 变换，无法检验缩减后的 factor 成本；
+   greenbea 的超时属于文档 §6 已登记的增广轨迹双稳态，不是 presolve
+   运行时间（3.3ms）或 fill-in 成本。
+3. **假设修正**：singleton 等式列即使带显式界仍可精确消元，但必须把
+   该界投影到等式其余变量。若
+   `a_j x_j + s = rhs` 且 `l_j ≤ x_j ≤ u_j`，则新行为
+   `rhs - max(a_j l_j,a_j u_j) ≤ s ≤
+   rhs - min(a_j l_j,a_j u_j)`；无穷端保持无穷。该式是对
+   `x_j=(rhs-s)/a_j` 的直接区间像推导（A&A 1995 §2.4），不需要
+   implied-free 假设，且用原等式行承载 ranged 约束时不增加行数或 nnz。
+   postsolve 仍按原等式快照恢复 `x_j`。
+
+修正后的 P2 预测（实现前重新固定）：greenbea 捕获的 singleton 等式列
+应为 200-288（允许部分候选因侧移哨兵/数值保护拒绝），列再降 3.7-5.3%，
+行数不保证同比下降；presolve ≤30ms。仅列缩减对 KKT 的收益弱于原预测，
+greenbea P2 耗时目标修正为 1.5-4.0s；maros-r7 ≤1.3s、dfl001 ≤3.5s。
+若 singleton 计数仍 <200，或任一 original-model 审计失败，再次停止并按
+同一顺序重推导。
+
+### P2 singleton 修正后二次 mismatch（2026-08-19，未 commit）
+
+按上式实现 bounded singleton equality projection 后，21 个规则用例、945
+断言全绿；但同一三案例探针仍为 `doubleton_eq=0 singleton_cols=0
+free_col_subst=0`，greenbea 结构仍 2392→2315 / 5405→5276 /
+30877→30231（3.6ms）。三例均 accurate，耗时 greenbea 4485ms、
+maros-r7 1697ms、dfl001 3324ms。singleton 计数低于重新固定的 200 下界，
+再次触发本节门。
+
+重排查结论：
+
+1. **实现保真度**：bounded singleton 的代数与正/反例 postsolve 均通过，
+   但 P1 输出上没有满足前置条件的候选；不是变换实现拒绝了 288 个候选。
+2. **成本/探针语义错误（根因）**：此前 `singleton_cols=288` 来自 HiGHS
+   完整 presolve 的规则计数，是界传播、dual fixing、stuffing 等规则级联
+   后动态产生的机会，不是原模型或 P1 输出的静态列度数。将完整 presolve
+   的末态计数拆给 P2 当独立输入锚点，违反了附录 A.3 已记录的规则顺序。
+3. **阶段依赖修正**：P2 三种代入规则保留并以单元/roundtrip 正确性验收，
+   但取消其独立长尾性能预测；P3 必须先实现 row implied bounds 与保守
+   dual fixing，再与 P2 共同迭代到 fixed point，才能检验 greenbea 候选
+   是否出现。先增加只读 verbose 计数（active singleton columns、其中
+   equality/ranged 分布及拒绝原因）固定真实基线，再为 P3 重新预测。
+
+本轮没有放宽总体验收目标；只是撤销“P2 单独即可产生 288 个候选”的错误
+分阶段假设。P3/P2 联合验收仍受 §2.3 最终时间与 90/90 accuracy 门约束。
+
+### P3 实现前算法卡与量化预测（2026-08-19）
+
+只读遥测确认 greenbea/maros-r7/dfl001 的 P1 输出均为：active singleton
+columns=0、singleton equality/ranged=0、doubleton equality rows=0、
+free/implied-free equality columns=0。因此 P3 先实现 A&A (1995) §3 的
+row implied bounds，并与 P1/P2 共同迭代。
+
+对行 `lhs_i ≤ Σ a_ik x_k ≤ rhs_i`，令去掉 j 后其余项的活动区间为
+`[L_-j,U_-j]`。若 `a_ij>0`，则
+`x_j ≥ (lhs_i-U_-j)/a_ij`、`x_j ≤ (rhs_i-L_-j)/a_ij`；若
+`a_ij<0` 两侧交换。无穷残余活动不产生对应界；界冲突在 1e-7 相对包络外
+才判 infeasible，1e-8 含混带内不收紧。实现用每行有限和+无穷贡献计数，
+把朴素 `O(Σ degree_i²)` 降为 `O(nnz)` 每轮（Achterberg et al. 2020
+§6.4 的活动界传播框架）。
+
+固定预测：greenbea 至少 100 次有效界收紧，并经 fixed/empty/singleton
+级联额外删除 ≥50 列，P2 候选从 0 变为正数；maros-r7/dfl001 至少一例
+达到 ≥1% 行或列缩减，否则 P3 本轮判定无性能价值。presolve 时间预算
+greenbea ≤80ms、另外两例 ≤150ms；三例须 accurate。联合耗时目标仍为
+greenbea 1.5-4.0s、maros-r7 ≤1.3s、dfl001 ≤3.5s。若收紧/删除方向错误或
+计数偏离上述下界 >50%，再次执行 mismatch 协议。
+
+### P3 首次 mismatch：残余活动无界（2026-08-19，未 commit）
+
+实现 `O(nnz)` row implied bounds 后，23 个用例、951 断言全绿；三案例
+短时结构探针却均为 `implied_bounds=0`，P1/P2 的尺寸与候选计数完全不变。
+greenbea “≥100 次收紧、额外删除 ≥50 列”的预测方向错误，触发 §2.5。
+
+排查顺序结论：
+
+1. **实现保真度**：四种系数/行侧组合的精确正例与残余活动无界的反例
+   均通过；现有 P1 行活动也在同一模型上报告大量无穷端。没有发现符号或
+   residual-sum 错误。
+2. **成本模型**：传播一轮仅把 greenbea presolve 保持在约 2-4ms，
+   不是时间盒阻断；计数为 0 是候选不可证，而非执行未完成。
+3. **假设违反（根因）**：三例为等式主导、变量多为单侧无界；对任一列，
+   其余项活动区间至少一端无穷。P3 算法卡明确规定无穷残余端不能推出界，
+   因而 “row implied bounds 会先制造 P2 候选” 的假设不成立。放宽容差
+   无法改变无穷活动，且会破坏正确性。
+
+处置：保留经过验证的 P3 规则，但取消本轮性能预测；不在该方向继续添加
+启发式。按原 §4 转入 P4 duplicate/parallel rows and columns 的结构哈希
+勘察，这类等价约简不依赖有限活动区间，且原计划明确以 greenbea、
+maros-r7 为主要受益案例。先只读统计精确重复/平行候选，再固定 P4 数量与
+性能预测；若候选同样为 0，需重新评估“标准规则子集足以复现 HiGHS 缩减”
+的 A1，而不能继续盲写规则。
+
+### P4 勘察 mismatch：A1 被证伪（2026-08-19，未 commit）
+
+按 P3 处置先加入只读结构哈希：活动行/列按支撑与归一化系数（1e-12
+量化，仅作候选计数，任何删除仍需二次精确验证）统计 parallel groups。
+三案例结果一致：`parallel_rows=0 parallel_cols=0`；同时 P2 六类候选仍
+全为 0。P4 原预测的 greenbea/maros-r7 结构收益没有输入基础。
+
+这次按 §2.5 排查的结论不是某条实现 bug，而是 **§2.4-A1 被证伪**：
+P1-P4 当前列出的标准局部规则子集不足以复现 HiGHS 在三个长尾模型上的
+reduced-to-empty 行为。依次观察到 P2 候选为 0、P3 有限活动传播为 0、
+P4 平行结构为 0 后，再实现 duplicate 删除或调容差不会改变模型，属于
+没有理论输入的代码猜测，必须停止。
+
+下一步改为协议勘察而非规则编码：检查 vendored HiGHS 是否能公开完整
+presolve reduction stack 的 reduced LP 与 primal postsolve，而不依赖当前
+失败的自定义列映射 `getPresolveSideState()`。若公共 `postsolve` 能接收
+native 内核得到的 reduced primal，则可形成“HiGHS 负责已验证的完整等价
+约简、native IPM 负责 reduced solve、原模型审计负责发布”的过渡闭环；
+它不等同于原立项的完全自研 presolve，因此采用前必须在本文另立预测和
+验收，并保留当前自研规则作为独立路径。若该协议也不可用，则本轮无法在
+不扩展到完整 11.6k 行 presolve 重实现的情况下满足最终性能目标。
+
+### HiGHS reduction-stack 过渡桥：实现前预测与验收（2026-08-19）
+
+代码审计确认 `highs_presolve_lp` 已保留执行 `presolve()` 的 HiGHS 实例，
+`highs_postsolve_primal` 直接调用公共 `Highs::postsolve(HighsSolution)`；
+`Highs::postsolve` 明确接受 `kReduced/kReducedToEmpty` 且 primal-only solution
+不需要 basis。当前阻断点仅是 `getPresolveSideState()` 的自定义仿射列映射
+硬门，而冷启动 IPM/dual-simplex 的采用与 primal postsolve 都不读取该映射；
+它只供 forward-map/warm-start 辅助使用。
+
+变更协议：`kReduced` 时始终转换并保留 reduced LP；若 side-state mapping
+缺失，状态记为 `reduced_primal_postsolve_only`，forward map 继续明确返回空，
+但允许 retained reduction stack 做 primal postsolve。发布仍需原模型 residual
+audit，任何 reduced solve/postsolve/audit 失败仍回退 direct，现有安全语义不变。
+引用：HiGHS `Highs::postsolve` (`highs/lp_data/Highs.cpp:3533-3565`) 与
+`HighsPostsolveStack::undo` (`highs/presolve/HighsPostsolveStack.h:649-796`)。
+
+固定预测：关闭自研 presolve、只开桥的首探针中，greenbea/maros-r7/dfl001
+均须 `use_reduced=1` 或 `solved_by_presolve=1`，original-model audit 3/3
+通过；按 §1.2 的 presolve 38-85ms 锚和 reduced 模型 native solve，目标
+greenbea ≤450ms、maros-r7 ≤600ms、dfl001 ≤2.2s。若 postsolve 失败或耗时
+偏离 >50%，按实现保真度→reduced 内核成本→假设顺序重查，暂不改选择策略。
+
+### 过渡桥首次 mismatch：转换器违反等式表示契约（2026-08-19）
+
+关闭自研 presolve、只开桥的 repeat-1 探针：dfl001 6071×12230→
+3657×9323（66.3ms presolve），2966ms accurate；maros-r7
+3136×9408→2152×6605（161.8ms），936ms accurate；greenbea
+2392×5405→952×2990（54.7ms），native reduced solve 15s Time limit。
+桥采用与两个 primal postsolve 均成功，证明取消 mapping 硬门的协议正确；
+但 greenbea 与 ≤450ms 预测方向相反，触发 §2.5。
+
+实现保真度首查即命中已知缺陷：
+`convert_highs_presolved_lp_to_native` 把所有 HiGHS 行放入 `A` 并用
+`row_lhs==b` 表示等式，`Aeq` 为空。本文 §6 P1 第一轮 mismatch 已实证
+zero-width slack 令 barrier 曲率 `theta ~ z/g_u` 在 `g_u→0` 时爆炸，
+并已规定所有精确等式必须回填 `Aeq/beq`；当时还特别记录该 HiGHS
+转换器“值得另案审查”。过渡桥是它第一次真正被 reduced solve 使用，
+所以 greenbea 重现同类停滞。
+
+处置固定：转换时按 `row_lower==row_upper` 精确拆入 `Aeq/beq`，其余行
+保留 `A/row_lhs/b`；矩阵、目标和盒不变，仅恢复 native IPM 的表示契约。
+修复后重复三例；greenbea 目标恢复 ≤450ms，maros-r7/dfl001 不得比本轮
+936/2966ms 回退 >20%，三例须 accurate。若 greenbea 仍超预测 50%，再查
+reduced 内核成本与轨迹，而不继续改转换语义。
+
+### 等式拆分后二次 mismatch：约简规模不是收敛性的充分条件（2026-08-19，未 commit）
+
+按上一节把 HiGHS 精确等式拆回 `Aeq/beq` 后，dfl001 为 2217ms、34 次
+迭代且 accurate，maros-r7 为 827ms、12 次迭代且 accurate；两者相对修复前
+分别改善约 25% 和 12%，没有触发 20% 回退门。greenbea 总时长却为
+5389ms，`presolve_used=3`，仍超过 450ms 预测超过十倍，故再次触发 §2.5。
+
+`MIPSOLVERS_IPM_VERBOSE=1` 将 greenbea 的两段成本拆开：HiGHS 约简后模型
+为 952 行、2990 列、23457 nnz，native 标准形为 `m=952, nn=3157,
+bw=825`；其 normal-equation 尝试只耗 524ms，但约 160 次迭代后 dual
+residual 停在约 `1.78e-4`，primal residual 振荡，未通过发布门。随后原模型
+normal/augmented 回退分别再耗约 3915/1093ms，构成总时长主体。
+
+按规定顺序重查：
+
+1. **实现保真度**：精确等式已进入 `Aeq/beq`，维数与 HiGHS presolved LP
+   一致；失败是完整 barrier 轨迹的残差停滞，不是转换遗漏或 postsolve
+   拒绝。
+2. **成本模型修正**：约简内核 524ms 仅比 450ms 预测高 16%，因子成本预测
+   基本成立；错误是默认这次尝试必然可发布，因而漏计了约 5s 原模型回退。
+3. **假设违反（根因）**：等价约简保留最优解映射，但不保证保留 native
+   barrier 冷启动所在的数值吸引域。尺寸缩小是每次 Newton 步更便宜的必要
+   条件，不是 residual 单调下降或有限步通过发布门的充分条件。
+
+处置：不调 IPM 容差、步长或迭代常数。只检验一个由当前结构遥测支持的
+组合：HiGHS reduced LP 仍有 100 个 active singleton columns，先对它运行
+已验证的 native P1-P3 等价规则，再做双层 primal postsolve。设 HiGHS 变换
+为 `P -> P_H`、native 变换为 `P_H -> P_N`；求得 `x_N` 后严格按栈逆序执行
+`x_H = T_N^{-1}(x_N)`、`x = T_H^{-1}(x_H)`，最后仍用原模型 residual audit
+发布。该复合正确性来自 A&A (1995) §2 的逐规则等价变换，以及 HiGHS
+`Highs::postsolve`/`HighsPostsolveStack::undo` 的逆序协议（上一节所列源码）。
+
+实现前固定预测与门：第二层 native presolve 在 greenbea 上 <=25ms；只有
+实际删除至少 1% 行或列时才采用（现有 meager gate），预期至少删除 30 列，
+否则报告不采用且不得改变现有路径。若采用，结构变化应打破当前停滞轨迹，
+reduced solve 必须成功、原模型 audit 必须通过，总时长 <=1.0s（相对 5.6s
+回退路径至少改善 82%）。dfl001/maros-r7 若第二层不采用，时长与解保持现状；
+若采用，三例均不得比各自 2217/827ms 回退超过 20%。若删除量、收敛方向或
+时间偏离门限，停止并依次检查双层 postsolve 实现、实际因子成本、singleton
+列可消去性假设，不用调参掩盖失配。
+
+### 双层约简首次 mismatch：P2 扫描未在成本盒内完成（2026-08-19，未 commit）
+
+按上一节接入双层栈并给第二层 50ms 硬盒后，greenbea repeat-1 为 7029ms
+accurate；详细复测为 5048ms accurate。两次都没有 native presolve summary，
+且内核结构仍为 HiGHS 输出的 `m=952, nn=3157, bw=825`，证明第二层返回
+`time_box`、没有采用。详细复测的 reduced normal 为 531ms，原模型 normal
+和 augmented 分别为 3564/855ms；轨迹与接入前相同，双层 postsolve 尚未执行。
+
+这同时否定了“第二层 <=25ms”和“至少删除 30 列”两个预测，按顺序排查：
+
+1. **实现保真度**：kernel LP 尺寸未变、最终 original audit accurate，说明
+   `time_box -> use_reduced=false` 的旁路契约正确；没有错误地把半成品模型
+   送入求解或 postsolve。
+2. **成本模型失配（当前根因）**：P1-P3 在原 greenbea 上约 2-4ms 不能外推
+   到 HiGHS reduced LP。后者虽 nnz 更少，却首次有 100 个 singleton-column
+   候选，会进入 P2 代入候选/填充检查；50ms 未完成说明候选扫描成本或级联
+   成本至少比预测高一倍。
+3. **结构假设尚未检验**：由于 pass 未完成，不能据此断言这 100 列不可消去，
+   也不能调 IPM 参数。先区分 build/P1/P3 与 P2 成本，再决定是否保留组合。
+
+下一步仅增加诊断可观测性：`time_box` 早退也打印 status/elapsed，并让第二层
+读取既有 `MIPSOLVERS_NATIVE_PRESOLVE_TIME_BOX`（master switch 仍由 HiGHS
+桥所有，不让 `MIPSOLVERS_NATIVE_PRESOLVE=0` 关闭嵌套诊断）。固定诊断协议：
+在 2s 上限下只跑一次 greenbea；若完成且删除 >=30 列，再以实测 presolve
+成本重算总成本并验证轨迹；若仍超时或零删除，双层方案判无性能输入并撤回，
+不继续扩时间盒。
+
+### 双层约简终止结论：2s 仍超时，撤回执行路径（2026-08-19，未 commit）
+
+诊断覆盖 `MIPSOLVERS_NATIVE_PRESOLVE_TIME_BOX=2` 后，greenbea 第二层明确
+输出 `time_box: rows 952->952 cols 2990->2990 nnz 23457->23457 ...
+2005.3ms`；最终虽 accurate，但总时长升至 8740ms。它既未完成也未产生可
+采用的中间结果，偏离 <=25ms 预测约 80 倍，并超过一次 reduced solve 成本
+约 3.8 倍。继续扩大 time box 的期望值为负。
+
+按上一节预先固定的处置，撤回 IPM bridge 中的双层执行路径，保留通用
+`time_box` verbose 行以便今后诊断。结构假设也据此作废：日志中的 100 个
+singleton columns 只是 IPM 标准形（含 slack/bound 扩展）统计，不等于
+`LPModel` presolve 的 100 个可代入原列；再次把下游标准形计数当上游规则
+候选，与 P2 首次 mismatch 的计数层级错误同型。下一步回到已量化的真实
+瓶颈：HiGHS reduced LP 的 531ms normal trajectory 在最优邻域附近不能同时
+通过 primal/dual 发布门；先审计失败点的原坐标 primal 是否已经满足原模型
+发布条件，再决定是终止判据缺少可发布解识别，还是确有对偶收敛缺陷。
+
+### 分离 primal/dual 证书：实现前推导与预测（2026-08-19）
+
+greenbea reduced normal 轨迹显示同一迭代联合 KKT 门过严地绑定了两个实际
+独立的证书：约 iter 95 时 `pf=3.36e-8`，已有高精度 primal 候选但
+`df=1.91e-4`；约 iter 155 时 `df=1.00e-10`，已有高精度 dual 候选但
+当前 `pf=1.84e-3`。这不是放宽容差的理由，而是终止实现漏掉了 LP 弱对偶
+允许的跨迭代组合。
+
+对 minimization 形式，任意 primal 可行 `x_p` 给出上界 `c'x_p`，任意 dual
+可行 `(y,z_l,z_u)` 给出下界 `d(y,z)`；二者无需来自同一个 barrier 点。
+因此在 original-coordinate audit 通过各自发布容差时，保留最小 primal
+objective 和最大 dual objective；若
+`|c'x_p-d(y,z)|/(1+|c'x_p|+|d(y,z)|) <= gap_tol`，弱对偶性即认证 `x_p`
+达到发布精度。maximization 先按现有 `sense_sign` 转成 minimization，公式
+不变。引用：Nocedal & Wright, *Numerical Optimization*, 2nd ed., §13.1
+（LP primal/dual 与 weak duality）；当前 `audit_ipm_lp_optimality` 已在原坐标
+计算同一 primal residual、dual residual 和 objective gap，因此不引入新
+数值定义。
+
+实现协议：只在单边 scaled residual 进入现有 100x cheap gate 后执行原坐标
+audit；primal/dual 各自通过严格 publication tolerance 才保存快照。联合
+gap 通过后发布保存的 primal 与保存的 dual multipliers，再由函数末尾完整
+KKT audit 复核；任何一侧缺失或 gap 不合格时轨迹与回退完全不变。
+
+固定预测：greenbea 应在 <=165 次迭代用 iter≈95 的 primal 与 iter≈155 的
+dual 组成证书，reduced kernel <=650ms、含 presolve/postsolve 总时长 <=0.9s，
+相对当前约 5.0-5.6s 回退改善 >=82%；dfl001/maros-r7 若本来同迭代收敛则
+路径与迭代数不变，耗时不得回退 >10%。三例 original-model audit 3/3 通过，
+否则按快照坐标/符号实现→audit 成本→“两侧 objective 已闭合”假设重查。
+
+### 分离证书首次 mismatch：两侧可行但 objective 未闭合（2026-08-19，未 commit）
+
+实现严格的单边 original-coordinate audit 与快照后，greenbea 仍回退并以
+6868ms accurate 结束，没有发布 `Optimal (split primal-dual certificate)`。
+因此 <=165 次、<=0.9s 的预测方向错误。
+
+当前顺序排查结论：实现仍由函数末尾完整 KKT audit fail-closed，且未出现
+错误发布；轨迹时间增加主要是机器波动/原模型回退，不是少量 `O(nnz)` audit。
+剩余假设缺口是把 `pf/df` 达标误当成 objective 自动闭合：弱对偶组合还要求
+保存的 primal 上界与 dual 下界 gap 达标，而当前结果证明它没有发生。先在
+verbose 下输出 `best_primal_residual/best_dual_residual/split_gap`，固定真实量级；
+禁止放宽 gap tolerance。若 gap 远大于 1e-7，则撤回此性能路径（可保留理论上
+正确但无收益的快照，或为零开销撤回），转查为何 normal 轨迹不能在 primal
+可行性保持时继续改善 objective/dual，而不是误称证书完成。
+
+### 分离证书终止结论：三例 gap 均不达标，撤回实现（2026-08-19，未 commit）
+
+verbose 量化结果：greenbea 的最佳单边快照为 primal residual `4.905e-5`、
+dual residual `5.923e-6`（二者各自在自身相对标尺下过 1e-7 门），但 split
+gap=`1.908e-5`，是发布门的 191 倍。dfl001/maros-r7 的 split gap 分别为
+`2.513e-7`/`2.657e-7`，也未过门。强制 augmented 形式求解 greenbea reduced
+LP 则 15s time limit，不能作为 normal 失败后的低成本恢复。
+
+因此“跨迭代证书即可消除回退”的 objective-闭合假设被三例共同否定。
+分离快照在理论上成立，但目标 workload 没有收益且增加近收敛 `O(nnz)` audit，
+按上一节预案撤回实现，避免把无效实验留在生产路径。保留文档记录；不放宽
+gap，不把 benchmark 的 1e-5 objective 判据替代求解器 1e-7 KKT 发布契约。
+
+### HiGHS bridge 二次根因：reduced side-scale 放大（2026-08-19）
+
+新增 fail-only 遥测推翻了“reduced kernel 失败”的判断：greenbea reduced
+solve 在 iter 163 返回 `Optimal (original KKT audit)`，scaled `pf=4.032e-6`、
+其 reduced-LP 原坐标 absolute primal residual=`1.351e-5`、relative primal
+residual=`1.130e-9`。HiGHS postsolve 后原模型分项为 row `4.571e-6`、
+equality `1.351e-5`、bound `1.730e-6`；原模型 side scale=1，故 relative
+residual=`1.351e-5`，被 1e-7 发布门正确拒绝。回退根因不是 postsolve
+放大，而是同一 absolute equality residual 在 reduced 模型约 1.20e4 的
+全局 side scale 下被掩盖。
+
+这与 P1 native mismatch 的 tolerance-transfer 模型完全同型。已有
+`lp_presolve_publication_tol_scale(orig,reduced)=0.9*s_orig/s_reduced` 正是保证
+`tol*scale_reduced <= 0.9*tol*scale_orig`；但函数的 `1e-4` 防御下限只因 native
+`kSideShiftCap=1e2` 才不会破坏不等式。HiGHS reduction 不受该 cap 约束，本例
+真实 ratio 给出约 `7.5e-5`，而下限返回 `1e-4`，已违反函数声明的 transfer
+invariant。修正不是新容差，而是移除不适用下限（改为仅防 underflow 的
+`1e-12`），native 路径因 cap 保证其返回值不变；HiGHS bridge 把所得 scale
+传入 reduced `direct_solve`。引用仍为本文 P1 audit-transfer 推导。
+
+固定预测：greenbea reduced solve 在 <=220 次迭代把 absolute primal residual
+压到 <=`9e-8`，HiGHS postsolve 后 original audit 通过，总时长 <=1.0s；
+dfl001/maros-r7 original audit 保持通过，耗时不得比 2.0s/0.65s 基线回退
+>20%。若 greenbea 轨迹在更严门下停滞或总时长 >1.5s，停止并按实现
+（scale 是否实际传入）→内核额外迭代成本→global-scale transfer 是否足以
+约束 eliminated-row roundoff 的顺序重查，不放宽 original audit。
+
+### HiGHS bridge publication-transfer 验收（2026-08-19，未 commit）
+
+修复后 greenbea repeat-1：`pub_scale=7.528e-5`，iter 165，reduced-LP
+absolute primal residual `3.813e-8`；HiGHS postsolve 后 original audit 通过，
+553.85ms accurate。相对修复前 4.4-6.9s 的 fallback 路径改善约 87-92%，
+满足 <=220 iter、<=1.0s 和 <=`9e-8` 三项固定预测。
+
+三案例 native-ipm vs highs-ipm、Release、repeat 3、time-limit 15s、commit
+`8d89b1cd` + 本工作树，命令：
+
+```
+netlib_solver_benchmark --cases greenbea,maros-r7,dfl001 \
+  --solvers native-ipm,highs-ipm --repeat 3 --time-limit 15 \
+  --max-iterations 100000 --json reports/bridge_pubscale_tail_r3.json
+```
+
+| case | Native median | HiGHS-IPM median | accuracy | measured / fixed target |
+|---|---:|---:|---|---|
+| greenbea | 536.20ms | 213.51ms（3/3 fail） | native 3/3 | <=1.0s，达标；HiGHS 无 accurate 时间 |
+| dfl001 | 2080.71ms | 1702.21ms | 双方 3/3 | 1.222x，略超 1.2x 总门 |
+| maros-r7 | 634.80ms | 430.48ms | 双方 3/3 | 1.475x，未达 1.2x 总门 |
+
+合计 native 9/9 accurate，HiGHS-IPM 6/9 accurate。dfl001/maros-r7 的 transfer
+scale 为 0.866/0.9，迭代仍为 34/12，证明本修复没有用过严 tolerance 制造
+剩余时间差；maros-r7 的 HiGHS presolve 单次约 132ms，native reduced kernel
+约 512ms，剩余差距属于内核/完整 presolve 效率，不可再由本次 audit-transfer
+模型解释。结论：publication correctness 与 greenbea 回退长尾已闭合，但
+§2.3 的 dfl001/maros-r7 `<=1.2x` 及“各种性能全面超越”仍未完成，禁止把
+9/9 vs 6/9 accuracy 优势表述成全部时间门通过。
+
+正确性验收：`test_lp_presolve` 23 cases/954 assertions、
+`test_branch_and_cut` 35/492、`test_numerical_stability` 27/479 均通过；完整
+Release `ctest --output-on-failure` 为 19/19（最终二进制 208.38s）。因三案例性能门未
+全部通过，按 §4 协议未启动 NETLIB 90 repeat-3。
+
+---
+
 ## 附录 A：P2 代入规则算法卡（HiGHS 语义提取，2026-08-18）
 
 来源：vendored HiGHS（`highs/presolve/HPresolve.cpp/.h`、

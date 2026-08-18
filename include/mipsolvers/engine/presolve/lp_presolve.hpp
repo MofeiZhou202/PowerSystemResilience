@@ -29,6 +29,13 @@ struct LpPresolveConfig {
   /// switch (§3.1) and the IPM wiring overlays the
   /// MIPSOLVERS_NATIVE_PRESOLVE* environment variables on top of it.
   bool enabled{false};
+  /// Run P2 equality substitutions after the P1 zero-fill fixpoint.  Kept
+  /// separately controllable for phase-level regression tests; production
+  /// callers leave the theory-guided P2 rule set enabled.
+  bool substitutions{true};
+  /// Run P3 row-activity implied-bound propagation.  Production callers
+  /// leave it enabled; phase-level tests can isolate earlier rule sets.
+  bool propagate_bounds{true};
   /// Wall-clock time box for one presolve pass.  Exceeding the box returns
   /// the unreduced model with status "time_box" (risk R5, §5).
   double time_box_sec{2.0};
@@ -156,10 +163,9 @@ Eigen::VectorXd postsolve_primal(const LpPresolveResult& result,
 /// Publication tolerance scale for the reduced solve (relative to the
 /// reduced model's global side scale) that guarantees the wiring's
 /// original-model residual audit.  Returns
-/// `clamp(0.9 * scale_orig/scale_reduced, 1e-4, 1.0)`; the invariant
+/// `min(0.9 * scale_orig/scale_reduced, 1.0)`; the invariant
 /// `result <= scale_orig/scale_reduced` is what the audit transfer
-/// requires, and kSideShiftCap keeps the clamp floor from ever violating
-/// it.  See the implementation comment for the full derivation
+/// requires.  See the implementation comment for the full derivation
 /// (native_presolve_lp_2026-08-18.md §6, P1 second mismatch round).
 double lp_presolve_publication_tol_scale(const LPModel& orig,
                                          const LPModel& reduced);

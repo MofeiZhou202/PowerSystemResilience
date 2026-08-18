@@ -512,10 +512,26 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
         bool reduced_ok = true;
         if (ps.use_reduced) {
           static const Eigen::VectorXd empty;
+          const double publication_tol_scale =
+              lp_presolve_publication_tol_scale(prob, ps.reduced);
           SolveResult rr = direct_solve(
               ps.reduced, empty,
               AugmentedBackendPolicy::StructurePreserving,
-              opt_.newton_formulation);
+              opt_.newton_formulation, publication_tol_scale);
+          if (std::getenv("MIPSOLVERS_PRESOLVE_VERBOSE")) {
+            std::fprintf(stderr,
+                         "[HIGHS-PRESOLVE] reduced_solve status=%s "
+                         "success=%d iterations=%d primal=%.3e dual=%.3e "
+                         "gap=%.3e original_primal=%.3e relative_primal=%.3e "
+                         "pub_scale=%.3e\n",
+                         rr.stats.status.c_str(),
+                         static_cast<int>(rr.stats.success),
+                         rr.stats.iterations, rr.stats.primal_feas,
+                         rr.stats.dual_feas, rr.stats.complementarity,
+                         rr.stats.unscaled_primal_feas,
+                         rr.stats.relative_primal_residual,
+                         publication_tol_scale);
+          }
           reduced_ok = rr.stats.success;
           reduced_kernel_failed = !reduced_ok;
           x_reduced = rr.x;

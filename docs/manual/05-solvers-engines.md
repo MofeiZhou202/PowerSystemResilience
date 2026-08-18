@@ -77,9 +77,10 @@ SolverEngine -> StrategyDispatcher -> PresolveManager
   或 Gurobi。
 - `IPMLPOptions::centrality_step_control=false` 只为复现旧的固定步长
   A/B 保留，不建议生产使用。
-- `IPMLPOptions::presolve`（默认 `true`）自 2026-08 P1 阶段起是活的：
-  原生 LP presolve（Andersen & Andersen 1995 §2.1-2.3 零填充规则：空行/
-  空列/固定列/冗余行/singleton 行）在冷启动求解前运行，reduced 模型
+- `IPMLPOptions::presolve`（默认 `true`）自 2026-08 起是活的：原生 LP
+  presolve 迭代运行 Andersen & Andersen (1995) §2.1-§3 的空行/空列、
+  固定列、冗余行、singleton 行、doubleton 等式/自由列/singleton 等式列
+  代入和 row implied-bound 传播。reduced 模型
   求解后经 postsolve + 原模型残差审计发布，任何一步失败都回退原模型
   direct 求解，因此不会发布错误或更松的解。环境变量
   `MIPSOLVERS_NATIVE_PRESOLVE=0` 强制关闭（其他任何值强制开启），
@@ -88,6 +89,13 @@ SolverEngine -> StrategyDispatcher -> PresolveManager
   返回未缩减模型）。Auto 选择器（§3）的 IPM 臂本阶段不走 presolve；
   设计与分阶段验收见
   `docs/archive/native_presolve_lp_2026-08-18.md`。
+- `IPMLPOptions::use_highs_presolve=true`（或 `MIPSOLVERS_PRESOLVE=1`）为
+  冷启动对照路径：HiGHS 负责完整等价约简，native IPM 求解 reduced LP，
+  再由保留的 HiGHS reduction stack 做 primal-only postsolve。该路径不要求
+  affine forward mapping；warm start 仍要求映射并在缺失时明确拒绝。
+  reduced solve 的发布容差按原/约简模型 side-scale 比例收紧，postsolve 后
+  仍须通过原模型残差审计，失败则回退 direct。
+  `MIPSOLVERS_PRESOLVE_VERBOSE` 输出约简、reduced solve 与恢复审计诊断。
 
 ### 2.2 MILP
 
