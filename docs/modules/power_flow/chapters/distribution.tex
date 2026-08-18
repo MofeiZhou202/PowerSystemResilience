@@ -39,12 +39,14 @@ Shirmohammadi et al.\ 1988）为主路径，面向单相（正序）等值模型
 \fld{parent\_is\_from\_side}（:build\_bfs\_tree）。无 SLACK 直接抛异常（:solve\_distribution\_pf\_ac\_snapshot）。
 诚实口径：
 \begin{itemize}
-  \item \textbf{辐射假设不强制校验}：头文件仅要求调用方先用
-        \srcpath{topology\_analysis.hpp} 的 \texttt{is\_radial()} 自查
-        （hpp:429--430）；环网送入时 BFS 树按先访问者确定父支路，环路支路
-        不参与扫描但仍出现在支路潮流回算中，结果\textbf{不报错也不保证正确}；
-  \item \textbf{与根不连通的孤岛}：未进入 \fld{order} 的母线电压保持初值
-        （\fld{vm\_pu}、相角 $0$），不参与残差计算，结果中静默保留（:solve\_distribution\_pf\_ac\_snapshot）；
+  \item \textbf{连通性与辐射假设显式 fail-close}：BFS 树未覆盖全部母线
+        （非单连通分量）或在役支路数 $\neq n-1$（非辐射）时不再静默继续，
+        而是置 \fld{control\_converged}=false、\fld{residual}=$+\infty$、
+        返回全零电压向量，并把原因串
+        \texttt{bfs\_requires\_one\_connected\_component} 或
+        \texttt{bfs\_requires\_radial\_topology} 写入
+        \fld{specialized\_path\_fail\_close\_reason}
+        （src/power\_flow/distribution\_power\_flow.cpp:solve\_distribution\_pf\_ac\_snapshot）；
   \item \textbf{多 SLACK}：只取首个 SLACK 为根（:solve\_distribution\_pf\_ac\_snapshot），其余 SLACK 母线
         当作普通节点处理，其出力由 \fld{compute\_net\_injection} 按普通发电机
         扣减（:260--267 仅跳过根）。
@@ -57,8 +59,11 @@ $S^{\mathrm{net}}_i=(S^{\mathrm{load}}_i-S^{\mathrm{gen}}_i)/S_{\mathrm{base}}$
 :208--225）、充电站（kW/kvar 换算，:228--235）、可选母线与可分组并联补偿
 （\fld{include\_shunts}，:238--257）、常规/静态/可再生发电机、PV（经功率曲线，
 :290--299，见本节下文）与储能（放电为正，:301--309），发电机侧一律跳过根节点。
-基准容量 \fld{base\_mva}$\le 0$ 时回退 $100$~MVA（:solve\_distribution\_pf\_ac\_snapshot）。注意 ZIP 负荷在此
-被\textbf{恒功率近似}（注释 :214--216），不随电压迭代更新。
+基准容量 \fld{base\_mva}$\le 0$ 时回退 $100$~MVA（:solve\_distribution\_pf\_ac\_snapshot）。ZIP 负荷
+已是\textbf{电压依赖}：\srcpath{run\_bfs\_sweep} 每轮回推都经
+\srcpath{voltage\_dependent\_net\_demand}（src/power\_flow/distribution\_power\_flow.cpp:voltage\_dependent\_net\_demand）
+按 $z\cdot|V|^2+i\cdot|V|+p$ 乘子随当前电压更新净需求（含母线并联与
+并联补偿的 $|V|^2$ 项），不再按恒功率冻结。
 
 内层扫描 \srcpath{run\_bfs\_sweep}（:run\_bfs\_sweep）。记复变比
 $t=|\mathrm{tap}|\angle\delta$（$|\mathrm{tap}|<10^{-12}$ 视为 $1$，:121--125），
@@ -226,7 +231,7 @@ src/power\_flow/distribution\_power\_flow.cpp:solve\_three\_phase\_distribution\
         精确一致（容差 $10^{-12}$），控制电压与按 DSS 数据独立复算值差
         $<0.2$~V（:verify\_regulator\_case\_matches\_repository），终止原因 \texttt{within\_band}；另有运行时
         语义矩阵（:1970，remote/local/LDC 组合逐场景核对 \fld{stop\_reason}
-        与 DSS 桥一致）与带母线合并的失败路径索引回归（:2490, :2519）；
+        与 DSS 桥一致）与带母线合并的失败路径索引回归（:TEST\_CASE, :TEST\_CASE）；
   \item \textbf{固定档变压器}：1ph 直通变压器（:TEST\_CASE）、固定档 vs 变比感知
         BFS（:TEST\_CASE）、LV 侧固定档端到端（:TEST\_CASE）。
 \end{itemize}

@@ -130,7 +130,9 @@ $Y_{bus}$ 装配时 $|z|=0$ 支路直接跳过（\srcpath{src/power\_flow/admitt
 \begin{itemize}
   \item \textbf{API 层 SolverDataCache}（thread\_local，src/api/hacdcpf.cpp:SolverDataCache）：
         同一 \texttt{HybridPowerSystem} 对象且 \fld{loss\_model} 不变时直接复用；
-  \item \textbf{求解器层 PatternCache}（engine 规范头 include/hacdcpf/power\_flow/newton\_solver.hpp）：
+  \item \textbf{求解器层 PatternCache}（规范头
+        \srcpath{include/hacdcpf/engine/solver/native/nle/newton\_solver.hpp}；
+        \srcpath{include/hacdcpf/power\_flow/newton\_solver.hpp} 为转发头）：
         缓存 \texttt{JacobianContext}、\texttt{JacobianPattern} 与稀疏线性求解器实例，
         键含数据指针、\fld{build\_id}（原子递增，缓存失效标记）与 Ybus/Gdc 存储地址；
         稀疏模式只在缓存失效时 \texttt{analyzePattern} 一次，之后每次迭代仅数值分解；

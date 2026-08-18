@@ -62,6 +62,9 @@ struct GlobalizationOptions {
   Strategy strategy{Strategy::LineSearch};
   double   trust_region_radius0{1.0};
   double   trust_region_max{10.0};
+  // ptc_delta0 / ptc_growth currently have no reader in src/ (PTC step size
+  // is driven by robust_nonlinear's ptc_dt0/ptc_dt_min/ptc_dt_max/ptc_gamma);
+  // retained for API/serialization compatibility.
   double   ptc_delta0{1.0};
   double   ptc_growth{2.0};
 };
@@ -157,6 +160,9 @@ struct PowerFlowOptions {
 
   double trust_region_radius0{1.0};
   double trust_region_max{10.0};
+  // ptc_delta0 / ptc_growth currently have no reader in src/ (PTC step size
+  // is driven by robust_nonlinear's ptc_dt0/ptc_dt_min/ptc_dt_max/ptc_gamma);
+  // retained for API/serialization compatibility.
   double ptc_delta0{1.0};
   double ptc_growth{2.0};
 

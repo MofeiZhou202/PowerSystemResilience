@@ -94,7 +94,7 @@ MW/MVAr 有名值，角度容差为度或 rad（随测试原文注明），成�
 \fld{opf\_hand\_01}--\fld{04}（1--2 母线 JSON 微算例） &
 README 闭式手算（merit order、支路拥塞、负荷削减、线性化成本） &
 LP 精确；QP 参考目标 815.333 &
-\srcpath{external\_data/opf\_hand\_cases/README.md}:21--296（未接入 ctest，GUI 手检）\\
+\srcpath{external\_data/opf\_hand\_cases/README.md（该目录当前不在仓库检出中）}:21--296（未接入 ctest，GUI 手检）\\
 MATPOWER 小算例 &
 case5/9/14/30/39/57（$\le 57$ 节点） &
 NativeAC 与 NativeQP 各自收敛 + Newton PF 回放 &
@@ -165,6 +165,11 @@ case9、case14、IEEE14 AC/DC、4 母线串联归约 &
 
 \subsection{手算解析解基准}\label{subsec:ver:hand}
 
+\textbf{诚实声明}：\srcpath{external\_data/opf\_hand\_cases/} 当前不在仓库检出中
+（工作区无此目录，git 历史亦无其提交记录）。本节内容转录自该目录 README 的
+早前版本，保留作文档存档；当前检出中无法复现或复算，读者请勿按文中路径
+查找算例文件。
+
 \srcpath{external\_data/opf\_hand\_cases/} 提供四个刻意做到极小的 JSON 算例，每个都在
 README 中给出完整闭式推导，用于对照 GUI/API 的 DC OPF 路径（直流模型无损，手算结果
 精确；README 同时声明 AC/parity 路径只作冒烟，因为交流可行性细节不在手算范围内，
@@ -197,7 +202,7 @@ README 中给出完整闭式推导，用于对照 GUI/API 的 DC OPF 路径（�
 
 \subsubsection*{已知偏差}
 该目录在当前检出中\textbf{未被任何 C++ 测试或 ctest 目标引用}（全仓检索仅
-\srcpath{ngnlp/chapters/07\_validation\_and\_usage.tex}:57--60 提及），定位为
+\srcpath{docs/modules/power\_flow/chapters/validation.tex}:134 提及），定位为
 GUI/API 人工校核材料；算例 02 的 README 明确“支路对偶当前不被 DC OPF 路径认证，
 应校验原始调度与潮流限值而非 \fld{branch\_mu\_*}”
 （\srcpath{external\_data/opf\_hand\_cases/README.md}:124），与
@@ -691,7 +696,7 @@ RPO &
 \srcpath{tests/test\_three\_phase\_hybrid\_opf.cpp}:512--522\\
 手算算例未自动化 &
 验证覆盖 &
-\srcpath{external\_data/opf\_hand\_cases/} 无 C++ 测试/ctest 引用，仅 GUI 人工校核 &
+\srcpath{external\_data/opf\_hand\_cases/}（该目录当前不在仓库检出中）无 C++ 测试/ctest 引用，仅 GUI 人工校核 &
 \srcpath{external\_data/opf\_hand\_cases/README.md}:1--19\\
 arm64 静态 MUMPS 数值/ABI 问题 &
 Ipopt 后端 &

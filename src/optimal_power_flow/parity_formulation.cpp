@@ -33,9 +33,6 @@ constexpr double kReactiveSetpointRegularization = 1.0e-3;
 
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kDegToRad = kPi / 180.0;
-// Stiffness (pu power per pu volt) of the soft anchor that holds an unobservable
-// DC bus at its setpoint — large enough to pin V_dc≈vm_pu, small enough to stay
-// well conditioned in the KKT.
 
 double clamp_interior(double x, double lo, double hi) {
   if (!std::isfinite(x)) {
@@ -2326,7 +2323,9 @@ void equality_jacobian(const Problem& prob,
     // Flex load in power balance: +pflex (adds to demand side)
     t.emplace_back(cidx.i_pbal_ac + bus, idx.i_pflex + k, prob.scale_p);
   }
-  // Soft DC voltage anchor: ∂/∂V_dc[k] = K for unobservable buses.
+  // Unobservable DC buses are pinned to their setpoint through tight variable
+  // bounds (see the dc_volt_anchor loop in setup_bounds), which contributes no
+  // equality-constraint Jacobian entries.
   // Energy-router port injections (AC rows scaled like other injections; DC
   // unscaled) and per-router active-power conservation rows.
   for (const auto& port : prob.er_ports) {

@@ -72,7 +72,7 @@ header-only 实现（\srcpath{src/power\_flow/nonmonotone\_linesearch.cpp} 仅�
 $M=1$ 退化为标准单调 Armijo。主循环中的实际形态
 （src/power\_flow/newton\_solver.cpp:NewtonSolver::solve 构造、\srcpath{run\_line\_search} :1493--1585）：
 merit 每轮压入窗口（:NewtonSolver::solve）；回溯 $\alpha\leftarrow\beta\alpha$、
-试探上限 \fld{max\_line\_search\_steps}$=10$ 次（:1506, :1525--1528）；
+试探上限 \fld{max\_line\_search\_steps}$=10$ 次（:run\_line\_search（lambda）, :run\_line\_search（lambda））；
 \fld{enable\_nonmonotone\_linesearch}=false 时改用 $M=1$ 的单调搜索实例
 （:run\_line\_search（lambda））。如实说明：生产回溯次数由 \fld{max\_line\_search\_steps}
 （默认 10）控制；折减系数即 \fld{line\_search\_beta}（默认 0.5，经构造函数传入，
@@ -101,10 +101,12 @@ merit 每轮压入窗口（:NewtonSolver::solve）；回溯 $\alpha\leftarrow\be
 $\rho<0.1$ 或 pred$\le0\Rightarrow\lambda\times10$，
 \srcpath{include/hacdcpf/power\_flow/lm\_trust\_region.hpp}）；\texttt{PtcSerController} 按 SER 公式
 $\delta t\leftarrow\mathrm{clamp}(\delta t(r_{k-1}/r_k)^\gamma,
-\delta t_{\min},\delta t_{\max})$ 调节伪时间步（)。如实说明：这两个
-控制器类当前\textbf{未被} Newton 主循环调用——生产的信赖域 dogleg 与 PTC
-直接使用 MIPSolvers 内核函数（见下），控制器与 \fld{ptc\_dt0}/
-\fld{ptc\_gamma} 等选项是预留接口。
+\delta t_{\min},\delta t_{\max})$ 调节伪时间步（\srcpath{include/hacdcpf/power\_flow/globalization/lm\_trust\_region.hpp:PtcSerController}）。
+如实说明：\texttt{LMController} 当前\textbf{未被} Newton 主循环调用，属预留接口；
+\texttt{PtcSerController} 已接线——PTC 全局化分支以 \fld{ptc\_dt0}/\fld{ptc\_dt\_min}/
+\fld{ptc\_dt\_max}/\fld{ptc\_gamma} 构造该控制器，用其 \texttt{dt()} 装配
+$J+I/\delta t$ 并以 \texttt{update()} 逐步更新伪时间步
+（src/power\_flow/newton\_solver.cpp:NewtonSolver::solve）。
 \paragraph{数学模型与算法}
 \begin{itemize}
   \item \textbf{信赖域 dogleg}（\fld{globalization}=TrustRegion，
@@ -116,19 +118,23 @@ $\delta t\leftarrow\mathrm{clamp}(\delta t(r_{k-1}/r_k)^\gamma,
         $\Delta\leftarrow\min(2\Delta,\Delta_{\max})$，$\rho<0.25$ 时
         $\Delta\leftarrow\max(0.25\Delta,10^{-10})$，$\rho>0$ 才接受
         （同文件 :62--80；调用 :1541--1542）。
-  \item \textbf{PTC}（\fld{globalization}=PseudoTransient，:1547--1579）：
-        求解 $(J+I/\delta t)\Delta x=-F$（)，步\textbf{无条件接受}
-        （)；SER 更新 $\delta t\leftarrow\delta t\cdot(r_{k-1}/r_k)$，
-        残差近零时改乘 \fld{ptc\_growth}，上限 $10^{12}$
-        （include/hacdcpf/engine/kernel/globalization/globalization.hpp；调用 :1579）。初值
-        \fld{ptc\_delta0}$=1.0$、增长 \fld{ptc\_growth}$=2.0$
-        （:1322，\srcpath{include/hacdcpf/power\_flow/power\_flow\_options.hpp:PowerFlowOptions}）。
+  \item \textbf{PTC}（\fld{globalization}=PseudoTransient，
+        src/power\_flow/newton\_solver.cpp:NewtonSolver::solve）：
+        求解 $(J+I/\delta t)\Delta x=-F$，步\textbf{无条件接受}；
+        SER 更新 $\delta t\leftarrow\delta t\cdot(r_{k-1}/r_k)^\gamma$，
+        残差 $\le10^{-30}$ 时改乘 $2$（\texttt{PtcSerController::update}
+        内硬编码），并钳位到 $[\delta t_{\min},\delta t_{\max}]$
+        （\srcpath{include/hacdcpf/power\_flow/globalization/lm\_trust\_region.hpp:PtcSerController}）。
+        初值 $\delta t_0$、指数 $\gamma$ 与上下限分别取
+        \fld{ptc\_dt0}$=0.1$、\fld{ptc\_gamma}$=0.7$、
+        \fld{ptc\_dt\_min}$=10^{-4}$、\fld{ptc\_dt\_max}$=10^{6}$
+        （\srcpath{include/hacdcpf/power\_flow/globalization/robust\_nonlinear\_options.hpp:RobustNonlinearOptions}）。
   \item \textbf{LM/PTC 自动恢复}（\fld{enable\_auto\_fallback\_scheduling}，
         默认\textbf{开}，\srcpath{include/hacdcpf/power\_flow/robust\_nonlinear\_options.hpp}；
         src/power\_flow/newton\_solver.cpp:NewtonSolver::solve）：线搜索与正则化全部失败后，LM 恢复解
         $(J^{\mathsf T}J+\lambda I)\Delta x=-J^{\mathsf T}F$（:NewtonSolver::solve），
         最多 4 次尝试、$\lambda$ 自 \fld{lm\_lambda0} 起 $\times10$ 增至
-        \fld{lm\_lambda\_max}（:2344--2348, :2387--2390）；仍失败则以 $J+I/\delta t$ 做
+        \fld{lm\_lambda\_max}（:reduce\_ncp\_mu（lambda）, :reduce\_ncp\_mu（lambda））；仍失败则以 $J+I/\delta t$ 做
         PTC 恢复并无条件接受（:NewtonSolver::solve）。
 \end{itemize}
 \paragraph{参数表}
@@ -136,7 +142,7 @@ $\delta t\leftarrow\mathrm{clamp}(\delta t(r_{k-1}/r_k)^\gamma,
 \fld{enable\_lm\_trust\_region\_fallback} & — & — & on/off & true & 允许 LM 恢复步（仅在自动调度开启时生效）\\
 \fld{lm\_lambda0}/\fld{lm\_lambda\_max} & $\lambda$ & — & — & $10^{-4}$/$10^{8}$ & LM 初始阻尼与上限（:1662--1684 使用）\\
 \fld{enable\_ptc\_ser} & — & — & on/off & true & 允许 PTC 恢复步（仅在自动调度开启时生效）\\
-\fld{ptc\_dt0} 等四字段 & $\delta t$ 族 & — & — & 0.1 / $10^{-4}$ / $10^{6}$ / 0.7 & SER 控制器预留（\fld{ptc\_dt\_min}/\fld{\_max}/\fld{ptc\_gamma}；生产 PTC 用 \fld{opt.ptc\_delta0}/\fld{ptc\_growth}）\\
+\fld{ptc\_dt0} 等四字段 & $\delta t$ 族 & — & — & 0.1 / $10^{-4}$ / $10^{6}$ / 0.7 & SER 控制器步长参数，已接线：PTC 分支以其构造 \texttt{PtcSerController}（\fld{ptc\_dt\_min}/\fld{\_max}/\fld{ptc\_gamma}；src/power\_flow/newton\_solver.cpp:NewtonSolver::solve）\\
 \fld{trust\_region\_radius0} & $\Delta_0$ & — & 0.1--2 & 1.0 & 信赖域初始半径（\texttt{PowerFlowOptions}，:1321）\\
 \fld{trust\_region\_max} & $\Delta_{\max}$ & — & 5--50 & 10.0 & 信赖域半径上限\\
 \fld{enable\_auto\_fallback\_scheduling} & — & — & on/off & true & 失败时自动追加 LM/PTC 恢复（src/power\_flow/newton\_solver.cpp:NewtonSolver::solve）\\
@@ -281,7 +287,7 @@ DCPF/Gauss--Seidel 暖启动（)。纯 AC（只用 AC 子系统，头文件
         $\sum a/\sum b$；每 2 阶做一次收敛检查（幅值/相角变化
         $<$\fld{mismatch}，:610--627），终值提取 :635--653；无功限值外环至多
         10 次 PV$\to$PQ 切换、越限 $10^{-6}$ 判据、Q 注入钉限
-        （:472--473, :655--688）；暖启动 DCPF 角度基线（:dcpf\_warmstart）/GS 预迭代
+        （:verify\_physical\_residual（lambda）, :verify\_physical\_residual（lambda））；暖启动 DCPF 角度基线（:dcpf\_warmstart）/GS 预迭代
         （:gauss\_seidel\_warmstart）；K 因子在 PV+SLACK 间分摊不平衡（:apply\_distributed\_slack）。
 \end{itemize}
 \paragraph{参数表（\texttt{HelmOptions}，include/hacdcpf/power\_flow/helm\_solver.hpp）}
@@ -289,7 +295,7 @@ DCPF/Gauss--Seidel 暖启动（)。纯 AC（只用 AC 子系统，头文件
 \fld{max\_coef} & $n_{\max}$ & 阶 & 50--200 & 100 & 幂级数最大系数数\\
 \fld{mismatch} & $\varepsilon$ & pu/rad & $10^{-8}$--$10^{-4}$ & $10^{-6}$ & Padé 收敛容差（幅值与相角）\\
 \fld{enforce\_q\_limits} & — & — & on/off & true & 无功限值 PV$\to$PQ 外环开关\\
-\fld{warm\_start}/\fld{gauss\_iter} & — & — & None / DCPF / GS & None/5 & 暖启动策略与 GS 预迭代次数（:12--24, :46）\\
+\fld{warm\_start}/\fld{gauss\_iter} & — & — & None / DCPF / GS & None/5 & 暖启动策略与 GS 预迭代次数（）\\
 \fld{allow\_multi\_slack} & — & — & on/off & true & 多 slack 母线（均置单位行）\\
 \fld{participation\_factors} & $K$ & — & $\ge0$ & 空 & 分布式松弛参与因子（非空即启用）\\
 \fld{sparse\_threshold} & — & 母线 & — & 200 & 稀疏阈值（当前实现恒为稀疏，该字段未消费）；\fld{pade\_trace\_out} 为收敛轨迹输出指针\\
@@ -369,7 +375,7 @@ LU 求解 Newton 线性系统，并配 Schur 补 AC/DC 块预条件器，面向�
         $<100\times$\fld{gmres\_tol} 且步有限、$\max|\Delta x|<10^{6}$；
   \item \textbf{触发与回退}（newton\_solver.cpp）：条件代理
         $>$\fld{nk\_condition\_trigger} 且开关开启时本轮用 NK（:NewtonSolver::solve）；
-        三种全局化分支均可受益（:1506--1509, :1555--1558, :1583--1588），
+        三种全局化分支均可受益（:run\_line\_search（lambda）, :run\_line\_search（lambda）, :run\_line\_search（lambda）），
         默认分支 NK 失败或步不被接受时回落标准 LU（:NewtonSolver::solve）；状态写入
         \fld{profiling.linear\_solver\_status}（\texttt{nk\_gmres}/
         \texttt{nk\_gmres\_schur}/\texttt{nk\_gmres\_failed}，:1250--1255）。

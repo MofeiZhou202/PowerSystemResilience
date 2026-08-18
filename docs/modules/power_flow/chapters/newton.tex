@@ -140,8 +140,10 @@ CMake 选项 \srcpath{HACDCPF\_USE\_SUITESPARSE}，缺失回退 Eigen SparseLU�
 MATPOWER 风格无功限值切换（src/power\_flow/newton\_solver.cpp:solve）：外环上限 30 次；
 内层收敛后检查隐含无功 $Q_g^{\mathrm{implied}}=Q^{\mathrm{calc}}+Q^{\mathrm{load}}-Q^{\mathrm{conv}}$
 越限（迟滞 \fld{pv\_q\_hysteresis\_pu}=0.01），越限则转 PQ 并把 \fld{qg} 钉在限值；
-全部限内后尝试恢复 PV（\fld{pv\_recover\_vm\_tol\_pu}=0.01）。迭代内仅在残差
-$<10^{-3}$ 时才允许切换（:solve），未收敛时仅残差 $\le 0.1$ 才允许（:solve）。
+全部限内后尝试恢复 PV（\fld{pv\_recover\_vm\_tol\_pu}=0.01）。切换\textbf{只在外环}
+发起，迭代内不做切换：内层 Newton 收敛后统一检查越限（:solve）；内层未收敛时
+仅当残差 $\le 0.1$ 才允许按当前 $Q$ 估计切换重试（:solve，守卫避免大残差下
+按不可靠 $Q$ 值在 PV/PQ 间来回振荡）。
 换流器 PQ$\leftrightarrow$VDC\_Q 模式切换在残差 $<10^{-6}$ 后按迟滞评估
 （高/低阈值 0.03/0.01 pu、持续 2 次迭代，:797--861, 1444--1454；
 逻辑见第~\ref{sec:hybrid}~章）。
@@ -169,7 +171,8 @@ $<10^{-3}$ 时才允许切换（:solve），未收敛时仅残差 $\le 0.1$ 才�
         无条件接受（:solve）；全部失败记 \fld{inner\_failed}（:solve）。
 \end{enumerate}
 另两种全局化策略：信赖域 dogleg（半径 1.0$\to$10）与伪瞬态延拓
-（$J+I/\delta t$，SER 时间步；\fld{ptc\_delta0}=1.0、\fld{ptc\_growth}=2.0），
+（$J+I/\delta t$，SER 时间步由 \fld{ptc\_dt0} 族驱动，详见
+第~\ref{sec:robust:lmptc}~节），
 由 \fld{opt.globalization} 三选一。完整算法伪代码见技术笔记
 \srcpath{docs/archive/reference/technical\_notebook/sections/03\_power\_flow.tex} 的 Algorithm PF-1；
 五阶段鲁棒管线的组件细节见本手册第~\ref{sec:robust}~章。

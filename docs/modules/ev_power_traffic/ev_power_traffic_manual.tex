@@ -109,7 +109,8 @@
 
 \section{接口与参数}
 \begin{paramtable}
-\fld{num\_steps} & $T$ & 步 & 整数 & — & 时域离散步数\\
+\fld{num\_steps}（\texttt{EVPowerTrafficOptions}） & $T$ & 步 & 整数 & $24$ & 时域离散步数（\srcpath{include/hacdcpf/ev\_power\_traffic/options.hpp:EVPowerTrafficOptions}）\\
+\fld{num\_steps}（\texttt{JointOptimizerOptions}） & $T$ & 步 & 整数 & $6$ & 时域离散步数（联合优化默认时域，\srcpath{include/hacdcpf/ev\_power\_traffic/options.hpp:JointOptimizerOptions}）\\
 \fld{dt\_ctm\_hr} & $\Delta t$ & h & CFL 界内 & — & CTM 时间步（受 CFL 约束）\\
 \fld{n\_cells\_per\_link} & — & — & 整数 & — & 每条路段的元胞数\\
 \fld{ev\_pce} & — & — & 正数 & $1$ & EV 折算当量系数（PCE）\\

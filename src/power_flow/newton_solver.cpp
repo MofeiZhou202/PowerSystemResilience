@@ -2329,12 +2329,13 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
       }  // end globalization dispatch
 
       // ── Gap 3: Auto-schedule Phase 3/4 in-loop recovery ───────────────
-      // When the default line-search branch exhausted all options (regulari-
-      // sation + escape move) without accepting a step, automatically try a
-      // Levenberg-Marquardt recovery step and then a pseudo-transient step
-      // before declaring inner_failed.  This integrates Phase 3 fallbacks
-      // into the main loop without requiring opt.globalization to be set
-      // explicitly to TrustRegion or PseudoTransient.
+      // When the default line-search branch exhausted all options (line
+      // search followed by diagonal regularisation above) without accepting
+      // a step, automatically try a Levenberg-Marquardt recovery step and
+      // then a pseudo-transient step before declaring inner_failed.  This
+      // integrates Phase 3 fallbacks into the main loop without requiring
+      // opt.globalization to be set explicitly to TrustRegion or
+      // PseudoTransient.
       if (!accepted_step && opt.globalization == GS::LineSearch &&
           ropts.enable_auto_fallback_scheduling) {
         // ── LM recovery step ────────────────────────────────────────────

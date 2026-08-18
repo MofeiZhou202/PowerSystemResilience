@@ -29,9 +29,9 @@ VSC 与 DC/DC 换流器稳态模型、DC 岛电压参考规划，以及换流器
 DC 母线类型枚举 \texttt{DCBusType}（\srcpath{include/hacdcpf/model/enums/bus\_types.hpp:DCBusType}）：
 \texttt{DC\_P}=1（功率母线）、\texttt{DC\_V}=3（电压参考母线）、
 \texttt{DC\_ISOLATED}=4（失电母线，剔除出方程组）。
-\textbf{如实说明}：\srcpath{include/hacdcpf/power\_flow/dc.hpp:solve\_dc} 的注释称
-"linear approximation"，但实现（见下节）是 $V\odot GV=P$ 的\textbf{非线性} Newton，
-与线性化角度直流潮流（$B\theta=P$，纯 AC）不是一回事。
+\textbf{如实说明}：\srcpath{include/hacdcpf/power\_flow/dc.hpp:solve\_dc} 求解的是
+非线性电阻 DC 节点方程 $V\odot GV=P$（头文件注释已注明 nonlinear；实现见下节，
+为 \textbf{非线性} Newton），与线性化角度直流潮流（$B\theta=P$，纯 AC）不是一回事。
 
 \subsection{DC 网络方程与纯 DC 求解器}
 
@@ -411,7 +411,7 @@ VSC 与 DC/DC \textbf{不}构成连边（:compute\_dc\_components），与协调
 （$k_{total}=\sum|k_{vdc}|$，退化时取 $0.1\times$ 成员数）；被提升/刚性锁定的换流器
 记入 \fld{promotion\_lock}（:solve）防止外环降级；提升名单与告警写入
 \fld{diagnostics.promoted\_vsc\_indices} 与 \fld{diagnostics.warnings}（:solve），
-终态换流器列表经 \fld{diagnostics.effective\_converters} 输出（:975, :1862）。
+终态换流器列表经 \fld{diagnostics.effective\_converters} 输出（:from\_parts, :from\_parts）。
 
 \subsubsection*{验证与校核}
 \srcpath{tests/test\_dc\_island\_reference.cpp}：无参考 DC 岛自动提升 PQ 换流器后

@@ -606,9 +606,15 @@ IPM 求解核的公共契约是 \fld{IPMOptions}/\fld{IPMResult} 与
 
 \begin{enumerate}
   \item \textbf{编译期门控}。CMake 选项 \srcpath{HACDCPF\_ENABLE\_IPOPT}
-        仅 macOS 默认 ON（\srcpath{CMakeLists.txt}:60--67）；非 Apple
-        平台显式开启会直接 \fld{FATAL\_ERROR}，因为 MIPSolvers 内嵌
-        Ipopt 的 CMake 构建路径目前是 macOS-only（同文件:HACDCPF\_ENABLE\_IPOPT）。
+        仅 macOS 默认 ON、其余平台默认 OFF
+        （\srcpath{CMakeLists.txt}:HACDCPF\_ENABLE\_IPOPT，帮助串为
+        ``when supported by that checkout''）。非 Apple 平台显式开启
+        \textbf{不再}触发 \fld{FATAL\_ERROR}：选项仅经
+        \srcpath{MIPSOLVERS\_BUILD\_LOCAL\_IPOPT} 转发给 MIPSolvers
+        子项目（同文件:MIPSOLVERS\_BUILD\_LOCAL\_IPOPT），能否真正构建
+        取决于该 MIPSolvers 检出对内嵌 Ipopt 的支持；当前
+        \srcpath{CMakeLists.txt} 中的 \fld{FATAL\_ERROR} 只剩 IPO 与
+        测试联用、OpenDSS 库缺失等少数守卫。
         构建成功时 MIPSolvers 子项目向全部依赖目标传播宏
         \srcpath{HACDCPF\_HAVE\_IPOPT=1}
         （\srcpath{MIPSolvers/CMakeLists.txt}:254--260）。OPF 门面代码

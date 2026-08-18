@@ -309,9 +309,9 @@ cpp:553--579）从一次完成的 \fld{CpfResult} 派生，输出
 
 \subsection{验证与校核}
 \begin{itemize}
-  \item \textbf{专项回归}：NEW 新增
+  \item \textbf{专项回归}：
         \srcpath{tests/test\_voltage\_stability.cpp}，已注册于
-        \srcpath{tests/CMakeLists.txt:124}，含两个 Catch2 用例：
+        \srcpath{tests/CMakeLists.txt:124}，含五个 Catch2 用例：
         \begin{enumerate}
           \item \textbf{弧长翻越鼻点}（:TEST\_CASE）：两母线电压稳定算例
                 （\srcpath{make\_two\_bus\_voltage\_stability\_case}，
@@ -327,7 +327,18 @@ cpp:553--579）从一次完成的 \fld{CpfResult} 派生，输出
                 \fld{has\_component\_loads} 为真且
                 \srcpath{CpfDirection::proportional} 给出的
                 \fld{dp\_load}/\fld{dq\_load} 等于聚合后数值
-                （$55$~MW/$22$~Mvar）——覆盖上节所述组件聚合口径。
+                （$55$~MW/$22$~Mvar）——覆盖上节所述组件聚合口径；
+          \item \textbf{PV 母线触发的回退专项}（:TEST\_CASE）：两母线算例
+                加挂带限值 PV 机组，断言求解退回 Q 限感知的自然参数化
+                （\fld{arc\_length\_used}=false、\fld{q\_limits\_enforced}、
+                \fld{model\_scope} 含 \texttt{pv-pq-active-set} 且给出告警）——
+                覆盖在运 PV 母线触发的弧长$\to$自然参数化回退分支；
+          \item \textbf{首步失败不置鼻点}（:TEST\_CASE）：\fld{step\_init} 设为
+                $100$ 强制首步校正失败，断言 \fld{nose\_found}=false、trace 仅
+                基态一点、\fld{termination\_reason} 含 \texttt{no continuation step}；
+          \item \textbf{工厂适配器}（:TEST\_CASE）：
+                \texttt{PowerFlowMethod::Continuation} 经
+                \srcpath{PowerFlowSolverFactory} 求解收敛且残差达标。
         \end{enumerate}
         同批新增的高级求解器回归还有
         \srcpath{tests/test\_homotopy\_continuation.cpp} 与
@@ -335,8 +346,7 @@ cpp:553--579）从一次完成的 \fld{CpfResult} 派生，输出
         （\srcpath{tests/CMakeLists.txt:123,125}），第~\ref{sec:robust}~章
         所述同伦求解器与 Newton--Krylov 的“无专项回归”状态同步解除；
   \item \textbf{仍未覆盖（诚实口径）}：混合 AC/DC 系统的 CPF（\fld{vdc}
-        轨迹与 DC slack 布局）、legacy 自然参数化模式、在运 PV 母线触发的
-        弧长$\to$自然参数化回退分支（src/power\_flow/voltage\_stability.cpp:solve）、
+        轨迹与 DC slack 布局）、legacy 自然参数化模式、
         \fld{vm\_min\_pu} 电压下限停止分支、\srcpath{at\_buses} 方向、
         \srcpath{compute\_vsi} 指标派生以及多 slack 系统均无专项断言；
         纯 NR 求解器之外的 MATPOWER 大算例 CPF 基准也不存在。GUI 后端无

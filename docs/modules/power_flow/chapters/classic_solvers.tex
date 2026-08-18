@@ -218,7 +218,7 @@ include/hacdcpf/power\_flow/ac\_linearized\_pf.hpp:solve\_ac\_linearized\_dc）�
 \alpha_i^{0}=1/R_i\;(\text{droop},\ R_i>0\text{ 否则取容量}),\qquad
 \alpha_i^{0}=1\;(\text{equal})
 \]
-（:create\_participation\_factors），统一归一化 $\sum_i\alpha_i=1$（:45--63, :417）；单机分摊上限
+（:create\_participation\_factors），统一归一化 $\sum_i\alpha_i=1$（:normalize\_factors, :create\_participation\_factors）；单机分摊上限
 与该母线机组群的调节裕度挂钩（三种模式同一口径），
 $\overline P_i=\max\big(|P_{\min,i}^{\Sigma}-P_{g,i}^{\mathrm{sched}}|,\,
 |P_{\max,i}^{\Sigma}-P_{g,i}^{\mathrm{sched}}|\big)/S_{\mathrm{base}}$
@@ -230,12 +230,15 @@ $\overline P_i=\max\big(|P_{\min,i}^{\Sigma}-P_{g,i}^{\mathrm{sched}}|,\,
 \textbf{简化变体} \srcpath{solve\_simplified}（:solve\_simplified）：先做换流器协调预校核
 （可阻断，:284--293），随后 \srcpath{make\_solver\_data} $+$ 统一 Newton 求基准解
 （:297--299，电压经 \srcpath{unproject\_bus\_vector} 回投影，:311--319）；
-基准解收敛后计算参与母线集合上的总不平衡
+基准解收敛后计算\textbf{全部 AC 母线}上的总不平衡
 \[
-\Delta P_{\Sigma}=\sum_{i\in\mathcal P}\big(P_i^{\mathrm{calc}}-P_i^{\mathrm{spec}}\big)
+\Delta P_{\Sigma}=\sum_{i\in\text{全部 AC 母线}}\big(P_i^{\mathrm{calc}}-P_i^{\mathrm{spec}}\big)
 \]
 （\srcpath{compute\_total\_participating\_mismatch\_pu}，:72--132；致密 $O(n^2)$ 复算，
-含换流器 AC 注入 \srcpath{converter\_ac\_injection}，:111--122），按
+含换流器 AC 注入 \srcpath{converter\_ac\_injection}，:111--122）。求和取全部已解 AC
+母线而非仅参与母线：非 slack 方程在数值容差内相消，剩余即全体 slack 母线提供的
+有功；只取参与母线会在物理 slack 不在参与集合时静默返回零（函数内注释，
+src/power\_flow/distributed\_slack\_solver.cpp:compute\_total\_participating\_mismatch\_pu）。按
 $\Delta P_i=\alpha_i\,\Delta P_{\Sigma}$ 分摊输出（:solve\_simplified）。
 
 \textbf{限值变体} \srcpath{solve\_full\_jacobian}：每轮完整 Newton 求解后，用
@@ -296,8 +299,12 @@ $\max(10^{-10},\fld{tol})$ pu 时结束，最多 20 次完整求解。
 \texttt{AdaptiveSolveResult solve(const HybridPowerSystem\& sys, const PowerFlowOptions\& opt,\\
 \hspace*{2em}const std::unordered\_map<int, ReactiveLimit>\& q\_limits = \{\}) const;}
 \end{quote}
-如实说明：\texttt{q\_limits} 形参当前\textbf{未接线}（\texttt{(void)q\_limits;}，
-src/power\_flow/adaptive\_solver.cpp:apply\_reactive\_limit\_overrides）。岛描述结构 \texttt{IslandInfo}
+如实说明：\texttt{q\_limits} 形参已接线——\srcpath{apply\_reactive\_limit\_overrides}
+（src/power\_flow/adaptive\_solver.cpp:apply\_reactive\_limit\_overrides）先校验
+\fld{base\_mva} 为正、限值有限且 \fld{qmin}$\le$\fld{qmax}，再把限值按
+\fld{base\_mva} 折算改写该母线首台在运发电机的 \fld{qmin\_mvar}/\fld{qmax\_mvar}
+（同母线其余机组清零）；限值非法或引用的 AC 母线无在运发电机时抛
+\texttt{std::runtime\_error}。岛描述结构 \texttt{IslandInfo}
 （\srcpath{include/hacdcpf/model/ac\_components.hpp:IslandInfo}）。公共 API
 \srcpath{solve\_power\_flow\_adaptive}（\srcpath{src/api/hacdcpf.cpp:solve\_power\_flow\_adaptive}）在收敛后
 于全系统 SolverData 上补算支路潮流（:solve\_power\_flow\_adaptive）；
@@ -312,8 +319,11 @@ src/power\_flow/adaptive\_solver.cpp:apply\_reactive\_limit\_overrides）。岛�
 （:detect\_islands），DFS 求连通分量（:detect\_islands）。活岛判据 \fld{has\_generators} 只看
 \textbf{真实在运注入}（发电机 $P_g>10^{-9}$ 或 \fld{is\_slack}、换流器
 $|P_{set}|$、静态/可再生/PV/储能/VPP、外部电网，:221--289），明确不以 SLACK
-母线类型作代理（注释 :222--229）。如实说明：\textbf{纯 DC 岛（无 AC 母线）被丢弃}
-（:detect\_islands），不出现在结果中。
+母线类型作代理（注释 :222--229）。如实说明：\textbf{每个连通分量都生成}
+\texttt{IslandInfo}（含纯 DC 岛，:detect\_islands）；无源岛（\fld{has\_generators}=false）
+不删除，而是在 \texttt{AdaptiveSolver::solve} 中按死岛处理、电压置零
+（\srcpath{src/power\_flow/adaptive\_solver.cpp:solve}，
+\srcpath{set\_dead\_island\_zero}）。
 
 \textbf{求解流程}（src/power\_flow/adaptive\_solver.cpp:solve）：
 \begin{enumerate}
@@ -346,7 +356,7 @@ $|P_{set}|$、静态/可再生/PV/储能/VPP、外部电网，:221--289），明
 \fld{tol}、\fld{max\_iter} & --- & --- & --- & $10^{-8}$/50 &
   转发各岛 Newton（见第~\ref{sec:newton}~章）\\
 \fld{loss\_model} & --- & 枚举 & --- & Linear &
-  各岛 \srcpath{make\_solver\_data} 装配损耗模型（:151, :216--218）\\
+  各岛 \srcpath{make\_solver\_data} 装配损耗模型（:merge\_island\_diagnostics, :merge\_island\_diagnostics）\\
 \end{paramtable}
 
 \subsubsection*{验证与校核}

@@ -536,8 +536,8 @@ $\kappa_d<\varepsilon_p$、$\kappa_c<\kappa_c^{tol}$ 四者同时成立
 \texttt{maximum iterations reached} & — & — & — & — & 迭代耗尽（:1041 默认值）\\
 \texttt{KKT factorization failed} & — & — & — & — & 正则化梯级/惯性校正全败（:1477--1480 凝集、:1311--1314 增广）\\
 \texttt{predictor back-solve failed} & — & — & — & — & 预测步回代失败（:1321--1326，仅增广）\\
-\texttt{corrector back-solve failed} & — & — & — & — & 校正步回代失败（:1386--1391、:1522--1526）\\
 \texttt{NaN in corrector step} & — & — & — & — & 校正方向出现非有限值（:1394--1398、:1537--1540）\\
+\texttt{NaN in corrector step} & — & — & — & — & 校正方向出现非有限值（:build\_kkt\_workspace、:solve\_economic\_dispatch）\\
 \texttt{filter line search failed} & — & — & — & — & 回溯耗尽且恢复阶段失败（:solve\_primal\_dual\_ipm）\\
 \end{paramtable}
 两条硬异常在入口处抛出 \fld{std::runtime\_error}：问题规模非法
@@ -615,32 +615,32 @@ $1000\times$ 容忍带（互补另取 $10^{-2}$ 工程下限）时仍按收敛�
 
 \subsubsection*{IPMOptions 字段}
 \begin{paramtable}
-\fld{max\_iter} & $K_{\max}$ & — & 100--1000（经验值） & 400 & 主迭代上限；驱动层折算 $80\times8=640$（\srcpath{native\_ipm\_solver.hpp}:18，src/optimal\_power\_flow/ac\_opf.cpp:solve\_with\_parity\_ipm）\\
-\fld{tol\_primal} & $\varepsilon_p$ & — & $10^{-8}$--$10^{-5}$（经验值） & $10^{-6}$ & 原始可行与平稳性判据容忍度；驱动层取 $\max(\fld{feasibility\_tol},10^{-10})$（:19，:1032，src/optimal\_power\_flow/ac\_opf.cpp:solve\_with\_parity\_ipm）\\
-\fld{tol\_dual} & $\varepsilon_d$ & — & $10^{-8}$--$10^{-5}$（经验值） & $10^{-6}$ & 不进收敛判据；仅滤波器平稳守卫 $\max(10\varepsilon_d,1.02\kappa_d)$（:20，:1701）\\
-\fld{tol\_complementarity} & $\varepsilon_c$ & — & — & $10^{-6}$ & \textbf{本核未读取}；互补阈值固定为 $\max(10\varepsilon_p,2\times10^{-3})$（:21，:1033--1036）\\
-\fld{regularization} & $\delta_0$ & — & — & $10^{-8}$ & \textbf{本核未读取}；正则化梯级硬编码（:22，:1459--1464）\\
-\fld{alpha\_max} & $\tau$ & — & 0.9--0.9999（经验值） & 0.95 & fraction-to-boundary 因子；驱动层把 \fld{interior\_fraction} 经 clamp 夹到 $[0.5,\,0.9999]$，默认 0.995（:23，:947，src/optimal\_power\_flow/ac\_opf.cpp:solve\_with\_parity\_ipm）\\
 \fld{verbose} & — & — & true/false & false & 逐迭代调试日志（:24，:1155--1160）\\
+\fld{tol\_primal} & $\varepsilon_p$ & — & $10^{-8}$--$10^{-5}$（经验值） & $10^{-6}$ & 原始可行与平稳性判据容忍度；驱动层取 $\max(\fld{feasibility\_tol},10^{-10})$（\srcpath{native\_ipm\_solver.hpp}:IPMOptions，src/optimal\_power\_flow/ac\_opf.cpp:solve\_with\_parity\_ipm）\\
+\fld{tol\_dual} & $\varepsilon_d$ & — & $10^{-8}$--$10^{-5}$（经验值） & $10^{-6}$ & 不进收敛判据；仅滤波器平稳守卫 $\max(10\varepsilon_d,1.02\kappa_d)$（\srcpath{native\_ipm\_solver.hpp}:IPMOptions，src/optimal\_power\_flow/parity\_ipm.cpp:solve\_primal\_dual\_ipm）\\
+\fld{tol\_complementarity} & $\varepsilon_c$ & — & — & $10^{-6}$ & \textbf{本核未读取}；互补阈值固定为 $\max(10\varepsilon_p,2\times10^{-3})$（\srcpath{native\_ipm\_solver.hpp}:IPMOptions，src/optimal\_power\_flow/parity\_ipm.cpp:solve\_primal\_dual\_ipm）\\
+\fld{regularization} & $\delta_0$ & — & — & $10^{-8}$ & \textbf{本核未读取}；正则化梯级硬编码（\srcpath{native\_ipm\_solver.hpp}:IPMOptions，src/optimal\_power\_flow/parity\_ipm.cpp:solve\_primal\_dual\_ipm）\\
+\fld{alpha\_max} & $\tau$ & — & 0.9--0.9999（经验值） & 0.95 & fraction-to-boundary 因子；驱动层把 \fld{interior\_fraction} 经 clamp 夹到 $[0.5,\,0.9999]$，默认 0.995（\srcpath{native\_ipm\_solver.hpp}:IPMOptions，src/optimal\_power\_flow/ac\_opf.cpp:solve\_with\_parity\_ipm）\\
+\fld{verbose} & — & — & true/false & false & 逐迭代调试日志（\srcpath{native\_ipm\_solver.hpp}:IPMOptions，src/optimal\_power\_flow/parity\_ipm.cpp:solve\_primal\_dual\_ipm）\\
 \fld{enable\_phase\_one} & — & — & true/false & true & 无兼容完整状态时运行有界 primal/dual 起点构造\\
 \fld{phase\_one\_time\_limit\_ms} & — & ms & $>0$ 协作截止；$\le0$ 不限 & 5000 & 在稀疏分解之间检查，单次分解不可中断\\
 \fld{phase\_one\_max\_iterations} & — & — & $\ge0$ & 12 & 约束 Newton 迭代硬上限\\
 \fld{phase\_one\_max\_factorizations} & — & — & $\ge0$ & 14 & primal 恢复与一次 dual fit 共用的数值分解硬上限\\
 \fld{phase\_one\_max\_backtracks} & — & — & $\ge0$ & 12 & 每次 Newton 步的回溯上限\\
-\fld{phase\_one\_barrier\_mu} & $\mu_I$ & — & $>0$ & 0.1 & Phase I 屏障参数，clamp 至 $[10^{-12},0.1]$；非有限或 $\le0$ 回退 0.1（:51，:1507--1512）\\
-\fld{phase\_one\_admission\_mu\_factor} & — & — & $\ge0$ & 1.0 & Phase I 准入要求 violation $\le$ 因子$\times\mu_I$，否则记 \texttt{outside-phase-one-admission}；非有限回退 1.0（:52，:1544--1552）\\
-\fld{phase\_one\_primal\_mu\_factor} & — & — & $\ge0$ & 0.1 & 交接 primal 容差 $\max(\varepsilon_p,\text{因子}\times\mu_I)$；非有限回退 0.1（:53，:1513--1520）\\
-\fld{phase\_one\_centrality\_tolerance} & $\eta_c$ & — & $\ge0$ & 0.5 & 中心性门槛（$\max_i|z_i\mu_i/\mu_0-1|$ 判据）；非有限回退 0.5（:54，:1959--1972）\\
-\fld{phase\_one\_dispatch\_dual\_predictor} & — & — & true/false & false & 实验性零分解连通分量 dispatch-price dual 候选（:55，:2240--2254）\\
 \fld{phase\_one\_dispatch\_dual\_min\_improvement} & — & — & 0--1 & 0.05 & raw 与 normalized dual residual 必须同时达到的改善比例（:56，:2245）\\
+\fld{phase\_one\_admission\_mu\_factor} & — & — & $\ge0$ & 1.0 & Phase I 准入要求 violation $\le$ 因子$\times\mu_I$，否则记 \texttt{outside-phase-one-admission}；非有限回退 1.0（:inf\_norm，:elapsed\_ms（lambda））\\
+\fld{phase\_one\_primal\_mu\_factor} & — & — & $\ge0$ & 0.1 & 交接 primal 容差 $\max(\varepsilon_p,\text{因子}\times\mu_I)$；非有限回退 0.1（:inf\_norm，:restore\_phase\_one\_primal）\\
+\fld{phase\_one\_centrality\_tolerance} & $\eta_c$ & — & $\ge0$ & 0.5 & 中心性门槛（$\max_i|z_i\mu_i/\mu_0-1|$ 判据）；非有限回退 0.5（:ftb，:initialize\_phase\_one\_duals）\\
+\fld{phase\_one\_dispatch\_dual\_predictor} & — & — & true/false & false & 实验性零分解连通分量 dispatch-price dual 候选（:ftb，:apply\_obj\_scale\_hessian（lambda））\\
+\fld{phase\_one\_dispatch\_dual\_min\_improvement} & — & — & 0--1 & 0.05 & raw 与 normalized dual residual 必须同时达到的改善比例（:ftb，:apply\_obj\_scale\_hessian（lambda））\\
 \fld{prepared\_state} & — & — & 指针/null & null & 跨求解保有 KKT 符号分析的所有者；\fld{layout\_signature} 变化时调用方须 \texttt{reset}（:66，:2385--2386、3466--3469）\\
 \fld{prepared\_numeric\_refactor} & — & — & true/false & false & 实验性数值重分解请求；当前后端无独立可审计 refactor 对象，fail-closed 报 \texttt{unsupported} 并总是新算数值因子（:70，:3473--3482）\\
 \fld{prepared\_numeric\_max\_relative\_drift} & — & — & $\ge0$ & $10^{-3}$ & 数值重分解允许的矩阵值相对漂移上限（:71；当前后端不消费，见上行）\\
 \fld{prepared\_numeric\_backward\_error\_tolerance} & — & — & $\ge0$ & $10^{-8}$ & 数值重分解的后向误差审计门槛（:72；当前后端不消费，见上行）\\
-\fld{primal\_start} & $x_0$ & — & — & nullptr & 热启动原始点（当前 Problem 布局），须全有限（:26，:864--885）\\
-\fld{equality\_dual\_start} & $\lambda_0$ & — & — & nullptr & 热启动等式乘子，与下两项同时通过检查才启用（:29，:910--919）\\
-\fld{inequality\_dual\_start} & $\mu_0$ & — & — & nullptr & 热启动不等式乘子，须严格为正（:30，:918）\\
 \fld{slack\_start} & $z_0$ & — & — & nullptr & 热启动松弛，须严格为正（:31，:919）\\
+\fld{equality\_dual\_start} & $\lambda_0$ & — & — & nullptr & 热启动等式乘子，与下两项同时通过检查才启用（\srcpath{native\_ipm\_solver.hpp}:IPMOptions，src/optimal\_power\_flow/parity\_ipm.cpp:solve\_primal\_dual\_ipm）\\
+\fld{inequality\_dual\_start} & $\mu_0$ & — & — & nullptr & 热启动不等式乘子，须严格为正（\srcpath{native\_ipm\_solver.hpp}:IPMOptions，src/optimal\_power\_flow/parity\_ipm.cpp:solve\_primal\_dual\_ipm）\\
+\fld{slack\_start} & $z_0$ & — & — & nullptr & 热启动松弛，须严格为正（\srcpath{native\_ipm\_solver.hpp}:IPMOptions，src/optimal\_power\_flow/parity\_ipm.cpp:solve\_primal\_dual\_ipm）\\
 \end{paramtable}
 
 \subsubsection*{环境变量开关}

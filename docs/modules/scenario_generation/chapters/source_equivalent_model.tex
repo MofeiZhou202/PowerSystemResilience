@@ -30,6 +30,27 @@ $\max(0,\texttt{v10})$。当前实现没有计算或返回气压廓线 $p(r)$，
 \srcpath{src/scenario\_generation/typhoon\_resilience.cpp:holland\_wind\_ms\_impl} 和
 \srcpath{src/scenario\_generation/typhoon\_resilience.cpp:holland\_wind\_ms}。
 
+\subsection{轨迹点 RMW 与 Holland B 生成}
+
+\srcpath{build\_track} 对每个轨迹点按以下分支赋值
+\begin{align}
+ \texttt{p.rmw\_km}&=\begin{cases}
+ \texttt{opts.initial\_rmw\_km},&\texttt{opts.initial\_rmw\_km}>0,\\
+ \operatorname{rmw\_from\_delta\_p}(\texttt{delta\_p}),&\text{否则},
+ \end{cases}\\
+ \texttt{p.holland\_b}&=\operatorname{holland\_b}(\texttt{lat},\texttt{p.rmw\_km}),
+\end{align}
+其中两个生成函数原样为
+\begin{align}
+ \operatorname{rmw\_from\_delta\_p}(\Delta p)
+ &=\exp\!\left(3.858-7.7\times10^{-5}\,\Delta p^{2}\right),\\
+ \operatorname{holland\_b}(\texttt{lat},\texttt{rmw\_km})
+ &=\max\!\left(0.8,\;1.881093-0.010917\,\texttt{lat}
+   -0.005567\,\texttt{rmw\_km}\right).
+\end{align}
+依据为 \srcpath{src/scenario\_generation/typhoon\_resilience.cpp:rmw\_from\_delta\_p} 和
+\srcpath{src/scenario\_generation/typhoon\_resilience.cpp:holland\_b}。
+
 \subsection{降雨实现}
 
 令 \texttt{radius} 为台风中心到站点的 Haversine 距离与

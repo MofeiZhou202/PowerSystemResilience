@@ -515,7 +515,9 @@ DCOPFFormulation build_dc_opf_lp(const HybridPowerSystem& sys,
       // them to zero; retaining the full block keeps all components symmetric.
       eq_trips.emplace_back(eq_row, form.i_theta(i), B_diag[i]);
       
-      // Off-diagonal: B_ij * θ_j  (skip j==slack since θ_slack = 0)
+      // Off-diagonal: B_ij * θ_j.  The slack column is retained as well:
+      // θ_slack is pinned to 0 by variable bounds, so its coefficient is
+      // numerically inert and keeping it preserves the full symmetric block.
       for (const auto& [j, bij] : B_entries[i]) {
         eq_trips.emplace_back(eq_row, form.i_theta(j), bij);
       }

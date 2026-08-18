@@ -155,7 +155,7 @@ def symbol_at(src_path, line_no):
 # ---------- anchor rewriting ----------
 FULL = re.compile(r'((?:[A-Za-z0-9_./\\-]+/)?[A-Za-z0-9_\\.-]+\.(?:cpp|hpp|h)):(\d+)(?:--(\d+))?')
 SAME = re.compile(r'同文件:(\d+)(?:--(\d+))?')
-BARE = re.compile(r'([（(]):(\d+)(?:--(\d+))?[）)]')
+BARE = re.compile(r'([（(])((?::\d+(?:--\d+)?\s*[，,、]?\s*)+)([）)])')
 
 report = {'resolved': 0, 'unresolved': [], 'files_changed': 0}
 
@@ -199,12 +199,19 @@ def process(doc_path):
     def bare_repl(m):
         if not state['last_src']:
             local_unresolved.append(('no-context', m.group(0))); return m.group(0)
-        sym = symbol_at(state['last_src'], int(m.group(2)))
+        open_c, body, close_c = m.group(1), m.group(2), m.group(3)
+        anchors = re.findall(r':(\d+)(?:--\d+)?', body)
+        if len(anchors) > 1:
+            # multi-entry lists too often rely on prose context that
+            # last-src tracking cannot recover reliably — leave for manual fix
+            local_unresolved.append(('manual-review-list', m.group(0), state['last_src']))
+            return m.group(0)
+        sym = symbol_at(state['last_src'], int(anchors[0]))
         if sym:
             report['resolved'] += 1
-            return f"{m.group(1)}:{esc(sym, tex)})" if m.group(1) == '(' else f"（:{esc(sym, tex)}）"
+            return f"{open_c}:{esc(sym, tex)}{close_c}"
         local_unresolved.append(('no-symbol', m.group(0), state['last_src']))
-        return m.group(1) + ')'
+        return open_c + close_c
 
     # per-line so "last seen file" tracking follows reading order
     NAME = re.compile(r'(?:[A-Za-z0-9_./\\-]+/)?[A-Za-z0-9_\\-]+\.(?:cpp|hpp|h)')

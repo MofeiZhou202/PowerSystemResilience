@@ -259,8 +259,9 @@ ParityIPM 或 Ipopt 的 AC OPF（:813--825；见第\ref{sec:parityipm}章）。
 失败解不回灌投影，以免用尺寸异常掩盖原始不可行性（注释 :869--871）。
 
 \textbf{孤岛预检}：用图模块 \srcpath{build\_power\_system\_graph} 与
-\srcpath{analyze\_topology} 在昂贵的 LP 装配前发现 \fld{IsolatedLoad}/
-\fld{NoSlack} 孤岛（:solve\_dc\_opf）。死岛负荷（母线 \fld{pd\_mw} 与
+\srcpath{analyze\_topology} 在昂贵的 LP 装配前识别死岛——\fld{IsolatedLoad}
+孤岛，或 \fld{NoSlack} 且岛内无在役可调度发电机的孤岛（:solve\_dc\_opf）；
+\fld{NoSlack} 但含可调度电源的孤岛判活并正常建模。死岛负荷（母线 \fld{pd\_mw} 与
 \fld{ac.loads} 两源相加，口径与建模一致，P1a 注释 :933--935）计入直接削减
 （:solve\_dc\_opf）；全部孤岛均无效时直接返回
 \texttt{"Infeasible: no island with slack bus"}（:solve\_dc\_opf）；否则把死岛上的
@@ -495,8 +496,9 @@ SCUC/SCED 为其自研 LP 体系（\srcpath{src/market/market\_simulation.cpp}:2
         豁免逻辑 :273--281）。
   \item \textbf{可行性自检}：\srcpath{check\_dc\_opf\_feasibility} 对 case14
         解复检通过（同文件 :308--346）。
-  \item \textbf{孤岛回归}：孤立负荷岛逐母线削减记账（:TEST\_CASE("DC OPF isolated-island shedding is reported per bus")）、死岛发电
-        机/支路剪枝（:TEST\_CASE("DC OPF preserves a source-capable island without an authored slack")）、松弛节点平衡行纳入复检（:TEST\_CASE("DC OPF feasibility check includes slack-bus balance")）。
+  \item \textbf{孤岛回归}：孤立负荷岛逐母线削减记账（:TEST\_CASE("DC OPF isolated-island shedding is reported per bus")）、无 authored
+        松弛但含可调度电源的孤岛\textbf{被保留}、岛内机组出力承担岛内负荷而不做削减
+        （:TEST\_CASE("DC OPF preserves a source-capable island without an authored slack")）、松弛节点平衡行纳入复检（:TEST\_CASE("DC OPF feasibility check includes slack-bus balance")）。
   \item \textbf{调度质量}：case30 上与 AC OPF（NativeAC）对比，$\sum|\Delta
         P_g|/\sum P_g$ 容忍阈值为 1.0——注释明言“DC OPF is a crude
         approximation”（同文件 :490--548，阈值 :536--547）。

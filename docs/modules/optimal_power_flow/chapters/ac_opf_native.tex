@@ -203,7 +203,7 @@ m = n_p + n_q + n_{dc} + n_c
         \fld{qmax\_mvar}$|)/S_{\mathrm{base}}$（同文件:initialize\_bounds\_and\_state）；三者初值均为
         0 向界内的截断（同文件:initialize\_bounds\_and\_state）。
 \end{itemize}
-最后全体变量经 \srcpath{clamp\_in\_interior} 压入严格内点：边距
+最后全体变量经 \srcpath{clamp\_interior} 压入严格内点：边距
 $\varepsilon=\min(\max(10^{-8},\,10^{-3}w),\;0.49w)$，$w$ 为该变量界宽
 （同文件:clamp\_interior）；无法构造严格内点时直接失败返回
 （同文件:solve\_ac\_opf\_impl）。
@@ -770,7 +770,8 @@ $\max(\lVert g\rVert_\infty,\max h^{+},\text{界违反})$ 汇总
         IEEE14 AC/DC 混合 OPF；\srcpath{tests/test\_nighttime\_opf.cpp}:58 起的
         夜间无光照 OPF 回归；\srcpath{tests/test\_graph\_roundtrip.cpp}:249 的
         图聚合往返后 OPF 一致性。
-  \item \textbf{手算校核数据}：\srcpath{external\_data/opf\_hand\_cases/} 提供
+  \item \textbf{手算校核数据}：\srcpath{external\_data/opf\_hand\_cases/}
+        （该目录当前不在仓库检出中）提供
         单母线 merit-order、两母线拥塞、甩负荷、二次成本线性化四个手算可复算
         算例（见其 README）；当前检出处未见直接消费该目录的 C++ 测试目标，
         如实标注为数据资产。

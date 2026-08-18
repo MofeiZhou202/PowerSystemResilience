@@ -20,32 +20,17 @@ time_series EOL 百分数归一化、SCIP 可按日并行、E' 阈值区分 1e-9
 `min_fault_probability` 改"保留字段未消费"、`holland_b` 改实际钳位、聚类改"默认可覆盖"；
 theory md 的 VSC 无序 droop 对与 κ 上限两处改正且 .zh.md 译文同步。
 
-### 修复过程中新发现的候选卡（待立项核实）
+### 候选卡处置记录（2026-08-18 第二批，已清零）
 
-- PF-N1：`newton_solver.cpp:2327-2328` 注释仍提已删除的"逃逸步"（代码注释清理，改代码）。
-- PF-N2：`cpf.tex`、`hybrid_acdc.tex`、`newton.tex` 部分非卡内行号可能仍有漂移，未逐一重核。
-- OPF-N1：`parity_ipm.tex:618-624,640-643` 既有表行行号整体约 +18 漂移；`dc_opf.tex:176` 等。
-- OPF-N2：`dc_opf.cpp:518` 注释 "skip j==slack" 与实际循环（不再跳过）矛盾（代码注释）。
-- MKT-N1：`docs/theory/market_simulation_mathematical_models.md`（含 .zh.md）若仍写 AC-only 口径需立项核查。
-- IE-N1：`docs/theory/integrated_energy_contract.md:27-28`（含 .zh.md）的效率校验措辞对 `eta_wasteheat` 有歧义。
-- EV-N1：`num_steps` 默认值两结构不同（24 vs 6），参数表默认列为"—"不构成错误但可补充分行。
-- SG-N1：`source_equivalent_model.tex` 未转写 `holland_b(lat,rmw)` 生成式与 `rmw_from_delta_p`（`typhoon_resilience.cpp:314-320`）。
-- CA-N1：`carbon_analysis` 章节 `edge_loss_carbon_intensity` 引用漂移 2 行（130-138）。
-- SC-N1：方法 B+Meshed 的 `min(1.8,1.15κ)` 实际只作用非故障母线单 κ 近似；若 IEC 本意应作用故障点，属代码口径问题（CODE-FIX 候选）。
-- REL-N1：无。PATH 类新发现已并入下方 PATH-1。
-
-### 锚点校对批次新发现的散文级候选卡（2026-08-18，未修）
-
-- PF-N3：`newton.tex` "迭代内仅在残差 <1e-3 时才允许 PV↔PQ 切换"已过时——当前无外环内切换，`check_q_limits_and_switch` 仅在外环结束后调用，守卫为残差 ≤0.1（`newton_solver.cpp:2484-2518`）。
-- PF-N4：`robust_solvers.tex` 称 `PtcSerController` 未被主循环调用——已接线（`newton_solver.cpp:1858`）；仅 `LMController` 闲置。另 `ptc_delta0`/`ptc_growth` 在 src/ 无读取点，已成死字段（候选代码清理）。
-- PF-N5：`classic_solvers.tex` 称自适应孤岛 `q_limits` 未接线——已接线（`adaptive_solver.cpp:316`）；同章"纯 DC 岛被丢弃"与 `detect_islands` 行为不符；分布式松弛失配公式口径应为全部 AC 母线求和（`distributed_slack_solver.cpp:210-214` 注释解释了原因）。
-- PF-N6：`distribution.tex` 诚实口径与代码相反——非连通/非辐射拓扑现显式 fail-close（`distribution_power_flow.cpp:510-520`）；ZIP 负荷已是电压依赖（`run_bfs_sweep` 经 `voltage_dependent_net_demand` 每迭代更新）。
-- PF-N7：`cpf.tex` 测试覆盖声明过时（现 5 个用例已含 PV 回退专项）；`overview.tex:133` "engine 规范头"表述与同文件自述矛盾（转发头 vs `engine/solver/native/nle/newton_solver.hpp`）；`hybrid_acdc.tex:32` 引用的 dc.hpp "linear approximation" 注释已改为 nonlinear。
-- OPF-N3：`ac_opf_native.tex:207` 散文裸函数名 `clamp_in_interior` 应为 `clamp_interior`；`external_data/opf_hand_cases/` 目录整体不存在，`verification.tex` 手算基准整节失去目标（需确认是否有底稿存档）。
-- OPF-N4：`overview.tex` L609-611 "非 Apple 平台开启 HACDCPF_ENABLE_IPOPT 直接 FATAL_ERROR" 与当前 CMakeLists 脱节。
-- OPF-N5：`parity_formulation.cpp:36-38` 悬置软锚注释与 `equality_jacobian`:2329 残留注释有误导性（代码注释清理）。
-- OPF-N6：`dc_opf.tex` "死岛剪枝"测试名与实际测试语义相反（测试验证的是有源孤岛保留）。
-- MISC-2：各手册/测试文件仍残留散文中的零散纯行号引用（未走锚点格式），量大、语义上下文弱，低优先级。
+- PF-N1 ✅ FIXED（逃逸步残留注释改写为"正则化→LM→伪瞬态"恢复链）；PF-N2 ✅ 已随符号锚点迁移消解。
+- OPF-N1 ✅ FIXED（部分随迁移消解；parity_ipm.tex 逗号分隔表行 11 行手工改符号锚点——并发现迁移工具 BARE 正则不覆盖 `（:NN，…）` 逗号列表形式，工具缺陷待修）；OPF-N2 ✅ FIXED（dc_opf.cpp:518 注释改"slack 列保留但数值惰性"）。
+- MKT-N1 ✅ INVALID（market_simulation_mathematical_models.md 为中文主稿且已正确描述全混合口径）。
+- IE-N1 ✅ FIXED（契约 md + .zh.md 补 eta_wasteheat/eta_carbon_to_fuel 校验排除说明）；EV-N1 ✅ FIXED（num_steps 按结构分行 24/6）；SG-N1 ✅ FIXED（补录 holland_b 生成式与 rmw_from_delta_p 小节，xelatex 编译通过）。
+- CA-N1 ✅ 已随符号锚点迁移消解；SC-N1 保留（代码口径问题，需 IEC 60909 专业判断，见下）。
+- PF-N3 ✅ FIXED（PV↔PQ 仅外环发起 + 残差≤0.1 守卫）；PF-N4 ✅ FIXED（PtcSerController 已接线、SER 公式按代码转写；死字段 ptc_delta0/ptc_growth 已加"保留兼容"注释，未删字段）。
+- PF-N5 ✅ FIXED（q_limits 已接线、纯 DC 岛不丢弃、分布式松弛全母线求和口径）；PF-N6 ✅ FIXED（fail-close 口径、ZIP 电压依赖）；PF-N7 ✅ FIXED（CPF 5 用例、转发头表述、dc.hpp nonlinear）。
+- OPF-N3 ✅ FIXED（clamp_interior 裸名改正；opf_hand_cases 四处引用就地标注"不在仓库检出中"，verification.tex 手算节加诚实声明——**若有底稿存档应恢复目录**）；OPF-N4 ✅ FIXED（IPOPT 平台口径按当前 CMake 改写）；OPF-N5 ✅ FIXED（软锚残留注释一删一改）；OPF-N6 ✅ FIXED（孤岛保留语义改写，判死/判活条件补齐）。
+- 新遗留（下批候选）：newton.tex 进入侧迟滞 `pv_q_hysteresis_pu` 口径疑似过时（代码 entry_margin_pu=0.0 无死区）；`options_results.tex:120` bad_condition_threshold"未接线"未核；parity_ipm.tex 等仍有逗号列表形式的裸行号锚点未迁移（工具缺陷）；MISC-2 零散行号清理仍为低优先级。
 
 ## 二、机械性漂移（不影响语义，批量修）
 

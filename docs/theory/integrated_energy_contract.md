@@ -25,8 +25,12 @@ energy-per-step totals are MWh, prices are per MWh, carbon is tCO2, carbon
 intensity is tCO2/MWh, and transport demand is km.
 
 Passive conversion, storage, retention, and inter-layer transfer efficiencies
-must be finite and in `(0,1]`; values above unity are rejected. Heat-pump COP is
-a separate performance ratio and may exceed one. Current normalization clamps
+must be finite and in `(0,1]`; values above unity are rejected. Two fields are
+outside this check: `eta_wasteheat` and `eta_carbon_to_fuel` (both default
+`0.0`) are not validated and enter the model as given — `eta_wasteheat` scales
+the heat-pump waste-heat recovery term in the heat balance, and
+`eta_carbon_to_fuel` only activates the synthetic-fuel bound when positive.
+Heat-pump COP is a separate performance ratio and may exceed one. Current normalization clamps
 negative/non-finite capacities and limits to zero, clamps storage bounds into
 capacity, and restores a non-positive/non-finite heat-pump COP to `3.2`; these
 legacy normalizations are not individually reported in the result and should

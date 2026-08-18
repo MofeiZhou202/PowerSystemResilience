@@ -39,8 +39,8 @@
 \fld{globalization} & --- & --- & 三选一 & LineSearch & 全局化策略枚举\texttt{GlobalizationStrategy\allowbreak\{LineSearch,\allowbreak TrustRegion,\allowbreak PseudoTransient\}}（include/hacdcpf/power\_flow/power\_flow\_options.hpp:GlobalizationStrategy）；分派点 src/power\_flow/newton\_solver.cpp:NewtonSolver::solve\\
 \fld{trust\_region\_radius0} & $\Delta_0$ & --- & 0.1--5 & 1.0 & 信赖域初始半径（src/power\_flow/newton\_solver.cpp:NewtonSolver::solve）\\
 \fld{trust\_region\_max} & $\Delta_{\max}$ & --- & 1--100 & 10.0 & 信赖域半径上限（src/power\_flow/newton\_solver.cpp:NewtonSolver::solve）\\
-\fld{ptc\_delta0} & $\delta t_0$ & --- & 0.01--10 & 1.0 & 伪瞬态延拓初始步长（src/power\_flow/newton\_solver.cpp:NewtonSolver::solve）\\
-\fld{ptc\_growth} & --- & --- & 1.2--5 & 2.0 & PTC 步长增长因子（src/power\_flow/newton\_solver.cpp:NewtonSolver::solve，\srcpath{PtcSerController}）\\
+\fld{ptc\_delta0} & $\delta t_0$ & --- & 0.01--10 & 1.0 & 伪瞬态延拓初始步长；\textbf{保留字段，当前无消费点}（PTC 实际由 \fld{RobustNonlinearOptions::ptc\_dt0} 族驱动，见下表）\\
+\fld{ptc\_growth} & --- & --- & 1.2--5 & 2.0 & PTC 步长增长因子；\textbf{保留字段，当前无消费点}（SER 近零残差改乘 $2$ 为 \srcpath{include/hacdcpf/power\_flow/globalization/lm\_trust\_region.hpp:PtcSerController} 内硬编码）\\
 \end{paramtable}
 
 \subsection{PV/PQ 切换与参考母线}
@@ -151,10 +151,10 @@ include。）算法语义见第~\ref{sec:robust}~章，此处仅列字段契约�
 \fld{trust\_region\_radius0} & $\Delta_0$ & --- & 0.1--5 & 1.0 &LM 信赖域初始半径（归一化）；\textbf{当前未接线}（信赖域全局化实际用\fld{PowerFlowOptions::trust\_region\_radius0}）\\
 \fld{trust\_region\_radius\_min} & $\Delta_{\min}$ & --- & $10^{-8}$--$10^{-4}$ & $10^{-6}$ &信赖域半径下限；\textbf{当前未接线}\\
 \fld{trust\_region\_radius\_max} & $\Delta_{\max}$ & --- & 10--$10^{3}$ & 100.0 &信赖域半径上限；\textbf{当前未接线}\\
-\fld{enable\_ptc\_ser} & --- & --- & true/false & true &PTC 恢复步开关（src/power\_flow/newton\_solver.cpp:NewtonSolver::solve）；SER 时间步升级尚未接线，实际 PTC 步长仍由 \fld{ptc\_delta0}/\fld{ptc\_growth}（PowerFlowOptions 层）驱动\\
-\fld{ptc\_dt0} & $\delta t_0$ & --- & $10^{-3}$--1 & 0.1 & SER 初始伪时间步；\textbf{当前未接线}\\
-\fld{ptc\_dt\_min} / \fld{ptc\_dt\_max} & --- & --- & $10^{-6}$--$10^{8}$ & $10^{-4}$ / $10^{6}$ &伪时间步下/上限；\textbf{当前未接线}\\
-\fld{ptc\_gamma} & $\gamma$ & --- & 0.1--2 & 0.7 &SER 指数 $\delta t_{k+1}=\delta t_k(r_{k-1}/r_k)^\gamma$；\textbf{当前未接线}\\
+\fld{enable\_ptc\_ser} & --- & --- & true/false & true &PTC 恢复步开关（src/power\_flow/newton\_solver.cpp:NewtonSolver::solve）；PTC 步长由 \fld{ptc\_dt0} 族经 \texttt{PtcSerController} 的 SER 更新驱动\\
+\fld{ptc\_dt0} & $\delta t_0$ & --- & $10^{-3}$--1 & 0.1 & SER 初始伪时间步（经 \texttt{PtcSerController} 接线，src/power\_flow/newton\_solver.cpp:NewtonSolver::solve）\\
+\fld{ptc\_dt\_min} / \fld{ptc\_dt\_max} & --- & --- & $10^{-6}$--$10^{8}$ & $10^{-4}$ / $10^{6}$ &伪时间步下/上限（同上接线）\\
+\fld{ptc\_gamma} & $\gamma$ & --- & 0.1--2 & 0.7 &SER 指数 $\delta t_{k+1}=\delta t_k(r_{k-1}/r_k)^\gamma$（同上接线）\\
 \end{paramtable}
 
 \subsubsection*{Phase 4：同伦延拓}
