@@ -47,7 +47,7 @@
 $-\lambda A+\mu U=0$，即 $\lambda A=\mu U$；代入 $A+U=1$ 解得 $A=\mu/(\lambda+\mu)$、
 $U=\lambda/(\lambda+\mu)$。以 $\mu=1/r$ 代入得 $U=\lambda/(\lambda+1/r)=\lambda r/(1+\lambda r)$。
 状态频率为“离开该状态的稳态流率”$f=\lambda A=\mu U$；又 $\lambda A=\lambda\mu/(\lambda+\mu)
-=1/(1/\lambda+1/\mu)=1/(m+r)$。
+\allowbreak=1/(1/\lambda+1/\mu)\allowbreak=1/(m+r)$。
 \end{proof}
 
 平台以单一\emph{解析器}把异构输入（$\lambda$、MTTR、MTBF、FOR、$p_d/\nu_d$）折算为
@@ -127,6 +127,34 @@ $C_{\mathrm{inst}}$ 为装机容量。F\&D 法进一步给出失负荷频率 $\m
 \srcpath{FrequencyDurationResult}（\fld{capacity\_outage\_levels}、\fld{cumulative\_probability}、
 \fld{cumulative\_frequency}、\fld{lolp}、\fld{lole\_fd}、\fld{lolf\_fd}、\fld{lold}）承载 COPT 与指标。
 
+\subsection{公共后果模型：突变算子、最小切负荷与引擎阶梯}\label{sec:rel-th-conseq}
+失效模式\emph{不}直接等于元件停运，而经\emph{后果算子}映射为网络 / 控制\emph{突变}：
+\begin{equation}
+ G_m=\Phi_m(G_0,x_m),
+\end{equation}
+$G_0$ 为健康富系统、$x_m$ 为模式严重度、$\Phi_m$ 产生一或多个突变：拓扑（强迫停运 / 卡开 / 强迫切负荷）、
+容量（按残余容量因子降额）、控制（定值冻结 / 失控 / 失去构网）、保护（拒动后区域扩展）、观测（量测 /
+通信退化）、恢复（禁止某动作，如拒合）。硬停运在同一目标上压制降额与失控；不兼容的强迫开 / 合突变报为
+冲突；所选物理引擎无法表示的突变标为\emph{不支持}而非人为置零。对失效态 $x$，各方法最终求\emph{最小切负荷}
+\begin{equation}
+ S(x)=\min_{y\in\mathcal F(G_x)}\sum_iw_ip_i^{sh},
+ \label{eq:rel-th-minshed}
+\end{equation}
+$\mathcal F(G_x)$ 为所选物理模型的可行运行 / 恢复域。实现把 VOLL 置于可行发电边际成本之上，使源成本仅在
+最小切负荷解间打破简并；可靠性只读 $S$ 与 $s_i$，不读经济目标值。三级\emph{物理后果引擎阶梯}为：
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{2.9cm}L{3.4cm}L{7.3cm}@{}}
+\toprule
+引擎 & 使用者 & 主物理 / 有效边界\\
+\midrule
+交流 DC-OPF & 纯交流 MC/FMEA & $P{=}B\theta$、节点平衡、源 / 支路限、切负荷；无电压幅值 / 无功可行性\\
+混合 AC/DC 网络 LP & 混合 MC、元件 / 故障模式 FMEA & AC 角—流、DC 平衡、有界 VSC/DC-DC 传输、储能 / DER；DC 传输线性稳态，无非线性 AC 校验\\
+耦合 LinDistFlow 恢复 MILP & 三阶段模型 & AC 有 / 无功 $+$ DC 有功平衡、平方电压、辐射森林、开关、双向换流、DER / 储能时序；线性化损耗，拒 LCC 与多端口路由器\\
+\bottomrule
+\end{tabular}
+\end{center}
+依据：\srcpath{src/reliability/reliability\_assessment.cpp:evaluate\_failed\_network\_state}。
+
 \subsection{蒙特卡洛可靠性评估}\label{sec:rel-th-mc}
 当网络约束、多重故障与调度重分布使解析枚举不可行时，蒙特卡洛（MC）以状态抽样估计指标。
 
@@ -180,16 +208,43 @@ SAIFI 为户均停电次数、SAIDI 为户均停电时长、CAIDI 为次均停�
 \fld{nodal\_cif}/\fld{nodal\_cid}）承载，需负荷点客户数据方计算（\fld{compute\_distribution\_indices}）。
 
 \subsection{尾部风险：VaR 与 CVaR}\label{sec:rel-th-var}
-可靠性关注\emph{尾部}的高损失场景。对损失 $L$（如年 EENS）与置信水平 $\alpha$，
+可靠性关注\emph{尾部}的高损失场景。对年损失 $E$（如年 EENS）与置信 $\alpha$，
+$\mathrm{VaR}_\alpha(E)=\inf\{e:\Pr[E\le e]\ge\alpha\}$，严格的期望损失（Expected Shortfall）为
 \begin{equation}
- \mathrm{VaR}_\alpha(L)=\inf\{\ell:\Pr[L\le\ell]\ge\alpha\},\qquad
- \mathrm{CVaR}_\alpha(L)=\mathbb E[L\mid L\ge\mathrm{VaR}_\alpha(L)]
- =\frac1{1-\alpha}\int_\alpha^1\mathrm{VaR}_\beta(L)\,\mathrm d\beta.
+ \mathrm{ES}_\alpha(E)=\frac1{1-\alpha}\int_\alpha^1\mathrm{VaR}_u(E)\,\mathrm du
+ =\min_{\eta\in\mathbb R}\Big\{\eta+\frac1{1-\alpha}\mathbb E[(E-\eta)^+]\Big\},
  \label{eq:rel-th-cvar}
 \end{equation}
-CVaR（期望损失超出）是相干风险度量（次可加、单调、平移不变、正齐次），优于 VaR。平台由 MC 样本
-分布估计（\srcpath{TailRiskMetrics}：\fld{eens\_var}/\fld{eens\_cvar}/\fld{lole\_var}/\fld{lole\_cvar}、
-\fld{eens\_percentiles}），依据 Rockafellar--Uryasev~\cite{rel:rockafellar}。
+右式为 Rockafellar--Uryasev 表征~\cite{rel:rockafellar}；连续分布下等于
+$\mathbb E[E\mid E\ge\mathrm{VaR}_\alpha]$。CVaR 是\emph{相干}风险度量（次可加、单调、平移不变、正齐次），
+优于 VaR。\textbf{实现注}：平台以\emph{经验 VaR 处起}的简单尾均值估计，对小样本或多个并列年损失会\emph{高估}
+VaR 处的概率质量，非严格 ES；序贯年样本为首选输入。承载于 \srcpath{TailRiskMetrics}
+（\fld{eens\_var}/\fld{eens\_cvar}/\fld{eens\_percentiles}）。
+
+\subsection{采样不确定性与稀有事件}\label{sec:rel-th-uncert}
+对 $n$ 个独立状态样本，缺供功率估计的标准误与渐近 $1-\alpha$ 区间为
+\begin{equation}
+ \mathrm{SE}(\widehat{\mathrm{EDNS}})=\frac{\widehat\sigma_S}{\sqrt n},\qquad
+ \bar S\pm z_{1-\alpha/2}\frac{\widehat\sigma_S}{\sqrt n},\qquad
+ \mathrm{SE}(\widehat{\mathrm{PLC}})=\sqrt{\frac{\widehat p(1-\widehat p)}{n}}.
+\end{equation}
+稀有失负荷宜用 Wilson 或精确二项区间；序贯年样本须以\emph{年级}方差 / 区间而非把小时当独立。极小
+PLC/LOLE 下朴素 MC 统计低效，重要抽样、交叉熵、子集模拟、按故障阶分层或最小割集引导抽样是提出的补救
+（平台重要抽样选项为\emph{实验性}，未经证据不得声称有效）。这与 CoV 停机准则（定理~\ref{thm:rel-th-cov}）
+互补：CoV 度量\emph{相对}收敛，SE / 区间度量\emph{绝对}不确定性。
+
+\subsection{薄弱环节辨识（后处理）}\label{sec:rel-th-weakpoint}
+评估后按元件对\emph{失负荷态}的贡献排序，定位薄弱环节。平台的元件重要度
+（\srcpath{ReliabilityResult::ComponentImportance}）是\emph{共现 / 归因}度量，而非 Birnbaum 边际重要度
+$\partial\mathrm{EENS}/\partial U_c$：以“元件 $c$ 停运时观测到的失负荷削减份额”定义
+\begin{align}
+ \text{loss\_weighted\_risk}_c&=\frac{\sum_k\lambda_k\,\mathbf 1[c\in\text{down}(k)]\,S_k}{\sum_k\lambda_k S_k},\\
+ \Pr(c\text{ 停}\mid\text{系统失负荷})&=\frac{\sum_k\lambda_k\,\mathbf 1[c\in\text{down}(k)]\,\mathbf 1[S_k>\varepsilon]}{\sum_k\lambda_k\,\mathbf 1[S_k>\varepsilon]},
+\end{align}
+并给出共停关联 EENS $\text{associated\_eens}_c$。\textbf{诚实口径}：多重失效态把整段削减\emph{归因于每个}
+停运元件，故各元件贡献之和可\emph{超过} 100\%——应读作\emph{排序}而非边际风险；精确边际须重解
+$\partial\mathrm{EENS}/\partial U_c$（未实现）。依据：\srcpath{src/reliability/reliability\_assessment.cpp}
+（\fld{critical\_components}）。
 
 \subsection{数值算例与基准（IEEE RTS-24）}\label{sec:rel-th-numexp}
 在 IEEE 可靠性测试系统 RTS-24（$24$ 母线、$33$ 机组、$38$ 支路；\srcpath{data/case24\_ieee\_rts.m}

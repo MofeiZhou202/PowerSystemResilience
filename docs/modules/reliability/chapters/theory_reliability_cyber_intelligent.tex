@@ -1,0 +1,162 @@
+% theory_reliability_cyber_intelligent.tex —— 智能信息物理可靠性模型（提出）
+% 本文件为理论层章节，遵循 docs/modules/THEORY_WRITING_GUIDE.md。
+% 数学模型依据 docs/theory/reliability_mathematical_models_and_intelligent_cyber_physical_assessment.md 第 13–19 节。
+
+\section{智能信息物理可靠性模型（提出层）}\label{sec:rel-icp}
+
+\begin{theorynote}
+本章转写\emph{提出}（proposed）的智能信息物理可靠性框架，它把已实现的 Level-1 FMEA
+（\S\ref{sec:rel-fa-cyber}）从“自动化可用/不可用”双类，细化为三耦合图上的检测—隔离—恢复—保护函数
+可靠性，并以阶段概率 $\pi_c(k)$、阶段时长 $\tau_{k,c,s}$、后果补丁 $\Phi_{k,c}$ 三通道进入可靠性指标。
+依据设计文档
+\srcpath{docs/theory/reliability\_mathematical\_models\_and\_intelligent\_cyber\_physical\_assessment.md}
+第 13--19 节。\textbf{诚实边界}：除第 17 节的静态事件抽象为\emph{部分实现}外，本章绝大部分为\emph{提出
+模型，尚未在平台实现}；就地以“未实现扩展说明”标注，不得与已实现的 §12 混淆。核心方法论警示贯穿全章：
+共享传感器 / 通信 / 电源 / 控制中心的路径\emph{不可}按独立相乘，须用联合分布 / 最小割集 / BDD 评估。
+\end{theorynote}
+
+\subsection{为何需要集成模型}\label{sec:rel-icp-why}
+纯物理问题问“给定失效设备，存活网络能供多少负荷”；集成问题更广：故障是否被检测、多快？失效段是否被
+正确隔离？保护是否无越级误动地清除目标区？哪些恢复动作可观测、可通信、可准入、可成功执行？微网 / DER
+能否成岛并维持至修复？多数信息失效\emph{间接}影响可靠性——延长定位 / 开关时间、扩大隔离区、移除可行
+恢复动作、冻结 DER 定值、抑制构网能力——故归入阶段概率、阶段时长与后果补丁。
+
+\subsection{三耦合图与联合状态}\label{sec:rel-icp-graphs}
+系统表为 $\mathcal G^{ICP}=(G_p,G_c,G_f,\Pi_{pc},\Pi_{cp})$：物理网 $G_p$、信息 / 通信网 $G_c$、
+检测 / 隔离 / 恢复 / 保护的功能依赖图 $G_f$、信息服务$\to$受控物理资产映射 $\Pi_{pc}$、物理母线$\to$信息
+资产供电映射 $\Pi_{cp}$。联合状态 $\xi_t=(x_t^p,x_t^c,e_t^c,b_t,\hat x_t,\mathcal A_t)$ 含物理 / 信息元件态、
+链路质量、备用能量、故障信念 $\hat x$ 与可执行动作集 $\mathcal A_t$。
+
+\subsection{信息功能可用度}\label{sec:rel-icp-avail}
+对所需功能 $f$ 与信息态 $x^c$，布尔结构函数 $\phi_f(x^c)\in\{0,1\}$ 指示“存在有效的
+传感器—控制器—执行器服务路径”，功能可用度为
+\begin{equation}
+ A_f=\Pr[\phi_f(X^c)=1]=\sum_{x^c}\phi_f(x^c)\Pr(X^c=x^c).
+\end{equation}
+
+\begin{proposition}[路径结构与独立性陷阱]\label{prop:rel-icp-path}
+串链 $A_f=\prod_qA_q$；冗余路径 $A_f=1-\prod_{p\in\mathcal P_f}(1-A_p)$ \emph{仅当路径独立}成立。一般
+（路径共享开关 / 电源 / 控制中心 / 时钟 / 管道）须按联合信息态分布评估
+\begin{equation}
+ A_f=\Pr\!\Big(\bigvee_{p\in\mathcal P_f}\bigwedge_{q\in p}\{X_q^c=1\}\Big),
+\end{equation}
+用最小割集 / 二元决策图 / 蒙特卡洛。对 FLISR，须同一信息态下三功能同时成立
+$A_k^{FLISR}=\Pr[\phi_D\land\phi_I\land\phi_R]$；分别算 $A_DA_IA_R$ 相乘在共享基础设施时\emph{一般错误}。
+\end{proposition}
+
+\paragraph{通信质量（QoS），不止可用度。}
+快速保护 / FLISR 的可用命令路径须满足端到端时延 / 抖动 / 丢包界
+$L_p\le L_f^{max}$、$J_p\le J_f^{max}$、$P_{loss,p}\le P_f^{max}$；服务事件
+$\mathcal Q_{f,p}=\{\phi_{f,p}{=}1,L_p{\le}L_f^{max},J_p{\le}J_f^{max},P_{loss,p}{\le}P_f^{max}\}$，
+QoS 感知可用度 $A_f^{QoS}=\Pr(\bigvee_p\mathcal Q_{f,p})$。仅比较时延 / 丢包的\emph{均值}不是服务可用度模型；
+保护流量需毫秒界、恢复控制容秒级、监视可容更长——单一全局通信可用度标量无法表征这些不同契约。
+
+\subsection{智能故障检测}\label{sec:rel-icp-detect}
+对真故障类 $k$ 与观测 $z$，检测器产生告警 $\hat k$，混淆矩阵 $C^D_{k\hat k}=\Pr(\hat k\mid k)$，
+检出 / 漏报 / 误报为 $P_D(k)=1-C^D_{k0}$、$P_{miss}(k)=C^D_{k0}$、$P_{FA}=\Pr(\hat k\ne0\mid k{=}0)$。
+误报须先定暴露基：以 $\nu_{eval}$ 个独立决策窗 / 年，$\lambda_{FA}=\nu_{eval}P_{FA}$；连续监测 / 时序相关
+检测器须用告警 / 年实测率或点过程模型，把每采样步当独立机会会把误跳高估数量级。检测须条件于可观测性 $o$
+与工况 $h$：$C^D_{k\hat k}(o,h)$。检测时延用分布 $T_k^D\sim F_k^D(t\mid o,h)$、$\tau_k^{iso}=T_k^D+T_k^{dec}+T_k^{trip}$。
+因后果对时延非线性，$\mathbb E[E_k(T_k^D)]\ne E_k(\mathbb E[T_k^D])$，正确贡献为
+\begin{equation}
+ \mathrm{EENS}_k=\lambda_k\int E_k(t)\,\mathrm dF_k^D(t),
+\end{equation}
+有限互斥时延类是该积分的实用求积。检测经 $\pi_c(k),\tau_{k,c,s},\Phi_{k,c}$ 进入可靠性（及时 / 迟 / 漏 /
+误报四后果类）。
+
+\subsection{智能故障隔离}\label{sec:rel-icp-isolate}
+设候选故障段集 $\mathcal Z$，隔离引擎给后验信念 $b_q=\Pr(K{=}q\mid z,G_p,G_c)$（$\sum_qb_q=1$），
+以\emph{决策论}权衡欠隔离风险与过大停电：
+\begin{equation}
+ \hat q=\arg\min_{q\in\mathcal Z}\big[c_{miss}\Pr(K\notin q\mid z)+c_{shed}P_{isolated}(q)\big],
+\end{equation}
+受保护选择性与开关遮断能力约束。隔离成功概率 $p_I(k,c)=\Pr[\bigwedge_{q\in Q_k}(\text{命令路径可用})_q\land
+(\text{器件动作})_q]$ 决定主区 $Z_k^{primary}$ / 后备区 $Z_k^{backup}$，共享通信路径与共直流电源须联合评估。
+
+\subsection{智能恢复}\label{sec:rel-icp-restore}
+恢复策略 $\pi_R:(\hat x_t,G_p,G_c,E_t^{st})\mapsto a_t$ 在部分可观测下选开关 / DER 调度 / 成岛 / 投荷。
+单步风险感知式为
+\begin{equation}
+ \min_{a,y}\ \sum_iw_ip_i^{sh}+c_{sw}\sum_\ell|z_\ell-z_\ell^0|+c_{risk}\,\mathcal R(a,\hat x),\qquad
+ \mathcal R(a,\hat x)=\Pr(g(a,X)>0\mid\hat x),
+\end{equation}
+$g$ 编码不完全隔离 / 过载 / 不安全带电 / 保护失配 / 电压越限 / 同步失败；受物理恢复模型、保护联锁与命令 /
+动作可用性约束（$z_\ell^{close}\le\phi_{cmd(\ell)}$、$p_r\le\overline P_r\phi_{ctrl(r)}$、$y_{island}\le\phi_{GFM}x_{GFM}^p$）。
+命令路径不可用未必使动作不可行，可转为带行程 / 操作时延的人工动作，故每动作兼具可行性与时序
+$T_a\in\{T_a^{remote},\ T_a^{crew}+T_a^{manual},\ \infty\}$。
+
+\begin{remark}[策略成功与筛选近似]\label{rem:rel-icp-policy}
+须区分优化器可行性与智能策略性能：$p_R^{valid}=\Pr(a\in\mathcal A_{safe}\mid\hat x,x)$、
+$p_R^{exec}=\Pr(\text{全部所需动作执行}\mid a,x^c)$。自动恢复类概率
+$\pi_{auto}(k)=\Pr(D_k\cap I_k\cap R_k^{valid}\cap R_k^{exec}\mid k)$，\emph{仅在条件独立}下才可因子化为
+$\Pr(D_k)\Pr(I_k)\Pr(R_k^{valid})\Pr(R_k^{exec})$。故乘积
+$A_k^{FLISR}P_D p_I p_R^{valid}p_R^{exec}$（即已实现 §12 的三维因子化，式~\eqref{eq:rel-fa-factor}）只是\emph{筛选}
+近似，会重复计共享依赖；无效 / 未验证动作须路由到保守人工 / 阻断类，不得计为成功恢复。多步恢复用约束
+POMDP / 模型预测控制，学习型策略须过确定性安全滤波（辐射 / 电压 / 热限 / 同步 / 联锁 / DER 能力）方可执行。
+\end{remark}
+
+\subsection{智能保护（静态事件抽象为部分实现）}\label{sec:rel-icp-protect}
+保护有两类失效族：\emph{可靠性}（dependability，真需求时拒动）与\emph{安全性}（security，无区内故障误动）。
+对保护区 $z$，$\nu_z=\sum_{k\in\mathcal K_z}\lambda_k$、拒动频率 $\lambda_z^{FT}=\nu_zp_z^{FT}$，其后果与误动为
+\begin{equation}
+ \mathrm{EENS}^{FT}=\sum_z\lambda_z^{FT}\sum_sS_{z,s}^{backup}\tau_{z,s}^{backup},\qquad
+ \mathrm{EENS}^{NT}=\sum_z\lambda_z^{NT}\sum_sS_{z,s}^{trip}\tau_{z,s}^{trip}.
+\end{equation}
+拒动概率的完整需求成功事件为
+\begin{equation}
+ \mathcal S_z=R_z\cap M_z\cap C_z\cap B_z\cap S_z'\cap A_z,\qquad
+ p_z^{FT}=\Pr(\mathcal S_z^c\mid\text{保护需求}),
+\end{equation}
+其中 $R_z$ 继电逻辑健康、$M_z$ 量测有效、$C_z$ 必要时通信 / 跳闸路径及时、$B_z$ 断路器机械动作、
+$S_z'$ 正确选择性定值、$A_z$ 站用电可用。
+本地主保护\emph{不应}被强加广域通信依赖，否则系统性高估信息—保护耦合。自适应保护（微网模式、逆变限流、
+拓扑变）以失配概率 $p_z^{mis}=\Pr(\theta_z\ne\theta_z^*(\sigma)\lor T_{update}>T_{required})$ 表述三模式
+（定值更新通信失、错误定值选择、起动电流不足），其后果由短路 / 保护模型定后备区后作区变异与时长类入可靠性。
+
+\subsection{保护—FRT 可靠性接口与微网（提出细化层）}\label{sec:rel-icp-frt}
+设计文档第 18 节以约 $16$ 个子模型把第 17 节的事件概率、清除时间、拓扑变异与 DER 后果从\emph{继电器与故障
+穿越（FRT）事件逻辑}细化：混合“保护—FRT”状态、DER 电压 / 频率穿越自动机（穿越 / 瞬时闭锁 / 跳闸为\emph{不同}
+状态）、故障期逆变电流与 GFL/GFM 行为、定时 / 反时限动作量、主 / 后备协调与断路器失灵、重合闸 / 熔断器 /
+分段器 / 反孤岛序列、DER-保护闭环与重连后可用度、保护—FRT 后果类、IEEE 1547 与保护参数接口、保真度阶梯与
+所需有效标志。第 19 节给微网 / DER 物理可靠性：孤岛可行性（构网源、功率 / 能量平衡、保护可行）与储能续航
+$P_b^{avail}=\min(P_b^{rated},(E_b-E_b^{min})\eta_b^{dis}/\tau_s)$。
+\begin{gapnote}
+第 13--19 节（除 §17 静态事件抽象部分实现外）为\emph{提出}模型，\emph{尚未}在平台可靠性评估器中实现：
+无显式通信拓扑 / 时延 / 信息节点电源 / 共因信息失效 / 学习型 FDIR 策略；第 18 节的继电器起动、后备区扩展、
+断路器失灵、DER-FRT 轨迹与联合类生成\emph{均未}耦合入当前评估器（已实现结果声明
+\texttt{protection\_logic\_modelled=false}、\texttt{protection\_frt\_reliability\_coupled=false}）。本章用于
+界定研究路线与诚实上界，不得当作平台当前算法。第 18 节细化不改变当前可靠性评估器的实现状态。
+\end{gapnote}
+
+\subsection{与实现的对应}\label{sec:rel-icp-impl}
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{5.4cm}L{9.0cm}@{}}
+\toprule
+\textbf{理论对象} & \textbf{平台实现状态}\\
+\midrule
+\endfirsthead
+\toprule
+\textbf{理论对象} & \textbf{平台实现状态}\\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+三耦合图 $\mathcal G^{ICP}$、联合状态、QoS 可用度 & \implnone（提出）\\
+信息功能结构可用度 $A_f$、FLISR 联合、最小割集 & \implnone（提出；已实现仅 §12 独立因子筛选）\\
+智能检测混淆矩阵 / 时延积分 EENS$_k$ & \implnone（提出）\\
+智能隔离决策论选区 / $p_I$ & \implnone（提出）\\
+智能恢复风险感知 MILP / POMDP / $p_R$ & \implnone（提出；已实现三阶段 MILP 见 \S\ref{sec:rel-rs}）\\
+智能保护拒动 / 误动事件抽象 $\lambda_z^{FT}$ & \implpart{静态事件抽象经故障模式 FMEA；动态协调提出}\\
+保护—FRT 细化（§18）、微网孤岛 / 储能续航（§19） & \implnone（提出细化层；储能续航式已用于恢复 MILP）\\
+\end{longtable}
+\end{center}
+
+\subsection{参考文献}
+\begin{thebibliography}{9}\small
+\bibitem{relicp:ieee1547} IEEE Std 1547-2018, \emph{IEEE Standard for Interconnection and
+  Interoperability of Distributed Energy Resources}. New York: IEEE, 2018.
+\bibitem{relicp:ieee2030} IEEE Std 2030.7-2017, \emph{IEEE Standard for the Specification of
+  Microgrid Controllers}. New York: IEEE, 2017.
+\bibitem{relicp:designdoc} HySim-XJTU-HRPES, \emph{Reliability Mathematical Models and Intelligent
+  Cyber-Physical Extension}, \srcpath{docs/theory/reliability\_mathematical\_models\_and\_intelligent\_cyber\_physical\_assessment.md}（第 13--19 节）.
+\end{thebibliography}

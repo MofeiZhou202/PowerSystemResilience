@@ -72,7 +72,7 @@
         \fld{model\_scope}/\fld{validity}/\fld{data\_quality}；
   \item \fld{FMEAResult}（:run\_three\_stage\_reliability\_from\_string）：系统级指标 + 逐条 \fld{contingencies}（按 EENS 贡献降序）
         + \fld{cyber\_physical} + \fld{ValidityFlags}（15 个能力标志，:FMEAResult::ValidityFlags）；
-  \item \fld{FailureModeFMEAResult}（\srcpath{include/hacdcpf/reliability/failure\_mode.hpp:FailureModeFMEAResult}）：\fld{contingencies} 与
+  \item \fld{FailureModeFMEAResult}（\srcpath{failure\_mode.hpp}）：\fld{contingencies} 与
         \fld{co\_contingencies}（N-2）、\fld{coverage}、\fld{n\_pairs\_evaluated}；
   \item \fld{ThreeStageReliabilityResult}（:FailureConsequenceKind）：\fld{saifi}/\fld{saidi\_min}/\fld{eens\_kwh\_yr}、
         逐故障 \fld{faults}（含 \fld{switching\_sequence}）、网络计数、\fld{validity}。

@@ -13,38 +13,41 @@
 \subsection{统一数据流}
 \begin{figure}[H]\centering
 \begin{tikzpicture}[font=\footnotesize,
-  box/.style={draw,rounded corners,minimum height=0.95cm,align=center,inner sep=3pt},
+  box/.style={draw,rounded corners,minimum height=1.0cm,text width=2.7cm,align=center,inner sep=4pt},
   arr/.style={->,thick}]
-  \node[box] (rich) at (0,0) {\texttt{HybridPowerSystem}\\富语义模型};
-  \node[box] (res) at (3.5,0) {参数解析器\\\srcpath{resolve\_reliability\_params}};
-  \node[box] (enum) at (7.4,0) {状态/故障枚举\\采样·N-1·故障模式目录};
-  \node[box] (patch) at (11.1,0) {后果算子\\$G_m=\Phi_m(G_0,x_m)$};
-  \node[box] (shed) at (3.5,-2.2) {切负荷引擎\\DC-OPF / 混合网络 LP / MILP};
-  \node[box] (metric) at (7.6,-2.2) {指标聚合\\EENS·LOLE·LOLF·SAIDI};
-  \node[box] (audit) at (11.2,-2.2) {口径审计\\\fld{model\_scope}·\fld{validity}};
+  \node[box] (rich) at (0,0) {富语义模型\\\texttt{HybridPowerSystem}};
+  \node[box] (res) at (3.7,0) {参数解析\\$\lambda,r,U$ 规范化};
+  \node[box] (enum) at (7.4,0) {状态/故障枚举\\抽样·N-1·目录};
+  \node[box] (patch) at (11.1,0) {后果算子\\$G_m{=}\Phi_m(G_0,x_m)$};
+  \node[box] (shed) at (3.7,-2.5) {切负荷引擎\\DC-OPF·LP·MILP};
+  \node[box] (metric) at (7.4,-2.5) {指标聚合\\EENS·LOLE·LOLF};
+  \node[box] (audit) at (11.1,-2.5) {口径审计\\\fld{model\_scope}};
   \draw[arr] (rich)--(res); \draw[arr] (res)--(enum); \draw[arr] (enum)--(patch);
-  \draw[arr] (patch.south) |- (shed.west); \draw[arr] (shed)--(metric); \draw[arr] (metric)--(audit);
+  \draw[arr] (patch.south) |- (shed.west);
+  \draw[arr] (shed)--(metric); \draw[arr] (metric)--(audit);
 \end{tikzpicture}
-\caption{可靠性评估统一数据流：解析$\to$枚举$\to$后果映射$\to$切负荷求解$\to$指标$\to$口径审计}
+\caption{可靠性评估统一数据流：解析$\to$枚举$\to$后果映射$\to$切负荷求解$\to$指标$\to$口径审计。}
 \end{figure}
 
 \subsection{公共入口族}
-全部入口位于命名空间 \texttt{hacdcpf::analysis}，行号以 2026-08-17 检出为准：
+全部入口位于命名空间 \texttt{hacdcpf::analysis}；头文件除三阶段模型在
+\srcpath{include/hacdcpf/analysis/} 外，均在 \srcpath{include/hacdcpf/reliability/}，下表“头文件”列仅
+记基名，函数名与“入口”列同名：
 \begin{center}\footnotesize
-\begin{tabular}{@{}L{5.4cm}L{5.4cm}L{3.6cm}@{}}
+\begin{tabular}{@{}L{4.9cm}L{4.9cm}L{3.8cm}@{}}
 \toprule
-入口 & 定义位置 & 方法族\\
+入口（函数） & 头文件 & 方法族\\
 \midrule
-\srcpath{resolve\_reliability\_params} & include/hacdcpf/reliability/reliability\_assessment.hpp:resolve\_reliability\_params & 参数解析（全方法共用）\\
-\srcpath{run\_nonsequential\_mc} & include/hacdcpf/reliability/reliability\_assessment.hpp:run\_nonsequential\_mc & 非序贯 MC\\
-\srcpath{run\_sequential\_mc} & include/hacdcpf/reliability/reliability\_assessment.hpp:run\_sequential\_mc & 序贯 MC（含 LOLF）\\
-\srcpath{run\_distribution\_fmea} & include/hacdcpf/reliability/reliability\_assessment.hpp:run\_distribution\_fmea & 元件级 FMEA\\
-\srcpath{run\_failure\_mode\_fmea} & include/hacdcpf/reliability/failure\_mode.hpp:run\_failure\_mode\_fmea & 故障模式级 FMEA（N-2）\\
-\srcpath{run\_three\_stage\_reliability} & include/hacdcpf/analysis/three\_stage\_reliability.hpp:run\_three\_stage\_reliability & 三阶段恢复 MILP\\
-\srcpath{run\_frequency\_duration\_analysis} & include/hacdcpf/reliability/reliability\_assessment.hpp:run\_frequency\_duration\_analysis & 频率-持续时间解析\\
-\srcpath{build\_failure\_mode\_catalog} & include/hacdcpf/reliability/failure\_mode.hpp:build\_failure\_mode\_catalog & 故障模式目录\\
-\srcpath{evaluate\_failed\_network\_state} & include/hacdcpf/reliability/reliability\_assessment.hpp:evaluate\_failed\_network\_state & 后果引擎入口\\
-\srcpath{compute\_distribution\_indices} & include/hacdcpf/reliability/reliability\_assessment.hpp:compute\_distribution\_indices & SAIFI/SAIDI/ASAI\\
+\srcpath{resolve\_reliability\_params} & \srcpath{reliability\_assessment.hpp} & 参数解析（全方法共用）\\
+\srcpath{run\_nonsequential\_mc} & \srcpath{reliability\_assessment.hpp} & 非序贯 MC\\
+\srcpath{run\_sequential\_mc} & \srcpath{reliability\_assessment.hpp} & 序贯 MC（含 LOLF）\\
+\srcpath{run\_distribution\_fmea} & \srcpath{reliability\_assessment.hpp} & 元件级 FMEA\\
+\srcpath{run\_failure\_mode\_fmea} & \srcpath{failure\_mode.hpp} & 故障模式级 FMEA（N-2）\\
+\srcpath{run\_three\_stage\_reliability} & \srcpath{three\_stage\_reliability.hpp} & 三阶段恢复 MILP\\
+\srcpath{run\_frequency\_duration\_analysis} & \srcpath{reliability\_assessment.hpp} & 频率-持续时间解析\\
+\srcpath{build\_failure\_mode\_catalog} & \srcpath{failure\_mode.hpp} & 故障模式目录\\
+\srcpath{evaluate\_failed\_network\_state} & \srcpath{reliability\_assessment.hpp} & 后果引擎入口\\
+\srcpath{compute\_distribution\_indices} & \srcpath{reliability\_assessment.hpp} & SAIFI/SAIDI/ASAI\\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -69,7 +72,7 @@ AC DC-OPF & 纯交流 MC/FMEA & 无电压幅值/无功可行性（$P=B\theta$）
 是数学结果的组成部分，下游 API 必须保留：
 \begin{itemize}
   \item MC/FMEA 在纯交流上为 \texttt{"ac-only-dcopf"}，
-        \fld{validity.dc\_load\_curtailment\_included}=false——EENS/LOLE 不含 DC 负荷中断；
+        \fld{validity.\allowbreak dc\_load\_curtailment\_included}=false——EENS/LOLE 不含 DC 负荷中断；
   \item 混合系统 FMEA 升级为 \texttt{"hybrid-acdc-network-lp"}；
   \item 三阶段模型为
         \texttt{"coupled-acdc-\allowbreak lindistflow-\allowbreak restoration-milp"}，

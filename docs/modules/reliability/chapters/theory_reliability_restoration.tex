@@ -1,0 +1,140 @@
+% theory_reliability_restoration.tex —— 三阶段恢复可靠性模型（LinDistFlow 恢复 MILP）
+% 本文件为理论层章节，遵循 docs/modules/THEORY_WRITING_GUIDE.md。
+% 数学模型依据 docs/theory/reliability_mathematical_models_and_intelligent_cyber_physical_assessment.md 第 4、10 节。
+
+\section{三阶段恢复可靠性模型}\label{sec:rel-rs}
+
+\begin{theorynote}
+本章转写\emph{已实现}的三阶段（隔离—开关恢复—修复）恢复可靠性模型，它以每个故障为一次事件，在三个
+时段内分别求解\emph{线性配电潮流}（LinDistFlow）恢复 MILP，得到分时段切负荷并按 N-0 反事实加权聚合
+为 EENS/LOLE。依据设计文档
+\srcpath{docs/theory/reliability\_mathematical\_models\_and\_intelligent\_cyber\_physical\_assessment.md}
+第 4、10 节及 \srcpath{include/hacdcpf/analysis/three\_stage\_reliability.hpp}。诚实边界：恢复 MILP 为
+线性化（LinDistFlow $+$ 视在功率盒式外松弛），拒绝 LCC 换流器与多端口能量路由器，不含二次损耗与
+非线性 AC 圆约束；失败或近似阶段清除 \fld{ok} 与物理有效标志，绝不静默回退。
+\end{theorynote}
+
+\subsection{阶段语义与时钟}\label{sec:rel-rs-stage}
+对故障 $k$，事件分三阶段（故障元件在三段全程保持开断，仅在 $\tau_{RP}$ 零时长边界“修复”）：
+\begin{center}\footnotesize
+\begin{tabular}{@{}cL{3.2cm}L{5.0cm}L{4.4cm}@{}}
+\toprule
+阶段 & 区间 & 物理含义 & 拓扑\\
+\midrule
+1 & $[0,\tau_{SW}]$ & 故障清除与隔离 & 故障开断；联络额定\\
+2 & $[\tau_{SW},\tau_{TP}]$ & 开关恢复 & 故障开断；合格联络优化\\
+3 & $[\tau_{TP},\tau_{RP}]$ & 修复窗 & 故障仍开断；保持已接受的 Stage-2 方案\\
+\bottomrule
+\end{tabular}
+\end{center}
+时长满足 $r_k=\tau_k^{iso}+\tau_k^{sw}+\tau_k^{rep}$，阶段时长为
+$\Delta t_{k,1}=\tau_{SW,k}$、$\Delta t_{k,2}=\tau_{TP,k}-\tau_{SW,k}$、$\Delta t_{k,3}=\tau_{RP,k}-\tau_{TP,k}$，
+对应实现字段 $\tau_k^{iso}=\Delta t_{k,1}$、$\tau_k^{sw}=\Delta t_{k,2}$、$\tau_k^{rep}=\Delta t_{k,3}$。
+
+\subsection{交流 LinDistFlow 恢复 MILP}\label{sec:rel-rs-milp}
+每阶段联合最小化交直流有功切负荷（末项以 $10^{-8}$ 权仅打破储能/换流器调度简并、保能量）：
+\begin{equation}
+ \min\ \sum_{i\in\mathcal B^{ac}}w_ip_i^{sh}+\sum_{d\in\mathcal B^{dc}}w_dp_d^{sh}
+ +10^{-8}\Big(\sum_bp_b^{st}+\sum_cp_c^{conv}\Big).
+\end{equation}
+带电与投切：源母线置为已带电根，跟网发电与储能\emph{不能}给死岛带电：
+\begin{equation}
+ P_i^d-p_i^{sh}\le P_i^dy_i,\ y_i\in\{0,1\};\qquad
+ 0\le p_i^g\le\overline P_i^gy_i,\quad 0\le p_b^{st}\le\overline P_b^{st}y_{i(b)}.
+\end{equation}
+有功 / 无功平衡（无功切负荷按功率因数比例 $q_i^{sh}=q_i^{sh}(P_i^d,Q_i^d)$，缺测无功以 0.9 功率因数重构）：
+\begin{align}
+ \sum_{j:(j,i)}P_{ji}-\sum_{j:(i,j)}P_{ij}+p_i^g+p_i^{sh}+\sum_{b:i(b)=i}p_b^{st}&=P_i^d,\\
+ \sum_{j:(j,i)}Q_{ji}-\sum_{j:(i,j)}Q_{ij}+q_i^g+q_i^{sh}&=Q_i^d,\qquad q_i^{sh}=\frac{Q_i^d}{P_i^d}p_i^{sh}.
+\end{align}
+对平方电压 $v_i$ 与支路投切态 $z_{ij}$，LinDistFlow 压降经 Big-M 随拓扑启用（$v_i$ 为平方标幺电压，
+$r_{ij},x_{ij}$ 为系统基标幺阻抗，$P_{ij},Q_{ij}$ 为 MW/Mvar，$S_{base}$ 为 MVA）：
+\begin{equation}
+ -M(1-z_{ij})\le v_j-v_i+\frac{2r_{ij}}{S_{base}}P_{ij}+\frac{2x_{ij}}{S_{base}}Q_{ij}\le M(1-z_{ij}),
+ \qquad \underline V_i^2\le v_i\le\overline V_i^2.
+\end{equation}
+
+\begin{remark}[视在功率盒式外松弛]\label{rem:rel-rs-box}
+实现对 $P,Q$ 用分离线性界 $|P_{ij}|\le z_{ij}\overline S_{ij}$、$|Q_{ij}|\le z_{ij}\overline S_{ij}$，
+是 $P_{ij}^2+Q_{ij}^2\le z_{ij}\overline S_{ij}^2$ 的\emph{外、乐观}松弛：允许角点 $P{=}Q{=}\overline S$
+（视在 $\sqrt2\,\overline S$）。决策级模型应改用 SOCP 或多边形内逼近
+$P_{ij}\cos\theta_j+Q_{ij}\sin\theta_j\le z_{ij}\overline S_{ij}\cos(\pi/J)$（$j=1,\dots,J$）。
+\end{remark}
+
+\subsection{严格辐射能量森林}\label{sec:rel-rs-forest}
+辅助商品流 $f_{ij}$ 从电压成形根建立连通性，强制辐射（生成森林）：
+\begin{align}
+ \sum f_{in}-\sum f_{out}&=y_i\ (i\notin\mathcal S_{root}),\qquad
+ \sum f_{in}-\sum f_{out}\le0\ (i\in\mathcal S_{root}),\\
+ |f_{ij}|&\le(|\mathcal B|-1)z_{ij},\quad z_{ij}\le y_i,\ z_{ij}\le y_j,\qquad
+ \sum_{(i,j)}z_{ij}\le\sum_iy_i-|\mathcal S_{root}|.
+\end{align}
+故障元件在每阶段固定开断；常开恢复联络在 Stage 1 固定开断、Stage 2 优化、Stage 3 保持已接受方案；
+开关预算 $\sum_{\ell\in\mathcal L^{NO}}z_\ell\le K^{sw}$。保护 / 联锁预检验证保护可切断故障电流、分段动作
+只在所需上游跳闸后发生；非法动作序列阻断恢复准入并上报。
+
+\subsection{事件内储能时序}\label{sec:rel-rs-storage}
+各阶段时长 $\Delta t_s$ 下储能荷电按序演化（放电受额定与剩余可交付能量双限）：
+\begin{equation}
+ E_{b,s+1}=E_{b,s}-p_{b,s}^{st}\Delta t_s,
+\end{equation}
+在稳定求解序 $[\text{AC 储能}\mid\text{移动储能}\mid\text{DC 储能}]$ 上一致施加；\texttt{InTransit} 移动储能
+电可用度为零、不列为可用源停运。Stage 3 仅在储能能量限改变时重解，否则复用 Stage-2 拓扑 / 解。
+
+\subsection{耦合直流 LinDistFlow 与换流器}\label{sec:rel-rs-dc}
+默认混合路径在同一阶段 MILP 内建直流网络，AC/DC 母线映射域限定（同号 ID 不混叠）。DC 支路
+$v_e-v_d+\tfrac{2r_{de}}{S_{base}^{dc}}P_{de}=0$，含 Big-M 投切、带电端点约束与严格 DC 辐射森林。
+VSC 以 AC$\to$DC 传输 $p_v^+$、DC$\to$AC 传输 $p_v^-$、恒效率 $\eta_v$ 表述：
+\begin{equation}
+ P_v^{ac}=-p_v^++\eta_vp_v^-,\qquad P_v^{dc}=\eta_vp_v^+-p_v^-,\qquad 0\le p_v^+,p_v^-\le\overline P_v.
+\end{equation}
+小正传输代价消去对冲简并。DC-DC 换流器用类似双向式；DC 静发 / PV / 储能带停运、功率、电压根与能量约束
+入直流平衡。VPP 无稳定成员引用列表，故作单一独立边界注入，不静默展开或重复计。LCC 换流器与多端口能量
+路由器因换相 / 端口平衡方程不等价于 VSC 而被拒绝。
+
+\subsection{频率加权与 N-0 资格}\label{sec:rel-rs-n0}
+设 $s_{i,k,s}^{raw}$ 为故障 $k$ 下切负荷、$s_{i,s}^{N0}$ 为同阶段时长 / 能量条件下的健康态切负荷，可靠性
+增量与指标为
+\begin{equation}
+ s_{i,k,s}^{inc}=\max(0,s_{i,k,s}^{raw}-s_{i,s}^{N0}),\quad
+ \mathrm{EENS}_i=\sum_k\lambda_k\sum_ss_{i,k,s}^{inc}\tau_{k,s},\quad
+ \mathrm{LOLE}=\sum_k\lambda_k\sum_s\tau_{k,s}\mathbf 1\!\Big[\sum_is_{i,k,s}^{inc}>\varepsilon\Big].
+\end{equation}
+N-0 反事实自\emph{同一}初始储能能量出发、用\emph{同一}三阶段时长，但演化\emph{独立}的健康调度 / 能量轨迹
+$s_{i,k,s}^{inc}=\max(0,\ s_i(G_{k,s},E_{k,s})-s_i(G_{0,s},E_{0|k,s}))$，其中 $E_{0|k,s}$ 是健康反事实在同一
+外生时长序列下达到的能量态（非故障耗竭态）。这估计故障的\emph{总因果效应}（含其对储能使用的影响），
+而非纯拓扑边际；仅当两路径共享初始 SOC、负荷、可再生可用性、阶段时长与所有非故障设置时有效。缺省故障集
+含 AC/DC 支路，发电机 / 变压器 / 换流器 / 开关 / DER-微网族由选项控制以复现历史仅支路结果。依据：
+\srcpath{src/reliability/three\_stage\_reliability.cpp:run\_three\_stage\_reliability}。
+
+\subsection{与实现的对应}\label{sec:rel-rs-impl}
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{5.4cm}L{9.0cm}@{}}
+\toprule
+\textbf{理论对象} & \textbf{平台实现状态}\\
+\midrule
+\endfirsthead
+\toprule
+\textbf{理论对象} & \textbf{平台实现状态}\\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+三阶段语义与时钟 & \implfull{include/hacdcpf/analysis/three\_stage\_reliability.hpp}\\
+交流 LinDistFlow 恢复 MILP、能量森林、开关预算 &
+  \implfull{src/reliability/three\_stage\_reliability.cpp:run\_three\_stage\_reliability}\\
+事件内储能时序（AC/移动/DC 序） & \implfull{src/reliability/three\_stage\_reliability.cpp}\\
+耦合 DC LinDistFlow $+$ VSC 双向传输 & \implfull{src/reliability/three\_stage\_reliability.cpp}（\fld{include\_dc\_power\_flow}）\\
+N-0 反事实增量与 EENS/LOLE 聚合 & \implfull{src/reliability/three\_stage\_reliability.cpp}\\
+视在功率 SOCP / 多边形内逼近 & \implnone（盒式外松弛，见注记~\ref{rem:rel-rs-box}）\\
+LCC 换流器、多端口能量路由器、二次损耗 & \implnone（显式拒绝 / 线性化边界）\\
+\end{longtable}
+\end{center}
+
+\subsection{参考文献}
+\begin{thebibliography}{9}\small
+\bibitem{relrs:baran} M.~E. Baran and F.~F. Wu, ``Optimal sizing of capacitors placed on a radial
+  distribution system,'' \emph{IEEE Trans. Power Del.}, vol.~4, no.~1, pp.~735--743, 1989（LinDistFlow）.
+\bibitem{relrs:designdoc} HySim-XJTU-HRPES, \emph{Reliability Mathematical Models and Intelligent
+  Cyber-Physical Extension}, \srcpath{docs/theory/reliability\_mathematical\_models\_and\_intelligent\_cyber\_physical\_assessment.md}（第 4、10 节）.
+\end{thebibliography}

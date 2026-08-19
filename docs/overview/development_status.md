@@ -113,6 +113,24 @@ rendered at publication scale and show no clipping, overlap, or overfull
 content. The log contains no undefined references, duplicate labels, or fatal
 errors.
 
+The internal geometry of manuscript Figs. 1, 2, 4, and 5 was subsequently
+reworked at the source-script level. Status labels and reconstruction paths in
+Fig. 1 now have separate lanes; Fig. 2 uses separated terminal labels, device-ID
+tracks, and one-to-one reverse-attribution rows; Fig. 4 separates evidence and
+acceptance-gate labels from the panel headings and decision paths; and Fig. 5
+routes the DC connection below the node labels. The regenerated vector figures
+were checked both individually and after full-width placement in the 19-page
+two-column manuscript. The current PDF is
+`build/latex-sppt-theory-layout-v3/sppt_theory.pdf`.
+
+A final publication-scale pass adds explicit safety margins at the remaining
+near-contact points: the Fig. 1 reconstruction lane is horizontal and detached
+from its label, Fig. 2 attribution arrows terminate before the asset boxes, Fig.
+4 evidence text, arrows, gate title, and gate line occupy separate regions, and
+Fig. 5 separates its DC-line path from both node and parameter labels. The
+corresponding manuscript build is
+`build/latex-sppt-theory-layout-v4/sppt_theory.pdf`.
+
 ## 技术委托要求文档
 
 已根据当前源码、公共接口、GUI、数据交换能力和已验证测试基线完成

@@ -114,8 +114,8 @@ def plot_public_feeders(manifest_rows: list[dict[str, str]], output_dir: Path) -
     warnings = np.array([int(row["import_warnings"]) for row in rows])
     positions = np.arange(len(rows))
 
-    figure = plt.figure(figsize=(7.15, 5.25), layout="constrained")
-    grid = figure.add_gridspec(2, 2, height_ratios=[1.65, 1.0], width_ratios=[1.25, 1.15])
+    figure = plt.figure(figsize=(7.15, 5.55), layout="constrained")
+    grid = figure.add_gridspec(2, 2, height_ratios=[1.55, 1.15], width_ratios=[1.22, 1.18])
     scale_axis = figure.add_subplot(grid[0, :])
     warning_axis = figure.add_subplot(grid[1, 0])
     overlay_axis = figure.add_subplot(grid[1, 1])
@@ -169,28 +169,29 @@ def plot_public_feeders(manifest_rows: list[dict[str, str]], output_dir: Path) -
     overlay_axis.set_ylim(0, 5.2)
     overlay_axis.axis("off")
     feeder = FancyBboxPatch(
-        (0.7, 4.05), 8.6, 0.65, boxstyle="round,pad=0.10", facecolor="#E7F0F7", edgecolor=COLORS["blue"]
+        (0.6, 4.12), 8.8, 0.62, boxstyle="round,pad=0.08", facecolor="#E7F0F7", edgecolor=COLORS["blue"]
     )
     overlay_axis.add_patch(feeder)
-    overlay_axis.text(5.0, 4.38, "Imported AC feeder: source and largest-load terminals", ha="center", va="center", fontsize=7.4)
-    for x_value, label, color in ((2.5, "PQ VSC", COLORS["orange"]), (7.5, "VDC-Q VSC", COLORS["green"])):
+    overlay_axis.text(5.0, 4.43, "Imported AC feeder: source and largest-load buses", ha="center", va="center", fontsize=7.1)
+    for x_value, label, color in ((2.2, "PQ VSC", COLORS["orange"]), (7.8, "VDC-Q VSC", COLORS["green"])):
         box = FancyBboxPatch(
-            (x_value - 0.85, 2.75), 1.7, 0.72, boxstyle="round,pad=0.10", facecolor="white", edgecolor=color
+            (x_value - 0.82, 2.82), 1.64, 0.68, boxstyle="round,pad=0.08", facecolor="white", edgecolor=color
         )
         overlay_axis.add_patch(box)
-        overlay_axis.text(x_value, 3.11, label, ha="center", va="center", fontsize=7.6)
-    for x_value, label in ((3.8, "DC-P"), (6.2, "DC-V: 1.02 p.u.")):
+        overlay_axis.text(x_value, 3.16, label, ha="center", va="center", fontsize=7.3)
+    for x_value, label in ((3.25, "DC-P"), (6.75, "DC-V: 1.02 p.u.")):
         node = FancyBboxPatch(
-            (x_value - 0.72, 1.52), 1.44, 0.66, boxstyle="round,pad=0.08",
+            (x_value - 0.92, 1.80), 1.84, 0.62, boxstyle="round,pad=0.07",
             facecolor="#F2EAF5", edgecolor="#76558E", linewidth=1.0
         )
         overlay_axis.add_patch(node)
-        overlay_axis.text(x_value, 1.85, label, ha="center", va="center", fontsize=6.8)
+        overlay_axis.text(x_value, 2.11, label, ha="center", va="center", fontsize=6.6)
     arrow_style = dict(arrowstyle="-", color=COLORS["ink"], linewidth=1.2)
-    for start, end in (((2.5, 4.05), (2.5, 3.47)), ((7.5, 4.05), (7.5, 3.47)), ((2.5, 2.75), (3.20, 2.18)), ((4.52, 1.85), (5.48, 1.85)), ((6.80, 2.18), (7.5, 2.75))):
+    for start, end in (((2.2, 4.12), (2.2, 3.50)), ((7.8, 4.12), (7.8, 3.50)), ((2.2, 2.82), (2.72, 2.42)), ((7.28, 2.42), (7.8, 2.82))):
         overlay_axis.add_patch(FancyArrowPatch(start, end, **arrow_style))
-    overlay_axis.text(5.0, 1.22, r"DC line: $r=0.02$ p.u.; both VSCs: $\eta=0.99$", ha="center", fontsize=7.1)
-    overlay_axis.text(5.0, 0.52, r"$P_{\rm PQ}=\mathrm{clamp}(0.02P_{\rm load},\,0.001S_b,\,0.05S_b)$", ha="center", fontsize=7.0)
+    overlay_axis.plot([3.25, 3.25, 6.75, 6.75], [1.80, 1.46, 1.46, 1.80], color=COLORS["ink"], linewidth=1.2)
+    overlay_axis.text(5.0, 0.92, r"DC line: $r=0.02$ p.u.; both VSCs: $\eta=0.99$", ha="center", fontsize=6.9)
+    overlay_axis.text(5.0, 0.22, r"$P_{\rm PQ}=\mathrm{clamp}(0.02P_{\rm load},\,0.001S_b,\,0.05S_b)$", ha="center", fontsize=6.8)
 
     save_figure(figure, output_dir, "sppt_public_feeder_variants")
 

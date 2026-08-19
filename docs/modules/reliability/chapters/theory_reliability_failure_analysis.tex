@@ -1,0 +1,301 @@
+% theory_reliability_failure_analysis.tex —— 元件失效模型、故障模式 FMEA、共故障与信息物理评估
+% 本文件为理论层章节，遵循 docs/modules/THEORY_WRITING_GUIDE.md。
+% 数学模型依据 docs/theory/reliability_mathematical_models_and_intelligent_cyber_physical_assessment.md。
+
+\section{元件失效模型与故障后果分析}\label{sec:rel-fa}
+
+\begin{theorynote}
+本章展开\emph{元件级}失效的详细数学模型与\emph{故障分析}（FMEA）方法，是 \S\ref{sec:rel-th}
+系统级评估的物理与统计基座，依据设计文档
+\srcpath{docs/theory/reliability\_mathematical\_models\_and\_intelligent\_cyber\_physical\_assessment.md}
+（第 3、8、9、12 节）。覆盖：可修元件的交替更新过程与“运行年—日历年”故障强度之辨、按需失效模式
+（$\lambda^{act}=\nu p^d$、按需失效概率 PFD）、确定性两阶段（隔离—修复）元件 FMEA、故障模式 FMEA
+的原因—后果目录与二阶共故障（N-2）近似、以及\emph{已实现}的 Level-1 信息物理 FMEA（自动化可用/不可用
+双类全期望细化、反事实归因与三维因子化筛选）。全部“已实现”结论以 \srcpath{src/reliability/} 为落点；
+凡实现采用稀有事件近似或独立性假设处，均就地标注其有效边界，绝不以近似冒充精确。
+\end{theorynote}
+
+\subsection{可修元件：交替更新过程}\label{sec:rel-fa-renewal}
+两状态可修元件的最一般刻画是\emph{交替更新过程}：运行时长 $T^\uparrow$ 与故障（修复）时长
+$T^\downarrow$ 独立同分布、均值有限，故障后修复至“修旧如新”。设 $H$ 为年小时数。
+
+\begin{theorem}[更新—回报不可用度]\label{thm:rel-fa-renewal}
+在上述假设下，长期不可用度为
+\begin{equation}
+ U=\frac{\mathbb E[T^\downarrow]}{\mathbb E[T^\uparrow]+\mathbb E[T^\downarrow]}
+ =\frac{\mathrm{MTTR}}{\mathrm{MTTF}+\mathrm{MTTR}},
+ \label{eq:rel-fa-U}
+\end{equation}
+\emph{不}要求指数分布的运行 / 修复时长。仅当把模型解释为两状态连续时间马尔可夫链
+（指数时长）时，才有转移强度 $\alpha=\lambda/H$、$\beta=1/r$ 与
+$U=\alpha/(\alpha+\beta)=\lambda r/(H+\lambda r)$。
+\end{theorem}
+
+\begin{proof}
+由更新—回报定理，长期处于“下”状态的时间比例等于每个更新周期内下状态期望时长占周期期望总时长之比，
+即 $\mathbb E[T^\downarrow]/(\mathbb E[T^\uparrow]+\mathbb E[T^\downarrow])$；此结论只依赖均值存在与
+遍历性，与时长分布形状无关。指数情形下 CTMC 平稳方程 $\pi_\uparrow\alpha=\pi_\downarrow\beta$、
+$\pi_\uparrow+\pi_\downarrow=1$ 给出 $\pi_\downarrow=\alpha/(\alpha+\beta)$，与~\eqref{eq:rel-fa-U} 一致。
+\end{proof}
+
+\paragraph{“运行年”与“日历年”故障强度之辨。}
+式~\eqref{eq:rel-fa-U} 中 $\lambda$ 必须是\emph{运行年}强度（元件在运行时的故障风险率）。若输入为按
+\emph{日历年}统计的经验故障次数 $f_{cal}$，则
+\begin{equation}
+ U_{cal}=\frac{f_{cal}r}{H},\qquad f_{cal}=(1-U)\lambda_{up},\qquad
+ \lambda_{up}=\frac{f_{cal}}{1-f_{cal}r/H}.
+ \label{eq:rel-fa-cal}
+\end{equation}
+二者仅在小 $U$ 时近似相等：$U\approx\lambda r/H$（$\lambda r\ll H$）。平台解析器
+（\srcpath{resolve\_reliability\_params}）把故障率输入\emph{按运行年强度} $\lambda$ 解释；采用观测日历
+频率的研究须按~\eqref{eq:rel-fa-cal} 换算，或显式声明稀有事件近似。多工况、部分降额、非指数老化、
+天气调制、相关失效与共享修复资源均超出两状态元组，需多状态 / 半马尔可夫 / 时序模型。
+
+\subsection{按需失效模式}\label{sec:rel-fa-demand}
+保护、开关等\emph{按需}功能以失败频率约简
+\begin{equation}
+ \lambda_m^{act}=\nu_m\,p_m^d\quad\Big[\tfrac{\text{需求}}{\text{年}}\Big]\Big[\tfrac{\text{失败操作}}{\text{需求}}\Big]
+ =\Big[\tfrac{\text{失败操作}}{\text{年}}\Big],
+ \label{eq:rel-fa-act}
+\end{equation}
+它是\emph{期望失败操作频率}，既非年概率、亦非 MTTF、亦非“需求时不可用”的概率。若需求为泊松过程、
+每次独立以 $p_m^d$ 失败，则由泊松稀疏化，年内至少一次失败操作的概率为
+\begin{equation}
+ \Pr(N_m^{fail}\ge1)=1-e^{-\nu_m p_m^d}\ (\ne\nu_m p_m^d\ \text{除稀有近似}),\qquad
+ \Pr(N_m^{fail}\ge1)=1-(1-p_m^d)^n\ (n\ \text{次独立需求}).
+\end{equation}
+对异构触发事件，更稳健的形式为
+$\lambda_m^{act}=\sum_{k\in\mathcal K_m}\lambda_k\Pr(m\text{ 失败}\mid k)$，含信息物理类时再对类 $c$
+以 $\pi_c(k)$ 加权。若共享驱动 $W$（如极端天气）同时改变需求强度与成功率，正确的边缘频率是
+$\lambda_m^{act}=\sum_k\int\lambda_k(w)\Pr(m\text{ 失败}\mid k,w)f_W(w)\,\mathrm dw$，用
+$\mathbb E[\lambda_k(W)]\,\mathbb E[p_m^d(W)]$ 替代将强加独立性、恰好漏掉关注的严重工况。
+
+\paragraph{按需失效概率与时间不可用度之别。}
+对休眠保护 / 开关，关键量常是按需失效概率 $\mathrm{PFD}_{avg}$ 而非时间不可用度。若危险未检出失效率
+为 $\lambda_{DU}$、完备验证试验周期为 $T_I$，低率近似为 $\mathrm{PFD}_{avg}\approx\lambda_{DU}T_I/2$，
+失败频率 $\lambda_m^{act}=\nu_m\mathrm{PFD}_{avg}$。平台在给出恢复时长 $r_m$ 时另算恢复占时
+$U_m^{recovery}=\lambda_m^{act}r_m/(H+\lambda_m^{act}r_m)$——它\emph{只是}失败后恢复态的时间占比，
+\emph{不是} $p_m^d$ 或 $\mathrm{PFD}_{avg}$；同理 $\mathrm{mttf\_hr}=H/\lambda_m^{act}$ 只是失败事件间的
+平均间隔，不是器件寿命。故洁净数据契约须区分三量：$p_m^d$/$\mathrm{PFD}_{avg}$、$\lambda_m^{act}=\nu_m p_m^d$、
+$U_m^{recovery}$。依据：\srcpath{resolve\_reliability\_params}（主动分支）。
+
+\subsection{确定性两阶段元件 FMEA}\label{sec:rel-fa-fmea}
+每个在运元件 $k$ 作 N-1 事件评估，事件含\emph{隔离/开关}阶段（时长 $\tau_k^{sw}$）与其后的\emph{修复}
+阶段，故障在两阶段全程失电：
+\begin{equation}
+ \tau_k^{rep}=\max(0,\,r_k-\tau_k^{sw}).
+\end{equation}
+修复阶段引擎可用抢修/开关重构、DER 再调度、储能、构网 VSC 与微网孤岛；储能受功率—能量双限
+\begin{equation}
+ P_b^{avail}=\min\!\Big(P_b^{rated},\ \frac{(E_b-E_b^{min})\eta_b^{dis}}{\tau_s}\Big).
+\end{equation}
+以两阶段切负荷 $S_k^{sw},S_k^{rep}$ 与日历频率 $f_k^{cal}$，暴露一致的解析聚合为
+\begin{align}
+ \mathrm{EENS}&=\sum_k f_k^{cal}\big(S_k^{sw}\tau_k^{sw}+S_k^{rep}\tau_k^{rep}\big),\\
+ \mathrm{LOLE}&=\sum_k f_k^{cal}\big(\tau_k^{sw}\mathbf 1[S_k^{sw}{>}\varepsilon]+\tau_k^{rep}\mathbf 1[S_k^{rep}{>}\varepsilon]\big),\\
+ \mathrm{LOLF}&=\sum_k f_k^{cal}\,\mathbf 1[S_k^{sw}{>}\varepsilon\ \lor\ S_k^{rep}{>}\varepsilon],
+\end{align}
+其中 $f_k^{cal}=(1-U_k)\lambda_k^{up}$。\textbf{实现注}：平台直接以解析器的 $\lambda_k^{up}$ 代 $f_k^{cal}$，
+即稀有事件近似 $f_k^{cal}\approx\lambda_k^{up}$，字面解释时把日历事件数高估 $1/(1-U_k)$ 倍，仅小 $U_k$ 可忽略；
+长修复 / 高不可用元件须显式换算。忽略的重叠项为二阶
+$\Pr(i,j\text{ 同时停})=O\big((f_i^{cal}r_i/H)(f_j^{cal}r_j/H)\big)$。LOLF 每个触发列一次损失、不计事件内
+多段损失（如储能耗尽后再失）。依据：\srcpath{src/reliability/reliability\_assessment.cpp:run\_distribution\_fmea}。
+
+\subsection{故障模式 FMEA 与二阶共故障}\label{sec:rel-fa-mode}
+富组件展开为\emph{被动}与\emph{主动}失效模式，原因类含：物理、信息控制、通信、量测、保护逻辑、人因、
+计划；后果含：强迫停运、降额、卡滞、拒动/误动（开/合/跳）、定值冻结、通信失联、失去构网、区域跳闸。
+单模式确定性结果为
+\begin{equation}
+ f_m=\begin{cases}\lambda_m,&\text{被动（稀有暴露近似）},\\ \nu_m p_m^d,&\text{主动按需},\end{cases}\quad
+ d_m=\tau_m^{iso}+\tau_m^{sw}+\max(r_m,r_m^{mode}),\quad
+ \mathrm{EENS}_m=f_m d_m S_m.
+ \label{eq:rel-fa-mode}
+\end{equation}
+暴露一致的被动模式应取 $f_m=f_m^{cal}=(1-U_m)\lambda_m^{up}$；主动分支已是事件/年单位，不再乘 $(1-U)$。
+
+\begin{proposition}[二阶共故障近似]\label{prop:rel-fa-pair}
+对相异模式 $i,j$，平台以
+\begin{equation}
+ U_i\approx\min\!\Big(1,\tfrac{f_i d_i}{H}\Big),\quad U_{ij}=U_iU_j,\quad
+ d_{ij}=\frac{d_id_j}{d_i+d_j},\quad f_{ij}=\frac{f_if_j(d_i+d_j)}{H},\quad
+ \mathrm{EENS}_{ij}=U_{ij}HS_{ij},
+ \label{eq:rel-fa-pair}
+\end{equation}
+其中等效重叠时长 $d_{ij}$ 恰使 $f_{ij}d_{ij}/H=U_iU_j$。这是 N-2 暴露/排序近似，非精确不相交状态展开。
+\end{proposition}
+
+精确二阶交互展开（\emph{未实现}）应为
+\begin{equation}
+ \mathbb E[S]\approx S_0+\sum_iU_i(S_i-S_0)+\sum_{i<j}U_iU_j\big(S_{ij}-S_i-S_j+S_0\big),
+ \label{eq:rel-fa-exact}
+\end{equation}
+需一致截断的状态概率。故当前实现把成对贡献\emph{加入}一阶总量，科学解读时应\emph{单列}成对项；
+$O(U_iU_jU_k)$ 及以上、修复资源与时序重叠交互均省略。依据：
+\srcpath{src/reliability/failure\_mode.cpp:run\_failure\_mode\_fmea}。
+
+\subsection{Level-1 信息物理 FMEA（已实现）}\label{sec:rel-fa-cyber}
+对每个 N-1 触发 $k$，以两个\emph{后果等价}的信息类细化物理 FMEA：自动化可用（$c=a$，条件概率
+$A_k=\Pr(C=a\mid K=k)$）与不可用（$c=m$，$1-A_k$，人工响应，$\tau_k^m\ge\tau_k^a$，且可冻结 DER/储能/
+构网/黑启动/微网等远程资源）。类条件后果 $E_{k,c}=S_{k,c}^{sw}\tau_{k,c}^{sw}+S_{k,c}^{rep}\tau_{k,c}^{rep}$，
+则\emph{全期望}细化为
+\begin{equation}
+ \boxed{\ \mathrm{EENS}=\sum_k\lambda_k\big[A_kE_{k,a}+(1-A_k)E_{k,m}\big]
+ =\sum_k\lambda_k\sum_{c\in\{a,m\}}\Pr(C{=}c\mid K{=}k)\,E_{k,c}.\ }
+ \label{eq:rel-fa-cyber}
+\end{equation}
+它是物理 FMEA 的全期望细化，\emph{非}新指标。$A_k$ 一般 $\ne\Pr(C{=}a)$，因天气/站用电/站点损毁可同时
+驱动两层——全局标量或逐元件覆盖是\emph{筛选}输入，隐含独立或用户已给条件值。
+
+\paragraph{反事实归因与自动化效率。}
+令 $E_k^{dur}$ 用人工时长但自动控制仍在。平台报告
+\begin{align}
+ \mathrm{EENS}^{perfect}&=\sum_k\lambda_kE_{k,a},\\
+ \Delta^{cyb,dur}&=\sum_k\lambda_k(1-A_k)(E_k^{dur}-E_{k,a}),\\
+ \Delta^{cyb,ctl}&=\sum_k\lambda_k(1-A_k)(E_{k,m}-E_k^{dur}),
+\end{align}
+且 $\mathrm{EENS}=\mathrm{EENS}^{perfect}+\Delta^{cyb,dur}+\Delta^{cyb,ctl}$，并给出无自动化上界
+$\mathrm{EENS}^{noauto}=\sum_k\lambda_kE_{k,m}$、自动化效率
+$\eta_A=(\mathrm{EENS}^{noauto}-\mathrm{EENS})/(\mathrm{EENS}^{noauto}-\mathrm{EENS}^{perfect})$ 与
+信息物理致 SAIDI 份额 $\gamma_{SAIDI}=(\mathrm{SAIDI}-\mathrm{SAIDI}^{perfect})/\mathrm{SAIDI}$。
+\begin{gapnote}
+时长/控制增量是\emph{反事实归因}，非天然非负测度：其非负性依赖单调性假设
+$E_{k,a}\le E_k^{dur}\le E_{k,m}$。若较慢开关反而启用更优拓扑、或冻结控制意外改善调度，任一增量可为负；
+此为“完美—退化”序非单调的诊断证据，\emph{不得}静默钳零。Level-1 无显式通信拓扑、时延、信息节点电源、
+共因信息失效或学习型 FDIR 策略；保护误动由故障模式 FMEA 单独处理，其 Level-1 分解字段为占位零。
+\end{gapnote}
+
+\paragraph{三维因子化筛选。}
+当信息与智能维启用时，自动类有效概率因子化为
+\begin{equation}
+ A_k^{eff}=A_k^{info}\,P_D\,P_I\,P_R^{valid}\,P_R^{exec}\,P_P^{success},
+ \label{eq:rel-fa-factor}
+\end{equation}
+即信息服务可用度乘检测 $P_D$、隔离 $P_I$、恢复决策有效 $P_R^{valid}$、恢复执行成功 $P_R^{exec}$、
+保护成功 $P_P^{success}$；禁用维取因子 $1$，逐元件信息覆盖先替换 $A_k^{info}$。这是\emph{独立因子筛选}
+近似，非联合类生成器：失败的智能功能被路由到既有退化/人工后果代理，$P_P^{success}$ 不推导继电器起动、
+后备区扩展、断路器失灵或 DER 穿越轨迹，故结果声明
+\texttt{joint\_class\_probability\_modelled=false}、\texttt{protection\_logic\_modelled=false}、
+\texttt{protection\_frt\_reliability\_coupled=false}。依据：
+\srcpath{src/reliability/reliability\_assessment.cpp:run\_distribution\_fmea}、\srcpath{failure\_mode.hpp:CyberPhysicalFMEAOptions}。
+
+\subsection{元件类型专属失效模式目录}\label{sec:rel-fa-catalog}
+上述框架的\emph{具体实例}由目录构建器 \srcpath{src/reliability/failure\_mode.cpp:build\_failure\_mode\_catalog}
+生成：每个富元件按其类型展开为一至多个失效模式，每个模式携带激活类（被动 / 按需）、起因类
+（物理 / 控制 / 通信 / 量测 / 保护）、映射后果（\S\ref{sec:rel-fa-mode} 的 $\Phi_m$）、经解析器
+（\S\ref{sec:rel-param}）解析的参数、三段时长 $(\tau^{iso},\tau^{sw},\tau^{rep})$，以及降额模式的残余容量因子
+$\rho\in(0,1]$。表~\ref{tab:rel-fa-catalog} 中的“模板默认”是\emph{可替换的筛选先验}，并非设备标准；
+优先级为\textbf{算例数据 $\succ$ 选定模板 $\succ$ 筛选默认}，缺失量在严格数据策略下保持未确定。
+被动模式默认以 $(\lambda\,[\text{occ/yr}],\,r\,[\text{hr}])$ 给出，按需模式以
+$(p_d,\,\nu_d\,[/\text{yr}])$ 给出。
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{2.2cm}L{3.9cm}L{4.5cm}L{3.4cm}@{}}
+\caption{元件类型专属失效模式目录（模板默认为筛选先验）}\label{tab:rel-fa-catalog}\\
+\toprule
+\textbf{元件类型} & \textbf{失效模式} & \textbf{激活·起因·后果} & \textbf{模板默认 / 残余}\\
+\midrule
+\endfirsthead
+\toprule
+\textbf{元件类型} & \textbf{失效模式} & \textbf{激活·起因·后果} & \textbf{模板默认 / 残余}\\
+\midrule
+\endhead
+\midrule\multicolumn{4}{r}{\footnotesize 续下页}\\
+\endfoot
+\bottomrule
+\endlastfoot
+AC/DC 母线 & \fld{busbar\_fault} & 被动·物理·强迫停运 & $\lambda{=}0.01,\ r{=}8$\\
+\midrule
+AC 发电机 & \fld{forced\_outage} & 被动·物理·强迫停运 & FOR，默认 $\lambda{=}4.38,\ r{=}50$\\
+ & \fld{derating} & 被动·物理·降额 & $\lambda{=}0.5,\ r{=}24$；$\rho{=}0.6$\\
+ & \fld{control\_unavailable} & 被动·控制·失控 & 恢复 $2$~h\\
+AC 支路 & \fld{permanent\_fault} & 被动·物理·强迫停运 & $\lambda{=}0.35,\ r{=}10$\\
+ & \fld{thermal\_derating} & 被动·物理·降额 & $\lambda{=}0.1,\ r{=}8$；$\rho{=}0.75$\\
+变压器 2W & \fld{internal\_fault} & 被动·物理·强迫停运 & $\lambda{=}0.03,\ r{=}200$\\
+ & \fld{tap\_changer\_failure} & 按需·物理·失控 & $p_d{=}0.005,\ \nu_d{=}50$\\
+ & \fld{cooling\_derating} & 被动·物理·降额 & $\lambda{=}0.05,\ r{=}24$；$\rho{=}0.7$\\
+变压器 3W & \fld{internal\_fault}、\fld{cooling\_derating} & 同 2W（内部故障 $\lambda{=}0.04$）& $r{=}200$；$\rho{=}0.7$\\
+\midrule
+静止发电机 & \fld{unit\_outage} & 被动·物理·强迫停运 & $\lambda{=}1.5,\ r{=}24$\\
+ & \fld{dispatch\_control\_unavailable} & 被动·控制·失控 & 恢复 $2$~h\\
+新能源机组 & \fld{unit\_outage} & 被动·物理·强迫停运 & $\lambda{=}2.0,\ r{=}48$\\
+ & \fld{resource\_derating} & 被动·物理·降额 & $\rho{=}0.5$\\
+AC 光伏 & \fld{plant\_outage} & 被动·物理·强迫停运 & $\lambda{=}1.5,\ r{=}24$\\
+ & \fld{inverter\_failure} & 被动·物理·降额 & $\rho{=}0.5$\\
+AC 储能 & \fld{unit\_outage} & 被动·物理·强迫停运 & FOR，$r{=}24$\\
+ & \fld{pcs\_failure} & 被动·物理·降额 & $\rho{=}0.5$\\
+ & \fld{bms\_control\_unavailable} & 被动·控制·失控 & 恢复 $2$~h\\
+\midrule
+AC 开关 & \fld{hardware\_outage} & 被动·物理·强迫停运 & $\lambda{=}0.05,\ r{=}4$\\
+ & \fld{fail\_to\_open}、\fld{sectionalize} & 按需·物理·拒开 & $p_d{=}p_{sw},\ \nu_d{=}2$\\
+ & \fld{fail\_to\_close} & 按需·物理·拒合 & 重合器取 $1{-}p_{rc}$\\
+ & \fld{fail\_to\_clear}（熔断器）& 按需·保护·拒动 & $\nu_d{=}1$\\
+ & \fld{stuck\_closed}、\fld{nuisance\_trip} & 被动·物理·卡合／保护·误动 & 用户先验\\
+ & \fld{comm\_loss} & 被动·通信·通信丢失 & 恢复 $2$~h\\
+AC 断路器 & \fld{hardware\_outage} & 被动·物理·强迫停运 & $\lambda{=}0.05,\ r{=}8$\\
+ & \fld{fail\_to\_trip} & 按需·保护·拒动 & $p_d{=}0.005,\ \nu_d{=}1$\\
+ & \fld{fail\_to\_close} & 按需·物理·拒合 & $p_d{=}0.01,\ \nu_d{=}2$\\
+ & \fld{nuisance\_trip}、\fld{comm\_status\_failure} & 被动·保护·误动／通信·通信丢失 & 恢复 $2$~h\\
+\midrule
+VSC 换流器 & \fld{power\_stage\_outage} & 被动·物理·强迫停运 & FOR，$r{=}48$\\
+ & \fld{derating} & 被动·物理·降额 & $\rho{=}0.7$\\
+ & \fld{grid\_forming\_lost} & 按需·控制·构网失效 & $p_d{=}0.02,\ \nu_d{=}1$\\
+ & \fld{setpoint\_frozen} & 被动·控制·定值冻结 & 恢复 $1$~h\\
+ & \fld{comm\_loss}、\fld{measurement\_bias} & 被动·通信／量测 & 恢复 $2$/$4$~h\\
+DC 支路 & \fld{pole\_fault} & 被动·物理·强迫停运 & $\lambda{=}0.20,\ r{=}24$\\
+ & \fld{derating} & 被动·物理·降额 & $\rho{=}0.75$\\
+DCDC 换流器 & \fld{power\_stage\_outage} & 被动·物理·强迫停运 & $\lambda{=}0.20,\ r{=}48$\\
+ & \fld{derating}、\fld{setpoint\_frozen}、\fld{comm\_loss} & 被动·物理／控制／通信 & $\rho{=}0.7$\\
+DC 断路器 & \fld{hardware\_outage} & 被动·物理·强迫停运 & $\lambda{=}0.10,\ r{=}8$\\
+ & \fld{fail\_to\_trip}、\fld{fail\_to\_close} & 按需·保护·拒动／物理·拒合 & $p_d{=}0.01$\\
+DC 储能／光伏／源 & \fld{unit\_outage}、\fld{array\_outage}、\fld{source\_outage} & 被动·物理·强迫停运 & $\lambda{=}1.5,\ r{=}24$\\
+\end{longtable}
+\end{center}
+聚合元件（微网、虚拟电厂、移动储能、能量路由器）先由
+\srcpath{src/reliability/reliability\_assessment.cpp:materialize\_aggregated\_reliability\_sources}
+物化为 PCC/端口处的可调注入或 AC$\leftrightarrow$DC 传输，其 \texttt{unit\_outage} 置其出服务即切除其所供负荷。
+所有模式经\emph{支持门}（\srcpath{src/reliability/failure\_mode.cpp:build\_consequence\_patch}）过滤：稳态
+引擎无法表示者（如纯量测偏差、非可调设备的通信丢失、拒合）记为 \fld{unsupported} 而\emph{不}静默施加，
+诚实见 \S\ref{sec:rel-src-boundary}。
+
+\subsection{与实现的对应}\label{sec:rel-fa-impl}
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{5.2cm}L{9.2cm}@{}}
+\toprule
+\textbf{理论对象} & \textbf{平台实现状态}\\
+\midrule
+\endfirsthead
+\toprule
+\textbf{理论对象} & \textbf{平台实现状态}\\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+交替更新不可用度~\eqref{eq:rel-fa-U}、运行年/日历年换算 &
+  \implpart{解析器按运行年 $\lambda$ 解释输入；日历换算须调用方处理}\\
+按需失效 $\lambda^{act}=\nu p^d$~\eqref{eq:rel-fa-act}、恢复占时 &
+  \implfull{src/reliability/reliability\_assessment.cpp:resolve\_reliability\_params}\\
+$\mathrm{PFD}_{avg}\approx\lambda_{DU}T_I/2$、验证试验模型 &
+  \implnone（休眠失效 PFD 未建模，仅 $\nu p^d$ 频率约简）\\
+两阶段元件 FMEA~\eqref{eq:rel-fa-mode} 前式、储能功率—能量限 &
+  \implfull{src/reliability/reliability\_assessment.cpp:run\_distribution\_fmea}\\
+故障模式目录（被动/主动、原因—后果） &
+  \implfull{src/reliability/failure\_mode.cpp:build\_failure\_mode\_catalog}\\
+二阶共故障近似~\eqref{eq:rel-fa-pair} &
+  \implpart{加入一阶总量的 N-2 排序近似；精确展开~\eqref{eq:rel-fa-exact} \implnone}\\
+Level-1 信息物理双类全期望~\eqref{eq:rel-fa-cyber}、归因、$\eta_A$ &
+  \implfull{src/reliability/reliability\_assessment.cpp:run\_distribution\_fmea}（\srcpath{CyberPhysicalFMEAOptions}）\\
+三维因子化筛选~\eqref{eq:rel-fa-factor} &
+  \implfull{failure\_mode.hpp:CyberPhysicalFMEAOptions::IntelligentFunctionOptions}\\
+联合类生成 / 保护逻辑 / FRT 耦合 &
+  \implnone（声明 \texttt{joint\_class\_probability\_modelled=false} 等）\\
+\end{longtable}
+\end{center}
+
+\subsection{参考文献}
+\begin{thebibliography}{9}\small
+\bibitem{relfa:billinton} R.~Billinton and R.~N. Allan, \emph{Reliability Evaluation of Power Systems},
+  2nd ed. New York: Plenum Press, 1996（交替更新过程与元件模型）.
+\bibitem{relfa:iec61508} IEC 61508-6, \emph{Functional Safety of Electrical/Electronic/Programmable
+  Electronic Safety-Related Systems, Part 6}. Geneva: IEC, 2010（$\mathrm{PFD}_{avg}$ 与验证试验）.
+\bibitem{relfa:designdoc} HySim-XJTU-HRPES, \emph{Reliability Mathematical Models and Intelligent
+  Cyber-Physical Extension}, \srcpath{docs/theory/reliability\_mathematical\_models\_and\_intelligent\_cyber\_physical\_assessment.md}（第 3、8、9、12 节，本章模型的权威来源）.
+\end{thebibliography}

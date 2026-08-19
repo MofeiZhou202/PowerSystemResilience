@@ -130,7 +130,9 @@ $\lambda(ENS_{sw}+ENS_{rep})$ 只有在 \texttt{automatic.ens\_mwh} 恰按该方
 \subsection{三阶段结果聚合}
 
 每个故障先对三个阶段的节点切负荷逐点扣除健康态并截为非负
-$p^{raw}_{ki}=\max(0,\texttt{shed\_by\_load}^{fault}_{ki}-\texttt{shed\_by\_load}^{healthy}_{ki})$，
+\begin{equation}
+ p^{raw}_{ki}=\max\!\big(0,\ \texttt{shed\_by\_load}^{fault}_{ki}-\texttt{shed\_by\_load}^{healthy}_{ki}\big),
+\end{equation}
 再按阶段总量缺口重标定：令
 $\Delta=\max(0,\texttt{shed\_kw}^{fault}-\texttt{shed\_kw}^{healthy})$，
 \begin{equation}
@@ -173,11 +175,10 @@ $c=\lfloor C/10\rfloor$；$c\le0$ 的机组不进入递推。
 其中 $x<c$ 时硬编码 $P[x-c]=1,F[x-c]=0$。备用索引先取
 $r=\operatorname{clamp}(\lfloor(C_{tot}-L)/10\rfloor,0,n-1)$，再用 $r+1$ 读取
 LOLP 与频率：
-\begin{equation}
- LOLP=P[r+1],\quad LOLF=8760F[r+1],\quad LOLE=8760LOLP,\quad
- LOLD=\begin{cases}LOLE/LOLF,&LOLF>0,\\0,&\text{否则}.
- \end{cases}
-\end{equation}
+\begin{align}
+ LOLP&=P[r+1], & LOLF&=8760\,F[r+1],\\
+ LOLE&=8760\,LOLP, & LOLD&=\begin{cases}LOLE/LOLF,&LOLF>0,\\0,&\text{否则}.\end{cases}
+\end{align}
 越过数组上界时 LOLP/LOLF 均为零。依据为
 \srcpath{src/reliability/reliability\_assessment.cpp:run\_frequency\_duration\_analysis}。
 
@@ -200,3 +201,74 @@ $\max(1,10(\sum|p_{load}|+\max(0,pd)))$。客户总数小于 1 时返回零结�
 本章只保证所列聚合式与当前代码一致。切负荷后果引擎内部的 AC-only DC-OPF、混合 AC/DC LP
 和三阶段恢复 MILP 是不同模型；其覆盖范围由结果的 \fld{model\_scope}、
 \fld{model\_limitations} 与有效性标志限定，不能仅凭“EENS”字段名互相替代。
+
+\subsection{实现严谨性分级}\label{sec:rel-src-rigor}
+本节按“该数学是否精确计算了它声称的量”对各环节分级，全部核对自\emph{当前}源码而非历史审计：
+\textbf{严谨}=在其声明假设下与教科书一致；\textbf{近似}=方法可靠但有明确简化；
+\textbf{存疑}=假设任意或选项未接线。
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{5.0cm}L{1.7cm}L{8.9cm}@{}}
+\toprule
+环节 & 分级 & 依据 / 说明\\
+\midrule
+两状态参数换算（解析器）& 严谨 & 精确两状态马氏 $U=\lambda/(\lambda+\mu)$、$f=\lambda A$；\srcpath{resolve\_reliability\_params}\\
+COPT 概率$+$频率递推 & 严谨 & Billinton--Allan 递推，频率增量 $\lambda p[P(X{-}C)-P(X)]$ 为边界穿越率\\
+序贯 MC 时序与 LOLF & 严谨 & 逆变换指数抽样、按 false$\to$true 回合计频率，年样本真实\\
+非序贯 MC 估计量与 CoV & 严谨\footnotemark[1] & 状态抽样 $\overline S$、均值标准误 CoV；单负荷级\\
+IEEE 1366 指标 & 严谨 & 客户加权 SAIFI/SAIDI/CAIDI/ASAI\\
+LinDistFlow 恢复 MILP 表述 & 严谨\footnotemark[2] & ONR 线性化（平衡/压降/热限/辐射森林/开关预算）\\
+最小切负荷 VOLL 配平 & 严谨 & 字典序最小切负荷，评估器只读 $S$/$s_i$ 不读目标值\\
+后果补丁溯源与支持门 & 严谨 & 稳态引擎无法表示的模式记为 \fld{unsupported} 而非静默施加\\
+FMEA 一阶 $\sum\lambda\tau S$ & 近似 & 稀有、非重叠一阶期望，无 N-2（除非启用二阶）\\
+故障模式二阶共故障 & 近似 & 独立二阶 $U_{ij}=U_iU_j$，同元件多模式相加有二阶重复计\\
+非序贯 / F\&D 单负荷级 & 近似 & 无负荷持续曲线，按峰保守 / 按谷乐观\\
+\fld{critical\_components} & 近似 & 共现归因份额，非 Birnbaum 边际（见 \S\ref{sec:rel-th-weakpoint}）\\
+\fld{use\_importance\_sampling} & 存疑 & 声明为实验项，未被任何采样路径消费\\
+缺省客户数 $10\times$MW & 存疑 & 常数任意，指标退化为负荷加权\\
+\bottomrule
+\end{tabular}
+\end{center}
+\footnotetext[1]{单负荷级下严谨；尾部风险的有效性取决于输入（序贯年样本有效）。}
+\footnotetext[2]{指“表述”严谨；DC 侧与换流传输为运输 / DC-LinDistFlow 界，见下。}
+
+\subsection{近期数值加固（已在当前代码闭环）}\label{sec:rel-src-hardening}
+下列此前的建模缺陷已在当前源码修正，构成本模块的成熟度基线（均经核对）：
+\begin{itemize}
+ \item \textbf{三阶段修复窗（曾最严重）}：故障元件现于\emph{每一阶段}均停运，阶段 2 的重构方案
+ 保持至阶段 3（\fld{held\_stage2\_plan}），修复时长 $\tau^{rep}$ 乘的是\emph{真正不可恢复}的切负荷，
+ 而非已修复网络的近零切负荷。源码注释即 “faulted branch is out in every stage”。依据
+ \srcpath{src/reliability/three\_stage\_reliability.cpp:stage\_topology}。
+ \item \textbf{非序贯尾部风险}：以\emph{合成年}自助抽样（$\min(\max(200,n),2000)$ 年，每年 8760 个
+ 增量切负荷样本）聚合后再算 VaR/CVaR，取代此前逐状态 $S\times8760$ 的过离散分布。依据
+ \srcpath{src/reliability/reliability\_assessment.cpp:eval\_missing（lambda）}。
+ \item \textbf{混合后果引擎}：AC 子网施加直流潮流 $P_f=B(\theta_i-\theta_j)$，零阻抗边等电位
+ $\theta_i=\theta_j$，网孔环流受约束（保真度随系统丰富度单调）；DC 侧与 VSC/DC-DC 传输仍为运输界。
+ 依据 \srcpath{src/reliability/reliability\_assessment.cpp:evaluate\_hybrid\_fmea\_network\_lp}。
+ \item \textbf{参数统一}：NSQ/SEQ 经 \srcpath{src/reliability/reliability\_assessment.cpp:compute\_mc\_reliability}
+ 走同一 \fld{resolve\_reliability\_params} 与同一按类模板缺省（与 FMEA 一致），消除同一元件跨方法
+ 缺失数据缺省的分歧。
+ \item \textbf{时长约定统一}：FMEA 取 $\tau^{rep}=\max(0,\mathrm{MTTR}-\tau^{sw})$，与三阶段一致；
+ 物理修复窗（全 MTTR）仍用于储能能量可行性。
+ \item \textbf{成岛锚点封顶}：构网支持的成岛锚点注入按设备额定封顶（VSC 取
+ $\max(p_{\max},|p_{\min}|,p_{rated})$，微网取额定容量），不再是 $2\times$需求的无界松弛。依据
+ \srcpath{src/reliability/reliability\_assessment.cpp:mark\_island\_anchor}。
+ \item \textbf{无功与信息物理}：三阶段无功优先用实测 \fld{q\_mvar}（仅缺失时回退 $0.9$ 功率因数）；
+ 通信丢失冻结可调换流 / DER 出力可致切负荷，降额按 \fld{residual\_capacity\_factor} 数据驱动且双向封顶。
+\end{itemize}
+
+\subsection{当前有效边界与跨方法不可通约性}\label{sec:rel-src-boundary}
+仍存在的诚实边界（不得隐去）：
+\begin{itemize}
+ \item 非序贯与 F\&D 为\emph{单负荷级}（无 LDC）；F\&D 仅发电充裕度（HL-I，10~MW 离散，无网络）。
+ \item 序贯事件时长取整到 $\ge1$ 小时（上取整 / 四舍五入不对称），年际汇总\emph{未}扣除对应小时的
+ N-0 切负荷——年尺度可忽略，但短时（如信息恢复）事件被略微放大。
+ \item \fld{critical\_components} 为共现份额，多重失效把整段切负荷计入\emph{每个}停运元件，贡献之和
+ 可超过 $100\%$；应作排序读，非边际风险。
+ \item \fld{use\_importance\_sampling}/\fld{importance\_lambda} 已声明但未接线；方差缩减仍属提出项。
+ \item \fld{ProtectionZoneExpansion} 打开母线所有关联边，仅对辐射馈线精确，网孔母线两种处理都不精确。
+\end{itemize}
+\textbf{跨方法不可通约性（关键）}：同一算例在非序贯 MC、FMEA、故障模式 FMEA 与三阶段下的 EENS 可
+\emph{显著不同}——这并非采样噪声，而因各方法调用\emph{不同后果引擎}（AC-only DC-OPF / 混合 AC/DC LP /
+LinDistFlow MILP）与\emph{不同恢复最优性}（贪心 $\le2$ 动作 vs.\ MILP）。参数（F10）与时长约定（F11）
+已统一，但\emph{引擎保真度仍分层}。因此每个导出指标旁必须并列 \fld{model\_scope} 与 \fld{validity}，
+不得仅凭“EENS”字段名跨方法互比。
