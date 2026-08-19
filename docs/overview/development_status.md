@@ -1,20 +1,55 @@
 # Development Status
 
-Updated: 2026-08-18
+Updated: 2026-08-19
 
 This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
+
+## Module manual theory layer (in progress)
+
+The 23 module manuals are being upgraded from code-transcription-only to a
+two-layer structure (general mathematical theory + implementation
+correspondence), as the foundation for a planned monograph. Infrastructure
+landed 2026-08-19: `docs/_manual_common/theory_environments.tex` (amsthm
+theorem family, `theorynote`/`gapnote` boxes, `\implfull/\implpart/\implnone`
+status tags), auto-included by `hysim_manual.sty`; `docs/modules/README.md`
+math-model rule 3 revised to permit general theory in `chapters/theory_*.tex`
+under strict marking rules; writing spec in
+`docs/modules/THEORY_WRITING_GUIDE.md`. Depth tiers: monograph-grade for
+power_flow, optimal_power_flow, dynamics, sppt, graph; engineering-reference
+grade (≤1200 lines each) for the rest. Rollout: short_circuit pilot first,
+then waves W1–W5; existing implementation chapters must not be modified.
+
+Pilot (short_circuit) accepted and W1 complete (2026-08-19): short_circuit
+gained 3 theory chapters (665 lines: symmetrical components, IEC 60909
+method, converter/DC fault); power_flow gained 4 monograph-grade chapters
+(~2900 lines: fundamentals+Newton+sparsity, classic methods, globalization+
+HELM/homotopy/NCP, voltage stability+converter theory); graph gained 1
+monograph-grade chapter (664 lines). All compile clean under XeLaTeX with
+zero line-number anchors; each chapter carries an implementation
+correspondence table (verified anchors) and gapnote markers for
+unimplemented theory.
 
 ## SPPT Applied Energy manuscript and fault campaign
 
 `docs/latex/sppt_theory.tex` is now the sole Applied Energy-oriented SPPT
 manuscript source. Its research question is the verifiable safety boundary of
 automated hybrid AC/DC digital-twin construction, rather than a generic
-AI-assisted software framework. The rewritten abstract, related-work positioning,
+AI-assisted software framework. The rewritten abstract, introduction-based literature positioning,
 contributions, numerical study, discussion, and conclusion use a fixed-seed
-statistical campaign instead of the previous six scripted edits as primary
+statistical campaign instead of the previous six isolated modifications as primary
 evidence. `docs/latex/sppt_campaign_study.tex` records the protocol and results.
+
+The theory now defines SPPT as an analysis-indexed family of projections rather
+than a catalogue of fault checks. Representation invariance, transformation
+composition, observable-dependent reconstruction, conservation/topology
+preservation, and converter-role closure provide the extension conditions for
+new data representations, devices, controls, reductions, and analyses. The
+six injected structural classes are explicitly described as selected tests of
+these conditions, not as a completeness definition. The literature review and
+generality discussion cite 32 sources, including a substantially expanded set
+of Applied Energy papers, and every bibliography item is cited in the text.
 
 The new reusable `sppt::run_fault_campaign` implementation and
 `sppt_scale_fault_campaign` target import seven public GridLAB-D r5643
@@ -25,7 +60,7 @@ intervals, independent residuals, physical AC/DC consequences, and stage timing.
 The completed seed-20260818 run contains 1,575 samples: 175 randomized valid
 controls, 1,050 structural faults, and 350 plausible intention errors. Full SPPT
 detected/localized 1,050/1,050 structural faults (pooled 95% Wilson lower bound
-0.9964) and rejected 0/175 controls. Solver-only missed all tested dangling VSC
+0.9964) and rejected 0/175 controls. Convergence-only screening missed all tested dangling VSC
 terminal, missing-DC-support, and invalid-efficiency faults and detected 4.0% of
 duplicate identities in its prespecified 32/78/330-bus scope. The 200
 intention-error samples solved through the 823-bus variant produced maxima of
@@ -34,7 +69,7 @@ VSC-transfer deviation. The VSC fault generator selects
 only in-service PQ controls and applies a nonzero signed perturbation, so no
 no-op setpoint samples inflate the count. These results explicitly bound
 SPPT: structurally consistent but incorrect parameters require telemetry,
-parameter provenance, state estimation, or human confirmation.
+parameter records, state estimation, or human confirmation.
 
 The final seed-20260818 campaign was run twice: all 1,575 non-timing rows matched
 field-for-field, while the four wall-clock columns were excluded from the
@@ -63,9 +98,10 @@ software-flow TikZ diagrams: physical rich-model semantics and canonical
 projection, provenance reconstruction, converter-role closure, and typed-agent
 candidate-state isolation. The converter-role mechanism was checked against the
 DC nodal equations and is described as a structural role-closure/rank condition,
-not as a universal voltage-shift invariance. The final 24-page PDF was compiled
-to `build/latex-sppt-new/sppt_theory.pdf`; figure pages 7--10 were rendered at
-publication scale and show no clipping or overlap.
+not as a universal voltage-shift invariance. The current 19-page, two-column PDF
+was compiled to `build/latex-sppt-final3/sppt_theory.pdf`; all pages were
+rendered at publication scale and show no clipping, overlap, overfull content,
+undefined references, or duplicate labels.
 
 ## 技术委托要求文档
 

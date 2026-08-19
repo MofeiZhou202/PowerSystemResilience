@@ -65,6 +65,9 @@
   \fi}
 \makeatother
 
+% ── 通用理论层环境（修订版 2 新增；公共样式手册自动引入，本手册为独立导言区需手动引入）──
+\input{../../_manual_common/theory_environments.tex}
+
 \title{\textbf{交直流混合高弹性能源电力系统仿真平台}\\[0.5em]
        {\Large 潮流计算技术手册}\\[0.3em]
        {\large 数学模型、算法流程、参数选项与验证校核}\\[0.3em]
@@ -230,6 +233,12 @@ CPF & \srcpath{CpfSolver::solve} & 混合 AC/DC & 电压稳定/负荷裕度\\
 
 \newpage
 \input{chapters/overview}
+% ── 通用理论层（修订版 2 新增，专著级深度）──
+\input{chapters/theory_fundamentals}
+\input{chapters/theory_classic_methods}
+\input{chapters/theory_globalization_advanced}
+\input{chapters/theory_voltage_stability_converters}
+% ── 实现转写层（源码等价）──
 \input{chapters/assembly}
 \input{chapters/newton}
 \input{chapters/classic_solvers}

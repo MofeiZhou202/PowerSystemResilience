@@ -1,0 +1,882 @@
+% theory_globalization_advanced.tex —— 潮流计算 通用理论：全局化与高级求解方法
+% 本文件为理论层章节，遵循 docs/modules/THEORY_WRITING_GUIDE.md。
+
+\section{全局化与高级求解方法理论}\label{sec:pf-th-glob}
+
+\begin{theorynote}
+本章为通用数学理论，按数值最优化与非线性方程组求解的标准文献体系撰写，覆盖：
+线搜索（Armijo/Wolfe 条件、Zoutendijk 全局收敛定理）、信赖域子问题与柯西点、
+Levenberg--Marquardt 与信赖域的等价关系、GLL 非单调线搜索、NCP/半光滑 Newton
+理论（Fischer--Burmeister 函数、Clarke 广义 Jacobian、超线性收敛）与 PV/PQ 切换
+的统一表述、HELM 全纯嵌入的复分析基础（幂级数、收敛半径、Padé 逼近与 Stahl
+定理）、同伦延拓（概率一正则性、路径跟踪、转折点），以及 Newton--Krylov/JFNK
+与非精确 Newton 的收敛理论。本章公式不要求逐式对应代码；与平台实现
+（\srcpath{src/power\_flow/} 与 \srcpath{include/hacdcpf/power\_flow/}）的对应关系
+见本章末"与实现的对应"表，超出实现的内容以"未实现扩展说明"框就地标记。
+实现层的组件级转写见本手册"全局化与鲁棒求解器族"章。
+\end{theorynote}
+
+\subsection{记号与约定}\label{sec:pf-th-glob-notation}
+\begin{itemize}
+  \item $F:\mathbb R^n\to\mathbb R^n$：潮流失配向量（P/Q 平衡、直流功率平衡、
+        换流器局部方程等的堆叠）；$x=(\theta,V_m,V_{dc},\ldots)$ 为堆叠状态；
+        $J(x)=DF(x)$ 为 Jacobian；
+  \item $\phi(x)=\tfrac12\lVert F(x)\rVert_2^2$：最小二乘 merit 函数，
+        $g(x)=\nabla\phi(x)=J(x)^{\mathsf T}F(x)$；
+  \item $d_k$ 或 $\Delta x_k$：第 $k$ 次迭代的搜索方向；$\alpha_k\in(0,1]$：步长；
+        $\beta\in(0,1)$：回溯折减因子；$c_1,c_2$：Armijo/Wolfe 常数；
+  \item $\Delta_k$：信赖域半径；$m_k(p)=\phi_k+g_k^{\mathsf T}p+\tfrac12
+        p^{\mathsf T}B_k p$（$B_k=J_k^{\mathsf T}J_k$）：二次模型；
+        $\rho_k=\mathrm{ared}_k/\mathrm{pred}_k$：增益比；
+  \item $\lambda$ 在本章按上下文两用：信赖域/LM 小节中为 LM 阻尼参数，
+        同伦小节中为同伦参数；$\mu\ge0$ 专用于 NCP 光滑化参数；
+  \item $s\in\mathbb C$：HELM 嵌入参数；$V_i(s)$：母线 $i$ 电压的全纯嵌入；
+        $[L/M]_f$：函数 $f$ 的 $(L,M)$ 阶 Padé 逼近；
+  \item $\eta_k\in[0,1)$：非精确 Newton 强制项（forcing term）；
+        $\mathcal K_m(A,v)$：$m$ 维 Krylov 子空间；
+  \item $a\perp b$ 表示互补性 $a\ge0,\ b\ge0,\ ab=0$；
+        $\partial F(x)$ 表示 Clarke 广义 Jacobian。
+\end{itemize}
+
+\subsection{线搜索与信赖域的全局化框架}\label{sec:pf-th-glob-framework}
+
+潮流 Newton 法的局部二次收敛只在解的邻域内成立；全局化机制回答的问题是：
+从任意初值出发，如何修正纯 Newton 步使迭代在全局意义下有收敛保证。
+两类标准机制——线搜索与信赖域——都作用在 merit 函数 $\phi$ 上。
+
+\begin{definition}[Armijo 充分下降条件]\label{sec:pf-th-glob-def-armijo}
+给定下降方向 $d_k$（即 $g_k^{\mathsf T}d_k<0$）与常数 $c_1\in(0,1)$，
+步长 $\alpha_k>0$ 满足 Armijo 条件，若
+\begin{equation}
+\phi(x_k+\alpha_k d_k)\le \phi(x_k)+c_1\alpha_k\,g_k^{\mathsf T}d_k .
+\end{equation}
+回溯线搜索从 $\alpha=1$ 出发按 $\alpha\leftarrow\beta\alpha$ 折减，
+直到条件成立。由 Taylor 展开，只要 $d_k$ 是下降方向，充分小的 $\alpha$
+必满足该条件，故回溯在有限步内终止。
+\end{definition}
+
+\begin{definition}[Wolfe 条件]\label{sec:pf-th-glob-def-wolfe}
+步长 $\alpha_k$ 满足 Wolfe 条件，若 Armijo 条件成立且曲率条件
+\begin{equation}
+g(x_k+\alpha_k d_k)^{\mathsf T}d_k\ge c_2\,g_k^{\mathsf T}d_k,
+\qquad 0<c_1<c_2<1
+\end{equation}
+成立。曲率条件排除"步长过小"的接受：它要求新点处方向导数的下降速率
+已被足够多地"用掉"。
+\end{definition}
+
+\begin{theorem}[Zoutendijk 全局收敛定理]\label{sec:pf-th-glob-thm-zoutendijk}
+设 $\phi$ 下有界，$g=\nabla\phi$ 在水平集
+$\{x:\phi(x)\le\phi(x_0)\}$ 上 Lipschitz 连续（常数 $L$），
+迭代 $x_{k+1}=x_k+\alpha_k d_k$ 的步长满足 Wolfe 条件。则
+\begin{equation}
+\sum_{k=0}^{\infty}\cos^2\theta_k\,\lVert g_k\rVert^2<\infty,
+\qquad
+\cos\theta_k=\frac{-g_k^{\mathsf T}d_k}{\lVert g_k\rVert\,\lVert d_k\rVert}.
+\end{equation}
+特别地，若方向满足\emph{夹角条件} $\cos\theta_k\ge\delta>0$，
+则 $\lim_{k\to\infty}\lVert g_k\rVert=0$。
+\end{theorem}
+
+\begin{proof}
+记 $s_k=\alpha_k d_k$。由曲率条件，
+\[
+(g_{k+1}-g_k)^{\mathsf T}s_k\ge(c_2-1)\,g_k^{\mathsf T}s_k .
+\]
+由 Lipschitz 连续性，
+\[
+(g_{k+1}-g_k)^{\mathsf T}s_k\le\lVert g_{k+1}-g_k\rVert\,\lVert s_k\rVert
+\le L\,\alpha_k\lVert d_k\rVert\,\lVert s_k\rVert
+=L\,\alpha_k\lVert d_k\rVert^2 .
+\]
+两式合并得
+$\alpha_k\ge\dfrac{(c_2-1)g_k^{\mathsf T}d_k}{L\lVert d_k\rVert^2}
+=\dfrac{(1-c_2)\cos\theta_k\lVert g_k\rVert}{L\lVert d_k\rVert}$，
+其中用到 $-g_k^{\mathsf T}d_k=\cos\theta_k\lVert g_k\rVert\lVert d_k\rVert$。
+代入 Armijo 条件：
+\[
+\phi_{k+1}\le\phi_k-c_1\alpha_k\,\cos\theta_k\lVert g_k\rVert\lVert d_k\rVert
+\le\phi_k-\frac{c_1(1-c_2)}{L}\cos^2\theta_k\lVert g_k\rVert^2 .
+\]
+递推并对 $k$ 求和，由 $\phi$ 下有界，
+$\frac{c_1(1-c_2)}{L}\sum_k\cos^2\theta_k\lVert g_k\rVert^2
+\le\phi_0-\lim_k\phi_k<\infty$。
+若 $\cos\theta_k\ge\delta>0$，则
+$\delta^2\sum_k\lVert g_k\rVert^2<\infty$，故 $\lVert g_k\rVert\to0$。
+\end{proof}
+
+\begin{remark}[对非线性方程组的含义]\label{sec:pf-th-glob-rem-stationary}
+Zoutendijk 定理保证的是 $g=J^{\mathsf T}F\to0$，即 $\phi$ 的驻点，
+而不是 $F=0$。当 $J$ 亏秩时可能存在 $F\ne0$ 而 $J^{\mathsf T}F=0$ 的
+\emph{非解驻点}（merit 函数的局部极小）。这是以最小二乘 merit 全局化
+非线性方程组的固有局限；实践中以发散探测、重启动与回退链兜底。
+Newton 方向 $d_k=-J_k^{-1}F_k$ 在 $J_k$ 非奇异且条件数有界时满足
+夹角条件：$g_k^{\mathsf T}d_k=-F_k^{\mathsf T}F_k=-2\phi_k<0$。
+\end{remark}
+
+\begin{definition}[信赖域子问题与柯西点]\label{sec:pf-th-glob-def-tr}
+信赖域方法在第 $k$ 步求解约束子问题
+\begin{equation}
+\min_{p\in\mathbb R^n}\ m_k(p)=\phi_k+g_k^{\mathsf T}p
++\tfrac12 p^{\mathsf T}B_k p,
+\qquad \lVert p\rVert\le\Delta_k,
+\end{equation}
+$B_k=J_k^{\mathsf T}J_k$（Gauss--Newton 模型）。沿负梯度方向的约束极小点
+称为\emph{柯西点}：
+\begin{equation}
+p_k^{C}=-\tau_k\frac{\Delta_k}{\lVert g_k\rVert}\,g_k,
+\qquad
+\tau_k=\begin{cases}1,&\lVert g_k\rVert^3\le\Delta_k\,g_k^{\mathsf T}B_k g_k
+\ \text{或}\ g_k^{\mathsf T}B_k g_k\le0,\\[2pt]
+\dfrac{\lVert g_k\rVert^3}{\Delta_k\,g_k^{\mathsf T}B_k g_k},&\text{其余}.\end{cases}
+\end{equation}
+即无约束最速下降极小点 $\bar\tau=\lVert g_k\rVert^3/(g_k^{\mathsf T}B_k g_k)$
+对应的点未出界时取其本身，否则截断到边界。
+\end{definition}
+
+\begin{lemma}[柯西点的充分下降]\label{sec:pf-th-glob-lem-cauchy}
+柯西点满足
+\begin{equation}
+m_k(p_k^{C})-m_k(0)\le-\tfrac12\lVert g_k\rVert\,
+\min\Bigl(\Delta_k,\ \frac{\lVert g_k\rVert}{\lVert B_k\rVert}\Bigr).
+\end{equation}
+\end{lemma}
+
+\begin{proof}
+沿 $p(\tau)=-\tau g_k/\lVert g_k\rVert$（$\tau\in(0,\Delta_k]$）有
+\[
+m_k(p(\tau))-m_k(0)=-\tau\lVert g_k\rVert
++\frac{\tau^2}{2\lVert g_k\rVert^2}\,g_k^{\mathsf T}B_k g_k .
+\]
+\textbf{情形 1}：$g_k^{\mathsf T}B_k g_k\le0$。二次项非正，
+$\tau_k=1$，故
+$m_k-m_k(0)\le-\Delta_k\lVert g_k\rVert\le-\tfrac12\lVert g_k\rVert
+\min(\Delta_k,\lVert g_k\rVert/\lVert B_k\rVert)$。
+
+\textbf{情形 2}：$g_k^{\mathsf T}B_k g_k>0$ 且
+$\bar\tau=\lVert g_k\rVert^3/(g_k^{\mathsf T}B_k g_k)\le\Delta_k$。
+取 $\tau=\bar\tau$ 得
+$m_k-m_k(0)=-\tfrac12\lVert g_k\rVert^4/(g_k^{\mathsf T}B_k g_k)
+=-\tfrac12\lVert g_k\rVert\bar\tau$。
+由 $g_k^{\mathsf T}B_k g_k\le\lVert B_k\rVert\lVert g_k\rVert^2$ 有
+$\bar\tau\ge\lVert g_k\rVert/\lVert B_k\rVert$；结合
+$\bar\tau\le\Delta_k$ 知
+$\min(\Delta_k,\lVert g_k\rVert/\lVert B_k\rVert)\le\bar\tau$，结论成立。
+
+\textbf{情形 3}：$g_k^{\mathsf T}B_k g_k>0$ 且 $\bar\tau>\Delta_k$。
+取 $\tau=\Delta_k$，此时 $\Delta_k^2 g_k^{\mathsf T}B_k g_k/
+(2\lVert g_k\rVert^2)<\tfrac12\Delta_k\lVert g_k\rVert$，故
+$m_k-m_k(0)<-\tfrac12\Delta_k\lVert g_k\rVert
+\le-\tfrac12\lVert g_k\rVert\min(\Delta_k,\lVert g_k\rVert/\lVert B_k\rVert)$。
+\end{proof}
+
+\begin{theorem}[信赖域全局收敛（陈述）]\label{sec:pf-th-glob-thm-tr}
+设迭代只接受满足 $\mathrm{pred}_k=m_k(0)-m_k(p_k)$ 不小于柯西点下降之固定
+比例（如 $\tfrac14$）的试探步，并按增益比
+$\rho_k=\mathrm{ared}_k/\mathrm{pred}_k$ 调节半径
+（$\rho_k$ 小则收缩并拒绝，$\rho_k$ 接近 1 则扩张）。在 $\phi$ 下有界、
+$g$ Lipschitz、$\lVert B_k\rVert$ 一致有界的假设下，
+$\liminf_{k\to\infty}\lVert g_k\rVert=0$；若再有 $\eta>0$ 的接受阈值
+与聚点处 Jacobian 非奇异，则整个序列收敛且渐近取纯 Newton 步。
+\end{theorem}
+
+\begin{proof}[证明思路]
+若 $\sum\Delta_k$ 在某一拒绝循环中保持有正下界以外的行为，则对足够小
+半径，Taylor 余项使 $\rho_k\to1$，必出现接受步；于是无限次接受的子列上
+$\mathrm{ared}_k\ge\eta\,\mathrm{pred}_k
+\ge\frac{\eta}{4}\cdot\tfrac12\lVert g_k\rVert
+\min(\Delta_k,\lVert g_k\rVert/\lVert B_k\rVert)$。
+由 $\phi_k$ 单调下降且下有界，$\mathrm{ared}_k\to0$，从而
+$\lVert g_k\rVert\min(\Delta_k,\cdot)\to0$；若 $\lVert g_k\rVert$ 有正下界
+则 $\Delta_k\to0$，与"半径充分小必接受"矛盾。完整论证见
+Nocedal \& Wright~\cite{pfglob-nw} 第 4 章。
+\end{proof}
+
+\begin{remark}[dogleg 折线步]\label{sec:pf-th-glob-rem-dogleg}
+精确求解信赖域子问题代价高；Powell 的 dogleg
+方法~\cite{pfglob-powell,pfglob-ds} 以折线近似解轨迹：当 Gauss--Newton 步
+$p^{GN}=-(J^{\mathsf T}J)^{-1}g$ 在界内时取之；否则沿"柯西点 $\to$ Newton
+步"的折线走到边界。折线包含柯西点，故引理~\ref{sec:pf-th-glob-lem-cauchy}
+的下降估计成立，全局收敛性随之保证。
+\end{remark}
+
+\begin{theorem}[Levenberg--Marquardt 与信赖域的对应]\label{sec:pf-th-glob-thm-lmtr}
+设 $\lambda>0$ 使 $B+\lambda I=J^{\mathsf T}J+\lambda I$ 正定，LM 步
+\begin{equation}
+p^{LM}(\lambda)=-\bigl(J^{\mathsf T}J+\lambda I\bigr)^{-1}J^{\mathsf T}F
+\end{equation}
+恰好是信赖域子问题在半径 $\Delta=\lVert p^{LM}(\lambda)\rVert$ 下的全局解；
+反之，信赖域解在 $\lVert p^*\rVert=\Delta$（边界情形）时必具有 LM 形式。
+\end{theorem}
+
+\begin{proof}
+信赖域子问题的最优性条件（Nocedal \&
+Wright~\cite{pfglob-nw} 定理 4.1；Moré~\cite{pfglob-more}）：
+$p^*$ 为全局解当且仅当存在 $\lambda^*\ge0$ 使
+\begin{equation}
+(B+\lambda^* I)p^*=-g,\qquad B+\lambda^* I\succeq0,\qquad
+\lambda^*\bigl(\Delta-\lVert p^*\rVert\bigr)=0.
+\end{equation}
+对给定 $\lambda>0$，$B+\lambda I$ 正定，$p^{LM}(\lambda)$ 由第一式唯一
+确定，互补条件以 $\Delta=\lVert p^{LM}(\lambda)\rVert$ 平凡成立，故
+$p^{LM}(\lambda)$ 是该半径下的全局解。反向由互补条件：边界解
+（$\lVert p^*\rVert=\Delta$）要求 $\lambda^*\ge0$ 且满足第一式，即
+LM 形式。
+\end{proof}
+
+\begin{remark}\label{sec:pf-th-glob-rem-lmtr}
+定理~\ref{sec:pf-th-glob-thm-lmtr} 表明 LM 阻尼与信赖域半径是同一族正则化
+步长的两种参数化：$\lambda$ 单调地反比于有效半径
+（$\lambda\to0$ 时 $p^{LM}\to p^{GN}$，$\lambda\to\infty$ 时步长趋于零且
+方向趋于最速下降）。因此实现中以增益比 $\rho$ 调节 $\lambda$
+（接受且 $\rho$ 大则 $\lambda/3$，拒绝则 $10\lambda$）与以 $\rho$ 调节
+$\Delta$ 在理论上等价，差别只在参数化与数值细节。LM 的历史出处为
+Levenberg~\cite{pfglob-levenberg} 与 Marquardt~\cite{pfglob-marquardt}。
+\end{remark}
+
+\begin{remark}[伪瞬态延拓（PTC）]\label{sec:pf-th-glob-rem-ptc}
+PTC 将方程 $F(x)=0$ 视为伪动力系统 $\dot x=-F(x)$ 的稳态，以隐式 Euler
+离散的 Newton 修正求解 $(J+\tfrac1{\delta t}I)\Delta x=-F$：
+$\delta t\to0$ 时为强阻尼的显式 Euler 小步，$\delta t\to\infty$ 时退化为
+纯 Newton 步。其收敛性分析（稳态吸引域内局部指数收敛到稳态）见
+Kelley \& Keyes~\cite{pfglob-kelley-keyes}。SER（Self-Equalising Residual）
+更新 $\delta t\leftarrow\delta t\,(r_{k-1}/r_k)^\gamma$ 是实践上有效的
+启发式调度，其理论性质没有与 Zoutendijk 定理同等严格的结果。
+\end{remark}
+
+\begin{gapnote}
+精确信赖域子问题求解（Moré--Sorensen 迭代）与大规模情形常用的
+Steihaug--Toint 截断共轭梯度法在当前代码中均未实现；信赖域分支采用
+dogleg 折线近似（经 \srcpath{include/hacdcpf/engine/kernel/globalization/globalization.hpp}
+转发到 MIPSolvers 的 \srcpath{dogleg\_step}）。
+此外实现只检查 Armijo 充分下降，未检查 Wolfe 曲率条件——对非线性方程组
+merit 这是常见简化，但严格意义上
+定理~\ref{sec:pf-th-glob-thm-zoutendijk} 的假设因此不被完整满足。
+\end{gapnote}
+
+\subsection{非单调线搜索（GLL）}\label{sec:pf-th-glob-gll}
+
+单调 Armijo 搜索要求 merit 每步下降；当迭代序列需穿过 merit 面的
+"窄谷"时，这会导致过小的步长与停滞。Grippo--Lampariello--Lucidi
+（GLL）~\cite{pfglob-gll} 放松了单调性。
+
+\begin{definition}[GLL 非单调 Armijo 条件]\label{sec:pf-th-glob-def-gll}
+取窗口 $M\ge1$，定义非单调参考值
+\begin{equation}
+\phi_k^{R}=\max_{0\le j\le\min(k,M-1)}\phi_{k-j},
+\end{equation}
+接受条件为
+\begin{equation}
+\phi(x_k+\alpha_k d_k)\le\phi_k^{R}
++c_1\alpha_k\,g_k^{\mathsf T}d_k .
+\end{equation}
+$M=1$ 时退化为单调 Armijo 搜索；$M>1$ 时容许 merit 在窗口内暂时上升，
+只要相对最近 $M$ 步的最坏值仍有充分下降。
+\end{definition}
+
+\begin{theorem}[GLL 全局收敛性（论证思路）]\label{sec:pf-th-glob-thm-gll}
+在定理~\ref{sec:pf-th-glob-thm-zoutendijk} 的光滑性假设与夹角条件
+$\cos\theta_k\ge\delta>0$ 下，采用 GLL 接受准则的迭代满足
+$\liminf_k\lVert g_k\rVert=0$。
+\end{theorem}
+
+\begin{proof}[证明思路]
+记参考下标 $\ell(k)$ 为窗口内取得最大值者：
+$\phi_{\ell(k)}=\phi_k^{R}$。论证分三步（细节见
+Grippo 等~\cite{pfglob-gll}）。
+\textbf{(i)} 参考序列单调：由接受条件，
+$\phi_{k+1}\le\phi_{\ell(k)}+c_1\alpha_k g_k^{\mathsf T}d_k
+\le\phi_{\ell(k)}$，故下一段窗口的最大值不超过上一段，
+$\{\phi_{\ell(k)}\}$ 非增且下有界，收敛到某 $\phi^R$。
+\textbf{(ii)} 参考子列充分下降：沿参考下标构成的子列应用与
+Zoutendijk 定理相同的估计，得
+$\sum\cos^2\theta_{\ell(k)}\lVert g_{\ell(k)}\rVert^2<\infty$，
+故 $\lVert g_{\ell(k)}\rVert\to0$。
+\textbf{(iii)} 全序列由参考子列控制：每个 $k$ 距其参考下标不超过
+$M$ 步；窗口内每步的回溯把 merit 增长控制在参考值的有限邻域内，
+方向与步长的一致有界性再把 $g_k$ 与 $g_{\ell(k)}$ 的差控制在
+$o(1)$，从而 $\liminf\lVert g_k\rVert=0$。
+\end{proof}
+
+\begin{remark}\label{sec:pf-th-glob-rem-gll}
+窗口 $M$ 是鲁棒性与速度的工程折中：$M$ 大则更宽容、可能接受更多全
+Newton 步（减少回溯次数与 Jacobian 重分解），但非单调震荡的幅度也更
+大；$M$ 小则接近单调行为。潮流实践中 $M\in[3,10]$ 是常见取值。
+\end{remark}
+
+\subsection{互补问题与半光滑 Newton 方法}\label{sec:pf-th-glob-ncp}
+
+发电机无功限值（PV$\to$PQ 切换）与换流器限流都是"控制器在若干运行分支
+间切换"的问题。统一它们的数学对象是互补问题。
+
+\begin{definition}[互补问题与 NCP 函数]\label{sec:pf-th-glob-def-ncp}
+标量互补条件写作 $0\le a\perp b\ge0$，即 $a\ge0,\ b\ge0,\ ab=0$。
+函数 $\varphi:\mathbb R^2\to\mathbb R$ 称为 \emph{NCP 函数}，若
+\begin{equation}
+\varphi(a,b)=0\iff a\ge0,\ b\ge0,\ ab=0 .
+\end{equation}
+把逐分量互补条件堆叠进 $F(x)=0$，即用 NCP 函数把混合不等式-等式系统
+化为单个非光滑方程组。
+\end{definition}
+
+\begin{proposition}[Fischer--Burmeister 函数]\label{sec:pf-th-glob-prop-fb}
+Fischer--Burmeister（FB）函数~\cite{pfglob-fischer}
+\begin{equation}
+\Phi_{FB}(a,b)=\sqrt{a^2+b^2}-a-b
+\end{equation}
+是 NCP 函数。
+\end{proposition}
+
+\begin{proof}
+$\sqrt{a^2+b^2}\ge\max(|a|,|b|)$。
+（$\Leftarrow$）若 $a,b\ge0$ 且 $ab=0$，不妨 $b=0$，则
+$\sqrt{a^2}-a-0=a-a=0$。
+（$\Rightarrow$）设 $\Phi_{FB}(a,b)=0$，即 $\sqrt{a^2+b^2}=a+b$。
+右端须非负，且 $a+b\ge\max(|a|,|b|)\ge|a|$ 给出 $b\ge0$，对称地
+$a\ge0$。平方得 $a^2+b^2=a^2+2ab+b^2$，即 $ab=0$。
+\end{proof}
+
+\begin{proposition}[FB 的光滑性结构]\label{sec:pf-th-glob-prop-fbsmooth}
+$\Phi_{FB}$ 在 $(0,0)$ 以外处处连续可微，
+\begin{equation}
+\nabla\Phi_{FB}(a,b)=\Bigl(\frac{a}{\sqrt{a^2+b^2}}-1,\
+\frac{b}{\sqrt{a^2+b^2}}-1\Bigr);
+\end{equation}
+在原点不可微，但 $\Psi(a,b)=\tfrac12\Phi_{FB}(a,b)^2$ 在全平面连续
+可微且 $\nabla\Psi(0,0)=0$（原点外 $\nabla\Psi=\Phi_{FB}\nabla\Phi_{FB}$，
+其模被 $\sqrt2\,|\Phi_{FB}|$ 控制，随 $(a,b)\to0$ 趋于零）。
+\end{proposition}
+
+\begin{definition}[Clarke 广义 Jacobian 与半光滑性]\label{sec:pf-th-glob-def-clarke}
+局部 Lipschitz 函数 $F:\mathbb R^n\to\mathbb R^m$ 在 $x$ 处的
+B-次微分 $\partial_B F(x)$ 为所有"可微点列 Jacobian 的极限"之集合，
+Clarke 广义 Jacobian 为其凸包
+$\partial F(x)=\mathrm{co}\,\partial_B F(x)$。
+$F$ 在 $x$ \emph{半光滑}，若对任意 $h\to0$ 与
+$V\in\partial F(x+h)$ 有
+\begin{equation}
+F(x+h)-F(x)-Vh=o(\lVert h\rVert);
+\end{equation}
+若加强为 $O(\lVert h\rVert^2)$，则称\emph{强半光滑}。
+分片光滑函数（如 $\min/\max/\Phi_{FB}$）皆强半光滑
+（Facchinei \& Pang~\cite{pfglob-fp} 第 7 章）。
+\end{definition}
+
+\begin{example}[FB 在原点的广义 Jacobian]\label{sec:pf-th-glob-ex-fb}
+$\Phi_{FB}$ 在原点的 B-次微分是单位圆周平移后的点集
+$\{(\frac{u}{r}-1,\frac{v}{r}-1):u^2+v^2=r^2,\ r>0\}$ 的闭包
+（以 $1/\sqrt2$ 为半径的圆），其 Clarke 广义 Jacobian 为对应圆盘。
+实现对偶激活点 $(a,b)=(0,0)$ 选取对称元素
+$(1/\sqrt2-1,\ 1/\sqrt2-1)$——即广义 Jacobian 的"中心"元，
+避免对某一侧分支的偏向。
+\end{example}
+
+\begin{theorem}[半光滑 Newton 的局部超线性收敛（Qi--Sun）]\label{sec:pf-th-glob-thm-qisun}
+设 $F$ 半光滑，$x^*$ 满足 $F(x^*)=0$，且 $\partial F(x^*)$ 中所有元素
+非奇异（BD-正则性）。则广义 Newton 迭代
+\begin{equation}
+x_{k+1}=x_k-V_k^{-1}F(x_k),\qquad V_k\in\partial F(x_k)
+\end{equation}
+在 $x^*$ 的邻域内适定并 q-超线性收敛；若 $F$ 强半光滑，收敛是 q-二次的
+（Qi \& Sun~\cite{pfglob-qisun}）。
+\end{theorem}
+
+\begin{proof}[证明思路]
+BD-正则性与广义 Jacobian 的上半连续性给出 $x^*$ 邻域内
+$\lVert V^{-1}\rVert$ 的一致界 $C$。于是
+\[
+x_{k+1}-x^*=V_k^{-1}\bigl[F(x^*)-F(x_k)-V_k(x^*-x_k)\bigr],
+\]
+括号内由半光滑性为 $o(\lVert x_k-x^*\rVert)$，故
+$\lVert x_{k+1}-x^*\rVert=o(\lVert x_k-x^*\rVert)$，即超线性；
+强半光滑时余项为 $O(\lVert x_k-x^*\rVert^2)$，得二次收敛。
+邻域适定性由同一致界保证 $V_k$ 非奇异。
+\end{proof}
+
+\begin{remark}[BD-正则性不可由单点证书替代]\label{sec:pf-th-glob-rem-bd}
+定理~\ref{sec:pf-th-glob-thm-qisun} 的假设要求解点邻域内
+B-次微分的\emph{所有}元素非奇异，这比"所选广义 Jacobian 元非奇异"
+强。运行中实测的速率商
+$\lVert F_{k+1}\rVert/\lVert F_k\rVert$ 只是局部速率的经验证据，
+不能反推 BD-正则性成立；退化分支交点（例如两个限值同时临界）处
+所选广义 Jacobian 可能病态，实现以后向误差证书拒绝该步并回退全
+稀疏 LU。
+\end{remark}
+
+\subsubsection{PV/PQ 切换的统一表述：中位数互补方程}
+
+\begin{proposition}[中位数 NCP 方程的零点集]\label{sec:pf-th-glob-prop-median}
+设母线电压偏差 $e=V_m-V_m^{set}$，无功裕度
+$\underline q=Q_g-Q_g^{\min}$、$\bar q=Q_g-Q_g^{\max}$
+（$\underline q>\bar q$）。方程
+\begin{equation}
+H(e,\underline q,\bar q)
+=\max\bigl(\min(e,\underline q),\ \bar q\bigr)=0
+\end{equation}
+的零点集恰为以下三个物理分支的并：
+\begin{equation}
+\text{(i)}\ e=0,\ Q_g^{\min}\le Q_g\le Q_g^{\max};\qquad
+\text{(ii)}\ Q_g=Q_g^{\min},\ e\ge0;\qquad
+\text{(iii)}\ Q_g=Q_g^{\max},\ e\le0 .
+\end{equation}
+即"限值内为 PV（电压控制）"、触下/上限时转为 PQ 且电压向正确方向
+松弛。
+\end{proposition}
+
+\begin{proof}
+记 $u=\min(e,\underline q)$，则 $H=\max(u,\bar q)=0$ 当且仅当
+$u\le0$，$\bar q\le0$，且两者至少其一为零。
+\textbf{(i)} 若 $\bar q<0$（未触上限），须 $u=0$，即
+$\min(e,\underline q)=0$：$e=0$ 且 $\underline q\ge0$，或
+$\underline q=0$ 且 $e\ge0$（并入情形 (ii) 的边界）。
+\textbf{(ii)} 若 $\underline q=0$（触下限），$u=\min(e,0)=0$
+当且仅当 $e\ge0$，而 $\bar q=\underline q-(Q_g^{\max}-Q_g^{\min})<0$
+自动满足。
+\textbf{(iii)} 若 $\bar q=0$（触上限），须
+$u=\min(e,\underline q)\le0$；此时 $\underline q>0$，
+故须 $e\le0$。
+三种情形之外：$\bar q<0$、$\underline q>0$、$e\ne0$ 时
+$u=\min(e,\underline q)\ne0$ 且若 $e<0$ 则 $u<0$ 使 $H<0$，
+$e>0$ 时 $u>0$ 使 $H>0$，均非零。
+\end{proof}
+
+\begin{remark}[与原始-对偶积极集的关系]\label{sec:pf-th-glob-rem-activeset}
+把不等式约束的积极集显式枚举（PV$\to$PQ 批量切换加有界恢复审计）是
+同一数学对象的另一算法化路径：对固定积极集解光滑系统、在收敛点处
+按违反度更新积极集，其有限识别性质与半光滑 Newton 等价地建立在
+互补结构上（Hintermüller--Ito--Kunisch~\cite{pfglob-hik}）。两者的
+差别在工程侧：积极集切换改变方程布局与稀疏模式（需重做符号分析），
+NCP 方程保持固定布局但引入非光滑点。
+\end{remark}
+
+\begin{definition}[CHKS 与 Kanzow 光滑化]\label{sec:pf-th-glob-def-smoothing}
+CHKS 光滑化（Chen--Harker~\cite{pfglob-chenharker} 与
+Kanzow~\cite{pfglob-kanzow} 的非内点延拓构造）以
+\begin{equation}
+\max\nolimits_\mu(a,b)=\tfrac12\bigl(a+b+\sqrt{(a-b)^2+4\mu^2}\bigr),
+\qquad \mu>0
+\end{equation}
+替代 $\max$（$\min$ 对偶地），Kanzow 光滑 FB 为
+\begin{equation}
+\Phi_\mu(a,b)=\sqrt{a^2+b^2+2\mu^2}-a-b .
+\end{equation}
+两者在 $\mu>0$ 时光滑，$\mu\to0$ 时逐点（实际一致）收敛到对应非光滑
+算子。
+\end{definition}
+
+\begin{proposition}[光滑化的一致逼近阶]\label{sec:pf-th-glob-prop-smootherr}
+对所有 $(a,b)\in\mathbb R^2$ 与 $\mu>0$，
+\begin{equation}
+\bigl|\Phi_\mu(a,b)-\Phi_{FB}(a,b)\bigr|\le\sqrt2\,\mu .
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+记 $r=\sqrt{a^2+b^2}$，则
+$\Phi_\mu-\Phi_{FB}=\sqrt{r^2+2\mu^2}-r
+=\dfrac{2\mu^2}{\sqrt{r^2+2\mu^2}+r}\le\dfrac{2\mu^2}{\sqrt2\,\mu}
+=\sqrt2\,\mu$。
+\end{proof}
+
+\begin{remark}[光滑延拓的收敛逻辑]\label{sec:pf-th-glob-rem-smoothcont}
+以 $\mu_k\downarrow0$ 的调度依次解光滑方程 $F_{\mu_k}(x)=0$、每个
+$\mu$ 层以前一层解为初值，是标准的非内点延拓
+（Kanzow~\cite{pfglob-kanzow}）：
+命题~\ref{sec:pf-th-glob-prop-smootherr} 保证 $F_{\mu_k}\to F$ 一致，
+若极限方程的解满足 BD-正则性，则足够小的 $\mu$ 层落在下一层的
+Newton 吸引域内，整条延拓链以有限次逐层 Newton 求解完成。工程上
+以两阶段调度（粗阶段慢退火、近收敛快退火）平衡鲁棒性与迭代数；
+最终证书必须以 $\mu=0$ 的精确 NCP 残差重估，防止把光滑代理的收敛
+误报为精确互补性。
+\end{remark}
+
+\subsection{全纯嵌入负荷流方法（HELM）的数学基础}\label{sec:pf-th-glob-helm}
+
+HELM（Trias~\cite{pfglob-trias}）把潮流方程嵌入复参数 $s$ 的全纯族，
+用解析延拓代替迭代。
+
+\begin{definition}[全纯嵌入与幂级数]\label{sec:pf-th-glob-def-helm}
+对 PQ 母线 $i$、PV 母线 $j$ 与平衡母线 $k$，嵌入取
+\begin{align}
+\sum_{\ell}Y_{i\ell}\,V_\ell(s)
+&=s\,\frac{S_i^{*}}{V_i^{*}(s^{*})}-s\,Y_i^{sh}\,V_i(s),\\
+\sum_{\ell}Y_{j\ell}\,V_\ell(s)
+&=s\,\frac{P_j-\mathrm j Q_j(s)}{V_j^{*}(s^{*})},\qquad
+V_j(s)V_j^{*}(s^{*})=W_j+s\bigl(|V_j^{set}|^2-W_j\bigr),\\
+V_k(s)&=V_k^{spec},
+\end{align}
+其中 $W_j=|V_j(0)|^2$。$s=0$ 对应无注入\emph{胚}（germ）系统，
+其解 $V(0)$ 由带平衡母线恒等行的齐次线性系统给出；$s=1$ 还原原
+潮流方程。假设 $s\mapsto V(s)$ 在 $s=0$ 邻域全纯，展开
+$V_i(s)=\sum_{n\ge0}c_i^{(n)}s^n$。
+\end{definition}
+
+\begin{proposition}[系数递推]\label{sec:pf-th-glob-prop-helmrec}
+若胚系统矩阵非奇异，则各阶系数由一系列具有\emph{同一}系数矩阵的
+线性系统递推确定：定义逆电压级数 $W_i(s)=1/V_i(s)=\sum_n
+w_i^{(n)}s^n$，Cauchy 乘积 $V_i(s)W_i(s)=1$ 给出卷积递推
+$\sum_{m=0}^{n}c_i^{(m)}w_i^{(n-m)}=\delta_{n0}$；
+代入嵌入方程逐阶比较 $s^n$ 的系数，第 $n$ 阶右端只含
+$c^{(0)},\ldots,c^{(n-1)}$（及 $w^{(n-1)}$）。
+故全部系数经一次矩阵分解加多次回代求得。
+\end{proposition}
+
+\begin{proof}[证明思路]
+嵌入方程除 $1/V_i(s^{*})$ 项外对 $V(s)$ 是线性的；$s=0$ 处
+$V_i(0)\ne0$（胚非奇异）保证 $W_i(s)$ 同邻域全纯。代入幂级数并
+比较系数是标准操作；线性项贡献第 $n$ 阶未知量
+$c^{(n)}$ 的胚矩阵作用，含 $s$ 因子的项把注入右端推迟一阶，
+故第 $n$ 阶系统闭式可解。严格性由隐函数定理的复形式保证
+（胚处 Jacobian 即胚矩阵，非奇异）。
+\end{proof}
+
+\begin{theorem}[Cauchy--Hadamard 收敛半径]\label{sec:pf-th-glob-thm-ch}
+幂级数 $\sum_n c^{(n)}s^n$ 的收敛半径
+\begin{equation}
+R=\Bigl(\limsup_{n\to\infty}\lVert c^{(n)}\rVert^{1/n}\Bigr)^{-1}
+\end{equation}
+等于 $s=0$ 到 $V(s)$ 最近奇点的距离；级数在 $|s|<R$ 内收敛到嵌入解，
+在 $|s|>R$ 发散。
+\end{theorem}
+
+\begin{remark}[奇点的物理含义]\label{sec:pf-th-glob-rem-helmsing}
+潮流方程的解支在鞍节点（saddle-node，电压失稳临界点）处两支合并，
+映射 $s\mapsto V(s)$ 在该处出现平方根型分支点。因此 $R$ 度量的是
+沿嵌入路径到最近鞍节点的"复距离"：重载系统分支点靠近 $s=1$，
+$R<1$ 时原级数无法在 $s=1$ 处求值——这正是需要解析延拓的原因。
+\end{remark}
+
+\begin{definition}[Padé 逼近]\label{sec:pf-th-glob-def-pade}
+函数 $f$ 的 $(L,M)$ 阶 Padé 逼近是满足
+\begin{equation}
+f(z)-\frac{P_L(z)}{Q_M(z)}=O(z^{L+M+1}),\qquad Q_M(0)=1
+\end{equation}
+的有理函数 $[L/M]_f=P_L/Q_M$（$\deg P_L\le L,\ \deg Q_M\le M$）。
+其系数由幂级数系数的线性方程组（Toeplitz 结构）确定；
+Padé 逼近的极点自动逼近 $f$ 的奇点，因而可在收敛圆外继续
+$f$——这是有理逼近相对幂级数的本质优势
+（Baker \& Graves-Morris~\cite{pfglob-baker}）。
+\end{definition}
+
+\begin{theorem}[Stahl 定理（陈述）]\label{sec:pf-th-glob-thm-stahl}
+设 $f$ 在 $z=0$ 解析，在 $\mathbb C$ 中只有有限多个分支点型奇点。
+则对角（及近对角）Padé 序列 $[n/n]_f$ 在 $\mathbb C$ 去掉一个
+对数容量最小的割集系统后的紧子集上\emph{依容量收敛}到 $f$
+（Stahl~\cite{pfglob-stahl}）；分母零点的极限分布集中在该极值割集上。
+\end{theorem}
+
+\begin{remark}[对 HELM 的操作性含义]\label{sec:pf-th-glob-rem-stahlops}
+Stahl 定理把"Padé 是否可信"化为奇点结构问题：若嵌入解支在实轴段
+$[0,1]$ 上无奇点，则（在有限分支点的假设下）近对角 Padé 在 $s=1$
+处收敛到物理解；反之，若 $[0,1]$ 内存在鞍节点分支点，Padé 部分
+极点被吸引到该处，逼近出现震荡/发散。实现据此把"Padé 逼近不收敛"
+作为潮流不可行（或解支不可达）的实用判据。严格地说，依容量收敛
+容许零容量例外集，且"发散必因不可行"的逆否口径依赖奇点结构假设，
+故该判据是强证据而非纯数学证书；其实现层边界见本手册
+"全局化与鲁棒求解器族"章的 HELM 小节。
+\end{remark}
+
+\begin{gapnote}
+Stahl 定理的完整假设核验（嵌入映射奇点结构的辨识、极值割集计算）
+与多解分支的系统性枚举在当前代码中均未实现；HELM 求解器采用固定的
+对角 Padé 矩阵法与相邻逼近差的启发式收敛判据
+（\srcpath{src/power\_flow/helm\_solver.cpp:pade\_at\_one}），
+未做容量意义下的误差分析。
+\end{gapnote}
+
+\subsection{同伦延拓理论}\label{sec:pf-th-glob-homotopy}
+
+\begin{definition}[同伦映射]\label{sec:pf-th-glob-def-homotopy}
+设 $F(x)=0$ 为目标方程，$G(x)=0$ 为有已知解 $x_0$ 的平凡方程。
+同伦是满足 $H(x,0)=G(x)$、$H(x,1)=F(x)$ 的连续映射
+$H:\mathbb R^n\times[0,1]\to\mathbb R^n$。线性凸同伦
+$H(x,\lambda)=(1-\lambda)G(x)+\lambda F(x)$ 是最简单的构造；
+对潮流，等价做法是按 $\lambda$ 缩放负荷/注入：
+$H(x,\lambda)=F_\lambda(x)$，其中 $\lambda=0$ 为零注入平启动系统，
+$\lambda=1$ 为目标工况。
+\end{definition}
+
+\begin{theorem}[概率一正则性（参数化 Sard 定理，陈述）]\label{sec:pf-th-glob-thm-sard}
+对带参数 $a\in\mathbb R^p$ 的光滑同伦 $H(x,\lambda;a)$，
+若 $0$ 是 $(x,\lambda,a)$ 联合映射的正则值，则对 Lebesgue 几乎
+所有 $a$，$0$ 是 $H(\cdot,\cdot;a)$ 的正则值，从而
+$H^{-1}(0)$ 是 $\mathbb R^n\times[0,1]$ 中的一维光滑流形——
+其连通分支或为闭曲线，或为两端落在 $\lambda\in\{0,1\}$ 截口上的
+光滑路径；从 $(x_0,0)$ 出发的路径或以有限弧长到达 $\lambda=1$
+截口（得到解），或发散至无穷。
+（Allgower \& Georg~\cite{pfglob-allgower}。）
+\end{theorem}
+
+\begin{remark}[证明思想]\label{sec:pf-th-glob-rem-sard}
+核心是 Sard 定理的参数化形式：临界值集测度为零，故"路径横截
+$\lambda$ 截口"对几乎一切初值/参数成立。这把延拓法从"碰运气的
+启发式"提升为有概率一保证的方法；剩下的失败模式只有路径无界
+（目标问题无解或解支断裂）与数值跟踪丢失。
+\end{remark}
+
+\begin{definition}[预测-校正路径跟踪]\label{sec:pf-th-glob-def-pc}
+增广系统 $H(x,\lambda)=0$ 的一维解流形以弧长 $s$ 参数化。
+预测步沿切向 $(\dot x,\dot\lambda)$（由
+$[D_xH\ \ D_\lambda H](\dot x,\dot\lambda)^{\mathsf T}=0$ 与归一化
+条件确定）取 Euler 步；校正步在垂直于切向的超平面上以 Newton 法
+回到路径（Newton 校正子的 Jacobian 为加边矩阵，非奇异性由路径
+正则性保证）。
+\end{definition}
+
+\begin{remark}[转折点（turning points）]\label{sec:pf-th-glob-rem-turning}
+路径可能相对 $\lambda$ 折叠：在转折点处 $D_xH$ 奇异、
+$d\lambda/ds=0$，"固定 $\lambda$ 增量+逐点重解"的朴素策略在该处
+失败（试探点无收敛解）。弧长参数化使增广 Jacobian 在普通转折点
+仍非奇异，路径可平滑地"越过"折叠；鞍节点恰恰是潮流嵌入路径最
+典型的转折点。按弧长连续编号的路径上，奇点指标（$D_xH$ 负
+特征值计数）在简单转折点两侧差一，这也是 CPF 电压稳定分析的
+理论入口（其工具化属本手册 CPF 章的主题）。
+\end{remark}
+
+\begin{remark}[步长自适应]\label{sec:pf-th-glob-rem-homstep}
+实现采用的简化策略——成功则步长加倍（封顶）、失败则折半（低于
+下界判失败）——是预测-校正框架去掉切向预测后的退化形式：以
+上一收敛解直接作为下一 $\lambda$ 层的 Newton 初值（纯校正）。
+在每层 Newton 收敛且层间距离小时等价于零阶预测。
+\end{remark}
+
+\begin{gapnote}
+弧长参数化、加边 Newton 校正与转折点穿越在当前同伦实现中均未实现：
+\srcpath{src/power\_flow/homotopy\_continuation.cpp:HomotopyContinuationSolver::solve}
+按 $\lambda$ 单调递增逐层调用完整混合潮流求解
+（\srcpath{detail::scale\_system\_by\_lambda} 缩放注入），
+失败仅折半步长，路径折叠会被判为同伦失败而非穿越。
+\end{gapnote}
+
+\subsection{Newton--Krylov 与非精确 Newton 理论}\label{sec:pf-th-glob-nk}
+
+大规模系统的 Newton 步 $J_k s_k=-F_k$ 不必精确求解；
+Newton--Krylov 方法以 Krylov 子空间迭代近似求解（JFNK 中矩阵-向量
+积 $Jv$ 可用差分 $[F(x+\epsilon v)-F(x)]/\epsilon$ 免 Jacobian 装配地
+近似），其收敛理论由非精确 Newton 框架给出。
+
+\begin{definition}[非精确 Newton 条件]\label{sec:pf-th-glob-def-inexact}
+第 $k$ 步接受满足
+\begin{equation}
+\lVert F_k+J_k s_k\rVert\le\eta_k\lVert F_k\rVert,
+\qquad \eta_k\in[0,1)
+\end{equation}
+的试探步 $s_k$，$\eta_k$ 称为强制项（forcing term）。
+$\eta_k=0$ 退化为精确 Newton。
+\end{definition}
+
+\begin{theorem}[非精确 Newton 局部收敛（Dembo--Eisenstat--Steihaug）]\label{sec:pf-th-glob-thm-des}
+设 $F$ 在解 $x^*$ 邻域连续可微，$J(x^*)$ 非奇异，$x_0$ 充分接近
+$x^*$。则：
+\begin{enumerate}
+  \item 若 $\eta_k\le\bar\eta<1$，迭代局部 q-线性收敛；
+  \item $x_k\to x^*$ q-超线性当且仅当
+        $\lVert F_k+J_ks_k\rVert=o(\lVert F_k\rVert)$
+       （特别地 $\eta_k\to0$ 是充分条件）；
+  \item 若 $J$ Lipschitz 且
+        $\lVert F_k+J_ks_k\rVert=O(\lVert F_k\rVert^2)$
+        （如 $\eta_k=O(\lVert F_k\rVert)$），收敛为 q-二次。
+\end{enumerate}
+（Dembo, Eisenstat \& Steihaug~\cite{pfglob-des}；选择策略见
+Eisenstat \& Walker~\cite{pfglob-ew}。）
+\end{theorem}
+
+\begin{proof}[证明思路]
+记 $r_k=F_k+J_ks_k$ 为线性化残差，则
+$x_{k+1}-x^*=x_k-x^*-J_k^{-1}(F_k-r_k)$。
+对 $F(x^*)=0$ 作 Taylor 展开
+$F_k=J_k(x_k-x^*)+O(\lVert x_k-x^*\rVert^2)$（$J$ Lipschitz），
+得
+\[
+x_{k+1}-x^*
+=J_k^{-1}r_k+O(\lVert x_k-x^*\rVert^2),
+\]
+故
+$\lVert x_{k+1}-x^*\rVert
+\le C\bigl(\eta_k\lVert F_k\rVert+\lVert x_k-x^*\rVert^2\bigr)$。
+由 $\lVert F_k\rVert=O(\lVert x_k-x^*\rVert)$（$J(x^*)$ 非奇异
+给出双边等价），三条结论依次成立。常数 $C$ 依赖
+$\lVert J(x^*)^{-1}\rVert$ 与局部 Lipschitz 常数。
+\end{proof}
+
+\begin{remark}[强制项的自适应选择]\label{sec:pf-th-glob-rem-forcing}
+远离解时取小 $\eta$ 是浪费（线性化模型本身误差大），近解时必须
+$\eta\to0$ 以保超线性。Eisenstat--Walker~\cite{pfglob-ew} 给出两类
+标准调度：$\eta_k=\lVert\phi_k-\phi_{k-1}^{\mathrm{pred}}\rVert/
+\phi_{k-1}$ 型（反映模型保真度）与
+$\eta_k=\gamma(\lVert F_k\rVert/\lVert F_{k-1}\rVert)^\alpha$ 型
+（反映收敛速率），并配安全回退。定理~\ref{sec:pf-th-glob-thm-des}
+只约束渐近行为，调度影响的是实际迭代数与内迭代总成本。
+\end{remark}
+
+\begin{proposition}[GMRES 的最小残差性质]\label{sec:pf-th-glob-prop-gmres}
+GMRES~\cite{pfglob-saad-schultz} 第 $m$ 步在仿射空间
+$x_0+\mathcal K_m(A,r_0)$ 中取使 $\lVert b-Ax\rVert_2$ 最小的
+$x_m$。精确算术下 $m=n$ 必终止于真解；若 Arnoldi 过程在第 $j$ 步
+满足 $h_{j+1,j}=0$（良性中断），则当前子空间已含精确解。
+\end{proposition}
+
+\begin{proof}
+Arnoldi 关系 $AV_m=V_{m+1}\bar H_m$（$\bar H_m$ 为
+$(m{+}1)\times m$ 上 Hessenberg 矩阵）与 $V_m$ 列正交性给出：对
+$x=x_0+V_my$，
+\[
+\lVert b-Ax\rVert=\lVert r_0-AV_my\rVert
+=\bigl\lVert\beta e_1-\bar H_m y\bigr\rVert,
+\]
+右端是小规模最小二乘问题，以 Givens 旋转在线更新，其解给出最小
+残差。$m=n$ 时 $\mathcal K_n=\mathbb R^n$，最小残差为 0；
+$h_{j+1,j}=0$ 时 $\mathcal K_j$ 是 $A$-不变子空间且含 $r_0$，
+真解的残差校正落在其中。
+\end{proof}
+
+\begin{remark}[重启与预条件]\label{sec:pf-th-glob-rem-gmresrestart}
+存储与正交化成本随 $m$ 线性增长，实用中取 GMRES($m$)：
+每 $m$ 步以当前解重启。重启破坏有限终止性，可能停滞，故预条件
+几乎总是必要：左预条件以 $P^{-1}A$ 替代 $A$ 构造 Krylov 子空间，
+$P$ 应逼近 $A$ 且易解。对本平台的混合 AC/DC 系统，按实现头文件
+契约注释，统一 Newton 的 Jacobian 呈块上三角结构
+（AC 块 $A$、DC 块 $D$、耦合块 $B$、左下为零），此时"Schur 块
+预条件子"实为精确块分解 $P=J$：预处理算子为恒等，GMRES 理论上
+一步收敛；其价值不在 Krylov 加速，而在于分别分解 $A$、$D$ 以
+降低填充与分解成本（Kelley~\cite{pfglob-kelley} 第 3、6 章的一般
+讨论）。
+\end{remark}
+
+\begin{gapnote}
+定理~\ref{sec:pf-th-glob-thm-des} 意义下的自适应强制项在当前实现中
+未接线：GMRES 内迭代的相对残差容差取固定配置值
+\fld{gmres\_tol}（\srcpath{src/power\_flow/newton\_krylov.cpp:gmres\_solve}），
+NK 步的接受另加宽松阈值与有限性检查
+（\srcpath{src/power\_flow/newton\_krylov.cpp:newton\_krylov\_step}），
+因此外层只享有结论 (i) 的线性收敛口径；免 Jacobian 的差分矩阵-向量
+积（严格 JFNK）亦未采用，矩阵-向量积直接作用于已装配的 Jacobian。
+\end{gapnote}
+
+\subsection{与实现的对应}\label{sec:pf-th-glob-map}
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{6.8cm}L{8.6cm}@{}}
+\toprule
+理论条目 & 实现状态\\
+\midrule
+\endfirsthead
+\toprule
+理论条目 & 实现状态\\
+\midrule
+\endhead
+Armijo 充分下降 + 回溯 &
+\implfull{include/hacdcpf/power\_flow/globalization/nonmonotone\_linesearch.hpp:NonmonotoneLineSearch::search}（$M{=}1$ 时即单调 Armijo；主循环挂接见 src/power\_flow/newton\_solver.cpp:NewtonSolver::solve）\\
+Wolfe 曲率条件 & \implnone\\
+Zoutendijk 全局收敛（定理~\ref{sec:pf-th-glob-thm-zoutendijk} 的渐近保证） &
+\implpart{实现以有限回溯上限 + 停滞检测 + 五级失败回退链兜底（RobustNonlinearOptions 停滞与回退字段），无渐近收敛性证书}\\
+信赖域子问题、柯西点与 dogleg（定义~\ref{sec:pf-th-glob-def-tr}、
+引理~\ref{sec:pf-th-glob-lem-cauchy}） &
+\implfull{include/hacdcpf/engine/kernel/globalization/globalization.hpp:dogleg\_step}（转发到 MIPSolvers；增益比半径调节同文件 trust\_region\_update，调用侧为 newton\_solver.cpp 的 TrustRegion 分支）\\
+精确信赖域子问题（Moré--Sorensen）、Steihaug--Toint CG & \implnone\\
+LM 正规方程 $(J^{\mathsf T}J+\lambda I)\Delta x=-J^{\mathsf T}F$
+与增益比调 $\lambda$（定理~\ref{sec:pf-th-glob-thm-lmtr} 的参数化） &
+\implpart{LM 恢复步内联实现于 src/power\_flow/newton\_solver.cpp:NewtonSolver::solve（线搜索耗尽后至多 4 次 $\lambda\times10$ 尝试）；头文件 LMController::update 是预留控制器，未被主循环消费}\\
+PTC 与 SER 伪时间步（注记~\ref{sec:pf-th-glob-rem-ptc}） &
+\implfull{include/hacdcpf/power\_flow/globalization/lm\_trust\_region.hpp:PtcSerController::update}（PTC 分支装配 $J+I/\delta t$，挂接 NewtonSolver::solve）\\
+GLL 非单调窗口参考值（定义~\ref{sec:pf-th-glob-def-gll}） &
+\implfull{include/hacdcpf/power\_flow/globalization/nonmonotone\_linesearch.hpp:NonmonotoneLineSearch}（push\_merit/reference\_merit，窗口默认 $M=5$）\\
+FB 函数与广义 Jacobian 元素
+（命题~\ref{sec:pf-th-glob-prop-fb}、例~\ref{sec:pf-th-glob-ex-fb}） &
+\implfull{include/hacdcpf/power\_flow/ncp\_functions.hpp:fischer\_burmeister}（原点对称元见同文件 fischer\_burmeister\_jacobian）\\
+中位数 NCP 统一 PV/PQ（命题~\ref{sec:pf-th-glob-prop-median}） &
+\implfull{include/hacdcpf/power\_flow/ncp\_functions.hpp:pv\_pq\_ncp}（广义导数 pv\_pq\_ncp\_jacobian，并列处取相邻单侧斜率平均）\\
+CHKS/Kanzow 光滑化与 $\mu$ 延拓（定义~\ref{sec:pf-th-glob-def-smoothing}） &
+\implfull{include/hacdcpf/power\_flow/ncp\_functions.hpp:smooth\_fb}（pv\_pq\_smooth\_ncp；两阶段退火调度在 NewtonSolver::solve 内，参数 RobustNonlinearOptions::enable\_smooth\_ncp 系列）\\
+半光滑 Newton 超线性/二次收敛（定理~\ref{sec:pf-th-glob-thm-qisun}） &
+\implpart{求解器按广义 Newton 步运行并上报实测速率商；BD-正则性不做事先验证，病态所选块以后向误差证书拒绝并回退全稀疏 LU（见 vsc\_limit\_ncp 契约）}\\
+VSC 限流的互补表述（同一 NCP 框架的设备级实例） &
+\implfull{src/power\_flow/vsc\_limit\_ncp.cpp:evaluate\_vsc\_limit\_ncp}（median\_ncp；限流圆盘与优先级分支见 vsc\_limit\_command）\\
+HELM 嵌入与系数递推（定义~\ref{sec:pf-th-glob-def-helm}、
+命题~\ref{sec:pf-th-glob-prop-helmrec}） &
+\implfull{src/power\_flow/helm\_solver.cpp:HelmSolver::solve}（胚矩阵 build\_germ\_matrix、$|V|^2$ 约束系数 magnitude\_squared\_coefficient）\\
+Padé 解析延拓（定义~\ref{sec:pf-th-glob-def-pade}） &
+\implfull{src/power\_flow/helm\_solver.cpp:pade\_at\_one}（对角 Padé 矩阵法在 $s=1$ 求值）\\
+Stahl 定理层面的收敛性分析（定理~\ref{sec:pf-th-glob-thm-stahl}） &
+\implpart{实现以相邻 Padé 逼近差为启发式收敛判据、以发散作不可行性实用判据；无容量/割集层面的理论核验}\\
+同伦映射与注入缩放（定义~\ref{sec:pf-th-glob-def-homotopy}） &
+\implfull{src/power\_flow/homotopy\_continuation.cpp:detail::scale\_system\_by\_lambda}（逐层驱动 HomotopyContinuationSolver::solve）\\
+概率一正则性与预测-校正跟踪
+（定理~\ref{sec:pf-th-glob-thm-sard}、定义~\ref{sec:pf-th-glob-def-pc}） &
+\implpart{实现为零阶预测（上层解直接作初值）+ 逐层完整重解 + 步长成败折半/加倍（HomotopyState）；无正则性检验}\\
+弧长参数化与转折点穿越（注记~\ref{sec:pf-th-glob-rem-turning}） & \implnone\\
+非精确 Newton 条件与 DES 收敛理论
+（定义~\ref{sec:pf-th-glob-def-inexact}、
+定理~\ref{sec:pf-th-glob-thm-des}） &
+\implpart{内层残差容差为固定 \fld{gmres\_tol} 而非自适应强制项（newton\_krylov.cpp:newton\_krylov\_step），外层仅享线性收敛口径}\\
+GMRES($m$)：MGS Arnoldi + Givens 最小二乘
+（命题~\ref{sec:pf-th-glob-prop-gmres}） &
+\implfull{src/power\_flow/newton\_krylov.cpp:gmres\_solve}（重启、真残差复核、良性中断处理齐全）\\
+Schur 块预条件（注记~\ref{sec:pf-th-glob-rem-gmresrestart}） &
+\implfull{src/power\_flow/newton\_krylov.cpp:SchurBlockPreconditioner::build}（apply 实现两段块回代；块结构契约见 newton\_krylov.hpp 类注释）\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{参考文献}
+{\renewcommand{\section}[2]{}%
+\begin{thebibliography}{99}\small
+\bibitem{pfglob-nw} J.~Nocedal and S.~J. Wright, \emph{Numerical
+Optimization}, 2nd ed., Springer, 2006.
+\bibitem{pfglob-ds} J.~E. Dennis and R.~B. Schnabel, \emph{Numerical
+Methods for Unconstrained Optimization and Nonlinear Equations}, SIAM,
+1996.
+\bibitem{pfglob-powell} M.~J.~D. Powell, A hybrid method for nonlinear
+equations, in \emph{Numerical Methods for Nonlinear Algebraic Equations}
+(P.~Rabinowitz, ed.), Gordon and Breach, 1970.
+\bibitem{pfglob-levenberg} K.~Levenberg, A method for the solution of
+certain non-linear problems in least squares, \emph{Quarterly of Applied
+Mathematics}, 2, 1944.
+\bibitem{pfglob-marquardt} D.~W. Marquardt, An algorithm for least-squares
+estimation of nonlinear parameters, \emph{SIAM Journal on Applied
+Mathematics}, 11(2), 1963.
+\bibitem{pfglob-more} J.~J. Mor\'e, The Levenberg--Marquardt algorithm:
+implementation and theory, in \emph{Numerical Analysis}, Lecture Notes in
+Mathematics 630, Springer, 1978.
+\bibitem{pfglob-gll} L.~Grippo, F.~Lampariello and S.~Lucidi, A nonmonotone
+line search technique for Newton's method, \emph{SIAM Journal on Numerical
+Analysis}, 23(4), 1986.
+\bibitem{pfglob-fp} F.~Facchinei and J.-S. Pang, \emph{Finite-Dimensional
+Variational Inequalities and Complementarity Problems}, Vol.~I, Springer,
+2003.
+\bibitem{pfglob-fischer} A.~Fischer, A special Newton-type optimization
+method, \emph{Optimization}, 24, 1992.
+\bibitem{pfglob-qisun} L.~Qi and J.~Sun, A nonsmooth version of Newton's
+method, \emph{Mathematical Programming}, 58, 1993.
+\bibitem{pfglob-kanzow} C.~Kanzow, Some noninterior continuation methods
+for linear complementarity problems, \emph{SIAM Journal on Matrix Analysis
+and Applications}, 17(4), 1996.
+\bibitem{pfglob-chenharker} B.~Chen and P.~T. Harker, A non-interior-point
+continuation method for linear complementarity problems, \emph{SIAM Journal
+on Matrix Analysis and Applications}, 14(4), 1993.
+\bibitem{pfglob-hik} M.~Hinterm\"uller, K.~Ito and K.~Kunisch, The
+primal-dual active set strategy as a semismooth Newton method,
+\emph{SIAM Journal on Optimization}, 13(3), 2002.
+\bibitem{pfglob-trias} A.~Trias, The holomorphic embedding load flow
+method, in \emph{Proceedings of the IEEE PES General Meeting}, San Diego,
+2012.
+\bibitem{pfglob-stahl} H.~Stahl, On the convergence of generalized Pad\'e
+approximants, \emph{Constructive Approximation}, 5, 1989.
+\bibitem{pfglob-baker} G.~A. Baker and P.~Graves-Morris, \emph{Pad\'e
+Approximants}, 2nd ed., Cambridge University Press, 1996.
+\bibitem{pfglob-allgower} E.~L. Allgower and K.~Georg, \emph{Numerical
+Continuation Methods: An Introduction}, Springer, 1990.
+\bibitem{pfglob-des} R.~S. Dembo, S.~C. Eisenstat and T.~Steihaug, Inexact
+Newton methods, \emph{SIAM Journal on Numerical Analysis}, 19(2), 1982.
+\bibitem{pfglob-ew} S.~C. Eisenstat and H.~F. Walker, Choosing the forcing
+terms in an inexact Newton method, \emph{SIAM Journal on Scientific
+Computing}, 17(1), 1996.
+\bibitem{pfglob-saad-schultz} Y.~Saad and M.~H. Schultz, GMRES: a
+generalized minimal residual algorithm for solving nonsymmetric linear
+systems, \emph{SIAM Journal on Scientific and Statistical Computing},
+7(3), 1986.
+\bibitem{pfglob-kelley} C.~T. Kelley, \emph{Iterative Methods for Linear
+and Nonlinear Equations}, SIAM, 1995.
+\bibitem{pfglob-kelley-keyes} C.~T. Kelley and D.~E. Keyes, Convergence
+analysis of pseudo-transient continuation, \emph{SIAM Journal on Numerical
+Analysis}, 35(2), 1998.
+\end{thebibliography}}

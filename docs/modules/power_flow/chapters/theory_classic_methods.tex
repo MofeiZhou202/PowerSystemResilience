@@ -1,0 +1,701 @@
+% theory_classic_methods.tex —— 潮流计算 通用理论：经典方法（GS/Z-bus 谱系、FDPF 解耦、直流潮流、DistFlow 与前推回代、分布式松弛与自适应孤岛）
+% 本文件为理论层章节，遵循 docs/modules/THEORY_WRITING_GUIDE.md。
+
+\section{经典潮流方法理论：不动点迭代、解耦与线性化}\label{sec:pf-th-cls}
+
+\begin{theorynote}
+本章为通用数学理论，按经典教材与原始文献体系撰写，覆盖五组主题：
+(i) Gauss--Seidel 与阻抗阵法的历史定位及其作为不动点迭代的数学结构；
+(ii) 快速解耦潮流（FDPF）的解耦物理原理推导、XB/BX 变体差异与收敛性分析；
+(iii) 直流潮流从 AC 方程经三条假设到 $P=B\theta$ 的严格推导、线性化误差界与损耗近似；
+(iv) 辐射状配电网的 DistFlow 支路潮流模型、前推回代的不动点--压缩映射收敛理论
+与高 $R/X$ 弱网特性；
+(v) 分布式松弛与自适应孤岛的理论定位。
+Newton 法本体、全局化策略与电压稳定/换流器相关理论各有专章，本章不复述；
+本章公式不要求逐式对应代码。与平台实现（\srcpath{src/power\_flow/}）的对应关系
+见本章末"与实现的对应"表，超出实现的内容以"未实现扩展说明"框就地标记。
+\end{theorynote}
+
+\subsection{记号与约定}\label{sec:pf-th-cls-notation}
+\begin{itemize}
+  \item $n$：AC 母线数；母线复电压 $V_i=V_{m,i}\,e^{j\theta_i}$（极坐标），
+        $\theta_{ij}=\theta_i-\theta_j$；
+  \item $Y_{bus}=G+jB$：节点导纳阵，$Y_{ij}=G_{ij}+jB_{ij}$；支路 $k$（$i\!\to\!j$）
+        阻抗 $z_k=r_k+jx_k$，串联导纳 $y_k=g_k+jb_k=1/z_k$（感应性支路 $b_k<0$）；
+  \item $P_i,Q_i$：母线 $i$ 注入有功/无功（发电减负荷，pu）；上标
+        $\mathrm{spec}/\mathrm{calc}$ 区分指定值与计算值；
+        失配 $\Delta P_i=P_i^{\mathrm{spec}}-P_i^{\mathrm{calc}}$，
+        $\Delta Q_i$ 同理；
+  \item $B',B''\in\mathbb R^{n\times n}$：FDPF 的两个常量近似阵
+        （本章取\textbf{ Laplacian 口径}：对角元为正，迭代方程写作
+        $B'\Delta\theta=\Delta P/V$、$B''\Delta V=\Delta Q/V$；
+        部分教材采用反号口径 $-B'$，两者仅差整体符号约定）；
+  \item $\rho(\cdot)$：谱半径；$\lVert\cdot\rVert_\infty$：行和范数（向量时为最大模）；
+  \item 配网一节中，$\mathcal T$ 为以根（slack）为源的辐射树，$\mathcal P(j)$ 为
+        根到母线 $j$ 的唯一路径，$\mathrm{sub}(j)$ 为 $j$ 的子树（含 $j$ 自身），
+        $\ell_{ij}=|I_{ij}|^2$ 为支路电流幅值平方。
+\end{itemize}
+
+\subsection{方法谱系：不动点迭代视角下的经典方法}\label{sec:pf-th-cls-lineage}
+
+潮流计算的数字化历史几乎与数字计算机同步。Ward 与 Hale 于 1956 年给出首个
+实用的导纳阵迭代法~\cite{cls:wardhale}；随后出现了以阻抗阵 $Z_{bus}=Y_{bus}^{-1}$
+为核心的一类方法（Z-bus 法），其系统整理见 Stagg 与 El-Abiad~\cite{cls:stagg}；
+Tinney 与 Hart 于 1967 年确立 Newton 法加稀疏排序分解的主流地位~\cite{cls:tinney}；
+Stott 与 Alsa\c{c} 于 1974 年提出快速解耦潮流~\cite{cls:stott}。Stott 的
+综述~\cite{cls:stottreview} 对这一谱系有经典评述。本节用统一的\emph{不动点迭代}
+语言重述前 Newton 时代方法，以看清其数学结构与被取代的原因。
+
+\begin{definition}[Y-bus Gauss--Seidel 潮流迭代]\label{sec:pf-th-cls-def-gs}
+把节点方程 $I=Y_{bus}V$ 与注入约束 $S_i^{\mathrm{spec}}=V_i\overline{I_i}$
+联立，对每个 PQ 母线解出
+\begin{equation}
+V_i^{(k+1)}=\frac{1}{Y_{ii}}\Biggl(\frac{\overline{S_i^{\mathrm{spec}}}}{\overline{V_i^{(k)}}}
+-\sum_{j<i}Y_{ij}V_j^{(k+1)}-\sum_{j>i}Y_{ij}V_j^{(k)}\Biggr),
+\label{sec:pf-th-cls-eq:gs}
+\end{equation}
+即把潮流问题写成电压向量上的不动点方程 $V=T(V)$ 并做 Gauss--Seidel 型分量迭代。
+PV 母线先由 $Q$ 方程解出无功再校正幅值。Z-bus 法把式~\eqref{sec:pf-th-cls-eq:gs}
+右端的邻接求和换成 $Z_{bus}$ 与注入电流的乘积，收敛性更好但每步需作用稠密
+$Z_{bus}$（或其隐式因子）。
+\end{definition}
+
+式~\eqref{sec:pf-th-cls-eq:gs} 中电流项 $\overline{S}/\overline{V}$ 使 $T$ 成为
+\emph{非线性}映射；其收敛性分析的第一步是看线性化的骨架——对线性方程组
+$YV=I$ 的 Gauss--Seidel 迭代，下述经典结论给出充分收敛条件。
+
+\begin{theorem}[严格对角占优线性系统的 Gauss--Seidel 收敛性]\label{sec:pf-th-cls-thm-gs}
+设 $A\in\mathbb C^{n\times n}$ 严格对角占优（每行
+$|a_{ii}|>\sum_{j\ne i}|a_{ij}|$），则对任意初值，求解 $Ax=b$ 的
+Gauss--Seidel 迭代收敛，迭代矩阵 $T_{GS}=-(D+L)^{-1}U$ 满足 $\rho(T_{GS})<1$
+（其中 $A=D+L+U$ 为对角/严格下三角/严格上三角分解）。
+\end{theorem}
+
+\begin{proof}
+设 $\lambda$ 为 $T_{GS}$ 的任一特征值，$x\ne0$ 为相应特征向量：
+$-(D+L)^{-1}Ux=\lambda x$，即 $M(\lambda)x=0$，其中
+$M(\lambda)=\lambda(D+L)+U$。$M(\lambda)$ 的元素为
+$m_{ii}=\lambda a_{ii}$，$m_{ij}=\lambda a_{ij}$（$j<i$），$m_{ij}=a_{ij}$
+（$j>i$）。设 $|\lambda|\ge1$，则对每行 $i$，
+\begin{equation*}
+|m_{ii}|=|\lambda|\,|a_{ii}|>|\lambda|\sum_{j\ne i}|a_{ij}|
+\ge \sum_{j<i}|\lambda a_{ij}|+\sum_{j>i}|a_{ij}|=\sum_{j\ne i}|m_{ij}|,
+\end{equation*}
+即 $M(\lambda)$ 仍严格对角占优。严格对角占优矩阵非奇异（否则由
+Gershgorin 圆盘定理存在含原点的圆盘，与对角占优矛盾），故 $M(\lambda)x=0$
+只有零解，与 $x\ne0$ 矛盾。因此 $T_{GS}$ 的所有特征值满足 $|\lambda|<1$，
+即 $\rho(T_{GS})<1$，迭代误差 $e^{(k)}=T_{GS}^{\,k}e^{(0)}\to0$。
+\end{proof}
+
+\begin{remark}[从线性骨架到非线性潮流]\label{sec:pf-th-cls-rem-gslim}
+电力网络的 $Y_{bus}$ 通常弱对角占优而非严格占优（联络线、充电电容、三绕组
+变压器等都会削弱占优性），且式~\eqref{sec:pf-th-cls-eq:gs} 的非线性项
+$\overline{S}/\overline{V}$ 在电压偏低时放大局部 Lipschitz 常数，使收敛域收缩、
+收敛速度随系统规模恶化。Gauss--Seidel 类方法只具有\emph{线性}（几何）收敛速度，
+且渐近常数接近 1；这正是 Newton 法（局部二次收敛）~\cite{cls:tinney} 与其
+近似版 FDPF~\cite{cls:stott} 取而代之的根本原因。作为不动点方法的价值在于结构
+透明：它把"潮流 = 求 $V=T(V)$ 的不动点"这一观点留给了后来的前推回代
+（第~\ref{sec:pf-th-cls-distflow}~节）与 HELM 等方法。
+\end{remark}
+
+\begin{gapnote}
+Y-bus Gauss--Seidel 与 Z-bus 阻抗阵法在平台 \srcpath{src/power\_flow/} 中
+\textbf{均无实现}（求解器谱系以 Newton 核、FDPF、直流、BFS 为主，
+见实现层"架构总览"章）；本节谱系内容仅作理论定位。
+\end{gapnote}
+
+\subsection{快速解耦潮流：解耦原理推导与 XB/BX 变体}\label{sec:pf-th-cls-fdpf}
+
+\subsubsection{弱耦合假设的数学化}
+
+极坐标 Newton 校正方程按 $(\theta,V)$ 分块（推导见本手册 Newton 理论章）：
+\begin{equation}
+\begin{pmatrix}\Delta P\\ \Delta Q\end{pmatrix}
+=
+\begin{pmatrix} H & N\\ J & L\end{pmatrix}
+\begin{pmatrix}\Delta\theta\\ \Delta V\end{pmatrix},
+\label{sec:pf-th-cls-eq:nrblock}
+\end{equation}
+其中对 $i\ne j$（记 $B_{ij}=\operatorname{Im}Y_{ij}$），
+\begin{align}
+H_{ij}&=\frac{\partial P_i}{\partial\theta_j}
+ =V_iV_j\bigl(G_{ij}\sin\theta_{ij}-B_{ij}\cos\theta_{ij}\bigr),&
+N_{ij}&=V_j\frac{\partial P_i}{\partial V_j}
+ =V_iV_j\bigl(G_{ij}\cos\theta_{ij}+B_{ij}\sin\theta_{ij}\bigr),\notag\\
+J_{ij}&=\frac{\partial Q_i}{\partial\theta_j}
+ =-V_iV_j\bigl(G_{ij}\cos\theta_{ij}+B_{ij}\sin\theta_{ij}\bigr),&
+L_{ij}&=V_j\frac{\partial Q_i}{\partial V_j}
+ =V_iV_j\bigl(G_{ij}\sin\theta_{ij}-B_{ij}\cos\theta_{ij}\bigr).
+\label{sec:pf-th-cls-eq:blocks}
+\end{align}
+
+\begin{definition}[FDPF 三条物理解耦假设]\label{sec:pf-th-cls-def-assump}
+\textbf{(A1) 高 $X/R$}：网络支路满足 $|G_{ij}|\ll|B_{ij}|$；
+\textbf{(A2) 小角度差}：运行点处 $|\theta_{ij}|$ 小，
+$\sin\theta_{ij}\approx0$、$\cos\theta_{ij}\approx1$；
+\textbf{(A3) 无功通量小}：对角处 $|Q_i|\ll|B_{ii}|V_i^2$
+（即流经的无功相对母线短路电纳口径为小量）。
+\end{definition}
+
+在 (A1)--(A2) 下，式~\eqref{sec:pf-th-cls-eq:blocks} 的非对角元化为
+\begin{equation}
+H_{ij}\approx L_{ij}\approx -V_iV_jB_{ij},\qquad
+N_{ij}\approx -J_{ij}\approx V_iV_jG_{ij}\approx0,
+\label{sec:pf-th-cls-eq:offdiag}
+\end{equation}
+即 $P$--$\theta$ 与 $Q$--$V$ 两块\textbf{解耦}，交叉块 $N,J$ 消失。
+对角元 $H_{ii}=-Q_i-B_{ii}V_i^2$、$L_{ii}=Q_i-B_{ii}V_i^2$ 在 (A3) 下
+均 $\approx -B_{ii}V_i^2$。于是两块校正方程可统一写成
+\begin{equation}
+\Delta P\approx -\,\mathrm{diag}(V)\,B'\,\mathrm{diag}(V)\,\Delta\theta,
+\qquad
+\Delta Q\approx -\,\mathrm{diag}(V)\,B''\,\mathrm{diag}(V)\,\Delta V,
+\end{equation}
+其中 $B',B''$ 是由 $-B$ 派生的 Laplacian 型常量阵（对角为正）。
+两端除以 $V_i$ 并把右端残留的幅值因子取为 $1$（即再叠加一条
+$V\approx1$ 的\textbf{(A4)}），得 Stott--Alsa\c{c} 标准形~\cite{cls:stott}
+\begin{equation}
+\boxed{\;B'\,\Delta\theta=\frac{\Delta P}{V},\qquad B''\,\Delta V=\frac{\Delta Q}{V}\;}
+\label{sec:pf-th-cls-eq:fdpf}
+\end{equation}
+两阵\textbf{常量化}，可在迭代前一次因子分解，每次迭代只做失配计算与两次
+稀疏回代；收敛判据一般取
+$\max(\lVert\Delta P/V\rVert_\infty,\lVert\Delta Q/V\rVert_\infty)<\varepsilon$。
+
+\subsubsection{XB 与 BX 变体：变压器分接头归属的差异}
+
+两条假设链在"如何处理变压器变比 $t$、线路充电与母线并联"上留下自由度，
+由此产生两个经典变体~\cite{cls:stott,cls:vanamerongen}：
+
+\begin{definition}[XB 与 BX 方案]\label{sec:pf-th-cls-def-xbbx}
+\textbf{XB 方案}（Stott--Alsa\c{c} 原始版，亦称 FDXB）：
+$B'$ 由纯串联电纳 $1/x$ 装配——忽略电阻、充电、母线并联，\textbf{变比取 $1$}、
+相移取 $0$；$B''$ \textbf{保留}变比、充电与母线并联的影响（仍忽略电阻与相移）。
+\textbf{BX 方案}：分接头归属对调——$B'$ \textbf{保留}变比（含移相的注入等效），
+$B''$ 中\textbf{变比取 $1$}；其余构造相同。
+\end{definition}
+
+\begin{remark}[变体选择的经验结论]\label{sec:pf-th-cls-rem-xbbx}
+van Amerongen~\cite{cls:vanamerongen} 的"通用版"FDPF 与
+Monticelli--Garcia--Saavedra~\cite{cls:monticelli} 对假设链的系统推导与测试
+表明：XB 方案在常规输电网（$R/X$ 小、分接头接近 1）上收敛最快；当网络
+$R/X$ 偏高或分接头远离标称时，BX 方案的收敛域与稳健性明显更好。物理原因：
+分接头同时影响有功与无功通道，把它放进 $B'$（BX）使 $P$--$\theta$ 子迭代
+吸收了主要的对角缩放效应；而 $R/X$ 大直接破坏假设 (A1)，两个方案都会退化，
+此时应回退全 Newton 或改用对 $R/X$ 不敏感的方法（配网见
+第~\ref{sec:pf-th-cls-distflow}~节）。
+\end{remark}
+
+\subsubsection{收敛性：近似 Newton 的线性收敛定理}
+
+FDPF 不再是精确 Newton，而是\textbf{常量近似雅可比的拟 Newton 迭代}
+$x^{k+1}=x^k-A^{-1}F(x^k)$，其中 $A=\mathrm{diag}(-V B' V,\,-V B'' V)\big|_{V=1}$。
+其收敛性由下述 Ostrowski 型定理刻画（一般形式见~\cite{cls:ortega}）。
+
+\begin{theorem}[常量近似雅可比迭代的局部线性收敛]\label{sec:pf-th-cls-thm-fdpf}
+设 $F:\mathbb R^m\to\mathbb R^m$ 在解 $x^*$ 的邻域内二阶连续可微，
+$F(x^*)=0$，$J(x^*)$ 非奇异；取常量非奇异阵 $A$。若
+\begin{equation}
+\sigma:=\rho\bigl(I-A^{-1}J(x^*)\bigr)<1,
+\end{equation}
+则存在 $x^*$ 的邻域，使迭代 $x^{k+1}=x^k-A^{-1}F(x^k)$ 对其中任意初值收敛到
+$x^*$，且收敛是线性的：对任意 $\varepsilon>0$ 存在范数与常数 $C$ 使
+$\lVert x^{k+1}-x^*\rVert\le(\sigma+\varepsilon)\lVert x^k-x^*\rVert
++C\lVert x^k-x^*\rVert^2$。
+\end{theorem}
+
+\begin{proof}
+记 $e_k=x^k-x^*$，$M=I-A^{-1}J(x^*)$。在 $x^*$ 处 Taylor 展开：
+$F(x^k)=J(x^*)e_k+r_k$，其中 $\lVert r_k\rVert\le C_2\lVert e_k\rVert^2$
+（$F$ 二阶连续可微）。于是
+\begin{equation}
+e_{k+1}=e_k-A^{-1}\bigl(J(x^*)e_k+r_k\bigr)=Me_k-A^{-1}r_k.
+\label{sec:pf-th-cls-eq:errrec}
+\end{equation}
+由谱半径的连续性，对任意 $\varepsilon>0$ 可取 $\mathbb R^m$ 上的范数使
+$\lVert M\rVert\le\sigma+\varepsilon=:\eta<1$（取 $\varepsilon<(1-\sigma)/2$）。
+式~\eqref{sec:pf-th-cls-eq:errrec} 给出
+$\lVert e_{k+1}\rVert\le\eta\lVert e_k\rVert+C_3\lVert e_k\rVert^2
+=\bigl(\eta+C_3\lVert e_k\rVert\bigr)\lVert e_k\rVert$。
+取 $\delta>0$ 使 $\eta+C_3\delta<1$；则当 $\lVert e_0\rVert<\delta$ 时归纳得
+$\lVert e_k\rVert\le(\eta+C_3\delta)^k\lVert e_0\rVert\to0$，且渐近收敛因子
+不超过 $\eta=\sigma+\varepsilon$。
+\end{proof}
+
+\begin{remark}[该定理对 FDPF 的实际含义]\label{sec:pf-th-cls-rem-fdpfcond}
+条件 $\rho(I-A^{-1}J(x^*))<1$ 正是解耦假设 (A1)--(A4) 的\textbf{定量形式}：
+假设越接近成立，$A$ 越逼近 $J(x^*)$，$\sigma$ 越接近 $0$、几何收敛越快；
+$R/X$ 升高或角度差拉大时 $\sigma$ 趋近甚至超过 1，表现为迭代缓慢或发散。
+与 Newton 的局部二次收敛相比，FDPF 用"线性收敛 + 每步 $O(\mathrm{nnz})$
+回代 + 一次分解"换取单步成本的数量级下降，在适定输电网上的实践表现是
+$2\sim5$ 次迭代达到工程容差~\cite{cls:stott,cls:monticelli}。同理，FDPF
+\textbf{没有} Newton 的回退链/限值切换等全局化机制，其收敛完全依赖初值落在
+定理~\ref{sec:pf-th-cls-thm-fdpf} 的邻域内。
+\end{remark}
+
+\begin{gapnote}
+平台 FDPF（\srcpath{src/power\_flow/fdpf\_solver.cpp}）实现的是 \textbf{XB 方案}
+（$B'$ 变比取 1、忽略电阻/充电/并联，$B''$ 保留变比与充电/并联，构型由
+\srcpath{make\_bp\_flags}/\srcpath{make\_bpp\_flags} 控制）；\textbf{BX 方案未实现}。
+实现层手册称该求解器为 FDXB，与定义~\ref{sec:pf-th-cls-def-xbbx} 的命名一致。
+\end{gapnote}
+
+\subsection{直流潮流：三条假设的严格推导与误差分析}\label{sec:pf-th-cls-dc}
+
+\subsubsection{从 AC 支路方程到 $P=B\theta$}
+
+支路 $k$（$i\!\to\!j$，串联导纳 $y_k=g_k+jb_k$，忽略充电）from 端有功潮流的
+精确 AC 表达式为
+\begin{equation}
+P_{ij}=V_i^2 g_k-V_iV_j\bigl(g_k\cos\theta_{ij}+b_k\sin\theta_{ij}\bigr).
+\label{sec:pf-th-cls-eq:acbranch}
+\end{equation}
+
+\begin{definition}[直流潮流三条假设]\label{sec:pf-th-cls-def-dc}
+\textbf{(D1) 忽略电阻}：$r_k=0$，故 $g_k=0$、$b_k=-1/x_k$；
+\textbf{(D2) 单位电压}：$V_i\equiv1$（标幺）；
+\textbf{(D3) 小角度}：$\sin\theta_{ij}\approx\theta_{ij}$。
+\end{definition}
+
+逐条施加于式~\eqref{sec:pf-th-cls-eq:acbranch}：(D1) 消去 $g_k$ 项；
+(D2) 置 $V_i=V_j=1$；得 $P_{ij}=-b_k\sin\theta_{ij}=\sin\theta_{ij}/x_k$；
+(D3) 给出线性支路方程
+\begin{equation}
+P_{ij}=\frac{\theta_i-\theta_j}{x_k}.
+\label{sec:pf-th-cls-eq:dcbranch}
+\end{equation}
+对全部支路求和得节点平衡 $\sum_j P_{ij}=P_i$，写成矩阵形式即
+\begin{equation}
+\boxed{\;B\,\theta=P\;}
+\label{sec:pf-th-cls-eq:dcpf}
+\end{equation}
+其中 $B$ 为以 $1/x_k$ 为权的\textbf{加权图 Laplacian}：$B_{ij}=-1/x_k$（$i\ne j$，
+有支路相连时），$B_{ii}=\sum_{k\ni i}1/x_k$。剔除 slack 行/列并把 slack 相角
+（通常取 $0$）的贡献移到右端，得降阶方程
+$B_{\mathrm{red}}\theta_{\mathrm{red}}=P_{\mathrm{red}}-B_{\mathrm{red,slack}}\theta_{\mathrm{slack}}$。
+移相变压器（相移 $\varphi_k$）在式~\eqref{sec:pf-th-cls-eq:dcbranch} 中表现为
+$\theta_{ij}\to\theta_{ij}-\varphi_k$，装配时等价为 from/to 端一对反向注入
+$\mp b_k\varphi_k$。支路潮流回算
+$P_{f,k}=(\theta_i-\theta_j-\varphi_k)/x_k$。
+
+\subsubsection{可解性：接地 Laplacian 的正定性}
+
+\begin{theorem}[降阶 $B$ 阵的对称正定性]\label{sec:pf-th-cls-thm-dc}
+设 AC 网络连通，全部在运支路 $x_k>0$，slack 集合非空。则剔除全部 slack
+行/列后的降阶阵 $B_{\mathrm{red}}$ 对称正定，直流潮流方程
+\eqref{sec:pf-th-cls-eq:dcpf} 有唯一解 $\theta_{\mathrm{red}}$。
+\end{theorem}
+
+\begin{proof}
+对称性由构造显然。对任意 $\theta\in\mathbb R^{n}$，二次型可写成支路平方和：
+\begin{equation}
+\theta^{\top}B\theta=\sum_{k=(i,j)}\frac{1}{x_k}\bigl(\theta_i-\theta_j\bigr)^2\ge0.
+\label{sec:pf-th-cls-eq:quad}
+\end{equation}
+若 $\theta^{\top}B\theta=0$，则每条支路两端相角相等；网络连通推出
+$\theta$ 为常向量。今限制到非 slack 子空间：若
+$\theta_{\mathrm{red}}^{\top}B_{\mathrm{red}}\theta_{\mathrm{red}}=0$，把
+$\theta_{\mathrm{red}}$ 以 slack 分量取 $0$ 补全为 $\theta$，由
+式~\eqref{sec:pf-th-cls-eq:quad} 仍有 $\theta^{\top}B\theta=0$（slack 相角取 0
+时含 slack 的支路项为 $(\theta_i-0)^2$，不变号），故 $\theta$ 为常向量；
+而 slack 分量为 $0$，所以常数为 $0$，即 $\theta_{\mathrm{red}}=0$。
+因此 $B_{\mathrm{red}}$ 正定，必非奇异，解存在唯一。
+\end{proof}
+
+\begin{remark}\label{sec:pf-th-cls-rem-dcslack}
+定理~\ref{sec:pf-th-cls-thm-dc} 说明：直流潮流的适定性只需要"连通 + 至少一个
+相角参考 + 正电抗"，与运行点无关——这是它作为筛选/规划工具的鲁棒性来源。
+代价是信息损失：$|V|$、$Q$、网损全部不输出，slack 母线自动吸收全系统不平衡
+（在无损模型中恰为 $\sum P_i^{\mathrm{spec}}$ 的反号）。
+\end{remark}
+
+\subsubsection{线性化误差分析}
+
+保留电阻与电压幅值后，直流模型相对式~\eqref{sec:pf-th-cls-eq:acbranch} 的误差
+可以逐项界定。下述命题给出 $V\equiv1$ 情形下的干净分解。
+
+\begin{proposition}[直流潮流支路线性化误差界]\label{sec:pf-th-cls-prop-dcerr}
+设支路 $k$ 阻抗 $z_k=r_k+jx_k$（$x_k>0$），$V_i=V_j=1$，记
+$\theta=\theta_{ij}$，$\rho_k=r_k/x_k$。则精确有功
+$P_{ij}=g_k(1-\cos\theta)+\frac{x_k}{r_k^2+x_k^2}\sin\theta$，
+与直流近似 $\theta/x_k$ 的误差 $\varepsilon_k=P_{ij}-\theta/x_k$ 满足
+\begin{equation}
+|\varepsilon_k|
+\le \frac{g_k\theta^2}{2}
++\frac{\rho_k^2}{x_k(1+\rho_k^2)}\,|\theta|
++\frac{|\theta|^3}{6x_k}.
+\label{sec:pf-th-cls-eq:dcerr}
+\end{equation}
+三项分别对应\textbf{损耗项}（$g(1-\cos\theta)$，二阶小量但恒正、系统性偏高）、
+\textbf{有效电抗项}（$1/x_{\mathrm{eff}}=x_k/(r_k^2+x_k^2)$ 与 $1/x_k$ 之差，
+$\rho_k^2$ 量级）与\textbf{正弦线性化项}（三阶小量）。
+\end{proposition}
+
+\begin{proof}
+由 $y_k=1/z_k=(r_k-jx_k)/(r_k^2+x_k^2)$，得 $g_k=r_k/(r_k^2+x_k^2)$、
+$b_k=-x_k/(r_k^2+x_k^2)$，代入式~\eqref{sec:pf-th-cls-eq:acbranch}
+（$V_i=V_j=1$）即得精确表达式。于是
+\begin{equation*}
+\varepsilon_k=g_k(1-\cos\theta)
++\sin\theta\Bigl(\frac{x_k}{r_k^2+x_k^2}-\frac{1}{x_k}\Bigr)
++\frac{\sin\theta-\theta}{x_k}.
+\end{equation*}
+逐项取绝对值：$0\le1-\cos\theta\le\theta^2/2$；
+$\bigl|\frac{x_k}{r_k^2+x_k^2}-\frac{1}{x_k}\bigr|
+=\frac{r_k^2}{x_k(r_k^2+x_k^2)}=\frac{\rho_k^2}{x_k(1+\rho_k^2)}$；
+$|\sin\theta-\theta|\le|\theta|^3/6$（Taylor 余项的交错级数估计）。
+三角不等式合并即得式~\eqref{sec:pf-th-cls-eq:dcerr}。
+\end{proof}
+
+\begin{remark}[误差的量级解读]\label{sec:pf-th-cls-rem-dcerr}
+输电网典型 $\rho_k\le0.3$、$|\theta|\le0.5$~rad：有效电抗项
+$\sim\rho_k^2|\theta|/x_k\le4.5\%$（相对 $|\theta|/x_k$），损耗项与正弦项更小；
+这与工程文献中"直流潮流支路有功误差约百分之几"的经验一致~\cite{cls:stottreview}。
+但对\textbf{高 $R/X$ 配网}（$\rho_k$ 可超 1），有效电抗项达 $O(\rho_k^2)$，
+式~\eqref{sec:pf-th-cls-eq:dcerr} 失去实用意义——直流潮流不适用于配网，
+与 FDPF 的失效机理同源（假设 (A1)/(D1)）。
+\end{remark}
+
+\subsubsection{损耗近似}
+
+直流模型自身无损（$g=0$ 隐含 $\sum P_i^{\mathrm{spec}}=0$ 才可精确平衡），
+工程中需要网损估计时标准的做法是\textbf{事后二次近似}：由精确支路损耗
+$P_{\mathrm{loss},k}=g_k|V_i-V_j|^2=g_k\bigl(V_i^2+V_j^2-2V_iV_j\cos\theta_{ij}\bigr)$，
+施加 (D2) 并展开 $\cos$ 到二阶，得
+\begin{equation}
+P_{\mathrm{loss},k}\approx g_k\,\theta_{ij}^2=\frac{r_k}{r_k^2+x_k^2}\,\theta_{ij}^2
+\approx r_k\Bigl(\frac{\theta_{ij}}{x_k}\Bigr)^2
+=r_k\,\frac{P_{f,k}^2}{1},
+\label{sec:pf-th-cls-eq:loss}
+\end{equation}
+即"损耗 $\approx r\times$（直流潮流）$^2$"的二次口径。进一步可把
+$\sum_k P_{\mathrm{loss},k}/2$ 按比例回加到负荷并重解（损耗修正直流潮流），
+使 slack 吸收量逼近真实网损。
+
+\begin{gapnote}
+平台直流求解器 \srcpath{solve\_ac\_linearized\_dc} 输出仅为相角与无损支路潮流；
+式~\eqref{sec:pf-th-cls-eq:loss} 的\textbf{损耗事后估计与损耗修正重解均未实现}
+（结果结构 \texttt{ACLinearizedDCResult} 无损耗字段）。
+\end{gapnote}
+
+\subsection{辐射状配电网潮流：DistFlow 模型与前推回代}\label{sec:pf-th-cls-distflow}
+
+\subsubsection{DistFlow 支路潮流模型}
+
+配电网的结构性差异——辐射拓扑、高 $R/X$、显著电压降落——使输电网方法的前提
+（(A1)、(D1)--(D3)）不再成立，催生了以支路变量为核心的模型体系。
+Baran 与 Wu~\cite{cls:baranwu} 的 DistFlow 模型是其中的标准形式。
+
+\begin{definition}[DistFlow 支路潮流方程]\label{sec:pf-th-cls-def-distflow}
+设辐射树 $\mathcal T$ 的支路一律按远离根的方向定向，支路 $(i,j)$ 阻抗
+$z_{ij}=r_{ij}+jx_{ij}$，记 $P_{ij},Q_{ij}$ 为从 $i$ 流向 $j$ 的有功/无功，
+$\ell_{ij}=|I_{ij}|^2$，$v_i=|V_i|^2$，$p_j,q_j$ 为母线 $j$ 的净负荷
+（含本地并联的 $|V|^2$ 项）。由 $V_j=V_i-z_{ij}I_{ij}$ 与
+$S_{ij}=V_i\overline{I_{ij}}$ 两端取模平方并分离实虚部，得递推方程组
+\begin{align}
+P_{ij}-r_{ij}\ell_{ij}-p_j&=\sum_{k\in\mathcal C(j)}P_{jk},
+\label{sec:pf-th-cls-eq:dfp}\\
+Q_{ij}-x_{ij}\ell_{ij}-q_j&=\sum_{k\in\mathcal C(j)}Q_{jk},
+\label{sec:pf-th-cls-eq:dfq}\\
+v_j&=v_i-2\bigl(r_{ij}P_{ij}+x_{ij}Q_{ij}\bigr)+\bigl(r_{ij}^2+x_{ij}^2\bigr)\ell_{ij},
+\label{sec:pf-th-cls-eq:dfv}\\
+\ell_{ij}\,v_i&=P_{ij}^2+Q_{ij}^2,
+\label{sec:pf-th-cls-eq:dfl}
+\end{align}
+$\mathcal C(j)$ 为 $j$ 的子节点集。方程
+\eqref{sec:pf-th-cls-eq:dfp}--\eqref{sec:pf-th-cls-eq:dfq} 是含损功率平衡，
+\eqref{sec:pf-th-cls-eq:dfv} 是电压降落恒等式，\eqref{sec:pf-th-cls-eq:dfl}
+是支路潮流与电流的耦合约束（唯一的非线性，且为凸二阶锥形式）。
+略去损耗项 $r\ell$、$x\ell$ 与 $(r^2+x^2)\ell$ 得\textbf{ LinDistFlow}
+（线性 DistFlow）模型，广泛用于配网优化建模~\cite{cls:baranwu}。
+\end{definition}
+
+\begin{remark}[存在唯一性]\label{sec:pf-th-cls-rem-chiang}
+Chiang 与 Baran~\cite{cls:chiangbaran} 证明：对辐射状配网，在"负荷不过分重"
+的可操作条件下，潮流方程的可行解在物理有意义的电压区域内\textbf{存在且唯一}，
+且可用不动点框架构造。这一结果把配网潮流与输电网多解问题区分开：辐射 +
+单电源 + 适度负荷保证了良态性，是前推回代可靠工作的理论底座。
+\end{remark}
+
+\subsubsection{前推回代：作为不动点迭代的推导}
+
+前推回代（Backward--Forward Sweep, BFS；Shirmohammadi
+等~\cite{cls:shirmohammadi}）不显式组装 DistFlow 方程组，而是把辐射树结构
+直接变成两遍扫描的不动点迭代。
+
+\begin{definition}[BFS 扫描映射]\label{sec:pf-th-cls-def-bfs}
+给定电压剖面 $V=(V_1,\dots,V_n)$（根 $V_0$ 固定为 slack 电压），
+\textbf{回推}（叶$\to$根）按
+$I_{ij}=\sum_{m\in\mathrm{sub}(j)}\overline{S_m^{\mathrm{net}}/V_m}$
+汇总各支路电流；\textbf{前推}（根$\to$叶）沿树按
+$V'_j=V'_i-z_{ij}I_{ij}$ 更新电压。记一遍完整扫描为映射 $V'=T(V)$，
+BFS 即 Picard 迭代 $V^{(k+1)}=T(V^{(k)})$，收敛判据
+$\max_j|V_j^{(k+1)}-V_j^{(k)}|<\varepsilon$。
+\end{definition}
+
+展开前推递推：$V'_j=V_0-\sum_{l\in\mathcal P(j)}z_l I_l$。由于 $I_l$ 只依赖
+$\mathrm{sub}$ 内母线电压，$T$ 是良定义的显式映射；其不动点精确满足
+DistFlow 方程（回推保证
+\eqref{sec:pf-th-cls-eq:dfp}--\eqref{sec:pf-th-cls-eq:dfq}，
+前推保证 \eqref{sec:pf-th-cls-eq:dfv}，电流定义保证
+\eqref{sec:pf-th-cls-eq:dfl}）。
+
+\begin{theorem}[BFS 的压缩收敛性（充分条件）]\label{sec:pf-th-cls-thm-bfs}
+设辐射网以母线 $0$ 为 slack，$V_0=1\angle0$ 固定；负荷恒功率，
+$|S_j^{\mathrm{net}}|\le\sigma_j$，记 $\sigma_\Sigma=\sum_j\sigma_j$；支路阻抗
+满足 $Z_{\max}:=\max_j\sum_{l\in\mathcal P(j)}|z_l|<\infty$（根到任一母线的
+路径阻抗上界）。取 $v_{\min}\in(0,1)$ 并限制电压剖面于
+$\mathcal D=\{V:\ |V_j|\ge v_{\min}\ \forall j\}$。若
+\begin{equation}
+L:=\frac{Z_{\max}\,\sigma_\Sigma}{v_{\min}^2}<1
+\qquad\text{且}\qquad
+1-\frac{Z_{\max}\sigma_\Sigma}{v_{\min}}\ge v_{\min},
+\label{sec:pf-th-cls-eq:bfsc}
+\end{equation}
+则 $T$ 在 $\mathcal D$ 上是压缩映射（$\lVert T(V)-T(W)\rVert_\infty\le
+L\lVert V-W\rVert_\infty$）且 $T(\mathcal D)\subseteq\mathcal D$；
+由 Banach 不动点定理，$T$ 在 $\mathcal D$ 内有\textbf{唯一}不动点，
+BFS 从 $\mathcal D$ 内任意初值出发以速率 $L$ 几何收敛。
+\end{theorem}
+
+\begin{proof}
+\textbf{第一步（回推的 Lipschitz 界）。}对
+$I_l=\sum_{m\in\mathrm{sub}(l)}\overline{S_m/V_m}$，在 $\mathcal D$ 上
+\begin{equation*}
+\Bigl|\frac{\overline{S_m}}{\overline{V_m}}-\frac{\overline{S_m}}{\overline{W_m}}\Bigr|
+=\frac{|S_m|\,|V_m-W_m|}{|V_m|\,|W_m|}
+\le\frac{\sigma_m}{v_{\min}^2}\,\lVert V-W\rVert_\infty,
+\end{equation*}
+对子树求和得
+$|I_l(V)-I_l(W)|\le\bigl(\sigma_\Sigma/v_{\min}^2\bigr)\lVert V-W\rVert_\infty$。
+\textbf{第二步（前推传播）。}由 $T(V)_j=V_0-\sum_{l\in\mathcal P(j)}z_l I_l(V)$，
+\begin{equation*}
+|T(V)_j-T(W)_j|\le\sum_{l\in\mathcal P(j)}|z_l|\,
+\frac{\sigma_\Sigma}{v_{\min}^2}\lVert V-W\rVert_\infty
+\le L\,\lVert V-W\rVert_\infty,
+\end{equation*}
+对 $j$ 取上确界即压缩性。\textbf{第三步（自映射）。}对 $V\in\mathcal D$，
+$|I_l(V)|\le\sigma_\Sigma/v_{\min}$，故
+$|T(V)_j|\ge1-Z_{\max}\sigma_\Sigma/v_{\min}\ge v_{\min}$
+（式~\eqref{sec:pf-th-cls-eq:bfsc} 第二式），即 $T(V)\in\mathcal D$。
+$\mathcal D$ 是有限维空间中的闭集（完备度量空间），Banach 定理给出
+唯一不动点与几何收敛 $\lVert V^{(k)}-V^*\rVert_\infty\le
+\frac{L^k}{1-L}\lVert V^{(1)}-V^{(0)}\rVert_\infty$。
+\end{proof}
+
+\begin{remark}[条件 \eqref{sec:pf-th-cls-eq:bfsc} 的物理读法]\label{sec:pf-th-cls-rem-bfsc}
+$Z_{\max}\sigma_\Sigma$ 是"路径阻抗 $\times$ 总负荷"——即\textbf{短路容量相对
+负荷规模的裕度}：条件要求馈线足够"强"（短路容量大、负荷轻、电压不贴近崩塌点
+$v_{\min}$ 过小）。这与工程直觉一致：重载长馈线末端电压低，BFS 迭代变慢甚至
+失效；也解释了为何实现必须用拓扑 fail-close 与残差监控兜底，而不能依赖先验
+条件检验（$L<1$ 只是充分条件，实践中 $L$ 略超 1 仍常收敛）。
+恒阻抗/恒电流负荷使 $T$ 更接近线性映射（注入电流对 $V$ 的敏感度降低），
+压缩条件更宽松——这就是 ZIP 负荷有助于 BFS 收敛的理论原因。
+\end{remark}
+
+\begin{remark}[高 $R/X$ 弱网特性与方法选择]\label{sec:pf-th-cls-rem-rx}
+配网 $R/X$ 常大于 1：(i) FDPF/直流的假设 (A1)/(D1) 被破坏
+（命题~\ref{sec:pf-th-cls-prop-dcerr} 的有效电抗项达 $O(\rho_k^2)$）；
+(ii) $P$--$V$、$Q$--$\theta$ 交叉耦合增强，解耦迭代发散；
+(iii) 电压降落项 $2(rP+xQ)$ 中电阻贡献占主导，$|V|$ 对有功潮流敏感。
+BFS 与 DistFlow 不显式使用任何弱耦合假设（式
+\eqref{sec:pf-th-cls-eq:dfp}--\eqref{sec:pf-th-cls-eq:dfl} 是精确恒等式），
+对 $R/X$ 天然免疫，配合辐射拓扑的 $O(n)$ 扫描复杂度，成为配网正序潮流的
+标准选择；环网/弱环网则需补偿法~\cite{cls:shirmohammadi} 或三相 Newton。
+\end{remark}
+
+\begin{gapnote}
+平台实现的是\textbf{精确 AC 支路模型的 BFS}
+（\srcpath{run\_bfs\_sweep}，含变比折算与 ZIP 电压依赖），收敛点与
+DistFlow 方程组等价，但\textbf{没有}独立的 DistFlow 方程组求解器；
+LinDistFlow 仅以 MIP 建模层形式存在于 power\_models 模块
+（\srcpath{src/power\_models/lindistflow\_builder.cpp:solve\_lindistflow}），
+不属于潮流求解路径。定理~\ref{sec:pf-th-cls-thm-bfs} 的压缩条件
+\eqref{sec:pf-th-cls-eq:bfsc} 亦\textbf{未}作为先验检验实现——实现以辐射/连通
+fail-close 检查加 $\max|\Delta V|$ 收敛判据代替。
+\end{gapnote}
+
+\subsection{分布式松弛与自适应孤岛的理论定位}\label{sec:pf-th-cls-slack}
+
+\subsubsection{松弛母线的自由度账与物理意义}
+
+$n$ 母线 AC 潮流每节点有四个量 $P,Q,|V|,\theta$、两条规范方程（注入定义），
+因此每母线必须指定两个量；但全系统的\textbf{网损在求解前未知}，若所有母线的
+$P$ 都事先钉死，功率平衡 $\sum P_i=\text{损耗}$ 一般无解。松弛（slack）母线的
+本质是\textbf{开放其 $P,Q$ 两个自由度}以吸收先验未知的不平衡（主要是网损），
+同时提供相角参考——$\theta$ 只在连通分量内有相对意义，必须钉住一个零点
+（自由度账：$n$ 个 PQ/PV 母线贡献 $2n-2$ 个失配方程，对应 $\theta$ 与 $|V|$
+的 $2n-2$ 个未知量，slack 的 $\theta,|V|$ 钉值）。
+
+\begin{definition}[分布式松弛与参与因子]\label{sec:pf-th-cls-def-dslack}
+把单一 slack 吸收的不平衡 $\Delta P_\Sigma$ 按归一化\textbf{参与因子}
+$\alpha_i\ge0$、$\sum_i\alpha_i=1$ 分摊到一组可调电源母线
+$\mathcal G$：$P_{g,i}\leftarrow P_{g,i}+\alpha_i\Delta P_\Sigma$。
+因子的常见生成口径：按容量（$\alpha_i\propto P_{g,i}^{\max}$）、
+按下垂系数（$\alpha_i\propto1/R_i$，对应一次调频的稳态份额）或均分。
+\end{definition}
+
+\begin{remark}[slack 分摊的物理意义与两种数学口径]\label{sec:pf-th-cls-rem-dslack}
+单 slack 模型隐含"一台无穷大机组瞬时平衡全网"，在网损分摊、AGC 与经济调度的
+衔接上不真实；分布式松弛把不平衡按参与因子映射到多台机组，模拟调速器
+稳态分配。\emph{数学上}有两种口径：\textbf{方程内口径}把
+$P_{g,i}=P_{g,i}^0+\alpha_i\,\pi$（$\pi$ 为增广未知的不平衡量）直接嵌入
+Newton 失配方程同步求解，结果自洽（分摊后网损变化已被迭代吸收）；
+\textbf{事后口径}先用单 slack 解出基准潮流，再把 slack 吸收量按 $\alpha$ 外部分摊。
+事后口径忽略分摊引起的网损二阶变化（$\Delta P_\Sigma$ 改变潮流分布进而改变
+损耗），属于一阶近似；要自洽需把分摊值写回后\textbf{重解}直至残余失配收敛。
+限值处理（机组 $P_{\min}/P_{\max}$ 越限钉限再分摊剩余）使口径进一步成为
+带投影的迭代。
+\end{remark}
+
+\subsubsection{自适应孤岛：连通分量、参考角与死岛}
+
+拓扑分裂（故障开断、计划孤岛）使一个求解对象变成多个电气解耦的子问题。
+其代数判据是图 Laplacian 的秩亏结构。
+
+\begin{lemma}[Laplacian 零空间的维数 = 连通分量数]\label{sec:pf-th-cls-lem-lap}
+设无向图有 $n$ 个顶点、$c$ 个连通分量，边权 $w_k>0$，$B$ 为其加权
+Laplacian（$B_{ij}=-w_k$、$B_{ii}=\sum_{k\ni i}w_k$）。则
+$\dim\ker B=c$，$\ker B$ 由各分量的示性向量张成。
+\end{lemma}
+
+\begin{proof}
+由式~\eqref{sec:pf-th-cls-eq:quad} 的二次型展开
+$x^{\top}Bx=\sum_{k=(i,j)}w_k(x_i-x_j)^2\ge0$：$Bx=0\Rightarrow x^{\top}Bx=0$
+$\Rightarrow$ 每条边两端分量相等 $\Rightarrow$ $x$ 在每个连通分量上取常值。
+反之每个分量上的常值向量显然在 $\ker B$ 中。故 $\ker B$ 恰为
+$\{\text{各分量示性向量的线性组合}\}$，维数为 $c$。
+\end{proof}
+
+\begin{remark}[引理~\ref{sec:pf-th-cls-lem-lap} 对潮流求解的含义]\label{sec:pf-th-cls-rem-island}
+$c$ 个孤岛的网络，其潮流雅可比（以及直流 $B$ 阵）天然有 $c$ 重零特征值：
+每个孤岛都需要\textbf{各自}的相角参考与功率平衡机制，混用单一 slack 的
+整体方程组必然奇异。\emph{自适应孤岛}的理论定位因此是：先分岛（图的连通分量
+分解），把原问题分解为 $c$ 个独立的适定子问题，活岛各自指定/自选 slack 求解；
+\textbf{无源岛}（无任何注入设备）在潮流框架内\textbf{无可行解}——其负荷无法满足、
+电压无支撑，物理上对应失压停运，诚实的计算处理是作为\emph{死岛}以零电压
+哨兵标记并排除出求解，而非强行给出无意义数值。这与定理
+\ref{sec:pf-th-cls-thm-dc} 的适定性条件（连通 + 参考 + 正电抗）互为表里。
+\end{remark}
+
+\begin{gapnote}
+方程内口径的精确分布式松弛（$\pi$ 作为增广未知量进入 Newton 失配）在平台中
+\textbf{未实现}：\srcpath{DistributedSlackSolver::solve\_simplified} 是事后分摊
+（一次基准 Newton + \srcpath{compute\_total\_participating\_mismatch\_pu} 复算
+分摊），\srcpath{solve\_full\_jacobian} 是"重调度 + 反复完整重解 + 钉限重分摊"
+的迭代逼近（兼容名 \texttt{full\_jacobian} 不表示增广 Jacobian）。
+\end{gapnote}
+
+\subsection{与实现的对应}\label{sec:pf-th-cls-implmap}
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{6.8cm}L{8.6cm}@{}}
+\toprule
+理论条目 & 实现状态\\
+\midrule
+\endfirsthead
+\toprule
+理论条目 & 实现状态\\
+\midrule
+\endhead
+Y-bus Gauss--Seidel 不动点迭代（定义~\ref{sec:pf-th-cls-def-gs}） &
+\implnone\\
+Z-bus 阻抗阵法 &
+\implnone\\
+FDPF 主迭代 $B'\Delta\theta=\Delta P/V$、$B''\Delta V=\Delta Q/V$
+（式~\eqref{sec:pf-th-cls-eq:fdpf}） &
+\implfull{src/power\_flow/fdpf\_solver.cpp:FDPFSolver::solve}（失配装配见同文件
+compute\_power\_injections、compute\_specified\_injections）\\
+$B'/B''$ 的 XB 口径常量阵装配（定义~\ref{sec:pf-th-cls-def-xbbx}） &
+\implfull{src/power\_flow/admittance\_builder.cpp:build\_susceptance\_matrix}（构型标志
+\srcpath{include/hacdcpf/power\_flow/assembly/admittance\_builder.hpp:make\_bp\_flags}、\srcpath{make\_bpp\_flags}）\\
+FDPF 常量阵一次分解 + 线性收敛结构
+（定理~\ref{sec:pf-th-cls-thm-fdpf}） &
+\implpart{Eigen SparseLU 一次性分解（FDPFSolver::solve）；无全局化与 Q 限值切换，
+收敛域外的行为无保障}\\
+FDPF BX 变体 &
+\implnone\\
+直流潮流 $B\theta=P$ 降阶求解
+（式~\eqref{sec:pf-th-cls-eq:dcpf}，定理~\ref{sec:pf-th-cls-thm-dc}） &
+\implfull{src/power\_flow/ac\_linearized\_pf.cpp:solve\_ac\_linearized\_dc}\\
+直流潮流移相变压器注入等效 &
+\implfull{src/power\_flow/ac\_linearized\_pf.cpp:solve\_ac\_linearized\_dc}（同函数内
+$\pm b_k\varphi_k$ 注入装配）\\
+直流损耗二次近似与损耗修正重解（式~\eqref{sec:pf-th-cls-eq:loss}） &
+\implnone\\
+DistFlow 支路潮流方程组
+（式~\eqref{sec:pf-th-cls-eq:dfp}--\eqref{sec:pf-th-cls-eq:dfl}） &
+\implpart{无独立方程组求解器；辐射支路关系由精确 AC 模型的 BFS 扫描实现，
+收敛点与 DistFlow 等价}\\
+LinDistFlow 线性化模型 &
+\implpart{潮流路径内无；MIP 建模层
+src/power\_models/lindistflow\_builder.cpp:solve\_lindistflow（属 power\_models 模块）}\\
+前推回代扫描映射（定义~\ref{sec:pf-th-cls-def-bfs}） &
+\implfull{src/power\_flow/distribution\_power\_flow.cpp:run\_bfs\_sweep}（BFS 树
+build\_bfs\_tree，支路关系 branch\_series\_current、branch\_child\_voltage\_from\_parent，
+ZIP 电压依赖 voltage\_dependent\_net\_demand）\\
+辐射/单连通前提的 fail-close 检查 &
+\implfull{src/power\_flow/distribution\_power\_flow.cpp:solve\_distribution\_pf\_ac\_snapshot}\\
+BFS 压缩收敛先验检验（定理~\ref{sec:pf-th-cls-thm-bfs} 的 $L<1$） &
+\implpart{无先验条件检验；以 $\max|\Delta V|$ 收敛判据与拓扑 fail-close 兜底}\\
+高 $R/X$ 网络的自动方法切换 &
+\implnone（方法由用户显式选择，无基于 $R/X$ 的自动分派）\\
+参与因子三口径生成（定义~\ref{sec:pf-th-cls-def-dslack}） &
+\implfull{src/power\_flow/distributed\_slack\_solver.cpp:create\_participation\_factors}（含
+sanitize\_slack\_cfg 校验与 normalize\_factors 归一）\\
+事后分摊与带限值重解两口径
+（注记~\ref{sec:pf-th-cls-rem-dslack}） &
+\implfull{src/power\_flow/distributed\_slack\_solver.cpp:solve\_simplified、solve\_full\_jacobian}（限值重分摊
+distribute\_with\_limits，失配复算 compute\_total\_participating\_mismatch\_pu）\\
+方程内精确分布式松弛（增广未知量 $\pi$） &
+\implnone\\
+孤岛分解与每岛参考/slack 自选
+（引理~\ref{sec:pf-th-cls-lem-lap} 的算法化） &
+\implfull{src/power\_flow/island\_detector.cpp:detect\_islands、extract\_island\_subsystem；自选摇摆
+src/power\_flow/adaptive\_solver.cpp:auto\_select\_swing\_bus}\\
+死岛零电压哨兵（注记~\ref{sec:pf-th-cls-rem-island}） &
+\implfull{src/power\_flow/adaptive\_solver.cpp:set\_dead\_island\_zero}（调度入口
+AdaptiveSolver::solve）\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{参考文献}
+{\renewcommand{\section}[2]{}%
+\begin{thebibliography}{9}\small
+\bibitem{cls:wardhale} J.~B. Ward and H.~W. Hale, Digital computer solution of
+power-flow problems, \emph{AIEE Transactions (Power Apparatus and Systems)},
+vol. 75, 1956.
+\bibitem{cls:stagg} G.~W. Stagg and A.~H. El-Abiad, \emph{Computer Methods in
+Power System Analysis}, McGraw-Hill, 1968.
+\bibitem{cls:tinney} W.~F. Tinney and C.~E. Hart, Power flow solution by
+Newton's method, \emph{IEEE Transactions on Power Apparatus and Systems},
+vol. PAS-86, no. 11, 1967.
+\bibitem{cls:stott} B.~Stott and O.~Alsa\c{c}, Fast decoupled load flow,
+\emph{IEEE Transactions on Power Apparatus and Systems}, vol. PAS-93, no. 3, 1974.
+\bibitem{cls:stottreview} B.~Stott, Review of load-flow calculation methods,
+\emph{Proceedings of the IEEE}, vol. 62, no. 7, 1974.
+\bibitem{cls:vanamerongen} R.~A.~M. van Amerongen, A general-purpose version of
+the fast decoupled load flow, \emph{IEEE Transactions on Power Systems},
+vol. 4, no. 2, 1989.
+\bibitem{cls:monticelli} A.~Monticelli, A.~Garcia and O.~R. Saavedra, Fast
+decoupled load flow: hypothesis, derivations, and testing, \emph{IEEE
+Transactions on Power Systems}, vol. 5, no. 4, 1990.
+\bibitem{cls:ortega} J.~M. Ortega and W.~C. Rheinboldt, \emph{Iterative Solution
+of Nonlinear Equations in Several Variables}, Academic Press, 1970.
+\bibitem{cls:arrillaga} J.~Arrillaga and N.~R. Watson, \emph{Computer Modelling
+of Electrical Power Systems}, 2nd ed., Wiley, 2001.
+\bibitem{cls:baranwu} M.~E. Baran and F.~F. Wu, Network reconfiguration in
+distribution systems for loss reduction and load balancing, \emph{IEEE
+Transactions on Power Delivery}, vol. 4, no. 2, 1989.
+\bibitem{cls:shirmohammadi} D.~Shirmohammadi, H.~W. Hong, A.~Semlyen and
+G.~X. Luo, A compensation-based power flow method for weakly meshed distribution
+and transmission networks, \emph{IEEE Transactions on Power Systems},
+vol. 3, no. 2, 1988.
+\bibitem{cls:chiangbaran} H.-D. Chiang and M.~E. Baran, On the existence and
+uniqueness of load flow solution for radial distribution power networks,
+\emph{IEEE Transactions on Circuits and Systems}, vol. 37, no. 3, 1990.
+\bibitem{cls:grainger} J.~J. Grainger and W.~D. Stevenson, \emph{Power System
+Analysis}, McGraw-Hill, 1994.
+\bibitem{cls:kundur} P.~Kundur, \emph{Power System Stability and Control},
+McGraw-Hill, 1994.
+\end{thebibliography}}

@@ -14,6 +14,9 @@
 \usepackage{hyperref}
 \hypersetup{colorlinks=true,linkcolor=black,urlcolor=blue}
 
+% ── 通用理论层环境（修订版 2 新增；本手册为独立导言区需手动引入）──
+\input{../../_manual_common/theory_environments.tex}
+
 % ── 统一参数表环境 ────────────────────────────────────────────────
 % 六列：字段名 | 符号 | 单位 | 典型范围 | 默认值 | 说明
 \emergencystretch=3em
@@ -162,6 +165,10 @@ OPF 模块的验证通道（细节见第\ref{sec:verification}章）：
 
 \newpage
 \input{chapters/overview}
+% ── 通用理论层（修订版 2 新增，专著级深度）──
+\input{chapters/theory_opf_general_ipm}
+\input{chapters/theory_opf_dc_convexity}
+% ── 实现转写层（源码等价）──
 \input{chapters/ac_opf_native}
 \input{chapters/dc_opf}
 \input{chapters/parity_formulation}

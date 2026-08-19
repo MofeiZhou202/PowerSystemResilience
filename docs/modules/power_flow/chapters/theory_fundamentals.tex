@@ -1,0 +1,705 @@
+% theory_fundamentals.tex —— 潮流计算 通用理论：节点方程、Newton 法与数值性态
+% 本文件为理论层章节，遵循 docs/modules/THEORY_WRITING_GUIDE.md。
+
+\section{潮流计算的数学基础}\label{sec:pf-th-fund}
+
+\begin{theorynote}
+本章为通用数学理论，按电力系统潮流计算的标准模型与数值分析文献体系撰写，覆盖：
+节点功率方程从基尔霍夫电流定律与 $\pi$ 等值电路出发的一般推导（含复数变比变压器
+与移相器两端口）、潮流问题的数学分类（PQ/PV/V$\theta$ 节点、方程-未知数计数、解的
+存在性与多解性）、Newton--Raphson 法的一般理论（局部二次收敛定理及其证明、收敛域、
+雅可比奇异的物理含义）、病态与数值性态（条件数分析、高 $R/X$ 比、重负荷/弱网、
+雅可比奇异与电压崩溃的关系），以及稀疏技术理论（图消元与填充、最小度/近似最小度
+排序原理、LU 填充的图刻画）。与平台实现（\srcpath{src/power\_flow/}）的对应关系见
+本章末"与实现的对应"表，超出实现的内容以"未实现扩展说明"框就地标记。
+\end{theorynote}
+
+\subsection{记号与约定}
+\begin{itemize}
+  \item $\mathcal N=\{1,\dots,n\}$：AC 节点集；$n$ 为节点数；$i,j$ 为节点下标；
+  \item $V_i=V_{m,i}e^{\mathrm j\theta_i}\in\mathbb C$：节点 $i$ 的复电压，
+        $\theta_{ij}=\theta_i-\theta_j$；$\overline{(\cdot)}$ 表示复共轭；
+        $\mathrm j$ 为虚数单位；
+  \item $S_i=P_i+\mathrm jQ_i=V_i\,\overline{I_i}$：节点注入复功率（注入网络为正方向）；
+  \item $Y_{bus}=G+\mathrm jB\in\mathbb C^{n\times n}$：节点导纳矩阵，
+        $Y_{ij}=G_{ij}+\mathrm jB_{ij}$；
+  \item 支路 $i$--$j$：串联阻抗 $z_{ij}=r_{ij}+\mathrm jx_{ij}$，串联导纳
+        $y_{ij}=1/z_{ij}=g_{ij}+\mathrm jb_{ij}$，线路充电（对地）总电纳 $b_{c,ij}$，
+        两端各半；
+  \item $t=ae^{\mathrm j\varphi}$：变压器/移相器复数变比，$a>0$ 为变比幅值，
+        $\varphi$ 为移相角；约定理想变压器位于 from 侧（节点 $i$ 侧）；
+  \item $F:\mathbb R^m\to\mathbb R^m$：潮流失配（mismatch）函数，$J=DF$ 为其雅可比；
+        $\lVert\cdot\rVert$ 未指明时为向量 $2$-范数及其诱导矩阵范数；
+        $\kappa(J)=\lVert J\rVert\,\lVert J^{-1}\rVert$：条件数；
+  \item $u$：浮点运算单位舍入（双精度 $u\approx1.1\times10^{-16}$）；
+  \item 全部电气量除特别声明外取标幺值（系统基准 $S_B$，电压基准按节点额定值）。
+\end{itemize}
+
+\subsection{节点功率方程的一般推导}\label{sec:pf-th-fund-power-eq}
+
+\subsubsection{\texorpdfstring{$\pi$}{π} 等值支路与复变比两端口}
+
+\begin{definition}[$\pi$ 等值支路]\label{def:pf-th-fund-pi}
+输电线路/电缆支路 $i$--$j$ 的集总参数 $\pi$ 等值电路由串联导纳 $y_{ij}$ 与两端
+对地充电电纳 $\mathrm jb_{c,ij}/2$ 组成。记 $i$、$j$ 端注入支路的电流为
+$I_{ij}$、$I_{ji}$（流入支路为正），则无变压器支路满足
+\begin{equation}
+\begin{bmatrix}I_{ij}\\ I_{ji}\end{bmatrix}
+=
+\begin{bmatrix}
+y_{ij}+\mathrm jb_{c,ij}/2 & -y_{ij}\\
+-y_{ij} & y_{ij}+\mathrm jb_{c,ij}/2
+\end{bmatrix}
+\begin{bmatrix}V_i\\ V_j\end{bmatrix}.
+\label{eq:pf-th-fund-pi}
+\end{equation}
+该两端口是互易的（转移导纳相等）且无源，$2\times2$ 导纳矩阵对称。
+\end{definition}
+
+\begin{definition}[复变比变压器/移相器两端口]\label{def:pf-th-fund-tap}
+非标准变比变压器与移相器统一建模为：$\pi$ 等值串联支路级联一台位于 from 侧
+（节点 $i$ 侧）的理想复变比变压器。设理想变压器内侧（绕组侧）节点为 $k$，复数变比
+$t=ae^{\mathrm j\varphi}$ 定义为
+\begin{equation}
+V_k=\frac{V_i}{t}.
+\end{equation}
+理想变压器不储能、不耗能，两侧复功率守恒：
+\begin{equation}
+V_i\,\overline{I_i}=V_k\,\overline{I_k'}
+\quad\Longrightarrow\quad
+I_i=\frac{I_k'}{\overline{t}},
+\label{eq:pf-th-fund-ideal}
+\end{equation}
+其中 $I_k'$ 为内侧节点 $k$ 流入串联支路的电流。
+\end{definition}
+
+\begin{proposition}[含变比与移相的一般支路模型]\label{prop:pf-th-fund-tport}
+定义~\ref{def:pf-th-fund-tap} 的两端口导纳参数为
+\begin{equation}
+\begin{bmatrix}I_i\\ I_j\end{bmatrix}
+=
+\begin{bmatrix}
+\dfrac{y_{ij}+\mathrm jb_{c,ij}/2}{|t|^2} & -\dfrac{y_{ij}}{\overline{t}}\\[2.2ex]
+-\dfrac{y_{ij}}{t} & y_{ij}+\mathrm jb_{c,ij}/2
+\end{bmatrix}
+\begin{bmatrix}V_i\\ V_j\end{bmatrix}.
+\label{eq:pf-th-fund-tport}
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+内侧节点 $k$ 经 $\pi$ 支路与节点 $j$ 相连，由式~\eqref{eq:pf-th-fund-pi}，
+\begin{equation}
+I_k'=\Bigl(y_{ij}+\mathrm j\tfrac{b_{c,ij}}{2}\Bigr)V_k-y_{ij}V_j,\qquad
+I_j=-y_{ij}V_k+\Bigl(y_{ij}+\mathrm j\tfrac{b_{c,ij}}{2}\Bigr)V_j .
+\end{equation}
+代入 $V_k=V_i/t$ 与式~\eqref{eq:pf-th-fund-ideal} 的 $I_i=I_k'/\overline{t}$：
+\begin{equation}
+I_i=\frac{1}{\overline{t}}\Bigl[\Bigl(y_{ij}+\mathrm j\tfrac{b_{c,ij}}{2}\Bigr)
+\frac{V_i}{t}-y_{ij}V_j\Bigr]
+=\frac{y_{ij}+\mathrm jb_{c,ij}/2}{|t|^2}V_i-\frac{y_{ij}}{\overline{t}}V_j ,
+\end{equation}
+\begin{equation}
+I_j=-\frac{y_{ij}}{t}V_i+\Bigl(y_{ij}+\mathrm j\tfrac{b_{c,ij}}{2}\Bigr)V_j .
+\end{equation}
+两式合并即得式~\eqref{eq:pf-th-fund-tport}。
+\end{proof}
+
+\begin{remark}[互易性、对称性与移相角的作用]\label{rem:pf-th-fund-reciprocity}
+当 $\varphi=0$（实变比）时 $-\,y_{ij}/\overline{t}=-\,y_{ij}/t$，两端口互易，
+$Y_{bus}$ 保持（复）对称；当 $\varphi\neq0$ 时
+$Y_{ij}^{ft}\neq Y_{ij}^{tf}$，两端口在导纳参数意义下不再互易，$Y_{bus}$
+失去对称性——但理想变压器仍满足功率守恒式~\eqref{eq:pf-th-fund-ideal}，
+非对称恰恰是"电压相移而功率守恒"在导纳框架中的正确编码。工程上
+$\varphi\neq0$ 的支路（移相器、相位角调节变压器）用于控制有功潮流的分布：
+其效果是在支路两端电压相角差上叠加一个可控偏置 $\varphi$。任何假设
+$Y_{bus}$ 对称的求解器或求逆算法在含移相器的网络上必须先核对适用性。
+\end{remark}
+
+\subsubsection{节点导纳矩阵与节点功率方程}
+
+\begin{definition}[节点导纳矩阵]\label{def:pf-th-fund-ybus}
+对所有在运支路按式~\eqref{eq:pf-th-fund-pi}/\eqref{eq:pf-th-fund-tport}
+组装：对角元累加自导纳（含充电与节点对地并联导纳 $g_{s,i}+\mathrm jb_{s,i}$），
+非对角元累加转移导纳，得 $Y_{bus}=G+\mathrm jB$。其结构性质：
+(i) 稀疏——非零元个数约为 $n+2b$（$b$ 为支路数，电力网 $b\approx1.5n$）；
+(ii) 无移相器时对称；（iii) 一般\textbf{不}具对角占优性（充电电纳与串联电纳
+在对角元中异号抵消），因此不能直接套用对角占优类的迭代法理论。
+\end{definition}
+
+\begin{theorem}[节点功率方程]\label{thm:pf-th-fund-power-eq}
+设网络无内部独立电流源，节点注入电流仅由支路与对地导纳产生，则
+\begin{equation}
+I_i=\sum_{j\in\mathcal N}Y_{ij}V_j,\qquad
+S_i=V_i\,\overline{\Bigl(\sum_{j\in\mathcal N}Y_{ij}V_j\Bigr)},
+\qquad i\in\mathcal N .
+\label{eq:pf-th-fund-si}
+\end{equation}
+\end{theorem}
+
+\begin{proof}
+对节点 $i$ 应用基尔霍夫电流定律：注入网络的电流 $I_i$ 等于经各关联支路流出
+电流之和。每条关联支路按式~\eqref{eq:pf-th-fund-pi}/\eqref{eq:pf-th-fund-tport}
+的右端贡献一个关于端电压的线性式；把所有支路的端电压系数按列下标归类，
+恰为 $Y_{bus}$ 第 $i$ 行与电压向量的乘积，即第一式。第二式由复功率定义
+$S_i=V_i\overline{I_i}$ 直接代入。
+\end{proof}
+
+\begin{corollary}[极坐标功率方程]\label{cor:pf-th-fund-polar}
+写 $V_i=V_{m,i}e^{\mathrm j\theta_i}$、$Y_{ij}=G_{ij}+\mathrm jB_{ij}$，
+$\theta_{ij}=\theta_i-\theta_j$，则式~\eqref{eq:pf-th-fund-si} 的实部、虚部为
+\begin{align}
+P_i&=\sum_{j\in\mathcal N}V_{m,i}V_{m,j}
+\bigl(G_{ij}\cos\theta_{ij}+B_{ij}\sin\theta_{ij}\bigr),\label{eq:pf-th-fund-polar-p}\\
+Q_i&=\sum_{j\in\mathcal N}V_{m,i}V_{m,j}
+\bigl(G_{ij}\sin\theta_{ij}-B_{ij}\cos\theta_{ij}\bigr).\label{eq:pf-th-fund-polar-q}
+\end{align}
+\end{corollary}
+
+\begin{proof}
+$\overline{Y_{ij}V_j}=(G_{ij}-\mathrm jB_{ij})V_{m,j}e^{-\mathrm j\theta_j}$，
+乘以 $V_i=V_{m,i}e^{\mathrm j\theta_i}$ 得
+$V_{m,i}V_{m,j}(G_{ij}-\mathrm jB_{ij})e^{\mathrm j\theta_{ij}}$；
+展开 $e^{\mathrm j\theta_{ij}}=\cos\theta_{ij}+\mathrm j\sin\theta_{ij}$，
+取实部、虚部分别即式~\eqref{eq:pf-th-fund-polar-p}、\eqref{eq:pf-th-fund-polar-q}。
+\end{proof}
+
+式~\eqref{eq:pf-th-fund-si}--\eqref{eq:pf-th-fund-polar-q} 是潮流计算的
+标准模型~\cite{pff:stagg-elabiad,pff:arrillaga-watson}。其实现层转写（逐式对照
+源码、ZIP 负荷注入、DC 侧 $P=V_{dc}\odot(G_{dc}V_{dc})$ 等）见本手册实现层
+"装配与 SolverData"章与"统一 Newton 章"，此处不再重复。
+
+\subsection{潮流问题的数学分类}\label{sec:pf-th-fund-classification}
+
+\subsubsection{节点类型}
+
+\begin{definition}[PQ、PV、V$\theta$ 节点]\label{def:pf-th-fund-bus-types}
+按节点的已知量/未知量划分~\cite{pff:stott-review}：
+\begin{itemize}
+  \item \textbf{PQ 节点}：指定 $P_i^{\mathrm{spec}},Q_i^{\mathrm{spec}}$；
+        未知量 $\theta_i,V_{m,i}$；对应负荷母线与无定压控制的电源母线；
+  \item \textbf{PV 节点}：指定 $P_i^{\mathrm{spec}},V_{m,i}^{\mathrm{spec}}$；
+        未知量 $\theta_i$（$Q_i$ 由解出后回算并受 $[Q_i^{\min},Q_i^{\max}]$ 校核）；
+        对应具备自动电压调节的发电机母线；
+  \item \textbf{V$\theta$ 节点（slack/参考节点）}：指定 $\theta_i$（通常 $0$）
+        与 $V_{m,i}$；$P_i,Q_i$ 完全自由，由功率平衡残差吸收。
+\end{itemize}
+\end{definition}
+
+\begin{proposition}[方程-未知数计数]\label{prop:pf-th-fund-counting}
+$n$ 节点系统含 $n_{pv}$ 个 PV 节点、$1$ 个 V$\theta$ 节点，其余为 PQ 节点，
+则潮流问题的未知量个数与独立方程个数均为
+\begin{equation}
+m=2n-2-n_{pv}.
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+未知量：角度 $\theta_i$ 对全部非参考节点自由，共 $n-1$ 个；电压幅值 $V_{m,i}$
+仅对 PQ 节点自由，共 $n-1-n_{pv}$ 个；合计 $2n-2-n_{pv}$。方程：有功平衡
+$P_i^{\mathrm{spec}}-P_i^{\mathrm{calc}}=0$ 对全部非参考节点列出，共 $n-1$ 个；
+无功平衡仅对 PQ 节点列出（PV 节点的 $Q$ 不平衡由发电机无功吸收、V$\theta$
+节点的 $P,Q$ 均自由），共 $n-1-n_{pv}$ 个；合计 $2n-2-n_{pv}$。两者相等，
+问题为方阵非线性方程组 $F(x)=0$，$F:\mathbb R^m\to\mathbb R^m$。
+\end{proof}
+
+\begin{remark}[参考节点的双重必要性]\label{rem:pf-th-fund-slack}
+V$\theta$ 节点的设置有两个独立的数学理由：
+(i) \emph{角度规范}：式~\eqref{eq:pf-th-fund-polar-p}--\eqref{eq:pf-th-fund-polar-q}
+中 $F$ 仅通过差 $\theta_{ij}$ 依赖于角度，全体角度同时平移不改变任何失配——
+角度空间带有一个 $S^1$ 对称性，不固定一个参考角则雅可比恒有一维零空间；
+(ii) \emph{损耗悬空}：网络损耗在求解之前未知，$n$ 个节点的有功指定值不能
+同时精确满足，必须有一个节点的 $P$（与 $Q$）退出方程组以吸收差额。
+多岛系统每个连通 AC 岛各需一个参考节点；把损耗分摊到多台机组的分布式松弛
+是上述单点吸收的推广，不改变计数结论。
+\end{remark}
+
+\subsubsection{解的存在性与多解性}
+
+潮流方程是关于 $(\theta,V_m)$ 的二次型代数方程组（固定 $V_m$ 时对
+$e^{\mathrm j\theta}$ 为双线性）。其解集一般不是单点：
+
+\begin{example}[两节点系统的解析解与鼻点]\label{ex:pf-th-fund-twobus}
+节点 1 为参考节点 $E\angle0$，节点 2 经纯电抗 $X$ 线路受电，负荷
+$P_L+\mathrm jQ_L$。记 $V=V_{m,2}$、$\delta=-\theta_2$，则
+\begin{equation}
+P_L=\frac{EV}{X}\sin\delta,\qquad
+Q_L=\frac{EV}{X}\cos\delta-\frac{V^2}{X}.
+\end{equation}
+消去 $\delta$（利用 $\sin^2+\cos^2=1$）得关于 $V^2$ 的二次方程
+\begin{equation}
+V^4+\bigl(2Q_LX-E^2\bigr)V^2+X^2\bigl(P_L^2+Q_L^2\bigr)=0,
+\label{eq:pf-th-fund-v4}
+\end{equation}
+\begin{equation}
+V^2=\frac{E^2-2Q_LX\pm\sqrt{\Delta}}{2},\qquad
+\Delta=E^4-4E^2Q_LX-4X^2P_L^2 .
+\label{eq:pf-th-fund-v2}
+\end{equation}
+$\Delta>0$ 且 $E^2>2Q_LX$ 时存在\textbf{两个}正根：高电压根（工程可行解）与
+低电压根；$\Delta=0$ 给出鞍结分岔（鼻点）$P_L^{\max}=\sqrt{E^4-4E^2Q_LX}/(2X)$；
+$\Delta<0$ 时无实解。数值上取 $E=1$、$X=0.5$、$Q_L=0$：$P_L=0.5$ 时
+$V^2=(1\pm\sqrt{0.75})/2$，即 $V\approx0.966$ 或 $V\approx0.259$；
+$P_L=1$ 时两根于 $V=1/\sqrt2$ 处汇合（鼻点）；$P_L>1$ 无解。
+\end{example}
+
+\begin{remark}[一般网络的多解性与不可解性]\label{rem:pf-th-fund-multiplicity}
+例~\ref{ex:pf-th-fund-twobus} 的定性结论对一般网络成立：潮流方程的实解个数
+通常随规模增长，且重负荷参数下可\textbf{不存在}实解（鼻点之外）。两点推论：
+(i) Newton 法不收敛\textbf{不能}作为问题无解的证明——它只说明初值不在任何
+解的局部收敛域内被给定迭代法捕获；(ii) 工程上关心的是高电压物理解，多解的
+枚举/全解搜索属于超出常规潮流的范畴。
+\end{remark}
+
+\begin{gapnote}
+平台提供 HELM（全纯嵌入）求解器
+（\srcpath{src/power\_flow/helm\_solver.cpp:HelmSolver::solve}），
+其方法论是沿解析延拓收敛到与平启动连通的物理解，而非枚举多解；
+全解枚举（如消元法、区间分析）未实现，也无计划对应接口。
+\end{gapnote}
+
+\subsubsection{无功限值与活动集表述}
+
+PV 节点的无功限值使潮流问题严格地说不再是纯方程组，而是带互补约束的
+混合问题：
+\begin{equation}
+Q_g^{\min}\le Q_g(x)\le Q_g^{\max},\qquad
+\text{限内时 }V_m=V^{\mathrm{set}},\ \text{触限时 }Q_g=Q_g^{\pm},
+\label{eq:pf-th-fund-qlimit}
+\end{equation}
+三态（下限/限内/上限）可用中值互补函数
+$\mathrm{mid}(V_m-V^{\mathrm{set}},\,Q_g-Q_g^{\min},\,Q_g-Q_g^{\max})=0$
+统一表示~\cite{pff:hintermuller}。工程实现的通行做法是\emph{活动集}策略：
+固定当前 PV/PQ 归属 $A$，解纯方程组 $F_A(x)=0$ 至收敛，在收敛点检验隐含
+无功，越限则批量切换为 PQ 并钉在限值，重复至无越限；恢复侧设迟滞与单次
+恢复审计以防止活动集循环。平台的活动集契约（含固定超集雅可比布局与
+CHKS 光滑化的半光滑 Newton 替代）全文见
+\srcpath{docs/theory/pv\_pq\_switching\_contract.md}，实现层转写见本手册
+"统一 Newton 章"与"鲁棒求解器章"。
+
+\subsection{Newton--Raphson 一般理论}\label{sec:pf-th-fund-newton}
+
+\subsubsection{迭代格式与局部二次收敛}
+
+\begin{definition}[Newton 迭代]\label{def:pf-th-fund-newton}
+对 $F:\mathbb R^m\to\mathbb R^m$、$F\in C^1$，Newton 迭代为
+\begin{equation}
+J(x_k)\,\Delta x_k=-F(x_k),\qquad x_{k+1}=x_k+\Delta x_k .
+\label{eq:pf-th-fund-newton-step}
+\end{equation}
+潮流语境下 $F$ 取失配 $F^{\mathrm{spec}}-F^{\mathrm{calc}}$（符号约定不影响
+理论），雅可比在极坐标下分块为
+$J=\begin{bmatrix}H&N\\ M&L\end{bmatrix}$，
+$H=\partial P/\partial\theta$、$N=\partial P/\partial V_m$、
+$M=\partial Q/\partial\theta$、$L=\partial Q/\partial V_m$
+~\cite{pff:tinney-hart}。
+\end{definition}
+
+\begin{lemma}[Banach 扰动引理]\label{lem:pf-th-fund-banach}
+设 $A\in\mathbb R^{m\times m}$ 非奇异，$\lVert A^{-1}\rVert\le\beta$，
+$E\in\mathbb R^{m\times m}$ 满足 $\beta\lVert E\rVert<1$，则 $A+E$ 非奇异且
+\begin{equation}
+\bigl\lVert(A+E)^{-1}\bigr\rVert\le\frac{\beta}{1-\beta\lVert E\rVert}.
+\end{equation}
+\end{lemma}
+
+\begin{proof}
+写 $A+E=A(I+A^{-1}E)$。$\lVert A^{-1}E\rVert\le\beta\lVert E\rVert<1$，
+Neumann 级数 $\sum_{k\ge0}(-A^{-1}E)^k$ 绝对收敛，其和为 $(I+A^{-1}E)^{-1}$，
+且 $\lVert(I+A^{-1}E)^{-1}\rVert\le\sum_k(\beta\lVert E\rVert)^k
+=1/(1-\beta\lVert E\rVert)$。于是 $(A+E)^{-1}=(I+A^{-1}E)^{-1}A^{-1}$，
+取范数即得结论。
+\end{proof}
+
+\begin{theorem}[Newton 法的局部二次收敛]\label{thm:pf-th-fund-quadratic}
+设 $F\in C^1$，$J=DF$ 在 $x^*$ 的邻域内 Lipschitz 连续：
+$\lVert J(x)-J(y)\rVert\le L\lVert x-y\rVert$；
+$F(x^*)=0$ 且 $J(x^*)$ 非奇异，$\lVert J(x^*)^{-1}\rVert=\beta$。
+则存在 $\delta>0$，使任意 $x_0\in B(x^*,\delta)$ 出发的 Newton 序列
+良定义、收敛到 $x^*$，且
+\begin{equation}
+\lVert e_{k+1}\rVert\le\beta L\lVert e_k\rVert^2,
+\qquad e_k=x_k-x^* .
+\label{eq:pf-th-fund-qconv}
+\end{equation}
+\end{theorem}
+
+\begin{proof}
+取 $\delta\le\min\{r,\,1/(2\beta L)\}$，其中 $r$ 为 Lipschitz 邻域半径。
+归纳假设 $x_k\in B(x^*,\delta)$：则
+$\lVert J(x_k)-J(x^*)\rVert\le L\delta\le1/(2\beta)$，由
+引理~\ref{lem:pf-th-fund-banach}（$\varepsilon=1/(2\beta)$，$\beta\varepsilon=1/2<1$），
+$J(x_k)$ 非奇异且 $\lVert J(x_k)^{-1}\rVert\le2\beta$，迭代良定义。
+由 $F(x_k)-F(x^*)=\int_0^1J(x^*+te_k)e_k\,\mathrm dt$ 与 Newton 方程
+$J(x_k)(x_k+\Delta x_k-x^*)=J(x_k)e_k-F(x_k)$，得误差恒等式
+\begin{equation}
+J(x_k)\,e_{k+1}
+=\int_0^1\bigl[J(x_k)-J(x^*+te_k)\bigr]e_k\,\mathrm dt .
+\end{equation}
+被积函数范数 $\le L(1-t)\lVert e_k\rVert^2$，积分得
+$\lVert J(x_k)e_{k+1}\rVert\le\frac{L}{2}\lVert e_k\rVert^2$，
+左乘 $J(x_k)^{-1}$ 并用 $2\beta$ 界即得式~\eqref{eq:pf-th-fund-qconv}。
+又因 $\beta L\lVert e_k\rVert\le\beta L\delta\le1/2$，
+$\lVert e_{k+1}\rVert\le\frac12\lVert e_k\rVert$，序列保持于球内并收缩，
+故收敛且为 Q-二次。
+\end{proof}
+
+\begin{remark}[潮流场景的条件核对]\label{rem:pf-th-fund-hypotheses}
+定理~\ref{thm:pf-th-fund-quadratic} 的三项假设在潮流中分别对应：
+(i) $C^1$+Lipschitz：式~\eqref{eq:pf-th-fund-polar-p}--\eqref{eq:pf-th-fund-polar-q}
+为三角多项式，任意紧集上自动满足；(ii) $F(x^*)=0$：物理解存在性，见
+第~\ref{sec:pf-th-fund-classification}~节，非平凡；(iii) $J(x^*)$ 非奇异：
+在鼻点处\textbf{系统性失效}（命题~\ref{prop:pf-th-fund-fold}）。"常规工况、
+平启动、$3$--$7$ 次迭代收敛"的工程经验正是二次收敛阶段
+$\lVert e_{k+1}\rVert\approx c\lVert e_k\rVert^2$ 的表现：
+残差小数位数近似逐次翻倍。
+\end{remark}
+
+\begin{remark}[仿射协变性与实现中的缩放]\label{rem:pf-th-fund-affine}
+Newton 序列在两组变换下不变：未知量的仿射重参数化 $\tilde x=Ax+b$ 与
+方程的左乘非奇异阵 $\tilde F=BF$（精确算术下逐点一致）。这一\emph{仿射协变性}
+意味着：对角缩放 $D_F=\mathrm{diag}(1/\max(|F_i^{\mathrm{spec}}|,1))$、
+$D_x=\mathrm{diag}(\pi,V_{m,i},\dots)$ 不改变理论迭代轨线，只改变浮点误差
+的分布——其实现动机（量纲均衡、改善 $J$ 的行/列范数比）见
+第~\ref{sec:pf-th-fund-conditioning}~节。反之，步长截断
+（$|\Delta\theta|\le1.5$~rad 等）与线搜索回退\textbf{破坏}纯 Newton 序列，
+定理~\ref{thm:pf-th-fund-quadratic} 只在进入全步接受阶段后适用。
+\end{remark}
+
+\subsubsection{收敛域与全局化}
+
+定理~\ref{thm:pf-th-fund-quadratic} 只保证\emph{存在}收敛球，未给出其大小。
+Newton 迭代的全局吸引域结构复杂（多解系统的吸引域边界可为分形），工程上
+以全局化策略替代收敛域刻画~\cite{pff:nocedal-wright}：在 merit 函数
+$\phi(x)=\tfrac12\lVert F(x)\rVert^2$ 上做（非单调）Armijo 线搜索、
+信赖域（dogleg）、Levenberg--Marquardt 正则化
+$(J^{\mathsf T}J+\lambda I)\Delta x=-J^{\mathsf T}F$，或伪瞬态延拓
+$(J+I/\delta t)\Delta x=-F$。这些策略把局部方法改造为对更大初值集
+"收敛或明确失败"的方法，但都不提供"解存在"的证书。
+
+\begin{gapnote}
+定量收敛判据——Kantorovich 定理（以
+$h=\beta L\lVert\Delta x_0\rVert\le1/2$ 在首步数据上判定收敛并给出误差界）
+与 Smale 的 $\alpha$-理论——在当前实现中\textbf{未}接线：代码不计算
+$h$ 型证书，失败回退链（线搜索 $\to$ 对角正则化 $\to$ LM $\to$ PTC，
+实现层见"统一 Newton 章"）是纯启发式全局化。
+\end{gapnote}
+
+\subsubsection{雅可比奇异的物理含义}
+
+\begin{proposition}[鞍结折点处雅可比必奇异]\label{prop:pf-th-fund-fold}
+设单参数潮流 $F(x,\lambda)=0$（$\lambda$ 为负荷/发电水平参数）存在光滑解弧
+$(x(s),\lambda(s))$，$s$ 为弧长参数。若在 $s^*$ 处 $\lambda'(s^*)=0$ 且
+$x'(s^*)\neq0$（解弧在 $\lambda$ 方向回折），则 $J^*=D_xF(x(s^*),\lambda(s^*))$
+奇异，且 $x'(s^*)\in\ker J^*$。
+\end{proposition}
+
+\begin{proof}
+对恒等式 $F(x(s),\lambda(s))\equiv0$ 关于 $s$ 微分：
+\begin{equation}
+D_xF\,x'(s)+D_\lambda F\,\lambda'(s)=0 .
+\end{equation}
+代入 $s=s^*$：$\lambda'(s^*)=0$ 给出 $J^*x'(s^*)=0$，而 $x'(s^*)\neq0$，
+故 $J^*$ 有非平凡零空间。
+\end{proof}
+
+\begin{remark}[奇异的两类成因与工程区分]\label{rem:pf-th-fund-singularity}
+(i) \emph{参数性奇异}：命题~\ref{prop:pf-th-fund-fold} 的折点，物理含义是
+鼻点/静态电压稳定极限——随 $\lambda$ 逼近 $\lambda^*$，
+$\sigma_{\min}(J)\to0$，$\kappa(J)\to\infty$（见
+第~\ref{sec:pf-th-fund-conditioning}~节）；
+(ii) \emph{结构性奇异}：无参考节点的孤岛、悬空节点形成的空行/空列、
+理想回路导致的秩亏——与负荷水平无关，是建模/拓扑缺陷。两者在线性求解阶段
+都表现为分解失败或巨大修正量，但处置完全不同：前者应转入连续潮流定位
+极限点~\cite{pff:ajjarapu-christy}，后者应在装配期诊断剔除。实现层以
+空行/空列扫描与方程闭合校核处置后者（见"与实现的对应"表）。
+\end{remark}
+
+\subsection{病态与数值性态}\label{sec:pf-th-fund-conditioning}
+
+\subsubsection{条件数与扰动界}
+
+\begin{definition}[条件数与向后误差]\label{def:pf-th-fund-cond}
+线性系统 $Jx=b$ 的条件数 $\kappa(J)=\lVert J\rVert\lVert J^{-1}\rVert$。
+称 $\hat x$ 具有向后误差 $\eta$，若 $\eta$ 是使
+$(J+\Delta J)\hat x=b+\Delta b$、$\lVert\Delta J\rVert\le\eta\lVert J\rVert$、
+$\lVert\Delta b\rVert\le\eta\lVert b\rVert$ 成立的最小相对扰动。
+\end{definition}
+
+\begin{theorem}[线性系统扰动界]\label{thm:pf-th-fund-perturb}
+设 $Jx=b$、$(J+\Delta J)(x+\Delta x)=b+\Delta b$，记
+$\kappa=\kappa(J)$、$\rho=\lVert\Delta J\rVert/\lVert J\rVert$，
+且 $\kappa\rho<1$，则
+\begin{equation}
+\frac{\lVert\Delta x\rVert}{\lVert x\rVert}
+\le\frac{\kappa}{1-\kappa\rho}
+\Bigl(\frac{\lVert\Delta b\rVert}{\lVert b\rVert}+\rho\Bigr).
+\label{eq:pf-th-fund-perturb}
+\end{equation}
+\end{theorem}
+
+\begin{proof}
+两式相减：$J\Delta x=\Delta b-\Delta J\,x-\Delta J\,\Delta x$。
+$J+\Delta J$ 非奇异（引理~\ref{lem:pf-th-fund-banach}，
+$\lVert J^{-1}\rVert\lVert\Delta J\rVert\le\kappa\rho<1$）。左乘 $J^{-1}$
+并取范数：
+\begin{equation}
+\lVert\Delta x\rVert
+\le\lVert J^{-1}\rVert\bigl(\lVert\Delta b\rVert+\lVert\Delta J\rVert\,
+\lVert x\rVert\bigr)+\lVert J^{-1}\rVert\lVert\Delta J\rVert\lVert\Delta x\rVert .
+\end{equation}
+移项除以 $1-\kappa\rho$，再用
+$\lVert\Delta b\rVert/\lVert x\rVert
+=\lVert J\rVert\,\lVert\Delta b\rVert/(\lVert J\rVert\lVert x\rVert)
+\le\lVert J\rVert\,\lVert\Delta b\rVert/\lVert b\rVert$
+即得式~\eqref{eq:pf-th-fund-perturb}。
+\end{proof}
+
+\begin{remark}[浮点含义与潮流量级]\label{rem:pf-th-fund-float}
+部分主元 LU 的向后误差 $\eta\approx u\cdot\rho_{\mathrm{growth}}$
+（增长因子，电力雅可比上实践接近 $1$）~\cite{pff:golub-vanloan}。
+由式~\eqref{eq:pf-th-fund-perturb}，每步 Newton 修正的相对前向误差量级为
+$u\,\kappa(J)$：$\kappa(J)\sim10^{8}$ 时双精度下修正量只剩约 8 位有效数字，
+残差无法压到 $10^{-8}$ 以下；$\kappa(J)\sim10^{16}$ 时修正量完全失真。
+这给出收敛容差 \fld{tol} 的一个理论下界 $\approx u\,\kappa(J)$：
+把容差设到病态系统分辨率之下，表现为"残差平台期"而非继续二次收敛。
+\end{remark}
+
+\subsubsection{高 \texorpdfstring{$R/X$}{R/X} 比与解耦失效}
+
+快速解耦潮流（FDPF）的推导假设~\cite{pff:stott-alsac}：
+(i) $|G_{ij}|\ll|B_{ij}|$（即 $R/X\ll1$）；(ii) $|\theta_{ij}|$ 小，
+$\cos\theta_{ij}\approx1$；(iii) $Q_i\ll B_{ii}V_i^2$。三者使
+$N=\partial P/\partial V_m$ 与 $M=\partial Q/\partial\theta$ 近似可忽略，
+$\theta$ 与 $V_m$ 解耦。配电网络 $R/X$ 常在 $1$ 附近甚至更大，假设 (i) 失效，
+交叉块量级与对角块可比，FDPF 迭代矩阵谱半径逼近或超过 $1$，表现为线性收敛
+变慢直至发散。Newton 法的渐近二次收敛\textbf{不}依赖解耦假设，但高 $R/X$
+使 $P$--$V$ 强耦合、雅可比失去块对角主导，配合辐射状拓扑（无环对角的
+"链式"结构）整体条件数上升；此时专用替代算法（前推回代类，利用辐射树结构
+逐支路递推）在鲁棒性上优于直接 Newton~\cite{pff:stott-review}。
+
+\subsubsection{重负荷、弱网与电压崩溃}
+
+随负荷参数 $\lambda\to\lambda^*$（鼻点），命题~\ref{prop:pf-th-fund-fold}
+给出 $\sigma_{\min}(J)\to0$；由于 $\lVert J\rVert$ 温和变化，
+$\kappa(J)\to\infty$。与之平行的物理图景：短路容量低（弱网）的节点
+$\partial V/\partial Q$ 灵敏度大，同样放大 $J^{-1}$ 的范数。重负荷/弱网病态
+因此\emph{不是}浮点异常，而是临近静态稳定极限的准确数值反映：
+雅可比的左零向量（奇异向量）同时是负荷参数变化对失配影响的方向，
+这一对应是连续潮流以弧长参数化翻越鼻点的理论基础
+~\cite{pff:ajjarapu-christy,pff:vancutsem-vournas,pff:kundur}。
+
+\begin{gapnote}
+当前实现未计算 $\kappa(J)$ 或其标准估计（如 Hager--Higham $1$-范数估计器、
+$\sigma_{\min}$ 监控）：代码仅计算行列范数代理
+\srcpath{src/power\_flow/newton\_solver.cpp:estimate\_condition\_proxy}，
+并以代理越阈触发 NK-GMRES 回退（默认关闭）。鼻点附近的奇异向量分析、
+按 $\sigma_{\min}$ 的裕度指标均未实现；电压稳定极限定位由连续潮流求解器
+（弧长延拓，实现层见"CPF 章"）承担，而非由病态诊断推导。
+\end{gapnote}
+
+\subsection{稀疏技术理论}\label{sec:pf-th-fund-sparsity}
+
+\subsubsection{消元图与填充}
+
+潮流雅可比（固定 PV/PQ 活动集下）具有与 $Y_{bus}$ 图同构的对称稀疏模式：
+每个 AC 节点至多四个块。对这类矩阵，稀疏 LU 的成本完全由\emph{消元顺序}
+决定，其理论语言是消元图~\cite{pff:george-liu,pff:davis-suitesparse}。
+
+\begin{definition}[矩阵图与消元图]\label{def:pf-th-fund-elimgraph}
+对称模式矩阵 $A\in\mathbb R^{n\times n}$ 的图 $G(A)=(V,E)$：
+$V=\{1,\dots,n\}$，$(i,j)\in E\iff a_{ij}\neq0$（$i\neq j$）。
+依次消去顶点 $v_1,v_2,\dots$：消去 $v$ 时把 $v$ 的当前邻居两两连边
+（已有边不重复），再删除 $v$；新产生的边称为\textbf{填充}（fill-in），
+对应 LU 因子中 $A$ 原本为零位置上的非零元。
+\end{definition}
+
+\begin{proposition}[Parter 规则]\label{prop:pf-th-fund-parter}
+以顶点 $v$ 为主元的消元步，在消元图中把 $v$ 的邻居集变成团（clique）：
+对任意两个邻居 $i,k$，消元后 $(i,k)$ 为边。
+\end{proposition}
+
+\begin{proof}
+对称高斯消元一步的 Schur 补更新为
+$\tilde a_{ik}=a_{ik}-a_{iv}a_{vv}^{-1}a_{vk}$。
+$i,k$ 同为 $v$ 的邻居时 $a_{iv}a_{vk}\neq0$，修正项一般非零，故
+$\tilde a_{ik}\neq0$ 无论 $a_{ik}$ 是否为零——已有边保留，缺失处产生填充边。
+精确相消（数值对消）是零测集事件，符号分析按一般位置处理。
+\end{proof}
+
+\begin{example}[星形网络的排序敏感性]\label{ex:pf-th-fund-star}
+中心节点 $1$ 连接叶节点 $2,\dots,5$（如主 slack 汇接多条馈线）。
+$A$ 的非零元 $13$ 个（$5$ 对角 $+$ $2\times4$ 非对角）。
+\begin{itemize}
+  \item 顺序 $(1,2,3,4,5)$：消去中心时其邻居为 $\{2,3,4,5\}$，按
+        命题~\ref{prop:pf-th-fund-parter} 形成 $4$ 团，产生
+        $\binom{4}{2}=6$ 条填充边；$L+U$ 非零元 $=13+2\times6=25$，
+        且后续每步面对稠密团，消元工作量 $\Theta(4^2)$；
+  \item 顺序 $(2,3,4,5,1)$：消去任一叶片时其唯一邻居是中心，不产生填充；
+        最后消去中心。填充为零，$L+U$ 非零元保持 $13$，工作量 $\Theta(n)$。
+\end{itemize}
+同一矩阵，仅排序不同，填充与工作量相差一个量级——这就是排序理论要
+形式化的现象。
+\end{example}
+
+\begin{proposition}[填充路径刻画]\label{prop:pf-th-fund-fillpath}
+设 $F=L+U$ 为某消元顺序下的填充矩阵。对 $i>j$，$(i,j)\in G(F)$ 当且仅当
+在 $G(A)$ 中存在一条从 $i$ 到 $j$ 的路径，其所有中间顶点的消元序号
+小于 $j$（即小于两端序号）。
+\end{proposition}
+
+\begin{proof}[证明要点]
+对消元步数归纳。基础步：原边显然满足（无中间顶点）。归纳步：消去 $v$
+时由命题~\ref{prop:pf-th-fund-parter} 新产生的边 $(i,k)$ 有路径
+$i$--$v$--$k$，其中 $v$ 先于 $i,k$ 消元；而既有边 $(i,j)\in G(F)$ 若在
+此前各步产生，其见证路径的中间顶点均已被消去、序号小于 $j$。反向：
+任给满足条件的路径，沿路径上序号最大的中间顶点归纳分裂为两条更短的
+合法路径，最终归结为原边或填充边。严格归纳见 George--Liu
+~\cite{pff:george-liu}。
+\end{proof}
+
+命题~\ref{prop:pf-th-fund-fillpath} 把"哪些位置会填充"完全归结为图论问题：
+填充 $=$ 低序号顶点介导的可达性。排序算法的目标即选消元顺序使这种
+可达性最小化。
+
+\subsubsection{最小度与近似最小度排序}
+
+\begin{definition}[最小度（MD）排序]\label{def:pf-th-fund-md}
+贪心策略：每步在当前消元图中选度（外部度）最小的顶点消元，平局任意打破；
+即 Tinney 方案 2~\cite{pff:tinney-walker}。直观依据：消去度 $d$ 的顶点至多
+产生 $\binom{d}{2}$ 条填充、$d^2$ 量级算术运算，局部最小化度近似全局
+最小化填充。
+\end{definition}
+
+\begin{remark}[AMD 的原理]\label{rem:pf-th-fund-amd}
+精确 MD 的瓶颈在于消去顶点后邻居集的团更新与外部度重算
+（最坏 $O(n\cdot nnz)$）。近似最小度（AMD）~\cite{pff:amestoy-amd} 以
+\emph{商图}表示消元过程：已消元顶点被吸收为"元素"，未消元顶点的邻接
+以元素集合表示，外部度用上界近似代替精确计算；配合超变量（结构相同的行
+合并）与质量吸收，AMD 在实践中达到接近 MD 的填充质量而开销低一个量级以上，
+是 SuiteSparse（KLU/UMFPACK 内部）的默认排序。对规则网孔类网络，嵌套分割
+（递归几何/图二分）另有严格界：二维 $n\times n$ 网格上填充
+$O(n^2\log n)$、分解工作量 $O(n^3)$~\cite{pff:george-nested}；电力网近似
+平面图，AMD 的实际表现通常已接近嵌套分割。
+\end{remark}
+
+\subsubsection{填充分析与符号/数值分解分离}
+
+由命题~\ref{prop:pf-th-fund-fillpath}，$L+U$ 的非零模式是 $A$ 的模式与
+消元顺序的纯函数，与数值无关。因此稀疏直接法天然分两层：
+\textbf{符号分解}（排序 + 模式确定，一次）与\textbf{数值分解}
+（填充数值，每次 Newton 迭代）。固定 PV/PQ 活动集与网络拓扑时，雅可比
+模式逐迭代不变，符号分解可跨迭代、跨求解复用——这是实现层模式缓存
+（JacobianPattern/analyzePattern 一次性构建，迭代内仅数值重分解）的
+理论依据。PV$\to$PQ 切换改变行/列结构时传统布局须重建模式，
+固定超集布局（所有非参考母线预留 $V_m$ 列与 $Q$ 行）以常量填充冗余换取
+模式不变性，其契约见 \srcpath{docs/theory/pv\_pq\_switching\_contract.md}。
+
+\begin{gapnote}
+平台\textbf{未自研}排序与块三角分解（BTF）：平衡潮流的排序委托给
+KLU 的符号分析（其内部默认为 AMD，并可经环境变量切换 COLAMD/嵌套分割，
+见 \srcpath{MIPSolvers/src/engine/kernel/linear\_algebra/linear\_solver.cpp:make\_default\_sparse\_solver}）；
+三相混合求解器直接使用 Eigen 的 COLAMDOrdering
+（\srcpath{src/power\_flow/three\_phase\_hybrid.cpp} 内 SparseLU 配置）。
+本节的 MD/AMD/嵌套分割理论用于理解因子填充来源，不对应平台自有代码；
+自定义排序接口亦未暴露。
+\end{gapnote}
+
+\subsection{与实现的对应}\label{sec:pf-th-fund-implmap}
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{6.8cm}L{8.6cm}@{}}
+\toprule
+理论条目 & 实现状态\\
+\midrule
+\endfirsthead
+\toprule
+理论条目 & 实现状态\\
+\midrule
+\endhead
+$\pi$ 等值支路组装（串联导纳 + 两端充电 $b_c/2$ + 节点/shunt 并联） &
+\implfull{src/power\_flow/admittance\_builder.cpp:build\_admittance\_matrix}\\
+复变比 $t=ae^{\mathrm j\varphi}$ 两端口（式~\eqref{eq:pf-th-fund-tport}，
+含移相器非对称） &
+\implfull{src/power\_flow/admittance\_builder.cpp:build\_admittance\_matrix}（幅值 \fld{tap}、移相角 \fld{shift\_deg} 合成复数 \fld{tap}，$Y_{ft}=-y_s/\overline{t}$、$Y_{tf}=-y_s/t$）\\
+节点功率方程极坐标注入（推论~\ref{cor:pf-th-fund-polar}） &
+\implfull{src/power\_flow/ac\_kernel.cpp:evaluate\_ac\_kernel\_serial}\\
+PQ/PV/V$\theta$ 分类与方程-未知数闭合（命题~\ref{prop:pf-th-fund-counting}） &
+\implfull{src/power\_flow/newton\_solver.cpp:build\_jacobian\_context}（闭合计数校核见同文件 scan\_empty\_rows\_cols）\\
+多岛各自参考节点（注记~\ref{rem:pf-th-fund-slack}） &
+\implfull{src/power\_flow/newton\_solver.cpp:build\_jacobian\_context}（每个孤立 AC 区域各自保留参考；DC 岛参考另有规划函数）\\
+无功限值活动集策略（式~\eqref{eq:pf-th-fund-qlimit}） &
+\implfull{src/power\_flow/newton\_solver.cpp:solve}（收敛点批量进入 + 迟滞恢复 + 单次恢复审计；契约见 docs/theory/pv\_pq\_switching\_contract.md）\\
+中值互补/CHKS 光滑化的半光滑 Newton &
+\implfull{src/power\_flow/newton\_solver.cpp:solve}（由 \fld{enable\_semi\_smooth\_newton} 启用，$\mu$ 延拓见 robust\_nonlinear\_options）\\
+多解枚举与全解搜索（注记~\ref{rem:pf-th-fund-multiplicity}） &
+\implnone（HELM 求解器 helm\_solver.cpp:HelmSolver::solve 仅返回与平启动连通的物理解，非枚举）\\
+Newton 迭代与局部二次收敛（定理~\ref{thm:pf-th-fund-quadratic}） &
+\implfull{src/power\_flow/newton\_solver.cpp:solve}（实现层转写见本手册"统一 Newton 章"）\\
+Kantorovich/$\alpha$ 定量收敛证书 &
+\implnone（以线搜索/信赖域/LM/PTC 启发式全局化回退链替代）\\
+折点雅可比奇异与鼻点定位（命题~\ref{prop:pf-th-fund-fold}） &
+\implfull{src/power\_flow/voltage\_stability.cpp:solve}（CpfSolver 弧长延拓翻越鼻点）\\
+结构性奇异诊断（注记~\ref{rem:pf-th-fund-singularity}） &
+\implpart{空行/空列扫描与方程闭合校核已实现（scan\_empty\_rows\_cols）；诊断不区分参数性/结构性成因，也不输出奇异向量}\\
+条件数监控与扰动界（定理~\ref{thm:pf-th-fund-perturb}） &
+\implpart{仅行列范数代理 estimate\_condition\_proxy 与可选 NK-GMRES 回退；无 Hager--Higham 或 $\sigma_{\min}$ 估计}\\
+仿射缩放 $D_F,D_x$（注记~\ref{rem:pf-th-fund-affine}） &
+\implfull{src/power\_flow/nonlinear\_scaling.cpp:build\_nonlinear\_scaling}\\
+高 $R/X$ 配网的前推回代替代 &
+\implfull{src/power\_flow/distribution\_power\_flow.cpp:solve\_distribution\_pf}（辐射状配网 BFS；FDPF 本体见 fdpf\_solver.cpp:FDPFSolver::solve）\\
+填充路径/消元图分析与符号-数值分解分离 &
+\implfull{src/power\_flow/jacobian\_pattern.cpp:build\_jacobian\_pattern}（模式一次构建、迭代内仅数值累加；符号分析缓存见 newton\_solver.cpp:solve 的 PatternCache）\\
+MD/AMD/嵌套分割排序算法 &
+\implpart{平台未自研：KLU 默认 AMD（MIPSolvers 端 make\_default\_sparse\_solver），三相混合用 Eigen COLAMDOrdering；无自定义排序接口}\\
+解析雅可比的差分校验工具 &
+\implfull{src/power\_flow/jacobian\_check.cpp:check\_jacobian}（中心差分 $h=10^{-6}$）\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{参考文献}
+{\renewcommand{\section}[2]{}%
+\begin{thebibliography}{9}\small
+\bibitem{pff:stagg-elabiad} G.~W. Stagg, A.~H. El-Abiad, \emph{Computer Methods
+in Power System Analysis}, McGraw-Hill, 1968.
+\bibitem{pff:arrillaga-watson} J.~Arrillaga, N.~R. Watson, \emph{Computer
+Modelling of Electrical Power Systems}, 2nd ed., Wiley, 2001.
+\bibitem{pff:tinney-hart} W.~F. Tinney, C.~E. Hart, Power flow solution by
+Newton's method, \emph{IEEE Transactions on Power Apparatus and Systems},
+vol. PAS-86, no. 11, pp. 1449--1460, 1967.
+\bibitem{pff:stott-alsac} B.~Stott, O.~Alsa\c{c}, Fast decoupled load flow,
+\emph{IEEE Transactions on Power Apparatus and Systems}, vol. PAS-93, no. 3,
+pp. 859--869, 1974.
+\bibitem{pff:stott-review} B.~Stott, Review of load-flow calculation methods,
+\emph{Proceedings of the IEEE}, vol. 62, no. 7, pp. 916--929, 1974.
+\bibitem{pff:ortega-rheinboldt} J.~M. Ortega, W.~C. Rheinboldt,
+\emph{Iterative Solution of Nonlinear Equations in Several Variables},
+Academic Press, 1970.
+\bibitem{pff:nocedal-wright} J.~Nocedal, S.~J. Wright, \emph{Numerical
+Optimization}, 2nd ed., Springer, 2006.
+\bibitem{pff:golub-vanloan} G.~H. Golub, C.~F. Van Loan, \emph{Matrix
+Computations}, 4th ed., Johns Hopkins University Press, 2013.
+\bibitem{pff:ajjarapu-christy} V.~Ajjarapu, C.~Christy, The continuation power
+flow: a tool for steady state voltage stability analysis, \emph{IEEE
+Transactions on Power Systems}, vol. 7, no. 1, pp. 416--423, 1992.
+\bibitem{pff:vancutsem-vournas} T.~Van Cutsem, C.~Vournas, \emph{Voltage
+Stability of Electric Power Systems}, Kluwer Academic Publishers, 1998.
+\bibitem{pff:kundur} P.~Kundur, \emph{Power System Stability and Control},
+McGraw-Hill, 1994.
+\bibitem{pff:hintermuller} M.~Hinterm\"uller, K.~Ito, K.~Kunisch, The
+primal-dual active set strategy as a semismooth Newton method, \emph{SIAM
+Journal on Optimization}, vol. 13, no. 3, pp. 865--888, 2002.
+\bibitem{pff:tinney-walker} W.~F. Tinney, J.~W. Walker, Direct solutions of
+sparse network equations by optimally ordered triangular factorization,
+\emph{Proceedings of the IEEE}, vol. 55, no. 11, pp. 1801--1809, 1967.
+\bibitem{pff:george-liu} A.~George, J.~W.~H. Liu, The evolution of the minimum
+degree ordering algorithm, \emph{SIAM Review}, vol. 31, no. 1, pp. 1--19, 1989.
+\bibitem{pff:amestoy-amd} P.~R. Amestoy, T.~A. Davis, I.~S. Duff, An approximate
+minimum degree ordering algorithm, \emph{SIAM Journal on Matrix Analysis and
+Applications}, vol. 17, no. 4, pp. 886--905, 1996.
+\bibitem{pff:george-nested} A.~George, Nested dissection of a regular finite
+element mesh, \emph{SIAM Journal on Numerical Analysis}, vol. 10, no. 2,
+pp. 345--363, 1973.
+\bibitem{pff:davis-suitesparse} T.~A. Davis, \emph{Direct Methods for Sparse
+Linear Systems}, SIAM, 2006.
+\end{thebibliography}}

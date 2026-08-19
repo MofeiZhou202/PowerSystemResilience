@@ -1,0 +1,227 @@
+% theory_iec60909.tex —— 短路计算 通用理论：IEC 60909 等效电压源法
+% 本文件为理论层章节，遵循 docs/modules/THEORY_WRITING_GUIDE.md。
+
+\section{IEC 60909 等效电压源法理论}\label{sec:sc-theory-iec}
+
+\begin{theorynote}
+本章为通用数学理论，按 IEC 60909-0 标准体系与经典教材撰写，覆盖等效电压源法的
+方法论与叠加原理视角、短路电流时域分解与峰值系数 $\kappa$ 的物理来源、同步电机
+电抗谱系（$x_d''/x_d'/x_d$）的电机学解释、修正系数体系（$K_G/K_T/K_S$）、开断电流
+衰减因子 $\mu$、稳态电流系数 $\lambda_{\max}/\lambda_{\min}$、热等效系数 $m/n$，
+以及近端/远端短路分类。与平台实现（\srcpath{src/short\_circuit/}）的对应关系见
+本章末"与实现的对应"表，超出实现的内容以"未实现扩展说明"框就地标记。
+\end{theorynote}
+
+\subsection{记号与约定}
+\begin{itemize}
+  \item $U_n$：系统标称线电压；$c$：电压因子（$c_{\max}$ 用于最大、$c_{\min}$ 用于
+        最小短路电流计算）；
+  \item $I_k''$：初始对称短路电流（有效值）；$i_p$：峰值；$I_b$：对称开断电流；
+        $I_k$：稳态短路电流；$I_{th}$：热等效短路电流；
+  \item $Z_k$：故障点等效短路阻抗；$R/X$：其电阻-电抗比；$\tau=X/(\omega R)$：
+        直流分量衰减时间常数；
+  \item $x_d'',x_d',x_d$：同步电机直轴次暂态/暂态/稳态电抗（电机额定基准标幺）；
+        $I_{rG}$：发电机额定电流；$t_{\min}$：最短开断延时；$T_k$：短路持续历时。
+\end{itemize}
+
+\subsection{等效电压源法与叠加原理}
+\begin{definition}[等效电压源法]
+IEC 60909-0~\cite{iec:iec60909-0} 将故障前网络在故障点处置换为\emph{唯一}有源元件——等效电压源
+$cU_n/\sqrt3$（相电压），其余所有电源均以内阻抗表示、非旋转负荷与非故障相关支路
+（线路电容、并联导纳）忽略，于是
+\begin{equation}
+I_k''=\frac{cU_n}{\sqrt3\,Z_k},
+\end{equation}
+$Z_k$ 为从故障点看入的等效短路阻抗（不平衡故障按第~\ref{sec:sc-theory-symcomp}~章
+的序网组合）。
+\end{definition}
+
+\begin{remark}[为什么用 $cU_n/\sqrt3$ 而不是故障前实测电压]
+等效电压源是\emph{计算约定}而非物理电源。因子 $c$ 一次性计入：
+(i) 系统电压在时间与空间上的分布（运行电压可高于 $U_n$）；
+(ii) 变压器分接头位置的离散变化；
+(iii) 忽略负荷电流与潮流工况带来的误差；
+(iv) 电机次暂态行为的等效折让。
+因此同一网络的最大/最小短路电流计算分别采用 $c_{\max}/c_{\min}$，对应设备校核与
+保护灵敏性两类口径。
+\end{remark}
+
+\begin{remark}[叠加原理视角]
+故障可等效为在故障点注入与故障前电压 $V_{pre}$ 等值反向的补偿电压源，与故障前
+状态叠加。网络线性时，故障分量只由该补偿源驱动：把全部内电势置零、仅保留故障点
+源，即得等效电压源法的电路结构。故障前负荷电流分量被忽略，其影响由 $c$ 折中
+补偿；这正是该方法相对潮流初值驱动精确法的近似所在。
+\end{remark}
+
+\begin{definition}[近端与远端短路]
+\emph{近端短路}：至少一台同步电机贡献的初始短路电流超过其两倍额定电流
+（$I_{kG}''>2I_{rG}$），或双侧电源各自贡献均占主导——交流分量随时间显著衰减，
+需计及 $\mu$、$\lambda$ 等修正。\emph{远端短路}：交流分量幅值视为不变，
+$I_k=I_b=I_k''$。分类决定后续特征电流的计算路径。
+\end{definition}
+
+\subsection{短路电流的时域分解与峰值系数}
+考察 $R$--$L$ 串联支路在 $t=0$ 合闸于正弦电压 $u(t)=\sqrt2\,U\sin(\omega t+\psi)$：
+\begin{equation}
+i(t)=\sqrt2\,I_k''\Bigl[\sin(\omega t+\psi-\theta)-\sin(\psi-\theta)\,e^{-t/\tau}\Bigr],
+\qquad \theta=\arctan\frac{\omega L}{R},\quad \tau=\frac{L}{R}=\frac{X}{\omega R}.
+\end{equation}
+第一项为强制交流分量，第二项为衰减的非周期（直流）分量，最坏情形
+$|\sin(\psi-\theta)|=1$。首个峰值约在半周波 $t\approx0.01$~s（50~Hz）处：
+\begin{equation}
+i_p=\kappa\sqrt2\,I_k'',\qquad
+\kappa=1+e^{-0.01/\tau}=1+e^{-\pi R/X}\ \ (f=50~\mathrm{Hz}).
+\end{equation}
+IEC 60909-0 采用工程拟合式
+\begin{equation}
+\kappa=1.02+0.98\,e^{-3R/X},
+\end{equation}
+在常用 $R/X$ 范围内与上式偏差约 $1\%$；极限行为一致：$R/X\to0$ 时 $\kappa\to2$
+（全偏移），$R/X\to\infty$ 时 $\kappa\to1.02\approx1$（无直流分量）。
+
+\begin{remark}[网状网络的 $\kappa$ 方法 A/B/C]
+网状网络中各馈入支路 $R/X$ 不同，标准给出三种等效方法：方法 A（取最小时间常数，
+最保守）、方法 B（取故障点等效阻抗的 $R/X$，并对结果乘 $1.15$ 安全修正，网状时
+$\kappa$ 上限 $1.8$）、方法 C（等效频率法）。故障点处近端系统更精确的口径是
+按式 (59) 逐贡献以各自 $R/X$ 求 $\kappa_i$ 后求和。
+\end{remark}
+
+\begin{gapnote}
+当前实现支持 \fld{SCKappaMethod} A/B/C 选项，但内部仅区分"方法 B 且网状"
+（$\kappa\leftarrow\min(1.8,\,1.15\kappa)$）与其余组合（统一钳制到 $[1,2]$）；
+方法 A 的最小时间常数口径与方法 C 的等效频率口径未分别实现
+（见第~\ref{sec:sc-detailed}~章）。
+\end{gapnote}
+
+\subsection{同步电机电抗谱系的电机学解释}
+故障瞬间绕组磁链守恒，转子阻尼绕组与励磁绕组依次对定子电枢反应形成屏蔽，使
+电机对外呈现的电抗随时间逐档放大：
+\begin{equation}
+x_d''<x_d'<x_d,
+\end{equation}
+$x_d''$（阻尼+励磁屏蔽，衰减时间常数 $T_d''$，数十 ms）、$x_d'$（励磁屏蔽，
+$T_d'$，数百 ms 至秒级）、$x_d$（稳态）。近端故障机端电流包络为
+\begin{equation}
+i_{ac}(t)=\sqrt2\Bigl[(I''-I')e^{-t/T_d''}+(I'-I)e^{-t/T_d'}+I\Bigr],
+\qquad I''=\frac{E_q}{x_d''},\ I'=\frac{E_q'}{x_d'},\ I=\frac{E_f}{x_d}.
+\end{equation}
+IEC 60909 的方法论是\emph{避免逐机时域仿真}：用 $x_d''$ 计算 $I_k''$，再以系数
+$\mu$（开断时刻）、$\lambda$（稳态）、$\kappa$（峰值）折算后续时段，把上式的
+衰减谱折叠进少量代数系数。
+
+\begin{gapnote}
+当前实现只携带两档电抗：$x_d''$（缺省 \fld{default\_xdpp}=0.2，用于 $I_k''/i_p/I_b$）
+与 $x_d$（稳态 $I_k$ 重建序网）；$x_d'$、$T_d'$、$T_d''$ 与时间域包络未建模，
+衰减全部经由 $\mu$、$\lambda$ 系数近似。
+\end{gapnote}
+
+\subsection{修正系数体系}
+IEC 60909 对电源设备阻抗引入修正系数，使等效电压源口径下各贡献的幅值/相位
+更接近真机行为：
+\begin{itemize}
+  \item \textbf{发电机 $K_G$}（直接并网机组）：
+        \begin{equation}
+        Z_{G,K}=K_G Z_G,\qquad K_G=\frac{c}{1+x_d''\sin\varphi_{rG}},
+        \end{equation}
+        折算额定功率因数下内电势与 $cU_n$ 的差异；
+  \item \textbf{变压器 $K_T$}（网络两/三绕组变压器）：
+        \begin{equation}
+        Z_{T,K}=K_T Z_T,\qquad K_T=\frac{0.95\,c}{1+0.6\,x_T},
+        \end{equation}
+        $x_T$ 取铭牌基准标幺值；计入分接头离散与饱和引起的阻抗不确定度；
+  \item \textbf{电站机组 $K_S$}：发电机与升压变作为整体从高压侧等效，
+        修正含额定变比平方项与 $|x_d''-x_T|$ 的组合项，适用于机组建模到
+        升压变高压侧的场合。
+\end{itemize}
+适用范围：修正系数用于最大短路电流口径；$c_{\min}$ 口径与部分特殊接线（如
+中性点经阻抗接地机组）另有规定，不可混用。
+
+\subsection{开断电流衰减因子 \texorpdfstring{$\mu$}{μ} 与电动机系数 \texorpdfstring{$q$}{q}}
+\begin{definition}[对称开断电流与 $\mu$、$q$]
+开断电流 $I_b$ 为开关触头分离时刻（最短延时 $t_{\min}$ 后）的对称短路电流有效值。
+近端同步机贡献按 $I_{bG}=\mu I_{kG}''$ 衰减，$\mu$ 是 $t_{\min}$ 与电流比
+$I_{kG}''/I_{rG}$ 的二元函数（标准以曲线与分段解析式给出，$\mu\le1$）；
+异步电动机贡献按 $I_{bM}=\mu q I_{kM}''$，$q$ 随每对极额定有功功率与 $t_{\min}$
+增大而减小（小电机衰减更快）。远端短路 $\mu=1$，$I_b=I_k''$。
+\end{definition}
+
+\subsection{稳态电流系数 \texorpdfstring{$\lambda_{\max}/\lambda_{\min}$}{λmax/λmin}}
+\begin{definition}[$\lambda$ 系数]
+近端短路的稳态电流由励磁响应主导，标准以额定电流倍数给出：
+\begin{equation}
+I_{kG}=\lambda\,I_{rG},
+\end{equation}
+$\lambda_{\max}$ 用于最大稳态（校核过励/持续热稳定），$\lambda_{\min}$ 用于最小
+稳态（校核保护灵敏性）；$\lambda$ 随饱和同步电抗 $x_{d,\mathrm{sat}}$ 查标准曲线，
+汽轮发电机系列 I/II 的 $\lambda_{\max}$ 典型上限分别约 $2.8$ 与 $5.0$。远端短路
+$I_k=I_k''$。
+\end{definition}
+
+\subsection{热等效系数 \texorpdfstring{$m$}{m} 与 \texorpdfstring{$n$}{n}}
+\begin{definition}[热等效短路电流]
+\begin{equation}
+I_{th}=I_k''\sqrt{m+n},
+\end{equation}
+$m$、$n$ 分别为非周期分量与交流分量衰减的热效应系数。由直流分量
+$i_{dc}(t)=\sqrt2 I_k''(\kappa-1)e^{-t/\tau}$ 的能量积分定义：
+\begin{equation}
+m=\frac{1}{T_k\,(I_k'')^2}\int_0^{T_k} i_{dc}^2\,dt
+=(\kappa-1)^2\,\frac{\tau}{T_k}\bigl(1-e^{-2T_k/\tau}\bigr),
+\end{equation}
+标准以 $m(\kappa,fT_k)$ 曲线/解析式给出；$n$ 计及近端交流分量衰减
+（$n\le1$），远端短路 $n=1$。
+\end{definition}
+
+\begin{gapnote}
+当前实现固定 $n=1$（远端口径），$m$ 用简化闭式
+（第~\ref{sec:sc-detailed}~章热等效段），未按标准曲线区分近端 $n<1$ 情形；
+用于最终设备热稳定校核前应对照标准复核。
+\end{gapnote}
+
+\subsection{与实现的对应}
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{6.8cm}L{8.6cm}@{}}
+\toprule
+理论条目 & 实现状态\\
+\midrule
+\endfirsthead
+\toprule
+理论条目 & 实现状态\\
+\midrule
+\endhead
+等效电压源与 $c_{\max}/c_{\min}$ 电压因子 &
+\implfull{include/hacdcpf/analysis/short\_circuit.hpp:get\_voltage\_factor\_sc}（实现取值约化见第~\ref{sec:sc-overview}~章）\\
+故障点三序戴维南等效（选择性求逆 $Y_sz_k=e_k$） &
+\implfull{src/short\_circuit/short\_circuit.cpp:build\_detailed\_sparse\_context}\\
+$\kappa$ 工程式与逐贡献峰值求和（IEC 60909-0 式 59） &
+\implfull{src/short\_circuit/short\_circuit.cpp:calculate\_kappa\_basic\_sc}（逐贡献求和见 run\_short\_circuit\_detailed\_impl）\\
+网状网络 $\kappa$ 方法 A/B/C 完整体系 &
+\implpart{仅"方法 B 且网状"触发 $\min(1.8,1.15\kappa)$；A、C 未区分，统一钳制 $[1,2]$（kappa\_of（lambda））}\\
+近端/远端显式分类 &
+\implpart{无显式分类标志；衰减仅作用于发电机/电机贡献，网络与电流源贡献按远端处理}\\
+电抗谱系 $x_d''/x_d'/x_d$ 与时间常数 &
+\implpart{仅用 $x_d''$（$I_k''$ 系）与 $x_d$（稳态重建，run\_short\_circuit\_detailed\_impl Step 7）；无 $x_d'$、$T_d'$、$T_d''$}\\
+修正系数 $K_G/K_T/K_S$ &
+\implpart{$K_G$、$K_T$ 已实现：calculate\_generator\_correction\_factor\_sc、calculate\_transformer\_correction\_factor\_sc；电站机组 $K_S$ 未单列}\\
+开断衰减 $\mu$ 与电动机 $q$ &
+\implfull{src/short\_circuit/short\_circuit.cpp:compute\_mu}（电动机 $q$ 见同文件 compute\_q）\\
+稳态系数 $\lambda_{\max}/\lambda_{\min}$ &
+\implpart{仅 $\lambda_{\max}$：$x_d/x_q\le1.2$ 取 2.8、$\ge1.5$ 取 5.0、其间线性插值（run\_short\_circuit\_detailed\_impl 稳态段）；$\lambda_{\min}$ 未实现}\\
+热等效 $m/n$ 标准曲线 &
+\implpart{$n$ 固定 1，$m$ 简化闭式（run\_short\_circuit\_detailed\_impl 热等效段）}\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{参考文献}
+{\renewcommand{\section}[2]{}%
+\begin{thebibliography}{9}\small
+\bibitem{iec:iec60909-0} IEC 60909-0, \emph{Short-circuit currents in three-phase
+a.c. systems -- Part 0: Calculation of currents}, 2016.
+\bibitem{iec:iec60909-4} IEC TR 60909-4, \emph{Short-circuit currents in three-phase
+a.c. systems -- Part 4: Examples for the calculation of short-circuit currents}, 2021.
+\bibitem{iec:kundur} P.~Kundur, \emph{Power System Stability and Control},
+McGraw-Hill, 1994.
+\bibitem{iec:anderson} P.~M. Anderson, \emph{Analysis of Faulted Power Systems},
+IEEE Press, 1995.
+\end{thebibliography}}

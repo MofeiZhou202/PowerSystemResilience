@@ -1,0 +1,157 @@
+% theory_converter_dc_fault.tex —— 短路计算 通用理论：换流器故障穿越与直流故障暂态
+% 本文件为理论层章节，遵循 docs/modules/THEORY_WRITING_GUIDE.md。
+
+\section{换流器故障穿越与直流故障暂态理论}\label{sec:sc-theory-convdc}
+
+\begin{theorynote}
+本章为通用数学理论，按电力电子并网控制与直流输电领域的标准模型撰写，覆盖跟网型
+（GFL）换流器故障穿越的准稳态建模、构网型（GFM）换流器的故障响应差异，以及直流
+故障暂态的阶段分解（电容放电、电缆 $RL$ 续流、换流器限流下的波形与简化上界）。
+本章大部分内容超出当前实现的准稳态口径；与平台实现（\srcpath{src/short\_circuit/}）
+的对应关系见本章末"与实现的对应"表，超出部分以"未实现扩展说明"框就地标记。
+\end{theorynote}
+
+\subsection{记号与约定}
+\begin{itemize}
+  \item $I_r$：换流器额定交流电流；$I_{\max}=kI_r$：故障期间电流上限
+        （$k$ 典型 $1.0\sim1.5$）；$U_1$：并网点正序电压标幺；
+  \item $z_{conv}=r_{sc}+jx_{sc}$：构网型换流器等效内阻抗（其额定基准标幺）；
+  \item 直流侧：$U_0$ 故障前极间电压，$C$ 直流支撑电容，$R,L$ 故障回路电阻/电感；
+  \item $\delta=R/(2L)$、$\omega_0$：二阶放电回路阻尼系数与振荡角频率。
+\end{itemize}
+
+\subsection{跟网型（GFL）换流器的故障穿越准稳态模型}
+GFL 换流器经锁相环（PLL）定向的矢量电流控制跟随电网，外特性为\emph{受控电流源}~\cite{conv:yazdani,conv:rocabert}。
+故障穿越（FRT/LVRT）期间，并网导则通常要求按电压跌落深度注入无功支撑电流，
+典型分段线性律
+\begin{equation}
+I_q=k_q\,(0.9-U_1)\,I_r\quad(U_1<0.9),\qquad
+I_p\le\sqrt{I_{\max}^2-I_q^2},
+\end{equation}
+死区内维持故障前电流，总电流受半导体约束 $I_{\max}=kI_r$ 硬限幅。据此的
+\emph{准稳态短路模型}为
+\begin{equation}
+I_{conv}''=k\,I_r,\qquad I_r=\frac{P_{rated}}{\sqrt3\,U_{ac}},
+\end{equation}
+幅值与本地阻抗无关，经网络转移阻抗比分配到故障点。与同步机的本质差异：贡献量级
+由\emph{控制限流}决定（约 $1\sim1.5$ pu），而非物理次暂态电抗（$5\sim10$ pu）。
+
+\begin{gapnote}
+完整 FRT 控制模型——PLL 动态、电流环饱和与反饱和、负序电流控制策略（对称分量
+独立控制）、导则无功注入规则、保护闭锁与恢复时序——在当前实现中均未建模；代码
+只取限流幅值 $kI_r$ 的准稳态结果（见第~\ref{sec:sc-converter}~章）。
+\end{gapnote}
+
+\subsection{构网型（GFM）换流器的故障响应}
+GFM 换流器对外呈现为内电势 $E\angle\delta$ 串联内阻抗 $z_{conv}$ 的\emph{电压源}，
+故障瞬间不依赖 PLL。无限制时故障电流
+\begin{equation}
+I_{conv}''\approx\frac{E}{|z_{conv}+Z_{th}|}
+\end{equation}
+可达数倍额定，超出器件耐受，故实际 GFM 必须配限流策略，其谱系为：
+(i) \textbf{虚拟阻抗}——故障时自适应增大等效 $x_{sc}$，保持电压源外特性；
+(ii) \textbf{电流饱和/限幅}——内环饱和后退化为限流电流源，行为趋近 GFL；
+(iii) \textbf{模式切换}——故障期间整体切换到电流控制。准稳态工程口径取
+"电压源串等效阻抗"模型（$x_{sc}$ 缺省量级 $0.15$ pu 对应约 $6.7$ pu 的限流前
+上限），持续贡献取决于内电势与等效阻抗；负序响应取决于是否配置对称分量独立
+控制。
+
+\begin{remark}[GFL 与 GFM 的故障响应差异]
+GFL：幅值受控（$\approx kI_r$）、相位跟随 PLL，提供电流支撑而非电压支撑；
+GFM：内电势/相位自主，提供电压与相位支撑，限流前贡献大、限流策略决定其波形。
+二者在故障电流计算中须分别建模为电流源与电压源，不可互换。
+\end{remark}
+
+\begin{gapnote}
+GFM 限流策略动态（虚拟阻抗自适应律、饱和切换条件、负序控制模式）未实现；代码
+仅固定内阻抗的电压源准稳态模型（$x_{sc}$ 缺省 $0.15$），不含限流后的模式退化。
+\end{gapnote}
+
+\subsection{直流故障暂态的阶段分解}
+以两电平 VSC 直流母线极间金属性短路为范式，暂态按机理分三个阶段。
+
+\begin{definition}[阶段 1：电容放电]
+直流支撑电容 $C$ 经故障回路 $(R,L)$ 放电，欠阻尼二阶响应：
+\begin{equation}
+i(t)=\frac{U_0}{\omega_0 L}\,e^{-\delta t}\sin(\omega_0 t),\qquad
+\delta=\frac{R}{2L},\quad
+\omega_0=\sqrt{\frac{1}{LC}-\delta^2},
+\end{equation}
+峰值出现在 $t^{*}=\frac{1}{\omega_0}\arctan(\omega_0/\delta)$，持续 $\mu$s--ms 级，
+幅值远超稳态短路电流，且由 $C,L$ 决定而与线路电阻上界无关。
+\end{definition}
+
+\begin{definition}[阶段 2：续流与不控整流馈入]
+电容电压过零后，两电平 VSC 的反并联二极管续流，电缆电流按 $L/R$ 时间常数衰减；
+同时交流系统经二极管不控整流持续馈入，电流趋向不控整流稳态值。MMC 拓扑无此
+自然续流通道，但故障馈入机理类似（子模块电容经桥臂放电）。
+\end{definition}
+
+\begin{definition}[阶段 3：稳态或阻断]
+不换流器干预时稳态由交流系统经二极管馈入决定（水平高）；实际系统由
+IGBT 闭锁（MMC 数 ms 内切断）、换流器限流控制或直流断路器开断截断，受控稳态
+电流降至限流量级（$\approx\sum kI_r$ 的直流折算）。
+\end{definition}
+
+\begin{remark}[对故障水平估计的含义]
+电容放电峰值可能远高于任何稳态估计，而受控稳态可能远低于电阻性上界——因此
+单一"故障水平"数字不能同时包络直流故障的暂态与稳态两端，须声明口径。
+\end{remark}
+
+\subsection{简化上界与工程估算口径}
+\begin{definition}[电阻性刚性源上界]
+忽略源内阻抗与回路电感，把直流网络化简为支路电阻图、电压参考母线视为理想电压源：
+\begin{equation}
+I_f=\frac{V_{pre}}{R_{th}+R_f},
+\end{equation}
+$R_{th}$ 为故障母线到源的戴维南电阻。这是\emph{线路电阻限制}的稳态金属性故障
+上界。
+\end{definition}
+适用：直流电缆载流与断路器稳态开断容量的保守筛查。不适用：暂态峰值校核（放电
+峰值更高）、受控稳态评估（限流后更低）与保护配合（需跳闸时序）。
+
+\begin{gapnote}
+完整直流故障波形（放电--续流--限流三阶段）、直流保护跳闸时序与断路器电流分配
+在当前实现中均未建模：\srcpath{dc\_bus\_fault\_level} 只给电阻性上界，逐断路器
+责任直接取母线故障电流。需要暂态峰值或受控稳态时应改用暂态仿真工作流
+（见第~\ref{sec:sc-dc}~章边界说明）。
+\end{gapnote}
+
+\subsection{与实现的对应}
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{6.8cm}L{8.6cm}@{}}
+\toprule
+理论条目 & 实现状态\\
+\midrule
+\endfirsthead
+\toprule
+理论条目 & 实现状态\\
+\midrule
+\endhead
+GFL 限流电流源 $I_{conv}''=kI_r$ 与倍率解析 &
+\implfull{src/short\_circuit/short\_circuit.cpp:converter\_current\_multiplier（lambda）}（故障点传递见 current\_source\_contribution\_ka（lambda））\\
+LVRT 无功注入规则与 FRT 控制动态 & \implnone\\
+GFM 电压源-内阻抗准稳态模型 &
+\implfull{src/short\_circuit/short\_circuit.cpp:build\_sc\_admittance\_matrices}（$x_{sc}$ 缺省 0.15，见第~\ref{sec:sc-converter}~章）\\
+GFM 限流策略谱系（虚拟阻抗/饱和/切换） & \implnone\\
+电容放电阶段（二阶欠阻尼波形） & \implnone\\
+续流与不控整流阶段 & \implnone\\
+电阻性刚性源上界 $V_{pre}/(R_{th}{+}R_f)$ &
+\implfull{src/short\_circuit/dc\_short\_circuit.cpp:dc\_bus\_fault\_level}\\
+直流断路器进入故障图与责任判定 &
+\implpart{断路器可纳入电导图并记 \fld{DCBreakerDutyResult}；各断路器电流分配未分闸计算（\fld{i\_duty\_ka} 直接取母线故障电流）}\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{参考文献}
+{\renewcommand{\section}[2]{}%
+\begin{thebibliography}{9}\small
+\bibitem{conv:arrillaga} J.~Arrillaga, \emph{High Voltage Direct Current
+Transmission}, 2nd ed., IEE, 1998.
+\bibitem{conv:yazdani} A.~Yazdani and R.~Iravani, \emph{Voltage-Sourced Converters
+in Power Systems: Modeling, Control, and Applications}, Wiley-IEEE Press, 2010.
+\bibitem{conv:rocabert} J.~Rocabert, A.~Luna, F.~Blaabjerg, and P.~Rodr\'iguez,
+``Control of power converters in AC microgrids,'' \emph{IEEE Trans. Power Electron.},
+vol.~27, no.~11, pp.~4734--4749, 2012.
+\end{thebibliography}}

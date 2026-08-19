@@ -1,0 +1,1077 @@
+% theory_machine_dae.tex —— 机电暂态（动力学）通用理论：相量模型、同步电机谱系与 DAE 数值方法
+% 本文件为理论层章节，遵循 docs/modules/THEORY_WRITING_GUIDE.md。
+
+\section{机电暂态仿真的数学基础：相量模型、同步电机谱系与 DAE 数值方法}\label{sec:dy-th-mac}
+
+\begin{theorynote}
+本章为通用数学理论，按电力系统机电暂态仿真的标准模型与数值分析文献体系撰写，覆盖：
+相量域（RMS）近似从动态相量定义出发的推导与适用范围（与 EMT 波形仿真的分界）、
+Park 变换与 dq0 坐标系及标幺化的代数结构、同步电机模型谱系（经典模型、二轴模型、
+次暂态模型）从磁链方程出发的完整推导、摆动方程与惯量常数 $H$ 及惯量中心（COI）
+参考系理论、机电暂态 DAE 的一般形式与微分指标（index）概念及分块/联立两类求解
+架构、隐式梯形与后向欧拉的局部截断误差和 A-稳定/L-稳定理论及刚性概念、
+Runge--Kutta 族的 Butcher 统一理论与 Rosenbrock 线性隐式方法一般理论，以及 DAE
+一致初始条件与动态修整（dynamic trimming）理论。与平台实现
+（\srcpath{src/dynamics/}）的对应关系见本章末"与实现的对应"表，超出实现的内容以
+"未实现扩展说明"框就地标记。控制系统（励磁/调速/PSS/逆变器控制）与小信号理论的
+专门展开见本手册另一理论章，本章仅在涉及整机方程耦合处引用其结论。
+\end{theorynote}
+
+\subsection{记号与约定}
+\begin{itemize}
+  \item $f_0$：系统标称频率（Hz）；$\Omega_b=2\pi f_0$：基准角速度（rad/s），即同步
+        旋转坐标系的转速；$t$：时间（s）；$\mathrm j$：虚数单位；
+        $\overline{(\cdot)}$ 表示复共轭；
+  \item $\bar u(t)=U(t)e^{\mathrm j\varphi(t)}$：相量（动态相量），瞬时值
+        $u(t)=\sqrt2\,\mathrm{Re}[\bar u(t)e^{\mathrm j\Omega_b t}]$；$U$ 为有效值；
+  \item 下标 $d,q,0$：转子 dq0 坐标系分量；下标 $r,i$：网络同步旋转直角坐标
+        （RI 系）实部/虚部分量；$\delta$：转子角（q 轴相对网络系的位置角，rad）；
+  \item $\omega$：转子电角速度标幺值（基准 $\Omega_b$），$\omega=1$ 为同步速；
+  \item $\psi_d,\psi_q$：定子直/交轴磁链；$e_q',e_d'$：暂态电势；
+        $e_q'',e_d''$（或 $\psi_d'',\psi_q''$）：次暂态电势（磁链）；
+  \item $x_d,x_q$：稳态同步电抗；$x_d',x_q'$：暂态电抗；$x_d'',x_q''$：次暂态电抗；
+        $x_l$：定子漏抗；$T_{d0}',T_{q0}'$ 与 $T_{d0}'',T_{q0}''$：开路暂态/次暂态
+        时间常数（s）；$R_s$：定子电阻；
+  \item $H$：惯量常数（s）；$D$：阻尼系数（pu 转矩/pu 转速）；$\tau_m,\tau_e$：
+        机械/电磁转矩（pu）；$P_m,P_e$：机械/电磁功率（pu）；
+  \item $x\in\mathbb R^{n_x}$：微分状态向量；$y\in\mathbb R^{n_y}$：代数变量向量
+        （网络电压、直流电压等）；$z=[y;x]$：联合未知量；
+  \item $f(x,y,t)$：微分方程右端；$g(x,y,t)$：代数约束；$M$：质量矩阵；
+        $J=\partial F/\partial z$：系统雅可比；$h$ 或 $\Delta t$：积分步长（s）；
+  \item $\lambda=\sigma\pm\mathrm j\omega_d\in\mathbb C$：特征值；检验方程
+        $\dot w=\lambda w$ 中 $z=h\lambda$；$R(z)$：单步法稳定函数；
+  \item $\lVert\cdot\rVert$ 未指明时为向量 $\infty$-范数或 $2$-范数（随上下文声明）；
+  \item 全部电气量除特别声明外取标幺值：单一系统功率基准 $S_B$（MVA），交流电压
+        基准按节点额定值，频率基准 $\Omega_b$；电机参数先给在机组自身基准
+        （$S_{\mathrm{dev}}$）上，并网端口处折算到 $S_B$。
+\end{itemize}
+
+\subsection{相量域（RMS）近似：原理与适用范围}\label{sec:dy-th-mac-phasor}
+
+\subsubsection{从瞬时量到动态相量}
+
+机电暂态仿真不追踪工频波形本身，而追踪波形的\emph{缓变包络}。设某相量为
+\begin{equation}
+u(t)=\sqrt2\,U(t)\cos\bigl(\Omega_b t+\varphi(t)\bigr),
+\label{eq:dy-th-mac-instant}
+\end{equation}
+其中幅值包络 $U(t)$ 与相位 $\varphi(t)$ 为慢变函数。
+
+\begin{definition}[动态相量]\label{def:dy-th-mac-phasor}
+式~\eqref{eq:dy-th-mac-instant} 的\emph{动态相量}是以恒定基准转速 $\Omega_b$
+旋转的坐标系中的复包络
+\begin{equation}
+\bar u(t)=U(t)e^{\mathrm j\varphi(t)},\qquad
+u(t)=\sqrt2\,\mathrm{Re}\bigl[\bar u(t)\,e^{\mathrm j\Omega_b t}\bigr].
+\label{eq:dy-th-mac-dynphasor}
+\end{equation}
+$\bar u$ 为常数时退化为稳态相量；允许 $\bar u$ 慢变即得到机电暂态仿真的基本变量。
+\end{definition}
+
+\begin{proposition}[电感支路的动态相量方程]\label{prop:dy-th-mac-inductor}
+对线性电感 $v=L\,\mathrm di/\mathrm dt$，若 $i(t)$、$v(t)$ 均以
+式~\eqref{eq:dy-th-mac-dynphasor} 形式的动态相量 $\bar\imath,\bar v$ 表示，则精确有
+\begin{equation}
+\bar v=L\,\frac{\mathrm d\bar\imath}{\mathrm dt}+\mathrm j\Omega_b L\,\bar\imath .
+\label{eq:dy-th-mac-inductor}
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+$i(t)=\sqrt2\,\mathrm{Re}[\bar\imath(t)e^{\mathrm j\Omega_b t}]$。对 $t$ 求导，
+\begin{equation}
+\frac{\mathrm di}{\mathrm dt}
+=\sqrt2\,\mathrm{Re}\Bigl[\Bigl(\frac{\mathrm d\bar\imath}{\mathrm dt}
++\mathrm j\Omega_b\bar\imath\Bigr)e^{\mathrm j\Omega_b t}\Bigr],
+\end{equation}
+括号内正是式~\eqref{eq:dy-th-mac-inductor} 右端除以 $L$ 后的旋转相量形式；
+乘以 $L$ 并比较 $v(t)=\sqrt2\,\mathrm{Re}[\bar v e^{\mathrm j\Omega_b t}]$ 即得。
+注意该推导只用到了微分乘积法则，对包络 $\bar\imath$ 的变化速率没有任何假设。
+\end{proof}
+
+\begin{definition}[RMS/相量近似（机电暂态近似）]\label{def:dy-th-mac-rms}
+当包络的特征时间尺度 $\tau_{\mathrm{env}}$ 满足 $\Omega_b\tau_{\mathrm{env}}\gg1$ 时，
+在式~\eqref{eq:dy-th-mac-inductor} 中弃去包络导数项 $L\,\mathrm d\bar\imath/\mathrm dt$，
+得到代数化的支路方程
+\begin{equation}
+\bar v=\mathrm jX\,\bar\imath,\qquad X=\Omega_b L .
+\label{eq:dy-th-mac-algebraic}
+\end{equation}
+对网络全部支路施加该近似，网络在每个瞬时刻由复线性代数方程
+$\bar Y\bar V=\bar I$（$\bar Y$ 为节点导纳矩阵）描述——此即经典暂态稳定程序的
+\emph{代数网络}假设。
+\end{definition}
+
+\begin{proposition}[相量近似的相对误差量级]\label{prop:dy-th-mac-rmserr}
+设包络按慢时间尺度演化，$|\mathrm d\bar\imath/\mathrm dt|\le
+|\bar\imath|/\tau_{\mathrm{env}}$，则弃去式~\eqref{eq:dy-th-mac-inductor} 中包络
+导数项引起的支路电压相对误差为
+\begin{equation}
+\frac{|\bar v_{\mathrm{exact}}-\bar v_{\mathrm{alg}}|}{|\bar v_{\mathrm{exact}}|}
+=O\Bigl(\frac{1}{\Omega_b\tau_{\mathrm{env}}}\Bigr).
+\label{eq:dy-th-mac-rmserr}
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+由式~\eqref{eq:dy-th-mac-inductor}，被弃项与保留项之比为
+\begin{equation}
+\frac{|L\,\mathrm d\bar\imath/\mathrm dt|}{|\mathrm j\Omega_b L\,\bar\imath|}
+\le\frac{1}{\Omega_b\tau_{\mathrm{env}}}.
+\end{equation}
+代数解的电压相对误差与被弃项同阶（导纳项本身未改动），即得
+式~\eqref{eq:dy-th-mac-rmserr}。50~Hz 系统 $\Omega_b\approx314$~rad/s，故包络
+时间常数为数十毫秒时相对误差已在 $10^{-3}$ 量级以下；这就是"机电暂态"（百毫秒
+至数十秒的转子摇摆与慢控制）与"电磁暂态"（毫秒内的行波、换流器开关谐波、
+直流分量衰减）两支仿真技术的定量分界。
+\end{proof}
+
+\begin{remark}[三种建模范式的统一视角]\label{rem:dy-th-mac-threeregimes}
+命题~\ref{prop:dy-th-mac-inductor} 表明三种范式是同一支路方程在不同取舍下的特例：
+\begin{itemize}
+  \item \textbf{代数网络}（经典暂态稳定）：全网弃去包络导数，网络为逐时刻代数约束；
+  \item \textbf{动态支路/动态相量}：对选定支路保留
+        式~\eqref{eq:dy-th-mac-inductor}——标幺下 $x=l$（电抗与电感数值相等，
+        见第~\ref{sec:dy-th-mac-park}~小节），方程写为
+        \begin{equation}
+        \frac{l}{\Omega_b}\frac{\mathrm d\bar\imath}{\mathrm dt}
+        =\bar v_{\mathrm{from}}-\bar v_{\mathrm{to}}-(r+\mathrm jl)\bar\imath ,
+        \label{eq:dy-th-mac-dynbranch}
+        \end{equation}
+        每条支路增加两个微分状态（$\mathrm{Re}\,\bar\imath,\mathrm{Im}\,\bar\imath$）。
+        当支路 $L/R$ 时间常数接近控制器带宽（换流器主导的馈线、低 $X/R$ 配电网）
+        时该保留是必要的；
+  \item \textbf{EMT}：保留瞬时波形，不使用相量表示；可解析直流偏移、谐波与开关
+        过程，但步长须达微秒级。本章其余部分均不采用此范式。
+\end{itemize}
+式~\eqref{eq:dy-th-mac-dynbranch} 的质量系数 $l/\Omega_b$ 表明：支路从代数到微分
+的"升格"在质量矩阵 DAE 表述（第~\ref{sec:dy-th-mac-dae}~小节）中只是质量矩阵对应
+对角元从 $0$ 翻转为 $l/\Omega_b$ 的数据变更，不需要改变求解架构。
+\end{remark}
+
+\begin{remark}[IBR 富集馈线上的适用边界]\label{rem:dy-th-mac-ibr}
+相量近似的失效不是渐变而是\emph{质变}：逆变器内环电流控制带宽可达数百 Hz，与网络
+$L/R$ 极点、LCL 滤波器谐振峰发生相互作用时，代数网络假设可能把失稳模态错误地
+"代数化"掉（虚假镇定），或把快极点遗漏在模型之外（虚假失稳）。工程准则：凡控制
+带宽 $\omega_c$ 满足 $\omega_c/\Omega_b$ 不可忽略的设备，其相连滤波器与短支路应升格
+为动态支路（式~\eqref{eq:dy-th-mac-dynbranch}），或改用 EMT 复核。相量域结果对
+这类工况应声明模型覆盖范围，不得外推为波形级结论。
+\end{remark}
+
+\subsection{坐标系、Park 变换与标幺化}\label{sec:dy-th-mac-park}
+
+\subsubsection{Park 变换与 dq0 坐标系}
+
+同步电机定子三相绕组的自感与互感随转子位置周期变化，直接在 abc 相坐标下写出的是
+\emph{时变系数}微分方程。Park 变换把定子量投影到随转子旋转的 dq0 坐标系，使对称
+电机的电感矩阵变为常数——这是全部同步电机降阶模型的代数起点。
+
+\begin{definition}[功率不变 Park 变换]\label{def:dy-th-mac-park}
+设 $\theta$ 为转子直轴（d 轴）相对定子 a 相磁轴的电角度，定义正交变换
+\begin{equation}
+P(\theta)=\sqrt{\frac{2}{3}}
+\begin{bmatrix}
+\cos\theta & \cos\bigl(\theta-\tfrac{2\pi}{3}\bigr) & \cos\bigl(\theta+\tfrac{2\pi}{3}\bigr)\\[1ex]
+-\sin\theta & -\sin\bigl(\theta-\tfrac{2\pi}{3}\bigr) & -\sin\bigl(\theta+\tfrac{2\pi}{3}\bigr)\\[1ex]
+\tfrac{1}{\sqrt2} & \tfrac{1}{\sqrt2} & \tfrac{1}{\sqrt2}
+\end{bmatrix},
+\qquad
+\begin{bmatrix}x_d\\x_q\\x_0\end{bmatrix}=P(\theta)\begin{bmatrix}x_a\\x_b\\x_c\end{bmatrix}.
+\label{eq:dy-th-mac-park}
+\end{equation}
+$x_d,x_q,x_0$ 分别称直轴、交轴、零序分量。
+\end{definition}
+
+\begin{proposition}[$P$ 的正交性与功率不变性]\label{prop:dy-th-mac-orth}
+对任意 $\theta$，$P(\theta)P(\theta)^{\mathsf T}=I_3$，即 $P$ 为正交矩阵；从而
+瞬时功率在变换下不变：
+\begin{equation}
+p=v_ai_a+v_bi_b+v_ci_c=v_di_d+v_qi_q+2v_0i_0 .
+\label{eq:dy-th-mac-power}
+\end{equation}
+（式~\eqref{eq:dy-th-mac-power} 右端 $0$ 轴项的因子 $2$ 来自定义
+~\ref{def:dy-th-mac-park} 中 $1/\sqrt2$ 行的归一化约定；采用 $x_0$ 幅值约定
+不同时该项系数相应变化，三相对称时 $x_0=0$，差异不出现。）
+\end{proposition}
+
+\begin{proof}
+记 $P$ 的前两行为 $r_1(\theta),r_2(\theta)$，第三行为 $r_3$。直接计算内积：
+对行 $r_1$，利用积化和差，
+\begin{align}
+r_1r_1^{\mathsf T}
+&=\frac{2}{3}\Bigl[\cos^2\theta+\cos^2\Bigl(\theta-\tfrac{2\pi}{3}\Bigr)
++\cos^2\Bigl(\theta+\tfrac{2\pi}{3}\Bigr)\Bigr]
+=\frac{2}{3}\cdot\frac{3}{2}=1,
+\end{align}
+因为 $\cos^2\alpha+\cos^2(\alpha-2\pi/3)+\cos^2(\alpha+2\pi/3)=3/2$（三倍角恒等式
+对 $\alpha$ 展开即得）。同理 $r_2r_2^{\mathsf T}=1$。交叉项：
+\begin{equation}
+r_1r_2^{\mathsf T}
+=-\frac{2}{3}\Bigl[\cos\theta\sin\theta
++\cos\Bigl(\theta-\tfrac{2\pi}{3}\Bigr)\sin\Bigl(\theta-\tfrac{2\pi}{3}\Bigr)
++\cos\Bigl(\theta+\tfrac{2\pi}{3}\Bigr)\sin\Bigl(\theta+\tfrac{2\pi}{3}\Bigr)\Bigr]
+=0,
+\end{equation}
+因为 $\sin2\theta+\sin(2\theta-4\pi/3)+\sin(2\theta+4\pi/3)=0$（三对称向量之和）。
+$r_1r_3^{\mathsf T}=\frac{\sqrt2}{\sqrt3}[\cos\theta+\cos(\theta-2\pi/3)
++\cos(\theta+2\pi/3)]=0$，同理 $r_2r_3^{\mathsf T}=0$，$r_3r_3^{\mathsf T}=
+3\cdot\frac{2}{3}\cdot\frac12=1$。故 $PP^{\mathsf T}=I_3$。
+
+功率不变性：记 $\mathbf v_{abc}=P^{\mathsf T}\mathbf v_{dq0}$（$P$ 正交故逆等于
+转置），则
+\begin{equation}
+\mathbf v_{abc}^{\mathsf T}\mathbf i_{abc}
+=\mathbf v_{dq0}^{\mathsf T}PP^{\mathsf T}\mathbf i_{dq0}
+=v_di_d+v_qi_q+v_0i_0^{(P)},
+\end{equation}
+其中 $i_0^{(P)}=i_0$ 按式~\eqref{eq:dy-th-mac-park} 的第三行定义
+$i_0^{(P)}=(i_a+i_b+i_c)/\sqrt3$ 计，则 $v_0i_0^{(P)}$ 项写成工程常用的
+$i_0^{\mathrm{eng}}=i_a+i_b+i_c$ 约定时系数为 $2v_0i_0$ 型（两者相差归一化
+因子）。三相对称时该讨论无实际影响。
+\end{proof}
+
+\begin{remark}[电机系与网络系的衔接：转子角 \texorpdfstring{$\delta$}{δ}]\label{rem:dy-th-mac-frames}
+机电暂态仿真中并存两类坐标系：
+\begin{itemize}
+  \item \textbf{网络系（RI）}：全网统一的、以 $\Omega_b$ 旋转的公共参考系，节点电压
+        未知量取 $V_r,V_i$；
+  \item \textbf{机体系（dq）}：每台电机随自身转子旋转，$\delta$ 为 q 轴相对网络系
+        的位置角。两系间的坐标换算为平面旋转：按 q 轴超前 d 轴 $90^\circ$、$\delta$
+        量至 q 轴的约定（Kundur/Sauer--Pai 约定~\cite{dym:kundur,dym:sauer-pai}），
+        \begin{equation}
+        v_d+\mathrm jv_q=(v_r+\mathrm jv_i)\,e^{-\mathrm j(\delta-\pi/2)},
+        \qquad
+        \begin{bmatrix}v_d\\v_q\end{bmatrix}
+        =\begin{bmatrix}\sin\delta&-\cos\delta\\\cos\delta&\sin\delta\end{bmatrix}
+        \begin{bmatrix}v_r\\v_i\end{bmatrix}.
+        \label{eq:dy-th-mac-ri-dq}
+        \end{equation}
+\end{itemize}
+换流器控制常用第三种约定（PLL 系）：$v_d+\mathrm jv_q=(v_r+\mathrm jv_i)
+e^{-\mathrm j\theta_{\mathrm{pll}}}$，锁定时 $v_q=0$、$v_d=|\bar V|$。电机约定与
+PLL 约定相差 $90^\circ$，混用会在初始化时产生 $\delta$ 的系统性偏差——每个设备
+的坐标约定必须逐一写明并在静止回归试验（无扰动下各导数恒零）中验证。
+\end{remark}
+
+\begin{remark}[不平衡网络：序分量与相位域]\label{rem:dy-th-mac-seq}
+dq0 变换依赖电机对称性，只能处理定子的\emph{正序}量。不平衡三相网络中相量与序分量
+经对称分量变换联系：令 $a=e^{\mathrm j2\pi/3}$，
+\begin{equation}
+\begin{bmatrix}x_a\\x_b\\x_c\end{bmatrix}
+=\underbrace{\begin{bmatrix}1&1&1\\1&a^2&a\\1&a&a^2\end{bmatrix}}_{T}
+\begin{bmatrix}x_0\\x_1\\x_2\end{bmatrix},
+\qquad
+\begin{bmatrix}x_0\\x_1\\x_2\end{bmatrix}
+=\frac13\begin{bmatrix}1&1&1\\1&a&a^2\\1&a^2&a\end{bmatrix}
+\begin{bmatrix}x_a\\x_b\\x_c\end{bmatrix}.
+\end{equation}
+序域定义的设备（正序电机模型）以 $Y_{abc}=T\,\mathrm{diag}(Y_0,Y_1,Y_2)T^{-1}$
+折算后压入相位域导纳矩阵；相域定义的设备（单相负荷、相间故障）直接压入。负序
+电流在转子系呈现 $2\omega$ 分量、超出相量频带，故电机对负序只呈现被动阻抗
+$Z_2\approx R_2+\mathrm jx_2$，$x_2\approx(x_d''+x_q'')/2$；零序经接地支路呈现
+$Y_0=1/(\mathrm jx_0)$（不接地机组 $Y_0=0$）。
+\end{remark}
+
+\subsubsection{标幺化}
+
+\begin{definition}[标幺制]\label{def:dy-th-mac-pu}
+选定功率基准 $S_B$、电压基准 $U_B$（线电压），则阻抗、电流基准为
+$Z_B=U_B^2/S_B$、$I_B=S_B/(\sqrt3\,U_B)$；角速度基准 $\Omega_b$，时间基准取
+$1$~s（即时间不以标幺计）。电机参数先以其额定值 $S_{\mathrm{dev}},U_{\mathrm{dev}}$
+为基准标幺，接入系统基准时按
+\begin{equation}
+x^{(B)}=x^{(\mathrm{dev})}\,\frac{S_B}{S_{\mathrm{dev}}}
+\Bigl(\frac{U_{\mathrm{dev}}}{U_B}\Bigr)^2
+\label{eq:dy-th-mac-baseconv}
+\end{equation}
+折算；注入电流按 $I^{(B)}=(S_{\mathrm{dev}}/S_B)I^{(\mathrm{dev})}$ 反比折算。
+\end{definition}
+
+\begin{remark}[标幺制的两条数值便利]\label{rem:dy-th-mac-pu-conv}
+\begin{itemize}
+  \item \textbf{电抗与电感同值}：$x=\Omega_b L/Z_B$ 且电感标幺
+        $l=L/(Z_B/\Omega_b)=L\Omega_b/Z_B$，故 $x=l$（数值相等）。因此动态支路
+        式~\eqref{eq:dy-th-mac-dynbranch} 与滤波器方程的质量系数统一写作
+        $l/\Omega_b$；
+  \item \textbf{频率标幺}：$\omega$ 以 $\Omega_b$ 为基准，$\omega=1$ 即同步速；
+        转子角方程 $\dot\delta=\Omega_b(\omega-\omega_{\mathrm{sys}})$ 中的
+        $\Omega_b$ 因子正是把标幺转速偏差换算回 rad/s 的基准还原。
+\end{itemize}
+直流侧各直流岛取各自电压基准、共用 $S_B$，于是 AC/DC 换流器功率平衡无需额外
+基准换算。
+\end{remark}
+
+\subsection{同步电机模型谱系：从磁链方程到经典模型}\label{sec:dy-th-mac-machine}
+
+本节给出机电暂态仿真同步电机模型族的标准推导链：从 Park 变换后的磁链方程出发，
+逐次弃去快动态得到次暂态、暂态（二轴）、经典模型。参数体系（$x_d,x_d',x_d'',
+T_{d0}',\dots$）与 IEEE Std 1110~\cite{dym:ieee1110} 的稳定性数据惯例一致。
+
+\subsubsection{磁链方程与转子绕组消去}
+
+Park 变换后，采用发电机惯例（定子电流流出为正）、标幺、转子 dq 系，定子电压方程为
+\begin{align}
+\frac{1}{\Omega_b}\dot\psi_d&=R_si_d+\omega\psi_q+v_d,\label{eq:dy-th-mac-stator-d}\\
+\frac{1}{\Omega_b}\dot\psi_q&=R_si_q-\omega\psi_d+v_q,\label{eq:dy-th-mac-stator-q}
+\end{align}
+磁链-电流关系按直轴（励磁绕组 $f$ 与阻尼绕组 $1d$）与交轴（阻尼绕组 $1q,2q$）
+分列。直轴（互感按等互感假设 $x_{ad}$ 归并）：
+\begin{equation}
+\begin{bmatrix}\psi_d\\\psi_f\\\psi_{1d}\end{bmatrix}
+=
+\begin{bmatrix}-x_d & x_{ad} & x_{ad}\\
+-x_{ad} & x_{ff} & x_{ad}\\
+-x_{ad} & x_{ad} & x_{11d}\end{bmatrix}
+\begin{bmatrix}i_d\\i_f\\i_{1d}\end{bmatrix},
+\label{eq:dy-th-mac-flux-d}
+\end{equation}
+交轴形式类似。转子电压方程：励磁绕组 $\dot\psi_f=\Omega_b(v_f-R_fi_f)$，
+阻尼绕组短路（$v=0$）。
+
+\begin{definition}[暂态/次暂态电势与电抗、时间常数]\label{def:dy-th-mac-emf}
+消去转子电流，用磁链定义等值电势与等值电抗：
+\begin{itemize}
+  \item \emph{暂态电势}：$e_q'\propto\psi_f$（直轴）、$e_d'\propto\psi_{1q}$（交轴）；
+        \emph{次暂态量}：$\psi_d'',\psi_q''$（或等价电势 $e_d'',e_q''$）由阻尼绕组
+        磁链组合而成；
+  \item \emph{暂态电抗}（直轴）：$x_d'=x_d-x_{ad}^2/x_{ff}$——把励磁绕组磁链"冻结"
+        （$\psi_f$ 恒定）时定子看入的等值电抗；\emph{次暂态电抗}
+        $x_d''=x_d'-x_{ad}^2(x_{11d}-x_{ff})^2/\bigl[x_{ff}^2(x_{11d}-2x_{ad}+x_{ff})\bigr]$
+        量级地写为 $x_d''=x_l+\bigl(1/(x_{ad}\parallel x_{f}\parallel x_{1d})\bigr)^{-1}$
+        形式的并联合成，$x_d''<x_d'<x_d$；
+  \item \emph{开路时间常数}：$T_{d0}'=x_{ff}/(\Omega_bR_f)$（定子开路时励磁磁链的
+        衰减常数，秒级），$T_{d0}''$（阻尼绕组对应，数十毫秒）。
+\end{itemize}
+\end{definition}
+
+物理图像是\emph{磁链守恒的逐层屏蔽}：扰动瞬间阻尼绕组首先屏蔽电枢反应（电机对外
+呈现 $x_d''$），阻尼电流衰减后励磁绕组屏蔽（呈现 $x_d'$），最终励磁电流亦调整后
+呈现稳态 $x_d$。这与短路计算章中 $x_d''/x_d'/x_d$ 谱系的电机学解释是同一物理
+过程在不同口径下的表述。
+
+\begin{proposition}[定子暂态忽略与定子代数方程]\label{prop:dy-th-mac-stator-alg}
+在式~\eqref{eq:dy-th-mac-stator-d}--\eqref{eq:dy-th-mac-stator-q} 中置
+$\dot\psi_d=\dot\psi_q=0$ 并取 $\omega\approx1$（标幺），则定子方程代数化为
+\begin{equation}
+v_d=-R_si_d+x_q''i_q+e_d'',\qquad
+v_q=-R_si_q-x_d''i_d+e_q'',
+\label{eq:dy-th-mac-stator-alg}
+\end{equation}
+其中 $e_d'',e_q''$ 为次暂态磁链经电流关系折合的电势。相应地电磁转矩
+$\tau_e=\psi_di_q-\psi_qi_d$ 化为端口量表达
+\begin{equation}
+\tau_e=(v_d+R_si_d)i_d+(v_q+R_si_q)i_q .
+\label{eq:dy-th-mac-te-port}
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+置 $\dot\psi_d=\dot\psi_q=0$、$\omega=1$，式~\eqref{eq:dy-th-mac-stator-q} 给出
+$\psi_d=R_si_q-v_q$ 变号整理后的代数关系；把磁链-电流关系中转子电流以
+次暂态电势表出并代入，$\psi_d=x_q''\text{ 型项与 }e''\text{ 项之和}$，整理即
+式~\eqref{eq:dy-th-mac-stator-alg}（具体系数即定义~\ref{def:dy-th-mac-emf} 的
+折合）。转矩：$\tau_e=\psi_di_q-\psi_qi_d$；由 $\omega=1$ 时的定子方程，
+$\psi_d=-(v_q+R_si_q)+e_q''$ 含 $e''$ 项、$\psi_q=(v_d+R_si_d)-e_d''$，
+代入后 $e''$ 项与 $\tau_e$ 定义中经电流关系折算的部分相消（$e_d''i_q-e_q''i_d$
+恰为次暂态电势经气隙传递的功率，被含在端口表达内），得
+式~\eqref{eq:dy-th-mac-te-port}。直接验算：式~\eqref{eq:dy-th-mac-te-port} 右端
+$=v_di_d+v_qi_q+R_s(i_d^2+i_q^2)$，即端口电功率加定子铜耗，等于气隙电磁功率
+（$\omega=1$ 时功率与转矩数值相同）。
+\end{proof}
+
+\begin{remark}[定子暂态忽略的代价]\label{rem:dy-th-mac-statorneglect}
+$\dot\psi_d=\dot\psi_q=0$ 丢弃的是以 $\Omega_b$ 为标度的快分量：短路电流中的直流
+非周期分量与由此产生的异步制动转矩脉动。因此基于式~\eqref{eq:dy-th-mac-stator-alg}
+的模型\emph{不能}用于需要直流偏移或非对称波形细节的研究（那属于 EMT 或短路
+计算章的口径），但对转子摇摆频段（$0.1$–$2$~Hz）无实质影响。保留定子磁链动态的
+六阶模型（Marconato、Sauer--Pai 型）把 $\psi_d,\psi_q$ 留作状态，适用于换流器
+控制与定子磁链时间常数相互作用的场合。
+\end{remark}
+
+\subsubsection{模型谱系}
+
+在命题~\ref{prop:dy-th-mac-stator-alg} 的代数定子之上，按保留的转子动态层级得到
+标准模型族（状态数以机电状态计，均另加转子摇摆两状态 $\delta,\omega$）：
+
+\begin{enumerate}
+  \item \textbf{次暂态模型（GENROU/GENSAL 类，4/3 电气状态）}。圆筒转子 GENROU
+        要求 $x_d''=x_q''=x''$，状态取 $e_q',e_d',\psi_{kd},\psi_{kq}$：
+        \begin{align}
+        T_{d0}'\dot e_q'&=V_f-X_{ad}I_{fd},\label{eq:dy-th-mac-genrou1}\\
+        T_{q0}'\dot e_d'&=-X_{aq}I_{1q},\\
+        T_{d0}''\dot\psi_{kd}&=-\psi_{kd}+e_q'-(x_d'-x_l)i_d,\\
+        T_{q0}''\dot\psi_{kq}&=-\psi_{kq}+e_d'+(x_q'-x_l)i_q,\label{eq:dy-th-mac-genrou4}
+        \end{align}
+        定子电流由 $2\times2$ 代数式
+        \begin{equation}
+        \begin{bmatrix}i_d\\i_q\end{bmatrix}
+        =\begin{bmatrix}-R_s&x''\\-x''&R_s\end{bmatrix}^{-1}
+        \begin{bmatrix}v_d-\psi_q''\\-v_q+\psi_d''\end{bmatrix}
+        \label{eq:dy-th-mac-genrou-stator}
+        \end{equation}
+        解出，次暂态磁链由 $e'$ 与 $\psi_k$ 的线性混合
+        $\psi_d''=\gamma_{d1}e_q'+\gamma_{d2}(x_d'-x_l)\psi_{kd}$ 等给出，
+        $\gamma_{d1}=(x_d''-x_l)/(x_d'-x_l)$、
+        $\gamma_{d2}=(x_d'-x_d'')/(x_d'-x_l)^2$（q 轴类似）。式
+        \eqref{eq:dy-th-mac-genrou1} 右端的 $X_{ad}I_{fd}$ 为励磁绕组磁链的折合
+        量，可含饱和函数 $S_e(\psi'')$ 修正。凸极 GENSAL/GENSAE 只保留直轴次暂态
+        结构与交轴单一阻尼通路（3 电气状态：$e_q',\psi_{kd},\psi_q''$），
+        饱和施加位置不同。
+  \item \textbf{二轴/暂态模型（one-$d$-one-$q$，2 电气状态）}。弃去阻尼绕组动态
+        （$T''\to0$，$\psi_k$ 即时跟随），只保留 $e_q',e_d'$：
+        \begin{equation}
+        T_{d0}'\dot e_q'=-e_q'-(x_d-x_d')i_d+V_f,\qquad
+        T_{q0}'\dot e_d'=-e_d'+(x_q-x_q')i_q,
+        \label{eq:dy-th-mac-oneq}
+        \end{equation}
+        定子方程 \eqref{eq:dy-th-mac-stator-alg} 中以 $x_d',x_q'$ 与 $e_d',e_q'$
+        代换次暂态量。该层级刻画暂态电抗后电势的衰减，但不刻画最初数十毫秒的
+        次暂态屏蔽。
+  \item \textbf{经典模型（0 电气状态）}。进一步设励磁磁链不衰减
+        （$T_{d0}'\to\infty$，即"暂态电势恒定"假设），$e_q'=$ const（或复电势
+        $\bar E'=E'\angle\delta$ 恒幅），电机成为 $x_d'$ 后的恒定电势源：
+        \begin{equation}
+        \bar E'=E'e^{\mathrm j\delta},\qquad
+        \bar I=\frac{\bar E'-\bar V}{R_s+\mathrm jx_d'},
+        \label{eq:dy-th-mac-classical}
+        \end{equation}
+        唯一动态是转子摇摆。经典模型适用于远离扰动电气细节的大系统首摆稳定筛查，
+        也是稳定性解析理论（等面积定则）的载体模型。
+\end{enumerate}
+
+\begin{remark}[谱系的统一视角]\label{rem:dy-th-mac-hierarchy}
+三级模型是同一磁链方程组在 $\{T'',T',\infty\}$ 上的截断序列：每弃一层屏蔽，等值
+电抗升一档、等值电势动态慢一档。选型准则：研究窗口短于 $T_{d0}''$ 量级（次暂态）
+或涉及次暂态电抗决定的初始冲击时须用次暂态模型；窗口覆盖励磁调节（秒级）时至少
+用二轴模型加 AVR；只做首摆筛查且网络远大于单机细节时经典模型可接受。模型阶数
+提高的数值代价主要是刚性增强（$T_{d0}''\sim30$~ms 与调速器 $5$--$60$~s 并存），
+见第~\ref{sec:dy-th-mac-stab}~小节。
+\end{remark}
+
+\subsection{摆动方程、惯量常数与惯量中心参考系}\label{sec:dy-th-mac-swing}
+
+\subsubsection{摆动方程的推导}
+
+\begin{proposition}[摆动方程与惯量常数]\label{prop:dy-th-mac-swing}
+设转子（机组全部旋转质量的等值）转动惯量为 $J$（$\mathrm{kg\,m^2}$），额定机械角
+速度 $\Omega_{m0}$（rad/s），机组额定容量 $S_{\mathrm{dev}}$。定义\emph{惯量常数}
+\begin{equation}
+H=\frac{\tfrac12 J\Omega_{m0}^2}{S_{\mathrm{dev}}}\quad[\mathrm s],
+\label{eq:dy-th-mac-H}
+\end{equation}
+即额定转速下转子储能（Ws）与额定容量（W）之比。则以标幺转速
+$\omega=\Omega_m/\Omega_{m0}$、标幺转矩（基准 $S_{\mathrm{dev}}/\Omega_{m0}$）计的
+转子运动方程为
+\begin{equation}
+2H\,\dot\omega=\tau_m-\tau_e-D(\omega-1),
+\label{eq:dy-th-mac-swing}
+\end{equation}
+$D$ 为阻尼系数（含风阻、阻尼绕组异步转矩的一阶近似）；电角度（rad）方程为
+\begin{equation}
+\dot\delta=\Omega_b\bigl(\omega-\omega_{\mathrm{sys}}\bigr),
+\label{eq:dy-th-mac-delta}
+\end{equation}
+$\omega_{\mathrm{sys}}$ 为网络参考系转速标幺值（通常取 $1$ 或参考机组转速）。
+\end{proposition}
+
+\begin{proof}
+旋转刚体的牛顿第二定律：$J\dot\Omega_m=T_a$，$T_a$ 为加速转矩（机械驱动转矩减
+电磁制动转矩再减阻尼）。两边除以基准转矩 $T_B=S_{\mathrm{dev}}/\Omega_{m0}$：
+\begin{equation}
+\frac{J\Omega_{m0}}{S_{\mathrm{dev}}}\dot\Omega_m
+=\frac{J\Omega_{m0}^2}{S_{\mathrm{dev}}}\,\dot\omega
+=2H\,\dot\omega=\tau_a=\tau_m-\tau_e-\tau_D .
+\end{equation}
+取 $\tau_D=D(\omega-1)$（对额定转速的一阶展开）即式~\eqref{eq:dy-th-mac-swing}。
+电角度 $\delta$ 定义为转子 q 轴相对以 $\Omega_b\omega_{\mathrm{sys}}$ 旋转的
+网络参考轴的角差，转子电角速度为 $\Omega_b\omega$（极对数折算已含在电角度
+定义内），故 $\dot\delta=\Omega_b\omega-\Omega_b\omega_{\mathrm{sys}}$，即
+式~\eqref{eq:dy-th-mac-delta}。
+\end{proof}
+
+$H$ 的物理读法：$2H$ 是以标幺功率全额加速转子、从静止升到额定转速所需的秒数
+（量纲验证：$H$ 为秒，$\dot\omega$ 为 pu/s，$2H\dot\omega$ 为 pu）。汽轮机组典型
+$H\in[3,10]$~s，水轮 $[2,4]$~s；逆变器无物理惯量，$H$ 由虚拟惯量控制参数扮演
+（VSM 的 $T_a$ 恰对应 $2H$）。
+
+\subsubsection{惯量中心（COI）参考系}
+
+多机系统中每台机的 $\delta_i$ 都含一个共同的"整体摇摆"分量，逐机角度对稳定判断
+不便；惯量中心把该分量集中到一个等值坐标上。
+
+\begin{definition}[惯量中心]\label{def:dy-th-mac-coi}
+设孤岛 $\mathcal I$ 内携物理（或虚拟）转速状态的设备集为
+$\mathcal G=\{1,\dots,m\}$，惯量权重 $W_k=H_kS_k$（$S_k$ 为设备基准容量；
+$H$ 已定义在各自基准上，$H_kS_k$ 即储能 Ws）。惯量中心角与转速为
+\begin{equation}
+\delta_{\mathrm{COI}}=\frac{\sum_{k\in\mathcal G}W_k\delta_k}{\sum_{k\in\mathcal G}W_k},
+\qquad
+\omega_{\mathrm{COI}}=\frac{\sum_{k\in\mathcal G}W_k\omega_k}{\sum_{k\in\mathcal G}W_k}.
+\label{eq:dy-th-mac-coi}
+\end{equation}
+相对角 $\tilde\delta_k=\delta_k-\delta_{\mathrm{COI}}$ 为机组相对惯量中心的摇摆角。
+\end{definition}
+
+\begin{proposition}[COI 的聚合摆动方程]\label{prop:dy-th-mac-coi-swing}
+对式~\eqref{eq:dy-th-mac-swing} 加权求和，COI 转速满足
+\begin{equation}
+2H_T\,\dot\omega_{\mathrm{COI}}
+=\sum_{k\in\mathcal G}\frac{S_k}{S_B}\bigl(\tau_{m,k}-\tau_{e,k}-D_k(\omega_k-1)\bigr),
+\qquad
+H_T=\frac{\sum_kW_k}{S_B},
+\label{eq:dy-th-mac-coi-swing}
+\end{equation}
+即 COI 如同一台惯量为 $H_T$、净加速功率为全岛功率缺额（系统基准）的等值机。
+孤岛加速/减速的整体趋势完全由该方程给出；各机相对运动 $\tilde\delta_k$ 描述
+岛内的同步性。
+\end{proposition}
+
+\begin{proof}
+式~\eqref{eq:dy-th-mac-swing} 两边乘 $S_k/S_B$（把转矩从机组基准换算到系统基准：
+$\tau S/\Omega_{m0}$ 为有名值，故 pu 功率换算仅差容量比）后对 $k$ 求和：
+\begin{equation}
+2\sum_k\frac{H_kS_k}{S_B}\dot\omega_k
+=\sum_k\frac{S_k}{S_B}\bigl(\tau_{m,k}-\tau_{e,k}-D_k(\omega_k-1)\bigr).
+\end{equation}
+左端 $=2(H_T)\,\mathrm d\!\left[\sum_kW_k\omega_k/\sum_kW_k\right]/\mathrm dt
+=2H_T\dot\omega_{\mathrm{COI}}$，即式~\eqref{eq:dy-th-mac-coi-swing}。
+\end{proof}
+
+\begin{proposition}[参考系平移不变性]\label{prop:dy-th-mac-shift}
+设所有机组改用 COI 参考系：$\tilde\delta_k=\delta_k-\delta_{\mathrm{COI}}$、
+$\tilde\omega_k=\omega_k-\omega_{\mathrm{COI}}$。则
+式~\eqref{eq:dy-th-mac-swing}--\eqref{eq:dy-th-mac-delta} 的相对运动方程与绝对
+形式逐项相同（仅以相对量代换绝对量），且相对角的平衡流形
+$\{\tilde\delta:\sum_kW_k\tilde\delta_k=0\}$ 在动力学下不变。
+\end{proposition}
+
+\begin{proof}
+电磁转矩 $\tau_{e,k}$ 只通过角度差 $\delta_i-\delta_j$（网络潮流方程的角度规范
+自由度）与转速依赖量依赖于 $(\delta,\omega)$，故对任意常数参考平移
+$\delta_k\mapsto\delta_k+c(t)$（全体一致）不变；$\tau_{m,k}$ 与 $D$ 项经调速器
+只依赖转速偏差。因此式~\eqref{eq:dy-th-mac-swing} 对 $\omega_k$ 与
+$\omega_k-\omega_{\mathrm{COI}}$ 同形（两者之差 $2H_T$ 加权平均后由命题
+~\ref{prop:dy-th-mac-coi-swing} 封闭）。$\dot{\tilde\delta}_k
+=\dot\delta_k-\dot\delta_{\mathrm{COI}}=\Omega_b(\tilde\omega_k)$，与
+式~\eqref{eq:dy-th-mac-delta} 同形。不变性：
+$\sum_kW_k\tilde\delta_k=\sum_kW_k\delta_k-\delta_{\mathrm{COI}}\sum_kW_k=0$
+对一切 $t$ 成立（定义~\ref{def:dy-th-mac-coi} 直接给出），其导数恒零。
+\end{proof}
+
+\begin{remark}[COI 的工程用途与边界]\label{rem:dy-th-mac-coi-use}
+(i) COI 频率 $f_{\mathrm{COI}}=f_0\omega_{\mathrm{COI}}$ 是孤岛级频率指标
+（扰动后频率跌落/恢复的口径量），ROCOF 指标 $\dot f_{\mathrm{COI}}$ 同理；
+(ii) 相对角 $\tilde\delta_k$ 越限（如 $|\tilde\delta|>180^\circ$）是失步判据的
+常用口径；(iii) COI 可作为相量仿真参考系锚点（$\omega_{\mathrm{sys}}=
+\omega_{\mathrm{COI}}$）的候选之一，另两候选为恒定同步系
+（$\omega_{\mathrm{sys}}\equiv1$）与指定参考机组转速；(iv) 权重约定：无惯量
+设备不进入式~\eqref{eq:dy-th-mac-coi} 的平均，构网逆变器以虚拟惯量参数参与，
+需在全岛权重和为零（无任何携频设备）时回退到指定锚点并如实报告。
+\end{remark}
+
+\subsection{机电暂态 DAE：一般形式、指标与求解架构}\label{sec:dy-th-mac-dae}
+
+\subsubsection{一般形式与质量矩阵表述}
+
+汇集全部设备微分状态 $x$（转子角/转速、磁链/电势、控制器状态、动态支路电流、
+直流电容电压）与网络代数变量 $y$（各节点电压相量分量、直流电压），机电暂态
+仿真模型为半显式微分代数方程组
+\begin{equation}
+\dot x=f(x,y,u,t),\qquad 0=g(x,y,u,t),
+\label{eq:dy-th-mac-dae}
+\end{equation}
+$u$ 为参考/设定输入，$t$ 的显式依赖来自事件与时变注入。网络行
+$g$ 的典型形态为电流平衡
+\begin{equation}
+0=\bar\imath_{\mathrm{inj}}(x,\bar V)-\bar Y_{\mathrm{eff}}\bar V
+\quad\text{（复形式，实部虚部各一行）},
+\label{eq:dy-th-mac-netrow}
+\end{equation}
+$\bar Y_{\mathrm{eff}}$ 含折入的设备诺顿导纳；直流行为
+$0=i_{dc,\mathrm{inj}}-G_{dc}V_{dc}$。
+
+\begin{definition}[质量矩阵形与残差形]\label{def:dy-th-mac-massform}
+堆叠 $z=[y;x]$，式~\eqref{eq:dy-th-mac-dae} 的两种求解器等价表述为
+\begin{equation}
+\text{质量矩阵形：}\ M\dot z=F(z,t),\quad M=\mathrm{blkdiag}(0_{n_y},M_x);
+\qquad
+\text{残差形：}\ R(\dot z,z,t)=M\dot z-F(z,t)=0 .
+\label{eq:dy-th-mac-massform}
+\end{equation}
+$M_x$ 块对角：归一化 ODE 状态对应单位元，物理储能状态（滤波电感、动态支路、
+直流电容）对应 $l/\Omega_b$、$c/\Omega_b$、C$_{dc}$ 型系数，设备内部代数行对应
+零元。质量系数从零到非零的翻转即第~\ref{sec:dy-th-mac-phasor}~小节"代数升格为
+微分"在公式层面的编码。
+\end{definition}
+
+\subsubsection{微分指标}
+
+\begin{definition}[微分指标（differentiation index）]\label{def:dy-th-mac-index}
+DAE 的微分指标为：为把全体未知量的导数表示为状态与时间的显式函数，需要对代数
+约束关于 $t$ 求导的最少次数。指标 $1$ 即对 $g(x,y,t)=0$ 求导一次即可解出 $\dot y$。
+\end{definition}
+
+\begin{proposition}[网络耦合 DAE 的指标判据]\label{prop:dy-th-mac-index1}
+式~\eqref{eq:dy-th-mac-dae} 沿解轨线为指标 $1$，当且仅当
+\begin{equation}
+g_y=\frac{\partial g}{\partial y}\ \text{沿轨线非奇异}.
+\label{eq:dy-th-mac-gy}
+\end{equation}
+此时代数变量由微分状态局部唯一确定（隐函数定理），$\dot y=-g_y^{-1}(g_xf+g_t)$，
+DAE 在微分流形 $\{g=0\}$ 上等价于一个 ODE。
+\end{proposition}
+
+\begin{proof}
+充分性：对 $g(x(t),y(t),t)=0$ 全微分得
+$g_x\dot x+g_y\dot y+g_t=0$。$g_y$ 非奇异时解出
+$\dot y=-g_y^{-1}(g_xf+g_t)$，求导一次即得全体导数的显式表达，指标 $\le1$；
+又 $g$ 非平凡故指标 $\ge1$。必要性（逆否）：若 $g_y$ 在某点奇异，则该点处对
+$g$ 求导一次所得方程中 $\dot y$ 的系数阵奇异，$\dot y$ 无法由一次求导唯一确定，
+需再次求导或补充约束，指标 $>1$（或系统不可解）。指标 $1$ 时在流形上取
+$x$ 为局部坐标，$y=y(x,t)$ 由隐函数定理存在且光滑，代入 $\dot x=f(x,y(x,t),t)$
+即得流形上的 ODE。
+\end{proof}
+
+对网络行式~\eqref{eq:dy-th-mac-netrow}，$g_y\approx-\bar Y_{\mathrm{eff}}
++\partial\bar\imath_{\mathrm{inj}}/\partial\bar V$。其奇异的典型物理成因有二：
+\begin{itemize}
+  \item \textbf{孤岛失去电压锚点}：拓扑事件后某连通岛内无同步机/构网设备/松弛
+        节点，该岛的 $\bar Y_{\mathrm{eff}}$ 块缺设备刚度而近奇异。求解器必须在
+        每次拓扑事件后做连通分量扫描并重新选举锚点，或把死岛行掩蔽后如实报告，
+        绝不允许"积分通过"奇异的 $g_y$；
+  \item \textbf{恒功率负荷在电压崩溃点}：$|V|\to0$ 时
+        $\partial(S/\bar V)^{*}/\partial V$ 发散。工程处置是低压下的恒功率-阻抗
+        平滑切换（$V<V_{\min}$ 时 $P(V)=P_0(V/V_{\min})^2$），既保指标 $1$ 又符合
+        实际负荷特性。
+\end{itemize}
+
+\subsubsection{分块与联立两类求解架构}
+
+式~\eqref{eq:dy-th-mac-dae} 有两类工业求解架构：
+
+\begin{definition}[分块（partitioned）架构]\label{def:dy-th-mac-partitioned}
+每个积分步内交替求解：(i) 固定 $x$，解代数网络 $g(x,y,t)=0$ 得 $y$（网络牛顿或
+不动点迭代）；(ii) 视 $y(x)$ 为已知，对 $\dot x=f(x,y(x),t)$ 施加显式或隐式 ODE
+单步法；(iii) 必要时在步末重新解代数方程使输出一致。代数-微分之间以有界次数的
+交替（Picard 型）逼近联立解。
+\end{definition}
+
+\begin{definition}[联立（simultaneous）架构]\label{def:dy-th-mac-simultaneous}
+把隐式单步法（如梯形）直接施加于质量矩阵形~\eqref{eq:dy-th-mac-massform}，
+每步对全未知量 $z_{n+1}$ 解一个非线性方程组，例如梯形法：
+\begin{equation}
+\Phi(z_{n+1})=M(z_{n+1}-z_n)-\frac{h}{2}\bigl[F(z_{n+1},t_{n+1})+F(z_n,t_n)\bigr]=0,
+\qquad
+\frac{\partial\Phi}{\partial z_{n+1}}=M-\frac{h}{2}J ,
+\label{eq:dy-th-mac-simnewton}
+\end{equation}
+以牛顿法求解；$M-hJ/2$ 呈箭头（arrowhead）稀疏结构：网络块（$-\bar Y_{\mathrm{eff}}$
+主导）加各设备小块加设备-网络耦合列。
+\end{definition}
+
+\begin{proposition}[分块交替的收敛条件]\label{prop:dy-th-mac-picard}
+设指标 $1$ 成立，分块架构中"固定 $x$ 解 $y$"用不动点迭代
+$y^{(k+1)}=G(y^{(k)};x)$（如把设备注入冻结后的线性网络解）。若在解的邻域内
+\begin{equation}
+\rho\Bigl(\frac{\partial G}{\partial y}\Bigr)\le q<1
+\label{eq:dy-th-mac-picard}
+\end{equation}
+（$\rho$ 为谱半径），则迭代以不小于 $1-q$ 的线性速率收敛到该 $x$ 下的唯一
+局部不动点；但\emph{步内设备状态与网络电压的联立一致性}只在交替迭代到收敛时
+才严格成立，有限次交替引入 $O(h)$ 量级的分裂误差（与显式欧拉同级）。
+\end{proposition}
+
+\begin{proof}
+设 $y^*$ 满足 $y^*=G(y^*;x)$。由微分中值定理，
+$y^{(k+1)}-y^*=G(y^{(k)})-G(y^*)=\frac{\partial G}{\partial y}(\xi_k)(y^{(k)}-y^*)$，
+取范数得 $\lVert y^{(k+1)}-y^*\rVert\le\lVert\partial G/\partial y\rVert\,
+\lVert y^{(k)}-y^*\rVert$。谱半径条件式~\eqref{eq:dy-th-mac-picard} 蕴含存在
+相容范数使 $\lVert\partial G/\partial y\rVert\le q'<1$（$q<q'<1$），故误差以
+公比 $q'$ 几何收缩，极限为不动点；指标 $1$（$g_y$ 非奇异）保证该不动点即
+$g(x,\cdot,t)=0$ 的局部唯一解。分裂误差：每步只做一次"代数解$\to$微分步"的
+交替相当于对 Lie 分裂的一阶格式，其局部误差为 $O(h^2)$、全局 $O(h)$，严格论证
+即分裂法的标准展开，此处从略~\cite{dym:hairer1}。
+\end{proof}
+
+\begin{remark}[两架构的工程权衡]\label{rem:dy-th-mac-archtradeoff}
+分块架构实现简单、网络求解器可复用静态潮流内核、与准稳态（QSTS）外层调度天然
+衔接，但 (i) 设备-网络一致性靠交替次数保证，刚性设备（换流器内环）下交替可能
+失稳；(ii) 显式积分器受最快模态步长限制（见下小节）。联立架构把一致性提升为
+牛顿收敛判据、可用 A-稳定隐式方法让步长只取决于精度，代价是每步一个大规模稀疏
+牛顿系统与雅可比装配/复用策略的复杂度。生产级暂态程序（PSID、PSS/E 的扩展
+活动）均以联立为主力、分块为校验与轻量路径。
+\end{remark}
+
+\subsection{隐式单步法的精度与稳定性理论}\label{sec:dy-th-mac-stab}
+
+\subsubsection{局部截断误差与阶}
+
+\begin{definition}[局部截断误差与方法的阶]\label{def:dy-th-mac-lte}
+对 ODE $\dot w=\varphi(w,t)$，单步法 $w_{n+1}=w_n+h\Phi(w_n,w_{n+1},t_n,h)$ 的
+\emph{局部截断误差}定义为精确解代入格式后的残差
+\begin{equation}
+\tau_{n+1}=\frac{w(t_{n+1})-w(t_n)}{h}-\Phi\bigl(w(t_n),w(t_{n+1}),t_n,h\bigr).
+\label{eq:dy-th-mac-lte}
+\end{equation}
+若 $\tau_{n+1}=O(h^p)$，称方法为 $p$ 阶；此时单步局部误差为 $O(h^{p+1})$，
+全局误差为 $O(h^p)$（$f$ 充分光滑且方法稳定的标准结论~\cite{dym:hairer1}）。
+\end{definition}
+
+\begin{proposition}[后向欧拉与隐式梯形的局部截断误差]\label{prop:dy-th-mac-lte2}
+后向欧拉 $w_{n+1}=w_n+h\varphi(w_{n+1},t_{n+1})$ 为一阶，
+\begin{equation}
+\tau^{\mathrm{BE}}_{n+1}=-\frac{h}{2}\ddot w(t_n)+O(h^2);
+\label{eq:dy-th-mac-be-lte}
+\end{equation}
+隐式梯形 $w_{n+1}=w_n+\frac h2\bigl[\varphi(w_n,t_n)+\varphi(w_{n+1},t_{n+1})\bigr]$
+为二阶，
+\begin{equation}
+\tau^{\mathrm{TR}}_{n+1}=-\frac{h^2}{12}\dddot w(t_n)+O(h^3).
+\label{eq:dy-th-mac-tr-lte}
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+对精确解做泰勒展开（$w,\dot w,\ddot w,\dddot w$ 均在 $t_n$ 取值）：
+$w(t_{n+1})=w+h\dot w+\frac{h^2}{2}\ddot w+\frac{h^3}{6}\dddot w+O(h^4)$，
+$\dot w(t_{n+1})=\dot w+h\ddot w+\frac{h^2}{2}\dddot w+O(h^3)$。
+
+后向欧拉：$\Phi=\dot w(t_{n+1})$，代入式~\eqref{eq:dy-th-mac-lte}，
+\begin{equation}
+\tau^{\mathrm{BE}}_{n+1}
+=\frac{h\dot w+\frac{h^2}{2}\ddot w+O(h^3)}{h}-\bigl(\dot w+h\ddot w+O(h^2)\bigr)
+=-\frac{h}{2}\ddot w+O(h^2).
+\end{equation}
+
+隐式梯形：$\Phi=\frac12[\dot w(t_n)+\dot w(t_{n+1})]$，
+\begin{equation}
+\tau^{\mathrm{TR}}_{n+1}
+=\dot w+\frac h2\ddot w+\frac{h^2}{6}\dddot w+O(h^3)
+-\frac12\Bigl[2\dot w+h\ddot w+\frac{h^2}{2}\dddot w+O(h^3)\Bigr]
+=-\frac{h^2}{12}\dddot w+O(h^3).
+\end{equation}
+两式即 \eqref{eq:dy-th-mac-be-lte}、\eqref{eq:dy-th-mac-tr-lte}。
+\end{proof}
+
+梯形的主误差项含三阶导数且系数 $1/12$ 小，故在光滑解段精度显著优于一阶方法；
+但如下所示其稳定性尾部行为不同，选型不能只看阶。
+
+\subsubsection{A-稳定、L-稳定与刚性}
+
+\begin{definition}[稳定函数与 A-稳定/L-稳定]\label{def:dy-th-mac-stability}
+将单步法施加于检验方程 $\dot w=\lambda w$（$\lambda\in\mathbb C$），记
+$z=h\lambda$，则 $w_{n+1}=R(z)w_n$，$R$ 称\emph{稳定函数}。方法的\emph{稳定域}
+为 $\mathcal S=\{z\in\mathbb C:|R(z)|\le1\}$。若 $\mathbb C^-=\{z:\mathrm{Re}\,z\le0\}
+\subseteq\mathcal S$，称方法 \textbf{A-稳定}；若 A-稳定且 $|R(\infty)|=
+\lim_{|z|\to\infty}|R(z)|=0$，称 \textbf{L-稳定}~\cite{dym:hairer2}。
+\end{definition}
+
+\begin{theorem}[后向欧拉与隐式梯形的稳定性]\label{thm:dy-th-mac-astab}
+后向欧拉 $R_{\mathrm{BE}}(z)=1/(1-z)$ 是 L-稳定的；隐式梯形
+$R_{\mathrm{TR}}(z)=(1+z/2)/(1-z/2)$ 是 A-稳定但\emph{非}L-稳定的，且
+$R_{\mathrm{TR}}(\infty)=-1$。
+\end{theorem}
+
+\begin{proof}
+\textbf{梯形：} 设 $\mathrm{Re}\,z\le0$。$R_{\mathrm{TR}}$ 是 Möbius 变换
+$z\mapsto(1+z/2)/(1-z/2)$。虚轴上 $|1+z/2|=|1-z/2|$（点到 $-2$ 与 $2$ 等距），
+故 $|R_{\mathrm{TR}}|=1$；左半平面内点到 $2$ 的距离大于到 $-2$ 的距离，
+即 $|1-z/2|>|1+z/2|$，故 $|R_{\mathrm{TR}}|<1$。由最大模原理（或直接的距离
+论证），$\mathbb C^-$ 映入闭单位圆盘，A-稳定成立。$z\to\infty$ 时
+$R_{\mathrm{TR}}\to( z/2)/(-z/2)=-1\ne0$，非 L-稳定。
+
+\textbf{后向欧拉：} $\mathrm{Re}\,z\le0$ 时 $|1-z|\ge1$，故
+$|R_{\mathrm{BE}}|=1/|1-z|\le1$，A-稳定；$z\to\infty$ 时
+$R_{\mathrm{BE}}\to0$，L-稳定。
+\end{proof}
+
+\begin{remark}[$R(\infty)=-1$ 的工程含义：梯形振铃]\label{rem:dy-th-mac-ringing}
+快衰减模态对应 $z=h\lambda$ 深在左半平面远处（$|z|\gg1$）。L-稳定方法把这类
+分量一步压到 $0$；梯形则将其乘以 $\approx-1$ 保留下来并逐步反号——表现为扰动
+（事件、开关、限幅切换）后的非物理高频振荡（"trapezoidal ringing"）。标准对策：
+(i) 事件后若干步用 L-稳定方法（后向欧拉或 TR-BDF2 的 BDF 半级）重启再切回梯形；
+(ii) 带阻尼梯形（$\alpha$-梯形）；(iii) 干脆全程用 L-稳定二阶方法（TR-BDF2）。
+这也是"梯形+后向欧拉启动"组合成为暂态程序默认配方的原因。
+\end{remark}
+
+\begin{definition}[刚性（stiffness）]\label{def:dy-th-mac-stiff}
+称问题为\emph{刚性}：当采用对精度而言合理的步长时，显式方法因稳定域有界而被迫
+取远小于精度所需的步长（Hairer--Wanner 的实用定义~\cite{dym:hairer2}：
+"stiff equations are problems for which explicit methods don't work"）。定量刻画：
+快模态已衰减到可忽略（其瞬态对解无贡献），但显式法仍须满足
+$h|\lambda_{\max}|\lesssim c$（$c$ 为稳定域边界的量级常数），于是
+$h\lesssim c/|\lambda_{\max}|$ 由\emph{最快快模态}而非精度决定。
+\end{definition}
+
+\begin{remark}[机电暂态的刚性谱与选型准则]\label{rem:dy-th-mac-choose}
+相量域机电暂态 DAE 构造性地刚性：电机次暂态 $T_d''\sim30$~ms、滤波器/动态支路的
+$l_f/\Omega_b\sim10^{-4}$~s，对上调速器与电站级控制的 $5$--$60$~s，谱跨
+$4$--$5$ 个数量级。选型准则：
+\begin{itemize}
+  \item 仅慢模态、无换流器内环的机网系统：显式/分块方法可用，
+        $h\lesssim2/|\lambda_{\max}|$ 决定步长上限；
+  \item 含快设备（LCL 滤波器、次暂态模型、快 AVR）：必须 A-稳定隐式法，
+        $h$ 按精度取 $1$--$10$~ms；事件密集段用 L-稳定步重启；
+  \item 强刚性且公差紧：高阶线性隐式（Rosenbrock）或变阶 BDF 族。
+\end{itemize}
+选型也可在运行时按试探步的牛顿收敛/步长折半统计自动升级（成本排序的
+稳定性阶梯），但不得把失败静默改写为收敛。
+\end{remark}
+
+\subsection{Runge--Kutta 族的 Butcher 理论与 Rosenbrock 方法}\label{sec:dy-th-mac-rk}
+
+\subsubsection{Runge--Kutta 方法的统一表述}
+
+\begin{definition}[$s$ 级 Runge--Kutta 方法与 Butcher 表]\label{def:dy-th-mac-rk}
+对 $\dot w=\varphi(w,t)$，$s$ 级 RK 方法为
+\begin{equation}
+k_i=\varphi\Bigl(w_n+h\textstyle\sum_{j=1}^{s}a_{ij}k_j,\ t_n+c_ih\Bigr),
+\qquad
+w_{n+1}=w_n+h\sum_{i=1}^{s}b_ik_i,
+\label{eq:dy-th-mac-rk}
+\end{equation}
+系数记为 Butcher 表 $(c,A,b)$，$c_i=\sum_ja_{ij}$。$A$ 严格下三角为\emph{显式}
+（ERK，逐级解出 $k_i$）；$A$ 下三角含对角为\emph{对角隐式}（DIRK/SDIRK，每级一个
+小牛顿）；$A$ 一般为\emph{全隐式}（IRK）。梯形法即 $s=2$ 的 Lobatto 型
+$A=\bigl[\begin{smallmatrix}0&0\\1/2&1/2\end{smallmatrix}\bigr]$、$b=(1/2,1/2)$，
+后向欧拉即 $s=1$ 的 $A=[1]$、$b=[1]$。
+\end{definition}
+
+\begin{proposition}[阶条件（至 4 阶）]\label{prop:dy-th-mac-ordercond}
+RK 方法达阶 $p$ 的充要条件由有根树（rooted trees）逐树给出~\cite{dym:butcher}；
+前四阶对应的条件为
+\begin{align}
+p=1:&\ \textstyle\sum_ib_i=1;\qquad
+p=2:\ \sum_ib_ic_i=\tfrac12;\label{eq:dy-th-mac-oc12}\\
+p=3:&\ \textstyle\sum_ib_ic_i^2=\tfrac13,\ \sum_{ij}b_ia_{ij}c_j=\tfrac16;
+\label{eq:dy-th-mac-oc3}\\
+p=4:&\ \textstyle\sum_ib_ic_i^3=\tfrac14,\ \sum_{ij}b_ic_ia_{ij}c_j=\tfrac18,
+\ \sum_{ij}b_ia_{ij}c_j^2=\tfrac1{12},\
+\sum_{ijk}b_ia_{ij}a_{jk}c_k=\tfrac1{24}.
+\label{eq:dy-th-mac-oc4}
+\end{align}
+经典四阶 RK（$c=(0,1/2,1/2,1)$，$A$ 严格下三角 $a_{21}=a_{32}=1/2$、$a_{43}=1$，
+$b=(1,2,2,1)/6$）满足全部条件，即工程常用 RK4。
+\end{proposition}
+
+\begin{proof}[证明要点]
+把方法与精确解在 $t_n$ 处对 $h$ 做泰勒展开：精确解的各阶导数由 $\varphi$ 的
+全导数链式展开给出（$\ddot w=\varphi_t+\varphi_w\varphi$ 等），方法侧的各阶
+增量由式~\eqref{eq:dy-th-mac-rk} 对 $h$ 逐次求导给出，两者逐幂次比较即得每棵
+有根树一个方程；式~\eqref{eq:dy-th-mac-oc12}--\eqref{eq:dy-th-mac-oc4} 是树数
+$\le4$ 的全部独立条件（树论的系统推导见~\cite{dym:butcher,dym:hairer1}）。
+对 RK4 逐式代入验证：$\sum_ib_i=(1+2+2+1)/6=1$；
+$b^{\mathsf T}c=(1\cdot0+2\cdot\tfrac12+2\cdot\tfrac12+1\cdot1)/6=\tfrac12$；
+$b^{\mathsf T}c^2=(2\cdot\tfrac14+2\cdot\tfrac14+1\cdot1)/6=\tfrac13$；
+$b^{\mathsf T}Ac=(2\cdot a_{32}c_2+1\cdot a_{43}c_3)/6
+=(2\cdot\tfrac12\cdot\tfrac12+\tfrac12)/6=\tfrac16$；
+式~\eqref{eq:dy-th-mac-oc4} 四式同理代入成立。故 RK4 为 4 阶。
+\end{proof}
+
+\begin{proposition}[显式 RK 的稳定域必有界]\label{prop:dy-th-mac-erkbounded}
+任何显式 RK 方法的稳定函数 $R(z)$ 是次数 $\le s$ 的多项式；因此其稳定域
+$\mathcal S$ 在左半平面内有界，显式 RK 不可能 A-稳定。
+\end{proposition}
+
+\begin{proof}
+对检验方程，$k_i=\lambda(w_n+h\sum_ja_{ij}k_j)$，$A$ 严格下三角时逐级代入只含
+乘积与求和，$k_i$ 为 $\lambda w_n$ 的次数 $\le i$ 的多项式，故
+$R(z)=1+z\,b^{\mathsf T}(I-zA)^{-1}\mathbf 1$ 归纳即得 $R(z)$ 为次数
+$\le s$ 的多项式（事实上 ERK 的 $R(z)=\sum_{k=0}^{s}z^k/k!$ 当 $p=s\le4$）。
+非常数多项式在 $\mathbb C^-$ 上无界（沿负实轴 $|R(-r)|\to\infty$，$r\to+\infty$
+时除非所有系数为零——与 $\sum b_i=1$ 给出 $R(z)=1+z+\cdots$ 矛盾），故存在
+$\mathrm{Re}\,z<0$ 使 $|R(z)|>1$，$\mathbb C^-\not\subseteq\mathcal S$。
+\end{proof}
+
+命题~\ref{prop:dy-th-mac-erkbounded} 是刚性问题必须用隐式或线性隐式方法的根本
+原因（定义~\ref{def:dy-th-mac-stiff} 的对应面）。
+
+\subsubsection{Rosenbrock（线性隐式 Runge--Kutta）方法}
+
+\begin{definition}[Rosenbrock 方法的一般形式]\label{def:dy-th-mac-rosenbrock}
+对自治化后的 $\dot w=\varphi(w)$，取 $W=I-\gamma hJ$，$J=\partial\varphi/\partial w$
+（或其近似），$s$ 级 Rosenbrock 方法为
+\begin{equation}
+Wk_i=h\,\varphi\Bigl(w_n+\textstyle\sum_{j=1}^{i-1}\alpha_{ij}k_j\Bigr)
++hJ\sum_{j=1}^{i-1}\gamma_{ij}k_j,
+\qquad
+w_{n+1}=w_n+\sum_{i=1}^{s}b_ik_i .
+\label{eq:dy-th-mac-rosenbrock}
+\end{equation}
+每级只解一个\emph{以同一 $W$ 为系数阵}的线性方程组：一次 LU 分解复用全部 $s$ 级，
+无内嵌牛顿迭代——这是相对 DIRK 的核心成本优势；代价是引入 $J$ 的显式依赖，
+阶条件比 RK 多出一族含 $\gamma_{ij}$ 的方程，且 $J$ 的误差会按阶条件退阶
+（$W$ 方法允许不精确雅可比，Rosenbrock 严格意义下要求 $J$ 精确或按
+$\gamma$-结构补偿）~\cite{dym:hairer2}。
+\end{definition}
+
+\begin{remark}[Rosenbrock 在机电暂态中的位置]\label{rem:dy-th-mac-rosenbrock-use}
+Rodas 类高阶 Rosenbrock（4--5 阶、L-稳定）配精确雅可比与步长控制，是中小规模
+刚性 DAE 的高精度路径；其单级特例 $s=1$、$\gamma=1$ 即\emph{线性隐式欧拉}
+（Rosenbrock--Euler）：
+\begin{equation}
+(I-hJ)\,\Delta w=h\,\varphi(w_n),\qquad w_{n+1}=w_n+\Delta w ,
+\label{eq:dy-th-mac-roseuler}
+\end{equation}
+相当于对后向欧拉的非线性方程做\emph{一次}牛顿迭代后截断，一阶、L-稳定：对检验
+方程取 $J=\lambda$ 得 $w_{n+1}=w_n+zw_n/(1-z)=w_n/(1-z)$，即稳定函数
+$R(z)=1/(1-z)$，与后向欧拉相同。每步一次雅可比求值与一次线性分解。
+\end{remark}
+
+\begin{gapnote}
+Rosenbrock 方法的完整家族（多级 Rodas 类、嵌入误差估计与自适应步长、质量矩阵
+DAE 推广 $M-\gamma hJ$）未在当前代码中实现：代码仅提供单级线性隐式欧拉变体
+（RosenbrockEuler，数值雅可比、固定步长），TR-BDF2 与 BDF/IDA 型变阶自适应
+路径亦未实现。第~\ref{sec:dy-th-mac-rk}~小节的一般理论超出实现范围的部分以此
+框标记。
+\end{gapnote}
+
+\subsection{DAE 一致初始条件与动态修整}\label{sec:dy-th-mac-init}
+
+\subsubsection{一致性合同}
+
+\begin{definition}[平衡初值与一致初始条件]\label{def:dy-th-mac-consistent}
+对式~\eqref{eq:dy-th-mac-dae}，初值 $(x_0,y_0,u_0)$ 称为\emph{平衡初值}：若
+\begin{equation}
+f(x_0,y_0,u_0,t_0)=0,\qquad g(x_0,y_0,u_0,t_0)=0 .
+\label{eq:dy-th-mac-equil}
+\end{equation}
+仅满足第二式者称\emph{代数一致}。平衡初值是"仿真在扰动前保持静止"的充要条件
+（$f,g$ 对 $t$ 的显式依赖在 $t_0$ 邻域内为零时）。
+\end{definition}
+
+\begin{proposition}[指标 1 下一致性的适定性]\label{prop:dy-th-mac-initwellposed}
+设式~\eqref{eq:dy-th-mac-dae} 在 $(x_0,y_0)$ 处指标 1（$g_y$ 非奇异，命题
+~\ref{prop:dy-th-mac-index1}），则对充分接近 $x_0$ 的任意微分状态 $\hat x$，
+存在局部唯一 $\hat y$ 使 $g(\hat x,\hat y)=0$，且 $\hat y$ 对 $\hat x$ 光滑
+依赖；对 $g(x_0,\cdot)=0$ 的牛顿迭代局部二次收敛。
+\end{proposition}
+
+\begin{proof}
+$g(x_0,y_0)=0$ 且 $g_y(x_0,y_0)$ 非奇异，隐函数定理给出局部光滑映射
+$\hat y=\eta(\hat x)$、$\eta(x_0)=y_0$，唯一性同定理。牛顿迭代
+$y^{(k+1)}=y^{(k)}-g_y(x_0,y^{(k)})^{-1}g(x_0,y^{(k)})$ 的局部二次收敛是标准
+结论（$g$ 二阶连续可微时误差满足 $e_{k+1}=O(e_k^2)$，见实现层潮流章 Newton
+理论部分的同款论证）。
+\end{proof}
+
+\subsubsection{三阶段初始化与动态修整}
+
+机电暂态初始化在工程上分三阶段执行~\cite{dym:milano}：
+\begin{enumerate}
+  \item \textbf{潮流断面}：解交直流混合潮流得全部节点电压与端口注入
+        $(\bar V_0,\bar I_0,V_{dc,0})$——这是代数一致性的网络部分；
+  \item \textbf{逐设备反解（back-solve）}：每台设备由端口条件反解内部状态与自由
+        设定值。同步机链：$\bar I=(\bar S_0/\bar V_0)^{*}\Rightarrow$
+        $\bar E=\bar V_0+(R_s+\mathrm jx_q)\bar I$ 定 $\delta_0\Rightarrow$
+        dq 电流 $\Rightarrow$ 各电势状态 $\Rightarrow$ $V_f^0$（从而\emph{反定}
+        AVR 参考 $V_{\mathrm{ref}}$）与 $\tau_m^0$（反定调速器参考
+        $P_{\mathrm{ref}}$）。逆变器链：滤波器状态 $\Rightarrow$ PLL 锁定
+        （$\theta_{\mathrm{pll}}=\theta_{\mathrm{terminal}}$、$v_q^{\mathrm{pll}}=0$）
+        $\Rightarrow$ 外环（$\theta_{oc},V_{oc}$ 与参考）$\Rightarrow$ 直流侧
+        $v_{dc}^0$ $\Rightarrow$ 内环 PI 积分状态（令 PI 输入为零）与调制
+        $m_0=v_{cv}^0/v_{dc}^0$；
+  \item \textbf{全系统修整（dynamic trimming）}：阶段 2 只是逐设备精确；共享量
+        （节点电压、内变量耦合、饱和）留下 $O(\mathrm{tol}_{\mathrm{pf}})$ 级
+        残差，会以 $0.1$--$1$~s 的虚假暂态出现。以阶段 2 结果为种子，对
+        式~\eqref{eq:dy-th-mac-equil} 施加全系统牛顿/交替修整，把快状态残差
+        $\lVert\dot x\rVert_\infty$ 压到容差（如 $10^{-7}$）以下，并把收敛性
+        如实写入初始化摘要，未达标保持可见警告。
+\end{enumerate}
+
+\begin{remark}[慢状态钉住]\label{rem:dy-th-mac-slowpin}
+小时级动态的状态（电池 SOC、热过程）不参与平衡残差：其方程行从
+式~\eqref{eq:dy-th-mac-equil} 第一式中移除（钉住取运行点值），其导数在 $t_0$
+允许非零。微分/代数/钉住的划分是设备声明的元数据而非求解器启发式；否则修整
+会把 SOC 等慢状态错误地"平衡"掉其合法的漂移趋势。
+\end{remark}
+
+\begin{remark}[与事件重启的关系]\label{rem:dy-th-mac-restart}
+拓扑/设定事件后的代数重一致化是本节的退化情形：微分状态冻结（物理状态不能
+跳变），仅对 $y$ 解 $g(x_{\mathrm{frozen}},y,t_e^+)=0$（网络牛顿），再以单步法
+从阶 1 重启（BDF 类变阶法需正式降阶重启；单步法无此问题）。限幅/死区切换留在
+积分器内部作为分段光滑右端处理；真正离散的跳变（跳闸、模式切换）一律走事件
+队列，积分到事件时刻、施加编辑、重一致化、重启。
+\end{remark}
+
+\subsection{与实现的对应}
+
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{6.8cm}L{8.6cm}@{}}
+\toprule
+理论条目 & 实现状态\\
+\midrule
+\endfirsthead
+\toprule
+理论条目 & 实现状态\\
+\midrule
+\endhead
+相量域代数网络（逐时刻 $\bar Y_{\mathrm{eff}}\bar V=\bar I$，AC 复相域 + DC 实量） &
+\implfull{src/dynamics/DynamicSystem.cpp:solveNetwork}（有效矩阵装配见 DynamicNetwork::assembleEffectiveMatrices）\\
+动态支路（动态相量 RL 支路，式~\eqref{eq:dy-th-mac-dynbranch}） &
+\implfull{src/dynamics/devices/BasicDynamicDevices.cpp:DynamicRLLine::computeDerivatives}（参数装配见 DynamicModelBuilder.cpp:make\_dynamic\_rl\_line\_params）\\
+EMT 波形仿真 &
+\implnone\\
+Park 变换与 RI$\leftrightarrow$dq 坐标换算（式~\eqref{eq:dy-th-mac-ri-dq}） &
+\implfull{src/dynamics/devices/BasicDynamicDevices.cpp:dq\_from\_phasor}（逆变换 phasor\_from\_dq）\\
+序分量-相位域接口 $Y_{abc}=T\,\mathrm{diag}(Y_0,Y_1,Y_2)T^{-1}$ &
+\implfull{src/dynamics/DynamicModelBuilder.cpp:sequence\_to\_phase\_matrix}\\
+标幺化与机组/系统基准换算（式~\eqref{eq:dy-th-mac-baseconv}） &
+\implfull{src/dynamics/DynamicModelBuilder.cpp:DynamicModelBuilder::build}（设备基准参数在装配层折算，单系统基准 $S_B$）\\
+同步电机模型谱系（经典/二轴/次暂态） &
+\implfull{src/dynamics/devices/BasicDynamicDevices.cpp:SynchronousMachine}（SynchronousMachineModelKind 覆盖 Classical、OneDOneQ、SimpleAF、AndersonFouad、SimpleMarconato、Marconato、SauerPai、GENROU、GENROE、GENSAL、GENSAE 共 11 型；摇摆右端见 SynchronousMachine::computeDerivatives）\\
+摆动方程与惯量常数 $H$（式~\eqref{eq:dy-th-mac-swing}--\eqref{eq:dy-th-mac-delta}） &
+\implfull{src/dynamics/devices/BasicDynamicDevices.cpp:SynchronousMachine::computeDerivatives}（$2H\dot\omega=P_m-P_e-\tau_{\mathrm{brake}}-D(\omega-1)$ 含小不平衡死区）\\
+惯量中心频率与分岛聚合（命题~\ref{prop:dy-th-mac-coi-swing}） &
+\implfull{src/dynamics/DynamicFrequency.cpp:computeFrequencyReport}（逐岛 $H\cdot S$ 加权 COI 频率/ROCOF 与系统级 COI；设备权重元数据见 DynamicDevice 的 contributes\_coi/inertia\_h）\\
+DAE 半显式形式与质量矩阵联立求解（式~\eqref{eq:dy-th-mac-massform}、\eqref{eq:dy-th-mac-simnewton}） &
+\implfull{src/dynamics/DynamicSystem.cpp:evaluateDaeResidual}（$r_f=\dot x-f$、$r_g=$ 网络电流平衡；驱动见 src/dynamics/DynamicSolver.cpp:solve\_mass\_matrix\_dae，MassMatrixDae 求解器类型）\\
+指标概念与指标 $\ge2$ 处置（约束稳定化/降指标） &
+\implpart{指标 1 口径由代数网络求解与奇异正则化维持（solveNetwork、singular\_regularization\_pu）；无显式指标诊断与高指标约化算法}\\
+分块求解架构（定义~\ref{def:dy-th-mac-partitioned}） &
+\implfull{src/dynamics/solvers/DaeSolver.cpp:DaeSolver::step}（代数解$\to$积分步$\to$代数解三段；代数内层为 AlgebraicNetworkSolver::solve，失速时牛顿回退见 DynamicSystem::solveNetworkNewton）\\
+隐式梯形/后向欧拉（命题~\ref{prop:dy-th-mac-lte2}、定理~\ref{thm:dy-th-mac-astab}） &
+\implfull{src/dynamics/integration/Trapezoidal.cpp:Trapezoidal::step}（阻尼牛顿，TrapezoidalNewton）与 src/dynamics/integration/BackwardEuler.cpp:BackwardEuler::step（BackwardEulerNewton）；MassMatrixDae 内 DynamicDaeStepMethod 亦含 BackwardEuler/Trapezoidal 两选项\\
+梯形振铃对策（注记~\ref{rem:dy-th-mac-ringing}：BE 重启/TR-BDF2/$\alpha$ 阻尼） &
+\implpart{无显式事件后方法切换；以步长折半与分块交替吸收事件突变（max\_step\_halving），TR-BDF2 未实现}\\
+刚性自动选型（注记~\ref{rem:dy-th-mac-choose}） &
+\implfull{src/dynamics/DynamicSolver.cpp:maybe\_auto\_select\_stiff\_solver}（成本排序的稳定性阶梯，失败保留可见错误）\\
+RK 族与 Butcher 阶条件（命题~\ref{prop:dy-th-mac-ordercond}） &
+\implpart{仅经典四阶 RK4：src/dynamics/integration/RK4.cpp:RK4::step（PartitionedRK4）；显式欧拉 ExplicitEuler::step 作对照；无嵌入对/自适应}\\
+Rosenbrock 一般理论（定义~\ref{def:dy-th-mac-rosenbrock}） &
+\implpart{仅单级线性隐式欧拉变体：src/dynamics/integration/Rosenbrock.cpp:Rosenbrock::step（$(I-hJ)\Delta=h f$，数值雅可比）；Rodas 类高阶族与质量矩阵推广未实现}\\
+一致初始化三阶段与动态修整（含慢状态钉住） &
+\implfull{src/dynamics/DynamicSystem.cpp:initializeStatesFromPowerFlow}（潮流断面+逐设备 trimToNetworkEquilibrium 交替修整，如 SynchronousMachine::trimToNetworkEquilibrium；慢状态掩蔽 mask\_slow\_residuals；收敛摘要写入 DynamicInitializationSummary）\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{参考文献}
+{\renewcommand{\section}[2]{}%
+\begin{thebibliography}{9}\small
+\bibitem{dym:kundur} P.~Kundur, \emph{Power System Stability and Control},
+McGraw-Hill, 1994.
+\bibitem{dym:sauer-pai} P.~W. Sauer and M.~A. Pai, \emph{Power System Dynamics
+and Stability}, Prentice Hall, 1998.
+\bibitem{dym:anderson-fouad} P.~M. Anderson and A.~A. Fouad, \emph{Power System
+Control and Stability}, 2nd ed., IEEE Press, 2003.
+\bibitem{dym:ieee1110} IEEE Std 1110-2002, \emph{IEEE Guide for Synchronous
+Generator Modeling Practices and Applications in Power System Stability Analyses},
+IEEE, 2002.
+\bibitem{dym:milano} F.~Milano, \emph{Power System Modelling and Scripting},
+Springer, 2010.
+\bibitem{dym:hairer1} E.~Hairer, S.~P. N{\o}rsett and G.~Wanner,
+\emph{Solving Ordinary Differential Equations I: Nonstiff Problems}, 2nd ed.,
+Springer, 1993.
+\bibitem{dym:hairer2} E.~Hairer and G.~Wanner, \emph{Solving Ordinary
+Differential Equations II: Stiff and Differential-Algebraic Problems}, 2nd ed.,
+Springer, 1996.
+\bibitem{dym:butcher} J.~C. Butcher, \emph{Numerical Methods for Ordinary
+Differential Equations}, 2nd ed., Wiley, 2008.
+\bibitem{dym:bcp} K.~E. Brenan, S.~L. Campbell and L.~R. Petzold,
+\emph{Numerical Solution of Initial-Value Problems in Differential-Algebraic
+Equations}, SIAM, 1996.
+\bibitem{dym:ascher-petzold} U.~M. Ascher and L.~R. Petzold, \emph{Computer
+Methods for Ordinary Differential Equations and Differential-Algebraic Equations},
+SIAM, 1998.
+\end{thebibliography}}

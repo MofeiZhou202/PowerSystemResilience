@@ -1,6 +1,6 @@
 \documentclass[final,5p,times,twocolumn]{elsarticle}
 \usepackage{amsmath,amssymb,bm,mathtools}
-\usepackage{booktabs,array,tabularx,graphicx,microtype}
+\usepackage{booktabs,array,tabularx,graphicx,microtype,balance}
 \newcolumntype{Y}{>{\raggedright\arraybackslash}X}
 \usepackage[dvipsnames,table]{xcolor}
 \usepackage{enumitem}
@@ -90,6 +90,19 @@ single benchmark prepared by the analyst, but it becomes restrictive when the
 same study must combine utility data, public feeder models, manufacturer data,
 and automatically generated modifications.
 
+The range of physical applications is already broad. Recent work includes
+reliability-aware topology planning~\cite{wang2022planning}, distribution
+reconfiguration with microgrid formation~\cite{wu2022reconfiguration},
+integrated and reconfigurable AC/DC building microgrids
+~\cite{yu2020architecture}, and forecasting-aided state estimation
+~\cite{huang2022state}. At the converter level, capacity management
+~\cite{heidari2022capacity}, stability-oriented control
+~\cite{khosravi2023stability}, multi-terminal energy control
+~\cite{xiao2021multiterminal}, and unbalanced operation of five-terminal
+MV/LV systems~\cite{xiao2022five} have been investigated in detail. The
+diversity of these studies reinforces the need for a modeling method that does
+not depend on one feeder size, one converter topology, or one control mode.
+
 Recent reviews of hybrid AC/DC distribution optimization organize the field
 around nodal formulations, converter-loss representations, operational
 objectives, and solution methods~\cite{altorok2024opf}. Universal AC/DC branch
@@ -154,7 +167,9 @@ output rather than the device-to-equation transformation on which subsequent
 analysis depends. The present work addresses this preceding modeling stage:
 AI may interpret and propose an engineering change, while acceptance is
 determined by the electrical model and the calculated quantities are obtained
-from the power-system equations.
+from the power-system equations. Related concerns about whether an apparently
+interpretable AI result is actually trustworthy have also been reported for
+energy forecasting~\cite{liao2024xai}.
 
 Existing model checks address only part of this problem. Data validation can
 identify invalid identifiers, ranges, and terminal references, but it does not
@@ -192,9 +207,10 @@ This paper develops semantics-preserving projection theory (SPPT) as a
 device-to-equation and equation-to-device consistency framework for hybrid
 AC/DC distribution analysis. Its main contributions are:
 \begin{enumerate}[leftmargin=1.7em,itemsep=2pt]
-\item A projection from detailed engineering models to a canonical hybrid
-AC/DC nodal representation, together with a reverse relation that classifies
-calculated quantities as exactly recoverable, bounded approximations,
+\item An analysis-indexed family of projections from detailed engineering
+models to canonical hybrid AC/DC representations. Representation invariance,
+transformation composition, and a reverse relation classify calculated
+quantities as exactly recoverable, bounded approximations,
 conservation-based allocations, or unsupported quantities.
 \item A converter-role formulation that distinguishes specified variables,
 balancing variables, AC angle references, and DC-voltage-regulating devices.
@@ -569,6 +585,86 @@ requires equality after both vectors have been returned to the same stable
 engineering identities. The 175 valid permutations in the numerical campaign
 evaluate this requirement across all seven public feeders.
 
+\subsection{Generality across devices, data representations, and analyses}
+\label{sec:generality}
+
+SPPT is an analysis-indexed family of physical projections rather than a fixed
+catalogue of model checks. Let
+\begin{equation}
+ \mathfrak A=(\mathcal X_{\mathfrak A},\mathcal F_{\mathfrak A},
+ \mathcal O_{\mathfrak A},\mathcal E_{\mathfrak A})
+ \label{eq:analysis-signature}
+\end{equation}
+denote an analysis specification containing its variables, governing
+equations, requested observables, and declared approximations. The corresponding
+projection $\Proj_{\mathfrak A}:S\mapsto C_{\mathfrak A}$ retains the part of an
+engineering model required by this specification. A balanced power flow, a
+three-phase power flow, a state estimator, and a dynamic study therefore need
+not share one canonical model; they share the requirement that the projection
+preserve the physical meaning of their declared observables.
+
+This formulation gives a representation-invariance condition. Let
+$S^{(1)}\simeq_{\mathcal O}S^{(2)}$ mean that two descriptions encode the same
+physical devices, connections, parameters, controls, and operating state for
+the observables $\mathcal O$, after declared unit and naming differences have
+been resolved. Then an exact observable must satisfy
+\begin{equation}
+ S^{(1)}\simeq_{\mathcal O}S^{(2)}\Longrightarrow
+ \Rmap_{S^{(1)}}A_{C^{(1)}}\!\left(\Proj_{\mathfrak A}(S^{(1)})\right)
+ =
+ \Rmap_{S^{(2)}}A_{C^{(2)}}\!\left(\Proj_{\mathfrak A}(S^{(2)})\right).
+ \label{eq:representation-invariance}
+\end{equation}
+For bounded-approximate observables, equality is replaced by the declared bound
+in \eqref{eq:approximate-contract}. Mature environments such as GridLAB-D,
+OpenDSS, MATPOWER, pandapower, and PowerModelsDistribution illustrate the
+diversity of power-system descriptions and analysis formulations
+~\cite{gridlabd,opendss,pmd,thurner2018pandapower,zimmerman2011matpower}.
+Equation~\eqref{eq:representation-invariance} does not require these
+environments to use identical internal variables; it requires physically
+equivalent inputs to agree after results have been returned to common
+engineering quantities.
+
+The same principle applies to a sequence of transformations. If $T_1$ and
+$T_2$ each retain a declared observable and their device relations are
+$\Gamma_{T_1}$ and $\Gamma_{T_2}$, then the composed transformation uses
+\begin{equation}
+ \Gamma_{T_2\circ T_1}=\Gamma_{T_1}\circ\Gamma_{T_2},
+ \label{eq:relation-composition}
+\end{equation}
+and must satisfy the same conservation, topology, and reconstruction conditions
+as a direct transformation. This compositional requirement prevents an
+individually reasonable unit conversion, device expansion, or topology
+reduction from losing physical meaning when the operations are combined.
+
+\Cref{tab:generality} states what must be supplied when the scope is extended.
+A new device is not accommodated by adding a device-name rule. It is described
+by its terminals, balance contribution, active control role, and reconstruction
+of requested quantities. Likewise, a new analysis declares the variables and
+equations it requires, while a new aggregation declares the observables and
+conservation relations it preserves. The acceptance conditions in
+\eqref{eq:model-acceptance} can then be derived from these declarations. The
+six fault classes used later test selected violations of the general
+conditions; they do not define SPPT itself.
+
+\begin{table*}[t]
+\centering
+\caption{Physical declarations required to extend the SPPT scope.}
+\label{tab:generality}
+\small
+\begin{tabularx}{\textwidth}{@{}p{0.18\textwidth}p{0.37\textwidth}X@{}}
+\toprule
+Extension & Required declaration & Preservation assessment \\
+\midrule
+New data representation & Stable identities, domains, units, terminals, status, controls, and parameter meanings & Physically equivalent descriptions satisfy \eqref{eq:representation-invariance}. \\
+New network device & Terminal expansion, constitutive or balance contribution, control role, limits, and observable reconstruction & Terminal connectivity and energy balance are retained, and requested results return to the parent device. \\
+New converter control & Regulated variables, quantities recovered from balance, reference contribution, and active limits & The equation--variable count and structural rank close on every energized island. \\
+New analysis & Variables, governing equations, requested observables, and approximation scope in \eqref{eq:analysis-signature} & Exact, bounded-approximate, conservation-associated, and unsupported quantities are distinguished before calculation. \\
+New aggregation or reduction & Component relation, retained topology, conserved quantities, and observable-specific error bounds & Relations compose according to \eqref{eq:relation-composition}, without changing identity or duplicating extensive quantities. \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
 \section{Converter-role closure and constrained AI modification}\label{sec:ai-modification}
 
 \subsection{Converter control roles}
@@ -872,7 +968,9 @@ forward and reverse device correspondence, classifies converter control roles,
 and evaluates island-level structural closure before nonlinear calculation.
 AI-proposed modifications are assessed on an isolated model and replace the
 accepted model only when the declared physical and numerical conditions are
-satisfied.
+satisfied. Its generality follows from representation invariance, compositional
+transformations, observable-dependent reconstruction, and analysis-specific
+equation--variable closure rather than from an enumeration of fault rules.
 
 The evaluation contains 1575 fixed-seed variants of seven public distribution
 feeders with 32--6986 AC buses and fully disclosed AC/DC additions. The complete
@@ -933,6 +1031,32 @@ in AC, DC, and hybrid microgrids applications: A comprehensive review,''
 \bibitem{liao2024xai} W.~Liao et al., ``Can we trust explainable artificial
 intelligence in wind power forecasting?'' \emph{Applied Energy}, vol.~376,
 124273, 2024.
+\bibitem{wang2022planning} Y.~Wang et al., ``Optimal double Q AC--DC hybrid
+distribution system planning with explicit topology-variable-based reliability
+assessment,'' \emph{Applied Energy}, vol.~322, 119438, 2022.
+\bibitem{wu2022reconfiguration} J.~Wu et al., ``AC/DC hybrid distribution
+network reconfiguration with microgrid formation using multi-agent soft
+actor-critic,'' \emph{Applied Energy}, vol.~307, 118189, 2022.
+\bibitem{yu2020architecture} X.~Yu et al., ``An integrated and reconfigurable
+hybrid AC/DC microgrid architecture with autonomous power flow control for
+nearly/net zero energy buildings,'' \emph{Applied Energy}, vol.~263, 114610,
+2020.
+\bibitem{huang2022state} Y.~Huang et al., ``Forecasting-aided state estimation
+based on deep learning for hybrid AC/DC distribution systems,'' \emph{Applied
+Energy}, vol.~306, 118119, 2022.
+\bibitem{heidari2022capacity} R.~Heidari et al., ``An intelligent capacity
+management system for interface converter in AC--DC hybrid microgrids,''
+\emph{Applied Energy}, vol.~316, 119112, 2022.
+\bibitem{khosravi2023stability} M.~Khosravi et al., ``A novel control approach
+to improve the stability of hybrid AC/DC microgrids,'' \emph{Applied Energy},
+vol.~344, 121261, 2023.
+\bibitem{xiao2021multiterminal} H.~Xiao et al., ``Modular multilevel converter
+based multi-terminal hybrid AC/DC microgrid with improved energy control
+method,'' \emph{Applied Energy}, vol.~282, 116154, 2021.
+\bibitem{xiao2022five} H.~Xiao et al., ``Novel modular multilevel converter-based
+five-terminal MV/LV hybrid AC/DC microgrids with improved operation capability
+under unbalanced power distribution,'' \emph{Applied Energy}, vol.~306,
+118140, 2022.
 \bibitem{altorok2024opf} M.~Altorok and A.~Ukil, ``Review on optimal power flow
 in a hybrid AC/DC distribution network,'' \emph{Electric Power Systems
 Research}, vol.~236, 110956, 2024.
@@ -946,6 +1070,7 @@ Systems Research}, vol.~228, 110090, 2024.
 comprehensive review of hybrid AC/DC networks: insights into system planning,
 energy management, control, and protection,'' \emph{Neural Computing and
 Applications}, vol.~36, pp.~17961--17977, 2024.
+\balance
 \bibitem{gutierrez2024ai} A.~Gutierrez-Escalona et al.,
 ``Artificial intelligence in the hierarchical control of AC, DC, and hybrid
 AC/DC microgrids: A review,'' \emph{IEEE Access}, vol.~12,
@@ -975,5 +1100,13 @@ collaborating on smart grid research,'' in \emph{Proc. IEEE PES General Meeting}
 \bibitem{pmd} D.~M.~Fobes et al., ``PowerModelsDistribution.jl: An open-source
 framework for exploring distribution power flow formulations,'' \emph{Electric
 Power Systems Research}, vol.~189, 106664, 2020.
+\bibitem{thurner2018pandapower} L.~Thurner et al., ``Pandapower---An open-source
+Python tool for convenient modeling, analysis, and optimization of electric
+power systems,'' \emph{IEEE Transactions on Power Systems}, vol.~33,
+pp.~6510--6521, 2018.
+\bibitem{zimmerman2011matpower} R.~D.~Zimmerman et al., ``MATPOWER: Steady-state
+operations, planning, and analysis tools for power systems research and
+education,'' \emph{IEEE Transactions on Power Systems}, vol.~26, pp.~12--19,
+2011.
 \end{thebibliography}
 \end{document}

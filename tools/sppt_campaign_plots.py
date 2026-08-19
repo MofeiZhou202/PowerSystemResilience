@@ -114,8 +114,8 @@ def plot_public_feeders(manifest_rows: list[dict[str, str]], output_dir: Path) -
     warnings = np.array([int(row["import_warnings"]) for row in rows])
     positions = np.arange(len(rows))
 
-    figure = plt.figure(figsize=(7.15, 5.05), layout="constrained")
-    grid = figure.add_gridspec(2, 2, height_ratios=[1.65, 1.0], width_ratios=[1.6, 1.0])
+    figure = plt.figure(figsize=(7.15, 5.25), layout="constrained")
+    grid = figure.add_gridspec(2, 2, height_ratios=[1.65, 1.0], width_ratios=[1.25, 1.15])
     scale_axis = figure.add_subplot(grid[0, :])
     warning_axis = figure.add_subplot(grid[1, 0])
     overlay_axis = figure.add_subplot(grid[1, 1])
@@ -190,7 +190,7 @@ def plot_public_feeders(manifest_rows: list[dict[str, str]], output_dir: Path) -
     for start, end in (((2.5, 4.05), (2.5, 3.47)), ((7.5, 4.05), (7.5, 3.47)), ((2.5, 2.75), (3.20, 2.18)), ((4.52, 1.85), (5.48, 1.85)), ((6.80, 2.18), (7.5, 2.75))):
         overlay_axis.add_patch(FancyArrowPatch(start, end, **arrow_style))
     overlay_axis.text(5.0, 1.22, r"DC line: $r=0.02$ p.u.; both VSCs: $\eta=0.99$", ha="center", fontsize=7.1)
-    overlay_axis.text(5.0, 0.52, r"$P_{\rm PQ}=\mathrm{clamp}(0.02P_{\rm load},,0.001S_b,,0.05S_b)$", ha="center", fontsize=7.0)
+    overlay_axis.text(5.0, 0.52, r"$P_{\rm PQ}=\mathrm{clamp}(0.02P_{\rm load},\,0.001S_b,\,0.05S_b)$", ha="center", fontsize=7.0)
 
     save_figure(figure, output_dir, "sppt_public_feeder_variants")
 
@@ -344,33 +344,40 @@ def plot_agent_campaign(agent_rows: list[dict[str, str]], output_dir: Path) -> N
             verdict[system_index, action_index] = 1 if accepted else -1
             recovery[system_index, action_index] = 1
 
-    figure, axes = plt.subplots(1, 2, figsize=(7.15, 3.55), layout="constrained")
+    figure, axes = plt.subplots(1, 2, figsize=(7.15, 3.35), layout="constrained",
+                               gridspec_kw={"width_ratios": [1.18, 1.0]})
     cmap = LinearSegmentedColormap.from_list("agent", [COLORS["red"], "#F4F5F6", COLORS["green"]])
     axes[0].imshow(verdict, cmap=cmap, vmin=-1, vmax=1, aspect="auto")
     axes[0].set_title("(a) Assessment of proposed modifications", loc="left")
     axes[0].set_xticks(range(len(actions)), [AGENT_LABELS[action] for action in actions])
     axes[0].set_yticks(range(len(systems)), [name.replace("-ACDC", "") for name in systems])
-    axes[0].tick_params(axis="x", rotation=30)
+    axes[0].tick_params(axis="x", rotation=27)
     for row_index in range(len(systems)):
         for column_index in range(len(actions)):
             axes[0].text(column_index, row_index,
-                         "accepted\nadopted" if verdict[row_index, column_index] > 0 else "refused\nunchanged",
-                         ha="center", va="center", fontsize=6.3, color="white")
+                         "A" if verdict[row_index, column_index] > 0 else "R",
+                         ha="center", va="center", fontsize=7.0, fontweight="bold", color="white")
 
-    stages = ["Proposed\nchange", "Physical\nchecks", "Model\nselection", "Power\nflow", "Device\nassociation", "Unchanged\nmodel check"]
-    accepted_path = [1, 1, 1, 1, 1, 1]
-    rejected_path = [1, 1, 0, 0, 0, 1]
+    stages = ["Proposed\nchange", "Physical\nchecks", "Model\nselection", "Power\nflow", "Device\nassociation", "Following\ncheck"]
     positions = np.arange(len(stages))
-    axes[1].plot(positions, accepted_path, marker="o", linewidth=2, color=COLORS["green"], label="Physically admissible modification")
-    axes[1].plot(positions, rejected_path, marker="s", linewidth=2, color=COLORS["red"], label="Physically inadmissible modification")
-    axes[1].set_xticks(positions, stages, rotation=30, ha="right")
-    axes[1].set_yticks([0, 1], ["not executed", "completed"])
-    axes[1].set_ylim(-0.15, 1.15)
-    axes[1].grid(axis="y", color=COLORS["light"], linewidth=0.7)
+    axes[1].plot(positions, np.ones(len(stages)), marker="o", linewidth=2,
+                 color=COLORS["green"])
+    axes[1].plot(positions, np.zeros(len(stages)), linewidth=1.5,
+                 color=COLORS["slate"], linestyle="--")
+    refused_colors = [COLORS["orange"], COLORS["red"], COLORS["blue"],
+                      COLORS["slate"], COLORS["slate"], COLORS["green"]]
+    refused_markers = ["s", "X", "o", "x", "x", "o"]
+    for position, color, marker in zip(positions, refused_colors, refused_markers):
+        axes[1].scatter(position, 0, color=color, marker=marker, s=29, zorder=3)
+    axes[1].set_xticks(positions, stages)
+    axes[1].set_yticks([0, 1], ["28 refused\nmodel retained", "14 accepted\nmodel adopted"])
+    axes[1].set_xlim(-0.25, len(stages) - 0.75)
+    axes[1].set_ylim(-0.28, 1.28)
+    axes[1].grid(axis="x", color=COLORS["light"], linewidth=0.7)
     axes[1].set_title("(b) Sequential physical assessment", loc="left")
-    axes[1].legend(frameon=False, loc="lower left")
-    axes[1].text(0.02, 0.04, "All 28 refused modifications preserved the model;\nall 42 subsequent unchanged-model checks were accepted.",
-                 transform=axes[1].transAxes, fontsize=7.0)
+    axes[1].tick_params(axis="x", labelsize=6.7)
+    axes[1].text(2, 0.16, "accepted model unchanged", ha="center", fontsize=6.7,
+                 color=COLORS["blue"])
     save_figure(figure, output_dir, "sppt_agent_public_campaign")
 
 

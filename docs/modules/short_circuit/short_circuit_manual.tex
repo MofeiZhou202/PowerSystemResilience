@@ -30,12 +30,20 @@
 之后进行；概览路径对不平衡故障采用简化 $Z_1{=}Z_2{=}Z_0$ 近似，详细路径构建真序网。直流路径
 为电阻性刚性源上界，\textbf{不}含换流器限流、电容放电暂态与直流保护跳闸。本模块是故障水平
 估计器，\textbf{非}保护配合仿真器。
+
+\smallskip
+\noindent\textbf{修订说明}：修订版 2 新增通用理论层（第 2--4 章：对称分量法、IEC 60909
+方法论、换流器与直流故障暂态），与源码转写层分立；理论章公式不覆盖实现层的阈值、
+近似或字段语义。
 \end{abstract}
 
 \tableofcontents
 \newpage
 
 \input{chapters/overview}
+\input{chapters/theory_symmetrical_components}
+\input{chapters/theory_iec60909}
+\input{chapters/theory_converter_dc_fault}
 \input{chapters/ac_sequence}
 \input{chapters/iec60909_detailed}
 \input{chapters/converter_contributions}

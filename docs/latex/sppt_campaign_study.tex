@@ -458,14 +458,14 @@ acceptable nonlinear solution.
 \caption{Scope and outcome of the native and external-engine assessments.}
 \label{tab:external-scope}
 \footnotesize
-\begin{tabularx}{\textwidth}{@{}p{0.15\textwidth}p{0.23\textwidth}p{0.24\textwidth}p{0.20\textwidth}X@{}}
+\begin{tabularx}{\textwidth}{@{}p{0.24\textwidth}p{0.25\textwidth}p{0.29\textwidth}X@{}}
 \toprule
-Assessment source & Public or disclosed cases & Common physical quantities & Quantitative outcome & Quantities outside the comparison\\
+Assessment and cases & Common physical quantities & Quantitative outcome & Quantities outside the comparison\\
 \midrule
-Native hybrid AC/DC & Seven GridLAB-D-derived hybrid distribution feeders & Positive-sequence AC buses and branches, DC buses and line, two VSCs, and device association & 7/7 base cases formed; all 1050 structural faults detected and localized & Unconverted phase-specific controls and protection functions\\
-GridLAB-D component studies & Distribution component matrix and long-duration checks & AC distribution components represented by both descriptions & 23/23 component calculations completed; 21/21 exact comparison conditions and 18/18 long checks satisfied & Added DC line, VSC controls, and unsupported technology-specific objects\\
-GridLAB-D taxonomy feeders & 24 public taxonomy models; seven directly comparable with the available release & Voltage magnitudes at 3222 common AC buses & 24/24 imports and projected calculations completed; maximum $|\Delta V|=0.03694$~p.u.; mean of case-wise differences 0.00832~p.u. & Models that the reference engine cannot evaluate without modification; all added DC quantities\\
-OpenDSS & Official IEEE-13 circuit and six public EPRI circuits & Three-phase AC distribution quantities shared by both representations & Reference-engine solution confirmed; use restricted to representation and scope checks & No claim of numerical validation for the added DC grid or VSC roles\\
+Native hybrid AC/DC: seven GridLAB-D-derived hybrid distribution feeders & Positive-sequence AC buses and branches, DC buses and line, two VSCs, and device association & 7/7 base cases formed; all 1050 structural faults detected and localized & Unconverted phase-specific controls and protection functions\\
+GridLAB-D component matrix and long-duration checks & AC distribution components represented by both descriptions & 23/23 component calculations completed; 21/21 exact comparison conditions and 18/18 long checks satisfied & Added DC line, VSC controls, and unsupported technology-specific objects\\
+GridLAB-D: 24 public taxonomy models; seven directly comparable with the available release & Voltage magnitudes at 3222 common AC buses & 24/24 imports and projected calculations completed; maximum $|\Delta V|=0.03694$~p.u.; mean of case-wise differences 0.00832~p.u. & Models that the reference engine cannot evaluate without modification; all added DC quantities\\
+OpenDSS: official IEEE-13 circuit and six public EPRI circuits & Three-phase AC distribution quantities shared by both representations & Reference-engine solution confirmed; use restricted to representation and scope checks & No claim of numerical validation for the added DC grid or VSC roles\\
 \bottomrule
 \end{tabularx}
 \end{table*}

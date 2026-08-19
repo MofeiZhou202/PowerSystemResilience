@@ -1,0 +1,281 @@
+% theory_symmetrical_components.tex —— 短路计算 通用理论：对称分量法
+% 本文件为理论层章节，遵循 docs/modules/THEORY_WRITING_GUIDE.md。
+
+\section{对称分量法理论}\label{sec:sc-theory-symcomp}
+
+\begin{theorynote}
+本章为通用数学理论，按领域标准模型与文献体系撰写，覆盖 Fortescue 对称分量变换
+（定义、正交性与功率不变变体）、序网独立的条件、四类故障边界条件到序网连接的
+一般推导，以及零序网络与变压器矢量组、中性点接地方式的关系。本章公式不要求逐式
+对应代码；与平台实现（\srcpath{src/short\_circuit/}）的对应关系见本章末
+"与实现的对应"表，超出实现的内容以"未实现扩展说明"框就地标记。
+\end{theorynote}
+
+\subsection{记号与约定}
+\begin{itemize}
+  \item 相量为基波复有效值；下标 $0,1,2$ 分指零、正、负序分量；
+  \item 算子 $a=e^{j2\pi/3}$，满足 $1+a+a^2=0$、$a^3=1$、$|a-a^2|=\sqrt3$、$(a^2-a)^2=-3$；
+  \item 故障母线 $k$ 处的三序戴维南阻抗记 $Z_{1k},Z_{2k},Z_{0k}$（标幺），故障支路阻抗 $Z_f$；
+  \item 故障点等效电势记 $E$（标幺；IEC 60909 电压因子 $c$ 的引入见
+        第~\ref{sec:sc-theory-iec}~章）；
+  \item 不对称故障均按"a 相为特殊相"约定推导，其他相对称轮换结论相同。
+\end{itemize}
+
+\subsection{Fortescue 变换}
+\begin{definition}[对称分量变换]
+任意三相相量组可唯一分解为零、正、负序三组对称分量~\cite{sym:fortescue}：
+\begin{equation}
+\begin{bmatrix}V_a\\V_b\\V_c\end{bmatrix}
+=\underbrace{\begin{bmatrix}1&1&1\\1&a^2&a\\1&a&a^2\end{bmatrix}}_{\displaystyle T}
+\begin{bmatrix}V_0\\V_1\\V_2\end{bmatrix},
+\qquad
+\begin{bmatrix}V_0\\V_1\\V_2\end{bmatrix}
+=\frac13\begin{bmatrix}1&1&1\\1&a&a^2\\1&a^2&a\end{bmatrix}
+\begin{bmatrix}V_a\\V_b\\V_c\end{bmatrix},
+\end{equation}
+电流同理。此为\emph{幅值不变}约定：正序分量即 a 相正序部分的相量。
+\end{definition}
+
+\begin{remark}[正交性与功率不变变体]
+由 $TT^{H}=3I$ 知 $\hat T=T/\sqrt3$ 为酉矩阵（$\hat T^{-1}=\hat T^{H}$）。采用
+$\hat T$ 的\emph{功率不变}变体使 $S=V_{abc}^{H}I_{abc}=V_{012}^{H}I_{012}$；
+幅值不变约定下则为
+\begin{equation}
+S=3\bigl(V_0I_0^{*}+V_1I_1^{*}+V_2I_2^{*}\bigr).
+\end{equation}
+两变体仅差尺度因子，序阻抗与故障电流公式形式不变。本手册与 IEC 60909 一致采用
+幅值不变约定。
+\end{remark}
+
+\subsection{序阻抗与序网解耦条件}
+\begin{definition}[元件序阻抗矩阵]
+设三相对称耦合元件满足 $V_{abc}=Z_{abc}I_{abc}$，其序阻抗矩阵为
+\begin{equation}
+Z_{012}=T^{-1}Z_{abc}\,T .
+\end{equation}
+\end{definition}
+
+\begin{proposition}[序网独立的条件]
+三序网相互解耦（$Z_{012}$ 对角）的常用充分条件是元件\emph{阻抗平衡}：对换位良好
+的静止元件，$Z_{abc}$ 为循环对称矩阵（对角元 $Z_s$、非对角元 $Z_m$），此时
+\begin{equation}
+Z_0=Z_s+2Z_m,\qquad Z_1=Z_2=Z_s-Z_m .
+\end{equation}
+未换位长线或相间耦合显著的元件使 $Z_{012}$ 出现序间耦合项，单序等效不再严格成立。
+\end{proposition}
+（结论由对循环矩阵直接作相似变换 $T^{-1}(\cdot)T$ 得到，证明从略。）
+
+\begin{remark}[旋转电机 $Z_1\ne Z_2$]
+负序磁场相对转子以两倍同步速切割，转子回路感应电流形成屏蔽，故同步/异步电机
+$Z_2$ 为次暂态量级且一般 $Z_2\ne Z_1$；静止元件恒有 $Z_1=Z_2$。零序通路则取决于
+接地回路（见本章末节）。
+\end{remark}
+
+\subsection{故障边界条件与序网连接的一般推导}
+在故障点对三个序网分别作戴维南等效（负、零序网无源）：
+\begin{equation}
+V_1=E-Z_{1k}I_1,\qquad V_2=-Z_{2k}I_2,\qquad V_0=-Z_{0k}I_0 .
+\end{equation}
+故障类型仅通过边界条件决定三序网的连接方式；以下逐类从边界条件导出。
+
+\subsubsection{三相故障}
+\begin{proposition}
+对称三相故障只激励正序网：
+\begin{equation}
+I_0=I_2=0,\qquad I_1=\frac{E}{Z_{1k}+Z_f},\qquad I_{k3}''=|I_1|.
+\end{equation}
+\end{proposition}
+推导：边界条件 $V_a=V_b=V_c=Z_f I_a$（三相一视同仁）代入反变换得 $V_0=V_2=0$、
+$I_0=I_2=0$，仅剩 $V_1=Z_f I_1$，与正序戴维南方程联立即得。序网连接：正序网
+单独经 $Z_f$ 闭合。
+
+\subsubsection{单相接地故障（SLG）}
+\begin{proposition}
+a 相经 $Z_f$ 接地时三序网串联：
+\begin{equation}
+I_1=I_2=I_0=\frac{E}{Z_{1k}+Z_{2k}+Z_{0k}+3Z_f},\qquad
+I_a=3I_1,\qquad I_{k1}''=|3I_1|.
+\end{equation}
+\end{proposition}
+推导：边界条件 $I_b=I_c=0$、$V_a=Z_f I_a$。由反变换
+\begin{equation}
+I_0=\tfrac13(I_a+I_b+I_c)=\tfrac13I_a,\quad
+I_1=\tfrac13(I_a+aI_b+a^2I_c)=\tfrac13I_a,\quad
+I_2=\tfrac13(I_a+a^2I_b+aI_c)=\tfrac13I_a,
+\end{equation}
+故 $I_0=I_1=I_2$——三序电流相等即三序网串联。又
+$V_a=V_0+V_1+V_2=E-(Z_{1k}+Z_{2k}+Z_{0k})I_1=3Z_f I_1$，整理即得。
+
+\subsubsection{两相故障（LL）}
+\begin{proposition}
+b、c 相经 $Z_f$ 短接（不接地）时正、负序网反相串联、零序开路：
+\begin{equation}
+I_0=0,\qquad I_1=-I_2=\frac{E}{Z_{1k}+Z_{2k}+Z_f},\qquad
+|I_b|=|I_c|=\sqrt3\,|I_1|.
+\end{equation}
+\end{proposition}
+推导：边界条件 $I_a=0$、$I_b+I_c=0$、$V_b-V_c=Z_f I_b$。前两式给出 $I_0=0$ 与
+$I_1=\frac13(a-a^2)I_b=-I_2$；第三式中 $V_b-V_c=(a^2-a)(V_1-V_2)$，利用
+$(a^2-a)^2=-3$ 化简得 $V_1-V_2=Z_f I_1$，即正、负序戴维南口反极性对接并经 $Z_f$
+闭合。幅值关系 $|I_b|=3|I_1|/|a-a^2|=\sqrt3\,|I_1|$。
+
+\subsubsection{两相接地故障（LLG）}
+\begin{proposition}
+b、c 相经公共阻抗 $Z_f$ 接地时，正序网与"负序网"、"零序网串联 $3Z_f$"两条支路
+并联：
+\begin{equation}
+I_1=\frac{E}{Z_{1k}+Z_{2k}\parallel(Z_{0k}+3Z_f)},\qquad
+I_2=-\frac{Z_{0k}+3Z_f}{Z_{2k}+Z_{0k}+3Z_f}I_1,\qquad
+I_0=-(I_1+I_2),
+\end{equation}
+相电流由 $I_{abc}=TI_{012}$ 重构。
+\end{proposition}
+推导：边界条件 $I_a=0$、$V_b=V_c=Z_f(I_b+I_c)$。第一式即 $I_0+I_1+I_2=0$；
+$V_b-V_c=(a^2-a)(V_1-V_2)=0$ 给出 $V_1=V_2$；又
+$I_b+I_c=2I_0+(a+a^2)(I_1+I_2)=3I_0$，且
+$V_b=V_0+a^2V_1+aV_2=V_0-V_1$（用 $V_1=V_2$ 与 $1+a+a^2=0$），于是
+$V_0-V_1=3Z_f I_0$。三条约束恰好对应：正、负序口等电位（并联），零序口经 $3Z_f$
+后与之等电位——三序网并联、$3Z_f$ 串入零序支路。
+
+\begin{figure}[H]\centering
+\begin{tikzpicture}[font=\footnotesize,
+  src/.style={circle,draw,minimum size=5mm,inner sep=0pt},
+  zb/.style={draw,minimum width=9mm,minimum height=4.2mm,inner sep=1pt},
+  every node/.style={transform shape}]
+% ---------- (a) 三相 ----------
+\begin{scope}
+\node[src] (e) at (0,0) {$E$};
+\node[zb] (z1) at (1.35,0) {$Z_{1k}$};
+\node[zb] (zf) at (2.9,-0.75) {$Z_f$};
+\draw (e) -- (z1);
+\draw (z1.east) -- (2.9,0) -- (zf.north);
+\draw (zf.south) -- (2.9,-1.15);
+\draw (2.76,-1.15)--(3.04,-1.15) (2.81,-1.24)--(2.99,-1.24) (2.86,-1.33)--(2.94,-1.33);
+\node at (1.5,-1.8) {(a) 三相：正序网经 $Z_f$ 闭合};
+\end{scope}
+% ---------- (b) SLG ----------
+\begin{scope}[xshift=8.2cm]
+\node[src] (e) at (0,0) {$E$};
+\node[zb] (z1) at (1.1,0) {$Z_{1k}$};
+\node[zb] (z2) at (2.35,0) {$Z_{2k}$};
+\node[zb] (z0) at (3.6,0) {$Z_{0k}$};
+\node[zb] (zf) at (4.9,-0.75) {$3Z_f$};
+\draw (e) -- (z1) (z1) -- (z2) (z2) -- (z0);
+\draw (z0.east) -- (4.9,0) -- (zf.north);
+\draw (zf.south) -- (4.9,-1.15);
+\draw (4.76,-1.15)--(5.04,-1.15) (4.81,-1.24)--(4.99,-1.24) (4.86,-1.33)--(4.94,-1.33);
+\node at (2.5,-1.8) {(b) SLG：三序网串联};
+\end{scope}
+% ---------- (c) LL ----------
+\begin{scope}[yshift=-3.1cm]
+\node[src] (e) at (0.8,0.75) {$E$};
+\node[zb] (z1) at (2.3,0.75) {$Z_{1k}$};
+\node[zb] (z2) at (2.3,-0.75) {$Z_{2k}$};
+\node[zb] (zf) at (0.8,-0.75) {$Z_f$};
+\draw (0,0.75) -- (e) (e) -- (z1) (z1) -- (3.2,0.75) -- (3.2,-0.75) -- (z2.east);
+\draw (z2) -- (zf) (zf) -- (0,-0.75) -- (0,0.75);
+\node at (1.6,0) {$I_1$};
+\node at (1.6,-1.8) {(c) LL：正、负序网反相串联经 $Z_f$};
+\end{scope}
+% ---------- (d) LLG ----------
+\begin{scope}[xshift=8.2cm,yshift=-3.1cm]
+\node[src] (e) at (0,0) {$E$};
+\node[zb] (z1) at (1.35,0) {$Z_{1k}$};
+\node[zb] (z2) at (2.9,-0.65) {$Z_{2k}$};
+\node[zb] (z0) at (4.3,-0.45) {$Z_{0k}$};
+\node[zb] (zf) at (4.3,-1.25) {$3Z_f$};
+\draw (e) -- (z1) (z1.east) -- (4.3,0);
+\draw (2.9,0) -- (z2.north);
+\draw (4.3,0) -- (z0.north);
+\draw (z0.south) -- (zf.north);
+\draw (z2.south) -- (2.9,-1.65) -- (4.3,-1.65) -- (zf.south);
+\draw (3.6,-1.65) -- (3.6,-1.85);
+\draw (3.46,-1.85)--(3.74,-1.85) (3.51,-1.94)--(3.69,-1.94) (3.56,-2.03)--(3.64,-2.03);
+\node at (2.3,-2.5) {(d) LLG：正序网串 $Z_2\parallel(Z_0{+}3Z_f)$};
+\end{scope}
+\end{tikzpicture}
+\caption{四类故障的序网连接（由边界条件导出）}\label{fig:sc-seq-conn}
+\end{figure}
+
+\begin{remark}[单相电流可以超过三相]
+由以上结论，金属性故障下 $I_{k1}''>I_{k3}''$ 当且仅当
+$|Z_{1k}+Z_{2k}+Z_{0k}|<3|Z_{1k}|$；取 $Z_2=Z_1$ 时约为 $|2Z_1+Z_0|<3|Z_1|$。
+有效接地系统（强中性点、接地变压器通路）中该条件常见，属物理结论而非数值异常。
+\end{remark}
+
+\begin{gapnote}
+严格 LLG 要求 $3Z_f$ 串入零序支路并作完整相电流重构。当前实现采用正序等效紧致
+近似 $Z_{1k}+(Z_{2k}\parallel Z_{0k})+Z_f$ 且只报有效幅值（见第~\ref{sec:sc-ac}~章），
+未重构相分解电流 $I_{L2}/I_{L3}$ 与地电流；序间耦合（未换位线路的非对角
+$Z_{012}$）完全未建模。
+\end{gapnote}
+
+\subsection{零序网络与变压器矢量组、中性点接地}
+零序电流三相同相，其通路取决于磁路结构与接地回路：
+\begin{itemize}
+  \item \textbf{绕组接法}：Y（不接地）对零序开路；Yg 提供对地通路；$\Delta$ 内部
+        环流，从 Yg 侧看为零序短路、从不接地侧看为开路；曲折（zigzag）接法提供
+        低零序阻抗通路；
+  \item \textbf{中性点阻抗}：中性点阻抗 $Z_n$ 流过 $3I_0$，故在零序网中以 $3Z_n$
+        出现；中性点接地方式（直接/经电阻/经消弧线圈/不接地）直接决定 $Z_{0k}$
+        量级与接地故障电流大小；
+  \item \textbf{三绕组变压器}：零序需按矢量组逐对建立星形等值，不能简单套用
+        正序漏抗。
+\end{itemize}
+因此同一正序网可对应完全不同的接地故障水平：SLG/LLG 计算对变压器零序数据高度
+敏感。
+
+\begin{gapnote}
+当前实现：支路零序使用显式 \fld{r0\_pu}/\fld{x0\_pu}，缺失则不提供零序通路；
+变压器矢量组对零序的阻断/导通未完整建模，三绕组变压器零序默认以正序代入
+（见第~\ref{sec:sc-verify}~章局限清单）。涉及接地变压器、曲折接法或 $\Delta$
+阻断的接地故障研究应人工校核 $Z_{0k}$。
+\end{gapnote}
+
+\subsection{与实现的对应}
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{6.4cm}L{9.0cm}@{}}
+\toprule
+理论条目 & 实现状态\\
+\midrule
+\endfirsthead
+\toprule
+理论条目 & 实现状态\\
+\midrule
+\endhead
+Fortescue 变换与功率不变变体 &
+\implpart{代码不显式构造相-序变换矩阵；计算直接在序等效阻抗层面进行，对称分量结论内嵌于故障公式}\\
+序网解耦与三序导纳矩阵构建 &
+\implfull{src/short\_circuit/short\_circuit.cpp:build\_sc\_admittance\_matrices}\\
+三相故障 $E/(Z_{1k}{+}Z_f)$ &
+\implfull{src/short\_circuit/short\_circuit.cpp:compute\_Zk}\\
+SLG 三序串联（$3Z_f$ 入零序支路） &
+\implfull{src/short\_circuit/short\_circuit.cpp:compute\_Zk}\\
+LL 反相串联与 $\sqrt3$ 因子 &
+\implfull{src/short\_circuit/short\_circuit.cpp:compute\_Zk}（概览路径例外见下行）\\
+LLG 严格并联连接 &
+\implpart{正序等效紧致近似 $Z_1{+}(Z_2{\parallel}Z_0){+}Z_f$，仅有效幅值，无相分解重构；src/short\_circuit/short\_circuit.cpp:compute\_Zk}\\
+零序-矢量组-中性点接地规则 &
+\implpart{显式零序支路数据可用；矢量组与三绕组零序未完整建模}\\
+序间耦合（未换位线路） & \implnone\\
+概览路径 $Z_1{=}Z_2{=}Z_0$ 简化 &
+\implpart{src/short\_circuit/short\_circuit.cpp:fault\_at\_bus\_with\_zkk；不平衡故障研究应使用详细路径}\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{参考文献}
+{\renewcommand{\section}[2]{}%
+\begin{thebibliography}{9}\small
+\bibitem{sym:fortescue} C.~L. Fortescue, ``Method of symmetrical co-ordinates
+applied to the solution of polyphase networks,'' \emph{Trans. AIEE}, vol.~37,
+pp.~1027--1140, 1918.
+\bibitem{sym:grainger} J.~J. Grainger and W.~D. Stevenson, \emph{Power System
+Analysis}, McGraw-Hill, 1994.
+\bibitem{sym:blackburn} J.~L. Blackburn, \emph{Symmetrical Components for Power
+Systems Engineering}, Marcel Dekker, 1993.
+\bibitem{sym:anderson} P.~M. Anderson, \emph{Analysis of Faulted Power Systems},
+IEEE Press, 1995.
+\bibitem{sym:iec60909-0} IEC 60909-0, \emph{Short-circuit currents in three-phase
+a.c. systems -- Part 0: Calculation of currents}, 2016.
+\end{thebibliography}}

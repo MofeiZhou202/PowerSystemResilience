@@ -1,0 +1,738 @@
+% theory_voltage_stability_converters.tex —— 潮流计算 通用理论：电压稳定、连续潮流与换流器稳态模型
+% 本文件为理论层章节，遵循 docs/modules/THEORY_WRITING_GUIDE.md。
+
+\section{电压稳定、连续潮流与换流器稳态理论}\label{sec:pf-th-vs}
+
+\begin{theorynote}
+本章为通用数学理论，按电压稳定与高压直流输电领域的标准模型与文献体系撰写，
+覆盖四组主题：(i) 电压稳定的分岔理论基础——鞍结分岔（SNB）与鼻点的分岔本质、
+负荷裕度的数学定义、$L$ 指标与模态分析/参与因子体系；(ii) 连续潮流（CPF）的
+参数化理论——自然/弧长/伪弧长参数化、增广系统、切向量预测与校正、步长控制的
+理论依据；(iii) 换流器稳态理论——VSC 注入模型与控制模式自由度分析、容量圆与
+调制比约束的几何意义、损耗模型推导，LCC 准稳态方程，DC-DC 变换器平均模型；
+(iv) AC/DC 接口方程的统一表述与 DC 岛可解性条件。
+本章公式不要求逐式对应代码；与平台实现（\srcpath{src/power\_flow/}）的对应关系
+见本章末"与实现的对应"表，超出实现的内容以"未实现扩展说明"框就地标记。
+\end{theorynote}
+
+\subsection{记号与约定}\label{sec:pf-th-vs-notation}
+\begin{itemize}
+  \item $x\in\mathbb{R}^{n}$：潮流状态向量（AC 相角 $\theta$、PQ 母线电压幅值
+        $V_m$、DC 母线电压 $v_{dc}$ 的堆叠）；$\lambda\in\mathbb{R}$：延拓参数
+        （负荷水平因子）；$F(x,\lambda)=0$：参数化潮流方程，
+        $J=F_x=\partial F/\partial x$ 为潮流雅可比；
+  \item $y=(x,\lambda)\in\mathbb{R}^{n+1}$：增广状态；$s$：弧长参数；$t$：
+        归一化切向量；上标 $0$ 表示基态（$\lambda=0$）取值；
+  \item $v,w$：奇异雅可比 $J$ 的右/左零向量（$Jv=0$，$w^{\top}J=0$）；
+  \item VSC 换流器 $k$ 连接 AC 母线 $i$ 与 DC 母线 $j$：$P_{ac},Q_{ac}$ 为 AC
+        端口注入（注入网络为正），$P_{dc}$ 为 DC 端口注入，$P_{loss}\ge0$ 为损耗，
+        $m$ 为调制比；$S_{base}$ 为系统基准功率；
+  \item LCC 换流站：$E_0$ 为换流变漏抗后的理想空载阀侧线电压，$E_t$ 为带载阀侧
+        母线线电压，$X_c$ 为每桥每相换相电抗，$n_b$ 为每极串联 6 脉动桥数，
+        $\alpha$ 为触发角，$\gamma$ 为关断角，$\mu$ 为换相重叠角，$I_d$、$U_d$
+        为直流电流与电压；
+  \item DC-DC 变换器 $m$：$V_{in},V_{out}$ 为端口电压，$D$ 为占空比，$\eta$ 为
+        效率；$G_{dc}=[g_{ij}]$ 为 DC 网络电导 Laplacian（$g=1/r_{pu}$）。
+  与手册其余部分冲突时以本章声明为准。
+\end{itemize}
+
+\subsection{电压稳定理论基础：鞍结分岔与负荷裕度}\label{sec:pf-th-vs-snb}
+
+\begin{definition}[参数化潮流方程与解支]
+设系统注入按方向 $d=(\Delta P,\Delta Q)$ 仿射增长，
+\begin{equation}
+F(x,\lambda)=F_0(x)+\lambda\,d(x)=0,\qquad F:\mathbb{R}^{n}\times\mathbb{R}\to\mathbb{R}^{n},
+\end{equation}
+$\lambda=0$ 对应基态运行点 $x_0$（$F(x_0,0)=0$）。满足 $F(x,\lambda)=0$ 的
+点集在 $(x,\lambda)$ 空间中形成\emph{解支}；其在指定母线上的投影
+$(\lambda,V_i(\lambda))$ 即 P--V 鼻曲线。
+\end{definition}
+
+\begin{definition}[正则点与鞍结分岔（折点）]
+解支上的点 $(x^*,\lambda^*)$ 称为\emph{正则点}，若 $J=F_x(x^*,\lambda^*)$ 非奇异；
+由隐函数定理，正则点附近解支可局部写成光滑函数 $x(\lambda)$。若 $J$ 奇异且
+秩亏一（$\mathrm{rank}\,J=n-1$），并满足下文定理~\ref{thm:pf-th-vs-snb} 的横截
+条件，则该点为\emph{鞍结分岔点}（saddle-node bifurcation，亦称折点/鼻点）：
+两条解支在此汇合并消失，$\lambda$ 在该点取局部极值 $\lambda^*$。
+\end{definition}
+
+\begin{lemma}[鼻点处雅可比奇异]\label{lem:pf-th-vs-singular}
+设解支可光滑地以弧长 $s$ 参数化：$(x(s),\lambda(s))$，$\|(\dot x,\dot\lambda)\|=1$。
+若 $\lambda(s)$ 在 $s=s^*$ 处取局部极值（鼻点），则 $F_x(x(s^*),\lambda(s^*))$
+奇异。
+\end{lemma}
+\begin{proof}
+对 $F(x(s),\lambda(s))\equiv0$ 关于 $s$ 求导得
+\begin{equation}
+F_x\,\dot x+F_\lambda\,\dot\lambda=0.
+\end{equation}
+极值处 $\dot\lambda(s^*)=0$，故 $F_x\,\dot x(s^*)=0$。由弧长参数化的归一化，
+$\|(\dot x,\dot\lambda)\|=1$ 且 $\dot\lambda=0$ 蕴含 $\dot x(s^*)\neq0$，
+即 $F_x$ 有非平凡零空间，奇异。
+\end{proof}
+
+引理~\ref{lem:pf-th-vs-singular} 给出"鼻点 $\Rightarrow$ 奇异"的方向；其逆命题
+需要横截条件排除退化情形，这正是下述核心定理的内容。
+
+\begin{theorem}[二次折点的刻画]\label{thm:pf-th-vs-snb}
+设 $F$ 光滑，$F(x^*,\lambda^*)=0$，$J=F_x(x^*,\lambda^*)$ 满足
+$\mathrm{rank}\,J=n-1$，右/左零空间分别由 $v,w$ 张成。若横截条件
+\begin{equation}
+w^{\top}F_\lambda\neq0,\qquad a:=w^{\top}F_{xx}[v,v]\neq0
+\end{equation}
+成立，则解集在 $(x^*,\lambda^*)$ 附近是一条光滑曲线，可参数化为
+$(x(\xi),\lambda(\xi))$（$\xi$ 为沿 $v$ 方向的局部坐标），且
+\begin{equation}
+\lambda(\xi)=\lambda^*-\frac{a}{2\,w^{\top}F_\lambda}\,\xi^{2}+O(\xi^{3}),\qquad
+\dot\lambda(0)=0,\quad \ddot\lambda(0)\neq0,
+\end{equation}
+即 $\lambda$ 在该点经历二次折点（鞍结分岔），解支在 $\lambda<\lambda^*$ 侧有两支
+（上支/下支），$\lambda>\lambda^*$ 侧无解。
+\end{theorem}
+\begin{proof}
+作分解 $x=x^*+\xi v+z$，其中 $z\in Z$，$Z$ 为 $\mathrm{span}\{v\}$ 的任一补子空间
+（如取 $Z=\{v\}^{\perp}$，维数 $n-1$）。考察映射
+\begin{equation}
+H(z,\lambda;\xi)=F(x^*+\xi v+z,\ \lambda)=0,
+\end{equation}
+其对 $(z,\lambda)$ 的导数为 $[J|_{Z}\ \ F_\lambda]$：这是 $n\times n$ 矩阵，
+其值域包含 $\mathrm{range}\,J$（维数 $n-1$）与 $F_\lambda$；由
+$w^{\top}F_\lambda\neq0$ 知 $F_\lambda\notin\mathrm{range}\,J$（否则存在 $u$
+使 $Ju=F_\lambda$，则 $w^{\top}F_\lambda=w^{\top}Ju=0$，矛盾），故该矩阵秩为
+$n$，非奇异。由隐函数定理，存在光滑的 $z(\xi)$、$\lambda(\xi)$ 使
+$H(z(\xi),\lambda(\xi);\xi)\equiv0$，$z(0)=0$，$\lambda(0)=\lambda^*$。
+
+对恒等式 $F(x^*+\xi v+z(\xi),\lambda(\xi))\equiv0$ 关于 $\xi$ 求导：
+\begin{equation}
+J\bigl(v+z'(0)\bigr)+F_\lambda\,\lambda'(0)=0.
+\end{equation}
+左乘 $w^{\top}$：$w^{\top}J=0$ 与 $w^{\top}F_\lambda\neq0$ 给出
+$\lambda'(0)=0$；代回得 $Jz'(0)=-Jv=0$，而 $z'(0)\in Z$ 与 $Z\cap\ker J=\{0\}$
+给出 $z'(0)=0$。再求二阶导并代入 $z'(0)=0$、$\lambda'(0)=0$：
+\begin{equation}
+J\,z''(0)+F_{xx}[v,v]+F_\lambda\,\lambda''(0)=0,
+\end{equation}
+左乘 $w^{\top}$ 得
+\begin{equation}
+\lambda''(0)=-\frac{w^{\top}F_{xx}[v,v]}{w^{\top}F_\lambda}=-\frac{a}{w^{\top}F_\lambda}\neq0.
+\end{equation}
+于是 $\lambda(\xi)=\lambda^*+\tfrac12\lambda''(0)\xi^2+O(\xi^3)$，为二次折点。
+\end{proof}
+
+\begin{remark}[鼻曲线上下支的稳定性解读]
+定理~\ref{thm:pf-th-vs-snb} 中 $\lambda''(0)$ 的符号决定折点开口方向；常规
+负荷增长下 $\lambda^*>0$ 为局部最大值，上支（高电压支）为小信号稳定运行支，
+下支（低电压支）不稳定（详见 Kundur~\cite{pfvs:kundur} 与
+Van Cutsem--Vournas~\cite{pfvs:vancutsem} 的小扰动分析）。工程负荷裕度只关心
+上支终点，CPF 翻越鼻点进入下支是\emph{数值追踪}行为，不对应可持续运行方式。
+\end{remark}
+
+\begin{example}[两母线系统的解析鼻点]\label{ex:pf-th-vs-twobus}
+送端为无穷大母线 $E\angle0$，经纯电抗 $jX$ 向受端母线（电压 $V\angle\delta$）
+输送恒功率负荷 $(P,Q)=(\lambda P_0,\lambda Q_0)$。潮流方程
+\begin{equation}
+P=\frac{EV\sin\delta}{X},\qquad Q=\frac{EV\cos\delta-V^{2}}{X}.
+\end{equation}
+消去 $\delta$（两式平方相加），令 $u=V^{2}$：
+\begin{equation}
+u^{2}+\bigl(2QX-E^{2}\bigr)u+X^{2}\bigl(P^{2}+Q^{2}\bigr)=0,
+\end{equation}
+\begin{equation}
+u=\frac{E^{2}-2QX\pm\sqrt{\bigl(E^{2}-2QX\bigr)^{2}-4X^{2}\bigl(P^{2}+Q^{2}\bigr)}}{2},
+\end{equation}
+$+$ 号对应上支。实解存在的充要条件是判别式非负；判别式 $=0$ 即鼻点。特取
+$Q_0=0$：鼻点条件 $E^{4}=4X^{2}\lambda^{2}P_0^{2}$，得
+\begin{equation}
+\lambda^{*}=\frac{E^{2}}{2XP_0},\qquad
+V_{\mathrm{nose}}=\frac{E}{\sqrt2},\qquad
+P_{\max}=\lambda^{*}P_0=\frac{E^{2}}{2X}.
+\end{equation}
+此时鼻点电压恰为 $E/\sqrt2\approx0.707$~pu——输电极限不仅取决于线路参数，
+还直接压低临界电压。该解析结果是 CPF 回归算例（两母线电压稳定算例）的理论
+期望值。
+\end{example}
+
+\begin{definition}[负荷裕度]\label{def:pf-th-vs-margin}
+沿增长方向 $d$，系统的\emph{负荷裕度}为基态到鼻点的传输能力增量：
+\begin{equation}
+\lambda^{*}=\sup\bigl\{\lambda\ge0:\ \exists\,x,\ F(x,\lambda)=0,\ (x,\lambda)
+\text{ 与基态同支}\bigr\},
+\end{equation}
+\begin{equation}
+P_{\mathrm{margin}}=P_{\mathrm{total}}(\lambda^{*})-P_{\mathrm{total}}(0)
+\quad(\mathrm{MW}),\qquad
+P_{\mathrm{total}}(\lambda)=\sum_i\bigl(P_{L,i}^{0}+\lambda\,\Delta P_{L,i}\bigr).
+\end{equation}
+$\lambda^{*}$ 由分岔点给出（连续负荷模型下即 SNB 点）；当计及发电机无功上限、
+离散分接头等不等式时，崩溃点可由限值诱导分岔（LIB）提前出现，负荷裕度取各
+机制的最小值。
+\end{definition}
+
+\begin{remark}[裕度对方向的依赖]
+负荷裕度是\emph{方向依赖}量：同一系统沿不同 $d$ 的 $\lambda^{*}$ 一般不同。
+工程报告必须同时声明增长方向（比例增长、单母线增长、区域增长等），否则裕度
+数字没有意义。
+\end{remark}
+
+\subsubsection*{$L$ 指标（Kessel--Glavitsch）}
+把母线划分为发电机母线集 $G$ 与负荷母线集 $L$，节点方程分块：
+\begin{equation}
+\begin{bmatrix}I_L\\ I_G\end{bmatrix}
+=
+\begin{bmatrix}Y_{LL} & Y_{LG}\\ Y_{GL} & Y_{GG}\end{bmatrix}
+\begin{bmatrix}V_L\\ V_G\end{bmatrix},
+\qquad
+V_L^{0}:=-Y_{LL}^{-1}Y_{LG}\,V_G,
+\end{equation}
+$V_L^{0}$ 为全部负荷电流置零时负荷母线的等效开路电压。
+
+\begin{definition}[$L$ 指标~\cite{pfvs:kessel}]
+对每个负荷母线 $j\in L$，
+\begin{equation}
+L_j=\Bigl|\,1-\frac{V_j^{0}}{V_j}\,\Bigr|,\qquad
+L=\max_{j\in L}L_j\in[0,1].
+\end{equation}
+\end{definition}
+$L_j=0$ 对应空载（$V_j=V_j^{0}$），$L\to1$ 对应 $V_j$ 远低于等效源电压、
+逼近电压崩溃；$L$ 是逐母线弱节点排序指标。在恒功率负荷、发电机母线电压
+幅值恒定的假设下，可以证明鼻点处 $L=1$；一般情形下 $L$ 是单调逼近 $1$ 的
+启发式裕度度量。
+
+\begin{gapnote}
+$L$ 指标、模态分析/参与因子与 Q--V 曲线在当前平台 CPF 中\textbf{均未实现}：
+指标族仅含负荷裕度类标量（$\lambda_{\max}$、$P_{\max}$、$P_{\mathrm{margin}}$
+与监控母线电压，实现层连续潮流章"结果结构与电压稳定指标"节如实声明）。
+上述两小节为完整理论体系所需而保留，属未实现扩展。
+\end{gapnote}
+
+\subsubsection*{模态分析与参与因子（Gao--Morison--Kundur）}
+把潮流雅可比按 $(\theta,V)$ 分块，并令 $\Delta P=0$（有功已平衡的扰动口径）：
+\begin{equation}
+\begin{bmatrix}\Delta P\\ \Delta Q\end{bmatrix}
+=
+\begin{bmatrix}J_{P\theta} & J_{PV}\\ J_{Q\theta} & J_{QV}\end{bmatrix}
+\begin{bmatrix}\Delta\theta\\ \Delta V\end{bmatrix}.
+\end{equation}
+
+\begin{proposition}[降阶 Q--V 雅可比~\cite{pfvs:gao}]\label{prop:pf-th-vs-modal}
+设 $J_{P\theta}$ 非奇异，则 $\Delta P=0$ 时
+\begin{equation}
+\Delta Q=J_R\,\Delta V,\qquad
+J_R=J_{QV}-J_{Q\theta}J_{P\theta}^{-1}J_{PV},
+\end{equation}
+$J_R$ 即潮流雅可比关于 $\theta$ 的 Schur 补。$J$ 奇异蕴含 $J_R$ 奇异
+（$\det J=\det J_{P\theta}\cdot\det J_R$），故电压崩溃点可用 $J_R$ 的最小模
+特征值刻画。
+\end{proposition}
+\begin{proof}
+由 $\Delta P=0$ 得 $\Delta\theta=-J_{P\theta}^{-1}J_{PV}\Delta V$，代入
+$\Delta Q$ 行即得 $J_R$。行列式恒等式为分块 Gauss 消元的标准结论。
+\end{proof}
+
+设 $J_R=\Xi\Lambda\Xi^{-1}$，$\Xi$ 的列为右特征向量 $\xi_k$，左特征向量
+$\eta_k=\Xi^{-1}$ 的行。模态分解 $\Delta V=\sum_k c_k\xi_k$ 给出
+$\Delta Q=\sum_k c_k\lambda_k\xi_k$：特征值 $\lambda_k$ 度量第 $k$ 个
+电压模态的 Q--V 灵敏度，$\lambda_k$ 小（$>0$）表示弱模态，$\lambda_k<0$ 表示
+电压不稳定（无功支撑增加反而压低电压）。母线 $i$ 对模态 $k$ 的\emph{参与因子}
+为 $p_{ik}=\xi_{ik}\eta_{ki}$，满足 $\sum_i p_{ik}=1$，用于弱节点排序。
+
+\subsection{连续潮流（CPF）理论}\label{sec:pf-th-vs-cpf}
+
+\subsubsection{问题提法与参数化}
+CPF 的目标是数值追踪解支 $F(x,\lambda)=0$ 经过鼻点的全过程。核心困难由
+引理~\ref{lem:pf-th-vs-singular} 给出：鼻点处 $F_x$ 奇异，\emph{自然参数化}
+（固定 $\lambda$ 递增、以 $x$ 为未知量用 Newton 求解）在鼻点附近必然恶化——
+Newton 迭代面对病态雅可比，且 $\lambda>\lambda^*$ 时无解可收。
+
+\begin{definition}[三种参数化]\label{def:pf-th-vs-param}
+设 $y=(x,\lambda)\in\mathbb{R}^{n+1}$，$G(y)=F(x,\lambda)$。
+\begin{itemize}
+  \item \emph{自然参数化}：以 $\lambda$ 为参数，逐步固定 $\lambda$ 求解 $x$；
+        在折点失效；
+  \item \emph{弧长参数化}：以解支弧长 $s$ 为参数，
+        $\mathrm{d}s^{2}=\|\mathrm{d}x\|^{2}+\mathrm{d}\lambda^{2}$，
+        补充方程 $\|y-y_{\mathrm{curr}}\|^{2}=s^{2}$；
+  \item \emph{伪弧长（Keller）参数化}~\cite{pfvs:keller}：以当前点切向量 $t$
+        张成的超平面局部参数化，补充方程
+        \begin{equation}
+        N(y)=t^{\top}\bigl(y-y_{\mathrm{pred}}\bigr)=0,
+        \end{equation}
+        其中 $y_{\mathrm{pred}}=y_{\mathrm{curr}}+s\,t$ 为预测点。伪弧长是弧长
+        约束的一阶（线性）版本，保证增广系统线性代数结构简单。
+    \end{itemize}
+\end{definition}
+
+\subsubsection{切向量预测}
+\begin{proposition}[切向量的确定]\label{prop:pf-th-vs-tangent}
+设 $y$ 为解支上的正则点（$\mathrm{rank}[F_x\ F_\lambda]=n$），则解支在该点的
+单位切向量 $t$ 由
+\begin{equation}
+[F_x\ \ F_\lambda]\,t=0,\qquad \|t\|=1,\qquad t^{\top}t_{\mathrm{prev}}>0
+\end{equation}
+唯一确定（符号条件保证沿支定向一致）。实践中以相邻两解点的归一化割线
+$t=(y_{\mathrm{curr}}-y_{\mathrm{prev}})/\|y_{\mathrm{curr}}-y_{\mathrm{prev}}\|$
+近似切向量（割线预测）。
+\end{proposition}
+\begin{proof}
+$[F_x\ F_\lambda]$ 为 $n\times(n+1)$ 满秩矩阵，零空间恰为一维，故单位切向量
+仅差符号；定向条件取与 $t_{\mathrm{prev}}$ 同号者。
+\end{proof}
+
+\begin{remark}[折点处切向量的形态]
+在二次折点，定理~\ref{thm:pf-th-vs-snb} 的证明给出 $\dot\lambda=0$、
+$\dot x\parallel v$：切向量退化为 $t\propto(v,0)$，即"$\lambda$ 不动、$x$ 沿
+$J$ 的零向量方向走"。这正是鼻曲线在鼻点处切线竖直（$\mathrm{d}\lambda/
+\mathrm{d}V=0$）的向量表述，也是自然参数化失效的几何原因。
+\end{remark}
+
+\subsubsection{增广校正与增广雅可比的非奇异性}
+伪弧长校正在预测点处求解增广系统
+\begin{equation}
+\Phi(y)=
+\begin{bmatrix}
+F(x,\lambda)\\[2pt] t^{\top}(y-y_{\mathrm{pred}})
+\end{bmatrix}=0,
+\qquad
+\Phi_y=\begin{bmatrix}F_x & F_\lambda\\ t_x^{\top} & t_\lambda\end{bmatrix}.
+\end{equation}
+CPF 方法的全部价值浓缩在下述定理中：增广化把折点从奇异点变回正则点。
+
+\begin{theorem}[增广雅可比在二次折点非奇异]\label{thm:pf-th-vs-augmented}
+设 $(x^*,\lambda^*)$ 为满足定理~\ref{thm:pf-th-vs-snb} 条件的二次折点，$t$ 为
+该点切向量。则增广雅可比 $\Phi_y$ 在 $(x^*,\lambda^*)$ 非奇异。
+\end{theorem}
+\begin{proof}
+先定 $t$ 的形态。切向量条件 $F_x t_x+F_\lambda t_\lambda=0$ 左乘 $w^{\top}$ 得
+$t_\lambda\,w^{\top}F_\lambda=0$，由横截条件 $t_\lambda=0$；于是 $F_xt_x=0$，
+$t_x=c\,v$，归一化后 $t=(v/\|v\|,\,0)$。
+
+设 $\Phi_y[u;\ \mu]=0$，即
+\begin{equation}
+Ju+\mu F_\lambda=0,\qquad t^{\top}\begin{bmatrix}u\\ \mu\end{bmatrix}=0.
+\end{equation}
+第一式左乘 $w^{\top}$：$\mu\,w^{\top}F_\lambda=0\Rightarrow\mu=0$；于是
+$Ju=0\Rightarrow u=c'v$；代入第二式：$t^{\top}[u;0]=c'\,v^{\top}v/\|v\|
+=c'\|v\|=0\Rightarrow c'=0$。故零空间平凡，$\Phi_y$ 非奇异。
+\end{proof}
+
+\begin{remark}[校正的收敛性与实现含义]
+定理~\ref{thm:pf-th-vs-augmented} 表明伪弧长校正在折点处仍是\emph{正则}
+Newton 问题：预测点足够接近解支时 Newton 校正保持二次收敛（标准 Newton--
+Kantorovich 框架），可以数值上"翻越"鼻点并采样下支。代价是每步需求解
+$(n+1)\times(n+1)$ 增广系统；Ajjarapu--Christy~\cite{pfvs:ajjarapu} 的原始
+CPF 与 CPFLOW~\cite{pfvs:chiang} 均利用增广矩阵相对 $J$ 只多一行一列的
+加边结构（bordered matrix）做块消元以保持稀疏效率。
+\end{remark}
+
+\subsubsection{步长控制的理论依据}
+弧长步长 $s$ 的自适应控制遵循两条原则：
+\begin{itemize}
+  \item \emph{曲率原则}：解支曲率大（鼻点附近）时切向量预测的一阶误差
+        $O(s^{2}\kappa)$（$\kappa$ 为曲率）放大，需减小 $s$；平直段可放大 $s$。
+        成败倍率（校正成功 $s\leftarrow\min(\gamma_{+}s,s_{\max})$，失败
+        $s\leftarrow\gamma_{-}s$ 重试，$s<s_{\min}$ 终止）是其最简实现；
+  \item \emph{收敛域原则}：Newton 校正对初值的吸引域有限，$s$ 过大时预测点
+        落在吸引域外，收缩重试相当于在解支上做信任域回退。
+\end{itemize}
+步长上下限 $[s_{\min},s_{\max}]$ 同时承担鼻点定位精度的角色：报告的
+$\lambda_{\max}$ 是采样点中的最大值，分辨率受 $s_{\max}$ 控制，需要精确鼻点
+时应收紧步长或做局部加密。
+
+\begin{gapnote}
+平台 CPF 实现了割线切向量+伪弧长超平面校正的完整框架，但两处与理论全配置
+有差距：(i) 翻越鼻点后仅保留固定个数（默认 2）的下支采样点即主动停止，
+非完整下支追踪；(ii) 校正器使用有限差分稠密雅可比 + 稠密 LU，未实现
+定理~\ref{thm:pf-th-vs-augmented} 加边结构的稀疏块消元，大规模系统下校正
+代价为 $O(n^{3})$ 级。另：存在任一在运 PV 母线时求解器自动回退自然参数化
+（实现层连续潮流章），此时定理~\ref{thm:pf-th-vs-augmented} 的保障不再适用，
+只能从上支逼近鼻点。
+\end{gapnote}
+
+\subsection{VSC 换流器通用稳态理论}\label{sec:pf-th-vs-vsc}
+
+\subsubsection{注入模型与功率守恒}
+\begin{definition}[VSC 稳态注入模型]\label{def:pf-th-vs-vsc}
+稳态潮流层面，VSC 换流器 $k$ 抽象为连接 AC 母线 $i$ 与 DC 母线 $j$ 的
+双端口耦合设备，端口注入 $(P_{ac},Q_{ac},P_{dc})$（注入网络为正）满足
+\emph{功率守恒}
+\begin{equation}
+P_{ac}+P_{dc}+P_{loss}=0,\qquad P_{loss}\ge0,
+\end{equation}
+换流器内部开关过程全部平均化，不显式出现。AC 网络只看到注入
+$(P_{ac},Q_{ac})$，DC 网络只看到注入 $P_{dc}$，两域通过守恒方程耦合。
+\end{definition}
+
+\subsubsection{控制模式、自由度与方程闭合原则}
+\begin{proposition}[换流器方程闭合的计数判据]\label{prop:pf-th-vs-closure}
+每台双端口 VSC 向网络引入三个端口量 $(P_{ac},Q_{ac},P_{dc})$；功率守恒（损耗
+为端口量的确定函数）提供一条方程，闭合 $P_{dc}$。因此每台 VSC 的控制模式必须
+额外交由\emph{恰好两条}独立等式约束：\emph{有功通道一条}（定 $P_{ac}$ /
+定 $P_{dc}$ / 控 $V_{dc}$ 刚性或下垂——此时 $P_{ac}$ 释放为自由平衡量，相应
+方程转移到 DC 侧），\emph{无功/电压通道一条}（定 $Q_{ac}$ 或控 $V_{ac}$）。
+少于两条则方程组欠定（自由度未被吸收，岛奇异）；多于两条则过约束（整定冲突，
+无解）。
+\end{proposition}
+\begin{remark}
+命题~\ref{prop:pf-th-vs-closure} 是\emph{必要性计数判据}而非充分条件：计数
+闭合不保证物理解存在（可能无可行运行点），也不排除病态。平台以"所有自由
+注入必须有闭合方程"为设计原则，并以规则目录形式落地为求解前预校核。
+\end{remark}
+
+用布尔变量记各通道占用：$z^{P_{ac}}$（AC 有功硬给定）、$z^{P_{dc}}$（DC 有功
+硬给定）、$z^{V_{dc}}$（DC 电压刚性控制）、$z^{Q}$、$z^{V_{ac}}$、$z^{pf}$
+（功率因数控制），闭合原则的互斥形式为
+\begin{equation}
+z^{P_{ac}}+z^{P_{dc}}+z^{V_{dc}}\le1,\qquad
+z^{Q}+z^{V_{ac}}+z^{pf}\le1.
+\end{equation}
+DC 侧构网（$z^{V_{dc}}=1$）时有功通道被占用，$P_{ac}$、$P_{dc}$ 均不得再硬
+给定（调度值只能作初值）；双侧同时构网（AC 侧定相角+幅值且 DC 侧定电压）
+对普通两端口换流器缺少承担有功不平衡的自由度，属于需要内部储能等额外机制
+的高级模式。
+
+VSC 稳态控制的七类典型分类（$\delta_s{+}V_s$ / $P_s{+}V_s$ / $P_s{+}Q_s$ /
+$U_{dc}{+}Q_s$ / $U_{dc}{+}V_s$ / droop $U_{dc}{+}V_s$ / droop $U_{dc}{+}Q_s$）
+是上述通道规则的枚举展开：每类模式恰好占用两个通道各一次。
+
+\subsubsection{DC 电压下垂律}
+多换流器共联 DC 网络时，DC 电压控制必须允许多源并联。标准形式为电压下垂
+\begin{equation}
+P_{dc}=P^{0}+K\bigl(V_{dc}^{set}-V_{dc}\bigr),\qquad K>0,
+\end{equation}
+电压偏低时注入增加，符号正确。平台采用\emph{平方电压下垂}变体
+\begin{equation}
+P_{tr}=k_{vdc}\bigl(v_{dc}^{2}-v_{dc,set}^{2}\bigr),\qquad
+P_{ac}=P_{tr}-P_{loss}(P_{tr},v_{dc}).
+\end{equation}
+\begin{remark}[$v^{2}$ 下垂的动机]
+恒电阻 DC 支路功率 $p_{ij}=g_{ij}v_i(v_i-v_j)$ 在标称点附近
+$v_i\approx v_j\approx1$ 有 $p_{ij}\approx g_{ij}(v_i-v_j)\approx
+\tfrac{g_{ij}}{2}(u_i-u_j)$（$u=v^{2}$）：网络方程对平方电压近似仿射。
+以 $u$ 为下垂变量使换流器律与网络律在同一变量上线性相容，小信号增益
+$\mathrm{d}P/\mathrm{d}v=2k_{vdc}v$ 在标称点即 $2k_{vdc}$，量纲与调度口径
+（MW/pu$^{2}$）直接可读。
+\end{remark}
+
+\subsubsection{损耗模型推导}
+VSC 稳态损耗的工程口径有两类：
+\begin{itemize}
+  \item \emph{恒定效率（Linear）}：由 $\eta=P_{out}/P_{in}$ 直接得
+        \begin{equation}
+        P_{loss}=(1-\eta)\,|p|,
+        \end{equation}
+        $p$ 为传输功率。损耗与电流解耦，适合规划级估算；
+  \item \emph{电流相关二次模型（CurrentBased）}：计及损耗的物理组成——
+        固定项（控制、辅助电源、空载）$a$；开关损耗与阀正向压降近似正比于
+        电流 $bI$；导通（欧姆）损耗正比于 $cI^{2}$：
+        \begin{equation}
+        P_{loss}=a+bI+cI^{2},\qquad I=\frac{|p|}{v_{dc}},
+        \end{equation}
+        电流取 DC 侧口径（$I=|p|/v_{dc}$，低压重载时损耗显著上升，与
+        $\eta$ 恒定的 Linear 模型定性不同）。
+\end{itemize}
+任何损耗模型必须满足 $P_{loss}\ge0$；模型给出负损耗属于数据错误而非数值
+现象。双向运行时效率口径按功率方向分段（注入约定下以 $|p|$ 对称化）。
+
+\subsubsection{容量圆、电流限与调制比约束的几何意义}
+VSC 的物理不等式约束在运行平面上有明确几何形态：
+\begin{itemize}
+  \item \emph{容量圆}：换流阀与内电抗的电流定额把 AC 侧运行点限制在圆盘
+        \begin{equation}
+        P_{ac}^{2}+Q_{ac}^{2}\le S_{rated}^{2},
+        \end{equation}
+        几何上为 $P$--$Q$ 平面中以原点为中心的圆；与有功盒约束
+        $P\in[P_{\min},P_{\max}]$、无功盒约束求交即得可行域；
+  \item \emph{AC 电流限}：$I_{ac}=S_{ac}/(\sqrt3\,V_{ll})\le I_{ac}^{\max}$
+        （名值；标幺口径 $I_{ac}=S_{ac}/V_m$），本质是容量圆随端电压收缩的
+        动态版本；
+  \item \emph{DC 电流限}：$I_{dc}=|P_{dc}|/v_{dc}\le I_{dc}^{\max}$，
+        $v_{dc}$ 低时同功率下电流放大，是低压 DC 网络的关键校核；
+  \item \emph{调制比窗口}：PWM 合成要求
+        \begin{equation}
+        V_{ac}^{model}=K_m\,m\,V_{dc},\qquad m\in[m_{\min},m_{\max}],
+        \end{equation}
+        即给定 $V_{dc}$ 时可合成的 AC 电压幅值被限制在线段
+        $[K_m m_{\min}V_{dc},\,K_m m_{\max}V_{dc}]$ 上；$V_{dc}$ 过低时窗口
+        无法覆盖所需 $V_{ac}$（几何上窗口平移出可行区），等价可行性校核为
+        $m=V_{ac}^{model}/(K_mV_{dc})\in[m_{\min},m_{\max}]$。
+\end{itemize}
+
+\begin{gapnote}
+上述不等式在平台默认路径下\textbf{不嵌入 Newton 方程}：容量圆、AC/DC 电流限、
+调制比窗口与 DC-DC 占空比窗口均在收敛后逐台校核并以告警输出
+（\texttt{ACDC-PHYS-01..05}、\texttt{DCDC-PHYS-01}），opt-in 开关可把越限
+Newton 根整体判为物理不可行（硬门卫），但方程内部不做再调度。唯一的方程
+内嵌例外是 VSC 交流电流限的半光滑 NCP 路径（min--max 中值 NCP 函数及其
+Chen--Harker--Kanzow--Smale 平滑，见~\cite{pfvs:facchinei}），为 opt-in
+且仅覆盖部分控制模式；完整的容量圆/调制比方程内嵌处理属未实现扩展。
+\end{gapnote}
+
+\subsection{LCC 换流器准稳态理论}\label{sec:pf-th-vs-lcc}
+
+\subsubsection{六脉动桥的平均直流电压}
+LCC（电网换相）换流器以晶闸管阀按电网电压过零点自然换相。6 脉动桥在一个
+周期内由 6 段 $60^{\circ}$ 的线电压片段拼成直流电压波形；设阀侧线电压有效值
+$E_0$，触发延迟角 $\alpha$，不计换相重叠时平均直流电压为片段积分
+\begin{equation}
+U_{d0}=\frac{1}{\pi/3}\int_{-\pi/6+\alpha}^{\pi/6+\alpha}\sqrt2\,E_0\cos\theta\,
+\mathrm{d}\theta
+=\frac{3\sqrt2}{\pi}E_0\cos\alpha.
+\end{equation}
+定义理想空载直流电压 $U_{d0}^{(0)}=\tfrac{3\sqrt2}{\pi}E_0$，则
+$U_d=U_{d0}^{(0)}\cos\alpha$。$\alpha$ 是整流侧唯一控制量：
+$\alpha<90^{\circ}$ 时 $U_d>0$（整流），$\alpha>90^{\circ}$ 时反号（逆变）。
+
+\subsubsection{换相重叠与外特性}
+换相期间两个阀同时导通，重叠角 $\mu$ 内直流电压被两相电压平均值拉低，
+损失面积正比于换相电抗与直流电流。标准结果（Kimbark~\cite{pfvs:kimbark}、
+Arrillaga~\cite{pfvs:arrillaga}）为
+\begin{equation}
+\cos\alpha-\cos(\alpha+\mu)=\frac{\sqrt2\,X_c I_d}{E_0},
+\end{equation}
+\begin{equation}
+U_d=U_{d0}^{(0)}\cos\alpha-\frac{3}{\pi}X_c I_d,
+\end{equation}
+重叠的净效应等效为一个\emph{不消耗有功}的换相电阻 $R_c=\tfrac{3}{\pi}X_c$
+（压降代表交流侧无功消耗，而非热损耗）。每极串联 $n_b$ 个桥时电压、压降
+同倍放大：$U_{d0}=\tfrac{3\sqrt2}{\pi}n_bE_0$，$U_d=U_{d0}\cos\alpha-
+\tfrac{3}{\pi}n_bX_cI_d$。
+
+逆变侧以越前角 $\beta=\pi-\alpha$ 与\emph{关断角} $\gamma=\beta-\mu$ 描述，
+$\gamma$ 是阀恢复正向阻断能力所需的最低裕度，逆变站正常控制方式为定关断角
+（CEA，$\gamma=\gamma_{\min}$）以防换相失败；外特性写为
+\begin{equation}
+U_d=U_{d0}\cos\gamma-\frac{3}{\pi}n_bX_cI_d+n_b\,dU_v,
+\end{equation}
+$dU_v$ 为阀正向压降项。整流侧对应方程以 $\alpha$ 描述，$dU_v$ 取负号。
+
+\subsubsection{无功消耗与功率因数}
+基波电流因触发延迟与换相重叠而滞后阀侧电压，换流器\emph{恒吸收无功}：
+\begin{equation}
+Q=P\tan\varphi,\qquad
+\cos\varphi\approx\frac{U_d}{U_{d0,t}},\qquad
+U_{d0,t}=\frac{3\sqrt2}{\pi}n_bE_t,
+\end{equation}
+功率因数用带载阀侧电压 $E_t$（区别于经分接头决定的空载量 $E_0$）评估。
+LCC 站的无功需求约为其传输有功的 $40\%\sim60\%$，必须就地补偿，这是
+LCC-HVDC 系统设计的核心约束之一~\cite{pfvs:arrillaga}。
+
+\begin{remark}[控制模式与电流单向性]
+准稳态控制模式：整流侧定电流（CC，正常方式，$\alpha$ 为自由量）、定功率
+（CP）、定 $\alpha$（备用）；逆变侧定 $\gamma$（CEA，正常方式）、定电流、
+定功率。晶闸管阀单向导电决定 $I_d$ 不可反号：功率反转靠电压极性反转实现。
+$I_d$ 触及边界 $[0,I_{rated}]$ 时原控制律不再保持，站退化为恒流特性
+（$\gamma$ 保持在 $\gamma_{\min}$ 之上）。分接头作为慢速离散自由度在
+Newton 方程外（外环）调整，不是潮流状态量。
+\end{remark}
+
+\subsection{DC-DC 变换器平均模型}\label{sec:pf-th-vs-dcdc}
+
+\subsubsection{CCM 平均模型推导}
+潮流级 DC-DC 模型基于开关周期平均与电感伏秒平衡：连续导通模式（CCM）下，
+稳态电感电流周期回复要求一个开关周期内电感两端伏秒积为零。
+
+\begin{example}[三种基本拓扑的电压律推导]
+设占空比 $D$（导通占比），开关周期 $T$。
+\begin{itemize}
+  \item \emph{Buck}：导通段电感承受 $V_{in}-V_{out}$，关断段承受 $-V_{out}$，
+        伏秒平衡 $(V_{in}-V_{out})DT=V_{out}(1-D)T$ 给出
+        $V_{out}=DV_{in}$；
+  \item \emph{Boost}：导通段 $V_{in}$，关断段 $V_{in}-V_{out}<0$，
+        $V_{in}DT+(V_{in}-V_{out})(1-D)T=0$ 给出
+        $V_{out}=V_{in}/(1-D)$；
+  \item \emph{Buck-Boost}（非反相口径）：$V_{in}DT=V_{out}(1-D)T$ 给出
+        $V_{out}/V_{in}=D/(1-D)$；
+  \item \emph{隔离型}：经变比 $n$ 的变压器耦合，$V_{out}=nM(D)V_{in}$，
+        $M(D)$ 为调制增益。
+\end{itemize}
+\end{example}
+
+稳态潮流关心的是反问题——由端口电压反演占空比并做可行性校核：
+\begin{equation}
+D=\begin{cases}
+V_{out}/V_{in} & \text{Buck}\\
+1-V_{in}/V_{out} & \text{Boost}\\
+V_{out}/(V_{in}+V_{out}) & \text{Buck-Boost}\\
+V_{out}/(nV_{in}) & \text{隔离型（}M\text{ 口径）}
+\end{cases},
+\qquad D\in[D_{\min},D_{\max}].
+\end{equation}
+
+\subsubsection{功率守恒、效率与欧姆损耗}
+端口注入约定下 $P_{in}^{port}+P_{out}^{port}+P_{loss}=0$。效率按功率方向
+分段施加：正向（$P_{out}^{ref}\ge0$）时 $P_{in}=P_{out}^{ref}/\eta$，反向时
+$P_{in}=\eta\,P_{out}^{ref}$；等值电阻产生的 $I^{2}R$ 损耗
+\begin{equation}
+P_{loss}^{I^2R}=r_{eq}\,\frac{P_{in}^{2}}{v_{dc,in}^{2}},\qquad
+P_{out}=P_{out}^{ref}-P_{loss}^{I^2R}.
+\end{equation}
+
+\begin{remark}[平均模型的适用边界]
+上述公式默认 CCM、稳态平均，忽略开关压降、电感电阻、死区、轻载 DCM、控制
+环动态与热约束。因此它们适用于潮流级可行性校核与稳态控制方程，不等同于
+开关级精确仿真；电流约束 $I_{in/out}=|P_{in/out}|/V_{in/out}\le I^{\max}$
+与单向器件的功率方向约束属不等式校核范畴。
+\end{remark}
+
+\subsection{AC/DC 接口方程的统一表述}\label{sec:pf-th-vs-unified}
+
+\subsubsection{统一方程组结构}
+混合 AC/DC 潮流把两域未知量放入同一方程组联立求解。状态与方程结构：
+\begin{equation}
+x=\begin{bmatrix}\theta_{\text{非 slack}}\\ V_{m,\mathrm{PQ}}\\ v_{dc,\text{非参考}}\end{bmatrix},
+\qquad
+F(x)=\begin{bmatrix}
+P^{spec}(x)-P^{calc}(x)\\
+Q^{spec}(x)-Q^{calc}(x)\\
+p_{dc}^{spec}(x)-v_{dc}\odot\bigl(G_{dc}v_{dc}\bigr)
+\end{bmatrix}=0,
+\end{equation}
+其中换流器贡献全部经 $spec$ 向量进入：AC 侧 $P^{spec}\mathrel{+}=P_{ac}$、
+$Q^{spec}\mathrel{+}=Q_{ac}$，DC 侧 $p_{dc}^{spec}\mathrel{+}=P_{dc}$；
+VSC 注入、LCC 站注入与 DC-DC 端口注入按各自模式在当前迭代点求值。雅可比
+呈块结构
+\begin{equation}
+J=\begin{bmatrix}
+J_{AC} & J_{AC\leftarrow DC}\\
+J_{DC\leftarrow AC} & J_{DC}
+\end{bmatrix},
+\end{equation}
+对角块内换流器自洽导数（如 $\partial p_{dc}^{spec}/\partial v_{dc}$、CEA 站
+外特性导数）是 DC 方程 Newton 收敛的必要条件；交叉块
+$J_{AC\leftarrow DC}$、$J_{DC\leftarrow AC}$ 是否装配是精度/稳健性取舍。
+
+\subsubsection{DC 岛可解性：电压参考的必要性}
+\begin{theorem}[DC 岛电压参考条件]\label{thm:pf-th-vs-dcref}
+设某 DC 电压岛连通、仅含恒电阻支路（电导 Laplacian $L=G_{dc}$）。
+(i) 若岛内无任何电压成形机制（无钉住母线、无下垂源、无特征控制换流站），
+则 DC 子方程在无载点 $v=c\,\mathbf 1$ 处雅可比奇异：$J_{dc}=cL$；
+(ii) 钉住岛内任一节点电压（删除对应行列）后，接地 Laplacian $L_r$ 在连通
+假设下正定，DC 子块局部正则。
+\end{theorem}
+\begin{proof}
+(i) Laplacian 行和为零：$L\mathbf1=0$。DC 方程
+$F(v)=v\odot(Lv)-p^{spec}$ 的雅可比为
+$J_{dc}=\mathrm{diag}(Lv)+L\,\mathrm{diag}(v)$；在 $v=c\mathbf1$ 处
+$Lv=0$，故 $J_{dc}=cL$，$\mathbf1\in\ker J_{dc}$，奇异。
+(ii) 删去参考节点后的接地 Laplacian $L_r$ 满足能量恒等式：对任意 $u$
+（参考分量置零），
+\begin{equation}
+u^{\top}L_r\,u=\sum_{(i,j)}g_{ij}(u_i-u_j)^{2}\ge0,
+\end{equation}
+等号成立要求所有相连节点分量相等；连通性归纳至参考节点分量 $0$，故
+$u=0$，$L_r$ 正定、非奇异。
+\end{proof}
+
+\begin{remark}[下垂源与参与因子的正则化作用]
+下垂源注入 $P=P^{0}+K(V^{set}-V)$ 为雅可比对角贡献正项 $K$：岛矩阵由
+$L$ 变为 $L+\mathrm{diag}(K_e)$，无需钉住任何节点即正定（弱对角占优加严格
+正对角）。多下垂源并联要求总增益 $K_{total}=\sum_eK_e>0$；多刚性源位于同一
+电气节点且整定不一致（$V_1^{set}\neq V_2^{set}$）时方程直接矛盾；刚性电压
+控制与参与因子功率分摊（$P_e=P_e^{0}+\alpha_e\lambda_d$，$\sum_e\alpha_e=1$）
+叠加占用同一有功通道，构成过约束——这些一致性条件与
+命题~\ref{prop:pf-th-vs-closure} 的计数判据同源。
+\end{remark}
+
+\begin{remark}[方程闭合计数的系统级形式]
+设 AC 非 slack 母线 $n_p$ 个、PQ 母线 $n_q$ 个、DC 非参考母线 $n_{dc}$ 个，
+则网络方程共 $n_p+n_q+n_{dc}$ 条，与状态维数相等；每台换流器/换流站按
+命题~\ref{prop:pf-th-vs-closure} 自带两条控制等式（或以 slack/参考身份换取
+网络行列的剔除），增广模式（如 AC 电压成形母线的增广方程、NCP 限值块）
+同步增广状态与方程。系统级闭合等价于：每个 DC 岛恰有一个电压成形机制
+（定理~\ref{thm:pf-th-vs-dcref}），且每台设备的自由注入均被控制等式吸收。
+\end{remark}
+
+\subsection{与实现的对应}\label{sec:pf-th-vs-impl}
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{6.8cm}L{8.6cm}@{}}
+\toprule
+理论条目 & 实现状态\\
+\midrule
+\endfirsthead
+\toprule
+理论条目 & 实现状态\\
+\midrule
+\endhead
+仿射负荷方向 $P(\lambda)=P^{0}+\lambda\Delta P$ 与方向构造 &
+\implfull{src/power\_flow/voltage\_stability.cpp:apply\_direction}（比例/指定母线两工厂见 include/hacdcpf/power\_flow/voltage\_stability.hpp:CpfDirection）\\
+自然参数化（固定 $\lambda$ 递增 + NR 校正） &
+\implfull{src/power\_flow/voltage\_stability.cpp:solve}（legacy 模式与首个延拓点；有在运 PV 母线时自动回退此口径并如实声明）\\
+弧长增广系统（$\lambda$ 为未知量、状态布局与打包） &
+\implfull{src/power\_flow/voltage\_stability.cpp:make\_state\_layout}（pack/unpack 见同文件 pack\_augmented\_state、unpack\_augmented\_state）\\
+割线切向量预测与符号一致性校正 &
+\implfull{src/power\_flow/voltage\_stability.cpp:solve}（定方向预测可经 use\_secant\_predictor=false 关闭）\\
+伪弧长超平面校正 $t^{\top}(y-y_{pred})=0$ &
+\implpart{src/power\_flow/voltage\_stability.cpp:arc\_length\_correct 实现超平面校正，但用有限差分稠密雅可比 + FullPivLU + 回溯线搜索，未做加边块消元与稀疏解析雅可比}\\
+成败倍率步长控制（$s_{\min}/s_{\max}/\gamma_\pm$） &
+\implfull{src/power\_flow/voltage\_stability.cpp:solve}（step\_grow/step\_shrink/step\_min/step\_max）\\
+鼻点判定（$\lambda$ 切向符号反转）与下支采样 &
+\implpart{翻越检测已实现（solve，置 nose\_found），但仅保留 lower\_branch\_steps（默认 2）个下支点即停，非完整下支追踪；相邻采样点间不做鼻点加密二分}\\
+负荷裕度指标族（$\lambda^*$、$P_{\max}$、$P_{margin}$） &
+\implfull{src/power\_flow/voltage\_stability.cpp:compute\_vsi}（汇总口径取 trace 中 $\lambda$ 最大点）\\
+$L$ 指标、模态分析/参与因子、Q--V 曲线 & \implnone\\
+VSC 注入模型与功率守恒 $P_{ac}+P_{dc}+P_{loss}=0$ &
+\implfull{src/power\_flow/converter\_model.cpp:converter\_ac\_injection}（DC 侧见同文件 converter\_dc\_injection）\\
+Linear/CurrentBased 损耗模型及导数 &
+\implfull{src/power\_flow/converter\_model.cpp:converter\_loss}（导数 converter\_loss\_jacobian；$I=|p|/\max(v_{dc},0.1)$ 带下限钳制）\\
+$v^{2}$ 下垂律 $P_{tr}=k_{vdc}(v_{dc}^{2}-v_{dc,set}^{2})$ &
+\implfull{src/power\_flow/converter\_model.cpp:converter\_ac\_injection}（交叉导数 converter\_ac\_jacobian\_vdc、converter\_dc\_jacobian\_vdc）\\
+控制模式枚举与七类分类映射 &
+\implfull{include/hacdcpf/model/enums/converter\_enums.hpp:ConverterMode}（六枚举；七类分类 ACDCControlMode 同文件；角色判定 include/hacdcpf/model/device\_control\_role.hpp:resolve\_device\_control\_role）\\
+方程闭合原则（计数判据、互斥规则） &
+\implpart{以规则目录形式落地为求解前预校核 src/power\_flow/converter\_coordination.cpp:evaluate\_converter\_coordination（ACDC-GFM/DCISLAND 等系列），非严格自由度计数；PQ$\leftrightarrow$VDC\_Q 切换见 src/power\_flow/newton\_solver.cpp:apply\_converter\_mode\_switching}\\
+容量圆/电流限/调制比窗口不等式 &
+\implpart{默认收敛后逐台校核仅告警（ACDC-PHYS-01..05，src/api/hacdcpf.cpp:populate\_derived\_results）；opt-in 硬门卫 enforce\_converter\_physical\_limits 判根不可行；VSC 交流电流限另有方程内嵌半光滑 NCP 路径 src/power\_flow/vsc\_limit\_ncp.cpp:evaluate\_vsc\_limit\_ncp（opt-in enable\_limit\_ncp，限 PQ/VDC\_Q/带阻抗 GFM 模式）}\\
+LCC 六脉动桥外特性与 $R_c=\frac{3}{\pi}X_c$ 压降 &
+\implfull{include/hacdcpf/power\_flow/lcc\_model.hpp:lcc\_operating\_point}（实现 src/power\_flow/lcc\_model.cpp；整流/逆变、CEA/CC/CP/定 $\alpha$ 分派）\\
+LCC 无功 $Q=P\tan\varphi$、$\cos\varphi\approx U_d/U_{d0,t}$ &
+\implfull{include/hacdcpf/power\_flow/lcc\_model.hpp:lcc\_ac\_injection}（$E_t$/$E_0$ 双电压口径与实现一致）\\
+LCC 电流单向钳制 $[0,I_{rated}]$ 与恒流退化 &
+\implfull{include/hacdcpf/power\_flow/lcc\_model.hpp:lcc\_operating\_point}（id\_at\_limit 与 [LCC-PHYS-03] 诊断）\\
+分接头的 Newton 外环地位 &
+\implfull{include/hacdcpf/power\_flow/lcc\_model.hpp}（头文件注释约定 R 卡外环包络；分接头非 Newton 状态量）\\
+DC-DC 平均模型（Power/Droop/Voltage 三模式、效率分段、$I^2R$ 损耗） &
+\implfull{src/power\_flow/converter\_model.cpp:dcdc\_power\_transfer}（雅可比 dcdc\_jacobian\_vdc）\\
+占空比反演与可行性窗 $D\in[d_{\min},d_{\max}]$ &
+\implfull{src/power\_flow/converter\_model.cpp:dcdc\_duty\_ratio}（Generic 拓扑不评估；校核为事后告警 DCDC-PHYS-01）\\
+统一联立方程组与换流器 spec 注入 &
+\implfull{src/power\_flow/jacobian\_builder.cpp:build\_power\_spec}（DC 注入装配 src/power\_flow/pf\_injection\_assembly.cpp:assemble\_dc\_injections；残差/雅可比 src/power\_flow/jacobian\_builder.cpp:evaluate\_residual\_impl）\\
+DC 岛电压参考必要性（定理~\ref{thm:pf-th-vs-dcref}） &
+\implfull{src/power\_flow/newton\_solver.cpp:plan\_dc\_island\_references}（岛识别 compute\_dc\_components；无参考自动提升 PQ 换流器或钉母线并告警）\\
+多源协调（下垂并联 $K_{total}>0$、主从、参与因子 $\sum\alpha=1$） &
+\implfull{src/power\_flow/newton\_solver.cpp:apply\_participation\_factor\_sharing}（规则校核 converter\_coordination.cpp 的 DCISLAND-*/PARTICIPATION 系列）\\
+AC$\leftrightarrow$DC 交叉雅可比块 &
+\implpart{src/power\_flow/jacobian\_builder.cpp:evaluate\_residual\_impl 已实现交叉块，但默认关闭（opt-in enable\_coupled\_jacobian）；DC 块内自洽导数与 LCC 外特性导数恒常装配}\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{参考文献}
+{\renewcommand{\section}[2]{}%
+\begin{thebibliography}{9}\small
+\bibitem{pfvs:kundur} P.~Kundur, \emph{Power System Stability and Control},
+McGraw-Hill, 1994.
+\bibitem{pfvs:vancutsem} T.~Van Cutsem, C.~Vournas, \emph{Voltage Stability of
+Electric Power Systems}, Kluwer Academic Publishers, 1998.
+\bibitem{pfvs:ajjarapu} V.~Ajjarapu, C.~Christy, ``The continuation power flow:
+a tool for steady state voltage stability analysis,'' \emph{IEEE Transactions on
+Power Systems}, vol.~7, no.~1, pp.~416--423, 1992.
+\bibitem{pfvs:chiang} H.-D. Chiang, A.~J. Flueck, K.~S. Shah, N.~Balu,
+``CPFLOW: a practical tool for tracing power system steady-state stationary
+behavior due to load and generation variations,'' \emph{IEEE Transactions on
+Power Systems}, vol.~10, no.~2, pp.~623--634, 1995.
+\bibitem{pfvs:gao} B.~Gao, G.~K. Morison, P.~Kundur, ``Voltage stability
+evaluation using modal analysis,'' \emph{IEEE Transactions on Power Systems},
+vol.~7, no.~4, pp.~1529--1542, 1992.
+\bibitem{pfvs:kessel} P.~Kessel, H.~Glavitsch, ``Estimating the voltage
+stability of a power system,'' \emph{IEEE Transactions on Power Delivery},
+vol.~1, no.~3, pp.~346--354, 1986.
+\bibitem{pfvs:keller} H.~B. Keller, ``Numerical solution of bifurcation and
+nonlinear eigenvalue problems,'' in P.~H. Rabinowitz (ed.), \emph{Applications
+of Bifurcation Theory}, Academic Press, pp.~359--384, 1977.
+\bibitem{pfvs:kimbark} E.~W. Kimbark, \emph{Direct Current Transmission},
+vol.~I, Wiley-Interscience, 1971.
+\bibitem{pfvs:arrillaga} J.~Arrillaga, \emph{High Voltage Direct Current
+Transmission}, 2nd ed., IEE Power Engineering Series, 1998.
+\bibitem{pfvs:facchinei} F.~Facchinei, J.-S. Pang, \emph{Finite-Dimensional
+Variational Inequalities and Complementarity Problems}, Springer, 2003.
+\end{thebibliography}}

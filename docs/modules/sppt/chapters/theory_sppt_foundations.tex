@@ -1,0 +1,736 @@
+% theory_sppt_foundations.tex —— SPPT 通用理论：蜕变测试、投影代数与语义保持
+% 本文件为理论层章节，遵循 docs/modules/THEORY_WRITING_GUIDE.md。
+
+\section{语义保持投影的数学基础}\label{sec:sp-th-foundations}
+
+\begin{theorynote}
+本章为通用数学理论，按蜕变测试、数值分析、图论与微分代数方程（DAE）的标准文献
+体系撰写，并与平台 SPPT 论文稿 \srcpath{docs/latex/sppt\_theory.tex} 的推导保持
+一致，覆盖：蜕变测试的一般框架（蜕变关系、测试谕令问题、充分性/多样性准则）、
+投影映射的代数性质（变换复合、幂等性、交换图表述）、可观测量依赖的语义保持
+形式化（精确/有界近似/守恒关联/不支持四分法与 intensive/extensive 反投影算子）、
+网络等值的理论依据（零阻抗合并、Kron 降阶与 Ward 等值为何保持潮流解）、残差
+审计的统计学基础（浮点残差下界与容差选取）、混淆矩阵与守卫指标
+（precision/recall/catch rate 与 Wilson 区间）、证书语料的抽样与覆盖理论，以及
+MR5/MR6 的图论表述与 MR7/MR8 的适定性基础。与平台实现（\srcpath{src/sppt/}、
+\srcpath{include/hacdcpf/sppt/}）的对应关系见本章末"与实现的对应"表，超出实现的
+内容以"未实现扩展说明"框就地标记。
+\end{theorynote}
+
+\subsection{记号与约定}\label{sec:sp-th-notation}
+\begin{itemize}
+  \item $S$：工程模型（rich model），含 AC/DC 母线、支路、开关、负荷、分布式电源、
+        储能、VSC、DC/DC 换流器及其稳定标识、域、端子、相别、单位与控制模式；
+        $\mathcal D_S$ 为其设备集合；
+  \item $\Pi$：投影映射，$C=\Pi(S)$ 为规范（canonical）模型；
+        $\Pi=\mathcal D\circ\mathcal M\circ\mathcal E\circ\mathcal U$ 为物理变换
+        复合（单位归一 $\mathcal U$、设备展开 $\mathcal E$、拓扑处理 $\mathcal M$、
+        失电岛分离 $\mathcal D$）；
+  \item $\Gamma_S\subseteq\mathcal D_S\times\mathcal D_C$：组件对应关系，
+        $(d_s,d_c)\in\Gamma_S$ 表示规范组件 $d_c$ 含有工程设备 $d_s$ 的声明贡献；
+  \item $\mathcal R_S$：由 $\Gamma_S$ 诱导的反向设备关联（反投影算子族的总称）；
+        $A_S$、$A_C$ 分别为在工程模型与规范模型上执行的分析；
+  \item $\mathcal O$：请求可观测量集合，划分为精确 $\mathcal O_{\rm ex}$、
+        有界近似 $\mathcal O_{\rm ap}$、守恒关联 $\mathcal O_{\rm co}$ 与不支持
+        $\mathcal O_{\rm un}$ 四类；
+  \item $\sim_0$：由闭合开关与阻抗恰为零的支路生成的母线等价关系，
+        $[i]_0=\{j\mid j\sim_0 i\}$ 为合并类；
+  \item $V_i=V_{m,i}e^{\mathrm j\theta_i}\in\mathbb C$：AC 节点复电压，
+        $Y_{bus}=G+\mathrm jB$：节点导纳矩阵；$v_k$：DC 节点电压，
+        $G_{dc}$：DC 电导矩阵；$\mathrm j$ 为虚数单位；
+  \item $u$：浮点单位舍入（IEEE 双精度 $u=2^{-53}\approx1.1\times10^{-16}$）；
+        $\gamma_p=pu/(1-pu)$：$p$ 次运算的标准累积误差系数；
+  \item $\operatorname{sprank}(B)$：结构秩，即方程--变量二分图的最大匹配数；
+  \item $\mathrm{tp},\mathrm{fp},\mathrm{tn},\mathrm{fn}$：混淆计数（正类取"可接纳"）；
+        $z$：标准正态分位数（95\% 置信取 $z=1.96$）。
+\end{itemize}
+
+\subsection{蜕变测试的一般框架}\label{sec:sp-th-mt}
+
+\subsubsection{测试谕令问题}
+软件测试的谕令（oracle）问题是：给定输入 $x$，判定程序输出 $P(x)$ 是否正确。
+对数值仿真代码该问题尤为尖锐：潮流、OPF、暂态仿真的"正确输出"通常不可知，
+否则便无需运行该程序。蜕变测试（metamorphic testing）~\cite{spth:chen98,spth:segura16}
+绕过谕令问题：不判定单个输出的对错，而检验程序在多个相关输入上的输出是否满足
+一条必要的数学关系。
+
+\begin{definition}[蜕变关系]\label{def:sp-th-mr}
+设 $P$ 为被测程序，$\mathcal I$ 为输入域。一条\emph{蜕变关系}（metamorphic
+relation, MR）是定义在 $k$ 元输入--输出组上的谓词
+\begin{equation}
+R\bigl((x_1,P(x_1)),\dots,(x_k,P(x_k))\bigr)\in\{\mathrm{true},\mathrm{false}\},
+\end{equation}
+它是正确实现必须满足的\emph{必要性质}：若 $P$ 正确，则对一切输入组
+$R=\mathrm{true}$。输入组通常由一个\emph{源用例} $x_1$ 与经已知变换生成的
+\emph{后继用例} $x_2,\dots,x_k$ 组成。
+\end{definition}
+
+\begin{proposition}[蜕变关系的检错方向]\label{prop:sp-th-mt-direction}
+若 $R$ 是必要性质且某输入组使 $R=\mathrm{false}$，则 $P$ 必有缺陷；
+反之，$R=\mathrm{true}$ 不能证明 $P$ 正确。
+\end{proposition}
+\begin{proof}
+第一条即必要性的逆否命题：$P$ 正确蕴含 $R=\mathrm{true}$，故 $R=\mathrm{false}$
+蕴含 $P$ 不正确。第二条由必要而非充分性立得：存在错误实现凑巧满足 $R$
+（例如恒输出零向量的程序满足任意"两次运行结果相等"型关系）。
+\end{proof}
+
+\begin{remark}[充分性与多样性准则]\label{rem:sp-th-mr-criteria}
+蜕变测试的有效性取决于所选 MR 族~\cite{spth:chen18}。经验准则包括：
+(i) \emph{必要性}——每条 MR 必须由被测对象的语义（本手册为电力方程的物理
+结构）推出，而非由实现细节推出；
+(ii) \emph{多样性}——不同 MR 应覆盖不同的变换方向与不同的可观测量，使单一
+错误难以同时满足全部关系；选择使既有 MR 失败的后续 MR 能显著提升检错能力；
+(iii) \emph{可执行性}——MR 应可计算为通过/残差判定，以便纳入回归套件持续
+证伪。SPPT 的 MR1--MR8 正是按此准则从投影理论的定理族中逐条挑选：
+每条 MR 对应一个可计算的交换图残差或结构判定（见本章后续各节与
+\srcpath{include/hacdcpf/sppt/metamorphic.hpp} 的 MR--定理对照注释）。
+\end{remark}
+
+\begin{remark}[谕令分层]
+蜕变关系不替代全部谕令。本框架的证据分层为：模型完整性（标识、单位、端子、
+域、取值范围）、控制角色闭包（岛级参考与平衡角色）、设备关联（结果可归因回
+稳定工程标识）、数值一致性（收敛 + 独立残差），最后才是运行意图（量测/台账
+核对）。前四层可在无量测时评估；第五层是结构性检查\emph{有意}放行的边界——
+一个数值合理但张冠李戴的负荷修改可以通过全部结构层，只能靠外部证据发现
+~\cite{spth:segura16}。
+\end{remark}
+
+\subsection{投影映射的代数性质}\label{sec:sp-th-projection}
+
+\subsubsection{变换复合与次序}
+\begin{definition}[投影的物理变换复合]\label{def:sp-th-proj-compose}
+投影映射分解为
+\begin{equation}
+\Pi=\mathcal D\circ\mathcal M\circ\mathcal E\circ\mathcal U,
+\label{eq:sp-th-proj-compose}
+\end{equation}
+其中 $\mathcal U$ 把有量纲量换算到声明的系统基准并保留原值与原单位记录；
+$\mathcal E$ 把复合设备展开为所选分析需要的最小端子等价集合（一台两端 VSC
+贡献一个 AC 端子、一个 DC 端子、耦合平衡方程与其控制模式方程）；
+$\mathcal M$ 仅收缩对所选分析声明为理想的连接（闭合开关与阻抗恰为零的支路，
+即 $\sim_0$ 等价类）；$\mathcal D$ 在开关状态与端子展开之后识别连通分量并把
+失电分量排除出通电方程集（其结果报告为不可得而非静默置零）。
+次序是本质的：设备必须先换算到共同电气基准才能比较端子；展开必须先于拓扑
+处理，否则设备内部端子会被当作外部母线误合并。
+\end{definition}
+
+\begin{proposition}[精确级联下的幂等性]\label{prop:sp-th-idempotent}
+设所有合并均为精确（仅 $\sim_0$ 类，无阈值近似），则 $\Pi$ 结构幂等：
+\begin{equation}
+\Pi(\Pi(S))\simeq\Pi(S),
+\end{equation}
+其中 $\simeq$ 表示母线/支路/设备计数、总注入与 $Y_{bus}$ 逐项相同。
+\end{proposition}
+\begin{proof}
+逐阶段验证不动点性质。
+(i) $\mathcal U$：已换算到声明基准的量再换算一次是恒等映射（换算因子为 $1$），
+原值记录重复记录同一对值。
+(ii) $\mathcal E$：$\mathcal E(S)$ 中的设备已是端子等价件，再展开即自身；
+复合设备的父级记录经 $\Gamma$ 复合保持不变。
+(iii) $\mathcal M$：设 $q:\mathcal B\to\mathcal B/{\sim_0}$ 为商映射，
+$q(i)=[i]_0$。在商集上，$\sim_0$ 的诱导关系为恒等关系——若
+$[i]_0\sim_0'[j]_0$，则存在 $i'\in[i]_0$、$j'\in[j]_0$ 使 $i'\sim_0 j'$，
+由等价关系的传递性 $[i]_0=[j]_0$。故第二次收缩不再产生新的合并，
+$q\circ q^{*}=\mathrm{id}$（$q^{*}$ 为商集上的商映射）。
+(iv) $\mathcal D$：失电分量的判定只依赖开关状态与连通性，对已分离模型
+再判定一次得到同样的通电/失电划分。
+四阶段各自幂等且复合关系 $\Gamma$ 按定义~\ref{def:sp-th-relcomp} 复合，
+故 $\Pi\circ\Pi$ 与 $\Pi$ 给出结构相同的规范模型。
+\end{proof}
+
+\begin{gapnote}
+实现中的合并阈值 \srcpath{include/hacdcpf/projection/project\_to\_canonical.hpp}:
+\fld{kBusMergeZThreshold}=1e-4 使 $\mathcal M$ 在 $|z|\in(0,10^{-4}]$ 的支路上
+成为\emph{数值近似}而非恒等；此时幂等性只在阈值语义下成立（二次投影的近似合并
+集合可与首次不同），因此 MR1 以计数、总注入与 $Y_{bus}$ 最大差为可执行判据而
+非依赖代数证明。近似合并数在 \fld{ProjectionCertificate::approximate\_merge\_count}
+中显式记账。
+\end{gapnote}
+
+\subsubsection{组件对应关系与其复合}
+\begin{definition}[组件对应关系]\label{def:sp-th-gamma}
+组件对应关系
+$\Gamma_S\subseteq\mathcal D_S\times\mathcal D_C$ 声明规范组件的工程来源，
+一般为多对多：一台换流器可展开为多个端子组件，多条母线可跨理想闭合开关
+合并。其权重须对广延量（如有功功率）满足守恒，对强度量（如电压）仅在
+电学合并类内广播。
+\end{definition}
+
+\begin{definition}[关系复合]\label{def:sp-th-relcomp}
+若 $T_1:S\mapsto S'$、$T_2:S'\mapsto S''$ 均为保持声明可观测量的变换，对应
+关系为 $\Gamma_{T_1}$、$\Gamma_{T_2}$，则复合变换 $T_2\circ T_1$ 的对应关系为
+关系复合
+\begin{equation}
+\Gamma_{T_2\circ T_1}=\Gamma_{T_1}\circ\Gamma_{T_2}
+=\bigl\{(d_s,d'')\,\big|\,\exists\, d':(d_s,d')\in\Gamma_{T_1},\
+(d',d'')\in\Gamma_{T_2}\bigr\}.
+\label{eq:sp-th-relcomp}
+\end{equation}
+复合变换必须满足与直接变换相同的守恒、拓扑与重建条件。
+\end{definition}
+
+\begin{remark}[组合性要求的意义]
+式~\eqref{eq:sp-th-relcomp} 防止"逐个合理、组合失真"：单独看都正确的单位
+换算、设备展开与拓扑降阶，组合后可能丢失物理来源或重复计数广延量。把对应
+关系定义为\emph{关系}（而非函数）并显式复合，是 SPPT 与"一次性写死的转换
+脚本"在代数上的分界。
+\end{remark}
+
+\subsubsection{交换图与表示不变性}
+\begin{definition}[精确语义保持]\label{def:sp-th-commute}
+对 $o\in\mathcal O_{\rm ex}$，投影与分析构成的图表交换：
+\begin{equation}
+\mathcal R_S\!\left(A_C(\Pi(S));o\right)=A_S(S;o),
+\label{eq:sp-th-commute}
+\end{equation}
+即"先投影再分析再归因"等于"在工程模型上直接分析"。对
+$o\in\mathcal O_{\rm ap}$，等式换为带容差的
+\begin{equation}
+\bigl\|\mathcal R_S\!\left(A_C(\Pi(S));o\right)-A_S(S;o)\bigr\|
+\le\epsilon_{\Pi,o},
+\label{eq:sp-th-approx}
+\end{equation}
+容差 $\epsilon_{\Pi,o}$ 依附于物理量与单位，不可跨量复用。
+\end{definition}
+
+\begin{definition}[表示不变性]\label{def:sp-th-repinv}
+写 $S^{(1)}\simeq_{\mathcal O}S^{(2)}$ 表示两个描述在解析声明的单位与命名
+差异后，对可观测量 $\mathcal O$ 编码了相同的物理设备、连接、参数、控制与
+运行状态，则对精确可观测量要求
+\begin{equation}
+S^{(1)}\simeq_{\mathcal O}S^{(2)}
+\ \Longrightarrow\
+\mathcal R_{S^{(1)}}A_{C^{(1)}}\Pi_{\mathfrak A}\!\left(S^{(1)}\right)
+=
+\mathcal R_{S^{(2)}}A_{C^{(2)}}\Pi_{\mathfrak A}\!\left(S^{(2)}\right),
+\label{eq:sp-th-repinv}
+\end{equation}
+其中 $\mathfrak A=(\mathcal X_{\mathfrak A},\mathcal F_{\mathfrak A},
+\mathcal O_{\mathfrak A},\mathcal E_{\mathfrak A})$ 为分析签名（变量、控制
+方程、请求可观测量、声明近似）。式~\eqref{eq:sp-th-repinv} 不要求各环境内部
+变量一致，只要求物理等价输入在结果归因回公共工程量后一致。MR3/MR5 即此
+要求的两个可执行特例。
+\end{definition}
+
+\subsection{语义保持的形式化与反投影算子}\label{sec:sp-th-preservation}
+
+\subsubsection{可观测量的四分法}
+\begin{definition}[可观测量划分]\label{def:sp-th-partition}
+对声明的分析与投影设置，请求可观测量划分为互不相交的四类：
+\begin{equation}
+\mathcal O=\mathcal O_{\rm ex}\cup\mathcal O_{\rm ap}
+\cup\mathcal O_{\rm co}\cup\mathcal O_{\rm un}.
+\end{equation}
+$\mathcal O_{\rm ex}$（精确）：式~\eqref{eq:sp-th-commute} 成立，如理想连接
+相连母线的电压幅值、精确展开换流器的总有功；
+$\mathcal O_{\rm ap}$（有界近似）：式~\eqref{eq:sp-th-approx} 成立且能陈述
+有物理意义的界；
+$\mathcal O_{\rm co}$（守恒关联）：多个工程设备贡献一个规范结果，无唯一物理
+拆分，只断言来源与守恒
+\begin{equation}
+\sum_{d\in\mathcal D_o}\widehat{o}_d=o_C,
+\qquad (d,d_C)\in\Gamma_S,
+\label{eq:sp-th-conservation}
+\end{equation}
+不宣称按参与因子分配的值是设备的实测值；
+$\mathcal O_{\rm un}$（不支持）：无重建规则，按不支持返回而非赋予一个看似
+合理的数。
+\end{definition}
+
+\begin{definition}[归因覆盖率与重建偏差]\label{def:sp-th-coverage}
+请求输出集合的归因覆盖率为
+\begin{equation}
+\kappa_{\mathcal O}=
+\frac{|\mathcal O_{\rm ex}|+|\mathcal O_{\rm ap}|+|\mathcal O_{\rm co}|}
+{|\mathcal O|},
+\label{eq:sp-th-kappa}
+\end{equation}
+仅当 $\kappa_{\mathcal O}=1$ 时结果集报告为完全可归因（不支持量保留在分母中
+而非被移除）。对守恒关联量，归一化重建偏差为
+\begin{equation}
+\delta_o=\frac{\bigl|\sum_{d\in\mathcal D_o}\widehat{o}_d-o_C\bigr|}
+{\max(|o_C|,o_{\rm base})},
+\label{eq:sp-th-delta}
+\end{equation}
+$o_{\rm base}$ 防止接近零处的病态相对误差；声明的守恒容差施加于 $\delta_o$。
+\end{definition}
+
+\subsubsection{强度量与广延量的反投影算子}
+\begin{definition}[反投影算子]\label{def:sp-th-backproj}
+设合并映射 $c:\mathcal B\to\{1,\dots,n_c\}$ 把母线映到合并类。
+\emph{强度量广播算子} $B:\mathbb R^{n_c}\to\mathbb R^{n}$，
+\begin{equation}
+(Bx)_i=x_{c(i)},
+\label{eq:sp-th-broadcast}
+\end{equation}
+仅当变换强制相等（同一 $\sim_0$ 类共享电位）时适用。
+\emph{广延量分配算子} $A:\mathbb R^{n_c}\to\mathbb R^{n}$，
+\begin{equation}
+(Ax)_i=w_i\,x_{c(i)},\qquad w_i\ge0,\quad
+\sum_{j\in c(i)}w_j=1,
+\label{eq:sp-th-alloc}
+\end{equation}
+权重按声明的物理来源或参与因子（负荷基、发电基）给出。混用两条规则会把
+一个规范注入复制成多份总量，属语义错误。
+\end{definition}
+
+\begin{lemma}[强度量往返恒等]\label{lem:sp-th-roundtrip}
+设类内投影算子 $P:\mathbb R^{n}\to\mathbb R^{n_c}$ 取代表元值，
+$(Pv)_c=v_{i(c)}$，$i(c)$ 为类 $c$ 的任一成员。则对任意规范场 $x$ 与代表元
+选取，
+\begin{equation}
+P(Bx)=x.
+\end{equation}
+\end{lemma}
+\begin{proof}
+$(P(Bx))_c=(Bx)_{i(c)}=x_{c(i(c))}=x_c$，对一切类 $c$ 成立。
+\end{proof}
+
+\begin{lemma}[广延量分配守恒]\label{lem:sp-th-alloc-conserve}
+对式~\eqref{eq:sp-th-alloc} 的分配与每个类 $c$，
+\begin{equation}
+\sum_{i:\,c(i)=c}(Ax)_i=x_c.
+\end{equation}
+\end{lemma}
+\begin{proof}
+$\sum_{i:c(i)=c}w_i x_c=x_c\sum_{i:c(i)=c}w_i=x_c$。
+\end{proof}
+
+\begin{remark}[往返恒等不等于真值恢复]
+引理~\ref{lem:sp-th-roundtrip} 表明 $B$ 是 $P$ 的右逆：从规范空间广播到工程
+空间再取代表元是无损的。但一般工程场 $v$ 经 $B(Pv)$ 后类内差异被抹平——
+这正是 $\sim_0$ 合并的物理内容（类内电位强制相等），也是合并类内部支路潮流
+不可从合并解中恢复、只能降级为审计级归因的原因。
+\end{remark}
+
+\subsubsection{置换不变性}
+\begin{definition}[记录置换不变性]\label{def:sp-th-perm}
+令 $\sigma(S)$ 为组件记录的一个置换，所有标识与物理数据不变，则要求在
+$\mathcal O_{\rm ex}$ 上
+\begin{equation}
+\mathcal R_{\sigma(S)}\,A_C\,\Pi(\sigma(S))
+=
+\mathcal R_S\,A_C\,\Pi(S).
+\label{eq:sp-th-perm}
+\end{equation}
+该条件强于比较两个无标号电压向量：它要求两边归因回\emph{同一组稳定工程
+标识}后相等。数值上允许浮点求和次序带来的 $O(u)$ 级残差
+（见第~\ref{sec:sp-th-residual}~节）。
+\end{definition}
+
+\subsection{网络等值的理论依据}\label{sec:sp-th-equiv}
+
+SPPT 的拓扑处理 $\mathcal M$ 属于网络等值的一个退化特例：只收缩阻抗\emph{恰为
+零}的支路。其精确性的一般理论——Kron 降阶即 Schur 补、无内部注入时逐量精确、
+含注入时由 Ward 修正注入恢复——已在图模块手册理论章证明（Kron 降阶精确性
+条件与含注入 Ward 等值两条定理），此处只推导 SPPT 直接依赖的退化结论。
+
+\begin{theorem}[零阻抗合并保持潮流解]\label{thm:sp-th-zimerge}
+设工程网络的母线集按 $\sim_0$ 划分为合并类 $\{C_k\}$，类间支路阻抗非零。
+将每个类收缩为一个规范节点，类间支路按端点类重接，类内注入按代数和叠加。
+则：
+(i) 工程节点方程的任一解诱导合并方程的解，且同类母线电位相等，
+类注入等于成员注入之和；
+(ii) 反之，合并方程的任一解可提升为工程方程的解（类内成员取类电位、
+注入取同一总和的任意可行拆分中的指定值）。
+\end{theorem}
+\begin{proof}
+(i) 零阻抗支路（含理想闭合开关）的端电压相等：$i\sim_0 j\Rightarrow
+V_i=V_j$，故类内电位一致，记为 $V_{c(i)}$。对类 $C_k$ 内全部成员写出
+KCL 方程 $I_i=\sum_j Y_{ij}V_j$ 并求和：类内支路对两端节点贡献等值反向
+的转移项，求和后相消；类间支路项只依赖类电位，汇集为合并导纳矩阵的行；
+左端注入求和得类注入。所得即合并方程。
+(ii) 给定合并解，对每个类置 $V_i=V_{c(i)}$、$I_i$ 取工程模型的声明注入。
+类间支路方程逐条成立（端电压与合并模型相同）；类内节点的 KCL 残差沿
+$\sim_0$ 连通子图经零阻抗支路内部重新分配后为零——因为类内支路电流在
+阻抗为零的假设下不受电压约束，可承担任意再分配。
+\end{proof}
+
+\begin{remark}[三类不可恢复量]
+定理~\ref{thm:sp-th-zimerge} 的 (ii) 同时给出恢复边界：类内零阻抗支路
+（开关、断路器）的电流不能从合并解唯一恢复（电压约束消失）；失电岛的
+电压潮流不在通电方程集中，应报告为不可得；阈值近似合并
+（$0<|z|\le$ 阈值）不在定理范围内，属 $\mathcal O_{\rm ap}$ 类可观测量，
+须按式~\eqref{eq:sp-th-approx} 声明误差界。三者分别对应实现中的审计级
+归因、不可得报告与近似合并记账。
+\end{remark}
+
+\begin{remark}[与 Ward/Kron 的关系]
+一般 Ward 等值对非零阻抗消去节点引入修正注入，在基态线性网络下逐量精确、
+在非线性（恒功率注入）下为工作点相关近似；这些结论与证明见图模块手册理论章。
+SPPT 不依赖 Ward 修正：$\sim_0$ 收缩是 Ward 框架中"消去节点无注入且支路阻抗
+为零"的退化情形，精确性由定理~\ref{thm:sp-th-zimerge} 直接保证，无需基态
+假设。
+\end{remark}
+
+\subsection{残差审计的统计学基础}\label{sec:sp-th-residual}
+
+\subsubsection{浮点残差下界}
+\begin{proposition}[残差的浮点下界]\label{prop:sp-th-floor}
+设失配函数 $F:\mathbb R^m\to\mathbb R^m$ 的每个分量由不超过 $p$ 次浮点运算
+的表达式求值，中间量绝对值由 $M$ 界定。在标准浮点模型
+$\mathrm{fl}(a\,\mathrm{op}\,b)=(a\,\mathrm{op}\,b)(1+\delta)$、
+$|\delta|\le u$ 下，对真残差 $r=F(x)$ 的计算值 $\widehat r$ 有
+\begin{equation}
+\|\widehat r-r\|_\infty\le\gamma_p\,M+O(u^2),
+\qquad \gamma_p=\frac{pu}{1-pu}.
+\label{eq:sp-th-floor}
+\end{equation}
+因此任何认证容差 $\tau$ 若低于 $c\,uM$ 量级，则"残差 $\le\tau$"的判定不再
+携带关于方程正确性的信息——它只是舍入噪声的再声明~\cite{spth:higham02}。
+\end{proposition}
+\begin{proof}
+对求值表达式的每次基本运算应用标准模型，误差系数逐次累积：$p$ 次运算的
+前向误差由 $(1+u)^p-1\le\gamma_p+O(u^2)$ 界定，乘以中间量上界 $M$ 并对
+分量取最大即得式~\eqref{eq:sp-th-floor}。这是数值分析的标准结论
+（舍入误差累积，见~\cite{spth:higham02} 第 2--3 章）在残差审计上的直接
+应用。
+\end{proof}
+
+\begin{remark}[容差选取的操作口径]
+由命题~\ref{prop:sp-th-floor} 与求解器停止准则给出两个下界：
+(i) $\tau\gtrsim c\,uM$（求值噪声底）；
+(ii) $\tau\ge\tau_{\rm solver}\cdot(1+o(1))$（收敛解只保证真残差在停止
+容差量级）。故 SPPT 把容差设计为\emph{调用方输入}而非通用认证阈值：
+潮流 commuting 残差常用 $10^{-6}$，幂等性的 Ybus 结构差用 $10^{-12}$
+（同一装配代码路径、无求解器介入，噪声底更低）。容差单位随关系而变
+（标幺电压、MW、LMP 单位），不可跨关系复用。
+\end{remark}
+
+\subsubsection{独立残差与求解器残差的相关性}
+\begin{proposition}[自洽盲区的存在]\label{prop:sp-th-selfconsistent}
+设生产装配把真实方程 $F$ 错误地装配为 $\widetilde F=F+\delta F$，且 Newton
+求解在 $\widetilde F$ 的根 $x^*$ 处收敛。则求解器内部残差
+$\|\widetilde F(x^*)\|$ 可任意小（受停止准则控制），而关于作者原语方程的
+独立残差
+\begin{equation}
+r_{\rm ind}=\|F(x^*)\|=\|\delta F(x^*)\|
+\end{equation}
+一般非零。即"小内部残差"与"方程装配正确"相互独立：前者只证明解与实际
+装配的方程自洽。
+\end{proposition}
+\begin{proof}
+Newton 收敛于 $\widetilde F$ 的根给出 $\widetilde F(x^*)\approx0$；
+于是 $F(x^*)=\widetilde F(x^*)-\delta F(x^*)\approx-\delta F(x^*)$，
+其范数即装配误差在该点的量级。
+\end{proof}
+
+\begin{remark}[独立性的实现含义]
+命题~\ref{prop:sp-th-selfconsistent} 要求独立残差评估器与生产投影/装配
+\emph{不共享代码路径}，否则同一缺陷会以相同方式进入两侧而相消。平台的独立
+审计器有意不调用生产投影、装配与残差求值器，直接在作者原语 AC/DC/VSC 方程
+上重建 $Y_{bus}$、$G_{dc}$ 与换流器平衡（实现锚点见对应表）。盲区对称地
+存在：独立评估器自身也可能有缺陷，因此它的角色是第二独立证据而非终极谕令。
+\end{remark}
+
+\subsection{混淆矩阵与守卫指标的统计学}\label{sec:sp-th-metrics}
+
+\subsubsection{守卫裁决与混淆矩阵}
+\begin{definition}[三门守卫]\label{def:sp-th-guard}
+对请求可观测量 $\mathcal O$，模型的接纳谓词为
+\begin{equation}
+\operatorname{Accept}(S,\mathcal O)
+=\operatorname{Valid}(S)\wedge\operatorname{WP}(\Pi(S))
+\wedge\operatorname{Attrib}(\mathcal R_S,\mathcal O),
+\label{eq:sp-th-accept}
+\end{equation}
+三门依次为：边界校验（模型完整性）、适定性（岛级参考闭包与换流器角色协调）、
+归因完整性（每个请求可观测量的覆盖率为 1）。三门任一失败即拒绝并命名首个
+失败门。
+\end{definition}
+
+\begin{definition}[混淆计数与派生指标]\label{def:sp-th-confusion}
+在带真值标签的编辑集合上，正类取"可接纳"，定义
+$\mathrm{tp}$（可接纳且被接纳）、$\mathrm{fp}$（不可接纳但被接纳，即漏拒）、
+$\mathrm{tn}$（不可接纳且被拒，即正确捕获）、$\mathrm{fn}$（可接纳但被拒，即过拒），及
+\begin{equation}
+\mathrm{precision}=\frac{\mathrm{tp}}{\mathrm{tp}+\mathrm{fp}},\qquad
+\mathrm{recall}=\frac{\mathrm{tp}}{\mathrm{tp}+\mathrm{fn}},\qquad
+\mathrm{catch}=\frac{\mathrm{tn}}{\mathrm{tn}+\mathrm{fp}},\qquad
+\mathrm{acc}=\frac{\mathrm{tp}+\mathrm{tn}}{\mathrm{tp}+\mathrm{fp}+\mathrm{tn}+\mathrm{fn}}.
+\end{equation}
+catch rate 是被拒样本中真不可接纳者的比例，是"漏拒"的补；分母为零时
+各指标按 $0$ 报告。
+\end{definition}
+
+\begin{remark}[指标的解读边界]
+$\mathrm{fp}$ 是安全攸关方向：一个不可接纳状态被提交会污染后续全部分析。
+$\mathrm{fn}$ 是可用性方向：过拒使合法修改无法落地。只报 catch rate 而不报
+precision/recall 会掩盖过拒——恒拒守卫取得 catch rate $=1$。
+合法置换控制组（期望接纳）为此提供过拒证据。
+\end{remark}
+
+\subsubsection{Wilson 评分区间}
+\begin{proposition}[Wilson 区间]\label{prop:sp-th-wilson}
+设 $n$ 次独立 Bernoulli 试验中检测到 $k$ 次，$\hat p=k/n$。检验
+$H_0:p=p_0$ 的评分统计量 $(\hat p-p_0)/\sqrt{p_0(1-p_0)/n}$ 的
+$|{\cdot}|\le z$ 反演给出 $p$ 的置信区间 $[c-h,\,c+h]$，其中
+\begin{equation}
+c=\frac{\hat p+z^2/(2n)}{1+z^2/n},\qquad
+h=\frac{z}{1+z^2/n}
+\sqrt{\frac{\hat p(1-\hat p)}{n}+\frac{z^2}{4n^2}}.
+\label{eq:sp-th-wilson}
+\end{equation}
+\end{proposition}
+\begin{proof}
+反演不等式 $(\hat p-p)^2\le z^2 p(1-p)/n$。两边乘 $n$ 并整理为 $p$ 的
+二次式：
+\begin{equation}
+(n+z^2)p^2-(2n\hat p+z^2)p+n\hat p^2\le0.
+\end{equation}
+首项系数为正，不等式在两根之间成立。由求根公式，两根的中点为
+$\frac{2n\hat p+z^2}{2(n+z^2)}=c$，半距为
+$\frac{\sqrt{(2n\hat p+z^2)^2-4(n+z^2)n\hat p^2}}{2(n+z^2)}$；
+根号内化简
+$(2n\hat p+z^2)^2-4n(n+z^2)\hat p^2
+=4n z^2\hat p(1-\hat p)+z^4$，
+代回即 $h$。
+\end{proof}
+
+\begin{remark}[为何不用正态近似区间]\label{rem:sp-th-why-wilson}
+检出率为 $0$ 或 $1$ 时 Wald 区间 $\hat p\pm z\sqrt{\hat p(1-\hat p)/n}$
+退化为零宽度或越出 $[0,1]$，覆盖率严重失真；Wilson 区间在边界附近仍保持
+接近名义覆盖率~\cite{spth:wilson27}。特别地 $k=0$ 时
+式~\eqref{eq:sp-th-wilson} 给出上界 $z^2/(n+z^2)$，$n$ 大时约 $3.84/n$，
+与经典的"$3/n$ 法则"（Clopper--Pearson 上界的常用近似）一致：例如
+$n=175$ 次合法置换零过拒对应 95\% 上界约 $0.0215$——零观测不能解释为
+"永不误拒"，只能解释为"误拒率不超过约 $2\%$"。
+\end{remark}
+
+\subsection{证书语料的抽样与覆盖理论}\label{sec:sp-th-corpus}
+
+\subsubsection{设计原则}
+\begin{definition}[证书语料与故障注入活动]\label{def:sp-th-corpus}
+\emph{证书语料}是带固定种子的 (用例, 证据) 行集合：每行记录投影 commuting
+残差、独立残差、归因完整性与（可选）OPF 对偶残差，连同容差与备注。
+\emph{故障注入活动}在其上叠加受控扰动：以固定种子伪随机发生器在每个基准
+用例上施加 $K$ 个扰动类各 $r$ 次重复，产出 $N_{\rm case}\times K\times r$
+行，\emph{不删除}任何失败、不收敛或不便的样本。
+\end{definition}
+
+\begin{remark}[无删除原则与选择偏差]
+"不删除样本"是统计诚实性的核心：若允许按结果剔除样本（如不收敛的重算、
+超时的丢弃），检出率估计对"易检出"子总体产生选择偏差，区间估计不再有效。
+固定种子与固定重复数使语料可复现，且样本量在观察结果\emph{之前}确定，
+避免"算到好看为止"的停步偏差。这与变异测试（mutation testing）社区对
+变异体抽样与全量评估的标准建议一致~\cite{spth:jia11}。
+\end{remark}
+
+\begin{remark}[覆盖的结构口径]
+扰动类按\emph{失效机理}划分而非按设备类型枚举：端子缺失（完整性）、
+AC 参考缺失与 DC 支撑缺失（角色闭包）、效率越界（物理范围）、标识重复
+（设备关联）、合理参数错误（运行意图层，结构性方法\emph{预期}放行）。
+每个机理类对应接纳谓词式~\eqref{eq:sp-th-accept} 的一个合取项或框架边界；
+六类结构性故障的全检出只能解读为"被测机理类被覆盖"，不能外推到未注入的
+机理（相关参数漂移、恶意量测篡改、未文档化的厂商控制等仍在被测总体之外）。
+\end{remark}
+
+\begin{proposition}[检出率估计的良定义性]\label{prop:sp-th-detection}
+设类 $f$ 的 $N_f$ 个样本为同一扰动机理的独立同分布实现，检测指示
+$D_i\in\{0,1\}$，则 $\hat r_f=N_f^{-1}\sum_i D_i$ 是真检出率 $r_f$ 的
+无偏估计，其不确定性由式~\eqref{eq:sp-th-wilson} 量化。
+\end{proposition}
+\begin{proof}
+$E[\hat r_f]=N_f^{-1}\sum_i E[D_i]=r_f$；独立性使二项模型适用，
+区间估计适用命题~\ref{prop:sp-th-wilson}。
+\end{proof}
+
+\subsubsection{MR5 重标记不变性的图论表述}
+\begin{lemma}[置换相似下的方程不变性]\label{lem:sp-th-mr5}
+设 $\sigma$ 为 AC 母线的一个置换，$P_\sigma$ 为其置换矩阵。重标记后的
+导纳矩阵与指定注入满足
+\begin{equation}
+Y_{bus}'=P_\sigma Y_{bus}P_\sigma^{\!\top},\qquad
+s'=P_\sigma s,
+\end{equation}
+失配函数满足 $F'(P_\sigma x)=P_\sigma F(x)$。因此 $x^*$ 是原方程的解当且
+仅当 $P_\sigma x^*$ 是重标记方程的解；按稳定母线 ID 对齐后，两次求解的
+逐母线电压相等（至多差浮点求和次序效应）。
+\end{lemma}
+\begin{proof}
+置换相似是基向量重排：$(P_\sigma Y P_\sigma^{\!\top})_{\sigma(i)\sigma(j)}
+=Y_{ij}$。于是
+$F'(P_\sigma x)=s'-P_\sigma f(x)
+=P_\sigma(s-f(x))=P_\sigma F(x)$，其中 $f$ 为按行的电压非线性式（逐行形式
+在置换下协变）。$P_\sigma$ 正交可逆，故 $F(x^*)=0\iff F'(P_\sigma x^*)=0$。
+图论语言：节点方程只依赖加权图 $(\mathcal V,\mathcal E,Y)$ 本身，与顶点
+标号的选取无关；图同构 $G\cong G'$ 诱导解的对应相等。Newton 迭代在匹配
+初值下逐迭代置换协变，解析上两次运行同一轨道；浮点上非结合的求和次序
+差异贡献 $O(uM)$ 残差，故 MR5 以正容差判定。
+\end{proof}
+
+\subsubsection{MR6 组合性的图论表述}
+\begin{definition}[不相交并（空接口粘合）]\label{def:sp-th-gluing}
+两系统 $S_1$、$S_2$ 的\emph{不相交并} $S_1\oplus S_2$ 要求母线 ID 区间
+不相交且无共享支路（空接口），组件记录并列拼接。
+\end{definition}
+
+\begin{lemma}[投影对空接口粘合的分配律]\label{lem:sp-th-mr6}
+空接口下
+\begin{equation}
+n_b\bigl(\Pi(S_1\oplus S_2)\bigr)=n_b\bigl(\Pi(S_1)\bigr)+n_b\bigl(\Pi(S_2)\bigr),
+\end{equation}
+对 AC/DC 母线计数与 AC/DC 支路计数分别成立，其中 $n_b$ 为相应计数函数。
+\end{lemma}
+\begin{proof}
+空接口意味着图 $G(S_1\oplus S_2)$ 是 $G(S_1)$ 与 $G(S_2)$ 的不相交并：
+$Y_{bus}$ 块对角，$\sim_0$ 等价类不发生跨侧合并（无跨侧边），失电判定
+逐侧独立（连通性不跨侧）。故商图
+$G(S_1\oplus S_2)/{\sim_0}
+=\bigl(G(S_1)/{\sim_0}\bigr)\sqcup\bigl(G(S_2)/{\sim_0}\bigr)$，
+顶点数与边数各自相加。$\mathcal U$、$\mathcal E$、$\mathcal D$ 均逐组件/
+逐岛作用，不引入跨侧耦合。
+\end{proof}
+
+\begin{remark}[非空接口的边界]
+引理~\ref{lem:sp-th-mr6} 的证明在接口非空时失效：共享边界母线使两侧的
+$\sim_0$ 类跨侧融合，计数不再可加；此时组合性要求沿接口的粘合
+（pushout）构造与相应的归因记录。当前实现的前提正是定义~\ref{def:sp-th-gluing}
+的"清洁接口"（不相交 ID 区间）。
+\end{remark}
+
+\subsubsection{MR7 适定性门与 MR8 的 DAE 适定性}
+\begin{proposition}[参考缺失导致结构欠定]\label{prop:sp-th-mr7}
+设某通电 AC 岛不含任何兼容的构角角色（无 slack、无构网换流器、无在运
+外部电网），则该岛的潮流失配函数 $F$ 在角度平移下不变：
+对任意常数 $c$，
+\begin{equation}
+F(\theta+c\,\mathbf 1,V_m)=F(\theta,V_m),
+\end{equation}
+雅可比沿方向 $(\mathbf 1,\mathbf 0)$ 恒奇异。因此任何正确的校验器/求解器
+必须给出类型化拒绝（validation error 或求解器诊断），而非静默"收敛"到
+一个规范未定的解。
+\end{proposition}
+\begin{proof}
+极坐标功率方程中 $F$ 仅经差 $\theta_{ij}=\theta_i-\theta_j$ 依赖角度，
+全体角度同加 $c$ 不改变任何差，故 $F$ 不变。对 $c$ 求导得
+$J\,(\mathbf 1,\mathbf 0)^{\!\top}=DF\cdot(\mathbf 1,\mathbf 0)^{\!\top}=0$，
+即雅可比有非平凡零空间。结构口径：角度变量列在方程--变量二分图中缺少
+可匹配的锚定方程，$\operatorname{sprank}<|\mathcal X_{\mathcal I}|$
+~\cite{spth:murota87}。一个仍返回收敛的实现要么暗中引入了未声明的参考
+（语义错误），要么输出了未定规范族中的任意成员（结果不可归因到声明的
+角度参考）。
+\end{proof}
+
+\begin{definition}[DAE 的 index-1 适定性]\label{def:sp-th-dae}
+半显式 DAE
+\begin{equation}
+\dot x=f(x,y),\qquad 0=g(x,y),
+\end{equation}
+在一致工作点 $(x_0,y_0)$ 处局部为 index-1，当且仅当代数子雅可比
+$\partial g/\partial y$ 在该点非奇异。此时由隐函数定理局部存在光滑的
+$y=\varphi(x)$，DAE 约化为 ODE $\dot x=f(x,\varphi(x))$，初值一致性与
+数值积分的适定性随之确立~\cite{spth:brenan96}。
+\end{definition}
+
+\begin{gapnote}
+MR8（DAE index-1 适定性门）当前没有公开的 \srcpath{mr8\_*} 入口：
+\srcpath{include/hacdcpf/sppt/metamorphic.hpp} 的注释列出了 MR8 与定理的对照，
+但公共 API 与 \srcpath{src/sppt/metamorphic.cpp} 中不存在对应函数。其唯一的
+可执行化是注册测试 \srcpath{tests/test\_sppt\_dae\_wellposedness.cpp}，它在
+单一声明测试点上经
+\srcpath{include/hacdcpf/dynamics/DynamicDaeDiagnostics.hpp:dynamic\_dae\_diagnostics}
+装配线性化并核验代数子雅可比满秩。沿轨迹的 index 漂移监测与 index-1 破坏的
+类型化拒绝尚未实现。
+\end{gapnote}
+
+\begin{remark}[必要条件与充分条件的分界]
+MR7 与 MR8 均为\emph{必要}的形成条件：角色闭包与 index-1 不排除电压崩溃、
+换流器限幅饱和、保护动作或动态失稳。把必要条件写成"门"而非"证书"，是
+SPPT 诚实口径的一部分：守卫承诺的是"拒绝不适定模型"，不是"被接纳模型
+运行安全"。
+\end{remark}
+
+\subsection{与实现的对应}\label{sec:sp-th-implmap}
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{6.8cm}L{8.6cm}@{}}
+\toprule
+理论条目 & 实现状态\\
+\midrule
+\endfirsthead
+\toprule
+理论条目 & 实现状态\\
+\midrule
+\endhead
+蜕变关系族的可执行化（MR1/2/3/3d/4/5/7 单系统套件） &
+\implfull{src/sppt/metamorphic.cpp:run\_core\_metamorphic\_suite}（MR6 需两系统输入、MR8 无入口，不在套件内）\\
+投影幂等性（命题~\ref{prop:sp-th-idempotent}） &
+\implfull{src/sppt/metamorphic.cpp:mr1\_projection\_idempotence}（计数+总注入+Ybus 判据，阈值合并见 gapnote）\\
+精确语义保持交换图（定义~\ref{def:sp-th-commute}，潮流） &
+\implfull{src/sppt/metamorphic.cpp:mr3\_semantic\_preservation\_pf}\\
+交换图对偶形式（OPF 节点电价） &
+\implfull{src/sppt/metamorphic.cpp:mr3\_semantic\_preservation\_opf\_dual}（LMP 缺失时 NotObserved）\\
+交换图暂态形式（轨迹末快照） &
+\implfull{src/sppt/metamorphic.cpp:mr3\_semantic\_preservation\_transient}\\
+强度量往返恒等（引理~\ref{lem:sp-th-roundtrip}） &
+\implfull{src/sppt/metamorphic.cpp:mr2\_attribution\_roundtrip}\\
+合并类等电位（定理~\ref{thm:sp-th-zimerge} 的类内一致性） &
+\implfull{src/sppt/metamorphic.cpp:mr4\_merged\_bus\_equipotential}（结构证书，不读求解电压）\\
+置换不变性（引理~\ref{lem:sp-th-mr5}） &
+\implpart{仅检验 AC 母线 vector 顺序反转这一种置换；任意图同构与 DC 侧重标记未覆盖（mr5\_relabel\_invariance）}\\
+组合性（引理~\ref{lem:sp-th-mr6}） &
+\implpart{仅拼接七类主组件 vector 且只校验母线/支路计数守恒，可观测量级等式未检验（mr6\_compositionality）}\\
+适定性门（命题~\ref{prop:sp-th-mr7}） &
+\implfull{src/sppt/metamorphic.cpp:mr7\_wellposedness\_gate}\\
+DAE index-1（定义~\ref{def:sp-th-dae}） &
+\implpart{无公开 mr8 入口；仅注册测试 test\_sppt\_dae\_wellposedness 在单一声明点核验（dynamic\_dae\_diagnostics），见 gapnote}\\
+变换复合 $\Pi=\mathcal D\circ\mathcal M\circ\mathcal E\circ\mathcal U$ &
+\implfull{include/hacdcpf/projection/project\_to\_canonical.hpp:project\_to\_canonical\_models}\\
+零阻抗合并（定理~\ref{thm:sp-th-zimerge}） &
+\implfull{include/hacdcpf/projection/project\_to\_canonical.hpp:merge\_zero\_impedance\_buses}（阈值 kBusMergeZThreshold=1e-4，近似合并记账于 ProjectionCertificate）\\
+强度/广延反投影算子（定义~\ref{def:sp-th-backproj}） &
+\implfull{include/hacdcpf/projection/project\_to\_canonical.hpp:unproject\_bus\_vector}（Intensive / ExtensiveDemand / ExtensiveGeneration 三语义）\\
+可观测量四分法与覆盖率（定义~\ref{def:sp-th-partition}、\ref{def:sp-th-coverage}） &
+\implfull{include/hacdcpf/projection/canonical\_network.hpp:RecoveryClass}（Strong/Approximate/AuditOnly/Unsupported；覆盖率评估 evaluate\_attribution）\\
+守恒关联量的参与因子分配（式~\eqref{eq:sp-th-conservation}） &
+\implpart{合并空间内按负荷/发电基分配（unproject\_bus\_vector 的 Extensive 语义）；一般守恒关联量的显式 $\delta_o$ 证书未独立输出}\\
+三门守卫（定义~\ref{def:sp-th-guard}） &
+\implfull{src/sppt/guard.cpp:guard\_system}\\
+混淆矩阵与派生指标（定义~\ref{def:sp-th-confusion}） &
+\implfull{include/hacdcpf/sppt/guard.hpp:GuardMetrics}（precision/recall/catch\_rate/accuracy，分母为零报 0）\\
+Wilson 区间（命题~\ref{prop:sp-th-wilson}） &
+\implfull{src/sppt/fault\_campaign.cpp:wilson\_interval}（汇总行 wilson\_low/wilson\_high）\\
+证书语料（定义~\ref{def:sp-th-corpus}） &
+\implfull{src/sppt/certificate.cpp:certify\_corpus}（单行 certify\_case、内存系统 certify\_systems）\\
+独立残差审计（命题~\ref{prop:sp-th-selfconsistent}） &
+\implpart{certify\_independent\_hybrid\_residual 仅覆盖原语 AC/DC/VSC/DCDC 模型；富设备宏展开超出范围时 supported=false（证据不可得而非零残差）}\\
+故障注入活动（固定种子、无删除） &
+\implfull{src/sppt/fault\_campaign.cpp:run\_fault\_campaign}\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{参考文献}
+{\renewcommand{\section}[2]{}%
+\begin{thebibliography}{9}\small
+\bibitem{spth:chen98} T.~Y. Chen, S.~C. Cheung, and S.~M. Yiu,
+\emph{Metamorphic Testing: A New Approach for Generating Next Test Cases},
+Technical Report HKUST-CS98-01, The Hong Kong University of Science and
+Technology, 1998.
+\bibitem{spth:chen18} T.~Y. Chen, F.-C. Kuo, H.~Liu, P.-L. Poon, D.~Towey,
+T.~H. Tse, and Z.~Q. Zhou, Metamorphic testing: A review of challenges and
+opportunities, \emph{ACM Computing Surveys}, vol.~51, no.~1, 2018.
+\bibitem{spth:segura16} S.~Segura, G.~Fraser, A.~B. Sanchez, and
+A.~Ruiz-Cort\'es, A survey on metamorphic testing, \emph{IEEE Transactions on
+Software Engineering}, vol.~42, no.~9, pp.~805--824, 2016.
+\bibitem{spth:jia11} Y.~Jia and M.~Harman, An analysis and survey of the
+development of mutation testing, \emph{IEEE Transactions on Software
+Engineering}, vol.~37, no.~5, pp.~649--678, 2011.
+\bibitem{spth:higham02} N.~J. Higham, \emph{Accuracy and Stability of
+Numerical Algorithms}, 2nd ed., SIAM, Philadelphia, 2002.
+\bibitem{spth:wilson27} E.~B. Wilson, Probable inference, the law of
+succession, and statistical inference, \emph{Journal of the American
+Statistical Association}, vol.~22, no.~158, pp.~209--212, 1927.
+\bibitem{spth:murota87} K.~Murota, \emph{Systems Analysis by Graphs and
+Matroids: Structural Solvability and Controllability}, Springer-Verlag,
+Berlin, 1987.
+\bibitem{spth:brenan96} K.~E. Brenan, S.~L. Campbell, and L.~R. Petzold,
+\emph{Numerical Solution of Initial-Value Problems in Differential-Algebraic
+Equations}, SIAM, Philadelphia, 1996.
+\bibitem{spth:kron} G.~Kron, \emph{Diakoptics: The Piecewise Solution of
+Large-Scale Systems}, Macdonald, London, 1963.
+\bibitem{spth:ward49} J.~B. Ward, Equivalent circuits for power-flow studies,
+\emph{Transactions of the American Institute of Electrical Engineers},
+vol.~68, pp.~373--382, 1949.
+\end{thebibliography}}

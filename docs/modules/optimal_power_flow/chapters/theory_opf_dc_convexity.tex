@@ -1,0 +1,908 @@
+% theory_opf_dc_convexity.tex —— 最优潮流 通用理论：DC 近似、LP 对偶与 LMP、凸松弛、
+% 混合整数方法、相域建模与交直流混合标准模型
+% 本文件为理论层章节，遵循 docs/modules/THEORY_WRITING_GUIDE.md。
+
+\section{DC 近似、凸松弛与混合整数方法理论}\label{sec:opf-th-dc}
+
+\begin{theorynote}
+本章为通用数学理论，按最优潮流（OPF）文献的标准模型与优化理论体系撰写，覆盖：
+DC 潮流近似从极坐标功率方程出发的严格推导（三条假设与 $P=B'\theta$ 的构造）及
+线性化误差界；DC OPF 的 LP 对偶理论与节点边际电价（LMP）的能量/阻塞/损耗
+分量分解（含 KKT 推导与数值例）；凸松弛一般理论（Jabr 二阶锥松弛、
+Lavaei--Low SDP 松弛的精确性条件、配网 DistFlow/Branch Flow 模型与树网
+角度恢复定理的证明）；LinDistFlow 线性化与近似误差分析；混合整数方法基础
+（OLTC 离散档位的 MILP 建模、二元-连续乘积的大 $M$ 线性化及其精确性证明、
+指示约束语义、分支定界原理与 MIP gap 语义）；三相/相域建模一般理论
+（Carson 方程、Kron 归约、Fortescue 序分量变换与换位线路的序网解耦证明、
+不平衡 OPF 的难点）；交直流混合 OPF 的文献标准模型（VSC 换流站损耗模型与
+DC 电导网络）。与平台实现（\srcpath{src/optimal\_power\_flow/} 与
+\srcpath{src/power\_models/}）的对应关系见本章末"与实现的对应"表，超出实现的
+内容以"未实现扩展说明"框就地标记。
+\end{theorynote}
+
+\subsection{记号与约定}
+\begin{itemize}
+  \item $\mathcal N=\{1,\dots,n\}$：AC 节点集；$\mathcal G$：发电机集；
+        $\mathcal L$：支路集；$e=(1,\dots,1)^{\mathsf T}$：全一向量；
+  \item $V_i=V_{m,i}e^{\mathrm j\theta_i}$：节点复电压，$\theta_{ij}=\theta_i-\theta_j$；
+        $v_i=V_{m,i}^2$（配网模型中的电压幅值平方变量）；
+  \item $Y_{bus}=G+\mathrm jB$：节点导纳矩阵；支路 $i$--$j$ 串联阻抗
+        $z_{ij}=r_{ij}+\mathrm jx_{ij}$，导纳 $y_{ij}=g_{ij}+\mathrm jb_{ij}=1/z_{ij}$；
+  \item $B'$：DC 近似电纳矩阵，$B'_{ij}=1/x_{ij}$（$i\neq j$，相邻），
+        $B'_{ii}=-\sum_{j\neq i}1/x_{ij}$；$B^\dagger$ 为其（降阶后）逆/伪逆；
+  \item $P_i^{\mathrm{spec}}$：节点净有功注入（发电减负荷）；$d_i$：节点负荷；
+        $g_i$ 或 $p_{g,k}$：发电出力；$c_k(\cdot)$：发电成本函数；
+  \item $W$：电压提升（lifting）变量，理论形式 $W=VV^{H}$；$H^n$：$n$ 阶
+        厄米特矩阵集；$W\succeq0$ 表示半正定；
+  \item $\ell_{ij}=|I_{ij}|^2$：支路电流幅值平方（Branch Flow 模型）；
+  \item $\lambda$：LP 等式行对偶（能量价格）；$\mu$：支路热限不等式对偶
+        （阻塞影子价格）；$\mathrm{LMP}_i$：节点 $i$ 边际电价；
+  \item $y\in\{0,1\}$：二元决策变量；$[\underline x,\overline x]$：连续变量盒界；
+  \item $a=e^{\mathrm j2\pi/3}$：三相序分量旋转算子；
+        $\rho$：大地电阻率（$\Omega\cdot$m）；$f$：频率（Hz）；
+  \item 全部电气量除特别声明外取标幺值。
+\end{itemize}
+
+\subsection{DC 近似的严格推导与误差界}\label{sec:opf-th-dc-deriv}
+
+\subsubsection{三条假设与 \texorpdfstring{$P=B'\theta$}{P=B'θ} 的构造}
+
+极坐标节点有功方程（其一般推导见《潮流计算技术手册》理论层）为
+\begin{equation}
+P_i=\sum_{j\in\mathcal N}V_{m,i}V_{m,j}
+\bigl(G_{ij}\cos\theta_{ij}+B_{ij}\sin\theta_{ij}\bigr),
+\qquad i\in\mathcal N .
+\label{eq:opf-th-dc-polar}
+\end{equation}
+
+\begin{definition}[DC 潮流假设]\label{def:opf-th-dc-assump}
+经典 DC 近似~\cite{opfdc:stott-dc-revisited,opfdc:wood-wollenberg} 由三条
+独立假设组成：
+\begin{itemize}
+  \item \textbf{（H1）小角度}：所有相邻节点 $|\theta_{ij}|\ll1$，
+        故 $\sin\theta_{ij}\approx\theta_{ij}$、$\cos\theta_{ij}\approx1$；
+  \item \textbf{（H2）平电压}：$V_{m,i}\approx1$~pu（幅值退出未知量集）；
+  \item \textbf{（H3）无损电抗网络}：$r_{ij}\ll x_{ij}$，取
+        $G_{ij}\approx0$（$i\neq j$）；忽略线路充电与对地并联，
+        取 $B_{ii}\approx-\sum_{j\neq i}B_{ij}$；变压器按标准变比归算、
+        移相角忽略。
+\end{itemize}
+\end{definition}
+
+\begin{theorem}[DC 潮流方程]\label{thm:opf-th-dc-btheta}
+在定义~\ref{def:opf-th-dc-assump} 的（H1）--（H3）下，节点注入关于相角
+线性化：
+\begin{equation}
+P=B'\theta,\qquad
+B'_{ij}=\frac{1}{x_{ij}}\ (j\in\delta(i),\ i\neq j),\qquad
+B'_{ii}=-\sum_{j\in\delta(i)}\frac{1}{x_{ij}},
+\label{eq:opf-th-dc-btheta}
+\end{equation}
+$\delta(i)$ 为节点 $i$ 的邻接集；对应支路潮流
+\begin{equation}
+P_{ij}=\frac{\theta_i-\theta_j}{x_{ij}},\qquad (i,j)\in\mathcal L .
+\label{eq:opf-th-dc-branch}
+\end{equation}
+$B'$ 为网络图以 $1/x_{ij}$ 为边权的（负）拉普拉斯矩阵：对称、对角元非正、
+行和为零，连通网络的 $B'$ 秩为 $n-1$，零空间为 $\mathrm{span}\{e\}$。
+\end{theorem}
+
+\begin{proof}
+对串联支路（忽略充电），$y_{ij}=1/(\mathrm jx_{ij})=-\mathrm j/x_{ij}$，
+故 $b_{ij}=-1/x_{ij}$，转移导纳 $B_{ij}=-b_{ij}=1/x_{ij}$（$i\neq j$）。
+由（H3），$G_{ij}=0$（$i\neq j$）且 $B_{ii}=-\sum_{j\neq i}1/x_{ij}$。
+由（H2），$V_{m,i}V_{m,j}=1$。由（H1），$\sin\theta_{ij}=\theta_{ij}$，
+$\cos\theta_{ij}=1$。代入式~\eqref{eq:opf-th-dc-polar}：
+\begin{equation}
+P_i=\sum_{j\neq i}\frac{1}{x_{ij}}\,\theta_{ij}
+=\sum_{j\neq i}\frac{1}{x_{ij}}(\theta_i-\theta_j)
+=B'_{ii}\theta_i+\sum_{j\neq i}B'_{ij}\theta_j ,
+\end{equation}
+即式~\eqref{eq:opf-th-dc-btheta}；$i$ 行代入
+$\theta_{ij}=\theta_i-\theta_j$ 即式~\eqref{eq:opf-th-dc-branch}。
+拉普拉斯性质：$B'$ 每行恰为邻接边权之代数和（对角为负和、行和为零），
+对称性由 $x_{ij}=x_{ji}$ 给出；连通图拉普拉斯秩 $n-1$、零空间
+$\mathrm{span}\{e\}$ 是图论标准结论（对任意 $\theta\perp e$，
+$\theta^{\mathsf T}B'\theta=-\sum_{(i,j)}(\theta_i-\theta_j)^2/x_{ij}=0$
+当且仅当 $\theta$ 在每条边上取等值，连通性迫使 $\theta\propto e$）。
+\end{proof}
+
+\begin{remark}[参考节点与唯一可解性]\label{rem:opf-th-dc-slack}
+$B'$ 的一维零空间对应角度规范自由度：固定参考节点 $\theta_r=0$ 后，
+降阶矩阵 $B'_{\mathrm{red}}$ 对称负定、可逆，
+$\theta_{\mathrm{red}}=(B'_{\mathrm{red}})^{-1}P_{\mathrm{red}}$ 唯一确定。
+这与 AC 潮流中 slack 节点的角度规范作用一致；不同之处是 DC 模型中
+$e^{\mathsf T}P=0$ 必须\emph{精确}成立（无损耗可吸收），不平衡量全部
+由参考节点注入承担。
+\end{remark}
+
+\begin{remark}[转移分布因子（PTDF）恒等式]\label{rem:opf-th-dc-ptdf}
+记支路-节点关联矩阵 $A$（每行一条支路，from 端 $+1$、to 端 $-1$）、
+$D=\mathrm{diag}(1/x_l)$，则支路潮流 $F=DA\theta$，节点平衡
+$P=B'\theta=-A^{\mathsf T}DA\,\theta$。以参考节点为枢轴解出 $\theta$ 并
+代回，得 $F=\mathrm{SF}\,P$，其中转移分布因子矩阵
+\begin{equation}
+\mathrm{SF}=DA\,\bigl(B'_{\mathrm{red}}\bigr)^{-1}J ,
+\label{eq:opf-th-dc-ptdf}
+\end{equation}
+$J$ 为把降阶注入向量嵌回全节点的 $0/1$ 矩阵。PTDF 行满足
+$\mathrm{SF}_{l,r}=0$（参考节点列）与
+$\mathrm{SF}_{l,i}-\mathrm{SF}_{l,j}$ 仅取决于网络拓扑与电抗、与运行点
+无关——这正是 DC 框架下 LMP 阻塞分量可做网络分解
+（第~\ref{sec:opf-th-dc-lmp}~节）与 $N\!-\!1$ 筛选可用 LODF 闭式更新
+的结构根源。
+\end{remark}
+
+\subsubsection{线性化误差界}
+
+DC 近似的误差来源可逐项分离。以下给出单支路层面的严格界。
+
+\begin{lemma}[正弦线性化的 Taylor 余项]\label{lem:opf-th-dc-taylor}
+对任意 $\theta\in\mathbb R$，存在 $\xi$ 介于 $0$ 与 $\theta$ 之间使
+$\sin\theta=\theta-\frac{\cos\xi}{6}\theta^3$，从而
+\begin{equation}
+|\sin\theta-\theta|\le\frac{|\theta|^3}{6},\qquad
+|1-\cos\theta|\le\frac{\theta^2}{2}.
+\label{eq:opf-th-dc-taylor}
+\end{equation}
+\end{lemma}
+
+\begin{proof}
+带 Lagrange 余项的 Taylor 定理用于 $g(\theta)=\sin\theta$（三阶）与
+$h(\theta)=\cos\theta$（二阶）：$g'''(t)=-\cos t$ 有界 $1$，
+$h''(t)=-\cos t$ 有界 $1$，即得式~\eqref{eq:opf-th-dc-taylor}。
+\end{proof}
+
+\begin{proposition}[支路潮流误差界]\label{prop:opf-th-dc-errbound}
+设支路 $i$--$j$ 为纯串联 $r_{ij}+\mathrm jx_{ij}$（无充电、标准变比），
+记 $\theta=\theta_{ij}$。精确交流支路潮流与其 DC 近似
+式~\eqref{eq:opf-th-dc-branch} 之差满足
+\begin{equation}
+\bigl|P_{ij}^{AC}-P_{ij}^{DC}\bigr|
+\le |g_{ij}|\cdot\bigl|V_{m,i}^2-V_{m,i}V_{m,j}\cos\theta\bigr|
++\frac{1}{x_{ij}}\Bigl(|V_{m,i}V_{m,j}-1|+\frac{|\theta|^3}{6}\Bigr).
+\label{eq:opf-th-dc-errbound}
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+由两端口支路模型，from 端有功潮流
+\begin{equation}
+P_{ij}^{AC}=V_{m,i}^2g_{ij}-V_{m,i}V_{m,j}
+\bigl(g_{ij}\cos\theta+b_{ij}\sin\theta\bigr),\qquad b_{ij}=-1/x_{ij}.
+\end{equation}
+与 $P_{ij}^{DC}=\theta/x_{ij}$ 相减：
+\begin{equation}
+P_{ij}^{AC}-P_{ij}^{DC}
+=g_{ij}\bigl(V_{m,i}^2-V_{m,i}V_{m,j}\cos\theta\bigr)
++\frac{1}{x_{ij}}\bigl(V_{m,i}V_{m,j}\sin\theta-\theta\bigr).
+\end{equation}
+第一项取绝对值即式~\eqref{eq:opf-th-dc-errbound} 的损耗项。第二项拆为
+\begin{equation}
+V_{m,i}V_{m,j}\sin\theta-\theta
+=(V_{m,i}V_{m,j}-1)\sin\theta+(\sin\theta-\theta),
+\end{equation}
+用 $|\sin\theta|\le1$ 与引理~\ref{lem:opf-th-dc-taylor} 的
+$|\sin\theta-\theta|\le|\theta|^3/6$ 即得。
+\end{proof}
+
+\begin{remark}[误差界的物理读法]\label{rem:opf-th-dc-errread}
+式~\eqref{eq:opf-th-dc-errbound} 的三项分别对应三条假设的代价：
+(i) $|g_{ij}|$ 项是\textbf{网损}（半线损耗，恒非负），数量级
+$r_{ij}/(r_{ij}^2+x_{ij}^2)$ 乘以电压差平方量级；
+(ii) $|V_{m,i}V_{m,j}-1|$ 项是\textbf{电压偏离}，标幺系统正常运行
+$|V_m-1|\le0.05$ 时此项约百分之几；
+(iii) $|\theta|^3/6$ 项是\textbf{角度曲率}：$|\theta|=0.5$~rad
+（约 $29^\circ$）时上界约 $2.1\%$，$|\theta|=1$~rad 时约 $16.7\%$——
+三次方衰减意味着小角度区间内 DC 近似精度极好、而角度张角大的工况
+（重载长链、弱联系互联）误差迅速失控。三条假设\textbf{不可互相代偿}：
+$R/X$ 小的网若角度大，或角度小的网若电压越限严重，DC 口径同样失真。
+工程上 DC OPF 的结果应当回代 AC 潮流校核（实现层的
+\srcpath{check\_dc\_opf\_feasibility} 只复查 DC 模型自身的可行性，
+见"与实现的对应"表）。
+\end{remark}
+
+\subsection{DC OPF 的 LP 对偶与 LMP 分解}\label{sec:opf-th-dc-lmp}
+
+\subsubsection{标准形与弱/强对偶}
+
+\begin{definition}[DC OPF（PTDF 形式）]\label{def:opf-th-dc-opflp}
+给定发电成本（分段线性或凸二次线性化后的线性形式）
+$c_k$（每 MWh 成本单位）、负荷向量 $d$、支路热限 $\overline F$：
+\begin{equation}
+\min_{g}\ c^{\mathsf T}g
+\quad\text{s.t.}\quad
+e^{\mathsf T}(g-d)=0,\quad
+\mathrm{SF}(g-d)\le\overline F,\quad
+-\mathrm{SF}(g-d)\le\overline F,\quad
+\underline g\le g\le\overline g .
+\label{eq:opf-th-dc-opflp}
+\end{equation}
+式~\eqref{eq:opf-th-dc-opflp} 是线性规划；等价地可用
+$B'\theta=g-d$ 的角度形式（约束面相同，经式~\eqref{eq:opf-th-dc-ptdf}
+互化）。凸二次成本以分段线性下包络或 QP 口径处理，不改变约束结构。
+\end{definition}
+
+\begin{lemma}[LP 弱对偶]\label{lem:opf-th-dc-weak}
+对标准形 $\min\{c^{\mathsf T}x:Ax=b,\ x\ge0\}$ 及其对偶
+$\max\{b^{\mathsf T}y:A^{\mathsf T}y\le c\}$，任意可行 $x,y$ 满足
+$b^{\mathsf T}y\le c^{\mathsf T}x$。
+\end{lemma}
+
+\begin{proof}
+$b^{\mathsf T}y=(Ax)^{\mathsf T}y=x^{\mathsf T}A^{\mathsf T}y
+\le x^{\mathsf T}c=c^{\mathsf T}x$，不等号由 $x\ge0$ 与
+$A^{\mathsf T}y\le c$ 的分量序保证。
+\end{proof}
+
+\begin{theorem}[LP 强对偶]\label{thm:opf-th-dc-strong}
+若式~\eqref{eq:opf-th-dc-opflp} 可行且有有限最优值，则存在对偶可行
+$(\lambda,\mu^+,\mu^-,\nu^-,\nu^+)$ 使原始与对偶最优值相等，且互补松弛
+成立：支路 $l$ 正向热限不紧则 $\mu^+_l=0$，反向不紧则 $\mu^-_l=0$；
+发电机出力在上下界内则其界对偶为零。
+\end{theorem}
+
+\begin{proof}[证明要点]
+标准结论~\cite{opfdc:bertsimas}：由 Farkas 引理（$Ax=b,\ x\ge0$ 可行，
+否则存在 $y$ 使 $A^{\mathsf T}y\le0$ 而 $b^{\mathsf T}y>0$），原始
+最优基对应的简约成本非负条件给出一组对偶可行乘子，其目标值与原始
+最优值之差即弱对偶间隙，而该间隙由基的最优性为零；互补松弛是
+KKT 条件在 LP 上的直接特化。完整推导见
+\cite{opfdc:bertsimas,opfdc:nemhauser-wolsey}。
+\end{proof}
+
+\subsubsection{LMP 的定义与三分量分解}
+
+\begin{definition}[节点边际电价]\label{def:opf-th-dc-lmpdef}
+记式~\eqref{eq:opf-th-dc-opflp} 的最优值为值函数 $V(d)$（其余数据固定）。
+节点 $i$ 的 LMP 定义~\cite{opfdc:schweppe-spot,opfdc:hogan} 为在该节点
+增供 $1$~MW 负荷的边际成本：
+\begin{equation}
+\mathrm{LMP}_i=\frac{\partial V}{\partial d_i}
+\label{eq:opf-th-dc-lmpdef}
+\end{equation}
+（在最优基非退化、值函数可微处良定义；退化处取次梯度，工程实现一律
+以平衡行对偶为口径）。
+\end{definition}
+
+\begin{theorem}[LMP 的能量-阻塞-损耗分解]\label{thm:opf-th-dc-lmpdecomp}
+对式~\eqref{eq:opf-th-dc-opflp} 的 KKT 点，记能量平衡行对偶为 $\lambda$、
+正/反向热限行对偶为 $\mu^+,\mu^-\ge0$，则
+\begin{equation}
+\mathrm{LMP}_i=\lambda
+-\sum_{l\in\mathcal L}(\mu^+_l-\mu^-_l)\,\mathrm{SF}_{l,i}
+=\underbrace{\lambda}_{\text{能量分量}}
++\underbrace{\mathrm{MCC}_i}_{\text{阻塞分量}}
++\underbrace{0}_{\text{损耗分量}},
+\qquad \mathrm{MCC}_i=-\sum_l(\mu^+_l-\mu^-_l)\mathrm{SF}_{l,i}.
+\label{eq:opf-th-dc-lmpdecomp}
+\end{equation}
+\end{theorem}
+
+\begin{proof}
+式~\eqref{eq:opf-th-dc-opflp} 的拉格朗日函数（界约束对偶
+$\nu^-,\nu^+\ge0$ 略写）为
+\begin{equation}
+L=c^{\mathsf T}g+\lambda\,e^{\mathsf T}(g-d)
++(\mu^+)^{\mathsf T}\bigl(\mathrm{SF}(g-d)-\overline F\bigr)
++(\mu^-)^{\mathsf T}\bigl(-\mathrm{SF}(g-d)-\overline F\bigr)+\cdots
+\end{equation}
+在 LICQ 成立的最优基处，包络定理给出
+$\partial V/\partial d_i=-\partial L/\partial d_i\big|_*$
+（注意 $d$ 以 $-d$ 进入约束，故值函数梯度与拉格朗日对 $d$ 的偏导差
+一个符号）：
+\begin{equation}
+\frac{\partial L}{\partial d_i}
+=-\lambda-\sum_l(\mu^+_l-\mu^-_l)\mathrm{SF}_{l,i}
+\quad\Longrightarrow\quad
+\mathrm{LMP}_i=\lambda-\sum_l(\mu^+_l-\mu^-_l)\mathrm{SF}_{l,i}.
+\end{equation}
+三分量的归因：$\lambda$ 与节点无关，是"再多发 $1$~MW"的边际能量成本；
+$\mathrm{MCC}_i$ 仅由\textbf{紧约束支路}的影子价格经 PTDF 加权而成
+（互补松弛保证不紧支路无贡献）；DC 模型无损（定理~\ref{thm:opf-th-dc-btheta}
+的（H3）），节点注入变化不引起损耗变化，损耗分量恒为零。
+\end{proof}
+
+\begin{remark}[损耗分量的非零化]\label{rem:opf-th-dc-loss}
+引入损耗后（如带网损因子的 DC 修正或 AC OPF），节点平衡中注入与负荷
+不再按 $1:1$ 折算，式~\eqref{eq:opf-th-dc-lmpdecomp} 出现第三项
+$\mathrm{MLC}_i=\lambda\cdot\partial P_{\mathrm{loss}}/\partial d_i$
+（符号约定各异）。这超出无损 DC 框架；市场的经典结算口径即
+$\mathrm{LMP}=\text{能量}+\text{阻塞}+\text{损耗}$ 三分量
+~\cite{opfdc:schweppe-spot,opfdc:christie}。
+\end{remark}
+
+\begin{example}[两节点阻塞算例]\label{ex:opf-th-dc-twobus}
+节点 1 有廉价机组 $c_1=20$，节点 2 有昂贵机组 $c_2=50$ 与负荷
+$d_2=100$~MW，单线热限 $\overline F=60$~MW，取节点 1 为参考。
+无约束时 $g_1=100$、LMP 均为 $20$。热限紧时：线路潮流
+$g_1=60\le\overline F$ 钉住，$g_2=40$；$\mathrm{SF}_{l,2}=1$
+（节点 2 的全部注入经该线）。发电机平稳性给出 $\lambda=c_1=20$，
+$\mu^+=c_2-c_1=30$，式~\eqref{eq:opf-th-dc-lmpdecomp} 给出
+$\mathrm{LMP}_1=20$、$\mathrm{LMP}_2=20+30=50$：阻塞使受端电价
+升至本地边际机组成本，阻塞租金 $\mu^+\overline F=30\times60=1800$
+等于两节点电价差乘以传输量。
+\end{example}
+
+\begin{gapnote}
+平台 DC OPF（实现层 DC OPF 章）的 \fld{lmp} 字段仅为\textbf{平衡行对偶
+经支撑 LP 回收}的单一口径（\srcpath{src/optimal\_power\_flow/dc\_opf.cpp:populate\_missing\_duals\_from\_supporting\_lp}），
+即式~\eqref{eq:opf-th-dc-lmpdecomp} 中能量与阻塞分量之和，不做三分量
+显式分解；且源码注释明确声明：阻塞工况下支路热限对偶
+（\fld{branch\_mu}，即 $\mu^\pm$）"不可靠"，仅 LMP 有效。损耗分量
+在无损模型中按定理~\ref{thm:opf-th-dc-lmpdecomp} 恒零，非实现缺失。
+市场模块的 $LMP=\mu/\Delta t$ 口径见
+\srcpath{docs/theory/market\_simulation\_mathematical\_models.md}。
+\end{gapnote}
+
+\subsection{凸松弛一般理论}\label{sec:opf-th-dc-relax}
+
+\subsubsection{QCQP 提升与 Jabr 二阶锥松弛}
+
+交流 OPF 的困难在于节点功率注入是电压的二次函数：写提升变量
+$W=VV^{H}\in H^n$，注入 $S_i=\sum_j\overline{Y_{ij}}W_{ij}$ 关于 $W$
+\textbf{线性}，非凸性全部集中于约束
+\begin{equation}
+W=VV^{H}\iff W\succeq0,\ \mathrm{rank}(W)=1 .
+\label{eq:opf-th-dc-rank1}
+\end{equation}
+
+\begin{definition}[Jabr SOCP 松弛]\label{def:opf-th-dc-jabr}
+Jabr 松弛~\cite{opfdc:jabr} 把式~\eqref{eq:opf-th-dc-rank1} 放松为
+$W$ 的全部支路 $2\times2$ 主子式半正定：对每条支路 $(i,j)$，
+\begin{equation}
+\begin{bmatrix}W_{ii}&W_{ij}\\ \overline{W_{ij}}&W_{jj}\end{bmatrix}\succeq0
+\iff
+|W_{ij}|^2\le W_{ii}W_{jj},\quad W_{ii}\ge0,\ W_{jj}\ge0 .
+\label{eq:opf-th-dc-jabr}
+\end{equation}
+\end{definition}
+
+\begin{proposition}[旋转二阶锥刻画]\label{prop:opf-th-dc-rotsoc}
+式~\eqref{eq:opf-th-dc-jabr} 的不等式等价于旋转二阶锥约束
+\begin{equation}
+\Bigl\lVert\bigl(2\,\mathrm{Re}\,W_{ij},\ 2\,\mathrm{Im}\,W_{ij},\
+W_{ii}-W_{jj}\bigr)\Bigr\rVert_2\le W_{ii}+W_{jj},
+\qquad W_{ii},W_{jj}\ge0 .
+\label{eq:opf-th-dc-rotsoc}
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+展开锥不等式两边平方（右端非负故平方保持序）：
+\begin{equation}
+4|W_{ij}|^2+(W_{ii}-W_{jj})^2\le(W_{ii}+W_{jj})^2
+=4W_{ii}W_{jj}+(W_{ii}-W_{jj})^2,
+\end{equation}
+消去公共项得 $|W_{ij}|^2\le W_{ii}W_{jj}$；$2\times2$ 厄米特矩阵的
+半正定性由 Sylvester 准则（对角非负 + 行列式非负）即
+$W_{ii}W_{jj}-|W_{ij}|^2\ge0$ 等价刻画。两个方向的推导可逆。
+\end{proof}
+
+\begin{theorem}[树网角度恢复]\label{thm:opf-th-dc-anglerec}
+设网络图为树，$W\in H^n$ 满足 $W_{ii}>0$，且对每条边 $(i,j)$ 锥约束
+式~\eqref{eq:opf-th-dc-jabr} 取等（$|W_{ij}|^2=W_{ii}W_{jj}$）。则存在
+复电压向量 $V$ 使 $W_{ij}=V_i\overline{V_j}$（即 $\mathrm{rank}\,W=1$），
+且该 $V$ 在整体相位旋转下唯一。
+\end{theorem}
+
+\begin{proof}
+取根节点 $r$，置 $\theta_r=0$、$V_r=\sqrt{W_{rr}}$。对每条边 $(i,j)$，
+$W_{ij}\neq0$（模为 $\sqrt{W_{ii}W_{jj}}>0$），定义相位增量
+$\Delta_{ij}=\arg W_{ij}$。对任意节点 $i$，存在树中唯一路径
+$r=v_0,v_1,\dots,v_k=i$，归纳定义
+$\theta_{v_{s+1}}=\theta_{v_s}-\Delta_{v_s v_{s+1}}$、
+$V_{v_s}=\sqrt{W_{v_sv_s}}e^{\mathrm j\theta_{v_s}}$。树无环，故相位
+赋值无路径冲突。对边 $(i,j)$：
+\begin{equation}
+V_i\overline{V_j}=\sqrt{W_{ii}W_{jj}}\,
+e^{\mathrm j(\theta_i-\theta_j)}
+=|W_{ij}|\,e^{\mathrm j\arg W_{ij}}=W_{ij},
+\end{equation}
+其中第二步用了锥等式（模相等）与相位构造（幅角相等）；两个复数模与
+幅角皆等故相等。对角元 $W_{ii}=|V_i|^2$ 由构造成立。唯一性：固定
+$\theta_r$ 后每条边的相位增量被 $W$ 唯一决定，归纳得唯一 $V$；
+$\theta_r$ 的自由度即整体相位旋转。
+\end{proof}
+
+\begin{remark}[Lavaei--Low SDP 松弛与精确性条件]\label{rem:opf-th-dc-sdp}
+把式~\eqref{eq:opf-th-dc-rank1} 放松为 $W\succeq0$（去掉秩约束）即
+SDP 松弛~\cite{opfdc:lavaei-low,opfdc:low-tutorial}。已知结论的要点：
+(i) 对辐射状（树）网络，SOCP 松弛与 SDP 松弛等价，且在温和的注入界
+条件下（如无反向功率上限紧约束、允许负荷过满足）松弛\textbf{精确}
+——最优解处全部支路锥约束取等，由定理~\ref{thm:opf-th-dc-anglerec}
+恢复物理电压~\cite{opfdc:farivar-low,opfdc:gan-low}；
+(ii) 网状网络上存在松弛间隙严格为正的算例，精确性需要额外结构条件
+（如弱循环二部图类的符号条件）~\cite{opfdc:lavaei-low}；
+(iii) 松弛的实用价值即使在非精确时也成立：其最优值是原非凸问题的
+\textbf{目标下界证书}，可用于启发式解的质量定界。
+\end{remark}
+
+\subsubsection{配网 DistFlow 与 Branch Flow 模型}
+
+\begin{definition}[DistFlow / Branch Flow 模型]\label{def:opf-th-dc-bfm}
+辐射状配网取根向外的有向树，支路 $(i,j)$（$i$ 为父节点）的
+Baran--Wu 方程~\cite{opfdc:baran-wu,opfdc:farivar-low} 以
+$\ell_{ij}=|I_{ij}|^2$、$v_i=|V_i|^2$ 与支路送端潮流 $P_{ij},Q_{ij}$
+为变量：
+\begin{align}
+P_{ij}&=p_j+\sum_{k\in\delta^+(j)}P_{jk}+r_{ij}\ell_{ij},
+\label{eq:opf-th-dc-bfm-p}\\
+Q_{ij}&=q_j+\sum_{k\in\delta^+(j)}Q_{jk}+x_{ij}\ell_{ij},
+\label{eq:opf-th-dc-bfm-q}\\
+v_j&=v_i-2\bigl(r_{ij}P_{ij}+x_{ij}Q_{ij}\bigr)
++\bigl(r_{ij}^2+x_{ij}^2\bigr)\ell_{ij},
+\label{eq:opf-th-dc-bfm-v}\\
+v_i\ell_{ij}&=P_{ij}^2+Q_{ij}^2,
+\label{eq:opf-th-dc-bfm-cone}
+\end{align}
+其中 $p_j,q_j$ 为节点 $j$ 净负荷。SOCP 松弛把
+式~\eqref{eq:opf-th-dc-bfm-cone} 放松为 $P_{ij}^2+Q_{ij}^2\le v_i\ell_{ij}$
+（旋转二阶锥，命题~\ref{prop:opf-th-dc-rotsoc} 同型）。
+\end{definition}
+
+\begin{proposition}[BFM 与 AC 潮流在树网上的等价]\label{prop:opf-th-dc-bfmeq}
+对给定根电压 $v_0$ 与节点注入 $(p,q)$，若
+$(P,Q,\ell,v)$ 满足式~\eqref{eq:opf-th-dc-bfm-p}--\eqref{eq:opf-th-dc-bfm-cone}
+（锥取等），则存在支路电流与节点电压相量使其逐点成立；反之 AC 潮流解
+显然给出这样一组 $(P,Q,\ell,v)$。
+\end{proposition}
+
+\begin{proof}[证明要点]
+反向：$I_{ij}=(P_{ij}-\mathrm jQ_{ij})/\overline{V_i}$、
+$\ell_{ij}=|I_{ij}|^2$ 直接验证四式。正向：由
+式~\eqref{eq:opf-th-dc-bfm-cone} 定义 $|I_{ij}|$，由
+式~\eqref{eq:opf-th-dc-bfm-v} 递推 $v$；相位沿树递推
+（$V_j=V_i-z_{ij}I_{ij}$ 的幅角逐步确定），树无环保证一致性——
+与定理~\ref{thm:opf-th-dc-anglerec} 同一机制。严格表述见
+\cite{opfdc:farivar-low}。
+\end{proof}
+
+\begin{gapnote}
+平台\textbf{无原生 SOCP/SDP 锥求解器}：三相混合 OPF 的松弛层
+（实现层三相混合章）以 LP 外逼近处理旋转二阶锥——在每个 LP 解点上
+对违例锥生成支撑超平面割
+（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_relaxation.cpp:violated\_cone\_cuts}），
+PSD 团以最小特征向量秩一割近似
+（同文件 \srcpath{append\_ac\_psd\_cuts}），逐轮并入 HiGHS LP 求解，
+并以 \srcpath{evaluate\_lp\_dual\_bound} 从 LP 对偶构造原非凸问题的
+有效目标下界。Jabr/SDP 松弛的完整锥编程语义（内点锥求解、对偶证书）
+未实现；DistFlow 的 $\ell$ 变量模型（式~\eqref{eq:opf-th-dc-bfm-p}--%
+\eqref{eq:opf-th-dc-bfm-cone}）未实现，配网快速通道为下一节的
+LinDistFlow 线性模型。
+\end{gapnote}
+
+\subsection{LinDistFlow 线性化与误差分析}\label{sec:opf-th-dc-ldf}
+
+\begin{definition}[LinDistFlow]\label{def:opf-th-dc-ldf}
+在式~\eqref{eq:opf-th-dc-bfm-p}--\eqref{eq:opf-th-dc-bfm-v} 中略去全部
+损耗项（$r\ell$、$x\ell$、$(r^2+x^2)\ell$），得 LinDistFlow
+~\cite{opfdc:baran-wu}：
+\begin{equation}
+P_{ij}=p_j+\sum_{k\in\delta^+(j)}P_{jk},\qquad
+Q_{ij}=q_j+\sum_{k\in\delta^+(j)}Q_{jk},\qquad
+v_j=v_i-2\bigl(r_{ij}P_{ij}+x_{ij}Q_{ij}\bigr).
+\label{eq:opf-th-dc-ldf}
+\end{equation}
+式~\eqref{eq:opf-th-dc-ldf} 关于 $(P,Q,v)$ 线性：辐射状网上潮流由
+负荷\textbf{闭式确定}（叶到根的子树求和），电压由根到叶的闭式累加
+确定，配合凸成本与盒界约束即得 LP/QP。
+\end{definition}
+
+\begin{proposition}[LinDistFlow 电压误差界]\label{prop:opf-th-dc-ldferr}
+固定同一组支路潮流 $(P,Q)$，记 $\hat v$ 为式~\eqref{eq:opf-th-dc-ldf}
+的电压解、$v$ 为式~\eqref{eq:opf-th-dc-bfm-v} 的电压解（同根电压
+$\hat v_0=v_0$），则对任意节点 $n$，沿根到 $n$ 的唯一路径
+$\mathcal P(n)$：
+\begin{equation}
+0\le \hat v_n-v_n
+=\sum_{(i,j)\in\mathcal P(n)}\bigl(r_{ij}^2+x_{ij}^2\bigr)\ell_{ij}
+\le\sum_{(i,j)\in\mathcal P(n)}
+\frac{r_{ij}^2+x_{ij}^2}{v_i^{\min}}\,\overline S_{ij}^{\,2},
+\label{eq:opf-th-dc-ldferr}
+\end{equation}
+其中 $\overline S_{ij}$ 为支路视在功率上界、$v_i^{\min}$ 为电压平方
+下界。即 LinDistFlow 电压\textbf{系统性偏高}，偏差恰为被略去的支路
+损耗电压补偿项的累加。
+\end{proposition}
+
+\begin{proof}
+沿路径把式~\eqref{eq:opf-th-dc-bfm-v} 与式~\eqref{eq:opf-th-dc-ldf}
+分别对边求和（伸缩和，中间电压相消）：
+\begin{equation}
+v_n=v_0-\sum_{\mathcal P(n)}2(rP+xQ)
++\sum_{\mathcal P(n)}(r^2+x^2)\ell,\qquad
+\hat v_n=v_0-\sum_{\mathcal P(n)}2(rP+xQ),
+\end{equation}
+两式相减即等式部分；$(r^2+x^2)\ell\ge0$ 给出非负性；最后一步用
+$\ell_{ij}=(P_{ij}^2+Q_{ij}^2)/v_i\le\overline S_{ij}^2/v_i^{\min}$。
+\end{proof}
+
+\begin{remark}[误差量级与适用范围]\label{rem:opf-th-dc-ldfrem}
+式~\eqref{eq:opf-th-dc-ldferr} 的被略项为 $|z|^2\ell\approx
+|z|^2 S^2/v$：城市配网典型参数（$|z|\lesssim0.5$~pu、$S\lesssim0.5$~pu、
+$v\approx1$）下每段约 $10^{-2}$~pu 以下，全路径累计通常
+$1$--$3\%$——与电压运行带宽同量级，故 LinDistFlow 适合
+\textbf{筛选与规划口径}而非精确运行校核。潮流重分配的二阶效应
+（损耗项 $r\ell$ 反过来改变上游潮流）同阶。电压越限判定类应用应把
+式~\eqref{eq:opf-th-dc-ldferr} 的系统性\textbf{正}偏差计入裕度：
+LinDistFlow 判定不越限不能保证精确模型不越限，反之其越限判定偏保守。
+\end{remark}
+
+\subsection{混合整数方法基础}\label{sec:opf-th-dc-mip}
+
+\subsubsection{OLTC 离散档位的 MILP 建模}
+
+\begin{definition}[离散档位与选址变量]\label{def:opf-th-dc-oltc}
+OLTC 第 $k$ 档变比 $a_k=a_0+k\Delta a$，$k\in\{\underline k,\dots,
+\overline k\}$（整数档位窗口）。MILP 嵌入以二元选址变量
+$y_k\in\{0,1\}$、$\sum_ky_k=1$ 表示档位选择，
+$a=\sum_k(a_0+k\Delta a)y_k$；可投切并联补偿同理以步数整数变量表示。
+\end{definition}
+
+\begin{lemma}[二元-连续乘积的大 \texorpdfstring{$M$}{M} 线性化精确性]
+\label{lem:opf-th-dc-bigm}
+设 $x\in[\underline x,\overline x]$ 连续、$y\in\{0,1\}$ 二元，
+$w=xy$。则四不等式组
+\begin{equation}
+\underline x\,y\le w\le\overline x\,y,\qquad
+x-\overline x(1-y)\le w\le x-\underline x(1-y)
+\label{eq:opf-th-dc-bigm}
+\end{equation}
+在 $y\in\{0,1\}$ 时\textbf{恰好}刻画 $w=xy$（无不必要松弛）。
+\end{lemma}
+
+\begin{proof}
+分两种取值验证。$y=0$：前两式给出 $\underline x\cdot0\le w\le
+\overline x\cdot0$——注意 $\underline x\le0\le\overline x$ 不总成立，
+故更准确地：前两式为 $w\le\overline x\,y=0$ 与 $w\ge\underline x\,y=0$
+在 $\underline x\le0\le\overline x$ 时直接钉住 $w=0$；一般情况下后两式
+$x-\overline x\le w\le x-\underline x$ 不约束 $w=0$ 与区间交叠，
+组合起来在二元点上恰给出 $w=0$ 与
+$w\in[x-\overline x,\,x-\underline x]$ 的交，即 $w=0$ 可行且
+$x\cdot0=0$ 一致。$y=1$：前两式退化为 $\underline x\le w\le\overline x$
+（盒界内，非约束），后两式给出 $x\le w\le x$，即 $w=x$。两情形均与
+$w=xy$ 一致，且逐点无多余自由度——松弛（$y$ 连续化到 $[0,1]$）即
+McCormick 包络，是乘积 $xy$ 在盒 $[\underline x,\overline x]\times[0,1]$
+上的凸/凹包络~\cite{opfdc:nemhauser-wolsey}。
+\end{proof}
+
+\begin{remark}[指示约束与大 \texorpdfstring{$M$}{M} 的取舍]
+\label{rem:opf-th-dc-indicator}
+"档位 $k$ 选中 $\Rightarrow$ 约束组 $\Phi_k(x)\le0$"可经指示约束
+（求解器原生处理，分支时直接施加/移除约束）或式
+~\eqref{eq:opf-th-dc-bigm} 型大 $M$ 不等式实现。大 $M$ 的 $M$ 必须取
+\textbf{最小的有效值}：过大的 $M$ 使 LP 松弛界松弛、分支定界树膨胀；
+指示约束避免显式 $M$，但把数值稳定性责任转移给求解器。离散变比
+与电压/潮流的\textbf{双线性乘积}（$a\cdot V$、$a\cdot\theta$ 项）
+是 OLTC MILP 的真正难点：乘积线性化（引理~\ref{lem:opf-th-dc-bigm}）
+只处理二元-连续乘积，$a=\sum a_ky_k$ 与连续量的乘积需逐档
+$w_k=a_k(y_k\cdot x)$ 展开后逐个线性化。
+\end{remark}
+
+\subsubsection{分支定界与 MIP gap 语义}
+
+\begin{definition}[分支定界（B\&B）]\label{def:opf-th-dc-bb}
+MIP $\min\{c^{\mathsf T}x:Ax\le b,\ x_I\in\mathbb Z^{|I|}\}$ 的分支
+定界维护：(i) 当前 LP 松弛（整数约束连续化）给出\textbf{对偶界}
+$z_D$（最小化问题为下界）；(ii) 当前最优整数可行解（incumbent）给出
+\textbf{原始界} $z_P$；(iii) 搜索树节点：取 LP 解中分数整数变量
+$x_i^*\notin\mathbb Z$，分裂为 $x_i\le\lfloor x_i^*\rfloor$ 与
+$x_i\ge\lceil x_i^*\rceil$ 两子节点。节点按三种规则剪枝：界剪
+（节点对偶界 $\ge z_P$）、不可行剪、整数可行剪（更新 incumbent）。
+\end{definition}
+
+\begin{proposition}[松弛界有效性]\label{prop:opf-th-dc-relaxbound}
+最小化 MIP 的任意松弛（可行集超集）最优值不超过原问题最优值；
+特别地 LP 松弛给出有效下界，且该界沿分支单调不减。
+\end{proposition}
+
+\begin{proof}
+松弛问题的可行集包含原可行集，最小化在更大集合上取值不增；
+分支把节点可行集\textbf{收缩}（追加半空间），其子节点 LP 松弛值
+不小于父节点，故沿任一路径界单调不减。
+\end{proof}
+
+\begin{definition}[MIP gap]\label{def:opf-th-dc-mipgap}
+相对 gap 的工程口径为
+\begin{equation}
+\mathrm{gap}=\frac{|z_P-z_D|}{\max(|z_P|,\,\varepsilon)}
+\label{eq:opf-th-dc-mipgap}
+\end{equation}
+（分母约定因求解器而异）。$\mathrm{gap}=0$ 是\textbf{最优性证书}：
+incumbent 即全局最优；$\mathrm{gap}>0$ 下停机（time-limit/gap-tol）
+返回的是"最优值位于 $[z_D,z_P]$ 内"的\textbf{区间证书}，incumbent
+本身只是可行解。
+\end{definition}
+
+\begin{proposition}[B\&B 有限终止]\label{prop:opf-th-dc-bbterm}
+若整数变量有界且 LP 松弛逐节点可解，分支定界经有限步终止：要么给出
+最优解与 $\mathrm{gap}=0$ 证书，要么证明不可行。
+\end{proposition}
+
+\begin{proof}[证明要点]
+有界整数变量的取值组合有限，枚举树节点数有限；命题
+~\ref{prop:opf-th-dc-relaxbound} 保证界剪不丢失最优解
+（被剪子树的对偶界不优于 incumbent，其内任何整数解亦不优）；
+不可行剪与整数剪同理安全。严格归纳见
+\cite{opfdc:nemhauser-wolsey,opfdc:wolsey}。
+\end{proof}
+
+\begin{gapnote}
+平台的离散无功优化 RPO\textbf{不是} B\&B/MILP：实现层 RPO 章的外层是
+四阶段坐标搜索（$\pm1$ 扰动灵敏度、整数三分、坐标下降、变量对精化，
+\srcpath{src/optimal\_power\_flow/reactive\_power\_opt.cpp:solve\_rpo}），
+内层为固定离散配置下的连续 OPF，\fld{gap\_tol} 是"本轮有改进"的
+坐标下降阈值而非定义~\ref{def:opf-th-dc-mipgap} 的最优性证书——
+RPO 结果不附带全局最优性界。平台内真正的 MILP 通道是市场/规划侧的
+SCUC（\srcpath{src/power\_models/scuc\_builder.cpp:solve\_scuc} 以
+\fld{VarType::Binary} 建机组组合），其 gap\_tol 停止容差与 mip\_gap
+报告由 MIPSolvers 引擎承担（见市场模块文档）。
+\end{gapnote}
+
+\subsection{三相/相域建模一般理论}\label{sec:opf-th-dc-phase}
+
+\subsubsection{Carson 方程与 Kron 归约}
+
+\begin{definition}[Carson 方程]\label{def:opf-th-dc-carson}
+架空配电线路计及大地回路的原始阻抗（SI 单位，$\Omega$/m）
+~\cite{opfdc:carson,opfdc:kersting}：导线 $i$ 自阻抗与导线 $i,j$
+互阻抗为
+\begin{equation}
+z_{ii}=\bigl(r_i+r_e\bigr)+\mathrm j\,\omega\cdot2\times10^{-7}
+\ln\frac{D_e}{\mathrm{GMR}_i},\qquad
+z_{ij}=r_e+\mathrm j\,\omega\cdot2\times10^{-7}\ln\frac{D_e}{D_{ij}}
+\ (i\neq j),
+\label{eq:opf-th-dc-carson}
+\end{equation}
+其中 $r_i$ 为导线交流电阻，大地回路等值电阻
+$r_e=9.869\times10^{-7}f$~$\Omega$/m，Carson 深度
+$D_e=658.4\sqrt{\rho/f}$~m（$\rho$ 为大地电阻率），$\mathrm{GMR}_i$
+为导线几何均距，$D_{ij}$ 为导线间距。式~\eqref{eq:opf-th-dc-carson}
+为简化 Carson 式（略去与频率相关的修正项级数，配电频率与线路长度下
+精度足够）。
+\end{definition}
+
+\begin{proposition}[中性线的 Kron 归约]\label{prop:opf-th-dc-kron}
+含 $m$ 根中性线的原始阻抗矩阵分块
+$\begin{bmatrix}Z_{ij}&Z_{in}\\ Z_{nj}&Z_{nn}\end{bmatrix}$
+（相/中性分块），中性点不接地注入电流为零时，归约后的相域
+$3\times3$ 阻抗为 Schur 补
+\begin{equation}
+Z_{abc}=Z_{ij}-Z_{in}Z_{nn}^{-1}Z_{nj}.
+\label{eq:opf-th-dc-kron}
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+原始方程分块写出：$V_a=Z_{ij}I_a+Z_{in}I_n$、
+$V_n=Z_{nj}I_a+Z_{nn}I_n$。中性线两端等电位（多点接地归算）给出
+$V_n=0$，解出 $I_n=-Z_{nn}^{-1}Z_{nj}I_a$ 代回第一式即
+式~\eqref{eq:opf-th-dc-kron}。
+\end{proof}
+
+\subsubsection{序分量变换与换位线路的解耦}
+
+\begin{definition}[Fortescue 序分量变换]\label{def:opf-th-dc-fortescue}
+记 $a=e^{\mathrm j2\pi/3}$，$A=\begin{bmatrix}1&1&1\\ 1&a^2&a\\
+1&a&a^2\end{bmatrix}$。相量 $V_{abc}=(V_a,V_b,V_c)^{\mathsf T}$ 的
+序分量为~\cite{opfdc:fortescue}
+\begin{equation}
+V_{012}=A^{-1}V_{abc},\qquad
+A^{-1}=\frac13\begin{bmatrix}1&1&1\\ 1&a&a^2\\ 1&a^2&a\end{bmatrix},
+\label{eq:opf-th-dc-fortescue}
+\end{equation}
+分量依次为零序、正序、负序。
+\end{definition}
+
+\begin{proposition}[换位线路的序网解耦]\label{prop:opf-th-dc-symdec}
+若相域阻抗矩阵为循环对称（换位线路的极限情形）：
+\begin{equation}
+Z_{abc}=\begin{bmatrix}z_s&z_m&z_m\\ z_m&z_s&z_m\\ z_m&z_m&z_s\end{bmatrix},
+\label{eq:opf-th-dc-circ}
+\end{equation}
+则序域阻抗对角：
+\begin{equation}
+A^{-1}Z_{abc}A=\mathrm{diag}\bigl(z_s+2z_m,\ z_s-z_m,\ z_s-z_m\bigr),
+\label{eq:opf-th-dc-symdec}
+\end{equation}
+即零序阻抗 $z_0=z_s+2z_m$，正/负序阻抗 $z_1=z_2=z_s-z_m$。
+\end{proposition}
+
+\begin{proof}
+直接计算。$A$ 的列分别为 $(1,1,1)^{\mathsf T}$、$(1,a^2,a)^{\mathsf T}$、
+$(1,a,a^2)^{\mathsf T}$。第一列（零序模态）：$Z_{abc}(1,1,1)^{\mathsf T}
+=(z_s+2z_m)(1,1,1)^{\mathsf T}$，即特征值 $z_s+2z_m$。第二列：
+第 $a$ 行给出 $z_s+z_m(a^2+a)=z_s-z_m$（因 $1+a+a^2=0$）；第 $b$ 行
+$z_m+z_sa^2+z_ma=a^2(z_m(a+a^2)\cdot a^{-2}\cdots)$——逐项：
+$z_m\cdot1+z_s a^2+z_m a=z_s a^2+z_m(1+a)=z_sa^2-z_ma^2=(z_s-z_m)a^2$；
+第 $c$ 行同理得 $(z_s-z_m)a$。故第二列是特征向量、特征值 $z_s-z_m$。
+第三列由对称同理。三列合并 $Z_{abc}A=A\,\mathrm{diag}(z_s+2z_m,\,
+z_s-z_m,\,z_s-z_m)$，左乘 $A^{-1}$ 即式~\eqref{eq:opf-th-dc-symdec}。
+\end{proof}
+
+\begin{remark}[不平衡 OPF 的难点]\label{rem:opf-th-dc-unbalanced}
+命题~\ref{prop:opf-th-dc-symdec} 的解耦\textbf{仅在换位/对称假设下}
+成立。实际配网不换位、相间互感显著，$Z_{abc}$ 非循环对称，序域矩阵
+出现非零耦合项，序分解失去降维价值——这是不平衡分析退回
+\textbf{相域}（每节点 $3$ 个复电压，$3\times3$ 满块导纳）的根本原因。
+相域 OPF 的额外难点：
+(i) 变量规模约 $3$ 倍于单相等值，且失去正序模型的全部结构性简化；
+(ii) 单相/两相负荷与电源使注入约束\textbf{逐相}给出，可行集不再
+旋转对称；
+(iii) 电压不平衡约束（VUF，负序与正序幅值比
+$|V_2|/|V_1|\le\varepsilon_{\mathrm{vuf}}$）是相电压的非凸二次函数，
+在提升形式下关于 $W$ 线性（$|V_2|^2=\mathrm{tr}(n_2n_2^{H}W)$，
+$n_2$ 为序分量系数向量），故\textbf{松弛框架天然兼容}而不平衡 NLP
+本体仍是高维非凸问题；
+(iv) 中性线/接地方式（有效接地、经阻抗接地、不接地）改变零序通道，
+必须在相域导纳中显式编码，不能事后折算。
+\end{remark}
+
+\begin{gapnote}
+Carson 方程（式~\eqref{eq:opf-th-dc-carson}）的\textbf{参数计算}在平台
+中未实现：相域模型从既有阻抗/导纳数据装配
+（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_adapter.cpp:build\_three\_phase\_hybrid\_model}
+消费 \fld{ThreePhaseHybridOPFCase} 的 \fld{y\_ac}），不做架空线几何
+参数到原始阻抗的换算，Kron 归约亦不在该路径上。序分量变换实现为
+诊断与约束用途
+（\srcpath{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:sequence\_components}
+计算 $V_1,V_2$ 供 VUF 不等式使用），不作为求解坐标。
+\end{gapnote}
+
+\subsection{交直流混合 OPF 的文献标准模型}\label{sec:opf-th-dc-hybrid}
+
+\begin{definition}[VSC 换流站三端口模型与损耗]\label{def:opf-th-dc-vsc}
+文献标准形式~\cite{opfdc:beerten} 把一台 VSC 换流站建模为三级级联：
+AC 母线（电压 $U_s$）— 变压器 — 滤波母线（$U_f$）— 相电抗器 —
+换流器母线（$U_c$），换流器直流侧功率 $P_{dc}$。稳态能量平衡
+\begin{equation}
+P_c+P_{dc}+P_{loss}=0,\qquad
+P_{loss}=a+b\,|I_c|+c\,|I_c|^2,
+\label{eq:opf-th-dc-vscloss}
+\end{equation}
+$P_c=\mathrm{Re}\{U_c\overline{I_c}\}$ 为换流器交流侧有功，损耗模型
+三系数对应：固定损耗 $a$（不随载流变化）、比例损耗 $b|I_c|$（开关损耗
+近似）、二次损耗 $c|I_c|^2$（导通损耗 $I^2R$ 类）。运行约束包括容量圆
+$P_c^2+Q_c^2\le\overline S^2$、交流电流限 $|I_c|\le\overline I_c$、
+调制比窗口 $\underline m\le m\le\overline m$ 与无功能力曲线。
+\end{definition}
+
+\begin{definition}[DC 电导网络]\label{def:opf-th-dc-dcgrid}
+DC 网络为纯电阻网络：节点电流 $I_{dc}=G_{dc}V_{dc}$，$G_{dc}$ 为 DC
+电导矩阵（支路电导 $1/r_{ij}$ 组装的拉普拉斯型矩阵），节点注入功率
+\begin{equation}
+P_{dc}=V_{dc}\odot\bigl(G_{dc}V_{dc}\bigr),
+\label{eq:opf-th-dc-dcpower}
+\end{equation}
+$\odot$ 为分量乘积。式~\eqref{eq:opf-th-dc-dcpower} 关于 $V_{dc}$ 二次
+（对应"DC 潮流"），换流站经式~\eqref{eq:opf-th-dc-vscloss} 把
+AC/DC 两侧耦合为统一 OPF~\cite{opfdc:beerten}。文献中常见的进一步
+线性化（$V_{dc}\approx1$ 后 $P_{dc}$ 线性）是 DC 网侧的"DC 近似"
+对应物。
+\end{definition}
+
+\begin{remark}[文献模型与平台 Parity 模型的关系]\label{rem:opf-th-dc-parity}
+平台交直流混合 OPF（实现层 Parity 建模章）采用同一
+$a+bI+cI^2$ 损耗耦合
+（\srcpath{src/optimal\_power\_flow/parity\_formulation.cpp:equality\_constraints}；
+AML 建模层同形，\srcpath{src/power\_models/acdcopf\_builder.cpp:solve\_acdcopf}），
+但有两点实现级差异：(i) 平台以\textbf{固定损耗 \fld{loss\_mw}、比例
+损耗 \fld{loss\_percent}、效率项 $1-\eta$} 三字段近似三系数，
+\fld{loss\_percent} 的精确化在源码中标注"refinement deferred"；
+(ii) 平台把换流站三级级联\textbf{压缩为单耦合行}加能力不等式
+（容量圆、电流限、调制窗口），不显式建 $U_f,U_c$ 内部母线——
+即采用定义~\ref{def:opf-th-dc-vsc} 的等值两端口口径。DC 侧
+式~\eqref{eq:opf-th-dc-dcpower} 的二次电导网络在 Parity 全空间中
+显式保留（显式直流电压块），松弛层将其提升为 $X_{ij}=u_iu_j$ 变量
+再外逼近（见实现层三相混合章）。
+\end{remark}
+
+\subsection{与实现的对应}\label{sec:opf-th-dc-implmap}
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{6.8cm}L{8.6cm}@{}}
+\toprule
+理论条目 & 实现状态\\
+\midrule
+\endfirsthead
+\toprule
+理论条目 & 实现状态\\
+\midrule
+\endhead
+DC 假设（H1）--（H3）与 $P=B'\theta$ 组装（定理~\ref{thm:opf-th-dc-btheta}） &
+\implpart{src/optimal\_power\_flow/dc\_opf.cpp:build\_dc\_opf\_lp（只读 \fld{x\_pu}、无电压幅值/无功变量、不检验小角度与 $R/X$ 前提，误差由使用者自担，见实现层 DC OPF 章"DC 线性化假设"节）}\\
+支路潮流误差界（命题~\ref{prop:opf-th-dc-errbound}） &
+\implnone（平台不做线性化误差的事前/事后量化；DC 结果仅经 check\_dc\_opf\_feasibility 复查 DC 模型自身可行性）\\
+PTDF/转移分布因子（注记~\ref{rem:opf-th-dc-ptdf}） &
+\implpart{DC OPF 本体用 $B'\theta$ 角度形式不显式建 PTDF；市场模块 SCUC 线路潮流以转移因子口径组装（src/market/market\_simulation.cpp 的 ptdf 计算），超出本模块范围}\\
+DC OPF LP/QP 标准形与求解（定义~\ref{def:opf-th-dc-opflp}） &
+\implfull{src/optimal\_power\_flow/dc\_opf.cpp:solve\_dc\_opf}（PWL 凸组合逼近凸二次成本见 build\_dc\_opf\_lp，真二次 QP 见 build\_dc\_opf\_qp；AML 口径见 src/power\_models/dc\_opf\_builder.cpp:solve\_dc\_opf）\\
+LP 对偶与互补松弛（定理~\ref{thm:opf-th-dc-strong}） &
+\implfull{src/optimal\_power\_flow/dc\_opf.cpp:populate\_missing\_duals\_from\_supporting\_lp}（支撑 LP 经 engine::solve\_lp\_with\_basis 回收完整对偶）\\
+LMP = 平衡行对偶（定义~\ref{def:opf-th-dc-lmpdef}） &
+\implpart{\fld{DCOPFResult::lmp} 已实现（extract\_dc\_opf\_result 经 \fld{compute\_lmp} 门控）；阻塞工况支路对偶 branch\_mu 声明不可靠，不做能量/阻塞分量分解；损耗分量恒零（无损模型，非缺失）}\\
+Jabr SOCP 松弛与旋转锥刻画（定义~\ref{def:opf-th-dc-jabr}、命题~\ref{prop:opf-th-dc-rotsoc}） &
+\implpart{src/optimal\_power\_flow/three\_phase\_hybrid\_relaxation.cpp:violated\_cone\_cuts（旋转锥的支撑超平面 LP 外逼近，无原生锥求解器；含 DC 提升锥与换流器容量/电流锥）}\\
+Lavaei--Low SDP 松弛（注记~\ref{rem:opf-th-dc-sdp}） &
+\implpart{PSD 团最小特征向量秩一割 three\_phase\_hybrid\_relaxation.cpp:append\_ac\_psd\_cuts；完整 SDP 未实现}\\
+树网角度恢复与精确性理论（定理~\ref{thm:opf-th-dc-anglerec}） &
+\implnone（松弛层只输出目标下界证书 evaluate\_lp\_dual\_bound 与诊断，不做秩一性检验与电压恢复）\\
+DistFlow/Branch Flow 模型（定义~\ref{def:opf-th-dc-bfm}） &
+\implnone（$\ell$ 变量与精确 DistFlow 方程未实现；配网通道为 LinDistFlow 与相域全模型）\\
+LinDistFlow（定义~\ref{def:opf-th-dc-ldf}） &
+\implfull{src/power\_models/lindistflow\_builder.cpp:solve\_lindistflow}（式~\eqref{eq:opf-th-dc-ldf} 的 LP 组装，含电压平方变量与支路热限）\\
+LinDistFlow 误差界（命题~\ref{prop:opf-th-dc-ldferr}） &
+\implnone（不输出误差界或保守性声明；结果未标注式~\eqref{eq:opf-th-dc-ldferr} 的系统性正偏差）\\
+OLTC 离散档位 MILP 建模与大 $M$（定义~\ref{def:opf-th-dc-oltc}、引理~\ref{lem:opf-th-dc-bigm}） &
+\implnone（RPO 不以 MILP 建档位；无大 $M$/指示约束代码路径）\\
+离散无功优化的工程替代（RPO 坐标搜索） &
+\implfull{src/optimal\_power\_flow/reactive\_power\_opt.cpp:solve\_rpo}（外层四阶段离散搜索 + 内层 solve\_opf\_inplace 连续 OPF；gap\_tol 为坐标下降改进阈值，非最优性证书）\\
+分支定界与 MIP gap（定义~\ref{def:opf-th-dc-bb}/\ref{def:opf-th-dc-mipgap}） &
+\implpart{B\&B 求解委托 MIPSolvers 引擎（gap\_tol 容差、mip\_gap 报告）；模块内 MILP 实例为 src/power\_models/scuc\_builder.cpp:solve\_scuc 的 Binary 机组组合；OPF 本体无 B\&B}\\
+Carson 方程与 Kron 归约（定义~\ref{def:opf-th-dc-carson}、命题~\ref{prop:opf-th-dc-kron}） &
+\implnone（相域阻抗从既有数据装配，无线路几何参数计算路径）\\
+序分量变换（定义~\ref{def:opf-th-dc-fortescue}） &
+\implpart{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:sequence\_components（仅 $V_1,V_2$ 供 VUF 约束与诊断；不作为求解坐标，序网解耦未利用）}\\
+相域不平衡 OPF（注记~\ref{rem:opf-th-dc-unbalanced}） &
+\implfull{src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:solve\_three\_phase\_hybrid\_opf}（直角坐标相电压 NLP，实现层三相混合章；松弛层为 three\_phase\_hybrid\_relaxation.cpp:solve\_three\_phase\_hybrid\_opf\_relaxation）\\
+VSC 损耗 $a+bI+cI^2$ 耦合（定义~\ref{def:opf-th-dc-vsc}） &
+\implfull{src/optimal\_power\_flow/parity\_formulation.cpp:equality\_constraints}（三字段近似 loss\_mw/loss\_percent/$1-\eta$；AML 口径 src/power\_models/acdcopf\_builder.cpp:solve\_acdcopf 同形；loss\_percent 精确化 deferred 见注记~\ref{rem:opf-th-dc-parity}）\\
+DC 电导网络 $P_{dc}=V_{dc}\odot(G_{dc}V_{dc})$（定义~\ref{def:opf-th-dc-dcgrid}） &
+\implfull{src/optimal\_power\_flow/parity\_formulation.cpp:build\_problem}（显式直流电压块与 DC 平衡行；松弛层提升 $X_{ij}=u_iu_j$ 见 three\_phase\_hybrid\_relaxation.cpp）\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{参考文献}
+{\renewcommand{\section}[2]{}%
+\begin{thebibliography}{9}\small
+\bibitem{opfdc:stott-dc-revisited} B.~Stott, J.~Jardim, O.~Alsa\c{c}, DC
+power flow revisited, \emph{IEEE Transactions on Power Systems}, vol. 24,
+no. 3, pp. 1290--1300, 2009.
+\bibitem{opfdc:wood-wollenberg} A.~J. Wood, B.~F. Wollenberg, G.~B. Shebl\'e,
+\emph{Power Generation, Operation, and Control}, 3rd ed., Wiley, 2014.
+\bibitem{opfdc:schweppe-spot} F.~C. Schweppe, M.~C. Caramanis, R.~D. Tabors,
+R.~E. Bohn, \emph{Spot Pricing of Electricity}, Kluwer Academic Publishers,
+1988.
+\bibitem{opfdc:hogan} W.~W. Hogan, Contract networks for electric power
+transmission, \emph{Journal of Regulatory Economics}, vol. 4, no. 3,
+pp. 211--242, 1992.
+\bibitem{opfdc:christie} R.~D. Christie, B.~F. Wollenberg, I.~Wangensteen,
+Transmission management in the deregulated environment, \emph{Proceedings of
+the IEEE}, vol. 88, no. 2, pp. 170--195, 2000.
+\bibitem{opfdc:bertsimas} D.~Bertsimas, J.~N. Tsitsiklis, \emph{Introduction
+to Linear Optimization}, Athena Scientific, 1997.
+\bibitem{opfdc:jabr} R.~A. Jabr, Radial distribution load flow using conic
+programming, \emph{IEEE Transactions on Power Systems}, vol. 21, no. 3,
+pp. 1458--1459, 2006.
+\bibitem{opfdc:lavaei-low} J.~Lavaei, S.~H. Low, Zero duality gap in optimal
+power flow problem, \emph{IEEE Transactions on Power Systems}, vol. 27,
+no. 1, pp. 92--107, 2012.
+\bibitem{opfdc:low-tutorial} S.~H. Low, Convex relaxation of optimal power
+flow---Part I: formulations and equivalence, \emph{IEEE Transactions on
+Control of Network Systems}, vol. 1, no. 1, pp. 15--27, 2014.
+\bibitem{opfdc:baran-wu} M.~E. Baran, F.~F. Wu, Network reconfiguration in
+distribution systems for loss reduction and load balancing, \emph{IEEE
+Transactions on Power Delivery}, vol. 4, no. 2, pp. 1401--1407, 1989.
+\bibitem{opfdc:farivar-low} M.~Farivar, S.~H. Low, Branch flow model:
+relaxations and convexification---Part I, \emph{IEEE Transactions on Power
+Systems}, vol. 28, no. 3, pp. 2554--2564, 2013.
+\bibitem{opfdc:gan-low} L.~Gan, N.~Li, U.~Topcu, S.~H. Low, Exact convex
+relaxation of optimal power flow in radial networks, \emph{IEEE Transactions
+on Automatic Control}, vol. 60, no. 1, pp. 72--87, 2015.
+\bibitem{opfdc:carson} J.~R. Carson, Wave propagation in overhead wires with
+ground return, \emph{Bell System Technical Journal}, vol. 5, no. 4,
+pp. 539--554, 1926.
+\bibitem{opfdc:kersting} W.~H. Kersting, \emph{Distribution System Modeling
+and Analysis}, 3rd ed., CRC Press, 2012.
+\bibitem{opfdc:fortescue} C.~L. Fortescue, Method of symmetrical co-ordinates
+applied to the solution of polyphase networks, \emph{Transactions of the
+AIEE}, vol. 37, no. 2, pp. 1027--1140, 1918.
+\bibitem{opfdc:beerten} J.~Beerten, S.~Cole, R.~Belmans, Generalized
+steady-state VSC MTDC model for sequential AC/DC power flow algorithms,
+\emph{IEEE Transactions on Power Systems}, vol. 27, no. 2, pp. 821--829,
+2012.
+\bibitem{opfdc:nemhauser-wolsey} G.~L. Nemhauser, L.~A. Wolsey,
+\emph{Integer and Combinatorial Optimization}, Wiley, 1988.
+\bibitem{opfdc:wolsey} L.~A. Wolsey, \emph{Integer Programming}, Wiley, 1998.
+\end{thebibliography}}

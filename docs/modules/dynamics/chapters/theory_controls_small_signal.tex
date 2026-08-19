@@ -1,0 +1,990 @@
+% theory_controls_small_signal.tex —— 机电暂态（动力学） 通用理论：控制系统、小信号与频率响应
+% 本文件为理论层章节，遵循 docs/modules/THEORY_WRITING_GUIDE.md。
+
+\section{控制系统、小信号稳定与频率响应理论}\label{sec:dy-th-ctl-main}
+
+\begin{theorynote}
+本章为通用数学理论，按电力系统稳定分析与逆变器控制的标准文献体系撰写，覆盖：
+励磁系统 IEEE 标准模型族（IEEE Std 421.5 谱系）、调速器/原动机标准模型
+（TGOV1、再热式、水轮机水锤、燃气轮机）、电力系统稳定器（PSS）标准传递函数与
+相位补偿理论；构网型（GFM）与跟网型（GFL）逆变器控制理论（下垂控制的小信号
+闭环、虚拟同步机及其与下垂的等价性、PLL 动力学与弱网稳定性问题）；小信号稳定
+分析的一般理论（DAE 线性化、代数变量的 Schur 补消元及其合法性、特征值/振型/
+阻尼比、参与因子的定义与性质）；频率响应的解析关系（惯量中心、初始 ROCOF、
+一次/二次调频的稳态分配）；感应电动机机电模型与负荷动态模型（ZIP/指数/恒功率
+负增量特性）；以及多质量块轴系扭振模型。同步机本体 DAE（磁链、摆方程、
+\texttt{GENROU} 等模型族）见本章姊妹章"同步机与网络 DAE 理论"。与平台实现
+（\srcpath{src/dynamics/}）的对应关系见本章末"与实现的对应"表，超出实现的内容
+以"未实现扩展说明"框就地标记。
+\end{theorynote}
+
+\subsection{记号与约定}\label{sec:dy-th-ctl-notation}
+\begin{itemize}
+  \item $\omega_b=2\pi f_0$：额定角频率（rad/s）；$\omega$、$\delta$：转速标幺值与
+        功角（rad）；$H$：惯量常数（s，机组基准），摆动方程写为
+        $2H\,\dot\omega=p_m-p_e$；
+  \item $E_{fd}$：励磁电压（pu）；$V_t$、$V_{ref}$：机端电压及其参考；$K_A,T_A$：
+        调节器增益与时间常数；$S_E(E_{fd})$：励磁饱和函数；
+  \item $R$：调速器调差系数（速度下垂，pu 功率/pu 频率）；$T_w$：水轮机水锤
+        时间常数；$K$（再热模型）：高压缸功率份额；
+  \item $m_p,m_q$：GFM 有功-频率、无功-电压下垂系数；$P_f,Q_f$：滤波后量测功率，
+        $T_f$：功率滤波时间常数；$X_c$：GFM 内电势到电网的耦合电抗；
+  \item $k_{pPLL},k_{iPLL}$：PLL 比例/积分增益；$\theta_{PLL}$：PLL 估计相角；
+  \item $x\in\mathbb R^{n_x}$：微分状态；$y\in\mathbb R^{n_a}$：代数（网络）变量；
+        $f,g$：DAE 右端；$A=f_x-f_yg_y^{-1}g_x$：降阶状态矩阵；
+  \item $\lambda_i=\sigma_i+\mathrm j\omega_i$：$A$ 的特征值（模态）；
+        $\zeta_i=-\sigma_i/|\lambda_i|$：阻尼比；$\phi_i,\psi_i$：右/左特征向量，
+        归一化 $\psi_i^{\mathsf T}\phi_i=1$；$p_{ki}=\phi_{ki}\psi_{ik}$：参与因子；
+  \item $s$（滑差）：感应电动机滑差；$X_0,X',T_0'$：感应机定子开路电抗、暂态电抗、
+        转子开路时间常数；
+  \item $H_i,K_{i,i+1},D_{i,i+1}$：轴系第 $i$ 质量块惯量、段间刚度与段间阻尼；
+  \item 全部电气量除特别声明外取标幺值；$s$ 作为拉普拉斯变量时以 $\mathrm{s}$ 或
+        上下文区分于滑差。
+\end{itemize}
+
+\subsection{励磁系统标准模型族}\label{sec:dy-th-ctl-exc}
+
+\subsubsection{通用结构与 IEEE 谱系}
+
+励磁系统的任务是维持机端电压并向系统提供阻尼支撑。IEEE Std 421.5~\cite{ctl:ieee4215}
+按励磁功率源将标准模型分为三族：DC 型（直流励磁机，如 IEEET1）、AC 型（交流励磁机
+加整流，如 EXAC1、ESAC1A）、ST 型（静止励磁，电势源或复合源整流，如 EXST1、
+ESST1A、ST6B）。所有族共享同一信号链：
+\begin{equation}
+V_{ref}-V_t\;\longrightarrow\;\text{量测滤波}\;\longrightarrow\;\text{调节器放大}
+\;\longrightarrow\;\text{励磁功率级}\;\longrightarrow\;E_{fd},
+\label{sec:dy-th-ctl-eq-exchain}
+\end{equation}
+并普遍携带三类辅助环节：励磁饱和 $S_E$、阻尼稳定反馈（速率反馈 $K_F,T_F$）与
+幅值限制 $V_{A,\min/\max}$、$E_{fd,\min/\max}$。
+
+\begin{definition}[简化励磁系统 SEXS]\label{sec:dy-th-ctl-def-sexs}
+SEXS 是配电/简化研究中最常用的励磁模型：单增益单滞后加可选超前-滞后校正，
+\begin{equation}
+T_A\,\dot v_A=K_A\Bigl(\frac{1+sT_a}{1+sT_b}\Bigr)_{\text{静态增益 1}}
+(V_{ref}-V_t)-v_A,\qquad
+E_{fd}=\operatorname{sat}_{[E_{fd,\min},E_{fd,\max}]}(v_A),
+\label{sec:dy-th-ctl-eq-sexs}
+\end{equation}
+其中超前-滞后比 $T_a/T_b$ 用于在中频段整形相位。SEXS 无励磁机时间常数，
+隐含励磁功率级瞬时响应的假设。
+\end{definition}
+
+\begin{definition}[IEEET1（DC 型）]\label{sec:dy-th-ctl-def-ieeet1}
+IEEET1 计入励磁机惯性与饱和，状态方程为
+\begin{align}
+T_A\dot v_R &= K_A\,(V_{ref}-V_t-v_f)-v_R,\\
+T_E\dot E_{fd} &= v_R-K_E E_{fd}-S_E(E_{fd})\,E_{fd},\\
+T_F\dot v_f &= \frac{K_F}{T_E}\bigl(v_R-K_E E_{fd}-S_E(E_{fd})E_{fd}\bigr)-v_f
+              =K_F\,\dot E_{fd}-v_f,
+\label{sec:dy-th-ctl-eq-ieeet1}
+\end{align}
+第三式即速率（微分）反馈 $v_f=\dfrac{sK_F}{1+sT_F}E_{fd}$ 的状态实现：它只响应
+$E_{fd}$ 的变化率，稳态 $v_f=0$，不改变静差而抑制励磁回路的振荡倾向。
+饱和函数取指数形式
+\begin{equation}
+S_E(E_{fd})=A_E\,e^{B_E E_{fd}},
+\label{sec:dy-th-ctl-eq-sat}
+\end{equation}
+$A_E,B_E$ 由饱和曲线上两点（通常 $0.75E_{fd,\max}$ 与 $E_{fd,\max}$）拟合。
+\end{definition}
+
+\begin{remark}[ST 型静止励磁]
+静止励磁（EXST1、ESST1A、ST6B 等）直接从机端（或机端加电流复合）整流取能，
+励磁功率级延迟可忽略，调节器常为 PI 结构
+$v_A=K_p(V_{ref}-V_t)+K_I\xi$，$\dot\xi=V_{ref}-V_t$；其时间响应快、正阻尼潜力大，
+但励磁上限随机端电压跌落（电压源特性），这是它与 DC/AC 型在故障期间行为的本质
+差别。复合源模型以 $K_C$ 计入定子电流对内电势源的贡献。
+\end{remark}
+
+\begin{remark}[励磁与负阻尼的机理]
+高增益快速励磁经励磁绕组引入相位滞后：在经典单机-无穷大模型的电气转矩通路
+（Heffron--Phillips 系数 $K_1\sim K_6$）中，$K_5$ 在重负荷长输电工况下变号，
+使励磁通路贡献负阻尼转矩；这正是 PSS 需要在 $0.2\sim2$~Hz 频段提供超前相位补偿
+的物理动机（见 PSS 小节）。该结论为多机系统的通用经验，严格的逐机推导依赖
+工作点，本章从略。
+\end{remark}
+
+\begin{gapnote}
+当前实现接入 12 种励磁模型的主干动态（\fld{ExciterModel}：SEXS、IEEET1、AVRSimple、
+AVRTypeI/II、ESAC1A、EXAC1、EXST1、SCRX、ESST1A、ST6B、ST8C，饱和为
+\fld{ae}/\fld{be} 指数形式），但 IEEE Std 421.5 规定的过励/欠励限制器
+（OEL/UEL）、强励门控与 P-Q 圆限制等辅助环节未建模；参数 \fld{kf}/\fld{tf\_s}
+仅在 AVRTypeI 路径生效。
+\end{gapnote}
+
+\subsection{调速器与原动机标准模型}\label{sec:dy-th-ctl-gov}
+
+\subsubsection{通用结构与 TGOV1}
+
+调速器-原动机链为：速度偏差经调差 $1/R$ 放大为阀位指令，伺服滞后给出阀位，
+原动机将阀位（流量）转换为机械功率。
+
+\begin{definition}[TGOV1]\label{sec:dy-th-ctl-def-tgov1}
+TGOV1 是汽轮机组的标准简化模型。记阀位 $x_{g1}$、汽轮机中间状态 $x_{g2}$，
+\begin{align}
+T_1\dot x_{g1} &= \frac{p_{ref}-(\omega-1)}{R}-x_{g1},
+\qquad x_{g1}\in[p_{\min},p_{\max}],\\
+T_3\dot x_{g2} &= \Bigl(1-\frac{T_2}{T_3}\Bigr)x_{g1}-x_{g2},\\
+\tau_m &= \frac{x_{g2}+\dfrac{T_2}{T_3}x_{g1}-D_T(\omega-1)}{\omega},
+\label{sec:dy-th-ctl-eq-tgov1}
+\end{align}
+合并消去 $x_{g2}$ 得阀位到机械功率的传递函数
+\begin{equation}
+\frac{P_m(s)}{X_{g1}(s)}=\frac{1+sT_2}{1+sT_3},
+\qquad
+\frac{P_m(s)}{\Delta\Omega(s)}=-\frac{1}{R}\,
+\frac{1}{1+sT_1}\cdot\frac{1+sT_2}{1+sT_3},
+\label{sec:dy-th-ctl-eq-tgov1tf}
+\end{equation}
+$T_1$ 为伺服/调节时间常数，$T_3$ 为汽室容积时间常数，$T_2$ 为高压缸直通份额
+形成的超前项（$T_2/T_3$ 即再热份额的近似），$D_T$ 为汽轮机自阻尼。
+\end{definition}
+
+\begin{remark}[实现口径]
+式~\eqref{sec:dy-th-ctl-eq-tgov1} 与代码
+\srcpath{src/dynamics/devices/BasicDynamicDevices.cpp:Governor::computeDerivatives}
+的 TGOV1 分支逐式一致（含阀位抗积分饱和钳制）；再热模型 IEEEG1 在该路径上以
+"更长的汽轮机时间常数"等效双容积结构，并非标准 IEEEG1 的
+$K+(1-K)/(1+sT_{RH})$ 双通道传递函数。
+\end{remark}
+
+\begin{definition}[再热式汽轮机（IEEEG1 标准形）]
+再热机组把总功率分为高压缸直通份额 $K$ 与经再热器容积滞后 $T_{RH}$ 的
+低压份额 $1-K$：
+\begin{equation}
+P_m(s)=\Bigl(K+\frac{1-K}{1+sT_{RH}}\Bigr)X_v(s),
+\qquad T_{RH}\approx4\sim11~\mathrm{s},
+\label{sec:dy-th-ctl-eq-ieeeg1}
+\end{equation}
+$K$ 典型值 $0.2\sim0.3$。再热滞后使机械功率在扰动后 $1\sim2$ s 内只恢复 $K$
+份额，是中期频率最低点（nadir）深度的决定因素之一。
+\end{definition}
+
+\subsubsection{水轮机水锤效应}
+
+\begin{definition}[水锤传递函数]
+刚性水柱假设下，导叶开度 $G$ 到水压头（从而机械功率）的传递函数为
+\begin{equation}
+\frac{P_m(s)}{G(s)}=\frac{1-sT_w}{1+\tfrac12 sT_w},
+\qquad T_w=\frac{L\,v_0}{g\,H_0},
+\label{sec:dy-th-ctl-eq-water}
+\end{equation}
+$T_w$ 为水锤（水流惯性）时间常数，典型 $0.5\sim4$~s。
+\end{definition}
+
+\begin{proposition}[水锤环节的非最小相位性]\label{sec:dy-th-ctl-prop-rhp}
+式~\eqref{sec:dy-th-ctl-eq-water} 在 $s=1/T_w$ 处有右半平面零点；因此导叶开大后
+机械功率先降后升，其稳态增益为 $1$、初始响应方向相反。
+\end{proposition}
+
+\begin{proof}
+分子 $1-sT_w$ 的零点为 $s=1/T_w>0$，即右半平面零点。阶跃响应初值由初值定理
+$\lim_{s\to\infty}s\cdot\frac1s G(s)=\lim_{s\to\infty}G(s)=-2<0$，终值由终值定理
+$\lim_{s\to0}G(s)=1>0$，故响应先反向（压力因流量未跟上而下降）后归正。
+\end{proof}
+
+\begin{remark}[稳定含义]
+右半平面零点限制水轮机调速回路可用增益：过大的积分增益在水锤频段引发振荡。
+标准对策是 HYGOV/WPIDHY 类模型采用瞬态调差（大 $R_t$）加补偿网络，或
+PID 结构中限制微分带宽。
+\end{remark}
+
+\begin{remark}[燃气轮机 GAST 与柴油机组]
+GAST 以燃油阀滞后（\fld{fuel\_t\_s}）串联排气温度/负荷限制滞后
+（\fld{temperature\_t\_s}）描述燃气轮机，温度限制闭环使稳态出力受环境温度
+约束；DEGOV/PIDGOV/WPIDHY 分别对应柴油执行机构（$T_a,T_b$ 超前-滞后）、
+PID 调速与水轮 PID 变体。TGTypeI/II 为国内调度系统常用的分段汽轮机模型。
+\end{remark}
+
+\subsubsection{一次调频的静态分配}
+
+\begin{proposition}[多机一次调频稳态分配]\label{sec:dy-th-ctl-prop-primary}
+设系统含 $m$ 台参与一次调频的机组（调差 $R_i$，pu 于各自基准），负荷频率特性
+系数 $D$（pu 负荷/pu 频率），不计二次调频。负荷突增 $\Delta P_L$（pu，系统基准）
+后的稳态频率偏差为
+\begin{equation}
+\Delta\omega_{ss}=-\frac{\Delta P_L}{D+\sum_{i=1}^{m}S_i/R_i},
+\label{sec:dy-th-ctl-eq-pri}
+\end{equation}
+其中 $S_i$ 为机组基准容量与系统基准之比；机组 $i$ 的稳态出力增量为
+$\Delta P_{mi}=-(S_i/R_i)\Delta\omega_{ss}$，即按 $1/R_i$（权重含容量）分配。
+\end{proposition}
+
+\begin{proof}
+新稳态下各机组阀位停止运动，由调差律 $\Delta P_{mi}=-(S_i/R_i)\Delta\omega_{ss}$；
+负荷侧净增量为 $\Delta P_L+D\,\Delta\omega_{ss}$（频率下降释放负荷）。功率平衡
+$\sum_i\Delta P_{mi}=\Delta P_L+D\Delta\omega_{ss}$ 代入调差律即得
+式~\eqref{sec:dy-th-ctl-eq-pri}；单机组分配式由调差律直接给出。
+\end{proof}
+
+\subsection{电力系统稳定器（PSS）标准模型}\label{sec:dy-th-ctl-pss}
+
+\begin{definition}[PSS1A 传递函数]\label{sec:dy-th-ctl-def-pss1a}
+PSS1A 以转速（或频率）偏差为输入，经增益、隔直（washout）与两级超前-滞后：
+\begin{equation}
+V_s(s)=K_S\cdot\frac{sT_W}{1+sT_W}\cdot
+\frac{1+sT_1}{1+sT_2}\cdot\frac{1+sT_3}{1+sT_4}\cdot\Delta\Omega(s),
+\qquad V_s\in[V_{s,\min},V_{s,\max}],
+\label{sec:dy-th-ctl-eq-pss1a}
+\end{equation}
+输出叠加于励磁参考（$V_{ref}\leftarrow V_{ref}+V_s$）。典型值
+$T_W=5\sim10$~s，$T_1,T_3=0.1\sim0.3$~s，$T_2,T_4=0.02\sim0.05$~s。
+\end{definition}
+
+\begin{proposition}[隔直环节的必要性]\label{sec:dy-th-ctl-prop-washout}
+若式~\eqref{sec:dy-th-ctl-eq-pss1a} 中去掉隔直因子（令 $T_W$ 支路增益恒为 1），
+则任何稳态频率偏差 $\Delta\omega_{ss}\neq0$ 都会产生持续非零的 $V_s$，
+使机端电压被永久抬高/压低；保留隔直因子后 $V_s$ 对直流输入的稳态增益为零。
+\end{proposition}
+
+\begin{proof}
+传递函数终值定理由 $\lim_{s\to0}\frac{sT_W}{1+sT_W}=0$ 给出直流增益为零；
+反之去掉该因子后直流增益为 $K_S\neq0$，阶跃输入产生稳态输出 $K_S\Delta\omega_{ss}$。
+\end{proof}
+
+\begin{proposition}[超前-滞后的相位补偿]\label{sec:dy-th-ctl-prop-leadlag}
+单级超前-滞后 $G(s)=\dfrac{1+sT_1}{1+sT_2}$（$T_1>T_2$）在
+$\omega_m=1/\sqrt{T_1T_2}$ 处取得最大相位超前
+\begin{equation}
+\varphi_{\max}=\arcsin\frac{T_1-T_2}{T_1+T_2}.
+\label{sec:dy-th-ctl-eq-leadlag}
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+$G(\mathrm j\omega)$ 的相位为
+$\varphi(\omega)=\arctan(\omega T_1)-\arctan(\omega T_2)$。对 $\omega$ 求导：
+$\varphi'(\omega)=\dfrac{T_1}{1+\omega^2T_1^2}-\dfrac{T_2}{1+\omega^2T_2^2}$，
+令其为零得 $\omega^2=1/(T_1T_2)$，即 $\omega_m$。代入并用
+$\tan\varphi_{\max}=\dfrac{\omega_m(T_1-T_2)}{1+\omega_m^2T_1T_2}
+=\dfrac{T_1-T_2}{2\sqrt{T_1T_2}}$，
+再由恒等式 $\sin\varphi=\tan\varphi/\sqrt{1+\tan^2\varphi}$ 化简得
+式~\eqref{sec:dy-th-ctl-eq-leadlag}。
+\end{proof}
+
+\begin{remark}[整定原则与双输入 PSS]
+PSS 整定的原则是让 $V_s$ 通路在区间振荡频段（约 $0.2\sim2$~Hz）的总相位
+（励磁通路滞后 $+$ PSS 超前）接近零，使 $\Delta\omega$ 输入映射为同相阻尼转矩；
+$\omega_m$ 应对准本机主导振荡频率，级数不足时相位曲线过窄、过补偿时引入
+无功振荡。PSS2A/PSS2B/PSS2C 为双输入型：以 $\Delta\omega$ 与 $\Delta P_e$
+经积分综合出"加速功率"信号，抑制原动机功率扰动（阀侧动作）被误判为系统
+振荡的反调现象；IEEEST、STAB1 为单输入变体。
+\end{remark}
+
+\subsection{跟网型（GFL）逆变器控制理论}\label{sec:dy-th-ctl-gfl}
+
+\subsubsection{同步坐标系与 SRF-PLL}
+
+GFL 逆变器自身不产生频率，而是经锁相环（PLL）跟随电网相角，在 PLL 建立的
+$dq$ 坐标系中以电流源方式注入给定功率。记电网正序电压幅值 $V$、真实相角
+$\theta_g$，PLL 估计相角 $\theta_{PLL}$；电压在 PLL 坐标系的 $q$ 分量为
+\begin{equation}
+v_q^{PLL}=V\sin(\theta_g-\theta_{PLL}).
+\label{sec:dy-th-ctl-eq-vq}
+\end{equation}
+SRF-PLL（同步旋转坐标系锁相环）以 PI 调节器驱动 $v_q^{PLL}\to0$：
+\begin{equation}
+\dot\xi_{PLL}=v_q^{PLL},\qquad
+\omega_{PLL}=\omega_0+k_{pPLL}\,v_q^{PLL}+k_{iPLL}\,\xi_{PLL},\qquad
+\dot\theta_{PLL}=\omega_{PLL}.
+\label{sec:dy-th-ctl-eq-pll}
+\end{equation}
+
+\begin{proposition}[PLL 小信号动力学]\label{sec:dy-th-ctl-prop-pll}
+在锁定工作点附近令 $e=\theta_g-\theta_{PLL}$，对式~\eqref{sec:dy-th-ctl-eq-vq}
+线性化（$v_q^{PLL}\approx Ve$），则 $e$ 满足
+\begin{equation}
+\ddot e+V k_{pPLL}\,\dot e+V k_{iPLL}\,e=0,
+\qquad
+\omega_n=\sqrt{V k_{iPLL}},\quad
+\zeta_{PLL}=\frac{k_{pPLL}\sqrt{V}}{2\sqrt{k_{iPLL}}}.
+\label{sec:dy-th-ctl-eq-pll2}
+\end{equation}
+环路渐近稳定当且仅当 $V k_{pPLL}>0$ 且 $V k_{iPLL}>0$；锁定相角对电网相角阶跃
+无静差（积分作用），对频率阶跃的稳态相角误差亦为零。
+\end{proposition}
+
+\begin{proof}
+对 $\theta_g$ 恒定的情形，由式~\eqref{sec:dy-th-ctl-eq-pll}，
+$\dot e=-\dot\theta_{PLL}=-k_{pPLL}Ve-k_{iPLL}\xi_{PLL}$（略去常数 $\omega_0$），
+再求导并以 $\dot\xi_{PLL}=Ve$ 代入得
+$\ddot e=-k_{pPLL}V\dot e-k_{iPLL}Ve$，移项即式~\eqref{sec:dy-th-ctl-eq-pll2}。
+二阶多项式 $s^2+Vk_{pPLL}s+Vk_{iPLL}$ 的 Routh 判据给出两系数同号（$V>0$ 时
+即 $k_{pPLL},k_{iPLL}>0$）为渐近稳定充要条件。对 $\theta_g$ 阶跃，终值定理
+$e_{ss}=\lim_{s\to0}sE(s)=0$（闭环含积分环节）；频率阶跃等价于斜坡相角输入，
+II 型环路（含两个积分器：PLL 积分器与 $\theta_{PLL}$ 积分）对斜坡相角同样
+无静差。
+\end{proof}
+
+\begin{remark}[PLL 带宽与电流环的尺度分离]
+工程整定要求 PLL 带宽远低于电流内环带宽（通常低一个数量级以上），使内环在
+PLL 时标上可视为瞬时跟随；否则两环耦合会产生额外振荡模态。降阶 PLL
+（\fld{ReducedOrderPLL}）在相量域仿真中略去部分快动态；Kaura 型 PLL 带前置
+低通滤波（\fld{pll\_lpf\_t\_s}）以抑制电压畸变引起的相角抖动。
+\end{remark}
+
+\subsubsection{电流环、功率外环与诺顿接口}
+
+在 PLL 坐标系内，GFL 以解耦 PI 电流环跟踪参考
+$i_d^{ref},i_q^{ref}$（由功率外环或功率-电流直接换算产生）：
+\begin{equation}
+v_d^{cmd}=v_d-\omega_b L_f i_q+k_{pc}(i_d^{ref}-i_d)+k_{ic}\xi_d,\qquad
+v_q^{cmd}=v_q+\omega_b L_f i_d+k_{pc}(i_q^{ref}-i_q)+k_{ic}\xi_q,
+\label{sec:dy-th-ctl-eq-curr}
+\end{equation}
+交叉项 $\mp\omega_b L_f i$ 实现 $d$/$q$ 轴解耦，$k_{ffv}$ 电压前馈加速响应。
+机电暂态（相量域）仿真通常把电流环等效为一阶滞后
+$T_r\,\dot i=i^{ref}-i$，即 REGC/REEC 型紧凑模型；全保真链（功率外环 PI、
+内环 PI、LCL 滤波微分方程）在需要校核控制交互时启用。
+
+对网络的接口是诺顿等效：逆变器呈现为受控电流源 $I_{inj}$ 并联一个（小的）
+稳定化导纳 $Y_{sh}$。电流限幅在电压跌落时按 $I_{max}$ 缩放注入电流（幅值限制
+或无功优先策略），这使故障期间的 GFL 行为本质上是\emph{限流的电流源}——
+与同步机的电压源特性相反，是低惯量系统保护配合困难的根源之一。
+
+\begin{remark}[弱网稳定性与序贯问题]
+GFL 的稳定性依赖"电网是稳定电压源"这一前提。短路比（SCR）低时，PLL 坐标系
+与电网真实相角之间的耦合增强：线路阻抗上的功率-相角敏感度下降，PLL 为维持
+功率给定需更大的相角修正，等效在 PLL 环路中引入随 SCR 降低而增大的正反馈，
+可把小信号模态推入右半平面~\cite{ctl:zhou-pll}。工程判据包括：限制 PLL 带宽、
+投入稳定化导纳、以及基于序阻抗的广义 Nyquist 判据（阻抗比
+$Z_g/Z_{inv}$ 的 Nyquist 曲线不包围临界点）。大扰动下则存在"失锁"
+（loss of synchronism of the PLL）这一 GFL 特有的暂态失稳形态。
+\end{remark}
+
+\begin{gapnote}
+广义 Nyquist 阻抗判据、SCR 扫描与 PLL-弱网耦合的定量稳定域计算在当前代码中
+未实现；平台提供的是时域/小信号层面的间接观测（对含 GFL 的系统做
+\srcpath{src/dynamics/SmallSignal.cpp:small\_signal\_analysis} 可暴露失稳模态）。
+\end{gapnote}
+
+\subsection{构网型（GFM）逆变器控制理论}\label{sec:dy-th-ctl-gfm}
+
+\subsubsection{下垂控制}
+
+GFM 逆变器自身建立频率与电压：内电势 $E\angle\delta$ 经耦合阻抗
+$Z_c\approx\mathrm jX_c$ 向电网供电，控制器模仿同步机外特性。
+
+\begin{definition}[功率滤波下垂控制]\label{sec:dy-th-ctl-def-droop}
+\begin{align}
+T_f\dot P_f &= P-P_f, & \dot\delta &= \omega_b\,m_p\,(P_{ref}-P_f),\\
+T_{fq}\dot Q_f &= Q-Q_f, & E^{droop} &= V_{ref}-m_q\,(Q_f-Q_{ref}),
+\label{sec:dy-th-ctl-eq-droop}
+\end{align}
+电压幅值经一阶电压环 $T_v\dot E=E^{cmd}-E$ 跟随
+$E^{cmd}=E^{droop}+k_{pv}(E^{droop}-V_t)+k_{iv}\xi_v$，并可叠加过载校正。
+$P$-$f$ 下垂使多台 GFM 按下垂系数反比分担功率变化，$Q$-$V$ 下垂抑制环流。
+\end{definition}
+
+\begin{theorem}[下垂 GFM 的小信号稳定域与阻尼]\label{sec:dy-th-ctl-thm-droop}
+设 GFM 经纯电抗 $X_c$ 接无穷大母线（电压 $V\angle0$），
+$P=\dfrac{EV}{X_c}\sin\delta$。在平衡点 $\delta^*$ 处记同步功率系数
+$K_s=\dfrac{EV}{X_c}\cos\delta^*$，令 $x=\delta-\delta^*$，
+$u=P_f-P_{ref}-K_s\delta^*$。则线性化闭环为
+\begin{equation}
+\ddot x+\frac{1}{T_f}\dot x+\frac{\omega_b m_p K_s}{T_f}\,x=0,
+\qquad
+\omega_n=\sqrt{\frac{\omega_b m_p K_s}{T_f}},\quad
+\zeta=\frac{1}{2\sqrt{\omega_b m_p K_s T_f}},
+\label{sec:dy-th-ctl-eq-droop2}
+\end{equation}
+渐近稳定当且仅当 $m_pK_s>0$ 且 $T_f>0$（假定 $\omega_b>0$）。
+\end{theorem}
+
+\begin{proof}
+由定义~\ref{sec:dy-th-ctl-def-droop} 的偏差化：$\dot x=-\omega_b m_p\,u$，
+$\dot u=(K_s x-u)/T_f$（对 $P$ 线性化 $P-P_{ref}\approx K_s x$ 并代入滤波方程）。
+第一式对时间求导，$\ddot x=-\omega_b m_p\dot u=-\dfrac{\omega_b m_p}{T_f}
+\bigl(K_s x-u\bigr)$；以 $u=-\dot x/(\omega_b m_p)$ 代入得
+$\ddot x=-\dfrac{\omega_b m_p K_s}{T_f}x-\dfrac{1}{T_f}\dot x$，移项即
+式~\eqref{sec:dy-th-ctl-eq-droop2} 左端。二阶特征多项式
+$s^2+\frac{1}{T_f}s+\frac{\omega_bm_pK_s}{T_f}$ 的 Routh 判据要求各系数同号，
+即 $T_f>0$ 与 $m_pK_s>0$；$\omega_n,\zeta$ 由标准形比对系数即得。
+\end{proof}
+
+\begin{remark}[物理解释]
+功率滤波时间常数 $T_f$ 是下垂 GFM 的"虚拟惯量"来源：$T_f$ 越大响应越慢、
+阻尼越弱（$\zeta\propto T_f^{-1/2}$）；$m_p$ 增大提高刚度（$\omega_n$ 增大）
+但降低阻尼比。稳定条件 $K_s>0$ 即 $|\delta^*|<90^{\circ}$，与同步机静态稳定极限
+一致——下垂控制把逆变器的同步机制还原为机电摆动力学。
+\end{remark}
+
+\subsubsection{虚拟同步机（VSM）及其与下垂的等价性}
+
+\begin{definition}[VSM 摆动方程]\label{sec:dy-th-ctl-def-vsm}
+VSM 直接数值实现摆动方程，以虚拟惯量时间常数 $T_a$ 与阻尼 $K_d$、频率下垂
+$D_p$：
+\begin{equation}
+\dot\delta=\omega_b(\omega-1),\qquad
+T_a\dot\omega=P_{ref}-P-K_d(\omega-\omega_{ref})-D_p(\omega-1).
+\label{sec:dy-th-ctl-eq-vsm}
+\end{equation}
+\end{definition}
+
+\begin{proposition}[下垂与 VSM 的等价性~\cite{ctl:darco}]\label{sec:dy-th-ctl-prop-equiv}
+带功率滤波的下垂律~\eqref{sec:dy-th-ctl-eq-droop} 与 VSM
+律~\eqref{sec:dy-th-ctl-eq-vsm}（取 $K_d=0$）在小信号意义下等价，参数映射为
+\begin{equation}
+T_a=\frac{T_f}{m_p},\qquad D_p=\frac{1}{m_p}
+\qquad(\text{标幺、角频率以 }\omega_b\text{ 折算}).
+\label{sec:dy-th-ctl-eq-equiv}
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+下垂律消去 $P_f$：对 $\dot\delta=\omega_b m_p(P_{ref}-P_f)$ 求导，
+$\ddot\delta=-\omega_b m_p\dot P_f=-\omega_b m_p(P-P_f)/T_f$；由下垂律
+$P_f-P_{ref}=-\dot\delta/(\omega_b m_p)$，即 $P_f=P_{ref}-\dot\delta/(\omega_b m_p)$，
+代入得
+\begin{equation}
+\frac{T_f}{m_p}\ddot\delta+\frac{1}{m_p}\dot\delta=\omega_b\,(P_{ref}-P).
+\end{equation}
+以 $\dot\delta=\omega_b(\omega-1)$ 代换，两边除以 $\omega_b$，恰为
+式~\eqref{sec:dy-th-ctl-eq-vsm}（$K_d=0$，$T_a=T_f/m_p$，$D_p=1/m_p$）。
+\end{proof}
+
+\begin{remark}
+等价性只在小信号、忽略电压环与限幅时成立；VSM 允许把 $T_a$、$K_d$ 解耦整定
+（惯量与阻尼独立），且易于附加虚拟阻抗与故障穿越逻辑，工程上更灵活。
+平台实现中 \fld{GridFormingControlKind::VirtualInertia} 即
+式~\eqref{sec:dy-th-ctl-eq-vsm} 形式（\fld{vsm\_ta\_s}、\fld{vsm\_damping\_kd}、
+\fld{vsm\_frequency\_droop\_kw}），\fld{Droop} 即
+式~\eqref{sec:dy-th-ctl-eq-droop} 形式。
+\end{remark}
+
+\subsubsection{虚拟振子控制（VOC）与同步稳定性讨论}
+
+VOC 用非线性振子（Van der Pol 型）替代摆方程，内电势相位与幅值满足
+\begin{equation}
+\dot\delta=\omega_b\Bigl[1+\frac{k_1}{E^2}\bigl(\cos\gamma\,\Delta P+
+\sin\gamma\,\Delta Q\bigr)\Bigr],\quad
+\dot E=\omega_b\Bigl[\frac{k_1}{E}\bigl(-\sin\gamma\,\Delta P+\cos\gamma\,\Delta Q\bigr)
++k_2(V_{ref}^2-E^2)E\Bigr],
+\label{sec:dy-th-ctl-eq-voc}
+\end{equation}
+$\gamma=\psi-\pi/2$ 为旋转角，$\Delta P=P_{ref}-P$ 等。VOC 在大扰动下具有
+极限环同步特性，全局收敛性质优于线性下垂~\cite{ctl:johnson-voc}；代价是
+稳态频率随负荷持续偏移（无二次校正时）且参数整定缺乏线性化工具以外的
+系统设计方法。
+
+\begin{remark}[GFM/GFL 的序贯与同步稳定性]
+\emph{同步稳定性}（大扰动保持同步）上，GFM 面临与同步机同型的功角失稳
+（故障期间 $P$-$\delta$ 曲线塌陷、限流后等效内电势下降），其判据可用等面积法
+类比分析；GFL 的大扰动失稳则是 PLL 失锁。\emph{序贯稳定性}（分层控制环
+依次收敛）上，GFL 依赖"电网先有稳定电压"（故需 GFM 或同步机先建立电网），
+GFM 可直接黑启动建网。混合系统中 GFM 份额决定系统的频率锚定能力，这也是
+平台把"孤岛存在电源但无频率锚定设备"作为显式错误（无锚孤岛使网络代数块
+奇异）报告的理论背景。
+\end{remark}
+
+\subsection{小信号稳定分析理论}\label{sec:dy-th-ctl-ss}
+
+\subsubsection{DAE 线性化与代数变量消元}
+
+机电暂态系统是半显式 DAE：
+\begin{equation}
+\dot x=f(x,y),\qquad 0=g(x,y),
+\label{sec:dy-th-ctl-eq-dae}
+\end{equation}
+$x$ 为全部设备微分状态（摆方程、控制器、逆变器、电机等），$y$ 为网络代数变量
+（节点电压实/虚部）。平衡点 $(x^*,y^*)$ 满足 $f=0,g=0$。
+
+\begin{theorem}[Schur 补降阶的合法性]\label{sec:dy-th-ctl-thm-schur}
+设 $g_y=\partial g/\partial y$ 在 $(x^*,y^*)$ 非奇异。则：
+（i）存在 $x^*$ 邻域上的光滑映射 $y=h(x)$ 使 $g(x,h(x))\equiv0$，且
+$h_x=-g_y^{-1}g_x$；
+（ii）原 DAE 在该邻域的局部动力学等价于降阶 ODE $\dot x=f(x,h(x))$，其线性化
+状态矩阵为 Schur 补
+\begin{equation}
+A=f_x-f_y\,g_y^{-1}g_x;
+\label{sec:dy-th-ctl-eq-schur}
+\end{equation}
+（iii）原 DAE 平衡点局部渐近稳定，当且仅当 $\sigma(A)\subset\mathbb C^-$
+（在 $g_y$ 非奇异且代数约束瞬时满足的半显式框架下）。
+\end{theorem}
+
+\begin{proof}
+（i）$g(x^*,y^*)=0$ 且 $g_y$ 非奇异，隐函数定理给出局部唯一的 $h$ 且
+$h(x^*)=y^*$；对 $g(x,h(x))=0$ 关于 $x$ 求全导数，
+$g_x+g_y h_x=0$，解得 $h_x=-g_y^{-1}g_x$。
+（ii）代数约束把轨道限制在流形 $\{(x,h(x))\}$ 上，故动力学由 $\dot x=f(x,h(x))$
+决定；链式法则给出其雅可比 $f_x+f_yh_x$，代入（i）即
+式~\eqref{sec:dy-th-ctl-eq-schur}。
+（iii）半显式 DAE 中代数变量无自身动态，任何偏离流形的扰动被代数约束瞬时
+校正；流形上的线性化由 $A$ 给出，Lyapunov 第一方法（Hartman--Grobman 框架下
+双曲平衡点的局部拓扑等价）给出结论。
+\end{proof}
+
+\begin{remark}[$g_y$ 奇异的物理含义]
+$g_y$ 即网络代数块（电流平衡方程对节点电压的雅可比）在平衡点附近的奇异性，
+物理上对应"该潮流工作点附近网络方程无解分叉"（如电压崩溃点）或孤岛失去
+频率锚定（相位不可测）。因此小信号分析中 $g_y$ 分解失败必须作为可见错误
+报告，而不是改写为"临界稳定"。
+\end{remark}
+
+\subsubsection{模态、振型与阻尼比}
+
+\begin{definition}[模态特征量]\label{sec:dy-th-ctl-def-mode}
+对 $A$ 的特征值 $\lambda_i=\sigma_i+\mathrm j\omega_i$（实矩阵特征值共轭成对）：
+振荡频率 $f_i=|\omega_i|/2\pi$（Hz），衰减率 $\sigma_i$（1/s），阻尼比
+\begin{equation}
+\zeta_i=-\frac{\sigma_i}{|\lambda_i|}=-\frac{\sigma_i}{\sqrt{\sigma_i^2+\omega_i^2}}.
+\label{sec:dy-th-ctl-eq-zeta}
+\end{equation}
+$|\omega_i|>\epsilon$（小阈值）时称振荡模态；$\omega_i=0$ 为非振荡（单调）模态。
+\end{definition}
+
+\begin{proposition}[阻尼比与包络衰减]\label{sec:dy-th-ctl-prop-env}
+模态 $\lambda_i$ 对任意状态分量的贡献形如
+$c\,e^{\sigma_i t}\cos(\omega_i t+\varphi)$；其包络时间常数为 $\tau_i=1/|\sigma_i|$，
+每周期衰减率（对数减缩量折算）为
+$\delta_i=-2\pi\sigma_i/|\omega_i|=2\pi\zeta_i/\sqrt{1-\zeta_i^2}$
+（$0<\zeta_i<1$）。$\zeta_i>0$ 当且仅当该分量渐近衰减；$\zeta_i=0$ 为等幅。
+\end{proposition}
+
+\begin{proof}
+第一论断是 $e^{\lambda_i t}$ 与其共轭之和的实部形式。包络
+$|c|e^{\sigma_i t}$ 的时间常数由 $e^{\sigma_i\tau_i}=e^{-1}$ 定义得
+$\tau_i=1/|\sigma_i|$。一个周期 $T=2\pi/|\omega_i|$ 内包络比为
+$e^{\sigma_i T}$，对数减缩量为 $-\sigma_iT=-2\pi\sigma_i/|\omega_i|$；
+以 $\sigma_i=-\zeta_i|\lambda_i|$、$|\omega_i|=|\lambda_i|\sqrt{1-\zeta_i^2}$
+代入得末式。符号对应关系由定义~\ref{sec:dy-th-ctl-def-mode} 直接读出。
+\end{proof}
+
+\begin{remark}[工程稳定口径]
+行业惯例要求全部机电振荡模态阻尼比不低于 $0.03\sim0.05$（弱阻尼区间
+$0<\zeta<0.03$ 需告警）；小信号稳定的严格数学口径是 $\sigma(A)\subset\mathbb C^-$，
+工程口径在其上叠加最小阻尼裕度。平台的模态摘要同时给出 \fld{stable}
+（$\operatorname{Re}\lambda<10^{-6}$ 阈值的严格口径）与
+\fld{min\_damping\_ratio}。
+\end{remark}
+
+\subsubsection{参与因子}
+
+\begin{definition}[参与因子]\label{sec:dy-th-ctl-def-pf}
+设 $A$ 可对角化，$A\phi_i=\lambda_i\phi_i$（右特征向量），
+$\psi_i^{\mathsf T}A=\lambda_i\psi_i^{\mathsf T}$（左特征向量），归一化
+$\psi_i^{\mathsf T}\phi_i=1$。状态 $k$ 对模态 $i$ 的参与因子为
+\begin{equation}
+p_{ki}=\phi_{ki}\,\psi_{ik},
+\label{sec:dy-th-ctl-eq-pf}
+\end{equation}
+即右特征向量第 $k$ 元（模态 $i$ 在状态 $k$ 上的可观度）与左特征向量第 $k$ 元
+（状态 $k$ 对模态 $i$ 的可控度）之积~\cite{ctl:perez-arriaga}。
+\end{definition}
+
+\begin{theorem}[参与因子的基本性质]\label{sec:dy-th-ctl-thm-pf}
+设 $A$ 特征值互异（从而可对角化），则
+（i）对每个模态 $i$，$\sum_k p_{ki}=1$；
+（ii）$p_{ki}=\partial\lambda_i/\partial a_{kk}$，即参与因子等于模态对状态矩阵
+对角元的灵敏度。
+\end{theorem}
+
+\begin{proof}
+（i）记 $\Phi=[\phi_1\ \cdots\ \phi_n]$、$\Psi=\Phi^{-1}$（行向量为
+$\psi_i^{\mathsf T}$）。归一化 $\psi_i^{\mathsf T}\phi_i=1$ 即 $(\Psi\Phi)_{ii}=1$，
+展开 $\sum_k\psi_{ik}\phi_{ki}=1$，交换乘积顺序即 $\sum_k p_{ki}=1$。
+（ii）对 $A\phi_i=\lambda_i\phi_i$ 关于参数作一阶变分：
+$\delta A\,\phi_i+A\,\delta\phi_i=\delta\lambda_i\,\phi_i+\lambda_i\,\delta\phi_i$。
+左乘 $\psi_i^{\mathsf T}$，利用 $\psi_i^{\mathsf T}A=\lambda_i\psi_i^{\mathsf T}$
+消去含 $\delta\phi_i$ 的两项，并以 $\psi_i^{\mathsf T}\phi_i=1$ 归一，得
+$\delta\lambda_i=\psi_i^{\mathsf T}\delta A\,\phi_i$。取 $\delta A=E_{kk}$
+（仅 $a_{kk}$ 摄动的单位矩阵元），$E_{kk}\phi_i=\phi_{ki}e_k$，故
+$\delta\lambda_i=\psi_{ik}\phi_{ki}=p_{ki}$。
+\end{proof}
+
+\begin{remark}[物理解释与实现口径]
+$p_{ki}$ 大表示状态 $k$ 既强可观模态 $i$ 的振荡、又强驱动它：机电振荡模态的
+参与因子集中于相关机组的 $\delta,\omega$ 状态，励磁/调速模态集中于控制器
+状态。参与因子是模态\emph{定位}与控制器\emph{选址}的标准工具。实现中给出
+归一化幅值 $|p_{ki}|$（按模态归一使行和为 1）并报告每模态最大参与状态
+（\fld{dominant\_state}）；复参与因子的相位信息与机电回路相关比
+（electromechanical loop correlation ratio）等高级指标未输出。
+\end{remark}
+
+\begin{remark}[降阶矩阵的装配与病态处理]
+实现复用质量矩阵 DAE 内核的设备 \texttt{addJacobian} 接口一次装配原始雅可比
+$J=\partial F/\partial u$（解析路径），代数行精确、微分行以大步长
+（$10^{-3}$ 量级）中心差分重算——原因是同步机摆方程含平衡死区
+（$|\text{功率不平衡}|\le10^{-4}$ 时导数强制为零），小步长差分会被死区截获而
+线性化为零。这是"光滑理论模型 $+$ 工程鲁棒化数值"的典型案例：理论章的 $A$
+是理想光滑线性化，实现的 $A$ 是带死区跨越的一致近似。
+\end{remark}
+
+\subsection{频率响应分析理论}\label{sec:dy-th-ctl-freq}
+
+\subsubsection{惯量中心（COI）与初始 ROCOF}
+
+\begin{definition}[惯量中心频率]\label{sec:dy-th-ctl-def-coi}
+对 $m$ 台具有转速状态的设备（惯量 $H_i$、基准容量 $S_i$，含提供虚拟惯量的
+GFM），惯量中心（COI）频率与角速度为
+\begin{equation}
+\omega_{coi}=\frac{\sum_i H_iS_i\,\omega_i}{\sum_i H_iS_i},\qquad
+f_{coi}=f_0\,\omega_{coi}.
+\label{sec:dy-th-ctl-eq-coi}
+\end{equation}
+\end{definition}
+
+\begin{theorem}[初始 ROCOF 公式]\label{sec:dy-th-ctl-thm-rocof}
+设 $t=0^+$ 时刻发生集中功率扰动 $\Delta P$（MW，正为功率缺额），扰动前系统
+机电平衡且各机组同速 $\omega_i=1$。假定调速器尚未响应（$p_m$ 未变）、电气功率
+再分配按网络方程瞬时完成、且各机组在初始瞬间同摆（coherent），则
+\begin{equation}
+\left.\frac{df_{coi}}{dt}\right|_{0^+}
+=-\,\frac{f_0\,\Delta P}{2\sum_i H_iS_i}
+\qquad[\mathrm{Hz/s}].
+\label{sec:dy-th-ctl-eq-rocof}
+\end{equation}
+\end{theorem}
+
+\begin{proof}
+第 $i$ 台机组摆动方程（MW 口径）$2H_iS_i\,\dot\omega_i=P_{mi}-P_{ei}$。
+$0^+$ 时刻各机组 $\Delta P_{mi}=0$（伺服与原动机滞后），网络侧总注入变化即
+$\sum_i(P_{mi}-P_{ei})=-\Delta P$（负荷突增/机组跳闸等效为电气功率净增
+$\Delta P$）。对摆动方程按 $H_iS_i$ 加权求和：
+\begin{equation}
+2\sum_i H_iS_i\,\frac{d}{dt}\omega_{coi}
+=\sum_i 2H_iS_i\,\dot\omega_i=-\Delta P,
+\end{equation}
+同摆假设下 $\dot\omega_i=\dot\omega_{coi}$；两边乘以 $f_0$ 换算 Hz/s 即
+式~\eqref{sec:dy-th-ctl-eq-rocof}。
+\end{proof}
+
+\begin{remark}
+式~\eqref{sec:dy-th-ctl-eq-rocof} 的要点是：初始 ROCOF 只由\emph{扰动大小与
+系统总惯量}决定，与扰动地点和网络结构无关——这是惯量作为频率第一防线
+的定量表述，也是低惯量（高比例逆变器）系统频率恶化的根因。实现的
+\fld{coi\_rocof\_hz\_s} 不按闭式~\eqref{sec:dy-th-ctl-eq-rocof} 计算，而是直接
+对各设备转速状态的数值导数做 $H_iS_i$ 加权平均，二者在扰动后瞬间一致，
+之后因机组间相对摇摆而分离（COI 平滑掉区间振荡分量）。
+\end{remark}
+
+\subsubsection{一次调频、惯量响应与二次调频的时序分工}
+
+频率响应是三个时间尺度的接力：
+\begin{enumerate}
+  \item \textbf{惯量响应}（$0\sim1$~s）：式~\eqref{sec:dy-th-ctl-eq-rocof} 主导，
+        决定初始斜率；惯量越大频率最低点越浅、到达越晚；
+  \item \textbf{一次调频}（$1\sim30$~s）：调速器按调差 $1/R_i$ 增发，
+        式~\eqref{sec:dy-th-ctl-eq-pri} 给出准稳态平台
+        $\Delta\omega_{ss}=-\Delta P_L/(D+\sum S_i/R_i)$；
+        频率最低点（nadir）由惯量、调差与原动机滞后（再热、水锤）共同决定，
+        二阶近似下 $t_{nadir}$ 与 nadir 深度有闭式估计；
+  \item \textbf{二次调频}（数十 s 至分钟级）：AGC 以区域控制偏差（ACE）的
+        积分作用把频率拉回额定值并恢复联络线计划，稳态 $\Delta\omega\to0$。
+\end{enumerate}
+
+\begin{proposition}[二次调频的无差性]\label{sec:dy-th-ctl-prop-agc}
+在一次调频闭环上叠加积分环节 $\dot\eta=-K_I\Delta\omega$、
+$p_{ref}\leftarrow p_{ref}+\eta$ 的二次调频后，若闭环渐近稳定，则稳态
+$\Delta\omega_{ss}=0$。
+\end{proposition}
+
+\begin{proof}
+稳态要求 $\dot\eta=0$，而 $\dot\eta=-K_I\Delta\omega$ 且 $K_I\neq0$，故
+$\Delta\omega_{ss}=0$。积分器把一次调频的静差转化为可调参考的累积位移。
+\end{proof}
+
+\begin{gapnote}
+集中式二次调频（AGC/ACE）动态在当前代码中无对应设备模型；平台的频率观测止于
+各孤岛 COI 频率与 ROCOF 的统计（
+\srcpath{src/dynamics/DynamicFrequency.cpp:computeFrequencyReport}），nadir
+闭式估计亦未实现（可由时域曲线读取）。
+\end{gapnote}
+
+\begin{remark}[孤岛频率与无锚孤岛]
+解列后每个电气孤岛是独立的频率系统：式~\eqref{sec:dy-th-ctl-eq-coi} 按岛内
+设备加权。仅含无惯量 GFM 的孤岛以 GFM 基准容量加权的成网频率为岛频率；
+既无同步机/GFM/平衡机也无其他频率锚定设备的带电孤岛，其网络代数块因相位
+不可观测而奇异，平台将其作为显式诊断（\fld{has\_anchorless\_source\_island}）
+而非静默失败。
+\end{remark}
+
+\subsection{感应电动机与负荷动态模型}\label{sec:dy-th-ctl-load}
+
+\subsubsection{感应电动机机电模型}
+
+\begin{definition}[三阶暂态电势模型]\label{sec:dy-th-ctl-def-im}
+单笼感应电动机（电动机惯例，从母线汲取电流）的三阶模型以转子暂态电势
+$e'_d,e'_q$ 与滑差 $s$ 为状态：
+\begin{align}
+\dot e'_d &= \omega_b\,s\,e'_q-\frac{1}{T'_0}\Bigl[e'_d+(X_0-X')\,i_q\Bigr],\\
+\dot e'_q &= -\omega_b\,s\,e'_d-\frac{1}{T'_0}\Bigl[e'_q-(X_0-X')\,i_d\Bigr],\\
+2H\dot s &= T_m-T_e,\qquad T_e=e'_di_d+e'_qi_q,
+\label{sec:dy-th-ctl-eq-im}
+\end{align}
+定子电流按暂态电抗后电势计算：
+$\underline i=\bigl(\underline v-(e'_d+\mathrm je'_q)\bigr)/(r_s+\mathrm jX')$，其中
+\begin{equation}
+X_0=X_s+X_m,\qquad
+X'=X_s+\frac{X_mX_r}{X_m+X_r},\qquad
+T'_0=\frac{X_r+X_m}{\omega_b R_r}.
+\label{sec:dy-th-ctl-eq-imparam}
+\end{equation}
+机械转矩取转速幂律 $T_m=T_{m0}\,\omega_r^{\alpha}$（$\alpha$ 典型值 $2$，泵/风机类）。
+五阶模型额外保留定子磁链暂态（两个定子状态），覆盖更深电压跌落下的直流分量
+与制动转矩冲击~\cite{ctl:load-tf}。
+\end{definition}
+
+\begin{proposition}[稳态转矩-滑差特性与最大转矩]\label{sec:dy-th-ctl-prop-tslip}
+稳态下感应机电磁转矩（气隙转矩，pu）为
+\begin{equation}
+T_e(s)=\frac{V^2}{\omega_s}\,
+\frac{R_r/s}{(R_s+R_r/s)^2+(X_s+X_r)^2},
+\label{sec:dy-th-ctl-eq-tslip}
+\end{equation}
+在 $s=s_m=\dfrac{R_r}{\sqrt{R_s^2+(X_s+X_r)^2}}$ 处取得最大转矩
+$T_{e,\max}=\dfrac{V^2}{2\omega_s\bigl(R_s+\sqrt{R_s^2+(X_s+X_r)^2}\bigr)}$；
+$s<s_m$ 为稳定运行支，$s>s_m$ 为不稳定支。
+\end{proposition}
+
+\begin{proof}
+稳态等效电路（转子折算到定子）给出电流
+$I=V/\sqrt{(R_s+R_r/s)^2+(X_s+X_r)^2}$，气隙功率 $P_{ag}=I^2R_r/s$，
+$T_e=P_{ag}/\omega_s$ 即式~\eqref{sec:dy-th-ctl-eq-tslip}。令 $u=R_r/s$，
+$T_e\propto g(u)=u/\bigl((R_s+u)^2+X^2\bigr)$（$X=X_s+X_r$）；求导
+$g'(u)=\bigl(R_s^2+X^2-u^2\bigr)/\bigl((R_s+u)^2+X^2\bigr)^2$，零点
+$u_m=\sqrt{R_s^2+X^2}$ 且 $g'$ 由正变负，为最大值点；代回 $s_m=R_r/u_m$ 与
+$g(u_m)$ 即得 $T_{e,\max}$ 式。稳定性：负载扰动使 $s$ 微增时，稳定支上
+$T_e$ 上升、恢复平衡；不稳定支上 $T_e$ 下降、滑差继续增大直至停转。
+\end{proof}
+
+\begin{remark}[停转与 FIDVR]
+电压深度跌落时 $T_e\propto V^2$ 骤减而负载转矩近似不变，滑差沿不稳定支增大：
+电动机停转（stall）。停转电机呈低值阻抗，持续吸收数倍额定无功，延缓故障切除后
+的电压恢复——即故障诱发的延迟电压恢复（FIDVR），是配电网电压稳定的核心
+机理之一。这要求暂态模型至少保留三阶机电结构（纯静态负荷无法复现该现象）。
+\end{remark}
+
+\subsubsection{静态与复合负荷模型}
+
+\begin{definition}[ZIP 与指数负荷模型]\label{sec:dy-th-ctl-def-zip}
+静态负荷的电压特性标准形为 ZIP（多项式）模型
+\begin{equation}
+P(V)=P_0\Bigl[Z_p\Bigl(\frac{V}{V_0}\Bigr)^2+I_p\Bigl(\frac{V}{V_0}\Bigr)+P_p\Bigr],
+\qquad Z_p+I_p+P_p=1,
+\label{sec:dy-th-ctl-eq-zip}
+\end{equation}
+$Q$ 同理（$Z_q,I_q,P_q$）；等价的指数模型写为 $P(V)=P_0(V/V_0)^{\alpha_p}$，
+恒阻抗、恒电流、恒功率分别对应 $\alpha=2,1,0$。与频率相关的扩展附加因子
+$(1+k_{pf}\Delta\omega)$。
+\end{definition}
+
+\begin{proposition}[恒功率负荷的负增量特性]\label{sec:dy-th-ctl-prop-cpl}
+恒功率（$P=P_0$ 恒定）支路对电压小扰动呈现负增量电导：
+$\dfrac{dI}{dV}=-\dfrac{P_0}{V^2}<0$（幅值口径），等效增量电阻 $-V^2/P_0$。
+\end{proposition}
+
+\begin{proof}
+$P=VI=P_0$ 常数给出 $I=P_0/V$，对 $V$ 求导即得。
+\end{proof}
+
+\begin{remark}
+负增量电导使恒功率负荷\emph{放大}电压扰动：电压下降时汲取电流反而上升，
+经线路阻抗进一步压低电压。配电网电子化（整流前端、变频驱动）使恒功率份额
+上升，其动态版本（带输入滤波的受控恒功率级，CPL）还会与滤波器交互产生
+振荡失稳；平台以 \texttt{ActiveConstantPowerLoadDynamic}（滤波电容电压两状态）
+复现这一动态失稳机理，并在低电压阈值下切换恒流以避免数值发散。
+\end{remark}
+
+\begin{remark}[复合负荷]
+工业馈线的负荷是 ZIP 静态部分与电动机部分的复合：马达份额决定 FIDVR 深度，
+ZIP 份额决定电压-功率稳态斜率。负荷建模的敏感性是稳定结论不确定性的主要
+来源之一~\cite{ctl:load-tf,ctl:taylor}。
+\end{remark}
+
+\begin{gapnote}
+指数负荷模型（$\alpha_p\neq0,1,2$ 的一般幂）与频率相关因子在当前代码中未单列：
+\fld{DynamicLoadModelKind} 仅含恒功率/恒电流/恒阻抗/ZIP 四档，一般指数特性
+需以 ZIP 权重在额定工作点附近局部拟合近似。
+\end{gapnote}
+
+\subsection{多质量块轴系扭振模型}\label{sec:dy-th-ctl-shaft}
+
+\subsubsection{五质量块模型}
+
+大型汽轮发电机组的轴系不能视为刚体：高压缸（HP）、中压缸（IP）、两个低压缸
+（LPA/LPB）与发电机转子（GEN）以弹性轴段相连，形成五质量块扭振系统。
+
+\begin{definition}[五质量块轴系方程]\label{sec:dy-th-ctl-def-shaft}
+记各质量块角位移 $\theta_i$、转速标幺值 $\omega_i$（$i=1,\dots,5$，$i=5$ 为
+发电机），段间刚度 $K_{i,i+1}$、段间阻尼 $D_{i,i+1}$，段扭矩
+\begin{equation}
+T_{i,i+1}=K_{i,i+1}(\theta_i-\theta_{i+1})+D_{i,i+1}(\omega_i-\omega_{i+1}),
+\qquad i=1,\dots,4,
+\label{sec:dy-th-ctl-eq-shaftseg}
+\end{equation}
+则 10 阶状态方程为
+\begin{align}
+\dot\theta_i &= \omega_b(\omega_i-1),\qquad i=1,\dots,5,\\
+2H_1\dot\omega_1 &= T_m-T_{12},\\
+2H_i\dot\omega_i &= T_{i-1,i}-T_{i,i+1},\qquad i=2,3,4,\\
+2H_5\dot\omega_5 &= T_{45}-T_e,
+\label{sec:dy-th-ctl-eq-shaft}
+\end{align}
+机械转矩 $T_m$ 施加于汽轮机首端（或多缸按功率份额分配），电磁转矩 $T_e$ 作用于
+发电机质量块。矩阵形式为
+\begin{equation}
+M\ddot\theta+D\dot\theta+K\theta=T,
+\qquad M=\operatorname{diag}(2H_i/\omega_b),
+\label{sec:dy-th-ctl-eq-shaftmat}
+\end{equation}
+$K$ 为由 $K_{i,i+1}$ 组装的三对角弹簧矩阵。
+\end{definition}
+
+\begin{theorem}[轴系模态结构]\label{sec:dy-th-ctl-thm-shaft}
+设轴系为连通链、$K_{i,i+1}>0$。则式~\eqref{sec:dy-th-ctl-eq-shaftmat} 的 $K$
+半正定、秩为 $n-1$（$n=5$），其零特征值对应\emph{刚体模态}（全体质量块同相
+同幅摆动，即系统机电振荡模态的载体）；其余 $n-1=4$ 个正特征值对应
+\emph{扭转模态}，无阻尼自然频率
+\begin{equation}
+f_i=\frac{1}{2\pi}\sqrt{\lambda_i(M^{-1}K)},\qquad i=1,\dots,4,
+\label{sec:dy-th-ctl-eq-torsion}
+\end{equation}
+典型分布于 $5\sim50$~Hz 次同步频段。
+\end{theorem}
+
+\begin{proof}
+把 $K$ 写成关联形式 $K=B^{\mathsf T}\operatorname{diag}(K_{i,i+1})B$，其中
+$B\in\mathbb R^{4\times5}$ 为链式关联矩阵（每行 $e_i^{\mathsf T}-e_{i+1}^{\mathsf T}$）。
+对任意 $\theta$，
+\begin{equation}
+\theta^{\mathsf T}K\theta=\sum_{i=1}^{4}K_{i,i+1}(\theta_i-\theta_{i+1})^2\ge0,
+\end{equation}
+故 $K$ 半正定；等号成立当且仅当 $\theta_1=\cdots=\theta_5$，即零空间为
+$\operatorname{span}\{\mathbf 1\}$（链连通保证无其他零模态），秩为 $4$。
+刚体模态对应零特征值：全体质量块相对角不变、轴段无扭转应力。$M$ 正定对角，
+广义特征问题 $K\phi=\lambda M\phi$ 等价于对称正定变换后的标准问题
+（$M^{-1/2}KM^{-1/2}$ 半正定），其特征值非负实数；正特征值经
+式~\eqref{sec:dy-th-ctl-eq-torsion} 给出扭转模态频率。段间阻尼 $D$ 提供各扭转
+模态的小阻尼（典型阻尼比不足 $0.01$）。
+\end{proof}
+
+\begin{remark}[实现口径与边界]
+平台的 \texttt{FiveMassShaft} 实现与
+式~\eqref{sec:dy-th-ctl-eq-shaftseg}--\eqref{sec:dy-th-ctl-eq-shaft} 逐式一致
+（10 状态：5 角位移 $+$ 5 转速，段扭矩含刚度与阻尼两项；发电机质量块转速、
+角位移回写宿主同步机的 $\delta,\omega$ 状态，见
+\srcpath{src/dynamics/devices/BasicDynamicDevices.cpp:FiveMassShaft::computeDerivatives}）。
+缺省参数五质量块惯量 $H=\{0.3,0.3,0.3,0.3,1.8\}$、段刚度 $25$ pu、段阻尼
+$0.02$ pu。
+\end{remark}
+
+\begin{remark}[扭振的危害与 SSR]
+扭转模态阻尼极弱，扰动（故障切除、重合闸）激起的扭振应力在轴段累积疲劳寿命
+损耗；当网络含串联电容补偿时，电气谐振频率与某扭转模态互补（次同步谐振，
+SSR），电气负阻尼可抵消机械阻尼导致扭振发散。IEEE 第一 benchmark 模型即是
+该现象的标准算例。
+\end{remark}
+
+\begin{gapnote}
+当前实现只含轴系机械部分（机械激励 $T_m$ 与电磁转矩 $T_e$ 的单机口径），
+未建模串补网络的电气谐振与 SSR 电气负阻尼相互作用；用于 SSR 评估时需外部
+构造网络激励或改用专用工具。
+\end{gapnote}
+
+\subsection{与实现的对应}\label{sec:dy-th-ctl-map}
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{6.8cm}L{8.6cm}@{}}
+\toprule
+理论条目 & 实现状态\\
+\midrule
+\endfirsthead
+\toprule
+理论条目 & 实现状态\\
+\midrule
+\endhead
+IEEE 421.5 励磁模型族主干动态（12 种） &
+\implfull{include/hacdcpf/dynamics/devices/BasicDynamicDevices.hpp:ExciterModel}（状态方程见 src/dynamics/devices/BasicDynamicDevices.cpp:Exciter::computeDerivatives）\\
+励磁饱和与稳定反馈（$S_E$、$K_F/T_F$） &
+\implpart{饱和仅 \fld{ae}/\fld{be} 指数形式；速率反馈仅 AVRTypeI 路径（\fld{kf}/\fld{tf\_s}）}\\
+OEL/UEL、强励门控等辅助环节 & \implnone\\
+TGOV1 汽轮机调速器（含阀位限幅与抗饱和） &
+\implfull{src/dynamics/devices/BasicDynamicDevices.cpp:Governor::computeDerivatives}\\
+IEEEG1 再热双通道结构 $K+(1-K)/(1+sT_{RH})$ &
+\implpart{\fld{GovernorModel} 含 IEEEG1 分派，但机组挂接路径以"更长汽轮机时间常数"等效再热，非标准双通道结构}\\
+水轮机水锤 $(1-sT_w)/(1+sT_w/2)$ 与 HYGOV/WPIDHY &
+\implpart{\fld{GovernorModel} 含 HYGOV/PIDGOV/WPIDHY 分派与水锤参数 \fld{water\_t\_s}；非最小相位环节以超前-滞后执行机构近似}\\
+GAST 燃气轮机、DEGOV 柴油、TGTypeI/II &
+\implfull{include/hacdcpf/dynamics/devices/BasicDynamicDevices.hpp:GovernorModel}（十一种模型全部分派）\\
+PSS1A/IEEEST/STAB1 单输入 PSS（隔直+两级超前-滞后） &
+\implfull{src/dynamics/devices/BasicDynamicDevices.cpp:PowerSystemStabilizer::computeDerivatives}\\
+PSS2A/2B/2C 双输入（加速功率综合） &
+\implfull{include/hacdcpf/dynamics/devices/BasicDynamicDevices.hpp:PSSModel}（双隔直 \fld{tw1\_s}\,$\sim$\,\fld{tw4\_s}、综合系数 \fld{ks2}/\fld{ks3}/\fld{m\_rtf}/\fld{n\_rtf}）\\
+GFL：SRF-PLL PI 动力学（降阶/Kaura/定频） &
+\implfull{include/hacdcpf/dynamics/devices/BasicDynamicDevices.hpp:FrequencyEstimatorKind}（ReducedOrderPLL/KauraPLL/FixedFrequency，增益 \fld{pll\_kp}/\fld{pll\_ki}）\\
+GFL：紧凑一阶响应与全保真链（外环 PI+内环 PI+LCL） &
+\implfull{src/dynamics/devices/BasicDynamicDevices.cpp:GridFollowingInverter::computeDerivativesFullFidelity}（紧凑路径见 GridFollowingInverter::computeDerivatives）\\
+GFL 弱网稳定域（SCR 扫描、广义 Nyquist 判据） & \implnone\\
+GFM 下垂控制（$P$-$f$/$Q$-$V$、功率滤波、电压环 PI、过载校正） &
+\implfull{src/dynamics/devices/BasicDynamicDevices.cpp:GridFormingInverter::computeDerivatives}（\fld{GridFormingControlKind::Droop} 分支）\\
+GFM 虚拟同步机（VSM 摆动方程） &
+\implfull{src/dynamics/devices/BasicDynamicDevices.cpp:GridFormingInverter::computeDerivatives}（VirtualInertia 分支，\fld{vsm\_ta\_s}/\fld{vsm\_damping\_kd}）\\
+GFM 虚拟振子控制（VOC） &
+\implfull{src/dynamics/devices/BasicDynamicDevices.cpp:GridFormingInverter::computeDerivatives}（VirtualOscillator 分支，\fld{voc\_k1}/\fld{voc\_psi\_rad}/\fld{voc\_k2}）\\
+Schur 补降阶消元 $A=f_x-f_yg_y^{-1}g_x$ &
+\implfull{src/dynamics/SmallSignal.cpp:small\_signal\_analysis}（$g_y$ 奇异显式报错）\\
+特征值/振型/阻尼比与稳定判据 &
+\implfull{src/dynamics/DynamicSolver.cpp:summarize\_small\_signal}（结构体见 include/hacdcpf/dynamics/SmallSignal.hpp:SmallSignalMode）\\
+参与因子 $p_{ki}=\phi_{ki}\psi_{ik}$ &
+\implpart{输出按模态归一的 $|p_{ki}|$ 与最大参与状态；复参与因子相位、机电回路相关比未输出（small\_signal\_analysis）}\\
+COI 频率与 ROCOF（孤岛加权统计） &
+\implfull{src/dynamics/DynamicFrequency.cpp:computeFrequencyReport}\\
+初始 ROCOF 闭式~\eqref{sec:dy-th-ctl-eq-rocof} &
+\implpart{实现按设备转速导数做 $H_iS_i$ 加权平均，非闭式代入；扰动初刻与闭式一致}\\
+一次调频稳态分配式~\eqref{sec:dy-th-ctl-eq-pri} &
+\implpart{由 \fld{Governor} 调差 \fld{droop\_r} 动态涌现，无闭式稳态报告}\\
+二次调频（AGC/ACE 积分） & \implnone\\
+感应电动机三阶暂态电势模型与五阶模型 &
+\implfull{src/dynamics/devices/BasicDynamicDevices.cpp:FluxInductionMachineDynamic::computeDerivatives}（五阶/简化变体见 InductionMachineDynamic::computeDerivatives）\\
+最大转矩/临界滑差闭式（命题 \ref{sec:dy-th-ctl-prop-tslip}） &
+\implpart{隐含于模型的转矩-滑差特性，无独立闭式校核输出}\\
+ZIP/恒功率/恒电流/恒阻抗负荷 &
+\implfull{src/dynamics/devices/BasicDynamicDevices.cpp:DynamicLoad::stamp}（\fld{DynamicLoadModelKind} 四档）\\
+指数负荷（一般幂）与频率相关因子 & \implnone\\
+恒功率负荷动态（CPL 负增量机理） &
+\implfull{include/hacdcpf/dynamics/devices/BasicDynamicDevices.hpp:ActiveConstantPowerLoadDynamic}（滤波电容两状态，低电压切换恒流）\\
+五质量块轴系扭振（10 状态、段刚度/阻尼） &
+\implfull{src/dynamics/devices/BasicDynamicDevices.cpp:FiveMassShaft::computeDerivatives}\\
+SSR 电气相互作用（串补谐振负阻尼） & \implnone\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{参考文献}
+{\renewcommand{\section}[2]{}%
+\begin{thebibliography}{9}\small
+\bibitem{ctl:kundur} P.~Kundur, \emph{Power System Stability and Control},
+McGraw-Hill, 1994.
+\bibitem{ctl:ieee4215} IEEE Std 421.5-2016, \emph{IEEE Recommended Practice for
+Excitation System Models for Power System Stability Studies}, IEEE, 2016.
+\bibitem{ctl:stabdef} P.~Kundur, J.~Paserba, V.~Ajjarapu, et al., Definition and
+classification of power system stability, \emph{IEEE Trans. Power Systems},
+vol.~19, no.~2, 2004.
+\bibitem{ctl:perez-arriaga} I.~J.~P\'erez-Arriaga, G.~C.~Verghese,
+F.~C.~Schweppe, Selective modal analysis with applications to electric power
+systems, \emph{IEEE Trans. Power Apparatus and Systems}, vol.~PAS-101, no.~9,
+1982.
+\bibitem{ctl:sauer-pai} P.~W.~Sauer, M.~A.~Pai, \emph{Power System Dynamics and
+Stability}, Prentice Hall, 1998.
+\bibitem{ctl:anderson-fouad} P.~M.~Anderson, A.~A.~Fouad, \emph{Power System
+Control and Stability}, 2nd ed., IEEE Press, 2003.
+\bibitem{ctl:machowski} J.~Machowski, J.~W.~Bialek, J.~R.~Bumby,
+\emph{Power System Dynamics -- Stability and Control}, 2nd ed., Wiley, 2008.
+\bibitem{ctl:darco} S.~D'Arco, J.~A.~Suul, Equivalence of virtual synchronous
+machines and frequency-droops for converter-based microgrids,
+\emph{IEEE Trans. Smart Grid}, vol.~5, no.~1, 2014.
+\bibitem{ctl:johnson-voc} B.~B.~Johnson, S.~V.~Dhople, A.~O.~Hamadeh,
+P.~T.~Krein, Synchronization of parallel single-phase inverters with virtual
+oscillator control, \emph{IEEE Trans. Power Electronics}, vol.~29, no.~11, 2014.
+\bibitem{ctl:zhou-pll} J.~Z.~Zhou, H.~Ding, S.~Fan, Y.~Zhang, A.~M.~Gole,
+Impact of short-circuit ratio and phase-locked-loop parameters on the
+small-signal behavior of a VSC-HVDC converter, \emph{IEEE Trans. Power
+Delivery}, vol.~29, no.~5, 2014.
+\bibitem{ctl:load-tf} IEEE Task Force on Load Representation for Dynamic
+Performance, Load representation for dynamic performance analysis (of power
+systems), \emph{IEEE Trans. Power Systems}, vol.~8, no.~2, 1993.
+\bibitem{ctl:taylor} C.~W.~Taylor, \emph{Power System Voltage Stability},
+McGraw-Hill, 1994.
+\end{thebibliography}}

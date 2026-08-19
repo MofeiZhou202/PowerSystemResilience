@@ -1,0 +1,47 @@
+% theory_environments.tex —— HySim-XJTU-HRPES 模块手册"通用理论层"共享环境
+% 用途：为 docs/modules/ 各手册的 theory_*.tex 理论章节提供统一排版与标记机制。
+% 引入方式（二选一，不得重复引入）：
+%   (a) 使用公共样式的手册：hysim_manual.sty 已自动引入，无需任何操作；
+%   (b) 自带导言区的手册（power_flow、optimal_power_flow）：在导言区写
+%       \input{../../_manual_common/theory_environments.tex}
+% 规范见 docs/modules/THEORY_WRITING_GUIDE.md 与 docs/modules/README.md。
+
+\RequirePackage{amsthm}
+\RequirePackage[most]{tcolorbox}
+
+% ── 定理族（中文名，按 section 编号）────────────────────────────
+\theoremstyle{plain}
+\newtheorem{theorem}{定理}[section]
+\newtheorem{lemma}[theorem]{引理}
+\newtheorem{proposition}[theorem]{命题}
+\newtheorem{corollary}[theorem]{推论}
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{定义}
+\newtheorem{example}[theorem]{例}
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{注记}
+\renewcommand{\proofname}{证明}
+
+% ── 理论章声明框：每个 theory_*.tex 章首必须使用 ─────────────────
+% 用法：\begin{theorynote} 本章为通用数学理论……\end{theorynote}
+\newtcolorbox{theorynote}{%
+  enhanced, breakable, colback=blue!4, colframe=blue!45!black,
+  boxrule=0.6pt, arc=1.5mm, left=2mm, right=2mm,
+  title={\textbf{通用理论章说明}},
+  fonttitle=\small\bfseries}
+
+% ── 未实现/理论扩展标记框：理论内容超出当前代码实现时必须就地标记 ──
+% 用法：\begin{gapnote} 本节模型在代码中尚未实现……\end{gapnote}
+\newtcolorbox{gapnote}{%
+  enhanced, breakable, colback=orange!6, colframe=orange!70!black,
+  boxrule=0.6pt, arc=1.5mm, left=2mm, right=2mm,
+  title={\textbf{未实现扩展说明}},
+  fonttitle=\small\bfseries}
+
+% ── 实现状态标签（"与实现的对应"表专用）─────────────────────────
+% \implfull{文件:函数名}  已实现（附锚点，禁止行号）
+% \implpart{差异说明}     部分实现（必须说明差异）
+% \implnone               未实现
+\newcommand{\implfull}[1]{\textbf{已实现}\quad\srcpath{#1}}
+\newcommand{\implpart}[1]{\textbf{部分实现}\quad（#1）}
+\newcommand{\implnone}{\textbf{未实现}}

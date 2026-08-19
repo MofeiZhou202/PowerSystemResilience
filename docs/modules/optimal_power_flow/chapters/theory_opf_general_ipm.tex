@@ -1,0 +1,954 @@
+% theory_opf_general_ipm.tex —— 最优潮流 通用理论：OPF 一般提法、KKT/LMP 与原–对偶内点法
+% 本文件为理论层章节，遵循 docs/modules/THEORY_WRITING_GUIDE.md。
+
+\section{OPF 一般提法与原--对偶内点法理论}\label{sec:opf-th-gen}
+
+\begin{theorynote}
+本章为通用数学理论，按非线性规划与电力系统最优潮流（OPF）的标准文献体系撰写，
+覆盖：OPF 问题的一般提法与发展脉络（变量/目标/约束标准形式、Stott 分类——
+全空间与紧致、极坐标与直角坐标）、目标函数族（二次发电费用、网损最小、电压
+偏差）及其凸性讨论、KKT 最优性条件与节点电价（LMP）的对偶解释（功率平衡乘子
+等于节点电价的影子价格定理及证明）、原--对偶内点法全理论（障碍问题与中心
+路径、扰动 KKT 系统、Mehrotra 预估校正、步长选取与全局化、凸情形多项式复杂度
+结论）、IPM 收敛性理论（局部超线性收敛、不可行检测、原对偶正则化）、初值与
+可行性恢复（Phase I 方法、罚函数与滤子法一般原理）、数值性质（KKT 系统病态
+来源、标幺化/缩放对条件数的影响）。与平台实现（\srcpath{src/optimal\_power\_flow/}）
+的对应关系见本章末"与实现的对应"表，超出实现的内容以"未实现扩展说明"框就地
+标记。交直流混合 OPF 的逐约束建模口径与三相/直流变体的理论分属本手册其余
+理论章；实现层的逐式转写见实现层各章。
+\end{theorynote}
+
+\subsection{记号与约定}
+\begin{itemize}
+  \item $x\in\mathbb R^{n}$：OPF 全部原始变量（全空间口径下含电压状态、发电
+        功率、换流器/储能等控制与耦合变量）；$f:\mathbb R^n\to\mathbb R$ 为目标；
+  \item $g:\mathbb R^n\to\mathbb R^{m_E}$：等式约束（潮流功率平衡、耦合
+        设备平衡、参考钉扎等）；$h:\mathbb R^n\to\mathbb R^{m_I}$：不等式
+        约束，统一写 $h(x)\le0$ 并引入松弛 $s\in\mathbb R^{m_I}$，
+        $h(x)+s=0$，$s\ge0$；
+  \item $\lambda\in\mathbb R^{m_E}$、$z\in\mathbb R^{m_I}$：等式/不等式
+        乘子（对偶变量）；$\mu>0$：障碍参数（注：平台源码以
+        \fld{mu} 记不等式乘子、以 $\gamma$ 记障碍目标，本章采用文献记号，
+        以 $z$ 记不等式乘子）；
+  \item $e=(1,\dots,1)^{\mathsf T}$；$S=\operatorname{diag}(s)$，
+        $Z=\operatorname{diag}(z)$；对偶间隙度量 $\mu(w)=s^{\mathsf T}z/m_I$；
+  \item $\mathcal L(x,\lambda,z)=f(x)+\lambda^{\mathsf T}g(x)
+        +z^{\mathsf T}h(x)$：拉格朗日函数；$W=\nabla_{xx}^2\mathcal L$：
+        拉格朗日 Hessian；$A_E=Dg$、$A_I=Dh$：约束雅可比；
+  \item $\lVert\cdot\rVert$ 未指明时为 $2$-范数；$\kappa(M)=\lVert
+        M\rVert\,\lVert M^{-1}\rVert$：条件数；$\operatorname{In}(M)$：对称
+        矩阵惯性（正/负/零特征值计数）；
+  \item $V_i=V_{m,i}e^{\mathrm j\theta_i}$：AC 节点复电压；$P_g,Q_g$：发电
+        有功/无功；$P^d,Q^d$：负荷；$\kappa$-条件数与峰值系数同名不同义，
+        本章 $\kappa$ 一律指条件数。
+\end{itemize}
+
+\subsection{OPF 问题的一般提法与发展脉络}\label{sec:opf-th-gen-formulation}
+
+\begin{definition}[OPF 标准形式]\label{def:opf-th-gen-standard}
+最优潮流是在满足交流（或交直流混合）稳态潮流方程与工程不等式限值下，最小化
+某一运行目标的约束优化问题：
+\begin{equation}
+\min_{x}\ f(x)\qquad
+\text{s.t.}\quad g(x)=0,\quad h(x)\le0,\quad
+x^{\min}\le x\le x^{\max},
+\label{eq:opf-th-gen-standard}
+\end{equation}
+其中等式 $g(x)=0$ 编码各节点有功/无功平衡（AC 域）、直流节点平衡与换流器
+耦合方程（DC 域）以及相角/电压参考钉扎；不等式 $h(x)\le0$ 编码支路容量、
+换流器容量圆/电流/调制度、节点电压窗口等非线性工程限值；盒式界
+$x^{\min}\le x\le x^{\max}$ 编码出力、分接头等直接限值。盒式界可视为特殊
+不等式并入 $h$，但实现上因其雅可比为符号矩阵而单独处理。
+\end{definition}
+
+\begin{remark}[发展脉络]\label{rem:opf-th-gen-history}
+OPF 问题由 Carpentier 于 1962 年首次以含潮流等式的约束优化形式提出
+\cite{opft:carpentier}。Dommel--Tinney 的约化梯度法\cite{opft:dommel-tinney}
+确立了"状态变量由潮流方程消去、只在控制变量空间寻优"的紧致路线；Sun 等的
+Newton OPF\cite{opft:sun-etal} 转向全空间：状态与控制同为显式变量，直接对
+KKT 系统做 Newton 迭代；Stott--Alsa\c{c}--Monticelli 的综述
+\cite{opft:stott-alsac-monticelli} 系统化了这一分类。内点法方面，Karmarkar
+\cite{opft:karmarkar} 的多项式时间 LP 算法之后，Granville\cite{opft:granville}、
+Torres--Quintana\cite{opft:torres-quintana} 与 Jabr 等\cite{opft:jabr-pdipm}
+相继把原--对偶内点法引入 OPF，W\"achter--Biegler 的滤子线搜索内点法
+\cite{opft:waechter-biegler}（Ipopt）则给出了非线性 OPF 全局化的工程范式。
+文献综述见 \cite{opft:momoh-review,opft:capitanescu-scopf,opft:cain-history}。
+\end{remark}
+
+\begin{definition}[Stott 分类：全空间与紧致]\label{def:opf-th-gen-stott}
+按变量空间的处理，OPF 算法分两类\cite{opft:stott-alsac-monticelli}：
+\begin{itemize}
+  \item \textbf{紧致（消参/约化空间）}：把电压状态 $x_s$ 视为控制 $u$ 的隐函数
+        $x_s=x_s(u)$（由潮流方程 $g(x_s,u)=0$ 定义），在 $u$ 空间构造约化目标
+        $\tilde f(u)=f(x_s(u),u)$ 与约化梯度 $\nabla\tilde f=\nabla_u f-
+        (\partial_u g)^{\mathsf T}(\partial_s g)^{-\mathsf T}\nabla_s f$。
+        变量少、但每步需解（或因子复用）潮流雅可比，不等式处理依赖罚/栅栏
+        外环或活动集；
+  \item \textbf{全空间}：$(x_s,u)$ 全部显式保留，$g=0$ 作为等式进入 KKT
+        系统。变量多但全部约束以显式行出现，不等式可在内点法框架内一致处理，
+        稀疏结构保持 $Y_{bus}$ 级稀疏度。
+\end{itemize}
+按坐标系，AC 方程可写为\emph{极坐标} $(\theta,V_m)$（三角函数非线性，
+变量数少）或\emph{直角坐标} $(e,f)$（$V=e+\mathrm jf$，方程为二次代数，
+Hessian 常数化，便于二阶方法\cite{opft:torres-quintana}）。
+\end{definition}
+
+\begin{remark}[两条路线的现代格局]\label{rem:opf-th-gen-routes}
+紧致路线在小系统上迭代数少、每步便宜，但工程不等式（支路容量、电压窗口）
+只能经外环近似，活动集震荡与罚参数病条件是固有弱点；全空间路线把约束处理
+内生化，配合原--对偶内点法成为大规模 OPF 的主流。平台两条路线并存：
+传统 Native AC 为紧致极坐标（非线性工程限值由外环罚/栅栏处理），Parity
+建模为全空间极坐标（全部约束族以显式不等式行进入 IPM），对应关系见本章末表。
+\end{remark}
+
+\begin{gapnote}
+直角坐标（rectangular）口径在当前实现中未采用：Native 紧致路径与 Parity
+全空间建模均为极坐标 $(\theta,V_m)$。Torres--Quintana 式直角坐标 IPM 的
+"Hessian 常数化"优势不适用于本平台代码，相关理论仅作分类学背景给出。
+\end{gapnote}
+
+\subsection{目标函数族与凸性}\label{sec:opf-th-gen-objectives}
+
+\begin{definition}[二次发电费用]\label{def:opf-th-gen-quadcost}
+发电机 $k$ 的费用曲线取二次型
+\begin{equation}
+C_k(P_{g,k})=a_kP_{g,k}^2+b_kP_{g,k}+c_k,\qquad
+f_{\mathrm{cost}}(x)=\sum_{k\in\mathcal G}C_k(P_{g,k}),
+\label{eq:opf-th-gen-quadcost}
+\end{equation}
+$\mathcal G$ 为发电机集，系数 $a_k,b_k\ge0$，$c_k$ 为固定费用（对最优解
+无影响，仅平移目标值）。
+\end{definition}
+
+\begin{proposition}[二次费用的凸性判据]\label{prop:opf-th-gen-quadconvex}
+$f_{\mathrm{cost}}$ 在 $\mathbb R^n$ 上凸当且仅当 $a_k\ge0$ 对一切
+$k\in\mathcal G$ 成立；严格凸当且仅当 $a_k>0$ 对一切 $k$ 成立。
+\end{proposition}
+
+\begin{proof}
+$\nabla^2 f_{\mathrm{cost}}=\operatorname{diag}(2a_k)$（对角于 $P_g$ 分量块，
+其余分量零）。光滑函数凸当且仅当 Hessian 处处半正定；对角矩阵半正定当且
+仅当对角元非负，即 $a_k\ge0$。严格凸性同理（对角元严格正给出
+$\nabla^2f\succ0$ 于 $P_g$ 块；对不含发电机功率的方向 Hessian 为零，故
+严格凸性只能在"每分量均被某台严格凸费用机覆盖"的子空间意义上成立）。
+\end{proof}
+
+\begin{remark}[网损最小目标]\label{rem:opf-th-gen-lossobj}
+支路 $\ell=(i,j)$（串联电导 $g_\ell>0$，忽略充电）的有功损耗为
+\begin{equation}
+P_{\mathrm{loss},\ell}
+=g_\ell\bigl(V_{m,i}^2+V_{m,j}^2-2V_{m,i}V_{m,j}\cos\theta_{ij}\bigr),
+\qquad \theta_{ij}=\theta_i-\theta_j,
+\label{eq:opf-th-gen-loss}
+\end{equation}
+网损目标 $f_{\mathrm{loss}}=\sum_\ell P_{\mathrm{loss},\ell}$。
+式~\eqref{eq:opf-th-gen-loss} 也可写成潮流变量的二次函数：
+$P_{\mathrm{loss},\ell}=g_\ell|V_i-V_j|^2$，沿支路潮流视角是凸二次型；
+但在电压变量 $(\theta,V_m)$ 下\textbf{非凸}。
+\end{remark}
+
+\begin{proposition}[AC 网损目标的非凸性]\label{prop:opf-th-gen-loss-nonconvex}
+设 $g_\ell>0$ 且 $\theta_{ij}\not\equiv0\pmod\pi$，则
+$P_{\mathrm{loss},\ell}$ 关于 $(V_{m,j},\theta_{ij})$ 的 Hessian 不定，
+故 $f_{\mathrm{loss}}$ 在一般运行点附近非凸。
+\end{proposition}
+
+\begin{proof}
+记 $c=2g_\ell V_{m,i}$，考察
+$\varphi(V_{m,j},\theta_{ij})=-cV_{m,j}\cos\theta_{ij}$
+（式~\eqref{eq:opf-th-gen-loss} 中唯一含混合二阶导的项；$V_{m,i}^2+
+V_{m,j}^2$ 项的 Hessian 半正定，不定性只能来自 $\varphi$）。计算
+\begin{equation}
+\frac{\partial^2\varphi}{\partial V_{m,j}\partial\theta_{ij}}
+=c\sin\theta_{ij},\qquad
+\frac{\partial^2\varphi}{\partial\theta_{ij}^2}
+=cV_{m,j}\cos\theta_{ij},\qquad
+\frac{\partial^2\varphi}{\partial V_{m,j}^2}=0,
+\end{equation}
+该 $2\times2$ 块的行列式为 $-(c\sin\theta_{ij})^2<0$（$\sin\theta_{ij}
+\neq0$ 时），故 Hessian 有一正一负特征值，不定。加回半正定项不能消除
+该负曲率方向（取 $(V_{m,j},\theta_{ij})$ 平面内负特征向量并令其余分量
+为零，半正定项沿该方向的贡献为零）。
+\end{proof}
+
+\begin{remark}[非凸性的含义]\label{rem:opf-th-gen-nonconvex-meaning}
+命题~\ref{prop:opf-th-gen-loss-nonconvex} 表明：即便目标取网损最小这类
+"物理直觉良好"的函数，AC OPF 整体上仍是非凸非线性规划——更不必说潮流
+等式 $g(x)=0$ 本身已使可行域非凸。因此内点法在 AC OPF 上的收敛证书一律
+是\emph{局部 KKT 点}而非全局最优；这一诚实口径被平台写入每个 AC OPF 结果的
+\fld{model\_limitations}（见实现层总览章"诚实口径"小节）。
+\end{remark}
+
+\begin{definition}[电压偏差目标]\label{def:opf-th-gen-vdev}
+\begin{equation}
+f_{\mathrm{vdev}}(x)=\sum_{i\in\mathcal N}w_i\bigl(V_{m,i}-V_{\mathrm{ref}}
+\bigr)^2,\qquad w_i\ge0,
+\end{equation}
+$\mathcal N$ 为受控节点集。这是 $V_m$ 的凸二次型（Hessian
+$\operatorname{diag}(2w_i)\succeq0$）。多目标情形取加权和
+$f=f_{\mathrm{cost}}+w_V f_{\mathrm{vdev}}+w_{\mathrm{loss}}f_{\mathrm{loss}}$，
+权重量纲不一致时需按第~\ref{sec:opf-th-gen-conditioning}~节的缩放讨论折算。
+\end{definition}
+
+\subsection{KKT 最优性条件与节点电价的对偶解释}\label{sec:opf-th-gen-kkt-lmp}
+
+\begin{definition}[LICQ 与 KKT 点]\label{def:opf-th-gen-kkt}
+记 $x^*$ 处起作用不等式集 $\mathcal A(x^*)=\{i:h_i(x^*)=0\}$。若
+$\{\nabla g_j(x^*)\}\cup\{\nabla h_i(x^*):i\in\mathcal A(x^*)\}$ 线性无关，
+称 $x^*$ 满足线性无关约束规范（LICQ）。KKT 条件为：存在
+$\lambda^*,z^*$ 使
+\begin{align}
+\nabla_x\mathcal L(x^*,\lambda^*,z^*)&=0,
+& g(x^*)&=0,\label{eq:opf-th-gen-kkt1}\\
+h(x^*)&\le0,\quad z^*\ge0,
+& z_i^*h_i(x^*)&=0\ \ \forall i .
+\label{eq:opf-th-gen-kkt2}
+\end{align}
+\end{definition}
+
+\begin{theorem}[KKT 必要性]\label{thm:opf-th-gen-kkt-nec}
+设 $f,g,h$ 连续可微，$x^*$ 为式~\eqref{eq:opf-th-gen-standard} 的局部解且
+LICQ 成立，则存在唯一乘子 $(\lambda^*,z^*)$ 满足
+式~\eqref{eq:opf-th-gen-kkt1}--\eqref{eq:opf-th-gen-kkt2}
+\cite{opft:kuhn-tucker,opft:nocedal-wright,opft:bertsekas-nlp}。
+\end{theorem}
+
+证明的完整展开属标准非线性规划教材（Farkas 引理 + 可行方向锥刻画），此处
+从略；本章需要的是其乘子的经济学解释。
+
+\begin{lemma}[扰动 KKT 映射的可微性]\label{lem:opf-th-gen-ift}
+设 $x^*$ 为局部解，LICQ、严格互补（$z_i^*>0$ 对 $i\in\mathcal A(x^*)$，
+$z_i^*=0$ 且 $h_i(x^*)<0$ 对其余）与二阶充分条件（$W^*=\nabla^2_{xx}
+\mathcal L^*$ 在临界锥上正定）成立。对等式右端扰动
+\begin{equation}
+P(d):\quad \min_x f(x)\quad\text{s.t.}\quad g(x)=d,\quad
+h_i(x)=0\ (i\in\mathcal A(x^*)),
+\end{equation}
+值函数 $V(d)=f(x(d))$ 在 $d=0$ 的邻域内良定且光滑，且 KKT 映射
+$F(w;d)=0$（$w=(x,\lambda)$，$F=(\nabla f+A_E^{\mathsf T}\lambda,\,
+g(x)-d)$）的雅可比
+\begin{equation}
+\frac{\partial F}{\partial w}=
+\begin{bmatrix}W^*&A_E^{\mathsf T}\\ A_E&0\end{bmatrix}
+\label{eq:opf-th-gen-kktmat}
+\end{equation}
+在 $w^*$ 非奇异。
+\end{lemma}
+
+\begin{proof}
+只需证式~\eqref{eq:opf-th-gen-kktmat} 的零空间平凡。设
+$W^*u+A_E^{\mathsf T}v=0$、$A_Eu=0$。第一式左乘 $u^{\mathsf T}$ 并用
+$A_Eu=0$ 得 $u^{\mathsf T}W^*u=0$。临界锥在起作用等式活动集冻结后即
+$\ker A_E$，二阶充分条件给出 $u^{\mathsf T}W^*u=0\Rightarrow u=0$。
+于是 $A_E^{\mathsf T}v=0$，LICQ（$A_E$ 行满秩）给出 $v=0$。隐函数定理
+给出 $w(d)$ 光滑，$V(d)=f(x(d))$ 随之光滑。
+\end{proof}
+
+\begin{theorem}[功率平衡乘子等于节点电价]\label{thm:opf-th-gen-lmp}
+在引理~\ref{lem:opf-th-gen-ift} 的假设下，值函数对负荷扰动的梯度为
+\begin{equation}
+\frac{\partial V}{\partial d_j}\Big|_{d=0}=-\lambda_j^*.
+\label{eq:opf-th-gen-shadow}
+\end{equation}
+取功率平衡约定 $g_i(x)=P_i^{\mathrm{inj}}(x)-P_i^d=0$（注入减负荷），
+负荷增加 $d_i$ 即 $g_i(x)=d_i$，则节点 $i$ 增加单位负荷引起的最优费用
+增量（节点电价，LMP\cite{opft:schweppe-spot}）为
+\begin{equation}
+\mathrm{LMP}_i=\frac{\partial V}{\partial P_i^d}=-\lambda_i^*,
+\label{eq:opf-th-gen-lmp}
+\end{equation}
+符号取决于等式书写方向；取相反约定（负荷减注入）则 $\mathrm{LMP}_i=
+\lambda_i^*$。
+\end{theorem}
+
+\begin{proof}
+对 $d$ 微分 $V(d)=f(x(d))$：
+$\partial V/\partial d_j=\nabla f(x^*)^{\mathsf T}\,\partial x/\partial d_j$。
+驻点条件 $\nabla f=-A_E^{\mathsf T}\lambda^*$ 代入得
+\begin{equation}
+\frac{\partial V}{\partial d_j}
+=-(\lambda^*)^{\mathsf T}A_E\,\frac{\partial x}{\partial d_j}.
+\end{equation}
+可行性 $g(x(d))=d$ 对 $d$ 微分给出
+$A_E\,\partial x/\partial d_j=e_j$（第 $j$ 个单位向量），故
+$\partial V/\partial d_j=-(\lambda^*)^{\mathsf T}e_j=-\lambda_j^*$。
+\end{proof}
+
+\begin{remark}[解释与适用边界]\label{rem:opf-th-gen-lmp-scope}
+(i) 定理~\ref{thm:opf-th-gen-lmp} 是\emph{局部}灵敏度结论：依赖 LICQ、
+严格互补与二阶充分条件，且非凸问题的乘子只对所选局部解有效；约束集合
+变化（新支路越限进入活动集）时 LMP 会出现跳跃（阻塞分量）。(ii) 严格
+互补失效（退化）时乘子不唯一，LMP 取某一极值乘子，经济解释需小心。
+(iii) DC OPF 为线性规划，定理~\ref{thm:opf-th-gen-lmp} 在 LP 意义下
+全局成立：节点电价 $=$ 平衡行对偶，且 LMP 分解为能量分量 + 阻塞分量 +
+网损分量（无损 DC 口径下无网损分量）。平台 Parity IPM 从等式对偶提取
+\fld{lmp\_p}/\fld{lmp\_q} 并以 \fld{lmp\_valid} 声明证书边界；
+嵌入式 Ipopt 适配器不回传乘子，对应 LMP 记为不可用——这正是
+"乘子证书必须与求解器实际产出对齐"的诚实口径。
+\end{remark}
+
+\subsection{原--对偶内点法}\label{sec:opf-th-gen-ipm}
+
+\subsubsection{障碍问题与中心路径}
+
+\begin{definition}[对数障碍问题与扰动 KKT 系统]\label{def:opf-th-gen-barrier}
+对 $\mu>0$，式~\eqref{eq:opf-th-gen-standard} 的对数障碍问题为
+\begin{equation}
+\min_{x,s}\ \varphi_\mu(x,s)=f(x)-\mu\sum_{i=1}^{m_I}\ln s_i
+\qquad\text{s.t.}\quad g(x)=0,\quad h(x)+s=0 .
+\label{eq:opf-th-gen-barrier}
+\end{equation}
+其一阶最优性条件（对 $s_i$ 求导得 $z_i=\mu/s_i$）整理为\emph{扰动 KKT
+系统}：求 $w=(x,s,\lambda,z)$ 使
+\begin{equation}
+F_\mu(w)=
+\begin{bmatrix}
+\nabla_x\mathcal L(x,\lambda,z)\\
+g(x)\\
+h(x)+s\\
+SZe-\mu e
+\end{bmatrix}=0,\qquad s>0,\ z>0 .
+\label{eq:opf-th-gen-perturbed-kkt}
+\end{equation}
+$\mu=0$ 时退化为式~\eqref{eq:opf-th-gen-kkt1}--\eqref{eq:opf-th-gen-kkt2}
+的等式化形式；$\mu>0$ 把互补条件 $z_ih_i=0$ 光滑化为 $s_iz_i=\mu$。
+障碍法思想源于 Fiacco--McCormick\cite{opft:fiacco-mccormick}。
+\end{definition}
+
+\begin{definition}[中心路径]\label{def:opf-th-gen-central-path}
+\emph{中心路径}为映射
+$\mathcal C=\{w(\mu):\mu>0,\ F_\mu(w(\mu))=0,\ s(\mu),z(\mu)>0\}$。
+原--对偶内点法的计算策略是：沿 $\mathcal C$ 的某邻域以 Newton 步追踪，
+同时驱动 $\mu\to0$，使 $w(\mu)$ 逼近 KKT 点 $w^*=w(0)$
+\cite{opft:wright-ipm,opft:forsgren-gill-wright}。
+\end{definition}
+
+\begin{theorem}[凸 LP 中心路径的对偶间隙刻画]\label{thm:opf-th-gen-gap}
+考虑线性规划 $\min c^{\mathsf T}x$ s.t. $Ax=b$、$x\ge0$ 及其对偶
+$\max b^{\mathsf T}y$ s.t. $A^{\mathsf T}y+z=c$、$z\ge0$。中心路径上
+任一点 $(x(\mu),y(\mu),z(\mu))$ 严格原始/对偶可行，且对偶间隙恰为
+\begin{equation}
+c^{\mathsf T}x(\mu)-b^{\mathsf T}y(\mu)=n\mu .
+\label{eq:opf-th-gen-gap}
+\end{equation}
+因此 $\mu\to0$ 时原始目标单调逼近最优值，$w(\mu)$ 的任一聚点为最优解。
+\end{theorem}
+
+\begin{proof}
+中心路径点满足 $Ax=b$、$A^{\mathsf T}y+z=c$、$XZe=\mu e$。于是
+\begin{equation}
+c^{\mathsf T}x-b^{\mathsf T}y
+=(A^{\mathsf T}y+z)^{\mathsf T}x-(Ax)^{\mathsf T}y
+=z^{\mathsf T}x=\sum_{i=1}^n x_iz_i=n\mu .
+\end{equation}
+对偶理论中 $b^{\mathsf T}y\le f^*\le c^{\mathsf T}x$，故
+$0\le c^{\mathsf T}x(\mu)-f^*\le n\mu\to0$；由严格可行性 $x,z>0$ 与
+间隙归零，聚点满足全部 LP 最优性条件。
+\end{proof}
+
+\begin{remark}[从 LP 到非凸 NLP]\label{rem:opf-th-gen-nlp-caveat}
+定理~\ref{thm:opf-th-gen-gap} 的间隙证书依赖凸性（LP/凸 QP 的原对偶
+间隙为零）。对 AC OPF 这类非凸问题，中心路径仍在 LICQ + 二阶充分条件 +
+严格互补成立的邻域内局部存在且光滑（由引理~\ref{lem:opf-th-gen-ift} 的
+同一非奇异性），但 $n\mu$ 不再具有全局间隙含义，只能作为局部互补度量。
+凸 QP 情形的多项式复杂度见定理~\ref{thm:opf-th-gen-complexity}。
+\end{remark}
+
+\subsubsection{Newton 系统：凝聚与增广两种形式}
+
+对 $F_\mu(w)=0$ 做 Newton：记 $W=\nabla^2_{xx}\mathcal L$，扰动 KKT 的
+雅可比给出线性系统
+\begin{equation}
+\begin{bmatrix}
+W & A_E^{\mathsf T} & A_I^{\mathsf T} & 0\\
+A_E & 0 & 0 & 0\\
+A_I & 0 & 0 & I\\
+0 & 0 & S & Z
+\end{bmatrix}
+\begin{bmatrix}\Delta x\\ \Delta\lambda\\ \Delta s\\ \Delta z\end{bmatrix}
+=-
+\begin{bmatrix}
+\nabla_x\mathcal L\\ g\\ h+s\\ SZe-\mu e
+\end{bmatrix}.
+\label{eq:opf-th-gen-newton4}
+\end{equation}
+两种降维方式：
+\begin{itemize}
+  \item \textbf{凝聚（condensed）形式}：由末行 $\Delta s=-s-S^{-1}Z
+        \Delta s$ 型消去链消去 $\Delta s,\Delta z$（$\Delta z=S^{-1}
+        (\mu e-SZe-Z\Delta s)$），得 $(n+m_E)$ 阶对称不定系统
+        \begin{equation}
+        \begin{bmatrix}W+A_I^{\mathsf T}S^{-1}ZA_I&A_E^{\mathsf T}\\
+        A_E&0\end{bmatrix}
+        \begin{bmatrix}\Delta x\\ \Delta\lambda\end{bmatrix}=\text{rhs},
+        \label{eq:opf-th-gen-condensed}
+        \end{equation}
+        其中 $\Sigma=S^{-1}Z$ 为斜对角权重；规模小但 $\Sigma$ 病态
+        （第~\ref{sec:opf-th-gen-conditioning}~节），且三重积
+        $A_I^{\mathsf T}\Sigma A_I$ 增加填充；
+  \item \textbf{增广（augmented）形式}：保留不等式块为
+        $[A_I, -ZS^{-1}]$ 两行块，$(n+m_E+m_I)$ 阶，避免三重积，
+        且 (2,2) 块元素量级受控，配合 LDL$^{\mathsf T}$ 惯性回读可做
+        正则化（第~\ref{sec:opf-th-gen-convergence}~节）。
+\end{itemize}
+
+\subsubsection{Mehrotra 预估校正}
+
+\begin{definition}[仿射方向与中心性参数]\label{def:opf-th-gen-mehrotra}
+Mehrotra 预估校正\cite{opft:mehrotra} 每迭代步分两步：
+\begin{enumerate}
+  \item \textbf{预估（仿射）步}：解式~\eqref{eq:opf-th-gen-newton4} 取
+        $\mu=0$ 的右端，得仿射方向 $(\Delta^{\mathrm{aff}}x,
+        \Delta^{\mathrm{aff}}s,\Delta^{\mathrm{aff}}\lambda,
+        \Delta^{\mathrm{aff}}z)$；按式~\eqref{eq:opf-th-gen-ftb} 计算
+        仿射步长 $\alpha_p^{\mathrm{aff}},\alpha_d^{\mathrm{aff}}$ 与
+        仿射对偶度量
+        \begin{equation}
+        \mu_{\mathrm{aff}}=\frac{(s+\alpha_p^{\mathrm{aff}}
+        \Delta^{\mathrm{aff}}s)^{\mathsf T}(z+\alpha_d^{\mathrm{aff}}
+        \Delta^{\mathrm{aff}}z)}{m_I},
+        \qquad \sigma=\Bigl(\frac{\mu_{\mathrm{aff}}}{\mu}\Bigr)^3,
+        \label{eq:opf-th-gen-sigma}
+        \end{equation}
+        $\sigma\in[0,1]$ 为中心性参数；
+  \item \textbf{校正步}：解同一系数矩阵、右端互补块改为
+        $\sigma\mu e-SZe-\Delta^{\mathrm{aff}}S\Delta^{\mathrm{aff}}Ze$
+        的 Newton 系统，叠加到仿射方向上。
+\end{enumerate}
+\end{definition}
+
+\begin{lemma}[校正步右端的二阶来源]\label{lem:opf-th-gen-corrector}
+要求校正后 $(s+\Delta s)(z+\Delta z)=\sigma\mu e$ 成立到一阶项、并把
+仿射步的二次交叉项显式补偿，则校正系统的互补块右端恰为
+$\sigma\mu e-SZe-\Delta^{\mathrm{aff}}S\Delta^{\mathrm{aff}}Ze$。
+\end{lemma}
+
+\begin{proof}
+逐分量展开
+\begin{equation}
+(s_i+\Delta s_i)(z_i+\Delta z_i)
+=s_iz_i+s_i\Delta z_i+z_i\Delta s_i+\Delta s_i\Delta z_i
+\stackrel{!}{=}\sigma\mu .
+\end{equation}
+移项得 $s_i\Delta z_i+z_i\Delta s_i=\sigma\mu-s_iz_i-\Delta s_i\Delta z_i$。
+纯 Newton（一阶）丢弃 $\Delta s_i\Delta z_i$，恰是仿射步过度削减互补积的
+误差来源；Mehrotra 校正以仿射方向的已知量近似
+$\Delta s_i\Delta z_i\approx\Delta^{\mathrm{aff}}s_i
+\Delta^{\mathrm{aff}}z_i$ 代入右端，即得结论。
+\end{proof}
+
+\begin{remark}[$\sigma$ 三次方规则的直觉]\label{rem:opf-th-gen-sigma3}
+$\mu_{\mathrm{aff}}\ll\mu$ 表明仿射方向几乎无阻碍地削减间隙，应激进
+（$\sigma\to0$）；$\mu_{\mathrm{aff}}\approx\mu$ 表明边界近、需中心化
+（$\sigma\to1$）。三次方放大两种情形的对比，是 Mehotra 规则
+\cite{opft:mehrotra} 在 LP/QP 上被广泛验证的经验选择；NLP 扩展中另有
+动态 $\mu$ 更新，如 Armand--Benoist--Orban 的
+$\mu^+=\mu^2/\mu_0$（超线性更新函数\cite{opft:armand-benoist-orban}），
+以及 Gondzio 的多次中心校正\cite{opft:gondzio}。
+\end{remark}
+
+\subsubsection{步长选取与全局化}
+
+\begin{definition}[fraction-to-boundary 规则]\label{def:opf-th-gen-ftb}
+给定方向与内点保持系数 $\tau\in(0,1)$（典型 $0.99\sim0.995$），原始/对偶
+步长分别取
+\begin{equation}
+\alpha_p=\max\Bigl\{\alpha\le1:\ s+\alpha\Delta s\ge(1-\tau)s\Bigr\},\qquad
+\alpha_d=\max\Bigl\{\alpha\le1:\ z+\alpha\Delta z\ge(1-\tau)z\Bigr\},
+\label{eq:opf-th-gen-ftb}
+\end{equation}
+即 $\alpha_p=\min\bigl(1,\ \tau\cdot\min_{i:\Delta s_i<0}
+(-s_i/\Delta s_i)\bigr)$。该规则保证 $s,z$ 严格正，是内点法与活动集法
+的分水岭。
+\end{definition}
+
+\begin{remark}[全局化的三条路线]\label{rem:opf-th-gen-globalization}
+全步 Newton 在非线性 OPF 上不全局收敛，需要步接受机制：
+(i) \textbf{merit 函数线搜索}：以 $\varphi_\mu$ 加等式残差罚构造单一
+下降函数，Armijo 回溯；
+(ii) \textbf{滤子（filter）}：把"可行性 $\theta(x)=\lVert g(x)\rVert$
+（含 $h(x)+s$）"与"目标 $\varphi_\mu$"视为双目标，滤子记录不可支配的
+$(\theta,\varphi)$ 对，试探步需对当前点与全部历史对至少一轴做出充分
+下降\cite{opft:fletcher-leyffer,opft:waechter-biegler}；
+(iii) \textbf{信赖域}。滤子法相对 merit 法免去了罚参数整定，是 Ipopt
+的标准全局化；其全局收敛性见
+定理~\ref{thm:opf-th-gen-filter-global}。回溯耗尽时进入可行性恢复
+（第~\ref{sec:opf-th-gen-phase1}~节）。
+\end{remark}
+
+\subsubsection{多项式复杂度}
+
+\begin{theorem}[凸情形的迭代复杂度]\label{thm:opf-th-gen-complexity}
+对凸二次规划（含 LP），短步原--对偶路径追踪法在窄邻域
+$\mathcal N_2(\theta)=\{w:\lVert SZe-\mu e\rVert_2\le\theta\mu\}$ 内取
+固定缩减率的 $\mu$ 更新，至多
+\begin{equation}
+O\bigl(\sqrt{n}\,\log(1/\varepsilon)\bigr)
+\end{equation}
+次迭代把对偶间隙降至 $\varepsilon$（Monteiro--Adler
+\cite{opft:monteiro-adler}；系统处理见 \cite{opft:wright-ipm}；自和谐
+障碍函数的一般理论见 \cite{opft:nesterov-nemirovskii}）。长步版本为
+$O(n\log(1/\varepsilon))$。
+\end{theorem}
+
+证明（中心性二次收缩 + 每步 $\mu$ 几何缩减的组合估计）从略，见所引文献。
+该结论是内点法取代活动集单纯形在电力 LP/QP（DC OPF）中普及的理论基础；
+对非凸 AC OPF 无对应多项式保证，复杂度结论只保留"每步一次稀疏 KKT 分解"
+的成本刻画。
+
+\subsection{IPM 收敛性理论}\label{sec:opf-th-gen-convergence}
+
+\subsubsection{局部收敛速率}
+
+\begin{theorem}[扰动 KKT Newton 的局部二次收敛]\label{thm:opf-th-gen-localquad}
+设 $w^*$ 为 KKT 点，LICQ、二阶充分条件与严格互补成立，$f,g,h$ 二阶
+Lipschitz 连续可微。则存在 $\bar\mu>0$ 与 $w^*$ 的邻域 $\Omega$，使对
+一切 $\mu\in(0,\bar\mu]$：中心路径点 $w(\mu)$ 在 $\Omega$ 内唯一，
+$DF_\mu(w)$ 在 $\Omega$ 内一致非奇异，且自 $\Omega$ 内任一点出发的
+$F_\mu$ Newton 迭代二次收敛于 $w(\mu)$。
+\end{theorem}
+
+\begin{proof}
+$DF_\mu$ 在 $\mu=0$ 处即式~\eqref{eq:opf-th-gen-newton4} 的系数矩阵。
+其左上角块经消去 $\Delta s,\Delta z$（严格互补保证 $S^*+Z^*$ 逐分量正，
+$S^*Z^*$ 对角元或零或正，$S^{-1}Z$ 在 $\mu\to0$ 时良定义于极限）化为
+式~\eqref{eq:opf-th-gen-kktmat} 型 KKT 矩阵，由引理~\ref{lem:opf-th-gen-ift}
+在 $w^*$ 非奇异。非奇异集的补集是闭集，故存在 $\bar\mu$ 与邻域使
+$DF_\mu$ 一致非奇异、$\lVert DF_\mu^{-1}\rVert$ 一致有界。$DF_\mu$ 由
+二阶导数构成，Lipschitz 连续。标准 Newton 局部收敛定理（Lipschitz 雅可比
++ 一致有界逆 $\Rightarrow$ 二次收敛，见
+\cite{opft:nocedal-wright}）即得结论。
+\end{proof}
+
+\begin{remark}[超线性与二次端到端速率]\label{rem:opf-th-gen-superlinear}
+定理~\ref{thm:opf-th-gen-localquad} 固定 $\mu$ 谈内层 Newton；端到端
+（外层 $\mu$ 更新）速率由 $\mu$ 缩减律决定：$\mu_{k+1}=o(\mu_k)$ 且步长
+趋于 $1$ 时原--对偶残差超线性收敛；$\mu_{k+1}=O(\mu_k^2)$（如
+Armand--Benoist--Orban 更新 $\mu^+=\mu^2/\mu_0$
+\cite{opft:armand-benoist-orban}）时达到二次。Mehrotra 规则
+式~\eqref{eq:opf-th-gen-sigma} 在全步恢复时自动给出
+$\sigma\approx(\mu_{\mathrm{aff}}/\mu)^3\to0$ 的激进缩减，实践中接近
+超线性\cite{opft:wright-ipm}。
+\end{remark}
+
+\subsubsection{KKT 惯性、正则化与不可行检测}
+
+\begin{theorem}[KKT 惯性判据]\label{thm:opf-th-gen-inertia}
+设 $A\in\mathbb R^{m\times n}$（$m\le n$）行满秩，$Z_0$ 的列张成
+$\ker A$，$W$ 对称。则
+\begin{equation}
+\operatorname{In}\begin{bmatrix}W&A^{\mathsf T}\\ A&0\end{bmatrix}
+=(n,m,0)\quad\Longleftrightarrow\quad Z_0^{\mathsf T}WZ_0\succ0,
+\label{eq:opf-th-gen-inertia}
+\end{equation}
+即约化 Hessian 在零空间上正定，当且仅当 KKT 矩阵恰有 $n$ 正、$m$ 负
+特征值\cite{opft:gould-inertia}。
+\end{theorem}
+
+\begin{proof}
+取 $n\times n$ 非奇异阵 $T=[Z_0\ Y]$ 使 $AY$ 非奇异（行满秩可做到）。
+构造合同变换
+\begin{equation}
+\widehat K=
+\begin{bmatrix}T^{\mathsf T}&0\\0&I_m\end{bmatrix}
+\begin{bmatrix}W&A^{\mathsf T}\\A&0\end{bmatrix}
+\begin{bmatrix}T&0\\0&I_m\end{bmatrix}
+=
+\begin{bmatrix}
+Z_0^{\mathsf T}WZ_0 & Z_0^{\mathsf T}WY & 0\\
+Y^{\mathsf T}WZ_0 & Y^{\mathsf T}WY & (AY)^{\mathsf T}\\
+0 & AY & 0
+\end{bmatrix}.
+\end{equation}
+Sylvester 惯性律：合同变换不改变惯性。若 $Z_0^{\mathsf T}WZ_0\succ0$，
+以其为 pivots 做块 Schur 补，余下 $2m$ 阶块
+$\begin{bmatrix}*&(AY)^{\mathsf T}\\AY&0\end{bmatrix}$；
+$AY$ 非奇异蕴含该块特征值成对 $\pm$（其平方为
+$\begin{bmatrix}(AY)^{\mathsf T}AY+\cdots&\cdot\\\cdot&
+AY(AY)^{\mathsf T}\end{bmatrix}$ 型，正负各 $m$），故惯性
+$(n-m,0,0)+(m,m,0)=(n,m,0)$。反之，若 $\operatorname{In}=(n,m,0)$，
+先证 $Z_0^{\mathsf T}WZ_0$ 非奇异（否则存在 $u\neq0$，
+$Z_0^{\mathsf T}WZ_0u=0$，可得 KKT 奇异，与全惯性矛盾），再对
+$\widehat K$ 以 $Z_0^{\mathsf T}WZ_0$ 取 Schur 补：惯性可加性给出
+$\operatorname{In}(Z_0^{\mathsf T}WZ_0)+(m,m,0)=(n,m,0)$，故
+$\operatorname{In}(Z_0^{\mathsf T}WZ_0)=(n-m,0,0)$，即正定。
+\end{proof}
+
+\begin{remark}[$\delta_W/\delta_C$ 原对偶正则化]\label{rem:opf-th-gen-regularization}
+式~\eqref{eq:opf-th-gen-inertia} 给出内点法的可执行证书：若 LDL$^{\mathsf T}$
+分解器能回读负元计数（惯性），则每次分解可验证当前步是否为
+$\varphi_\mu$ 的下降方向。W\"achter--Biegler 正则化
+\cite{opft:waechter-biegler}：惯性不等于 $(n,m_E+m_I,0)$ 时对 (1,1) 块
+加 $\delta_W I$ 并递增重试（$\delta_W$ 从 $\kappa_w^- \lVert W\rVert$
+量级起步、按倍率升级、封顶）；$A_E$ 行亏秩（结构奇异）时对 (2,2) 块加
+$-\delta_C I$，代价是等式残差引入 $O(\delta_C\lVert\lambda\rVert)$ 量级
+误差，需按收敛容差选取 $\delta_C$。无惯性回读的 LU 类后端无法执行该
+证书，只能靠解精度诊断事后识别。
+\end{remark}
+
+\begin{remark}[不可行检测]\label{rem:opf-th-gen-infeasibility}
+非凸 NLP 不存在多项式时间不可行证书（Farkas 型证书只对线性系统存在）。
+内点法的实用不可行判据为：可行性恢复（第~\ref{sec:opf-th-gen-phase1}~节）
+收敛到 $\theta(x)>0$ 的驻点，或步长被 fraction-to-boundary 持续钳制在
+机器精度附近而可行性残差停滞——此时障碍问题趋于一个\emph{不可行的}
+平稳点，应声明疑似不可行而非继续迭代。凸 LP/QP 情形则可由
+"$\theta$ 不趋于 $0$ 而 $\mu\to0$"结合对偶理论给出较强结论
+\cite{opft:wright-ipm}。
+\end{remark}
+
+\subsection{初值与可行性恢复}\label{sec:opf-th-gen-phase1}
+
+\subsubsection{Phase I 原理与罚函数}
+
+内点法要求 $s,z>0$ 且希望初值接近中心路径。Phase I 的一般原理是先求
+可行（或低违反）点再移交主迭代：
+
+\begin{definition}[可行性度量与 Phase I 问题]\label{def:opf-th-gen-phase1}
+定义可行性度量
+$\theta(x,s)=\lVert g(x)\rVert+\lVert h(x)+s\rVert_+$
+（第二项为正向违反的范数）。Phase I 解
+\begin{equation}
+\min_{x,s\ge0}\ \theta(x,s)
+\qquad\text{或弹性（elastic）形式}\quad
+\min_{x,s\ge0,\,\xi\ge0}\ \rho\,\textstyle\sum\xi_i
+\quad\text{s.t.}\quad g(x)=\xi_E^+-\xi_E^- ,
+\label{eq:opf-th-gen-phase1}
+\end{equation}
+后者即把等式/不等式加松弛并最小化松弛总量。$\theta$ 降至容差即移交
+Phase II（原问题 IPM）；$\theta$ 收敛到正值驻点则疑似不可行
+（注记~\ref{rem:opf-th-gen-infeasibility}）。
+\end{definition}
+
+\begin{lemma}[二次罚的误差界]\label{lem:opf-th-gen-quadpen}
+设 $f$ 下有界于 $\underline f$，$x^*$ 为原问题全局解。二次罚问题
+$\min_x f(x)+\frac{\rho}{2}\lVert g(x)\rVert^2$ 的全局解 $x_\rho$ 满足
+\begin{equation}
+\lVert g(x_\rho)\rVert\le\sqrt{\frac{2\bigl(f(x^*)-\underline f\bigr)}{\rho}}
+=O(\rho^{-1/2}).
+\end{equation}
+若 LICQ 在最优点成立，可改进为 $\lVert g(x_\rho)\rVert=O(\rho^{-1})$，
+且罚 Hessian 条件数 $\kappa=O(\rho)$——罚方法精度与病态不可兼得，这正
+是障碍法取代罚方法的原因之一\cite{opft:fiacco-mccormick}。
+\end{lemma}
+
+\begin{proof}
+$x_\rho$ 全局最优给出
+$f(x_\rho)+\frac{\rho}{2}\lVert g(x_\rho)\rVert^2\le f(x^*)$
+（$x^*$ 可行，罚项为零）。由 $f(x_\rho)\ge\underline f$ 移项开方即得。
+LICQ 改进与条件数估计为标准的乘子误差分析（见 \cite{opft:nocedal-wright}
+罚方法章），从略。
+\end{proof}
+
+\begin{proposition}[$\ell_1$ 精确罚]\label{prop:opf-th-gen-exactpen}
+设 $x^*$ 为 $\min f$ s.t. $g(x)=0$ 的局部解，LICQ 成立，乘子
+$\lambda^*$。则对
+\begin{equation}
+\rho>\lVert\lambda^*\rVert_\infty,
+\end{equation}
+$x^*$ 是精确罚函数 $\phi_\rho(x)=f(x)+\rho\lVert g(x)\rVert_1$ 的严格
+局部极小点\cite{opft:nocedal-wright}。
+\end{proposition}
+
+\begin{proof}
+$\phi_\rho$ 在 $x^*$ 沿方向 $p$ 的方向导数为
+\begin{equation}
+D\phi_\rho(x^*;p)=\nabla f(x^*)^{\mathsf T}p+\rho\lVert A_Ep\rVert_1
+=-(\lambda^*)^{\mathsf T}A_Ep+\rho\sum_j|(A_Ep)_j|
+\ge\bigl(\rho-\lVert\lambda^*\rVert_\infty\bigr)\lVert A_Ep\rVert_1,
+\end{equation}
+第一步用驻点条件 $\nabla f=-A_E^{\mathsf T}\lambda^*$ 与
+$g(x^*)=0$（故 $\lVert\cdot\rVert_1$ 在 $x^*$ 的方向导数为
+$\lVert A_Ep\rVert_1$）。当 $A_Ep\neq0$，$\rho>\lVert\lambda^*\rVert_\infty$
+给出严格正增长。当 $A_Ep=0$ 且 $p\neq0$：$p$ 为线性化可行方向，
+二阶充分条件给出二次增长；LICQ 保证该分解覆盖所有方向（$A_E$ 行满秩，
+$\mathbb R^n=\ker A_E\oplus\operatorname{range}A_E^{\mathsf T}$），
+故 $x^*$ 严格局部极小。
+\end{proof}
+
+\begin{remark}[$\ell_1$ 罚在电力中的形态]\label{rem:opf-th-gen-voll}
+命题~\ref{prop:opf-th-gen-exactpen} 的工程对应物是失负荷价值（VOLL）：
+把切负荷 $\Delta P^d\ge0$ 以单价 $\mathrm{VOLL}$ 计入目标，相当于对功率
+平衡施加 $\ell_1$ 松弛；VOLL 超过最大边际乘子即满足精确性阈值，原问题
+可行时切负荷恒为零。这是 DC OPF 与可行性恢复共用的机制。
+\end{remark}
+
+\subsubsection{滤子法一般原理}
+
+\begin{definition}[滤子与支配]\label{def:opf-th-gen-filter}
+滤子 $\mathcal F$ 是不可支配对 $(\theta_k,\varphi_k)$ 的集合：称点 $x$
+被滤子接受，若对每对 $(\theta_k,\varphi_k)\in\mathcal F$ 至少满足
+\begin{equation}
+\theta(x)\le(1-\gamma_\theta)\theta_k
+\quad\text{或}\quad
+\varphi(x)\le\varphi_k-\gamma_\varphi\theta_k,
+\end{equation}
+$\gamma_\theta,\gamma_\varphi\in(0,1)$ 为充分下降裕度。试探点被接受则
+入列（视步型决定是否入滤子），被拒则回溯；回溯耗尽触发可行性恢复。
+\end{definition}
+
+\begin{theorem}[滤子方法全局收敛（陈述）]\label{thm:opf-th-gen-filter-global}
+在约束规范与步长的标准假设下，滤子-SQP 产生的迭代列或发散到不可行
+（被恢复机制接管），或任一聚点为 KKT 点\cite{opft:fletcher-leyffer}；
+障碍-滤子变体（以 $\varphi_\mu$ 为目标轴）对 NLP 内点法同样成立
+\cite{opft:waechter-biegler}。
+\end{theorem}
+
+证明依赖罚函数无关的 Cauchy 步与临界性度量分析，从略。要点是：滤子
+以双目标充分下降替代单一 merit 函数的罚参数，避免了
+引理~\ref{lem:opf-th-gen-quadpen} 的"精度-病态"两难。
+
+\begin{gapnote}
+平台自研 Parity IPM 的 Phase I 是\textbf{有界暖启动产生器}而非完整
+可行性恢复 NLP：它在预算内构造满足移交走廊（primal 残差与中心性双门限，
+对应 \fld{IPMOptions} 的 phase-one 因子族）的初值即移交 Phase II，不做
+弹性模式的 $\ell_1$ 松弛最小化；完整可行性恢复（restoration）只有嵌入式
+Ipopt 后端具备。滤子全局化在小规模 KKT 上默认不启用（历史路径），可经
+环境变量强制开启。
+\end{gapnote}
+
+\subsection{数值性质：KKT 病态来源与缩放}\label{sec:opf-th-gen-conditioning}
+
+\subsubsection{病态的三个结构性来源}
+
+\begin{proposition}[障碍凝聚带来的 $\Theta(1/\mu)$ 病态]\label{prop:opf-th-gen-mu-cond}
+在严格互补的 KKT 点邻域内，凝聚系统
+式~\eqref{eq:opf-th-gen-condensed} 中 $\Sigma=S^{-1}Z$ 的对角元满足：
+起作用约束（$s_i\to0$，$z_i\to z_i^*>0$）上
+$\sigma_i=z_i/s_i=\Theta(1/\mu)$；不起作用约束（$s_i\to s_i^*>0$，
+$z_i\to0$）上 $\sigma_i=\Theta(\mu)$。设 $A_I$ 起作用行独立、$W$ 有界，
+则凝聚 (1,1) 块 $\widetilde W=W+A_I^{\mathsf T}\Sigma A_I$ 的条件数
+$\kappa(\widetilde W)=\Theta(1/\mu)$。
+\end{proposition}
+
+\begin{proof}
+中心路径上 $s_iz_i=\mu$。起作用：$z_i\to z_i^*>0$ 给出
+$s_i=\mu/z_i=\Theta(\mu)$，$\sigma_i=z_i^2/\mu=\Theta(1/\mu)$；不起作用
+同理 $\sigma_i=\Theta(\mu)$。$\widetilde W$ 的最大特征值：取起作用集
+$\mathcal A$ 的 $A_{I,\mathcal A}$ 行空间内单位向量 $u$（$A_{I,\mathcal A}
+^{\mathsf T}$ 列独立保证存在 $v$ 使 $u=A_{I,\mathcal A}^{\mathsf T}v$ 且
+$\lVert A_{I,\mathcal A}u\rVert$ 有正下界），则
+$u^{\mathsf T}\widetilde Wu\ge\sigma_{\min}^{\mathcal A}
+\lVert A_{I,\mathcal A}u\rVert^2-|u^{\mathsf T}Wu|=\Theta(1/\mu)$。
+最小特征值由 $W$ 在与起作用行正交方向上的正定性（二阶充分条件）控制，
+$\Theta(1)$。两式相除即 $\kappa=\Theta(1/\mu)$。
+\end{proof}
+
+\begin{remark}[其余两个来源]\label{rem:opf-th-gen-cond-sources}
+(ii) \textbf{物理量纲悬殊}：交直流混合模型中直流线路电导可达
+$10^2\sim10^3$~pu，与电压幅值 $O(1)$、相角 $O(10^{-1})$ 的系数共存于
+同一 KKT 系统，行/列范数跨 $4$ 个以上数量级，直接放大有效条件数；
+(iii) \textbf{近简并与亏秩}：零阻抗支路、参考钉扎与换流器耦合行使
+$A_E$ 接近亏秩，(2,2) 块正则化 $\delta_C$ 的引入（
+注记~\ref{rem:opf-th-gen-regularization}）本身又贡献了
+$O(1/\delta_C)$ 量级的奇异值展布。
+\end{remark}
+
+\subsubsection{标幺化与矩阵缩放}
+
+\begin{remark}[标幺化的条件数意义]\label{rem:opf-th-gen-perunit}
+标幺制（系统 $S_B$、节点额定 $V_B$）把电压幅值归一到 $O(1)$、功率归一
+到 $O(1)$，其数值本质是\textbf{对角行/列缩放}：变量代换 $x=D\hat x$、
+方程 $r=R\hat r$ 把 KKT 系统变为 $\widehat K=D^{\mathsf T}RK D$（合同
+/等价变换混合）。缩放不改变精确解，但改变条件数与浮点舍入的相对权重：
+未标幺的有名值模型（MW、kV 直接入方程）中
+$\kappa$ 可比标幺模型高 $2$~个数量级以上，直接侵蚀 IPM 可收敛的
+$\mu$ 下限（由 $u\kappa$ 决定，$u$ 为单位舍入）。
+\end{remark}
+
+\begin{definition}[Ruiz 均衡缩放]\label{def:opf-th-gen-ruiz}
+Ruiz 迭代\cite{opft:ruiz}：对矩阵 $K$ 反复做
+$K\leftarrow D_rKD_c$，其中 $D_r,D_c$ 逐次取当前行/列范数的倒数对角阵，
+直至行、列范数（$1$-、$2$- 或 $\infty$-范数）全部均衡到 $O(1)$。对具有
+匹配支撑（存在全非零对角的重排）的矩阵，该迭代收敛，极限矩阵行列范数
+恒一。
+\end{definition}
+
+\begin{remark}[缩放与分解精度]\label{rem:opf-th-gen-scaling-effect}
+对稀疏 LU/LDL$^{\mathsf T}$，行缩放决定 pivot 增长的相对判据，列缩放
+决定解分量的相对误差分配；Ruiz 均衡后带阈值部分 pivoting 的分解后向
+误差显著改善\cite{opft:ruiz}。注意缩放\textbf{不}改变
+命题~\ref{prop:opf-th-gen-mu-cond} 的 $\Theta(1/\mu)$ 渐近阶——那是
+障碍参数的结构性病态，只能靠增广形式（避免 $\Sigma$ 显式成块）与
+正则化缓解；缩放消除的是物理量纲与建模习惯引入的\emph{可乘}病态。
+两者叠加决定了 OPF KKT 分解的实际精度预算。
+\end{remark}
+
+\subsection{与实现的对应}\label{sec:opf-th-gen-implmap}
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{6.8cm}L{8.6cm}@{}}
+\toprule
+理论条目 & 实现状态\\
+\midrule
+\endfirsthead
+\toprule
+理论条目 & 实现状态\\
+\midrule
+\endhead
+OPF 标准形式（定义~\ref{def:opf-th-gen-standard}，全空间变量 + 显式
+等式/不等式/盒式界） &
+\implfull{include/hacdcpf/optimal\_power\_flow/formulation.hpp:Problem}（装配
+parity\_formulation.cpp:build\_problem；变量布局 VarIndex、约束布局
+ConstraintIndex、盒式界 build\_variable\_bounds）\\
+Stott 分类：全空间极坐标路线 &
+\implfull{src/optimal\_power\_flow/parity\_formulation.cpp:build\_problem}（全部
+状态/控制/耦合变量显式，潮流方程为显式等式行）\\
+Stott 分类：紧致（消参）极坐标路线 &
+\implfull{src/optimal\_power\_flow/ac\_opf.cpp:build\_index}（Native AC 紧致路径，
+潮流雅可比上下文 + 外环罚/栅栏处理非线性限值）\\
+直角坐标（rectangular）口径 &
+\implnone（两条引擎均为极坐标）\\
+二次费用目标与凸性判据（命题~\ref{prop:opf-th-gen-quadconvex}） &
+\implfull{src/optimal\_power\_flow/parity\_formulation.cpp:objective}（梯度与对角
+Hessian 见 objective\_gradient\_hessian\_diag；Native 口径
+ac\_opf.cpp:evaluate\_objective；负 $a_k$ 不做凸性检查）\\
+网损/电压偏差目标（注记~\ref{rem:opf-th-gen-lossobj}、
+定义~\ref{def:opf-th-gen-vdev}） &
+\implfull{src/optimal\_power\_flow/parity\_formulation.cpp:objective}（供 RPO 内层
+NLP，权重 active\_loss\_weight / voltage\_deviation\_weight）\\
+KKT 必要性与 LMP 影子价格解释（定理~\ref{thm:opf-th-gen-lmp}） &
+\implpart{Parity IPM 从等式对偶提取 lmp\_p/lmp\_q 并置 lmp\_valid
+（ac\_opf.cpp:solve\_with\_parity\_ipm）；DC OPF 经支撑 LP 恢复对偶
+（dc\_opf.cpp:populate\_missing\_duals\_from\_supporting\_lp）；嵌入式 Ipopt
+不回传乘子，LMP 记不可用}\\
+障碍问题、扰动 KKT 与中心路径（定义~\ref{def:opf-th-gen-barrier}） &
+\implfull{src/optimal\_power\_flow/parity\_ipm.cpp:solve\_primal\_dual\_ipm}（不等式
+与盒式界化松弛，Newton 作用于扰动 KKT）\\
+凝聚/增广两种 Newton 形式（式~\eqref{eq:opf-th-gen-condensed}） &
+\implfull{src/optimal\_power\_flow/parity\_ipm.cpp:factor\_kkt\_sparse\_augmented}
+（增广；凝聚路径 factor\_kkt\_sparse，稠密路径恒凝聚）\\
+Mehrotra 预估校正与 $\sigma=(\mu_{\mathrm{aff}}/\mu)^3$
+（定义~\ref{def:opf-th-gen-mehrotra}） &
+\implfull{src/optimal\_power\_flow/parity\_ipm.cpp:solve\_primal\_dual\_ipm}（含交叉项
+$\Delta^{\mathrm{aff}}S\Delta^{\mathrm{aff}}Ze$ 补偿及其钳制；另实现 ABO 动态
+$\mu$ 与 Gondzio 多次校正，环境变量 HACDCPF\_OPF\_MU\_STRATEGY 切换）\\
+fraction-to-boundary 步长（式~\eqref{eq:opf-th-gen-ftb}） &
+\implfull{src/optimal\_power\_flow/parity\_ipm.cpp:ftb}（原始/对偶分别取步，
+$\tau$ 对应选项 interior\_fraction）\\
+$(\theta,\varphi)$ 滤子全局化（定义~\ref{def:opf-th-gen-filter}） &
+\implpart{大 KKT（维度 $\ge512$）默认启用，含 domination memory 与
+$\theta_{\max}$ 守卫（solve\_primal\_dual\_ipm 内 filter 段）；小系统保持
+无监督全步，环境变量 HACDCPF\_OPF\_FILTER\_ALL 强制开启}\\
+凸情形多项式复杂度（定理~\ref{thm:opf-th-gen-complexity}） &
+\implnone（平台 IPM 面向非凸 NLP，无复杂度证书）\\
+局部超线性/二次速率（定理~\ref{thm:opf-th-gen-localquad}、
+注记~\ref{rem:opf-th-gen-superlinear}） &
+\implpart{无速率证书；ABO $\mu^+=\mu^2/\mu_0$ 更新按超线性构造实现于
+solve\_primal\_dual\_ipm，速率为实验观察}\\
+惯性判据与 $\delta_W/\delta_C$ 正则化（定理~\ref{thm:opf-th-gen-inertia}、
+注记~\ref{rem:opf-th-gen-regularization}） &
+\implfull{src/optimal\_power\_flow/parity\_ipm.cpp:factor\_kkt\_sparse\_augmented}
+（MUMPS LDL$^{\mathsf T}$ 回读负惯性，$\delta_W$ 逐次 $\times8$ 升级并封顶；
+$\delta_C$ 由 HACDCPF\_OPF\_DELTA\_C 调；LU 后端无惯性证书，靠
+solve\_degraded 后端升级兜底）\\
+不可行检测（注记~\ref{rem:opf-th-gen-infeasibility}） &
+\implpart{vacuous-step 规则（步长 $<10^{-7}$ 判方向不可用）与恢复/停机
+启发式（solve\_primal\_dual\_ipm），结果经 infeasibility\_hints 人读报告；
+无 Farkas 型不可行证书}\\
+Phase I 与移交走廊（定义~\ref{def:opf-th-gen-phase1}） &
+\implpart{parity\_ipm.cpp:restore\_phase\_one\_primal、
+initialize\_phase\_one\_duals 为预算受限的暖启动产生器 + 双门限移交走廊
+（IPMOptions 的 phase\_one 因子族）；非弹性模式可行性恢复 NLP，完整
+restoration 仅嵌入式 Ipopt 具备（ac\_opf.cpp:solve\_parity\_with\_ipopt）}\\
+$\ell_1$ 精确罚 / VOLL（命题~\ref{prop:opf-th-gen-exactpen}、
+注记~\ref{rem:opf-th-gen-voll}） &
+\implfull{src/optimal\_power\_flow/dc\_opf.cpp:build\_dc\_opf\_lp}（voll $\le0$ 时按
+最大边际成本自动折算精确阈值）；Native AC 外环罚见
+ac\_opf.cpp:solve\_ac\_opf\_impl\\
+滤子线搜索 NLP（定理~\ref{thm:opf-th-gen-filter-global}） &
+\implfull{src/optimal\_power\_flow/ac\_opf.cpp:build\_parity\_nlp\_input}（同一 Parity
+模型逐行映射为 engine::NLPModel，由嵌入式 Ipopt 执行滤子全局化）\\
+$\Theta(1/\mu)$ 结构性病态（命题~\ref{prop:opf-th-gen-mu-cond}） &
+\implpart{以增广形式 + 中心化重试（corrector 爆炸检测与 re-centering）间接
+缓解（solve\_primal\_dual\_ipm）；无显式条件数估计}\\
+标幺化与 Ruiz 均衡缩放（定义~\ref{def:opf-th-gen-ruiz}） &
+\implfull{src/optimal\_power\_flow/parity\_ipm.cpp:compute\_ruiz\_scaling}（KKT 分解前
+5 趟行列均衡；内部方程全平台标幺制，$S_B=100$~MVA）\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{参考文献}
+{\renewcommand{\section}[2]{}%
+\begin{thebibliography}{9}\small
+\bibitem{opft:carpentier} J.~Carpentier, Contribution \`a l'\'etude du
+dispatching \'economique, \emph{Bulletin de la Soci\'et\'e Fran\c{c}aise des
+\'Electriciens}, s\'erie 8, vol. 3, pp. 431--447, 1962.
+\bibitem{opft:dommel-tinney} H.~W. Dommel, W.~F. Tinney, Optimal power flow
+solutions, \emph{IEEE Transactions on Power Apparatus and Systems},
+vol. PAS-87, no. 10, pp. 1866--1876, 1968.
+\bibitem{opft:sun-etal} D.~I. Sun, B.~Ashley, B.~Brewer, A.~Hughes,
+W.~F. Tinney, Optimal power flow by Newton approach, \emph{IEEE Transactions
+on Power Apparatus and Systems}, vol. PAS-103, no. 10, pp. 2864--2880, 1984.
+\bibitem{opft:stott-alsac-monticelli} B.~Stott, O.~Alsa\c{c},
+A.~J. Monticelli, Security analysis and optimization, \emph{Proceedings of
+the IEEE}, vol. 75, no. 12, pp. 1623--1644, 1987.
+\bibitem{opft:momoh-review} J.~A. Momoh, R.~Adapa, M.~E. El-Hawary, A review
+of selected optimal power flow literature to 1993, \emph{IEEE Transactions on
+Power Systems}, vol. 14, no. 1, pp. 96--111, 1999.
+\bibitem{opft:capitanescu-scopf} F.~Capitanescu, J.~L. Martinez Ramos,
+P.~Panciatici, et al., State-of-the-art, challenges, and future trends in
+security constrained optimal power flow, \emph{Electric Power Systems
+Research}, vol. 81, no. 8, pp. 1731--1741, 2011.
+\bibitem{opft:cain-history} M.~B. Cain, R.~P. O'Neill, A.~Castillo, History
+of optimal power flow and formulations, FERC Staff Paper, 2012.
+\bibitem{opft:granville} S.~Granville, Optimal reactive dispatch through
+interior point methods, \emph{IEEE Transactions on Power Systems}, vol. 9,
+no. 1, pp. 136--146, 1994.
+\bibitem{opft:torres-quintana} G.~L. Torres, V.~H. Quintana, An interior-point
+method for nonlinear optimal power flow using voltage rectangular coordinates,
+\emph{IEEE Transactions on Power Systems}, vol. 13, no. 4, pp. 1211--1218,
+1998.
+\bibitem{opft:jabr-pdipm} R.~A. Jabr, A.~H. Coonick, B.~J. Cory, A primal-dual
+interior point method for optimal power flow dispatching, \emph{IEEE
+Transactions on Power Systems}, vol. 17, no. 3, pp. 654--662, 2002.
+\bibitem{opft:karmarkar} N.~Karmarkar, A new polynomial-time algorithm for
+linear programming, \emph{Combinatorica}, vol. 4, no. 4, pp. 373--395, 1984.
+\bibitem{opft:monteiro-adler} R.~D.~C. Monteiro, I.~Adler, Interior path
+following primal-dual algorithms. Part II: Convex quadratic programming,
+\emph{Mathematical Programming}, vol. 44, no. 1, pp. 43--66, 1989.
+\bibitem{opft:mehrotra} S.~Mehrotra, On the implementation of a primal-dual
+interior point method, \emph{SIAM Journal on Optimization}, vol. 2, no. 4,
+pp. 575--601, 1992.
+\bibitem{opft:gondzio} J.~Gondzio, Multiple centrality corrections in a
+primal-dual method for linear programming, \emph{Computational Optimization
+and Applications}, vol. 6, no. 2, pp. 137--156, 1996.
+\bibitem{opft:armand-benoist-orban} P.~Armand, J.~Benoist, D.~Orban, Dynamic
+updates of the barrier parameter in primal-dual methods for nonlinear
+programming, \emph{Computational Optimization and Applications}, vol. 41,
+no. 1, pp. 1--25, 2008.
+\bibitem{opft:wright-ipm} S.~J. Wright, \emph{Primal-Dual Interior-Point
+Methods}, SIAM, 1997.
+\bibitem{opft:nesterov-nemirovskii} Y.~Nesterov, A.~Nemirovskii,
+\emph{Interior-Point Polynomial Algorithms in Convex Programming}, SIAM, 1994.
+\bibitem{opft:fiacco-mccormick} A.~V. Fiacco, G.~P. McCormick,
+\emph{Nonlinear Programming: Sequential Unconstrained Minimization
+Techniques}, Wiley, 1968; SIAM reprint, 1990.
+\bibitem{opft:kuhn-tucker} H.~W. Kuhn, A.~W. Tucker, Nonlinear programming,
+in \emph{Proceedings of the Second Berkeley Symposium on Mathematical
+Statistics and Probability}, University of California Press, pp. 481--492,
+1951.
+\bibitem{opft:nocedal-wright} J.~Nocedal, S.~J. Wright, \emph{Numerical
+Optimization}, 2nd ed., Springer, 2006.
+\bibitem{opft:bertsekas-nlp} D.~P. Bertsekas, \emph{Nonlinear Programming},
+2nd ed., Athena Scientific, 1999.
+\bibitem{opft:schweppe-spot} F.~C. Schweppe, M.~C. Caramanis, R.~D. Tabors,
+R.~E. Bohn, \emph{Spot Pricing of Electricity}, Kluwer Academic Publishers,
+1988.
+\bibitem{opft:fletcher-leyffer} R.~Fletcher, S.~Leyffer, Nonlinear programming
+without a penalty function, \emph{Mathematical Programming}, vol. 91, no. 2,
+pp. 239--269, 2002.
+\bibitem{opft:waechter-biegler} A.~W\"achter, L.~T. Biegler, On the
+implementation of an interior-point filter line-search algorithm for
+large-scale nonlinear programming, \emph{Mathematical Programming}, vol. 106,
+no. 1, pp. 25--57, 2006.
+\bibitem{opft:forsgren-gill-wright} A.~Forsgren, P.~E. Gill, M.~H. Wright,
+Interior methods for nonlinear optimization, \emph{SIAM Review}, vol. 44,
+no. 4, pp. 525--597, 2002.
+\bibitem{opft:gould-inertia} N.~I.~M. Gould, On practical conditions for the
+existence and uniqueness of solutions to the general equality quadratic
+programming problem, \emph{Mathematical Programming}, vol. 32, no. 1,
+pp. 90--99, 1985.
+\bibitem{opft:ruiz} D.~Ruiz, A scaling algorithm to equilibrate both rows and
+columns norms in matrices, Technical Report RAL-TR-2001-034, Rutherford
+Appleton Laboratory, 2001.
+\end{thebibliography}}

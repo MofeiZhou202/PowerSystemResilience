@@ -1,0 +1,664 @@
+% theory_graph_foundations.tex —— 图模块 通用理论：图论基础、网络矩阵与降阶理论
+% 本文件为理论层章节，遵循 docs/modules/THEORY_WRITING_GUIDE.md。
+
+\section{图与网络降阶的数学基础}\label{sec:gr-th-foundations}
+
+\begin{theorynote}
+本章为通用数学理论，按图论与稀疏矩阵计算的标准文献体系撰写，覆盖：图论基本概念
+（图、子图、度、路径、连通分量、邻接表示）；电网络的矩阵表示（节点-支路关联矩阵、
+KCL/KVL 的矩阵形式、$Y_{bus}=AY_bA^{\mathsf T}$ 的推导及其代数性质）；树与余树理论
+（基本回路/割集、辐射性的定理化刻画）；DFS/BFS 与 Tarjan 桥/割点算法的正确性论证；
+Kron 降阶一般理论（Schur 补与高斯消元的等价、精确性条件、含注入的 Ward 等值）；
+稀疏性理论（fill-in 与消去顺序、最小度/AMD/嵌套分割）；以及多级降阶的映射复合代数、
+星-三角/串并联等值与近似等值的误差讨论。本章公式不要求逐式对应代码；与平台实现
+（\srcpath{src/graph/}、\srcpath{include/hacdcpf/graph/}）的对应关系见本章末
+"与实现的对应"表，超出实现的内容以"未实现扩展说明"框就地标记。
+\end{theorynote}
+
+\subsection{记号与约定}
+\begin{itemize}
+  \item $G=(V,E)$：无向图，$N=|V|$ 节点数，$E=|E|$ 边数，$p$ 连通分量数；
+        允许并联边（电力网络中双回线常见），不允许自环；
+  \item $\mu=E-N+p$：圈复杂度（cyclomatic number，独立回路数）；
+  \item $A\in\{0,\pm1\}^{N\times E}$：节点-支路关联矩阵；$B$：基本回路矩阵；
+        $Y_b=\operatorname{diag}(y_e)$：支路原始导纳矩阵；
+  \item $Y\in\mathbb C^{N\times N}$：节点导纳矩阵；$\alpha$ 保留集、$\beta$ 消去集，
+        分块记 $Y_{\alpha\alpha},Y_{\alpha\beta},Y_{\beta\alpha},Y_{\beta\beta}$；
+  \item $V_i$：节点电压相量；$I_i$：节点注入电流；$i_e$：支路电流（沿边定向）；
+  \item $disc[\cdot]$、$low[\cdot]$：DFS 发现时间与 low-link 值；
+  \item $\operatorname{nnz}(\cdot)$：矩阵非零元个数；$r_{fill}$：填充比。
+\end{itemize}
+与本手册其余部分冲突时以本章声明为准。
+
+\subsection{图论基础形式化}\label{sec:gr-th-basics}
+
+\begin{definition}[图、子图与度]
+\emph{无向图} $G=(V,E)$ 由节点集 $V$ 与边集 $E$ 组成，每条边 $e\in E$ 关联无序节点对
+$\{u,v\}$。\emph{子图} $G'=(V',E')$ 满足 $V'\subseteq V$、$E'\subseteq E$；若
+$V'=V$ 则称\emph{生成子图}。节点 $v$ 的\emph{度} $\deg(v)$ 为与其关联的边数。
+电力网络建模中，母线对应节点，支路/开关/换流器耦合对应边；并联支路使图成为
+多重图，本章结论对多重图同样成立。
+\end{definition}
+
+\begin{lemma}[握手引理]\label{sec:gr-th-handshake}
+$\sum_{v\in V}\deg(v)=2E$。
+\end{lemma}
+\begin{proof}
+对关联关系集合 $\mathcal I=\{(v,e):v\in e\}$ 双向计数：按节点求和得
+$|\mathcal I|=\sum_v\deg(v)$；按边求和，每条边恰关联两个端点，得
+$|\mathcal I|=2E$。两者相等。
+\end{proof}
+
+\begin{definition}[路径、连通与连通分量]
+\emph{路径}是节点序列 $v_0,v_1,\dots,v_k$，相邻节点间有边相连；$v_0=v_k$ 且边互不
+重复时称\emph{回路}（圈）。若任意两节点间存在路径，称图\emph{连通}。连通关系是
+$V$ 上的等价关系，其等价类导出的极大连通子图称为\emph{连通分量}（电力语境下的
+\emph{孤岛}），分量数记为 $p$。
+\end{definition}
+
+\begin{definition}[邻接矩阵与邻接表]
+\emph{邻接矩阵} $\mathcal A(G)\in\{0,1\}^{N\times N}$ 定义为
+$\mathcal A_{ij}=$（连接 $i,j$ 的边数）。\emph{邻接表}为每个节点存储其
+（边号, 邻居）对列表。
+\end{definition}
+
+\begin{remark}[表示法的选择]
+邻接矩阵占用 $O(N^2)$ 空间，适合稠密小图的代数运算；邻接表占用 $O(N+E)$ 空间，
+支持 $O(\deg(v))$ 的邻居枚举，是 DFS/BFS 等遍历算法达到线性复杂度的前提。
+电力网络极度稀疏（每节点平均度通常为 $2$–$5$），邻接表是唯一合理的遍历表示；
+而邻接矩阵的代数推广——节点导纳矩阵——则以稀疏格式参与数值求解。
+\end{remark}
+
+\subsection{电网络的矩阵表示}\label{sec:gr-th-network}
+
+\begin{definition}[节点-支路关联矩阵]
+为每条边 $e=\{i,j\}$ 任意指定定向 $i\to j$，定义
+$A\in\{0,\pm1\}^{N\times E}$：
+\begin{equation}
+A_{ve}=\begin{cases}
++1,& e \text{ 以 } v \text{ 为起点},\\
+-1,& e \text{ 以 } v \text{ 为终点},\\
+0,& \text{其余}.
+\end{cases}
+\end{equation}
+定向是计算约定，不影响任何物理结论（支路电流符号随之翻转）。
+\end{definition}
+
+\begin{proposition}[关联矩阵的秩]\label{sec:gr-th-rankA}
+设图有 $p$ 个连通分量，则 $\operatorname{rank}A=N-p$（实数域上）。
+\end{proposition}
+\begin{proof}
+每列恰含一个 $+1$ 与一个 $-1$，故同一分量内全部行向量之和为零，得
+$\operatorname{rank}A\le N-p$。下设图连通（$p=1$），证 $\operatorname{rank}A\ge N-1$：
+取一棵生成树（第~\ref{sec:gr-th-tree}~节证明其存在），对其 $N-1$ 条树边对应的列
+做归纳。树叶（度为 1 的树节点）对应的行在其唯一关联树边列上取 $\pm1$、其余树边列
+上取 $0$；删去该叶与其树边后剩余仍是树。据此可从树叶向根逐次做行消元，将树边列
+组成的 $N\times(N-1)$ 子矩阵化为阶梯形，含 $N-1$ 个主元，故秩至少 $N-1$。
+各分量独立成立，合并即得 $\operatorname{rank}A=N-p$。
+\end{proof}
+
+\begin{definition}[KCL/KVL 的矩阵形式]
+记支路电流向量 $i_b\in\mathbb C^{E}$（沿边定向）、节点注入电流向量
+$I\in\mathbb C^{N}$（注入网络为正）、节点对地电压向量 $V\in\mathbb C^{N}$，
+支路电压向量 $v_b\in\mathbb C^{E}$（沿定向的电压降）。则
+\begin{equation}
+\text{KCL：}\quad I=A\,i_b;\qquad
+\text{KVL：}\quad v_b=A^{\mathsf T}V.
+\end{equation}
+第一式逐行读：节点 $v$ 的注入等于以其为起点的支路电流之和减去以其为终点的支路
+电流之和；第二式逐列读：支路电压降等于两端节点电压之差，对任意回路求和为零。
+\end{definition}
+
+\begin{definition}[支路原始导纳]
+忽略支路间互感耦合，每条支路以集中参数 $\pi$ 等值（阻抗 $z_e=r_e+\mathrm jx_e$、
+对地充电纳入节点并联项），支路导纳 $y_e=1/z_e$，原始导纳矩阵
+$Y_b=\operatorname{diag}(y_1,\dots,y_E)$。
+\end{definition}
+
+\begin{theorem}[节点导纳矩阵的关联矩阵分解]\label{sec:gr-th-ybus}
+在不计互感、支路电流满足 $i_b=Y_bv_b$ 的网络中，
+\begin{equation}
+Y_{bus}=A\,Y_b\,A^{\mathsf T},
+\end{equation}
+且其元素为
+\begin{equation}
+[Y_{bus}]_{ij}=-\sum_{e\in\,i\!\sim\!j}y_e\ \ (i\ne j),
+\qquad
+[Y_{bus}]_{ii}=\sum_{e\ni i}y_e+y_i^{\mathrm{sh}},
+\end{equation}
+其中 $e\in i\!\sim\!j$ 遍历连接 $i,j$ 的全部（并联）边，$y_i^{\mathrm{sh}}$ 为节点
+$i$ 的对地并联导纳（充电、负荷导纳、接地支路之和，作为对 $A Y_b A^{\mathsf T}$
+对角元的追加）。
+\end{theorem}
+\begin{proof}
+由 KCL/KVL 与支路关系：$I=Ai_b=AY_bv_b=AY_bA^{\mathsf T}V$，故
+$Y_{bus}=AY_bA^{\mathsf T}$。元素计算：
+$[AY_bA^{\mathsf T}]_{ij}=\sum_e y_eA_{ie}A_{je}$。$i\ne j$ 时乘积 $A_{ie}A_{je}$
+非零当且仅当 $e$ 同时关联 $i$ 与 $j$，此时 $e$ 以一端为起点、另一端为终点，
+乘积为 $-1$，故 $[Y_{bus}]_{ij}=-\sum_{e\in i\sim j}y_e$；$i=j$ 时
+$A_{ie}^2$ 对每条关联边取 $1$，故对角元为关联支路导纳之和，再计入节点对地
+并联项 $y_i^{\mathrm{sh}}$。
+\end{proof}
+
+\begin{remark}
+上式给出 $Y_{bus}$ 的稀疏结构：$[Y_{bus}]_{ij}\ne0$（$i\ne j$）当且仅当
+$i,j$ 相邻——$Y_{bus}$ 的零模式恰为图邻接结构的代数镜像，这是第~\ref{sec:gr-th-sparsity}~节
+稀疏性理论的出发点。含移相变压器或不对称耦合时 $Y_{bus}$ 不再对称，分解式须推广；
+本章默认对称情形。
+\end{remark}
+
+\begin{theorem}[接地导纳矩阵的正定性]\label{sec:gr-th-ybus-pd}
+设网络连通、每条支路电导 $g_e=\Re y_e>0$、存在对地通路（至少一个节点的
+$y_i^{\mathrm{sh}}$ 有正实部，或指定参考节点接地）。删去参考节点行列后所得的
+\emph{接地导纳矩阵} $\bar Y$ 满足：对任意 $V\ne0$，
+$\Re\bigl(V^{\mathsf H}\bar YV\bigr)>0$，特别地 $\bar Y$ 非奇异。
+\end{theorem}
+\begin{proof}
+由分解式，
+\begin{equation}
+\Re\bigl(V^{\mathsf H}Y_{bus}V\bigr)
+=\sum_{e=\{i,j\}}g_e\,|V_i-V_j|^2+\sum_i \Re\bigl(y_i^{\mathrm{sh}}\bigr)|V_i|^2\ge0.
+\end{equation}
+若该式为零，则每条边上 $|V_i-V_j|=0$，连通性迫使所有节点电压相等为某常数 $c$；
+对地通路（$\Re y_i^{\mathrm{sh}}>0$ 或接地约束 $V_{\mathrm{ref}}=0$）迫使 $c=0$。
+故半正定型仅在 $V=0$ 时取零，$\bar Y$ 实部正定、非奇异。
+\end{proof}
+
+\begin{definition}[基本回路矩阵]
+给定生成树（或生成森林），每条\emph{连支}（非树边）与树上的唯一路径构成一个
+\emph{基本回路}（第~\ref{sec:gr-th-tree}~节）。基本回路矩阵
+$B\in\{0,\pm1\}^{\mu\times E}$ 的每行对应一个基本回路，沿回路取向在所含边上取
+$\pm1$。KVL 的回路形式为
+\begin{equation}
+B\,v_b=0.
+\end{equation}
+\end{definition}
+
+\subsection{树、余树与辐射性}\label{sec:gr-th-tree}
+
+\begin{definition}[树、生成树与余树]
+连通无圈图称为\emph{树}。图 $G$ 的\emph{生成树}是包含全部节点的树形生成子图；
+生成树之外的边称\emph{连支}（弦），其集合称\emph{余树}。对 $p$ 个分量的图，
+逐分量取生成树得\emph{生成森林}。
+\end{definition}
+
+\begin{theorem}[树的等价刻画]\label{sec:gr-th-tree-equiv}
+对含 $N$ 个节点的图 $G$，以下命题等价：
+\begin{enumerate}
+  \item $G$ 是树（连通且无圈）；
+  \item $G$ 连通且 $E=N-1$；
+  \item $G$ 无圈且 $E=N-1$；
+  \item 任意两节点间存在\emph{唯一}路径。
+\end{enumerate}
+\end{theorem}
+\begin{proof}
+(i)$\Rightarrow$(ii)：对 $N$ 归纳。$N=1$ 时 $E=0$ 成立。$N\ge2$ 时树必有叶
+（否则沿边游走必重复节点成圈），删去一叶及其关联边得 $N-1$ 节点的树，由归纳假设
+其边数为 $N-2$，故 $E=N-1$；连通性显然。
+
+(ii)$\Rightarrow$(i)：设 $G$ 连通且 $E=N-1$。若 $G$ 含圈，删去圈上一边不破坏
+连通性（圈上两点仍有绕行路径），重复至无圈，得连通无圈子图 $G'$ 即树，
+由已证方向其边数为 $N-1$；但每删一边边数严格减少，与 $E=N-1$ 矛盾，故原图本无圈。
+
+(i)$\Rightarrow$(iv)：连通保证路径存在；若两点间有两条不同路径，其对称差含圈，
+矛盾。
+
+(iv)$\Rightarrow$(i)：路径存在即连通；若含圈，圈上两点间有两条路径，矛盾。
+
+(iii) 与 (i)(ii) 的互推由同一计数论证给出：无圈图逐分量归纳得 $E=N-p$，
+$E=N-1$ 当且仅当 $p=1$（连通）。
+\end{proof}
+
+\begin{corollary}[辐射性的代数判据]\label{sec:gr-th-radial}
+配电网络\emph{辐射状}（radial）当且仅当其图连通且 $E=N-1$；等价地，连通且
+圈复杂度 $\mu=0$。这为重构、恢复与黑启动的拓扑约束提供了 $O(N+E)$ 可判的
+充要条件。
+\end{corollary}
+
+\begin{theorem}[圈空间维数与基本回路基]\label{sec:gr-th-cyclebasis}
+$\mu=E-N+p$ 恰为图的\emph{圈空间}维数（边子集在 $\mathrm{GF}(2)$ 上按对称差
+构成的向量空间中，由全体回路生成的子空间之维数）。任取生成森林，其 $\mu$ 条
+连支各确定一个基本回路；这组基本回路构成圈空间的一组基。
+\end{theorem}
+\begin{proof}
+生成森林含 $N-p$ 条边（每分量 $N_c-1$ 条，对分量求和），故连支数为
+$E-(N-p)=\mu$。每个基本回路恰含一条其他基本回路不含的连支，故它们线性无关
+（任何非空对称差必含某连支而非空集）。再证生成性：任一回路 $C$，取其所含连支
+对应的基本回路之对称差 $S$；$C\triangle S$ 是无圈子集且只含树边，而无圈子集
+中若含边则其导出子图有圈——唯一可能是空集，故 $C=S$。于是 $\mu$ 个基本回路
+构成基，维数为 $\mu$。
+\end{proof}
+
+\begin{definition}[基本割集]
+删去生成树的任一树边将树分为两部分，跨这两部分的全部原图边构成一个
+\emph{基本割集}。$N-p$ 条树边对应 $N-p$ 个基本割集，它们构成割空间
+（边割按对称差生成的空间）的一组基，维数 $N-p$。圈空间与割空间互为正交补，
+维数之和 $\mu+(N-p)=E$。
+\end{definition}
+
+\begin{remark}
+基本回路/割集理论是经典回路法与割集法潮流方程的基础，也直接支撑拓扑报告中的
+回路计数 $\fld{cycle\_count}=\max(0,E-N+p)$ 与基本圈枚举。
+\end{remark}
+
+\subsection{DFS、BFS 与桥/割点算法}\label{sec:gr-th-dfs}
+
+\begin{definition}[DFS 树、发现时间与回边]
+深度优先搜索（DFS）从未访问节点出发递归深入，首次到达节点 $v$ 的时刻记
+$disc[v]$（时间戳从 $1$ 递增）。DFS 的递归结构生成\emph{DFS 生成森林}：
+首次发现 $v$ 时所经边为\emph{树边}，其余为\emph{非树边}。
+\end{definition}
+
+\begin{lemma}[无向图无横叉边]\label{sec:gr-th-nocross}
+无向图的 DFS 中，每条非树边必连接一对祖先-后裔节点（\emph{回边}），不存在
+连接两棵不相干子树的横叉边。
+\end{lemma}
+\begin{proof}
+设边 $\{u,v\}$ 存在且 $disc[u]<disc[v]$。DFS 在离开 $u$ 之前必考察
+$\{u,v\}$；若此时 $v$ 未访问，则 $\{u,v\}$ 成为树边；若 $v$ 已访问，则
+$disc[u]<disc[v]$ 且 $v$ 的递归必已结束，由栈结构 $v$ 是 $u$ 的真后裔
+（否则 $v$ 先开始且先结束，则考察该边时 $u$ 尚未入栈，矛盾）。故非树边
+连接祖先与后裔。
+\end{proof}
+
+\begin{definition}[low-link 值]
+\begin{equation}
+low[v]=\min\Bigl(disc[v],\ \min_{\substack{u\in\mathrm{subtree}(v)\\
+\{u,w\}\,\text{回边}}}disc[w]\Bigr),
+\end{equation}
+即 $v$ 的子树经树边向下、再经至多一条回边向上所能触及的最小发现时间。
+DFS 中可递推计算：
+$low[v]=\min\bigl(disc[v],\ \min_{w:\,\text{回边}}disc[w],\ \min_{u\,\text{子节点}}low[u]\bigr)$。
+\end{definition}
+
+\begin{lemma}[桥判据]\label{sec:gr-th-bridge}
+设 $(u,v)$ 为树边，$u$ 为 $v$ 的父节点。则 $\{u,v\}$ 是桥（删去后图不再连通）
+当且仅当 $low[v]>disc[u]$。
+\end{lemma}
+\begin{proof}
+（$\Leftarrow$）若 $low[v]>disc[u]$，则 $v$ 的子树内不存在指向 $u$ 或其祖先的
+回边；由引理~\ref{sec:gr-th-nocross}，$v$ 子树与图其余部分之间除 $\{u,v\}$ 外
+无其他边，删去 $\{u,v\}$ 后 $v$ 子树脱离，故为桥。
+
+（$\Rightarrow$）若 $\{u,v\}$ 是桥，则 $v$ 子树与其余部分之间无其他边，特别地
+无回边指向发现时间 $\le disc[u]$ 的节点，故 $low[v]\ge disc[v]>disc[u]$。
+\end{proof}
+
+\begin{lemma}[割点判据]\label{sec:gr-th-ap}
+设 $u$ 非 DFS 根。$u$ 是割点（删去后图连通分量数增加）当且仅当存在子节点 $v$
+使 $low[v]\ge disc[u]$。DFS 根是割点当且仅当其在 DFS 树中有至少两个子节点。
+\end{lemma}
+\begin{proof}
+非根情形。（$\Leftarrow$）若子节点 $v$ 满足 $low[v]\ge disc[u]$，则 $v$ 子树
+无回边绕过 $u$ 到达其真祖先；删去 $u$ 后 $v$ 子树与 $u$ 的祖先部分断开，分量数
+增加。（$\Rightarrow$）若 $u$ 是割点，删去 $u$ 后图分裂，其中必有一块由 $u$ 的
+某棵子树 $v$ 整体构成（DFS 树结构保证跨子树无边，引理~\ref{sec:gr-th-nocross}），
+该子树无回边指向 $disc$ 小于 $disc[u]$ 的节点，即 $low[v]\ge disc[u]$。
+
+根情形：根无祖先，其删除后各 DFS 子树两两之间无边（同引理），故根为割点当且仅当
+子树数 $\ge2$。
+\end{proof}
+
+\begin{theorem}[Tarjan 桥/割点算法]\label{sec:gr-th-tarjan}
+单趟 DFS 依据引理~\ref{sec:gr-th-bridge}、\ref{sec:gr-th-ap} 的判据，可在
+$O(N+E)$ 时间与 $O(N)$ 附加空间内求出全部桥与割点~\cite{grf:tarjan}。
+\end{theorem}
+\begin{proof}
+正确性：$disc$、$low$ 在 DFS 回溯时按递推式 $O(\deg(v))$ 逐节点计算，low-link
+递推的正确性由定义直接归纳（子节点的 $low$ 已先算好）；判定条件即两条引理，
+穷举所有树边与非根节点，故输出恰为全部桥与割点。
+
+复杂度：DFS 每节点入栈一次、每条边在两端正向各考察一次，$low$ 更新与判据测试
+均为 $O(1)$，总计 $O(N+E)$；存储 $disc/low/$栈为 $O(N)$。
+\end{proof}
+
+\begin{remark}[BFS 的角色]
+广度优先搜索（BFS）按层展开，给出到源点的最少边数距离与一棵矮生成树，适合
+连通分量枚举与基本回路的路径回溯（沿父指针上升至最近公共祖先）。DFS 则天然给出
+祖先-后裔结构，是 low-link 类算法的载体。两者同为 $O(N+E)$，在平台中分别承担
+孤岛枚举/基本圈构造与桥/割点检测。
+\end{remark}
+
+\subsection{Kron 降阶与 Ward 等值}\label{sec:gr-th-kron}
+
+\begin{definition}[分块与 Schur 补]
+将节点集划分为保留集 $\alpha$ 与消去集 $\beta$，网络方程 $YV=I$ 分块为
+\begin{equation}
+\begin{bmatrix}Y_{\alpha\alpha}&Y_{\alpha\beta}\\[2pt]
+Y_{\beta\alpha}&Y_{\beta\beta}\end{bmatrix}
+\begin{bmatrix}V_\alpha\\V_\beta\end{bmatrix}
+=
+\begin{bmatrix}I_\alpha\\I_\beta\end{bmatrix}.
+\end{equation}
+设 $Y_{\beta\beta}$ 非奇异，定义 \emph{Schur 补}
+\begin{equation}
+Y_{red}=Y_{\alpha\alpha}-Y_{\alpha\beta}Y_{\beta\beta}^{-1}Y_{\beta\alpha},
+\qquad\text{记 }K=Y_{\beta\beta}^{-1}Y_{\beta\alpha}.
+\end{equation}
+\end{definition}
+
+\begin{theorem}[Schur 补与高斯消元的等价]\label{sec:gr-th-schur-gauss}
+对分块方程组做一步块高斯消元（以 $Y_{\beta\beta}$ 为主元块消去 $V_\beta$）
+所得关于 $V_\alpha$ 的方程恰为
+\begin{equation}
+Y_{red}\,V_\alpha=I_\alpha-Y_{\alpha\beta}Y_{\beta\beta}^{-1}I_\beta,
+\qquad
+V_\beta=Y_{\beta\beta}^{-1}\bigl(I_\beta-Y_{\beta\alpha}V_\alpha\bigr).
+\end{equation}
+反之，由上式解出的 $(V_\alpha,V_\beta)$ 必满足原方程组。即消去是\emph{精确的
+同解变换}，不产生任何近似。
+\end{theorem}
+\begin{proof}
+第二块行左乘 $Y_{\alpha\beta}Y_{\beta\beta}^{-1}$ 后从第一块行减去：
+\begin{equation}
+\bigl(Y_{\alpha\alpha}-Y_{\alpha\beta}Y_{\beta\beta}^{-1}Y_{\beta\alpha}\bigr)V_\alpha
+=I_\alpha-Y_{\alpha\beta}Y_{\beta\beta}^{-1}I_\beta,
+\end{equation}
+即所断言的约化方程；第二块行移项即得 $V_\beta$ 的恢复式。反之，由约化方程解出
+$V_\alpha$、由恢复式定义 $V_\beta$，回代验证两块行均成立，故同解。
+\end{proof}
+
+\begin{lemma}[消去块的非奇异充分条件]\label{sec:gr-th-ybb}
+若 $Y$ 严格对角占优（按行，复数情形按模），则其任意主子阵——特别地
+$Y_{\beta\beta}$——非奇异。
+\end{lemma}
+\begin{proof}
+主子阵的行仅删去若干非对角元，对角元不变，故严格对角占优性保持。由 Gershgorin
+圆盘定理，严格对角占优矩阵的所有特征值模不小于
+$\min_i\bigl(|Y_{ii}|-\sum_{j\ne i}|Y_{ij}|\bigr)>0$，故非奇异。
+电力网络中节点并联项（充电、负荷导纳）常使 $Y$ 满足（不可约）对角占优，
+但对角占优是充分而非必要条件，工程上仍需显式主元守卫。
+\end{proof}
+
+\begin{theorem}[Kron 降阶的精确性条件]\label{sec:gr-th-kron-exact}
+约化导纳模型 $Y_{red}V_\alpha=I_\alpha$ 对\emph{任意}保留集注入 $I_\alpha$
+都与原网络同解，当且仅当消去节点无注入（$I_\beta=0$，无源节点）。此时
+\begin{equation}
+Y_{red}=Y_{\alpha\alpha}-Y_{\alpha\beta}Y_{\beta\beta}^{-1}Y_{\beta\alpha},
+\qquad
+V_\beta=-K\,V_\alpha=-Y_{\beta\beta}^{-1}Y_{\beta\alpha}V_\alpha,
+\end{equation}
+降阶对保留节点电压、注入与端口潮流\emph{逐量精确}（Kron 降阶~\cite{grf:kron}）。
+\end{theorem}
+\begin{proof}
+由定理~\ref{sec:gr-th-schur-gauss}，含注入修正项的约化方程对任意 $I_\alpha$
+同解；令 $I_\beta=0$ 即退化为 $Y_{red}V_\alpha=I_\alpha$，恢复式退化为
+$V_\beta=-KV_\alpha$。必要性：若 $I_\beta\ne0$ 而仍用无修正的约化模型，则两模型
+解相差 $Y_{red}^{-1}Y_{\alpha\beta}Y_{\beta\beta}^{-1}I_\beta$；该偏差向量
+对一般 $I_\beta$ 非零（例如取 $I_\beta$ 沿 $Y_{\beta\beta}$ 的某列方向），
+故精确性要求 $I_\beta=0$。
+\end{proof}
+
+\begin{theorem}[含注入的 Ward 等值]\label{sec:gr-th-ward}
+设消去节点带\emph{恒定电流}注入 $I_\beta$（与 $V$ 无关），则精确的等值网络
+由约化导纳矩阵与修正注入组成（Ward 等值~\cite{grf:ward}）：
+\begin{equation}
+Y_{red}=Y_{\alpha\alpha}-Y_{\alpha\beta}Y_{\beta\beta}^{-1}Y_{\beta\alpha},
+\qquad
+I_{red}=I_\alpha-Y_{\alpha\beta}Y_{\beta\beta}^{-1}I_\beta,
+\end{equation}
+求解 $Y_{red}V_\alpha=I_{red}$ 后，消去节点电压按下式精确恢复：
+\begin{equation}
+V_\beta=Y_{\beta\beta}^{-1}\bigl(I_\beta-Y_{\beta\alpha}V_\alpha\bigr)
+=-K\,V_\alpha+Y_{\beta\beta}^{-1}I_\beta.
+\end{equation}
+\end{theorem}
+\begin{proof}
+即定理~\ref{sec:gr-th-schur-gauss} 的同解变换按 $I_{red}$ 定义重写：
+$I_{red}$ 恰为约化方程右端；恢复式即第二块行移项。全程仅为线性代数恒等变换，
+对恒定 $I_\beta$ 无近似。
+\end{proof}
+
+\begin{remark}[恒功率注入导致的近似]
+交流潮流中负荷为恒功率注入 $I_j=(S_j/V_j)^{*}$，依赖被消去的电压本身，
+不再满足 Ward 等值的线性前提。此时 Kron/Ward 消去相当于在基准工作点处把
+恒功率负荷冻结为恒电流或恒导纳的近似，其误差随扰动后运行点偏离基准点而增长；
+近似等值的保真度本质上是\emph{工作点相关}的，必须结合灵敏度或误差界评估。
+\end{remark}
+
+\begin{gapnote}
+当前稠密 Kron 入口 \srcpath{apply\_kron\_reduction\_with\_injection} 已实现
+$I_{red}$ 的计算，但恢复 API \srcpath{recover\_eliminated\_voltages} 只返回
+$V_\beta=-KV_\alpha$，未含定理~\ref{sec:gr-th-ward} 中的
+$+Y_{\beta\beta}^{-1}I_\beta$ 修正项；带非零 $I_\beta$ 的完整电压恢复在现有
+接口下不可达。恒功率内部节点 Kron 近似的工作点相关误差界估计亦未实现
+（见手册"后续改进方向"）。
+\end{gapnote}
+
+\begin{gapnote}
+更精细的外部系统等值——REI 等值（按设备类别聚合注入的辐射等值独立网）、
+Dimo 等值等——未在图模块实现；当前仅覆盖 Ward/Kron 一族。
+\end{gapnote}
+
+\subsection{稀疏性与消去顺序}\label{sec:gr-th-sparsity}
+
+\begin{definition}[fill-in 与消去图]
+对稀疏矩阵做消元时，原本为零的位置因消去运算变为非零，称为\emph{填入}
+（fill-in）。把矩阵的零模式看作图（非零元 $Y_{ij}$ 对应边 $\{i,j\}$），
+消去过程对应\emph{消去图}序列 $G^{(0)}=G,G^{(1)},\dots$：消去节点 $k$ 后
+从图中删除 $k$ 及其关联边。
+\end{definition}
+
+\begin{theorem}[消去的成团规则；fill-path 刻画]\label{sec:gr-th-fill}
+消去节点 $k$ 时，其当前邻居在消去图中两两相连成为团（clique）：
+\begin{equation}
+Y_{ij}\leftarrow Y_{ij}-\frac{Y_{ik}Y_{kj}}{Y_{kk}},\qquad i,j\in N(k),
+\end{equation}
+只要 $Y_{ik}Y_{kj}\ne0$ 且原本 $Y_{ij}=0$，位置 $(i,j)$ 即被填入。
+更一般地（Rose~\cite{grf:rose}）：节点对 $(i,j)$ 在最终三角因子中为非零，
+当且仅当原图中存在一条从 $i$ 到 $j$ 的路径，其全部内部节点在消去顺序中
+都先于 $i$ 与 $j$ 被消去。
+\end{theorem}
+\begin{proof}
+成团规则：消去 $k$ 即对剩余方程做 Schur 补更新，$(i,j)$ 位置增量为
+$-Y_{ik}Y_{kj}/Y_{kk}$，$i,j$ 同为 $k$ 的邻居时增量一般非零，故邻居两两相连。
+fill-path 刻画对消去步数归纳：基础步即成团规则（路径 $i$--$k$--$j$，内部节点
+仅 $k$ 且先被消去）。归纳步：若因子中 $(i,j)$ 非零，则或原图有边（空内部路径），
+或某步消去 $k$ 时填入——由归纳假设 $i$ 到 $k$、$k$ 到 $j$ 各有内部节点先于
+$\min(i,j)$ 被消去的路径，拼接（经 $k$，且 $k$ 先于 $i,j$ 被消去）即得所求路径。
+反向由同一归纳成立。
+\end{proof}
+
+\begin{remark}[消去顺序的决定性影响]
+同一矩阵不同消去顺序产生的填入量可相差数量级。电力网络 $Y_{bus}$ 极端稀疏，
+消去顺序实质上决定了 LU 分解的内存与时间。最小填入消去顺序问题是 NP 完全的
+（Yannakakis~\cite{grf:yannakakis}），工程上依赖启发式。
+\end{remark}
+
+\begin{definition}[最小度、AMD 与嵌套分割]
+\emph{最小度}（Minimum Degree，Tinney 第二方案~\cite{grf:tinney}）：每步在消去图中
+选取当前度最小的节点消去——其邻居成团至多引入 $\binom{d}{2}$ 条新边，贪心压低
+单步填入。\emph{近似最小度}（AMD）以可廉价更新的度上界代替精确度，摊还复杂度
+更低，是大规模稀疏库（SuiteSparse 等）的默认排序。\emph{嵌套分割}（Nested
+Dissection~\cite{grf:georgeliu}）：递归地用顶点分隔集把图劈为两半，最后消去分隔集；
+对 $n\times n$ 网格类图可证填入 $O(N\log N)$、分解工作量 $O(N^{3/2})$
+（$N=n^2$），远优于自然顺序的 $O(N^2)$ 填入。
+\end{definition}
+
+\begin{definition}[填充比]
+降阶（或消元）前后非零元之比
+\begin{equation}
+r_{fill}=\frac{\operatorname{nnz}(Y_{red})}{\operatorname{nnz}(Y_{full})}
+\end{equation}
+度量消去集选择对稀疏性的破坏。消去高度节点会制造大团，使 $r_{fill}\gg1$，
+"降阶"反而增加求解成本；因此工业实现必须设填充比守卫，超限即拒绝。
+\end{definition}
+
+\begin{gapnote}
+当前稀疏 Kron 采用最小 front（邻居数）贪心排序，属最小度思想的一个简化变体；
+AMD 与嵌套分割排序尚未实现（手册"后续改进方向"已列为规划）。最小度族排序在
+装配层 LU 求解器中的应用由求解后端（SuiteSparse/Eigen）自带，不在图模块内。
+\end{gapnote}
+
+\subsection{多级降阶的映射代数与等值电路}\label{sec:gr-th-compose}
+
+\begin{proposition}[多级降阶的映射复合与逆序恢复]\label{sec:gr-th-compose-prop}
+设降阶序列 $R_1,R_2,\dots,R_m$ 依次作用于网络，第 $k$ 步的状态空间由
+$X^{(k-1)}$ 压缩到 $X^{(k)}$。若每步保留一个线性恢复算子
+$T_k:X^{(k)}\to X^{(k-1)}$（无源消去时
+$x^{(k-1)}=\begin{bmatrix}I\\-K_k\end{bmatrix}x^{(k)}$ 的嵌入形式；
+收缩与重编号时为置换/复制算子），则全状态恢复为算子复合
+\begin{equation}
+x^{(0)}=T_1\,T_2\,\cdots\,T_m\,x^{(m)},
+\end{equation}
+即恢复必须按降阶的\emph{逆序}逐层施加。节点重编号对应置换同余
+$Y\mapsto PYP^{\mathsf T}$，不改变任何谱与解的性质。
+\end{proposition}
+\begin{proof}
+对 $m$ 归纳。$m=1$ 即单层恢复算子定义。设前 $m-1$ 层恢复为
+$x^{(0)}=T_1\cdots T_{m-1}x^{(m-1)}$，而第 $m$ 层给出
+$x^{(m-1)}=T_mx^{(m)}$，代入即得。每层算子由该层降阶类型唯一确定
+（Kron 为回代算子，收缩为代表元复制，串联/悬垂为逐节点递推），复合良定义。
+重编号是节点集的双射，$P$ 为正交置换阵，$PYP^{\mathsf T}$ 与原矩阵相似同构，
+方程组仅换元不解变。
+\end{proof}
+
+\begin{proposition}[零阻抗等电位合并的精确性]\label{sec:gr-th-zmerge}
+设边集合 $E_0$ 中每条边阻抗为零（闭合开关/断路器的理想化）。将每个由 $E_0$
+连通的节点组并为一个超节点（电压取公共值、注入求和、外部支路平移端点），
+则等值网络与原网络在同一边界条件下同解。
+\end{proposition}
+\begin{proof}
+零阻抗边的 KVL 给出其两端电压相等，故组内所有节点电压必取同一值，以超节点
+变量代替不损失自由度；组内节点的 KCL 方程求和，内部零阻抗边电流成对抵消，
+得超节点注入等于组内注入之和；跨组支路端点平移后方程形式不变。反向，由超节点
+解把公共电压复制回组内各节点，内部边电流不确定（零阻抗边潮流不可由电压恢复），
+但全部节点量与原方程组相容。故对节点电压与外部端口行为，合并精确。
+\end{proof}
+
+\begin{theorem}[串联等值：度 2 无源节点的消去]\label{sec:gr-th-series}
+设节点 $j$ 度为 2，经阻抗 $z_1$ 接 $i$、经 $z_2$ 接 $k$，$j$ 无注入、
+无对地支路。消去 $j$ 等价于以单支路 $z_{eq}=z_1+z_2$ 直连 $i$--$k$，
+即导纳
+\begin{equation}
+y_{eq}=\frac{y_1y_2}{y_1+y_2}.
+\end{equation}
+\end{theorem}
+\begin{proof}
+记串联电流 $i_1$（$i\to j$）、$i_2$（$j\to k$）。KVL：
+$V_i-V_j=z_1i_1$，$V_j-V_k=z_2i_2$；$j$ 无注入无对地支路，KCL 给出
+$i_1=i_2=:i$。两式相加消去 $V_j$：$V_i-V_k=(z_1+z_2)i$，恰为阻抗
+$z_1+z_2$ 的单支路方程。此即为 $|\beta|=1$ 的 Kron 消去
+（定理~\ref{sec:gr-th-kron-exact}）的显式闭式。
+\end{proof}
+
+\begin{remark}[串联等值的适用边界]
+定理要求中间节点\emph{无注入且无对地元件}；若 $j$ 带负荷、发电机或线路充电
+（$\pi$ 模型把充电放在节点上），串联合并必须迁移注入或改为近似处理。含
+$\pi$ 充电的两段线路严格等值不是裸阻抗相加，而是含集中参数的 II 型等值；
+实现层据此对串联候选施加设备类别与注入约束。
+\end{remark}
+
+\begin{proposition}[星-网变换即星形中心的 Kron 消去]\label{sec:gr-th-starmesh}
+设星形中心节点 $0$ 经导纳 $y_\ell$ 连接叶节点 $\ell=1,\dots,n$，$0$ 无注入。
+记 $y_\Sigma=\sum_{\ell=1}^n y_\ell$。消去 $0$ 后叶节点两两之间出现新支路
+\begin{equation}
+y_{\ell m}=\frac{y_\ell y_m}{y_\Sigma}\qquad(\ell\ne m),
+\end{equation}
+叶 $\ell$ 的对地自感纳增量使新对角元为 $y_\ell(y_\Sigma-y_\ell)/y_\Sigma$。
+$n=3$ 时即经典星-三角（Y-$\Delta$）变换公式。
+\end{proposition}
+\begin{proof}
+对 $|\beta|=1$ 应用 Schur 补：$Y_{00}=y_\Sigma$，$Y_{0\ell}=-y_\ell$，
+\begin{equation}
+[Y_{red}]_{\ell m}=Y_{\ell m}-\frac{Y_{\ell 0}Y_{0m}}{Y_{00}}
+=0-\frac{y_\ell y_m}{y_\Sigma}\cdot(-1)^{2}
+=-\frac{y_\ell y_m}{y_\Sigma}\quad(\ell\ne m),
+\end{equation}
+非对角元取负即新支路导纳 $y_{\ell m}=y_\ell y_m/y_\Sigma$；对角元
+$y_\ell-y_\ell^2/y_\Sigma=y_\ell(y_\Sigma-y_\ell)/y_\Sigma$。
+这正是消去图的成团规则（定理~\ref{sec:gr-th-fill}）：星形中心消去使其 $n$ 个
+邻居成团，一次引入 $\binom{n}{2}$ 条新边——星-网变换是 fill-in 现象的最小
+完整实例。
+\end{proof}
+
+\begin{remark}[悬垂折叠的近似性与工作点依赖]
+度 1 叶节点 $\ell$ 经阻抗 $z_\ell$ 挂在父节点 $p$ 上。把叶负荷 $S_\ell$ 折算到
+$p$ 的严格式应计入支路损耗
+\begin{equation}
+\Delta S_{\mathrm{loss}}=z_\ell\,\frac{|S_\ell|^2}{|V_\ell|^2},
+\end{equation}
+而 $|V_\ell|$ 又依赖全网络工况。折叠时若取 $|V_p|\approx1.0$ pu 估计损耗
+（或忽略损耗），所得等值负荷的误差正比于 $|S_\ell|^2$——轻载时微不足道，
+重载长馈线时平方放大。这类近似等值的误差\emph{内生地依赖工作点}，上报结果时
+应声明近似口径而非宣称精确。
+\end{remark}
+
+\subsection{与实现的对应}
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{6.8cm}L{8.6cm}@{}}
+\toprule
+理论条目 & 实现状态\\
+\midrule
+\endfirsthead
+\toprule
+理论条目 & 实现状态\\
+\midrule
+\endhead
+图容器、邻接表与 domain-qualified 映射 &
+\implfull{src/graph/power\_system\_graph.cpp:build\_power\_system\_graph}（结构定义见 include/hacdcpf/graph/power\_system\_graph.hpp）\\
+关联矩阵分解 $Y_{bus}=AY_bA^{\mathsf T}$ 与正定性 &
+\implpart{图模块只建拓扑不装配 $Y_{bus}$；装配在装配层完成（见《潮流计算技术手册》），本理论为其依据}\\
+连通分量枚举与孤岛判定 &
+\implfull{src/graph/topology\_analysis.cpp:analyze\_topology}（快速口径见同文件 count\_islands、is\_connected）\\
+辐射性判据（连通 $\land$ $E=N-1$，推论~\ref{sec:gr-th-radial}） &
+\implfull{src/graph/topology\_analysis.cpp:is\_radial}（$\fld{cycle\_count}=\max(0,E-N+p)$ 在 analyze\_topology）\\
+基本回路基（定理~\ref{sec:gr-th-cyclebasis}） &
+\implfull{src/graph/topology\_analysis.cpp:find\_fundamental\_cycles}（BFS 生成树 + 父指针回溯至 LCA）\\
+Tarjan 桥/割点（引理~\ref{sec:gr-th-bridge}、\ref{sec:gr-th-ap}） &
+\implfull{src/graph/topology\_analysis.cpp:tarjan\_bridge\_ap}（桥判据 $low[v]>disc[parent]$、非根割点 $low[v]\ge disc[parent]$ 与定理一致）\\
+零阻抗等电位合并（命题~\ref{sec:gr-th-zmerge}）与并查集 &
+\implfull{src/graph/switch\_contraction.cpp:contract\_zero\_impedance\_edges}（内部 DSU，路径压缩 + 按秩合并；含电压基与多 slack 守卫）\\
+Kron 精确降阶（$I_\beta=0$，定理~\ref{sec:gr-th-kron-exact}） &
+\implfull{src/graph/kron\_reduction.cpp:apply\_kron\_reduction}（FullPivLU::isInvertible 主元守卫 + 填充比守卫）\\
+Ward 修正注入 $I_{red}$（定理~\ref{sec:gr-th-ward}） &
+\implfull{src/graph/kron\_reduction.cpp:apply\_kron\_reduction\_with\_injection}\\
+含 $I_\beta$ 的完整电压恢复 $V_\beta=-KV_\alpha+Y_{\beta\beta}^{-1}I_\beta$ &
+\implpart{recover\_eliminated\_voltages 仅返回 $-KV_\alpha$，无 $I_\beta$ 修正项；调用链 result\_recovery.cpp:recover\_kron\_eliminated\_buses 同受此限}\\
+消去块非奇异的充分条件（引理~\ref{sec:gr-th-ybb}） &
+\implpart{理论充分条件未做静态判定；以运行时 FullPivLU 可逆性检查代替（apply\_kron\_reduction）}\\
+稀疏逐节点 Kron 与成团更新（定理~\ref{sec:gr-th-fill} 的更新式） &
+\implfull{src/graph/sparse\_kron\_reduction.cpp:reduce\_sparse\_kron}（最小 front 贪心 + front/主元/填充三重守卫，eliminate 保存恢复系数）\\
+最小度/AMD/嵌套分割排序 &
+\implpart{稀疏 Kron 内部为最小 front 简化变体；AMD/嵌套分割未实现（"后续改进方向"已列）；装配层 LU 排序由求解后端自带}\\
+最小填入的 NP 完全性结论 &
+\implnone（纯理论结论，无需实现）\\
+多级映射复合与逆序恢复（命题~\ref{sec:gr-th-compose-prop}） &
+\implfull{src/graph/result\_recovery.cpp:recover\_kron\_eliminated\_buses}（映射结构 ReductionMapping 见 include/hacdcpf/graph/reduction\_mapping.hpp；稀疏恢复算子见 sparse\_kron\_recovery\_operator）\\
+串联等值 $z_1+z_2$（定理~\ref{sec:gr-th-series}） &
+\implpart{apply\_series\_reduction 受设备类别、保留集、注入与映射可恢复性约束，非裸公式逐式实现（见源码等价章）}\\
+星-网/Y-$\Delta$ 变换（命题~\ref{sec:gr-th-starmesh}） &
+\implpart{未单列变换例程；其机理已由稀疏 Kron 的成团消去涵盖}\\
+悬垂折叠近似与工作点依赖 &
+\implpart{apply\_pendant\_reduction 为近似（$|V_{\text{parent}}|\approx1.0$ pu）；带实际父电压的迭代恢复在 result\_recovery.cpp:recover\_pendant\_buses，恢复收敛标志未上报}\\
+REI/Dimo 等高级外部等值 &
+\implnone\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{参考文献}
+{\renewcommand{\section}[2]{}%
+\begin{thebibliography}{9}\small
+\bibitem{grf:tarjan} R.~E. Tarjan, Depth-first search and linear graph algorithms,
+\emph{SIAM Journal on Computing}, 1972.
+\bibitem{grf:rose} D.~J. Rose, Triangulated graphs and the elimination process,
+\emph{Journal of Mathematical Analysis and Applications}, 1970.
+\bibitem{grf:tinney} W.~F. Tinney and J.~W. Walker, Direct solutions of sparse
+network equations by optimally ordered triangular factorization,
+\emph{Proceedings of the IEEE}, 1967.
+\bibitem{grf:yannakakis} M.~Yannakakis, Computing the minimum fill-in is
+NP-complete, \emph{SIAM Journal on Algebraic and Discrete Methods}, 1981.
+\bibitem{grf:georgeliu} A.~George and J.~W.-H. Liu, \emph{Computer Solution of
+Large Sparse Positive Definite Systems}, Prentice-Hall, 1981.
+\bibitem{grf:kron} G.~Kron, \emph{Diakoptics: The Piecewise Solution of
+Large-Scale Systems}, MacDonald, 1963.
+\bibitem{grf:ward} J.~B. Ward, Equivalent circuits for power-flow studies,
+\emph{Transactions of the AIEE}, 1949.
+\bibitem{grf:arrillaga} J.~Arrillaga and N.~R. Watson, \emph{Computer Modelling
+of Electrical Power Systems}, 2nd ed., Wiley, 2001.
+\bibitem{grf:even} S.~Even, \emph{Graph Algorithms}, 2nd ed., Cambridge
+University Press, 2012.
+\bibitem{grf:zhang} 张伯明、陈寿孙、严正，《高等电力网络分析》（第二版），
+清华大学出版社，2007.
+\end{thebibliography}}
