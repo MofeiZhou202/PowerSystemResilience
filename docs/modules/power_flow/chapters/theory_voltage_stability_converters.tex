@@ -6,11 +6,11 @@
 \begin{theorynote}
 本章为通用数学理论，按电压稳定与高压直流输电领域的标准模型与文献体系撰写，
 覆盖四组主题：(i) 电压稳定的分岔理论基础——鞍结分岔（SNB）与鼻点的分岔本质、
-负荷裕度的数学定义、$L$ 指标与模态分析/参与因子体系；(ii) 连续潮流（CPF）的
+负荷裕度的数学定义、$L$ 指标与模态分析/参与因子体系、戴维南等值下的最大功率传输与阻抗匹配判据；(ii) 连续潮流（CPF）的
 参数化理论——自然/弧长/伪弧长参数化、增广系统、切向量预测与校正、步长控制的
 理论依据；(iii) 换流器稳态理论——VSC 注入模型与控制模式自由度分析、容量圆与
 调制比约束的几何意义、损耗模型推导，LCC 准稳态方程，DC-DC 变换器平均模型；
-(iv) AC/DC 接口方程的统一表述与 DC 岛可解性条件。
+(iv) AC/DC 接口方程的统一表述与 DC 岛可解性条件；(v) 以平台弧长连续潮流实测数据与两母线解析鼻点对照的数值基准。
 本章公式不要求逐式对应代码；与平台实现（\srcpath{src/power\_flow/}）的对应关系
 见本章末"与实现的对应"表，超出实现的内容以"未实现扩展说明"框就地标记。
 \end{theorynote}
@@ -235,6 +235,50 @@ $\Delta Q=\sum_k c_k\lambda_k\xi_k$：特征值 $\lambda_k$ 度量第 $k$ 个
 电压模态的 Q--V 灵敏度，$\lambda_k$ 小（$>0$）表示弱模态，$\lambda_k<0$ 表示
 电压不稳定（无功支撑增加反而压低电压）。母线 $i$ 对模态 $k$ 的\emph{参与因子}
 为 $p_{ik}=\xi_{ik}\eta_{ki}$，满足 $\sum_i p_{ik}=1$，用于弱节点排序。
+
+\subsection{戴维南等值与最大功率传输判据}\label{sec:pf-th-vs-thevenin}
+
+例~\ref{ex:pf-th-vs-twobus} 的两母线鼻点可推广到\emph{任意}负荷母线：把其余网络对该
+母线作戴维南等值 $(E_{th},Z_{th})$，则该母线的静态电压稳定极限由\emph{阻抗匹配}刻画。
+
+\begin{theorem}[最大功率传输与临界电压]\label{thm:pf-th-vs-thevenin}
+负荷母线经戴维南等值 $E_{th}\angle0$、$Z_{th}\angle\theta_{th}$ 馈电，负荷阻抗
+$Z_L\angle\varphi$（$\varphi$ 为功率因数角，$\tan\varphi=Q/P$）。沿固定 $\varphi$ 增大
+负荷（即减小 $Z_L$），则传输有功在\emph{阻抗模匹配} $Z_L=Z_{th}$ 处取最大，且该临界点
+\begin{equation}
+V_{\mathrm{crit}}=\frac{E_{th}}{\sqrt{2\bigl(1+\cos(\theta_{th}-\varphi)\bigr)}},\qquad
+P_{\max}=\frac{E_{th}^2}{2Z_{th}}\cdot\frac{\cos\varphi}{1+\cos(\theta_{th}-\varphi)} .
+\label{eq:pf-th-vs-thevenin}
+\end{equation}
+\end{theorem}
+\begin{proof}
+回路电流 $I=E_{th}/|Z_{th}+Z_L|$，其中
+$|Z_{th}+Z_L|^2=Z_{th}^2+Z_L^2+2Z_{th}Z_L\cos(\theta_{th}-\varphi)$。负荷有功
+\begin{equation*}
+P=I^2Z_L\cos\varphi
+=\frac{E_{th}^2\,Z_L\cos\varphi}{Z_{th}^2+Z_L^2+2Z_{th}Z_L\cos(\theta_{th}-\varphi)} .
+\end{equation*}
+对 $Z_L$ 求导，分子为 $E_{th}^2\cos\varphi\,(Z_{th}^2-Z_L^2)$，令其为零得
+$Z_L=Z_{th}$（阻抗匹配）。代回：分母
+$=2Z_{th}^2\bigl(1+\cos(\theta_{th}-\varphi)\bigr)$，即得 $P_{\max}$；负荷端电压
+$V=IZ_L=E_{th}Z_{th}/|Z_{th}+Z_L|$，匹配点处
+$|Z_{th}+Z_L|=Z_{th}\sqrt{2(1+\cos(\theta_{th}-\varphi))}$，即 $V_{\mathrm{crit}}$。
+\end{proof}
+
+\begin{remark}[与鼻点、$L$ 指标、在线监视的联系]\label{rem:pf-th-vs-thevenin}
+纯电抗、单位功率因数（$\theta_{th}=\pi/2$、$\varphi=0$）时
+$\cos(\theta_{th}-\varphi)=0$，式~\eqref{eq:pf-th-vs-thevenin} 化为
+$V_{\mathrm{crit}}=E_{th}/\sqrt2$、$P_{\max}=E_{th}^2/(2Z_{th})$——正是
+例~\ref{ex:pf-th-vs-twobus} 的两母线鼻点。判据 $Z_L=Z_{th}$ 即“负荷阻抗逼近戴维南
+阻抗”，是基于本地相量在线辨识 $Z_{th}$ 的阻抗裕度指标~\cite{pfvs:vu} 与 $L$ 指标
+（第~\ref{sec:pf-th-vs-snb}~节）的共同物理内核。其局限：戴维南等值随其余网络运行点
+缓变，需在线更新；多负荷同时增长时各母线 $Z_{th}$ 耦合变化，单母线判据仅局部有效。
+\end{remark}
+
+\begin{gapnote}
+基于戴维南等值的阻抗匹配裕度指标在平台 CPF 中\textbf{未实现}（指标族仅含 $\lambda$-裕度类，
+见本章末对应表与实现层 CPF 章）；本判据作为电压稳定的解析内核与 CPF 数值追踪互补。
+\end{gapnote}
 
 \subsection{连续潮流（CPF）理论}\label{sec:pf-th-vs-cpf}
 
@@ -642,6 +686,35 @@ $L$ 变为 $L+\mathrm{diag}(K_e)$，无需钉住任何节点即正定（弱对�
 （定理~\ref{thm:pf-th-vs-dcref}），且每台设备的自由注入均被控制等式吸收。
 \end{remark}
 
+\subsection{数值算例与基准}\label{sec:pf-th-vs-numexp}
+
+\srcpath{tools/pf\_doc\_benchmark.cpp}（模式 \texttt{cpf}）在例~\ref{ex:pf-th-vs-twobus} 的
+两母线系统（$E=1$、$X=0.5$~pu、负荷 $50+\mathrm j20$~MVA、基准 100~MVA）上运行平台弧长
+连续潮流（\srcpath{src/power\_flow/voltage\_stability.cpp:CpfSolver}），与解析鼻点对照。
+
+\begin{example}[两母线 CPF 与解析鼻点]\label{ex:pf-th-vs-cpfnum}
+比例加载 $P(\lambda)=(1{+}\lambda)\cdot0.5$、$Q(\lambda)=(1{+}\lambda)\cdot0.2$（pu）。
+解析上判别式 $\Delta=1-0.4s-0.25s^2=0$（$s=1{+}\lambda$）给出 $s^*=1.3541$，故
+$\lambda^*=0.3541$、$P_{\max}=0.677$~pu$=67.70$~MW、
+$V_{\mathrm{nose}}=\sqrt{(1-2Q_LX)/2}=0.6038$~pu。平台弧长 CPF（默认翻越鼻点）实测：
+\begin{center}\footnotesize
+\begin{tabular}{@{}lccc@{}}
+\toprule
+量 & 解析 & CPF 实测 & 相对误差\\
+\midrule
+$\lambda_{\max}$      & $0.3541$ & $0.3536$ & $0.14\%$\\
+$P_{\max}$ (MW)       & $67.70$  & $67.68$  & $0.03\%$\\
+$V_{\mathrm{nose}}$ (pu) & $0.6038$ & $0.6130$ & $1.5\%$\\
+\bottomrule
+\end{tabular}
+\end{center}
+$\lambda_{\max}$ 与 $P_{\max}$ 吻合到 $0.1\%$ 量级，验证弧长校正在鼻点邻域仍为正则
+Newton 问题（定理~\ref{thm:pf-th-vs-augmented}）；$V_{\mathrm{nose}}$ 的 $1.5\%$ 偏差
+源于鼻点采样步长（$\Delta\lambda\!\sim\!0.02$）——CPF 报告的是最接近鼻尖的\emph{采样}点，
+其电压略高于精确鼻尖 $E/\!\sqrt2$。求解器以 $22$ 个追踪点翻越鼻点并采样下支，
+$\mathtt{nose\_found}$、$\mathtt{arc\_length\_used}$ 均为真，与弧长连续潮流的设计一致。
+\end{example}
+
 \subsection{与实现的对应}\label{sec:pf-th-vs-impl}
 \begin{center}\footnotesize
 \begin{longtable}{@{}L{6.8cm}L{8.6cm}@{}}
@@ -702,6 +775,11 @@ DC 岛电压参考必要性（定理~\ref{thm:pf-th-vs-dcref}） &
 \implfull{src/power\_flow/newton\_solver.cpp:apply\_participation\_factor\_sharing}（规则校核 converter\_coordination.cpp 的 DCISLAND-*/PARTICIPATION 系列）\\
 AC$\leftrightarrow$DC 交叉雅可比块 &
 \implpart{src/power\_flow/jacobian\_builder.cpp:evaluate\_residual\_impl 已实现交叉块，但默认关闭（opt-in enable\_coupled\_jacobian）；DC 块内自洽导数与 LCC 外特性导数恒常装配}\\
+戴维南最大功率/阻抗匹配判据（定理~\ref{thm:pf-th-vs-thevenin}，
+式~\eqref{eq:pf-th-vs-thevenin}） &
+\implnone（指标族仅 $\lambda$-裕度类；电压稳定极限由弧长 CPF 追踪，非阻抗匹配指标）\\
+两母线 CPF 与解析鼻点数值基准（例~\ref{ex:pf-th-vs-cpfnum}） &
+\implfull{tools/pf\_doc\_benchmark.cpp}（模式 cpf；调用 voltage\_stability.cpp:CpfSolver::solve）\\
 \bottomrule
 \end{longtable}
 \end{center}
@@ -735,4 +813,7 @@ vol.~I, Wiley-Interscience, 1971.
 Transmission}, 2nd ed., IEE Power Engineering Series, 1998.
 \bibitem{pfvs:facchinei} F.~Facchinei, J.-S. Pang, \emph{Finite-Dimensional
 Variational Inequalities and Complementarity Problems}, Springer, 2003.
+\bibitem{pfvs:vu} K.~Vu, M.~M. Begovic, D.~Novosel, and M.~M. Saha, Use of local
+measurements to estimate voltage-stability margin, \emph{IEEE Transactions on
+Power Systems}, vol.~14, no.~3, pp.~1029--1035, 1999.
 \end{thebibliography}}

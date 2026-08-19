@@ -783,6 +783,12 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/matpower_pf_compare.cpp")
   hacdcpf_copy_opendss_runtime(matpower_pf_compare)
 endif()
 
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/pf_doc_benchmark.cpp")
+  add_executable(pf_doc_benchmark tools/pf_doc_benchmark.cpp)
+  target_link_libraries(pf_doc_benchmark PRIVATE hacdcpf::hacdcpf)
+  hacdcpf_copy_opendss_runtime(pf_doc_benchmark)
+endif()
+
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/bpa_dat_convert.cpp")
   add_executable(bpa_dat_convert tools/bpa_dat_convert.cpp)
   target_link_libraries(bpa_dat_convert PRIVATE hacdcpf::hacdcpf)

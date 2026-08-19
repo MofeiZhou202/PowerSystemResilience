@@ -7,10 +7,12 @@
 本章为通用数学理论，按电力系统潮流计算的标准模型与数值分析文献体系撰写，覆盖：
 节点功率方程从基尔霍夫电流定律与 $\pi$ 等值电路出发的一般推导（含复数变比变压器
 与移相器两端口）、潮流问题的数学分类（PQ/PV/V$\theta$ 节点、方程-未知数计数、解的
-存在性与多解性）、Newton--Raphson 法的一般理论（局部二次收敛定理及其证明、收敛域、
-雅可比奇异的物理含义）、病态与数值性态（条件数分析、高 $R/X$ 比、重负荷/弱网、
-雅可比奇异与电压崩溃的关系），以及稀疏技术理论（图消元与填充、最小度/近似最小度
-排序原理、LU 填充的图刻画）。与平台实现（\srcpath{src/power\_flow/}）的对应关系见
+存在性与多解性、可解性的压缩充分条件）、Newton--Raphson 法的一般理论（局部二次收敛定理及其证明、收敛域、
+雅可比奇异的物理含义）、直角坐标下失配的精确二次结构与 Iwamoto 最优乘子法、
+病态与数值性态（条件数分析、高 $R/X$ 比、重负荷/弱网、
+雅可比奇异与电压崩溃的关系）、稀疏技术理论（图消元与填充、最小度/近似最小度
+排序原理、LU 填充的图刻画），以及由平台求解器实测数据给出的收敛性数值算例与基准。
+与平台实现（\srcpath{src/power\_flow/}）的对应关系见
 本章末"与实现的对应"表，超出实现的内容以"未实现扩展说明"框就地标记。
 \end{theorynote}
 
@@ -277,6 +279,79 @@ CHKS 光滑化的半光滑 Newton 替代）全文见
 \srcpath{docs/theory/pv\_pq\_switching\_contract.md}，实现层转写见本手册
 "统一 Newton 章"与"鲁棒求解器章"。
 
+\subsection{潮流可解性的充分条件}\label{sec:pf-th-fund-solvability}
+
+第~\ref{sec:pf-th-fund-classification}~节从两母线鼻点（例~\ref{ex:pf-th-fund-twobus}）
+定性说明了潮流解可以不存在。本节给出一个\emph{定量}充分条件：当负荷相对短路容量足够
+小时，存在唯一的高电压解，且不动点迭代收敛到它。设网络含单一 slack（母线 $0$，
+电压 $u_0$）与 PQ 母线集 $L=\{1,\dots,n\}$，$Y_{bus}$ 按 $\{0\}$ 与 $L$ 分块，
+子块 $Y_{LL}$ 非奇异（连通接地网络成立）。
+
+\begin{proposition}[PQ 潮流的不动点形式]\label{prop:pf-th-fund-fixedpoint}
+记 PQ 母线注入复功率 $s\in\mathbb C^n$（发电为正）。定义\emph{空载电压}
+$w:=-Y_{LL}^{-1}Y_{L0}u_0$（$s=0$ 时的解）。则 PQ 潮流方程等价于不动点方程
+\begin{equation}
+u=T(u):=w+Y_{LL}^{-1}\,\overline{s\oslash u},
+\label{eq:pf-th-fund-fixedpoint}
+\end{equation}
+其中 $\oslash$ 为逐分量除、$\overline{(\cdot)}$ 为复共轭。
+\end{proposition}
+\begin{proof}
+PQ 母线电流注入 $i_L=Y_{LL}u+Y_{L0}u_0$；由 $s_i=u_i\overline{i_i}$ 得
+$i_i=\overline{s_i/u_i}$，即 $i_L=\overline{s\oslash u}$。两式相等，左乘 $Y_{LL}^{-1}$、
+移项即式~\eqref{eq:pf-th-fund-fixedpoint}。
+\end{proof}
+
+\begin{theorem}[压缩可解性条件]\label{thm:pf-th-fund-solvability}
+记 $\eta:=\lVert Y_{LL}^{-1}\rVert_\infty$（行和范数）、$\sigma:=\max_i|s_i|$、
+$w_{\min}:=\min_i|w_i|>0$。若
+\begin{equation}
+4\,\eta\,\sigma<w_{\min}^2,
+\label{eq:pf-th-fund-solvcond}
+\end{equation}
+则映射 $T$ 在闭球 $\mathcal B=\{u:\lVert u-w\rVert_\infty\le w_{\min}/2\}$ 上是压缩自映射，
+潮流方程~\eqref{eq:pf-th-fund-fixedpoint} 在 $\mathcal B$ 内有\emph{唯一}解，且 Picard
+迭代 $u^{(k+1)}=T(u^{(k)})$ 从 $u^{(0)}=w$ 出发几何收敛到它。
+\end{theorem}
+\begin{proof}
+在 $\mathcal B$ 上 $|u_i|\ge|w_i|-\tfrac{w_{\min}}2\ge\tfrac{w_{\min}}2=:\rho$。
+\textbf{自映射}：对 $u\in\mathcal B$，
+\begin{equation*}
+\lVert T(u)-w\rVert_\infty=\bigl\lVert Y_{LL}^{-1}\overline{s\oslash u}\bigr\rVert_\infty
+\le\eta\,\max_i\frac{|s_i|}{|u_i|}\le\frac{\eta\sigma}{\rho}
+=\frac{2\eta\sigma}{w_{\min}}<\frac{w_{\min}}2,
+\end{equation*}
+末步用式~\eqref{eq:pf-th-fund-solvcond}，故 $T(u)\in\mathcal B$。
+\textbf{压缩}：对 $u,u'\in\mathcal B$，逐分量
+$\bigl|\overline{s_i/u_i}-\overline{s_i/u_i'}\bigr|
+=|s_i|\,|u_i-u_i'|/(|u_i||u_i'|)\le(\sigma/\rho^2)\lVert u-u'\rVert_\infty$，故
+\begin{equation*}
+\lVert T(u)-T(u')\rVert_\infty\le\eta\,\frac{\sigma}{\rho^2}\lVert u-u'\rVert_\infty
+=\frac{4\eta\sigma}{w_{\min}^2}\lVert u-u'\rVert_\infty,
+\end{equation*}
+压缩系数 $L=4\eta\sigma/w_{\min}^2<1$。$\mathcal B$ 是完备度量空间中的闭集，Banach
+不动点定理给出唯一不动点与几何收敛。
+\end{proof}
+
+\begin{remark}[短路容量裕度的读法与两母线校核]\label{rem:pf-th-fund-solvability}
+$\eta=\lVert Y_{LL}^{-1}\rVert_\infty$ 是“路径阻抗”量级、$\eta^{-1}$ 度量短路容量，
+$w_{\min}$ 为最弱母线的空载电压；条件~\eqref{eq:pf-th-fund-solvcond} 即“负荷 $\times$
+路径阻抗 $\ll$ 空载电压$^2$”的短路容量裕度，与前推回代的压缩条件
+（式~\eqref{sec:pf-th-cls-eq:bfsc}，第~\ref{sec:pf-th-cls}~章）同源。以两母线系统
+（例~\ref{ex:pf-th-fund-twobus}，$Q=0$）校核：$Y_{LL}=1/(\mathrm jX)$、$w=E$、
+$\eta=X$、$\sigma=P$，条件给出 $P<E^2/(4X)$，恰为真鼻点 $P_{\max}=E^2/(2X)$ 的一半——
+即该充分条件保守约 $2$ 倍，符合“压缩界不触鼻点极限”的一般预期。更锐的（计及负荷
+方向与网络结构的）可解性判据见 Bolognani--Zampieri~\cite{pff:bolognani} 与
+Simpson-Porco--D\"orfler--Bullo~\cite{pff:simpsonporco}。
+\end{remark}
+
+\begin{gapnote}
+条件~\eqref{eq:pf-th-fund-solvcond} 作为求解前的可解性预判在平台中\textbf{未实现}：
+求解器直接尝试 Newton/BFS，以收敛与否与残差水平事后判定；HELM
+（\srcpath{src/power\_flow/helm\_solver.cpp:HelmSolver::solve}）沿解析延拓返回与平启动
+连通的物理解，同样不输出式~\eqref{eq:pf-th-fund-solvcond} 型的先验证书。
+\end{gapnote}
+
 \subsection{Newton--Raphson 一般理论}\label{sec:pf-th-fund-newton}
 
 \subsubsection{迭代格式与局部二次收敛}
@@ -414,7 +489,115 @@ $\sigma_{\min}(J)\to0$，$\kappa(J)\to\infty$（见
 极限点~\cite{pff:ajjarapu-christy}，后者应在装配期诊断剔除。实现层以
 空行/空列扫描与方程闭合校核处置后者（见"与实现的对应"表）。
 \end{remark}
+\subsection{直角坐标表述、二次结构与最优乘子法}\label{sec:pf-th-fund-rect}
 
+极坐标式~\eqref{eq:pf-th-fund-polar-p}--\eqref{eq:pf-th-fund-polar-q} 是平台采用的
+标准形式，但改用\emph{直角坐标}可揭示潮流失配的一个精确二次代数结构，并由此导出两个
+经典结论：电流注入雅可比的常量非对角块，以及沿 Newton 方向的\emph{闭式最优步长}。
+
+\subsubsection{直角坐标功率方程}
+\begin{definition}[直角坐标电压与注入电流]\label{def:pf-th-fund-rect}
+记 $V_i=e_i+\mathrm jf_i$。注入电流 $I_i=\sum_jY_{ij}V_j$ 的实/虚部
+\begin{equation}
+a_i:=\operatorname{Re}I_i=\sum_j\bigl(G_{ij}e_j-B_{ij}f_j\bigr),\qquad
+b_i:=\operatorname{Im}I_i=\sum_j\bigl(G_{ij}f_j+B_{ij}e_j\bigr)
+\end{equation}
+均为状态 $x=(e_1,\dots,e_n,f_1,\dots,f_n)$ 的\emph{线性}函数。
+\end{definition}
+
+\begin{proposition}[直角坐标注入功率]\label{prop:pf-th-fund-rectpq}
+\begin{equation}
+P_i=e_ia_i+f_ib_i,\qquad Q_i=f_ia_i-e_ib_i,
+\label{eq:pf-th-fund-rectpq}
+\end{equation}
+均为 $x$ 的齐二次型；母线电压幅值平方 $V_i^2=e_i^2+f_i^2$ 亦为齐二次型。
+\end{proposition}
+\begin{proof}
+$S_i=V_i\overline{I_i}=(e_i+\mathrm jf_i)(a_i-\mathrm jb_i)
+=(e_ia_i+f_ib_i)+\mathrm j(f_ia_i-e_ib_i)$，取实、虚部即得。$a_i,b_i$ 线性于 $x$，
+故 $P_i,Q_i$ 为 $x$ 的二次齐次多项式。
+\end{proof}
+
+\subsubsection{失配映射的精确二次结构}
+\begin{theorem}[潮流失配是二次多项式映射]\label{thm:pf-th-fund-quadmap}
+以直角坐标未知量 $x$（slack 的 $e,f$ 固定）装配失配 $F(x)$——PQ 母线取
+$(\Delta P_i,\Delta Q_i)$、PV 母线取 $(\Delta P_i,\ (V_i^{\mathrm{set}})^2-e_i^2-f_i^2)$——
+则 $F$ 是 $x$ 的二次多项式映射：存在常向量 $c_0$、常矩阵 $J_0$ 与\emph{常}对称双线性
+形 $\mathcal B[\cdot,\cdot]$ 使
+\begin{equation}
+F(x)=c_0+J_0x+\tfrac12\mathcal B[x,x],\qquad D^3F\equiv0 .
+\label{eq:pf-th-fund-quadmap}
+\end{equation}
+从而对任意基点 $x_k$ 与方向 $\Delta$，
+\begin{equation}
+F(x_k+\alpha\Delta)=F(x_k)+\alpha\,J(x_k)\Delta+\tfrac12\alpha^2\,\mathcal B[\Delta,\Delta]
+\label{eq:pf-th-fund-exactstep}
+\end{equation}
+是\emph{精确}恒等式（无截断），其中 $J(x_k)=J_0+\mathcal B[x_k,\cdot]$。
+\end{theorem}
+\begin{proof}
+由命题~\ref{prop:pf-th-fund-rectpq}，$F$ 的每个分量是 $x$ 的二次多项式（常数项、
+线性项与二次项之和），故其三阶及以上导数恒为零，Taylor 展开在二阶精确终止，
+即式~\eqref{eq:pf-th-fund-quadmap}。把 $x=x_k+\alpha\Delta$ 代入，二次映射只产生
+$\alpha^0,\alpha^1,\alpha^2$ 三项，系数分别为 $F(x_k)$、$J(x_k)\Delta$、
+$\tfrac12\mathcal B[\Delta,\Delta]$，即式~\eqref{eq:pf-th-fund-exactstep}。
+\end{proof}
+
+\begin{remark}[电流注入雅可比的常量非对角块]\label{rem:pf-th-fund-ci}
+以\emph{电流失配} $\Delta I_i=\overline{S_i^{\mathrm{spec}}/V_i}-\sum_jY_{ij}V_j$
+（实/虚部堆叠）为方程的电流注入 Newton 法~\cite{pff:dacosta} 中，网络项
+$\sum_jY_{ij}V_j$ 对 $V_j$ 线性，故非对角块
+$\partial(\Delta I_i^{\mathrm{re}},\Delta I_i^{\mathrm{im}})/\partial(e_j,f_j)$
+（$i\ne j$）恒等于\emph{常量} $2\times2$ 实块
+$\left[\begin{smallmatrix}-G_{ij}&\phantom{-}B_{ij}\\-B_{ij}&-G_{ij}\end{smallmatrix}\right]$，
+与运行点无关，只有 $2\times2$ 对角块随本地负荷电流的状态依赖而变。这一“非对角块免
+重算”性质是电流注入法单步更省的结构来源。
+\end{remark}
+
+\subsubsection{Iwamoto 最优乘子法}
+式~\eqref{eq:pf-th-fund-exactstep} 的精确性使沿 Newton 方向的 merit 有\emph{闭式}
+最小点。设 $g:=F(x_k)$，Newton 方向 $\Delta_N$ 满足 $J(x_k)\Delta_N=-g$，
+记 $c:=\mathcal B[\Delta_N,\Delta_N]$，则由式~\eqref{eq:pf-th-fund-exactstep}，
+$F(x_k+\alpha\Delta_N)=(1-\alpha)g+\tfrac12\alpha^2c$。
+
+\begin{proposition}[最优乘子的三次方程]\label{prop:pf-th-fund-iwamoto}
+记 $a_0=g^{\mathsf T}g$、$a_1=g^{\mathsf T}c$、$a_2=c^{\mathsf T}c$，则 merit
+$\phi(\alpha)=\tfrac12\lVert F(x_k+\alpha\Delta_N)\rVert^2$ 是 $\alpha$ 的\emph{四次}
+多项式，其驻点由\emph{三次}方程
+\begin{equation}
+a_2\,\alpha^3-3a_1\,\alpha^2+2(a_0+a_1)\,\alpha-2a_0=0
+\label{eq:pf-th-fund-iwamoto}
+\end{equation}
+给出。落在 $(0,1]$ 内使 $\phi$ 最小的实根即\emph{最优乘子} $\mu_k$，可由 Cardano
+公式闭式求得，代价可忽略~\cite{pff:iwamoto}。
+\end{proposition}
+\begin{proof}
+$\phi(\alpha)=\tfrac12\bigl[(1-\alpha)^2a_0+(1-\alpha)\alpha^2a_1+\tfrac14\alpha^4a_2\bigr]$。
+求导 $\phi'(\alpha)=\tfrac12\bigl[-2a_0(1-\alpha)+a_1(2\alpha-3\alpha^2)+a_2\alpha^3\bigr]$，
+令其为零并整理即式~\eqref{eq:pf-th-fund-iwamoto}。又 $\phi'(0)=-a_0<0$
+（$a_0=\lVert g\rVert^2>0$），保证在 $\alpha>0$ 侧存在使 merit 下降的根。
+\end{proof}
+
+\begin{remark}[最优乘子的全局化意义与渐近还原]\label{rem:pf-th-fund-iwamoto}
+$\mu_k$ 给出沿 Newton 方向的\emph{精确}最优 merit 下降，无需回溯试探，历史上专用于
+病态/发散边缘系统的稳健求解~\cite{pff:iwamoto}。近解处 $\Delta_N\to0$，
+$c=\mathcal B[\Delta_N,\Delta_N]$ 为二阶小量，$a_2=\lVert c\rVert^2\to0$，
+式~\eqref{eq:pf-th-fund-iwamoto} 退化为 $2(a_0+a_1)\alpha-2a_0\approx0$，
+$\mu_k\to1$：方法自动还原为全步 Newton，定理~\ref{thm:pf-th-fund-quadratic} 的
+二次收敛得以保留。这与极坐标下 Armijo 线搜索近解 $\alpha\to1$ 殊途同归，差别在于
+二次结构给出了\emph{无试探}的闭式步长。
+\end{remark}
+
+\begin{gapnote}
+平台统一 Newton 求解器采用\textbf{极坐标}功率失配
+（\srcpath{src/power\_flow/ac\_kernel.cpp:evaluate\_ac\_kernel\_serial}），全局化用
+Armijo/非单调线搜索、LM 与 PTC（见第~\ref{sec:pf-th-glob}~章），
+\textbf{未实现}直角坐标 Newton、电流注入 Newton 与 Iwamoto 最优乘子；
+式~\eqref{eq:pf-th-fund-iwamoto} 依赖的精确二次结构在极坐标下不成立（三角项使
+$D^3F\ne0$）。平台内唯一的电流注入构造是三相 Newton 的定点辅助
+（\srcpath{src/power\_flow/three\_phase\_nr.cpp:evaluate\_fixed\_point\_current\_injections}），
+非本节的电流失配 Newton 主迭代。
+\end{gapnote}
 \subsection{病态与数值性态}\label{sec:pf-th-fund-conditioning}
 
 \subsubsection{条件数与扰动界}
@@ -605,6 +788,86 @@ KLU 的符号分析（其内部默认为 AMD，并可经环境变量切换 COLAM
 自定义排序接口亦未暴露。
 \end{gapnote}
 
+\subsection{数值算例与基准}\label{sec:pf-th-fund-numexp}
+
+本节全部数字由 \srcpath{tools/pf\_doc\_benchmark.cpp}（模式 \texttt{nr}）在 MATPOWER
+标准算例（\srcpath{data/case*.m}）上、经平台默认统一 Newton 求解器（极坐标、KLU 稀疏
+分解、平启动、$\mathrm{tol}=10^{-10}$）实测生成，可随代码演进重跑复现。迭代次数与残差
+轨迹为机器无关量；求解墙钟时间仅供量级参考（Apple~M4，单线程）。
+
+\subsubsection{收敛的规模弱依赖性}
+表~\ref{tab:pf-th-fund-nrconv} 给出 $9\sim300$ 母线算例的收敛数据。Newton 维数
+$m=2(n-1)$（固定超集布局：非参考母线一律保留 $\theta$ 与 $V_m$ 两列，见
+第~\ref{sec:pf-th-fund-sparsity}~节末）。迭代次数稳定在 $4\sim8$ 次、几乎不随规模增长，
+最终残差压到 $10^{-13}$ 量级——正是注记~\ref{rem:pf-th-fund-hypotheses} 所述“平启动、
+个位数次迭代收敛”的定量印证。
+
+\begin{table}[H]\centering\footnotesize
+\caption{统一 Newton 潮流在 MATPOWER 算例上的收敛数据（平启动，$\mathrm{tol}=10^{-10}$）}
+\label{tab:pf-th-fund-nrconv}
+\begin{tabular}{@{}lrrrrrr@{}}
+\toprule
+算例 & 母线数 $n$ & Newton 维数 $m$ & 迭代次数 & 最终残差 & 条件数代理 & PV$\to$PQ 切换\\
+\midrule
+case9   & 9   & 16  & 5 & $1.7\times10^{-14}$ & $5.9\times10^{2}$ & 0\\
+case14  & 14  & 26  & 4 & $9.6\times10^{-15}$ & $1.9\times10^{3}$ & 0\\
+case30  & 30  & 58  & 5 & $8.9\times10^{-15}$ & $2.0\times10^{4}$ & 0\\
+case57  & 57  & 112 & 4 & $3.4\times10^{-12}$ & $2.2\times10^{4}$ & 0\\
+case118 & 118 & 234 & 7 & $8.5\times10^{-14}$ & $1.3\times10^{5}$ & 6\\
+case300 & 300 & 598 & 8 & $4.3\times10^{-13}$ & $1.3\times10^{9}$ & 10\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+条件数代理列由 \srcpath{estimate\_condition\_proxy}（行/列 $\infty$-范数之积，\emph{非}真
+$\kappa_2$）给出，随规模与负荷压力单调上升。case300 的代理达 $10^{9}$ 量级，但其真解
+仍收敛到 $4\times10^{-13}$：若真 $\kappa_2$ 果为 $10^{9}$，由注记~\ref{rem:pf-th-fund-float}
+的 $u\,\kappa$ 界残差应止步于 $\sim10^{-7}$，故该行/列范数代理\emph{显著高估}真
+$\kappa_2$，只宜作趋势指标而非绝对条件数。
+
+\subsubsection{二次收敛的逐迭代验证}
+\begin{example}[case30 的二次收敛率]\label{ex:pf-th-fund-quadconv}
+下表列出 case30 每次 Newton 迭代记录的最大失配范数 $r_k$（$k=0$ 为平启动初始失配）
+与二次收敛率 $r_k/r_{k-1}^2$。比率在 $r_2,r_3$ 步稳定于 $\approx0.22$（有界），
+即 $r_{k+1}\approx0.22\,r_k^2$——定理~\ref{thm:pf-th-fund-quadratic} 的
+$\lVert e_{k+1}\rVert\le\beta L\lVert e_k\rVert^2$ 在此对应 $\beta L\approx0.2$。
+末步 $r_4$ 触及 $\sim10^{-14}$ 的浮点残差地板，比率失真（$r_3^2\approx9\times10^{-19}$
+已低于双精度可分辨范围），与注记~\ref{rem:pf-th-fund-float} 的残差平台期吻合。
+\begin{center}\footnotesize
+\begin{tabular}{@{}crl@{}}
+\toprule
+迭代 $k$ & 最大失配 $r_k$ & 二次率 $r_k/r_{k-1}^2$\\
+\midrule
+0 & $3.93\times10^{-1}$ & —\\
+1 & $1.63\times10^{-2}$ & $1.06\times10^{-1}$\\
+2 & $6.59\times10^{-5}$ & $2.47\times10^{-1}$\\
+3 & $9.57\times10^{-10}$ & $2.20\times10^{-1}$\\
+4 & $8.88\times10^{-15}$ & （残差地板）\\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{example}
+
+\subsubsection{无功限值切换对 Newton 轨迹的扰动}
+\begin{example}[case300 的两段式收敛]\label{ex:pf-th-fund-qswitch}
+case300 逐迭代记录的最大失配为（竖线标注一次 PV$\to$PQ 切换处）
+\begin{center}\footnotesize
+$9.27,\ 2.59,\ 3.54{\times}10^{-1},\ 8.45{\times}10^{-3},\ 4.65{\times}10^{-6},\
+1.38{\times}10^{-12}\ \big\|\ 3.00{\times}10^{-3},\ 2.04{\times}10^{-7},\
+4.26{\times}10^{-13}.$
+\end{center}
+轨迹呈三个阶段：(i) \emph{大修正区}（$9.27\to2.59\to0.35$，比率非二次），
+对应初值远离解、超出定理~\ref{thm:pf-th-fund-quadratic} 的二次收敛邻域，
+线搜索与步长限幅等全局化机制主导（第~\ref{sec:pf-th-fund-newton}~节收敛域讨论）；
+(ii) \emph{二次收敛尾}（$8.45{\times}10^{-3}\to4.65{\times}10^{-6}\to1.38{\times}10^{-12}$，
+残差近似逐步平方，比率 $\approx0.065$）；(iii) 竖线处一次 \textbf{无功限值 PV$\to$PQ 切换}
+改变活动集、重新注入 $\sim3\times10^{-3}$ 的失配，之后再次二次收敛到 $4.3\times10^{-13}$。
+这段真实轨迹同时印证三件事：远离解的全局化行为、近解的二次收敛，以及
+式~\eqref{eq:pf-th-fund-qlimit} 的无功限值活动集切换如何以“重启 Newton”的形式表现——
+纯 Newton 序列被活动集变更打断，正是注记~\ref{rem:pf-th-fund-affine} 所述“限值切换
+破坏纯 Newton 序列”的实测样貌。
+\end{example}
+
 \subsection{与实现的对应}\label{sec:pf-th-fund-implmap}
 \begin{center}\footnotesize
 \begin{longtable}{@{}L{6.8cm}L{8.6cm}@{}}
@@ -633,6 +896,9 @@ PQ/PV/V$\theta$ 分类与方程-未知数闭合（命题~\ref{prop:pf-th-fund-co
 \implfull{src/power\_flow/newton\_solver.cpp:solve}（由 \fld{enable\_semi\_smooth\_newton} 启用，$\mu$ 延拓见 robust\_nonlinear\_options）\\
 多解枚举与全解搜索（注记~\ref{rem:pf-th-fund-multiplicity}） &
 \implnone（HELM 求解器 helm\_solver.cpp:HelmSolver::solve 仅返回与平启动连通的物理解，非枚举）\\
+可解性的压缩充分条件（定理~\ref{thm:pf-th-fund-solvability}，
+式~\eqref{eq:pf-th-fund-solvcond}） &
+\implnone（无求解前可解性预判；以收敛与否事后判定）\\
 Newton 迭代与局部二次收敛（定理~\ref{thm:pf-th-fund-quadratic}） &
 \implfull{src/power\_flow/newton\_solver.cpp:solve}（实现层转写见本手册"统一 Newton 章"）\\
 Kantorovich/$\alpha$ 定量收敛证书 &
@@ -653,6 +919,18 @@ MD/AMD/嵌套分割排序算法 &
 \implpart{平台未自研：KLU 默认 AMD（MIPSolvers 端 make\_default\_sparse\_solver），三相混合用 Eigen COLAMDOrdering；无自定义排序接口}\\
 解析雅可比的差分校验工具 &
 \implfull{src/power\_flow/jacobian\_check.cpp:check\_jacobian}（中心差分 $h=10^{-6}$）\\
+直角坐标失配的精确二次结构与步长恒等式（定理~\ref{thm:pf-th-fund-quadmap}，
+式~\eqref{eq:pf-th-fund-exactstep}） &
+\implnone（主迭代用极坐标功率失配，三角项使 $D^3F\ne0$）\\
+电流注入 Newton 的常量非对角块（注记~\ref{rem:pf-th-fund-ci}） &
+\implpart{仅三相 Newton 含定点电流注入辅助
+three\_phase\_nr.cpp:evaluate\_fixed\_point\_current\_injections；单相/正序主迭代为极坐标功率失配}\\
+Iwamoto 最优乘子闭式步长（命题~\ref{prop:pf-th-fund-iwamoto}，
+式~\eqref{eq:pf-th-fund-iwamoto}） &
+\implnone（全局化改用 Armijo/非单调线搜索、LM、PTC，见第~\ref{sec:pf-th-glob}~章）\\
+收敛性数值基准（表~\ref{tab:pf-th-fund-nrconv}、例~\ref{ex:pf-th-fund-quadconv}、
+\ref{ex:pf-th-fund-qswitch}） &
+\implfull{tools/pf\_doc\_benchmark.cpp}（模式 nr；调用 api/hacdcpf.hpp:solve\_power\_flow）\\
 \bottomrule
 \end{longtable}
 \end{center}
@@ -702,4 +980,17 @@ element mesh, \emph{SIAM Journal on Numerical Analysis}, vol. 10, no. 2,
 pp. 345--363, 1973.
 \bibitem{pff:davis-suitesparse} T.~A. Davis, \emph{Direct Methods for Sparse
 Linear Systems}, SIAM, 2006.
+\bibitem{pff:iwamoto} S.~Iwamoto and Y.~Tamura, A load flow calculation method
+for ill-conditioned power systems, \emph{IEEE Transactions on Power Apparatus
+and Systems}, vol. PAS-100, no. 4, pp. 1736--1743, 1981.
+\bibitem{pff:dacosta} V.~M. da Costa, N.~Martins, and J.~L.~R. Pereira,
+Developments in the Newton Raphson power flow formulation based on current
+injections, \emph{IEEE Transactions on Power Systems}, vol. 14, no. 4,
+pp. 1320--1326, 1999.
+\bibitem{pff:bolognani} S.~Bolognani and S.~Zampieri, On the existence and linear
+approximation of the power flow solution in power distribution networks,
+\emph{IEEE Transactions on Power Systems}, vol. 31, no. 1, pp. 163--172, 2016.
+\bibitem{pff:simpsonporco} J.~W. Simpson-Porco, F.~D\"orfler, and F.~Bullo,
+Voltage collapse in complex power grids, \emph{Nature Communications}, vol. 7,
+art. 10790, 2016.
 \end{thebibliography}}

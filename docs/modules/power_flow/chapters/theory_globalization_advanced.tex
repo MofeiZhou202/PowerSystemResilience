@@ -9,8 +9,9 @@
 Levenberg--Marquardt 与信赖域的等价关系、GLL 非单调线搜索、NCP/半光滑 Newton
 理论（Fischer--Burmeister 函数、Clarke 广义 Jacobian、超线性收敛）与 PV/PQ 切换
 的统一表述、HELM 全纯嵌入的复分析基础（幂级数、收敛半径、Padé 逼近与 Stahl
-定理）、同伦延拓（概率一正则性、路径跟踪、转折点），以及 Newton--Krylov/JFNK
-与非精确 Newton 的收敛理论。本章公式不要求逐式对应代码；与平台实现
+定理）、同伦延拓（概率一正则性、路径跟踪、转折点）、Newton--Krylov/JFNK
+与非精确 Newton 的收敛理论，以及不动点迭代的 Anderson 加速（与 GMRES 的等价）；
+并以平台求解器实测数据给出高级求解器收敛与可解性边界的数值基准。本章公式不要求逐式对应代码；与平台实现
 （\srcpath{src/power\_flow/} 与 \srcpath{include/hacdcpf/power\_flow/}）的对应关系
 见本章末"与实现的对应"表，超出实现的内容以"未实现扩展说明"框就地标记。
 实现层的组件级转写见本手册"全局化与鲁棒求解器族"章。
@@ -303,6 +304,60 @@ $o(1)$，从而 $\liminf\lVert g_k\rVert=0$。
 Newton 步（减少回溯次数与 Jacobian 重分解），但非单调震荡的幅度也更
 大；$M$ 小则接近单调行为。潮流实践中 $M\in[3,10]$ 是常见取值。
 \end{remark}
+
+\subsection{Anderson 加速}\label{sec:pf-th-glob-anderson}
+
+前推回代、FDPF 与 HELM 胚迭代等\emph{不动点}方法只具线性收敛
+（第~\ref{sec:pf-th-cls}~章）。Anderson 加速~\cite{pfglob-anderson} 利用历史残差
+外推，常能显著提升其收敛速度，且不需要 Jacobian。
+
+\begin{definition}[Anderson 加速 AA($m$)]\label{def:pf-th-glob-anderson}
+设不动点迭代 $x\mapsto g(x)$、残差 $f(x)=g(x)-x$。取记忆深度 $m$，第 $k$ 步令
+$m_k=\min(m,k)$，用最近 $m_k{+}1$ 个残差解约束最小二乘
+\begin{equation}
+\alpha^{(k)}=\arg\min_{\sum_i\alpha_i=1}
+\Bigl\lVert\sum_{i=0}^{m_k}\alpha_i\,f_{k-m_k+i}\Bigr\rVert_2,
+\end{equation}
+再取（阻尼因子 $\beta\in(0,1]$，$\beta{=}1$ 为无阻尼）
+\begin{equation}
+x_{k+1}=(1-\beta)\sum_{i=0}^{m_k}\alpha_i^{(k)}x_{k-m_k+i}
++\beta\sum_{i=0}^{m_k}\alpha_i^{(k)}g(x_{k-m_k+i}).
+\end{equation}
+$m=0$ 退化为（阻尼）Picard 迭代。约束最小二乘可等价化为对残差差分
+$\Delta f_i=f_{i+1}-f_i$ 的无约束最小二乘，规模 $n\times m_k$，代价低。
+\end{definition}
+
+\begin{theorem}[线性情形与 GMRES 的等价（Walker--Ni）]\label{thm:pf-th-glob-anderson-gmres}
+设 $g(x)=Ax+b$ 为仿射映射，不动点即解 $(I-A)x=b$。则无阻尼、全记忆（$m=\infty$）的
+Anderson 加速在不停滞前提下，其第 $k$ 步迭代 $x_k$ 与 GMRES 施于 $(I-A)x=b$ 的第 $k$
+步迭代重合，残差范数逐步相等 $\lVert f_k\rVert=\lVert r_k^{\mathrm{GMRES}}\rVert$
+~\cite{pfglob-walkerni}。
+\end{theorem}
+\begin{proof}[证明要点]
+无约束形式下 AA 更新为 $x_{k+1}=x_k+\beta f_k-(\Delta X_k+\beta\Delta F_k)\gamma^{(k)}$，
+$\gamma^{(k)}=\arg\min_\gamma\lVert f_k-\Delta F_k\gamma\rVert$，其中
+$\Delta X_k,\Delta F_k$ 收集历史差分 $\Delta x_i,\Delta f_i$。仿射映射使
+$\Delta f_i=(A-I)\Delta x_i$，故 $\Delta F_k=(A-I)\Delta X_k$；最小二乘
+$\min_\gamma\lVert f_k-\Delta F_k\gamma\rVert$ 是在 Krylov 仿射空间上极小化
+$(I-A)$-残差，正是 GMRES 的最小残差性质（命题~\ref{sec:pf-th-glob-prop-gmres}）。
+逐步对照生成子空间即得残差相等；完整对应见 Walker--Ni~\cite{pfglob-walkerni} 定理 2.2。
+\end{proof}
+
+\begin{remark}[非线性收敛与工程意义]\label{rem:pf-th-glob-anderson}
+对压缩不动点 $g$（Lipschitz 常数 $\kappa<1$），AA($m$) 局部 r-线性收敛，渐近因子不劣于
+Picard，实践中常显著更快~\cite{pfglob-tothkelley}。定理
+\ref{thm:pf-th-glob-anderson-gmres} 揭示其本质：AA 是不动点迭代上的“类 GMRES”外推，
+以 $O(m)$ 存储与一次小最小二乘换取超线性加速——对配网 BFS、FDPF 这类线性收敛且单步
+廉价的方法尤为契合。$m$ 过大时 $\Delta F_k$ 病态，需列主元 QR 或 Tikhonov 正则与条件
+数门限兜底。
+\end{remark}
+
+\begin{gapnote}
+Anderson 加速在平台中\textbf{未实现}：不动点类求解器（\srcpath{run\_bfs\_sweep}、
+\srcpath{FDPFSolver::solve}）按朴素 Picard/拟 Newton 迭代运行，HELM 用固定阶 Padé 而非
+残差外推；平台的加速手段是 Newton 类（二次收敛）与 GMRES 内迭代
+（\srcpath{src/power\_flow/newton\_krylov.cpp:gmres\_solve}），非不动点外推。
+\end{gapnote}
 
 \subsection{互补问题与半光滑 Newton 方法}\label{sec:pf-th-glob-ncp}
 
@@ -753,6 +808,56 @@ NK 步的接受另加宽松阈值与有限性检查
 积（严格 JFNK）亦未采用，矩阵-向量积直接作用于已装配的 Jacobian。
 \end{gapnote}
 
+\subsection{数值算例与基准}\label{sec:pf-th-glob-numexp}
+
+本节数字由 \srcpath{tools/pf\_doc\_benchmark.cpp}（模式 \texttt{robust}/\texttt{stress}）
+在 MATPOWER 算例上经平台公共 API 实测（平启动，Apple~M4）。
+
+\subsubsection{高级求解器在标准算例上的收敛}
+表~\ref{tab:pf-th-glob-robust} 给出平启动下\emph{关闭}全局化的纯 Newton、同伦延拓、HELM
+与 Newton--Krylov 的最终残差。四者在 $9\sim57$ 母线算例上均达到 $10^{-8}$ 容差；
+\textbf{HELM 在 case118/case300 上止步于 $\sim10^{-7}$}（固定对角 Padé 阶的精度上限，未达
+$10^{-8}$，表中标 $\dagger$），与注记~\ref{sec:pf-th-glob-rem-stahlops} 及实现层 HELM
+边界一致。纯 Newton 在标准算例平启动下即收敛，说明全局化阶梯的价值在于\emph{更难}的
+工况（见下）而非常规潮流。
+\begin{table}[H]\centering\footnotesize
+\caption{高级求解器在标准算例上的最终残差（平启动，$\mathrm{tol}=10^{-8}$）}
+\label{tab:pf-th-glob-robust}
+\begin{tabular}{@{}lrllll@{}}
+\toprule
+算例 & 母线数 & 纯 Newton & 同伦延拓 & HELM & Newton--Krylov\\
+\midrule
+case9   & 9   & $1.7\times10^{-14}$ & $3.4\times10^{-9}$  & $8.2\times10^{-10}$      & $1.7\times10^{-14}$\\
+case14  & 14  & $1.3\times10^{-10}$ & $5.8\times10^{-11}$ & $1.6\times10^{-10}$      & $1.3\times10^{-10}$\\
+case30  & 30  & $9.6\times10^{-10}$ & $1.4\times10^{-12}$ & $3.5\times10^{-11}$      & $9.6\times10^{-10}$\\
+case57  & 57  & $3.4\times10^{-12}$ & $9.9\times10^{-9}$  & $1.6\times10^{-10}$      & $3.4\times10^{-12}$\\
+case118 & 118 & $8.5\times10^{-14}$ & $8.5\times10^{-14}$ & $8.9\times10^{-8}\,\dagger$ & $8.5\times10^{-14}$\\
+case300 & 300 & $4.3\times10^{-13}$ & $6.2\times10^{-13}$ & $2.5\times10^{-7}\,\dagger$ & $4.3\times10^{-13}$\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{负荷加载与可解性边界}
+表~\ref{tab:pf-th-glob-stress} 把算例负荷按因子 $\gamma$ 整体放大（发电不变、slack 吸收），
+记录纯 Newton、带鲁棒升级的 Newton 与同伦三者的收敛性。三者在每个 $\gamma$ 处\emph{一致}
+收敛或一致失败（故合并为一列）：case9 的边界落在 $\gamma\in(2.2,2.5)$、case118 在
+$(1.5,1.8)$。这印证：越过该边界的失败是\textbf{物理无解}（鼻点之外），而非求解器鲁棒性
+不足——对应同伦理论中路径“发散至无穷”的失败模式（定理~\ref{sec:pf-th-glob-thm-sard}）
+与可解性充分条件越界（定理~\ref{thm:pf-th-fund-solvability}）。全局化阶梯能扩大\emph{可
+达}解集，却不能制造不存在的解。
+\begin{table}[H]\centering\footnotesize
+\caption{负荷加载因子 $\gamma$ 下的收敛性（纯 Newton、鲁棒 Newton、同伦三者一致）}
+\label{tab:pf-th-glob-stress}
+\begin{tabular}{@{}lccccccccc@{}}
+\toprule
+$\gamma$ & 1.0 & 1.2 & 1.5 & 1.8 & 2.0 & 2.2 & 2.5 & 2.8 & 3.0\\
+\midrule
+case9   & Y & Y & Y & Y & Y & Y & N & N & N\\
+case118 & Y & Y & Y & N & N & N & N & N & N\\
+\bottomrule
+\end{tabular}
+\end{table}
+
 \subsection{与实现的对应}\label{sec:pf-th-glob-map}
 \begin{center}\footnotesize
 \begin{longtable}{@{}L{6.8cm}L{8.6cm}@{}}
@@ -813,6 +918,12 @@ GMRES($m$)：MGS Arnoldi + Givens 最小二乘
 \implfull{src/power\_flow/newton\_krylov.cpp:gmres\_solve}（重启、真残差复核、良性中断处理齐全）\\
 Schur 块预条件（注记~\ref{sec:pf-th-glob-rem-gmresrestart}） &
 \implfull{src/power\_flow/newton\_krylov.cpp:SchurBlockPreconditioner::build}（apply 实现两段块回代；块结构契约见 newton\_krylov.hpp 类注释）\\
+Anderson 加速与 GMRES 等价（定义~\ref{def:pf-th-glob-anderson}、
+定理~\ref{thm:pf-th-glob-anderson-gmres}） &
+\implnone（不动点求解器用朴素 Picard/拟 Newton，无残差外推；加速手段为 Newton/GMRES）\\
+高级求解器与可解性边界数值基准（表~\ref{tab:pf-th-glob-robust}、
+\ref{tab:pf-th-glob-stress}） &
+\implfull{tools/pf\_doc\_benchmark.cpp}（模式 robust/stress）\\
 \bottomrule
 \end{longtable}
 \end{center}
@@ -879,4 +990,10 @@ and Nonlinear Equations}, SIAM, 1995.
 \bibitem{pfglob-kelley-keyes} C.~T. Kelley and D.~E. Keyes, Convergence
 analysis of pseudo-transient continuation, \emph{SIAM Journal on Numerical
 Analysis}, 35(2), 1998.
+\bibitem{pfglob-anderson} D.~G. Anderson, Iterative procedures for nonlinear
+integral equations, \emph{Journal of the ACM}, 12(4), 1965.
+\bibitem{pfglob-walkerni} H.~F. Walker and P.~Ni, Anderson acceleration for
+fixed-point iterations, \emph{SIAM Journal on Numerical Analysis}, 49(4), 2011.
+\bibitem{pfglob-tothkelley} A.~Toth and C.~T. Kelley, Convergence analysis for
+Anderson acceleration, \emph{SIAM Journal on Numerical Analysis}, 53(2), 2015.
 \end{thebibliography}}

@@ -7,10 +7,12 @@
 本章为通用数学理论，按经典教材与原始文献体系撰写，覆盖五组主题：
 (i) Gauss--Seidel 与阻抗阵法的历史定位及其作为不动点迭代的数学结构；
 (ii) 快速解耦潮流（FDPF）的解耦物理原理推导、XB/BX 变体差异与收敛性分析；
-(iii) 直流潮流从 AC 方程经三条假设到 $P=B\theta$ 的严格推导、线性化误差界与损耗近似；
+(iii) 直流潮流从 AC 方程经三条假设到 $P=B\theta$ 的严格推导、线性化误差界、损耗近似，
+及基于直流模型的转移分布因子（PTDF/ISF）与线路开断分布因子（LODF）；
 (iv) 辐射状配电网的 DistFlow 支路潮流模型、前推回代的不动点--压缩映射收敛理论
 与高 $R/X$ 弱网特性；
-(v) 分布式松弛与自适应孤岛的理论定位。
+(v) 分布式松弛（含方程内精确加边 Newton 系统）与自适应孤岛的理论定位；
+(vi) 以平台求解器实测数据给出的 FDPF、直流与前推回代收敛性数值基准。
 Newton 法本体、全局化策略与电压稳定/换流器相关理论各有专章，本章不复述；
 本章公式不要求逐式对应代码。与平台实现（\srcpath{src/power\_flow/}）的对应关系
 见本章末"与实现的对应"表，超出实现的内容以"未实现扩展说明"框就地标记。
@@ -378,6 +380,65 @@ $\sum_k P_{\mathrm{loss},k}/2$ 按比例回加到负荷并重解（损耗修正�
 （结果结构 \texttt{ACLinearizedDCResult} 无损耗字段）。
 \end{gapnote}
 
+\subsection{直流灵敏度：转移分布因子与线路开断分布因子}\label{sec:pf-th-cls-ptdf}
+
+直流模型的线性性使支路潮流对节点注入、以及对线路开断的\emph{灵敏度}具有闭式矩阵
+表达。这两类因子——PTDF 与 LODF——是安全分析、市场出清与 N-1 校核的基础工具，
+其价值在于\textbf{只依赖网络拓扑与电抗、与运行点无关}，可离线预计算。
+
+\subsubsection{PTDF：注入转移分布因子}
+设剔除 slack 后的降阶节点电纳阵 $B\in\mathbb R^{(n-1)\times(n-1)}$
+（式~\eqref{sec:pf-th-cls-eq:dcpf}，$B=A^{\top}B_dA$），支路-节点关联阵
+$A\in\mathbb R^{b\times(n-1)}$（第 $l$ 行对应支路 $l=(i\!\to\!j)$，$i$ 列为 $+1$、
+$j$ 列为 $-1$，slack 列剔除），支路电纳对角阵 $B_d=\mathrm{diag}(1/x_l)$。支路有功
+$f_l=(\theta_i-\theta_j)/x_l$ 即 $f=B_dA\theta$，结合 $\theta=B^{-1}P$ 得
+
+\begin{definition}[PTDF/ISF 矩阵]\label{def:pf-th-cls-ptdf}
+\begin{equation}
+f=\Phi\,P,\qquad \Phi:=B_dA\,B^{-1}\in\mathbb R^{b\times(n-1)} .
+\label{sec:pf-th-cls-eq:ptdf}
+\end{equation}
+$\Phi_{lk}$ 是“节点 $k$ 单位注入、slack 回收”引起的支路 $l$ 潮流变化，称\emph{注入
+转移分布因子}（injection shift factor, ISF），亦称\emph{功率转移分布因子}（PTDF）。
+\end{definition}
+
+\begin{proposition}[点对点交易的支路灵敏度]\label{prop:pf-th-cls-ptdf-pair}
+从节点 $s$ 注入、节点 $t$ 抽取的单位交易（$P_s{=}{+}1,\,P_t{=}{-}1$）引起支路 $l$ 的
+潮流变化为 $\Phi_{ls}-\Phi_{lt}$；特别地，沿支路 $m=(p\!\to\!q)$ 两端的单位对流引起
+支路 $l$ 的变化记 $\rho_{lm}:=\Phi_{lp}-\Phi_{lq}$（slack 端分量取零）。
+\end{proposition}
+（由式~\eqref{sec:pf-th-cls-eq:ptdf} 对注入的线性叠加即得。）
+
+\subsubsection{LODF：线路开断分布因子}
+\begin{theorem}[Wood--Wollenberg LODF 公式]\label{thm:pf-th-cls-lodf}
+设支路 $m$ 开断前潮流为 $f_m^0$，且开断不致系统解列（$\rho_{mm}\ne1$）。则开断后
+支路 $l$（$l\ne m$）的潮流增量为
+\begin{equation}
+\Delta f_l=\psi_{lm}\,f_m^0,\qquad
+\psi_{lm}=\frac{\rho_{lm}}{1-\rho_{mm}},
+\label{sec:pf-th-cls-eq:lodf}
+\end{equation}
+$\rho_{lm}=\Phi_{lp}-\Phi_{lq}$、$\rho_{mm}=\Phi_{mp}-\Phi_{mq}$（$m=(p\!\to\!q)$），
+$\psi_{lm}$ 称\emph{线路开断分布因子}（LODF）。
+\end{theorem}
+\begin{proof}
+用补偿定理：在\emph{完整}网络上叠加一对沿 $m$ 端点的注入（$p$ 注入 $\Delta$、$q$
+抽取 $\Delta$），以其等效替代被开断支路的电流。该注入使支路 $m$ 上产生附加流
+$\rho_{mm}\Delta$，使任意支路 $l$ 产生 $\rho_{lm}\Delta$。开断的自洽条件是：这对注入
+所“代表”的幻象电流 $\Delta$ 恰等于叠加后支路 $m$ 的总流，即
+$\Delta=f_m^0+\rho_{mm}\Delta$，解得 $\Delta=f_m^0/(1-\rho_{mm})$。于是任意
+$l\ne m$ 的增量 $\Delta f_l=\rho_{lm}\Delta=\dfrac{\rho_{lm}}{1-\rho_{mm}}f_m^0$。
+$\rho_{mm}\to1$ 对应开断使 $m$ 成为割边、网络解列，LODF 发散。
+\end{proof}
+
+\begin{remark}[拓扑不变性与用途]\label{rem:pf-th-cls-lodf}
+$\Phi$ 与 $\psi$ 只由 $A$、$B_d$（拓扑与电抗）决定，与负荷、发电水平无关，故可离线
+预计算、在线以一次矩阵-向量积完成全部注入或单一开断的支路潮流筛查——这是直流
+线性化在安全约束调度、N-1 校核与市场阻塞定价中被广泛采用的根本原因；其代价是
+继承直流模型的全部近似（命题~\ref{sec:pf-th-cls-prop-dcerr}）。多重开断需对
+$\psi$ 作分块推广（同时开断的支路间存在耦合）。
+\end{remark}
+
 \subsection{辐射状配电网潮流：DistFlow 模型与前推回代}\label{sec:pf-th-cls-distflow}
 
 \subsubsection{DistFlow 支路潮流模型}
@@ -548,6 +609,45 @@ Newton 失配方程同步求解，结果自洽（分摊后网损变化已被迭�
 带投影的迭代。
 \end{remark}
 
+\subsubsection{方程内精确分布式松弛的加边 Newton 系统}\label{sec:pf-th-cls-augslack}
+注记~\ref{sec:pf-th-cls-rem-dslack} 的“事后口径”只一阶近似分摊引起的网损变化。
+\emph{方程内}口径把分摊量作为增广未知量与潮流方程联立，自洽吸收网损的二阶效应。
+
+\begin{proposition}[加边分布式松弛系统]\label{prop:pf-th-cls-augslack}
+引入标量未知 $\pi$（待分摊的总不平衡）；参与母线 $i\in\mathcal G$ 的有功注入取
+$P_i^{\mathrm{spec}}(\pi)=P_i^0+\alpha_i\pi$（$\sum_{i\in\mathcal G}\alpha_i=1$）。
+保留一个\emph{仅}提供角度与电压基准的参考母线（$\theta_{\mathrm{ref}}=0$、
+$V_{\mathrm{ref}}$ 固定、其无功自由），并\textbf{恢复}参考母线的有功平衡方程纳入方程组。
+则未知量 $(\theta_{\ne\mathrm{ref}},V_{m,\mathrm{PQ}},\pi)$ 与方程（全部母线有功平衡
+$+$ PQ 母线无功平衡）个数相等，其 Newton 系统为\emph{加边}结构
+\begin{equation}
+\begin{bmatrix} J_{\mathrm{pf}} & \boldsymbol\alpha\\[2pt]
+\boldsymbol c^{\top} & 0\end{bmatrix}
+\begin{bmatrix}\Delta x\\ \Delta\pi\end{bmatrix}
+=-\begin{bmatrix}F_{\mathrm{pf}}\\ F_{\mathrm{ref}}\end{bmatrix},
+\label{sec:pf-th-cls-eq:augslack}
+\end{equation}
+其中 $J_{\mathrm{pf}}$ 为常规潮流雅可比，$\boldsymbol\alpha$ 为
+$\partial F_{\mathrm{pf}}/\partial\pi$ 的参与因子列，$\boldsymbol c^{\top}$ 为新增
+参考母线有功平衡对 $x$ 的偏导行。
+\end{proposition}
+
+\begin{remark}[自洽性与加边求解]\label{rem:pf-th-cls-augslack}
+式~\eqref{sec:pf-th-cls-eq:augslack} 的解 $\pi^\star$ 是收敛点处各参与母线共同吸收的
+总不平衡（对应全网损耗份额）；网损随分摊变化的二阶效应已在迭代内消化，正是事后
+口径所缺。加边系统只比基潮流多一行一列，用块消元（Schur 补/矩阵求逆引理）可在\emph{一次}
+基潮流分解上求解——$\Delta x=-J_{\mathrm{pf}}^{-1}(F_{\mathrm{pf}}+\boldsymbol\alpha\Delta\pi)$
+代入底行得关于标量 $\Delta\pi$ 的方程，$\Delta\pi=-(F_{\mathrm{ref}}-\boldsymbol c^{\top}
+J_{\mathrm{pf}}^{-1}F_{\mathrm{pf}})/(\boldsymbol c^{\top}J_{\mathrm{pf}}^{-1}\boldsymbol\alpha)$，
+仅需两次以 $J_{\mathrm{pf}}$ 的回代，无需如“重复完整重解”那样多次重构与再分解。
+多参考（多岛）时 $\pi$ 逐岛设立、$\alpha$ 逐岛归一。
+\end{remark}
+
+\begin{gapnote}
+式~\eqref{sec:pf-th-cls-eq:augslack} 的方程内加边分布式松弛在平台中\textbf{未实现}
+（实现为事后分摊与重复重解，见本节末“与实现的对应”表及其函数命名说明）。
+\end{gapnote}
+
 \subsubsection{自适应孤岛：连通分量、参考角与死岛}
 
 拓扑分裂（故障开断、计划孤岛）使一个求解对象变成多个电气解耦的子问题。
@@ -585,6 +685,80 @@ $c$ 个孤岛的网络，其潮流雅可比（以及直流 $B$ 阵）天然有 $
 分摊），\srcpath{solve\_full\_jacobian} 是"重调度 + 反复完整重解 + 钉限重分摊"
 的迭代逼近（兼容名 \texttt{full\_jacobian} 不表示增广 Jacobian）。
 \end{gapnote}
+
+\subsection{数值算例与基准}\label{sec:pf-th-cls-numexp}
+
+本节数字由 \srcpath{tools/pf\_doc\_benchmark.cpp}（模式 \texttt{fdpf}/\texttt{dc}/\texttt{bfs}）
+在 MATPOWER 算例上经平台公共求解 API 实测生成（平启动，Apple~M4，单线程），
+迭代次数与误差为机器无关量。
+
+\subsubsection{FDPF 与 Newton 的迭代数对比}
+表~\ref{tab:pf-th-cls-fdpf} 给出统一 Newton 与 FDPF（XB 方案）达到 $\mathrm{tol}=10^{-8}$
+所需迭代数。FDPF 迭代数（$11\sim44$）显著多于 Newton（$3\sim8$），且随系统解耦质量
+（$R/X$、角度差）波动——这正是定理~\ref{sec:pf-th-cls-thm-fdpf} 的\emph{线性}收敛与
+Newton \emph{二次}收敛之别；FDPF 以更多次但每次仅两回代（常量 $B'/B''$ 一次分解）
+换取单步成本的数量级下降。
+\begin{table}[H]\centering\footnotesize
+\caption{FDPF 与统一 Newton 的迭代数（平启动，$\mathrm{tol}=10^{-8}$）}
+\label{tab:pf-th-cls-fdpf}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+算例 & 母线数 $n$ & Newton 迭代 & FDPF(XB) 迭代\\
+\midrule
+case9   & 9   & 5 & 11\\
+case14  & 14  & 3 & 26\\
+case30  & 30  & 4 & 27\\
+case57  & 57  & 4 & 39\\
+case118 & 118 & 7 & 15\\
+case300 & 300 & 8 & 44\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{直流潮流的支路有功误差}
+表~\ref{tab:pf-th-cls-dc} 给出直流线性化支路有功与全交流解的偏差（逐支路 from 端有功）。
+平均误差为 $0.4\sim11$~MW（相对各算例总负荷约 $0.05\%\sim0.5\%$），但重载支路的最大误差
+可达数十至数百 MW，随规模/负荷压力上升——与命题~\ref{sec:pf-th-cls-prop-dcerr} 的误差
+界（损耗项 $\propto\theta^2$、正弦线性化项 $\propto\theta^3$）一致：角度差越大，线性化
+误差越显著。直流适合把握整体潮流格局，不宜用于重载支路的精确定量。
+\begin{table}[H]\centering\footnotesize
+\caption{直流线性化相对全交流的支路有功误差（MW）}
+\label{tab:pf-th-cls-dc}
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+算例 & 母线数 & 支路数 & 最大误差 & 平均误差 & 均方根误差\\
+\midrule
+case9   & 9   & 9   & $4.6$   & $1.25$ & $1.95$\\
+case14  & 14  & 20  & $9.0$   & $1.25$ & $2.42$\\
+case30  & 30  & 41  & $1.7$   & $0.39$ & $0.53$\\
+case57  & 57  & 80  & $9.6$   & $1.57$ & $2.45$\\
+case118 & 118 & 186 & $59.4$  & $3.60$ & $7.46$\\
+case300 & 300 & 411 & $409.5$ & $10.6$ & $29.8$\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{前推回代在配电馈线上的表现}
+表~\ref{tab:pf-th-cls-bfs} 在四个辐射配电算例上对比 BFS 与统一 Newton。两法最低母线电压
+一致到 $10^{-9}$（交叉校核），BFS 迭代数（$7\sim9$）略多于 Newton（$4\sim5$），但每次
+仅 $O(n)$ 次树上扫描、无雅可比装配与分解；馈线末端电压低至 $0.87\sim0.93$~pu，体现
+高 $R/X$ 长馈线的显著压降。BFS 对 $R/X$ 天然免疫（式~\eqref{sec:pf-th-cls-eq:dfp}--%
+\eqref{sec:pf-th-cls-eq:dfl} 为精确恒等式），是注记~\ref{sec:pf-th-cls-rem-rx} 所述配网
+首选方法的实测印证。
+\begin{table}[H]\centering\footnotesize
+\caption{前推回代（BFS）与统一 Newton 在辐射配电算例上的对比（$\mathrm{tol}=10^{-8}$）}
+\label{tab:pf-th-cls-bfs}
+\begin{tabular}{@{}lrrrrrr@{}}
+\toprule
+算例 & 母线数 & BFS 迭代 & BFS $\min|V|$ & Newton 迭代 & Newton $\min|V|$ & $\min|V|$ 差\\
+\midrule
+case33bw & 33  & 8 & $0.9131$ & 4 & $0.9131$ & $2\times10^{-9}$\\
+case69   & 69  & 8 & $0.9092$ & 5 & $0.9092$ & $4\times10^{-10}$\\
+case85   & 85  & 9 & $0.8739$ & 5 & $0.8739$ & $5\times10^{-10}$\\
+case141  & 141 & 7 & $0.9279$ & 4 & $0.9279$ & $1\times10^{-10}$\\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \subsection{与实现的对应}\label{sec:pf-th-cls-implmap}
 \begin{center}\footnotesize
@@ -655,6 +829,15 @@ src/power\_flow/adaptive\_solver.cpp:auto\_select\_swing\_bus}\\
 死岛零电压哨兵（注记~\ref{sec:pf-th-cls-rem-island}） &
 \implfull{src/power\_flow/adaptive\_solver.cpp:set\_dead\_island\_zero}（调度入口
 AdaptiveSolver::solve）\\
+PTDF/ISF 与 LODF（定义~\ref{def:pf-th-cls-ptdf}、定理~\ref{thm:pf-th-cls-lodf}） &
+\implpart{仅市场 N-1 安全校核实现：src/market/market\_simulation.cpp:build\_lodf\_model
+构造 PTDF 与 $\psi_{lm}=\rho_{lm}/(1-\rho_{mm})$（lodf\_value）；power\_flow 直流求解器不产出因子}\\
+方程内精确分布式松弛加边系统（命题~\ref{prop:pf-th-cls-augslack}，
+式~\eqref{sec:pf-th-cls-eq:augslack}） &
+\implnone（实现为事后分摊 solve\_simplified 与重复完整重解 solve\_full\_jacobian，见上）\\
+FDPF/直流/BFS 收敛性数值基准（表~\ref{tab:pf-th-cls-fdpf}、\ref{tab:pf-th-cls-dc}、
+\ref{tab:pf-th-cls-bfs}） &
+\implfull{tools/pf\_doc\_benchmark.cpp}（模式 fdpf/dc/bfs）\\
 \bottomrule
 \end{longtable}
 \end{center}
@@ -698,4 +881,6 @@ uniqueness of load flow solution for radial distribution power networks,
 Analysis}, McGraw-Hill, 1994.
 \bibitem{cls:kundur} P.~Kundur, \emph{Power System Stability and Control},
 McGraw-Hill, 1994.
+\bibitem{cls:woodwollenberg} A.~J. Wood, B.~F. Wollenberg and G.~B. Shebl\'e,
+\emph{Power Generation, Operation, and Control}, 3rd ed., Wiley, 2014.
 \end{thebibliography}}
