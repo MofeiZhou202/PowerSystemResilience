@@ -42,14 +42,22 @@ statistical campaign instead of the previous six isolated modifications as prima
 evidence. `docs/latex/sppt_campaign_study.tex` records the protocol and results.
 
 The theory now defines SPPT as an analysis-indexed family of projections rather
-than a catalogue of fault checks. Representation invariance, transformation
-composition, observable-dependent reconstruction, conservation/topology
-preservation, and converter-role closure provide the extension conditions for
-new data representations, devices, controls, reductions, and analyses. The
-six injected structural classes are explicitly described as selected tests of
-these conditions, not as a completeness definition. The literature review and
-generality discussion cite 32 sources, including a substantially expanded set
-of Applied Energy papers, and every bibliography item is cited in the text.
+than a catalogue of fault checks. Formal statements and proofs cover the exact
+projection fixed-point property, ideal-connection contraction,
+intensive/extensive reconstruction, compositional preservation,
+internal/independent residual separation, and AC reference singularity. The
+reverse ideal-connection result explicitly requires class balance for retained
+member injections and distinguishes unique tree currents from cycle-flow
+non-uniqueness. Representation invariance, transformation composition,
+observable-dependent reconstruction, conservation/topology preservation, and
+converter-role closure provide extension conditions for new data
+representations, devices, controls, reductions, and analyses. The six injected
+structural classes are selected tests of these conditions, not a completeness
+definition. The introduction now supports its model-heterogeneity, calibration,
+network-equivalence, AI, and anomaly-detection claims with 37 cited sources;
+the bibliography is ordered by first appearance. Repeated defensive caveats
+were consolidated into a positive statement of demonstrated domain and transfer
+path in the discussion.
 
 The new reusable `sppt::run_fault_campaign` implementation and
 `sppt_scale_fault_campaign` target import seven public GridLAB-D r5643
@@ -98,10 +106,12 @@ software-flow TikZ diagrams: physical rich-model semantics and canonical
 projection, provenance reconstruction, converter-role closure, and typed-agent
 candidate-state isolation. The converter-role mechanism was checked against the
 DC nodal equations and is described as a structural role-closure/rank condition,
-not as a universal voltage-shift invariance. The current 19-page, two-column PDF
-was compiled to `build/latex-sppt-final3/sppt_theory.pdf`; all pages were
-rendered at publication scale and show no clipping, overlap, overfull content,
-undefined references, or duplicate labels.
+not as a universal voltage-shift invariance. The strengthened 19-page,
+two-column PDF was compiled to
+`build/latex-sppt-theory-strengthened-v2/sppt_theory.pdf`; all pages were
+rendered at publication scale and show no clipping, overlap, or overfull
+content. The log contains no undefined references, duplicate labels, or fatal
+errors.
 
 ## 技术委托要求文档
 

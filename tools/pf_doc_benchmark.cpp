@@ -31,6 +31,11 @@
 #include "hacdcpf/power_flow/distribution_power_flow.hpp"
 #include "hacdcpf/power_flow/voltage_stability.hpp"
 #include "hacdcpf/assembly/solver_data.hpp"
+#include "hacdcpf/dynamics/DynamicModelBuilder.hpp"
+#include "hacdcpf/dynamics/DynamicSolver.hpp"
+#include "hacdcpf/dynamics/DynamicSystem.hpp"
+#include "hacdcpf/dynamics/DynamicEvent.hpp"
+#include "hacdcpf/reliability/reliability_assessment.hpp"
 
 namespace {
 
@@ -335,6 +340,307 @@ int mode_cpf() {
   return 0;
 }
 
+// AC OPF and DC OPF objective/convergence, plus the DC-vs-AC cost gap.
+int mode_opf(const std::vector<std::string>& cases) {
+  std::cout << "# AC OPF and DC OPF on standard cases (default options)\n";
+  std::cout << "# columns: case n_bus ac_conv ac_obj ac_outer ac_stat ac_viol "
+               "dc_conv dc_obj gap_pct\n";
+  const auto yn = [](bool b) { return b ? "Y" : "N"; };
+  for (const auto& c : cases) {
+    try {
+      auto sys = hacdcpf::io::parse_matpower(c);
+      hacdcpf::opf::ACOPFOptions aopt;
+      aopt.ac_solver_backend = hacdcpf::opf::ACOPFSolverBackend::ParityIPM;
+      const auto ac = hacdcpf::solve_ac_opf(sys, aopt);
+      const hacdcpf::opf::DCOPFOptions dopt;
+      const auto dc = hacdcpf::solve_dc_opf(sys, dopt);
+      const double gap =
+          (ac.converged && dc.converged && std::abs(ac.objective) > 1e-9)
+              ? 100.0 * (ac.objective - dc.objective) / ac.objective
+              : 0.0;
+      std::cout << basename_of(c) << ' ' << sys.ac.buses.size() << ' '
+                << yn(ac.converged) << ' ' << std::fixed << std::setprecision(2)
+                << ac.objective << ' ' << ac.outer_iterations << ' '
+                << std::scientific << std::setprecision(2) << ac.max_stationarity
+                << ' ' << ac.max_constraint_violation << ' ' << yn(dc.converged)
+                << ' ' << std::fixed << std::setprecision(2) << dc.objective
+                << ' ' << gap << '\n';
+    } catch (const std::exception& e) {
+      std::cout << basename_of(c) << " ERROR " << e.what() << '\n';
+    }
+  }
+  return 0;
+}
+
+// Single-machine-infinite-bus small-signal: electromechanical mode + spectrum.
+int mode_dyn() {
+  const double H = 3.5, Xdp = 0.30, Xe = 0.20, Pg = 0.80, f0 = 50.0;
+  hacdcpf::HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.freq_hz = f0;
+  hacdcpf::ACBus b1;
+  b1.index = 1;
+  b1.bus_type = hacdcpf::BusType::SLACK;
+  b1.vm_pu = 1.0;
+  b1.vmin_pu = 0.5;
+  b1.vmax_pu = 1.5;
+  hacdcpf::ACBus b2;
+  b2.index = 2;
+  b2.bus_type = hacdcpf::BusType::PV;
+  b2.vm_pu = 1.0;
+  b2.vmin_pu = 0.5;
+  b2.vmax_pu = 1.5;
+  sys.ac.buses = {b1, b2};
+  hacdcpf::ACBranch br;
+  br.index = 1;
+  br.from_bus = 1;
+  br.to_bus = 2;
+  br.r_pu = 0.0;
+  br.x_pu = Xe;
+  br.tap = 1.0;
+  br.in_service = true;
+  sys.ac.branches = {br};
+  hacdcpf::Generator gs;
+  gs.index = 1;
+  gs.bus = 1;
+  gs.is_slack = true;
+  gs.vg_pu = 1.0;
+  gs.in_service = true;
+  gs.inertia_h = 1e6;  // frozen reference => effective infinite bus
+  gs.xd_pu = 1.0;
+  gs.xdp_pu = Xdp;
+  gs.xdpp_pu = Xdp;
+  gs.qmax_mvar = 1e4;
+  gs.qmin_mvar = -1e4;
+  gs.pmax_mw = 1e4;
+  gs.pmin_mw = -1e4;
+  hacdcpf::Generator g2;
+  g2.index = 2;
+  g2.bus = 2;
+  g2.is_slack = false;
+  g2.vg_pu = 1.0;
+  g2.in_service = true;
+  g2.pg_mw = Pg * 100.0;
+  g2.inertia_h = H;
+  g2.xd_pu = 1.0;
+  g2.xdp_pu = Xdp;
+  g2.xdpp_pu = Xdp;
+  g2.pmax_mw = 1e4;
+  g2.pmin_mw = -1e4;
+  g2.qmax_mvar = 1e4;
+  g2.qmin_mvar = -1e4;
+  g2.dynamic_model.model_name = "ClassicalMachine";
+  sys.ac.generators = {gs, g2};
+
+  hacdcpf::dynamics::DynamicSolverOptions opt;
+  opt.t_end_s = 0.1;
+  opt.dt_s = 0.01;
+  opt.compute_small_signal = true;
+  opt.solver_type = hacdcpf::dynamics::DynamicSolverType::TrapezoidalNewton;
+  const auto res = hacdcpf::run_transient_simulation(sys, opt);
+  const auto pf = hacdcpf::solve_power_flow(sys, {});
+
+  std::cout << "# SMIB classical machine small-signal (H=" << H << "s, Xdp=" << Xdp
+            << ", Xe=" << Xe << ", Pg=" << Pg << "pu, f0=" << f0 << "Hz)\n";
+  std::cout << "pf_converged=" << (pf.converged ? "Y" : "N");
+  if (pf.vm.size() > 1)
+    std::cout << " Vt2=" << pf.vm[1] << " theta2_deg=" << pf.va[1];
+  std::cout << "\nmodal: computed=" << (res.modal.computed ? "Y" : "N")
+            << " success=" << (res.modal.success ? "Y" : "N")
+            << " n_diff=" << res.modal.n_differential
+            << " stable=" << (res.modal.stable ? "Y" : "N") << '\n';
+  std::cout << std::fixed << std::setprecision(4);
+  for (const auto& m : res.modal.modes) {
+    std::cout << "  lambda=" << m.eigen_real << (m.eigen_imag >= 0 ? "+" : "")
+              << m.eigen_imag << "j f=" << m.frequency_hz << "Hz zeta="
+              << m.damping_ratio << " osc=" << (m.oscillatory ? "Y" : "N")
+              << " state=" << m.dominant_state << '\n';
+  }
+  return 0;
+}
+
+// Attach WSCC classical-machine data (H, Xd' on 100 MVA base) to case9 gens.
+hacdcpf::HybridPowerSystem make_wscc9() {
+  auto sys = hacdcpf::io::parse_matpower("data/case9.m");
+  sys.ac.freq_hz = 60.0;  // WSCC 3-machine system is 60 Hz
+  sys.ac.base_mva = 100.0;
+  struct MD { int bus; double h; double xdp; };
+  const MD md[] = {{1, 23.64, 0.0608}, {2, 6.40, 0.1198}, {3, 3.01, 0.1813}};
+  for (auto& g : sys.ac.generators) {
+    for (const auto& d : md) {
+      if (g.bus == d.bus) {
+        g.inertia_h = d.h;
+        g.xdp_pu = d.xdp;
+        g.xd_pu = d.xdp;    // classical: single reactance behind constant EMF
+        g.xdpp_pu = d.xdp;
+        g.dynamic_model.model_name = "ClassicalMachine";
+      }
+    }
+  }
+  return sys;
+}
+
+// Eigenvalue-spectrum stiffness ratio: max|Re λ| / min|Re λ| over damped modes.
+double stiffness_ratio(const hacdcpf::dynamics::DynamicModalSummary& modal) {
+  double lo = 1e30, hi = 0.0;
+  for (const auto& m : modal.modes) {
+    const double a = std::abs(m.eigen_real);
+    if (a > 1e-6) { lo = std::min(lo, a); hi = std::max(hi, a); }
+  }
+  return (hi > 0.0 && lo < 1e29) ? hi / lo : 0.0;
+}
+
+// Multi-machine modal (WSCC 9-bus) + stiffness spectrum + integrator comparison
+// under a bus fault. Real data for the dynamics manual "数值算例与基准" sections.
+int mode_dyn2() {
+  using namespace hacdcpf;
+  std::cout << std::fixed << std::setprecision(4);
+
+  // ---- Part A: WSCC 9-bus 3-machine electromechanical modes ----
+  auto sys9 = make_wscc9();
+  dynamics::DynamicSolverOptions mopt;
+  mopt.t_end_s = 0.02;
+  mopt.dt_s = 0.005;
+  mopt.compute_small_signal = true;
+  mopt.solver_type = dynamics::DynamicSolverType::TrapezoidalNewton;
+  const auto r9 = hacdcpf::run_transient_simulation(sys9, mopt);
+  std::cout << "# WSCC 9-bus 3-machine classical small-signal (60Hz, H={23.64,6.40,3.01})\n";
+  std::cout << "modal_computed=" << (r9.modal.computed ? "Y" : "N")
+            << " n_diff=" << r9.modal.n_differential
+            << " stable=" << (r9.modal.stable ? "Y" : "N") << '\n';
+  for (const auto& m : r9.modal.modes) {
+    if (m.oscillatory && m.frequency_hz > 0.05)
+      std::cout << "  em_mode lambda=" << m.eigen_real << (m.eigen_imag >= 0 ? "+" : "")
+                << m.eigen_imag << "j f=" << m.frequency_hz << "Hz zeta="
+                << m.damping_ratio << " state=" << m.dominant_state << '\n';
+  }
+  std::cout << "  stiffness_ratio=" << stiffness_ratio(r9.modal) << '\n';
+
+  // ---- Part B: SMIB spectrum + stiffness (H=3.5, Xdp=0.30, Xe=0.20, Pg=0.80) ----
+  {
+    const double H = 3.5, Xdp = 0.30, Xe = 0.20, Pg = 0.80, f0 = 50.0;
+    HybridPowerSystem sys;
+    sys.base_mva = 100.0; sys.ac.base_mva = 100.0; sys.ac.freq_hz = f0;
+    ACBus b1; b1.index = 1; b1.bus_type = BusType::SLACK; b1.vm_pu = 1.0;
+    b1.vmin_pu = 0.5; b1.vmax_pu = 1.5;
+    ACBus b2; b2.index = 2; b2.bus_type = BusType::PV; b2.vm_pu = 1.0;
+    b2.vmin_pu = 0.5; b2.vmax_pu = 1.5;
+    sys.ac.buses = {b1, b2};
+    ACBranch br; br.index = 1; br.from_bus = 1; br.to_bus = 2; br.r_pu = 0.0;
+    br.x_pu = Xe; br.tap = 1.0; br.in_service = true; sys.ac.branches = {br};
+    Generator gs; gs.index = 1; gs.bus = 1; gs.is_slack = true; gs.vg_pu = 1.0;
+    gs.in_service = true; gs.inertia_h = 1e6; gs.xd_pu = 1.0; gs.xdp_pu = Xdp;
+    gs.xdpp_pu = Xdp; gs.qmax_mvar = 1e4; gs.qmin_mvar = -1e4; gs.pmax_mw = 1e4;
+    gs.pmin_mw = -1e4;
+    Generator g2; g2.index = 2; g2.bus = 2; g2.is_slack = false; g2.vg_pu = 1.0;
+    g2.in_service = true; g2.pg_mw = Pg * 100.0; g2.inertia_h = H; g2.xd_pu = 1.0;
+    g2.xdp_pu = Xdp; g2.xdpp_pu = Xdp; g2.pmax_mw = 1e4; g2.pmin_mw = -1e4;
+    g2.qmax_mvar = 1e4; g2.qmin_mvar = -1e4;
+    g2.dynamic_model.model_name = "ClassicalMachine";
+    sys.ac.generators = {gs, g2};
+    dynamics::DynamicSolverOptions opt; opt.t_end_s = 0.02; opt.dt_s = 0.005;
+    opt.compute_small_signal = true;
+    opt.solver_type = dynamics::DynamicSolverType::TrapezoidalNewton;
+    const auto r = hacdcpf::run_transient_simulation(sys, opt);
+    std::cout << "# SMIB spectrum (H=3.5,Xdp=0.30,Xe=0.20,Pg=0.80,f0=50)\n";
+    for (const auto& m : r.modal.modes)
+      std::cout << "  lambda=" << m.eigen_real << (m.eigen_imag >= 0 ? "+" : "")
+                << m.eigen_imag << "j f=" << m.frequency_hz << "Hz zeta="
+                << m.damping_ratio << '\n';
+    std::cout << "  stiffness_ratio=" << stiffness_ratio(r.modal) << '\n';
+  }
+
+  // ---- Part C: integrator comparison under a bus fault (WSCC 9-bus) ----
+  // Bolted-ish 3-phase shunt fault at bus 7, applied t=0.10s, cleared t=0.18s.
+  std::cout << "# integrator comparison: WSCC 9-bus, 80ms fault at bus7\n";
+  struct SolverSpec { const char* name; dynamics::DynamicSolverType t; };
+  const SolverSpec solvers[] = {
+      {"Trapezoidal", dynamics::DynamicSolverType::TrapezoidalNewton},
+      {"BackwardEuler", dynamics::DynamicSolverType::BackwardEulerNewton},
+      {"RK4", dynamics::DynamicSolverType::PartitionedRK4},
+      {"Rosenbrock", dynamics::DynamicSolverType::RosenbrockEuler}};
+  for (double dt : {0.010, 0.005}) {
+    for (const auto& sp : solvers) {
+      try {
+        auto sysc = make_wscc9();
+        dynamics::DynamicSolverOptions opt;
+        opt.t_start_s = 0.0; opt.t_end_s = 3.0; opt.dt_s = dt;
+        opt.compute_small_signal = false; opt.solver_type = sp.t;
+        dynamics::DynamicModelBuilder builder;
+        dynamics::DynamicSystem ds = builder.build(sysc, opt);
+        dynamics::DynamicEvent f; f.time_s = 0.10;
+        f.type = dynamics::DynamicEventType::FaultShunt; f.bus = 7; f.value = 1e3;
+        dynamics::DynamicEvent c; c.time_s = 0.18;
+        c.type = dynamics::DynamicEventType::ClearFault; c.bus = 7;
+        ds.events.push_back(f); ds.events.push_back(c);
+        dynamics::DynamicSolver solver;
+        const auto r = solver.solve(ds);
+        double peak = 0.0, ffin = 0.0;
+        for (const auto& s : r.snapshots) {
+          const double dfreq = std::abs(s.coi_frequency_hz - 60.0);
+          peak = std::max(peak, dfreq);
+          ffin = s.coi_frequency_hz;
+        }
+        std::cout << "  dt=" << dt << " " << sp.name
+                  << " success=" << (r.success ? "Y" : "N")
+                  << " peak_df=" << peak << "Hz coi_final=" << ffin
+                  << "Hz newton=" << r.newton_iterations
+                  << " rejected=" << r.rejected_steps << '\n';
+      } catch (const std::exception& e) {
+        std::cout << "  dt=" << dt << " " << sp.name << " ERROR " << e.what() << '\n';
+      }
+    }
+  }
+  return 0;
+}
+
+// IEEE RTS-24 reliability indices: non-sequential + sequential Monte Carlo.
+int mode_rel() {
+  using namespace hacdcpf;
+  std::cout << std::fixed << std::setprecision(4);
+  auto sys = io::parse_matpower("data/case24_ieee_rts.m");
+  analysis::apply_ieee24_reliability_data(sys);
+  std::cout << "# IEEE RTS-24 reliability (AC-only DC-OPF scope)\n";
+  std::cout << "n_bus=" << sys.ac.buses.size() << " n_gen="
+            << sys.ac.generators.size() << " n_branch="
+            << sys.ac.branches.size() << '\n';
+
+  // ---- Non-sequential (state-sampling) Monte Carlo ----
+  {
+    analysis::ReliabilityOptions opt;
+    opt.max_iterations = 20000;
+    opt.cov_threshold = 0.03;
+    opt.seed = 12345;
+    opt.enable_parallel = true;
+    opt.compute_tail_risk = true;
+    const auto r = analysis::run_nonsequential_mc(sys, opt);
+    std::cout << "NSQ_MC converged=" << (r.converged ? "Y" : "N")
+              << " iters=" << r.iterations_used << " cov=" << r.final_cov
+              << " EENS=" << r.eens_mwh_yr << " LOLE=" << r.lole_hr_yr
+              << " EDNS=" << r.edns_mw << " PLC=" << r.plc
+              << " EENS_CVaR95=" << r.tail_risk.eens_cvar
+              << " scope=" << r.model_scope << '\n';
+  }
+
+  // ---- Sequential (chronological) Monte Carlo ----
+  {
+    auto lp = analysis::build_ieee_rts24_load_profile(8736);
+    analysis::ReliabilityOptions opt;
+    opt.max_iterations = 400;
+    opt.cov_threshold = 0.05;
+    opt.seed = 12345;
+    opt.hours_per_year = 8736;
+    opt.enable_parallel = true;
+    const auto r = analysis::run_sequential_mc(sys, lp, opt);
+    std::cout << "SEQ_MC converged=" << (r.converged ? "Y" : "N")
+              << " years=" << r.iterations_used << " cov=" << r.final_cov
+              << " EENS=" << r.eens_mwh_yr << " LOLE=" << r.lole_hr_yr
+              << " LOLF=" << r.lolf_occ_yr << '\n';
+  }
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -343,7 +649,8 @@ int main(int argc, char** argv) {
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     if (i == 1 && (a == "nr" || a == "fdpf" || a == "dc" || a == "bfs" ||
-                   a == "robust" || a == "stress" || a == "cpf")) {
+                   a == "robust" || a == "stress" || a == "cpf" ||
+                   a == "opf" || a == "dyn" || a == "dyn2" || a == "rel")) {
       mode = a;
       continue;
     }
@@ -366,6 +673,10 @@ int main(int argc, char** argv) {
   if (mode == "robust") return mode_robust(cases);
   if (mode == "stress") return mode_stress(cases);
   if (mode == "cpf") return mode_cpf();
+  if (mode == "opf") return mode_opf(cases);
+  if (mode == "dyn") return mode_dyn();
+  if (mode == "dyn2") return mode_dyn2();
+  if (mode == "rel") return mode_rel();
   std::cerr << "unknown mode: " << mode << "\n";
   return 2;
 }

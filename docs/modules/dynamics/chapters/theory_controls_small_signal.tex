@@ -10,7 +10,7 @@
 相位补偿理论；构网型（GFM）与跟网型（GFL）逆变器控制理论（下垂控制的小信号
 闭环、虚拟同步机及其与下垂的等价性、PLL 动力学与弱网稳定性问题）；小信号稳定
 分析的一般理论（DAE 线性化、代数变量的 Schur 补消元及其合法性、特征值/振型/
-阻尼比、参与因子的定义与性质）；频率响应的解析关系（惯量中心、初始 ROCOF、
+阻尼比、参与因子的定义与性质、特征值灵敏度与残差法阻尼控制器整定）；频率响应的解析关系（惯量中心、初始 ROCOF、
 一次/二次调频的稳态分配）；感应电动机机电模型与负荷动态模型（ZIP/指数/恒功率
 负增量特性）；以及多质量块轴系扭振模型。同步机本体 DAE（磁链、摆方程、
 \texttt{GENROU} 等模型族）见本章姊妹章"同步机与网络 DAE 理论"。与平台实现
@@ -884,6 +884,118 @@ SSR），电气负阻尼可抵消机械阻尼导致扭振发散。IEEE 第一 be
 构造网络激励或改用专用工具。
 \end{gapnote}
 
+\subsection{特征值灵敏度与残差法阻尼控制器整定}\label{sec:dy-th-ctl-residue}
+
+§\ref{sec:dy-th-ctl-pss} 的相位补偿给出 PSS 超前网络的\emph{定性}准则；模态控制理论
+以\textbf{特征值灵敏度}与\textbf{残差}把它变成定量整定。
+
+\begin{proposition}[特征值对参数的灵敏度]\label{prop:dy-th-ctl-eigsens}
+设状态矩阵 $A(p)$ 依赖参数 $p$，$\lambda_i$ 为单特征值，右/左特征向量
+$\phi_i,\psi_i$（$A\phi_i=\lambda_i\phi_i$、$\psi_i^{\mathsf H}A=\lambda_i\psi_i^{\mathsf H}$，
+规范化 $\psi_i^{\mathsf H}\phi_i=1$）。则
+\begin{equation}
+\frac{\partial\lambda_i}{\partial p}=\psi_i^{\mathsf H}\frac{\partial A}{\partial p}\phi_i .
+\label{eq:dy-th-ctl-eigsens}
+\end{equation}
+\end{proposition}
+\begin{proof}
+对 $A\phi_i=\lambda_i\phi_i$ 关于 $p$ 求导：$A'\phi_i+A\phi_i'=\lambda_i'\phi_i+\lambda_i\phi_i'$。
+左乘 $\psi_i^{\mathsf H}$，用 $\psi_i^{\mathsf H}A=\lambda_i\psi_i^{\mathsf H}$ 消去 $\phi_i'$ 项、
+$\psi_i^{\mathsf H}\phi_i=1$，即得式~\eqref{eq:dy-th-ctl-eigsens}。
+\end{proof}
+
+\begin{definition}[模态残差]\label{def:dy-th-ctl-residue}
+设阻尼控制器以量测 $y=Cx$ 为输入、经传递函数 $H(s)$ 作用于状态注入 $Bu$
+（闭环 $A(K)=A_0+B\,H\,C$）。开环传递 $G(s)=C(sI-A_0)^{-1}B$ 在模态 $\lambda_i$
+的\emph{残差}为
+\begin{equation}
+R_i=(C\phi_i)(\psi_i^{\mathsf H}B).
+\label{eq:dy-th-ctl-residue}
+\end{equation}
+\end{definition}
+
+\begin{theorem}[残差-相位补偿整定]\label{thm:dy-th-ctl-residue}
+小增益下反馈使模态 $\lambda_i$ 一阶移动 $\Delta\lambda_i\approx R_i\,H(\lambda_i)$。欲使
+$\lambda_i$ 沿负实轴方向移动（纯增阻尼、不移频），须令控制器在振荡频率
+$\omega_i=|\mathrm{Im}\,\lambda_i|$ 处的相位满足
+\begin{equation}
+\arg R_i+\arg H(\mathrm j\omega_i)=180^\circ .
+\label{eq:dy-th-ctl-phasecomp}
+\end{equation}
+所需超前相位 $\arg H=180^\circ-\arg R_i$ 即 §\ref{sec:dy-th-ctl-pss} 超前-滞后网络的
+设计目标；增益按目标阻尼比线性外推、再以完整特征值重算校核。
+\end{theorem}
+\begin{proof}[证明要点]
+由命题~\ref{prop:dy-th-ctl-eigsens}，$\partial A/\partial K=B\hat H C$（$\hat H$ 为控制器
+固定结构、$K$ 为标量增益），$\partial\lambda_i/\partial K=\psi_i^{\mathsf H}B\hat H(\lambda_i)C\phi_i
+=R_i\hat H(\lambda_i)$，小增益积分即得模态移动；令 $\Delta\lambda_i$ 为负实数即得相位
+条件~\eqref{eq:dy-th-ctl-phasecomp}（Pagola--P\'erez-Arriaga--Verghese~\cite{ctl:pagola}）。
+\end{proof}
+
+\begin{remark}[选点与多模态权衡]\label{rem:dy-th-ctl-residue}
+$|R_i|$ 度量该量测-注入对模态 $i$ 的\emph{可控可观积}：$|R_i|$ 大的信号对
+（如本地 $\Delta\omega$ 对本地励磁）是最有效的 PSS 布点，与参与因子的弱节点排序
+（§\ref{sec:dy-th-ctl-ss}）互补——残差含 B/C 通道信息、参与因子只含状态归属。多机
+多模态时单一 PSS 的 $\arg R_i$ 各模态不同，只能折中补偿主导区间，广域阻尼
+控制（WADC）以远方信号提高对区域间模态的 $|R_i|$。
+\end{remark}
+
+\begin{gapnote}
+残差法整定与特征值灵敏度\textbf{未作为求解器功能实现}：平台小信号分析输出特征值、
+阻尼比与参与因子（\srcpath{small\_signal\_analysis}，见数值节），但不计算
+式~\eqref{eq:dy-th-ctl-residue} 的残差、不做闭环控制器综合；PSS 参数为用户按
+§\ref{sec:dy-th-ctl-pss} 结构输入的既定值。
+\end{gapnote}
+
+\subsection{数值算例与基准}\label{sec:dy-th-ctl-numexp}
+
+\srcpath{tools/pf\_doc\_benchmark.cpp}（模式 \texttt{dyn}）在单机无穷大母线（经典电机
+$H{=}3.5$~s、$X_d'{=}0.3$、$X_e{=}0.2$、$P{=}0.8$~pu、$f_0{=}50$~Hz，参考机以 $H{=}10^6$
+冻结）上做小信号线性化，得机电振荡模态
+\begin{equation}
+\lambda_{\mathrm{em}}=-0.071\pm6.577\,\mathrm j~\mathrm{s^{-1}},\qquad f=1.05~\mathrm{Hz},\quad\zeta=0.011 .
+\end{equation}
+
+\begin{example}[机电模态与摆动方程的相互印证]\label{ex:dy-th-ctl-smib}
+由 $\omega_n\approx|\mathrm{Im}\,\lambda_{\mathrm{em}}|=6.58$~rad/s，反解摆动方程
+$\omega_n^2=K_s\omega_s/(2H)$（$\omega_s=2\pi f_0=314.16$）得同步转矩系数
+\begin{equation}
+K_s=\frac{2H\omega_n^2}{\omega_s}=\frac{2\cdot3.5\cdot6.58^2}{314.16}\approx0.96~\text{pu/rad},
+\end{equation}
+与运行点 $K_s=E'V_\infty\cos\delta_0/(x_d{+}x_e)$ 在 $E'\!\approx\!1.16$、$\cos\delta_0\!\approx\!1$、
+$x_d{+}x_e{=}1.2$ 处相符——平台小信号所得机电频率与经典摆动方程一致。阻尼比
+$\zeta{=}0.011$ 近于零，反映经典电机\textbf{无阻尼绕组、$D{\approx}0$}：其微弱正阻尼来自
+网络电阻与代数消元，恰是 PSS（§\ref{sec:dy-th-ctl-pss}、残差法
+§\ref{sec:dy-th-ctl-residue}）需要补偿的欠阻尼机电模态。冻结参考机贡献 $\approx0$~Hz
+模态，验证 $H\to\infty$ 的无穷大母线极限。
+\end{example}
+
+\subsubsection{多机机电模态（WSCC 9 节点）}\label{sec:dy-th-ctl-wscc}
+在 WSCC 9 节点 3 机系统（经典电机，$H{=}\{23.64,6.40,3.01\}$~s，
+$X_d'{=}\{0.061,0.120,0.181\}$，$60$~Hz；\srcpath{tools/pf\_doc\_benchmark.cpp} 模式 \texttt{dyn2}）上对
+初始化平衡点小信号线性化（$n_{\mathrm{diff}}{=}12$），得三个机电振荡模态：
+\begin{center}\footnotesize
+\begin{tabular}{@{}cccccc@{}}
+\toprule
+机组 & $H$/s & $\lambda$/s$^{-1}$ & $f$/Hz & $\zeta$ & 主导状态\\
+\midrule
+G1 & $23.64$ & $-0.011\pm22.93\,\mathrm j$ & $3.65$ & $0.0005$ & $\delta_1$\\
+G2 & $6.40$ & $-0.039\pm31.03\,\mathrm j$ & $4.94$ & $0.0013$ & $\delta_2$\\
+G3 & $3.01$ & $-0.083\pm36.88\,\mathrm j$ & $5.87$ & $0.0023$ & $\delta_3$\\
+\bottomrule
+\end{tabular}
+\end{center}
+三个模态各由一台机的转子角主导，频率随惯量\emph{单调下降}（$H$ 越大 $f$ 越低），定性印证
+$\omega_n=\sqrt{K_s\omega_s/2H}$；但并非严格 $\propto1/\sqrt H$，因各机同步转矩系数 $K_s$（经 $X_d'$ 与
+网络位置）不同。阻尼比 $\zeta\sim5\times10^{-4}$--$2\times10^{-3}$ 近零——经典电机无阻尼绕组、无 AVR/PSS，
+正是残差法（§\ref{sec:dy-th-ctl-residue}）整定 PSS 所要补偿的欠阻尼机电模态；实部谱刚性比
+$\max|\mathrm{Re}\,\lambda|/\min|\mathrm{Re}\,\lambda|\approx7.85$。
+\begin{remark}[经典模型的频率偏高]\label{rem:dy-th-ctl-wscc}
+经典恒电势—$X_d'$ 模型（叠加较小的 $X_d'$）给出的机电频率\emph{高于}详细模型（GENROU$+$励磁）的
+WSCC 参考模态（约 $1.5$--$2.5$~Hz），因恒电势之后无场/阻尼绕组磁链动态“软化”耦合。本例用于校验
+\emph{多机}模态装配与惯量—频率标度的定性规律；定量模态须以详细电机$+$励磁模型为准。
+\end{remark}
+
 \subsection{与实现的对应}\label{sec:dy-th-ctl-map}
 \begin{center}\footnotesize
 \begin{longtable}{@{}L{6.8cm}L{8.6cm}@{}}
@@ -948,6 +1060,11 @@ ZIP/恒功率/恒电流/恒阻抗负荷 &
 五质量块轴系扭振（10 状态、段刚度/阻尼） &
 \implfull{src/dynamics/devices/BasicDynamicDevices.cpp:FiveMassShaft::computeDerivatives}\\
 SSR 电气相互作用（串补谐振负阻尼） & \implnone\\
+特征值灵敏度与残差法整定（命题~\ref{prop:dy-th-ctl-eigsens}、
+定理~\ref{thm:dy-th-ctl-residue}） &
+\implnone（小信号仅出特征值/阻尼比/参与因子，不算残差、不做控制器综合）\\
+SMIB 机电模态小信号数值基准（例~\ref{ex:dy-th-ctl-smib}） &
+\implfull{tools/pf\_doc\_benchmark.cpp}（模式 dyn）\\
 \bottomrule
 \end{longtable}
 \end{center}
@@ -955,6 +1072,10 @@ SSR 电气相互作用（串补谐振负阻尼） & \implnone\\
 \subsection{参考文献}
 {\renewcommand{\section}[2]{}%
 \begin{thebibliography}{9}\small
+\bibitem{ctl:pagola} F.~L. Pagola, I.~J. P\'erez-Arriaga, G.~C. Verghese, On
+sensitivities, residues and participations: applications to oscillatory
+stability analysis and control, \emph{IEEE Transactions on Power Systems},
+vol.~4, no.~1, pp.~278--285, 1989.
 \bibitem{ctl:kundur} P.~Kundur, \emph{Power System Stability and Control},
 McGraw-Hill, 1994.
 \bibitem{ctl:ieee4215} IEEE Std 421.5-2016, \emph{IEEE Recommended Practice for

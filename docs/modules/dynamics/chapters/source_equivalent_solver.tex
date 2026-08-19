@@ -207,6 +207,9 @@ $f_n$ 和 $0$。没有源的连通分量不进入岛列表。系统级结果使�
 \texttt{BatteryDynamic}、\texttt{PVDynamic} 与
 \texttt{ProtectionRelay}。
 
-本章尚未逐分支转写上述每一种设备的全部导数，因此不提供任何教材标准设备方程，也不声称这些设备
-已被本章逐式覆盖。读者必须以所列 \texttt{computeDerivatives}、对应 \texttt{stamp} 与
+本章尚未逐分支转写上述每一种设备的全部导数，但\emph{同步发电机组控制链}已在后续三章逐式转写：
+同步电机族见 \S\ref{sec:dynamics-device-machines}、励磁 / AVR 族见 \S\ref{sec:dynamics-device-exciters}、
+调速器与 PSS 族见 \S\ref{sec:dynamics-device-governors-pss}，其状态导数、控制框图与参数表均以对应
+\texttt{computeDerivatives} 为准。其余设备（跟网 / 构网逆变器、VSC、感应电机、各类负荷、直流环节、
+储能、保护继电器等）尚未逐式覆盖，仍以所列 \texttt{computeDerivatives}、对应 \texttt{stamp} 与
 \texttt{addJacobian} 为准；此边界用于阻止文档公式被误当作代码不存在的模型。

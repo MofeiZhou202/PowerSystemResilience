@@ -1,0 +1,267 @@
+% theory_reliability_foundations.tex —— 可靠性评估通用理论：元件模型、网络约简、充裕度与蒙特卡洛
+% 本文件为理论层章节，遵循 docs/modules/THEORY_WRITING_GUIDE.md。
+
+\section{电力系统可靠性评估的数学基础}\label{sec:rel-th}
+
+\begin{theorynote}
+本章为通用数学理论，按电力系统可靠性工程的标准体系（Billinton--Allan~\cite{rel:billinton-allan}）撰写，
+覆盖：两状态元件的连续时间马尔可夫（CTMC）可用度模型、串并联网络的频率—持续时间（F\&D）约简与
+最小割集、发电充裕度的停运容量概率表（COPT）递推与 LOLP/LOLE/LOLF/LOLD 指标、非序贯与序贯蒙特卡洛
+估计量及其无偏性与变异系数（CoV）收敛率、IEEE Std 1366 配电可靠性指标（SAIFI/SAIDI/CAIDI/ASAI）、
+以及尾部风险 VaR/CVaR。全部结论以平台实现（\srcpath{src/reliability/}）为落点，超出实现处以“未实现
+扩展说明”框标记。诚实边界：平台的蒙特卡洛/FMEA 状态评估以\emph{交流网络的 DC-OPF} 削减为口径
+（\texttt{model\_scope="ac-only-dcopf"}），不含直流侧负荷削减与 VSC/直流潮流约束（见本章末）。
+\end{theorynote}
+
+\subsection{记号与约定}\label{sec:rel-th-notation}
+\begin{itemize}
+  \item $\lambda$：元件故障率（占/年，occ/yr）；$\mu=1/r$：修复率；$r$：平均修复时间 MTTR（yr 或 hr）；
+        $m=1/\lambda$：平均无故障时间 MTTF；$T=m+r$：平均循环时间（MTBF）；
+  \item $A$：可用度（稳态在运行概率）；$U=1-A$：强迫停运率 / 不可用度（FOR）；$f$：状态频率（occ/yr）；
+  \item $H=8760$（或 $8736$）：年小时数；$L$：负荷（MW）；$C$：可用发电容量（MW）；
+  \item EENS：期望缺供电量（MWh/yr）；EDNS：期望缺供功率（MW）；
+        LOLP/LOLE/LOLF/LOLD：失负荷概率/期望（hr/yr）/频率（occ/yr）/持续（hr/occ）；
+  \item 主动型元件：$p_d$ 每次需求失效概率、$\nu_d$ 需求频率（次/年），等效年频率 $\lambda_a=\nu_d p_d$。
+\end{itemize}
+除特别声明，所有元件相互独立，故障/修复时间服从指数分布（马尔可夫假设）。
+
+\subsection{两状态元件模型}\label{sec:rel-th-twostate}\label{sec:rel-param}
+可修元件在“运行”（up）与“故障”（down）间交替，构成两状态连续时间马尔可夫链，生成元矩阵
+\begin{equation}
+ Q=\begin{bmatrix}-\lambda & \lambda\\ \mu & -\mu\end{bmatrix}.
+ \label{eq:rel-th-Q}
+\end{equation}
+
+\begin{theorem}[稳态可用度与频率]\label{thm:rel-th-avail}
+两状态元件~\eqref{eq:rel-th-Q} 的稳态概率、频率为
+\begin{equation}
+ A=\frac{\mu}{\lambda+\mu}=\frac{m}{m+r},\qquad
+ U=\frac{\lambda}{\lambda+\mu}=\frac{\lambda r}{1+\lambda r},\qquad
+ f=\lambda A=\mu U=\frac{1}{m+r}.
+ \label{eq:rel-th-AUf}
+\end{equation}
+\end{theorem}
+
+\begin{proof}
+稳态分布 $\pi=[A,U]$ 满足 $\pi Q=0$ 与 $A+U=1$。$\pi Q=0$ 的首列给出平衡方程
+$-\lambda A+\mu U=0$，即 $\lambda A=\mu U$；代入 $A+U=1$ 解得 $A=\mu/(\lambda+\mu)$、
+$U=\lambda/(\lambda+\mu)$。以 $\mu=1/r$ 代入得 $U=\lambda/(\lambda+1/r)=\lambda r/(1+\lambda r)$。
+状态频率为“离开该状态的稳态流率”$f=\lambda A=\mu U$；又 $\lambda A=\lambda\mu/(\lambda+\mu)
+=1/(1/\lambda+1/\mu)=1/(m+r)$。
+\end{proof}
+
+平台以单一\emph{解析器}把异构输入（$\lambda$、MTTR、MTBF、FOR、$p_d/\nu_d$）折算为
+式~\eqref{eq:rel-th-AUf} 的规范量 $(\lambda,r,U)$，供所有方法共享，并记录 MTBF 语义与数据来源
+（\srcpath{include/hacdcpf/reliability/reliability\_assessment.hpp:resolve\_reliability\_params}）。
+
+\subsection{网络约简：串并联与最小割集}\label{sec:rel-th-network}
+在\emph{小不可用度}（$U_i\ll1$）近似下，串并联子网可用 F\&D 三元组 $(\lambda,r,U)$ 逐级合并。
+
+\begin{proposition}[串联合并]\label{prop:rel-th-series}
+$n$ 个串联元件（任一故障即系统故障），系统三元组为
+\begin{equation}
+ U_s=1-\prod_i(1-U_i)\approx\sum_iU_i,\qquad
+ \lambda_s=\sum_i\lambda_i,\qquad
+ r_s=\frac{\sum_i\lambda_ir_i}{\sum_i\lambda_i}.
+ \label{eq:rel-th-series}
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+系统可用要求全部元件可用，$A_s=\prod_iA_i$，故 $U_s=1-\prod_i(1-U_i)$，一阶展开得
+$\sum_iU_i$。系统故障频率为各元件“单独触发系统故障”的频率之和
+$f_s=\sum_i f_i\prod_{j\ne i}A_j\approx\sum_i\lambda_i$（$A_j\approx1$，$f_i\approx\lambda_i$）；
+由 $\lambda_s=f_s/A_s\approx f_s$ 得 $\lambda_s=\sum_i\lambda_i$。等效修复时间由 $U_s=\lambda_s r_s$
+（小量下 $U\approx\lambda r$）与 $U_s\approx\sum\lambda_ir_i$ 联立得 $r_s=\sum\lambda_ir_i/\sum\lambda_i$。
+\end{proof}
+
+\begin{proposition}[双元件并联合并]\label{prop:rel-th-parallel}
+两个并联元件（同时故障才系统故障），在 $\lambda_ir_i\ll1$ 下
+\begin{equation}
+ U_p=U_1U_2\approx\lambda_1r_1\lambda_2r_2,\qquad
+ \lambda_p\approx\lambda_1\lambda_2(r_1+r_2),\qquad
+ r_p=\frac{r_1r_2}{r_1+r_2}.
+ \label{eq:rel-th-parallel}
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+独立性给 $U_p=U_1U_2$。系统进入故障态需一元件先故障（频率 $\approx\lambda_1$ 或 $\lambda_2$）而另一
+元件恰处于故障态（概率 $U_2$ 或 $U_1$）：$f_p\approx\lambda_1U_2+\lambda_2U_1
+=\lambda_1\lambda_2 r_2+\lambda_2\lambda_1 r_1=\lambda_1\lambda_2(r_1+r_2)$。等效
+$\lambda_p=f_p/A_p\approx f_p$。$r_p$ 由 $U_p=\lambda_p r_p$ 得
+$r_p=U_1U_2/[\lambda_1\lambda_2(r_1+r_2)]=r_1r_2/(r_1+r_2)$。
+\end{proof}
+
+一般（含网络约束、非串并联）拓扑用\emph{最小割集}表述：系统故障事件
+$=\bigcup_k(\text{割集 }K_k\text{ 全故障})$，一阶近似 $U_{\mathrm{sys}}\approx\sum_k\prod_{i\in K_k}U_i$，
+主导项为低阶（一阶、二阶）割集。平台不做符号割集枚举，而以蒙特卡洛状态抽样统计削减（见
+\S\ref{sec:rel-th-mc}），因此天然涵盖网络重分布与多重故障耦合。
+
+\subsection{发电充裕度：停运容量概率表与 LOLE/LOLF}\label{sec:rel-th-copt}
+发电充裕度评估把机组停运卷积成\emph{停运容量概率表}（COPT）。
+
+\begin{proposition}[COPT 递推]\label{prop:rel-th-copt}
+设已叠加若干机组得累积停运概率 $P(X)=\Pr\{\text{停运容量}\ge X\}$。再叠加一台容量 $C$、强迫停运率
+$U$ 的机组，则
+\begin{equation}
+ P'(X)=(1-U)\,P(X)+U\,P(X-C).
+ \label{eq:rel-th-copt}
+\end{equation}
+频率表按同样卷积递推（附加 $\pm$ 机组故障/修复率的频率增量）。
+\end{proposition}
+
+\begin{proof}
+新机组以概率 $1-U$ 在运（停运容量不变，贡献 $P(X)$），以概率 $U$ 停运（停运容量增加 $C$，
+把原表右移 $C$，贡献 $P(X-C)$）。两互斥事件相加即~\eqref{eq:rel-th-copt}。
+\end{proof}
+
+由 COPT 与负荷 $L$，失负荷概率与期望为
+\begin{equation}
+ \mathrm{LOLP}=\Pr\{C<L\}=P(\,\text{停运}>C_{\mathrm{inst}}-L\,),\qquad
+ \mathrm{LOLE}=\sum_{t}\mathrm{LOLP}(L_t)\,\Delta t,
+ \label{eq:rel-th-lole}
+\end{equation}
+$C_{\mathrm{inst}}$ 为装机容量。F\&D 法进一步给出失负荷频率 $\mathrm{LOLF}$（越过 $L$ 的净向上频率）与
+持续 $\mathrm{LOLD}=\mathrm{LOLE}/\mathrm{LOLF}$。平台以 F\&D 结构体
+\srcpath{FrequencyDurationResult}（\fld{capacity\_outage\_levels}、\fld{cumulative\_probability}、
+\fld{cumulative\_frequency}、\fld{lolp}、\fld{lole\_fd}、\fld{lolf\_fd}、\fld{lold}）承载 COPT 与指标。
+
+\subsection{蒙特卡洛可靠性评估}\label{sec:rel-th-mc}
+当网络约束、多重故障与调度重分布使解析枚举不可行时，蒙特卡洛（MC）以状态抽样估计指标。
+
+\paragraph{非序贯（状态抽样）。}
+每次抽样对各元件独立取 Bernoulli 状态 $x_i\sim\mathrm{Bern}(U_i)$（$1$=故障），对该系统状态解
+DC-OPF 得最小削减 $C(\mathbf x)$（MW），估计
+\begin{equation}
+ \widehat{\mathrm{EENS}}=\frac1N\sum_{k=1}^N C(\mathbf x^{(k)})\cdot H,\qquad
+ \widehat{\mathrm{EDNS}}=\frac1N\sum_{k=1}^N C(\mathbf x^{(k)}).
+ \label{eq:rel-th-nsq}
+\end{equation}
+
+\begin{theorem}[无偏性与 CoV 收敛]\label{thm:rel-th-cov}
+估计量~\eqref{eq:rel-th-nsq} 无偏：$\mathbb E[\widehat{\mathrm{EDNS}}]=\mathbb E[C(\mathbf x)]=\mathrm{EDNS}$；
+样本均值的变异系数
+\begin{equation}
+ \mathrm{CoV}=\frac{\sigma_{\widehat{}}}{\widehat\mu}=\frac{\sigma_C}{\mu_C\sqrt N}=O\!\left(N^{-1/2}\right),
+ \label{eq:rel-th-cov}
+\end{equation}
+$\sigma_C,\mu_C$ 为单样本削减的标准差与均值。停机准则为 $\mathrm{CoV}\le\varepsilon$。
+\end{theorem}
+
+\begin{proof}
+$\mathbf x^{(k)}$ 独立同分布，$\mathbb E[\tfrac1N\sum_kC(\mathbf x^{(k)})]=\mathbb E[C(\mathbf x)]$，
+无偏。样本均值方差 $\mathrm{Var}(\widehat\mu)=\sigma_C^2/N$，标准差 $\sigma_C/\sqrt N$；
+除以均值 $\mu_C$ 即 $\mathrm{CoV}=\sigma_C/(\mu_C\sqrt N)$，随 $N$ 以 $N^{-1/2}$ 衰减。
+\end{proof}
+
+CoV 的 $O(N^{-1/2})$ 率与\emph{维数无关}，是 MC 相对枚举的根本优势；但稀有事件（$\mu_C$ 小、
+$\sigma_C/\mu_C$ 大）收敛慢，需重要抽样等方差缩减。依据：\srcpath{src/reliability/reliability\_assessment.cpp:run\_nonsequential\_mc}
+（\fld{cov\_threshold}、\fld{max\_iterations}、\fld{final\_cov}）。
+
+\paragraph{序贯（时序模拟）。}
+按时间推进：各元件抽指数分布的运行/修复时长（率 $\lambda_i$/$\mu_i$）生成时序状态，逐时对
+含负荷曲线的系统解 DC-OPF，累计年度 EENS 与\emph{越限次数}得 LOLF。序贯法额外给出频率与持续
+（LOLF、LOLD）及其年际分布，代价是每样本为完整一年。依据：
+\srcpath{src/reliability/reliability\_assessment.cpp:run\_sequential\_mc}、
+\srcpath{build\_ieee\_rts24\_load\_profile}。
+
+\subsection{配电可靠性指标（IEEE Std 1366）}\label{sec:rel-th-1366}
+以负荷点 $i$ 的故障率 $\lambda_i$、年停电时间 $U_i$（hr/yr）与客户数 $N_i$ 定义系统指标：
+\begin{align}
+ \mathrm{SAIFI}&=\frac{\sum_i\lambda_iN_i}{\sum_iN_i},&
+ \mathrm{SAIDI}&=\frac{\sum_iU_iN_i}{\sum_iN_i},&
+ \mathrm{CAIDI}&=\frac{\mathrm{SAIDI}}{\mathrm{SAIFI}},\\
+ \mathrm{ASAI}&=1-\frac{\mathrm{SAIDI}}{H},&
+ \mathrm{ASUI}&=1-\mathrm{ASAI}.&&
+\end{align}
+SAIFI 为户均停电次数、SAIDI 为户均停电时长、CAIDI 为次均停电时长、ASAI 为供电可用率。平台以
+\srcpath{DistributionIndices}（\fld{saifi}/\fld{saidi}/\fld{caidi}/\fld{asai}/\fld{asui} 及逐节点
+\fld{nodal\_cif}/\fld{nodal\_cid}）承载，需负荷点客户数据方计算（\fld{compute\_distribution\_indices}）。
+
+\subsection{尾部风险：VaR 与 CVaR}\label{sec:rel-th-var}
+可靠性关注\emph{尾部}的高损失场景。对损失 $L$（如年 EENS）与置信水平 $\alpha$，
+\begin{equation}
+ \mathrm{VaR}_\alpha(L)=\inf\{\ell:\Pr[L\le\ell]\ge\alpha\},\qquad
+ \mathrm{CVaR}_\alpha(L)=\mathbb E[L\mid L\ge\mathrm{VaR}_\alpha(L)]
+ =\frac1{1-\alpha}\int_\alpha^1\mathrm{VaR}_\beta(L)\,\mathrm d\beta.
+ \label{eq:rel-th-cvar}
+\end{equation}
+CVaR（期望损失超出）是相干风险度量（次可加、单调、平移不变、正齐次），优于 VaR。平台由 MC 样本
+分布估计（\srcpath{TailRiskMetrics}：\fld{eens\_var}/\fld{eens\_cvar}/\fld{lole\_var}/\fld{lole\_cvar}、
+\fld{eens\_percentiles}），依据 Rockafellar--Uryasev~\cite{rel:rockafellar}。
+
+\subsection{数值算例与基准（IEEE RTS-24）}\label{sec:rel-th-numexp}
+在 IEEE 可靠性测试系统 RTS-24（$24$ 母线、$33$ 机组、$38$ 支路；\srcpath{data/case24\_ieee\_rts.m}
+$+$ \srcpath{apply\_ieee24\_reliability\_data}）上运行两类 MC（\srcpath{tools/pf\_doc\_benchmark.cpp}
+模式 \texttt{rel}，\texttt{ac-only-dcopf} 口径）：
+\begin{center}\footnotesize
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+方法 & 样本 & CoV & EENS/(MWh$\cdot$yr$^{-1}$) & LOLE/(hr$\cdot$yr$^{-1}$) & 其他\\
+\midrule
+非序贯 MC & $2\times10^4$ 态（未达 $0.03$） & $0.097$ & $47\,245$ & $240.0$ & EDNS $5.39$~MW，PLC $0.027$\\
+序贯 MC & $101$ 年（收敛） & $0.035$ & $43\,506$ & $43.3$ & LOLF $14.7$~occ/yr\\
+\bottomrule
+\end{tabular}
+\end{center}
+两法的 EENS 相互吻合（$4.35$--$4.72\times10^4$~MWh/yr），互为交叉校验；序贯法在 $101$ 年即达
+$\mathrm{CoV}{=}0.035$，而非序贯法在 $2\times10^4$ 态仍停于 $0.097$——印证稀有失负荷事件下
+LOLE 类频率指标收敛慢（定理~\ref{thm:rel-th-cov}），需更多样本或方差缩减。非序贯尾部
+$\mathrm{CVaR}_{95\%}(\mathrm{EENS}){=}6.33\times10^4\gg$ 均值，示厚尾风险。
+\begin{gapnote}
+上述 EENS/LOLE\emph{显著高于}经典 RTS-24 交流建模参考值（EENS $\sim1.2\times10^3$~MWh/yr、
+LOLE $\sim9.4$~hr/yr）。差异源于平台状态评估的\emph{诚实口径}：$(i)$ \texttt{model\_scope="ac-only-dcopf"}
+仅以交流 DC-OPF 削减，不含无功/电压可行性与直流侧；$(ii)$ 当某故障态 DC-OPF 不收敛时，平台\emph{保守地}
+将该孤岛全部负荷计为削减（评估器会给出 warning）。因此本表数字应读作平台在该口径下的\emph{保守
+上界}与\emph{方法学演示}（收敛率、跨方法一致性、尾部风险），\emph{不}作为对经典 RTS 参考值的复现。
+定量对标需引入交流可行性校核与 DC-OPF 失败态的精细化处理。
+\end{gapnote}
+
+\subsection{与实现的对应}\label{sec:rel-th-impl}
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{5.0cm}L{9.4cm}@{}}
+\toprule
+\textbf{理论对象} & \textbf{平台实现状态}\\
+\midrule
+\endfirsthead
+\toprule
+\textbf{理论对象} & \textbf{平台实现状态}\\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+两状态可用度~\eqref{eq:rel-th-AUf}、参数解析 &
+  \implfull{src/reliability/reliability\_assessment.cpp:resolve\_reliability\_params}\\
+非序贯（状态抽样）MC~\eqref{eq:rel-th-nsq}、CoV 停机 &
+  \implfull{src/reliability/reliability\_assessment.cpp:run\_nonsequential\_mc}\\
+序贯（时序）MC、LOLF/年际分布 &
+  \implfull{src/reliability/reliability\_assessment.cpp:run\_sequential\_mc}\\
+COPT 递推~\eqref{eq:rel-th-copt}、LOLP/LOLE/LOLF/LOLD &
+  \implpart{以 \srcpath{FrequencyDurationResult} 承载 COPT 与 F\&D 指标；主入口为 MC 而非独立解析 COPT}\\
+串并联/最小割集解析约简~\eqref{eq:rel-th-series}--\eqref{eq:rel-th-parallel} &
+  \implnone（平台以 MC 状态抽样替代符号割集枚举）\\
+IEEE 1366 配电指标 &
+  \implfull{include/hacdcpf/reliability/reliability\_assessment.hpp:DistributionIndices}（需客户数据）\\
+VaR/CVaR 尾部风险 &
+  \implfull{include/hacdcpf/reliability/reliability\_assessment.hpp:TailRiskMetrics}\\
+无功/电压可行性、直流侧削减 &
+  \implnone（\texttt{model\_scope="ac-only-dcopf"}，\fld{validity} 标志声明）\\
+\end{longtable}
+\end{center}
+
+\subsection{参考文献}
+\begin{thebibliography}{9}\small
+\bibitem{rel:billinton-allan} R.~Billinton and R.~N. Allan, \emph{Reliability Evaluation of Power
+  Systems}, 2nd ed. New York: Plenum Press, 1996.
+\bibitem{rel:billinton-li} R.~Billinton and W.~Li, \emph{Reliability Assessment of Electric Power
+  Systems Using Monte Carlo Methods}. New York: Plenum Press, 1994.
+\bibitem{rel:rts79} IEEE APM Subcommittee, ``IEEE Reliability Test System,'' \emph{IEEE Trans. Power
+  App. Syst.}, vol.~PAS-98, no.~6, pp.~2047--2054, 1979.
+\bibitem{rel:rts96} C.~Grigg \emph{et al.}, ``The IEEE Reliability Test System--1996,'' \emph{IEEE
+  Trans. Power Syst.}, vol.~14, no.~3, pp.~1010--1020, 1999.
+\bibitem{rel:ieee1366} IEEE Std 1366-2012, \emph{IEEE Guide for Electric Power Distribution
+  Reliability Indices}. New York: IEEE, 2012.
+\bibitem{rel:rockafellar} R.~T. Rockafellar and S.~Uryasev, ``Optimization of conditional
+  value-at-risk,'' \emph{Journal of Risk}, vol.~2, no.~3, pp.~21--41, 2000.
+\end{thebibliography}

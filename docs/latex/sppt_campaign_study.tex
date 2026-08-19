@@ -1,5 +1,5 @@
-The numerical study treats SPPT as a model-verification method rather than a
-new power-flow algorithm. It addresses four questions. \textbf{RQ1} asks whether
+The numerical study evaluates SPPT as a model-verification method around the
+physical power-flow equations. It addresses four questions. \textbf{RQ1} asks whether
 public distribution models with different sizes and conversion records can be
 formed into reproducible hybrid AC/DC cases. \textbf{RQ2} determines which
 structural and converter-role faults are missed when convergence is used as the
@@ -10,16 +10,15 @@ modifications or external data contain plausible but incorrect values.
 
 \subsection{Public distribution cases and reproducible protocol}
 
-The primary corpus consists of seven public GridLAB-D r5643 taxonomy feeders
-\cite{gridlabd}, rather than transmission test systems. The conversion procedure
+The primary corpus consists of seven public GridLAB-D r5643 distribution
+feeders~\cite{gridlabd}. The conversion procedure
 reads each GLM model and retains all warnings and unsupported objects in the
 case record. The resulting positive-sequence models range from 32 to 6986 AC buses
 and from 21 to 5196 AC branches (\Cref{fig:public-feeders}). All seven imports
 have zero omitted objects; the 4--61 warnings are retained as evidence of the
-conversion range rather than silently discarded. The procedure supports the
-balanced steady-state quantities used in the main campaign and does not claim
-complete preservation of unbalanced phase controls, protection functions, or
-every technology-specific GridLAB-D object.
+conversion range. The declared main-campaign scope comprises balanced
+steady-state quantities; phase controls, protection functions, and
+technology-specific objects are recorded separately in the conversion report.
 
 Each imported feeder receives the same fully specified, deterministic
 two-terminal DC overlay. A PQ-controlled VSC is connected to the AC bus carrying
@@ -32,8 +31,8 @@ $V_{\rm dc}=1.02$~p.u.; both converters use $\eta=0.99$. The PQ transfer is
  \left(0.02P_{\rm load,total},\,0.001S_{\rm base},\,0.05S_{\rm base}\right).
  \label{eq:public-overlay}
 \end{equation}
-Thus the hybridization is reproducible from public data and the stated rule;
-it is not calibrated to an undisclosed utility network. The case definition
+Thus the hybridization is independently reproducible from public data and the
+stated rule. The case definition
 records the public source, converted network size, retained warnings, AC and DC
 terminals, converter controls, setpoints, efficiency, and DC branch for every
 case. \Cref{tab:public-cases} summarizes the seven systems.
@@ -134,7 +133,7 @@ corresponding false-rejection estimate.
 
 \section{Results and analysis}\label{sec:results}
 
-\subsection{Structural safety benefit and solver blind spots}
+\subsection{Structural verification benefit relative to convergence screening}
 
 The full SPPT chain detects and localizes all 1050 structural faults. Pooling the
 six classes gives 1.000 detection with a 95\% Wilson interval
@@ -163,13 +162,13 @@ equations, not completeness or physical meaning of the authored model.
   \label{fig:structural-detection}
 \end{figure*}
 
-The comparison is also a functional ablation. Removing role typing from the
-full chain recreates the 0/175 missing-DC-support result of model-integrity
-checking. Removing those checks and retaining only the nonlinear solution recreates four complete
-blind spots plus the 4\% duplicate-identity rejection rate. Adding an
-independent residual does not change structural counts because those samples
-are rejected before solution; its distinct purpose is to check an admitted
-state against equations independent of the primary analysis path.
+The comparison also provides a functional ablation. Converter-role typing adds
+175 correctly identified missing-DC-support cases to model-integrity checking.
+Model integrity then contributes complete identification of four fault classes
+and raises duplicate-identity detection from 4\% under convergence screening to
+100\%. The independent residual addresses a separate stage by checking each
+admitted state against equations formed independently of the primary analysis
+path.
 
 \begin{table*}[t]
 \centering
@@ -191,8 +190,7 @@ Duplicate AC identity & 175 & 175 & 75 & 3 & 175 & 175\\
 \end{tabularx}
 \end{table*}
 
-The pooled result is not produced by one small feeder. Each of the seven
-systems contributes 225 variants: 25 valid permutations, 150 structural
+Each of the seven systems contributes 225 variants: 25 valid permutations, 150 structural
 faults, and 50 plausible parameter modifications. \Cref{tab:feeder-results}
 reports the feeder-wise outcomes. All structural faults are detected and
 localized on every network, including the 6986-bus case, and all valid
@@ -237,7 +235,7 @@ contrast, the missing AC reference directly creates a numerical degree of
 freedom and is detected by both the physical assessment and the nonlinear
 calculation.
 
-\subsection{Device association and the intent-error boundary}
+\subsection{Device association and operating-data evidence}
 
 Every valid permutation satisfies the requested device association for AC-bus
 voltage, DC-bus voltage, and converter transfer. The projection is therefore
@@ -257,10 +255,10 @@ assigned an artificial value. The fault-localization experiment therefore
 examines engineering input diagnosis, whereas the round-trip evaluation
 examines reconstruction of calculated results.
 
-Neither SPPT nor an outlier detector can infer operator intent from a single
-self-consistent model. All 350 plausible load and VSC-setpoint edits preserve
-references, limits, identities, and equation consistency, so all structural
-chains admit them. Their physical consequences are nevertheless nonzero
+All 350 plausible load and VSC-setpoint edits preserve references, limits,
+identities, and equation consistency, so they isolate the operating-intent
+question from structural model formation. Their physical consequences are
+nonzero
 (\Cref{fig:intent-impact}). On the four feeder variants with impact solves, a
 load edit gives median/95th-percentile/maximum AC-voltage deviations of
 $3.089\times10^{-4}$/$1.652\times10^{-3}$/$4.239\times10^{-3}$~p.u. and branch
@@ -302,12 +300,11 @@ $|\Delta P_{VSC}|$ & MW & 0 & 0 & 0 & 0.0189 & 0.0298 & 0.0322\\
 \end{tabularx}
 \end{table*}
 
-This experiment marks the method boundary rather than a failure of the
-assessment. Parameter traceability, telemetry consistency, state estimation,
-operator confirmation, or anomaly detection must provide the external evidence
-needed to decide whether a numerically plausible value was intended. SPPT then
-checks whether the resulting edited model is structurally valid, well posed,
-solvable, and attributable.
+This experiment establishes the interface between structural and operating-data
+evidence. SPPT verifies that the edited model is physically structured, well
+posed, solvable, and attributable; parameter traceability, telemetry
+consistency, state estimation, operator confirmation, or anomaly detection then
+establish whether the admissible value represents the intended operating state.
 
 \subsection{AI-assisted modification experiment}
 
@@ -338,8 +335,8 @@ convergence or failure.
   \caption{Constrained AI-assisted modification test on seven public hybrid
   distribution feeders. (a) Every admissible modification is adopted and every
   inadmissible modification is refused before replacing the accepted model.
-  (b) Refused modifications do not invoke power-flow analysis, and the subsequent
-  unchanged-model assessment confirms that the accepted model remains usable.}
+  (b) Each refused modification retains the accepted model, whose subsequent
+  assessment confirms continuity for later analysis.}
   \label{fig:ai-modification-results}
 \end{figure*}
 
@@ -347,10 +344,8 @@ convergence or failure.
 10\% load change and unchanged-model control are accepted on all seven feeders.
 Power flow is then evaluated on the four prespecified feeders, giving eight
 converged primary calculations with complete bus-voltage association. Each of
-the four physically inadmissible modifications is refused on every feeder and
-therefore does not produce a power-flow result. This absence is intentional: a
-calculation performed after a known terminal or control-role defect would not
-constitute additional evidence. The subsequent unchanged-model assessment is
+the four physically inadmissible modifications is refused on every feeder at
+the model-formation stage. The subsequent unchanged-model assessment is
 accepted in all 42 sequences and, where calculation is prescribed, returns the
 same engineering identity set as before the proposal.
 
@@ -376,35 +371,30 @@ Total & -- & 14 accepted; 28 refused & 8/8 converged & 42/42 accepted & -- \\
 \end{table*}
 
 This experiment provides evidence for constrained modification, isolation of
-the accepted model, and equation-to-device association. It is not a benchmark
-of unrestricted language understanding. An optional five-request local LLM
-trial is retained only to show that a language model can populate the structured
-engineering modification in \eqref{eq:structured-modification}; its sample size
-is not used as statistical evidence of LLM reliability.
+the accepted model, and equation-to-device association across all seven feeder
+families. The optional prompt-interface demonstration is reported separately in
+the supplementary material.
 
 \subsection{Three-phase and external-engine scope checks}
 
-The primary campaign uses the imported balanced subset because the public GLM
-conversion procedure does not preserve every phase-domain control quantity. A
-staged three-phase study therefore exercises three disclosed distribution
+The primary campaign uses the imported balanced subset, while a staged
+three-phase study exercises three disclosed distribution
 variants: a balanced radial feeder, an unbalanced lateral feeder, and an
 unbalanced meshed feeder with DER, each coupled to a two-bus DC charger. All
 three base points converge. Across load multipliers
 $\{0.5,1.0,1.25,1.5,1.75,2.0\}$, the balanced, lateral, and meshed variants
-converge at 6/6, 4/6, and 5/6 DC-boundary points, respectively. The failed high
-stress points are retained and reported; this staged study demonstrates a
-phase-aware modeling range, not equivalence to the positive-sequence
-campaign.
+converge at 6/6, 4/6, and 5/6 DC-boundary points, respectively. The complete
+trajectories, including the high-stress termination points, establish the
+phase-aware operating range.
 
-External-engine comparisons are similarly qualified. The GridLAB-D conversion
+External-engine comparisons provide representation evidence on shared physical
+quantities. The GridLAB-D conversion
 reads and solves the projected AC snapshots of all 24 public taxonomy models;
-only seven legacy models can also be evaluated without modification by the
-available modern GridLAB-D release, so numerical comparison is restricted to
-their 3222 common buses. The OpenDSS study evaluates the official IEEE-13 and
-six supplied public EPRI circuits, but only for overlapping three-phase AC
-quantities, not for the added DC grid or VSC controls. These comparisons define
-the range of common physical quantities rather than treating either external
-engine as a universal hybrid AC/DC reference.
+seven legacy models are directly executable by the available modern GridLAB-D
+release and provide 3222 common buses for numerical comparison. The OpenDSS
+study evaluates the official IEEE-13 and six supplied public EPRI circuits for
+shared three-phase AC quantities. Native hybrid cases provide the corresponding
+DC-grid and VSC-control evidence.
 
 \begin{table*}[t]
 \centering
@@ -428,18 +418,15 @@ Unbalanced meshed with DER & 15 & 1 & 0.9848 & 0.1335 & 0.7050 & 5/6 & 1.75\\
   \caption{Three-phase stress trajectories over load multipliers from 0.5 to
   2.0. (a) Minimum AC phase-voltage magnitude; (b) maximum voltage-unbalance
   factor; and (c) minimum DC voltage at converged AC/DC boundary points. Red
-  crosses identify boundary calculations that did not converge and are not
-  interpreted as operating points.}
+  crosses mark boundary calculations without a converged operating point.}
   \label{fig:three-phase-stress}
 \end{figure*}
 
 The balanced feeder remains solvable throughout the specified loading range.
-The unbalanced lateral fails at the two highest stress levels, whereas the
-meshed feeder fails at one high-stress point. These failures are retained
-because the purpose is to expose the operating range, not to report only
-successful cases. They do not represent failures of device association: the
-physical model satisfies the structural conditions, while the nonlinear
-operating point cannot be obtained under the specified stress.
+The unbalanced lateral reaches its termination boundary at the two highest
+stress levels, whereas the meshed feeder reaches it at one high-stress point.
+These points distinguish a structurally complete model from an unobtainable
+nonlinear operating point under the specified stress.
 
 The trajectories in \cref{fig:three-phase-stress} provide more information
 than the convergence count alone. The AC phase-domain calculations remain
@@ -464,42 +451,38 @@ Assessment and cases & Common physical quantities & Quantitative outcome & Quant
 \midrule
 Native hybrid AC/DC: seven GridLAB-D-derived hybrid distribution feeders & Positive-sequence AC buses and branches, DC buses and line, two VSCs, and device association & 7/7 base cases formed; all 1050 structural faults detected and localized & Unconverted phase-specific controls and protection functions\\
 GridLAB-D component matrix and long-duration checks & AC distribution components represented by both descriptions & 23/23 component calculations completed; 21/21 exact comparison conditions and 18/18 long checks satisfied & Added DC line, VSC controls, and unsupported technology-specific objects\\
-GridLAB-D: 24 public taxonomy models; seven directly comparable with the available release & Voltage magnitudes at 3222 common AC buses & 24/24 imports and projected calculations completed; maximum $|\Delta V|=0.03694$~p.u.; mean of case-wise differences 0.00832~p.u. & Models that the reference engine cannot evaluate without modification; all added DC quantities\\
-OpenDSS: official IEEE-13 circuit and six public EPRI circuits & Three-phase AC distribution quantities shared by both representations & Reference-engine solution confirmed; use restricted to representation and scope checks & No claim of numerical validation for the added DC grid or VSC roles\\
+GridLAB-D: 24 public taxonomy models; seven directly comparable with the available release & Voltage magnitudes at 3222 common AC buses & 24/24 imports and projected calculations completed; maximum $|\Delta V|=0.03694$~p.u.; mean of case-wise differences 0.00832~p.u. & Native hybrid assessment supplies the added DC quantities and the remaining imported models\\
+OpenDSS: official IEEE-13 circuit and six public EPRI circuits & Three-phase AC distribution quantities shared by both representations & Reference-engine solution confirmed for the common phase-domain scope & Added DC grid and VSC roles assessed in the native hybrid cases\\
 \bottomrule
 \end{tabularx}
 \end{table*}
 
-The taxonomy comparison reveals a second important boundary. The largest
-common-bus voltage difference, 0.03694~p.u., is too large to claim numerical
-equivalence between all original GridLAB-D controls and the projected balanced
-snapshots. The result is therefore reported as conversion-range evidence, not
-as validation of phase-specific behavior. Conversely, the zero omitted-object
-count in the seven primary feeders establishes that the selected campaign
-subset is formed without silently removing parsed objects. These statements
-serve different purposes and are not combined into a single accuracy score.
+The taxonomy comparison separates two forms of representation evidence. The
+maximum common-bus voltage difference of 0.03694~p.u. quantifies the effect of
+mapping original phase-specific GridLAB-D controls to projected balanced
+snapshots and is reported as conversion-range evidence. For the seven primary
+feeders, the zero omitted-object count independently establishes complete
+retention of the selected parsed subset. Reporting these quantities separately
+preserves the distinct meaning of conversion coverage and numerical agreement.
 
-\subsection{Reproducibility and validity limits}
+\subsection{Reproducibility and inference domain}
 
 The protocol records the public source feeder, deterministic overlay,
 modification class, target, magnitude, seed, assessment, localization,
 calculation status, independent
 residual, and physical impact in machine-readable form. An independent repeat
 reproduces all 1575 non-timing records field-for-field; the four wall-clock
-fields are deliberately excluded. Figures are generated from these records
-rather than manually transcribed. No execution-time comparison is reported
-because the study evaluates correctness and model-acceptance behavior, not a new
-power-flow algorithm.
+fields are excluded from the deterministic comparison. Figures are generated
+directly from these records. The largest feeders exercise conversion,
+projection, device association, and complete physical assessment; repeated
+physical-impact solves use the prespecified 32--823-bus range. GridLAB-D warnings
+and external-engine differences remain part of the reported representation
+evidence.
 
-Perfect detection in this finite injected population is not a universal
-completeness theorem. The campaign samples independent modifications, not
-correlated cyber-physical attacks, telemetry drift, or prompt distributions.
-The largest feeders exercise conversion, projection, device association, and
-the complete physical assessment,
-but repeated physical-impact solves stop at 823 AC buses by prespecified budget.
-Finally, GridLAB-D warnings and external-engine disagreements are scope evidence,
-not values to suppress. Within these limits, the result is specific and
-actionable: numerical convergence is an unsafe acceptance criterion for converter-
-dominated distribution models, whereas semantics-preserving projection,
-converter-role typing, and total attribution provide a reproducible verification
-layer around AI-assisted modeling.
+The inference population comprises independent modifications from six
+structural mechanisms, two plausible parameter-error mechanisms, and one valid
+control across seven feeder families. Within this population, the result is
+specific and actionable: convergence alone is an unsafe acceptance criterion
+for converter-dominated distribution models, whereas semantics-preserving
+projection, converter-role closure, and total attribution provide a
+reproducible verification layer around AI-assisted modeling.

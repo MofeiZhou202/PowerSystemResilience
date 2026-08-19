@@ -1,0 +1,287 @@
+\section{感应电机、负荷与其他动态设备（逐式转写）}
+\label{sec:dynamics-device-motors-loads}
+
+本章转写发电机组与变流器之外的其余动态设备：感应电机（电动机）、静态 / 动态负荷、多质量轴系、
+WECC 聚合分布式电源，以及直流与储能杂项。公式以 \srcpath{src/dynamics/devices/BasicDynamicDevices.cpp}
+各设备 \texttt{computeDerivatives} 为准，控制环节基元同 \S\ref{sec:dynamics-control-primitives}，
+$\omega_b=2\pi f$。
+
+\subsection{感应电机（电动机）}
+\label{sec:dynamics-induction}
+平台按 \fld{flux\_model} 提供两种感应电机实现。
+
+\paragraph{电流跟踪模型 \texttt{InductionMachineDynamic}。}
+三阶（定子电流 $i_r,i_q$、转速 $\omega$）或五阶（另加定子磁链 $\psi_{ds},\psi_{qs}$）。以负载功率
+$S_{\mathrm{cmd}}=p+\mathrm jq$（$p=P_{\mathrm{mech}}\,\omega^{\,n}$，$n=$\fld{torque\_exponent}）反解目标电流
+$i_{\mathrm{tgt}}=\overline{S_{\mathrm{cmd}}/V}$，电流以转子时间常数 $\tau_r=(|x_r|+|x_m|)/(\omega_b|r_r|)$ 收敛：
+\begin{align}
+ \dot i_r&=\frac{i_{\mathrm{tgt},r}-i_r}{\tau_r},\qquad \dot i_q=\frac{i_{\mathrm{tgt},q}-i_q}{\tau_r},\\
+ \dot\omega&=\frac{\tau_e-\tau_m-D(\omega-1)}{2H},\qquad \omega\in[0.05,1.20],
+\end{align}
+五阶时另有 $\dot\psi_{ds}=(v_r-\psi_{ds})/\tau_s$、$\dot\psi_{qs}=(v_i-\psi_{qs})/\tau_s$，
+$\tau_s=(|x_s|+|x_m|)/(\omega_b|r_s|)$。依据：\srcpath{InductionMachineDynamic::computeDerivatives}。
+
+\paragraph{单笼磁链模型 \texttt{FluxInductionMachineDynamic}。}
+三状态（暂态电势 $e_d',e_q'$、转差 $s$），同步坐标下的标准单笼暂态电势方程，可复现 FIDVR 失速：
+\begin{align}
+ \dot e_d'&=\omega_b\,s\,e_q'-\frac{e_d'+(x_0-x')\,i_q}{T_0'},\qquad
+ \dot e_q'=-\omega_b\,s\,e_d'-\frac{e_q'-(x_0-x')\,i_d}{T_0'},\\
+ \dot s&=\frac{T_{\mathrm{load}}(1-s)-\tau_e-D\,s}{2H},\qquad \tau_e=e_d'i_d+e_q'i_q,
+\end{align}
+定子电流 $i=\overline{(V-E')/Z'}$（$Z'=r_s+\mathrm jx'$，\srcpath{statorCurrent}）。当 $s>0.10$ 判定失速。
+依据：\srcpath{FluxInductionMachineDynamic::computeDerivatives}。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[>=Latex,
+  blk/.style={draw,rounded corners,minimum height=8mm,minimum width=16mm,align=center,font=\footnotesize},
+  sum/.style={draw,circle,inner sep=0pt,minimum size=5mm,font=\footnotesize},
+  every node/.style={font=\footnotesize}]
+  \node (v) {$V$};
+  \node[blk,right=6mm of v,fill=blue!5] (emf) {暂态电势\\ $e_d',e_q'$};
+  \node[blk,right=8mm of emf,fill=green!6] (te) {$\tau_e=e_d'i_d{+}e_q'i_q$};
+  \node[sum,right=7mm of te] (s1) {$\Sigma$};
+  \node[blk,right=7mm of s1,fill=orange!8] (swing) {$\dfrac{1}{2Hs}$};
+  \node[right=7mm of swing] (slip) {$s$};
+  \draw[->] (v) -- (emf);
+  \draw[->] (emf) -- (te);
+  \draw[->] (te) -- node[above,font=\footnotesize]{$-\tau_e$} (s1);
+  \draw[->] (s1) -- (swing);
+  \draw[->] (swing) -- (slip);
+  \draw[->] ($(s1)+(0,-9mm)$) node[left,font=\footnotesize]{$+T_{\mathrm{load}}(1{-}s)$} -- (s1.south);
+  \draw[->] (slip.south) .. controls +(0,-7mm) and +(0,-7mm) .. (emf.south)
+     node[pos=0.5,below,font=\footnotesize]{$\omega_b s$ 耦合};
+\end{tikzpicture}
+\caption{单笼感应电机：暂态电势 $e_d',e_q'$ 经 $\omega_b s$ 耦合，电磁转矩 $\tau_e$ 与负载转矩驱动
+转差 $s$ 的机械摆动 $1/2Hs$；$s>0.10$ 判失速。}
+\label{fig:im-flux}
+\end{figure}
+
+\paragraph{参数表。}
+\compmeta{InductionMachineDynamicParams}{include/hacdcpf/dynamics/devices/BasicDynamicDevices.hpp}
+\begin{paramtable}
+\fld{r\_s\_pu} & $r_s$ & pu & $0.01\sim0.05$ & $0.02$ & 定子电阻\\
+\fld{x\_s\_pu} & $x_s$ & pu & $0.05\sim0.15$ & $0.10$ & 定子漏抗\\
+\fld{r\_r\_pu} & $r_r$ & pu & $0.01\sim0.05$ & $0.02$ & 转子电阻\\
+\fld{x\_r\_pu} & $x_r$ & pu & $0.05\sim0.15$ & $0.08$ & 转子漏抗\\
+\fld{x\_m\_pu} & $x_m$ & pu & $2\sim4$ & $3.0$ & 励磁电抗\\
+\fld{inertia\_h} & $H$ & s & $0.3\sim2$ & $0.5$ & 惯性常数\\
+\fld{damping\_d} & $D$ & pu & $0\sim1$ & $0$ & 阻尼系数\\
+\fld{torque\_exponent} & $n$ & — & $0\sim2$ & $2.0$ & 负载转矩—转速指数\\
+\fld{fifth\_order} & — & — & 布尔 & false & 是否含定子磁链暂态（五阶）\\
+\fld{flux\_model} & — & — & 布尔 & false & 是否用单笼磁链模型\\
+\end{paramtable}
+
+\subsection{静态与动态负荷}
+\label{sec:dynamics-loads}
+\texttt{DynamicLoad} 为代数负荷（无状态），按 \fld{model\_kind} 分四型
+（\texttt{ConstantPower}/\texttt{ConstantCurrent}/\texttt{ConstantImpedance}/\texttt{ZIP}）。恒阻抗直接印
+导纳 $Y=\overline{S}\,s_\phi/V_0^2$，其余型逐相印“消耗电流”$-i_{\mathrm{cons}}(V_\phi)$
+（\srcpath{load\_consuming\_current}），ZIP 按电压多项式加权。依据：\srcpath{DynamicLoad::stamp}。
+
+\texttt{ActiveConstantPowerLoadDynamic}（CPL）为两状态（输入滤波电容电压 $v_c$ 的实 / 虚部）的
+恒功率负荷，显式表征其\emph{负阻抗}特性：
+\begin{equation}
+ i_{\mathrm{load}}=\overline{S/v_{\mathrm{div}}},\qquad
+ i_\ell=\frac{V_{\mathrm{grid}}-v_c}{Z_f},\qquad
+ \dot v_c=\frac{i_\ell-i_{\mathrm{load}}}{C_f},
+\end{equation}
+其中 $v_{\mathrm{div}}$ 在 $|v_c|<V_{\min}$ 时被钳到 $V_{\min}$（越限转为恒电流，抑制负阻抗发散）。依据：
+\srcpath{ActiveConstantPowerLoadDynamic::computeDerivatives}。三相不平衡负荷 \texttt{ThreePhaseDynamicLoad}
+与直流负荷 \texttt{DCDynamicLoad} 为对应的代数型。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[>=Latex,
+  blk/.style={draw,rounded corners,minimum height=8mm,minimum width=15mm,align=center,font=\footnotesize},
+  sum/.style={draw,circle,inner sep=0pt,minimum size=5mm,font=\footnotesize},
+  every node/.style={font=\footnotesize}]
+  \node (vg) {$V_{\mathrm{grid}}$};
+  \node[blk,right=7mm of vg,fill=blue!5] (zf) {输入滤波\\ $Z_f=r_f{+}\mathrm jx_f$};
+  \node[sum,right=7mm of zf] (s1) {$\Sigma$};
+  \node[blk,right=7mm of s1,fill=orange!8] (cap) {$\dfrac{1}{sC_f}$};
+  \node[right=7mm of cap] (vc) {$v_c$};
+  \node[blk,below=9mm of cap,fill=red!6] (cpl) {恒功率\\ $\overline{S/v_c}$};
+  \draw[->] (vg) -- (zf);
+  \draw[->] (zf) -- node[above,font=\footnotesize]{$i_\ell$} (s1);
+  \draw[->] (s1) -- (cap);
+  \draw[->] (cap) -- (vc);
+  \draw[->] (vc.south) |- (cpl.east);
+  \draw[->] (cpl.west) -| (s1.south) node[pos=0.85,right,font=\footnotesize]{$-i_{\mathrm{load}}$};
+\end{tikzpicture}
+\caption{有源恒功率负荷（CPL）：输入 $LC$ 滤波电容电压 $v_c$ 由网侧电流 $i_\ell$ 与恒功率负阻抗
+电流 $i_{\mathrm{load}}=\overline{S/v_c}$ 之差充放电；$|v_c|<V_{\min}$ 时转恒流。}
+\label{fig:load-cpl}
+\end{figure}
+
+\subsection{多质量轴系 \texttt{FiveMassShaft}}
+\label{sec:dynamics-shaft}
+十状态（五个质量的角 $\theta_i$ 与转速 $\omega_i$，$i=0\dots4$，对应 HP/IP/LP 汽轮机段、发电机、励磁机）。
+段间扭矩 $T_i=k_i(\theta_i-\theta_{i+1})+d_i(\omega_i-\omega_{i+1})$，运动方程为
+\begin{equation}
+ \dot\theta_i=\omega_b(\omega_i-1),\qquad
+ 2H_0\dot\omega_0=\tau_m-T_0,\quad
+ 2H_i\dot\omega_i=T_{i-1}-T_i\ (1\!\le\! i\!\le\!3),\quad
+ 2H_4\dot\omega_4=T_3-\tau_e,
+\end{equation}
+$\tau_m$ 为汽轮机输入转矩、$\tau_e$ 为发电机气隙转矩（\srcpath{recoveredElectricalTorque}）。挂接同步机时
+末端质量的 $\dot\theta_4,\dot\omega_4$ 覆盖同步机的 $\dot\delta,\dot\omega$，实现次同步扭振耦合。依据：
+\srcpath{FiveMassShaft::computeDerivatives}。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[>=Latex,
+  mass/.style={draw,circle,minimum size=9mm,font=\footnotesize,fill=blue!5},
+  every node/.style={font=\footnotesize}]
+  \node[mass] (m0) {$H_0$};
+  \node[mass,right=12mm of m0] (m1) {$H_1$};
+  \node[mass,right=12mm of m1] (m2) {$H_2$};
+  \node[mass,right=12mm of m2] (m3) {$H_3$};
+  \node[mass,right=12mm of m3,fill=green!8] (m4) {$H_4$};
+  \draw[thick] (m0) -- node[above,font=\footnotesize]{$k_0,d_0$} (m1);
+  \draw[thick] (m1) -- node[above,font=\footnotesize]{$k_1,d_1$} (m2);
+  \draw[thick] (m2) -- node[above,font=\footnotesize]{$k_2,d_2$} (m3);
+  \draw[thick] (m3) -- node[above,font=\footnotesize]{$k_3,d_3$} (m4);
+  \draw[->] (m0) -- ++(-10mm,0) node[left]{$\tau_m$};
+  \draw[<-] (m4) -- ++(10mm,0) node[right]{$\tau_e$};
+  \node[below=1mm of m0]{HP};\node[below=1mm of m1]{IP};\node[below=1mm of m2]{LP};
+  \node[below=1mm of m3]{发电机};\node[below=1mm of m4]{励磁};
+\end{tikzpicture}
+\caption{五质量轴系：HP/IP/LP 汽轮机段—发电机—励磁机经扭转刚度 $k_i$ 与阻尼 $d_i$ 串联，
+输入转矩 $\tau_m$、输出电磁转矩 $\tau_e$。}
+\label{fig:five-mass}
+\end{figure}
+
+\subsection{WECC 聚合分布式电源}
+\label{sec:dynamics-wecc-der}
+\texttt{DERAADynamic}（WECC DER\_A）为六个基本状态（电压量测 $V_m$、有功量测 $P_m$、无功控制 $Q_v$、
+无功电流 $I_q$、跳闸乘子 $\mathrm{mult}$、频率量测 $F_m$），可选跳闸计时与频率—有功（$\mathrm{freq\_flag}$）
+分支：
+\begin{align}
+ \dot V_m&=\frac{V_t-V_m}{T_{rv}},\qquad \dot P_m=\frac{P_{\mathrm{ref}}-P_m}{T_p},\qquad
+ \dot F_m=\frac{1-F_m}{T_{rf}},\\
+ \dot Q_v&=\frac{Q_v^{\mathrm{ref}}-Q_v}{T_{iq}},\qquad
+ I_q^{\mathrm{cmd}}=\mathrm{clamp}\!\big(K_{qv}\,\mathrm{db}(V_{\mathrm{ref}}-V_m)+Q_v\big)\cdot\mathrm{mult},\\
+ \dot I_q&=\frac{I_q^{\mathrm{cmd}}-I_q}{T_g},\qquad \dot{\mathrm{mult}}=\frac{\mathrm{mult}_{\mathrm{tgt}}-\mathrm{mult}}{T_v},
+\end{align}
+$\mathrm{db}(\cdot)$ 为死区（\srcpath{dera\_deadband}），$\mathrm{mult}_{\mathrm{tgt}}$ 由电压 / 频率越限
+计时触发跳闸；$\mathrm{freq\_flag}=1$ 时增设有功 PI（$K_{pg},K_{ig}$）与有功指令斜坡 $T_{pord}$。有功电流
+$I_p$ 按 $P/V_m$ 限幅并乘 $\mathrm{mult}$。依据：\srcpath{DERAADynamic::computeDerivatives}。
+
+\texttt{REGCADynamic}（WECC REGC\_A $+$ REEC\_A $+$ REPC\_A）以并网电流 $i_p,i_q$ 与滤波电压 $v_{flt}$ 为基本
+状态（REEC\_A 使能时加有功指令 $P_{\mathrm{ord}}$，REPC\_A 使能时加无功 PI $Q_{PI}$）：
+\begin{align}
+ \dot v_{flt}&=\frac{V_t-v_{flt}}{T_{fltr}},\qquad
+ \dot P_{\mathrm{ord}}=\mathrm{clamp}\!\Big(\frac{P_{\mathrm{tgt}}-P_{\mathrm{ord}}}{T_{pord}},\,\pm\dot P_{\max}\Big),\\
+ i_p^{\mathrm{cmd}}&=\mathrm{clamp}(P_{\mathrm{ord}}/v_{ctl})\cdot L_{\mathrm{VACM}},\qquad
+ i_q^{\mathrm{cmd}}=\mathrm{clamp}\!\big(I_{qv}+Q_{\mathrm{cmd}}/v_{ctl}\big)-\text{HVRCM},\\
+ \dot i_p&=\frac{i_p^{\mathrm{lim}}-i_p}{T_g},\qquad \dot i_q=\frac{i_q^{\mathrm{lim}}-i_q}{T_g},
+\end{align}
+其中低压有功电流管理 $L_{\mathrm{VACM}}\in[0,1]$ 随端压线性降流、高压无功管理 HVRCM 在过压时吸收无功，
+$I_{qv}=\mathrm{clamp}(K_{qv}\,\mathrm{db}(V_{\mathrm{ref}}-v_{flt}))$ 为故障期动态电压支撑，
+$(i_p^{\mathrm{lim}},i_q^{\mathrm{lim}})$ 经限流器分配（\srcpath{limited\_current}）。REPC\_A 以死区 PI 对
+（滤波）端压生成无功指令 $Q_{\mathrm{ext}}$。依据：\srcpath{REGCADynamic::computeDerivatives}。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[>=Latex,
+  blk/.style={draw,rounded corners,minimum height=8mm,minimum width=14mm,align=center,font=\footnotesize},
+  sum/.style={draw,circle,inner sep=0pt,minimum size=5mm,font=\footnotesize},
+  every node/.style={font=\footnotesize}]
+  \node (pref) {$P_{\mathrm{ref}},Q_{\mathrm{ref}}$};
+  \node[blk,right=6mm of pref,fill=blue!5] (reec) {REEC\_A\\ $P_{\mathrm{ord}},I_{qv}$};
+  \node[blk,right=6mm of reec,fill=red!6] (lim) {限流\\ LVACM/HVRCM};
+  \node[blk,right=6mm of lim,fill=orange!8] (regc) {REGC\_A\\ $\dfrac{1}{1+sT_g}$};
+  \node[right=6mm of regc,align=center] (grid) {电网\\ $i_p,i_q$};
+  \node[blk,below=8mm of reec,fill=green!6] (repc) {REPC\_A\\ 厂级 PI};
+  \draw[->] (pref) -- (reec);
+  \draw[->] (reec) -- node[above,font=\footnotesize]{$i_{pq}^{\mathrm{cmd}}$} (lim);
+  \draw[->] (lim) -- (regc);
+  \draw[->] (regc) -- (grid);
+  \draw[->] (repc.north) -- (reec.south);
+  \draw[->] (regc.south) |- (repc.east);
+\end{tikzpicture}
+\caption{WECC REGC\_A/REEC\_A/REPC\_A 复合：厂级 PI（REPC\_A）$\to$ 电气控制（REEC\_A）
+生成电流指令 $\to$ 限流 $+$ LVACM/HVRCM $\to$ 发电机接口（REGC\_A）注入 $i_p,i_q$。}
+\label{fig:regc-a}
+\end{figure}
+
+\subsection{直流与储能杂项}
+\label{sec:dynamics-dc-storage}
+\begin{itemize}
+  \item \textbf{直流电压源} \texttt{DCVoltageSourceDynamic}：无状态代数诺顿源，印直流电导 $G$ 与电流
+        $G\,V_{\mathrm{ref}}$，作刚性直流电压支撑。依据：\srcpath{DCVoltageSourceDynamic::stamp}。
+  \item \textbf{DC/DC 变换器} \texttt{DCDCConverterDynamic}：单状态出力 $\dot P=(P_{\mathrm{ref}}-P)/T$，
+        直流侧印入口电流 $-P/(\eta V_{\mathrm{in}})$、出口电流 $+P/V_{\mathrm{out}}$。依据：
+        \srcpath{DCDCConverterDynamic::computeDerivatives}。
+  \item \textbf{电池储能} \texttt{BatteryDynamic}：两状态（有功 $P$、荷电 $\mathrm{SOC}$）：
+        \begin{equation}
+         \dot P=\frac{P_{\mathrm{ref}}-P}{T},\qquad
+         \dot{\mathrm{SOC}}=\frac{1}{3600}\!\left(\frac{-P_{\mathrm{mw}}}{\eta E}\right)
+           -\frac{\sigma}{100}\frac{\mathrm{SOC}}{3600},
+        \end{equation}
+        放电 $\eta=\eta_{\mathrm{dis}}$、充电（$P<0$）$\eta=\eta_{\mathrm{chg}}$，$\sigma$ 为自放电率
+        （\%/h）；SOC 为慢状态，在残差掩蔽中被冻结（\srcpath{maskSlowStateResidual}）；SOC 触限时停止
+        对应方向注入。依据：\srcpath{BatteryDynamic::computeDerivatives}。
+  \item \textbf{周期变源} \texttt{PeriodicVariableSourceDynamic}：两状态（电压、角）按预设正弦扰动
+        $\dot x=\omega(a\cos\omega t-b\sin\omega t)$ 演化，戴维南阻抗后接平衡内电势，用于强迫振荡研究。
+        依据：\srcpath{PeriodicVariableSourceDynamic::computeDerivatives}。
+  \item \textbf{静止无功补偿} \texttt{CSVGN1Dynamic}（SVC）：三状态（晶闸管输出、二阶调节器 $V_{r1},V_{r2}$）。
+        输入 $K(V_m-V_{\mathrm{ref}})$ 经二阶非绕组超前—滞后（\srcpath{lead\_lag\_2nd\_nonwindup}）与晶闸管
+        滞后 $T_5$，形成可调电纳 $B$，注入电流 $I=-\mathrm jB\,V$。依据：\srcpath{CSVGN1Dynamic::computeDerivatives}。
+\end{itemize}
+
+\paragraph{电池参数表。}
+\compmeta{BatteryDynamicParams}{include/hacdcpf/dynamics/devices/BasicDynamicDevices.hpp}
+\begin{paramtable}
+\fld{p\_ref\_mw} & $P_{\mathrm{ref}}$ & MW & — & $0$ & 有功参考（正放电 / 负充电）\\
+\fld{e\_rated\_mwh} & $E$ & MWh & — & $0$ & 额定容量\\
+\fld{soc\_init} & $\mathrm{SOC}_0$ & — & $0\sim1$ & $0.5$ & 初始荷电（另有 \fld{soc\_min}/\fld{soc\_max}）\\
+\fld{eta\_charge} & $\eta_{\mathrm{chg}}$ & — & $0.9\sim1$ & $0.95$ & 充电效率（另有 \fld{eta\_discharge}）\\
+\fld{self\_discharge\_pct\_per\_h} & $\sigma$ & \%/h & $0\sim1$ & $0$ & 自放电率\\
+\fld{response\_t\_s} & $T$ & s & $0.02\sim0.1$ & $0.05$ & 有功响应时间常数\\
+\fld{is\_ac} & — & — & 布尔 & true & 交流（否则直流母线）接口\\
+\fld{stamp\_power} & — & — & 布尔 & true & 是否向网络印功率\\
+\end{paramtable}
+
+\subsection{与实现的对应}
+\label{sec:dynamics-motors-loads-impl}
+\begin{footnotesize}
+\begin{longtable}{@{}L{3.4cm}L{1.4cm}L{4.4cm}L{3.0cm}@{}}
+\toprule
+\textbf{设备} & \textbf{状态} & \textbf{核心结构} & \textbf{实现状态}\\
+\midrule
+\endfirsthead
+\multicolumn{4}{@{}l}{\footnotesize（续表）}\\\toprule
+\textbf{设备} & \textbf{状态} & \textbf{核心结构} & \textbf{实现状态}\\\midrule
+\endhead
+\bottomrule
+\endfoot
+\texttt{InductionMachineDynamic} & 3/5 & 电流跟踪 $+$ 摆动($+$定子磁链) &
+  \implfull{BasicDynamicDevices.cpp:InductionMachineDynamic::computeDerivatives}\\
+\texttt{FluxInductionMachineDynamic} & 3 & 单笼暂态电势 $+$ 转差 &
+  \implfull{BasicDynamicDevices.cpp:FluxInductionMachineDynamic::computeDerivatives}\\
+\texttt{DynamicLoad} & 0 & ZIP / 恒 P/I/Z 代数负荷 &
+  \implfull{BasicDynamicDevices.cpp:DynamicLoad::stamp}\\
+\texttt{ActiveConstantPowerLoadDynamic} & 2 & 恒功率负阻抗 $+$ 输入滤波 &
+  \implfull{BasicDynamicDevices.cpp:ActiveConstantPowerLoadDynamic::computeDerivatives}\\
+\texttt{FiveMassShaft} & 10 & 五质量扭振轴系 &
+  \implfull{BasicDynamicDevices.cpp:FiveMassShaft::computeDerivatives}\\
+\texttt{DERAADynamic} & 6$\sim$10 & WECC DER\_A 聚合 DER &
+  \implfull{BasicDynamicDevices.cpp:DERAADynamic::computeDerivatives}\\
+\texttt{REGCADynamic} & 3$\sim$5 & REGC\_A/REEC\_A/REPC\_A &
+  \implfull{BasicDynamicDevices.cpp:REGCADynamic::computeDerivatives}\\
+\texttt{DCVoltageSourceDynamic} & 0 & 代数直流诺顿源 &
+  \implfull{BasicDynamicDevices.cpp:DCVoltageSourceDynamic::stamp}\\
+\texttt{DCDCConverterDynamic} & 1 & 出力滞后 $+$ 直流功率平衡 &
+  \implfull{BasicDynamicDevices.cpp:DCDCConverterDynamic::computeDerivatives}\\
+\texttt{BatteryDynamic} & 2 & 有功滞后 $+$ SOC 慢状态 &
+  \implfull{BasicDynamicDevices.cpp:BatteryDynamic::computeDerivatives}\\
+\texttt{PeriodicVariableSourceDynamic} & 2 & 预设正弦扰动源 &
+  \implfull{BasicDynamicDevices.cpp:PeriodicVariableSourceDynamic::computeDerivatives}\\
+\texttt{CSVGN1Dynamic} & 3 & SVC 电压调节 $+$ 可调电纳 &
+  \implfull{BasicDynamicDevices.cpp:CSVGN1Dynamic::computeDerivatives}\\
+\end{longtable}
+\end{footnotesize}
+上述设备的 $p/q$ 只有在求解器记录端口电流后才出现（\S\ref{sec:dynamics-source-equivalent}），
+暂态帧不得用静态潮流公式回算；负荷、电机、直流环节与储能的对外结果均遵循此诚实口径。

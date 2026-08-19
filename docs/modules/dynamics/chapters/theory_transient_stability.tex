@@ -1,0 +1,286 @@
+% theory_transient_stability.tex —— 机电暂态（动力学）通用理论：大扰动暂态稳定的直接法
+% 本文件为理论层章节，遵循 docs/modules/THEORY_WRITING_GUIDE.md。
+
+\section{大扰动暂态稳定：等面积定则、能量函数与直接法}\label{sec:dy-th-ts}
+
+\begin{theorynote}
+本章为通用数学理论，展开电力系统\emph{大扰动}（暂态）稳定的解析理论体系，覆盖：单机无穷大
+母线（SMIB）经典模型的相平面与\emph{等面积定则}（含充要条件的严格证明）、临界切除角与临界切除
+时间（CCT）的闭式推导、多机经典模型的\emph{暂态能量函数}（Lyapunov 直接法）及其沿轨迹单调性
+定理与证明、稳定域边界与控制不稳定平衡点（CUEP）刻画、以及势能边界面（PEBS）与边界控制不稳定
+平衡点（BCU）等工程直接法的框架。本章与前两理论章（\S\ref{sec:dy-th-mac} 的 DAE 数值方法、
+控制/小信号章）互补：小信号理论刻画平衡点邻域的\emph{渐近}行为，本章刻画有限幅扰动下轨迹是否
+\emph{保持同步}。与平台实现的诚实边界在本章末明确：平台以\emph{时域数值积分}（前章 DAE 求解器）
+判定暂态稳定，\emph{并未}内置能量函数/BCU 直接筛法；本章的解析结论用于为时域结果提供可核对的
+闭式基准（数值基准见后续基准章节）。超出实现的内容以“未实现扩展说明”框就地标记。
+\end{theorynote}
+
+\subsection{记号与约定}\label{sec:dy-th-ts-notation}
+沿用 \S\ref{sec:dy-th-mac} 的记号。本章额外约定：
+\begin{itemize}
+  \item 经典模型：第 $i$ 台机以\emph{恒定}暂态电势幅值 $E_i'$ 位于暂态电抗 $x_{di}'$ 之后，
+        转子角 $\delta_i$（rad）为其相对同步旋转参考系的位置；$M_i=2H_i/\Omega_b$ 为惯量系数
+        （$\mathrm{pu\text{-}s^2/rad}$），$D_i\ge0$ 为阻尼系数；
+  \item $P_{mi}$：机械功率（pu，故障前后视为常量，即调速器不动作的“经典”假设）；
+        $P_{ei}$：电磁功率（pu）；
+  \item SMIB：单机（$H,E',x_d'$）经外部电抗接无穷大母线 $V_\infty\angle0$，合并转移电抗
+        $X_T$，最大功率 $P_{\max}=E'V_\infty/X_T$；
+  \item 网络内节点导纳（Kron 化到发电机内节点）$\bar Y_{ij}=G_{ij}+\mathrm jB_{ij}$，
+        $C_{ij}=E_i'E_j'B_{ij}$，$D_{ij}=E_i'E_j'G_{ij}$；$\delta_{ij}=\delta_i-\delta_j$；
+  \item COI（惯量中心）：$M_T=\sum_iM_i$，$\delta_{\mathrm{COI}}=\frac1{M_T}\sum_iM_i\delta_i$，
+        $\tilde\delta_i=\delta_i-\delta_{\mathrm{COI}}$，$\tilde\omega_i=\omega_i-\omega_{\mathrm{COI}}$；
+  \item 上标 $\mathrm{I/II/III}$ 分别指故障前、故障中、故障后（清除后）三个网络位形。
+\end{itemize}
+
+\subsection{单机无穷大母线的相平面与首积分}\label{sec:dy-th-ts-smib}
+SMIB 经典模型的摆动方程（无阻尼）为
+\begin{equation}
+ M\ddot\delta=P_m-P_e(\delta),\qquad P_e(\delta)=P_{\max}\sin\delta,\qquad M=\frac{2H}{\Omega_b}.
+ \label{eq:dy-th-ts-swing}
+\end{equation}
+
+\begin{definition}[平衡点]\label{def:dy-th-ts-eq}
+式~\eqref{eq:dy-th-ts-swing} 在 $P_m<P_{\max}$ 时有两个平衡角
+$\delta_s=\arcsin(P_m/P_{\max})\in(0,\tfrac\pi2)$ 与 $\delta_u=\pi-\delta_s$。前者为\emph{稳定}
+（$\partial P_e/\partial\delta>0$，同步转矩为正），后者为\emph{不稳定}平衡点。
+\end{definition}
+
+将~\eqref{eq:dy-th-ts-swing} 两端乘 $\dot\delta$ 并对时间积分，得沿轨迹守恒的首积分。
+
+\begin{proposition}[能量首积分]\label{prop:dy-th-ts-firstint}
+对无阻尼系统~\eqref{eq:dy-th-ts-swing}，函数
+\begin{equation}
+ \mathcal E(\delta,\dot\delta)=\underbrace{\tfrac12 M\dot\delta^2}_{\text{动能 }\mathcal E_k}
+ +\underbrace{\Bigl[-P_m(\delta-\delta_s)-P_{\max}(\cos\delta-\cos\delta_s)\Bigr]}_{\text{势能 }\mathcal E_p}
+ \label{eq:dy-th-ts-energy}
+\end{equation}
+沿轨迹为常数：$\mathrm d\mathcal E/\mathrm dt=0$。含阻尼 $D\dot\delta$ 时
+$\mathrm d\mathcal E/\mathrm dt=-D\dot\delta^2\le0$。
+\end{proposition}
+
+\begin{proof}
+$\dfrac{\mathrm d\mathcal E}{\mathrm dt}=M\dot\delta\ddot\delta+\bigl[-P_m+P_{\max}\sin\delta\bigr]\dot\delta
+=\dot\delta\bigl[M\ddot\delta-(P_m-P_{\max}\sin\delta)\bigr]=0$，末步用~\eqref{eq:dy-th-ts-swing}。
+含阻尼时 $M\ddot\delta=P_m-P_e-D\dot\delta$，代入得 $\mathrm d\mathcal E/\mathrm dt=-D\dot\delta^2$。
+\end{proof}
+
+$\mathcal E_p(\delta)$ 在 $\delta_s$ 取极小、在 $\delta_u$ 取极大，构成一个“势阱”：轨迹被束缚于势阱内
+即保持同步。这正是等面积定则的能量诠释。
+
+\subsection{等面积定则}\label{sec:dy-th-ts-eac}
+考虑三位形故障序列：$t<0$ 系统处于故障前稳态 $\delta_0=\delta_s^{\mathrm I}$；$t\in[0,t_c)$ 故障中，
+功角曲线为 $P_e^{\mathrm{II}}(\delta)$；$t\ge t_c$ 故障清除，曲线为 $P_e^{\mathrm{III}}(\delta)$。清除
+瞬间转子角为 $\delta_c=\delta(t_c)$。
+
+\begin{theorem}[等面积定则]\label{thm:dy-th-ts-eac}
+SMIB 无阻尼系统在上述序列下\emph{暂态稳定}（转子角有界并最终回摆）\,当且仅当\,存在
+$\delta_{\max}\le\delta_u^{\mathrm{III}}$ 使加速面积等于减速面积：
+\begin{equation}
+ \underbrace{\int_{\delta_0}^{\delta_c}\!\bigl(P_m-P_e^{\mathrm{II}}(\delta)\bigr)\mathrm d\delta}_{A_{\mathrm{acc}}}
+ =\underbrace{\int_{\delta_c}^{\delta_{\max}}\!\bigl(P_e^{\mathrm{III}}(\delta)-P_m\bigr)\mathrm d\delta}_{A_{\mathrm{dec}}},
+ \label{eq:dy-th-ts-eac}
+\end{equation}
+且临界（可行性）条件为 $A_{\mathrm{acc}}\le A_{\mathrm{dec}}^{\max}
+=\int_{\delta_c}^{\delta_u^{\mathrm{III}}}(P_e^{\mathrm{III}}-P_m)\mathrm d\delta$。
+\end{theorem}
+
+\begin{proof}
+由命题~\ref{prop:dy-th-ts-firstint}，无阻尼时 $\tfrac12M\dot\delta^2=-\Delta\mathcal E_p$。故障起始
+$\dot\delta(0)=0$。故障段积分~\eqref{eq:dy-th-ts-swing}：
+\begin{equation*}
+ \tfrac12M\dot\delta(t_c)^2=\int_{\delta_0}^{\delta_c}\bigl(P_m-P_e^{\mathrm{II}}\bigr)\mathrm d\delta=A_{\mathrm{acc}}\ge0,
+\end{equation*}
+即故障期净做正功、转子获得动能。清除后继续积分至转子首次 $\dot\delta=0$ 的角 $\delta_{\max}$：
+\begin{equation*}
+ 0-\tfrac12M\dot\delta(t_c)^2=\int_{\delta_c}^{\delta_{\max}}\bigl(P_m-P_e^{\mathrm{III}}\bigr)\mathrm d\delta
+ =-\int_{\delta_c}^{\delta_{\max}}\bigl(P_e^{\mathrm{III}}-P_m\bigr)\mathrm d\delta=-A_{\mathrm{dec}}.
+\end{equation*}
+两式相加即 $A_{\mathrm{acc}}=A_{\mathrm{dec}}$，这是 $\dot\delta$ 能重新归零（回摆）的\emph{必要}条件。
+其\emph{充分性}：$P_e^{\mathrm{III}}-P_m$ 在 $(\delta_s^{\mathrm{III}},\delta_u^{\mathrm{III}})$ 上为正，
+故减速面积随 $\delta_{\max}$ 单调增，最大值在 $\delta_{\max}=\delta_u^{\mathrm{III}}$ 处取得；若
+$A_{\mathrm{acc}}\le A_{\mathrm{dec}}^{\max}$，由介值定理存在 $\delta_{\max}\le\delta_u^{\mathrm{III}}$
+使~\eqref{eq:dy-th-ts-eac} 成立，轨迹在越过 $\delta_u^{\mathrm{III}}$ 前回摆，保持同步。反之若
+$A_{\mathrm{acc}}>A_{\mathrm{dec}}^{\max}$，则转子在 $\delta_u^{\mathrm{III}}$ 处仍有
+$\dot\delta>0$，越过不稳定平衡点后 $P_e^{\mathrm{III}}<P_m$ 使其持续加速、失步。
+\end{proof}
+
+\begin{corollary}[临界切除角与临界切除时间]\label{cor:dy-th-ts-cct}
+设机端\emph{金属性}短路（故障中 $P_e^{\mathrm{II}}\equiv0$）、故障前后同一功角曲线
+$P_e^{\mathrm{I}}=P_e^{\mathrm{III}}=P_{\max}\sin\delta$，则临界切除角为
+\begin{equation}
+ \cos\delta_{cc}=\frac{P_m}{P_{\max}}\bigl(\delta_u-\delta_0\bigr)+\cos\delta_u
+ =\frac{P_m}{P_{\max}}\bigl(\pi-2\delta_0\bigr)-\cos\delta_0,
+ \label{eq:dy-th-ts-cca}
+\end{equation}
+$\delta_0=\arcsin(P_m/P_{\max})$、$\delta_u=\pi-\delta_0$。故障中转子角为抛物线
+$\delta(t)=\delta_0+\dfrac{\Omega_bP_m}{4H}t^2$，故临界切除时间为
+\begin{equation}
+ t_{cc}=\sqrt{\frac{4H\,(\delta_{cc}-\delta_0)}{\Omega_b\,P_m}}.
+ \label{eq:dy-th-ts-cctime}
+\end{equation}
+\end{corollary}
+
+\begin{proof}
+金属性短路时 $A_{\mathrm{acc}}=\int_{\delta_0}^{\delta_{cc}}P_m\,\mathrm d\delta=P_m(\delta_{cc}-\delta_0)$；
+$A_{\mathrm{dec}}^{\max}=\int_{\delta_{cc}}^{\delta_u}(P_{\max}\sin\delta-P_m)\mathrm d\delta
+=P_{\max}(\cos\delta_{cc}-\cos\delta_u)-P_m(\delta_u-\delta_{cc})$。令二者相等并消去 $P_m\delta_{cc}$
+即得~\eqref{eq:dy-th-ts-cca}。故障中 $P_e^{\mathrm{II}}=0$，\eqref{eq:dy-th-ts-swing} 化为
+$\ddot\delta=\Omega_bP_m/(2H)$ 为常数，两次积分（初值 $\delta_0$、$\dot\delta_0=0$）得抛物线；
+令 $\delta(t_{cc})=\delta_{cc}$ 解出~\eqref{eq:dy-th-ts-cctime}。
+\end{proof}
+
+\subsection{多机暂态能量函数与 Lyapunov 直接法}\label{sec:dy-th-ts-tef}
+将等面积的能量思想推广到多机系统。取 Kron 化到发电机内节点的经典模型，同步参考系下
+\begin{equation}
+ M_i\dot\omega_i=P_{mi}-P_{ei}-D_i\omega_i,\qquad \dot\delta_i=\omega_i,\qquad
+ P_{ei}=\sum_{j\ne i}\bigl[C_{ij}\sin\delta_{ij}+D_{ij}\cos\delta_{ij}\bigr].
+ \label{eq:dy-th-ts-mm}
+\end{equation}
+\emph{无损}网络（转移电导 $G_{ij}=0\Rightarrow D_{ij}=0$）时可构造严格的能量函数。
+
+\begin{definition}[暂态能量函数]\label{def:dy-th-ts-tef}
+对无损网络，定义相对故障后稳定平衡点 $\{\delta_i^{s}\}$ 的暂态能量函数
+\begin{equation}
+ V(\delta,\omega)=\tfrac12\sum_i M_i\omega_i^2
+ -\sum_i P_{mi}\bigl(\delta_i-\delta_i^{s}\bigr)
+ -\sum_{i<j}C_{ij}\bigl(\cos\delta_{ij}-\cos\delta_{ij}^{s}\bigr).
+ \label{eq:dy-th-ts-Vdef}
+\end{equation}
+第一项为动能 $V_k$，其余为势能 $V_p$。
+\end{definition}
+
+\begin{theorem}[能量函数的 Lyapunov 性质]\label{thm:dy-th-ts-lyap}
+沿无损系统~\eqref{eq:dy-th-ts-mm} 的故障后轨迹，
+\begin{equation}
+ \frac{\mathrm dV}{\mathrm dt}=-\sum_i D_i\,\omega_i^2\le0,
+ \label{eq:dy-th-ts-dVdt}
+\end{equation}
+无阻尼（$D_i=0$）时 $V$ 守恒。故 $V$ 是故障后系统在 $\{\delta_i^{s}\}$ 邻域的 Lyapunov 函数。
+\end{theorem}
+
+\begin{proof}
+对~\eqref{eq:dy-th-ts-Vdef} 求全导数：
+\begin{equation*}
+ \dot V=\sum_i M_i\omega_i\dot\omega_i-\sum_i P_{mi}\dot\delta_i
+ +\sum_{i<j}C_{ij}\sin\delta_{ij}\,(\dot\delta_i-\dot\delta_j).
+\end{equation*}
+用 $\dot\delta_i=\omega_i$ 及无损 $P_{ei}=\sum_{j\ne i}C_{ij}\sin\delta_{ij}$，且
+$\sum_{i<j}C_{ij}\sin\delta_{ij}(\omega_i-\omega_j)=\sum_i\omega_i\sum_{j\ne i}C_{ij}\sin\delta_{ij}
+=\sum_i\omega_iP_{ei}$（利用 $C_{ij}=C_{ji}$、$\sin\delta_{ij}=-\sin\delta_{ji}$ 配对）。于是
+\begin{equation*}
+ \dot V=\sum_i\omega_i\bigl(M_i\dot\omega_i-P_{mi}+P_{ei}\bigr)
+ =\sum_i\omega_i\bigl(-D_i\omega_i\bigr)=-\sum_iD_i\omega_i^2,
+\end{equation*}
+末步代入~\eqref{eq:dy-th-ts-mm}。$D_i=0$ 时 $\dot V=0$。
+\end{proof}
+
+\begin{definition}[临界能量与直接判据]\label{def:dy-th-ts-cuep}
+设 $\{\delta_i^{u}\}$ 为与故障模式相关的\emph{控制不稳定平衡点}（CUEP），临界能量
+$V_{\mathrm{cr}}=V(\delta^{u},0)$。\emph{直接法判据}：若清除时刻状态满足
+$V(\delta_{c},\omega_{c})<V_{\mathrm{cr}}$，则故障后轨迹位于 $V<V_{\mathrm{cr}}$ 的连通不变集内，
+系统暂态稳定；能量裕度 $\Delta V=V_{\mathrm{cr}}-V(\delta_c,\omega_c)$ 度量稳定程度。
+\end{definition}
+
+判据的合理性来自定理~\ref{thm:dy-th-ts-lyap}：$V$ 沿故障后轨迹不增，故 $V(\delta_c,\omega_c)<V_{\mathrm{cr}}$
+的轨迹不能翻越势垒 $V_{\mathrm{cr}}$ 到达失步区。$V_{\mathrm{cr}}$ 的估计（等于 SMIB 的
+$A_{\mathrm{dec}}^{\max}$ 之多机推广）由 CUEP 决定，其一致定位是直接法的核心难点。
+
+\begin{gapnote}
+本节的多机能量函数、CUEP 定位与下述 PEBS/BCU 直接法\emph{均未}在平台内实现：平台通过对完整 DAE
+的\emph{时域积分}（\S\ref{sec:dy-th-mac} 的隐式/显式求解器与 \srcpath{src/dynamics/} 设备方程）判定
+暂态稳定，不含独立的能量函数装配、UEP 搜索或稳定域估计模块。此外，平台网络一般\emph{有损}
+（$G_{ij}\ne0$），此时~\eqref{eq:dy-th-ts-Vdef} 的路径积分项
+$\int\sum_{i<j}D_{ij}\cos\delta_{ij}\,\mathrm d(\delta_i+\delta_j)$ 非全微分，严格能量函数不存在，只能用
+\emph{路径依赖}的近似能量（沿故障后轨迹或直线路径积分）。因此本节结论用于\emph{解析核对}与物理
+诠释，不代表平台的判稳算法。
+\end{gapnote}
+
+\subsection{稳定域边界与工程直接法（框架）}\label{sec:dy-th-ts-bcu}
+无阻尼系统的失步由势能面的\emph{鞍点}（I 型 UEP）主导。两类工程直接法在此框架下工作：
+\begin{itemize}
+  \item \textbf{PEBS}（势能边界面，\cite{dyts:athay}）：沿故障轨迹监测势能 $V_p$，其沿轨迹的首个
+        极大近似给出临界能量，避免显式求解 UEP；
+  \item \textbf{BCU}（边界控制 UEP，\cite{dyts:bcu}）：构造与原系统稳定域边界一一对应的\emph{降维
+        梯度系统}，先在梯度系统上定位 CUEP，再映射回原系统计算 $V_{\mathrm{cr}}$，理论上给出与故障
+        模式匹配的控制 UEP。
+\end{itemize}
+二者均以定理~\ref{thm:dy-th-ts-lyap} 的能量不增性为正确性基础；其严格适用范围（网络无损、
+经典模型、一致 CUEP 存在）见~\cite{dyts:chiang}。
+
+\subsection{与时域仿真的关系（诚实口径）}\label{sec:dy-th-ts-timedomain}
+平台的暂态稳定评估是\emph{时域}的：给定故障事件序列，按 \S\ref{sec:dy-th-mac} 的积分器推进完整
+DAE，由转子角/频率轨迹是否有界、阻尼比是否为正判定稳定，而非计算能量裕度。等面积与能量函数在
+本平台中的作用是：
+\begin{enumerate}
+  \item \textbf{解析基准}：对经典模型（\srcpath{src/dynamics/devices/BasicDynamicDevices.cpp:SynchronousMachine::computeDerivatives}
+        的 \texttt{ClassicalMachine} 分支），推论~\ref{cor:dy-th-ts-cct} 给出 CCT 的闭式值，可与时域
+        逐步逼近的临界切除时间对拍（数值基准见后续基准小节）；
+  \item \textbf{物理诠释}：能量首积分把“回摆/失步”解释为势阱束缚，指导事件设计与结果判读。
+\end{enumerate}
+
+\subsection{数值算例：SMIB 临界切除时间（解析）}\label{sec:dy-th-ts-example}
+取 $H=3.5$ s、$f_0=50$ Hz（$\Omega_b=100\pi$）、$P_m=0.8$、$P_{\max}=1.8$（均 pu），机端金属性
+三相短路、故障前后同一功角曲线。则
+\begin{align*}
+ \delta_0&=\arcsin(0.8/1.8)=0.4606\ \mathrm{rad}\ (26.4^\circ),\quad
+ \delta_u=\pi-\delta_0=2.6810\ \mathrm{rad}\ (153.6^\circ),\\
+ \cos\delta_{cc}&=\tfrac{0.8}{1.8}(\pi-2\times0.4606)-\cos(0.4606)
+ =0.4444\times2.2204-0.8949=0.0925,\\
+ \delta_{cc}&=\arccos(0.0925)=1.4783\ \mathrm{rad}\ (84.7^\circ),\\
+ t_{cc}&=\sqrt{\frac{4\times3.5\times(1.4783-0.4606)}{100\pi\times0.8}}
+ =\sqrt{\frac{14.248}{251.33}}=0.238\ \mathrm{s}.
+\end{align*}
+即临界切除时间约 $238$ ms（$11.9$ 个工频周波）。该闭式值将在基准小节与平台时域故障仿真
+（\texttt{ClassicalMachine}，逐步二分切除时刻）对拍校核；对含阻尼或次暂态/励磁的详细模型，闭式
+等面积仅为一阶近似，须以时域结果为准。
+
+\subsection{与实现的对应}\label{sec:dy-th-ts-impl}
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{5.4cm}L{9.2cm}@{}}
+\toprule
+\textbf{理论对象} & \textbf{平台实现状态}\\
+\midrule
+\endfirsthead
+\toprule
+\textbf{理论对象} & \textbf{平台实现状态}\\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+经典模型摆动方程~\eqref{eq:dy-th-ts-swing}/\eqref{eq:dy-th-ts-mm} &
+  \implfull{src/dynamics/devices/BasicDynamicDevices.cpp:SynchronousMachine::computeDerivatives}（\texttt{ClassicalMachine} 分支）\\
+时域暂态稳定判定（积分完整 DAE） &
+  \implfull{src/dynamics/DynamicSolver.cpp:DaeStepFormula}（积分器见 \S\ref{sec:dy-th-mac}）\\
+故障事件序列（施加/清除短路） &
+  \implpart{经 \srcpath{applyDynamicEventsThrough} 施加扰动事件；等面积三位形为解析设定，非独立模块}\\
+等面积定则/CCT 闭式（定理~\ref{thm:dy-th-ts-eac}、推论~\ref{cor:dy-th-ts-cct}） &
+  \implnone（解析基准，用于核对时域 CCT）\\
+多机暂态能量函数~\eqref{eq:dy-th-ts-Vdef}、临界能量、能量裕度 &
+  \implnone\\
+PEBS / BCU 直接法与 CUEP 定位 &
+  \implnone\\
+\end{longtable}
+\end{center}
+
+\subsection{参考文献}
+\begin{thebibliography}{9}\small
+\bibitem{dyts:kundur} P.~Kundur, \emph{Power System Stability and Control}.
+  New York: McGraw-Hill, 1994（第 13 章：暂态稳定与等面积定则）.
+\bibitem{dyts:sauerpai} P.~W. Sauer and M.~A. Pai, \emph{Power System Dynamics and Stability}.
+  Upper Saddle River, NJ: Prentice-Hall, 1998.
+\bibitem{dyts:anderson} P.~M. Anderson and A.~A. Fouad, \emph{Power System Control and Stability},
+  2nd ed. Piscataway, NJ: IEEE Press/Wiley, 2003.
+\bibitem{dyts:pai} M.~A. Pai, \emph{Energy Function Analysis for Power System Stability}.
+  Boston: Kluwer Academic, 1989.
+\bibitem{dyts:chiang} H.-D. Chiang, \emph{Direct Methods for Stability Analysis of Electric Power
+  Systems: Theoretical Foundation, BCU Methodologies, and Applications}. Hoboken, NJ: Wiley, 2011.
+\bibitem{dyts:athay} T.~Athay, R.~Podmore, and S.~Virmani, ``A practical method for the direct
+  analysis of transient stability,'' \emph{IEEE Trans. Power App. Syst.}, vol.~PAS-98, no.~2,
+  pp.~573--584, 1979.
+\bibitem{dyts:bcu} H.-D. Chiang, F.~F. Wu, and P.~P. Varaiya, ``A BCU method for direct analysis of
+  power system transient stability,'' \emph{IEEE Trans. Power Syst.}, vol.~9, no.~3,
+  pp.~1194--1208, 1994.
+\bibitem{dyts:kakimoto} N.~Kakimoto, Y.~Ohsawa, and M.~Hayashi, ``Transient stability analysis of
+  electric power system via Lur'e-type Lyapunov function,'' \emph{Trans. IEE Japan},
+  vol.~98, no.~5/6, 1978.
+\end{thebibliography}

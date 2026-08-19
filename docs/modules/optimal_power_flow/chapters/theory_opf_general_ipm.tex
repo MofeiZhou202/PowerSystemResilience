@@ -12,7 +12,8 @@
 路径、扰动 KKT 系统、Mehrotra 预估校正、步长选取与全局化、凸情形多项式复杂度
 结论）、IPM 收敛性理论（局部超线性收敛、不可行检测、原对偶正则化）、初值与
 可行性恢复（Phase I 方法、罚函数与滤子法一般原理）、数值性质（KKT 系统病态
-来源、标幺化/缩放对条件数的影响）。与平台实现（\srcpath{src/optimal\_power\_flow/}）
+来源、标幺化/缩放对条件数的影响）、安全约束 OPF（预防/校正 $N\!-\!1$ 与 Benders
+分解），以及以自研 Parity IPM 实测的交流 OPF 收敛与最优性数值基准。与平台实现（\srcpath{src/optimal\_power\_flow/}）
 的对应关系见本章末"与实现的对应"表，超出实现的内容以"未实现扩展说明"框就地
 标记。交直流混合 OPF 的逐约束建模口径与三相/直流变体的理论分属本手册其余
 理论章；实现层的逐式转写见实现层各章。
@@ -773,6 +774,96 @@ $K\leftarrow D_rKD_c$，其中 $D_r,D_c$ 逐次取当前行/列范数的倒数�
 两者叠加决定了 OPF KKT 分解的实际精度预算。
 \end{remark}
 
+\subsection{安全约束最优潮流（SCOPF）}\label{sec:opf-th-gen-scopf}
+
+实际调度要求基态最优的同时对一组预想事故（$N\!-\!1$）保持可行。安全约束 OPF
+（SCOPF）把基态 OPF 扩展为\emph{多情景}问题~\cite{opft:capitanescu-scopf}。
+
+\begin{definition}[预防式与校正式 SCOPF]\label{def:opf-th-gen-scopf}
+设基态 $c=0$ 与事故集 $c=1,\dots,K$（每个事故对应一组修改后的网络方程
+$g^c,h^c$）。控制变量 $u$（发电有功、电压设定等）、状态变量 $x^c$。
+\emph{预防式}SCOPF 要求单一控制 $u$ 对全部情景可行：
+\begin{equation}
+\min_{u,\{x^c\}}\ f(u,x^0)\quad\text{s.t.}\quad
+g^c(u,x^c)=0,\ h^c(u,x^c)\le0,\quad c=0,1,\dots,K .
+\label{eq:opf-th-gen-scopf-prev}
+\end{equation}
+\emph{校正式}SCOPF 允许事故后有限再调度：控制 $u^c$ 可在爬坡限内偏离基态
+$u^0$，增补 $|u^c-u^0|\le\Delta^c$、$g^c(u^c,x^c)=0$、$h^c(u^c,x^c)\le0$。
+\end{definition}
+
+式~\eqref{eq:opf-th-gen-scopf-prev} 是\emph{块结构}问题：$K+1$ 个 OPF 块仅通过
+公共控制 $u$（预防式）或耦合约束 $|u^c-u^0|\le\Delta^c$（校正式）相连；直接求解
+规模随 $K$ 线性膨胀，Benders 分解利用该结构解耦。
+
+\begin{definition}[Benders 分解]\label{def:opf-th-gen-benders}
+以基态控制 $u$ 为\emph{复杂变量}，主问题只含基态与已生成的割：
+$\min_{u\in\mathcal U^0,\,\eta}\ f_0(u)+\eta$ s.t.（可行性/最优性割）。对每个情景
+$c$ 固定 $u$ 解子问题 $Q_c(u)=\min\{f_c(u^c,x^c):g^c=0,\ h^c\le0,\
+|u^c-u|\le\Delta^c\}$。子问题（凸/LP 时）的对偶 $\pi^c$ 给出对 $u$ 的支撑
+\begin{equation}
+Q_c(u')\ge Q_c(u)+(\pi^c)^{\mathsf T}(u'-u)
+\label{eq:opf-th-gen-benderscut}
+\end{equation}
+即 Benders 最优性割；子问题不可行时其对偶射线给出可行性割。
+\end{definition}
+
+\begin{theorem}[Benders 分解的有限收敛（凸情形）]\label{thm:opf-th-gen-benders}
+若各子问题 $Q_c(\cdot)$ 为凸（LP/凸 QP）、可行域为多面体，则主--子迭代在有限次后
+收敛到式~\eqref{eq:opf-th-gen-scopf-prev} 的全局最优：主问题下界单调不减、子问题
+给出上界，二者在有限步内相等。
+\end{theorem}
+\begin{proof}[证明要点]
+$Q_c(u)$ 是多面体上参数右端的最优值，为 $u$ 的\emph{分片线性凸}函数，其有限个
+线性片各对应子问题的一个对偶顶点。每轮主问题解出候选 $u$，被违反的割即加入；
+对偶顶点有限故割集有限，有限步后主问题对 $\sum_c Q_c$ 的分片线性下逼近在最优
+$u^\star$ 处相切，下界等于上界（Benders~\cite{opft:benders}；SCOPF 校正再调度的
+经典应用见 Monticelli--Pereira--Granville~\cite{opft:monticelli-scopf}）。
+\end{proof}
+
+\begin{remark}[与实现的关系]\label{rem:opf-th-gen-scopf}
+预防式与 DC 线性化配合时式~\eqref{eq:opf-th-gen-scopf-prev} 为 LP，事故后支路潮流
+用 LODF 闭式表达（第~\ref{sec:opf-th-dc}~章），$N\!-\!1$ 筛选无须重解全网；校正式
+的割含再调度成本。全 AC 的 SCOPF（每情景一个 AC OPF）非凸，Benders 割仅局部有效，
+工程上以 DC/凸代理筛选 + AC 校核的两阶段流程近似。
+\end{remark}
+
+\begin{gapnote}
+SCOPF（预防/校正、Benders 分解）在 \srcpath{src/optimal\_power\_flow/} 中
+\textbf{未实现}：OPF 求解器为单情景基态 OPF；$N\!-\!1$ 安全校核与 LODF 割在\emph{市场}
+模块（\srcpath{src/market/market\_simulation.cpp}）以 DC 线性化 + 迭代割形式出现，
+非本节的 AC SCOPF 联合优化。
+\end{gapnote}
+
+\subsection{数值算例与基准}\label{sec:opf-th-gen-numexp}
+
+本节数字由 \srcpath{tools/pf\_doc\_benchmark.cpp}（模式 \texttt{opf}）实测：以自研
+\textbf{Parity 全空间原--对偶 IPM}（\fld{ac\_solver\_backend}=ParityIPM）求解 MATPOWER
+标准算例的交流 OPF，报告最优目标与收敛点的 KKT 残差（Apple~M4）。
+
+表~\ref{tab:opf-th-gen-acopf} 显示 IPM 在 $9\sim300$ 母线算例上均收敛到 KKT 稳态点：
+稳态残差 $\lVert\nabla_x\mathcal L\rVert$ 与最大约束违反均落在 $10^{-9}\sim10^{-6}$，
+最优目标与文献 MATPOWER 交流 OPF 基准一致（如 case9 的 $5296.69$、case57 的
+$41737.79$、case118 的 $129660.69$ \$/h），验证式~\eqref{eq:opf-th-gen-kkt1}--%
+\eqref{eq:opf-th-gen-kkt2} 的 KKT 系统被正确求解、定理~\ref{thm:opf-th-gen-lmp} 的
+乘子在收敛点良定。
+\begin{table}[H]\centering\footnotesize
+\caption{Parity IPM 交流 OPF 的最优目标与 KKT 残差（默认经济目标）}
+\label{tab:opf-th-gen-acopf}
+\begin{tabular}{@{}lrrll@{}}
+\toprule
+算例 & 母线数 & 最优成本 (\$/h) & 稳态残差 & 最大约束违反\\
+\midrule
+case9   & 9   & $5296.69$   & $5.7\times10^{-9}$ & $5.8\times10^{-8}$\\
+case14  & 14  & $8081.52$   & $5.5\times10^{-8}$ & $1.5\times10^{-8}$\\
+case30  & 30  & $576.89$    & $9.0\times10^{-7}$ & $3.0\times10^{-7}$\\
+case57  & 57  & $41737.79$  & $1.2\times10^{-7}$ & $7.7\times10^{-8}$\\
+case118 & 118 & $129660.69$ & $4.8\times10^{-8}$ & $8.5\times10^{-9}$\\
+case300 & 300 & $719725.10$ & $1.8\times10^{-7}$ & $1.4\times10^{-7}$\\
+\bottomrule
+\end{tabular}
+\end{table}
+
 \subsection{与实现的对应}\label{sec:opf-th-gen-implmap}
 \begin{center}\footnotesize
 \begin{longtable}{@{}L{6.8cm}L{8.6cm}@{}}
@@ -863,6 +954,12 @@ $\Theta(1/\mu)$ 结构性病态（命题~\ref{prop:opf-th-gen-mu-cond}） &
 标幺化与 Ruiz 均衡缩放（定义~\ref{def:opf-th-gen-ruiz}） &
 \implfull{src/optimal\_power\_flow/parity\_ipm.cpp:compute\_ruiz\_scaling}（KKT 分解前
 5 趟行列均衡；内部方程全平台标幺制，$S_B=100$~MVA）\\
+安全约束 OPF：预防/校正与 Benders 分解（定义~\ref{def:opf-th-gen-scopf}、
+定理~\ref{thm:opf-th-gen-benders}） &
+\implnone（OPF 为单情景基态；$N\!-\!1$ 的 DC-LODF 迭代割在市场模块
+market\_simulation.cpp，非 AC SCOPF 联合优化）\\
+Parity IPM 交流 OPF 数值基准（表~\ref{tab:opf-th-gen-acopf}） &
+\implfull{tools/pf\_doc\_benchmark.cpp}（模式 opf；ac\_solver\_backend=ParityIPM）\\
 \bottomrule
 \end{longtable}
 \end{center}
@@ -870,6 +967,13 @@ $\Theta(1/\mu)$ 结构性病态（命题~\ref{prop:opf-th-gen-mu-cond}） &
 \subsection{参考文献}
 {\renewcommand{\section}[2]{}%
 \begin{thebibliography}{9}\small
+\bibitem{opft:benders} J.~F. Benders, Partitioning procedures for solving
+mixed-variables programming problems, \emph{Numerische Mathematik}, vol. 4,
+pp. 238--252, 1962.
+\bibitem{opft:monticelli-scopf} A.~Monticelli, M.~V.~F. Pereira, S.~Granville,
+Security-constrained optimal power flow with post-contingency corrective
+rescheduling, \emph{IEEE Transactions on Power Systems}, vol. 2, no. 1,
+pp. 175--180, 1987.
 \bibitem{opft:carpentier} J.~Carpentier, Contribution \`a l'\'etude du
 dispatching \'economique, \emph{Bulletin de la Soci\'et\'e Fran\c{c}aise des
 \'Electriciens}, s\'erie 8, vol. 3, pp. 431--447, 1962.

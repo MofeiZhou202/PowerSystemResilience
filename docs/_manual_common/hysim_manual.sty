@@ -57,7 +57,7 @@
 \newcommand{\compmeta}[2]{\noindent\textbf{代码结构体：}\texttt{#1}\hfill
   \textbf{定义位置：}\texttt{#2}\par\smallskip}
 
-% 可断行的源码路径/函数名（/ 与 \_ 处允许换行）
+% 可断行的源码路径/函数名（/、: 与 \_ 处允许换行）
 \makeatletter
 \newcommand{\srcpath}[1]{\texttt{\src@scan#1\src@stop}}
 \def\src@scan#1{%
@@ -65,7 +65,8 @@
   \else
     \ifx#1\_\_\allowbreak\else
     \ifx#1/#1\allowbreak\else
-    #1\fi\fi
+    \ifx#1:#1\allowbreak\else
+    #1\fi\fi\fi
     \expandafter\src@scan
   \fi}
 \makeatother

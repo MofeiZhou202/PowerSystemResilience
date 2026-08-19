@@ -1,0 +1,294 @@
+\section{电力电子变流器（逆变器）设备模型（逐式转写）}
+\label{sec:dynamics-device-inverters}
+
+本章转写并网变流器的两大控制族：\emph{构网}（Grid-Forming, GFM，\srcpath{GridFormingInverter}）与
+\emph{跟网}（Grid-Following, GFL，\srcpath{GridFollowingInverter}）。前者作电压源（内电势经虚拟阻抗
+并网），后者作受控电流源（锁相同步、按功率指令注流）。公式以
+\srcpath{src/dynamics/devices/BasicDynamicDevices.cpp} 的 \srcpath{GridFormingInverter::computeDerivatives}、
+\srcpath{GridFollowingInverter::computeDerivatives} 及其全保真分支
+\srcpath{computeDerivativesFullFidelity} 为准，全部标幺于 \fld{base\_mva}，缺省正序（可选相域）。
+控制环节基元同 \S\ref{sec:dynamics-control-primitives}。记 $\omega_b=2\pi f$（$f=$\fld{frequency\_hz}
+或 \fld{f\_ref\_hz}）。
+
+\subsection{构网逆变器：公共结构}
+\label{sec:dynamics-gfm-common}
+GFM 以内电势相量 $E=e_{\mathrm{mag}}\angle\theta$ 串联虚拟阻抗 $Z_v=r_v+\mathrm jx_v$ 并网，端口电流
+按诺顿形式 $I=Y_v(E-V)$（$Y_v=1/Z_v$），量测功率 $S=V\overline I$，$p=\Re S$、$q=\Im S$。六个状态为
+内角 $\theta$、内电势幅值 $e_{\mathrm{mag}}$、功率 / 转速状态 $x_2$、无功滤波 $q_f$、电压积分 $\xi_v$、
+过载积分 $\xi_{ol}$（另可含直流电压 $v_{dc}$）。电压外环对所有控制方式统一：
+\begin{align}
+ e_{\mathrm{droop}}&=V_{\mathrm{ref}}-k_q^{\mathrm{droop}}(q_f-q_{\mathrm{ref}}),\qquad
+ \varepsilon_v=e_{\mathrm{droop}}-V_t,\\
+ e_{\mathrm{cmd}}&=\mathrm{clamp}_{\mathrm{lim}}\!\Big(e_{\mathrm{droop}}
+   +k_p^{v}\varepsilon_v+k_i^{v}\xi_v\Big)\big|_{V_{\min}^{\mathrm{int}}}^{V_{\max}^{\mathrm{int}}},
+\end{align}
+$V_t$ 为平均端电压。当 \fld{current\_limit\_pu}$>0$ 且电流度量越限时，$e_{\mathrm{cmd}}$ 按
+$e_{\mathrm{cmd}}\leftarrow V_t+\rho(e_{\mathrm{cmd}}-V_t)$（$\rho=I_{\lim}/I_{\mathrm{metric}}$）向端电压收缩。
+过载校正 $\Delta_{ol}=k_p^{ol}\,\mathrm{ovl}+k_i^{ol}\xi_{ol}$，$\mathrm{ovl}=\max(0,p_f-p_{\max})-\max(0,p_{\min}-p_f)$。
+依据：\srcpath{GridFormingInverter::computeDerivatives}。
+
+\subsection{下垂（诺顿）构网 \texttt{Droop}}
+缺省 \texttt{GridFormingNortonDroop}。有功经 $P$–$f$ 下垂形成频率 / 相角：
+\begin{equation}
+ \dot\theta=\omega_b\,k_p^{\mathrm{droop}}(p_{\mathrm{ref}}-p_f)-\Delta_{ol},\quad
+ \dot e_{\mathrm{mag}}=\frac{e_{\mathrm{cmd}}-e_{\mathrm{mag}}}{T_v},\quad
+ \dot p_f=\frac{p-p_f}{T_p},\quad \dot q_f=\frac{q-q_f}{T_q},
+\end{equation}
+$\dot\xi_v=\varepsilon_v$、$\dot\xi_{ol}=\mathrm{ovl}$；参考系锁定时 $\dot\theta=0$。依据：
+\srcpath{GridFormingInverter::computeDerivatives}（\texttt{Droop} 分支）。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[>=Latex]
+  \node (pref) {$p_{\mathrm{ref}}$};
+  \node[csum,right=9mm of pref] (s1) {$\Sigma$};
+  \node[cb,right=11mm of s1,fill=blue!5] (droop) {$\dfrac{\omega_b k_p^{\mathrm{droop}}}{s}$};
+  \node[right=11mm of droop] (th) {$\theta$};
+  \draw[->] (pref) -- (s1);
+  \draw[->] (s1) -- (droop);
+  \draw[->] (droop) -- (th);
+  \draw[<-] (s1.south) -- ++(0,-8mm) node[csig,below]{$-p_f$};
+  \node[below=20mm of pref] (qref) {$q_{\mathrm{ref}}$};
+  \node[csum,right=9mm of qref] (s2) {$\Sigma$};
+  \node[cb,right=11mm of s2,fill=green!6] (vloop) {电压环\\ $k_p^v{+}k_i^v/s$};
+  \node[cb,right=10mm of vloop,fill=red!6] (lim) {限流\\ 限幅};
+  \node[right=9mm of lim] (emag) {$e_{\mathrm{mag}}$};
+  \draw[->] (qref) -- (s2);
+  \draw[->] (s2) -- node[csig,above]{$e_{\mathrm{droop}}$} (vloop);
+  \draw[->] (vloop) -- (lim);
+  \draw[->] (lim) -- (emag);
+  \draw[<-] (s2.south) -- ++(0,-8mm) node[csig,below]{$-q_f,\,V_t$};
+\end{tikzpicture}
+\caption{下垂构网：$P$–$f$ 下垂积分成角 $\theta$（上），$Q$–$V$ 下垂经电压环与限流形成内电势
+$e_{\mathrm{mag}}$（下）；$p_f=$LPF$(p)$、$q_f=$LPF$(q)$ 为滤波反馈。}
+\label{fig:gfm-droop}
+\end{figure}
+
+\subsection{虚拟同步机 \texttt{VirtualInertia}（VSM）}
+状态 $x_2=\omega$ 显式表征虚拟转速，构成二阶惯性 / 阻尼摆动：
+\begin{align}
+ \dot\theta&=\omega_b(\omega-1),\qquad
+ \dot\omega=\frac{p_{\mathrm{ref}}-p-k_d^{\mathrm{vsm}}(\omega-\omega_{\mathrm{pll}})
+   -k_\omega^{\mathrm{vsm}}(\omega-\omega_{\mathrm{ref}})}{T_a},\\
+ \dot e_{\mathrm{mag}}&=\frac{e_{\mathrm{cmd}}-e_{\mathrm{mag}}}{T_v},\qquad
+ \dot q_f=\frac{q-q_f}{T_q},\qquad \dot\xi_v=\varepsilon_v,\qquad \dot\xi_{ol}=\mathrm{ovl},
+\end{align}
+$T_a=$\fld{vsm\_ta\_s} 为虚拟惯性时间常数，$\omega_{\mathrm{ref}}=\omega_{\mathrm{pll}}=1$。依据：
+\srcpath{GridFormingInverter::computeDerivatives}（\texttt{VirtualInertia} 分支）。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[>=Latex,
+  blk/.style={draw,rounded corners,minimum height=8mm,minimum width=15mm,align=center,font=\small},
+  sum/.style={draw,circle,inner sep=0pt,minimum size=5mm,font=\footnotesize},
+  every node/.style={font=\small}]
+  \node (pref) {$p_{\mathrm{ref}}$};
+  \node[sum,right=7mm of pref] (s1) {$\Sigma$};
+  \node[blk,right=8mm of s1,fill=blue!5] (ta) {$\dfrac{1}{sT_a}$};
+  \node[blk,right=8mm of ta,fill=blue!5] (wb) {$\dfrac{\omega_b}{s}$};
+  \node[right=8mm of wb] (th) {$\theta$};
+  \draw[->] (pref) -- (s1);
+  \draw[->] (s1) -- (ta);
+  \draw[->] (ta) -- node[above,font=\footnotesize]{$\omega-1$} (wb);
+  \draw[->] (wb) -- (th);
+  \draw[->] ($(s1)+(0,-10mm)$) node[left,font=\footnotesize]{$-p,\,-k_d\Delta\omega,\,-k_\omega\Delta\omega$} -- (s1.south);
+\end{tikzpicture}
+\caption{VSM 虚拟同步机：有功不平衡经虚拟惯性 $1/sT_a$ 与阻尼 / 频率下垂形成转速 $\omega$，再积分成角。}
+\label{fig:gfm-vsm}
+\end{figure}
+
+\subsection{虚拟振荡器 \texttt{VirtualOscillator}（VOC）}
+以 Andronov--Hopf 型振荡器直接生成角频率与幅值。记 $\gamma=\psi-\pi/2$、$\Delta p=p_{\mathrm{ref}}-p$、
+$\Delta q=q_{\mathrm{ref}}-q$、$e=\max(\varepsilon_V,|e_{\mathrm{mag}}|)$：
+\begin{align}
+ \omega_{oc}&=1+\frac{k_1}{e^2}\big(\cos\gamma\,\Delta p+\sin\gamma\,\Delta q\big),\qquad
+ \dot\theta=\omega_b(\omega_{oc}-1),\\
+ \dot e_{\mathrm{mag}}&=\omega_b\!\left[\frac{k_1}{e}\big(-\sin\gamma\,\Delta p+\cos\gamma\,\Delta q\big)
+   +k_2\big(V_{\mathrm{ref}}^2-e^2\big)e\right],
+\end{align}
+$\dot p_f=(p-x_2)/T_p$、$\dot q_f=(q-q_f)/T_q$。$k_1=$\fld{voc\_k1}、$k_2=$\fld{voc\_k2}、$\psi=$\fld{voc\_psi\_rad}。
+依据：\srcpath{GridFormingInverter::computeDerivatives}（\texttt{VirtualOscillator} 分支）。
+
+\subsection{直流母线环节（可选）}
+当 GFM/GFL 挂接动态直流母线（\texttt{DCLinkMode::DynamicDCVoltage}）时增设 $v_{dc}$ 状态，
+其导数由 \srcpath{dc\_link\_voltage\_derivative} 按电容充放电给出：交流侧功率 $p$、直流网侧功率
+$p_{dc}^{\mathrm{net}}$（\srcpath{dc\_link\_network\_power\_pu}）、效率 $\eta$、电容 $C_{dc}$ 与限幅
+$[v_{dc}^{\min},v_{dc}^{\max}]$ 共同决定 $\dot v_{dc}$。依据：\srcpath{GridFormingInverter::computeDerivatives} 末段。
+
+\subsection{构网参数表}
+\label{sec:dynamics-gfm-params}
+\compmeta{GridFormingInverterParams}{include/hacdcpf/dynamics/devices/BasicDynamicDevices.hpp}
+\begin{paramtable}
+\fld{control\_kind} & — & — & 枚举 & Droop & Droop/VirtualInertia/VirtualOscillator\\
+\fld{v\_ref\_pu} & $V_{\mathrm{ref}}$ & pu & $0.95\sim1.05$ & $1.0$ & 电压参考\\
+\fld{virtual\_x\_pu} & $x_v$ & pu & $0.05\sim0.3$ & $0.10$ & 虚拟电抗（另有 \fld{virtual\_r\_pu}）\\
+\fld{p\_droop\_pu} & $k_p^{\mathrm{droop}}$ & pu & $0.005\sim0.05$ & $0.01$ & 有功—频率下垂\\
+\fld{q\_droop\_pu} & $k_q^{\mathrm{droop}}$ & pu & $0.02\sim0.1$ & $0.05$ & 无功—电压下垂\\
+\fld{power\_filter\_t\_s} & $T_p$ & s & $0.01\sim0.1$ & $0.05$ & 功率量测滤波（另有 \fld{reactive\_power\_filter\_t\_s}）\\
+\fld{voltage\_control\_t\_s} & $T_v$ & s & $0.005\sim0.05$ & $0.02$ & 内电势时间常数\\
+\fld{voltage\_kp} & $k_p^{v}$ & pu & $0.05\sim1$ & $0.1$ & 电压环比例（另有 \fld{voltage\_ki}）\\
+\fld{current\_limit\_pu} & $I_{\lim}$ & pu & $1.1\sim1.5$ & $0$（0 不限） & 电流限幅\\
+\fld{vsm\_ta\_s} & $T_a$ & s & $1\sim10$ & $2.0$ & VSM 虚拟惯性时间常数\\
+\fld{vsm\_frequency\_droop\_kw} & $k_\omega^{\mathrm{vsm}}$ & pu & $10\sim50$ & $20$ & VSM 频率下垂（另有 \fld{vsm\_damping\_kd}）\\
+\fld{voc\_k1} & $k_1$ & pu & — & $0.0033$ & VOC 功率增益\\
+\fld{voc\_k2} & $k_2$ & pu & — & $0.0796$ & VOC 幅值收敛增益\\
+\fld{voc\_psi\_rad} & $\psi$ & rad & $0\sim\pi/2$ & $\pi/4$ & VOC 旋转相位\\
+\fld{vmax\_internal\_pu} & $V_{\max}^{\mathrm{int}}$ & pu & — & $1.30$ & 内电势上限（另有 \fld{vmin\_internal\_pu}）\\
+\fld{dc\_link\_capacitance\_s} & $C_{dc}$ & s & — & $0.10$ & 直流电容（动态直流母线时）\\
+\end{paramtable}
+
+\subsection{跟网逆变器：紧凑 REGC/REEC 子集}
+\label{sec:dynamics-gfl-subset}
+缺省紧凑模型（六状态：PLL 角 $\theta$、PLL 积分 $\xi_{\mathrm{pll}}$、$d/q$ 电流 $i_d,i_q$、
+有功 / 无功滤波 $p_f,q_f$；另可含 Kaura PLL 滤波、LCL、$v_{dc}$）。以正序端压
+$V^+$ 经 $\theta$ 变换得 $(v_d,v_q)$（再经 \srcpath{pll\_measurement} 滤波），锁相与注流为
+\begin{align}
+ \Delta f&=k_p^{\mathrm{pll}}v_q+k_i^{\mathrm{pll}}\xi_{\mathrm{pll}}\ (\text{FixedFrequency 时为 0}),\qquad
+ \dot\theta=\omega_b\,\Delta f,\qquad \dot\xi_{\mathrm{pll}}=v_q,\\
+ i_d^{\mathrm{ref}}&=\frac{v_d p_{\mathrm{ref}}+v_q q_{\mathrm{ref}}}{v_d^2+v_q^2},\qquad
+ i_q^{\mathrm{ref}}=\frac{v_q p_{\mathrm{ref}}-v_d q_{\mathrm{ref}}}{v_d^2+v_q^2},\\
+ (i_d^{\mathrm{cmd}},i_q^{\mathrm{cmd}})&=\mathrm{limit}(i_d^{\mathrm{ref}},i_q^{\mathrm{ref}};I_{\lim}),\qquad
+ \dot i_d=\frac{i_d^{\mathrm{cmd}}-i_d}{T_i},\quad \dot i_q=\frac{i_q^{\mathrm{cmd}}-i_q}{T_i},\\
+ \dot p_f&=\frac{p_{\mathrm{ref}}-p_f}{T_p},\qquad \dot q_f=\frac{q_{\mathrm{ref}}-q_f}{T_p},
+\end{align}
+分母以 \fld{v\_min\_current\_pu} 平方兜底。$p_{\mathrm{ref}},q_{\mathrm{ref}}$ 由 IEEE 1547 volt-var /
+frequency-watt 平滑参考叠加（\srcpath{gfl\_compose\_refs}），限流方式由 \fld{limiter\_kind} /
+\fld{reactive\_current\_priority} 选取（\srcpath{limited\_current}）。依据：
+\srcpath{GridFollowingInverter::computeDerivatives}。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[>=Latex,
+  blk/.style={draw,rounded corners,minimum height=8mm,minimum width=14mm,align=center,font=\footnotesize},
+  sum/.style={draw,circle,inner sep=0pt,minimum size=5mm,font=\footnotesize},
+  every node/.style={font=\footnotesize}]
+  \node (v) {$V^+$};
+  \node[blk,right=6mm of v,fill=green!6] (pll) {PLL\\ $k_p{+}k_i/s$};
+  \node[right=7mm of pll] (th) {$\theta$};
+  \node[blk,below=8mm of pll,fill=blue!5] (pq) {功率$\to$电流\\ $i_{dq}^{\mathrm{ref}}$};
+  \node[blk,right=7mm of pq,fill=red!6] (lim) {限流};
+  \node[blk,right=7mm of lim,fill=orange!8] (lag) {$\dfrac{1}{1+sT_i}$};
+  \node[right=6mm of lag] (iout) {$i_{dq}$};
+  \node[left=6mm of pq] (ref) {$p_{\mathrm{ref}},q_{\mathrm{ref}}$};
+  \draw[->] (v) -- (pll);
+  \draw[->] (pll) -- (th);
+  \draw[->] (ref) -- (pq);
+  \draw[->] (pq) -- (lim);
+  \draw[->] (lim) -- (lag);
+  \draw[->] (lag) -- (iout);
+  \draw[->] (v |- pq) ++(0,0) -- (pq.west);
+\end{tikzpicture}
+\caption{紧凑 GFL：PLL 锁相成角 $\theta$，功率指令经代数反演得 $i_{dq}^{\mathrm{ref}}$、限流后以一阶
+响应 $1/(1+sT_i)$ 注入电流。}
+\label{fig:gfl-subset}
+\end{figure}
+
+\subsection{跟网逆变器：全保真级联链}
+\label{sec:dynamics-gfl-full}
+当 \fld{full\_fidelity}$=$true（且非相域）时启用 PSD 兼容的外环 PI $+$ 内环电流 PI $+$ 差分 LCL 滤波，
+状态含 $\theta,\xi_{\mathrm{pll}}$、外环量测 $p_{oc},q_{oc}$、外环积分 $\sigma_p,\sigma_q$、内环积分
+$\gamma_d,\gamma_q$、LCL 的换流侧电流 $i_{cnv}$、滤波电容电压 $v_{filter}$、网侧电流 $i_{grid}$（RI 分量）、
+PLL 滤波与 $v_{dc}$。外环（功率 $P$ 环出 $i_q^{\mathrm{ref}}$、$Q$ 环出 $i_d^{\mathrm{ref}}$）：
+\begin{align}
+ \dot p_{oc}&=\omega_z(p_e-p_{oc}),\quad \dot q_{oc}=\omega_f(q_e-q_{oc}),\quad
+ \dot\sigma_p=p_{\mathrm{ref}}-p_{oc},\quad \dot\sigma_q=q_{\mathrm{ref}}-q_{oc},\\
+ i_q^{\mathrm{ref}}&=k_p^{p}(p_{\mathrm{ref}}-p_{oc})+k_i^{p}\sigma_p,\qquad
+ i_d^{\mathrm{ref}}=k_p^{q}(q_{\mathrm{ref}}-q_{oc})+k_i^{q}\sigma_q,
+\end{align}
+$p_e=v_d^f i_d^g+v_q^f i_q^g$、$q_e=v_q^f i_d^g-v_d^f i_q^g$ 在滤波电容节点量测。锁相（Kaura：
+$\varepsilon_{\mathrm{pll}}=\mathrm{atan2}(v_q^f,v_d^f)$；降阶：$\varepsilon_{\mathrm{pll}}=v_q^\ell$），
+$\omega_{\mathrm{pll}}=1+k_p^{\mathrm{pll}}\varepsilon_{\mathrm{pll}}+k_i^{\mathrm{pll}}\xi_{\mathrm{pll}}$。
+内环电流 PI 带 $dq$ 解耦与电压前馈：
+\begin{align}
+ \dot\gamma_d&=i_d^{\mathrm{ref}}-i_d^c,\qquad \dot\gamma_q=i_q^{\mathrm{ref}}-i_q^c,\\
+ v_d^{\mathrm{cnv}}&=k_{pc}(i_d^{\mathrm{ref}}-i_d^c)+k_{ic}\gamma_d-\omega_{\mathrm{pll}}L_f i_q^c+k_{ffv}v_d^f,\\
+ v_q^{\mathrm{cnv}}&=k_{pc}(i_q^{\mathrm{ref}}-i_q^c)+k_{ic}\gamma_q+\omega_{\mathrm{pll}}L_f i_d^c+k_{ffv}v_q^f.
+\end{align}
+差分 LCL 滤波（RI 帧，$\omega_b=2\pi f_{\mathrm{ref}}$）：
+\begin{align}
+ \dot i_{cnv}&=\frac{\omega_b}{L_f}\big(V_{cnv}-V_{filter}-R_f i_{cnv}\big)\ \text{（含 $\pm L_f$ 旋转耦合）},\\
+ \dot V_{filter}&=\frac{\omega_b}{C_f}\big(i_{cnv}-i_{grid}\big)\ \text{（含 $\pm C_f$ 耦合）},\qquad
+ \dot i_{grid}=\frac{\omega_b}{L_g}\big(V_{filter}-V^+-R_g i_{grid}\big).
+\end{align}
+其中旋转耦合项按实部 / 虚部交叉写入（$+L_f i_{cnv}^{\Im}$、$-L_f i_{cnv}^{\Re}$ 等）。传统 $i_d,i_q$
+状态在全保真模式下仅作遥测镜像（$0.01$ s 跟踪换流侧电流）。依据：
+\srcpath{GridFollowingInverter::computeDerivativesFullFidelity}。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[>=Latex,
+  blk/.style={draw,rounded corners,minimum height=8mm,minimum width=14mm,align=center,font=\footnotesize},
+  sum/.style={draw,circle,inner sep=0pt,minimum size=5mm,font=\footnotesize},
+  every node/.style={font=\footnotesize}]
+  \node (ref) {$p_{\mathrm{ref}},q_{\mathrm{ref}}$};
+  \node[blk,right=6mm of ref,fill=blue!5] (outer) {外环 PI\\ $k_p{+}k_i/s$};
+  \node[blk,right=6mm of outer,fill=green!6] (inner) {内环 PI\\ 解耦${+}$前馈};
+  \node[blk,right=6mm of inner,fill=orange!8] (lcl) {LCL\\ $L_f{-}C_f{-}L_g$};
+  \node[right=6mm of lcl] (grid) {电网 $V^+$};
+  \node[blk,below=8mm of inner,fill=green!6] (pllb) {PLL\\ $\omega_{\mathrm{pll}}$};
+  \draw[->] (ref) -- node[above,font=\footnotesize]{} (outer);
+  \draw[->] (outer) -- node[above,font=\footnotesize]{$i_{dq}^{\mathrm{ref}}$} (inner);
+  \draw[->] (inner) -- node[above,font=\footnotesize]{$V_{cnv}$} (lcl);
+  \draw[->] (lcl) -- node[above,font=\footnotesize]{$i_{grid}$} (grid);
+  \draw[->] (lcl.south) |- (pllb.east);
+  \draw[->] (pllb.west) -| ($(ref)+(0,-8mm)$) |- ($(outer.south)+(0,0)$);
+  \draw[->] (lcl.south) |- ($(outer.south)+(-3mm,-4mm)$) -- ++(0,4mm);
+\end{tikzpicture}
+\caption{全保真 GFL 级联：外环功率 PI $\to i_{dq}^{\mathrm{ref}}$、内环电流 PI（$dq$ 解耦 $+$ 电压前馈）
+$\to V_{cnv}$，经差分 LCL 滤波注入电网；PLL 由滤波电容电压锁相。}
+\label{fig:gfl-full}
+\end{figure}
+
+\subsection{跟网参数表}
+\label{sec:dynamics-gfl-params}
+\compmeta{GridFollowingInverterParams}{include/hacdcpf/dynamics/devices/BasicDynamicDevices.hpp}
+\begin{paramtable}
+\fld{frequency\_estimator} & — & — & 枚举 & 降阶PLL & 锁相 / 频率估计方式\\
+\fld{response\_t\_s} & $T_i$ & s & $0.005\sim0.05$ & $0.02$ & 紧凑电流响应时间常数\\
+\fld{pll\_kp} & $k_p^{\mathrm{pll}}$ & pu & — & $0.01$ & PLL 比例（另有 \fld{pll\_ki}）\\
+\fld{pll\_lpf\_t\_s} & $T_{\mathrm{pll}}$ & s & — & $0.005$ & Kaura PLL 低通\\
+\fld{power\_filter\_t\_s} & $T_p$ & s & $0.01\sim0.1$ & $0.02$ & 功率量测滤波\\
+\fld{v\_min\_current\_pu} & — & pu & — & $0.20$ & 功率反演分母兜底电压\\
+\fld{current\_limit\_pu} & $I_{\lim}$ & pu & $1.1\sim1.5$ & $0$（0 不限） & 电流限幅\\
+\fld{full\_fidelity} & — & — & 布尔 & false & 启用外环$+$内环$+$LCL 全保真链\\
+\fld{outer\_kp\_p} & $k_p^{p}$ & pu & — & $2.0$ & 有功外环比例（另有 \fld{outer\_ki\_p}）\\
+\fld{outer\_omega\_z} & $\omega_z$ & rad/s & — & $41.468$ & 有功量测低通\\
+\fld{outer\_kp\_q} & $k_p^{q}$ & pu & — & $2.0$ & 无功外环比例（另有 \fld{outer\_ki\_q}/\fld{outer\_omega\_f}）\\
+\fld{inner\_kpc} & $k_{pc}$ & pu & — & $0.37$ & 内环电流比例（另有 \fld{inner\_kic}）\\
+\fld{inner\_kffv} & $k_{ffv}$ & pu & $0\sim1$ & $1.0$ & 电压前馈系数\\
+\fld{lcl\_lf\_pu} & $L_f$ & pu & — & $0.009$ & 换流侧电感（另有 \fld{lcl\_rf\_pu}）\\
+\fld{lcl\_cf\_pu} & $C_f$ & pu & — & $2.5$ & 滤波电容\\
+\fld{lcl\_lg\_pu} & $L_g$ & pu & — & $0.002$ & 网侧电感（另有 \fld{lcl\_rg\_pu}）\\
+\fld{f\_ref\_hz} & $f_{\mathrm{ref}}$ & Hz & $50/60$ & $50$ & 参考频率（$\omega_b=2\pi f_{\mathrm{ref}}$）\\
+\end{paramtable}
+
+\subsection{与实现的对应}
+\label{sec:dynamics-inv-impl}
+\begin{footnotesize}
+\begin{longtable}{@{}L{3.0cm}L{2.0cm}L{4.2cm}L{3.0cm}@{}}
+\toprule
+\textbf{模型} & \textbf{状态} & \textbf{核心结构} & \textbf{实现状态}\\
+\midrule
+\endfirsthead
+\multicolumn{4}{@{}l}{\footnotesize（续表）}\\\toprule
+\textbf{模型} & \textbf{状态} & \textbf{核心结构} & \textbf{实现状态}\\\midrule
+\endhead
+\bottomrule
+\endfoot
+\texttt{GFM Droop} & 6($+v_{dc}$) & 虚拟阻抗 $+$ $P/Q$ 下垂 $+$ 电压环 &
+  \implfull{BasicDynamicDevices.cpp:GridFormingInverter::computeDerivatives}\\
+\texttt{GFM VirtualInertia} & 6($+v_{dc}$) & 虚拟惯性摆动 $+$ 电压环 &
+  \implfull{BasicDynamicDevices.cpp:GridFormingInverter::computeDerivatives}\\
+\texttt{GFM VirtualOscillator} & 6 & Andronov--Hopf 振荡器 &
+  \implfull{BasicDynamicDevices.cpp:GridFormingInverter::computeDerivatives}\\
+\texttt{GFL 紧凑} & 6($+$PLL/LCL/$v_{dc}$) & PLL $+$ 功率反演 $+$ 一阶电流 &
+  \implfull{BasicDynamicDevices.cpp:GridFollowingInverter::computeDerivatives}\\
+\texttt{GFL 全保真} & 多态 & 外环$+$内环 PI $+$ 差分 LCL &
+  \implfull{BasicDynamicDevices.cpp:GridFollowingInverter::computeDerivativesFullFidelity}\\
+\texttt{GFL 相域} & 6$+2{\times}3$ & 每相电流状态 $+$ 共用 PLL &
+  \implpart{相域电流控制，正序 PLL 同步}\\
+\end{longtable}
+\end{footnotesize}
+GFM 遵循 NERC 标准命名，缺省 \texttt{GridFormingNortonDroop}；两族均支持 IEEE 1547 穿越 / 跳闸 / 重连
+保护与 volt-var / frequency-watt 智能逆变功能（\srcpath{updateSmartControls}），缺省关闭。相域控制
+（\fld{phase\_domain\_control}）为显式不平衡网络提供每相端口，共用一个正序同步 / 频率成形环。

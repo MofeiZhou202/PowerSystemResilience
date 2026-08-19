@@ -1,0 +1,358 @@
+\section{励磁系统（AVR）设备模型（逐式转写）}
+\label{sec:dynamics-device-exciters}
+
+本章逐个转写平台内置励磁 / 自动电压调节器（AVR）模型族，全部公式以
+\srcpath{src/dynamics/devices/BasicDynamicDevices.cpp} 中的
+\srcpath{Exciter::computeDerivatives} 及共享控制环节基元为唯一依据。励磁机以两种方式运行：
+
+\begin{itemize}
+  \item \textbf{挂接同步机}（\texttt{machine\_}$\ne$\texttt{nullptr}）：励磁机不拥有励磁电压状态，而是
+        \emph{驱动同步机自有的场状态} $v_f$（下标由 \srcpath{fieldIndex} 给出，即
+        \S\ref{sec:dynamics-device-machines} 各机型的最后一位 $v_f$）；
+  \item \textbf{独立运行}：励磁机自持一个励磁电压状态 $E_{fd}$ 作为内部状态。
+\end{itemize}
+
+两种方式的调节器方程一致，仅“场电压”这一状态的归属不同。公共输入信号为机端电压
+$V_t=$\srcpath{terminalVoltage}、参考电压 $V_{\mathrm{ref}}$（初始化时锁存 \fld{v\_ref\_pu}）、
+电力系统稳定器附加信号 $V_s=$\srcpath{pss\_vs\_output}（无 PSS 时为 0），以及调节误差
+$V_{\mathrm{err}}=V_{\mathrm{ref}}+V_s-V_m$（$V_m$ 为经测量环节的机端电压，未设测量环节时用 $V_t$）。
+所有时间常数经 \srcpath{control\_time} 钳位为 $\tau=\max(\tau_{\min},|T|)$，
+$\tau_{\min}=$\texttt{kMinTimeConstant}。依据：\srcpath{Exciter::computeDerivatives}、
+\srcpath{exciter\_state\_count}。
+
+\subsection{控制环节基元}
+\label{sec:dynamics-control-primitives}
+励磁、调速与 PSS 三章共用以下一阶传递函数基元（\srcpath{BasicDynamicDevices.cpp} 匿名命名空间）。
+每个基元返回 $(\text{输出},\ \dot x)$，$x$ 为其内部状态。
+
+\begin{align}
+ \text{惯性（低通）} \ \frac{K}{1+sT}:\quad & y=x,\qquad \dot x=\frac{K u-x}{\tau},
+   && \srcpath{low\_pass\_block}\\
+ \text{改进低通} \ \frac{K}{K_{\mathrm{den}}+sT}:\quad & y=x,\qquad
+   \dot x=\frac{K u-K_{\mathrm{den}}\,x}{\tau},
+   && \srcpath{low\_pass\_modified\_block}\\
+ \text{隔直（洗出）} \ \frac{sK}{1+sT}:\quad & y=x+\frac{K}{\tau}u,\qquad
+   \dot x=-\frac{1}{\tau}\!\left(\frac{K}{\tau}u+x\right),
+   && \srcpath{high\_pass\_block}\\
+ \text{超前—滞后} \ \frac{K(1+sT_1)}{1+sT_2}:\quad & y=x+K\frac{T_1}{T_2}u,\qquad
+   \dot x=\frac{K\!\left(1-\tfrac{T_1}{T_2}\right)u-x}{\tau_2},
+   && \srcpath{lead\_lag\_block}
+\end{align}
+非绕组限幅低通（\srcpath{low\_pass\_nonwindup}）在饱和且继续朝越限方向时冻结积分：
+\begin{equation}
+ \dot x=\frac{a\,(K u-x)}{\tau},\quad y=\mathrm{clamp}(x,y_{\min},y_{\max}),\quad
+ a=\begin{cases}0,& (x\ge y_{\max}\wedge Ku-x>0)\vee(x\le y_{\min}\wedge Ku-x<0),\\ 1,&\text{否则.}\end{cases}
+\end{equation}
+两种饱和函数与整流调节函数为
+\begin{align}
+ S_e^{\mathrm{DC}}&=A_e\,e^{B_e|E_{fd}|} && \srcpath{avr\_saturation}\ (\text{直流励磁机}),\\
+ S_e^{\mathrm{AC}}&=\frac{B_e\,(V_e-A_e)^2}{V_e} && \srcpath{ac\_exciter\_saturation}\ (\text{交流励磁机}),\\
+ F_{\mathrm{EX}}(I_N)&=\begin{cases}
+   1, & I_N\le 0,\\
+   1-0.577\,I_N, & 0<I_N\le 0.433,\\
+   \sqrt{0.75-I_N^2}, & 0.433<I_N<0.75,\\
+   1.732\,(1-I_N), & 0.75\le I_N\le 1,\\
+   0, & I_N>1,
+ \end{cases} && \srcpath{exciter\_rectifier}.
+\end{align}
+$A_e=B_e=0$ 时饱和为零。$F_{\mathrm{EX}}$ 为交流励磁机整流器的换相压降特性，自变量为归一化负载
+$I_N=K_c\,I_{fd}/V_e$。
+
+\subsection{比例型 \texttt{AVRSimple}}
+最简模型：单积分器直接驱动场电压，无独立状态（挂接时 0 状态，独立时 1 状态），
+\begin{equation}
+ \dot E_{fd}=K_v\,(V_{\mathrm{ref}}-V_t).
+\end{equation}
+依据：\srcpath{Exciter::computeDerivatives}（\texttt{AVRSimple} 分支）。
+
+\subsection{简化励磁 \texttt{SEXS}}
+IEEE \texttt{SEXS}：一个超前—滞后环节（比值 $T_a/T_b$，$T_a=$\fld{ta\_over\_tb}$\cdot T_b$）级联增益 $K_a$、
+限幅与场滞后 $T_e$，状态为超前—滞后内部量 $V_r$（1 个）加场电压：
+\begin{align}
+ V_{ll}&=V_r+\frac{T_a}{T_b}\big(V_{\mathrm{ref}}+V_s-V_t\big),\qquad
+ \dot V_r=\frac{\left(1-\tfrac{T_a}{T_b}\right)\!\big(V_{\mathrm{ref}}+V_s-V_t\big)-V_r}{T_b},\\
+ E_{fd}^{\mathrm{cmd}}&=\mathrm{clamp}\big(K_a V_{ll},\,E_{fd}^{\min},\,E_{fd}^{\max}\big),\qquad
+ \dot E_{fd}=\frac{E_{fd}^{\mathrm{cmd}}-E_{fd}}{T_e}.
+\end{align}
+依据：\srcpath{Exciter::computeDerivatives}（\texttt{SEXS} 分支）。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[>=Latex,node distance=7mm,
+  blk/.style={draw,rounded corners,minimum height=8mm,minimum width=17mm,align=center,font=\small},
+  sum/.style={draw,circle,inner sep=0pt,minimum size=5mm,font=\footnotesize},
+  every node/.style={font=\small}]
+  \node (in) {$V_{\mathrm{ref}}{+}V_s$};
+  \node[sum,right=8mm of in] (s1) {$\Sigma$};
+  \node[blk,right=8mm of s1] (ll) {$\dfrac{1+sT_a}{1+sT_b}$};
+  \node[blk,right=8mm of ll] (ka) {$K_a$};
+  \node[blk,right=8mm of ka,fill=red!6] (lim) {限幅};
+  \node[blk,right=8mm of lim,fill=blue!5] (te) {$\dfrac{1}{1+sT_e}$};
+  \node[right=8mm of te] (out) {$E_{fd}$};
+  \draw[->] (in) -- (s1);
+  \draw[->] (s1) -- (ll);
+  \draw[->] (ll) -- (ka);
+  \draw[->] (ka) -- (lim);
+  \draw[->] (lim) -- (te);
+  \draw[->] (te) -- (out);
+  \draw[->] (in |- s1) ++(0,-9mm) node[left,font=\footnotesize]{$V_t$} -- ++(0,7mm) -| (s1.south);
+  \node[above=0.5mm of s1,font=\footnotesize]{$+$};
+  \node[below left=0.5mm and 0mm of s1,font=\footnotesize]{$-$};
+\end{tikzpicture}
+\caption{SEXS 简化励磁：超前—滞后 $(1+sT_a)/(1+sT_b)$、增益 $K_a$、限幅与场滞后 $1/(1+sT_e)$。}
+\label{fig:exc-sexs}
+\end{figure}
+
+\subsection{\texttt{IEEET1}（简化实现）}
+\label{sec:dynamics-exc-ieeet1}
+本实现的 \texttt{IEEET1} 退化为“比例误差 $+$ 场滞后”单环（挂接 0 状态、独立 1 状态）：
+\begin{equation}
+ E_{fd}^{\mathrm{cmd}}=\mathrm{clamp}\big(E_{fd}^{0}+K_a(V_{\mathrm{ref}}-V_t+V_s),\,
+   E_{fd}^{\min},\,E_{fd}^{\max}\big),\qquad
+ \dot E_{fd}=\frac{E_{fd}^{\mathrm{cmd}}-E_{fd}}{T_e},
+\end{equation}
+$E_{fd}^{0}$ 为初始化平衡场电压。依据：\srcpath{Exciter::computeDerivatives}（末段比例—滞后回退）。
+
+\begin{gapnote}
+标准 IEEE Type 1（IEEET1）应含测量环节 $1/(1+sT_r)$、调节器 $K_a/(1+sT_a)$、
+励磁机 $1/(K_e+sT_e)$ 及速率反馈 $sK_f/(1+sT_f)$ 与励磁机饱和 $S_e$。本平台的 \texttt{IEEET1}
+是上述结构的\emph{简化比例—滞后}实现，未保留独立调节器时间常数、速率反馈与励磁机饱和回路。
+需要完整 Type 1 结构时应选用 \texttt{AVRTypeI}（见下）。此边界如实标注，防止把文档结构误认作代码实现。
+\end{gapnote}
+
+\subsection{IEEE Type I 直流励磁机 \texttt{AVRTypeI}}
+\label{sec:dynamics-exc-avr1}
+三状态（挂接：$V_{r1},V_{r2},V_m$；独立再加 $E_{fd}$），标准直流励磁机结构。测量、速率反馈与励磁机
+支路为
+\begin{align}
+ \dot V_m&=\frac{V_t-V_m}{T_r},\qquad S_e=A_e\,e^{B_e|E_{fd}|},\\
+ Y_{hp}&=V_{r2}+\frac{K_f}{T_f}E_{fd},\qquad
+ \dot V_{r2}=-\frac{1}{T_f}\!\left(\frac{K_f}{T_f}E_{fd}+V_{r2}\right),\\
+ \dot V_{r1}&=\frac{K_a\big(V_{\mathrm{ref}}+V_s-V_m-Y_{hp}\big)-V_{r1}}{T_a},\qquad
+ \dot E_{fd}=\frac{V_{r1}-(K_e+S_e)\,E_{fd}}{T_e}.
+\end{align}
+依据：\srcpath{Exciter::computeDerivatives}（\texttt{AVRTypeI} 分支）、\srcpath{avr\_saturation}。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[>=Latex]
+  \node (in) {$V_{\mathrm{ref}}{+}V_s$};
+  \node[csum,right=8mm of in] (s1) {$\Sigma$};
+  \node[csum,right=18mm of s1] (s2) {$\Sigma$};
+  \node[cb,right=9mm of s2] (reg) {$\dfrac{K_a}{1+sT_a}$};
+  \node[cb,right=9mm of reg,fill=blue!5] (exc) {$\dfrac{1}{K_e{+}S_e{+}sT_e}$};
+  \node[right=9mm of exc] (out) {$E_{fd}$};
+  \draw[->] (in) -- (s1);
+  \draw[->] (s1) -- (s2);
+  \draw[->] (s2) -- (reg);
+  \draw[->] (reg) -- (exc);
+  \draw[->] (exc) -- (out);
+  \node[cbs,below=13mm of s1,fill=green!6] (meas) {$\dfrac{1}{1+sT_r}$};
+  \draw[->] (meas.north) -- (s1.south) node[csig,pos=0.55,left]{$-V_m$};
+  \node[cbs,below=13mm of s2,fill=orange!8] (fb) {$\dfrac{sK_f}{1+sT_f}$};
+  \draw[->] (fb.north) -- (s2.south) node[csig,pos=0.55,right]{$-Y_{hp}$};
+  \draw[->] ($(exc.east)!0.5!(out)$) |- (fb.east);
+  \node[csig,left=18mm of meas] (vt) {$V_t$};
+  \draw[->] (vt) -- (meas.west);
+\end{tikzpicture}
+\caption{AVRTypeI（IEEE 1 型直流励磁机）：测量 $1/(1+sT_r)$、调节器 $K_a/(1+sT_a)$、
+励磁机 $1/(K_e+S_e+sT_e)$ 与速率反馈 $sK_f/(1+sT_f)$。}
+\label{fig:exc-avr1}
+\end{figure}
+
+\subsection{IEEE Type II \texttt{AVRTypeII}}
+三状态，调节器改为两级超前—滞后（增益 $K_0$）加限幅：
+\begin{align}
+ \dot V_m&=\frac{V_t-V_m}{T_r},\qquad S_e=A_e\,e^{B_e|E_{fd}|},\\
+ Y_{ll1}&=V_{r1}+K_0\frac{T_2}{T_1}\big(V_{\mathrm{ref}}+V_s-V_m\big),\qquad
+ \dot V_{r1}=\frac{K_0\!\left(1-\tfrac{T_2}{T_1}\right)\!\big(V_{\mathrm{ref}}+V_s-V_m\big)-V_{r1}}{T_1},\\
+ Y_{ll2}&=K_0 V_{r2}+\frac{T_4}{T_3}Y_{ll1},\qquad
+ \dot V_{r2}=\frac{\left(1-\tfrac{T_4}{T_3}\right)Y_{ll1}-K_0 V_{r2}}{K_0 T_3},\\
+ V_r&=\mathrm{clamp}(Y_{ll2},V_a^{\min},V_a^{\max}),\qquad
+ \dot E_{fd}=\frac{V_r-(1+S_e)\,E_{fd}}{T_e}.
+\end{align}
+依据：\srcpath{Exciter::computeDerivatives}（\texttt{AVRTypeII} 分支）。
+
+\subsection{静态可控硅励磁 \texttt{SCRX}}
+两状态（$V_m,V_r$），母线馈电静态励磁机的简化实现：
+\begin{equation}
+ \dot V_m=\frac{V_t-V_m}{T_r},\qquad
+ \dot V_r=\frac{K_a\big(V_{\mathrm{ref}}+V_s-V_m\big)-V_r}{T_a},\qquad
+ \dot E_{fd}=\frac{\mathrm{clamp}(V_r,E_{fd}^{\min},E_{fd}^{\max})-E_{fd}}{T_e}.
+\end{equation}
+依据：\srcpath{Exciter::computeDerivatives}（\texttt{SCRX} 分支）。
+
+\begin{gapnote}
+本实现的 \texttt{SCRX} 仅保留增益—滞后 $K_a/(1+sT_a)$ 与场滞后 $1/(1+sT_e)$，未含标准 SCRX 的
+$T_b/T_c$ 超前—滞后、母线馈电／电流馈电切换（$C_{\mathrm{switch}}$）与负场电流门控（$r_{c}/r_{fd}$）。
+\end{gapnote}
+
+\subsection{IEEE AC1A 交流励磁机 \texttt{ESAC1A} / \texttt{EXAC1}}
+\label{sec:dynamics-exc-ac1a}
+五状态（$V_m,V_{r1},V_{r2},V_e,V_{r3}$），含励磁机内电势 $V_e$、去磁、饱和与整流器换相。设机端场电流
+代理 $I_{fd}$（挂接时取机端场量 $v_f$，独立时取 $V_e$），$V_e$ 分母作符号保护 $\tilde V_e$：
+\begin{align}
+ \dot V_m&=\frac{V_t-V_m}{T_r},\qquad V_{\mathrm{err}}=V_{\mathrm{ref}}+V_s-V_m,\qquad
+ I_N=\frac{K_c I_{fd}}{\tilde V_e},\\
+ S_e&=\frac{B_e(V_e-A_e)^2}{V_e},\qquad
+ V_{FE}=K_d I_{fd}+K_e V_e+S_e V_e,\\
+ Y_{fb}&=V_{r3}+\frac{K_f}{T_f}V_{FE},\qquad
+ \dot V_{r3}=-\frac{1}{T_f}\!\left(\frac{K_f}{T_f}V_{FE}+V_{r3}\right),\qquad
+ V_{in}=V_{\mathrm{err}}-Y_{fb},\\
+ Y_{ll}&=V_{r1}+\frac{T_c}{T_b}V_{in}\ (T_b>\tau_{\min}),\qquad
+ \dot V_{r1}=\frac{\left(1-\tfrac{T_c}{T_b}\right)V_{in}-V_{r1}}{T_b},\\
+ \dot V_{r2}&=\frac{a\,(K_a Y_{ll}-V_{r2})}{T_a}\ \text{（非绕组限幅 }[V_a^{\min},V_a^{\max}]\text{）},\qquad
+ V_r=\mathrm{clamp}(V_{r2},E_{fd}^{\min},E_{fd}^{\max}),\\
+ \dot V_e&=\frac{V_r-V_{FE}}{T_e},\qquad
+ E_{fd}^{\mathrm{cmd}}=V_e\,F_{\mathrm{EX}}(I_N),\qquad
+ \dot E_{fd}=\frac{E_{fd}^{\mathrm{cmd}}-E_{fd}}{T_e}.
+\end{align}
+当 $|K_c|\le10^{-12}$ 时 $\dot E_{fd}$ 退化为 $\dot V_e$（无整流压降）。依据：
+\srcpath{Exciter::computeDerivatives}（\texttt{exciter\_is\_ac1a} 分支）、
+\srcpath{ac\_exciter\_saturation}、\srcpath{exciter\_rectifier}。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[>=Latex]
+  \node (in) {$V_{\mathrm{err}}$};
+  \node[csum,right=8mm of in] (s1) {$\Sigma$};
+  \node[cbs,right=9mm of s1] (ll) {$\dfrac{1+sT_c}{1+sT_b}$};
+  \node[cb,right=9mm of ll,fill=red!6] (reg) {$\dfrac{K_a}{1+sT_a}$};
+  \node[csum,right=11mm of reg] (s2) {$\Sigma$};
+  \node[cbs,right=10mm of s2,fill=blue!5] (ve) {$\dfrac{1}{sT_e}$};
+  \node[cb,right=10mm of ve,fill=green!6] (fex) {$\times F_{\mathrm{EX}}(I_N)$};
+  \node[right=8mm of fex] (out) {$E_{fd}$};
+  \draw[->] (in) -- (s1);
+  \draw[->] (s1) -- (ll);
+  \draw[->] (ll) -- (reg);
+  \draw[->] (reg) -- node[csig,above]{$V_r$} (s2);
+  \draw[->] (s2) -- (ve);
+  \draw[->] (ve) -- node[csig,above]{$V_e$} (fex);
+  \draw[->] (fex) -- (out);
+  \node[cb,below=14mm of s2,fill=orange!8] (vfe) {去磁${+}$饱和\\ $V_{FE}$};
+  \node[cbs,below=14mm of ll,fill=orange!8] (fb) {$\dfrac{sK_f}{1+sT_f}$};
+  \draw[->] (ve.south) |- (vfe.east);
+  \draw[->] (vfe.north) -- (s2.south) node[csig,midway,right]{$-V_{FE}$};
+  \draw[->] (vfe.west) -- (fb.east);
+  \draw[->] (fb.west) -| (s1.south) node[csig,pos=0.72,left]{$-Y_{fb}$};
+\end{tikzpicture}
+\caption{AC1A 交流励磁机（ESAC1A/EXAC1）：超前—滞后、非绕组调节器 $K_a/(1+sT_a)$、
+励磁机积分 $1/sT_e$ 带去磁—饱和反馈 $V_{FE}$、整流器换相 $F_{\mathrm{EX}}(I_N)$ 与速率反馈 $sK_f/(1+sT_f)$。}
+\label{fig:exc-ac1a}
+\end{figure}
+
+\subsection{静态励磁 \texttt{EXST1} / \texttt{ESST1A} / \texttt{ST6B} / \texttt{ST8C}}
+\label{sec:dynamics-exc-static}
+四状态（\texttt{EXST1}/\texttt{ESST1A}/\texttt{ST6B}）或五状态（\texttt{ST8C}）静态励磁，共享同一分支。记
+$V_m$（测量）、$x_1$（首级超前—滞后）、$x_2$（次级超前—滞后，若存在）、$x_3$（内场滞后，若存在）、
+$x_4$（速率反馈，若存在），$T_c'=T_c$（$T_c>0$）否则 $T_a$：
+\begin{align}
+ \dot V_m&=\frac{V_t-V_m}{T_r},\qquad V_{\mathrm{err}}=V_{\mathrm{ref}}+V_s-V_m,\\
+ Y_1&=x_1+K_a\frac{T_c'}{T_b}V_{\mathrm{err}},\qquad
+ \dot x_1=\frac{K_a\!\left(1-\tfrac{T_c'}{T_b}\right)V_{\mathrm{err}}-x_1}{T_b},\\
+ Y_2&=x_2+\frac{T_2}{T_1}Y_1,\qquad
+ \dot x_2=\frac{\left(1-\tfrac{T_2}{T_1}\right)Y_1-x_2}{T_1}\quad(\text{若 } n_{\mathrm{state}}\ge3),\\
+ Y_{fb}&=x_4+\frac{K_f}{T_f}E_{fd},\qquad
+ \dot x_4=-\frac{1}{T_f}\!\left(\frac{K_f}{T_f}E_{fd}+x_4\right)\quad(\text{若 } n_{\mathrm{state}}\ge5),\\
+ Y&=Y_2-Y_{fb}+\underbrace{K_g V_t}_{\text{仅 ST6B/ST8C/ESST1A}}-K_d E_{fd},\qquad
+ E_{fd}^{\mathrm{cmd}}=\mathrm{clamp}(Y,E_{fd}^{\min},E_{fd}^{\max}),
+\end{align}
+场电压更新按状态数分两种：$n_{\mathrm{state}}\ge4$ 时经内滞后 $x_3$ 双级
+$\dot x_3=(E_{fd}^{\mathrm{cmd}}-x_3)/T_e$、$\dot E_{fd}=(x_3-E_{fd})/T_e$；否则单级
+$\dot E_{fd}=(E_{fd}^{\mathrm{cmd}}-E_{fd})/T_e$。项 $K_g V_t$ 仅对含端电压补偿的
+\texttt{ST6B}/\texttt{ST8C}/\texttt{ESST1A}（\srcpath{exciter\_has\_terminal\_compounding}）出现。依据：
+\srcpath{Exciter::computeDerivatives}（扩展模型末段分支）。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[>=Latex,
+  blk/.style={draw,rounded corners,minimum height=8mm,minimum width=16mm,align=center,font=\footnotesize},
+  sum/.style={draw,circle,inner sep=0pt,minimum size=5mm,font=\footnotesize},
+  every node/.style={font=\footnotesize}]
+  \node (in) {$V_{\mathrm{ref}}{+}V_s$};
+  \node[sum,right=7mm of in] (s1) {$\Sigma$};
+  \node[blk,right=7mm of s1] (r1) {$\dfrac{K_a(1+sT_c)}{1+sT_b}$};
+  \node[blk,right=7mm of r1] (r2) {$\dfrac{1+sT_2}{1+sT_1}$};
+  \node[sum,right=6mm of r2] (s2) {$\Sigma$};
+  \node[blk,right=6mm of s2,fill=red!6] (lim) {限幅};
+  \node[blk,right=6mm of lim,fill=blue!5] (te) {$\dfrac{1}{1+sT_e}$};
+  \node[right=6mm of te] (out) {$E_{fd}$};
+  \node[blk,below=14mm of s1,fill=green!6] (meas) {$\dfrac{1}{1+sT_r}$};
+  \draw[->] (in) -- (s1);
+  \draw[->] (s1) -- (r1);
+  \draw[->] (r1) -- (r2);
+  \draw[->] (r2) -- (s2);
+  \draw[->] (s2) -- (lim);
+  \draw[->] (lim) -- (te);
+  \draw[->] (te) -- (out);
+  \draw[->] ($(out)+(0,-22mm)$) node[right,font=\footnotesize]{$V_t$} -- (meas.east);
+  \draw[->] (meas.west) -| (s1.south);
+  \draw[->] ($(out)+(0,-11mm)$) -- ($(s2)+(0,-11mm)$) -- (s2.south)
+     node[pos=0.5,below,font=\footnotesize]{$-K_dE_{fd}\ (+K_gV_t)$};
+  \node[above=0.5mm of s1,font=\footnotesize]{$+$};
+\end{tikzpicture}
+\caption{静态励磁（EXST1/ESST1A/ST6B/ST8C）：测量、双级超前—滞后 $K_a(1+sT_c)/(1+sT_b)$、
+$(1+sT_2)/(1+sT_1)$、去磁 $K_dE_{fd}$ 与端电压补偿 $K_gV_t$（仅后三者）、限幅与场滞后。}
+\label{fig:exc-static}
+\end{figure}
+
+\subsection{与实现的对应}
+\label{sec:dynamics-exc-impl}
+\begin{footnotesize}
+\begin{longtable}{@{}L{2.6cm}L{2.4cm}L{5.2cm}L{2.8cm}@{}}
+\toprule
+\textbf{模型} & \textbf{状态数(挂接/独立)} & \textbf{状态变量} & \textbf{实现状态}\\
+\midrule
+\endfirsthead
+\multicolumn{4}{@{}l}{\footnotesize（续表）}\\
+\toprule
+\textbf{模型} & \textbf{状态数(挂接/独立)} & \textbf{状态变量} & \textbf{实现状态}\\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+\texttt{AVRSimple} & 0/1 & $E_{fd}$ & \implfull{BasicDynamicDevices.cpp:Exciter::computeDerivatives}\\
+\texttt{IEEET1} & 0/1 & $E_{fd}$ & \implpart{简化比例—滞后，见 \S\ref{sec:dynamics-exc-ieeet1}}\\
+\texttt{SEXS} & 1 & $V_r(,E_{fd})$ & \implfull{BasicDynamicDevices.cpp:lead\_lag\_block}\\
+\texttt{SCRX} & 2 & $V_m,V_r$ & \implpart{无 $T_b/T_c$ 与馈电切换}\\
+\texttt{AVRTypeI} & 3/4 & $V_{r1},V_{r2},V_m(,E_{fd})$ & \implfull{BasicDynamicDevices.cpp:avr\_saturation}\\
+\texttt{AVRTypeII} & 3/4 & $V_{r1},V_{r2},V_m(,E_{fd})$ & \implfull{BasicDynamicDevices.cpp:Exciter::computeDerivatives}\\
+\texttt{EXST1} & 4 & $V_m,x_1,x_2,x_3(,E_{fd})$ & \implfull{BasicDynamicDevices.cpp:Exciter::computeDerivatives}\\
+\texttt{ESST1A} & 4 & $V_m,x_1,x_2,x_3$（含 $K_gV_t$） & \implfull{BasicDynamicDevices.cpp:exciter\_has\_terminal\_compounding}\\
+\texttt{ST6B} & 4 & 同上 & \implfull{BasicDynamicDevices.cpp:exciter\_has\_terminal\_compounding}\\
+\texttt{ESAC1A} & 5 & $V_m,V_{r1},V_{r2},V_e,V_{r3}$ & \implfull{BasicDynamicDevices.cpp:exciter\_rectifier}\\
+\texttt{EXAC1} & 5 & 同上 & \implfull{BasicDynamicDevices.cpp:exciter\_is\_ac1a}\\
+\texttt{ST8C} & 5 & $V_m,x_1,x_2,x_3,x_4$ & \implfull{BasicDynamicDevices.cpp:Exciter::computeDerivatives}\\
+\end{longtable}
+\end{footnotesize}
+挂接时场电压状态由同步机拥有（\srcpath{fieldIndex}），励磁机通过 $\dot v_f$ 写入其导数。
+
+\subsection{参数表}
+\label{sec:dynamics-exc-params}
+\compmeta{ExciterDynamicParams}{include/hacdcpf/dynamics/devices/BasicDynamicDevices.hpp}
+\begin{paramtable}
+\fld{model} & — & — & 枚举 & SEXS & 励磁机模型族\\
+\fld{v\_ref\_pu} & $V_{\mathrm{ref}}$ & pu & $0.95\sim1.1$ & $1.0$ & 参考电压（初始化时锁存）\\
+\fld{ka} & $K_a$ & pu & $20\sim400$ & $20$ & 调节器增益\\
+\fld{ta\_s} & $T_a$ & s & $0.01\sim0.2$ & $0.05$ & 调节器时间常数\\
+\fld{ta\_over\_tb} & $T_a/T_b$ & — & $0.1\sim1$ & $1.0$ & SEXS 超前—滞后比\\
+\fld{tb\_s} & $T_b$ & s & $0.05\sim20$ & $0.05$ & SEXS 超前—滞后分母\\
+\fld{te\_s} & $T_e$ & s & $0.02\sim1$ & $0.40$ & 励磁机 / 场时间常数\\
+\fld{tr\_s} & $T_r$ & s & $0.01\sim0.06$ & $0.01$ & 机端电压测量时间常数\\
+\fld{kv} & $K_v$ & pu & $10\sim50$ & $20$ & AVRSimple 积分增益\\
+\fld{ke} & $K_e$ & pu & $-0.1\sim1$ & $1.0$ & 励磁机自励系数（Type I）\\
+\fld{kf} & $K_f$ & pu & $0\sim0.1$ & $0$ & 速率（稳定）反馈增益\\
+\fld{tf\_s} & $T_f$ & s & $0.5\sim2$ & $1.0$ & 速率反馈时间常数\\
+\fld{ae} & $A_e$ & pu & $0\sim0.1$ & $0$ & 饱和系数 A（0 关闭饱和）\\
+\fld{be} & $B_e$ & — & $0\sim2$ & $0$ & 饱和指数 / 系数 B\\
+\fld{k0} & $K_0$ & pu & $20\sim200$ & $20$ & AVRTypeII 调节器增益\\
+\fld{t1\_s}$\sim$\fld{t4\_s} & $T_{1\text{--}4}$ & s & $0.01\sim1$ & $0.05/0.01$ & AVRTypeII 两级超前—滞后\\
+\fld{tc\_s} & $T_c$ & s & $0.05\sim10$ & $0.05$ & AC/ST 超前—滞后分子\\
+\fld{kg} & $K_g$ & pu & $0\sim1$ & $1.0$ & 端电压补偿增益（ST6B/8C/ESST1A）\\
+\fld{kc} & $K_c$ & pu & $0\sim0.5$ & $0$ & 整流器换相系数（$I_N=K_cI_{fd}/V_e$）\\
+\fld{kd} & $K_d$ & pu & $0\sim1.5$ & $0$ & 去磁系数\\
+\fld{va\_min\_pu} & $V_a^{\min}$ & pu & — & $-5$ & 调节器下限（另有 \fld{va\_max\_pu}）\\
+\fld{efd\_min\_pu} & $E_{fd}^{\min}$ & pu & — & $0$ & 场电压下限（另有 \fld{efd\_max\_pu}）\\
+\end{paramtable}
+$V_s$ 附加信号来自挂接的 PSS（\S\ref{sec:dynamics-device-governors-pss}）；$T_e$ 在 \texttt{IEEET1} 直接取
+\fld{te\_s}，其余模型经 \srcpath{control\_time} 钳位。

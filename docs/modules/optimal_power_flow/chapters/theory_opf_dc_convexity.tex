@@ -10,12 +10,12 @@ DC 潮流近似从极坐标功率方程出发的严格推导（三条假设与 $
 线性化误差界；DC OPF 的 LP 对偶理论与节点边际电价（LMP）的能量/阻塞/损耗
 分量分解（含 KKT 推导与数值例）；凸松弛一般理论（Jabr 二阶锥松弛、
 Lavaei--Low SDP 松弛的精确性条件、配网 DistFlow/Branch Flow 模型与树网
-角度恢复定理的证明）；LinDistFlow 线性化与近似误差分析；混合整数方法基础
+角度恢复定理的证明、网孔网络的相角一致性（KVL）与松弛间隙）；LinDistFlow 线性化与近似误差分析；混合整数方法基础
 （OLTC 离散档位的 MILP 建模、二元-连续乘积的大 $M$ 线性化及其精确性证明、
 指示约束语义、分支定界原理与 MIP gap 语义）；三相/相域建模一般理论
 （Carson 方程、Kron 归约、Fortescue 序分量变换与换位线路的序网解耦证明、
 不平衡 OPF 的难点）；交直流混合 OPF 的文献标准模型（VSC 换流站损耗模型与
-DC 电导网络）。与平台实现（\srcpath{src/optimal\_power\_flow/} 与
+DC 电导网络），以及以自研 Parity IPM 与直流 OPF 实测的成本间隙数值基准。与平台实现（\srcpath{src/optimal\_power\_flow/} 与
 \srcpath{src/power\_models/}）的对应关系见本章末"与实现的对应"表，超出实现的
 内容以"未实现扩展说明"框就地标记。
 \end{theorynote}
@@ -418,6 +418,40 @@ SDP 松弛~\cite{opfdc:lavaei-low,opfdc:low-tutorial}。已知结论的要点：
 \textbf{目标下界证书}，可用于启发式解的质量定界。
 \end{remark}
 
+\subsubsection{网孔网络的相角一致性与松弛间隙}
+
+定理~\ref{thm:opf-th-dc-anglerec} 的树网角度恢复依赖\emph{无环}。网孔网络上，即使
+全部支路锥约束取等，$W$ 也未必秩一——相位增量须绕每个环路一致。
+
+\begin{proposition}[网孔相角一致性（KVL）]\label{prop:opf-th-dc-cycle}
+设连通图 $G$、$W\in H^n$ 满足 $W_{ii}>0$ 且每边锥约束取等
+（$|W_{ij}|^2=W_{ii}W_{jj}$）。记边相位 $\Delta_{ij}=\arg W_{ij}$
+（$\Delta_{ji}=-\Delta_{ij}$）。则存在电压相量 $V$ 使 $W_{ij}=V_i\overline{V_j}$
+（$\mathrm{rank}\,W=1$）\emph{当且仅当}对 $G$ 的每个环路 $C$，
+\begin{equation}
+\sum_{(i,j)\in C}\Delta_{ij}\equiv0\pmod{2\pi}.
+\label{eq:opf-th-dc-cycle}
+\end{equation}
+\end{proposition}
+\begin{proof}
+（$\Rightarrow$）若 $W_{ij}=V_i\overline{V_j}$，则 $\Delta_{ij}=\theta_i-\theta_j$，
+环路求和伸缩相消 $\equiv0\pmod{2\pi}$。（$\Leftarrow$）取生成树 $T$，用
+定理~\ref{thm:opf-th-dc-anglerec} 沿 $T$ 定义 $\theta$（幅值 $\sqrt{W_{ii}}$）。对任一
+非树边 $(i,j)$，树路径 $i\rightsquigarrow j$ 与该边构成环路 $C$，
+条件~\eqref{eq:opf-th-dc-cycle} 给出 $\theta_i-\theta_j\equiv\Delta_{ij}$，故
+$V_i\overline{V_j}=W_{ij}$ 对非树边亦成立；全部边满足即秩一。
+\end{proof}
+
+\begin{remark}[KVL、松弛间隙与凸性代价]\label{rem:opf-th-dc-cycle}
+条件~\eqref{eq:opf-th-dc-cycle} 正是相角的\textbf{基尔霍夫电压定律}（环路相角差之和
+为零）。树网无独立环路，条件空洞成立，故 SOCP 精确（注记~\ref{rem:opf-th-dc-sdp}）；
+网孔网每个独立环路贡献一条式~\eqref{eq:opf-th-dc-cycle} 约束，而 $\arg W_{ij}$ 是 $W$
+的\emph{非凸}函数——凸 SOCP/SDP 松弛恰恰\textbf{丢弃}了这些环路约束，这是网孔网络上
+松弛可能不精确（存在正间隙）的结构根源。补回环路约束即恢复非凸可行集；实用中以在
+锥松弛解上检查式~\eqref{eq:opf-th-dc-cycle} 的违反度作为松弛紧性判据。独立环路数
+$=|\mathcal L|-n+1$（连通图的一阶贝蒂数）。
+\end{remark}
+
 \subsubsection{配网 DistFlow 与 Branch Flow 模型}
 
 \begin{definition}[DistFlow / Branch Flow 模型]\label{def:opf-th-dc-bfm}
@@ -798,6 +832,33 @@ AML 建模层同形，\srcpath{src/power\_models/acdcopf\_builder.cpp:solve\_acd
 再外逼近（见实现层三相混合章）。
 \end{remark}
 
+\subsection{数值算例与基准}\label{sec:opf-th-dc-numexp}
+
+\srcpath{tools/pf\_doc\_benchmark.cpp}（模式 \texttt{opf}）在 MATPOWER 算例上对比直流 OPF
+与交流 OPF（自研 Parity IPM）的最优目标。表~\ref{tab:opf-th-dc-gap} 的\emph{成本间隙}
+$(f_{AC}^\star-f_{DC}^\star)/f_{AC}^\star$ 度量 DC 近似在\textbf{经济}口径的代价。
+\begin{table}[H]\centering\footnotesize
+\caption{直流 OPF 与交流 OPF 最优成本及间隙（默认经济目标，\$/h）}
+\label{tab:opf-th-dc-gap}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+算例 & 母线数 & 交流 OPF $f_{AC}^\star$ & 直流 OPF $f_{DC}^\star$ & 成本间隙\\
+\midrule
+case9   & 9   & $5296.69$   & $5216.03$   & $1.52\%$\\
+case14  & 14  & $8081.52$   & $7642.59$   & $5.43\%$\\
+case30  & 30  & $576.89$    & $565.21$    & $2.03\%$\\
+case57  & 57  & $41737.79$  & $41006.74$  & $1.75\%$\\
+case118 & 118 & $129660.69$ & $125947.88$ & $2.86\%$\\
+case300 & 300 & $719725.10$ & $706240.29$ & $1.87\%$\\
+\bottomrule
+\end{tabular}
+\end{table}
+间隙普遍为 $1.5\%\sim5.4\%$：直流 OPF 忽略网损与无功/电压约束，系统性\textbf{低估}发电
+成本（$f_{DC}^\star<f_{AC}^\star$），与命题~\ref{prop:opf-th-dc-errbound} 的支路误差、
+注记~\ref{rem:opf-th-dc-errread} 的“网损 + 电压偏离 + 角度曲率”三项代价一致。间隙随
+负荷压力与网损占比变化、非常数——故 DC OPF 宜作\textbf{阻塞格局与出清价的快速筛选}，
+精确成本与可行性须回代交流 OPF。
+
 \subsection{与实现的对应}\label{sec:opf-th-dc-implmap}
 \begin{center}\footnotesize
 \begin{longtable}{@{}L{6.8cm}L{8.6cm}@{}}
@@ -849,6 +910,11 @@ VSC 损耗 $a+bI+cI^2$ 耦合（定义~\ref{def:opf-th-dc-vsc}） &
 \implfull{src/optimal\_power\_flow/parity\_formulation.cpp:equality\_constraints}（三字段近似 loss\_mw/loss\_percent/$1-\eta$；AML 口径 src/power\_models/acdcopf\_builder.cpp:solve\_acdcopf 同形；loss\_percent 精确化 deferred 见注记~\ref{rem:opf-th-dc-parity}）\\
 DC 电导网络 $P_{dc}=V_{dc}\odot(G_{dc}V_{dc})$（定义~\ref{def:opf-th-dc-dcgrid}） &
 \implfull{src/optimal\_power\_flow/parity\_formulation.cpp:build\_problem}（显式直流电压块与 DC 平衡行；松弛层提升 $X_{ij}=u_iu_j$ 见 three\_phase\_hybrid\_relaxation.cpp）\\
+网孔相角一致性（KVL）与松弛间隙（命题~\ref{prop:opf-th-dc-cycle}，
+式~\eqref{eq:opf-th-dc-cycle}） &
+\implnone（锥松弛层不检查环路相角一致性，也不输出松弛间隙/紧性证书）\\
+DC 与 AC OPF 成本间隙数值基准（表~\ref{tab:opf-th-dc-gap}） &
+\implfull{tools/pf\_doc\_benchmark.cpp}（模式 opf）\\
 \bottomrule
 \end{longtable}
 \end{center}

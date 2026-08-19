@@ -5,6 +5,16 @@
 \documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
 \usepackage{../../_manual_common/hysim_manual}
 
+% 控制框图统一样式（本手册专用）：主信号链在同一基线，反馈走下方回程线，间距充裕以避免重叠。
+\tikzset{
+  cb/.style={draw,rounded corners,minimum height=9mm,minimum width=19mm,align=center,
+             font=\small,inner sep=3pt,fill=white},
+  cbs/.style={draw,rounded corners,minimum height=8mm,minimum width=13mm,align=center,
+              font=\footnotesize,inner sep=2pt,fill=white},
+  csum/.style={draw,circle,minimum size=6mm,inner sep=0pt,font=\footnotesize},
+  csig/.style={font=\footnotesize},
+}
+
 \title{\textbf{交直流混合高弹性能源电力系统仿真平台}\\[0.5em]
        {\Large 机电暂态（动力学）技术手册}\\[0.3em]
        {\large 数学模型、接口参数、验证校核与工业级评价}}
@@ -93,8 +103,15 @@ BackwardEulerNewton、TrapezoidalNewton、RosenbrockEuler、MassMatrixDae）、
 % ── 通用理论层（修订版 2 新增，专著级深度）──
 \input{chapters/theory_machine_dae}
 \input{chapters/theory_controls_small_signal}
+\input{chapters/theory_transient_stability}
 % ── 实现转写层（源码等价）──
 \input{chapters/source_equivalent_solver}
+% ── 设备模型逐式转写层（同步发电机组控制链：机—励—调—稳）──
+\input{chapters/device_models_machines}
+\input{chapters/device_models_exciters}
+\input{chapters/device_models_governors_pss}
+\input{chapters/device_models_inverters}
+\input{chapters/device_models_motors_loads}
 
 \section{接口与参数}
 \begin{paramtable}

@@ -10,8 +10,10 @@ Park 变换与 dq0 坐标系及标幺化的代数结构、同步电机模型谱�
 次暂态模型）从磁链方程出发的完整推导、摆动方程与惯量常数 $H$ 及惯量中心（COI）
 参考系理论、机电暂态 DAE 的一般形式与微分指标（index）概念及分块/联立两类求解
 架构、隐式梯形与后向欧拉的局部截断误差和 A-稳定/L-稳定理论及刚性概念、
-Runge--Kutta 族的 Butcher 统一理论与 Rosenbrock 线性隐式方法一般理论，以及 DAE
-一致初始条件与动态修整（dynamic trimming）理论。与平台实现
+Runge--Kutta 族的 Butcher 统一理论与 Rosenbrock 线性隐式方法一般理论、线性多步（BDF）
+方法及其零稳定性与 Dahlquist 阶垒，以及 DAE
+一致初始条件与动态修整（dynamic trimming）理论，并以单机无穷大母线小信号实测数据
+给出机电模态与刚性谱的数值基准。与平台实现
 （\srcpath{src/dynamics/}）的对应关系见本章末"与实现的对应"表，超出实现的内容以
 "未实现扩展说明"框就地标记。控制系统（励磁/调速/PSS/逆变器控制）与小信号理论的
 专门展开见本手册另一理论章，本章仅在涉及整机方程耦合处引用其结论。
@@ -818,6 +820,59 @@ $4$--$5$ 个数量级。选型准则：
 稳定性阶梯），但不得把失败静默改写为收敛。
 \end{remark}
 
+\subsection{线性多步法（BDF）与刚性衰减}\label{sec:dy-th-mac-bdf}
+
+隐式单步法（§\ref{sec:dy-th-mac-stab}）之外，变阶\emph{向后差分公式}（BDF）是刚性 DAE
+的另一主力：以过去 $k$ 步解值构造隐式格式，单步只解一次非线性系统即达 $k$ 阶。
+
+\begin{definition}[BDF-$k$ 公式]\label{def:dy-th-mac-bdf}
+以等步长 $h$、过去节点 $w_{n},\dots,w_{n-k+1}$ 逼近 $\dot w_{n+1}=\varphi(w_{n+1},t_{n+1})$，
+BDF-$k$ 为
+\begin{equation}
+\sum_{j=0}^{k}\alpha_j\,w_{n+1-j}=h\,\varphi(w_{n+1},t_{n+1}),
+\label{eq:dy-th-mac-bdf}
+\end{equation}
+$\{\alpha_j\}$ 由“$k$ 次插值多项式在 $t_{n+1}$ 的导数等于 $\varphi_{n+1}$”唯一确定。
+$k{=}1$ 即后向欧拉；$k{=}2$ 为 $\tfrac32 w_{n+1}-2w_n+\tfrac12 w_{n-1}=h\varphi_{n+1}$。
+BDF-$k$ 的阶为 $p=k$。
+\end{definition}
+
+\begin{definition}[生成多项式与零稳定]\label{def:dy-th-mac-rootcond}
+线性多步法 $\sum_j\alpha_j w_{n+1-j}=h\sum_j\beta_j\varphi_{n+1-j}$ 的生成多项式
+$\rho(\zeta)=\sum_j\alpha_j\zeta^{k-j}$、$\sigma(\zeta)=\sum_j\beta_j\zeta^{k-j}$。方法
+\emph{零稳定}当且仅当 $\rho$ 满足\textbf{根条件}：全部根 $|\zeta_i|\le1$，且模为 $1$ 的根为单根。
+\end{definition}
+
+\begin{theorem}[Dahlquist 收敛与两个阶垒]\label{thm:dy-th-mac-dahlquist}
+(i)（收敛 $=$ 相容 $+$ 零稳定）线性多步法收敛当且仅当它相容（$\rho(1)=0$、
+$\rho'(1)=\sigma(1)$）且零稳定~\cite{dym:hairer1}。
+(ii)（第一阶垒）零稳定 $k$ 步法的阶至多 $k+2$（$k$ 偶）、$k+1$（$k$ 奇）；BDF-$k$
+取阶 $p=k$，且\textbf{仅 $k\le6$ 零稳定}（$k\ge7$ 违反根条件、发散）。
+(iii)（第二阶垒，Dahlquist）A-稳定线性多步法的阶不超过 $2$，二阶 A-稳定方法中误差
+常数最小者为隐式梯形~\cite{dym:hairer2}。
+\end{theorem}
+
+\begin{proposition}[BDF 的 A($\alpha$)-稳定与刚性衰减]\label{prop:dy-th-mac-bdfstab}
+BDF-$1$、BDF-$2$ 为 A-稳定；BDF-$3$ 至 BDF-$6$ 为 A($\alpha$)-稳定，半角 $\alpha$ 随 $k$
+递减（$\alpha_3\!\approx\!86^\circ,\alpha_4\!\approx\!73^\circ,\alpha_5\!\approx\!52^\circ,
+\alpha_6\!\approx\!18^\circ$）。全部 BDF-$k$（$k\le6$）满足\emph{刚性衰减}：
+$\mathrm{Re}\,z\to-\infty$ 时 $|w_{n+1}/w_n|\to0$，快模态被一步压向零（与后向欧拉同类，
+无梯形振铃）。
+\end{proposition}
+\begin{proof}[证明要点]
+将式~\eqref{eq:dy-th-mac-bdf} 施于 $\dot w=\lambda w$（$z=h\lambda$，$\sigma(\zeta)=\zeta^k$）：
+稳定性由 $\rho(\zeta)-z\zeta^k$ 的根决定，$z\to-\infty$ 时主根 $\zeta\to0$，即刚性衰减。
+A($\alpha$) 半角由稳定域边界 $z=\rho(e^{\mathrm j\theta})/e^{\mathrm jk\theta}$ 的轨迹与负实轴
+张角算得，$k$ 越大边界越向虚轴凹进、$\alpha$ 越小；$k\ge7$ 时 $\rho$ 出现模大于 $1$
+的根，根条件失效（Hairer--Wanner~\cite{dym:hairer2}）。
+\end{proof}
+
+\begin{gapnote}
+BDF/线性多步法在平台中\textbf{未实现}：动态求解器族为分块单步（Euler/Heun/RK4）、
+后向欧拉、隐式梯形、单级 Rosenbrock 与质量矩阵 DAE，均为\emph{单步}法（见本章末对应
+表与 DynamicSolverType 枚举）；无多步/变阶 BDF 内核。
+\end{gapnote}
+
 \subsection{Runge--Kutta 族的 Butcher 理论与 Rosenbrock 方法}\label{sec:dy-th-mac-rk}
 
 \subsubsection{Runge--Kutta 方法的统一表述}
@@ -994,6 +1049,51 @@ $y^{(k+1)}=y^{(k)}-g_y(x_0,y^{(k)})^{-1}g(x_0,y^{(k)})$ 的局部二次收敛是
 队列，积分到事件时刻、施加编辑、重一致化、重启。
 \end{remark}
 
+\subsection{数值算例与基准}\label{sec:dy-th-mac-numexp}
+
+本节数字由 \srcpath{tools/pf\_doc\_benchmark.cpp}（模式 \texttt{dyn}）实测：构造单机无穷大
+母线（SMIB，经典电机 $H{=}3.5$~s、$X_d'{=}0.3$、经 $X_e{=}0.2$ 接入以 $H{=}10^6$ 冻结的
+参考机，$P{=}0.8$~pu、$f_0{=}50$~Hz），对初始化平衡点做小信号线性化
+（\fld{compute\_small\_signal}）。Schur 降阶状态矩阵（$n_{\mathrm{diff}}{=}8$）的机电振荡
+模态为
+\begin{equation}
+\lambda_{\mathrm{em}}=-0.071\pm6.577\,\mathrm j~\mathrm{s^{-1}},\qquad
+f=1.05~\mathrm{Hz},\quad\zeta=0.011,
+\end{equation}
+其余为冻结参考机的 $\approx0$~Hz 模态与零特征值（$H\to\infty$ 的无穷大母线极限）。
+$|\lambda_{\mathrm{em}}|\approx6.58$ 表明该经典机 SMIB \textbf{非刚性}：$h{=}10$~ms 下
+$h|\lambda|\approx0.066\ll2$，显式方法即落在稳定域内（定理~\ref{thm:dy-th-mac-astab}）。
+一旦引入次暂态（$T_d''\sim30$~ms）或快 AVR/滤波器，$|\lambda_{\max}|$ 上升 $3$--$4$ 个
+量级（注记~\ref{rem:dy-th-mac-choose}），$h|\lambda_{\max}|\gg2$ 迫使显式失稳——这正是
+A-稳定隐式法与 BDF（§\ref{sec:dy-th-mac-bdf}）的用武之地。机电模态本身与摆动方程的
+相互印证见姊妹章的小信号数值节。
+
+\subsubsection{积分器的一致性与代价对照（多机故障）}
+进一步在 WSCC 9 节点 3 机系统（经典电机，$H{=}\{23.64,6.40,3.01\}$~s，$60$~Hz）上比较四种积分器：
+在母线 7 施加 $80$~ms 近金属性三相短路（$t{=}0.10$--$0.18$~s），积分至 $3$~s，度量重心频率峰值偏移
+$\Delta f_{\max}$、末端重心频率与线性求解次数（\srcpath{tools/pf\_doc\_benchmark.cpp} 模式 \texttt{dyn2}，
+经 \srcpath{DynamicModelBuilder} 装配、\texttt{FaultShunt}/\texttt{ClearFault} 事件驱动、
+\srcpath{DynamicSolver::solve} 求解）：
+\begin{center}\footnotesize
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+求解器 & 类型 & $\Delta f_{\max}$/Hz & $f_{\mathrm{coi}}(3\mathrm s)$/Hz & 线性解@10ms & 线性解@5ms\\
+\midrule
+梯形 Trapezoidal & A-稳定隐式 & $0.0725$ & $60.068$ & $590$ & $1180$\\
+后向欧拉 Backward Euler & L-稳定隐式 & $0.0723$ & $60.064$ & $590$ & $1180$\\
+RK4（分块） & 显式 4 级 & $0.0725$ & $60.068$ & $1200$ & $2400$\\
+Rosenbrock--Euler & 线性隐式 & $0.0723$ & $60.064$ & $300$ & $600$\\
+\bottomrule
+\end{tabular}
+\end{center}
+四法均成功、无拒绝步（定步长），且 $\Delta f_{\max}$ 与末端频率\emph{在三位有效数字内一致}——这是数值
+\emph{相容性}的直接体现：稳定函数 $R(h\lambda)$ 虽异，但在该非刚性工况（$h|\lambda|\ll1$）下均落于精度
+一致区。将 $h$ 由 $10$~ms 减半至 $5$~ms，结果几乎不变而代价翻倍，说明 $10$~ms 已收敛（局部误差
+$O(h^{p})$ 低于分辨率）。代价排序 Rosenbrock（每步一次因子分解）$<$ 隐式牛顿（梯形/后向欧拉，每步
+数次牛顿迭代）$<$ RK4（四级、每级一次网络求解），与 §\ref{sec:dy-th-mac-rk} 的级数—代价分析一致。
+选取隐式 A/L-稳定法的收益要到引入次暂态/快 AVR 的刚性工况才显现（届时 RK4 的稳定域约束迫使
+$h$ 大幅减小，代价反超隐式法）。
+
 \subsection{与实现的对应}
 
 \begin{center}\footnotesize
@@ -1042,6 +1142,11 @@ Rosenbrock 一般理论（定义~\ref{def:dy-th-mac-rosenbrock}） &
 \implpart{仅单级线性隐式欧拉变体：src/dynamics/integration/Rosenbrock.cpp:Rosenbrock::step（$(I-hJ)\Delta=h f$，数值雅可比）；Rodas 类高阶族与质量矩阵推广未实现}\\
 一致初始化三阶段与动态修整（含慢状态钉住） &
 \implfull{src/dynamics/DynamicSystem.cpp:initializeStatesFromPowerFlow}（潮流断面+逐设备 trimToNetworkEquilibrium 交替修整，如 SynchronousMachine::trimToNetworkEquilibrium；慢状态掩蔽 mask\_slow\_residuals；收敛摘要写入 DynamicInitializationSummary）\\
+BDF/线性多步法与 Dahlquist 阶垒（定义~\ref{def:dy-th-mac-bdf}、
+定理~\ref{thm:dy-th-mac-dahlquist}） &
+\implnone（求解器族全为单步法；无多步/变阶 BDF 内核）\\
+SMIB 机电模态/刚性谱数值基准（§\ref{sec:dy-th-mac-numexp}） &
+\implfull{tools/pf\_doc\_benchmark.cpp}（模式 dyn；compute\_small\_signal）\\
 \bottomrule
 \end{longtable}
 \end{center}

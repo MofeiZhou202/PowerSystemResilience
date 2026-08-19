@@ -1,0 +1,348 @@
+\section{同步电机设备模型（逐式转写）}
+\label{sec:dynamics-device-machines}
+
+本章逐个转写平台内置同步电机模型族的状态方程、定子代数关系与转子—网络接口，全部公式以
+\srcpath{src/dynamics/devices/BasicDynamicDevices.cpp} 中的
+\srcpath{SynchronousMachine::computeDerivatives} 及其 \texttt{evaluate\_*} / \texttt{*\_params}
+辅助函数为唯一依据。模型选择由枚举 \texttt{SynchronousMachineModelKind}
+（\srcpath{include/hacdcpf/dynamics/devices/BasicDynamicDevices.hpp}）给出，共
+\emph{经典、单轴双绕组、圆转子次暂态（GENROU/GENROE）、凸极次暂态（GENSAL/GENSAE）、
+Marconato 族（含 Anderson--Fouad）、Sauer--Pai} 六类实现路径，状态数 $2\sim10$ 不等。
+本章不引入代码之外的“教科书标准式”；凡代码未实现的物理效应（如附加饱和支路、独立
+$q$ 轴场绕组）均如实标注。
+
+\subsection{公共转子—网络接口}
+\label{sec:dynamics-machine-common}
+所有高阶电机模型共享同一套转子运动方程与 $dq$／网络接口。设备状态向量的前两位恒为
+转子角 $\delta$（下标 0）与转子转速 $\omega$（下标 1，标幺，同步时 $\omega=1$）；
+\emph{最后两位}恒为机械转矩 $\tau_m$ 与励磁电压 $v_f$。当未挂接调速器 / 励磁机时，
+$\tau_m$、$v_f$ 的导数被显式置零（视为常量给定）；一旦挂接对应控制器，该状态的导数改由
+\srcpath{Governor}／\srcpath{Exciter} 设备拥有（见后续章节）。判定标志为
+\texttt{governor\_attached\_} 与 \texttt{exciter\_attached\_}。
+
+\paragraph{转子运动（摆动）方程。}
+记基频电角速度 $\omega_b=2\pi f_n$（$f_n=$\fld{frequency\_hz}），惯性常数
+$H=\max(0.01,\,$\fld{inertia\_h}$)$，阻尼系数 $D=$\fld{damping\_d}。摆动方程按代码写作
+\begin{align}
+ \dot\delta &= \begin{cases}\omega_b(\omega-1), & \text{\fld{dynamic\_angle}}=\text{true},\\[2pt]
+                              0, & \text{否则,}\end{cases}\\[4pt]
+ P_a &= \tau_m-\tau_e-\tau_{\mathrm{brake}}
+        -\frac{D\,(\omega-1)}{\max(\varepsilon_V,\,|\omega|)},\\[2pt]
+ \dot\omega &= \begin{cases}0, & |P_a|\le\varepsilon_P \;\wedge\; |\omega-1|\le\varepsilon_P,\\[2pt]
+                            \dfrac{P_a}{2H}, & \text{否则,}\end{cases}
+\end{align}
+其中 $\tau_e$ 为气隙电磁转矩（由各模型的 \texttt{evaluate\_*} 给出），
+$\tau_{\mathrm{brake}}$ 为负序制动转矩（\srcpath{negative\_sequence\_braking\_torque}，仅在设置
+$r_2,x_2$ 时非零），$\varepsilon_V=$\texttt{kMinVoltage}、$\varepsilon_P=$
+\texttt{kMachinePowerBalanceTolPu} 为数值下限与功率平衡闭锁阈值。功率闭锁分支是代码特有的
+数值锁存：当功率不平衡与转差同时进入阈值带时冻结 $\dot\omega$，避免残余抖动。依据：
+\srcpath{SynchronousMachine::computeDerivatives}。
+
+\paragraph{$dq$／网络坐标变换。}
+定子接口采用 PSS/E 风格的 $q$ 轴超前约定（\srcpath{psd\_ri\_to\_dq}／\srcpath{psd\_dq\_to\_ri}）。
+以正序机端电压相量 $V=V_r+\mathrm jV_i$ 为输入，
+\begin{equation}
+ \begin{bmatrix}v_d\\ v_q\end{bmatrix}
+ =\begin{bmatrix}\sin\delta & -\cos\delta\\ \cos\delta & \sin\delta\end{bmatrix}
+  \begin{bmatrix}V_r\\ V_i\end{bmatrix},
+ \qquad
+ \begin{bmatrix}I_r\\ I_i\end{bmatrix}
+ =\begin{bmatrix}\sin\delta & \cos\delta\\ -\cos\delta & \sin\delta\end{bmatrix}
+  \begin{bmatrix}i_d\\ i_q\end{bmatrix}.
+\end{equation}
+注入网络的复电流 $I=I_r+\mathrm jI_i$ 由该逆变换回填。气隙功率与无功按
+$p_e=v_di_d+v_qi_q$、$q_e=v_qi_d-v_di_q$ 计算。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[>=Latex,node distance=8mm,
+  blk/.style={draw,rounded corners,minimum height=8mm,minimum width=15mm,align=center,font=\small},
+  sum/.style={draw,circle,inner sep=0pt,minimum size=5mm,font=\footnotesize},
+  every node/.style={font=\small}]
+  \node[sum] (s1) {$\Sigma$};
+  \node[blk,right=10mm of s1] (inertia) {$\dfrac{1}{2Hs}$};
+  \node[blk,right=12mm of inertia] (speed) {$\dfrac{\omega_b}{s}$};
+  \node[right=10mm of speed] (delta) {$\delta$};
+  \node[blk,below=12mm of speed,fill=blue!5] (dq) {$dq$ 变换\\ + 定子代数};
+  \node[left=14mm of dq,align=center] (vbus) {机端\\ $V=V_r+\mathrm jV_i$};
+  \coordinate (wtap) at ($(inertia.east)!0.5!(speed.west)$);
+  \draw[->] (s1) -- node[above,font=\footnotesize]{$P_a$} (inertia);
+  \draw[->] (inertia) -- node[above,font=\footnotesize]{$\omega-1$} (speed);
+  \draw[->] (speed) -- (delta);
+  \draw[->] (wtap) |- (dq.west |- wtap) -- ($(dq.north west)!0.3!(dq.north east)$);
+  \draw[->] (vbus) -- (dq);
+  \draw[->] (dq.east) -| node[pos=0.25,below,font=\footnotesize]{$-\tau_e$} (s1.south);
+  \node[above=1mm of s1,font=\footnotesize] {$+\tau_m$};
+  \node[below left=5mm and 1mm of s1,font=\footnotesize] {$-\tau_{\mathrm{brake}},\,-D\Delta\omega$};
+  \draw[->] (delta.south) .. controls +(0,-14mm) and +(0,10mm) .. (dq.north east);
+\end{tikzpicture}
+\caption{高阶同步电机的公共转子—网络接口：摆动积分回路（$1/2Hs$、$\omega_b/s$）与
+$dq$ 定子代数块。$\tau_e$ 反馈由定子电流经气隙功率给出，$\delta$ 反馈进入 $dq$ 变换。}
+\label{fig:machine-common-loop}
+\end{figure}
+
+\subsection{经典模型 \texttt{ClassicalMachine}}
+\label{sec:dynamics-machine-classical}
+经典模型是缺省路径（\texttt{SynchronousMachineModelKind::Classical}），当机端未给出
+$x_d',x_q'$ 等次暂态参数时使用。它把电机等效为恒定电势 $E\angle\theta$ 串联阻抗
+$Z=r+\mathrm jx$ 的电压源，状态为 $(\theta,\omega,E,p_m)$，共 4 个（当励磁与调速均缺省时可退化为
+$(\theta,\omega)$ 2 状态）。注入电流与电磁功率为
+\begin{equation}
+ I=\frac{E\angle\theta-V}{Z},\qquad
+ p_e=\Re\!\big(V\,\overline{I}\big)\cdot s_{\phi},
+\end{equation}
+$s_\phi$ 为相功率合成系数 \fld{phase\_power\_scale}。摆动方程与
+\S\ref{sec:dynamics-machine-common} 同构，但阻尼项按转矩线性写作 $D(\omega-1)$（\emph{不}除以
+$|\omega|$），且直接使用 $p_m-p_e$：
+\begin{equation}
+ \dot\theta=\omega_b(\omega-1),\qquad
+ \dot\omega=\frac{p_m-p_e-\tau_{\mathrm{brake}}-D(\omega-1)}{2H}.
+\end{equation}
+$E$（下标 2，场／内电势幅值）与 $p_m$（下标 3）在无励磁／调速时导数为零。依据：
+\srcpath{SynchronousMachine::computeDerivatives}（末段回退分支）。
+
+\subsection{单轴双绕组模型 \texttt{OneDOneQ}}
+\label{sec:dynamics-machine-onedoneq}
+六状态模型 $(\delta,\omega,e_q',e_d',\tau_m,v_f)$，保留 $d$ 轴场绕组与 $q$ 轴阻尼绕组各一，
+忽略次暂态与定子暂态。暂态电势方程为
+\begin{align}
+ \dot e_q' &= \frac{-e_q'-(x_d-x_d')\,i_d+v_f}{T_{d0}'},\\
+ \dot e_d' &= \frac{-e_d'+(x_q-x_q')\,i_q}{T_{q0}'},
+\end{align}
+定子电流 $i_d,i_q$ 由 \srcpath{evaluate\_onedoneq} 在等效阻抗
+$x_{\mathrm{eff}}=\sqrt{x_d'x_q'}$ 下解出，$\tau_m,v_f$ 为末两位状态。依据：
+\srcpath{SynchronousMachine::computeDerivatives}（\texttt{machine\_is\_onedoneq} 分支）。
+
+\subsection{圆转子次暂态模型 GENROU / GENROE}
+\label{sec:dynamics-machine-genrou}
+圆转子模型（\texttt{GENROU} 二次饱和 / \texttt{GENROE} 指数饱和，或
+\texttt{psd\_genrou\_model} 标志）为八状态
+$(\delta,\omega,e_q',e_d',\psi_{kd},\psi_{kq},\tau_m,v_f)$，其中 $\psi_{kd},\psi_{kq}$ 为
+$d/q$ 轴阻尼绕组磁链。所有耦合系数由电抗与漏抗按次暂态等值电路给出
+（\srcpath{genrou\_gamma\_d1} 等）：
+\begin{equation}
+ \gamma_{d1}=\frac{x_d''-x_l}{x_d'-x_l},\quad
+ \gamma_{q1}=\frac{x_d''-x_l}{x_q'-x_l},\quad
+ \gamma_{d2}=\frac{x_d'-x_d''}{(x_d'-x_l)^2},\quad
+ \gamma_{q2}=\frac{x_q'-x_d''}{(x_q'-x_l)^2},\quad
+ \gamma_{qd}=\frac{x_q-x_l}{x_d-x_l}.
+\end{equation}
+次暂态磁链、定子电流与励磁／阻尼支路量（\srcpath{evaluate\_genrou}）为
+\begin{align}
+ \psi_d'' &= \gamma_{d1}e_q'+\gamma_{d2}(x_d'-x_l)\,\psi_{kd},\qquad
+ \psi_q'' = \gamma_{q1}e_d'+(1-\gamma_{q1})\,\psi_{kq},\\
+ i_d &= \frac{-r(v_d-\psi_q'')+x_d''(-v_q+\psi_d'')}{r^2+x_d''^2},\qquad
+ i_q = \frac{x_d''(v_d-\psi_q'')+r(-v_q+\psi_d'')}{r^2+x_d''^2},\\
+ X_{ad}i_{fd} &= e_q'+(x_d-x_d')\big(\gamma_{d1}i_d-\gamma_{d2}\psi_{kd}+\gamma_{d2}e_q'\big)
+              +S_e\,\psi_d'',\\
+ X_{aq}i_{1q} &= e_d'+(x_q-x_q')\big(\gamma_{q2}e_d'-\gamma_{q2}\psi_{kq}-\gamma_{q1}i_q\big)
+              +S_e\,\psi_q''\,\gamma_{qd},\\
+ \tau_e &= i_d(v_d+r\,i_d)+i_q(v_q+r\,i_q).
+\end{align}
+饱和因子 $S_e$ 以次暂态磁链幅值 $\psi''=\lVert(\psi_d'',\psi_q'')\rVert_2$ 为自变量
+（\srcpath{genrou\_saturation}）：
+\begin{equation}
+ S_e=\begin{cases} S_B\,(\psi''-S_A)^2/\psi'', & \text{GENROU（二次）},\\
+                   S_B\,(\psi'')^{S_A}, & \text{GENROE（指数）},\end{cases}
+ \qquad (S_A=S_B=0\Rightarrow S_e=0).
+\end{equation}
+除公共 $\dot\delta,\dot\omega$ 外，四个电磁状态方程为
+\begin{equation}
+ \dot e_q'=\frac{v_f-X_{ad}i_{fd}}{T_{d0}'},\quad
+ \dot e_d'=\frac{-X_{aq}i_{1q}}{T_{q0}'},\quad
+ \dot\psi_{kd}=\frac{-\psi_{kd}+e_q'-(x_d'-x_l)i_d}{T_{d0}''},\quad
+ \dot\psi_{kq}=\frac{-\psi_{kq}+e_d'+(x_q'-x_l)i_q}{T_{q0}''}.
+\end{equation}
+依据：\srcpath{SynchronousMachine::computeDerivatives}（\texttt{machine\_is\_roundrotor} 分支）、
+\srcpath{evaluate\_genrou}、\srcpath{genrou\_params}。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[>=Latex,
+  blk/.style={draw,rounded corners,minimum height=8mm,minimum width=17mm,align=center,font=\small},
+  sum/.style={draw,circle,inner sep=0pt,minimum size=5mm,font=\footnotesize},
+  every node/.style={font=\small}]
+  % d-axis
+  \node[sum] (sd) {$\Sigma$};
+  \node[blk,right=9mm of sd,fill=blue!5] (feq) {$\dfrac{1}{T_{d0}'s}$};
+  \node[right=8mm of feq] (eqp) {$e_q'$};
+  \node[blk,right=8mm of eqp,fill=blue!5] (fpsikd) {$\dfrac{1}{T_{d0}''s}$};
+  \node[right=8mm of fpsikd] (psikd) {$\psi_{kd}$};
+  \draw[->] (sd) -- (feq);
+  \draw[->] (feq) -- node[above,font=\footnotesize]{} (eqp);
+  \draw[->] (eqp) -- (fpsikd);
+  \draw[->] (fpsikd) -- (psikd);
+  \node[above=1mm of sd,font=\footnotesize] {$+v_f$};
+  \draw[<-] (sd.south) -- ++(0,-6mm) node[below,font=\footnotesize]{$-X_{ad}i_{fd}(e_q',\psi_{kd},i_d)$};
+  % q-axis
+  \node[sum,below=20mm of sd] (sq) {$\Sigma$};
+  \node[blk,right=9mm of sq,fill=orange!8] (fed) {$\dfrac{1}{T_{q0}'s}$};
+  \node[right=8mm of fed] (edp) {$e_d'$};
+  \node[blk,right=8mm of edp,fill=orange!8] (fpsikq) {$\dfrac{1}{T_{q0}''s}$};
+  \node[right=8mm of fpsikq] (psikq) {$\psi_{kq}$};
+  \draw[->] (sq) -- (fed);
+  \draw[->] (fed) -- (edp);
+  \draw[->] (edp) -- (fpsikq);
+  \draw[->] (fpsikq) -- (psikq);
+  \draw[<-] (sq.south) -- ++(0,-6mm) node[below,font=\footnotesize]{$-X_{aq}i_{1q}(e_d',\psi_{kq},i_q)$};
+  % stator box
+  \node[blk,right=10mm of psikd,minimum height=22mm,fill=green!6] (stator) at ($(psikd)!0.5!(psikq)+(24mm,0)$) {定子代数\\ $\psi_d'',\psi_q''$\\ $\to i_d,i_q,\tau_e$};
+  \draw[->] (psikd.east) -- (stator.north west);
+  \draw[->] (psikq.east) -- (stator.south west);
+  \draw[->] (eqp.north) .. controls +(0,6mm) and +(0,6mm) .. (stator.north);
+  \draw[->] (edp.south) .. controls +(0,-6mm) and +(0,-6mm) .. (stator.south);
+\end{tikzpicture}
+\caption{GENROU/GENROE 的双轴磁链信号流：$d$ 轴场绕组 $e_q'$ 与阻尼绕组 $\psi_{kd}$、
+$q$ 轴 $e_d'$ 与 $\psi_{kq}$，均汇入定子代数块解出 $i_d,i_q,\tau_e$。励磁 $v_f$ 进入 $d$ 轴求和点。}
+\label{fig:genrou-flux}
+\end{figure}
+
+\subsection{凸极次暂态模型 GENSAL / GENSAE}
+\label{sec:dynamics-machine-gensal}
+凸极模型为七状态 $(\delta,\omega,e_q',\psi_{kd},\psi_{q}'',\tau_m,v_f)$。与圆转子的关键差异是
+\emph{没有独立的 $q$ 轴暂态电势 $e_d'$}：$q$ 轴只保留一个次暂态阻尼磁链 $\psi_q''$。耦合系数
+（\srcpath{salient\_gamma\_d1} 等）为
+\begin{equation}
+ \gamma_{d1}=\frac{x_d''-x_l}{x_d'-x_l},\quad
+ \gamma_{q1}=\frac{x_d'-x_d''}{x_d'-x_l},\quad
+ \gamma_{d2}=\frac{x_d'-x_d''}{(x_d'-x_l)^2},\quad
+ \gamma_{qd}=\frac{x_q-x_l}{x_d-x_l},
+\end{equation}
+$d$ 轴次暂态磁链 $\psi_d''=\gamma_{d1}e_q'+\gamma_{q1}\psi_{kd}$。定子电流与励磁支路依饱和类型
+分支（\srcpath{evaluate\_salient}）：\texttt{GENSAL}（二次，作用于 $e_q'$）取
+\begin{align}
+ i_d &= \frac{-r(v_d+\psi_q'')+x_d''(\psi_d''-v_q)}{r^2+x_d''^2},\qquad
+ i_q = \frac{x_d''(v_d+\psi_q'')+r(\psi_d''-v_q)}{r^2+x_d''^2},\\
+ X_{ad}i_{fd} &= e_q'+S_e\,e_q'
+   +(x_d-x_d')\big(i_d+\gamma_{d2}(e_q'-\psi_{kd}-(x_d'-x_l)i_d)\big),\\
+ \dot\psi_q'' &= \frac{-\psi_q''-(x_q-x_d'')\,i_q}{T_{q0}''}\quad(\text{GENSAL}),
+\end{align}
+而 \texttt{GENSAE}（指数，作用于 $\psi''=\lVert(\psi_d'',\psi_q'')\rVert_2$）改用
+$i_d=[-r(v_d-\psi_q'')+x_d''(-v_q+\psi_d'')]/(r^2+x_d''^2)$，并令
+\begin{equation}
+ \dot\psi_q''=\frac{-\psi_q''+(x_q-x_d'')\,i_q-S_e\,\gamma_{qd}\,\psi_q''}{T_{q0}''}
+ \quad(\text{GENSAE}).
+\end{equation}
+其余两个 $d$ 轴状态方程与圆转子同型：
+\begin{equation}
+ \dot e_q'=\frac{v_f-X_{ad}i_{fd}}{T_{d0}'},\qquad
+ \dot\psi_{kd}=\frac{-\psi_{kd}+e_q'-(x_d'-x_l)i_d}{T_{d0}''}.
+\end{equation}
+依据：\srcpath{SynchronousMachine::computeDerivatives}（\texttt{machine\_is\_salient} 分支）、
+\srcpath{evaluate\_salient}、\srcpath{salient\_params}。
+
+\subsection{Marconato 与 Anderson--Fouad 族}
+\label{sec:dynamics-machine-marconato}
+该族用次暂态电势 $e_q'',e_d''$（而非阻尼磁链）表述，含两种规模：
+\emph{简化}（\texttt{SimpleMarconato}/\texttt{SimpleAF}，八状态
+$(\delta,\omega,e_q',e_d',e_q'',e_d'',\tau_m,v_f)$）与\emph{完整}
+（\texttt{Marconato}/\texttt{AndersonFouad}，十状态，另加定子暂态磁链 $\psi_q,\psi_d$）。
+耦合项与 $d$ 轴附加时间常数（\srcpath{marconato\_gamma}）为
+\begin{equation}
+ \gamma_d=\frac{T_{d0}''x_d''}{T_{d0}'x_d'}(x_d-x_d'),\qquad
+ \gamma_q=\frac{T_{q0}''x_q''}{T_{q0}'x_q'}(x_q-x_q'),
+\end{equation}
+Anderson--Fouad 子族（\texttt{SimpleAF}/\texttt{AndersonFouad}）强制
+$T_{AA}=\gamma_d=\gamma_q=0$。四个电势方程为
+\begin{align}
+ \dot e_q' &= \frac{-e_q'-(x_d-x_d'-\gamma_d)i_d+(1-T_{AA}/T_{d0}')v_f}{T_{d0}'},\\
+ \dot e_d' &= \frac{-e_d'+(x_q-x_q'-\gamma_q)i_q}{T_{q0}'},\\
+ \dot e_q'' &= \frac{-e_q''+e_q'-(x_d'-x_d''+\gamma_d)i_d+(T_{AA}/T_{d0}')v_f}{T_{d0}''},\\
+ \dot e_d'' &= \frac{-e_d''+e_d'+(x_q'-x_q''+\gamma_q)i_q}{T_{q0}''}.
+\end{align}
+完整 Marconato/Anderson--Fouad 另求解定子暂态磁链
+\begin{equation}
+ \dot\psi_q=\omega_b\big(r\,i_q-\omega\,\psi_d+v_q\big),\qquad
+ \dot\psi_d=\omega_b\big(r\,i_d+\omega\,\psi_q+v_d\big),
+\end{equation}
+定子电流与 $\tau_e$ 由 \srcpath{evaluate\_simple\_marconato} / \srcpath{evaluate\_marconato} 给出。
+依据：\srcpath{SynchronousMachine::computeDerivatives}（\texttt{machine\_is\_simple\_marconato} 与
+\texttt{machine\_is\_marconato} 分支）、\srcpath{simple\_marconato\_params}。
+
+\subsection{Sauer--Pai 模型}
+\label{sec:dynamics-machine-sauerpai}
+十状态 $(\delta,\omega,\psi_q,\psi_d,e_q',e_d',\psi_d'',\psi_q'',\tau_m,v_f)$，同时保留定子暂态磁链
+$\psi_q,\psi_d$ 与次暂态磁链 $\psi_d'',\psi_q''$，是本平台阶数最高的同步机模型。定子电流与
+电磁转矩（\srcpath{evaluate\_sauerpai}）直接由磁链解出：
+\begin{equation}
+ i_d=\frac{\gamma_{d1}e_q'-\psi_d+(1-\gamma_{d1})\psi_d''}{x_d''},\quad
+ i_q=\frac{-\gamma_{q1}e_d'-\psi_q+(1-\gamma_{q1})\psi_q''}{x_q''},\quad
+ \tau_e=\psi_d\,i_q-\psi_q\,i_d.
+\end{equation}
+状态方程（除公共 $\dot\delta,\dot\omega$）为
+\begin{align}
+ \dot\psi_q &= \omega_b\big(r\,i_q-\omega\,\psi_d+v_q\big),\qquad
+ \dot\psi_d = \omega_b\big(r\,i_d+\omega\,\psi_q+v_d\big),\\
+ \dot e_q' &= \frac{-e_q'-(x_d-x_d')\big(i_d-\gamma_{d2}\psi_d''-(1-\gamma_{d1})i_d+\gamma_{d2}e_q'\big)+v_f}{T_{d0}'},\\
+ \dot e_d' &= \frac{-e_d'+(x_q-x_q')\big(i_q-\gamma_{q2}\psi_q''-(1-\gamma_{q1})i_q-\gamma_{d2}e_d'\big)}{T_{q0}'},\\
+ \dot\psi_d'' &= \frac{-\psi_d''+e_q'-(x_d'-x_l)i_d}{T_{d0}''},\qquad
+ \dot\psi_q'' = \frac{-\psi_q''-e_d'-(x_q'-x_l)i_q}{T_{q0}''}.
+\end{align}
+$\psi_q,\psi_d$ 方程中 $\omega_b$ 前的括号即定子电压方程 $v_{d,q}=-r\,i_{d,q}\mp\omega\psi_{q,d}-\dot\psi_{d,q}/\omega_b$
+的重排，体现了对定子电磁暂态的显式保留。依据：
+\srcpath{SynchronousMachine::computeDerivatives}（\texttt{machine\_is\_sauerpai} 分支）、
+\srcpath{evaluate\_sauerpai}、\srcpath{sauerpai\_params}。
+
+\subsection{与实现的对应}
+\label{sec:dynamics-machine-impl}
+\begin{footnotesize}
+\begin{longtable}{@{}L{3.4cm}L{1.1cm}L{4.0cm}L{4.6cm}@{}}
+\toprule
+\textbf{模型（枚举）} & \textbf{状态数} & \textbf{状态变量} & \textbf{实现状态}\\
+\midrule
+\endfirsthead
+\multicolumn{4}{@{}l}{\footnotesize（续表）}\\
+\toprule
+\textbf{模型（枚举）} & \textbf{状态数} & \textbf{状态变量} & \textbf{实现状态}\\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+\texttt{Classical} & 2/4 & $\theta,\omega(,E,p_m)$ &
+  \implfull{BasicDynamicDevices.cpp:SynchronousMachine::computeDerivatives}\\
+\texttt{OneDOneQ} & 6 & $\delta,\omega,e_q',e_d',\tau_m,v_f$ &
+  \implfull{BasicDynamicDevices.cpp:evaluate\_onedoneq}\\
+\texttt{GENROU/GENROE} & 8 & $\delta,\omega,e_q',e_d',\psi_{kd},\psi_{kq},\tau_m,v_f$ &
+  \implfull{BasicDynamicDevices.cpp:evaluate\_genrou}\\
+\texttt{GENSAL/GENSAE} & 7 & $\delta,\omega,e_q',\psi_{kd},\psi_q'',\tau_m,v_f$ &
+  \implfull{BasicDynamicDevices.cpp:evaluate\_salient}\\
+\texttt{SimpleMarconato/SimpleAF} & 8 & $\delta,\omega,e_q',e_d',e_q'',e_d'',\tau_m,v_f$ &
+  \implfull{BasicDynamicDevices.cpp:evaluate\_simple\_marconato}\\
+\texttt{Marconato/AndersonFouad} & 10 & 另加 $\psi_q,\psi_d$ &
+  \implfull{BasicDynamicDevices.cpp:evaluate\_marconato}\\
+\texttt{SauerPai} & 10 & $\delta,\omega,\psi_q,\psi_d,e_q',e_d',\psi_d'',\psi_q'',\tau_m,v_f$ &
+  \implfull{BasicDynamicDevices.cpp:evaluate\_sauerpai}\\
+\end{longtable}
+\end{footnotesize}
+$\tau_m,v_f$ 的导数与调速器 / 励磁机的对应见后续两章；初值由各模型的
+\srcpath{*\_initial\_residual} 牛顿求解（\srcpath{solve\_genrou\_initial\_conditions} 等）。
+
+\subsection{参数表}
+\label{sec:dynamics-machine-params}
+下表列出同步电机公共参数结构体 \compmeta{VoltageSourceDynamicParams}{include/hacdcpf/dynamics/devices/BasicDynamicDevices.hpp}
+的关键字段。缺省值 0 表示“启用模型内建回退值”，回退值随模型族不同（GENROU 与 GENSAL 列于说明）。
+\begin{paramtable}
+\fld{inertia\_h} & $H$ & s & $1\sim10$ & $0$（钳位 $\ge0.01$） & 惯性常数（机组基）\\
+\fld{damping\_d} & $D$ & pu & $0\sim3$ & $1.0$ & 阻尼系数\\
+\fld{frequency\_hz} & $f_n$ & Hz & $50/60$ & $50$ & 额定频率（$\omega_b=2\pi f_n$）\\
+\fld{base\_mva} & $S_B$ & MVA & — & $100$ & 机组功率基\\
+\fld{r\_pu} & $r$ & pu & $0\sim0.02$ & $0$ & 定子电阻\\
+\fld{xd\_pu} & $x_d$ & pu & $1.0\sim2.2$ & $0$（GENROU 1.8 / GENSAL 1.0） & $d$ 轴同步电抗\\
+\fld{xq\_pu} & $x_q$ & pu & $0.5\sim2.1$ & $0$（GENROU 1.7 / GENSAL 0.75） & $q$ 轴同步电抗\\
+\fld{xdp\_pu} & $x_d'$ & pu & $0.2\sim0.5$ & $0$（GENROU 0.3 / GENSAL 0.4） & $d$ 轴暂态电抗\\
+\fld{xqp\_pu} & $x_q'$ & pu & $0.3\sim1.0$ & $0$（GENROU 0.55） & $q$ 轴暂态电抗\\
+\fld{xdpp\_pu} & $x_d''$ & pu & $0.15\sim0.3$ & $0$（回退 $x$，GENROU 0.25） & $d$ 轴次暂态电抗\\
+\fld{xqpp\_pu} & $x_q''$ & pu & $0.15\sim0.3$ & $0$（Marconato 0.18） & $q$ 轴次暂态电抗\\
+\fld{xl\_pu} & $x_l$ & pu & $0.1\sim0.25$ & $0$（GENROU 0.2 / GENSAL 0.1） & 定子漏抗\\
+\fld{td0p\_s} & $T_{d0}'$ & s & $4\sim10$ & $0$（GENROU 8 / GENSAL 5） & $d$ 轴暂态开路时间常数\\
+\fld{td0pp\_s} & $T_{d0}''$ & s & $0.02\sim0.06$ & $0$（GENROU 0.03） & $d$ 轴次暂态开路时间常数\\
+\fld{tq0p\_s} & $T_{q0}'$ & s & $0.3\sim2$ & $0$（GENROU 0.4） & $q$ 轴暂态开路时间常数\\
+\fld{tq0pp\_s} & $T_{q0}''$ & s & $0.02\sim0.2$ & $0$（GENROU 0.05 / GENSAL 0.2） & $q$ 轴次暂态开路时间常数\\
+\fld{t\_aa\_s} & $T_{AA}$ & s & $0\sim0.2$ & $0$ & Marconato $d$ 轴附加时间常数\\
+\fld{saturation\_a} & $S_A$ & pu & $0\sim1$ & $0$ & 饱和参数 A（0 关闭饱和）\\
+\fld{saturation\_b} & $S_B$ & pu & $0\sim0.5$ & $0$ & 饱和参数 B\\
+\fld{dynamic\_angle} & — & — & 布尔 & false & 是否积分转子角（否则冻结 $\delta$）\\
+\fld{machine\_model} & — & — & 枚举 & Classical & 模型族选择\\
+\end{paramtable}
+$x_2,r_2,x_0,r_0$（\fld{x2\_pu} 等）为负 / 零序阻抗，仅在不平衡序网接口与负序制动转矩
+$\tau_{\mathrm{brake}}$ 中使用，缺省 0 复现纯正序平衡行为。

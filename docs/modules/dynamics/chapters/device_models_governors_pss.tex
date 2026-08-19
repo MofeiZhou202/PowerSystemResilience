@@ -1,0 +1,359 @@
+\section{调速器与电力系统稳定器设备模型（逐式转写）}
+\label{sec:dynamics-device-governors-pss}
+
+本章转写发电机组控制链的后两环：原动机—调速系统（Governor）与电力系统稳定器（PSS）。二者均以
+\srcpath{src/dynamics/devices/BasicDynamicDevices.cpp} 中的 \srcpath{Governor::computeDerivatives}、
+\srcpath{PowerSystemStabilizer::computeDerivatives} 及共享控制环节基元
+（\S\ref{sec:dynamics-control-primitives}）为唯一依据。调速器驱动同步机的机械转矩状态 $\tau_m$
+（下标由 \srcpath{pmIndex} 给出，即 \S\ref{sec:dynamics-device-machines} 各机型最后一位），
+PSS 则产生附加信号 $V_s$ 注入励磁机求和点（\S\ref{sec:dynamics-device-exciters}）。
+
+\subsection{调速器公共接口}
+\label{sec:dynamics-gov-common}
+记功率基 $S_B=$\fld{base\_mva}、上下限 $p_{\max}=$\fld{pmax\_mw}$/S_B$、
+$p_{\min}=$\fld{pmin\_mw}$/S_B$、参考功率 $p_{\mathrm{ref}}=\mathrm{clamp}(\text{\fld{p\_ref\_mw}}/S_B,p_{\min},p_{\max})$、
+调差系数 $R=$\fld{droop\_r}（缺省 $0.05$），转速 $\omega$ 取自同步机 \srcpath{omegaIndex}。多数模型的阀门指令为
+\begin{equation}
+ u_{\mathrm{valve}}=\mathrm{clamp}\!\left(p_{\mathrm{ref}}-\frac{\omega-1}{R},\,p_{\min},\,p_{\max}\right),
+\end{equation}
+调速器把涡轮输出写入机械转矩状态 $\dot\tau_m$。独立运行（未挂接同步机）时退化为参考跟踪
+$\dot x=(p_{\mathrm{ref}}-x)/T_1$。依据：\srcpath{Governor::computeDerivatives}、
+\srcpath{governor\_state\_count}。
+
+\subsection{汽轮机调速 \texttt{TGOV1}}
+两状态（阀门 $x_{g1}$、涡轮 $x_{g2}$）。阀门采用非绕组限幅，涡轮为 $(1+sT_2)/(1+sT_3)$：
+\begin{align}
+ u_{\mathrm{ref}}&=\frac{p_{\mathrm{ref}}-(\omega-1)}{R},\qquad
+ \dot x_{g1}=\frac{u_{\mathrm{ref}}-x_{g1}}{T_1}\ \text{（越限且外推时置 0）},\\
+ \dot x_{g2}&=\frac{\left(1-\tfrac{T_2}{T_3}\right)\hat x_{g1}-x_{g2}}{T_3},\qquad
+ \hat x_{g1}=\mathrm{clamp}(x_{g1},p_{\min},p_{\max}),\\
+ \tau_m&=\frac{x_{g2}+\tfrac{T_2}{T_3}\hat x_{g1}-D_T(\omega-1)}{\max(\varepsilon_V,|\omega|)},\qquad
+ \dot\tau_m^{\,\mathrm{state}}=\dot x_{g2}+\tfrac{T_2}{T_3}\dot x_{g1}+\frac{\tau_m-\tau_m^{\,\mathrm{state}}}{T_3}.
+\end{align}
+依据：\srcpath{Governor::computeDerivatives}（\texttt{TGOV1} 分支）。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[>=Latex,
+  blk/.style={draw,rounded corners,minimum height=8mm,minimum width=16mm,align=center,font=\small},
+  sum/.style={draw,circle,inner sep=0pt,minimum size=5mm,font=\footnotesize},
+  every node/.style={font=\small}]
+  \node (in) {$p_{\mathrm{ref}}$};
+  \node[sum,right=8mm of in] (s1) {$\Sigma$};
+  \node[blk,right=8mm of s1,fill=red!6] (valve) {$\dfrac{1/R}{1+sT_1}$\\ 非绕组};
+  \node[blk,right=9mm of valve,fill=blue!5] (turb) {$\dfrac{1+sT_2}{1+sT_3}$};
+  \node[right=9mm of turb] (out) {$\tau_m$};
+  \draw[->] (in) -- (s1);
+  \draw[->] (s1) -- (valve);
+  \draw[->] (valve) -- (turb);
+  \draw[->] (turb) -- (out);
+  \draw[->] ($(s1)+(0,-10mm)$) node[left,font=\footnotesize]{$\omega-1$} -- (s1.south);
+  \node[above=0.5mm of s1,font=\footnotesize]{$+$};
+  \node[below left=0.5mm and 0mm of s1,font=\footnotesize]{$-$};
+\end{tikzpicture}
+\caption{TGOV1：调差 $1/R$、阀门非绕组滞后 $1/(1+sT_1)$、涡轮 $(1+sT_2)/(1+sT_3)$ 与阻尼 $D_T$。}
+\label{fig:gov-tgov1}
+\end{figure}
+
+\subsection{通用汽轮机调速 \texttt{TGTypeI}}
+三状态（$x_{g1},x_{g2},x_{g3}$），阀门滞后后接两级超前—滞后：
+\begin{align}
+ \dot x_{g1}&=\frac{u_{\mathrm{valve}}-x_{g1}}{T_1},\qquad
+ y_{ll}=x_{g2}+\frac{T_3}{T_c}x_{g1},\qquad
+ \dot x_{g2}=\frac{\left(1-\tfrac{T_3}{T_c}\right)x_{g1}-x_{g2}}{T_c},\\
+ \tau_m&=x_{g3}+\frac{T_4}{T_5}y_{ll},\qquad
+ \dot x_{g3}=\frac{\left(1-\tfrac{T_4}{T_5}\right)y_{ll}-x_{g3}}{T_5}.
+\end{align}
+依据：\srcpath{Governor::computeDerivatives}（\texttt{TGTypeI} 分支）。
+
+\subsection{\texttt{TGTypeII} 与 \texttt{TGSimple}}
+两者各一状态。\texttt{TGTypeII} 用单超前—滞后产生转矩增量：
+\begin{equation}
+ \tau_\Delta=x_g+\frac{T_1}{T_2}\frac{1-\omega}{R},\quad
+ \dot x_g=\frac{\left(1-\tfrac{T_1}{T_2}\right)\tfrac{1-\omega}{R}-x_g}{T_2},\quad
+ \tau_m=\mathrm{clamp}(p_{\mathrm{ref}}+\tau_\Delta,p_{\min},p_{\max}).
+\end{equation}
+\texttt{TGSimple} 为单一阀门—涡轮滞后：$\dot x=(u_{\mathrm{valve}}-x)/T_1$，机械转矩以同一 $T_1$ 跟踪 $x$。
+依据：\srcpath{Governor::computeDerivatives}（\texttt{TGTypeII}/\texttt{TGSimple} 分支）。
+
+\subsection{燃气轮机调速 \texttt{GAST}}
+三状态（$x_{g1}$ 燃料阀、$x_{g2}$ 燃烧、$x_{g3}$ 排温）：
+\begin{equation}
+ \dot x_{g1}=\frac{u_{\mathrm{valve}}-x_{g1}}{T_1},\quad
+ \dot x_{g2}=\frac{x_{g1}-x_{g2}}{T_f},\quad
+ \dot x_{g3}=\frac{x_{g2}-x_{g3}}{T_t},\quad
+ \tau_m=\mathrm{clamp}(x_{g2}-D_T(\omega-1),p_{\min},p_{\max}),
+\end{equation}
+$T_f=$\fld{fuel\_t\_s}、$T_t=$\fld{temperature\_t\_s}。第三状态 $x_{g3}$ 为排温 / 负荷限幅通道。依据：
+\srcpath{Governor::computeDerivatives}（\texttt{GAST} 分支）。
+
+\subsection{水轮机调速 \texttt{HYGOV}}
+四状态（阀位 $g$、软反馈 $s$、水锤 $w$、涡轮 $q$），含刚性水锤惯性时间常数 $T_w=$\fld{water\_t\_s}：
+\begin{align}
+ g_{\mathrm{cmd}}&=\mathrm{clamp}(u_{\mathrm{valve}},g_{\min},g_{\max}),\qquad
+ y_s=s+\frac{T_a}{T_b}g,\\
+ \dot g&=\frac{g_{\mathrm{cmd}}-g}{T_g},\qquad
+ \dot s=\frac{\left(1-\tfrac{T_a}{T_b}\right)g-s}{T_b},\qquad
+ \dot w=\frac{y_s-w}{T_w},\qquad
+ \dot q=\frac{w-q}{T_t},\\
+ \tau_m&=\mathrm{clamp}(q-D_T(\omega-1),p_{\min},p_{\max}).
+\end{align}
+依据：\srcpath{Governor::computeDerivatives}（\texttt{HYGOV} 分支）。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[>=Latex,
+  blk/.style={draw,rounded corners,minimum height=8mm,minimum width=14mm,align=center,font=\footnotesize},
+  sum/.style={draw,circle,inner sep=0pt,minimum size=5mm,font=\footnotesize},
+  every node/.style={font=\footnotesize}]
+  \node (in) {$u_{\mathrm{valve}}$};
+  \node[blk,right=6mm of in,fill=red!6] (gate) {$\dfrac{1}{1+sT_g}$\\ 限幅};
+  \node[blk,right=6mm of gate,fill=blue!5] (water) {$\dfrac{1}{1+sT_w}$};
+  \node[blk,right=6mm of water,fill=blue!5] (turb) {$\dfrac{1}{1+sT_t}$};
+  \node[right=6mm of turb] (out) {$\tau_m$};
+  \node[blk,below=8mm of gate,fill=orange!8] (servo) {$\dfrac{sT_a}{1+sT_b}$};
+  \draw[->] (in) -- (gate);
+  \draw[->] (gate) -- node[above,font=\footnotesize]{$g$} (water);
+  \draw[->] (water) -- node[above,font=\footnotesize]{$w$} (turb);
+  \draw[->] (turb) -- (out);
+  \draw[->] (gate.south) |- (servo.east);
+  \draw[->] (servo.west) -| ($(in)!0.5!(gate)$) |- ($(water.west)+(0,3mm)$);
+\end{tikzpicture}
+\caption{HYGOV 水轮机：阀位限幅滞后、软反馈 $sT_a/(1+sT_b)$、水锤惯性 $1/(1+sT_w)$ 与涡轮 $1/(1+sT_t)$。}
+\label{fig:gov-hygov}
+\end{figure}
+
+\subsection{柴油机调速 \texttt{DEGOV} / \texttt{DEGOV1}}
+五状态（$x_0\!\sim\!x_4$）：执行器 $\to$ 超前—滞后 $\to$ 燃料 $\to$ 闸门 $\to$ 涡轮串联：
+\begin{align}
+ \dot x_0&=\frac{u_{\mathrm{valve}}-x_0}{T_1},\qquad
+ (a_1,\dot x_1)=\mathrm{leadlag}(x_0,x_1;1,T_a,T_b),\\
+ \dot x_2&=\frac{a_1-x_2}{T_f},\qquad \dot x_3=\frac{x_2-x_3}{T_g},\qquad \dot x_4=\frac{x_3-x_4}{T_t},\\
+ \tau_m&=\mathrm{clamp}(x_4-D_T(\omega-1),p_{\min},p_{\max}).
+\end{align}
+依据：\srcpath{Governor::computeDerivatives}（\texttt{DEGOV}/\texttt{DEGOV1} 分支）。
+
+\subsection{PID 水轮机调速 \texttt{PIDGOV} / \texttt{WPIDHY}}
+七状态（转速滤波 $x_0$、积分 $x_i$、调节器 $x_{\mathrm{reg}}$、微分 $x_d$、执行器 $x_{\mathrm{act}}$、
+阀位 $g$、水锤 $w$）。误差含水锤反馈 $e=p_{\mathrm{ref}}+x_0/R-w$：
+\begin{align}
+ \dot x_0&=\frac{(1-\omega)-x_0}{T_1},\qquad e=p_{\mathrm{ref}}+\frac{x_0}{R}-w,\qquad
+ \dot x_i=K_i\,e,\qquad \dot x_d=\frac{e-x_d}{T_a},\\
+ c&=\mathrm{clamp}\!\left(p_{\mathrm{ref}}+K_i x_i+K_d\dot x_d+\frac{x_0}{R},p_{\min},p_{\max}\right),\qquad
+ \dot x_{\mathrm{reg}}=\frac{c-x_{\mathrm{reg}}}{T_b},\\
+ \dot x_{\mathrm{act}}&=\frac{x_{\mathrm{reg}}-x_{\mathrm{act}}}{T_g},\qquad
+ \dot g=\frac{\mathrm{clamp}(x_{\mathrm{act}},g_{\min},g_{\max})-g}{T_f},\qquad
+ \dot w=\frac{g-w}{T_w},\\
+ \tau_m&=\mathrm{clamp}(w-D_T(\omega-1),p_{\min},p_{\max}).
+\end{align}
+依据：\srcpath{Governor::computeDerivatives}（\srcpath{governor\_is\_pid\_hydro} 分支）。
+
+\subsection{\texttt{IEEEG1}（简化实现）}
+本实现的 \texttt{IEEEG1} 退化为单状态“阀门滞后 $+$ 再热涡轮滞后”：
+$\dot x=(u_{\mathrm{valve}}-x)/T_1$，机械转矩以再热时间常数 $T_{\mathrm{reheat}}=$\fld{reheat\_t\_s} 跟踪阀门。
+依据：\srcpath{Governor::computeDerivatives}（末段默认分支）。
+\begin{gapnote}
+标准 IEEEG1 为含高／中／低压多级涡轮（$K_1\!\sim\!K_8$ 功率分配、HP/IP/LP 再热）的双阀汽轮机模型。
+本平台的 \texttt{IEEEG1} 仅保留单阀门滞后与单再热滞后，未展开多级功率分配。需要完整多级结构时
+应改用 \texttt{TGTypeI}（两级超前—滞后）近似。此边界如实标注。
+\end{gapnote}
+
+\subsection{调速器：与实现的对应及参数}
+\label{sec:dynamics-gov-impl}
+\begin{footnotesize}
+\begin{longtable}{@{}L{2.2cm}L{1.0cm}L{5.6cm}L{3.2cm}@{}}
+\toprule
+\textbf{模型} & \textbf{状态} & \textbf{状态变量} & \textbf{实现状态}\\
+\midrule
+\endfirsthead
+\multicolumn{4}{@{}l}{\footnotesize（续表）}\\\toprule
+\textbf{模型} & \textbf{状态} & \textbf{状态变量} & \textbf{实现状态}\\\midrule
+\endhead
+\bottomrule
+\endfoot
+\texttt{TGOV1} & 2 & 阀门 $x_{g1}$、涡轮 $x_{g2}$ & \implfull{BasicDynamicDevices.cpp:Governor::computeDerivatives}\\
+\texttt{TGTypeI} & 3 & $x_{g1},x_{g2},x_{g3}$ & \implfull{BasicDynamicDevices.cpp:Governor::computeDerivatives}\\
+\texttt{TGTypeII} & 1 & $x_g$（超前—滞后） & \implfull{BasicDynamicDevices.cpp:lead\_lag\_block}\\
+\texttt{TGSimple} & 1 & 阀门—涡轮滞后 & \implfull{BasicDynamicDevices.cpp:Governor::computeDerivatives}\\
+\texttt{GAST} & 3 & 燃料、燃烧、排温 & \implfull{BasicDynamicDevices.cpp:Governor::computeDerivatives}\\
+\texttt{HYGOV} & 4 & 阀位、软反馈、水锤、涡轮 & \implfull{BasicDynamicDevices.cpp:Governor::computeDerivatives}\\
+\texttt{DEGOV/DEGOV1} & 5 & $x_0\!\sim\!x_4$ 串联 & \implfull{BasicDynamicDevices.cpp:Governor::computeDerivatives}\\
+\texttt{PIDGOV/WPIDHY} & 7 & PID $+$ 执行器 $+$ 水锤 & \implfull{BasicDynamicDevices.cpp:governor\_is\_pid\_hydro}\\
+\texttt{IEEEG1} & 1 & 阀门（$+$ 再热滞后） & \implpart{简化单级，见本节 gapnote}\\
+\end{longtable}
+\end{footnotesize}
+\compmeta{GovernorDynamicParams}{include/hacdcpf/dynamics/devices/BasicDynamicDevices.hpp}
+\begin{paramtable}
+\fld{model} & — & — & 枚举 & TGOV1 & 调速器模型族\\
+\fld{droop\_r} & $R$ & pu & $0.03\sim0.1$ & $0.05$ & 调差系数\\
+\fld{p\_ref\_mw} & $p_{\mathrm{ref}}$ & MW & — & $0$ & 参考功率（除以 $S_B$ 标幺化）\\
+\fld{t\_s} & $T_1$ & s & $0.1\sim0.5$ & $0.50$ & 阀门 / 伺服时间常数\\
+\fld{t2\_s} & $T_2$ & s & $0\sim2$ & $0$ & TGOV1 涡轮超前时间常数\\
+\fld{turbine\_t\_s} & $T_3$ & s & $0.2\sim10$ & $0.50$ & 涡轮时间常数\\
+\fld{damping\_d\_t} & $D_T$ & pu & $0\sim0.5$ & $0$ & 涡轮阻尼\\
+\fld{reheat\_t\_s} & $T_{\mathrm{rh}}$ & s & $4\sim10$ & $6.0$ & IEEEG1 再热时间常数\\
+\fld{tc\_s} & $T_c$ & s & $0.1\sim1$ & $0.50$ & TGTypeI 伺服时间常数\\
+\fld{t3\_s}$\sim$\fld{t5\_s} & $T_{3\text{--}5}$ & s & $0.1\sim5$ & $0.1/0.3/5$ & TGTypeI 超前—滞后与再热\\
+\fld{fuel\_t\_s} & $T_f$ & s & $0.1\sim1$ & $0.40$ & GAST/DEGOV 燃料时间常数\\
+\fld{temperature\_t\_s} & $T_t$ & s & $1\sim5$ & $3.0$ & GAST 排温 / 负荷限幅\\
+\fld{water\_t\_s} & $T_w$ & s & $0.5\sim4$ & $1.0$ & 水锤惯性时间常数\\
+\fld{gate\_t\_s} & $T_g$ & s & $0.1\sim0.5$ & $0.25$ & 闸门伺服时间常数\\
+\fld{ki} & $K_i$ & pu & $0\sim5$ & $1.0$ & PID 积分增益（另有 \fld{kd}）\\
+\fld{gate\_max\_pu} & $g_{\max}$ & pu & — & $1.0$ & 闸门上限（另有 \fld{gate\_min\_pu}）\\
+\fld{pmax\_mw} & $p_{\max}$ & MW & — & $0$（$0\Rightarrow\infty$） & 出力上限（另有 \fld{pmin\_mw}）\\
+\end{paramtable}
+
+\subsection{电力系统稳定器公共接口}
+\label{sec:dynamics-pss-common}
+PSS 输入为转速偏差 $u=\omega-1$（\srcpath{omegaIndex}），输出附加信号 $V_s$ 经
+\srcpath{pss\_vs\_output} 注入励磁机误差求和点。初始化时全部状态置零，故平衡点（$\omega=1$）处
+$V_s=0$，PSS 不扰动初值。未挂接同步机时导数全零。依据：
+\srcpath{PowerSystemStabilizer::computeDerivatives}、\srcpath{pss\_vs\_output}、\srcpath{pss\_state\_count}。
+
+\subsection{\texttt{PSS1A}}
+三状态：隔直（洗出）$sT_w$ 后接两级超前—滞后：
+\begin{align}
+ y_w&=K_s u-x_1,\qquad \dot x_1=\frac{K_s u-x_1}{T_w},\\
+ y_1&=\frac{T_1}{T_2}y_w+x_2,\qquad \dot x_2=\frac{\left(1-\tfrac{T_1}{T_2}\right)y_w-x_2}{T_2},\\
+ \dot x_3&=\frac{\left(1-\tfrac{T_3}{T_4}\right)y_1-x_3}{T_4},\qquad
+ V_s=\mathrm{clamp}\!\left(\frac{T_3}{T_4}y_1+x_3,\,V_s^{\min},\,V_s^{\max}\right).
+\end{align}
+依据：\srcpath{PowerSystemStabilizer::computeDerivatives}（末段默认分支）。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[>=Latex,
+  blk/.style={draw,rounded corners,minimum height=8mm,minimum width=16mm,align=center,font=\small},
+  every node/.style={font=\small}]
+  \node (in) {$\omega-1$};
+  \node[blk,right=7mm of in] (ks) {$K_s$};
+  \node[blk,right=7mm of ks,fill=orange!8] (w) {$\dfrac{sT_w}{1+sT_w}$};
+  \node[blk,right=7mm of w,fill=blue!5] (ll1) {$\dfrac{1+sT_1}{1+sT_2}$};
+  \node[blk,right=7mm of ll1,fill=blue!5] (ll2) {$\dfrac{1+sT_3}{1+sT_4}$};
+  \node[blk,right=7mm of ll2,fill=red!6] (lim) {限幅};
+  \node[right=7mm of lim] (out) {$V_s$};
+  \draw[->] (in) -- (ks);
+  \draw[->] (ks) -- (w);
+  \draw[->] (w) -- (ll1);
+  \draw[->] (ll1) -- (ll2);
+  \draw[->] (ll2) -- (lim);
+  \draw[->] (lim) -- (out);
+\end{tikzpicture}
+\caption{PSS1A：增益 $K_s$、隔直 $sT_w/(1+sT_w)$、两级超前—滞后与输出限幅 $[V_s^{\min},V_s^{\max}]$。}
+\label{fig:pss-pss1a}
+\end{figure}
+
+\subsection{\texttt{IEEEST}}
+七状态：二阶输入滤波 $+$ 两级超前—滞后 $+$ 隔直输出，并含带电压门控的输出限幅：
+\begin{align}
+ \dot x_1&=\frac{u-a_3 x_1-x_2}{a_4},\quad \dot x_2=x_1,\quad
+ \dot x_3=\frac{x_2-a_1 x_3-x_4}{a_2},\quad \dot x_4=x_3,\\
+ y_f&=\frac{a_6}{a_2}x_2+\Big(a_5-a_1\frac{a_6}{a_2}\Big)x_3+\Big(1-\frac{a_6}{a_2}\Big)x_4,\\
+ (y_{ll1},\dot x_5)&=\mathrm{leadlag}(y_f,x_5;1,T_1,T_2),\quad
+ (y_{ll2},\dot x_6)=\mathrm{leadlag}(y_{ll1},x_6;1,T_3,T_4),\\
+ \dot x_7&=\text{highpass}(y_{ll2},x_7;K_sT_5,T_6),\qquad
+ V_s=L_{\mathrm{gate}}\!\Big(\mathrm{clamp}\big(\tfrac{K_sT_5}{T_6}(y_{ll2}-x_7),V_s^{\min},V_s^{\max}\big)\Big),
+\end{align}
+其中输出门控 $L_{\mathrm{gate}}$（\srcpath{pss\_output\_limiter}）在机端电压落在 $[V_{cl},V_{cu}]$ 外时置零
+（$V_{cl}$ 或 $V_{cu}$ 为 0 时不门控）。依据：\srcpath{PowerSystemStabilizer::computeDerivatives}
+（\texttt{IEEEST} 分支）、\srcpath{pss\_vs\_output}。
+
+\subsection{\texttt{STAB1}}
+三状态，采用增益 $K_t$ 与比值参数 $T_1/T_3$、$T_2/T_4$，输出对称限幅 $\pm H_{\mathrm{lim}}$：
+\begin{align}
+ y_{hp}&=x_1+K_t u,\qquad \dot x_1=-\frac{K_t u+x_1}{T},\qquad
+ y_1=x_2+\frac{T_1}{T_3}y_{hp},\\
+ \dot x_2&=\frac{\left(1-\tfrac{T_1}{T_3}\right)y_{hp}-x_2}{T_3},\qquad
+ \dot x_3=\frac{\left(1-\tfrac{T_2}{T_4}\right)y_1-x_3}{T_4},\qquad
+ V_s=\mathrm{clamp}\!\left(x_3+\frac{T_2}{T_4}y_1,\pm H_{\mathrm{lim}}\right),
+\end{align}
+$T=$\fld{stab\_t\_s}。依据：\srcpath{PowerSystemStabilizer::computeDerivatives}（\texttt{STAB1} 分支）。
+
+\subsection{双输入斜坡跟踪族 \texttt{PSS2A} / \texttt{PSS2B} / \texttt{PSS2C}}
+\label{sec:dynamics-pss2}
+IEEE PSS2 系列为双输入（转速与电功率，本实现中电功率通道暂用本地转速）斜坡跟踪滤波器，
+状态数分别为 16 / 17 / 19。前段结构一致：
+\begin{align}
+ \dot x_0&=\frac{u_1-x_0}{T_{w1}},\qquad \dot x_1=\frac{u_2-x_1}{T_{w2}},\qquad
+ m=K_{s2}x_0+K_{s3}x_1,\qquad \dot x_2=\frac{m-x_2}{T_6},\\
+ (r,\dot x_3)&=\mathrm{leadlag}(x_2,x_3;1,M,N)\ \text{（斜坡跟踪滤波）},\qquad
+ (w,\dot x_4)=\mathrm{leadlag}(r,x_4;1,T_{w3},T_7),\\
+ (\ell,\dot x_5)&=\mathrm{leadlag}(w,x_5;K_{s1},T_1,T_2),
+\end{align}
+其后接一条\emph{变长一阶滞后链}（依次 $T_3,T_4$；\texttt{PSS2B/2C} 追加 $T_8$；\texttt{PSS2C} 再追加 $T_9$；
+不足位以 $T_{10}$ 填充），末位为输出滞后 $T_{11}$：
+\begin{equation}
+ y=\mathrm{clamp}(K_{s1}x_{\mathrm{prev}},V_s^{\min},V_s^{\max}),\qquad
+ \dot x_{\mathrm{last}}=\frac{y-x_{\mathrm{last}}}{T_{11}},\qquad V_s=x_{\mathrm{last}}.
+\end{equation}
+状态数差异即滞后链长度：\texttt{PSS2A}=16、\texttt{PSS2B}=17、\texttt{PSS2C}=19。依据：
+\srcpath{PowerSystemStabilizer::computeDerivatives}（\srcpath{pss\_is\_pss2} 分支）、\srcpath{pss\_vs\_output}。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[>=Latex,
+  blk/.style={draw,rounded corners,minimum height=8mm,minimum width=13mm,align=center,font=\footnotesize},
+  sum/.style={draw,circle,inner sep=0pt,minimum size=5mm,font=\footnotesize},
+  every node/.style={font=\footnotesize}]
+  \node (u1) {$\omega{-}1$};
+  \node[blk,right=6mm of u1,fill=orange!8] (w1) {$\dfrac{sT_{w1}}{1+sT_{w1}}$};
+  \node[blk,below=6mm of w1,fill=orange!8] (w2) {$\dfrac{sT_{w2}}{1+sT_{w2}}$};
+  \node[left=6mm of w2] (u2) {$P_e$};
+  \node[sum,right=7mm of w1] (s1) {$\Sigma$};
+  \node[blk,right=7mm of s1,fill=green!6] (rtf) {$\dfrac{1+sM}{1+sN}$\\ 斜坡跟踪};
+  \node[blk,right=6mm of rtf,fill=blue!5] (lead) {$K_{s1}\dfrac{1+sT_1}{1+sT_2}$};
+  \node[blk,right=6mm of lead,fill=red!6] (chain) {滞后链\\ $T_3,T_4,\dots$};
+  \node[right=6mm of chain] (out) {$V_s$};
+  \draw[->] (u1) -- (w1);
+  \draw[->] (u2) -- (w2);
+  \draw[->] (w1) -- node[above,font=\footnotesize]{$K_{s2}$} (s1);
+  \draw[->] (w2) -| node[pos=0.8,right,font=\footnotesize]{$K_{s3}$} (s1);
+  \draw[->] (s1) -- (rtf);
+  \draw[->] (rtf) -- (lead);
+  \draw[->] (lead) -- (chain);
+  \draw[->] (chain) -- (out);
+\end{tikzpicture}
+\caption{PSS2 斜坡跟踪族：双隔直输入（转速、电功率）经 $K_{s2}/K_{s3}$ 混合、斜坡跟踪滤波
+$(1+sM)/(1+sN)$、超前 $K_{s1}(1+sT_1)/(1+sT_2)$ 与变长滞后链，末级输出滞后 $T_{11}$。}
+\label{fig:pss-pss2}
+\end{figure}
+
+\subsection{PSS：与实现的对应及参数}
+\label{sec:dynamics-pss-impl}
+\begin{footnotesize}
+\begin{longtable}{@{}L{2.0cm}L{1.0cm}L{5.6cm}L{3.4cm}@{}}
+\toprule
+\textbf{模型} & \textbf{状态} & \textbf{结构} & \textbf{实现状态}\\
+\midrule
+\endfirsthead
+\multicolumn{4}{@{}l}{\footnotesize（续表）}\\\toprule
+\textbf{模型} & \textbf{状态} & \textbf{结构} & \textbf{实现状态}\\\midrule
+\endhead
+\bottomrule
+\endfoot
+\texttt{PSS1A} & 3 & 洗出 $+$ 两级超前—滞后 & \implfull{BasicDynamicDevices.cpp:PowerSystemStabilizer::computeDerivatives}\\
+\texttt{IEEEST} & 7 & 二阶滤波 $+$ 超前—滞后 $+$ 门控限幅 & \implfull{BasicDynamicDevices.cpp:pss\_output\_limiter}\\
+\texttt{STAB1} & 3 & $K_t$ 洗出 $+$ 两级超前—滞后 & \implfull{BasicDynamicDevices.cpp:PowerSystemStabilizer::computeDerivatives}\\
+\texttt{PSS2A} & 16 & 双输入斜坡跟踪 & \implfull{BasicDynamicDevices.cpp:pss\_is\_pss2}\\
+\texttt{PSS2B} & 17 & 同上 $+T_8$ 级 & \implfull{BasicDynamicDevices.cpp:pss\_is\_pss2}\\
+\texttt{PSS2C} & 19 & 同上 $+T_8,T_9$ 级 & \implfull{BasicDynamicDevices.cpp:pss\_is\_pss2}\\
+\end{longtable}
+\end{footnotesize}
+\compmeta{PSSDynamicParams}{include/hacdcpf/dynamics/devices/BasicDynamicDevices.hpp}
+\begin{paramtable}
+\fld{model} & — & — & 枚举 & PSS1A & PSS 模型族\\
+\fld{ks} & $K_s$ & pu & $1\sim20$ & $5.0$ & 稳定器增益\\
+\fld{tw\_s} & $T_w$ & s & $1\sim20$ & $10.0$ & 隔直（洗出）时间常数\\
+\fld{t1\_s}$\sim$\fld{t4\_s} & $T_{1\text{--}4}$ & s & $0.02\sim0.3$ & $0.15/0.03$ & 两级超前—滞后\\
+\fld{vs\_max\_pu} & $V_s^{\max}$ & pu & $0.05\sim0.2$ & $0.10$ & 输出上限（另有 \fld{vs\_min\_pu}）\\
+\fld{a1}$\sim$\fld{a6} & $a_{1\text{--}6}$ & — & — & $0/1$ & IEEEST 二阶滤波系数\\
+\fld{t5\_s},\fld{t6\_s} & $T_5,T_6$ & s & $0.02\sim0.2$ & $0.10/0.05$ & IEEEST 隔直输出\\
+\fld{vcu},\fld{vcl} & $V_{cu},V_{cl}$ & pu & — & $0$（0 不门控） & 输出电压门控上下限\\
+\fld{kt} & $K_t$ & pu & $1\sim20$ & $5.0$ & STAB1 增益\\
+\fld{h\_lim} & $H_{\mathrm{lim}}$ & pu & $0.05\sim0.2$ & $0.10$ & STAB1 对称输出限幅\\
+\fld{ks1}$\sim$\fld{ks3} & $K_{s1\text{--}3}$ & pu & — & $10/1/1$ & PSS2 增益（输出、双输入混合）\\
+\fld{m\_rtf},\fld{n\_rtf} & $M,N$ & s & — & $5/1$ & PSS2 斜坡跟踪滤波常数\\
+\fld{tw1\_s}$\sim$\fld{tw3\_s} & $T_{w1\text{--}3}$ & s & $1\sim10$ & $2.0$ & PSS2 隔直时间常数\\
+\fld{t7\_s}$\sim$\fld{t9\_s} & $T_{7\text{--}9}$ & s & $0.1\sim2$ & $2/0.2/0.1$ & PSS2 滞后链时间常数\\
+\end{paramtable}
+$V_s$ 上界通常取 $0.05\sim0.1$ pu，以免 PSS 掩盖 AVR 的电压调节；门控 $[V_{cl},V_{cu}]$ 用于低压闭锁。
