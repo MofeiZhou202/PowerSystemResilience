@@ -604,7 +604,17 @@ int mode_rel() {
   std::cout << "# IEEE RTS-24 reliability (AC-only DC-OPF scope)\n";
   std::cout << "n_bus=" << sys.ac.buses.size() << " n_gen="
             << sys.ac.generators.size() << " n_branch="
-            << sys.ac.branches.size() << '\n';
+            << sys.ac.branches.size() << " n_transformer_metadata="
+            << sys.ac.transformers_2w.size() << '\n';
+
+  // HL-I/COPT reference layer: generator adequacy only, no network outages.
+  {
+    const auto fd = analysis::run_frequency_duration_analysis(sys, 2850.0);
+    std::cout << "FD_CURRENT_MAPPING LOLP=" << fd.lolp
+              << " LOLE=" << fd.lole_fd
+              << " LOLF=" << fd.lolf_fd
+              << " LOLD=" << fd.lold << '\n';
+  }
 
   // ---- Non-sequential (state-sampling) Monte Carlo ----
   {
@@ -620,6 +630,11 @@ int mode_rel() {
               << " EENS=" << r.eens_mwh_yr << " LOLE=" << r.lole_hr_yr
               << " EDNS=" << r.edns_mw << " PLC=" << r.plc
               << " EENS_CVaR95=" << r.tail_risk.eens_cvar
+              << " OPFFailedP=" << r.opf_failed_probability
+              << " DeadIslandP=" << r.dead_island_probability
+              << " OPFFailedEENS=" << r.opf_failed_eens_mwh_yr
+              << " DeadIslandEENS=" << r.dead_island_eens_mwh_yr
+              << " OPFShedEENS=" << r.opf_shed_eens_mwh_yr
               << " scope=" << r.model_scope << '\n';
   }
 
@@ -636,7 +651,12 @@ int mode_rel() {
     std::cout << "SEQ_MC converged=" << (r.converged ? "Y" : "N")
               << " years=" << r.iterations_used << " cov=" << r.final_cov
               << " EENS=" << r.eens_mwh_yr << " LOLE=" << r.lole_hr_yr
-              << " LOLF=" << r.lolf_occ_yr << '\n';
+              << " LOLF=" << r.lolf_occ_yr
+              << " OPFFailedP=" << r.opf_failed_probability
+              << " DeadIslandP=" << r.dead_island_probability
+              << " OPFFailedEENS=" << r.opf_failed_eens_mwh_yr
+              << " DeadIslandEENS=" << r.dead_island_eens_mwh_yr
+              << " OPFShedEENS=" << r.opf_shed_eens_mwh_yr << '\n';
   }
   return 0;
 }

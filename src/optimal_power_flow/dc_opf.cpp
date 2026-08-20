@@ -1211,7 +1211,17 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
     namespace gr = hacdcpf::graph;
     const auto g    = gr::build_power_system_graph(sys);
     const auto topo = gr::analyze_topology(g);
-    if (!topo.all_islands_valid) {
+    const bool any_island_without_source = std::any_of(
+        topo.islands.begin(), topo.islands.end(), [&](const gr::IslandInfo& island) {
+          if (island.ac_bus_ids.empty()) return false;
+          return !std::any_of(
+              island.ac_bus_ids.begin(), island.ac_bus_ids.end(),
+              [&](int bus) {
+                return std::any_of(sys.ac.generators.begin(), sys.ac.generators.end(),
+                    [&](const auto& gen) { return gen.in_service && gen.bus == bus; });
+              });
+        });
+    if (!topo.all_islands_valid || any_island_without_source) {
       std::unordered_set<int> dispatchable_source_buses;
       for (const auto& gen : sys.ac.generators) {
         if (gen.in_service) dispatchable_source_buses.insert(gen.bus);
@@ -1225,7 +1235,8 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
       for (const auto& isl : topo.islands) {
         if (isl.status == gr::IslandStatus::IsolatedLoad ||
             (isl.status == gr::IslandStatus::NoSlack &&
-             !island_has_dispatchable_source(isl))) {
+             !island_has_dispatchable_source(isl)) ||
+            !island_has_dispatchable_source(isl)) {
           dead_buses.insert(isl.ac_bus_ids.begin(), isl.ac_bus_ids.end());
         }
       }
@@ -1249,7 +1260,7 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
       const bool has_valid = std::any_of(
           topo.islands.begin(), topo.islands.end(),
           [&](const gr::IslandInfo& i) {
-            return i.status == gr::IslandStatus::Valid ||
+            return i.status == gr::IslandStatus::Valid &&
                    island_has_dispatchable_source(i);
           });
       if (!has_valid) {

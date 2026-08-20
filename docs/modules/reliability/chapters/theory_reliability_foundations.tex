@@ -272,25 +272,62 @@ $+$ \srcpath{apply\_ieee24\_reliability\_data}）上运行两类 MC（\srcpath{t
 \resizebox{\textwidth}{!}{%
 \begin{tabular}{@{}lccccc@{}}
 \toprule
-方法 & 样本 & CoV & EENS/(MWh$\cdot$yr$^{-1}$) & LOLE/(hr$\cdot$yr$^{-1}$) & 其他\\
+层级/方法 & 负荷口径 & CoV/年数 & EENS/(MWh$\cdot$yr$^{-1}$) & LOLE/(hr$\cdot$yr$^{-1}$) & 诊断\\
 \midrule
-非序贯 MC & $2\times10^4$ 态（未达 $0.03$） & $0.097$ & $47\,245$ & $240.0$ & EDNS $5.39$~MW，PLC $0.027$\\
-序贯 MC & $101$ 年（收敛） & $0.035$ & $43\,506$ & $43.3$ & LOLF $14.7$~occ/yr\\
+HL-I 当前机组映射（COPT） & 峰值 $2850$~MW & 精确卷积 & 仅容量缺额 & 见 FD & 不含网络故障\\
+非序贯 MC（原始记录） & 固定峰值、8760 h & $0.097/2\times10^4$ 态 & $47\,244.9$ & $240.0$ & 回退 $13\,731.3$\\
+序贯 MC（原始记录） & 8736 h 曲线 & $0.035/101$ 年 & $43\,506.1$ & $43.3$ & N-0 未扣除\\
+序贯 MC（修正口径） & 8736 h 曲线 & $0.125/400$ 年 & $5\,843.0$ & $5.32$ & 回退 $5\,628.7$\\
 \bottomrule
 \end{tabular}
 }
 \end{center}
-两法的 EENS 相互吻合（$4.35$--$4.72\times10^4$~MWh/yr），互为交叉校验；序贯法在 $101$ 年即达
-$\mathrm{CoV}{=}0.035$，而非序贯法在 $2\times10^4$ 态仍停于 $0.097$——印证稀有失负荷事件下
-LOLE 类频率指标收敛慢（定理~\ref{thm:rel-th-cov}），需更多样本或方差缩减。非序贯尾部
-$\mathrm{CVaR}_{95\%}(\mathrm{EENS}){=}6.33\times10^4\gg$ 均值，示厚尾风险。
+原始两法数值接近不能作为正确性证明：非序贯使用固定峰值，序贯使用时序曲线；且旧序贯实现把健康状态的 N-0 缺额重复计入故障风险。修正后每小时采用
+\begin{equation}
+ S^{\mathrm{inc}}_{h}=\max\{0,S(x_h,L_h)-S(x_0,L_h)\},\qquad
+ \mathrm{EENS}=\frac1{N_y}\sum_y\sum_h S^{\mathrm{inc}}_{y,h}.
+\end{equation}
+其中 $x_0$ 是同一负荷倍率下的 N-0 状态。修正重跑的 $5\,843$~MWh/yr 尚未达到 $\mathrm{CoV}=0.05$，不能当作最终基准值。
 \begin{boundarynote}
-上述 EENS/LOLE\emph{显著高于}经典 RTS-24 交流建模参考值（EENS $\sim1.2\times10^3$~MWh/yr、
-LOLE $\sim9.4$~hr/yr）。差异源于平台状态评估的\emph{诚实口径}：$(i)$ \texttt{model\_scope="ac-only-dcopf"}
-仅以交流 DC-OPF 削减，不含无功/电压可行性与直流侧；$(ii)$ 当某故障态 DC-OPF 不收敛时，平台\emph{保守地}
-将该孤岛全部负荷计为削减（评估器会给出 warning）。因此本表数字应读作平台在该口径下的\emph{保守
-上界}与\emph{方法学演示}（收敛率、跨方法一致性、尾部风险），\emph{不}作为对经典 RTS 参考值的复现。
-定量对标需引入交流可行性校核与 DC-OPF 失败态的精细化处理。
+经典 RTS-24 的 EENS $\sim1.2\times10^3$~MWh/yr、LOLE $\sim9.4$~hr/yr 通常是 HL-I 发电充裕度口径，仅对机组 COPT 卷积，不抽样输电支路。平台 MC 的期望后果分解为
+\begin{equation}
+ \mathbb E[S]=\mathbb E[S_{\mathrm{gen}}]+\mathbb E[S_{\mathrm{network}}]
+ +\mathbb E[S_{\mathrm{dead\ island}}]+\mathbb E[S_{\mathrm{fallback}}].
+\end{equation}
+最后一项是 DC-OPF 不收敛时把存活负荷全部削减的实现回退，不能混入物理网络风险。结果结构现已报告
+\texttt{opf\_failed\_probability}、\texttt{dead\_island\_eens\_mwh\_yr} 和
+\texttt{opf\_failed\_eens\_mwh\_yr}：非序贯原始重跑的回退为 $13\,731.3$~MWh/yr（总值约 29\%），
+序贯按 N-0 增量修正后的回退为 $5\,628.7$~MWh/yr（约 96\%）。这证明剩余偏高首先是求解器/拓扑处理问题，不能称为 RTS 物理风险。
+
+产生回退的具体原因是 MATPOWER 变压器同时存在两种表示：带变比支路保留在 \texttt{ac.branches}，并额外生成带
+\texttt{source\_branch\_idx} 的 \texttt{Transformer2W} 元数据。旧拓扑图把两者都当成连通边，而 DC-OPF 只把 \texttt{ac.branches}
+装入支路约束。因此“变压器支路停运、元数据边仍在”的状态会被图判为有源连通岛，随后 OPF 面对实际断开的 B 矩阵而失败；失败分支见
+\srcpath{src/reliability/reliability\_assessment.cpp:1144}，会把所有存活负荷计为削减。现已让拓扑图跳过链接元数据边，并禁止该元数据生成独立随机失效；修复后的基准必须重新收敛后才能与 HL-I 对比。
+
+该故障链可写成同一状态向量上的两个不同边集：
+\begin{equation}
+ E_{\mathrm{graph}}=E_{\mathrm{branch}}\cup E_{\mathrm{transformer\ metadata}},\qquad
+ E_{\mathrm{opf}}=E_{\mathrm{branch}} .
+\end{equation}
+若对应原始支路状态为 $x_b=1$ 而元数据仍为在线，旧实现得到
+$G(E_{\mathrm{graph}})$ 连通、但 $B(E_{\mathrm{opf}})$ 已断开；拓扑预筛因此不切除该负荷，
+而 OPF 无法为断开的实际分量建立可行功率平衡，触发“存活负荷全部削减”的回退。反向状态
+（元数据停运而原始支路在线）则会采到一个不对应任何物理故障的随机事件。两种情况分别造成
+假阴性和假阳性，不能用“保守模型”解释。
+
+修复后的不变量是：对任意链接元数据行 $t$，只要 $t.\texttt{source\_branch\_idx}>0$，它只能参与
+结果归因和映射，不能参与图边、孤岛边或独立蒙特卡洛元件集合；其在线状态完全由对应
+\texttt{ACBranch} 决定。该不变量由
+\srcpath{tests/test\_reliability\_resolver.cpp} 中的两母线回归测试执行验证：健康状态拓扑连通，
+停运原始支路后恰为两个 AC 岛、负荷岛状态为 \texttt{NoSlack}，且 DC-OPF 返回 10 MW 的可审计切负荷，
+不再借助元数据边维持连通。自适应孤岛子系统也采用同一过滤规则（\srcpath{src/power\_flow/island\_detector.cpp}）。
+
+还修正了同类但独立的“假有源”状态：母线的 \texttt{SLACK} 类型只是电压参考属性，
+不是在线发电能力。当某一岛上的所有可调机组均停运时，旧拓扑仍把该岛标为有效，
+而 DC-OPF 的发电变量集合为空（$n_g=0$），导致无源岛进入求解失败回退。现行拓扑—
+OPF 预筛同时检查岛内在线机组；无源岛在 OPF 前按节点负荷显式切除，因而不再把求解器
+失败伪装成网络后果。该规则在 \srcpath{src/reliability/reliability\_assessment.cpp:1076}
+和 \srcpath{src/optimal\_power\_flow/dc\_opf.cpp:1214} 分别执行。
 \end{boundarynote}
 
 \subsection{与实现的对应}\label{sec:rel-th-impl}

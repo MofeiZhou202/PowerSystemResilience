@@ -381,6 +381,9 @@ struct StateEvalResult {
   double curtailment_mw{0.0};
   std::vector<double> nodal_curtailment_mw;
   bool is_loss_state{false};
+  bool opf_failed{false};
+  double direct_island_shed_mw{0.0};
+  double opf_shed_mw{0.0};
 };
 
 // Compute full component count for extended state vector:
@@ -702,7 +705,13 @@ static std::vector<bool> build_active_component_mask(
   for (size_t i = 0; i < co.nst;   ++i) active[co.off_st   + i] = sys.ac.storage[i].in_service;
   for (size_t i = 0; i < co.nvsc;  ++i) active[co.off_vsc  + i] = sys.vsc_converters[i].in_service;
   for (size_t i = 0; i < co.ndb;   ++i) active[co.off_db   + i] = sys.dc.branches[i].in_service;
-  for (size_t i = 0; i < co.nt2;   ++i) active[co.off_t2   + i] = sys.ac.transformers_2w[i].in_service;
+  for (size_t i = 0; i < co.nt2;   ++i) {
+    // MATPOWER keeps the exact transformer pi-model in ac.branches and adds a
+    // linked Transformer2W metadata row. Treat the pair as one physical
+    // component; otherwise MC samples an outage that the DC-OPF never applies.
+    const auto& tr = sys.ac.transformers_2w[i];
+    active[co.off_t2 + i] = tr.in_service && tr.source_branch_idx <= 0;
+  }
   for (size_t i = 0; i < co.nt3;   ++i) active[co.off_t3   + i] = sys.ac.transformers_3w[i].in_service;
   for (size_t i = 0; i < co.ndcdc; ++i) active[co.off_dcdc + i] = sys.dc.dcdc_converters[i].in_service;
   for (size_t i = 0; i < co.ndccb; ++i) active[co.off_dccb + i] = sys.dc.dc_circuit_breakers[i].in_service;
@@ -1040,6 +1049,10 @@ StateEvalResult evaluate_state(
     result.curtailment_mw = ns.total_shed_mw;
     result.nodal_curtailment_mw = std::move(ns.nodal_shed_mw);
     result.is_loss_state = ns.is_loss;
+    // The hybrid LP has an explicit load-shedding objective; it does not use
+    // the AC-only all-load fallback below. Keep the decomposition conservative
+    // and attributable to the LP term for callers that inspect diagnostics.
+    result.opf_shed_mw = result.curtailment_mw;
     return result;
   }
 
@@ -1060,11 +1073,25 @@ StateEvalResult evaluate_state(
     for (int i = 0; i < (int)sys.ac.buses.size(); ++i)
       bus_pos[sys.ac.buses[i].index] = i;
 
+    // A bus retaining the SLACK flag is not a physical source after all
+    // generators on its island fail.  The DC-OPF formulation has no
+    // dispatch variable for such an island, so classify it as dead here and
+    // shed its load explicitly instead of entering the OPF fallback path.
+    const auto island_has_dispatchable_source = [&](const gr::IslandInfo& isl) {
+      return std::any_of(sys.ac.generators.begin(), sys.ac.generators.end(),
+          [&](const auto& gen) {
+            return gen.in_service &&
+                   std::find(isl.ac_bus_ids.begin(), isl.ac_bus_ids.end(),
+                             gen.bus) != isl.ac_bus_ids.end();
+          });
+    };
+
     // Collect all buses belonging to dead islands
     std::unordered_set<int> dead_buses;
     for (const auto& isl : topo.islands) {
       if (isl.status == gr::IslandStatus::IsolatedLoad ||
-          isl.status == gr::IslandStatus::NoSlack) {
+          isl.status == gr::IslandStatus::NoSlack ||
+          !island_has_dispatchable_source(isl)) {
         for (int bid : isl.ac_bus_ids) dead_buses.insert(bid);
       }
     }
@@ -1105,10 +1132,12 @@ StateEvalResult evaluate_state(
     if (!has_valid) {
       result.curtailment_mw       = direct_shed_mw;
       result.nodal_curtailment_mw = std::move(nodal_direct_shed);
+      result.direct_island_shed_mw = direct_shed_mw;
       result.is_loss_state        = (result.curtailment_mw > curtail_threshold_mw);
       return result;
     }
   }
+  result.direct_island_shed_mw = direct_shed_mw;
 
   // Run DC-OPF with load shedding enabled.
   // Guard: warn if the system has non-trivial DC loads (including DCBus::pd_mw)
@@ -1130,6 +1159,7 @@ StateEvalResult evaluate_state(
     spdlog::warn("evaluate_state: DC-OPF failed to converge; "
                  "treating all surviving-island load as curtailed (conservative)");
     result.curtailment_mw = direct_shed_mw;
+    result.opf_failed = true;
     result.nodal_curtailment_mw = std::move(nodal_direct_shed);
     result.nodal_curtailment_mw.resize(sys.ac.buses.size(), 0.0);
     // bus pd_mw was zeroed for dead-island buses above; remainder is live.
@@ -1155,6 +1185,7 @@ StateEvalResult evaluate_state(
 
   // Combine direct shed (dead islands) + OPF shed (surviving islands)
   result.curtailment_mw       = direct_shed_mw + opf_result.total_load_shedding_mw;
+  result.opf_shed_mw          = opf_result.total_load_shedding_mw;
   result.nodal_curtailment_mw = std::move(nodal_direct_shed);
   if (!opf_result.load_shedding_mw.empty()) {
     result.nodal_curtailment_mw.resize(
@@ -1361,8 +1392,15 @@ ReliabilityResult run_nonsequential_mc(
 	  std::vector<double> nodal_dns_sum(nb, 0.0);
 	  std::vector<double> comp_fail_count(nc, 0.0);
 	  std::vector<double> comp_loss_weighted_sum(nc, 0.0);
-	  double total_loss_weighted_sum = 0.0;
-	  double total_loss_samples = 0.0;
+  double total_loss_weighted_sum = 0.0;
+  double total_loss_samples = 0.0;
+  double weighted_opf_failed_states = 0.0;
+  double weighted_dead_island_states = 0.0;
+  double weighted_opf_failed_eens = 0.0;
+  double weighted_dead_island_eens = 0.0;
+  double weighted_opf_shed_eens = 0.0;
+  long long opf_failed_state_count = 0;
+  long long dead_island_state_count = 0;
 
   // F8: collect the per-sampled-state DNS and loss flag so tail risk can be
   // computed on bootstrap-aggregated SYNTHETIC YEARS (a statistically valid
@@ -1422,6 +1460,18 @@ ReliabilityResult run_nonsequential_mc(
         std::max(0.0, dns - n0_result.curtailment_mw);
     const double weighted_incremental_dns =
         likelihood_ratio * incremental_dns;
+    if (eval_result.opf_failed) {
+      ++opf_failed_state_count;
+      weighted_opf_failed_states += likelihood_ratio;
+      weighted_opf_failed_eens += weighted_incremental_dns;
+    }
+    if (eval_result.direct_island_shed_mw > options.curtail_threshold_mw) {
+      ++dead_island_state_count;
+      weighted_dead_island_states += likelihood_ratio;
+      weighted_dead_island_eens += weighted_incremental_dns;
+    }
+    weighted_opf_shed_eens += likelihood_ratio *
+        std::max(0.0, eval_result.opf_shed_mw);
     sum_incremental_dns += weighted_incremental_dns;
     sum_incremental_dns_sq +=
         weighted_incremental_dns * weighted_incremental_dns;
@@ -1678,6 +1728,21 @@ ReliabilityResult run_nonsequential_mc(
       ? likelihood_sum * likelihood_sum / likelihood_sq_sum
       : 0.0;
   result.final_cov = result.cov_history.empty() ? 0.0 : result.cov_history.back();
+  result.evaluated_state_count = result.iterations_used;
+  result.opf_failed_state_count = opf_failed_state_count;
+  result.dead_island_state_count = dead_island_state_count;
+  result.opf_failed_probability = result.iterations_used > 0
+      ? weighted_opf_failed_states / static_cast<double>(result.iterations_used)
+      : 0.0;
+  result.dead_island_probability = result.iterations_used > 0
+      ? weighted_dead_island_states / static_cast<double>(result.iterations_used)
+      : 0.0;
+  result.opf_failed_eens_mwh_yr = weighted_opf_failed_eens /
+      static_cast<double>(result.iterations_used) * 8760.0;
+  result.dead_island_eens_mwh_yr = weighted_dead_island_eens /
+      static_cast<double>(result.iterations_used) * 8760.0;
+  result.opf_shed_eens_mwh_yr = weighted_opf_shed_eens /
+      static_cast<double>(result.iterations_used) * 8760.0;
   
   // Nodal EENS
   result.nodal_eens_mwh_yr.resize(nb);
@@ -1983,8 +2048,15 @@ ReliabilityResult run_sequential_mc(
 	  std::vector<double> nodal_eens_accum(nb, 0.0);
 	  std::vector<double> comp_fail_during_loss(nc, 0.0);
 	  std::vector<double> comp_loss_during_loss(nc, 0.0);
-	  double total_loss_weighted_mwh = 0.0;
-	  int total_loss_hours = 0;
+  double total_loss_weighted_mwh = 0.0;
+  int total_loss_hours = 0;
+  double baseline_eens_total_mwh = 0.0;
+  double opf_failed_eens_total_mwh = 0.0;
+  double dead_island_eens_total_mwh = 0.0;
+  double opf_shed_eens_total_mwh = 0.0;
+  long long evaluated_state_count = 0;
+  long long opf_failed_state_count = 0;
+  long long dead_island_state_count = 0;
   
   spdlog::info("SEQ MC: {} total components, {} hours/year", nc, hours_per_year);
 
@@ -2143,16 +2215,33 @@ ReliabilityResult run_sequential_mc(
     for (int h = 0; h < hours_per_year; ++h) {
       const auto& state = hour_work[static_cast<size_t>(h)].state;
       const auto& eval_result = hour_work[static_cast<size_t>(h)].eval;
+      const auto& n0_result = n0_for_hour(h);
+      const double incremental_shed = std::max(
+          0.0, eval_result.curtailment_mw - n0_result.curtailment_mw);
+      ++evaluated_state_count;
+      baseline_eens_total_mwh += n0_result.curtailment_mw;
+      if (eval_result.opf_failed) {
+        ++opf_failed_state_count;
+        opf_failed_eens_total_mwh += incremental_shed;
+      }
+      if (eval_result.direct_island_shed_mw > options.curtail_threshold_mw) {
+        ++dead_island_state_count;
+        dead_island_eens_total_mwh += incremental_shed;
+      }
+      opf_shed_eens_total_mwh += std::max(0.0, eval_result.opf_shed_mw);
       
-	      if (eval_result.is_loss_state) {
-	        year_eens += eval_result.curtailment_mw;
+	      if (incremental_shed > options.curtail_threshold_mw) {
+	        year_eens += incremental_shed;
 	        ++year_loss_hours;
 	        year_loss_flags[h] = true;
-	        total_loss_weighted_mwh += eval_result.curtailment_mw;
+	        total_loss_weighted_mwh += incremental_shed;
 	        
 	        // Accumulate nodal EENS
 	        for (size_t b = 0; b < nb && b < eval_result.nodal_curtailment_mw.size(); ++b) {
-	          nodal_eens_accum[b] += eval_result.nodal_curtailment_mw[b];
+	          const double n0_bus = b < n0_result.nodal_curtailment_mw.size()
+              ? n0_result.nodal_curtailment_mw[b] : 0.0;
+	          nodal_eens_accum[b] += std::max(
+              0.0, eval_result.nodal_curtailment_mw[b] - n0_bus);
 	        }
 	        
 	        // Track component failures during loss.  Keep both the conditional
@@ -2160,7 +2249,7 @@ ReliabilityResult run_sequential_mc(
 	        for (size_t c = 0; c < nc; ++c) {
 	          if (state[c]) {
 	            comp_fail_during_loss[c] += 1.0;
-	            comp_loss_during_loss[c] += eval_result.curtailment_mw;
+            comp_loss_during_loss[c] += incremental_shed;
 	          }
 	        }
 	        total_loss_hours++;
@@ -2236,6 +2325,27 @@ ReliabilityResult run_sequential_mc(
                                         result.annual_lolf.end(), 0.0) / n_years;
   result.edns_mw = result.eens_mwh_yr / static_cast<double>(options.hours_per_year);
   result.plc = result.lole_hr_yr / static_cast<double>(options.hours_per_year);
+  result.baseline_eens_mwh_yr = baseline_eens_total_mwh /
+      static_cast<double>(n_years);
+  result.baseline_edns_mw = result.baseline_eens_mwh_yr /
+      static_cast<double>(options.hours_per_year);
+  result.incremental_eens_mwh_yr = result.eens_mwh_yr;
+  result.incremental_edns_mw = result.edns_mw;
+  result.evaluated_state_count = evaluated_state_count;
+  result.opf_failed_state_count = opf_failed_state_count;
+  result.dead_island_state_count = dead_island_state_count;
+  const double evaluated_hours = static_cast<double>(
+      std::max<long long>(1, evaluated_state_count));
+  result.opf_failed_probability =
+      static_cast<double>(opf_failed_state_count) / evaluated_hours;
+  result.dead_island_probability =
+      static_cast<double>(dead_island_state_count) / evaluated_hours;
+  result.opf_failed_eens_mwh_yr = opf_failed_eens_total_mwh /
+      static_cast<double>(n_years);
+  result.dead_island_eens_mwh_yr = dead_island_eens_total_mwh /
+      static_cast<double>(n_years);
+  result.opf_shed_eens_mwh_yr = opf_shed_eens_total_mwh /
+      static_cast<double>(n_years);
   result.final_cov = result.cov_history.empty() ? 0.0 : result.cov_history.back();
   result.parallel_execution.actual_parallel_evaluations = seq_parallel_evals;
   result.parallel_execution.serial_evaluations = seq_serial_evals;

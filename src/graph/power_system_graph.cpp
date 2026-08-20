@@ -215,6 +215,11 @@ PowerSystemGraph build_power_system_graph(
 
   // ── 11. Transformer 2W as AC branches ────────────────────────────
   for (const auto& tr : system.ac.transformers_2w) {
+    // MATPOWER imports retain the exact transformer pi-model as an ACBranch;
+    // Transformer2W is linked metadata in that case, not an extra electrical
+    // edge. Adding both lets topology screening see a path that DC-OPF does
+    // not have after the branch fails.
+    if (tr.source_branch_idx > 0) continue;
     int fn = g.ac_node_idx(tr.hv_bus);
     int tn = g.ac_node_idx(tr.lv_bus);
     if (fn < 0 || tn < 0) continue;

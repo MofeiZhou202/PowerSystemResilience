@@ -95,6 +95,7 @@ std::vector<IslandInfo> detect_islands(const HybridPowerSystem& sys) {
   // whose AC connectivity goes through transformers would be fragmented
   // into many spurious singleton islands.
   for (const auto& tr : sys.ac.transformers_2w) {
+    if (tr.source_branch_idx > 0) continue;
     if (!tr.in_service) continue;
     add_edge(ac_node(tr.hv_bus), ac_node(tr.lv_bus));
   }
@@ -521,8 +522,11 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
 
   // 2W / 3W transformers carry their own bus references and contribute
   // to branch admittance via canonical projection, so they must be
-  // copied as well.
+  // copied as well.  MATPOWER imports also carry linked Transformer2W
+  // metadata for an ACBranch (source_branch_idx > 0); that row is provenance
+  // only and must not be copied as an independent electrical device.
   for (const auto& tr : sys.ac.transformers_2w) {
+    if (tr.source_branch_idx > 0) continue;
     if (!tr.in_service) continue;
     const auto itf = ac_map.find(tr.hv_bus);
     const auto itt = ac_map.find(tr.lv_bus);

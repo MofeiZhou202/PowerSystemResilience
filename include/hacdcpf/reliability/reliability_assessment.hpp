@@ -383,6 +383,17 @@ struct ReliabilityResult {
   double baseline_edns_mw{0.0};       // N-0 curtailment (MW)
   double incremental_eens_mwh_yr{0.0}; // Outage-state excess above N-0 (MWh/yr)
   double incremental_edns_mw{0.0};     // Expected outage-state excess above N-0 (MW)
+  // State-evaluation decomposition. These counters/energies are reported in
+  // the same sampling measure as eens_mwh_yr (including likelihood weights for
+  // importance sampling). They make conservative solver fallbacks auditable.
+  long long evaluated_state_count{0};
+  long long opf_failed_state_count{0};
+  long long dead_island_state_count{0};
+  double opf_failed_probability{0.0};
+  double dead_island_probability{0.0};
+  double opf_failed_eens_mwh_yr{0.0};
+  double dead_island_eens_mwh_yr{0.0};
+  double opf_shed_eens_mwh_yr{0.0};
   double lole_hr_yr{0.0};    // Loss of Load Expectation (hr/yr)
   double lolf_occ_yr{0.0};   // Loss of Load Frequency (occ/yr, SEQ only)
   double plc{0.0};           // Probability of Load Curtailment

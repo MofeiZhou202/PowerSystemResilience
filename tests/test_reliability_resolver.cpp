@@ -27,6 +27,8 @@
 
 #include "hacdcpf/model/hybrid_power_system.hpp"
 #include "hacdcpf/io/case_builders.hpp"
+#include "hacdcpf/graph/graph.hpp"
+#include "hacdcpf/optimal_power_flow/dc_opf_solver.hpp"
 #include "hacdcpf/reliability/reliability_assessment.hpp"
 #include "hacdcpf/reliability/failure_mode.hpp"
 #include "hacdcpf/reliability/protection_frt.hpp"
@@ -37,7 +39,85 @@ using Catch::Approx;
 
 namespace {
 constexpr double kHoursPerYear = 8760.0;
+
+HybridPowerSystem make_linked_transformer_case() {
+  HybridPowerSystem sys;
+  sys.ac.base_mva = 100.0;
+
+  ACBus slack;
+  slack.index = 1;
+  slack.bus_type = BusType::SLACK;
+  slack.in_service = true;
+  ACBus load_bus;
+  load_bus.index = 2;
+  load_bus.bus_type = BusType::PQ;
+  load_bus.in_service = true;
+  load_bus.pd_mw = 10.0;
+  sys.ac.buses = {slack, load_bus};
+
+  Generator gen;
+  gen.index = 1;
+  gen.bus = 1;
+  gen.in_service = true;
+  gen.is_slack = true;
+  gen.pmin_mw = 0.0;
+  gen.pmax_mw = 50.0;
+  sys.ac.generators = {gen};
+
+  ACBranch branch;
+  branch.index = 1;
+  branch.from_bus = 1;
+  branch.to_bus = 2;
+  branch.x_pu = 0.1;
+  branch.r_pu = 0.01;
+  branch.tap = 1.05;
+  branch.rate_a_mva = 100.0;
+  branch.in_service = true;
+  sys.ac.branches = {branch};
+
+  Transformer2W metadata;
+  metadata.index = 1;
+  metadata.hv_bus = 1;
+  metadata.lv_bus = 2;
+  metadata.in_service = true;
+  metadata.source_branch_idx = branch.index;
+  sys.ac.transformers_2w = {metadata};
+  return sys;
+}
 }  // namespace
+
+TEST_CASE("linked MATPOWER transformer metadata never masks a failed branch",
+          "[reliability][topology][transformer-link]") {
+  auto healthy = make_linked_transformer_case();
+  const auto healthy_graph = graph::build_power_system_graph(healthy);
+  const auto healthy_topology = graph::analyze_topology(healthy_graph);
+  REQUIRE(healthy_topology.is_connected);
+
+  auto failed = healthy;
+  failed.ac.branches.front().in_service = false;
+  // The importer intentionally leaves linked Transformer2W metadata online.
+  // It must not become a second electrical edge when the source branch fails.
+  const auto failed_graph = graph::build_power_system_graph(failed);
+  const auto failed_topology = graph::analyze_topology(failed_graph);
+  CHECK_FALSE(failed_topology.is_connected);
+  CHECK(failed_topology.n_ac_islands == 2);
+
+  const auto load_island = std::find_if(
+      failed_topology.islands.begin(), failed_topology.islands.end(),
+      [](const graph::IslandInfo& island) {
+        return std::find(island.ac_bus_ids.begin(), island.ac_bus_ids.end(), 2) !=
+               island.ac_bus_ids.end();
+      });
+  REQUIRE(load_island != failed_topology.islands.end());
+  CHECK(load_island->status == graph::IslandStatus::NoSlack);
+
+  opf::DCOPFOptions opf_options;
+  opf_options.load_shedding = true;
+  opf_options.compute_lmp = false;
+  const auto opf = opf::solve_dc_opf(failed, opf_options);
+  CHECK(opf.converged);
+  CHECK(opf.total_load_shedding_mw == Approx(10.0).margin(1e-6));
+}
 
 // ─────────────────────────────────────────────────────────────────────────
 // Resolver conversion rules
