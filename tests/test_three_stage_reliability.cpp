@@ -40,6 +40,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -119,7 +120,27 @@ hacdcpf::HybridPowerSystem make_two_bus_islanding_case(double load_mw = 0.4,
 /// Common post-run assertions shared by all integration test cases.
 void check_result_shape(const ThreeStageReliabilityResult& r,
                         bool expect_exact_ok = true) {
-  INFO("error: " << r.error);
+  std::ostringstream diagnostics;
+  if (!r.ok) {
+    diagnostics << "fault_count=" << r.faults.size() << '\n';
+    for (const auto& fault : r.faults) {
+      diagnostics << "fault " << fault.component_type << ':'
+                  << fault.component_index << " status=" << fault.status
+                  << " stages=[" << fault.stage1_status << ", "
+                  << fault.stage2_status << ", " << fault.stage3_status << "]"
+                  << " solver_statuses=[" << fault.stage1_solver_status << ", "
+                  << fault.stage2_solver_status << ", "
+                  << fault.stage3_solver_status << "]"
+                  << " gaps=[" << fault.stage1_mip_gap << ", "
+                  << fault.stage2_mip_gap << ", " << fault.stage3_mip_gap
+                  << "] solver_reported_gaps=["
+                  << fault.stage1_solver_reported_mip_gap << ", "
+                  << fault.stage2_solver_reported_mip_gap << ", "
+                  << fault.stage3_solver_reported_mip_gap
+                  << "]\n";
+    }
+  }
+  INFO("error: " << r.error << '\n' << diagnostics.str());
   if (expect_exact_ok) {
     REQUIRE(r.ok);
   } else {
@@ -153,9 +174,15 @@ void check_result_shape(const ThreeStageReliabilityResult& r,
     CHECK(!f.stage1_status.empty());
     CHECK(!f.stage2_status.empty());
     CHECK(!f.stage3_status.empty());
+    CHECK(!f.stage1_solver_status.empty());
+    CHECK(!f.stage2_solver_status.empty());
+    CHECK(!f.stage3_solver_status.empty());
     CHECK(f.stage1_mip_gap >= 0.0);
     CHECK(f.stage2_mip_gap >= 0.0);
     CHECK(f.stage3_mip_gap >= 0.0);
+    CHECK(f.stage1_solver_reported_mip_gap >= 0.0);
+    CHECK(f.stage2_solver_reported_mip_gap >= 0.0);
+    CHECK(f.stage3_solver_reported_mip_gap >= 0.0);
     CHECK(f.pls_stage1 >= 0.0);
     CHECK(f.pls_stage2 >= 0.0);
     CHECK(f.pls_stage3 >= 0.0);
@@ -326,7 +353,7 @@ TEST_CASE("Three-stage reliability — test_1_no_sop (5-bus pure AC)",
   CHECK(r.saifi < 1.0);
 
   CHECK(r.model_scope == "ac-lindistflow-milp");
-  CHECK(r.model_limitations.find("ACBranch and DCBranch") != std::string::npos);
+  CHECK(r.model_limitations.find("默认 N-1 故障集包含交流、直流支路") != std::string::npos);
   CHECK(r.model_limitations.find("VSC") != std::string::npos);
   CHECK(r.validity.branch_flow_enforced);
   CHECK(r.validity.voltage_constraints_enforced);
@@ -351,7 +378,7 @@ TEST_CASE("Three-stage reliability — case33mg_acdc (33-bus AC/DC + microgrid)"
   CHECK(r.nl_vsc >= 1);
 
   CHECK(r.model_scope.find("dc-lindistflow") != std::string::npos);
-  CHECK(r.model_limitations.find("ACBranch and DCBranch") != std::string::npos);
+  CHECK(r.model_limitations.find("默认 N-1 故障集包含交流、直流支路") != std::string::npos);
   CHECK(r.validity.dc_power_flow_enforced);
   CHECK(r.validity.sop_dispatch_optimised);
   CHECK(r.validity.branch_flow_enforced);
@@ -360,6 +387,26 @@ TEST_CASE("Three-stage reliability — case33mg_acdc (33-bus AC/DC + microgrid)"
   CHECK(r.validity.restoration_milp_solved);
 
   check_result_shape(r);
+
+  // Regression for a near-zero load-shed optimum: HiGHS 1.14 reports a
+  // relative gap of 1 although its model status is explicitly Optimal.  Keep
+  // the backend diagnostic, but normalize the certified gap from the stronger
+  // termination certificate instead of downgrading the stage to approximate.
+  const auto zero_shed_fault = std::find_if(
+      r.faults.begin(), r.faults.end(), [](const auto& fault) {
+        return fault.component_type == "ac_branch" && fault.component_index == 2;
+      });
+  REQUIRE(zero_shed_fault != r.faults.end());
+  CHECK(zero_shed_fault->stage2_solver_status == "StrictHiGHS Optimal run=0");
+  CHECK(zero_shed_fault->stage3_solver_status == "StrictHiGHS Optimal run=0");
+  CHECK(zero_shed_fault->stage2_solver_reported_mip_gap ==
+        Catch::Approx(1.0).margin(1e-12));
+  CHECK(zero_shed_fault->stage3_solver_reported_mip_gap ==
+        Catch::Approx(1.0).margin(1e-12));
+  CHECK(zero_shed_fault->stage2_mip_gap == Catch::Approx(0.0).margin(1e-12));
+  CHECK(zero_shed_fault->stage3_mip_gap == Catch::Approx(0.0).margin(1e-12));
+  CHECK(zero_shed_fault->stage2_status == "success");
+  CHECK(zero_shed_fault->stage3_status == "success");
 
   std::printf("[TC-3] case33mg_acdc: nb=%d (ac=%d dc=%d), nl=%d (ac=%d dc=%d), "
                "vsc=%d, sop=%d, mg=%d\n",
@@ -1475,11 +1522,25 @@ TEST_CASE("Three-stage reliability — built-in Dist33 DER uses the coupled mode
   CHECK(result.validity.dc_power_flow_enforced);
   CHECK(result.validity.sop_dispatch_optimised);
   CHECK(result.validity.branch_flow_enforced);
+  CHECK(result.validity.apparent_power_polygon_enforced);
   CHECK(result.validity.voltage_constraints_enforced);
   CHECK(result.validity.radial_topology_enforced);
+  CHECK(result.apparent_power_polygon_sides == 16);
+  CHECK(result.maximum_ac_branch_apparent_power_ratio <= 1.0 + 1e-7);
   REQUIRE_FALSE(result.faults.empty());
   for (const auto& fault : result.faults)
     CHECK(fault.psop3.size() == sys.vsc_converters.size());
+}
+
+TEST_CASE("Three-stage reliability rejects an invalid apparent-power polygon",
+          "[reliability][three_stage][thermal_limit][validation]") {
+  auto sys = make_two_bus_islanding_case();
+  ThreeStageReliabilityOptions options;
+  options.enable_parallel = false;
+  options.apparent_power_polygon_sides = 5;
+  CHECK_THROWS_AS(run_three_stage_reliability_from_string(
+                      hacdcpf::io::to_json(sys, 2), options),
+                  std::invalid_argument);
 }
 
 TEST_CASE("Three-stage reliability — custom protection conditions sustained scenarios",

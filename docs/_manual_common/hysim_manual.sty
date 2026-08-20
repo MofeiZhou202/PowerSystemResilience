@@ -48,14 +48,15 @@
 \def\fld@scan#1{%
   \ifx#1\fld@stop
   \else
-    \ifx#1\_\_\allowbreak\else#1\fi
+    \ifx#1\_\_\allowbreak\else
+    \ifx#1.#1\allowbreak\else#1\fi\fi
     \expandafter\fld@scan
   \fi}
 \makeatother
 
 % 模块元信息行：#1=求解器/结构体/类名  #2=头文件路径
 \newcommand{\compmeta}[2]{\noindent\textbf{代码结构体：}\texttt{#1}\hfill
-  \textbf{定义位置：}\texttt{#2}\par\smallskip}
+  \textbf{定义位置：}\srcpath{#2}\par\smallskip}
 
 % 可断行的源码路径/函数名（/、: 与 \_ 处允许换行）
 \makeatletter
@@ -66,7 +67,10 @@
     \ifx#1\_\_\allowbreak\else
     \ifx#1/#1\allowbreak\else
     \ifx#1:#1\allowbreak\else
-    #1\fi\fi\fi
+    \ifx#1.#1\allowbreak\else
+    \ifx#1-#1\allowbreak\else
+    \ifx#1+#1\allowbreak\else
+    #1\fi\fi\fi\fi\fi\fi
     \expandafter\src@scan
   \fi}
 \makeatother

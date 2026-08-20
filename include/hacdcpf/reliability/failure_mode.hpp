@@ -438,8 +438,12 @@ struct FailureModeCoContingency {
   double joint_unavailability{0.0};      ///< U_i*U_j (both simultaneously down)
   double duration_hr{0.0};               ///< overlap mean duration d_i*d_j/(d_i+d_j)
   double total_shed_mw{0.0};             ///< S_ij with both modes applied
-  double eens_contribution{0.0};         ///< U_i*U_j*8760*S_ij
+  double eens_contribution{0.0};         ///< raw overlap U_i*U_j*8760*S_ij (ranking)
+  /// Exact second-order correction added to the aggregate expansion:
+  /// U_i*U_j*8760*(S_ij-S_i-S_j+S_0).  It may be negative.
+  double interaction_eens_correction{0.0};
   double lole_contribution{0.0};         ///< U_i*U_j*8760 (if S_ij>eps)
+  double interaction_lole_correction{0.0};
   bool causes_loss{false};
 };
 
@@ -452,11 +456,19 @@ struct FailureModeFMEAResult {
   double edns_mw{0.0};
   double lole_hr_yr{0.0};
   double lolf_occ_yr{0.0};
+  double baseline_eens_mwh_yr{0.0};
+  double first_order_eens_mwh_yr{0.0};
+  double second_order_interaction_eens_mwh_yr{0.0};
   DistributionIndices distribution_idx;
   std::vector<double> nodal_eens_mwh_yr;
   std::vector<FailureModeContingency> contingencies;
   std::vector<FailureModeCoContingency> co_contingencies;  ///< N-2 (max_order>=2)
   int n_pairs_evaluated{0};                                ///< co-failure solves done
+  int n_pairs_skipped_by_threshold{0};
+  int n_pairs_skipped_by_budget{0};
+  /// True only if every eligible, non-conflicting distinct-component pair was
+  /// evaluated.  When false, the aggregate is a budgeted second-order truncation.
+  bool second_order_expansion_complete{false};
   FailureModeCoverage coverage;
   ReliabilityDataQuality data_quality;
   std::vector<std::string> warnings;

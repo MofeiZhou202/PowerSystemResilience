@@ -72,7 +72,21 @@ ReliabilityParams resolve_reliability_params(
   p.demand_frequency_per_year = raw.demand_frequency_per_year;
   p.cyber_recovery_hr = raw.cyber_recovery_hr;
 
-  auto finalize_from_lambda_repair = [&](double lambda, double repair) {
+  auto finalize_from_lambda_repair = [&](double lambda_or_frequency,
+                                         double repair,
+                                         bool calendar_input = false) {
+    double lambda = lambda_or_frequency;
+    if (calendar_input && repair > 0.0) {
+      // Billinton & Allan (1996), alternating-renewal exposure identity:
+      // f_cal=(1-U)lambda_up and U=f_cal*r/H.
+      const double calendar_unavailability =
+          lambda_or_frequency * repair / kHoursPerYear;
+      if (!(calendar_unavailability >= 0.0) ||
+          calendar_unavailability >= 1.0)
+        throw std::invalid_argument(
+            "calendar failure frequency and repair time imply U >= 1");
+      lambda = lambda_or_frequency / (1.0 - calendar_unavailability);
+    }
     p.lambda_per_year = lambda;
     p.repair_hr = repair;
     if (repair > 0.0) {
@@ -80,6 +94,9 @@ ReliabilityParams resolve_reliability_params(
       p.unavailability = (lambda + mu) > 0.0 ? lambda / (lambda + mu) : 0.0;
     }
     p.mttf_hr = lambda > 0.0 ? kHoursPerYear / lambda : 0.0;
+    p.calendar_frequency_per_year = calendar_input
+        ? lambda_or_frequency
+        : (1.0 - p.unavailability) * lambda;
   };
 
   // Repair/recovery preference: cyber recovery time overrides physical repair
@@ -103,6 +120,9 @@ ReliabilityParams resolve_reliability_params(
         raw.demand_frequency_per_year * raw.probability_per_demand;
     p.lambda_active_per_year = lambda_active;
     finalize_from_lambda_repair(lambda_active, active_repair);
+    // A failed demand is already an event counted on the calendar timeline;
+    // it is not conditioned on passive component up-time exposure.
+    p.calendar_frequency_per_year = lambda_active;
     if (raw.active_params_are_template) {
       p.used_default = true;
       p.data_source = "default";  // template default — not case data (honest provenance)
@@ -118,7 +138,9 @@ ReliabilityParams resolve_reliability_params(
     }
   } else if (has_lambda && has_mttr_hr) {
     // ACBranch-style: failures/year + repair hours.
-    finalize_from_lambda_repair(raw.failure_rate_per_year, raw.mttr_hr);
+    finalize_from_lambda_repair(
+        raw.failure_rate_per_year, raw.mttr_hr,
+        policy.failure_rate_basis == FailureRateBasis::CalendarTime);
     p.has_data = true;
     p.data_source = "case";
   } else if (has_mttf) {
@@ -168,6 +190,7 @@ ReliabilityParams resolve_reliability_params(
     p.unavailability = f;
     p.repair_hr = mttr;
     p.lambda_per_year = f / ((1.0 - f) * mttr) * kHoursPerYear;
+    p.calendar_frequency_per_year = f * kHoursPerYear / mttr;
     p.mttf_hr = mttr * (1.0 - f) / f;
     p.has_data = true;
     p.data_source = "case";
@@ -182,6 +205,10 @@ ReliabilityParams resolve_reliability_params(
   } else if (has_lambda) {
     // Lambda only: frequency known, repair time unknown.
     p.lambda_per_year = raw.failure_rate_per_year;
+    p.calendar_frequency_per_year =
+        policy.failure_rate_basis == FailureRateBasis::CalendarTime
+            ? raw.failure_rate_per_year
+            : 0.0;
     p.mttf_hr = kHoursPerYear / raw.failure_rate_per_year;
     p.has_data = true;
     p.data_source = "case";
@@ -201,7 +228,12 @@ ReliabilityParams resolve_reliability_params(
       const double lambda =
           (p.lambda_per_year > 0.0) ? p.lambda_per_year : default_lambda_per_year;
       const double repair = (p.repair_hr > 0.0) ? p.repair_hr : default_repair_hr;
-      finalize_from_lambda_repair(lambda, repair);
+      if (has_lambda &&
+          policy.failure_rate_basis == FailureRateBasis::CalendarTime) {
+        finalize_from_lambda_repair(raw.failure_rate_per_year, repair, true);
+      } else {
+        finalize_from_lambda_repair(lambda, repair);
+      }
       p.used_default = true;
       p.data_source = p.has_data ? "case" : "default";
       if (!resolved) {
@@ -623,6 +655,40 @@ static std::string resolve_component_name(
     { const auto& x = sys.microgrids[vec_idx];              return fmt(x.index, x.name); }
   // Fallback: vector position (unchanged from old behaviour)
   return type_name + "[" + std::to_string(vec_idx) + "]";
+}
+
+static int resolve_component_stable_index(
+    int vec_idx, const std::string& type_name,
+    const HybridPowerSystem& sys) {
+  const auto index_at = [vec_idx](const auto& items) {
+    if (vec_idx < 0 || vec_idx >= static_cast<int>(items.size()))
+      throw std::runtime_error(
+          "reliability component position is outside its container");
+    return items[static_cast<size_t>(vec_idx)].index;
+  };
+  if (type_name == "Generator") return index_at(sys.ac.generators);
+  if (type_name == "ACBranch") return index_at(sys.ac.branches);
+  if (type_name == "StaticGen") return index_at(sys.ac.static_generators);
+  if (type_name == "RenewableGen") return index_at(sys.ac.renewable_gens);
+  if (type_name == "ACStorage") return index_at(sys.ac.storage);
+  if (type_name == "VSCConverter") return index_at(sys.vsc_converters);
+  if (type_name == "DCBranch") return index_at(sys.dc.branches);
+  if (type_name == "Transformer2W") return index_at(sys.ac.transformers_2w);
+  if (type_name == "Transformer3W") return index_at(sys.ac.transformers_3w);
+  if (type_name == "DCDCConverter") return index_at(sys.dc.dcdc_converters);
+  if (type_name == "DCCircuitBreaker")
+    return index_at(sys.dc.dc_circuit_breakers);
+  if (type_name == "DCStorage") return index_at(sys.dc.storage);
+  if (type_name == "DCPVArray") return index_at(sys.dc.pv_arrays);
+  if (type_name == "ACSwitch") return index_at(sys.ac.switches);
+  if (type_name == "ACCircuitBreaker")
+    return index_at(sys.ac.circuit_breakers);
+  if (type_name == "ACPVSystem") return index_at(sys.ac.pv_systems);
+  if (type_name == "DCStaticGenAC") return index_at(sys.dc.static_generators);
+  if (type_name == "DCStaticGen")
+    return index_at(sys.dc.dc_static_generators);
+  if (type_name == "Microgrid") return index_at(sys.microgrids);
+  throw std::runtime_error("unknown reliability component type");
 }
 
 static std::vector<bool> build_active_component_mask(
@@ -1102,16 +1168,49 @@ StateEvalResult evaluate_state(
   return result;
 }
 
-// Sample component states (Bernoulli trials)
-std::vector<bool> sample_state(
-    const std::vector<double>& unavailabilities,
+struct BernoulliStateSample {
+  std::vector<bool> state;
+  double likelihood_ratio{1.0};
+};
+
+// Rubinstein & Kroese, Simulation and the Monte Carlo Method, 3rd ed.,
+// Sec. 5.2: independent Bernoulli odds twisting with the exact P/Q likelihood.
+BernoulliStateSample sample_state(
+    const std::vector<double>& target_unavailability,
+    const std::vector<double>& proposal_unavailability,
     std::mt19937& rng) {
+  if (target_unavailability.size() != proposal_unavailability.size())
+    throw std::logic_error("importance-sampling probability dimensions differ");
   std::uniform_real_distribution<double> dist(0.0, 1.0);
-  std::vector<bool> state(unavailabilities.size(), false);
-  for (size_t i = 0; i < unavailabilities.size(); ++i) {
-    state[i] = (dist(rng) < unavailabilities[i]);
+  BernoulliStateSample sample;
+  sample.state.resize(target_unavailability.size(), false);
+  long double log_likelihood = 0.0L;
+  for (size_t i = 0; i < target_unavailability.size(); ++i) {
+    const double p = target_unavailability[i];
+    const double q = proposal_unavailability[i];
+    if (!std::isfinite(p) || !std::isfinite(q) || p < 0.0 || p > 1.0 ||
+        q < 0.0 || q > 1.0)
+      throw std::invalid_argument("Bernoulli outage probability must be in [0,1]");
+    sample.state[i] = (dist(rng) < q);
+    if (p == q) continue;
+    if (sample.state[i]) {
+      if (q <= 0.0 || p <= 0.0)
+        throw std::logic_error("sampled impossible Bernoulli failure state");
+      log_likelihood += std::log(static_cast<long double>(p)) -
+                        std::log(static_cast<long double>(q));
+    } else {
+      if (q >= 1.0 || p >= 1.0)
+        throw std::logic_error("sampled impossible Bernoulli healthy state");
+      log_likelihood += std::log1p(-static_cast<long double>(p)) -
+                        std::log1p(-static_cast<long double>(q));
+    }
   }
-  return state;
+  const long double likelihood = std::exp(log_likelihood);
+  if (!std::isfinite(likelihood) ||
+      likelihood > static_cast<long double>(std::numeric_limits<double>::max()))
+    throw std::runtime_error("importance-sampling likelihood ratio overflow");
+  sample.likelihood_ratio = static_cast<double>(likelihood);
+  return sample;
 }
 
 // Count number of loss events (transitions from 0 to 1) in a time series
@@ -1141,6 +1240,11 @@ ReliabilityResult run_nonsequential_mc(
                  options.max_iterations);
     return {};
   }
+  if (options.use_importance_sampling &&
+      (!std::isfinite(options.importance_lambda) ||
+       options.importance_lambda <= 0.0))
+    throw std::invalid_argument(
+        "importance_lambda must be finite and positive for importance sampling");
 
   ReliabilityResult result;
   // Hard-code structured capability declarations.  Flags stay false until the
@@ -1211,6 +1315,20 @@ ReliabilityResult run_nonsequential_mc(
     }
   }
 
+  std::vector<double> proposal_unavailabilities = unavailabilities;
+  if (options.use_importance_sampling) {
+    for (size_t c = 0; c < nc; ++c) {
+      const double p = unavailabilities[c];
+      if (p <= 0.0 || p >= 1.0) continue;
+      // Odds(q) = lambda * Odds(p), hence
+      // q = lambda*p / (1-p+lambda*p).
+      const double denominator =
+          1.0 - p + options.importance_lambda * p;
+      proposal_unavailabilities[c] =
+          options.importance_lambda * p / denominator;
+    }
+  }
+
   // Initialize random number generator
   std::mt19937 rng;
   if (options.seed != 0) {
@@ -1235,15 +1353,16 @@ ReliabilityResult run_nonsequential_mc(
   int contingency_count = 0;  // Count of states with failures
   
   // Accumulators
-  double sum_dns = 0.0;
   double sum_incremental_dns = 0.0;
   double sum_incremental_dns_sq = 0.0;
-  int loss_hours = 0;
+  double weighted_loss_hours = 0.0;
+	  double likelihood_sum = 0.0;
+	  double likelihood_sq_sum = 0.0;
 	  std::vector<double> nodal_dns_sum(nb, 0.0);
 	  std::vector<double> comp_fail_count(nc, 0.0);
 	  std::vector<double> comp_loss_weighted_sum(nc, 0.0);
 	  double total_loss_weighted_sum = 0.0;
-	  int total_loss_samples = 0;
+	  double total_loss_samples = 0.0;
 
   // F8: collect the per-sampled-state DNS and loss flag so tail risk can be
   // computed on bootstrap-aggregated SYNTHETIC YEARS (a statistically valid
@@ -1251,9 +1370,12 @@ ReliabilityResult run_nonsequential_mc(
   // the distribution of one random hour annualized — not an annual quantity.
   std::vector<double> hourly_dns_samples;
   std::vector<std::uint8_t> hourly_loss_samples;
+  std::vector<double> hourly_likelihood_weights;
   if (options.compute_tail_risk) {
     hourly_dns_samples.reserve(static_cast<size_t>(options.max_iterations));
     hourly_loss_samples.reserve(static_cast<size_t>(options.max_iterations));
+    hourly_likelihood_weights.reserve(
+        static_cast<size_t>(options.max_iterations));
   }
 
   // Compute total system load
@@ -1292,14 +1414,19 @@ ReliabilityResult run_nonsequential_mc(
 
   auto consume_nsq_sample = [&](int iter,
                                 const std::vector<bool>& state,
-                                const StateEvalResult& eval_result) {
+                                const StateEvalResult& eval_result,
+                                double likelihood_ratio) {
     // Accumulate results
     double dns = eval_result.curtailment_mw;
     const double incremental_dns =
         std::max(0.0, dns - n0_result.curtailment_mw);
-    sum_dns += dns;
-    sum_incremental_dns += incremental_dns;
-    sum_incremental_dns_sq += incremental_dns * incremental_dns;
+    const double weighted_incremental_dns =
+        likelihood_ratio * incremental_dns;
+    sum_incremental_dns += weighted_incremental_dns;
+    sum_incremental_dns_sq +=
+        weighted_incremental_dns * weighted_incremental_dns;
+    likelihood_sum += likelihood_ratio;
+    likelihood_sq_sum += likelihood_ratio * likelihood_ratio;
 
     // F8: bootstrap the contingency increment rather than annualizing the
     // imported model's N-0 deficit as if it were a random outage state.
@@ -1307,12 +1434,13 @@ ReliabilityResult run_nonsequential_mc(
       hourly_dns_samples.push_back(incremental_dns);
       hourly_loss_samples.push_back(
           incremental_dns > options.curtail_threshold_mw ? 1u : 0u);
+      hourly_likelihood_weights.push_back(likelihood_ratio);
     }
     
 	    if (incremental_dns > options.curtail_threshold_mw) {
-	      ++loss_hours;
-	      ++total_loss_samples;
-	      total_loss_weighted_sum += incremental_dns;
+	      weighted_loss_hours += likelihood_ratio;
+	      total_loss_samples += likelihood_ratio;
+	      total_loss_weighted_sum += weighted_incremental_dns;
 	      
 	      // Attribute only outage-state excess above the matching N-0 bus
 	      // curtailment. This keeps imported base-case islands out of the risk map.
@@ -1320,7 +1448,7 @@ ReliabilityResult run_nonsequential_mc(
 	        const double n0_bus = b < n0_result.nodal_curtailment_mw.size()
 	                                  ? n0_result.nodal_curtailment_mw[b]
 	                                  : 0.0;
-	        nodal_dns_sum[b] +=
+	        nodal_dns_sum[b] += likelihood_ratio *
 	            std::max(0.0, eval_result.nodal_curtailment_mw[b] - n0_bus);
 	      }
 	      
@@ -1329,15 +1457,15 @@ ReliabilityResult run_nonsequential_mc(
 	      // with FMEA EENS contribution.
 	      for (size_t c = 0; c < nc; ++c) {
 	        if (state[c]) {
-	          comp_fail_count[c] += 1.0;
-	          comp_loss_weighted_sum[c] += incremental_dns;
+	          comp_fail_count[c] += likelihood_ratio;
+	          comp_loss_weighted_sum[c] += weighted_incremental_dns;
 	        }
 	      }
 	    }
     
     // Update expected indices
     const double incremental_edns = sum_incremental_dns / iter;
-    double lole = (double)loss_hours / iter * 8760.0;  // hr/yr
+    double lole = weighted_loss_hours / iter * 8760.0;  // hr/yr
     (void)lole;  // Used in verbose output
     
     // Calculate CoV
@@ -1415,6 +1543,7 @@ ReliabilityResult run_nonsequential_mc(
 
   struct NSQSampleWork {
     std::vector<bool> state;
+    double likelihood_ratio{1.0};
     StateKey key;
     StateEvalResult eval;
     bool is_n0{false};
@@ -1442,7 +1571,9 @@ ReliabilityResult run_nonsequential_mc(
 
     for (size_t bi = 0; bi < batch.size(); ++bi) {
       auto& item = batch[bi];
-      item.state = sample_state(unavailabilities, rng);
+      auto sample = sample_state(unavailabilities, proposal_unavailabilities, rng);
+      item.state = std::move(sample.state);
+      item.likelihood_ratio = sample.likelihood_ratio;
       item.is_n0 = std::none_of(item.state.begin(), item.state.end(),
                                 [](bool b) { return b; });
       if (item.is_n0) {
@@ -1507,7 +1638,8 @@ ReliabilityResult run_nonsequential_mc(
     bool stop = false;
     for (size_t bi = 0; bi < batch.size(); ++bi) {
       const int iter = batch_start + static_cast<int>(bi);
-      if (!consume_nsq_sample(iter, batch[bi].state, batch[bi].eval)) {
+      if (!consume_nsq_sample(iter, batch[bi].state, batch[bi].eval,
+                              batch[bi].likelihood_ratio)) {
         stop = true;
         break;
       }
@@ -1519,7 +1651,7 @@ ReliabilityResult run_nonsequential_mc(
   // Log summary of sampling
   spdlog::info("NSQ MC: Sampling summary - N-0 states: {}, Contingency states: {}, Unique states evaluated: {}",
                n0_count, contingency_count, state_db.size());
-  spdlog::info("NSQ MC: Loss states: {}, Total loss samples: {}", loss_hours, total_loss_samples);
+  spdlog::info("NSQ MC: Weighted loss samples: {:.6f}", weighted_loss_hours);
   result.parallel_execution.cache_hits = nsq_cache_hits;
   result.parallel_execution.cache_misses = nsq_cache_misses;
   result.parallel_execution.n0_evaluations = n0_count;
@@ -1532,12 +1664,19 @@ ReliabilityResult run_nonsequential_mc(
     spdlog::warn("NSQ MC: No iterations completed; metrics are undefined");
     return result;
   }
-  result.edns_mw = sum_dns / n;
-  result.eens_mwh_yr = result.edns_mw * 8760.0;
   result.incremental_edns_mw = sum_incremental_dns / n;
+  result.edns_mw = result.baseline_edns_mw + result.incremental_edns_mw;
+  result.eens_mwh_yr = result.edns_mw * 8760.0;
   result.incremental_eens_mwh_yr = result.incremental_edns_mw * 8760.0;
-  result.lole_hr_yr = (double)loss_hours / n * 8760.0;
-  result.plc = (double)loss_hours / n;
+  result.lole_hr_yr = weighted_loss_hours / n * 8760.0;
+  result.plc = weighted_loss_hours / n;
+  result.importance_sampling_used = options.use_importance_sampling;
+  result.importance_twisting_factor =
+      options.use_importance_sampling ? options.importance_lambda : 1.0;
+  result.importance_mean_likelihood_ratio = likelihood_sum / n;
+  result.importance_effective_sample_size = likelihood_sq_sum > 0.0
+      ? likelihood_sum * likelihood_sum / likelihood_sq_sum
+      : 0.0;
   result.final_cov = result.cov_history.empty() ? 0.0 : result.cov_history.back();
   
   // Nodal EENS
@@ -1593,7 +1732,8 @@ ReliabilityResult run_nonsequential_mc(
   if (options.compute_tail_risk && !hourly_dns_samples.empty()) {
     constexpr int kSynthYearHours = 8760;
     const int n_years = std::min(std::max(200, result.iterations_used), 2000);
-    std::uniform_int_distribution<size_t> pick(0, hourly_dns_samples.size() - 1);
+    std::discrete_distribution<size_t> pick(
+        hourly_likelihood_weights.begin(), hourly_likelihood_weights.end());
     result.annual_eens.clear();
     result.annual_lole.clear();
     result.annual_eens.reserve(static_cast<size_t>(n_years));
@@ -1616,6 +1756,136 @@ ReliabilityResult run_nonsequential_mc(
   return result;
 }
 
+ExactReliabilitySensitivityResult compute_exact_reliability_sensitivity(
+    const HybridPowerSystem& sys,
+    const ReliabilityOptions& options,
+    size_t maximum_components) {
+  ComponentOffsets co(sys);
+  if (maximum_components == 0 || maximum_components > 20)
+    throw std::invalid_argument(
+        "exact reliability sensitivity maximum_components must be in [1,20]");
+
+  const MCReliability mcr =
+      compute_mc_reliability(sys, co, options.data_policy);
+  std::vector<double> unavailabilities = mcr.U;
+  const auto active_component = build_active_component_mask(sys, co);
+  for (size_t c = 0; c < co.total; ++c)
+    if (!active_component[c]) unavailabilities[c] = 0.0;
+  if (options.data_policy.default_policy ==
+      ReliabilityDefaultPolicy::StrictCaseDataOnly) {
+    const auto has_data =
+        mc_component_has_case_data(sys, co, options.data_policy);
+    for (size_t c = 0; c < co.total && c < has_data.size(); ++c)
+      if (!has_data[c]) unavailabilities[c] = 0.0;
+  }
+  for (double value : unavailabilities)
+    if (!std::isfinite(value) || value < 0.0 || value > 1.0)
+      throw std::runtime_error(
+          "resolved component unavailability is outside [0,1]");
+
+  // Billinton & Allan, Reliability Evaluation of Power Systems, 2nd ed.,
+  // ch. 2: U=0 and U=1 are degenerate Bernoulli variables and do not enlarge
+  // the state space.  See the Chinese reliability manual, exact-sensitivity
+  // section, for the compact-state to full-component-state mapping.
+  std::vector<size_t> stochastic_components;
+  std::vector<bool> deterministic_state(co.total, false);
+  stochastic_components.reserve(co.total);
+  for (size_t c = 0; c < co.total; ++c) {
+    if (unavailabilities[c] >= 1.0) {
+      deterministic_state[c] = true;
+    } else if (unavailabilities[c] > 0.0) {
+      stochastic_components.push_back(c);
+    }
+  }
+  const size_t nc = stochastic_components.size();
+  if (nc > maximum_components)
+    throw std::invalid_argument(
+        "exact reliability sensitivity stochastic-component limit exceeded");
+
+  opf::DCOPFOptions opf_opt = options.opf_options;
+  opf_opt.load_shedding = true;
+  opf_opt.voll = reliability_shedding_voll(sys, opf_opt.voll);
+  opf_opt.verbose = false;
+  opf_opt.compute_lmp = false;
+  const std::vector<bool> healthy(co.total, false);
+  const StateEvalResult n0 = evaluate_state(
+      sys, healthy, opf_opt, options.load_scale_factor,
+      options.curtail_threshold_mw);
+
+  const size_t state_count = size_t{1} << nc;
+  std::vector<double> incremental_loss_mw(state_count, 0.0);
+  double expected_incremental_mw = 0.0;
+  for (size_t state_index = 0; state_index < state_count; ++state_index) {
+    std::vector<bool> state = deterministic_state;
+    long double probability = 1.0L;
+    for (size_t compact = 0; compact < nc; ++compact) {
+      const size_t full = stochastic_components[compact];
+      const bool down = (state_index & (size_t{1} << compact)) != 0;
+      state[full] = down;
+      probability *= down ? unavailabilities[full]
+                          : (1.0 - unavailabilities[full]);
+    }
+    const auto evaluated = evaluate_state(
+        sys, state, opf_opt, options.load_scale_factor,
+        options.curtail_threshold_mw);
+    incremental_loss_mw[state_index] =
+        std::max(0.0, evaluated.curtailment_mw - n0.curtailment_mw);
+    expected_incremental_mw += static_cast<double>(probability) *
+        incremental_loss_mw[state_index];
+  }
+
+  ExactReliabilitySensitivityResult result;
+  result.baseline_eens_mwh_yr = n0.curtailment_mw * 8760.0;
+  result.expected_incremental_eens_mwh_yr =
+      expected_incremental_mw * 8760.0;
+  result.states_evaluated = state_count;
+  result.exact_independent_binary_model = true;
+  result.components.reserve(nc);
+  for (size_t compact = 0; compact < nc; ++compact) {
+    const size_t full = stochastic_components[compact];
+    double conditional_up_mw = 0.0;
+    double conditional_down_mw = 0.0;
+    const size_t bit = size_t{1} << compact;
+    for (size_t state_index = 0; state_index < state_count; ++state_index) {
+      if ((state_index & bit) != 0) continue;
+      long double other_probability = 1.0L;
+      for (size_t j = 0; j < nc; ++j) {
+        if (j == compact) continue;
+        const size_t other_full = stochastic_components[j];
+        const bool down = (state_index & (size_t{1} << j)) != 0;
+        other_probability *= down ? unavailabilities[other_full]
+                                  : (1.0 - unavailabilities[other_full]);
+      }
+      conditional_up_mw += static_cast<double>(other_probability) *
+          incremental_loss_mw[state_index];
+      conditional_down_mw += static_cast<double>(other_probability) *
+          incremental_loss_mw[state_index | bit];
+    }
+    ExactReliabilitySensitivityItem item;
+    item.global_state_index = full;
+    auto [index, type_name] = decode_component(full, co);
+    item.component_position = static_cast<size_t>(index);
+    item.component_index = resolve_component_stable_index(index, type_name, sys);
+    item.component_type = type_name;
+    item.component_name = resolve_component_name(index, type_name, sys);
+    item.unavailability = unavailabilities[full];
+    item.eens_if_forced_down_mwh_yr = conditional_down_mw * 8760.0;
+    item.eens_if_forced_up_mwh_yr = conditional_up_mw * 8760.0;
+    item.birnbaum_mwh_yr_per_unit_unavailability =
+        (conditional_down_mw - conditional_up_mw) * 8760.0;
+    item.eens_derivative_mwh_yr_per_unit_unavailability =
+        item.birnbaum_mwh_yr_per_unit_unavailability;
+    item.fussell_vesely = result.expected_incremental_eens_mwh_yr > 0.0
+        ? (result.expected_incremental_eens_mwh_yr -
+           item.eens_if_forced_up_mwh_yr) /
+              result.expected_incremental_eens_mwh_yr
+        : 0.0;
+    if (std::abs(item.fussell_vesely) < 1e-15) item.fussell_vesely = 0.0;
+    result.components.push_back(std::move(item));
+  }
+  return result;
+}
+
 ReliabilityResult run_sequential_mc(
     const HybridPowerSystem& sys,
     const LoadProfile& load_profile,
@@ -1634,6 +1904,10 @@ ReliabilityResult run_sequential_mc(
                  options.hours_per_year);
     return {};
   }
+  if (options.use_importance_sampling)
+    throw std::invalid_argument(
+        "importance sampling is defined only for non-sequential MC; "
+        "sequential MC requires a path-space likelihood model");
 
   const HybridPowerSystem spatial_sys =
       apply_load_profile_spatial_factors(sys, load_profile);
@@ -2028,6 +2302,8 @@ TailRiskMetrics compute_tail_risk(
   
   TailRiskMetrics metrics;
   if (eens_samples.empty()) return metrics;
+  if (!std::isfinite(confidence) || confidence <= 0.0 || confidence >= 1.0)
+    throw std::invalid_argument("tail-risk confidence must be in (0, 1)");
   
   const size_t n = eens_samples.size();
   
@@ -2043,28 +2319,25 @@ TailRiskMetrics compute_tail_risk(
   std::sort(sorted_eens.begin(), sorted_eens.end());
   std::sort(sorted_lole.begin(), sorted_lole.end());
   
-  // VaR at confidence level (e.g., 95% 鈫?index at 95th percentile)
-  size_t var_idx = static_cast<size_t>(std::ceil(confidence * n)) - 1;
-  var_idx = std::min(var_idx, n - 1);
-  
-  metrics.eens_var = sorted_eens[var_idx];
-  metrics.lole_var = sorted_lole[var_idx];
-  
-  // CVaR (Expected Shortfall): mean of values above VaR
-  double eens_sum_above = 0.0;
-  double lole_sum_above = 0.0;
-  int count_above = 0;
-  
-  for (size_t i = var_idx; i < n; ++i) {
-    eens_sum_above += sorted_eens[i];
-    lole_sum_above += sorted_lole[i];
-    ++count_above;
+  // Rockafellar & Uryasev (2002), empirical Expected Shortfall.  The VaR atom
+  // is fractionally weighted when alpha*n is not integral; averaging every
+  // sample >= VaR overweights ties and small samples.
+  const double tail_probability = 1.0 - confidence;
+  const size_t quantile_count = static_cast<size_t>(std::ceil(confidence * n));
+  const size_t quantile_index = std::clamp<size_t>(quantile_count, 1, n) - 1;
+  metrics.eens_var = sorted_eens[quantile_index];
+  metrics.lole_var = sorted_lole[quantile_index];
+
+  const double var_atom_weight =
+      static_cast<double>(quantile_count) / static_cast<double>(n) - confidence;
+  double eens_tail_integral = var_atom_weight * sorted_eens[quantile_index];
+  double lole_tail_integral = var_atom_weight * sorted_lole[quantile_index];
+  for (size_t i = quantile_count; i < n; ++i) {
+    eens_tail_integral += sorted_eens[i] / static_cast<double>(n);
+    lole_tail_integral += sorted_lole[i] / static_cast<double>(n);
   }
-  
-  if (count_above > 0) {
-    metrics.eens_cvar = eens_sum_above / count_above;
-    metrics.lole_cvar = lole_sum_above / count_above;
-  }
+  metrics.eens_cvar = eens_tail_integral / tail_probability;
+  metrics.lole_cvar = lole_tail_integral / tail_probability;
   
   // Store full distribution
   metrics.eens_distribution = eens_samples;
@@ -2086,6 +2359,435 @@ TailRiskMetrics compute_tail_risk(
 // Frequency & Duration Method (Analytical)
 // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 
+namespace {
+
+struct CapacityOutageState {
+  double outage_mw{0.0};
+  double probability{0.0};
+};
+
+double component_unavailability(const TwoStateReliabilityComponent& component,
+                                double hours_per_year) {
+  if (!(hours_per_year > 0.0) || !std::isfinite(hours_per_year))
+    throw std::invalid_argument("hours_per_year must be finite and positive");
+  if (!std::isfinite(component.failure_rate_per_year) ||
+      component.failure_rate_per_year < 0.0 ||
+      !std::isfinite(component.repair_time_hr) || component.repair_time_hr < 0.0 ||
+      !std::isfinite(component.unavailability) ||
+      component.unavailability < 0.0 || component.unavailability >= 1.0)
+    throw std::invalid_argument("invalid two-state reliability component");
+
+  if (component.unavailability > 0.0) return component.unavailability;
+  if (component.failure_rate_per_year == 0.0 || component.repair_time_hr == 0.0)
+    return 0.0;
+  const double mu_per_year = hours_per_year / component.repair_time_hr;
+  return component.failure_rate_per_year /
+         (component.failure_rate_per_year + mu_per_year);
+}
+
+std::vector<CapacityOutageState> convolve_capacity_state(
+    const std::vector<CapacityOutageState>& states, double capacity_mw,
+    double unavailability, double merge_tolerance_mw) {
+  std::vector<CapacityOutageState> expanded;
+  expanded.reserve(states.size() * 2);
+  for (const auto& state : states) {
+    expanded.push_back(
+        {state.outage_mw, state.probability * (1.0 - unavailability)});
+    expanded.push_back(
+        {state.outage_mw + capacity_mw, state.probability * unavailability});
+  }
+  std::sort(expanded.begin(), expanded.end(), [](const auto& lhs, const auto& rhs) {
+    return lhs.outage_mw < rhs.outage_mw;
+  });
+
+  std::vector<CapacityOutageState> merged;
+  merged.reserve(expanded.size());
+  for (const auto& state : expanded) {
+    if (!merged.empty() &&
+        std::abs(state.outage_mw - merged.back().outage_mw) <= merge_tolerance_mw) {
+      const double combined_probability =
+          merged.back().probability + state.probability;
+      if (combined_probability > 0.0) {
+        merged.back().outage_mw =
+            (merged.back().outage_mw * merged.back().probability +
+             state.outage_mw * state.probability) /
+            combined_probability;
+      }
+      merged.back().probability = combined_probability;
+    } else {
+      merged.push_back(state);
+    }
+  }
+  return merged;
+}
+
+double cumulative_at(const std::vector<CapacityOutageState>& states,
+                     const std::vector<double>& suffix_probability,
+                     double threshold_mw) {
+  const auto it = std::lower_bound(
+      states.begin(), states.end(), threshold_mw,
+      [](const CapacityOutageState& state, double threshold) {
+        return state.outage_mw < threshold;
+      });
+  if (it == states.end()) return 0.0;
+  return suffix_probability[static_cast<size_t>(it - states.begin())];
+}
+
+double frequency_at(const std::vector<CapacityOutageState>& states,
+                    const std::vector<double>& cumulative_frequency,
+                    double threshold_mw) {
+  if (threshold_mw <= 0.0 || states.empty()) return 0.0;
+  const auto it = std::lower_bound(
+      states.begin(), states.end(), threshold_mw,
+      [](const CapacityOutageState& state, double threshold) {
+        return state.outage_mw < threshold;
+      });
+  if (it == states.end()) return 0.0;
+  return cumulative_frequency[static_cast<size_t>(it - states.begin())];
+}
+
+}  // namespace
+
+FrequencyDurationEquivalent reduce_series_frequency_duration(
+    const std::vector<TwoStateReliabilityComponent>& components,
+    double hours_per_year) {
+  FrequencyDurationEquivalent result;
+  double sum_lambda = 0.0;
+  for (const auto& component : components) {
+    const double unavailable = component_unavailability(component, hours_per_year);
+    result.availability *= 1.0 - unavailable;
+    sum_lambda += component.failure_rate_per_year;
+  }
+  result.unavailability = 1.0 - result.availability;
+  // Billinton & Allan (1996), coherent series block boundary-crossing rate.
+  result.failure_frequency_per_year = result.availability * sum_lambda;
+  if (result.failure_frequency_per_year > 0.0)
+    result.mean_failure_duration_hr =
+        result.unavailability * hours_per_year /
+        result.failure_frequency_per_year;
+  return result;
+}
+
+FrequencyDurationEquivalent reduce_parallel_frequency_duration(
+    const std::vector<TwoStateReliabilityComponent>& components,
+    double hours_per_year) {
+  FrequencyDurationEquivalent result;
+  if (components.empty()) return result;
+
+  result.unavailability = 1.0;
+  std::vector<double> unavailable;
+  unavailable.reserve(components.size());
+  for (const auto& component : components) {
+    const double value = component_unavailability(component, hours_per_year);
+    unavailable.push_back(value);
+    result.unavailability *= value;
+  }
+  result.availability = 1.0 - result.unavailability;
+
+  // Entry into the all-down state occurs when one up component fails while all
+  // remaining components are down.  This is exact for independent CTMCs.
+  for (size_t i = 0; i < components.size(); ++i) {
+    double other_down_probability = 1.0;
+    for (size_t j = 0; j < components.size(); ++j)
+      if (j != i) other_down_probability *= unavailable[j];
+    result.failure_frequency_per_year +=
+        components[i].failure_rate_per_year * (1.0 - unavailable[i]) *
+        other_down_probability;
+  }
+  if (result.failure_frequency_per_year > 0.0)
+    result.mean_failure_duration_hr =
+        result.unavailability * hours_per_year /
+        result.failure_frequency_per_year;
+  return result;
+}
+
+LowDemandPFDResult compute_low_demand_pfd(
+    double dangerous_undetected_rate_per_hour,
+    double proof_test_interval_hr) {
+  if (!std::isfinite(dangerous_undetected_rate_per_hour) ||
+      dangerous_undetected_rate_per_hour < 0.0 ||
+      !std::isfinite(proof_test_interval_hr) || proof_test_interval_hr <= 0.0)
+    throw std::invalid_argument(
+        "dangerous-undetected rate must be non-negative and proof-test interval positive");
+
+  LowDemandPFDResult result;
+  const double exposure =
+      dangerous_undetected_rate_per_hour * proof_test_interval_hr;
+  result.first_order_pfd_average = 0.5 * exposure;
+  if (exposure == 0.0) return result;
+
+  // IEC 61508-6 low-demand model, integrated exactly over one proof-test cycle.
+  if (exposure < 1e-5) {
+    // Taylor expansion of the exact cycle average avoids cancellation in
+    // 1 + expm1(-x)/x when x approaches machine precision.
+    result.pfd_average =
+        exposure * (0.5 + exposure * (-1.0 / 6.0 + exposure / 24.0));
+  } else {
+    result.pfd_average = 1.0 + std::expm1(-exposure) / exposure;
+  }
+  result.approximation_relative_error =
+      std::abs(result.first_order_pfd_average - result.pfd_average) /
+      result.pfd_average;
+  return result;
+}
+
+namespace {
+
+constexpr size_t kMaxExactInformationPaths = 24;
+constexpr size_t kMaxMinimalCutSets = 100000;
+
+using ComponentPath = std::vector<size_t>;
+
+void validate_information_components(
+    const std::vector<InformationServiceComponent>& components) {
+  for (const auto& component : components) {
+    if (!std::isfinite(component.availability) || component.availability < 0.0 ||
+        component.availability > 1.0 ||
+        !std::isfinite(component.packet_delivery_probability) ||
+        component.packet_delivery_probability < 0.0 ||
+        component.packet_delivery_probability > 1.0 ||
+        !std::isfinite(component.latency_ms) || component.latency_ms < 0.0 ||
+        !std::isfinite(component.jitter_ms) || component.jitter_ms < 0.0)
+      throw std::invalid_argument("invalid information-service component");
+  }
+}
+
+std::vector<ComponentPath> reduce_success_paths(
+    std::vector<ComponentPath> paths) {
+  for (auto& path : paths) {
+    std::sort(path.begin(), path.end());
+    path.erase(std::unique(path.begin(), path.end()), path.end());
+  }
+  std::sort(paths.begin(), paths.end(), [](const auto& lhs, const auto& rhs) {
+    if (lhs.size() != rhs.size()) return lhs.size() < rhs.size();
+    return lhs < rhs;
+  });
+  paths.erase(std::unique(paths.begin(), paths.end()), paths.end());
+
+  std::vector<ComponentPath> reduced;
+  for (const auto& candidate : paths) {
+    const bool redundant = std::any_of(
+        reduced.begin(), reduced.end(), [&](const ComponentPath& retained) {
+          return std::includes(candidate.begin(), candidate.end(),
+                               retained.begin(), retained.end());
+        });
+    if (!redundant) reduced.push_back(candidate);
+  }
+  return reduced;
+}
+
+std::vector<ComponentPath> qos_valid_paths(
+    const std::vector<InformationServiceComponent>& components,
+    const InformationFunctionDefinition& function) {
+  if (!std::isfinite(function.max_latency_ms) ||
+      !std::isfinite(function.max_jitter_ms) ||
+      !std::isfinite(function.min_packet_delivery_probability) ||
+      function.min_packet_delivery_probability < 0.0 ||
+      function.min_packet_delivery_probability > 1.0)
+    throw std::invalid_argument("invalid information-function QoS limit");
+
+  std::vector<ComponentPath> valid;
+  for (const auto& candidate : function.alternative_paths) {
+    ComponentPath path = candidate.component_indices;
+    std::sort(path.begin(), path.end());
+    path.erase(std::unique(path.begin(), path.end()), path.end());
+    double latency = 0.0;
+    double jitter = 0.0;
+    double packet_delivery = 1.0;
+    for (const size_t index : path) {
+      if (index >= components.size())
+        throw std::out_of_range("information path component index out of range");
+      latency += components[index].latency_ms;
+      jitter += components[index].jitter_ms;
+      packet_delivery *= components[index].packet_delivery_probability;
+    }
+    if (function.max_latency_ms > 0.0 && latency > function.max_latency_ms)
+      continue;
+    if (function.max_jitter_ms > 0.0 && jitter > function.max_jitter_ms)
+      continue;
+    if (packet_delivery < function.min_packet_delivery_probability)
+      continue;
+    valid.push_back(std::move(path));
+  }
+  return reduce_success_paths(std::move(valid));
+}
+
+double success_path_union_probability(
+    const std::vector<InformationServiceComponent>& components,
+    const std::vector<ComponentPath>& paths) {
+  if (paths.empty()) return 0.0;
+  if (paths.front().empty()) return 1.0;
+  if (paths.size() > kMaxExactInformationPaths)
+    throw std::length_error(
+        "exact information reliability supports at most 24 reduced success paths");
+
+  // Exact inclusion-exclusion of the path-success events.  A component in
+  // several paths appears once in the union event, preserving shared failures.
+  // Billinton & Allan (1996), coherent-system path/cut-set evaluation.
+  long double availability = 0.0L;
+  const uint64_t subset_count = uint64_t{1} << paths.size();
+  for (uint64_t subset = 1; subset < subset_count; ++subset) {
+    ComponentPath required;
+    size_t selected_paths = 0;
+    for (size_t p = 0; p < paths.size(); ++p) {
+      if ((subset & (uint64_t{1} << p)) == 0) continue;
+      ++selected_paths;
+      required.insert(required.end(), paths[p].begin(), paths[p].end());
+    }
+    std::sort(required.begin(), required.end());
+    required.erase(std::unique(required.begin(), required.end()), required.end());
+    long double intersection_probability = 1.0L;
+    for (const size_t index : required) {
+      intersection_probability *=
+          components[index].availability *
+          components[index].packet_delivery_probability;
+    }
+    availability += (selected_paths % 2 == 1 ? 1.0L : -1.0L) *
+                    intersection_probability;
+  }
+  return std::clamp(static_cast<double>(availability), 0.0, 1.0);
+}
+
+std::vector<ComponentPath> minimal_hitting_sets(
+    const std::vector<ComponentPath>& success_paths) {
+  if (success_paths.empty() || success_paths.front().empty()) return {};
+  std::vector<ComponentPath> cuts(1);
+  for (const auto& path : success_paths) {
+    std::vector<ComponentPath> expanded;
+    for (const auto& cut : cuts) {
+      const bool already_hits = std::any_of(
+          cut.begin(), cut.end(), [&](size_t index) {
+            return std::binary_search(path.begin(), path.end(), index);
+          });
+      if (already_hits) {
+        expanded.push_back(cut);
+      } else {
+        for (const size_t index : path) {
+          ComponentPath next = cut;
+          next.push_back(index);
+          std::sort(next.begin(), next.end());
+          next.erase(std::unique(next.begin(), next.end()), next.end());
+          expanded.push_back(std::move(next));
+        }
+      }
+    }
+    cuts = reduce_success_paths(std::move(expanded));
+    if (cuts.size() > kMaxMinimalCutSets)
+      throw std::length_error("minimal cut-set enumeration exceeded 100000 sets");
+  }
+  return cuts;
+}
+
+InformationFunctionReliabilityResult evaluate_reduced_information_paths(
+    const std::vector<InformationServiceComponent>& components,
+    std::vector<ComponentPath> paths) {
+  paths = reduce_success_paths(std::move(paths));
+  InformationFunctionReliabilityResult result;
+  result.valid_path_count = paths.size();
+  result.availability = success_path_union_probability(components, paths);
+  result.minimal_cut_sets = minimal_hitting_sets(paths);
+  return result;
+}
+
+}  // namespace
+
+InformationFunctionReliabilityResult evaluate_information_function_reliability(
+    const std::vector<InformationServiceComponent>& components,
+    const InformationFunctionDefinition& function) {
+  validate_information_components(components);
+  return evaluate_reduced_information_paths(
+      components, qos_valid_paths(components, function));
+}
+
+InformationFunctionReliabilityResult evaluate_joint_information_reliability(
+    const std::vector<InformationServiceComponent>& components,
+    const std::vector<InformationFunctionDefinition>& functions) {
+  validate_information_components(components);
+  if (functions.empty()) {
+    InformationFunctionReliabilityResult result;
+    result.availability = 1.0;
+    result.valid_path_count = 1;
+    return result;
+  }
+
+  // AND of functions, each represented as an OR of paths: distribute by
+  // choosing one success path per function, unioning their required components,
+  // then minimize supersets before exact inclusion-exclusion.
+  std::vector<ComponentPath> joint_paths(1);
+  for (const auto& function : functions) {
+    const auto function_paths = qos_valid_paths(components, function);
+    if (function_paths.empty()) return {};
+    std::vector<ComponentPath> expanded;
+    if (joint_paths.size() > kMaxMinimalCutSets / function_paths.size())
+      throw std::length_error("joint information path expansion exceeded 100000 paths");
+    expanded.reserve(joint_paths.size() * function_paths.size());
+    for (const auto& prefix : joint_paths) {
+      for (const auto& path : function_paths) {
+        ComponentPath combined = prefix;
+        combined.insert(combined.end(), path.begin(), path.end());
+        expanded.push_back(std::move(combined));
+      }
+    }
+    joint_paths = reduce_success_paths(std::move(expanded));
+  }
+  return evaluate_reduced_information_paths(components, std::move(joint_paths));
+}
+
+PhysicalNetworkReliabilityResult evaluate_physical_network_reliability(
+    const std::vector<PhysicalReliabilityComponent>& components,
+    const std::vector<PhysicalSuccessPath>& success_paths) {
+  if (components.empty())
+    throw std::invalid_argument(
+        "physical network reliability requires at least one component");
+  std::unordered_set<std::string> stable_ids;
+  std::vector<InformationServiceComponent> probability_components;
+  probability_components.reserve(components.size());
+  for (const auto& component : components) {
+    if (component.stable_id.empty() ||
+        !stable_ids.insert(component.stable_id).second)
+      throw std::invalid_argument(
+          "physical reliability component stable IDs must be non-empty and unique");
+    if (!std::isfinite(component.availability) ||
+        component.availability < 0.0 || component.availability > 1.0)
+      throw std::invalid_argument(
+          "physical reliability component availability must be in [0,1]");
+    InformationServiceComponent probability_component;
+    probability_component.id = component.stable_id;
+    probability_component.availability = component.availability;
+    probability_components.push_back(std::move(probability_component));
+  }
+
+  std::vector<ComponentPath> paths;
+  paths.reserve(success_paths.size());
+  for (const auto& supplied : success_paths) {
+    for (const size_t index : supplied.component_indices) {
+      if (index >= components.size())
+        throw std::out_of_range(
+            "physical success-path component index is out of range");
+    }
+    paths.push_back(supplied.component_indices);
+  }
+  paths = reduce_success_paths(std::move(paths));
+
+  PhysicalNetworkReliabilityResult result;
+  result.availability =
+      success_path_union_probability(probability_components, paths);
+  result.loss_probability = 1.0 - result.availability;
+  result.reduced_success_path_count = paths.size();
+  result.minimal_cut_set_indices = minimal_hitting_sets(paths);
+  result.minimal_cut_set_stable_ids.reserve(
+      result.minimal_cut_set_indices.size());
+  for (const auto& cut : result.minimal_cut_set_indices) {
+    std::vector<std::string> stable_cut;
+    stable_cut.reserve(cut.size());
+    for (const size_t index : cut)
+      stable_cut.push_back(components[index].stable_id);
+    result.minimal_cut_set_stable_ids.push_back(std::move(stable_cut));
+  }
+  result.exact_independent_path_model = true;
+  return result;
+}
+
 FrequencyDurationResult run_frequency_duration_analysis(
     const HybridPowerSystem& sys,
     double peak_load_mw) {
@@ -2104,11 +2806,11 @@ FrequencyDurationResult run_frequency_duration_analysis(
   
   spdlog::info("F&D Analysis: Starting with peak load = {:.1f} MW", peak_load_mw);
   
-  // Build list of generators with F&D parameters
+  // Build list of generators with F&D parameters.  No repair time is invented:
+  // FOR alone identifies the COPT probability but cannot identify LOLF/LOLD.
   struct GenFD {
     double capacity;
-    double lambda;  // failure rate (per hour)
-    double mu;      // repair rate (per hour)
+    double lambda;  // failure rate (per year)
     double p;       // availability
     double q;       // unavailability (FOR)
   };
@@ -2120,22 +2822,22 @@ FrequencyDurationResult run_frequency_duration_analysis(
     GenFD gfd;
     gfd.capacity = g.pmax_mw;
     
-    // Convert FOR and MTTR to lambda and mu
+    // Convert FOR and MTTR to lambda.
     // FOR = q = MTTR / (MTTF + MTTR) = lambda / (lambda + mu)
     // lambda = FOR / MTTR (per hour), mu = 1 / MTTR
     double for_rate = g.forced_outage_rate;
-    double mttr_hr = g.mttr_hr > 0 ? g.mttr_hr : 50.0;  // default 50 hrs
+    double mttr_hr = g.mttr_hr;
     
     if (for_rate > 0 && for_rate < 1.0) {
-      gfd.mu = 1.0 / mttr_hr;
       gfd.q = for_rate;
       gfd.p = 1.0 - for_rate;
-      // lambda = q * mu / (1 - q) = FOR / ((1 - FOR) * MTTR)
-      gfd.lambda = for_rate / ((1.0 - for_rate) * mttr_hr);
+      gfd.lambda = mttr_hr > 0.0
+                       ? for_rate / ((1.0 - for_rate) * mttr_hr) * 8760.0
+                       : 0.0;
+      if (!(mttr_hr > 0.0)) result.frequency_valid = false;
     } else {
       // Perfect generator
       gfd.lambda = 0.0;
-      gfd.mu = 1.0;
       gfd.p = 1.0;
       gfd.q = 0.0;
     }
@@ -2145,77 +2847,85 @@ FrequencyDurationResult run_frequency_duration_analysis(
   
   if (gens.empty()) {
     spdlog::warn("F&D Analysis: No generators found");
+    result.warnings.push_back(
+        "No in-service AC generators are available for COPT construction");
     return result;
   }
   
-  // Build COPT recursively using convolution
-  // Start with "no outage" state: P(0) = 1, F(0) = 0
-  double step_size = 10.0;  // MW resolution
+  result.probability_valid = true;
+  result.frequency_valid = std::all_of(gens.begin(), gens.end(), [](const GenFD& g) {
+    return g.q == 0.0 || g.lambda > 0.0;
+  });
+
+  // Billinton & Allan (1996), exact discrete COPT convolution.  Capacity states
+  // are not binned; only round-off-equivalent sums are merged.
   double total_capacity = 0.0;
   for (const auto& g : gens) total_capacity += g.capacity;
-  
-  int n_levels = static_cast<int>(total_capacity / step_size) + 1;
-  std::vector<double> outage_levels(n_levels);
-  std::vector<double> cum_prob(n_levels, 0.0);
-  std::vector<double> cum_freq(n_levels, 0.0);
-  
-  for (int i = 0; i < n_levels; ++i) {
-    outage_levels[i] = i * step_size;
-  }
-  cum_prob[0] = 1.0;  // P(outage >= 0) = 1
-  
-  // Add each generator using recursive formula
+  const double merge_tolerance_mw = 1e-10 * std::max(1.0, total_capacity);
+  std::vector<CapacityOutageState> states{{0.0, 1.0}};
+  std::vector<double> cumulative_frequency{0.0};
+
   for (const auto& g : gens) {
-    int c_steps = static_cast<int>(g.capacity / step_size);
-    if (c_steps <= 0) continue;
-    
-    std::vector<double> new_prob(n_levels, 0.0);
-    std::vector<double> new_freq(n_levels, 0.0);
-    
-    for (int x = 0; x < n_levels; ++x) {
-      // Get old values at x and x - C
-      double p_old_x = cum_prob[x];
-      double f_old_x = cum_freq[x];
-      double p_old_xc = (x >= c_steps) ? cum_prob[x - c_steps] : 1.0;
-      double f_old_xc = (x >= c_steps) ? cum_freq[x - c_steps] : 0.0;
-      
-      // Probability recursion: P_new(X) = p * P_old(X) + q * P_old(X - C)
-      new_prob[x] = g.p * p_old_x + g.q * p_old_xc;
-      
-      // Frequency recursion: F_new(X) = p * F_old(X) + q * F_old(X-C) 
-      //                               + lambda * p * [P_old(X-C) - P_old(X)]
-      double term1 = g.p * f_old_x;
-      double term2 = g.q * f_old_xc;
-      double term3 = g.lambda * g.p * (p_old_xc - p_old_x);
-      new_freq[x] = term1 + term2 + term3;
+    if (!(g.capacity > 0.0)) continue;
+    std::vector<double> old_suffix(states.size(), 0.0);
+    for (size_t i = states.size(); i-- > 0;) {
+      old_suffix[i] = states[i].probability;
+      if (i + 1 < states.size()) old_suffix[i] += old_suffix[i + 1];
     }
-    
-    cum_prob = new_prob;
-    cum_freq = new_freq;
+    auto next_states = convolve_capacity_state(
+        states, g.capacity, g.q, merge_tolerance_mw);
+    std::vector<double> next_frequency(next_states.size(), 0.0);
+    for (size_t i = 0; i < next_states.size(); ++i) {
+      const double threshold = next_states[i].outage_mw;
+      const double p_x = cumulative_at(states, old_suffix, threshold);
+      const double p_xc = cumulative_at(states, old_suffix, threshold - g.capacity);
+      next_frequency[i] =
+          g.p * frequency_at(states, cumulative_frequency, threshold) +
+          g.q * frequency_at(states, cumulative_frequency,
+                             threshold - g.capacity) +
+          g.lambda * g.p * (p_xc - p_x);
+    }
+    states = std::move(next_states);
+    cumulative_frequency = std::move(next_frequency);
   }
-  
-  // Store COPT
-  result.capacity_outage_levels = outage_levels;
-  result.cumulative_probability = cum_prob;
-  result.cumulative_frequency = cum_freq;
+
+  result.exact_capacity_states = true;
+  result.capacity_outage_levels.reserve(states.size());
+  result.state_probability.reserve(states.size());
+  result.cumulative_probability.assign(states.size(), 0.0);
+  for (const auto& state : states) {
+    result.capacity_outage_levels.push_back(state.outage_mw);
+    result.state_probability.push_back(state.probability);
+  }
+  for (size_t i = states.size(); i-- > 0;) {
+    result.cumulative_probability[i] = states[i].probability;
+    if (i + 1 < states.size())
+      result.cumulative_probability[i] += result.cumulative_probability[i + 1];
+  }
+  result.cumulative_frequency = cumulative_frequency;
   
   // Calculate reliability indices at reserve margin
   double reserve = total_capacity - peak_load_mw;
-  int reserve_idx = static_cast<int>(reserve / step_size);
-  reserve_idx = std::max(0, std::min(reserve_idx, n_levels - 1));
-  
-  // LOLP = P(outage > reserve) = P(outage >= reserve + step)
-  int lolp_idx = reserve_idx + 1;
-  result.lolp = (lolp_idx < n_levels) ? cum_prob[lolp_idx] : 0.0;
-  
-  // LOLF = F(outage > reserve)
-  result.lolf_fd = (lolp_idx < n_levels) ? cum_freq[lolp_idx] * 8760.0 : 0.0;  // per year
+  const auto loss_it = std::upper_bound(
+      states.begin(), states.end(), reserve,
+      [](double value, const CapacityOutageState& state) {
+        return value < state.outage_mw;
+      });
+  if (loss_it != states.end()) {
+    const size_t loss_index = static_cast<size_t>(loss_it - states.begin());
+    result.lolp = result.cumulative_probability[loss_index];
+    if (result.frequency_valid)
+      result.lolf_fd = result.cumulative_frequency[loss_index];
+  }
   
   // LOLE = LOLP * 8760 (simplified, assumes constant load)
   result.lole_fd = result.lolp * 8760.0;
   
   // LOLD = LOLE / LOLF (average duration of loss event)
   result.lold = (result.lolf_fd > 0) ? result.lole_fd / result.lolf_fd : 0.0;
+  if (!result.frequency_valid)
+    result.warnings.push_back(
+        "LOLF and LOLD are unavailable because at least one non-perfect generator has FOR but no MTTR");
   
   spdlog::info("F&D Analysis: Complete. LOLP={:.6f}, LOLE={:.2f} hr/yr, LOLF={:.2f} occ/yr, LOLD={:.2f} hr/occ",
                result.lolp, result.lole_fd, result.lolf_fd, result.lold);
@@ -2575,7 +3285,9 @@ std::vector<FMEAComponent> build_fmea_catalog(
   std::vector<FMEAComponent> catalog;
 
   // Resolve one component's reliability params, update the data-quality
-  // tally, and return {lambda_per_year, repair_hr}.  `def_lambda`/`def_repair`
+  // tally, and return {calendar_frequency_per_year, repair_hr}.
+  // Monte Carlo consumes the operating intensity; deterministic FMEA weights
+  // consequences by events observed on the reporting calendar.
   // are the per-kind template fallbacks used only when the policy permits
   // defaulting and case data is incomplete.
   auto resolve_cat = [&](const ReliabilityRawFields& raw,
@@ -2592,7 +3304,10 @@ std::vector<FMEAComponent> build_fmea_catalog(
       dq.components_with_reliability_data++;
     }
     double repair = pr.repair_hr > 0.0 ? pr.repair_hr : def_repair;
-    return {pr.lambda_per_year, repair};
+    const double calendar_frequency = pr.calendar_frequency_per_year > 0.0
+        ? pr.calendar_frequency_per_year
+        : pr.lambda_per_year;
+    return {calendar_frequency, repair};
   };
 
   // ---- AC Generators ----
@@ -4361,17 +5076,79 @@ FMEAResult run_distribution_fmea(
     return std::clamp(value, 0.0, 1.0);
   };
   const auto& intelligent = options.cyber_physical.intelligent;
-  const double intelligent_success_probability = intelligent.enabled
-      ? probability(intelligent.detection_success_probability) *
-            probability(intelligent.isolation_success_probability) *
-            probability(intelligent.restoration_decision_valid_probability) *
-            probability(intelligent.restoration_execution_success_probability) *
-            probability(intelligent.protection_success_probability)
-      : 1.0;
-  const double information_service_availability =
+  const bool explicit_joint_states = !intelligent.joint_states.empty();
+  if (explicit_joint_states && !intelligent.enabled)
+    throw std::invalid_argument(
+        "joint intelligent-function states require intelligent.enabled=true");
+  if (explicit_joint_states &&
+      !options.cyber_physical.availability_overrides.empty())
+    throw std::invalid_argument(
+        "per-component scalar availability overrides cannot be combined with explicit joint function states");
+
+  double information_service_availability =
       options.cyber_physical.information_enabled
           ? probability(options.cyber_physical.automation_availability)
           : 1.0;
+  double detection_probability = intelligent.enabled
+      ? probability(intelligent.detection_success_probability) : 1.0;
+  double isolation_probability = intelligent.enabled
+      ? probability(intelligent.isolation_success_probability) : 1.0;
+  double restoration_decision_probability = intelligent.enabled
+      ? probability(intelligent.restoration_decision_valid_probability) : 1.0;
+  double restoration_execution_probability = intelligent.enabled
+      ? probability(intelligent.restoration_execution_success_probability) : 1.0;
+  double protection_probability = intelligent.enabled
+      ? probability(intelligent.protection_success_probability) : 1.0;
+  double intelligent_success_probability = detection_probability *
+      isolation_probability * restoration_decision_probability *
+      restoration_execution_probability * protection_probability;
+  double joint_automation_probability =
+      information_service_availability * intelligent_success_probability;
+
+  if (explicit_joint_states) {
+    double probability_sum = 0.0;
+    information_service_availability = 0.0;
+    detection_probability = 0.0;
+    isolation_probability = 0.0;
+    restoration_decision_probability = 0.0;
+    restoration_execution_probability = 0.0;
+    protection_probability = 0.0;
+    intelligent_success_probability = 0.0;
+    joint_automation_probability = 0.0;
+    for (const auto& state : intelligent.joint_states) {
+      if (!std::isfinite(state.probability) || state.probability < 0.0 ||
+          state.probability > 1.0)
+        throw std::invalid_argument(
+            "joint intelligent-function state probability must be in [0,1]");
+      probability_sum += state.probability;
+      information_service_availability += state.probability *
+          (state.information_service_available ? 1.0 : 0.0);
+      detection_probability += state.probability *
+          (state.detection_success ? 1.0 : 0.0);
+      isolation_probability += state.probability *
+          (state.isolation_success ? 1.0 : 0.0);
+      restoration_decision_probability += state.probability *
+          (state.restoration_decision_valid ? 1.0 : 0.0);
+      restoration_execution_probability += state.probability *
+          (state.restoration_execution_success ? 1.0 : 0.0);
+      protection_probability += state.probability *
+          (state.protection_success ? 1.0 : 0.0);
+      const bool intelligent_success = state.detection_success &&
+          state.isolation_success && state.restoration_decision_valid &&
+          state.restoration_execution_success && state.protection_success;
+      if (intelligent_success)
+        intelligent_success_probability += state.probability;
+      if (intelligent_success &&
+          (!options.cyber_physical.information_enabled ||
+           state.information_service_available))
+        joint_automation_probability += state.probability;
+    }
+    if (std::abs(probability_sum - 1.0) > 1e-9)
+      throw std::invalid_argument(
+          "joint intelligent-function state probabilities must sum to one");
+    if (!options.cyber_physical.information_enabled)
+      information_service_availability = 1.0;
+  }
   const bool hybrid_fmea = has_hybrid_fmea_components(sys);
   if (hybrid_fmea) {
     result.model_scope = "hybrid-acdc-network-lp";
@@ -4407,27 +5184,24 @@ FMEAResult run_distribution_fmea(
     auto& cyber = result.cyber_physical;
     cyber.enabled = true;
     cyber.level = 1;
-    cyber.model_scope = intelligent.enabled
-        ? "level1-factorized-physical-information-intelligent-screening"
-        : "level1-scalar-interface-matrix";
+    cyber.model_scope = explicit_joint_states
+        ? "level1-joint-physical-information-intelligent-classes"
+        : (intelligent.enabled
+               ? "level1-factorized-physical-information-intelligent-screening"
+               : "level1-scalar-interface-matrix");
     cyber.information_enabled = options.cyber_physical.information_enabled;
     cyber.intelligent_enabled = intelligent.enabled;
-    cyber.independent_factorization = intelligent.enabled;
+    cyber.independent_factorization = intelligent.enabled && !explicit_joint_states;
     cyber.information_service_availability = information_service_availability;
     cyber.intelligent_function_success_probability =
         intelligent_success_probability;
-    cyber.effective_automation_probability =
-        information_service_availability * intelligent_success_probability;
-    cyber.detection_success_probability = intelligent.enabled
-        ? probability(intelligent.detection_success_probability) : 1.0;
-    cyber.isolation_success_probability = intelligent.enabled
-        ? probability(intelligent.isolation_success_probability) : 1.0;
-    cyber.restoration_decision_valid_probability = intelligent.enabled
-        ? probability(intelligent.restoration_decision_valid_probability) : 1.0;
-    cyber.restoration_execution_success_probability = intelligent.enabled
-        ? probability(intelligent.restoration_execution_success_probability) : 1.0;
-    cyber.protection_success_probability = intelligent.enabled
-        ? probability(intelligent.protection_success_probability) : 1.0;
+    cyber.effective_automation_probability = joint_automation_probability;
+    cyber.detection_success_probability = detection_probability;
+    cyber.isolation_success_probability = isolation_probability;
+    cyber.restoration_decision_valid_probability = restoration_decision_probability;
+    cyber.restoration_execution_success_probability =
+        restoration_execution_probability;
+    cyber.protection_success_probability = protection_probability;
     // Compatibility field: this is the effective automatic-class probability
     // after the enabled information and intelligent screening factors.
     cyber.automation_availability = cyber.effective_automation_probability;
@@ -4440,8 +5214,11 @@ FMEAResult run_distribution_fmea(
         options.cyber_physical.information_enabled;
     result.validity.intelligent_function_probabilities_modelled =
         intelligent.enabled;
-    result.validity.joint_class_probability_modelled = false;
-    result.validity.protection_logic_modelled = false;
+    result.validity.joint_class_probability_modelled = explicit_joint_states;
+    result.validity.protection_logic_modelled =
+        options.cyber_physical.protection_misoperation.enabled;
+    result.validity.protection_misoperation_modelled =
+        options.cyber_physical.protection_misoperation.enabled;
     result.validity.protection_frt_reliability_coupled = false;
     result.validity.cyber_control_consequence_modelled =
         options.cyber_physical.freeze_der_on_automation_loss;
@@ -4454,11 +5231,17 @@ FMEAResult run_distribution_fmea(
         "are frozen. The class switching times replace the global "
         "switching_time_hr for every contingency. Communication topology, shared "
         "cyber cut sets, cyber-node power supply, weather common cause, and "
-        "adversarial attacks are not modelled; "
-        "delta_protection_misoperation_mwh_yr is a reserved placeholder (always "
-        "zero at Level 1 — protection misoperation lives in the failure-mode "
-        "FMEA).";
-    if (intelligent.enabled) {
+        "adversarial attacks are not modelled. Protection-security nuisance "
+        "trips are included when an explicit no-fault decision-window model is "
+        "enabled; customer indices require a separate protection-zone-to-load "
+        "allocation and are therefore not inferred from the system aggregate.";
+    if (explicit_joint_states) {
+      result.model_limitations +=
+          " Explicit mutually-exclusive joint information/detection/isolation/"
+          "restoration/protection states replace independent factorization; the "
+          "states still collapse to the existing automatic versus degraded "
+          "physical consequence classes.";
+    } else if (intelligent.enabled) {
       result.model_limitations +=
           " Intelligent detection, isolation, restoration-decision, action-"
           "execution, and protection-success inputs are multiplied as a "
@@ -4536,8 +5319,9 @@ FMEAResult run_distribution_fmea(
           }
         }
       }
-      automation_availability =
-          probability(information_availability) * intelligent_success_probability;
+      automation_availability = explicit_joint_states
+          ? joint_automation_probability
+          : probability(information_availability) * intelligent_success_probability;
     }
     automation_availability = std::clamp(automation_availability, 0.0, 1.0);
     const double down_probability = 1.0 - automation_availability;
@@ -4858,6 +5642,51 @@ FMEAResult run_distribution_fmea(
     result.contingencies.push_back(std::move(work.detail));
   }
 
+  if (options.cyber_physical.enabled &&
+      options.cyber_physical.protection_misoperation.enabled) {
+    const auto& misop = options.cyber_physical.protection_misoperation;
+    const double probabilities[] = {
+        misop.false_trip_probability_per_window,
+        misop.trip_channel_success_probability,
+        misop.breaker_success_probability};
+    for (double value : probabilities) {
+      if (!std::isfinite(value) || value < 0.0 || value > 1.0)
+        throw std::invalid_argument(
+            "protection-misoperation probabilities must be in [0,1]");
+    }
+    const double nonnegative[] = {
+        misop.no_fault_decision_windows_per_year,
+        misop.disconnected_load_mw,
+        misop.restoration_duration_hr};
+    for (double value : nonnegative) {
+      if (!std::isfinite(value) || value < 0.0)
+        throw std::invalid_argument(
+            "protection-misoperation exposure, load, and duration must be non-negative");
+    }
+
+    // Chinese reliability manual Eq. (rel-icp-misoperation-runtime): an
+    // active-on-demand security chain over no-fault decision windows.
+    auto& cyber = result.cyber_physical;
+    cyber.protection_misoperation_frequency_per_year =
+        misop.no_fault_decision_windows_per_year *
+        misop.false_trip_probability_per_window *
+        misop.trip_channel_success_probability *
+        misop.breaker_success_probability;
+    cyber.delta_protection_misoperation_mwh_yr =
+        cyber.protection_misoperation_frequency_per_year *
+        misop.disconnected_load_mw * misop.restoration_duration_hr;
+    if (misop.disconnected_load_mw > 0.01) {
+      cyber.protection_misoperation_lole_hr_yr =
+          cyber.protection_misoperation_frequency_per_year *
+          misop.restoration_duration_hr;
+      cyber.protection_misoperation_lolf_occ_yr =
+          cyber.protection_misoperation_frequency_per_year;
+    }
+    result.eens_mwh_yr += cyber.delta_protection_misoperation_mwh_yr;
+    result.lole_hr_yr += cyber.protection_misoperation_lole_hr_yr;
+    result.lolf_occ_yr += cyber.protection_misoperation_lolf_occ_yr;
+  }
+
   result.edns_mw = result.eens_mwh_yr / 8760.0;
 
   // Sort contingencies by EENS contribution descending
@@ -4871,11 +5700,15 @@ FMEAResult run_distribution_fmea(
   if (result.cyber_physical.enabled) {
     auto& cyber = result.cyber_physical;
     cyber.eens_adjusted_mwh_yr = result.eens_mwh_yr;
+    const double cyber_conditioned_physical_eens =
+        cyber.eens_adjusted_mwh_yr -
+        cyber.delta_protection_misoperation_mwh_yr;
     const double attainable = cyber.eens_no_automation_mwh_yr -
                               cyber.eens_perfect_cyber_mwh_yr;
     if (std::abs(attainable) > 1e-12) {
       cyber.automation_efficacy = std::clamp(
-          (cyber.eens_no_automation_mwh_yr - cyber.eens_adjusted_mwh_yr) /
+          (cyber.eens_no_automation_mwh_yr -
+           cyber_conditioned_physical_eens) /
               attainable,
           0.0, 1.0);
     } else {
@@ -4893,6 +5726,12 @@ FMEAResult run_distribution_fmea(
               result.distribution_idx.saidi,
           0.0, 1.0);
     }
+    cyber.eens_decomposition_residual_mwh_yr =
+        cyber.eens_adjusted_mwh_yr -
+        (cyber.eens_perfect_cyber_mwh_yr +
+         cyber.delta_cyber_duration_mwh_yr +
+         cyber.delta_cyber_control_mwh_yr +
+         cyber.delta_protection_misoperation_mwh_yr);
   }
 
   spdlog::info("FMEA: Complete. {} contingencies ({} with loss). "

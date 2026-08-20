@@ -8,9 +8,11 @@
 覆盖：两状态元件的连续时间马尔可夫（CTMC）可用度模型、串并联网络的频率—持续时间（F\&D）约简与
 最小割集、发电充裕度的停运容量概率表（COPT）递推与 LOLP/LOLE/LOLF/LOLD 指标、非序贯与序贯蒙特卡洛
 估计量及其无偏性与变异系数（CoV）收敛率、IEEE Std 1366 配电可靠性指标（SAIFI/SAIDI/CAIDI/ASAI）、
-以及尾部风险 VaR/CVaR。全部结论以平台实现（\srcpath{src/reliability/}）为落点，超出实现处以“未实现
-扩展说明”框标记。诚实边界：平台的蒙特卡洛/FMEA 状态评估以\emph{交流网络的 DC-OPF} 削减为口径
-（\texttt{model\_scope="ac-only-dcopf"}），不含直流侧负荷削减与 VSC/直流潮流约束（见本章末）。
+以及尾部风险 VaR/CVaR。全部结论以平台实现（\srcpath{src/reliability/}）为落点，规模上限、保真度与
+适用范围通过结果范围和有效性标志声明。纯交流系统采用交流网络 DC-OPF 削减口径
+（\texttt{model\_scope="ac-only-dcopf"}）；含直流网络的系统采用
+\texttt{hybrid-acdc-network-lp}，联合计入 AC/DC 有功平衡、直流负荷削减及 VSC/DC-DC 有界传输。
+两种口径均不认证非线性交流无功与电压可行性。
 \end{theorynote}
 
 \subsection{记号与约定}\label{sec:rel-th-notation}
@@ -20,7 +22,7 @@
   \item $A$：可用度（稳态在运行概率）；$U=1-A$：强迫停运率 / 不可用度（FOR）；$f$：状态频率（occ/yr）；
   \item $H=8760$（或 $8736$）：年小时数；$L$：负荷（MW）；$C$：可用发电容量（MW）；
   \item EENS：期望缺供电量（MWh/yr）；EDNS：期望缺供功率（MW）；
-        LOLP/LOLE/LOLF/LOLD：失负荷概率/期望（hr/yr）/频率（occ/yr）/持续（hr/occ）；
+  \item LOLP/LOLE/LOLF/LOLD：失负荷概率/期望（hr/yr）/频率（occ/yr）/持续（hr/occ）；
   \item 主动型元件：$p_d$ 每次需求失效概率、$\nu_d$ 需求频率（次/年），等效年频率 $\lambda_a=\nu_d p_d$。
 \end{itemize}
 除特别声明，所有元件相互独立，故障/修复时间服从指数分布（马尔可夫假设）。
@@ -55,7 +57,8 @@ $U=\lambda/(\lambda+\mu)$。以 $\mu=1/r$ 代入得 $U=\lambda/(\lambda+1/r)=\la
 （\srcpath{include/hacdcpf/reliability/reliability\_assessment.hpp:resolve\_reliability\_params}）。
 
 \subsection{网络约简：串并联与最小割集}\label{sec:rel-th-network}
-在\emph{小不可用度}（$U_i\ll1$）近似下，串并联子网可用 F\&D 三元组 $(\lambda,r,U)$ 逐级合并。
+独立两状态 CTMC 的串并联子网可用稳态可用度、边界穿越频率和平均故障持续时间逐级合并。下式同时列出
+工程中常用的小不可用度（$U_i\ll1$）近似；平台实现保留精确稳态乘积与边界穿越频率，而非只计算一阶式。
 
 \begin{proposition}[串联合并]\label{prop:rel-th-series}
 $n$ 个串联元件（任一故障即系统故障），系统三元组为
@@ -93,10 +96,11 @@ $\lambda_p=f_p/A_p\approx f_p$。$r_p$ 由 $U_p=\lambda_p r_p$ 得
 $r_p=U_1U_2/[\lambda_1\lambda_2(r_1+r_2)]=r_1r_2/(r_1+r_2)$。
 \end{proof}
 
-一般（含网络约束、非串并联）拓扑用\emph{最小割集}表述：系统故障事件
+一般（含网络约束、非串并联）物理拓扑用\emph{最小割集}表述：系统故障事件
 $=\bigcup_k(\text{割集 }K_k\text{ 全故障})$，一阶近似 $U_{\mathrm{sys}}\approx\sum_k\prod_{i\in K_k}U_i$，
-主导项为低阶（一阶、二阶）割集。平台不做符号割集枚举，而以蒙特卡洛状态抽样统计削减（见
-\S\ref{sec:rel-th-mc}），因此天然涵盖网络重分布与多重故障耦合。
+主导项为低阶（一阶、二阶）割集。平台对一般\emph{物理网络}仍以蒙特卡洛状态抽样统计削减（见
+\S\ref{sec:rel-th-mc}）；对显式信息服务成功路径则已实现共享元件保持、QoS 筛选、最小割集和精确容斥
+（\S\ref{sec:rel-icp-avail}），两者不可混称。
 
 \subsection{发电充裕度：停运容量概率表与 LOLE/LOLF}\label{sec:rel-th-copt}
 发电充裕度评估把机组停运卷积成\emph{停运容量概率表}（COPT）。
@@ -126,6 +130,19 @@ $C_{\mathrm{inst}}$ 为装机容量。F\&D 法进一步给出失负荷频率 $\m
 持续 $\mathrm{LOLD}=\mathrm{LOLE}/\mathrm{LOLF}$。平台以 F\&D 结构体
 \srcpath{FrequencyDurationResult}（\fld{capacity\_outage\_levels}、\fld{cumulative\_probability}、
 \fld{cumulative\_frequency}、\fld{lolp}、\fld{lole\_fd}、\fld{lolf\_fd}、\fld{lold}）承载 COPT 与指标。
+
+\begin{example}[两机组 COPT 与充裕度指标]\label{ex:rel-th-copt}
+两台 $60$~MW 机组，强迫停运率 $q=0.05$（$p=0.95$），$\mathrm{MTTF}=1900$~h、$r=100$~h
+（校验 $U=r/(\mathrm{MTTF}{+}r)=0.05$，$\lambda=8760/1900=4.61/\text{yr}$、$\mu=8760/100=87.6/\text{yr}$）。
+停运容量 $X$ 的概率表为 $P(0){=}p^2{=}0.9025$、$P(60){=}2pq{=}0.095$、$P(120){=}q^2{=}0.0025$。
+设峰荷 $L=50$~MW、总容量 $120$~MW，则失负荷当可用容量 $120-X<50$，即 $X\ge120$（两机全停）：
+\begin{equation*}
+ \mathrm{LOLP}=P(X{\ge}120)=0.0025,\qquad \mathrm{LOLE}=8760\times0.0025=21.9~\text{h/yr}.
+\end{equation*}
+两机全停态的离开率为 $2\mu=175.2/\text{yr}$，故 $\mathrm{LOLF}=0.0025\times175.2=0.438~\text{occ/yr}$、
+$\mathrm{LOLD}=\mathrm{LOLE}/\mathrm{LOLF}=50$~h（$=1/(2\mu)$，两机中任一先修复即结束）。若峰荷升至 $70$~MW，
+则 $X{\ge}60$ 即失负荷，$\mathrm{LOLP}=0.095{+}0.0025=0.0975$——凸显充裕度对备用裕度的强敏感性。
+\end{example}
 
 \subsection{公共后果模型：突变算子、最小切负荷与引擎阶梯}\label{sec:rel-th-conseq}
 失效模式\emph{不}直接等于元件停运，而经\emph{后果算子}映射为网络 / 控制\emph{突变}：
@@ -217,8 +234,9 @@ $\mathrm{VaR}_\alpha(E)=\inf\{e:\Pr[E\le e]\ge\alpha\}$，严格的期望损失�
 \end{equation}
 右式为 Rockafellar--Uryasev 表征~\cite{rel:rockafellar}；连续分布下等于
 $\mathbb E[E\mid E\ge\mathrm{VaR}_\alpha]$。CVaR 是\emph{相干}风险度量（次可加、单调、平移不变、正齐次），
-优于 VaR。\textbf{实现注}：平台以\emph{经验 VaR 处起}的简单尾均值估计，对小样本或多个并列年损失会\emph{高估}
-VaR 处的概率质量，非严格 ES；序贯年样本为首选输入。承载于 \srcpath{TailRiskMetrics}
+优于 VaR。\textbf{实现注}：平台按经验分布对最坏 $1-\alpha$ 概率质量积分；当 VaR 处有并列样本时只取补足
+尾概率所需的分数质量，因此与上式的经验 ES 一致，而不是把全部 VaR 原子重复计入。序贯年样本为首选输入。
+承载于 \srcpath{TailRiskMetrics}
 （\fld{eens\_var}/\fld{eens\_cvar}/\fld{eens\_percentiles}）。
 
 \subsection{采样不确定性与稀有事件}\label{sec:rel-th-uncert}
@@ -229,28 +247,29 @@ VaR 处的概率质量，非严格 ES；序贯年样本为首选输入。承载�
  \mathrm{SE}(\widehat{\mathrm{PLC}})=\sqrt{\frac{\widehat p(1-\widehat p)}{n}}.
 \end{equation}
 稀有失负荷宜用 Wilson 或精确二项区间；序贯年样本须以\emph{年级}方差 / 区间而非把小时当独立。极小
-PLC/LOLE 下朴素 MC 统计低效，重要抽样、交叉熵、子集模拟、按故障阶分层或最小割集引导抽样是提出的补救
-（平台重要抽样选项为\emph{实验性}，未经证据不得声称有效）。这与 CoV 停机准则（定理~\ref{thm:rel-th-cov}）
+PLC/LOLE 下朴素 MC 统计低效。平台已实现优势比扭曲重要抽样、似然比无偏修正和 ESS 诊断；交叉熵、子集模拟与
+按故障阶分层不属于该接口范围，完整推导见 \S\ref{sec:rel-exact}。这与 CoV 停机准则（定理~\ref{thm:rel-th-cov}）
 互补：CoV 度量\emph{相对}收敛，SE / 区间度量\emph{绝对}不确定性。
 
 \subsection{薄弱环节辨识（后处理）}\label{sec:rel-th-weakpoint}
-评估后按元件对\emph{失负荷态}的贡献排序，定位薄弱环节。平台的元件重要度
-（\srcpath{ReliabilityResult::ComponentImportance}）是\emph{共现 / 归因}度量，而非 Birnbaum 边际重要度
+评估后按元件对\emph{失负荷态}的贡献排序，定位薄弱环节。平台的元件重要度定义为
+\srcpath{ReliabilityResult::ComponentImportance}，是\emph{共现 / 归因}度量，而非 Birnbaum 边际重要度
 $\partial\mathrm{EENS}/\partial U_c$：以“元件 $c$ 停运时观测到的失负荷削减份额”定义
 \begin{align}
  \text{loss\_weighted\_risk}_c&=\frac{\sum_k\lambda_k\,\mathbf 1[c\in\text{down}(k)]\,S_k}{\sum_k\lambda_k S_k},\\
  \Pr(c\text{ 停}\mid\text{系统失负荷})&=\frac{\sum_k\lambda_k\,\mathbf 1[c\in\text{down}(k)]\,\mathbf 1[S_k>\varepsilon]}{\sum_k\lambda_k\,\mathbf 1[S_k>\varepsilon]},
 \end{align}
 并给出共停关联 EENS $\text{associated\_eens}_c$。\textbf{诚实口径}：多重失效态把整段削减\emph{归因于每个}
-停运元件，故各元件贡献之和可\emph{超过} 100\%——应读作\emph{排序}而非边际风险；精确边际须重解
-$\partial\mathrm{EENS}/\partial U_c$（未实现）。依据：\srcpath{src/reliability/reliability\_assessment.cpp}
+停运元件，故各元件贡献之和可\emph{超过} 100\%——应读作\emph{排序}而非边际风险。精确状态接口另行计算
+$\partial\mathrm{EENS}/\partial U_c$、Birnbaum 与 Fussell--Vesely，见 \S\ref{sec:rel-exact}。依据：\srcpath{src/reliability/reliability\_assessment.cpp}
 （\fld{critical\_components}）。
 
 \subsection{数值算例与基准（IEEE RTS-24）}\label{sec:rel-th-numexp}
 在 IEEE 可靠性测试系统 RTS-24（$24$ 母线、$33$ 机组、$38$ 支路；\srcpath{data/case24\_ieee\_rts.m}
 $+$ \srcpath{apply\_ieee24\_reliability\_data}）上运行两类 MC（\srcpath{tools/pf\_doc\_benchmark.cpp}
 模式 \texttt{rel}，\texttt{ac-only-dcopf} 口径）：
-\begin{center}\footnotesize
+\begin{center}
+\resizebox{\textwidth}{!}{%
 \begin{tabular}{@{}lccccc@{}}
 \toprule
 方法 & 样本 & CoV & EENS/(MWh$\cdot$yr$^{-1}$) & LOLE/(hr$\cdot$yr$^{-1}$) & 其他\\
@@ -259,19 +278,20 @@ $+$ \srcpath{apply\_ieee24\_reliability\_data}）上运行两类 MC（\srcpath{t
 序贯 MC & $101$ 年（收敛） & $0.035$ & $43\,506$ & $43.3$ & LOLF $14.7$~occ/yr\\
 \bottomrule
 \end{tabular}
+}
 \end{center}
 两法的 EENS 相互吻合（$4.35$--$4.72\times10^4$~MWh/yr），互为交叉校验；序贯法在 $101$ 年即达
 $\mathrm{CoV}{=}0.035$，而非序贯法在 $2\times10^4$ 态仍停于 $0.097$——印证稀有失负荷事件下
 LOLE 类频率指标收敛慢（定理~\ref{thm:rel-th-cov}），需更多样本或方差缩减。非序贯尾部
 $\mathrm{CVaR}_{95\%}(\mathrm{EENS}){=}6.33\times10^4\gg$ 均值，示厚尾风险。
-\begin{gapnote}
+\begin{boundarynote}
 上述 EENS/LOLE\emph{显著高于}经典 RTS-24 交流建模参考值（EENS $\sim1.2\times10^3$~MWh/yr、
 LOLE $\sim9.4$~hr/yr）。差异源于平台状态评估的\emph{诚实口径}：$(i)$ \texttt{model\_scope="ac-only-dcopf"}
 仅以交流 DC-OPF 削减，不含无功/电压可行性与直流侧；$(ii)$ 当某故障态 DC-OPF 不收敛时，平台\emph{保守地}
 将该孤岛全部负荷计为削减（评估器会给出 warning）。因此本表数字应读作平台在该口径下的\emph{保守
 上界}与\emph{方法学演示}（收敛率、跨方法一致性、尾部风险），\emph{不}作为对经典 RTS 参考值的复现。
 定量对标需引入交流可行性校核与 DC-OPF 失败态的精细化处理。
-\end{gapnote}
+\end{boundarynote}
 
 \subsection{与实现的对应}\label{sec:rel-th-impl}
 \begin{center}\footnotesize
@@ -293,15 +313,17 @@ LOLE $\sim9.4$~hr/yr）。差异源于平台状态评估的\emph{诚实口径}�
 序贯（时序）MC、LOLF/年际分布 &
   \implfull{src/reliability/reliability\_assessment.cpp:run\_sequential\_mc}\\
 COPT 递推~\eqref{eq:rel-th-copt}、LOLP/LOLE/LOLF/LOLD &
-  \implpart{以 \srcpath{FrequencyDurationResult} 承载 COPT 与 F\&D 指标；主入口为 MC 而非独立解析 COPT}\\
-串并联/最小割集解析约简~\eqref{eq:rel-th-series}--\eqref{eq:rel-th-parallel} &
-  \implnone（平台以 MC 状态抽样替代符号割集枚举）\\
+  \implfull{src/reliability/reliability\_assessment.cpp:run\_frequency\_duration\_analysis}（独立两状态机组、恒定峰荷；容量不分箱，缺 MTTR 时不伪造 LOLF/LOLD）\\
+串并联解析约简~\eqref{eq:rel-th-series}--\eqref{eq:rel-th-parallel} &
+  \implfull{src/reliability/reliability\_assessment.cpp:reduce\_series\_frequency\_duration / reduce\_parallel\_frequency\_duration}（独立两状态 CTMC）\\
+一般物理网络最小割集解析枚举 &
+  \implfull{src/reliability/reliability\_assessment.cpp:evaluate\_physical\_network\_reliability}（成功路径容斥精确可用率、极小击中集、稳定 ID 输出）\\
 IEEE 1366 配电指标 &
   \implfull{include/hacdcpf/reliability/reliability\_assessment.hpp:DistributionIndices}（需客户数据）\\
 VaR/CVaR 尾部风险 &
-  \implfull{include/hacdcpf/reliability/reliability\_assessment.hpp:TailRiskMetrics}\\
-无功/电压可行性、直流侧削减 &
-  \implnone（\texttt{model\_scope="ac-only-dcopf"}，\fld{validity} 标志声明）\\
+  \implfull{include/hacdcpf/reliability/reliability\_assessment.hpp:TailRiskMetrics}（经验 ES 对 VaR 原子作分数权重）\\
+混合 AC/DC 有功网络与直流侧削减 &
+  \implfull{src/reliability/reliability\_assessment.cpp:evaluate\_hybrid\_fmea\_network\_lp}（\texttt{hybrid-acdc-network-lp}）\\
 \end{longtable}
 \end{center}
 

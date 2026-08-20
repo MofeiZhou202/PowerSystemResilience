@@ -249,8 +249,8 @@ FMEA 一阶 $\sum\lambda\tau S$ & 近似 & 稀有、非重叠一阶期望，无 
  缺失数据缺省的分歧。
  \item \textbf{时长约定统一}：FMEA 取 $\tau^{rep}=\max(0,\mathrm{MTTR}-\tau^{sw})$，与三阶段一致；
  物理修复窗（全 MTTR）仍用于储能能量可行性。
- \item \textbf{成岛锚点封顶}：构网支持的成岛锚点注入按设备额定封顶（VSC 取
- $\max(p_{\max},|p_{\min}|,p_{rated})$，微网取额定容量），不再是 $2\times$需求的无界松弛。依据
+ \item \textbf{成岛锚点封顶}：构网支持的成岛锚点注入按设备额定封顶。VSC 的上限取
+ $\max\{p_{\max},\lvert p_{\min}\rvert,p_{rated}\}$，微网取额定容量；不再使用 $2\times$需求的无界松弛。依据
  \srcpath{src/reliability/reliability\_assessment.cpp:mark\_island\_anchor}。
  \item \textbf{无功与信息物理}：三阶段无功优先用实测 \fld{q\_mvar}（仅缺失时回退 $0.9$ 功率因数）；
  通信丢失冻结可调换流 / DER 出力可致切负荷，降额按 \fld{residual\_capacity\_factor} 数据驱动且双向封顶。
@@ -264,7 +264,8 @@ FMEA 一阶 $\sum\lambda\tau S$ & 近似 & 稀有、非重叠一阶期望，无 
  N-0 切负荷——年尺度可忽略，但短时（如信息恢复）事件被略微放大。
  \item \fld{critical\_components} 为共现份额，多重失效把整段切负荷计入\emph{每个}停运元件，贡献之和
  可超过 $100\%$；应作排序读，非边际风险。
- \item \fld{use\_importance\_sampling}/\fld{importance\_lambda} 已声明但未接线；方差缩减仍属提出项。
+ \item \fld{use\_importance\_sampling}/\fld{importance\_lambda} 已接入优势比扭曲抽样，并以似然比修正
+ EDNS、PLC、尾部风险和元件统计；结果返回 ESS 与平均似然比，序贯方法收到该选项时明确拒绝。
  \item \fld{ProtectionZoneExpansion} 打开母线所有关联边，仅对辐射馈线精确，网孔母线两种处理都不精确。
 \end{itemize}
 \textbf{跨方法不可通约性（关键）}：同一算例在非序贯 MC、FMEA、故障模式 FMEA 与三阶段下的 EENS 可

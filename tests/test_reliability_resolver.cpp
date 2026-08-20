@@ -19,7 +19,9 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <numeric>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -27,6 +29,7 @@
 #include "hacdcpf/io/case_builders.hpp"
 #include "hacdcpf/reliability/reliability_assessment.hpp"
 #include "hacdcpf/reliability/failure_mode.hpp"
+#include "hacdcpf/reliability/protection_frt.hpp"
 
 using namespace hacdcpf;
 using namespace hacdcpf::analysis;
@@ -51,10 +54,41 @@ TEST_CASE("resolver: lambda + MTTR (AC-branch style)", "[reliability][resolver]"
   CHECK_FALSE(p.used_default);
   CHECK(p.data_source == "case");
   CHECK(p.lambda_per_year == Approx(2.0));
+  CHECK(p.calendar_frequency_per_year ==
+        Approx((1.0 - p.unavailability) * p.lambda_per_year));
   CHECK(p.repair_hr == Approx(10.0));
   // U = lambda / (lambda + 8760/repair)
   CHECK(p.unavailability == Approx(2.0 / (2.0 + kHoursPerYear / 10.0)));
   CHECK(p.mttf_hr == Approx(kHoursPerYear / 2.0));
+}
+
+TEST_CASE("resolver: calendar failure frequency is inverted without rare-event approximation",
+          "[reliability][resolver][calendar]") {
+  ReliabilityRawFields raw;
+  raw.failure_rate_per_year = 2.0;
+  raw.mttr_hr = 438.0;
+  ReliabilityDataPolicy policy;
+  policy.failure_rate_basis = FailureRateBasis::CalendarTime;
+
+  const auto resolved = resolve_reliability_params(raw, policy);
+  const double expected_u = 2.0 * 438.0 / 8760.0;
+  REQUIRE(resolved.has_data);
+  CHECK(resolved.calendar_frequency_per_year == Approx(2.0));
+  CHECK(resolved.unavailability == Approx(expected_u));
+  CHECK(resolved.lambda_per_year == Approx(2.0 / (1.0 - expected_u)));
+  CHECK((1.0 - resolved.unavailability) * resolved.lambda_per_year ==
+        Approx(resolved.calendar_frequency_per_year));
+
+  policy.hours_per_year = 8736.0;
+  const auto non_leap_reporting_year = resolve_reliability_params(raw, policy);
+  const double expected_8736_u = 2.0 * 438.0 / 8736.0;
+  CHECK(non_leap_reporting_year.unavailability == Approx(expected_8736_u));
+  CHECK(non_leap_reporting_year.lambda_per_year ==
+        Approx(2.0 / (1.0 - expected_8736_u)));
+
+  raw.failure_rate_per_year = 20.0;
+  CHECK_THROWS_AS(resolve_reliability_params(raw, policy),
+                  std::invalid_argument);
 }
 
 TEST_CASE("resolver: MTBF + MTTR (transformer style)", "[reliability][resolver]") {
@@ -315,6 +349,731 @@ TEST_CASE("resolver: non-finite inputs are rejected",
 
   CHECK_FALSE(p.has_data);
   CHECK(p.data_source == "missing");
+}
+
+// -------------------------------------------------------------------------
+// Analytical reliability theory kernels
+// -------------------------------------------------------------------------
+
+TEST_CASE("analytical F&D: exact series and parallel CTMC reductions",
+          "[reliability][analytical][frequency-duration]") {
+  const double lambda = 8760.0 / 1900.0;
+  const TwoStateReliabilityComponent unit{lambda, 100.0, 0.05};
+
+  const auto series = reduce_series_frequency_duration({unit, unit});
+  CHECK(series.availability == Approx(0.95 * 0.95).margin(1e-14));
+  CHECK(series.unavailability == Approx(1.0 - 0.95 * 0.95).margin(1e-14));
+  CHECK(series.failure_frequency_per_year ==
+        Approx(0.95 * 0.95 * 2.0 * lambda).margin(1e-12));
+  CHECK(series.mean_failure_duration_hr ==
+        Approx(series.unavailability * 8760.0 /
+               series.failure_frequency_per_year).margin(1e-12));
+
+  const auto parallel = reduce_parallel_frequency_duration({unit, unit});
+  CHECK(parallel.unavailability == Approx(0.05 * 0.05).margin(1e-14));
+  CHECK(parallel.failure_frequency_per_year ==
+        Approx(2.0 * lambda * 0.95 * 0.05).margin(1e-12));
+  CHECK(parallel.mean_failure_duration_hr == Approx(50.0).margin(1e-10));
+}
+
+TEST_CASE("analytical COPT: two 60 MW units match the closed-form table",
+          "[reliability][analytical][copt]") {
+  HybridPowerSystem sys;
+  Generator g1;
+  g1.index = 1;
+  g1.in_service = true;
+  g1.pmax_mw = 60.0;
+  g1.forced_outage_rate = 0.05;
+  g1.mttr_hr = 100.0;
+  Generator g2 = g1;
+  g2.index = 2;
+  sys.ac.generators = {g1, g2};
+
+  const auto result = run_frequency_duration_analysis(sys, 50.0);
+  REQUIRE(result.capacity_outage_levels.size() == 3);
+  REQUIRE(result.state_probability.size() == 3);
+  CHECK(result.exact_capacity_states);
+  CHECK(result.probability_valid);
+  CHECK(result.frequency_valid);
+  CHECK(result.capacity_outage_levels[0] == Approx(0.0));
+  CHECK(result.capacity_outage_levels[1] == Approx(60.0));
+  CHECK(result.capacity_outage_levels[2] == Approx(120.0));
+  CHECK(result.state_probability[0] == Approx(0.9025).margin(1e-14));
+  CHECK(result.state_probability[1] == Approx(0.095).margin(1e-14));
+  CHECK(result.state_probability[2] == Approx(0.0025).margin(1e-14));
+  CHECK(std::accumulate(result.state_probability.begin(),
+                        result.state_probability.end(), 0.0) ==
+        Approx(1.0).margin(1e-14));
+  CHECK(result.lolp == Approx(0.0025).margin(1e-14));
+  CHECK(result.lole_fd == Approx(21.9).margin(1e-12));
+  CHECK(result.lolf_fd == Approx(0.438).margin(1e-12));
+  CHECK(result.lold == Approx(50.0).margin(1e-10));
+
+  sys.ac.generators.front().mttr_hr = 0.0;
+  const auto probability_only = run_frequency_duration_analysis(sys, 50.0);
+  CHECK(probability_only.probability_valid);
+  CHECK_FALSE(probability_only.frequency_valid);
+  CHECK(probability_only.lolp == Approx(0.0025).margin(1e-14));
+  CHECK(probability_only.lolf_fd == Approx(0.0));
+  CHECK(probability_only.lold == Approx(0.0));
+  REQUIRE_FALSE(probability_only.warnings.empty());
+}
+
+TEST_CASE("analytical PFD: exact proof-test average and low-rate limit",
+          "[reliability][analytical][pfd]") {
+  const auto result = compute_low_demand_pfd(1e-6, 1000.0);
+  const double expected = 1.0 - (1.0 - std::exp(-0.001)) / 0.001;
+  CHECK(result.pfd_average == Approx(expected).margin(1e-13));
+  CHECK(result.first_order_pfd_average == Approx(0.0005));
+  CHECK(result.approximation_relative_error < 0.001);
+
+  const auto tiny = compute_low_demand_pfd(1e-12, 1.0);
+  CHECK(tiny.pfd_average == Approx(5e-13).margin(1e-24));
+  CHECK_THROWS_AS(compute_low_demand_pfd(-1.0, 1.0), std::invalid_argument);
+}
+
+TEST_CASE("tail risk: empirical expected shortfall fractionally weights VaR atom",
+          "[reliability][analytical][tail-risk]") {
+  const std::vector<double> losses{0.0, 0.0, 10.0, 20.0};
+  const auto risk = compute_tail_risk(losses, {}, 0.60);
+  CHECK(risk.eens_var == Approx(10.0));
+  // Integral of empirical quantiles on [0.6,1]: 0.15*10 + 0.25*20,
+  // divided by the 0.4 tail probability.
+  CHECK(risk.eens_cvar == Approx(16.25).margin(1e-12));
+  CHECK_THROWS_AS(compute_tail_risk(losses, {}, 1.0), std::invalid_argument);
+}
+
+TEST_CASE("information reliability: shared infrastructure is counted once",
+          "[reliability][analytical][cyber][cut-set]") {
+  const std::vector<InformationServiceComponent> components{
+      {"control-center", 0.9, 1.0, 1.0, 0.1},
+      {"radio-a", 0.8, 1.0, 1.0, 0.1},
+      {"radio-b", 0.7, 1.0, 1.0, 0.1}};
+  InformationFunctionDefinition function;
+  function.name = "FLISR";
+  function.alternative_paths = {{{0, 1}}, {{0, 2}}};
+
+  const auto result =
+      evaluate_information_function_reliability(components, function);
+  CHECK(result.valid_path_count == 2);
+  CHECK(result.availability == Approx(0.9 * (1.0 - 0.2 * 0.3)).margin(1e-12));
+  CHECK(result.availability != Approx(1.0 - (1.0 - 0.72) * (1.0 - 0.63)));
+  REQUIRE(result.minimal_cut_sets.size() == 2);
+  CHECK(std::find(result.minimal_cut_sets.begin(), result.minimal_cut_sets.end(),
+                  std::vector<size_t>{0}) != result.minimal_cut_sets.end());
+  CHECK(std::find(result.minimal_cut_sets.begin(), result.minimal_cut_sets.end(),
+                  (std::vector<size_t>{1, 2})) != result.minimal_cut_sets.end());
+
+  function.max_latency_ms = 1.5;
+  const auto no_paths =
+      evaluate_information_function_reliability(components, function);
+  CHECK(no_paths.valid_path_count == 0);
+  CHECK(no_paths.availability == Approx(0.0));
+}
+
+TEST_CASE("physical network reliability: meshed success paths yield exact minimal cuts",
+          "[reliability][analytical][physical][cut-set]") {
+  const std::vector<PhysicalReliabilityComponent> components{
+      {"ac_branch:10", 0.9},
+      {"ac_branch:20", 0.8},
+      {"ac_branch:30", 0.7}};
+  const std::vector<PhysicalSuccessPath> paths{{{0, 1}}, {{0, 2}}};
+
+  const auto result = evaluate_physical_network_reliability(components, paths);
+  CHECK(result.exact_independent_path_model);
+  CHECK(result.reduced_success_path_count == 2);
+  CHECK(result.availability == Approx(0.9 * (1.0 - 0.2 * 0.3)).margin(1e-12));
+  CHECK(result.loss_probability == Approx(1.0 - result.availability).margin(1e-12));
+  REQUIRE(result.minimal_cut_set_stable_ids.size() == 2);
+  CHECK(std::find(result.minimal_cut_set_stable_ids.begin(),
+                  result.minimal_cut_set_stable_ids.end(),
+                  std::vector<std::string>{"ac_branch:10"}) !=
+        result.minimal_cut_set_stable_ids.end());
+  CHECK(std::find(result.minimal_cut_set_stable_ids.begin(),
+                  result.minimal_cut_set_stable_ids.end(),
+                  (std::vector<std::string>{"ac_branch:20", "ac_branch:30"})) !=
+        result.minimal_cut_set_stable_ids.end());
+
+  CHECK_THROWS_AS(evaluate_physical_network_reliability(
+                      {{"duplicate", 0.9}, {"duplicate", 0.8}}, {{{0}}}),
+                  std::invalid_argument);
+  CHECK_THROWS_AS(evaluate_physical_network_reliability(components, {{{3}}}),
+                  std::out_of_range);
+}
+
+TEST_CASE("information reliability: joint functions retain shared dependencies",
+          "[reliability][analytical][cyber][joint]") {
+  const std::vector<InformationServiceComponent> components{
+      {"shared-center", 0.9}, {"detector", 0.8}, {"restorer", 0.7}};
+  InformationFunctionDefinition detection;
+  detection.name = "detection";
+  detection.alternative_paths = {{{0, 1}}};
+  InformationFunctionDefinition restoration;
+  restoration.name = "restoration";
+  restoration.alternative_paths = {{{0, 2}}};
+
+  const auto joint = evaluate_joint_information_reliability(
+      components, {detection, restoration});
+  CHECK(joint.availability == Approx(0.9 * 0.8 * 0.7).margin(1e-12));
+  REQUIRE(joint.minimal_cut_sets.size() == 3);
+  for (size_t index = 0; index < 3; ++index) {
+    CHECK(std::find(joint.minimal_cut_sets.begin(), joint.minimal_cut_sets.end(),
+                    std::vector<size_t>{index}) !=
+          joint.minimal_cut_sets.end());
+  }
+}
+
+TEST_CASE("protection FRT: inverse-time integration and event classes are exact",
+          "[reliability][protection-frt][event-tree]") {
+  InverseTimeRelaySettings primary_curve;
+  primary_curve.pickup_current = 1.0;
+  primary_curve.time_multiplier = 1.0;
+  primary_curve.curve_a = 1.0;
+  primary_curve.curve_p = 1.0;
+  primary_curve.reset_time_s = 1.0;
+  const std::vector<RelayCurrentPoint> current{{0.0, 2.0}, {1.1, 2.0}};
+  const auto relay = evaluate_inverse_time_relay(current, primary_curve);
+  REQUIRE(relay.operated);
+  CHECK(relay.command_time_s == Approx(1.0).margin(1e-12));
+  CHECK(relay.terminal_action_integral == Approx(1.0));
+
+  const auto reset_relay = evaluate_inverse_time_relay(
+      {{0.0, 2.0}, {0.5, 0.0}, {1.5, 2.0}, {2.5, 2.0}},
+      primary_curve);
+  REQUIRE(reset_relay.operated);
+  CHECK(reset_relay.command_time_s ==
+        Approx(1.5 + 1.0 - 0.5 * std::exp(-1.0)).margin(1e-12));
+
+  ProtectionFRTEventInput input;
+  input.primary.current_trajectory = current;
+  input.primary.relay = primary_curve;
+  input.primary.relay_success_probability = 0.9;
+  input.primary.breaker_success_probability = 0.95;
+  input.backup.current_trajectory = {{0.0, 2.0}, {2.1, 2.0}};
+  input.backup.relay = primary_curve;
+  input.backup.relay.time_multiplier = 2.0;
+  input.backup.relay_success_probability = 0.8;
+  input.backup.breaker_success_probability = 1.0;
+  input.coordination_margin_s = 0.5;
+  input.uncleared_terminal_time_s = 3.0;
+
+  ProtectionFRTDERInput der;
+  der.stable_id = "ac_pv_system:7";
+  der.settings.enabled = true;
+  der.settings.v_filter_t_s = 1e-9;
+  der.settings.f_filter_t_s = 1e-9;
+  der.settings.allow_reconnect = false;
+  der.settings.undervoltage_trip = {{0.9, 0.2}};
+  der.trajectory = {{0.0, 0.4, 0.0}, {0.1, 0.4, 0.0},
+                    {0.2, 0.4, 0.0}, {3.0, 0.4, 0.0}};
+  input.ders = {der};
+
+  const auto generated = generate_protection_frt_classes(input);
+  REQUIRE(generated.class_probabilities_normalized);
+  CHECK(generated.primary_clear_time_s == Approx(1.0).margin(1e-12));
+  CHECK(generated.backup_clear_time_s == Approx(2.0).margin(1e-12));
+  double primary_probability = 0.0;
+  double backup_probability = 0.0;
+  double uncleared_probability = 0.0;
+  bool saw_breaker_failure = false;
+  for (const auto& event_class : generated.classes) {
+    REQUIRE(event_class.der_results.size() == 1);
+    CHECK(event_class.der_results.front().terminal_class ==
+          DERFRTTerminalClass::Tripped);
+    switch (event_class.protection_outcome) {
+      case ProtectionClearingOutcome::PrimaryCleared:
+        primary_probability += event_class.conditional_probability;
+        break;
+      case ProtectionClearingOutcome::BackupCleared:
+        backup_probability += event_class.conditional_probability;
+        saw_breaker_failure |= event_class.failure_cause ==
+            ProtectionFailureCause::PrimaryBreakerFailed;
+        break;
+      case ProtectionClearingOutcome::Uncleared:
+        uncleared_probability += event_class.conditional_probability;
+        break;
+    }
+  }
+  CHECK(primary_probability == Approx(0.855).margin(1e-12));
+  CHECK(backup_probability == Approx(0.116).margin(1e-12));
+  CHECK(uncleared_probability == Approx(0.029).margin(1e-12));
+  CHECK(saw_breaker_failure);
+
+  ProtectionFRTReliabilityScenario scenario;
+  scenario.scenario_id = "fault-1";
+  scenario.initiating_frequency_per_year = 2.0;
+  scenario.trace_classes_validated = true;
+  for (const auto& event_class : generated.classes) {
+    double shed = 0.0;
+    switch (event_class.protection_outcome) {
+      case ProtectionClearingOutcome::PrimaryCleared: shed = 1.0; break;
+      case ProtectionClearingOutcome::BackupCleared: shed = 2.0; break;
+      case ProtectionClearingOutcome::Uncleared: shed = 3.0; break;
+    }
+    scenario.classes.push_back({event_class, {{1.0, shed}}});
+  }
+  const auto reliability = aggregate_protection_frt_reliability({scenario});
+  CHECK(reliability.eens_mwh_yr == Approx(2.348).margin(1e-12));
+  CHECK(reliability.lole_hr_yr == Approx(2.0).margin(1e-12));
+  CHECK(reliability.lolf_occ_yr == Approx(2.0).margin(1e-12));
+  CHECK(reliability.validity.protection_frt_reliability_coupled);
+  CHECK(reliability.validity.der_ride_through_modelled);
+  CHECK(reliability.validity.protection_coordination_modelled);
+  CHECK(reliability.validity.breaker_failure_modelled);
+  CHECK_FALSE(reliability.validity.online_dae_coupled);
+}
+
+TEST_CASE("protection coordination: relay criteria and clearing margins are explicit",
+          "[reliability][protection-frt][coordination]") {
+  ProtectionRelayModel definite;
+  definite.relay_id = "50/51-primary";
+  definite.characteristic =
+      ProtectionRelayCharacteristic::DefiniteTimeOvercurrent;
+  definite.pickup_current = 1.0;
+  definite.definite_time_delay_s = 1.0;
+  definite.reset_time_s = 1.0;
+  const auto reset = evaluate_protection_relay(
+      {{0.0, 2.0}, {0.4, 0.0}, {1.4, 2.0}, {2.4, 2.0}}, definite);
+  REQUIRE(reset.operated);
+  CHECK(reset.command_time_s ==
+        Approx(1.4 + 1.0 - 0.4 * std::exp(-1.0)).margin(1e-12));
+
+  ProtectionRelayModel distance;
+  distance.relay_id = "21-line";
+  distance.characteristic = ProtectionRelayCharacteristic::Distance;
+  distance.distance_zones = {{"Z1", 6.0, 0.1}, {"Z2", 10.0, 0.5}};
+  auto zone = evaluate_protection_relay(
+      {{0.0, 1.0, 1.0, 5.0}, {0.2, 1.0, 1.0, 5.0}}, distance);
+  REQUIRE(zone.operated);
+  CHECK(zone.command_time_s == Approx(0.1).margin(1e-12));
+  CHECK(zone.operated_zone == 0);
+  CHECK(zone.operated_zone_name == "Z1");
+  zone = evaluate_protection_relay(
+      {{0.0, 1.0, 1.0, 8.0}, {0.6, 1.0, 1.0, 8.0}}, distance);
+  REQUIRE(zone.operated);
+  CHECK(zone.command_time_s == Approx(0.5).margin(1e-12));
+  CHECK(zone.operated_zone == 1);
+
+  ProtectionRelayModel differential;
+  differential.relay_id = "87-transformer";
+  differential.characteristic = ProtectionRelayCharacteristic::Differential;
+  differential.differential_pickup = 0.2;
+  differential.differential_slope = 0.5;
+  differential.differential_high_set = 4.0;
+  differential.definite_time_delay_s = 0.0;
+  const auto restrained = evaluate_protection_relay(
+      {{0.0, 0.0, 1.0, 0.0, 1.0, 2.0},
+       {0.1, 0.0, 1.0, 0.0, 1.0, 2.0}}, differential);
+  CHECK_FALSE(restrained.operated);
+  const auto high_set = evaluate_protection_relay(
+      {{0.0, 0.0, 1.0, 0.0, 5.0, 20.0},
+       {0.1, 0.0, 1.0, 0.0, 5.0, 20.0}}, differential);
+  CHECK(high_set.operated);
+  CHECK(high_set.command_time_s == Approx(0.0));
+
+  ProtectionRelayModel primary = definite;
+  primary.definite_time_delay_s = 0.1;
+  ProtectionRelayModel backup = definite;
+  backup.relay_id = "50/51-backup";
+  backup.definite_time_delay_s = 0.5;
+  BreakerClearingChain breaker;
+  breaker.mechanical_delay_s = 0.05;
+  const std::vector<ProtectionMeasurementPoint> fault{
+      {0.0, 2.0}, {1.0, 2.0}};
+  auto report = evaluate_protection_coordination(
+      {primary, backup}, {fault, fault}, {breaker, breaker}, {{0, 1, 0.3}});
+  REQUIRE(report.checks.size() == 1);
+  CHECK(report.checks[0].primary_clear_time_s == Approx(0.15).margin(1e-12));
+  CHECK(report.checks[0].backup_clear_time_s == Approx(0.55).margin(1e-12));
+  CHECK(report.checks[0].actual_margin_s == Approx(0.4).margin(1e-12));
+  CHECK(report.all_selective);
+  report = evaluate_protection_coordination(
+      {primary, backup}, {fault, fault}, {breaker, breaker}, {{0, 1, 0.5}});
+  CHECK_FALSE(report.all_selective);
+}
+
+TEST_CASE("protection measurement: CT PT dynamics and saturation match closed form",
+          "[reliability][protection-frt][measurement]") {
+  InstrumentTransformerSettings settings;
+  settings.ct_ratio = 10.0;
+  settings.pt_ratio = 100.0;
+  settings.ct_time_constant_s = 1.0;
+  settings.pt_time_constant_s = 1.0;
+  settings.ct_saturation_secondary_a = 5.0;
+  settings.pt_saturation_secondary_v = 2.0;
+  const auto measured = simulate_instrument_transformers(
+      {{0.0, {100.0, 0.0}, {100.0, 0.0}},
+       {1.0, {100.0, 0.0}, {100.0, 0.0}},
+       {2.0, {100.0, 0.0}, {100.0, 0.0}}},
+      settings);
+  REQUIRE(measured.size() == 3);
+  CHECK(std::abs(measured[1].voltage_phasor_v) ==
+        Approx(1.0 - std::exp(-1.0)).margin(1e-12));
+  CHECK(std::abs(measured[1].current_phasor_a) == Approx(5.0));
+  CHECK(std::abs(measured[2].current_phasor_a) == Approx(5.0));
+}
+
+TEST_CASE("complex distance protection evaluates mho and quadrilateral geometry",
+          "[reliability][protection-frt][distance]") {
+  const auto point = [](double impedance) {
+    ProtectionMeasurementPoint sample;
+    sample.time_s = 0.0;
+    sample.directional_current = 1.0;
+    sample.phasor_measurement_valid = true;
+    sample.current_phasor_a = {1.0, 0.0};
+    sample.voltage_phasor_v = {impedance, 0.0};
+    return sample;
+  };
+  auto end = point(0.0);
+  end.time_s = 1.0;
+
+  ProtectionRelayModel mho;
+  mho.relay_id = "mho";
+  mho.characteristic = ProtectionRelayCharacteristic::Distance;
+  DistanceProtectionZone mho_zone;
+  mho_zone.name = "Z1";
+  mho_zone.reach_ohm = 10.0;
+  mho_zone.shape = DistanceZoneShape::Mho;
+  mho.distance_zones = {mho_zone};
+  CHECK(evaluate_protection_relay({point(5.0), end}, mho).operated);
+  CHECK_FALSE(evaluate_protection_relay({point(-1.0), end}, mho).operated);
+
+  ProtectionRelayModel quad = mho;
+  quad.relay_id = "quad";
+  quad.distance_zones[0].shape = DistanceZoneShape::Quadrilateral;
+  quad.distance_zones[0].forward_resistance_ohm = 6.0;
+  quad.distance_zones[0].reverse_resistance_ohm = 1.0;
+  quad.distance_zones[0].forward_reactance_ohm = 8.0;
+  quad.distance_zones[0].reverse_reactance_ohm = 2.0;
+  CHECK(evaluate_protection_relay({point(5.5), end}, quad).operated);
+  CHECK_FALSE(evaluate_protection_relay({point(7.0), end}, quad).operated);
+}
+
+TEST_CASE("adaptive protection changes settings only with communication",
+          "[reliability][protection-frt][adaptive]") {
+  ProtectionRelayModel base;
+  base.pickup_current = 2.0;
+  base.definite_time_delay_s = 1.0;
+  base.distance_zones = {{"Z1", 10.0, 0.5}};
+  AdaptiveProtectionContext context;
+  context.pickup_scale = 0.5;
+  context.distance_reach_scale = 1.2;
+  context.time_delay_scale = 0.8;
+  const auto adapted = adapt_protection_settings(base, context);
+  CHECK(adapted.pickup_current == Approx(1.0));
+  CHECK(adapted.distance_zones[0].reach_ohm == Approx(12.0));
+  CHECK(adapted.distance_zones[0].delay_s == Approx(0.4));
+  context.communication_available = false;
+  const auto retained = adapt_protection_settings(base, context);
+  CHECK(retained.pickup_current == Approx(base.pickup_current));
+  CHECK(retained.distance_zones[0].reach_ohm ==
+        Approx(base.distance_zones[0].reach_ohm));
+}
+
+TEST_CASE("recloser fuse sectionalizer automatic sequence reaches physical terminal states",
+          "[reliability][protection-frt][sequence]") {
+  RecloserFuseSectionalizerInput temporary;
+  temporary.shot_trip_times_s = {0.1, 0.2, 0.3};
+  temporary.reclose_intervals_s = {0.5, 1.0};
+  temporary.maximum_shots = 3;
+  temporary.fault_clears_after_shot = 1;
+  auto result = simulate_recloser_fuse_sectionalizer(temporary);
+  CHECK(result.fault_cleared);
+  CHECK(result.recloser_closed);
+  CHECK_FALSE(result.recloser_locked_out);
+  REQUIRE(result.events.size() == 2);
+  CHECK(result.events[0].action == ProtectionSequenceAction::TripOpen);
+  CHECK(result.events[1].action == ProtectionSequenceAction::Reclose);
+
+  RecloserFuseSectionalizerInput sectionalizer = temporary;
+  sectionalizer.fault_clears_after_shot = -1;
+  sectionalizer.sectionalizer_count_to_open = 2;
+  result = simulate_recloser_fuse_sectionalizer(sectionalizer);
+  CHECK(result.sectionalizer_open);
+  CHECK(result.fault_cleared);
+  CHECK(result.recloser_closed);
+
+  RecloserFuseSectionalizerInput fuse = temporary;
+  fuse.fault_clears_after_shot = -1;
+  fuse.fuse_total_clearing_time_s = 0.25;
+  result = simulate_recloser_fuse_sectionalizer(fuse);
+  CHECK(result.fuse_open);
+  CHECK(result.fault_cleared);
+  CHECK(result.fuse_melting_fraction == Approx(1.0));
+
+  RecloserFuseSectionalizerInput lockout = temporary;
+  lockout.fault_clears_after_shot = -1;
+  lockout.instantaneous_lockout = true;
+  result = simulate_recloser_fuse_sectionalizer(lockout);
+  CHECK(result.recloser_locked_out);
+  CHECK_FALSE(result.recloser_closed);
+  REQUIRE(result.events.size() == 2);
+  CHECK(result.events[1].action == ProtectionSequenceAction::Lockout);
+}
+
+TEST_CASE("DER momentary cessation and synchronization gates reach explicit terminal states",
+          "[reliability][protection-frt][momentary-cessation][synchronization]") {
+  dynamics::IEEE1547Settings ieee;
+  ieee.enabled = true;
+  ieee.nominal_frequency_hz = 50.0;
+  ieee.v_continuous_min_pu = 0.88;
+  ieee.v_continuous_max_pu = 1.10;
+  ieee.f_continuous_min_hz = 49.0;
+  ieee.f_continuous_max_hz = 51.0;
+  ieee.undervoltage_trip.clear();
+  ieee.overvoltage_trip.clear();
+  ieee.underfrequency_trip.clear();
+  ieee.overfrequency_trip.clear();
+
+  DERMomentaryCessationSettings cessation;
+  cessation.enabled = true;
+  cessation.enter_below_voltage_pu = 0.8;
+  cessation.exit_above_voltage_pu = 0.9;
+  cessation.exit_dwell_s = 0.05;
+  auto result = classify_der_frt_trajectory(
+      ieee, cessation,
+      {{0.0, 1.0, 0.0}, {0.05, 0.7, 0.0}, {0.10, 0.7, 0.0}},
+      0.10);
+  CHECK(result.ever_momentary_ceased);
+  CHECK(result.terminal_momentary_ceased);
+  CHECK(result.terminal_class == DERFRTTerminalClass::MomentaryCessation);
+  CHECK(result.terminal_restore_scale == Approx(0.0));
+
+  result = classify_der_frt_trajectory(
+      ieee, cessation,
+      {{0.0, 1.0, 0.0}, {0.05, 0.7, 0.0}, {0.10, 0.95, 0.0},
+       {0.15, 0.95, 0.0}},
+      0.15);
+  CHECK(result.ever_momentary_ceased);
+  CHECK_FALSE(result.terminal_momentary_ceased);
+  CHECK(result.terminal_class == DERFRTTerminalClass::RideThrough);
+  CHECK(result.first_momentary_recovery_time_s == Approx(0.15));
+
+  cessation.maximum_duration_s = 0.04;
+  result = classify_der_frt_trajectory(
+      ieee, cessation,
+      {{0.0, 1.0, 0.0}, {0.05, 0.7, 0.0}, {0.10, 0.7, 0.0}},
+      0.10);
+  CHECK(result.terminal_class == DERFRTTerminalClass::Tripped);
+  CHECK(result.trip_reason == "momentary cessation maximum duration exceeded");
+
+  MicrogridSynchronizationInput synchronization;
+  synchronization.voltage_difference_pu = 0.03;
+  synchronization.frequency_difference_hz = 0.05;
+  synchronization.angle_difference_rad = 0.1;
+  auto synchronized = evaluate_microgrid_synchronization(synchronization);
+  CHECK(synchronized.close_permitted);
+  synchronization.angle_difference_rad = 0.3;
+  synchronized = evaluate_microgrid_synchronization(synchronization);
+  CHECK_FALSE(synchronized.close_permitted);
+  CHECK_FALSE(synchronized.angle_within_window);
+  synchronization.angle_difference_rad = 0.0;
+  synchronization.close_command_channel_available = false;
+  synchronized = evaluate_microgrid_synchronization(synchronization);
+  CHECK_FALSE(synchronized.close_permitted);
+}
+
+TEST_CASE("automatic protection topology derives stable-id load consequence",
+          "[reliability][protection-frt][topology]") {
+  HybridPowerSystem system;
+  ACBus source;
+  source.index = 1;
+  source.bus_type = BusType::SLACK;
+  ACBus downstream;
+  downstream.index = 2;
+  downstream.bus_type = BusType::PQ;
+  downstream.pd_mw = 1.5;
+  downstream.n_customers = 10;
+  system.ac.buses = {source, downstream};
+  ACBranch branch;
+  branch.index = 101;
+  branch.from_bus = 1;
+  branch.to_bus = 2;
+  branch.in_service = true;
+  branch.x_pu = 0.1;
+  system.ac.branches = {branch};
+  Load load;
+  load.index = 201;
+  load.bus = 2;
+  load.p_mw = 2.0;
+  load.scaling = 0.5;
+  load.n_customers = 5;
+  system.ac.loads = {load};
+
+  AutomaticProtectionTopologyInput action;
+  action.opened_ac_branch_indices = {101};
+  const auto result = evaluate_automatic_protection_topology(system, action);
+  CHECK(result.stable_ids_resolved);
+  CHECK(result.domain_qualified_topology_used);
+  REQUIRE(result.deenergized_ac_bus_ids == std::vector<int>{2});
+  CHECK(result.deenergized_dc_bus_ids.empty());
+  CHECK(result.shed_mw == Approx(2.5));
+  CHECK(result.interrupted_customers == 15);
+  CHECK(result.islands_without_source == 1);
+  CHECK_THROWS_AS(evaluate_automatic_protection_topology(
+                      system, AutomaticProtectionTopologyInput{{}, {999}, {}}),
+                  std::invalid_argument);
+}
+
+TEST_CASE("protection misoperation maps false alarms to annual reliability indices",
+          "[reliability][protection-frt][misoperation]") {
+  ProtectionMisoperationInput input;
+  input.no_fault_decision_windows_per_year = 1000.0;
+  input.false_trip_probability_per_window = 0.01;
+  input.trip_channel_success_probability = 0.8;
+  input.breaker_success_probability = 0.9;
+  input.disconnected_load_mw = 5.0;
+  input.restoration_duration_hr = 2.0;
+  const auto result = evaluate_protection_misoperation(input);
+  CHECK(result.false_trip_frequency_per_year == Approx(7.2));
+  CHECK(result.eens_mwh_yr == Approx(72.0));
+  CHECK(result.lole_hr_yr == Approx(14.4));
+  CHECK(result.lolf_occ_yr == Approx(7.2));
+}
+
+TEST_CASE("protection cyber: shared topology common cause and battery are exact",
+          "[reliability][protection-frt][cyber]") {
+  std::vector<ProtectionCyberComponent> components{
+      {"shared-center", 0.9, 1.0, 2.0, 0.5, "dc-1", 10.0, 10.0,
+       "control-room"},
+      {"detector", 0.8, 1.0, 1.0, 0.2},
+      {"restorer", 0.7, 1.0, 1.0, 0.2}};
+  ProtectionCyberFunction detection{
+      "detection", {{{0, 1}}}, 5.0, 1.0, 0.99};
+  ProtectionCyberFunction restoration{
+      "restoration", {{{0, 2}}}, 5.0, 1.0, 0.99};
+  const auto nominal = enumerate_protection_cyber_states(
+      components, {detection, restoration});
+  REQUIRE(nominal.probabilities_normalized);
+  CHECK(nominal.shared_dependencies_modelled);
+  REQUIRE(nominal.function_availability.size() == 2);
+  CHECK(nominal.function_availability[0] == Approx(0.72).margin(1e-12));
+  CHECK(nominal.function_availability[1] == Approx(0.63).margin(1e-12));
+
+  const std::vector<ProtectionCyberEnvironment> common_cause{
+      {"normal", 0.8, {}, {}, 0.0},
+      {"control-room-fire", 0.2, {"control-room"}, {}, 0.0}};
+  const auto conditioned = enumerate_protection_cyber_states(
+      components, {detection, restoration}, common_cause);
+  CHECK(conditioned.common_cause_conditioned);
+  CHECK(conditioned.function_availability[0] == Approx(0.8 * 0.72).margin(1e-12));
+  CHECK(conditioned.function_availability[1] == Approx(0.8 * 0.63).margin(1e-12));
+
+  components[0].intrinsic_availability = 1.0;
+  components[1].intrinsic_availability = 1.0;
+  components[2].intrinsic_availability = 1.0;
+  const std::vector<ProtectionCyberEnvironment> power_states{
+      {"short-outage", 0.5, {}, {"dc-1"}, 0.5},
+      {"long-outage", 0.5, {}, {"dc-1"}, 2.0}};
+  const auto power = enumerate_protection_cyber_states(
+      components, {detection}, power_states);
+  CHECK(power.power_dependency_modelled);
+  CHECK(power.function_availability[0] == Approx(0.5).margin(1e-12));
+
+  auto missing_power = components;
+  missing_power[0].power_draw_w = 0.0;
+  CHECK_THROWS_AS(enumerate_protection_cyber_states(
+                      missing_power, {detection}, power_states),
+                  std::invalid_argument);
+  std::vector<ProtectionCyberComponent> too_many(21);
+  for (size_t i = 0; i < too_many.size(); ++i)
+    too_many[i].id = "component-" + std::to_string(i);
+  CHECK_THROWS_AS(enumerate_protection_cyber_states(too_many, {}),
+                  std::invalid_argument);
+}
+
+namespace {
+ProtectionCyberReliabilityScenario make_protection_cyber_oracle(
+    double center_availability) {
+  ProtectionCyberReliabilityScenario scenario;
+  scenario.scenario_id = "line-fault-oracle";
+  scenario.initiating_frequency_per_year = 2.0;
+  auto& event = scenario.event;
+  event.primary.relay.relay_id = "primary";
+  event.primary.relay.characteristic =
+      ProtectionRelayCharacteristic::DefiniteTimeOvercurrent;
+  event.primary.relay.pickup_current = 1.0;
+  event.primary.relay.definite_time_delay_s = 0.1;
+  event.primary.trajectory = {{0.0, 2.0}, {1.0, 2.0}};
+  event.primary.relay_success_probability = 0.9;
+  event.primary.breaker_success_probability = 1.0;
+  event.backup = event.primary;
+  event.backup.relay.relay_id = "backup";
+  event.backup.relay.definite_time_delay_s = 0.5;
+  event.backup.relay_success_probability = 1.0;
+  event.coordination_margin_s = 0.3;
+  event.uncleared_terminal_time_s = 2.0;
+  event.information_components = {
+      {"shared-center", center_availability, 1.0}};
+  ProtectionCyberFunction function;
+  function.name = "shared-control";
+  function.alternative_paths = {{{0}}};
+  event.information_functions = {function};
+  event.function_bindings.detection_function = 0;
+  event.function_bindings.isolation_function = 0;
+  event.function_bindings.restoration_function = 0;
+
+  scenario.consequence.primary_clearing_shed_mw = 10.0;
+  scenario.consequence.backup_clearing_shed_mw = 10.0;
+  scenario.consequence.uncleared_shed_mw = 10.0;
+  scenario.consequence.isolated_shed_mw = 2.0;
+  scenario.consequence.isolation_failed_shed_mw = 8.0;
+  scenario.consequence.restored_shed_mw = 0.0;
+  scenario.consequence.restoration_failed_shed_mw = 5.0;
+  scenario.consequence.automatic_restoration_hr = 0.1;
+  scenario.consequence.manual_restoration_hr = 1.0;
+  scenario.consequence.repair_hr = 10.0;
+  return scenario;
+}
+}  // namespace
+
+TEST_CASE("protection cyber: three-method reliability comparison matches oracle",
+          "[reliability][protection-frt][cyber][comparison]") {
+  const auto comparison = compare_protection_cyber_reliability(
+      {make_protection_cyber_oracle(0.8)});
+  // Protection-only per event:
+  // 0.9*(10*0.1/3600+2*0.1)+0.1*(10*0.5/3600+2*0.1).
+  const double protection_per_event =
+      0.9 * (10.0 * 0.1 / 3600.0 + 0.2) +
+      0.1 * (10.0 * 0.5 / 3600.0 + 0.2);
+  // Center-down class: 10*2/3600 + 8*1 +
+  // 5*(10-1-2/3600) MWh per initiating event.
+  const double center_down_per_event =
+      10.0 * 2.0 / 3600.0 + 8.0 +
+      5.0 * (10.0 - 1.0 - 2.0 / 3600.0);
+  const double cyber_per_event =
+      0.8 * protection_per_event + 0.2 * center_down_per_event;
+  const double protection_lole_per_event =
+      0.9 * (0.1 / 3600.0 + 0.1) +
+      0.1 * (0.5 / 3600.0 + 0.1);
+  const double cyber_lole_per_event =
+      0.8 * protection_lole_per_event + 0.2 * 10.0;
+  CHECK(comparison.static_fmea_eens_mwh_yr == Approx(200.0).margin(1e-12));
+  CHECK(comparison.protection_only_eens_mwh_yr ==
+        Approx(2.0 * protection_per_event).margin(1e-12));
+  CHECK(comparison.cyber_conditioned_eens_mwh_yr ==
+        Approx(2.0 * cyber_per_event).margin(1e-12));
+  CHECK(comparison.protection_only_eens_mwh_yr <
+        comparison.cyber_conditioned_eens_mwh_yr);
+  CHECK(comparison.cyber_conditioned_eens_mwh_yr <
+        comparison.static_fmea_eens_mwh_yr);
+  CHECK(comparison.static_fmea_lole_hr_yr == Approx(20.0));
+  CHECK(comparison.protection_only_lole_hr_yr ==
+        Approx(2.0 * protection_lole_per_event).margin(1e-12));
+  CHECK(comparison.cyber_conditioned_lole_hr_yr ==
+        Approx(2.0 * cyber_lole_per_event).margin(1e-12));
+  CHECK(comparison.static_fmea_lolf_occ_yr == Approx(2.0));
+  CHECK(comparison.protection_only_lolf_occ_yr == Approx(2.0));
+  CHECK(comparison.cyber_conditioned_lolf_occ_yr == Approx(2.0));
+  CHECK(comparison.validity.information_topology_modelled);
+  CHECK_FALSE(comparison.validity.online_network_dae_coupled);
+
+  const auto degraded = compare_protection_cyber_reliability(
+      {make_protection_cyber_oracle(0.4)});
+  CHECK(degraded.cyber_conditioned_eens_mwh_yr >
+        comparison.cyber_conditioned_eens_mwh_yr);
+  CHECK(degraded.cyber_conditioned_lole_hr_yr >
+        comparison.cyber_conditioned_lole_hr_yr);
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -969,8 +1728,13 @@ TEST_CASE("configuration: every supported protective device consumes nuisance fr
              entry.mode.ref.consequence == FailureConsequenceKind::NuisanceTrip;
     });
     REQUIRE(nuisance != configured.end());
-    CHECK(nuisance->mode.params.lambda_per_year ==
-          Approx(1.25 + static_cast<double>(i)));
+    const double configured_calendar_frequency =
+        1.25 + static_cast<double>(i);
+    CHECK(nuisance->mode.params.calendar_frequency_per_year ==
+          Approx(configured_calendar_frequency));
+    CHECK((1.0 - nuisance->mode.params.unavailability) *
+              nuisance->mode.params.lambda_per_year ==
+          Approx(configured_calendar_frequency));
     CHECK(nuisance->mode.params.data_source == "user_override");
   }
 }
@@ -1293,10 +2057,79 @@ TEST_CASE("fmea: multi-mode co-failure enumeration captures N-2 risk",
   auto r2 = run_failure_mode_fmea(sys, opt2);
   CHECK(r2.n_pairs_evaluated >= 1);
   CHECK(r2.eens_mwh_yr > 0.0);
+  CHECK(r2.second_order_expansion_complete);
   REQUIRE_FALSE(r2.co_contingencies.empty());
   CHECK(r2.co_contingencies.front().total_shed_mw == Approx(8.0).margin(0.5));
   CHECK(r2.co_contingencies.front().eens_contribution > 0.0);
+  CHECK(r2.co_contingencies.front().interaction_eens_correction ==
+        Approx(r2.co_contingencies.front().eens_contribution).margin(1e-9));
+  CHECK(r2.eens_mwh_yr ==
+        Approx(r2.second_order_interaction_eens_mwh_yr).margin(1e-9));
   CHECK(r2.co_contingencies.front().joint_unavailability > 0.0);
+}
+
+TEST_CASE("fmea: exact N-2 interaction vanishes for additive island consequences",
+          "[reliability][failure_mode][n2][interaction]") {
+  HybridPowerSystem sys;
+  ACBus source;
+  source.index = 1;
+  source.bus_type = BusType::SLACK;
+  source.in_service = true;
+  ACBus load_a;
+  load_a.index = 2;
+  load_a.bus_type = BusType::PQ;
+  load_a.pd_mw = 3.0;
+  load_a.in_service = true;
+  ACBus load_b = load_a;
+  load_b.index = 3;
+  load_b.pd_mw = 5.0;
+  sys.ac.buses = {source, load_a, load_b};
+
+  Generator generator;
+  generator.index = 1;
+  generator.bus = 1;
+  generator.is_slack = true;
+  generator.in_service = true;
+  generator.pmax_mw = 20.0;
+  sys.ac.generators = {generator};
+
+  ACBranch branch_a;
+  branch_a.index = 1;
+  branch_a.from_bus = 1;
+  branch_a.to_bus = 2;
+  branch_a.in_service = true;
+  branch_a.x_pu = 0.1;
+  branch_a.rate_a_mva = 10.0;
+  branch_a.failure_rate = 0.5;
+  branch_a.mttr_hr = 10.0;
+  ACBranch branch_b = branch_a;
+  branch_b.index = 2;
+  branch_b.to_bus = 3;
+  sys.ac.branches = {branch_a, branch_b};
+
+  ReliabilityDataPolicy strict;
+  strict.default_policy = ReliabilityDefaultPolicy::StrictCaseDataOnly;
+  FailureModeFMEAOptions first_order_options;
+  first_order_options.data_policy = strict;
+  const auto first_order =
+      run_failure_mode_fmea(sys, first_order_options);
+
+  FailureModeFMEAOptions second_order_options = first_order_options;
+  second_order_options.max_order = 2;
+  const auto second_order =
+      run_failure_mode_fmea(sys, second_order_options);
+
+  REQUIRE(second_order.second_order_expansion_complete);
+  REQUIRE_FALSE(second_order.co_contingencies.empty());
+  CHECK(second_order.co_contingencies.front().total_shed_mw ==
+        Approx(8.0).margin(0.5));
+  CHECK(second_order.co_contingencies.front().eens_contribution > 0.0);
+  CHECK(second_order.co_contingencies.front().interaction_eens_correction ==
+        Approx(0.0).margin(1e-9));
+  CHECK(second_order.second_order_interaction_eens_mwh_yr ==
+        Approx(0.0).margin(1e-9));
+  CHECK(second_order.eens_mwh_yr ==
+        Approx(first_order.eens_mwh_yr).margin(1e-9));
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1386,6 +2219,109 @@ TEST_CASE("nsq MC: hybrid system includes DC load curtailment in EENS",
   // VSC unavailability ~0.1 -> the 5 MW DC load is shed in those states, so the
   // hybrid-LP-based MC reports non-trivial EENS (previously zero under AC-only).
   CHECK(r.eens_mwh_yr > 100.0);
+}
+
+TEST_CASE("nsq MC importance sampling preserves the lambda-one identity",
+          "[reliability][mc][importance]") {
+  const auto sys = make_hybrid_mc_system();
+  ReliabilityOptions plain;
+  plain.max_iterations = 500;
+  plain.seed = 31415;
+  plain.compute_tail_risk = false;
+  plain.enable_parallel = false;
+  const auto reference = run_nonsequential_mc(sys, plain);
+
+  ReliabilityOptions importance = plain;
+  importance.use_importance_sampling = true;
+  importance.importance_lambda = 1.0;
+  const auto twisted = run_nonsequential_mc(sys, importance);
+
+  CHECK(twisted.importance_sampling_used);
+  CHECK(twisted.importance_twisting_factor == Approx(1.0));
+  CHECK(twisted.importance_mean_likelihood_ratio == Approx(1.0));
+  CHECK(twisted.importance_effective_sample_size == Approx(500.0));
+  CHECK(twisted.eens_mwh_yr == Approx(reference.eens_mwh_yr));
+  CHECK(twisted.lole_hr_yr == Approx(reference.lole_hr_yr));
+}
+
+TEST_CASE("nsq MC importance sampling reports likelihood diagnostics",
+          "[reliability][mc][importance]") {
+  const auto sys = make_hybrid_mc_system();
+  ReliabilityOptions options;
+  options.max_iterations = 2000;
+  options.seed = 2718;
+  options.compute_tail_risk = false;
+  options.enable_parallel = false;
+  options.use_importance_sampling = true;
+  options.importance_lambda = 4.0;
+  const auto result = run_nonsequential_mc(sys, options);
+
+  CHECK(result.importance_sampling_used);
+  CHECK(result.importance_twisting_factor == Approx(4.0));
+  CHECK(result.importance_effective_sample_size > 0.0);
+  CHECK(result.importance_effective_sample_size <= result.iterations_used);
+  CHECK(result.importance_mean_likelihood_ratio == Approx(1.0).margin(0.08));
+  CHECK(result.incremental_eens_mwh_yr > 100.0);
+}
+
+TEST_CASE("importance sampling rejects invalid or unsupported configurations",
+          "[reliability][mc][importance]") {
+  const auto sys = make_hybrid_mc_system();
+  ReliabilityOptions invalid;
+  invalid.max_iterations = 1;
+  invalid.compute_tail_risk = false;
+  invalid.use_importance_sampling = true;
+  invalid.importance_lambda = 0.0;
+  CHECK_THROWS_AS(run_nonsequential_mc(sys, invalid), std::invalid_argument);
+
+  ReliabilityOptions sequential = invalid;
+  sequential.importance_lambda = 2.0;
+  sequential.hours_per_year = 1;
+  LoadProfile profile;
+  profile.factors = {1.0};
+  CHECK_THROWS_AS(run_sequential_mc(sys, profile, sequential),
+                  std::invalid_argument);
+}
+
+TEST_CASE("exact Birnbaum Fussell-Vesely and EENS derivative match hybrid oracle",
+          "[reliability][sensitivity][exact]") {
+  auto sys = make_hybrid_mc_system();
+  sys.vsc_converters.front().index = 77;
+  ReliabilityOptions options;
+  options.compute_tail_risk = false;
+  options.load_scale_factor = 1.0;
+  options.data_policy.default_policy =
+      ReliabilityDefaultPolicy::StrictCaseDataOnly;
+  const auto result = compute_exact_reliability_sensitivity(sys, options);
+
+  CHECK(result.exact_independent_binary_model);
+  CHECK(result.states_evaluated == 2);
+  CHECK(result.baseline_eens_mwh_yr == Approx(0.0).margin(1e-9));
+  CHECK(result.expected_incremental_eens_mwh_yr ==
+        Approx(0.1 * 5.0 * 8760.0).margin(1e-8));
+  const auto converter = std::find_if(
+      result.components.begin(), result.components.end(),
+      [](const auto& item) { return item.component_type == "VSCConverter"; });
+  REQUIRE(converter != result.components.end());
+  CHECK(converter->component_position == 0);
+  CHECK(converter->component_index == 77);
+  CHECK(converter->eens_if_forced_down_mwh_yr ==
+        Approx(5.0 * 8760.0).margin(1e-8));
+  CHECK(converter->eens_if_forced_up_mwh_yr == Approx(0.0).margin(1e-9));
+  CHECK(converter->birnbaum_mwh_yr_per_unit_unavailability ==
+        Approx(5.0 * 8760.0).margin(1e-8));
+  CHECK(converter->eens_derivative_mwh_yr_per_unit_unavailability ==
+        Approx(converter->birnbaum_mwh_yr_per_unit_unavailability));
+  CHECK(converter->fussell_vesely == Approx(1.0).margin(1e-12));
+  CHECK(compute_exact_reliability_sensitivity(sys, options, 1)
+            .states_evaluated == 2);
+
+  auto two_stochastic_components = sys;
+  two_stochastic_components.ac.generators.front().forced_outage_rate = 0.2;
+  two_stochastic_components.ac.generators.front().mttr_hr = 24.0;
+  CHECK_THROWS_AS(compute_exact_reliability_sensitivity(
+                      two_stochastic_components, options, 1),
+                  std::invalid_argument);
 }
 
 TEST_CASE("nsq MC: microgrid supervisory outage removes island support",
@@ -1832,11 +2768,17 @@ TEST_CASE("FMEA: Level-1 cyber conditioning preserves bounds and decomposition",
         return item.component_type == "ac_branch" && item.component_index == 0;
       });
   REQUIRE(branch != result.contingencies.end());
-  CHECK(branch->eens_perfect_cyber_contribution == Approx(0.05).margin(1e-6));
-  CHECK(branch->eens_no_automation_contribution == Approx(1.0).margin(1e-6));
-  CHECK(branch->eens_cyber_duration_increment == Approx(0.2375).margin(1e-6));
+  const double branch_calendar_frequency = 8760.0 / (8760.0 + 4.0);
+  CHECK(branch->failure_rate == Approx(branch_calendar_frequency).margin(1e-12));
+  CHECK(branch->eens_perfect_cyber_contribution ==
+        Approx(0.05 * branch_calendar_frequency).margin(1e-12));
+  CHECK(branch->eens_no_automation_contribution ==
+        Approx(1.0 * branch_calendar_frequency).margin(1e-12));
+  CHECK(branch->eens_cyber_duration_increment ==
+        Approx(0.2375 * branch_calendar_frequency).margin(1e-12));
   CHECK(branch->eens_cyber_control_increment == Approx(0.0).margin(1e-8));
-  CHECK(branch->eens_contribution == Approx(0.2875).margin(1e-6));
+  CHECK(branch->eens_contribution ==
+        Approx(0.2875 * branch_calendar_frequency).margin(1e-12));
   CHECK(branch->tau_sw_hr == Approx(0.2875).margin(1e-8));
 
   // Level-1+ three-dimensional screening multiplies the information service
@@ -1861,6 +2803,34 @@ TEST_CASE("FMEA: Level-1 cyber conditioning preserves bounds and decomposition",
   CHECK_FALSE(three_dimension.validity.joint_class_probability_modelled);
   CHECK_FALSE(three_dimension.validity.protection_logic_modelled);
   CHECK_FALSE(three_dimension.validity.protection_frt_reliability_coupled);
+
+  // An explicit mutually-exclusive state table preserves dependence and
+  // replaces the scalar product.  Here information is always available but
+  // detection and every downstream function succeed together only 40% of time.
+  using JointState = CyberPhysicalFMEAOptions::IntelligentFunctionOptions::
+      JointFunctionState;
+  JointState joint_success;
+  joint_success.probability = 0.4;
+  JointState joint_failure;
+  joint_failure.probability = 0.6;
+  joint_failure.detection_success = false;
+  options.cyber_physical.intelligent.joint_states =
+      {joint_success, joint_failure};
+  const auto joint_dimension = run_distribution_fmea(sys, options);
+  CHECK(joint_dimension.validity.joint_class_probability_modelled);
+  CHECK_FALSE(joint_dimension.cyber_physical.independent_factorization);
+  CHECK(joint_dimension.cyber_physical.information_service_availability ==
+        Approx(1.0));
+  CHECK(joint_dimension.cyber_physical.detection_success_probability ==
+        Approx(0.4));
+  CHECK(joint_dimension.cyber_physical.effective_automation_probability ==
+        Approx(0.4));
+  CHECK(joint_dimension.cyber_physical.automation_efficacy ==
+        Approx(0.4).margin(1e-8));
+
+  options.cyber_physical.intelligent.joint_states.back().probability = 0.5;
+  CHECK_THROWS_AS(run_distribution_fmea(sys, options), std::invalid_argument);
+  options.cyber_physical.intelligent.joint_states.clear();
   options.cyber_physical.intelligent.enabled = false;
 
   // Cyber conditioning parallelizes exactly like the physical path (no serial
@@ -1880,9 +2850,10 @@ TEST_CASE("FMEA: Level-1 cyber conditioning preserves bounds and decomposition",
         return item.component_type == "ac_branch" && item.component_index == 0;
       });
   REQUIRE(perfect_branch != perfect_cyber.contingencies.end());
-  CHECK(perfect_branch->eens_contribution == Approx(0.05).margin(1e-6));
+  CHECK(perfect_branch->eens_contribution ==
+        Approx(0.05 * branch_calendar_frequency).margin(1e-12));
   CHECK(perfect_branch->eens_no_automation_contribution ==
-        Approx(1.0).margin(1e-6));
+        Approx(1.0 * branch_calendar_frequency).margin(1e-12));
   CHECK(perfect_cyber.cyber_physical.eens_no_automation_mwh_yr >=
         perfect_cyber.cyber_physical.eens_perfect_cyber_mwh_yr);
 
@@ -1897,7 +2868,8 @@ TEST_CASE("FMEA: Level-1 cyber conditioning preserves bounds and decomposition",
       });
   REQUIRE(physical_branch != physical.contingencies.end());
   CHECK_FALSE(physical.cyber_physical.enabled);
-  CHECK(physical_branch->eens_contribution == Approx(0.5).margin(1e-6));
+  CHECK(physical_branch->eens_contribution ==
+        Approx(0.5 * branch_calendar_frequency).margin(1e-12));
 }
 
 TEST_CASE("FMEA: Level-1 cyber conditioning attributes DER control loss",
@@ -1980,15 +2952,20 @@ TEST_CASE("FMEA: Level-1 cyber conditioning attributes DER control loss",
         return item.component_type == "ac_branch" && item.component_index == 0;
       });
   REQUIRE(branch != result.contingencies.end());
+  const double branch_calendar_frequency = 8760.0 / (8760.0 + 4.0);
+  CHECK(branch->failure_rate == Approx(branch_calendar_frequency).margin(1e-12));
 
   CHECK(result.validity.cyber_control_consequence_modelled);
   CHECK(branch->shed_rep_automatic_mw == Approx(0.0).margin(1e-8));
   CHECK(branch->shed_rep_manual_mw == Approx(1.0).margin(1e-8));
   CHECK(branch->eens_perfect_cyber_contribution == Approx(0.0).margin(1e-8));
-  CHECK(branch->eens_no_automation_contribution == Approx(4.0).margin(1e-6));
+  CHECK(branch->eens_no_automation_contribution ==
+        Approx(4.0 * branch_calendar_frequency).margin(1e-12));
   CHECK(branch->eens_cyber_duration_increment == Approx(0.0).margin(1e-8));
-  CHECK(branch->eens_cyber_control_increment == Approx(2.0).margin(1e-6));
-  CHECK(branch->eens_contribution == Approx(2.0).margin(1e-6));
+  CHECK(branch->eens_cyber_control_increment ==
+        Approx(2.0 * branch_calendar_frequency).margin(1e-12));
+  CHECK(branch->eens_contribution ==
+        Approx(2.0 * branch_calendar_frequency).margin(1e-12));
 }
 
 TEST_CASE("built-in cyber-physical demo exposes automation value",
@@ -2020,23 +2997,56 @@ TEST_CASE("built-in cyber-physical demo exposes automation value",
         return item.component_type == "ac_branch" && item.component_index == 0;
       });
   REQUIRE(feeder != result.contingencies.end());
+  const double feeder_calendar_frequency = feeder->failure_rate;
 
   // Automatic class: FLISR closes the tie and dispatches the battery to cover
   // the 0.8 MW tie shortfall -> repair shed 0.  ens = 2 MW * 0.05 h = 0.1.
   CHECK(feeder->shed_rep_automatic_mw == Approx(0.0).margin(1e-8));
-  CHECK(feeder->eens_perfect_cyber_contribution == Approx(0.1).margin(1e-6));
+  CHECK(feeder->eens_perfect_cyber_contribution ==
+        Approx(0.1 * feeder_calendar_frequency).margin(1e-12));
   // Manual class: the crew still closes the tie during the repair stage, but
   // the battery is frozen, so the 1.2 MVA tie limit leaves 0.8 MW shed.
   // ens = 2 MW * 1 h + 0.8 MW * 3 h = 4.4.
   CHECK(feeder->shed_rep_manual_mw == Approx(0.8).margin(1e-6));
-  CHECK(feeder->eens_no_automation_contribution == Approx(4.4).margin(1e-6));
+  CHECK(feeder->eens_no_automation_contribution ==
+        Approx(4.4 * feeder_calendar_frequency).margin(1e-12));
   // Increments at A = 0.75: duration 0.25*(2.0-0.1), control 0.25*(4.4-2.0).
-  CHECK(feeder->eens_cyber_duration_increment == Approx(0.475).margin(1e-6));
-  CHECK(feeder->eens_cyber_control_increment == Approx(0.6).margin(1e-6));
-  CHECK(feeder->eens_contribution == Approx(1.175).margin(1e-6));
+  CHECK(feeder->eens_cyber_duration_increment ==
+        Approx(0.475 * feeder_calendar_frequency).margin(1e-12));
+  CHECK(feeder->eens_cyber_control_increment ==
+        Approx(0.6 * feeder_calendar_frequency).margin(1e-12));
+  CHECK(feeder->eens_contribution ==
+        Approx(1.175 * feeder_calendar_frequency).margin(1e-12));
   CHECK(result.cyber_physical.delta_cyber_duration_mwh_yr > 0.0);
   CHECK(result.cyber_physical.delta_cyber_control_mwh_yr > 0.0);
   CHECK(result.cyber_physical.eens_perfect_cyber_mwh_yr < result.eens_mwh_yr);
   CHECK(result.eens_mwh_yr <
         result.cyber_physical.eens_no_automation_mwh_yr);
+
+  auto misoperation_options = options;
+  auto& misoperation =
+      misoperation_options.cyber_physical.protection_misoperation;
+  misoperation.enabled = true;
+  misoperation.no_fault_decision_windows_per_year = 100.0;
+  misoperation.false_trip_probability_per_window = 0.01;
+  misoperation.trip_channel_success_probability = 0.5;
+  misoperation.breaker_success_probability = 0.8;
+  misoperation.disconnected_load_mw = 2.0;
+  misoperation.restoration_duration_hr = 0.25;
+  const auto with_misoperation =
+      run_distribution_fmea(sys, misoperation_options);
+  CHECK(with_misoperation.validity.protection_logic_modelled);
+  CHECK(with_misoperation.validity.protection_misoperation_modelled);
+  CHECK(with_misoperation.cyber_physical
+            .protection_misoperation_frequency_per_year == Approx(0.4));
+  CHECK(with_misoperation.cyber_physical
+            .delta_protection_misoperation_mwh_yr == Approx(0.2));
+  CHECK(with_misoperation.eens_mwh_yr ==
+        Approx(result.eens_mwh_yr + 0.2).margin(1e-8));
+  CHECK(with_misoperation.lole_hr_yr ==
+        Approx(result.lole_hr_yr + 0.1).margin(1e-8));
+  CHECK(with_misoperation.lolf_occ_yr ==
+        Approx(result.lolf_occ_yr + 0.4).margin(1e-8));
+  CHECK(with_misoperation.cyber_physical.eens_decomposition_residual_mwh_yr ==
+        Approx(0.0).margin(1e-8));
 }

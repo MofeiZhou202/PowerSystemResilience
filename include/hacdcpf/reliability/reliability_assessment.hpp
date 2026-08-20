@@ -41,6 +41,14 @@ enum class MtbfConvention {
   Unspecified       ///< not declared; strict mode blocks, compat assumes MtbfAsMttf
 };
 
+/// Basis of a supplied `failure_rate_per_year` value.
+enum class FailureRateBasis {
+  /// Conditional failure intensity while the component is operating.
+  OperatingTime,
+  /// Observed failures per calendar/reporting year, including downtime.
+  CalendarTime
+};
+
 /// Policy object threaded through every reliability method.
 struct ReliabilityDataPolicy {
   ReliabilityDefaultPolicy default_policy{
@@ -52,6 +60,10 @@ struct ReliabilityDataPolicy {
   double hours_per_year{8760.0};
   /// How to interpret legacy `mtbf_hours` fields (default = mean-time-to-failure).
   MtbfConvention mtbf_convention{MtbfConvention::MtbfAsMttf};
+  /// How to interpret `failure_rate_per_year`.  The historical contract is an
+  /// operating-time intensity; calendar observations require the explicit
+  /// CalendarTime selection so the resolver can undo downtime exposure.
+  FailureRateBasis failure_rate_basis{FailureRateBasis::OperatingTime};
 };
 
 /// Raw failure-mode reliability fields as stored on the model / case.  Any
@@ -81,7 +93,8 @@ struct ReliabilityParams {
   bool has_data{false};            // true if the case provided usable data
   bool used_default{false};        // true if a default/template filled gaps
   std::string data_source;         // "case" | "template" | "default" | "missing"
-  double lambda_per_year{0.0};     // failure frequency (occ/yr)
+  double lambda_per_year{0.0};     // operating-time failure intensity (occ/up-year)
+  double calendar_frequency_per_year{0.0}; // observed/expected events per calendar year
   double repair_hr{0.0};           // mean repair / recovery duration (hr)
   double unavailability{0.0};      // steady-state forced unavailability
   double mttf_hr{0.0};             // mean time to failure (hr)
@@ -172,9 +185,10 @@ struct ReliabilityOptions {
   // Distribution system indices (requires customer data in loads)
   bool compute_distribution_indices{false};  // Compute SAIFI/SAIDI/ASAI
 
-  // Importance sampling for variance reduction (experimental)
+  // Independent-Bernoulli odds twisting for non-sequential MC. Sequential MC
+  // rejects this option because a path-space likelihood ratio is required.
   bool use_importance_sampling{false};
-  double importance_lambda{2.0};      // Importance sampling twisting factor
+  double importance_lambda{2.0};      // Failure-odds twisting factor (> 0)
 
   // Parallel evaluation of independent sampled states / simulated years.
   bool enable_parallel{true};
@@ -189,7 +203,8 @@ struct TailRiskMetrics {
   double eens_var{0.0};       // VaR of EENS at confidence level
   double lole_var{0.0};       // VaR of LOLE at confidence level
   
-  // Conditional Value at Risk (Expected Shortfall): expected loss given > VaR
+  // Conditional Value at Risk (Expected Shortfall): empirical upper-tail mean
+  // with fractional weighting of probability mass at the VaR atom.
   double eens_cvar{0.0};      // CVaR of EENS
   double lole_cvar{0.0};      // CVaR of LOLE
   
@@ -224,6 +239,7 @@ struct DistributionIndices {
 struct FrequencyDurationResult {
   // Capacity Outage Probability Table (COPT)
   std::vector<double> capacity_outage_levels;  // MW
+  std::vector<double> state_probability;       // P(outage == X)
   std::vector<double> cumulative_probability;  // P(outage >= X)
   std::vector<double> cumulative_frequency;    // F(outage >= X) (occ/yr)
   
@@ -232,7 +248,125 @@ struct FrequencyDurationResult {
   double lole_fd{0.0};          // LOLE from F&D method (hr/yr)
   double lolf_fd{0.0};          // LOLF from F&D method (occ/yr)
   double lold{0.0};             // Loss of Load Duration = LOLE/LOLF (hr/occ)
+  bool probability_valid{false};
+  bool frequency_valid{false};
+  bool exact_capacity_states{false};
+  std::vector<std::string> warnings;
 };
+
+/// Independent two-state component used by analytical F&D reduction.
+/// `failure_rate_per_year` is the up-to-down transition intensity lambda;
+/// `repair_time_hr` is 1/mu.  `unavailability` must be consistent with those
+/// rates when all three are supplied.
+struct TwoStateReliabilityComponent {
+  double failure_rate_per_year{0.0};
+  double repair_time_hr{0.0};
+  double unavailability{0.0};
+};
+
+/// Exact steady-state frequency/duration equivalent of a coherent series or
+/// parallel block under independent two-state component assumptions.
+struct FrequencyDurationEquivalent {
+  double availability{1.0};
+  double unavailability{0.0};
+  double failure_frequency_per_year{0.0};
+  double mean_failure_duration_hr{0.0};
+};
+
+FrequencyDurationEquivalent reduce_series_frequency_duration(
+    const std::vector<TwoStateReliabilityComponent>& components,
+    double hours_per_year = 8760.0);
+
+FrequencyDurationEquivalent reduce_parallel_frequency_duration(
+    const std::vector<TwoStateReliabilityComponent>& components,
+    double hours_per_year = 8760.0);
+
+/// IEC 61508 low-demand dangerous-undetected failure model with periodic,
+/// complete proof testing.  The exact cycle-average is
+/// 1 - (1-exp(-lambda_DU*T_I))/(lambda_DU*T_I); lambda*T/2 is also returned
+/// so callers can quantify the small-rate approximation error.
+struct LowDemandPFDResult {
+  double pfd_average{0.0};
+  double first_order_pfd_average{0.0};
+  double approximation_relative_error{0.0};
+};
+
+LowDemandPFDResult compute_low_demand_pfd(
+    double dangerous_undetected_rate_per_hour,
+    double proof_test_interval_hr);
+
+/// Independent information-service component.  Availability and packet
+/// delivery are separate probabilities but share the same component identity,
+/// so a component used by multiple paths is counted once in joint events.
+struct InformationServiceComponent {
+  std::string id;
+  double availability{1.0};
+  double packet_delivery_probability{1.0};
+  double latency_ms{0.0};
+  double jitter_ms{0.0};
+};
+
+struct InformationServicePath {
+  std::vector<size_t> component_indices;
+};
+
+struct InformationFunctionDefinition {
+  std::string name;
+  std::vector<InformationServicePath> alternative_paths;
+  double max_latency_ms{0.0};  ///< <= 0 disables this QoS limit
+  double max_jitter_ms{0.0};   ///< <= 0 disables this QoS limit
+  double min_packet_delivery_probability{0.0};
+};
+
+struct InformationFunctionReliabilityResult {
+  double availability{0.0};
+  size_t valid_path_count{0};
+  /// Minimal component-index sets whose simultaneous failure disables every
+  /// QoS-valid success path.  Empty when an empty (failure-independent) path
+  /// exists or when no valid success path exists.
+  std::vector<std::vector<size_t>> minimal_cut_sets;
+};
+
+/// Exact independent-component structure-function evaluation.  Alternative
+/// paths may share components; inclusion-exclusion counts each shared event
+/// once.  Throws when the reduced path/component count exceeds the documented
+/// exact-enumeration bound instead of silently assuming path independence.
+InformationFunctionReliabilityResult evaluate_information_function_reliability(
+    const std::vector<InformationServiceComponent>& components,
+    const InformationFunctionDefinition& function);
+
+/// Probability that every requested function is simultaneously available in
+/// the same component state.  This is not the product of marginal function
+/// availabilities when functions share infrastructure.
+InformationFunctionReliabilityResult evaluate_joint_information_reliability(
+    const std::vector<InformationServiceComponent>& components,
+    const std::vector<InformationFunctionDefinition>& functions);
+
+/// Independent physical component used by an explicit success-path network.
+struct PhysicalReliabilityComponent {
+  std::string stable_id;
+  double availability{1.0};
+};
+
+struct PhysicalSuccessPath {
+  std::vector<size_t> component_indices;
+};
+
+struct PhysicalNetworkReliabilityResult {
+  double availability{0.0};
+  double loss_probability{1.0};
+  size_t reduced_success_path_count{0};
+  std::vector<std::vector<size_t>> minimal_cut_set_indices;
+  std::vector<std::vector<std::string>> minimal_cut_set_stable_ids;
+  bool exact_independent_path_model{false};
+};
+
+/// Exact coherent physical-network evaluation from explicit success paths.
+/// Shared components are counted once by inclusion-exclusion; minimal cut sets
+/// are the minimal hitting sets of the reduced path family.
+PhysicalNetworkReliabilityResult evaluate_physical_network_reliability(
+    const std::vector<PhysicalReliabilityComponent>& components,
+    const std::vector<PhysicalSuccessPath>& success_paths);
 
 // ═══════════════════════════════════════════════════════════════════════
 // Reliability Assessment Results
@@ -252,6 +386,12 @@ struct ReliabilityResult {
   double lole_hr_yr{0.0};    // Loss of Load Expectation (hr/yr)
   double lolf_occ_yr{0.0};   // Loss of Load Frequency (occ/yr, SEQ only)
   double plc{0.0};           // Probability of Load Curtailment
+
+  // Importance-sampling diagnostics (non-sequential MC only).
+  bool importance_sampling_used{false};
+  double importance_twisting_factor{1.0};
+  double importance_effective_sample_size{0.0};
+  double importance_mean_likelihood_ratio{1.0};
 
   // Convergence history
   std::vector<double> eens_history;
@@ -290,26 +430,22 @@ struct ReliabilityResult {
   /// this field is set.  Example: "DC loads not modelled (AC-only OPF)".
   std::string model_limitations;
 
-  /// Structured model-capability declaration.  Always "ac-only-dcopf" for
-  /// the Monte Carlo / FMEA evaluators in this file: the state evaluator
-  /// calls `solve_dc_opf` on the AC network only — DC power-flow balance,
-  /// DC load curtailment, and VSC re-dispatch are NOT enforced.  EENS/LOLE
-  /// figures therefore do NOT include DC load interruptions and will
-  /// underestimate total curtailment on hybrid AC/DC systems.
-  ///
-  /// Do NOT treat `eens_mwh_yr` or `lole_hr_yr` as full-system reliability
-  /// indices when the submitted `HybridPowerSystem` contains DC components.
-  /// Check `validity.dc_load_curtailment_included` before using these figures.
+  /// Structured model-capability declaration. Pure AC systems use
+  /// "ac-only-dcopf". Systems with represented DC/VSC assets use
+  /// "hybrid-acdc-network-lp", including AC/DC active-power balance, DC load
+  /// shedding, bounded branch transfer, and bounded converter transfer.
+  /// Neither scope certifies nonlinear AC voltage/reactive feasibility; callers
+  /// must inspect the validity flags before interpreting the indices.
   std::string model_scope{"ac-only-dcopf"};
 
   /// Per-feature validity flags so downstream code can branch on what the
   /// evaluator actually modelled, rather than guessing from `model_scope`.
   struct ValidityFlags {
     /// True only if DC load curtailment contributes to EENS/LOLE.
-    /// Always false for the current AC-only DC-OPF evaluator.
+    /// True for the hybrid AC/DC network LP and false for AC-only DC-OPF.
     bool dc_load_curtailment_included{false};
     /// True if VSC/DC branch contingencies affect DC-side power balance.
-    /// Always false — failures only affect AC island topology, not DC flow.
+    /// True for the hybrid AC/DC network LP and false for AC-only DC-OPF.
     bool vsc_dc_power_flow_modelled{false};
     /// True if AC load curtailment is computed via OPF (not all-or-nothing).
     /// True for NSQ/SEQ MC and FMEA paths that call solve_dc_opf.
@@ -355,6 +491,35 @@ ReliabilityResult run_sequential_mc(
     const HybridPowerSystem& sys,
     const LoadProfile& load_profile,
     const ReliabilityOptions& options = {});
+
+struct ExactReliabilitySensitivityItem {
+  size_t global_state_index{0};
+  size_t component_position{0};
+  /// Public stable component .index, never the vector position.
+  int component_index{0};
+  std::string component_type;
+  std::string component_name;
+  double unavailability{0.0};
+  double eens_if_forced_down_mwh_yr{0.0};
+  double eens_if_forced_up_mwh_yr{0.0};
+  double birnbaum_mwh_yr_per_unit_unavailability{0.0};
+  double eens_derivative_mwh_yr_per_unit_unavailability{0.0};
+  double fussell_vesely{0.0};
+};
+
+struct ExactReliabilitySensitivityResult {
+  double baseline_eens_mwh_yr{0.0};
+  double expected_incremental_eens_mwh_yr{0.0};
+  std::vector<ExactReliabilitySensitivityItem> components;
+  size_t states_evaluated{0};
+  bool exact_independent_binary_model{false};
+  std::string model_scope{"exact-independent-binary-state-enumeration"};
+};
+
+ExactReliabilitySensitivityResult compute_exact_reliability_sensitivity(
+    const HybridPowerSystem& sys,
+    const ReliabilityOptions& options = {},
+    size_t maximum_components = 20);
 
 /// Apply IEEE RTS-24 reliability data to the existing IEEE-24 system.
 /// Sets forced_outage_rate and mttr_hr on generators, and
@@ -409,8 +574,23 @@ struct CyberPhysicalFMEAOptions {
   };
   std::vector<AvailabilityOverride> availability_overrides;
 
-  /// Level-1+ factorized intelligent-function screening.  This does not model
-  /// relay pickup, protection/FRT trajectories, or joint class dependence.
+  /// Protection-security contribution from no-fault decision windows.  The
+  /// chain is evaluated as nu_window * p_false_alarm * p_channel * p_breaker;
+  /// its EENS/LOLE/LOLF is added to the system result instead of being exposed
+  /// as an always-zero decomposition field.
+  struct ProtectionMisoperationOptions {
+    bool enabled{false};
+    double no_fault_decision_windows_per_year{0.0};
+    double false_trip_probability_per_window{0.0};
+    double trip_channel_success_probability{1.0};
+    double breaker_success_probability{1.0};
+    double disconnected_load_mw{0.0};
+    double restoration_duration_hr{0.0};
+  } protection_misoperation{};
+
+  /// Level-1+ intelligent-function screening.  Scalar inputs use a factorized
+  /// model; joint_states can replace it with explicit joint class dependence.
+  /// Neither mode models relay pickup or protection/FRT trajectories.
   /// A failed function is routed to the existing degraded/manual consequence
   /// class, so protection_success_probability is a consequence proxy rather
   /// than an explicit backup-zone calculation.
@@ -421,6 +601,22 @@ struct CyberPhysicalFMEAOptions {
     double restoration_decision_valid_probability{0.98};
     double restoration_execution_success_probability{0.98};
     double protection_success_probability{0.995};
+
+    /// Explicit mutually-exclusive joint states.  When non-empty, these states
+    /// replace the independent scalar product above and may encode arbitrary
+    /// dependence among information, detection, isolation, restoration, and
+    /// protection success.  Probabilities must be finite, non-negative, and
+    /// sum to one.
+    struct JointFunctionState {
+      double probability{0.0};
+      bool information_service_available{true};
+      bool detection_success{true};
+      bool isolation_success{true};
+      bool restoration_decision_valid{true};
+      bool restoration_execution_success{true};
+      bool protection_success{true};
+    };
+    std::vector<JointFunctionState> joint_states;
   } intelligent{};
 };
 
@@ -577,10 +773,11 @@ struct CyberPhysicalReliabilityMetrics {
   double eens_adjusted_mwh_yr{0.0};
   double delta_cyber_duration_mwh_yr{0.0};
   double delta_cyber_control_mwh_yr{0.0};
-  /// Reserved placeholder: always 0 at Level 1.  Protection misoperation
-  /// (fail-to-trip / nuisance trip) is a failure-mode FMEA concern (doc C3);
-  /// the field exists so the doc's four-term decomposition is API-stable.
   double delta_protection_misoperation_mwh_yr{0.0};
+  double protection_misoperation_frequency_per_year{0.0};
+  double protection_misoperation_lole_hr_yr{0.0};
+  double protection_misoperation_lolf_occ_yr{0.0};
+  double eens_decomposition_residual_mwh_yr{0.0};
   /// eta = (EENS_noAuto - EENS) / (EENS_noAuto - EENS_perfect), clamped [0,1].
   /// With a UNIFORM availability A this equals A by construction; it becomes
   /// informative once per-component availability_overrides differ.
@@ -651,6 +848,7 @@ struct FMEAResult {
     bool intelligent_function_probabilities_modelled{false};
     bool joint_class_probability_modelled{false};
     bool protection_logic_modelled{false};
+    bool protection_misoperation_modelled{false};
     bool protection_frt_reliability_coupled{false};
   };
   ValidityFlags validity{};
@@ -661,8 +859,11 @@ struct FMEAResult {
 // ═══════════════════════════════════════════════════════════════════════
 
 /// Frequency & Duration method (analytical).
-/// Builds COPT recursively and calculates LOLP, LOLE, LOLF without simulation.
-/// This is faster than MC but assumes independent component failures.
+/// Builds an exact-capacity-state COPT recursively and calculates LOLP, LOLE,
+/// LOLF without simulation.  "Exact" means no capacity binning; states whose
+/// floating-point capacities differ only by round-off are merged.  This is
+/// faster than MC but assumes independent two-state generator failures and a
+/// constant peak load.
 FrequencyDurationResult run_frequency_duration_analysis(
     const HybridPowerSystem& sys,
     double peak_load_mw = 0.0);  // 0 = use sum of bus loads

@@ -1,0 +1,161 @@
+\section{稀有事件估计、精确状态枚举与灵敏度}\label{sec:rel-exact}
+
+\subsection{问题定义与三种计算口径}
+设可靠性元件集合为 $\mathcal C$，状态 $x_c=1$ 表示停运，不可用率为 $U_c$。给定状态向量
+$x$，后果求解器返回切负荷 $S(x)$。非序贯蒙特卡洛、精确状态枚举与一阶 FMEA 都计算同一个后果函数，
+差别只在概率积分方式：
+\begin{align}
+ \mathrm{EDNS}&=\sum_x p(x)S(x),\qquad
+ \mathrm{EENS}=H\,\mathrm{EDNS},\\
+ \mathrm{PLC}&=\sum_xp(x)\mathbf 1[S(x)>\varepsilon],
+ \qquad \mathrm{LOLE}=H\,\mathrm{PLC}.
+\end{align}
+精确枚举保留全部状态，普通蒙特卡洛按 $p(x)$ 抽样，重要抽样按扭曲分布 $q(x)$ 抽样并乘似然比。
+FMEA 则只取预先定义的单元件或故障模式事件，不能代替多重停运概率积分。
+
+对独立二态元件，状态概率为
+\begin{equation}
+ p(x)=\prod_{c\in\mathcal C}U_c^{x_c}(1-U_c)^{1-x_c}.
+ \label{eq:rel-exact-state-probability}
+\end{equation}
+平台只对 $0<U_c<1$ 的非退化元件展开二进制维度。$U_c=0$ 固定运行，$U_c=1$ 固定停运；二者仍保留在
+传给后果求解器的完整状态向量中。这样可避免确定状态把复杂度从 $2^m$ 虚增到 $2^n$，又不会丢掉确定停运后果。
+
+\subsection{不可用率的统一解析}
+若给出运行态故障强度 $\lambda_c$（次/年）和平均修复时间 $r_c$（小时），指数修复二态模型给出
+\begin{equation}
+ \mu_c=H/r_c,\qquad U_c=\frac{\lambda_c}{\lambda_c+\mu_c}.
+\end{equation}
+若算例直接给出强迫停运率，则解析器保留该值；若给出 MTBF，必须先依据
+\srcpath{MtbfConvention} 判断它是平均失效前时间还是完整周期。所有方法经同一解析器得到
+\srcpath{ReliabilityParams}，否则“方法对比”会被输入语义差异污染。
+
+\subsection{普通非序贯蒙特卡洛}
+普通抽样以 $X_c\sim\operatorname{Bernoulli}(U_c)$ 生成状态。$N$ 个样本的无偏估计为
+\begin{equation}
+ \widehat{\mathrm{EDNS}}=\frac1N\sum_{n=1}^NS(X^{(n)}),\qquad
+ \widehat{\mathrm{PLC}}=\frac1N\sum_{n=1}^N\mathbf 1[S(X^{(n)})>\varepsilon].
+\end{equation}
+对切负荷样本均值，平台报告变异系数
+\begin{equation}
+ \mathrm{CoV}=\frac{\widehat\sigma_S/\sqrt N}{\widehat\mu_S}.
+\end{equation}
+当均值接近零时，相对误差会不稳定，因此同时保留固定最大样本数。固定随机种子只保证伪随机序列可复现，
+不保证不同编译器、不同并行分块或后果求解器版本得到逐样本相同结果；工程复现应同时冻结构建与算例版本。
+
+\subsection{优势比扭曲的重要抽样}
+平台把每个元件的停运优势比乘以正因子 $\kappa$：
+\begin{equation}
+ \frac{\widetilde U_c}{1-\widetilde U_c}
+ =\kappa\frac{U_c}{1-U_c},\qquad
+ \widetilde U_c=\frac{\kappa U_c}{1-U_c+\kappa U_c}.
+ \label{eq:rel-is-twist}
+\end{equation}
+$\kappa>1$ 增加故障状态出现概率，$\kappa=1$ 与普通抽样逐样本同分布。对从 $q$ 抽到的状态，似然比为
+\begin{equation}
+ w(x)=\frac{p(x)}{q(x)}
+ =\prod_c\left(\frac{U_c}{\widetilde U_c}\right)^{x_c}
+ \left(\frac{1-U_c}{1-\widetilde U_c}\right)^{1-x_c}.
+\end{equation}
+于是
+\begin{equation}
+ \widehat{\mathrm{EDNS}}_{IS}=\frac1N\sum_{n=1}^Nw_nS_n,qquad
+ \widehat{\mathrm{PLC}}_{IS}=\frac1N\sum_{n=1}^Nw_n\mathbf 1[S_n>\varepsilon]
+\end{equation}
+保持无偏。实现使用对数似然累加再指数化，避免许多元件概率连乘的下溢；非有限权重直接报错，不以零替代。
+
+\subsection{有效样本量与扭曲诊断}
+权重退化由
+\begin{equation}
+ N_{eff}=\frac{(\sum_nw_n)^2}{\sum_nw_n^2}
+\end{equation}
+度量，满足 $0<N_{eff}\le N$。均值似然比
+$\overline w=N^{-1}\sum_nw_n$ 理论上趋近 $1$，但有限样本会偏离；它是覆盖诊断，不是强制归一化因子。
+平台返回 \fld{importance\_sampling\_used}、\fld{importance\_twisting\_factor}、
+\fld{importance\_mean\_likelihood\_ratio} 与 \fld{importance\_effective\_sample\_size}。
+
+不能仅凭“故障样本更多”断言方差下降。若 $\kappa$ 过大，绝大多数样本集中在极高阶停运，而真实风险由一、二阶
+状态主导，权重会强烈退化。工程上应扫描多个 $\kappa$，同时比较估计标准误和 $N_{eff}/N$；不能事后挑选最有利
+的单次结果。序贯蒙特卡洛目前明确拒绝该选项，因为其路径似然需包含每次跃迁与持留时间密度，不能复用静态状态权重。
+
+\subsection{精确状态枚举}
+设非退化元件数为 $m$，平台枚举 $2^m$ 个状态。对每个状态调用与非序贯 MC 相同的最小切负荷后果引擎，累加
+式~\eqref{eq:rel-exact-state-probability}。时间复杂度为
+\begin{equation}
+ T_{exact}=O(2^mT_{consequence}),\qquad M_{exact}=O(n+m),
+\end{equation}
+其中实现逐状态流式累加，不保存全部后果，因此内存不随 $2^m$ 增长。默认最多二十个非退化元件；超限明确拒绝，
+不静默截断元件，也不改用近似方法。
+
+精确结果返回状态概率和、枚举状态数、基准 EENS/EDNS/PLC/LOLE，以及每个元件的稳定 ID、容器位置和内部状态位。
+三种身份不得混用：\fld{global\_state\_index} 是完整状态向量位，\fld{component\_position} 是对应类型容器位置，
+\fld{component\_index} 是对外稳定 \fld{.index}。HTTP 响应同时给出 \fld{stable\_id}，便于与 GUI 资产一致定位。
+
+\subsection{Birnbaum 重要度的离散推导}
+固定除元件 $c$ 外的状态 $x_{-c}$，分别计算 $c$ 运行和停运的系统后果。EENS 对 $U_c$ 的精确导数为
+\begin{align}
+ B_c^{EENS}
+ &=\frac{\partial\mathrm{EENS}}{\partial U_c}\\
+ &=H\sum_{x_{-c}}p(x_{-c})
+ \left[S(x_c{=}1,x_{-c})-S(x_c{=}0,x_{-c})\right].
+ \label{eq:rel-birnbaum-eens}
+\end{align}
+该式不是有限差分近似，因为独立二态模型对单个 $U_c$ 是仿射的。相同方法给出 PLC 的 Birnbaum 导数：
+\begin{equation}
+ B_c^{PLC}=\sum_{x_{-c}}p(x_{-c})
+ \left[\mathbf 1(S_1>\varepsilon)-\mathbf 1(S_0>\varepsilon)\right].
+\end{equation}
+若元件停运在某些状态反而降低切负荷，导数可为负；实现不钳零，因为负值可能揭示调度、拓扑或后果模型的非单调性。
+
+\subsection{EENS 导数与参数扰动}
+\fld{eens\_derivative\_mwh\_yr\_per\_unit\_unavailability} 与
+Birnbaum EENS 值相同，单位是“每单位不可用率变化的 MWh/年”。小扰动满足
+\begin{equation}
+ \Delta\mathrm{EENS}\approx B_c^{EENS}\Delta U_c.
+\end{equation}
+若输入参数是故障率或修复时间，还需链式法则。由 $U=\lambda/(\lambda+H/r)$ 得
+\begin{align}
+ \frac{\partial U}{\partial\lambda}
+ &=\frac{H/r}{(\lambda+H/r)^2},\\
+ \frac{\partial U}{\partial r}
+ &=\frac{\lambda H/r^2}{(\lambda+H/r)^2}.
+\end{align}
+因此设备改造的边际价值应结合实际可改变的参数，而不能把“每单位不可用率”的导数直接解释为“每减少一次故障”。
+
+\subsection{Fussell--Vesely 归因}
+平台按元件停运状态中包含的风险定义
+\begin{equation}
+ FV_c=\frac{\sum_{x:x_c=1}p(x)H S(x)}{\mathrm{EENS}}.
+ \label{eq:rel-fv}
+\end{equation}
+当总 EENS 为零时取零并声明边界。多元件同时停运的后果会同时进入多个 $FV_c$，所以各元件 FV 之和可以超过一；
+它是“含该元件失效的风险占比”，不是互斥责任分摊。Birnbaum 衡量边际变化，FV 衡量现状归因，两者排序不同是正常的。
+
+\subsection{与共现重要度的区别}
+普通 MC 的 \fld{critical\_components} 以采样中“元件停运且系统失负荷”的共现和损失权重排序。该量受抽样噪声、
+联合停运与扭曲权重影响，不等于式~\eqref{eq:rel-birnbaum-eens}。精确灵敏度接口单独返回 Birnbaum、EENS 导数和 FV，
+从数据结构上阻止 GUI 把共现分数误标为边际重要度。
+
+\subsection{五兆瓦直流负荷解析算例}
+考虑一个不可用率 $U=0.1$ 的 VSC，其停运时使 $5$ MW 直流负荷全年不可供。两状态后果为
+$S_0=0$、$S_1=5$ MW，故
+\begin{align}
+ \mathrm{EENS}&=0.9\times0+0.1\times5\times8760=4380\ \mathrm{MWh}/\text{年},\\
+ B^{EENS}&=8760(5-0)=43800\ \mathrm{MWh}/(\text{年}\cdot\text{单位不可用率}),\\
+ FV&=4380/4380=1.
+\end{align}
+测试把 VSC 的稳定 ID 特意设为 $77$，而容器位置仍为 $0$，从而防止实现因偶然数值相等而混淆身份空间。
+
+\subsection{数值验收关系}
+精确枚举用于校验蒙特卡洛而不是取代大系统抽样。小系统上必须满足：
+\begin{enumerate}
+ \item 状态概率和在 $10^{-12}$ 容差内为一；
+ \item $\kappa=1$ 时重要抽样逐样本权重为一、$N_{eff}=N$；
+ \item 普通 MC 与重要抽样置信区间覆盖精确 EENS；
+ \item Birnbaum 与对 $U_c$ 的中心有限差分一致；
+ \item 稳定 ID、容器位置和状态位可分别回溯；
+ \item $U=0/1$ 元件不扩大枚举维数，但后果状态正确保留。
+\end{enumerate}
+实现落点为 \srcpath{compute\_exact\_reliability\_sensitivity} 与
+\srcpath{run\_nonsequential\_mc}；注册验证位于 \srcpath{test\_reliability\_resolver}，HTTP 契约由
+统一 \srcpath{/api/session/run\_reliability} 入口的 \fld{exact\_sensitivity} 和 NSQ 分支覆盖。

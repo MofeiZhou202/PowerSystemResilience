@@ -1,0 +1,241 @@
+\section{保护逻辑与 DER 故障穿越的可靠性接口}\label{sec:rel-pf}
+
+\begin{theorynote}
+本章围绕平台\emph{既有}动态（IEEE~1547 块）给出已落地的 \textbf{L1 轨迹类可靠性接口}：把继电器轨迹、
+时限/反时限协调、断路器机械与 DER 故障穿越（FRT）事件，条件化为互斥的\emph{后果类}并折算为
+EENS/LOLE/LOLF。给定轨迹入口消费代表性电流、DER 电压/相角轨迹和类条件切负荷阶段；在线入口由 Mass-Matrix DAE
+生成故障电流与 DER 轨迹并反馈支路跳闸。自动拓扑、重合序列、瞬时闭锁和同步窗分别由可执行函数承担。
+\end{theorynote}
+
+\begin{boundarynote}
+\textbf{实现状态（诚实边界，依据设计文档 \S18.1）}：下表区分给定轨迹、在线动态和拓扑后果的保真度。
+除非结果显式报告 \fld{protection\_frt\_reliability\_coupled=true}，动态 IEEE~1547 与短路能力是\emph{独立}
+分析，\emph{不}贡献该结果的 EENS/LOLE/LOLF/SAIDI 或恢复阶段 DER 可用性。
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{5.7cm}L{2.5cm}L{5.5cm}@{}}
+\toprule
+能力 & 状态 & 可靠性含义\\
+\midrule
+DER 电压/频率越限计时、跳闸、重连合格与功率爬坡 & 已实现（选项，动态）& L1 类生成复用 IEEE~1547 状态机；通用 FMEA/MC 不自动调用\\
+GFL/GFM 动态、电流限幅与优先级、volt-var/freq-watt & 已实现（选项，动态）& 供暂态研究，未转为列联类概率或 EENS 阶段\\
+短路换流器贡献（GFL 电流源、GFM 阻抗后电压源）& 短路分析已实现 & 静态故障快照，非继电/FRT 事件演化\\
+拒动/误动/拒开合、保护区扩展、重合概率 & 可靠性事件抽象已实现 & 作为\emph{输入}被故障模式 FMEA 与三阶段消费；启动值与选择性\emph{未}导出\\
+反时限动作积分、复位、清除延时链、主/后备/断路器失灵事件树 & \textbf{L1 已实现} & 由给定轨迹生成互斥类和协调诊断\\
+在线距离/差动、重合序列、DER--保护双向反馈与 DAE & \textbf{已实现} & 给定轨迹或在线 DAE 生成互斥类并进入年度事件树\\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{boundarynote}
+
+\subsection{混合保护--穿越状态}\label{sec:rel-pf-state}
+\begin{definition}[事件时状态]
+事件时刻的混合状态为
+\begin{equation}
+ \zeta(t)=\big(x^{dyn}(t),\,\sigma(t),\,\chi(t),\,\kappa(t),\,\Omega(t),\,s^{br}(t),\,s^{rec}(t),\,\vartheta(t)\big),
+\end{equation}
+分别为电气/控制器微分状态、拓扑与并/离网模式、DER 连接态 $\chi_r\in\{0,1\}$、复合 DER 模式
+$\kappa_r=(\kappa_r^{ctrl},\kappa_r^{FRT},\kappa_r^{lim})$、保护动作量/计时器 $\Omega_z$、断路器状态
+$s_z^{br}$、重合器状态 $s_z^{rec}$ 与激活定值组 $\vartheta_z$。
+\end{definition}
+以电压角 $\delta_i$ 记电气量、以 $\vartheta_z$ 记保护定值，避免同符号歧义。事件间遵循微分代数
+\begin{equation}
+ \dot x^{dyn}=F_{\sigma,\kappa}(x^{dyn},y,u,w),\qquad 0=G_{\sigma,\kappa}(x^{dyn},y,u,w),
+\end{equation}
+$y$ 为网络代数量（电压、支路电流、接口功率），$u$ 为控制输入、$w$ 为扰动；离散守卫在
+$g_e(\zeta(t^-))=0$ 时触发 $\zeta(t^+)=\mathcal R_e(\zeta(t^-))$，产生跳闸、模式切换、断路器动作、
+重合与重连。复合模式使 GFL/GFM、穿越/跳闸、限幅/未限幅\emph{不}互斥：一台 DER 可同时为 GFM 构网、
+强制穿越且电流受限。
+
+\subsection{DER 电压/频率穿越自动机}\label{sec:rel-pf-frt}
+设 DER $r$ 端正序电压 $V_r=|V_{i(r)}^{+}|$、量测频率 $f_r$。对配置带 $j$，其有效谓词 $h_{r,j}\in\{0,1\}$
+与\emph{逐带}连续越限计时器
+\begin{equation}
+ D_{r,j}(t)=\begin{cases}t-\sup\big(\{s\in[t_0,t]:h_{r,j}(s)=0\}\cup\{t_0\}\big),&h_{r,j}(t)=1,\\[2pt]0,&h_{r,j}(t)=0,\end{cases}
+\end{equation}
+带条件清除即复位；这比把所有异常时间累加为一个标量严格，后者会错误合并不同激励与不同带。配置跳闸守卫
+\begin{equation}
+ \mathcal G_r^{trip}(t)=\bigvee_{j\in\mathcal J_r^{trip}}\big[D_{r,j}(t)\ge T_{r,j}^{trip}\big],\qquad
+ T_{r,j}^{trip}=\mathcal T_{r,j}(\text{类别},\text{接入规程},\text{整定},\text{固件证据}).
+\end{equation}
+\emph{类别本身不决定跳闸曲线}：$T_{r,j}^{trip}$ 须落在适用要求内但由实际整定给出。模式转移与连接态为
+\begin{equation}
+ \kappa_r(t^+)=\Psi_r\big(\kappa_r(t^-),V_r,f_r,\{D_{r,j}\}_j,\eta_r^{device}\big),\quad
+ \chi_r(t^+)=\begin{cases}0,&\mathcal G_r^{trip}=1,\\1,&\mathcal G_r^{reconnect}=1,\\ \chi_r(t^-),&\text{否则}.\end{cases}
+\end{equation}
+重叠带谓词须在 $\Psi_r$ 中给出显式优先级，否则两个同时激活的带会规定不兼容动作。
+
+\subsection{穿越、瞬时闭锁与跳闸是不同状态}\label{sec:rel-pf-output}
+DER 出力须按动态模式条件化：
+\begin{equation}
+ (p_r,q_r)=\begin{cases}
+ (p_r^{cmd},q_r^{cmd}),&\kappa_r^{FRT}=\text{正常},\\
+ (p_r^{FRT},q_r^{FRT}),&\kappa_r^{FRT}=\text{穿越},\\
+ (p_r^{MC},q_r^{MC}),&\kappa_r^{FRT}=\text{瞬时闭锁},\\
+ (0,0),&\kappa_r^{FRT}\in\{\text{跳闸},\text{闭锁},\text{重连等待}\},\\
+ a_r(t)(p_r^{avail},q_r^{avail}),&\kappa_r^{FRT}=\text{爬坡}.
+ \end{cases}
+\end{equation}
+瞬时闭锁策略 $(p_r^{MC},q_r^{MC})$ 是设备相关的（可为零、可保无功支撑），\emph{不得}假定所有并网 DER
+都支撑电压，也\emph{不得}把瞬时闭锁等同于物理断开。$\Psi_r$ 须给出瞬时闭锁的进入/退出守卫（含恢复驻留、
+迟滞、延迟升级为跳闸），否则穿越$\leftrightarrow$瞬时闭锁会在带边界颤振而终端类不唯一。
+
+\subsection{故障期逆变器电流与 GFL/GFM}\label{sec:rel-pf-current}
+公共电流限幅圆 $i_{d,r}^2+i_{q,r}^2\le(I_r^{max})^2$。有功优先时
+\begin{equation}
+ i_{d,r}=\operatorname{sat}(i_{d,r}^{ref},I_r^{max}),\quad
+ i_{q,r}=\operatorname{sat}\!\Big(i_{q,r}^{ref},\sqrt{(I_r^{max})^2-i_{d,r}^2}\Big),
+\end{equation}
+无功优先时对调 $d/q$，其中 $\operatorname{sat}(x,\bar x)=\operatorname{sgn}(x)\min(|x|,\bar x)$。平衡三相
+RMS 下故障期功率受\emph{电压相关}圆约束
+\begin{equation}
+ p_r^2+q_r^2\le(\sqrt3\,V_{LL,r}I_r^{max})^2\ \xrightarrow{\text{标幺}}\ p_r^2+q_r^2\le V_r^2(I_r^{max})^2,
+\end{equation}
+\emph{不}等于稳态铭牌圆；混用相/线电压与单相/三相功率会引入 $\sqrt3$ 或 $3$ 的因子错误。GFL 为 PLL 同步的
+受控\emph{电流}源；GFM 为滤波/虚拟阻抗后的受控\emph{电压}源\emph{直至限幅改变有效模式}：
+\begin{equation}
+ \kappa_r=\begin{cases}(\mathrm{GFM},\kappa_r^{FRT},\text{电压构网}),&|i_r^{ref}|\le I_r^{max},\\
+ (\mathrm{GFM},\kappa_r^{FRT},\text{电流受限}),&|i_r^{ref}|>I_r^{max}.\end{cases}
+\end{equation}
+保护到达与孤岛支撑必须用\emph{限幅后}模式；标签 \texttt{GFM} 本身不认证无限电压支撑或稳定孤岛。
+
+\subsection{保护动作量：定时限与反时限}\label{sec:rel-pf-relay}
+定时限（连续启动语义）$\dot D_z=1$（$\rho_z=1$）或 $-D_z/T_z^{reset}$（$\rho_z=0$），并在 $D_z\ge T_z^{delay}$
+出令。反时限过流采用通用曲线并\emph{对动作量积分}以应对故障期电流变化：
+\begin{equation}
+ T_z^{curve}(M)=\mathrm{TMS}_z\!\left[\frac{A_z}{M^{p_z}-1}+B_z\right]+T_z^{add},\quad
+ \dot\Omega_z=\begin{cases}1/T_z^{curve}(M),&M>1,\\ -\Omega_z/T_z^{reset},&M\le1,\end{cases}
+\end{equation}
+$M=|\widetilde I_z|/I_z^{pickup}$，出令时刻 $T_z^{relay}=\inf\{t:\Omega_z(t)\ge1\}$。当 DER 限幅/跳闸/电压
+支撑或拓扑改变在继电器动作前改变电流时，该积分是\emph{必要}的。电气清除\emph{不}在出令时刻发生，清除链为
+\begin{equation}
+ T_z^{clear}=T_z^{relay}+T_z^{channel}+T_z^{tripcoil}+T_z^{mechanical}+T_z^{arc},
+\end{equation}
+$T_z^{channel}$ 仅在方案确用通信通道（导引/传输跳闸）时非零且条件于通信服务态；纯本地硬接线取 $0$。
+所有时间量须用单一时基（通常秒），曲线系数须遵循选定 IEC/IEEE/厂商族而不混用。
+
+\subsection{主后备协调与断路器失灵}\label{sec:rel-pf-coord}
+对故障 $k$，$T_k^{pri}=\min_{z\in\mathcal P_k^{pri}}T_z^{clear}$、$T_k^{bak}=\min_{z\in\mathcal P_k^{bak}}T_z^{clear}$
+（永不有效动作者取 $+\infty$）。须把\emph{物理清除结果}与\emph{协调诊断}分离：主清除事件 $\mathcal E_k^{pri}$
+与满意协调 $\mathcal S_k^{coord}=\mathcal E_k^{pri}\cap\{T_k^{bak}-T_k^{pri}\ge\Delta T_k^{coord}\}$——主设备可
+清除故障而后备裕度不足，这是\emph{带协调告警属性的主清除}，非未分类样本。跳令后电流持续即断路器失灵
+\begin{equation}
+ \mathcal F_z^{BF}=\big\{u_z^{trip}(t_z^{cmd}){=}1,\,s_z^{br}\ne\text{开},\,\inf_{\tau\in[t_z^{cmd},t_z^{cmd}+T_z^{BF}]}|\widetilde I_z(\tau)|>I_z^{open}\big\},
+\end{equation}
+启动失灵后备并扩展清除区；机械拒开概率是\emph{另一}按需失效，若已并入标定的失灵事件概率则\emph{不}再独立
+相乘。原始事件可重叠，故须由显式事件树按优先级赋类：$(1)$ 若终端仍带电则\emph{拒清};$(2)$ 否则若任一非必要
+健全区被跳则\emph{误协调};$(3)$ 否则按主/后备清除赋类。
+
+\subsection{保护--FRT 后果类与 EENS}\label{sec:rel-pf-consequence}
+把接口类扩展为六元组
+\begin{equation}
+ c=(c_D,c_I,c_P,c_{FRT},c_{rec},c_R),\qquad
+ \pi_c(k)=\Pr(C_D{=}c_D,\dots,C_R{=}c_R\mid K{=}k),
+\end{equation}
+联合表示检测、隔离、保护、穿越、重连与恢复结果。设故障前暴露 DER 集 $\mathcal R_k$ 与终端分类时刻
+$T_k^{term}=\min(T_k^{clear},T_k^{backup,max})$。以\emph{跳闸优先}定义互斥 FRT 划分
+\begin{align}
+ \mathcal E_k^{FRT,trip}&=\{\exists r\in\mathcal R_k:\chi_r(T_k^{term})=0\},\\
+ \mathcal E_k^{FRT,MC}&=\{\chi_r(T_k^{term}){=}1\,\forall r\}\cap\{\exists r:\kappa_r^{FRT}(T_k^{term})=MC\},\\
+ \mathcal E_k^{FRT,ride}&=\{\chi_r(T_k^{term}){=}1\,\forall r\}\cap\{\kappa_r^{FRT}(T_k^{term})\ne MC\,\forall r\};
+\end{align}
+$\mathcal R_k=\varnothing$ 时置 $c_{FRT}=\text{不适用}$ 而非依赖空真。\textbf{关键警示}：一台小光伏跳闸与一台
+关键 GFM 储能跳闸\emph{不能}仅因同属 $\mathcal E_k^{FRT,trip}$ 而赋同一后果——聚合标签仅在 $\mathcal R_k$ 内
+DER 后果等价、或物理引擎同时接收器件级轨迹 $\{\chi_r,\kappa_r,a_r\}$ 时才充分。类条件物理后果与 FRT 条件
+EENS 增量为
+\begin{equation}
+\begin{aligned}
+ S_{k,c}(t)&=S\big(\Phi_{k,c_P,c_{FRT},c_I}(G_0),\mathcal A_{c_R},
+   \chi(t),\overline p^{avail}(t)\big),\\
+ \Delta\mathrm{EENS}^{PFRT}&=\sum_k\lambda_k\!\sum_c\pi_c(k)
+   \!\int_{\mathcal T_k}\!S_{k,c}(t)\,\mathrm dt,
+\end{aligned}
+\end{equation}
+即\emph{动态保护/FRT 条件} EENS 与\emph{静态 DER 恒可用}基线之差。代表性类：主清除$\times$穿越/瞬时闭锁/
+跳闸、后备清除、误协调、拒清（失灵为致因属性）、暂态自清除、重合闭锁、孤岛保护无效。
+
+\subsection{微网孤岛可行性、储能续航与同步}\label{sec:rel-pf-microgrid}
+DER 侧后果的\emph{岛级}闭合由物理微网模型给出。微网岛 $q$ 可服务须有可用构网锚
+\begin{equation}
+ y_q^{island}\le\sum_{r\in\mathcal R_q^{GFM}}x_r^p\,\phi_{ctrl(r)}(x^c),
+\end{equation}
+二值锚可用积已隐含“至少一个锚可用”，MILP 实现须为每个积 $x_r^p\phi_{ctrl(r)}$ 引入辅助二值。有功/无功
+充裕度为 $\sum_{r}p_r^{DER}+p_q^{st}+p_q^{sh}=P_q^d+P_q^{loss}$、$\sum_{r}q_r^{DER}+q_q^{sh}=Q_q^d+Q_q^{loss}$，
+换流器能力用二阶锥 $(p_r^{DER})^2+(q_r^{DER})^2\le(S_r^{rated})^2$；LP/MILP 须声明其多边形是\emph{保守内}逼近
+\begin{equation}
+ p_r\cos\theta_j+q_r\sin\theta_j\le S_r^{rated}\cos(\pi/J),\quad j=1,\dots,J,
+\end{equation}
+还是\emph{乐观外}松弛。\emph{无}额定、能量、无功能力与控制通道可用性的构网标志\emph{不}足以证明孤岛可维持。
+储能续航按时序 SOC
+\begin{equation}
+ E_{b,t+1}=E_{b,t}+\eta_b^{ch}p_{b,t}^{ch}\Delta t-\frac{p_{b,t}^{dis}}{\eta_b^{dis}}\Delta t,\quad
+ \underline E_b\le E_{b,t}\le\overline E_b,
+\end{equation}
+并以 $u_{b,t}\in\{0,1\}$ 禁止同时充放。\textbf{诚实}：储能\emph{不得}在每个恢复阶段或每次重叠停运独立按满
+功率计入——事件阶段能量记账已在三阶段实现，多事件时序需序贯仿真。可再生受天气上限
+$0\le p_{r,t}\le x_{r,t}^p\bar p_{r,t}^{weather}$；通信/控制丢失应按\emph{实际回退}模式（定值保持 /
+本地下垂 / 失效跳闸）取值，而非一律当强迫停运——三种回退的可靠性价值迥异。合环前须满足同步窗
+$|\Delta V|\le\Delta V^{max}$、$|\Delta f|\le\Delta f^{max}$、$|\Delta\theta|\le\Delta\theta^{max}$；忽略同步的
+纯拓扑恢复计划须标注为可达服务的\emph{上界}。物理$\to$信息回耦（Level~3）中信息节点后备能量按
+$B_{u,t+1}=\min(\overline B_u,\max(0,B_{u,t}+P_u^{ch}\Delta t-P_u^{load}\Delta t))$ 更新，可用度
+$x_{u,t}^c=x_{u,t}^{intr}\mathbf 1[y_{\pi(u),t}{=}1\lor B_{u,t}{>}0]$，剩余续航 $T_u^{remain}=B_{u,t}/P_u^{load}$；
+若 $T_u^{remain}<\Delta t$ 则节点在区间内失效，须事件队列或分数时长记账，端点二值更新会误判功能可用度。
+
+\subsection{保真度阶梯与所需有效性标志}\label{sec:rel-pf-fidelity}
+建议分级集成：$L0$——静态事件抽象（\S\ref{sec:rel-fa-cyber}），保护/FRT 为\emph{输入}概率与时长；
+$L1$——对代表拓扑的给定故障/保护/FRT 轨迹生成互斥类，按场景权重折算 EENS；$L2$（当前离散事件子集已实现）——
+在给定量测/DER 轨迹上联立多种继电判据、主后备/断路器和显式信息状态并自动生成三窗口后果；在线 $L2$ 由
+Mass-Matrix DAE 生成网络/FRT/限幅轨迹；$L3$ 由连续信息物理事件队列执行年度抽样。类生成器
+$\mathcal M_{PFRT}:(k,\omega)\mapsto(C_P,C_{FRT},C_{rec},T^{clear},\Phi_{k,c},\dots,\mathcal V^{PFRT})$
+必须随附有效性向量 $\mathcal V^{PFRT}$（保真度、收敛、参数溯源、启动/FRT/限幅/同步边界附近的代理误差）。
+在线年度耦合器 \srcpath{compare\_online\_protection\_cyber\_reliability} 对同一故障分别运行主、后备
+Mass-Matrix DAE 发现过程，保留 CT/PT 后的实测继电轨迹与 DER 逐点轨迹，再构造
+$\mathcal M_{PFRT}$ 的输入并调用三级事件树。设 DAE 输出主保护命令时刻 $t_p^{cmd}$，断路器链总延时为
+$d_p^{br}$，则事件树使用的主清除时刻严格取
+\begin{equation}
+ t_p^{clear}=t_p^{cmd}+d_p^{br};
+ \end{equation}
+不允许由 HTTP 或 GUI 再提供一个互相矛盾的清除时间。耦合成功时
+\fld{online\_network\_dae\_coupled=true}，任一 DAE 不收敛、动作未施加或轨迹维数不一致均明确失败，
+不得回退到用户给定轨迹。
+\begin{boundarynote}
+除非导出指标\emph{确实}消费上述耦合事件类或轨迹，任何单独动态研究都\emph{不}使可靠性结果 FRT 感知。合法置
+\fld{protection\_frt\_reliability\_coupled=true} 需可追溯的类生成器；相关标志（设计文档 \S18.16）还包括
+\fld{der\_ride\_through\_modelled}、\fld{protection\_coordination\_modelled}、\fld{breaker\_failure\_modelled}
+等。只有 \fld{trace\_classes\_validated=true} 且类概率归一时聚合器才接受场景，并始终声明
+\fld{online\_dae\_coupled=false}；在线年度耦合接口成功时单独置真，通用给定轨迹聚合器不冒充在线结果。
+\end{boundarynote}
+
+\subsection{与实现的对应}\label{sec:rel-pf-impl}
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{5.4cm}L{9.0cm}@{}}
+\toprule
+\textbf{理论对象} & \textbf{平台实现状态}\\
+\midrule
+\endfirsthead
+\toprule
+\textbf{理论对象} & \textbf{平台实现状态}\\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+静态保护事件抽象（拒动/误动/拒开合/区扩展）& \textbf{已实现}：故障模式 FMEA 与三阶段消费为输入概率与配置时长；\srcpath{src/reliability/failure\_mode.cpp:build\_consequence\_patch}\\
+短路换流器贡献（GFL 电流源、GFM 阻抗后电压源）& \textbf{已实现}（短路模块，静态快照）；\srcpath{src/short\_circuit/}\\
+DER IEEE~1547 越限/跳闸/重连状态机 & \textbf{已实现}（动态，选项），由 L1 轨迹分类器复用；\srcpath{src/dynamics/}\\
+逐带 FRT 计时器 / 模式自动机 $\Psi_r$ / 瞬时闭锁 & \textbf{已实现}：IEEE~1547 逐带计时与 \srcpath{DERMomentaryCessationSettings}\\
+定/反时限、方向闭锁、距离/差动、清除链 / 主后备协调 / 断路器失灵 & \textbf{给定轨迹 L2 已实现}；\srcpath{src/reliability/protection\_frt.cpp:evaluate\_protection\_relay / evaluate\_protection\_coordination}\\
+共享信息路径、QoS、共因环境、供电与电池自治、功能绑定 & \textbf{离散状态 L2 已实现（最多 20 个二值信息元件）}；\srcpath{src/reliability/protection\_frt.cpp:enumerate\_protection\_cyber\_states}\\
+静态 FMEA / 仅保护 / 信息物理联合指标对比 & \textbf{已实现}；\srcpath{src/reliability/protection\_frt.cpp:compare\_protection\_cyber\_reliability}\\
+保护--FRT 后果类 $\pi_c(k)$ 与 EENS/LOLE/LOLF & \textbf{L1 已实现}（轨迹验证类 + 外部切负荷阶段）；\srcpath{src/reliability/protection\_frt.cpp:aggregate\_protection\_frt\_reliability}\\
+在线 DAE、瞬时闭锁、自动后果拓扑与重合/同步反馈 & \textbf{已实现}：\srcpath{online\_protection.cpp}、\srcpath{simulate\_recloser\_fuse\_sectionalizer}、\srcpath{evaluate\_automatic\_protection\_topology}、\srcpath{evaluate\_microgrid\_synchronization}\\
+\end{longtable}
+\end{center}
+
+\subsection{参考文献}
+\begin{thebibliography}{9}
+\bibitem{relpf:ieee1547} IEEE Std 1547-2018, \emph{IEEE Standard for Interconnection and Interoperability
+ of Distributed Energy Resources with Associated Electric Power Systems Interfaces}, 2018.
+\bibitem{relpf:iec60255} IEC 60255-151, \emph{Measuring relays and protection equipment -- Part 151:
+ Functional requirements for over/under current protection}, 2009.
+\bibitem{relpf:c37} IEEE Std C37.113, \emph{IEEE Guide for Protective Relay Applications to Transmission Lines}.
+\bibitem{relpf:designdoc} HySim 团队，\emph{可靠性数学模型与智能信息物理评估}，\S18（设计文档）。
+\end{thebibliography}

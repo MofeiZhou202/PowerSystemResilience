@@ -61,8 +61,12 @@ $\pi_\uparrow+\pi_\downarrow=1$ 给出 $\pi_\downarrow=\alpha/(\alpha+\beta)$，
 它是\emph{期望失败操作频率}，既非年概率、亦非 MTTF、亦非“需求时不可用”的概率。若需求为泊松过程、
 每次独立以 $p_m^d$ 失败，则由泊松稀疏化，年内至少一次失败操作的概率为
 \begin{equation}
- \Pr(N_m^{fail}\ge1)=1-e^{-\nu_m p_m^d}\ (\ne\nu_m p_m^d\ \text{除稀有近似}),\qquad
- \Pr(N_m^{fail}\ge1)=1-(1-p_m^d)^n\ (n\ \text{次独立需求}).
+\begin{aligned}
+ \Pr(N_m^{fail}\ge1)&=1-e^{-\nu_m p_m^d}
+   \quad(\ne\nu_m p_m^d\ \text{，除稀有近似}),\\
+ \Pr(N_m^{fail}\ge1)&=1-(1-p_m^d)^n
+   \quad(n\ \text{次独立需求}).
+\end{aligned}
 \end{equation}
 对异构触发事件，更稳健的形式为
 $\lambda_m^{act}=\sum_{k\in\mathcal K_m}\lambda_k\Pr(m\text{ 失败}\mid k)$，含信息物理类时再对类 $c$
@@ -101,14 +105,36 @@ $U_m^{recovery}$。依据：\srcpath{resolve\_reliability\_params}（主动分�
 $\Pr(i,j\text{ 同时停})=O\big((f_i^{cal}r_i/H)(f_j^{cal}r_j/H)\big)$。LOLF 每个触发列一次损失、不计事件内
 多段损失（如储能耗尽后再失）。依据：\srcpath{src/reliability/reliability\_assessment.cpp:run\_distribution\_fmea}。
 
+\begin{example}[三段辐射馈线的两阶段 FMEA 与 IEEE 1366 指标]\label{ex:rel-fa-feeder}
+自电源起串联三段 $S_1,S_2,S_3$，各段末端负荷点 $L_1,L_2,L_3$（各 $1$~MW）。每段
+$\lambda=0.1/\text{yr}$、$\mathrm{MTTR}\;r=4$~h、切换 $\tau^{sw}=0.5$~h。仅一台馈线首端断路器，故\emph{任一}段
+故障均使全线瞬时停电；切换后隔离故障段并\emph{恢复上游}负荷，故障段下游负荷停至修复。段 $k$ 故障对
+负荷 $i$ 的停时为：$i<k$ 取 $\tau^{sw}$，$i\ge k$ 取 $r$。按 $\mathrm{EENS}=\sum_k\lambda_k[\sum_{i<k}L_i\tau^{sw}+\sum_{i\ge k}L_ir]$：
+\begin{align*}
+ k{=}1:&\ 0.1(3{\cdot}1{\cdot}4)=1.20, & k{=}2:&\ 0.1(1{\cdot}0.5+2{\cdot}4)=0.85,\\
+ k{=}3:&\ 0.1(2{\cdot}0.5+1{\cdot}4)=0.50, & &\Rightarrow\ \mathrm{EENS}=2.55~\text{MWh/yr}.
+\end{align*}
+逐负荷年停时 $U_i$（$=\sum_k\lambda_k d_{ki}$）为 $U_1{=}0.5$、$U_2{=}0.85$、$U_3{=}1.2$~h/yr；每负荷均被三段
+故障中断，故 $\mathrm{CIF}_i=3\lambda=0.3/\text{yr}$。等客户数下
+\begin{align*}
+ \mathrm{SAIFI}&=0.3/\text{yr}, & \mathrm{SAIDI}&=\tfrac{0.5+0.85+1.2}{3}=0.85~\text{h/yr},\\
+ \mathrm{CAIDI}&=\tfrac{0.85}{0.3}=2.83~\text{h}, & \mathrm{ASAI}&=1-\tfrac{0.85}{8760}=0.99990.
+\end{align*}
+校验 $\sum_iU_iL_i=2.55=\mathrm{EENS}$，与聚合式一致。若末端加联络开关回馈 $L_3$，则 $k{=}1,2$ 故障下 $L_3$
+的停时由 $r$ 降为 $\tau^{sw}$，$\mathrm{EENS}$ 降至 $2.55-0.1{\times}(4{-}0.5){\times}2=1.85$~MWh/yr——即重构价值。
+\end{example}
+
 \subsection{故障模式 FMEA 与二阶共故障}\label{sec:rel-fa-mode}
 富组件展开为\emph{被动}与\emph{主动}失效模式，原因类含：物理、信息控制、通信、量测、保护逻辑、人因、
 计划；后果含：强迫停运、降额、卡滞、拒动/误动（开/合/跳）、定值冻结、通信失联、失去构网、区域跳闸。
 单模式确定性结果为
 \begin{equation}
- f_m=\begin{cases}\lambda_m,&\text{被动（稀有暴露近似）},\\ \nu_m p_m^d,&\text{主动按需},\end{cases}\quad
- d_m=\tau_m^{iso}+\tau_m^{sw}+\max(r_m,r_m^{mode}),\quad
- \mathrm{EENS}_m=f_m d_m S_m.
+\begin{aligned}
+ f_m&=\begin{cases}\lambda_m,&\text{被动（稀有暴露近似）},\\
+ \nu_m p_m^d,&\text{主动按需},\end{cases}\\
+ d_m&=\tau_m^{iso}+\tau_m^{sw}+\max(r_m,r_m^{mode}),\\
+ \mathrm{EENS}_m&=f_m d_m S_m.
+\end{aligned}
  \label{eq:rel-fa-mode}
 \end{equation}
 暴露一致的被动模式应取 $f_m=f_m^{cal}=(1-U_m)\lambda_m^{up}$；主动分支已是事件/年单位，不再乘 $(1-U)$。
@@ -124,13 +150,17 @@ $\Pr(i,j\text{ 同时停})=O\big((f_i^{cal}r_i/H)(f_j^{cal}r_j/H)\big)$。LOLF �
 其中等效重叠时长 $d_{ij}$ 恰使 $f_{ij}d_{ij}/H=U_iU_j$。这是 N-2 暴露/排序近似，非精确不相交状态展开。
 \end{proposition}
 
-精确二阶交互展开（\emph{未实现}）应为
+平台聚合总量采用二阶 Hoeffding 交互展开
 \begin{equation}
  \mathbb E[S]\approx S_0+\sum_iU_i(S_i-S_0)+\sum_{i<j}U_iU_j\big(S_{ij}-S_i-S_j+S_0\big),
  \label{eq:rel-fa-exact}
 \end{equation}
-需一致截断的状态概率。故当前实现把成对贡献\emph{加入}一阶总量，科学解读时应\emph{单列}成对项；
-$O(U_iU_jU_k)$ 及以上、修复资源与时序重叠交互均省略。依据：
+而每个成对行仍保留 $U_iU_jHS_{ij}$ 作为风险排序量。聚合 EENS/LOLE 只加入
+$U_iU_jH(S_{ij}-S_i-S_j+S_0)$（及对应失负荷指示的交互项），从而不把一阶后果重复计入。结果同时报告
+\fld{first\_order\_eens\_mwh\_yr}、\fld{second\_order\_interaction\_eens\_mwh\_yr} 与
+\fld{second\_order\_expansion\_complete}；阈值或预算跳过会使完整性为假并给出计数/警告。静态交互权不定义
+边界穿越频率，故聚合 LOLF 保持一阶，成对 \fld{joint\_frequency\_per\_year} 仅作诊断。
+$O(U_iU_jU_k)$ 及以上、相关失效、共享修复资源与时序重叠交互仍省略。依据：
 \srcpath{src/reliability/failure\_mode.cpp:run\_failure\_mode\_fmea}。
 
 \subsection{Level-1 信息物理 FMEA（已实现）}\label{sec:rel-fa-cyber}
@@ -157,12 +187,13 @@ $A_k=\Pr(C=a\mid K=k)$）与不可用（$c=m$，$1-A_k$，人工响应，$\tau_k
 $\mathrm{EENS}^{noauto}=\sum_k\lambda_kE_{k,m}$、自动化效率
 $\eta_A=(\mathrm{EENS}^{noauto}-\mathrm{EENS})/(\mathrm{EENS}^{noauto}-\mathrm{EENS}^{perfect})$ 与
 信息物理致 SAIDI 份额 $\gamma_{SAIDI}=(\mathrm{SAIDI}-\mathrm{SAIDI}^{perfect})/\mathrm{SAIDI}$。
-\begin{gapnote}
+\begin{boundarynote}
 时长/控制增量是\emph{反事实归因}，非天然非负测度：其非负性依赖单调性假设
 $E_{k,a}\le E_k^{dur}\le E_{k,m}$。若较慢开关反而启用更优拓扑、或冻结控制意外改善调度，任一增量可为负；
 此为“完美—退化”序非单调的诊断证据，\emph{不得}静默钳零。Level-1 无显式通信拓扑、时延、信息节点电源、
-共因信息失效或学习型 FDIR 策略；保护误动由故障模式 FMEA 单独处理，其 Level-1 分解字段为占位零。
-\end{gapnote}
+共因信息失效与时序 FDIR 由 Level-2 事件树和序贯队列处理。保护误动可由故障模式 FMEA 或
+\srcpath{ProtectionMisoperationOptions} 输入；后者实际增加系统 EENS/LOLE/LOLF，并给出守恒分解残差。
+\end{boundarynote}
 
 \paragraph{三维因子化筛选。}
 当信息与智能维启用时，自动类有效概率因子化为
@@ -171,11 +202,11 @@ $E_{k,a}\le E_k^{dur}\le E_{k,m}$。若较慢开关反而启用更优拓扑、�
  \label{eq:rel-fa-factor}
 \end{equation}
 即信息服务可用度乘检测 $P_D$、隔离 $P_I$、恢复决策有效 $P_R^{valid}$、恢复执行成功 $P_R^{exec}$、
-保护成功 $P_P^{success}$；禁用维取因子 $1$，逐元件信息覆盖先替换 $A_k^{info}$。这是\emph{独立因子筛选}
-近似，非联合类生成器：失败的智能功能被路由到既有退化/人工后果代理，$P_P^{success}$ 不推导继电器起动、
-后备区扩展、断路器失灵或 DER 穿越轨迹，故结果声明
-\texttt{joint\_class\_probability\_modelled=false}、\texttt{protection\_logic\_modelled=false}、
-\texttt{protection\_frt\_reliability\_coupled=false}。依据：
+保护成功 $P_P^{success}$；禁用维取因子 $1$，逐元件信息覆盖先替换 $A_k^{info}$。这是缺省的\emph{独立因子筛选}
+近似。调用方也可提供互斥且概率和为一的 \fld{joint\_states}，显式给出信息、检测、隔离、恢复决策/执行与
+保护成功的联合类；此时不再相乘，并置 \fld{joint\_class\_probability\_modelled=true}。两种模式均把失败功能
+路由到既有退化/人工后果代理，仍不从电流轨迹推导后备区或 DER 穿越。轨迹驱动的 L1 保护--FRT 类生成与指标
+聚合由 \srcpath{protection\_frt.hpp} 独立提供（\S\ref{sec:rel-pf}），并不自动接管通用 FMEA 路由。依据：
 \srcpath{src/reliability/reliability\_assessment.cpp:run\_distribution\_fmea}、\srcpath{failure\_mode.hpp:CyberPhysicalFMEAOptions}。
 
 \subsection{元件类型专属失效模式目录}\label{sec:rel-fa-catalog}
@@ -256,6 +287,30 @@ DC 储能／光伏／源 & \fld{unit\_outage}、\fld{array\_outage}、\fld{sourc
 引擎无法表示者（如纯量测偏差、非可调设备的通信丢失、拒合）记为 \fld{unsupported} 而\emph{不}静默施加，
 诚实见 \S\ref{sec:rel-src-boundary}。
 
+\subsection{数值基准：辐射馈线 N-1 FMEA}\label{sec:rel-fa-bench}
+在四个标准辐射配电测试馈线上运行确定性 N-1 FMEA（\srcpath{src/reliability/reliability\_assessment.cpp:run\_distribution\_fmea}，
+默认两阶段 $\tau^{sw}=0.5$~h）。MATPOWER 算例\emph{无}可靠性数据，故按类模板取每支路
+$\lambda=0.35/\text{yr}$、$r=10$~h，客户数按 $10\times$MW 代理；结果为\emph{方法演示}，非标定研究。
+\begin{center}\footnotesize
+\begin{tabular}{@{}lrcrrrrr@{}}
+\toprule
+算例 & 母线 & 列联/失负荷 & EENS & LOLE & LOLF & SAIFI & SAIDI\\
+ & & & \tiny MWh/yr & \tiny h/yr & \tiny /yr & \tiny /cust·yr & \tiny h/cust·yr\\
+\midrule
+IEEE 33-bus & 33 & 33/33 & 830.7 & 227.9 & 15.58 & 7.03 & 223.7\\
+IEEE 69-bus & 69 & 69/67 & 1005.8 & 450.0 & 27.48 & 7.45 & 223.7\\
+IEEE 85-bus & 85 & 85/85 & 661.6 & 513.0 & 33.78 & 9.01 & 265.3\\
+141-bus & 141 & 141/140 & 3270.9 & 705.5 & 53.03 & 9.79 & 271.9\\
+\bottomrule
+\end{tabular}
+\end{center}
+观察：$\mathrm{LOLF}\approx\sum_{k:\text{失负荷}}\lambda_k\approx n_{loss}\times(0.35\text{–}0.41)$（含变电源略高
+默认率），与一阶 FMEA 定义一致；EENS 随馈线深度增长（141-bus 最深、上游故障波及最广，EENS 最大）。
+\textbf{诚实边界}：模板率与 $10\times$MW 客户代理使 $\mathrm{SAIDI}\approx224\text{–}272$~h/yr，\emph{远高于}标定
+现网值（$\sim1$–$5$~h/yr）；该量级反映\emph{筛选先验}而非真实设备，标定研究须提供逐支路 $\lambda,r$ 与
+\fld{num\_customers}（见 \S\ref{sec:rel-th-1366} 与 \S\ref{sec:rel-src-boundary} 的客户代理注记）。作为对照，
+\S\ref{sec:rel-th-numexp} 的 IEEE RTS-24 用\emph{真实} RTS 可靠性数据。
+
 \subsection{与实现的对应}\label{sec:rel-fa-impl}
 \begin{center}\footnotesize
 \begin{longtable}{@{}L{5.2cm}L{9.2cm}@{}}
@@ -270,23 +325,23 @@ DC 储能／光伏／源 & \fld{unit\_outage}、\fld{array\_outage}、\fld{sourc
 \bottomrule
 \endfoot
 交替更新不可用度~\eqref{eq:rel-fa-U}、运行年/日历年换算 &
-  \implpart{解析器按运行年 $\lambda$ 解释输入；日历换算须调用方处理}\\
+  \implfull{src/reliability/reliability\_assessment.cpp:resolve\_reliability\_params}（按 \fld{failure\_rate\_basis} 精确执行 $f_{cal}=(1-U)\lambda_{up}$ 与反解）\\
 按需失效 $\lambda^{act}=\nu p^d$~\eqref{eq:rel-fa-act}、恢复占时 &
   \implfull{src/reliability/reliability\_assessment.cpp:resolve\_reliability\_params}\\
 $\mathrm{PFD}_{avg}\approx\lambda_{DU}T_I/2$、验证试验模型 &
-  \implnone（休眠失效 PFD 未建模，仅 $\nu p^d$ 频率约简）\\
+  \implfull{src/reliability/reliability\_assessment.cpp:compute\_low\_demand\_pfd}（完备周期试验的精确周期平均及一阶误差；调用方再以需求率换算事件频率）\\
 两阶段元件 FMEA~\eqref{eq:rel-fa-mode} 前式、储能功率—能量限 &
   \implfull{src/reliability/reliability\_assessment.cpp:run\_distribution\_fmea}\\
 故障模式目录（被动/主动、原因—后果） &
   \implfull{src/reliability/failure\_mode.cpp:build\_failure\_mode\_catalog}\\
 二阶共故障近似~\eqref{eq:rel-fa-pair} &
-  \implpart{加入一阶总量的 N-2 排序近似；精确展开~\eqref{eq:rel-fa-exact} \implnone}\\
+  \implfull{src/reliability/failure\_mode.cpp:run\_failure\_mode\_fmea}（成对行保留原始排序量，聚合采用~\eqref{eq:rel-fa-exact}；跳过诊断声明截断）\\
 Level-1 信息物理双类全期望~\eqref{eq:rel-fa-cyber}、归因、$\eta_A$ &
   \implfull{src/reliability/reliability\_assessment.cpp:run\_distribution\_fmea}（\srcpath{CyberPhysicalFMEAOptions}）\\
 三维因子化筛选~\eqref{eq:rel-fa-factor} &
   \implfull{failure\_mode.hpp:CyberPhysicalFMEAOptions::IntelligentFunctionOptions}\\
 联合类生成 / 保护逻辑 / FRT 耦合 &
-  \implnone（声明 \texttt{joint\_class\_probability\_modelled=false} 等）\\
+  \textbf{完整实现}：显式互斥 \fld{joint\_states}、L1 轨迹类、Level-2 保护信息事件树、自动拓扑后果、序贯事件队列与在线 DAE 年度耦合均有独立可执行入口\\
 \end{longtable}
 \end{center}
 

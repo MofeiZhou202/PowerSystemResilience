@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <numbers>
 #include <numeric>
 #include <sstream>
 #include <string>
@@ -151,6 +152,7 @@ struct NativeCase {
   bool include_converter_faults{false};
   bool include_switch_faults{false};
   bool include_dc_power_flow{true};
+  int apparent_power_polygon_sides{16};
   bool protection_configuration_applied{false};
   int protection_rows_applied{0};
   int protection_scenarios_generated{0};
@@ -629,6 +631,11 @@ NativeCase build_native_case(const HybridPowerSystem& input,
   c.include_converter_faults = options.include_converter_faults;
   c.include_switch_faults = options.include_switch_faults;
   c.include_dc_power_flow = options.include_dc_power_flow;
+  if (options.apparent_power_polygon_sides < 4 ||
+      options.apparent_power_polygon_sides % 2 != 0)
+    throw std::invalid_argument(
+        "apparent_power_polygon_sides must be an even integer >= 4");
+  c.apparent_power_polygon_sides = options.apparent_power_polygon_sides;
 
   for (const auto& b : sys.ac.buses) {
     if (b.in_service) add_bus(c.buses, b.index);
@@ -1044,9 +1051,9 @@ struct DSU {
 //                    v_j - v_i + 2(r P + x Q) ≤  M(1 - z_ij)
 //                    v_j - v_i + 2(r P + x Q) ≥ -M(1 - z_ij)
 //
-//   C4  (eq. 7–8): Branch active/reactive flow limits with Big-M:
-//                    -z_ij · S̄_ij ≤ P_ij ≤ z_ij · S̄_ij
-//                    -z_ij · S̄_ij ≤ Q_ij ≤ z_ij · S̄_ij
+//   C4  (eq. 7–8): Inscribed polygon apparent-power limit:
+//                    P cos(theta_j)+Q sin(theta_j)
+//                    <= z S̄ cos(pi/J), j=0,...,J-1
 //
 //   C5  (eq. 9):   Voltage bounds:   V̲² ≤ v_i ≤ V̄²
 //
@@ -1089,8 +1096,10 @@ struct StageSolve {
   double shed_kw{0.0};
   std::vector<double> shed_by_load;
   std::string status{"unknown"};
+  std::string solver_status{"unknown"};
   double objective{0.0};
   double mip_gap{0.0};
+  double solver_reported_mip_gap{0.0};
   bool proven_optimal{true};
   std::vector<int> closed_tie_switch_indices;
   std::vector<int> closed_legacy_branch_indices;
@@ -1100,7 +1109,20 @@ struct StageSolve {
   std::vector<double> storage_energy_used_mwh;
   std::vector<double> vsc_dispatch_kw;
   std::vector<double> dcdc_dispatch_kw;
+  double maximum_ac_branch_apparent_power_ratio{0.0};
 };
+
+bool solver_status_proves_milp_optimality(const std::string& status) {
+  // MIPSolvers adapters.cpp and bc_status.hpp define these exact terminal
+  // certificates.  A relative gap can be 1 for a zero-objective optimum, so
+  // it cannot override an explicit optimal model status (HiGHS 1.14 model
+  // status semantics; derivation: reliability manual, three-stage chapter).
+  return status == "HiGHS optimal" ||
+         status == "StrictHiGHS Optimal run=0" ||
+         status == "Optimal (HiGHS presolve)" ||
+         status == "Optimal (root gap closed)" ||
+         status == "Optimal (tree exhausted)";
+}
 
 bool eligible_restoration_tie(const Switch& sw) {
   if (!sw.in_service || sw.closed || sw.locked_open) return false;
@@ -2368,16 +2390,22 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
            kBigMVoltage);
   }
 
-  // ── C4 (eq. 7–8): Branch flow limits with Big-M ──────────────────────────
-  // -z_ij · S̄ ≤ P_ij ≤ z_ij · S̄
-  // P_ij - z_ij · S̄ ≤ 0    →   P_ij - S̄ · z_ij ≤ 0
-  // -P_ij - z_ij · S̄ ≤ 0   →  -P_ij - S̄ · z_ij ≤ 0
+  // ── C4: inner polygon for the apparent-power circle ─────────────────────
+  // Taylor (2015), convex power-system optimization, polygonal thermal-limit
+  // approximation.  The cos(pi/J) radius makes the polygon inscribed, so no
+  // feasible point can exceed the authored MVA rating.
+  const int polygon_sides = c.apparent_power_polygon_sides;
+  const double polygon_radius = std::cos(std::numbers::pi / polygon_sides);
   for (int b = 0; b < n_br; ++b) {
     const double s = ac_branches[b].s_max_mw;
-    add_le({{ off_P + b,  1.0}, { off_z + b, -s}}, 0.0);  // P ≤ z·S̄
-    add_le({{ off_P + b, -1.0}, { off_z + b, -s}}, 0.0);  // -P ≤ z·S̄
-    add_le({{ off_Q + b,  1.0}, { off_z + b, -s}}, 0.0);  // Q ≤ z·S̄
-    add_le({{ off_Q + b, -1.0}, { off_z + b, -s}}, 0.0);  // -Q ≤ z·S̄
+    for (int facet = 0; facet < polygon_sides; ++facet) {
+      const double theta =
+          (2.0 * facet + 1.0) * std::numbers::pi / polygon_sides;
+      add_le({{off_P + b, std::cos(theta)},
+              {off_Q + b, std::sin(theta)},
+              {off_z + b, -s * polygon_radius}},
+             0.0);
+    }
   }
 
   // DC voltage drop and branch transfer limits. Taylor (2015), Sec. 4.3;
@@ -2614,6 +2642,8 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
   }
 
   if (!res_success || res_x.size() != static_cast<size_t>(n_vars)) {
+    out.solver_status = res_status.empty() ? "unknown" : res_status;
+    out.solver_reported_mip_gap = res_mip_gap;
     out.status = res_status.empty() ? "failed" : res_status;
     // Conservative failure result: shed every represented AC and DC load.
     for (int li = 0; li < nd_total; ++li)
@@ -2622,9 +2652,14 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     return out;
   }
 
-  const bool proven_optimal = (res_mip_gap <= kGapTol + 1e-9);
+  out.solver_status = res_status.empty() ? "unknown" : res_status;
+  out.solver_reported_mip_gap = res_mip_gap;
+  const bool proven_by_status = solver_status_proves_milp_optimality(res_status);
+  const bool proven_optimal = proven_by_status ||
+                              (std::isfinite(res_mip_gap) &&
+                               res_mip_gap <= kGapTol + 1e-9);
   out.status = proven_optimal ? "success" : "success (approximate)";
-  out.mip_gap = res_mip_gap;
+  out.mip_gap = proven_by_status ? 0.0 : res_mip_gap;
   out.proven_optimal = proven_optimal;
   out.objective = res_objective;
 
@@ -2747,6 +2782,14 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
         : (out.closed_tie_switch_indices.empty()
                ? "no switching required"
                : "ordered tie closures validated against eligibility, radiality, voltage, and branch limits");
+  }
+
+  for (int b = 0; b < n_br; ++b) {
+    const double rating = ac_branches[b].s_max_mw;
+    if (rating <= 0.0) continue;
+    out.maximum_ac_branch_apparent_power_ratio = std::max(
+        out.maximum_ac_branch_apparent_power_ratio,
+        std::hypot(res_x[off_P + b], res_x[off_Q + b]) / rating);
   }
 
   // ── Extract p^sh_i (per AC bus) → map back to load points ───────────────
@@ -3212,6 +3255,7 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
   // (no switching) rather than propagating a misleading negative count string.
   if (max_sw_ops < 0) max_sw_ops = 0;
   fill_summary(c, r);
+  r.apparent_power_polygon_sides = c.apparent_power_polygon_sides;
   r.nodal_eens_kwh_yr.assign(c.loads.size(), 0.0);
   r.nodal_cif.assign(c.loads.size(), 0.0);
   r.nodal_cid_min.assign(c.loads.size(), 0.0);
@@ -3491,9 +3535,15 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
     d.stage1_status = s1.status;
     d.stage2_status = s2.status;
     d.stage3_status = s3.status;
+    d.stage1_solver_status = s1.solver_status;
+    d.stage2_solver_status = s2.solver_status;
+    d.stage3_solver_status = s3.solver_status;
     d.stage1_mip_gap = s1.mip_gap;
     d.stage2_mip_gap = s2.mip_gap;
     d.stage3_mip_gap = s3.mip_gap;
+    d.stage1_solver_reported_mip_gap = s1.solver_reported_mip_gap;
+    d.stage2_solver_reported_mip_gap = s2.solver_reported_mip_gap;
+    d.stage3_solver_reported_mip_gap = s3.solver_reported_mip_gap;
     auto is_success_like = [](const std::string& s) { return s.rfind("success", 0) == 0; };
     const bool all_success = is_success_like(n0.s1.status) &&
                  is_success_like(n0.s2.status) &&
@@ -3851,6 +3901,21 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
   r.saidi_min = weighted_duration_min / total_customers;
   r.eens_cost = r.eens_kwh_yr * kReliabilityVoll;
 
+  for (const auto& baseline : n0_evaluated) {
+    r.maximum_ac_branch_apparent_power_ratio = std::max(
+        {r.maximum_ac_branch_apparent_power_ratio,
+         baseline.s1.maximum_ac_branch_apparent_power_ratio,
+         baseline.s2.maximum_ac_branch_apparent_power_ratio,
+         baseline.s3.maximum_ac_branch_apparent_power_ratio});
+  }
+  for (const auto& fault : evaluated) {
+    r.maximum_ac_branch_apparent_power_ratio = std::max(
+        {r.maximum_ac_branch_apparent_power_ratio,
+         fault.s1.maximum_ac_branch_apparent_power_ratio,
+         fault.s2.maximum_ac_branch_apparent_power_ratio,
+         fault.s3.maximum_ac_branch_apparent_power_ratio});
+  }
+
   // Populate model limitations so callers can surface the linearization
   // boundary separately from actual component-coverage gaps.
   const bool has_dc_or_vsc = !c.sys.dc.buses.empty() || !c.sys.dc.branches.empty() ||
@@ -3859,56 +3924,28 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
   const bool has_unmodelled_hybrid_devices =
       !c.sys.lcc_converters.empty() || !c.sys.energy_routers.empty();
   r.model_limitations =
-      "Coupled AC/DC restoration MILP: the AC network uses finite-source LinDistFlow with energized-bus variables, "
-      "explicit p_g/q_g source capacity bounds, strict commodity-flow radial forest, "
-      "branch active/reactive flow limits, voltage bounds [vmin², vmax²], "
-      "continuous load shed variables p^sh_i ∈ [0, p_d,i], "
-      "and switch-count constraint"
+      "交直流恢复 MILP：交流网络采用有限电源 LinDistFlow、带电母线变量、显式有功/无功电源容量、"
+      "严格商品流辐射森林、视在功率内接多边形、电压上下限、连续切负荷和开关次数约束"
       + (max_sw_ops == INT_MAX
-           ? std::string(" (no limit)")
-           : " (≤ " + std::to_string(max_sw_ops) + " operations per fault)")
-      + ". "
-        "Selected restoration switch closures are returned in execution order and "
-        "checked against device role/capability plus the MILP radiality, voltage, and "
-        "branch limits. Legacy out-of-service branch closures are reported as "
-        "unvalidated. Controlled-equipment protection and interlock bindings are "
-        "prechecked before restoration; validated trip/isolation devices are forced "
-        "open in the MILP, invalid interlocks block restoration switching, and Stage-3 "
-        "binary switch states are fixed to the accepted Stage-2 plan. "
-        "Grid-following DER injects only in a component containing an upstream or "
-        "grid-forming voltage anchor; it cannot root an outage island. AC and DC storage "
-        "use explicit per-device discharge variables and sequentially carry "
-        "deliverable MWh from isolation through switching and the repair window. "
-        "Reported PLS and reliability indices are incremental to a matching N-0 "
-        "healthy-state solve; raw fault-state and N-0 shed remain available for audit. "
-        "N-1 contingency enumeration covers ACBranch and DCBranch outages by default; "
-        "generator, static/renewable/PV generation, storage, microgrid, transformer, "
-        "DC static/PV/storage DER, VSC/DC-DC converter, AC switch, and AC/DC circuit-breaker "
-        "mobile storage, VPP, DC static/PV/storage DER, VSC/DC-DC converter, AC switch, "
-        "and AC/DC circuit-breaker outages are enumerated only when their opt-in flags "
-        "are set (converter faults remove coupled dispatch; switch/breaker faults force "
-        "open their topology edge; load outage is not enumerated as a standalone fault). "
-       "The DC network uses nodal active-power balance, squared-voltage drop, branch limits, "
-       "energized-bus and radial-forest constraints. VSC and DC-DC transfers are bidirectional "
-       "with constant efficiency and are co-optimized with AC/DC load pickup; psop reports the "
-       "signed AC-to-DC VSC transfer. Converter fixed standby loss, quadratic conduction loss, "
-       "DC-DC duty-ratio voltage conversion, and nonlinear AC apparent-power circles remain outside "
-       "this linear reliability model. Missing reactive demand is reconstructed at 0.9 power factor; "
-       "quadratic branch losses are dropped by LinDistFlow.";
+           ? std::string("（不限制）")
+           : "（每个故障不超过 " + std::to_string(max_sw_ops) + " 次）")
+      + "。恢复开关按执行顺序返回，并校核设备角色、能力、辐射性、电压和热限；旧式停运支路合闸会标为未认证。"
+        "保护与联锁在恢复前校核，合格的跳闸/隔离设备在 MILP 中强制开断，非法联锁阻断恢复，第三阶段保持第二阶段开关方案。"
+        "跟网 DER 只能在含上游或构网电压锚点的连通分量中注入，不能独立建立停电孤岛。交流、直流和移动储能按设备功率及可交付能量跨三阶段顺序演化。"
+        "切负荷和可靠性指标相对匹配的 N-0 健康反事实计算，原始故障态与 N-0 切负荷同时保留审计。"
+        "默认 N-1 故障集包含交流、直流支路；电源、储能、微网、变压器、VSC/DC-DC、开关和交直流断路器需显式选入，负荷不作为独立停运故障。"
+        "直流网络执行节点有功平衡、平方电压降、支路限额、带电母线和辐射森林；VSC/DC-DC 采用恒效率双向传输并与交直流负荷恢复联合优化。"
+        "缺失无功按 0.9 功率因数重构；LinDistFlow 忽略二次支路损耗，固定待机损耗、二次导通损耗和 DC-DC 占空比电压变换不在本线性结果口径内。";
   if (!c.include_dc_power_flow && has_dc_or_vsc)
     r.model_limitations +=
-        " DC power flow was explicitly disabled, so DC consequences use the legacy connectivity/capacity fallback.";
+        " 直流潮流已显式关闭，直流后果退回连通性/容量模型并清除对应有效标志。";
   if (has_unmodelled_hybrid_devices)
     r.model_limitations +=
-        " LCC converters and multi-port energy routers require their dedicated commutation/port-balance model and are not represented by the VSC equations.";
+        " 输入含 LCC 或多端口能量路由器；其换相/端口平衡不等价于 VSC 方程，结果明确判为不适用。";
   if (c.protection_configuration_applied) {
     r.model_limitations +=
-        " Session protection configuration is applied by mutually exclusive "
-        "sustained-event scenarios: successful automatic reclose is classified "
-        "as momentary and excluded from IEEE-1366 sustained SAIFI/SAIDI/EENS; "
-        "primary command/trip and contact-opening failures are independent; "
-        "configured backup zones are topology/load consequence sets, not relay "
-        "pickup, time-current, directional, DER-FRT, or waveform simulations.";
+        " 会话保护配置按互斥持续事件执行：成功自动重合归为瞬时事件，不进入持续 SAIFI/SAIDI/EENS；"
+        "主保护命令/跳闸和触头开断失败按独立按需事件处理；配置的后备区是拓扑后果集合，三阶段入口本身不替代在线保护/FRT 轨迹入口。";
   }
   for (const auto& limitation : c.protection_configuration_limitations)
     r.model_limitations += " " + limitation;
@@ -3923,6 +3960,7 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
       : "ac-lindistflow-milp";
   r.validity = ThreeStageReliabilityResult::ValidityFlags{
       .branch_flow_enforced = coupled_scope_valid,
+      .apparent_power_polygon_enforced = coupled_scope_valid,
       .voltage_constraints_enforced = coupled_scope_valid,
       .radial_topology_enforced = coupled_scope_valid,
       .sop_dispatch_optimised = c.include_dc_power_flow &&

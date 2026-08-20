@@ -19369,14 +19369,38 @@ const App = (() => {
 	        aggregation: '按模式频率与持续时间聚合 EENS/LOLE，并保留模式级归因和数据来源。',
 	        boundary: '稳态模型无法表达的测量、动作或保护后果必须标记为不支持，不计作零风险。',
 	      },
-	      fd: {
-	        title: '频率-持续时间（发电充裕度 COPT）',
-	        formula: 'LOLE = LOLP · H；LOLD = LOLE / LOLF',
-	        sampling: '卷积 AC 发电机容量停运状态，形成容量停运概率与频率表。',
-	        consequence: '以恒定峰值负荷比较可用发电容量，不求解网络潮流或恢复。',
-	        aggregation: '由容量不足状态汇总 LOLP、LOLE、LOLF 与平均持续时间。',
-	        boundary: '仅发电充裕度；不提供网络故障、DC 后果、EENS 或客户停电指标。',
-	      },
+		      fd: {
+		        title: '频率-持续时间（发电充裕度 COPT）',
+		        formula: 'LOLE = LOLP · H；LOLD = LOLE / LOLF',
+		        sampling: '卷积 AC 发电机容量停运状态，形成容量停运概率与频率表。',
+		        consequence: '以恒定峰值负荷比较可用发电容量，不求解网络潮流或恢复。',
+		        aggregation: '由容量不足状态汇总 LOLP、LOLE、LOLF 与平均持续时间。',
+		        boundary: '仅发电充裕度；不提供网络故障、DC 后果、EENS 或客户停电指标。',
+		      },
+		      exact_sensitivity: {
+		        title: '精确可靠性灵敏度（独立二状态完整枚举）',
+		        formula: 'B_i = E[L | i停运] - E[L | i运行]；dEENS/dU_i = B_i',
+		        sampling: '完整枚举所有非退化随机元件的 2^n 个状态；U=0/1 的退化状态不扩张状态空间。',
+		        consequence: '每个状态调用最小切负荷后果模型，并与 N-0 基线分离。',
+		        aggregation: '输出 Birnbaum、EENS 对不可用率导数和 Fussell-Vesely 风险占比。',
+		        boundary: '仅独立二状态模型；随机元件超过 20 个时明确拒绝，不退回抽样近似。',
+		      },
+		      physical_cut_set: {
+		        title: '物理网络最小割集（成功路径精确枚举）',
+		        formula: 'A = P(并集成功路径)；最小割集 = 成功路径族的极小击中集',
+		        sampling: '对约简后的成功路径做容斥精确求并集概率，不使用路径独立近似。',
+		        consequence: '共享元件在同一状态事件中只计一次，输出导致全部成功路径失效的最小元件组合。',
+		        aggregation: '返回系统可用率、失效概率、约简路径数和稳定 ID 最小割集。',
+		        boundary: '输入必须完整描述单调相干网络，元件状态按统计独立处理；规模超过精确枚举上限时后端明确拒绝。',
+		      },
+		      protection_cyber_compare: {
+		        title: '静态 FMEA、仅保护与信息物理联合事件树对照',
+		        formula: 'EENS = sum_e f_e sum_c p(c|e) sum_w S_c,w tau_c,w',
+		        sampling: '给定轨迹或在线 Mass-Matrix DAE 生成主/后备测量，断路器与信息状态再生成互斥联合事件类。',
+		        consequence: '同一故障频率与三窗口后果分别在静态、仅保护和信息物理联合条件下求值。',
+		        aggregation: '并列输出 EENS、LOLE、LOLF，以及保护收益和信息失效增量。',
+		        boundary: '在线模式每个场景执行主、后备各两遍 DAE；给定轨迹模式不产生网络动态反馈。',
+		      },
 	      three_stage: {
 	        title: '三阶段 AC/DC 联合恢复 MILP（隔离、重构、修复）',
 	        formula: 'EENS = sum_k lambda_k · sum_s S_k,s tau_k,s',
@@ -19581,20 +19605,56 @@ const App = (() => {
 
 	    function updateReliabilityControlState() {
 	      const physicalModel = document.getElementById('relPhysicalModel')?.value || 'auto';
-	      const methodEl = document.getElementById('relMethod');
-	      const maxIterEl = document.getElementById('relMaxIter');
+		      const methodEl = document.getElementById('relMethod');
+		      const maxIterEl = document.getElementById('relMaxIter');
+		      const selectedMethod = methodEl?.value || 'nsq';
+		      const exactSensitivity = selectedMethod === 'exact_sensitivity';
+		      const protectionCyberComparison = selectedMethod === 'protection_cyber_compare';
+		      const physicalCutSet = selectedMethod === 'physical_cut_set';
 	      const hintEl = document.getElementById('relAnalysisHint');
 	      const cyberToggle = document.getElementById('relCyberEnabled');
 	      const intelligentToggle = document.getElementById('relIntelligentEnabled');
-	      const controlState = HySimCore.AnalysisContracts.reliabilityControlState({
+		      const controlState = HySimCore.AnalysisContracts.reliabilityControlState({
 	        physicalModel,
 	        method: methodEl?.value || 'nsq',
 	        cyberEnabled: cyberToggle?.checked === true,
 	        informationEnabled: cyberToggle?.checked === true,
-	        intelligentEnabled: intelligentToggle?.checked === true,
-	      });
-	      if (methodEl) methodEl.disabled = controlState.useThreeStage;
-	      if (maxIterEl) maxIterEl.disabled = controlState.useThreeStage;
+		        intelligentEnabled: intelligentToggle?.checked === true,
+		      });
+		      const importanceSampling = selectedMethod === 'nsq' && !controlState.useThreeStage;
+		      if (methodEl) methodEl.disabled = controlState.useThreeStage;
+		      if (maxIterEl) maxIterEl.disabled = controlState.useThreeStage ||
+		        exactSensitivity || protectionCyberComparison || physicalCutSet;
+		      document.querySelectorAll('.rel-physical-cut-set-control').forEach(element => {
+		        element.hidden = !physicalCutSet;
+		        element.querySelectorAll('textarea').forEach(input => {
+		          input.disabled = !physicalCutSet;
+		        });
+		      });
+		      document.querySelectorAll('.rel-three-stage-control').forEach(element => {
+		        element.hidden = !controlState.useThreeStage;
+		        element.querySelectorAll('input').forEach(input => {
+		          input.disabled = !controlState.useThreeStage;
+		        });
+		      });
+		      document.querySelectorAll('.rel-importance-control').forEach(element => {
+		        element.hidden = !importanceSampling;
+		        element.querySelectorAll('input').forEach(input => {
+		          input.disabled = !importanceSampling;
+		        });
+		      });
+		      document.querySelectorAll('.rel-exact-sensitivity-control').forEach(element => {
+		        element.hidden = !exactSensitivity;
+		        element.querySelectorAll('input').forEach(input => {
+		          input.disabled = !exactSensitivity;
+		        });
+		      });
+		      document.querySelectorAll('.rel-protection-cyber-control').forEach(element => {
+		        element.hidden = !protectionCyberComparison;
+		        element.querySelectorAll('input').forEach(input => {
+		          input.disabled = !protectionCyberComparison;
+		        });
+		      });
 	      if (cyberToggle) cyberToggle.disabled = !controlState.informationToggleEnabled;
 	      if (intelligentToggle) {
 	        intelligentToggle.disabled = !controlState.intelligentToggleEnabled;
@@ -19910,7 +19970,9 @@ const App = (() => {
 	        failReliabilityWorkflow('configuration', '可靠性或保护配置未通过后端校验');
 	        return;
 	      }
-	      if (!options.skipParameterCheck) {
+	      const requestedMethod = options.methodOverride ||
+	        document.getElementById('relMethod')?.value || 'nsq';
+	      if (!options.skipParameterCheck && requestedMethod !== 'physical_cut_set') {
 	        const quality = await apiGet('/api/session/reliability/data_quality');
 	        if (!quality) {
 	          setStatus('可靠性参数校验失败', 'error');
@@ -19938,6 +20000,7 @@ const App = (() => {
 	        (configured?.protection || []).length > 0;
 	      const methodInput = document.getElementById('relMethod');
 	      if (!options.methodOverride && hasModeConfiguration &&
+	          methodInput?.value !== 'physical_cut_set' &&
 	          methodInput?.value !== 'failure_mode_fmea') {
 	        methodInput.value = 'failure_mode_fmea';
 	        changeReliabilityMethod();
@@ -19948,11 +20011,78 @@ const App = (() => {
 	        ((document.getElementById('relPhysicalModel')?.value) || 'auto');
 	      const method = selectedMethod === 'three_stage' || physicalModel === 'restoration_milp'
 	        ? 'three_stage' : selectedMethod;
+	      let physicalCutSet = null;
+	      if (method === 'physical_cut_set') {
+	        try {
+	          const components = JSON.parse(
+	            document.getElementById('relPhysicalCutSetComponents')?.value || '[]');
+	          const successPaths = JSON.parse(
+	            document.getElementById('relPhysicalCutSetPaths')?.value || '[]');
+	          if (!Array.isArray(components) || components.length === 0 ||
+	              !Array.isArray(successPaths) || successPaths.length === 0 ||
+	              components.some(row => !row || typeof row.stable_id !== 'string' ||
+	                !row.stable_id.trim() || !Number.isFinite(Number(row.availability)) ||
+	                Number(row.availability) < 0 || Number(row.availability) > 1) ||
+	              successPaths.some(path => !Array.isArray(path) || path.some(index =>
+	                !Number.isInteger(index) || index < 0 || index >= components.length))) {
+	            throw new Error('元件、概率或路径序号不符合约束');
+	          }
+	          physicalCutSet = {
+	            components: components.map(row => ({
+	              stable_id: row.stable_id.trim(),
+	              availability: Number(row.availability),
+	            })),
+	            success_paths: successPaths,
+	          };
+	        } catch (error) {
+	          setStatus('物理最小割集输入无效', 'error');
+	          log(`物理最小割集 JSON 校验失败：${error.message}`, 'error');
+	          failReliabilityWorkflow('configuration', '物理元件或成功路径输入无效');
+	          return null;
+	        }
+	      }
+	      const apparentPowerPolygonSides =
+	        Number(document.getElementById('relTsPolygonSides')?.value || 16);
+	      if (method === 'three_stage' &&
+	          (!Number.isInteger(apparentPowerPolygonSides) ||
+	           apparentPowerPolygonSides < 4 ||
+	           apparentPowerPolygonSides % 2 !== 0)) {
+	        setStatus('三阶段热限边数无效', 'error');
+	        log('交流支路热限多边形边数必须是大于等于 4 的偶数', 'error');
+	        failReliabilityWorkflow('configuration', '视在功率多边形边数无效');
+	        return null;
+	      }
 	      const maxIter = parseInt(document.getElementById('relMaxIter')?.value) || 2000;
 	      const metricFocus = (document.getElementById('relMetricFocus')?.value) || 'all';
 	      const weakBasis = (document.getElementById('relWeakBasis')?.value) || 'auto';
-	      const relParallel = document.getElementById('relParallel')?.checked ?? true;
-	      const relParallelThreads = parseInt(document.getElementById('relParallelThreads')?.value, 10);
+		      const relParallel = document.getElementById('relParallel')?.checked ?? true;
+		      const relParallelThreads = parseInt(document.getElementById('relParallelThreads')?.value, 10);
+		      const useImportanceSampling = method === 'nsq' &&
+		        document.getElementById('relImportanceSampling')?.checked === true;
+		      const importanceLambda = Number(document.getElementById('relImportanceLambda')?.value);
+		      const exactMaximumComponents = Number(document.getElementById('relExactMaxComponents')?.value);
+		      const protectionCyberValues = {
+		        frequency: Number(document.getElementById('relPcFrequency')?.value),
+		        onlineDae: document.getElementById('relPcOnlineDae')?.checked === true,
+		        faultBus: Number(document.getElementById('relPcFaultBus')?.value),
+		        primaryBranch: Number(document.getElementById('relPcPrimaryBranch')?.value),
+		        backupBranch: Number(document.getElementById('relPcBackupBranch')?.value),
+		        daeStep: Number(document.getElementById('relPcDaeStep')?.value),
+		        faultCurrent: Number(document.getElementById('relPcFaultCurrent')?.value),
+		        primaryDelay: Number(document.getElementById('relPcPrimaryDelay')?.value),
+		        backupDelay: Number(document.getElementById('relPcBackupDelay')?.value),
+		        primarySuccess: Number(document.getElementById('relPcPrimarySuccess')?.value),
+		        backupSuccess: Number(document.getElementById('relPcBackupSuccess')?.value),
+		        breakerSuccess: Number(document.getElementById('relPcBreakerSuccess')?.value),
+		        coordinationMargin: Number(document.getElementById('relPcCoordinationMargin')?.value),
+		        informationAvailability: Number(document.getElementById('relPcInfoAvailability')?.value),
+		        faultShed: Number(document.getElementById('relPcFaultShed')?.value),
+		        isolatedShed: Number(document.getElementById('relPcIsolatedShed')?.value),
+		        restorationFailedShed: Number(document.getElementById('relPcRestoreFailedShed')?.value),
+		        automaticRestoration: Number(document.getElementById('relPcAutoRestore')?.value),
+		        manualRestoration: Number(document.getElementById('relPcManualRestore')?.value),
+		        repair: Number(document.getElementById('relPcRepair')?.value),
+		      };
 	      const informationEnabled = method === 'fmea' &&
 	        document.getElementById('relCyberEnabled')?.checked === true;
 	      const intelligentEnabled = method === 'fmea' &&
@@ -20009,7 +20139,7 @@ const App = (() => {
 	        failReliabilityWorkflow('configuration', 'SEQ 负荷曲线包含无效倍率');
 	        return;
 	      }
-	      if (method === 'seq' && seqSpatialText) {
+		      if (method === 'seq' && seqSpatialText) {
 	        try {
 	          seqSpatialFactors = JSON.parse(seqSpatialText);
 	        } catch (err) {
@@ -20029,11 +20159,57 @@ const App = (() => {
 	          return;
 	        }
 	      }
+		      if (useImportanceSampling &&
+		          (!Number.isFinite(importanceLambda) || importanceLambda <= 0)) {
+		        setStatus('重要抽样参数无效', 'error');
+		        log('重要抽样扭曲因子必须是有限正数', 'error');
+		        failReliabilityWorkflow('configuration', '重要抽样扭曲因子无效');
+		        return;
+		      }
+		      if (method === 'exact_sensitivity' &&
+		          (!Number.isInteger(exactMaximumComponents) ||
+		           exactMaximumComponents < 1 || exactMaximumComponents > 20)) {
+		        setStatus('精确灵敏度状态上限无效', 'error');
+		        log('精确灵敏度随机元件上限必须是 1-20 的整数', 'error');
+		        failReliabilityWorkflow('configuration', '精确灵敏度随机元件上限无效');
+		        return;
+		      }
+		      if (method === 'protection_cyber_compare') {
+		        const values = Object.entries(protectionCyberValues)
+		          .filter(([key]) => key !== 'onlineDae').map(([, value]) => value);
+		        const probabilities = [protectionCyberValues.primarySuccess,
+		          protectionCyberValues.backupSuccess,
+		          protectionCyberValues.breakerSuccess,
+		          protectionCyberValues.informationAvailability];
+		        const invalid = values.some(value => !Number.isFinite(value) || value < 0) ||
+		          probabilities.some(value => value > 1) ||
+		          (!protectionCyberValues.onlineDae &&
+		            protectionCyberValues.faultCurrent <= 1) ||
+		          protectionCyberValues.daeStep <= 0 ||
+		          !Number.isInteger(protectionCyberValues.faultBus) ||
+		          !Number.isInteger(protectionCyberValues.primaryBranch) ||
+		          !Number.isInteger(protectionCyberValues.backupBranch) ||
+		          protectionCyberValues.backupDelay - protectionCyberValues.primaryDelay <
+		            protectionCyberValues.coordinationMargin ||
+		          protectionCyberValues.manualRestoration > protectionCyberValues.repair ||
+		          protectionCyberValues.automaticRestoration > protectionCyberValues.repair;
+		        if (invalid) {
+		          setStatus('保护-信息物理对照参数无效', 'error');
+		          log('概率须在 0-1 内，故障电流须大于固定 1.0 拾取值，后备配合裕度与恢复时间须满足约束', 'error');
+		          failReliabilityWorkflow('configuration', '保护配合或三窗口后果参数无效');
+		          return;
+		        }
+		      }
+		      const protectionTerminalTime = Math.max(
+		        1, protectionCyberValues.backupDelay + 0.1);
 	      const opts = {
 	        method,
 	        physical_model: physicalModel,
 	        data_policy: (document.getElementById('relDataPolicy')?.value) || 'missing_only',
+	        failure_rate_basis:
+	          (document.getElementById('relFailureRateBasis')?.value) || 'operating_time',
 	        reliability_template: (document.getElementById('relTemplate')?.value) || 'none',
+	        physical_cut_set: physicalCutSet,
 	        load: {
 	          scale_factor: physicalLoadScale,
 	          hours_per_year: 8760,
@@ -20044,14 +20220,104 @@ const App = (() => {
 	          parallel: relParallel,
 	          parallel_threads: Number.isFinite(relParallelThreads) ? relParallelThreads : 0,
 	        },
-	        monte_carlo: {
-	          max_iterations: method === 'seq' ? Math.max(50, Math.round(maxIter / 10)) : maxIter,
-	          cov_threshold: 0.05,
-	          compute_tail_risk: false,
-	          parallel: relParallel,
-	          parallel_threads: Number.isFinite(relParallelThreads) ? relParallelThreads : 0,
-	        },
+		        monte_carlo: {
+		          max_iterations: method === 'seq' ? Math.max(50, Math.round(maxIter / 10)) : maxIter,
+		          cov_threshold: 0.05,
+		          compute_tail_risk: false,
+		          use_importance_sampling: useImportanceSampling,
+		          importance_lambda: useImportanceSampling ? importanceLambda : 1,
+		          parallel: relParallel,
+		          parallel_threads: Number.isFinite(relParallelThreads) ? relParallelThreads : 0,
+		        },
+		        exact_sensitivity: {
+		          maximum_components: method === 'exact_sensitivity'
+		            ? exactMaximumComponents : 20,
+		          curtailment_threshold_mw: 0.01,
+		        },
+		        protection_cyber: {
+		          curtailment_threshold_mw: 0.01,
+		          online_dae: method === 'protection_cyber_compare' &&
+		            protectionCyberValues.onlineDae,
+		          scenarios: method === 'protection_cyber_compare' ? [{
+		            scenario_id: 'gui-protection-cyber-scenario',
+		            initiating_frequency_per_year: protectionCyberValues.frequency,
+		            coordination_margin_s: protectionCyberValues.coordinationMargin,
+		            uncleared_terminal_time_s: protectionTerminalTime,
+		            online_dae: {
+		              fault_ac_bus_id: protectionCyberValues.faultBus || undefined,
+		              primary_branch_index: protectionCyberValues.primaryBranch || undefined,
+		              backup_branch_index: protectionCyberValues.backupBranch || undefined,
+		              fault_time_s: 0.05,
+		              fault_r_pu: 0.2,
+		              fault_x_pu: 0,
+		              dt_s: protectionCyberValues.daeStep,
+		              t_end_s: protectionTerminalTime,
+		            },
+		            primary: {
+		              relay: {
+		                relay_id: 'gui-primary',
+		                characteristic: 'definite_time_overcurrent',
+		                pickup_current: 1,
+		                definite_time_delay_s: protectionCyberValues.primaryDelay,
+		              },
+		              trajectory: [
+		                { time_s: 0, current: protectionCyberValues.faultCurrent },
+		                { time_s: protectionTerminalTime, current: protectionCyberValues.faultCurrent },
+		              ],
+		              breaker: {},
+		              relay_success_probability: protectionCyberValues.primarySuccess,
+		              breaker_success_probability: protectionCyberValues.breakerSuccess,
+		            },
+		            backup: {
+		              relay: {
+		                relay_id: 'gui-backup',
+		                characteristic: 'definite_time_overcurrent',
+		                pickup_current: 1,
+		                definite_time_delay_s: protectionCyberValues.backupDelay,
+		              },
+		              trajectory: [
+		                { time_s: 0, current: protectionCyberValues.faultCurrent },
+		                { time_s: protectionTerminalTime, current: protectionCyberValues.faultCurrent },
+		              ],
+		              breaker: {},
+		              relay_success_probability: protectionCyberValues.backupSuccess,
+		              breaker_success_probability: protectionCyberValues.breakerSuccess,
+		            },
+		            information_components: [{
+		              id: 'gui-shared-information-path',
+		              intrinsic_availability: protectionCyberValues.informationAvailability,
+		              packet_delivery_probability: 1,
+		            }],
+		            information_functions: [{
+		              name: 'gui-detection-trip-isolation-restoration',
+		              alternative_paths: [[0]],
+		            }],
+		            function_bindings: {
+		              detection_function: 0,
+		              primary_trip_function: 0,
+		              backup_trip_function: 0,
+		              isolation_function: 0,
+		              restoration_function: 0,
+		            },
+		            consequence: {
+		              primary_clearing_shed_mw: protectionCyberValues.faultShed,
+		              backup_clearing_shed_mw: protectionCyberValues.faultShed,
+		              uncleared_shed_mw: protectionCyberValues.faultShed,
+		              isolated_shed_mw: protectionCyberValues.isolatedShed,
+		              isolation_failed_shed_mw: protectionCyberValues.faultShed,
+		              restored_shed_mw: 0,
+		              restoration_failed_shed_mw:
+		                protectionCyberValues.restorationFailedShed,
+		              automatic_restoration_hr:
+		                protectionCyberValues.automaticRestoration,
+		              manual_restoration_hr:
+		                protectionCyberValues.manualRestoration,
+		              repair_hr: protectionCyberValues.repair,
+		            },
+		          }] : [],
+		        },
 	        restoration: {
+	          apparent_power_polygon_sides: apparentPowerPolygonSides,
 	          switching_time_hr: physicalSwitchMinutes / 60,
 	          enable_switch_reconfiguration:
 	            document.getElementById('relPhysicalReconfiguration')?.checked !== false,
@@ -20430,7 +20696,7 @@ const App = (() => {
 	      return html;
 	    }
 
-	    function renderReliabilityBaselineAuditHtml(data) {
+		    function renderReliabilityBaselineAuditHtml(data) {
 	      const baselineMw = relNumber(relMetricValue(data, 'baseline_edns_mw')) || 0;
 	      const baselineEens = relNumber(relMetricValue(data, 'baseline_eens_mwh_yr')) || 0;
 	      if (baselineMw <= 1e-9 && baselineEens <= 1e-9) return '';
@@ -20440,8 +20706,80 @@ const App = (() => {
 	      const html = `<div class="sub-hint-warn">正常态已存在 ${baselineMw.toFixed(3)} MW 未供电，` +
 	        `全年折算 ${baselineEens.toFixed(2)} MWh。原始总 EENS ${rawEens.toFixed(2)} MWh，` +
 	        `故障增量 EENS ${incrementalEens.toFixed(2)} MWh。请检查孤岛、开关状态和电源连接；风险排序已按故障增量计算。</div>`;
-	      return renderReliabilityPanel('N-0 基线审计', html);
-	    }
+		      return renderReliabilityPanel('N-0 基线审计', html);
+		    }
+
+		    function renderReliabilitySamplingAndSensitivityHtml(data) {
+		      const nf = (value, digits = 4) => Number.isFinite(Number(value))
+		        ? Number(value).toFixed(digits) : '—';
+		      let html = '';
+		      const importance = data?.importance_sampling;
+		      if (importance?.used) {
+		        html += renderReliabilityPanel('重要抽样诊断',
+		          `<table><thead><tr><th>扭曲因子</th><th>有效样本量 ESS</th><th>平均似然比</th></tr></thead>` +
+		          `<tbody><tr><td>${nf(importance.twisting_factor, 3)}</td>` +
+		          `<td>${nf(importance.effective_sample_size, 1)}</td>` +
+		          `<td>${nf(importance.mean_likelihood_ratio, 6)}</td></tr></tbody></table>` +
+		          '<div class="sub-hint">ESS 由归一化似然权重计算；平均似然比偏离 1 表示有限样本误差或扭曲过强。</div>');
+		      }
+		      const rows = Array.isArray(data?.sensitivity_components)
+		        ? data.sensitivity_components : [];
+		      if (rows.length || data?.method === 'exact_sensitivity') {
+		        let table = `<div class="sub-hint">完整枚举 ${escapeHtml(String(data?.states_evaluated ?? 0))} 个状态；` +
+		          `随机元件上限 ${escapeHtml(String(data?.maximum_stochastic_components ?? 20))}。</div>`;
+		        table += '<table><thead><tr><th>稳定元件</th><th>类型</th><th>不可用率</th><th>强制停运 EENS</th><th>强制运行 EENS</th><th>Birnbaum / EENS导数</th><th>Fussell-Vesely</th></tr></thead><tbody>';
+		        const busMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap)
+		          ? Canvas.getCompBusMap() : null;
+		        rows.forEach(row => {
+		          const click = reliabilityClickAttr(row, busMap);
+		          const identity = row.stable_id || `${row.canonical_component_type || row.component_type}:${row.component_index}`;
+		          table += `<tr${click}><td>${escapeHtml(row.display_name || identity)}<br><small>${escapeHtml(identity)}</small></td>` +
+		            `<td>${escapeHtml(row.display_type || reliabilityComponentTypeLabel(row.component_type))}</td>` +
+		            `<td>${nf(row.unavailability, 6)}</td>` +
+		            `<td>${nf(row.eens_if_forced_down_mwh_yr, 3)}</td>` +
+		            `<td>${nf(row.eens_if_forced_up_mwh_yr, 3)}</td>` +
+		            `<td>${nf(row.birnbaum_mwh_yr_per_unit_unavailability, 3)}</td>` +
+		            `<td>${nf(row.fussell_vesely, 6)}</td></tr>`;
+		        });
+		        table += '</tbody></table>';
+		        html += renderReliabilityPanel('精确可靠性灵敏度', table);
+		      }
+		      const comparison = data?.method_comparison;
+		      if (comparison?.static_fmea && comparison?.protection_only &&
+		          comparison?.cyber_conditioned) {
+		        const methods = [
+		          ['静态 FMEA', comparison.static_fmea],
+		          ['仅保护事件树', comparison.protection_only],
+		          ['信息物理联合事件树', comparison.cyber_conditioned],
+		        ];
+		        let table = '<table><thead><tr><th>方法</th><th>EENS (MWh/年)</th><th>LOLE (h/年)</th><th>LOLF (次/年)</th></tr></thead><tbody>';
+		        methods.forEach(([label, metrics]) => {
+		          table += `<tr><td>${escapeHtml(label)}</td><td>${nf(metrics.eens_mwh_yr, 6)}</td>` +
+		            `<td>${nf(metrics.lole_hr_yr, 6)}</td><td>${nf(metrics.lolf_occ_yr, 6)}</td></tr>`;
+		        });
+		        table += '</tbody></table>' +
+		          `<div class="sub-hint">保护相对静态 FMEA 的 EENS 降低量：${nf(comparison.protection_benefit_mwh_yr, 6)} MWh/年；` +
+		          `信息系统失效相对仅保护的 EENS 增量：${nf(comparison.cyber_increment_mwh_yr, 6)} MWh/年。</div>`;
+		        html += renderReliabilityPanel('静态、保护与信息物理联合结果对照', table);
+		      }
+		      const onlineRows = Array.isArray(data?.online_diagnostics)
+		        ? data.online_diagnostics : [];
+		      if (onlineRows.length) {
+		        let table = '<table><thead><tr><th>场景</th><th>主保护 DAE/事件树(s)</th><th>后备 DAE/事件树(s)</th><th>轨迹点(主/后备)</th><th>动作反馈</th><th>DER-FRT</th></tr></thead><tbody>';
+		        onlineRows.forEach(row => {
+		          table += `<tr><td>${escapeHtml(row.scenario_id || '—')}</td>` +
+		            `<td>${nf(row.primary_clear_time_s, 4)} / ${nf(row.primary_event_tree_clear_time_s, 4)}</td>` +
+		            `<td>${nf(row.backup_clear_time_s, 4)} / ${nf(row.backup_event_tree_clear_time_s, 4)}</td>` +
+		            `<td>${escapeHtml(String(row.primary_relay_trajectory_points ?? 0))} / ${escapeHtml(String(row.backup_relay_trajectory_points ?? 0))}</td>` +
+		            `<td>${row.primary_protection_action_applied && row.backup_protection_action_applied ? '主后备均已反馈' : '动作未完全反馈'}</td>` +
+		            `<td>${row.primary_der_frt_consumed && row.backup_der_frt_consumed ? '主后备均已消费' : '未完全消费'}</td></tr>`;
+		        });
+		        table += '</tbody></table>' +
+		          '<div class="sub-hint">清除时刻两列应在一个 DAE 时间步内一致；这项诊断用于证明动态轨迹进入了年度事件树。</div>';
+		        html += renderReliabilityPanel('在线 DAE 与年度事件树闭环诊断', table);
+		      }
+		      return html;
+		    }
 
 		    function renderReliabilityDashboardShell(data, method) {
 		      const hasRisk = (Array.isArray(data.critical_components) && data.critical_components.length) ||
@@ -20916,15 +21254,36 @@ const App = (() => {
 		      document.getElementById('resultsContent').style.display = 'block';
 		      setActiveResultGroup('reliability');
 		      const nf = (v, d = 2) => (typeof v === 'number' && isFinite(v)) ? v.toFixed(d) : '—';
-		      const methodLabel = { nsq: '非序贯蒙特卡洛', seq: '序贯蒙特卡洛', fmea: 'FMEA (N-1)', failure_mode_fmea: '失效模式 FMEA', fd: '频率-持续时间', three_stage: '三阶段恢复重构' }[method] || method;
+		      const methodLabel = { nsq: '非序贯蒙特卡洛', seq: '序贯蒙特卡洛', fmea: 'FMEA (N-1)', failure_mode_fmea: '失效模式 FMEA', fd: '频率-持续时间', exact_sensitivity: '精确可靠性灵敏度', physical_cut_set: '物理网络最小割集', protection_cyber_compare: '保护-信息物理三级对照', three_stage: '三阶段恢复重构' }[method] || method;
 		      const weakBasis = relSelectedWeakBasis(data, method);
 		      const weakMeta = relWeakBasisMeta(weakBasis);
 		      const weakRows = relRankRows(relCandidateRows(data), weakBasis);
 		      const relTime = Number.isFinite(Number(data.execution_time_sec))
 		        ? `${Number(data.execution_time_sec).toFixed(3)} s` : '—';
-		      let html = `<div style="margin-bottom:8px;"><b>方法：</b>${escapeHtml(methodLabel)} · <b>计算时间：</b>${relTime}</div>`;
+		      const basisLabel = data.failure_rate_basis === 'calendar_time'
+		        ? '日历年频率' : '运行年强度';
+		      let html = `<div style="margin-bottom:8px;"><b>方法：</b>${escapeHtml(methodLabel)} · <b>故障率口径：</b>${basisLabel} · <b>计算时间：</b>${relTime}</div>`;
+		      if (method === 'physical_cut_set') {
+		        const cuts = Array.isArray(data.minimal_cut_sets) ? data.minimal_cut_sets : [];
+		        html += '<table><tbody>' +
+		          `<tr><td>系统可用率</td><td>${nf(data.availability, 10)}</td></tr>` +
+		          `<tr><td>系统失效概率</td><td>${nf(data.loss_probability, 10)}</td></tr>` +
+		          `<tr><td>约简成功路径数</td><td>${escapeHtml(String(data.reduced_success_path_count ?? 0))}</td></tr>` +
+		          `<tr><td>精确独立元件模型</td><td>${data.exact_independent_path_model ? '是' : '否'}</td></tr>` +
+		          '</tbody></table>';
+		        html += '<h4 style="margin:10px 0 4px;">稳定 ID 最小割集</h4><table><thead><tr><th>#</th><th>同时失效元件</th></tr></thead><tbody>';
+		        cuts.forEach((cut, index) => {
+		          html += `<tr><td>${index + 1}</td><td>${escapeHtml((cut || []).join(' + '))}</td></tr>`;
+		        });
+		        html += '</tbody></table>' + renderRelScopeHtml(data);
+		        document.getElementById('reliabilityResults').innerHTML = html;
+		        enhanceResultTablesIn(document.getElementById('reliabilityResults'),
+		          { module: 'reliability' });
+		        return;
+		      }
 		      html += renderReliabilityKpiTiles(data, method);
 		      html += renderReliabilityBaselineAuditHtml(data);
+		      html += renderReliabilitySamplingAndSensitivityHtml(data);
 		      html += renderReliabilityDashboardShell(data, method);
 	      html += renderReliabilityComponentModelHtml(data);
 	      html += renderReliabilityDerControlHtml(data);
@@ -20936,6 +21295,14 @@ const App = (() => {
 		      html += renderRelScopeHtml(data);
 		      html += renderCyberPhysicalReliabilityHtml(data);
 		      html += renderReliabilityMetricsHtml(data, method);
+		      if (method === 'three_stage') {
+		        html += renderReliabilityPanel('交流支路视在功率热限',
+		          '<table><tbody>' +
+		          `<tr><td>内接多边形边数</td><td>${escapeHtml(String(data.apparent_power_polygon_sides ?? '—'))}</td></tr>` +
+		          `<tr><td>最大 |S| / 额定值</td><td>${nf(data.maximum_ac_branch_apparent_power_ratio, 8)}</td></tr>` +
+		          `<tr><td>约束执行</td><td>${data.validity?.apparent_power_polygon_enforced ? '已执行' : '未认证'}</td></tr>` +
+		          '</tbody></table>');
+		      }
 		      if (weakRows.length) {
 		        html += `<h4 style="margin:10px 0 4px;">薄弱环节 (按 ${escapeHtml(weakMeta.label)})</h4>`;
 		        html += renderReliabilityRiskBasisHtml(method, weakBasis);
@@ -21005,7 +21372,7 @@ const App = (() => {
 	      // Three-stage restoration: per-fault load shed by stage
 	      if (method === 'three_stage' && Array.isArray(data.faults) && data.faults.length) {
 	        const faultRows = relRankRows(data.faults, weakBasis);
-	        html += '<h4 style="margin:10px 0 4px;">三阶段故障传播与恢复</h4><table><thead><tr><th>元件</th><th>类型</th><th>保护场景</th><th>概率/清除</th><th>状态</th><th>阶段1</th><th>阶段2</th><th>阶段3</th><th>合计(kW)</th><th>EENS</th><th>LOLE</th></tr></thead><tbody>';
+	        html += '<h4 style="margin:10px 0 4px;">三阶段故障传播与恢复</h4><table><thead><tr><th>元件</th><th>类型</th><th>保护场景</th><th>概率/清除</th><th>状态</th><th>求解证书</th><th>阶段1</th><th>阶段2</th><th>阶段3</th><th>合计(kW)</th><th>EENS</th><th>LOLE</th></tr></thead><tbody>';
 	        const tsMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
 	        faultRows.slice(0, 15).forEach(f => {
 	          const clk = reliabilityClickAttr(f, tsMap);
@@ -21016,7 +21383,15 @@ const App = (() => {
 	            unresolved_after_backup_failure: '主备均失败', unconfigured: '未配置',
 	          }[f.protection_scenario] || f.protection_scenario || '未配置';
 	          const probabilityAndTime = `${nf(Number(f.scenario_probability) * 100, 3)}% / ${nf(f.clearing_time_s, 3)} s`;
-	          html += `<tr${clk}><td>${escapeHtml(name)}</td><td>${escapeHtml(type)}</td><td>${escapeHtml(protectionScenario)}</td><td>${escapeHtml(probabilityAndTime)}</td><td>${escapeHtml(f.status || '')}</td><td>${nf(f.pls_stage1, 1)}</td><td>${nf(f.pls_stage2, 1)}</td><td>${nf(f.pls_stage3, 1)}</td><td>${nf(f.pls_total, 1)}</td><td>${nf(f.eens_contribution_mwh_yr ?? f.eens_contribution, 3)}</td><td>${nf(f.lole_contribution_hr_yr ?? f.lole_contribution, 3)}</td></tr>`;
+	          const statusLabel = f.status === 'success' ? '已认证最优'
+	            : (f.status === 'success (approximate)' ? '可行近似' : '失败');
+	          const solverCertificate = [1, 2, 3].map(stage => {
+	            const solverStatus = f[`stage${stage}_solver_status`] || '未知';
+	            const certifiedGap = nf(f[`stage${stage}_mip_gap`], 6);
+	            const reportedGap = nf(f[`stage${stage}_solver_reported_mip_gap`], 6);
+	            return `阶段${stage}: ${solverStatus}; 认证间隙 ${certifiedGap}; 后端原始间隙 ${reportedGap}`;
+	          }).join('；');
+	          html += `<tr${clk}><td>${escapeHtml(name)}</td><td>${escapeHtml(type)}</td><td>${escapeHtml(protectionScenario)}</td><td>${escapeHtml(probabilityAndTime)}</td><td>${escapeHtml(statusLabel)}</td><td>${escapeHtml(solverCertificate)}</td><td>${nf(f.pls_stage1, 1)}</td><td>${nf(f.pls_stage2, 1)}</td><td>${nf(f.pls_stage3, 1)}</td><td>${nf(f.pls_total, 1)}</td><td>${nf(f.eens_contribution_mwh_yr ?? f.eens_contribution, 3)}</td><td>${nf(f.lole_contribution_hr_yr ?? f.lole_contribution, 3)}</td></tr>`;
 	        });
         html += '</tbody></table>';
 	        const sequenceRows = faultRows.filter(f =>

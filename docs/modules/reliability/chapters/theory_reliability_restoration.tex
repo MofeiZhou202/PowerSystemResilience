@@ -9,9 +9,9 @@
 时段内分别求解\emph{线性配电潮流}（LinDistFlow）恢复 MILP，得到分时段切负荷并按 N-0 反事实加权聚合
 为 EENS/LOLE。依据设计文档
 \srcpath{docs/theory/reliability\_mathematical\_models\_and\_intelligent\_cyber\_physical\_assessment.md}
-第 4、10 节及 \srcpath{include/hacdcpf/analysis/three\_stage\_reliability.hpp}。诚实边界：恢复 MILP 为
-线性化（LinDistFlow $+$ 视在功率盒式外松弛），拒绝 LCC 换流器与多端口能量路由器，不含二次损耗与
-非线性 AC 圆约束；失败或近似阶段清除 \fld{ok} 与物理有效标志，绝不静默回退。
+第 4、10 节及 \srcpath{include/hacdcpf/analysis/three\_stage\_reliability.hpp}。恢复 MILP 采用
+LinDistFlow 与视在功率圆的内接多边形保守近似；拒绝 LCC 换流器与多端口能量路由器，不含二次损耗。
+失败阶段清除 \fld{ok} 与物理有效标志，绝不静默回退。
 \end{theorynote}
 
 \subsection{阶段语义与时钟}\label{sec:rel-rs-stage}
@@ -54,11 +54,16 @@ $r_{ij},x_{ij}$ 为系统基标幺阻抗，$P_{ij},Q_{ij}$ 为 MW/Mvar，$S_{bas
  \qquad \underline V_i^2\le v_i\le\overline V_i^2.
 \end{equation}
 
-\begin{remark}[视在功率盒式外松弛]\label{rem:rel-rs-box}
-实现对 $P,Q$ 用分离线性界 $|P_{ij}|\le z_{ij}\overline S_{ij}$、$|Q_{ij}|\le z_{ij}\overline S_{ij}$，
-是 $P_{ij}^2+Q_{ij}^2\le z_{ij}\overline S_{ij}^2$ 的\emph{外、乐观}松弛：允许角点 $P{=}Q{=}\overline S$
-（视在 $\sqrt2\,\overline S$）。决策级模型应改用 SOCP 或多边形内逼近
-$P_{ij}\cos\theta_j+Q_{ij}\sin\theta_j\le z_{ij}\overline S_{ij}\cos(\pi/J)$（$j=1,\dots,J$）。
+\begin{remark}[视在功率内接多边形]\label{rem:rel-rs-box}
+实现对每条交流支路施加 $J$ 个线性半空间
+\begin{equation}
+ P_{ij}\cos\theta_j+Q_{ij}\sin\theta_j
+ \le z_{ij}\overline S_{ij}\cos(\pi/J),\qquad
+ \theta_j=(2j+1)\pi/J,\quad j=0,\ldots,J-1.
+\end{equation}
+$J$ 必须为不小于 4 的偶数，默认 $J=16$。右端的 $\cos(\pi/J)$ 使多边形内接于额定视在功率圆，
+故任一可行点均满足 $\sqrt{P_{ij}^2+Q_{ij}^2}\le\overline S_{ij}$；结果同时返回边数、最大热限比和
+\fld{apparent\_power\_polygon\_enforced}，以便运行时核验保守约束确已执行。
 \end{remark}
 
 \subsection{严格辐射能量森林}\label{sec:rel-rs-forest}
@@ -91,14 +96,21 @@ VSC 以 AC$\to$DC 传输 $p_v^+$、DC$\to$AC 传输 $p_v^-$、恒效率 $\eta_v$
 小正传输代价消去对冲简并。DC-DC 换流器用类似双向式；DC 静发 / PV / 储能带停运、功率、电压根与能量约束
 入直流平衡。VPP 无稳定成员引用列表，故作单一独立边界注入，不静默展开或重复计。LCC 换流器与多端口能量
 路由器因换相 / 端口平衡方程不等价于 VSC 而被拒绝。
+\begin{boundarynote}
+本入口的可靠性方程只定义 VSC、DC-DC 与线性网络恢复。LCC 换相、多端口能量路由器端口平衡及固定/二次
+损耗不属于该结果口径；输入含这些资产时明确清除 \fld{ok} 和物理有效标志，不返回伪造的零影响结果。
+\end{boundarynote}
 
 \subsection{频率加权与 N-0 资格}\label{sec:rel-rs-n0}
 设 $s_{i,k,s}^{raw}$ 为故障 $k$ 下切负荷、$s_{i,s}^{N0}$ 为同阶段时长 / 能量条件下的健康态切负荷，可靠性
 增量与指标为
 \begin{equation}
- s_{i,k,s}^{inc}=\max(0,s_{i,k,s}^{raw}-s_{i,s}^{N0}),\quad
- \mathrm{EENS}_i=\sum_k\lambda_k\sum_ss_{i,k,s}^{inc}\tau_{k,s},\quad
- \mathrm{LOLE}=\sum_k\lambda_k\sum_s\tau_{k,s}\mathbf 1\!\Big[\sum_is_{i,k,s}^{inc}>\varepsilon\Big].
+\begin{aligned}
+ s_{i,k,s}^{inc}&=\max(0,s_{i,k,s}^{raw}-s_{i,s}^{N0}),\\
+ \mathrm{EENS}_i&=\sum_k\lambda_k\sum_ss_{i,k,s}^{inc}\tau_{k,s},\\
+ \mathrm{LOLE}&=\sum_k\lambda_k\sum_s\tau_{k,s}
+   \mathbf 1\!\Big[\sum_is_{i,k,s}^{inc}>\varepsilon\Big].
+\end{aligned}
 \end{equation}
 N-0 反事实自\emph{同一}初始储能能量出发、用\emph{同一}三阶段时长，但演化\emph{独立}的健康调度 / 能量轨迹
 $s_{i,k,s}^{inc}=\max(0,\ s_i(G_{k,s},E_{k,s})-s_i(G_{0,s},E_{0|k,s}))$，其中 $E_{0|k,s}$ 是健康反事实在同一
@@ -106,6 +118,25 @@ $s_{i,k,s}^{inc}=\max(0,\ s_i(G_{k,s},E_{k,s})-s_i(G_{0,s},E_{0|k,s}))$，其中
 而非纯拓扑边际；仅当两路径共享初始 SOC、负荷、可再生可用性、阶段时长与所有非故障设置时有效。缺省故障集
 含 AC/DC 支路，发电机 / 变压器 / 换流器 / 开关 / DER-微网族由选项控制以复现历史仅支路结果。依据：
 \srcpath{src/reliability/three\_stage\_reliability.cpp:run\_three\_stage\_reliability}。
+
+\subsection{求解终止证书与相对间隙}\label{sec:rel-rs-certificate}
+MILP 后端同时给出终止状态和相对间隙。对零或近零切负荷目标，分母尺度会使后端原始相对间隙等于 1，
+即使模型状态已明确为最优；因此不能让派生的相对量覆盖更强的终止证书。实现先保留
+\fld{stage1/2/3\_solver\_status} 与 \fld{stage1/2/3\_solver\_reported\_mip\_gap}，再按
+\begin{equation}
+ \mathrm{proven}=\mathrm{status\_optimal}\ \lor\
+ \bigl(\mathrm{isfinite}(g)\land g\le10^{-6}+10^{-9}\bigr)
+\end{equation}
+形成认证状态。若后端明确返回 HiGHS、StrictHiGHS 或原生分支定界的最优终止状态，认证间隙
+\fld{stage1/2/3\_mip\_gap} 规范为 0；原始间隙仍保留用于审计。该规则不跳过后验可行性检查：变量界、
+整数性、等式、不等式、热限或倒闸校核任一失败，阶段仍标为失败。
+
+\begin{remark}[零后果故障回归]
+专项三阶段测试中的 \texttt{case33mg\_acdc} 支路 2 固定验证：阶段 2、3
+后端状态为 StrictHiGHS 最优，后端原始间隙为 1，而认证间隙为 0、阶段状态为成功。该测试防止将零分母
+相对间隙重新误判为近似解，同时保留原始诊断，不以放宽阈值掩盖问题。
+测试定义见 \srcpath{tests/test\_three\_stage\_reliability.cpp}。
+\end{remark}
 
 \subsection{与实现的对应}\label{sec:rel-rs-impl}
 \begin{center}\footnotesize
@@ -126,8 +157,10 @@ $s_{i,k,s}^{inc}=\max(0,\ s_i(G_{k,s},E_{k,s})-s_i(G_{0,s},E_{0|k,s}))$，其中
 事件内储能时序（AC/移动/DC 序） & \implfull{src/reliability/three\_stage\_reliability.cpp}\\
 耦合 DC LinDistFlow $+$ VSC 双向传输 & \implfull{src/reliability/three\_stage\_reliability.cpp}（\fld{include\_dc\_power\_flow}）\\
 N-0 反事实增量与 EENS/LOLE 聚合 & \implfull{src/reliability/three\_stage\_reliability.cpp}\\
-视在功率 SOCP / 多边形内逼近 & \implnone（盒式外松弛，见注记~\ref{rem:rel-rs-box}）\\
-LCC 换流器、多端口能量路由器、二次损耗 & \implnone（显式拒绝 / 线性化边界）\\
+视在功率圆的多边形内逼近 &
+  \implfull{src/reliability/three\_stage\_reliability.cpp:solve\_stage\_milp}（默认 16 边，运行时返回最大热限比）\\
+MILP 终止证书、认证间隙与后端原始间隙 &
+  \implfull{src/reliability/three\_stage\_reliability.cpp:solver\_status\_proves\_milp\_optimality}\\
 \end{longtable}
 \end{center}
 

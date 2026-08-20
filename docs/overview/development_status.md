@@ -1,10 +1,61 @@
 # Development Status
 
-Updated: 2026-08-19
+Updated: 2026-08-20
 
 This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
+
+## 可靠性理论与执行闭环（2026-08-20）
+
+可靠性模块的现行理论均已落到可调用代码、结果字段和注册测试，不再以路线图充当
+功能。闭环范围包括：不分箱 COPT 精确状态概率与 F&D 有效性诊断、独立两状态
+串并联约化、IEC 61508 低需求 PFD、含 VaR 原子分数权重的经验期望短缺、带完整性
+诊断的 N-2 二阶交互、物理与信息最小割集、共享依赖信息路径与 QoS、联合功能
+可用率、互斥信息功能类、有限 POMDP 精确信念树，以及静态 FMEA、仅保护、
+信息物理联合三种方法的同口径 EENS/LOLE/LOLF 对照。
+
+保护与动态链实际执行 CT/PT 一阶动态和饱和、定时限/反时限、方向、mho 与四边形
+距离、差动、主后备配合、断路器失灵、重合器—熔断器—分段器序列、自动保护
+拓扑、径向失电岛负荷退出、IEEE 1547 DER-FRT、瞬时闭锁、微网同步窗、信息
+共因、物理供电和备用电池。三级对照既可消费给定轨迹，也可执行在线 Mass-Matrix
+DAE；在线模式对主、后备各做发现和动作反馈两遍动态计算，并把实际轨迹、清除
+时刻和 DER 终态送入年度事件树。HTTP 与 GUI 返回 DAE/事件树时间一致性、轨迹
+点数、动作反馈、FRT 消费及模型限制，不以 HTTP 200 代替物理有效性证明。
+
+三阶段 MILP 的零目标相对间隙修订遵循“明确最优终止证书强于派生相对量”。修订前
+预测：`case33mg_acdc` 支路 2 的阶段 2、3 应由近似改判为已认证最优，认证间隙从
+1 归一为 0，后端原始间隙仍为 1，SAIFI/SAIDI/EENS 数值不变，36/36 用例通过。
+实测与预测一致：36/36 用例、1887/1887 断言通过，SAIFI=0.7580 次/(户·年)、
+SAIDI=7.20 分钟/(户·年)、EENS=440.0 kWh/年；后端状态为 StrictHiGHS Optimal，
+认证间隙为 0，原始间隙为 1。未触发理论重新推导阈值。
+
+当前 `macos-release` 专项回归重新实测：`test_reliability_resolver` 为 79 个用例、
+613 个断言；`test_intelligent_cyber_physical_reliability` 为 7 个用例、60 个断言；
+`test_three_stage_reliability` 为 36 个用例、1887 个断言；
+`test_resilience_assessment` 为 39 个用例、360 个断言。合计 161 个用例、2920 个
+断言全部通过。已注册浏览器测试 `reliability_workflow_e2e` 与
+`reliability_configuration_e2e` 全部通过，实测分别为 18.98 秒和 52.70 秒；覆盖
+在线 DAE HTTP/GUI、精确灵敏度、重要抽样、三级对照、参数稀疏保存/回读和
+390×844 移动视口无横向溢出。
+
+闭式三级基准的静态、仅保护、联合 EENS 分别为 200.0、0.4007777778、
+21.5217333333 MWh/年，对应 LOLE 为 20.0、0.2000777778、4.1600622222 h/年。
+保护误动基准为 0.4 次/年，EENS、LOLE、LOLF 增量分别为 0.2 MWh/年、0.1 h/年、
+0.4 次/年，分解残差为 0。有效故障率同时报告运行时间条件强度和日历年事件频率，
+并由 `(1-U)*lambda_up=f_calendar` 回归验证，避免把两种口径直接混用。
+
+中文可靠性手册最终为 103 页 A4，正文约 13.8 万字符、其中约 5.2 万汉字；XeLaTeX
+干净编译无溢出版心警告，Poppler 以 120 dpi 渲染全部 103 页，非空页 103/103。
+联系表和封面、求解证书、保护、信息系统、在线 DAE、三级对照、参数表、验证边界、
+末页均已目视检查，无裁切、重叠或英文生成附录。可靠性手册、总理论文档及可靠性
+源码的悬空状态词扫描为零，新增代码的任务标记、占位和固定伪值扫描为零。
+
+明确拒绝边界保留：在线保护是正序网络和单相故障输入，不认证三相 EMT、行波保护
+或 CT 磁滞；年度后果使用三窗口模型；三阶段恢复入口拒绝 LCC 和多端口能量路由器，
+不伪造零影响结果。活动兄弟仓库 MIPSolvers 为 `7721936245d...`，仓库记录 pin 为
+`3bf1e66749e...`，因此上述结果只证明当前本地 Release 工作区，不能声称依赖锁定
+可复现。
 
 ## Module manual theory layer (in progress)
 

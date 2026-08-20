@@ -288,15 +288,30 @@ struct CatalogCtx {
         std::isfinite(policy.hours_per_year) && policy.hours_per_year > 0.0
             ? policy.hours_per_year
             : 8760.0;
-    auto set_resolved_lambda = [&](double lambda) {
+    auto set_resolved_lambda = [&](double lambda,
+                                   bool value_is_calendar_frequency = false) {
+      if (value_is_calendar_frequency && e.mode.params.repair_hr > 0.0) {
+        const double unavailable =
+            lambda * e.mode.params.repair_hr / hours_per_year;
+        if (!(unavailable >= 0.0) || unavailable >= 1.0)
+          throw std::invalid_argument(
+              "calendar failure frequency and repair time imply U >= 1");
+        e.mode.params.calendar_frequency_per_year = lambda;
+        lambda /= 1.0 - unavailable;
+      }
       e.mode.params.lambda_per_year = lambda;
       e.mode.params.mttf_hr = lambda > 0.0 ? hours_per_year / lambda : 0.0;
       const double repair = e.mode.params.repair_hr;
       if (lambda > 0.0 && repair > 0.0) {
         const double mu = hours_per_year / repair;
         e.mode.params.unavailability = lambda / (lambda + mu);
+        if (!value_is_calendar_frequency)
+          e.mode.params.calendar_frequency_per_year =
+              (1.0 - e.mode.params.unavailability) * lambda;
       } else {
         e.mode.params.unavailability = 0.0;
+        if (!value_is_calendar_frequency)
+          e.mode.params.calendar_frequency_per_year = 0.0;
       }
     };
     if (protection && cons == FailureConsequenceKind::FailToTrip) {
@@ -305,7 +320,7 @@ struct CatalogCtx {
           protection->fail_to_trip_probability;
       e.mode.params.lambda_active_per_year =
           raw.demand_frequency_per_year * protection->fail_to_trip_probability;
-      set_resolved_lambda(e.mode.params.lambda_active_per_year);
+      set_resolved_lambda(e.mode.params.lambda_active_per_year, true);
       e.mode.params.data_source = "user_override";
       e.mode.params.has_data = true;
     } else if (protection && cons == FailureConsequenceKind::FailToOpen) {
@@ -314,18 +329,20 @@ struct CatalogCtx {
           protection->fail_to_open_probability;
       e.mode.params.lambda_active_per_year =
           raw.demand_frequency_per_year * protection->fail_to_open_probability;
-      set_resolved_lambda(e.mode.params.lambda_active_per_year);
+      set_resolved_lambda(e.mode.params.lambda_active_per_year, true);
       e.mode.params.data_source = "user_override";
       e.mode.params.has_data = true;
     } else if (protection && cons == FailureConsequenceKind::NuisanceTrip) {
-      set_resolved_lambda(protection->nuisance_trip_frequency_per_year);
+      set_resolved_lambda(protection->nuisance_trip_frequency_per_year, true);
       e.mode.params.data_source = "user_override";
       e.mode.params.has_data = true;
     }
     if (custom) {
       if (custom->enabled) e.enabled = *custom->enabled;
       if (custom->failure_rate_per_year)
-        set_resolved_lambda(*custom->failure_rate_per_year);
+        set_resolved_lambda(
+            *custom->failure_rate_per_year,
+            policy.failure_rate_basis == FailureRateBasis::CalendarTime);
       if (custom->forced_outage_rate) {
         const double unavailable = *custom->forced_outage_rate;
         e.mode.params.unavailability = unavailable;
@@ -339,7 +356,7 @@ struct CatalogCtx {
         e.mode.params.probability_per_demand = raw.probability_per_demand;
         e.mode.params.lambda_active_per_year =
             raw.demand_frequency_per_year * raw.probability_per_demand;
-        set_resolved_lambda(e.mode.params.lambda_active_per_year);
+        set_resolved_lambda(e.mode.params.lambda_active_per_year, true);
       }
       if (custom->probability_given_initiated)
         e.mode.probability_given_initiated =
@@ -1936,6 +1953,9 @@ FailureModeFMEAResult run_failure_mode_fmea(
     double frequency{0.0};
     double duration{0.0};
     double unavailability{0.0};
+    double shed_mw{0.0};
+    bool causes_loss{false};
+    std::vector<double> nodal_shed_mw;
   };
   std::vector<SupportedMode> supported_modes;
 
@@ -1959,7 +1979,9 @@ FailureModeFMEAResult run_failure_mode_fmea(
     const double dur = entry.mode.isolation_hr + entry.mode.switching_hr +
                        std::max(entry.mode.params.repair_hr, entry.mode.repair_hr);
     c.duration_hr = dur;
-    c.frequency_per_year = entry.mode.params.lambda_per_year;  // active already = nu*p
+    c.frequency_per_year = entry.mode.params.calendar_frequency_per_year > 0.0
+        ? entry.mode.params.calendar_frequency_per_year
+        : entry.mode.params.lambda_per_year;
 
     if (!entry.enabled) {
       c.supported = false;
@@ -2013,6 +2035,9 @@ FailureModeFMEAResult run_failure_mode_fmea(
       work.supported_mode.duration = dur;
       work.supported_mode.unavailability =
           std::min(1.0, c.frequency_per_year * dur / 8760.0);
+      work.supported_mode.shed_mw = total_shed;
+      work.supported_mode.causes_loss = c.causes_loss;
+      work.supported_mode.nodal_shed_mw = nodal_shed;
       work.has_supported_mode = true;
     }
 
@@ -2080,16 +2105,49 @@ FailureModeFMEAResult run_failure_mode_fmea(
     if (work.has_supported_mode) supported_modes.push_back(std::move(work.supported_mode));
     result.contingencies.push_back(std::move(work.contingency));
   }
+  result.first_order_eens_mwh_yr = result.eens_mwh_yr;
 
   // ── Optional second-order (co-failure) enumeration ──────────────────────
-  // Compose pairs of supported single modes on DISTINCT components, evaluate the
-  // joint network state, and accumulate the overlap contribution using the
-  // standard independent second-order approximation: the probability that both
-  // modes are simultaneously down is U_i*U_j, so the joint state contributes
-  // EENS += U_i*U_j*8760*S_ij (MWh/yr) and LOLE += U_i*U_j*8760 (hr/yr).  These
-  // are distinct states from the single-mode terms (which approximate "i down,
-  // others up"), so the sum is the standard first+second-order state expansion.
+  // Hoeffding/ANOVA second-order state expansion from
+  // docs/modules/reliability/chapters/theory_reliability_failure_analysis.tex,
+  // eq. (rel-fa-exact): S0 + sum Ui(Si-S0) +
+  // sum UiUj(Sij-Si-Sj+S0).  The raw pair overlap remains in each row for
+  // ranking, but only the interaction term enters aggregate EENS/LOLE.
   if (options.max_order >= 2 && supported_modes.size() > 1) {
+    const NetworkShedResult baseline_state =
+        evaluate_failed_network_state(sys, fmea_opts);
+    std::vector<double> baseline_nodal = baseline_state.nodal_shed_mw;
+    if (baseline_nodal.size() < nb) baseline_nodal.resize(nb, 0.0);
+    const double baseline_shed = baseline_state.total_shed_mw;
+    const bool baseline_loss = baseline_shed > eps;
+    result.baseline_eens_mwh_yr = baseline_shed * 8760.0;
+
+    result.eens_mwh_yr = result.baseline_eens_mwh_yr;
+    result.lole_hr_yr = baseline_loss ? 8760.0 : 0.0;
+    std::fill(result.nodal_eens_mwh_yr.begin(),
+              result.nodal_eens_mwh_yr.end(), 0.0);
+    std::fill(nodal_cid.begin(), nodal_cid.end(), 0.0);
+    for (size_t bb = 0; bb < nb; ++bb) {
+      result.nodal_eens_mwh_yr[bb] = baseline_nodal[bb] * 8760.0;
+      nodal_cid[bb] = baseline_nodal[bb] > eps ? 8760.0 : 0.0;
+    }
+    for (const auto& mode : supported_modes) {
+      result.eens_mwh_yr +=
+          mode.unavailability * 8760.0 * (mode.shed_mw - baseline_shed);
+      result.lole_hr_yr += mode.unavailability * 8760.0 *
+          ((mode.causes_loss ? 1.0 : 0.0) - (baseline_loss ? 1.0 : 0.0));
+      for (size_t bb = 0; bb < nb; ++bb) {
+        const double single_shed = bb < mode.nodal_shed_mw.size()
+                                       ? mode.nodal_shed_mw[bb]
+                                       : 0.0;
+        result.nodal_eens_mwh_yr[bb] += mode.unavailability * 8760.0 *
+            (single_shed - baseline_nodal[bb]);
+        nodal_cid[bb] += mode.unavailability * 8760.0 *
+            ((single_shed > eps ? 1.0 : 0.0) -
+             (baseline_nodal[bb] > eps ? 1.0 : 0.0));
+      }
+    }
+
     struct PairWork {
       size_t a{0};
       size_t b{0};
@@ -2108,17 +2166,18 @@ FailureModeFMEAResult run_failure_mode_fmea(
     const int max_pairs = std::max(0, options.max_pairs_evaluated);
     std::vector<PairWork> pair_work;
     pair_work.reserve(static_cast<size_t>(std::min<int>(max_pairs, 4096)));
-    for (size_t i = 0; i < supported_modes.size() &&
-                       static_cast<int>(pair_work.size()) < max_pairs; ++i) {
+    for (size_t i = 0; i < supported_modes.size(); ++i) {
       for (size_t k = i + 1; k < supported_modes.size(); ++k) {
-        if (static_cast<int>(pair_work.size()) >= max_pairs) break;
         const auto& a = supported_modes[i];
         const auto& b = supported_modes[k];
         // Modes of the same component are mutually-exclusive alternatives, not
         // independent co-failures.
         if (a.component_id == b.component_id) continue;
         const double u_ij = a.unavailability * b.unavailability;
-        if (u_ij < options.min_pair_unavailability) continue;
+        if (u_ij < options.min_pair_unavailability) {
+          ++result.n_pairs_skipped_by_threshold;
+          continue;
+        }
 
         ConsequencePatch composed =
             compose_consequence_patches({a.patch, b.patch});
@@ -2127,6 +2186,10 @@ FailureModeFMEAResult run_failure_mode_fmea(
           if (w.find("hard conflict") != std::string::npos) { conflict = true; break; }
         if (conflict) continue;
 
+        if (static_cast<int>(pair_work.size()) >= max_pairs) {
+          ++result.n_pairs_skipped_by_budget;
+          continue;
+        }
         pair_work.push_back({i, k, u_ij, std::move(composed)});
       }
     }
@@ -2141,10 +2204,16 @@ FailureModeFMEAResult run_failure_mode_fmea(
 
       std::vector<double> nodal_shed;
       const double shed_ij = evaluate_patch(pw.composed, nodal_shed);
-      if (shed_ij <= eps) return work;
-
       const double eens_ij = pw.joint_unavailability * 8760.0 * shed_ij;
-      const double lole_ij = pw.joint_unavailability * 8760.0;
+      const bool pair_loss = shed_ij > eps;
+      const double lole_ij = pair_loss
+                                 ? pw.joint_unavailability * 8760.0
+                                 : 0.0;
+      const double interaction_eens = pw.joint_unavailability * 8760.0 *
+          (shed_ij - a.shed_mw - b.shed_mw + baseline_shed);
+      const double interaction_lole = pw.joint_unavailability * 8760.0 *
+          ((pair_loss ? 1.0 : 0.0) - (a.causes_loss ? 1.0 : 0.0) -
+           (b.causes_loss ? 1.0 : 0.0) + (baseline_loss ? 1.0 : 0.0));
       const double freq_ij =
           a.frequency * b.frequency * (a.duration + b.duration) / 8760.0;
       const double dur_ij = (a.duration + b.duration) > 0.0
@@ -2156,11 +2225,16 @@ FailureModeFMEAResult run_failure_mode_fmea(
       work.nodal_cid.assign(nb, 0.0);
       for (size_t bb = 0; bb < nb && bb < nodal_shed.size(); ++bb) {
         const double sbed = nodal_shed[bb];
-        work.nodal_eens[bb] += pw.joint_unavailability * 8760.0 * sbed;
-        if (sbed > eps) {
-          work.nodal_cif[bb] += freq_ij;
-          work.nodal_cid[bb] += freq_ij * dur_ij;
-        }
+        const double shed_a = bb < a.nodal_shed_mw.size()
+                                  ? a.nodal_shed_mw[bb] : 0.0;
+        const double shed_b = bb < b.nodal_shed_mw.size()
+                                  ? b.nodal_shed_mw[bb] : 0.0;
+        work.nodal_eens[bb] = pw.joint_unavailability * 8760.0 *
+            (sbed - shed_a - shed_b + baseline_nodal[bb]);
+        work.nodal_cid[bb] = pw.joint_unavailability * 8760.0 *
+            ((sbed > eps ? 1.0 : 0.0) - (shed_a > eps ? 1.0 : 0.0) -
+             (shed_b > eps ? 1.0 : 0.0) +
+             (baseline_nodal[bb] > eps ? 1.0 : 0.0));
       }
 
       work.co.mode_a = a.patch.mode;
@@ -2170,9 +2244,11 @@ FailureModeFMEAResult run_failure_mode_fmea(
       work.co.duration_hr = dur_ij;
       work.co.total_shed_mw = shed_ij;
       work.co.eens_contribution = eens_ij;
+      work.co.interaction_eens_correction = interaction_eens;
       work.co.lole_contribution = lole_ij;
-      work.co.causes_loss = true;
-      work.causes_loss = true;
+      work.co.interaction_lole_correction = interaction_lole;
+      work.co.causes_loss = pair_loss;
+      work.causes_loss = pair_loss;
       return work;
     };
 
@@ -2210,13 +2286,13 @@ FailureModeFMEAResult run_failure_mode_fmea(
     }
 
     for (auto& work : pair_results) {
-      if (!work.evaluated || !work.causes_loss) continue;
-      result.eens_mwh_yr += work.co.eens_contribution;
-      result.lole_hr_yr += work.co.lole_contribution;
-      result.lolf_occ_yr += work.co.joint_frequency_per_year;
+      if (!work.evaluated) continue;
+      result.eens_mwh_yr += work.co.interaction_eens_correction;
+      result.second_order_interaction_eens_mwh_yr +=
+          work.co.interaction_eens_correction;
+      result.lole_hr_yr += work.co.interaction_lole_correction;
       for (size_t bb = 0; bb < nb; ++bb) {
         if (bb < work.nodal_eens.size()) result.nodal_eens_mwh_yr[bb] += work.nodal_eens[bb];
-        if (bb < work.nodal_cif.size()) nodal_cif[bb] += work.nodal_cif[bb];
         if (bb < work.nodal_cid.size()) nodal_cid[bb] += work.nodal_cid[bb];
       }
       result.co_contingencies.push_back(std::move(work.co));
@@ -2225,6 +2301,15 @@ FailureModeFMEAResult run_failure_mode_fmea(
               [](const FailureModeCoContingency& x, const FailureModeCoContingency& y) {
                 return x.eens_contribution > y.eens_contribution;
               });
+    result.second_order_expansion_complete =
+        result.n_pairs_skipped_by_threshold == 0 &&
+        result.n_pairs_skipped_by_budget == 0;
+    if (!result.second_order_expansion_complete) {
+      result.warnings.push_back(
+          "second-order interaction expansion is incomplete because pair states were omitted by the configured threshold or budget");
+    }
+    result.warnings.push_back(
+        "pair joint_frequency_per_year is diagnostic only; aggregate LOLF remains first-order because static Hoeffding interaction weights do not define boundary-crossing frequency");
   }
 
   result.edns_mw = result.eens_mwh_yr / 8760.0;

@@ -393,6 +393,8 @@ hacdcpf_add_test(test_three_stage_reliability test_three_stage_reliability.cpp)
 #   SAIFI/SAIDI fix (compute_distribution_indices), the data-quality summary,
 #   and the opt-in data policy through run_distribution_fmea.
 hacdcpf_add_test(test_reliability_resolver test_reliability_resolver.cpp)
+hacdcpf_add_test(test_intelligent_cyber_physical_reliability
+                 test_intelligent_cyber_physical_reliability.cpp)
 
 # LTM traffic framework: triangular FD sending/receiving, single-link LTM,
 # mesoscopic multi-link corridor, EV penetration sweep (station loading),

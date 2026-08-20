@@ -13,7 +13,7 @@
 
 | 入口 | 用途 |
 |---|---|
-| `docs/development_status.md` | 最近验证的构建/测试基线、当前脏工作树与未闭环问题 |
+| `docs/overview/development_status.md` | 最近验证的构建/测试基线、当前脏工作树与未闭环问题 |
 | `docs/README.md` | 实现契约与理论材料的唯一文档导航入口 |
 | `.github/skills/manage-codebase-context/SKILL.md` | 代码状态核实、交接和 AI 文档同步流程 |
 
@@ -54,7 +54,7 @@ Rich HybridPowerSystem（工程语义层）
 | `power_models/` | 基于 MIPSolvers AML 的求解器无关建模层（acopf/acdcopf/dc_opf/lindistflow/scuc builder） |
 | `graph/` | 图建模、拓扑分析、开关收缩、Kron/series/pendant/sparse-Kron 降阶与结果恢复 |
 | `network_reconfiguration/` | ONR 与故障后重构 MILP |
-| `reliability/` | MC、FMEA（含 failure-mode 目录与信息物理 L1）、三阶段 MILP、F&D |
+| `reliability/` | MC、FMEA（含 failure-mode 目录与信息物理 L1/L2）、物理/信息最小割集、在线保护 DAE、三阶段 MILP、F&D |
 | `resilience/` | 启发式/多时段 MIP/分阶段 MILP 弹性恢复，MESS 路由 |
 | `analysis/` | 承载力（DL/T 2041-2025）、反事实规划、多维薄弱环节 |
 | `scenario_generation/` | 常规/可靠性/弹性场景 + 台风（Holland 风场） |

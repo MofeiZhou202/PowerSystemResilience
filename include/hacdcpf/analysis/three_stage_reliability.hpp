@@ -74,9 +74,15 @@ struct ThreeStageFaultDetail {
   std::string stage1_status;
   std::string stage2_status;
   std::string stage3_status;
+  std::string stage1_solver_status; ///< backend termination status before normalization
+  std::string stage2_solver_status;
+  std::string stage3_solver_status;
   double stage1_mip_gap{0.0};
   double stage2_mip_gap{0.0};
   double stage3_mip_gap{0.0};
+  double stage1_solver_reported_mip_gap{0.0};
+  double stage2_solver_reported_mip_gap{0.0};
+  double stage3_solver_reported_mip_gap{0.0};
   double objective{0.0};
   double pls_stage1{0.0};     ///< load shed in Stage 1 (kW)
   double pls_stage2{0.0};     ///< load shed in Stage 2 (kW)
@@ -142,6 +148,8 @@ struct ThreeStageReliabilityResult {
   double eens_kwh_yr{0.0};    ///< expected energy not supplied (kWh / yr)
   double eens_cost{0.0};      ///< EENS × ω (currency / yr)
   int    worst_line{0};       ///< line id with maximum total load shed
+  int apparent_power_polygon_sides{0};
+  double maximum_ac_branch_apparent_power_ratio{0.0};
 
   // Per-load-node indices (length = nd).
   std::vector<double> nodal_eens_kwh_yr;
@@ -194,6 +202,7 @@ struct ThreeStageReliabilityResult {
   /// system.
   struct ValidityFlags {
     bool branch_flow_enforced{false};
+    bool apparent_power_polygon_enforced{false};
     bool voltage_constraints_enforced{false};
     bool radial_topology_enforced{false};
     bool sop_dispatch_optimised{false};
@@ -220,6 +229,11 @@ struct ThreeStageReliabilityResult {
 // ─── Options ─────────────────────────────────────────────────────────────────
 
 struct ThreeStageReliabilityOptions {
+  /// Even number of facets in the inscribed polygon enforcing
+  /// sqrt(P^2+Q^2) <= S on every energized AC branch.  Values must be even and
+  /// at least 4; 16 is the default accuracy/cost compromise.
+  int apparent_power_polygon_sides{16};
+
   /// Maximum number of switching operations allowed during Stage 2 (post-fault
   /// switching restoration).  Each normally-open AC switch that is closed in
   /// Stage 2 to merge two distinct connected components counts as one

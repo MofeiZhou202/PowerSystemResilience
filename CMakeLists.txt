@@ -525,6 +525,9 @@ set(HACDCPF_SOURCES
   src/reliability/reliability_assessment.cpp
   src/reliability/reliability_data.cpp
   src/reliability/failure_mode.cpp
+  src/reliability/protection_frt.cpp
+  src/reliability/intelligent_cyber_physical.cpp
+  src/reliability/online_protection.cpp
   src/resilience/resilience_assessment.cpp
   src/resilience/resilience_stage_milp.cpp
   src/resilience/resilience_restoration_mip.cpp

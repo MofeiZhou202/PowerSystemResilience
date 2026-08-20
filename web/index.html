@@ -1855,6 +1855,12 @@
           <option value="comprehensive">综合混合示范</option>
         </select>
       </label>
+      <label class="sub-label" title="运行年强度按设备实际运行时间计；日历年频率包含停运暴露，后端按修复时间精确反解运行年强度">故障率口径
+        <select id="relFailureRateBasis">
+          <option value="operating_time" selected>运行年强度</option>
+          <option value="calendar_time">日历年频率</option>
+        </select>
+      </label>
     </div>
     <div class="rel-param-group rel-dimension rel-dimension-physical" data-rel-dimension="physical" title="物理维度：失效模式与故障后果类型">
       <span class="rel-param-title">物理 · 失效</span>
@@ -1929,10 +1935,13 @@
         <input id="relTsDcPf" type="checkbox" checked/>
         <span>三阶段DC潮流</span>
       </label>
+      <label class="sub-label rel-three-stage-control" title="交流支路视在功率圆的内接多边形边数；必须是大于等于4的偶数">热限边数
+        <input id="relTsPolygonSides" type="number" value="16" min="4" max="128" step="2"/>
+      </label>
     </div>
     <div class="rel-param-group rel-dimension rel-dimension-information" data-rel-dimension="information" title="信息维度：通信服务可用性、响应时延与失联控制退化">
       <span class="rel-param-title">信息</span>
-      <label class="sub-label sub-checkbox rel-cyber-toggle" title="启用信息服务条件化；当前为 Level-1 条件后果筛查，不构造显式通信拓扑">
+      <label class="sub-label sub-checkbox rel-cyber-toggle" title="为 FMEA 启用 Level-1 信息服务条件化；保护-信息物理三级对照方法另行执行共享通信拓扑、QoS、共因、物理供电与电池自治">
         <input id="relCyberEnabled" type="checkbox" aria-controls="relCyberAvailability relCyberAutoMinutes relCyberManualMinutes relCyberFreezeDer"/>
         <span>启用信息维度</span>
       </label>
@@ -1949,11 +1958,11 @@
         <input id="relCyberFreezeDer" type="checkbox" checked/>
         <span>失联冻结 DER</span>
       </label>
-      <span class="sub-hint">Level 1 条件后果</span>
+      <span class="sub-hint">FMEA: Level 1 · 三级对照: 共享拓扑与时序</span>
     </div>
     <div class="rel-param-group rel-dimension rel-dimension-intelligent" data-rel-dimension="intelligent" title="智能维度：检测、隔离、恢复决策、动作执行和保护成功率">
       <span class="rel-param-title">智能</span>
-      <label class="sub-label sub-checkbox rel-intelligent-toggle" title="启用智能功能成功率筛查；当前采用条件独立乘积并将失败路由到退化/人工后果类">
+      <label class="sub-label sub-checkbox rel-intelligent-toggle" title="为 FMEA 启用智能功能成功率筛查；保护-信息物理三级对照方法另行执行检测、隔离、恢复、保护配合、DER-FRT 与在线 DAE">
         <input id="relIntelligentEnabled" type="checkbox" aria-controls="relDetectionSuccess relIsolationSuccess relRestorationDecisionSuccess relRestorationExecutionSuccess relProtectionSuccess"/>
         <span>启用智能维度</span>
       </label>
@@ -1972,7 +1981,7 @@
       <label class="sub-label rel-intelligent-control" title="主保护和开断链路完成预期清除的筛查概率；当前不计算继电器时限或备用区扩大">
         <input id="relProtectionSuccess" type="number" value="0.995" min="0" max="1" step="0.001"/>
       </label>
-      <span class="sub-hint">独立因子筛查 · 保护-FRT 未耦合</span>
+      <span class="sub-hint">FMEA: 因子筛查 · 三级对照: 保护-FRT 在线闭环</span>
     </div>
     <div class="rel-param-group rel-der-control-group" title="在不改写当前模型的前提下，对可靠性计算副本施加 DER 控制角色场景">
       <span class="rel-param-title">DER 控制</span>
@@ -1999,7 +2008,16 @@
           <option value="fmea">元件 N-1 FMEA</option>
           <option value="failure_mode_fmea">失效模式 FMEA</option>
           <option value="fd">频率-持续时间 (F&amp;D)</option>
+          <option value="exact_sensitivity">精确灵敏度（状态枚举）</option>
+          <option value="physical_cut_set">物理网络最小割集</option>
+          <option value="protection_cyber_compare">保护-信息物理三级对照</option>
         </select>
+      </label>
+      <label class="sub-label rel-physical-cut-set-control" hidden title="JSON 数组；每项必须含稳定ID和独立可用率">物理元件
+        <textarea id="relPhysicalCutSetComponents" rows="2" spellcheck="false">[{"stable_id":"ac_branch:10","availability":0.9},{"stable_id":"ac_branch:20","availability":0.8},{"stable_id":"ac_branch:30","availability":0.7}]</textarea>
+      </label>
+      <label class="sub-label rel-physical-cut-set-control" hidden title="JSON 二维数组；每条成功路径列出物理元件数组中的零基序号">成功路径
+        <textarea id="relPhysicalCutSetPaths" rows="2" spellcheck="false">[[0,1],[0,2]]</textarea>
       </label>
       <label class="sub-label" title="蒙特卡洛最大抽样次数 (NSQ) / 年数×10 (SEQ)">抽样次数
         <input id="relMaxIter" type="number" value="2000" min="100" step="500"/>
@@ -2010,6 +2028,77 @@
       </label>
       <label class="sub-label" title="可靠性分析线程数；0 表示自动使用硬件并发数">线程
         <input id="relParallelThreads" type="number" value="0" min="0" max="256" step="1"/>
+      </label>
+      <label class="sub-label sub-checkbox rel-importance-control" title="仅用于非序贯蒙特卡洛；按扭曲不可用度抽样并用似然比保持估计无偏">
+        <input id="relImportanceSampling" type="checkbox"/>
+        <span>重要抽样</span>
+      </label>
+      <label class="sub-label rel-importance-control" title="不可用度优势比的扭曲因子；1 表示与普通抽样逐样本一致">扭曲因子
+        <input id="relImportanceLambda" type="number" value="2" min="0.000001" step="0.1"/>
+      </label>
+      <label class="sub-label rel-exact-sensitivity-control" title="精确枚举允许的非退化随机二状态元件上限；超过后端将明确拒绝">随机元件上限
+        <input id="relExactMaxComponents" type="number" value="20" min="1" max="20" step="1"/>
+      </label>
+      <label class="sub-label rel-protection-cyber-control" title="对照事件的年发生频率">故障频率
+        <input id="relPcFrequency" type="number" value="2" min="0" step="0.1"/>
+      </label>
+      <label class="sub-label sub-checkbox rel-protection-cyber-control" title="由网络 Mass-Matrix DAE 生成主、后备测量轨迹，并把支路跳闸反馈到第二遍动态计算">
+        <input id="relPcOnlineDae" type="checkbox"/>
+        <span>在线 DAE</span>
+      </label>
+      <label class="sub-label rel-protection-cyber-control" title="在线 DAE 故障交流母线稳定 ID；0 表示取主保护支路受端">故障母线
+        <input id="relPcFaultBus" type="number" value="0" min="0" step="1"/>
+      </label>
+      <label class="sub-label rel-protection-cyber-control" title="在线 DAE 主保护交流支路稳定 ID；0 表示取第一条在役支路">主保护支路
+        <input id="relPcPrimaryBranch" type="number" value="0" min="0" step="1"/>
+      </label>
+      <label class="sub-label rel-protection-cyber-control" title="在线 DAE 后备保护交流支路稳定 ID；0 表示取第二条在役支路">后备保护支路
+        <input id="relPcBackupBranch" type="number" value="0" min="0" step="1"/>
+      </label>
+      <label class="sub-label rel-protection-cyber-control" title="在线 DAE 时间步，单位秒；事件树清除时刻一致性容差不超过一个时间步">DAE步长(s)
+        <input id="relPcDaeStep" type="number" value="0.01" min="0.0001" step="0.001"/>
+      </label>
+      <label class="sub-label rel-protection-cyber-control" title="提供给主、后备过流继电器的故障电流标幺值">故障电流
+        <input id="relPcFaultCurrent" type="number" value="2" min="0" step="0.1"/>
+      </label>
+      <label class="sub-label rel-protection-cyber-control" title="主保护定时限动作延时，单位秒">主保护(s)
+        <input id="relPcPrimaryDelay" type="number" value="0.1" min="0" step="0.01"/>
+      </label>
+      <label class="sub-label rel-protection-cyber-control" title="后备保护定时限动作延时，单位秒">后备保护(s)
+        <input id="relPcBackupDelay" type="number" value="0.5" min="0" step="0.01"/>
+      </label>
+      <label class="sub-label rel-protection-cyber-control" title="主继电器按需成功概率">主保护成功率
+        <input id="relPcPrimarySuccess" type="number" value="0.9" min="0" max="1" step="0.01"/>
+      </label>
+      <label class="sub-label rel-protection-cyber-control" title="后备继电器按需成功概率">后备保护成功率
+        <input id="relPcBackupSuccess" type="number" value="1" min="0" max="1" step="0.01"/>
+      </label>
+      <label class="sub-label rel-protection-cyber-control" title="主、后备断路器的按需成功概率">断路器成功率
+        <input id="relPcBreakerSuccess" type="number" value="1" min="0" max="1" step="0.01"/>
+      </label>
+      <label class="sub-label rel-protection-cyber-control" title="后备与主保护清除时刻之间要求的选择性裕度，单位秒">配合裕度(s)
+        <input id="relPcCoordinationMargin" type="number" value="0.3" min="0" step="0.01"/>
+      </label>
+      <label class="sub-label rel-protection-cyber-control" title="共享检测、隔离和恢复信息路径的固有可用率">信息可用率
+        <input id="relPcInfoAvailability" type="number" value="0.8" min="0" max="1" step="0.01"/>
+      </label>
+      <label class="sub-label rel-protection-cyber-control" title="故障未隔离时的切负荷功率，单位 MW">故障切负荷
+        <input id="relPcFaultShed" type="number" value="10" min="0" step="0.1"/>
+      </label>
+      <label class="sub-label rel-protection-cyber-control" title="成功隔离后的剩余切负荷功率，单位 MW">隔离后切负荷
+        <input id="relPcIsolatedShed" type="number" value="2" min="0" step="0.1"/>
+      </label>
+      <label class="sub-label rel-protection-cyber-control" title="恢复动作失败后的剩余切负荷功率，单位 MW">恢复失败切负荷
+        <input id="relPcRestoreFailedShed" type="number" value="5" min="0" step="0.1"/>
+      </label>
+      <label class="sub-label rel-protection-cyber-control" title="自动恢复窗口，单位小时">自动恢复(h)
+        <input id="relPcAutoRestore" type="number" value="0.1" min="0" step="0.1"/>
+      </label>
+      <label class="sub-label rel-protection-cyber-control" title="信息失效后的人工恢复窗口，单位小时">人工恢复(h)
+        <input id="relPcManualRestore" type="number" value="1" min="0" step="0.1"/>
+      </label>
+      <label class="sub-label rel-protection-cyber-control" title="物理修复窗口，单位小时">修复(h)
+        <input id="relPcRepair" type="number" value="10" min="0" step="0.5"/>
       </label>
       <div class="rel-seq-profile rel-seq-editor-launch" title="编辑序贯蒙特卡洛逐时负荷曲线和各 AC/DC 负荷点的空间倍率">
         <span>SEQ负荷模型</span>

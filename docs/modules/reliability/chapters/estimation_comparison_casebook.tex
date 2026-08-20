@@ -1,0 +1,343 @@
+\section{精确法、抽样法与故障分析法的统一对照算例}\label{sec:rel-estimation-casebook}
+
+保护和信息模型解决“一个状态产生什么后果”，统计估计层解决“状态以什么权重进入年度指标”。本章在同一二状态假设下对照
+精确枚举、普通非序贯蒙特卡洛、重要抽样、频率--持续时间和 N-2 故障分析，说明哪些结果应一致、哪些指标因模型口径不同
+不能直接比较。
+
+\subsection{二状态元件的统一参数化}
+元件 $i$ 的失效率为 $\lambda_i$ 次/年，平均修复时间为 $r_i$ h。采用常失效率、常修复率两状态 CTMC 时，修复率
+$\mu_i=8760/r_i$ 次/年，稳态不可用率
+\begin{equation}\label{eq:rel-case-unavailability}
+ U_i=\frac{\lambda_i}{\lambda_i+\mu_i}.
+\end{equation}
+若输入直接给 FOR，则精确枚举和非序贯 MC 可使用 FOR 作为 $U_i$；但没有 MTTR 时不能反推出状态转移频率，F\&D 仍可
+给 LOLP/LOLE，却不能伪造 LOLF 和 LOLD。
+
+所有方法必须使用同一可靠性数据策略。\verb|case_data_only| 只消费案例字段；\verb|missing_only| 仅在字段缺失时使用默认库；
+\verb|template_override| 按模板覆盖。若一行使用案例 FOR、另一行使用模板失效率，即使网络相同也不是方法对照。
+
+\subsection{精确独立状态枚举}
+对 $n$ 个非退化独立元件，状态 $x\in\{0,1\}^n$，约定 $x_i=1$ 表示停运。状态概率为
+\begin{equation}
+ p(x)=\prod_iU_i^{x_i}(1-U_i)^{1-x_i}.
+\end{equation}
+每个状态调用同一最小切负荷后果函数，得到增量损失 $L(x)$。精确年度指标为
+\begin{align}
+ \mathrm{EENS}_{exact}&=H\sum_xp(x)L(x),\\
+ \mathrm{LOLE}_{exact}&=H\sum_xp(x)\mathbf1[L(x)>\varepsilon].
+\end{align}
+退化元件 $U_i=0$ 或 1 不扩张位空间，而是固定运行或停运。实现上限为 20 个非退化元件；超过上限明确拒绝，因为
+$2^{20}=1,048,576$ 已是单次交互分析的可见成本，不能静默退回无误差声明的近似。
+
+状态概率和
+\begin{equation}
+ r_p=\left|1-\sum_xp(x)\right|
+\end{equation}
+必须在浮点容差内为零。后果评估失败的状态不能以 $L=0$ 继续；否则最困难的停运状态会被系统性解释为无损失。
+
+\subsection{Birnbaum 与 EENS 导数}
+对元件 $i$，将其强制停运和强制运行，其余元件仍按原分布，定义
+\begin{align}
+ E_i^-&=H\,\mathbb E[L\mid x_i=1],\\
+ E_i^+&=H\,\mathbb E[L\mid x_i=0].
+\end{align}
+Birnbaum 能量重要度为
+\begin{equation}\label{eq:rel-case-birnbaum}
+ B_i=E_i^--E_i^+.
+\end{equation}
+因为总期望可写成 $E=U_iE_i^-+(1-U_i)E_i^+$，故
+\begin{equation}
+ \frac{\partial E}{\partial U_i}=B_i.
+\end{equation}
+专项测试同时用中心有限差分修改 $U_i$，要求导数与式~\eqref{eq:rel-case-birnbaum} 一致。若把内部向量位置当成稳定组件 ID，
+有限差分会修改错误元件，这项测试会立即失败。
+
+Fussell--Vesely 风险占比定义为
+\begin{equation}
+ FV_i=\frac{E-E_i^+}{E},\qquad E>0.
+\end{equation}
+它回答“消除元件 $i$ 的随机失效可消除多少现有风险”，而 Birnbaum 回答“不可用率微增的边际代价”。二者排序可以不同，
+结果表必须同时给单位：$B_i$ 为 MWh/年/单位不可用率，$FV_i$ 无量纲。
+
+\subsection{普通非序贯蒙特卡洛}
+普通 MC 从目标分布 $p(x)$ 独立抽取 $N$ 个状态，估计量
+\begin{equation}
+ \widehat E_{MC}=\frac{H}{N}\sum_{k=1}^NL(x^{(k)}).
+\end{equation}
+其方差
+\begin{equation}
+ \operatorname{Var}(\widehat E_{MC})=\frac{H^2}{N}
+ \operatorname{Var}_p[L(X)].
+\end{equation}
+低概率高损失状态会使大部分样本为零，有限样本中关键状态的命中次数可能仍为零。程序返回样本数、EENS 历史和最终
+变异系数；固定随机种子只保证复现，不把抽样结果变成精确值。
+
+非序贯 MC 的 LOLE 是 $H$ 乘失负荷概率；它没有事件时间顺序，不能给真实 LOLF。响应对 LOLF 返回不可用原因，而不是
+数值零。序贯 MC 才通过状态转移统计年度停电次数和持续时间。
+
+\subsection{优势比扭曲重要抽样}
+重要抽样把元件停运优势比乘扭曲因子 $\kappa>0$。目标不可用率 $U_i$ 转为提议分布
+\begin{equation}\label{eq:rel-case-twisted-u}
+ Q_i=\frac{\kappa U_i}{1-U_i+\kappa U_i}.
+\end{equation}
+从 $q(x)$ 抽样后，似然比
+\begin{equation}
+ w(x)=\frac{p(x)}{q(x)}=prod_i
+ \left(\frac{U_i}{Q_i}\right)^{x_i}
+ \left(\frac{1-U_i}{1-Q_i}\right)^{1-x_i}.
+\end{equation}
+无偏估计量为
+\begin{equation}
+ \widehat E_{IS}=\frac{H}{N}\sum_{k=1}^Nw(x^{(k)})L(x^{(k)}).
+\end{equation}
+实现使用未自归一化似然比保持无偏；把分母改为 $\sum_kw_k$ 会产生自归一化估计量，有限样本下有偏，不能与当前契约混用。
+
+当 $\kappa=1$ 时，式~\eqref{eq:rel-case-twisted-u} 给 $Q_i=U_i$，每个样本 $w=1$，重要抽样必须逐样本退化为普通抽样。
+专项测试固定相同随机种子，要求平均似然比精确为 1、有效样本量精确为 $N$。这是似然比方向最强的单元检查。
+
+\subsection{有效样本量与扭曲强度}
+归一化权重 $\widetilde w_k=w_k/\sum_jw_j$，有效样本量
+\begin{equation}
+ N_{eff}=\frac{1}{\sum_k\widetilde w_k^2}
+ =\frac{(\sum_kw_k)^2}{\sum_kw_k^2}.
+\end{equation}
+$N_{eff}\le N$。扭曲因子增大时关键停运状态出现更多，但权重离散也增大，ESS 可能下降。最优扭曲不是“越大越好”，应在
+关键状态覆盖和权重退化之间平衡。
+
+平均似然比 $\overline w=N^{-1}\sum_kw_k$ 的理论期望为 1。有限样本明显偏离 1 可能表示样本量不足或扭曲过强；长期系统性
+偏离则提示似然比公式、退化状态处理或概率下溢错误。响应同时返回 $\kappa$、ESS 和 $\overline w$，不能只显示一个“已启用
+重要抽样”标志。
+
+\subsection{精确法与抽样法的量化比较}
+对小系统先计算 $E_{exact}$，再用不同种子运行普通 MC 与 IS。定义相对误差
+\begin{equation}
+ e_r=\frac{|\widehat E-E_{exact}|}{\max(E_{exact},\epsilon)}.
+\end{equation}
+单次 IS 误差不保证小于单次 MC；正确比较应在多个独立种子上比较均方误差和置信区间。重要抽样的价值是对选定稀有事件
+降低方差，不是改变期望。
+
+建议使用三组实验：$\kappa=1$ 验证恒等性；$\kappa=2\sim4$ 检查关键停运覆盖和 ESS；过大的 $\kappa$ 用于展示权重退化。
+若 $\kappa=4$ 时 ESS 接近 $N$ 且关键状态更多，扭曲有效；若 ESS 只有个位数，应降低扭曲或增加样本。
+
+\subsection{序贯蒙特卡洛与非序贯均值}
+序贯 MC 对每个元件交替抽取运行时间和修复时间，生成逐时状态 $X(t)$。年度损失
+\begin{equation}
+ E_y=\int_0^HL(X_y(t))dt
+\end{equation}
+，多年度均值估计 EENS。若负荷恒定、元件独立两状态、每年从稳态初始化且无电池记忆或事件重叠，序贯与非序贯 EENS 应在
+抽样误差内一致。加入逐时负荷、共因持续过程、电池耗尽和恢复状态后，两者不再同口径。
+
+序贯结果的 LOLE 对停电区间并集积分，LOLF 统计从无损失到有损失的进入次数。平均持续时间
+$\mathrm{LOLD}=\mathrm{LOLE}/\mathrm{LOLF}$ 仅在 LOLF 正且时序有效时返回。用非序贯失负荷样本数代替 LOLF 会把样本频数
+误当物理事件频率。
+
+\subsection{精确容量停运表}
+频率--持续时间法对发电机容量停运状态做卷积。机组 $i$ 容量为 $C_i$、不可用率 $U_i$，从初始状态
+$(0,1)$ 递推
+\begin{align}
+ P_{new}(c)&\mathrel{+}=P(c)(1-U_i),\\
+ P_{new}(c+C_i)&\mathrel{+}=P(c)U_i.
+\end{align}
+容量值不分箱，只有浮点容差内相同的停运容量合并。因此
+\fld{exact\_capacity\_states=true} 表示未用人为 MW 桶近似。
+
+给定总装机 $C_T$ 和峰荷 $D$，容量不足状态满足 $C_T-c<D$。由这些状态汇总
+\begin{align}
+ \mathrm{LOLP}&=\sum_{c:C_T-c<D}P(c),\\
+ \mathrm{LOLE}&=H\,\mathrm{LOLP}.
+\end{align}
+若每台机组有修复率，还可由状态进入/离开频率计算累计频率和 LOLF；缺 MTTR 时
+\fld{frequency\_valid=false}，LOLP/LOLE 仍可用。
+
+F\&D 只比较总可用发电容量与恒定峰荷，不求网络潮流、DC 负荷、保护和恢复。它与网络 MC 的 EENS 数值不能直接比较，但
+在忽略网络且后果只由容量缺额决定的特制小系统中，COPT 状态概率应与精确枚举一致。
+
+\subsection{串并联系统频率--持续时间约化}
+两个独立两状态元件串联，系统工作仅当二者都工作，稳态可用率
+\begin{equation}
+ A_s=A_1A_2.
+\end{equation}
+等效失效频率可由从工作态流出的频率求得
+\begin{equation}
+ f_s=A_1A_2(\lambda_1+\lambda_2).
+\end{equation}
+等效不可用率 $U_s=1-A_s$，若 $U_s>0$，平均停运时间为 $r_s=8760U_s/f_s$。
+
+并联系统失效仅当二者都失效，$U_p=U_1U_2$。进入双失效态的频率为
+\begin{equation}
+ f_p=U_1A_2\lambda_2+A_1U_2\lambda_1.
+\end{equation}
+实现直接使用 CTMC 稳态流量，不用“失效率相乘”这一量纲错误公式。专项测试以状态流守恒和极限情形检查：任一串联元件
+完全不可用时系统不可用；任一并联元件完全可用时系统不可用率为零。
+
+\subsection{低需求保护功能的 PFD}
+对失效率 $\lambda$、完备试验周期 $T$、试验后恢复如新的低需求保护功能，周期平均失效概率
+\begin{equation}
+ \mathrm{PFD}_{avg}=1-\frac{1-e^{-\lambda T}}{\lambda T}.
+\end{equation}
+当 $\lambda T\ll1$ 时
+\begin{equation}
+ \mathrm{PFD}_{avg}=\frac{\lambda T}{2}
+ -\frac{(\lambda T)^2}{6}+O((\lambda T)^3).
+\end{equation}
+实现对小参数使用稳定数值形式，避免 $1-e^{-x}$ 相消。PFD 是按需失效概率，不是年故障频率；调用方需乘需求频率后才能
+形成保护拒动事件频率。
+
+\subsection{N-2 二阶交互修正}
+设正常态切负荷 $S_0$，单停运后果 $S_i,S_j$，双停运后果 $S_{ij}$。二阶交互量
+\begin{equation}\label{eq:rel-case-n2-interaction}
+ \Delta S_{ij}=S_{ij}-S_i-S_j+S_0.
+\end{equation}
+独立小不可用率下，二阶期望近似
+\begin{equation}
+ \mathbb E[S]\approx S_0+sum_iU_i(S_i-S_0)
+ +\sum_{i<j}U_iU_j\Delta S_{ij}.
+\end{equation}
+若后果可加，$S_{ij}=S_i+S_j-S_0$，交互修正为零；若双停运触发孤岛或容量瓶颈，$\Delta S_{ij}>0$；若两个停运后果
+重叠且不会重复切负荷，交互可为负。
+
+故障模式对偶行保留原始联合暴露用于排序，系统聚合使用式~\eqref{eq:rel-case-n2-interaction} 修正，避免把 N-1 已计风险再加
+一次。结果报告第一阶 EENS、二阶交互 EENS、跳过对数和二阶展开是否完整。超过对偶评估上限或低于联合不可用率门槛时，
+完整性为假，报告不能称为完整 N-2 总量。
+
+\subsection{N-2 加性与非加性算例}
+加性算例取 $S_0=0,S_i=2,S_j=3,S_{ij}=5$ MW，则 $\Delta S_{ij}=0$，二阶修正不改变 N-1 总量。若双停运
+使 10 MW 岛失电，$S_{ij}=10$，则 $\Delta S_{ij}=5$ MW，二阶风险增加
+$HU_iU_j\times5$。若两次单停运都切同一 3 MW 负荷，$S_i=S_j=S_{ij}=3$，则交互为 $-3$ MW，修正删除重复计数。
+
+专项测试至少覆盖加性零交互和网络协同非零交互，并检查对偶稳定 ID 顺序规范化，防止 $(i,j)$ 与 $(j,i)$ 重复。
+
+\subsection{经验 VaR 与严格期望短缺}
+对年度损失样本 $E_1,\ldots,E_N$ 排序，经验 VaR 是满足累计概率达到 $\alpha$ 的最小值。离散分布在 VaR 点可能有概率原子，
+严格期望短缺需只取该原子中进入最坏 $1-\alpha$ 尾部的部分。设大于 VaR 的样本权重为 $p_>$，VaR 原子权重为 $p_=$，则
+取用比例
+\begin{equation}
+ \gamma=\frac{1-\alpha-p_>}{p_=}
+\end{equation}
+并计算
+\begin{equation}
+ \mathrm{ES}_{\alpha}=\frac{
+ \mathbb E[E\mathbf1(E>\mathrm{VaR})]
+ +\gamma\,\mathrm{VaR}\,P(E=\mathrm{VaR})}{1-\alpha}.
+\end{equation}
+简单平均所有 $E\ge\mathrm{VaR}$ 会把整个 VaR 原子纳入，离散样本下可能严重偏差。实现以分数权重处理原子，测试用大量重复
+损失值与闭式尾部均值比较。
+
+\subsection{数据质量对结果的影响}
+可靠性参数可能来自案例、模板、默认补全或非法输入修正。结果记录来源计数、缺失数、默认使用数和警告。默认库能让探索性
+分析运行，但不能把默认补全结果解释为资产实测风险。比较算法时，数据策略和系统指纹必须相同；比较资产时，还应报告每个
+关键元件的参数来源。
+
+MTBF 约定也会改变失效率。若 MTBF 表示运行时间均值，$\lambda=8760/MTBF$；若表示包含修复的日历周期间隔，则需要结合
+MTTR 解析。平台要求显式约定并在解析器中统一转换，避免 MC、FMEA 和 F\&D 各自解释同一字段。
+
+\subsection{方法一致性矩阵}
+在独立二状态、恒定负荷、相同后果函数的条件下，精确枚举是无抽样基准，普通 MC 与 $\kappa=1$ 的 IS 应收敛到它；适度
+扭曲 IS 仍收敛到同一均值但方差可降低；序贯 MC 的长期 EENS 也应一致，并额外给事件频率。F\&D 仅在忽略网络、后果只由
+容量缺额决定时与精确枚举一致。N-1/N-2 FMEA 按故障频率和持续时间展开，不等同于完整稳态状态概率，除非稀有事件近似和
+持续时间定义严格匹配。
+
+因此“六种算法结果不同”本身不证明哪一个错误。先检查：状态空间是否相同、负荷是否恒定、是否有时序记忆、是否求网络
+后果、是否包含 N-2、是否使用同一数据策略、是否报告增量还是含 N-0 的总量。只有这些条件一致后，误差才可归因于抽样或
+近似。
+
+\subsection{程序级验收顺序}
+估计层推荐按以下不变量验收：解析后的 $U_i$ 在 $[0,1]$；精确状态概率和为一；$\kappa=1$ 时权重全为一且 ESS 为 $N$；
+扭曲后 ESS 在 $(0,N]$ 且平均似然比有限；Birnbaum 与有限差分一致；退化元件不扩张状态数；F\&D 容量概率和为一；缺 MTTR
+时频率有效性为假；串并联 CTMC 流量守恒；PFD 小参数极限正确；N-2 加性算例交互为零；经验 ES 正确处理 VaR 原子。
+
+HTTP E2E 进一步检查稳定身份、状态数、重要抽样诊断字段和 GUI 表格。精确灵敏度行必须同时返回
+\fld{stable\_id}、组件稳定索引、内部位置、Birnbaum 和 FV；前端以稳定 ID 支持画布定位。测试不接受只有数组长度正确但
+身份字段缺失的结果。
+
+\subsection{与保护信息联合方法的衔接}
+精确信息状态枚举与精确物理停运枚举解决不同维度。保护信息事件树通常在每个物理故障场景内部精确枚举信息元件状态，再按
+场景年频率聚合；它不自动枚举全系统所有物理元件的同时停运。若需联合物理全状态与信息全状态，状态数会成为
+$2^{n_p+n_c}$，应先利用条件独立、割集或重要抽样控制成本，并保持似然比覆盖所有被扭曲维度。
+
+当前三级对照有意固定一个物理起始场景，专门测量保护和信息因素的影响；精确灵敏度入口有意固定独立物理二状态模型，专门
+测量元件不可用率导数。把二者并列报告比把它们强行合成一个没有可解释基准的巨大模型更有审计价值。
+
+\subsection{可复现证据}
+对应实现位于 \srcpath{src/reliability/reliability\_assessment.cpp} 的非序贯、序贯、重要抽样、精确灵敏度、F\&D、PFD 与
+串并联约化函数，以及 \srcpath{src/reliability/failure\_mode.cpp} 的二阶交互聚合。专项 C++ 测试覆盖闭式预言，
+\srcpath{tests/e2e/reliability\_workflow\_e2e.mjs} 覆盖 HTTP 和 GUI。最终报告应给出命令、通过的用例/断言、依赖提交和
+模型边界；若本地兄弟依赖提交与仓库 pin 不同，只能声称当前工作区验证通过，不能声称锁定环境可复现。
+
+\subsection{概率与频率混用的诊断算例}
+不可用率 $U$ 是任意时刻处于停运态的概率，年故障率 $\lambda$ 是单位时间内进入停运态的次数，二者量纲不同。取
+$\lambda=2$ 次/年、$r=4$ h，则稀有事件近似 $U\approx\lambda r/8760=9.1324\times10^{-4}$。若 5 MW 负荷在每次故障
+期间持续停电，频率--持续时间计算
+\begin{equation}
+ E=\lambda\times5\times4=40\ \text{MWh/年}.
+\end{equation}
+稳态概率计算同样给 $E=8760\times U\times5\approx40$ MWh/年。若误把 $\lambda=2$ 当成概率，由于概率超过一会被输入
+校验拒绝；若先错误截成一，则得到 43800 MWh/年。若误把 $U$ 当年频率，则得到约 0.0183 MWh/年。数量级检查应成为结果
+审计的第一步。
+
+精确式~\eqref{eq:rel-case-unavailability} 在故障率不再很小时比 $\lambda r/8760$ 更稳健。解析器返回最终 $U$、原始字段和
+约定，使审计者可以复算。测试不能只断言 $0\le U\le1$，还应检查给定 $\lambda,r$ 的闭式值。
+
+\subsection{正常态基线污染的诊断算例}
+若正常系统已经有 $S_0=1$ MW 切负荷，故障态切负荷 $S_1=3$ MW，非序贯 MC 若直接报告总损失，会把正常态问题算进故障
+风险。平台同时报告
+\begin{align}
+ E_{raw}&=H\,\mathbb E[S(X)],\\
+ E_{base}&=HS_0,\\
+ E_{inc}&=H\,\mathbb E[\max(0,S(X)-S_0)].
+\end{align}
+假设故障概率 0.01，则 $E_{raw}=8760(0.99\times1+0.01\times3)=8935.2$ MWh/年，基线为 8760 MWh/年，故障增量只有
+175.2 MWh/年。只展示 8935.2 会把拓扑或正常调度缺陷误归因于随机故障。
+
+GUI 发现非零基线时显示正常态切负荷、原始 EENS 和增量 EENS。跨方法比较必须选择同一口径：FMEA 通常按故障增量聚合，
+若拿它与 MC 原始总量比较会出现固定的 $E_{base}$ 差异。
+
+\subsection{似然比数值下溢的诊断}
+当元件很多或 $\kappa$ 很大，直接连乘似然比可能下溢。稳定计算先累加
+\begin{equation}
+ \log w(x)=\sum_i\left[x_i\log\frac{U_i}{Q_i}
+ +(1-x_i)\log\frac{1-U_i}{1-Q_i}\right],
+\end{equation}
+再在可表示范围内指数化。退化概率 $U_i=0$ 或 1 不参与扭曲与对数比，避免 $0/0$。若提议分布给目标分布正概率状态零概率，
+则不满足绝对连续性，入口必须拒绝，而不是产生无限权重。
+
+诊断同时观察平均似然比和 ESS：全部权重下溢为零会使两者无定义；单个权重支配会使 ESS 接近 1。程序要求扭曲因子有限正，
+并在结果中返回有限诊断值。工程上还应比较多种扭曲强度，避免只挑一个偶然接近精确值的种子。
+
+\subsection{退化元件与状态数的诊断}
+考虑 5 个元件，其中两个 $U=0$、一个 $U=1$、两个满足 $0<U<1$。完整物理组合虽然形式上有 $2^5$ 个，正概率状态只有
+$2^2=4$ 个。精确枚举应报告 4 个状态，两个永不故障元件固定运行，完全不可用元件固定停运。若仍枚举 32 个状态，会出现
+大量零概率后果求解，浪费计算且可能让零概率失败状态中止整个任务。
+
+Birnbaum 对退化元件仍可通过“强制运行/停运”的反事实定义计算，但当前精确入口的随机状态空间只扩张非退化元件。报告应
+区分 \fld{components\_evaluated} 与 \fld{stochastic\_components}，不能用状态数反推系统总组件数。
+
+\subsection{秒、小时与年度的单位诊断}
+保护清除窗口使用秒，恢复与修复窗口使用小时，年度频率使用次/年。一个 20 MW 故障、清除时间 0.18 s、年频率 3 次的
+清除窗口贡献为
+\begin{equation}
+ E_c=3\times20\times0.18/3600=0.003\ \text{MWh/年}.
+\end{equation}
+若遗漏除以 3600，会得到 10.8 MWh/年，相差三个数量级。相反，修复时间 4 h 若又除以 3600，会把 240 MWh/年错误降为
+0.0667 MWh/年。
+
+因此三窗口实现先把每段时长规范化为小时再乘 MW；响应字段名以 \verb|_s|、\verb|_hr|、\verb|_mwh_yr| 标明单位。测试用
+秒级闭式算例专门捕获这一错误，不依赖大系统结果的偶然抵消。
+
+\subsection{比较报告的最小证据集}
+一份可审查的方法对比至少应包含：系统指纹和模型名称；可靠性数据策略及默认补全数；负荷倍率和年度小时数；方法的状态空间
+或事件空间；物理后果模型 scope；EENS/LOLE/LOLF 的绝对值和单位；N-0 基线；抽样数、随机种子、变异系数或 ESS；精确法
+的状态数和概率残差；F\&D 的概率/频率有效性；N-2 的交互项与完整性；保护信息三级对照的两项差值；在线模式的轨迹消费
+和清除时刻一致性；所有限制与失败状态。
+
+只有百分比而没有绝对值不可接受。若基线接近零，百分比可能任意大；若两方法的结果口径不同，百分比没有可解释分母。只有
+排名相关系数也不够，因为相同排名可以对应数量级完全不同的风险。GUI 的比较功能因此同时保留绝对指标、归一化离散度、
+Spearman、top-k Jaccard 和共同薄弱元件。
+
+\subsection{从偏差到定位的顺序}
+当实测结果偏离理论预言时，按以下顺序定位：先核对单位和数据策略；再核对 N-0 基线与增量口径；检查状态概率或事件类概率
+守恒；检查稳定 ID 与内部位置映射；检查后果求解是否对失败状态诚实返回；抽样法再检查随机种子、权重、ESS 和置信区间；
+在线保护再检查量测轨迹、动作事件、失电岛和 DER 终态；最后才调整数值容差。
+
+如果偏差远大于理论允许的 $O(N^{-1/2})$ 抽样误差或一步时间离散误差，不能通过扩大断言范围解决。应重新推导被测估计量，
+构造最小闭式算例，并确认程序实际消费了发生偏差的参数。该流程保证性能或功能增强仍服从同一理论契约。

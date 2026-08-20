@@ -641,6 +641,36 @@ int mode_rel() {
   return 0;
 }
 
+// Deterministic N-1 distribution FMEA on radial feeders.  MATPOWER cases carry
+// no reliability data, so per-branch screening-template rates (lambda=0.35/yr,
+// r=10h) are used; results are a method demonstration, not a validated study.
+int mode_relfmea(const std::vector<std::string>& cases) {
+  using namespace hacdcpf;
+  std::cout << std::fixed << std::setprecision(3);
+  std::cout << "# Distribution N-1 FMEA (screening-template branch rates "
+               "lambda=0.35/yr r=10h; template customers=10/MW)\n";
+  std::cout << "# case n_bus n_branch n_cont n_loss EENS[MWh/yr] EDNS[MW] "
+               "LOLE[hr/yr] LOLF[/yr] SAIFI SAIDI[hr/yr] scope\n";
+  for (const auto& c : cases) {
+    HybridPowerSystem sys;
+    try {
+      sys = io::parse_matpower(c);
+    } catch (const std::exception& e) {
+      std::cout << c << " parse_error " << e.what() << '\n';
+      continue;
+    }
+    analysis::FMEAOptions opt;
+    opt.verbose = false;
+    const auto r = analysis::run_distribution_fmea(sys, opt);
+    std::cout << c << ' ' << sys.ac.buses.size() << ' ' << sys.ac.branches.size()
+              << ' ' << r.n_contingencies << ' ' << r.n_loss_contingencies
+              << ' ' << r.eens_mwh_yr << ' ' << r.edns_mw << ' ' << r.lole_hr_yr
+              << ' ' << r.lolf_occ_yr << ' ' << r.distribution_idx.saifi << ' '
+              << r.distribution_idx.saidi << ' ' << r.model_scope << '\n';
+  }
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -650,14 +680,15 @@ int main(int argc, char** argv) {
     const std::string a = argv[i];
     if (i == 1 && (a == "nr" || a == "fdpf" || a == "dc" || a == "bfs" ||
                    a == "robust" || a == "stress" || a == "cpf" ||
-                   a == "opf" || a == "dyn" || a == "dyn2" || a == "rel")) {
+                   a == "opf" || a == "dyn" || a == "dyn2" || a == "rel" ||
+                   a == "relfmea")) {
       mode = a;
       continue;
     }
     cases.push_back(a);
   }
   if (cases.empty()) {
-    if (mode == "bfs") {
+    if (mode == "bfs" || mode == "relfmea") {
       cases = {"data/case33bw.m", "data/case69.m", "data/case85.m",
                "data/case141.m"};
     } else {
@@ -677,6 +708,7 @@ int main(int argc, char** argv) {
   if (mode == "dyn") return mode_dyn();
   if (mode == "dyn2") return mode_dyn2();
   if (mode == "rel") return mode_rel();
+  if (mode == "relfmea") return mode_relfmea(cases);
   std::cerr << "unknown mode: " << mode << "\n";
   return 2;
 }

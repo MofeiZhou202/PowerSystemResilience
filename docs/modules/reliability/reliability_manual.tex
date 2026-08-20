@@ -6,8 +6,10 @@
 %   include/hacdcpf/reliability/failure_mode.hpp
 %   include/hacdcpf/analysis/three_stage_reliability.hpp
 %   src/reliability/{reliability_assessment,failure_mode,reliability_data,three_stage_reliability}.cpp
-\documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
+\documentclass[UTF8,fontset=fandol,a4paper,12pt]{ctexart}
 \usepackage{../../_manual_common/hysim_manual}
+\linespread{1.18}
+\setlength{\parskip}{0.22em}
 
 \title{\textbf{交直流混合高弹性能源电力系统仿真平台}\\[0.5em]
        {\Large 可靠性评估技术手册}\\[0.3em]
@@ -22,16 +24,18 @@
 （\srcpath{src/reliability/} 与 \srcpath{include/hacdcpf/reliability/}，
 以及位于 \srcpath{include/hacdcpf/analysis/three\_stage\_reliability.hpp} 的三阶段
 恢复评估器）整理，覆盖统一可靠性参数解析器、非序贯/序贯蒙特卡洛、元件级 FMEA 与
-故障模式级 FMEA（含信息物理 L1 扩展）、三阶段故障恢复 MILP、频率-持续时间解析法，
+故障模式级 FMEA、三阶段故障恢复 MILP、频率-持续时间解析法、重要抽样、精确状态灵敏度、
+保护配合、智能检测/隔离/恢复、信息物理事件树、序贯信息事件队列与在线 Mass-Matrix DAE 闭环，
 以及尾部风险与配电可靠性指标。每个方法给出功能定位、源码等价数学模型、
 全部选项与结果字段的单位制和默认值、验证依据及已知局限。文档风格与《潮流计算技术
 手册》《最优潮流技术手册》一致，全部公式逐条注明源码出处（文件:函数名锚点，禁止行号）。
 
 \smallskip
-\noindent\textbf{核心口径}：蒙特卡洛与 FMEA 的最小切负荷评估在纯交流系统上为
-\emph{AC-only DC-OPF}（\fld{model\_scope}=\texttt{"ac-only-dcopf"}），\textbf{不计} DC
-负荷中断，故对含直流分量的混合系统会低估切负荷；三阶段模型为耦合交直流
-LinDistFlow 恢复 MILP。全部近似、回退与模型覆盖不足均写入结果的 \fld{model\_scope}、
+\noindent\textbf{核心口径}：蒙特卡洛与 FMEA 在纯交流系统上采用
+\emph{AC-only DC-OPF}（\fld{model\_scope}=\texttt{"ac-only-dcopf"}）；含直流网络时采用
+\texttt{"hybrid-acdc-network-lp"}，联合计入 AC/DC 有功网络、直流负荷削减及换流器传输。
+三阶段模型为耦合交直流 LinDistFlow 恢复 MILP。上述稳态模型均不认证非线性交流无功/电压可行性；
+全部近似、拒绝边界与模型覆盖不足均写入结果的 \fld{model\_scope}、
 \fld{model\_limitations} 与 \fld{ValidityFlags}。
 \end{abstract}
 
@@ -41,15 +45,26 @@ LinDistFlow 恢复 MILP。全部近似、回退与模型覆盖不足均写入结
 \input{chapters/overview}
 % ── 通用理论层（修订版 2 新增，工程参考级）──
 \input{chapters/theory_reliability_foundations}
+\input{chapters/exact_estimation_sensitivity}
+\input{chapters/estimation_comparison_casebook}
 
 \input{chapters/theory_reliability_failure_analysis}
 
 \input{chapters/theory_reliability_restoration}
 
 \input{chapters/theory_reliability_cyber_intelligent}
+\input{chapters/theory_reliability_protection_frt}
+\input{chapters/protection_engineering_chain}
+\input{chapters/protection_topology_misoperation_cases}
+\input{chapters/cyber_chronology}
+\input{chapters/cyber_parameter_impact_cases}
+\input{chapters/intelligent_online_coupling}
+\input{chapters/online_dae_validation_cases}
+\input{chapters/method_comparison_acceptance}
 % ── 实现转写层（源码等价）──
 \input{chapters/source_equivalent_model}
 \input{chapters/options_results}
+\input{chapters/runtime_contract_verification}
 \input{chapters/verification}
 
 \input{../../_manual_common/industrial_evaluation}

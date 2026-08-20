@@ -15,7 +15,7 @@
 \begin{tikzpicture}[font=\footnotesize,
   box/.style={draw,rounded corners,minimum height=1.0cm,text width=2.7cm,align=center,inner sep=4pt},
   arr/.style={->,thick}]
-  \node[box] (rich) at (0,0) {富语义模型\\\texttt{HybridPowerSystem}};
+  \node[box] (rich) at (0,0) {富语义模型\\\texttt{HybridPower}\\\texttt{System}};
   \node[box] (res) at (3.7,0) {参数解析\\$\lambda,r,U$ 规范化};
   \node[box] (enum) at (7.4,0) {状态/故障枚举\\抽样·N-1·目录};
   \node[box] (patch) at (11.1,0) {后果算子\\$G_m{=}\Phi_m(G_0,x_m)$};
@@ -72,8 +72,8 @@ AC DC-OPF & 纯交流 MC/FMEA & 无电压幅值/无功可行性（$P=B\theta$）
 是数学结果的组成部分，下游 API 必须保留：
 \begin{itemize}
   \item MC/FMEA 在纯交流上为 \texttt{"ac-only-dcopf"}，
-        \fld{validity.\allowbreak dc\_load\_curtailment\_included}=false——EENS/LOLE 不含 DC 负荷中断；
-  \item 混合系统 FMEA 升级为 \texttt{"hybrid-acdc-network-lp"}；
+        \fld{validity.\allowbreak dc\_load\_curtailment\_included}=false；
+  \item 混合系统 MC/FMEA 使用 \texttt{"hybrid-acdc-network-lp"}，联合计入直流负荷削减与有界换流；
   \item 三阶段模型为
         \texttt{"coupled-acdc-\allowbreak lindistflow-\allowbreak restoration-milp"}，
         含 LCC/能量路由器

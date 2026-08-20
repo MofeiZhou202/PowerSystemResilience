@@ -198,6 +198,41 @@ SPPT 的专用生产路由仍可在服务器源码中发现。旧的嵌入式 UI
 | `POST /api/session/reliability/configuration/validate` | 解析并校验候选配置，不改变会话状态。 |
 | `POST /api/session/reliability/configuration` | 校验、解析保护区引用、原子保存并清除缓存的分析结果。 |
 
+`POST /api/session/run_reliability` 的顶层字段 `failure_rate_basis` 明确年故障率口径：
+`operating_time` 表示设备运行期间的条件故障强度，`calendar_time` 表示含停运暴露的日历年事件频率。
+后者按报告年小时数 $H$ 和修复时间 $r$ 精确执行
+$U=f_{cal}r/H$、$\lambda_{up}=f_{cal}/(1-U)$；$U\ge1$、未知枚举值或非正 $H$ 均返回中文 400，
+不采用稀有事件近似。响应原样返回实际采用的 `failure_rate_basis`。
+
+主路由的 `method=physical_cut_set` 执行物理成功路径的精确容斥与最小击中集枚举。请求示例：
+
+```json
+{
+  "method": "physical_cut_set",
+  "physical_cut_set": {
+    "components": [
+      {"stable_id": "ac_branch:10", "availability": 0.9},
+      {"stable_id": "ac_branch:20", "availability": 0.8},
+      {"stable_id": "ac_branch:30", "availability": 0.7}
+    ],
+    "success_paths": [[0, 1], [0, 2]]
+  }
+}
+```
+
+`success_paths` 使用 `components` 数组的零基序号，稳定身份只由 `stable_id` 对外返回。后端拒绝空数组、
+重复/空稳定 ID、越界序号及不在 $[0,1]$ 的可用率。响应给出 `availability`、`loss_probability`、
+`reduced_success_path_count`、`minimal_cut_sets`（稳定 ID）、`minimal_cut_set_indices` 和
+`exact_independent_path_model=true`。该接口要求输入路径完整描述单调相干网络，并假设元件状态独立；
+超过精确枚举规模守卫时明确拒绝，不回退到路径独立近似。
+
+三阶段请求可在 `restoration.apparent_power_polygon_sides` 指定交流支路视在功率内接多边形边数，
+必须为不小于 4 的偶数，默认 16。响应返回该边数、`maximum_ac_branch_apparent_power_ratio` 以及
+`validity.apparent_power_polygon_enforced`；有效结果的最大比值不得超过 1（仅允许数值容差）。
+每个故障还返回 `stage1/2/3_solver_status`、认证后的 `stage1/2/3_mip_gap` 和后端原始
+`stage1/2/3_solver_reported_mip_gap`。零或近零目标下后端可能报告相对间隙 1；若终止状态明确为最优，
+认证间隙为 0，但原始值不会丢失。变量界、整数性和模型约束后验检查仍可将该阶段判为失败。
+
 故障模式覆盖项以 `mode_id` 为键；保护引用使用
 `component_kind + component .index` 形式的稳定 ID，例如 `ac_transformer_2w:7`。
 vector position 仅以 `component_position` 返回用于诊断，不是对外身份。同一
@@ -216,6 +251,8 @@ schema 使用的 12 个数值字段名相同。这些值是应用上述优先级
 不是已保存的覆盖项。GUI 将它们标记为继承值，只提交用户实际修改的字段；
 选择不同的 hazard 表示形式会替换先前的 hazard 覆盖项，而不是把互斥的
 形式一起提交。
+其中 `effective_failure_rate_per_year` 始终表示设备运行期间的条件强度，
+`effective_calendar_frequency_per_year` 表示用于年度后果加权的日历频率；保护误动等按日历输入的事件会同时返回二者。
 
 保护行把一个保护装置映射到一个被保护组件、可选的后备装置以及显式的
 保护区组件 ID。拒动与拒分闸概率、误动频率、清除时间、自动重合闸与
@@ -240,10 +277,26 @@ lambda_unresolved = lambda*(1-r)*q1*q2
 故障会阻塞恢复直到清除。后备装置的匹配保护行提供 `q2`；否则响应会声明
 假定的上级后备边界。起始频率在瞬时与持续场景之间守恒。
 
-这是一个按概率条件化的保护事件抽象，不是继电保护时间-电流仿真。它不从
-短路电流计算动作值（pickup），也不计算方向/距离/差动选择性、定值配合、
-断路器机械特性、DER 穿越或 GFM/GFL 动态反馈。配置的误动频率仍是
-故障模式 FMEA 的输入，尚不是三阶段恢复场景。
+三阶段恢复路由本身是按概率条件化的保护事件抽象。可靠性主路由另提供
+`method=protection_cyber_compare`，并支持两种可执行模式：
+
+- `protection_cyber.online_dae=false`：消费请求给出的主/后备测量轨迹；
+- `protection_cyber.online_dae=true`：对每个场景执行主保护、后备保护各自的
+  “故障发现 + 动作反馈”两遍 Mass-Matrix DAE，再把实测轨迹、支路跳闸、
+  失电岛负荷退出和 DER-FRT 终态送入年度事件树。
+
+两种模式都计算定时限与 IEC 60255 反时限、方向、mho/四边形距离、差动、
+主后备配合、断路器动作链、信息共享依赖、QoS、共因、供电与电池依赖，并
+并列返回静态 FMEA、仅保护、信息物理联合 EENS/LOLE/LOLF。在线响应额外返回
+`dae_trajectories_consumed_by_event_tree` 与 `online_diagnostics`；后者逐场景
+给出 DAE 和事件树的主/后备清除时刻、轨迹点数、动作反馈、失电母线稳定 ID
+及 DER-FRT 消费标志。两种清除时刻的差不得超过一个 DAE 时间步。
+
+保护误动可在 FMEA 的
+`dimensions.information.protection_misoperation` 中按无故障判别窗、误跳概率、
+通道和断路器成功率配置，实际进入 EENS、LOLE、LOLF，并返回分解残差。
+当前在线入口采用正序网络、单相故障输入和三窗口年度后果；LCC 与显式三相
+保护动态不在该结果口径内。
 
 已保存的覆盖项是稀疏的。GUI 不会把每一行生效的内置值都变成显式的用户值。
 加载不同的内置或导入模型，或通过 `/api/session/update_components` 替换

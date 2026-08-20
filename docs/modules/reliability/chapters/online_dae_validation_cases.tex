@@ -1,0 +1,225 @@
+\section{在线动态耦合、年度消费与验证证据}\label{sec:rel-online-dae-validation}
+
+本章说明在线保护模式如何从网络状态生成量测轨迹、如何把保护动作反馈给第二遍动态仿真，以及这些轨迹如何进入年度可靠性
+事件树。验收重点不是“调用了动态求解器”，而是主清除、后备清除和未清除三种后果确实消费不同轨迹，且 DAE 清除时刻与
+事件树清除时刻一致。
+
+\subsection{动态网络与设备状态}
+在线模式使用质量矩阵形式的微分代数方程
+\begin{align}
+ M\dot x&=f(x,v,u,t),\\
+ 0&=g(x,v,u,t),
+\end{align}
+其中 $x$ 为发电机、换流器、控制器等动态状态，$v$ 为交流节点复电压与可选直流代数量，$u$ 包含故障和开关事件。
+Backward Euler 步在 $t_{k+1}$ 求解
+\begin{equation}
+ R(z_{k+1})=
+ \begin{bmatrix}
+ M(x_{k+1}-x_k)/\Delta t-f(x_{k+1},v_{k+1},u_{k+1})\\
+ g(x_{k+1},v_{k+1},u_{k+1})
+ \end{bmatrix}=0,
+\end{equation}
+其中 $z=(x,v)$。每个时间步用稀疏 Newton 迭代；求解失败时在线可靠性入口返回具体阶段和动态消息，不生成后续事件类。
+
+动态时域必须满足 $t_{end}>t_{fault}$，时间步必须为有限正数。故障阻抗
+$Z_f=R_f+jX_f$ 不能为零向量；当前输入指定交流母线稳定 ID、相别和故障阻抗。投影后找不到母线、被保护支路已退出或稳定
+ID 不存在时，入口在第一遍 DAE 前拒绝。
+
+\subsection{第一遍故障发现运行}
+第一遍在原系统上于 $t_f$ 施加故障并联导纳
+\begin{equation}
+ Y_f=1/(R_f+jX_f).
+\end{equation}
+对故障母线目标相，快照电压为 $V_k$，一次故障电流为
+\begin{equation}
+ I_k=\begin{cases}0,&t_k<t_f,\\Y_fV_k,&t_k\ge t_f.\end{cases}
+\end{equation}
+程序不是把 $1/Z_f$ 当成恒定电流，而是每个快照用动态电压更新，因此电源控制、换流器限流和电压恢复都会改变继电器输入。
+
+一次 $V_k,I_k$ 先通过 CT/PT 精确离散环节，再形成
+\verb|measured_relay_trajectory|。继电器判据只消费这条二次量轨迹。若轨迹不达到拾取条件，结果仍可成功返回发现运行与 DER
+分类，但不会伪造支路跳闸和闭环运行。
+
+\subsection{动作时刻与断路器因果链}
+继电器得到命令时刻 $t_{cmd}$ 后，按式~\eqref{eq:rel-breaker-chain} 计算清除时刻。清除时刻必须不晚于动态时域终点；否则
+延长时域或调整整定，不能把动作夹在最后一个采样点。保护成功概率不参与 DAE 动作时刻，它在年度事件树中决定“设备按需
+成功”分支；这一区分使物理动作时间与统计拒动概率保持独立。
+
+例如故障发生于 0.05 s，定时限延时 0.02 s，断路器机械延时 0.01 s，其余延时为零，则理论清除时刻为 0.08 s。离散轨迹
+首次拾取受时间网格影响，实际值允许与理论连续值相差一个 $\Delta t$。程序在事件树转换后要求
+\begin{equation}\label{eq:rel-dae-event-time-consistency}
+ |t_{clear}^{DAE}-t_{clear}^{tree}|\le
+ \max(\Delta t_P,\Delta t_B)+10^{-9}\ \mathrm{s}.
+\end{equation}
+
+\subsection{第二遍动作反馈运行}
+第二遍从同一原始系统重建动态模型，仍在 $t_f$ 施加相同故障，并在 $t_{clear}$ 同时施加：
+\begin{enumerate}
+ \item 被保护交流支路稳定 ID 的跳闸事件；
+ \item 故障母线的清除故障事件；
+ \item 开断后所有无源交流岛的负荷退出事件。
+\end{enumerate}
+如果只在第一遍轨迹上截断电流而不重新求解，支路开断后的节点电压、频率和换流器状态都不会改变，不能称为闭环。结果中的
+\fld{protection\_action\_applied} 只有在动态事件记录同时包含目标支路跳闸和故障清除时才为真。
+
+失电岛负荷退出由图连通性自动生成，结果返回
+\fld{deenergized\_ac\_bus\_ids} 和
+\fld{dead\_island\_load\_shedding\_applied}。这些动态负荷退出只保证 DAE 状态符合拓扑；年度失负荷仍由三窗口后果统计，
+不会重复从动态功率积分一次。
+
+\subsection{为什么需要主、后备各两遍}
+主保护和后备保护可能有不同的支路、整定、CT/PT、断路器延时和监视 DER。若先做一遍故障轨迹，再只把后备延时加在主保护
+结果上，会漏掉后备支路跳开后的不同拓扑。在线年度场景因此包含两个
+\srcpath{OnlineProtectionDAEInput}：主输入和后备输入。每个输入各自执行发现与反馈两遍，总计四遍 DAE。
+
+主清除类消费主输入的闭环 DER 轨迹；后备清除类消费后备输入的闭环 DER 轨迹；未清除类消费主输入第一遍持续故障轨迹。
+记三组轨迹为 $\Gamma_P,\Gamma_B,\Gamma_U$，则 DER 终态分别为
+\begin{equation}
+ q_P=\Psi(\Gamma_P),\qquad q_B=\Psi(\Gamma_B),\qquad
+ q_U=\Psi(\Gamma_U).
+\end{equation}
+如果主保护在 DER 闭锁超时前清除而后备保护在超时后清除，可能有 $q_P=$穿越、$q_B=$跳闸。使用一条共享轨迹会直接改变
+后果类概率与切负荷。
+
+\subsection{稳定身份一致性}
+主、后备监视器必须以同一个 DER 稳定 ID 表示同一设备。适配器不能分别生成
+\verb|device:primary| 与 \verb|device:backup|，否则事件树无法判断两条轨迹是否属于同一设备。HTTP 在线模式用
+\verb|ac_bus:<id>:online-der-monitor| 作为默认监视身份，主后备完全一致；轨迹容器的位置只用于内部并行数组。
+
+转换前检查主后备监视器维数与稳定 ID；不一致时拒绝。这个检查曾在 E2E 中捕获适配器错误：两遍 DAE 都成功，但事件类
+生成器拒绝消费错位轨迹。修正稳定身份后，路由返回的
+\fld{dae\_trajectories\_consumed\_by\_event\_tree} 才能为真。
+
+\subsection{换流器动态反馈证据}
+若系统含 GFL 或 GFM VSC，动态快照的设备输出应出现对应设备类型与稳定组件索引。在线结果扫描发现和闭环两遍快照，只有
+读取到真实换流器动态输出才置
+\fld{converter\_dynamic\_feedback\_consumed=true}。专项测试分别放入 GFL 与 GFM VSC，要求输出类型、组件索引和状态值
+非空。这个标志防止仅凭系统含有 VSC 就宣称换流器动态参与。
+
+GFL 限流可降低故障电流并延迟过流保护；GFM 内电势与虚拟阻抗会改变故障期间电压和电流相位。两者对保护动作的影响由
+第一遍 DAE 轨迹自然进入，不在可靠性层另乘经验修正系数。
+
+\subsection{在线事件树的构造}
+对在线场景 $e$，主后备 DAE 产生测量轨迹和 DER 轨迹。适配器构造与给定轨迹入口相同的
+\srcpath{ProtectionCyberEventInput}：
+\begin{align}
+ \text{primary.trajectory}&\leftarrow\Gamma_{relay,P}^{DAE},\\
+ \text{backup.trajectory}&\leftarrow\Gamma_{relay,B}^{DAE},\\
+ \text{ders}&\leftarrow\Gamma_{P},\\
+ \text{backup\_ders}&\leftarrow\Gamma_{B},\\
+ \text{uncleared\_ders}&\leftarrow\Gamma_{U}.
+\end{align}
+信息元件、功能、环境、绑定和三窗口后果保持用户输入。这样在线与给定轨迹模式的差别仅在轨迹来源，后续类生成与年度聚合
+完全共享，便于做同口径对照。
+
+\subsection{年度三窗口积分}
+每个联合类的后果分为电气清除、切换恢复和残余修复三段。设清除切负荷 $S_c$、清除时刻 $t_c$，切换后切负荷 $S_s$、
+恢复时间 $\tau_s$，残余切负荷 $S_r$、修复时间 $\tau_r$，则
+\begin{equation}
+ W_c=S_c\frac{t_c}{3600}+S_s\tau_s+S_r\max(0,\tau_r-\tau_s).
+\end{equation}
+具体类选择主清除、后备清除或未清除的 $S_c,t_c$，再按检测、隔离、恢复功能状态选择自动或人工窗口。所有持续时间先检查
+单调关系；自动恢复不能晚于修复，负持续时间拒绝。
+
+在线动态只覆盖秒级清除与 DER 状态，小时级切换和修复仍由可靠性后果模型给出。把 DAE 一直运行 10 h 既无必要，也会把
+运维恢复决策误当成电磁或机电动态。
+
+\subsection{在线与给定轨迹的差异解释}
+给定轨迹适合保护定值回放、标准波形和闭式测试。它的优点是确定、快速、容易复现；缺点是整定、支路跳闸或换流器控制变化
+不会反过来改变轨迹。在线模式的轨迹由当前系统生成，动作反馈会改变第二遍网络，适合研究限流、低电压穿越和拓扑分离。
+
+两种模式使用同一条给定轨迹且关闭所有动态反馈时，结果应在时间离散容差内接近。若差异很大，应逐项核查：故障阻抗与给定
+电流是否一致、CT/PT 是否一致、在线电压是否塌落、换流器是否限流、支路跳开是否形成失电岛、DER 是否跨越闭锁或跳闸
+门槛。不能把差值统称为“动态误差”。
+
+\subsection{计算成本模型}
+设场景数为 $N_e$，每遍时间步数为 $N_t$，单步稀疏 DAE 成本为 $C_{DAE}$。在线三级对照主导成本约为
+\begin{equation}
+ C_{online}\approx4N_eN_tC_{DAE}+C_{tree},
+\end{equation}
+其中系数 4 来自主发现、主反馈、后备发现、后备反馈。给定轨迹模式成本约为
+$C_{trace}\approx N_eN_tC_{relay}+C_{tree}$，通常远小于在线模式。
+
+这一模型给出三个可检验预言：时域加倍且步长不变，在线耗时近似加倍；步长减半且时域不变，耗时近似加倍；场景数加倍，
+动态部分近似线性增加。稀疏因子复用和 Newton 迭代数会造成偏离，但不会改变四遍 DAE 的结构常数。HTTP 限制单次最多
+100 个场景，避免无界请求占用会话。
+
+\subsection{时间步收敛检查}
+设用步长 $h$ 和 $h/2$ 得到清除时刻 $t_h,t_{h/2}$ 与 EENS $E_h,E_{h/2}$。定时限动作由采样跨越触发，清除时刻差通常
+满足
+\begin{equation}
+ |t_h-t_{h/2}|\le h+epsilon.
+\end{equation}
+EENS 的清除窗口差满足近似上界
+\begin{equation}
+ |E_h-E_{h/2}|\le\sum_e\lambda_e S_{e,max}\frac{h}{3600}
+\end{equation}
+，不包括因 DER 终态跨门槛导致的离散跃迁。若步长变化使 DER 从“超时跳闸”变成“恢复”，应提高时间分辨率并报告状态
+门槛，而不是只看 EENS 相对误差。
+
+\subsection{HTTP 请求契约}
+可靠性主路由使用 \fld{method=protection\_cyber\_compare}。顶层
+\fld{protection\_cyber.online\_dae} 选择轨迹来源。在线场景中的
+\fld{online\_dae} 对象可给出故障母线、主后备支路稳定 ID、故障时刻、阻抗、时间步、终止时刻、CT/PT 和动态初始化选项。
+支路或母线填零/省略时，GUI 请求允许后端按在役交流支路选择默认值，并在诊断中返回实际后果；工程批处理应显式给稳定 ID，
+避免模型拓扑变化后默认对象改变。
+
+主、后备对象仍给出继电器、断路器和按需成功概率。在线模式忽略其中人为给出的量测幅值，但保留轨迹字段以维持同一请求
+schema；真正参与计算的轨迹点数由响应
+\verb|online_diagnostics.*_relay_trajectory_points| 给出。GUI 通过“在线 DAE”开关、故障母线、主后备支路和 DAE 步长控件
+构造该请求。
+
+\subsection{HTTP 响应证据}
+在线成功响应至少包含：
+\begin{itemize}
+ \item \fld{validity.online\_network\_dae\_coupled=true}；
+ \item \fld{dae\_trajectories\_consumed\_by\_event\_tree=true}；
+ \item 主、后备轨迹点数均大于零；
+ \item 主、后备动作反馈均为真；
+ \item 主、后备 DER-FRT 消费均为真；
+ \item DAE 与事件树清除时刻满足式~\eqref{eq:rel-dae-event-time-consistency}；
+ \item 径向开断时返回失电母线稳定 ID 和负荷退出应用标志；
+ \item 静态、仅保护、联合三行指标与保护收益、信息增量。
+\end{itemize}
+其中任一动态证据缺失，前端把工作流标记为受限或失败，而不是仅凭 HTTP 200 显示“在线耦合完成”。
+
+\subsection{端到端构造算例}
+E2E 使用三母线系统：母线 1 为电源，母线 2、3 为负荷；主后备支路使用稳定 ID 1 和 2。故障设在母线 2，
+$t_f=0.05$ s，$R_f=0.2$ pu，$\Delta t=0.01$ s。主、后备定时限分别为 0.02 s 和 0.05 s，断路器机械延时均为
+0.01 s。测试先通过 JSON 装载系统，再调用 HTTP 在线模式。
+
+验收不是硬编码某一个浮点清除时刻，而是要求：两条 DAE 轨迹非空；两条支路动作进入各自闭环；DER 监视身份相同；每个
+DAE 清除时刻与事件树时刻差不超过 0.010000001 s；联合比较有效性为真。随后浏览器实际勾选“在线 DAE”，运行同一路由，
+结果区必须出现“在线 DAE 与年度事件树闭环诊断”“主后备均已反馈”“主后备均已消费”。
+
+\subsection{径向与并联对照}
+专项 C++ 测试先构造两条并联支路。跳开一条后仍连通，失电母线集合为空，闭环 DAE 通过剩余支路恢复。随后删除第二条支路
+形成径向系统，跳开唯一支路后失电母线集合精确为目标负荷母线，自动负荷退出被应用，闭环仍收敛。这一成对测试同时证明：
+拓扑算法不会把所有跳闸都当成停电，也不会在真实失电岛中保留不可解的恒功率负荷。
+
+\subsection{异常路径与诚实失败}
+下列情况明确失败并带原因：故障母线不存在；被保护支路不存在或不在役；故障阻抗无效；时间步非正；时域早于故障或清除
+时刻；断路器延时为负；第一遍或第二遍 DAE 不收敛；主后备监视器维数或稳定 ID 不一致；事件树类概率不守恒；清除时刻
+超过一步容差。HTTP 将 C++ 标准异常转为 400 和中文 \verb|error|，不会返回一组全零指标。
+
+动态库个别设备可能抛出非标准异常。在线适配器在主 DAE、后备 DAE、事件类转换和年度聚合四个边界分别捕获并转成带阶段
+名称的标准错误，避免 HTTP 只显示“未知服务器错误”。这项防护不掩盖失败，只改善可诊断性。
+
+\subsection{结果适用边界}
+当前在线可靠性入口的网络量测采用正序交流网络并接受单相故障相别输入；年度后果使用用户给定三窗口，不把动态瞬时功率
+直接外推为全年能量。LCC 换流器和显式三相不平衡保护动态不属于该入口的模型口径。它们在系统中出现时，结果必须通过
+\fld{model\_scope} 与限制文字说明，不能解释成相应设备已被详细保护模型覆盖。
+
+这类边界与“代码没有执行理论功能”不同：本章提出的正序在线 DAE、量测、继电、主后备、断路器、失电岛、DER-FRT 和年度
+事件树均有执行入口和测试；模型没有声称覆盖的 LCC/显式三相物理不能用当前结果替代。
+
+\subsection{验证矩阵与复现顺序}
+推荐按以下顺序复现，便于定位偏差：先运行保护判据与 CT/PT 闭式单元测试；再运行在线 DAE 的并联/径向、GFL/GFM 和主后备
+年度消费专项；随后构建 HTTP 服务器，运行可靠性工作流 E2E；最后在桌面和移动视口检查在线控件、结果表、控制台错误与页面
+横向溢出。若数值与理论预言偏差超过一步时间误差，先检查轨迹、稳定 ID 和事件记录，再检查年度类概率，不能直接放宽断言。
+
+实现锚点为 \srcpath{src/reliability/online\_protection.cpp:run\_online\_protection\_dae}、
+\srcpath{src/reliability/online\_protection.cpp:compare\_online\_protection\_cyber\_reliability}、
+\srcpath{tests/run\_gui\_server.cpp:online\_protection\_cyber\_scenario\_from\_json} 与
+\srcpath{tests/e2e/reliability\_workflow\_e2e.mjs}。这些锚点分别承担动态、年度聚合、HTTP 适配和浏览器验收，缺少任一层都不能
+称为产品闭环。

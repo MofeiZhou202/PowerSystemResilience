@@ -9,8 +9,9 @@
 \midrule
 \srcpath{test\_reliability\_resolver} & \srcpath{tests/CMakeLists.txt} & MC、FMEA、故障模式 FMEA、解析器、数据策略、信息物理\\
 \srcpath{test\_three\_stage\_reliability} & \srcpath{tests/CMakeLists.txt} & 三阶段隔离/重构/修复与指标\\
+\srcpath{test\_intelligent\_cyber\_physical\_reliability} & \srcpath{tests/CMakeLists.txt} & CT/PT、保护配合、设备序列、信息共享依赖、在线 DAE、DER-FRT、三级对照\\
 \srcpath{test\_resilience\_assessment} & \srcpath{tests/CMakeLists.txt} & 交叉调用 \srcpath{run\_sequential\_mc}/\srcpath{run\_distribution\_fmea}\\
-\srcpath{reliability\_workflow\_e2e} & GUI E2E & FLISR 案例三向敏感性（负荷/信息服务/故障率）\\
+\srcpath{reliability\_workflow\_e2e} & GUI E2E & FLISR 三向敏感性、日历年频率、物理割集、三阶段、在线 DAE 与三级对照\\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -20,22 +21,24 @@
 
 \subsection{边界与局限（如实标注）}
 \begin{itemize}
-  \item \textbf{AC-only DC-OPF 口径}：MC/FMEA 在纯交流上 \fld{model\_scope}=\texttt{"ac-only-dcopf"}，
-        \fld{validity.dc\_load\_curtailment\_included}=false、\fld{vsc\_dc\_power\_flow\_modelled}=false、
-        \fld{ac\_voltage\_reactive\_feasibility\_certified}=false——EENS/LOLE \textbf{不含} DC 负荷中断，
-        对含直流分量系统低估切负荷；
+  \item \textbf{网络后果口径}：MC/FMEA 在纯交流上为
+        \srcpath{"ac-only-dcopf"}；混合系统为
+        \srcpath{"hybrid-acdc-network-lp"}，此时
+        \fld{validity.dc\_load\_curtailment\_included}=true、\fld{vsc\_dc\_power\_flow\_modelled}=true。
+        两种口径的 \fld{ac\_voltage\_reactive\_feasibility\_certified}=false；
   \item \textbf{重要度语义}：\fld{critical\_components.importance} 是共现/归因秩（多故障态整体切负荷
         归给每个停运元件，可相加超 100\%），\textbf{非} Birnbaum 边际重要度 $\partial\mathrm{EENS}/\partial U_c$；
   \item \textbf{收敛判据}：CoV 仅对 $\bar S>0$ 有定义，零损失运行跑满迭代且记录零 CoV 不代表收敛；
   \item \textbf{尾部风险}：非序贯 VaR/CVaR 为 iid 小时近似，低估天气/修复/储能持续性引致的离散度；
-  \item \textbf{信息物理 L1}：标量接口矩阵，无通信拓扑、无保护 FRT 轨迹、无类间联合依赖，
-        保护误动占位项恒为 0；
+  \item \textbf{信息物理分层}：L1 标量接口矩阵保留为快速筛选；L2 对照入口执行共享通信拓扑、QoS、
+        共因环境、物理供电与电池自治、保护/FRT 轨迹和互斥联合事件树，保护误动进入总 EENS/LOLE/LOLF；
   \item \textbf{三阶段范围}：耦合 LinDistFlow（线性化损耗），LCC 与多端口能量路由器被拒
         （清 \fld{ok}）；VSC/DC-DC 恒效率（无固定/二次损耗）；发电机/变压器/换流器/开关故障为选入项；
-  \item \textbf{保护事件树}：静态事件树，非时限-电流/选择性/FRT 仿真；瞬时重合不计入 SAIFI/SAIDI/EENS。
+  \item \textbf{在线保护边界}：在线入口执行 CT/PT、定/反时限、方向、mho/四边形距离、差动、主后备、
+        断路器失灵、重合器/熔断器/分段器和 DER-FRT 闭环；其网络为正序、单相故障输入，不认证三相 EMT 或行波保护。
 \end{itemize}
 
-\subsection{加深与后续}
+\subsection{证据维护}
 本手册为对照 2026-08-17 检出的实现修订；行号引用如与后续代码变更不符，以
 \srcpath{include/hacdcpf/reliability/}、\srcpath{include/hacdcpf/analysis/three\_stage\_reliability.hpp}
 与注册测试为准。数学模型对照见

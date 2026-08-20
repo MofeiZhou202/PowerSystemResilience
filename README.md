@@ -5,7 +5,7 @@
 
 本文档面向工程使用者和开发者，说明 HySim-XJTU-HRPES 从“工程场景建模”到“规范模型求解”、再到“结果回投”的完整链路。当前合同与实现参考统一从 `docs/README.md` 进入；历史审计、理论提案和旧技术总笔记隔离在 `docs/archive/`，不代表当前行为。
 
-## 文档同步状态（2026-08-17）
+## 文档同步状态（2026-08-20）
 
 - `docs/README.md` 是当前文档的唯一导航入口，明确区分运行契约与理论参考。
 - `main` 提供统一 Trial 能力清单、后端 fail-closed 403 防绕过、五阶段
@@ -126,7 +126,7 @@ powershell -ExecutionPolicy Bypass -File tools/package_trial_windows.ps1
 | 三相混合 PF / OPF | 活跃研发中，GUI 已接入 | `powerflow::solve_three_phase_hybrid_pf` 与 `opf::phase_hybrid` 已接入 `/xjtu/` 潮流/OPF 工具栏；OPF 提供 Full 与 GraphReduced（稀疏 Kron 降阶）、Ipopt/NativeIPM 双后端。GUI rich-model 适配范围见下文。 |
 | 电压稳定 | 已实现 | 连续潮流（CPF）采用增广 `[state, lambda]` 弧长预测-校正，可越过 P-V 鼻点并保留下支采样；输出 P-V 曲线与 VSI 指标。 |
 | 图建模、网络降阶、重构 | 已实现并持续回归 | 支持连通性、开关收缩、Kron/series/pendant/sparse-Kron reduction、ONR。 |
-| 可靠性与弹性分析 | 已实现并持续回归 | 包含 MC、FMEA 和三阶段可靠性；failure-mode FMEA 目录覆盖当前 rich-model 元件，并提供会话级元件参数/保护区自定义、稳定 ID 校验及 GUI/API 一一映射。可靠性 GUI 可在计算副本上比较 authored/GFL/GFM DER 控制场景，并用同快照、同数据策略和同报告年基准对比六种算法的指标离散度、Spearman/top-k Jaccard 与共识薄弱元件。目录覆盖不等于所有稳态后果均可表达，LCC、三相、动态同步与保护-FRT 未支持后果会显式报告。弹性严格 MIP 及 DAE 二次证书保持既有边界。 |
+| 可靠性与弹性分析 | 已实现并持续回归 | 包含 MC、精确容量状态 COPT/F&D、FMEA、运行年/日历年故障率精确换算、物理成功路径容斥与稳定 ID 最小割集、三阶段可靠性；failure-mode FMEA 的 N-2 聚合采用二阶交互修正并报告截断完整性。信息可靠性支持共享依赖路径、QoS、联合功能、最小割集、共因环境、通信设备供电与电池自治；保护链覆盖 CT/PT 动态与饱和、定/反时限、方向、mho/四边形距离、差动、主后备配合、重合器—熔断器—分段器序列、误动、自动拓扑、瞬时闭锁和同步窗。三级对照可选择给定轨迹或在线 Mass-Matrix DAE，后者把主/后备测量、支路跳闸、失电岛负荷退出和 DER-FRT 轨迹送入年度事件树，并输出静态 FMEA/仅保护/信息物理联合 EENS/LOLE/LOLF。三阶段交流支路热限采用可配置偶数边内接多边形并返回最大视在功率比。当前在线模式采用正序网络、单相故障输入和三窗口年度后果；LCC 与显式三相保护动态不在该模型口径内。弹性严格 MIP 及 DAE 二次证书保持既有边界。 |
 | 三相与短路分析 | 已实现并持续回归 | 三相 NR 与 AC/DC 短路分析（IEC 60909 简化与详细路径、DC 故障水平估计）均有独立测试族。 |
 | 谐波分析 | 已实现（持续增强） | 频域穿透、Newton 非线性、三相 abc 与 AC/DC 耦合谐波潮流，频扫/谐振检测与 IEEE 519 / GB/T 14549 合规校核。 |
 | 暂态动力学 | 已实现基础框架（持续增强） | 动态建模、事件、7 类求解器（含 MassMatrixDae 同时式 DAE）、DAE 诊断、小信号与频率观测；设备模型覆盖同步机/调速器/励磁/PSS、GFM/GFL 逆变器、DER 与 IEEE 1547 保护。显式三相网络自动启用 GFL 逐相电流状态与相域限流，GFM 采用序耦合 Norton 端口和最大相电流限流；三线制默认阻断零序电流。 |
@@ -284,9 +284,9 @@ Canonical 层的一个重要设计原则是：求解器只看到必要的数学�
 | 电压稳定 | `CpfSolver`、`compute_vsi`（`power_flow/voltage_stability.hpp`） | 连续潮流（CPF） | P-V 曲线、VSI 指标 |
 | 网络重构 | `solve_optimal_reconfiguration`, `run_topology_reconfiguration` | LinDistFlow MILP + graph connectivity | 开/合支路集合、损耗 proxy、PF 校验 |
 | 图分析/降阶 | `build_power_system_graph`, `contract_zero_impedance_edges`, Kron/series/pendant/sparse-Kron recovery | graph abstraction | 连通性、径向性、super-node、恢复映射 |
-| 可靠性 MC | `run_nonsequential_mc`, `run_sequential_mc` | component outage sampling + DC OPF state evaluation | EENS、LOLE、LOLF、CoV、VaR/CVaR、关键元件 |
-| FMEA 可靠性 | `run_distribution_fmea`, `run_failure_mode_fmea` | 全 rich-model 失效模式目录 + N-1/N-2 enumeration + switching/repair stage evaluation；会话级参数与保护区覆盖；可选信息物理 Level 1 调节（`CyberPhysicalFMEAOptions`） | contingency detail、EENS/EDNS/SAIFI/SAIDI、参数来源、覆盖与未支持后果诊断 |
-| 三阶段可靠性 | `run_three_stage_reliability` | native C++ 联合 AC/DC LinDistFlow MILP；VSC/DC-DC 双向效率，AC/DC/DER/移动储能/VPP 调度与跨阶段 SOC；会话保护配置按自动重合、主保护、后备保护和未清除事件调节频率、清除时间、停运区与恢复准入 | 三阶段失负荷、保护场景审计、有符号 VSC 调度、节点可靠性指标与有效性标志；LCC/多端能量路由器、继电整定与 DER-FRT 动态闭环仍显式受限 |
+| 可靠性 MC/F&D | `run_nonsequential_mc`, `run_sequential_mc`, `run_frequency_duration_analysis` | component outage sampling + DC OPF；独立两状态机组精确容量状态 COPT | EENS、LOLE、LOLF、CoV、严格经验 VaR/CVaR；COPT 状态概率/频率与缺失 MTTR 诊断 |
+| FMEA 与信息/保护可靠性 | `run_distribution_fmea`, `run_failure_mode_fmea`, `evaluate_physical_network_reliability`, `evaluate_joint_information_reliability`, `generate_protection_cyber_classes`, `compare_protection_cyber_reliability` | 全 rich-model 失效模式目录 + N-1/N-2 二阶交互；运行年/日历年频率换算；物理/信息成功路径容斥、QoS、共因与供电依赖的精确状态；给定轨迹的 L2 保护/FRT 联合事件树 | EENS/EDNS/SAIFI/SAIDI、二阶完整性、稳定 ID 最小割集、静态 FMEA/仅保护/联合 EENS/LOLE/LOLF 对比与有效性边界 |
+| 三阶段可靠性 | `run_three_stage_reliability` | native C++ 联合 AC/DC LinDistFlow MILP；交流支路视在功率内接多边形；VSC/DC-DC 双向效率，AC/DC/DER/移动储能/VPP 调度与跨阶段 SOC；会话保护配置按自动重合、主保护、后备保护和未清除事件调节频率、清除时间、停运区与恢复准入 | 三阶段失负荷、热限边数与最大视在功率比、保护场景审计、有符号 VSC 调度、节点可靠性指标与有效性标志；该路由是概率条件化恢复 MILP，继电整定与 DER-FRT 动态由独立的在线保护—信息物理三级对照入口执行 |
 | 配电弹性 | `run_distribution_resilience_assessment`, `run_distribution_resilience_mip_assessment`, `run_certified_distribution_resilience_mip` | heuristic sequential 或 multi-period hybrid AC/DC MIP；可将拓扑/MESS 转换送入多保真 DAE oracle | 恢复曲线、元件/MESS 状态、故障序列、弹性指标、逐转换动态证书及模型边界 |
 | 短路分析 | `compute_short_circuit`, `run_short_circuit_detailed`, `dc_bus_fault_level` | Z-bus IEC 60909 简化 / 完整 IEC（c 因子、κ/ip/ib/ik/ith、变压器修正、电机与换流器贡献）；DC 为戴维南保守上限估计 | 故障电流、IEC 指标、DC 故障水平与开断 duty |
 | 谐波潮流 | `solve_harmonic_power_flow`（及 `_newton` / `_3ph` / `_3ph_hybrid` / `_hybrid_newton` 变体）, `frequency_scan`, `check_harmonic_limits` | 频域穿透（NIC 双端口桥）、Newton 非线性、三相 abc、AC/DC 耦合 | 谐波电压/电流、频扫/谐振、IEEE 519 / GB/T 14549 合规、K 因子/TDD |

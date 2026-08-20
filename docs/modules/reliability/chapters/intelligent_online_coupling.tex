@@ -1,0 +1,148 @@
+\section{智能检测、隔离、恢复与在线动态闭环}\label{sec:rel-intelligent-online}
+
+\subsection{混淆矩阵的概率契约}
+检测模型把无故障类记为 $0$，真实故障类和报告类为 $1,\ldots,K$。矩阵
+$C_{ij}=\Pr(\widehat K=j\mid K=i)$ 的每一行必须非负且和为一。对真实故障 $k$：
+\begin{align}
+ P_D(k)&=1-C_{k0},\\
+ P_C(k)&=C_{kk},\\
+ P_M(k)&=C_{k0}.
+\end{align}
+检测与正确分类不是同一指标：报告了错误故障段属于“已检测但误分类”，会改变隔离候选和后果区，而不是自动计为漏报。
+
+\subsection{误报暴露基}
+无故障行的 $1-C_{00}$ 是每判别窗误报概率。年度误报频率必须乘实际判别窗数：
+\begin{equation}
+ \lambda_{FA}=\nu_{win}(1-C_{00}).
+\end{equation}
+若连续采样高度相关，$\nu_{win}$ 应取独立决策次数或直接使用现场告警率；把每毫秒采样点都当独立窗会把误动频率夸大。
+
+\subsection{检测时延类积分}
+每个真实故障的检测时延用互斥离散类 $(p_h,t_h)$ 近似分布。与报告类别联合后，类概率为 $C_{kj}p_h$，及时检测概率为
+\begin{equation}
+ P_{timely}(k)=\sum_{j>0}\sum_{h:t_h\le T_{lim}}C_{kj}p_h.
+\end{equation}
+条件平均检测时延为
+\begin{equation}
+ \mathbb E[T_D\mid D]=
+ \frac{\sum_{j>0,h}C_{kj}p_ht_h}{P_D(k)}.
+\end{equation}
+平台输出每个联合类，因而调用方可把时延映射为非线性故障能量，而不是只消费均值。
+
+\subsection{后验风险隔离}
+给定故障段后验 $b_k$ 和候选隔离方案 $q$，覆盖概率为
+\begin{equation}
+ B_q=\sum_{k\in\mathcal K_q}b_k.
+\end{equation}
+候选期望成本为
+\begin{equation}
+ J_q=c_{miss}(1-a_qB_q)+c_{shed}P_q^{isolated}+c_tT_q,
+\end{equation}
+其中 $a_q$ 是开关动作成功概率。若所需信息功能不可用，候选标记为不可执行，不参与最小化；不把不可执行方案的成本设成
+某个任意大常数，以免数值尺度变化后被错误选中。
+
+\subsection{隔离结果的含义}
+最小风险方案不是“预测最可能故障段”的同义词。高后验但隔离范围巨大时，另一个覆盖多个相邻段、切负荷较小的候选可能有
+更低风险。输出保留每个候选的可执行性、覆盖概率和成本，便于审计权重。后验必须和为一，覆盖索引越界或负成本直接拒绝。
+
+\subsection{风险约束恢复}
+候选恢复动作 $a$ 给出恢复负荷、开关成本、不安全概率、执行成功概率、远程时间和人工时间。硬风险约束为
+\begin{equation}
+ p_a^{unsafe}\le\overline p^{unsafe}.
+\end{equation}
+可远程执行时，期望恢复量为 $p_a^{exec}P_a^{restore}$；信息功能不可用但允许人工时，使用人工时长和相应执行概率。目标为
+\begin{equation}
+ J_a=c_E\left(P^{d}-p_a^{exec}P_a^{restore}\right)T_h+c_{sw,a}.
+\end{equation}
+违反风险约束的动作进入拒绝列表，不能通过较高恢复量补偿安全违规。
+
+\subsection{人工回退}
+人工回退不是信息功能“成功”。它改变动作时长和可能的执行概率，但仍允许系统最终恢复。输出
+\fld{used\_manual\_fallback} 和 \fld{selected\_duration\_s}，年度后果据此选择自动或人工切换窗口。
+若人工时间也不可用或动作无本地操作能力，应把持续时间视为无穷并从候选集中移除。
+
+\subsection{有限 POMDP 模型}
+平台提供有限状态、动作、观测和有限时域的精确信念树。模型为
+\begin{equation}
+ \mathcal M=(\mathcal S,\mathcal A,\mathcal O,T,O,c,c_T,b_0,H).
+\end{equation}
+转移张量 $T^a_{ss'}$ 和观测张量 $O^a_{s'o}$ 的每一概率行必须和为一；初始信念 $b_0$ 也必须归一。
+
+\subsection{信念更新}
+执行动作 $a$ 后先预测
+\begin{equation}
+ \bar b(s')=\sum_sT^a_{ss'}b(s),
+\end{equation}
+观察到 $o$ 后更新
+\begin{equation}
+ b'(s')=\frac{O^a_{s'o}\bar b(s')}
+ {\sum_jO^a_{jo}\bar b(j)}.
+\end{equation}
+零概率观测分支不递归。实现不做信念量化或启发式剪枝，因此对给定初始信念和有限时域是精确的。
+
+\subsection{Bellman 递推}
+终端值为 $V_0(b)=\sum_sb_sc_T(s)$。剩余 $h$ 步时
+\begin{equation}
+ V_h(b)=\min_a\left[\sum_sb_sc(s,a)+
+ \sum_o\Pr(o\mid b,a)V_{h-1}(\tau(b,a,o))\right].
+\end{equation}
+输出最优首动作、期望总成本和访问信念节点数。由于复杂度随时域、动作和观测指数增长，接口对状态数、动作数、观测数和时域
+设明确上限；超限拒绝，不声称近似求解了大规模 POMDP。
+
+\subsection{信息收集动作算例}
+测试构造“立即隔离”和“先观察”两类动作。立即隔离成本确定，观察动作有小成本但产生能区分真实故障的观测，下一步可选
+针对性隔离。精确信念树应选择先观察，并得到低于立即隔离的期望总成本。该测试同时验证观测价值确实通过后验改变后续动作，
+不是只在结果中返回一个固定策略名。
+
+\subsection{Mass-Matrix DAE 在线入口}
+在线保护输入包括故障交流母线、相别、发生时刻、故障阻抗、被保护支路稳定 ID、继电模型、断路器链、CT/PT 参数、DER
+监视器和动态求解选项。入口强制求解器为 Mass-Matrix DAE，打开逐步快照、设备输出和 DER 保护状态机。
+
+\subsection{第一次发现运行}
+第一次运行只施加故障，不预设保护动作。对故障母线相电压 $V_f(t)$ 和故障导纳 $Y_f$，继电一次电流轨迹取
+\begin{equation}
+ I_f(t)=\begin{cases}0,&t<t_f,\\Y_fV_f(t),&t\ge t_f.\end{cases}
+\end{equation}
+该轨迹经过 CT/PT 后送入继电判据，得到 $t_{cmd}$。因此换流器限流、GFL/GFM 动态和网络电压变化会影响继电到达，
+而不是由输入字段预置“已经消费动态反馈”。
+
+\subsection{第二次闭环运行}
+若继电动作，计算 $t_{clear}$ 并重新构建同一动态系统，同时加入故障、交流支路跳闸和故障清除事件。两种清除事件必须都在
+\fld{applied\_event\_records} 中出现；缺任一项即视为闭环失败。若继电不动作，结果仍成功返回发现轨迹和未清除 DER 轨迹，
+但 \fld{protection\_action\_applied=false}。
+
+\subsection{DER-FRT 轨迹消费}
+每个 DER 监视器用稳定字符串 ID 和交流母线 ID 绑定。发现运行保留未清除故障轨迹；闭环运行保留对应保护清除轨迹。
+IEEE~1547 状态机逐点消费电压幅值和相角，输出是否曾跳闸、是否重连、首跳/首重连时间和终端恢复比例。
+
+\subsection{GFL/GFM 动态反馈证据}
+\fld{converter\_dynamic\_feedback\_consumed} 只有在动态快照中实际找到 GFL、GFM 或 VSC 设备输出时才为真。测试分别建立
+真实 \srcpath{VSCGridFollowing} 和 \srcpath{VSCGridForming} 动态设备，检查输出类型、稳定组件 ID 和非空遥测；仅把
+\fld{ac\_grid\_forming} 设为真而没有设备输出不能通过。
+
+\subsection{主后备在线年度耦合}
+\srcpath{compare\_online\_protection\_cyber\_reliability} 对同一故障运行主、后备两个 DAE 配置。它把两次发现运行的
+CT/PT 实测轨迹送入保护配合，把主闭环 DER 轨迹绑定主清除类、后备闭环轨迹绑定后备类、发现运行未清除轨迹绑定拒清类。
+这三套轨迹不能互换，否则后备清除时间改变的 FRT 后果会丢失。
+
+\subsection{时间一致性守卫}
+事件树重新评估继电轨迹后得到的主、后备清除时刻必须与 DAE 结果在最大时间步容差内一致：
+\begin{equation}
+ |t_{clear}^{tree}-t_{clear}^{DAE}|\le\max(\Delta t_p,\Delta t_b)+10^{-9}.
+\end{equation}
+不一致表示轨迹、整定或断路器链在转换中被改变，接口明确失败。成功后才设置
+\fld{online\_network\_dae\_coupled=true} 和 \fld{dae\_trajectories\_consumed\_by\_event\_tree=true}。
+
+\subsection{数值成本模型}
+每个在线场景需两次主保护 DAE 和两次后备保护 DAE（发现与闭环；不动作时只有发现），再做一次离散信息状态枚举。
+粗略成本为
+\begin{equation}
+ T\approx N_s(2T_{DAE,p}+2T_{DAE,b}+2^{n_c}T_{tree}).
+\end{equation}
+因此在线耦合适合代表性故障类或重要场景，不应未经筛选地对百万次年度事件逐次求 DAE。大样本研究可先用在线接口生成
+条件类库，再由序贯队列抽取类；类库的拓扑、工况和参数适用域必须随结果保存。
+
+\subsection{动态耦合的有效边界}
+当前在线入口使用故障母线电压与故障导纳形成继电电流，适合验证因果闭环和设备动态影响；它不是完整三相线路端保护模型，
+未替代专业 EMT、行波或互感器磁滞仿真。结果的 \fld{model\_scope} 明确为
+\srcpath{mass-matrix-dae+trajectory-derived-relay+branch-trip+der-frt}，工程定值校核仍需匹配所需保真度。

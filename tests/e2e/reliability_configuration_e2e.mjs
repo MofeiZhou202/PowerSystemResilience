@@ -180,7 +180,12 @@ async function main() {
     'custom protection failure probability is not effective');
     const nuisanceMode = saved.data.effective_modes.find(mode =>
       mode.stable_id === protectiveMode.stable_id && mode.consequence === 'nuisance_trip');
-    assert(nuisanceMode && Math.abs(nuisanceMode.effective_failure_rate_per_year - 1.2) < 1e-12,
+    assert(nuisanceMode &&
+      Math.abs(nuisanceMode.effective_calendar_frequency_per_year - 1.2) < 1e-12 &&
+      nuisanceMode.effective_failure_rate_per_year >
+        nuisanceMode.effective_calendar_frequency_per_year &&
+      Math.abs((1 - nuisanceMode.effective_unavailability) *
+        nuisanceMode.effective_failure_rate_per_year - 1.2) < 1e-12,
       'custom nuisance-trip frequency is not effective');
 
     const unappliedRun = await request(base, '/api/session/run_reliability', {
@@ -193,6 +198,23 @@ async function main() {
       unappliedRun.data.reliability_configuration?.consumer === 'failure_mode_fmea' &&
       unappliedRun.data.reliability_configuration?.limitation,
     'non-failure-mode method did not disclose that saved configuration was unapplied');
+    assert(typeof unappliedRun.data.exact_capacity_states === 'boolean' &&
+      typeof unappliedRun.data.probability_valid === 'boolean' &&
+      typeof unappliedRun.data.frequency_valid === 'boolean' &&
+      Array.isArray(unappliedRun.data.state_probability) &&
+      unappliedRun.data.state_probability.length ===
+        unappliedRun.data.capacity_outage_levels.length &&
+      Array.isArray(unappliedRun.data.warnings),
+    'F&D response did not expose exact state probabilities and validity');
+    if (unappliedRun.data.probability_valid) {
+      const coptProbability = unappliedRun.data.state_probability.reduce(
+        (sum, value) => sum + value, 0);
+      assert(Math.abs(coptProbability - 1) < 1e-10,
+        `F&D state probabilities are not normalized: ${coptProbability}`);
+    } else {
+      assert(unappliedRun.data.warnings.length > 0,
+        'invalid F&D probability result did not explain the unavailable COPT');
+    }
 
     const protectedThreeStage = await request(base, '/api/session/run_reliability', {
       method: 'three_stage',

@@ -2480,14 +2480,17 @@ th[aria-sort="descending"] .rt-sort::after { content: "▼"; }
   body[data-active-result-group="evTraffic"] #componentLib,
   body[data-active-result-group="rpo"] #componentLib,
   body[data-active-result-group="parameterLibrary"] #componentLib,
+  body[data-active-result-group="reliability"] #componentLib,
   body[data-active-result-group="transient"] #canvasContainer,
   body[data-active-result-group="modelIO"] #canvasContainer,
   body[data-active-result-group="evTraffic"] #canvasContainer,
   body[data-active-result-group="rpo"] #canvasContainer,
   body[data-active-result-group="parameterLibrary"] #canvasContainer,
+  body[data-active-result-group="reliability"] #canvasContainer,
   body[data-active-result-group="transient"] #rightPanelResizer,
   body[data-active-result-group="evTraffic"] #rightPanelResizer,
-  body[data-active-result-group="rpo"] #rightPanelResizer {
+  body[data-active-result-group="rpo"] #rightPanelResizer,
+  body[data-active-result-group="reliability"] #rightPanelResizer {
     display: none;
   }
   body[data-active-result-group="modelIO"] #rightPanelResizer {

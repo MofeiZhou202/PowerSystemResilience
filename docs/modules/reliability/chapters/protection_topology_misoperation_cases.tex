@@ -1,0 +1,213 @@
+\section{保护拓扑、误动与配合的可复核推导}\label{sec:rel-protection-topology-cases}
+
+本章把保护装置的动作结果从“成功率乘一个后果”展开为可执行的因果链。分析对象不是单个继电器的动作精度，而是从
+量测、判据、出口、断路器、拓扑分离到恢复窗口的系统级可靠性贡献。所有概率均为无量纲，时间先以秒完成保护配合，进入
+年度指标前再除以 $3600$ 转为小时；支路、母线和 DER 均使用对外稳定 ID，不以向量位置代替。
+
+\subsection{故障事件与无故障误动事件必须分开}
+设物理故障场景集合为 $\mathcal E_F$，无故障判别窗集合为 $\mathcal E_N$。物理故障场景 $e$ 的年频率为
+$\lambda_e$，联合类为 $c$，类概率为 $\pi(c\mid e)$，三窗口后果为
+\begin{equation}
+ W(e,c)=\sum_{w=1}^{3}S_{e,c,w}\tau_{e,c,w}.
+\end{equation}
+故障触发的期望未供电量为
+\begin{equation}
+ \mathrm{EENS}_{F}=\sum_{e\in\mathcal E_F}\lambda_e
+ \sum_c\pi(c\mid e)W(e,c).
+\end{equation}
+无故障时不存在上述起始故障频率。若一年有 $\nu_{win}$ 个独立判别窗，单窗误跳概率为 $p_{FA}$，跳闸通道与断路器
+成功率分别为 $p_{ch}$、$p_{br}$，则真正造成开断的误动频率为
+\begin{equation}\label{eq:rel-misop-frequency}
+ \lambda_{NT}=\nu_{win}p_{FA}p_{ch}p_{br}.
+\end{equation}
+设误动切除负荷为 $S_{trip}$，恢复时间为 $\tau_{rest}$，则
+\begin{align}
+ \Delta\mathrm{EENS}_{NT}&=\lambda_{NT}S_{trip}\tau_{rest},\\
+ \Delta\mathrm{LOLE}_{NT}&=\lambda_{NT}\tau_{rest}
+   \mathbf 1[S_{trip}>\varepsilon],\\
+ \Delta\mathrm{LOLF}_{NT}&=\lambda_{NT}
+   \mathbf 1[S_{trip}>\varepsilon].
+\end{align}
+这里 $p_{ch}$ 和 $p_{br}$ 出现在成功链而不是失败链中，因为误判只有在跳闸命令被成功传输且断路器成功开断时才形成
+停电。若把它们写成 $1-p$，会得到“通道越可靠，误动停电越少”的错误方向。
+
+\subsection{误动算例与守恒检查}
+取 $\nu_{win}=100$ 次/年、$p_{FA}=0.01$、$p_{ch}=0.5$、$p_{br}=0.8$，则
+\begin{equation}
+ \lambda_{NT}=100\times0.01\times0.5\times0.8=0.4\ \text{次/年}.
+\end{equation}
+若 $S_{trip}=2$ MW、$\tau_{rest}=0.25$ h，则
+\begin{equation}
+ \Delta\mathrm{EENS}_{NT}=0.4\times2\times0.25=0.2\ \text{MWh/年},
+\end{equation}
+同时 $\Delta\mathrm{LOLE}_{NT}=0.1$ h/年、$\Delta\mathrm{LOLF}_{NT}=0.4$ 次/年。程序不仅返回这四个量，
+还校核
+\begin{equation}\label{eq:rel-eens-decomposition}
+ r_E=\mathrm{EENS}_{total}-\mathrm{EENS}_{physical}
+ -\Delta E_{information}-\Delta E_{intelligent}
+ -\Delta\mathrm{EENS}_{NT}.
+\end{equation}
+专项算例要求 $|r_E|\le10^{-12}$ MWh/年。这个残差可以发现两个常见错误：只显示误动字段却没有把它加入总量，或者既在
+故障模式目录中计一次、又在无故障判别窗中重复计一次。
+
+\subsection{误动参数的边际影响}
+在其他参数固定且 $S_{trip}>\varepsilon$ 时，式~\eqref{eq:rel-misop-frequency} 给出
+\begin{align}
+ \frac{\partial\Delta\mathrm{EENS}_{NT}}{\partial p_{FA}}
+ &=\nu_{win}p_{ch}p_{br}S_{trip}\tau_{rest},\\
+ \frac{\partial\Delta\mathrm{EENS}_{NT}}{\partial p_{ch}}
+ &=\nu_{win}p_{FA}p_{br}S_{trip}\tau_{rest},\\
+ \frac{\partial\Delta\mathrm{EENS}_{NT}}{\partial\tau_{rest}}
+ &=\lambda_{NT}S_{trip}.
+\end{align}
+因此误报率降低一半会使误动 EENS 精确降低一半；但通道可用率降低虽然也减少误动停电，却会增加真实故障时的拒动风险。
+工程比较必须把两类事件同时纳入，不能凭误动一项得出“降低通信可靠性有益”的结论。
+
+\subsection{量测链的离散更新}
+保护判据消费 CT/PT 二次量而不是网络一次量。对时间常数 $T_m$、采样步长 $\Delta t$ 的一阶量测环节，平台采用精确
+零阶保持离散式
+\begin{equation}\label{eq:rel-instrument-exact-step}
+ y_k=\alpha y_{k-1}+(1-\alpha)\frac{x_k}{n},\qquad
+ \alpha=\exp(-\Delta t/T_m),
+\end{equation}
+其中 $n$ 为一次/二次变比。$T_m=0$ 时直接取 $x_k/n$。若二次侧饱和上限为 $y_{sat}$，则复相量按幅值投影
+\begin{equation}
+ \widehat y_k=
+ \begin{cases}
+ y_k,&|y_k|\le y_{sat},\\
+ y_{sat}y_k/|y_k|,&|y_k|>y_{sat}.
+ \end{cases}
+\end{equation}
+这一投影保留相角而限制幅值。CT 饱和会降低过流元件看到的电流，可能推迟或阻止动作；PT 动态会改变距离元件的
+$Z_{app}=V/I$ 轨迹。程序把变比、时间常数、饱和上限同时送入继电器量测轨迹，测试以式
+~\eqref{eq:rel-instrument-exact-step} 为闭式预言逐点比较。
+
+\subsection{定时限与反时限的统一动作积分}
+定时限过流在 $I(t)>I_p$ 时累计拾取时间，低于拾取值时按复归时间衰减。连续超过定值 $T_d$ 后，命令时刻为
+\begin{equation}
+ t_{cmd}=\inf\left\{t:\int_0^t\mathbf1[I(\xi)>I_p]\,d\xi\ge T_d\right\}.
+\end{equation}
+IEC 60255 型反时限曲线的局部动作时间写成
+\begin{equation}
+ T(I)=\mathrm{TMS}\left[\frac{A}{(I/I_p)^P-1}+B\right]+T_{add},
+\end{equation}
+继电器状态量按
+\begin{equation}
+ z_{k+1}=z_k+\frac{\Delta t_k}{T(I_k)}
+\end{equation}
+积分，首次达到 $z\ge1$ 时动作。该写法允许电流随在线 DAE 变化，而不是把故障初值代入曲线一次。若限流型 DER 使
+$I/I_p$ 从 4 降到 1.2，$T(I)$ 会显著增加；这正是静态短路电流法与在线耦合结果产生差异的来源。
+
+\subsection{方向、距离与差动判据}
+方向元件先检查方向量为正，再允许过流或距离判据累计。距离保护的 mho 圆以线路角 $\theta_l$ 和整定阻抗 $Z_r$ 定义，
+判据为
+\begin{equation}
+ \left|Z_{app}-\frac{Z_r}{2}e^{j\theta_l}\right|
+ \le\frac{Z_r}{2}.
+\end{equation}
+四边形区则分别限制旋转坐标中的电阻和电抗上下界，适合独立设置耐受故障电阻的范围。差动元件使用
+\begin{equation}
+ I_{diff}\ge\max(I_{pickup},k_s I_{rest})
+ \quad\text{或}\quad I_{diff}\ge I_{high}.
+\end{equation}
+这些判据的输出不是最终可靠性指标，而是主/后备动作时刻与动作布尔值。随后断路器链增加通道、线圈、机械和燃弧延时：
+\begin{equation}\label{eq:rel-breaker-chain}
+ t_{clear}=t_{cmd}+t_{ch}+t_{coil}+t_{mech}+t_{arc}.
+\end{equation}
+任何一项为负、非有限数或使清除时刻超过动态时域，入口都会拒绝，而不是截成零。
+
+\subsection{主后备配合的含义}
+对主保护 $i$ 和后备保护 $j$，配合裕度为
+\begin{equation}
+ M_{ij}=t_{clear,j}-t_{clear,i}-M_{req}.
+\end{equation}
+$M_{ij}\ge0$ 表示满足选择性。配合报告同时保留两个清除时刻、要求裕度和实际裕度。可靠性事件树仍按真实动作结果生成
+主清除、后备清除和未清除类；单纯的裕度告警不会凭空扩大切负荷。若运维策略规定裕度不足时闭锁重合或扩大隔离区，调用方
+应在后果模型中显式表达该策略。
+
+设主继电与主断路器按需成功率分别为 $p_{r1},p_{b1}$，后备对应 $p_{r2},p_{b2}$，则忽略信息系统时
+\begin{align}
+ p_P&=p_{r1}p_{b1},\\
+ p_B&=(1-p_P)p_{r2}p_{b2},\\
+ p_U&=(1-p_P)(1-p_{r2}p_{b2}),
+\end{align}
+且 $p_P+p_B+p_U=1$。程序对每个信息状态重新计算这些互斥类，并在最终聚合前检查概率和。
+
+\subsection{开断后的交流拓扑判定}
+设在役交流图为 $G=(V,E)$，保护跳开的稳定支路为 $e_t$，电压源母线集合为 $V_s$。开断后可带电集合为
+\begin{equation}
+ V_E=\operatorname{Reach}_{G\setminus\{e_t\}}(V_s),
+\end{equation}
+失电母线集合为 $V_D=V\setminus V_E$。平台从外部电网、在役发电机、构网储能和构网 VSC 的交流端建立 $V_s$，沿除
+$e_t$ 外的在役支路做确定性图遍历。每个 $v\in V_D$ 使用稳定母线 ID 进入结果。
+
+在线闭环在 $t_{clear}$ 同时施加三类事件：清除故障并联支路、跳开被保护支路、把 $V_D$ 上恒功率负荷缩放为零。第三项
+不是把停电后果删除；它只使无源孤岛的 DAE 代数方程符合“负荷已失电”的物理状态。年度 EENS 仍由三窗口后果计算，因而
+不会因动态负荷退出而漏计能量。
+
+\subsection{径向馈线手算}
+考虑 $1-2-3$ 径向馈线，母线 1 有外部电网，母线 2、3 各有 1 MW 负荷。若保护跳开支路 $1-2$，则
+$V_E=\{1\}$、$V_D=\{2,3\}$，动态闭环应在清除时刻退出 2 MW 恒功率负荷。若跳开 $2-3$，则
+$V_E=\{1,2\}$、$V_D=\{3\}$，只退出 1 MW。专项测试构造单支路径向系统，要求失电母线稳定 ID 精确等于
+\verb|{2}|、负荷退出事件确实被 DAE 应用且闭环收敛。
+
+若在 $1-2$ 之间有两条并联支路，只跳开其中一条后 $V_D=\varnothing$。此时不生成负荷退出，另一条支路承担供电。这个
+对照证明算法依据连通性而不是“任何跳闸都切除下游负荷”的固定模板。
+
+\subsection{自动拓扑后果与区段切负荷}
+给定故障支路、保护区和开关状态，自动后果入口分别生成主保护、后备保护与未清除状态。主保护只切除最小故障区；后备保护
+可以按配置扩展到上游保护区；未清除状态保持故障影响至物理修复。每个输出含受影响负荷稳定 ID、总切负荷 MW 和连通性
+诊断。AC 与 DC 母线映射保持域限定，数值相同的 AC bus 5 与 DC bus 5 不会混为同一节点。
+
+当用户给出的保护区引用不存在、支路已退出或稳定 ID 重复时，入口明确拒绝。没有映射到负荷的合法空区返回零后果并保留
+成功状态；“空区”和“引用错误”不能用同一个零值表示。
+
+\subsection{重合器、熔断器与分段器状态序列}
+自动序列按时间顺序处理重合器跳闸、死区、重合、熔断竞争和分段器无电流计数。设重合器第 $m$ 次曲线动作时刻为
+$t_{R,m}$，熔断器熔断时刻为 $t_F$。在 fuse-saving 策略中，若 $t_{R,1}<t_F$，第一次快速跳闸先清除电流，瞬时故障
+在死区后消失，熔断器保持；永久故障则在后续慢曲线中可能满足 $t_F<t_{R,m}$，由熔断器隔离支线。
+
+分段器不直接开断故障电流。它在上游重合器造成的无电流死区中累计计数，达到门槛后开断，再允许上游重合器恢复健康区段。
+程序输出每个事件的时间、动作类型、设备稳定 ID、计数和最终开合状态。若启用瞬时闭锁，第一次跳闸后序列终止，不会伪造
+后续重合。
+
+临时故障算例要求序列终态为重合器闭合、熔断器完好、分段器闭合；永久主干故障要求重合器最终闭锁；永久支线故障在设定
+熔断竞争条件下要求熔断器开断而健康主干恢复。测试同时检查事件时间单调，防止“后发生的熔断被排在先发生的重合之前”。
+
+\subsection{DER 穿越、瞬时闭锁与跳闸}
+DER 状态机至少区分穿越、瞬时闭锁和物理跳闸。设进入闭锁的低压门槛为 $V_{in}$，退出门槛为 $V_{out}>V_{in}$，退出
+驻留时间为 $T_{dwell}$，最大闭锁时间为 $T_{max}$。轨迹第一次满足 $V<V_{in}$ 时进入闭锁；之后连续满足
+$V>V_{out}$ 达 $T_{dwell}$ 才恢复。若闭锁持续超过 $T_{max}$，终态升级为跳闸。
+
+迟滞 $V_{out}-V_{in}$ 防止电压在边界附近抖动导致每个采样点切换状态。输出保留首次闭锁时刻、首次恢复时刻、终态和是否
+超时。保护事件树分别消费主清除闭环轨迹、后备清除闭环轨迹和未清除发现轨迹；三类不能共享一条 DER 终态，因为不同清除
+时刻可能跨越 $T_{max}$。
+
+\subsection{微网同步检查}
+重合闸或并列前需同时满足电压、频率和相角窗口。设两侧测量为 $(V_1,f_1,\theta_1)$ 与
+$(V_2,f_2,\theta_2)$，平台计算
+\begin{align}
+ \Delta V&=|V_1-V_2|,\\
+ \Delta f&=|f_1-f_2|,\\
+ \Delta\theta&=\left|\operatorname{wrap}_{[-\pi,\pi)}(\theta_1-\theta_2)\right|.
+\end{align}
+只有三项均不超过门槛、同步测量可用且合闸命令通道可用时才允许合闸。相角按周期折回十分关键：$179^\circ$ 与
+$-179^\circ$ 的差应为 $2^\circ$，不是 $358^\circ$。测量缺失或命令通道失效均返回禁止合闸及明确原因，不能把缺数当成
+零偏差。
+
+\subsection{保护因素对三种方法的影响方向}
+静态 FMEA 不执行保护，故继电延时、断路器机械时间和配合裕度不会改变其结果。仅保护方法消费这些量：清除时间增加会扩大
+第一窗口未供电量；主保护拒动会把概率质量从主清除移向后备或未清除。信息物理联合方法在仅保护基础上再受检测、跳闸、
+隔离和恢复功能状态影响。
+
+若后果满足 $E_P\le E_B\le E_U$，提高主保护成功率使仅保护与联合 EENS 不增；若主保护误切更大区域导致 $E_P>E_B$，
+方向可能反转，程序不强制单调。保护误动只进入配置了无故障判别窗的 FMEA 总量，不应改变以单一物理故障构造的三级对照
+静态行。报告必须把这种口径差异写清楚。
+
+\subsection{保护链验收条件}
+保护相关实现通过以下不变量验收：量测变比与饱和逐点满足闭式离散式；定/反时限动作积分不跨越采样时间；距离区边界和差动
+斜率边界分别有内外点；主后备清除时刻与断路器链满足式~\eqref{eq:rel-breaker-chain}；重合序列事件时间单调；拓扑结果使用
+稳定 ID；径向开断后失电岛负荷退出且年度后果仍计入；误动分解满足式~\eqref{eq:rel-eens-decomposition}；同步检查同时消费
+三种差值与两项信息可用性。对应实现位于 \srcpath{src/reliability/protection\_frt.cpp}、
+\srcpath{src/reliability/online\_protection.cpp} 与
+\srcpath{src/reliability/reliability\_assessment.cpp}，注册测试以闭式数值和终态共同断言，而不是只检查函数不抛异常。

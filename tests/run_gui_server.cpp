@@ -6598,10 +6598,10 @@ static json apply_reliability_der_control_scenario(
 
   json limitations = json::array();
   limitations.push_back(
-      "Grid-forming is a steady-state island-reference credit; transient synchronization, current limiting, and protection/FRT trajectories are not certified.");
+      "构网能力在稳态可靠性后果中作为孤岛参考；暂态同步、电流限幅和保护/FRT 轨迹由保护-信息物理在线入口单独认证。" );
   if (!black_start_enabled) {
     limitations.push_back(
-        "Black-start credit is disabled in the audit. Methods without an independent black-start state may still use an authored grid-forming flag as a composite island-source capability.");
+        "本次审计关闭黑启动贡献；未单列黑启动状态的方法仍可能把算例构网标志作为复合孤岛电源能力。" );
   }
   return json{{"scenario", scenario},
               {"black_start_enabled", black_start_enabled},
@@ -6971,7 +6971,18 @@ static hacdcpf::analysis::ReliabilityDataPolicy parse_reliability_data_policy(
   pol.hours_per_year = load.value(
       "hours_per_year", j.value("hours_per_year", 8760.0));
   if (!std::isfinite(pol.hours_per_year) || pol.hours_per_year <= 0.0)
-    throw std::runtime_error("load.hours_per_year must be finite and positive");
+    throw std::runtime_error("load.hours_per_year 必须是有限正数");
+
+  const std::string failure_rate_basis =
+      j.value("failure_rate_basis", std::string("operating_time"));
+  if (failure_rate_basis == "operating_time") {
+    pol.failure_rate_basis = FailureRateBasis::OperatingTime;
+  } else if (failure_rate_basis == "calendar_time") {
+    pol.failure_rate_basis = FailureRateBasis::CalendarTime;
+  } else {
+    throw std::runtime_error(
+        "failure_rate_basis 只能是 operating_time 或 calendar_time");
+  }
 
   if (pol.default_policy == ReliabilityDefaultPolicy::OverwriteWithNamedTemplate) {
     if (tmpl == "comprehensive" || tmpl == "comprehensive-hybrid") {
@@ -7017,6 +7028,8 @@ static json fmea_validity_json(
       {"joint_class_probability_modelled",
        v.joint_class_probability_modelled},
       {"protection_logic_modelled", v.protection_logic_modelled},
+      {"protection_misoperation_modelled",
+       v.protection_misoperation_modelled},
       {"protection_frt_reliability_coupled",
        v.protection_frt_reliability_coupled}};
 }
@@ -7094,6 +7107,34 @@ static void parse_cyber_physical_fmea_options(
   target.freeze_der_on_automation_loss =
       information.value("freeze_der_on_service_loss",
                         information.value("freeze_der_on_automation_loss", true));
+  const json misoperation = information.value(
+      "protection_misoperation", json::object());
+  if (!misoperation.is_object()) {
+    throw std::runtime_error(
+        "dimensions.information.protection_misoperation must be an object");
+  }
+  auto& misop = target.protection_misoperation;
+  misop.enabled = misoperation.value("enabled", false);
+  target.enabled = target.enabled || misop.enabled;
+  misop.no_fault_decision_windows_per_year = finite_in_range(
+      misoperation.value("no_fault_decision_windows_per_year", 0.0),
+      0.0, 1.0e12,
+      "dimensions.information.protection_misoperation.no_fault_decision_windows_per_year");
+  misop.false_trip_probability_per_window = finite_in_range(
+      misoperation.value("false_trip_probability_per_window", 0.0), 0.0, 1.0,
+      "dimensions.information.protection_misoperation.false_trip_probability_per_window");
+  misop.trip_channel_success_probability = finite_in_range(
+      misoperation.value("trip_channel_success_probability", 1.0), 0.0, 1.0,
+      "dimensions.information.protection_misoperation.trip_channel_success_probability");
+  misop.breaker_success_probability = finite_in_range(
+      misoperation.value("breaker_success_probability", 1.0), 0.0, 1.0,
+      "dimensions.information.protection_misoperation.breaker_success_probability");
+  misop.disconnected_load_mw = finite_in_range(
+      misoperation.value("disconnected_load_mw", 0.0), 0.0, 1.0e9,
+      "dimensions.information.protection_misoperation.disconnected_load_mw");
+  misop.restoration_duration_hr = finite_in_range(
+      misoperation.value("restoration_duration_hr", 0.0), 0.0, 8760.0,
+      "dimensions.information.protection_misoperation.restoration_duration_hr");
   target.availability_overrides.clear();
   const json overrides = information.value("availability_overrides", json::array());
   if (!overrides.is_array()) {
@@ -7174,6 +7215,14 @@ static json cyber_physical_reliability_json(
       {"delta_cyber_control_mwh_yr", cyber.delta_cyber_control_mwh_yr},
       {"delta_protection_misoperation_mwh_yr",
        cyber.delta_protection_misoperation_mwh_yr},
+      {"protection_misoperation_frequency_per_year",
+       cyber.protection_misoperation_frequency_per_year},
+      {"protection_misoperation_lole_hr_yr",
+       cyber.protection_misoperation_lole_hr_yr},
+      {"protection_misoperation_lolf_occ_yr",
+       cyber.protection_misoperation_lolf_occ_yr},
+      {"eens_decomposition_residual_mwh_yr",
+       cyber.eens_decomposition_residual_mwh_yr},
       {"automation_efficacy", cyber.automation_efficacy},
       {"saidi_perfect_cyber_hr_cust_yr",
        cyber.saidi_perfect_cyber_hr_cust_yr},
@@ -7500,6 +7549,8 @@ static json reliability_configuration_to_json(
     row["enabled"] = entry.enabled;
     row["data_source"] = entry.mode.params.data_source;
     row["effective_failure_rate_per_year"] = entry.mode.params.lambda_per_year;
+    row["effective_calendar_frequency_per_year"] =
+        entry.mode.params.calendar_frequency_per_year;
     row["effective_repair_hr"] = entry.mode.repair_hr;
     row["effective_unavailability"] = entry.mode.params.unavailability;
     row["probability_given_initiated"] = entry.mode.probability_given_initiated;
@@ -7650,7 +7701,9 @@ static json failure_mode_co_contingency_json(
       {"duration_hr", co.duration_hr},
       {"total_shed_mw", co.total_shed_mw},
       {"eens_contribution", co.eens_contribution},
+      {"interaction_eens_correction", co.interaction_eens_correction},
       {"lole_contribution", co.lole_contribution},
+      {"interaction_lole_correction", co.interaction_lole_correction},
       {"causes_loss", co.causes_loss}};
 }
 
@@ -7683,9 +7736,12 @@ static json mc_critical_component_json(
     const hacdcpf::analysis::ReliabilityResult::ComponentImportance& ci) {
   const std::string canonical_type = mc_type_to_fmea_type(ci.component_type);
   const auto meta = describe_fmea_component(sys, canonical_type, ci.index);
+  const int stable_index = meta.canvas_index >= 0 ? meta.canvas_index : ci.index;
   return json{
       {"index", ci.index},
-      {"component_index", ci.index},
+      {"component_position", ci.index},
+      {"component_index", stable_index},
+      {"stable_id", canonical_type + ":" + std::to_string(stable_index)},
       {"is_generator", ci.is_generator},
       {"importance", ci.importance},
       {"loss_weighted_risk", ci.loss_weighted_risk},
@@ -7705,10 +7761,357 @@ static json mc_critical_component_json(
       {"global_state_index", ci.global_state_index}};
 }
 
+static hacdcpf::analysis::ProtectionRelayCharacteristic
+protection_characteristic_from_json(const std::string& value) {
+  using C = hacdcpf::analysis::ProtectionRelayCharacteristic;
+  if (value == "definite_time_overcurrent") return C::DefiniteTimeOvercurrent;
+  if (value == "inverse_time_overcurrent") return C::InverseTimeOvercurrent;
+  if (value == "distance") return C::Distance;
+  if (value == "differential") return C::Differential;
+  throw std::runtime_error("unknown protection relay characteristic: " + value);
+}
+
+static hacdcpf::analysis::DistanceZoneShape distance_shape_from_json(
+    const std::string& value) {
+  using S = hacdcpf::analysis::DistanceZoneShape;
+  if (value == "magnitude_circle") return S::MagnitudeCircle;
+  if (value == "mho") return S::Mho;
+  if (value == "quadrilateral") return S::Quadrilateral;
+  throw std::runtime_error("unknown distance-zone shape: " + value);
+}
+
+static hacdcpf::analysis::ProtectionRelayModel protection_relay_from_json(
+    const json& row) {
+  using namespace hacdcpf::analysis;
+  if (!row.is_object()) throw std::runtime_error("relay must be an object");
+  ProtectionRelayModel relay;
+  relay.relay_id = row.value("relay_id", std::string());
+  relay.characteristic = protection_characteristic_from_json(
+      row.value("characteristic", std::string("definite_time_overcurrent")));
+  relay.directional = row.value("directional", false);
+  relay.pickup_current = row.value("pickup_current", 1.0);
+  relay.definite_time_delay_s = row.value("definite_time_delay_s", 0.0);
+  relay.differential_pickup = row.value("differential_pickup", 0.0);
+  relay.differential_slope = row.value("differential_slope", 0.0);
+  relay.differential_high_set = row.value("differential_high_set", 0.0);
+  relay.reset_time_s = row.value("reset_time_s", 1.0);
+  const json inverse = row.value("inverse_time", json::object());
+  if (!inverse.is_object())
+    throw std::runtime_error("relay.inverse_time must be an object");
+  relay.inverse_time.pickup_current = inverse.value(
+      "pickup_current", relay.pickup_current);
+  relay.inverse_time.time_multiplier = inverse.value("time_multiplier", 1.0);
+  relay.inverse_time.curve_a = inverse.value("curve_a", 0.14);
+  relay.inverse_time.curve_p = inverse.value("curve_p", 0.02);
+  relay.inverse_time.curve_b = inverse.value("curve_b", 0.0);
+  relay.inverse_time.additional_delay_s = inverse.value(
+      "additional_delay_s", 0.0);
+  relay.inverse_time.reset_time_s = inverse.value("reset_time_s", 1.0);
+  const json zones = row.value("distance_zones", json::array());
+  if (!zones.is_array())
+    throw std::runtime_error("relay.distance_zones must be an array");
+  for (const auto& value : zones) {
+    DistanceProtectionZone zone;
+    zone.name = value.value("name", std::string());
+    zone.reach_ohm = value.value("reach_ohm", 0.0);
+    zone.delay_s = value.value("delay_s", 0.0);
+    zone.shape = distance_shape_from_json(
+        value.value("shape", std::string("magnitude_circle")));
+    zone.line_angle_rad = value.value("line_angle_rad", 0.0);
+    zone.forward_resistance_ohm = value.value(
+        "forward_resistance_ohm", 0.0);
+    zone.reverse_resistance_ohm = value.value(
+        "reverse_resistance_ohm", 0.0);
+    zone.forward_reactance_ohm = value.value(
+        "forward_reactance_ohm", 0.0);
+    zone.reverse_reactance_ohm = value.value(
+        "reverse_reactance_ohm", 0.0);
+    relay.distance_zones.push_back(std::move(zone));
+  }
+  return relay;
+}
+
+static std::vector<hacdcpf::analysis::ProtectionMeasurementPoint>
+protection_trajectory_from_json(const json& rows) {
+  using hacdcpf::analysis::ProtectionMeasurementPoint;
+  if (!rows.is_array() || rows.empty())
+    throw std::runtime_error("protection trajectory must be a non-empty array");
+  std::vector<ProtectionMeasurementPoint> trajectory;
+  trajectory.reserve(rows.size());
+  for (const auto& row : rows) {
+    ProtectionMeasurementPoint point;
+    point.time_s = row.value("time_s", 0.0);
+    point.current = row.value("current", 0.0);
+    point.directional_current = row.value("directional_current", point.current);
+    point.apparent_impedance_ohm = row.value("apparent_impedance_ohm", 0.0);
+    point.differential_current = row.value("differential_current", 0.0);
+    point.restraint_current = row.value("restraint_current", 0.0);
+    point.phasor_measurement_valid = row.value("phasor_measurement_valid", false);
+    point.voltage_phasor_v = {
+        row.value("voltage_real", 0.0), row.value("voltage_imag", 0.0)};
+    point.current_phasor_a = {
+        row.value("current_real", 0.0), row.value("current_imag", 0.0)};
+    trajectory.push_back(point);
+  }
+  return trajectory;
+}
+
+static hacdcpf::analysis::CoordinatedProtectionChainInput
+protection_chain_from_json(const json& row) {
+  using namespace hacdcpf::analysis;
+  if (!row.is_object())
+    throw std::runtime_error("protection chain must be an object");
+  CoordinatedProtectionChainInput chain;
+  chain.relay = protection_relay_from_json(row.at("relay"));
+  chain.trajectory = protection_trajectory_from_json(row.at("trajectory"));
+  const json breaker = row.value("breaker", json::object());
+  if (!breaker.is_object())
+    throw std::runtime_error("protection chain breaker must be an object");
+  chain.breaker.channel_delay_s = breaker.value("channel_delay_s", 0.0);
+  chain.breaker.trip_coil_delay_s = breaker.value("trip_coil_delay_s", 0.0);
+  chain.breaker.mechanical_delay_s = breaker.value("mechanical_delay_s", 0.0);
+  chain.breaker.arc_delay_s = breaker.value("arc_delay_s", 0.0);
+  chain.relay_success_probability = row.value(
+      "relay_success_probability", 1.0);
+  chain.breaker_success_probability = row.value(
+      "breaker_success_probability", 1.0);
+  return chain;
+}
+
+static hacdcpf::analysis::ProtectionCyberReliabilityScenario
+protection_cyber_scenario_from_json(const json& row) {
+  using namespace hacdcpf::analysis;
+  if (!row.is_object())
+    throw std::runtime_error("protection-cyber scenario must be an object");
+  ProtectionCyberReliabilityScenario scenario;
+  scenario.scenario_id = row.value("scenario_id", std::string());
+  scenario.initiating_frequency_per_year = row.at(
+      "initiating_frequency_per_year").get<double>();
+  scenario.event.primary = protection_chain_from_json(row.at("primary"));
+  scenario.event.backup = protection_chain_from_json(row.at("backup"));
+  scenario.event.coordination_margin_s = row.value("coordination_margin_s", 0.0);
+  scenario.event.uncleared_terminal_time_s = row.at(
+      "uncleared_terminal_time_s").get<double>();
+
+  const json components = row.value("information_components", json::array());
+  if (!components.is_array())
+    throw std::runtime_error("information_components must be an array");
+  for (const auto& value : components) {
+    ProtectionCyberComponent component;
+    component.id = value.value("id", std::string());
+    component.intrinsic_availability = value.value(
+        "intrinsic_availability", 1.0);
+    component.packet_delivery_probability = value.value(
+        "packet_delivery_probability", 1.0);
+    component.latency_ms = value.value("latency_ms", 0.0);
+    component.jitter_ms = value.value("jitter_ms", 0.0);
+    component.supplied_by_bus_id = value.value(
+        "supplied_by_bus_id", std::string());
+    component.backup_energy_wh = value.value("backup_energy_wh", 0.0);
+    component.power_draw_w = value.value("power_draw_w", 0.0);
+    component.common_cause_group = value.value(
+        "common_cause_group", std::string());
+    scenario.event.information_components.push_back(std::move(component));
+  }
+  const json functions = row.value("information_functions", json::array());
+  if (!functions.is_array())
+    throw std::runtime_error("information_functions must be an array");
+  for (const auto& value : functions) {
+    ProtectionCyberFunction function;
+    function.name = value.value("name", std::string());
+    const json paths = value.value("alternative_paths", json::array());
+    if (!paths.is_array())
+      throw std::runtime_error("alternative_paths must be an array");
+    for (const auto& path : paths) {
+      if (!path.is_array())
+        throw std::runtime_error("each information path must be an array");
+      function.alternative_paths.push_back(
+          {path.get<std::vector<size_t>>()});
+    }
+    function.max_latency_ms = value.value("max_latency_ms", 0.0);
+    function.max_jitter_ms = value.value("max_jitter_ms", 0.0);
+    function.min_packet_delivery_probability = value.value(
+        "min_packet_delivery_probability", 0.0);
+    scenario.event.information_functions.push_back(std::move(function));
+  }
+  const json environments = row.value("information_environments", json::array());
+  if (!environments.is_array())
+    throw std::runtime_error("information_environments must be an array");
+  for (const auto& value : environments) {
+    ProtectionCyberEnvironment environment;
+    environment.name = value.value("name", std::string());
+    environment.probability = value.value("probability", 1.0);
+    environment.failed_common_cause_groups = value.value(
+        "failed_common_cause_groups", std::vector<std::string>{});
+    environment.deenergized_bus_ids = value.value(
+        "deenergized_bus_ids", std::vector<std::string>{});
+    environment.information_outage_duration_hr = value.value(
+        "information_outage_duration_hr", 0.0);
+    scenario.event.information_environments.push_back(std::move(environment));
+  }
+  const json bindings = row.value("function_bindings", json::object());
+  scenario.event.function_bindings.detection_function = bindings.value(
+      "detection_function", -1);
+  scenario.event.function_bindings.primary_trip_function = bindings.value(
+      "primary_trip_function", -1);
+  scenario.event.function_bindings.backup_trip_function = bindings.value(
+      "backup_trip_function", -1);
+  scenario.event.function_bindings.isolation_function = bindings.value(
+      "isolation_function", -1);
+  scenario.event.function_bindings.restoration_function = bindings.value(
+      "restoration_function", -1);
+
+  const json consequence = row.at("consequence");
+  scenario.consequence.primary_clearing_shed_mw = consequence.at(
+      "primary_clearing_shed_mw").get<double>();
+  scenario.consequence.backup_clearing_shed_mw = consequence.at(
+      "backup_clearing_shed_mw").get<double>();
+  scenario.consequence.uncleared_shed_mw = consequence.at(
+      "uncleared_shed_mw").get<double>();
+  scenario.consequence.isolated_shed_mw = consequence.at(
+      "isolated_shed_mw").get<double>();
+  scenario.consequence.isolation_failed_shed_mw = consequence.at(
+      "isolation_failed_shed_mw").get<double>();
+  scenario.consequence.restored_shed_mw = consequence.at(
+      "restored_shed_mw").get<double>();
+  scenario.consequence.restoration_failed_shed_mw = consequence.at(
+      "restoration_failed_shed_mw").get<double>();
+  scenario.consequence.automatic_restoration_hr = consequence.at(
+      "automatic_restoration_hr").get<double>();
+  scenario.consequence.manual_restoration_hr = consequence.at(
+      "manual_restoration_hr").get<double>();
+  scenario.consequence.repair_hr = consequence.at("repair_hr").get<double>();
+  return scenario;
+}
+
+static hacdcpf::analysis::OnlineProtectionCyberReliabilityScenario
+online_protection_cyber_scenario_from_json(
+    const hacdcpf::HybridPowerSystem& sys, const json& row) {
+  using namespace hacdcpf::analysis;
+  const auto supplied = protection_cyber_scenario_from_json(row);
+  const json online = row.value("online_dae", json::object());
+  if (!online.is_object())
+    throw std::runtime_error("scenario.online_dae must be an object");
+
+  std::vector<const hacdcpf::ACBranch*> in_service;
+  for (const auto& branch : sys.ac.branches) {
+    if (branch.in_service) in_service.push_back(&branch);
+  }
+  if (in_service.empty())
+    throw std::runtime_error("online DAE comparison requires an in-service AC branch");
+
+  const int primary_branch_index = online.value(
+      "primary_branch_index", in_service.front()->index);
+  const int backup_branch_index = online.value(
+      "backup_branch_index",
+      in_service.size() > 1 ? in_service[1]->index : in_service.front()->index);
+  const auto find_branch = [&](int stable_index) -> const hacdcpf::ACBranch& {
+    const auto it = std::find_if(
+        in_service.begin(), in_service.end(),
+        [&](const auto* branch) { return branch->index == stable_index; });
+    if (it == in_service.end())
+      throw std::runtime_error(
+          "online DAE protected AC branch stable index is absent or out of service");
+    return **it;
+  };
+  const auto& primary_branch = find_branch(primary_branch_index);
+  find_branch(backup_branch_index);
+  const int fault_bus_id = online.value("fault_ac_bus_id", primary_branch.to_bus);
+  if (std::none_of(sys.ac.buses.begin(), sys.ac.buses.end(),
+                   [&](const auto& bus) { return bus.index == fault_bus_id; }))
+    throw std::runtime_error("online DAE fault AC bus stable index is absent");
+
+  const double fault_time_s = online.value("fault_time_s", 0.05);
+  const double fault_r_pu = online.value("fault_r_pu", 0.2);
+  const double fault_x_pu = online.value("fault_x_pu", 0.0);
+  const double dt_s = online.value("dt_s", 0.01);
+  const double terminal_time_s = std::max(
+      supplied.event.uncleared_terminal_time_s,
+      std::max(fault_time_s + 0.05,
+               supplied.event.backup.relay.definite_time_delay_s +
+                   fault_time_s + 0.1));
+  const double t_end_s = online.value("t_end_s", terminal_time_s);
+  const json instruments = online.value("instrument_transformers", json::object());
+  if (!instruments.is_object())
+    throw std::runtime_error("online_dae.instrument_transformers must be an object");
+
+  auto make_input = [&](const CoordinatedProtectionChainInput& chain,
+                        int protected_branch_index) {
+    OnlineProtectionDAEInput input;
+    input.fault_ac_bus_id = fault_bus_id;
+    input.fault_phase = online.value("fault_phase", 0);
+    input.fault_time_s = fault_time_s;
+    input.fault_r_pu = fault_r_pu;
+    input.fault_x_pu = fault_x_pu;
+    input.protected_ac_branch_index = protected_branch_index;
+    input.relay = chain.relay;
+    input.breaker = chain.breaker;
+    input.instrument_transformers.ct_ratio = instruments.value("ct_ratio", 1.0);
+    input.instrument_transformers.pt_ratio = instruments.value("pt_ratio", 1.0);
+    input.instrument_transformers.ct_time_constant_s = instruments.value(
+        "ct_time_constant_s", 0.0);
+    input.instrument_transformers.pt_time_constant_s = instruments.value(
+        "pt_time_constant_s", 0.0);
+    input.instrument_transformers.ct_saturation_secondary_a = instruments.value(
+        "ct_saturation_secondary_a", 0.0);
+    input.instrument_transformers.pt_saturation_secondary_v = instruments.value(
+        "pt_saturation_secondary_v", 0.0);
+    OnlineDERFRTMonitor monitor;
+    monitor.stable_id =
+        "ac_bus:" + std::to_string(fault_bus_id) + ":online-der-monitor";
+    monitor.ac_bus_id = fault_bus_id;
+    monitor.settings = hacdcpf::dynamics::make_default_ieee1547(
+        hacdcpf::dynamics::IEEE1547Category::CategoryII,
+        sys.ac.freq_hz > 0.0 ? sys.ac.freq_hz : 50.0);
+    monitor.settings.enabled = true;
+    monitor.loss_of_generation_shed_mw = online.value(
+        "der_loss_shed_mw", 0.0);
+    input.der_monitors = {monitor};
+    input.dynamic_options.t_end_s = t_end_s;
+    input.dynamic_options.dt_s = dt_s;
+    input.dynamic_options.run_power_flow_initialization = online.value(
+        "run_power_flow_initialization", false);
+    input.dynamic_options.trim_dynamic_initial_conditions = online.value(
+        "trim_dynamic_initial_conditions", false);
+    input.dynamic_options.enforce_voltage_health_check = online.value(
+        "enforce_voltage_health_check", false);
+    input.dynamic_options.singular_regularization_pu = online.value(
+        "singular_regularization_pu", 1e-7);
+    return input;
+  };
+
+  OnlineProtectionCyberReliabilityScenario scenario;
+  scenario.scenario_id = supplied.scenario_id;
+  scenario.initiating_frequency_per_year =
+      supplied.initiating_frequency_per_year;
+  scenario.primary = make_input(
+      supplied.event.primary, primary_branch_index);
+  scenario.backup = make_input(
+      supplied.event.backup, backup_branch_index);
+  scenario.primary_relay_success_probability =
+      supplied.event.primary.relay_success_probability;
+  scenario.primary_breaker_success_probability =
+      supplied.event.primary.breaker_success_probability;
+  scenario.backup_relay_success_probability =
+      supplied.event.backup.relay_success_probability;
+  scenario.backup_breaker_success_probability =
+      supplied.event.backup.breaker_success_probability;
+  scenario.coordination_margin_s = supplied.event.coordination_margin_s;
+  scenario.uncleared_terminal_time_s = t_end_s;
+  scenario.information_components = supplied.event.information_components;
+  scenario.information_functions = supplied.event.information_functions;
+  scenario.information_environments = supplied.event.information_environments;
+  scenario.function_bindings = supplied.event.function_bindings;
+  scenario.consequence = supplied.consequence;
+  return scenario;
+}
+
 static json three_stage_validity_json(
     const hacdcpf::analysis::ThreeStageReliabilityResult::ValidityFlags& v) {
   return json{
       {"branch_flow_enforced", v.branch_flow_enforced},
+      {"apparent_power_polygon_enforced",
+       v.apparent_power_polygon_enforced},
       {"voltage_constraints_enforced", v.voltage_constraints_enforced},
       {"radial_topology_enforced", v.radial_topology_enforced},
       {"sop_dispatch_optimised", v.sop_dispatch_optimised},
@@ -7808,9 +8211,15 @@ static json three_stage_fault_json(
       {"stage1_status", f.stage1_status},
       {"stage2_status", f.stage2_status},
       {"stage3_status", f.stage3_status},
+      {"stage1_solver_status", f.stage1_solver_status},
+      {"stage2_solver_status", f.stage2_solver_status},
+      {"stage3_solver_status", f.stage3_solver_status},
       {"stage1_mip_gap", f.stage1_mip_gap},
       {"stage2_mip_gap", f.stage2_mip_gap},
       {"stage3_mip_gap", f.stage3_mip_gap},
+      {"stage1_solver_reported_mip_gap", f.stage1_solver_reported_mip_gap},
+      {"stage2_solver_reported_mip_gap", f.stage2_solver_reported_mip_gap},
+      {"stage3_solver_reported_mip_gap", f.stage3_solver_reported_mip_gap},
       {"failure_rate", f.failure_rate},
       {"frequency_per_year", f.failure_rate},
       {"initiating_failure_rate", f.initiating_failure_rate},
@@ -7880,6 +8289,10 @@ static void populate_three_stage_result_json(
   out["model_scope"] = r.model_scope;
   out["model_limitations"] = r.model_limitations;
   out["validity"] = three_stage_validity_json(r.validity);
+  out["apparent_power_polygon_sides"] =
+      r.apparent_power_polygon_sides;
+  out["maximum_ac_branch_apparent_power_ratio"] =
+      r.maximum_ac_branch_apparent_power_ratio;
   out["component_coverage"] = json{
       {"ac_network", "lindistflow_active_reactive_voltage_radial"},
       {"dc_network", "lindistflow_active_voltage_radial"},
@@ -7918,11 +8331,9 @@ static void populate_three_stage_result_json(
       {"type", "deterministic_frequency_weighted"},
       {"hours_per_year", hours_per_year},
       {"description",
-       "Three-stage metrics use FMEA-style lambda times consequence aggregation; "
-       "LOLP/PLC is LOLE divided by reporting hours, not a Monte Carlo sample probability."},
+       "三阶段指标按日历年事件频率乘条件后果聚合；LOLP/PLC 为 LOLE 除以报告年小时数，不是蒙特卡洛样本概率。"},
       {"stage_duration_convention",
-       "Stage 1 isolation, Stage 2 switching restoration, Stage 3 repair window with "
-       "the faulted component still out and Stage-2 reconfiguration held."},
+       "阶段 1 为隔离，阶段 2 为开关恢复，阶段 3 为故障元件仍停运且保持阶段 2 重构方案的修复窗。"},
       {"protection_conditioning_formula",
        "lambda_transient=lambda*r; lambda_primary=lambda*(1-r)*(1-q1); "
        "lambda_backup=lambda*(1-r)*q1*(1-q2); "
@@ -24301,6 +24712,9 @@ int main(int argc, char** argv) {
         opts.verbose = j.value("verbose", false);
         opts.compute_tail_risk = j.value("compute_tail_risk", false);
         opts.var_confidence = j.value("var_confidence", 0.95);
+        opts.use_importance_sampling =
+            j.value("use_importance_sampling", false);
+        opts.importance_lambda = j.value("importance_lambda", 2.0);
         opts.enable_parallel = j.value("parallel", j.value("enable_parallel", true));
         opts.parallel_threads = j.value("parallel_threads", 0);
         opts.opf_options.verbose = false;
@@ -24337,6 +24751,11 @@ int main(int argc, char** argv) {
         out["nodal_eens_mwh_yr"] = result.nodal_eens_mwh_yr;
         out["eens_history"] = result.eens_history;
         out["cov_history"] = result.cov_history;
+        out["importance_sampling"] = json{
+            {"used", result.importance_sampling_used},
+            {"twisting_factor", result.importance_twisting_factor},
+            {"effective_sample_size", result.importance_effective_sample_size},
+            {"mean_likelihood_ratio", result.importance_mean_likelihood_ratio}};
         
         // Tail risk metrics
         if (opts.compute_tail_risk) {
@@ -25734,8 +26153,12 @@ int main(int argc, char** argv) {
         };
 
         json out;
-        out["method"] = method;
-        out["data_policy"] = reliability_policy_label(pol);
+	        out["method"] = method;
+	        out["data_policy"] = reliability_policy_label(pol);
+	        out["failure_rate_basis"] =
+	            pol.failure_rate_basis ==
+	                    hacdcpf::analysis::FailureRateBasis::CalendarTime
+	                ? "calendar_time" : "operating_time";
 	        out["der_control"] = der_control_audit;
 	        out["comparison_basis"] = json{
 	            {"system_fingerprint", system_fingerprint},
@@ -25764,7 +26187,284 @@ int main(int argc, char** argv) {
 	                 ? "Saved failure-mode and protection configuration is not consumed by the selected reliability method."
 	                 : "No custom failure-mode or protection configuration is saved for this model."}};
 
-        if (method == "nsq" || method == "seq") {
+	        if (method == "physical_cut_set") {
+	          const json input = j.at("physical_cut_set");
+	          if (!input.is_object())
+	            throw std::runtime_error("physical_cut_set 必须是对象");
+	          const json component_rows = input.at("components");
+	          const json path_rows = input.at("success_paths");
+	          if (!component_rows.is_array() || component_rows.empty())
+	            throw std::runtime_error(
+	                "physical_cut_set.components 必须是非空数组");
+	          if (!path_rows.is_array() || path_rows.empty())
+	            throw std::runtime_error(
+	                "physical_cut_set.success_paths 必须是非空数组");
+	          std::vector<hacdcpf::analysis::PhysicalReliabilityComponent>
+	              components;
+	          components.reserve(component_rows.size());
+	          for (const auto& row : component_rows) {
+	            if (!row.is_object())
+	              throw std::runtime_error("物理元件行必须是对象");
+	            components.push_back({row.at("stable_id").get<std::string>(),
+	                                  row.at("availability").get<double>()});
+	          }
+	          std::vector<hacdcpf::analysis::PhysicalSuccessPath> paths;
+	          paths.reserve(path_rows.size());
+	          for (const auto& row : path_rows) {
+	            if (!row.is_array())
+	              throw std::runtime_error("成功路径必须是元件序号数组");
+	            paths.push_back({row.get<std::vector<size_t>>()});
+	          }
+	          const auto r =
+	              hacdcpf::analysis::evaluate_physical_network_reliability(
+	                  components, paths);
+	          out["model_scope"] = "independent-coherent-success-path-exact";
+	          out["availability"] = r.availability;
+	          out["loss_probability"] = r.loss_probability;
+	          out["reduced_success_path_count"] =
+	              r.reduced_success_path_count;
+	          out["minimal_cut_sets"] = r.minimal_cut_set_stable_ids;
+	          out["minimal_cut_set_indices"] = r.minimal_cut_set_indices;
+	          out["exact_independent_path_model"] =
+	              r.exact_independent_path_model;
+	          out["validity"] = json{
+	              {"exact_independent_path_model",
+	               r.exact_independent_path_model},
+	              {"stable_component_identity_preserved", true}};
+	          out["model_limitations"] =
+	              "输入成功路径必须完整描述单调相干物理网络；元件状态按统计独立处理。";
+	          out["reliability_configuration"] = json{
+	              {"configured", has_custom_reliability_configuration},
+	              {"applied", false},
+	              {"consumer", "physical_cut_set"},
+	              {"limitation", "割集计算使用请求中的稳定ID、可用率与成功路径，不读取会话失效模式配置。"}};
+	        } else if (method == "protection_cyber_compare") {
+	          const json comparison_request = j.at("protection_cyber");
+	          if (!comparison_request.is_object())
+	            throw std::runtime_error("protection_cyber must be an object");
+	          const json scenario_rows = comparison_request.at("scenarios");
+	          if (!scenario_rows.is_array() || scenario_rows.empty())
+	            throw std::runtime_error(
+	                "protection_cyber.scenarios must be a non-empty array");
+	          if (scenario_rows.size() > 100)
+	            throw std::runtime_error(
+	                "protection_cyber.scenarios exceeds the 100-scenario limit");
+	          const double threshold = comparison_request.value(
+	              "curtailment_threshold_mw", 0.01);
+	          const bool online_dae = comparison_request.value("online_dae", false);
+	          hacdcpf::analysis::ProtectionCyberReliabilityComparison r;
+	          json online_diagnostics = json::array();
+	          bool dae_trajectories_consumed = false;
+	          if (online_dae) {
+	            std::vector<
+	                hacdcpf::analysis::OnlineProtectionCyberReliabilityScenario>
+	                scenarios;
+	            scenarios.reserve(scenario_rows.size());
+	            for (const auto& row : scenario_rows)
+	              scenarios.push_back(
+	                  online_protection_cyber_scenario_from_json(sys, row));
+	            hacdcpf::analysis::OnlineProtectionCyberReliabilityResult
+	                online_result;
+	            try {
+	              online_result =
+	                  hacdcpf::analysis::compare_online_protection_cyber_reliability(
+	                      sys, scenarios, threshold);
+	            } catch (const std::exception&) {
+	              throw;
+	            } catch (...) {
+	              throw std::runtime_error(
+	                  "在线 DAE 可靠性比较抛出非标准异常；输入系统或动态设备模型不满足运行契约");
+	            }
+	            r = online_result.comparison;
+	            dae_trajectories_consumed =
+	                online_result.dae_trajectories_consumed_by_event_tree;
+	            for (const auto& diagnostic : online_result.diagnostics) {
+	              online_diagnostics.push_back(json{
+	                  {"scenario_id", diagnostic.scenario_id},
+	                  {"primary_clear_time_s",
+	                   diagnostic.primary.protection_clear_time_s},
+	                  {"backup_clear_time_s",
+	                   diagnostic.backup.protection_clear_time_s},
+	                  {"primary_event_tree_clear_time_s",
+	                   diagnostic.primary_event_tree_clear_time_s},
+	                  {"backup_event_tree_clear_time_s",
+	                   diagnostic.backup_event_tree_clear_time_s},
+	                  {"primary_relay_trajectory_points",
+	                   diagnostic.primary.measured_relay_trajectory.size()},
+	                  {"backup_relay_trajectory_points",
+	                   diagnostic.backup.measured_relay_trajectory.size()},
+	                  {"primary_protection_action_applied",
+	                   diagnostic.primary.protection_action_applied},
+	                  {"backup_protection_action_applied",
+	                   diagnostic.backup.protection_action_applied},
+	                  {"primary_dead_island_load_shedding_applied",
+	                   diagnostic.primary.dead_island_load_shedding_applied},
+	                  {"backup_dead_island_load_shedding_applied",
+	                   diagnostic.backup.dead_island_load_shedding_applied},
+	                  {"primary_deenergized_ac_bus_ids",
+	                   diagnostic.primary.deenergized_ac_bus_ids},
+	                  {"backup_deenergized_ac_bus_ids",
+	                   diagnostic.backup.deenergized_ac_bus_ids},
+	                  {"primary_der_frt_consumed",
+	                   diagnostic.primary.der_frt_state_machine_consumed},
+	                  {"backup_der_frt_consumed",
+	                   diagnostic.backup.der_frt_state_machine_consumed}});
+	            }
+	          } else {
+	            std::vector<hacdcpf::analysis::ProtectionCyberReliabilityScenario>
+	                scenarios;
+	            scenarios.reserve(scenario_rows.size());
+	            for (const auto& row : scenario_rows)
+	              scenarios.push_back(protection_cyber_scenario_from_json(row));
+	            r = hacdcpf::analysis::compare_protection_cyber_reliability(
+	                scenarios, threshold);
+	          }
+	          out["physical_model"] = online_dae
+	              ? "online-mass-matrix-dae-protection-cyber-event-tree"
+	              : "supplied-trajectory-protection-cyber-event-tree";
+	          out["model_scope"] = online_dae
+	              ? "mass-matrix-dae+protection-cyber-event-tree+three-window-consequence"
+	              : r.model_scope;
+	          out["model_limitations"] = online_dae
+	              ? json::array({
+	                    "在线模式按每个场景执行主、后备故障发现与动作反馈 DAE；当前 GUI 使用单相故障和一个母线 FRT 监视点。",
+	                    "静态、仅保护和信息物理联合指标使用同一故障频率与三窗口后果口径。"})
+	              : json::array({
+	                    "给定轨迹模式直接消费用户提供的继电器测量轨迹，不调用网络 DAE。",
+	                    "静态、仅保护和信息物理联合指标使用同一故障频率与三窗口后果口径。"});
+	          out["validity"] = json{
+	              {"relay_logic_modelled", r.validity.relay_logic_modelled},
+	              {"protection_coordination_modelled",
+	               r.validity.protection_coordination_modelled},
+	              {"breaker_failure_modelled",
+	               r.validity.breaker_failure_modelled},
+	              {"information_topology_modelled",
+	               r.validity.information_topology_modelled},
+	              {"information_qos_modelled",
+	               r.validity.information_qos_modelled},
+	              {"common_cause_conditioned",
+	               r.validity.common_cause_conditioned},
+	              {"cyber_power_dependency_modelled",
+	               r.validity.cyber_power_dependency_modelled},
+	              {"der_ride_through_modelled",
+	               r.validity.der_ride_through_modelled},
+	              {"online_network_dae_coupled",
+	               r.validity.online_network_dae_coupled}};
+	          out["dae_trajectories_consumed_by_event_tree"] =
+	              dae_trajectories_consumed;
+	          out["online_diagnostics"] = std::move(online_diagnostics);
+	          out["metrics"] = json{
+	              {"eens_mwh_yr", r.cyber_conditioned_eens_mwh_yr},
+	              {"lole_hr_yr", r.cyber_conditioned_lole_hr_yr},
+	              {"lolf_occ_yr", r.cyber_conditioned_lolf_occ_yr},
+	              {"edns_mw", r.cyber_conditioned_eens_mwh_yr / 8760.0},
+	              {"plc", na("确定性事件树不输出抽样 PLC。")},
+	              {"saifi", na("未计算用户可靠性指标。")},
+	              {"saidi", na("未计算用户可靠性指标。")},
+	              {"caidi", na("未计算用户可靠性指标。")},
+	              {"asai", na("未计算用户可靠性指标。")}};
+	          out["method_comparison"] = json{
+	              {"static_fmea",
+	               {{"eens_mwh_yr", r.static_fmea_eens_mwh_yr},
+	                {"lole_hr_yr", r.static_fmea_lole_hr_yr},
+	                {"lolf_occ_yr", r.static_fmea_lolf_occ_yr}}},
+	              {"protection_only",
+	               {{"eens_mwh_yr", r.protection_only_eens_mwh_yr},
+	                {"lole_hr_yr", r.protection_only_lole_hr_yr},
+	                {"lolf_occ_yr", r.protection_only_lolf_occ_yr}}},
+	              {"cyber_conditioned",
+	               {{"eens_mwh_yr", r.cyber_conditioned_eens_mwh_yr},
+	                {"lole_hr_yr", r.cyber_conditioned_lole_hr_yr},
+	                {"lolf_occ_yr", r.cyber_conditioned_lolf_occ_yr}}},
+	              {"cyber_increment_mwh_yr", r.cyber_increment_mwh_yr},
+	              {"protection_benefit_mwh_yr",
+	               r.protection_benefit_mwh_yr}};
+	          out["scenarios_evaluated"] = r.scenarios_evaluated;
+	          out["joint_classes_evaluated"] = r.joint_classes_evaluated;
+	        } else if (method == "exact_sensitivity") {
+          const json exact = j.value("exact_sensitivity", json::object());
+          if (!exact.is_object())
+            throw std::runtime_error("exact_sensitivity must be an object");
+          hacdcpf::analysis::ReliabilityOptions opts;
+          opts.data_policy = pol;
+          opts.load_scale_factor = load_scale;
+          opts.curtail_threshold_mw = exact.value(
+              "curtailment_threshold_mw", j.value("curtail_threshold_mw", 0.01));
+          const int maximum_components = exact.value("maximum_components", 20);
+          if (maximum_components < 1 || maximum_components > 20)
+            throw std::runtime_error(
+                "exact_sensitivity.maximum_components must be in [1,20]");
+          const auto r = hacdcpf::analysis::compute_exact_reliability_sensitivity(
+              sys, opts, static_cast<size_t>(maximum_components));
+          out["physical_model"] = "minimum-load-shedding-state-evaluation";
+          out["model_scope"] = r.model_scope;
+          out["model_limitations"] = json::array({
+              "仅枚举相互独立的二状态随机元件；不含共因失效与时序状态转移。",
+              "状态数按非退化随机元件计算；超过配置上限时明确拒绝。"});
+          out["data_quality"] = reliability_data_quality_json(
+              hacdcpf::analysis::summarize_reliability_data_quality(sys, pol));
+          out["validity"] = json{
+              {"exact_independent_binary_model",
+               r.exact_independent_binary_model},
+              {"state_space_fully_enumerated", true},
+              {"common_cause_modelled", false},
+              {"chronology_modelled", false}};
+          out["metrics"] = json{
+              {"eens_mwh_yr", r.expected_incremental_eens_mwh_yr},
+              {"raw_eens_mwh_yr",
+               r.baseline_eens_mwh_yr +
+                   r.expected_incremental_eens_mwh_yr},
+              {"baseline_eens_mwh_yr", r.baseline_eens_mwh_yr},
+              {"incremental_eens_mwh_yr",
+               r.expected_incremental_eens_mwh_yr},
+              {"edns_mw", r.expected_incremental_eens_mwh_yr / 8760.0},
+              {"lole_hr_yr", na("精确灵敏度入口当前只聚合 EENS。")},
+              {"lolf_occ_yr", na("独立状态枚举不包含时序故障次数。")},
+              {"plc", na("精确灵敏度入口当前只聚合 EENS。")},
+              {"saifi", na("未计算用户可靠性指标。")},
+              {"saidi", na("未计算用户可靠性指标。")},
+              {"caidi", na("未计算用户可靠性指标。")},
+              {"asai", na("未计算用户可靠性指标。")}};
+          out["states_evaluated"] = r.states_evaluated;
+          out["maximum_stochastic_components"] = maximum_components;
+          json rows = json::array();
+          for (const auto& item : r.components) {
+            const std::string canonical_type =
+                mc_type_to_fmea_type(item.component_type);
+            const auto meta = describe_fmea_component(
+                sys, canonical_type,
+                static_cast<int>(item.component_position));
+            rows.push_back(json{
+                {"stable_id", canonical_type + ":" +
+                                  std::to_string(item.component_index)},
+                {"component_type", item.component_type},
+                {"canonical_component_type", canonical_type},
+                {"component_index", item.component_index},
+                {"component_position", item.component_position},
+                {"global_state_index", item.global_state_index},
+                {"component_name", item.component_name},
+                {"display_name", meta.display_name},
+                {"display_type", meta.display_type},
+                {"canvas_type", meta.canvas_type},
+                {"canvas_index", meta.canvas_index},
+                {"component_domain", meta.component_domain},
+                {"primary_bus", meta.primary_bus},
+                {"secondary_bus", meta.secondary_bus},
+                {"mappable", meta.mappable},
+                {"unavailability", item.unavailability},
+                {"eens_if_forced_down_mwh_yr",
+                 item.eens_if_forced_down_mwh_yr},
+                {"eens_if_forced_up_mwh_yr",
+                 item.eens_if_forced_up_mwh_yr},
+                {"birnbaum_mwh_yr_per_unit_unavailability",
+                 item.birnbaum_mwh_yr_per_unit_unavailability},
+                {"eens_derivative_mwh_yr_per_unit_unavailability",
+                 item.eens_derivative_mwh_yr_per_unit_unavailability},
+                {"fussell_vesely", item.fussell_vesely}});
+          }
+          out["sensitivity_components"] = rows;
+          out["critical_components"] = rows;
+        } else if (method == "nsq" || method == "seq") {
           hacdcpf::analysis::ReliabilityOptions opts;
           opts.data_policy = pol;
           opts.load_scale_factor = load_scale;
@@ -25772,6 +26472,9 @@ int main(int argc, char** argv) {
           opts.seed = mc.value("seed", 0);
           opts.compute_tail_risk = mc.value("compute_tail_risk", false);
           opts.var_confidence = mc.value("var_confidence", 0.95);
+          opts.use_importance_sampling =
+              mc.value("use_importance_sampling", false);
+          opts.importance_lambda = mc.value("importance_lambda", 2.0);
           opts.hours_per_year = load.value("hours_per_year", 8736);
           opts.enable_parallel = mc.value("parallel", parallel_requested);
           opts.parallel_threads = mc.value("parallel_threads", parallel_threads);
@@ -25900,6 +26603,11 @@ int main(int argc, char** argv) {
 	          for (const auto& ci : r.critical_components)
 	            crit.push_back(mc_critical_component_json(sys, ci));
 	          out["critical_components"] = crit;
+	          out["importance_sampling"] = json{
+	              {"used", r.importance_sampling_used},
+	              {"twisting_factor", r.importance_twisting_factor},
+	              {"effective_sample_size", r.importance_effective_sample_size},
+	              {"mean_likelihood_ratio", r.importance_mean_likelihood_ratio}};
         } else if (method == "fmea") {
           hacdcpf::analysis::FMEAOptions fo;
           fo.data_policy = pol;
@@ -26125,6 +26833,16 @@ int main(int argc, char** argv) {
 	          out["contingencies"] = modes;
 	          out["n_contingencies"] = r.contingencies.size();
 	          out["n_pairs_evaluated"] = r.n_pairs_evaluated;
+	          out["n_pairs_skipped_by_threshold"] =
+	              r.n_pairs_skipped_by_threshold;
+	          out["n_pairs_skipped_by_budget"] = r.n_pairs_skipped_by_budget;
+	          out["second_order_expansion_complete"] =
+	              r.second_order_expansion_complete;
+	          out["baseline_eens_mwh_yr"] = r.baseline_eens_mwh_yr;
+	          out["first_order_eens_mwh_yr"] = r.first_order_eens_mwh_yr;
+	          out["second_order_interaction_eens_mwh_yr"] =
+	              r.second_order_interaction_eens_mwh_yr;
+	          out["warnings"] = r.warnings;
 	          json co_modes = json::array();
 	          for (const auto& x : r.co_contingencies)
 	            co_modes.push_back(failure_mode_co_contingency_json(sys, x));
@@ -26154,10 +26872,17 @@ int main(int argc, char** argv) {
             {"caidi", na("F&D generation adequacy does not compute customer interruption indices.")},
             {"asai",  na("F&D generation adequacy does not compute customer interruption indices.")}};
           out["capacity_outage_levels"] = r.capacity_outage_levels;
+          out["state_probability"] = r.state_probability;
           out["cumulative_probability"] = r.cumulative_probability;
           out["cumulative_frequency"] = r.cumulative_frequency;
+          out["probability_valid"] = r.probability_valid;
+          out["frequency_valid"] = r.frequency_valid;
+          out["exact_capacity_states"] = r.exact_capacity_states;
+          out["warnings"] = r.warnings;
         } else if (method == "three_stage") {
           hacdcpf::analysis::ThreeStageReliabilityOptions tso;
+          tso.apparent_power_polygon_sides =
+              rest.value("apparent_power_polygon_sides", 16);
           if (rest.contains("max_switch_operations"))
             tso.max_switch_operations = rest.value("max_switch_operations", INT_MAX);
           tso.include_generator_faults = rest.value("include_generator_faults", false);

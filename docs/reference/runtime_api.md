@@ -219,11 +219,40 @@ The process-global GUI session exposes a model-bound reliability configuration:
 | `POST /api/session/reliability/configuration/validate` | Parse and validate a candidate without changing session state. |
 | `POST /api/session/reliability/configuration` | Validate, resolve protection-zone references, save atomically, and clear cached analyses. |
 
+`POST /api/session/run_reliability` accepts a top-level `failure_rate_basis`:
+`operating_time` is the conditional up-time intensity and `calendar_time` is
+the observed calendar frequency. The latter is inverted exactly using
+`U=f_cal*r/H` and `lambda_up=f_cal/(1-U)`; invalid basis values and `U>=1` are
+rejected. The selected basis is echoed in every response.
+
+`method=physical_cut_set` accepts `physical_cut_set.components[]` rows with a
+unique `stable_id` and availability in `[0,1]`, plus `success_paths[][]` using
+zero-based indices into that component array. It performs exact inclusion-
+exclusion on reduced success paths and returns availability, loss probability,
+reduced path count, minimal cuts in both stable-ID and index spaces, and
+`exact_independent_path_model=true`. Invalid/oversized inputs fail explicitly;
+the endpoint never substitutes a path-independence approximation.
+
+Three-stage requests accept an even
+`restoration.apparent_power_polygon_sides >= 4` (default 16). Responses echo
+the side count, maximum AC branch apparent-power/rating ratio, and
+`validity.apparent_power_polygon_enforced`.
+Each fault also returns the backend `stage1/2/3_solver_status`, certified
+`stage1/2/3_mip_gap`, and raw `stage1/2/3_solver_reported_mip_gap`. An explicit
+optimal termination certificate normalizes the certified gap to zero when a
+zero or near-zero objective makes the backend relative gap ill-scaled; the raw
+diagnostic is retained and all post-solve feasibility audits remain mandatory.
+
 Failure-mode overrides are keyed by `mode_id`; protection references use
 `component_kind + component .index` stable IDs such as `ac_transformer_2w:7`.
 Vector position is returned only as `component_position` for diagnostics and is
 not an external identity. Duplicate `.index` values within one component kind
 are rejected because they would make the stable mapping ambiguous.
+
+Every `effective_modes[]` row distinguishes
+`effective_failure_rate_per_year` (conditional up-time intensity) from
+`effective_calendar_frequency_per_year` (calendar event frequency used for
+annual consequence weighting). Calendar-input protection events expose both.
 
 The mode schema exposes optional `enabled`, hazard (`failure_rate_per_year`,
 `mtbf_hours`, `forced_outage_rate`), repair/duration, conditional/demand
@@ -272,12 +301,16 @@ backup device supplies `q2`; otherwise the response declares the assumed
 upstream-backup boundary. Initiating frequency is conserved between transient
 and sustained scenarios.
 
-This is a probability-conditioned protection event abstraction, not a relay
-time-current simulation. It does not calculate pickup from short-circuit
-current, direction/distance/differential selectivity, setting coordination,
-breaker mechanics, DER ride-through, or GFM/GFL dynamic feedback. Configured
-nuisance-trip frequency remains a failure-mode-FMEA input and is not yet a
-three-stage recovery scenario.
+三阶段 HTTP 路由本身是概率条件化的恢复模型；可靠性主路由另提供
+`method=protection_cyber_compare`。当
+`protection_cyber.online_dae=false` 时，它消费请求给出的主/后备轨迹；为 true
+时，每个场景执行主、后备各自的故障发现与动作反馈 Mass-Matrix DAE，并把
+CT/PT 后的轨迹、支路跳闸、失电岛负荷退出和 DER-FRT 终态送入同一年度事件树。
+两种模式都返回静态 FMEA、仅保护、信息物理联合 EENS/LOLE/LOLF。在线模式
+额外返回 `dae_trajectories_consumed_by_event_tree` 和逐场景
+`online_diagnostics`，用于核对 DAE 与事件树清除时刻、轨迹点数、动作反馈、
+失电母线稳定 ID 和 FRT 消费状态。当前在线结果口径为正序网络、单相故障输入
+和三窗口年度后果；LCC 与显式三相保护动态不在该口径内。
 
 Saved overrides are sparse. The GUI does not turn every effective built-in row
 into an explicit user value. Loading a different built-in or imported model, or
@@ -299,6 +332,15 @@ matches an enumerated contingency; otherwise its scope is empty and its
 limitation explains unmatched rows or ignored mode overrides. Other methods
 return `applied: false` plus a non-empty `limitation` when saved configuration
 exists; they never silently imply that custom values affected the run.
+
+The <code>fd</code> response returns exact, unbinned capacity-outage levels
+together with state probabilities, cumulative probabilities/frequencies,
+probability/frequency validity, exact-capacity-state status, and warnings. FOR
+without MTTR remains usable for probability/LOLE but does not fabricate LOLF
+or LOLD. Failure-mode N-2 responses distinguish each pair's raw ranking
+contribution from its EENS/LOLE interaction corrections; aggregate fields
+report first-order EENS, second-order interaction EENS, skipped-pair counts,
+and second-order expansion completeness.
 
 `coverage.modes_unsupported` is derived from the same consequence-patch
 decision returned as `effective_modes[].supported`; it is not a catalog-only

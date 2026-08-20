@@ -30,6 +30,7 @@ playwright-report/
 # external_data/
 
 # LaTeX build artifacts
+/*.md.tex
 docs/**/*.pdf
 docs/**/*.xdv
 docs/**/*.aux

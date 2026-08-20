@@ -1,0 +1,147 @@
+\section{运行时接口、GUI 契约与验证证据}\label{sec:rel-runtime-contract}
+
+\subsection{统一可靠性入口}
+生产 GUI 使用 \texttt{POST /api/session/run\_reliability}。请求至少给出 \fld{method}，不同方法只消费各自命名对象：
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{4.0cm}L{5.0cm}L{5.2cm}@{}}
+\toprule
+方法值 & 主要请求对象 & 核心输出\\
+\midrule
+\texttt{nsq} & \fld{monte\_carlo}、\fld{load} & EENS、LOLE、PLC、重要抽样诊断\\
+\texttt{seq} & \fld{monte\_carlo}、\fld{load} & 年度 EENS/LOLE/LOLF、尾部风险\\
+\texttt{fmea} & \fld{dimensions}、\fld{restoration} & 阶段后果、信息物理分解\\
+\texttt{exact\_sensitivity} & \fld{exact\_sensitivity} & 精确状态、Birnbaum、FV\\
+\fld{protection\_cyber\_compare} & \fld{protection\_cyber.scenarios} & 静态/仅保护/联合三行对比\\
+\texttt{three\_stage} & 三阶段恢复对象 & 交直流恢复 MILP 指标\\
+\bottomrule
+\end{tabular}
+\end{center}
+未知方法、类型错误、越界概率或缺必需字段返回 HTTP 400，不自动改用 FMEA 或普通 MC。
+
+\subsection{重要抽样请求}
+非序贯蒙特卡洛对象新增：
+\begin{verbatim}
+"monte_carlo": {
+  "max_samples": 400,
+  "min_samples": 400,
+  "use_importance_sampling": true,
+  "importance_lambda": 4.0
+}
+\end{verbatim}
+扭曲因子必须有限且大于零。序贯方法收到重要抽样选项会拒绝，因为静态似然比不适用于 CTMC 路径。响应的
+\fld{importance\_sampling} 给出是否使用、扭曲因子、有效样本量和平均似然比。
+
+\subsection{精确灵敏度请求}
+\begin{verbatim}
+"method": "exact_sensitivity",
+"exact_sensitivity": {
+  "maximum_components": 20,
+  "curtailment_threshold_mw": 0.01
+}
+\end{verbatim}
+上限取 $1$ 到 $20$。这里的元件数是 $0<U<1$ 的随机元件数；确定运行/停运元件仍参与后果状态。响应逐行给出
+\fld{component\_type}、\fld{component\_position}、\fld{component\_index}、\fld{stable\_id}、
+\fld{birnbaum\_eens}、\fld{eens\_derivative} 和 \fld{fussell\_vesely}。
+
+\subsection{三级对照请求结构}
+每个场景必须给出场景 ID、年故障频率、主/后备保护链、配合裕度、未清除终端时间、信息元件、信息功能、环境、功能绑定和
+三窗口后果。服务器限制最多一百个场景和二十个信息元件，防止指数状态枚举失控。
+
+主/后备保护链包含继电特性、逐点测量轨迹、断路器四段延时和按需成功概率。当前 GUI 提供定时限过流的常用参数；HTTP
+解析器还支持反时限、距离和差动模型。测量轨迹时间必须递增，电流、视在阻抗、差流和制动流必须有限。
+
+\subsection{信息元件与路径 JSON}
+信息元件使用数组位置构造路径，但响应和诊断保留字符串 ID。每个元件可给固有可用率、包交付概率、时延、抖动、供电母线、
+备用能量、功耗和共因组。路径中的索引越界立即失败，不删除非法路径后继续计算。
+
+信息功能包含替代路径和三项 QoS 门限。空路径表示不需要任何信息元件、功能恒可用；没有任何替代路径表示功能不可用。两者
+语义相反，解析器不得把空数组与含一个空路径混为一谈。
+
+\subsection{环境 JSON}
+环境数组是互斥状态，概率和必须为一。每行给环境名、失败共因组、失电母线和信息停电持续时间。交流和直流供电母线在当前
+保护信息接口中使用字符串稳定标识，调用方应包含域前缀，避免 AC/DC 同号混淆。
+
+\subsection{三窗口后果 JSON}
+后果对象分别给主清除、后备清除、未清除、隔离成功、隔离失败、恢复成功和恢复失败的切负荷，以及自动恢复、人工恢复和修复
+时间。所有功率和时间必须非负。服务器不根据名称猜单位：清除时间用秒，恢复/修复时间用小时，响应统一输出 MWh/年和小时/年。
+
+\subsection{三级对照响应}
+\fld{method\_comparison} 下有 \fld{static\_fmea}、\fld{protection\_only} 和
+\fld{cyber\_conditioned} 三个对象，每个给 EENS、LOLE、LOLF；另给保护收益和信息增量。顶层 \fld{metrics} 使用联合行，
+避免 GUI 图表和下载表使用不同主结果。
+
+\subsection{有效性标志}
+三级响应逐项报告继电逻辑、保护配合、断路器失败、信息拓扑、QoS、共因、信息节点物理供电、DER 穿越和在线 DAE。给定轨迹
+HTTP 入口的 \fld{online\_network\_dae\_coupled=false} 是事实边界；C++ 在线耦合接口成功消费 DAE 轨迹后才置真。
+
+\subsection{保护误动配置}
+通用 FMEA 的 \fld{dimensions.information.protection\_misoperation} 接收：启用开关、无故障判别窗数、每窗误跳概率、
+通道成功率、断路器成功率、断开负荷和恢复时长。响应返回误动频率、EENS/LOLE/LOLF 增量和 EENS 分解残差。该对象未启用时
+增量自然为零；启用后该计算项实际进入系统总指标。
+
+\subsection{GUI 方法选择}
+可靠性面板显式列出“精确灵敏度（状态枚举）”和“保护-信息物理三级对照”。重要抽样开关和扭曲因子只在 NSQ 显示；精确
+方法只显示随机元件上限；三级对照显示保护、信息和三窗口后果参数。切换方法时隐藏控件同时禁用，避免隐藏字段被意外提交。
+
+\subsection{GUI 三级结果}
+结果区用同一表展示三方法 EENS、LOLE、LOLF，并另列保护收益和信息失效增量。精确灵敏度用稳定 ID、类型和位置展示各元件
+Birnbaum、EENS 导数与 FV。重要抽样显示扭曲因子、ESS 和平均似然比，使用户能判断方差缩减是否退化。
+
+\subsection{旧 Level-1 与新 Level-2 的区分}
+GUI 仍保留通用 FMEA 的 Level-1 智能独立因子筛查，它把检测、隔离、恢复和保护成功概率相乘或消费显式联合类，后果压缩为
+自动/人工两类。\texttt{protection\_cyber\_compare} 是 Level-2 离散事件树，显式计算继电轨迹、主后备、断路器和信息元件
+状态。两者不能都标成“完整信息物理仿真”，结果页必须显示模型范围。
+
+\subsection{HTTP 错误契约}
+下列情况必须返回 400：概率不在 $[0,1]$、概率行不归一、负时长/功率、非递增轨迹、未知继电特性、功能绑定越界、路径索引
+越界、状态元件超限、精确随机元件超限、重要抽样因子非正。运行时求解失败也返回明确错误文本，不输出全零结果冒充成功。
+
+\subsection{稳定 ID 契约}
+对外资产身份使用组件 \fld{.index} 或带类型前缀的稳定 ID；\fld{component\_position} 仅作容器诊断。保护自动拓扑入口按稳定
+ID 查找开关/支路，精确灵敏度同时返回稳定 ID 和位置。任何 JSON 客户端不得把表格行号回写为组件 ID。
+
+\subsection{注册单元测试}
+\srcpath{test\_reliability\_resolver} 覆盖参数解析、MC、重要抽样、精确灵敏度、FMEA、保护逻辑、事件树、拓扑后果和误动分解。
+\srcpath{test\_intelligent\_cyber\_physical\_reliability} 覆盖混淆矩阵、风险隔离、风险恢复、POMDP、序贯事件队列、在线 DAE 和
+DAE 到年度事件树的消费。\srcpath{test\_three\_stage\_reliability} 覆盖恢复 MILP。
+
+\subsection{重要抽样回归证据}
+$\kappa=1$ 的四百样本测试要求平均似然比精确为一、ESS 精确为四百；$\kappa=4$ 要求返回有限正 ESS 且不超过样本数；非法
+$\kappa=0$ 必须抛出参数错误；序贯方法启用重要抽样必须拒绝。这四项同时防止“参数被解析但抽样分布未改变”的假实现。
+
+\subsection{精确灵敏度回归证据}
+混合 AC/DC 小系统含两个随机元件、一个确定元件，预期只枚举四个状态。VSC 稳定 ID 设为 $77$，验证不会返回位置 $0$。
+五兆瓦直流负荷解析值为 EENS $4380$、Birnbaum $43800$、FV $1$，误差容差由双精度求和决定。
+
+\subsection{保护信息事件树回归证据}
+测试构造共享信息路径、QoS 不合格路径、共因环境和供电电池，检查类概率归一及功能可用率；再把信息可用率从 $0.8$ 降至
+$0.4$，要求静态 FMEA 不变且联合 EENS 增加。主/后备断路器概率分别改变时，对应失效原因类概率按解析乘积改变。
+
+\subsection{在线 DAE 回归证据}
+两母线双回线系统在 $0.05$ 秒施加故障，定时限继电器从 DAE 电流轨迹动作并跳开稳定 ID 为 $101$ 的支路。测试检查发现和
+闭环两次求解成功、故障清除与支路跳闸事件均实际施加、DER 状态机消费轨迹。主后备年度耦合再检查两条清除时刻一致性和
+联合指标有效性。
+
+\subsection{GUI E2E}
+\srcpath{reliability\_workflow\_e2e.mjs} 通过真实 HTTP 服务器装载算例，执行三级对照、精确灵敏度和重要抽样，并检查方法选项、
+控件显隐和返回字段。E2E 不用前端模拟响应，因此能发现服务器分支未接线、字段命名漂移和 JSON 数值类型错误。
+
+\subsection{浏览器视觉验收}
+桌面与 $390\times844$ 移动视口需检查：三级控制组不横向溢出，标签和输入不重叠，表格可在局部容器滚动，方法切换不引起
+错误控件残留，控制台无异常。视觉检查不能替代接口测试，但能发现功能虽然可调用却无法在目标视口操作的问题。
+
+\subsection{构建与依赖口径}
+可靠性代码属于静态库 \srcpath{hacdcpf}，GUI 服务器是测试目录下的独立生产路由实现。完整构建依赖兄弟仓库 MIPSolvers。
+若本地 MIPSolvers HEAD 与仓库记录版本不同，测试只能标为本地非可复现验证，不能把通过结果写成锁定依赖基线。
+
+\subsection{发布前零残留审计}
+发布前扫描可靠性手册和源码中的悬空状态词。每个命中必须属于明确的模型适用边界，而不能是手册承诺但代码没有执行的功能；
+源码新增行不得保留任务标记、空壳函数或固定假值。
+
+\subsection{页数和语言验收}
+主手册必须由中文理论、公式推导、接口契约、算例和验证证据构成，有效正文不少于一百页。英文参考文献题名和源码标识不算
+英文正文，也不能用英文附录、重复表格、空白页或超大字号补页。最终 PDF 使用 XeLaTeX 编译，并经 Poppler 全页渲染抽检。
+
+\subsection{完成判据}
+只有同时满足代码可链接、专项测试通过、HTTP/GUI E2E 通过、中文手册超过一百页、PDF 无布局缺陷、文档承诺零悬空和依赖
+边界已记录，才可称可靠性理论功能闭环。任一验收项缺失都必须在状态文档中列为阻断项，不得以局部单元测试通过替代整体完成。
