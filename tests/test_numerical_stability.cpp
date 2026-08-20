@@ -230,6 +230,7 @@ TEST_CASE("IPM centrality step control preserves the legacy opt-out result",
   const LPModel lp = make_scaled_lp(1e3, 1e-3, 1e-2, 1e2);
 
   IPMLPOptions modern_opt;
+  CHECK(modern_opt.max_correctors == -1);
   modern_opt.max_correctors = 0;
   REQUIRE(modern_opt.centrality_step_control);
   const SolveResult modern = NativeIPMLPAdapter(modern_opt).solve_lp(lp);
@@ -272,6 +273,17 @@ TEST_CASE("IPM original-model audit checks the complete bounded LP KKT system",
   CHECK(bad_dual.relative_dual_residual > 1e-6);
   CHECK(bad_dual.relative_gap > 1e-6);
   CHECK_FALSE(bad_dual.acceptable(1e-12, 1e-12, 1e-12));
+
+  // A presolve constant shifts both objectives without changing the gap
+  // numerator. Cancellation can therefore make the original-scale relative
+  // gap much larger than the reduced-scale gap; the audit must normalize
+  // after applying the offset (A&A 1995 Section 2.4; derivation Section 8.18).
+  const IPMLPOptimalityAudit shifted = audit_ipm_lp_optimality(
+      lp, x, row_duals, zl, zu, nullptr, nullptr, 14.0);
+  REQUIRE(shifted.valid);
+  CHECK(shifted.primal_objective == Approx(bad_dual.primal_objective + 14.0));
+  CHECK(shifted.dual_objective == Approx(bad_dual.dual_objective + 14.0));
+  CHECK(shifted.relative_gap > bad_dual.relative_gap);
 }
 
 TEST_CASE("IPM audit reconstructs fixed-column bound multipliers",

@@ -292,7 +292,8 @@ void initialize_entering_heap(const State& state, PrimalPricingHeap& heap,
 bool rebuild_primal_state(State& state, Statistics& statistics,
                           PrimalDevexMode devex_mode,
                           PrimalDevexFramework& devex,
-                          std::string& failure) {
+                          std::string& failure,
+                          bool allow_strong_rebuild) {
   const Eigen::VectorXd previous_x = state.x_basic;
   const Eigen::VectorXd previous_reduced_costs = state.reduced_costs;
   const double previous_objective = state.objective;
@@ -308,8 +309,30 @@ bool rebuild_primal_state(State& state, Statistics& statistics,
   // correction when a backward-stable FTRAN alone is not accurate enough for
   // the primal feasibility contract.
   if (!reconstruct(state, failure, true, true, true)) {
-    failure = "primal major reconstruction failed: " + failure;
-    return false;
+    const std::string first_failure = failure;
+    const bool fresh_solve_validation_failure =
+        state.factor->update_count() == 0 &&
+        first_failure.find("backward-error validation") != std::string::npos;
+    // HiGHS HEkk.cpp:3029-3050 raises the Markowitz threshold to 0.5 after
+    // fresh numerical trouble. The driver enables this only for original-cost
+    // primal cleanup, so ordinary dual and primal pivot paths stay at 0.1.
+    if (!allow_strong_rebuild || !fresh_solve_validation_failure ||
+        !state.factor->strengthen_pivot_threshold()) {
+      failure = "primal major reconstruction failed: " + first_failure;
+      return false;
+    }
+    if (!state.factor->rebuild(state.basis, statistics.rank_repairs,
+                               failure)) {
+      failure = "strong-pivot primal INVERT failed after " + first_failure +
+                ": " + failure;
+      return false;
+    }
+    ++statistics.reinversions;
+    if (!reconstruct(state, failure, true, true, true)) {
+      failure = "strong-pivot primal reconstruction failed after " +
+                first_failure + ": " + failure;
+      return false;
+    }
   }
   if (previous_x.size() == state.x_basic.size() && previous_x.allFinite()) {
     statistics.max_primal_drift =
@@ -524,7 +547,8 @@ bool certify_primal_unbounded_ray(const State& state,
 
 Result run_primal_phase(
     State& state, Statistics& statistics,
-    const std::chrono::steady_clock::time_point& solve_start) {
+    const std::chrono::steady_clock::time_point& solve_start,
+    bool allow_strong_rebuild) {
   PrimalProfile profile(state.phase);
   PrimalDevexMode devex_mode = primal_devex_mode();
   if (devex_mode == PrimalDevexMode::Pse && state.n > kPrimalPseMaxColumns) {
@@ -556,7 +580,7 @@ Result run_primal_phase(
       if (state.updates_since_rebuild > 0) {
         std::string failure;
         if (!rebuild_primal_state(state, statistics, devex_mode, devex,
-                                  failure)) {
+                                  failure, allow_strong_rebuild)) {
           return make_result(state, Status::NumericalFailure,
                              std::move(failure), statistics);
         }
@@ -604,7 +628,7 @@ Result run_primal_phase(
       if (state.updates_since_rebuild > 0) {
         std::string failure;
         if (!rebuild_primal_state(state, statistics, devex_mode, devex,
-                                  failure)) {
+                                  failure, allow_strong_rebuild)) {
           return make_result(state, Status::NumericalFailure,
                              std::move(failure), statistics);
         }
@@ -623,7 +647,7 @@ Result run_primal_phase(
       if (state.updates_since_rebuild > 0) {
         std::string failure;
         if (!rebuild_primal_state(state, statistics, devex_mode, devex,
-                                  failure)) {
+                                  failure, allow_strong_rebuild)) {
           return make_result(state, Status::NumericalFailure,
                              std::move(failure), statistics);
         }
@@ -700,7 +724,7 @@ Result run_primal_phase(
     if (!row_solve.accepted) {
       if (state.updates_since_rebuild > 0) {
         if (!rebuild_primal_state(state, statistics, devex_mode, devex,
-                                  failure)) {
+                                  failure, allow_strong_rebuild)) {
           return make_result(state, Status::NumericalFailure,
                              std::move(failure), statistics);
         }
@@ -762,7 +786,7 @@ Result run_primal_phase(
     if (!primal_pivot_identity_acceptable(pivot, row_pivot)) {
       if (state.updates_since_rebuild > 0) {
         if (!rebuild_primal_state(state, statistics, devex_mode, devex,
-                                  failure)) {
+                                  failure, allow_strong_rebuild)) {
           return make_result(state, Status::NumericalFailure,
                              std::move(failure), statistics);
         }
@@ -777,7 +801,7 @@ Result run_primal_phase(
     if (!std::isfinite(dual_step)) {
       if (state.updates_since_rebuild > 0) {
         if (!rebuild_primal_state(state, statistics, devex_mode, devex,
-                                  failure)) {
+                                  failure, allow_strong_rebuild)) {
           return make_result(state, Status::NumericalFailure,
                              std::move(failure), statistics);
         }
@@ -800,7 +824,7 @@ Result run_primal_phase(
     if (!reduced_cost_update_finite) {
       if (state.updates_since_rebuild > 0) {
         if (!rebuild_primal_state(state, statistics, devex_mode, devex,
-                                  failure)) {
+                                  failure, allow_strong_rebuild)) {
           return make_result(state, Status::NumericalFailure,
                              std::move(failure), statistics);
         }
@@ -816,7 +840,7 @@ Result run_primal_phase(
     if (!std::isfinite(candidate_objective)) {
       if (state.updates_since_rebuild > 0) {
         if (!rebuild_primal_state(state, statistics, devex_mode, devex,
-                                  failure)) {
+                                  failure, allow_strong_rebuild)) {
           return make_result(state, Status::NumericalFailure,
                              std::move(failure), statistics);
         }
@@ -933,7 +957,7 @@ Result run_primal_phase(
     if (state.factor->needs_rebuild() ||
         state.updates_since_rebuild >= kPrimalRebuildInterval) {
       if (!rebuild_primal_state(state, statistics, devex_mode, devex,
-                                failure)) {
+                                failure, allow_strong_rebuild)) {
         return make_result(state, Status::NumericalFailure,
                            std::move(failure), statistics);
       }

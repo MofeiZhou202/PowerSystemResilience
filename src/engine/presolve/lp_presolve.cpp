@@ -19,15 +19,49 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <map>
+#include <stdexcept>
 #include <type_traits>
 
 namespace mipsolvers::engine {
 
+class LpPresolveActivitySnapshot {
+ public:
+  int rows{0};
+  int cols{0};
+  long nnz{0};
+  std::vector<double> lower_bounds;
+  std::vector<double> upper_bounds;
+  std::vector<double> min_sum;
+  std::vector<double> max_sum;
+  std::vector<int> min_inf_count;
+  std::vector<int> max_inf_count;
+  std::uint64_t matrix_fingerprint{0};
+};
+
 namespace {
 
 constexpr double kInf = std::numeric_limits<double>::infinity();
+
+void fingerprint_mix(std::uint64_t& hash, const void* data,
+                     std::size_t size) {
+  const auto* bytes = static_cast<const unsigned char*>(data);
+  for (std::size_t k = 0; k < size; ++k) {
+    hash ^= bytes[k];
+    hash *= UINT64_C(1099511628211);
+  }
+}
+
+void fingerprint_entry(std::uint64_t& hash, int col, int row, double value) {
+  fingerprint_mix(hash, &col, sizeof(col));
+  fingerprint_mix(hash, &row, sizeof(row));
+  std::uint64_t bits = 0;
+  static_assert(sizeof(bits) == sizeof(value));
+  std::memcpy(&bits, &value, sizeof(bits));
+  fingerprint_mix(hash, &bits, sizeof(bits));
+}
 
 // Tolerances (design §5, risk R1).  Two envelopes:
 //  - kInfeasTol = 1e-7 relative (HiGHS primal_feasibility_tolerance
@@ -72,7 +106,93 @@ struct PresolveWork {
   std::vector<double> csr_val;
   std::vector<char> row_active;
   std::vector<char> col_active;
+  // Active bipartite-graph degrees let fast P1 rules scale with changed
+  // support rather than rescanning all nonzeros each round (Gleixner,
+  // Gottwald & Hoen 2024, PaPILO Section 2.1; design Section 8.32).
+  std::vector<int> row_degree;
+  std::vector<int> col_degree;
+  // Deduplicated changed-support queues for P1. A row is invalidated only by
+  // an incident column deletion/bound change; a column only by an incident
+  // row deletion (PaPILO v3, Gleixner, Gottwald & Hoen 2024, Section 2.1;
+  // design Section 8.33).
+  std::vector<int> dirty_rows;
+  std::vector<int> dirty_cols;
+  std::vector<unsigned char> row_dirty;
+  std::vector<unsigned char> col_dirty;
+  bool full_p1_scan_control = false;
+  // Resident P3 activity state. L/U store finite contribution sums while the
+  // counts retain unbounded contributions (A&A 1995 Section 3; design 8.30).
+  std::vector<double> activity_min_sum;
+  std::vector<double> activity_max_sum;
+  std::vector<int> activity_min_inf;
+  std::vector<int> activity_max_inf;
+  std::vector<unsigned char> activity_min_overflow;
+  std::vector<unsigned char> activity_max_overflow;
+  bool activity_ready = false;
+  bool activity_from_snapshot = false;
+  std::uint64_t matrix_fingerprint{UINT64_C(1469598103934665603)};
 };
+
+void mark_row_dirty(PresolveWork& w, int i) {
+  if (!w.row_active[static_cast<std::size_t>(i)] ||
+      w.row_dirty[static_cast<std::size_t>(i)]) {
+    return;
+  }
+  w.row_dirty[static_cast<std::size_t>(i)] = 1;
+  w.dirty_rows.push_back(i);
+}
+
+void mark_col_dirty(PresolveWork& w, int j) {
+  if (!w.col_active[static_cast<std::size_t>(j)] ||
+      w.col_dirty[static_cast<std::size_t>(j)]) {
+    return;
+  }
+  w.col_dirty[static_cast<std::size_t>(j)] = 1;
+  w.dirty_cols.push_back(j);
+}
+
+void mark_all_active_dirty(PresolveWork& w) {
+  w.dirty_rows.clear();
+  w.dirty_cols.clear();
+  w.row_dirty.assign(static_cast<std::size_t>(w.m), 0);
+  w.col_dirty.assign(static_cast<std::size_t>(w.n), 0);
+  w.dirty_rows.reserve(static_cast<std::size_t>(w.m));
+  w.dirty_cols.reserve(static_cast<std::size_t>(w.n));
+  for (int i = 0; i < w.m; ++i) mark_row_dirty(w, i);
+  for (int j = 0; j < w.n; ++j) mark_col_dirty(w, j);
+}
+
+std::vector<int> take_dirty_rows(PresolveWork& w) {
+  std::vector<int> rows;
+  rows.swap(w.dirty_rows);
+  for (const int i : rows) w.row_dirty[static_cast<std::size_t>(i)] = 0;
+  if (w.full_p1_scan_control) {
+    rows.clear();
+    rows.reserve(static_cast<std::size_t>(w.m));
+    for (int i = 0; i < w.m; ++i) {
+      if (w.row_active[static_cast<std::size_t>(i)]) rows.push_back(i);
+    }
+    return rows;
+  }
+  std::sort(rows.begin(), rows.end());
+  return rows;
+}
+
+std::vector<int> take_dirty_cols(PresolveWork& w) {
+  std::vector<int> cols;
+  cols.swap(w.dirty_cols);
+  for (const int j : cols) w.col_dirty[static_cast<std::size_t>(j)] = 0;
+  if (w.full_p1_scan_control) {
+    cols.clear();
+    cols.reserve(static_cast<std::size_t>(w.n));
+    for (int j = 0; j < w.n; ++j) {
+      if (w.col_active[static_cast<std::size_t>(j)]) cols.push_back(j);
+    }
+    return cols;
+  }
+  std::sort(cols.begin(), cols.end());
+  return cols;
+}
 
 /// Build the merged representation.  Returns false on non-finite input
 /// (NaN coefficient/cost/side) — the caller reports "invalid_input" instead
@@ -135,6 +255,9 @@ bool build_work(const LPModel& lp, PresolveWork& w) {
   w.csc_row.reserve(static_cast<std::size_t>(lp.A.nonZeros() +
                                              lp.Aeq.nonZeros()));
   w.csc_val.reserve(w.csc_row.capacity());
+  w.matrix_fingerprint = UINT64_C(1469598103934665603);
+  fingerprint_mix(w.matrix_fingerprint, &w.m, sizeof(w.m));
+  fingerprint_mix(w.matrix_fingerprint, &w.n, sizeof(w.n));
   for (int j = 0; j < n; ++j) {
     w.csc_start[static_cast<std::size_t>(j)] =
         static_cast<int>(w.csc_row.size());
@@ -144,6 +267,8 @@ bool build_work(const LPModel& lp, PresolveWork& w) {
         if (!std::isfinite(it.value())) return false;
         w.csc_row.push_back(static_cast<int>(it.row()));
         w.csc_val.push_back(it.value());
+        fingerprint_entry(w.matrix_fingerprint, j,
+                          static_cast<int>(it.row()), it.value());
       }
     }
     if (j < lp.Aeq.outerSize()) {
@@ -152,6 +277,8 @@ bool build_work(const LPModel& lp, PresolveWork& w) {
         if (!std::isfinite(it.value())) return false;
         w.csc_row.push_back(mi + static_cast<int>(it.row()));
         w.csc_val.push_back(it.value());
+        fingerprint_entry(w.matrix_fingerprint, j,
+                          mi + static_cast<int>(it.row()), it.value());
       }
     }
   }
@@ -180,10 +307,223 @@ bool build_work(const LPModel& lp, PresolveWork& w) {
   }
   w.row_active.assign(static_cast<std::size_t>(w.m), 1);
   w.col_active.assign(static_cast<std::size_t>(n), 1);
+  w.row_degree.resize(static_cast<std::size_t>(w.m));
+  for (int i = 0; i < w.m; ++i) {
+    w.row_degree[static_cast<std::size_t>(i)] =
+        w.csr_start[static_cast<std::size_t>(i) + 1] -
+        w.csr_start[static_cast<std::size_t>(i)];
+  }
+  w.col_degree.resize(static_cast<std::size_t>(n));
+  for (int j = 0; j < n; ++j) {
+    w.col_degree[static_cast<std::size_t>(j)] =
+        w.csc_start[static_cast<std::size_t>(j) + 1] -
+        w.csc_start[static_cast<std::size_t>(j)];
+  }
+  if (const char* control =
+          std::getenv("MIPSOLVERS_NATIVE_PRESOLVE_FULL_P1_SCAN")) {
+    w.full_p1_scan_control =
+        !(control[0] == '0' && control[1] == '\0');
+  }
+  mark_all_active_dirty(w);
   return true;
 }
 
+bool load_activity_snapshot(const LpPresolveActivitySnapshot& snapshot,
+                            PresolveWork& w) {
+  if (snapshot.rows != w.m || snapshot.cols != w.n ||
+      snapshot.nnz != static_cast<long>(w.csc_row.size()) ||
+      snapshot.matrix_fingerprint != w.matrix_fingerprint ||
+      snapshot.lower_bounds != w.lb || snapshot.upper_bounds != w.ub ||
+      snapshot.min_sum.size() != static_cast<std::size_t>(w.m) ||
+      snapshot.max_sum.size() != static_cast<std::size_t>(w.m) ||
+      snapshot.min_inf_count.size() != static_cast<std::size_t>(w.m) ||
+      snapshot.max_inf_count.size() != static_cast<std::size_t>(w.m)) {
+    return false;
+  }
+  w.activity_min_sum = snapshot.min_sum;
+  w.activity_max_sum = snapshot.max_sum;
+  w.activity_min_inf = snapshot.min_inf_count;
+  w.activity_max_inf = snapshot.max_inf_count;
+  w.activity_min_overflow.assign(static_cast<std::size_t>(w.m), 0);
+  w.activity_max_overflow.assign(static_cast<std::size_t>(w.m), 0);
+  w.activity_ready = true;
+  w.activity_from_snapshot = true;
+  return true;
+}
+
+void rebuild_activity(PresolveWork& w) {
+  w.activity_min_sum.assign(static_cast<std::size_t>(w.m), 0.0);
+  w.activity_max_sum.assign(static_cast<std::size_t>(w.m), 0.0);
+  w.activity_min_inf.assign(static_cast<std::size_t>(w.m), 0);
+  w.activity_max_inf.assign(static_cast<std::size_t>(w.m), 0);
+  w.activity_min_overflow.assign(static_cast<std::size_t>(w.m), 0);
+  w.activity_max_overflow.assign(static_cast<std::size_t>(w.m), 0);
+  for (int i = 0; i < w.m; ++i) {
+    if (!w.row_active[static_cast<std::size_t>(i)]) continue;
+    for (int p = w.csr_start[static_cast<std::size_t>(i)];
+         p < w.csr_start[static_cast<std::size_t>(i) + 1]; ++p) {
+      const int j = w.csr_col[static_cast<std::size_t>(p)];
+      if (!w.col_active[static_cast<std::size_t>(j)]) continue;
+      const double a = w.csr_val[static_cast<std::size_t>(p)];
+      const double min_bound =
+          a > 0.0 ? w.lb[static_cast<std::size_t>(j)]
+                  : w.ub[static_cast<std::size_t>(j)];
+      const double max_bound =
+          a > 0.0 ? w.ub[static_cast<std::size_t>(j)]
+                  : w.lb[static_cast<std::size_t>(j)];
+      if (std::isinf(min_bound)) {
+        ++w.activity_min_inf[static_cast<std::size_t>(i)];
+      } else {
+        w.activity_min_sum[static_cast<std::size_t>(i)] += a * min_bound;
+        if (!std::isfinite(w.activity_min_sum[static_cast<std::size_t>(i)]))
+          w.activity_min_overflow[static_cast<std::size_t>(i)] = 1;
+      }
+      if (std::isinf(max_bound)) {
+        ++w.activity_max_inf[static_cast<std::size_t>(i)];
+      } else {
+        w.activity_max_sum[static_cast<std::size_t>(i)] += a * max_bound;
+        if (!std::isfinite(w.activity_max_sum[static_cast<std::size_t>(i)]))
+          w.activity_max_overflow[static_cast<std::size_t>(i)] = 1;
+      }
+    }
+  }
+  w.activity_ready = true;
+  w.activity_from_snapshot = false;
+}
+
+void update_activity_side(double a, double old_bound, double new_bound,
+                          double& sum, int& inf_count,
+                          unsigned char& overflow) {
+  // Contribution/count transitions are the incremental form of A&A (1995)
+  // Section 3 row activities; full derivation is design Section 8.30.
+  const bool old_inf = std::isinf(old_bound);
+  const bool new_inf = std::isinf(new_bound);
+  if (old_inf) {
+    --inf_count;
+  } else if (!overflow) {
+    sum -= a * old_bound;
+    if (!std::isfinite(sum)) overflow = 1;
+  }
+  if (new_inf) {
+    ++inf_count;
+  } else if (!overflow) {
+    sum += a * new_bound;
+    if (!std::isfinite(sum)) overflow = 1;
+  }
+}
+
+void update_column_activity(PresolveWork& w, int j, double old_lo,
+                            double old_hi, double new_lo, double new_hi) {
+  if (old_lo == new_lo && old_hi == new_hi) return;
+  // A bound change invalidates both the column's fixed predicate and every
+  // incident row activity predicate (Achterberg et al. 2020, Section 6.4;
+  // design Section 8.33 mismatch finding).
+  mark_col_dirty(w, j);
+  for (int p = w.csc_start[static_cast<std::size_t>(j)];
+       p < w.csc_start[static_cast<std::size_t>(j) + 1]; ++p) {
+    const int i = w.csc_row[static_cast<std::size_t>(p)];
+    if (!w.row_active[static_cast<std::size_t>(i)]) continue;
+    mark_row_dirty(w, i);
+    if (!w.activity_ready) continue;
+    const double a = w.csc_val[static_cast<std::size_t>(p)];
+    update_activity_side(
+        a, a > 0.0 ? old_lo : old_hi, a > 0.0 ? new_lo : new_hi,
+        w.activity_min_sum[static_cast<std::size_t>(i)],
+        w.activity_min_inf[static_cast<std::size_t>(i)],
+        w.activity_min_overflow[static_cast<std::size_t>(i)]);
+    update_activity_side(
+        a, a > 0.0 ? old_hi : old_lo, a > 0.0 ? new_hi : new_lo,
+        w.activity_max_sum[static_cast<std::size_t>(i)],
+        w.activity_max_inf[static_cast<std::size_t>(i)],
+        w.activity_max_overflow[static_cast<std::size_t>(i)]);
+  }
+}
+
+void remove_column_activity(PresolveWork& w, int j) {
+  if (!w.activity_ready) return;
+  for (int p = w.csc_start[static_cast<std::size_t>(j)];
+       p < w.csc_start[static_cast<std::size_t>(j) + 1]; ++p) {
+    const int i = w.csc_row[static_cast<std::size_t>(p)];
+    if (!w.row_active[static_cast<std::size_t>(i)]) continue;
+    const double a = w.csc_val[static_cast<std::size_t>(p)];
+    const double lo = w.lb[static_cast<std::size_t>(j)];
+    const double hi = w.ub[static_cast<std::size_t>(j)];
+    const double min_bound = a > 0.0 ? lo : hi;
+    const double max_bound = a > 0.0 ? hi : lo;
+    if (std::isinf(min_bound)) {
+      --w.activity_min_inf[static_cast<std::size_t>(i)];
+    } else if (!w.activity_min_overflow[static_cast<std::size_t>(i)]) {
+      w.activity_min_sum[static_cast<std::size_t>(i)] -= a * min_bound;
+      if (!std::isfinite(w.activity_min_sum[static_cast<std::size_t>(i)]))
+        w.activity_min_overflow[static_cast<std::size_t>(i)] = 1;
+    }
+    if (std::isinf(max_bound)) {
+      --w.activity_max_inf[static_cast<std::size_t>(i)];
+    } else if (!w.activity_max_overflow[static_cast<std::size_t>(i)]) {
+      w.activity_max_sum[static_cast<std::size_t>(i)] -= a * max_bound;
+      if (!std::isfinite(w.activity_max_sum[static_cast<std::size_t>(i)]))
+        w.activity_max_overflow[static_cast<std::size_t>(i)] = 1;
+    }
+  }
+}
+
+void rebuild_active_degrees(PresolveWork& w) {
+  w.row_degree.assign(static_cast<std::size_t>(w.m), 0);
+  w.col_degree.assign(static_cast<std::size_t>(w.n), 0);
+  for (int j = 0; j < w.n; ++j) {
+    if (!w.col_active[static_cast<std::size_t>(j)]) continue;
+    for (int p = w.csc_start[static_cast<std::size_t>(j)];
+         p < w.csc_start[static_cast<std::size_t>(j) + 1]; ++p) {
+      const int i = w.csc_row[static_cast<std::size_t>(p)];
+      if (!w.row_active[static_cast<std::size_t>(i)]) continue;
+      ++w.row_degree[static_cast<std::size_t>(i)];
+      ++w.col_degree[static_cast<std::size_t>(j)];
+    }
+  }
+  // A P2 commit may create fill or alter coefficients anywhere in the
+  // committed graph, so local queue completeness cannot be proven. Recheck
+  // every active endpoint (A&A 1995 Section 2.4; design Section 8.33).
+  mark_all_active_dirty(w);
+}
+
+void deactivate_row(PresolveWork& w, int i) {
+  if (!w.row_active[static_cast<std::size_t>(i)]) return;
+  for (int p = w.csr_start[static_cast<std::size_t>(i)];
+       p < w.csr_start[static_cast<std::size_t>(i) + 1]; ++p) {
+    const int j = w.csr_col[static_cast<std::size_t>(p)];
+    if (!w.col_active[static_cast<std::size_t>(j)]) continue;
+    int& degree = w.col_degree[static_cast<std::size_t>(j)];
+    if (degree <= 0) {
+      throw std::logic_error("native LP presolve column degree underflow");
+    }
+    --degree;
+    mark_col_dirty(w, j);
+  }
+  w.row_degree[static_cast<std::size_t>(i)] = 0;
+  w.row_active[static_cast<std::size_t>(i)] = 0;
+}
+
+void deactivate_column(PresolveWork& w, int j) {
+  if (!w.col_active[static_cast<std::size_t>(j)]) return;
+  remove_column_activity(w, j);
+  for (int p = w.csc_start[static_cast<std::size_t>(j)];
+       p < w.csc_start[static_cast<std::size_t>(j) + 1]; ++p) {
+    const int i = w.csc_row[static_cast<std::size_t>(p)];
+    if (!w.row_active[static_cast<std::size_t>(i)]) continue;
+    int& degree = w.row_degree[static_cast<std::size_t>(i)];
+    if (degree <= 0) {
+      throw std::logic_error("native LP presolve row degree underflow");
+    }
+    --degree;
+    mark_row_dirty(w, i);
+  }
+  w.col_degree[static_cast<std::size_t>(j)] = 0;
+  w.col_active[static_cast<std::size_t>(j)] = 0;
+}
+
 struct RuleCounts {
+  long p1_row_visits = 0;
+  long p1_col_visits = 0;
   long empty_rows = 0;
   long empty_cols = 0;
   long fixed_cols = 0;
@@ -202,11 +542,13 @@ struct RuleCounts {
   long implied_free_equality_col_candidates = 0;
   long parallel_row_candidates = 0;
   long parallel_col_candidates = 0;
-  long total() const {
+  long structural_total() const {
     return empty_rows + empty_cols + fixed_cols + redundant_rows +
-           singleton_rows + implied_bound_tightenings +
-           doubleton_equations + singleton_columns +
+           singleton_rows + doubleton_equations + singleton_columns +
            free_column_substitutions;
+  }
+  long total() const {
+    return structural_total() + implied_bound_tightenings;
   }
 };
 
@@ -223,7 +565,13 @@ enum class RuleOutcome { kOk, kInfeasible, kUnboundedCandidate };
 
 /// Row pass: empty rows, singleton rows, redundant rows (A&A §2.1, §2.3).
 RuleOutcome row_sweep(PresolveWork& w, RuleCounts& counts) {
-  for (int i = 0; i < w.m; ++i) {
+  // PaPILO keeps row activities resident so activity-based fast presolvers
+  // consume changed support rather than all matrix nonzeros every round
+  // (Gleixner, Gottwald & Hoen 2024, Section 2.1; design Section 8.32).
+  if (!w.activity_ready) rebuild_activity(w);
+  const std::vector<int> candidates = take_dirty_rows(w);
+  counts.p1_row_visits += static_cast<long>(candidates.size());
+  for (const int i : candidates) {
     if (!w.row_active[static_cast<std::size_t>(i)]) continue;
     const int rb = w.csr_start[static_cast<std::size_t>(i)];
     const int re = w.csr_start[static_cast<std::size_t>(i) + 1];
@@ -232,42 +580,36 @@ RuleOutcome row_sweep(PresolveWork& w, RuleCounts& counts) {
     const double tol_infeas = row_tol(lhs, rhs, kInfeasTol);
     const double tol_delete = row_tol(lhs, rhs, kDeleteTol);
 
-    // Collect active entries and min/max activity in one pass (A&A §2.3:
-    // activity bounds from the column bounds; an unbounded contributing
-    // column makes the corresponding activity bound infinite).
-    int degree = 0;
+    const int degree = w.row_degree[static_cast<std::size_t>(i)];
     int last_col = -1;
     double last_val = 0.0;
     double row_abs_max = 0.0;
-    double min_act = 0.0;
-    double max_act = 0.0;
-    bool min_inf = false;  // min activity is -inf
-    bool max_inf = false;  // max activity is +inf
-    for (int p = rb; p < re; ++p) {
-      const int j = w.csr_col[static_cast<std::size_t>(p)];
-      if (!w.col_active[static_cast<std::size_t>(j)]) continue;
-      const double a = w.csr_val[static_cast<std::size_t>(p)];
-      ++degree;
-      last_col = j;
-      last_val = a;
-      row_abs_max = std::max(row_abs_max, std::abs(a));
-      const double lo = w.lb[static_cast<std::size_t>(j)];
-      const double hi = w.ub[static_cast<std::size_t>(j)];
-      if (a > 0.0) {
-        if (lo == -kInf) min_inf = true; else min_act += a * lo;
-        if (hi == kInf) max_inf = true; else max_act += a * hi;
-      } else {
-        if (hi == kInf) min_inf = true; else min_act += a * hi;
-        if (lo == -kInf) max_inf = true; else max_act += a * lo;
+    // Only singleton processing needs the actual entry. Empty and general
+    // activity rules use resident degrees and activities.
+    if (degree == 1) {
+      for (int p = rb; p < re; ++p) {
+        const int j = w.csr_col[static_cast<std::size_t>(p)];
+        if (!w.col_active[static_cast<std::size_t>(j)]) continue;
+        last_col = j;
+        last_val = w.csr_val[static_cast<std::size_t>(p)];
+        row_abs_max = std::abs(last_val);
+        break;
+      }
+      if (last_col < 0) {
+        throw std::logic_error(
+            "native LP presolve singleton degree has no active entry");
       }
     }
-    // Overflow guard: a finite-bound accumulation that left the finite
-    // regime carries no information about the true activity bound (huge
-    // opposite-sign terms may cancel).  Treat that side as unbounded —
-    // conservative in both directions: it can neither prove infeasibility
-    // nor justify a redundant-row deletion from that side (§5 R1).
-    if (!std::isfinite(min_act)) min_inf = true;
-    if (!std::isfinite(max_act)) max_inf = true;
+    const double min_act =
+        w.activity_min_sum[static_cast<std::size_t>(i)];
+    const double max_act =
+        w.activity_max_sum[static_cast<std::size_t>(i)];
+    const bool min_inf =
+        w.activity_min_inf[static_cast<std::size_t>(i)] != 0 ||
+        w.activity_min_overflow[static_cast<std::size_t>(i)] != 0;
+    const bool max_inf =
+        w.activity_max_inf[static_cast<std::size_t>(i)] != 0 ||
+        w.activity_max_overflow[static_cast<std::size_t>(i)] != 0;
 
     if (degree == 0) {
       // Empty row (A&A §2.1): the activity is identically zero.  A violation
@@ -283,7 +625,7 @@ RuleOutcome row_sweep(PresolveWork& w, RuleCounts& counts) {
       }
       if ((lhs == -kInf || lhs <= tol_delete) &&
           (rhs == kInf || rhs >= -tol_delete)) {
-        w.row_active[static_cast<std::size_t>(i)] = 0;
+        deactivate_row(w, i);
         ++counts.empty_rows;
       }
       continue;
@@ -310,6 +652,8 @@ RuleOutcome row_sweep(PresolveWork& w, RuleCounts& counts) {
         }
         double& lo = w.lb[static_cast<std::size_t>(j)];
         double& hi = w.ub[static_cast<std::size_t>(j)];
+        const double old_lo = lo;
+        const double old_hi = hi;
         // An implied bound that excludes the current box by more than the
         // infeasibility envelope proves infeasibility (A&A §2.3).
         const bool lb_conflict =
@@ -347,8 +691,9 @@ RuleOutcome row_sweep(PresolveWork& w, RuleCounts& counts) {
                      new_ub < hi) {
             deletion_safe = false;
           }
+          update_column_activity(w, j, old_lo, old_hi, lo, hi);
           if (deletion_safe) {
-            w.row_active[static_cast<std::size_t>(i)] = 0;
+            deactivate_row(w, i);
             ++counts.singleton_rows;
             continue;
           }
@@ -380,7 +725,7 @@ RuleOutcome row_sweep(PresolveWork& w, RuleCounts& counts) {
     const bool upper_ok =
         (rhs == kInf) || (!max_inf && max_act <= rhs + tol_delete);
     if (lower_ok && upper_ok) {
-      w.row_active[static_cast<std::size_t>(i)] = 0;
+      deactivate_row(w, i);
       ++counts.redundant_rows;
     }
   }
@@ -392,38 +737,23 @@ RuleOutcome row_sweep(PresolveWork& w, RuleCounts& counts) {
 /// every residual activity [L_-j,U_-j] be obtained in O(1), hence O(nnz)
 /// for the whole sweep rather than a quadratic scan per row.
 RuleOutcome implied_bound_sweep(PresolveWork& w, RuleCounts& counts) {
+  if (!w.activity_ready) rebuild_activity(w);
   for (int i = 0; i < w.m; ++i) {
     if (!w.row_active[static_cast<std::size_t>(i)]) continue;
     const int rb = w.csr_start[static_cast<std::size_t>(i)];
     const int re = w.csr_start[static_cast<std::size_t>(i) + 1];
-    double min_sum = 0.0;
-    double max_sum = 0.0;
-    int min_inf_count = 0;
-    int max_inf_count = 0;
-    bool min_overflow = false;
-    bool max_overflow = false;
-
-    for (int p = rb; p < re; ++p) {
-      const int j = w.csr_col[static_cast<std::size_t>(p)];
-      if (!w.col_active[static_cast<std::size_t>(j)]) continue;
-      const double a = w.csr_val[static_cast<std::size_t>(p)];
-      const double lo = w.lb[static_cast<std::size_t>(j)];
-      const double hi = w.ub[static_cast<std::size_t>(j)];
-      const double min_bound = a > 0.0 ? lo : hi;
-      const double max_bound = a > 0.0 ? hi : lo;
-      if (min_bound == -kInf || min_bound == kInf) {
-        ++min_inf_count;
-      } else {
-        min_sum += a * min_bound;
-        if (!std::isfinite(min_sum)) min_overflow = true;
-      }
-      if (max_bound == -kInf || max_bound == kInf) {
-        ++max_inf_count;
-      } else {
-        max_sum += a * max_bound;
-        if (!std::isfinite(max_sum)) max_overflow = true;
-      }
-    }
+    // Estimator-resident or incrementally maintained activity state replaces
+    // the former per-row rebuild (A&A 1995 Section 3; design Section 8.30).
+    const double min_sum = w.activity_min_sum[static_cast<std::size_t>(i)];
+    const double max_sum = w.activity_max_sum[static_cast<std::size_t>(i)];
+    const int min_inf_count =
+        w.activity_min_inf[static_cast<std::size_t>(i)];
+    const int max_inf_count =
+        w.activity_max_inf[static_cast<std::size_t>(i)];
+    const bool min_overflow =
+        w.activity_min_overflow[static_cast<std::size_t>(i)] != 0;
+    const bool max_overflow =
+        w.activity_max_overflow[static_cast<std::size_t>(i)] != 0;
 
     const double lhs = w.lhs[static_cast<std::size_t>(i)];
     const double rhs = w.rhs[static_cast<std::size_t>(i)];
@@ -477,6 +807,8 @@ RuleOutcome implied_bound_sweep(PresolveWork& w, RuleCounts& counts) {
 
       double& current_lo = w.lb[static_cast<std::size_t>(j)];
       double& current_hi = w.ub[static_cast<std::size_t>(j)];
+      const double old_lo = current_lo;
+      const double old_hi = current_hi;
       const double lo_tol = kDeleteTol * std::max(1.0, std::abs(candidate_lo));
       const double hi_tol = kDeleteTol * std::max(1.0, std::abs(candidate_hi));
       if ((current_lo == -kInf && candidate_lo > -kInf) ||
@@ -489,6 +821,7 @@ RuleOutcome implied_bound_sweep(PresolveWork& w, RuleCounts& counts) {
         current_hi = candidate_hi;
         ++counts.implied_bound_tightenings;
       }
+      update_column_activity(w, j, old_lo, old_hi, current_lo, current_hi);
     }
   }
   return RuleOutcome::kOk;
@@ -517,12 +850,59 @@ constexpr double kSubstitutionPivotThreshold = 0.01;
 constexpr long kSubstitutionMaxFillin = 10;
 constexpr double kSubstitutionNnzGrowthLimit = 0.05;
 
+// Adaptive publication constants are cost-model policy, not reduction
+// tolerances. See design Sections 8.22 and 8.24: below this size direct IPM
+// is cheaper than building presolve adjacency; P2 replay is reserved for the
+// measured singleton-equality cohort that reduces normal-equation dimension.
+constexpr long kAdaptiveMinDimensionSum = 4000;
+constexpr double kAdaptiveStructuralCut = 0.10;
+constexpr double kAdaptiveP2MinSingletonEqualityDensity = 0.25;
+constexpr double kAdaptiveP2MaxSingletonEqualityDensity = 0.90;
+
+struct ActiveStructure {
+  long rows{0};
+  long cols{0};
+  long nnz{0};
+  long singleton_equality_cols{0};
+};
+
+// One read-only CSC pass supplies the staged P2 evidence without paying for
+// MutableAdjacency.  A&A (1995) Section 2.4 identifies singleton equality
+// columns as direct substitution candidates; the density is used only for
+// the Section 8.22 amortization decision.
+ActiveStructure inspect_active_structure(const PresolveWork& w) {
+  ActiveStructure s;
+  for (int i = 0; i < w.m; ++i)
+    s.rows += w.row_active[static_cast<std::size_t>(i)];
+  for (int j = 0; j < w.n; ++j) {
+    if (!w.col_active[static_cast<std::size_t>(j)]) continue;
+    ++s.cols;
+    int degree = 0;
+    int singleton_row = -1;
+    for (int p = w.csc_start[static_cast<std::size_t>(j)];
+         p < w.csc_start[static_cast<std::size_t>(j) + 1]; ++p) {
+      const int i = w.csc_row[static_cast<std::size_t>(p)];
+      if (!w.row_active[static_cast<std::size_t>(i)]) continue;
+      ++degree;
+      singleton_row = i;
+      ++s.nnz;
+    }
+    if (degree == 1 &&
+        w.lhs[static_cast<std::size_t>(singleton_row)] ==
+            w.rhs[static_cast<std::size_t>(singleton_row)]) {
+      ++s.singleton_equality_cols;
+    }
+  }
+  return s;
+}
+
 /// Deterministic, mutable sparse adjacency used only while P2 substitutions
 /// create fill-in.  P1 keeps the compact CSC/CSR scans; one conversion per
 /// substitution sweep avoids imposing map overhead on the common P1 path.
 struct MutableAdjacency {
   std::vector<std::map<int, double>> rows;
   std::vector<std::map<int, double>> cols;
+  long nonzeros{0};
 
   explicit MutableAdjacency(const PresolveWork& w)
       : rows(static_cast<std::size_t>(w.m)),
@@ -536,6 +916,7 @@ struct MutableAdjacency {
         const double v = w.csc_val[static_cast<std::size_t>(p)];
         rows[static_cast<std::size_t>(i)].emplace(j, v);
         cols[static_cast<std::size_t>(j)].emplace(i, v);
+        ++nonzeros;
       }
     }
   }
@@ -543,20 +924,26 @@ struct MutableAdjacency {
   void set(int i, int j, double value) {
     auto& row = rows[static_cast<std::size_t>(i)];
     auto& col = cols[static_cast<std::size_t>(j)];
+    const auto old = row.find(j);
     if (value == 0.0) {
-      row.erase(j);
-      col.erase(i);
+      if (old != row.end()) {
+        row.erase(old);
+        col.erase(i);
+        --nonzeros;
+      }
     } else {
-      row[j] = value;
-      col[i] = value;
+      if (old == row.end()) {
+        row.emplace(j, value);
+        col.emplace(i, value);
+        ++nonzeros;
+      } else {
+        old->second = value;
+        col.find(i)->second = value;
+      }
     }
   }
 
-  long nnz() const {
-    long count = 0;
-    for (const auto& row : rows) count += static_cast<long>(row.size());
-    return count;
-  }
+  long nnz() const { return nonzeros; }
 };
 
 long count_parallel_candidates(
@@ -617,6 +1004,12 @@ void commit_mutable_adjacency(PresolveWork& w, const MutableAdjacency& a) {
   }
   w.csc_start[static_cast<std::size_t>(w.n)] =
       static_cast<int>(w.csc_row.size());
+  rebuild_active_degrees(w);
+  // P2 can change coefficients and create fill. The next P3 sweep rebuilds
+  // from this committed structure instead of applying unproven fill deltas
+  // (A&A 1995 Section 2.4; design Section 8.30).
+  w.activity_ready = false;
+  w.activity_from_snapshot = false;
 }
 
 enum class SubstitutionOutcome { kRejected, kApplied, kInfeasible };
@@ -1029,7 +1422,16 @@ RuleOutcome substitution_sweep(
         continue;
       }
       for (const auto& [j, unused] : a.rows[static_cast<std::size_t>(i)]) {
-        if (!implied_free_in_equality(w, a, i, j) ||
+        // General substitution may drop the eliminated column's box. HiGHS'
+        // implied-free test excludes the substitution row and tracks bound
+        // provenance; a local interval projection cannot safely compose
+        // across multiple substitutions (design Section 8.13). Until that
+        // provenance is available, only a genuinely two-sided-free column
+        // satisfies the A&A (1995) Section 2.4 primal condition here.
+        const bool truly_free =
+            w.lb[static_cast<std::size_t>(j)] == -kInf &&
+            w.ub[static_cast<std::size_t>(j)] == kInf;
+        if (!truly_free ||
             !stable_substitution_pivot(a, i, j)) {
           continue;
         }
@@ -1053,13 +1455,13 @@ RuleOutcome substitution_sweep(
 RuleOutcome col_sweep(PresolveWork& w, RuleCounts& counts,
                       std::vector<LpPostsolveRecord>& stack,
                       double& objective_offset_min, double side_cap) {
-  for (int j = 0; j < w.n; ++j) {
+  const std::vector<int> candidates = take_dirty_cols(w);
+  counts.p1_col_visits += static_cast<long>(candidates.size());
+  for (const int j : candidates) {
     if (!w.col_active[static_cast<std::size_t>(j)]) continue;
     const int cb = w.csc_start[static_cast<std::size_t>(j)];
     const int ce = w.csc_start[static_cast<std::size_t>(j) + 1];
-    int degree = 0;
-    for (int p = cb; p < ce; ++p)
-      if (w.row_active[static_cast<std::size_t>(w.csc_row[p])]) ++degree;
+    const int degree = w.col_degree[static_cast<std::size_t>(j)];
 
     const double cj = w.c[static_cast<std::size_t>(j)];
     const double lo = w.lb[static_cast<std::size_t>(j)];
@@ -1083,7 +1485,7 @@ RuleOutcome col_sweep(PresolveWork& w, RuleCounts& counts,
       }
       objective_offset_min += cj * value;
       stack.push_back(LpPostsolveFixedCol{j, value});
-      w.col_active[static_cast<std::size_t>(j)] = 0;
+      deactivate_column(w, j);
       ++counts.empty_cols;
       continue;
     }
@@ -1134,7 +1536,7 @@ RuleOutcome col_sweep(PresolveWork& w, RuleCounts& counts,
           if (rhs < kInf) rhs -= av;
         }
         stack.push_back(LpPostsolveFixedCol{j, value});
-        w.col_active[static_cast<std::size_t>(j)] = 0;
+        deactivate_column(w, j);
         ++counts.fixed_cols;
       }
     }
@@ -1205,8 +1607,364 @@ LpPresolveConfig lp_presolve_config_from_env(LpPresolveConfig base) {
     const double v = std::strtod(e, &end);
     if (end != e) base.time_box_sec = v;
   }
+  if (const char* e =
+          std::getenv("MIPSOLVERS_NATIVE_PRESOLVE_SUBSTITUTIONS")) {
+    base.substitutions = !(e[0] == '0' && e[1] == '\0');
+  }
+  if (const char* e =
+          std::getenv("MIPSOLVERS_NATIVE_PRESOLVE_PROPAGATE_BOUNDS")) {
+    base.propagate_bounds = !(e[0] == '0' && e[1] == '\0');
+  }
+  if (const char* e =
+          std::getenv("MIPSOLVERS_NATIVE_PRESOLVE_ADAPTIVE_STAGING")) {
+    base.adaptive_staging = !(e[0] == '0' && e[1] == '\0');
+  }
   if (std::getenv("MIPSOLVERS_NATIVE_PRESOLVE_VERBOSE")) base.verbose = true;
   return base;
+}
+
+LpPresolveOpportunityEstimate lp_presolve_estimate_adaptive_opportunity(
+    const LPModel& lp) {
+  const auto t0 = std::chrono::steady_clock::now();
+  LpPresolveOpportunityEstimate out;
+  const int mi = static_cast<int>(lp.A.rows());
+  const int me = static_cast<int>(lp.Aeq.rows());
+  const int m = mi + me;
+  const int n = static_cast<int>(lp.c.size());
+  out.rows = m;
+  out.cols = n;
+  out.nnz = lp.A.nonZeros() + lp.Aeq.nonZeros();
+  auto finish = [&]() {
+    out.estimate_ms = std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - t0)
+                          .count();
+    return out;
+  };
+
+  // Shape and scalar checks mirror build_work. Invalid input is left to the
+  // direct solver; this estimator never makes a feasibility conclusion.
+  if (lp.b.size() != mi || lp.beq.size() != me ||
+      (lp.row_lhs.size() != 0 && lp.row_lhs.size() != mi) ||
+      (mi > 0 && lp.A.cols() != n) || (me > 0 && lp.Aeq.cols() != n) ||
+      lp.vars.size() > static_cast<std::size_t>(n)) {
+    return finish();
+  }
+  for (int j = 0; j < n; ++j)
+    if (!std::isfinite(lp.c[j])) return finish();
+  for (int i = 0; i < mi; ++i) {
+    if (std::isnan(lp_row_lhs_or_neg_inf(lp, i)) || std::isnan(lp.b[i]))
+      return finish();
+  }
+  for (int i = 0; i < me; ++i)
+    if (!std::isfinite(lp.beq[i])) return finish();
+
+  if (static_cast<long>(m) + static_cast<long>(n) <
+      kAdaptiveMinDimensionSum) {
+    out.valid = true;
+    out.small_model = true;
+    return finish();
+  }
+
+  std::vector<double> projected_lo(static_cast<std::size_t>(n), -kInf);
+  std::vector<double> projected_hi(static_cast<std::size_t>(n), kInf);
+  for (int j = 0; j < n; ++j) {
+    const double lo = j < static_cast<int>(lp.vars.size())
+                          ? lp.vars[static_cast<std::size_t>(j)].lb
+                          : -kVariableNoBound;
+    const double hi = j < static_cast<int>(lp.vars.size())
+                          ? lp.vars[static_cast<std::size_t>(j)].ub
+                          : kVariableNoBound;
+    if (std::isnan(lo) || std::isnan(hi)) return finish();
+    projected_lo[static_cast<std::size_t>(j)] =
+        variable_has_finite_lower_bound(lo) ? lo : -kInf;
+    projected_hi[static_cast<std::size_t>(j)] =
+        variable_has_finite_upper_bound(hi) ? hi : kInf;
+    if (projected_lo[static_cast<std::size_t>(j)] >
+        projected_hi[static_cast<std::size_t>(j)]) {
+      return finish();
+    }
+  }
+
+  std::vector<double> min_sum(static_cast<std::size_t>(m), 0.0);
+  std::vector<double> max_sum(static_cast<std::size_t>(m), 0.0);
+  std::vector<int> min_inf(static_cast<std::size_t>(m), 0);
+  std::vector<int> max_inf(static_cast<std::size_t>(m), 0);
+  std::vector<int> row_degree(static_cast<std::size_t>(m), 0);
+  std::vector<int> col_degree(static_cast<std::size_t>(n), 0);
+  std::vector<int> singleton_col_row(static_cast<std::size_t>(n), -1);
+  std::vector<double> max_activity_span(static_cast<std::size_t>(m), 0.0);
+  std::uint64_t matrix_fingerprint = UINT64_C(1469598103934665603);
+  fingerprint_mix(matrix_fingerprint, &m, sizeof(m));
+  fingerprint_mix(matrix_fingerprint, &n, sizeof(n));
+  long activity_nnz = 0;
+
+  auto stream_column = [&](int j, auto&& visit) {
+    if (j < lp.A.outerSize()) {
+      for (Eigen::SparseMatrix<double>::InnerIterator it(lp.A, j); it; ++it)
+        if (it.value() != 0.0)
+          visit(static_cast<int>(it.row()), it.value());
+    }
+    if (j < lp.Aeq.outerSize()) {
+      for (Eigen::SparseMatrix<double>::InnerIterator it(lp.Aeq, j); it;
+           ++it)
+        if (it.value() != 0.0)
+          visit(mi + static_cast<int>(it.row()), it.value());
+    }
+  };
+
+  // First CSC stream: original-box row activities and structural degrees.
+  bool finite_matrix = true;
+  for (int j = 0; j < n; ++j) {
+    stream_column(j, [&](int i, double a) {
+      if (!std::isfinite(a)) {
+        finite_matrix = false;
+        return;
+      }
+      fingerprint_entry(matrix_fingerprint, j, i, a);
+      ++activity_nnz;
+      ++row_degree[static_cast<std::size_t>(i)];
+      ++col_degree[static_cast<std::size_t>(j)];
+      singleton_col_row[static_cast<std::size_t>(j)] = i;
+      const double lo = projected_lo[static_cast<std::size_t>(j)];
+      const double hi = projected_hi[static_cast<std::size_t>(j)];
+      const double min_bound = a > 0.0 ? lo : hi;
+      const double max_bound = a > 0.0 ? hi : lo;
+      const bool min_bound_finite = min_bound != -kInf && min_bound != kInf;
+      const bool max_bound_finite = max_bound != -kInf && max_bound != kInf;
+      double min_contribution = 0.0;
+      double max_contribution = 0.0;
+      if (!min_bound_finite)
+        ++min_inf[static_cast<std::size_t>(i)];
+      else {
+        min_contribution = a * min_bound;
+        min_sum[static_cast<std::size_t>(i)] += min_contribution;
+      }
+      if (!max_bound_finite)
+        ++max_inf[static_cast<std::size_t>(i)];
+      else {
+        max_contribution = a * max_bound;
+        max_sum[static_cast<std::size_t>(i)] += max_contribution;
+      }
+      const double activity_span =
+          min_bound_finite && max_bound_finite
+              ? std::abs(max_contribution - min_contribution)
+              : kInf;
+      max_activity_span[static_cast<std::size_t>(i)] = std::max(
+          max_activity_span[static_cast<std::size_t>(i)],
+          std::isfinite(activity_span) ? activity_span : kInf);
+    });
+  }
+  if (!finite_matrix) return finish();
+  for (int i = 0; i < m; ++i) {
+    if (!std::isfinite(min_sum[static_cast<std::size_t>(i)]) ||
+        !std::isfinite(max_sum[static_cast<std::size_t>(i)])) {
+      return finish();
+    }
+  }
+  const std::vector<double> snapshot_lo = projected_lo;
+  const std::vector<double> snapshot_hi = projected_hi;
+
+  auto row_lhs = [&](int i) {
+    return i < mi ? (finite_row_side(lp_row_lhs_or_neg_inf(lp, i))
+                          ? lp_row_lhs_or_neg_inf(lp, i)
+                          : -kInf)
+                  : lp.beq[i - mi];
+  };
+  auto row_rhs = [&](int i) {
+    return i < mi ? (finite_row_side(lp.b[i]) ? lp.b[i] : kInf)
+                  : lp.beq[i - mi];
+  };
+
+  // A&A (1995) Section 3: a finite-activity upper side can tighten column j
+  // only if rhs-L < |a_ij|(u_j-l_j); the lower-side condition is symmetric.
+  // Section 8.27 derives this row-span necessary condition and its tolerance.
+  std::vector<unsigned char> projectable_row(static_cast<std::size_t>(m), 0);
+  for (int i = 0; i < m; ++i) {
+    bool upper_projectable = false;
+    const double rhs = row_rhs(i);
+    if (rhs < kInf) {
+      if (min_inf[static_cast<std::size_t>(i)] == 1) {
+        upper_projectable = true;
+      } else if (min_inf[static_cast<std::size_t>(i)] == 0) {
+        const double slack = rhs - min_sum[static_cast<std::size_t>(i)];
+        upper_projectable =
+            slack <= max_activity_span[static_cast<std::size_t>(i)] +
+                         row_tol(rhs, min_sum[static_cast<std::size_t>(i)],
+                                 kDeleteTol);
+      }
+    }
+
+    bool lower_projectable = false;
+    const double lhs = row_lhs(i);
+    if (lhs > -kInf) {
+      if (max_inf[static_cast<std::size_t>(i)] == 1) {
+        lower_projectable = true;
+      } else if (max_inf[static_cast<std::size_t>(i)] == 0) {
+        const double slack = max_sum[static_cast<std::size_t>(i)] - lhs;
+        lower_projectable =
+            slack <= max_activity_span[static_cast<std::size_t>(i)] +
+                         row_tol(max_sum[static_cast<std::size_t>(i)], lhs,
+                                 kDeleteTol);
+      }
+    }
+    if (upper_projectable || lower_projectable) {
+      projectable_row[static_cast<std::size_t>(i)] = 1;
+      ++out.projectable_rows;
+    }
+  }
+
+  // Second CSC stream: one Jacobi P3 projection. Residual activities always
+  // use the original box above; only per-column aggregate candidates change.
+  // Rows failing the Section 8.27 necessary condition have an empty projection.
+  bool finite_projection = true;
+  if (out.projectable_rows > 0) {
+    for (int j = 0; j < n; ++j) {
+      const double original_lo = projected_lo[static_cast<std::size_t>(j)];
+      const double original_hi = projected_hi[static_cast<std::size_t>(j)];
+      stream_column(j, [&](int i, double a) {
+        if (!finite_projection ||
+            !projectable_row[static_cast<std::size_t>(i)])
+          return;
+        const double min_bound = a > 0.0 ? original_lo : original_hi;
+        const double max_bound = a > 0.0 ? original_hi : original_lo;
+        const bool own_min_inf = min_bound == -kInf || min_bound == kInf;
+        const bool own_max_inf = max_bound == -kInf || max_bound == kInf;
+        const bool residual_min_finite =
+            min_inf[static_cast<std::size_t>(i)] -
+                    static_cast<int>(own_min_inf) ==
+                0;
+        const bool residual_max_finite =
+            max_inf[static_cast<std::size_t>(i)] -
+                    static_cast<int>(own_max_inf) ==
+                0;
+        const double residual_min =
+            residual_min_finite
+                ? min_sum[static_cast<std::size_t>(i)] -
+                      (own_min_inf ? 0.0 : a * min_bound)
+                : 0.0;
+        const double residual_max =
+            residual_max_finite
+                ? max_sum[static_cast<std::size_t>(i)] -
+                      (own_max_inf ? 0.0 : a * max_bound)
+                : 0.0;
+        double candidate_lo = original_lo;
+        double candidate_hi = original_hi;
+        const double lhs = row_lhs(i);
+        const double rhs = row_rhs(i);
+        if (a > 0.0) {
+          if (lhs > -kInf && residual_max_finite)
+            candidate_lo = std::max(candidate_lo, (lhs - residual_max) / a);
+          if (rhs < kInf && residual_min_finite)
+            candidate_hi = std::min(candidate_hi, (rhs - residual_min) / a);
+        } else {
+          if (rhs < kInf && residual_min_finite)
+            candidate_lo = std::max(candidate_lo, (rhs - residual_min) / a);
+          if (lhs > -kInf && residual_max_finite)
+            candidate_hi = std::min(candidate_hi, (lhs - residual_max) / a);
+        }
+        if ((candidate_lo > -kInf && !finite_row_side(candidate_lo)) ||
+            (candidate_hi < kInf && !finite_row_side(candidate_hi))) {
+          finite_projection = false;
+          return;
+        }
+        projected_lo[static_cast<std::size_t>(j)] =
+            std::max(projected_lo[static_cast<std::size_t>(j)], candidate_lo);
+        projected_hi[static_cast<std::size_t>(j)] =
+            std::min(projected_hi[static_cast<std::size_t>(j)], candidate_hi);
+      });
+    }
+  }
+  if (!finite_projection) return finish();
+
+  for (int i = 0; i < m; ++i) {
+    out.empty_rows += row_degree[static_cast<std::size_t>(i)] == 0;
+    out.singleton_rows += row_degree[static_cast<std::size_t>(i)] == 1;
+  }
+  for (int j = 0; j < n; ++j) {
+    out.empty_cols += col_degree[static_cast<std::size_t>(j)] == 0;
+    const double lo = j < static_cast<int>(lp.vars.size())
+                          ? lp.vars[static_cast<std::size_t>(j)].lb
+                          : -kVariableNoBound;
+    const double hi = j < static_cast<int>(lp.vars.size())
+                          ? lp.vars[static_cast<std::size_t>(j)].ub
+                          : kVariableNoBound;
+    const double original_lo =
+        variable_has_finite_lower_bound(lo) ? lo : -kInf;
+    const double original_hi =
+        variable_has_finite_upper_bound(hi) ? hi : kInf;
+    const bool projected_finite =
+        std::isfinite(projected_lo[static_cast<std::size_t>(j)]) &&
+        std::isfinite(projected_hi[static_cast<std::size_t>(j)]);
+    if (projected_finite &&
+        projected_lo[static_cast<std::size_t>(j)] >
+            projected_hi[static_cast<std::size_t>(j)] +
+                row_tol(projected_lo[static_cast<std::size_t>(j)],
+                        projected_hi[static_cast<std::size_t>(j)],
+                        kInfeasTol)) {
+      return finish();
+    }
+    const double scale =
+        projected_finite
+            ? std::max(
+                  {1.0, std::abs(projected_lo[static_cast<std::size_t>(j)]),
+                   std::abs(projected_hi[static_cast<std::size_t>(j)])})
+            : 1.0;
+    const bool originally_fixed =
+        std::isfinite(original_lo) && std::isfinite(original_hi) &&
+        original_hi - original_lo <= kFixedTol * scale;
+    out.fixed_cols += originally_fixed;
+    out.projected_bound_tightenings +=
+        projected_lo[static_cast<std::size_t>(j)] > original_lo +
+            kDeleteTol * std::max(1.0, std::abs(projected_lo[static_cast<std::size_t>(j)]));
+    out.projected_bound_tightenings +=
+        projected_hi[static_cast<std::size_t>(j)] < original_hi -
+            kDeleteTol * std::max(1.0, std::abs(projected_hi[static_cast<std::size_t>(j)]));
+    if (!originally_fixed && projected_finite &&
+        projected_hi[static_cast<std::size_t>(j)] >=
+            projected_lo[static_cast<std::size_t>(j)] &&
+        projected_hi[static_cast<std::size_t>(j)] -
+                projected_lo[static_cast<std::size_t>(j)] <=
+            kFixedTol * scale) {
+      ++out.projected_fixed_cols;
+    }
+    if (col_degree[static_cast<std::size_t>(j)] == 1) {
+      const int singleton_row =
+          singleton_col_row[static_cast<std::size_t>(j)];
+      if (singleton_row >= 0 && row_lhs(singleton_row) == row_rhs(singleton_row))
+        ++out.singleton_equality_cols;
+    }
+  }
+
+  const double row_seed =
+      static_cast<double>(out.empty_rows + out.singleton_rows) /
+      std::max(1, m);
+  const double col_seed =
+      static_cast<double>(out.empty_cols + out.fixed_cols +
+                          out.projected_fixed_cols) /
+      std::max(1, n);
+  out.structural_potential = std::max(row_seed, col_seed);
+  out.singleton_equality_density =
+      static_cast<double>(out.singleton_equality_cols) / std::max(1, n);
+  out.should_run =
+      out.structural_potential >= 0.5 * kAdaptiveStructuralCut ||
+      (out.singleton_equality_density >=
+           kAdaptiveP2MinSingletonEqualityDensity &&
+       out.singleton_equality_density <=
+       kAdaptiveP2MaxSingletonEqualityDensity);
+  out.valid = true;
+  auto activity_snapshot = std::make_shared<LpPresolveActivitySnapshot>();
+  activity_snapshot->rows = m;
+  activity_snapshot->cols = n;
+  activity_snapshot->nnz = activity_nnz;
+  activity_snapshot->lower_bounds = snapshot_lo;
+  activity_snapshot->upper_bounds = snapshot_hi;
+  activity_snapshot->min_sum = std::move(min_sum);
+  activity_snapshot->max_sum = std::move(max_sum);
+  activity_snapshot->min_inf_count = std::move(min_inf);
+  activity_snapshot->max_inf_count = std::move(max_inf);
+  activity_snapshot->matrix_fingerprint = matrix_fingerprint;
+  out.activity_snapshot = std::move(activity_snapshot);
+  return finish();
 }
 
 Eigen::VectorXd postsolve_primal(const LpPresolveResult& result,
@@ -1252,6 +2010,13 @@ Eigen::VectorXd postsolve_primal(const LpPresolveResult& result,
 
 LpPresolveResult lp_presolve_run(const LPModel& lp,
                                  const LpPresolveConfig& cfg) {
+  return lp_presolve_run(lp, cfg, {});
+}
+
+LpPresolveResult lp_presolve_run(
+    const LPModel& lp, const LpPresolveConfig& cfg,
+    const std::shared_ptr<const LpPresolveActivitySnapshot>&
+        activity_snapshot) {
   const auto t0 = std::chrono::steady_clock::now();
   LpPresolveResult out;
   // Row/col/nnz accounting mirrors highs_presolve_lp so the telemetry of
@@ -1273,6 +2038,24 @@ LpPresolveResult lp_presolve_run(const LPModel& lp,
     return out;
   }
 
+  const bool adaptive_staging = cfg.adaptive_staging && cfg.substitutions;
+  if (adaptive_staging &&
+      out.orig_rows + out.orig_cols < kAdaptiveMinDimensionSum) {
+    out.reduced_rows = out.orig_rows;
+    out.reduced_cols = out.orig_cols;
+    out.reduced_nnz = out.orig_nnz;
+    out.status = "small_model";
+    out.presolve_ms = elapsed_ms();
+    if (cfg.verbose) {
+      std::fprintf(stderr,
+                   "[NATIVE-PRESOLVE] adaptive: small_model rows=%ld "
+                   "cols=%ld threshold=%ld %.3fms\n",
+                   out.orig_rows, out.orig_cols, kAdaptiveMinDimensionSum,
+                   out.presolve_ms);
+    }
+    return out;
+  }
+
   PresolveWork w;
   if (!build_work(lp, w)) {
     // Non-finite model data: no reduction is defensible; the caller solves
@@ -1284,10 +2067,28 @@ LpPresolveResult lp_presolve_run(const LPModel& lp,
     out.presolve_ms = elapsed_ms();
     return out;
   }
+  if (cfg.propagate_bounds && activity_snapshot) {
+    out.p3_activity_snapshot_used =
+        load_activity_snapshot(*activity_snapshot, w);
+  }
 
   RuleCounts counts;
   double objective_offset_min = 0.0;
   int rounds = 0;
+  bool adaptive_decided = !adaptive_staging;
+  bool substitutions_active = cfg.substitutions && !adaptive_staging;
+  auto print_progress = [&]() {
+    std::fprintf(stderr,
+                 "[NATIVE-PRESOLVE] progress: rounds=%d empty_rows=%ld "
+                 "empty_cols=%ld fixed_cols=%ld redundant_rows=%ld "
+                 "singleton_rows=%ld implied_bounds=%ld doubleton_eq=%ld "
+                 "singleton_cols=%ld free_col_subst=%ld\n",
+                 rounds, counts.empty_rows, counts.empty_cols,
+                 counts.fixed_cols, counts.redundant_rows,
+                 counts.singleton_rows, counts.implied_bound_tightenings,
+                 counts.doubleton_equations, counts.singleton_columns,
+                 counts.free_column_substitutions);
+  };
   const double time_box_ms = 1000.0 * std::max(0.0, cfg.time_box_sec);
   // Original global side scale (same definition as the original-model
   // residual audit: max over finite sides, floored at 1).  Fixed-column
@@ -1320,6 +2121,7 @@ LpPresolveResult lp_presolve_run(const LPModel& lp,
       out.status = "time_box";
       out.presolve_ms = elapsed_ms();
       if (cfg.verbose) {
+        print_progress();
         std::fprintf(stderr,
                      "[NATIVE-PRESOLVE] %s: rows %ld->%ld cols %ld->%ld nnz "
                      "%ld->%ld use_reduced=%d %.1fms\n",
@@ -1331,7 +2133,11 @@ LpPresolveResult lp_presolve_run(const LPModel& lp,
       return out;
     }
     ++rounds;
-    const long before = counts.total();
+    // A&A (1995) Section 3 makes every P3 projection independently valid;
+    // reaching its floating-point bound fixpoint is optional.  Continue the
+    // global pass only when the matrix structure changed, so bound-only
+    // progress cannot trigger repeated O(nnz) sweeps (design Section 8.11).
+    const long structural_before = counts.structural_total();
     const RuleOutcome row_outcome = row_sweep(w, counts);
     if (row_outcome != RuleOutcome::kOk) {
       out.infeasible = row_outcome == RuleOutcome::kInfeasible;
@@ -1363,7 +2169,7 @@ LpPresolveResult lp_presolve_run(const LPModel& lp,
     }
     bool substitution_timed_out = false;
     const RuleOutcome substitution_outcome =
-        cfg.substitutions
+        substitutions_active
             ? substitution_sweep(w, counts, out.postsolve_stack,
                                  objective_offset_min, side_cap,
                                  substitution_nnz_limit, deadline,
@@ -1376,6 +2182,7 @@ LpPresolveResult lp_presolve_run(const LPModel& lp,
       out.status = "time_box";
       out.presolve_ms = elapsed_ms();
       if (cfg.verbose) {
+        print_progress();
         std::fprintf(stderr,
                      "[NATIVE-PRESOLVE] %s: rows %ld->%ld cols %ld->%ld nnz "
                      "%ld->%ld use_reduced=%d %.1fms\n",
@@ -1392,7 +2199,65 @@ LpPresolveResult lp_presolve_run(const LPModel& lp,
       out.presolve_ms = elapsed_ms();
       return out;
     }
-    if (counts.total() == before) break;
+    if (counts.structural_total() == structural_before) {
+      if (!adaptive_decided) {
+        const ActiveStructure s = inspect_active_structure(w);
+        const double row_cut =
+            1.0 - static_cast<double>(s.rows) / std::max(1, w.m);
+        const double col_cut =
+            1.0 - static_cast<double>(s.cols) / std::max(1, w.n);
+        const double singleton_density =
+            static_cast<double>(s.singleton_equality_cols) /
+            std::max(1L, s.cols);
+        // A&A (1995) Section 2.4 makes every substitution valid, but replay
+        // is profitable only for the opportunity cohort derived in Section
+        // 8.24. P1/P3 structural cuts remain publication evidence below;
+        // they are no longer treated as evidence that map-backed P2 pays.
+        substitutions_active =
+            singleton_density >=
+                kAdaptiveP2MinSingletonEqualityDensity &&
+            singleton_density <=
+                kAdaptiveP2MaxSingletonEqualityDensity;
+        adaptive_decided = true;
+        if (cfg.verbose) {
+          std::fprintf(stderr,
+                       "[NATIVE-PRESOLVE] adaptive: p2=%d row_cut=%.6f "
+                       "col_cut=%.6f singleton_eq=%ld density=%.6f\n",
+                       static_cast<int>(substitutions_active), row_cut,
+                       col_cut, s.singleton_equality_cols,
+                       singleton_density);
+        }
+        if (substitutions_active) {
+          // The prepass is evidence only.  Equivalent presolve rules do not
+          // commute numerically: Section 8.22 measured a different sparse
+          // pattern and IPM trajectory when P2 continued from the P1/P3
+          // fixpoint.  Rebuild and replay the validated eager interleaving.
+          PresolveWork eager_work;
+          if (!build_work(lp, eager_work)) {
+            out.reduced_rows = out.orig_rows;
+            out.reduced_cols = out.orig_cols;
+            out.reduced_nnz = out.orig_nnz;
+            out.status = "invalid_input";
+            out.presolve_ms = elapsed_ms();
+            return out;
+          }
+          if (cfg.propagate_bounds && activity_snapshot) {
+            out.p3_activity_snapshot_used =
+                load_activity_snapshot(*activity_snapshot, eager_work);
+          }
+          w = std::move(eager_work);
+          counts = RuleCounts{};
+          out.postsolve_stack.clear();
+          objective_offset_min = 0.0;
+          rounds = 0;
+          if (cfg.verbose)
+            std::fprintf(stderr,
+                         "[NATIVE-PRESOLVE] adaptive: replay_eager=1\n");
+          continue;
+        }
+      }
+      break;
+    }
   }
 
   if (counts.total() == 0) {
@@ -1429,6 +2294,28 @@ LpPresolveResult lp_presolve_run(const LPModel& lp,
                    out.presolve_ms);
     }
     return out;
+  }
+
+  if (adaptive_staging) {
+    const ActiveStructure s = inspect_active_structure(w);
+    const double row_cut =
+        1.0 - static_cast<double>(s.rows) / std::max(1, w.m);
+    const double col_cut =
+        1.0 - static_cast<double>(s.cols) / std::max(1, w.n);
+    if (std::max(row_cut, col_cut) < kAdaptiveStructuralCut) {
+      out.reduced_rows = s.rows;
+      out.reduced_cols = s.cols;
+      out.reduced_nnz = s.nnz;
+      out.status = "insufficient_reduction";
+      out.presolve_ms = elapsed_ms();
+      if (cfg.verbose) {
+        std::fprintf(stderr,
+                     "[NATIVE-PRESOLVE] adaptive: %s row_cut=%.6f "
+                     "col_cut=%.6f use_reduced=0 %.1fms\n",
+                     out.status.c_str(), row_cut, col_cut, out.presolve_ms);
+      }
+      return out;
+    }
   }
 
   // Meager-reduction gate (§6, P1 second mismatch round).  The reduced
@@ -1533,31 +2420,84 @@ LpPresolveResult lp_presolve_run(const LPModel& lp,
     v.ub = hi == kInf ? kVariableNoBound : hi;
   }
 
-  std::vector<Eigen::Triplet<double>> trips;
-  trips.reserve(w.csc_row.size());
-  std::vector<Eigen::Triplet<double>> trips_eq;
-  long reduced_nnz = 0;
+  auto matrix_workspace = std::make_shared<LpPresolveMatrixWorkspace>();
+  matrix_workspace->inequality_rows = mred;
+  matrix_workspace->equality_rows = meq;
+  matrix_workspace->cols = nred;
+  matrix_workspace->a_row_start.assign(static_cast<std::size_t>(mred) + 1,
+                                        0);
+  matrix_workspace->aeq_row_start.assign(static_cast<std::size_t>(meq) + 1,
+                                          0);
+  for (int i = 0; i < w.m; ++i) {
+    const int ra = row_map_a[static_cast<std::size_t>(i)];
+    const int re = row_map_eq[static_cast<std::size_t>(i)];
+    if (ra < 0 && re < 0) continue;
+    int degree = 0;
+    for (int p = w.csr_start[static_cast<std::size_t>(i)];
+         p < w.csr_start[static_cast<std::size_t>(i) + 1]; ++p) {
+      degree += w.col_active[static_cast<std::size_t>(
+          w.csr_col[static_cast<std::size_t>(p)])];
+    }
+    if (ra >= 0)
+      matrix_workspace->a_row_start[static_cast<std::size_t>(ra) + 1] =
+          degree;
+    else
+      matrix_workspace->aeq_row_start[static_cast<std::size_t>(re) + 1] =
+          degree;
+  }
+  for (int i = 0; i < mred; ++i)
+    matrix_workspace->a_row_start[static_cast<std::size_t>(i) + 1] +=
+        matrix_workspace->a_row_start[static_cast<std::size_t>(i)];
+  for (int i = 0; i < meq; ++i)
+    matrix_workspace->aeq_row_start[static_cast<std::size_t>(i) + 1] +=
+        matrix_workspace->aeq_row_start[static_cast<std::size_t>(i)];
+  const int a_nnz = matrix_workspace->a_row_start.back();
+  const int aeq_nnz = matrix_workspace->aeq_row_start.back();
+  matrix_workspace->a_col.resize(static_cast<std::size_t>(a_nnz));
+  matrix_workspace->a_value.resize(static_cast<std::size_t>(a_nnz));
+  matrix_workspace->aeq_col.resize(static_cast<std::size_t>(aeq_nnz));
+  matrix_workspace->aeq_value.resize(static_cast<std::size_t>(aeq_nnz));
+  matrix_workspace->a_csc_to_csr.reserve(static_cast<std::size_t>(a_nnz));
+  matrix_workspace->aeq_csc_to_csr.reserve(
+      static_cast<std::size_t>(aeq_nnz));
+  std::vector<int> a_pos(matrix_workspace->a_row_start.begin(),
+                         matrix_workspace->a_row_start.end() - 1);
+  std::vector<int> aeq_pos(matrix_workspace->aeq_row_start.begin(),
+                           matrix_workspace->aeq_row_start.end() - 1);
+
+  red.A.resize(mred, nred);
+  red.A.reserve(a_nnz);
+  red.Aeq.resize(meq, nred);
+  red.Aeq.reserve(aeq_nnz);
   for (int r = 0; r < nred; ++r) {
+    red.A.startVec(r);
+    red.Aeq.startVec(r);
     const int j = red_to_orig[static_cast<std::size_t>(r)];
     for (int p = w.csc_start[static_cast<std::size_t>(j)];
          p < w.csc_start[static_cast<std::size_t>(j) + 1]; ++p) {
       const int i = w.csc_row[static_cast<std::size_t>(p)];
       const int ra = row_map_a[static_cast<std::size_t>(i)];
       if (ra >= 0) {
-        trips.emplace_back(ra, r, w.csc_val[static_cast<std::size_t>(p)]);
-        ++reduced_nnz;
+        const double value = w.csc_val[static_cast<std::size_t>(p)];
+        red.A.insertBackByOuterInner(r, ra) = value;
+        const int q = a_pos[static_cast<std::size_t>(ra)]++;
+        matrix_workspace->a_col[static_cast<std::size_t>(q)] = r;
+        matrix_workspace->a_value[static_cast<std::size_t>(q)] = value;
+        matrix_workspace->a_csc_to_csr.push_back(q);
         continue;
       }
       const int re = row_map_eq[static_cast<std::size_t>(i)];
       if (re >= 0) {
-        trips_eq.emplace_back(re, r, w.csc_val[static_cast<std::size_t>(p)]);
-        ++reduced_nnz;
+        const double value = w.csc_val[static_cast<std::size_t>(p)];
+        red.Aeq.insertBackByOuterInner(r, re) = value;
+        const int q = aeq_pos[static_cast<std::size_t>(re)]++;
+        matrix_workspace->aeq_col[static_cast<std::size_t>(q)] = r;
+        matrix_workspace->aeq_value[static_cast<std::size_t>(q)] = value;
+        matrix_workspace->aeq_csc_to_csr.push_back(q);
       }
     }
   }
-  red.A.resize(mred, nred);
-  red.A.setFromTriplets(trips.begin(), trips.end());
-  red.A.makeCompressed();
+  red.A.finalize();
   red.row_lhs.resize(mred);
   red.b.resize(mred);
   for (int i = 0; i < w.m; ++i) {
@@ -1566,9 +2506,7 @@ LpPresolveResult lp_presolve_run(const LPModel& lp,
     red.row_lhs[ri] = w.lhs[static_cast<std::size_t>(i)];
     red.b[ri] = w.rhs[static_cast<std::size_t>(i)];
   }
-  red.Aeq.resize(meq, nred);
-  red.Aeq.setFromTriplets(trips_eq.begin(), trips_eq.end());
-  red.Aeq.makeCompressed();
+  red.Aeq.finalize();
   red.beq.resize(meq);
   for (int i = 0; i < w.m; ++i) {
     const int ri = row_map_eq[static_cast<std::size_t>(i)];
@@ -1580,9 +2518,10 @@ LpPresolveResult lp_presolve_run(const LPModel& lp,
   // reported in the original sense so c_orig' x_orig = c_red' x_red + offset.
   out.objective_offset = sense_sign * objective_offset_min;
   out.use_reduced = true;
+  out.matrix_workspace = std::move(matrix_workspace);
   out.reduced_rows = mred + meq;
   out.reduced_cols = nred;
-  out.reduced_nnz = reduced_nnz;
+  out.reduced_nnz = static_cast<long>(a_nnz) + aeq_nnz;
   out.status = "reduced";
   out.presolve_ms = elapsed_ms();
 
@@ -1592,12 +2531,15 @@ LpPresolveResult lp_presolve_run(const LPModel& lp,
                  "empty_cols=%ld fixed_cols=%ld redundant_rows=%ld "
                  "singleton_rows=%ld implied_bounds=%ld doubleton_eq=%ld "
                  "singleton_cols=%ld "
-                 "free_col_subst=%ld\n",
+                 "free_col_subst=%ld p1_row_visits=%ld "
+                 "p1_col_visits=%ld full_scan_control=%d\n",
                  rounds, counts.empty_rows, counts.empty_cols,
                  counts.fixed_cols, counts.redundant_rows,
                  counts.singleton_rows, counts.implied_bound_tightenings,
                  counts.doubleton_equations, counts.singleton_columns,
-                 counts.free_column_substitutions);
+                 counts.free_column_substitutions, counts.p1_row_visits,
+                 counts.p1_col_visits,
+                 static_cast<int>(w.full_p1_scan_control));
     std::fprintf(stderr,
                  "[NATIVE-PRESOLVE] p2_candidates: singleton_cols=%ld "
                  "singleton_eq=%ld singleton_ranged=%ld doubleton_eq=%ld "

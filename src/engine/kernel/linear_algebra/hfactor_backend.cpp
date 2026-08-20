@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <type_traits>
 
 // HiGHS headers (vendored copies).
@@ -187,8 +188,10 @@ struct HFactorBackend::Impl {
   mutable std::uint64_t profiled_indexed_solve_count = 0;
   mutable std::uint64_t aq_capture_serial = 0;
   mutable std::uint64_t ep_capture_serial = 0;
+  mutable std::uint64_t ftran_workspace_serial = 0;
   mutable bool aq_capture_valid = false;
   mutable bool ep_capture_valid = false;
+  mutable bool ftran_workspace_valid = false;
   mutable std::uint64_t dense_solves = 0;
   mutable std::uint64_t indexed_solves = 0;
   std::uint64_t factor_serial = 0;
@@ -252,6 +255,12 @@ double HFactorBackend::build_synthetic_tick() const noexcept {
   return p_->f.build_synthetic_tick;
 }
 
+bool HFactorBackend::strengthen_pivot_threshold() noexcept {
+  if (pivot_threshold_ >= kMaxPivotThreshold) return false;
+  pivot_threshold_ = kMaxPivotThreshold;
+  return true;
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // factorize
 // ────────────────────────────────────────────────────────────────────────────
@@ -266,6 +275,7 @@ bool HFactorBackend::factorize_impl(const SparseMatrix& A,
   ++p_->factor_serial;
   p_->aq_capture_valid = false;
   p_->ep_capture_valid = false;
+  p_->ftran_workspace_valid = false;
 
   if (n_basic <= 0 || basic_index == nullptr) return false;
   if (A.rows() <= 0 || A.cols() <= 0) return false;
@@ -301,6 +311,7 @@ bool HFactorBackend::factorize_impl(const SparseMatrix& A,
   // solve branches are deliberately disabled in the vendored factor source;
   // selecting them makes the update representation inconsistent with FTRAN.
   const HighsInt update_method = kUpdateMethodFt;
+  const double pivot_threshold = pivot_threshold_;
   // Pivot tolerance (min absolute pivot for rank determination) is
   // env-overridable for diagnosis: the default 1e-10 declares mildly
   // ill-conditioned SCUC bases rank-deficient where UMFPACK still succeeds.
@@ -313,13 +324,13 @@ bool HFactorBackend::factorize_impl(const SparseMatrix& A,
     p_->f.setupGeneral32(
         num_col, num_row, static_cast<HighsInt>(n_basic), p_->bound_start32,
         p_->bound_index32, p_->bound_value, p_->basic_index.data(),
-        kDefaultPivotThreshold, pivot_tol, kHighsDebugLevelMin, nullptr, true,
+        pivot_threshold, pivot_tol, kHighsDebugLevelMin, nullptr, true,
         update_method);
   } else {
     p_->f.setupGeneral(
         num_col, num_row, static_cast<HighsInt>(n_basic), p_->bound_start,
         p_->bound_index, p_->bound_value, p_->basic_index.data(),
-        kDefaultPivotThreshold, pivot_tol, kHighsDebugLevelMin, nullptr, true,
+        pivot_threshold, pivot_tol, kHighsDebugLevelMin, nullptr, true,
         update_method);
   }
 
@@ -453,18 +464,19 @@ bool HFactorBackend::factorize_with_logicals_impl(
   p_->num_row = h_num_row;
   p_->num_col = h_num_col;
   const HighsInt update_method = kUpdateMethodFt;
+  const double pivot_threshold = pivot_threshold_;
   if (p_->bound_start32 != nullptr) {
     p_->f.setupGeneral32(
         h_num_col, h_num_row, static_cast<HighsInt>(n_basic),
         p_->bound_start32, p_->bound_index32, p_->bound_value,
-        p_->basic_index.data(), kDefaultPivotThreshold,
+        p_->basic_index.data(), pivot_threshold,
         kDefaultPivotTolerance, kHighsDebugLevelMin, nullptr, true,
         update_method);
   } else {
     p_->f.setupGeneral(
         h_num_col, h_num_row, static_cast<HighsInt>(n_basic), p_->bound_start,
         p_->bound_index, p_->bound_value, p_->basic_index.data(),
-        kDefaultPivotThreshold, kDefaultPivotTolerance, kHighsDebugLevelMin,
+        pivot_threshold, kDefaultPivotTolerance, kHighsDebugLevelMin,
         nullptr, true, update_method);
   }
   p_->setup_done = true;
@@ -601,6 +613,8 @@ void HFactorBackend::ftran(const double* rhs, double* result,
   // the real RHS density selects sparse vs dense internally.  Same permutation
   // convention as the dense path (no input remap, output remapped).
   HVector& vector = p_->solve_vec_ftran;
+  ++p_->ftran_workspace_serial;
+  p_->ftran_workspace_valid = false;
   vector.clear();
   vector.packFlag = false;
   if (rhs_pattern != nullptr) {
@@ -806,12 +820,61 @@ bool HFactorBackend::ftran_indexed(
     const std::vector<int>& rhs_index, const std::vector<double>& rhs_value,
     std::vector<int>& result_index, std::vector<double>& result_value,
     std::vector<int>& result_lookup, bool capture_update) const {
-  result_index.clear();
-  result_value.clear();
-  result_lookup.clear();
+  return ftran_indexed_impl(rhs_index, rhs_value, &result_index, &result_value,
+                            &result_lookup, capture_update, false);
+}
+
+bool HFactorBackend::ftran_indexed_resident(
+    const std::vector<int>& rhs_index, const std::vector<double>& rhs_value,
+    ResidentVectorView& result) const {
+  result = {};
+  if (!ftran_indexed_impl(rhs_index, rhs_value, nullptr, nullptr, nullptr, true,
+                          true)) {
+    return false;
+  }
+  result = ResidentVectorView(
+      this, p_->factor_serial, &p_->factor_serial, &p_->aq_capture_valid,
+      p_->update_vec_aq.index.data(), p_->update_vec_aq.array.data(),
+      static_cast<int>(p_->update_vec_aq.count), m,
+      sizeof(HighsInt) == sizeof(std::int64_t),
+      p_->external_to_internal.data(), p_->internal_to_external.data());
+  return result.valid();
+}
+
+bool HFactorBackend::ftran_indexed_scratch_resident(
+    const std::vector<int>& rhs_index, const std::vector<double>& rhs_value,
+    ResidentVectorView& result) const {
+  result = {};
+  if (!ftran_indexed_impl(rhs_index, rhs_value, nullptr, nullptr, nullptr, false,
+                          true)) {
+    return false;
+  }
+  p_->ftran_workspace_valid = true;
+  result = ResidentVectorView(
+      this, p_->ftran_workspace_serial, &p_->ftran_workspace_serial,
+      &p_->ftran_workspace_valid, p_->solve_vec_ftran.index.data(),
+      p_->solve_vec_ftran.array.data(),
+      static_cast<int>(p_->solve_vec_ftran.count), m,
+      sizeof(HighsInt) == sizeof(std::int64_t), p_->external_to_internal.data(),
+      p_->internal_to_external.data());
+  return result.valid();
+}
+
+bool HFactorBackend::ftran_indexed_impl(
+    const std::vector<int>& rhs_index, const std::vector<double>& rhs_value,
+    std::vector<int>* result_index, std::vector<double>* result_value,
+    std::vector<int>* result_lookup, bool capture_update,
+    bool resident_only) const {
+  if (result_index != nullptr) result_index->clear();
+  if (result_value != nullptr) result_value->clear();
+  if (result_lookup != nullptr) result_lookup->clear();
   if (!valid || rhs_index.size() != rhs_value.size()) return false;
   ++p_->indexed_solves;
   HVector& vector = capture_update ? p_->update_vec_aq : p_->solve_vec_ftran;
+  if (!capture_update) {
+    ++p_->ftran_workspace_serial;
+    p_->ftran_workspace_valid = false;
+  }
   double& density_mean =
       capture_update ? p_->density_mean_aq : p_->density_mean_ftran;
   vector.clear();
@@ -844,8 +907,10 @@ bool HFactorBackend::ftran_indexed(
     const auto tp_now = std::chrono::steady_clock::now();
     p_->profiled_indexed_solve_time_sec +=
         std::chrono::duration<double>(tp_now - solve_start).count();
-    p_->profiled_indexed_export_time_sec +=
-        std::chrono::duration<double>(tp_now - solve_end).count();
+    if (!resident_only) {
+      p_->profiled_indexed_export_time_sec +=
+          std::chrono::duration<double>(tp_now - solve_end).count();
+    }
     p_->profiled_indexed_solve_synthetic_tick += vector.synthetic_tick;
     ++p_->profiled_indexed_solve_count;
   };
@@ -854,21 +919,30 @@ bool HFactorBackend::ftran_indexed(
     record_profile();
     return false;
   }
-  result_index.reserve(
-      static_cast<std::size_t>(std::max<HighsInt>(0, vector.count)));
-  result_value.reserve(result_index.capacity());
+  if (!resident_only) {
+    result_index->reserve(
+        static_cast<std::size_t>(std::max<HighsInt>(0, vector.count)));
+    result_value->reserve(result_index->capacity());
+  }
   // result_lookup stays empty: IndexedVector::at() builds it lazily, and the
   // hot pivot loops only iterate the packed support. Finiteness is checked
   // here so callers do not need a second pass over the exported values.
   bool all_finite = true;
-  for (HighsInt k = 0; k < vector.count; ++k) {
+  const HighsInt solved_count = vector.count;
+  HighsInt resident_count = 0;
+  for (HighsInt k = 0; k < solved_count; ++k) {
     const HighsInt internal = vector.index[static_cast<std::size_t>(k)];
     const double entry = vector.array[static_cast<std::size_t>(internal)];
     if (entry == 0.0) continue;
     all_finite = all_finite && std::isfinite(entry);
-    result_index.push_back(static_cast<int>(p_->out_pos(internal)));
-    result_value.push_back(entry);
+    if (resident_only) {
+      vector.index[static_cast<std::size_t>(resident_count++)] = internal;
+    } else {
+      result_index->push_back(static_cast<int>(p_->out_pos(internal)));
+      result_value->push_back(entry);
+    }
   }
+  if (resident_only) vector.count = resident_count;
   if (!all_finite) {
     if (capture_update) p_->aq_capture_valid = false;
     record_profile();
@@ -892,6 +966,8 @@ bool HFactorBackend::ftran_indexed_at_captured_pattern(
   }
   ++p_->indexed_solves;
   HVector& vector = p_->solve_vec_ftran;
+  ++p_->ftran_workspace_serial;
+  p_->ftran_workspace_valid = false;
   vector.clear();
   vector.packFlag = false;
   for (std::size_t k = 0; k < rhs_index.size(); ++k) {
@@ -947,6 +1023,140 @@ bool HFactorBackend::ftran_indexed_at_captured_pattern(
   return true;
 }
 
+bool HFactorBackend::ftran_resident_ep_at_captured_aq_pattern(
+    const ResidentVectorView& rhs,
+    std::vector<double>& result_value) const {
+  result_value.clear();
+  if (!rhs.valid() || rhs.owner_ != this || !valid ||
+      !p_->aq_capture_valid || p_->aq_capture_serial != p_->factor_serial) {
+    return false;
+  }
+  ++p_->indexed_solves;
+  HVector& vector = p_->solve_vec_ftran;
+  ++p_->ftran_workspace_serial;
+  p_->ftran_workspace_valid = false;
+  vector.clear();
+  vector.packFlag = false;
+  // The BTRAN result is already in external row space, which is also FTRAN's
+  // RHS space. Preserve its HVector support order and avoid a Native packed
+  // round trip (derivation: native_presolve_lp_2026-08-18.md section 8.17).
+  const HVector& resident_ep = p_->update_vec_ep;
+  for (HighsInt k = 0; k < resident_ep.count; ++k) {
+    const HighsInt row = resident_ep.index[static_cast<std::size_t>(k)];
+    const double entry = resident_ep.array[static_cast<std::size_t>(row)];
+    if (entry == 0.0) continue;
+    vector.array[static_cast<std::size_t>(row)] = entry;
+    vector.index[static_cast<std::size_t>(vector.count++)] = row;
+  }
+  HFactor& nc = const_cast<HFactor&>(p_->f);
+  const auto solve_start =
+      p_->profile_indexed_solves ? std::chrono::steady_clock::now()
+                                 : std::chrono::steady_clock::time_point{};
+  const double expected_density = std::max(
+      static_cast<double>(vector.count) / std::max(1, m),
+      p_->density_mean_ftran);
+  nc.ftranCall(vector, expected_density, nullptr);
+  const auto solve_end =
+      p_->profile_indexed_solves ? std::chrono::steady_clock::now()
+                                 : std::chrono::steady_clock::time_point{};
+  update_solve_density_mean(p_->density_mean_ftran, vector.count, m);
+  auto record_profile = [&]() {
+    if (!p_->profile_indexed_solves) return;
+    const auto now = std::chrono::steady_clock::now();
+    p_->profiled_indexed_solve_time_sec +=
+        std::chrono::duration<double>(now - solve_start).count();
+    p_->profiled_indexed_export_time_sec +=
+        std::chrono::duration<double>(now - solve_end).count();
+    p_->profiled_indexed_solve_synthetic_tick += vector.synthetic_tick;
+    ++p_->profiled_indexed_solve_count;
+  };
+  if (vector.count < 0) {
+    record_profile();
+    return false;
+  }
+  for (HighsInt k = 0; k < vector.count; ++k) {
+    const HighsInt row = vector.index[static_cast<std::size_t>(k)];
+    if (!std::isfinite(vector.array[static_cast<std::size_t>(row)])) {
+      record_profile();
+      return false;
+    }
+  }
+
+  const HVector& captured_aq = p_->update_vec_aq;
+  result_value.reserve(
+      static_cast<std::size_t>(std::max<HighsInt>(0, captured_aq.count)));
+  for (HighsInt k = 0; k < captured_aq.count; ++k) {
+    const HighsInt internal =
+        captured_aq.index[static_cast<std::size_t>(k)];
+    if (captured_aq.array[static_cast<std::size_t>(internal)] == 0.0) continue;
+    result_value.push_back(vector.array[static_cast<std::size_t>(internal)]);
+  }
+  record_profile();
+  return true;
+}
+
+bool HFactorBackend::ftran_resident_ep_at_captured_aq_pattern(
+    const ResidentVectorView& rhs, ResidentVectorView& result) const {
+  result = {};
+  if (!rhs.valid() || rhs.owner_ != this || !valid ||
+      !p_->aq_capture_valid || p_->aq_capture_serial != p_->factor_serial) {
+    return false;
+  }
+  ++p_->indexed_solves;
+  HVector& vector = p_->solve_vec_ftran;
+  ++p_->ftran_workspace_serial;
+  p_->ftran_workspace_valid = false;
+  vector.clear();
+  vector.packFlag = false;
+  const HVector& resident_ep = p_->update_vec_ep;
+  for (HighsInt k = 0; k < resident_ep.count; ++k) {
+    const HighsInt row = resident_ep.index[static_cast<std::size_t>(k)];
+    const double entry = resident_ep.array[static_cast<std::size_t>(row)];
+    if (entry == 0.0) continue;
+    vector.array[static_cast<std::size_t>(row)] = entry;
+    vector.index[static_cast<std::size_t>(vector.count++)] = row;
+  }
+  HFactor& nc = const_cast<HFactor&>(p_->f);
+  const auto solve_start =
+      p_->profile_indexed_solves ? std::chrono::steady_clock::now()
+                                 : std::chrono::steady_clock::time_point{};
+  const double expected_density = std::max(
+      static_cast<double>(vector.count) / std::max(1, m),
+      p_->density_mean_ftran);
+  nc.ftranCall(vector, expected_density, nullptr);
+  update_solve_density_mean(p_->density_mean_ftran, vector.count, m);
+  auto record_profile = [&]() {
+    if (!p_->profile_indexed_solves) return;
+    const auto now = std::chrono::steady_clock::now();
+    p_->profiled_indexed_solve_time_sec +=
+        std::chrono::duration<double>(now - solve_start).count();
+    p_->profiled_indexed_solve_synthetic_tick += vector.synthetic_tick;
+    ++p_->profiled_indexed_solve_count;
+  };
+  if (vector.count < 0) {
+    record_profile();
+    return false;
+  }
+  for (HighsInt k = 0; k < vector.count; ++k) {
+    const HighsInt row = vector.index[static_cast<std::size_t>(k)];
+    if (!std::isfinite(vector.array[static_cast<std::size_t>(row)])) {
+      record_profile();
+      return false;
+    }
+  }
+
+  const HVector& captured_aq = p_->update_vec_aq;
+  p_->ftran_workspace_valid = true;
+  result = ResidentVectorView(
+      this, p_->ftran_workspace_serial, &p_->ftran_workspace_serial,
+      &p_->ftran_workspace_valid, captured_aq.index.data(), vector.array.data(),
+      static_cast<int>(captured_aq.count), m,
+      sizeof(HighsInt) == sizeof(std::int64_t), p_->external_to_internal.data(),
+      p_->internal_to_external.data());
+  record_profile();
+  return result.valid();
+}
+
 bool HFactorBackend::captured_aq_value(int external_row, double& out) const {
   if (!valid || external_row < 0 || external_row >= m ||
       !p_->aq_capture_valid || p_->aq_capture_serial != p_->factor_serial) {
@@ -962,9 +1172,34 @@ bool HFactorBackend::btran_indexed(
     const std::vector<int>& rhs_index, const std::vector<double>& rhs_value,
     std::vector<int>& result_index, std::vector<double>& result_value,
     std::vector<int>& result_lookup, bool capture_update) const {
-  result_index.clear();
-  result_value.clear();
-  result_lookup.clear();
+  return btran_indexed_impl(rhs_index, rhs_value, &result_index, &result_value,
+                            &result_lookup, capture_update, false);
+}
+
+bool HFactorBackend::btran_indexed_resident(
+    const std::vector<int>& rhs_index, const std::vector<double>& rhs_value,
+    ResidentVectorView& result) const {
+  result = {};
+  if (!btran_indexed_impl(rhs_index, rhs_value, nullptr, nullptr, nullptr, true,
+                          true)) {
+    return false;
+  }
+  result = ResidentVectorView(
+      this, p_->factor_serial, &p_->factor_serial, &p_->ep_capture_valid,
+      p_->update_vec_ep.index.data(), p_->update_vec_ep.array.data(),
+      static_cast<int>(p_->update_vec_ep.count), m,
+      sizeof(HighsInt) == sizeof(std::int64_t));
+  return result.valid();
+}
+
+bool HFactorBackend::btran_indexed_impl(
+    const std::vector<int>& rhs_index, const std::vector<double>& rhs_value,
+    std::vector<int>* result_index, std::vector<double>* result_value,
+    std::vector<int>* result_lookup, bool capture_update,
+    bool resident_only) const {
+  if (result_index != nullptr) result_index->clear();
+  if (result_value != nullptr) result_value->clear();
+  if (result_lookup != nullptr) result_lookup->clear();
   if (!valid || rhs_index.size() != rhs_value.size()) return false;
   ++p_->indexed_solves;
   HVector& vector = capture_update ? p_->update_vec_ep : p_->solve_vec_btran;
@@ -996,10 +1231,12 @@ bool HFactorBackend::btran_indexed(
     const auto tp_now = std::chrono::steady_clock::now();
     p_->profiled_indexed_solve_time_sec +=
         std::chrono::duration<double>(tp_now - solve_start).count();
-    const double export_sec =
-        std::chrono::duration<double>(tp_now - solve_end).count();
-    p_->profiled_indexed_export_time_sec += export_sec;
-    p_->profiled_indexed_export_btran_time_sec += export_sec;
+    if (!resident_only) {
+      const double export_sec =
+          std::chrono::duration<double>(tp_now - solve_end).count();
+      p_->profiled_indexed_export_time_sec += export_sec;
+      p_->profiled_indexed_export_btran_time_sec += export_sec;
+    }
     p_->profiled_indexed_solve_synthetic_tick += vector.synthetic_tick;
     ++p_->profiled_indexed_solve_count;
   };
@@ -1008,21 +1245,30 @@ bool HFactorBackend::btran_indexed(
     record_profile();
     return false;
   }
-  result_index.reserve(
-      static_cast<std::size_t>(std::max<HighsInt>(0, vector.count)));
-  result_value.reserve(result_index.capacity());
+  if (!resident_only) {
+    result_index->reserve(
+        static_cast<std::size_t>(std::max<HighsInt>(0, vector.count)));
+    result_value->reserve(result_index->capacity());
+  }
   // result_lookup stays empty: IndexedVector::at() builds it lazily, and the
   // hot pivot loops only iterate the packed support. Finiteness is checked
   // here so callers do not need a second pass over the exported values.
   bool all_finite = true;
-  for (HighsInt k = 0; k < vector.count; ++k) {
+  const HighsInt solved_count = vector.count;
+  HighsInt resident_count = 0;
+  for (HighsInt k = 0; k < solved_count; ++k) {
     const HighsInt row = vector.index[static_cast<std::size_t>(k)];
     const double entry = vector.array[static_cast<std::size_t>(row)];
     if (entry == 0.0) continue;
     all_finite = all_finite && std::isfinite(entry);
-    result_index.push_back(static_cast<int>(row));
-    result_value.push_back(entry);
+    if (resident_only) {
+      vector.index[static_cast<std::size_t>(resident_count++)] = row;
+    } else {
+      result_index->push_back(static_cast<int>(row));
+      result_value->push_back(entry);
+    }
   }
+  if (resident_only) vector.count = resident_count;
   if (!all_finite) {
     if (capture_update) p_->ep_capture_valid = false;
     record_profile();
@@ -1080,6 +1326,7 @@ bool HFactorBackend::update_captured(int pivot_row, int entering_col) {
   ++p_->factor_serial;
   p_->aq_capture_valid = false;
   p_->ep_capture_valid = false;
+  p_->ftran_workspace_valid = false;
   refactor_hint_ = static_cast<int>(hint);
   return true;
 }

@@ -132,12 +132,14 @@ TEST_CASE("lp_presolve_config_from_env honors the override convention",
   unset_env("MIPSOLVERS_NATIVE_PRESOLVE");
   unset_env("MIPSOLVERS_NATIVE_PRESOLVE_VERBOSE");
   unset_env("MIPSOLVERS_NATIVE_PRESOLVE_TIME_BOX");
+  unset_env("MIPSOLVERS_NATIVE_PRESOLVE_ADAPTIVE_STAGING");
 
   // No env: the base config passes through unchanged.
   LpPresolveConfig cfg = lp_presolve_config_from_env(LpPresolveConfig{});
   CHECK_FALSE(cfg.enabled);
   CHECK(cfg.time_box_sec == Approx(2.0));
   CHECK_FALSE(cfg.verbose);
+  CHECK_FALSE(cfg.adaptive_staging);
 
   // "0" disables, any other value enables.
   set_env("MIPSOLVERS_NATIVE_PRESOLVE", "0");
@@ -154,6 +156,13 @@ TEST_CASE("lp_presolve_config_from_env honors the override convention",
   CHECK(cfg.verbose);
   CHECK(cfg.time_box_sec == Approx(0.5));
 
+  set_env("MIPSOLVERS_NATIVE_PRESOLVE_ADAPTIVE_STAGING", "1");
+  cfg = lp_presolve_config_from_env(LpPresolveConfig{});
+  CHECK(cfg.adaptive_staging);
+  set_env("MIPSOLVERS_NATIVE_PRESOLVE_ADAPTIVE_STAGING", "0");
+  cfg = lp_presolve_config_from_env(LpPresolveConfig{});
+  CHECK_FALSE(cfg.adaptive_staging);
+
   // A non-numeric time box is ignored (same strtod guard as the HiGHS arm).
   set_env("MIPSOLVERS_NATIVE_PRESOLVE_TIME_BOX", "abc");
   cfg = lp_presolve_config_from_env(LpPresolveConfig{});
@@ -162,6 +171,366 @@ TEST_CASE("lp_presolve_config_from_env honors the override convention",
   unset_env("MIPSOLVERS_NATIVE_PRESOLVE");
   unset_env("MIPSOLVERS_NATIVE_PRESOLVE_VERBOSE");
   unset_env("MIPSOLVERS_NATIVE_PRESOLVE_TIME_BOX");
+  unset_env("MIPSOLVERS_NATIVE_PRESOLVE_ADAPTIVE_STAGING");
+}
+
+TEST_CASE("Adaptive LP presolve skips small models before adjacency build",
+          "[presolve][lp][adaptive]") {
+  const LPModel lp = make_small_lp();
+  LpPresolveConfig cfg;
+  cfg.enabled = true;
+  cfg.substitutions = true;
+  cfg.adaptive_staging = true;
+  const LpPresolveResult res = lp_presolve_run(lp, cfg);
+  CHECK(res.status == "small_model");
+  CHECK_FALSE(res.use_reduced);
+  CHECK(res.reduced_rows == res.orig_rows);
+  CHECK(res.reduced_cols == res.orig_cols);
+  CHECK(res.reduced_nnz == res.orig_nnz);
+}
+
+TEST_CASE("Adaptive LP presolve rejects saturated singleton-only P2 replay",
+          "[presolve][lp][adaptive][p2-policy]") {
+  constexpr int rows = 1000;
+  constexpr int cols = 4000;
+  LPModel lp;
+  lp.c = Eigen::VectorXd::Zero(cols);
+  lp.A.resize(0, cols);
+  lp.b.resize(0);
+  lp.row_lhs.resize(0);
+  lp.Aeq.resize(rows, cols);
+  lp.beq = Eigen::VectorXd::Ones(rows);
+  lp.vars.assign(static_cast<std::size_t>(cols),
+                 VariableMeta{VarType::Continuous, 0.0, 1.0});
+  std::vector<Eigen::Triplet<double>> entries;
+  entries.reserve(cols);
+  for (int col = 0; col < cols; ++col) {
+    entries.emplace_back(col / 4, col, 1.0);
+  }
+  lp.Aeq.setFromTriplets(entries.begin(), entries.end());
+  lp.Aeq.makeCompressed();
+
+  LpPresolveConfig cfg;
+  cfg.enabled = true;
+  cfg.substitutions = true;
+  cfg.adaptive_staging = true;
+  const LpPresolveResult res = lp_presolve_run(lp, cfg);
+  CHECK(res.status == "no_reduction");
+  CHECK_FALSE(res.use_reduced);
+  CHECK(res.reduced_rows == rows);
+  CHECK(res.reduced_cols == cols);
+}
+
+TEST_CASE("Adaptive LP presolve retains the intermediate singleton P2 cohort",
+          "[presolve][lp][adaptive][p2-policy]") {
+  constexpr int rows = 1001;
+  constexpr int singleton_cols = 2002;
+  constexpr int chain_cols = 998;
+  constexpr int cols = singleton_cols + chain_cols;
+  LPModel lp;
+  lp.c = Eigen::VectorXd::Zero(cols);
+  lp.A.resize(0, cols);
+  lp.b.resize(0);
+  lp.row_lhs.resize(0);
+  lp.Aeq.resize(rows, cols);
+  lp.beq = Eigen::VectorXd::Constant(rows, 2.0);
+  lp.vars.assign(static_cast<std::size_t>(cols),
+                 VariableMeta{VarType::Continuous, 0.0, 1.0});
+  std::vector<Eigen::Triplet<double>> entries;
+  entries.reserve(singleton_cols + 2 * chain_cols);
+  for (int row = 0; row < rows; ++row) {
+    entries.emplace_back(row, 2 * row, 1.0);
+    entries.emplace_back(row, 2 * row + 1, 1.0);
+  }
+  for (int k = 0; k < chain_cols; ++k) {
+    const int col = singleton_cols + k;
+    entries.emplace_back(k, col, 1.0);
+    entries.emplace_back(k + 1, col, 1.0);
+  }
+  lp.Aeq.setFromTriplets(entries.begin(), entries.end());
+  lp.Aeq.makeCompressed();
+
+  LpPresolveConfig cfg;
+  cfg.enabled = true;
+  cfg.substitutions = true;
+  cfg.adaptive_staging = true;
+  const LpPresolveResult res = lp_presolve_run(lp, cfg);
+  CHECK(res.status == "reduced");
+  CHECK(res.use_reduced);
+  CHECK(res.reduced_rows < rows);
+  CHECK(res.reduced_cols < cols);
+}
+
+TEST_CASE("Read-only P3 opportunity predicts direct projected fixings",
+          "[presolve][lp][adaptive][opportunity]") {
+  constexpr int rows = 1000;
+  constexpr int cols = 4000;
+  LPModel lp;
+  lp.c = Eigen::VectorXd::Zero(cols);
+  lp.A.resize(0, cols);
+  lp.b.resize(0);
+  lp.row_lhs.resize(0);
+  lp.Aeq.resize(rows, cols);
+  lp.beq = Eigen::VectorXd::Zero(rows);
+  lp.vars.assign(static_cast<std::size_t>(cols),
+                 VariableMeta{VarType::Continuous, 0.0, 1.0});
+  std::vector<Eigen::Triplet<double>> entries;
+  entries.reserve(cols);
+  for (int col = 0; col < cols; ++col)
+    entries.emplace_back(col / 4, col, 1.0);
+  lp.Aeq.setFromTriplets(entries.begin(), entries.end());
+  lp.Aeq.makeCompressed();
+
+  const LpPresolveOpportunityEstimate estimate =
+      lp_presolve_estimate_adaptive_opportunity(lp);
+  CHECK(estimate.valid);
+  CHECK(estimate.should_run);
+  CHECK(estimate.projected_fixed_cols == cols);
+  CHECK(estimate.projectable_rows == rows);
+  CHECK(estimate.structural_potential == Approx(1.0));
+}
+
+TEST_CASE("Read-only P3 opportunity rejects a nonforcing saturated pattern",
+          "[presolve][lp][adaptive][opportunity]") {
+  constexpr int rows = 1000;
+  constexpr int cols = 4000;
+  LPModel lp;
+  lp.c = Eigen::VectorXd::Zero(cols);
+  lp.A.resize(0, cols);
+  lp.b.resize(0);
+  lp.row_lhs.resize(0);
+  lp.Aeq.resize(rows, cols);
+  lp.beq = Eigen::VectorXd::Constant(rows, 2.0);
+  lp.vars.assign(static_cast<std::size_t>(cols),
+                 VariableMeta{VarType::Continuous, 0.0, 1.0});
+  std::vector<Eigen::Triplet<double>> entries;
+  entries.reserve(cols);
+  for (int col = 0; col < cols; ++col)
+    entries.emplace_back(col / 4, col, 1.0);
+  lp.Aeq.setFromTriplets(entries.begin(), entries.end());
+  lp.Aeq.makeCompressed();
+
+  const LpPresolveOpportunityEstimate estimate =
+      lp_presolve_estimate_adaptive_opportunity(lp);
+  CHECK(estimate.valid);
+  CHECK_FALSE(estimate.should_run);
+  CHECK(estimate.projected_fixed_cols == 0);
+  CHECK(estimate.projectable_rows == 0);
+  CHECK(estimate.singleton_equality_density == Approx(1.0));
+}
+
+TEST_CASE("Read-only P3 opportunity fails closed on activity overflow",
+          "[presolve][lp][adaptive][opportunity]") {
+  constexpr int cols = 4000;
+  LPModel lp;
+  lp.c = Eigen::VectorXd::Zero(cols);
+  lp.A.resize(0, cols);
+  lp.b.resize(0);
+  lp.row_lhs.resize(0);
+  lp.Aeq.resize(1, cols);
+  lp.beq = Eigen::VectorXd::Zero(1);
+  lp.vars.assign(static_cast<std::size_t>(cols),
+                 VariableMeta{VarType::Continuous, 0.0, 10.0});
+  std::vector<Eigen::Triplet<double>> entries;
+  entries.emplace_back(0, 0, 1e308);
+  entries.emplace_back(0, 1, 1e308);
+  lp.Aeq.setFromTriplets(entries.begin(), entries.end());
+  lp.Aeq.makeCompressed();
+
+  const LpPresolveOpportunityEstimate estimate =
+      lp_presolve_estimate_adaptive_opportunity(lp);
+  CHECK_FALSE(estimate.valid);
+  CHECK_FALSE(estimate.should_run);
+}
+
+TEST_CASE("Estimator activities feed incremental P3 across infinite bounds",
+          "[presolve][lp][adaptive][opportunity][incremental-p3]") {
+  constexpr int rows = 1000;
+  constexpr int cols = 4000;
+  LPModel lp;
+  lp.c = Eigen::VectorXd::Zero(cols);
+  lp.A.resize(0, cols);
+  lp.b.resize(0);
+  lp.row_lhs.resize(0);
+  lp.Aeq.resize(rows, cols);
+  lp.beq = Eigen::VectorXd::Zero(rows);
+  lp.vars.resize(cols);
+  std::vector<Eigen::Triplet<double>> entries;
+  entries.reserve(cols);
+  for (int j = 0; j < cols; ++j) {
+    const int row = j / 4;
+    entries.emplace_back(row, j, 1.0);
+    if ((row & 1) == 0) {
+      lp.vars[static_cast<std::size_t>(j)] =
+          VariableMeta{VarType::Continuous, 0.0, kVariableNoBound};
+    } else {
+      lp.vars[static_cast<std::size_t>(j)] =
+          VariableMeta{VarType::Continuous, -kVariableNoBound, 0.0};
+    }
+  }
+  lp.Aeq.setFromTriplets(entries.begin(), entries.end());
+  lp.Aeq.makeCompressed();
+
+  const LpPresolveOpportunityEstimate estimate =
+      lp_presolve_estimate_adaptive_opportunity(lp);
+  REQUIRE(estimate.valid);
+  REQUIRE(estimate.activity_snapshot);
+
+  LpPresolveConfig cfg = p3_cfg();
+  const LpPresolveResult cold = lp_presolve_run(lp, cfg);
+  const LpPresolveResult resident =
+      lp_presolve_run(lp, cfg, estimate.activity_snapshot);
+  CHECK_FALSE(cold.p3_activity_snapshot_used);
+  CHECK(resident.p3_activity_snapshot_used);
+  CHECK(resident.status == cold.status);
+  CHECK(resident.infeasible == cold.infeasible);
+  CHECK(resident.use_reduced == cold.use_reduced);
+  CHECK(resident.reduced_rows == cold.reduced_rows);
+  CHECK(resident.reduced_cols == cold.reduced_cols);
+  CHECK(resident.reduced_nnz == cold.reduced_nnz);
+  REQUIRE(resident.use_reduced);
+  const Eigen::VectorXd x = postsolve_primal(
+      resident, Eigen::VectorXd::Zero(resident.reduced_cols));
+  REQUIRE(x.size() == cols);
+  CHECK((lp.Aeq * x - lp.beq).lpNorm<Eigen::Infinity>() == Approx(0.0));
+}
+
+TEST_CASE("Incremental P3 rejects a stale matrix snapshot",
+          "[presolve][lp][adaptive][opportunity][incremental-p3]") {
+  constexpr int rows = 1000;
+  constexpr int cols = 4000;
+  auto make_lp = [](double first_coefficient) {
+    LPModel lp;
+    lp.c = Eigen::VectorXd::Zero(cols);
+    lp.A.resize(0, cols);
+    lp.b.resize(0);
+    lp.row_lhs.resize(0);
+    lp.Aeq.resize(rows, cols);
+    lp.beq = Eigen::VectorXd::Zero(rows);
+    lp.vars.assign(static_cast<std::size_t>(cols),
+                   VariableMeta{VarType::Continuous, 0.0, 1.0});
+    std::vector<Eigen::Triplet<double>> entries;
+    entries.reserve(cols);
+    for (int j = 0; j < cols; ++j)
+      entries.emplace_back(j / 4, j, j == 0 ? first_coefficient : 1.0);
+    lp.Aeq.setFromTriplets(entries.begin(), entries.end());
+    lp.Aeq.makeCompressed();
+    return lp;
+  };
+
+  const LPModel source = make_lp(1.0);
+  const LPModel target = make_lp(2.0);
+  const auto estimate = lp_presolve_estimate_adaptive_opportunity(source);
+  REQUIRE(estimate.activity_snapshot);
+  const LpPresolveResult cold = lp_presolve_run(target, p3_cfg());
+  const LpPresolveResult rejected =
+      lp_presolve_run(target, p3_cfg(), estimate.activity_snapshot);
+  CHECK_FALSE(rejected.p3_activity_snapshot_used);
+  CHECK(rejected.status == cold.status);
+  CHECK(rejected.reduced_rows == cold.reduced_rows);
+  CHECK(rejected.reduced_cols == cold.reduced_cols);
+  CHECK(rejected.reduced_nnz == cold.reduced_nnz);
+}
+
+TEST_CASE("P2 commit invalidates resident P3 activities",
+          "[presolve][lp][p2][incremental-p3]") {
+  constexpr int cols = 3999;
+  LPModel lp;
+  lp.c = Eigen::VectorXd::Zero(cols);
+  lp.A.resize(0, cols);
+  lp.b.resize(0);
+  lp.row_lhs.resize(0);
+  lp.Aeq.resize(1, cols);
+  lp.beq = Eigen::VectorXd::Ones(1);
+  lp.vars.assign(static_cast<std::size_t>(cols),
+                 VariableMeta{VarType::Continuous, 0.0, 1.0});
+  std::vector<Eigen::Triplet<double>> entries{{0, 0, 1.0}, {0, 1, 1.0}};
+  lp.Aeq.setFromTriplets(entries.begin(), entries.end());
+  lp.Aeq.makeCompressed();
+
+  const auto estimate = lp_presolve_estimate_adaptive_opportunity(lp);
+  REQUIRE(estimate.activity_snapshot);
+  LpPresolveConfig cfg = p2_cfg();
+  cfg.propagate_bounds = true;
+  const LpPresolveResult cold = lp_presolve_run(lp, cfg);
+  const LpPresolveResult resident =
+      lp_presolve_run(lp, cfg, estimate.activity_snapshot);
+  CHECK(resident.p3_activity_snapshot_used);
+  CHECK(resident.status == cold.status);
+  CHECK(resident.infeasible == cold.infeasible);
+  CHECK(resident.reduced_rows == cold.reduced_rows);
+  CHECK(resident.reduced_cols == cold.reduced_cols);
+  CHECK(resident.reduced_nnz == cold.reduced_nnz);
+}
+
+TEST_CASE("Resident P1 degrees follow row and column deletion cascades",
+          "[presolve][lp][p1][resident-degree]") {
+  LPModel lp = make_blank_lp(3);
+  lp.c = Eigen::VectorXd::Zero(3);
+  lp.vars = {{VarType::Continuous, 0.0, 2.0},
+             {VarType::Continuous, 0.0, 2.0},
+             {VarType::Continuous, 0.0, 2.0}};
+  lp.A.resize(0, 3);
+  lp.b.resize(0);
+  lp.row_lhs.resize(0);
+  lp.Aeq.resize(3, 3);
+  std::vector<Eigen::Triplet<double>> entries{
+      {0, 0, 1.0}, {1, 0, 1.0}, {1, 1, 1.0},
+      {2, 1, 1.0}, {2, 2, 1.0}};
+  lp.Aeq.setFromTriplets(entries.begin(), entries.end());
+  lp.Aeq.makeCompressed();
+  lp.beq = Eigen::VectorXd::Constant(3, 1.0);
+  lp.beq[1] = 2.0;
+  lp.beq[2] = 2.0;
+
+  LpPresolveConfig cfg = enabled_cfg();
+  cfg.propagate_bounds = false;
+  cfg.substitutions = false;
+  const LpPresolveResult res = lp_presolve_run(lp, cfg);
+  REQUIRE(res.use_reduced);
+  CHECK(res.reduced_rows == 0);
+  CHECK(res.reduced_cols == 0);
+  CHECK(res.reduced_nnz == 0);
+
+  const Eigen::VectorXd x = postsolve_primal(res, Eigen::VectorXd());
+  REQUIRE(x.size() == 3);
+  CHECK((lp.Aeq * x - lp.beq).lpNorm<Eigen::Infinity>() == Approx(0.0));
+  CHECK(x[0] == Approx(1.0));
+  CHECK(x[1] == Approx(1.0));
+  CHECK(x[2] == Approx(1.0));
+}
+
+TEST_CASE("P1 dirty queues revisit noncontiguous incidence cascades",
+          "[presolve][lp][p1][dirty-queue]") {
+  LPModel lp = make_blank_lp(5);
+  lp.c = Eigen::VectorXd::Zero(5);
+  lp.vars.assign(5, VariableMeta{VarType::Continuous, 0.0, 2.0});
+  lp.A.resize(0, 5);
+  lp.b.resize(0);
+  lp.row_lhs.resize(0);
+  lp.Aeq.resize(4, 5);
+  std::vector<Eigen::Triplet<double>> entries{
+      {0, 0, 1.0}, {0, 4, 1.0}, {3, 0, 1.0}};
+  lp.Aeq.setFromTriplets(entries.begin(), entries.end());
+  lp.Aeq.makeCompressed();
+  lp.beq = Eigen::VectorXd::Zero(4);
+  lp.beq[0] = 2.0;
+  lp.beq[3] = 1.0;
+
+  LpPresolveConfig cfg = enabled_cfg();
+  cfg.propagate_bounds = true;
+  cfg.substitutions = false;
+  const LpPresolveResult res = lp_presolve_run(lp, cfg);
+  REQUIRE(res.use_reduced);
+  CHECK(res.reduced_rows == 0);
+  CHECK(res.reduced_cols == 0);
+  CHECK(res.reduced_nnz == 0);
+
+  const Eigen::VectorXd x = postsolve_primal(res, Eigen::VectorXd());
+  REQUIRE(x.size() == 5);
+  CHECK((lp.Aeq * x - lp.beq).lpNorm<Eigen::Infinity>() == Approx(0.0));
+  CHECK(x[0] == Approx(1.0));
+  CHECK(x[4] == Approx(1.0));
 }
 
 TEST_CASE("P1 reduces the small LP via the singleton-row rule (A&A §2.3)",
@@ -358,6 +727,71 @@ TEST_CASE("P1 fixed column substitution shifts row sides and the objective "
   // c'x == c_red'x_red + offset.
   CHECK(lp.c.dot(x) ==
         Approx(res.reduced.c.dot(x_red) + res.objective_offset));
+}
+
+TEST_CASE("Presolve compaction publishes CSC-consistent resident CSR",
+          "[presolve][lp][matrix-workspace]") {
+  LPModel lp = make_blank_lp(5);
+  lp.c = Eigen::VectorXd::Zero(5);
+  lp.vars = {{VarType::Continuous, 1.0, 1.0},
+             {VarType::Continuous, 0.0, 10.0},
+             {VarType::Continuous, 0.0, 10.0},
+             {VarType::Continuous, -10.0, 10.0},
+             {VarType::Continuous, -10.0, 10.0}};
+  set_ineq_rows(lp,
+                {Eigen::Triplet<double>(0, 0, 2.0),
+                 Eigen::Triplet<double>(0, 1, 3.0),
+                 Eigen::Triplet<double>(0, 2, -1.0),
+                 Eigen::Triplet<double>(1, 1, 1.0),
+                 Eigen::Triplet<double>(1, 2, 2.0)},
+                (Eigen::VectorXd(2) << -kInf, 0.5).finished(),
+                (Eigen::VectorXd(2) << 20.0, kInf).finished());
+  lp.Aeq.resize(1, 5);
+  lp.Aeq.insert(0, 0) = -4.0;
+  lp.Aeq.insert(0, 3) = 2.0;
+  lp.Aeq.insert(0, 4) = 5.0;
+  lp.Aeq.makeCompressed();
+  lp.beq = Eigen::VectorXd::Constant(1, 7.0);
+
+  const LpPresolveResult res = lp_presolve_run(lp, enabled_cfg());
+  REQUIRE(res.use_reduced);
+  REQUIRE(res.matrix_workspace);
+  const auto& ws = *res.matrix_workspace;
+  CHECK(ws.inequality_rows == res.reduced.A.rows());
+  CHECK(ws.equality_rows == res.reduced.Aeq.rows());
+  CHECK(ws.cols == res.reduced.c.size());
+
+  auto check_block = [](const Eigen::SparseMatrix<double>& matrix,
+                        const std::vector<int>& row_start,
+                        const std::vector<int>& col,
+                        const std::vector<double>& value,
+                        const std::vector<int>& csc_to_csr) {
+    REQUIRE(row_start.size() ==
+            static_cast<std::size_t>(matrix.rows()) + 1);
+    REQUIRE(col.size() == static_cast<std::size_t>(matrix.nonZeros()));
+    REQUIRE(value.size() == col.size());
+    REQUIRE(csc_to_csr.size() == col.size());
+    for (int i = 0; i < matrix.rows(); ++i) {
+      for (int p = row_start[static_cast<std::size_t>(i)];
+           p < row_start[static_cast<std::size_t>(i) + 1]; ++p) {
+        CHECK(matrix.coeff(i, col[static_cast<std::size_t>(p)]) ==
+              Approx(value[static_cast<std::size_t>(p)]));
+      }
+    }
+    for (int j = 0; j < matrix.cols(); ++j) {
+      for (int p = matrix.outerIndexPtr()[j];
+           p < matrix.outerIndexPtr()[j + 1]; ++p) {
+        const int q = csc_to_csr[static_cast<std::size_t>(p)];
+        CHECK(col[static_cast<std::size_t>(q)] == j);
+        CHECK(value[static_cast<std::size_t>(q)] ==
+              Approx(matrix.valuePtr()[p]));
+      }
+    }
+  };
+  check_block(res.reduced.A, ws.a_row_start, ws.a_col, ws.a_value,
+              ws.a_csc_to_csr);
+  check_block(res.reduced.Aeq, ws.aeq_row_start, ws.aeq_col, ws.aeq_value,
+              ws.aeq_csc_to_csr);
 }
 
 TEST_CASE("P1 redundant row: activity inside the sides deletes, outside "

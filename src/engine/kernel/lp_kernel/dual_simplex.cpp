@@ -23,6 +23,7 @@
 #endif
 
 #include "mipsolvers/core/logging.hpp"
+#include "mipsolvers/engine/presolve/lp_presolve.hpp"
 #include "mipsolvers/engine/strategy/highs_presolve_side_state.hpp"
 
 namespace mipsolvers::engine {
@@ -1844,7 +1845,8 @@ static SimplexResult solve_lp_with_basis_impl(const LPModel& lp,
       static_cast<int>(solved.basis.index_count()) == m) {
     solved_basis->rebind_A(solved.form.A);
     solved.basis.cached_sparse_basis = std::move(solved_basis);
-    solved.basis.persist_eta_count = 0;
+    solved.basis.persist_eta_count =
+        solved.basis.cached_sparse_basis->eta_count();
   }
   return solved;
 }
@@ -1907,11 +1909,133 @@ bool lp_solution_residual_acceptable(const LPModel& lp,
   return viol <= tol * scale;
 }
 
+int print_lp_solution_residual_diagnostics(const LPModel& lp,
+                                           const Eigen::VectorXd& x) {
+  constexpr double kSideSentinel = 1e19;
+  double max_ineq = 0.0;
+  double max_eq = 0.0;
+  double max_bound = 0.0;
+  double scale = 1.0;
+  int ineq_index = -1;
+  int eq_index = -1;
+  int bound_index = -1;
+  if (x.size() == lp.c.size() && x.allFinite()) {
+    const Eigen::VectorXd ax = lp.A * x;
+    for (int i = 0; i < ax.size(); ++i) {
+      double row_viol = 0.0;
+      if (std::abs(lp.b[i]) < kSideSentinel) {
+        row_viol = std::max(row_viol, ax[i] - lp.b[i]);
+        scale = std::max(scale, std::abs(lp.b[i]));
+      }
+      const double lhs = lp_row_lhs_or_neg_inf(lp, i);
+      if (std::isfinite(lhs) && std::abs(lhs) < kSideSentinel) {
+        row_viol = std::max(row_viol, lhs - ax[i]);
+        scale = std::max(scale, std::abs(lhs));
+      }
+      if (row_viol > max_ineq) {
+        max_ineq = row_viol;
+        ineq_index = i;
+      }
+    }
+    const Eigen::VectorXd aeqx = lp.Aeq * x;
+    for (int i = 0; i < aeqx.size(); ++i) {
+      const double row_viol = std::abs(aeqx[i] - lp.beq[i]);
+      scale = std::max(scale, std::abs(lp.beq[i]));
+      if (row_viol > max_eq) {
+        max_eq = row_viol;
+        eq_index = i;
+      }
+    }
+    for (int j = 0; j < x.size(); ++j) {
+      const auto& var = lp.vars[static_cast<std::size_t>(j)];
+      double bound_viol = 0.0;
+      if (std::isfinite(var.lb))
+        bound_viol = std::max(bound_viol, var.lb - x[j]);
+      if (std::isfinite(var.ub))
+        bound_viol = std::max(bound_viol, x[j] - var.ub);
+      if (bound_viol > max_bound) {
+        max_bound = bound_viol;
+        bound_index = j;
+      }
+    }
+  }
+  const double max_viol = std::max({max_ineq, max_eq, max_bound});
+  std::fprintf(stderr,
+               "[NATIVE-PRESOLVE] dual_original_residual "
+               "ineq=%.17g@%d eq=%.17g@%d bound=%.17g@%d "
+               "scale=%.17g normalized=%.17g\n",
+               max_ineq, ineq_index, max_eq, eq_index, max_bound,
+               bound_index, scale, max_viol / scale);
+  return bound_index;
+}
+
+void print_presolve_column_history(const LPModel& lp,
+                                   const LpPresolveResult& ps,
+                                   const Eigen::VectorXd& x, int col) {
+  if (col < 0 || col >= x.size() || col >= static_cast<int>(lp.vars.size()))
+    return;
+  const auto& var = lp.vars[static_cast<std::size_t>(col)];
+  std::fprintf(stderr,
+               "[NATIVE-PRESOLVE] dual_bound_column col=%d x=%.17g "
+               "lb=%.17g ub=%.17g\n",
+               col, x[col], var.lb, var.ub);
+  for (std::size_t k = 0; k < ps.postsolve_stack.size(); ++k) {
+    std::visit(
+        [&](const auto& rec) {
+          using T = std::decay_t<decltype(rec)>;
+          if constexpr (std::is_same_v<T, LpPostsolveFixedCol>) {
+            if (rec.orig_col == col)
+              std::fprintf(stderr,
+                           "[NATIVE-PRESOLVE] dual_bound_record index=%zu "
+                           "type=fixed value=%.17g\n",
+                           k, rec.value);
+          } else if constexpr (
+              std::is_same_v<T, LpPostsolveDoubletonEquation>) {
+            if (rec.subst_col == col)
+              std::fprintf(stderr,
+                           "[NATIVE-PRESOLVE] dual_bound_record index=%zu "
+                           "type=doubleton stay=%d pivot=%.17g coef=%.17g "
+                           "rhs=%.17g stay_x=%.17g\n",
+                           k, rec.stay_col, rec.coef_subst, rec.coef_stay,
+                           rec.rhs, x[rec.stay_col]);
+          } else if constexpr (
+              std::is_same_v<T, LpPostsolveFreeColSubstitution>) {
+            if (rec.col == col) {
+              double activity = 0.0;
+              for (const auto& [j, coef] : rec.row_entries)
+                activity += coef * x[j];
+              std::fprintf(stderr,
+                           "[NATIVE-PRESOLVE] dual_bound_record index=%zu "
+                           "type=free pivot=%.17g rhs=%.17g activity=%.17g "
+                           "row_nnz=%zu\n",
+                           k, rec.pivot, rec.rhs, activity,
+                           rec.row_entries.size() + 1);
+            }
+          }
+        },
+        ps.postsolve_stack[k]);
+  }
+}
+
 // AUDIT-NAV: LP kernel 分派与原空间结果恢复入口；先审核标准型映射，再审核
 // HiGHS/Native 后端选择、basis hint 兼容性和最终残差/证书。
 SimplexResult solve_lp_with_basis(const LPModel& lp,
-                                  const SimplexOptions& input_opt,
-                                  const SimplexBasis* basis_hint) {
+                                   const SimplexOptions& input_opt,
+                                   const SimplexBasis* basis_hint) {
+  bool native_presolve_attempted = false;
+  auto attach_native_presolve_stats = [&](SimplexResult& result,
+                                          const LpPresolveResult& ps,
+                                          int used) {
+    result.result.stats.presolve_ms = ps.presolve_ms;
+    result.result.stats.presolve_orig_rows = ps.orig_rows;
+    result.result.stats.presolve_orig_cols = ps.orig_cols;
+    result.result.stats.presolve_orig_nnz = ps.orig_nnz;
+    result.result.stats.presolve_reduced_rows = ps.reduced_rows;
+    result.result.stats.presolve_reduced_cols = ps.reduced_cols;
+    result.result.stats.presolve_reduced_nnz = ps.reduced_nnz;
+    result.result.stats.presolve_used = used;
+  };
+  LpPresolveResult native_presolve_result;
   if (std::getenv("MIPSOLVERS_PRESOLVE_ANALYZE") != nullptr) {
     const int n = static_cast<int>(lp.vars.size());
     const int mi = static_cast<int>(lp.A.rows());
@@ -1996,6 +2120,99 @@ SimplexResult solve_lp_with_basis(const LPModel& lp,
                  col_fixed);
   }
 
+  // Native LP presolve for cold solves. Each P1/P2/P3 reduction is justified
+  // by A&A (1995), Sections 2-3; the reduced publication tolerance scaling and
+  // fail-closed postsolve contract are derived in design Sections 6 and 8.12.
+  {
+    LpPresolveConfig ncfg;
+    ncfg.enabled = input_opt.use_native_presolve;
+    // Native dual publishes the P1 capability envelope validated in design
+    // Section 8.16. Full P2/P3 remains the IPM default; explicit environment
+    // overlays can re-enable either phase for orthogonal dual experiments.
+    ncfg.substitutions = false;
+    ncfg.propagate_bounds = false;
+    ncfg = lp_presolve_config_from_env(ncfg);
+    if (ncfg.enabled && basis_hint == nullptr) {
+      native_presolve_result = lp_presolve_run(lp, ncfg);
+      native_presolve_attempted = true;
+      if (native_presolve_result.infeasible) {
+        SimplexResult r;
+        r.result.stats.solver_name = "natDualSimplex+NativePresolve";
+        r.result.stats.success = false;
+        r.result.stats.status = "Infeasible (presolve)";
+        attach_native_presolve_stats(r, native_presolve_result, 1);
+        return r;
+      }
+      if (native_presolve_result.use_reduced) {
+        Eigen::VectorXd x_reduced;
+        int iters = 0;
+        SolveStats reduced_stats;
+        bool reduced_ok = true;
+        if (native_presolve_result.reduced.c.size() > 0) {
+          SimplexOptions reduced_opt = input_opt;
+          reduced_opt.use_native_presolve = false;
+          reduced_opt.use_highs_presolve = false;
+          const double pub_scale = lp_presolve_publication_tol_scale(
+              lp, native_presolve_result.reduced);
+          reduced_opt.feasibility_tol *= pub_scale;
+          reduced_opt.optimality_tol *= pub_scale;
+          reduced_opt.escalation_residual_tol *= pub_scale;
+          SimplexResult rr = solve_lp_with_basis_impl(
+              native_presolve_result.reduced, reduced_opt, nullptr);
+          if (ncfg.verbose) {
+            std::fprintf(stderr,
+                         "[NATIVE-PRESOLVE] dual_reduced_solve status=%s "
+                         "success=%d iterations=%d pub_scale=%.3e\n",
+                         rr.result.stats.status.c_str(),
+                         static_cast<int>(rr.result.stats.success),
+                         rr.result.stats.iterations, pub_scale);
+          }
+          reduced_ok = rr.result.stats.success;
+          x_reduced = std::move(rr.result.x);
+          iters = rr.result.stats.iterations;
+          reduced_stats = std::move(rr.result.stats);
+        }
+        if (reduced_ok) {
+          Eigen::VectorXd x_orig =
+              postsolve_primal(native_presolve_result, x_reduced);
+          const bool original_audit_ok =
+              x_orig.size() == lp.c.size() &&
+              lp_solution_residual_acceptable(
+                  lp, x_orig, input_opt.escalation_residual_tol);
+          if (ncfg.verbose) {
+            std::fprintf(stderr,
+                         "[NATIVE-PRESOLVE] dual_postsolve reduced_size=%lld "
+                         "original_size=%lld expected_size=%lld audit=%d\n",
+                         static_cast<long long>(x_reduced.size()),
+                         static_cast<long long>(x_orig.size()),
+                         static_cast<long long>(lp.c.size()),
+                         static_cast<int>(original_audit_ok));
+            if (!original_audit_ok) {
+              const int bound_col =
+                  print_lp_solution_residual_diagnostics(lp, x_orig);
+              print_presolve_column_history(
+                  lp, native_presolve_result, x_orig, bound_col);
+            }
+          }
+          if (original_audit_ok) {
+            SimplexResult r;
+            r.result.x = std::move(x_orig);
+            r.result.stats = std::move(reduced_stats);
+            r.result.stats.solver_name = "natDualSimplex+NativePresolve";
+            r.result.stats.success = true;
+            r.result.stats.status = "Optimal";
+            r.result.stats.objective = lp.c.dot(r.result.x);
+            r.result.stats.iterations = iters;
+            attach_native_presolve_stats(r, native_presolve_result, 1);
+            return r;
+          }
+        }
+        // Reduced solve, postsolve, or original-space audit failed. Continue
+        // through the existing HiGHS presolve and direct-solve fallbacks.
+      }
+    }
+  }
+
   // Adaptive HiGHS presolve (opt-in via SimplexOptions::use_highs_presolve or
   // the MIPSOLVERS_PRESOLVE env var).  Solve the reduced LP with the native
   // kernel, then postsolve the primal to original space.  Only applied on cold
@@ -2043,6 +2260,8 @@ SimplexResult solve_lp_with_basis(const LPModel& lp,
             r.result.stats.status = "Optimal";
             r.result.stats.objective = obj;
             r.result.stats.iterations = iters;
+            if (native_presolve_attempted)
+              attach_native_presolve_stats(r, native_presolve_result, 3);
             return r;
           }
         }
@@ -2060,6 +2279,8 @@ SimplexResult solve_lp_with_basis(const LPModel& lp,
     res.result.stats.success = false;
     res.result.stats.status = "Residual audit rejected";
   }
+  if (native_presolve_attempted)
+    attach_native_presolve_stats(res, native_presolve_result, 3);
   return res;
 }
 
@@ -2399,6 +2620,9 @@ static SimplexResult solve_lp_from_sf_impl(
   out.result.stats.certified_dse_time_sec =
       native.statistics.certified_dse_time_sec;
   out.result.stats.native_dual_kernel_time_sec = native_kernel_time_sec;
+  out.result.stats.native_factor_reuses =
+      native.statistics.initial_factor_reuses;
+  out.result.stats.native_reinversions = native.statistics.reinversions;
   MIPSOLVERS_LOG_DEBUG(
       "[NATIVE DUAL] status={} message='{}' m={} n={} iterations={} "
       "reinversions={} rank_repairs={} primal_inf={:.3e} dual_inf={:.3e}",
@@ -2490,6 +2714,8 @@ static SimplexResult solve_lp_from_sf_impl(
   out.basis.cols = n;
   out.basis.at_upper = at_upper;
   out.basis.cached_sparse_basis = solved_basis_ops;
+  out.basis.persist_eta_count =
+      solved_basis_ops ? solved_basis_ops->eta_count() : 0;
   if (native.edge_weights.size() == static_cast<std::size_t>(m)) {
     out.basis.cached_dse_basis =
         std::make_shared<const std::vector<int>>(basis);

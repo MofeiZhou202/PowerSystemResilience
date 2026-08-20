@@ -796,6 +796,13 @@ struct SimplexOptions {
   // Legacy ABI fields; numerical escalation and rescue backends were removed.
   int escalation_start_level{0};
   int escalation_max_level_sf{2};
+  // Opt-in P1 native LP presolve for cold solves. P2/P3 remain available via
+  // the documented environment overlays while their reduced models are
+  // validated against the native dual kernel. The reduced primal is
+  // postsolved and audited in original space; failures continue through the
+  // configured HiGHS presolve and direct-solve fallbacks. Environment overlays
+  // are defined by lp_presolve_config_from_env().
+  bool use_native_presolve{false};
   // Opt-in: run adaptive HiGHS presolve before the native solve, solve the
   // reduced LP, then postsolve the primal back to original space (primal-only,
   // no basis needed).  Only applied on cold solves (no basis hint).  On any

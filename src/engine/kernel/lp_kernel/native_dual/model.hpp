@@ -14,6 +14,8 @@
 
 #include <Eigen/Core>
 
+#include "mipsolvers/engine/kernel/linear_algebra/hfactor_backend.hpp"
+
 #include "../native_dual_core.hpp"
 #include "partitioned_row_matrix.hpp"
 
@@ -650,9 +652,83 @@ struct Leaving {
   double delta{0.0};
   double violation{0.0};
   IndexedVector row_ep;
+  HFactorBackend::ResidentVectorView resident_row_ep;
+  bool row_ep_factor_resident{false};
+  bool has_resident_row_ep() const {
+    return row_ep_factor_resident && resident_row_ep.valid();
+  }
+  int row_ep_count() const {
+    return row_ep_factor_resident ? resident_row_ep.count()
+                                  : static_cast<int>(row_ep.index.size());
+  }
+  int row_ep_index(int position) const {
+    return row_ep_factor_resident
+               ? resident_row_ep.index(position)
+               : row_ep.index[static_cast<std::size_t>(position)];
+  }
+  double row_ep_value(int position) const {
+    return row_ep_factor_resident
+               ? resident_row_ep.value(position)
+               : row_ep.value[static_cast<std::size_t>(position)];
+  }
+  double row_ep_at(int target_row) const {
+    return row_ep_factor_resident ? resident_row_ep.at(target_row)
+                                  : row_ep.at(target_row);
+  }
+  bool row_ep_finite() const {
+    return row_ep_factor_resident ? resident_row_ep.finite() : row_ep.finite();
+  }
+  double row_ep_max_abs() const {
+    if (row_ep_factor_resident) return resident_row_ep.max_abs();
+    double result = 0.0;
+    for (double entry : row_ep.value) result = std::max(result, std::abs(entry));
+    return result;
+  }
+  double row_ep_squared_norm() const {
+    if (row_ep_factor_resident) return resident_row_ep.squared_norm();
+    double result = 0.0;
+    for (double entry : row_ep.value) result += entry * entry;
+    return result;
+  }
   bool released_taboo_row{false};
   int taboo_row_rejections{0};
   bool row_ep_refined{false};
+};
+
+// Pivotal FTRAN result retained in HFactor's captured AQ workspace. The
+// packed alternative exists for diagnostics and non-resident backends; all
+// consumers run before the factor update invalidates the resident view.
+struct PivotalColumn {
+  IndexedVector packed;
+  HFactorBackend::ResidentVectorView resident;
+  bool factor_resident{false};
+
+  bool has_resident() const {
+    return factor_resident && resident.valid();
+  }
+  int dimension() const {
+    return factor_resident ? resident.dimension() : packed.dimension;
+  }
+  int count() const {
+    return factor_resident ? resident.count()
+                           : static_cast<int>(packed.index.size());
+  }
+  int index(int position) const {
+    return factor_resident
+               ? resident.index(position)
+               : packed.index[static_cast<std::size_t>(position)];
+  }
+  double value(int position) const {
+    return factor_resident
+               ? resident.value(position)
+               : packed.value[static_cast<std::size_t>(position)];
+  }
+  double at(int row) const {
+    return factor_resident ? resident.at(row) : packed.at(row);
+  }
+  bool finite() const {
+    return factor_resident ? resident.finite() : packed.finite();
+  }
 };
 
 struct Entering {
@@ -707,8 +783,13 @@ struct PivotTransaction {
   // the selected group (never summed into the capacity walk, never entered the
   // basis) => wasted for pivot selection. Sizes the deferred-certification win.
   int bfrt_exact_dot_wasted{0};
+  double bfrt_prefilter_time_sec{0.0};
+  double bfrt_candidate_time_sec{0.0};
   double bfrt_sort_time_sec{0.0};
   double bfrt_order_time_sec{0.0};
+  double bfrt_harris_time_sec{0.0};
+  double bfrt_terminal_scan_time_sec{0.0};
+  double bfrt_rhs_time_sec{0.0};
 };
 
 struct Certificate {

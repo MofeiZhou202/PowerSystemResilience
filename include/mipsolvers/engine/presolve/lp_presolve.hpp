@@ -13,6 +13,7 @@
 /// referenced in §2.1 of the design doc.
 #pragma once
 
+#include <memory>
 #include <string>
 #include <variant>
 #include <vector>
@@ -22,6 +23,25 @@
 #include "mipsolvers/engine/problem_types.hpp"
 
 namespace mipsolvers::engine {
+
+class LpPresolveActivitySnapshot;
+
+/// Compact row views paired with a presolve-produced reduced LP. The CSC to
+/// CSR permutations let scaled kernel values scatter without rebuilding the
+/// sparse structure (design Section 8.31).
+struct LpPresolveMatrixWorkspace {
+  int inequality_rows{0};
+  int equality_rows{0};
+  int cols{0};
+  std::vector<int> a_row_start;
+  std::vector<int> a_col;
+  std::vector<double> a_value;
+  std::vector<int> a_csc_to_csr;
+  std::vector<int> aeq_row_start;
+  std::vector<int> aeq_col;
+  std::vector<double> aeq_value;
+  std::vector<int> aeq_csc_to_csr;
+};
 
 /// Configuration for the native LP presolve.
 struct LpPresolveConfig {
@@ -36,6 +56,10 @@ struct LpPresolveConfig {
   /// Run P3 row-activity implied-bound propagation.  Production callers
   /// leave it enabled; phase-level tests can isolate earlier rule sets.
   bool propagate_bounds{true};
+  /// Stage P2 behind the P1/P3 structural amortization policy from design
+  /// Section 8.22.  The IPM enables this; focused rule tests leave it off so
+  /// they exercise the requested reduction family directly.
+  bool adaptive_staging{false};
   /// Wall-clock time box for one presolve pass.  Exceeding the box returns
   /// the unreduced model with status "time_box" (risk R5, §5).
   double time_box_sec{2.0};
@@ -47,8 +71,44 @@ struct LpPresolveConfig {
 /// @p base (same convention as highs_lp_presolve_config_from_env):
 ///   MIPSOLVERS_NATIVE_PRESOLVE         "0" -> force disable, anything else -> enable
 ///   MIPSOLVERS_NATIVE_PRESOLVE_TIME_BOX double -> time_box_sec
+///   MIPSOLVERS_NATIVE_PRESOLVE_SUBSTITUTIONS "0" -> disable P2
+///   MIPSOLVERS_NATIVE_PRESOLVE_PROPAGATE_BOUNDS "0" -> disable P3
+///   MIPSOLVERS_NATIVE_PRESOLVE_ADAPTIVE_STAGING "0" -> force eager P2
 ///   MIPSOLVERS_NATIVE_PRESOLVE_VERBOSE present -> verbose
 LpPresolveConfig lp_presolve_config_from_env(LpPresolveConfig base);
+
+/// Read-only P3 opportunity estimate for the Auto IPM arm.
+///
+/// At most two CSC streams evaluate one Jacobi row-activity projection without
+/// changing the LP. `should_run` is a cost-policy decision only; false means
+/// solve the original LP, never that a presolve reduction is invalid.
+/// Theory and acceptance contract: native_presolve_lp_2026-08-18.md §8.26-8.27.
+struct LpPresolveOpportunityEstimate {
+  bool valid{false};
+  bool should_run{false};
+  bool small_model{false};
+  long rows{0};
+  long cols{0};
+  long nnz{0};
+  long empty_rows{0};
+  long singleton_rows{0};
+  long empty_cols{0};
+  long fixed_cols{0};
+  long projected_bound_tightenings{0};
+  long projected_fixed_cols{0};
+  long projectable_rows{0};
+  long singleton_equality_cols{0};
+  double structural_potential{0.0};
+  double singleton_equality_density{0.0};
+  double estimate_ms{0.0};
+  /// Original-box row activities produced by the estimator's first CSC pass.
+  /// Auto passes this opaque snapshot to lp_presolve_run so P3 does not
+  /// materialize the same activities again (design Section 8.30).
+  std::shared_ptr<const LpPresolveActivitySnapshot> activity_snapshot;
+};
+
+LpPresolveOpportunityEstimate lp_presolve_estimate_adaptive_opportunity(
+    const LPModel& lp);
 
 /// One postsolve record: column `orig_col` was fixed to `value` (A&A §2.2:
 /// fixed-column substitution and zero-cost/unbounded-direction empty-column
@@ -108,6 +168,7 @@ struct LpPresolveResult {
   /// authoritatively on the original model (§4, P1 definition).
   bool unbounded_candidate{false};
   LPModel reduced;          ///< Native reduced LP (valid iff use_reduced).
+  std::shared_ptr<const LpPresolveMatrixWorkspace> matrix_workspace;
   /// Constant term the deleted fixed columns contribute to the objective, in
   /// the original sense convention: c_orig' x_orig = c_red' x_red + offset.
   double objective_offset{0.0};
@@ -123,6 +184,7 @@ struct LpPresolveResult {
   long reduced_rows{-1};
   long reduced_cols{-1};
   long reduced_nnz{-1};
+  bool p3_activity_snapshot_used{false};
   std::string status;       ///< Machine-readable pass status name.
 };
 
@@ -147,7 +209,12 @@ struct LpPresolveResult {
 /// reports status "meager_reduction" with use_reduced=false — a reduction
 /// that small has negative expected value for the speculative reduced
 /// solve (§6, P1 second mismatch round).
-LpPresolveResult lp_presolve_run(const LPModel& lp, const LpPresolveConfig& cfg);
+LpPresolveResult lp_presolve_run(const LPModel& lp,
+                                 const LpPresolveConfig& cfg);
+
+LpPresolveResult lp_presolve_run(
+    const LPModel& lp, const LpPresolveConfig& cfg,
+    const std::shared_ptr<const LpPresolveActivitySnapshot>& activity_snapshot);
 
 /// Recover an original-space primal from a reduced-space primal.
 ///

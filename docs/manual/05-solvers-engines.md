@@ -78,7 +78,7 @@ SolverEngine -> StrategyDispatcher -> PresolveManager
 - `IPMLPOptions::centrality_step_control=false` 只为复现旧的固定步长
   A/B 保留，不建议生产使用。
 - `IPMLPOptions::presolve`（默认 `true`）自 2026-08 起是活的：原生 LP
-  presolve 迭代运行 Andersen & Andersen (1995) §2.1-§3 的空行/空列、
+  presolve 运行 Andersen & Andersen (1995) §2.1-§3 的空行/空列、
   固定列、冗余行、singleton 行、doubleton 等式/自由列/singleton 等式列
   代入和 row implied-bound 传播。reduced 模型
   求解后经 postsolve + 原模型残差审计发布，任何一步失败都回退原模型
@@ -86,9 +86,24 @@ SolverEngine -> StrategyDispatcher -> PresolveManager
   `MIPSOLVERS_NATIVE_PRESOLVE=0` 强制关闭（其他任何值强制开启），
   `MIPSOLVERS_NATIVE_PRESOLVE_VERBOSE` 打印 `[NATIVE-PRESOLVE]` 汇总，
   `MIPSOLVERS_NATIVE_PRESOLVE_TIME_BOX` 改内部时间盒（默认 2s，超盒
-  返回未缩减模型）。Auto 选择器（§3）的 IPM 臂本阶段不走 presolve；
+  返回未缩减模型）。P1 默认通过 changed-support dirty row/column queues 只重查受
+  删除或界变化影响的端点；verbose 汇总包含实际 P1 visits，
+  `MIPSOLVERS_NATIVE_PRESOLVE_FULL_P1_SCAN=1` 可恢复每轮全端点扫描作为诊断控制。
+  IPM 默认采用 P1/P3-first 的 staged 路径：小模型直接求解，
+  大模型只在结构缩减或 singleton 等式密度足以摊销成本时运行 P2 并发布 reduced
+  solve；`MIPSOLVERS_NATIVE_PRESOLVE_ADAPTIVE_STAGING=0` 可强制恢复 eager P2
+  控制臂。Auto 选择器（§3）的 IPM 臂先运行只读 Jacobi row-activity 投影：只有
+  预计 P3 固定/初始结构缩减达到 5%，或 singleton 等式密度落在已验证区间时才进入
+  staged presolve；否则保持 direct。该机会门不修改模型，显式环境变量仍有最终覆盖权。
   设计与分阶段验收见
   `docs/archive/native_presolve_lp_2026-08-18.md`。
+- `SimplexOptions::use_native_presolve=true` 为原生 dual simplex 的冷启动
+  Native presolve 路径。当前发布能力边界是 P1（空行/空列、固定列、冗余行和
+  singleton 行）；reduced solve、primal postsolve 与原模型残差审计任一步失败
+  都继续走已配置的 HiGHS presolve/direct 回退。P2/P3 可分别用
+  `MIPSOLVERS_NATIVE_PRESOLVE_SUBSTITUTIONS` 和
+  `MIPSOLVERS_NATIVE_PRESOLVE_PROPAGATE_BOUNDS` 显式重开做数值研究，但尚不属于
+  dual 的默认能力边界；IPM 可在 staged 门通过时运行完整 P1/P2/P3。
 - `IPMLPOptions::use_highs_presolve=true`（或 `MIPSOLVERS_PRESOLVE=1`）为
   冷启动对照路径：HiGHS 负责完整等价约简，native IPM 求解 reduced LP，
   再由保留的 HiGHS reduction stack 做 primal-only postsolve。该路径不要求
@@ -213,8 +228,9 @@ g := F / ( m · (2·nnz(L) + nnz) )  >  κ/K₀ =: c
 ### 3.4 上线设计：并发组合（portfolio）
 
 `NativeAutoLPAdapter`（`src/engine/solver/native/native_lp_selector.cpp`）
-在两个线程上同时跑 dual-simplex-DSE 与 IPM（`ipm-direct`），返回第一个
-成功结果——直接实现逐实例 `min(T_DSE, T_IPM)` 而不是预测它：
+在两个线程上同时跑 dual-simplex-DSE 与 IPM（只读 presolve 机会门后选择
+`adaptive-presolve` 或 direct），返回第一个成功结果——直接实现逐实例
+`min(T_DSE, T_IPM)` 而不是预测内核赢家：
 
 - 两个内核都经过同一容差审计，谁先赢结果都正确；
 - 一方胜出后，共享 abort 标志（`SimplexOptions::cancel_flag` /
@@ -428,8 +444,11 @@ LP、改界重优化和加割后的热启动——这是 B&C 节点内核选单�
 3. 步长不是固定 0.9995 回缩，而是由试探互补度决定的动态互补缓冲步长：
    至少保留 90% 最大步，同时避免阻塞互补乘积被推到机器边界附近
    （`ipm_centrality_step_lengths`，fresh/cached 共用）；
-4. Gondzio 多重中心校正把试探点中过小/过大的 `g_j z_j` 投回宽中心邻域
-   `[0.1μ, 10μ]`，不再分解 KKT，只在总步长得到足够提升时接受
+4. fresh 路径可通过 `IPMLPOptions::max_correctors` 控制 Gondzio 多重中心校正：
+   校正把试探点中过小/过大的 `g_j z_j` 投回宽中心邻域 `[0.1μ, 10μ]`，不再
+   分解 KKT，只在总步长得到足够提升时接受。默认值 `-1` 为 Auto：小符号因子
+   保留最多 3 次校正，大因子按回代内存流量切换到每轮仅执行 Mehrotra
+   predictor/corrector 两次线性求解；`0` 强制禁用，正数为显式上限
    （cached 路径尚无多重校正）。
 
 主流程其余环节：预处理/变量变换 → Ruiz 缩放 → 严格内部初值 → 残差计算
@@ -608,7 +627,10 @@ LP IPM 的发布门槛（P2a，已实现）：缩放空间的绝对/相对残差
 
 primal residual、dual stationarity 与 relative gap 审计（
 `audit_ipm_lp_optimality`，fresh/cached 共用同一审计器）。fixed column
-的非唯一界乘子由 stationarity 重构。API 暴露
+的非唯一界乘子由 stationarity 重构。若 presolve substitution 产生 objective
+constant，审计先把该常数同时加回 primal/dual objective，再按原模型目标尺度计算
+`ρ_g`；这保持 gap 分子不变，并防止大常数抵消使 reduced solve 过早发布。
+API 暴露
 `relative_primal_residual`、`relative_dual_residual`、`relative_gap`、
 `dual_objective` 供上层审核。锥 IPM 同理：可行度与绝对/相对 gap 同时
 满足才返回 `optimal`。
@@ -626,6 +648,12 @@ MILP 的终止由 §6.2 的 `gap_tol` / `max_nodes` / `time_limit_sec` 控制；
   路径恢复原变量后复核，不合格降级为 `unknown`。
 - **迭代改进只提交严格改进。** KKT 求解在原始未正则化系统上算残差，迭代
   改进只提交严格降低无穷范数残差的候选方向。
+- **单纯形 cleanup 的稳定性升级。** 原生 dual simplex 恢复原始成本后的
+  primal cleanup 若在 fresh basis 上仍未通过 FTRAN/BTRAN 后向误差门，会按
+  HiGHS 的数值 trouble 策略把 Markowitz pivot threshold 从 0.1 单调提高到
+  0.5，并对同一 basis 额外 INVERT 一次。普通 dual/primal 主路径不启用该慢
+  路径；残差门不放宽。推导与 `pilot87` 验收见
+  `docs/archive/native_presolve_lp_2026-08-18.md` §8.6-§8.7。
 - **正则化有误差预算。** IPM 的对角扰动候选
   `ρ_μ = clamp(1e-6·μ, ε_mach, 1e-2)`，并按 inexact-Newton forcing 条件
   `ρ_k(1+‖(x_k,y_k)‖_∞) ≤ 0.1·‖F(x_k,y_k,z_k)‖_∞` 进一步限制；方向的

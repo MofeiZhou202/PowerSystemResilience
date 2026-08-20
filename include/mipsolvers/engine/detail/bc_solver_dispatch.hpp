@@ -354,9 +354,10 @@ class SolverDispatcher {
       persistent_probe_basis_.cached_sparse_basis.reset();
     }
     // Nodes may be shared by siblings or queues. Never publish the mutable LP
-    // owner through their basis snapshots.
+    // owner through their basis snapshots. Keep the immutable eta epoch so a
+    // later worker-local attachment can reject an owner mutated by a sibling;
+    // see docs/archive/native_presolve_lp_2026-08-18.md, Section 8.18.
     result.basis.cached_sparse_basis.reset();
-    result.basis.persist_eta_count = 0;
   }
 
   static bool time_limit_hit(const SimplexOptions& opts) {

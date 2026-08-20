@@ -20,6 +20,11 @@ namespace mipsolvers::engine::native_dual::detail {
 class PartitionedRowMatrix {
  public:
   using Index = std::int64_t;
+  struct RowSlice {
+    const int* col{nullptr};
+    const double* value{nullptr};
+    Index count{0};
+  };
 
   bool empty() const noexcept { return rows_ == 0; }
   Index rows() const noexcept { return rows_; }
@@ -39,6 +44,13 @@ class PartitionedRowMatrix {
   }
   double value_at(Index slot) const noexcept {
     return values_[static_cast<std::size_t>(slot)];
+  }
+  // Contiguous PRICE traversal with the same stable slot order as the scalar
+  // accessors. See native_presolve_lp_2026-08-18.md Section 8.23.
+  RowSlice nonbasic_row(Index row) const noexcept {
+    const Index begin = outer_[static_cast<std::size_t>(row)];
+    return {inner_.data() + begin, values_.data() + begin,
+            nonbasic_end_[static_cast<std::size_t>(row)] - begin};
   }
 
   // Transposes the CSC standard form into an (initially unpartitioned) CSR view

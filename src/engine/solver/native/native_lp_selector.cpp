@@ -12,6 +12,7 @@
 
 #include "mipsolvers/engine/kernel/ipm/ipm_lp_solver.hpp"
 #include "mipsolvers/engine/kernel/lp_kernel/dual_simplex.hpp"
+#include "mipsolvers/engine/presolve/lp_presolve.hpp"
 
 namespace mipsolvers::engine {
 namespace {
@@ -91,6 +92,28 @@ SolveResult NativeAutoLPAdapter::solve_lp(const LPModel& prob) const {
   // either result is correct. See docs/lp_kernel_selector_2026-08-11.md.
   const double tl = time_limit_sec_;
   auto slot = std::make_shared<PortfolioSlot>();
+  const LpPresolveOpportunityEstimate presolve_estimate =
+      lp_presolve_estimate_adaptive_opportunity(prob);
+  const bool run_native_presolve =
+      presolve_estimate.valid && presolve_estimate.should_run;
+
+  if (const char* dbg = std::getenv("MIPSOLVERS_LP_SELECTOR_DEBUG");
+      dbg && *dbg) {
+    std::fprintf(stderr,
+                 "LP-PORTFOLIO presolve-estimate valid=%d run=%d small=%d "
+                 "q=%.6f projected_fixed=%ld tightened=%ld projectable_rows=%ld "
+                 "singleton_eq=%ld density=%.6f ms=%.3f\n",
+                 static_cast<int>(presolve_estimate.valid),
+                 static_cast<int>(presolve_estimate.should_run),
+                 static_cast<int>(presolve_estimate.small_model),
+                 presolve_estimate.structural_potential,
+                 presolve_estimate.projected_fixed_cols,
+                 presolve_estimate.projected_bound_tightenings,
+                 presolve_estimate.projectable_rows,
+                 presolve_estimate.singleton_equality_cols,
+                 presolve_estimate.singleton_equality_density,
+                 presolve_estimate.estimate_ms);
+  }
 
   auto dse_worker = [slot, lp = prob, tl]() {
     SolveResult r;
@@ -102,17 +125,19 @@ SolveResult NativeAutoLPAdapter::solve_lp(const LPModel& prob) const {
     }
     publish(slot, std::move(r));
   };
-  auto ipm_worker = [slot, lp = prob, tl]() {
+  auto ipm_worker = [slot, lp = prob, tl, run_native_presolve,
+                     activity_snapshot =
+                         presolve_estimate.activity_snapshot]() {
     SolveResult r;
     try {
       IPMLPOptions opt;  // defaults == native-ipm-direct
-      // P1 keeps the selector's IPM arm on the pre-P1 direct path; the
-      // design (native_presolve_lp_2026-08-18.md §3.1) enables native
-      // presolve here only with the P4 acceptance.
-      opt.presolve = false;
+      // The read-only Jacobi P3 projection rejects the Section 8.25 bandwidth
+      // losers before building adjacency. Derivation and holdout: Sections
+      // 8.26-8.28 of native_presolve_lp_2026-08-18.md.
+      opt.presolve = run_native_presolve;
       opt.time_limit_sec = tl;
       opt.cancel_flag = &slot->cancel;
-      r = NativeIPMLPAdapter(opt).solve_lp(lp);
+      r = NativeIPMLPAdapter(opt).solve_lp(lp, activity_snapshot);
     } catch (...) {
       r.stats.success = false;
       r.stats.status = "NativeIPMLP exception";
@@ -127,9 +152,10 @@ SolveResult NativeAutoLPAdapter::solve_lp(const LPModel& prob) const {
     // Thread creation failed: fall back to a synchronous IPM solve (the prior
     // default LP path). Any worker already launched publishes harmlessly.
     IPMLPOptions opt;
-    opt.presolve = false;  // same pre-P1 selector path as ipm_worker above
+    opt.presolve = run_native_presolve;
     opt.time_limit_sec = tl;
-    return NativeIPMLPAdapter(opt).solve_lp(prob);
+    return NativeIPMLPAdapter(opt).solve_lp(
+        prob, presolve_estimate.activity_snapshot);
   }
 
   std::unique_lock<std::mutex> lk(slot->m);

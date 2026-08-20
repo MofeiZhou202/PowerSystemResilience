@@ -50,6 +50,8 @@ struct SolveStats {
   double dse_initialization_time_sec{0.0};
   double certified_dse_time_sec{0.0};
   double native_dual_kernel_time_sec{0.0};
+  int native_factor_reuses{0};
+  int native_reinversions{0};
   std::string status;
   std::string solver_name;
 

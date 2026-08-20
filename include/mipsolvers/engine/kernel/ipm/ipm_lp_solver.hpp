@@ -14,6 +14,9 @@
 
 namespace mipsolvers::engine {
 
+class LpPresolveActivitySnapshot;
+struct LpPresolveMatrixWorkspace;
+
 /// Algebraically equivalent Newton systems available to the LP IPM.
 /// Auto compares CHOLMOD symbolic work and fill estimates, then monitors the
 /// accepted Newton directions so a numerically weak normal-equations
@@ -45,7 +48,11 @@ struct IPMLPOptions {
   double tol_dual{1e-8};     ///< Dual feasibility tolerance
   double tol_gap{1e-8};      ///< Complementarity gap tolerance
   int ruiz_rounds{10};       ///< Ruiz equilibration rounds (0 = disable)
-  int max_correctors{3};     ///< Max Gondzio centering correctors per iteration
+  // Base Mehrotra uses two solves per factorization. Auto retains Gondzio on
+  // cache-resident factors and removes extra factor streams on large factors
+  // (§7.4 of docs/archive/native_presolve_lp_2026-08-18.md; Anjos et al. 2020,
+  // §6.2). Zero disables; a positive value is an explicit per-iteration cap.
+  int max_correctors{-1};    ///< -1=auto, 0=off, >0=max Gondzio correctors
   /// Keep blocking complementarity products away from zero with the adaptive
   /// primal/dual step rule used by modern bounded-variable IPMs.  Disable only
   /// for controlled comparison with the legacy fixed 0.9995 boundary fraction.
@@ -88,14 +95,19 @@ struct IPMLPOptimalityAudit {
 
 /// Recompute primal feasibility, dual feasibility, and the duality gap in the
 /// unscaled LPModel coordinates. Optional bound overrides support cached node
-/// LPs without copying the constraint matrices. Exposed for numerical tests.
+/// LPs without copying the constraint matrices. objective_offset is the
+/// original-sense constant from an exact presolve substitution; it shifts both
+/// primal and dual objectives before the relative gap is normalized (A&A 1995
+/// Section 2.4; native_presolve_lp_2026-08-18.md Section 8.18). Exposed for
+/// numerical tests.
 IPMLPOptimalityAudit audit_ipm_lp_optimality(
     const LPModel& lp, const Eigen::VectorXd& x,
     const Eigen::VectorXd& row_duals_min,
     const Eigen::VectorXd& box_dual_lb_min,
     const Eigen::VectorXd& box_dual_ub_min,
     const Eigen::VectorXd* lower_bounds_override = nullptr,
-    const Eigen::VectorXd* upper_bounds_override = nullptr);
+    const Eigen::VectorXd* upper_bounds_override = nullptr,
+    double objective_offset = 0.0);
 
 /// Forward declaration for Apple Accelerate sparse Cholesky cache.
 struct AccelSparseCache;
@@ -127,6 +139,13 @@ class NativeIPMLPAdapter final : public SolverAdapter {
   bool supports(ProblemClass cls) const override;
 
   SolveResult solve_lp(const LPModel& prob) const override;
+
+  /// Auto entry point carrying the estimator's original-box row activities
+  /// directly into native presolve (design Section 8.30).
+  SolveResult solve_lp(
+      const LPModel& prob,
+      const std::shared_ptr<const LpPresolveActivitySnapshot>&
+          activity_snapshot) const;
 
   /// Solve LP with warm-start from a previous primal solution.
   /// When x0 is provided, the IPM uses it as initial primal point instead
@@ -202,7 +221,16 @@ class NativeIPMLPAdapter final : public SolverAdapter {
                             double time_limit_sec,
                             AugmentedBackendPolicy backend_policy,
                             IPMNewtonFormulation formulation,
-                            double publication_tol_scale = 1.0) const;
+                            double publication_tol_scale = 1.0,
+                            double objective_offset = 0.0,
+                            const std::shared_ptr<const
+                                LpPresolveMatrixWorkspace>& matrix_workspace =
+                                {}) const;
+
+  SolveResult solve_lp_with_presolve_snapshot(
+      const LPModel& prob, const Eigen::VectorXd& x0,
+      const std::shared_ptr<const LpPresolveActivitySnapshot>&
+          activity_snapshot) const;
 
   IPMLPOptions opt_;
   mutable std::unique_ptr<AccelSparseCache> accel_cache_;

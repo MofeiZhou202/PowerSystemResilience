@@ -25,6 +25,11 @@ struct IndexedSolveEvidence {
   bool accepted{false};
 };
 
+struct ResidentSolveEvidence {
+  HFactorBackend::ResidentVectorView solution;
+  bool accepted{false};
+};
+
 struct EdgeWeightEvidence {
   std::vector<double> weights;
   bool accepted{false};
@@ -66,9 +71,17 @@ class BasisFactor final : public BasisOps {
   // per-pivot allocation of the result vectors. Returns whether the solve was
   // accepted.
   bool indexed_ftran_into(const IndexedVector& rhs, IndexedVector& out,
-                          bool capture_update = false) const;
+                           bool capture_update = false) const;
+  ResidentSolveEvidence resident_ftran(const IndexedVector& rhs) const;
+  ResidentSolveEvidence resident_scratch_ftran(const IndexedVector& rhs) const;
   bool indexed_ftran_at_captured_pattern(
       const IndexedVector& rhs, std::vector<double>& result_value) const;
+  bool resident_ftran_at_captured_pattern(
+      const HFactorBackend::ResidentVectorView& rhs,
+      std::vector<double>& result_value) const;
+  bool resident_ftran_at_captured_pattern(
+      const HFactorBackend::ResidentVectorView& rhs,
+      HFactorBackend::ResidentVectorView& result) const;
   // O(1) read of the entering-column FTRAN (col_aq) at a single row, from the
   // factor-resident update_vec_aq backing. Bit-identical to indexed_ftran's
   // packed value at that row (the pivotal `column_pivot`); false if the capture
@@ -76,19 +89,27 @@ class BasisFactor final : public BasisOps {
   bool captured_aq_value(int external_row, double& out) const;
   IndexedSolveEvidence indexed_btran(const IndexedVector& rhs,
                                      bool capture_update = false) const;
+  ResidentSolveEvidence resident_btran(const IndexedVector& rhs) const;
   EdgeWeightEvidence compute_exact_edge_weights() const;
   bool basis_inverse_row(int row, Eigen::VectorXd& out) const override;
   bool basis_inverse_row_sparse_entries(
       int row, std::vector<std::pair<int, double>>& out) const override;
   bool tableau_row(int row, Eigen::RowVectorXd& out) const override;
   int generation() const override { return generation_; }
+  int eta_count() const override { return update_count(); }
   SparseFactorTelemetry factor_telemetry() const override;
   void rebind_A(const StandardColumnMatrix& A) override;
   bool bound_to_A(const StandardColumnMatrix& A) const override;
+  bool reusable_for(const StandardFormLP& sf,
+                    const std::vector<int>& basis,
+                    int persisted_eta_count) const;
 
   const std::vector<int>& basis() const { return basis_; }
   std::string last_solve_diagnostics() const;
   bool needs_rebuild() const { return rank_factor_.needs_refactorise(); }
+  bool strengthen_pivot_threshold() {
+    return rank_factor_.strengthen_pivot_threshold();
+  }
   int update_count() const { return rank_factor_.n_updates; }
   bool last_solve_refined() const { return last_solve_refined_; }
   int rebuild_count() const { return rebuild_count_; }
@@ -145,7 +166,11 @@ class BasisFactor final : public BasisOps {
   double norm_Bt_inf_{0.0};
   mutable int generation_{0};
   int rebuild_count_{0};
+  // Failure-only telemetry; these fields never participate in solve control.
   mutable double last_residual_{0.0};
+  mutable double last_initial_residual_{0.0};
+  mutable double last_refinement_rhs_residual_{0.0};
+  mutable double last_refinement_correction_norm_{0.0};
   mutable double last_error_limit_{0.0};
   mutable double last_matrix_norm_{0.0};
   mutable double last_solution_norm_{0.0};

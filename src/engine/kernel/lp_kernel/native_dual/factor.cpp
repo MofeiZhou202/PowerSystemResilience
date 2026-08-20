@@ -319,6 +319,9 @@ SolveEvidence BasisFactor::refine_checked(const Eigen::VectorXd& rhs,
   evidence.refined = true;
   last_solve_transpose_ = transpose;
   last_solve_refined_ = true;
+  last_initial_residual_ = last_residual_;
+  last_refinement_rhs_residual_ = 0.0;
+  last_refinement_correction_norm_ = 0.0;
   if (A_ == nullptr || rhs.size() != A_->rows() ||
       initial.size() != A_->rows() || !rhs.allFinite() ||
       !initial.allFinite() || !rank_factor_.valid) {
@@ -331,6 +334,7 @@ SolveEvidence BasisFactor::refine_checked(const Eigen::VectorXd& rhs,
   Eigen::VectorXd solution = initial;
   const Eigen::VectorXd residual = residual_vector(rhs, solution, transpose);
   if (residual.size() != rhs.size() || !residual.allFinite()) return evidence;
+  last_refinement_rhs_residual_ = residual.lpNorm<Eigen::Infinity>();
   Eigen::VectorXd correction(rhs.size());
   if (transpose) {
     rank_factor_.btran(residual.data(), correction.data());
@@ -338,6 +342,8 @@ SolveEvidence BasisFactor::refine_checked(const Eigen::VectorXd& rhs,
     rank_factor_.ftran(residual.data(), correction.data());
   }
   if (!correction.allFinite()) return evidence;
+  last_refinement_correction_norm_ =
+      correction.lpNorm<Eigen::Infinity>();
   solution += correction;
   if (!solution.allFinite() ||
       !backward_error_acceptable(rhs, solution, transpose)) {
@@ -380,7 +386,11 @@ std::string BasisFactor::last_solve_diagnostics() const {
   std::ostringstream message;
   message << std::setprecision(17)
           << "solve=" << (last_solve_transpose_ ? "BTRAN" : "FTRAN")
+          << ", initial_residual_inf=" << last_initial_residual_
+          << ", refinement_rhs_residual_inf="
+          << last_refinement_rhs_residual_
           << ", residual_inf=" << last_residual_
+          << ", correction_inf=" << last_refinement_correction_norm_
           << ", limit=" << last_error_limit_
           << ", norm_B=" << last_matrix_norm_
           << ", norm_solution_inf=" << last_solution_norm_
@@ -453,6 +463,30 @@ bool BasisFactor::indexed_ftran_into(const IndexedVector& rhs,
                                     out.lookup_slot, capture_update);
 }
 
+ResidentSolveEvidence BasisFactor::resident_ftran(
+    const IndexedVector& rhs) const {
+  ResidentSolveEvidence evidence;
+  if (A_ == nullptr || rhs.dimension != A_->rows() || !rhs.finite() ||
+      !rank_factor_.valid) {
+    return evidence;
+  }
+  evidence.accepted = rank_factor_.ftran_indexed_resident(
+      rhs.index, rhs.value, evidence.solution);
+  return evidence;
+}
+
+ResidentSolveEvidence BasisFactor::resident_scratch_ftran(
+    const IndexedVector& rhs) const {
+  ResidentSolveEvidence evidence;
+  if (A_ == nullptr || rhs.dimension != A_->rows() || !rhs.finite() ||
+      !rank_factor_.valid) {
+    return evidence;
+  }
+  evidence.accepted = rank_factor_.ftran_indexed_scratch_resident(
+      rhs.index, rhs.value, evidence.solution);
+  return evidence;
+}
+
 bool BasisFactor::indexed_ftran_at_captured_pattern(
     const IndexedVector& rhs, std::vector<double>& result_value) const {
   result_value.clear();
@@ -462,6 +496,29 @@ bool BasisFactor::indexed_ftran_at_captured_pattern(
   }
   return rank_factor_.ftran_indexed_at_captured_pattern(
       rhs.index, rhs.value, result_value);
+}
+
+bool BasisFactor::resident_ftran_at_captured_pattern(
+    const HFactorBackend::ResidentVectorView& rhs,
+    std::vector<double>& result_value) const {
+  result_value.clear();
+  if (A_ == nullptr || rhs.dimension() != A_->rows() || !rhs.finite() ||
+      !rank_factor_.valid) {
+    return false;
+  }
+  return rank_factor_.ftran_resident_ep_at_captured_aq_pattern(
+      rhs, result_value);
+}
+
+bool BasisFactor::resident_ftran_at_captured_pattern(
+    const HFactorBackend::ResidentVectorView& rhs,
+    HFactorBackend::ResidentVectorView& result) const {
+  result = {};
+  if (A_ == nullptr || rhs.dimension() != A_->rows() || !rhs.finite() ||
+      !rank_factor_.valid) {
+    return false;
+  }
+  return rank_factor_.ftran_resident_ep_at_captured_aq_pattern(rhs, result);
 }
 
 bool BasisFactor::captured_aq_value(int external_row, double& out) const {
@@ -481,6 +538,18 @@ IndexedSolveEvidence BasisFactor::indexed_btran(const IndexedVector& rhs,
   evidence.accepted = rank_factor_.btran_indexed(
       rhs.index, rhs.value, evidence.solution.index, evidence.solution.value,
       evidence.solution.lookup_slot, capture_update);
+  return evidence;
+}
+
+ResidentSolveEvidence BasisFactor::resident_btran(
+    const IndexedVector& rhs) const {
+  ResidentSolveEvidence evidence;
+  if (A_ == nullptr || rhs.dimension != A_->rows() || !rhs.finite() ||
+      !rank_factor_.valid) {
+    return evidence;
+  }
+  evidence.accepted = rank_factor_.btran_indexed_resident(
+      rhs.index, rhs.value, evidence.solution);
   return evidence;
 }
 
@@ -626,6 +695,13 @@ void BasisFactor::rebind_A(const StandardColumnMatrix& A) {
 
 bool BasisFactor::bound_to_A(const StandardColumnMatrix& A) const {
   return A_ == &A;
+}
+
+bool BasisFactor::reusable_for(const StandardFormLP& sf,
+                               const std::vector<int>& basis,
+                               int persisted_eta_count) const {
+  return rank_factor_.valid && A_ == &sf.A && basis_ == basis &&
+         persisted_eta_count == update_count();
 }
 
 }  // namespace mipsolvers::engine::native_dual::detail

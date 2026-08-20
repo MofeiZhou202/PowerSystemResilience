@@ -421,7 +421,7 @@ SolveResult NativeIPMLPAdapter::solve_structure_aware_node_lp(
   }
   return solve_lp_impl(node_lp, x0, opt_.ruiz_rounds, -1.0,
                        AugmentedBackendPolicy::StructurePreserving,
-                       IPMNewtonFormulation::ForceAugmented);
+                       IPMNewtonFormulation::ForceAugmented, 1.0, 0.0, {});
 }
 
 SolveResult NativeIPMLPAdapter::solve_cached_node_lp(
@@ -1323,7 +1323,7 @@ NativeIPMLPAdapter::solve_cached_bound_change_batch(
     entry.result = use_augmented_direct
         ? solve_lp_impl(direct_lp, x0, opt_.ruiz_rounds, -1.0,
                         AugmentedBackendPolicy::StructurePreserving,
-                        IPMNewtonFormulation::ForceAugmented)
+                        IPMNewtonFormulation::ForceAugmented, 1.0, 0.0, {})
         : solve_cached_node_lp(node_lb, node_ub, x0);
   }
 

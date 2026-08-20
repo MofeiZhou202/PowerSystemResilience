@@ -11,7 +11,10 @@
 // factorization, rank repair, triangular solves, and captured FT updates.
 // ═══════════════════════════════════════════════════════════════════════════
 
+#include <algorithm>
 #include <cstdint>
+#include <cmath>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -30,6 +33,106 @@ using HFactorSparseMatrix64 =
 
 class HFactorBackend {
  public:
+  // Generation-bound read-only access to the captured pivotal BTRAN result.
+  // The view exposes row-space coordinates without exposing HiGHS' HVector
+  // type. Any factorization or basis update invalidates existing views.
+  class ResidentVectorView {
+   public:
+    ResidentVectorView() = default;
+    bool valid() const noexcept {
+      return capture_valid_ != nullptr && live_serial_ != nullptr &&
+             *capture_valid_ && *live_serial_ == serial_;
+    }
+    int dimension() const noexcept {
+      return valid() ? dimension_ : 0;
+    }
+    int count() const noexcept { return valid() ? count_ : 0; }
+    // The coordinate accessors require valid() to have been checked at the
+    // consuming stage boundary. This avoids O(nnz) repeated generation tests.
+    int index(int position) const noexcept {
+      const int stored = stored_index(position);
+      return internal_to_external_ != nullptr
+                 ? mapped_index(internal_to_external_, stored)
+                 : stored;
+    }
+    double value(int position) const noexcept {
+      return value_data_[static_cast<std::size_t>(stored_index(position))];
+    }
+    double at(int external_row) const noexcept {
+      const int stored = external_to_internal_ != nullptr
+                             ? mapped_index(external_to_internal_, external_row)
+                             : external_row;
+      return value_data_[static_cast<std::size_t>(stored)];
+    }
+    bool finite() const noexcept {
+      if (!valid()) return false;
+      for (int k = 0; k < count_; ++k) {
+        if (!std::isfinite(value(k))) return false;
+      }
+      return true;
+    }
+    double max_abs() const noexcept {
+      if (!valid()) return std::numeric_limits<double>::quiet_NaN();
+      double result = 0.0;
+      for (int k = 0; k < count_; ++k) {
+        result = (std::max)(result, std::abs(value(k)));
+      }
+      return result;
+    }
+    double squared_norm() const noexcept {
+      if (!valid()) return std::numeric_limits<double>::quiet_NaN();
+      double result = 0.0;
+      for (int k = 0; k < count_; ++k) {
+        const double entry = value(k);
+        result += entry * entry;
+      }
+      return result;
+    }
+
+   private:
+    friend class HFactorBackend;
+    ResidentVectorView(const HFactorBackend* owner, std::uint64_t serial,
+                       const std::uint64_t* live_serial,
+                       const bool* capture_valid, const void* index_data,
+                       const double* value_data, int count, int dimension,
+                       bool index_is_64,
+                       const void* external_to_internal = nullptr,
+                       const void* internal_to_external = nullptr) noexcept
+        : owner_(owner),
+          serial_(serial),
+          live_serial_(live_serial),
+          capture_valid_(capture_valid),
+          index_data_(index_data),
+          value_data_(value_data),
+          count_(count),
+          dimension_(dimension),
+          index_is_64_(index_is_64),
+          external_to_internal_(external_to_internal),
+          internal_to_external_(internal_to_external) {}
+
+    int mapped_index(const void* data, int position) const noexcept {
+      return index_is_64_
+                 ? static_cast<int>(static_cast<const std::int64_t*>(
+                                        data)[position])
+                 : static_cast<const int*>(data)[position];
+    }
+    int stored_index(int position) const noexcept {
+      return mapped_index(index_data_, position);
+    }
+
+    const HFactorBackend* owner_{nullptr};
+    std::uint64_t serial_{0};
+    const std::uint64_t* live_serial_{nullptr};
+    const bool* capture_valid_{nullptr};
+    const void* index_data_{nullptr};
+    const double* value_data_{nullptr};
+    int count_{0};
+    int dimension_{0};
+    bool index_is_64_{false};
+    const void* external_to_internal_{nullptr};
+    const void* internal_to_external_{nullptr};
+  };
+
   HFactorBackend();
   ~HFactorBackend();
 
@@ -68,6 +171,7 @@ class HFactorBackend {
   std::uint64_t profiled_indexed_solve_count() const noexcept;
   // Synthetic work recorded by HFactor for the most recent INVERT.
   double build_synthetic_tick() const noexcept;
+  bool strengthen_pivot_threshold() noexcept;
 
 
   // Rows that received no pivot in the last failed build (HiGHS-style
@@ -178,6 +282,35 @@ class HFactorBackend {
                      std::vector<double>& result_value,
                      std::vector<int>& result_lookup,
                      bool capture_update = false) const;
+  // Captured pivotal FTRAN without exporting update_vec_aq. Coordinates are
+  // exposed in caller row order even when HFactor permutes its pivot rows.
+  // See docs/archive/native_presolve_lp_2026-08-18.md section 8.18.
+  bool ftran_indexed_resident(const std::vector<int>& rhs_index,
+                               const std::vector<double>& rhs_value,
+                               ResidentVectorView& result) const;
+  // Non-pivotal FTRAN retained in the reusable solve_vec_ftran workspace.
+  // Unlike ftran_indexed_resident, this does not replace the captured AQ.
+  // The view expires on the next scratch FTRAN or factor change. See the
+  // derivation document section 8.20.
+  bool ftran_indexed_scratch_resident(
+      const std::vector<int>& rhs_index,
+      const std::vector<double>& rhs_value,
+      ResidentVectorView& result) const;
+  // Captured pivotal BTRAN without exporting update_vec_ep. See
+  // docs/archive/native_presolve_lp_2026-08-18.md section 8.17.
+  bool btran_indexed_resident(const std::vector<int>& rhs_index,
+                              const std::vector<double>& rhs_value,
+                              ResidentVectorView& result) const;
+  // Auxiliary DSE FTRAN with the resident pivotal BTRAN as RHS. Only values
+  // on the captured pivotal-column support are exported, in AQ support order.
+  bool ftran_resident_ep_at_captured_aq_pattern(
+      const ResidentVectorView& rhs,
+      std::vector<double>& result_value) const;
+  // Same auxiliary DSE FTRAN, but retain rho in factor scratch and expose its
+  // values in captured-AQ support order. The view expires when that scratch is
+  // reused or the factor changes. See the derivation document section 8.19.
+  bool ftran_resident_ep_at_captured_aq_pattern(
+      const ResidentVectorView& rhs, ResidentVectorView& result) const;
 
   // ── Product-form basis update ──────────────────────────────────────────
   //
@@ -216,10 +349,26 @@ class HFactorBackend {
       const SparseMatrix& A, const int* basic_index, int n_basic,
       const std::vector<int>& logical_col_by_row,
       std::vector<int>& repaired_basis);
+  bool btran_indexed_impl(const std::vector<int>& rhs_index,
+                          const std::vector<double>& rhs_value,
+                          std::vector<int>* result_index,
+                          std::vector<double>* result_value,
+                          std::vector<int>* result_lookup,
+                          bool capture_update,
+                          bool resident_only) const;
+  bool ftran_indexed_impl(const std::vector<int>& rhs_index,
+                          const std::vector<double>& rhs_value,
+                          std::vector<int>* result_index,
+                          std::vector<double>* result_value,
+                          std::vector<int>* result_lookup,
+                          bool capture_update,
+                          bool resident_only) const;
   struct Impl;
   std::unique_ptr<Impl> p_;
   std::vector<int> no_pivot_rows_;
   std::vector<int> no_pivot_vars_;
+  // HiGHS HEkk.cpp:3029-3050 raises 0.1 to 0.5 after fresh numerical trouble.
+  double pivot_threshold_ = 0.1;
   // Updated by every call to update(); kept out of Impl so the inline
   // accessor above stays cheap.
   mutable int refactor_hint_ = 0;

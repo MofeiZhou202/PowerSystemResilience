@@ -29,7 +29,8 @@ IPMLPOptimalityAudit audit_ipm_lp_optimality(
     const Eigen::VectorXd& box_dual_lb_min,
     const Eigen::VectorXd& box_dual_ub_min,
     const Eigen::VectorXd* lower_bounds_override,
-    const Eigen::VectorXd* upper_bounds_override) {
+    const Eigen::VectorXd* upper_bounds_override,
+    double objective_offset) {
   IPMLPOptimalityAudit audit;
   constexpr double kSideSentinel = 1e19;
   const int n = static_cast<int>(lp.c.size());
@@ -47,7 +48,8 @@ IPMLPOptimalityAudit audit_ipm_lp_optimality(
         lower_bounds_override->size() != n ||
         upper_bounds_override->size() != n)) ||
       !x.allFinite() || !lp.c.allFinite() || !row_duals_min.allFinite() ||
-      !box_dual_lb_min.allFinite() || !box_dual_ub_min.allFinite()) {
+      !box_dual_lb_min.allFinite() || !box_dual_ub_min.allFinite() ||
+      !std::isfinite(objective_offset)) {
     return audit;
   }
 
@@ -163,7 +165,14 @@ IPMLPOptimalityAudit audit_ipm_lp_optimality(
 
   dual_violation =
       std::max(dual_violation, stationarity.lpNorm<Eigen::Infinity>());
-  const double primal_objective = sense_sign * lp.c.dot(x);
+  // Exact presolve substitutions add the same constant to primal and dual
+  // objectives. The gap numerator is invariant, but the relative denominator
+  // must be evaluated in the original objective scale (A&A 1995 Section 2.4;
+  // native_presolve_lp_2026-08-18.md Section 8.18).
+  const double objective_offset_min = sense_sign * objective_offset;
+  const double primal_objective =
+      sense_sign * lp.c.dot(x) + objective_offset_min;
+  dual_objective += objective_offset_min;
   const double relative_gap =
       std::abs(primal_objective - dual_objective) /
       (1.0 + std::abs(primal_objective) + std::abs(dual_objective));
@@ -200,10 +209,26 @@ bool NativeIPMLPAdapter::supports(ProblemClass cls) const {
 
 SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob) const {
   static const Eigen::VectorXd empty;
-  return solve_lp(prob, empty);
+  return solve_lp_with_presolve_snapshot(prob, empty, {});
 }
 
-SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::VectorXd& x0) const {
+SolveResult NativeIPMLPAdapter::solve_lp(
+    const LPModel& prob,
+    const std::shared_ptr<const LpPresolveActivitySnapshot>&
+        activity_snapshot) const {
+  static const Eigen::VectorXd empty;
+  return solve_lp_with_presolve_snapshot(prob, empty, activity_snapshot);
+}
+
+SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob,
+                                         const Eigen::VectorXd& x0) const {
+  return solve_lp_with_presolve_snapshot(prob, x0, {});
+}
+
+SolveResult NativeIPMLPAdapter::solve_lp_with_presolve_snapshot(
+    const LPModel& prob, const Eigen::VectorXd& x0,
+    const std::shared_ptr<const LpPresolveActivitySnapshot>&
+        activity_snapshot) const {
   const auto solve_start = std::chrono::steady_clock::now();
   const bool has_warm_start = x0.size() == prob.c.size();
   const bool has_deadline =
@@ -251,7 +276,11 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
                           AugmentedBackendPolicy backend_policy,
                           IPMNewtonFormulation formulation,
                           double publication_tol_scale = 1.0,
-                          bool speculative = false) -> SolveResult {
+                          bool speculative = false,
+                          double objective_offset = 0.0,
+                          const std::shared_ptr<const
+                              LpPresolveMatrixWorkspace>& matrix_workspace =
+                              {}) -> SolveResult {
     auto run_variant = [&](int rounds, IPMNewtonFormulation form,
                            const Eigen::VectorXd* override_start = nullptr) {
       const double budget = has_deadline ? remaining_time() : 0.0;
@@ -263,7 +292,8 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
       }
       return solve_lp_impl(p, override_start ? *override_start : start,
                            rounds, budget, backend_policy, form,
-                           publication_tol_scale);
+                           publication_tol_scale, objective_offset,
+                           matrix_workspace);
     };
     auto merit = [](const SolveResult& result) {
       if (result.stats.success) return 0.0;
@@ -393,9 +423,14 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
   {
     LpPresolveConfig ncfg;
     ncfg.enabled = opt_.presolve;  // P1: programmatic switch live (§3.1)
+    // Fast P1/P3 precedes the map-backed P2 rules, and a reduced solve is
+    // published only when its structural savings amortize presolve cost.
+    // See native_presolve_lp_2026-08-18.md Section 8.22.
+    ncfg.adaptive_staging = true;
     ncfg = lp_presolve_config_from_env(ncfg);
     if (ncfg.enabled && !has_warm_start) {
-      const LpPresolveResult nps = lp_presolve_run(prob, ncfg);
+      const LpPresolveResult nps =
+          lp_presolve_run(prob, ncfg, activity_snapshot);
       presolve_used = 1;
       presolve_ms = nps.presolve_ms;
       presolve_orig_rows = nps.orig_rows;
@@ -440,13 +475,30 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
           SolveResult rr = direct_solve(
               nps.reduced, empty,
               AugmentedBackendPolicy::StructurePreserving,
-              opt_.newton_formulation, pub_scale, /*speculative=*/true);
+              opt_.newton_formulation, pub_scale, /*speculative=*/true,
+              nps.objective_offset, nps.matrix_workspace);
           reduced_ok = rr.stats.success;
           x_reduced = std::move(rr.x);
           iters = rr.stats.iterations;
         }  // else: reduced-to-empty -> postsolve an empty primal.
         if (reduced_ok) {
           const Eigen::VectorXd x_orig = postsolve_primal(nps, x_reduced);
+          if (std::getenv("MIPSOLVERS_NATIVE_PRESOLVE_VERBOSE") &&
+              x_orig.size() == prob.c.size() &&
+              x_reduced.size() == nps.reduced.c.size()) {
+            // Objective identity for A&A (1995) Section 2.4 substitutions;
+            // diagnostic only, per the mismatch protocol in the derivation
+            // document Section 8.18.
+            const double original_objective = prob.c.dot(x_orig);
+            const double reconstructed_objective =
+                nps.reduced.c.dot(x_reduced) + nps.objective_offset;
+            std::fprintf(stderr,
+                         "[NATIVE-PRESOLVE] objective: original=%.17g "
+                         "reconstructed=%.17g offset=%.17g identity_error=%.6g\n",
+                         original_objective, reconstructed_objective,
+                         nps.objective_offset,
+                         original_objective - reconstructed_objective);
+          }
           const double audit_tol =
               std::max(1e-10, 10.0 * std::max(0.0, opt_.tol_primal));
           if (x_orig.size() == prob.c.size() &&
@@ -618,7 +670,11 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
                                                    backend_policy,
                                                IPMNewtonFormulation
                                                    formulation,
-                                               double publication_tol_scale) const {
+                                               double publication_tol_scale,
+                                               double objective_offset,
+                                               const std::shared_ptr<const
+                                                   LpPresolveMatrixWorkspace>&
+                                                   matrix_workspace) const {
   const bool has_warm_start = (x0.size() == prob.c.size());
   const bool ipm_verbose_env = (std::getenv("MIPSOLVERS_IPM_VERBOSE") != nullptr);
   SolveResult out;
@@ -762,9 +818,12 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
   const int* Aeq_i = me > 0 ? Aeq_mat.innerIndexPtr() : nullptr;
   const double* Aeq_v = me > 0 ? Aeq_mat.valuePtr() : nullptr;
 
-  // Build CSR for A (inequality) — needed for forward SpMV (sequential y writes)
-  std::vector<int> A_rp, A_ci, Aeq_rp, Aeq_ci;
-  std::vector<double> A_rv, Aeq_rv;
+  // CSR is needed for forward SpMV (sequential y writes). A presolve-reduced
+  // solve carries compact row structure resident from compaction; Ruiz and
+  // lower-only row normalization preserve that structure, so only values are
+  // scattered from the effective CSC (design Section 8.31).
+  std::vector<int> owned_A_rp, owned_A_ci, owned_Aeq_rp, owned_Aeq_ci;
+  std::vector<double> owned_A_rv, owned_Aeq_rv;
   auto build_csr = [](const Eigen::SparseMatrix<double>& M,
                        std::vector<int>& rp, std::vector<int>& ci, std::vector<double>& rv) {
     int rows = static_cast<int>(M.rows());
@@ -787,8 +846,68 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
         ci[q] = k; rv[q] = Mv[p];
       }
   };
-  if (mi > 0) build_csr(A_mat, A_rp, A_ci, A_rv);
-  if (me > 0) build_csr(Aeq_mat, Aeq_rp, Aeq_ci, Aeq_rv);
+  const bool resident_csr =
+      matrix_workspace && matrix_workspace->inequality_rows == mi &&
+      matrix_workspace->equality_rows == me &&
+      matrix_workspace->cols == n_orig &&
+      matrix_workspace->a_row_start.size() ==
+          static_cast<std::size_t>(mi) + 1 &&
+      matrix_workspace->aeq_row_start.size() ==
+          static_cast<std::size_t>(me) + 1 &&
+      matrix_workspace->a_col.size() ==
+          static_cast<std::size_t>(A_mat.nonZeros()) &&
+      matrix_workspace->a_value.size() ==
+          static_cast<std::size_t>(A_mat.nonZeros()) &&
+      matrix_workspace->a_csc_to_csr.size() ==
+          static_cast<std::size_t>(A_mat.nonZeros()) &&
+      matrix_workspace->aeq_col.size() ==
+          static_cast<std::size_t>(Aeq_mat.nonZeros()) &&
+      matrix_workspace->aeq_value.size() ==
+          static_cast<std::size_t>(Aeq_mat.nonZeros()) &&
+      matrix_workspace->aeq_csc_to_csr.size() ==
+          static_cast<std::size_t>(Aeq_mat.nonZeros());
+
+  const int* A_rp = nullptr;
+  const int* A_ci = nullptr;
+  const double* A_rv = nullptr;
+  const int* Aeq_rp = nullptr;
+  const int* Aeq_ci = nullptr;
+  const double* Aeq_rv = nullptr;
+  if (resident_csr) {
+    A_rp = matrix_workspace->a_row_start.data();
+    A_ci = matrix_workspace->a_col.data();
+    Aeq_rp = matrix_workspace->aeq_row_start.data();
+    Aeq_ci = matrix_workspace->aeq_col.data();
+    if (scal.active || any_flip) {
+      owned_A_rv.resize(static_cast<std::size_t>(A_mat.nonZeros()));
+      for (int p = 0; p < A_mat.nonZeros(); ++p) {
+        const int q = matrix_workspace->a_csc_to_csr[static_cast<std::size_t>(p)];
+        owned_A_rv[static_cast<std::size_t>(q)] = A_v[p];
+      }
+      owned_Aeq_rv.resize(static_cast<std::size_t>(Aeq_mat.nonZeros()));
+      for (int p = 0; p < Aeq_mat.nonZeros(); ++p) {
+        const int q =
+            matrix_workspace->aeq_csc_to_csr[static_cast<std::size_t>(p)];
+        owned_Aeq_rv[static_cast<std::size_t>(q)] = Aeq_v[p];
+      }
+      A_rv = owned_A_rv.data();
+      Aeq_rv = owned_Aeq_rv.data();
+    } else {
+      A_rv = matrix_workspace->a_value.data();
+      Aeq_rv = matrix_workspace->aeq_value.data();
+    }
+  } else {
+    if (mi > 0)
+      build_csr(A_mat, owned_A_rp, owned_A_ci, owned_A_rv);
+    if (me > 0)
+      build_csr(Aeq_mat, owned_Aeq_rp, owned_Aeq_ci, owned_Aeq_rv);
+    A_rp = owned_A_rp.data();
+    A_ci = owned_A_ci.data();
+    A_rv = owned_A_rv.data();
+    Aeq_rp = owned_Aeq_rp.data();
+    Aeq_ci = owned_Aeq_ci.data();
+    Aeq_rv = owned_Aeq_rv.data();
+  }
   if (opt_.verbose || ipm_verbose_env) {
     int empty_cols = 0;
     int singleton_cols = 0;
@@ -935,6 +1054,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
       !use_banded && formulation == IPMNewtonFormulation::ForceAugmented;
   bool auto_structure_augmented = false;
   bool auto_hybrid_augmented = false;
+  int automatic_max_correctors = 3;
 
   // === Banded storage: band[(row-col)*m + col] for row >= col, row-col <= bw ===
   const int bw = bandwidth;
@@ -1168,6 +1288,13 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
         normal_lnz = cholmod_ldlt.symbolic_nonzeros();
         normal_symbolic_available = cholmod_ok;
       }
+      // A corrector back-solve streams at least the factor values once in each
+      // triangular direction. Auto drops those extra streams only when the
+      // selected factor's value array is no longer cache-resident (§7.4 of
+      // native_presolve_lp_2026-08-18.md; Anjos et al. 2020, §4 and §6.2).
+      constexpr double kAutoCorrectorFactorBytes = 4'000'000.0;
+      automatic_max_correctors =
+          normal_lnz * sizeof(double) >= kAutoCorrectorFactorBytes ? 0 : 3;
       const bool normal_fill_economic =
           normal_lnz > 0.0 &&
           normal_lnz <= 5.0 * static_cast<double>(sparse_n_nnz);
@@ -1362,6 +1489,12 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
         }
         use_augmented =
             robustness_route || performance_route || hybrid_performance_route;
+        if (use_augmented) {
+          automatic_max_correctors =
+              augmented_lnz * sizeof(double) >= kAutoCorrectorFactorBytes
+                  ? 0
+                  : 3;
+        }
         auto_structure_augmented = performance_route;
         auto_hybrid_augmented = hybrid_performance_route;
         if (opt_.verbose || ipm_verbose_env) {
@@ -2686,6 +2819,9 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
   // boundary step-length helper (used to score each corrector's step gain).
   std::vector<double> gc_xi(nn), gc_ddx(nn), gc_ddy(m), gc_ddzl(nn),
       gc_ddzu(nn), gc_rgl(nn), gc_rgu(nn), gc_zero_rp(m, 0.0);
+  const int max_correctors = opt_.max_correctors >= 0
+                                 ? opt_.max_correctors
+                                 : automatic_max_correctors;
   int barrier_count = 0;
   for (int j = 0; j < nn; ++j) {
     barrier_count += static_cast<int>(flb_d[j]) + static_cast<int>(fub_d[j]);
@@ -2734,7 +2870,8 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
       row_duals_min[i] = row_sign * y_d[i] * dr;
     }
     return audit_ipm_lp_optimality(prob, x_original, row_duals_min,
-                                   bound_duals_lb, bound_duals_ub);
+                                   bound_duals_lb, bound_duals_ub, nullptr,
+                                   nullptr, objective_offset);
   };
 
   int normal_tiny_step_streak = 0;
@@ -3187,13 +3324,13 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
     // solves (measured: +7 iters on 39-bus, +6.5s on 118-bus).  Throttling is
     // the degenerate slow-start that stalls the affine step (6-bus: 64->30).
     int accepted_gondzio = 0;
-    if (!skip_corrector && opt_.max_correctors > 0 && mu > 0.0 &&
+    if (!skip_corrector && max_correctors > 0 && mu > 0.0 &&
         std::min(ap, ad) < 0.9) {
       constexpr double kBetaMin = 0.1, kBetaMax = 10.0;
       constexpr double kDeltaAlpha = 0.1;   // step-enlargement probe
       constexpr double kGammaAccept = 0.1;  // min total step gain to keep
       const double lo = kBetaMin * mu, hi = kBetaMax * mu;
-      for (int kc = 0; kc < opt_.max_correctors; ++kc) {
+      for (int kc = 0; kc < max_correctors; ++kc) {
         const double ap_t = std::min(ap + kDeltaAlpha, 1.0);
         const double ad_t = std::min(ad + kDeltaAlpha, 1.0);
         for (int j = 0; j < nn; ++j) {
@@ -3437,7 +3574,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
   out.x.resize(n_orig);
   for (int j = 0; j < n_orig; ++j)
     out.x(j) = scal.active ? x_d[j] * scal.dc[static_cast<size_t>(j)] : x_d[j];
-  out.stats.objective = prob.c.dot(out.x);
+  out.stats.objective = prob.c.dot(out.x) + objective_offset;
   if (m > 0) {
     out.constraint_duals.resize(m);
     for (int i = 0; i < m; ++i) {
@@ -3463,7 +3600,8 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
   // Publication is fail-closed against a full KKT audit in the original model.
   Eigen::VectorXd row_duals_min = sense_sign * out.constraint_duals;
   const IPMLPOptimalityAudit audit = audit_ipm_lp_optimality(
-      prob, out.x, row_duals_min, out.box_dual_lb, out.box_dual_ub);
+      prob, out.x, row_duals_min, out.box_dual_lb, out.box_dual_ub, nullptr,
+      nullptr, objective_offset);
   if (audit.valid) {
     out.stats.unscaled_primal_feas = audit.primal_residual_inf;
     out.stats.unscaled_dual_feas = audit.dual_residual_inf;

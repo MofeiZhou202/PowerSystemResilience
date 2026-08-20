@@ -28,6 +28,7 @@ struct Statistics {
   int degenerate_primal_steps{0};
   int major_rebuilds{0};
   int reinversions{0};
+  int initial_factor_reuses{0};
   int rank_repairs{0};
   int bound_flips{0};
   int iterative_refinements{0};

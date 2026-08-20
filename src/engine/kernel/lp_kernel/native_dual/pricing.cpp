@@ -88,6 +88,26 @@ double price_tiny() {
   return value;
 }
 
+bool packed_row_ep_control_enabled() {
+  static const bool enabled =
+      std::getenv("MIPSOLVERS_DS_PACKED_ROW_EP") != nullptr;
+  return enabled;
+}
+
+bool solve_pivotal_btran(State& state, const IndexedVector& unit,
+                         Leaving& leaving) {
+  if (packed_row_ep_control_enabled()) {
+    IndexedSolveEvidence solve = state.factor->indexed_btran(unit, true);
+    leaving.row_ep = std::move(solve.solution);
+    leaving.row_ep_factor_resident = false;
+    return solve.accepted && leaving.row_ep.finite();
+  }
+  ResidentSolveEvidence solve = state.factor->resident_btran(unit);
+  leaving.resident_row_ep = solve.solution;
+  leaving.row_ep_factor_resident = solve.accepted;
+  return solve.accepted && leaving.resident_row_ep.finite();
+}
+
 bool lower_leaving_priority(const State::LeavingHeapEntry& lhs,
                             const State::LeavingHeapEntry& rhs) {
   if (lhs.merit != rhs.merit) return lhs.merit < rhs.merit;
@@ -328,15 +348,16 @@ bool choose_leaving_certified_exact(State& state, Leaving& leaving,
   unit.clear(state.m);
   unit.index.push_back(best_row);
   unit.value.push_back(1.0);
-  IndexedSolveEvidence row_solve = state.factor->indexed_btran(unit, true);
+  const bool row_solve_accepted = solve_pivotal_btran(state, unit, leaving);
   ++state.certified_dse_btrans;
-  leaving.row_ep = std::move(row_solve.solution);
-  if (!row_solve.accepted || !leaving.row_ep.finite()) {
+  if (!row_solve_accepted) {
     failure = "certified CHUZR pivotal BTRAN failed";
     return false;
   }
   long double pivotal_weight = 0.0L;
-  for (double value : leaving.row_ep.value) {
+  const int pivotal_row_count = leaving.row_ep_count();
+  for (int k = 0; k < pivotal_row_count; ++k) {
+    const double value = leaving.row_ep_value(k);
     const long double value_ld = static_cast<long double>(value);
     pivotal_weight += value_ld * value_ld;
   }
@@ -351,7 +372,7 @@ bool choose_leaving_certified_exact(State& state, Leaving& leaving,
   return true;
 }
 
-double dot_error_bound(const State& state, const IndexedVector& row_ep, int col,
+double dot_error_bound(const State& state, const Leaving& leaving, int col,
                        const std::vector<double>* dense_row_ep = nullptr) {
   double absolute_dot = 0.0;
   int terms = 0;
@@ -359,7 +380,7 @@ double dot_error_bound(const State& state, const IndexedVector& row_ep, int col,
     const double multiplier =
         dense_row_ep != nullptr
             ? (*dense_row_ep)[static_cast<std::size_t>(it.row())]
-            : row_ep.at(it.row());
+            : leaving.row_ep_at(it.row());
     absolute_dot += std::abs(multiplier * it.value());
     ++terms;
   }
@@ -389,6 +410,41 @@ inline bool lean_ratio_enabled() {
 inline bool lean_dse_enabled() {
   static const bool v = std::getenv("MIPSOLVERS_DS_LEAN_DSE") != nullptr;
   return v;
+}
+
+inline bool packed_dse_ftran_enabled() {
+  static const bool v =
+      std::getenv("MIPSOLVERS_DS_PACKED_DSE_FTRAN") != nullptr;
+  return v;
+}
+
+inline bool bfrt_profile_enabled() {
+  static const bool v = std::getenv("MIPSOLVERS_DS_PROFILE") != nullptr;
+  return v;
+}
+
+inline bool split_bfrt_scan_enabled() {
+  static const bool v =
+      std::getenv("MIPSOLVERS_DS_SPLIT_BFRT_SCAN") != nullptr;
+  return v;
+}
+
+inline bool accessor_price_control_enabled() {
+  static const bool v =
+      std::getenv("MIPSOLVERS_DS_ACCESSOR_PRICE") != nullptr;
+  return v;
+}
+
+inline bool repeated_dse_terms_control_enabled() {
+  static const bool v =
+      std::getenv("MIPSOLVERS_DS_REPEATED_DSE_TERMS") != nullptr;
+  return v;
+}
+
+inline double bfrt_profile_clock() {
+  return std::chrono::duration<double>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
 }
 
 void prefilter_active_phase_two(const State& state, const Leaving& leaving,
@@ -481,11 +537,41 @@ void prefilter_active_phase_two(const State& state, const Leaving& leaving,
   }
 }
 
+std::size_t vector_count(const IndexedVector& vector) {
+  return vector.index.size();
+}
+
+int vector_index(const IndexedVector& vector, std::size_t position) {
+  return vector.index[position];
+}
+
+double vector_value(const IndexedVector& vector, std::size_t position) {
+  return vector.value[position];
+}
+
+std::size_t vector_count(const HFactorBackend::ResidentVectorView& vector) {
+  return static_cast<std::size_t>(vector.count());
+}
+
+int vector_index(const HFactorBackend::ResidentVectorView& vector,
+                 std::size_t position) {
+  return vector.index(static_cast<int>(position));
+}
+
+double vector_value(const HFactorBackend::ResidentVectorView& vector,
+                    std::size_t position) {
+  return vector.value(static_cast<int>(position));
+}
+
+template <typename Vector>
 void multiply_AT_indexed_impl(const StandardRowMatrix& A_row,
-                              const IndexedVector& y, IndexedVector& result,
+                              const Vector& y, IndexedVector& result,
                               const std::vector<char>* basic,
                               const std::vector<Move>* move,
-                              std::vector<int>* active_position) {
+                              std::vector<int>* active_position,
+                              PriceDseArithmeticProfile* profile) {
+  const double accumulate_start =
+      profile != nullptr ? bfrt_profile_clock() : 0.0;
   if (active_position != nullptr) active_position->clear();
   result.clear(static_cast<int>(A_row.cols()));
   struct Accumulator {
@@ -506,9 +592,10 @@ void multiply_AT_indexed_impl(const StandardRowMatrix& A_row,
     ++accumulator.epoch;
   }
   accumulator.touched.clear();
-  for (std::size_t k = 0; k < y.index.size(); ++k) {
-    const int row = y.index[k];
-    const double multiplier = y.value[k];
+  const std::size_t y_count = vector_count(y);
+  for (std::size_t k = 0; k < y_count; ++k) {
+    const int row = vector_index(y, k);
+    const double multiplier = vector_value(y, k);
     if (row < 0 || row >= A_row.rows() || multiplier == 0.0) continue;
     for (StandardRowMatrix::InnerIterator it(A_row, row); it; ++it) {
       const int col = static_cast<int>(it.col());
@@ -521,6 +608,10 @@ void multiply_AT_indexed_impl(const StandardRowMatrix& A_row,
       accumulator.value[index] += multiplier * it.value();
     }
   }
+  if (profile != nullptr) {
+    profile->price_accumulate += bfrt_profile_clock() - accumulate_start;
+  }
+  const double pack_start = profile != nullptr ? bfrt_profile_clock() : 0.0;
   const double tiny = price_tiny();
   result.index.reserve(accumulator.touched.size());
   result.value.reserve(accumulator.touched.size());
@@ -540,6 +631,9 @@ void multiply_AT_indexed_impl(const StandardRowMatrix& A_row,
       }
     }
   }
+  if (profile != nullptr) {
+    profile->price_pack += bfrt_profile_clock() - pack_start;
+  }
 }
 
 }  // namespace
@@ -553,7 +647,8 @@ IndexedVector multiply_AT_indexed(const StandardRowMatrix& A_row,
 
 void multiply_AT_indexed(const StandardRowMatrix& A_row, const IndexedVector& y,
                          IndexedVector& result) {
-  multiply_AT_indexed_impl(A_row, y, result, nullptr, nullptr, nullptr);
+  multiply_AT_indexed_impl(A_row, y, result, nullptr, nullptr, nullptr,
+                           nullptr);
 }
 
 void multiply_AT_indexed_bfrt(const StandardRowMatrix& A_row,
@@ -562,15 +657,39 @@ void multiply_AT_indexed_bfrt(const StandardRowMatrix& A_row,
                               const std::vector<Move>& move,
                               IndexedVector& result,
                               std::vector<int>& active_position) {
-  multiply_AT_indexed_impl(A_row, y, result, &basic, &move, &active_position);
+  multiply_AT_indexed_bfrt(A_row, y, basic, move, result, active_position,
+                           nullptr);
 }
 
-void multiply_AT_partitioned_bfrt(const PartitionedRowMatrix& partition,
-                                  const StandardColumnMatrix& columns,
-                                  const IndexedVector& y,
-                                  const std::vector<Move>& move, int leaving_col,
-                                  IndexedVector& result,
-                                  std::vector<int>& active_position) {
+void multiply_AT_indexed_bfrt(const StandardRowMatrix& A_row,
+                              const IndexedVector& y,
+                              const std::vector<char>& basic,
+                              const std::vector<Move>& move,
+                              IndexedVector& result,
+                              std::vector<int>& active_position,
+                              PriceDseArithmeticProfile* profile) {
+  multiply_AT_indexed_impl(A_row, y, result, &basic, &move, &active_position,
+                           profile);
+}
+
+void multiply_AT_indexed_bfrt(
+    const StandardRowMatrix& A_row,
+    const HFactorBackend::ResidentVectorView& y,
+    const std::vector<char>& basic, const std::vector<Move>& move,
+    IndexedVector& result, std::vector<int>& active_position,
+    PriceDseArithmeticProfile* profile) {
+  multiply_AT_indexed_impl(A_row, y, result, &basic, &move, &active_position,
+                           profile);
+}
+
+template <typename Vector>
+void multiply_AT_partitioned_bfrt_impl(
+    const PartitionedRowMatrix& partition,
+    const StandardColumnMatrix& columns, const Vector& y,
+    const std::vector<Move>& move, int leaving_col, IndexedVector& result,
+    std::vector<int>& active_position, PriceDseArithmeticProfile* profile) {
+  const double accumulate_start =
+      profile != nullptr ? bfrt_profile_clock() : 0.0;
   active_position.clear();
   result.clear(static_cast<int>(partition.cols()));
   struct Accumulator {
@@ -591,27 +710,51 @@ void multiply_AT_partitioned_bfrt(const PartitionedRowMatrix& partition,
     ++accumulator.epoch;
   }
   accumulator.touched.clear();
-  for (std::size_t k = 0; k < y.index.size(); ++k) {
-    const int row = y.index[k];
-    const double multiplier = y.value[k];
+  const std::size_t y_count = vector_count(y);
+  const bool accessor_price_control = accessor_price_control_enabled();
+  for (std::size_t k = 0; k < y_count; ++k) {
+    const int row = vector_index(y, k);
+    const double multiplier = vector_value(y, k);
     if (row < 0 || row >= partition.rows() || multiplier == 0.0) continue;
-    const auto end = partition.nonbasic_end(row);
-    for (auto slot = partition.row_start(row); slot < end; ++slot) {
-      const int col = partition.col_at(slot);
-      const std::size_t index = static_cast<std::size_t>(col);
-      if (accumulator.stamp[index] != accumulator.epoch) {
-        accumulator.stamp[index] = accumulator.epoch;
-        accumulator.value[index] = 0.0;
-        accumulator.touched.push_back(col);
+    if (accessor_price_control) {
+      const auto end = partition.nonbasic_end(row);
+      for (auto slot = partition.row_start(row); slot < end; ++slot) {
+        const int col = partition.col_at(slot);
+        const std::size_t index = static_cast<std::size_t>(col);
+        if (accumulator.stamp[index] != accumulator.epoch) {
+          accumulator.stamp[index] = accumulator.epoch;
+          accumulator.value[index] = 0.0;
+          accumulator.touched.push_back(col);
+        }
+        accumulator.value[index] += multiplier * partition.value_at(slot);
       }
-      accumulator.value[index] += multiplier * partition.value_at(slot);
+    } else {
+      // Sparse SAXPY over the identical stable row-slot order; only address
+      // formation changes (derivation Section 8.23).
+      const PartitionedRowMatrix::RowSlice slice =
+          partition.nonbasic_row(row);
+      for (PartitionedRowMatrix::Index slot = 0; slot < slice.count; ++slot) {
+        const int col = slice.col[slot];
+        const std::size_t index = static_cast<std::size_t>(col);
+        if (accumulator.stamp[index] != accumulator.epoch) {
+          accumulator.stamp[index] = accumulator.epoch;
+          accumulator.value[index] = 0.0;
+          accumulator.touched.push_back(col);
+        }
+        accumulator.value[index] += multiplier * slice.value[slot];
+      }
     }
+  }
+  if (profile != nullptr) {
+    profile->price_accumulate += bfrt_profile_clock() - accumulate_start;
   }
   // The leaving column is basic (outside the nonbasic scan) but its pivotal
   // entry alpha_r = e_r^T B^-1 A_{basis[r]} = 1 feeds the downstream dual
   // reduced-cost update of the leaving variable; accumulate it from its own
   // column over the row_ep support so that update is preserved.
   if (leaving_col >= 0 && leaving_col < static_cast<int>(cols)) {
+    const double leaving_dot_start =
+        profile != nullptr ? bfrt_profile_clock() : 0.0;
     double leaving_alpha = 0.0;
     for (StandardColumnMatrix::InnerIterator it(columns, leaving_col); it;
          ++it) {
@@ -624,7 +767,12 @@ void multiply_AT_partitioned_bfrt(const PartitionedRowMatrix& partition,
       accumulator.touched.push_back(leaving_col);
     }
     accumulator.value[index] += leaving_alpha;
+    if (profile != nullptr) {
+      profile->price_leaving_dot +=
+          bfrt_profile_clock() - leaving_dot_start;
+    }
   }
+  const double pack_start = profile != nullptr ? bfrt_profile_clock() : 0.0;
   const double tiny = price_tiny();
   result.index.reserve(accumulator.touched.size());
   result.value.reserve(accumulator.touched.size());
@@ -641,6 +789,28 @@ void multiply_AT_partitioned_bfrt(const PartitionedRowMatrix& partition,
       }
     }
   }
+  if (profile != nullptr) {
+    profile->price_pack += bfrt_profile_clock() - pack_start;
+  }
+}
+
+void multiply_AT_partitioned_bfrt(
+    const PartitionedRowMatrix& partition,
+    const StandardColumnMatrix& columns, const IndexedVector& y,
+    const std::vector<Move>& move, int leaving_col, IndexedVector& result,
+    std::vector<int>& active_position, PriceDseArithmeticProfile* profile) {
+  multiply_AT_partitioned_bfrt_impl(partition, columns, y, move, leaving_col,
+                                    result, active_position, profile);
+}
+
+void multiply_AT_partitioned_bfrt(
+    const PartitionedRowMatrix& partition,
+    const StandardColumnMatrix& columns,
+    const HFactorBackend::ResidentVectorView& y,
+    const std::vector<Move>& move, int leaving_col, IndexedVector& result,
+    std::vector<int>& active_position, PriceDseArithmeticProfile* profile) {
+  multiply_AT_partitioned_bfrt_impl(partition, columns, y, move, leaving_col,
+                                    result, active_position, profile);
 }
 
 void multiply_AT_indexed_csc(const StandardColumnMatrix& A,
@@ -759,9 +929,7 @@ bool choose_leaving_bland(State& state, Leaving& leaving,
   unit.clear(state.m);
   unit.index.push_back(leaving.row);
   unit.value.push_back(1.0);
-  IndexedSolveEvidence row_solve = state.factor->indexed_btran(unit, true);
-  leaving.row_ep = std::move(row_solve.solution);
-  if (!row_solve.accepted) {
+  if (!solve_pivotal_btran(state, unit, leaving)) {
     failure = "CHUZR packed BTRAN failed (Bland)";
     return false;
   }
@@ -839,16 +1007,13 @@ bool choose_leaving(State& state, Leaving& leaving, std::string& failure) {
   unit.clear(state.m);
   unit.index.push_back(leaving.row);
   unit.value.push_back(1.0);
-  IndexedSolveEvidence row_solve = state.factor->indexed_btran(unit, true);
-  leaving.row_ep = std::move(row_solve.solution);
-  if (!row_solve.accepted) {
+  if (!solve_pivotal_btran(state, unit, leaving)) {
     failure = "CHUZR packed BTRAN failed";
     return false;
   }
   if (state.edge_weight_mode == EdgeWeightMode::Devex) return true;
 
-  double exact_weight = 0.0;
-  for (double value : leaving.row_ep.value) exact_weight += value * value;
+  const double exact_weight = leaving.row_ep_squared_norm();
   const double stored_weight =
       state.edge_weight[static_cast<std::size_t>(leaving.row)];
   const double error = std::abs(exact_weight - stored_weight);
@@ -923,11 +1088,7 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
     }
   };
   static thread_local std::vector<double> dense_row_ep;
-  double row_ep_max_abs = 0.0;
-  for (std::size_t k = 0; k < leaving.row_ep.index.size(); ++k) {
-    row_ep_max_abs =
-        std::max(row_ep_max_abs, std::abs(leaving.row_ep.value[k]));
-  }
+  const double row_ep_max_abs = leaving.row_ep_max_abs();
   // The dense scatter only serves dot_error_bound lookups; build it on the
   // first exact bound evaluation so fully short-circuited scans skip the
   // O(m) clear. The scattered values are identical either way.
@@ -935,9 +1096,10 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
   auto dense_row_ep_for_dot = [&]() -> const std::vector<double>* {
     if (!dense_row_ep_built) {
       dense_row_ep.assign(static_cast<std::size_t>(state.m), 0.0);
-      for (std::size_t k = 0; k < leaving.row_ep.index.size(); ++k) {
-        dense_row_ep[static_cast<std::size_t>(leaving.row_ep.index[k])] =
-            leaving.row_ep.value[k];
+      const int row_ep_count = leaving.row_ep_count();
+      for (int k = 0; k < row_ep_count; ++k) {
+        dense_row_ep[static_cast<std::size_t>(leaving.row_ep_index(k))] =
+            leaving.row_ep_value(k);
       }
       dense_row_ep_built = true;
     }
@@ -951,18 +1113,13 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
   const bool taboo_possible = !state.taboo_changes.empty();
   const bool branch_free_phase_two =
       state.phase == Phase::Two && have_error_coef;
+  const bool profile_bfrt = bfrt_profile_enabled();
+  const double candidate_start = profile_bfrt ? bfrt_profile_clock() : 0.0;
   if (branch_free_phase_two) {
-    static thread_local BfrtPrefilterWorkspace prefilter;
-    prefilter_active_phase_two(state, leaving, pivot_row, active_position,
-                               row_ep_max_abs, stable_pivot_tolerance,
-                               prefilter);
     const bool lean = lean_ratio_enabled();
-    for (int s = 0; s < scan_count; ++s) {
-      const std::size_t position = static_cast<std::size_t>(s);
-      const int col = scan_col(s);
-      const int direction = sign(state.move[static_cast<std::size_t>(col)]);
-      const double alpha = prefilter.signed_alpha[position];
-      const std::uint8_t flags = prefilter.flags[position];
+    auto classify_candidate = [&](int col, int direction, double alpha,
+                                  double cheap_error,
+                                  std::uint8_t flags) -> bool {
       const bool positive = (flags & kBfrtPositive) != 0;
       double range = 0.0;
       if (positive) {
@@ -974,19 +1131,19 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
         transaction.stability_blocked = true;
         ++transaction.unstable_pivot_rejections;
         ++transaction.bfrt_stability_prefiltered;
-        continue;
+        return true;
       }
       if (!positive) {
         if (!lean && (flags & kBfrtNeedsExact) != 0) {
           ++transaction.bfrt_exact_dot_calls;
-          const double error = dot_error_bound(state, leaving.row_ep, col,
+          const double error = dot_error_bound(state, leaving, col,
                                                dense_row_ep_for_dot());
           if (alpha + error > 0.0) {
             transaction.stability_blocked = true;
             ++transaction.unstable_pivot_rejections;
           }
         }
-        continue;
+        return true;
       }
 
       double error = 0.0;
@@ -995,26 +1152,25 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
         ++transaction.bfrt_exact_dot_calls;
         used_exact_dot = true;
         error =
-            dot_error_bound(state, leaving.row_ep, col, dense_row_ep_for_dot());
+            dot_error_bound(state, leaving, col, dense_row_ep_for_dot());
         if (!(alpha > error)) {
           if (alpha + error > 0.0) {
             transaction.stability_blocked = true;
             ++transaction.unstable_pivot_rejections;
           }
-          continue;
+          return true;
         }
       } else {
         // Cheap error bound (also the lean path for borderline candidates that
         // would otherwise take an exact dot): conservative, so admission stays
         // sound and the terminal audit remains the backstop.
-        error = state.bfrt_error_coef[static_cast<std::size_t>(col)] *
-                row_ep_max_abs;
+        error = cheap_error;
         if (lean && !(alpha > error)) {
           if (alpha + error > 0.0) {
             transaction.stability_blocked = true;
             ++transaction.unstable_pivot_rejections;
           }
-          continue;
+          return true;
         }
       }
       ++transaction.certified_candidate_count;
@@ -1022,7 +1178,7 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
       if (!(alpha > stable_pivot_tolerance)) {
         transaction.stability_blocked = true;
         ++transaction.unstable_pivot_rejections;
-        continue;
+        return true;
       }
       ++transaction.stable_candidate_count;
       add_capacity(alpha, range, transaction.stable_capacity);
@@ -1041,6 +1197,65 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
           is_taboo_change(state, bfrt_leaving_col, col, &taboo_expiry);
       candidates.push_back(
           {col, alpha, breakpoint, range, taboo, taboo_expiry, used_exact_dot});
+      return true;
+    };
+
+    if (split_bfrt_scan_enabled()) {
+      static thread_local BfrtPrefilterWorkspace prefilter;
+      const double prefilter_start =
+          profile_bfrt ? bfrt_profile_clock() : 0.0;
+      prefilter_active_phase_two(state, leaving, pivot_row, active_position,
+                                 row_ep_max_abs, stable_pivot_tolerance,
+                                 prefilter);
+      if (profile_bfrt) {
+        transaction.bfrt_prefilter_time_sec =
+            bfrt_profile_clock() - prefilter_start;
+      }
+      for (int s = 0; s < scan_count; ++s) {
+        const std::size_t position = static_cast<std::size_t>(s);
+        const int col = scan_col(s);
+        const int direction = sign(state.move[static_cast<std::size_t>(col)]);
+        const double cheap_error =
+            state.bfrt_error_coef[static_cast<std::size_t>(col)] *
+            row_ep_max_abs;
+        if (!classify_candidate(col, direction,
+                                prefilter.signed_alpha[position], cheap_error,
+                                prefilter.flags[position])) {
+          return false;
+        }
+      }
+    } else {
+      // Harris (1973), Maros (2003) section 9: this is the scalar form of the
+      // same stability prefilter, fused with its sole ordered consumer. See
+      // derivation section 8.21 for the bit-identical data-flow contract.
+      for (int s = 0; s < scan_count; ++s) {
+        const std::size_t pivot_position = scan_position(s);
+        const int col = pivot_row.index[pivot_position];
+        const std::size_t index = static_cast<std::size_t>(col);
+        const int direction = sign(state.move[index]);
+        const double alpha =
+            leaving.side * direction * pivot_row.value[pivot_position];
+        const double cheap_error =
+            state.bfrt_error_coef[index] * row_ep_max_abs;
+        const bool positive = alpha > 0.0;
+        const bool above_stable = alpha > stable_pivot_tolerance;
+        const bool prefiltered = positive && !above_stable;
+        const bool nonpositive_ambiguous =
+            !positive && alpha + cheap_error > 0.0;
+        const bool cheap_certified =
+            positive && above_stable && alpha > cheap_error;
+        const bool needs_exact =
+            nonpositive_ambiguous ||
+            (positive && above_stable && !cheap_certified);
+        const std::uint8_t flags = static_cast<std::uint8_t>(
+            (positive ? kBfrtPositive : 0) |
+            (prefiltered ? kBfrtPrefiltered : 0) |
+            (cheap_certified ? kBfrtCheapCertified : 0) |
+            (needs_exact ? kBfrtNeedsExact : 0));
+        if (!classify_candidate(col, direction, alpha, cheap_error, flags)) {
+          return false;
+        }
+      }
     }
   }
   if (!branch_free_phase_two) {
@@ -1097,7 +1312,7 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
           }
           const std::vector<double>* dense =
               parallel_scan ? parallel_dense_row_ep : dense_row_ep_for_dot();
-          evaluation.error = dot_error_bound(state, leaving.row_ep, j, dense);
+          evaluation.error = dot_error_bound(state, leaving, j, dense);
           evaluation.stability_blocked =
               evaluation.signed_alpha + evaluation.error > 0.0;
           evaluation_output[position] = evaluation;
@@ -1114,7 +1329,7 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
         } else {
           const std::vector<double>* dense =
               parallel_scan ? parallel_dense_row_ep : dense_row_ep_for_dot();
-          evaluation.error = dot_error_bound(state, leaving.row_ep, j, dense);
+          evaluation.error = dot_error_bound(state, leaving, j, dense);
           evaluation.needed_exact = true;
           if (!(evaluation.signed_alpha > evaluation.error)) {
             evaluation.stability_blocked =
@@ -1187,6 +1402,11 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
                             evaluation.breakpoint, evaluation.range, taboo,
                             taboo_expiry, evaluation.needed_exact});
     }
+  }
+  if (profile_bfrt) {
+    transaction.bfrt_candidate_time_sec =
+        bfrt_profile_clock() - candidate_start -
+        transaction.bfrt_prefilter_time_sec;
   }
   if (candidates.empty()) return true;
 
@@ -1314,10 +1534,11 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
         state.sf->b - state.sf->A * full_primal(state);
     long double projected_residual = 0.0L;
     long double projected_residual_abs = 0.0L;
-    for (std::size_t k = 0; k < leaving.row_ep.index.size(); ++k) {
-      const int row = leaving.row_ep.index[k];
+    const int row_ep_count = leaving.row_ep_count();
+    for (int k = 0; k < row_ep_count; ++k) {
+      const int row = leaving.row_ep_index(k);
       const long double term =
-          static_cast<long double>(leaving.row_ep.value[k]) *
+          static_cast<long double>(leaving.row_ep_value(k)) *
           static_cast<long double>(equation_residual[row]);
       projected_residual += term;
       projected_residual_abs += std::abs(term);
@@ -1331,7 +1552,7 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
       for (StandardColumnMatrix::InnerIterator it(state.sf->A,
                                                           basis_col);
            it; ++it) {
-        bt_pi += static_cast<long double>(leaving.row_ep.at(it.row())) *
+        bt_pi += static_cast<long double>(leaving.row_ep_at(it.row())) *
                  static_cast<long double>(it.value());
       }
       const long double btran_residual =
@@ -1344,7 +1565,7 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
       btran_witness_error_abs += std::abs(term);
     }
     const long double projection_roundoff =
-        (static_cast<long double>(leaving.row_ep.index.size() + state.m) +
+        (static_cast<long double>(row_ep_count + state.m) +
          256.0L) *
         static_cast<long double>(std::numeric_limits<double>::epsilon()) *
         std::max({projected_residual_abs, btran_witness_error_abs,
@@ -1381,6 +1602,7 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
   // current signed reduced cost directly: replacing it by max(0, -d*r) would
   // discard already-consumed tolerance when d*r>0.
   const long double dual_tolerance = state.options->optimality_tol;
+  const double harris_start = profile_bfrt ? bfrt_profile_clock() : 0.0;
   long double harris_step_upper =
       std::numeric_limits<long double>::infinity();
   for (std::size_t i = selected_begin; i < candidates.size(); ++i) {
@@ -1437,7 +1659,12 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
   transaction.entering.alpha = selected->alpha;
   transaction.entering.theta = static_cast<double>(selected->breakpoint);
   const long double theta = selected->breakpoint;
+  if (profile_bfrt) {
+    transaction.bfrt_harris_time_sec = bfrt_profile_clock() - harris_start;
+  }
 
+  const double terminal_scan_start =
+      profile_bfrt ? bfrt_profile_clock() : 0.0;
   long double step_lower = -std::numeric_limits<long double>::infinity();
   long double step_upper = harris_step_upper;
   int step_upper_col = -1;
@@ -1553,7 +1780,7 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
             << ", limiting_signed_rc=" << step_upper_signed_reduced_cost;
     if (step_upper_col >= 0) {
       message << ", limiting_dot_error="
-              << dot_error_bound(state, leaving.row_ep, step_upper_col)
+              << dot_error_bound(state, leaving, step_upper_col)
               << ", limiting_lower=" << state.bounds.lower[step_upper_col]
               << ", limiting_upper=" << state.bounds.upper[step_upper_col];
     }
@@ -1563,7 +1790,12 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
   }
   transaction.dual_step_lower = static_cast<double>(step_lower);
   transaction.dual_step_upper = static_cast<double>(step_upper);
+  if (profile_bfrt) {
+    transaction.bfrt_terminal_scan_time_sec =
+        bfrt_profile_clock() - terminal_scan_start;
+  }
 
+  const double rhs_start = profile_bfrt ? bfrt_profile_clock() : 0.0;
   static thread_local std::vector<std::pair<int, double>> rhs_terms;
   rhs_terms.clear();
   for (const BoundFlip& flip : transaction.flips) {
@@ -1594,7 +1826,7 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
   for (std::size_t k = 0; k < transaction.bfrt_rhs.index.size(); ++k) {
     const int row = transaction.bfrt_rhs.index[k];
     const long double term =
-        static_cast<long double>(leaving.row_ep.at(row)) *
+        static_cast<long double>(leaving.row_ep_at(row)) *
         static_cast<long double>(transaction.bfrt_rhs.value[k]);
     rhs_projection += term;
     rhs_projection_abs += std::abs(term);
@@ -1629,18 +1861,23 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
   }
   transaction.covered_violation = static_cast<double>(
       std::min(std::max(materialized_coverage, 0.0L), violation_ld));
+  if (profile_bfrt) {
+    transaction.bfrt_rhs_time_sec = bfrt_profile_clock() - rhs_start;
+  }
   return true;
 }
 
 bool compute_dse_weights(const State& state, const Leaving& leaving,
                          const IndexedVector& pivot_row,
-                         const IndexedVector& direction, double pivot,
+                         const PivotalColumn& direction, double pivot,
                          EdgeWeightUpdate& update,
-                         bool& restart_devex, std::string& failure) {
+                         bool& restart_devex, std::string& failure,
+                         PriceDseArithmeticProfile* profile) {
   restart_devex = false;
+  update.nonpivotal_row.clear();
   update.nonpivotal_value.clear();
   update.pivotal_value = 0.0;
-  if (direction.dimension != state.m || !direction.finite() || pivot == 0.0) {
+  if (direction.dimension() != state.m || !direction.finite() || pivot == 0.0) {
     failure = "edge-weight update received an invalid pivotal column";
     return false;
   }
@@ -1678,22 +1915,23 @@ bool compute_dse_weights(const State& state, const Leaving& leaving,
       failure = "Devex new pivotal weight is non-finite";
       return false;
     }
-    const int update_count = static_cast<int>(direction.index.size());
+    const int update_count = direction.count();
+    update.nonpivotal_row.reserve(static_cast<std::size_t>(update_count));
     update.nonpivotal_value.reserve(static_cast<std::size_t>(update_count));
     for (int position = 0; position < update_count; ++position) {
-      const int row = direction.index[static_cast<std::size_t>(position)];
+      const int row = direction.index(position);
       if (row < 0 || row >= state.m) {
         failure = "Devex direction pattern contains an invalid row";
         return false;
       }
       if (row == leaving.row) continue;
       const double candidate =
-          new_pivotal * direction.value[static_cast<std::size_t>(position)] *
-          direction.value[static_cast<std::size_t>(position)];
+          new_pivotal * direction.value(position) * direction.value(position);
       if (!std::isfinite(candidate)) {
         failure = "Devex recurrence produced a non-finite weight";
         return false;
       }
+      update.nonpivotal_row.push_back(row);
       update.nonpivotal_value.push_back(
           std::max(state.edge_weight[static_cast<std::size_t>(row)],
                    candidate));
@@ -1702,37 +1940,61 @@ bool compute_dse_weights(const State& state, const Leaving& leaving,
     return true;
   }
 
-  // HFactor already holds the FTRAN result in a dense HVector. The recurrence
-  // only reads rho on the captured pivotal-column support, so extract exactly
-  // those coordinates in direction order instead of exporting packed rho,
-  // clearing O(m) dense scratch, and scattering rho back into it.
-  static thread_local std::vector<double> rho_on_direction;
-  if (!state.factor->indexed_ftran_at_captured_pattern(
-          leaving.row_ep, rho_on_direction)) {
+  // HFactor already holds rho in a dense HVector. Goldfarb--Reid DSE reads it
+  // only on the captured pivotal-column support, so the default path exposes a
+  // generation-bound view in that same order (derivation document section
+  // 8.19); the diagnostic control retains the prior value export.
+  static thread_local std::vector<double> packed_rho_on_direction;
+  HFactorBackend::ResidentVectorView resident_rho_on_direction;
+  const bool use_resident_rho =
+      leaving.has_resident_row_ep() && !packed_dse_ftran_enabled();
+  const double ftran_start = profile != nullptr ? bfrt_profile_clock() : 0.0;
+  const bool dse_ftran_ok =
+      use_resident_rho
+          ? state.factor->resident_ftran_at_captured_pattern(
+                leaving.resident_row_ep, resident_rho_on_direction)
+      : leaving.has_resident_row_ep()
+          ? state.factor->resident_ftran_at_captured_pattern(
+                leaving.resident_row_ep, packed_rho_on_direction)
+          : state.factor->indexed_ftran_at_captured_pattern(
+                leaving.row_ep, packed_rho_on_direction);
+  if (profile != nullptr) {
+    profile->dse_ftran += bfrt_profile_clock() - ftran_start;
+  }
+  if (!dse_ftran_ok) {
     failure = "DSE packed FTRAN failed";
     return false;
   }
-  if (rho_on_direction.size() != direction.value.size()) {
+  const int rho_count = use_resident_rho
+                            ? resident_rho_on_direction.count()
+                            : static_cast<int>(packed_rho_on_direction.size());
+  if (rho_count != direction.count()) {
     failure = "DSE auxiliary FTRAN pattern disagrees with pivotal column";
     return false;
   }
   const double old_pivotal_weight =
       state.edge_weight[static_cast<std::size_t>(leaving.row)];
   const double inv_pivot = 1.0 / pivot;
-  const int update_count = static_cast<int>(direction.index.size());
+  const int update_count = direction.count();
   const bool lean_dse = lean_dse_enabled();
+  const bool reuse_dse_terms = sizeof(long double) == sizeof(double) &&
+                               !repeated_dse_terms_control_enabled();
+  const double recurrence_start =
+      profile != nullptr ? bfrt_profile_clock() : 0.0;
+  update.nonpivotal_row.reserve(static_cast<std::size_t>(update_count));
   update.nonpivotal_value.reserve(static_cast<std::size_t>(update_count));
   for (int position = 0; position < update_count; ++position) {
-    const int row = direction.index[static_cast<std::size_t>(position)];
+    const int row = direction.index(position);
     if (row < 0 || row >= state.m) {
       failure = "DSE direction pattern contains an invalid row";
       return false;
     }
     if (row == leaving.row) continue;
-    const double ratio =
-        direction.value[static_cast<std::size_t>(position)] * inv_pivot;
+    const double ratio = direction.value(position) * inv_pivot;
     const double rho_value =
-        rho_on_direction[static_cast<std::size_t>(position)];
+        use_resident_rho
+            ? resident_rho_on_direction.value(position)
+            : packed_rho_on_direction[static_cast<std::size_t>(position)];
     const double stored_weight =
         state.edge_weight[static_cast<std::size_t>(row)];
     double value;
@@ -1744,6 +2006,18 @@ bool compute_dse_weights(const State& state, const Leaving& leaving,
               ratio * ratio * old_pivotal_weight;
       roundoff = 1024.0 * std::numeric_limits<double>::epsilon() *
                  std::max(1.0, std::abs(stored_weight));
+    } else if (reuse_dse_terms) {
+      // MSVC long double is double. Reuse the two Goldfarb--Reid terms in the
+      // identical left-to-right value and floor order (derivation Section
+      // 8.23); wider-long-double targets retain the expression below.
+      const double cross_term = 2.0 * ratio * rho_value;
+      const double square_term =
+          ratio * ratio * old_pivotal_weight;
+      value = stored_weight - cross_term + square_term;
+      double floor_scale = std::max(1.0, std::abs(stored_weight));
+      floor_scale = std::max(floor_scale, std::abs(cross_term));
+      floor_scale = std::max(floor_scale, std::abs(square_term));
+      roundoff = 1024.0 * std::numeric_limits<double>::epsilon() * floor_scale;
     } else {
       const long double ratio_ld = static_cast<long double>(ratio);
       const long double value_ld =
@@ -1760,6 +2034,7 @@ bool compute_dse_weights(const State& state, const Leaving& leaving,
       failure = "Goldfarb-Reid update produced a non-finite DSE weight";
       return false;
     }
+    update.nonpivotal_row.push_back(row);
     update.nonpivotal_value.push_back(std::max(value, roundoff));
   }
   const double new_pivotal_weight =
@@ -1770,6 +2045,9 @@ bool compute_dse_weights(const State& state, const Leaving& leaving,
     return false;
   }
   update.pivotal_value = new_pivotal_weight;
+  if (profile != nullptr) {
+    profile->dse_recurrence += bfrt_profile_clock() - recurrence_start;
+  }
   return true;
 }
 

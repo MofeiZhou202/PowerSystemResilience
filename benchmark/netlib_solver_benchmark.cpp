@@ -10,7 +10,8 @@
 ///       --time-limit 30 --csv reports/netlib_benchmark.csv
 ///       --json reports/netlib_benchmark.json
 ///   netlib_solver_benchmark --case afiro --solvers highs-simplex,ipopt
-/// Fully native comparison key: native-dual-direct (no HiGHS presolve).
+/// Fully native comparison keys: native-dual-direct and
+/// native-dual-devex-direct (no HiGHS presolve).
 /// DSE comparison keys: native-dual-devex, native-dual-structural-dse,
 /// native-dual-exact-dse, native-dual-certified-dse.
 
@@ -226,7 +227,8 @@ bool parse_args(int argc, char** argv, Config& cfg) {
           << "                       IPM keys: native-ipm-direct,\n"
           << "                       native-ipm-legacy-step\n"
           << "                       native DSE keys: native-dual-devex,\n"
-          << "                       full-native key: native-dual-direct\n"
+          << "                       full-native keys: native-dual-direct,\n"
+          << "                       native-dual-devex-direct\n"
           << "                       native-dual-structural-dse,\n"
           << "                       native-dual-exact-dse,\n"
           << "                       native-dual-certified-dse\n"
@@ -645,6 +647,8 @@ RunResult run_adapter(const CaseInfo& kase, const std::string& solver,
   const auto t0 = std::chrono::steady_clock::now();
   if (solver == "native-dual-simplex" || solver == "native-dual-direct" ||
       solver == "native-dual-devex" ||
+      solver == "native-dual-devex-native-presolve" ||
+      solver == "native-dual-devex-direct" ||
       solver == "native-dual-structural-dse" ||
       solver == "native-dual-exact-dse" ||
       solver == "native-dual-certified-dse") {
@@ -652,8 +656,14 @@ RunResult run_adapter(const CaseInfo& kase, const std::string& solver,
     opt.lp_kernel_backend = eng::LpKernelBackend::ExperimentalNative;
     opt.max_iter = cfg.max_iterations;
     opt.time_limit_sec = cfg.time_limit_sec;
-    opt.use_highs_presolve = solver != "native-dual-direct";
-    if (solver == "native-dual-devex") {
+    opt.use_highs_presolve = solver != "native-dual-direct" &&
+                             solver != "native-dual-devex-direct" &&
+                             solver != "native-dual-devex-native-presolve";
+    opt.use_native_presolve =
+        solver == "native-dual-devex-native-presolve";
+    if (solver == "native-dual-devex" ||
+        solver == "native-dual-devex-native-presolve" ||
+        solver == "native-dual-devex-direct") {
       opt.dual_edge_weight_initialization =
           eng::DualEdgeWeightInitialization::Devex;
     } else if (solver == "native-dual-structural-dse") {
@@ -669,6 +679,10 @@ RunResult run_adapter(const CaseInfo& kase, const std::string& solver,
     result = eng::solve_lp_with_basis(kase.lp, opt).result;
     if (solver == "native-dual-direct") {
       row.solver = "Native-DualSimplex[direct]";
+    } else if (solver == "native-dual-devex-direct") {
+      row.solver = "Native-DualSimplex[Devex,direct]";
+    } else if (solver == "native-dual-devex-native-presolve") {
+      row.solver = "Native-DualSimplex[Devex](+native-presolve)";
     } else if (solver == "native-dual-devex") {
       row.solver = "Native-DualSimplex[Devex](+HiGHS-presolve)";
     } else if (solver == "native-dual-structural-dse") {
@@ -690,10 +704,13 @@ RunResult run_adapter(const CaseInfo& kase, const std::string& solver,
     // presolve-free as the h8-comparable control arm. Env
     // MIPSOLVERS_NATIVE_PRESOLVE=0 force-disables per run.
     opt.presolve = solver != "native-ipm-direct";
-    opt.use_highs_presolve = solver != "native-ipm-direct";
+    // This key isolates Native presolve.  HiGHS presolve is a separate API/
+    // environment control; enabling both here made a Native policy rejection
+    // silently run the bridge and invalidated Section 8.22 measurements.
+    opt.use_highs_presolve = false;
     opt.centrality_step_control = solver != "native-ipm-legacy-step";
     result = eng::NativeIPMLPAdapter(opt).solve_lp(kase.lp);
-    if (!opt.use_highs_presolve) {
+    if (!opt.presolve) {
       row.solver = "Native-IPM[centrality-step,direct]";
     } else {
       row.solver = opt.centrality_step_control

@@ -732,7 +732,8 @@ bool reconstruct(State& state, std::string& failure, bool primal, bool dual,
     }
     const Eigen::VectorXd y = state.factor->btran(c_basic);
     if (y.size() != state.m || !y.allFinite()) {
-      failure = "BTRAN failed backward-error validation";
+      failure = "BTRAN failed backward-error validation: " +
+                state.factor->last_solve_diagnostics();
       return false;
     }
     reconstruct_reduced_costs(state, y);
@@ -1441,11 +1442,29 @@ bool initialize(State& state, const StandardFormLP& sf,
   } else if (!build_logical_basis(sf, state.basis, failure)) {
     return false;
   }
-  state.factor =
-      std::make_shared<BasisFactor>(sf, logical_columns(sf));
-  if (!state.factor->rebuild(state.basis, statistics.rank_repairs, failure))
-    return false;
-  ++statistics.reinversions;
+  std::shared_ptr<BasisFactor> reusable_factor;
+  if (hint != nullptr && options.allow_persistent_lp_state &&
+      hint->cached_sparse_basis &&
+      hint->cached_sparse_basis->kind() == BasisOpsKind::NativeSparse) {
+    reusable_factor =
+        std::dynamic_pointer_cast<BasisFactor>(hint->cached_sparse_basis);
+  }
+  // Revised-simplex reoptimization permits retaining B and its eta updates
+  // when only b/l/u changed. Matrix identity, basis order, and the persisted
+  // eta epoch jointly exclude copied structures and sibling mutation; see
+  // docs/archive/native_presolve_lp_2026-08-18.md, Section 8.18 (Maros 2003,
+  // Section 9).
+  if (reusable_factor &&
+      reusable_factor->reusable_for(sf, state.basis,
+                                    hint->persist_eta_count)) {
+    state.factor = std::move(reusable_factor);
+    ++statistics.initial_factor_reuses;
+  } else {
+    state.factor = std::make_shared<BasisFactor>(sf, logical_columns(sf));
+    if (!state.factor->rebuild(state.basis, statistics.rank_repairs, failure))
+      return false;
+    ++statistics.reinversions;
+  }
   if (!reconstruct(state, failure)) return false;
   state.fresh_rebuild = true;
   state.updates_since_rebuild = 0;

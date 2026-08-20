@@ -351,6 +351,98 @@ TEST_CASE("Node LP dispatcher owns persistent state instead of queue nodes",
   CHECK_FALSE(sibling.basis.cached_sparse_basis);
 }
 
+TEST_CASE("Native persistent factor reuse is matrix and eta epoch exact",
+          "[dual_simplex][native][persistent][factor]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd(2);
+  lp.c << 0.0, 1.0;
+  lp.A.resize(0, 2);
+  lp.b.resize(0);
+  lp.Aeq.resize(1, 2);
+  lp.Aeq.insert(0, 0) = 1.0;
+  lp.Aeq.insert(0, 1) = 1.0;
+  lp.Aeq.makeCompressed();
+  lp.beq = Eigen::VectorXd::Ones(1);
+  lp.vars.push_back({VarType::Continuous, 0.0, 10.0});
+  lp.vars.push_back({VarType::Continuous, 0.0, 10.0});
+
+  SimplexOptions options;
+  options.lp_kernel_backend = LpKernelBackend::ExperimentalNative;
+  options.allow_persistent_lp_state = true;
+  StandardFormLP sf = build_standard_form_lp(lp);
+  auto root = solve_lp_from_sf(sf, options);
+  REQUIRE(root.result.stats.success);
+  REQUIRE(root.basis.cached_sparse_basis);
+  const auto root_factor = root.basis.cached_sparse_basis;
+
+  Eigen::VectorXd lb = Eigen::VectorXd::Zero(2);
+  Eigen::VectorXd ub(2);
+  ub << 10.0, 5.0;
+  update_standard_form_bounds(sf, lp, lb, ub);
+  auto reused = solve_lp_from_sf(sf, options, &root.basis);
+  REQUIRE(reused.result.stats.success);
+  CHECK(reused.result.stats.objective == Approx(0.0).margin(1e-12));
+  CHECK(reused.basis.cached_sparse_basis == root_factor);
+  CHECK(reused.result.stats.native_factor_reuses == 1);
+  CHECK(reused.result.stats.native_reinversions == 0);
+
+  auto stale_epoch = reused.basis;
+  ++stale_epoch.persist_eta_count;
+  auto rebuilt_epoch = solve_lp_from_sf(sf, options, &stale_epoch);
+  REQUIRE(rebuilt_epoch.result.stats.success);
+  CHECK(rebuilt_epoch.basis.cached_sparse_basis != root_factor);
+  CHECK(rebuilt_epoch.result.stats.native_factor_reuses == 0);
+  CHECK(rebuilt_epoch.result.stats.native_reinversions == 1);
+
+  StandardFormLP copied_sf = sf;
+  auto rebuilt_matrix = solve_lp_from_sf(copied_sf, options, &reused.basis);
+  REQUIRE(rebuilt_matrix.result.stats.success);
+  CHECK(rebuilt_matrix.basis.cached_sparse_basis != root_factor);
+  CHECK(rebuilt_matrix.result.stats.native_factor_reuses == 0);
+  CHECK(rebuilt_matrix.result.stats.native_reinversions == 1);
+}
+
+TEST_CASE("Native node dispatcher reattaches its worker-local factor",
+          "[dual_simplex][native][persistent][dispatcher]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd(2);
+  lp.c << 0.0, 1.0;
+  lp.A.resize(0, 2);
+  lp.b.resize(0);
+  lp.Aeq.resize(1, 2);
+  lp.Aeq.insert(0, 0) = 1.0;
+  lp.Aeq.insert(0, 1) = 1.0;
+  lp.Aeq.makeCompressed();
+  lp.beq = Eigen::VectorXd::Ones(1);
+  lp.vars.push_back({VarType::Continuous, 0.0, 10.0});
+  lp.vars.push_back({VarType::Continuous, 0.0, 10.0});
+
+  detail::DispatcherConfig config;
+  config.lp_kernel_backend = LpKernelBackend::ExperimentalNative;
+  config.allow_persistent_lp_state = true;
+  detail::SolverDispatcher dispatcher(config, nullptr);
+
+  StandardFormLP sf = build_standard_form_lp(lp);
+  auto root = dispatcher.solve_no_fallback(
+      sf, nullptr, detail::SolveContext::NodeLP);
+  REQUIRE(root.result.stats.success);
+  CHECK_FALSE(root.basis.cached_sparse_basis);
+
+  Eigen::VectorXd lb = Eigen::VectorXd::Zero(2);
+  Eigen::VectorXd ub(2);
+  ub << 10.0, 5.0;
+  update_standard_form_bounds(sf, lp, lb, ub);
+  auto child = dispatcher.solve_no_fallback(
+      sf, &root.basis, detail::SolveContext::NodeLP);
+  REQUIRE(child.result.stats.success);
+  CHECK(child.result.stats.objective == Approx(0.0).margin(1e-12));
+  CHECK(child.result.stats.native_factor_reuses == 1);
+  CHECK(child.result.stats.native_reinversions == 0);
+  CHECK_FALSE(child.basis.cached_sparse_basis);
+}
+
 TEST_CASE("HiGHS persistent LP honors the caller iteration limit",
           "[dual_simplex][persistent][iteration_limit]") {
   constexpr int rows = 64;
@@ -2138,6 +2230,8 @@ TEST_CASE("DualSimplex: batched DSE uses one existing INVERT",
     CHECK(evidence.weights[static_cast<std::size_t>(row)] ==
           Approx(inverse.row(row).squaredNorm()).epsilon(2e-12));
   }
+  CHECK(factor.strengthen_pivot_threshold());
+  CHECK_FALSE(factor.strengthen_pivot_threshold());
 }
 
 TEST_CASE("DualSimplex: cold pricing falls back to O(m+n) Devex",
@@ -2381,9 +2475,10 @@ TEST_CASE("DualSimplex: certified DSE selects the brute-force exact merit",
   CHECK(leaving.side == -1);
   CHECK(state.certified_dse_candidates == 3);
   CHECK(state.certified_dse_btrans >= 2);
-  REQUIRE(leaving.row_ep.dimension == 3);
+  REQUIRE(leaving.has_resident_row_ep());
+  REQUIRE(leaving.resident_row_ep.dimension() == 3);
   for (int col = 0; col < 3; ++col) {
-    CHECK(leaving.row_ep.at(col) ==
+    CHECK(leaving.row_ep_at(col) ==
           Approx(inverse.row(expected_row)[col]).epsilon(2e-12));
   }
 }
@@ -3530,6 +3625,126 @@ TEST_CASE("HFactor extracts DSE values on the captured FTRAN pattern",
     }
     CHECK(extracted[k] == expected);
   }
+}
+
+TEST_CASE("HFactor resident BTRAN matches packed coordinates and expires",
+          "[dual_simplex][performance][hfactor][resident_view]") {
+  Eigen::Matrix<double, 3, 4> dense;
+  dense << 2.0, 1.0, 0.0, 1.0,
+           0.0, 3.0, 1.0, -1.0,
+           1.0, 0.0, 4.0, 2.0;
+  Eigen::SparseMatrix<double> A = dense.sparseView();
+  A.makeCompressed();
+  const std::vector<int> basis{2, 0, 1};
+  HFactorBackend factor;
+  REQUIRE(factor.factorize(A, basis.data(), 3));
+
+  std::vector<int> aq_index;
+  std::vector<double> aq_value;
+  std::vector<int> lookup;
+  const std::vector<int> column_index{0, 1, 2};
+  const std::vector<double> column_value{1.0, -1.0, 2.0};
+  REQUIRE(factor.ftran_indexed(column_index, column_value, aq_index, aq_value,
+                               lookup, true));
+  REQUIRE_FALSE(aq_index.empty());
+  const int pivot_row = aq_index.front();
+
+  std::vector<int> packed_index;
+  std::vector<double> packed_value;
+  REQUIRE(factor.btran_indexed({pivot_row}, {1.0}, packed_index,
+                               packed_value, lookup, true));
+  HFactorBackend::ResidentVectorView resident;
+  REQUIRE(factor.btran_indexed_resident({pivot_row}, {1.0}, resident));
+  REQUIRE(resident.valid());
+  REQUIRE(resident.finite());
+  REQUIRE(resident.dimension() == 3);
+  REQUIRE(resident.count() == static_cast<int>(packed_index.size()));
+  double expected_norm = 0.0;
+  double expected_max = 0.0;
+  for (int k = 0; k < resident.count(); ++k) {
+    CAPTURE(k);
+    CHECK(resident.index(k) == packed_index[static_cast<std::size_t>(k)]);
+    CHECK(resident.value(k) == packed_value[static_cast<std::size_t>(k)]);
+    CHECK(resident.at(resident.index(k)) == resident.value(k));
+    expected_norm += resident.value(k) * resident.value(k);
+    expected_max = std::max(expected_max, std::abs(resident.value(k)));
+  }
+  CHECK(resident.squared_norm() == expected_norm);
+  CHECK(resident.max_abs() == expected_max);
+
+  std::vector<int> packed_aq_index;
+  std::vector<double> packed_aq_value;
+  REQUIRE(factor.ftran_indexed(column_index, column_value, packed_aq_index,
+                               packed_aq_value, lookup, true));
+  HFactorBackend::ResidentVectorView resident_aq;
+  REQUIRE(factor.ftran_indexed_resident(column_index, column_value,
+                                        resident_aq));
+  REQUIRE(resident_aq.valid());
+  REQUIRE(resident_aq.finite());
+  REQUIRE(resident_aq.count() ==
+          static_cast<int>(packed_aq_index.size()));
+  for (int k = 0; k < resident_aq.count(); ++k) {
+    CAPTURE(k);
+    CHECK(resident_aq.index(k) ==
+          packed_aq_index[static_cast<std::size_t>(k)]);
+    CHECK(resident_aq.value(k) ==
+          packed_aq_value[static_cast<std::size_t>(k)]);
+    CHECK(resident_aq.at(resident_aq.index(k)) == resident_aq.value(k));
+  }
+
+  std::vector<double> packed_dse;
+  std::vector<double> resident_dse;
+  REQUIRE(factor.ftran_indexed_at_captured_pattern(
+      packed_index, packed_value, packed_dse));
+  REQUIRE(factor.ftran_resident_ep_at_captured_aq_pattern(resident,
+                                                          resident_dse));
+  CHECK(resident_dse == packed_dse);
+
+  HFactorBackend::ResidentVectorView resident_dse_view;
+  REQUIRE(factor.ftran_resident_ep_at_captured_aq_pattern(
+      resident, resident_dse_view));
+  REQUIRE(resident_dse_view.valid());
+  REQUIRE(resident_dse_view.count() == static_cast<int>(packed_dse.size()));
+  for (int k = 0; k < resident_dse_view.count(); ++k) {
+    CHECK(resident_dse_view.index(k) == resident_aq.index(k));
+    CHECK(resident_dse_view.value(k) == packed_dse[static_cast<std::size_t>(k)]);
+    CHECK(resident_dse_view.at(resident_dse_view.index(k)) ==
+          packed_dse[static_cast<std::size_t>(k)]);
+  }
+  const HFactorBackend::ResidentVectorView expired_dse_view = resident_dse_view;
+  REQUIRE(factor.ftran_resident_ep_at_captured_aq_pattern(
+      resident, resident_dse_view));
+  CHECK_FALSE(expired_dse_view.valid());
+
+  const std::vector<int> bfrt_rhs_index{0, 2};
+  const std::vector<double> bfrt_rhs_value{0.75, -1.25};
+  std::vector<int> packed_bfrt_index;
+  std::vector<double> packed_bfrt_value;
+  REQUIRE(factor.ftran_indexed(bfrt_rhs_index, bfrt_rhs_value,
+                               packed_bfrt_index, packed_bfrt_value, lookup));
+  HFactorBackend::ResidentVectorView resident_bfrt;
+  REQUIRE(factor.ftran_indexed_scratch_resident(
+      bfrt_rhs_index, bfrt_rhs_value, resident_bfrt));
+  REQUIRE(resident_bfrt.valid());
+  REQUIRE(resident_bfrt.count() == static_cast<int>(packed_bfrt_index.size()));
+  for (int k = 0; k < resident_bfrt.count(); ++k) {
+    CHECK(resident_bfrt.index(k) ==
+          packed_bfrt_index[static_cast<std::size_t>(k)]);
+    CHECK(resident_bfrt.value(k) ==
+          packed_bfrt_value[static_cast<std::size_t>(k)]);
+    CHECK(resident_bfrt.at(resident_bfrt.index(k)) == resident_bfrt.value(k));
+  }
+  const HFactorBackend::ResidentVectorView expired_bfrt = resident_bfrt;
+  REQUIRE(factor.ftran_resident_ep_at_captured_aq_pattern(
+      resident, resident_dse_view));
+  CHECK_FALSE(expired_bfrt.valid());
+
+  REQUIRE(factor.update_captured(pivot_row, 3));
+  CHECK_FALSE(resident.valid());
+  CHECK(resident.count() == 0);
+  CHECK_FALSE(resident_aq.valid());
+  CHECK(resident_aq.count() == 0);
+  CHECK_FALSE(resident_dse_view.valid());
 }
 
 TEST_CASE("HFactor preserves caller basis positions and solve coordinates",

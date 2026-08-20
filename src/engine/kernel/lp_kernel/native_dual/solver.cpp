@@ -269,7 +269,9 @@ struct DSProfile {
   double leaving = 0.0, price = 0.0, entering = 0.0, ftran = 0.0, dse = 0.0,
          rebuild = 0.0, minor_total = 0.0, primal = 0.0, edge_init = 0.0,
          postcond = 0.0, rc_update = 0.0, valid = 0.0, lu_update = 0.0,
-         cycle = 0.0, bfrt_sort = 0.0, bfrt_order = 0.0;
+         cycle = 0.0, bfrt_prefilter = 0.0, bfrt_candidate = 0.0,
+         bfrt_sort = 0.0, bfrt_order = 0.0, bfrt_harris = 0.0,
+         bfrt_terminal_scan = 0.0, bfrt_rhs = 0.0;
   long pivots = 0, rebuilds = 0;
   long bfrt_calls = 0, bfrt_candidates = 0, bfrt_groups = 0,
        bfrt_selected_group = 0, bfrt_flips = 0,
@@ -283,6 +285,7 @@ struct DSProfile {
   // the end of solve_impl. solve_pure = solve_time - export_time.
   double solve_time = 0.0, export_time = 0.0;
   double export_btran_time = 0.0;
+  detail::PriceDseArithmeticProfile arithmetic;
   std::uint64_t solve_count = 0;
   // Average structural support of the two hot simplex vectors.
   double sum_rowep_nnz = 0.0, sum_pivotrow_nnz = 0.0;
@@ -296,7 +299,8 @@ struct DSProfile {
     enabled = std::getenv("MIPSOLVERS_DS_PROFILE") != nullptr;
     leaving = price = entering = ftran = dse = rebuild = minor_total = primal =
         edge_init = postcond = rc_update = valid = lu_update = cycle =
-            bfrt_sort = bfrt_order = 0.0;
+            bfrt_prefilter = bfrt_candidate = bfrt_sort = bfrt_order =
+                bfrt_harris = bfrt_terminal_scan = bfrt_rhs = 0.0;
     sum_rowep_nnz = sum_pivotrow_nnz = 0.0;
     density_samples = 0;
     dual_one_reinvert.clear();
@@ -310,6 +314,7 @@ struct DSProfile {
     model_m = model_n = 0;
     solve_time = export_time = 0.0;
     export_btran_time = 0.0;
+    arithmetic.clear();
     solve_count = 0;
     start_clock = enabled ? std::chrono::duration<double>(
                                 std::chrono::steady_clock::now()
@@ -393,7 +398,42 @@ struct DSProfile {
               ? 100.0 * static_cast<double>(bfrt_exact_dots_wasted) /
                     static_cast<double>(bfrt_exact_dots)
               : 0.0);
+      std::fprintf(
+          stderr,
+          "[DS-BFRT-SPLIT] prefilter=%.6fs candidate=%.6fs order=%.6fs "
+          "harris=%.6fs terminalScan=%.6fs rhs=%.6fs accounted=%.6fs "
+          "(%.1f%% of entering)\n",
+          bfrt_prefilter, bfrt_candidate, bfrt_order, bfrt_harris,
+          bfrt_terminal_scan, bfrt_rhs,
+          bfrt_prefilter + bfrt_candidate + bfrt_order + bfrt_harris +
+              bfrt_terminal_scan + bfrt_rhs,
+          entering > 0.0
+              ? 100.0 * (bfrt_prefilter + bfrt_candidate + bfrt_order +
+                         bfrt_harris + bfrt_terminal_scan + bfrt_rhs) /
+                    entering
+              : 0.0);
     }
+    std::fprintf(
+        stderr,
+        "[DS-ARITH-SPLIT] priceAccumulate=%.6fs leavingDot=%.6fs "
+        "pack=%.6fs audit=%.6fs priceAccounted=%.6fs (%.1f%% of price) | "
+        "dseFtran=%.6fs recurrenceTransaction=%.6fs dseAccounted=%.6fs "
+        "(%.1f%% of dse)\n",
+        arithmetic.price_accumulate, arithmetic.price_leaving_dot,
+        arithmetic.price_pack, arithmetic.price_audit,
+        arithmetic.price_accumulate + arithmetic.price_leaving_dot +
+            arithmetic.price_pack + arithmetic.price_audit,
+        price > 0.0
+            ? 100.0 * (arithmetic.price_accumulate +
+                       arithmetic.price_leaving_dot + arithmetic.price_pack +
+                       arithmetic.price_audit) /
+                  price
+            : 0.0,
+        arithmetic.dse_ftran, arithmetic.dse_recurrence,
+        arithmetic.dse_ftran + arithmetic.dse_recurrence,
+        dse > 0.0
+            ? 100.0 * (arithmetic.dse_ftran + arithmetic.dse_recurrence) / dse
+            : 0.0);
     const auto report_reinvert = [](const char* phase,
                                     const ReinvertPhaseProfile& profile) {
       const LinearFit wall_fit = profile.time_fit();
@@ -510,13 +550,49 @@ struct MinorScratch {
 };
 thread_local MinorScratch g_ds_scratch;
 
+struct BfrtDelta {
+  detail::IndexedVector packed;
+  HFactorBackend::ResidentVectorView resident;
+  bool factor_resident{false};
+
+  void clear(int dimension) {
+    packed.clear(dimension);
+    resident = {};
+    factor_resident = false;
+  }
+  int count() const {
+    return factor_resident ? resident.count()
+                           : static_cast<int>(packed.index.size());
+  }
+  int index(int position) const {
+    return factor_resident
+               ? resident.index(position)
+               : packed.index[static_cast<std::size_t>(position)];
+  }
+  double value(int position) const {
+    return factor_resident
+               ? resident.value(position)
+               : packed.value[static_cast<std::size_t>(position)];
+  }
+  double at(int row) const {
+    return factor_resident ? resident.at(row) : packed.at(row);
+  }
+};
+thread_local BfrtDelta g_bfrt_delta;
+
+bool packed_bfrt_ftran_enabled() {
+  static const bool enabled =
+      std::getenv("MIPSOLVERS_DS_PACKED_BFRT_FTRAN") != nullptr;
+  return enabled;
+}
+
 // S3 proposal step: build the primal transaction (basic-value changes) from the
 // two FTRAN images into `scratch.primal_changes`. The scratch is a parameter so
 // an S4 worker can propose on private storage; the arithmetic and order are the
 // production ones. Returns false with a message on an invalid or non-finite row.
 bool build_primal_transaction(MinorScratch& scratch, const State& state,
-                              const detail::IndexedVector& bfrt_delta,
-                              const detail::IndexedVector& direction,
+                               const BfrtDelta& bfrt_delta,
+                              const detail::PivotalColumn& direction,
                               double primal_step, int leaving_row,
                               double entering_bound, std::string& failure) {
   std::vector<std::pair<int, double>>& primal_changes = scratch.primal_changes;
@@ -542,15 +618,17 @@ bool build_primal_transaction(MinorScratch& scratch, const State& state,
     scratch.primal_delta[index] += delta;
     return true;
   };
-  for (std::size_t k = 0; k < bfrt_delta.index.size(); ++k) {
-    if (!add_primal_delta(bfrt_delta.index[k], -bfrt_delta.value[k])) {
-      failure = "packed primal transaction contains an invalid row";
+  const int bfrt_count = bfrt_delta.count();
+  for (int k = 0; k < bfrt_count; ++k) {
+    if (!add_primal_delta(bfrt_delta.index(k), -bfrt_delta.value(k))) {
+      failure = "BFRT primal transaction contains an invalid row";
       return false;
     }
   }
-  for (std::size_t k = 0; k < direction.index.size(); ++k) {
-    if (!add_primal_delta(direction.index[k],
-                          -direction.value[k] * primal_step)) {
+  const int direction_count = direction.count();
+  for (int k = 0; k < direction_count; ++k) {
+    if (!add_primal_delta(direction.index(k),
+                          -direction.value(k) * primal_step)) {
       failure = "packed primal transaction contains an invalid row";
       return false;
     }
@@ -637,7 +715,7 @@ bool certify_bfrt_dual_feasibility(const State& state,
 // returns the clamped remaining_delta via out-param, false with a message on a
 // non-finite or beyond-envelope disagreement.
 bool certify_bfrt_leaving_agreement(const State& state,
-                                    const detail::IndexedVector& bfrt_delta,
+                                     const BfrtDelta& bfrt_delta,
                                     int leaving_row, int leaving_side,
                                     int leaving_col, double covered_violation,
                                     double violation, double& remaining_delta,
@@ -662,7 +740,7 @@ bool certify_bfrt_leaving_agreement(const State& state,
                 std::abs(bfrt_delta_at_row), std::abs(leaving_bound)});
   if (!std::isfinite(remaining_delta) ||
       leaving_side * remaining_delta < -remaining_slack) {
-    failure = "packed BFRT FTRAN disagrees with the leaving-row change";
+    failure = "BFRT FTRAN disagrees with the leaving-row change";
     return false;
   }
   if (leaving_side * remaining_delta < 0.0) remaining_delta = 0.0;
@@ -714,22 +792,43 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
   if (!state.partition_row.empty()) {
     const int leaving_col_priced =
         state.basis[static_cast<std::size_t>(leaving.row)];
-    detail::multiply_AT_partitioned_bfrt(
-        state.partition_row, state.sf->A, leaving.row_ep, state.move,
-        leaving_col_priced, pivot_row_storage, bfrt_active_position);
+    if (leaving.has_resident_row_ep()) {
+      detail::multiply_AT_partitioned_bfrt(
+          state.partition_row, state.sf->A, leaving.resident_row_ep, state.move,
+          leaving_col_priced, pivot_row_storage, bfrt_active_position,
+          g_ds_profile.enabled ? &g_ds_profile.arithmetic : nullptr);
+    } else {
+      detail::multiply_AT_partitioned_bfrt(
+          state.partition_row, state.sf->A, leaving.row_ep, state.move,
+          leaving_col_priced, pivot_row_storage, bfrt_active_position,
+          g_ds_profile.enabled ? &g_ds_profile.arithmetic : nullptr);
+    }
   } else {
-    detail::multiply_AT_indexed_bfrt(state.sf->A_row, leaving.row_ep,
-                                     state.basic, state.move, pivot_row_storage,
-                                     bfrt_active_position);
+    if (leaving.has_resident_row_ep()) {
+      detail::multiply_AT_indexed_bfrt(
+          state.sf->A_row, leaving.resident_row_ep, state.basic, state.move,
+          pivot_row_storage, bfrt_active_position,
+          g_ds_profile.enabled ? &g_ds_profile.arithmetic : nullptr);
+    } else {
+      detail::multiply_AT_indexed_bfrt(
+          state.sf->A_row, leaving.row_ep, state.basic, state.move,
+          pivot_row_storage, bfrt_active_position,
+          g_ds_profile.enabled ? &g_ds_profile.arithmetic : nullptr);
+    }
   }
   const detail::IndexedVector& pivot_row = pivot_row_storage;
-  if (!pivot_row.finite()) {
+  const double audit_start = g_ds_profile.enabled ? ds_clock() : 0.0;
+  const bool pivot_row_finite = pivot_row.finite();
+  if (g_ds_profile.enabled) {
+    g_ds_profile.arithmetic.price_audit += ds_clock() - audit_start;
+  }
+  if (!pivot_row_finite) {
     return numerical_trouble("packed PRICE produced non-finite values");
   }
   if (g_ds_profile.enabled) g_ds_profile.price += ds_clock() - _t_pr;
   if (g_ds_profile.enabled) {
     g_ds_profile.sum_rowep_nnz +=
-        static_cast<double>(leaving.row_ep.index.size());
+        static_cast<double>(leaving.row_ep_count());
     g_ds_profile.sum_pivotrow_nnz +=
         static_cast<double>(pivot_row.index.size());
     ++g_ds_profile.density_samples;
@@ -748,6 +847,12 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
     g_ds_profile.bfrt_flips += static_cast<long>(transaction.flips.size());
     g_ds_profile.bfrt_sort += transaction.bfrt_sort_time_sec;
     g_ds_profile.bfrt_order += transaction.bfrt_order_time_sec;
+    g_ds_profile.bfrt_prefilter += transaction.bfrt_prefilter_time_sec;
+    g_ds_profile.bfrt_candidate += transaction.bfrt_candidate_time_sec;
+    g_ds_profile.bfrt_harris += transaction.bfrt_harris_time_sec;
+    g_ds_profile.bfrt_terminal_scan +=
+        transaction.bfrt_terminal_scan_time_sec;
+    g_ds_profile.bfrt_rhs += transaction.bfrt_rhs_time_sec;
     g_ds_profile.bfrt_stability_prefiltered +=
         transaction.bfrt_stability_prefiltered;
     g_ds_profile.bfrt_exact_dots += transaction.bfrt_exact_dot_calls;
@@ -809,6 +914,21 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
       statistics.dual_phase_one_stable_capacity_error =
           transaction.stable_capacity_error;
     }
+    // Terminal Farkas construction outlives the minor-iteration hot path and
+    // keeps its existing packed contract. Materialize only on this rare exit;
+    // pivotal PRICE/BFRT/DSE remain factor-resident (derivation section 8.17).
+    if (leaving.has_resident_row_ep()) {
+      const int resident_count = leaving.resident_row_ep.count();
+      leaving.row_ep.clear(state.m);
+      leaving.row_ep.index.reserve(static_cast<std::size_t>(resident_count));
+      leaving.row_ep.value.reserve(leaving.row_ep.index.capacity());
+      for (int k = 0; k < resident_count; ++k) {
+        const double value = leaving.resident_row_ep.value(k);
+        if (value == 0.0) continue;
+        leaving.row_ep.index.push_back(leaving.resident_row_ep.index(k));
+        leaving.row_ep.value.push_back(value);
+      }
+    }
     outcome.kind = MinorKind::PossiblyPrimalInfeasible;
     outcome.leaving = std::move(leaving);
     return outcome;
@@ -823,12 +943,24 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
       column.value.push_back(it.value());
     }
     const double _t_ft = g_ds_profile.enabled ? ds_clock() : 0.0;
-    const detail::IndexedSolveEvidence direction_solve =
-        state.factor->indexed_ftran(column, true);
+    detail::PivotalColumn direction;
+    bool direction_accepted = false;
+    if (std::getenv("MIPSOLVERS_DS_PACKED_COL_AQ") != nullptr) {
+      detail::IndexedSolveEvidence direction_solve =
+          state.factor->indexed_ftran(column, true);
+      direction.packed = std::move(direction_solve.solution);
+      direction.factor_resident = false;
+      direction_accepted = direction_solve.accepted;
+    } else {
+      detail::ResidentSolveEvidence direction_solve =
+          state.factor->resident_ftran(column);
+      direction.resident = direction_solve.solution;
+      direction.factor_resident = direction_solve.accepted;
+      direction_accepted = direction_solve.accepted;
+    }
     if (g_ds_profile.enabled) g_ds_profile.ftran += ds_clock() - _t_ft;
-    const detail::IndexedVector& direction = direction_solve.solution;
-    if (!direction_solve.accepted) {
-      return numerical_trouble("packed pivotal-column FTRAN failed");
+    if (!direction_accepted || !direction.finite()) {
+      return numerical_trouble("pivotal-column FTRAN failed");
     }
     // col_aq (roadmap S2): read the pivotal element from the factor-resident
     // update_vec_aq backing (O(1)) instead of building a lookup over the packed
@@ -915,16 +1047,25 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
     }
     if (g_ds_profile.enabled) g_ds_profile.postcond += ds_clock() - _t_pc;
 
-    // col_bfrt (roadmap S2, first Class-P step): the BFRT flip-RHS FTRAN image
-    // is consumed entirely within this pivot, so its packed backing is reused
-    // across iterations instead of allocated per pivot. indexed_ftran_into is
-    // numerically identical to indexed_ftran (same ftran_indexed call).
-    static thread_local detail::IndexedVector bfrt_delta;
+    // BFRT's d=B^-1*r_flip remains in factor scratch. Its two consumers run
+    // before the DSE auxiliary FTRAN reuses that scratch; the packed diagnostic
+    // preserves the prior path (derivation document section 8.20).
+    BfrtDelta& bfrt_delta = g_bfrt_delta;
     bfrt_delta.clear(state.m);
     if (has_flips) {
-      if (!state.factor->indexed_ftran_into(transaction.bfrt_rhs,
-                                            bfrt_delta)) {
-        return numerical_trouble("packed BFRT RHS FTRAN failed");
+      if (packed_bfrt_ftran_enabled()) {
+        if (!state.factor->indexed_ftran_into(transaction.bfrt_rhs,
+                                               bfrt_delta.packed)) {
+          return numerical_trouble("packed BFRT RHS FTRAN failed");
+        }
+      } else {
+        detail::ResidentSolveEvidence solve =
+            state.factor->resident_scratch_ftran(transaction.bfrt_rhs);
+        bfrt_delta.resident = solve.solution;
+        bfrt_delta.factor_resident = solve.accepted;
+        if (!solve.accepted) {
+          return numerical_trouble("resident BFRT RHS FTRAN failed");
+        }
       }
     }
 
@@ -936,23 +1077,9 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
       return numerical_trouble(std::move(failure));
     }
 
-    detail::EdgeWeightUpdate& edge_weight_update =
-        g_ds_scratch.edge_weight_update;
-    bool restart_devex = false;
-    const double _t_dse = g_ds_profile.enabled ? ds_clock() : 0.0;
-    const bool _dse_ok = detail::compute_dse_weights(
-        state, leaving, pivot_row, direction, column_pivot, edge_weight_update,
-        restart_devex, failure);
-    if (g_ds_profile.enabled) g_ds_profile.dse += ds_clock() - _t_dse;
-    if (!_dse_ok) {
-      return numerical_trouble(std::move(failure));
-    }
-
-    // S3 proposal/certification/commit: every certification above ran on
-    // unmutated state. The remaining work builds the primal transaction on
-    // private workspace, then commits — the factor update is the first and only
-    // fallible commit step, so no rollback path is reachable and the move/basis
-    // exchange is published only after it succeeds.
+    // Maros (2003) section 9: build x_B-d-beta*step while d's resident view is
+    // live. This proposal mutates only MinorScratch, so DSE can still fail
+    // before the factor/basis/state commit without requiring rollback.
     const Move entering_old_move =
         state.move[static_cast<std::size_t>(entering.col)];
     const double entering_bound =
@@ -967,6 +1094,21 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
     const std::vector<std::pair<int, double>>& primal_changes =
         g_ds_scratch.primal_changes;
 
+    detail::EdgeWeightUpdate& edge_weight_update =
+        g_ds_scratch.edge_weight_update;
+    bool restart_devex = false;
+    const double _t_dse = g_ds_profile.enabled ? ds_clock() : 0.0;
+    const bool _dse_ok = detail::compute_dse_weights(
+        state, leaving, pivot_row, direction, column_pivot, edge_weight_update,
+        restart_devex, failure,
+        g_ds_profile.enabled ? &g_ds_profile.arithmetic : nullptr);
+    if (g_ds_profile.enabled) g_ds_profile.dse += ds_clock() - _t_dse;
+    if (!_dse_ok) {
+      return numerical_trouble(std::move(failure));
+    }
+
+    // S3 commit: every certification and proposal above ran on unmutated state.
+    // The factor update remains the first and only fallible commit step.
     const double _t_lu = g_ds_profile.enabled ? ds_clock() : 0.0;
     const bool _lu_ok =
         state.factor->update_indexed(leaving.row, entering.col, failure);
@@ -1004,11 +1146,20 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
       detail::cycle_signature_apply_move_toggle(state, flip.col, -old_sign);
     }
     if (g_ds_profile.enabled) g_ds_profile.cycle += ds_clock() - _t_cy;
-    std::size_t edge_value_position = 0;
-    for (const int row : direction.index) {
-      if (row == leaving.row) continue;
+    if (edge_weight_update.nonpivotal_row.size() !=
+        edge_weight_update.nonpivotal_value.size()) {
+      return numerical_trouble(
+          "edge-weight transaction row/value sizes disagree");
+    }
+    for (std::size_t k = 0;
+         k < edge_weight_update.nonpivotal_row.size(); ++k) {
+      const int row = edge_weight_update.nonpivotal_row[k];
+      if (row < 0 || row >= state.m || row == leaving.row) {
+        return numerical_trouble(
+            "edge-weight transaction contains an invalid row");
+      }
       state.edge_weight[static_cast<std::size_t>(row)] =
-          edge_weight_update.nonpivotal_value[edge_value_position++];
+          edge_weight_update.nonpivotal_value[k];
     }
     state.edge_weight[static_cast<std::size_t>(leaving.row)] =
         edge_weight_update.pivotal_value;
@@ -1478,7 +1629,8 @@ Result run_phase(State& state, Statistics& statistics,
           }
           const int primal_cleanup_iteration_start = statistics.iterations;
           const auto primal_cleanup_start = std::chrono::steady_clock::now();
-          Result cleanup = detail::run_primal_phase(state, statistics, start);
+          Result cleanup =
+              detail::run_primal_phase(state, statistics, start, true);
           statistics.primal_cleanup_iterations +=
               statistics.iterations - primal_cleanup_iteration_start;
           statistics.primal_cleanup_time_sec +=

@@ -4,9 +4,23 @@
 
 namespace mipsolvers::engine::native_dual::detail {
 
+struct PriceDseArithmeticProfile {
+  double price_accumulate{0.0};
+  double price_leaving_dot{0.0};
+  double price_pack{0.0};
+  double price_audit{0.0};
+  double dse_ftran{0.0};
+  double dse_recurrence{0.0};
+
+  void clear() { *this = PriceDseArithmeticProfile{}; }
+};
+
 struct EdgeWeightUpdate {
-  // Aligned with direction.index after skipping the leaving row. Reusing that
-  // owner avoids duplicating row indices in the transactional value stream.
+  // The factor-resident AQ view expires at factor update, while edge weights
+  // commit immediately afterward. Retain only the affected row coordinates
+  // in solver-state transaction storage; AQ values remain factor-resident.
+  // See docs/archive/native_presolve_lp_2026-08-18.md, Section 8.18.
+  std::vector<int> nonpivotal_row;
   std::vector<double> nonpivotal_value;
   double pivotal_value{0.0};
 };
@@ -28,6 +42,19 @@ void multiply_AT_indexed_bfrt(const StandardRowMatrix& A_row,
                               const std::vector<Move>& move,
                               IndexedVector& result,
                               std::vector<int>& active_position);
+void multiply_AT_indexed_bfrt(const StandardRowMatrix& A_row,
+                              const IndexedVector& y,
+                              const std::vector<char>& basic,
+                              const std::vector<Move>& move,
+                              IndexedVector& result,
+                              std::vector<int>& active_position,
+                              PriceDseArithmeticProfile* profile);
+void multiply_AT_indexed_bfrt(
+    const StandardRowMatrix& A_row,
+    const HFactorBackend::ResidentVectorView& y,
+    const std::vector<char>& basic, const std::vector<Move>& move,
+    IndexedVector& result, std::vector<int>& active_position,
+    PriceDseArithmeticProfile* profile = nullptr);
 // Partitioned dual PRICE: scans only the nonbasic prefix of each row_ep-hit
 // row (skipping basic columns), then injects the leaving column's pivotal
 // entry. Produces the same nonbasic pivotal-row values and active positions
@@ -35,9 +62,17 @@ void multiply_AT_indexed_bfrt(const StandardRowMatrix& A_row,
 void multiply_AT_partitioned_bfrt(const PartitionedRowMatrix& partition,
                                   const StandardColumnMatrix& columns,
                                   const IndexedVector& y,
+                                  const std::vector<Move>& move,
+                                  int leaving_col, IndexedVector& result,
+                                  std::vector<int>& active_position,
+                                  PriceDseArithmeticProfile* profile = nullptr);
+void multiply_AT_partitioned_bfrt(const PartitionedRowMatrix& partition,
+                                  const StandardColumnMatrix& columns,
+                                  const HFactorBackend::ResidentVectorView& y,
                                   const std::vector<Move>& move, int leaving_col,
                                   IndexedVector& result,
-                                  std::vector<int>& active_position);
+                                  std::vector<int>& active_position,
+                                  PriceDseArithmeticProfile* profile = nullptr);
 // Deterministic experimental CSC kernel exposed within the native-dual module
 // for rounding-envelope checks and controlled kernel benchmarks. Production
 // PRICE remains on the CSR path until a suite-positive selector is proved.
@@ -53,8 +88,9 @@ bool choose_entering_bfrt(const State& state, const Leaving& leaving,
                           PivotTransaction& transaction, std::string& failure);
 bool compute_dse_weights(const State& state, const Leaving& leaving,
                          const IndexedVector& pivot_row,
-                         const IndexedVector& direction, double pivot,
+                         const PivotalColumn& direction, double pivot,
                          EdgeWeightUpdate& update,
-                         bool& restart_devex, std::string& failure);
+                         bool& restart_devex, std::string& failure,
+                         PriceDseArithmeticProfile* profile = nullptr);
 
 }  // namespace mipsolvers::engine::native_dual::detail
