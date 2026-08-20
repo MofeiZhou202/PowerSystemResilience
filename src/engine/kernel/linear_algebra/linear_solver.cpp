@@ -181,6 +181,39 @@ bool EigenUmfPackSolver::solve_many(const Eigen::MatrixXd& rhs,
 class EigenKluSolver::Impl {
  public:
   Eigen::KLU<Eigen::SparseMatrix<double>> solver;
+
+  bool pattern_matches(const Eigen::SparseMatrix<double>& a) const {
+    if (!numeric_ready || !a.isCompressed() || a.rows() != rows ||
+        a.cols() != cols || a.nonZeros() != nonzeros) {
+      return false;
+    }
+    return std::equal(outer.begin(), outer.end(), a.outerIndexPtr()) &&
+           std::equal(inner.begin(), inner.end(), a.innerIndexPtr());
+  }
+
+  void record_pattern(const Eigen::SparseMatrix<double>& a) {
+    numeric_ready = a.isCompressed();
+    if (!numeric_ready) {
+      outer.clear();
+      inner.clear();
+      return;
+    }
+    rows = a.rows();
+    cols = a.cols();
+    nonzeros = a.nonZeros();
+    outer.assign(a.outerIndexPtr(), a.outerIndexPtr() + a.outerSize() + 1);
+    inner.assign(a.innerIndexPtr(), a.innerIndexPtr() + a.nonZeros());
+  }
+
+  void invalidate_numeric() { numeric_ready = false; }
+
+ private:
+  Eigen::Index rows{0};
+  Eigen::Index cols{0};
+  Eigen::Index nonzeros{0};
+  std::vector<Eigen::SparseMatrix<double>::StorageIndex> outer;
+  std::vector<Eigen::SparseMatrix<double>::StorageIndex> inner;
+  bool numeric_ready{false};
 };
 
 EigenKluSolver::EigenKluSolver() = default;
@@ -192,14 +225,21 @@ const char* EigenKluSolver::backend_name() const {
 
 void EigenKluSolver::analyze_pattern(const Eigen::SparseMatrix<double>& a) {
   empty_system_ = is_empty_square_system(a);
-  if (empty_system_) return;
+  if (empty_system_) {
+    if (impl_) impl_->invalidate_numeric();
+    return;
+  }
   if (!impl_) impl_ = std::make_unique<Impl>();
+  impl_->invalidate_numeric();
   impl_->solver.analyzePattern(a);
 }
 
 bool EigenKluSolver::factorize(const Eigen::SparseMatrix<double>& a) {
   empty_system_ = is_empty_square_system(a);
-  if (empty_system_) return true;
+  if (empty_system_) {
+    if (impl_) impl_->invalidate_numeric();
+    return true;
+  }
   const bool needs_analyze = !impl_;
   if (!impl_) impl_ = std::make_unique<Impl>();
   if (needs_analyze) {
@@ -208,7 +248,32 @@ bool EigenKluSolver::factorize(const Eigen::SparseMatrix<double>& a) {
     impl_->solver.analyzePattern(a);
   }
   impl_->solver.factorize(a);
-  return impl_->solver.info() == Eigen::Success;
+  const bool ok = impl_->solver.info() == Eigen::Success;
+  if (ok) {
+    impl_->record_pattern(a);
+  } else {
+    impl_->invalidate_numeric();
+  }
+  return ok;
+}
+
+bool EigenKluSolver::refactorize(const Eigen::SparseMatrix<double>& a) {
+  empty_system_ = is_empty_square_system(a);
+  if (empty_system_) {
+    if (impl_) impl_->invalidate_numeric();
+    return true;
+  }
+  if (!impl_ || !impl_->pattern_matches(a)) return false;
+  // KLU refactor fixes the pivot order from klu_factor and requires byte-for-
+  // byte identical Ap/Ai. The exact check above enforces that Release-build
+  // precondition before entering SuiteSparse. See the internal derivation,
+  // docs/archive/klu_numeric_refactor_2026-08-20.md, sections 2-3.
+  if (!impl_->solver.refactorize(a)) {
+    impl_->invalidate_numeric();
+    return false;
+  }
+  impl_->record_pattern(a);
+  return true;
 }
 
 bool EigenKluSolver::solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) {

@@ -40,6 +40,7 @@ class NewtonSolver {
     JacobianContext ctx;
     JacobianPattern pattern;
     std::unique_ptr<SparseLinearSolver> solver;
+    bool numeric_factor_ready{false};
   };
 
   mutable PatternCache cache_;

@@ -633,6 +633,80 @@ TEST_CASE("EigenKluSolver: multiple right-hand sides",
   EigenKluSolver solver;
   run_sparse_solve_many_3x3(solver);
 }
+
+TEST_CASE("EigenKluSolver: guarded numeric refactor lifecycle",
+          "[engine][linear-solver][klu][refactor]") {
+  EigenKluSolver solver;
+  CHECK(solver.supports_numeric_refactor());
+
+  Eigen::SparseMatrix<double> a(3, 3);
+  a.insert(0, 0) = 4.0; a.insert(0, 1) = 1.0;
+  a.insert(1, 0) = 1.0; a.insert(1, 1) = 3.0; a.insert(1, 2) = 1.0;
+  a.insert(2, 1) = 1.0; a.insert(2, 2) = 2.0;
+  a.makeCompressed();
+
+  // A numeric factor is mandatory; Release builds must reject this without
+  // relying on Eigen's assertions.
+  CHECK_FALSE(solver.refactorize(a));
+  solver.analyze_pattern(a);
+  REQUIRE(solver.factorize(a));
+
+  Eigen::SparseMatrix<double> same_pattern = a;
+  for (Eigen::Index k = 0; k < same_pattern.nonZeros(); ++k) {
+    same_pattern.valuePtr()[k] *= 1.25 + 0.05 * static_cast<double>(k);
+  }
+  const Eigen::Vector3d expected(1.5, -0.75, 2.0);
+  const Eigen::VectorXd rhs = same_pattern * expected;
+  REQUIRE(solver.refactorize(same_pattern));
+  Eigen::VectorXd x;
+  REQUIRE(solver.solve(rhs, x));
+  CHECK((x - expected).lpNorm<Eigen::Infinity>() ==
+        Approx(0.0).margin(1e-11));
+
+  // KLU requires identical Ap/Ai. Reject a structural change before entering
+  // klu_refactor, then demonstrate the full-analysis recovery transaction.
+  Eigen::SparseMatrix<double> changed_pattern = same_pattern;
+  changed_pattern.coeffRef(0, 2) = 0.5;
+  changed_pattern.makeCompressed();
+  CHECK_FALSE(solver.refactorize(changed_pattern));
+  solver.analyze_pattern(changed_pattern);
+  REQUIRE(solver.factorize(changed_pattern));
+  const Eigen::VectorXd changed_rhs = changed_pattern * expected;
+  REQUIRE(solver.solve(changed_rhs, x));
+  CHECK((x - expected).lpNorm<Eigen::Infinity>() ==
+        Approx(0.0).margin(1e-11));
+}
+
+TEST_CASE("EigenKluSolver: failed refactor permits full recovery",
+          "[engine][linear-solver][klu][refactor][recovery]") {
+  EigenKluSolver solver;
+  Eigen::SparseMatrix<double> a(2, 2);
+  a.insert(0, 0) = 2.0;
+  a.insert(0, 1) = 1.0;
+  a.insert(1, 0) = 1.0;
+  a.insert(1, 1) = 2.0;
+  a.makeCompressed();
+  solver.analyze_pattern(a);
+  REQUIRE(solver.factorize(a));
+
+  Eigen::SparseMatrix<double> singular = a;
+  singular.valuePtr()[0] = 1.0;
+  singular.valuePtr()[1] = 1.0;
+  singular.valuePtr()[2] = 1.0;
+  singular.valuePtr()[3] = 1.0;
+  CHECK_FALSE(solver.refactorize(singular));
+
+  // The failed Numeric object is discarded by analyze_pattern/factorize; a
+  // later well-posed matrix is not poisoned by the speculative fast path.
+  solver.analyze_pattern(a);
+  REQUIRE(solver.factorize(a));
+  const Eigen::Vector2d expected(2.0, -1.0);
+  const Eigen::VectorXd rhs = a * expected;
+  Eigen::VectorXd x;
+  REQUIRE(solver.solve(rhs, x));
+  CHECK((x - expected).lpNorm<Eigen::Infinity>() ==
+        Approx(0.0).margin(1e-12));
+}
 #endif
 
 // ─── SuperLU (compiled in only when HACDCPF_HAVE_SUPERLU is set) ─────────────

@@ -2862,6 +2862,26 @@ compaction 和容器维护才是主要成本。默认保留 dirty queue 的依�
 必要失效基础。当前不得宣称 dirty queue 单独带来端到端加速，maros-r7 的下一步仍必须
 消除 P2 commit 全量失效或降低 P2/compaction 成本。
 
+**最终 clean 验收与竞争位置（2026-08-20）。** 验收 commit 为
+`571fe73fedb803d6aa5a4ea8fb6917c0ef9bca9b` + 当前文档增量，MSVC 19.44 x86-64
+Release（`/O2 /Ob2 /DNDEBUG /fp:fast`）。执行
+`cmake --build build/windows-msvc-release --config Release --clean-first -j 8` 成功；
+`ctest --test-dir build/windows-msvc-release -C Release --output-on-failure` 为 19/19，
+real time 205.08s。默认与 `MIPSOLVERS_NATIVE_PRESOLVE_FULL_P1_SCAN=1` 两条完整
+`test_lp_presolve` 均为 35 cases / 1056 assertions；默认、
+`MIPSOLVERS_DS_ACCESSOR_PRICE=1`、`MIPSOLVERS_DS_REPEATED_DSE_TERMS=1` 三条完整
+dual-simplex controls 均为 79 cases / 23124 assertions。新增 `[dirty-queue]` 为
+1 case / 8 assertions；numerical-stability 为 27/484，NETLIB regression 为 3/294。
+
+clean binary 的固定 20 例报告 `reports/native_p1_dirty_queue_large20_r1.json` 为 20/20
+accurate，Native 几何均值 133.804ms。目标组报告
+`reports/native_p1_dirty_queue_auto_targets_r3.json` 的 Native/HiGHS 中位为：greenbeb
+`329.326/237.557ms`（Native 1.39x），maros-r7 `1263.970/973.607ms`（1.30x），woodw
+`245.963/281.501ms`（0.87x）；三例 case-median 几何均值为
+`467.819/402.294ms`（Native 1.16x）。该时段系统负载显著高于 §8.32，wall 数字仅报告
+当前竞争位置，不能归因于 dirty queue。结论仍是 Native 未在该目标组全面超过 HiGHS；
+本节交付的是正确接入且可观测的 changed-support 数据流，不是已证实的端到端提速。
+
 ## 附录 A：P2 代入规则算法卡（HiGHS 语义提取，2026-08-18）
 
 来源：vendored HiGHS（`highs/presolve/HPresolve.cpp/.h`、

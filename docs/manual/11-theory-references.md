@@ -32,6 +32,7 @@ theory-guided 规则，所有算法/数值改动必须以这些推导文档为�
 | [ipm_structural_performance_2026-08-06.md](../archive/ipm_structural_performance_2026-08-06.md) | IPM 结构化性能分析（2026-08-06 快照） |
 | [lp_kernel_selector_2026-08-11.md](../archive/lp_kernel_selector_2026-08-11.md) | LP 内核选择器：成本模型与并发组合 portfolio 的决策记录 |
 | [native_ipm_windows_integration_2026-08-13.md](../archive/native_ipm_windows_integration_2026-08-13.md) | 原生 IPM 的 Windows 集成记录 |
+| [klu_numeric_refactor_2026-08-20.md](../archive/klu_numeric_refactor_2026-08-20.md) | 固定模式 LE/NLE 的 KLU 数值重分解契约、成本模型、回退事务与验收协议 |
 
 ### Native MILP 专项（2026-08-13 系列）
 

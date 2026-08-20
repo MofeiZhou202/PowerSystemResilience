@@ -89,7 +89,15 @@ endif()
 # system BLAS/LAPACK elsewhere, vendored reference LAPACK as fallback) and is
 # consumed here via MIPSOLVERS_BLAS_LIBRARIES.
 if(MIPSOLVERS_BLAS_LIBRARIES)
-  target_link_libraries(cholmod_vendored PRIVATE ${MIPSOLVERS_BLAS_LIBRARIES})
+  # Concrete BLAS paths belong to the build tree.  The installed SDK restores
+  # its static oneMKL closure from package-relative paths in
+  # mipsolversConfig.cmake; exporting host paths would make the package
+  # non-relocatable.  Target names are kept build-only for the same reason.
+  foreach(_SS_BLAS_LIBRARY IN LISTS MIPSOLVERS_BLAS_LIBRARIES)
+    target_link_libraries(cholmod_vendored PRIVATE
+      "$<BUILD_INTERFACE:${_SS_BLAS_LIBRARY}>")
+  endforeach()
+  unset(_SS_BLAS_LIBRARY)
 else()
   # Degrade gracefully to the simplicial method (no BLAS) — CHOLMOD stays
   # usable, just without the supernodal BLAS-3 kernels.
@@ -119,6 +127,14 @@ target_include_directories(umfpack_vendored PUBLIC
   "$<BUILD_INTERFACE:${_SS_ROOT}/CHOLMOD/Include>"
   "$<BUILD_INTERFACE:${_SS_ROOT}/UMFPACK/Include>"
   "$<BUILD_INTERFACE:${_SS_ROOT}/UMFPACK/Source>")
+# UMFPACK otherwise emits unconditional Fortran-BLAS references even though
+# its sources contain equivalent scalar update loops.  Keep the no-BLAS
+# production profile internally consistent with CHOLMOD's NSUPERNODAL mode.
+# See docs/archive/lp_tail_elimination_2026-08-18.md, section 14, and Davis
+# 2004, Algorithm 832 (UMFPACK's BLAS-independent numeric factorization).
+if(NOT MIPSOLVERS_BLAS_LIBRARIES)
+  target_compile_definitions(umfpack_vendored PRIVATE NBLAS)
+endif()
 target_link_libraries(umfpack_vendored PRIVATE cholmod_vendored)
 add_library(mipsolvers::umfpack_vendored ALIAS umfpack_vendored)
 

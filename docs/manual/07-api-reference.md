@@ -249,6 +249,11 @@ public:
 外部适配器的可用性探测：`HighsAdapter::available()` 在 PATH 上查找 HiGHS 可执行
 文件；`GurobiAdapter::available()` 检查许可证（`GRB_LICENSE_FILE` 或标准搜索路径）。
 
+`SparseLinearSolver` 的 `supports_numeric_refactor()` 和 `refactorize()` 是固定稀疏
+模式的可选能力。默认实现保持完整 `factorize()` 行为；KLU 实现仅在已有成功数值
+分解且压缩列结构完全一致时执行固定主元数值重分解。调用方必须把 `false` 视为
+重新 `analyze_pattern()` 后完整分解的信号，不能把它解释为最终求解失败。
+
 ### 7.1.7 C++ 最小完整示例
 
 ```cpp

@@ -45,6 +45,13 @@ class SparseLinearSolver {
   virtual void set_pivot_perturbation_exponent(int exponent) {
     (void)exponent;
   }
+  /// Whether the backend can update numeric values while retaining its
+  /// existing symbolic analysis and pivot order. The default preserves the
+  /// full-factorization behavior of existing and third-party backends.
+  virtual bool supports_numeric_refactor() const { return false; }
+  virtual bool refactorize(const Eigen::SparseMatrix<double>& a) {
+    return factorize(a);
+  }
 };
 
 class EigenSparseLUSolver final : public SparseLinearSolver {
@@ -89,6 +96,8 @@ class EigenKluSolver final : public SparseLinearSolver {
   bool factorize(const Eigen::SparseMatrix<double>& a) override;
   bool solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) override;
   bool solve_many(const Eigen::MatrixXd& rhs, Eigen::MatrixXd& x) override;
+  bool supports_numeric_refactor() const override { return true; }
+  bool refactorize(const Eigen::SparseMatrix<double>& a) override;
 
  private:
   class Impl;

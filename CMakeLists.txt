@@ -453,6 +453,24 @@ if(MIPSOLVERS_HAVE_HIGHS_LIB)
     endif()
   endif()
 
+  # KLU fixed-pattern numeric-refactor benchmark. This is deliberately not a
+  # CTest: wall-clock speed is recorded for release evidence, not used as a
+  # machine-dependent correctness gate.
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/klu_refactor_benchmark.cpp")
+    add_executable(klu_refactor_benchmark
+      benchmark/klu_refactor_benchmark.cpp)
+    set_target_properties(klu_refactor_benchmark PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+    target_include_directories(klu_refactor_benchmark PRIVATE
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+    target_link_libraries(klu_refactor_benchmark PRIVATE mipsolvers)
+    if(NOT MSVC)
+      target_compile_options(klu_refactor_benchmark PRIVATE -Wall -Wextra
+        $<$<CONFIG:Release>:-O3 -DNDEBUG>
+        $<$<CONFIG:RelWithDebInfo>:-O2 -g -DNDEBUG>)
+    endif()
+  endif()
+
   # Standalone Phase-II BFRT prefilter experiment. This target is deliberately
   # not linked into the solver: it must prove exact classification plus lower
   # instruction/traffic counts and wall time before production integration.
@@ -1234,6 +1252,69 @@ if(_ms_json_bundle_src)
   install(DIRECTORY "${_ms_json_bundle_src}/nlohmann"
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/mipsolvers-deps/nlohmann_json")
   message(STATUS "mipsolvers: bundling nlohmann_json headers from ${_ms_json_bundle_src}")
+endif()
+
+# A static MIPSolvers archive leaves oneMKL symbols to the final executable,
+# so a production SDK must carry the exact libraries used by this build.  The
+# staged manifest fixes architecture, linkage, and threading before packaging;
+# the consumer config below reconstructs the link closure from relative paths.
+set(_ms_mkl_library_names "")
+if(WIN32 AND MIPSOLVERS_HAVE_MKL_PARDISO)
+  if(NOT MIPSOLVERS_MKL_THREADING STREQUAL "SEQUENTIAL")
+    message(FATAL_ERROR
+      "The relocatable Windows SDK requires MIPSOLVERS_MKL_THREADING=SEQUENTIAL")
+  endif()
+  if(NOT MIPSOLVERS_MKL_ROOT OR
+     NOT EXISTS "${MIPSOLVERS_MKL_ROOT}/manifest.cmake" OR
+     NOT EXISTS "${MIPSOLVERS_MKL_ROOT}/SHA256SUMS" OR
+     NOT IS_DIRECTORY "${MIPSOLVERS_MKL_ROOT}/licensing")
+    message(FATAL_ERROR
+      "The relocatable Windows SDK requires a staged oneMKL bundle with "
+      "manifest.cmake, SHA256SUMS, and licensing/. Run "
+      "third_party/stage_onemkl.ps1 first.")
+  endif()
+
+  include("${MIPSOLVERS_MKL_ROOT}/manifest.cmake")
+  if(NOT MIPSOLVERS_LOCAL_MKL_MANIFEST_VERSION STREQUAL "1" OR
+     NOT MIPSOLVERS_LOCAL_MKL_ARCHITECTURE STREQUAL "x64" OR
+     NOT MIPSOLVERS_LOCAL_MKL_LINKAGE STREQUAL "static" OR
+     NOT MIPSOLVERS_LOCAL_MKL_THREADING MATCHES "^(sequential|both)$" OR
+     NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+    message(FATAL_ERROR
+      "Unsupported staged oneMKL manifest for the Windows x64 production SDK")
+  endif()
+
+  foreach(_ms_mkl_expected IN ITEMS
+      mkl_intel_lp64.lib mkl_sequential.lib mkl_core.lib)
+    set(_ms_mkl_source "")
+    foreach(_ms_mkl_candidate IN LISTS MIPSOLVERS_MKL_LIBRARIES)
+      if(IS_ABSOLUTE "${_ms_mkl_candidate}" AND EXISTS "${_ms_mkl_candidate}")
+        get_filename_component(_ms_mkl_candidate_name "${_ms_mkl_candidate}" NAME)
+        if(_ms_mkl_candidate_name STREQUAL _ms_mkl_expected)
+          set(_ms_mkl_source "${_ms_mkl_candidate}")
+          break()
+        endif()
+      endif()
+    endforeach()
+    if(NOT _ms_mkl_source)
+      message(FATAL_ERROR
+        "Selected static oneMKL link closure is missing ${_ms_mkl_expected}")
+    endif()
+    install(FILES "${_ms_mkl_source}"
+      DESTINATION "${CMAKE_INSTALL_LIBDIR}/mipsolvers-deps/oneapi-mkl")
+    list(APPEND _ms_mkl_library_names "${_ms_mkl_expected}")
+  endforeach()
+
+  install(FILES
+    "${MIPSOLVERS_MKL_ROOT}/manifest.cmake"
+    "${MIPSOLVERS_MKL_ROOT}/SHA256SUMS"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/mipsolvers/oneapi-mkl")
+  install(DIRECTORY "${MIPSOLVERS_MKL_ROOT}/licensing/"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/mipsolvers/licenses/oneapi-mkl")
+  unset(_ms_mkl_candidate)
+  unset(_ms_mkl_candidate_name)
+  unset(_ms_mkl_expected)
+  unset(_ms_mkl_source)
 endif()
 
 install(EXPORT mipsolversTargets

@@ -721,6 +721,7 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
     cache_.pattern = build_jacobian_pattern(data, cache_.ctx);
     cache_.solver = make_default_sparse_solver();
     cache_.solver->analyze_pattern(cache_.pattern.matrix);
+    cache_.numeric_factor_ready = false;
     cache_.pattern.analyzed = true;
     out.profiling.jacobian_pattern_rebuilds += 1;
     out.profiling.jacobian_analyze_calls += 1;
@@ -844,7 +845,24 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
       return false;
     }
     out.profiling.factorization_calls += 1;
-    if (!sparse_solver->factorize(jac)) {
+    bool factor_ok = false;
+    if (cache_.numeric_factor_ready &&
+        sparse_solver->supports_numeric_refactor()) {
+      factor_ok = sparse_solver->refactorize(jac);
+      if (!factor_ok) {
+        // KLU refactor uses a fixed pivot order and may reject a changed
+        // pattern or a newly singular numeric instance. Reanalysis plus full
+        // pivoting is the correctness-preserving transaction rollback.
+        // See docs/archive/klu_numeric_refactor_2026-08-20.md, section 3.
+        sparse_solver->analyze_pattern(jac);
+        out.profiling.jacobian_analyze_calls += 1;
+      }
+    }
+    if (!factor_ok) {
+      factor_ok = sparse_solver->factorize(jac);
+    }
+    cache_.numeric_factor_ready = factor_ok;
+    if (!factor_ok) {
       out.profiling.linear_solver_status = "factorization_failed";
       auto t1 = Clock::now();
       elapsed_ms = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(t1 - t0)
@@ -1285,8 +1303,8 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
             const Eigen::VectorXd lm_rhs =
                 -(jac_for_linear.transpose() * rhs_for_linear);
             Eigen::VectorXd lm_dx;
-            if (cache_.solver->factorize(JtJ) &&
-                cache_.solver->solve(lm_rhs, lm_dx) && lm_dx.allFinite()) {
+            if (solve_linear(JtJ, lm_rhs, lm_dx, linear_ms_this_iter) &&
+                lm_dx.allFinite()) {
               if (use_scaled_linear_system) {
                 lm_dx = scaling.unscale_step(lm_dx);
               }

@@ -563,3 +563,82 @@ H4 线程化 MKL（dfl001 10.25s→2.66s，CBWR 负结果记录）；H5-H8 修�
 （§6 H2′）依旧。结论：greenbea ~4.2s 是 direct 契约下的结构性地板，
 判据 (3) 对该案例（HiGHS-ipm 220ms，presolve 驱动）不可达。
 ctest h8 构建实测 18/18 ✓（回填 §13.2）。
+
+## 14. Windows 便携生产配置的 SuiteSparse 门槛（2026-08-20）
+
+**预注册模型与失配。** 初始生产配置以最小运行时依赖为目标，关闭
+MKL、OpenMP、SCIP、Ipopt、SuiteSparse、SuperLU 和 MUMPS，预测核心
+Native/HiGHS/PaPILO 静态 SDK 在 Release 全测仍为 19/19，包外消费者仅
+依赖 Windows 系统 DLL 和 MSVC `/MD` 运行库。clean build 为 339/339，
+但 CTest 实测仅 **15/19**：`test_ipm_solver`、`test_conic_ipm`、
+`test_aml_conic`、`test_numerical_stability` 失败；LP/MIP、dual simplex、
+presolve 与 NETLIB 测试通过。结果相对 19/19 预测少 4 项，属于错误方向，
+必须停止“完全移除 SuiteSparse”方案。
+
+**再推导。** 实现保真检查确认 BLAS/LAPACK 为 `none`，且上述失败集中在
+IPM/Conic 稀疏 KKT 路径；这与 §2、§4 已验证的 CHOLMOD 数值门槛一致，
+不是 MSVC 运行库或包导出问题。修订后的便携成本模型允许仓库内 vendored
+SuiteSparse 以静态 `.lib` 随包导出：它增加包体积和链接对象数，但不增加
+部署 DLL；继续关闭 MKL/OpenMP/SCIP/Ipopt/SuperLU/MUMPS。理论依据为
+Chen--Davis--Hager--Rajamanickam 2008, §4 的 CHOLMOD 稀疏 Cholesky 路径，
+以及本文件 §2--§4 的 Windows 实测。
+
+**修订预测与固定验收。** 启用静态 SuiteSparse 后，预测失败的 4 项恢复，
+CTest 达到 19/19；随后安装导出文件不得包含源码/构建机绝对路径，源码树外
+`find_package` 消费者必须配置、编译、求解成功，最终 EXE 的
+`dumpbin /DEPENDENTS` 不得出现 MKL、Intel OpenMP、ZLIB、SCIP 或 Ipopt DLL。
+任一条件不满足则不得标记为 Windows 生产包。
+
+**第二次实现保真失配（clean build，commit `571fe73f`）。** 上述配置在
+980 个目标中的 953 个完成后，链接 `milp_benchmark_runner.exe` 失败：
+vendored UMFPACK 仍调用 `dgemv_`、`dtrsv_`、`dtrsm_`、`dgemm_` 和
+`dger_`，而便携配置明确令 BLAS/LAPACK 为 `none`。因此“静态
+SuiteSparse 不增加运行时依赖”这一模型本身没有被否定，失败来自实现没有
+把无 BLAS 决策一致地传播给 UMFPACK；CHOLMOD 已通过 `NSUPERNODAL` 正确
+执行同类降级。
+
+**再推导与实现契约。** UMFPACK 自带 `NBLAS` 标量 C 更新路径：rank-1、
+triangular solve 和 rank-k frontal update 分别回落到等价循环；其控制信息也
+将 `UMFPACK_COMPILED_WITH_BLAS` 报为 0（Davis 2004, Algorithm 832；
+SuiteSparse 7.12.2 `UMFPACK/Source/umf_blas3_update.c`）。故当统一依赖解析器
+返回空 BLAS 集时，UMFPACK 必须与 CHOLMOD 同步定义 `NBLAS`。成本模型预期
+大前沿 LU 的常数因子变差，但本生产配置的目标是可复现和零外部数值运行时；
+Native dual simplex 主路径使用 HFactor，不依赖这一 UMFPACK BLAS-3 更新。
+固定验收不变：增量完成剩余 27 个链接目标，CTest 19/19，外部消费者仅凭
+安装前缀构建运行，DLL 扫描无被排除的数值运行时。若测试仍少于 19 项，
+再次按实现保真、机器模型、假设、理论的顺序调查，不能继续打包。
+
+**第二次验收失配。** `NBLAS` 修复后增量构建 369/369，证明静态依赖闭包
+已可链接；CTest 实测 **17/19**，而非预测的 19/19。`test_conic_ipm` 与
+`test_aml_conic` 已恢复，但 `test_ipm_solver` 的 augmented/inertia KKT 用例
+和 `test_numerical_stability` 的 augmented Newton 等价性用例仍失败；其余
+17 项（含 Native dual simplex、LP/MIP、presolve、NETLIB）通过。失败方向
+表明 `NBLAS` 解决的是 UMFPACK 链接保真，不能替代 CHOLMOD supernodal
+路径所需的 BLAS/LAPACK 数值内核。
+
+**生产配置再修订。** 仓库已固定供应 oneMKL 2026.0.1 x64 static 的
+`mkl_intel_lp64`、`mkl_sequential`、`mkl_core` 及许可证。按 §2--§4 已验证的
+CHOLMOD supernodal 模型，三库提供 BLAS/LAPACK 且 sequential 层不引入
+Intel OpenMP DLL；本配置仍关闭 MKL PARDISO 后端，只把静态 oneMKL 用作
+SuiteSparse 数值内核。预测 CTest 从 17/19 恢复到 19/19；成本是 SDK 至多
+增加约 638 MB 未压缩静态归档，最终链接器只抽取被引用对象。安装导出必须
+把三库和许可证复制进 SDK，并以相对安装前缀引用，不能泄露 staging 绝对
+路径。外部消费者和 DLL 验收保持不变，尤其不得出现 `mkl_*.dll` 或
+`libiomp5md.dll`。
+
+**第三次验收失配。** static oneMKL sequential BLAS/LAPACK 构建 601/601，
+CTest 仍为 **17/19**，且失败断言和残差与 `BLAS=none` 逐项相同。完整依赖
+构建目录对照也以相同值失败，排除了 BLAS 算术路径。定点 trace 显示 Auto
+用例的 condensed/augmented 结构成本均为 0，随后 condensed inertia 重试
+109 次耗尽：配置虽令 `MIPSOLVERS_USE_MUMPS=ON`，但没有可用 MUMPS target；
+同时 portable 配置关闭了 MKL PARDISO，故编译期不存在任何可报告 inertia
+的 symmetric-indefinite backend。`ipm_solver.cpp` 的理论契约正是只在该
+能力存在时执行 augmented Auto routing。
+
+**最终配置假设。** static oneMKL 已因 CHOLMOD BLAS/LAPACK 纳入闭包，故
+启用其 sequential PARDISO 只复用同一组三个静态归档，不新增 DLL、OpenMP
+或部署前提。PARDISO 的负主元计数提供 bordered-Hessian inertia 证书，正是
+augmented KKT 路径所需能力（Schenk--Gärtner 2006, ETNA 23 §4；本文件
+§13）。修订预测：打开 `MIPSOLVERS_USE_MKL_PARDISO=ON` 后两个失败测试均
+恢复，CTest 19/19；若仍失败，则静态 PARDISO 配置不是充分条件，停止依赖
+层尝试并转入算法回归修复。DLL 和源码树外消费者验收不变。

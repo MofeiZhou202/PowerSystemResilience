@@ -55,6 +55,18 @@ inline klu_numeric* klu_factor(int Ap[], int Ai[], std::complex<double> Ax[], kl
    return klu_z_factor(Ap, Ai, &numext::real_ref(Ax[0]), Symbolic, Common);
 }
 
+inline int klu_refactor(int Ap[], int Ai[], double Ax[], klu_symbolic *Symbolic,
+                        klu_numeric *Numeric, klu_common *Common, double) {
+   return ::klu_refactor(Ap, Ai, Ax, Symbolic, Numeric, Common);
+}
+
+inline int klu_refactor(int Ap[], int Ai[], std::complex<double> Ax[],
+                        klu_symbolic *Symbolic, klu_numeric *Numeric,
+                        klu_common *Common, std::complex<double>) {
+   return ::klu_z_refactor(Ap, Ai, &numext::real_ref(Ax[0]), Symbolic, Numeric,
+                           Common);
+}
+
 
 template<typename _MatrixType>
 class KLU : public SparseSolverBase<KLU<_MatrixType> >
@@ -209,6 +221,31 @@ class KLU : public SparseSolverBase<KLU<_MatrixType> >
       factorize_impl();
     }
 
+    /** Reuses the existing KLU pivot order for a numeric-only refactorization.
+      * The sparsity pattern must be identical to the matrix passed to the
+      * successful factorize() call. See MIPSolvers' derivation
+      * docs/archive/klu_numeric_refactor_2026-08-20.md, section 2.
+      */
+    template<typename InputMatrixType>
+    bool refactorize(const InputMatrixType& matrix)
+    {
+      if (!m_analysisIsOk || !m_factorizationIsOk || !m_symbolic || !m_numeric)
+      {
+        m_info = InvalidInput;
+        return false;
+      }
+      grab(matrix.derived());
+      const int ok = Eigen::klu_refactor(
+          const_cast<StorageIndex*>(mp_matrix.outerIndexPtr()),
+          const_cast<StorageIndex*>(mp_matrix.innerIndexPtr()),
+          const_cast<Scalar*>(mp_matrix.valuePtr()), m_symbolic, m_numeric,
+          &m_common, Scalar());
+      m_info = ok ? Success : NumericalIssue;
+      m_factorizationIsOk = ok ? 1 : 0;
+      m_extractedDataAreDirty = true;
+      return ok != 0;
+    }
+
     /** \internal */
     template<typename BDerived,typename XDerived>
     bool _solve_impl(const MatrixBase<BDerived> &b, MatrixBase<XDerived> &x) const;
@@ -227,6 +264,8 @@ class KLU : public SparseSolverBase<KLU<_MatrixType> >
       m_isInitialized         = false;
       m_numeric               = 0;
       m_symbolic              = 0;
+      m_analysisIsOk          = false;
+      m_factorizationIsOk     = false;
       m_extractedDataAreDirty = true;
 
       klu_defaults(&m_common);

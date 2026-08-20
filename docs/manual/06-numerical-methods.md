@@ -67,6 +67,8 @@ K(v) = P·diag(v)·Pᵀ + R
 
 **后端选择的一个非对称性（重要）**：parity-IPM 的 OPF KKT 经 Ruiz 均衡 + `δ_W` 后是良态的，默认后端为 MUMPS；而*通用* IPM 的 `δ_C` 升级逻辑依赖分解器的**奇异标志**驱动——MUMPS 会吸收零/小主元（`CNTL(3)`、`ICNTL(24)`）而不报错，反而使该机制失效，所以 `make_default_sparse_solver()` 保持 `UMFPACK > KLU > …`，MUMPS 只在 KKT 已知良态处显式选用。这是算法性质的后果，不是偏好。
 
+**KLU 固定模式数值重分解**。缓存型电力潮流 Newton 在首次完整 KLU 分解后，可对后续同模式 Jacobian 使用 `klu_refactor`。该路径固定首次主元顺序且不重新选主元，因此只在压缩列 `Ap/Ai` 逐项相同时启用；模式变化、奇异或固定主元失败均重新执行符号分析和完整分解。一次性 LE 和通用非缓存 NLE 不使用此优化。完整契约与成本模型见 [KLU numeric refactor 推导](../archive/klu_numeric_refactor_2026-08-20.md)。
+
 **索引宽度**。2³¹ 的天花板不是维度 `n`（`n = 10⁶` 轻松装下），而是**因子非零数**：百万阶基矩阵的 `nnz(L)+nnz(U)` 可超过 `int` 上限并*静默*回绕。约定：分解接口先升到 64 位——UMFPACK 用 `umfpack_dl_*`、HiGHS 用 `HIGHSINT64`、CHOLMOD 用 `cholmod_l_*`；内部 CCS/CSR 缓存的*索引值*可保持 32 位（均 `< n`），但一切*计数*与接口数组必须 64 位，一切窄化转换必须显式守卫（响亮失败，不截断）。
 
 ---
