@@ -1450,6 +1450,8 @@ TEST_CASE("Sequential MC: N-0 baseline curtailment is counted every hour",
   CHECK(r.iterations_used == 1);
   CHECK(r.eens_mwh_yr == Approx(4.0).margin(1e-6));
   CHECK(r.lole_hr_yr == Approx(4.0).margin(1e-6));
+  CHECK(r.baseline_eens_mwh_yr == Approx(4.0).margin(1e-6));
+  CHECK(r.incremental_eens_mwh_yr == Approx(0.0).margin(1e-9));
   REQUIRE(r.annual_eens.size() == 1);
   CHECK(r.annual_eens.front() == Approx(4.0).margin(1e-6));
 }
@@ -1483,6 +1485,8 @@ TEST_CASE("Sequential MC: per-load spatial factors preserve distinct load points
   // Effective demand is 0.5 + 1.0 MW against 1.0 MW capacity.
   CHECK(r.eens_mwh_yr == Approx(2.0).margin(1e-6));
   CHECK(r.lole_hr_yr == Approx(4.0).margin(1e-6));
+  CHECK(r.baseline_eens_mwh_yr == Approx(2.0).margin(1e-6));
+  CHECK(r.incremental_eens_mwh_yr == Approx(0.0).margin(1e-9));
 }
 
 TEST_CASE("Sequential MC: inactive baseline components are not sampled as failures",

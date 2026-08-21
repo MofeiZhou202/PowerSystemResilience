@@ -27,6 +27,7 @@
 
 #include "hacdcpf/model/hybrid_power_system.hpp"
 #include "hacdcpf/io/case_builders.hpp"
+#include "hacdcpf/io/matpower_parser.hpp"
 #include "hacdcpf/graph/graph.hpp"
 #include "hacdcpf/optimal_power_flow/dc_opf_solver.hpp"
 #include "hacdcpf/reliability/reliability_assessment.hpp"
@@ -84,6 +85,36 @@ HybridPowerSystem make_linked_transformer_case() {
   sys.ac.transformers_2w = {metadata};
   return sys;
 }
+
+HybridPowerSystem make_two_island_source_case() {
+  HybridPowerSystem sys;
+  sys.ac.base_mva = 100.0;
+
+  ACBus slack;
+  slack.index = 1;
+  slack.bus_type = BusType::SLACK;
+  slack.in_service = true;
+  ACBus local;
+  local.index = 2;
+  local.bus_type = BusType::PQ;
+  local.in_service = true;
+  local.pd_mw = 10.0;
+  sys.ac.buses = {slack, local};
+
+  Generator grid_source;
+  grid_source.index = 1;
+  grid_source.bus = 1;
+  grid_source.in_service = true;
+  grid_source.is_slack = true;
+  grid_source.pmax_mw = 50.0;
+  Generator island_source;
+  island_source.index = 2;
+  island_source.bus = 2;
+  island_source.in_service = true;
+  island_source.pmax_mw = 20.0;
+  sys.ac.generators = {grid_source, island_source};
+  return sys;
+}
 }  // namespace
 
 TEST_CASE("linked MATPOWER transformer metadata never masks a failed branch",
@@ -117,6 +148,263 @@ TEST_CASE("linked MATPOWER transformer metadata never masks a failed branch",
   const auto opf = opf::solve_dc_opf(failed, opf_options);
   CHECK(opf.converged);
   CHECK(opf.total_load_shedding_mw == Approx(10.0).margin(1e-6));
+}
+
+TEST_CASE("hybrid reliability LP uses physical branches and one angle reference per island",
+          "[reliability][hybrid][topology][transformer-link]") {
+  auto sys = make_linked_transformer_case();
+  sys.ac.branches.front().in_service = false;
+  DCBus dc_bus;
+  dc_bus.index = 1;
+  dc_bus.in_service = true;
+  sys.dc.buses = {dc_bus};
+
+  FMEAOptions options;
+  options.opf_options.compute_lmp = false;
+  const auto result = evaluate_failed_network_state(sys, options);
+  CHECK(result.model_scope == "hybrid-acdc-network-lp");
+  CHECK(result.is_loss);
+  CHECK(result.total_shed_mw == Approx(10.0).margin(1e-6));
+}
+
+TEST_CASE("hybrid reliability redispatch admits zero converter transfer",
+          "[reliability][hybrid][constructive-feasibility]") {
+  HybridPowerSystem sys;
+  ACBus ac_bus;
+  ac_bus.index = 1;
+  ac_bus.in_service = true;
+  sys.ac.buses = {ac_bus};
+  DCBus dc_bus;
+  dc_bus.index = 1;
+  dc_bus.in_service = true;
+  sys.dc.buses = {dc_bus};
+  VSCConverter converter;
+  converter.index = 1;
+  converter.bus_ac = 1;
+  converter.bus_dc = 1;
+  converter.in_service = true;
+  converter.controllable = false;
+  converter.p_set_mw = 5.0;
+  converter.pmax_mw = 5.0;
+  converter.pmin_mw = 5.0;
+  sys.vsc_converters = {converter};
+
+  const auto result = evaluate_failed_network_state(sys, FMEAOptions{});
+  CHECK(result.model_scope == "hybrid-acdc-network-lp");
+  CHECK_FALSE(result.is_loss);
+  CHECK(result.total_shed_mw == Approx(0.0).margin(1e-8));
+}
+
+TEST_CASE("DC OPF distinguishes angle reference from island power source",
+          "[reliability][topology][island-source]") {
+  auto sys = make_two_island_source_case();
+  const auto topology = graph::analyze_topology(
+      graph::build_power_system_graph(sys));
+  REQUIRE(topology.n_ac_islands == 2);
+  REQUIRE(std::any_of(topology.islands.begin(), topology.islands.end(),
+      [](const graph::IslandInfo& island) {
+        return island.status == graph::IslandStatus::NoSlack &&
+               std::find(island.ac_bus_ids.begin(), island.ac_bus_ids.end(), 2) !=
+                   island.ac_bus_ids.end();
+      }));
+
+  opf::DCOPFOptions options;
+  options.load_shedding = true;
+  options.compute_lmp = false;
+  const auto supplied = opf::solve_dc_opf(sys, options);
+  REQUIRE(supplied.converged);
+  CHECK(supplied.total_load_shedding_mw == Approx(0.0).margin(1e-7));
+
+  sys.ac.generators[1].in_service = false;
+  const auto unsupplied = opf::solve_dc_opf(sys, options);
+  REQUIRE(unsupplied.converged);
+  CHECK(unsupplied.total_load_shedding_mw == Approx(10.0).margin(1e-6));
+}
+
+TEST_CASE("DC OPF load shedding keeps every generator-less state feasible",
+          "[reliability][dc-opf][constructive-feasibility]") {
+  HybridPowerSystem sys;
+  sys.ac.base_mva = 100.0;
+  ACBus bus;
+  bus.index = 7;
+  bus.bus_type = BusType::PQ;
+  bus.in_service = true;
+  bus.pd_mw = 10.0;
+  sys.ac.buses = {bus};
+
+  for (const auto backend : {opf::DCOPFSolverBackend::Auto,
+                             opf::DCOPFSolverBackend::HiGHS,
+                             opf::DCOPFSolverBackend::Native}) {
+    opf::DCOPFOptions options;
+    options.solver = backend;
+    options.load_shedding = true;
+    options.lexicographic_load_shedding = true;
+    options.compute_lmp = false;
+    const auto result = opf::solve_dc_opf(sys, options);
+    INFO("status=" << result.status);
+    INFO("solver=" << result.solver_name);
+    REQUIRE(result.converged);
+    REQUIRE(result.load_shedding_mw.size() == 1);
+    CHECK(result.load_shedding_mw[0] == Approx(10.0).margin(1e-6));
+    CHECK(result.total_load_shedding_mw == Approx(10.0).margin(1e-6));
+  }
+}
+
+TEST_CASE("Reliability DC OPF curtails fixed injection instead of becoming infeasible",
+          "[reliability][dc-opf][constructive-feasibility][pgc]") {
+  HybridPowerSystem sys;
+  sys.ac.base_mva = 100.0;
+  ACBus bus;
+  bus.index = 1;
+  bus.bus_type = BusType::PQ;
+  bus.in_service = true;
+  bus.pd_mw = 2.0;
+  sys.ac.buses = {bus};
+
+  StaticGenerator static_generator;
+  static_generator.index = 1;
+  static_generator.bus = 1;
+  static_generator.p_mw = 5.0;
+  sys.ac.static_generators = {static_generator};
+
+  RenewableGen renewable;
+  renewable.index = 1;
+  renewable.bus = 1;
+  renewable.p_mw = 3.0;
+  sys.ac.renewable_gens = {renewable};
+
+  PVSystem pv;
+  pv.index = 1;
+  pv.bus = 1;
+  pv.p_mw = 4.0;
+  sys.ac.pv_systems = {pv};
+
+  Storage storage;
+  storage.index = 1;
+  storage.bus = 1;
+  storage.p_mw = 1.0;
+  sys.ac.storage = {storage};
+
+  for (const auto backend : {opf::DCOPFSolverBackend::HiGHS,
+                             opf::DCOPFSolverBackend::Native}) {
+    opf::DCOPFOptions options;
+    options.solver = backend;
+    options.load_shedding = true;
+    options.lexicographic_load_shedding = true;
+    options.full_redispatch_from_zero = true;
+    options.allow_fixed_generation_curtailment = true;
+    options.compute_lmp = false;
+    const auto result = opf::solve_dc_opf(sys, options);
+    INFO("status=" << result.status);
+    INFO("solver=" << result.solver_name);
+    REQUIRE(result.converged);
+    REQUIRE(result.load_shedding_mw.size() == 1);
+    REQUIRE(result.fixed_generation_curtailment_mw.size() == 1);
+    CHECK(result.total_load_shedding_mw == Approx(0.0).margin(1e-7));
+    CHECK(result.fixed_generation_curtailment_mw[0] ==
+          Approx(11.0).margin(1e-6));
+    CHECK(result.total_fixed_generation_curtailment_mw ==
+          Approx(11.0).margin(1e-6));
+    const auto [feasible, violation_mw, reason] =
+        opf::check_dc_opf_feasibility(sys, result, options.feasibility_tol);
+    INFO("feasibility reason=" << reason);
+    CHECK(feasible);
+    CHECK(violation_mw <= options.feasibility_tol * sys.ac.base_mva);
+  }
+}
+
+TEST_CASE("Reliability HL-II uses zero Pmin and exact shed-first dispatch",
+          "[reliability][dc-opf][lexicographic][pmin]") {
+  HybridPowerSystem sys;
+  sys.ac.base_mva = 100.0;
+  ACBus bus;
+  bus.index = 1;
+  bus.bus_type = BusType::PQ;
+  bus.in_service = true;
+  bus.pd_mw = 10.0;
+  sys.ac.buses = {bus};
+
+  Generator gen;
+  gen.index = 1;
+  gen.bus = 1;
+  gen.in_service = true;
+  gen.pmin_mw = 15.0;
+  gen.pmax_mw = 20.0;
+  gen.cost_c1 = 100.0;
+  sys.ac.generators = {gen};
+
+  FMEAOptions options;
+  options.opf_options.voll = 0.01;
+  options.opf_options.compute_lmp = false;
+  const auto result = evaluate_failed_network_state(sys, options);
+  CHECK(result.model_scope == "ac-only-dcopf");
+  CHECK(result.total_shed_mw == Approx(0.0).margin(1e-7));
+  CHECK_FALSE(result.is_loss);
+}
+
+TEST_CASE("IEEE RTS-24 reliability data is mapped by unit and branch row",
+          "[reliability][rts24][data]") {
+  auto sys = io::parse_matpower(
+      std::string(HACDCPF_TEST_DATA_DIR) + "/case24_ieee_rts.m");
+  REQUIRE(sys.ac.generators.size() == 33);
+  REQUIRE(sys.ac.branches.size() == 38);
+  REQUIRE_NOTHROW(apply_ieee24_reliability_data(sys));
+
+  const auto check_generator = [&](size_t position, double expected_for,
+                                   double expected_mttr) {
+    INFO("generator row=" << position + 1);
+    CHECK(sys.ac.generators[position].forced_outage_rate ==
+          Approx(expected_for).margin(1e-12));
+    CHECK(sys.ac.generators[position].mttr_hr ==
+          Approx(expected_mttr).margin(1e-12));
+  };
+  check_generator(0, 0.10, 50.0);       // U20
+  check_generator(2, 0.02, 40.0);       // U76
+  check_generator(8, 0.04, 50.0);       // U100
+  check_generator(11, 0.05, 50.0);      // U197
+  check_generator(14, 0.1 / 10000.1, 0.1);  // synchronous condenser
+  check_generator(15, 0.02, 60.0);      // U12
+  check_generator(20, 0.04, 40.0);      // U155
+  check_generator(22, 0.12, 150.0);     // U400
+  check_generator(24, 0.01, 20.0);      // U50
+  check_generator(32, 0.08, 100.0);     // U350
+
+  CHECK(sys.ac.branches[5].failure_rate == Approx(0.38));
+  CHECK(sys.ac.branches[5].mttr_hr == Approx(10.0));
+  CHECK(sys.ac.branches[6].failure_rate == Approx(0.02));
+  CHECK(sys.ac.branches[6].mttr_hr == Approx(768.0));
+  CHECK(sys.ac.branches[11].failure_rate == Approx(0.44));
+  CHECK(sys.ac.branches[33].failure_rate == Approx(0.38));
+  CHECK(sys.ac.branches[35].failure_rate == Approx(0.34));
+
+  auto malformed = sys;
+  malformed.ac.generators[3].pmax_mw += 1.0;
+  CHECK_THROWS_AS(apply_ieee24_reliability_data(malformed),
+                  std::invalid_argument);
+}
+
+TEST_CASE("IEEE RTS-24 every N-0 N-1 and N-2 HL-II state is feasible",
+          "[reliability][rts24][state-scan]") {
+  auto sys = io::parse_matpower(
+      std::string(HACDCPF_TEST_DATA_DIR) + "/case24_ieee_rts.m");
+  apply_ieee24_reliability_data(sys);
+
+  opf::DCOPFOptions options;
+  options.solver = opf::DCOPFSolverBackend::HiGHS;
+  options.feasibility_tol = 1e-7;
+  const auto scan = scan_ac_hlii_n2_states(sys, options);
+  INFO("first failure state=" << scan.first_failure_state);
+  INFO("first failure reason=" << scan.first_failure_reason);
+  CHECK(scan.component_count == 71);
+  CHECK(scan.states_evaluated == 2557);
+  CHECK(scan.failed_states == 0);
+  CHECK(scan.nonfinite_states == 0);
+  CHECK(scan.infeasible_states == 0);
+  CHECK(scan.negative_shed_states == 0);
+  CHECK(scan.shed_above_load_states == 0);
+  CHECK(scan.total_load_mw == Approx(2850.0).margin(1e-9));
+  CHECK(scan.maximum_shed_mw <= scan.total_load_mw + 1e-5);
+  CHECK(scan.passed());
 }
 
 // ─────────────────────────────────────────────────────────────────────────

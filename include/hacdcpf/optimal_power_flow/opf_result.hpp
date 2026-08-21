@@ -313,6 +313,23 @@ struct DCOPFResult {
   std::vector<double> load_shedding_mw;
   double total_load_shedding_mw{0.0};
 
+  /// Curtailment of fixed positive injections (static generation, renewable
+  /// generation, PV, discharging storage, and negative authored demand), in
+  /// authored AC-bus order and MW.
+  std::vector<double> fixed_generation_curtailment_mw;
+  double total_fixed_generation_curtailment_mw{0.0};
+
+  /// Records the effective generator lower-bound semantics used by the solve.
+  bool full_redispatch_from_zero{false};
+
+  /// Primal certificate evaluated in the exact canonical formulation before
+  /// projection back to authored buses. This remains valid when ideal switches
+  /// merge buses and individual ideal-edge flows are not reconstructed.
+  bool primal_feasibility_certified{false};
+  double maximum_primal_violation_mw{
+      std::numeric_limits<double>::infinity()};
+  std::string primal_feasibility_reason;
+
   /// Ordered list of solver backends attempted (most-recent last).
   /// Each entry is of the form "<backend>:<status>" where status is one of
   /// "ok" or a short failure reason. Recorded by solve_dc_opf so callers can

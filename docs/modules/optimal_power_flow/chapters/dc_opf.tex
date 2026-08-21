@@ -82,12 +82,14 @@ $\fld{base\_mva}=\max(\fld{sys.ac.base\_mva},\,1.0)$，默认 100~MVA
 x=[\ \underbrace{\theta}_{n_b}\ ;\ \underbrace{P_g}_{n_g}\ ;\
 \underbrace{P_f}_{n_l\ \text{（可选）}}\ ;\
 \underbrace{\Delta P_d}_{n_b\ \text{（可选）}}\ ;\
+\underbrace{P^{gc}}_{n_b\ \text{（可选）}}\ ;\
 \underbrace{\lambda}_{\text{PWL 断点}}\ ]
 \end{align*}
 （\srcpath{src/optimal\_power\_flow/dc\_opf.cpp:build\_dc\_opf\_lp}，函数
 \srcpath{build\_dc\_opf\_lp}）。其中 $P_f$ 变量仅当
 \fld{include\_branch\_limits}=\texttt{true} 时引入（:build\_dc\_opf\_lp），$\Delta P_d$
-削减变量仅当 \fld{load\_shedding}=\texttt{true} 时每母线一个（:build\_dc\_opf\_lp），
+削减变量仅当 \fld{load\_shedding}=\texttt{true} 时每母线一个（:build\_dc\_opf\_lp），$P^{gc}$
+仅当 \fld{allow\_fixed\_generation\_curtailment}=\texttt{true} 时每母线一个，
 $\lambda$ 为凸二次成本发电机（$\fld{cost\_c2}>10^{-12}$ 且
 $\fld{pmax\_mw}>\fld{pmin\_mw}$，:build\_dc\_opf\_lp）的分段线性凸组合权重，段数取
 $\mathrm{clamp}(\fld{pwl\_segments},1,1000)$（:build\_dc\_opf\_lp）。
@@ -104,6 +106,7 @@ $\mathrm{clamp}(\fld{pwl\_segments},1,1000)$（:build\_dc\_opf\_lp）。
 \begin{align*}
 \min\ \sum_{k\in\mathcal{G}_{\mathrm{lin}}} c_{1,k}\,S_{\mathrm{base}}\,P_{g,k}
 \;+\;\sum_{i} \mathrm{VOLL}\cdot S_{\mathrm{base}}\,\Delta P_{d,i}
+\;+\;\sum_i\gamma_i S_{\mathrm{base}}P^{gc}_i
 \;+\;\sum_{k\in\mathcal{G}_{\mathrm{pwl}}}\sum_{p}
 f_k(\hat P_{k,p})\,\lambda_{k,p}
 \end{align*}
@@ -133,17 +136,17 @@ Q_{P_{g,k},P_{g,k}} &= 2\,c_{2,k}\,S_{\mathrm{base}}^{2},
 所有母线（含松弛节点）各有一行平衡方程
 （\srcpath{src/optimal\_power\_flow/dc\_opf.cpp:build\_dc\_opf\_lp}）。显式 $P_f$ 口径下
 \begin{align*}
-\sum_{g\in\mathcal{G}(i)} P_{g,g} + \Delta P_{d,i}
+\sum_{g\in\mathcal{G}(i)} P_{g,g} + \Delta P_{d,i}-P^{gc}_i
 - \sum_{l:\,\mathrm{from}(l)=i} P_{f,l} + \sum_{l:\,\mathrm{to}(l)=i} P_{f,l}
-= P_{d,i}
+= P^{\rm gross}_{d,i}-P^{\rm fix}_{g,i}
 \end{align*}
 （发电机系数 $+1$：:build\_dc\_opf\_lp；削减变量系数 $+1$ 的符号推导注释 :build\_dc\_opf\_lp；
 $P_f$ 在 from 侧取 $-1$、to 侧取 $+1$：:build\_dc\_opf\_lp；右端项 $P_d$：:build\_dc\_opf\_lp）。
-节点净负荷 $P_{d,i}$ 聚合两类需求并扣除固定注入：母线自带 \fld{pd\_mw}
-（:build\_dc\_opf\_lp）加 \fld{Load::p\_mw}$\times$\fld{scaling}（:build\_dc\_opf\_lp），减去
-\fld{StaticGenerator}（:build\_dc\_opf\_lp）、\fld{RenewableGen}（:build\_dc\_opf\_lp）、
-\fld{PVSystem}（:build\_dc\_opf\_lp）与 \fld{Storage::p\_mw}（:build\_dc\_opf\_lp）的固定出力，
-全部折算标幺。
+实现先分别聚合毛需求 $P^{\rm gross}_{d,i}$ 与固定正注入 $P^{\rm fix}_{g,i}$，再形成净右端项。
+母线 \fld{pd\_mw} 和 \fld{Load::p\_mw}$\times$\fld{scaling} 的正值进入毛需求，负值进入固定注入；
+\fld{StaticGenerator}、\fld{RenewableGen}、\fld{PVSystem} 与 \fld{Storage::p\_mw} 的正值进入固定注入，
+负值进入毛需求。因而 $0\le\Delta P_{d,i}\le P^{\rm gross}_{d,i}$，启用 $P^{gc}$ 时
+$0\le P^{gc}_i\le P^{\rm fix}_{g,i}$，不会用净负荷错误压缩可削负荷上界。
 
 无显式 $P_f$ 变量时（\fld{include\_branch\_limits}=\texttt{false}），支路潮流
 直接代入平衡行，形成经典 $B\theta$ 形式（:build\_dc\_opf\_lp）：
@@ -402,6 +405,10 @@ fallback。
 \fld{branch\_limit\_margin} & — & — & 0.9--1.0（经验值） & 1.0 & 支路界缩放系数，乘在 \fld{rate\_a\_mva} 上（:DCOPFOptions）\\
 \fld{load\_shedding} & — & — & true/false & true & 是否引入每母线削减变量 $\Delta P_d$\\
 \fld{voll} & VOLL & —/MWh & $\ge 0$ & 0.0 & 失负荷价值；$\le 0$ 时按 $\max(100,\,1.1\times$最高边际成本$)$ 自动取值（:DCOPFOptions）\\
+\fld{lexicographic\_load\_shedding} & — & — & true/false & false & 两阶段精确优先级：先最小总削减，再固定最优削减量并最小发电成本；HiGHS 第二阶段使用 PWL 成本 LP\\
+\fld{full\_redispatch\_from\_zero} & — & — & true/false & false & HL-I/HL-II 充裕度再调度语义，在线机组统一采用 $0\le P_g\le P_g^{\max}$\\
+\fld{allow\_fixed\_generation\_curtailment} & — & — & true/false & false & 是否引入逐母线 $P^{gc}$；与全负荷削减、零机组下界共同给出任意拓扑的构造性可行点\\
+\fld{fixed\_generation\_curtailment\_cost} & $\gamma$ & 成本/MWh & $\ge0$ & 1.0 & 第二级目标中的固定正注入削减代价；第一级最小切负荷不使用\\
 \fld{compute\_lmp} & — & — & true/false & true & 主解后是否追加支撑 LP 回收对偶；false 时 \fld{lmp} 清空并注明原因（:solve\_dc\_opf）\\
 \fld{structural\_warm\_start} & — & — & true/false & true & 为 NativeLCQP 构造逐分量功率配平与约化 Laplacian 初值；LP/外部后端忽略\\
 \fld{phase\_one\_linear\_relaxation} & — & — & true/false & false & 仅 HiGHS 后端的 Phase-I 凸松弛：直接解 LP-PWL 而非把二次模型路由到 QP 后端；返回点为 warm start，非二次成本 DCOPF 最优证书\\
@@ -416,7 +423,7 @@ fallback。
 \compmeta{DCOPFResult}{\srcpath{include/hacdcpf/optimal\_power\_flow/opf\_result.hpp}}
 
 全部字段如下（定义 :DCOPFResult）。向量字段的索引空间：\fld{va}/\fld{lmp}/
-\fld{load\_shedding\_mw} 按原始母线向量位置（经反投影）；\fld{pg\_mw} 按
+\fld{load\_shedding\_mw}/\fld{fixed\_generation\_curtailment\_mw} 按原始母线向量位置（经反投影）；\fld{pg\_mw} 按
 \fld{sys.ac.generators} 位置；\fld{pf\_mw}/\fld{branch\_mu\_*} 按
 \fld{sys.ac.branches} 位置；\fld{external\_grid\_p\_mw} 按
 \fld{sys.ac.external\_grids} 位置。
@@ -426,7 +433,7 @@ fallback。
 \fld{pg\_mw} & $P_g$ & MW & \fld{pmin\_mw}--\fld{pmax\_mw} & 空 & 发电机有功调度（由标幺乘 $S_{\mathrm{base}}$ 还原，:extract\_dc\_opf\_result）\\
 \fld{external\_grid\_p\_mw} & $P_{\mathrm{ext}}$ & MW & $\pm 10^{5}$ & 空 & 外网（升格发电机）有功（:DCOPFResult）\\
 \fld{pf\_mw} & $P_f$ & MW & $\pm$\fld{rate\_a\_mva} & 空 & 支路有功，from$\to$to 为正；无显式 $P_f$ 时由 $(\theta_f-\theta_t)/x$ 回算（:DCOPFResult）\\
-\fld{converged} & — & — & true/false & false & 后端报告成功即 true（:DCOPFResult）\\
+\fld{converged} & — & — & true/false & false & 后端成功且规范坐标原始可行性证书通过时为 true\\
 \fld{iterations} & — & — & — & 0 & 最终后端迭代数\\
 \fld{objective} & $f$ & —/h & — & 0.0 & 目标值；口径见 \fld{objective\_model}（QP 含 $c_0$，LP 为线性/PWL 成本）\\
 \fld{status} & — & — & — & 空 & 后端状态串或拒绝/失败原因（如 \texttt{"HiGHS not available"}）\\
@@ -445,8 +452,14 @@ fallback。
 \fld{branch\_mu\_validity\_reason} & — & — & — & 空 & 上述无效性的人类可读说明\\
 \fld{lmp\_valid} & — & — & true/false & false & 行对偶证书完整时为 true（:DCOPFResult）\\
 \fld{lmp\_validity\_reason} & — & — & — & 空 & LMP 来源/缺失原因说明\\
-\fld{load\_shedding\_mw} & $\Delta P_d$ & MW & $\ge 0$ & 空 & 逐母线削减量（含孤岛预削减；$<10^{-6}$ 数值噪声清零，:extract\_dc\_opf\_result）\\
+\fld{load\_shedding\_mw} & $\Delta P_d$ & MW & $\ge 0$ & 空 & 逐母线模型内生削减量；$<10^{-6}$ 数值噪声清零\\
 \fld{total\_load\_shedding\_mw} & — & MW & $\ge 0$ & 0.0 & 削减总量\\
+\fld{fixed\_generation\_curtailment\_mw} & $P^{gc}$ & MW & $\ge0$ & 空 & 逐母线固定正注入削减量\\
+\fld{total\_fixed\_generation\_curtailment\_mw} & — & MW & $\ge0$ & 0.0 & 固定正注入削减总量\\
+\fld{full\_redispatch\_from\_zero} & — & — & true/false & false & 回显本次有效机组下界语义\\
+\fld{primal\_feasibility\_certified} & — & — & true/false & false & 反投影前在实际规范 LP/QP 坐标中认证全部等式、不等式和盒界\\
+\fld{maximum\_primal\_violation\_mw} & — & MW & $\ge0$ & inf & 上述规范坐标证书的最大违反量\\
+\fld{primal\_feasibility\_reason} & — & — & — & 空 & 证书通过或拒绝原因\\
 \fld{solver\_chain} & — & — & — & 空 & 依序记录各后端尝试结果，供审计回退路径（:DCOPFResult）\\
 \fld{objective\_model} & — & — & QP/LP-PWL/LP & 空 & 报告目标值对应的成本口径（:DCOPFResult）\\
 \fld{pwl\_segments\_effective} & — & — & 0--1000 & 0 & LP-PWL 实际段数；0 表示 QP 真二次成本\\
@@ -457,9 +470,9 @@ fallback。
 \subsection{典型使用场景}
 
 \begin{itemize}
-  \item \textbf{可靠性评估（FMEA/状态评估）}：每个故障状态以开启负荷削减的
-        DC OPF 评估最小负荷中断；VOLL 被强制设为远高于发电成本，实现“先削减
-        最小化、后成本”的字典序
+  \item \textbf{可靠性评估（FMEA/状态评估）}：每个故障状态开启毛负荷削减、固定正注入削减和
+        零机组下界；先解纯最小切负荷 LP，再加入最优切负荷等式并最小化 PWL 发电与 $P^{gc}$ 成本，
+        不使用有限 VOLL 冒充字典序
         （\srcpath{src/reliability/reliability\_assessment.cpp:evaluate\_state} 调用，
         选项设置 :run\_nonsequential\_mc；AC-only 适用范围声明 :evaluate\_state）。
   \item \textbf{EV--交通耦合联合优化}：按时段把 EV 充电负荷注入系统后逐时段

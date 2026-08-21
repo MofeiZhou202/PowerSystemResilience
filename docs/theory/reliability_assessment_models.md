@@ -1,620 +1,175 @@
-> Documentation Sync (2026-07-12)
-> Scope: reviewed against current repository structure, CMake presets/options, and registered test targets.
-> Status: implementation-backed reference.
-> Source of truth: when text and implementation diverge, treat src/, include/, tests/, and CMake files as authoritative.
+# 可靠性评估经典方法与执行契约
 
-# Reliability Assessment — Mathematical Models & Code Review (Canonical Space)
-
-This document is the engineering/math reference and rigor audit for the hybrid
-AC/DC **reliability assessment** module. It is the companion/enhancement to
-[`network_reconfiguration_models.md`](network_reconfiguration_models.md): network
-reconfiguration is the *restoration kernel* that every contingency-based
-reliability method invokes, so the two documents describe one continuum —
-*reconfiguration* answers "what is the best topology now?", *reliability* answers
-"what is the frequency-and-duration-weighted consequence of every contingency,
-restored as well as the topology allows?".
-
-It states the **implemented** math model of each method, classifies each piece
-as rigorous or heuristic, and records concrete correctness findings. Historical
-code-review roadmaps were removed; runtime validity fields and tests are the
-scope authority.
-
-Implementation:
-`src/reliability/reliability_assessment.cpp` (resolver, NSQ/SEQ Monte Carlo, F&D,
-tail risk, distribution indices, deterministic FMEA),
-`src/reliability/failure_mode.cpp` (failure-mode catalog, consequence operator,
-failure-mode FMEA), `src/reliability/three_stage_reliability.cpp` (LinDistFlow
-restoration MILP), `src/reliability/reliability_data.cpp` (IEEE RTS-24 / template
-data). Public contracts: `include/hacdcpf/reliability/reliability_assessment.hpp`,
-`include/hacdcpf/reliability/failure_mode.hpp`,
-`include/hacdcpf/analysis/three_stage_reliability.hpp`.
-
-Rigor tags used throughout: **✓ rigorous** (textbook-exact for its stated
-assumptions), **◐ approximate** (sound but with a documented simplification),
-**⚠ questionable** (assumption is arbitrary or applied inconsistently),
-**✗ incorrect/misleading** (the math does not compute the quantity it claims).
-
----
-
-## 0. Executive summary of findings
-
-| # | Area | Verdict | Severity | Where |
-|---|------|---------|----------|-------|
-| F1 | Two-state unavailability / FOR↔λ↔MTTF conversions | ✓ rigorous | — | `src/reliability/reliability_assessment.cpp:resolve_reliability_params-217` |
-| F2 | F&D COPT probability+frequency recursion | ✓ rigorous (Billinton) | — | `src/reliability/reliability_assessment.cpp:eval_down_hours（lambda）-2056` |
-| F3 | Sequential MC chronological exponential sampling | ✓ rigorous | — | `src/reliability/reliability_assessment.cpp:run_sequential_mc-1678` |
-| F4 | MC convergence CoV (std-error-of-mean) | ✓ rigorous | — | `:1296-1304`, `:1751-1760` |
-| F5 | IEEE 1366 SAIFI/SAIDI/CAIDI/ASAI | ✓ rigorous | — | `:2165-2186` |
-| F6 | FMEA / 3-stage first-order `Σ λ·τ·shed` | ◐ first-order | low | `:3949-3976`, `three_stage…:1229-1234` |
-| **F7** | **Three-stage Stage-3 restores the faulted component for the whole repair window** (empirically confirmed, §6) | **✗ misleading** | **high** | `three_stage…:628`, `:637-641`, `:1212-1234` |
-| F8 | NSQ tail-risk built on per-state `shed×8760` samples | ✗ misleading | medium | `:1264-1267`, `:1396-1400` |
-| F9 | Hybrid consequence engine now enforces AC-branch DC power flow (Kirchhoff via angles) | ✓ fixed | medium | `:3248-3640` |
-| F10 | MC unavailabilities bypass the unified resolver; per-method missing-data defaults diverge | ⚠ inconsistent | medium | `:959-1135`, `:1459-1584` vs `:2413-2428` |
-| F11 | FMEA event duration = `τ_sw + full MTTR` (switching time double-counted) | ✓ fixed (τ_rep = MTTR − τ_sw, see §5) | — | `run_distribution_fmea` stage loop |
-| F12 | FMEA grid-forming/microgrid support modeled as an unbounded slack (rating ignored) | ⚠ over-optimistic | medium | `:3095-3118`, `:2964-2986` |
-| F13 | Single load level in NSQ & F&D (no load-duration curve) | ◐ documented | low | `:1199-1208`, `:2049` |
-| F14 | Three-stage reactive demand rebuilt from PF=0.9 (ignores `q_mvar`) | ⚠ discards data | low | `three_stage…:548` |
-| F15 | Cyber/comm/control modes now drive EENS (comm-loss→frozen setpoint; data-driven derating) | ✓ fixed | low | `src/reliability/failure_mode.cpp:demand_probability（lambda）-940` |
-| F16 | Component-importance = co-occurrence attribution, not a Birnbaum/marginal measure | ◐ heuristic | low | `:1282-1287`, `:1360-1390` |
-| F17 | `use_importance_sampling` option unimplemented | ⚠ dead option | low | header `:165-167` |
-
-The headline is **F7**: the most physically detailed method (the three-stage
-restoration MILP) systematically *under-counts* the energy not supplied during
-the repair window, while the simpler FMEA gets that window right. Sections 5–6
-develop this.
-
----
-
-## 1. Notation
-
-Per component $c$ and failure mode $m$:
-
-- $\lambda_c$ — failure frequency (occ/yr); $r_c$ — mean repair/recovery time (hr).
-- $U_c$ — steady-state forced unavailability; $\text{MTTF}_c,\text{MTTR}_c$ (hr).
-- $\mu_c = H/r_c$ — repair rate (repairs/yr), with reporting horizon $H$ (8760 hr, or 8736 for the IEEE-RTS week-aligned year).
-- Active-on-demand mode: $\nu_d$ demands/yr, $p_d$ failure probability/demand.
-- Network consequence of a (failed) state: $S(\cdot)$ = total load shed (MW), $s_i(\cdot)$ = nodal shed at bus $i$.
-- System metrics: $\text{EENS}$ (MWh/yr), $\text{EDNS}$ (MW), $\text{LOLE}$ (hr/yr), $\text{LOLF}$ (occ/yr), $\text{PLC}/\text{LOLP}$ (–).
-
-The reliability evaluators **never read the dispatch objective value**; they read
-only $S$ and $s_i$. The objective is rigged (Section 7) so the consequence engine
-returns the *minimum* feasible shed.
-
----
-
-## 2. The shared parameter model (resolver)  ✓ F1
-
-`resolve_reliability_params` (`src/reliability/reliability_assessment.cpp:resolve_reliability_params-217`) maps the
-heterogeneous case fields into a canonical $\{\lambda, r, U, \text{MTTF}\}$ tuple.
-All conversions are the exact two-state-Markov forms and are **rigorous**:
-
-$$
-U=\frac{\lambda}{\lambda+\mu},\quad \mu=\frac{H}{r}
-\;\Longleftrightarrow\;
-U=\frac{\lambda r}{\lambda r + H}.
-$$
-
-From an explicit MTTF (or legacy MTBF with declared convention):
-$\lambda=H/\text{MTTF}$, and (with repair $r$) $U=\dfrac{r}{\text{MTTF}+r}$ —
-algebraically identical to the line above, confirmed in code by computing
-$\lambda$ then overwriting $U$ with the MTTF form (`:121-156`).
-
-From a forced-outage rate $f$ (= $U$) and repair $r$ (`:159-168`):
-
-$$
-\text{MTTF}=\frac{r(1-f)}{f},\qquad
-\lambda=\frac{f}{(1-f)\,r}\,H .
-$$
-
-Active-on-demand equivalent annual frequency (`:97-100`):
-$\lambda^{\text{act}} = \nu_d\,p_d$, then folded into the same
-frequency–duration form using the recovery time as $r$.
-
-**Provenance honesty (good):** missing/zero/non-finite inputs are treated as
-"not provided"; under `StrictCaseDataOnly` nothing is invented, the `data_source`
-is tagged `case|template|default|missing`, and the ambiguous MTBF-as-MTTF
-assumption emits a warning (`:143-146`). Domain guards reject $f\notin(0,1)$,
-$p_d\notin(0,1]$, etc.
-
-> ⚠ **F10 — the resolver is not actually the single source of truth for the
-> simulators.** The NSQ and SEQ Monte-Carlo paths compute unavailabilities and
-> MTTF/MTTR *inline* (`:959-1135`, `:1459-1584`) and only call the resolver for
-> the strict-mode *mask* (`mc_component_has_case_data`) and the data-quality
-> report. When case data is present the inline math matches the resolver, but the
-> **missing-data fallbacks diverge across methods** for the *same* component:
+> 最后核实：2026-08-20。
 >
-> | undocumented AC branch | effective $\lambda$ used |
-> |---|---|
-> | NSQ inline default | $U=0.01 \Rightarrow$ implied $\lambda$ ≈ 8.8 occ/yr at $r{=}10$h… i.e. an *unavailability* of 0.01, far above |
-> | FMEA resolver default | $\lambda=0.35$, $r=10 \Rightarrow U\approx4\times10^{-4}$ |
-> | three-stage default | $\lambda=k\text{DefaultFailureRate}=0.10$ (`three_stage…:43`) |
->
-> Three methods, three different implied risks for one undocumented branch. The
-> header advertises "one canonical parameter set so that every method consumes
-> identical lambda/repair/unavailability" — that contract holds for *present*
-> data only. **Fix:** route every per-component $\{U,\text{MTTF},\text{MTTR}\}$ in
-> NSQ/SEQ through `resolve_reliability_params` with the same per-kind template
-> table FMEA uses.
+> 本文是当前实现的中文摘要，不保存历史缺陷清单或研究路线图。完整推导、保护配合、信息系统、
+> 在线动态、参数影响、方法对比和验证算例见
+> `docs/modules/reliability/reliability_manual.tex`。运行行为以 `include/`、`src/`、`tests/`
+> 和已注册测试为准。
 
----
+## 1. 统一参数与概率模型
 
-## 3. The consequence-engine fidelity ladder
-
-Every method reduces to "apply failures → minimize load shed on the surviving
-network." Three different physics models are used, and **which one runs depends on
-the system and the method**, not on a user choice. This is the deepest
-cross-cutting issue, so it is stated once here and referenced later.
-
-| Engine | Physics | Used by | Fidelity |
-|---|---|---|---|
-| **DC-OPF** `solve_dc_opf` | DC power flow (B·θ), thermal limits, load shed; **no V/Q** | NSQ/SEQ/FMEA on **AC-only** systems (`:838`, `evaluate_failed_network_state:3847`) | enforces Kirchhoff voltage law (angles) |
-| **Hybrid network LP** `evaluate_hybrid_fmea_network_lp` | AC branches enforce **DC power flow** $P_f=B(\theta_i-\theta_j)$ (angles); zero-impedance edges (switch/breaker/transformer) enforce $\theta_i=\theta_j$; DC side + VSC/DC-DC transfers are transportation | every method on **hybrid AC/DC** systems (`:3248-3640`) | DC-PF on the AC subnetwork; DC/converter transfers transport-bound |
-| **LinDistFlow MILP** `solve_stage_milp` | linearised DistFlow: $v_j=v_i-2(rP+xQ)$, V-bounds, thermal, radiality | three-stage AC sub-network only (`three_stage…:367-1137`) | most detailed (has voltage); DC side falls back to connectivity |
-
-> ✓ **F9 (fixed).** The hybrid path (used whenever a DC bus/branch/VSC/DCDC/DC-storage/DC-PV
-> exists) now enforces **Kirchhoff's voltage law on the AC subnetwork**: each AC
-> branch adds a bus-angle-difference flow definition $P_f=B(\theta_i-\theta_j)$ with
-> $B=1/\max(|x|,10^{-4})$, and zero-impedance edges (switch/breaker/transformer)
-> collapse to $\theta_i=\theta_j$ (equipotential bus merge, flow free). Radial
-> networks reproduce the previous transport answer exactly (unique flow); **meshed
-> networks now constrain loop flows**, so the engine no longer routes power along
-> paths a real network cannot sustain. Load-shed slack keeps the LP feasible, and
-> the `conservative_hybrid_shed` fallback is preserved. The DC subnetwork and the
-> VSC / DC-DC transfers remain transportation-bound (voltage-source converters set
-> their own terminal, so a transport model of the converter transfer is
-> appropriate). Fidelity is now **monotone**: adding a DC bus to an AC case keeps
-> DC-PF physics on the AC side rather than relaxing to transportation.
-
-**Connection to reconfiguration.** The repair-stage search in FMEA
-(`evaluate_contingency_stage:3724-3814`) and all three stages of the three-stage
-MILP are exactly the ONR problem of
-[`network_reconfiguration_models.md`](network_reconfiguration_models.md) §1–§6,
-specialized to *min-shed* with the faulted element forced open. The three-stage
-MILP **is** the LinDistFlow ONR (G2 commodity-flow radiality, G3 power balance,
-G4 voltage big-M, G5 thermal, G7 switch budget) solved per restoration stage.
-Reliability is therefore "ONR under the contingency set, weighted by
-$\lambda$ and stage durations."
-
----
-
-## 4. Probabilistic adequacy methods
-
-### 4.1 Non-Sequential Monte Carlo  (`run_nonsequential_mc:913-1403`)
-
-**Model.** State sampling: each component independently down with prob $U_c$
-(Bernoulli, `sample_state:886-895`). Evaluate the state's shed $S$, accumulate
-$\text{EDNS}=\frac1n\sum S$, then
+所有评估入口通过统一解析器把元件数据归一为运行时间故障强度、日历年事件频率、平均修复时间、
+不可用度和平均无故障时间。设报告年小时数为 $H$、运行时间故障强度为 $\lambda_{up}$、
+修复时间为 $r$，则
 
 $$
-\text{EENS}=\text{EDNS}\cdot H,\qquad
-\text{LOLE}=\frac{\#\{\text{loss states}\}}{n}\,H,\qquad
-\text{PLC}=\frac{\#\{\text{loss states}\}}{n}.
+\mu=H/r,\qquad
+U=\frac{\lambda_{up}}{\lambda_{up}+\mu}
+=\frac{\lambda_{up}r}{H+\lambda_{up}r},\qquad
+f_{cal}=(1-U)\lambda_{up}.
 $$
 
-**Verdict.** The estimator is the standard state-sampling estimator and is
-**✓ rigorous** for a *single load level* with independent components. State dedup
-(packed-bitset key, `:272-293`), N-0 caching (`:1214`), strict-mode masking
-(`:1157-1163`), and base-out-of-service zeroing (`:1149-1152`) are all correct.
+年度 EENS、LOLE 和 LOLF 使用 $f_{cal}$，不得把运行时间强度直接当作日历年事件频率。
+`StrictCaseDataOnly` 不补造缺失数据；模板策略由同一逐元件解析器供非序贯 MC、序贯 MC、FMEA
+和精确灵敏度共同使用。解析结果保留数据来源与有效性诊断。
 
-**Convergence ✓ F4.** With per-sample variance $\sigma^2$ of $S$,
+## 2. 状态后果模型
 
-$$
-\text{CoV}=\frac{\sigma}{\bar S\sqrt n}=\frac{\text{SE}(\bar S)}{\bar S},
-$$
+物理后果的完整独立审计见中文手册
+`docs/modules/reliability/chapters/physical_consequence_models.tex`。该章统一审计主网 HL-II、混合
+AC/DC、配网三阶段和运行拓扑重构的可行域；本摘要只保留执行契约，避免把指标聚合与物理后果混为一谈。
 
-i.e. the coefficient of variation of the *mean estimator* (`:1298-1304`). Correct
-Billinton stopping rule. (Uses the population variance $\frac1n\sum S^2-\bar S^2$
-rather than the unbiased $\frac{1}{n-1}$ form — negligible.)
-
-> ◐ **F13.** Load is fixed at the base level $\times$ `load_scale_factor`; there is
-> no load-duration curve. NSQ-EENS is therefore "EENS at one load level," not the
-> chronological annual integral. This is the conventional adequacy simplification,
-> but it should be read as conservative-at-peak / optimistic-at-base depending on
-> the scale chosen.
-
-> ✗ **F8 — NSQ tail risk is built on the wrong distribution.** Each sample pushes
-> `dns*8760` as one "annual EENS" sample (`:1264-1267`) and VaR/CVaR are taken
-> over those (`:1396-1400`). But annual EENS is a *sum over 8760 correlated hours*;
-> its distribution is tight (CLT). The per-state $S\times H$ distribution is wildly
-> over-dispersed (most states are N-0 → 0; a few severe states → huge), so the
-> reported VaR/CVaR describe "one random hour annualized," not the annual risk.
-> The percentiles/VaR are essentially the per-state shed distribution scaled by
-> $H$. **Fix:** for non-sequential sampling, bootstrap-aggregate states into
-> synthetic years before computing tail metrics, or restrict VaR/CVaR to the
-> sequential method (where `annual_eens` is a true per-year sum and the metric *is*
-> valid).
-
-> ◐ **F16.** "Critical components" rank by `loss_weighted_risk` = the share of
-> loss-state shed observed while that component is down (`:1282-1287`). In a
-> multi-failure state the *entire* state shed is attributed to *every* down
-> component, so contributions sum to more than 100% and this is a co-occurrence
-> attribution, not a Birnbaum importance $\partial\,\text{EENS}/\partial U_c$.
-> Fine as a ranking; do not read it as marginal risk.
-
-### 4.2 Sequential Monte Carlo  (`run_sequential_mc:1405-1857`)
-
-**Model.** Per component, alternate up/down sojourns drawn by inverse-transform
-sampling of the exponential (`:1646-1678`):
+纯交流 HL-II 状态采用最小切负荷 DC-OPF；混合交直流状态采用 AC/DC 有功网络 LP。设
+$d_i$ 为毛负荷，$s_i$ 为负荷削减，$p_g$ 为可调机组出力，$\bar p_i^{fix}$ 为固定正注入，
+$p_i^{gc}$ 为固定注入削减，则交流节点平衡为
 
 $$
-T^{\uparrow}=-\text{MTTF}\,\ln u,\qquad T^{\downarrow}=-\text{MTTR}\,\ln u,\quad u\sim\mathcal U(0,1).
+\sum_{g\in\mathcal G_i}p_g+\bar p_i^{fix}-p_i^{gc}+s_i-d_i
+=\sum_{e\in\delta(i)}K_{ie}f_e,
 $$
 
-Hourly states feed the consequence engine with the chronological load scale
-$\text{(profile)}\times\text{(stress)}$ (`hourly_load_scale:558-567`). Per-year
-$\text{EENS}=\sum_h s_h$, $\text{LOLE}=\#\{\text{loss hours}\}$, and **LOLF** =
-count of $0\to1$ transitions in the hourly loss flag (`count_loss_events:898-905`).
-
-**Verdict ✓ F3.** This is the rigorous reference method: it captures chronology,
-the load-duration curve, *and* loss frequency. Its `annual_eens`/`annual_lole`
-are genuine per-year samples, so its tail-risk metrics (F8) **are** valid.
-
-> ◐ Minor: durations are rounded to integer hours with `max(1,·)` (up-time
-> `round`, down-time `ceil`, `:1661`/`:1666`). Every event lasts ≥ 1 hr, which
-> slightly inflates very short (e.g. cyber-recovery) outages and discretizes
-> sub-hour MTTRs. Asymmetric round/ceil adds a tiny duration bias. Negligible at
-> annual scale.
-
-### 4.3 Frequency & Duration / COPT  (`run_frequency_duration_analysis:1924-2059`)
-
-**Model.** Recursive cumulative capacity-outage probability table over generators
-only. For each unit (capacity $C$, availability $p$, unavailability $q$, failure
-rate $\lambda$, in MW / per-hour) the cumulative-state recursion is
+并满足
 
 $$
-P_{\text{new}}(X)=p\,P(X)+q\,P(X-C),
-$$
-$$
-F_{\text{new}}(X)=p\,F(X)+q\,F(X-C)+\lambda\,p\,\big[P(X-C)-P(X)\big].
-$$
-
-**Verdict ✓ F2.** Both lines are the exact Billinton–Allan recursive COPT build:
-the frequency increment $\lambda p[P(X{-}C)-P(X)]$ is precisely the
-boundary-crossing rate contributed by the new unit failing out of its up-state
-across the level $X$ (`:2017-2025`). Indices:
-
-$$
-\text{LOLP}=P(\text{outage}>\text{reserve}),\quad
-\text{LOLF}=F(\cdot)\,H,\quad
-\text{LOLE}=\text{LOLP}\,H,\quad
-\text{LOLD}=\text{LOLE}/\text{LOLF}.
+0\le p_g\le a_g\bar P_g,\quad
+0\le s_i\le d_i,\quad
+0\le p_i^{gc}\le\bar p_i^{fix},\quad
+-a_e\bar f_e\le f_e\le a_e\bar f_e.
 $$
 
-**Scope.** Generation adequacy only (HL-I): no network, transmission, or load
-model; single load level; 10 MW discretization with integer capacity rounding
-(`:2004`); the reserve→cumulative index has a one-step ($\le$10 MW) coarseness
-(`:2043`). All documented; treat as a fast screening bound, not a network EENS.
-
----
-
-## 5. Deterministic FMEA  (`run_distribution_fmea:3858-4028`)
-
-**Model.** Enumerate every in-service component as an N-1 contingency $k$ with
-frequency $\lambda_k$. Two stages are evaluated by the consequence engine:
-
-- **Switching stage** (duration $\tau^{sw}_k$ = `switching_time_hr`, default 0.5 hr):
-  fault isolated, emergency sources and islanding applied, **no** tie
-  reconfiguration. Shed $S^{sw}_k$.
-- **Repair stage** (duration $\tau^{rep}_k=\text{MTTR}_k-\tau^{sw}_k$, F11 fix —
-  the event lasts MTTR in total and the two stages are disjoint windows): fault
-  still out, plus a greedy ≤2-action switch/branch reconfiguration search.
-  Shed $S^{rep}_k$. The physical repair horizon (full MTTR) is still used for
-  storage-energy feasibility; only the frequency weighting uses the stage
-  duration.
-
-Aggregation (`:3949-3976`):
+每个交流连通分量任取一个角度参考。输入 `SLACK` 只是可复用的角度规范，不是供电能力，也不是
+可行性条件。HL-II 允许机组从零出力重新调度；固定注入允许显式削减。因此
 
 $$
-\text{EENS}=\sum_k \lambda_k\big(S^{sw}_k\tau^{sw}_k+S^{rep}_k\tau^{rep}_k\big),\qquad
-\text{LOLE}=\sum_k\lambda_k\big(\tau^{sw}_k\mathbb 1_{S^{sw}_k>0}+\tau^{rep}_k\mathbb 1_{S^{rep}_k>0}\big),
-$$
-$$
-\text{LOLF}=\sum_k\lambda_k\,\mathbb 1_{S^{sw}_k>0\,\lor\,S^{rep}_k>0}.
+p=0,\qquad f=0,\qquad \theta=0,\qquad s=d,\qquad
+p^{gc}=\bar p^{fix}
 $$
 
-**Verdict ◐ F6.** This is the standard first-order analytical FMEA expectation:
-valid when contingencies are rare and non-overlapping (no N-2), each occurring
-$\lambda_k$ times/yr with the staged shed. The two-stage decomposition correctly
-keeps the faulted component **out during the entire repair window** — so for load
-that switching cannot restore, $S^{rep}_k\cdot\text{MTTR}_k$ is charged, which is
-physically right (contrast F7). Sorting, nodal accumulation, and CIF/CID→SAIFI
-are consistent.
+是构造性可行点。该模型出现未收敛或后验原始可行性认证失败时，只能视为构模或数值求解缺陷，
+状态评估立即失败，禁止以“全切负荷”伪造 EENS。
 
-> ✓ **F11 (fixed).** The event now lasts MTTR in total: switching shed is
-> charged for $\tau^{sw}$ and reconfigured shed for
-> $\tau^{rep}=\max(0,\text{MTTR}-\tau^{sw})$ (with $\tau^{sw}$ clamped to
-> $\le$ MTTR), matching the textbook and three-stage conventions. The physical
-> repair horizon (full MTTR) is retained for storage-energy limits. Note this
-> slightly LOWERED historical FMEA EENS values (≈5% at MTTR=10 h) relative to
-> the old $\tau^{sw}+\text{MTTR}$ accounting.
+目标采用严格两阶段字典序：先最小化 $\sum_i s_i$，再固定其最优值并最小化发电和固定注入削减成本。
+单一有限 VOLL 只有在证明支配界和求解容差后才与字典序等价，当前可靠性后果入口不依赖这种近似。
 
-> **Level-1 cyber-physical conditioning (optional).** When
-> `FMEAOptions::cyber_physical.enabled` is set, every stage above is evaluated
-> per cyber class (automation available / unavailable) and mixed with the
-> scalar automation availability $A_k$; the class switching times replace
-> `switching_time_hr`, and the automation-unavailable class keeps crew-based
-> switch reconfiguration in the repair stage but freezes DER/storage/
-> grid-forming/islanding dispatch. Model, decomposition, and metric definitions:
-> archived [cyber-physical fidelity ladder](../archive/theory/cyber_physical_reliability_extension.md)
-> §4.1/§6 (implemented at Level 1 for this method only).
+## 3. 拓扑与物理边不变量
 
-> ⚠ **F12.** Grid-forming support is modeled by promoting the device's bus to a
-> **SLACK external grid** (`mark_island_anchor:2931-2947`) which
-> `add_external_grid_dispatch_sources` then backs with
-> $p_{\max}=\max(1000,\,2\times\text{demand})$ MW (`:2964-2986`) — **the converter's
-> own MVA rating is never imposed**. A single small grid-forming VSC therefore
-> fully energizes its island regardless of its rating, so post-fault support is
-> over-credited. The header already warns this "can overestimate available
-> support" (`:585-587`); the fix is to cap the anchor injection at the device
-> rating (and add an islanded power balance), not the heuristic 2×demand.
+拓扑分析、随机状态和功率流约束必须使用同一物理边集。MATPOWER 导入形成的
+`Transformer2W(source_branch_idx>0)` 是原始 `ACBranch` 的参数与归因元数据，不是第二条物理边，
+不进入图、LP 或独立随机元件集合。其可用状态由所链接的原始支路唯一决定。
 
-> ◐ The repair reconfiguration is a **greedy, OPF-budget-capped** enumeration
-> (`max_repair_opf_calls=200`, `:3756-3812`), not a proven optimum, and is flagged
-> via `repair_search_truncated`. It enumerates AC switches/branches only (no DC
-> breakers/branches/DCDC/VSC topology). So FMEA restoration is a heuristic upper
-> bound on served load, whereas the three-stage method solves a MILP — another
-> cross-method inconsistency.
+这项不变量消除了旧实现中“拓扑仍连通、B 矩阵已经断开”的表示矛盾。无源岛的全负荷削减由同一个
+优化模型内生得到，不经过 slack/source 预筛，也不经过失败回退。
 
----
+## 4. 非序贯与序贯蒙特卡洛
 
-## 6. Three-stage restoration MILP  (`three_stage_reliability.cpp`)
-
-**Model.** Per branch fault $k$, three LinDistFlow MILPs minimize $\sum_i p^{sh}_i$
-over the intervals $[0,\tau_{SW}]$, $[\tau_{SW},\tau_{TP}]$, $[\tau_{TP},\tau_{RP}]$.
-The MILP (documented at `three_stage…:282-332`) is exactly the ONR LinDistFlow of
-the reconfiguration doc: active/reactive balance, voltage drop
-$v_j=v_i-2(rP+xQ)$ with big-M decoupling on open branches, thermal big-M, a
-single-commodity radial-forest, switch-count budget $K^{sw}$, and continuous shed
-$p^{sh}_i\in[0,p_{d,i}]$. As a **formulation** this is the most rigorous engine in
-the module (✓ structure). The stage-conditioned topology is:
-
-| Stage | interval / duration | faulted element | tie switches |
-|---|---|---|---|
-| 1 (isolation) | $[0,\tau_{SW}]$, $\tau^{iso}$ | **open** (`z_k=0`) | open |
-| 2 (reconfig)  | $[\tau_{SW},\tau_{TP}]$, $\tau^{sw}$ | **open** (`z_k=0`) | **closeable**, $\le K^{sw}$ |
-| 3 (post-repair) | $[\tau_{TP},\tau_{RP}]$, $\tau^{rep}\approx\text{MTTR}$ | **CLOSED — restored** (`:628`) | forced open → nominal (`:637-641`) |
-
-EENS per load (`:1229-1234`):
-$\text{ENS}_i=\sum_k\lambda_k\big(s^{1}_i\tau^{iso}_k+s^{2}_i\tau^{sw}_k+s^{3}_i\tau^{rep}_k\big)$.
-
-> ✗ **F7 — the repair-window duration multiplies the wrong (already-restored)
-> topology.** The interval $[\tau_{TP},\tau_{RP}]$ is the *repair window*: the
-> faulted component is being repaired and is therefore **still out** until the
-> instant $\tau_{RP}$. Yet Stage 3 sets the faulted branch back **in service**
-> (`if (br.failed && stage < 3)` is false at stage 3, `:628`; mirrored in the DC
-> fallback `:1057-1058`,`:1064-1065`) and reopens the ties to nominal. So Stage 3
-> evaluates the **fully repaired** network — which yields $s^{3}_i\approx 0$ — and
-> then multiplies that ≈0 shed by the **long** repair duration $\tau^{rep}\approx
-> \text{MTTR}$.
->
-> Consequence: load that Stage-2 switching **cannot** restore (radial feeder, no
-> back-feed path, insufficient tie capacity) is charged only the Stage-2 duration
-> $\tau^{sw}=\tau_{TP}-\tau_{SW}\approx\tfrac{1}{60}$ hr (≈ 1 min), instead of the
-> repair duration MTTR. For a radial load with no tie, the correct
-> $\text{ENS}=\lambda\,\text{Load}\cdot\text{MTTR}$; the code returns
-> $\lambda\,\text{Load}\cdot(\tau^{iso}+\tau^{sw})\approx\lambda\,\text{Load}\cdot\tfrac1{30}$ hr
-> — an **under-estimate of ~30–150×** for unrestorable load.
->
-> Root cause: Stage 3 is labeled "post-repair" but is assigned the repair-window
-> *duration*. The window $[\tau_{TP},\tau_{RP}]$ is the time *during which* the
-> component is out being repaired, so Stage 3 should keep `z_k=0` (fault out) with
-> the Stage-2 reconfiguration **held**, and only return to nominal at the instant
-> repair completes (a zero-duration boundary). **Fix:** in Stage 3 force the
-> faulted element open (same as Stage 2) and keep the reconfigured ties closed;
-> $s^{3}_i$ then equals the genuinely unrestorable shed and the
-> $s^{3}_i\cdot\text{MTTR}$ term becomes correct. Note FMEA (§5) already does this
-> correctly — the simpler method is the more accurate one here.
->
-> **Empirical confirmation.** A radial 1-branch feeder (10 MW source → 1 MW load,
-> no tie, $\lambda=1$/yr) where the single branch fault *topologically isolates*
-> the load was run through `run_three_stage_reliability_from_string` for
-> MTTR ∈ {1, 10, 100, 1000} h (test `[reliability][three_stage][f7]` in
-> `tests/test_three_stage_reliability.cpp`):
->
-> | MTTR (h) | shed₁ (kW) | shed₂ (kW) | shed₃ (kW) | **EENS (kWh/yr)** | textbook $\lambda L\,\text{MTTR}$ |
-> |---:|---:|---:|---:|---:|---:|
-> | 1 | 1000 | 1000 | **0** | **33.333** | 1 000 |
-> | 10 | 1000 | 1000 | **0** | **33.333** | 10 000 |
-> | 100 | 1000 | 1000 | **0** | **33.333** | 100 000 |
-> | 1000 | 1000 | 1000 | **0** | **33.333** | 1 000 000 |
->
-> EENS is flat at $33.333=\lambda\,L\,(\tau^{iso}+\tau^{sw})=1000\cdot\tfrac{2}{60}$
-> kWh/yr across a 1000× MTTR sweep, and $s^{3}\equiv0$. The repair window
-> contributes nothing; the under-estimate is ≈300× at MTTR=10 h and ≈30 000× at
-> MTTR=1000 h. (The pre-existing "longer MTTR raises EENS" test passes only because
-> it uses a *capacity* shortfall, $s^{3}\ne0$, which keeps a residual repair-window
-> term — that test cannot detect this topology-isolation case.)
-
-> ⚠ **F14.** Reactive demand is **rebuilt** as $q_{d,i}=p_{d,i}\tan(\arccos 0.9)\approx
-> 0.4843\,p_{d,i}$ (`:548`), discarding each load's actual `q_mvar`. The 0.9-PF
-> assumption is applied uniformly even when measured Q is available.
-
-> ◐ Hybrid scope: DC buses/branches/VSC are **not** in the AC MILP; VSC/SOP
-> setpoints are fixed at 0 (`:1216-1221`), and `r.ok` is forced false for any
-> DC/VSC case (`:1308`). ✓ **DC power flow (default on):** the DC subnetwork is a
-> **DC LinDistFlow LP** (per-bus voltage bounds $v\in[v_{\min}^2,v_{\max}^2]$,
-> resistive drop $v_j=v_i-2rP$, per-branch thermal limits, DC sources, and VSC
-> transfers budgeted by the AC component surplus), so DC line congestion and
-> voltage violations shed load the old aggregate check missed. Set
-> `include_dc_power_flow=false` to force the legacy capacity fallback (also used
-> automatically if the DC LP fails to solve). `dc_power_flow_enforced` and
-> `model_scope` (`…+dc-lindistflow` vs `…+dc-connectivity-fallback`) report which
-> is active. Honestly flagged in `validity`/`model_scope` (`:1280-1289`).
-> Solver hardening (bound/integrality/residual post-checks with conservative
-> full-shed fallback, `:957-1026`) is solid.
-
-> ◐ Stage boundary times $\tau_{SW}=1$ min, $\tau_{TP}=2$ min are **global
-> constants** (`:39-41`), not per-device, and the default repair when MTTR is
-> absent is 1 hr — short for distribution assets.
-
-> ✓ **Fault set (extended).** N-1 enumeration covers **ACBranch** and **DCBranch**
-> outages by default; **generator, transformer, VSC/DC-DC converter, AC switch,
-> and AC/DC circuit-breaker** outages are enumerated when their opt-in flags
-> (`include_generator_faults`, `include_transformer_faults`,
-> `include_converter_faults`, `include_switch_faults`) are set. Converter and
-> DC-breaker faults act through the DC connectivity fallback (the faulted coupling
-> and its transfer capacity are dropped); AC switch/breaker faults become
-> forced-open AC restoration edges. Default off preserves the historical
-> branch-only enumeration, so existing SAIFI/EENS are unchanged unless enabled.
-
----
-
-## 7. The min-shed objective rig  ◐
-
-`reliability_shedding_voll` (`:252-270`) sets the value of lost load to
-$1000\times$ the worst source marginal cost, clamped to $[10^5,10^7]$ \$/MWh, so
-the LP/OPF is a lexicographic *minimum-load-shedding* problem (shed only when
-physically forced; source cost is a tie-breaker). Because the evaluators read only
-$S,s_i$ and never the objective value, inflating VOLL changes *which* min-shed
-dispatch is chosen but not the reported shed — **correct and well-reasoned**. Edge
-case: if a source marginal exceeds $10^4$ \$/MWh, the $10^7$ cap can erode the
-intended $1000\times$ dominance margin; in practice generator marginals are far
-below this.
-
----
-
-## 8. Failure-mode model (`failure_mode.cpp`)  ◐ F15
-
-A rich component expands into multiple **failure modes** (passive/active ×
-physical/cyber/protection/comm/measurement), each resolved through §2 and mapped
-by a **consequence operator** $\Phi_m$ to network mutations
-(`build_consequence_patch:764-928`). `run_failure_mode_fmea:1167-1307` then sums
-the same first-order $f_m\cdot\text{dur}_m\cdot S_m$ with
-$\text{dur}_m=\tau^{iso}+\tau^{sw}+r_m$ and $f_m=\lambda$ (passive) or $\nu_d p_d$
-(active).
-
-**Verdict.** The taxonomy, provenance, and "honest support gate" (modes the
-steady-state engine cannot represent are reported `unsupported`, not silently
-applied — `:829-851`) are a genuine strength. Scope after the F15 wiring:
-
-- `ForcedOutage`, `Derating`, load-point shed, aggregated-source outage,
-  breaker `FailToTrip→ProtectionZoneExpansion`, **control-unavailable /
-  setpoint-frozen (pinned setpoint), and communication-loss on a dispatchable
-  converter/DER (frozen dispatch → possible shed)** now drive EENS. A
-  communication-loss on a *non-dispatchable* target (switch/breaker), pure
-  `MeasurementBias`, and `FailToClose` still resolve to zero steady-state shed —
-  correctly, since those are restoration-path / state-estimation effects with no
-  first-order shed signature (they remain honestly `unsupported`).
-- ✓ **F15a.** Communication loss on a controllable converter now maps to
-  loss-of-dispatch (`RemoveControllability`): the device holds its last setpoint
-  and cannot re-dispatch, so an island that relied on its flexible infeed sheds
-  (`build_consequence_patch` `CommunicationLoss` case).
-- ✓ **F15b.** `Derating` severity is **data-driven**: each derating mode carries a
-  `residual_capacity_factor` (surviving fraction, e.g. thermal 0.75, cooling 0.70,
-  converter power-stage 0.70) instead of a uniform 0.5, and the consequence mapper
-  reads it. `derate()` now scales **both** transfer directions of a bidirectional
-  converter (`pmax` and `pmin`), so a converter feeding a DC island is actually
-  capacity-limited (previously derating only touched `pmax`, a no-op for AC→DC).
-- `ProtectionZoneExpansion` opens **every** edge incident to `bus_from`
-  (`expand_protection_zone:1014-1049`) — a conservative radial approximation that
-  is exact only for radial feeders; meshed buses are mis-handled either way.
-- \u2713 **Multi-mode (N-2) co-failures** are now enumerated on demand
-  (`FailureModeFMEAOptions::max_order >= 2`): pairs of supported modes on
-  **distinct** components are composed via `compose_consequence_patches` (correct
-  outage-dominates-derating precedence, `:1086-1137`; hard forced-open/closed
-  conflicts skipped), evaluated jointly, and weighted by the independent
-  second-order overlap $U_i U_j$ (EENS $+= U_i U_j\cdot 8760\cdot S_{ij}$). A
-  `min_pair_unavailability` floor and `max_pairs_evaluated` cap keep the
-  $O(M^2)$ enumeration tractable; `co_contingencies[]` reports the ranked joint
-  states. Default `max_order = 1` (single-mode) is unchanged.
-- Independence across the *several modes of one component* is assumed (their EENS
-  contributions add), which double-counts to second order — fine when modes are
-  rare.
-
----
-
-## 9. Metric definitions (as implemented)
+非序贯 MC 对独立二态元件抽样
 
 $$
-\text{EDNS}=\tfrac1n\textstyle\sum S\ \text{(MW)},\quad
-\text{EENS}=\text{EDNS}\cdot H,\quad
-\text{LOLE}=\text{PLC}\cdot H,\quad
-\text{PLC}=\Pr[S>\varepsilon],
-$$
-with curtailment threshold $\varepsilon=$ `curtail_threshold_mw` (0.01 MW).
-SEQ adds $\text{LOLF}=\mathbb E[\,$0→1 loss transitions/yr$\,]$.
-
-**IEEE Std 1366 ✓ F5** (`compute_distribution_indices:2065-2191`):
-
-$$
-\text{SAIFI}=\frac{\sum_i \text{CIF}_i N_i}{\sum_i N_i},\quad
-\text{SAIDI}=\frac{\sum_i \text{CID}_i N_i}{\sum_i N_i},\quad
-\text{CAIDI}=\frac{\text{SAIDI}}{\text{SAIFI}},\quad
-\text{ASAI}=1-\frac{\text{SAIDI}}{H},\quad \text{ASUI}=1-\text{ASAI}.
+p(x)=\prod_iU_i^{x_i}(1-U_i)^{1-x_i},
 $$
 
-Hybrid `[AC | DC]` nodal layout is handled; DC customers are appended. ⚠ When
-`n_customers` is absent, customers default to $10\times$MW (`:2106`,`:2114`,`:2149`),
-turning SAIFI/SAIDI into load-weighted (not customer-weighted) indices — a
-documented proxy, but the 10/MW constant is arbitrary and should be a parameter.
+并以状态后果 $S(x)$ 估计 EDNS、EENS、LOLE 和 PLC。优势比扭曲重要抽样使用精确似然比
+$w(x)=p(x)/q(x)$，结果返回权重诊断和有效样本量
 
-**Tail risk** (`compute_tail_risk:1863-1918`): VaR = ascending
-$\lceil c\,n\rceil$-quantile; CVaR = mean of the upper tail from VaR onward
-(expected shortfall). The estimator is correct; its **validity depends entirely
-on the input** — valid for SEQ `annual_eens`, invalid for NSQ (F8). The CVaR
-includes the VaR index itself (slight optimistic-tail bias) and percentiles use
-floor indices without interpolation (minor).
+$$
+N_{eff}=\frac{(\sum_n w_n)^2}{\sum_nw_n^2}.
+$$
 
----
+非序贯尾部风险先把状态样本按报告年聚合成合成年损失，再计算 VaR 与经验期望短缺；不把单个随机小时
+乘以全年小时数冒充年度分布。
 
-## 10. What is rigorous vs. what to fix
+序贯 MC 按失效与修复指数时钟生成逐小时状态，并消费负荷时间曲线。对同一小时健康状态 $x_0$，定义
 
-**Rigorous and trustworthy (keep):** the two-state parameter conversions (F1); the
-Billinton COPT probability+frequency recursion (F2); sequential MC chronology and
-its LOLF (F3); the MC CoV stopping rule (F4); IEEE-1366 indices (F5); the
-LinDistFlow MILP *formulation* and its solver post-checks; the min-shed objective
-rig (§7); the consequence-patch provenance/support-gate discipline.
+$$
+S^0_h=S(x_0,h),\qquad
+S^{inc}_{y,h}=\max\{0,S(x_{y,h},h)-S^0_h\}.
+$$
 
-**Priority fixes (math correctness):**
+标准原始指标、健康基线和故障增量分别为
 
-1. **F7 — three-stage repair window.** Hold the faulted element open and the
-   reconfiguration closed through Stage 3 so the MTTR duration multiplies the
-   genuinely-unrestorable shed. *This is the single largest accuracy error in the
-   module and it makes the most-detailed method the least accurate for
-   non-restorable load.*
-2. **F8 — NSQ tail risk.** Stop feeding `shed×8760` as annual samples; restrict
-   VaR/CVaR to the sequential method or aggregate states into synthetic years.
-3. **F10 — parameter unification.** Make NSQ/SEQ consume
-   `resolve_reliability_params` (values, not just the strict mask) so missing-data
-   defaults match FMEA/three-stage.
+$$
+\mathrm{EENS}^{raw}=\frac1{N_y}\sum_y\sum_hS(x_{y,h},h),
+$$
 
-**Secondary (fidelity/consistency):**
+$$
+\mathrm{EENS}^{0}=\frac1{N_y}\sum_y\sum_hS^0_h,\qquad
+\mathrm{EENS}^{inc}=\frac1{N_y}\sum_y\sum_hS^{inc}_{y,h}.
+$$
 
-4. **F9** ✓ *done* — the hybrid consequence engine now enforces DC-power-flow
-   physics on the AC subnetwork (branch angle-difference flow definitions;
-   zero-impedance edges equipotential), so fidelity is monotone with system
-   richness. DC/converter transfers remain (appropriately) transportation-bound.
-5. **F12** — cap FMEA grid-forming/microgrid support at the device rating with an
-   islanded power balance, instead of a 2×demand slack.
-6. **F11/§6** ✓ *done* — FMEA now uses the three-stage convention
-   ($\tau^{rep}=\text{MTTR}-\tau^{sw}$); one duration convention across methods.
-7. **F14** — use measured `q_mvar` in the three-stage MILP when available.
-8. **F15** ✓ *done* — control-unavailable / setpoint-frozen and communication-loss
-   on a dispatchable converter/DER now wire into the shed engine (frozen dispatch
-   → possible shed), and derating severity is data-driven (`residual_capacity_factor`,
-   with bidirectional converter derating fixed). Measurement-bias, comm-loss on
-   non-dispatchable devices, and fail-to-close remain honestly `unsupported`
-   (restoration / state-estimation effects, no first-order shed).
-9. **F13/F16/F17** — expose the load-level/LDC assumption; relabel
-   "critical components" as co-occurrence share (or implement a Birnbaum measure);
-   either implement or remove the importance-sampling option.
+`eens_mwh_yr` 和 `annual_eens` 使用原始量；`baseline_eens_mwh_yr` 单列健康基线；
+`incremental_eens_mwh_yr` 单列故障增量。LOLE 和 LOLF 同样由原始逐小时失负荷标志计算。
+健康状态已有缺额时，不能静默扣除后仍把结果称为标准 EENS。
 
-**One-line consistency note for the GUI/API:** the same hybrid case can produce
-materially different EENS under NSQ, FMEA, failure-mode FMEA, and three-stage —
-not from sampling noise but because each invokes a *different consequence engine,
-parameter-default set, and restoration optimality*. Surface the active
-`model_scope`/`validity` flags (already populated) next to every reported index so
-the numbers are never compared across methods as if commensurable.
+`ReliabilityResult::converged` 在 MC 中表示统计 CoV 停止条件是否满足，不表示单个 OPF 状态是否求解成功。
+单状态求解失败会立即抛错；`opf_failed_probability` 与 `opf_failed_eens_mwh_yr` 在有效运行中必须为零。
 
----
+## 5. FMEA、联合故障与重要度
 
-## 11. Cross-reference
+单故障模式先形成显式后果补丁，再调用共同物理后果引擎。一级 FMEA 聚合日历事件频率、阶段持续时间
+与切负荷。二阶联合故障使用
 
-- Reconfiguration / restoration kernel and the canonical LinDistFlow ONR:
-  [`network_reconfiguration_models.md`](network_reconfiguration_models.md).
-- Failure-mode implementation: `src/reliability/failure_mode.cpp` and the
-  registered reliability tests.
-- Per-method capability declarations are emitted at runtime in
-  `ReliabilityResult::validity` / `FMEAResult::validity` /
-  `ThreeStageReliabilityResult::validity` — treat them as the authoritative scope
-  statement for any exported number.
+$$
+\mathbb E[S]\approx S_0+\sum_iU_i(S_i-S_0)
++\sum_{i<j}U_iU_j(S_{ij}-S_i-S_j+S_0),
+$$
+
+并报告计算完整性、跳过原因和二阶交互项。规模守卫内还可精确枚举全部状态，计算 Birnbaum、
+Fussell--Vesely 和 EENS 对不可用度的解析导数；有限差分只作验证，不替代理论定义。
+
+物理与信息成功路径按共享元件保持的容斥计算联合可用率，最小割集通过极小击中集求解并返回稳定组件 ID。
+信息功能支持共享通信依赖、QoS、共同原因和互斥功能类，不能把各功能可用率简单相乘。
+
+## 6. 三阶段恢复与保护信息物理链
+
+三阶段恢复 MILP 依次求解故障隔离、运行拓扑重构和修复窗口。故障元件在全部阶段保持停运；第三阶段继承
+第二阶段已接受拓扑。模型覆盖 AC LinDistFlow、DC 有功平衡、辐射森林、热限、开关动作、双向 VSC/DC--DC、
+DER、微网和储能跨阶段能量。每个阶段有 $0\le p^{sh}\le P^d$；对 $P^d>0$ 的负荷采用
+$q^{sh}=(Q^d/P^d)p^{sh}$，对 $P^d=0,Q^d\ne0$ 的纯无功负荷另设
+$\min(0,Q^d)\le q^{sh}\le\max(0,Q^d)$，所以 $p^{sh}=P^d,q^{sh}=Q^d$ 是显式削减可行点。MILP 求解失败或后验
+认证失败立即抛出异常，不以全切负荷伪造 EENS。保护联锁阻止的是恢复动作准入，不等价于数学不可行。
+LCC 与多端口能量路由器在入口明确拒绝，不返回伪造的零影响结果。
+
+保护执行链实际计算 CT/PT 动态与饱和、定时限/反时限、方向、距离、差动、主后备配合、断路器失灵、
+重合器—熔断器—分段器序列、自动保护拓扑、DER 穿越与闭锁、微网同步窗以及信息共因和备用电池。
+三级方法对照可消费给定轨迹，也可在线调用 Mass-Matrix DAE；在线模式把保护动作反馈到网络并重新计算轨迹。
+
+保护在线模型是正序网络和单相故障输入，不认证三相 EMT、行波保护或 CT 磁滞；年度后果采用三个时间窗口。
+这些是当前模型边界，不是未实现功能。
+
+## 7. 结果解释与 IEEE RTS-24 基准
+
+结果必须同时读取 `model_scope`、`validity`、`model_limitations`、求解器状态和后验可行性证书。
+不同后果模型的 EENS 不能脱离状态空间、负荷轨迹、故障集合和运行语义直接比较。
+
+IEEE RTS-24 当前逐行映射 33 台机组和 38 条物理支路。确定性 N-0/N-1/N-2 共 2557 个状态全部通过：
+无求解失败、无非有限结果、无负削减、无超总负荷削减，最大原始约束违反为 0 MW。当前固定种子诊断值为：
+
+| 方法 | EENS/(MWh/yr) | LOLE/(h/yr) | CoV | 状态求解失败 |
+|---|---:|---:|---:|---:|
+| 非序贯 MC，20000 状态 | 123156.84 | 738.468 | 0.0314 | 0 |
+| 序贯 MC，400 年 | 1222.5778 | 10.5375 | 0.1152 | 0 |
+
+两次 MC 均未满足各自预设统计停止条件，因此只能称为诊断值，不能称为最终收敛基准。经典 RTS-24
+约 1200 MWh/yr、9.4 h/yr 的结果通常是只抽样机组、忽略网络故障的 HL-I 口径；与 HL-II 网络约束
+结果比较时必须采用相同机组状态和负荷轨迹，计算反事实网络增量，不能把两组数直接相减后归因。
+
+## 8. 验证入口
+
+- `test_reliability_resolver`：参数解析、MC/FMEA、混合 AC/DC 后果、固定注入削减、RTS-24 状态扫描。
+- `test_three_stage_reliability`：三阶段恢复、交直流耦合、保护动作与求解证书。
+- `test_intelligent_cyber_physical_reliability`：有限 POMDP、检测、隔离和风险约束恢复。
+- `reliability_workflow_e2e`、`reliability_configuration_e2e`：HTTP/GUI、在线 DAE、参数保存与移动视口。
+- `pf_doc_benchmark rel`：RTS-24 F&D、非序贯 MC 和序贯 MC 固定种子诊断。
+
+任何新增设备、后果模型或结果字段必须同步修改完整中文手册、本文、运行接口和注册测试；不得只在理论中规划。

@@ -264,10 +264,179 @@ $\partial\mathrm{EENS}/\partial U_c$：以“元件 $c$ 停运时观测到的失
 $\partial\mathrm{EENS}/\partial U_c$、Birnbaum 与 Fussell--Vesely，见 \S\ref{sec:rel-exact}。依据：\srcpath{src/reliability/reliability\_assessment.cpp}
 （\fld{critical\_components}）。
 
-\subsection{数值算例与基准（IEEE RTS-24）}\label{sec:rel-th-numexp}
+\subsection{数值算例与基准（IEEE RTS-24）}\label{sec:rel-th-numexp}\label{sec:rel-th-state-consequence}
+本节先规定 IEEE RTS-24 网络约束可靠性评估应求解的数学对象。该模型是后续代码修订与基准验收的
+判据；在全部一致性条件通过前，不以某次蒙特卡洛汇总值反推模型正确。
+
+\subsubsection{物理状态与唯一表示}
+令 $\mathcal N$、$\mathcal E$、$\mathcal G$ 分别为 AC 母线、物理支路和机组集合，
+$a_e(x),a_g(x)\in\{0,1\}$ 为状态 $x$ 下的可用标志。求解器使用的带电边集必须为
+\begin{equation}
+ \mathcal E(x)=\{e\in\mathcal E:a_e(x)=1\}.
+ \label{eq:rel-rts-edge-set}
+\end{equation}
+若导入器为物理支路 $e$ 生成参数、控制或结果归因元数据 $t$，并以映射
+$\rho(t)=e$ 关联，则 $t$ 不得再产生独立图边或独立随机变量：
+\begin{equation}
+ a_t(x)\equiv a_{\rho(t)}(x),\qquad
+ \mathcal E_{\rm topo}(x)=\mathcal E_{\rm flow}(x)=\mathcal E(x).
+ \label{eq:rel-rts-representation-invariant}
+\end{equation}
+式~\eqref{eq:rel-rts-representation-invariant} 是\emph{表示不变性}，不是数值近似。违反它会使拓扑筛选
+与功率平衡看到两个不同系统，任何 EENS 结果均无物理解释。
+
+由 $\mathcal E(x)$ 得连通分量 $\mathcal C(x)=\{C_1,\ldots,C_K\}$。按 MATPOWER DC 模型~\cite{rel:zimmerman}，对每个分量任取一个母线
+$r_k\in C_k$ 固定 $\theta_{r_k}=0$，即可消除 DC 节点电纳矩阵的一维零空间：
+\begin{equation}
+ \operatorname{rank} B_k=|C_k|-1,\qquad \theta_{r_k}=0.
+ \label{eq:rel-rts-angle-reference}
+\end{equation}
+因此 \texttt{SLACK} 最多提供一个可复用的角度规范，不是供电能力；\texttt{NoSlack} 也不等于失电岛。
+对式~\eqref{eq:rel-rts-dcopf}，无需判定输入数据中“有没有平衡节点”：每个 $C_k$ 任取一个
+$r_k$ 即可。一个没有导入 slack 标签、但含在线可调机组的分量仍可求解；一个保留 slack 标签、但没有
+可用注入能力的分量仍会缺供。这里必须区分两类问题：普通 DC 潮流需要指定承担功率不平衡的 slack
+注入，而 DC-OPF 已在所有母线同时执行式~\eqref{eq:rel-rts-balance}，功率不平衡由优化变量分配，
+角度参考不承担额外注入。
+
+\subsubsection{同一状态上的最小切负荷 DC 模型}
+对时段 $h$ 的毛需求 $d_{ih}\ge0$，定义负荷削减 $s_{ih}\in[0,d_{ih}]$、机组出力 $p_{gh}$、
+支路潮流 $f_{eh}$ 和相角 $\theta_{ih}$。静态电源、可再生电源、光伏、放电储能以及负的作者负荷
+统一聚合为状态相关固定正注入 $\bar p^{\rm fix}_{ih}(x)\ge0$，并定义固定电源削减
+$p^{gc}_{ih}$。网络状态后果模型为
+\begin{subequations}\label{eq:rel-rts-dcopf}
+\begin{align}
+ S(x,h)=\min\quad & \sum_{i\in\mathcal N}s_{ih}, \label{eq:rel-rts-dcopf-obj}\\
+ \text{s.t.}\quad
+&\sum_{g\in\mathcal G_i}p_{gh}+\bar p^{\rm fix}_{ih}(x)-p^{gc}_{ih}
+  +s_{ih}-d_{ih}
+   =\sum_{e\in\delta(i)}K_{ie}f_{eh}, &&i\in\mathcal N,\label{eq:rel-rts-balance}\\
+&f_{eh}=a_e(x)b_e(\theta_{o(e)h}-\theta_{d(e)h}), &&e\in\mathcal E,\label{eq:rel-rts-flow}\\
+&-a_e(x)\bar f_e\le f_{eh}\le a_e(x)\bar f_e, &&e\in\mathcal E,\label{eq:rel-rts-limit}\\
+&0\le s_{ih}\le d_{ih},\quad
+  0\le p^{gc}_{ih}\le\bar p^{\rm fix}_{ih}(x), &&i\in\mathcal N,\label{eq:rel-rts-shed}\\
+ &\theta_{r_kh}=0, &&C_k\in\mathcal C(x).\label{eq:rel-rts-ref}
+\end{align}
+\end{subequations}
+其中 $K$ 为支路—节点关联矩阵，$b_e$ 为 DC 电纳。当前可靠性后果模型采用等权 MW 削减，且与
+平台 DC-OPF 一致，不计支路移相角。若分量 $C_k$ 没有任何可用供给，对式~\eqref{eq:rel-rts-balance} 在 $C_k$ 上求和，边界潮流
+相消，立即得到
+\begin{equation}
+ \sum_{i\in C_k}s_{ih}=\sum_{i\in C_k}d_{ih}.
+ \label{eq:rel-rts-dead-island}
+\end{equation}
+所以无源岛的“全负荷切除”应由同一个优化模型自然产生，不需要以 slack 标签或设备类型作启发式回退。
+更强地说，在采用 HL-II 再调度语义~\eqref{eq:rel-rts-hlii-redispatch} 时，
+\begin{equation}
+ p=0,\qquad f=0,\qquad \theta=0,\qquad s=d,\qquad
+ p^{gc}=\bar p^{\rm fix}
+ \label{eq:rel-rts-constructive-point}
+\end{equation}
+总是一个可行点；即使整个系统没有在线机组，或某孤岛固定注入大于负荷，模型也应返回可行最优解，而不是以
+$n_g=0$、供给过剩或 \texttt{NoSlack} 返回求解失败。固定注入与毛负荷必须分开聚合；若先合成净负荷再令
+$s_i\le\max(d_i-\bar p_i^{\rm fix},0)$，式~\eqref{eq:rel-rts-constructive-point} 将被错误破坏。
+
+目标~\eqref{eq:rel-rts-dcopf-obj} 按字典序实现。令 $S^\star$ 为第一级最优值，第二级求解
+\begin{equation}
+ \min\ \sum_g C_g(p_g)+\sum_i\gamma_i p^{gc}_i
+ \quad\text{s.t. 式~\eqref{eq:rel-rts-dcopf} 且 }\sum_i s_i=S^\star,
+ \label{eq:rel-rts-lexicographic-second}
+\end{equation}
+其中 $\gamma_i\ge0$ 为固定电源削减代价。单一有限 VOLL 加权只有在给出目标界和求解容差时才能证明等价；否则
+“VOLL 很大”只是工程近似，必须在结果有效性中声明。
+
+\subsubsection{机组下界的三种运行语义}
+机组约束不能在未声明评估层级时统一改写。至少有以下三个互不等价的模型：
+
+\paragraph{A. HL-I 发电充裕度。}
+忽略网络，仅比较可用容量与负荷：
+\begin{equation}
+ 0\le p_{gh}\le a_g(x)\bar P_g.
+ \label{eq:rel-rts-hli-dispatch}
+\end{equation}
+这与 COPT 的“在线容量可从 0 使用到 $\bar P_g$”一致，不消费 MATPOWER 的经济调度 $P_g^{\min}$。
+
+\paragraph{B. HL-II 网络约束充裕度。}
+保留式~\eqref{eq:rel-rts-dcopf} 的网络约束，并仍采用
+\begin{equation}
+ 0\le p_{gh}\le a_g(x)\bar P_g.
+ \label{eq:rel-rts-hlii-redispatch}
+\end{equation}
+该口径假设故障后允许充裕度再调度，但不模拟开停机、最小开停时间与爬坡。它适合把网络约束增量与
+经典 RTS COPT 比较，但不能冒充生产模拟。
+
+\paragraph{C. 固定/时序开机组合的运行可靠性。}
+若开机状态 $y_{gh}\in\{0,1\}$ 来自 UC 或生产模拟，则
+\begin{equation}
+ a_g(x)y_{gh}P_g^{\min}\le p_{gh}\le a_g(x)y_{gh}\bar P_g.
+ \label{eq:rel-rts-commitment}
+\end{equation}
+此时低负荷岛可能满足 $\sum_gP_g^{\min}>\sum_i d_i$。模型必须明确选择以下机制之一：消费 UC 的
+紧急停机决策、加入有物理含义的弃电/外送变量、或把该状态报告为\emph{运行约束不可行}；不得把这种
+供给过剩转换成负荷不足。没有 $y_{gh}$、爬坡、最小开停时间和弃电语义时，直接保留正 $P_g^{\min}$
+或直接把全部 $P_g^{\min}$ 清零都不能称为通用正确模型。
+
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{3.2cm}L{3.7cm}L{3.7cm}L{3.7cm}@{}}
+\toprule
+口径 & 机组下界 & 可与经典 RTS 比较 & 必须报告的限制\\
+\midrule
+HL-I COPT & $0$ & 是，发电充裕度 & 无网络\\
+HL-II 再调度 & $0$ & 可比较网络约束增量 & 无 UC/爬坡/电压无功\\
+固定/时序组合 & $a_gyP^{\min}$ & 仅与同一 UC 轨迹比较 & 需弃电或紧急停机语义\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsubsection{物理后果、基线缺额与数值失败必须分离}
+对求解成功状态，定义原始物理削减 $S^{\rm raw}(x,h)$。同负荷下健康状态为 $x_0$，则
+\begin{equation}
+ S^0(h)=S^{\rm raw}(x_0,h),\qquad
+ S^{\rm inc}(x,h)=\max\{0,S^{\rm raw}(x,h)-S^0(h)\}.
+ \label{eq:rel-rts-raw-incremental}
+\end{equation}
+标准 EENS 使用 $S^{\rm raw}$；$S^{\rm inc}$ 是故障增量诊断。若 $S^0(h)>0$，应判定基准系统、负荷
+曲线或运行语义未闭环，并同时报告原始量与增量量，不能静默用增量量替换标准指标。
+
+令 $q(x,h)=1$ 表示优化器取得满足可行性容差的解。数值失败 $q=0$ 不是物理状态，故主估计量只能对
+已认证状态定义：
+\begin{equation}
+ \widehat{\mathrm{EENS}}_{\rm cert}
+ =\frac{H}{N}\sum_{k:q_k=1}S^{\rm raw}(x^{(k)},h_k),\qquad
+ p_{\rm fail}=\frac1N\sum_k\mathbf1[q_k=0].
+ \label{eq:rel-rts-certified-eens}
+\end{equation}
+若为失败状态临时取 $S^{\rm UB}=\sum_i d_i$，它只能形成保守上界
+\begin{equation}
+ \widehat{\mathrm{EENS}}^{\rm UB}
+ =\widehat{\mathrm{EENS}}_{\rm cert}
+ +\frac{H}{N}\sum_{k:q_k=0}S^{\rm UB}_k,
+ \label{eq:rel-rts-eens-upper-bound}
+\end{equation}
+不得把式~\eqref{eq:rel-rts-eens-upper-bound} 标成普通 EENS。每个失败状态至少记录：状态键、连通分量、
+在线源与上下界、求解器状态、原始/对偶残差及后端链。只有证明失败源于模型物理不可行，且模型已包含
+式~\eqref{eq:rel-rts-shed} 所需的松弛后，才能把它解释为系统后果。
+
+\begin{theorynote}
+本节契约已在 AC-only HL-II 与混合 AC/DC 有功网络两条代码路径闭环实现。AC-only 入口强制开启
+毛负荷削减、固定正注入削减、$P_g^{\min}=0$ 和
+两阶段字典序目标：第一阶段最小化 $\sum_i s_i$，第二阶段加入 $\sum_i s_i=S^\star$ 等式后
+最小化 PWL 发电成本与 $p^{gc}$ 代价。混合 LP 同样执行两阶段目标，VSC/DC--DC 紧急再调度区间包含
+零传输。两条路径均使用唯一物理边集和每个 AC 连通分量一个角度参考。DC-OPF 在规范投影坐标中对
+等式、不等式、盒界和有限性作后验认证；若后端失败或证书超差，评估立即抛出含残差与后端链的错误，
+该状态不写入 EENS。序贯 MC 的 \fld{annual\_eens} 与 \fld{eens\_mwh\_yr} 逐小时累加
+$S^{\rm raw}$，\fld{baseline\_eens\_mwh\_yr} 单列 $S^0$，
+\fld{incremental\_eens\_mwh\_yr} 单列 $S^{\rm inc}$；LOLE/LOLF 也按原始失负荷标志计算。
+因此健康状态已有缺额时，不会再被静默扣除出标准指标。
+\end{theorynote}
+
+\subsubsection{诊断数据与方法对比}
 在 IEEE 可靠性测试系统 RTS-24（$24$ 母线、$33$ 机组、$38$ 支路；\srcpath{data/case24\_ieee\_rts.m}
 $+$ \srcpath{apply\_ieee24\_reliability\_data}）上运行两类 MC（\srcpath{tools/pf\_doc\_benchmark.cpp}
 模式 \texttt{rel}，\texttt{ac-only-dcopf} 口径）：
+可靠性数据按 \texttt{case24\_ieee\_rts.m} 的 33 行机组和 38 行支路逐行映射，并以
+母线号、$P_g^{\max}$ 和支路端点签名校验。第 15 行 $P_g^{\max}=0$ 是同步调相机，仍保留其
+记录身份但不提供有功容量。旧实现按母线给同一母线全部机组复制一个 FOR/MTTR，并把并联支路按
+端点合并匹配；这会改变 COPT 和网络状态概率，是结果偏高/偏低均可能发生的数据构模错误。
 \begin{center}
 \resizebox{\textwidth}{!}{%
 \begin{tabular}{@{}lccccc@{}}
@@ -275,34 +444,49 @@ $+$ \srcpath{apply\_ieee24\_reliability\_data}）上运行两类 MC（\srcpath{t
 层级/方法 & 负荷口径 & CoV/年数 & EENS/(MWh$\cdot$yr$^{-1}$) & LOLE/(hr$\cdot$yr$^{-1}$) & 诊断\\
 \midrule
 HL-I 当前机组映射（COPT） & 峰值 $2850$~MW & 精确卷积 & 仅容量缺额 & 见 FD & 不含网络故障\\
-非序贯 MC（原始记录） & 固定峰值、8760 h & $0.097/2\times10^4$ 态 & $47\,244.9$ & $240.0$ & 回退 $13\,731.3$\\
-序贯 MC（原始记录） & 8736 h 曲线 & $0.035/101$ 年 & $43\,506.1$ & $43.3$ & N-0 未扣除\\
-序贯 MC（修正口径） & 8736 h 曲线 & $0.125/400$ 年 & $5\,843.0$ & $5.32$ & 回退 $5\,628.7$\\
+非序贯 MC（逐台数据，诊断） & 固定峰值、8760 h & $0.0314/2\times10^4$ 态 & $123\,156.8$ & $738.5$ & 未达到停止条件\\
+序贯 MC（逐台数据，诊断） & 8736 h 曲线 & $0.1152/400$ 年 & $1\,222.6$ & $10.54$ & 未达到停止条件\\
+确定性 HL-II 扫描 & N-0/N-1/N-2 & $2557/2557$ 态 & -- & -- & 失败 0、残差 0\\
 \bottomrule
 \end{tabular}
 }
 \end{center}
-原始两法数值接近不能作为正确性证明：非序贯使用固定峰值，序贯使用时序曲线；且旧序贯实现把健康状态的 N-0 缺额重复计入故障风险。修正后每小时采用
+两类 MC 数值不作为模型可行性证明：非序贯使用固定峰值，序贯使用时序曲线，且本次运行的 CoV
+尚未达到停止阈值。当前模型先用确定性扫描证明每个 N-0/N-1/N-2 状态均可认证，再把 MC
+作为概率估计。修正后每小时采用
 \begin{equation}
  S^{\mathrm{inc}}_{h}=\max\{0,S(x_h,L_h)-S(x_0,L_h)\},\qquad
- \mathrm{EENS}=\frac1{N_y}\sum_y\sum_h S^{\mathrm{inc}}_{y,h}.
+ \mathrm{EENS}^{\mathrm{inc}}=\frac1{N_y}\sum_y\sum_h S^{\mathrm{inc}}_{y,h}.
 \end{equation}
-其中 $x_0$ 是同一负荷倍率下的 N-0 状态。修正重跑的 $5\,843$~MWh/yr 尚未达到 $\mathrm{CoV}=0.05$，不能当作最终基准值。
+其中 $x_0$ 是同一负荷倍率下的 N-0 状态。该量按式~\eqref{eq:rel-rts-raw-incremental} 只能称为
+故障增量 EENS；标准原始 EENS 仍须另报。上表两次 MC 均为诊断运行，不能当作最终收敛基准；
+最终基准必须在预设 CoV 停止条件满足且失败计数为零后发布。
+这里的 MC \texttt{converged} 仅表示统计误差停止条件；它不能覆盖状态级求解证书。后者若为
+\texttt{converged=false} 或后验可行性失败，属于构模/数值求解缺陷，绝不作为“尚未抽够样本”处理，
+也不允许继续产生可靠性指标。
 \begin{boundarynote}
-经典 RTS-24 的 EENS $\sim1.2\times10^3$~MWh/yr、LOLE $\sim9.4$~hr/yr 通常是 HL-I 发电充裕度口径，仅对机组 COPT 卷积，不抽样输电支路。平台 MC 的期望后果分解为
+经典 RTS-24 的 EENS $\sim1.2\times10^3$~MWh/yr、LOLE $\sim9.4$~hr/yr 通常是 HL-I 发电充裕度口径，仅对机组 COPT 卷积，不抽样输电支路。发电与网络风险一般重叠，不能直接作相互独立的加法分解。应在相同状态与负荷上计算反事实增量
 \begin{equation}
- \mathbb E[S]=\mathbb E[S_{\mathrm{gen}}]+\mathbb E[S_{\mathrm{network}}]
- +\mathbb E[S_{\mathrm{dead\ island}}]+\mathbb E[S_{\mathrm{fallback}}].
+ \Delta\mathrm{EENS}_{\rm network}
+ =H\,\mathbb E\!\left[S_{\rm HL\text{-}II}(x,h)-S_{\rm HL\text{-}I}(x,h)\right],
+ \label{eq:rel-rts-network-increment}
 \end{equation}
-最后一项是 DC-OPF 不收敛时把存活负荷全部削减的实现回退，不能混入物理网络风险。结果结构现已报告
+两模型采用相同机组可用状态和运行语义时，HL-II 可行域是 HL-I 可行域加网络限制后的子集，故该增量应非负。
+无源岛削减与其余连通区域的 OPF 削减可按\emph{互斥母线集合}相加，但它们已经包含在
+$S_{\rm HL\text{-}II}$ 内，不能再次叠加。式~\eqref{eq:rel-rts-eens-upper-bound} 只保留为历史
+诊断定义；当前执行契约不接受任何数值失败状态，不能把失败状态的上界写入 EENS，也不能混入
+物理网络风险。结果结构现已报告
 \texttt{opf\_failed\_probability}、\texttt{dead\_island\_eens\_mwh\_yr} 和
-\texttt{opf\_failed\_eens\_mwh\_yr}：非序贯原始重跑的回退为 $13\,731.3$~MWh/yr（总值约 29\%），
-序贯按 N-0 增量修正后的回退为 $5\,628.7$~MWh/yr（约 96\%）。这证明剩余偏高首先是求解器/拓扑处理问题，不能称为 RTS 物理风险。
+\texttt{opf\_failed\_eens\_mwh\_yr}。当前闭环模型要求两个 \texttt{opf\_failed} 字段严格为零；
+\texttt{dead\_island\_eens} 是求解成功后的物理归因，可以非零。历史失败回退值只保留为缺陷定位记录，
+不能称为 RTS 物理风险；若状态求解返回 \texttt{converged=false} 或后验证书失败，入口立即抛出包含
+状态键、求解器状态和残差的错误，调用方必须修复构模或数值算法后重新运行。
 
 产生回退的具体原因是 MATPOWER 变压器同时存在两种表示：带变比支路保留在 \texttt{ac.branches}，并额外生成带
 \texttt{source\_branch\_idx} 的 \texttt{Transformer2W} 元数据。旧拓扑图把两者都当成连通边，而 DC-OPF 只把 \texttt{ac.branches}
-装入支路约束。因此“变压器支路停运、元数据边仍在”的状态会被图判为有源连通岛，随后 OPF 面对实际断开的 B 矩阵而失败；失败分支见
-\srcpath{src/reliability/reliability\_assessment.cpp:1144}，会把所有存活负荷计为削减。现已让拓扑图跳过链接元数据边，并禁止该元数据生成独立随机失效；修复后的基准必须重新收敛后才能与 HL-I 对比。
+装入支路约束。因此旧实现中“变压器支路停运、元数据边仍在”的状态会被图判为有源连通岛，随后
+OPF 面对实际断开的 $B$ 矩阵而失败；旧失败分支又把存活负荷全部计为削减。现行拓扑、AC-only DC-OPF、
+混合 AC/DC LP 和随机元件集合均跳过链接元数据边，且失败状态直接抛错，不再生成 EENS 数值。
 
 该故障链可写成同一状态向量上的两个不同边集：
 \begin{equation}
@@ -313,21 +497,21 @@ HL-I 当前机组映射（COPT） & 峰值 $2850$~MW & 精确卷积 & 仅容量�
 $G(E_{\mathrm{graph}})$ 连通、但 $B(E_{\mathrm{opf}})$ 已断开；拓扑预筛因此不切除该负荷，
 而 OPF 无法为断开的实际分量建立可行功率平衡，触发“存活负荷全部削减”的回退。反向状态
 （元数据停运而原始支路在线）则会采到一个不对应任何物理故障的随机事件。两种情况分别造成
-假阴性和假阳性，不能用“保守模型”解释。
+假阴性和假阳性，不能用“保守模型”解释。现行图、OPF 和 MC 元件集合均跳过
+\texttt{source\_branch\_idx>0} 的链接元数据，因此该双重表示不再产生独立随机状态。
 
-修复后的不变量是：对任意链接元数据行 $t$，只要 $t.\texttt{source\_branch\_idx}>0$，它只能参与
+表示层修订采用的不变量是：对任意链接元数据行 $t$，只要 $t.\texttt{source\_branch\_idx}>0$，它只能参与
 结果归因和映射，不能参与图边、孤岛边或独立蒙特卡洛元件集合；其在线状态完全由对应
 \texttt{ACBranch} 决定。该不变量由
 \srcpath{tests/test\_reliability\_resolver.cpp} 中的两母线回归测试执行验证：健康状态拓扑连通，
 停运原始支路后恰为两个 AC 岛、负荷岛状态为 \texttt{NoSlack}，且 DC-OPF 返回 10 MW 的可审计切负荷，
 不再借助元数据边维持连通。自适应孤岛子系统也采用同一过滤规则（\srcpath{src/power\_flow/island\_detector.cpp}）。
 
-还修正了同类但独立的“假有源”状态：母线的 \texttt{SLACK} 类型只是电压参考属性，
-不是在线发电能力。当某一岛上的所有可调机组均停运时，旧拓扑仍把该岛标为有效，
-而 DC-OPF 的发电变量集合为空（$n_g=0$），导致无源岛进入求解失败回退。现行拓扑—
-OPF 预筛同时检查岛内在线机组；无源岛在 OPF 前按节点负荷显式切除，因而不再把求解器
-失败伪装成网络后果。该规则在 \srcpath{src/reliability/reliability\_assessment.cpp:1076}
-和 \srcpath{src/optimal\_power\_flow/dc\_opf.cpp:1214} 分别执行。
+同类但独立的错误来自把母线 \texttt{SLACK} 类型误作在线发电能力。进一步按
+式~\eqref{eq:rel-rts-balance}--\eqref{eq:rel-rts-ref} 推导可知，修复并不是把判据改成“岛内是否有
+在线源”，而是完全取消 DC-OPF 的平衡节点/在线源可行性预筛：无 slack 有源岛由局部角度参考求解，
+有 slack 无源岛和无 slack 无源岛都由 $s=d$ 内生得到全切负荷。现行实现已经删除该在线源预筛，
+并以无机组、固定注入过剩、断岛和链接变压器四类回归用例约束这一行为。
 \end{boundarynote}
 
 \subsection{与实现的对应}\label{sec:rel-th-impl}
@@ -361,6 +545,8 @@ VaR/CVaR 尾部风险 &
   \implfull{include/hacdcpf/reliability/reliability\_assessment.hpp:TailRiskMetrics}（经验 ES 对 VaR 原子作分数权重）\\
 混合 AC/DC 有功网络与直流侧削减 &
   \implfull{src/reliability/reliability\_assessment.cpp:evaluate\_hybrid\_fmea\_network\_lp}（\texttt{hybrid-acdc-network-lp}）\\
+网络约束状态后果模型~\eqref{eq:rel-rts-edge-set}--\eqref{eq:rel-rts-eens-upper-bound} &
+  \implfull{src/optimal\_power\_flow/dc\_opf.cpp:solve\_dc\_opf 与 src/reliability/reliability\_assessment.cpp:evaluate\_state / evaluate\_hybrid\_fmea\_network\_lp}（唯一物理边、逐分量角度参考、$P_g^{\min}=0$、$p^{gc}$、两阶段字典序及规范坐标后验可行性证书）\\
 \end{longtable}
 \end{center}
 
@@ -378,4 +564,7 @@ VaR/CVaR 尾部风险 &
   Reliability Indices}. New York: IEEE, 2012.
 \bibitem{rel:rockafellar} R.~T. Rockafellar and S.~Uryasev, ``Optimization of conditional
   value-at-risk,'' \emph{Journal of Risk}, vol.~2, no.~3, pp.~21--41, 2000.
+\bibitem{rel:zimmerman} R.~D. Zimmerman, C.~E. Murillo-S\'anchez, and R.~J. Thomas,
+  ``MATPOWER: Steady-state operations, planning, and analysis tools for power systems
+  research and education,'' \emph{IEEE Trans. Power Syst.}, vol.~26, no.~1, pp.~12--19, 2011.
 \end{thebibliography}

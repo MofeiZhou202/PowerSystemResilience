@@ -357,6 +357,10 @@ $\to$ NativeDualSimplex
 \fld{branch\_limit\_margin} & — & pu & $>0$ & 1.0 & 支路限值缩放系数\\
 \fld{load\_shedding} & — & — & true/false & true & 是否启用切负荷松弛变量\\
 \fld{voll} & VOLL & — & $\ge 0$ & 0.0 & 失负荷价值（成本币种未定）；$\le 0$ 时按 $\max(100,\,1.1\times$ 最大边际成本$)$ 自动折算（\srcpath{dc\_opf.cpp:build\_dc\_opf\_lp}）\\
+\fld{lexicographic\_load\_shedding} & — & — & true/false & false & 两阶段精确目标：先最小总削减，再固定最优削减量并最小发电成本\\
+\fld{full\_redispatch\_from\_zero} & — & — & true/false & false & 充裕度评估中令所有在线机组从 0 到 $P_g^{\max}$ 可调\\
+\fld{allow\_fixed\_generation\_curtailment} & — & — & true/false & false & 是否引入逐母线固定正注入削减 $P^{gc}$，用于构造性可行性\\
+\fld{fixed\_generation\_curtailment\_cost} & $\gamma$ & 成本/MWh & $\ge0$ & 1.0 & 第二级固定正注入削减代价\\
 \fld{compute\_lmp} & — & — & true/false & true & 是否在主解后补解支撑 LP 以恢复约束对偶（LMP 与阻塞价格）；关闭可省一次 LP（字段注释，include/hacdcpf/optimal\_power\_flow/opf\_options.hpp:DCOPFOptions；实现 src/optimal\_power\_flow/dc\_opf.cpp:populate\_missing\_duals\_from\_supporting\_lp）\\
 \fld{structural\_warm\_start} & — & — & true/false & true & NativeLCQP 的逐连通分量配平与约化 Laplacian 初值；其他后端忽略\\
 \end{paramtable}

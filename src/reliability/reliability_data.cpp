@@ -15,6 +15,10 @@
 
 #include <spdlog/spdlog.h>
 
+#include <cmath>
+#include <stdexcept>
+#include <string>
+
 namespace hacdcpf::analysis {
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -95,25 +99,53 @@ int get_hourly_col(Season season, bool is_weekend) {
 
 // ═══════════════════════════════════════════════════════════════════════
 // IEEE RTS-24 Generator Reliability Data
-// Based on case24_failrate.m, mapped to the 10-generator builder model.
+// IEEE RTS Task Force (1979), generator table; row order is the MATPOWER
+// case24_ieee_rts.m order. The 33rd record count includes the Pmax=0
+// synchronous condenser at row 15; there are 32 active-power generating units.
 // ═══════════════════════════════════════════════════════════════════════
 struct GenReliabilityData {
   int bus;
+  double pmax_mw;
   double mttf_hr;
   double mttr_hr;
 };
 
-const GenReliabilityData kIeee24GenReliability[] = {
-    { 1, 2940.0, 60.0},
-    { 2, 2940.0, 60.0},
-    { 7, 1200.0, 40.0},
-    {13, 1100.0, 45.0},
-    {15,  960.0, 50.0},
-    {16, 1100.0, 45.0},
-    {18, 1100.0, 50.0},
-    {21, 1100.0, 50.0},
-    {22, 1100.0, 50.0},
-    {23, 1100.0, 50.0},
+const GenReliabilityData kIeee24UnitReliability[] = {
+    { 1,  20.0,  450.0,  50.0}, { 1,  20.0,  450.0,  50.0},
+    { 1,  76.0, 1960.0,  40.0}, { 1,  76.0, 1960.0,  40.0},
+    { 2,  20.0,  450.0,  50.0}, { 2,  20.0,  450.0,  50.0},
+    { 2,  76.0, 1960.0,  40.0}, { 2,  76.0, 1960.0,  40.0},
+    { 7, 100.0, 1200.0,  50.0}, { 7, 100.0, 1200.0,  50.0},
+    { 7, 100.0, 1200.0,  50.0},
+    {13, 197.0,  950.0,  50.0}, {13, 197.0,  950.0,  50.0},
+    {13, 197.0,  950.0,  50.0},
+    {14,   0.0, 10000.0,  0.1},  // synchronous condenser
+    {15,  12.0, 2940.0,  60.0}, {15,  12.0, 2940.0,  60.0},
+    {15,  12.0, 2940.0,  60.0}, {15,  12.0, 2940.0,  60.0},
+    {15,  12.0, 2940.0,  60.0},
+    {15, 155.0,  960.0,  40.0}, {16, 155.0,  960.0,  40.0},
+    {18, 400.0, 1100.0, 150.0}, {21, 400.0, 1100.0, 150.0},
+    {22,  50.0, 1980.0,  20.0}, {22,  50.0, 1980.0,  20.0},
+    {22,  50.0, 1980.0,  20.0}, {22,  50.0, 1980.0,  20.0},
+    {22,  50.0, 1980.0,  20.0}, {22,  50.0, 1980.0,  20.0},
+    {23, 155.0,  960.0,  40.0}, {23, 155.0,  960.0,  40.0},
+    {23, 350.0, 1150.0, 100.0},
+};
+
+// The native hybrid builder aggregates each bus's fleet into one generator.
+// These rows preserve the builder's documented screening model, but are not
+// used by the unit-level MATPOWER RTS-24 benchmark.
+const GenReliabilityData kIeee24AggregateGenReliability[] = {
+    { 1, 300.0, 2940.0, 60.0},
+    { 2, 300.0, 2940.0, 60.0},
+    { 7, 400.0, 1200.0, 40.0},
+    {13, 800.0, 1100.0, 45.0},
+    {15, 400.0,  960.0, 50.0},
+    {16, 300.0, 1100.0, 45.0},
+    {18, 600.0, 1100.0, 50.0},
+    {21, 600.0, 1100.0, 50.0},
+    {22, 500.0, 1100.0, 50.0},
+    {23, 800.0, 1100.0, 50.0},
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -127,21 +159,37 @@ struct BranchReliabilityData {
   double repair_hr;
 };
 
-const BranchReliabilityData kIeee24BranchReliability[] = {
+const BranchReliabilityData kIeee24UnitBranchReliability[] = {
     { 1,  2, 0.24, 16.0},  { 1,  3, 0.51, 10.0},  { 1,  5, 0.33, 10.0},
     { 2,  4, 0.39, 10.0},  { 2,  6, 0.48, 10.0},  { 3,  9, 0.38, 10.0},
-    { 4,  9, 0.36, 10.0},  { 5, 10, 0.34, 10.0},  { 6, 10, 0.33, 35.0},
-    { 7,  8, 0.30, 10.0},  { 3, 24, 0.02, 768.0}, // transformer
+    { 3, 24, 0.02, 768.0}, { 4,  9, 0.36, 10.0},  { 5, 10, 0.34, 10.0},
+    { 6, 10, 0.33, 35.0},  { 7,  8, 0.30, 10.0},  { 8,  9, 0.44, 10.0},
     { 8, 10, 0.44, 10.0},  { 9, 11, 0.02, 768.0}, // transformer
     { 9, 12, 0.02, 768.0},                         // transformer
     {10, 11, 0.02, 768.0},                         // transformer
     {10, 12, 0.02, 768.0},                         // transformer
     {11, 13, 0.40, 11.0},  {11, 14, 0.39, 11.0},  {12, 13, 0.40, 11.0},
     {12, 23, 0.52, 11.0},  {13, 23, 0.49, 11.0},  {14, 16, 0.38, 11.0},
-    {15, 16, 0.33, 11.0},  {15, 21, 0.41, 11.0},  {15, 24, 0.41, 11.0},
+    {15, 16, 0.33, 11.0},  {15, 21, 0.41, 11.0},  {15, 21, 0.41, 11.0},
+    {15, 24, 0.41, 11.0},
     {16, 17, 0.35, 11.0},  {16, 19, 0.34, 11.0},  {17, 18, 0.32, 11.0},
-    {17, 22, 0.54, 11.0},  {18, 21, 0.35, 11.0},  {19, 20, 0.34, 11.0},
-    {20, 23, 0.33, 11.0},  {21, 22, 0.45, 11.0},
+    {17, 22, 0.54, 11.0},  {18, 21, 0.35, 11.0},  {18, 21, 0.35, 11.0},
+    {19, 20, 0.38, 11.0},  {19, 20, 0.38, 11.0},  {20, 23, 0.34, 11.0},
+    {20, 23, 0.34, 11.0},  {21, 22, 0.45, 11.0},
+};
+
+const BranchReliabilityData kIeee24AggregateBranchReliability[] = {
+    { 1,  2, 0.24, 16.0},  { 1,  3, 0.51, 10.0},  { 1,  5, 0.33, 10.0},
+    { 2,  4, 0.39, 10.0},  { 2,  6, 0.48, 10.0},  { 3,  9, 0.38, 10.0},
+    { 4,  9, 0.36, 10.0},  { 5, 10, 0.34, 10.0},  { 6, 10, 0.33, 35.0},
+    { 7,  8, 0.30, 10.0},  { 3, 24, 0.02, 768.0}, { 8, 10, 0.44, 10.0},
+    { 9, 11, 0.02, 768.0}, { 9, 12, 0.02, 768.0}, {10, 11, 0.02, 768.0},
+    {10, 12, 0.02, 768.0}, {11, 13, 0.40, 11.0},  {11, 14, 0.39, 11.0},
+    {12, 13, 0.40, 11.0},  {12, 23, 0.52, 11.0},  {13, 23, 0.49, 11.0},
+    {14, 16, 0.38, 11.0},  {15, 16, 0.33, 11.0},  {15, 21, 0.41, 11.0},
+    {15, 24, 0.41, 11.0},  {16, 17, 0.35, 11.0},  {16, 19, 0.34, 11.0},
+    {17, 18, 0.32, 11.0},  {17, 22, 0.54, 11.0},  {18, 21, 0.35, 11.0},
+    {19, 20, 0.38, 11.0},  {20, 23, 0.34, 11.0},  {21, 22, 0.45, 11.0},
 };
 
 double unavail_from_mttf(double mttf_hr, double mttr_hr) {
@@ -183,39 +231,56 @@ LoadProfile build_ieee_rts24_load_profile(int hours_per_year) {
 // apply_ieee24_reliability_data
 // ═══════════════════════════════════════════════════════════════════════
 void apply_ieee24_reliability_data(HybridPowerSystem& sys) {
-  // Generators
-  for (auto& gen : sys.ac.generators) {
-    bool matched = false;
-    for (const auto& rd : kIeee24GenReliability) {
-      if (gen.bus == rd.bus) {
-        gen.mttr_hr           = rd.mttr_hr;
-        gen.forced_outage_rate = unavail_from_mttf(rd.mttf_hr, rd.mttr_hr);
-        matched = true;
-        break;
-      }
-    }
-    if (!matched || gen.forced_outage_rate <= 0.0 || gen.mttr_hr <= 0.0) {
-      gen.mttr_hr           = 50.0;
-      gen.forced_outage_rate = 0.02;
-    }
+  const bool unit_level =
+      sys.ac.generators.size() == std::size(kIeee24UnitReliability) &&
+      sys.ac.branches.size() == std::size(kIeee24UnitBranchReliability);
+  const bool aggregate =
+      sys.ac.generators.size() == std::size(kIeee24AggregateGenReliability) &&
+      sys.ac.branches.size() == std::size(kIeee24AggregateBranchReliability);
+  if (!unit_level && !aggregate) {
+    throw std::invalid_argument(
+        "apply_ieee24_reliability_data: system is neither the 33-row/38-branch "
+        "MATPOWER RTS-24 nor the explicit 10-generator/33-branch aggregate builder");
   }
 
-  // Branches
-  for (auto& br : sys.ac.branches) {
-    bool matched = false;
-    for (const auto& rd : kIeee24BranchReliability) {
-      if ((br.from_bus == rd.from_bus && br.to_bus == rd.to_bus) ||
-          (br.from_bus == rd.to_bus   && br.to_bus == rd.from_bus)) {
-        br.mttr_hr     = rd.repair_hr;
-        br.failure_rate = rd.lambda;
-        matched = true;
-        break;
+  const auto apply_generators = [&](const auto& table, const char* scope) {
+    for (size_t i = 0; i < sys.ac.generators.size(); ++i) {
+      auto& gen = sys.ac.generators[i];
+      const auto& rd = table[i];
+      if (gen.bus != rd.bus || std::abs(gen.pmax_mw - rd.pmax_mw) > 1e-6) {
+        throw std::invalid_argument(
+            "apply_ieee24_reliability_data: " + std::string(scope) +
+            " generator row " + std::to_string(i + 1) +
+            " does not match the RTS-24 bus/Pmax signature");
       }
+      gen.mttr_hr = rd.mttr_hr;
+      gen.forced_outage_rate = unavail_from_mttf(rd.mttf_hr, rd.mttr_hr);
     }
-    if (!matched || br.failure_rate <= 0.0 || br.mttr_hr <= 0.0) {
-      br.failure_rate = 0.35;
-      br.mttr_hr      = 10.0;
+  };
+  const auto apply_branches = [&](const auto& table, const char* scope) {
+    for (size_t i = 0; i < sys.ac.branches.size(); ++i) {
+      auto& branch = sys.ac.branches[i];
+      const auto& rd = table[i];
+      const bool same_endpoints =
+          (branch.from_bus == rd.from_bus && branch.to_bus == rd.to_bus) ||
+          (branch.from_bus == rd.to_bus && branch.to_bus == rd.from_bus);
+      if (!same_endpoints) {
+        throw std::invalid_argument(
+            "apply_ieee24_reliability_data: " + std::string(scope) +
+            " branch row " + std::to_string(i + 1) +
+            " does not match the RTS-24 endpoint signature");
+      }
+      branch.failure_rate = rd.lambda;
+      branch.mttr_hr = rd.repair_hr;
     }
+  };
+
+  if (unit_level) {
+    apply_generators(kIeee24UnitReliability, "unit-level");
+    apply_branches(kIeee24UnitBranchReliability, "unit-level");
+  } else {
+    apply_generators(kIeee24AggregateGenReliability, "aggregate");
+    apply_branches(kIeee24AggregateBranchReliability, "aggregate");
   }
 }
 

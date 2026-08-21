@@ -1,12 +1,41 @@
 # Development Status
 
-Updated: 2026-08-20
+Updated: 2026-08-21
 
 This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
 
 ## 可靠性理论与执行闭环（2026-08-20）
+
+### 物理后果独立章节与三阶段可行性审计（2026-08-20）
+
+新增中文手册章节 `chapters/physical_consequence_models.tex`，把物理后果单独定义为状态投影后的
+最小切负荷算子，系统审计主网 HL-II DC-OPF、混合 AC/DC 网络 LP、配网 LinDistFlow、Stage 1
+保护隔离、Stage 2 运行拓扑重构和 Stage 3 修复窗保持拓扑。章节给出逐节点平衡、角度参考、固定注入
+削减、VSC 双向效率、辐射森林、开关预算、储能跨阶段递推和任意故障的构造性可行点，并明确区分
+物理削减、保护不准入与构模/数值失败。可靠性手册 XeLaTeX 编译由 107 页增至 112 页，新增章节
+第 24--27 页及受影响的三阶段第 48--49 页经 Poppler 渲染复核，无致命错误、溢出版心、裁切或重叠。
+
+三阶段实现删除了求解失败、等式后验违反和不等式后验违反时的“全切负荷”伪造路径。闭环健康拓扑
+固定全闭与辐射森林冲突时，固定拓扑仅作为可重试预解，随后调用允许开边/重构的通用 MILP；通用
+MILP 或其后验认证失败立即返回带阶段号、后端状态、间隙或残差的错误，不写入 EENS/SAIDI/SAIFI。
+保护联锁未通过时，Stage 2/3 仍在 Stage-1 安全拓扑上求解并认证实际削减，状态为
+`success (protection interlock)`、恢复准入标志为 false；该物理后果按持续时间计入指标，但不再被误报为
+求解失败。章节中的辐射森林已按实现修订为商品流、健康常闭边保持和边数不等式，并补全电压区间、
+Big-M 与含根健康分量生成树等构造性可行条件。
+可行性定理的配网适用域已收紧为根森林兼容输入：有效径向配网，或为健康闭环提供可操作分段设备。
+缺少分段设备元数据的闭环不会由优化器凭空开线，而会把径向化失电显式计入 N-0 原始削减。新增唯一
+发电机故障回归覆盖“无源、无可用 slack、全切负荷仍成功求解”的三阶段构造性可行点。
+
+进一步按构造性证明逐式审计发现：旧模型仅以
+$q_i^{sh}=(Q_i^d/P_i^d)p_i^{sh}$ 隐式表示无功削减，且母线负荷导入会跳过
+$P_i^d=0,Q_i^d\ne0$ 的纯无功负荷；唯一源故障后因此缺少 $q_i^{sh}=Q_i^d$ 的可行点。现实现保留
+$P_i^d>0$ 时的代数消元，只对纯无功母线增加
+$\min(0,Q_i^d)\le q_i^{sh}\le\max(0,Q_i^d)$，并在母线失电时强制完全削减。这样既补齐任意有效
+故障的无功平衡构造，又保持既有 MILP 矩阵及求解器原始间隙不变。新增纯无功唯一源故障反例后，
+`test_three_stage_reliability` 为 38 个用例、1904 个断言全部通过；完整 `macos-release` 回归完成
+1611 项注册测试调度，其中 1608 通过、3 条件跳过、0 失败，总耗时 228.47 秒。
 
 ### RTS-24 拓扑—求解一致性修复
 
@@ -18,11 +47,25 @@ the current Git worktrees remain authoritative.
 
 现行不变量为：`source_branch_idx > 0` 的变压器行只用于映射和结果归因，不参与图边、
 孤岛子系统边或独立蒙特卡洛元件集合；其物理状态完全由对应 `ACBranch` 决定。图构建、
-孤岛检测、可靠性状态掩码和子系统复制均已采用同一规则。新增回归用例验证健康状态连通，
-停运原始支路后形成两个 AC 岛、负荷岛为 `NoSlack`，且 DC-OPF 返回 10 MW 可审计切负荷。
-`test_reliability_resolver` 当前实测为 80 个用例、620 个断言，全部通过。RTS-24 全量序贯
-重跑尚未作为最终基准发布：400 年 × 8736 小时会触发数百万次 OPF，当前仍需采用收敛的
-分层基准配置；现有 5843 MWh/年中间值和 5628.7 MWh/年回退分解均明确标注为未收敛诊断值。
+孤岛检测、可靠性状态向量和子系统复制均已采用同一规则。HL-II DC-OPF 不再检查输入 slack、
+`NoSlack`、在线源或全局机组数；每个连通分量任取角度参考，在线机组采用 `0<=Pg<=Pmax`，
+并执行“先最小切负荷、再最小 PWL 发电成本”的两阶段字典序 LP；对静态电源、可再生、PV、
+储能和负净负荷额外引入有界固定电源削减 `pgc`，因此固定注入过剩也有显式可行点。任何未收敛
+或规范坐标后验证书失败的状态立即抛错，不写入 EENS；混合 AC/DC FMEA LP 同样执行两阶段证书，
+删除数值失败全切负荷回退。
+
+RTS-24 可靠性数据已从按母线复制改为 MATPOWER 33 行机组、38 行支路逐行映射，并校验
+母线/Pmax/端点签名；并联支路不再共用首个端点匹配值。确定性 `relscan` 枚举 71 个导入记录
+（33 行机组，含 1 行零有功同步调相机；38 条物理支路）的 N-0/N-1/N-2 共 2557 个状态，
+实测 2557/2557 收敛，非有限、不可行、负削减、超总负荷削减均为 0，最大功率平衡/约束违反
+为 0 MW，最大状态削减 245 MW。当前 `test_reliability_resolver` 为 88 个用例、704 个断言，
+全部通过。逐台数据 MC 诊断得到 NSQ EENS=123156.8 MWh/年、LOLE=738.5 h/年、CoV=0.0314；
+SEQ EENS=1222.6 MWh/年、LOLE=10.54 h/年、CoV=0.1152；两者 `OPFFailedP/EENS=0`，但均未
+达到各自预设停止条件，故不作为最终收敛基准发布。
+
+顺序 MC 现行字段口径已固定：`eens_mwh_yr`/`annual_eens` 为逐小时总切负荷（含 N-0 基线），
+`baseline_eens_mwh_yr` 为同负荷曲线健康状态缺额，`incremental_eens_mwh_yr` 为相对 N-0 的故障增量；
+LOLE/LOLF 按总切负荷标志统计。N-0 缺额反例与逐负荷空间因子反例均已注册回归。
 
 可靠性模块的现行理论均已落到可调用代码、结果字段和注册测试，不再以路线图充当
 功能。闭环范围包括：不分箱 COPT 精确状态概率与 F&D 有效性诊断、独立两状态
@@ -61,8 +104,8 @@ SAIDI=7.20 分钟/(户·年)、EENS=440.0 kWh/年；后端状态为 StrictHiGHS 
 0.4 次/年，分解残差为 0。有效故障率同时报告运行时间条件强度和日历年事件频率，
 并由 `(1-U)*lambda_up=f_calendar` 回归验证，避免把两种口径直接混用。
 
-中文可靠性手册最终为 103 页 A4，正文约 13.8 万字符、其中约 5.2 万汉字；XeLaTeX
-干净编译无溢出版心警告，Poppler 以 120 dpi 渲染全部 103 页，非空页 103/103。
+中文可靠性手册当前为 112 页 A4；XeLaTeX 干净编译无致命错误或溢出版心警告，原 107 页基线曾以
+Poppler 全页渲染验证，本次新增/受影响的第 24--27、48--49 页以 120 dpi 重新渲染目视检查。
 联系表和封面、求解证书、保护、信息系统、在线 DAE、三级对照、参数表、验证边界、
 末页均已目视检查，无裁切、重叠或英文生成附录。可靠性手册、总理论文档及可靠性
 源码的悬空状态词扫描为零，新增代码的任务标记、占位和固定伪值扫描为零。
@@ -215,7 +258,8 @@ RPO、CPF、短路、谐波、动态、小信号、可靠性、弹性、重构�
 |---|---|
 | Required MIPSolvers source | Current pin `3bf1e66749e3b3e0bbd57696a7d4f43ecf09218c`; the clean sibling worktree matches it and includes the PF KLU numeric-refactor interface/adapter. The PF regressions below used the same three-file dependency content before it was committed. The earlier general full-regression baseline was established at `60f8bc4e4eeb58c239f83b7ff0fde1be75cd05b0`. |
 | Current clean `macos-release` build | At repository `1773aa0e75d7` with MIPSolvers `3bf1e66749e3`, `cmake --preset macos-release` followed by `cmake --build --preset macos-release --clean-first` completed successfully on macOS 26.5.2 / Apple M4 Max. The precompiled MIPSolvers dependency manifest did not match the active ABI, so configuration correctly used the repository-vendored HiGHS, SCIP, Ipopt, and SuiteSparse instead. |
-| Current complete `macos-release` regression | After the fixes recorded below, `cmake --build --preset macos-release -j8` completed and `ctest --preset macos-release --output-on-failure` ran all 1549 registered tests in 178.49 s with 0 failures: 1546 passed and 3 were conditionally skipped. The skips are one unavailable formal-SOC JSON input and two unavailable external GridLAB-D comparisons. |
+| Current complete `macos-release` regression | After the reliability raw/incremental EENS and DCOPF status fixes, `cmake --build --preset macos-release -j8` completed and `ctest --preset macos-release --output-on-failure` ran all 1609 registered tests in 225.45 s with 0 failures: 1606 passed and 3 were conditionally skipped. The skips are one unavailable formal-SOC JSON input and two unavailable external GridLAB-D comparisons. |
+| Current physical-consequence audit | The registered suite now contains 1611 tests after adding the only-source-outage and pure-reactive-load constructive-feasibility cases. `test_three_stage_reliability` passed 38 cases / 1904 assertions. The final complete `ctest --preset macos-release --output-on-failure` rerun completed all 1611 registered tests in 228.47 s with 0 failures: 1608 passed and 3 were conditionally skipped. The skips are one unavailable formal-SOC JSON input and two unavailable external GridLAB-D comparisons. The earlier focused main-grid HL-II, hybrid consequence, and three-stage selection passed 39/39 in 13.42 s before the pure-reactive case was registered. |
 | `full-dev` regression | 1430/1430 registered tests completed without failure; 3 condition-dependent tests skipped |
 | Earlier green `macos-release` regression | 1425/1425 registered tests completed without failure; 3 condition-dependent tests skipped |
 | Graph ASan/UBSan subset | 28 cases, 113 assertions passed after the iterative Tarjan fix |
@@ -1418,8 +1462,8 @@ through the production PF projection facade instead of interpreting stable bus
 IDs as canonical positions. The first complete rerun exposed the related
 canonical-input test 1148; an explicit `projection_certificate` split now
 prevents re-projecting already-canonical systems, and focused tests 1127/1148
-both pass. The final `macos-release` CTest ran all 1549 registered tests in
-178.49 s with 0 failures: 1546 passed and 3 condition-dependent tests were
+both pass. The final `macos-release` CTest ran all 1609 registered tests in
+225.45 s with 0 failures: 1606 passed and 3 condition-dependent tests were
 skipped. The skips comprise one unavailable formal SOC JSON input and two
 unavailable external GridLAB-D comparisons. The focused NCP/Schur GUI test,
 Canvas/WebGL linking, hybrid Auto OPF, and RPO cross-validation all pass. The

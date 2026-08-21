@@ -1,0 +1,192 @@
+% physical_consequence_models.tex -- 物理后果模型独立审计章
+% 理论先于实现：本章给出主网、配网、运行拓扑重构和三阶段恢复的统一可行域。
+
+\section{物理后果模型与可行性审计}
+\label{sec:rel-physical-consequence}
+
+\begin{theorynote}
+本章把“物理后果”从可靠性指标聚合中分离出来。故障事件只改变设备状态、保护隔离状态、可用源、
+开关候选和阶段时钟；后果算子在给定状态上求解一个带有\emph{显式负荷削减}的最小后果问题。
+主网采用网络约束 HL-II DC-OPF，含直流设备时采用耦合 AC/DC 有功网络 LP；配网采用带电状态、
+LinDistFlow、电压、热限、辐射森林和运行拓扑重构的三阶段 MILP。所有后果模型都必须包含
+$0\le s_i\le d_i$，所以“全切负荷”是一个构造性可行点，而不是数值求解失败的替代值。
+任何求解器失败、后验残差超差、整数性失败或结果非有限，均属于构模/数值缺陷：该状态立即中止，
+不得把全切负荷写入 EENS、LOLE、SAIDI 或 SAIFI。
+\end{theorynote}
+
+\subsection{统一的状态—后果算子}
+设原始设备模型为 $G_0$，故障/保护/信息状态为 $x$，阶段为 $s$，外生负荷和可再生可用性为 $h$。
+状态投影先生成唯一的物理边集、源集和开关候选：
+\begin{equation}
+ (\mathcal E_x,\mathcal G_x,\mathcal L_x,\mathcal W_x)
+ =\Pi(G_0,x,h,s).
+ \label{eq:physical-projection}
+\end{equation}
+后果算子定义为
+\begin{equation}
+ S_{x,s}(h)=\min_{u\in\mathcal F(G_0,x,h,s)}\sum_{i\in\mathcal N}w_i s_i,
+ \qquad 0\le s_i\le d_i(h).
+ \label{eq:physical-consequence-operator}
+\end{equation}
+其中 $u$ 包含发电、潮流、电压、储能、换流器、带电状态和开关状态。$S_{x,s}$ 是物理后果；
+求解器状态、迭代次数和最优间隙是认证元数据，不能被当成后果变量。
+
+对每个状态至少需要四个不变量：
+\begin{enumerate}
+  \item 拓扑边集与潮流边集相同；链接元数据只能做映射和归因，不生成第二条电气边；
+  \item AC、DC 母线分别在各自域内编号，稳定组件 ID、vector position 和图索引不混用；
+  \item 故障元件在规定的隔离/修复边界前保持停运，不能被 Stage 3 的重构悄悄重新合闸；
+  \item 所有正负荷都存在有界削减变量，固定正注入存在有界弃电变量或等价的固定注入削减。
+\end{enumerate}
+
+\subsection{主网：HL-II DC-OPF 后果模型}
+令 $a_e(x),a_g(x)\in\{0,1\}$ 表示支路和机组可用状态，$d_i$ 为毛负荷，$\bar p_i^{fix}$ 为固定正注入。
+对每个 AC 连通分量 $C_k$ 任取角度参考 $r_k$，不以输入数据中的 \texttt{SLACK} 标签作为可行性判据：
+\begin{subequations}\label{eq:physical-main-dcopf}
+\begin{align}
+ \min\quad & \sum_i s_i,\\
+ \sum_{g\in\mathcal G_i}p_g+\bar p_i^{fix}-p_i^{gc}+s_i-d_i
+ &=\sum_{e\in\delta(i)}K_{ie}f_e, &&i\in\mathcal N,\\
+ f_e&=a_e b_e(\theta_{o(e)}-\theta_{d(e)}),&&e\in\mathcal E,\\
+ -a_e\bar f_e\le f_e&\le a_e\bar f_e,&&e\in\mathcal E,\\
+ 0\le p_g&\le a_g\bar p_g,\quad 0\le s_i\le d_i,\quad
+ 0\le p_i^{gc}\le\bar p_i^{fix},\\
+ \theta_{r_k}&=0,&&C_k\in\mathcal C(x).
+\end{align}
+\end{subequations}
+在线机组下界为零，表示 HL-II 故障后允许再调度；这不是 UC 运行语义。第一阶段最小化总削减得到
+$S^\star$，第二阶段加入 $\sum_i s_i=S^\star$，再最小化发电成本和固定电源削减代价。
+因此在线源为零、孤岛无 slack、固定注入过剩和断开支路都具有显式可行点：
+\begin{equation}
+ p=0,\ f=0,\ \theta=0,\ s=d,\ p^{gc}=\bar p^{fix}.
+ \label{eq:physical-main-feasible-point}
+\end{equation}
+若该模型返回 \texttt{converged=false}，不是物理后果，而是模型或数值求解器缺陷。
+
+\subsection{混合交直流主网后果}
+混合系统的 AC 支路采用同一角度—潮流方程，DC 网络采用节点有功平衡、平方电压降和支路限额；VSC、
+DC--DC 变换器用有界双向传输变量耦合两个域。对 VSC $v$：
+\begin{equation}
+ P_v^{ac}=-p_v^++\eta_vp_v^-,\qquad
+ P_v^{dc}=\eta_vp_v^+-p_v^-,\qquad 0\le p_v^+,p_v^-\le\bar p_v.
+ \label{eq:physical-vsc-transfer}
+\end{equation}
+DC 负荷同样有 $0\le s_i^{dc}\le d_i^{dc}$，DC 固定源有界削减。混合 LP 的可行性构造为所有可调源、
+潮流、换流器传输取零，AC/DC 负荷全部削减，固定注入全部削减；因此增加 DC 域不会把一个原本可行的
+负荷削减模型变成“无源即不可行”。LCC 和多端口能量路由器若未提供相应换相/端口方程，入口必须拒绝，
+不得返回零影响结果。
+
+\subsection{配网：单阶段运行后果}
+配网把“可带电”与“可注入”分开。$y_i\in\{0,1\}$ 表示母线带电，$z_{ij}\in\{0,1\}$ 表示线路闭合，
+$p_i^{sh},q_i^{sh}$ 为显式的有功、无功削减：
+\begin{align}
+ 0\le p_i^{sh}&\le P_i^d,\qquad
+ \min(0,Q_i^d)\le q_i^{sh}&\le\max(0,Q_i^d),\\
+ q_i^{sh}&=\frac{Q_i^d}{P_i^d}p_i^{sh}\quad(P_i^d>0),\\
+ 0\le p_g&\le \bar P_g y_{i(g)},\qquad
+ 0\le p_b^{st}\le\bar P_b^{st}y_{i(b)},\\
+ P_i^d-p_i^{sh}&\le P_i^d y_i,\\
+ q_i^{sh}&\ge Q_i^d(1-y_i)\quad(P_i^d=0,Q_i^d>0),\\
+ q_i^{sh}&\le Q_i^d(1-y_i)\quad(P_i^d=0,Q_i^d<0).
+ \end{align}
+纯无功负荷不能被丢弃或强行套用未定义的 $Q_i^d/P_i^d$。当前目标在最小有功削减后，以不超过
+$10^{-8}$ 的归一化项最小化 $P_i^d=0$ 母线的 $|q_i^{sh}|$，只消除无功削减退化，不改变有功 EENS 口径。
+交流 LinDistFlow 约束为
+\begin{align}
+ \sum_{j:(j,i)}P_{ji}-\sum_{j:(i,j)}P_{ij}+p_i^g+p_i^{st}+p_i^{sh}&=P_i^d,\\
+ \sum_{j:(j,i)}Q_{ji}-\sum_{j:(i,j)}Q_{ij}+q_i^g+q_i^{sh}&=Q_i^d,\\
+ -M(1-z_{ij})\le v_j-v_i+2(r_{ij}P_{ij}+x_{ij}Q_{ij})&\le M(1-z_{ij}),\\
+ \underline V_i^2\le v_i&\le\overline V_i^2,\\
+ |P_{ij}\cos\phi+Q_{ij}\sin\phi|&\le z_{ij}\bar S_{ij}\cos(\pi/J).
+ \end{align}
+视在功率约束使用额定圆的内接 $J$ 边形，因此模型可行点不会超热限；$J=16$ 是当前默认值。
+
+\subsection{配网三阶段与运行拓扑重构}
+对故障 $k$，阶段时长为 $\Delta t_1=\tau_{iso}$、$\Delta t_2=\tau_{sw}$、$\Delta t_3=\tau_{rep}$。
+故障元件状态满足
+\begin{equation}
+ z_{k,s}=0\quad(s=1,2,3),\qquad z_{\ell,2}\in\{0,1\},
+ \qquad z_{\ell,3}=z_{\ell,2}\quad(\ell\text{ 为已接受联络}).
+ \label{eq:physical-three-stage-topology}
+\end{equation}
+Stage 1 固定保护隔离后的拓扑；Stage 2 在可操作联络和开关预算内重构；Stage 3 在修复窗保持 Stage-2
+拓扑，故障元件在 $\tau_{rep}$ 结束前不恢复。若储能剩余能量、阶段时长或其他物理边界变化，Stage 3
+固定 Stage-2 开关变量后重新求解；若这些数据与 Stage 2 完全相同，则 Stage-2 的已认证最优解及最优值可被
+精确复用。这是同一优化问题的复用，不是未校核地复制一个后果值。
+
+运行拓扑重构的辐射森林采用有向参考下可正可负的商品流 $F_{ij}$ 和根集合 $\mathcal R$。记
+$\kappa$ 为候选健康图中含根的连通分量数；当前实现的约束为：
+\begin{align}
+ \sum_{j:(j,i)}F_{ji}-\sum_{j:(i,j)}F_{ij}&=y_i, &&i\notin\mathcal R,\\
+ \sum_{j:(j,r)}F_{jr}-\sum_{j:(r,j)}F_{rj}&\le 0, &&r\in\mathcal R,\\
+ |F_{ij}|&\le (|\mathcal N|-1)z_{ij},\\
+ z_{ij}&\le y_i,\quad z_{ij}\le y_j,\\
+ y_i+y_j-z_{ij}&\le 1, &&(i,j)\text{ 为健康常闭边},\\
+ \sum_{(i,j)}z_{ij}&\le\sum_i y_i-\kappa.
+ \end{align}
+商品流保证每个带电非根母线由某个根可达，边数不等式排除多余环；健康常闭边在两端均带电时不得被
+无记录地打开，正常开断的联络边才由 Stage 2 决定是否闭合。VSC/DC--DC 是跨域能量耦合，不计入 AC
+或 DC 辐射树基数；当前完整物理口径对 AC、DC 两域均执行辐射森林约束。
+
+储能在阶段间按能量守恒推进：
+\begin{equation}
+ E_{b,s+1}=E_{b,s}-p_{b,s}^{st}\Delta t_s,\qquad
+ 0\le p_{b,s}^{st}\le\min(\bar P_b, E_{b,s}/\Delta t_s).
+ \label{eq:physical-storage-chronology}
+\end{equation}
+健康 N-0 反事实从同一初始能量独立演化；故障路径与健康路径不能共享已耗尽的电池状态。
+
+\subsection{任意故障的构造性可行性定理}
+\begin{theorynote}
+\textbf{定理（负荷削减可行性）}：若每个模型包含有限的有功/无功负荷削减上界、固定正注入削减上界，所有电压
+允许区间非空且包含所选参考值，Big-M 足以在开边时解耦端电压；对配网还要求强制带电根及不可操作的
+健康常闭边能够形成根森林（或已提供可开断分段设备使其可形成根森林）。若故障只通过将设备/边/源的
+上界置零或把开关固定为开断来改变可行域，则任意单故障、多故障、孤岛和保护隔离状态至少存在一个可行点。
+\end{theorynote}
+证明取所有可调发电、储能、换流器传输和支路潮流为零；所有母线角度/电压取参考允许值；每个负荷取
+$s_i=d_i$，固定正注入取 $p_i^{gc}=\bar p_i^{fix}$。主网节点平衡逐点成立，断开的支路流为零。
+配网若无源，则令全部 $y_i=z_{ij}=0$；若存在被强制带电的根，则取上述根森林中的母线和边带电，
+被删除的故障边和不采用的联络边取零，并沿树从根向每个非根发送一单位商品。也可只保留满足不可操作
+常闭边约束所需的最小根分量，其余母线失电。所有负荷仍取
+$p_i^{sh}=P_i^d,q_i^{sh}=Q_i^d$，故有功、无功潮流与源出力均可取零；
+储能不放电，能量约束成立。
+固定拓扑快捷预解若强制保留健康闭环，则可能与生成森林冲突，但通用 MILP 可选择允许的辐射拓扑。
+因此在声明的有效输入域内，故障不会破坏通用模型可行性；若实现报告不可行，必须检查是否错误固定了
+正出力、遗漏削减变量、电压输入区间非法、Big-M 不足、重复拓扑边、不可分段健康闭环、错误固定闭环
+或数值证书失效。对缺少分段设备元数据的健康闭环，模型会把为满足辐射性产生的失电计入 N-0 原始削减；
+这不是故障增量，但提示输入拓扑不在“全负荷可辐射运行”的条件内。
+
+\subsection{审计矩阵与实现对应}
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{3.5cm}L{4.2cm}L{4.8cm}L{2.3cm}@{}}
+\toprule
+层级 & 必须存在的可行性松弛 & 主要实现 & 认证结果\\
+\midrule
+主网 HL-II & $s,d,p^{gc}$；$P_g^{min}=0$；逐岛角度参考 & \srcpath{src/optimal\_power\_flow/dc\_opf.cpp} & 证书/失败即抛错\\
+混合 AC/DC & AC/DC 削减、VSC/DC--DC 零传输 & \srcpath{src/reliability/reliability\_assessment.cpp} & 两阶段 LP 证书\\
+配网 Stage 1 & $p^{sh},q^{sh}$；保护后固定开断 & \srcpath{src/reliability/three\_stage\_reliability.cpp} & MILP 后验认证\\
+配网 Stage 2 & 联络开关、商品流、开关预算 & 同上；运行拓扑重构 & 拓扑/潮流校核\\
+配网 Stage 3 & 保持 Stage-2，故障仍开断，储能能量递推 & 同上 & 阶段 3 重解/证书\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+当前执行契约明确区分三种情况：\textbf{物理削减}（求解成功且 $S>0$）、\textbf{保护不准入}（保护逻辑
+阻止恢复动作，但可在安全拓扑上求解削减）和\textbf{构模/数值失败}（无证书或非有限）。前两种的已认证
+削减按各自持续时间进入 EENS；保护不准入返回 ``\texttt{success (protection interlock)}'' 并设置恢复未准入
+标志，不得伪装成 solver failed。第三种立即返回错误，不能以全切负荷伪装成保守结果。
+
+\subsection{验证要求}
+每次修改后必须执行：
+\begin{enumerate}
+  \item 无机组、无 slack、有源孤岛、无源孤岛、固定注入过剩、并联支路和链接变压器元数据故障；
+  \item 主网 N-0/N-1/N-2 全状态有限、可行、削减在 $[0,\sum d]$；
+  \item 配网每个故障的三个阶段均有状态、证书、拓扑和热限结果；Stage 2/3 联络集合一致；
+  \item 任意阶段的求解失败都能在调用边界看到阶段号、状态和残差，且 EENS/SAIDI 不增加伪造项；
+  \item 结果中的模型范围、线性化边界、拒绝设备和求解证书与本章逐项一致。
+\end{enumerate}
+
+固定拓扑预解的不可行不属于上述第三类失败：它只是用来快速复用上一阶段拓扑的候选解，闭环网络在
+“所有健康边均固定闭合”时可能违反辐射森林约束。实现将此情况标为可重试状态，随后调用允许运行拓扑
+重构的通用 MILP；只有通用 MILP 也无法取得证书时，才按构模/数值错误中止。这样既不放松最终辐射性，
+也不把合法的 Stage-1 重构误判为不可行。

@@ -678,6 +678,84 @@ TEST_CASE("Three-stage reliability — source capacity is finite, not infinite s
   CHECK(r.faults.front().pls_stage3 == Catch::Approx(0.0).margin(1e-3));
 }
 
+TEST_CASE("Three-stage reliability — loss of the only source remains feasible by shedding",
+          "[reliability][three_stage][constructive_feasibility]") {
+  const char* json = R"json({
+    "name":"source_outage_constructive_feasibility", "base_mva":10.0,
+    "ac":{
+      "base_mva":10.0,
+      "buses":[
+        {"index":1,"bus_type":1,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":0.0,"qd_mvar":0.0,"n_customers":1},
+        {"index":2,"bus_type":3,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":1.0,"qd_mvar":0.2,"n_customers":1}
+      ],
+      "branches":[
+        {"index":1,"from_bus":1,"to_bus":2,"r_pu":0.001,"x_pu":0.001,"rate_a_mva":10.0,"in_service":true,"failure_rate":0.0,"mttr_hr":1.0}
+      ],
+      "loads":[],"external_grids":[],
+      "generators":[{"index":1,"bus":1,"in_service":true,"pg_mw":1.0,"pmax_mw":1.0,"pmin_mw":0.4,"qmax_mvar":1.0,"qmin_mvar":-1.0,"failure_rate":1.0,"mttr_hr":2.0}],
+      "static_generators":[],"renewable_gens":[],"pv_systems":[],"storage":[],"switches":[]
+    },
+    "dc":{"buses":[],"branches":[],"loads":[],"storage":[],"static_generators":[],"dc_static_generators":[],"pv_arrays":[],"dc_circuit_breakers":[]},
+    "vsc_converters":[],"dcdc_converters":[]
+  })json";
+
+  ThreeStageReliabilityOptions options;
+  options.include_generator_faults = true;
+  const auto result = run_three_stage_reliability_from_string(json, options);
+
+  REQUIRE(result.ok);
+  const auto generator_fault = std::find_if(
+      result.faults.begin(), result.faults.end(),
+      [](const auto& fault) { return fault.component_type == "generator"; });
+  REQUIRE(generator_fault != result.faults.end());
+  CHECK(generator_fault->stage1_status == "success");
+  CHECK(generator_fault->stage2_status == "success");
+  CHECK(generator_fault->stage3_status == "success");
+  CHECK(generator_fault->raw_pls_stage1 == Catch::Approx(1000.0).margin(1e-6));
+  CHECK(generator_fault->raw_pls_stage2 == Catch::Approx(1000.0).margin(1e-6));
+  CHECK(generator_fault->raw_pls_stage3 == Catch::Approx(1000.0).margin(1e-6));
+  CHECK(generator_fault->eens_contribution_mwh_yr == Catch::Approx(
+      generator_fault->failure_rate * generator_fault->ens_kwh / 1000.0));
+}
+
+TEST_CASE("Three-stage reliability — pure reactive load remains feasible after source loss",
+          "[reliability][three_stage][constructive_feasibility][reactive]") {
+  const char* json = R"json({
+    "name":"pure_reactive_constructive_feasibility", "base_mva":10.0,
+    "ac":{
+      "base_mva":10.0,
+      "buses":[
+        {"index":1,"bus_type":1,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":0.0,"qd_mvar":0.0,"n_customers":1},
+        {"index":2,"bus_type":3,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":0.0,"qd_mvar":0.5,"n_customers":1}
+      ],
+      "branches":[
+        {"index":1,"from_bus":1,"to_bus":2,"r_pu":0.001,"x_pu":0.001,"rate_a_mva":10.0,"in_service":true,"failure_rate":0.0,"mttr_hr":1.0}
+      ],
+      "loads":[],"external_grids":[],
+      "generators":[{"index":1,"bus":1,"in_service":true,"pg_mw":0.0,"pmax_mw":1.0,"pmin_mw":0.0,"qmax_mvar":1.0,"qmin_mvar":-1.0,"failure_rate":1.0,"mttr_hr":2.0}],
+      "static_generators":[],"renewable_gens":[],"pv_systems":[],"storage":[],"switches":[]
+    },
+    "dc":{"buses":[],"branches":[],"loads":[],"storage":[],"static_generators":[],"dc_static_generators":[],"pv_arrays":[],"dc_circuit_breakers":[]},
+    "vsc_converters":[],"dcdc_converters":[]
+  })json";
+
+  ThreeStageReliabilityOptions options;
+  options.include_generator_faults = true;
+  const auto result = run_three_stage_reliability_from_string(json, options);
+
+  REQUIRE(result.ok);
+  const auto generator_fault = std::find_if(
+      result.faults.begin(), result.faults.end(),
+      [](const auto& fault) { return fault.component_type == "generator"; });
+  REQUIRE(generator_fault != result.faults.end());
+  CHECK(generator_fault->stage1_status == "success");
+  CHECK(generator_fault->stage2_status == "success");
+  CHECK(generator_fault->stage3_status == "success");
+  CHECK(generator_fault->raw_pls_stage1 == Catch::Approx(0.0).margin(1e-9));
+  CHECK(generator_fault->raw_pls_stage2 == Catch::Approx(0.0).margin(1e-9));
+  CHECK(generator_fault->raw_pls_stage3 == Catch::Approx(0.0).margin(1e-9));
+}
+
 TEST_CASE("Three-stage reliability — standalone AC switch is a Stage 2 candidate edge",
           "[reliability][three_stage][regression]") {
   const char* json = R"json({
@@ -824,11 +902,11 @@ TEST_CASE("Three-stage reliability — trip, isolate, then restore sequence is a
   REQUIRE(protection_pos != std::string::npos);
   blocked_json.insert(protection_pos, "\"locked_closed\":true,");
   const auto blocked = run_three_stage_reliability_from_string(blocked_json, opts);
-  CHECK_FALSE(blocked.ok);
+  CHECK(blocked.ok);
   REQUIRE_FALSE(blocked.faults.empty());
   const auto& blocked_fault = blocked.faults.front();
-  CHECK(blocked_fault.stage2_status == "failed (protection interlock)");
-  CHECK(blocked_fault.stage3_status == "failed (protection interlock)");
+  CHECK(blocked_fault.stage2_status == "success (protection interlock)");
+  CHECK(blocked_fault.stage3_status == "success (protection interlock)");
   CHECK_FALSE(blocked_fault.protection_interlock_valid);
   CHECK_FALSE(blocked_fault.restoration_milp_admitted);
   CHECK_FALSE(blocked_fault.stage3_switch_plan_held);

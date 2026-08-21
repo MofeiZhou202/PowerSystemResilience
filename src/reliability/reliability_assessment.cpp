@@ -8,6 +8,7 @@
 #include <memory>
 #include <numeric>
 #include <random>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -270,41 +271,10 @@ double compute_unavailability_lambda(double lambda_per_yr, double repair_hr) {
   return lambda_per_yr / (lambda_per_yr + mu);
 }
 
-// ── Reliability objective: minimise LOAD SHEDDING, not generation cost ───────
-// Every Monte-Carlo / FMEA method reuses the economic-dispatch DC-OPF (or the
-// hybrid AC/DC network LP) to evaluate a *failed* network state.  In a
-// reliability study we do not care about generation economics — only whether
-// the surviving network can serve load.  The objective must therefore be
-// dominated by load shedding so the solver never sheds load it could otherwise
-// supply; generation/source cost is kept only as a negligible tie-breaker among
-// minimum-shed dispatches (lexicographic "minimum load shedding", matching the
-// three-stage restoration MILP which already minimises pure MW shed).
-//
-// Enforced by choosing a Value-of-Lost-Load that strongly dominates the worst
-// generator/source marginal cost.  The result is scaled, floored, and capped so
-// the objective coefficient stays well-conditioned for the native simplex LP.
-// Reliability code reads only the shed quantities (total_load_shedding_mw /
-// nodal load_shedding_mw), never the objective value, so inflating VOLL changes
-// *which* min-shed dispatch is chosen but not the reported curtailment.
-double reliability_shedding_voll(const HybridPowerSystem& sys,
-                                 double user_voll,
-                                 double extra_max_marginal = 0.0) {
-  double max_marginal = std::max(0.0, extra_max_marginal);
-  for (const auto& g : sys.ac.generators) {
-    if (!g.in_service) continue;
-    const double mc = g.cost_c1 + 2.0 * g.cost_c2 * std::max(0.0, g.pmax_mw);
-    max_marginal = std::max(max_marginal, mc);
-  }
-  // 1000x the worst marginal cost guarantees min-shed dominance; the [1e5, 1e7]
-  // window keeps the objective coefficient well-conditioned for the simplex.
-  double dominant = 1000.0 * max_marginal;
-  dominant = std::max(dominant, 1.0e5);
-  dominant = std::min(dominant, 1.0e7);
-  // Honour an explicit (larger) user VOLL but never fall below the dominant
-  // floor that makes the evaluation a true minimum-load-shedding study.
-  if (user_voll > 0.0) dominant = std::max(dominant, user_voll);
-  return dominant;
-}
+// Reliability consequence models use an exact two-level objective. No finite
+// VOLL scalar can prove load shedding has priority for every data scale; the
+// first LP therefore minimizes only shed MW and the second minimizes dispatch
+// cost on the attained minimum-shed face (manual Sec. 2.11).
 
 using StateKey = std::vector<std::uint64_t>;
 
@@ -412,7 +382,17 @@ struct ComponentOffsets {
     nst   = sys.ac.storage.size();
     nvsc  = sys.vsc_converters.size();
     ndb   = sys.dc.branches.size();
-    nt2   = sys.ac.transformers_2w.size();
+    const bool all_transformers_are_linked_metadata =
+        !sys.ac.transformers_2w.empty() &&
+        std::all_of(sys.ac.transformers_2w.begin(), sys.ac.transformers_2w.end(),
+                    [](const auto& transformer) {
+                      return transformer.source_branch_idx > 0;
+                    });
+    // A linked MATPOWER Transformer2W is a metadata view of an ACBranch, not a
+    // second stochastic component. RTS-24 has only such rows, so omit the
+    // entire metadata family from the MC state vector. Mixed systems retain
+    // standalone Transformer2W rows and are handled by the existing mapping.
+    nt2   = all_transformers_are_linked_metadata ? 0 : sys.ac.transformers_2w.size();
     nt3   = sys.ac.transformers_3w.size();
     ndcdc = sys.dc.dcdc_converters.size();
     ndccb = sys.dc.dc_circuit_breakers.size();
@@ -854,23 +834,10 @@ void materialize_mc_microgrid_support(HybridPowerSystem& sys) {
 // Evaluate a single system state using DC-OPF
 // The state vector layout follows ComponentOffsets.
 //
-// ── HYBRID AC/DC PHYSICS LIMITATION ──────────────────────────────────────────
-// Despite accepting VSC and DC branch failures (via component_failures),
-// the underlying power-balance evaluation is an AC-only DC OPF (solve_dc_opf).
-// DC bus loads, DC bus generation, and VSC/DC branch flow constraints are NOT
-// included in the OPF model.  The effect of a failed VSC or DC branch is
-// captured only indirectly: the AC-side island pre-screening may detect that
-// the AC network has become disconnected, and any AC-side load stranded in a
-// dead island is shed directly.  However:
-//   • DC loads are not shed through the OPF; their curtailment is zero.
-//   • VSC power injection into the AC network is treated as zero when the VSC
-//     is out of service, but DC-side reserves are NOT re-dispatched.
-//   • EENS/LOLE computed from this function will underestimate true mixed-
-//     system curtailment for systems with significant DC load or DC generation.
-// See also apply_fmea_support_sources() which approximates grid-forming VSC
-// converters as AC emergency generators — a conservative approximation that
-// can overestimate available support in post-fault AC-island scenarios.
-// ─────────────────────────────────────────────────────────────────────────────
+// Pure-AC states use the certified DC-OPF below. Hybrid states are routed to
+// evaluate_hybrid_fmea_network_lp after failures and load scaling are applied,
+// so DC demand, DC sources, VSC/DC-DC transfers, and AC branch angles share one
+// state consequence model. See theory_reliability_foundations.tex, Sec. 2.11.
 StateEvalResult evaluate_state(
     HybridPowerSystem sys,  // copy intentional
     const std::vector<bool>& component_failures,
@@ -1017,6 +984,14 @@ StateEvalResult evaluate_state(
 
   materialize_mc_microgrid_support(sys);
 
+  // Reliability HL-II redispatch does not inherit unit-commitment lower bounds:
+  // every surviving source may dispatch anywhere in [0, available Pmax]. This
+  // preserves the constructive feasible point p=0, f=0, theta=0, shed=d from
+  // theory_reliability_foundations.tex, Sec. 2.11.
+  for (auto& gen : sys.ac.generators) {
+    if (gen.in_service) gen.pmin_mw = 0.0;
+  }
+
   // Apply load scaling if needed
   if (std::abs(load_scale - 1.0) > 1e-9) {
     for (auto& bus : sys.ac.buses) {
@@ -1049,95 +1024,11 @@ StateEvalResult evaluate_state(
     result.curtailment_mw = ns.total_shed_mw;
     result.nodal_curtailment_mw = std::move(ns.nodal_shed_mw);
     result.is_loss_state = ns.is_loss;
-    // The hybrid LP has an explicit load-shedding objective; it does not use
-    // the AC-only all-load fallback below. Keep the decomposition conservative
-    // and attributable to the LP term for callers that inspect diagnostics.
+    // The hybrid LP has an explicit load-shedding objective and certificate.
+    // Attribute its complete consequence to the optimized network term.
     result.opf_shed_mw = result.curtailment_mw;
     return result;
   }
-
-  // ── Island pre-screening ──────────────────────────────────────────────────
-  // Identify islands with no voltage reference (IsolatedLoad / NoSlack).
-  // Their loads are shed directly without running OPF, and the bus-level
-  // pd_mw is zeroed to keep the DC-OPF B-matrix well-posed.
-  double direct_shed_mw = 0.0;
-  std::vector<double> nodal_direct_shed(sys.ac.buses.size(), 0.0);
-  {
-    namespace gr = hacdcpf::graph;
-    auto g    = gr::build_power_system_graph(sys);
-    auto topo = gr::analyze_topology(g);
-
-    // Build bus_id → array-position map
-    std::unordered_map<int, int> bus_pos;
-    bus_pos.reserve(sys.ac.buses.size());
-    for (int i = 0; i < (int)sys.ac.buses.size(); ++i)
-      bus_pos[sys.ac.buses[i].index] = i;
-
-    // A bus retaining the SLACK flag is not a physical source after all
-    // generators on its island fail.  The DC-OPF formulation has no
-    // dispatch variable for such an island, so classify it as dead here and
-    // shed its load explicitly instead of entering the OPF fallback path.
-    const auto island_has_dispatchable_source = [&](const gr::IslandInfo& isl) {
-      return std::any_of(sys.ac.generators.begin(), sys.ac.generators.end(),
-          [&](const auto& gen) {
-            return gen.in_service &&
-                   std::find(isl.ac_bus_ids.begin(), isl.ac_bus_ids.end(),
-                             gen.bus) != isl.ac_bus_ids.end();
-          });
-    };
-
-    // Collect all buses belonging to dead islands
-    std::unordered_set<int> dead_buses;
-    for (const auto& isl : topo.islands) {
-      if (isl.status == gr::IslandStatus::IsolatedLoad ||
-          isl.status == gr::IslandStatus::NoSlack ||
-          !island_has_dispatchable_source(isl)) {
-        for (int bid : isl.ac_bus_ids) dead_buses.insert(bid);
-      }
-    }
-
-    // Accumulate curtailment for dead islands.
-    // P1b: DC-OPF adds bus.pd_mw and ac.loads as additive demand sources
-    // (both are summed in the B-matrix); direct-shed must use the same
-    // convention to avoid under-counting when a bus has both components.
-    for (int bid : dead_buses) {
-      auto it = bus_pos.find(bid);
-      if (it == bus_pos.end()) continue;
-      int pos = it->second;
-      double load = std::max(0.0, sys.ac.buses[pos].pd_mw);
-      direct_shed_mw += load;
-      nodal_direct_shed[pos] += load;
-    }
-    for (auto& ld : sys.ac.loads) {
-      if (!ld.in_service || !dead_buses.count(ld.bus)) continue;
-      double extra = std::max(0.0, ld.p_mw * ld.scaling);
-      direct_shed_mw += extra;
-      if (auto it = bus_pos.find(ld.bus); it != bus_pos.end())
-        nodal_direct_shed[it->second] += extra;
-      ld.in_service = false;  // prevent OPF from seeing this load
-    }
-
-    // Always zero bus-level loads for dead buses to prevent a singular
-    // B-matrix in the DC-OPF (isolated bus ⇒ zero row in B).
-    for (int bid : dead_buses) {
-      auto it = bus_pos.find(bid);
-      if (it == bus_pos.end()) continue;
-      sys.ac.buses[it->second].pd_mw   = 0.0;
-      sys.ac.buses[it->second].qd_mvar = 0.0;
-    }
-
-    // Fast path: skip OPF if no valid island exists
-    bool has_valid = std::any_of(topo.islands.begin(), topo.islands.end(),
-        [](const gr::IslandInfo& x) { return x.status == gr::IslandStatus::Valid; });
-    if (!has_valid) {
-      result.curtailment_mw       = direct_shed_mw;
-      result.nodal_curtailment_mw = std::move(nodal_direct_shed);
-      result.direct_island_shed_mw = direct_shed_mw;
-      result.is_loss_state        = (result.curtailment_mw > curtail_threshold_mw);
-      return result;
-    }
-  }
-  result.direct_island_shed_mw = direct_shed_mw;
 
   // Run DC-OPF with load shedding enabled.
   // Guard: warn if the system has non-trivial DC loads (including DCBus::pd_mw)
@@ -1150,49 +1041,75 @@ StateEvalResult evaluate_state(
                    total_dc_load_mw);
     }
   }
-  auto opf_result = opf::solve_dc_opf(sys, opf_opt);
+  opf::DCOPFOptions reliability_opf_opt = opf_opt;
+  reliability_opf_opt.load_shedding = true;
+  reliability_opf_opt.lexicographic_load_shedding = true;
+  reliability_opf_opt.full_redispatch_from_zero = true;
+  reliability_opf_opt.allow_fixed_generation_curtailment = true;
+  if (reliability_opf_opt.solver == opf::DCOPFSolverBackend::Auto)
+    reliability_opf_opt.solver = opf::DCOPFSolverBackend::HiGHS;
+  auto opf_result = opf::solve_dc_opf(sys, reliability_opf_opt);
 
-  // P1a: OPF infeasibility — treat all remaining surviving-bus load as shed.
-  // Covers: no generator on island, singular B-matrix, LP solver failure.
-  // Silently returning zero curtailment for infeasible states inflates EENS.
   if (!opf_result.converged) {
-    spdlog::warn("evaluate_state: DC-OPF failed to converge; "
-                 "treating all surviving-island load as curtailed (conservative)");
-    result.curtailment_mw = direct_shed_mw;
-    result.opf_failed = true;
-    result.nodal_curtailment_mw = std::move(nodal_direct_shed);
-    result.nodal_curtailment_mw.resize(sys.ac.buses.size(), 0.0);
-    // bus pd_mw was zeroed for dead-island buses above; remainder is live.
-    for (size_t i = 0; i < sys.ac.buses.size(); ++i) {
-      double load = std::max(0.0, sys.ac.buses[i].pd_mw);
-      result.curtailment_mw += load;
-      result.nodal_curtailment_mw[i] += load;
+    std::ostringstream message;
+    message << "可靠性状态 DC-OPF 未收敛；该模型存在显式可行点，故这是构模或数值求解错误。"
+            << " status=" << opf_result.status
+            << ", solver=" << opf_result.solver_name
+            << ", structural_residual="
+            << opf_result.structural_warm_start_residual
+            << ", initial_residual="
+            << opf_result.solver_initial_primal_residual
+            << ", phase_one_residual="
+            << opf_result.phase_one_iterate_residual << ", chain=[";
+    for (size_t i = 0; i < opf_result.solver_chain.size(); ++i) {
+      if (i > 0) message << "; ";
+      message << opf_result.solver_chain[i];
     }
-    for (const auto& ld : sys.ac.loads) {
-      if (!ld.in_service) continue;  // dead-island loads already disabled
-      double load = std::max(0.0, ld.p_mw * ld.scaling);
-      result.curtailment_mw += load;
-      for (size_t i = 0; i < sys.ac.buses.size(); ++i) {
-        if (sys.ac.buses[i].index == ld.bus) {
-          result.nodal_curtailment_mw[i] += load;
-          break;
-        }
-      }
-    }
-    result.is_loss_state = (result.curtailment_mw > curtail_threshold_mw);
-    return result;
+    message << "]";
+    throw std::runtime_error(message.str());
   }
 
-  // Combine direct shed (dead islands) + OPF shed (surviving islands)
-  result.curtailment_mw       = direct_shed_mw + opf_result.total_load_shedding_mw;
+  if (!opf_result.primal_feasibility_certified) {
+    std::ostringstream message;
+    message << "可靠性状态 DC-OPF 后验可行性认证失败；结果不得写入 EENS。"
+            << " violation_mw=" << opf_result.maximum_primal_violation_mw
+            << ", reason='" << opf_result.primal_feasibility_reason << "'";
+    throw std::runtime_error(message.str());
+  }
+
+  result.curtailment_mw       = opf_result.total_load_shedding_mw;
   result.opf_shed_mw          = opf_result.total_load_shedding_mw;
-  result.nodal_curtailment_mw = std::move(nodal_direct_shed);
-  if (!opf_result.load_shedding_mw.empty()) {
-    result.nodal_curtailment_mw.resize(
-        std::max(result.nodal_curtailment_mw.size(),
-                 opf_result.load_shedding_mw.size()), 0.0);
-    for (size_t i = 0; i < opf_result.load_shedding_mw.size(); ++i)
-      result.nodal_curtailment_mw[i] += opf_result.load_shedding_mw[i];
+  result.nodal_curtailment_mw = opf_result.load_shedding_mw;
+
+  // A source-less island is a post-solve attribution category, not a
+  // feasibility precondition. Sum only the shedding actually chosen by the
+  // common OPF over mutually exclusive buses in those components.
+  namespace gr = hacdcpf::graph;
+  const auto topology = gr::analyze_topology(gr::build_power_system_graph(sys));
+  std::unordered_set<int> source_buses;
+  for (const auto& gen : sys.ac.generators) {
+    if (gen.in_service && gen.pmax_mw > 0.0) source_buses.insert(gen.bus);
+  }
+  for (const auto& grid : sys.ac.external_grids) {
+    if (grid.in_service) source_buses.insert(grid.bus);
+  }
+  std::unordered_map<int, size_t> bus_pos;
+  bus_pos.reserve(sys.ac.buses.size());
+  for (size_t i = 0; i < sys.ac.buses.size(); ++i)
+    bus_pos.emplace(sys.ac.buses[i].index, i);
+  for (const auto& island : topology.islands) {
+    const bool has_source = std::any_of(
+        island.ac_bus_ids.begin(), island.ac_bus_ids.end(),
+        [&](int bus) { return source_buses.count(bus) != 0; });
+    if (has_source) continue;
+    for (int bus : island.ac_bus_ids) {
+      const auto position = bus_pos.find(bus);
+      if (position != bus_pos.end() &&
+          position->second < result.nodal_curtailment_mw.size()) {
+        result.direct_island_shed_mw +=
+            result.nodal_curtailment_mw[position->second];
+      }
+    }
   }
   result.is_loss_state = (result.curtailment_mw > curtail_threshold_mw);
 
@@ -1369,11 +1286,9 @@ ReliabilityResult run_nonsequential_mc(
     rng.seed(rd());
   }
   
-  // DC-OPF options.  Reliability state evaluation minimises LOAD SHEDDING, so
-  // VOLL is set to strongly dominate generation cost (lexicographic min-shed).
+  // evaluate_state enforces the exact two-stage shed-first objective.
   opf::DCOPFOptions opf_opt = options.opf_options;
   opf_opt.load_shedding = true;
-  opf_opt.voll = reliability_shedding_voll(sys, opf_opt.voll);
   opf_opt.verbose = false;
   opf_opt.compute_lmp = false;  // batch path — LMPs not needed, skip supporting LP
   
@@ -1461,9 +1376,12 @@ ReliabilityResult run_nonsequential_mc(
     const double weighted_incremental_dns =
         likelihood_ratio * incremental_dns;
     if (eval_result.opf_failed) {
-      ++opf_failed_state_count;
-      weighted_opf_failed_states += likelihood_ratio;
-      weighted_opf_failed_eens += weighted_incremental_dns;
+      // The load-shedding formulation has a constructive feasible point. A
+      // state-level solver failure is therefore a model/numerical defect, not
+      // a physical outage consequence; never consume it in an estimator.
+      throw std::runtime_error(
+          "非序贯可靠性状态评估返回 opf_failed=true；"
+          "该状态不得进入 EENS，必须修复构模或数值求解器");
     }
     if (eval_result.direct_island_shed_mw > options.curtail_threshold_mw) {
       ++dead_island_state_count;
@@ -1869,7 +1787,6 @@ ExactReliabilitySensitivityResult compute_exact_reliability_sensitivity(
 
   opf::DCOPFOptions opf_opt = options.opf_options;
   opf_opt.load_shedding = true;
-  opf_opt.voll = reliability_shedding_voll(sys, opf_opt.voll);
   opf_opt.verbose = false;
   opf_opt.compute_lmp = false;
   const std::vector<bool> healthy(co.total, false);
@@ -2036,11 +1953,9 @@ ReliabilityResult run_sequential_mc(
     rng.seed(rd());
   }
   
-  // DC-OPF options.  Reliability state evaluation minimises LOAD SHEDDING, so
-  // VOLL is set to strongly dominate generation cost (lexicographic min-shed).
+  // evaluate_state enforces the exact two-stage shed-first objective.
   opf::DCOPFOptions opf_opt = options.opf_options;
   opf_opt.load_shedding = true;
-  opf_opt.voll = reliability_shedding_voll(sys, opf_opt.voll);
   opf_opt.verbose = false;
   opf_opt.compute_lmp = false;  // batch path — LMPs not needed, skip supporting LP
   
@@ -2051,6 +1966,7 @@ ReliabilityResult run_sequential_mc(
   double total_loss_weighted_mwh = 0.0;
   int total_loss_hours = 0;
   double baseline_eens_total_mwh = 0.0;
+  double incremental_eens_total_mwh = 0.0;
   double opf_failed_eens_total_mwh = 0.0;
   double dead_island_eens_total_mwh = 0.0;
   double opf_shed_eens_total_mwh = 0.0;
@@ -2162,6 +2078,7 @@ ReliabilityResult run_sequential_mc(
     // Evaluate every hour.  N-0 hours are not assumed to have zero shed: the base
     // system can already be islanded, capacity-short, or stressed by load profile.
     double year_eens = 0.0;
+    double year_incremental_eens = 0.0;
     int year_loss_hours = 0;
     std::vector<bool> year_loss_flags(hours_per_year, false);
 
@@ -2216,13 +2133,19 @@ ReliabilityResult run_sequential_mc(
       const auto& state = hour_work[static_cast<size_t>(h)].state;
       const auto& eval_result = hour_work[static_cast<size_t>(h)].eval;
       const auto& n0_result = n0_for_hour(h);
+      const double total_shed = std::max(0.0, eval_result.curtailment_mw);
       const double incremental_shed = std::max(
-          0.0, eval_result.curtailment_mw - n0_result.curtailment_mw);
+          0.0, total_shed - n0_result.curtailment_mw);
+      year_incremental_eens += incremental_shed;
       ++evaluated_state_count;
       baseline_eens_total_mwh += n0_result.curtailment_mw;
       if (eval_result.opf_failed) {
-        ++opf_failed_state_count;
-        opf_failed_eens_total_mwh += incremental_shed;
+        // The load-shedding formulation has a constructive feasible point. A
+        // state-level solver failure is therefore a model/numerical defect,
+        // not a physical outage consequence.
+        throw std::runtime_error(
+            "序贯可靠性状态评估返回 opf_failed=true；"
+            "该状态不得进入 EENS，必须修复构模或数值求解器");
       }
       if (eval_result.direct_island_shed_mw > options.curtail_threshold_mw) {
         ++dead_island_state_count;
@@ -2230,18 +2153,19 @@ ReliabilityResult run_sequential_mc(
       }
       opf_shed_eens_total_mwh += std::max(0.0, eval_result.opf_shed_mw);
       
-	      if (incremental_shed > options.curtail_threshold_mw) {
-	        year_eens += incremental_shed;
-	        ++year_loss_hours;
-	        year_loss_flags[h] = true;
-	        total_loss_weighted_mwh += incremental_shed;
+      // Raw chronological reliability indices include an N-0 deficit in every
+      // hour.  The matching N-0 subtraction remains available through
+      // `incremental_shed` for outage attribution and component ranking.
+      if (total_shed > options.curtail_threshold_mw) {
+        year_eens += total_shed;
+        ++year_loss_hours;
+        year_loss_flags[h] = true;
+        total_loss_weighted_mwh += total_shed;
 	        
 	        // Accumulate nodal EENS
 	        for (size_t b = 0; b < nb && b < eval_result.nodal_curtailment_mw.size(); ++b) {
-	          const double n0_bus = b < n0_result.nodal_curtailment_mw.size()
-              ? n0_result.nodal_curtailment_mw[b] : 0.0;
 	          nodal_eens_accum[b] += std::max(
-              0.0, eval_result.nodal_curtailment_mw[b] - n0_bus);
+              0.0, eval_result.nodal_curtailment_mw[b]);
 	        }
 	        
 	        // Track component failures during loss.  Keep both the conditional
@@ -2261,6 +2185,7 @@ ReliabilityResult run_sequential_mc(
     
     // Record annual results
     result.annual_eens.push_back(year_eens);
+    incremental_eens_total_mwh += year_incremental_eens;
     result.annual_lole.push_back((double)year_loss_hours);
     result.annual_lolf.push_back((double)year_lolf);
     
@@ -2329,8 +2254,10 @@ ReliabilityResult run_sequential_mc(
       static_cast<double>(n_years);
   result.baseline_edns_mw = result.baseline_eens_mwh_yr /
       static_cast<double>(options.hours_per_year);
-  result.incremental_eens_mwh_yr = result.eens_mwh_yr;
-  result.incremental_edns_mw = result.edns_mw;
+  result.incremental_eens_mwh_yr = incremental_eens_total_mwh /
+      static_cast<double>(n_years);
+  result.incremental_edns_mw = result.incremental_eens_mwh_yr /
+      static_cast<double>(options.hours_per_year);
   result.evaluated_state_count = evaluated_state_count;
   result.opf_failed_state_count = opf_failed_state_count;
   result.dead_island_state_count = dead_island_state_count;
@@ -2404,6 +2331,134 @@ ReliabilityResult run_sequential_mc(
 // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 // Tail Risk Metrics (VaR / CVaR)
 // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
+
+HLIIStateScanResult scan_ac_hlii_n2_states(
+    const HybridPowerSystem& sys,
+    const opf::DCOPFOptions& options) {
+  struct OutageRef {
+    bool generator;
+    size_t position;
+    std::string key;
+  };
+
+  std::vector<OutageRef> components;
+  components.reserve(sys.ac.generators.size() + sys.ac.branches.size());
+  for (size_t i = 0; i < sys.ac.generators.size(); ++i) {
+    if (!sys.ac.generators[i].in_service) continue;
+    components.push_back(
+        {true, i, "G:" + std::to_string(sys.ac.generators[i].index)});
+  }
+  for (size_t i = 0; i < sys.ac.branches.size(); ++i) {
+    if (!sys.ac.branches[i].in_service) continue;
+    components.push_back(
+        {false, i, "B:" + std::to_string(sys.ac.branches[i].index)});
+  }
+
+  HLIIStateScanResult scan;
+  scan.component_count = components.size();
+  for (const auto& bus : sys.ac.buses) {
+    if (bus.in_service) scan.total_load_mw += std::max(0.0, bus.pd_mw);
+  }
+  for (const auto& load : sys.ac.loads) {
+    scan.total_load_mw += std::max(0.0, model::effective_load_p_mw(load));
+  }
+
+  opf::DCOPFOptions audit_options = options;
+  audit_options.load_shedding = true;
+  audit_options.lexicographic_load_shedding = true;
+  audit_options.full_redispatch_from_zero = true;
+  audit_options.allow_fixed_generation_curtailment = true;
+  audit_options.compute_lmp = false;
+  audit_options.verbose = false;
+  const double bound_tolerance_mw = std::max(
+      1e-7, audit_options.feasibility_tol * std::max(1.0, sys.ac.base_mva));
+
+  const auto record_failure = [&](const std::string& state,
+                                  const std::string& reason) {
+    if (scan.first_failure_state.empty()) {
+      scan.first_failure_state = state;
+      scan.first_failure_reason = reason;
+    }
+  };
+  const auto finite_vector = [](const std::vector<double>& values) {
+    return std::all_of(values.begin(), values.end(),
+                       [](double value) { return std::isfinite(value); });
+  };
+  const auto evaluate = [&](const std::vector<size_t>& outage_positions) {
+    HybridPowerSystem state = sys;
+    std::string state_key = "N-0";
+    for (size_t outage_position : outage_positions) {
+      const auto& outage = components[outage_position];
+      state_key = state_key == "N-0" ? outage.key : state_key + "+" + outage.key;
+      if (outage.generator)
+        state.ac.generators[outage.position].in_service = false;
+      else
+        state.ac.branches[outage.position].in_service = false;
+    }
+    for (auto& generator : state.ac.generators) {
+      if (generator.in_service) generator.pmin_mw = 0.0;
+    }
+
+    ++scan.states_evaluated;
+    opf::DCOPFResult solved;
+    try {
+      solved = opf::solve_dc_opf(state, audit_options);
+    } catch (const std::exception& error) {
+      ++scan.failed_states;
+      record_failure(state_key, error.what());
+      return;
+    }
+    if (!solved.converged) {
+      ++scan.failed_states;
+      record_failure(state_key, solved.status);
+      return;
+    }
+
+    const bool finite = std::isfinite(solved.total_load_shedding_mw) &&
+                        finite_vector(solved.va) && finite_vector(solved.pg_mw) &&
+                        finite_vector(solved.pf_mw) &&
+                        finite_vector(solved.load_shedding_mw);
+    if (!finite) {
+      ++scan.nonfinite_states;
+      record_failure(state_key, "non-finite DC-OPF result");
+      return;
+    }
+    scan.maximum_shed_mw =
+        std::max(scan.maximum_shed_mw, solved.total_load_shedding_mw);
+    if (solved.total_load_shedding_mw < -bound_tolerance_mw) {
+      ++scan.negative_shed_states;
+      record_failure(state_key, "negative total load shedding");
+    }
+    if (solved.total_load_shedding_mw >
+        scan.total_load_mw + bound_tolerance_mw) {
+      ++scan.shed_above_load_states;
+      record_failure(state_key, "total load shedding exceeds total demand");
+    }
+
+    const auto [feasible, violation_mw, reason] =
+        opf::check_dc_opf_feasibility(
+            state, solved, audit_options.feasibility_tol);
+    scan.maximum_feasibility_violation_mw = std::max(
+        scan.maximum_feasibility_violation_mw, violation_mw);
+    if (!feasible) {
+      ++scan.infeasible_states;
+      record_failure(state_key, reason);
+    }
+  };
+
+  // Reliability manual Sec. 2.11: exhaustive N-0/N-1/N-2 certification over
+  // the unique physical AC branch set and the imported generator records.
+  evaluate({});
+  for (size_t first = 0; first < components.size(); ++first) {
+    evaluate({first});
+  }
+  for (size_t first = 0; first < components.size(); ++first) {
+    for (size_t second = first + 1; second < components.size(); ++second) {
+      evaluate({first, second});
+    }
+  }
+  return scan;
+}
 
 TailRiskMetrics compute_tail_risk(
     const std::vector<double>& eens_samples,
@@ -4054,6 +4109,40 @@ void materialize_aggregated_reliability_sources(HybridPowerSystem& sys,
   }
 }
 
+void refresh_fmea_ac_storage_dispatch(
+    HybridPowerSystem& sys,
+    const FMEAOptions& options,
+    double stage_duration_hr) {
+  namespace gr = hacdcpf::graph;
+  const auto topology = gr::analyze_topology(gr::build_power_system_graph(sys));
+  std::unordered_set<int> source_buses;
+  for (const auto& gen : sys.ac.generators) {
+    if (gen.in_service && gen.pmax_mw > 0.0) source_buses.insert(gen.bus);
+  }
+  for (const auto& grid : sys.ac.external_grids) {
+    if (grid.in_service) source_buses.insert(grid.bus);
+  }
+  std::unordered_set<int> energized_buses;
+  for (const auto& island : topology.islands) {
+    const bool energized = std::any_of(
+        island.ac_bus_ids.begin(), island.ac_bus_ids.end(),
+        [&](int bus) { return source_buses.count(bus) != 0; });
+    if (energized)
+      energized_buses.insert(island.ac_bus_ids.begin(), island.ac_bus_ids.end());
+  }
+
+  for (auto& storage : sys.ac.storage) {
+    if (!storage.in_service || !storage.controllable) continue;
+    const bool black_start_ok = options.enable_black_start_storage &&
+                                storage.grid_forming &&
+                                bus_in_microgrid(sys, storage.bus);
+    const bool grid_following_energized = energized_buses.count(storage.bus) != 0;
+    storage.p_mw = black_start_ok || grid_following_energized
+        ? storage_available_mw(storage, stage_duration_hr)
+        : 0.0;
+  }
+}
+
 void apply_fmea_support_sources(
     HybridPowerSystem& sys,
     const FMEAOptions& options,
@@ -4064,14 +4153,18 @@ void apply_fmea_support_sources(
   const double support_cost = std::max(1.0, options.voll * 0.01);
 
   if (options.enable_storage_dispatch) {
+    // A grid-following store cannot energize a source-less island. Re-evaluate
+    // this condition after every topology change; grid-forming black-start
+    // storage is the only exception.
+    refresh_fmea_ac_storage_dispatch(sys, options, stage_duration_hr);
     for (auto& st : sys.ac.storage) {
       if (!st.in_service || !st.controllable) continue;
       const double p = storage_available_mw(st, stage_duration_hr);
       if (p <= 1e-9) continue;
-      st.p_mw = std::max(st.p_mw, p);
       const bool black_start_ok = options.enable_black_start_storage &&
                                   st.grid_forming &&
                                   bus_in_microgrid(sys, st.bus);
+      if (st.p_mw <= 1e-9 && !black_start_ok) continue;
       if (black_start_ok) {
         add_emergency_generator(
             sys, st.bus, p, "FMEA_black_start_storage_" + std::to_string(st.index),
@@ -4247,27 +4340,6 @@ std::pair<double, double> dcdc_bounds_mw(const DCDCConverter& converter) {
   return {pmin, pmax};
 }
 
-StateEvalResult conservative_hybrid_shed(
-    const HybridPowerSystem& sys,
-    const std::vector<double>& ac_load_mw,
-    const std::vector<double>& dc_load_mw,
-    double curtail_threshold_mw) {
-  StateEvalResult result;
-  result.nodal_curtailment_mw.assign(
-      sys.ac.buses.size() + sys.dc.buses.size(), 0.0);
-  for (size_t bus_pos = 0; bus_pos < ac_load_mw.size(); ++bus_pos) {
-    result.nodal_curtailment_mw[bus_pos] = positive_or_zero(ac_load_mw[bus_pos]);
-    result.curtailment_mw += result.nodal_curtailment_mw[bus_pos];
-  }
-  for (size_t bus_pos = 0; bus_pos < dc_load_mw.size(); ++bus_pos) {
-    const size_t out_pos = sys.ac.buses.size() + bus_pos;
-    result.nodal_curtailment_mw[out_pos] = positive_or_zero(dc_load_mw[bus_pos]);
-    result.curtailment_mw += result.nodal_curtailment_mw[out_pos];
-  }
-  result.is_loss_state = result.curtailment_mw > curtail_threshold_mw;
-  return result;
-}
-
 StateEvalResult evaluate_hybrid_fmea_network_lp(
     const HybridPowerSystem& sys,
     const FMEAOptions& options,
@@ -4440,6 +4512,9 @@ StateEvalResult evaluate_hybrid_fmea_network_lp(
              b_pu, branch.in_service);
   }
   for (const auto& transformer : sys.ac.transformers_2w) {
+    // Imported MATPOWER tap-changing branches also carry a linked
+    // Transformer2W provenance row. It is not a second electrical edge.
+    if (transformer.source_branch_idx > 0) continue;
     auto from_it = ac_bus_pos.find(transformer.hv_bus);
     auto to_it = ac_bus_pos.find(transformer.lv_bus);
     if (from_it == ac_bus_pos.end() || to_it == ac_bus_pos.end()) continue;
@@ -4512,6 +4587,10 @@ StateEvalResult evaluate_hybrid_fmea_network_lp(
     auto dc_it = dc_bus_pos.find(converter.bus_dc);
     if (ac_it == ac_bus_pos.end() || dc_it == dc_bus_pos.end()) continue;
     auto [pmin, pmax] = vsc_bounds_mw(converter);
+    // HL-II emergency redispatch must admit zero transfer. A fixed pre-fault
+    // setpoint is not a mandatory post-contingency injection.
+    pmin = std::min(pmin, 0.0);
+    pmax = std::max(pmax, 0.0);
     if (std::abs(pmax - pmin) <= 1e-9 && std::abs(pmax) <= 1e-9) continue;
     vsc_transfers.push_back({ac_it->second, dc_it->second, pmin, pmax,
                              converter.name.empty() ? "vsc_" + std::to_string(converter.index)
@@ -4523,11 +4602,44 @@ StateEvalResult evaluate_hybrid_fmea_network_lp(
     auto to_it = dc_bus_pos.find(converter.bus_out);
     if (from_it == dc_bus_pos.end() || to_it == dc_bus_pos.end()) continue;
     auto [pmin, pmax] = dcdc_bounds_mw(converter);
+    pmin = std::min(pmin, 0.0);
+    pmax = std::max(pmax, 0.0);
     if (std::abs(pmax - pmin) <= 1e-9 && std::abs(pmax) <= 1e-9) continue;
     dcdc_transfers.push_back({from_it->second, to_it->second, pmin, pmax,
                               converter.name.empty() ? "dcdc_" + std::to_string(converter.index)
                                                      : converter.name,
                               converter.in_service});
+  }
+
+  // One angle gauge per energized AC connected component. A single global
+  // reference leaves one null mode for every additional island and can make a
+  // feasible load-shedding LP fail numerically.
+  std::vector<int> ac_parent(ac_bus_count);
+  std::iota(ac_parent.begin(), ac_parent.end(), 0);
+  const auto ac_root = [&](int node) {
+    int root = node;
+    while (ac_parent[static_cast<size_t>(root)] != root)
+      root = ac_parent[static_cast<size_t>(root)];
+    while (ac_parent[static_cast<size_t>(node)] != node) {
+      const int next = ac_parent[static_cast<size_t>(node)];
+      ac_parent[static_cast<size_t>(node)] = root;
+      node = next;
+    }
+    return root;
+  };
+  for (const auto& edge : ac_edges) {
+    if (!edge.active) continue;
+    const int from_root = ac_root(edge.from_pos);
+    const int to_root = ac_root(edge.to_pos);
+    if (from_root != to_root)
+      ac_parent[static_cast<size_t>(to_root)] = from_root;
+  }
+  std::vector<unsigned char> ac_angle_reference(ac_bus_count, 0);
+  std::unordered_set<int> referenced_roots;
+  for (size_t bus_pos = 0; bus_pos < ac_bus_count; ++bus_pos) {
+    const int root = ac_root(static_cast<int>(bus_pos));
+    if (referenced_roots.insert(root).second)
+      ac_angle_reference[bus_pos] = 1;
   }
 
   const int source_offset = 0;
@@ -4544,17 +4656,12 @@ StateEvalResult evaluate_hybrid_fmea_network_lp(
   const int flow_row_offset = static_cast<int>(ac_bus_count + dc_bus_count);
   const int row_count = flow_row_offset + static_cast<int>(ac_edges.size());
   if (variable_count <= 0 || row_count <= 0) {
-    return conservative_hybrid_shed(sys, ac_load_mw, dc_load_mw, curtail_threshold_mw);
+    StateEvalResult empty;
+    empty.nodal_curtailment_mw.assign(ac_bus_count + dc_bus_count, 0.0);
+    return empty;
   }
 
   const double base_mva = std::max({sys.base_mva, sys.ac.base_mva, sys.dc.base_mva, 1.0});
-  // Reliability evaluation: minimise load shedding, not dispatch cost.  Use a
-  // VOLL that strongly dominates every source's marginal cost so the LP serves
-  // all load it physically can before shedding (source cost stays only a
-  // tie-breaker among minimum-shed dispatches).
-  double max_src_cost = 0.0;
-  for (const auto& s : sources) max_src_cost = std::max(max_src_cost, s.cost_mwh);
-  const double voll = reliability_shedding_voll(sys, options.voll, max_src_cost);
   engine::LPModel lp;
   lp.sense = engine::Sense::Minimize;
   lp.vars.resize(variable_count);
@@ -4635,7 +4742,7 @@ StateEvalResult evaluate_hybrid_fmea_network_lp(
                     0.0,
                     positive_or_zero(ac_load_mw[bus_pos]) / base_mva,
                     "shed_ac_" + std::to_string(sys.ac.buses[bus_pos].index)};
-    lp.c[var] = voll * base_mva;
+    lp.c[var] = 0.0;
     equality_triplets.emplace_back(static_cast<int>(bus_pos), var, 1.0);
   }
   for (size_t bus_pos = 0; bus_pos < dc_bus_count; ++bus_pos) {
@@ -4644,12 +4751,12 @@ StateEvalResult evaluate_hybrid_fmea_network_lp(
                     0.0,
                     positive_or_zero(dc_load_mw[bus_pos]) / base_mva,
                     "shed_dc_" + std::to_string(sys.dc.buses[bus_pos].index)};
-    lp.c[var] = voll * base_mva;
+    lp.c[var] = 0.0;
     equality_triplets.emplace_back(static_cast<int>(ac_bus_count + bus_pos), var, 1.0);
   }
 
   // F9: AC bus angle variables + DC power-flow (Kirchhoff) flow-definition rows.
-  // theta[0] is the angle reference (fixed at 0); the others are free.  Each AC
+  // Every energized AC component has one angle reference fixed at 0. Each AC
   // edge adds one row: branches enforce Pf = B*(theta_from - theta_to) (DC power
   // flow), while zero-impedance edges (switch/breaker/transformer, B=0) enforce
   // theta_from = theta_to (equipotential bus merge) with their flow left free.
@@ -4657,7 +4764,7 @@ StateEvalResult evaluate_hybrid_fmea_network_lp(
   // networks it constrains loop flows that the pure transport LP left free.
   for (size_t bus_pos = 0; bus_pos < ac_bus_count; ++bus_pos) {
     const int var = theta_offset + static_cast<int>(bus_pos);
-    const double bound = (bus_pos == 0) ? 0.0 : 1.0e3;
+    const double bound = ac_angle_reference[bus_pos] != 0 ? 0.0 : 1.0e3;
     lp.vars[var] = {engine::VarType::Continuous, -bound, bound,
                     "theta_ac_" + std::to_string(sys.ac.buses[bus_pos].index)};
   }
@@ -4702,49 +4809,132 @@ StateEvalResult evaluate_hybrid_fmea_network_lp(
       simplex_cache != nullptr && simplex_cache->basis.has_value()
           ? &*simplex_cache->basis
           : nullptr;
-  auto solve_certificate =
-      engine::solve_lp_with_basis(lp, simplex_options, basis_hint);
-  const auto& solve_result = solve_certificate.result;
-  if (!solve_result.stats.success || solve_result.x.size() < variable_count) {
+  const Eigen::VectorXd economic_objective = lp.c;
+  lp.c.setZero();
+  for (size_t bus_pos = 0; bus_pos < ac_bus_count; ++bus_pos)
+    lp.c[ac_shed_offset + static_cast<int>(bus_pos)] = base_mva;
+  for (size_t bus_pos = 0; bus_pos < dc_bus_count; ++bus_pos)
+    lp.c[dc_shed_offset + static_cast<int>(bus_pos)] = base_mva;
+
+  const double certification_tolerance =
+      std::max(1e-9, options.opf_options.feasibility_tol);
+  const auto certified = [&](const engine::SolveResult& candidate) {
+    if (!candidate.stats.success || candidate.x.size() != variable_count ||
+        !candidate.x.allFinite())
+      return false;
+    double violation = lp.Aeq.rows() > 0
+        ? (lp.Aeq * candidate.x - lp.beq).lpNorm<Eigen::Infinity>()
+        : 0.0;
+    for (int col = 0; col < variable_count; ++col) {
+      const auto& bounds = lp.vars[static_cast<size_t>(col)];
+      violation = std::max(violation, bounds.lb - candidate.x[col]);
+      violation = std::max(violation, candidate.x[col] - bounds.ub);
+    }
+    return std::isfinite(violation) && violation <= certification_tolerance;
+  };
+  const auto throw_solver_bug = [&](const char* phase,
+                                    const engine::SolveResult& candidate) {
     if (simplex_cache != nullptr) {
       simplex_cache->basis = simplex_cache->fallback_basis;
     }
-    spdlog::warn(
-        "FMEA hybrid AC/DC LP failed for {}[{}] '{}' (status='{}'); "
-        "applying conservative full-load shed",
-        simplex_cache != nullptr ? simplex_cache->component_type : "unknown",
-        simplex_cache != nullptr ? simplex_cache->component_index : -1,
-        simplex_cache != nullptr ? simplex_cache->component_name : "unknown",
-        solve_result.stats.status);
-    return conservative_hybrid_shed(sys, ac_load_mw, dc_load_mw, curtail_threshold_mw);
+    std::ostringstream message;
+    message << "可靠性混合 AC/DC LP " << phase
+            << " 未取得可行最优证书；零出力、零传输、全削负荷构成显式可行点，"
+               "故这是构模或数值求解错误。 component="
+            << (simplex_cache != nullptr ? simplex_cache->component_type : "unknown")
+            << '['
+            << (simplex_cache != nullptr ? simplex_cache->component_index : -1)
+            << "] name='"
+            << (simplex_cache != nullptr ? simplex_cache->component_name : "unknown")
+            << "', status='" << candidate.stats.status
+            << "', primal_residual=" << candidate.stats.primal_feas
+            << ", dual_residual=" << candidate.stats.dual_feas;
+    throw std::runtime_error(message.str());
+  };
+
+  auto shed_certificate =
+      engine::solve_lp_with_basis(lp, simplex_options, basis_hint);
+  if (!certified(shed_certificate.result)) {
+    throw_solver_bug("第一阶段（最小切负荷）", shed_certificate.result);
   }
+
+  double minimum_shed_pu = 0.0;
+  for (size_t bus_pos = 0; bus_pos < ac_bus_count; ++bus_pos)
+    minimum_shed_pu += shed_certificate.result.x[
+        ac_shed_offset + static_cast<int>(bus_pos)];
+  for (size_t bus_pos = 0; bus_pos < dc_bus_count; ++bus_pos)
+    minimum_shed_pu += shed_certificate.result.x[
+        dc_shed_offset + static_cast<int>(bus_pos)];
+
+  if (simplex_cache != nullptr) {
+    engine::SimplexBasis next_basis;
+    next_basis.indices = shed_certificate.basis.basis_indices();
+    next_basis.rows = shed_certificate.basis.rows;
+    next_basis.cols = shed_certificate.basis.cols;
+    next_basis.at_upper = shed_certificate.basis.at_upper;
+    next_basis.cached_dse_weights = shed_certificate.basis.cached_dse_weights;
+    next_basis.cached_dse_basis = shed_certificate.basis.cached_dse_basis;
+    next_basis.sf_n_slack = shed_certificate.basis.sf_n_slack;
+    next_basis.sf_n_surplus = shed_certificate.basis.sf_n_surplus;
+    next_basis.sf_n_artificial = shed_certificate.basis.sf_n_artificial;
+    simplex_cache->basis = std::move(next_basis);
+  }
+
+  using Triplet = Eigen::Triplet<double>;
+  const int old_rows = lp.Aeq.rows();
+  std::vector<Triplet> augmented_entries;
+  augmented_entries.reserve(static_cast<size_t>(
+      lp.Aeq.nonZeros() + ac_bus_count + dc_bus_count));
+  for (int col = 0; col < lp.Aeq.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(lp.Aeq, col); it; ++it)
+      augmented_entries.emplace_back(it.row(), it.col(), it.value());
+  }
+  for (size_t bus_pos = 0; bus_pos < ac_bus_count; ++bus_pos)
+    augmented_entries.emplace_back(
+        old_rows, ac_shed_offset + static_cast<int>(bus_pos), 1.0);
+  for (size_t bus_pos = 0; bus_pos < dc_bus_count; ++bus_pos)
+    augmented_entries.emplace_back(
+        old_rows, dc_shed_offset + static_cast<int>(bus_pos), 1.0);
+  Eigen::SparseMatrix<double> augmented_aeq(old_rows + 1, variable_count);
+  augmented_aeq.setFromTriplets(augmented_entries.begin(),
+                                augmented_entries.end());
+  Eigen::VectorXd augmented_beq(old_rows + 1);
+  augmented_beq.head(old_rows) = lp.beq;
+  augmented_beq[old_rows] = minimum_shed_pu;
+  lp.Aeq = std::move(augmented_aeq);
+  lp.beq = std::move(augmented_beq);
+  lp.c = economic_objective;
+  for (size_t bus_pos = 0; bus_pos < ac_bus_count; ++bus_pos)
+    lp.c[ac_shed_offset + static_cast<int>(bus_pos)] = 0.0;
+  for (size_t bus_pos = 0; bus_pos < dc_bus_count; ++bus_pos)
+    lp.c[dc_shed_offset + static_cast<int>(bus_pos)] = 0.0;
+
+  simplex_options.fallback_basis = nullptr;
+  auto economic_certificate =
+      engine::solve_lp_with_basis(lp, simplex_options, nullptr);
+  if (!certified(economic_certificate.result)) {
+    throw_solver_bug("第二阶段（固定最小切负荷后经济调度）",
+                     economic_certificate.result);
+  }
+  const auto& solve_result = economic_certificate.result;
 
   StateEvalResult result;
   result.nodal_curtailment_mw.assign(ac_bus_count + dc_bus_count, 0.0);
   for (size_t bus_pos = 0; bus_pos < ac_bus_count; ++bus_pos) {
-    const double shed = std::max(0.0, solve_result.x[ac_shed_offset + static_cast<int>(bus_pos)] * base_mva);
+    const double shed = std::max(
+        0.0, solve_result.x[ac_shed_offset + static_cast<int>(bus_pos)] *
+                 base_mva);
     result.nodal_curtailment_mw[bus_pos] = shed;
     result.curtailment_mw += shed;
   }
   for (size_t bus_pos = 0; bus_pos < dc_bus_count; ++bus_pos) {
-    const double shed = std::max(0.0, solve_result.x[dc_shed_offset + static_cast<int>(bus_pos)] * base_mva);
+    const double shed = std::max(
+        0.0, solve_result.x[dc_shed_offset + static_cast<int>(bus_pos)] *
+                 base_mva);
     result.nodal_curtailment_mw[ac_bus_count + bus_pos] = shed;
     result.curtailment_mw += shed;
   }
   result.is_loss_state = result.curtailment_mw > curtail_threshold_mw;
-  if (simplex_cache != nullptr) {
-    engine::SimplexBasis next_basis;
-    next_basis.indices = solve_certificate.basis.basis_indices();
-    next_basis.rows = solve_certificate.basis.rows;
-    next_basis.cols = solve_certificate.basis.cols;
-    next_basis.at_upper = solve_certificate.basis.at_upper;
-    next_basis.cached_dse_weights = solve_certificate.basis.cached_dse_weights;
-    next_basis.cached_dse_basis = solve_certificate.basis.cached_dse_basis;
-    next_basis.sf_n_slack = solve_certificate.basis.sf_n_slack;
-    next_basis.sf_n_surplus = solve_certificate.basis.sf_n_surplus;
-    next_basis.sf_n_artificial = solve_certificate.basis.sf_n_artificial;
-    simplex_cache->basis = std::move(next_basis);
-  }
   return result;
 }
 
@@ -5074,6 +5264,8 @@ FMEAStageEval evaluate_contingency_stage(
     if (budget_exhausted()) return;
     HybridPowerSystem cand = sys_copy;
     close_repair_actions(cand, switches, branches);
+    if (options.enable_storage_dispatch)
+      refresh_fmea_ac_storage_dispatch(cand, options, stage_duration_hr);
     StateEvalResult ev = evaluate_prepared_fmea_system(
       cand, options, opf_opt, stage_duration_hr, simplex_cache);
     ++opf_calls;
@@ -5157,10 +5349,9 @@ NetworkShedResult evaluate_failed_network_state(
     r.model_scope = "hybrid-acdc-network-lp";
   } else {
     // AC-only: reuse the DC-OPF state evaluator with no extra sampled failures.
-    // Minimise load shedding (not dispatch cost) for the failed state.
+    // evaluate_state applies the exact two-stage shed-first objective.
     opf::DCOPFOptions opf_opt = options.opf_options;
     opf_opt.load_shedding = true;
-    opf_opt.voll = reliability_shedding_voll(prepared, std::max(opf_opt.voll, options.voll));
     opf_opt.verbose = false;
     opf_opt.compute_lmp = false;
     ComponentOffsets co(prepared);
@@ -5374,11 +5565,9 @@ FMEAResult run_distribution_fmea(
                sys.ac.generators.size(), sys.ac.branches.size(),
                sys.dc.branches.size(), sys.vsc_converters.size());
 
-  // DC-OPF options.  FMEA contingency evaluation minimises LOAD SHEDDING, so
-  // VOLL is set to strongly dominate generation cost (lexicographic min-shed).
+  // evaluate_state enforces the exact two-stage shed-first objective.
   opf::DCOPFOptions opf_opt = options.opf_options;
   opf_opt.load_shedding = true;
-  opf_opt.voll = reliability_shedding_voll(sys, std::max(opf_opt.voll, options.voll));
   opf_opt.verbose = false;
   opf_opt.compute_lmp = false;  // batch path — LMPs not needed, skip supporting LP
 

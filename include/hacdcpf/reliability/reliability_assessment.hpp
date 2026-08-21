@@ -385,7 +385,9 @@ struct ReliabilityResult {
   double incremental_edns_mw{0.0};     // Expected outage-state excess above N-0 (MW)
   // State-evaluation decomposition. These counters/energies are reported in
   // the same sampling measure as eens_mwh_yr (including likelihood weights for
-  // importance sampling). They make conservative solver fallbacks auditable.
+  // importance sampling). OPF-failure fields are retained for response-schema
+  // compatibility and remain zero: a state-solver failure now throws because
+  // the load-shedding formulation has an explicit feasible point.
   long long evaluated_state_count{0};
   long long opf_failed_state_count{0};
   long long dead_island_state_count{0};
@@ -502,6 +504,36 @@ ReliabilityResult run_sequential_mc(
     const HybridPowerSystem& sys,
     const LoadProfile& load_profile,
     const ReliabilityOptions& options = {});
+
+/// Deterministic feasibility audit for the AC HL-II consequence model.
+/// Enumerates N-0, every generator/physical-AC-branch N-1 state, and every
+/// corresponding N-2 state. Linked Transformer2W metadata is deliberately not
+/// a second outage component. This is a numerical-model certification scan,
+/// not a probability-weighted reliability index.
+struct HLIIStateScanResult {
+  size_t component_count{0};
+  size_t states_evaluated{0};
+  size_t failed_states{0};
+  size_t nonfinite_states{0};
+  size_t infeasible_states{0};
+  size_t negative_shed_states{0};
+  size_t shed_above_load_states{0};
+  double total_load_mw{0.0};
+  double maximum_shed_mw{0.0};
+  double maximum_feasibility_violation_mw{0.0};
+  std::string first_failure_state;
+  std::string first_failure_reason;
+
+  bool passed() const {
+    return failed_states == 0 && nonfinite_states == 0 &&
+           infeasible_states == 0 && negative_shed_states == 0 &&
+           shed_above_load_states == 0;
+  }
+};
+
+HLIIStateScanResult scan_ac_hlii_n2_states(
+    const HybridPowerSystem& sys,
+    const opf::DCOPFOptions& options = {});
 
 struct ExactReliabilitySensitivityItem {
   size_t global_state_index{0};

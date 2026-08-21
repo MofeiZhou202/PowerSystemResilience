@@ -71,15 +71,18 @@ struct DCOPFFormulation {
   int nl{0};         // Number of branches
   int slack{0};      // Slack bus index
   int n_shed{0};     // Number of load shedding variables (0 or nb)
+  int n_pgc{0};      // Number of fixed-generation curtailment variables
   
-  // Variable layout in x = [theta; Pg; Pf; dpd]
+  // Variable layout in x = [theta; Pg; Pf; dpd; pgc; lambda]
   // theta: nb angles (slack fixed to 0)
   // Pg: ng generator outputs
   // Pf: nl branch flows (optional, helps with flow limits)
   // dpd: n_shed load shedding slack variables (one per bus)
+  // pgc: n_pgc fixed-generation curtailment variables (one per bus)
   int nvar{0};
   int pf_offset{0};  // starting index of Pf variables
   int shed_offset{0}; // starting index of dpd variables
+  int pgc_offset{0};  // starting index of fixed-generation curtailment variables
   int pwl_offset{0};  // starting index of convex-combination lambda variables
   int pwl_segments_effective{0};
   
@@ -88,6 +91,7 @@ struct DCOPFFormulation {
   int i_pg(int gen) const { return nb + gen; }
   int i_pf(int br) const { return pf_offset + br; }
   int i_dpd(int bus) const { return shed_offset + bus; }
+  int i_pgc(int bus) const { return pgc_offset + bus; }
   int i_pwl(int gen, int point) const {
     return pwl_point_offset_by_gen[static_cast<size_t>(gen)] + point;
   }
@@ -117,6 +121,8 @@ struct DCOPFFormulation {
   std::vector<int> component_of_bus;
   std::vector<std::vector<int>> component_buses;
   std::vector<int> component_references;
+  std::vector<double> gross_demand_pu;
+  std::vector<double> fixed_generation_pu;
   std::vector<double> pd_pu;
   
   // Store base_mva for result extraction
@@ -205,13 +211,16 @@ DCOPFFormulation build_dc_opf_lp(const HybridPowerSystem& sys,
     }
   }
   
-  // Variable layout: [theta(nb), Pg(ng), Pf(n_active_br), dpd(n_shed), lambda]
+  // Variable layout: [theta(nb), Pg(ng), Pf(n_active_br), dpd(n_shed),
+  //                   pgc(n_pgc), lambda]
   const bool include_pf = opt.include_branch_limits;
   const int n_pf_vars = include_pf ? n_active_br : 0;
   form.n_shed = opt.load_shedding ? form.nb : 0;
+  form.n_pgc = opt.allow_fixed_generation_curtailment ? form.nb : 0;
   form.pf_offset = form.nb + form.ng;
   form.shed_offset = form.nb + form.ng + n_pf_vars;
-  form.pwl_offset = form.shed_offset + form.n_shed;
+  form.pgc_offset = form.shed_offset + form.n_shed;
+  form.pwl_offset = form.pgc_offset + form.n_pgc;
   form.pwl_point_offset_by_gen.assign(static_cast<size_t>(form.ng), -1);
   form.pwl_point_count_by_gen.assign(static_cast<size_t>(form.ng), 0);
   const int requested_segments = std::clamp(opt.pwl_segments, 1, 1000);
@@ -219,7 +228,8 @@ DCOPFFormulation build_dc_opf_lp(const HybridPowerSystem& sys,
   if (!opt.compact_quadratic_model) {
     for (int k = 0; k < form.ng; ++k) {
       const auto& gen = gens[static_cast<size_t>(form.gen_map[k])];
-      if (gen.cost_c2 <= 1e-12 || !(gen.pmax_mw > gen.pmin_mw)) continue;
+      const double pmin_mw = opt.full_redispatch_from_zero ? 0.0 : gen.pmin_mw;
+      if (gen.cost_c2 <= 1e-12 || !(gen.pmax_mw > pmin_mw)) continue;
       const int point_count = requested_segments + 1;
       form.pwl_point_offset_by_gen[static_cast<size_t>(k)] =
           form.pwl_offset + n_pwl_vars;
@@ -276,7 +286,7 @@ DCOPFFormulation build_dc_opf_lp(const HybridPowerSystem& sys,
   for (int k = 0; k < form.ng; ++k) {
     const int gi = form.gen_map[k];
     const auto& gen = gens[gi];
-    double pmin = gen.pmin_mw / base_mva;
+    double pmin = (opt.full_redispatch_from_zero ? 0.0 : gen.pmin_mw) / base_mva;
     double pmax = gen.pmax_mw / base_mva;
     // Clamp to reasonable values
     pmin = std::max(pmin, -kHugeBound);
@@ -291,10 +301,11 @@ DCOPFFormulation build_dc_opf_lp(const HybridPowerSystem& sys,
         form.pwl_point_count_by_gen[static_cast<size_t>(k)];
     if (point_count == 0) continue;
     const auto& gen = gens[static_cast<size_t>(form.gen_map[k])];
+    const double pmin_mw = opt.full_redispatch_from_zero ? 0.0 : gen.pmin_mw;
     for (int p = 0; p < point_count; ++p) {
       const double alpha = static_cast<double>(p) /
                            static_cast<double>(point_count - 1);
-      const double pg_mw = gen.pmin_mw + alpha * (gen.pmax_mw - gen.pmin_mw);
+      const double pg_mw = pmin_mw + alpha * (gen.pmax_mw - pmin_mw);
       const int col = form.i_pwl(k, p);
       form.lp.vars[col] = {engine::VarType::Continuous, 0.0, 1.0, ""};
       form.lp.c[col] = gen.cost_c2 * pg_mw * pg_mw +
@@ -315,47 +326,72 @@ DCOPFFormulation build_dc_opf_lp(const HybridPowerSystem& sys,
   }
   
   // --------------------------------------------------------------------------
-  // Compute net demand at each bus (needed for load shedding bounds + RHS)
+  // Separate gross demand from fixed positive injection. Reliability adequacy
+  // needs both quantities explicitly: with 0<=shed<=d and 0<=pgc<=p_fixed,
+  // (Pg,Pf,theta,shed,pgc)=(0,0,0,d,p_fixed) is feasible on every topology.
+  // See docs/modules/reliability/chapters/theory_reliability_foundations.tex,
+  // Sec. 2.11.
   // --------------------------------------------------------------------------
-  std::vector<double> pd_pu(form.nb, 0.0);
+  std::vector<double> gross_demand_pu(form.nb, 0.0);
+  std::vector<double> fixed_generation_pu(form.nb, 0.0);
+  const auto add_demand = [&](int bus_pos, double demand_mw) {
+    if (demand_mw >= 0.0)
+      gross_demand_pu[static_cast<size_t>(bus_pos)] += demand_mw / base_mva;
+    else
+      fixed_generation_pu[static_cast<size_t>(bus_pos)] += -demand_mw / base_mva;
+  };
+  const auto add_injection = [&](int bus_pos, double injection_mw) {
+    if (injection_mw >= 0.0)
+      fixed_generation_pu[static_cast<size_t>(bus_pos)] += injection_mw / base_mva;
+    else
+      gross_demand_pu[static_cast<size_t>(bus_pos)] += -injection_mw / base_mva;
+  };
   for (int i = 0; i < form.nb; ++i) {
-    pd_pu[i] = buses[i].pd_mw / base_mva;
+    add_demand(i, buses[i].pd_mw);
   }
   for (const auto& ld : sys.ac.loads) {
     if (!ld.in_service) continue;
     auto it = form.bus_map.find(ld.bus);
     if (it == form.bus_map.end()) continue;
-    pd_pu[it->second] += (ld.p_mw * ld.scaling) / base_mva;
+    add_demand(it->second, ld.p_mw * ld.scaling);
   }
   for (const auto& sg : sys.ac.static_generators) {
     if (!sg.in_service) continue;
     auto it = form.bus_map.find(sg.bus);
     if (it == form.bus_map.end()) continue;
-    pd_pu[it->second] -= (sg.p_mw * sg.scaling) / base_mva;
+    add_injection(it->second, sg.p_mw * sg.scaling);
   }
   for (const auto& rg : sys.ac.renewable_gens) {
     if (!rg.in_service) continue;
     auto it = form.bus_map.find(rg.bus);
     if (it == form.bus_map.end()) continue;
-    pd_pu[it->second] -= rg.p_mw / base_mva;
+    add_injection(it->second, rg.p_mw);
   }
   for (const auto& pv : sys.ac.pv_systems) {
     if (!pv.in_service) continue;
     auto it = form.bus_map.find(pv.bus);
     if (it == form.bus_map.end()) continue;
-    pd_pu[it->second] -= pv.p_mw / base_mva;
+    add_injection(it->second, pv.p_mw);
   }
   for (const auto& st : sys.ac.storage) {
     if (!st.in_service) continue;
     auto it = form.bus_map.find(st.bus);
     if (it == form.bus_map.end()) continue;
-    pd_pu[it->second] -= st.p_mw / base_mva;
+    add_injection(it->second, st.p_mw);
   }
+  std::vector<double> pd_pu(form.nb, 0.0);
+  for (int i = 0; i < form.nb; ++i)
+    pd_pu[static_cast<size_t>(i)] =
+        gross_demand_pu[static_cast<size_t>(i)] -
+        fixed_generation_pu[static_cast<size_t>(i)];
+  form.gross_demand_pu = gross_demand_pu;
+  form.fixed_generation_pu = fixed_generation_pu;
   form.pd_pu = pd_pu;
 
   // --------------------------------------------------------------------------
   // Load shedding variables: dpd (one per bus)
-  // 0 ≤ dpd_i ≤ max(pd_pu_i, 0) — can only shed positive demand
+  // 0 ≤ dpd_i ≤ gross_demand_i — fixed injections do not reduce the
+  // amount of authored load that may be shed.
   // Cost: VOLL × dpd_i × base_mva (in $/h)
   // --------------------------------------------------------------------------
   if (form.n_shed > 0) {
@@ -373,11 +409,22 @@ DCOPFFormulation build_dc_opf_lp(const HybridPowerSystem& sys,
     }
     
     for (int i = 0; i < form.nb; ++i) {
-      double ub = std::max(pd_pu[i], 0.01 / base_mva);
+      const double ub = gross_demand_pu[static_cast<size_t>(i)];
       form.lp.vars[form.i_dpd(i)] = {engine::VarType::Continuous, 0.0, ub, ""};
       // LP cost coefficient for dpd: VOLL × base_mva (converts pu to MW)
       form.lp.c[form.i_dpd(i)] = voll_effective * base_mva;
     }
+  }
+
+  // Fixed-generation curtailment p_gc removes non-dispatchable positive
+  // injection. It is a secondary cost and is never traded against load
+  // shedding in the first lexicographic phase.
+  for (int i = 0; i < form.n_pgc; ++i) {
+    form.lp.vars[form.i_pgc(i)] = {
+        engine::VarType::Continuous, 0.0,
+        fixed_generation_pu[static_cast<size_t>(i)], ""};
+    form.lp.c[form.i_pgc(i)] =
+        std::max(0.0, opt.fixed_generation_curtailment_cost) * base_mva;
   }
 
   // --------------------------------------------------------------------------
@@ -430,6 +477,12 @@ DCOPFFormulation build_dc_opf_lp(const HybridPowerSystem& sys,
   // So dpd enters the LHS with coefficient +1 (like generation).
   for (int i = 0; i < form.n_shed; ++i) {
     eq_trips.emplace_back(balance_row[i], form.i_dpd(i), 1.0);
+  }
+
+  // Curtailing fixed injection raises net demand, hence -p_gc on the left of
+  // Pg + shed - p_gc - network_export = gross_demand - fixed_generation.
+  for (int i = 0; i < form.n_pgc; ++i) {
+    eq_trips.emplace_back(balance_row[i], form.i_pgc(i), -1.0);
   }
   
   if (include_pf) {
@@ -532,6 +585,7 @@ DCOPFFormulation build_dc_opf_lp(const HybridPowerSystem& sys,
         form.pwl_point_count_by_gen[static_cast<size_t>(k)];
     if (point_count == 0) continue;
     const auto& gen = gens[static_cast<size_t>(form.gen_map[k])];
+    const double pmin_mw = opt.full_redispatch_from_zero ? 0.0 : gen.pmin_mw;
     const int convexity_row = row++;
     const int interpolation_row = row++;
     beq[convexity_row] = 1.0;
@@ -540,7 +594,7 @@ DCOPFFormulation build_dc_opf_lp(const HybridPowerSystem& sys,
       const double alpha = static_cast<double>(p) /
                            static_cast<double>(point_count - 1);
       const double pg_pu =
-          (gen.pmin_mw + alpha * (gen.pmax_mw - gen.pmin_mw)) / base_mva;
+          (pmin_mw + alpha * (gen.pmax_mw - pmin_mw)) / base_mva;
       eq_trips.emplace_back(convexity_row, form.i_pwl(k, p), 1.0);
       eq_trips.emplace_back(interpolation_row, form.i_pwl(k, p), -pg_pu);
     }
@@ -615,6 +669,9 @@ void build_dc_opf_qp(DCOPFFormulation& form, const HybridPowerSystem& sys) {
   for (int i = 0; i < form.n_shed; ++i) {
     form.qp.c[form.i_dpd(i)] = form.lp.c[form.i_dpd(i)];
   }
+  for (int i = 0; i < form.n_pgc; ++i) {
+    form.qp.c[form.i_pgc(i)] = form.lp.c[form.i_pgc(i)];
+  }
   
   form.qp.Q.resize(form.nvar, form.nvar);
   form.qp.Q.setFromTriplets(Q_trips.begin(), Q_trips.end());
@@ -643,6 +700,39 @@ DCStructuralWarmStart build_dc_structural_warm_start(
   const auto& branches = sys.ac.branches;
   const bool include_pf =
       !form.branch_map.empty() && form.pf_offset < form.shed_offset;
+
+  // Reliability Sec. 2.11 constructive certificate. With zero generator lower
+  // bounds, full load shedding, and fixed-injection curtailment, this point
+  // satisfies every nodal balance independently of topology and branch limits.
+  bool every_generator_accepts_zero = true;
+  for (int k = 0; k < form.ng; ++k) {
+    const auto& bounds = form.lp.vars[static_cast<size_t>(form.i_pg(k))];
+    every_generator_accepts_zero = every_generator_accepts_zero &&
+                                   bounds.lb <= 0.0 && bounds.ub >= 0.0;
+  }
+  if (form.n_shed == form.nb && form.n_pgc == form.nb &&
+      every_generator_accepts_zero) {
+    for (int bus = 0; bus < form.nb; ++bus) {
+      warm.x[form.i_dpd(bus)] =
+          form.gross_demand_pu[static_cast<size_t>(bus)];
+      warm.x[form.i_pgc(bus)] =
+          form.fixed_generation_pu[static_cast<size_t>(bus)];
+    }
+    for (int k = 0; k < form.ng; ++k) {
+      const int count =
+          form.pwl_point_count_by_gen[static_cast<size_t>(k)];
+      if (count > 0) warm.x[form.i_pwl(k, 0)] = 1.0;
+    }
+    warm.equality_residual = form.lp.Aeq.rows() > 0
+        ? (form.lp.Aeq * warm.x - form.lp.beq)
+              .lpNorm<Eigen::Infinity>()
+        : 0.0;
+    warm.built = std::isfinite(warm.equality_residual) &&
+                 warm.equality_residual <= 1e-10;
+    warm.status = warm.built ? "constructive-full-curtailment"
+                             : "constructive-certificate-residual";
+    return warm;
+  }
 
   std::vector<std::vector<int>> generators_by_component(
       form.component_buses.size());
@@ -806,7 +896,7 @@ DCStructuralWarmStart build_dc_structural_warm_start(
     const int count = form.pwl_point_count_by_gen[static_cast<std::size_t>(k)];
     if (count == 0) continue;
     const auto& gen = gens[static_cast<std::size_t>(form.gen_map[static_cast<std::size_t>(k)])];
-    const double lo = gen.pmin_mw / form.base_mva;
+    const double lo = form.lp.vars[static_cast<size_t>(form.i_pg(k))].lb;
     const double hi = gen.pmax_mw / form.base_mva;
     const double position = hi > lo
         ? std::clamp((warm.x[form.i_pg(k)] - lo) / (hi - lo), 0.0, 1.0)
@@ -1073,6 +1163,17 @@ DCOPFResult extract_dc_opf_result(const DCOPFFormulation& form,
       result.total_load_shedding_mw += shed;
     }
   }
+
+  if (form.n_pgc > 0) {
+    result.fixed_generation_curtailment_mw.resize(form.nb, 0.0);
+    for (int i = 0; i < form.nb; ++i) {
+      double curtailment = sol.x[form.i_pgc(i)] * base_mva;
+      if (curtailment < 1e-6) curtailment = 0.0;
+      result.fixed_generation_curtailment_mw[static_cast<size_t>(i)] =
+          curtailment;
+      result.total_fixed_generation_curtailment_mw += curtailment;
+    }
+  }
   
   return result;
 }
@@ -1099,6 +1200,7 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
   };
 
   DCOPFResult result;
+  result.full_redispatch_from_zero = opt.full_redispatch_from_zero;
   if (std::any_of(sys_in.lcc_converters.begin(),
                   sys_in.lcc_converters.end(),
                   [](const LCCConverter& lcc) { return lcc.in_service; })) {
@@ -1172,6 +1274,12 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
             unproject_bus_vector(value.load_shedding_mw, map,
                                  BusVectorSemantics::Extensive);
       }
+      if (value.fixed_generation_curtailment_mw.size() ==
+          static_cast<size_t>(map.n_merged)) {
+        value.fixed_generation_curtailment_mw = unproject_bus_vector(
+            value.fixed_generation_curtailment_mw, map,
+            BusVectorSemantics::Extensive);
+      }
       std::vector<double> original_flows(sys_in.ac.branches.size(), 0.0);
       for (size_t i = 0; i < original_flows.size(); ++i) {
         auto it = map.branch_orig_to_proj.find(static_cast<int>(i));
@@ -1187,128 +1295,12 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
     return value;
   };
 
-  // ── Graph topology pre-check ─────────────────────────────────────────────
-  // Detect isolated load islands before the expensive LP build; pre-shed their
-  // load and return infeasible immediately when no slack-connected island exists.
-  double direct_shed_mw = 0.0;
-  std::vector<double> direct_shed_by_bus(sys.ac.buses.size(), 0.0);
-  const auto original_bus_pos = build_bus_map(sys.ac.buses);
+  // Zimmerman et al. (2011), MATPOWER DC model: build every conductive
+  // component in one formulation and choose one angle gauge per component.
+  // With load shedding enabled, p=0, f=0, theta=0, shed=d is an explicit
+  // feasible point even when a component (or the whole system) has no online
+  // generator. Topology labels and source counts must not reject that point.
   const HybridPowerSystem* sys_ptr = &sys;
-  std::optional<HybridPowerSystem> sys_pruned;
-
-  auto apply_direct_shed_to_result = [&]() {
-    if (direct_shed_mw <= 1e-12) return;
-    if (result.load_shedding_mw.size() < direct_shed_by_bus.size()) {
-      result.load_shedding_mw.resize(direct_shed_by_bus.size(), 0.0);
-    }
-    for (size_t i = 0; i < direct_shed_by_bus.size(); ++i) {
-      result.load_shedding_mw[i] += direct_shed_by_bus[i];
-    }
-    result.total_load_shedding_mw += direct_shed_mw;
-  };
-
-  if (!sys.ac.buses.empty()) {
-    namespace gr = hacdcpf::graph;
-    const auto g    = gr::build_power_system_graph(sys);
-    const auto topo = gr::analyze_topology(g);
-    const bool any_island_without_source = std::any_of(
-        topo.islands.begin(), topo.islands.end(), [&](const gr::IslandInfo& island) {
-          if (island.ac_bus_ids.empty()) return false;
-          return !std::any_of(
-              island.ac_bus_ids.begin(), island.ac_bus_ids.end(),
-              [&](int bus) {
-                return std::any_of(sys.ac.generators.begin(), sys.ac.generators.end(),
-                    [&](const auto& gen) { return gen.in_service && gen.bus == bus; });
-              });
-        });
-    if (!topo.all_islands_valid || any_island_without_source) {
-      std::unordered_set<int> dispatchable_source_buses;
-      for (const auto& gen : sys.ac.generators) {
-        if (gen.in_service) dispatchable_source_buses.insert(gen.bus);
-      }
-      const auto island_has_dispatchable_source = [&](const gr::IslandInfo& island) {
-        return std::any_of(
-            island.ac_bus_ids.begin(), island.ac_bus_ids.end(),
-            [&](int bus) { return dispatchable_source_buses.count(bus) != 0; });
-      };
-      std::unordered_set<int> dead_buses;
-      for (const auto& isl : topo.islands) {
-        if (isl.status == gr::IslandStatus::IsolatedLoad ||
-            (isl.status == gr::IslandStatus::NoSlack &&
-             !island_has_dispatchable_source(isl)) ||
-            !island_has_dispatchable_source(isl)) {
-          dead_buses.insert(isl.ac_bus_ids.begin(), isl.ac_bus_ids.end());
-        }
-      }
-      // P1a: DC-OPF formulation adds bus.pd_mw and ac.loads additively as
-      // demand; direct-shed accounting must mirror the same convention to
-      // avoid under-counting curtailment when both sources are present.
-      for (const auto& b : sys.ac.buses) {
-        if (!dead_buses.count(b.index)) continue;
-        const double shed = std::max(0.0, b.pd_mw);
-        auto it = original_bus_pos.find(b.index);
-        if (it != original_bus_pos.end()) direct_shed_by_bus[it->second] += shed;
-        direct_shed_mw += shed;
-      }
-      for (const auto& ld : sys.ac.loads) {
-        if (!ld.in_service || !dead_buses.count(ld.bus)) continue;
-        const double shed = std::max(0.0, ld.p_mw * ld.scaling);
-        auto it = original_bus_pos.find(ld.bus);
-        if (it != original_bus_pos.end()) direct_shed_by_bus[it->second] += shed;
-        direct_shed_mw += shed;
-      }
-      const bool has_valid = std::any_of(
-          topo.islands.begin(), topo.islands.end(),
-          [&](const gr::IslandInfo& i) {
-            return i.status == gr::IslandStatus::Valid &&
-                   island_has_dispatchable_source(i);
-          });
-      if (!has_valid) {
-        if (opt.verbose)
-          spdlog::warn("DC OPF: no valid island — {:.2f} MW direct shed, infeasible",
-                       direct_shed_mw);
-        result.status = "Infeasible: no island with slack bus";
-        result.converged = false;
-        apply_direct_shed_to_result();
-        return separate_external_grid_dispatch(std::move(result));
-      }
-      // Prune dead-bus loads from a local copy before building the formulation.
-      sys_pruned = sys;
-      for (auto& b : sys_pruned->ac.buses) {
-        if (!dead_buses.count(b.index)) continue;
-        b.pd_mw = 0.0;
-        b.qd_mvar = 0.0;
-      }
-      for (auto& ld : sys_pruned->ac.loads) {
-        if (!dead_buses.count(ld.bus)) continue;
-        ld.in_service = false;
-      }
-      for (auto& gen : sys_pruned->ac.generators) {
-        if (dead_buses.count(gen.bus)) gen.in_service = false;
-      }
-      for (auto& sg : sys_pruned->ac.static_generators) {
-        if (dead_buses.count(sg.bus)) sg.in_service = false;
-      }
-      for (auto& rg : sys_pruned->ac.renewable_gens) {
-        if (dead_buses.count(rg.bus)) rg.in_service = false;
-      }
-      for (auto& pv : sys_pruned->ac.pv_systems) {
-        if (dead_buses.count(pv.bus)) pv.in_service = false;
-      }
-      for (auto& st : sys_pruned->ac.storage) {
-        if (dead_buses.count(st.bus)) st.in_service = false;
-      }
-      for (auto& br : sys_pruned->ac.branches) {
-        if (dead_buses.count(br.from_bus) || dead_buses.count(br.to_bus)) {
-          br.in_service = false;
-        }
-      }
-      sys_ptr = &(*sys_pruned);
-      if (opt.verbose)
-        spdlog::warn("DC OPF: {:.2f} MW in isolated islands pre-shed before LP solve",
-                     direct_shed_mw);
-    }
-  }
 
   // Build LP formulation (constraint structure)
   DCOPFFormulation form;
@@ -1318,14 +1310,12 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
     spdlog::error("DC OPF: invalid topology — {}", e.what());
     result.status = std::string("Invalid topology: ") + e.what();
     result.converged = false;
-    apply_direct_shed_to_result();
     return separate_external_grid_dispatch(std::move(result));
   }
   
-  if (form.nb == 0 || form.ng == 0) {
-    result.status = "Empty system or no generators";
+  if (form.nb == 0) {
+    result.status = "Empty system";
     result.converged = false;
-    apply_direct_shed_to_result();
     return separate_external_grid_dispatch(std::move(result));
   }
   
@@ -1442,7 +1432,8 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
   // hint still causes HiGHS to handle LP/MILP sub-problems within that backend
   // where applicable.
   auto try_highs = [&]() -> bool {
-    if (!opt.phase_one_linear_relaxation) {
+    if (!opt.phase_one_linear_relaxation &&
+        !opt.lexicographic_load_shedding) {
       // Single QP attempt through SolverEngine with HiGHS preference.
       // A previous version had two back-to-back calls with identical options;
       // the first success path skipped solver_chain recording and the duplicate
@@ -1463,8 +1454,9 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
 
     // Stott, Jardim & Alsac, IEEE TPS 2009, "DC Power Flow Revisited": the
     // linear network model preserves component balance and branch congestion.
-    // For Phase I its PWL cost is sufficient; Phase II certifies the nonlinear
-    // AC objective/KKT point, so paying for an exact QP here is unnecessary.
+    // For AC Phase I its PWL cost is sufficient. For reliability's exact
+    // two-level objective, Phase I has already fixed minimum shedding and this
+    // LP minimizes the documented PWL generation cost on that optimal face.
     engine::HighsAdapter highs;
     if (highs.available()) {
       sol = highs.solve_lp(form.lp);
@@ -1503,9 +1495,96 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
     record_chain("NativeDualSimplex", sol.stats.success, sol.stats.status);
     return true;
   };
-  
+
+  // Reliability adequacy uses a true lexicographic objective. First solve an
+  // LP whose only objective is total shed, then add the attained optimum as an
+  // equality and solve the economic objective on that optimal face. This is
+  // the executable form of theory_reliability_foundations.tex, Sec. 2.11; no
+  // finite VOLL magnitude is used to approximate priority.
+  bool lexicographic_phase_one_ok = true;
+  if (opt.lexicographic_load_shedding && form.n_shed > 0) {
+    const Eigen::VectorXd economic_lp_c = form.lp.c;
+    const Eigen::VectorXd economic_qp_c = form.qp.c;
+    form.lp.c.setZero();
+    for (int i = 0; i < form.n_shed; ++i)
+      form.lp.c[form.i_dpd(i)] = form.base_mva;
+
+    engine::SolveResult shed_solution;
+    engine::HighsAdapter highs;
+    if (highs.available()) {
+      shed_solution = highs.solve_lp(form.lp);
+      shed_solution.stats.solver_name = "HiGHS-LP(lexicographic-shed)";
+      record_chain("LexicographicShed-HiGHS", shed_solution.stats.success,
+                   shed_solution.stats.status);
+    } else {
+      record_chain("LexicographicShed-HiGHS", false, "unavailable");
+    }
+    if (!shed_solution.stats.success) {
+      engine::SimplexOptions simp_opt;
+      simp_opt.max_iter = opt.max_iterations;
+      simp_opt.feasibility_tol = opt.feasibility_tol;
+      simp_opt.optimality_tol = opt.optimality_tol;
+      auto native = engine::solve_lp_with_basis(form.lp, simp_opt, nullptr);
+      shed_solution.stats.success = native.result.stats.success;
+      shed_solution.stats.iterations = native.result.stats.iterations;
+      shed_solution.stats.objective = native.result.stats.objective;
+      shed_solution.stats.status = native.result.stats.success
+          ? "Optimal" : "Not Optimal";
+      shed_solution.stats.solver_name =
+          "NativeDualSimplex(lexicographic-shed)";
+      shed_solution.x = native.result.x;
+      shed_solution.constraint_duals = native.result.constraint_duals;
+      shed_solution.box_dual_lb = native.result.box_dual_lb;
+      shed_solution.box_dual_ub = native.result.box_dual_ub;
+      record_chain("LexicographicShed-NativeDualSimplex",
+                   shed_solution.stats.success, shed_solution.stats.status);
+    }
+
+    form.lp.c = economic_lp_c;
+    form.qp.c = economic_qp_c;
+    for (int i = 0; i < form.n_shed; ++i) {
+      form.lp.c[form.i_dpd(i)] = 0.0;
+      form.qp.c[form.i_dpd(i)] = 0.0;
+    }
+
+    if (!shed_solution.stats.success ||
+        shed_solution.x.size() != form.nvar ||
+        !shed_solution.x.allFinite()) {
+      if (shed_solution.stats.success)
+        shed_solution.stats.status = "Malformed lexicographic Phase-I primal";
+      shed_solution.stats.success = false;
+      sol = std::move(shed_solution);
+      lexicographic_phase_one_ok = false;
+    } else {
+      double minimum_shed_pu = 0.0;
+      for (int i = 0; i < form.n_shed; ++i)
+        minimum_shed_pu += shed_solution.x[form.i_dpd(i)];
+
+      using Triplet = Eigen::Triplet<double>;
+      const int old_rows = form.lp.Aeq.rows();
+      std::vector<Triplet> entries;
+      entries.reserve(static_cast<size_t>(form.lp.Aeq.nonZeros() + form.n_shed));
+      for (int col = 0; col < form.lp.Aeq.outerSize(); ++col) {
+        for (Eigen::SparseMatrix<double>::InnerIterator it(form.lp.Aeq, col); it; ++it)
+          entries.emplace_back(it.row(), it.col(), it.value());
+      }
+      for (int i = 0; i < form.n_shed; ++i)
+        entries.emplace_back(old_rows, form.i_dpd(i), 1.0);
+
+      Eigen::SparseMatrix<double> lexicographic_aeq(old_rows + 1, form.nvar);
+      lexicographic_aeq.setFromTriplets(entries.begin(), entries.end());
+      Eigen::VectorXd lexicographic_beq(old_rows + 1);
+      lexicographic_beq.head(old_rows) = form.lp.beq;
+      lexicographic_beq[old_rows] = minimum_shed_pu;
+      form.lp.Aeq = lexicographic_aeq;
+      form.lp.beq = lexicographic_beq;
+      form.qp.Aeq = lexicographic_aeq;
+      form.qp.beq = lexicographic_beq;
+    }
+  }
+
   bool solved = false;
-  switch (opt.solver) {
+  if (lexicographic_phase_one_ok) switch (opt.solver) {
     case DCOPFSolverBackend::NativeQP:
       solved = try_native_qp();
       // Warm-start-only Phase I has a strict wall budget; an unconstrained
@@ -1530,11 +1609,8 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
       
     case DCOPFSolverBackend::HiGHS:
       solved = try_highs();
-      if (!solved) {
-        result.status = "HiGHS not available";
-        result.converged = false;
-        apply_direct_shed_to_result();
-        return separate_external_grid_dispatch(std::move(result));
+      if (!solved || !sol.stats.success) {
+        solved = try_native_simplex();
       }
       break;
       
@@ -1574,6 +1650,41 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
           ? sol.stats.initial_primal_feas
           : std::numeric_limits<double>::infinity();
 
+  // Certify the exact canonical formulation before any bus unprojection. This
+  // is the only coordinate space that contains every solved equality; ideal
+  // switch contraction does not reconstruct internal ideal-edge flows.
+  bool primal_certified = false;
+  double maximum_primal_violation_mw =
+      std::numeric_limits<double>::infinity();
+  std::string primal_feasibility_reason = "solver did not return a primal point";
+  if (sol.stats.success && sol.x.size() == form.nvar && sol.x.allFinite()) {
+    double maximum_violation_pu = 0.0;
+    if (form.lp.Aeq.rows() > 0) {
+      maximum_violation_pu = std::max(
+          maximum_violation_pu,
+          (form.lp.Aeq * sol.x - form.lp.beq).lpNorm<Eigen::Infinity>());
+    }
+    if (form.lp.A.rows() > 0) {
+      const Eigen::VectorXd inequality_residual = form.lp.A * sol.x - form.lp.b;
+      maximum_violation_pu = std::max(
+          maximum_violation_pu, inequality_residual.maxCoeff());
+    }
+    for (int col = 0; col < form.nvar; ++col) {
+      const auto& bounds = form.lp.vars[static_cast<size_t>(col)];
+      maximum_violation_pu = std::max(
+          maximum_violation_pu, bounds.lb - sol.x[col]);
+      maximum_violation_pu = std::max(
+          maximum_violation_pu, sol.x[col] - bounds.ub);
+    }
+    maximum_primal_violation_mw =
+        std::max(0.0, maximum_violation_pu) * form.base_mva;
+    primal_certified = std::isfinite(maximum_primal_violation_mw) &&
+        maximum_violation_pu <= std::max(0.0, opt.feasibility_tol);
+    primal_feasibility_reason = primal_certified
+        ? "canonical LP/QP equalities, inequalities, and bounds certified"
+        : "canonical formulation residual exceeds feasibility tolerance";
+  }
+
   // Supporting LP for dual extraction (LMPs) — skip when not requested.
   if (opt.compute_lmp) {
     populate_missing_duals_from_supporting_lp(form, sol, use_qp, opt);
@@ -1600,6 +1711,18 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
   const double phase_one_iterate_residual = result.phase_one_iterate_residual;
   std::string structural_status = std::move(result.structural_warm_start_status);
   result = extract_dc_opf_result(form, sol, *sys_ptr, runtime_sec);
+  result.full_redispatch_from_zero = opt.full_redispatch_from_zero;
+  result.primal_feasibility_certified = primal_certified;
+  result.maximum_primal_violation_mw = maximum_primal_violation_mw;
+  result.primal_feasibility_reason = std::move(primal_feasibility_reason);
+  if (result.converged && !result.primal_feasibility_certified) {
+    result.converged = false;
+    result.status = "Primal feasibility certificate failed: " +
+                    result.primal_feasibility_reason;
+    if (phase_one_warm_start_only) {
+      result.status += "; not DCOPF optimal";
+    }
+  }
   result.solver_chain = std::move(chain_snapshot);
   result.structural_warm_start_requested = structural_requested;
   result.structural_warm_start_built = structural_built;
@@ -1638,6 +1761,8 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
     result.objective_model = form.pwl_segments_effective > 0 ? "LP-PWL" : "LP";
     result.pwl_segments_effective = form.pwl_segments_effective;
   }
+  if (opt.lexicographic_load_shedding)
+    result.objective_model = "LEX(" + result.objective_model + ")";
   
   if (opt.verbose) {
     spdlog::info("DC OPF: converged={} obj={:.4f} solver={} time={:.3f}s",
@@ -1645,7 +1770,6 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys_in,
                  result.runtime_sec);
   }
   
-  apply_direct_shed_to_result();
   return separate_external_grid_dispatch(std::move(result));
 }
 
@@ -1667,6 +1791,10 @@ check_dc_opf_feasibility(const HybridPowerSystem& sys,
   if (result.va.size() != buses.size()) {
     return {false, 1e20, "Result size mismatch"};
   }
+  if (result.pg_mw.size() != gens.size() ||
+      result.pf_mw.size() != branches.size()) {
+    return {false, 1e20, "Dispatch or branch-flow result size mismatch"};
+  }
   
   auto bus_map = build_bus_map(buses);
   
@@ -1676,7 +1804,7 @@ check_dc_opf_feasibility(const HybridPowerSystem& sys,
     if (!gen.in_service) continue;
     
     const double pg = result.pg_mw[gi];
-    const double pmin = gen.pmin_mw;
+    const double pmin = result.full_redispatch_from_zero ? 0.0 : gen.pmin_mw;
     const double pmax = gen.pmax_mw;
     
     if (pg < pmin - tol * base_mva) {
@@ -1716,16 +1844,32 @@ check_dc_opf_feasibility(const HybridPowerSystem& sys,
   
   // Check power balance (approximately)
   std::vector<double> p_net(buses.size(), 0.0);
+  std::vector<double> gross_demand_mw(buses.size(), 0.0);
+  std::vector<double> fixed_generation_mw(buses.size(), 0.0);
+  const auto add_demand = [&](size_t bus_pos, double demand_mw) {
+    if (demand_mw >= 0.0)
+      gross_demand_mw[bus_pos] += demand_mw;
+    else
+      fixed_generation_mw[bus_pos] += -demand_mw;
+  };
+  const auto add_injection = [&](size_t bus_pos, double injection_mw) {
+    if (injection_mw >= 0.0)
+      fixed_generation_mw[bus_pos] += injection_mw;
+    else
+      gross_demand_mw[bus_pos] += -injection_mw;
+  };
   
   // Subtract demand
   for (size_t i = 0; i < buses.size(); ++i) {
     p_net[i] -= buses[i].pd_mw;
+    add_demand(i, buses[i].pd_mw);
   }
   for (const auto& ld : sys.ac.loads) {
     if (!ld.in_service) continue;
     auto it = bus_map.find(ld.bus);
     if (it == bus_map.end()) continue;
     p_net[it->second] -= ld.p_mw * ld.scaling;
+    add_demand(static_cast<size_t>(it->second), ld.p_mw * ld.scaling);
   }
 
   // Add back load shedding — the OPF formulation includes a dpd[i] variable
@@ -1733,7 +1877,15 @@ check_dc_opf_feasibility(const HybridPowerSystem& sys,
   // every OPF solution that exercised load shedding appear infeasible.
   if (!result.load_shedding_mw.empty()) {
     for (size_t i = 0; i < buses.size() && i < result.load_shedding_mw.size(); ++i) {
-      p_net[i] += result.load_shedding_mw[i];
+      const double shed = result.load_shedding_mw[i];
+      p_net[i] += shed;
+      const double violation =
+          std::max({-shed, shed - gross_demand_mw[i], 0.0});
+      if (violation > max_viol) {
+        max_viol = violation;
+        viol_desc = "Bus " + std::to_string(i) +
+                    " load-shedding bound violation";
+      }
     }
   }
 
@@ -1757,24 +1909,46 @@ check_dc_opf_feasibility(const HybridPowerSystem& sys,
     auto it = bus_map.find(sg.bus);
     if (it == bus_map.end()) continue;
     p_net[it->second] += sg.p_mw * sg.scaling;
+    add_injection(static_cast<size_t>(it->second), sg.p_mw * sg.scaling);
   }
   for (const auto& rg : sys.ac.renewable_gens) {
     if (!rg.in_service) continue;
     auto it = bus_map.find(rg.bus);
     if (it == bus_map.end()) continue;
     p_net[it->second] += rg.p_mw;
+    add_injection(static_cast<size_t>(it->second), rg.p_mw);
   }
   for (const auto& pv : sys.ac.pv_systems) {
     if (!pv.in_service) continue;
     auto it = bus_map.find(pv.bus);
     if (it == bus_map.end()) continue;
     p_net[it->second] += pv.p_mw;
+    add_injection(static_cast<size_t>(it->second), pv.p_mw);
   }
   for (const auto& st : sys.ac.storage) {
     if (!st.in_service) continue;
     auto it = bus_map.find(st.bus);
     if (it == bus_map.end()) continue;
     p_net[it->second] += st.p_mw;
+    add_injection(static_cast<size_t>(it->second), st.p_mw);
+  }
+
+  if (!result.fixed_generation_curtailment_mw.empty()) {
+    if (result.fixed_generation_curtailment_mw.size() != buses.size()) {
+      return {false, 1e20,
+              "Fixed-generation-curtailment result size mismatch"};
+    }
+    for (size_t i = 0; i < buses.size(); ++i) {
+      const double curtailment = result.fixed_generation_curtailment_mw[i];
+      p_net[i] -= curtailment;
+      const double violation = std::max(
+          {-curtailment, curtailment - fixed_generation_mw[i], 0.0});
+      if (violation > max_viol) {
+        max_viol = violation;
+        viol_desc = "Bus " + std::to_string(i) +
+                    " fixed-generation-curtailment bound violation";
+      }
+    }
   }
   
   // Subtract branch outflows, add inflows

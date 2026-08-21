@@ -197,6 +197,28 @@ struct DCOPFOptions {
   bool load_shedding{true};
   double voll{0.0};
 
+  /// Solve load shedding and dispatch cost as an exact two-level objective:
+  /// first minimize total shed, then fix that optimum and minimize generation
+  /// cost. This avoids relying on a finite VOLL scalarization. HiGHS uses the
+  /// configured PWL generation-cost model for the second-level LP; QP-capable
+  /// backends may use the quadratic cost model.
+  bool lexicographic_load_shedding{false};
+
+  /// HL-I/HL-II adequacy redispatch semantics: every available generator may
+  /// operate from zero to Pmax, independently of economic/UC Pmin data.
+  bool full_redispatch_from_zero{false};
+
+  /// Add one fixed-injection curtailment variable per AC bus. This is required
+  /// by adequacy studies containing static generation, renewable generation,
+  /// PV, discharging storage, or negative authored demand: together with full
+  /// load shedding and zero generator lower bounds it makes the all-zero-flow
+  /// state constructively feasible for every network topology.
+  bool allow_fixed_generation_curtailment{false};
+
+  /// Secondary-objective penalty for fixed-injection curtailment (cost/MWh).
+  /// It is ignored by the first, minimum-load-shedding lexicographic phase.
+  double fixed_generation_curtailment_cost{1.0};
+
   // When true (default), the solver runs a supporting simplex LP after the
   // primal solve to recover constraint dual variables (LMPs and congestion
   // prices).  Set to false when only the primal dispatch is needed and the

@@ -11,7 +11,10 @@
 \srcpath{docs/theory/reliability\_mathematical\_models\_and\_intelligent\_cyber\_physical\_assessment.md}
 第 4、10 节及 \srcpath{include/hacdcpf/analysis/three\_stage\_reliability.hpp}。恢复 MILP 采用
 LinDistFlow 与视在功率圆的内接多边形保守近似；拒绝 LCC 换流器与多端口能量路由器，不含二次损耗。
-失败阶段清除 \fld{ok} 与物理有效标志，绝不静默回退。
+求解或证书失败清除 \fld{ok} 与物理有效标志，绝不静默回退；保护联锁不准入不是求解失败，模型在
+安全的 Stage-1 拓扑上继续求解实际削减并返回 \texttt{success (protection interlock)}。
+固定拓扑快速预解若因闭环与辐射森林约束冲突而失败，仅允许作为可重试的内部候选；随后必须调用允许
+运行拓扑重构的通用 MILP。通用 MILP 或后验认证失败时立即报错，不生成全切负荷上界。
 \end{theorynote}
 
 \subsection{阶段语义与时钟}\label{sec:rel-rs-stage}
@@ -32,20 +35,29 @@ $\Delta t_{k,1}=\tau_{SW,k}$、$\Delta t_{k,2}=\tau_{TP,k}-\tau_{SW,k}$、$\Delt
 对应实现字段 $\tau_k^{iso}=\Delta t_{k,1}$、$\tau_k^{sw}=\Delta t_{k,2}$、$\tau_k^{rep}=\Delta t_{k,3}$。
 
 \subsection{交流 LinDistFlow 恢复 MILP}\label{sec:rel-rs-milp}
-每阶段联合最小化交直流有功切负荷（末项以 $10^{-8}$ 权仅打破储能/换流器调度简并、保能量）：
+每阶段联合最小化交直流有功切负荷；纯无功负荷集合
+$\mathcal B^{Q0}=\{i:P_i^d=0,Q_i^d\ne0\}$ 的归一化项以及储能/换流器项均以 $10^{-8}$ 权
+打破简并，不改变有功 EENS 口径：
 \begin{equation}
  \min\ \sum_{i\in\mathcal B^{ac}}w_ip_i^{sh}+\sum_{d\in\mathcal B^{dc}}w_dp_d^{sh}
- +10^{-8}\Big(\sum_bp_b^{st}+\sum_cp_c^{conv}\Big).
+ +10^{-8}\left(\sum_{i\in\mathcal B^{Q0}}
+ \frac{|q_i^{sh}|}{\max(1,|Q_i^d|)}+\sum_bp_b^{st}+\sum_cp_c^{conv}\right).
 \end{equation}
-带电与投切：源母线置为已带电根，跟网发电与储能\emph{不能}给死岛带电：
-\begin{equation}
- P_i^d-p_i^{sh}\le P_i^dy_i,\ y_i\in\{0,1\};\qquad
- 0\le p_i^g\le\overline P_i^gy_i,\quad 0\le p_b^{st}\le\overline P_b^{st}y_{i(b)}.
-\end{equation}
-有功 / 无功平衡（无功切负荷按功率因数比例 $q_i^{sh}=q_i^{sh}(P_i^d,Q_i^d)$，缺测无功以 0.9 功率因数重构）：
+带电与投切：源母线置为已带电根，跟网发电与储能\emph{不能}给死岛带电；显式无功削减覆盖
+$P_i^d=0,Q_i^d\ne0$ 的纯无功负荷：
+\begin{align}
+ P_i^d-p_i^{sh}&\le P_i^dy_i,\qquad y_i\in\{0,1\},\\
+ 0\le p_i^g&\le\overline P_i^gy_i,\qquad
+ 0\le p_b^{st}\le\overline P_b^{st}y_{i(b)},\\
+ \min(0,Q_i^d)&\le q_i^{sh}\le\max(0,Q_i^d).
+\end{align}
+有功 / 无功平衡（$P_i^d>0$ 时保持功率因数，$P_i^d=0$ 时 $q_i^{sh}$ 独立有界；母线失电时
+按 $Q_i^d$ 的符号施加 $q_i^{sh}\ge Q_i^d(1-y_i)$ 或 $q_i^{sh}\le Q_i^d(1-y_i)$，从而强制
+$q_i^{sh}=Q_i^d$；缺测无功以 0.9 功率因数重构）：
 \begin{align}
  \sum_{j:(j,i)}P_{ji}-\sum_{j:(i,j)}P_{ij}+p_i^g+p_i^{sh}+\sum_{b:i(b)=i}p_b^{st}&=P_i^d,\\
- \sum_{j:(j,i)}Q_{ji}-\sum_{j:(i,j)}Q_{ij}+q_i^g+q_i^{sh}&=Q_i^d,\qquad q_i^{sh}=\frac{Q_i^d}{P_i^d}p_i^{sh}.
+ \sum_{j:(j,i)}Q_{ji}-\sum_{j:(i,j)}Q_{ij}+q_i^g+q_i^{sh}&=Q_i^d,\\
+ q_i^{sh}&=\frac{Q_i^d}{P_i^d}p_i^{sh}\qquad(P_i^d>0).
 \end{align}
 对平方电压 $v_i$ 与支路投切态 $z_{ij}$，LinDistFlow 压降经 Big-M 随拓扑启用（$v_i$ 为平方标幺电压，
 $r_{ij},x_{ij}$ 为系统基标幺阻抗，$P_{ij},Q_{ij}$ 为 MW/Mvar，$S_{base}$ 为 MVA）：
@@ -72,11 +84,14 @@ $J$ 必须为不小于 4 的偶数，默认 $J=16$。右端的 $\cos(\pi/J)$ 使
  \sum f_{in}-\sum f_{out}&=y_i\ (i\notin\mathcal S_{root}),\qquad
  \sum f_{in}-\sum f_{out}\le0\ (i\in\mathcal S_{root}),\\
  |f_{ij}|&\le(|\mathcal B|-1)z_{ij},\quad z_{ij}\le y_i,\ z_{ij}\le y_j,\qquad
- \sum_{(i,j)}z_{ij}\le\sum_iy_i-|\mathcal S_{root}|.
+ \sum_{(i,j)}z_{ij}\le\sum_iy_i-\kappa,
 \end{align}
+其中 $\kappa$ 是候选健康图中含根的连通分量数；对健康常闭边另有
+$y_i+y_j-z_{ij}\le1$，禁止优化器在两端均带电时凭空开断没有操作记录的线路。因而有效输入应为辐射
+配网，或为健康闭环提供可操作分段开关；缺少该元数据的闭环会产生 N-0 径向化削减，而不是免费开边。
 故障元件在每阶段固定开断；常开恢复联络在 Stage 1 固定开断、Stage 2 优化、Stage 3 保持已接受方案；
 开关预算 $\sum_{\ell\in\mathcal L^{NO}}z_\ell\le K^{sw}$。保护 / 联锁预检验证保护可切断故障电流、分段动作
-只在所需上游跳闸后发生；非法动作序列阻断恢复准入并上报。
+只在所需上游跳闸后发生；非法动作序列阻断恢复准入并上报，但安全拓扑上的后果求解仍为成功。
 
 \subsection{事件内储能时序}\label{sec:rel-rs-storage}
 各阶段时长 $\Delta t_s$ 下储能荷电按序演化（放电受额定与剩余可交付能量双限）：
@@ -129,7 +144,8 @@ MILP 后端同时给出终止状态和相对间隙。对零或近零切负荷目
 \end{equation}
 形成认证状态。若后端明确返回 HiGHS、StrictHiGHS 或原生分支定界的最优终止状态，认证间隙
 \fld{stage1/2/3\_mip\_gap} 规范为 0；原始间隙仍保留用于审计。该规则不跳过后验可行性检查：变量界、
-整数性、等式、不等式、热限或倒闸校核任一失败，阶段仍标为失败。
+整数性、等式、不等式或目标重算任一失败，立即中止当前状态评估，不生成可聚合的阶段后果；热限由内接
+多边形约束及返回的最大视在功率比审计，倒闸序列另以设备能力和 Stage-2/3 拓扑一致性标志审计。
 
 \begin{remark}[零后果故障回归]
 专项三阶段测试中的 \texttt{case33mg\_acdc} 支路 2 固定验证：阶段 2、3

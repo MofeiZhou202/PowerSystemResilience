@@ -595,6 +595,39 @@ int mode_dyn2() {
   return 0;
 }
 
+// IEEE RTS-24 deterministic HL-II feasibility certification. This must pass
+// before a Monte Carlo estimate is interpreted as a physical reliability index.
+int mode_relscan() {
+  using namespace hacdcpf;
+  auto sys = io::parse_matpower("data/case24_ieee_rts.m");
+  analysis::apply_ieee24_reliability_data(sys);
+
+  opf::DCOPFOptions options;
+  options.solver = opf::DCOPFSolverBackend::HiGHS;
+  options.feasibility_tol = 1e-7;
+  const auto scan = analysis::scan_ac_hlii_n2_states(sys, options);
+
+  std::cout << std::fixed << std::setprecision(9);
+  std::cout << "# IEEE RTS-24 HL-II deterministic N-0/N-1/N-2 scan\n"
+            << "components=" << scan.component_count
+            << " states=" << scan.states_evaluated
+            << " failed=" << scan.failed_states
+            << " nonfinite=" << scan.nonfinite_states
+            << " infeasible=" << scan.infeasible_states
+            << " negative_shed=" << scan.negative_shed_states
+            << " shed_above_load=" << scan.shed_above_load_states
+            << " total_load_mw=" << scan.total_load_mw
+            << " maximum_shed_mw=" << scan.maximum_shed_mw
+            << " maximum_violation_mw="
+            << scan.maximum_feasibility_violation_mw << '\n';
+  if (!scan.passed()) {
+    std::cout << "first_failure_state=" << scan.first_failure_state
+              << " reason=" << scan.first_failure_reason << '\n';
+    return 1;
+  }
+  return 0;
+}
+
 // IEEE RTS-24 reliability indices: non-sequential + sequential Monte Carlo.
 int mode_rel() {
   using namespace hacdcpf;
@@ -701,7 +734,7 @@ int main(int argc, char** argv) {
     if (i == 1 && (a == "nr" || a == "fdpf" || a == "dc" || a == "bfs" ||
                    a == "robust" || a == "stress" || a == "cpf" ||
                    a == "opf" || a == "dyn" || a == "dyn2" || a == "rel" ||
-                   a == "relfmea")) {
+                   a == "relscan" || a == "relfmea")) {
       mode = a;
       continue;
     }
@@ -727,6 +760,7 @@ int main(int argc, char** argv) {
   if (mode == "opf") return mode_opf(cases);
   if (mode == "dyn") return mode_dyn();
   if (mode == "dyn2") return mode_dyn2();
+  if (mode == "relscan") return mode_relscan();
   if (mode == "rel") return mode_rel();
   if (mode == "relfmea") return mode_relfmea(cases);
   std::cerr << "unknown mode: " << mode << "\n";

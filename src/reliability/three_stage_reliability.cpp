@@ -17,6 +17,7 @@
 #include <numbers>
 #include <numeric>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -654,8 +655,11 @@ NativeCase build_native_case(const HybridPowerSystem& input,
   }
   for (int i = 0; i < static_cast<int>(sys.ac.buses.size()); ++i) {
     const auto& b = sys.ac.buses[i];
-    if (!b.in_service || b.pd_mw <= 1e-9) continue;
-    c.loads.push_back({b.index, b.pd_mw * 1000.0, bus_customers(b),
+    if (!b.in_service ||
+        (b.pd_mw <= 1e-9 && std::abs(b.qd_mvar) <= 1e-9))
+      continue;
+    c.loads.push_back({b.index, std::max(0.0, b.pd_mw) * 1000.0,
+                       bus_customers(b),
                        b.qd_mvar * 1000.0,
                        ReliabilityComponentKind::ACBusLoad, i});
   }
@@ -1867,8 +1871,16 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
 
   // ── Variable index helpers ────────────────────────────────────────────────
   // AC layout is followed by the coupled DC network, VSC, and DC-DC blocks.
+  std::vector<int> pure_q_shed_position(static_cast<size_t>(n_bus), -1);
+  int n_pure_q_shed = 0;
+  for (int i = 0; i < n_bus; ++i) {
+    if (p_d[i] <= 1e-9 && std::abs(q_d[i]) > 1e-9)
+      pure_q_shed_position[static_cast<size_t>(i)] = n_pure_q_shed++;
+  }
+
   const int off_shed  = 0;
-  const int off_y      = off_shed + n_bus;
+  const int off_qshed = off_shed + n_bus;
+  const int off_y      = off_qshed + n_pure_q_shed;
   const int off_z      = off_y     + n_bus;
   const int off_P     = off_z    + n_br;
   const int off_Q     = off_P   + n_br;
@@ -1905,6 +1917,21 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
                               0.0, p_d[i],
                               "psh_" + std::to_string(sys.ac.buses[i].index)};
     lp.c[off_shed + i] = 1.0;  // minimise total MW shed (eq. 3)
+  }
+  for (int i = 0; i < n_bus; ++i) {
+    const int qpos = pure_q_shed_position[static_cast<size_t>(i)];
+    if (qpos < 0) continue;
+    // P>0 uses the algebraically eliminated qsh=(Q/P)psh expression below.
+    // Only P=0, Q!=0 needs an explicit column, preserving the existing MILP
+    // matrix and solver diagnostics for all prior cases.
+    // Derivation: docs/modules/reliability/chapters/physical_consequence_models.tex
+    const double qmin = std::min(0.0, q_d[i]);
+    const double qmax = std::max(0.0, q_d[i]);
+    lp.vars[off_qshed + qpos] = {
+        engine::VarType::Continuous, qmin, qmax,
+        "qsh_" + std::to_string(sys.ac.buses[i].index)};
+    lp.c[off_qshed + qpos] =
+        std::copysign(1e-8 / std::max(1.0, std::abs(q_d[i])), q_d[i]);
   }
   for (int s = 0; s < n_storage; ++s) {
     const std::string storage_name = s < n_ac_storage
@@ -2211,8 +2238,17 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
   // ── C0 (eq. 3a): energized/load-pickup coupling ─────────────────────────
   // P^d_i - p^sh_i ≤ P^d_i y_i.  If y_i=0 the bus must shed all active load.
   for (int i = 0; i < n_bus; ++i) {
-    if (p_d[i] <= 1e-9) continue;
-    add_le({{off_shed + i, -1.0}, {off_y + i, -p_d[i]}}, -p_d[i]);
+    if (p_d[i] > 1e-9) {
+      add_le({{off_shed + i, -1.0}, {off_y + i, -p_d[i]}}, -p_d[i]);
+    } else if (q_d[i] > 1e-9) {
+      // qsh >= Qd(1-y); at y=0 the positive reactive load is fully shed.
+      const int qvar = off_qshed + pure_q_shed_position[static_cast<size_t>(i)];
+      add_le({{qvar, -1.0}, {off_y + i, -q_d[i]}}, -q_d[i]);
+    } else if (q_d[i] < -1e-9) {
+      // qsh <= Qd(1-y); same construction for a capacitive (negative-Q) load.
+      const int qvar = off_qshed + pure_q_shed_position[static_cast<size_t>(i)];
+      add_le({{qvar, 1.0}, {off_y + i, q_d[i]}}, q_d[i]);
+    }
   }
   // Grid-following generation and storage cannot energize a dead component.
   // Their dispatch is available only when y_i is established by an anchor.
@@ -2301,12 +2337,19 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
   }
 
   // ── C2 (eq. 5): Reactive power balance at every AC bus i ────────────────
-  // Σ Q_ji - Σ Q_ij + q_g,i + (q_d,i/p_d,i) · p^sh_i = Q^d_i
+  // Σ Q_ji - Σ Q_ij + q_g,i + q^sh_i = Q^d_i. For P^d_i>0,
+  // q^sh_i=(Q^d_i/P^d_i)p^sh_i is eliminated algebraically; P^d_i=0
+  // retains an explicit bounded q^sh_i.
   for (int i = 0; i < n_bus; ++i) {
     std::vector<std::pair<int,double>> terms = {{off_qg + i, 1.0}};
-    // Reactive shed proportional to active shed
-    const double ratio = (p_d[i] > 1e-9) ? (q_d[i] / p_d[i]) : 0.0;
-    if (std::abs(ratio) > 1e-12) terms.push_back({off_shed + i, ratio});
+    if (p_d[i] > 1e-9) {
+      const double ratio = q_d[i] / p_d[i];
+      if (std::abs(ratio) > 1e-12)
+        terms.push_back({off_shed + i, ratio});
+    } else {
+      const int qpos = pure_q_shed_position[static_cast<size_t>(i)];
+      if (qpos >= 0) terms.push_back({off_qshed + qpos, 1.0});
+    }
     for (int b = 0; b < n_br; ++b) {
       if (ac_branches[b].to_pos   == i) terms.push_back({off_Q + b,  1.0});
       if (ac_branches[b].from_pos == i) terms.push_back({off_Q + b, -1.0});
@@ -2645,11 +2688,22 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     out.solver_status = res_status.empty() ? "unknown" : res_status;
     out.solver_reported_mip_gap = res_mip_gap;
     out.status = res_status.empty() ? "failed" : res_status;
-    // Conservative failure result: shed every represented AC and DC load.
-    for (int li = 0; li < nd_total; ++li)
-      out.shed_by_load[li] = std::max(0.0, c.loads[li].p_kw);
-    out.shed_kw = std::accumulate(out.shed_by_load.begin(), out.shed_by_load.end(), 0.0);
-    return out;
+    if (fixed_topology) {
+      // A fixed-topology pre-solve is only an optimization shortcut. A healthy
+      // meshed feeder can be infeasible under its forced all-closed topology
+      // and the radial-forest constraint, while the general Stage-1 MILP is
+      // feasible after opening/de-energizing one edge. No consequence is
+      // produced from this retryable shortcut failure.
+      out.status = "retryable (fixed-topology restriction)";
+      return out;
+    }
+    std::ostringstream message;
+    message << "三阶段物理后果 MILP 第 " << stage
+            << " 阶段未返回可行解；负荷削减变量允许全切，"
+               "该故障状态应有构造性可行点，这是构模或数值求解错误。status='"
+            << out.solver_status << "', reported_mip_gap="
+            << out.solver_reported_mip_gap;
+    throw std::runtime_error(message.str());
   }
 
   out.solver_status = res_status.empty() ? "unknown" : res_status;
@@ -2665,12 +2719,16 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
 
   const double bound_tol = 1e-6;
   const double integer_tol = 1e-4;
-  auto fail_postsolve = [&]() {
-    out.status = "failed (constraint violation)";
+  auto fail_postsolve = [&](const std::string& reason) {
     out.proven_optimal = false;
-    for (int li = 0; li < nd_total; ++li)
-      out.shed_by_load[li] = std::max(0.0, c.loads[li].p_kw);
-    out.shed_kw = std::accumulate(out.shed_by_load.begin(), out.shed_by_load.end(), 0.0);
+    if (fixed_topology) {
+      out.status = "retryable (fixed-topology certificate)";
+      return;
+    }
+    throw std::runtime_error(
+        "三阶段物理后果 MILP 第 " + std::to_string(stage) +
+        " 阶段后验认证失败；" + reason +
+        "。该状态不得写入可靠性指标");
   };
   for (int var = 0; var < n_vars; ++var) {
     const double value = res_x[var];
@@ -2678,7 +2736,7 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     if (value < bounds.lb - bound_tol || value > bounds.ub + bound_tol) {
       spdlog::warn("[三阶段可靠性] LinDistFlow MILP bound violation: var[{}]={:.8f} bounds=[{:.8f},{:.8f}]",
                    var, value, bounds.lb, bounds.ub);
-      fail_postsolve();
+      fail_postsolve("变量界违反");
       return out;
     }
   }
@@ -2691,10 +2749,10 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     return false;
   };
   for (int var : mip.binary_idx) {
-    if (!check_integer(var)) { fail_postsolve(); return out; }
+    if (!check_integer(var)) { fail_postsolve("二元变量整数性违反"); return out; }
   }
   for (int var : mip.integer_idx) {
-    if (!check_integer(var)) { fail_postsolve(); return out; }
+    if (!check_integer(var)) { fail_postsolve("整数变量整数性违反"); return out; }
   }
   const double recomputed_objective = lp.c.dot(res_x);
   const double objective_tol = 1e-5 * std::max(1.0, std::abs(recomputed_objective));
@@ -2702,7 +2760,7 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
       std::abs(res_objective - recomputed_objective) > objective_tol) {
     spdlog::warn("[三阶段可靠性] LinDistFlow MILP objective mismatch: solver={:.8f} recomputed={:.8f}",
                  res_objective, recomputed_objective);
-    fail_postsolve();
+    fail_postsolve("求解器目标与重算目标不一致");
     return out;
   }
   out.objective = recomputed_objective;
@@ -2737,25 +2795,31 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
   if (n_eq > 0) {
     const Eigen::VectorXd eq_res = (lp.Aeq * res_x - lp.beq).cwiseAbs();
     if (eq_res.maxCoeff() > kCoupledResidualTolerance) {
-      spdlog::warn("[三阶段可靠性] LinDistFlow MILP equality violation={:.2e} — fallback",
-                   eq_res.maxCoeff());
-      out.status = "failed (constraint violation)";
-      for (int li = 0; li < nd_total; ++li)
-        out.shed_by_load[li] = std::max(0.0, c.loads[li].p_kw);
-      out.shed_kw = std::accumulate(out.shed_by_load.begin(), out.shed_by_load.end(), 0.0);
-      return out;
+      if (fixed_topology) {
+        out.status = "retryable (fixed-topology residual)";
+        return out;
+      }
+      std::ostringstream message;
+      message << "三阶段物理后果 MILP 第 " << stage
+              << " 阶段等式后验认证失败；最大残差="
+              << eq_res.maxCoeff()
+              << "，该状态不得写入可靠性指标";
+      throw std::runtime_error(message.str());
     }
   }
   if (n_ineq > 0) {
     const double ineq_viol = (lp.A * res_x - lp.b).cwiseMax(0.0).maxCoeff();
     if (ineq_viol > kCoupledResidualTolerance) {
-      spdlog::warn("[三阶段可靠性] LinDistFlow MILP inequality violation={:.2e} — fallback",
-                   ineq_viol);
-      out.status = "failed (constraint violation)";
-      for (int li = 0; li < nd_total; ++li)
-        out.shed_by_load[li] = std::max(0.0, c.loads[li].p_kw);
-      out.shed_kw = std::accumulate(out.shed_by_load.begin(), out.shed_by_load.end(), 0.0);
-      return out;
+      if (fixed_topology) {
+        out.status = "retryable (fixed-topology residual)";
+        return out;
+      }
+      std::ostringstream message;
+      message << "三阶段物理后果 MILP 第 " << stage
+              << " 阶段不等式后验认证失败；最大违反="
+              << ineq_viol
+              << "，该状态不得写入可靠性指标";
+      throw std::runtime_error(message.str());
     }
   }
 
@@ -3455,8 +3519,13 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
                                    &item.interlock.forced_open_switch_indices,
                                    nullptr, false, &storage_energy,
                                    fault.tau_rep_hr);
-      item.s2.status = "failed (protection interlock)";
-      item.s3.status = "failed (protection interlock)";
+      // Protection non-admission is an operational state, not a solver
+      // failure. Both stages were solved and certified on the unchanged safe
+      // Stage-1 topology; retain that distinction for downstream validity and
+      // reliability aggregation (reliability manual, physical consequence
+      // chapter: physical curtailment / protection non-admission / solver bug).
+      item.s2.status = "success (protection interlock)";
+      item.s3.status = "success (protection interlock)";
       item.s2.switch_sequence_valid = false;
       item.s3.switch_sequence_valid = false;
       item.s2.switch_sequence_message = item.interlock.message;
@@ -3970,14 +4039,12 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
   };
 
   // r.ok is true only when every fault stage solved to a verified optimum and
-  // the submitted system is inside the evaluator's full physical scope.  Hybrid
-  // DC/VSC/SOP cases return metrics, but they use the documented connectivity
-  // fallback and therefore are not exact full-system MILP results.
-  // Any stage that returned "failed*" used conservative full-shed estimates;
-  // those values are still accumulated into EENS but the result is flagged
-  // so that callers know the metrics are upper-bound estimates, not exact.
-  // M3: "success (approximate)" stages also clear r.ok — the gap was not
-  // proven, so the shed values are feasible but potentially non-optimal.
+  // the submitted system is inside the evaluator's full physical scope. Hybrid
+  // DC/VSC/SOP cases with DC power flow disabled use the explicitly requested
+  // connectivity/capacity scope and therefore clear full-physics validity.
+  // Solver/certificate failures throw before aggregation and never fabricate
+  // full-shed EENS. "success (approximate)" also clears r.ok because the gap
+  // was not proven, although the returned primal is feasible.
   bool any_failed = false;
   for (const auto& fd : r.faults) {
     if (fd.status.rfind("failed", 0) == 0 ||

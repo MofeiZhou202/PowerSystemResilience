@@ -901,15 +901,24 @@ def main() -> int:
             ),
             {},
         )
-        # Automatic: tie + dispatched battery -> ens 0.1.  Manual: crew closes
-        # the tie but the battery is frozen, tie limit sheds 0.8 MW -> ens 4.4.
-        # A=0.75: 0.1 + 0.25*(2.0-0.1) + 0.25*(4.4-2.0) = 1.175.
+        # The resolver reports the exact calendar event frequency rather than
+        # the rare-event input rate.  Therefore the closed-form contribution
+        # is evaluated from the response values, not from the old lambda=1
+        # approximation (which would give 1.175 MWh/yr).
+        perfect = float(feeder_result.get("eens_perfect_cyber_contribution", 0.0))
+        duration_increment = float(feeder_result.get("eens_cyber_duration_increment", 0.0))
+        control_increment = float(feeder_result.get("eens_cyber_control_increment", 0.0))
         chk.check(
             st == 200 and
             float(demo_cyber.get("delta_cyber_duration_mwh_yr", 0.0)) > 0.0 and
             float(demo_cyber.get("delta_cyber_control_mwh_yr", 0.0)) > 0.0 and
             abs(float(feeder_result.get("shed_rep_manual_mw", 0.0)) - 0.8) < 1e-6 and
-            abs(float(feeder_result.get("eens_contribution", 0.0)) - 1.175) < 1e-6,
+            abs(float(feeder_result.get("eens_contribution", 0.0)) -
+                (perfect + duration_increment + control_increment)) < 1e-9 and
+            abs(float(demo_cyber.get("eens_adjusted_mwh_yr", 0.0)) -
+                (float(demo_cyber.get("eens_perfect_cyber_mwh_yr", 0.0)) +
+                 float(demo_cyber.get("delta_cyber_duration_mwh_yr", 0.0)) +
+                 float(demo_cyber.get("delta_cyber_control_mwh_yr", 0.0)))) < 1e-9,
             "built-in demo separates restoration-delay and control-loss EENS",
         )
 

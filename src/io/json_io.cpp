@@ -3931,6 +3931,12 @@ std::string dc_opf_result_to_json(const opf::DCOPFResult& result, int indent) {
   j["solver_name"]             = result.solver_name;
   j["runtime_sec"]             = result.runtime_sec;
   j["total_load_shedding_mw"]  = result.total_load_shedding_mw;
+  j["total_fixed_generation_curtailment_mw"] =
+      result.total_fixed_generation_curtailment_mw;
+  j["full_redispatch_from_zero"] = result.full_redispatch_from_zero;
+  j["primal_feasibility_certified"] = result.primal_feasibility_certified;
+  j["maximum_primal_violation_mw"] = result.maximum_primal_violation_mw;
+  j["primal_feasibility_reason"] = result.primal_feasibility_reason;
 
   // Solver-path audit fields — the primary new data that callers care about.
   j["solver_chain"]   = result.solver_chain;
@@ -3956,6 +3962,8 @@ std::string dc_opf_result_to_json(const opf::DCOPFResult& result, int indent) {
   j["branch_mu_upper"]    = result.branch_mu_upper;
   j["branch_mu_valid"]    = result.branch_mu_valid;
   j["load_shedding_mw"]   = result.load_shedding_mw;
+  j["fixed_generation_curtailment_mw"] =
+      result.fixed_generation_curtailment_mw;
   j["pg_mw"]              = result.pg_mw;
   j["pf_mw"]              = result.pf_mw;
   j["va"]                 = result.va;
@@ -3973,6 +3981,17 @@ opf::DCOPFResult dc_opf_result_from_json(const std::string& json_str) {
   r.solver_name = jget<std::string>(j, "solver_name", "");
   r.runtime_sec = jget(j, "runtime_sec", 0.0);
   r.total_load_shedding_mw = jget(j, "total_load_shedding_mw", 0.0);
+  r.total_fixed_generation_curtailment_mw =
+      jget(j, "total_fixed_generation_curtailment_mw", 0.0);
+  r.full_redispatch_from_zero =
+      jget<bool>(j, "full_redispatch_from_zero", false);
+  r.primal_feasibility_certified =
+      jget<bool>(j, "primal_feasibility_certified", false);
+  r.maximum_primal_violation_mw = jget<double>(
+      j, "maximum_primal_violation_mw",
+      std::numeric_limits<double>::infinity());
+  r.primal_feasibility_reason =
+      jget<std::string>(j, "primal_feasibility_reason", "");
   r.branch_mu_valid = jget(j, "branch_mu_valid", false);
   r.objective_model = jget<std::string>(j, "objective_model", "");
   r.structural_warm_start_requested = jget<bool>(j, "structural_warm_start_requested", false);
@@ -4000,6 +4019,9 @@ opf::DCOPFResult dc_opf_result_from_json(const std::string& json_str) {
   if (j.contains("branch_mu_lower")) r.branch_mu_lower = j["branch_mu_lower"].get<std::vector<double>>();
   if (j.contains("branch_mu_upper")) r.branch_mu_upper = j["branch_mu_upper"].get<std::vector<double>>();
   if (j.contains("load_shedding_mw")) r.load_shedding_mw = j["load_shedding_mw"].get<std::vector<double>>();
+  if (j.contains("fixed_generation_curtailment_mw"))
+    r.fixed_generation_curtailment_mw =
+        j["fixed_generation_curtailment_mw"].get<std::vector<double>>();
   if (j.contains("pg_mw")) r.pg_mw = j["pg_mw"].get<std::vector<double>>();
   if (j.contains("pf_mw")) r.pf_mw = j["pf_mw"].get<std::vector<double>>();
   if (j.contains("va")) r.va = j["va"].get<std::vector<double>>();
