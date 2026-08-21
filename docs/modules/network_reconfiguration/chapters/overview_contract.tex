@@ -1,0 +1,167 @@
+% overview_contract.tex —— 网络重构模块总览与公共契约
+
+\section{模块总览与公共契约}\label{sec:nr-overview}
+
+\subsection{职责与非职责}
+
+网络重构模块解决给定单时刻设备状态下的离散拓扑选择问题。核心调用链为
+\begin{equation}
+\mathcal S_{rich}
+\xrightarrow{\Pi_{canon}}
+\widehat{\mathcal S}
+\xrightarrow{\text{topology/LinDistFlow MILP}}
+\widehat z^star
+\xrightarrow{\Phi^{-1}}
+\text{rich-device actions}.
+\end{equation}
+其中 $\mathcal S_{rich}$ 是 \texttt{HybridPowerSystem}，$\widehat z^star$ 是规范边空间中的
+开闭状态，$\Phi^{-1}$ 通过 \texttt{BranchExpandMap} 将变化边归因回开关、断路器或物理支路。
+
+本模块的职责包括：
+\begin{itemize}
+  \item AC、DC 和 VSC 边的域限定故障/候选标识；
+  \item 统一树或分域辐射森林约束、可选 DC 网状运行；
+  \item 可选有功/无功平衡、电压降、箱式热限和切负荷；
+  \item 富模型开断能力、闭锁和上游保护联锁过滤；
+  \item 图启发式、外部 MILP 后端、原生 B\&C 显式路径及后验可行性检查；
+  \item 规范边到设备动作的回投影和确定性动作排序。
+\end{itemize}
+
+核心 C++ 函数\textbf{不负责}完整非线性交直流潮流、完整混合 OPF、保护暂态、时序恢复、
+储能 SOC 演化或可靠性指标积分。这些能力分别属于 power\_flow、optimal\_power\_flow、
+reliability/resilience 等模块。生产 HTTP 路由在核心候选解之后额外调用 PF/OPF，但该后处理
+不是 \srcpath{run\_topology\_reconfiguration} 本身的行为。
+
+\subsection{代码所有权与可达路径}
+
+\begin{center}\small
+\begin{tabular}{@{}L{5.2cm}L{4.0cm}L{5.4cm}@{}}
+\toprule
+符号/入口 & 所有权 & 当前可达行为\\
+\midrule
+\srcpath{run\_topology\_reconfiguration} &
+\srcpath{topology\_reconfiguration.cpp} &
+混合 AC/DC 规范投影、MILP/启发式、结果提取、设备动作\\
+\srcpath{solve\_optimal\_reconfiguration(ACSystem)} &
+\srcpath{topology\_analysis.cpp} &
+包装为 \texttt{HybridPowerSystem} 后调用上一入口，再运行验证 PF\\
+\srcpath{solve\_optimal\_reconfiguration} 的混合重载 &
+\srcpath{topology\_analysis.cpp} &
+先规范投影，再仅把规范 AC 子系统传给 AC 兼容入口\\
+\srcpath{is\_connected/is\_radial/count\_islands} &
+\srcpath{topology\_analysis.cpp} &
+只检查 \texttt{ACSystem} 中在运 \texttt{ACBranch}\\
+\srcpath{POST /api/session/run\_reconfig} &
+\srcpath{tests/run\_gui\_server.cpp} &
+核心求解后回写富模型并追加拓扑、PF、AC OPF 与 JSON 响应\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{quote}\small\textbf{重要：}
+\srcpath{topology\_analysis.cpp} 在兼容包装返回之后仍保留一段旧 AC LinDistFlow B\&C 实现，
+但当前控制流在该代码之前无条件 \texttt{return result}。因此旧段落不是运行时模型，头文件中
+“模块自有 B\&C + MIR”描述也不能作为现行行为证据。
+\end{quote}
+
+\subsection{命名空间、头文件与门面边界}
+
+公共类型均位于 \texttt{hacdcpf::analysis}：
+\begin{itemize}
+  \item \srcpath{topology\_reconfiguration.hpp}：
+        \texttt{BranchRef}、\texttt{TopoReconfOptions}、\texttt{TopoReconfResult}；
+  \item \srcpath{topology\_analysis.hpp}：
+        三个 AC 拓扑查询、\texttt{ONROptions}、\texttt{ONRResult} 与兼容入口。
+\end{itemize}
+顶层 \texttt{hacdcpf} 门面当前不重导出这些头；库调用方应直接包含对应模块头文件。
+
+\subsection{单位制、方向与索引空间}
+
+\begin{center}\small
+\begin{tabular}{@{}L{3.6cm}L{3.0cm}L{8.0cm}@{}}
+\toprule
+对象 & 单位/空间 & 契约\\
+\midrule
+组件 \fld{index} & 稳定 ID & 对外标识；不得当作 vector position\\
+规范母线位置 & 0-based & AC 为 $[0,n_{ac})$，DC 为 $[n_{ac},n_b)$；只在函数内部使用\\
+\texttt{BranchRef} & 类型化稳定 ID & \fld{category}+\fld{index}；混合系统首选\\
+\fld{open\_branch\_ids} 等 & 裸整数 & 兼容字段；AC/DC/VSC 同号时有歧义\\
+$P,Q,P_d,Q_d$ & p.u.（模型内） & 由 MW/Mvar 除以 \fld{base\_mva}；结果切负荷再乘回 MW/Mvar\\
+$v_i$ & pu$^2$ & LinDistFlow 平方电压变量\\
+$F_e,F_g$ & 无量纲 & 单商品虚拟流，仅证明拓扑连通性\\
+\fld{max\_time\_s} & s & MILP 墙钟时限\\
+\fld{reconf\_loss\_mw} & 名义 MW 代理 & $S_B\sum_{e\in E_{line}}r_e\beta_e$，不是 PF 损耗\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+统一边位置固定为 AC 支路、DC 支路、VSC：
+\begin{equation}
+E=[E_{ac},E_{dc},E_{vsc}],\qquad
+e_{dc}=n_{l,ac}+k,\quad e_{vsc}=n_l+k.
+\end{equation}
+该位置布局只用于矩阵装配；结果必须恢复为 \texttt{BranchRef}。
+
+\subsection{选项完整契约}
+
+\subsubsection{故障与候选集}
+\begin{paramtable}
+\fld{line\_failures} & $\mathcal F_{ac}$ & 稳定 ID & AC-only & 空 & 强制断开的 \texttt{ACBranch::index}\\
+\fld{faulted\_branches} & $\mathcal F$ & \texttt{BranchRef} & AC/DC/VSC & 空 & 混合系统故障集\\
+\fld{switchable\_branches} & $\mathcal C$ & \texttt{BranchRef} & AC/DC/VSC & 空 & 显式候选集\\
+\fld{switchable\_branch\_ids} & $\mathcal C_{ac}$ & 稳定 ID & AC-only & 空 & 旧式 AC 候选集\\
+\end{paramtable}
+若两个候选字段均为空，物理 AC 支路和 DC 支路仅把初始断开边自动视作 tie；来自富模型
+Switch/CircuitBreaker 的规范 AC 边则按设备能力自动判断。VSC 只有被结构化显式列出时才可切换。
+一旦任一显式候选字段非空，未列出的分支保持初始状态。
+
+\subsubsection{模型组与拓扑模式}
+\begin{paramtable}
+\fld{enable\_pf} & -- & 布尔 & -- & \texttt{true} & 创建 $P,Q,P_g,Q_g,v,s^P,s^Q$\\
+\fld{enable\_voltage} & G4 & 布尔 & -- & \texttt{true} & PF 开启时施加线路电压降\\
+\fld{enable\_thermal} & G5 & 布尔 & -- & \texttt{true} & PF 开启时施加 P/Q 箱式容量\\
+\fld{split\_domain\_trees} & -- & 布尔 & -- & \texttt{false} & AC/DC 分域树，VSC 不计边数\\
+\fld{allow\_dc\_mesh} & -- & 布尔 & -- & \texttt{false} & 启用分域模式且不施加 DC 树边数\\
+\fld{loss\_aware} & -- & 布尔 & -- & \texttt{false} & PF 开启时使用 $t\ge |P|$ 代理\\
+\end{paramtable}
+\fld{allow\_dc\_mesh} 隐含分域行为。它允许 DC 环网，因此返回结果不能被解释为“整个混合系统
+均执行了辐射约束”。
+
+\subsubsection{权重、边界与求解控制}
+\begin{paramtable}
+\fld{lambda\_switch} & $\lambda_{sw}$ & -- & 建议 $\ge0$ & $1$ & 每次设备动作成本权重\\
+\fld{lambda\_loss} & $\lambda_{loss}$ & -- & 建议 $\ge0$ & $10$ & 电阻/潮流绝对值代理权重\\
+\fld{lambda\_shed} & $\lambda_{shed}$ & -- & 建议 $\ge0$ & $10^4$ & P/Q 切负荷权重\\
+\fld{lambda\_island} & $\lambda_{isl}$ & -- & 建议 $\ge0$ & $10^5$ & 非主根启用权重\\
+\fld{max\_switch\_ops} & $N_{sw}$ & 次数成本 & $0$=不限制 & $0$ & 隔离设备一次变化按 3 计\\
+\fld{v\_min\_pu} & $\underline V$ & pu & $>0$ & $0.95$ & 母线未给有效下限时使用\\
+\fld{v\_max\_pu} & $\overline V$ & pu & $>0$ & $1.05$ & 母线未给有效上限时使用\\
+\fld{default\_rate\_mva} & $\overline S_0$ & MVA & $>0$ & $10$ & 支路/VSC 容量回退\\
+\fld{big\_m\_v} & $M_{cap}$ & pu$^2$ & $>0$ & $2$ & 支路自适应 M 的上限\\
+\fld{max\_time\_s} & -- & s & $>0$ & $300$ & 求解器时限\\
+\fld{mip\_gap} & $\epsilon_{mip}$ & -- & $\ge0$ & $0.01$ & 相对间隙阈值\\
+\fld{skip\_heuristic} & -- & 布尔 & -- & \texttt{false} & 强制进入 MILP 路径\\
+\fld{solver} & -- & 字符串 & 见第~\ref{sec:nr-solver}~章 & \texttt{auto} & 后端选择\\
+\fld{verbose} & -- & 布尔 & -- & \texttt{false} & spdlog 诊断\\
+\end{paramtable}
+
+公共入口没有集中校验上述数值域；负权重、反向电压区间、非正容量或未知求解器字符串的行为
+不应视作稳定输入契约。生产调用方应先做输入校验。
+
+\subsection{结果族速览}
+
+\texttt{TopoReconfResult} 同时包含四类信息：
+\begin{enumerate}
+  \item 拓扑：\fld{open\_branches}/\fld{closed\_branches}、\fld{switched\_on}/
+        \fld{switched\_off}；
+  \item 富设备动作：\fld{switch\_operations}、\fld{ordered\_switch\_actions} 和序列状态；
+  \item 优化：\fld{milp\_objective}、\fld{obj\_terms}、切负荷、求解器状态/间隙；
+  \item 作用域：\fld{model\_scope} 与 \texttt{ValidityFlags}。
+\end{enumerate}
+\fld{feasible} 只表示返回向量通过当前线性模型的后验残差、整数性和边界检查；
+\fld{optimal} 与 \fld{proven\_optimal} 只在后端状态被识别为最优且间隙满足阈值时为真。
+图启发式成功时两者均为假。
+
+\texttt{ONRResult} 是兼容形状，只保留 AC 整数支路 ID、代理目标、验证 PF 和
+\texttt{BCStats}。它没有 \texttt{model\_scope}、限制列表、后端名称、切负荷和可执行性字段，
+不能承载混合核心的全部证书。

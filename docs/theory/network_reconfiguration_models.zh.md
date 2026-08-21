@@ -1,68 +1,82 @@
-> 本文档为 [network_reconfiguration_models.md](network_reconfiguration_models.md) 的中文译文，供 GUI 帮助中心使用；两者冲突时以原文与代码为准。
+> 文档同步：2026-08-21
+> 状态：有实现支撑的模型速查。
+> 完整契约：[`docs/modules/network_reconfiguration/network_reconfiguration_manual.tex`](../modules/network_reconfiguration/network_reconfiguration_manual.tex)。
 
-> 文档同步（2026-07-12）
-> 范围：已对照当前仓库结构、CMake presets/options 与已注册的测试目标完成审阅。
-> 状态：有实现支撑的参考文档。
-> 事实来源：当文字与实现不一致时，以 src/、include/、tests/ 与 CMake 文件为准。
+# 规范空间网络重构模型
 
-# 最优网络重构 — 数学模型（规范空间）
+当前维护入口是 `analysis::run_topology_reconfiguration(const
+HybridPowerSystem&, const TopoReconfOptions&)`，在规范 AC/DC/VSC 边空间求解一个单时刻快照。
+历史 `solve_optimal_reconfiguration` 现为该入口的 AC 兼容包装；其无条件返回之后保留的旧 AC B&C
+函数体不可达。
 
-本文档是交直流混合最优网络重构（optimal network reconfiguration, ONR）的工程/数学参考。它取代了归档技术笔记章节
-`docs/archive/reference/technical_notebook/sections/07_network_reconfiguration.tex`
-中的叙述性文字。该材料在此被重述为可配置的约束组、目标函数和一个可选潮流层，以便从 GUI 开关切换。断路器（CB）、
-开关、AC/DC 线路与 DC/DC
-换流器在**规范（canonical）**模型空间上被优化，然后投影回设备操作。
+## 1. 投影与标识
 
-> **配套 / 增强：** 可靠性评估数学参考与严谨性审计——
-> [`reliability_assessment_models.md`](reliability_assessment_models.md)——
-> 记录了本 ONR LinDistFlow 模型如何被复用为 FMEA 修复搜索与三阶段可靠性 MILP 的逐阶段恢复内核，
-> 并将每条可靠性公式分类为严谨或启发式。
+核心固定以 `strip_dead_islands=false`、`preserve_switch_branches=true` 投影。AC/DC 母线使用独立
+ID map，只在内部组合为本地位置。混合边输入输出使用
+`BranchRef { EdgeCategory, component.index }`；AC、DC、VSC 同号时，旧裸整数向量有歧义。
 
-实现：`src/network_reconfiguration/topology_reconfiguration.cpp`
-（`run_topology_reconfiguration`）与 `topology_analysis.cpp`
-（`solve_optimal_reconfiguration`）。
+规范边集为
 
-## 1. 规范投影与混合边集
+$$E=E_{ac}\cup E_{dc}\cup E_{vsc}.$$
 
-在 $\widehat{\mathcal S}=\Pi_{\text{canon}}(\mathcal S)$ 上求解，使用
-`project_to_canonical_models(sys, strip_dead=false)`（保留死区段，使打开的联络开关仍可作为候选）。边集：
+`BranchExpandMap` 把变化的规范 AC 边归因回富模型开关或断路器。设备能力、锁定、熔断器限制和上游
+保护绑定可以否决显式候选。DC/VSC 候选仍是分支级决策。
 
-$$\mathcal E_{\text{hyb}}=\mathcal E_{ac}^{\text{canon}}\cup\mathcal E_{dc}^{\text{canon}}\cup\mathcal E_{vsc}^{\text{canon}}.$$
+## 2. 变量与拓扑
 
-设备通过 `BranchExpandMap` 映射到规范边：每个 `Switch`/`CircuitBreaker` → 一条带有端点母线与闭合状态的 `ACBranch`。线路状态决策 $z_\ell$ 由设备命令 $\Phi_\ell$ 实现：
+始终存在的拓扑块包含虚拟流 $F_e$、根注入 $F_g$、边状态 $\beta_e$ 和根指示 $\gamma_g$。
+`enable_pf=true` 时增加线路/VSC 的 $P,Q$、源 $P_g,Q_g$、平方电压 $v_i$ 与非负切负荷
+$s_i^P,s_i^Q$；同时开启 `loss_aware` 时增加 $t_e\ge|P_e|$。
 
-$$z_\ell=u_{sw}\ \text{(switch/tie)},\quad z_\ell=u_{cb}\ \text{(single-side)},\quad z_\ell=u_{\text{from}}\wedge u_{\text{to}}\ \text{(double-side)}.$$
+统一模式使用源定根虚拟流与
 
-## 2. 变量
+$$\sum_{e\in E_{participating}}\beta_e+\sum_g\gamma_g=n_b.$$
 
-每条边 $e$ 与每条母线 $i$：$\beta_e\in\{0,1\}$ 状态；$P_e,Q_e$ 潮流；$v_i=|V_i|^2$；$f_e$ 商品流（commodity flow）；$\gamma_g\in\{0,1\}$ 根；$s_i^P,s_i^Q\ge0$ 切负荷；$t_e\ge0$ 用于 $|P_e|$。
+分域模式把 VSC 虚拟流固定为零，对每个预计算 AC 分量、以及未开启 `allow_dc_mesh` 时的 DC 分量
+分别施加树边数。VSC 不计入 AC/DC 树边数；`allow_dc_mesh=true` 不证明 DC 径向。
 
-## 3. 约束组（可在 GUI 中开关）
+故障边固定断开，非候选保持原状态。动作预算展开 $|\beta-\beta^0|$ 并使用设备动作成本；要求失电
+操作的隔离序列保守按三次动作计。
 
-- **G1 树基数约束：** $\sum\beta_e+\sum\gamma_g=n_b$。
-- **G2 连通性（商品流）：** 根节点 $\sum f-\sum f=-(n{-}1)$，其余 $=1$，$|f_e|\le n_b\,\beta_e$。
-- **G3 功率平衡：** $\sum_{\text{in}}P-\sum_{\text{out}}P-P_g=-P_i^{net}-s_i^P$（Q 类似，AC）。
-- **G4 电压降（LinDistFlow，大 M 法）：** $|v_j-v_i+2r_eP_e+2x_eQ_e|\le M(1-\beta_e)$。
-- **G5 热稳定：** $|P_e|\le P_e^{\max}\beta_e$，$|Q_e|\le Q_e^{\max}\beta_e$。
-- **G6 VSC 传输：** $|P_e^{vsc}|\le S^{\max}$，无功近似处理。
-- **G7 开关操作预算：** $\sum|\beta_e-\beta_e^0|\le N_{sw}$。
+## 3. 可选电气层
 
-G3–G6 仅在**可选潮流（PF）**开启时生效；G1–G2 始终生效（纯连通性）。G4/G5 可独立开关（`enable_voltage`、`enable_thermal`）。G7 在 `max_switch_ops>0` 时生效。
+PF 开启时，有功平衡覆盖 AC/DC 母线，无功平衡只覆盖 AC。线路电压近似为
 
-## 4. 目标函数（权重可在 GUI 中配置）
+$$|v_j-v_i+2r_eP_e+2x_eQ_e|\le M_e(1-\beta_e),$$
 
-$$\min\ \lambda_{sw}\!\sum_{\text{ties}}\!\beta_e-\lambda_{sw}\!\sum_{\text{in-svc}}\!\beta_e+\lambda_{loss}\!\sum r_e\beta_e+\lambda_{shed}\!\sum(s^P+s^Q)+\lambda_{isl}\!\sum_{g>0}\gamma_g.$$
+DC 线没有 $Q$ 项。热限是 P/Q 独立箱约束，不是圆形 MVA 约束。VSC 有功在两端等量进入且不含
+效率损耗；VSC 无功是 AC 端口近似。模型没有电流平方变量，节点平衡也不含支路损耗。
 
-开关项：最小网损（$\lambda_{loss}$）、最小开关操作（$\lambda_{sw}$）、最大恢复（$\lambda_{shed}$）、最少孤岛（$\lambda_{isl}$）。
+AC 母线需求与 `Load` 行相加，DC 母线需求与 `DCLoad` 行相加。源容量聚合发电机、DER、储能、
+外部电网、DC 源和合格 DC 电压母线。零容量伪根允许孤立区段保留图表示；PF 平衡会把其需求计为
+切负荷。
 
-## 5. 可选潮流
+## 4. 目标与损耗口径
 
-PF 关闭 → 仅 G1/G2（连通性，快速）。PF 开启 → LinDistFlow G3–G6（电压/热稳定感知）。
+目标是开关、损耗代理、切负荷和额外根的加权和。初始闭合边的动作项省略常数，因此
+`milp_objective` 不等于正向 `obj_terms` 之和，也没有 MW 单位。
 
-## 6. 优化后潮流交叉校验
+- `obj_terms.loss`：加权目标贡献；
+- 核心 `reconf_loss_mw`：$base\_mva\sum_{closed\ AC/DC}r_e$，是假设 1 pu 电流的拓扑代理；
+- HTTP `reconfig_loss_mw`：后验证 PF 支路损耗，仅在 `reconfig_pf_converged=true` 时有意义。
 
-应用 $\beta^\*$，运行完整 Newton 潮流；报告辐射状/连通/孤岛情况、真实网损，以及经 `compute_device_terminal_flows` 得到的断路器潮流。标志位 `post_power_flow_validated`/`full_hybrid_opf_validated`。
+当前 HTTP 的 `estimated_loss_mw = milp_objective * base_mva` 量纲错误，已登记为 AUD-018；客户端
+必须忽略该字段。
 
-## 7. 理论：AC/DC 换流器需要树约束吗？
+## 5. 求解与证书边界
 
-**不需要——VSC/DC-DC 必须从辐射状约束中排除。** 辐射状约束按电气域分别施加。VSC 桥接一个 AC 节点与一个 DC 节点；闭合它永远不会形成 AC 环网，因此将其计入 $\sum\beta=n_b{-}1$ 会过度约束。正确做法：分域树 + 换流器作为可控功率传输，$|P^{vsc}|\le S^{\max}$，健康换流器 $z=1$。即使用 $\sum_{AC}\beta=n_{ac}{-}1$、$\sum_{DC}\beta=n_{dc}{-}1$，换流器自由。通过 `split_domain_trees` 启用：VSC 的 β 从基数约束中剔除，使网状 MTDC 链路保持闭合。
+图启发式只能返回可行 incumbent，不能证明最优。实际后端分派为：`native` 只走原生 B&C；`scip`
+只走 SCIP；`highs` 和 `auto` 为 HiGHS 失败后 SCIP；未知字符串也按 auto。
+
+所有解都检查线性等式、不等式、整数性与变量界。`feasible` 只代表该线性模型通过。核心不运行完整
+混合 PF/OPF；生产 HTTP 路由把动作写回富模型、重新投影、运行 PF 和 AC OPF 后才形成
+`executable`。
+
+兼容 `ONRResult` 在核心候选后运行 AC PF，但 PF 不收敛不会清除优化 `feasible`。它还存在一个
+回退：核心失败但原始 connected 拓扑 PF 收敛时，返回原拓扑并设 `feasible=true`，当前没有字段标明
+该回退。
+
+## 6. 明确限制
+
+本模型是单时刻、平衡稳态近似。核心入口不实现精确 DistFlow/SOCP/AC 重构、三相开关、多时段储能
+和动作计划、N-1/随机 ONR、动态保护、通信失败或完整混合非线性 PF/OPF 证书。

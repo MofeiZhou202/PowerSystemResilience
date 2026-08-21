@@ -6,6 +6,68 @@ This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
 
+## Graph documentation and deep audit (2026-08-21)
+
+`docs/modules/graph/` now has an eleven-chapter source-equivalent manual at the
+granularity of the PF/OPF manuals. The existing 664-line graph-theory chapter
+is retained intact; nine implementation chapters now separate public identity
+and units, rich-model graph coverage, topology algorithms, switch/zero-Z
+contraction, reduction planning, series/pendant behavior, dense/sparse Kron,
+mapping/recovery, production HTTP/GUI composition, and verification/audit.
+The manual explicitly separates general graph/Ward theory from reachable code
+and states that no unified public C++ reduction pipeline exists.
+
+The deep source audit covered all ten public graph headers, eight
+implementations, CMake registration, direct tests, major cross-module
+consumers, and production topology/network-reduction routes. AUD-024--AUD-031
+record eight open issues: same-ID AC/DC plan conflicts, unused option/enumeration
+surface, incomplete/non-composable mappings, pendant branch-ID recovery
+mismatch, incomplete injection-Kron recovery, unreachable `IsolatedLoad`
+status, post-series edge-ID/position divergence, and rich-component loss during
+contraction/HTTP compact export. Runtime code was not changed in this pass.
+
+The current Release targets were rebuilt before execution. `test_graph` passed
+30 cases/129 assertions, `test_graph_kron` 9/44, and `test_graph_roundtrip` 17/294,
+for 56 direct cases/467 assertions. Numeric cross-validation records an analytic
+3-bus Kron error below `1e-10`, sparse boundary-current errors at or below
+`3.55e-15`, series/PF loss differences below `1e-6 MW`, and a DC-OPF objective
+difference of `1.14e-13`. No full-network graph benchmark is claimed; the dependency
+HEAD differs from the repository pin. These are focused Release rebuild results, not
+full CTest or sanitizer results.
+
+## Network reconfiguration documentation and deep audit (2026-08-21)
+
+`docs/modules/network_reconfiguration/` has been expanded from a 136-line main
+file plus one 120-line implementation chapter into an eight-chapter manual. It
+now separates engineering theory from reachable implementation and covers the
+public option/result contract, canonical projection and domain-qualified IDs,
+source/load aggregation, unified and split-domain radiality, optional
+LinDistFlow, device capabilities and protection sequencing, heuristic/external/
+native solver paths, posterior certificates, the legacy ONR wrapper, production
+HTTP post-validation, registered tests, and known limits. The previously
+referenced but missing `chapters/theory_reconfiguration.tex` is now present.
+
+The module audit depth in `docs/testing/module_code_audit.md` is now **Deep**.
+Six open findings are recorded as AUD-018--AUD-023. The highest-severity issue
+is the production route's dimensionally invalid
+`estimated_loss_mw = milp_objective * base_mva`; clients must use post-PF
+`reconfig_loss_mw` only when `reconfig_pf_converged=true`. Other findings cover
+validity flags set before feasibility, solver-comment/fallback drift, public
+result fields with no core assignment path, a legacy ONR fallback that hides a
+failed MILP behind unchanged-topology PF feasibility, and an unreachable old
+AC B&C implementation. This pass documents the defects but does not change
+runtime code.
+
+The same focused Release rebuild also passed `test_topology_crossval` (12 cases/86
+assertions), `test_reconfig_options` (10/37), `test_device_flows` (5/18),
+`test_distribution_pipeline` (1/178), and `test_crossmodule_integration` (2/82),
+totalling 30 cases/401 assertions. Numerical evidence includes 6-bus MILP versus
+exhaustive relative difference 0% with `optimal=false`, independent IEEE 33-bus
+BFS loss `0.118446 -> 0.0995629 MW`, and cross-module Newton PF loss
+`0.202677 -> 0.16527 MW` with residuals below `1e-8`. The BFS and Newton values are
+different model outputs and are intentionally not merged. No full CTest, HTTP E2E,
+sanitizer, or pinned-dependency rerun is claimed.
+
 ## 可靠性理论与执行闭环（2026-08-20）
 
 ### 物理后果独立章节与三阶段可行性审计（2026-08-20）

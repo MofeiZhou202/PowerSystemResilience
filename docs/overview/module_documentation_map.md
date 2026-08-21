@@ -1,6 +1,6 @@
 # 模块文档覆盖地图
 
-最后核实：2026-08-18
+最后核实：2026-08-21
 
 本表以当前文件系统为准。`src/<module>/` 与 `docs/modules/<module>/` 的目录名必须完全一致；覆盖等级只表示
 文档是否存在并完成源码等价核验，不表示实现已经达到生产认证。
@@ -12,13 +12,13 @@
 | `carbon_analysis` | [碳分析手册](../modules/carbon_analysis/carbon_analysis_manual.tex) | `source_equivalent_model.tex` |
 | `dynamics` | [动力学手册](../modules/dynamics/dynamics_manual.tex) | `source_equivalent_solver.tex` |
 | `ev_power_traffic` | [电—交通手册](../modules/ev_power_traffic/ev_power_traffic_manual.tex) | `source_equivalent_model.tex` |
-| `graph` | [图模块手册](../modules/graph/graph_manual.tex) | `source_equivalent_algorithms.tex` |
+| `graph` | [图模块手册](../modules/graph/graph_manual.tex) | 十一章：接口/索引、通用理论、建图拓扑、收缩、计划、串联/悬垂、稠密/稀疏 Kron、恢复、HTTP、验证审计、数值交叉验证 |
 | `harmonics_power_flow` | [谐波手册](../modules/harmonics_power_flow/harmonics_power_flow_manual.tex) | `source_equivalent_model.tex` |
 | `integrated_energy` | [综合能源手册](../modules/integrated_energy/integrated_energy_manual.tex) | `source_equivalent_milp.tex` |
 | `io` | [输入输出手册](../modules/io/io_manual.tex) | 格式字段换算与拒绝条件，不建立独立电气模型 |
 | `market` | [市场手册](../modules/market/market_manual.tex) | `source_equivalent_contract.tex` |
 | `model` | [模型手册](../modules/model/model_manual.tex) | 有效容量、GFM 参数选择、单位换算；专题审计从属保存 |
-| `network_reconfiguration` | [网络重构手册](../modules/network_reconfiguration/network_reconfiguration_manual.tex) | `source_equivalent_model.tex` |
+| `network_reconfiguration` | [网络重构手册](../modules/network_reconfiguration/network_reconfiguration_manual.tex) | 九章：接口、通用理论、规范投影/设备、可达 MILP、求解证书、兼容 ONR、HTTP、验证审计、数值交叉验证 |
 | `optimal_power_flow` | [最优潮流手册](../modules/optimal_power_flow/opf_manual.tex) | 八个实现章节；不复制 `power_models` 公式 |
 | `power_flow` | [潮流计算手册](../modules/power_flow/power_flow_manual.tex) | 十一个实现章节；线性 DC 移相式已按现行源码复核 |
 | `power_models` | [AML 建模层手册](../modules/power_models/power_models_manual.tex) | `source_equivalent_builders.tex`，本模块唯一 builder 公式源 |

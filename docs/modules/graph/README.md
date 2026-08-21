@@ -1,14 +1,36 @@
 # graph 模块技术手册
 
-本目录是 `src/graph/` 的唯一模块文档目录。
+本目录是 `src/graph/` 的唯一模块文档目录，覆盖混合 AC/DC 图投影、拓扑报告、零阻抗收缩、
+串联/悬垂/Kron 降阶、结果恢复及生产 HTTP/GUI 图分析链。
 
-本目录对应源码 `src/graph/`，说明范围为图建模、拓扑分析、网络降阶与恢复。公共头文件通常位于
-`include/hacdcpf/graph/`；若头文件采用仓库的跨模块布局，准确位置以主手册“数据来源”节为准。
+## 受控源文件
 
-- 主文档：[graph_manual.tex](graph_manual.tex)
-- 统一样式：`../../_manual_common/hysim_manual.sty`
-- 工业评价基线：`../../_manual_common/industrial_evaluation.tex`
-- 总导航：[模块手册索引](../README.md)
+- [graph_manual.tex](graph_manual.tex)：主手册与章节编排。
+- `chapters/overview_contract.tex`：职责边界、公共入口、单位和索引空间。
+- `chapters/theory_graph_foundations.tex`：专著级图论、网络矩阵和 Schur 补理论。
+- `chapters/construction_topology.tex`：富模型建图覆盖、岛、径向性、桥、割点和基本圈。
+- `chapters/contraction_semantics.tex`：闭合开关/零阻抗并查集收缩及富组件回映射。
+- `chapters/reduction_planning.tex`：候选分类、选项生效矩阵和计划语义。
+- `chapters/series_pendant_reduction.tex`：串联精确条件与悬垂近似。
+- `chapters/source_equivalent_algorithms.tex`：稠密/稀疏 Kron 源码等价算法。
+- `chapters/recovery_mapping.tex`：映射索引空间与四类电压恢复。
+- `chapters/runtime_http_contract.tex`：生产拓扑/网络化简 HTTP 与 GUI 契约。
+- `chapters/verification_audit.tex`：测试矩阵、系统审计、开放问题和使用判据。
+- `chapters/numerical_cross_validation.tex`：Kron、收缩、串联及 PF/OPF round-trip 的数值结果、误差门槛与复现条件。
 
-在本目录执行两遍 `xelatex graph_manual.tex` 生成目录和交叉引用。公式、默认值、结果口径和限制必须随
-公开头文件、实现与注册测试同步更新；PDF 与 LaTeX 辅助文件不作为规范源提交。
+公共头位于 `include/hacdcpf/graph/`，八个实现文件位于 `src/graph/`；生产路由位于
+`tests/run_gui_server.cpp`。较短的 Markdown 契约为
+[graph_runtime_contract.md](../../developer/graph_runtime_contract.md)，本手册是完整实现参考。
+
+## 编译与验收
+
+在本目录执行：
+
+```bash
+xelatex -interaction=nonstopmode graph_manual.tex
+xelatex -interaction=nonstopmode graph_manual.tex
+```
+
+PDF、`.aux`、`.log`、`.toc`、`.xdv` 与 SyncTeX 文件是构建产物，不作为规范源提交。修改图语义、
+映射、默认值或近似边界后，必须同步核对公共头、八个实现文件、生产路由及三个直接测试目标。
+数值结果章节还必须注明构建提交、依赖提交、测试命令、单位、误差门槛和未覆盖范围。

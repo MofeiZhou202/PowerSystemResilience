@@ -1,72 +1,117 @@
-> Documentation Sync (2026-07-12)
-> Scope: reviewed against current repository structure, CMake presets/options, and registered test targets.
-> Status: implementation-backed reference.
-> Source of truth: when text and implementation diverge, treat src/, include/, tests/, and CMake files as authoritative.
+> Documentation sync: 2026-08-21
+> Status: implementation-backed quick reference.
+> Complete contract: [`docs/modules/network_reconfiguration/network_reconfiguration_manual.tex`](../modules/network_reconfiguration/network_reconfiguration_manual.tex).
 
-# Optimal Network Reconfiguration — Mathematical Models (Canonical Space)
+# Network Reconfiguration Models in Canonical Space
 
-This document is the engineering/math reference for the hybrid AC/DC optimal
-network reconfiguration (ONR). It supersedes the prose in the archived
-technical-notebook section
-`docs/archive/reference/technical_notebook/sections/07_network_reconfiguration.tex`.
-That material is restated here as configurable constraint groups, objectives,
-and an optional power-flow layer so they can be toggled from the GUI. CBs,
-switches, AC/DC lines, and DC/DC
-converters are optimized over the **canonical** model space, then projected back
-to device operations.
+The maintained entry is `analysis::run_topology_reconfiguration(const
+HybridPowerSystem&, const TopoReconfOptions&)`. It solves one snapshot in
+canonical AC/DC/VSC edge space. The historical
+`solve_optimal_reconfiguration` API is now an AC compatibility wrapper around
+that entry; the older inline AC B&C body below its unconditional return is not
+reachable.
 
-> **Companion / enhancement:** the reliability assessment math reference and
-> rigor audit — [`reliability_assessment_models.md`](reliability_assessment_models.md) —
-> documents how this ONR LinDistFlow model is reused as the per-stage restoration
-> kernel of the FMEA repair search and the three-stage reliability MILP, and
-> classifies every reliability formula as rigorous or heuristic.
+## 1. Projection and identifiers
 
-Implementation: `src/network_reconfiguration/topology_reconfiguration.cpp`
-(`run_topology_reconfiguration`) and `topology_analysis.cpp`
-(`solve_optimal_reconfiguration`).
+The core projects with `strip_dead_islands=false` and
+`preserve_switch_branches=true`. AC and DC buses use separate ID maps and are
+combined only as local positions. Hybrid edge inputs and outputs use
+`BranchRef { EdgeCategory, component.index }`; legacy bare-integer vectors are
+ambiguous when AC, DC, and VSC components share an index.
 
-## 1. Canonical projection and the hybrid edge set
+Canonical edges are
 
-Solve over $\widehat{\mathcal S}=\Pi_{\text{canon}}(\mathcal S)$ with
-`project_to_canonical_models(sys, strip_dead=false)` (dead sections kept so open
-ties remain candidates). Edges:
+$$E=E_{ac}\cup E_{dc}\cup E_{vsc}.$$
 
-$$\mathcal E_{\text{hyb}}=\mathcal E_{ac}^{\text{canon}}\cup\mathcal E_{dc}^{\text{canon}}\cup\mathcal E_{vsc}^{\text{canon}}.$$
-
-Devices map to canonical edges via `BranchExpandMap`: each `Switch`/`CircuitBreaker` → one `ACBranch` with endpoint buses and closed state. The line-status decision $z_\ell$ is realized by device commands $\Phi_\ell$:
-
-$$z_\ell=u_{sw}\ \text{(switch/tie)},\quad z_\ell=u_{cb}\ \text{(single-side)},\quad z_\ell=u_{\text{from}}\wedge u_{\text{to}}\ \text{(double-side)}.$$
+`BranchExpandMap` attributes changed canonical AC edges back to rich switches
+or circuit breakers. Device capabilities, locks, fuse restrictions, and
+upstream-protection bindings can remove a requested edge from the candidate
+set. DC and VSC candidates are branch-level decisions.
 
 ## 2. Variables
 
-Per edge $e$ and bus $i$: $\beta_e\in\{0,1\}$ status; $P_e,Q_e$ flows; $v_i=|V_i|^2$; $f_e$ commodity flow; $\gamma_g\in\{0,1\}$ root; $s_i^P,s_i^Q\ge0$ shed; $t_e\ge0$ for $|P_e|$.
+The always-present topology block contains signed fictitious flows $F_e$,
+root injections $F_g$, edge states $\beta_e$, and root indicators $\gamma_g$.
+With `enable_pf=true`, the model adds line/VSC $P,Q$, source $P_g,Q_g$,
+squared voltages $v_i$, and nonnegative shedding $s_i^P,s_i^Q$. With
+`loss_aware && enable_pf`, it also adds $t_e\ge |P_e|$ for AC/DC lines.
 
-## 3. Constraint groups (GUI-toggleable)
+## 3. Topology constraints
 
-- **G1 Tree cardinality:** $\sum\beta_e+\sum\gamma_g=n_b$.
-- **G2 Connectivity (commodity flow):** root $\sum f-\sum f=-(n{-}1)$, others $=1$, $|f_e|\le n_b\,\beta_e$.
-- **G3 Power balance:** $\sum_{\text{in}}P-\sum_{\text{out}}P-P_g=-P_i^{net}-s_i^P$ (Q similar, AC).
-- **G4 Voltage drop (LinDistFlow, big-M):** $|v_j-v_i+2r_eP_e+2x_eQ_e|\le M(1-\beta_e)$.
-- **G5 Thermal:** $|P_e|\le P_e^{\max}\beta_e$, $|Q_e|\le Q_e^{\max}\beta_e$.
-- **G6 VSC transfer:** $|P_e^{vsc}|\le S^{\max}$, reactive approximated.
-- **G7 Switch budget:** $\sum|\beta_e-\beta_e^0|\le N_{sw}$.
+Unified mode uses source-rooted fictitious-flow balance and
 
-G3–G6 only when **PF optional** is on; G1–G2 always (pure connectivity). G4/G5 are independently toggleable (`enable_voltage`, `enable_thermal`). G7 active when `max_switch_ops>0`.
+$$\sum_{e\in E_{participating}}\beta_e+\sum_g\gamma_g=n_b.$$
 
-## 4. Objective (GUI-configurable weights)
+Split-domain mode fixes VSC fictitious flow to zero and imposes a separate
+tree-edge count for each precomputed AC component and, unless
+`allow_dc_mesh=true`, each DC component. VSCs do not count as AC or DC tree
+edges. `allow_dc_mesh` therefore does not certify DC radiality.
 
-$$\min\ \lambda_{sw}\!\sum_{\text{ties}}\!\beta_e-\lambda_{sw}\!\sum_{\text{in-svc}}\!\beta_e+\lambda_{loss}\!\sum r_e\beta_e+\lambda_{shed}\!\sum(s^P+s^Q)+\lambda_{isl}\!\sum_{g>0}\gamma_g.$$
+Faulted edges are fixed open. Non-candidates keep their authored state. A
+switch-operation budget expands $|\beta-\beta^0|$ directly and uses device
+operation costs; a de-energized isolation sequence conservatively costs three
+actions.
 
-Toggle: min-loss ($\lambda_{loss}$), min-switching ($\lambda_{sw}$), max-restored ($\lambda_{shed}$), min-islands ($\lambda_{isl}$).
+## 4. Optional electrical layer
 
-## 5. Optional power flow
+With PF enabled, active balance covers AC and DC buses; reactive balance covers
+AC buses. The line voltage approximation is
 
-PF off → G1/G2 only (connectivity, fast). PF on → LinDistFlow G3–G6 (voltage/thermal aware).
+$$|v_j-v_i+2r_eP_e+2x_eQ_e|\le M_e(1-\beta_e),$$
 
-## 6. Post-optimal PF cross-check
+with no $Q$ term on DC lines. Thermal limits are independent boxes on $P$ and
+$Q$, not circular MVA limits. VSC active flow enters both terminals with no
+efficiency loss; VSC reactive flow is an AC-terminal approximation. The model
+has no current-squared variable or branch-loss term in balance.
 
-Apply $\beta^\*$, run full Newton PF; report radial/connected/islands, true loss, CB flows via `compute_device_terminal_flows`. Flags `post_power_flow_validated`/`full_hybrid_opf_validated`.
+AC bus-level demand and `Load` rows are additive. DC bus-level demand and
+`DCLoad` rows are additive. Source limits aggregate generators, DER, storage,
+external grids, DC sources, and eligible DC-voltage buses. Zero-capacity
+pseudo-roots allow an isolated section to remain topologically represented
+while PF balance charges its load as shedding.
 
-## 7. Theory: do AC/DC converters need tree constraints?
+## 5. Objective and loss meanings
 
-**No — VSC/DC-DC must be excluded from radiality.** Radiality is per electrical domain. A VSC bridges an AC and a DC node; closing it never forms an AC loop, so counting it in $\sum\beta=n_b{-}1$ over-constrains. Correct: per-domain trees + converters as controllable power transfers, $|P^{vsc}|\le S^{\max}$, $z=1$ for healthy converters. Use $\sum_{AC}\beta=n_{ac}{-}1$, $\sum_{DC}\beta=n_{dc}{-}1$, converters free. Enabled via `split_domain_trees`: VSC β dropped from cardinality so meshed MTDC links stay closed.
+The objective is a weighted sum of switching, a resistance/flow proxy,
+shedding, and extra roots. Initially closed switching terms omit a constant,
+so `milp_objective` is not the sum of the positive `obj_terms` report and has
+no MW unit.
+
+- `obj_terms.loss`: weighted objective contribution.
+- core `reconf_loss_mw`: $base\_mva\sum_{closed\ AC/DC}r_e$, a nominal 1 pu
+  current topology proxy, not solved loss.
+- HTTP `reconfig_loss_mw`: post-power-flow branch loss, meaningful only when
+  `reconfig_pf_converged=true`.
+
+The current HTTP field `estimated_loss_mw = milp_objective * base_mva` is
+dimensionally invalid and is tracked as AUD-018. Clients must ignore it.
+
+## 6. Solver and certificate boundary
+
+The graph heuristic can return a feasible incumbent but never an optimality
+certificate. Reachable backend dispatch is:
+
+- `native`: Native B&C only;
+- `scip`: SCIP only;
+- `highs` or `auto`: HiGHS, then SCIP on failure;
+- unknown strings: same as `auto`.
+
+Every returned vector is checked against linear equalities, inequalities,
+integrality, and bounds. `feasible` means only that this linear model passed.
+The core does not run full hybrid PF/OPF. The production HTTP route applies
+actions to the rich model, reprojects, runs PF and AC OPF, and only then builds
+its `executable` flag.
+
+The compatibility `ONRResult` runs a verification AC PF after a core incumbent,
+but PF non-convergence does not clear its optimization `feasible` flag. It also
+contains a fallback that can report `feasible=true` for the unchanged original
+topology when the core solve failed and the base PF converged; no result field
+currently identifies that fallback.
+
+## 7. Explicit limitations
+
+This is a single-snapshot, balanced steady-state approximation. It does not
+implement exact DistFlow/SOCP/AC reconfiguration, three-phase switching,
+multi-period storage and switching schedules, N-1/stochastic ONR, dynamic
+protection, communication failures, or a complete hybrid nonlinear PF/OPF
+certificate inside the core entry.

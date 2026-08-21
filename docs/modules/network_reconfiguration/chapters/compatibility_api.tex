@@ -1,0 +1,93 @@
+% compatibility_api.tex —— AC 拓扑查询与历史 ONR 包装
+
+\section{拓扑查询与历史 ONR 兼容接口}\label{sec:nr-compat}
+
+\subsection{AC 拓扑查询}
+
+三个查询只读取 \texttt{ACSystem.buses} 和在运 \texttt{ACBranch}：
+\begin{align}
+\srcpath{count\_islands(ac)}&=\text{DFS connected-component count},\\
+\srcpath{is\_connected(ac)}&\Longleftrightarrow count=1,\\
+\srcpath{is\_radial(ac)}&\Longleftrightarrow |E_{on}|=|V|-1\land is\_connected.
+\end{align}
+空系统的约定为 \texttt{count\_islands=0}、\texttt{is\_connected=true}、
+\texttt{is\_radial=true}；单母线无支路也为 connected/radial。
+
+端点不在母线表中的在运支路会被 DFS 邻接构造跳过，但仍被
+\srcpath{count\_in\_service\_branches} 计入边数。因此无效端点可能使 \texttt{is\_radial} 失败；
+查询不返回诊断。它们不考虑 DC 支路、VSC、Switch/CircuitBreaker 富组件或 projection。
+
+\subsection{ONROptions 到 TopoReconfOptions 的映射}
+
+\srcpath{solve\_optimal\_reconfiguration(const ACSystem\&)} 当前是兼容包装。映射固定为：
+\begin{center}\small
+\begin{tabular}{@{}L{5.0cm}L{5.0cm}L{4.5cm}@{}}
+\toprule
+ONR 输入 & 核心选项 & 固定/差异\\
+\midrule
+\fld{v\_min\_pu/v\_max\_pu} & 同名 & 直接复制\\
+\fld{default\_rate\_mva} & 同名 & 直接复制\\
+\fld{big\_m} & \fld{big\_m\_v} & 直接复制\\
+\fld{max\_time\_s/mip\_gap/verbose} & 同名 & 直接复制\\
+\fld{switchable\_branch\_ids} & 同名 & 空时展开为全部 AC 支路 ID\\
+-- & \fld{enable\_pf/voltage/thermal} & 固定 true\\
+-- & \fld{loss\_aware} & 固定 true\\
+-- & $\lambda_{sw},\lambda_{loss},\lambda_{shed},\lambda_{isl}$ & $0,1,10^4,10^5$\\
+-- & \fld{solver} & 固定 \texttt{highs}，实现可再 fallback SCIP\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+因此 ONR 头文件仍描述的旧变量布局 $[\alpha,P,Q,v,f,t]$ 与自有 B\&C/MIR 不是当前可达路径。
+实际模型包含混合核心的根变量、源聚合、切负荷和设备语义；纯 AC 包装只是在输入中没有 DC/VSC。
+
+\subsection{ONRResult 映射}
+
+核心结构化结果只筛选 \texttt{AC\_Line} 类别写入
+\fld{open\_branch\_ids}/\fld{closed\_branch\_ids}。其他字段映射为
+\begin{align}
+\fld{feasible}_{onr}&=\fld{feasible}_{topo},\\
+\fld{optimal}_{onr}&=\fld{optimal}_{topo}\lor\fld{proven\_optimal}_{topo},\\
+\fld{milp\_objective}_{onr}&=\fld{milp\_objective}_{topo},\\
+\fld{estimated\_loss\_mw}_{onr}&=\fld{reconf\_loss\_mw}_{topo},\\
+\fld{bc\_stats}_{onr}&=\fld{bc\_stats}_{topo}.
+\end{align}
+由于包装固定外部 HiGHS 首选，\fld{bc\_stats} 通常是默认值而非实际 HiGHS 统计。
+
+核心可行时，包装把 closed ID 集应用到 ACSystem 副本，再调用
+\srcpath{solve\_power\_flow}（\fld{max\_iter}=200、\fld{tol}=$10^{-6}$）填充
+\fld{verification\_pf}。PF 不收敛不会把 \fld{feasible} 改为 false，调用方必须单独检查
+\fld{verification\_pf.converged}。
+
+\subsection{兼容失败回退}
+
+若核心返回不可行，但输入 AC 拓扑本来 connected，包装会在原始拓扑上运行 PF。若该 PF 收敛，
+返回值被改写为：
+\begin{center}
+\fld{feasible=true},\quad \fld{optimal=false},\quad
+\fld{milp\_objective=0},
+\end{center}
+open/closed 恢复为原始状态，\fld{estimated\_loss\_mw} 取原闭合支路
+$S_B\sum r_e$。\texttt{ONRResult} 没有字段标明“这是未重构的原拓扑 PF 回退”，也不保留核心失败
+原因。故 \fld{feasible=true} 在此兼容 API 中可能只代表基准拓扑 PF 可行，不代表 ONR MILP 得到
+候选解。
+
+\begin{quote}\small\textbf{重要：}
+需要严格优化证书、混合域引用、切负荷或回退透明度的新代码，应直接调用
+\srcpath{run\_topology\_reconfiguration}。历史 ONR API 只适合保留旧调用形状，并必须联合检查
+\fld{optimal} 与 \fld{verification\_pf.converged}。
+\end{quote}
+
+\subsection{HybridPowerSystem 重载}
+
+混合重载先调用 \srcpath{project\_to\_canonical\_models(sys)}，然后只把 \texttt{proj.ac} 传给
+ACSystem 兼容入口。因此 Transformer、Switch、FlexibleLoad 等可经投影进入规范 AC 表，但 DC 网络、
+DC 负荷、VSC 和 DC 故障语义均被丢弃。该重载不是混合 AC/DC ONR；混合系统应调用
+\srcpath{run\_topology\_reconfiguration}。
+
+\subsection{summary() 口径}
+
+\texttt{ONRResult::summary()} 打印可行/最优、目标、代理损耗、AC 整数支路 ID 和 BCStats；
+\texttt{TopoReconfResult::summary()} 打印目标、动作计数、\fld{reconf\_loss\_mw}、耗时以及旧式整数
+列表。两个摘要都不会打印 \fld{model\_scope}、ValidityFlags、结构化类别、切负荷、后端状态或
+已知限制，不能直接作为审计报告。

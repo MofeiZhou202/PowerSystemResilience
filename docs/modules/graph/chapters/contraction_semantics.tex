@@ -1,0 +1,104 @@
+% contraction_semantics.tex —— 零阻抗与闭合开关收缩
+
+\section{零阻抗、开关与断路器收缩}\label{sec:gr-contraction}
+
+\subsection{选项与默认值}
+
+\compmeta{ContractionOptions}{include/hacdcpf/graph/switch\_contraction.hpp}
+\begin{paramtable}
+\fld{contract\_closed\_switches} & -- & bool & -- & true & 收缩闭合 AC Switch\\
+\fld{contract\_closed\_breakers} & -- & bool & -- & true & 收缩闭合 AC/DC 断路器\\
+\fld{contract\_zero\_impedance\_lines} & -- & bool & -- & true & 收缩 AC/DC 低阻线\\
+\fld{zero\_impedance\_threshold} & $\epsilon_Z$ & pu & 建议 $\ge0$ & $10^{-8}$ & $\operatorname{hypot}(r,x)<\epsilon_Z$\\
+\fld{voltage\_base\_tolerance} & $\epsilon_V$ & relative & 建议 $\ge0$ & $10^{-6}$ & 基准电压相对差上限\\
+\fld{allow\_multi\_slack\_merge} & -- & bool & -- & false & 是否允许一个超节点含多个参考\\
+\end{paramtable}
+头注释把 \fld{voltage\_base\_tolerance} 称作 kV tolerance，但实现判据是
+\begin{equation}
+ |V_{B,i}-V_{B,j}|>\epsilon_V\max(V_{B,i},V_{B,j}),
+\end{equation}
+即相对容差；任一端 base\_kv 不正时跳过该检查。选项没有输入验证。
+
+\subsection{可收缩边}
+
+\srcpath{switch\_contraction.cpp:contract\_zero\_impedance\_edges} 只考虑在运边：
+\begin{itemize}
+  \item Switch：closed 且 \fld{contract\_closed\_switches=true}；
+  \item Breaker/DC\_Switch：closed 且 \fld{contract\_closed\_breakers=true}；
+  \item AC\_Line/DC\_Line：\fld{contract\_zero\_impedance\_lines=true} 且
+        $\operatorname{hypot}(r,x)<\epsilon_Z$；
+  \item Transformer、VSC、DCDC 永不收缩。
+\end{itemize}
+线阻抗在收缩时按本次阈值重新判断，不依赖构图时的 \fld{is\_zero\_impedance}，因此调用方可改变
+阈值。HTTP 层有意把 line contraction 默认设为 false，与 C++ 默认 true 不同。
+
+\subsection{并查集与多参考守卫}
+
+候选边按 graph.edges 顺序处理。每次 union 前先检查电压基，再扫描两个当前 DSU 分量是否都已有
+\fld{is\_slack}；默认情况下若两边都有参考，记录 \texttt{GraphMultipleSlack} 并跳过该 union。
+该策略是顺序相关的“尽可能部分收缩”：一个诊断不会撤销此前成功的合并，也不会让整个结果失败。
+允许多参考时继续合并，并在组后验证写 warning 文本，但 Diagnostic 没有 severity 字段。
+
+并查集复杂度约 $O(E\alpha(N))$；多参考预检查每次 union 扫描全部节点，最坏增加 $O(EN)$。
+
+\subsection{代表节点选择}
+
+每个同域分量选一个稳定 bus ID 作为代表：优先级最高者胜，同级取最小 bus ID。AC 顺序为
+SLACK $>$ PV $>$ PQ $>$ ISOLATED，DC 为 DC\_V $>$ DC\_P $>$ DC\_ISOLATED。
+VSC 不是可收缩边，因此 DSU 分量正常情况下不会跨 AC/DC 域。
+
+输出同时填充：
+\begin{itemize}
+  \item 权威 \fld{ac\_bus\_to\_super}/\fld{dc\_bus\_to\_super}；
+  \item 权威反向 \fld{ac\_super\_to\_buses}/\fld{dc\_super\_to\_buses}；
+  \item 兼容 \fld{bus\_to\_super}/\fld{super\_to\_buses}，同号 AC/DC 会覆盖；
+  \item 非平凡组写入 \fld{switch\_records}，记录本身没有 domain 字段。
+\end{itemize}
+
+\subsection{contracted graph 的构造}
+
+结果图只为在运 DSU 组创建节点，并聚合全部 GraphNode 布尔标志。只复制\textbf{在运}外部边，内部
+同域自环丢弃，edge\_id 重新从 0 编号；跨域 VSC 即使两端 bus ID 数值相等也保留。与初始建图
+不同，开路开关/断路器不会保留在 immediate \fld{contracted\_graph} 中；若需要 latent topology，
+应从 \fld{contracted\_system} 重新 build graph。
+
+\subsection{contracted system 的聚合与回映射}
+
+AC 超节点把 bus-level $P_d,Q_d,G_s,B_s$ 求和并选择最高 BusType；DC 超节点把 bus-level
+$P_d$、客户数求和，is\_load 做 OR，选择最高 DCBusType。详细 Load/Generator 等行不合并，而是把
+其 bus 引用改到代表母线。实现显式重映射的主要集合如下：
+\begin{itemize}
+  \item AC：generator/load/shunt/storage/external grid/static/renewable/PV/flexible/asymmetric load、
+        charging station、motor、branch、2W/3W transformer、switch、breaker；
+  \item DC：branch/load/storage/static generator/DC static generator/PV array/DCDC/DC breaker；
+  \item hybrid：VSC 的 AC/DC 两端分别走域映射。
+\end{itemize}
+随后删除非代表母线及收缩后形成的 AC/DC branch、switch、breaker、DCDC 自环。
+
+当前未重映射 \texttt{dc\_storage}、LCC、EnergyRouter ports、MobileStorage、VPP PCC、Microgrid
+PCC/internal buses 和 RegulatorControl.monitored\_bus。HTTP 导出层会过滤悬空对象，但过滤不是
+语义保持：某资产可能被删除而非迁移到代表母线。因此含这些资产的系统不能把收缩结果宣称为完整
+rich-model 等价。
+
+\subsection{精确性边界}
+
+对于理想闭合开关或确实 $Z=0$ 的同电压基节点，$V_i=V_{super}$ 是拓扑/电压精确关系。但
+\fld{contract\_zero\_impedance\_lines} 对有限小阻抗执行硬收缩会丢失压降和损耗；精确性取决于阈值。
+收缩只返回电压成员映射，不返回被删内部边电流/潮流分摊规则，闭环零阻抗组的内部流本来也可能
+不唯一。
+
+\subsection{结果真值表}
+
+\begin{center}\small
+\begin{tabular}{@{}L{4.0cm}L{3.0cm}L{7.0cm}@{}}
+\toprule
+情况 & 行为 & 调用方解释\\
+\midrule
+无可收缩边 & 身份组+原样系统 & 不是失败\\
+电压基不匹配 & 跳过该边并 diagnostic & 可能仍有其他合并\\
+多参考默认禁止 & 跳过导致冲突的 union & 返回部分结果\\
+允许多参考 & 合并并 diagnostic & 不证明求解器参考方程相容\\
+缺端点/停运节点 & 构图阶段已跳过/不成组 & 没有 contraction diagnostic\\
+\bottomrule
+\end{tabular}
+\end{center}

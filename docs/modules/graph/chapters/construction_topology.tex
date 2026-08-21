@@ -1,0 +1,130 @@
+% construction_topology.tex —— 富模型建图与拓扑算法
+
+\section{富模型建图与拓扑报告}\label{sec:gr-build-topology}
+
+\subsection{节点构造与在运语义}
+
+\srcpath{power\_system\_graph.cpp:build\_power\_system\_graph} 先按 authored vector 顺序加入所有
+ACBus，再加入所有 DCBus。\texttt{nodes[]} 因而是“AC authored positions 在前、DC authored
+positions 在后”，但这是当前实现顺序，不应替代域映射。AC 的
+\texttt{ISOLATED} 和 DC 的 \texttt{DC\_ISOLATED} 即使 bus.in\_service=true 也写为图上
+\fld{in\_service=false}。
+
+\begin{longtable}{@{}L{4.2cm}L{5.2cm}L{4.8cm}@{}}
+\toprule
+节点标志 & 当前来源 & 未覆盖/注意\\
+\midrule
+\endfirsthead
+\toprule
+节点标志 & 当前来源 & 未覆盖/注意\\
+\midrule
+\endhead
+\fld{has\_generator} & AC Generator、ExternalGrid、StaticGenerator、RenewableGen、PVSystem；DC StaticGeneratorDC & DC \texttt{static\_generators}、PVArrayDC 不设置\\
+\fld{has\_load} & bus-level demand、AC Load/FlexibleLoad、DCLoad & AsymmetricLoad、motor、charging station 不设置\\
+\fld{has\_shunt} & bus gs/bs 与 AC Shunt & 不按 shunt.in\_service 过滤\\
+\fld{has\_storage} & AC Storage & DC storage/DCStorage、MobileStorage 不设置\\
+\fld{has\_vsc\_ac/dc} & 在运 VSC 两端 & LCC 不设置\\
+\fld{has\_dcdc} & 在运 DCDC 两端 & EnergyRouter 端口不设置\\
+\fld{has\_controllable} & 非固定档 Transformer2W 两端 & regulator、可控 shunt 等不直接设置\\
+\fld{is\_slack} & AC：SLACK、generator slack、ExternalGrid；DC：DC\_V & 混合岛仍按 AC-primary 判参考\\
+\bottomrule
+\end{longtable}
+
+这些标志直接控制降阶候选。若某富组件没有进入上表，它所在母线可能被误判为无注入/无控制节点；
+在严格工程使用前必须先做 canonical projection 或显式把该母线设为保留，而当前 API 没有按 ID
+传入保留集合的字段。
+
+\subsection{边类别和电气字段覆盖}
+
+\begin{longtable}{@{}L{3.8cm}L{3.0cm}L{4.0cm}L{3.5cm}@{}}
+\toprule
+源组件 & \texttt{EdgeCategory} & 在运/参数 & 边界\\
+\midrule
+\endfirsthead
+\toprule
+源组件 & 类别 & 在运/参数 & 边界\\
+\midrule
+\endhead
+ACBranch & AC\_Line & 复制 $r,x,b,tap,shift,rate$ & $|Z|<$ threshold 标 zero-Z\\
+Transformer2W & AC\_Transformer & 只复制端点/状态 & source branch index $>0$ 时跳过；不复制阻抗/变比\\
+Switch & Switch & in\_service $\land$ closed & 开路边保留为 out-of-service\\
+CircuitBreaker & Breaker & in\_service $\land$ closed & 同上\\
+DCBranch & DC\_Line & 复制 $r$ & 代码用 $r<$ threshold，不取绝对值\\
+DCCircuitBreaker & DC\_Switch & in\_service $\land$ closed & 开路边保留\\
+VSC & VSC\_Coupling & 在运虚拟边 & 无阻抗；只表连接性\\
+DCDC & DCDC\_Coupling & 在运虚拟边 & 无效率/方向；只表连接性\\
+\bottomrule
+\end{longtable}
+
+Transformer3W、LCC、EnergyRouter 和 three-phase 子系统不生成图边。缺失端点的组件被静默跳过；
+建图不返回 diagnostic，也不校验重复 bus ID、负阈值或邻接一致性。
+
+\subsection{邻接表与开路边}
+
+每个加入的边都写入 \fld{edges}，并在两端 \fld{adj} 中保存
+\texttt{(edges[] position, neighbour node position)}，所以图是无向多重图。邻接表包含开路边，
+所有拓扑算法再检查 edge/node.in\_service。\fld{edge\_id} 在初始建图时按 0,1,... 赋值，恰好
+等于 \texttt{edges[]} 位置；这不是源组件 ID。
+
+\subsection{连通分量与快速查询}
+
+\srcpath{topology\_analysis.cpp:dfs\_components} 用显式栈遍历在运子图并返回每个 node position 的
+component id，停运节点为 $-1$。于是
+\begin{align}
+\srcpath{count\_islands}(G)&=\max_i c_i+1,\\
+\srcpath{is\_connected}(G)&\Longleftrightarrow count=1,\\
+\srcpath{is\_radial}(G)&\Longleftrightarrow
+  (N_{on}=0)\lor(count=1\land E_{on}=N_{on}-1).
+\end{align}
+空图的 \srcpath{count\_islands}=0、\srcpath{is\_connected}=false、
+\srcpath{is\_radial}=true。单个在运节点无边为 connected/radial。
+
+\subsection{TopologyReport 的岛口径}
+
+每个分量的扁平 \fld{bus\_ids} 与域限定 \fld{ac\_bus\_ids}/\fld{dc\_bus\_ids} 同时填充。
+只要含任意 AC 节点，\fld{domain=AC}；所以 \fld{n\_dc\_islands} 只计纯 DC 分量，不是“含 DC
+节点的岛数”。有效性规则为：
+\begin{equation}
+status(C)=\begin{cases}
+\text{NoSlack},&C\text{ 含 AC 且无 AC slack},\\
+\text{NoDCVoltageRef},&C\text{ 为纯 DC 且无 DC\_V},\\
+\text{Valid},&\text{其他。}
+\end{cases}
+\end{equation}
+混合岛即使含 DC\_V，只要没有 AC slack 仍为 NoSlack；反之含 AC slack 时不再单独要求 DC\_V。
+\texttt{IsolatedLoad} 枚举当前没有赋值路径：孤立负荷只产生
+\texttt{GraphIsolatedLoad} diagnostic 并令 \fld{all\_islands\_valid=false}。
+
+\subsection{圈复杂度与径向性}
+
+完整报告计算
+\begin{equation}
+\fld{cycle\_count}=\max(0,E_{on}-N_{on}+p),\qquad
+\fld{is\_radial}=(p=1)\land(\fld{cycle\_count}=0).
+\end{equation}
+这里 $E$ 包括 VSC/DCDC 虚拟连接边。它证明整个混合无向图是一棵树，不分别证明 AC、DC 子图
+各自径向；重构模块的分域树是另一种约束口径。
+
+\subsection{桥和割点}
+
+\srcpath{topology\_analysis.cpp:tarjan\_bridge\_ap} 是显式栈 Tarjan。DFS 树边 $(u,v)$ 为桥当
+$low[v]>disc[u]$；非根 $u$ 为割点当存在子节点 $v$ 使 $low[v]\ge disc[u]$，根需至少两个 DFS
+子树。父边按 edge position 跳过而非按邻点跳过，因此并联边不会误报桥。复杂度
+$O(N+E)$，内存 $O(N+E)$，避免递归栈深度问题。
+
+\srcpath{find\_bridges} 返回 \texttt{edges[]} positions；
+\srcpath{find\_articulation\_points} 返回 \texttt{nodes[]} positions；完整报告再把割点转换为
+\texttt{TopologyBusRef\{domain,bus\_id\}}。扁平 \fld{cut\_vertex\_bus\_ids} 可含两个相同整数。
+
+\subsection{基本圈基}
+
+\srcpath{find\_fundamental\_cycles} 用 BFS 生成森林；每条非树边与其两端在树上的唯一路径组成一个
+基本圈。输出的每个整数都是 \texttt{graph.edges[]} position，圈内边的次序不是有向环行走顺序，
+也不携带方向/符号。仅当完整报告的 cycle count 大于 0 才调用该函数。
+
+\subsection{诊断字段的索引边界}
+
+\texttt{Diagnostic::related\_buses/related\_branches} 都是裸整数向量，结构体没有 domain/category。
+当前拓扑诊断只写 related buses，且混合同号时可能含糊。\texttt{GraphDisconnectedBus}、
+\texttt{NodeHasInjection}、\texttt{NodeIsRetained}、\texttt{NodeDegreeNotTwo}、通用 Warning/Error
+等代码在 graph 实现中没有生成路径，不能把枚举存在理解为可观测诊断覆盖。

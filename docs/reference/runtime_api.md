@@ -1,6 +1,6 @@
 # Runtime API Contract
 
-Updated: 2026-08-18 (result_window gains optional lod 0/1 aggregated results)
+Updated: 2026-08-21
 
 The GUI server is implemented in `tests/run_gui_server.cpp`. Session endpoints
 operate on one loaded `HybridPowerSystem`; a model-changing request clears
@@ -143,6 +143,25 @@ serialization; the frontend parses it with `JSON.parse`.
 The GUI calls `syncToBackend()` before analyses when the authored Canvas model
 is dirty. Result playback never synchronizes or changes the model.
 
+## Graph analysis and network reduction
+
+| Method and route | Contract |
+|---|---|
+| `POST /api/session/topology` | Analyzes the resident `PowerSystemGraph`; the body is ignored. Returns connectivity/radiality/cycle counts, AC-primary islands, authored-position island/cut masks, domain-qualified `cut_vertices`, per-endpoint-domain bridges, and diagnostics. `n_buses/n_branches` are graph storage counts and may include out-of-service objects. Flat `cut_vertex_bus_ids` and diagnostic bus IDs are compatibility output and are ambiguous for same-number AC/DC buses. |
+| `POST /api/session/network_reduction` | Request booleans default to switch contraction=true, one-pass series=true, pendant=false, Kron=false, and zero-impedance-line contraction=false. Executes contraction -> one series plan -> optional one pendant plan. Kron candidates are counted only; no Kron operation changes `after` or `reduced_system`. Returns live before/after counts, domain-qualified bus representative rows, operation records/fidelity strings, diagnostics, and a compact reloadable `hacdcpf_system_json_v1`. Compacting filters dangling rich assets and clears three-phase/projection/telemetry state, so reloadability is not a semantic-equivalence certificate. |
+
+Both routes return 409 when another session analysis owns the busy flag and
+400 for no loaded system, malformed JSON, or an exception. They do not run
+PF/OPF or recover eliminated voltages/branch flows. The HTTP default for
+zero-impedance line contraction is deliberately false, unlike the public C++
+`ContractionOptions` default of true. The full contract and open audit issues
+are in the [graph manual](../modules/graph/graph_manual.tex).
+
+数值交叉验证索引：稠密/稀疏 Kron 的 boundary-current 与 recovery 误差、闭合开关和
+series PF round-trip、case33bw split-series 以及 DC-OPF objective round-trip 见
+[graph 数值章节](../modules/graph/chapters/numerical_cross_validation.tex)。这些是
+库/测试层证据；两个 HTTP 路由本身仍不执行 PF/OPF，也不生成被消去电压恢复证书。
+
 ## Primary analyses
 
 | Route | Result family |
@@ -159,6 +178,28 @@ is dirty. Result playback never synchronizes or changes the model.
 | `POST /api/session/harmonics*` | Harmonic PF, three-phase, frequency scan, metrics, and Newton variants. |
 | `POST /api/session/run_reliability*` | Non-sequential, sequential, FMEA, feeder, and three-stage reliability. |
 | `POST /api/session/run_reconfig` | Topology reconfiguration. |
+
+`run_reconfig` solves one snapshot even though the response exposes a
+one-element `steps_topology` view. `milp_feasible` certifies only the core
+topology/LinDistFlow model; `executable` additionally requires rich-device
+action mapping, switching-sequence validation, reprojection, PF convergence,
+and AC-OPF convergence. Clients must not collapse these states into one
+success flag. Hybrid branches are domain-qualified in `dc_branch_details`,
+`vsc_details`, and `switch_operations`; the bare `open_branch_ids` and
+`closed_branch_ids` arrays are AC-only compatibility output.
+
+The current `estimated_loss_mw` response is not a physical loss: the route
+computes `milp_objective * base_mva`, although the objective mixes weighted
+switching, shedding, island, and loss terms and omits switching constants.
+This is tracked as AUD-018. Ignore the field until the runtime is corrected;
+use `reconfig_loss_mw` only when `reconfig_pf_converged=true`. The complete
+request/result and validity contract is in the
+[network-reconfiguration manual](../modules/network_reconfiguration/network_reconfiguration_manual.tex).
+
+6-bus 穷举、IEEE 33-bus 独立 BFS、Newton PF/DC-OPF/碳流流水线的原始数值和验收门槛见
+[网络重构数值章节](../modules/network_reconfiguration/chapters/numerical_cross_validation.tex)。
+其中 BFS 与 Newton PF 是两套不同模型输出，MILP objective 和错误的 HTTP
+`estimated_loss_mw` 均不得作为物理损耗交叉替代。
 
 Power-flow numerical overrides are sparse intent. In particular, omitting
 `options.robust_nonlinear.enable_auto_fallback_scheduling` preserves the C++

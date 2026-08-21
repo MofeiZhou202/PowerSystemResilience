@@ -44,6 +44,12 @@ transformers, switches, breakers, VSC virtual couplings, and DC/DC virtual
 couplings. Electrical quantities stored on graph edges use per-unit impedance,
 degrees for phase shift, kV for voltage bases, and MVA for ratings.
 
+The projection is intentionally incomplete: Transformer3W, LCC,
+EnergyRouter, and the three-phase model do not create graph edges, and several
+detailed load/generation/storage families do not set node-retention flags.
+Transformer2W edges currently omit electrical parameters. Consumers must not
+infer full rich-model coverage from graph connectivity alone.
+
 Open switches and breakers may remain as out-of-service edges so latent
 topology is inspectable. Connectivity, cycles, bridges, and radiality use only
 in-service nodes and edges. An island is valid only when its active domains
@@ -71,6 +77,37 @@ No graph reduction by itself proves that a nonlinear solver result is
 equivalent. Use the registered round-trip tests and projection certificate for
 that claim, and retain approximation/fill diagnostics in user-facing results.
 
+The current mapping is not a complete multi-stage certificate. Reverse bus
+maps remain identity after series/pendant operations, pendant branch maps are
+empty, and `ReductionMapping::switch_records`/`kron_records` are not populated.
+There is no public mapping-composition or unified reduction-pipeline API.
+
+`make_reduction_plan()` is not fully domain safe: candidates carry a domain,
+but its conflict sets and batch Kron list use bare integer bus IDs. Do not use
+one plan as an AC/DC same-ID correctness certificate. Series-created edges also
+break the initial convenience relation `GraphEdge::edge_id == edges[] position`;
+adjacency, bridge, and cycle values remain vector positions.
+
+## Production HTTP composition
+
+- `POST /api/session/topology` analyzes the resident graph. Domain-qualified
+  `cut_vertices` and per-endpoint bridge domains are authoritative; flat cut
+  IDs and diagnostic bus IDs are compatibility output. Its bus/branch counts
+  are graph storage counts, including out-of-service objects.
+- `POST /api/session/network_reduction` applies contraction, one series plan,
+  and optional one pendant plan. HTTP defaults are switch=true, series=true,
+  pendant=false, Kron=false, and zero-impedance-line contraction=false. The
+  last default differs from C++ `ContractionOptions` (true).
+- The endpoint only identifies Kron candidates; it does not apply Kron to the
+  exported system. Sparse Kron is separately integrated into graph-reduced
+  three-phase hybrid OPF.
+- `reduced_system` is compacted by filtering dangling objects. This makes the
+  JSON reloadable but can delete unsupported rich assets instead of preserving
+  their semantics. Treat it as a topology-reduction view until AUD-031 closes.
+
+The complete source-equivalent contract, HTTP fields, formulas, and audit are
+in the [graph module manual](../modules/graph/graph_manual.tex).
+
 ## Registered verification
 
 - `test_graph`: construction, topology, AC/DC same-ID cut vertices,
@@ -82,3 +119,7 @@ that claim, and retain approximation/fill diagnostics in user-facing results.
 - `test_distribution_pipeline`: graph information through projection and
   downstream analyses.
 
+Existing `macos-release` binaries passed 56 direct graph cases / 467
+assertions. Including `test_distribution_pipeline` and
+`test_three_phase_hybrid_opf`, the focused total is 69 cases / 797 assertions.
+This is not a clean rebuild or full CTest run.

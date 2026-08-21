@@ -1,0 +1,146 @@
+% verification_audit.tex —— 验证矩阵、审计结论与边界
+
+\section{验证矩阵与系统审计}\label{sec:nr-verification}
+
+\subsection{审计范围}
+
+本轮逐段核对：
+\begin{itemize}
+  \item 两个公共头的全部类型、默认值、注释与入口；
+  \item \srcpath{topology\_reconfiguration.cpp} 的全部 1949 行可达核心路径；
+  \item \srcpath{topology\_analysis.cpp} 的查询、兼容包装和包装后不可达旧模型；
+  \item CMake 源文件接线、五个直接/交叉测试目标；
+  \item \srcpath{POST /api/session/run\_reconfig} 的请求映射、富模型回投影、PF/OPF 与 JSON；
+  \item web/e2e 消费点、理论速查、模块文档地图和审计台账。
+\end{itemize}
+“Deep”表示公共接口、核心实现、失败/结果语义和注册测试均已检查；不表示所有网络规模、所有求解器
+组合或所有富设备类型都已动态穷举。
+
+\subsection{注册测试映射}
+
+\begin{longtable}{@{}L{4.1cm}L{6.1cm}L{4.4cm}@{}}
+\toprule
+目标 & 主要覆盖 & 本轮 Release 实测\\
+\midrule
+\endfirsthead
+\toprule
+目标 & 主要覆盖 & 本轮 Release 实测\\
+\midrule
+\endhead
+\srcpath{test\_topology\_crossval} &
+AC 查询、ExternalGrid/DC 源、AC/DC 负荷聚合、无源失败、候选稳定 ID、同号 AC/DC、DC 故障、
+旧 ONR、6-bus 枚举、33-bus PF、DER & 12 cases / 86 assertions\\
+\srcpath{test\_reconfig\_options} &
+分域树、双 VSC、DC mesh、G4/G5、loss aware、Fuse、可操作 tie、上游保护三步序列、动作预算 &
+10 cases / 37 assertions\\
+\srcpath{test\_device\_flows} &
+设备终端潮流与 dead-section/tie 投影保持 & 5 cases / 18 assertions\\
+\srcpath{test\_distribution\_pipeline} &
+rich model $\to$ projection $\to$ PF $\to$ OPF $\to$ SC $\to$ ONR $\to$ JSON &
+1 case / 178 assertions\\
+\srcpath{test\_crossmodule\_integration} &
+IEEE 33-bus ONR $\to$ DC OPF $\to$ Newton PF $\to$ carbon & 2 cases / 82 assertions\\
+\bottomrule
+\end{longtable}
+
+上述五个 \texttt{macos-release} 目标均由当前源码重新构建后运行并返回 0，共 30 cases、
+401 assertions。这是 focused Release rebuild，不替代完整 1600+ 项回归、sanitizer 或生产 HTTP
+E2E；逐项数值和依赖提交见第~\ref{sec:nr-numerical-crossval} 节。
+
+\subsection{覆盖充分的契约}
+
+已有直接回归锁定：
+\begin{itemize}
+  \item AC/DC 同号 ID 使用 \texttt{BranchRef} 消歧；旧 AC 整数候选不会误操作 DC；
+  \item ExternalGrid-only、DC-only 源与无源失败；
+  \item AC bus demand + Load、DCBus demand + DCLoad 的加法聚合；
+  \item 分域 AC/DC 树、VSC bridge 自由、DC mesh 和 DC 独立开环；
+  \item Fuse 不参与即时恢复、tie 直接闭合、隔离设备上游 trip/operate/reclose；
+  \item 6-bus 与穷举、33-bus 与后续 PF/配电 PF、跨模块 OPF/PF/碳流；
+  \item verbose=false 不向 stdout/stderr 泄漏求解器诊断。
+\end{itemize}
+
+\subsection{动态覆盖缺口}
+
+下列高风险契约尚无直接、专门的断言：
+\begin{itemize}
+  \item \texttt{solver=auto/highs/scip/native} 的完整分派、fallback 与状态/gap 规范化；
+  \item 图启发式成功路径的 \fld{proven\_optimal=false} 和无限 gap；
+  \item 后端返回成功但后验等式/不等式/整数性/变量界失败的拒绝分支；
+  \item 负权重、$v_{min}>v_{max}$、非正容量、未知 solver、未匹配故障 ID 的输入拒绝；
+  \item 切负荷不超过节点需求、P/Q 同比例削减和纯无功/负负荷边界；
+  \item CircuitBreaker 的锁定/操作能力与 Switch 规则的一致性；
+  \item 核心 \fld{base\_loss\_mw} 等默认字段、HTTP \texttt{estimated\_loss\_mw} 口径；
+  \item ONR 核心失败后“原拓扑 PF 可行”回退的可观察标志；
+  \item HTTP \fld{executable} 的注册生产路由专项 E2E；现有参数库脚本未注册到 CMake。
+\end{itemize}
+
+\subsection{开放审计发现}
+
+\subsubsection{NR-01：HTTP estimated loss 量纲错误（高）}
+
+证据：\srcpath{run\_gui\_server.cpp} 的 \texttt{POST /api/session/run\_reconfig} 把
+\fld{milp\_objective}$\times S_B$ 写入 \texttt{estimated\_loss\_mw}。目标含多种权重和省略常数，
+不能转换为 MW。影响是 GUI/API 客户端可能发布错误损耗值。修复应删除该字段、改名为目标缩放诊断，
+或映射到明确的核心代理；真实损耗只在 PF 收敛后报告。需加 HTTP 回归区分切负荷/开关成本与损耗。
+
+\subsubsection{NR-02：ValidityFlags 在求解前宣称约束已执行（中）}
+
+证据：核心在空系统/无源/后端失败之前即把 radial/device/protection 标志设为 true；
+\fld{allow\_dc\_mesh=true} 时仍标 radial=true。影响是不可行结果或 DC mesh 可能被误读为全域已认证。
+修复应把“requested/modelled/enforced/validated”拆开，至少在不可行返回时不声明 validated，并增加
+AC/DC 分域字段。
+
+\subsubsection{NR-03：solver 公共注释与实际 fallback 漂移（中）}
+
+证据：\texttt{TopoReconfOptions::solver} 注释声称 auto 为 HiGHS$\to$Native，实际为
+HiGHS$\to$SCIP；显式 highs 也会 fallback SCIP。\texttt{topology\_analysis.hpp} 仍声称现行 ONR
+直接调用自有 B\&C/MIR，而包装在旧模型前已返回。影响是部署方可能错误估计依赖、可复现性和证书来源。
+修复应同步头注释，决定是否恢复 Native fallback，并对四种字符串注册分派测试。
+
+\subsubsection{NR-04：核心结果存在永不赋值的公共字段（中）}
+
+\fld{base\_loss\_mw}、\fld{loss\_reduction\_mw}、\fld{loss\_reduction\_pct} 和四个后验证/
+可执行性字段在核心无赋值路径。HTTP 在局部副本/局部变量上补值，但直接 C++ 调用只见默认值且无法
+区分“未评估”与“评估失败”。修复应移除字段、改为 optional/availability，或把后验证作为显式 API。
+
+\subsubsection{NR-05：历史 ONR 回退隐藏 MILP 失败（中）}
+
+核心不可行但原 AC 拓扑 PF 收敛时，兼容包装返回 \fld{feasible=true}、目标 0、原拓扑支路集，且没有
+fallback/limitation/status 字段。调用方可能把它当作 ONR incumbent。修复应保留核心失败原因并新增
+\texttt{fallback\_used/model\_scope}，或不改变 \fld{feasible} 的优化语义。
+
+\subsubsection{NR-06：旧 AC MILP 为大段不可达实现（低）}
+
+\srcpath{topology\_analysis.cpp} 在兼容包装的无条件 return 后仍保留约 600 行旧模型。它增加审计成本，
+且头注释、测试名称容易继续引用旧行为。修复应删除不可达代码并把历史模型移入文档/版本历史，或恢复
+为明确、独立且可测试的入口；不应继续让一份函数体表达两个互斥实现。
+
+\subsection{已知模型边界}
+
+\begin{itemize}
+  \item 单时刻、稳态、正序/平衡等值；无三相相域拓扑变量；
+  \item LinDistFlow 不含支路损耗，P/Q 热限为矩形，VSC 有功无效率损耗且 Q 只接 AC 端；
+  \item \fld{loss\_aware} 是 $r|P|$ 线性代理，不是 $I^2R$；默认非 loss-aware 更只是 $r\beta$；
+  \item 根与源容量是聚合近似，ExternalGrid 能力以短路容量或默认容量替代运行限额；
+  \item 切负荷无需求上界与恒功率因数联动；
+  \item 设备能力只对投影可归因的 AC Switch/CircuitBreaker 较完整，DC/VSC 结构化候选是分支级；
+  \item 保护联锁是静态元数据规则，不含短路电流、保护配合、同步或操作时延；
+  \item 结果不包含逐母线电压/切负荷、逐边 P/Q、对偶量、下界、约束残差和模型限制列表；
+  \item 核心不执行完整 PF/OPF，兼容 ONR 只验证 AC PF，HTTP 才追加 PF/AC OPF；
+  \item 旧整数 ID 结果不适用于 AC/DC/VSC 同号系统。
+\end{itemize}
+
+\subsection{工业使用判据}
+
+把结果用于运行建议前，至少应满足：
+\begin{enumerate}
+  \item 输入通过严格 validation，故障与候选稳定 ID 全部匹配；
+  \item 使用 \texttt{BranchRef}，并保存实际 solver/backend/status/gap；
+  \item \fld{feasible=true}；若宣称最优，还须 \fld{proven\_optimal=true}；
+  \item 动作已回投影、\fld{switch\_sequence\_valid=true}；
+  \item 富模型重投影后 AC/DC 拓扑符合业务要求；
+  \item 完整 PF 收敛并满足电压/热限，所需场景下完整 OPF 也收敛；
+  \item 损耗来自收敛 PF，而非目标或名义电阻代理；
+  \item 对关键故障做备用动作、保护配合和现场可操作性复核。
+\end{enumerate}

@@ -1,0 +1,156 @@
+% canonical_device_semantics.tex —— 规范投影、边空间与设备动作
+
+\section{规范投影与设备语义}\label{sec:nr-projection}
+
+\subsection{投影配置与所有权}
+
+核心入口首先调用
+\srcpath{projection::RichToCanonicalOperator::apply}，固定配置为
+\begin{center}
+\texttt{strip\_dead\_islands=false},\qquad
+\texttt{preserve\_switch\_branches=true}.
+\end{center}
+前者保留当前失电但可能经 tie 恢复的区段；后者确保富模型 Switch/CircuitBreaker 在规范 AC
+支路表中保留可归因边。求解模型只读取投影后的 \texttt{ac}、\texttt{dc} 和
+\texttt{vsc\_converters}，但设备能力判断仍回看原始 \texttt{sys.ac.switches} 与
+\texttt{sys.ac.circuit\_breakers}。
+
+\begin{quote}\small\textbf{重要：}
+投影是重构入口的一部分。调用方不应先用默认投影删除 dead island，再把结果传入重构函数；
+否则已删除的失电区段和联络路径无法由内部投影恢复。
+\end{quote}
+
+\subsection{AC/DC 域限定母线映射}
+
+规范位置采用两个独立映射：
+\begin{equation}
+\mu_{ac}:\texttt{ACBus::index}\mapsto[0,n_{ac}),\qquad
+\mu_{dc}:\texttt{DCBus::index}\mapsto[n_{ac},n_b).
+\end{equation}
+VSC 端点解析为 $(\mu_{ac}(bus_{ac}),\mu_{dc}(bus_{dc}))$。这允许 AC 母线 1 和 DC 母线 1
+同时存在，不发生哈希覆盖。任何跨域调用若改用裸 \texttt{unordered\_map<int,int>} 都会破坏
+该不变量。
+
+端点 ID 无法解析的边保留默认位置 $-1$，随后不参与矩阵装配。入口没有单独返回“跳过了无效端点边”
+的诊断；严格调用方应先运行系统 validation。
+
+\subsection{类型化边引用}
+
+\texttt{BranchRef} 定义为
+\begin{equation}
+\operatorname{ref}(e)=(\operatorname{category}(e),\operatorname{component\ index}(e)),
+\end{equation}
+类别只承诺 \texttt{AC\_Line}、\texttt{DC\_Line}、\texttt{VSC\_Coupling}。以下字段必须用该
+类型解释：\fld{faulted\_branches}、\fld{switchable\_branches}、\fld{open\_branches}、
+\fld{closed\_branches}、\fld{switched\_on} 和 \fld{switched\_off}。
+
+兼容整数向量把三类稳定 ID 混放，注释中所谓区间并不是可靠的数值分区，因为每个组件表的
+\fld{index} 都可独立取值。混合系统中必须忽略裸整数结果并使用结构化字段。
+
+\subsection{候选设备判定}
+
+\subsubsection{物理 AC/DC/VSC 边}
+
+没有 \texttt{BranchExpandMap} 来源的 AC 物理支路：显式候选模式下只有被列出的 ID 可变；自动模式
+下只有初始断开支路可闭合。DC 支路采用相同规则，但只读取结构化 DC 候选。VSC 在自动模式下固定，
+只有结构化显式列出才可切换。
+
+故障优先级高于候选：任何匹配 \fld{line\_failures}/\fld{faulted\_branches} 的边都强制
+$\beta_e=F_e=0$。未匹配的故障 ID 被静默忽略；当前没有“请求故障数/实际匹配数”字段。
+
+\subsubsection{富模型 Switch}
+
+投影来源为 Switch 时，\srcpath{effective\_switch\_capabilities} 与设备字段共同决定可变性：
+\begin{itemize}
+  \item 不在运或 \texttt{Fuse}：不可作为即时恢复动作；
+  \item 初始闭合且 \fld{locked\_closed}：不可断开；
+  \item 初始断开且 \fld{locked\_open}：不可闭合；
+  \item 要求失电操作：必须绑定在运、非熔断器、具备开断能力的上游保护开关；
+  \item 闭合恢复只允许 Tie、CircuitBreaker、Recloser 或 LoadBreakSwitch，且能力声明允许；
+  \item 直接可带负荷/故障电流操作的设备，状态变化成本为 1；要求失电操作者保守计 3。
+\end{itemize}
+显式列出一个设备规范边不能越过上述硬过滤。
+
+\subsubsection{CircuitBreaker 与其他来源}
+
+投影来源为 CircuitBreaker 时，当前硬条件仅检查富断路器记录存在且 \fld{in\_service}；
+Switch 的锁定/能力细分规则没有完整复用于 CircuitBreaker POD。Transformer 来源永不成为重构决策。
+
+\subsection{重叠边去重}
+
+富开关设备可能与其控制的物理 AC 支路共享端点。规范投影为了归因同时保留两条边；若两者都进入
+拓扑，会产生虚假并联并破坏径向边数。核心实现扫描所有 AC 边：若 Switch/CircuitBreaker 来源边与
+非设备来源边端点相同，设备等效边设置 \texttt{edge\_participates=false}；自环设备边同样排除。
+
+被排除边仍按初始状态进入结果的 open/closed 列表，但虚拟流和 LinDistFlow 变量固定为零，不能
+改变拓扑。这是一种端点启发式去重，不是显式“设备串接物理支路”的联合状态方程。
+
+\subsection{源模型与根资格}
+
+核心把同一规范母线上的资源聚合为一组 $P_g,Q_g$ 上下界。当前来源如下：
+\begin{center}\small
+\begin{tabular}{@{}L{4.4cm}L{4.0cm}L{6.0cm}@{}}
+\toprule
+资源 & 注入能力 & 可形成拓扑根\\
+\midrule
+AC Generator & $P_{min}/P_{max},Q_{min}/Q_{max}$ & 仅 \fld{is\_slack} 或 slack 母线\\
+AC StaticGenerator/Renewable/PV/Storage & 有效容量与 Q 范围 & 否\\
+AC ExternalGrid & 短路容量或默认容量 & 是\\
+DC StaticGenerator/Storage/PVArray & 有效有功容量 & 是\\
+无 VSC 连接的在运 DC\_V 母线 & $\max(\overline S_0,S_B)$ & 是\\
+普通 slack 母线回退 & $\max(\overline S_0,S_B)$ & 是\\
+失电分量伪根 & 零 P/Q 容量 & 是，仅虚拟连通\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+VSC 相连的 DC\_V 母线只被视为电压参考，不被当作独立能源；其有功必须经 VSC 到达。若系统没有
+任何真实可成根的 AC/DC 源，入口立即返回 \fld{feasible=false}，状态字符串含
+\texttt{no AC/DC source bus available}。
+
+当前闭合边图中每个无真实根分量会加入一个零容量伪根。它只满足拓扑商品流；PF 开启时，孤立分量
+仍须以 $s^P/s^Q$ 平衡负荷。\fld{lambda\_island} 对除主根外的 $\gamma_g$ 加惩罚。
+
+\subsection{负荷聚合}
+
+负荷按规范空间\textbf{相加}：
+\begin{align}
+P_{d,i}^{ac}&=ACBus.pd+\sum_{Load@i}Load.p,\\
+Q_{d,i}^{ac}&=ACBus.qd+\sum_{Load@i}Load.q,\\
+P_{d,i}^{dc}&=DCBus.pd+\sum_{DCLoad@i}P_{effective}.
+\end{align}
+这与部分模块“存在 Load 表时替代母线聚合字段”的策略不同。注册回归专门固定了 AC 母线需求与
+Load 记录相加、DCBus 与 DCLoad 相加的语义。
+
+投影前的 FlexibleLoad、AsymmetricLoad、Charger 等富组件如何进入规范负荷，由 canonical
+projection 合同决定；本模块不重复直接遍历这些富表。
+
+\subsection{设备动作回投影}
+
+求解后每条规范边比较初始状态与 $\beta_e^\star>0.5$。AC 边通过 \texttt{BranchExpandMap} 恢复为
+Switch 或 CircuitBreaker；无来源映射、DC 和 VSC 变化以 \texttt{DeviceKind::Branch} 返回。
+\texttt{SwitchOperation.index} 的索引空间取决于 \fld{kind}：设备种类时为富设备稳定 ID，Branch
+时为相应类别组件 ID。
+
+动作顺序按 \fld{switch\_operations} 的确定性遍历生成：
+\begin{itemize}
+  \item 可直接开断设备：单步 \texttt{open}/\texttt{close}；
+  \item 要求失电操作的 Switch：上游 \texttt{open}，本设备 \texttt{open/close}，若最终仍需上游
+        闭合则追加 \texttt{reclose}；
+  \item 映射缺失、Fuse 或缺少可操作上游保护：序列无效并停止追加。
+\end{itemize}
+该序列只验证静态能力和绑定，不模拟保护动作时间、同步条件、故障电流、触头状态或操作失败概率。
+
+\subsection{核心与 HTTP 回投影的差异}
+
+核心函数只生成动作及 \fld{switch\_sequence\_validated}。生产 HTTP 路由另外：
+\begin{enumerate}
+  \item 把故障和动作写入富模型副本；
+  \item 从修改后的富模型重新执行 canonical projection；
+  \item 计算 AC/DC/混合拓扑；
+  \item 运行完整 PF 和 AC OPF；
+  \item 联合设置 \fld{post\_action\_reprojection\_validated}、
+        \fld{post\_power\_flow\_validated}、\fld{full\_hybrid\_opf\_validated} 和
+        \fld{executable}。
+\end{enumerate}
+因此直接 C++ 调用看到这些四个字段为默认 false 是当前实现行为，不表示核心已经尝试并失败。

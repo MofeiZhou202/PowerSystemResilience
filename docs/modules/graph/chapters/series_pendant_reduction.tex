@@ -1,0 +1,94 @@
+% series_pendant_reduction.tex —— 系统模型级串联与悬垂降阶
+
+\section{串联化简与悬垂负荷折叠}\label{sec:gr-series-pendant}
+
+\subsection{共同执行语义}
+
+两个 reducer 都从 graph/system 副本开始，仅消费匹配类型的 plan actions。被消去 bus/branch 不从
+内部结果中立即删除，而是标 \fld{in\_service=false}；HTTP 导出层另行 compact。动作大小不符、
+母线/边找不到或边已停运时静默跳过，\fld{diagnostics} 当前始终为空。
+
+\subsection{串联适用条件}
+
+计划层已要求被消去节点无注入、无 shunt/control、在运度数 2，且两条边均为普通 AC/DC line。
+若保留热限，则两边必须没有 rate\_a\_mva。执行层不重复检查这些工程条件，信任 plan；手工构造
+ReductionPlan 的调用方承担前置条件责任。
+
+对 $i-j-k$，代码构造
+\begin{align}
+r_{ik}&=r_{ij}+r_{jk},&x_{ik}&=x_{ij}+x_{jk},\\
+b_{ik}&=b_{ij}+b_{jk},&tap_{ik}&=1,&shift_{ik}&=0,\\
+rate_{ik}&=0.
+\end{align}
+串联阻抗相加对无注入节点的 series impedance 精确；两个 $\pi$ 型支路的总充电电纳直接相加不是
+一般严格二端口级联等值，且原热限被清零。故 result 的“exact”必须读作
+\textbf{零注入串联阻抗关系精确}，不是所有支路参数/约束逐项保真。
+
+\subsection{新增边与 ID}
+
+新 branch ID 从
+\begin{equation}
+\max\{\,|E|,\ 1+\max ACBranch.index,\ 1+\max DCBranch.index\,\}
+\end{equation}
+开始，并同时赋给 new edge 的 \fld{edge\_id} 与 \fld{comp\_index}、新 AC/DCBranch.index。
+这样不会与现有普通 line component index 冲突，但可能与其他类别组件 index 数值重复；稳定 ID 仍需
+结合类别。由于该值通常大于 \texttt{reduced\_graph.edges.size()}，新边的 edge\_id 不再是 vector
+position，邻接表保存的仍是实际 push-back position。
+
+\subsection{串联模型更新}
+
+记录 \texttt{SeriesReductionRecord}：eliminated/from/to bus 为稳定 ID，domain 域限定，
+original\_branch\_ids 存两条\textbf{源组件 comp\_index}，new\_branch\_id 存新 edge ID。
+旧 AC/DCBranch 按 comp\_index 停运，被消去 bus 停运，新等值 branch 加入对应域。
+
+branch mapping 的 identity keys 和 action 输入使用 graph edge\_id；record 的 original branch IDs
+则改用 component index。二者属于不同空间，不能交叉查询。当前 reverse bus maps 未把 eliminated
+bus 追加到代表 bus 的 original list，因此 \fld{reduced\_to\_original\_buses} 仍是初始身份视图。
+
+\subsection{多动作边界}
+
+每个 action 从持续变更的 reduced graph 查边，但 plan 来自原图。相邻链节点在计划层被冲突集合
+跳过，避免第二个动作引用已失效邻点；非相邻动作可一次执行。reduced graph 的原邻接条目不删除，
+依靠旧 edge.in\_service=false 过滤。
+
+\subsection{悬垂负荷聚合}
+
+对 parent $i$ 与 leaf $j$，执行层从 bus-level demand 加上在运详细 Load/DCLoad。基准功率取
+system.base\_mva，非正时回退 100 MVA。以 $|V_i|^2\approx1$ 计算
+\begin{align}
+p_j^{pu}&=P_j/S_B,&q_j^{pu}&=Q_j/S_B,\\
+\ell_j&=(p_j^{pu})^2+(q_j^{pu})^2,\\
+p_{abs}^{pu}&=p_j^{pu}+r_{ij}\ell_j,\\
+q_{abs}^{pu}&=q_j^{pu}+x_{ij}\ell_j \quad(AC),
+\end{align}
+DC 固定 $q=0$。吸收量乘 $S_B$ 后写入 parent 的 bus-level demand；原详细 load 行仍留在已停运
+leaf bus 下，HTTP compact 会因端点不存在而删除。
+
+\subsection{悬垂记录与分支空间}
+
+\texttt{PendantReductionRecord::p\_load\_absorbed/q\_load\_absorbed} 实际存 MW/MVAr，尽管字段注释
+写 pu；手册以实现单位为准。\fld{branch\_id} 当前存 action 的 graph edge\_id，而恢复函数按源
+AC/DCBranch.index 查它。当 component index 不等于 edge ID 时，恢复会找不到阻抗并退化为
+$Z=0$，这是开放审计问题。
+
+Pendant result 不初始化 branch maps，也不更新 reverse bus maps；只有 domain-qualified
+original-to-reduced bus map 和 pendant records 可用于当前恢复。
+
+\subsection{悬垂近似误差}
+
+真实支路损耗为 $Z|S/V_j|^2$，而折叠使用 $|V_i|=1$。电压偏低、重载、高 $R/X$ 时误差增大；
+折叠后的 PF 只证明近似系统可解，不证明原系统精确等价。当前结果不报告误差界、基准/化简损耗差、
+近似有效标志或折叠恢复收敛状态。
+
+\subsection{调用示例的正确顺序}
+
+\begin{enumerate}
+  \item build graph；
+  \item classify + make plan；
+  \item apply series；
+  \item 在 series result 的 graph/system 上重新 classify + plan；
+  \item 可选 apply pendant；
+  \item 求解 reduced system；
+  \item 按应用的逆序调用 pendant/series/switch recovery，并自行维护每阶段 mapping。
+\end{enumerate}
+当前没有把多阶段 mapping 自动 compose 成一份 \texttt{ReductionMapping} 的函数。

@@ -1,0 +1,236 @@
+% theory_reconfiguration.tex —— 网络重构通用理论
+% 本文件为理论层章节，遵循 docs/modules/THEORY_WRITING_GUIDE.md。
+
+\section{网络重构通用理论}\label{sec:nr-theory}
+
+\begin{theorynote}
+本章为工程参考级通用数学理论，覆盖图上的配电网重构、辐射森林、单商品流连通性、
+DistFlow/LinDistFlow、开关动作、混合 AC/DC 分域拓扑、目标标度和验证层次。公式不要求
+逐式对应代码；与平台实现的对应关系见章末。严格支路流、二阶锥松弛、多时段恢复和
+N--1 安全约束若超出当前实现，均以“未实现扩展说明”标记。
+\end{theorynote}
+
+\subsection{记号与问题定义}
+
+令电气网络为图 $G=(V,E)$，候选边集 $E=E_f\cup E_s$，其中 $E_f$ 是状态固定边，
+$E_s$ 是可操作开关边。$z_e\in\{0,1\}$ 表示边 $e$ 最终闭合，$z_e^0$ 是初始状态，
+$a_e\in\{0,1\}$ 表示故障可用性。源集合为 $R\subseteq V$，负荷为 $(p_i^d,q_i^d)$。
+单时刻网络重构的一般形式为
+\begin{equation}
+\min_{z,x,s}\quad C_{sw}(z,z^0)+C_{loss}(x,z)+C_{shed}(s)+C_{isl}(z)
+\end{equation}
+\begin{equation}
+\text{s.t.}\quad z_e\le a_e,\quad
+z_e=z_e^0\ (e\in E_f),\quad
+(z,x,s)\in\mathcal T\cap\mathcal P,
+\end{equation}
+其中 $\mathcal T$ 是拓扑可行集，$\mathcal P$ 是选定电气近似的可行集。重构问题的困难来自
+$z$ 的组合性，以及开边时电压降/潮流方程的析取结构。
+
+\subsection{辐射树、森林与根节点}
+
+\begin{definition}[辐射供电拓扑]
+对连通分量 $G_k=(V_k,E_k)$，若 $|E_k|=|V_k|-1$ 且连通，则 $G_k$ 为树。允许多个有源或
+失电分量时，最终拓扑为森林；若森林含 $r$ 个分量，则
+\begin{equation}
+\sum_{e\in E}z_e=|V|-r.
+\end{equation}
+\end{definition}
+
+仅有边数等式不能排除“一个分量含环、另一个分量断开”的抵消，必须与连通性或分量约束联用。
+当每个供电分量选择一个根 $y_r\in\{0,1\}$ 时，可写为
+\begin{equation}
+\sum_{e\in E}z_e+\sum_{r\in R}y_r=|V|,
+\end{equation}
+但该式仍需虚拟流保证每个非根节点可由某个已选根到达。
+
+\begin{proposition}[单商品流的连通性证书]
+给每条候选边有符号虚拟流 $f_e$，给根候选虚拟注入 $g_r\ge0$。取一致的关联矩阵 $A$，若
+\begin{align}
+A f-Bg&=-\mathbf 1,\\
+|f_e|&\le |V|z_e,\\
+0\le g_r&\le |V|y_r,
+\end{align}
+并满足树/森林基数关系，则每个节点位于某个已选根的树中。这里 $B$ 把根注入映射到节点。
+\end{proposition}
+
+直观上每个节点消费一单位虚拟商品，只有根能够注入；未闭合边不能传商品。因此任何无根分量
+都会违反平衡。流方向与电功率方向无关，只要关联矩阵符号全局一致即可。
+
+\subsection{故障、固定状态与开关预算}
+
+故障与设备能力共同决定状态界：
+\begin{equation}
+\begin{array}{ll}
+a_e=0:&z_e=0,\\
+e\notin E_s:&z_e=z_e^0,\\
+e\in E_s,\ a_e=1:&0\le z_e\le1,\ z_e\in\mathbb Z.
+\end{array}
+\end{equation}
+若动作成本为 $c_e^{op}>0$，总预算为
+\begin{equation}
+\sum_{e\in E_s}c_e^{op}|z_e-z_e^0|\le N_{op}.
+\end{equation}
+对二元 $z_e$，绝对值可以按初始状态展开为 $z_e$ 或 $1-z_e$，无需新增变量。
+
+物理开关动作不等于单个二元状态变化。隔离开关可能要求“上游保护断开--隔离设备操作--上游
+重合”三步序列，因此操作成本应来自设备能力，而非只数拓扑边。
+
+\subsection{DistFlow 与 LinDistFlow}
+
+对从 $i$ 指向 $j$ 的径向 AC 支路，经典 branch-flow/DistFlow 方程可写为
+\begin{align}
+P_{ij}&=p_j^d-p_j^g+\sum_{k:j\to k}P_{jk}+r_{ij}\ell_{ij},\\
+Q_{ij}&=q_j^d-q_j^g+\sum_{k:j\to k}Q_{jk}+x_{ij}\ell_{ij},\\
+v_j&=v_i-2(r_{ij}P_{ij}+x_{ij}Q_{ij})+(r_{ij}^2+x_{ij}^2)\ell_{ij},\\
+P_{ij}^2+Q_{ij}^2&=v_i\ell_{ij},
+\end{align}
+其中 $v_i=|V_i|^2$，$\ell_{ij}=|I_{ij}|^2$。忽略二阶损耗项并固定方向后得到
+LinDistFlow：
+\begin{align}
+P_{ij}&\approx p_j^d-p_j^g+\sum_{k:j\to k}P_{jk},\\
+Q_{ij}&\approx q_j^d-q_j^g+\sum_{k:j\to k}Q_{jk},\\
+v_j-v_i+2(r_{ij}P_{ij}+x_{ij}Q_{ij})&\approx0.
+\end{align}
+
+当支路可开断时，电压式用 Big-M 析取：
+\begin{equation}
+-M_e(1-z_e)\le v_j-v_i+2(r_eP_e+x_eQ_e)\le M_e(1-z_e).
+\end{equation}
+容量可以采用箱式近似 $|P_e|,|Q_e|\le\bar S_ez_e$，但它既允许角点
+$(\bar S_e,\bar S_e)$，也比圆形 $P_e^2+Q_e^2\le\bar S_e^2z_e$ 更宽松。
+
+\begin{gapnote}
+当前模块不创建 $\ell_e$，不保留 $r_e\ell_e/x_e\ell_e$ 损耗项，也不施加
+$P_e^2+Q_e^2\le v_i\ell_e$ 的二阶锥约束。因此结果不是严格 DistFlow、SOCP 下界或 AC 可行性
+证书；完整电气可行性必须由后续非线性 PF/OPF 检查。
+\end{gapnote}
+
+\subsection{切负荷与孤岛可行性}
+
+用 $s_i^P,s_i^Q\ge0$ 表示削减后，节点平衡可写为
+\begin{align}
+\sum_{e\in\delta^+(i)}P_e-\sum_{e\in\delta^-(i)}P_e-P_i^g-s_i^P&=-P_i^d,\\
+\sum_{e\in\delta^+(i)}Q_e-\sum_{e\in\delta^-(i)}Q_e-Q_i^g-s_i^Q&=-Q_i^d.
+\end{align}
+零容量伪根可以证明一个失电分量的图连通性，但不能注入真实功率；若该分量保持孤立，平衡式迫使
+负荷被削减。工程上通常还应施加 $0\le s_i^P\le P_i^d$ 及适当的无功削减边界。
+
+\begin{gapnote}
+当前核心实现只给 $s_i^P,s_i^Q$ 非负下界，没有按节点需求设置上界，也没有显式耦合恒功率因数
+削减。对常规正负荷和高切负荷惩罚，该松弛通常取不超过需求的解；但这不是任意输入下的数学保证。
+\end{gapnote}
+
+\subsection{损耗目标与多目标标度}
+
+严格有功损耗为 $\sum_e r_e\ell_e$。常见近似包括：
+\begin{align}
+L_{status}(z)&=\sum_e r_ez_e,\\
+L_{abs}(P)&=\sum_e r_et_e,\qquad t_e\ge|P_e|,\\
+L_{quad}(P,Q,v)&\approx\sum_e r_e\frac{P_e^2+Q_e^2}{v_i}.
+\end{align}
+$L_{status}$ 只偏好低电阻闭边组合；$L_{abs}$ 随流量变化但不是 $I^2R$；$L_{quad}$ 更接近物理，
+却需要二次/锥建模。多目标加权
+\begin{equation}
+J=\lambda_{sw}C_{sw}+\lambda_{loss}L+\lambda_{shed}S+\lambda_{isl}I
+\end{equation}
+只有在各项尺度和优先级经过校准时才有稳定语义。若业务要求“先最小切负荷，再最小动作，再最小
+损耗”，字典序或分层求解比仅凭大权重更可靠。
+
+\begin{gapnote}
+当前模块采用单次加权和，不执行字典序优化，也不报告目标各项的归一化尺度。默认大惩罚只是工程
+偏好，不构成严格优先级证明。
+\end{gapnote}
+
+\subsection{混合 AC/DC 的分域拓扑}
+
+混合图含 $G_{ac}=(V_{ac},E_{ac})$、$G_{dc}=(V_{dc},E_{dc})$ 和换流边 $E_c$。配电辐射性通常
+针对每个电气域定义：
+\begin{equation}
+\sum_{e\in E_{ac,k}}z_e=|V_{ac,k}|-1,
+\qquad
+\sum_{e\in E_{dc,k}}z_e=|V_{dc,k}|-1,
+\end{equation}
+换流器作为跨域功率端口，不计入域内树边数。若允许 MTDC 网状运行，可去掉 DC 边数等式但仍保留
+电气平衡、容量和参考条件。
+
+统一混合树是另一种合法建模选择：把换流器当作普通图边，对 $V_{ac}\cup V_{dc}$ 施加一棵树。
+它比“AC 径向 + DC 可网状 + 换流器自由”的业务语义更严格，不能把两者混称为同一径向约束。
+
+\subsection{候选解、最优证书与可执行方案}
+
+三个层次必须分开：
+\begin{enumerate}
+  \item \textbf{线性模型可行}：变量满足当前 MILP 的等式、不等式、边界和整数性；
+  \item \textbf{已证明最优}：求解器状态和 MIP gap 对该模型提供最优性证书；
+  \item \textbf{工程可执行}：动作能映射回设备，序列满足能力/保护约束，回投影后 PF/OPF 通过。
+\end{enumerate}
+第 1 层不蕴含第 2 或第 3 层。尤其是图启发式可提供第 1 层 incumbent，但不能提供最优性；
+LinDistFlow 的最优解也可能在 AC PF 中不可行。
+
+\begin{gapnote}
+当前 C++ 核心只完整承担第 1 层，并在部分后端状态下标注第 2 层；第 3 层的完整组合只在生产 HTTP
+路由后处理中计算。库调用方必须自行复现该验证链，不能仅检查 \fld{feasible}。
+\end{gapnote}
+
+\subsection{未实现扩展边界}
+
+下列常见 ONR 扩展不属于当前模块：
+\begin{itemize}
+  \item 多时段开关计划、最小停留时间、储能 SOC、移动电源路由；
+  \item N--1 安全重构、随机/鲁棒负荷与可再生不确定性；
+  \item 三相不平衡、相别开关、零序/中性线与相间耦合；
+  \item 保护动作时间、电弧/涌流、同步检查和故障电流约束；
+  \item 精确 $I^2R$、SOCP/SDP 松弛最优性界和完整 AC/DC 非线性联合重构；
+  \item 拓扑可观测性、通信可用性和遥控失败概率。
+\end{itemize}
+这些能力若由 reliability、resilience 或其他模块提供，也不能倒推为本入口的隐式功能。
+
+\subsection{与实现的对应}
+
+\begin{longtable}{@{}L{7.4cm}L{7.0cm}@{}}
+\toprule
+理论条目 & 实现状态\\
+\midrule
+\endfirsthead
+\toprule
+理论条目 & 实现状态\\
+\midrule
+\endhead
+故障/固定/候选状态界 & \implfull{topology\_reconfiguration.cpp:run\_topology\_reconfiguration}\\
+统一树的单商品流与根变量 & \implfull{topology\_reconfiguration.cpp:run\_topology\_reconfiguration}\\
+AC/DC 分域树与 DC mesh 选项 & \implfull{topology\_reconfiguration.cpp:run\_topology\_reconfiguration}\\
+LinDistFlow 节点平衡与电压降 & \implpart{无支路损耗项、无电流平方变量、VSC 无功为端口近似}\\
+圆形/锥形视在功率容量 & \implpart{仅实现 P/Q 独立箱约束}\\
+动作预算与设备动作成本 & \implfull{topology\_reconfiguration.cpp:run\_topology\_reconfiguration}\\
+严格 $I^2R$ 或 SOCP 损耗 & \implnone\\
+多目标字典序求解 & \implnone\\
+后验线性残差/整数性/边界证书 & \implfull{topology\_reconfiguration.cpp:run\_topology\_reconfiguration}\\
+完整 PF/OPF 工程可执行性 & \implpart{tests/run\_gui\_server.cpp:POST /api/session/run\_reconfig；核心函数不执行}\\
+多时段、不确定性、N--1 与三相 ONR & \implnone\\
+\bottomrule
+\end{longtable}
+
+\subsection{参考文献}
+
+\begin{thebibliography}{9}\small
+\bibitem{nr:baranwu}
+M. E. Baran and F. F. Wu,
+``Network reconfiguration in distribution systems for loss reduction and load balancing,''
+\emph{IEEE Transactions on Power Delivery}, vol. 4, no. 2, pp. 1401--1407, 1989.
+
+\bibitem{nr:civanlar}
+S. Civanlar, J. J. Grainger, H. Yin, and S. S. H. Lee,
+``Distribution feeder reconfiguration for loss reduction,''
+\emph{IEEE Transactions on Power Delivery}, vol. 3, no. 3, pp. 1217--1223, 1988.
+
+\bibitem{nr:lavorato}
+M. Lavorato, J. F. Franco, M. J. Rider, and R. Romero,
+``Imposing radiality constraints in distribution system optimization problems,''
+\emph{IEEE Transactions on Power Systems}, vol. 27, no. 1, pp. 172--180, 2012.
+
+\bibitem{nr:jabr}
+R. A. Jabr, R. Singh, and B. C. Pal,
+``Minimum loss network reconfiguration using mixed-integer convex programming,''
+\emph{IEEE Transactions on Power Systems}, vol. 27, no. 2, pp. 1106--1115, 2012.
+\end{thebibliography}

@@ -1,6 +1,6 @@
 # Module Code Audit
 
-Updated: 2026-08-09
+Updated: 2026-08-21
 
 This is the living code-audit ledger for repository modules. It records
 source-backed defects and audit coverage; it is not a dated snapshot and does
@@ -40,6 +40,30 @@ Addressed this iteration:
 | AUD-015 | Reliability review (RL-01/RL-02): `compute_tail_risk` could index past the LOLE sample vector when the LOLE series is shorter than the EENS series; `compute_distribution_indices` could emit `asai` outside `[0,1]` when `saidi > hours_per_year` (e.g. multi-interruption microgrids). | `compute_tail_risk` resizes `sorted_lole` to the EENS length (0-fill) before percentile indexing ([reliability_assessment.cpp#L2041](../src/reliability/reliability_assessment.cpp#L2041)); `asai = std::clamp(1 - saidi/H, 0, 1)` ([#L2351](../src/reliability/reliability_assessment.cpp#L2351)). | `test_reliability_resolver` RL-01 (shorter-LOLE tail risk) and RL-02 (ASAI clamp) cases |
 | AUD-016 | Dynamics review (DY-01): `small_signal_analysis` computed participation factors from `R.inverse()` without guarding a defective/near-singular reduced Jacobian, so a non-finite left-eigenvector inverse could poison every participation factor. | When `Linv = R.inverse()` is not all-finite the participation loop falls back to right-eigenvector magnitude (`rk*rk`) and `result.message` declares the defective-Jacobian fallback ([SmallSignal.cpp#L423](../src/dynamics/SmallSignal.cpp#L423)). | `test_transient_dynamics` small-signal suite (the defective-matrix branch is documented as impractical to force through the public API) |
 | AUD-017 | Market pricing index-space deep review (position/index dual-key, LMP dual extraction, N-1 cut loop). | **No defect.** LMP/shed/curtail use a direct authored-bus index that is correct only because AC/DC buses are never filtered (`build.B == buses.size()`, `b ≡ authored position` — [market_simulation.cpp#L958](../src/market/market_simulation.cpp#L958)); balance/reserve/dc_balance duals all live in the equality block and are read as `constraint_duals[inequality_rows + row]` ([#L2758](../src/market/market_simulation.cpp#L2758)); settlement keeps both `generator_position` (authored) and `generator_index` (stable); the N-1 cut loop dedups via `cut_keys`, breaks on `added==0`, and is bounded by `max_iterations`. The **buses-never-filtered ⇒ LMP-authored-position** invariant is recorded as a design guarantee to preserve. | Existing `test_market_simulation` settlement (per-authored-bus `lmp_per_mwh[b]`) and hybrid-DC (`dc_*[0]`/`[1]` at authored positions) cases pin the direct-index attribution |
+
+New open findings from the deep `network_reconfiguration/` audit:
+
+| ID | Severity | Finding | Required closure |
+|---|---|---|---|
+| AUD-018 | High | `POST /api/session/run_reconfig` reports `estimated_loss_mw = milp_objective * base_mva`. The objective mixes weighted switching, shedding, island, and loss terms and omits switching constants, so the conversion is dimensionally invalid. | Remove/rename the field or map it to an explicitly defined proxy; use post-PF `reconfig_loss_mw` for physical loss and add an HTTP regression with nonzero switching/shedding terms. |
+| AUD-019 | Medium | `TopoReconfResult::ValidityFlags` sets radial/device/protection flags before feasibility is known; `radial_topology_enforced` remains true when `allow_dc_mesh=true`. Failed solves and meshed DC results can therefore look fully certified. | Separate requested/modelled/enforced/validated states and report AC/DC radiality independently; add infeasible and DC-mesh result-contract tests. |
+| AUD-020 | Medium | Public solver comments claim `auto` is HiGHS→Native and the historical ONR directly uses native B&C/MIR. Reachable code dispatches `auto` and `highs` as HiGHS→SCIP; the old AC B&C body is after an unconditional return. | Align public comments with runtime behavior, decide whether Native fallback is intended, and register dispatch/fallback tests for all solver strings. |
+| AUD-021 | Medium | Core result fields `base_loss_mw`, `loss_reduction_mw`, `loss_reduction_pct`, and four post-action/PF/OPF/executable flags have no assignment path. HTTP mutates a local result copy or computes separate locals, while library callers cannot distinguish not-evaluated from failed. | Remove the fields, make availability explicit, or expose a documented post-validation API that populates them; add direct-library field tests. |
+| AUD-022 | Medium | The legacy `solve_optimal_reconfiguration` wrapper converts a failed core solve into `feasible=true` when the unchanged connected AC topology passes PF, with objective 0 and no fallback/status/scope marker. | Preserve the core failure and expose `fallback_used`/scope, or keep optimization feasibility false; add a regression that forces this branch. |
+| AUD-023 | Low | Roughly 600 lines of the historical AC LinDistFlow B&C implementation remain unreachable after the compatibility wrapper's unconditional return, while comments and test prose still describe it as active. | Delete/move the historical implementation or restore it as a separate explicit, tested entry; keep one reachable model per function. |
+
+New open findings from the deep `graph/` audit:
+
+| ID | Severity | Finding | Required closure |
+|---|---|---|---|
+| AUD-024 | High | Reduction candidates carry `NodeDomain`, but `make_reduction_plan()` keys candidate lookup, eliminated sets, neighbour conflicts, and the batch Kron list by bare integer bus IDs. Same-number AC/DC candidates can suppress each other, and one Kron action has only its default AC `bus_domain`. | Use domain-qualified keys throughout planning/actions and add same-ID AC/DC multi-action regressions. |
+| AUD-025 | Low | The public reduction surface drifts from reachable behavior: `mode`, `preserve_all_voltage_constrained_buses`, and `ReductionMethod` are unused; switch contraction and `max_fill_ratio` are not wired through the plan; switch/retain actions and `RadialFeederSegment` have no generation path. | Remove unsupported surface or implement every option/action with effect tests and explicit diagnostics. |
+| AUD-026 | Medium | `ReductionMapping` is not a complete bidirectional or multi-stage certificate: reverse bus maps remain identity after series/pendant, pendant branch maps are empty, mapping-level switch/Kron records are never populated, and no composition API exists. | Populate domain-qualified forward/reverse maps for every operation and add composition plus round-trip tests. |
+| AUD-027 | High | Pendant reduction records the graph `edge_id` as `PendantReductionRecord::branch_id`, while voltage recovery looks it up as a source branch component `.index`. With non-sequential component IDs, impedance lookup can fail and silently recover with `Z=0`. | Use one declared ID space, reject lookup failure, and add a non-sequential-ID numerical recovery regression. |
+| AUD-028 | Medium | Dense Kron with injection computes `I_reduced`, but recovery only evaluates `V_beta=-K V_alpha`; it cannot add `Ybb^-1 I_beta` because the recovery API accepts no interior injection. | Store/accept the injection correction and verify the full partitioned equation. |
+| AUD-029 | Medium | `IslandStatus::IsolatedLoad` is never assigned: topology emits only `GraphIsolatedLoad`, while `validate_system.cpp` checks the unreachable status branch. | Unify status/diagnostic semantics and register topology-to-validation isolated-load tests. |
+| AUD-030 | Medium | A series-created edge receives an `edge_id` beyond existing graph/component IDs while adjacency, bridge, and cycle APIs continue to use vector positions. The initial convenience relation `edge_id == edges[] position` no longer holds after reduction. | Separate these types or renumber graph-internal IDs consistently, then add post-series topology/index regressions. |
+| AUD-031 | High | Graph construction omits Transformer3W, LCC, EnergyRouter, and three-phase topology and under-flags several rich injections. Contraction does not remap multiple rich asset terminals; HTTP compact export then filters dangling objects, potentially deleting assets instead of preserving them. | Complete rich-component graph/remap coverage or reject unsupported reductions, with per-component HTTP reload and semantic round-trip tests. |
 
 ## Closed findings
 
@@ -244,8 +268,8 @@ the review record. The table above is the current status.
 | `power_flow/` | Focused | Baseline | Active manual and regression baseline retained; the point-in-time math audit is archived. |
 | `optimal_power_flow/` | Focused | Baseline | Active OPF manual retained; point-in-time diagnostics and validation are archived. |
 | `power_models/` | Focused | Baseline | Ownership and AML builder documentation confirmed. |
-| `graph/` | Focused | Deep | AUD-009 closed; domain-qualified topology and cycle index contracts are tested. |
-| `network_reconfiguration/` | Focused | Baseline | No new finding in this pass. |
+| `graph/` | Focused | Deep | AUD-009 closed; AUD-024--AUD-031 open across domain-safe planning, option drift, mapping/recovery, edge identity, island status, and rich-component coverage. Focused Release rebuild: three direct targets pass 56 cases / 467 assertions; numerical chapter records Kron/current/recovery and PF/OPF round-trip errors. |
+| `network_reconfiguration/` | Focused | Deep | AUD-018--AUD-023 open: HTTP loss units, validity timing, solver-comment drift, unpopulated result fields, hidden ONR fallback, and unreachable legacy model. Focused Release rebuild: five focused targets pass 30 cases / 401 assertions; numerical chapter records exhaustive, BFS, PF and pipeline cross-validation with proxy limitations. |
 | `reliability/` | Focused | Deep | AUD-015 closed: tail-risk LOLE-vs-EENS length guard and ASAI `[0,1]` clamp; result-scope invariants checked. |
 | `resilience/` | Distributed | Deep | AUD-011 closed; AUD-009 propagation now exposes AC/DC cut-vertex lists. |
 | `analysis/` | Distributed | Sampled | Focused submodule documents exist; no umbrella result contract. |
@@ -275,7 +299,8 @@ disabled and the local dependency dirty-check override:
 | SPPT executable layer | 7 targets: 33 cases, 213 assertions |
 | Harmonics | `test_harmonics_power_flow`: 52 cases, 359 assertions |
 | EV Formulation D | `test_ev_power_traffic_joint_opt_d`: 15 cases, 196 assertions |
-| Graph/reduction | `test_graph`, `test_graph_kron`, `test_graph_roundtrip`: 55 cases, 461 assertions |
+| Graph/reduction | Focused Release rebuild `test_graph`, `test_graph_kron`, `test_graph_roundtrip`: 56 cases, 467 assertions; numeric logs in `/private/tmp/hysim_graph_nr_evidence_20260821/` |
+| Graph cross-module | Existing `macos-release` `test_distribution_pipeline`, `test_three_phase_hybrid_opf`: 13 cases, 330 assertions |
 | Scenario generation/schema | 2 targets: 12 cases, 105 assertions |
 | Carbon snapshot/annual/GEC | 3 targets: 41 cases, 574 assertions |
 | Resilience/reliability shared suite | `test_resilience_assessment`: 39 cases, 360 assertions, including five Native-to-StrictHiGHS cycles |

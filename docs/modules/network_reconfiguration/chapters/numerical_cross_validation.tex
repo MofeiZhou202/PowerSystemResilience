@@ -1,0 +1,87 @@
+% numerical_cross_validation.tex -- 重构数值结果与独立交叉验证
+\section{数值结果与独立交叉验证}\label{sec:nr-numerical-crossval}
+
+\subsection{复现实验条件}
+
+本节针对“只有断言、没有数值结果”的缺口，给出可从日志复核的结果和口径。实验
+使用 Apple Silicon macOS/arm64 的 \srcpath{macos-release}（Release、\texttt{-O3}、
+\texttt{-DNDEBUG}），主仓库提交为 \texttt{b1bf15736c96}，
+本地 \texttt{../MIPSolvers} 为 \texttt{7721936245d5}，
+与仓库声明 pin \texttt{3bf1e66749e3} 不一致。该依赖差异必须随结果一起报告。
+
+本轮 focused Release rebuild 目标为：
+\begin{verbatim}
+cmake --build --preset macos-release --target \
+  test_topology_crossval test_reconfig_options test_device_flows \
+  test_distribution_pipeline test_crossmodule_integration -j4
+\end{verbatim}
+五个目标共通过 30 cases/401 assertions。完整 CTest、HTTP 生产 E2E、sanitizer
+和“pinned dependency”重跑均未在本轮执行。
+
+\subsection{6-bus：MILP 与穷举生成树}
+
+对 6-bus 小系统枚举所有 spanning trees，独立最优目标为
+0.04290000 pu；HiGHS MILP 返回 0.0429 pu，按
+\((J_{\rm MILP}-J_{\rm exhaustive})/J_{\rm exhaustive}\) 计算相对差为 0\%。
+测试将此比较标为 informational，且结果字段 \fld{optimal=false}；因此只能说
+当前 incumbent 与穷举最优值数值一致（门槛 $\le10^{-8}$），不能写成 MILP 已证明
+最优。MILP 选中的闭合支路数为 5，恰为 \(n_{bus}-1\)，满足该实例的径向性检查。
+
+加入 DER（renewable + storage）后，MILP 目标从无 DER 的 0.0429 pu 降至
+0.026 pu，降幅约 39.3939\%。独立 BFS/DPF 路径给出的 DER 方案损耗为
+0.0381 MW；这是物理潮流损耗的另一个模型输出，不是 0.026 pu MILP 目标的单位
+换算，也不能用它证明 MILP 目标代表损耗。
+
+\subsection{IEEE 33-bus：ONR 输出与独立 BFS}
+
+IEEE 33-bus ONR 返回线性损耗 proxy 0.075197（无量纲标幺目标），开断支路为
+10、13、15、28、33，闭合支路数为 32，等于 \(33-1\)。日志中的
+\texttt{estimated loss = 14.531 MW} 是生产路由把目标乘以 base MVA 的已知量纲错误，
+本手册明确禁止把它当作物理损耗。该运行还报告 \texttt{B\&C nodes explored=0}、
+\texttt{gap=1e+30}，所以没有 proven-optimal 证据。
+
+将相同开关拓扑交给独立 BFS/DPF loss evaluator，基准拓扑损耗为 0.118446 MW，
+重构拓扑为 0.0995629 MW，下降约 15.9424\%。这组数值证明“重构后该独立潮流模型
+的损耗下降”，但不与 MILP proxy 进行单位混算，也不替代 Newton PF 的完整电压/热限
+证书。
+
+\subsection{IEEE 33-bus 跨模块流水线}
+
+\texttt{test\_crossmodule\_integration} 以同一 case 串联 ONR、DC OPF、Newton PF
+和碳流追踪。基准 Newton PF residual 为 \(7.4675\times10^{-9}\)，基准物理有功
+损耗 0.202677 MW；重构后流水线 PF residual 为 \(2.50789\times10^{-9}\)，损耗
+0.16527 MW，按 PF 口径下降约 18.4565\%。碳流节点平衡误差为
+\(3.16036\times10^{-7}\%\)。DC OPF 基准与重构目标均为 74.3，说明该实例的
+OPF 目标没有因拓扑动作改变，但不表示 PF 损耗不变。
+
+这里必须保留两套损耗交叉验证：
+\[
+\begin{aligned}
+\text{BFS/DPF:}\quad &0.118446\longrightarrow0.0995629\ {\rm MW},\\
+\text{Newton PF:}\quad &0.202677\longrightarrow0.16527\ {\rm MW}.
+\end{aligned}
+\]
+前者来自独立 BFS/DPF，后者来自 Newton PF/跨模块流水线；二者算法、网络模型或
+参数口径不同，不能合并成一个“唯一真实损耗”。
+
+\subsection{选项、设备与保护动作的数值检查}
+
+\texttt{test\_reconfig\_options -s} 的 HiGHS 状态为
+\texttt{StrictHiGHS Optimal run=0}。分域检查中 DC mesh 的 \fld{dc\_open}=0，
+AC/DC split-domain radiality 返回 \fld{dc\_closed}=1、\fld{ac\_closed}=1。
+loss-aware 实例保留必要 tie（闭合支路数 2），设备/保护路径验证动作序列
+\([20\ \mathrm{open},21\ \mathrm{close},20\ \mathrm{reclose}]\)，并返回
+\fld{switch\_sequence\_valid=true}。这些是选项和动作约束的证据，不是完整保护配合
+或现场同步检验。
+
+\subsection{结论、门槛与限制}
+
+数值准入规则为：6-bus MILP 与穷举相对差 $\le10^{-8}$ 且仍检查
+\fld{optimal=false}；33-bus BFS 必须收敛并通过 radiality；跨模块 PF 必须独立报告
+residual，不能以 MILP objective 代替。当前证据通过这些门槛，但以下结论仍未闭环：
+\begin{itemize}
+  \item 33-bus 当前运行没有 proven optimality，不能发布全局最优声明；
+  \item \texttt{estimated\_loss\_mw} 仍是错误字段，真实损耗只能取收敛 PF/BFS 的明确口径；
+  \item 未重跑完整 HTTP E2E、sanitizer 和 pinned MIPSolvers；
+  \item 核心 MILP 仍是单时刻线性/名义损耗模型，不覆盖非线性 AC OPF、保护配合和操作时延。
+\end{itemize}

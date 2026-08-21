@@ -1,0 +1,92 @@
+% reduction_planning.tex —— 候选分类、选项生效和计划
+
+\section{降阶候选、选项与计划}\label{sec:gr-plan}
+
+\subsection{公共选项完整表}
+
+\compmeta{GraphReductionOptions}{include/hacdcpf/graph/reduction\_plan.hpp}
+\begin{paramtable}
+\fld{enable\_switch\_contraction} & -- & bool & -- & true & 仅被 HTTP/调用方读取；plan 不生成收缩动作\\
+\fld{enable\_series\_reduction} & -- & bool & -- & true & 控制 series actions\\
+\fld{enable\_pendant\_reduction} & -- & bool & -- & false & 控制 pendant actions\\
+\fld{enable\_kron\_reduction} & -- & bool & -- & false & 控制 plan 中 KronEliminate 动作\\
+\fld{preserve\_all\_load\_buses} & -- & bool & -- & true & 负荷节点强制保留；false 才可能 pendant\\
+\fld{preserve\_all\_generator\_buses} & -- & bool & -- & true & 发电/PV 节点强制保留\\
+\fld{preserve\_all\_voltage\_constrained\_buses} & -- & bool & -- & true & 当前无读取路径\\
+\fld{preserve\_all\_monitored\_buses} & -- & bool & -- & true & 仅当 GraphNode.is\_monitored 已设置\\
+\fld{preserve\_branch\_flow\_limited\_edges} & -- & bool & -- & true & series 遇 rate\_a\_mva$>0$ 跳过\\
+\fld{zero\_impedance\_threshold} & $\epsilon_Z$ & pu & -- & $10^{-8}$ & plan/reducers不读；HTTP转给 contraction\\
+\fld{voltage\_base\_tolerance} & $\epsilon_V$ & relative & -- & $10^{-6}$ & plan不读；HTTP转给 contraction\\
+\fld{max\_fill\_ratio} & $r_{max}$ & -- & -- & 2.0 & plan不传给 dense/sparse Kron\\
+\fld{mode} & -- & enum & Safe/\allowbreak Moderate/\allowbreak Aggressive & Safe & 当前无读取路径\\
+\end{paramtable}
+
+\texttt{ReductionMethod} 的 None/Switch/Series/Pendant/Kron/Ward/Hybrid 枚举在当前源码中没有使用；
+\texttt{ReductionMode} 也不自动切换 enable 字段。必须按各布尔选项判断实际行为。
+
+\subsection{候选分类优先级}
+
+\srcpath{reduction\_plan.cpp:classify\_reduction\_candidates} 跳过停运节点。保留规则按首个命中返回：
+slack；受 generator-preserve 控制的 voltage-controlled/generator；storage；VSC；DCDC；controllable；
+受 monitored-preserve 控制的 monitored；受 load-preserve 控制的 load。
+
+其余节点的在运度数 $d_i$ 由邻接表计算。被动定义为
+\begin{equation}
+\neg(load\lor generator\lor shunt\lor storage\lor VSC\lor DCDC\lor controllable).
+\end{equation}
+分类为：被动 $d=0$ 保留；被动 $d=1$ 为
+\texttt{ZeroInjectionPassiveInterior}；被动 $d=2$ 为
+\texttt{ZeroInjectionDegree2}；被动 $d>2$ 为 \texttt{KronPassiveNode}；非被动 $d=1$ 为
+\texttt{PendantLoad}；其余保留。\texttt{RadialFeederSegment} 当前不产生。
+
+system 参数在此函数中未使用，所以候选正确性完全取决于 GraphNode flags。第
+\ref{sec:gr-build-topology} 章列出的未建模富组件不会被二次查询补救。
+
+\subsection{串联动作生成}
+
+对每个 ZeroInjectionDegree2 候选重新收集两条在运邻边，并要求：
+\begin{enumerate}
+  \item 恰好两个邻居；
+  \item 若 preserve flow limits，则两边 rate\_a\_mva 都不大于 0；
+  \item 两边类别都为 AC\_Line 或 DC\_Line；
+  \item 两个邻居没有被此前动作消去。
+\end{enumerate}
+动作的 \fld{eliminated\_branches} 存 graph edge\_id，\fld{retained\_buses} 存稳定 bus ID，
+\fld{bus\_domain} 存候选域。计划是对\textbf{原图一次扫描}，不在每次消去后重算度数，因此长链中
+相邻被动节点不会在一次 plan 中全部串联合并；HTTP 下一阶段也不会循环 series 到不动点。
+
+\subsection{悬垂动作生成}
+
+PendantLoad 取遇到的第一条在运邻边作为连接边，不再次验证度数恰为 1，也不限制边类别为普通
+AC/DC line。候选分类已要求初始度数为 1，但若调用方伪造 candidates 或图在两步间变化，plan
+没有完整拒绝诊断。动作不检查热限。
+
+\subsection{Kron 动作生成}
+
+当前 plan 只收集 \texttt{KronPassiveNode}（度数 $>2$），不收集度数 1 的
+\texttt{ZeroInjection}\allowbreak\texttt{PassiveInterior}。retained 列表只加入 MustRetain 候选；未实际执行
+series/pendant 的其他候选可能不在 retained 列表。\fld{bus\_domain} 沿用默认 AC，且 eliminated
+只存裸 bus ID。因此该动作不能直接无歧义表示混合同号 AC/DC 的批量 Kron 集。
+
+此外 graph 层没有“把该 action 转为 Ybus row positions 并调用 apply\_kron”的实现；HTTP 只把
+候选计数返回。\texttt{KronEliminate} 是审计计划信息，不是已执行证书。
+
+\subsection{域冲突边界}
+
+候选本身有 \fld{domain}，但 \srcpath{make\_reduction\_plan} 内部的 candidate map、
+\texttt{eliminated\_buses} 和邻居冲突检查按裸 \texttt{int bus\_id} 键控。若 AC bus $k$ 与
+DC bus $k$ 都是候选，先处理的动作可能使另一域候选被误判为已消去；邻居同号也可造成保守跳过。
+这通常少做降阶而非跨域错误消去，但违反 domain-qualified 契约，不能宣称计划在同号系统完全域安全。
+
+\subsection{计数字段}
+
+\fld{n\_buses\_eliminated} 按创建动作累计；\fld{n\_branches\_eliminated} 对每个 series 加 2、
+每个 pendant 加 1，Kron 不增加支路计数。它是“计划引用的原边数”，不是执行后的净边数，也不保证
+动作最终被 reducer 接受。调用方应以 reduced graph 的在运计数和实际 records 为准。
+
+\subsection{计划不是流水线}
+
+\texttt{ReductionActionType::SwitchContraction} 与 Retain 没有生成路径；
+\srcpath{apply\_series\_reduction} 忽略非-series action，\srcpath{apply\_pendant\_reduction} 忽略
+非-pendant action。没有公共 \texttt{apply\_reduction\_plan} 或映射复合函数。组合多阶段时必须
+在每个新 graph/system 上重新分类和计划，并自行复合 authored-to-current 映射。

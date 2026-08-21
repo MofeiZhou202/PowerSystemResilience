@@ -1,214 +1,51 @@
 % !TEX program = xelatex
-% 编译方式：在本目录执行两遍 xelatex（详见 docs/_manual_common/README.md）。
-% 源码依据：src/graph/ 与 include/hacdcpf/graph/
-%   （topology_analysis / switch_contraction / series_reduction / kron_reduction / result_recovery），公式与参数以代码为准。
+% 编译方式：在本目录执行两遍 xelatex，或使用 Codex latex-compile 工具。
+% 源码依据：include/hacdcpf/graph/、src/graph/、tests/run_gui_server.cpp 与注册测试。
 \documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
 \usepackage{../../_manual_common/hysim_manual}
 
 \title{\textbf{交直流混合高弹性能源电力系统仿真平台}\\[0.5em]
        {\Large 图建模、拓扑分析与网络降阶技术手册}\\[0.3em]
-       {\large 数学模型、约束、算法流程、数值稳定性与工业级评估}}
+       {\large 图语义、收缩/降阶算法、恢复契约、运行时接口与验证}}
 \author{HySim-XJTU-HRPES（西安交通大学 HRPES 团队）}
 \date{\today}
 
 \begin{document}
 \maketitle
 \begin{abstract}
-\noindent 本手册依据 HySim-XJTU-HRPES 平台图模块
-（\srcpath{src/graph/}、\srcpath{include/hacdcpf/graph/}）整理，覆盖从
-\texttt{HybridPowerSystem} 到 \texttt{PowerSystemGraph} 的图建模、拓扑分析（孤岛/辐射性/
-回路/桥/割点），以及零阻抗合并与开关收缩、串联/悬垂降阶、稠密与稀疏 Kron/Schur 补降阶，
-并为每类降阶保留映射以恢复被消去母线的状态。全部结论以源码为准：Kron 仅对无源/线性内部
-节点精确，悬垂折叠为近似；AC/DC 母线共享整数 ID 时须使用 domain-qualified 映射
-（\fld{ac\_bus\_id\_to\_node\_idx}/\fld{dc\_bus\_id\_to\_node\_idx}）。伞形头文件为
-\srcpath{hacdcpf/graph/graph.hpp}。文档风格、参数表体例与符号约定与《潮流计算技术手册》
-《最优潮流技术手册》一致。
+\noindent 本手册以当前可达代码路径为边界，系统说明
+\srcpath{build\_power\_system\_graph} 的混合 AC/DC 无向图投影、
+\srcpath{analyze\_topology} 的岛/径向性/桥/割点/基本圈报告、闭合开关与零阻抗线的并查集收缩、
+候选分类和降阶计划、串联与悬垂化简、稠密和稀疏 Kron/Schur 补，以及求解后电压恢复。
+手册同时覆盖 \srcpath{POST /api/session/topology} 与
+\srcpath{POST /api/session/network\_reduction} 的生产 HTTP/GUI 组合路径、注册测试和系统审计。
+
+\smallskip
+\noindent\textbf{核心口径}：公共 C++ 层没有自动执行“收缩 $\to$ 串联 $\to$ 悬垂 $\to$ Kron
+$\to$ 求解 $\to$ 恢复”的统一入口；调用方必须显式组合各阶段。HTTP 的网络化简路由只实际应用
+收缩、串联和可选悬垂，Kron 仅统计候选。图边的稳定组件 \fld{comp\_index}、图位置和
+\fld{edge\_id} 必须分开；AC/DC 同号母线必须使用 domain-qualified 映射。Kron 对线性无源内部
+节点精确，悬垂折叠和恒功率内部节点均含工作点近似。
+
+\smallskip
+\noindent 第~\ref{sec:gr-th-foundations} 章为专著级通用理论；其后的章节只陈述当前实现。
+超出实现的 Ward 多端口等值、最优消去排序、非线性误差界和自动多级恢复不构成运行时承诺。
 \end{abstract}
 
 \tableofcontents
 \newpage
 
-\section{阅读指南与约定}
-\subsection{数据来源}
-\begin{itemize}
-  \item \srcpath{include/hacdcpf/graph/power\_system\_graph.hpp} —— 图建模与
-        \texttt{PowerSystemGraph}/\allowbreak\texttt{GraphNode}/\allowbreak\texttt{GraphEdge}；
-  \item \srcpath{include/hacdcpf/graph/topology\_analysis.hpp} —— 拓扑分析与
-        \texttt{TopologyReport}；
-  \item \srcpath{include/hacdcpf/graph/switch\_contraction.hpp}、
-        \srcpath{series\_reduction.hpp}、\srcpath{kron\_reduction.hpp}、
-        \srcpath{sparse\_kron\_reduction.hpp} —— 各类降阶；
-  \item \srcpath{include/hacdcpf/graph/reduction\_plan.hpp}、
-        \srcpath{reduction\_mapping.hpp}、\srcpath{result\_recovery.hpp} —— 降阶计划、映射与状态恢复；
-  \item \srcpath{docs/developer/graph\_runtime\_contract.md} —— 既有运行时契约。
-\end{itemize}
-
-\subsection{单位制与索引空间}
-支路参数 $r/x/b/\text{tap}$ 为标幺值（pu）；本模块严格区分三类 ID：组件
-\fld{comp\_index}（对外稳定）、\fld{edge\_id}（0-based 位置索引）与图 node/edge 临时索引。
-AC 与 DC 母线各自经 \fld{ac\_bus\_id\_to\_node\_idx}/\fld{dc\_bus\_id\_to\_node\_idx} 映射到
-node 下标，恢复结果 \texttt{FullNetworkVoltages} 按 \fld{ac\_bus\_voltage}/\fld{dc\_bus\_voltage}
-分列。零阻抗判定阈值为 \fld{zero\_impedance\_threshold}（默认 $10^{-8}$）。
-
-\subsection{符号约定}
-$N$ 节点数、$E$ 边数、$p$ 连通分量数、$\mu$ 圈复杂度；$Y$ 母线导纳矩阵，按保留集 $\alpha$
-与消去集 $\beta$ 分块；$Z_{ij}$ 支路阻抗；$V_i$ 母线电压相量。降阶映射统一记为
-\texttt{ReductionMapping}，状态恢复算子记 \srcpath{recover\_*}。
-
-\subsection{诚实口径}
-每类降阶都记录一份映射以支持 \srcpath{recover\_*} 状态恢复：Kron 仅对无源/线性内部节点严格
-精确，恒功率内部节点为工作点相关的近似；填充比守卫 \fld{max\_fill\_ratio} 与奇异
-$Y_{\beta\beta}$ 主元守卫可拒绝降阶；悬垂折叠为近似（取 $|V_{\text{parent}}|=1.0$ pu，迭代恢复
-不单独报告收敛标志）。旧式扁平映射（\fld{bus\_id\_to\_node\_idx}、\texttt{IslandInfo::bus\_ids}
-等）在 AC/DC 同号 ID 时含糊，须改用 domain-qualified 映射。
-
-\section{模块定位与工程应用场景}
-\subsection{功能定位}
-图模块是投影层与装配层之间的\textbf{拓扑基础设施}：它把工程语义系统建为无向图，提供
-连通性/辐射性/桥/割点等拓扑判定，并在装配 $Y_{bus}$ 之前对网络做保序降阶（开关收缩、
-串联/悬垂合并、Kron/Schur 补），同时为每类降阶保留可逆映射以在求解后恢复被消去母线的
-电压与支路潮流。它是潮流、OPF、重构、可靠性、弹性等上层模块共享的公共层。
-
-\subsection{工程应用场景}
-典型场景：大规模系统求解前的规模压缩（Kron 消去无源内部节点，降低 $Y_{bus}$ 维数）；
-含大量闭合开关/断路器的配电网建模（零阻抗收缩为超节点）；孤岛与辐射性检测（重构、恢复、
-黑启动前置判定）；桥/割点识别（可靠性 N-1 与结构脆弱性分析）。降阶后的解经映射恢复回
-原始编号空间，对上层完全透明。
-
-\section{输入、输出与边界条件}
-\subsection{输入}
-\texttt{HybridPowerSystem}（含 AC/DC 母线、支路、开关、断路器、VSC、DC-DC 耦合）；
-零阻抗阈值 \fld{zero\_impedance\_threshold}；降阶选项 \texttt{GraphReductionOptions}
-（各降阶开关、\fld{max\_fill\_ratio}、\fld{mode}、\fld{preserve\_*} 强制保留集）。
-
-\subsection{输出}
-\texttt{PowerSystemGraph}（节点/边/邻接表 + domain-qualified 映射）；\texttt{TopologyReport}
-（孤岛列表、连通/辐射标志、回路数、桥边、割点、基本圈、诊断）；降阶后的等值网络 +
-\texttt{ReductionMapping}；状态恢复输出 \texttt{FullNetworkVoltages}（AC/DC 分列）。
-
-\subsection{边界条件}
-零阻抗合并要求两端电压基一致（容差内）；多平衡节点合并默认拒绝（除非
-\fld{allow\_multi\_slack\_merge}）；Kron 要求 $Y_{\beta\beta}$ 非奇异且填充比不超限；
-串联降阶要求中间节点无源且度为 2；被 \fld{preserve\_*} 标记的母线/支路不参与任何降阶。
-
-\section{变量、参数与符号定义}
-\subsection{关键数据结构}
-\compmeta{PowerSystemGraph}{include/hacdcpf/graph/power\_system\_graph.hpp}
-主要字段：\fld{nodes}（\texttt{GraphNode}）、\fld{edges}（\texttt{GraphEdge}：\fld{comp\_index}、
-\fld{edge\_id}、\fld{r\_pu}/\fld{x\_pu}/\fld{b\_pu}/\fld{tap}、\fld{is\_zero\_impedance}）、
-\fld{ac\_bus\_id\_to\_node\_idx}、\fld{dc\_bus\_id\_to\_node\_idx}、\fld{adj}。
-
-\compmeta{TopologyReport}{include/hacdcpf/graph/topology\_analysis.hpp}
-主要字段：\fld{islands}、\fld{is\_connected}、\fld{is\_radial}、\fld{cycle\_count}、
-\fld{bridge\_edge\_ids}、\fld{cut\_vertices}、\fld{fundamental\_cycles}、\fld{diagnostics}。
-
-\compmeta{GraphReductionOptions}{include/hacdcpf/graph/reduction\_plan.hpp}
-主要字段：\fld{enable\_switch\_contraction}/\fld{enable\_series\_reduction}/
-\fld{enable\_pendant\_reduction}/\fld{enable\_kron\_reduction}、\fld{zero\_impedance\_threshold}、
-\fld{max\_fill\_ratio}、\fld{mode}（\texttt{Safe}/\texttt{Moderate}/\texttt{Aggressive}）。
-降阶结果映射为 \texttt{ReductionMapping}，恢复输出为 \texttt{FullNetworkVoltages}。
-
-\subsection{参数字典}
-\begin{paramtable}
-\fld{zero\_impedance\_threshold} & — & pu & 小正数 & $10^{-8}$ & 零阻抗/闭合开关判定阈值\\
-\fld{max\_fill\_ratio} & — & — & $\ge 1$ & $2.0$ & Kron 填充比上限（超限拒绝）\\
-\fld{enable\_switch\_contraction} & — & 布尔 & — & \texttt{true} & 是否启用开关/零阻抗收缩\\
-\fld{enable\_series\_reduction} & — & 布尔 & — & — & 是否启用串联降阶\\
-\fld{enable\_pendant\_reduction} & — & 布尔 & — & — & 是否启用悬垂折叠（近似）\\
-\fld{enable\_kron\_reduction} & — & 布尔 & — & — & 是否启用 Kron/Schur 补降阶\\
-\fld{mode} & — & — & Safe/Moderate/Aggressive & \texttt{Safe} & 降阶激进程度\\
-\fld{allow\_multi\_slack\_merge} & — & 布尔 & — & \texttt{false} & 是否允许多平衡节点合并\\
-\end{paramtable}
-\srcpath{build\_power\_system\_graph} 的 \fld{zero\_impedance\_threshold} 参数默认 $10^{-8}$；
-\fld{preserve\_*} 系列标志用于强制保留指定母线/支路不被降阶。
-
-% ── 通用理论层（修订版 2 新增，专著级深度）──
+\input{chapters/overview_contract}
 \input{chapters/theory_graph_foundations}
-% ── 实现转写层（源码等价）──
+\input{chapters/construction_topology}
+\input{chapters/contraction_semantics}
+\input{chapters/reduction_planning}
+\input{chapters/series_pendant_reduction}
 \input{chapters/source_equivalent_algorithms}
-
-\section{算法流程}
-\begin{figure}[H]\centering
-\begin{tikzpicture}[font=\footnotesize,
-  box/.style={draw,rounded corners,minimum height=0.85cm,align=center,inner sep=3pt},arr/.style={->,thick}]
-  \node[box](build) at (0,0){建图\\build\_power\_system\_graph};
-  \node[box](topo) at (3.3,0){拓扑分析\\岛/桥/割点/回路};
-  \node[box](plan) at (6.6,0){降阶计划\\make\_reduction\_plan};
-  \node[box](apply) at (9.9,0){逐级降阶\\收缩/串联/悬垂/Kron};
-  \node[box](solve) at (3.3,-1.9){装配求解\\$Y_{\text{red}}$};
-  \node[box](rec) at (6.6,-1.9){状态恢复\\recover\_*};
-  \node[box](full) at (9.9,-1.9){FullNetworkVoltages\\AC/DC 分列};
-  \draw[arr](build)--(topo);\draw[arr](topo)--(plan);\draw[arr](plan)--(apply);
-  \draw[arr](apply.south)|-(solve.east);\draw[arr](solve)--(rec);\draw[arr](rec)--(full);
-\end{tikzpicture}
-\caption{图建模—降阶—求解—恢复流水线}
-\end{figure}
-降阶计划 \srcpath{make\_reduction\_plan} 先分类候选（可收缩边、可串联节点、悬垂叶、
-Kron 消去集），逐类应用并在每步追加映射；求解后按逆序恢复。桥/割点由单趟 Tarjan DFS
-在 $O(N+E)$ 内求出。
-
-\section{工程假设与数值稳定性分析}
-\subsection{工程假设}
-无向图假设支路双向对称；串联合并假设中间节点无横向注入；Kron 假设消去节点为无源或
-线性；悬垂折叠假设父节点电压近似 $1.0$ pu。以上假设违反时相应降阶被守卫拒绝或标注为近似。
-
-\subsection{数值稳定性}
-Kron 的数值风险集中在 $Y_{\beta\beta}^{-1}$：接近奇异（弱耦合子网）会放大恢复误差，故设
-主元守卫；填充比守卫防止稀疏 Kron 退化为稠密（内存与时间爆炸）。开关收缩为纯拓扑操作
-（无浮点求逆），数值稳定；串联合并只做复数加法，稳定。恢复映射为复合而非覆盖，避免
-多级降阶时的编号错位。
-
-\section{复杂度分析}
-建图 $O(N+E)$；拓扑分析（连通分量、桥、割点、基本圈）单趟 DFS $O(N+E)$；开关收缩为
-并查集 $O(E\,\alpha(N))$；串联/悬垂降阶按候选数线性；稠密 Kron 为 $O(|\beta|^3)$
-（$Y_{\beta\beta}$ 求逆），稀疏 Kron 在良好排序下接近 $O(\text{nnz})$ 但受填充比限制；
-状态恢复为一次前代/回代，与降阶同阶。
-
-\section{异常工况处理}
-\begin{itemize}
-  \item \textbf{$Y_{\beta\beta}$ 奇异}：主元守卫触发，拒绝该 Kron 降阶并回退到未降阶网络；
-  \item \textbf{填充比超限}：\fld{max\_fill\_ratio} 守卫拒绝降阶，保持稀疏；
-  \item \textbf{多平衡节点欲合并}：默认拒绝并诊断，除非显式 \fld{allow\_multi\_slack\_merge}；
-  \item \textbf{电压基不一致的零阻抗合并}：拒绝合并并告警（避免跨电压等级等电位错误）；
-  \item \textbf{死岛（无 slack 的孤岛）}：拓扑报告标注，上层据此置零或跳过该岛。
-\end{itemize}
-
-\section{与其他模块的接口关系}
-图模块为投影层（\srcpath{src/model/network\_utils.cpp} 的零阻抗合并）与装配层
-（$Y_{bus}$ 构建）提供拓扑基础；潮流/OPF 在装配前调用降阶、求解后调用恢复；重构
-（\srcpath{network\_reconfiguration}）与弹性（\srcpath{resilience}）消费辐射性/桥/割点判定；
-可靠性 N-1 消费割点与桥。domain-qualified 映射是全平台跨 AC/DC 传递的统一契约。
-
-\section{测试与验证建议}
-注册测试：\srcpath{test\_graph}（拓扑、开关收缩、串联/悬垂）、
-\srcpath{test\_graph\_kron}（Schur 补与电压恢复）、
-\srcpath{test\_graph\_roundtrip}（聚合前后 PF/OPF 一致性 round-trip）。建议补充：
-AC/DC 同号 ID 的 domain-qualified 恢复对照、多级降阶复合映射逆运算、$Y_{\beta\beta}$
-近奇异时守卫触发、填充比守卫边界、以及死岛与多岛混合的拓扑断言。
-
-\section{工业级评估指标}
-建议纳入：降阶后 $Y_{bus}$ 维数压缩率与求解加速比；Kron 恢复的电压相量最大误差
-（对无源节点应达机器精度量级）；开关收缩后端子潮流恢复的守恒残差；拓扑分析对已知
-桥/割点算例的召回率；round-trip（降阶—求解—恢复）与直接求解的逐母线一致性（$L_\infty$ 范数）。
-
-\section{适用范围与局限性}
-\begin{itemize}
-  \item Kron 仅对无源/线性内部节点精确；恒功率内部节点为工作点相关的近似；
-        \fld{max\_fill\_ratio} 填充守卫与奇异 $Y_{\beta\beta}$ 主元守卫可拒绝降阶；
-  \item 悬垂折叠为近似（取 $|V_{\text{parent}}|=1.0$ pu；迭代恢复不单独报告收敛标志）；
-  \item 旧式扁平映射（\fld{bus\_id\_to\_node\_idx}、\texttt{IslandInfo::bus\_ids}、
-        \texttt{ReductionMapping} 扁平映射）在 AC/DC 同号 ID 时含糊，须用 domain-qualified 映射；
-  \item 多平衡节点合并默认拒绝，除非 \fld{allow\_multi\_slack\_merge}；两端电压基须在容差内一致。
-\end{itemize}
-
-\section{后续改进方向}
-\begin{enumerate}
-  \item 为恒功率内部节点的 Kron 近似提供工作点相关的误差界估计并写入结果；
-  \item 悬垂折叠的迭代恢复已实现（带父节点实际电压，\srcpath{result\_recovery.cpp}），
-        剩余工作是把恢复收敛标志写入结果并上报；
-  \item 引入基于最小度/近似最小填充（AMD）的消去排序以进一步压低稀疏 Kron 填充；
-  \item 统一淘汰旧式扁平映射，全平台强制 domain-qualified 接口。
-\end{enumerate}
+\input{chapters/recovery_mapping}
+\input{chapters/runtime_http_contract}
+\input{chapters/verification_audit}
+\input{chapters/numerical_cross_validation}
 
 \input{../../_manual_common/industrial_evaluation}
 

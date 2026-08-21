@@ -1,75 +1,129 @@
-\section{源码等价图算法}
+% source_equivalent_algorithms.tex —— 稠密与稀疏 Kron 源码等价算法
 
-本章只描述当前图实现实际计算的量，不用理论上更完整的降阶式替换代码接口。
+\section{稠密与稀疏 Kron/Schur 补}\label{sec:gr-kron}
 
-\subsection{拓扑量}
+\subsection{两条独立实现路径}
 
-\srcpath{src/graph/topology\_analysis.cpp:count\_islands} 只统计 in-service 节点和边。
-空节点图的 \srcpath{is\_radial} 返回真；非空图只有在 \srcpath{count\_islands()==1} 且
-$E=N-1$ 时返回真。完整报告先以 DFS 得到分量数 $p$，再赋值
+\srcpath{kron\_reduction.cpp} 接收任意 Eigen sparse complex matrix，但把四个分块转为 dense 并一次
+消去给定 $\beta$；\srcpath{sparse\_kron\_reduction.cpp} 保持可变稀疏 row/column maps，逐节点消去
+eligible 集并保存 reverse tape。二者不消费 \texttt{ReductionPlan}，也不生成
+\texttt{HybridPowerSystem} 或 \texttt{ReductionMapping}。
+
+\subsection{稠密分块与 Schur 补}
+
+调用方提供 retained 原矩阵行位置 $\alpha$ 和 eliminated 行位置 $\beta$。实现按非零项累加到
 \begin{equation}
- \fld{cycle\_count}=\max(0,E-N+p),\qquad
- \fld{is\_radial}=(p=1)\land(\fld{cycle\_count}=0).
+Y=\begin{bmatrix}Y_{\alpha\alpha}&Y_{\alpha\beta}\\
+Y_{\beta\alpha}&Y_{\beta\beta}\end{bmatrix}.
 \end{equation}
-AC/DC 混合岛只要包含任何 AC 节点就归为 AC 岛；AC 岛要求 AC slack，纯 DC 岛要求 DC 电压参考。
-桥判据为 DFS 子节点 $v$ 满足 $low[v]>disc[parent]$；非根割点为
-$low[v]\ge disc[parent]$，根割点要求 DFS 子树数大于 1。
-依据为 \srcpath{src/graph/topology\_analysis.cpp:tarjan\_bridge\_ap} 和
-\srcpath{src/graph/topology\_analysis.cpp:analyze\_topology}。
+它不检查 $Y$ 方阵、索引范围、$\alpha/\beta$ 互斥或是否覆盖全部行；无效索引可能越界，公共调用方
+必须预验证。
 
-\subsection{稠密 Kron 降阶}
-
-\srcpath{src/graph/kron\_reduction.cpp:apply\_kron\_reduction} 把输入稀疏矩阵累加到四个稠密块。
-消去集为空时仅抽取 retained 子矩阵并直接标记 valid。
-否则使用 \srcpath{FullPivLU::isInvertible()} 拒绝奇异 $Y_{\beta\beta}$，再计算
+当 $\beta=\varnothing$ 时只抽取 retained 子矩阵，标 valid，不计算 dense recovery blocks。
+否则使用 \texttt{FullPivLU::isInvertible()}；不可逆时返回
+\texttt{KronSingularYbb}。有效时计算
 \begin{align}
- K&=Y_{\beta\beta}^{-1}Y_{\beta\alpha},\\
- Y_{red}&=Y_{\alpha\alpha}-Y_{\alpha\beta}K.
+K&=Y_{\beta\beta}^{-1}Y_{\beta\alpha},\\
+L&=Y_{\alpha\beta}Y_{\beta\beta}^{-1},\\
+Y_{red}&=Y_{\alpha\alpha}-Y_{\alpha\beta}K.
 \end{align}
-代码还显式计算并保存 $Y_{\alpha\beta}Y_{\beta\beta}^{-1}$。
-非零数用 $|x|>10^{-15}$ 计数，填充比为
+代码用 \texttt{lu.solve} 得 $K$，但为 $L$ 显式调用 \texttt{lu.inverse()}；两块均以 dense matrix
+保存在 \texttt{KronData}，内存 $O(|\alpha||\beta|+|\beta|^2)$。
+
+\subsection{稠密填充守卫}
+
+原 nnz 取 Eigen sparse \srcpath{nonZeros()}；reduced dense entry 仅当绝对值大于 $10^{-15}$ 计数并
+写 triplet。定义
 \begin{equation}
- r_{fill}=\begin{cases}
- nnz(Y_{red})/nnz(Y_{full}),&nnz(Y_{full})>0,\\1,&nnz(Y_{full})=0.
- \end{cases}
+r_{fill}=\begin{cases}
+nnz(Y_{red})/nnz(Y),&nnz(Y)>0,\\
+1,&nnz(Y)=0.
+\end{cases}
 \end{equation}
-只有 $r_{fill}\le\fld{max\_fill\_ratio}$ 才输出 reduced 矩阵并标记 valid。
+若 $r_{fill}>r_{max}$，写 \texttt{KronFillInTooLarge} 并不返回 reduced matrix/recovery valid。
+这不是传统“新增 fill / 原 retained nnz”口径；矩阵维数下降时 ratio 可能小于 1。
 
-带注入入口在上述 valid 后计算
+\subsection{常电流注入版本}
+
+\srcpath{apply\_kron\_reduction\_with\_injection} 先调用上述函数，再抽取 $I_\alpha,I_\beta$：
 \begin{equation}
- I_{red}=I_\alpha-\left(Y_{\alpha\beta}Y_{\beta\beta}^{-1}\right)I_\beta,
+I_{red}=I_\alpha-LI_\beta.
 \end{equation}
-见 \srcpath{src/graph/kron\_reduction.cpp:apply\_kron\_reduction\_with\_injection}。但是当前恢复 API
-\srcpath{recover\_eliminated\_voltages} 不接收 $I_\beta$，实际只返回
+它要求 I\_full 覆盖所有给定索引，但没有维数检查。$Y_{red}$ 与零注入版本相同。
+
+\subsection{稠密恢复的实际边界}
+
+\srcpath{recover\_eliminated\_voltages} 当前只计算
 \begin{equation}
- V_\beta=-K V_\alpha.
+V_\beta=-K V_\alpha.
 \end{equation}
-invalid 或 $K$ 行数为零时返回空向量，见 \srcpath{src/graph/kron\_reduction.cpp:recover\_eliminated\_voltages}。
-因此不能声称当前 API 已实现含非零 $I_\beta$ 的完整电压恢复式。
+完整含注入关系应为 $V_\beta=Y_{\beta\beta}^{-1}I_\beta-KV_\alpha$，但 recovery API 不接收
+$I_\beta$，所以注入版本的 \fld{I\_reduced} 可用于边界方程，不能用现有函数完整恢复内部电压。
+invalid、空 $K$ 都返回空向量，不抛错；$V_\alpha$ 维数不匹配由 Eigen 运行时行为决定。
 
-\subsection{稀疏逐节点 Kron}
+\subsection{SparseKronOptions}
 
-\srcpath{src/graph/sparse\_kron\_reduction.cpp:eliminate} 对节点 $k$ 的每个列邻居 $i$、行邻居 $j$
-执行
+\compmeta{SparseKronOptions}{include/hacdcpf/graph/sparse\_kron\_reduction.hpp}
+\begin{paramtable}
+\fld{max\_front} & $f_{max}$ & count & $\ge0$ & 12 & 候选最大 row/column 邻居数\\
+\fld{max\_nnz\_ratio} & $\rho_{max}$ & -- & $\ge1$ & 2.0 & 预测 nnz 相对初始上限\\
+\fld{pivot\_tolerance} & $\epsilon_p$ & -- & $\ge0$ & $10^{-12}$ & $|Y_{kk}|\le\epsilon_p$ 不消去\\
+\fld{drop\_tolerance} & $\epsilon_d$ & -- & $\ge0$ & $10^{-13}$ & 小更新直接删除\\
+\end{paramtable}
+
+稀疏入口验证方阵、eligible mask 长度和四个选项范围；失败写 \fld{error}，不抛异常。
+
+\subsection{可变稀疏矩阵}
+
+实现同时维护每行和每列的 unordered map 以及 active mask。front 定义为
 \begin{equation}
- Y_{ij}\leftarrow Y_{ij}-\frac{Y_{ik}Y_{kj}}{Y_{kk}},
+f(k)=\max\{|\{j\ne k:Y_{kj}\ne0\}|,
+             |\{i\ne k:Y_{ik}\ne0\}|\}.
 \end{equation}
-并保存恢复系数 $-Y_{kj}/Y_{kk}$。任何更新值绝对值不大于
-\fld{drop\_tolerance} 就从 row/column map 中删除。
+预测消去后的 nnz 为当前 nnz 减去第 $k$ 行/列（对角只减一次），再加上 row-neighbour 与
+col-neighbour 笛卡尔积中当前为空的位置；该估计未扣除数值相消或 drop。
 
-候选节点按 $\max(n_{row},n_{col})$ 的 front size 最小优先；弹出时若 front 已变化则重新入队。
-只有 front 不超过 \fld{max\_front}、$|Y_{kk}|$ 严格大于 \fld{pivot\_tolerance}，且预测消去后
-非零数不超过
+\subsection{最小 front 队列与拒绝语义}
+
+eligible 节点以 \texttt{(front,node)} 进入最小优先队列。弹出时 front 已变化则重新入队；若
+$f(k)>f_{max}$、pivot 太小或预测 nnz 超过
 \begin{equation}
- \left\lceil\fld{max\_nnz\_ratio}\cdot nnz(Y_{initial})\right\rceil
+\left\lceil\rho_{max}\,nnz(Y_0)\right\rceil
 \end{equation}
-才消去。选项要求 max front 非负、max nnz ratio 至少 1、两个 tolerance 非负；否则返回 error。
-依据为 \srcpath{src/graph/sparse\_kron\_reduction.cpp:reduce\_sparse\_kron}。
+则直接 \texttt{continue}，节点保留且没有 per-node rejection diagnostic。算法不会因某候选拒绝而
+使整个 result invalid。
 
-\subsection{串联、悬垂与映射覆盖边界}
+对接受节点，逐项执行
+\begin{equation}
+Y_{ij}\leftarrow Y_{ij}-\frac{Y_{ik}Y_{kj}}{Y_{kk}},
+\end{equation}
+保存 recovery coefficients $c_{kj}=-Y_{kj}/Y_{kk}$，移除其行列，再重新排受影响 eligible 邻点。
+\fld{max\_front} 报实际已消去节点的最大 front；\fld{recovery\_steps.size()} 是消去节点数。
 
-串联和悬垂降阶不是单一 $Z_1+Z_2$ 公式：代码还受设备类别、保留集合、注入、状态和映射
-可恢复性约束。其当前实现分别位于 \srcpath{src/graph/series\_reduction.cpp}、
-\srcpath{src/graph/reduction\_plan.cpp} 与 \srcpath{src/graph/result\_recovery.cpp}。
-本章未逐分支展开这些文件，因此不提供“等值阻抗相加”或“叶节点固定 1 pu”等概括式，也不声称
-这些路径已完成数学逐式覆盖。
+\subsection{稀疏结果与恢复}
+
+active 原节点按升序写 \fld{retained}，\fld{reduced} 的位置对应 retained vector position。
+其 \srcpath{valid()} 方法只检查 error 为空、original size 非负、reduced rows 等于 retained
+size；它不要求至少消去一个节点，也不保存候选拒绝原因。
+
+\srcpath{recover\_sparse\_kron\_state} 先把 retained state 散射到 original positions，再逆序执行
+\begin{equation}
+x_k=\sum_j c_{kj}x_j.
+\end{equation}
+invalid 或维数不符抛 \texttt{invalid\_argument}。\srcpath{sparse\_kron\_recovery\_operator} 对每个
+retained basis vector 调用完整恢复以显式构造 $T:x_{full}=Tx_{retained}$，适合小规模诊断；复杂度
+约为 retained 数乘一次 tape recovery，生产大系统优先直接用 tape。
+
+\subsection{三相混合 OPF 集成}
+
+\srcpath{three\_phase\_hybrid\_opf.cpp:build\_model\_data} 的 GraphReduced 变体把有 P/Q load、固定
+电流、generator、converter terminal 和 reference phase node 标为 retained，其余 eligible。
+调用稀疏 Kron 后若 result invalid 则抛 runtime error；被 front/pivot/fill 单独拒绝的节点自然留在
+retained 集。OPF 显式构造 recovery operator，把 full phase voltage 表成 reduced variables 的线性
+函数，并在 result 中返回 reduction 和 eliminated count。这是当前稀疏 Kron 最完整的生产消费者。
+
+\subsection{数值与物理边界}
+
+两条实现都描述线性 $I=YV$。被消去节点若有恒功率/电压相关注入，eligible 判定或 operating-point
+线性化必须由调用方处理；graph Kron API 本身不读 HybridPowerSystem。drop tolerance 改变矩阵与
+恢复算子，是受控数值近似；FullPivLU 的 isInvertible 也不是用户可配置条件数阈值。

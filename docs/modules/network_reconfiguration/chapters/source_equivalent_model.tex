@@ -106,11 +106,11 @@ $c_e(1-\beta_e)$。矩阵形式把闭合边常数移到右端：
  \le N_{max}-\sum_{e:\alpha_e=1}c_e.
 \end{equation}
 仅当 \fld{max\_switch\_ops}>0 时创建，见
-\srcpath{src/network\_reconfiguration/topology\_reconfiguration.cpp:bigm\_branch（lambda）}。
+\srcpath{topology\_reconfiguration.cpp:run\_topology\_reconfiguration}。
 
 旧手册给出的 $\sum r_eS_B$ 不是当前 loss aware 目标。结果的
 \fld{feasible}/\fld{optimal}/\fld{proven\_optimal} 还受后端状态字符串规范化和 primal 可用性影响；
-详细提取位于 \srcpath{src/network\_reconfiguration/topology\_reconfiguration.cpp:try\_external（lambda）}。
+详细提取位于 \srcpath{topology\_reconfiguration.cpp:run\_topology\_reconfiguration}。
 
 \subsection{覆盖边界}
 

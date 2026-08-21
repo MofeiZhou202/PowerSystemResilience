@@ -1,0 +1,116 @@
+% overview_contract.tex —— 模块职责、公共入口与索引契约
+
+\section{模块总览与公共契约}\label{sec:gr-overview}
+
+\subsection{受控源码与职责边界}
+
+图模块由十个公共头和八个实现文件组成，伞形头为
+\srcpath{include/hacdcpf/graph/graph.hpp}。其职责分为四层：
+\begin{enumerate}
+  \item 把 \texttt{HybridPowerSystem} 的一部分工程组件投影为带域节点、分类边和邻接表；
+  \item 在只读图上计算连通分量、岛状态、径向性、桥、割点与基本圈；
+  \item 在系统副本上执行零阻抗收缩、串联化简和悬垂折叠，或直接对导纳矩阵执行 Kron；
+  \item 通过映射/恢复带把保留节点的复电压扩展回被消去节点。
+\end{enumerate}
+它不装配通用 $Y_{bus}$，不调用 PF/OPF，不验证恢复后的非线性方程，也不自动组合全部阶段。
+规范投影与 \texttt{BusMergeMap}/\texttt{BranchExpandMap} 属于 \texttt{model/projection}，不能与
+本模块的 \texttt{ReductionMapping} 混为一谈。
+
+\subsection{公共入口族}
+
+\begin{longtable}{@{}L{5.2cm}L{4.4cm}L{5.0cm}@{}}
+\toprule
+入口 & 输入/输出 & 当前语义\\
+\midrule
+\endfirsthead
+\toprule
+入口 & 输入/输出 & 当前语义\\
+\midrule
+\endhead
+\srcpath{build\_power\_system\_graph} & rich system $\to$ graph & 建立节点、边、域映射和邻接表\\
+\srcpath{analyze\_topology} & graph $\to$ report & 完整岛、径向性、桥/割点/圈报告\\
+\srcpath{is\_connected/is\_radial/count\_islands} & graph $\to$ 标量 & 只看在运节点和边的快速查询\\
+\srcpath{find\_bridges} & graph $\to$ edge positions & Tarjan 桥，返回 \texttt{edges[]} 位置\\
+\srcpath{find\_articulation\_points} & graph $\to$ node positions & Tarjan 割点，返回 \texttt{nodes[]} 位置\\
+\srcpath{find\_fundamental\_cycles} & graph $\to$ edge-position lists & 生成树加非树边的基本圈基\\
+\srcpath{contract\_zero\_impedance\_edges} & graph+system $\to$ contraction result & 并查集合并并重写系统副本\\
+\srcpath{classify\_reduction\_candidates} & graph+system+options $\to$ candidates & 当前实现实际只读 graph，system 参数未使用\\
+\srcpath{make\_reduction\_plan} & graph + candidates + options $\to$ plan & 生成 series/pendant/Kron 动作，不生成收缩动作\\
+\srcpath{apply\_series\_reduction} & graph+system+plan $\to$ reduced result & 只消费 SeriesReduction 动作\\
+\srcpath{apply\_pendant\_reduction} & graph+system+plan $\to$ reduced result & 只消费 PendantFold 动作\\
+\srcpath{apply\_kron\_reduction} & sparse $Y$, $\alpha$, $\beta$ $\to$ dense-block result & Schur 补、填充守卫和恢复矩阵\\
+\srcpath{apply\_kron\_reduction\_with\_injection} & 再加 $I$ $\to$ $Y_{red},I_{red}$ & 常电流注入等值\\
+\srcpath{reduce\_sparse\_kron} & sparse $Y$+eligible $\to$ tape & 最小 front 顺序逐节点消去\\
+\srcpath{recover\_*} & reduced state+mapping $\to$ full voltage maps & 收缩/串联/Kron/悬垂分别恢复\\
+\bottomrule
+\end{longtable}
+
+\subsection{单位制}
+
+\begin{center}\small
+\begin{tabular}{@{}L{4.0cm}L{3.0cm}L{7.0cm}@{}}
+\toprule
+量 & 单位 & 说明\\
+\midrule
+\fld{base\_kv} & kV & 节点额定电压；收缩守卫使用相对差\\
+\fld{r\_pu/x\_pu/b\_pu} & pu & 图边电阻、电抗、总充电电纳\\
+\fld{tap} & pu & 变比；图中 Transformer2W 目前不复制其电气参数\\
+\fld{shift\_deg} & degree & ACBranch 相移\\
+\fld{rate\_a\_mva} & MVA & 串联候选热限保留依据\\
+\texttt{FullNetworkVoltages} & pu complex & $V=V_m e^{j\theta}$\\
+\srcpath{vm\_pu/va\_deg} & pu / degree & 扁平兼容映射的便捷访问器\\
+\fld{elapsed\_ms} & ms & 稀疏 Kron 内部计时\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{五类身份空间}
+
+\begin{longtable}{@{}L{4.4cm}L{5.0cm}L{4.8cm}@{}}
+\toprule
+值 & 含义 & 对外使用规则\\
+\midrule
+\endfirsthead
+\toprule
+值 & 含义 & 对外使用规则\\
+\midrule
+\endhead
+\texttt{GraphNode::bus\_id} & 源模型母线稳定 \texttt{.index} & 必须与 \texttt{NodeDomain} 联合\\
+\texttt{nodes[]} 位置 / \fld{from\_node} & 临时图节点下标 & 不持久化、不作为母线 ID\\
+\texttt{GraphEdge::comp\_index} & 源组件稳定 \texttt{.index} & 回写模型时使用\\
+\texttt{edges[]} 位置 / 邻接表 edge index & 临时图边下标 & bridge/cycle API 的返回空间\\
+\texttt{GraphEdge::edge\_id} & 构图时等于边位置的内部标识 & 串联新增边后不保证仍等于位置\\
+\bottomrule
+\end{longtable}
+
+权威母线查询是 \fld{ac\_bus\_id\_to\_node\_idx} 与
+\fld{dc\_bus\_id\_to\_node\_idx}。\fld{bus\_id\_to\_node\_idx} 只写 AC；
+\texttt{IslandInfo::bus\_ids}、\fld{cut\_vertex\_bus\_ids}、扁平
+\texttt{ReductionMapping} 与 \fld{bus\_voltage} 都是兼容视图。AC/DC 数值同号时，扁平视图
+可重复、覆盖或丢失域信息，不能驱动混合系统计算。
+
+\subsection{调用层与可达流水线}
+
+公共 C++ 接口是离散原语，而生产 GUI 路由自行组合：
+\begin{equation}
+\text{rich snapshot}\to\text{graph}\to
+[\text{contraction}]\to[\text{series}]\to[\text{pendant}]
+\to\text{compact JSON}.
+\end{equation}
+该路由不求解，也不恢复电压；Kron 只识别候选。另一条独立生产用法是三相混合 OPF 的
+\texttt{GraphReduced} 变体，它直接在相节点 $Y$ 上调用稀疏 Kron，并把恢复算子嵌入 NLP。
+二者不能用一个“网络降阶已执行”布尔量概括。
+
+\subsection{失败与状态通道}
+
+拓扑与收缩 API 不抛出一般业务失败，而把部分问题写入 \texttt{Diagnostic}；收缩仍返回一个
+可能部分合并的系统。稠密 Kron 用 \fld{kron\_data.valid} 和 diagnostics 表示拒绝；稀疏 Kron
+用 \fld{error}/\srcpath{valid()}，恢复维数错误则抛 \texttt{invalid\_argument}。串联/悬垂遇到
+动作形状、边或母线不匹配时多数静默 \texttt{continue}，其 result diagnostics 当前没有赋值路径。
+因此“返回对象存在”不等于“请求的每个动作都执行”。
+
+\subsection{主要消费者}
+
+\srcpath{validate\_system.cpp}、PF/AC OPF 门面、时序潮流、可靠性/弹性/保护模块和网络重构消费
+拓扑报告；\srcpath{three\_phase\_hybrid\_opf.cpp} 消费稀疏 Kron；GUI server 维护 resident graph
+并提供拓扑、视窗与网络化简路由。图模块本身不拥有这些上层结果的 \texttt{model\_scope}。

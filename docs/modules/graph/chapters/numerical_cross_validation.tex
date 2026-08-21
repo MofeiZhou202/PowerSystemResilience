@@ -1,0 +1,107 @@
+% numerical_cross_validation.tex -- 可复核数值证据与独立交叉验证
+\section{数值交叉验证与可复现实验}\label{sec:gr-numerical-crossval}
+
+\subsection{实验边界与复现条件}
+
+本节补上实现审计不能由断言数量替代的数值证据。所有数值来自同一轮 clean
+Release 重编译后的注册测试，不修改运行时算法。实验机为 Apple Silicon
+macOS/arm64，CMake preset 为 \srcpath{macos-release}（Release、\texttt{-O3}、
+\texttt{-DNDEBUG}）。主仓库提交为 \texttt{b1bf15736c96}，
+本地 \texttt{../MIPSolvers} 为 \texttt{7721936245d5}；
+后者与仓库记录的 pin \texttt{3bf1e66749e3} 不同，因此这里的结果是“当前工作树依赖”
+证据，不是 pinned-dependency 认证。
+
+重建和运行命令如下（输出日志保存在
+\srcpath{/private/tmp/hysim\_graph\_nr\_evidence\_20260821/}）：
+\begin{verbatim}
+cmake --build --preset macos-release --target \
+  test_graph test_graph_kron test_graph_roundtrip \
+  test_topology_crossval test_reconfig_options test_device_flows \
+  test_distribution_pipeline test_crossmodule_integration -j4
+build/macos-release/tests/test_graph -s
+build/macos-release/tests/test_graph_kron -s
+build/macos-release/tests/test_graph_roundtrip -s
+\end{verbatim}
+
+本节只声称这八个目标的 focused Release rebuild 结果：\texttt{test\_graph} 30 cases/129
+assertions，\texttt{test\_graph\_kron} 9/44，\texttt{test\_graph\_roundtrip}
+17/294；其余五个目标属于重构及跨模块证据，列在网络重构章节。没有运行完整
+CTest、sanitizer 或图模块级全网络基准，故不得将本节表格解释为全套认证。
+
+\subsection{验收门槛}
+
+\begin{center}\small
+\begin{tabular}{@{}L{5.0cm}L{3.0cm}L{5.2cm}@{}}
+\toprule
+比较对象 & 验收门槛 & 口径\\
+\midrule
+无源线性 Kron & boundary current 与恢复状态最大绝对误差 $\le 10^{-10}$ & 复数电流/电压，标幺或导纳单位按测试输入\\
+闭合开关、无源 series & 保留电压与总有功损耗差 $\le 10^{-6}$ & 与完整网络 PF 的同一 MW 基准比较\\
+case33bw split-series & 恢复电压最大误差 $\le 10^{-4}\,{\rm pu}$，损耗差 $\le 10^{-4}\,{\rm MW}$ & 允许 MATPOWER/数值线性代数舍入\\
+DC OPF round-trip & 目标差 $\le 10^{-3}$ & 目标值不是物理损耗\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{稠密 Kron：解析式与完整矩阵对照}
+
+三母线无源测试将中间母线消去。稠密 Schur 补得到等值导纳虚部
+\(6.66666666666666785\)，解析值为 \(6.66666666666666696\)，误差小于
+\(10^{-10}\)。加入边界电压后，边界电压检查为 0（容差 \(10^{-10}\)）。这是一条
+独立于实现矩阵填充顺序的标量解析对照，证明无源内部节点的 Kron 路径没有把
+导纳符号或端点顺序写反。
+
+对稀疏 Kron tape，保留 3 个节点、消去 2 个节点，并同时用完整矩阵直接求解和
+recovery operator 回放。三组边界电流最大误差分别为
+\(3.55\times10^{-15}\)、\(2.03\times10^{-15}\)、\(6.30\times10^{-16}\)；
+消去节点零注入残差为 \(8.90\times10^{-16}\) 与 \(4.19\times10^{-15}\)，
+恢复算子最大误差为 0。该结果满足比 \(10^{-10}\) 更严格的门槛，且同时检查了
+边界方程、内部零注入和状态恢复三种量。
+
+恒功率内部注入被单独标成近似路径：with-injection 与 zero-injection reduced
+current norm 的差为 \(0.64513950905954009\)。因此该路径不能被描述为精确
+Ward 等值；调用方必须保留工作点、注入假设和后验 PF 结果。
+
+\subsection{开关收缩与串联化简的 PF round-trip}
+
+闭合 AC 开关收缩后，两个被合并母线的电压分别为 1.0 pu 与
+0.9898411045193044 pu；完整网和收缩网回放的总有功损耗均为
+0.01479915889694494 MW，差值低于 \(10^{-6}\,\rm MW\)。该数值也暴露了工程
+边界：实现把低阻/闭合关系视为可收缩候选，但输入若允许明显电压差，收缩前后的
+电压并非“强制相等”的物理测量值，仍需后验检查。
+
+对被动三母线串联支路，完整/化简 PF 损耗和恢复电压为
+\[
+\begin{aligned}
+P_{\rm loss}^{full}&=0.01430375711174059\ {\rm MW},&
+P_{\rm loss}^{red}&=0.01430375711175214\ {\rm MW},\\
+V_{2}^{rec}&=0.99381398947056943\ {\rm pu},&
+V_{2}^{full}&=0.99381398947057409\ {\rm pu}.
+\end{aligned}
+\]
+损耗差约 \(1.16\times10^{-14}\,\rm MW\)。
+把 branch component index 改成非连续值后得到相同数量级结果，说明测试覆盖了
+“稳定组件 ID 不等于 vector position”的真实接口风险。
+
+IEEE case33bw 的 split-series round-trip 进一步把多个串联记录组合起来：共生成
+3 条 series records，最大恢复电压误差约 \(1.17\times10^{-12}\,\rm pu\)，代表值为
+\(0.9985161219139157\) 对 \(0.99851612191391848\)、
+\(0.94375047987776928\) 对 \(0.94375047987795657\)、
+\(0.91963815539739369\) 对 \(0.91963815539855953\)。完整与化简 PF 的损耗
+均为 0.2026771169693 MW 量级，差满足 \(10^{-4}\,\rm MW\) 门槛。
+
+\subsection{DC OPF 与图化简的一致性}
+
+串联化简前后的 DC OPF 目标分别为
+\(800.0\) 与 \(800.00000000000011369\)，差约
+\(1.14\times10^{-13}\)。这只是目标函数 round-trip 证据：它不证明 AC PF
+可行性，也不证明经济成本与物理损耗相同；后者仍须由 OPF/PF 各自的 result scope
+和 residual 字段给出。
+
+\subsection{证据解读与未覆盖范围}
+
+上述结果形成三层交叉验证：解析三母线标量、完整矩阵与 recovery operator、以及
+完整/化简网络的 PF/OPF round-trip。它们没有覆盖任意富组件的全网络图基准；
+AUD-024--AUD-031 所列的同号 AC/DC 计划冲突、非连续 pendant branch ID、内部注入
+恢复、multi-stage mapping compose 和富组件 compact 丢失仍是开放审计项。因而当前
+graph reduction 只准用于组件覆盖已知、域限定 ID 已保存并有原网后验 PF/OPF 的场景。

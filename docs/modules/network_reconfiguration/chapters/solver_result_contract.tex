@@ -1,0 +1,179 @@
+% solver_result_contract.tex —— 求解路径、后验证与结果字段
+
+\section{求解路径与结果证书}\label{sec:nr-solver}
+
+\subsection{模型装配与二元变量}
+
+矩阵以 Eigen 稀疏 triplet 装配为 \texttt{MIPModel}。只有自由 $\beta_e$ 和全部 $\gamma_g$ 被声明为
+二元变量；固定 $\beta_e$ 保持连续类型但满足 $lb=ub\in\{0,1\}$，以减少 B\&C 分支规模。
+故障边、不可操作边、排除 overlay 和同分量无效 tie 均通过变量边界固定。
+
+\fld{enable\_pf=false} 时只创建 $F,F_g,\beta,\gamma$；此时
+\fld{enable\_voltage}、\fld{enable\_thermal} 和 \fld{loss\_aware} 不创建相应变量或约束。
+\fld{model\_scope} 分别固定为：
+\begin{equation}
+\begin{cases}
+\texttt{hybrid-acdc-topology-lindistflow},&\fld{enable\_pf}=true,\\
+\texttt{hybrid-acdc-topology-connectivity},&\fld{enable\_pf}=false.
+\end{cases}
+\end{equation}
+
+\subsection{图启发式}
+
+当 \fld{skip\_heuristic=false} 且不是分域模式时，核心先从主根沿当前健康闭合边做 BFS。若所有母线
+已可达，则取 BFS 树；若有不可达节点，则从一条连接“已达/未达”两侧的初始断开自由边中选择当前
+线性系数最小者，再扩展一次 BFS。启发式向量设置：
+\begin{itemize}
+  \item participating 边只闭合 BFS parent edge，overlay 保留原状态；
+  \item 主根 $\gamma=1$，虚拟流由子树大小生成；
+  \item 其余变量初始为零。
+\end{itemize}
+只有该向量同时满足全部等式、不等式和变量界（最大违反 $<10^{-6}$）时才被接受。PF 开启且存在
+非零负荷时，零 $P/Q/P_g/s$ 往往使启发式失败，从而进入 MILP。
+
+成功的启发式返回
+\begin{center}
+\texttt{solver\_backend=graph-heuristic},\quad
+\texttt{solver\_status=feasible incumbent},\quad
+\texttt{solver\_mip\_gap=inf},\quad
+\texttt{proven\_optimal=false}.
+\end{center}
+它没有与 MILP 下界比较，不能称为最优 ONR。
+
+\subsection{实际后端分派}
+
+\begin{center}\small
+\begin{tabular}{@{}L{2.5cm}L{6.0cm}L{6.0cm}@{}}
+\toprule
+\fld{solver} & 首选路径 & 失败行为\\
+\midrule
+\texttt{native} & \texttt{solve\_milp\_bc}，MIR、5 轮根割、伪成本分支 & 直接失败返回\\
+\texttt{scip} & \texttt{ScipAdapter} & 不可用或失败则返回\\
+\texttt{highs} & \texttt{StrictHighsBranchAndCutAdapter} & 再尝试 SCIP；不尝试 Native\\
+\texttt{auto} & HiGHS & 再尝试 SCIP；不尝试 Native\\
+其他字符串 & 与 \texttt{auto} 相同 & HiGHS 后 SCIP\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+这一分派以 \srcpath{topology\_reconfiguration.cpp:run\_topology\_reconfiguration} 为准。
+公共头注释中 \texttt{auto (HiGHS->native)} 与实现不符；当前实际没有 auto-to-native fallback。
+外部后端成功时 \fld{bc\_stats} 保持默认值，诊断应读取 \fld{solver\_backend}、
+\fld{solver\_status} 和 \fld{solver\_mip\_gap}。
+
+\subsection{成功、可行与最优判定}
+
+外部或 Native 返回 \texttt{stats.success=true} 且解向量长度不少于变量数，才进入统一后验证。
+\fld{proven\_optimal} 还要求：
+\begin{enumerate}
+  \item 规范化状态字符串属于实现识别的最优状态集合；
+  \item MIP gap 有限；
+  \item $gap\le\fld{mip\_gap}+10^{-9}$。
+\end{enumerate}
+识别集合包括 \texttt{optimal}、\texttt{highs optimal}、
+\texttt{optimal solution found}、\texttt{optimality gap reached} 等固定字符串。一个后端若返回语义等价
+但未列入的状态，仍会得到可行结果，但不会标记已证明最优。
+
+\subsection{统一后验可行性检查}
+
+所有启发式/外部/Native 解必须通过：
+\begin{align}
+\|A_{eq}x-b_{eq}\|_\infty&\le10^{-6},\\
+\|(Ax-b)_+\|_\infty&\le10^{-6},\\
+\operatorname{dist}(x_j,\{0,1\})&\le10^{-4}\quad(j\in\mathcal B),\\
+l_i-10^{-6}\le x_i&\le u_i+10^{-6}.
+\end{align}
+任何一项失败都把 \fld{feasible} 改为 false 并返回；残差数值只在 verbose 日志中出现，没有存入
+\texttt{TopoReconfResult}。通过后 \fld{feasible=true}，且
+\fld{optimal=proven\_optimal}。
+
+\subsection{目标值与分解}
+
+模型内开关项对初始闭合边使用 $-\lambda_{sw}c_e\beta_e$，省略常数
+$\lambda_{sw}c_e$；初始断开边使用 $+\lambda_{sw}c_e\beta_e$。因此
+\fld{milp\_objective}$=c^Tx$ 可以为负，且不是四个正向业务成本的直接总和。
+
+\texttt{ObjBreakdown} 采用更易读的正向动作计费：
+\begin{align}
+J_{switch}^{report}&=\lambda_{sw}\sum_e c_e[\beta_e\ne\beta_e^0],\\
+J_{loss}^{report}&=\lambda_{loss}\sum_{e\in E_{line}}|r_e|
+\begin{cases}t_e,&\fld{loss\_aware}\land\fld{enable\_pf},\\\beta_e,&\text{其他},\end{cases}\\
+J_{shed}^{report}&=\lambda_{shed}\left(\sum_i s_i^P+\sum_{i\in AC}s_i^Q\right),\\
+J_{island}^{report}&=\lambda_{island}\sum_{g\ne g_0}\gamma_g.
+\end{align}
+因为 $J_{switch}^{report}$ 恢复了省略常数，通常有
+\begin{equation}
+\fld{milp\_objective}\ne
+J_{switch}^{report}+J_{loss}^{report}+J_{shed}^{report}+J_{island}^{report}.
+\end{equation}
+调用方不得用四项求和反向校验原始目标，除非同时恢复所有常数。
+
+\subsection{损耗字段的三种不同口径}
+
+\begin{center}\small
+\begin{tabular}{@{}L{4.0cm}L{5.1cm}L{5.4cm}@{}}
+\toprule
+字段/数值 & 计算 & 含义\\
+\midrule
+\fld{obj\_terms.loss} & $\lambda_{loss}\sum |r|t$ 或 $\lambda_{loss}\sum|r|\beta$ & 加权目标贡献，无物理 MW 承诺\\
+\fld{reconf\_loss\_mw} & $S_B\sum_{AC/DC\ closed}r_e$ & 假设每条闭边 1 pu 电流的拓扑代理\\
+HTTP \texttt{reconfig\_loss\_mw} & 完整 PF 支路 $P_{from}+P_{to}$ 的正损耗和 & PF 收敛时的后验证损耗\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+核心 \fld{base\_loss\_mw}、\fld{loss\_reduction\_mw}、\fld{loss\_reduction\_pct} 当前没有赋值
+路径，保持默认 0；HTTP 使用局部变量另行计算并写入 JSON。\texttt{ONRResult::estimated\_loss\_mw}
+映射自核心 \fld{reconf\_loss\_mw}，仍是拓扑代理。
+
+\subsection{完整字段赋值真值表}
+
+\begin{longtable}{@{}L{4.2cm}L{4.0cm}L{6.4cm}@{}}
+\toprule
+字段 & 核心赋值时机 & 解释/限制\\
+\midrule
+\endfirsthead
+\toprule
+字段 & 核心赋值时机 & 解释/限制\\
+\midrule
+\endhead
+\fld{feasible} & 后验线性检查通过 & 不是 PF/OPF 可行\\
+\fld{optimal}/\fld{proven\_optimal} & 状态+有限 gap 通过 & 启发式永远 false\\
+结构化 open/closed/switched & 可行解提取 & 混合系统权威索引空间\\
+旧式整数向量 & 同时填充 & 可能跨域碰撞\\
+\fld{switch\_operations} & 状态发生变化 & 设备或分支稳定 ID\\
+\fld{ordered\_switch\_actions} & 动作回投影后 & 静态操作顺序，不是时域仿真\\
+\fld{total\_shed\_mw/mvar} & PF 变量存在时 & $s^P/s^Q$ 求和；无节点向量\\
+\fld{milp\_objective} & $c^Tx$ & 含权重和省略常数\\
+\fld{obj\_terms} & 可行解后处理 & switching 项与原目标常数口径不同\\
+\fld{reconf\_loss\_mw} & 可行解后处理 & 名义电流代理\\
+\fld{base\_loss\_mw} 等 & 不赋值 & 核心始终默认 0\\
+\fld{solve\_time\_s} & 正常/大多数失败返回 & 早期空系统/无源返回仍为 0\\
+\fld{solver\_backend/status/gap} & 求解路径 & 早期无源只有 status\\
+\fld{bc\_stats} & 仅 Native 路径 & 外部后端保持默认\\
+\fld{model\_scope} & 入口开始 & 即使后续不可行仍存在\\
+\fld{post\_action.../post\_power.../full\_hybrid.../executable} & 不赋值 & 仅 HTTP 层修改副本\\
+\bottomrule
+\end{longtable}
+
+\subsection{ValidityFlags 的准确读法}
+
+核心入口在求解前即设置部分标志：\fld{radial\_topology\_enforced}、
+\fld{device\_capability\_constraints\_enforced}、\fld{protection\_interlocks\_enforced} 为 true；
+\fld{ac\_lindistflow\_enforced} 等于 \fld{enable\_pf}；DC/VSC 标志按资产存在设置。
+这些标志描述“模型构造意图”，并不以 \fld{feasible} 为前提。
+
+特别地，\fld{allow\_dc\_mesh=true} 时 DC 边不受树边数约束，但
+\fld{radial\_topology\_enforced} 仍为 true。调用方必须联合读取选项/运行时拓扑结果，不能把该单个
+布尔值解释为 AC、DC、VSC 全域都已证明径向。
+
+\subsection{失败模式}
+
+\begin{itemize}
+  \item 空母线或无 AC/DC 线路：返回默认不可行结果；只有 VSC 而无线段也在此边界内；
+  \item 无可用根源：返回不可行并给出明确 \fld{solver\_status}；
+  \item 后端无 incumbent：返回不可行并保留后端失败摘要；
+  \item 后验残差、整数性或边界失败：返回不可行，详细残差只在 verbose 日志；
+  \item 无效故障/候选稳定 ID：混合核心多数静默忽略；历史 ONR 旧死代码中的 throw 不可达；
+  \item 未知 \fld{solver}：落入 auto 行为，不拒绝输入。
+\end{itemize}

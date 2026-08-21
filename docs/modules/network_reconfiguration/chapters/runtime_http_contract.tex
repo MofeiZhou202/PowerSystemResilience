@@ -1,0 +1,112 @@
+% runtime_http_contract.tex —— 生产 HTTP 路由同步契约
+
+\section{HTTP/JSON 与 GUI 同步契约}\label{sec:nr-http}
+
+\subsection{生产路由与会话语义}
+
+生产入口为
+\begin{center}
+\texttt{POST /api/session/run\_reconfig}
+\end{center}
+实现于 \srcpath{tests/run\_gui\_server.cpp}。它读取当前会话的富模型快照，执行\textbf{单时刻}
+重构，并为了沿用前端时序表格把结果包装为 \fld{num\_steps=1}。响应中的
+\fld{steps\_topology}、\fld{sw\_on\_per\_step} 等不是多时段优化证据。
+
+\subsection{请求选项}
+
+路由从顶层 JSON 或 \texttt{options} 对象读取：
+\begin{itemize}
+  \item 电压：\texttt{v\_min\_pu}/\texttt{v\_max\_pu}，兼容别名
+        \texttt{v\_min}/\texttt{v\_max}；
+  \item 求解：\texttt{mip\_gap}、\texttt{max\_time\_s}（HTTP 默认 60 s）、
+        \texttt{solver}、\texttt{skip\_heuristic}；
+  \item 模型：\texttt{enable\_pf}、\texttt{enable\_voltage}、
+        \texttt{enable\_thermal}、\texttt{split\_domain\_trees}、
+        \texttt{allow\_dc\_mesh}、\texttt{loss\_aware}（HTTP 默认 true）；
+  \item 目标：四个 \texttt{lambda\_*} 与 \texttt{max\_switch\_ops}；
+  \item 故障：\texttt{line\_failures}（AC 兼容）、\texttt{fault\_ac}、
+        \texttt{fault\_dc}、\texttt{fault\_vsc}。
+\end{itemize}
+路由不接收显式 \texttt{switchable\_branches}；候选由富模型设备类型、角色、能力和锁状态自动生成。
+当系统同时含 DC 母线与 VSC 且请求未显式给 \texttt{split\_domain\_trees} 时，路由自动启用分域模式。
+
+HTTP 默认值与 C++ 默认值存在两处有意差异：\fld{max\_time\_s} 为 60 而非 300，
+\fld{loss\_aware} 为 true 而非 false。复现实验必须记录调用层。
+
+\subsection{后动作验证流水线}
+
+核心 \fld{feasible} 后，路由执行：
+\begin{enumerate}
+  \item 将请求故障和 \fld{switch\_operations} 写入富模型副本；
+  \item 重新 canonical projection，\fld{strip\_dead\_islands=false}；
+  \item 分别检查 AC、DC 和混合图的连通/孤岛/径向状态；
+  \item 在富模型上运行 \srcpath{solve\_power\_flow}；
+  \item 运行 \srcpath{solve\_ac\_opf}；异常只转为验证消息；
+  \item 仅当动作映射、序列、回投影、PF、OPF 全部通过时设置
+        \fld{executable=true}。
+\end{enumerate}
+
+路由中的 \fld{full\_hybrid\_opf\_validated} 实际由 \srcpath{solve\_ac\_opf(rich\_reconfig)} 的
+\fld{converged} 赋值。其具体混合覆盖取决于 AC OPF 门面与输入资产，不应仅凭字段名推断所有
+DC/VSC 非线性约束都得到独立认证。
+
+\subsection{响应字段分组}
+
+\begin{longtable}{@{}L{4.4cm}L{4.2cm}L{6.0cm}@{}}
+\toprule
+组 & 代表字段 & 口径\\
+\midrule
+\endfirsthead
+\toprule
+组 & 代表字段 & 口径\\
+\midrule
+\endhead
+核心候选 & \srcpath{feasible}、\srcpath{milp\_feasible}、\srcpath{milp\_objective}、\srcpath{obj\_terms} & 核心线性模型\\
+工程可执行 & \srcpath{executable}、\srcpath{zero\_load\_loss\_valid}、验证消息 & PF/OPF/动作联合\\
+模型范围 & \texttt{model\_scope}, \texttt{validity} & 核心+HTTP 后处理标志\\
+求解器 & \texttt{solver\_name}, \texttt{solver\_status} & 后端或启发式；当前不返回 gap\\
+切负荷 & \srcpath{total\_shed\_mw}、\srcpath{total\_shed\_mvar} & 核心 LinDistFlow 变量总和\\
+真实 PF 损耗 & \srcpath{base\_loss\_mw}、\srcpath{reconfig\_loss\_mw}、reduction & 仅 PF 收敛时有物理意义\\
+拓扑 & base/reconfig 的 radial、connected、islands 字段 & AC/DC/混合分组\\
+AC 兼容表 & open/closed AC ID 与 \srcpath{branch\_details} & 只列 AC\\
+混合详情 & \srcpath{dc\_branch\_details}、\srcpath{vsc\_details} & 带 domain 的独立数组\\
+设备动作 & \srcpath{switch\_operations}、\srcpath{ordered\_switch\_actions} & 富设备/分支稳定 ID\\
+伪时序视图 & \texttt{num\_steps=1}, \texttt{steps\_topology} & 单快照包装\\
+\bottomrule
+\end{longtable}
+
+\fld{zero\_load\_loss\_valid} 定义为
+\begin{equation}
+\fld{executable}\land \fld{total\_shed\_mw}\le10^{-6},
+\end{equation}
+因此核心候选切负荷为零但后验证失败时，该字段仍为 false。这是比单看
+\fld{total\_shed\_mw} 更严格的 GUI 结论。
+
+\subsection{已审计的损耗响应缺陷}
+
+当前路由写入
+\begin{equation}
+\texttt{estimated\_loss\_mw}
+=\fld{milp\_objective}\times\fld{base\_mva}.
+\end{equation}
+该式量纲不成立：\fld{milp\_objective} 可能同时含加权开关、切负荷、孤岛和损耗项，且开关项省略
+常数。它既不同于核心 \fld{reconf\_loss\_mw}，也不同于 HTTP 的 PF
+\texttt{reconfig\_loss\_mw}。在代码修复前，客户端必须忽略 \texttt{estimated\_loss\_mw}，
+只在 \texttt{reconfig\_pf\_converged=true} 时使用 \texttt{reconfig\_loss\_mw}。
+
+\subsection{失败与 HTTP 状态}
+
+核心不可行通常仍返回 HTTP 200，\texttt{milp\_feasible=false}；JSON 解析、输入访问或求解过程中
+抛出的 \texttt{std::exception} 返回 400；未知异常返回 500。HTTP 200 不等于拓扑可行，更不等于
+\fld{executable=true}。
+
+\subsection{GUI 消费约束}
+
+GUI 应：
+\begin{itemize}
+  \item 用 domain+ID 展示混合边，AC 旧式 ID 列表只用于纯 AC 表格；
+  \item 同时展示 MILP 可行、PF/OPF 后验证和可执行性，不把它们折叠为一个“成功”；
+  \item 把 \fld{milp\_objective} 标为无量纲加权目标，把损耗标为 PF 后验证值；
+  \item 在 \fld{proven\_optimal} 未由 HTTP 暴露的现状下，不显示“全局最优”；
+  \item 把单时刻响应标为一次重构，而非调度曲线。
+\end{itemize}

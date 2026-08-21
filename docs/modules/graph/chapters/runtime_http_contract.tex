@@ -1,0 +1,137 @@
+% runtime_http_contract.tex —— 生产 HTTP/GUI 图分析与化简组合契约
+
+\section{生产 HTTP 与 GUI 组合契约}\label{sec:gr-runtime-http}
+
+\subsection{会话快照与并发口径}
+
+生产路由实现在 GUI server 测试可执行的源文件中。拓扑分析读取会话内常驻的不可变
+\texttt{PowerSystemGraph}；网络化简读取不可变系统快照并创建请求局部的 graph/system 副本。两条路由
+都用会话级 \fld{busy} 排斥其他分析：已有任务时返回 HTTP 409 busy-conflict 错误。未加载系统、
+JSON 解析失败或执行异常返回
+HTTP 400。返回 200 只表示路由完成，不是 PF/OPF 或语义等价证书。
+
+\subsection{POST /api/session/topology}
+
+该路由忽略请求体，不接受算法选项，直接对 resident graph 调用
+\srcpath{analyze\_topology}。顶层字段为：
+
+\begin{longtable}{@{}L{4.4cm}L{4.2cm}L{5.6cm}@{}}
+\toprule
+字段 & 索引/单位 & 解释\\
+\midrule
+\endfirsthead
+\toprule
+字段 & 索引/单位 & 解释\\
+\midrule
+\endhead
+\fld{is\_connected/is\_radial} & bool & 整个在运混合无向图的结论\\
+\fld{cycle\_count} & count & $E_{on}-N_{on}+p$，不返回圈的边列表\\
+\fld{n\_ac\_islands/n\_dc\_islands} & count & DC 只计纯 DC 岛；混合岛归 AC\\
+\fld{all\_islands\_valid} & bool & 参考节点与孤立负荷综合标志\\
+\fld{n\_buses/n\_branches} & graph storage count & \texttt{node\_count/edge\_count}，包含图中停运对象，不是 live count\\
+\fld{islands[]} & stable bus IDs & 含 domain、status、AC/DC 母线列表和参考标志\\
+\fld{ac/dc\_bus\_island[]} & authored positions & 按系统 AC/DC bus vector 顺序，停运/未归岛为 $-1$\\
+\fld{cut\_vertices[]} & domain+stable ID & \texttt{bus/domain/pos}；推荐消费者使用\\
+\fld{cut\_vertex\_bus\_ids[]} & flat stable IDs & 兼容输出，同号 AC/DC 时有歧义\\
+\fld{ac/dc\_cut\_vertex[]} & authored positions & Canvas 布尔掩码\\
+\fld{bridges[]} & stable endpoints+positions & 每端独立给出 domain、bus ID 和 Canvas position\\
+\fld{diagnostics[]} & mixed legacy IDs & code/message/related buses/branches；related buses 未带域\\
+\bottomrule
+\end{longtable}
+
+岛状态字符串为 \texttt{Valid/NoSlack/NoDCVoltageRef/IsolatedLoad/Empty}，但当前核心分析不会赋值
+\texttt{IsolatedLoad} 或 \texttt{Empty}；孤立负荷通过 diagnostic 和
+\fld{all\_islands\_valid=false} 表达。桥列表不暴露 graph edge position 或源组件 index，而是为 GUI
+重建端点和类别；VSC 桥可有不同的 \fld{from\_domain/to\_domain}，legacy \fld{domain} 仅当两端均
+为 DC 时写 DC。
+
+\subsection{POST /api/session/network\_reduction 请求}
+
+请求体为 JSON object，当前五个布尔选项如下：
+
+\begin{center}\small
+\begin{tabular}{@{}L{5.7cm}L{2.0cm}L{6.5cm}@{}}
+\toprule
+字段 & HTTP 默认 & 实际作用\\
+\midrule
+\fld{enable\_switch\_contraction} & true & 执行闭合开关/断路器收缩阶段\\
+\fld{enable\_series\_reduction} & true & 单轮 classify/plan/apply series\\
+\fld{enable\_pendant\_reduction} & false & 单轮悬垂负荷折叠\\
+\fld{enable\_kron\_reduction} & false & 只标记响应 stage enabled；Kron 不执行\\
+\fld{contract\_zero\_impedance\_lines} & false & 收缩阶段是否额外合并低阻 AC/DC line\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+HTTP 与 C++ 默认的关键差异是 \fld{contract\_zero\_impedance\_lines}：C++ 为 true，而路由为
+false，防止用户遗漏
+$r/x$ 参数的普通线路被静默并母线。GUI 发出的请求不含
+\fld{enable\_kron\_reduction}，所以 GUI 下该值始终为 false。即使为 false，路由仍执行一次候选分类并
+返回 \fld{n\_candidates}；\fld{enabled} 表示请求意图，不是“候选扫描是否发生”。
+
+\subsection{网络化简实际流水线}
+
+可达执行顺序固定为：
+\begin{equation}
+G_0\xrightarrow[\text{可选低阻 line}]{\text{switch/breaker contraction}}
+G_1\xrightarrow{\text{one series plan}}G_2
+\xrightarrow{\text{one optional pendant plan}}G_3.
+\end{equation}
+每阶段都在前一阶段的新 graph/system 上重新 classify/plan。series 不是迭代到不动点；Kron 只在
+$G_3$ 上统计 passive candidates，因为矩阵 Kron 不生成 rich system，故不会改变 after count 或
+\fld{reduced\_system}。该路由不调用 PF/OPF，也不执行电压/支路结果恢复。
+
+路由另外维护 AC/DC 分开的 authored bus $\to$ 当前代表映射，并把代表链压缩。这个临时映射用于
+HTTP 展示，弥补了单阶段 \texttt{ReductionMapping} 不会自动复合的限制；它不是公共 C++ API，也没有
+支路映射。
+
+\subsection{网络化简响应}
+
+\begin{longtable}{@{}L{4.4cm}L{4.4cm}L{5.4cm}@{}}
+\toprule
+字段组 & 空间/单位 & 解释\\
+\midrule
+\endfirsthead
+\toprule
+字段组 & 空间/单位 & 解释\\
+\midrule
+\endhead
+\fld{before/after} & live counts & 在运 bus/edge 数；与 topology 的 storage count 不同\\
+\fld{n\_buses/branches\_eliminated} & count & before-after；不是 plan 的引用计数\\
+\fld{reduction\_pct\_buses} & percent & 空图为 0\\
+\fld{stages} & counts+fidelity strings & 每阶段 enabled、记录数和明确的精确/近似口径\\
+\fld{formulation\_notes[]} & text & 四条模型说明；不是机器可验证证书\\
+\fld{switch\_groups[]} & domain+stable IDs & super bus 与原成员\\
+\fld{series\_records[]} & domain+stable IDs, pu & $r_{eq},x_{eq}$ 及精确性字符串\\
+\fld{pendant\_records[]} & domain+stable IDs & 只声明 flat-voltage approximate，不给误差\\
+\fld{ac/dc\_bus\_reduction[]} & authored positions+stable IDs & status、代表 ID 和代表 authored position\\
+\fld{diagnostics[]} & legacy bare IDs & 汇总 contraction/series/pendant diagnostics\\
+\fld{reduced\_system} & JSON object & compact 后的 rich-model 子集，可重新加载\\
+\fld{reduced\_system\_schema} & string & 固定为 \texttt{hacdcpf\_system\_json\_v1}\\
+\bottomrule
+\end{longtable}
+
+母线 status 取 \texttt{retained/merged/series\_eliminated/pendant\_eliminated}。代表 position 在原始
+同域 bus vector 中查找；代表不存在时为 $-1$。响应没有统一 \texttt{schema}、\texttt{model\_scope}、
+\texttt{validity} 或 approximation error 字段，消费端应保留 \fld{stages.fidelity} 和 diagnostics。
+
+\subsection{紧凑 reduced\_system 的边界}
+
+reducer 内部保留停运 audit ghosts；HTTP 在序列化前删除停运母线/支路，并过滤端点不再存在的普通
+AC/DC 设备、VSC/DCDC、移动储能、VPP、微网和 EnergyRouter ports。端口少于两个的 EnergyRouter
+被删除，regulator 仅在 transformer 与 monitored bus 都仍有效时保留。随后清空 three-phase model、
+投影 mapping/certificate/report 和 telemetry。
+
+该过滤保证 JSON 不含悬空 terminal，且 E2E 已验证一个混合系统可重载并通过 topology/PF；它不证明
+设备语义保持。收缩层未重映射的富组件可能在 compact 时被删除，Transformer3W/LCC/EnergyRouter/
+three-phase 又不完整参与初始图模型。因此在 AUD-031 关闭前，含这些资产的导出只能解释为
+\textbf{拓扑化简视图}，不能作为全 rich-model 等价替代。
+
+\subsection{GUI 与 topology\_window 的关系}
+
+GUI 的拓扑面板调用 topology 路由并以 authored positions 高亮岛、桥和割点；网络化简面板显示
+before/after、记录表和代表着色，并允许下载响应 JSON。它不会自动用 reduced system 替换当前会话。
+
+\srcpath{POST /api/session/topology\_window} 只是 resident graph 空间索引上的 bbox/LOD 视窗查询：按
+地理坐标筛选/聚合节点和边，不运行 graph reduction，也不产生恢复映射。它与本章两条分析路由共享
+图数据来源，但不属于化简算法流水线。
