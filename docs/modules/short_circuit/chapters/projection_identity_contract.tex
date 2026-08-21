@@ -1,0 +1,92 @@
+% 富模型投影、身份与结果归属契约
+\section{富模型投影、身份与结果归属}\label{sec:sc-projection}
+
+短路模块的交流入口并不直接在用户编辑的 \fld{HybridPowerSystem} 上组装序网。三个公共
+入口 \srcpath{compute\_short\_circuit}、\srcpath{compute\_fault\_at\_bus} 和
+\srcpath{run\_short\_circuit\_detailed} 均先调用
+\srcpath{projection::RichToCanonicalOperator::apply}。因此，一个结果是否可解释，取决于
+``投影前对象身份--canonical 计算空间--结果回投影''三者是否区分清楚。
+
+\subsection{计算链与三个 ID 空间}
+
+\begin{center}
+\begin{tikzpicture}[node distance=8mm and 9mm,>=Latex,
+  box/.style={draw,rounded corners=2pt,align=center,inner sep=5pt,text width=3.5cm}]
+\node[box] (rich) {Rich 工程模型\\稳定组件 \fld{index}};
+\node[box,right=of rich] (canon) {Canonical 模型\\连续内部位置};
+\node[box,right=of canon] (solve) {序网/电导矩阵\\矩阵行列位置};
+\node[box,below=of canon] (back) {结果归属\\authored bus ID};
+\draw[->] (rich) -- node[above,align=center]{投影\\证书/映射} (canon);
+\draw[->] (canon) -- (solve);
+\draw[->] (solve) |- (back);
+\draw[->] (back) -| (rich);
+\end{tikzpicture}
+\end{center}
+
+\begin{itemize}
+  \item \textbf{稳定组件 ID}：\fld{ACBus::index}、\fld{DCBus::index}、
+        \fld{ACBranch::index} 等，是 JSON、GUI 和公共结果应使用的身份；允许不连续。
+  \item \textbf{vector position}：\fld{buses[i]}、\fld{branches[i]} 的零基位置，仅用于容器遍历。
+  \item \textbf{矩阵位置}：\srcpath{build\_id\_map} 生成的零基行列编号；投影后 AC 母线通常
+        重编号为 $1,\ldots,n$，但该编号不是原始组件身份。
+\end{itemize}
+AC 与 DC 允许存在同号母线，例如 AC bus 7 与 DC bus 7。两域计算分别使用各自容器和映射，
+不得用裸整数跨域查找；\srcpath{dc\_bus\_fault\_level} 的 \fld{dc\_bus\_id} 明确只在 DC 域解释。
+
+\subsection{Rich 到 canonical 的电气语义}
+
+投影执行富设备聚合、两绕组/三绕组变压器展开、开关和断路器状态处理、近零阻抗合并以及
+失电孤岛剥离，并随 canonical 系统保存以下证据：
+\begin{itemize}
+  \item \fld{BusMergeMap}：\fld{ext\_to\_int} 把 authored AC bus ID 映到内部位置，
+        \fld{groups} 记录合并等价类，\fld{dead\_bus\_indices} 记录被剥离母线；
+  \item \fld{BranchExpandMap}：把投影生成的 \fld{ACBranch::index} 关联到富设备来源，
+        包括 \fld{Transformer2W}、\fld{Transformer3W}、开关和断路器；
+  \item \fld{ProjectionCertificate} 与 \fld{ProjectionReport}：记录精确/阈值近似合并和组件来源。
+\end{itemize}
+详细短路中的变压器 IEC 校正正是通过 \fld{BranchExpandMap} 找回富变压器铭牌参数，见
+\srcpath{build\_transformer\_branch\_corrections}。这证明 provenance 不只是显示元数据，而是
+模型计算的一部分。
+
+\subsection{故障位置解析与合并母线}
+
+单母线和详细入口接收 authored AC bus ID。若存在 \fld{BusMergeMap}，源码先用
+\fld{ext\_to\_int} 找到合并后的矩阵位置；详细入口的 \srcpath{ext\_bus\_id} 再把内部
+代表母线转换回 authored 代表 ID。若两个零阻抗母线被合并，在任一成员上施加故障会落到同一
+canonical 节点，因此电气结果相同。输出阶段利用
+\srcpath{CanonicalToRichOperator::ac\_bus\_reprojection\_positions} 广播到每个仍可归属的
+原始 AC 母线，并把 \fld{bus\_id} 改回各自 \fld{ACBus::index}。
+
+不存在或被剥离的请求母线不能伪造为其他位置：单母线概览和详细入口都抛出
+\texttt{bus\_id not found}。空 AC 系统返回 \fld{status=invalid\_network} 与原因；详细稀疏分解
+无效或后向误差超过 $10^{-9}$ 时返回 \fld{status=numerical\_failure}，绝不消费零逆列。AUD-042 已关闭。
+
+\subsection{结果索引与单位总表}
+
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{3.3cm}L{3.2cm}L{2.2cm}L{5.4cm}@{}}
+\toprule
+结果 & 索引空间 & 单位 & 归属语义\\
+\midrule
+\endfirsthead
+\toprule
+结果 & 索引空间 & 单位 & 归属语义\\
+\midrule
+\endhead
+\fld{SCResult.bus\_results} & authored AC bus ID & pu、MVA、kA & 已由 canonical 位置广播回原始 AC 母线；被剥离母线无行\\
+\fld{SCDetailedResult.bus\_results} & authored AC bus ID & kA、pu & 已回投影；合并组成员共享同一电气解\\
+\fld{converter\_contributions} & authored VSC index 与 AC bus ID & MW、pu、kA & VSC 身份来自投影后的组件；bus ID 经代表映射返回\\
+\fld{branch\_results} & authored AC 组件类型与稳定 ID；另含 canonical 诊断 ID & kA、MVA & 经 \fld{BranchExpandMap} 展开；Transformer3W 保留 pair number\\
+\fld{DCFaultResult} & authored DC bus ID & pu、kA & DC 路径直接遍历 rich DC 容器，不经过 AC canonical 投影\\
+\fld{breaker\_duties} & authored DCCB index & pu、kA & 身份稳定；按实际电阻边电流恢复\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{可恢复性边界}
+
+母线电压和母线故障指标属于节点强可恢复量；合并组内它们可以广播。支路电流是端口量，必须知道
+原始端口、投影分支和可能的三绕组 pair number 才能恢复。当前详细求解使用
+\fld{BranchExpandMap} 生成 authored 设备行。闭合零阻抗开关/断路器在投影中消失时仍返回身份行，
+但标记 \fld{electrical\_value\_available=false}：零阻抗网状回路内的单设备电流没有唯一解，N/A
+不能解释为零。canonical branch ID 只保留作诊断，不能替代设备稳定 ID。

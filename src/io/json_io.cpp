@@ -357,6 +357,9 @@ static json ac_branch_to_json(const ACBranch& br) {
   j["r0_pu"] = br.r0_pu;
   j["x0_pu"] = br.x0_pu;
   j["b0_pu"] = br.b0_pu;
+  j["sc_r_reference_temperature_c"] = br.sc_r_reference_temperature_c;
+  j["sc_end_temperature_c"] = br.sc_end_temperature_c;
+  j["sc_alpha_per_c"] = br.sc_alpha_per_c;
   j["failure_rate"] = br.failure_rate;
   j["mttr_hr"] = br.mttr_hr;
   j["vn_hv_kv"] = br.vn_hv_kv;
@@ -397,6 +400,10 @@ static ACBranch ac_branch_from_json(const json& j) {
   br.r0_pu = jget(j, "r0_pu", 0.0);
   br.x0_pu = jget(j, "x0_pu", 0.0);
   br.b0_pu = jget(j, "b0_pu", 0.0);
+  br.sc_r_reference_temperature_c =
+      jget(j, "sc_r_reference_temperature_c", 20.0);
+  br.sc_end_temperature_c = jget(j, "sc_end_temperature_c", 20.0);
+  br.sc_alpha_per_c = jget(j, "sc_alpha_per_c", 0.0);
   br.failure_rate = jget(j, "failure_rate", 0.0);
   br.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
   br.vn_hv_kv = jget(j, "vn_hv_kv", 0.0);
@@ -702,6 +709,20 @@ static json generator_to_json(const Generator& g) {
   j["xdpp_pu"] = g.xdpp_pu;
   j["td0p_s"] = g.td0p_s;
   j["td0pp_s"] = g.td0pp_s;
+  j["ra_pu"] = g.ra_pu;
+  j["vn_kv"] = g.vn_kv;
+  j["cos_phi"] = g.cos_phi;
+  j["xq_pu"] = g.xq_pu;
+  j["xd_xq"] = g.xd_xq;
+  j["x0_pu"] = g.x0_pu;
+  j["r0_pu"] = g.r0_pu;
+  j["pg_percent"] = g.pg_percent;
+  j["power_station_transformer_index"] =
+      g.power_station_transformer_index;
+  j["sc_lambda_max"] = g.sc_lambda_max;
+  j["sc_lambda_min"] = g.sc_lambda_min;
+  j["sc_terminal_fed_static_excitation"] =
+      g.sc_terminal_fed_static_excitation;
   j["emission_factor_tco2_mwh"] = g.emission_factor_tco2_mwh;
   j["nox_factor_kg_mwh"] = g.nox_factor_kg_mwh;
   j["so2_factor_kg_mwh"] = g.so2_factor_kg_mwh;
@@ -745,6 +766,20 @@ static Generator generator_from_json(const json& j) {
   g.xdpp_pu = jget(j, "xdpp_pu", 0.0);
   g.td0p_s = jget(j, "td0p_s", 0.0);
   g.td0pp_s = jget(j, "td0pp_s", 0.0);
+  g.ra_pu = jget(j, "ra_pu", 0.0);
+  g.vn_kv = jget(j, "vn_kv", 0.0);
+  g.cos_phi = jget(j, "cos_phi", 1.0);
+  g.xq_pu = jget(j, "xq_pu", 0.0);
+  g.xd_xq = jget(j, "xd_xq", 1.0);
+  g.x0_pu = jget(j, "x0_pu", 0.0);
+  g.r0_pu = jget(j, "r0_pu", 0.0);
+  g.pg_percent = jget(j, "pg_percent", 0.0);
+  g.power_station_transformer_index =
+      jget(j, "power_station_transformer_index", 0);
+  g.sc_lambda_max = jget(j, "sc_lambda_max", 0.0);
+  g.sc_lambda_min = jget(j, "sc_lambda_min", 0.0);
+  g.sc_terminal_fed_static_excitation =
+      jget(j, "sc_terminal_fed_static_excitation", false);
   g.emission_factor_tco2_mwh = jget_alias(j, "emission_factor_tco2_mwh", "co2_emission_rate", 0.0);
   g.nox_factor_kg_mwh = jget(j, "nox_factor_kg_mwh", 0.0);
   g.so2_factor_kg_mwh = jget(j, "so2_factor_kg_mwh", 0.0);
@@ -1587,6 +1622,13 @@ static json transformer2w_to_json(const Transformer2W& t) {
   j["vector_group"] = t.vector_group;
   j["z0_percent"] = t.z0_percent;
   j["x0_r0"] = t.x0_r0;
+  j["mag0_percent"] = t.mag0_percent;
+  j["mag0_rx"] = t.mag0_rx;
+  j["si0_hv_partial"] = t.si0_hv_partial;
+  j["xn_ohm"] = t.xn_ohm;
+  j["power_station_unit"] = t.power_station_unit;
+  j["oltc"] = t.oltc;
+  j["pt_percent"] = t.pt_percent;
   j["mtbf_hours"] = t.mtbf_hours;
   j["mttr_hours"] = t.mttr_hours;
   j["n_parallel"] = t.n_parallel;
@@ -1627,6 +1669,13 @@ static Transformer2W transformer2w_from_json(const json& j) {
   t.vector_group = jget<std::string>(j, "vector_group", "");
   t.z0_percent = jget(j, "z0_percent", 0.0);
   t.x0_r0 = jget(j, "x0_r0", 0.0);
+  t.mag0_percent = jget(j, "mag0_percent", 0.0);
+  t.mag0_rx = jget(j, "mag0_rx", 0.0);
+  t.si0_hv_partial = jget(j, "si0_hv_partial", 0.5);
+  t.xn_ohm = jget(j, "xn_ohm", 0.0);
+  t.power_station_unit = jget(j, "power_station_unit", false);
+  t.oltc = jget(j, "oltc", false);
+  t.pt_percent = jget(j, "pt_percent", 0.0);
   t.mtbf_hours = jget_alias(j, "mtbf_hours", "mtbf_hours", 0.0);
   t.mttr_hours = jget_alias(j, "mttr_hours", "mttr_hours", 0.0);
   t.n_parallel = jget(j, "n_parallel", 1);
@@ -1705,6 +1754,13 @@ static json transformer3w_to_json(const Transformer3W& t) {
   j["vkr_hv_mv_percent"] = t.vkr_hv_mv_percent;
   j["vkr_hv_lv_percent"] = t.vkr_hv_lv_percent;
   j["vkr_mv_lv_percent"] = t.vkr_mv_lv_percent;
+  j["vk0_hv_mv_percent"] = t.vk0_hv_mv_percent;
+  j["vk0_hv_lv_percent"] = t.vk0_hv_lv_percent;
+  j["vk0_mv_lv_percent"] = t.vk0_mv_lv_percent;
+  j["vkr0_hv_mv_percent"] = t.vkr0_hv_mv_percent;
+  j["vkr0_hv_lv_percent"] = t.vkr0_hv_lv_percent;
+  j["vkr0_mv_lv_percent"] = t.vkr0_mv_lv_percent;
+  j["vector_group"] = t.vector_group;
   j["pfe_kw"] = t.pfe_kw;
   j["i0_percent"] = t.i0_percent;
   j["tap_side"] = t.tap_side;
@@ -1738,6 +1794,13 @@ static Transformer3W transformer3w_from_json(const json& j) {
   t.vkr_hv_mv_percent = jget(j, "vkr_hv_mv_percent", 0.0);
   t.vkr_hv_lv_percent = jget(j, "vkr_hv_lv_percent", 0.0);
   t.vkr_mv_lv_percent = jget(j, "vkr_mv_lv_percent", 0.0);
+  t.vk0_hv_mv_percent = jget(j, "vk0_hv_mv_percent", 0.0);
+  t.vk0_hv_lv_percent = jget(j, "vk0_hv_lv_percent", 0.0);
+  t.vk0_mv_lv_percent = jget(j, "vk0_mv_lv_percent", 0.0);
+  t.vkr0_hv_mv_percent = jget(j, "vkr0_hv_mv_percent", 0.0);
+  t.vkr0_hv_lv_percent = jget(j, "vkr0_hv_lv_percent", 0.0);
+  t.vkr0_mv_lv_percent = jget(j, "vkr0_mv_lv_percent", 0.0);
+  t.vector_group = jget<std::string>(j, "vector_group", "");
   t.pfe_kw = jget(j, "pfe_kw", 0.0);
   t.i0_percent = jget(j, "i0_percent", 0.0);
   t.tap_side = jget(j, "tap_side", 0);

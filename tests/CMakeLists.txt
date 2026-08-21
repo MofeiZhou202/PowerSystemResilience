@@ -210,6 +210,40 @@ hacdcpf_add_test(test_dc_short_circuit test_dc_short_circuit.cpp)
 # I"k/ip/Ib/Ik at the 6 kV busbar checked against the published values.
 hacdcpf_add_test(test_short_circuit_iec60909_4 test_short_circuit_iec60909_4.cpp)
 
+# Independent OpenDSS fault-study and GridLAB-D balanced-shunt matrix. The
+# script owns fixed numerical gates (OpenDSS Ik'' <= 1e-6, ip <= 2%; GridLAB-D
+# Ik'' <= 1e-6) and requires all 35 GridLAB-D-representable cases to execute.
+set(_HACDCPF_SHORT_CIRCUIT_VALIDATION_PY
+    "${CMAKE_SOURCE_DIR}/.venv/bin/python")
+if(EXISTS "${_HACDCPF_SHORT_CIRCUIT_VALIDATION_PY}" AND
+   EXISTS "${CMAKE_SOURCE_DIR}/tools/short_circuit_validation/run_cross_engine_matrix.py" AND
+   TARGET short_circuit_validation_matrix)
+  add_test(NAME short_circuit_cross_engine_matrix
+    COMMAND "${_HACDCPF_SHORT_CIRCUIT_VALIDATION_PY}"
+            "${CMAKE_SOURCE_DIR}/tools/short_circuit_validation/run_cross_engine_matrix.py"
+            --native "$<TARGET_FILE:short_circuit_validation_matrix>"
+            --require-gridlabd
+            --min-gridlabd-cases 35
+            --output-dir "${CMAKE_CURRENT_BINARY_DIR}/short_circuit_cross_engine_matrix")
+  set_tests_properties(short_circuit_cross_engine_matrix PROPERTIES
+    LABELS "short_circuit;validation;opendss;gridlabd"
+    TIMEOUT 120
+    ENVIRONMENT "PYTHONPYCACHEPREFIX=/tmp/hacdcpf_pycache")
+endif()
+if(EXISTS "${_HACDCPF_SHORT_CIRCUIT_VALIDATION_PY}" AND
+   EXISTS "${CMAKE_SOURCE_DIR}/tools/short_circuit_validation/run_ieee_feeder_faultstudy.py" AND
+   TARGET short_circuit_thevenin_batch)
+  add_test(NAME short_circuit_ieee_feeder_thevenin
+    COMMAND "${_HACDCPF_SHORT_CIRCUIT_VALIDATION_PY}"
+            "${CMAKE_SOURCE_DIR}/tools/short_circuit_validation/run_ieee_feeder_faultstudy.py"
+            --native "$<TARGET_FILE:short_circuit_thevenin_batch>"
+            --output-dir "${CMAKE_CURRENT_BINARY_DIR}/short_circuit_ieee_feeder_thevenin")
+  set_tests_properties(short_circuit_ieee_feeder_thevenin PROPERTIES
+    LABELS "short_circuit;validation;opendss;ieee_feeder"
+    TIMEOUT 120
+    ENVIRONMENT "PYTHONPYCACHEPREFIX=/tmp/hacdcpf_pycache")
+endif()
+
 # Harmonic power flow (hybrid AC/DC): frequency-domain harmonic penetration with
 # NIC AC/DC coupling, validated against closed-form analytical voltages.
 #   1. AC 2-bus analytical V(h) + THD

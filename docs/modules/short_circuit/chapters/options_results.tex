@@ -4,20 +4,31 @@
 \subsection{概览选项 \texttt{SCOptions}}
 \compmeta{SCOptions}{include/hacdcpf/analysis/short\_circuit.hpp:SCOptions}
 \begin{paramtable}
-\fld{fault\_type} & — & — & 枚举 & ThreePhase & 故障类型（3ph/SLG/LL/LLG）\\
+\fld{fault\_type} & — & — & 枚举 & {\scriptsize\texttt{ThreePhase}} & 故障类型（3ph/SLG/LL/LLG）\\
 \fld{c\_factor} & $c$ & — & $0.9\sim1.1$ & 1.1 & IEC 电压校正因子 $c_{max}$\\
 \fld{default\_xdpp} & $x_d''$ & pu & $0.1\sim0.3$ & 0.2 & 缺省次暂态电抗\\
 \fld{compute\_all\_buses} & — & — & 布尔 & true & 全母线计算（否则用单母线接口）\\
 \fld{inverse\_rhs\_batch\_size} & — & — & 整数 & 32 & 选择性逆对角提取的 RHS 块列数\\
+\fld{cancellation\_requested} & — & — & 回调 & 空 & RHS 块之间的协作式取消\\
 \end{paramtable}
+
+\subsection{同步发电机 IEC 稳态字段}
+\begin{paramtable}
+\fld{sc\_lambda\_max} & $\lambda_{\max}$ & — & $>0$（需要时） & 0.0 & 最大单馈近端稳态系数；0 表示未提供\\
+\fld{sc\_lambda\_min} & $\lambda_{\min}$ & — & $>0$（需要时） & 0.0 & 最小单馈近端稳态系数；0 表示未提供\\
+\fld{sc\_terminal\_fed\_static\_excitation} & — & — & 布尔 & false & 机端故障最大/最小稳态均使用 $\lambda_{\min}$\\
+\end{paramtable}
+三字段均随 Generator JSON 往返；只有实际进入单馈近端工况时才要求对应 $\lambda$ 为正，
+多馈和远端工况不读取不存在的曲线值；端子静态励磁机端故障必须提供正的
+\fld{sc\_lambda\_min}。
 
 \subsection{详细选项 \texttt{SCDetailedOptions}}
 \compmeta{SCDetailedOptions}{include/hacdcpf/analysis/short\_circuit.hpp:SCDetailedOptions}
 \begin{paramtable}
-\fld{fault\_type} & — & — & 枚举 & ThreePhase & 故障类型\\
+\fld{fault\_type} & — & — & 枚举 & {\scriptsize\texttt{ThreePhase}} & 故障类型\\
 \fld{calc\_type} & — & — & Max/Min & Max & 最大/最小短路计算口径\\
 \fld{kappa\_method} & — & — & A/B/C & C & 冲击系数 $\kappa$ 方法\\
-\fld{topology} & — & — & Radial/Meshed & Meshed & 网络拓扑（影响衰减）\\
+\fld{topology} & — & — & {\scriptsize Auto/\allowbreak Radial/\allowbreak Meshed} & Auto & 方法 B 网状修正；Auto 从实际电源路径判定\\
 \fld{c\_factor} & $c$ & — & $\ge0$ & 0.0 & 显式电压因子（$\le0$ 用口径推定）\\
 \fld{fault\_impedance\_pu} & $R_f$ & pu & $\ge0$ & 0.0 & 故障路径电阻\\
 \fld{breaking\_time\_s} & $t_b$ & 秒 & — & 0.10 & 开断时间（$I_b$）\\
@@ -25,9 +36,12 @@
 \fld{default\_xdpp} & $x_d''$ & pu & — & 0.2 & 缺省次暂态电抗\\
 \fld{apply\_iec\_transformer\_correction} & $K_T$ & — & 布尔 & true & 施加 IEC 变压器阻抗校正\\
 \fld{compute\_branch\_flows} & — & — & 布尔 & true & 计算支路故障电流/功率\\
+\fld{compute\_voltage\_drops} & — & — & 布尔 & true & 计算故障期间剩余电压\\
+\fld{compute\_nonfault\_currents} & — & — & 布尔 & true & 计算非故障母线自阻抗电流指标\\
 \fld{compute\_ith} & — & — & 布尔 & true & 计算热等效电流 $I_{th}$\\
 \fld{ith\_duration\_s} & $T_k$ & 秒 & — & 1.0 & $I_{th}$ 计算历时\\
 \fld{inverse\_rhs\_batch\_size} & — & — & 整数 & 32 & 选择性逆 RHS 块列数\\
+\fld{cancellation\_requested} & — & — & 回调 & 空 & RHS 块/故障位置之间协作式取消\\
 \end{paramtable}
 
 \subsection{直流故障选项 \texttt{DCFaultOptions}}
@@ -41,13 +55,24 @@
 \fld{min\_closed\_breaker\_resistance\_pu} & — & pu & 小正数 & $10^{-6}$ & 理想闭合断路器最小电阻\\
 \end{paramtable}
 
-\subsection{结果结构摘要}
+\subsection{结果结构完整口径}
 \begin{itemize}
-  \item \fld{BusFaultResult}（:DCBreakerDutyResult）/\fld{SCResult}（:DCFaultResult）：概览 $Z_{thevenin}$、$I_{fault}$、
-        \fld{sk\_mva}、\fld{ikpp\_ka}；
-  \item \fld{SCDetailedResult}（:dc\_bus\_fault\_level）：\fld{solved}、逐母线 \fld{SCDetailedBusResult}（:SCDetailedBusResult，
-        $I_k''/i_p/I_b/I_k/I_{th}$ 及分源贡献）、逐支路 \fld{SCDetailedBranchResult}（:dc\_bus\_fault\_level）、
-        换流器贡献 \fld{SCConverterContributionResult}（:dc\_bus\_fault\_level）；
-  \item \fld{DCFaultResult}：\fld{i\_fault\_ka}、\fld{r\_thevenin\_pu}、\fld{breaker\_duties}
-        （\fld{DCBreakerDutyResult}）。
+  \item \fld{BusFaultResult}/\fld{SCResult}：authored \fld{bus\_id}、复数
+        \fld{z\_thevenin/i\_fault\_pu}、\fld{sk\_mva}、\fld{ikpp\_ka} 和 \fld{base\_mva}；
+  \item \fld{SCDetailedBusResult}：authored \fld{bus\_id}，总/正序/负序初始电流、发电机/电机/
+        负荷/静止发电机/外网/换流器贡献、去电机值、$i_p/I_b/I_k/I_{th}$、热系数
+        \fld{thermal\_m/thermal\_n}、剩余电压以及故障点
+        $I_A/I_B/I_C/I_g$；
+  \item \fld{SCDetailedBranchResult}：端点、canonical 诊断 ID、domain-qualified authored
+        \fld{component\_kind/component\_index/pair\_number}、两端/最大支路电流和视在功率；收缩理想
+        设备以 \fld{electrical\_value\_available=false} 返回；
+  \item \fld{SCConverterContributionResult}：稳定换流器 ID、bus ID、名称、模型、AC/DC GFM 标志、
+        额定 MW、限流 pu 和贡献 kA；
+  \item \fld{SCDetailedResult}：除上述向量外含 status/message、model scope/limitations、effective $c$
+        及 factorization/finite/最大后向误差质量；
+  \item \fld{DCFaultResult}：逐故障点 status/solved/message/scope/limitations、预故障电压、戴维南
+        电阻、pu/kA 电流、残差、边计数和实际电阻边分流的 \fld{DCBreakerDutyResult}。
 \end{itemize}
+
+所有向量的索引空间与回投影限制见第~\ref{sec:sc-projection}~章，HTTP 实际字段子集见
+第~\ref{sec:sc-runtime}~章。

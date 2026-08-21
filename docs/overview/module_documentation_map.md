@@ -26,7 +26,7 @@
 | `resilience` | [弹性手册](../modules/resilience/resilience_manual.tex) | `source_equivalent_model.tex` |
 | `scenario_generation` | [场景生成手册](../modules/scenario_generation/scenario_generation_manual.tex) | `source_equivalent_model.tex` |
 | `server` | [服务端手册](../modules/server/server_manual.tex) | ETag、revision、缓存和作业状态契约 |
-| `short_circuit` | [短路手册](../modules/short_circuit/short_circuit_manual.tex) | 概览与详细入口分章，公式绑定对应实现 |
+| `short_circuit` | [短路手册](../modules/short_circuit/short_circuit_manual.tex) | 十五个模块专章加统一工业评价基线：对称分量/IEC/换流器理论、AC 概览与详细序网、DC 故障、投影身份、稀疏批量、完整 I/O、HTTP/GUI、验证架构、数值交叉验证与深度审计 |
 | `sppt` | [SPPT 手册](../modules/sppt/sppt_manual.tex) | `source_equivalent_relations.tex` |
 | `time_series` | [时序手册](../modules/time_series/time_series_manual.tex) | `source_equivalent_model.tex` |
 | `validation` | [静态校验手册](../modules/validation/validation_manual.tex) | 实际谓词、阈值和四级过滤 |

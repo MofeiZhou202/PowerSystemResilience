@@ -52,6 +52,18 @@ def fault_current_a(engine: Any) -> complex:
     return complex(float(currents[0]), float(currents[1]))
 
 
+def element_max_current_a(engine: Any, element_name: str) -> float:
+    # DSS C-API returns the zero-based active-element index; zero is success.
+    if engine.ActiveCircuit.SetActiveElement(element_name) < 0:
+        raise RuntimeError(f"OpenDSS element is missing: {element_name}")
+    values = list(engine.ActiveCircuit.ActiveCktElement.Currents)
+    return max(
+        (abs(complex(float(values[index]), float(values[index + 1])))
+         for index in range(0, len(values) - 1, 2)),
+        default=0.0,
+    )
+
+
 def build_opendss_case(case: dict[str, Any]) -> dict[str, Any]:
     engine = dss.DSS
     engine.Text.Command = "Clear"
@@ -120,13 +132,55 @@ def build_opendss_case(case: dict[str, Any]) -> dict[str, Any]:
     z0 = complex_pair(engine.ActiveCircuit.ActiveBus.Zsc0)
 
     voltage_source_ikss_ka = fault_bus_kv(case) / math.sqrt(3.0) / abs(z1)
-    total_ikss_ka = voltage_source_ikss_ka
+    # Re-solve an explicit bolted fault so OpenDSS independently identifies
+    # which physical branches carry partial fault current. IEC 60909-0:2016
+    # method A uses the minimum R/X of those branches, not the fault-point
+    # Thevenin R/X.
+    engine.Text.Command = "Set mode=snapshot"
+    engine.Text.Command = "Solve"
+    engine.Text.Command = (
+        f"New Fault.benchmark_fault bus1=n{case['fault_bus']} phases=3 r=1e-6"
+    )
+    engine.Text.Command = "Solve"
+    baseline_fault_current = fault_current_a(engine)
+    participating_rx: list[float] = []
+
+    source = model["source"]
+    if element_max_current_a(engine, "Vsource.source") > 1e-6:
+        source_x = float(source["x1_pu"])
+        if abs(source_x) > 1e-15:
+            participating_rx.append(abs(float(source["r1_pu"]) / source_x))
+
+    if kind == "line_network":
+        for index, branch in enumerate(model["branches"], start=1):
+            if element_max_current_a(engine, f"Line.line{index}") <= 1e-6:
+                continue
+            branch_x = float(branch["x1_pu"])
+            if abs(branch_x) > 1e-15:
+                participating_rx.append(abs(float(branch["r1_pu"]) / branch_x))
+    else:
+        transformer = model["transformer"]
+        if element_max_current_a(engine, "Transformer.transformer") > 1e-6:
+            vk = float(transformer["vk_percent"])
+            vkr = float(transformer["vkr_percent"])
+            transformer_x = math.sqrt(max(0.0, vk * vk - vkr * vkr))
+            if transformer_x > 1e-15:
+                participating_rx.append(abs(vkr / transformer_x))
+
+    for index, ibr in enumerate(ibrs, start=1):
+        if ibr["mode"] != "grid_forming":
+            continue
+        if element_max_current_a(engine, f"Vsource.gfm{index}") <= 1e-6:
+            continue
+        x_sc = float(ibr["x_sc_pu"])
+        if abs(x_sc) > 1e-15:
+            participating_rx.append(abs(float(ibr["r_sc_pu"]) / x_sc))
+    if not participating_rx:
+        raise RuntimeError(f"{case['name']}: method A found no participating branch")
+
+    total_ikss_ka = abs(baseline_fault_current) / 1000.0
     gfls = [ibr for ibr in ibrs if ibr["mode"] == "grid_following"]
     if gfls:
-        # Reading Zsc leaves DSS C-API in its fault-study network state. Restore
-        # a solved snapshot before inserting explicit current sources and fault.
-        engine.Text.Command = "Set mode=snapshot"
-        engine.Text.Command = "Solve"
         for index, ibr in enumerate(ibrs, start=1):
             if ibr["mode"] != "grid_following":
                 continue
@@ -140,9 +194,6 @@ def build_opendss_case(case: dict[str, Any]) -> dict[str, Any]:
                 f"New Isource.gfl{index} bus1=n{bus} phases=3 amps={amps} "
                 "angle=0 enabled=no"
             )
-        engine.Text.Command = (
-            f"New Fault.benchmark_fault bus1=n{case['fault_bus']} phases=3 r=1e-6"
-        )
         engine.Text.Command = "Solve"
         baseline = fault_current_a(engine)
         for index, ibr in enumerate(ibrs, start=1):
@@ -167,6 +218,7 @@ def build_opendss_case(case: dict[str, Any]) -> dict[str, Any]:
         "z0": z0,
         "voltage_source_ikss_ka": voltage_source_ikss_ka,
         "total_ikss_ka": total_ikss_ka,
+        "method_a_min_rx": min(participating_rx),
     }
 
 
@@ -193,13 +245,28 @@ def relative_error(actual: float, reference: float) -> float:
 
 def gridlabd_capability() -> dict[str, Any]:
     configured = os.environ.get("GRIDLABD_BIN")
-    executable = configured or shutil.which("gridlabd")
+    candidates = [
+        Path(configured) if configured else None,
+        Path(found) if (found := shutil.which("gridlabd")) else None,
+        ROOT.parent / "gridlab-d" / "cmake-build" / "bin" / "gridlabd",
+        ROOT.parent / "gridlab-d" / "build" / "bin" / "gridlabd",
+        ROOT.parent / "gridlab-d" / "build" / "source" / "gridlabd",
+    ]
+    executable = next(
+        (str(candidate) for candidate in candidates
+         if candidate is not None and candidate.is_file()
+         and os.access(candidate, os.X_OK)),
+        None,
+    )
     if not executable:
         return {
             "available": False,
             "short_circuit_api": False,
             "status": "unavailable",
-            "detail": "GRIDLABD_BIN is unset and gridlabd is not on PATH",
+            "detail": (
+                "GridLAB-D was not found through GRIDLABD_BIN, PATH, or the "
+                "supported sibling-repository build locations"
+            ),
         }
     probe = subprocess.run(
         [executable, "--version"], capture_output=True, text=True, check=False,
@@ -594,6 +661,11 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--native", type=Path, default=DEFAULT_NATIVE)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--max-ikss-relative-error", type=float, default=1e-6)
+    parser.add_argument("--max-ip-relative-error", type=float, default=2e-2)
+    parser.add_argument("--require-gridlabd", action="store_true")
+    parser.add_argument("--min-gridlabd-cases", type=int, default=35)
+    parser.add_argument("--max-gridlabd-relative-error", type=float, default=1e-6)
     args = parser.parse_args()
 
     native_report = run_native(args.native)
@@ -610,7 +682,7 @@ def main() -> None:
             for ibr in case["model"].get("ibrs", [])
         )
         ikss_ka = dss_result["total_ikss_ka"] if has_gfl else voltage_source_ikss_ka
-        rx = abs(zeq.real / zeq.imag) if abs(zeq.imag) > 1e-15 else 0.0
+        rx = float(dss_result["method_a_min_rx"])
         kappa = 1.02 + 0.98 * math.exp(-3.0 * rx)
         current_source_ka = max(0.0, ikss_ka - voltage_source_ikss_ka)
         ip_ka = math.sqrt(2.0) * (
@@ -654,6 +726,33 @@ def main() -> None:
     markdown_path.write_text(markdown_report(report), encoding="utf-8")
     print(json_path)
     print(markdown_path)
+    ikss_error = report["summary"]["metrics"]["ikss_ka"]["max_relative_error"]
+    ip_error = report["summary"]["metrics"]["ip_ka"]["max_relative_error"]
+    if ikss_error > args.max_ikss_relative_error:
+        raise SystemExit(
+            f"OpenDSS Ikss relative error {ikss_error:.9g} exceeds "
+            f"{args.max_ikss_relative_error:.9g}"
+        )
+    if ip_error > args.max_ip_relative_error:
+        raise SystemExit(
+            f"OpenDSS ip relative error {ip_error:.9g} exceeds "
+            f"{args.max_ip_relative_error:.9g}"
+        )
+    gridlabd_summary = report["summary"]["gridlabd_balanced_shunt"]
+    if args.require_gridlabd and not report["engines"]["gridlabd"]["available"]:
+        raise SystemExit(report["engines"]["gridlabd"]["detail"])
+    if args.require_gridlabd and gridlabd_summary["case_count"] < args.min_gridlabd_cases:
+        raise SystemExit(
+            f"GridLAB-D produced {gridlabd_summary['case_count']} numerical cases; "
+            f"at least {args.min_gridlabd_cases} are required"
+        )
+    if gridlabd_summary["case_count"]:
+        gridlabd_error = gridlabd_summary["max_relative_error"]
+        if gridlabd_error > args.max_gridlabd_relative_error:
+            raise SystemExit(
+                f"GridLAB-D Ikss relative error {gridlabd_error:.9g} exceeds "
+                f"{args.max_gridlabd_relative_error:.9g}"
+            )
 
 
 if __name__ == "__main__":

@@ -22,8 +22,9 @@
         \end{equation}
         贡献按 $c/|z_{conv}|$ 和传递阻抗比计算。
 \end{itemize}
-上述实现见 \srcpath{src/short\_circuit/short\_circuit.cpp:converter\_current\_multiplier（lambda）}、
-\srcpath{src/short\_circuit/short\_circuit.cpp:source\_transfer\_abs（lambda）} 和 \srcpath{src/short\_circuit/short\_circuit.cpp:current\_source\_contribution\_ka（lambda）}。
+上述实现均位于 \srcpath{src/short\_circuit/short\_circuit.cpp}，对应局部函数
+\srcpath{converter\_current\_multiplier}、\srcpath{source\_transfer\_abs} 和
+\srcpath{current\_source\_contribution\_ka}。
 
 \subsection{贡献结果}
 逐换流器贡献记于 \fld{SCConverterContributionResult}（:bus\_kv（lambda））：\fld{converter\_index}、\fld{bus\_id}、

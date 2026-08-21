@@ -6834,7 +6834,7 @@ const App = (() => {
       calc_type: document.getElementById('scCalcType')?.value || 'Max',
       c_factor: scReadNumber('scCFactor', 0),
       kappa_method: document.getElementById('scKappaMethod')?.value || 'C',
-      topology: document.getElementById('scTopology')?.value || 'Meshed',
+      topology: document.getElementById('scTopology')?.value || 'Auto',
       fault_impedance_pu: scReadNumber('scFaultImpedance', 0),
       breaking_time_s: scReadNumber('scBreakingTime', 0.10),
       ith_duration_s: scReadNumber('scIthDuration', 1.0),
@@ -12537,11 +12537,13 @@ const App = (() => {
   }
 
   function scOptionsSummaryHtml(data, detailed = false) {
+    const displayedCFactor = detailed && Number.isFinite(Number(data?.effective_c_factor))
+      ? data.effective_c_factor : scOpt(data, 'c_factor', 0);
     return `
       <div class="result-item"><span class="result-label">计算类型</span>
         <span class="result-value">${scOpt(data, 'calc_type', 'Max')}</span></div>
       <div class="result-item"><span class="result-label">c / κ / 拓扑</span>
-        <span class="result-value">${scFmtOpt(scOpt(data, 'c_factor', 0), 3)} / ${scOpt(data, 'kappa_method', 'C')} / ${scOpt(data, 'topology', 'Meshed')}</span></div>
+        <span class="result-value">${scFmtOpt(displayedCFactor, 3)} / ${scOpt(data, 'kappa_method', 'C')} / ${scOpt(data, 'topology', 'Auto')}</span></div>
       <div class="result-item"><span class="result-label">Zf / x''d</span>
         <span class="result-value">${scFmtOpt(scOpt(data, 'fault_impedance_pu', 0), 4)} / ${scFmtOpt(scOpt(data, 'default_xdpp', 0.2), 3)} pu</span></div>
       <div class="result-item"><span class="result-label">tb / Tk / f</span>
@@ -12652,6 +12654,20 @@ const App = (() => {
         html += `<tr><td>${c.converter_index ?? ''}</td><td>${c.bus_id ?? ''}</td>` +
                 `<td>${c.model || ''}</td><td>${fmt(c.i_limit_pu, 3)}</td>` +
                 `<td>${fmt(c.contribution_ka, 4)}</td></tr>`;
+      });
+      html += '</tbody></table>';
+    }
+
+    if (r.branch_results && r.branch_results.length) {
+      html += '<h4 style="margin:12px 0 4px">故障期间支路电流</h4>';
+      html += '<table><thead><tr><th>设备</th><th>端点</th><th>Imax(kA)</th><th>From/To(kA)</th><th>S(MVA)</th></tr></thead><tbody>';
+      r.branch_results.forEach(b => {
+        const pair = Number(b.pair_number) >= 0 ? ` / pair ${b.pair_number}` : '';
+        const available = b.electrical_value_available !== false;
+        html += `<tr title="${escapeHtml(b.message || '')}"><td>${escapeHtml(b.component_kind || 'ACBranch')} ${b.component_index ?? ''}${pair}</td>` +
+                `<td>${b.from_bus ?? ''}-${b.to_bus ?? ''}</td><td>${available ? fmt(b.i_branch_ka, 4) : 'N/A'}</td>` +
+                `<td>${available ? `${fmt(b.i_from_ka, 4)} / ${fmt(b.i_to_ka, 4)}` : 'N/A'}</td>` +
+                `<td>${available ? fmt(b.s_branch_mva, 3) : 'N/A'}</td></tr>`;
       });
       html += '</tbody></table>';
     }

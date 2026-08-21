@@ -80,6 +80,7 @@ enum class SCKappaMethod {
 };
 
 enum class SCTopology {
+  Auto,
   Radial,
   Meshed,
 };
@@ -94,7 +95,7 @@ struct SCDetailedOptions {
   FaultType fault_type{FaultType::ThreePhase};
   SCCalcType calc_type{SCCalcType::Max};
   SCKappaMethod kappa_method{SCKappaMethod::C};
-  SCTopology topology{SCTopology::Meshed};
+  SCTopology topology{SCTopology::Auto};
   double c_factor{0.0};                 ///< Optional explicit IEC voltage factor.
                                         ///  <=0 uses calc_type + nominal voltage.
   double fault_impedance_pu{0.0};
@@ -127,7 +128,13 @@ struct SCDetailedBusResult {
   double ib_ka{0.0};
   double ik_ka{0.0};
   double ith_ka{0.0};                 ///< Thermal equivalent SC current (IEC 60909 §8)
+  double thermal_m{0.0};              ///< IEC 60909 Annex A DC heat factor m
+  double thermal_n{0.0};              ///< IEC 60909 Annex A AC heat factor n
   double v_remaining_pu{1.0};         ///< Remaining voltage during fault [p.u.]
+  double i_phase_a_ka{0.0};           ///< Fault-current phase-A magnitude [kA]
+  double i_phase_b_ka{0.0};           ///< Fault-current phase-B magnitude [kA]
+  double i_phase_c_ka{0.0};           ///< Fault-current phase-C magnitude [kA]
+  double i_ground_ka{0.0};            ///< Ground-return current magnitude [kA]
 };
 
 /// Per-branch fault current result
@@ -135,10 +142,23 @@ struct SCDetailedBranchResult {
   int from_bus{0};
   int to_bus{0};
   int branch_index{0};
+  std::string domain{"AC"};           ///< Domain-qualified public identity.
+  std::string component_kind{"ACBranch"}; ///< Authored component type.
+  int component_index{0};              ///< Authored component stable .index.
+  int pair_number{-1};                 ///< Transformer3W pair, otherwise -1.
+  bool attribution_complete{true};     ///< False only when authored recovery is ambiguous.
+  bool electrical_value_available{true}; ///< False for contracted ideal devices.
+  std::string message;
   double i_branch_ka{0.0};            ///< Branch fault current magnitude [kA]
   double i_from_ka{0.0};              ///< Current at from-end [kA]
   double i_to_ka{0.0};                ///< Current at to-end [kA]
   double s_branch_mva{0.0};           ///< Apparent power flow through branch during fault [MVA]
+};
+
+struct SCNumericalQuality {
+  bool factorization_valid{false};
+  bool all_finite{false};
+  double max_linear_residual{0.0};
 };
 
 struct SCConverterContributionResult {
@@ -156,6 +176,12 @@ struct SCConverterContributionResult {
 struct SCDetailedResult {
   int fault_bus_id{0};
   bool solved{false};
+  std::string status{"not_run"};
+  std::string message;
+  std::string model_scope{"iec60909-quasi-static-sequence-v2"};
+  std::vector<std::string> model_limitations;
+  double effective_c_factor{0.0};
+  SCNumericalQuality numerical_quality;
   std::vector<SCDetailedBusResult> bus_results;
   std::vector<SCDetailedBranchResult> branch_results;
   std::vector<SCConverterContributionResult> converter_contributions;
@@ -178,6 +204,11 @@ struct SCMotorParams {
   double x_ohm{0.0};
 };
 
+struct SCThermalFactors {
+  double m{0.0};
+  double n{0.0};
+};
+
 double get_voltage_factor_sc(double vn_kv, SCCalcType calc_type);
 double calculate_kappa_basic_sc(double rx_ratio);
 double calculate_generator_correction_factor_sc(const SCGeneratorParams& p,
@@ -195,6 +226,11 @@ double calculate_transformer_zero_sequence_correction_factor_sc(const SCTransfor
                                                                 SCCalcType calc_type,
                                                                 double base_mva);
 std::complex<double> calculate_motor_impedance_sc(const SCMotorParams& p);
+SCThermalFactors calculate_thermal_factors_sc(double kappa,
+                                              double ikss_ka,
+                                              double ik_ka,
+                                              double frequency_hz,
+                                              double duration_s);
 
 SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
                                             int fault_bus_id,

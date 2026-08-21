@@ -1,0 +1,87 @@
+% 稀疏批量算法与资源边界
+\section{稀疏批量算法、复杂度与取消语义}\label{sec:sc-sparse}
+
+\subsection{为什么只求逆的列和对角}
+
+短路计算需要 $Z_s=Y_s^{-1}$ 的驱动点阻抗 $Z_s(k,k)$，详细贡献和剩余电压还需要故障列
+$Z_s(:,k)$。显式形成完整稠密逆矩阵既不必要，也会把内存从稀疏因子规模推高到
+$O(n^2)$。当前 AC 实现对单位向量求解
+\begin{equation}
+  Y_s z_k=e_k,\qquad z_k=Z_s(:,k),\qquad Z_s(k,k)=z_k(k),
+\end{equation}
+并且只保留所需列或对角。\srcpath{SparseInverseSolver} 在编译提供
+\srcpath{HACDCPF\_OPF\_HAVE\_KLU} 时选择 Eigen KLU 包装，否则使用 Eigen
+\fld{SparseLU}；两者都先分析稀疏模式，再数值分解。
+
+\subsection{概览全母线算法}
+
+\srcpath{compute\_short\_circuit} 的流程为：
+\begin{enumerate}
+  \item 投影 rich 系统，构造单个正序 \fld{Y\_fault}；
+  \item 对 \fld{Y\_fault} 做一次稀疏 LU 分解；
+  \item 以 \fld{inverse\_rhs\_batch\_size} 个单位向量组成稠密 RHS 块，解出对应逆列；
+  \item 每列只保存本列的对角元素，随后逐母线换算 $Z_{kk}$、$I_k''$ 和 $S_k''$；
+  \item 按 \fld{BusMergeMap} 广播回 authored bus ID。
+\end{enumerate}
+RHS 块大小必须位于 $[1,256]$，越界在装配前拒绝。增大块宽通常提高三角求解吞吐，但临时稠密矩阵内存约为
+$O(nb)$ 个复数，其中 $n$ 为 canonical AC 母线数、$b$ 为实际块宽；它不改变数值模型。
+
+\subsection{详细单点与批量复用}
+
+\srcpath{build\_detailed\_sparse\_context} 一次构建初始、稳态和 network-only 序网，并缓存
+所需稀疏分解。\srcpath{run\_short\_circuit\_detailed\_batch} 对一组故障母线只创建一个
+\fld{DetailedSparseContext}，随后逐故障位置调用
+\srcpath{run\_short\_circuit\_detailed\_impl}。因此批量接口比循环调用单点公共入口少做重复投影、
+序网装配和分解。
+
+若 \fld{compute\_nonfault\_currents=true}，详细路径还提取正/负/零序逆对角，以便给非故障母线
+构造自阻抗指标；生产 HTTP 详细路由固定把该选项改为 false，从而避免两组额外逆对角计算。
+故障母线完整电流、源贡献、全母线剩余电压仍然保留。
+
+\subsection{成本模型}
+
+令 $n$ 为 canonical AC 母线数，$m_s=\mathrm{nnz}(Y_s)$，$q$ 为请求故障位置数，
+$F_s$、$T_s$ 分别表示一个序网的稀疏 LU 分解与一次三角求解成本。其实际值由消元树和填充决定，
+不能仅由 $m_s$ 给出多项式精确式。可审计的成本分解为
+\begin{equation}
+T_{\rm batch}\approx T_{\rm projection}+T_{\rm assembly}
++\sum_s F_s+q\sum_s T_s+T_{\rm attribution},
+\end{equation}
+其中三相只消费正序故障等效，不平衡故障消费三序。逆对角提取若启用，需要每个相关序网再做
+$n$ 个 RHS 的三角求解，但按块执行。内存峰值近似为稀疏矩阵与 LU 因子、若干长度 $n$ 的逆列，
+以及 $n\times b$ 的稠密 RHS/解块；必须以实测 fill-in 而不是原矩阵非零数估计生产容量。
+
+\subsection{取消与失败原子性}
+
+\fld{cancellation\_requested} 是协作式回调。概览/逆对角算法在 RHS 块之间检查，详细批量在故障
+位置之间检查；一次正在执行的稀疏分析、分解或三角求解不可中断。取消通过异常
+\texttt{short-circuit analysis cancelled} 传播，HTTP 转成 400 错误而不是部分成功结果。
+DC 批量路径同样在选列求解之间检查取消回调。
+
+AC 概览分解失败时抛异常。详细入口在消费前检查每个必需序网因子；每次选列/对角求解还计算
+Higham 后向误差
+\begin{equation}
+ \eta=\frac{\lVert Ax-b\rVert_2}{\lVert A\rVert_2\lVert x\rVert_2+\lVert b\rVert_2},
+\end{equation}
+并固定要求 $\eta\le10^{-9}$。失败返回 \fld{status=numerical\_failure}、message 和质量字段，绝不
+以零列继续。仅有限流电流源且没有电压源时不强行正则化 Zbus，而走独立的接地故障连通分量模型；
+其不可确定的电压和支路量进入 limitations。AUD-042 已关闭。
+
+\subsection{DC 算法的不同资源边界}
+
+\srcpath{dc\_bus\_fault\_levels} 首先以并查集收缩 $r\le10^{-12}$ 的理想导体，再从所有 DC\_V
+超节点做可达性搜索；无源孤岛不进入有源 Dirichlet 块，因而不会使其他分量奇异。对有源非源节点
+构造稀疏 $G_{NN}$ 并只分解一次：预故障电压解一个 RHS，每个故障点解 $G_{NN}z_k=e_k$，以
+$R_{th}=z_k(k)$ 计算故障电流，再按补偿定理
+$V^f=V^0-z_k I_f$ 恢复支路/DCCB 电流。复杂度为收缩/建图 $O(V+E\alpha(V))$、一次稀疏因子
+$F$、每故障一个三角求解 $T$ 和 $O(E)$ 电流恢复；内存为 $O(F+V+E)$，不形成完整逆矩阵。
+
+\subsection{性能声明的复现要求}
+
+任何时延/吞吐结论至少应记录：rich/canonical 母线与支路数、三序非零数、LU 因子非零数、
+KLU 或 SparseLU 后端、RHS 块宽、请求故障数、是否计算非故障指标、硬件与构建类型。
+Release 基准 \srcpath{dc\_short\_circuit\_benchmark} 固定 1000 母线链、64 个故障点、批量 200 次
+取中位数，逐点入口 5 次取中位数。最新 Release 实测 batch 1.02900 ms、逐点重建 16.5459 ms，
+倍率 0.0621906，
+64 个电流最大差为 0 pu；达到预先冻结的不高于 0.10 倍阈值。结果依赖本机 arm64、Release 和
+当前依赖 HEAD，不能替代目标网络 fill-in 基准。

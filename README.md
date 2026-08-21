@@ -127,7 +127,7 @@ powershell -ExecutionPolicy Bypass -File tools/package_trial_windows.ps1
 | 电压稳定 | 已实现 | 连续潮流（CPF）采用增广 `[state, lambda]` 弧长预测-校正，可越过 P-V 鼻点并保留下支采样；输出 P-V 曲线与 VSI 指标。 |
 | 图建模、网络降阶、重构 | 已实现并持续回归 | 支持连通性、开关收缩、Kron/series/pendant/sparse-Kron reduction、ONR。 |
 | 可靠性与弹性分析 | 已实现并持续回归 | 包含 MC、精确容量状态 COPT/F&D、FMEA、运行年/日历年故障率精确换算、物理成功路径容斥与稳定 ID 最小割集、三阶段可靠性。物理后果统一采用显式负荷削减：主网 HL-II 执行逐岛角度参考、零下界再调度、固定注入削减和两阶段字典序 DC-OPF；混合 AC/DC 执行同口径两阶段网络 LP；配网执行含有功/无功削减、AC/DC LinDistFlow、热限、辐射森林、Stage-2 运行拓扑重构及 Stage-3 拓扑保持的 MILP，纯无功负荷也具有显式削减可行点。无源/无 slack 状态由模型内生全切负荷，任何求解或证书失败立即报错，不伪造 EENS。保护不准入在安全拓扑上继续求解后果，并与 solver failure 分开标记。信息可靠性支持共享依赖路径、QoS、联合功能、最小割集、共因环境、通信设备供电与电池自治；在线保护链覆盖 CT/PT、主后备配合、重合/分段、DER-FRT 与 Mass-Matrix DAE。LCC、多端口路由器及显式三相保护动态不在当前物理后果口径内。 |
-| 三相与短路分析 | 已实现并持续回归 | 三相 NR 与 AC/DC 短路分析（IEC 60909 简化与详细路径、DC 故障水平估计）均有独立测试族。 |
+| 三相与短路分析 | 已实现并持续回归 | 三相 NR 与 AC/DC 短路分析均有独立测试族。详细短路模块覆盖 IEC 60909 三序网、$K_G/K_T/K_S$、两/三绕组 Y/YN/Z/ZN/$\Delta$ 零序、线路零序电纳、方法 A/B/C、公式 (77)、$I_{bmo}$、附录 A、导体温度、相/地电流、稀疏批量、authored 身份恢复，以及理想导体收缩和实际电阻边 DCCB 分流；57 个直接短路用例/917 断言、IEC 13 母线综合例、50 组 OpenDSS 完整网络、35 组 GridLAB-D 5.3.0 平衡探针和 IEEE 13/34/123 外部 Thevenin 核已验证。GridLAB-D 为短路交叉验证强制门禁；详细 IEC 60909 计算域无开放审计项，EMT、控制器、保护与 IEC 61660 属于各自模型族。 |
 | 谐波分析 | 已实现（持续增强） | 频域穿透、Newton 非线性、三相 abc 与 AC/DC 耦合谐波潮流，频扫/谐振检测与 IEEE 519 / GB/T 14549 合规校核。 |
 | 暂态动力学 | 已实现基础框架（持续增强） | 动态建模、事件、7 类求解器（含 MassMatrixDae 同时式 DAE）、DAE 诊断、小信号与频率观测；设备模型覆盖同步机/调速器/励磁/PSS、GFM/GFL 逆变器、DER 与 IEEE 1547 保护。显式三相网络自动启用 GFL 逐相电流状态与相域限流，GFM 采用序耦合 Norton 端口和最大相电流限流；三线制默认阻断零序电流。 |
 | 时序与年度生产模拟 | 已实现并持续回归 | UC MILP → AC-OPF → PF 校验流水线；年度分层分解（支持按日并行）、多年生命周期仿真与容量扫描对比。 |
@@ -157,7 +157,7 @@ powershell -ExecutionPolicy Bypass -File tools/package_trial_windows.ps1
 ### 3) 测试覆盖信号（如何判断“不是纸面功能”）
 
 - 当前 `tests/CMakeLists.txt` 已注册 100 余个 C++ 测试目标（1300 余个 Catch2 用例），覆盖 IO、PF/OPF、图分析、重构、可靠性、弹性、短路、谐波、三相、暂态、EV-交通耦合、市场、综合能源、SPPT 与跨模块一致性；另有 Node/Playwright 浏览器 E2E 与 Python GUI HTTP E2E 注册进 CTest。
-- 部分测试有运行时外部依赖门控（gridlabd 可执行、Julia、OpenDSS、Playwright/chromium 等），依赖缺失时自动 skip，不构成失败。
+- 部分测试有运行时外部依赖门控（Julia、部分 GridLAB-D I/O 比较、OpenDSS、Playwright/chromium 等），依赖缺失时自动 skip；短路交叉验证例外，GridLAB-D 缺失、少于 35 个案例或误差超门均直接失败。
 - 这表示“代码路径已工程化并具备回归入口”，但不等同于“你当前机器/当前配置已全部跑通”。
 - 对外汇报建议使用两层口径：
   - 能力存在性：以源码与测试目标注册为准。
@@ -288,7 +288,7 @@ Canonical 层的一个重要设计原则是：求解器只看到必要的数学�
 | FMEA 与信息/保护可靠性 | `run_distribution_fmea`, `run_failure_mode_fmea`, `evaluate_physical_network_reliability`, `evaluate_joint_information_reliability`, `generate_protection_cyber_classes`, `compare_protection_cyber_reliability` | 全 rich-model 失效模式目录 + N-1/N-2 二阶交互；运行年/日历年频率换算；物理/信息成功路径容斥、QoS、共因与供电依赖的精确状态；给定轨迹的 L2 保护/FRT 联合事件树 | EENS/EDNS/SAIFI/SAIDI、二阶完整性、稳定 ID 最小割集、静态 FMEA/仅保护/联合 EENS/LOLE/LOLF 对比与有效性边界 |
 | 三阶段可靠性 | `run_three_stage_reliability` | native C++ 联合 AC/DC LinDistFlow MILP；交流支路视在功率内接多边形；VSC/DC-DC 双向效率，AC/DC/DER/移动储能/VPP 调度与跨阶段 SOC；会话保护配置按自动重合、主保护、后备保护和未清除事件调节频率、清除时间、停运区与恢复准入 | 三阶段失负荷、热限边数与最大视在功率比、保护场景审计、有符号 VSC 调度、节点可靠性指标与有效性标志；该路由是概率条件化恢复 MILP，继电整定与 DER-FRT 动态由独立的在线保护—信息物理三级对照入口执行 |
 | 配电弹性 | `run_distribution_resilience_assessment`, `run_distribution_resilience_mip_assessment`, `run_certified_distribution_resilience_mip` | heuristic sequential 或 multi-period hybrid AC/DC MIP；可将拓扑/MESS 转换送入多保真 DAE oracle | 恢复曲线、元件/MESS 状态、故障序列、弹性指标、逐转换动态证书及模型边界 |
-| 短路分析 | `compute_short_circuit`, `run_short_circuit_detailed`, `dc_bus_fault_level` | Z-bus IEC 60909 简化 / 完整 IEC（c 因子、κ/ip/ib/ik/ith、变压器修正、电机与换流器贡献）；DC 为戴维南保守上限估计 | 故障电流、IEC 指标、DC 故障水平与开断 duty |
+| 短路分析 | `compute_short_circuit`, `run_short_circuit_detailed`, `dc_bus_fault_level`, `dc_bus_fault_levels` | 稀疏 Z-bus IEC 60909 概览 / 详细序网（c 因子、κ/ip/ib/ik/ith、相电流、变压器修正、电机与换流器贡献）；DC 为电阻性刚性源准稳态批量模型，收缩理想导体并由故障后电压恢复 DCCB 实际边电流 | authored 母线/设备故障电流、IEC 指标、数值质量、DC 故障水平与准稳态开断 duty；EMT 与控制动态显式列为限制 |
 | 谐波潮流 | `solve_harmonic_power_flow`（及 `_newton` / `_3ph` / `_3ph_hybrid` / `_hybrid_newton` 变体）, `frequency_scan`, `check_harmonic_limits` | 频域穿透（NIC 双端口桥）、Newton 非线性、三相 abc、AC/DC 耦合 | 谐波电压/电流、频扫/谐振、IEEE 519 / GB/T 14549 合规、K 因子/TDD |
 | 暂态仿真 | `run_transient_simulation`, `small_signal_analysis`, `computeFrequencyReport` | 机电暂态 DAE（7 类求解器，含 MassMatrixDae 同时式） | 轨迹、事件、COI/孤岛频率、小信号摘要 |
 | 碳分析 | `run_carbon_analysis`, `compute_annual_carbon_analysis`, `compute_annual_user_gec_accounting` | PF result + proportional / matrix tracing；年度时序含储能碳库存 | 节点、支路、负荷碳流；年度碳与用户/节点 GEC 核算 |

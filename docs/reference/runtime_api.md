@@ -179,6 +179,21 @@ series PF round-trip、case33bw split-series 以及 DC-OPF objective round-trip 
 | `POST /api/session/run_reliability*` | Non-sequential, sequential, FMEA, feeder, and three-stage reliability. |
 | `POST /api/session/run_reconfig` | Topology reconfiguration. |
 
+The three short-circuit routes have deliberately different result scopes:
+
+| Route | Effective contract |
+|---|---|
+| `POST /api/session/sc` | All-authored-AC-bus overview. Returns `bus_id`, `ikpp_ka`, `sk_mva`, and complex Thevenin impedance parts with `model_scope=overview-positive-sequence`. For unbalanced faults this is the simplified `Z1=Z2=Z0` overview, not the detailed sequence solve. |
+| `POST /api/session/sc_detailed` | Requires non-empty authored AC `fault_bus_ids`; defaults Method-B topology to independently evaluated `Auto`, and forces `compute_nonfault_currents=false` while preserving complete selected-fault duties, phase currents, source contributions, voltage profile, and authored branch rows. Each result carries status/message/scope/limitations, effective `c_factor`, and numerical quality; the top level separates requested options and aggregate complete/partial/failed counts. Contracted ideal switchgear has an identity row with `electrical_value_available=false`. |
+| `POST /api/session/dc_sc` | Requires non-empty authored DC `fault_bus_ids`; one sparse batch reports per-item status/scope/limitations, `v_prefault_pu`, `r_thevenin_pu`, pu/kA fault current, residual, graph counts, and actual resistive-edge DCCB duties. HTTP 200 may contain per-item `solved=false`; the top-level batch status must also be checked. |
+
+All three routes return 409 for session contention and 400 for parsing/raised
+errors. Public solver validation rejects non-finite and out-of-domain numeric
+options before assembly. Required sparse factors and selected solves must pass a
+`1e-9` backward-residual gate before detailed AC can report success. The complete
+option/result, identity, numerical validation, and closed-audit contract is in the
+[short-circuit manual](../modules/short_circuit/short_circuit_manual.tex).
+
 `run_reconfig` solves one snapshot even though the response exposes a
 one-element `steps_topology` view. `milp_feasible` certifies only the core
 topology/LinDistFlow model; `executable` additionally requires rich-device

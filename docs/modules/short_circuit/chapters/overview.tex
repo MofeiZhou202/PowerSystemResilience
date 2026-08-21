@@ -13,16 +13,19 @@
 \toprule
 入口 & 定义位置 & 用途\\
 \midrule
-\srcpath{compute\_short\_circuit} & include/hacdcpf/analysis/short\_circuit.hpp:compute\_short\_circuit & 概览：全母线 Z-bus 等效故障\\
-\srcpath{compute\_fault\_at\_bus} & include/hacdcpf/analysis/short\_circuit.hpp:compute\_fault\_at\_bus & 概览：单母线查询\\
-\srcpath{run\_short\_circuit\_detailed} & include/hacdcpf/analysis/short\_circuit.hpp:run\_short\_circuit\_detailed & 详细 IEC 60909（单母线）\\
-\srcpath{run\_short\_circuit\_detailed\_batch} & include/hacdcpf/analysis/short\_circuit.hpp:run\_short\_circuit\_detailed\_batch & 详细 IEC 60909（多母线）\\
-\srcpath{dc\_bus\_fault\_level} & dc\_short\_circuit.hpp & 直流母线金属性故障水平\\
+\srcpath{compute\_short\_circuit} & \srcpath{short\_circuit.hpp} & 概览：全母线 Z-bus 等效故障\\
+\srcpath{compute\_fault\_at\_bus} & \srcpath{short\_circuit.hpp} & 概览：单母线查询\\
+\srcpath{run\_short\_circuit\_detailed} & \srcpath{short\_circuit.hpp} & 详细 IEC 60909（单母线）\\
+\srcpath{run\_short\_circuit\_detailed\_batch} & \srcpath{short\_circuit.hpp} & 详细 IEC 60909（多母线）\\
+\srcpath{dc\_bus\_fault\_level} & \srcpath{dc\_short\_circuit.hpp} & 直流母线金属性故障水平\\
 \bottomrule
 \end{tabular}
 \end{center}
-IEC 辅助函数：\srcpath{get\_voltage\_factor\_sc}（:dc\_bus\_fault\_level）、\srcpath{calculate\_kappa\_basic\_sc}（:dc\_bus\_fault\_level）、
-\srcpath{calculate\_generator\_correction\_factor\_sc}、\srcpath{calculate\_transformer\_correction\_factor\_sc}。
+前四个入口定义于 \srcpath{include/hacdcpf/analysis/short\_circuit.hpp}，DC 入口定义于同目录的
+\srcpath{dc\_short\_circuit.hpp}。IEC 辅助函数包括
+\srcpath{get\_voltage\_factor\_sc}、\srcpath{calculate\_kappa\_basic\_sc}、
+\srcpath{calculate\_generator\_correction\_factor\_sc} 和
+\srcpath{calculate\_transformer\_correction\_factor\_sc}。
 
 \subsection{基准量}
 交流母线（线电压基准 $U_b$ kV、系统基准功率 $S_b$ MVA）：
@@ -47,8 +50,10 @@ c_{\min}(U_n), & \text{最小计算（\fld{Min}）}
 \subsection{诚实口径}
 \begin{itemize}
   \item 概览 \srcpath{compute\_short\_circuit} 对不平衡故障用简化 $Z_1{=}Z_2{=}Z_0$；详细路径建真序网；
-  \item 三绕组变压器零序默认以正序代入（未建矢量组）；
-  \item 直流路径为电阻性刚性源上界，不含换流器限流/电容放电/直流保护跳闸；
-  \item 结果 \fld{SCDetailedResult}（:dc\_bus\_fault\_level）的 \fld{solved} 标志与逐母线/支路/换流器贡献分列，
-        便于按 IEC 60909 逐项校核。
+  \item 详细路径按矢量组建立两绕组零序印章，并以带变比四节点印章和 Schur 消元建立三绕组
+        正/零序网络；参数不完整或矢量组不支持时显式拒绝，不以正序参数代替零序；
+  \item 直流路径为电阻性刚性源准稳态模型，支持理想导体收缩、稀疏批量与实际电阻边 DCCB 分流，
+        但不含换流器限流/电容放电/直流保护跳闸；
+  \item 结果含结构化 status/message/scope/limitations、数值质量、逐母线/支路/换流器贡献与 authored
+        身份，便于按 IEC 60909 逐项校核并拒绝假成功。
 \end{itemize}

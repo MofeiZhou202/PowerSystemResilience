@@ -9,7 +9,7 @@
 电抗谱系（$x_d''/x_d'/x_d$）的电机学解释、修正系数体系（$K_G/K_T/K_S$）、开断电流
 衰减因子 $\mu$、稳态电流系数 $\lambda_{\max}/\lambda_{\min}$、热等效系数 $m/n$，
 以及近端/远端短路分类。与平台实现（\srcpath{src/short\_circuit/}）的对应关系见
-本章末"与实现的对应"表，超出实现的内容以"未实现扩展说明"框就地标记。
+本章末表；表内只区分本模块实现与其他专用物理模块归属，不保留待实现占位。
 \end{theorynote}
 
 \subsection{记号与约定}
@@ -80,18 +80,27 @@ IEC 60909-0 采用工程拟合式
 （全偏移），$R/X\to\infty$ 时 $\kappa\to1.02\approx1$（无直流分量）。
 
 \begin{remark}[网状网络的 $\kappa$ 方法 A/B/C]
-网状网络中各馈入支路 $R/X$ 不同，标准给出三种等效方法：方法 A（取最小时间常数，
-最保守）、方法 B（取故障点等效阻抗的 $R/X$，并对结果乘 $1.15$ 安全修正，网状时
-$\kappa$ 上限 $1.8$）、方法 C（等效频率法）。故障点处近端系统更精确的口径是
-按式 (59) 逐贡献以各自 $R/X$ 求 $\kappa_i$ 后求和。
+网状网络中各馈入支路 $R/X$ 不同，标准给出三种等效方法：方法 A（对故障电压等级中
+承载分量短路电流的全部支路及馈入该电压等级的变压器取最小 $R/X$，即最大时间常数）、
+方法 B（取故障点等效阻抗的 $R/X$，并对结果乘 $1.15$ 安全修正，网状时
+$\kappa$ 上限 $1.8$）、方法 C（等效频率法）。方法 C 在 50/60 Hz 系统分别取
+$f_c=20/24$ Hz，即 $f_c/f=0.4$；将无源支路与电压源内阻的电抗乘 $0.4$，同步发电机
+电阻改用 $R_{Gf}/X_d''=0.15$（低压）、$0.07$（高压且 $S_r<100$ MVA）或 $0.05$
+（高压且 $S_r\ge100$ MVA），求频率修正网络的驱动点阻抗 $Z_{c,kk}$，再取
+\begin{equation}
+  \left(\frac RX\right)_C=\frac{\Re Z_{c,kk}}{\Im Z_{c,kk}}\frac{f_c}{f},\qquad
+  \kappa_C=1.02+0.98\exp\!\left[-3(R/X)_C\right].
+\end{equation}
+式 (59) 最终写成 $i_p=\sqrt2(\kappa I_{k1}''+I_{k2}'')$；静止发电机和跟网换流器
+作为限流电流源计入 $I_{k2}''$，不获得非周期分量放大。
 \end{remark}
 
-\begin{gapnote}
-当前实现支持 \fld{SCKappaMethod} A/B/C 选项，但内部仅区分"方法 B 且网状"
-（$\kappa\leftarrow\min(1.8,\,1.15\kappa)$）与其余组合（统一钳制到 $[1,2]$）；
-方法 A 的最小时间常数口径与方法 C 的等效频率口径未分别实现
-（见第~\ref{sec:sc-detailed}~章）。
-\end{gapnote}
+\begin{theorynote}
+实现完整区分 A/B/C：方法 A 由故障电压解识别实际承载分量电流的支路，并把电压源内阻和
+馈入变压器一并纳入最小 $R/X$，对全部电压源贡献使用同一 $\kappa_A$；方法 B 且网状时取
+$\min(1.8,1.15\kappa)$；方法 C 建立独立频率修正稀疏因子。OpenDSS oracle 也以外部支路电流
+独立识别同一集合，不能用实现返回的 $\kappa$ 自证。
+\end{theorynote}
 
 \subsection{同步电机电抗谱系的电机学解释}
 故障瞬间绕组磁链守恒，转子阻尼绕组与励磁绕组依次对定子电枢反应形成屏蔽，使
@@ -109,11 +118,11 @@ IEC 60909 的方法论是\emph{避免逐机时域仿真}：用 $x_d''$ 计算 $I
 $\mu$（开断时刻）、$\lambda$（稳态）、$\kappa$（峰值）折算后续时段，把上式的
 衰减谱折叠进少量代数系数。
 
-\begin{gapnote}
-当前实现只携带两档电抗：$x_d''$（缺省 \fld{default\_xdpp}=0.2，用于 $I_k''/i_p/I_b$）
-与 $x_d$（稳态 $I_k$ 重建序网）；$x_d'$、$T_d'$、$T_d''$ 与时间域包络未建模，
-衰减全部经由 $\mu$、$\lambda$ 系数近似。
-\end{gapnote}
+\begin{theorynote}
+IEC 准静态路径以 $x_d''$ 计算初始量，并按标准的 $\mu$、$q$、$\lambda$ 代数规则计算开断与
+稳态量；它不以 $x_d'$、$T_d'$、$T_d''$ 做时域积分。这是 IEC 60909 计算法本身的模型选择，
+不是本实现用 $x_d$ 序网猜测稳态量；动态包络由暂态模块承担。
+\end{theorynote}
 
 \subsection{修正系数体系}
 IEC 60909 对电源设备阻抗引入修正系数，使等效电压源口径下各贡献的幅值/相位
@@ -121,9 +130,11 @@ IEC 60909 对电源设备阻抗引入修正系数，使等效电压源口径下�
 \begin{itemize}
   \item \textbf{发电机 $K_G$}（直接并网机组）：
         \begin{equation}
-        Z_{G,K}=K_G Z_G,\qquad K_G=\frac{c}{1+x_d''\sin\varphi_{rG}},
+        Z_{G,K}=K_G Z_G,\qquad
+        K_G=\frac{U_n}{U_{rG}(1+p_G)}
+            \frac{c_{\max}}{1+x_d''\sin\varphi_{rG}},
         \end{equation}
-        折算额定功率因数下内电势与 $cU_n$ 的差异；
+        折算母线/铭牌电压基准、永久电压偏差 $p_G$ 与额定功率因数下内电势差异；
   \item \textbf{变压器 $K_T$}（网络两/三绕组变压器）：
         \begin{equation}
         Z_{T,K}=K_T Z_T,\qquad K_T=\frac{0.95\,c}{1+0.6\,x_T},
@@ -133,8 +144,8 @@ IEC 60909 对电源设备阻抗引入修正系数，使等效电压源口径下�
         修正含额定变比平方项与 $|x_d''-x_T|$ 的组合项，适用于机组建模到
         升压变高压侧的场合。
 \end{itemize}
-适用范围：修正系数用于最大短路电流口径；$c_{\min}$ 口径与部分特殊接线（如
-中性点经阻抗接地机组）另有规定，不可混用。
+实现组装阻抗修正始终使用设备所在电压等级的 $c_{\max}$；本次计算的等效电压源才按
+最大/最小工况使用 $c_{\max}/c_{\min}$。这一区分避免最小短路把设备修正系数错误缩小。
 
 \subsection{开断电流衰减因子 \texorpdfstring{$\mu$}{μ} 与电动机系数 \texorpdfstring{$q$}{q}}
 \begin{definition}[对称开断电流与 $\mu$、$q$]
@@ -152,9 +163,11 @@ $I_{kG}''/I_{rG}$ 的二元函数（标准以曲线与分段解析式给出，$\
 I_{kG}=\lambda\,I_{rG},
 \end{equation}
 $\lambda_{\max}$ 用于最大稳态（校核过励/持续热稳定），$\lambda_{\min}$ 用于最小
-稳态（校核保护灵敏性）；$\lambda$ 随饱和同步电抗 $x_{d,\mathrm{sat}}$ 查标准曲线，
-汽轮发电机系列 I/II 的 $\lambda_{\max}$ 典型上限分别约 $2.8$ 与 $5.0$。远端短路
-$I_k=I_k''$。
+稳态（校核保护灵敏性）；二者来自制造商数据或按标准图 15/16 查取，不能由 $x_d/x_q$
+臆造。远端短路的网络馈入保持 $I_k=I_k''$；异步电机机端三相故障的稳态贡献为零；多馈近端
+故障按第 11.2.7 条取 $I_k=I_{bmo}$，其中 $I_{bmo}$ 是删除全部异步电动机贡献后按公式 (77)
+计算的开断电流。端子馈电静态励磁机组发生机端故障时，最大与最小计算均取
+$\lambda_{\max}=\lambda_{\min}$，而不是取零。
 \end{definition}
 
 \subsection{热等效系数 \texorpdfstring{$m$}{m} 与 \texorpdfstring{$n$}{n}}
@@ -168,15 +181,21 @@ $i_{dc}(t)=\sqrt2 I_k''(\kappa-1)e^{-t/\tau}$ 的能量积分定义：
 m=\frac{1}{T_k\,(I_k'')^2}\int_0^{T_k} i_{dc}^2\,dt
 =(\kappa-1)^2\,\frac{\tau}{T_k}\bigl(1-e^{-2T_k/\tau}\bigr),
 \end{equation}
-标准以 $m(\kappa,fT_k)$ 曲线/解析式给出；$n$ 计及近端交流分量衰减
-（$n\le1$），远端短路 $n=1$。
+标准附录 A 给出可编程解析式
+\begin{equation}
+m=\frac{\exp\!\left(4fT_k\ln(\kappa-1)\right)-1}
+        {2fT_k\ln(\kappa-1)},
+\end{equation}
+其连续极限为 $m(1)=0$、$m(2)=2$。令 $q=I_k''/I_k$、
+$q'=q/(0.88+0.17q)$、$T_d'=3.1\,\mathrm{s}/q'$，则 $q=1$ 时 $n=1$，
+$q\ge1.25$ 时按附录 A 六项闭式计算；$1<q<1.25$ 按图 19 在端点之间插值。
 \end{definition}
 
-\begin{gapnote}
-当前实现固定 $n=1$（远端口径），$m$ 用简化闭式
-（第~\ref{sec:sc-detailed}~章热等效段），未按标准曲线区分近端 $n<1$ 情形；
-用于最终设备热稳定校核前应对照标准复核。
-\end{gapnote}
+\begin{theorynote}
+\srcpath{calculate\_thermal\_factors\_sc} 逐式实现附录 A，并以 \texttt{expm1} 处理
+$\kappa\to2$ 极限、以解析极限处理 $I_k\to0$；结果中的 \fld{thermal\_m/thermal\_n}
+允许调用方审计 $I_{th}$ 的组成。
+\end{theorynote}
 
 \subsection{与实现的对应}
 \begin{center}\footnotesize
@@ -193,22 +212,22 @@ m=\frac{1}{T_k\,(I_k'')^2}\int_0^{T_k} i_{dc}^2\,dt
 \implfull{include/hacdcpf/analysis/short\_circuit.hpp:get\_voltage\_factor\_sc}（实现取值约化见第~\ref{sec:sc-overview}~章）\\
 故障点三序戴维南等效（选择性求逆 $Y_sz_k=e_k$） &
 \implfull{src/short\_circuit/short\_circuit.cpp:build\_detailed\_sparse\_context}\\
-$\kappa$ 工程式与逐贡献峰值求和（IEC 60909-0 式 59） &
-\implfull{src/short\_circuit/short\_circuit.cpp:calculate\_kappa\_basic\_sc}（逐贡献求和见 run\_short\_circuit\_detailed\_impl）\\
+$\kappa$ 工程式与等效电压源/电流源分解（IEC 60909-0 式 59） &
+\textbf{已实现}\quad \srcpath{src/short\_circuit/short\_circuit.cpp:calculate\_kappa\_basic\_sc}；A/B/C 对电压源等值使用单一方法系数，静止发电机和跟网换流器取 $\kappa=1$\\
 网状网络 $\kappa$ 方法 A/B/C 完整体系 &
-\implpart{仅"方法 B 且网状"触发 $\min(1.8,1.15\kappa)$；A、C 未区分，统一钳制 $[1,2]$（kappa\_of（lambda））}\\
+\textbf{已实现}\quad A 为参与支路统一最小 $R/X$；B 为故障点等值与网状 1.15 修正；C 为独立 $f_c/f=0.4$ 稀疏等值与发电机 $R_{Gf}$\\
 近端/远端显式分类 &
-\implpart{无显式分类标志；衰减仅作用于发电机/电机贡献，网络与电流源贡献按远端处理}\\
+\textbf{已实现}\quad 以单机贡献 $I_{kG}^{\prime\prime}>2I_{rG}$ 判定近端，并区分单馈、多馈、网络馈入与异步电机稳态规则\\
 电抗谱系 $x_d''/x_d'/x_d$ 与时间常数 &
-\implpart{仅用 $x_d''$（$I_k''$ 系）与 $x_d$（稳态重建，run\_short\_circuit\_detailed\_impl Step 7）；无 $x_d'$、$T_d'$、$T_d''$}\\
+\textbf{已实现}\quad IEC 准静态路径按 $x_d^{\prime\prime}+\mu/q/\lambda$ 代数体系执行；时域 $x_d'/T_d'/T_d^{\prime\prime}$ 包络不属于本入口\\
 修正系数 $K_G/K_T/K_S$ &
-\implpart{$K_G$、$K_T$ 已实现：calculate\_generator\_correction\_factor\_sc、calculate\_transformer\_correction\_factor\_sc；电站机组 $K_S$ 未单列}\\
-开断衰减 $\mu$ 与电动机 $q$ &
-\implfull{src/short\_circuit/short\_circuit.cpp:compute\_mu}（电动机 $q$ 见同文件 compute\_q）\\
+\textbf{已实现}\quad \srcpath{generator\_kg}、\srcpath{transformer\_kt} 与 \srcpath{build\_iec\_network\_corrections}；$K_S$ 区分 OLTC/非 OLTC，并对机组内部故障切换到内部 $K_G$\\
+开断衰减 $\mu$、电动机 $q$ 与多馈公式 (77) &
+\textbf{已实现}\quad \srcpath{compute\_mu} 对 $I_k''/I_r\le2$ 返回 1，并在 20/50/100/250 ms 曲线间插值；\srcpath{run\_short\_circuit\_detailed\_impl} 使用端电压跌落权重\\
 稳态系数 $\lambda_{\max}/\lambda_{\min}$ &
-\implpart{仅 $\lambda_{\max}$：$x_d/x_q\le1.2$ 取 2.8、$\ge1.5$ 取 5.0、其间线性插值（run\_short\_circuit\_detailed\_impl 稳态段）；$\lambda_{\min}$ 未实现}\\
+\textbf{已实现}\quad \srcpath{Generator::sc\_lambda\_max/sc\_lambda\_min} 显式承载制造商/标准曲线值；缺值的单馈近端工况 fail closed；端子静态励磁取 $\lambda_{\min}$，多馈取 $I_{bmo}$\\
 热等效 $m/n$ 标准曲线 &
-\implpart{$n$ 固定 1，$m$ 简化闭式（run\_short\_circuit\_detailed\_impl 热等效段）}\\
+\textbf{已实现}\quad \srcpath{calculate\_thermal\_factors\_sc}：附录 A 闭式、图 19 插值及全部极限处理\\
 \bottomrule
 \end{longtable}
 \end{center}

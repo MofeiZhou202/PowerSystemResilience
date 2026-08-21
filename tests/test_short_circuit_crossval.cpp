@@ -12,9 +12,11 @@
 //   5. Fault-type ratios: SLG ≥ 3PH for grounded source
 //   6. IEC 60909 c-factor: larger c_factor ↑ Sk
 
+#include <algorithm>
 #include <cmath>
 #include <complex>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -39,6 +41,10 @@ using json = nlohmann::json;
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+static ACBus make_bus(int id, BusType t, double kv = 100.0);
+static ACBranch make_branch(int id, int f, int t, double r, double x);
+static const SCDetailedBusResult& fault_row(const SCDetailedResult& r);
+
 static HybridPowerSystem make_sys(std::vector<ACBus>    buses,
                                   std::vector<ACBranch> branches,
                                   double base_mva = 100.0,
@@ -58,13 +64,221 @@ static HybridPowerSystem make_sys(std::vector<ACBus>    buses,
       g.pmax_mw = 9999.0; g.pmin_mw = 0.0;
       g.qmax_mvar = 9999.0; g.qmin_mvar = -9999.0;
       g.xdpp_pu = xdpp;
+      g.mbase_mva = base_mva;
+      g.vn_kv = b.base_kv;
+      g.sc_lambda_max = 1.0;
+      g.sc_lambda_min = 1.0;
       sys.ac.generators.push_back(g);
     }
   }
   return sys;
 }
 
-static ACBus make_bus(int id, BusType t, double kv = 100.0) {
+TEST_CASE("SC detailed rejects invalid numeric options",
+          "[short_circuit][validation]") {
+  const auto sys = make_sys({make_bus(1, BusType::SLACK)}, {});
+  SCDetailedOptions opt;
+  opt.base_frequency_hz = std::numeric_limits<double>::quiet_NaN();
+  CHECK_THROWS_AS(run_short_circuit_detailed(sys, 1, opt), std::invalid_argument);
+  opt = {};
+  opt.fault_impedance_pu = -0.01;
+  CHECK_THROWS_AS(run_short_circuit_detailed(sys, 1, opt), std::invalid_argument);
+  opt = {};
+  opt.inverse_rhs_batch_size = 0;
+  CHECK_THROWS_AS(run_short_circuit_detailed(sys, 1, opt), std::invalid_argument);
+}
+
+TEST_CASE("SC detailed reports singular required sequence factors",
+          "[short_circuit][validation][singular]") {
+  HybridPowerSystem sys;
+  sys.base_mva = sys.ac.base_mva = 100.0;
+  sys.ac.buses = {make_bus(1, BusType::PQ, 20.0)};
+  const auto result = run_short_circuit_detailed(sys, 1);
+  CHECK_FALSE(result.solved);
+  CHECK(result.status == "numerical_failure");
+  CHECK_FALSE(result.numerical_quality.factorization_valid);
+  CHECK_FALSE(result.message.empty());
+}
+
+TEST_CASE("SC detailed reconstructs SLG and LL phase currents",
+          "[short_circuit][sequence][phase-current]") {
+  HybridPowerSystem sys;
+  sys.base_mva = sys.ac.base_mva = 100.0;
+  sys.ac.buses = {make_bus(1, BusType::SLACK, 20.0)};
+  ExternalGrid grid;
+  grid.index = 1;
+  grid.bus = 1;
+  grid.r_pu = 0.01;
+  grid.x_pu = 0.10;
+  grid.r0_pu = 0.02;
+  grid.x0_pu = 0.20;
+  sys.ac.external_grids = {grid};
+  SCDetailedOptions opt;
+  opt.c_factor = 1.0;
+  opt.compute_branch_flows = false;
+
+  opt.fault_type = FaultType::SinglePhaseGround;
+  const auto slg = run_short_circuit_detailed(sys, 1, opt);
+  REQUIRE(slg.solved);
+  const auto& slg_row = fault_row(slg);
+  CHECK(slg_row.i_phase_a_ka > 0.0);
+  CHECK(std::abs(slg_row.i_phase_b_ka) < 1e-10);
+  CHECK(std::abs(slg_row.i_phase_c_ka) < 1e-10);
+  CHECK(std::abs(slg_row.i_ground_ka - slg_row.i_phase_a_ka) < 1e-9);
+
+  opt.fault_type = FaultType::TwoPhase;
+  const auto ll = run_short_circuit_detailed(sys, 1, opt);
+  REQUIRE(ll.solved);
+  const auto& ll_row = fault_row(ll);
+  CHECK(std::abs(ll_row.i_phase_a_ka) < 1e-10);
+  CHECK(std::abs(ll_row.i_phase_b_ka - ll_row.i_phase_c_ka) < 1e-9);
+  CHECK(std::abs(ll_row.i_ground_ka) < 1e-10);
+
+  const Cx z1(0.01, 0.10);
+  const Cx z2 = z1;
+  const Cx z0(0.02, 0.20);
+  const Cx zf(0.05, 0.0);
+  const Cx a(-0.5, std::sqrt(3.0) / 2.0);
+  const Cx a2 = a * a;
+  const double i_base_ka = 100.0 / (std::sqrt(3.0) * 20.0);
+
+  opt.fault_impedance_pu = zf.real();
+  const auto ll_resistive = run_short_circuit_detailed(sys, 1, opt);
+  REQUIRE(ll_resistive.solved);
+  const auto& ll_resistive_row = fault_row(ll_resistive);
+  const Cx ll_i1 = 1.0 / (z1 + z2 + zf);
+  const double ll_phase_ka = std::abs((a2 - a) * ll_i1) * i_base_ka;
+  CHECK(ll_resistive_row.i_phase_b_ka == Catch::Approx(ll_phase_ka).margin(1e-9));
+  CHECK(ll_resistive_row.i_phase_c_ka == Catch::Approx(ll_phase_ka).margin(1e-9));
+  CHECK(ll_resistive_row.ikss_ka == Catch::Approx(ll_phase_ka).margin(1e-9));
+
+  opt.fault_type = FaultType::TwoPhaseGround;
+  const auto llg = run_short_circuit_detailed(sys, 1, opt);
+  REQUIRE(llg.solved);
+  const auto& llg_row = fault_row(llg);
+  const Cx z0f = z0 + 3.0 * zf;
+  const Cx llg_i1 = 1.0 / (z1 + z2 * z0f / (z2 + z0f));
+  const Cx llg_i2 = -llg_i1 * z0f / (z2 + z0f);
+  const Cx llg_i0 = -llg_i1 * z2 / (z2 + z0f);
+  const double llg_b_ka = std::abs(llg_i0 + a2 * llg_i1 + a * llg_i2) * i_base_ka;
+  const double llg_c_ka = std::abs(llg_i0 + a * llg_i1 + a2 * llg_i2) * i_base_ka;
+  CHECK(llg_row.i_phase_a_ka == Catch::Approx(0.0).margin(1e-9));
+  CHECK(llg_row.i_phase_b_ka == Catch::Approx(llg_b_ka).margin(1e-9));
+  CHECK(llg_row.i_phase_c_ka == Catch::Approx(llg_c_ka).margin(1e-9));
+  CHECK(llg_row.i_ground_ka ==
+        Catch::Approx(3.0 * std::abs(llg_i0) * i_base_ka).margin(1e-9));
+  CHECK(llg_row.ikss_ka == Catch::Approx(std::max(llg_b_ka, llg_c_ka)).margin(1e-9));
+}
+
+TEST_CASE("SC detailed branch output carries authored transformer identity",
+          "[short_circuit][projection][identity]") {
+  HybridPowerSystem sys;
+  sys.base_mva = sys.ac.base_mva = 100.0;
+  sys.ac.buses = {make_bus(1, BusType::SLACK, 110.0),
+                  make_bus(2, BusType::PQ, 20.0)};
+  ExternalGrid grid;
+  grid.index = 1; grid.bus = 1; grid.r_pu = 0.01; grid.x_pu = 0.1;
+  grid.r0_pu = 0.01; grid.x0_pu = 0.1;
+  sys.ac.external_grids = {grid};
+  Transformer2W transformer;
+  transformer.index = 77;
+  transformer.hv_bus = 1; transformer.lv_bus = 2;
+  transformer.sn_mva = 100.0;
+  transformer.vn_hv_kv = 110.0; transformer.vn_lv_kv = 20.0;
+  transformer.vk_percent = 10.0; transformer.vkr_percent = 1.0;
+  transformer.z0_percent = 10.0; transformer.x0_r0 = 10.0;
+  sys.ac.transformers_2w = {transformer};
+  const auto result = run_short_circuit_detailed(sys, 2);
+  REQUIRE(result.solved);
+  REQUIRE_FALSE(result.branch_results.empty());
+  const auto& branch = result.branch_results.front();
+  CHECK(branch.domain == "AC");
+  CHECK(branch.component_kind == "Transformer2W");
+  CHECK(branch.component_index == 77);
+  CHECK(branch.attribution_complete);
+}
+
+TEST_CASE("SC detailed preserves contracted switch identity without fake current",
+          "[short_circuit][projection][identity][switch]") {
+  HybridPowerSystem sys;
+  sys.base_mva = sys.ac.base_mva = 100.0;
+  sys.ac.buses = {make_bus(1, BusType::SLACK, 20.0),
+                  make_bus(2, BusType::PQ, 20.0),
+                  make_bus(3, BusType::PQ, 20.0)};
+  sys.ac.branches = {make_branch(10, 2, 3, 0.01, 0.1)};
+  ExternalGrid grid;
+  grid.index = 1; grid.bus = 1; grid.r_pu = 0.01; grid.x_pu = 0.1;
+  grid.r0_pu = 0.01; grid.x0_pu = 0.1;
+  sys.ac.external_grids = {grid};
+  Switch sw;
+  sw.index = 88; sw.bus_from = 1; sw.bus_to = 2;
+  sw.closed = true; sw.in_service = true;
+  sw.r_contact_ohm = 0.0; sw.z_ohm = 0.0;
+  sys.ac.switches = {sw};
+  const auto result = run_short_circuit_detailed(sys, 3);
+  REQUIRE(result.solved);
+  const auto found = std::find_if(
+      result.branch_results.begin(), result.branch_results.end(),
+      [](const auto& row) {
+        return row.component_kind == "Switch" && row.component_index == 88;
+      });
+  REQUIRE(found != result.branch_results.end());
+  CHECK_FALSE(found->electrical_value_available);
+  CHECK_FALSE(found->message.empty());
+}
+
+TEST_CASE("SC detailed assembles Transformer3W canonical equivalent exactly once",
+          "[short_circuit][projection][transformer3w]") {
+  HybridPowerSystem rich;
+  rich.base_mva = rich.ac.base_mva = 100.0;
+  rich.ac.buses = {make_bus(1, BusType::SLACK, 110.0),
+                   make_bus(2, BusType::PQ, 33.0),
+                   make_bus(3, BusType::PQ, 11.0)};
+  ExternalGrid grid;
+  grid.index = 1;
+  grid.bus = 1;
+  grid.r_pu = grid.r0_pu = 0.01;
+  grid.x_pu = grid.x0_pu = 0.10;
+  rich.ac.external_grids = {grid};
+
+  Transformer3W transformer;
+  transformer.index = 91;
+  transformer.hv_bus = 1;
+  transformer.mv_bus = 2;
+  transformer.lv_bus = 3;
+  transformer.sn_hv_mva = 100.0;
+  transformer.sn_mv_mva = 60.0;
+  transformer.sn_lv_mva = 40.0;
+  transformer.vn_hv_kv = 110.0;
+  transformer.vn_mv_kv = 33.0;
+  transformer.vn_lv_kv = 11.0;
+  transformer.vk_hv_mv_percent = 10.0;
+  transformer.vk_hv_lv_percent = 12.0;
+  transformer.vk_mv_lv_percent = 8.0;
+  transformer.vkr_hv_mv_percent = 1.0;
+  transformer.vkr_hv_lv_percent = 1.2;
+  transformer.vkr_mv_lv_percent = 0.8;
+  rich.ac.transformers_3w = {transformer};
+
+  SCDetailedOptions options;
+  options.c_factor = 1.0;
+  options.apply_iec_transformer_correction = false;
+  options.compute_branch_flows = false;
+  options.compute_voltage_drops = false;
+  const auto rich_result = run_short_circuit_detailed(rich, 3, options);
+  REQUIRE(rich_result.solved);
+
+  auto canonical = projection::RichToCanonicalOperator::apply(rich).canonical;
+  canonical.ac.transformers_3w.clear();
+  const auto canonical_result = run_short_circuit_detailed(canonical, 3, options);
+  REQUIRE(canonical_result.solved);
+  CHECK(fault_row(rich_result).ikss_ka ==
+        Catch::Approx(fault_row(canonical_result).ikss_ka).margin(1e-10));
+  CHECK(fault_row(rich_result).ip_ka ==
+        Catch::Approx(fault_row(canonical_result).ip_ka).margin(1e-10));
+}
+
+static ACBus make_bus(int id, BusType t, double kv) {
   ACBus b;
   b.index = id; b.bus_type = t;
   b.vm_pu = 1.0; b.va_deg = 0.0;
@@ -719,14 +933,10 @@ TEST_CASE("SC overview includes an external-grid source without generators",
   CHECK(result.bus_results[1].ikpp_ka > 0.0);
 }
 
-TEST_CASE("SC detailed: fault-bus peak uses formula (59) per-contribution kappa",
+TEST_CASE("SC detailed: method B uses voltage-level peak-factor caps",
           "[short_circuit][iec60909][peak]") {
-  // Network-only fault (no machine shunts): the peak at the fault bus is
-  // sqrt(2)·kappa_net·I"k with kappa_net from the network R/X ratio. For
-  // R/X -> 0 the basic kappa saturates near 2.0; the method-B meshed rule
-  // kappa = min(1.8, 1.15·kappa) applies uniformly — to the fault-bus
-  // per-contribution kappas as well as to transferred currents at non-fault
-  // buses — so kappa_net lands on the 1.8 cap.
+  // IEC 60909-0:2016, method B: the meshed correction is capped at 2.0 in
+  // HV/MV systems and at 1.8 only in LV systems.
   HybridPowerSystem sys;
   sys.base_mva = 100.0;
   sys.ac.base_mva = 100.0;
@@ -749,13 +959,18 @@ TEST_CASE("SC detailed: fault-bus peak uses formula (59) per-contribution kappa"
   const auto result = run_short_circuit_detailed(sys, 1, opt);
   REQUIRE(result.solved);
   const auto& row = fault_row(result);
-  // R/X = 1e-8 (not exactly 0), so the basic kappa is 2.0 - O(1e-8) and
-  // min(1.8, 1.15·kappa) lands exactly on the 1.8 cap.
-  CHECK(row.ip_ka == Catch::Approx(1.8 * std::sqrt(2.0) * row.ikss_ka)
+  CHECK(row.ip_ka == Catch::Approx(2.0 * std::sqrt(2.0) * row.ikss_ka)
                          .epsilon(1e-6));
+
+  sys.ac.buses.front().base_kv = 0.4;
+  const auto lv_result = run_short_circuit_detailed(sys, 1, opt);
+  REQUIRE(lv_result.solved);
+  const auto& lv_row = fault_row(lv_result);
+  CHECK(lv_row.ip_ka ==
+        Catch::Approx(1.8 * std::sqrt(2.0) * lv_row.ikss_ka).epsilon(1e-6));
 }
 
-TEST_CASE("SC detailed: transferred current peak keeps method B 1.8 cap",
+TEST_CASE("SC detailed: transferred current peak keeps the method B cap",
           "[short_circuit][iec60909][peak]") {
   HybridPowerSystem sys;
   sys.base_mva = 100.0;
@@ -781,10 +996,51 @@ TEST_CASE("SC detailed: transferred current peak keeps method B 1.8 cap",
   const auto result = run_short_circuit_detailed(sys, 1, opt);
   REQUIRE(result.solved);
   const auto& row2 = bus_row(result, 2);
-  // Non-fault bus: single-kappa approximation with method-B 1.15 factor
-  // capped at 1.8 on the transferred current.
-  CHECK(row2.ip_ka == Catch::Approx(1.8 * std::sqrt(2.0) * row2.ikss_1_ka)
+  // The fault voltage level is 20 kV, so the method-B upper cap is 2.0.
+  CHECK(row2.ip_ka == Catch::Approx(2.0 * std::sqrt(2.0) * row2.ikss_1_ka)
                           .epsilon(1e-12));
+}
+
+TEST_CASE("SC detailed: method B Auto classifies multiple source paths",
+          "[short_circuit][iec60909][peak][topology]") {
+  HybridPowerSystem sys;
+  sys.base_mva = sys.ac.base_mva = 100.0;
+  sys.ac.buses = {make_bus(1, BusType::SLACK, 20.0),
+                  make_bus(2, BusType::PV, 20.0),
+                  make_bus(3, BusType::PQ, 20.0)};
+  sys.ac.branches = {make_branch(1, 1, 3, 0.05, 0.10),
+                     make_branch(2, 2, 3, 0.05, 0.10)};
+  ExternalGrid first;
+  first.index = 1; first.bus = 1; first.r_pu = 0.05; first.x_pu = 0.10;
+  ExternalGrid second = first;
+  second.index = 2; second.bus = 2;
+  sys.ac.external_grids = {first, second};
+
+  SCDetailedOptions options;
+  options.c_factor = 1.0;
+  options.kappa_method = SCKappaMethod::B;
+  options.compute_ith = false;
+  options.compute_branch_flows = false;
+  options.compute_nonfault_currents = false;
+  options.topology = SCTopology::Auto;
+  const auto auto_meshed = run_short_circuit_detailed(sys, 3, options);
+  options.topology = SCTopology::Meshed;
+  const auto explicit_meshed = run_short_circuit_detailed(sys, 3, options);
+  REQUIRE(auto_meshed.solved);
+  REQUIRE(explicit_meshed.solved);
+  CHECK(fault_row(auto_meshed).ip_ka ==
+        Catch::Approx(fault_row(explicit_meshed).ip_ka).epsilon(1e-12));
+
+  sys.ac.branches.front().r_pu = 0.001;
+  sys.ac.external_grids.front().r_pu = 0.001;
+  options.topology = SCTopology::Auto;
+  const auto auto_low_rx = run_short_circuit_detailed(sys, 3, options);
+  options.topology = SCTopology::Radial;
+  const auto explicit_radial = run_short_circuit_detailed(sys, 3, options);
+  REQUIRE(auto_low_rx.solved);
+  REQUIRE(explicit_radial.solved);
+  CHECK(fault_row(auto_low_rx).ip_ka ==
+        Catch::Approx(fault_row(explicit_radial).ip_ka).epsilon(1e-12));
 }
 
 TEST_CASE("SC detailed: transformer correction factor is applied in canonical space",
@@ -869,6 +1125,130 @@ TEST_CASE("SC projection: transformer zero-sequence percent respects x0/r0 ratio
   CHECK(std::abs(br.x0_pu - expected_x0) < 1e-12);
 }
 
+TEST_CASE("SC detailed: zigzag neutral uses authored zero-sequence test impedance",
+          "[short_circuit][iec60909][transformer][zero_sequence][zigzag]") {
+  HybridPowerSystem sys;
+  sys.base_mva = sys.ac.base_mva = 100.0;
+  sys.ac.buses = {make_bus(1, BusType::PQ, 110.0),
+                  make_bus(2, BusType::SLACK, 20.0)};
+  ExternalGrid grid;
+  grid.index = 1; grid.bus = 2; grid.r_pu = 0.01; grid.x_pu = 0.10;
+  grid.r0_pu = 0.02; grid.x0_pu = 0.20;
+  sys.ac.external_grids = {grid};
+
+  Transformer2W transformer;
+  transformer.index = 1; transformer.hv_bus = 1; transformer.lv_bus = 2;
+  transformer.sn_mva = 100.0;
+  transformer.vn_hv_kv = 110.0; transformer.vn_lv_kv = 20.0;
+  transformer.vk_percent = 10.0; transformer.vkr_percent = 1.0;
+  transformer.z0_percent = 8.0; transformer.x0_r0 = 4.0;
+  transformer.vector_group = "YNd";
+  sys.ac.transformers_2w = {transformer};
+
+  SCDetailedOptions options;
+  options.fault_type = FaultType::SinglePhaseGround;
+  options.c_factor = 1.0;
+  options.apply_iec_transformer_correction = false;
+  options.compute_branch_flows = false;
+  options.compute_ith = false;
+  const auto grounded_wye = run_short_circuit_detailed(sys, 1, options);
+  REQUIRE(grounded_wye.solved);
+
+  sys.ac.transformers_2w.front().vector_group = "ZNd";
+  const auto grounded_zigzag = run_short_circuit_detailed(sys, 1, options);
+  REQUIRE(grounded_zigzag.solved);
+  CHECK(fault_row(grounded_zigzag).ikss_ka ==
+        Catch::Approx(fault_row(grounded_wye).ikss_ka).epsilon(1e-12));
+  CHECK(fault_row(grounded_zigzag).i_ground_ka ==
+        Catch::Approx(fault_row(grounded_wye).i_ground_ka).epsilon(1e-12));
+}
+
+TEST_CASE("SC detailed: three-winding zigzag ports preserve zero-sequence equivalent",
+          "[short_circuit][iec60909][transformer][three_winding][zigzag]") {
+  HybridPowerSystem sys;
+  sys.base_mva = sys.ac.base_mva = 100.0;
+  sys.ac.buses = {make_bus(1, BusType::SLACK, 110.0),
+                  make_bus(2, BusType::PQ, 20.0),
+                  make_bus(3, BusType::PQ, 10.0)};
+  ExternalGrid grid;
+  grid.index = 1; grid.bus = 1; grid.r_pu = 0.01; grid.x_pu = 0.10;
+  grid.r0_pu = 0.02; grid.x0_pu = 0.20;
+  sys.ac.external_grids = {grid};
+
+  Transformer3W transformer;
+  transformer.index = 1;
+  transformer.hv_bus = 1; transformer.mv_bus = 2; transformer.lv_bus = 3;
+  transformer.sn_hv_mva = 100.0;
+  transformer.sn_mv_mva = 60.0; transformer.sn_lv_mva = 40.0;
+  transformer.vn_hv_kv = 110.0;
+  transformer.vn_mv_kv = 20.0; transformer.vn_lv_kv = 10.0;
+  transformer.vk_hv_mv_percent = 10.0;
+  transformer.vk_hv_lv_percent = 12.0;
+  transformer.vk_mv_lv_percent = 8.0;
+  transformer.vkr_hv_mv_percent = 1.0;
+  transformer.vkr_hv_lv_percent = 1.2;
+  transformer.vkr_mv_lv_percent = 0.8;
+  transformer.vk0_hv_mv_percent = 10.0;
+  transformer.vk0_hv_lv_percent = 12.0;
+  transformer.vk0_mv_lv_percent = 8.0;
+  transformer.vkr0_hv_mv_percent = 1.0;
+  transformer.vkr0_hv_lv_percent = 1.2;
+  transformer.vkr0_mv_lv_percent = 0.8;
+  transformer.vector_group = "YNynyn";
+  sys.ac.transformers_3w = {transformer};
+
+  SCDetailedOptions options;
+  options.fault_type = FaultType::SinglePhaseGround;
+  options.c_factor = 1.0;
+  options.apply_iec_transformer_correction = false;
+  options.compute_branch_flows = false;
+  options.compute_ith = false;
+  const auto grounded_wye = run_short_circuit_detailed(sys, 3, options);
+  REQUIRE(grounded_wye.solved);
+
+  sys.ac.transformers_3w.front().vector_group = "ZNznyn";
+  const auto grounded_zigzag = run_short_circuit_detailed(sys, 3, options);
+  REQUIRE(grounded_zigzag.solved);
+  CHECK(fault_row(grounded_zigzag).ikss_ka ==
+        Catch::Approx(fault_row(grounded_wye).ikss_ka).epsilon(1e-12));
+  CHECK(fault_row(grounded_zigzag).i_ground_ka ==
+        Catch::Approx(fault_row(grounded_wye).i_ground_ka).epsilon(1e-12));
+}
+
+TEST_CASE("SC detailed: zero-sequence line capacitance closes an ungrounded fault path",
+          "[short_circuit][iec60909][zero_sequence][capacitance]") {
+  HybridPowerSystem sys;
+  sys.base_mva = sys.ac.base_mva = 100.0;
+  sys.ac.buses = {make_bus(1, BusType::SLACK, 20.0),
+                  make_bus(2, BusType::PQ, 20.0)};
+  Generator generator;
+  generator.index = 1; generator.bus = 1; generator.mbase_mva = 100.0;
+  generator.vn_kv = 20.0; generator.xdpp_pu = 0.10;
+  generator.sc_lambda_max = 1.0; generator.sc_lambda_min = 1.0;
+  sys.ac.generators = {generator};
+  auto line = make_branch(1, 1, 2, 0.01, 0.10);
+  line.r0_pu = 0.03; line.x0_pu = 0.30; line.b0_pu = 0.0;
+  sys.ac.branches = {line};
+
+  SCDetailedOptions options;
+  options.fault_type = FaultType::SinglePhaseGround;
+  options.c_factor = 1.0;
+  options.compute_branch_flows = false;
+  options.compute_ith = false;
+  const auto open = run_short_circuit_detailed(sys, 2, options);
+  REQUIRE(open.solved);
+  CHECK(open.status == "solved_zero_sequence_open");
+  CHECK(fault_row(open).ikss_ka == Catch::Approx(0.0).margin(1e-12));
+
+  sys.ac.branches.front().b0_pu = 0.04;
+  const auto capacitive = run_short_circuit_detailed(sys, 2, options);
+  INFO("status=" << capacitive.status << " message=" << capacitive.message);
+  REQUIRE(capacitive.solved);
+  CHECK(capacitive.status == "solved");
+  CHECK(fault_row(capacitive).ikss_ka > 0.0);
+  CHECK(std::isfinite(fault_row(capacitive).ikss_ka));
+}
+
 TEST_CASE("SC detailed: LV transformer taps cross-validate with OpenDSS fault study",
           "[short_circuit][crossval][opendss][transformer][tap]") {
 #ifdef HACDCPF_PROJECT_ROOT
@@ -931,7 +1311,12 @@ TEST_CASE("SC detailed: LV transformer taps cross-validate with OpenDSS fault st
     REQUIRE(three_phase.solved);
     const auto& row3 = fault_row(three_phase);
     CHECK(row3.ikss_ka == Catch::Approx(expected.at("ik3_ka").get<double>()).epsilon(2e-6));
-    CHECK(row3.ip_ka == Catch::Approx(expected.at("ip_iec60909_ka").get<double>()).epsilon(2e-6));
+    const double transformer_x = std::sqrt(0.10 * 0.10 - 0.01 * 0.01);
+    const double participating_rx = std::min(
+        eg.r_pu / eg.x_pu, 0.01 / transformer_x);
+    const double method_a_ip = std::sqrt(2.0) *
+        calculate_kappa_basic_sc(participating_rx) * row3.ikss_ka;
+    CHECK(row3.ip_ka == Catch::Approx(method_a_ip).epsilon(2e-12));
 
     // Z0 = Z1 in this grounded OpenDSS fixture, so the SLG and 3-phase RMS
     // currents must agree. This specifically exercises LV-tap Z0 referral.
@@ -940,6 +1325,185 @@ TEST_CASE("SC detailed: LV transformer taps cross-validate with OpenDSS fault st
     REQUIRE(ground.solved);
     CHECK(fault_row(ground).ikss_ka == Catch::Approx(row3.ikss_ka).epsilon(2e-6));
   }
+}
+
+TEST_CASE("SC detailed method A uses the minimum participating branch R over X",
+          "[short_circuit][iec60909][peak][method-a]") {
+  HybridPowerSystem sys;
+  sys.base_mva = sys.ac.base_mva = 100.0;
+  sys.ac.buses = {make_bus(1, BusType::SLACK, 20.0),
+                  make_bus(2, BusType::PQ, 20.0),
+                  make_bus(3, BusType::PQ, 20.0)};
+  ExternalGrid grid;
+  grid.index = 1; grid.bus = 1; grid.r_pu = 0.05; grid.x_pu = 0.10;
+  sys.ac.external_grids = {grid};
+  sys.ac.branches = {make_branch(1, 1, 2, 0.04, 0.10),
+                     make_branch(2, 2, 3, 0.005, 0.10)};
+
+  SCDetailedOptions options;
+  options.c_factor = 1.0;
+  options.kappa_method = SCKappaMethod::A;
+  options.topology = SCTopology::Radial;
+  options.compute_branch_flows = false;
+  options.compute_ith = false;
+  const auto result = run_short_circuit_detailed(sys, 3, options);
+  REQUIRE(result.solved);
+  const auto& row = fault_row(result);
+  const double expected_kappa = calculate_kappa_basic_sc(0.005 / 0.10);
+  CHECK(row.ip_ka ==
+        Catch::Approx(std::sqrt(2.0) * expected_kappa * row.ikss_ka)
+            .epsilon(1e-12));
+
+  const Cx equivalent(0.05 + 0.04 + 0.005, 0.10 + 0.10 + 0.10);
+  const double wrong_equivalent_kappa = calculate_kappa_basic_sc(
+      std::abs(equivalent.real() / equivalent.imag()));
+  CHECK(std::abs(expected_kappa - wrong_equivalent_kappa) > 0.20);
+}
+
+TEST_CASE("SC steady current classifies IEC near and far generator faults",
+          "[short_circuit][iec60909][steady][lambda]") {
+  HybridPowerSystem sys;
+  sys.base_mva = sys.ac.base_mva = 100.0;
+  sys.ac.buses = {make_bus(1, BusType::SLACK, 20.0)};
+  Generator generator;
+  generator.index = 17; generator.bus = 1; generator.mbase_mva = 100.0;
+  generator.vn_kv = 20.0; generator.xdpp_pu = 0.10;
+  generator.sc_lambda_max = 2.20; generator.sc_lambda_min = 1.40;
+  sys.ac.generators = {generator};
+
+  SCDetailedOptions options;
+  options.c_factor = 1.0;
+  options.compute_branch_flows = false;
+  options.compute_ith = false;
+  auto maximum = run_short_circuit_detailed(sys, 1, options);
+  REQUIRE(maximum.solved);
+  const double rated_ka = 100.0 / (std::sqrt(3.0) * 20.0);
+  CHECK(fault_row(maximum).ik_ka ==
+        Catch::Approx(2.20 * rated_ka).epsilon(1e-12));
+
+  options.calc_type = SCCalcType::Min;
+  auto minimum = run_short_circuit_detailed(sys, 1, options);
+  REQUIRE(minimum.solved);
+  CHECK(fault_row(minimum).ik_ka ==
+        Catch::Approx(1.40 * rated_ka).epsilon(1e-12));
+
+  sys.ac.generators.front().sc_lambda_min = 0.0;
+  const auto missing = run_short_circuit_detailed(sys, 1, options);
+  CHECK_FALSE(missing.solved);
+  CHECK(missing.status == "invalid_generator_data");
+
+  sys.ac.generators.front().sc_terminal_fed_static_excitation = true;
+  sys.ac.generators.front().sc_lambda_min = 1.40;
+  const auto static_excitation = run_short_circuit_detailed(sys, 1, options);
+  REQUIRE(static_excitation.solved);
+  CHECK(fault_row(static_excitation).ik_ka ==
+        Catch::Approx(1.40 * rated_ka).epsilon(1e-12));
+
+  options.calc_type = SCCalcType::Max;
+  const auto static_excitation_max = run_short_circuit_detailed(sys, 1, options);
+  REQUIRE(static_excitation_max.solved);
+  CHECK(fault_row(static_excitation_max).ik_ka ==
+        Catch::Approx(1.40 * rated_ka).epsilon(1e-12));
+
+  sys.ac.generators.front().sc_terminal_fed_static_excitation = false;
+  sys.ac.generators.front().xdpp_pu = 1.0;
+  options.calc_type = SCCalcType::Min;
+  const auto far_fault = run_short_circuit_detailed(sys, 1, options);
+  REQUIRE(far_fault.solved);
+  CHECK(fault_row(far_fault).ik_ka ==
+        Catch::Approx(fault_row(far_fault).ikss_ka).epsilon(1e-12));
+}
+
+TEST_CASE("IEC Annex A thermal factors match analytic values and limits",
+          "[short_circuit][iec60909][thermal][annex-a]") {
+  const auto kappa_one = calculate_thermal_factors_sc(1.0, 10.0, 10.0, 50.0, 1.0);
+  CHECK(kappa_one.m == 0.0);
+  CHECK(kappa_one.n == 1.0);
+
+  const auto kappa_two = calculate_thermal_factors_sc(2.0, 10.0, 10.0, 50.0, 1.0);
+  CHECK(kappa_two.m == 2.0);
+  CHECK(kappa_two.n == 1.0);
+
+  const auto analytic = calculate_thermal_factors_sc(1.8, 10.0, 5.0, 50.0, 1.0);
+  CHECK(analytic.m == Catch::Approx(0.04481420117724551).margin(1e-14));
+  CHECK(analytic.n == Catch::Approx(0.5285589523006868).margin(1e-14));
+  CHECK(10.0 * std::sqrt(analytic.m + analytic.n) ==
+        Catch::Approx(7.572140737452866).margin(1e-13));
+
+  const auto zero_steady = calculate_thermal_factors_sc(1.8, 10.0, 0.0, 50.0, 1.0);
+  CHECK(std::isfinite(zero_steady.n));
+  CHECK(zero_steady.n > 0.0);
+  CHECK(zero_steady.n < 1.0);
+}
+
+TEST_CASE("IEC Annex A uses the peak factor produced by method C",
+          "[short_circuit][iec60909][thermal][method-c]") {
+  auto sys = make_sys({make_bus(1, BusType::SLACK, 20.0)}, {}, 100.0, 0.20);
+  auto& generator = sys.ac.generators.front();
+  generator.ra_pu = 0.20;
+  generator.sc_lambda_max = 1.0;
+
+  SCDetailedOptions options;
+  options.c_factor = 1.0;
+  options.kappa_method = SCKappaMethod::C;
+  options.compute_branch_flows = false;
+  options.compute_nonfault_currents = false;
+  const auto result = run_short_circuit_detailed(sys, 1, options);
+  REQUIRE(result.solved);
+  const auto& row = fault_row(result);
+
+  const double effective_kappa =
+      row.ip_ka / (std::sqrt(2.0) * row.ikss_ka);
+  const auto expected = calculate_thermal_factors_sc(
+      effective_kappa, row.ikss_ka, row.ik_ka,
+      options.base_frequency_hz, options.ith_duration_s);
+  const auto wrong_power_frequency = calculate_thermal_factors_sc(
+      calculate_kappa_basic_sc(generator.ra_pu / generator.xdpp_pu),
+      row.ikss_ka, row.ik_ka,
+      options.base_frequency_hz, options.ith_duration_s);
+
+  CHECK(row.thermal_m == Catch::Approx(expected.m).margin(1e-14));
+  CHECK(row.thermal_n == Catch::Approx(expected.n).margin(1e-14));
+  CHECK(row.ith_ka ==
+        Catch::Approx(row.ikss_ka * std::sqrt(expected.m + expected.n))
+            .margin(1e-13));
+  CHECK(std::abs(row.thermal_m - wrong_power_frequency.m) > 1e-3);
+}
+
+TEST_CASE("SC steady current uses breaking current for IEC multiple-fed near faults",
+          "[short_circuit][iec60909][steady][multiple-fed]") {
+  HybridPowerSystem sys;
+  sys.base_mva = sys.ac.base_mva = 100.0;
+  sys.ac.buses = {make_bus(1, BusType::SLACK, 20.0)};
+  Generator generator;
+  generator.index = 1; generator.bus = 1; generator.mbase_mva = 100.0;
+  generator.vn_kv = 20.0; generator.xdpp_pu = 0.10;
+  sys.ac.generators = {generator};
+  ExternalGrid grid;
+  grid.index = 1; grid.bus = 1; grid.r_pu = 0.01; grid.x_pu = 0.10;
+  sys.ac.external_grids = {grid};
+
+  SCDetailedOptions options;
+  options.c_factor = 1.0;
+  options.compute_branch_flows = false;
+  options.compute_ith = false;
+  const auto result = run_short_circuit_detailed(sys, 1, options);
+  REQUIRE(result.solved);
+  const auto& row = fault_row(result);
+  CHECK(row.ib_ka > 0.0);
+  CHECK(row.ik_ka == Catch::Approx(row.ib_ka).epsilon(1e-12));
+
+  AsynchronousMotor motor;
+  motor.index = 1; motor.bus = 1; motor.vn_kv = 20.0;
+  motor.sn_mva = 10.0; motor.cos_phi = 0.9; motor.efficiency = 0.95;
+  motor.r_pu = 0.05; motor.x_pu = 0.20; motor.poles = 1;
+  sys.ac.motors = {motor};
+  const auto with_motor = run_short_circuit_detailed(sys, 1, options);
+  REQUIRE(with_motor.solved);
+  const auto& motor_row = fault_row(with_motor);
+  CHECK(motor_row.ikss_motor_contrib_ka > 0.0);
+  CHECK(motor_row.ik_ka > 0.0);
+  CHECK(motor_row.ib_ka > motor_row.ik_ka);
 }
 
 TEST_CASE("SC detailed: projected rich motors remain motor contributions and obey threshold",

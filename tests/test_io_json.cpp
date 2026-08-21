@@ -246,6 +246,80 @@ TEST_CASE("JSON round-trip: Load short-circuit motor fields are preserved",
     CHECK_THAT(rt.motor_efficiency, WithinAbs(0.91, 1e-12));
 }
 
+TEST_CASE("JSON round-trip: IEC 60909 line transformer and generator fields are preserved",
+          "[io][json][roundtrip][short_circuit][iec60909]") {
+    auto orig = make_2bus();
+    auto& branch = orig.ac.branches.front();
+    branch.sc_r_reference_temperature_c = 20.0;
+    branch.sc_end_temperature_c = 90.0;
+    branch.sc_alpha_per_c = 0.00393;
+
+    Transformer2W t2;
+    t2.index = 31; t2.hv_bus = 1; t2.lv_bus = 2; t2.sn_mva = 80.0;
+    t2.mag0_percent = 75.0; t2.mag0_rx = 0.12;
+    t2.si0_hv_partial = 0.65; t2.xn_ohm = 18.0;
+    t2.power_station_unit = true; t2.oltc = true; t2.pt_percent = 11.5;
+    orig.ac.transformers_2w = {t2};
+
+    Transformer3W t3;
+    t3.index = 41; t3.hv_bus = 1; t3.mv_bus = 2; t3.lv_bus = 2;
+    t3.vk0_hv_mv_percent = 12.1; t3.vk0_hv_lv_percent = 13.2;
+    t3.vk0_mv_lv_percent = 14.3; t3.vkr0_hv_mv_percent = 0.31;
+    t3.vkr0_hv_lv_percent = 0.42; t3.vkr0_mv_lv_percent = 0.53;
+    t3.vector_group = "YNynd";
+    orig.ac.transformers_3w = {t3};
+
+    auto& generator = orig.ac.generators.front();
+    generator.ra_pu = 0.004; generator.vn_kv = 21.0;
+    generator.cos_phi = 0.87; generator.xq_pu = 1.72;
+    generator.xd_xq = 1.18; generator.x0_pu = 0.08;
+    generator.r0_pu = 0.006; generator.pg_percent = 6.5;
+    generator.power_station_transformer_index = 31;
+    generator.sc_lambda_max = 2.35;
+    generator.sc_lambda_min = 1.42;
+    generator.sc_terminal_fed_static_excitation = true;
+
+    const auto restored = from_json(to_json(orig));
+    const auto& rb = restored.ac.branches.front();
+    CHECK_THAT(rb.sc_r_reference_temperature_c, WithinAbs(20.0, 1e-12));
+    CHECK_THAT(rb.sc_end_temperature_c, WithinAbs(90.0, 1e-12));
+    CHECK_THAT(rb.sc_alpha_per_c, WithinAbs(0.00393, 1e-12));
+
+    REQUIRE(restored.ac.transformers_2w.size() == 1);
+    const auto& rt2 = restored.ac.transformers_2w.front();
+    CHECK_THAT(rt2.mag0_percent, WithinAbs(75.0, 1e-12));
+    CHECK_THAT(rt2.mag0_rx, WithinAbs(0.12, 1e-12));
+    CHECK_THAT(rt2.si0_hv_partial, WithinAbs(0.65, 1e-12));
+    CHECK_THAT(rt2.xn_ohm, WithinAbs(18.0, 1e-12));
+    CHECK(rt2.power_station_unit);
+    CHECK(rt2.oltc);
+    CHECK_THAT(rt2.pt_percent, WithinAbs(11.5, 1e-12));
+
+    REQUIRE(restored.ac.transformers_3w.size() == 1);
+    const auto& rt3 = restored.ac.transformers_3w.front();
+    CHECK_THAT(rt3.vk0_hv_mv_percent, WithinAbs(12.1, 1e-12));
+    CHECK_THAT(rt3.vk0_hv_lv_percent, WithinAbs(13.2, 1e-12));
+    CHECK_THAT(rt3.vk0_mv_lv_percent, WithinAbs(14.3, 1e-12));
+    CHECK_THAT(rt3.vkr0_hv_mv_percent, WithinAbs(0.31, 1e-12));
+    CHECK_THAT(rt3.vkr0_hv_lv_percent, WithinAbs(0.42, 1e-12));
+    CHECK_THAT(rt3.vkr0_mv_lv_percent, WithinAbs(0.53, 1e-12));
+    CHECK(rt3.vector_group == "YNynd");
+
+    const auto& rg = restored.ac.generators.front();
+    CHECK_THAT(rg.ra_pu, WithinAbs(0.004, 1e-12));
+    CHECK_THAT(rg.vn_kv, WithinAbs(21.0, 1e-12));
+    CHECK_THAT(rg.cos_phi, WithinAbs(0.87, 1e-12));
+    CHECK_THAT(rg.xq_pu, WithinAbs(1.72, 1e-12));
+    CHECK_THAT(rg.xd_xq, WithinAbs(1.18, 1e-12));
+    CHECK_THAT(rg.x0_pu, WithinAbs(0.08, 1e-12));
+    CHECK_THAT(rg.r0_pu, WithinAbs(0.006, 1e-12));
+    CHECK_THAT(rg.pg_percent, WithinAbs(6.5, 1e-12));
+    CHECK(rg.power_station_transformer_index == 31);
+    CHECK_THAT(rg.sc_lambda_max, WithinAbs(2.35, 1e-12));
+    CHECK_THAT(rg.sc_lambda_min, WithinAbs(1.42, 1e-12));
+    CHECK(rg.sc_terminal_fed_static_excitation);
+}
+
 TEST_CASE("JSON round-trip: VSC short-circuit fields are preserved",
           "[io][json][roundtrip][short_circuit][converter]") {
     auto orig = make_2bus();

@@ -13,11 +13,16 @@
         缺失则不提供零序路径（除非投影填回退值）；非标准变比 $t$ 以标准 pi/tap 块插入；
   \item \textbf{外部电网}：由 \fld{ikq\_ka}+\fld{x\_r}、直接标幺 $r/x$、或短路功率给出——
         $Z_{ext,\Omega}=cU_{nQ}/(\sqrt3 I_{kQ}'')$，或 $|Z_{ext,pu}|=cS_b/S_{sc}$；
-  \item \textbf{同步发电机}：$z_G''=(r_a+jx_d'')S_b/S_{rG}$，IEC 校正
-        $K_G=c/(1+x_d''\sin\varphi_r)$，$z_{G,corr}''=K_G z_G''$（稳态 $I_k$ 时 $x_d''\to x_d$）；
-        零序 $K_{G0}=c/(1+x_0\sin\varphi_r)$（\srcpath{calculate\_generator\_correction\_factor\_sc}）；
-  \item \textbf{变压器}：富两绕组变压器投影为等效 AC 支路，可选 IEC 校正 $K_T$
-        （\fld{apply\_iec\_transformer\_correction}，默认 true；\srcpath{calculate\_transformer\_correction\_factor\_sc}）。
+  \item \textbf{同步发电机}：$z_G''=(r_a+jx_d'')S_b/S_{rG}$，先按
+        $(U_{rG}/U_b)^2$ 换到母线电压基准，再乘含 $U_n/U_{rG}$ 与 $p_G$ 的 $K_G$；
+        电站机组外部故障时发电机与升压变同时乘 $K_S$，机端内部故障则变压器恢复原阻抗、
+        发电机改用内部故障 $K_G$；
+  \item \textbf{线路}：最小短路按 IEC 60909-0:2016 式 (14) 使用
+        $R_\theta=[1+\alpha(\theta_e-\theta_{ref})]R_{ref}$；最大短路保持参考温度电阻；
+  \item \textbf{变压器}：两绕组支持 YNyn/YNd/Dyn/Yyn/YNy 及稳定三角绕组写法，
+        不接地 Yy/Yd/Dy/Dd 阻断零序；中性点电抗、励磁零序阻抗和分配系数进入 T 型等值。
+        三绕组成对短路试验阻抗先乘各自 $K_T$，变换为三支星形绕组后以含理想变比的四节点
+        印章组装，再对内部星点作 Schur 消元；零序按三个绕组的接地/三角/不接地语义建立同构印章。
 \end{itemize}
 
 \subsection{特征电流}
@@ -25,44 +30,40 @@
 \begin{itemize}
   \item \textbf{初始对称短路电流} $I_k''$（\fld{ikss\_ka}），并分列发电机/电机/静止发电机/外网/
         换流器贡献（\fld{ikss\_gen\_contrib\_ka} 等）与去电机值 \fld{ikss\_no\_motor\_ka}；
-  \item \textbf{峰值电流} $i_p$：故障母线按 IEC 60909-0 (59) 逐贡献求和
+  \item \textbf{峰值电流} $i_p$：方法 C 建立 $f_c/f=0.4$ 的独立正序稀疏网络，所有
+        无源/机器电抗按频率缩放，同步发电机采用 $R_{Gf}$，由 $Z_{c,kk}$ 求单一
+        $\kappa_C$，并按 IEC 60909-0 (59)
         \begin{equation}
-        i_p=\sqrt2\Bigl(\kappa_{net}\,I_{net}''+\textstyle\sum_i \kappa_i I_i''
-        +I_{sgen}''+I_{conv,CS}''\Bigr),
+        i_p=\sqrt2\bigl(\kappa_C I_{k1}''+I_{k2}''\bigr)
         \end{equation}
-        其中网络部分 $I_{net}''$ 用不含机组并联支路的网络 Thevenin 阻抗求 $\kappa_{net}$，
-        各电压源贡献（发电机、电机、构网换流器）取各自 $R/X$ 的
-        $\kappa_i$，电流源贡献
-        （静止发电机、跟网换流器）无衰减直流分量、以 $\kappa=1$ 计入
-        （\srcpath{src/short\_circuit/short\_circuit.cpp:run\_short\_circuit\_detailed\_impl} 的
-        \texttt{vs\_peak\_contribs} 求和处）；非故障母线保留单 $\kappa$ 近似
-        $i_p=\sqrt2\,(\kappa\,I_{k,1}''+I_{CS})$。基础冲击系数
+        合成，其中 $I_{k2}''$ 是静止发电机/跟网换流器限流电流源贡献。方法 A/B 同样对
+        等效电压源总电流使用一个方法系数，电流源项取 $\kappa=1$；非故障母线采用单
+        $\kappa$ 转移近似。基础冲击系数
         $\kappa=1.02+0.98\,e^{-3R/X}$（\srcpath{src/short\_circuit/short\_circuit.cpp:calculate\_kappa\_basic\_sc}；方法选择
-        \fld{SCKappaMethod} A/B/C，\srcpath{include/hacdcpf/analysis/short\_circuit.hpp:SCKappaMethod}）。同一条钳制规则统一作用于所有
-        $\kappa$（故障点 $\kappa_{net}$、逐贡献 $\kappa_i$ 与非故障母线单 $\kappa$）：方法 B 且 \fld{Meshed}
-        时取 $\kappa\leftarrow\min(1.8,\,1.15\kappa)$，否则 $\mathrm{clamp}$ 到 $[1,2]$
-        （\srcpath{src/short\_circuit/short\_circuit.cpp:kappa\_of（lambda）}）；
-  \item \textbf{开断电流} $I_b$（\fld{ib\_ka}，按 \fld{breaking\_time\_s} 计及发电机贡献衰减 $\mu$）；
-  \item \textbf{稳态电流} $I_k$（\fld{ik\_ka}）：发电机稳态贡献按 IEC 60909 的
-        $\lambda_{\max}$ 系数放大额定电流——$x_d/x_q\le1.2$ 取 $2.8$，$\ge1.5$ 取 $5.0$，
-        其间线性插值（\fld{xd\_xq} 缺省 $1.0$），再乘转移比 $|Z_{s,gi}|/|Z_{k,s}|$ 计
-        $I_{k,G}=\lambda_{\max} I_{rG}\,(\,|Z_{s,gi}|/|Z_{k,s}|\,)$；网络部分由稳态
-        Zbus 求取（发电机改用 $x_d$ 并联支路，电机不计入），见
-        \srcpath{src/short\_circuit/short\_circuit.cpp:run\_short\_circuit\_detailed\_impl}（Step 7）；
-  \item \textbf{热等效电流}：源码固定 $n=1$。若 $|R/X|<10^{-12}$ 或
-        $T_k<10^{-12}$，令 $m=1$；否则当
-        $a=4\pi fT_k|R/X|>10^{-6}$ 时令
-        $m=(2fT_k)^{-1}(1-e^{-a})/a$，最后
-        $I_{th}=I_k''\sqrt{m+n}$。当 $a\le10^{-6}$ 时保留前一项赋值
-        $m=(2fT_k)^{-1}\bigl(1-e^{-2T_k/\tau}\bigr)/(2/\tau)+1$（$\tau=1/(\omega\,R/X)$）；
-        完整实现见
-        \srcpath{src/short\_circuit/short\_circuit.cpp:run\_short\_circuit\_detailed\_impl}（热等效电流段）；
+        \fld{SCKappaMethod} A/B/C）。方法 A 由故障电压解筛出故障电压等级的实际参与支路和
+        馈入变压器，并对电源内阻与全部电压源贡献统一使用最小 $R/X$ 所得 $\kappa_A$；方法 B
+        且 \fld{Meshed} 时乘 1.15，低压上限 1.8、中高压上限 2.0；\fld{Auto} 通过独立
+        电源路径数判定是否网状，并按标准对任一路径 $R/X<0.3$ 取消 1.15 修正；
+  \item \textbf{开断电流} $I_b$（\fld{ib\_ka}）：$\mu$ 在电流比不大于 2 时取 1，
+        在 20/50/100/250 ms 标准曲线间按 \fld{breaking\_time\_s} 插值；多馈三相故障按
+        公式 (77) 使用 $|Z_iI_{ki}''|/(cU_n/\sqrt3)$ 权重，不平衡故障按公式 (78)--(80)
+        取 $I_b=I_k''$；
+  \item \textbf{稳态电流} $I_k$（\fld{ik\_ka}）：先以单机贡献
+        $I_{kG}''>2I_{rG}$ 判定近端。单馈近端使用显式制造商/标准曲线字段
+        \fld{sc\_lambda\_max/sc\_lambda\_min} 计算 $I_{kG}=\lambda I_{rG}$；缺失所需
+        $\lambda$ 时返回 \fld{invalid\_generator\_data}，不由 $x_d/x_q$ 猜值。端子馈电静态励磁的
+        机端故障在最大/最小计算中均取 $\lambda_{\min}$；多馈近端取去除全部异步电机后的
+        $I_k=I_{bmo}$；远端网络馈入保持初始值，异步电机稳态为零；
+  \item \textbf{热等效电流}：\srcpath{calculate\_thermal\_factors\_sc} 按 IEC 60909-0:2016
+        附录 A 计算 $m(\kappa,fT_k)$ 与 $n(I_k''/I_k,T_k)$，含 $\kappa\to1/2$、$I_k\to0$
+        极限及图 19 的 $1< I_k''/I_k <1.25$ 插值，最后
+        $I_{th}=I_k''\sqrt{m+n}$；\fld{thermal\_m/thermal\_n} 随结果返回；
   \item \textbf{剩余电压} \fld{v\_remaining\_pu} 与逐支路故障电流 \fld{SCDetailedBranchResult}（\srcpath{src/short\_circuit/short\_circuit.cpp:TransformerBranchCorrection}）。
 \end{itemize}
 
 \subsection{计算口径}
 \fld{SCCalcType}（\fld{Max}/\fld{Min}，\srcpath{include/hacdcpf/analysis/short\_circuit.hpp:SCCalcType}）选择 $c_{\max}/c_{\min}$ 与相应机组数据；
-\fld{SCTopology}（\fld{Radial}/\fld{Meshed}，\srcpath{include/hacdcpf/analysis/short\_circuit.hpp:SCTopology}）仅影响 $\kappa$：方法 B 且 \fld{Meshed}
-时取 $\kappa\leftarrow\min(1.8,\,1.15\kappa)$（消费点为
-\srcpath{src/short\_circuit/short\_circuit.cpp:run\_short\_circuit\_detailed\_impl} 的 \texttt{kappa} 与
-\texttt{kappa\_of}），开断电流 $I_b$ 不区分拓扑、无网状衰减分支。
+\fld{SCTopology}（\fld{Auto}/\fld{Radial}/\fld{Meshed}，默认 \fld{Auto}）仅影响方法 B 的
+网状 1.15 修正；低压 $\kappa$ 上限为 1.8，中高压为 2.0。\fld{Auto} 从实际参与电源到
+故障点枚举独立路径，且任一路径 $R/X<0.3$ 时按标准不施加 1.15。开断电流 $I_b$ 的
+公式 (77) 不由该拓扑枚举另行分支。

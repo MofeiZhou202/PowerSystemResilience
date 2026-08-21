@@ -32,7 +32,9 @@ $S_b/(\sqrt3U_{fault})$；见 \srcpath{src/short\_circuit/short\_circuit.cpp:ext
 I_{k1}''=\frac{3c}{Z_{1k}+Z_{2k}+Z_{0k}+3Z_f}I_b,\qquad
 Z_{k,1}=\frac{Z_{1k}+Z_{2k}+Z_{0k}+3Z_f}{3}.
 \end{equation}
-这是 \srcpath{compute\_Zk} 返回的有效阻抗；源码并不在此处构造复数相电流。
+这是 \srcpath{compute\_Zk} 返回的有效阻抗。详细路径另由
+\srcpath{fault\_sequence\_currents} 求 $I_0,I_1,I_2$ 并重构 $I_a,I_b,I_c$ 与
+$I_g=3I_0$；结果字段为 \fld{i\_phase\_a/b/c\_ka} 和 \fld{i\_ground\_ka}。
 当零序路径低阻时 $|(Z_1{+}Z_2{+}Z_0)/3|<|Z_1|$，故 $|I_{k1}''|>|I_{k3}''|$——有效接地系统
 （强中性点或接地变路径）中单相电流可高于三相，非数值缺陷。
 
@@ -44,15 +46,18 @@ I_{k2}''=\frac{\sqrt3\,c}{Z_{1k}+Z_{2k}}I_b,\qquad Z_{k,2}=\frac{Z_{1k}+Z_{2k}}{
 $V_0/(Z_{kk}+Z_{kk})$，见 \srcpath{src/short\_circuit/short\_circuit.cpp:fault\_at\_bus\_with\_zkk}。
 
 \subsection{两相接地故障}
-实现用正序等效的紧致工程近似：
+实现按完整序网连接求解。令 $Z_{0f}=Z_{0k}+3Z_f$，则
 \begin{equation}
-Z_{k,2E}=Z_{1k}+\big(Z_{2k}\parallel Z_{0k}\big)+Z_f,\quad
-Z_{2k}\parallel Z_{0k}=\frac{Z_{2k}Z_{0k}}{Z_{2k}+Z_{0k}},\quad
-|I_{k2E}''|=\frac{c}{|Z_{k,2E}|}I_b.
+I_1=\frac{c}{Z_{1k}+Z_{2k}\parallel Z_{0f}},\qquad
+I_2=-I_1\frac{Z_{0f}}{Z_{2k}+Z_{0f}},\qquad
+I_0=-I_1\frac{Z_{2k}}{Z_{2k}+Z_{0f}},
 \end{equation}
-当 $|Z_2+Z_0|\le10^{-15}$ 时，源码把并联项直接置零；见
-\srcpath{src/short\_circuit/short\_circuit.cpp:compute\_Zk}。
-若需相分解电流 $I_{L2}/I_{L3}$ 与地电流，须扩展为完整序电流重构（当前只给有效电流幅值）。
+再由对称分量逆变换得到三相电流，\fld{ikss\_ka} 取三相幅值最大者。故障阻抗的三倍项只
+进入零序支路，不能在并联等值之后再串加一次。
+
+若故障母线所在零序连通分量没有任何接地导纳，组件化零序求解器返回物理开路：
+$I_0=I_a=I_g=0$，状态为 \fld{solved\_zero\_sequence\_open}。该结果不包含线路对地电容
+产生的小电流和中性点位移；后者需三相相域或 EMT 模型。
 
 \subsection{概览路径与近似}
 概览 \srcpath{compute\_short\_circuit} 只构造一个 \texttt{Y\_fault}，其四种实际分支为

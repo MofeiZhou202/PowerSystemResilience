@@ -4,6 +4,7 @@
 /// =============================
 /// Steady-state DC fault-level (bolted-fault current) estimate for a DC bus.
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -28,6 +29,8 @@ struct DCFaultOptions {
   bool add_unassigned_closed_breaker_edges{true};
   /// Minimum resistance used for ideal closed DCCBs to avoid singular graphs.
   double min_closed_breaker_resistance_pu{1e-6};
+  /// Cooperative cancellation checked between selected sparse solves.
+  std::function<bool()> cancellation_requested;
 };
 
 /// Fault-duty estimate for a DC circuit breaker participating in the DC
@@ -62,6 +65,10 @@ struct DCFaultResult {
   int dccb_blocked_branch_count{0};
   std::vector<DCBreakerDutyResult> breaker_duties;
   std::string message;
+  std::string status{"not_run"};
+  std::string model_scope{"dc-resistive-quasi-static-v2"};
+  std::vector<std::string> model_limitations;
+  double max_linear_residual{0.0};
 };
 
 /// Estimate the steady-state bolted-fault current at a DC bus.
@@ -78,5 +85,11 @@ struct DCFaultResult {
 /// breaker/cable screening.
 DCFaultResult dc_bus_fault_level(const HybridPowerSystem& sys, int dc_bus_id,
                                  const DCFaultOptions& opt = {});
+
+/// Batch variant. Topology construction and sparse component factorizations
+/// are reused for every requested fault bus.
+std::vector<DCFaultResult> dc_bus_fault_levels(
+    const HybridPowerSystem& sys, const std::vector<int>& dc_bus_ids,
+    const DCFaultOptions& opt = {});
 
 }  // namespace hacdcpf::analysis

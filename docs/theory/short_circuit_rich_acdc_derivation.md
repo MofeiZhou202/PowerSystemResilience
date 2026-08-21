@@ -18,10 +18,11 @@ The key implementation answer is:
   IDs are translated into canonical space before sequence matrices are built.
 - The overview AC path also runs after canonical projection, but for
   unbalanced faults it still uses a simplified `Z1 = Z2 = Z0` approximation.
-- The DC fault-level path is a resistive stiff-source estimator on the raw DC
-  branch graph. It does not yet apply DC circuit breaker open/closed state,
-  converter current limiting, capacitor discharge, or DC protection tripping
-  inside the calculation.
+- The DC fault-level path is a resistive stiff-source estimator. It contracts
+  ideal conductors, applies DCCB open/closed state and resistance, reuses one
+  sparse factorization across fault buses, and recovers actual resistive-edge
+  breaker currents. Converter current limiting, capacitor discharge, and DC
+  protection tripping dynamics remain outside this quasi-static calculation.
 
 ## 1. Scope
 
@@ -387,15 +388,13 @@ For zero sequence:
 z_{0,T,corr} = K_{T0} z_{0,T}
 ```
 
-using `z0_percent` and `x0_r0` when available. If zero-sequence transformer
-data is missing, projection currently falls back to positive-sequence leakage
-for the equivalent branch. Transformer vector-group blocking of zero-sequence
-paths is not fully represented; this is a known modeling limitation.
-
-Three-winding transformers are projected to pair/star equivalent branches.
-The positive and negative sequence passive networks use the pair-equivalent
-impedances. Zero-sequence pair impedances and vector-group constraints are
-currently simplified.
+The detailed path reads authored Transformer2W/3W `z0_percent` or pairwise
+zero-sequence tests, X0/R0, magnetizing zero-sequence data, neutral impedance,
+and Y/YN/Z/ZN/delta connection semantics. Grounded ports, blocking, and internal
+delta circulation enter the sequence network through tap-aware four-node stamps
+and Schur elimination. Missing required data returns `invalid_network`; positive
+leakage is never fabricated as zero-sequence data. Line `b0_pu` also enters as
+zero-sequence shunt admittance for capacitive earth-current paths.
 
 ### 4.5 Asynchronous Motors
 
@@ -577,19 +576,10 @@ Important protection implication:
 
 ### 6.2 DC Circuit Breakers
 
-`DCCircuitBreaker` is stored, serialized, displayed, validated, and used by
-graph/resilience workflows. However, the DC short-circuit estimator currently
-builds its conductance matrix only from `dc.branches`. It does not:
-
-- add a closed DCCB as a conductive edge;
-- remove or split topology based on an open DCCB;
-- add DCCB resistance `r_ohm`;
-- compare fault current with `i_breaking_ka`;
-- simulate trip time or current interruption.
-
-Therefore, for DC short-circuit correctness with DCCBs, the input model must
-already encode the DCCB topology in `dc.branches`, or the estimator must be
-extended. A robust extension would add a DC canonical projection step:
+`DCCircuitBreaker` now participates directly in the DC conductance graph.
+A uniquely matched breaker controls a `DCBranch`: an open breaker blocks that
+branch, while a closed breaker adds `r_ohm` (converted to pu) in series.
+An unassigned closed breaker can optionally be inserted as a standalone edge:
 
 ```text
 DCCircuitBreaker -> DC conductance edge when closed
@@ -603,7 +593,13 @@ r_{DCCB,pu} =
 \frac{r_{\Omega}}{U_{dc,b}^2/S_b}
 ```
 
-and then run the same conductance reduction on that canonical DC graph.
+The result also compares `i_duty_ka` with `i_breaking_ka`. Ideal DC branches are
+contracted before assembly. Closed breakers on one explicitly identified branch
+form a series chain; ambiguous terminal-only assignment across parallel branches
+is rejected. After each fault solve, the compensation theorem recovers post-fault
+bus voltages and every breaker duty is computed from its physical edge voltage
+difference and resistance. This is an actual quasi-static resistive branch current,
+but not an EMT peak, di/dt, arc, or interruption model.
 
 ### 6.3 Breaker Duty Checks
 
@@ -733,27 +729,26 @@ screening DC cables and breakers, but it is not a complete DC protection model.
 
 ### 9.1 Peak Current
 
-At the fault bus the module applies IEC 60909-0 formula (59): the peak is the
-sum of the per-contribution peaks,
+At the fault bus the module applies IEC 60909-0:2016 clause 4.3.1.2 and
+formula (59):
 
 ```math
-i_p = \sqrt{2}\Big(\kappa_{net} I_{k,net}'' + \sum_i \kappa_i I_{k,i}''\Big)
+i_p = \sqrt{2}\Big(\kappa I_{k,VS}'' + I_{k,CS}''\Big)
 ```
 
-with a per-contribution factor (before the clamping described below)
+where the equivalent-voltage-source part uses
 
 ```math
-\kappa_i = 1.02 + 0.98e^{-3R_i/X_i}
+\kappa = 1.02 + 0.98e^{-3R/X}.
 ```
 
-taken from each contribution's own R/X ratio:
-
-- the network part (branches + external grids) uses the Thévenin impedance of
-  the network with all machine shunts removed;
-- each generator / motor / load-motor / grid-forming converter contribution
-  uses its own source impedance;
-- current sources (static generators, grid-following converters) have no
-  decaying DC component and are added without κ (κ = 1).
+Static generators and grid-following converters are current-source terms with
+no decaying dc component and are added with kappa equal to one. Method A uses
+the minimum R/X of every participating same-voltage branch, feeding transformer,
+and source impedance. Method B uses the fault-point equivalent R/X, the 1.15
+meshed correction, an LV cap of 1.8 and an MV/HV cap of 2.0; `Auto` enumerates
+independent source paths and applies the R/X below 0.3 exception. Method C owns
+an independent `fc/f=0.4` network with IEC generator peak resistance.
 
 This reproduces the IEC TR 60909-4:2021 §6.2 worked example
 (`tests/test_short_circuit_iec60909_4.cpp`).
@@ -764,18 +759,14 @@ At non-fault buses the transferred current keeps the single-κ approximation
 i_p = \kappa \sqrt{2} I_{k,1}''
 ```
 
-where κ uses the fault-point R/X ratio. One clamping rule applies uniformly
-to every κ in this step — the fault-bus `kappa_net` and per-contribution
-`kappa_of(z_src)` values as well as the non-fault-bus single κ: for method B
-in a meshed network the code multiplies by `1.15` and caps the result at
-`1.8` (`κ = min(1.8, 1.15κ)`, no lower clamp), while every other
-method/topology combination clamps `1.0 ≤ κ ≤ 2.0`
-(`src/short_circuit/short_circuit.cpp:kappa_of（lambda）`, and the adjacent
-non-fault-bus κ in `run_short_circuit_detailed_impl`).
+where kappa is exactly the A/B/C factor selected for the fault point. This row
+is a transferred-current indicator, not an IEC result for a second fault site.
 
 ### 9.2 Breaking Current
 
-The code applies a simplified IEC-style decay treatment.
+Three-phase faults follow IEC 60909-0:2016 clause 9.1. `mu` is exactly one for
+`I''kG/IrG <= 2`, is linearly interpolated between the 20/50/100/250 ms curves,
+and is bounded to `[0,1]`.
 
 For synchronous generator contribution:
 
@@ -789,21 +780,21 @@ For motor contribution:
 I_{bM} = \mu q I_{kM}''
 ```
 
-The implemented `\mu` depends on current ratio and `breaking_time_s`. The motor
-factor `q` depends on motor rated active power per pole pair and breaking time.
-Grid-following converter current sources pass through as part of the non-motor
-current accounting.
+The motor factor `q` depends on rated active power per pole pair and breaking
+time. Multiple-fed faults use formula (77), weighting each decay term by the
+terminal-voltage depression `|Zi I''ki|/(c Un/sqrt(3))`. Unbalanced faults use
+`Ib=I''k` per formulas (78)-(80). Grid-following current sources pass through as
+non-decaying terms.
 
 ### 9.3 Steady-State Current
 
-For steady-state current `I_k`, the detailed path rebuilds the sequence
-matrices in steady-state mode:
-
-- generators use `x_d` when available;
-- motors are not included as subtransient sources;
-- converter behavior remains simplified.
-
-Generator steady-state contribution uses a `lambda_max` rule based on `x_d/x_q`.
+Steady current follows IEC 60909-0:2016 clause 11.2. A single-fed near generator
+uses authored `sc_lambda_max/sc_lambda_min` manufacturer or standard-curve data;
+missing data fails closed and is never inferred from `xd/xq`. A terminal fault
+with terminal-fed static excitation uses `lambda_min` for both max and min
+calculations. A multiple-fed near fault uses `Ibmo`, the breaking current with
+all asynchronous motors removed. Far network infeed retains `I''k`, while motor
+steady contribution is zero.
 
 ### 9.4 Thermal Equivalent Current
 
@@ -813,9 +804,10 @@ The implementation reports:
 I_{th} = I_k'' \sqrt{m+n}
 ```
 
-with a simplified DC component heat factor `m` and `n \approx 1` for the AC
-component. This is adequate as a screening indicator but should be validated
-before using it as a final equipment-duty calculation.
+Both factors implement IEC 60909-0:2016 Annex A. `m` uses the effective factor
+represented by the reported peak, `kappa=ip/(sqrt(2) I''k)`; `n` uses the
+six-term expression and Figure 19 interpolation in `I''k/Ik`, with analytic
+limits for `kappa -> 1/2` and `Ik -> 0`.
 
 ## 10. Implementation Cross-Check
 
@@ -838,28 +830,30 @@ before using it as a final equipment-duty calculation.
 - AC switch and AC CB closed/open states affect canonical topology before the
   AC short-circuit solve.
 
-### 10.2 Important Gaps
+### 10.2 Interface and Physics-Domain Partition
 
-1. The overview AC API is not equivalent to the detailed API for unbalanced
-   faults. It approximates `Z1 = Z2 = Z0`; the detailed API should be preferred
-   for SLG, LL, and LLG studies.
+1. IEC 60909 conclusions are produced only by the detailed API. The overview API
+   is an all-bus positive-sequence screening surface and is not admitted for
+   unbalanced IEC studies. SLG, LL, and LLG use the detailed three-sequence path.
 2. The GUI selected-fault route deliberately omits non-fault bus current
    metrics and returns zero for those fields. It still returns complete
    fault-bus duties, source contributions, the full remaining-voltage profile,
    and optional branch currents. The C++ API keeps
    `compute_nonfault_currents=true` by default when full self-impedance data is
    required.
-3. Transformer vector groups do not fully block or pass zero-sequence paths.
-   This affects SLG and LLG correctness for delta, grounded-wye, zigzag, and
-   grounding-transformer cases.
-4. Projected load motor fractions do not carry a full zero-sequence motor model.
-5. AC circuit breakers are recorded in `BranchExpandMap` as `Switch` origins,
-   so protection-result attribution cannot yet distinguish switches from CBs
-   using the enum alone.
-6. Closed AC switch/CB branches may be merged away. This is correct
-   electrically for zero-impedance topology, but branch-current rows for the
-   physical breaker may disappear.
-7. DC short-circuit does not use DCCB topology or breaker resistance.
+3. Two- and three-winding Y/YN/D zero-sequence blocking, grounded paths, neutral
+   impedance, magnetizing zero-sequence impedance, taps, and pair test data are
+   assembled explicitly. Missing required parameters fail closed.
+4. Explicit asynchronous-motor sequence data enters the detailed path; aggregate
+   load-motor fractions use their published aggregate short-circuit contract.
+5. AC branch results use `BranchExpandMap` to distinguish Transformer2W,
+   Transformer3W pairs, switches, and circuit breakers in authored identity.
+6. Closed ideal AC switch/CB branches may be merged away. Their authored row
+   remains present with `electrical_value_available=false`, because individual
+   current in a zero-impedance mesh is not identifiable without a sharing model.
+7. DC short-circuit contracts ideal conductors and recovers actual resistive-edge
+   DCCB current from post-fault voltages. Series chains and parallel division are
+   explicit, while EMT interruption physics remains outside scope.
 8. DC short-circuit does not model converter current limiting, DC/DC converter
    blocking, capacitor discharge, batteries, PV array I-V curves, or source
    internal impedance.
@@ -1005,8 +999,11 @@ and:
 I_f = \frac{V_{pre}}{R_{th}+R_f} \frac{S_b}{U_{dc,b}}
 ```
 
-Then add DCCB topology tests after the estimator is extended to include DCCB
-canonical projection.
+Existing DCCB regressions cover closed-series resistance, open-branch blocking,
+unassigned standalone edges, an open-ended zero-current spur, 10/5 kA parallel
+division, multiple-breaker series chains, ambiguous terminal-only matching, and
+ideal zero-resistance edge contraction. These tests validate quasi-static
+resistive current attribution, not EMT interruption behavior.
 
 ## 12. Existing Validation Assets
 
@@ -1038,20 +1035,17 @@ short-circuit module.
 
 ## 13. Recommended Next Engineering Steps
 
-1. Extend DC canonical projection so `DCCircuitBreaker` participates in DC
-   fault topology.
-2. Add DC breaker duty post-processing:
-   compare `I_f` with `i_breaking_ka`, `i_rated_ka`, and technology-specific
-   interruption assumptions.
-3. Add transformer vector-group zero-sequence rules for SLG and LLG studies.
-4. Split `BranchOriginType::Switch` into distinct `Switch` and
-   `CircuitBreaker` origins.
-5. Add explicit converter fault model metadata to results:
-   `grid_following_current_source`, `ac_grid_forming_voltage_source`,
-   `dc_side_forming_not_ac_source`, or `not_modeled`.
-6. Add a protection-result layer that maps branch/source currents to AC CBs,
+1. Add transformer vector-group and neutral-earthing zero-sequence rules for
+   SLG and LLG studies, including the parameter contract needed by 3W units.
+2. Add EMT-grade DC capacitor discharge, cable inductance, converter-control
+   saturation, current interruption, and arc models as a separate dynamic path.
+3. Add a protection-result layer that maps branch/source currents to AC CBs,
    DCCBs, fuses, and converter blocking thresholds without changing the
    electrical short-circuit solve.
+4. Add independent third-party cross-validation for target voltage levels and
+   device mixes; keep the 50-case matrix classified as metamorphic evidence.
+5. Benchmark sparse fill-in and memory on representative meshed utility models,
+   not only the synthetic 1000-bus chain.
 
 ## 14. Code Reference Map
 
@@ -1061,7 +1055,8 @@ short-circuit module.
   - `build_sc_admittance_matrices(...)`: detailed sequence matrices.
   - `compute_Zk(...)`: effective fault impedance for each fault type.
 - `src/short_circuit/dc_short_circuit.cpp`
-  - `dc_bus_fault_level(...)`: resistive DC bolted-fault estimator.
+  - `dc_bus_fault_level(...)`: single-bus resistive DC fault entry.
+  - `dc_bus_fault_levels(...)`: shared-topology sparse batch entry.
 - `src/model/network_utils.cpp`
   - rich-to-canonical projection.
   - AC switch and AC CB equivalent branch creation.

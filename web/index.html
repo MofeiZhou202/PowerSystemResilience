@@ -725,6 +725,7 @@
     </label>
     <label class="sub-label">网络
       <select id="scTopologySelect">
+        <option value="Auto">自动判定</option>
         <option value="Meshed">网状</option>
         <option value="Radial">辐射状</option>
       </select>
@@ -3606,7 +3607,7 @@
     <input type="hidden" id="scCalcType" value="Max"/>
     <input type="hidden" id="scCFactor" value="1.1"/>
     <input type="hidden" id="scKappaMethod" value="C"/>
-    <input type="hidden" id="scTopology" value="Meshed"/>
+    <input type="hidden" id="scTopology" value="Auto"/>
     <div class="modal-actions">
       <button id="btnScRun" class="btn btn-warn">确定</button>
       <button id="btnScCancel" class="btn">取消</button>

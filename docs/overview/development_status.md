@@ -6,6 +6,89 @@ This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
 
+## Short-circuit theory-to-code closure and monograph (2026-08-21)
+
+`docs/modules/short_circuit/` is now a fifteen-domain-chapter, source-equivalent
+manual at PF/OPF granularity, followed by the shared industrial evaluation baseline.
+The existing symmetrical-components, IEC 60909,
+converter/DC-transient theory is retained and separated from reachable code.
+New chapters cover rich-to-canonical projection and authored identity,
+selective sparse inverse and batch reuse, complete C++ option/result fields,
+the three production HTTP/GUI paths, evidence-tiered numerical cross-validation,
+failure truth tables, a deep source audit, and industrial admission gates.
+
+The audit findings AUD-032--AUD-053 are closed in runtime code and validation tooling, with zero open
+findings in the detailed IEC 60909 scope. Detailed AC now
+checks every required sparse factor and selected solve against a `1e-9`
+backward-error gate, returns exact fault-point phase/ground currents, separates
+requested and effective voltage factors, classifies failures, and maps branch
+results to authored domain/kind/index identity. Contracted ideal AC switchgear
+retains an authored row with `electrical_value_available=false` instead of a
+fabricated zero current.
+
+The IEC closure now includes line end-temperature resistance, generator
+nameplate voltage and `pg_percent`, complete `K_G/K_T/K_S` handling (including
+internal power-station faults), two-winding vector-group zero sequence, and
+three-winding positive/zero-sequence four-node stamps with tap-aware Schur
+elimination. Method C owns an independent `fc/f=0.4` sparse factor with IEC
+generator peak resistance. Methods A/B use the standard single fault-point peak
+factor; Method B defaults to independently tested automatic topology detection
+with LV/MV-HV caps. Breaking current implements formula (77), full `mu` curve
+interpolation and unbalanced formulas (78)-(80). Steady current requires authored
+lambda data, uses `lambda_min` for terminal-fed static excitation, and uses
+motor-free `Ibmo` for multiple-fed near faults. Annex A uses the effective factor
+represented by the reported peak. Zero sequence is factored by connected component:
+grounded components solve normally, while an ungrounded fault component returns
+`solved_zero_sequence_open` and physical 0 A with the capacitive-current boundary
+declared. All added IEC fields survive JSON round trip.
+
+The DC kernel now contracts ideal conductors, excludes source-free islands from
+the active Dirichlet block, reuses one sparse factorization and selected columns
+across a batch, observes cancellation, and rejects invalid/ambiguous inputs.
+Post-fault voltages are recovered by the compensation theorem; DCCB duty is the
+actual resistive-edge current, including 10/5 kA parallel division and explicit
+series chains. The production AC/DC routes expose per-item status, scope,
+limitations, residual quality and aggregate completion counts; the detailed AC
+HTTP boundary rejects a negative fault impedance with an explanatory 400.
+
+The current Release targets were rebuilt and executed:
+`test_short_circuit_crossval` passed 39 cases/626 assertions,
+`test_dc_short_circuit` 16/60, and `test_short_circuit_iec60909_4` 2/231, for
+57 direct short-circuit cases/917 assertions. Focused JSON short-circuit tests
+passed 3/48. The IEC TR 60909-4 section 6.2 reference keeps all six reported
+errors below 0.5%. The comprehensive 13-bus test checks 3PH max/min, 2PH, SLG,
+and method-C peak arrays; all grounded numerical gates pass, with method-C peak
+maximum relative error `1.15e-12` and grounded SLG maximum `1.17e-6`.
+
+Both registered OpenDSS validations were rerun. The 50-case complete-network
+matrix has maximum `Ik''` relative error `1.805581638e-7` and peak error
+`1.485279759e-7`. IEEE 13/34/123 external-Thevenin validation covers 111 buses,
+444 faults and 2220 quantities with maximum relative error
+`8.558706274e-16`; this is fault-kernel parity, not complete phase-domain
+network parity. The registered matrix automatically found the sibling GridLAB-D
+5.3.0 build and its mandatory gate passed 35/35 balanced-probe cases; maximum
+relative error was `2.329225394e-8`. Missing GridLAB-D, fewer than 35 numerical
+cases, or error above `1e-6` now fails the test. `gui_api_e2e` passed 77/77 checks.
+On the frozen 1000-bus/64-fault protocol, batch median was 1.02900 ms versus
+16.5459 ms for repeated single calls (ratio 0.0621906, maximum current difference 0 pu), below
+the predeclared 0.10 threshold.
+
+The monograph was compiled with XeLaTeX to
+`output/pdf/short_circuit_manual.pdf` (39 A4 pages). All 39 pages were rendered
+with Poppler at 120 dpi and visually reviewed, including the dense option,
+HTTP, numerical-validation and audit tables. The final log has no overfull
+boxes, unresolved references/citations, missing glyphs or fatal errors; the
+rendered pages have no clipping, overlap, broken tables or unintended blanks.
+
+Required IEC input that is absent is rejected rather than inferred. EMT/DC
+capacitor discharge, controller, protection and IEC 61660 studies are owned by
+their dedicated model families and are not tracked as unfinished IEC 60909 work.
+The evidence uses project HEAD
+`7970d9b21c765b06d21f72f0b0e93a56564cf85e` and MIPSolvers HEAD
+`7721936245d5756193381b415457e6cf2214341e`; the latter differs from the
+repository pin `3bf1e66749e3b3e0bbd57696a7d4f43ecf09218c`. It is a focused
+Release result, not a full CTest, sanitizer, or pinned-dependency baseline.
+
 ## Graph documentation and deep audit (2026-08-21)
 
 `docs/modules/graph/` now has an eleven-chapter source-equivalent manual at the

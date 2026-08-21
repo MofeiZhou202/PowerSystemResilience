@@ -1,5 +1,5 @@
-% 第 7 章：验证与边界局限
-\section{验证与边界局限}\label{sec:sc-verify}
+% 验证架构与测试所有权
+\section{验证架构与测试所有权}\label{sec:sc-verify}
 
 \subsection{注册测试}
 \begin{center}\footnotesize
@@ -9,28 +9,40 @@
 \midrule
 \srcpath{test\_short\_circuit\_crossval} & \srcpath{tests/CMakeLists.txt} & Z-bus 戴维南交叉校核 + IEC 检查，兼测详细路径\\
 \srcpath{test\_dc\_short\_circuit} & \srcpath{tests/CMakeLists.txt} & 直流金属性故障水平与断路器责任\\
-\srcpath{test\_short\_circuit\_iec60909\_4} & \srcpath{tests/CMakeLists.txt} & IEC TR 60909-4:2021 §6.2 参考算例\\
+\srcpath{test\_short\_circuit\_iec60909\_4} & \srcpath{tests/CMakeLists.txt} & IEC TR §6.2 与综合 13 母线四类故障/方法 C\\
+\srcpath{short\_circuit\_cross\_engine\_matrix} & \srcpath{tests/CMakeLists.txt} & 50 组 OpenDSS；其中 35 组另由 GridLAB-D 平衡分流探针比较\\
+\srcpath{short\_circuit\_ieee\_feeder\_thevenin} & \srcpath{tests/CMakeLists.txt} & IEEE 13/34/123 外部 Thevenin 故障核 2220 数值量\\
 \bottomrule
 \end{tabular}
 \end{center}
-概览法以已知网络的解析戴维南阻抗交叉验证；详细法以 IEC TR 60909-4 参考算例校核
-$I_k''/i_p/I_b/I_k/I_{th}$。
+\srcpath{short\_circuit\_validation\_matrix} 是第一个注册外部矩阵的原生数据生成器，并非
+孤立人工工具。概览法以解析戴维南阻抗校核；详细法以 IEC TR 单点与综合网络校核
+$I_k''/i_p/I_b/I_k$、源贡献、温度、矢量组和机组修正。热等效电流以 IEC 附录 A 的
+$\kappa=1/2$ 极限、六项闭式、图 19 插值和方法 C 有效峰值恒等式逐项数值校核。
 
-\subsection{边界与局限（如实标注）}
+\subsection{标准归属与入口选择}
 \begin{itemize}
-  \item \textbf{概览不平衡近似}：\srcpath{compute\_short\_circuit} 对不平衡故障用简化
-        $Z_1{=}Z_2{=}Z_0$（负序=正序、零序未建模）；详细路径建真序网，但三绕组变压器零序
-        默认以正序代入（未建矢量组）；
-  \item \textbf{直流上界}：\srcpath{dc\_bus\_fault\_level} 为电阻性刚性源估计，\textbf{不}含换流器限流、
-        电容放电暂态、源内阻抗与直流保护跳闸——是线路电阻限制的保守上界；
-  \item \textbf{两相接地}：仅给正序等效的有效电流幅值，未做相分解电流 $I_{L2}/I_{L3}$ 与地电流重构；
+  \item \textbf{IEC 60909 准入入口}：\srcpath{run\_short\_circuit\_detailed} 建立独立三序网、
+        矢量组和相/地电流，是 IEC 结论唯一入口；\srcpath{compute\_short\_circuit} 是正序全母线
+        筛查器，不进入不平衡 IEC 合规门；
+  \item \textbf{直流准稳态}：\srcpath{dc\_bus\_fault\_level} 为电阻性刚性源模型，\textbf{不}含
+        换流器限流、电容放电、电感 $di/dt$ 与电弧，因此相对真实峰值不保证上/下界；
+  \item \textbf{零序参数门}：两/三绕组接地矢量组缺少必需零序参数时显式
+        \fld{invalid\_network}；不接地分量返回阻抗模型物理 0 A，不含电容接地电流；
   \item \textbf{非保护配合器}：无跳闸时限曲线、方向/距离/差动选择性、电弧模型与跳闸后拓扑更新；
   \item \textbf{换流器}：跟网/构网为稳态/准稳态故障水平，不含控制环动态、FRT 轨迹与限流器切换时序；
-  \item \textbf{投影前置}：AC 短路在 \srcpath{project\_to\_canonical\_models} 后进行，富设备被展平，
-        结果 ID 已在规范空间。
+  \item \textbf{投影前置}：AC 短路在 canonical 空间求解；母线和支路均回投影到 authored
+        身份，canonical branch ID 只保留为诊断；收缩理想设备以 N/A 行表达；
+  \item \textbf{DC 理想边}：零电阻导体先收缩；DCCB 责任由补偿定理故障后电压恢复实际边电流；
+  \item \textbf{外部证据}：OpenDSS 与 GridLAB-D 5.3.0 本轮均已重跑；注册矩阵强制要求
+        GridLAB-D 至少 35 个数值案例且最大误差不高于 $10^{-6}$；pandapower 综合 1PH 上游
+        测试未作为本模块合规 oracle；其正则化伪电流只作来源说明，不计入通过数。
 \end{itemize}
 
-\subsection{加深与后续}
-行号以 2026-08-17 检出为准，如与后续变更不符以
-\srcpath{include/hacdcpf/analysis/short\_circuit.hpp}、\srcpath{dc\_short\_circuit.hpp} 与注册测试
-为准。IEC 60909 推导与富模型映射对照 \srcpath{docs/theory/short\_circuit\_rich\_acdc\_derivation.md}。
+\subsection{证据解释规则}
+测试 ``pass'' 只证明测试中声明的模型与门槛。IEC 标准例是外部数值参考；解析小例是独立公式；
+50 组矩阵是 OpenDSS 完整网络交叉验证，IEEE feeders 是外部 Thevenin 故障核比较，两者范围不同。
+所有证据不得互相替代。完整原始数值、误差和复现提交见
+第~\ref{sec:sc-numerical}~章；已关闭审计项和适用范围见第~\ref{sec:sc-audit}~章。IEC 推导与富模型
+速查仍可参见 \srcpath{docs/theory/short\_circuit\_rich\_acdc\_derivation.md}，冲突时以公共头、源码和
+注册测试为准。

@@ -1,0 +1,90 @@
+% 生产 HTTP 与 GUI 契约
+\section{生产 HTTP、JSON 与 GUI 契约}\label{sec:sc-runtime}
+
+生产路由定义在 \srcpath{tests/run\_gui\_server.cpp}，GUI 消费逻辑定义在
+\srcpath{web/js/app.js}。三条 session 路由共享驻留系统快照和全局 busy 标志：无系统、JSON
+解析失败或求解异常返回 HTTP 400；已有分析占用时返回 409；取消也作为 400 错误传播。
+
+\subsection{三条路由不是同一结果的不同显示}
+
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{3.0cm}L{3.4cm}L{3.4cm}L{4.4cm}@{}}
+\toprule
+路由 & 请求定位 & 成功响应 & 关键边界\\
+\midrule
+\endfirsthead
+\toprule
+路由 & 请求定位 & 成功响应 & 关键边界\\
+\midrule
+\endhead
+\srcpath{POST /api/session/sc} & AC 全母线概览；GUI 留空故障母线时调用 &
+\fld{bus\_results}: bus ID、$I_k''$、$S_k''$、$Z_{th}$ 实虚部 &
+\fld{model\_scope}=\srcpath{overview-positive-sequence}；不返回峰值、开断、稳态、热流、贡献或支路结果\\
+\srcpath{POST /api/session/sc\_detailed} & 一组 authored AC \fld{fault\_bus\_ids} &
+每个故障点的结构化状态、完整故障点指标、相电流、全母线剩余电压、VSC 贡献和 authored 支路结果 &
+服务端强制 \fld{compute\_nonfault\_currents=false}；返回 requested/effective $c$ 与批量完成计数\\
+\srcpath{POST /api/session/dc\_sc} & 一组 authored DC \fld{fault\_bus\_ids} &
+每点 \fld{solved/message}、$V_{pre}$、$R_{th}$、故障电流、边计数和断路器责任 &
+批量共享稀疏分解；逐项返回 scope/limitations/残差，顶层返回 complete/partial/failed 计数\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{AC 概览请求与响应}
+
+请求可把选项放在顶层或 \fld{options} 对象中。服务端先解析
+\fld{SCDetailedOptions}，再只复制 \fld{fault\_type}、\fld{default\_xdpp} 和有效
+\fld{c\_factor} 到 \fld{SCOptions}；若详细选项的 $c\le0$，Max 使用 1.1、Min 使用 1.0。
+因此概览响应顶层 \fld{c\_factor} 是实际使用值，而嵌套 \fld{options.c\_factor} 仍是请求的
+详细选项值。
+
+每个 \fld{bus\_results} 行包含 \fld{bus\_id}、\fld{ikpp\_ka}、\fld{sk\_mva}、
+\fld{z\_thevenin\_re/im}；公共 C++ 结果中的复数 \fld{i\_fault\_pu} 没有序列化。
+该路径对于 SLG/LL/LLG 使用概览近似，不能替代真序网详细计算。
+
+\subsection{AC 详细请求与响应}
+
+\fld{fault\_bus\_ids} 必须是非空数组。可解析的选项包括故障类型、Max/Min、$\kappa$ 方法、
+Auto/径向/网状拓扑（默认 Auto）、$c$、故障阻抗、开断时间、频率、缺省 $x_d''$、是否计算支路/电压/$I_{th}$ 以及
+$I_{th}$ 历时。服务端不接收 \fld{inverse\_rhs\_batch\_size}、取消回调和
+\fld{apply\_iec\_transformer\_correction}；它们保持 C++ 默认。
+
+响应声明 \fld{model\_scope}=\texttt{iec60909-\allowbreak quasi-static-\allowbreak sequence-v2}。每项包含
+\fld{status}、\fld{message}、\fld{model\_scope}、\fld{model\_limitations}、
+\fld{effective\_c\_factor} 与 \fld{numerical\_quality}；bus row
+除五类 IEC 电流和贡献外还返回 $I_A/I_B/I_C/I_g$。\fld{branch\_results} 以
+\fld{domain/component\_kind/component\_index/pair\_number} 标识 authored 设备，同时保留
+\fld{canonical\_branch\_index} 诊断字段。投影收缩的理想开关仍返回设备行，但
+\fld{electrical\_value\_available=false}，防止把不可辨识电流误读为零。
+
+顶层 \fld{c\_factor\_requested} 保留用户意图，每项和 \fld{effective\_c\_factors} 返回实际使用值；
+\fld{batch\_status}、requested/solved/failed count 给出整体完成口径。AUD-032、033、037、038 已关闭。
+
+\subsection{DC 请求与响应}
+
+DC 路由要求非空 \fld{fault\_bus\_ids}，把六个 \fld{DCFaultOptions} 字段逐一解析后批量调用
+\srcpath{dc\_bus\_fault\_levels}，同批共享拓扑、收缩与稀疏因子。单个结果的 \fld{solved=false} 仍属于 HTTP 200
+正常响应，并通过 \fld{message} 解释 ``无 DC\_V 源''、``故障点是刚性源''、``无电阻通路''等。
+调用者必须逐行检查，不能用 HTTP 状态代表每个故障位置有效。
+
+断路器响应保留 authored \fld{breaker\_index}、端点、控制支路 ID、接触电阻、模型字符串和
+开断额定校核。\fld{i\_duty\_ka} 由故障后端电压差和物理边总电阻恢复；串联 DCCB 电流相同，
+并联路径按电导自然分流。该准稳态责任仍不等于 EMT 峰值、$di/dt$ 或开断瞬态。
+
+\subsection{GUI 工作流}
+
+交流故障位置留空时，GUI 调用概览路由并显示 bus、$S_k''$、$I_k''$；输入一个 AC bus ID 时，
+调用详细路由，显示故障点五类电流、贡献表、VSC 模型和全母线剩余电压。DC 模式留空时会从
+Canvas 系统对象收集全部 DC bus ID，批量调用 DC 路由并显示 DC 结果。GUI 同时显示 AC
+authored 支路电流表；不可辨识的收缩设备显示 N/A。GUI 不提供 C++ 默认的非故障母线电流指标。
+
+显示成功文案不能作为物理有效性证书：详细 GUI 当前找到响应行后主要显示数值，生产消费方仍应检查
+每个 \fld{solved}、模型范围、限制、有限性、单位与 ID 归属。
+
+\subsection{请求前验证}
+
+\srcpath{apply\_sc\_request\_options} 和 \srcpath{apply\_dc\_sc\_request\_options} 解析 JSON
+类型；AC 详细路由随后以 \srcpath{sc\_detailed\_options\_validation\_error} 在 HTTP 边界执行
+与公共入口一致的无异常范围校验，C++ 公共入口仍是最终防线。负故障阻抗、负/零频率或时间、非正缺省
+电抗、非法 RHS 块宽、负 DC 故障电阻以及 NaN/Inf 均在装配前抛出并由 HTTP 返回 400；不再静默
+钳位。生产 E2E 固定覆盖负故障阻抗拒绝，AUD-034 已关闭。

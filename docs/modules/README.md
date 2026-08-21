@@ -27,7 +27,7 @@
 | `resilience` | `modules/resilience/` | [弹性手册](resilience/resilience_manual.tex) | 启发式恢复、严格 MILP、MESS |
 | `scenario_generation` | `modules/scenario_generation/` | [场景生成手册](scenario_generation/scenario_generation_manual.tex) | 常规、可靠性、弹性、台风场景 |
 | `server` | `modules/server/` | [服务端手册](server/server_manual.tex) | `RuntimeApiV1` 与版本能力配置 |
-| `short_circuit` | `modules/short_circuit/` | [短路手册](short_circuit/short_circuit_manual.tex) | IEC 60909、序网、换流器、直流故障 |
+| `short_circuit` | `modules/short_circuit/` | [短路手册](short_circuit/short_circuit_manual.tex) | IEC 60909、序网、换流器、直流故障、投影身份、批量算法、HTTP、数值交叉验证与系统审计 |
 | `sppt` | `modules/sppt/` | [SPPT 手册](sppt/sppt_manual.tex) | MR1–MR8、证书、守卫、代理循环 |
 | `time_series` | `modules/time_series/` | [时序手册](time_series/time_series_manual.tex) | UC→OPF→PF、年度生产、生命周期 |
 | `validation` | `modules/validation/` | [静态校验手册](validation/validation_manual.tex) | Basic/Electrical/SolverReady/Strict 校验 |

@@ -869,6 +869,18 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/short_circuit_validation_matrix.cpp
   target_link_libraries(short_circuit_validation_matrix PRIVATE hacdcpf::hacdcpf)
 endif()
 
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/short_circuit_thevenin_batch.cpp")
+  add_executable(short_circuit_thevenin_batch
+    tools/short_circuit_thevenin_batch.cpp)
+  target_link_libraries(short_circuit_thevenin_batch PRIVATE hacdcpf::hacdcpf)
+endif()
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/dc_short_circuit_benchmark.cpp")
+  add_executable(dc_short_circuit_benchmark
+    tools/dc_short_circuit_benchmark.cpp)
+  target_link_libraries(dc_short_circuit_benchmark PRIVATE hacdcpf::hacdcpf)
+endif()
+
 # ── SPPT MR3 certificate corpus emitter (LaTeX + CSV) ─────────────────────────
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/sppt_certify.cpp")
   add_executable(sppt_certify tools/sppt_certify.cpp)

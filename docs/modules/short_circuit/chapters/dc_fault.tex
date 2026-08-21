@@ -13,8 +13,9 @@ I_f=\frac{V_N[k]}{(G_{NN}^{-1})_{kk}+\max(0,R_f)},
 （\fld{fault\_resistance\_pu}，默认 0 即金属性故障）。当分母不大于 $10^{-12}$、
 $G_{NN}$ 不可逆或故障母线本身是 \texttt{DC\_V} 时返回未求解。标幺电流乘
 $S_b/U_b$ 得 kA。依据为 \srcpath{src/short\_circuit/dc\_short\_circuit.cpp:dc\_bus\_fault\_level}。
-这是\textbf{线路电阻限制}的故障水平，是
-适用于直流断路器/电缆选型筛查的保守上界。
+这是\textbf{线路电阻限制}的准稳态故障水平，可用于直流断路器/电缆的第一层筛查；由于模型同时
+省略可能抬高峰值的电容放电和可能压低稳态电流的换流器限流，它相对真实暂态\textbf{既不保证
+上界也不保证下界}。
 
 \subsection{直流断路器参与}
 选项 \fld{DCFaultOptions} 控制断路器如何进入电导图：
@@ -23,16 +24,19 @@ $S_b/U_b$ 得 kA。依据为 \srcpath{src/short\_circuit/dc\_short\_circuit.cpp:
   \item \fld{dc\_breakers\_control\_branches}：匹配的断路器控制对应 \texttt{DCBranch}——断开阻断支路、
         闭合串入接触电阻；
   \item \fld{add\_unassigned\_closed\_breaker\_edges}：未指派的闭合断路器作独立导电边；
-  \item \fld{min\_closed\_breaker\_resistance\_pu}（默认 $10^{-6}$）：理想闭合断路器最小电阻，避免奇异图。
+  \item \fld{min\_closed\_breaker\_resistance\_pu}：正电阻闭合边的数值下限；严格零电阻边作为
+        理想导体先由并查集收缩，不以小电阻替代拓扑等势关系。
 \end{itemize}
 逐断路器故障责任记于 \fld{DCBreakerDutyResult}：\fld{i\_duty\_ka}、\fld{i\_breaking\_ka}、
-\fld{breaking\_rating\_ok}、\fld{controls\_branch} 与 \fld{r\_pu}。当前实现没有计算各断路器的
-电流分配：所有在运、闭合且进入故障图的断路器均直接令 \fld{i\_duty\_ka} 等于母线故障电流；
-见 \srcpath{src/short\_circuit/dc\_short\_circuit.cpp:dc\_bus\_fault\_level}。结果 \fld{DCFaultResult} 另记
+\fld{breaking\_rating\_ok}、\fld{controls\_branch} 与 \fld{r\_pu}。实现先以补偿定理恢复故障后
+母线电压，再按每条实际电阻边 $I_{ij}=(V_i-V_j)/R_{ij}$ 计算责任；串联 DCCB 电流相同，并联
+路径按电阻分流，开路支线为 0。端点相同且无法唯一归属到并行支路的 DCCB 显式拒绝，不猜测。
+结果 \fld{DCFaultResult} 另记
 \fld{v\_prefault\_pu}、边计数（\fld{dc\_branch\_edges\_used}/\fld{dccb\_edges\_used}）与
 \fld{dccb\_open\_count}/\fld{dccb\_blocked\_branch\_count}。
 
 \subsection{边界}
-本估计\textbf{不}建模换流器限流、电容放电暂态、源内阻抗与直流保护跳闸，因此是保守上界：
-真实峰值放电电流可能更高（电容），而稳态受控电流可能更低（换流器限流）。需要暂态峰值或
+本估计\textbf{不}建模换流器限流、电容放电暂态、线路电感、源控制与直流保护跳闸。
+真实峰值放电电流可能更高（电容），而稳态受控电流可能更低（换流器限流），故不能视为真实
+故障波形的包络。需要暂态峰值、$di/dt$ 或
 受控稳态时应改用暂态仿真（\srcpath{docs/theory/transient\_runtime.md}）。

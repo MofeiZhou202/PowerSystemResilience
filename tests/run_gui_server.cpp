@@ -563,7 +563,12 @@ std::string sc_kappa_method_name(hacdcpf::analysis::SCKappaMethod km) {
 }
 
 std::string sc_topology_name(hacdcpf::analysis::SCTopology top) {
-  return top == hacdcpf::analysis::SCTopology::Radial ? "Radial" : "Meshed";
+  switch (top) {
+    case hacdcpf::analysis::SCTopology::Auto: return "Auto";
+    case hacdcpf::analysis::SCTopology::Radial: return "Radial";
+    case hacdcpf::analysis::SCTopology::Meshed: return "Meshed";
+  }
+  return "Auto";
 }
 
 json sc_options_to_json(const hacdcpf::analysis::SCDetailedOptions& opt) {
@@ -657,11 +662,14 @@ void apply_sc_request_options(const json& root,
     opt.kappa_method = hacdcpf::analysis::SCKappaMethod::B;
   }
 
-  const std::string topology = o->value("topology", std::string("Meshed"));
+  const std::string topology = o->value("topology", std::string("Auto"));
   if (topology == "Radial" || topology == "radial" || topology == "Tree" || topology == "tree") {
     opt.topology = hacdcpf::analysis::SCTopology::Radial;
-  } else {
+  } else if (topology == "Meshed" || topology == "meshed" ||
+             topology == "Mesh" || topology == "mesh") {
     opt.topology = hacdcpf::analysis::SCTopology::Meshed;
+  } else {
+    opt.topology = hacdcpf::analysis::SCTopology::Auto;
   }
 
   if (o->contains("c_factor") && (*o)["c_factor"].is_number()) {
@@ -691,6 +699,27 @@ void apply_sc_request_options(const json& root,
   if (o->contains("ith_duration_s") && (*o)["ith_duration_s"].is_number()) {
     opt.ith_duration_s = (*o)["ith_duration_s"].get<double>();
   }
+}
+
+std::optional<std::string> sc_detailed_options_validation_error(
+    const hacdcpf::analysis::SCDetailedOptions& opt) {
+  const auto finite = [](double value) { return std::isfinite(value); };
+  if (!finite(opt.c_factor) || opt.c_factor < 0.0 || opt.c_factor > 2.0)
+    return "SCDetailedOptions.c_factor must be finite and in [0, 2]";
+  if (!finite(opt.fault_impedance_pu) || opt.fault_impedance_pu < 0.0)
+    return "SCDetailedOptions.fault_impedance_pu must be finite and non-negative";
+  if (!finite(opt.breaking_time_s) || opt.breaking_time_s <= 0.0)
+    return "SCDetailedOptions.breaking_time_s must be finite and positive";
+  if (!finite(opt.base_frequency_hz) || opt.base_frequency_hz <= 0.0)
+    return "SCDetailedOptions.base_frequency_hz must be finite and positive";
+  if (!finite(opt.default_xdpp) || opt.default_xdpp <= 0.0)
+    return "SCDetailedOptions.default_xdpp must be finite and positive";
+  if (!finite(opt.ith_duration_s) ||
+      (opt.compute_ith && opt.ith_duration_s <= 0.0))
+    return "SCDetailedOptions.ith_duration_s must be finite and positive when I_th is requested";
+  if (opt.inverse_rhs_batch_size == 0 || opt.inverse_rhs_batch_size > 256)
+    return "SCDetailedOptions.inverse_rhs_batch_size must be in [1, 256]";
+  return std::nullopt;
 }
 
 void apply_replay_zip_and_solver_flags(hacdcpf::powerflow::SolverData& data,
@@ -20461,6 +20490,12 @@ int main(int argc, char** argv) {
         if (fault_bus_ids.empty()) throw std::runtime_error("No fault_bus_ids specified");
         hacdcpf::analysis::SCDetailedOptions dopt;
         apply_sc_request_options(j, dopt);
+        if (const auto error = sc_detailed_options_validation_error(dopt)) {
+          g_session.busy.store(false);
+          res.status = 400;
+          res.set_content(json{{"error", *error}}.dump(), "application/json");
+          return;
+        }
         // The selected-bus GUI consumes complete fault-bus duties plus the
         // network voltage profile; non-fault current metrics would require
         // two full inverse diagonals and are returned as zero-valued fields.
@@ -20472,24 +20507,40 @@ int main(int argc, char** argv) {
         json out;
         out["fault_type"] = sc_fault_type_name(dopt.fault_type);
         out["calc_type"] = sc_calc_type_name(dopt.calc_type);
-        out["c_factor"] = dopt.c_factor;
+        out["c_factor_requested"] = dopt.c_factor;
         out["options"] = sc_options_to_json(dopt);
-        out["model_scope"] = "selected-fault-complete-voltage-profile";
-        out["model_limitations"] = json::array({
-            "Non-fault bus current metrics are omitted; request the C++ API with compute_nonfault_currents=true when those self-impedance quantities are required."
-        });
+        out["model_scope"] = "iec60909-quasi-static-sequence-v2";
+        int solved_count = 0;
+        int failed_count = 0;
+        json effective_factors = json::array();
         json res_arr = json::array();
         for (const auto& dr : results) {
           json rj;
           rj["fault_bus_id"] = dr.fault_bus_id;
           rj["solved"] = dr.solved;
+          rj["status"] = dr.status;
+          rj["message"] = dr.message;
+          rj["model_scope"] = dr.model_scope;
+          rj["model_limitations"] = dr.model_limitations;
+          rj["effective_c_factor"] = dr.effective_c_factor;
+          rj["numerical_quality"] = {
+              {"factorization_valid", dr.numerical_quality.factorization_valid},
+              {"all_finite", dr.numerical_quality.all_finite},
+              {"max_linear_residual", dr.numerical_quality.max_linear_residual}};
+          effective_factors.push_back(dr.effective_c_factor);
+          if (dr.solved) ++solved_count; else ++failed_count;
           json bus_arr = json::array();
           for (const auto& br : dr.bus_results) {
             bus_arr.push_back({
               {"bus_id", br.bus_id}, {"ikss_ka", br.ikss_ka},
               {"ip_ka", br.ip_ka}, {"ib_ka", br.ib_ka},
               {"ik_ka", br.ik_ka}, {"ith_ka", br.ith_ka},
+              {"thermal_m", br.thermal_m}, {"thermal_n", br.thermal_n},
               {"v_remaining_pu", br.v_remaining_pu},
+              {"i_phase_a_ka", br.i_phase_a_ka},
+              {"i_phase_b_ka", br.i_phase_b_ka},
+              {"i_phase_c_ka", br.i_phase_c_ka},
+              {"i_ground_ka", br.i_ground_ka},
               {"ikss_gen_contrib_ka", br.ikss_gen_contrib_ka},
               {"ikss_motor_contrib_ka", br.ikss_motor_contrib_ka},
               {"ikss_load_contrib_ka", br.ikss_load_contrib_ka},
@@ -20499,6 +20550,25 @@ int main(int argc, char** argv) {
             });
           }
           rj["bus_results"] = bus_arr;
+          json branch_arr = json::array();
+          for (const auto& branch : dr.branch_results) {
+            branch_arr.push_back({
+                {"domain", branch.domain},
+                {"component_kind", branch.component_kind},
+                {"component_index", branch.component_index},
+                {"pair_number", branch.pair_number},
+                {"attribution_complete", branch.attribution_complete},
+                {"electrical_value_available", branch.electrical_value_available},
+                {"message", branch.message},
+                {"canonical_branch_index", branch.branch_index},
+                {"from_bus", branch.from_bus},
+                {"to_bus", branch.to_bus},
+                {"i_branch_ka", branch.i_branch_ka},
+                {"i_from_ka", branch.i_from_ka},
+                {"i_to_ka", branch.i_to_ka},
+                {"s_branch_mva", branch.s_branch_mva}});
+          }
+          rj["branch_results"] = std::move(branch_arr);
           json conv_arr = json::array();
           for (const auto& cc : dr.converter_contributions) {
             conv_arr.push_back({
@@ -20517,6 +20587,13 @@ int main(int argc, char** argv) {
           res_arr.push_back(rj);
         }
         out["results"] = res_arr;
+        out["effective_c_factors"] = std::move(effective_factors);
+        if (!results.empty()) out["effective_c_factor"] = results.front().effective_c_factor;
+        out["batch_status"] = failed_count == 0 ? "complete" :
+                              (solved_count == 0 ? "failed" : "partial");
+        out["requested_count"] = results.size();
+        out["solved_count"] = solved_count;
+        out["failed_count"] = failed_count;
         res.set_content(out.dump(), "application/json");
         g_session.busy.store(false);
       } catch (const std::exception& e) {
@@ -20551,17 +20628,26 @@ int main(int argc, char** argv) {
 
         hacdcpf::analysis::DCFaultOptions dopt;
         apply_dc_sc_request_options(j, dopt);
+        dopt.cancellation_requested = [] {
+          return g_session.cancel.load(std::memory_order_relaxed);
+        };
 
         json out;
         out["analysis"] = "dc_short_circuit";
         out["options"] = dc_sc_options_to_json(dopt);
+        const auto dc_results = hacdcpf::analysis::dc_bus_fault_levels(
+            sys, fault_bus_ids, dopt);
         json res_arr = json::array();
-        for (const int bus_id : fault_bus_ids) {
-          const auto dr = hacdcpf::analysis::dc_bus_fault_level(sys, bus_id, dopt);
+        int solved_count = 0;
+        for (const auto& dr : dc_results) {
           json rj;
           rj["fault_bus_id"] = dr.fault_bus_id;
           rj["solved"] = dr.solved;
           rj["message"] = dr.message;
+          rj["status"] = dr.status;
+          rj["model_scope"] = dr.model_scope;
+          rj["model_limitations"] = dr.model_limitations;
+          rj["max_linear_residual"] = dr.max_linear_residual;
           rj["v_prefault_pu"] = dr.v_prefault_pu;
           rj["r_thevenin_pu"] = dr.r_thevenin_pu;
           rj["i_fault_pu"] = dr.i_fault_pu;
@@ -20589,9 +20675,16 @@ int main(int argc, char** argv) {
             });
           }
           rj["breaker_duties"] = duties;
+          if (dr.solved) ++solved_count;
           res_arr.push_back(std::move(rj));
         }
         out["results"] = res_arr;
+        out["batch_status"] = solved_count == static_cast<int>(dc_results.size())
+                                  ? "complete"
+                                  : (solved_count == 0 ? "failed" : "partial");
+        out["requested_count"] = dc_results.size();
+        out["solved_count"] = solved_count;
+        out["failed_count"] = static_cast<int>(dc_results.size()) - solved_count;
         res.set_content(out.dump(), "application/json");
         g_session.busy.store(false);
       } catch (const std::exception& e) {

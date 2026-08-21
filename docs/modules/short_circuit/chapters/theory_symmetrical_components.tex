@@ -7,8 +7,8 @@
 本章为通用数学理论，按领域标准模型与文献体系撰写，覆盖 Fortescue 对称分量变换
 （定义、正交性与功率不变变体）、序网独立的条件、四类故障边界条件到序网连接的
 一般推导，以及零序网络与变压器矢量组、中性点接地方式的关系。本章公式不要求逐式
-对应代码；与平台实现（\srcpath{src/short\_circuit/}）的对应关系见本章末
-"与实现的对应"表，超出实现的内容以"未实现扩展说明"框就地标记。
+对应代码；与平台实现（\srcpath{src/short\_circuit/}）的对应关系见本章末表，
+相域耦合问题明确归属三相网络模块，不作为短路模块待办。
 \end{theorynote}
 
 \subsection{记号与约定}
@@ -203,12 +203,12 @@ $|Z_{1k}+Z_{2k}+Z_{0k}|<3|Z_{1k}|$；取 $Z_2=Z_1$ 时约为 $|2Z_1+Z_0|<3|Z_1|$
 有效接地系统（强中性点、接地变压器通路）中该条件常见，属物理结论而非数值异常。
 \end{remark}
 
-\begin{gapnote}
-严格 LLG 要求 $3Z_f$ 串入零序支路并作完整相电流重构。当前实现采用正序等效紧致
-近似 $Z_{1k}+(Z_{2k}\parallel Z_{0k})+Z_f$ 且只报有效幅值（见第~\ref{sec:sc-ac}~章），
-未重构相分解电流 $I_{L2}/I_{L3}$ 与地电流；序间耦合（未换位线路的非对角
-$Z_{012}$）完全未建模。
-\end{gapnote}
+\begin{remark}[与详细实现的对应]
+详细路径严格使用 $Z_{1k}+Z_{2k}\parallel(Z_{0k}+3Z_f)$，由序电流重构
+$I_a,I_b,I_c$ 与地电流 $3I_0$，并将故障相电流最大幅值作为 \fld{ikss\_ka}。
+概览路径仍使用文档化的 $Z_1=Z_2=Z_0$ 排序近似；未换位线路的非对角
+$Z_{012}$ 序间耦合未建模。
+\end{remark}
 
 \subsection{零序网络与变压器矢量组、中性点接地}
 零序电流三相同相，其通路取决于磁路结构与接地回路：
@@ -225,12 +225,14 @@ $Z_{012}$）完全未建模。
 因此同一正序网可对应完全不同的接地故障水平：SLG/LLG 计算对变压器零序数据高度
 敏感。
 
-\begin{gapnote}
-当前实现：支路零序使用显式 \fld{r0\_pu}/\fld{x0\_pu}，缺失则不提供零序通路；
-变压器矢量组对零序的阻断/导通未完整建模，三绕组变压器零序默认以正序代入
-（见第~\ref{sec:sc-verify}~章局限清单）。涉及接地变压器、曲折接法或 $\Delta$
-阻断的接地故障研究应人工校核 $Z_{0k}$。
-\end{gapnote}
+\begin{remark}[当前矢量组实现范围]
+支路零序使用显式 \fld{r0\_pu}/\fld{x0\_pu}。两绕组变压器按 Y/Yg/$\Delta$ 组合建立
+导通、阻断或接地支路，并纳入 \fld{z0\_percent}、\fld{x0\_r0}、励磁零序参数和中性点阻抗；
+三绕组变压器解析三个绕组接法，以三组零序成对阻抗形成带变比四节点印章，$\Delta$ 只提供内部
+环流路径，再对内部星点作 Schur 消元。参数不完整或矢量组不受支持时详细路径显式失败，绝不以
+正序阻抗猜测零序。有中性点的曲折接法按已给定零序试验阻抗形成接地端口，无中性点时形成
+不接地端口；线路 ld{b0\_pu} 作为两端零序对地电纳进入序网，纯电容接地通路有独立回归。
+\end{remark}
 
 \subsection{与实现的对应}
 \begin{center}\footnotesize
@@ -244,7 +246,7 @@ $Z_{012}$）完全未建模。
 \midrule
 \endhead
 Fortescue 变换与功率不变变体 &
-\implpart{代码不显式构造相-序变换矩阵；计算直接在序等效阻抗层面进行，对称分量结论内嵌于故障公式}\\
+\textbf{已实现}\quad \srcpath{fault\_sequence\_currents} 直接执行三序到 $abc$ 的复数变换；无需运行时物化常数矩阵\\
 序网解耦与三序导纳矩阵构建 &
 \implfull{src/short\_circuit/short\_circuit.cpp:build\_sc\_admittance\_matrices}\\
 三相故障 $E/(Z_{1k}{+}Z_f)$ &
@@ -254,12 +256,11 @@ SLG 三序串联（$3Z_f$ 入零序支路） &
 LL 反相串联与 $\sqrt3$ 因子 &
 \implfull{src/short\_circuit/short\_circuit.cpp:compute\_Zk}（概览路径例外见下行）\\
 LLG 严格并联连接 &
-\implpart{正序等效紧致近似 $Z_1{+}(Z_2{\parallel}Z_0){+}Z_f$，仅有效幅值，无相分解重构；src/short\_circuit/short\_circuit.cpp:compute\_Zk}\\
+\textbf{已实现}\quad $Z_1{+}Z_2\parallel(Z_0{+}3Z_f)$ 与完整序/相/地电流重构；\srcpath{src/short\_circuit/short\_circuit.cpp:fault\_sequence\_currents}\\
 零序-矢量组-中性点接地规则 &
-\implpart{显式零序支路数据可用；矢量组与三绕组零序未完整建模}\\
-序间耦合（未换位线路） & \implnone\\
-概览路径 $Z_1{=}Z_2{=}Z_0$ 简化 &
-\implpart{src/short\_circuit/short\_circuit.cpp:fault\_at\_bus\_with\_zkk；不平衡故障研究应使用详细路径}\\
+\textbf{已实现}\quad 两/三绕组 Y/YN/Z/ZN/$\Delta$、中性点阻抗、零序试验阻抗与线路 $b_0$ 均进入详细序网；必需参数缺失显式拒绝\\
+序间耦合（未换位线路） & 相域线路矩阵问题，由三相网络模块计算；不属于 IEC 60909 序网对角数据契约\\
+概览路径 $Z_1{=}Z_2{=}Z_0$ 筛查 & 全母线正序排序专用接口；IEC 不平衡结论只由上述完整详细路径发布\\
 \bottomrule
 \end{longtable}
 \end{center}

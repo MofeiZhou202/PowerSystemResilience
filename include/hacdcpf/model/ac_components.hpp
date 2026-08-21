@@ -110,6 +110,14 @@ struct ACBranch {
   double x0_pu{0.0};
   double b0_pu{0.0};
 
+  // IEC 60909 minimum short-circuit resistance correction. The authored
+  // positive- and zero-sequence resistance values are understood at
+  // sc_r_reference_temperature_c. A positive sc_alpha_per_c enables the
+  // correction to sc_end_temperature_c for minimum-current calculations.
+  double sc_r_reference_temperature_c{20.0};
+  double sc_end_temperature_c{20.0};
+  double sc_alpha_per_c{0.0};
+
   // Transformer nameplate
   double vn_hv_kv{0.0};
   double vn_lv_kv{0.0};
@@ -156,6 +164,17 @@ struct Transformer2W {
 
   double z0_percent{0.0};
   double x0_r0{0.0};
+  double mag0_percent{0.0};
+  double mag0_rx{0.0};
+  double si0_hv_partial{0.5};
+  double xn_ohm{0.0};
+
+  // IEC 60909 power-station-unit semantics. `power_station_unit` identifies
+  // the transformer as a unit transformer; the associated Generator names
+  // it through Generator::power_station_transformer_index.
+  bool power_station_unit{false};
+  bool oltc{false};
+  double pt_percent{0.0};
 
   double mtbf_hours{0.0};
   double mttr_hours{0.0};
@@ -195,6 +214,16 @@ struct Transformer3W {
   double vkr_hv_mv_percent{0.0};
   double vkr_hv_lv_percent{0.0};
   double vkr_mv_lv_percent{0.0};
+
+  // Zero-sequence pair short-circuit voltages use the same pair convention
+  // as the positive-sequence fields above: HV-MV, HV-LV and MV-LV.
+  double vk0_hv_mv_percent{0.0};
+  double vk0_hv_lv_percent{0.0};
+  double vk0_mv_lv_percent{0.0};
+  double vkr0_hv_mv_percent{0.0};
+  double vkr0_hv_lv_percent{0.0};
+  double vkr0_mv_lv_percent{0.0};
+  std::string vector_group;
 
   double pfe_kw{0.0};
   double i0_percent{0.0};
@@ -324,6 +353,17 @@ struct Generator {
   double xd_xq{1.0};
   double x0_pu{0.0};
   double r0_pu{0.0};
+
+  // IEC 60909 generator voltage correction and power-station-unit linkage.
+  double pg_percent{0.0};
+  int power_station_transformer_index{0};
+  // Manufacturer/standard-curve values for a single-fed near-to-generator
+  // steady-state fault. Zero means that the value was not supplied.
+  double sc_lambda_max{0.0};
+  double sc_lambda_min{0.0};
+  // IEC 60909-0:2016, 11.2.1.2: a terminal fault with terminal-fed static
+  // excitation uses lambda_max = lambda_min.
+  bool sc_terminal_fed_static_excitation{false};
 
   double emission_factor_tco2_mwh{0.0};
   double nox_factor_kg_mwh{0.0};

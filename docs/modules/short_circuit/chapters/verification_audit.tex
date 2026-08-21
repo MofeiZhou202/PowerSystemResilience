@@ -1,0 +1,114 @@
+% 系统审计、失败真值表与准入边界
+\section{系统审计、失败真值表与工业准入}\label{sec:sc-audit}
+
+本轮审计覆盖两个公共头、两个核心实现、canonical 投影/归属调用、三条生产 session 路由、GUI
+消费路径、四个直接测试目标、两个外部引擎注册 CTest 和参数矩阵工具。它是对当前实现的深度审计，
+包含 IEC TR 综合例与 OpenDSS 分层比较，但仍不等于 IEC 合规认证或保护装置型式试验。
+
+\subsection{结果真值表}
+
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{3.2cm}L{3.0cm}L{3.0cm}L{4.7cm}@{}}
+\toprule
+场景 & C++ 表达 & HTTP 表达 & 调用方判据\\
+\midrule
+\endfirsthead
+\toprule
+场景 & C++ 表达 & HTTP 表达 & 调用方判据\\
+\midrule
+\endhead
+AC 概览成功 & 返回 \fld{SCResult}；无 solved 字段 & 200 + bus rows & 还需检查非空、有限、模型范围\\
+AC 概览非法 bus/分解失败 & 抛异常 & 400 + error & 不得使用部分结果\\
+AC 详细成功 & \fld{solved=true} & 200；每项 solved=true & 只消费路由实际序列化字段\\
+AC 详细 bus 不存在 & 当前公共路径抛 \fld{invalid\_argument} & 400 + error & 整个批请求失败，不返回其余故障点\\
+AC 详细空系统 & \fld{status=invalid\_network}，带 message & 200 中该项 false & 不消费数值\\
+AC 详细分解无效 & \fld{status=numerical\_failure}，solved=false & 200 + false + quality & 检查状态、原因和残差\\
+AC 接地故障处于不接地零序分量 & \fld{solved=true}、\fld{status=solved\_zero\_sequence\_open} & 200 + 0 kA + limitation & 0 仅表示阻抗序网开路，不含电容接地电流\\
+DC 成功 & \fld{solved=true} & 200 中该项 true & 检查 $R_{th}>0$、有限性和模型假设\\
+DC 无源/无通路/刚性源 & \fld{solved}=false，带 message & 200 中 false 与 message & 这是已分类的物理/模型失败，不是零电流\\
+并发占用 & 不适用 & 409 + error & 可退避重试，不改变请求\\
+取消 & AC/DC 抛异常 & 400 + error & 无部分成功承诺\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{审计发现}
+
+编号与 \srcpath{docs/testing/module\_code\_audit.md} 保持一致：
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{1.5cm}L{1.5cm}L{8.1cm}L{3.1cm}@{}}
+\toprule
+ID & 严重度 & 事实与影响 & 关闭条件摘要\\
+\midrule
+\endfirsthead
+\toprule
+ID & 严重度 & 事实与影响 & 关闭条件摘要\\
+\midrule
+\endhead
+AUD-032 & Closed & 详细 HTTP 已序列化完整 branch rows。 & E2E 校验字段与数量。\\
+AUD-033 & Closed & requested $c$ 与逐故障 effective $c$ 分离。 & 自动 $c$ E2E。\\
+AUD-034 & Closed & AC/DC 公共入口统一拒绝非法有限性/范围，HTTP 返回 400。 & C++ 边界与 HTTP 负阻抗回归。\\
+AUD-035 & Closed & 由补偿定理故障后电压恢复 DCCB 实际边电流。 & 开路支线 0 kA、并联 10/5 kA。\\
+AUD-036 & Closed & DC 改为理想边收缩、稀疏选列、批量复用与取消。 & 1000-bus/64-fault 倍率 0.0621906。\\
+AUD-037 & Closed & AC/DC 逐项状态、原因、scope、limitations、残差和批量计数齐备。 & C++/E2E 契约。\\
+AUD-038 & Closed & 支路结果恢复 domain-qualified authored 身份；收缩设备显式 N/A。 & 变压器与理想开关回归。\\
+AUD-039 & Closed & 理想 DC 边并查集收缩，保持等势。 & $R_{th}=0.1$ pu 解析例。\\
+AUD-040 & Closed & 同支路多 DCCB 是串联链；并行支路端点歧义拒绝。 & 串联链/歧义回归。\\
+AUD-041 & Closed & 英/中文理论速查曾有 ``DC 短路不使用 DCCB'' 及整母线责任近似的陈旧陈述。 & 两份活文档已同步实际边恢复与理想边收缩。\\
+AUD-042 & Closed & 必需因子、有限性和 $10^{-9}$ 后向误差全部通过才可 solved。 & 奇异序网返回 numerical\_failure。\\
+AUD-043 & Closed & 方法 C 曾与 A 共用故障点 $R/X$；现有独立 $f_c/f=0.4$ 网络、$R_{Gf}$ 和单 $\kappa_C$。 & 13 母线 $i_p$ 最大误差 $1.15\times10^{-12}$。\\
+AUD-044 & Closed & 三绕组零序曾跨不同母线 pu 基准直接消元；现按变比建立四节点印章后 Schur 消元。 & 7 个接地 SLG 点均过 0.5\% 门。\\
+AUD-045 & Closed & 全局 $Y_0$ 会被任一不接地分量拖成奇异；现逐零序连通分量分解并分类开路。 & 6 个隔离母线返回物理 0 kA。\\
+AUD-046 & Closed & 新增 IEC 字段若经 JSON 丢失会改变网络；读写与字段级往返测试已覆盖。 & \srcpath{test\_io\_json[short\_circuit]} 3/48。\\
+AUD-047 & Closed & GridLAB-D 仅查环境变量/PATH 会漏掉本机兄弟仓库并静默以 0 案例通过；现自动发现并强制引擎、案例数和误差门。 & 35/35，最大误差 $2.329225394\times10^{-8}$。\\
+AUD-048 & Closed & 方法 A 曾使用故障点等值 $R/X$；现取全部参与支路、馈入变压器与电源路径的最小 $R/X$。 & 不等 $R/X$ 独立反例及外部矩阵。\\
+AUD-049 & Closed & 稳态曾推断 $\lambda$ 且端子静态励磁取零；现显式曲线字段、端子取 $\lambda_{\min}$、多馈取 $I_{bmo}$。 & 近/远端、缺值、静态励磁和带电机多馈回归。\\
+AUD-050 & Closed & 附录 A 曾使用与报告峰值不一致的 $\kappa$，OpenDSS 峰值 oracle 口径亦旧。 & 方法 C 热恒等式；50 例 $i_p$ 最大误差 $1.485279759\times10^{-7}$。\\
+AUD-051 & Closed & 开断电流曾缺公式 (77) 权重、完整 $\mu$ 插值和不平衡规则。 & 综合 $I_b$、插值与不平衡回归。\\
+AUD-052 & Closed & 方法 B 曾全电压等级封顶 1.8 且依赖手填拓扑。 & LV/MV 上限、Auto 网状与低 $R/X$ 例外回归。\\
+AUD-053 & Closed & 曲折绕组曾被拒绝，线路零序并联电纳缺物理回归。 & 2W/3W zigzag 等值与电容接地通路开/闭回归。\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+上述项目均已由运行时代码与反例关闭。理想闭合 DC 支路现在先收缩端点；AC 收缩设备保留 authored
+结果行，但在电流不可唯一辨识时明确返回 N/A，不以数值零冒充物理解。
+
+\subsection{已经有测试保护的契约}
+
+现有回归明确覆盖：AC 两/三母线解析戴维南、IEEE 14-bus 有限性、单点/全量一致、非连续 bus ID、
+理想合并广播、故障点电压和外部电网贡献、关闭非故障逆对角后的故障点等价、IEC $c$ 缩放、
+GFL/GFM 模型选择、标准 IEC 电机算例、rich 实用算例；DC 覆盖径向电阻、显式故障电阻、无源、
+刚性源、DCCB 串联/断开/standalone。
+
+新增回归覆盖负/NaN 选项、HTTP 负阻抗、详细 branch rows、canonical 到 rich 设备身份、收缩开关、
+DC 理想边、多断路器串联/歧义、并联实际分流、奇异 AC 因子、取消、大规模 DC 批量性能、
+IEC 综合 13 母线、四类故障解析式、方法 A/B/C、公式 (77)、$I_{bmo}$、附录 A、三绕组零序、
+组件化开路零序和新增 JSON 字段。详细 IEC 60909 计算域没有开放审计项；Canvas 跨域定位、
+目标网络容量规划、EMT/保护与 IEC 61660 由各自模块和准入门负责，不记作 IEC 60909 未完成项。
+
+\subsection{工业使用准入门}
+
+\begin{enumerate}
+  \item \textbf{数据门}：完成 electrical/solver-ready 校验；确认 kV/MVA/pu 基准、零序参数、接地方式、
+        变压器矢量组、机器次暂态参数和 VSC 限流参数来源。
+  \item \textbf{模型门}：三相/不平衡研究选择正确入口；若问题依赖矢量组零序阻断、控制动态、
+        电弧、电容放电或保护动作，必须换用更高保真模型。
+  \item \textbf{身份门}：设备级结论只使用 authored ID；canonical ID 仅为诊断。收缩设备必须检查
+        \fld{electrical\_value\_available}，N/A 不得解释为零。
+  \item \textbf{结果门}：逐项检查 solved/异常、有限性、非负性、effective 选项、模型范围和限制；
+        不把缺失/剥离行解释为零。
+  \item \textbf{验证门}：目标电压等级和设备类型至少有一个解析例、一个标准/第三方基准及参数敏感性；
+        标准例误差门槛在运行前冻结。
+  \item \textbf{保护门}：准稳态 DCCB duty 已按实际电阻边分流；最终选型仍须使用 EMT 峰值、$di/dt$
+        和开断暂态，不得把本模块替代 IEC 61660/厂商开断模型。
+\end{enumerate}
+
+\subsection{可信结论与禁止外推}
+
+在已验证范围内，可以可信地使用详细 AC 路径评估 IEC 60909 准稳态故障量、源贡献和剩余电压，
+使用概览路径快速排序全母线三相故障水平，使用 DC 路径对纯电阻、刚性源网络做稳态线路电阻
+限制筛查与实际电阻边分流。不得外推为：EMT/DC 电容放电仿真、动态保护配合/选择性分析、
+故障穿越控制仿真、线路电容主导的不接地接地故障，或缺少矢量组/中性点参数时的零序自动推断。
+GridLAB-D 5.3.0 的 35 个可表达案例已在强制门下重跑；pandapower 综合 1PH 上游路径未作为
+本模块合规 oracle，只能作为带已知正则化差异的来源说明，不计入通过数。

@@ -1,0 +1,205 @@
+% 数值结果与交叉验证
+\section{数值结果与分层交叉验证}\label{sec:sc-numerical}
+
+本章只列可由当前 Release 二进制和注册算例复算的数字，并区分三种证据等级：
+\textbf{A} 为外部标准参考值，\textbf{B} 为独立解析解，\textbf{C} 为同实现参数扫掠/性质测试。
+C 级能发现单调性、缩放和模型切换回归，但不能冒充独立求解器交叉验证。
+
+\subsection{A 级：IEC TR 60909-4 §6.2 标准例}
+
+算例为 33/6 kV 系统、6 kV 母线三相故障、两台变压器和异步电机，$t_b=0.1$ s。输入来自
+\srcpath{tests/data/short\_circuit\_iec60909\_4.json}，参考值来自 IEC TR 60909-4:2021
+§6.2；输入舍入到约四位有效数字，因此注册验收门槛为相对误差 $0.5\%$。
+
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{3.6cm}r r r r@{}}
+\toprule
+量 & HySim (kA) & IEC 参考 (kA) & 有符号误差 (\%) & 门槛\\
+\midrule
+$I_k''$ & 19.553053 & 19.520000 & +0.1693 & $<0.5\%$\\
+$i_p$ & 48.901518 & 48.820000 & +0.1670 & $<0.5\%$\\
+$I_b$ & 17.074240 & 17.040000 & +0.2009 & $<0.5\%$\\
+$I_k$ & 14.777167 & 14.740000 & +0.2521 & $<0.5\%$\\
+去电机 $I_k''$ & 14.776850 & 14.740000 & +0.2500 & $<0.5\%$\\
+电机贡献 & 4.776203 & 4.780000 & -0.0794 & $<0.5\%$\\
+\bottomrule
+\end{tabular}
+\end{center}
+六项均通过。该算例同时锁定变压器铭牌基准换算、方法 C 等效峰值、电机 $\mu/q$ 衰减和电机
+阻抗只换基一次，证据入口为 \srcpath{test\_short\_circuit\_iec60909\_4}。
+
+\subsection{A/B 级：IEC TR 60909-4 综合 13 母线网络}
+
+同一测试目标还构造完整 13 母线综合网：2 个外部电网、7 条线路、2 台电站单元两绕组变压器、
+4 台三绕组变压器、3 台同步发电机和 3 台异步电动机。冻结参考来自 pandapower 2.14.10 的
+IEC 60909 算例源与已执行路径；它不是 IEC 认证替代物，也不把上游仅定义但未断言的数组
+伪称为独立证据。HySim 对这些数组增加本地强制断言，并由 OpenDSS/GridLAB-D 矩阵承担
+独立求解器交叉验证。
+
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{4.5cm}r r r@{}}
+\toprule
+故障量 & 母线数 & 最大相对误差 & 固定门槛\\
+\midrule
+三相最大 $I_k''$ & 13 & $3.26\times10^{-12}$ & $0.5\%$\\
+三相最小 $I_k''$（含 80\,$^\circ$C 线路电阻） & 13 & $9.04\times10^{-12}$ & $0.5\%$\\
+两相最大 $I_k''$ & 13 & $3.41\times10^{-12}$ & $0.5\%$\\
+三相最大 $i_p$（方法 C） & 13 & $1.15\times10^{-12}$ & $2.0\%$\\
+单相接地最大 $I_k''$（有接地回路） & 7 & $1.17\times10^{-6}$ & $0.5\%$\\
+三相 $I_b$（前 10 母线） & 10 & $1.96\times10^{-3}$ & $0.5\%$\\
+两相 $i_p$（前 10 母线） & 10 & $8.98\times10^{-7}$ & $2.0\%$\\
+单相接地 $i_p$（前 5 母线） & 5 & $2.39\times10^{-6}$ & $2.0\%$\\
+去电机三相 $I_k''/i_p$（前 8 母线） & 16 & $3.13\times10^{-6}$ & $0.5/2.0\%$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+三相最大数组范围为 13.577772--80.572048 kA，方法 C 峰值范围为
+36.842717--210.315897 kA；最小三相范围为 5.050107--67.957787 kA；两相范围为
+11.758695--69.777440 kA。单相接地前七个有接地回路母线为
+24.652614、15.972216、10.410564、9.049797、17.045200、25.485458、19.048962 kA。
+
+pandapower 上游将综合 1PH 测试标记为 ``gen-close under develop''，且其
+\srcpath{\_add\_gen\_sc\_impedance\_zero} 为每台发电机人为加入
+$1/(1000+j1000)$ pu 正则化导纳。因此被三角绕组隔离的母线 9/10 得到
+0.000067361/0.000134722 kA 数值伪电流；HySim 的组件化零序求解返回物理开路 0 kA，
+并以 \fld{solved\_zero\_sequence\_open} 声明不含电容接地电流。该两点不计作跨引擎数值一致，
+也不把此组证据称为 IEC 认证。
+
+\subsection{B 级：AC 戴维南解析例}
+
+两母线例取近似理想源 $x_d''=0.001$ pu、线路
+$Z_{12}=0.2+j0.4$ pu。解析值（忽略有限源电抗）为 $Z_{th,2}=0.2+j0.4$ pu；实现得到
+$0.2+j0.401$ pu，复数绝对误差 $1.0\times10^{-3}$ pu，小于测试门槛 $0.01$ pu。
+实现 $S_{k,2}''=223.160366$ MVA。
+
+三母线径向例再串联 $Z_{23}=0.3+j0.6$ pu：
+\begin{center}\footnotesize
+\begin{tabular}{@{}l l l r@{}}
+\toprule
+母线 & 解析 $Z_{th}$ (pu) & 实现 $Z_{th}$ (pu) & $S_k''$ (MVA)\\
+\midrule
+2 & $0.2+j0.4$ & $0.2+j0.401$ & 223.160366\\
+3 & $0.5+j1.0$ & $0.5+j1.001$ & 89.371215\\
+\bottomrule
+\end{tabular}
+\end{center}
+两点误差均为 $1.0\times10^{-3}$ pu，且故障容量沿馈线递减。有限的 0.001 pu 源电抗解释了
+实现与 ``理想源''解析式的差异，不应把它报告为线性求解残差。
+
+\subsection{B 级：DC 电阻网络解析例}
+
+三母线 0.75 kV、1 MVA 径向网络中，故障点到 DC\_V 源的路径电阻为 0.1 pu，故
+$R_{th}=0.1$ pu、$I_f=1/0.1=10$ pu。DC 电流基准为 $S_b/U_b=1/0.75$ kA，
+实现得到 $13.333333$ kA，绝对门槛 $10^{-6}$ kA。另加 $R_f=0.1$ pu 后得到 5 pu；
+闭合 DCCB 串入 0.1 pu 接触电阻时也得到 $R_{th}=0.2$ pu、$I_f=5$ pu。
+
+未指派闭合 DCCB 作为 0.1 pu 并联边时，$R_{th}$ 从 0.500000 降为
+$0.0833333$ pu，解析值为 $(0.5^{-1}+0.1^{-1})^{-1}=1/12$ pu。断开控制 DCCB 后
+源路径消失，结果为 \fld{solved=false} 且消息包含 \texttt{no resistive path}。
+
+两条并联电阻路径的总故障电流为 15.000000 kA。补偿定理恢复的 DCCB 责任分别为
+10.000000 kA 与 5.000000 kA，二者之和与故障点电流一致；接在无负荷开路支线上的 DCCB
+责任为 0.000000 kA。上述数值是实际边电压差除以总电阻的解析交叉验证，不是把故障点总电流
+复制到每个断路器。
+
+\subsection{B 级：OpenDSS 50 组完整网络交叉验证}
+
+\srcpath{short\_circuit\_validation\_matrix} 生成 50 个参数化完整网络，注册 CTest
+\srcpath{short\_circuit\_cross\_engine\_matrix} 用 OpenDSS faultstudy 独立重建线路、变压器、
+零序与 GFM/GFL 等值。固定门为 $I_k''\le10^{-6}$ 相对误差、$i_p\le2\%$ 相对误差；本轮
+$I_k''$ 最大误差 $1.805581638\times10^{-7}$，$i_p$ 最大误差
+$1.485279759\times10^{-7}$，均通过。
+
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{3.3cm}L{5.2cm}L{5.7cm}@{}}
+\toprule
+维度 & 参数序列 & $I_k''$ 或贡献结果 (kA)\\
+\midrule
+\endfirsthead
+\toprule
+维度 & 参数序列 & $I_k''$ 或贡献结果 (kA)\\
+\midrule
+\endhead
+电源强度 & strong / medium / weak & 28.8046 / 19.2131 / 11.5443\\
+线路阻抗 & short / nominal / long & 26.2313 / 15.9834 / 8.41230\\
+10-bus 馈线距离 & near / mid / far & 36.4772 / 26.7826 / 18.4267\\
+变压器 $v_k$ & 4 / 6 / 10 / 16\% & 20.6210 / 18.0446 / 14.4338 / 11.1029\\
+SLG 零序倍数 & 0.5 / 1 / 2 / 3 & 19.1801 / 15.9834 / 11.9876 / 9.59006\\
+GFL 限流 & 1.05 / 1.20 / 1.50 pu & 换流器贡献 0.6062 / 0.6928 / 0.8660\\
+GFM 额定容量 & 10 / 25 / 50 MVA & 换流器贡献 1.9202 / 4.8006 / 9.6012\\
+GFM 电抗 & 0.10 / 0.20 / 0.30 pu & 换流器贡献 7.1811 / 3.6039 / 2.4043\\
+混合 GFM+GFL & 同一故障点 & 总 $I_k''=21.4733$；换流器贡献 5.4934\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+50/50 组总量误差均低于 $10^{-6}$；最坏 $I_k''$ 为混合 GFM+GFL，最坏 $i_p$ 为
+\texttt{transformer\_vk\_16}。
+OpenDSS 比较的是同一完整正/零序网络与故障量，不含 IEC 方法 C（外部峰值由其 Thevenin
+$R/X$ 的方法 A 公式独立计算）。
+
+\subsection{B 级：OpenDSS IEEE 13/34/123 外部 Thevenin 故障核}
+
+注册 CTest \srcpath{short\_circuit\_ieee\_feeder\_thevenin} 由 DSS C-API 读取 IEEE feeder
+每个三相母线的 $Z_1/Z_0$，再把外部 Thevenin 输入 HySim 故障核，对三相、单相接地、两相与
+两相接地四类电流及序/相量做比较。结果为 111 个母线、444 个故障、2220 个数值量，最大相对误差
+$8.558706274\times10^{-16}$；分馈线为 IEEE13 11/44、IEEE34 29/116、IEEE123 71/284
+（母线/故障）。这验证\textbf{外部 Thevenin 故障核}，不验证 HySim 与 OpenDSS 的完整不平衡
+相域网络装配一致性，两种证据不得合并表述。
+
+\subsection{B 级：GridLAB-D 5.3.0 平衡分流探针}
+
+注册矩阵自动发现兄弟仓库
+\srcpath{/Users/tianyangzhao/Codes/gridlab-d/cmake-build/bin/gridlabd}，本轮实际版本为
+GridLAB-D 5.3.0-20236。GridLAB-D 没有与 OpenDSS FaultStudy/Zsc 等价的公共短路接口，故对
+可表达的平衡三相网络接入显式 100~$\Omega$ 三相分流，执行稳态 NR，再由线性戴维南关系反推
+金属性三相 RMS 电流。35/35 个数值案例均完成，平均相对误差
+$6.309885695\times10^{-9}$，最大相对误差 $2.329225394\times10^{-8}$，最坏例为
+\texttt{gfm\_x\_30}。
+
+其余 9 个 GFL 限流单元和 6 个不平衡故障单元超出 GridLAB-D 该稳态接口的表达能力，矩阵逐项记录
+\fld{unsupported\_gfl\_current\_limit}/\fld{unsupported\_fault\_type}，并由同一矩阵的 OpenDSS
+FaultStudy/显式电流源结果覆盖，绝不外推 GridLAB-D 数值。注册 CTest 使用
+\texttt{--require-gridlabd --min-gridlabd-cases 35}，并固定最大误差门 $10^{-6}$；找不到引擎、
+有效案例不足或误差越门均直接失败，不再存在能力缺失静默通过。
+
+\subsection{复现环境与测试计数}
+
+本轮以 \srcpath{macos-release} 重新构建并执行核心与外部验证目标：
+\begin{itemize}
+  \item \srcpath{test\_short\_circuit\_crossval}：39 cases / 626 assertions；
+  \item \srcpath{test\_dc\_short\_circuit}：16 cases / 60 assertions；
+  \item \srcpath{test\_short\_circuit\_iec60909\_4}：2 cases / 231 assertions；
+  \item \srcpath{test\_io\_json[short\_circuit]}：3 cases / 48 assertions；
+  \item 交叉引擎注册 CTest：50 组 OpenDSS 完整网络与其中 35 组 GridLAB-D 平衡探针均通过；
+  \item IEEE feeder 注册 CTest：444 个故障、2220 个数值量均通过。
+\end{itemize}
+三个直接短路 Catch2 目标合计 57 cases / 917 assertions。生产 HTTP 全链路
+\srcpath{gui\_api\_e2e} 为 77/77 checks，覆盖 requested/effective $c$、数值质量、authored
+支路身份与负故障阻抗 HTTP 400 拒绝。
+
+\srcpath{dc\_short\_circuit\_benchmark} 在 1000 bus、64 faults 下测得批量中位数
+1.02900 ms、重复单点中位数 16.5459 ms，倍率 0.0621906，低于预先冻结的 0.10 门槛；
+两路径最大故障电流差为 0 pu。计时只用于本机算法回归，不外推为跨平台性能承诺。
+主仓库提交为
+\texttt{7970d9b21c76\allowbreak 5b06d21f72f0\allowbreak b0e93a56564c\allowbreak f85e}；兄弟仓库
+MIPSolvers 实际 HEAD 为
+\texttt{7721936245d5\allowbreak 756193381b41\allowbreak 5457e6cf2214\allowbreak 341e}，仓库 pin 为
+\texttt{3bf1e66749e3\allowbreak b3e0bbd57696\allowbreak a7d4f43ecf09\allowbreak 218c}。因此这些是当前脏工作树和非 pin 依赖上的
+聚焦 Release 证据，不声明全量 CTest、sanitizer 或 pinned-dependency 复现。
+
+\subsection{分层验收门槛}
+
+\begin{itemize}
+  \item IEC §6.2：每个标准量相对误差 $<0.5\%$，不得只检查总电流；
+  \item 综合 13 母线：$I_k''\le0.5\%$、$i_p\le2\%$；不接地分量物理零值绝对门
+        $10^{-6}$ kA，pandapower 正则化伪电流单列；
+  \item OpenDSS 完整网络：$I_k''\le10^{-6}$、$i_p\le2\%$ 相对误差；
+  \item GridLAB-D 平衡探针：必须至少 35 个数值案例，$I_k''$ 最大相对误差 $\le10^{-6}$；
+  \item IEEE feeder 外部 Thevenin 核：全部 2220 个量最大相对误差 $\le10^{-12}$；
+  \item 解析例：AC 复阻抗绝对误差 $<0.01$ pu，DC 标量绝对误差 $<10^{-9}$ pu；
+  \item API 一致性：单点与全母线概览的 $Z_{th}$、$I_f$ 在 $10^{-12}$ 内一致；
+  \item 投影：非连续 ID 原样返回，理想合并组的母线指标差 $<10^{-12}$；
+  \item 性能：1000 母线/64 故障的批量/重复单点时间比 $\le0.10$，且电流差为零。
+\end{itemize}

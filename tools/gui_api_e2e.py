@@ -77,6 +77,14 @@ class Client:
         st, _, raw = self._req(path, data=body, ctype="application/json")
         return st, json.loads(raw)
 
+    def post_json_error(self, path: str, payload: dict | None = None):
+        body = json.dumps(payload or {}).encode()
+        try:
+            self._req(path, data=body, ctype="application/json")
+        except urllib.error.HTTPError as error:
+            return error.code, json.loads(error.read())
+        raise AssertionError(f"expected HTTP error from {path}")
+
     def post_bytes(self, path: str, payload: bytes):
         return self._req(path, data=payload, ctype="application/octet-stream")
 
@@ -1430,6 +1438,40 @@ def main() -> int:
                                  {"options": {"fault_type": "3ph", "c_factor": 1.1}})
             chk.check(st == 200 and len(sc.get("bus_results", [])) >= 1,
                       f"sc -> {len(sc.get('bus_results', []))} bus results")
+
+            st, detailed_sc = c.post_json(
+                "/api/session/sc_detailed",
+                {"fault_bus_ids": [2], "options": {
+                    "fault_type": "ThreePhase", "calc_type": "Max",
+                    "c_factor": 0.0, "compute_branch_flows": True,
+                }},
+            )
+            detailed_rows = detailed_sc.get("results", [])
+            first_sc = detailed_rows[0] if detailed_rows else {}
+            branches = first_sc.get("branch_results", [])
+            fault_rows = first_sc.get("bus_results", [])
+            fault_row = fault_rows[0] if fault_rows else {}
+            chk.check(
+                st == 200
+                and detailed_sc.get("batch_status") == "complete"
+                and first_sc.get("effective_c_factor", 0.0) > 0.0
+                and first_sc.get("numerical_quality", {}).get("all_finite") is True
+                and "thermal_m" in fault_row
+                and "thermal_n" in fault_row
+                and len(branches) >= 1
+                and all("component_kind" in row and "component_index" in row
+                        for row in branches),
+                "sc_detailed returns effective options, Annex A factors, quality, and authored branch rows",
+            )
+            invalid_status, invalid_sc = c.post_json_error(
+                "/api/session/sc_detailed",
+                {"fault_bus_ids": [2], "options": {"fault_impedance_pu": -0.1}},
+            )
+            chk.check(
+                invalid_status == 400 and "non-negative" in invalid_sc.get("error", ""),
+                "sc_detailed rejects a negative fault impedance at the HTTP boundary "
+                f"(status={invalid_status}, error={invalid_sc.get('error', '')!r})",
+            )
 
         maybe_run_opendss_ieee13_smoke(c, chk)
 
