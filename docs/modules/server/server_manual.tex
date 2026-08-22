@@ -78,5 +78,7 @@ stale=(r_{current}\text{存在})\land(r_{current}\ne r_j).
 \section{适用范围与局限}
 本手册不描述 GUI 单会话路由，不承诺分布式持久化、跨进程作业恢复或身份认证。当前缓存仅属进程内会话；
 进程重启后的状态不在模型内。后续改进应由 OpenAPI/schema 测试自动生成字段矩阵，并对状态转换做属性测试。
+\input{chapters/theory_server_consistency}
+\input{chapters/numerical_cross_validation}
 \input{../../_manual_common/industrial_evaluation}
 \end{document}

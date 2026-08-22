@@ -1,0 +1,20 @@
+% numerical_cross_validation.tex -- server 契约证据
+\section{HTTP 契约数值回归与未覆盖边界}\label{sec:server-numerical}
+
+本轮 Release 直接运行 \srcpath{test_edition_profile}，通过 3 cases/33 assertions，覆盖完整
+版 profile、保留/禁用/未分类路由、市场/谐波/高级 I/O 特性分类和分析计划顺序。
+该目标验证 edition profile 的纯函数契约，不等价于 RuntimeApiV1 生产 HTTP E2E。
+
+\begin{center}\small
+\begin{tabular}{@{}L{6.5cm}L{5.0cm}@{}}
+\toprule 场景 & 预期结果\\\midrule
+完整版 `/api/cases` & Retained\\
+未知 `/api/cases_extra` & Unclassified\\
+试用版时序路由 & Disabled，feature=time\_series\\
+缺少分析指标 & 抛出 invalid\_argument\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+RuntimeApiV1 的 304/428/412、并发写冲突、作业取消和拓扑分页仍需由
+\srcpath{runtime_api_v1_e2e} 或专门状态机测试量化；没有执行的生产 E2E 不在本章宣称通过。

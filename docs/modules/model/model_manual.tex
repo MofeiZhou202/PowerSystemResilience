@@ -1,120 +1,40 @@
 % !TEX program = xelatex
 \documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
 \usepackage{../../_manual_common/hysim_manual}
-\title{\textbf{HySim-XJTU-HRPES}\\[0.4em]{\Large model 模块实现契约手册}\\
-{\large 数据语义、单位换算、有效容量与参数选择}}
-\author{西安交通大学 HRPES 团队}
+
+\title{\textbf{交直流混合高弹性能源电力系统仿真平台}\\[0.5em]
+       {\Large 工程模型与规范投影技术专著}\\[0.3em]
+       {\large 组件语义、身份空间、单位参数、等值变换与结果归因}}
+\author{HySim-XJTU-HRPES（西安交通大学 HRPES 团队）}
 \date{\today}
+
 \begin{document}
 \maketitle
 \begin{abstract}
-本文档对应 \srcpath{src/model/} 与 \srcpath{include/hacdcpf/model/}，只记录代码实际执行的
-数据规则和代数变换，不把元件容器描述扩展成潮流、优化或动态方程。规范投影实现虽然位于
-\srcpath{src/model/}，其公共接口属于 \srcpath{include/hacdcpf/projection/}；因此仍归本模块说明，
-但必须保留 rich、canonical 和结果恢复三类索引空间的区别。
+本文档覆盖 \srcpath{include/hacdcpf/model/}、位于 \srcpath{src/model/} 的模型实现以及
+公共投影头 \srcpath{include/hacdcpf/projection/}。它把 \texttt{HybridPowerSystem} 视为工程语义真源，
+系统说明 AC、DC、换流器、三相、聚合体、动态档案和遥测容器，给出有效功率/容量、控制角色、
+单位换算、标准参数库、rich 到 canonical 的等值链及结果恢复契约。
+
+本模块不求解潮流、优化或动态状态。组件存在于 POD 容器并不表示每个下游工作流都以相同保真度消费；
+所有能力判断应联合 \texttt{component\_runtime\_semantics()}、投影证书、归因恢复等级和具体求解结果。
+稳定组件 \fld{index}、vector position 与 graph node/edge index 是三类不同空间；AC/DC 同整数母线号
+只有在 domain-qualified 映射中才无歧义。
 \end{abstract}
+
 \tableofcontents
 \newpage
 
-\section{模块定位、输入与输出}
-输入是 \texttt{HybridPowerSystem} 及其 AC、DC、换流器和扩展组件容器；输出包括规范化系统、映射、
-单位换算量、有效功率/容量和参数解析结果。本模块不求解电气状态。稳定对外 ID 是组件
-\fld{index}；vector position 与 graph index 不是可交换的 ID。
-
-\section{源码入口与数据结构}
-\begin{longtable}{p{4.0cm}p{4.2cm}p{6.0cm}}
-\toprule
-源码 & 符号 & 实现职责\\\midrule
-\srcpath{hybrid\_power\_system.hpp} & \texttt{HybridPowerSystem} & rich 工程语义容器\\
-\srcpath{effective\_capacity.hpp} & \texttt{effective\_*} & 在役、缩放、可控性和容量回退\\
-\srcpath{gfm\_norton\_contract.hpp} & \texttt{resolve\_gfm\_norton\_parameters} & GFM 参数优先级\\
-\srcpath{unit\_conversion.cpp} & 单位换算函数 & 标幺、物理量和角度换算\\
-\srcpath{project\_to\_canonical.hpp} & 投影与映射 & rich 到 canonical 及结果归因\\
-\srcpath{model\_semantics.cpp} & 语义目录 & 组件在各工作流中的保真级别声明\\
-\bottomrule
-\end{longtable}
-
-\section{与代码逐式一致的代数规则}
-\subsection{缩放清洗和有效功率}
-\srcpath{include/hacdcpf/model/effective\_capacity.hpp:sanitize\_scaling} 的
-\srcpath{sanitize\_scaling} 逐字等价于
-\begin{equation}
-s_{eff}=\begin{cases}s,&\operatorname{isfinite}(s)\land s>0,\\0,&\text{其他情况。}\end{cases}
-\end{equation}
-AC/DC 负荷和静态发电的返回值分别来自同文件 :effective\_load\_p\_mw、:effective\_p\_mw（StaticGenerator）、:effective\_p\_mw（StaticGeneratorDC）：
-\begin{align}
-P_{load}^{eff}&=\begin{cases}P_{load}s_{eff},&\fld{in\_service}=true,\\0,&\text{否则，}\end{cases}\\
-P_{sg}^{eff}&=\begin{cases}P_{sg}s_{eff},&\fld{in\_service}=true,\\0,&\text{否则，}\end{cases}\\
-P_{dcsg}^{eff}&=\begin{cases}P_{set}s_{eff},&\fld{in\_service}=true,\\0,&\text{否则。}\end{cases}
-\end{align}
-这里不对 $P$ 本身取绝对值或截断；该符号行为与 helper 返回语句一致。
-
-\subsection{有效容量回退}
-静态 AC 发电的实现分支位于
-\srcpath{include/hacdcpf/model/effective\_capacity.hpp:effective\_capacity\_mw}：
-\begin{equation}
-C_{sg}^{eff}=\begin{cases}
-0,&\neg in\_service\lor s_{eff}=0,\\
-\max(0,P s_{eff}),&\neg controllable,\\
-\max(0,P^{cap}s_{eff}),&controllable,
-\end{cases}
-\end{equation}
-其中 $P^{cap}=P_{max}$（若 $P_{max}>0$），否则用 $P_{rated}$（若 $P_{rated}>0$），再否则用 $P$。
-DC 静态发电同式，但最后一级只在 $P_{max}$ 与 $P_{set}$ 间选择（:effective\_capacity\_mw）。
-同步发电机容量（:effective\_capacity\_mw）为
-\begin{equation}
-C_g=\begin{cases}0,&\neg in\_service,\\P_{max},&P_{max}>0,\\\max(0,P_g),&\text{否则，}\end{cases}
-\end{equation}
-储能容量（:effective\_capacity\_mw）为
-\begin{equation}
-C_s=\begin{cases}0,&\neg in\_service,\\P_{max},&P_{max}>0,\\\max(0,P_{rated}),&\text{否则。}\end{cases}
-\end{equation}
-
-\subsection{GFM Norton 参数选择}
-\srcpath{resolve\_gfm\_norton\_parameters}
-（\srcpath{include/hacdcpf/model/gfm\_norton\_contract.hpp:resolve\_gfm\_norton\_parameters}）的选择规则为
-\begin{align}
-E&=\begin{cases}E_{gfm},&E_{gfm}>0,\\V_{ac,set},&\text{否则，}\end{cases}\\
-\theta&=\frac{\pi}{180}\begin{cases}
-\theta_{gfm},&E_{gfm}>0\lor\theta_{gfm}\ne0,\\
-\theta_{ac,set},&\text{否则，}
-\end{cases}\\
-R_v&=\begin{cases}R_{gfm},&R_{gfm}\ne0,\\R_{conv},&\text{否则，}\end{cases}&
-X_v&=\begin{cases}X_{gfm},&X_{gfm}\ne0,\\X_{sc},&\text{否则。}\end{cases}
-\end{align}
-函数随后返回 $\underline E=E e^{j\theta}$ 与 $Z_v=R_v+jX_v$。零值在这里具有“使用回退字段”的精确
-语义，不能改写成非负约束或默认物理参数。
-
-\section{规范投影与映射不变量}
-投影可形式化为代码映射
-\begin{equation}
-(S_c,M)=\Pi(S_r),\qquad
-M=(M_{bus}^{ac},M_{bus}^{dc},M_{branch},M_{component}).
-\end{equation}
-该式只表示函数输入输出，不声称所有组件均为无损等价。允许结果恢复的最小不变量是：
-\begin{align}
-M_{bus}^{ac}&:\text{canonical AC position}\to\text{原始 AC 稳定 ID},\\
-M_{bus}^{dc}&:\text{canonical DC position}\to\text{原始 DC 稳定 ID},\\
-M_{branch}&:\text{canonical branch}\to\texttt{BranchRef}.
-\end{align}
-AC 与 DC 可拥有相同整数 ID，因此映射键必须包含 domain。聚合、零阻抗合并或三绕组展开时不保证
-组件数量守恒；结果只能经对应映射恢复，不能按 vector position 回填。
-
-\section{边界条件、复杂度与异常处理}
-容器扫描和 helper 为 $O(n)$ 或单元素 $O(1)$；投影成本至少与组件数线性，并受图合并与映射构建影响。
-非有限/负缩放被精确清零；缺失 GFM 专用字段按上述零值规则回退；无效电气引用不由本模块 helper 自动
-修复，应交给 \texttt{validation}。投影生成的近似组件必须通过映射或限制字段保留来源，不能宣称 rich
-模型全部精确覆盖。
-
-\section{接口、测试与工业评价}
-上游是 I/O 和人工建模；下游包括 validation、graph、PF、OPF、动态、可靠性和市场。测试应覆盖：
-非有限缩放、零缩放、可控/不可控容量分支、GFM 每个零值回退分支、AC/DC 同号 bus ID、投影往返、
-零阻抗合并和结果归因。评价指标为映射完备率、往返字段保真率、未知组件拒绝率、单位一致性和跨模块
-有效容量一致性。
-
-\section{适用范围、局限与改进方向}
-本模块提供语义和转换，不提供物理可解性保证。历史
-\srcpath{component\_models\_math\_audit.tex} 是问题审计，不是当前行为规范。后续改进应把每一类 rich
-组件的 projection fidelity 与结果恢复证书变成机器可读表，并由测试自动检查。
+\input{chapters/overview_identity_contract}
+\input{chapters/theory_engineering_projection}
+\input{chapters/theory_identity_units}
+\input{chapters/theory_quotient_recovery}
+\input{chapters/component_catalog}
+\input{chapters/effective_control_semantics}
+\input{chapters/units_parameters_contract}
+\input{chapters/canonical_projection_attribution}
+\input{chapters/numerical_cross_validation}
+\input{chapters/verification_audit}
 \input{../../_manual_common/industrial_evaluation}
+
 \end{document}

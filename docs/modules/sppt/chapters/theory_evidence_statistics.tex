@@ -1,0 +1,138 @@
+% theory_evidence_statistics.tex -- SPPT 证据独立性与统计准入理论
+% 本文件遵循 docs/modules/THEORY_WRITING_GUIDE.md。
+\section{证据独立性、检出统计与反证准入理论}
+
+\begin{theorynote}
+本章把“关系成立”“数值自洽”“独立方程通过”和“故障可检出”分成不同命题，给出误差传播、
+Wilson 区间与消融因果解释。SPPT 属专著级模块，因此关键结论给出证明；实现未覆盖处明确标记。
+\end{theorynote}
+
+\subsection{证据图而非单一布尔值}
+
+设主张 $H$ 为“投影在观察量 $y$ 上语义保持”。内部 commuting test 的观察为
+\begin{equation}
+ r_{comm}=d\bigl(A_C(Px),\,P_y(A_Rx)\bigr),
+ \label{eq:sppt-commuting-evidence}
+\end{equation}
+独立作者方程残差为
+\begin{equation}
+ r_{ind}=\|F_{authored}(x,\hat y)\|_\infty.
+ \label{eq:sppt-independent-evidence}
+\end{equation}
+二者检验不同失败模式：前者比较两条流水线，后者不调用生产投影/装配/残差评估器而从 authored primitives
+重建方程。证书状态至少应是三元组
+$(\text{supported},\text{observed},\text{passed})$；unsupported 不是零残差。
+
+\begin{theorem}[共同错误的不可辨识性]
+若两条 commuting 路径共享同一错误变换 $B$，且 $BA_R=A_CB$ 在被测输入上成立，则
+$r_{comm}=0$ 不能区分正确投影 $P$ 与错误投影 $B$。
+\end{theorem}
+\begin{proof}
+把式~\eqref{eq:sppt-commuting-evidence} 中两条路径均替换为 $B$，由交换关系有
+$A_C(Bx)=B(A_Rx)$，故距离为零。观察对 $P$ 与 $B$ 相同，无法辨识。
+\end{proof}
+
+因此 MR 是必要的结构证据，但不能单独承担物理 oracle。独立方程仍共享 POD 字段和符号约定，也不是绝对
+独立；证据强度取决于共享代码/数据的最小割。
+
+\subsection{误差分解与阈值}
+
+设理论交换误差为零，观察误差可分解为
+\begin{equation}
+ r_{obs}\le L_A\epsilon_P+L_P\epsilon_A+\epsilon_{solve}+\epsilon_{eval},
+ \label{eq:sppt-error-budget}
+\end{equation}
+其中 $L_A,L_P$ 是局部 Lipschitz 常数，$\epsilon_P$ 为近似投影误差，$\epsilon_A$ 为分析离散/迭代误差。
+精确理想收缩可取 $\epsilon_P=0$；阈值收缩必须保留该项。统一阈值 $\tau$ 只有在所有量已归一化到可比尺度
+时才有意义。
+
+\begin{proposition}[残差小不推出前向误差小]
+对线性化方程 $J\Delta x=-F$，有
+$\|\Delta x\|\le\|J^{-1}\|\|F\|$。当 $J$ 近奇异时，小残差仍可能对应大状态误差。
+\end{proposition}
+因此参考缺失、病态零阻抗和 DAE 代数子雅可比需要结构/条件性守卫，不能只靠 residual gate。
+
+\subsection{故障活动的估计量}
+
+对固定故障类与检测器，令 $X_i\in\{0,1\}$ 表示第 $i$ 个合格注入是否被检出，经验检出率
+\begin{equation}
+ \hat p=\frac1n\sum_{i=1}^nX_i.
+\end{equation}
+在独立同分布 Bernoulli 假设下，Wilson $1-\alpha$ 区间为
+\begin{equation}
+ \frac{\hat p+z^2/(2n)\ \pm\ z
+ \sqrt{\hat p(1-\hat p)/n+z^2/(4n^2)}}{1+z^2/n}.
+ \label{eq:sppt-wilson}
+\end{equation}
+
+\begin{proposition}[全检出不等于 $p=1$]
+当 $n$ 次全部检出时，Wilson 95\% 下界仍小于 1；$n=35$ 时约为 0.9011。
+\end{proposition}
+\begin{proof}
+在式~\eqref{eq:sppt-wilson} 代入 $\hat p=1,z=1.96,n=35$，下界为
+$1/(1+z^2/n)\approx0.9011<1$。
+\end{proof}
+
+同一基础系统的多次扰动通常相关；跨 feeder 的 35 样本也不是对所有电网的随机抽样。因此 Wilson 区间只描述
+已声明采样机制下的二项近似，不是总体覆盖保证。
+
+\subsection{阴性对照与假阳性}
+
+valid control 应不被拒绝。若 $FP$ 为阴性对照中的误拒数、$TN$ 为正确接受数，则特异度为
+$TN/(TN+FP)$。只报告故障检出率会鼓励“全部拒绝”的无用守卫；完整准入至少同时报告阳性故障检出与
+阴性对照误拒。
+
+对 plausible load/setpoint error，静态 validation 与结构 MR 可能合法地不检出，因为修改仍在模型域内。
+这不是必然漏检缺陷，而是说明其需要量测、状态估计或外部先验 oracle。
+
+\subsection{消融的因果解释边界}
+
+消融比较完整机制 $M$ 与移除部件 $M\setminus c$。若其他输入、随机种子和路径不变，差值
+\begin{equation}
+ \Delta_c=Q(M)-Q(M\setminus c)
+\end{equation}
+是该实验范围内的机制贡献证据。但当前 provenance 消融使用结构计数，role 消融修改参考源，merge 消融
+用 $10^{-6}+j10^{-6}$ pu 替代闭合设备；三者的 $Q$ 不同，不能横向比较成统一效果大小。
+
+\begin{gapnote}
+当前活动没有分层 bootstrap、跨种子稳定性、故障注入失败率建模或多重比较修正。规模工具在固定种子
+20260822 下 repetitions=10/20 会因未捕获 \texttt{std::invalid\_argument} 终止；因此本手册只把
+repetitions=5 的 315 样本作为探索性证据，不声称统计活动已闭环。
+\end{gapnote}
+
+\subsection{反证优先的准入逻辑}
+
+设证据集合为 $E_s$（结构）、$E_n$（数值）、$E_i$（独立）、$E_u$（不确定性）和 $E_a$（权限）。
+高等级准入应为
+\begin{equation}
+ \mathcal A=E_s\land E_n\land E_i\land E_u\land E_a,
+ \label{eq:sppt-joint-admission}
+\end{equation}
+其中“不支持”在必需证据上取 false。若目标只需低等级契约，可显式定义较弱谓词，但必须改名并声明范围，
+不能让缺失证据通过 vacuous truth 自动升级。
+
+\subsection{与实现的对应}
+
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{7.1cm}L{8.1cm}@{}}
+\toprule 理论条目 & 实现状态\\\midrule
+\endfirsthead\toprule 理论条目 & 实现状态\\\midrule\endhead
+MR commuting residual & \implfull{src/sppt/metamorphic.cpp:mr3\_semantic\_preservation\_pf}\\
+独立 authored AC/DC/VSC/DCDC 残差 & \implfull{src/sppt/independent\_residual.cpp:certify\_independent\_hybrid\_residual}\\
+supported/observed/passed 状态 & \implpart{各证据结构分别表达；无统一证据图类型}\\
+Wilson 95\% 区间 & \implfull{src/sppt/fault\_campaign.cpp:wilson\_interval}\\
+阴性 valid control 与多检测器汇总 & \implfull{src/sppt/fault\_campaign.cpp:run\_fault\_campaign}\\
+跨种子/分层 bootstrap 与多重比较 & \implnone\\
+联合准入式~\eqref{eq:sppt-joint-admission} & \implpart{guard/agent/admission 分散实现；证书 all\_pass 较弱}\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{参考文献}
+{\renewcommand{\section}[2]{}%
+\begin{thebibliography}{9}\small
+\bibitem{sppt:wilson1927b} E.~B. Wilson, Probable inference, the law of succession, and statistical inference,
+\emph{Journal of the American Statistical Association}, vol.~22, no.~158, pp.~209--212, 1927.
+\bibitem{sppt:metamorphic2016} T.~Y. Chen et al., Metamorphic testing: a review of challenges and opportunities,
+\emph{ACM Computing Surveys}, vol.~51, no.~1, 2018.
+\end{thebibliography}}

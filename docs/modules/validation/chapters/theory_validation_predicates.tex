@@ -1,0 +1,37 @@
+% theory_validation_predicates.tex -- 静态校验理论层
+\section{静态模型校验的谓词、层级与可靠性边界}\label{sec:validation-theory}
+
+\begin{theorynote}
+本章把静态校验器视为从系统到诊断集合的纯函数。它验证结构、引用、边界和参考节点资格，
+不证明 PF/OPF 收敛，也不替输入执行修复。
+\end{theorynote}
+
+\subsection{诊断集合与有效性}
+令 $Q$ 为问题集合，严重度为 Info、Warning、Error，则
+\begin{equation}
+valid(Q)\iff\nexists q\in Q:\ severity(q)=Error.
+\end{equation}
+四级校验是同一基础问题集合的过滤/提升：Basic 保留 Error，Electrical 额外保留
+ACSystem/DCSystem 相关诊断，SolverReady 保持自然严重度，Strict 将 Warning 提升为 Error。
+
+\subsection{结构谓词}
+代表性约束包括
+\begin{align}
+lo&\le hi, & x&\ge0, & 0<\eta&\le1,\\
+V_{min}&>0, & V_{max}&>V_{min}, & b_{from}&\ne b_{to}.
+\end{align}
+AC/DC 母线 ID 在各自域内唯一；同号 AC/DC ID 不构成重复。支路端点必须存在于同域集合。
+
+\subsection{与实现的对应}
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{7.0cm}L{8.2cm}@{}}
+\toprule 谓词/层级 & 实现状态\\\midrule
+\endfirsthead\toprule 谓词/层级 & 实现状态\\\midrule\endhead
+基础字段与引用检查 & \implfull{src/validation/validate_system.cpp:validate}\\
+参考节点资格 & \implfull{src/validation/validate_system.cpp:validate_reference_bus_eligibility}\\
+四级过滤/Warning 提升 & \implfull{src/validation/validate_system.cpp:validate}\\
+非有限值的统一拒绝 & \implpart{部分比较依赖 C++ NaN 语义，未由每个 helper 统一捕获}\\
+PF/OPF 收敛证明 & \implnone\\
+\bottomrule
+\end{longtable}
+\end{center}

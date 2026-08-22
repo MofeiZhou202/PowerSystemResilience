@@ -1,0 +1,35 @@
+% numerical_cross_validation.tex -- 市场数值证据
+\section{数值结果、恒等式校核与验证边界}\label{sec:market-numerical}
+
+本节记录当前 macOS Release 二进制的实际结果。执行目标为
+\srcpath{build/macos-release/tests/test_market_simulation}，本轮通过 22 cases、845 assertions。
+这是市场模块内部回归证据，不是独立商业市场软件 oracle。
+
+\subsection{24 时段日前链路}
+固定算例完成 24 个 SCUC 时段、24 个定价时段和 24 个 AC 认证时段，结果状态为
+\texttt{converged}，\fld{num\_pricing\_converged}=24，\fld{num\_ac\_secure}=24。
+算例含 3 台在役机组、9 条 AC 支路；估计 SCUC 变量数 2088、二元变量 72、SCED 变量数
+1872，LODF 稠密存储估计 2456 bytes。某一代表时段的备用需求为 11.34 MW，备用出力和
+需求差小于 $10^{-7}$ MW，负荷切除为 0 MW，所有 AC LMP 有限。
+
+\begin{center}\small
+\begin{tabular}{@{}L{6.0cm}rr@{}}
+\toprule 指标 & 实测 & 门槛\\\midrule
+定价收敛时段数 & 24/24 & 全部\\
+AC 安全认证时段数 & 24/24 & 全部\\
+最大备用平衡误差 & $<10^{-7}$ MW & $10^{-7}$ MW\\
+负荷切除 & 0 MW & $<10^{-6}$ MW\\
+SCUC warm start/结构提示/分支优先级 & true/true/true & 必须存在\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{交叉校核层级}
+测试同时检查向量长度、备用平衡、LMP 有限性、结算记录和性能剖面；这些是源码结果
+与契约的同实现一致性校核。当前没有独立 LP/MILP 重建、MATPOWER 市场 oracle 或跨引擎
+LMP 比较，因此不能把 24/24 写成市场经济最优性证明。
+
+\subsection{失败与准入}
+SCUC 达到相对 gap 但未证明最优时，结果必须保留 \fld{scuc\_optimality\_proven=false}；
+AC 认证失败不改变商业出清，只把 \texttt{SecurityResult} 标为失败；未支持资产通过
+\fld{unsupported\_assets} 显式退回。任何报告若省略这三个字段，均不满足本手册准入。

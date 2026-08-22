@@ -1,0 +1,86 @@
+\section{输入数据与选项完整契约}
+
+\subsection{时域与 profile 广播}
+
+\fld{num\_steps} 必须为正，\fld{step\_duration\_hr} 必须有限且大于零。
+每个 profile 只接受长度 0、1 或 $n$：空向量用字段专用默认值填充，单值广播到全时域，
+长度 $n$ 原样保留，其他长度抛 \texttt{std::invalid\_argument}。实现锚点为
+\srcpath{src/integrated\_energy/integrated\_energy\_optimizer.cpp:profile\_or\_default}。
+
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{4.3cm}L{2.0cm}L{2.0cm}L{6.3cm}@{}}
+\toprule
+字段族 & 单位 & 空 profile 回退 & 语义\\\midrule
+\endfirsthead
+\toprule 字段族 & 单位 & 空 profile 回退 & 语义\\\midrule\endhead
+四类 \fld{*\_load\_mw} & MW & 0 & 电、热、氢、燃料终端需求\\
+\fld{transport\_demand\_km} & km/步 & 0 & 总出行服务；关闭交通时求解内覆盖为 0\\
+\fld{solar/wind\_available\_mw} & MW & 0 & 可用出力，不由 rated 字段自动生成\\
+\fld{grid\_buy\_price} & 价格/MWh & 80 & 购电成本\\
+\fld{grid\_sell\_price} & 价格/MWh & 35 & 售电收益系数\\
+\fld{grid\_carbon\_tco2\_mwh} & tCO$_2$/MWh & 0.55 & 外购电平均排放因子\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{容量、库存与效率}
+
+一般容量、功率上限、成本、碳系数和里程强度经 \srcpath{positive\_or\_zero} 处理：
+仅有限且大于零的值保留，其余为零。五类库存均有容量、下限、初态、充电上限和放电上限；
+初态随后受变量边界检查。周/季氢层与两级双向转移仅在
+\fld{enable\_hydrogen\_storage\_layers}=true 时可用。
+
+以下被动效率必须有限且在 $(0,1]$：电解、P2F、燃料电池、CHP 三效率、共同充放效率、
+五个保持率和四个层间转移效率。\fld{cop\_heatpump} 非正或非有限时回填 3.2；
+\fld{eta\_wasteheat} 与 \fld{eta\_carbon\_to\_fuel} 当前不经过效率校验，按原值进入约束，
+这是必须由调用者额外审计的边界。
+
+\subsection{交通与碳字段}
+
+\fld{ev\_ratio}/\fld{hv\_ratio}/\fld{icv\_ratio} 先清洗为非负值；和大于 $10^{-8}$ 时除以总和，
+否则替换为 $(0,0,1)$。因此输出车型里程使用归一化比例，不一定等于原始输入。
+\fld{alpha\_*\_mwh\_per\_km} 是能耗强度。\fld{fuel\_carbon\_tco2\_mwh} 与电网 profile
+共同形成毛排放；\fld{ccus\_capture\_fraction}、\fld{ccus\_max\_tco2\_per\_h} 和
+\fld{ccus\_power\_mwh\_per\_tco2} 分别限制捕集比例、捕集率和辅助用电。
+
+\subsection{求解与建模选项}
+
+\begin{paramtable}
+\fld{solver} & -- & -- & 枚举 & Auto & AML 后端：Auto、HiGHS、SCIP、Gurobi、Native\\
+\fld{objective} & -- & -- & 枚举 & Cost & 成本、碳、最小弃能或加权目标\\
+\fld{enable\_grid\_exchange\_exclusivity} & -- & -- & bool & false & 创建逐时购售电方向二进制变量\\
+\fld{enable\_storage\_exclusivity} & -- & -- & bool & false & 为五类储能分别创建充放方向二进制变量\\
+\fld{enable\_carbon\_budget} & -- & -- & bool & false & 施加全时域残余碳预算\\
+\fld{enforce\_terminal\_storage\_cyclic} & -- & -- & bool & true & 五类末态固定为各自初态\\
+\fld{enable\_transport} & -- & -- & bool & true & 关闭时交通需求按零处理\\
+\fld{enable\_hydrogen\_storage\_layers} & -- & -- & bool & true & 启用周/季库存及层间转移\\
+\fld{verbose} & -- & -- & bool & false & AML verbosity 取 1，否则 0\\
+\fld{time\_limit\_sec} & -- & s & 正数 & 60 & 透传后端；达到时限仍可能有原始解\\
+\fld{mip\_gap\_tol} & $\epsilon_g$ & -- & $\ge0$ & $10^{-4}$ & 后端容差及 \fld{optimal} 二次判定阈值\\
+\fld{weight\_cost} & $w_C$ & -- & 实数 & 1 & Weighted 分支成本权重\\
+\fld{weight\_carbon} & $w_E$ & -- & 实数 & 0 & Weighted 分支碳权重\\
+\fld{weight\_curtailment} & $w_U$ & -- & 实数 & 0 & Weighted 分支弃能权重\\
+\end{paramtable}
+
+\fld{solver} 只选择首选后端；\srcpath{solve\_campus\_ies} 设置
+\fld{allow\_fallback}=true，故实际 \fld{solver\_name} 可能不同于请求。结果审计必须读取实际后端和状态，
+不能用请求枚举推断执行路径。
+
+\subsection{输入拒绝与静默清洗清单}
+
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{5.0cm}L{4.5cm}L{5.5cm}@{}}
+\toprule
+条件 & 行为 & 风险口径\\\midrule
+\endfirsthead
+\toprule 条件 & 行为 & 风险口径\\\midrule\endhead
+$n\le0$ 或 $\Delta t\le0$/非有限 & 抛异常 & 无结果对象\\
+profile 长度不是 0、1、$n$ & 抛异常 & 不截断、不循环填充\\
+\fld{fixed\_power\_factor}$\ne1$ & 抛异常 & 无功模型未实现\\
+被动效率不在 $(0,1]$ & 抛异常 & fail-closed\\
+一般容量/成本非正或非有限 & 清零 & 可能把错误输入静默退化为禁用设备\\
+COP 非正或非有限 & 回填 3.2 & 必须在外部输入审计记录回退\\
+交通比例和近零 & 回填 $(0,0,1)$ & 默认全部视为燃油车\\
+\bottomrule
+\end{longtable}
+\end{center}

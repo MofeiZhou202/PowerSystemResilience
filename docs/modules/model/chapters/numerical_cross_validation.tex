@@ -1,0 +1,76 @@
+\section{规范投影数值实验与独立数学 oracle}
+
+\subsection{复现命令与证据分层}
+
+冻结算例由
+\srcpath{tools/model\_validation/validate\_model\_projection.cpp:main}
+调用生产投影、图构建、恢复和单位转换 API，输出 JSON；
+\srcpath{tools/model\_validation/run\_projection\_oracle.py:main}
+不链接 C++ 库，独立检查集合相等、守恒和解析公式。注册命令为
+\begin{verbatim}
+ctest --test-dir build/macos-release \
+  -R '^model_projection_cross_validation$' --output-on-failure
+\end{verbatim}
+浮点准入阈值为 $10^{-12}$。Model 是语义/变换模块，外部潮流引擎无法验证其 stable-ID 或 provenance；
+因此这里选择独立集合与代数 oracle，而不是把另一个 PF 求解器伪装成身份映射 oracle。
+
+\subsection{零阻抗商类与守恒恢复}
+
+authored AC buses 为 $(101,205,309)$。理想连接合并 $\{101,205\}$，真实线路保留 309，规范母线数从 3
+降为 2。两合并母线负荷为 $(12,8)$ MW、发电为 $(30,10)$ MW。
+
+\begin{center}\small
+\begin{tabular}{@{}lrrr@{}}\toprule
+检查 & 解析期望 & 生产输出 & 绝对误差\\\midrule
+商类成员 & $\{101,205\}$ & $\{101,205\}$ & 0\\
+总负荷前/后 / MW & $20/20$ & $20/20$ & 0\\
+总发电前/后 / MW & $40/40$ & $40/40$ & 0\\
+需求权重 & $(0.6,0.4)$ & $(0.6,0.4)$ & 0\\
+发电权重 & $(0.75,0.25)$ & $(0.75,0.25)$ & 0\\
+电压广播 / pu & $(1.02,1.02)$ & $(1.02,1.02)$ & 0\\
+发电恢复 / MW & $(30,10)$ & $(30,10)$ & 0\\
+负荷恢复 / MW & $(12,8)$ & $(12,8)$ & 0\\\bottomrule
+\end{tabular}
+\end{center}
+再次执行 merge 后母线数不变；这是节点数幂等证据，但不单独证明所有组件属性逐字段幂等。
+
+\subsection{AC/DC 同号身份反例}
+
+AC 与 DC 均使用 bus IDs $(1,2)$。图节点位置分别为 AC $(0,1)$、DC $(2,3)$，总节点数为 4；
+域枚举分别为 AC=0、DC=1。故裸整数 1 不足以寻址，但
+\texttt{ac\_bus\_id\_to\_node\_idx} 与
+\texttt{dc\_bus\_id\_to\_node\_idx} 保持单射。本例是对“同号即同节点”错误实现的直接反例。
+
+\subsection{稀疏 DC dead island：恢复通过、身份失败}
+
+DC buses 为 $(1,2,5)$，其中 1--2 是带 DC\_V 源的活岛，5 是无源孤岛。投影保留两个 bus，位置映射为
+$(0,1,-1)$，电压恢复得到 $(1.0,0.99,0.0)$ pu，误差为 0。
+
+但证书的 \fld{dc\_dead\_bus\_indices} 输出 $(3)$，不是 authored stable ID $(5)$。因此本章把结果拆为：
+\begin{center}\small
+\begin{tabular}{@{}lr@{}}\toprule
+契约 & 判定\\\midrule
+survivor-position round trip & PASS\\
+失电零值恢复 & PASS\\
+稀疏 authored dead-bus ID 保持 & FAIL（已知限制）\\\bottomrule
+\end{tabular}
+\end{center}
+CTest 的 overall PASS 只表示独立 oracle 成功复现当前观察与其声明边界；JSON 另有
+\fld{stable\_dead\_id\_contract=false}，不得删去这一字段后宣称完整通过。
+
+\subsection{欧姆--标幺解析交叉验证}
+
+冻结线路基准 $V_b=12.47$ kV、$S_b=10$ MVA，长度 5 km、并联 2 回，
+$r=0.2\ \Omega/\mathrm{km}$、$x=0.4\ \Omega/\mathrm{km}$。解析得
+\begin{equation}
+ Z_b=15.55009\ \Omega,\quad r_{pu}=0.0321541547348,\quad
+ x_{pu}=0.0643083094696.
+\end{equation}
+生产转换与解析式误差均为 0；第一次调用报告转换 1 条，第二次为 0 且数值不变，验证非破坏幂等契约。
+
+\subsection{独立检查汇总与边界}
+
+除上述稳定 dead-bus ID 契约外，商类、负荷/发电守恒、两类参与因子、强度/广延恢复、同号 AC/DC
+分离、位置恢复、$r/x$ 标幺公式和转换幂等共 15 项误差均为 0。该证据没有覆盖所有组件族的 expansion、
+三绕组 pair mapping、阈值收缩的物理误差或所有 downstream result attribution；这些仍由现有组件数学审计
+提供内部断言，而非本章独立 oracle。

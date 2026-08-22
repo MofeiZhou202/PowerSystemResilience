@@ -1,0 +1,70 @@
+\section{规范投影、证书与结果归因}
+
+\subsection{投影流水线}
+
+\srcpath{project\_to\_canonical\_models} 的职责可分为：
+\begin{enumerate}
+  \item 聚合 charger、投影三相兼容视图并物化 DC storage；
+  \item 把 2W/3W 变压器、开关、断路器和宏设备转为规范支路/设备；
+  \item 展开能量路由器，并记录显式 expansion provenance；
+  \item 按策略收缩理想或阈值小阻抗连接，组合 \texttt{BusMergeMap}；
+  \item 剥离无源死岛、规范化 DC bus index，重写所有域限定引用；
+  \item 建立支路展开、组件映射、投影报告和机器可读证书。
+\end{enumerate}
+具体顺序由 \srcpath{src/model/network\_utils.cpp:project\_to\_canonical\_models} 定义，
+调用者不应自行重排其中步骤。
+
+\subsection{投影策略与证书}
+
+\texttt{ProjectionMode::ExactIdeal} 仅收缩作者阻抗严格为零或有明确 ideal provenance 的设备；
+\texttt{ThresholdApproximate} 还允许收缩小于默认 $10^{-4}$ pu 阈值的非零设备。
+\texttt{ProjectionCertificate} 记录 mode、threshold、每条 \texttt{MergeRecord} 的阻抗与
+\texttt{ExactIdeal/ThresholdApproximate}、诊断、投影前 DC 母线数及死岛 position 映射。
+\fld{exact()} 只表示没有 approximate merge，不代表宏设备投影或下游分析整体无近似。
+
+tap 非 1 或 shift 非零的支路不允许按零阻抗普通连接收缩。\fld{ideal\_connectivity} 是作者意图证明，
+用于区别理想拓扑边和数值很短的真实线路。
+
+\subsection{BusMergeMap}
+
+\texttt{BusMergeMap} 同时保存
+\fld{ext\_to\_int}、\fld{ext\_to\_orig\_pos}、\fld{int\_to\_ext}、groups、dead bus、
+原支路 position 到投影支路 position，以及需求/发电两套参与因子。
+\begin{itemize}
+  \item Intensive：把代表值广播到成员，死岛返回零；
+  \item ExtensiveDemand：按 \fld{extensive\_participation} 拆分；
+  \item ExtensiveGeneration：按 \fld{generation\_participation} 拆分；
+  \item 映射声称已构建但关键表缺失时，反投影抛异常而不是猜测连续编号。
+\end{itemize}
+DC 死岛恢复使用独立 prestrip position 映射，不能借用 AC bus map。
+
+\subsection{支路与组件 provenance}
+
+\texttt{BranchExpandMap} 把规范 ACBranch 关联回 Transformer2W、Transformer3W pair、Switch 或
+CircuitBreaker，并保留原端子和闭合状态。\texttt{ComponentMapping} 记录 source/canonical type、id 和
+participation factor。稳定 ID 是字符串化来源；映射不是依赖名称前缀的隐式约定。
+
+\subsection{可观测量恢复等级}
+
+\texttt{ObservableAttribution} 按观测类型统计 canonical entity 和 attributed entity，并使用：
+\begin{itemize}
+  \item \texttt{Strong}：在声明模型下可确定恢复；
+  \item \texttt{Approximate}：采用等分、近似合并或不可辨识约定；
+  \item \texttt{AuditOnly}：可追溯但不是求解观测；
+  \item \texttt{Unsupported}：没有可用恢复路径。
+\end{itemize}
+\fld{total()} 只要求 recovery 非 Unsupported 且计数相等；它不把 Approximate 提升为 Strong。
+
+\subsection{设备终端流与符号}
+
+\srcpath{src/model/result\_attribution.cpp:ResultAttributionLayer::apply} 以 authored system、projected system、
+PF/OPF 结果和 mapping 构建设备级结果。网络端子功率常采用“母线流向设备”符号，源荷署名常采用
+“注入母线为正”符号；调用者必须读取结果类型的 terminal/sign contract，不能跨族直接相加。
+停运组件统一归零；同母线多个理想开关/断路器不可辨识时按约定分配并降级恢复等级。
+
+\subsection{投影后审计不变量}
+
+至少检查：AC/DC 引用均存在、AC/DC 同号不串域、映射 group 覆盖所有 surviving authored bus、
+参与因子组内和为 1、死岛输出为零、支路展开来源可追、强度量往返一致、广延量总和守恒，以及
+所有近似 merge 在证书中有记录。投影“成功返回”本身不替代这些不变量。
+

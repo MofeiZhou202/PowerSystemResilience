@@ -6,6 +6,47 @@ This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
 
+## Integrated-energy, model and SPPT monographs (2026-08-22)
+
+The compact contract manuals were replaced by theory--implementation--numerical
+evidence chains. `integrated_energy` is now 10 chapters/23 A4 pages with three theory
+chapters, a source-equivalent LP/MILP, full I/O contracts, two analytic optimal
+solutions and a 24-hour independent equation/cost oracle. The analytic cases match
+within floating-point error; the 24-hour maximum electric balance and stock
+recurrence residuals are `1.776e-15 MW` and `1.066e-14 MWh`, and independently
+recomputed cost differs by `1.819e-12`. The registered Release
+`integrated_energy_cross_validation` passes at a `1e-7` gate. This remains an
+aggregate-PCC campus model with no AC voltage/branch certificate and no independent
+external full-MILP oracle.
+
+`model` is now 11 chapters/22 pages with typed-identity, dimensional/per-unit and
+quotient/recovery theory. The registered `model_projection_cross_validation` passes
+15 declared set/algebra/unit checks at `1e-12`, including exact load/generation
+conservation, intensive/extensive recovery, same-number AC/DC separation and unit
+conversion idempotence. It also found an open contract defect: for authored DC IDs
+`(1,2,5)`, position recovery is correctly `(1.0,0.99,0.0)` pu but
+`dc_dead_bus_indices` reports position token `3`, not stable ID `5`; the machine
+report therefore keeps `stable_dead_id_contract=false`.
+
+`sppt` is now 11 chapters/32 pages. The certificate corpus has MR3 residual zero on
+10/10 cases, but the independent authored-equation evaluator supports only 6/10;
+its largest observed residual is `8.26e-9` under a `1e-6` gate. Eight scale cases
+through 2869 buses converged; the switch ablation enlarged max Ybus diagonal by
+`3.61e4`. A fixed-seed, five-repetition public-feeder campaign completed 315 base
+samples and reports Wilson intervals. Increasing repetitions to 10 or 20 reproducibly
+terminates on uncaught `std::invalid_argument`, so fault statistics remain
+exploratory rather than release-level evidence. MR8 still has no public relation API.
+
+Existing focused direct binaries also pass: integrated energy 6 cases/106 assertions,
+model 30 cases/1696 assertions, and eight SPPT targets 37 cases/246 assertions. The
+three manuals were compiled with XeLaTeX, all 77 pages rendered at 120 dpi, and full
+contact sheets plus dense numerical/table pages were inspected. Logs have no
+overfull boxes, unresolved references/citations, missing glyphs or fatal errors; no
+blank, clipped, overlapping or broken-table page was observed. No full CTest,
+sanitizer, external PF/MILP engine or pinned-dependency release validation was run.
+Local MIPSolvers HEAD `7721936245d5756193381b415457e6cf2214341e` differs from pin
+`3bf1e66749e3b3e0bbd57696a7d4f43ecf09218c`.
+
 ## Resilience dynamic-feedback and cross-validation closure (current worktree)
 
 The resilience monograph now follows the theory/implementation/interface/

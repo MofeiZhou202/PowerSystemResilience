@@ -1,0 +1,97 @@
+\section{证书语料、异构残差、规模曲线与失败证据}
+
+\subsection{复现范围}
+
+本章在当前 macOS Release 构建中直接运行
+\texttt{sppt\_certify}、\texttt{sppt\_benchmark}、\texttt{sppt\_ablation} 与
+\texttt{sppt\_scale\_fault\_campaign}。前三者的输入与输出路径由工具源码固定；故障活动命令为
+\begin{verbatim}
+sppt_scale_fault_campaign <outdir> 5 20260822
+\end{verbatim}
+证书阈值为 $10^{-6}$。计时为 best-of-N wall clock，只用于当前机器规模观察，不是跨平台性能承诺。
+
+\subsection{十案例证书与独立作者方程}
+
+MR3 生产流水线 residual 在 10/10 案例均为 0；归因 total 在 10/10 成立；可观察 OPF dual 的 9 个案例
+residual 为 0。独立方程覆盖 6/10 案例，结果如下。
+
+\begin{center}\footnotesize
+\begin{tabular}{@{}lrrrl@{}}\toprule
+案例 & AC/DC buses & MR3 residual & independent residual & independent 状态\\\midrule
+case5 & 5/0 & 0 & $6.42\times10^{-11}$ & PASS\\
+case9 & 9/0 & 0 & $2.03\times10^{-14}$ & PASS\\
+case14 & 14/0 & 0 & -- & unsupported\\
+case30 & 30/0 & 0 & $9.57\times10^{-10}$ & PASS\\
+case57 & 57/0 & 0 & -- & unsupported\\
+case118 & 118/0 & 0 & -- & unsupported\\
+case300 & 300/0 & 0 & -- & unsupported\\
+ieee14-acdc-native & 14/2 & 0 & $3.73\times10^{-13}$ & PASS\\
+ieee24-mtdc-native & 24/4 & 0 & $2.62\times10^{-12}$ & PASS\\
+case33bw-acdc-native & 33/2 & 0 & $8.26\times10^{-9}$ & PASS\\\bottomrule
+\end{tabular}
+\end{center}
+
+最大已观测独立残差为 $8.26\times10^{-9}<10^{-6}$。case14/57/118/300 含独立 evaluator 不支持的 rich
+macro，CSV 中 \fld{independent\_supported=false}。工具打印的
+``10/10 fully pass'' 来自 \texttt{Certificate::all\_pass()} 的较弱逻辑：unsupported 不单独使其失败；
+若研究要求完整独立证据，本语料只能说 6/10 覆盖，不能说 10/10 独立交叉验证。
+
+\subsection{规模曲线}
+
+\begin{center}\small
+\begin{tabular}{@{}lrrrrr@{}}\toprule
+案例 & buses & branches & iterations & projection/assembly ms & solve ms\\\midrule
+case9 & 9 & 9 & 5 & 0.00/0.00 & 0.04\\
+case30 & 30 & 41 & 4 & 0.01/0.01 & 0.15\\
+case118 & 118 & 186 & 7 & 0.03/0.04 & 0.62\\
+case300 & 300 & 411 & 8 & 0.08/0.08 & 2.67\\
+case1354pegase & 1354 & 1991 & 10 & 0.28/0.34 & 6.99\\
+case2869pegase & 2869 & 4582 & 15 & 0.49/0.59 & 16.94\\\bottomrule
+\end{tabular}
+\end{center}
+八个规模点全部收敛且 MR3 residual 为 0。因时间分辨率保留两位小数，小案例的 0.00 表示低于显示精度，
+不是零耗时。单次当前机器结果不支持复杂度拟合或显著性结论。
+
+\subsection{机制消融}
+
+移除 provenance 的结构计数在 case14/case118/switch-demo 分别产生 3、9、2 个不可归因实体，总计 14；
+其他两案例为 0。role guard 对 5/5 参考缺失编辑均拒绝，raw PF 没有静默 converged。switch-demo 中
+保留收缩保护的 $\max|Y_{ii}|=19.6$，把开关改为 $10^{-6}+j10^{-6}$ pu 且不收缩后为
+$7.07\times10^5$，尺度放大 $3.61\times10^4$ 倍。该比值不是条件数，不能直接推出 Newton 失败概率。
+
+\subsection{315 样本故障活动}
+
+7 个公共 feeder、9 类 fault/control、每系统 5 次得到 315 个基础样本；汇总中的 detector 行会重复引用同一
+基础注入，不应把各 detector 的 sample 数相加成独立样本。35/35 检出的 Wilson 95\% 区间为
+$[0.901099,1]$，0/35 为 $[0,0.098901]$。
+
+\begin{center}\footnotesize
+\begin{tabular}{@{}lrrrr@{}}\toprule
+故障类 & validation & solver-only & full SPPT & SPPT+independent\\\midrule
+valid control & 0/35 & 0/20 & 0/35 & 0/35\\
+missing VSC AC terminal & 35/35 & 0/15 & 35/35 & 35/35\\
+missing VSC DC terminal & 35/35 & 0/15 & 35/35 & 35/35\\
+missing AC reference & 35/35 & 15/15 & 35/35 & 35/35\\
+missing DC support & 0/35 & 0/15 & 35/35 & 35/35\\
+invalid converter efficiency & 35/35 & 0/15 & 35/35 & 35/35\\
+duplicate AC bus identity & 35/35 & 0/15 & 35/35 & 35/35\\
+plausible load error & 0/35 & 0/20 & 0/35 & 0/35\\
+plausible converter setpoint & 0/35 & 0/20 & 0/35 & 0/35\\\bottomrule
+\end{tabular}
+\end{center}
+
+valid control 无误拒；结构上合法但语义可疑的 plausible errors 全部未检出，说明 SPPT 不是量测异常检测器。
+solver-only 的分母因只对限定规模案例实际求解而较小。
+
+\subsection{规模失败与当前准入结论}
+
+相同 seed 下 repetitions=10 与 20 两次运行均因未捕获 \texttt{std::invalid\_argument} 终止，未生成完整活动。
+这项失败是当前可重复证据的一部分：故障活动工具尚不能作为长跑稳健性基线。当前可支持的结论只有：
+MR3 在所列 10 个证书案例与 8 个规模案例交换；独立作者方程覆盖 6/10；低重复故障活动显示结构故障的
+预期分层检出；provenance 与 merge guard 消融在构造案例上非空。不能据此声称任意模型、任意故障或
+MR8 的普遍正确性。
+
+\begin{gapnote}
+在修复并注册高重复 fault campaign、对异常捕获 fail-closed、增加多 seed 与独立 macro 终端方程 oracle 前，
+SPPT 的统计证据保持“探索性”，不进入发布级全覆盖准入。
+\end{gapnote}

@@ -339,7 +339,8 @@ the review record. The table above is the current status.
 
 | Module/domain | Documentation | Audit depth | Current result |
 |---|---|---|---|
-| `model/`, `validation/` | Focused | Baseline | No new finding in this pass. |
+| `model/` | Focused | Deep | Independent quotient/recovery/unit oracle passes its declared algebraic checks, but found an open contract defect: sparse authored DC dead-bus ID 5 is reported as prestrip position token 3 in `dc_dead_bus_indices`; position recovery remains correct. |
+| `validation/` | Focused | Baseline | Active validation manual and regression baseline retained. |
 | `projection/`, `assembly/` | Focused | Sampled | Core AC/DC map and attribution invariants checked; no new finding recorded. |
 | `power_flow/` | Focused | Baseline | Active manual and regression baseline retained; the point-in-time math audit is archived. |
 | `optimal_power_flow/` | Focused | Baseline | Active OPF manual retained; point-in-time diagnostics and validation are archived. |
@@ -356,9 +357,9 @@ the review record. The table above is the current status.
 | `time_series/` | Focused | Deep | AUD-066/069/070 are closed in runtime code pending dedicated regressions; AUD-067/068/071/072/073 remain partial with explicit scope. Existing focused rerun passes 11/11 direct tests; new Release rebuild and numerical evidence must be recorded before claiming full closure. |
 | `carbon_analysis/` | Focused | Deep | AUD-010 closed. |
 | `ev_power_traffic/` | Distributed | Deep | AUD-007 closed. |
-| `integrated_energy/` | Focused | Deep | AUD-003, AUD-004, and AUD-005 closed. |
+| `integrated_energy/` | Focused | Deep | Ten-chapter source-equivalent monograph plus registered analytic/Python cross-validation; AUD-003, AUD-004, and AUD-005 remain closed. The isolated-campus electrical boundary and missing external full-MILP oracle are explicit. |
 | `market/` | Focused | Deep | AUD-017: index-space deep review (position/index dual-key, LMP dual extraction, N-1 cut loop) found no defect; buses-never-filtered ⇒ LMP-authored-position invariant recorded. |
-| `sppt/` | Focused | Deep | AUD-006 closed. |
+| `sppt/` | Focused | Deep | Eleven-chapter theory-to-executable monograph. Independent residual supports 6/10 certificate cases; repetitions=10/20 scale campaigns terminate on uncaught `std::invalid_argument`, so statistical closure remains open. MR8 has no public relation API. |
 | `io/` | Focused | Baseline | Format ownership and clean-clone documentation checked. |
 | `api/`, `src/server/`, `web/` | Focused | Sampled | Typhoon snapshot ownership and domain-qualified graph output are verified at the HTTP boundary. |
 
@@ -381,6 +382,17 @@ disabled and the local dependency dirty-check override:
 | Carbon snapshot/annual/GEC | 3 targets: 41 cases, 574 assertions |
 | Resilience/reliability shared suite | `test_resilience_assessment`: 39 cases, 360 assertions, including five Native-to-StrictHiGHS cycles |
 | Runtime server | `run_gui_server` compiled and linked against the changed contracts |
+
+The monograph pass rebuilt and passed the registered Release
+`integrated_energy_cross_validation` and `model_projection_cross_validation` tests.
+The first includes two analytic optimal solutions and a 24-hour independent Python
+equation/cost oracle; the second includes independent set, conservation, recovery,
+domain-qualified identity, dead-island and per-unit checks while retaining the failed
+stable dead-bus ID contract. Existing direct binaries also passed 6 cases/106
+assertions for campus integrated energy, 30 cases/1696 assertions for model, and 41
+cases/246 assertions across eight SPPT targets. SPPT tools additionally ran 10-case
+certification, 8-case scaling, ablation and a 315-sample fixed-seed campaign. No full
+CTest, sanitizer, external PF/MILP engine, or pinned-dependency baseline was run.
 
 An exact packaged-task/jthread microbenchmark measured 0.0145--0.0187 ms per
 create/run/join cycle across five 1000-cycle runs, below the 10 ms fixed-overhead

@@ -1,0 +1,66 @@
+\section{模块边界、对象层次与身份契约}
+
+\subsection{所有权与数据流}
+
+\texttt{HybridPowerSystem} 是富工程模型根对象，包含 \texttt{ACSystem}、\texttt{DCSystem}、
+VSC/LCC、能量路由器、VPP、微网、移动储能、三相系统、动态模型档案和遥测。
+典型计算链为
+\begin{equation}
+S_{rich}\xrightarrow{\text{validation}}
+S_{checked}\xrightarrow{\Pi}
+(S_{can},M,C)\xrightarrow{A}y_{can}\xrightarrow{\mathcal R_M}y_{rich},
+\end{equation}
+其中 $M$ 是母线/支路/组件映射，$C$ 是 \texttt{ProjectionCertificate}，$A$ 是下游分析。
+\srcpath{src/model/network\_utils.cpp:project\_to\_canonical\_models} 承担投影实现，
+\srcpath{src/model/result\_attribution.cpp:ResultAttributionLayer::apply} 承担设备级归因。
+
+\subsection{三类索引空间}
+
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{4.2cm}L{4.4cm}L{6.6cm}@{}}
+\toprule
+空间 & 类型/例子 & 合法用途\\\midrule
+\endfirsthead
+\toprule 空间 & 类型/例子 & 合法用途\\\midrule\endhead
+稳定工程身份 & 组件 \fld{index}、\texttt{StableBusId} & JSON/API、报告、跨步骤关联和结果回填\\
+容器位置 & \texttt{std::vector} 的 0-based position、\texttt{VectorPos} & 当前容器局部扫描和线性代数排列\\
+图/求解内部索引 & \texttt{NodeIdx}、矩阵行列、edge index & 投影后图与求解器内部计算\\
+域限定母线身份 & \texttt{ac\_bus\_id\_to\_node\_idx}；\\
+& \texttt{dc\_bus\_id\_to\_node\_idx} & AC/DC 可同号时的无歧义查找\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\srcpath{include/hacdcpf/model/typed\_ids.hpp:TypedIndex} 用不同 Tag 阻止部分误混，但大量历史 POD 仍以
+\texttt{int} 保存引用，故运行时必须经校验和 domain-qualified map。任何按 \fld{index}-1 访问 vector 的代码
+都隐含连续编号假设，不是模型层公共契约。
+
+\subsection{错误与结果类型}
+
+\srcpath{include/hacdcpf/model/error.hpp:ErrorCode} 定义类型化错误码；模板
+\texttt{Result<T>} 表达值或 \texttt{Error}。模型层也存在为保持兼容而直接抛
+\texttt{std::invalid\_argument}/\texttt{std::runtime\_error} 的入口。调用者不能假定所有失败均通过
+同一种通道，必须以具体函数签名和测试为准。
+
+\subsection{运行时保真目录}
+
+\srcpath{src/model/model\_semantics.cpp:component\_runtime\_semantics} 为每个 rich collection 声明
+身份、端子、单位、符号、参数所有者、结果契约及各 workflow 的运行时保真度。其取值为
+\texttt{Exact}、\texttt{Equivalent}、\texttt{Aggregated}、\texttt{BoundaryInjection}、
+\texttt{Projected}、\texttt{Unsupported} 与 \texttt{NotApplicable}。
+\srcpath{module\_data\_contracts} 同样声明顶层源码模块的输入、执行视图、输出、身份和边界。
+这两张表是机器可读说明，不会自动改变求解器行为；测试只保证目录覆盖和唯一性。
+
+\subsection{默认常量与版本边界}
+
+\srcpath{include/hacdcpf/model/defaults.hpp:Defaults} 提供 $S_{base}=100$ MVA、$f=50$ Hz、
+电压限值和数值容差等共享默认值。结构体自身仍有大量就地默认值，标准参数库和
+\texttt{TypicalParameters} 又可能按缺失字段补全；因此“默认值”有三层：构造初值、参数库补全值、
+求解入口回退值。手册后文逐项区分，不把 \texttt{Defaults} 误写成所有字段的唯一来源。
+
+\subsection{本手册不覆盖的所有权}
+
+潮流方程归 \srcpath{docs/modules/power\_flow/}，OPF 决策模型归
+\srcpath{docs/modules/optimal\_power\_flow/} 与 \srcpath{docs/modules/power\_models/}，
+四级校验规则归 \srcpath{docs/modules/validation/}。本手册只说明这些模块接收的模型语义和映射，
+不复制其求解方程。

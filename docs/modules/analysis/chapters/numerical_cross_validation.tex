@@ -1,0 +1,21 @@
+% numerical_cross_validation.tex -- 分析模块数值证据
+\section{数值结果、排序校核与范围边界}\label{sec:analysis-numerical}
+
+当前 Release 目标分别通过：承载力 3 cases/27 assertions，多维薄弱环节 4 cases/33 assertions，
+反事实规划 2 cases/52 assertions。三者均为源码构造案例和跨模块调用回归，不是外部规划
+软件 oracle。
+
+\subsection{承载力和薄弱环节}
+承载力测试检查容量公式、等级边界和 JSON 结果；薄弱环节测试检查缺失维度、单维压力、
+冲突/兼容分类、Pareto 排序和稳定 ID。准入条件是：缺失证据不进入压力分母，排序键在
+同覆盖集内稳定，零/退化阈值不产生除零。
+
+\subsection{反事实案例}
+固定小馈线反事实测试调用 FMEA/弹性后果引擎。输出日志中基线与措施评估均得到
+EENS=1.00 MWh/yr、LOLE=0.50 hr/yr、LOLF=1.00 occ/yr 的构造基准；该数字用于检查
+复制系统、措施施加和指标单位，不表示所有措施都无收益。测试还验证措施失败不会污染
+其他候选、双措施协同字段和 \fld{evaluated\_systems}/\fld{failed\_systems} 计数。
+
+\subsection{验证边界}
+没有运行独立 DL/T 2041 计算器、商业规划软件或 8760 小时外部规划 oracle，因此本章不
+声称承载力等级的现场准确率、薄弱环节 Top-$k$ 命中率或反事实收益的因果有效性。

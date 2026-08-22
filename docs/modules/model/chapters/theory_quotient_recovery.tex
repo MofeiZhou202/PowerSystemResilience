@@ -1,0 +1,147 @@
+% theory_quotient_recovery.tex -- 商图、守恒恢复与信息损失理论
+% 本文件遵循 docs/modules/THEORY_WRITING_GUIDE.md。
+\section{商图投影、守恒恢复与信息损失界}
+
+\begin{theorynote}
+本章严格区分精确理想连接收缩与阈值近似收缩，证明商投影幂等性、广延量守恒和强度量广播条件，
+并给出缺少 provenance 时不可强恢复的结论。理论中的一般误差界只有在所列条件成立时可用。
+\end{theorynote}
+
+\subsection{等价关系与商图}
+
+对 AC 节点集合 $V$，令理想边集合 $E_0$ 包含零串联阻抗、unity 变比、零移相且闭合的连接。
+定义
+\begin{equation}
+ u\sim v\iff u=v\ \text{或存在仅由 }E_0\text{ 构成的路径连接 }u,v.
+ \label{eq:model-equivalence}
+\end{equation}
+自反、对称和传递性分别来自空路径、无向路径反转和路径拼接，因此 $\sim$ 是等价关系。
+商映射 $q:V\to V/{\sim}$ 把每个节点映到其等价类。
+
+\begin{theorem}[精确商投影的幂等性]
+若投影只收缩式~\eqref{eq:model-equivalence} 的等价类，并把所有诱导端口一致重写，则
+$q(q(G))\cong q(G)$；第二次投影不再减少节点数或改变物理参数。
+\end{theorem}
+\begin{proof}
+第一次投影后，每个 $E_0$ 连通分量已成为单节点，剩余不同节点间不存在 $E_0$ 边；否则它们原先属于同一
+连通分量。故第二次等价类均为单点。端口与参数的确定性重写在单点类上为恒等。
+\end{proof}
+
+幂等性需要防止 rich 设备再次展开。仅比较节点数不充分：重复生成等值负荷或支路也可能保持节点数却改变
+注入或导纳，因此完整检查还应比较组件多重集、参数和 provenance。
+
+\subsection{强度量的精确恢复}
+
+理想边满足 $V_u-ae^{j\phi}V_v=ZI$。在 $a=1,\phi=0,Z=0$ 时，$V_u=V_v$。
+因此对每个等价类 $C_k$，规范解 $\bar V_k$ 的 lift 为
+\begin{equation}
+ (R_I\bar V)_i=\bar V_{q(i)},\qquad i\in C_k.
+ \label{eq:model-intensive-lift}
+\end{equation}
+
+\begin{proposition}[强度量往返]
+在类内一致子空间 $\mathcal U=\{v:v_i=v_j\text{ if }i\sim j\}$ 上，选择任一类代表的限制算子 $P_I$
+与式~\eqref{eq:model-intensive-lift} 满足 $R_IP_Iv=v$。
+\end{proposition}
+\begin{proof}
+对 $i\in C_k$，$P_Iv$ 读取 $C_k$ 任一代表值；因 $v\in\mathcal U$，该值等于 $v_i$，广播后逐分量恢复。
+\end{proof}
+
+\subsection{广延量守恒与参与因子}
+
+对类 $C_k$ 的总量 $X_k$，以非负基准 $b_i$ 定义
+\begin{equation}
+ w_i=\begin{cases}
+ b_i/\sum_{j\in C_k}b_j,&\sum_jb_j>0,\\
+ 1/|C_k|,&\text{否则},
+ \end{cases}
+ \qquad x_i=w_iX_k.
+ \label{eq:model-extensive-recovery}
+\end{equation}
+
+\begin{theorem}[分区广延量守恒]
+若 $\{C_k\}$ 是 $V$ 的分区且每类参与因子和为 1，则恢复后
+$\sum_{i\in C_k}x_i=X_k$，进而 $\sum_i x_i=\sum_kX_k$。
+\end{theorem}
+\begin{proof}
+$\sum_{i\in C_k}x_i=X_k\sum_iw_i=X_k$；再对互不相交的类求和。
+\end{proof}
+
+需求和发电必须使用不同 $b_i$。例如同一类中负荷为 $(12,8)$ MW、发电为 $(30,10)$ MW，则需求权重为
+$(0.6,0.4)$，发电权重为 $(0.75,0.25)$。复用一个权重虽保持总量，却会产生错误设备归因。
+
+\subsection{强恢复的不可能性}
+
+\begin{theorem}[有损聚合无 provenance 时不可唯一恢复]
+设聚合 $P:\mathbb R^n\to\mathbb R$ 为 $P(x)=\sum_ix_i$ 且 $n>1$。不存在函数
+$R:\mathbb R\to\mathbb R^n$ 使 $R(P(x))=x$ 对所有 $x$ 成立。
+\end{theorem}
+\begin{proof}
+取 $x=(1,0,\ldots)$ 与 $y=(0,1,\ldots)$，有 $x\ne y$ 但 $P(x)=P(y)=1$。若存在 $R$，则
+$R(1)$ 必须同时等于 $x$ 与 $y$，矛盾。
+\end{proof}
+
+参与因子不是“恢复真实设备解”，而是带审计依据的分摊规则。强恢复只适用于投影在目标观察量上单射的情形；
+其余应标为 approximate、audit-only 或 unsupported。
+
+\subsection{阈值收缩误差界}
+
+对被近似收缩的边 $e=(u,v)$，欧姆关系给出
+\begin{equation}
+ |V_u-V_v|=|Z_eI_e|\le |Z_e|I_e^{max}.
+ \label{eq:model-threshold-bound}
+\end{equation}
+若路径含多条被收缩边，三角不等式给出类内任意两点
+\begin{equation}
+ |V_i-V_j|\le\sum_{e\in\mathrm{path}(i,j)}|Z_e|I_e^{max}.
+ \label{eq:model-path-error}
+\end{equation}
+因此只知道 $|Z_e|<\epsilon_Z$ 而没有电流界，无法给出电压误差数值保证。阈值是拓扑启发式，不是物理误差
+容差。保护、短路或谐波研究可能对微小阻抗敏感，不能无条件复用潮流投影阈值。
+
+\subsection{映射复合律}
+
+若 rich 到 canonical 映射为 $P_1$，canonical 到 reduced 映射为 $P_2$，总投影是
+$P=P_2\circ P_1$。若分别有可用恢复 $R_1,R_2$，候选总恢复为
+\begin{equation}
+ R=R_1\circ R_2.
+ \label{eq:model-recovery-composition}
+\end{equation}
+只有当两个阶段都在目标观察量上满足各自恢复条件时，$RP=I$。任一阶段 unsupported，复合结果也不能
+升级为 strong。证书应携带每一级来源、类成员、权重、近似类型和 dead-island 策略。
+
+\subsection{dead island 与零值语义}
+
+剥离无源孤岛后，将其电压恢复为 $0$ pu 是“失电状态编码”，不是已求得的电压解。它必须与正常运行的
+接近零数值区分。恢复向量按 authored position 扩展；若证书另声称输出稳定 ID，则必须通过稀疏 ID 算例验证。
+
+\begin{gapnote}
+当前交叉验证发现：稀疏 DC ID $(1,2,5)$ 中，孤岛 authored ID 为 5，但
+\texttt{dc\_dead\_bus\_indices} 报告 3。原因是检测前已连续重编号。位置恢复正确为
+$(1.0,0.99,0.0)$，但稳定 ID 契约未闭环；对外归因不得把该字段当作 authored ID 证据。
+\end{gapnote}
+
+\subsection{与实现的对应}
+
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{7.1cm}L{8.1cm}@{}}
+\toprule 理论条目 & 实现状态\\\midrule
+\endfirsthead\toprule 理论条目 & 实现状态\\\midrule\endhead
+理想/阈值等价类与 merge 记录 & \implfull{src/model/network\_utils.cpp:merge\_zero\_impedance\_buses\_impl}\\
+重投影幂等保护 & \implfull{src/model/network\_utils.cpp:project\_in\_place}\\
+强度量广播与需求/发电参与因子 & \implfull{src/model/network\_utils.cpp:unproject\_bus\_vector}\\
+DC position 恢复为失电零值 & \implfull{src/model/network\_utils.cpp:unproject\_dc\_bus\_vector}\\
+阈值电压误差式~\eqref{eq:model-path-error} & \implpart{记录阈值和边；不计算电流上界或误差证书}\\
+多级映射自动复合 & \implpart{各模块保留局部 mapping；无统一可逆映射代数 API}\\
+稀疏 DC dead bus 稳定 ID & \implpart{位置恢复成立；稳定 ID 字段在重编号后丢失 authored ID}\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{参考文献}
+{\renewcommand{\section}[2]{}%
+\begin{thebibliography}{9}\small
+\bibitem{model:godsil2001} C.~Godsil and G.~Royle, \emph{Algebraic Graph Theory}, Springer, 2001.
+\bibitem{model:dorfler2013b} F.~Dorfler and F.~Bullo, Kron reduction of graphs with applications to electrical networks,
+\emph{IEEE Transactions on Circuits and Systems I}, vol.~60, no.~1, pp.~150--163, 2013.
+\end{thebibliography}}

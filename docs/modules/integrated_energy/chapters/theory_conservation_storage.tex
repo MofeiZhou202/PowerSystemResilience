@@ -1,0 +1,163 @@
+% theory_conservation_storage.tex -- 综合能源守恒、库存与互斥理论
+% 本文件遵循 docs/modules/THEORY_WRITING_GUIDE.md。
+\section{载能守恒、库存动力学与无套利条件}
+
+\begin{theorynote}
+本章从载能图的关联矩阵出发，推导逐时守恒、跨时域库存恒等式以及导入/导出与充/放互斥的
+充分条件。结论用于解释数值证据应检查哪些残差；只有章末对应表标为“完整实现”的条目才是当前
+园区求解器的运行契约。
+\end{theorynote}
+
+\subsection{载能图与符号}
+
+令载能集合为 $\mathcal C=\{e,q,h,f\}$，时段集合为
+$\mathcal T=\{0,\ldots,T-1\}$。把每个外部源、负荷、转换器、库存端口写成有向超边，
+$A\in\mathbb R^{|\mathcal C|\times m}$ 为载能--端口关联矩阵：向载能母线注入取正，取出取负。
+设备活动向量 $x_t\in\mathbb R^m$ 与外生净需求 $d_t$ 满足
+\begin{equation}
+  A x_t=d_t,\qquad t\in\mathcal T .
+  \label{eq:ies-incidence-balance}
+\end{equation}
+它是四条逐时平衡的紧凑写法。转换效率不应塞进单位关联矩阵，而应由设备局部约束
+$B_jx_{jt}=0$ 表达；这样可以区分“端口拓扑”与“能量损耗”。
+
+\begin{proposition}[逐时守恒的全时域恒等式]
+若式~\eqref{eq:ies-incidence-balance} 对所有 $t$ 成立，则任意载能 $c$ 的累计外部输入等于
+累计终端需求、净库存吸收、转换净取出和弃能之和。若所有量以 MW 表示，累计式必须乘
+$\Delta t$ 后才具有 MWh 量纲。
+\end{proposition}
+\begin{proof}
+取 $A$ 的第 $c$ 行，对 $t$ 求和并乘 $\Delta t$。有限和保持等式；再按端口类型对列分组，
+即得所述累计恒等式。该证明不依赖目标函数或求解算法。
+\end{proof}
+
+该命题给出两级残差：逐时残差
+\begin{equation}
+ r_{c,\infty}=\max_t\left|(Ax_t-d_t)_c\right|
+ \label{eq:ies-carrier-residual}
+\end{equation}
+用于发现某一时段的符号或单位错误；累计残差可能因正负抵消而很小，不能替代
+式~\eqref{eq:ies-carrier-residual}。
+
+\subsection{单库存递推的望远镜恒等式}
+
+库存 $s$ 的每步模型写为
+\begin{equation}
+ E_{t+1}=\rho E_t+\eta^{ch}\Delta t P_t^{ch}
+ -\frac{\Delta t}{\eta^{dis}}P_t^{dis}+\Delta t\,\xi_t,
+ \label{eq:ies-stock-recursion-expanded}
+\end{equation}
+其中 $\xi_t$ 是层间净输入。反复代入可得闭式解
+\begin{equation}
+ E_T=\rho^T E_0+\sum_{t=0}^{T-1}\rho^{T-1-t}\Delta t
+ \left(\eta^{ch}P_t^{ch}-\frac{P_t^{dis}}{\eta^{dis}}+\xi_t\right).
+ \label{eq:ies-stock-closed-form}
+\end{equation}
+
+\begin{proposition}[循环边界下的损耗恒等式]
+若 $E_T=E_0$，则
+\begin{equation}
+ \sum_t\rho^{T-1-t}\Delta t
+ \left(\eta^{ch}P_t^{ch}-P_t^{dis}/\eta^{dis}+\xi_t\right)
+ =(1-\rho^T)E_0 .
+ \label{eq:ies-cyclic-loss-identity}
+\end{equation}
+当 $\rho=1$ 且无层间转移时，累计放电的库存侧能量不能超过累计充电的库存侧能量；循环条件下二者相等。
+\end{proposition}
+\begin{proof}
+在式~\eqref{eq:ies-stock-closed-form} 中代入 $E_T=E_0$ 并移项即可。右端是为补偿
+静置损耗所需的折算净输入。
+\end{proof}
+
+当前接口中的 $\rho$ 是“每步保持率”。若物理数据给的是每小时保持率 $\rho_h$，任意步长下应使用
+$\rho=\rho_h^{\Delta t}$；直接使用 $\rho_h$ 会使时间离散变化时产生模型漂移。
+
+\subsection{分层储氢的状态空间}
+
+把日、周、季三层状态写成 $z_t=(H_t^d,H_t^w,H_t^s)^\top$，则
+\begin{equation}
+ z_{t+1}=Rz_t+\Delta t(Bu_t+Gv_t),
+ \label{eq:ies-layered-state}
+\end{equation}
+其中 $R=\operatorname{diag}(\rho_d,\rho_w,\rho_s)$；$u_t$ 为各层充放；$v_t$ 为
+日到周、周到日、周到季、季到周四条转移。$G$ 每列在源层取 $-1$，在目的层取对应效率。
+因此每一次层间转移都使“未加权总氢量”减少
+$(1-\eta_{ab})\Delta t v_{ab,t}$。
+
+\begin{corollary}[层间转移不创造能量]
+若所有转移效率位于 $(0,1]$，则对 $\mathbf 1^\top z_t$ 求和，层间流只可能保持或降低三层总库存，
+不会凭空增加氢能。
+\end{corollary}
+
+\begin{gapnote}
+当前实现允许同一时段同时存在相反方向的层间转移；储能互斥二进制只约束各层自身充放，未约束
+日--周和周--季的双向流。正吞吐成本通常压制循环流，但这不是结构保证。
+\end{gapnote}
+
+\subsection{导入与导出的无套利充分条件}
+
+电力交换满足净注入 $g_t=P_t^{imp}-P_t^{exp}$。固定其他变量，保持 $g_t$ 不变而同时减少
+$P_t^{imp},P_t^{exp}$ 的方向是 $(-\delta,-\delta)$。
+
+\begin{proposition}[价格次序排除同时购售]
+若购电边际价 $c_t^{buy}$ 严格大于售电边际收入 $c_t^{sell}$，且减少购售不改变其他约束，
+则任何最优解都可取 $P_t^{imp}P_t^{exp}=0$。若严格不等式成立，含同时购售的点不可能最优。
+\end{proposition}
+\begin{proof}
+令 $\delta=\min(P_t^{imp},P_t^{exp})>0$。净交换不变，目标变化为
+$-\delta(c_t^{buy}-c_t^{sell})<0$，与最优性矛盾。
+\end{proof}
+
+负购电价、售电补贴、分段价格或依赖毛流量的碳/网络费会破坏证明条件。因此工程准入不能仅凭“通常
+购价高于售价”省略互斥；当前接口提供二进制门显式建立互斥。
+
+\subsection{充放电互斥的精确消元}
+
+设某时段 $P^{ch},P^{dis}>0$。保持库存变化不变的消元方向满足
+$\eta^{ch}\delta^{ch}=\delta^{dis}/\eta^{dis}$，即
+$\delta^{dis}=\eta^{ch}\eta^{dis}\delta^{ch}$。电母线净需求的变化为
+\begin{equation}
+ -\delta^{ch}+\delta^{dis}=-(1-\eta^{ch}\eta^{dis})\delta^{ch}\le0.
+\end{equation}
+若减少净需求总能以非负边际成本消化，且吞吐成本为正，则同时充放不是最优。反之，负价格、强制消纳、
+终端奖励或缺少向下调节时，显式二进制互斥仍有必要。
+
+\subsection{可再生比例分母与碳预算下界}
+
+当前类型的比例约束为
+\begin{equation}
+ \sum_t\Delta t(P_t^{pv}+P_t^{wind})\ge \alpha
+ \sum_t\Delta t(P_t^{imp}+P_t^{pv}+P_t^{wind}+P_t^{chp}+P_t^{fc}).
+ \label{eq:ies-renewable-mandate}
+\end{equation}
+右端是所列“供应量”而非终端负荷，也不扣除出口、储能循环和转换损耗。解释政策比例时必须逐项公布
+分子与分母，不能只报一个利用率。
+
+对给定负荷与容量，可先解不含碳预算的最小残余碳问题得到 $R_{min}$。预算 $B<R_{min}$ 是不可行的
+充分证据；$B\ge R_{min}$ 只消除这一必要障碍，不保证其他载能与容量约束可行。
+
+\subsection{与实现的对应}
+
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{7.1cm}L{8.1cm}@{}}
+\toprule 理论条目 & 实现状态\\\midrule
+\endfirsthead\toprule 理论条目 & 实现状态\\\midrule\endhead
+四载能逐时守恒与最大残差 & \implfull{src/integrated\_energy/integrated\_energy\_optimizer.cpp:solve\_campus\_ies}\\
+五类库存递推与循环末态 & \implfull{src/integrated\_energy/integrated\_energy\_optimizer.cpp:solve\_campus\_ies}\\
+保持率按 $\rho_h^{\Delta t}$ 换算 & \implnone\\
+分层储氢状态空间 & \implpart{三层与四条转移已实现；相反方向转移不互斥}\\
+购售与各层充放互斥 & \implfull{src/integrated\_energy/integrated\_energy\_optimizer.cpp:solve\_campus\_ies}\\
+可再生比例式~\eqref{eq:ies-renewable-mandate} & \implfull{src/integrated\_energy/integrated\_energy\_optimizer.cpp:solve\_campus\_ies}\\
+碳预算最小可行下界预检查 & \implnone\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{参考文献}
+{\renewcommand{\section}[2]{}%
+\begin{thebibliography}{9}\small
+\bibitem{ies:geidl2007b} M.~Geidl et al., Energy hubs for the future,
+\emph{IEEE Power and Energy Magazine}, vol.~5, no.~1, pp.~24--30, 2007.
+\bibitem{ies:boyd2004} S.~Boyd and L.~Vandenberghe, \emph{Convex Optimization},
+Cambridge University Press, 2004.
+\end{thebibliography}}

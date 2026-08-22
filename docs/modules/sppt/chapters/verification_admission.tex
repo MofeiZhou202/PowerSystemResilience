@@ -1,0 +1,73 @@
+\section{注册验证、证据审计与研究准入}
+
+\subsection{测试矩阵}
+
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{4.5cm}L{10.7cm}@{}}
+\toprule 目标 & 覆盖\\\midrule
+\endfirsthead
+\toprule 目标 & 覆盖\\\midrule\endhead
+\texttt{test\_sppt\_metamorphic} & MR1--MR7、MR3d not-observed、AC/DC 投影、稳定 ID 对齐和核心套件形状\\
+\texttt{test\_sppt\_dae\_wellposedness} & 声明工作点的 DAE index-1 子雅可比与 MR3t\\
+\texttt{test\_sppt\_certificate} & case9/14/30 PF corpus、CSV/LaTeX、原生 IEEE14-ACDC 独立 residual 和 attribution\\
+\texttt{test\_sppt\_guard} & 三门、显式 observable、Unsupported 拒绝和混淆指标\\
+\texttt{test\_sppt\_fault\_campaign} & 固定种子、一重复九类、45 summary、CSV/LaTeX 字段和结构故障定位\\
+\texttt{test\_sppt\_agent} & candidate commit 不变量、stable actions、不确定性和 authority\\
+\texttt{test\_sppt\_benchmark} & case9--118 ladder 的收敛/计时/MR3 与 renderer\\
+\texttt{test\_sppt\_ablation} & provenance、reference 和 merge 三类机制及聚合 renderer\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{MR 覆盖的精确边界}
+
+\begin{itemize}
+  \item MR1 比较计数、总 P/Q 和 Ybus；阈值近似再次投影的物理误差不由此穷尽；
+  \item MR2 只在已有 merge map 上测试构造强度量，未覆盖所有设备结果；
+  \item MR3 PF 是生产 rich 路径与显式 projection 路径的交换一致性，二者共享大量代码；
+  \item MR3d LMP 不可得时必须 NotObserved 且不通过；
+  \item MR3t 只比较固定 0.10 s、0.005 s 步长的末快照摘要；
+  \item MR4 当前检查成员是否映射到同一 internal index，不读取已求解成员电压；
+  \item MR5 只反转 AC bus vector 顺序，不是任意 AC/DC 图同构活动；
+  \item MR6 只拼接七类主要 vector 并比较 AC/DC bus/branch 计数；
+  \item MR7 通过 validation 消息关键词观察 typed rejection；residual 固定为零；
+  \item MR8 无公共函数，注册测试只覆盖单一 DAE 线性化点。
+\end{itemize}
+
+\subsection{证据准入矩阵}
+
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{3.8cm}L{5.6cm}L{5.8cm}@{}}
+\toprule 声明 & 所需最低证据 & 不足以支持\\\midrule
+\endfirsthead
+\toprule 声明 & 所需最低证据 & 不足以支持\\\midrule\endhead
+投影结构一致 & MR1/2/4/5/6 适用项、projection certificate、round-trip & 单次 PF 收敛\\
+稳态语义保持 & MR3 observed pass、独立 residual supported/pass、归因 total & 仅 MR3 同源双路径\\
+OPF dual 保持 & MR3d observed/pass、LMP 单位和 ID 对齐 & NotObserved 或空 LMP\\
+动态形成适定 & MR8 点检、MR3t、多工况轨迹 residual & 单一工作点 index-1\\
+守卫检出能力 & 固定活动全部样本、混淆矩阵、CI、故障类覆盖 & 只报 100\% catch rate\\
+AI 辅助只读分析 & guard、solver、independent、uncertainty、authority contract & agent script sound=true\\
+物理控制 & 外部安全控制架构、人工授权、实时状态与故障闭环 & 当前 SPPT 决策函数永不直接准入\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{最近验证与诚实口径}
+
+开发状态中的最近聚焦 SPPT 基线为 7 个目标、33 个用例、213 个断言；其构建关闭若干可选依赖，
+且本地 MIPSolvers 与记录 pin 不一致。本文档修改只改变 LaTeX，不自动更新该算法证据。
+本轮可用目标的实际复跑、手册页数和 LaTeX/渲染检查会写入
+\srcpath{docs/overview/development\_status.md}；未运行全量 CTest、sanitizer 或外部 oracle 时明确保留。
+
+\subsection{研究报告最小披露}
+
+任何 SPPT 数值表必须包含：代码/依赖 revision、corpus 与生成规则、seed/repetitions、投影 mode/threshold、
+请求 observable、每个 MR 的 observation、容差和单位、求解器状态、independent supported scope、所有失败/跳过行、
+硬件与 timing 统计量。理论命题、实现关系、测试通过和外部实证是四类不同证据，不得互相替代。
+
+\subsection{未闭环方向}
+
+优先级最高的是公开 MR8 结果契约与多工作点/沿轨迹 DAE 适定性、任意域限定重标记/组合性 property test、
+宏设备独立 terminal-equation oracle、OPF KKT 独立证书和真实 telemetry 参数错误活动。扩展前必须先给出
+理论条件、实现锚点、自动测试和可复现数值结果，不能只在论文或手册中增加主张。
+

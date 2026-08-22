@@ -1,0 +1,86 @@
+\section{可复现实验、解析解与独立方程交叉验证}
+
+\subsection{证据生成路径}
+
+本章数字由 Release 目标 \texttt{integrated\_energy\_xref} 生成原始 JSON，再由不链接 HySim/MIPSolvers
+建模 API 的 Python 程序逐式重算。注册测试命令为
+\begin{verbatim}
+ctest --test-dir build/macos-release \
+  -R '^integrated_energy_cross_validation$' --output-on-failure
+\end{verbatim}
+生成器位于
+\srcpath{tools/integrated\_energy\_validation/validate\_integrated\_energy\_xref.cpp:main}，
+oracle 位于
+\srcpath{tools/integrated\_energy\_validation/run\_cross\_validation.py:validate\_case}。
+准入阈值统一为 $10^{-7}$；表中残差均已恢复为相应工程量，而非求解器内部缩放残差。
+
+\subsection{实验 A：一时段解析最优解}
+
+冻结输入为电负荷 $5$ MW、光伏可用 $2$ MW、购电价 $100$/MWh、光伏运维 $2$/MWh；其余载能、
+设备、储能、碳与出口全部关闭。因光伏边际成本低于购电且容量受限，唯一经济调度为
+\begin{equation}
+ P^{pv}=2,qquad P^{imp}=5-2=3\ \text{MW},qquad
+ C^*=2\times2+100\times3=304.
+\end{equation}
+
+\begin{center}\small
+\begin{tabular}{@{}lrrr@{}}\toprule
+量 & 解析值 & StrictHiGHS & 绝对误差\\\midrule
+光伏 / MW & 2 & 2 & $0$\\
+购电 / MW & 3 & 3 & $0$\\
+目标/总成本 & 304 & 304 & $0$\\\bottomrule
+\end{tabular}
+\end{center}
+
+该算例独立验证方向与目标系数，但不覆盖转换、库存或 MILP 分支。
+
+\subsection{实验 B：两时段储能套利解析解}
+
+两时段负荷均为 $1$ MW，购电价为 $(20,120)$/MWh；储能容量 $1$ MWh，初末 SOC 为零，
+$\eta^{ch}=\eta^{dis}=0.9$、$\rho=1$，吞吐费与出口为零。低价时充满需要
+$P_0^{ch}=1/0.9=1.111111111$ MW，高价时最多放出
+$P_1^{dis}=0.9$ MW。故
+\begin{equation}
+ P^{imp}=(2.111111111,0.1),\quad E=(0,1,0),\quad C^*=54.2222222222.
+\end{equation}
+
+\begin{center}\small
+\begin{tabular}{@{}lrrr@{}}\toprule
+量 & 解析值 & StrictHiGHS & 最大绝对误差\\\midrule
+充/放与中间 SOC & $(1.111111,0.9,1)$ & 同左 & $1.110\times10^{-16}$\\
+目标/总成本 & $54.2222222222$ & $54.2222222222$ & $7.105\times10^{-15}$\\\bottomrule
+\end{tabular}
+\end{center}
+无储能成本为 $140$，因此该最优解节省 $85.7777777778$。这项比较使用解析 LP，而非另一个调用同一 AML
+模型的求解器包装。
+
+\subsection{实验 C：24 时段全载能样例}
+
+样例由 \srcpath{src/integrated\_energy/integrated\_energy\_optimizer.cpp:make\_sample\_campus\_ies\_data}
+确定性生成，包含四载能、五类库存、交通、CCUS 与成本目标。StrictHiGHS 返回 optimal：总成本
+$14039.18038252814$，购电 $52.6302726071$ MWh，可再生出力 $110.6860329018$ MWh，总排放
+$68.7957633345$ tCO$_2$，残余碳 $12.7846107510$ tCO$_2$。
+
+Python oracle 从输出向量独立重建每条作者方程，最大误差如下。
+\begin{center}\small
+\begin{tabular}{@{}lrlr@{}}\toprule
+检查族 & 最大误差 & 检查族 & 最大误差\\\midrule
+电平衡 / MW & $1.776\times10^{-15}$ & 热平衡 / MW & $4.441\times10^{-16}$\\
+氢平衡 / MW & $4.441\times10^{-16}$ & 燃料平衡 / MW & $5.343\times10^{-16}$\\
+五类库存 / MWh & $1.066\times10^{-14}$ & 转换等式 & $0$\\
+可再生可用量 / MW & $9.797\times10^{-16}$ & 交通映射 & $0$\\
+碳关系 / tCO$_2$ & $2.498\times10^{-15}$ & 总成本重算 & $1.819\times10^{-12}$\\\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{证据强度与未覆盖项}
+
+实验 A/B 是独立解析最优值比较；实验 C 是独立方程残差与目标重算，能发现符号、索引、单位和抽取错误，
+但不能独立证明 24 h 解的全局最优性。三项都没有验证 AC 电压、无功或支路约束；也没有第二个外部 MILP
+后端的全模型最优值对照。MIPSolvers 本地 HEAD 与仓库 pin 不一致，因此这些数字是当前工作树证据，
+不是已固定依赖的发布基线。
+
+\begin{gapnote}
+要把 24 h 最优性升级为跨引擎证据，需要维护一个不复用 AML builder 的独立 LP/MILP 公式导出或外部
+模型，并比较目标、离散模式和全部原始残差。当前证据只在上述三层范围内准入。
+\end{gapnote}

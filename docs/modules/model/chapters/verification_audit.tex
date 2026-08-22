@@ -1,0 +1,57 @@
+\section{测试矩阵、审计证据与准入边界}
+
+\subsection{核心注册测试}
+
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{4.8cm}L{10.4cm}@{}}
+\toprule 目标 & 主要证据\\\midrule
+\endfirsthead
+\toprule 目标 & 主要证据\\\midrule\endhead
+\texttt{test\_model\_semantics\_contract} & rich collection 语义目录唯一覆盖、模块数据契约、DCStorage 物化幂等和 DC 注入兼容视图\\
+组件数学审计测试 & \srcpath{tests/model/test\_component\_models\_math\_audit.cpp}：charger/ER、变压器、三相、收缩、死岛、typed ID、归因、单位、参数和 validation 的反例\\
+\texttt{test\_rich\_components} & 主要 AC/DC/换流器/聚合组件 JSON round-trip 和算例 builder\\
+\texttt{test\_component\_io\_mapping} & collection registry、动态 profile、参数规则、数字孪生证据和跨字段审计\\
+\texttt{test\_result\_attribution} & rich identity、恢复等级、合并自环电纳与设备结果\\
+\texttt{test\_validation} & 引用、重复 ID、上下限、参考角色和四级校验\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+测试分属多个模块，说明模型语义是跨模块契约。修改组件字段至少需要检查 JSON round-trip、projection、
+对应求解装配和结果归因四个方向；只添加 POD 字段和序列化测试不能证明功能闭环。
+
+\subsection{历史数学审计的地位}
+
+同目录 \srcpath{component\_models\_math\_audit.tex} 记录 2026-08-02 前后的逐项修复：A1--A3、
+B1--B25、C1--C20 已按报告处置，D1--D20 保留为观察项。该文件含历史行号、当时构建路径和旧缺陷描述，
+用于追溯为何契约收紧，不是当前行为规范。当前事实以源码、本手册和最新注册测试为准。
+
+\subsection{剩余观察边界}
+
+现有审计仍提示的工程债务包括：部分 dead public API、组件同义字段命名差异、宏设备/三相投影的
+不可逆信息、参数来源多层、某些动态和可靠性字段仅被特定模块消费，以及结果终端符号跨族不统一。
+这些观察不能自动解释为当前数值缺陷，但在新增工作流时必须重新审计。
+
+\subsection{变更准入清单}
+
+\begin{enumerate}
+  \item 新字段必须声明单位、符号、稳定身份/端子和参数所有者；
+  \item 为每个相关 workflow 更新 \texttt{component\_runtime\_semantics()}；
+  \item 更新 JSON/外部格式映射，明确缺失与回退，不静默伪造来源；
+  \item 若进入 canonical，补 projection provenance、AC/DC 同号、dead island 和幂等测试；
+  \item 若结果可见，补 Strong/Approximate/AuditOnly/Unsupported 归因及索引空间；
+  \item 若改变方程或容量语义，同步下游 PF/OPF/可靠性/弹性/市场/时序手册和回归；
+  \item 运行 \texttt{git diff --check}、聚焦测试及可承受的完整 Release CTest，分别记录未执行项。
+\end{enumerate}
+
+\subsection{验证口径}
+
+现有开发状态中模型数学审计的历史 Debug 证据与当前 Release 树并非同一构建。本文档改写不改变 C++ 行为；
+本轮会重跑可用的聚焦目标并单独记录。未运行 sanitizer、全量 CTest 或外部工具时，不得把“手册编译通过”
+写成模型算法验证。
+
+\subsection{工业应用边界}
+
+模型层只保证数据表示和已执行转换的契约，不保证输入真实、状态可观、方程适定、优化全局最优或控制安全。
+生产应用至少还需数据来源审计、所需 validation level、投影证书、具体分析的 validity/model scope、
+独立残差或交叉引擎证据，以及结果到稳定资产 ID 的完整归因。

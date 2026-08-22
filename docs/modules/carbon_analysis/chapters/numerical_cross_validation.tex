@@ -1,0 +1,25 @@
+% numerical_cross_validation.tex -- 碳流数值证据
+\section{数值结果与独立方程校核}\label{sec:carbon-numerical}
+
+本轮 macOS Release 直接运行三个碳流目标：
+\srcpath{test_carbonflow_tracing} 通过 21 cases/246 assertions，
+\srcpath{test_carbonflow_dynamic_storage} 通过 15 cases/126 assertions，
+\srcpath{test_carbonflow_case_validation} 通过 5 cases/202 assertions。
+
+\subsection{快照追踪证据}
+测试覆盖比例追踪、矩阵法、AC/DC 分域、支路损耗责任、零功率源、奇异矩阵诊断和 JSON
+结果语义。准入条件为：已收敛 PF 才允许 \fld{tracing\_verified=true}；矩阵法必须报告
+有限的秩和相对残差；节点功率平衡误差必须不超过选项 \fld{verification\_tol}。
+这些测试是独立于生产调用顺序的闭式/构造网络回归，但没有与 OpenDSS 或第三方碳流软件
+进行交叉引擎比较。
+
+\subsection{动态储能证据}
+15 个动态储能用例覆盖充电碳汇、放电碳源、端末 SOC 和逐小时快照。测试运行中出现的
+“bus has load but no in-service connection”只是构造案例的拓扑 warning，测试仍以结构化
+结果和 126 条断言通过；它不能被解释成一般孤岛系统均可验证。
+
+\subsection{数值边界}
+矩阵秩亏、潮流不收敛、非有限输入和缺少逐时系统快照会使结果进入未验证路径；报告必须
+同时保留 \fld{matrix\_solved}、\fld{power\_balance\_verified} 和错误列表。当前没有独立
+稀疏线性代数 oracle 的机器可读结果，故本节只声明实现—方程一致性，不声明碳流估计的
+外部准确度。

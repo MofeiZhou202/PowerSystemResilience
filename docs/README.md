@@ -60,7 +60,8 @@
 `src/` 的 23 个顶层模块均在 `docs/modules/<module>/` 中具有唯一中文手册目录。原
 `ComponentModels`、`PowerFlow`、`OptimalPowerFlow` 的材料已分别归并到 `model`、
 `power_flow`、`optimal_power_flow`，不再作为平行活目录。所有数学公式只描述源码实际实现，
-并要求绑定实现函数及行号；无法逐式核验的理论材料不得进入模块主手册。
+并要求实现转写绑定 `文件:函数名` 符号锚点；通用理论必须进入独立理论章，并用实现对应表和
+`gapnote` 与当前运行行为隔离。
 
 完整清单、源码映射和编译入口见 [模块手册索引](modules/README.md)，统一编译方法见
 [LaTeX 文档说明](latex/README.md)。

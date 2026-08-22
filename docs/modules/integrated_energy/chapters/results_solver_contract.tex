@@ -1,0 +1,66 @@
+\section{求解器状态、结果向量与可视化契约}
+
+\subsection{可行、最优与失败语义}
+
+\fld{feasible} 精确等于 AML \srcpath{SolveResult::has\_primal}。
+\fld{optimal} 要求后端报告 optimal、\fld{optimality\_gap} 有限且
+\begin{equation}
+\fld{optimality\_gap}\le\fld{mip\_gap\_tol}+10^{-12}.
+\end{equation}
+达到时限或 fallback 后只要存在原始解，\fld{feasible} 可以为真而 \fld{optimal} 为假。
+无原始解时函数仍返回状态、实际求解器、目标值和耗时，但不填充时序结果。
+
+\subsection{结果长度与索引}
+
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{5.0cm}L{2.0cm}L{8.0cm}@{}}
+\toprule
+结果族 & 长度 & 单位/口径\\\midrule
+\endfirsthead
+\toprule 结果族 & 长度 & 单位/口径\\\midrule\endhead
+所有 \fld{p\_*}/\fld{q\_*}/\fld{h\_*}/\fld{f\_*} 流率 & $n$ & MW，按输入时间位置\\
+\fld{e\_storage\_mwh}、\fld{q\_storage\_mwh}、三层 \fld{h\_*\_storage\_mwh} & $n+1$ & MWh，含初态和末态\\
+\fld{d\_ev\_km}/\fld{d\_hv\_km}/\fld{d\_icv\_km} & $n$ & km/步，固定比例映射\\
+\fld{emissions\_tco2}/\fld{co2\_captured\_tco2}/\fld{carbon\_residual\_tco2} & $n$ & tCO$_2$/步\\
+\fld{p\_pcc\_mw} & $n$ & MW，export-import；\fld{pcc\_ac\_bus} 仅归因标签\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+提取函数把绝对值小于 $10^{-7}$ 的原始变量置为零。这是报告清洗阈值，不是可行性容差；
+用清洗后序列复算平衡时应使用与测试一致的正容差，而不能期待位级相等。
+
+\subsection{汇总量}
+
+所有 MW 序列总能量按 $\Delta t\sum_tP_t$ 计算；碳变量已经是每步 tCO$_2$，直接求和。
+\fld{total\_transport\_km} 是三类求解里程之和，关闭交通时为零。
+\begin{equation}
+\fld{renewable\_utilization}=
+\begin{cases}
+E^{renew}/E^{available},&E^{available}>10^{-9},\\
+0,&\text{否则。}
+\end{cases}
+\end{equation}
+\fld{total\_cost} 由提取后序列重新计算，项与成本目标一致；当目标为 Carbon、MinCurtailment 或 Weighted 时，
+\fld{objective} 与 \fld{total\_cost} 不相等是预期行为。
+
+\subsection{有效性和模型限制}
+
+\texttt{CampusIESValidity} 的当前默认/返回口径为：多载能平衡和聚合 PCC 有功已建模，
+电气网络耦合、无功、电压和支路限值均为 false。\fld{model\_scope} 固定为
+\srcpath{isolated-campus-multi-carrier-milp}；\fld{model\_limitations} 至少包含 PCC 未接 AC 网络及
+无功/电压/支路/安全约束未建模两项。调用方不得用空 limitations 作为成功条件，也不得在外层删除这些声明。
+
+\subsection{Sankey 边}
+
+\texttt{CampusIESSankeyFlow} 使用英文 source/target、MWh 数值和 carrier 字符串。
+\srcpath{add\_sankey\_flow} 只保留大于 $10^{-9}$ 的边，因此零流不会出现。边值由设备流量积分，
+包括充放电两条方向边，但没有单列保持损失、转换损失和全部 CCUS 碳流；故 Sankey 是展示视图，
+不是可从边集合独立复算的完整守恒图。
+
+\subsection{复杂度与数值风险}
+
+连续变量和逐时约束数量均为 $O(n)$。开启购售互斥增加 $n$ 个二进制；开启储能互斥增加
+$5n$ 个二进制，全部开启共 $6n$。LP 路径的实际复杂度取决于后端稀疏线性代数；MILP 最坏复杂度
+为指数级，\fld{time\_limit\_sec} 和 gap 是必要证书字段。固定 $10^{-6}$ 目标扰动、$10^{-7}$ 提取清零和
+$10^{-9}$ 汇总/Sankey 阈值处在不同语义层，不能互换。

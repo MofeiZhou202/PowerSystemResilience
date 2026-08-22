@@ -1,0 +1,65 @@
+\section{固定种子故障注入与统计证据}
+
+\subsection{活动设计}
+
+\texttt{FaultCampaignOptions} 默认 seed=20260818、每类重复 25、residual tolerance=$10^{-6}$；
+结构故障可选执行 solver-only 基线，并分别用 330/823 AC bus 控制结构/影响求解规模。
+\srcpath{run\_fault\_campaign} 对每个系统、每个故障类和每次重复生成一行，样本不因失败或不收敛删除。
+
+\subsection{故障类与期望}
+
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{5.0cm}L{3.2cm}L{7.0cm}@{}}
+\toprule 类 & 期望接纳 & 机理\\\midrule
+\endfirsthead
+\toprule 类 & 期望接纳 & 机理\\\midrule\endhead
+\texttt{ValidControl} & 是 & 合法重标记/控制样本，测过拒\\
+\texttt{MissingVscAcTerminal} & 否 & VSC AC 端子引用不存在\\
+\texttt{MissingVscDcTerminal} & 否 & VSC DC 端子引用不存在\\
+\texttt{MissingAcReference} & 否 & 删除 AC 角度参考\\
+\texttt{MissingDcSupport} & 否 & 删除 DC 电压支撑\\
+\texttt{InvalidConverterEfficiency} & 否 & 效率越过物理范围\\
+\texttt{DuplicateAcBusIdentity} & 否 & 稳定 AC bus ID 重复\\
+\texttt{PlausibleLoadError} & 是/结构上可接纳 & 合理范围参数错误，观察物理影响而非期望结构拒绝\\
+{\ttfamily\scriptsize\shortstack[l]{PlausibleConverter\\SetpointError}} & 是/结构上可接纳 & 合理换流器设定偏移，需运行证据发现\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+“expected admissible”表示当前结构准入真值，不表示参数与真实系统一致。合理参数错误是负控制：若结构守卫拒绝全部此类样本，
+反而可能说明过拟合或过拒。
+
+\subsection{五类检测器}
+
+每个 fault 生成 validation、solver-only、validation+solver、full-SPPT、SPPT+independent 五组 summary。
+solver-only 只有实际尝试的行进入分母；其他检测器以全部相应行为分母。full-SPPT 使用 guard 拒绝，
+SPPT+independent 仅在 guard 接纳且 solver 收敛后可能由 supported independent residual 追加拒绝。
+
+\subsection{定位与物理影响}
+
+样本行保存 target、magnitude、各检测器裁决、是否 localized、solver/independent residual、四阶段耗时。
+对非结构且非 valid control 的样本，若 baseline 和 injected solve 均可得，还报告 AC/DC 电压、支路有功和 VSC
+有功的最大差。零影响可能来自故障未激活、结果形状不匹配或数值抵消，必须联合 note 解读。
+
+\subsection{Wilson 区间}
+
+对 $k/n$ 检出率，代码使用 $z=1.96$ 的 Wilson 95\% 区间：
+\begin{equation}
+c=\frac{\hat p+z^2/(2n)}{1+z^2/n},\qquad
+h=\frac{z}{1+z^2/n}\sqrt{\frac{\hat p(1-\hat p)}{n}+\frac{z^2}{4n^2}}.
+\end{equation}
+$n=0$ 的 summary 必须按实现的零口径解读，不能制造置信度。重复样本共享同一基础系统时未必统计独立，
+故区间主要是固定活动的二项摘要，不是所有未来电网的总体覆盖保证。
+
+\subsection{输出契约}
+
+\fld{samples\_csv()} 输出全部逐样本字段。\fld{summary\_csv()} 依次输出检测器、故障类、样本数、
+检出数、定位数、检出率和置信区间。\fld{to\_latex()} 有意排除两个 plausible parameter error 类，
+仅展示结构活动摘要。论文或报告若讨论参数错误，
+必须读取 CSV，不得从压缩 LaTeX 表推断其不存在。
+
+\subsection{可复现性要求}
+
+报告活动结果必须保存 seed、repetitions、系统 corpus 精确版本、故障预算、solver 配置、容差、所有未删除行和
+summary 生成代码版本。改变 bus budget 会改变 solver-only 分母；改变 local MIPSolvers/PF 实现会改变收敛和影响量，
+不能与旧活动结果无条件拼接。

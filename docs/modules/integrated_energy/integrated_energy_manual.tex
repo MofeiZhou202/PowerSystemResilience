@@ -1,141 +1,39 @@
 % !TEX program = xelatex
-% 编译方式：在本目录执行两遍 xelatex（详见 docs/_manual_common/README.md）。
-% 源码依据：src/integrated_energy/ 与 include/hacdcpf/integrated_energy/ 源码及
-%           docs/theory/integrated_energy_contract.md，公式与参数以代码为准。
 \documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
 \usepackage{../../_manual_common/hysim_manual}
 
 \title{\textbf{交直流混合高弹性能源电力系统仿真平台}\\[0.5em]
-       {\Large 综合能源（园区多能流）技术手册}\\[0.3em]
-       {\large 数学模型、接口参数、验证校核与工业级评价}}
+       {\Large 园区综合能源系统优化技术专著}\\[0.3em]
+       {\large 电--热--氢--燃料耦合、分层储能、交通与碳约束}}
 \author{HySim-XJTU-HRPES（西安交通大学 HRPES 团队）}
 \date{\today}
 
 \begin{document}
 \maketitle
 \begin{abstract}
-\noindent 本手册依据 HySim-XJTU-HRPES 平台综合能源模块
-（\srcpath{src/integrated\_energy/}、\srcpath{include/hacdcpf/integrated\_energy/}）整理，
-覆盖孤立园区多能载荷（电/热/氢/燃料/交通/储能）的混合整数线性规划（MILP），
-命名空间 \texttt{hacdcpf::integrated\_energy}。诚实口径为本手册核心：本模块\textbf{不是交流网络模型}，
-\fld{model\_scope}=\texttt{isolated-campus-multi-carrier-milp}，\fld{electrical\_network\_coupled}=false，
-不含无功、电压、支路潮流或安全约束；并网点（PCC）交换为单一聚合进/出功率对，
-\fld{fixed\_power\_factor} 必须恰为 $1.0$（其余取值被拒绝）。全部结论以源码与契约
-\srcpath{docs/theory/integrated\_energy\_contract.md} 为准。文档版式与《碳流追踪与碳排放核算技术手册》一致。
+本文档对应 \srcpath{src/integrated\_energy/} 与
+\srcpath{include/hacdcpf/integrated\_energy/}，以园区多载能线性/混合整数优化为对象，
+完整说明数据归一化、电--热--氢--燃料平衡、五类库存、分层储氢、交通能源需求、
+CCUS、四类目标、后端选择和结果归因。手册采用“理论--实现--接口--数值证据--准入”
+双层结构：理论章给出标准能源枢纽模型及成立条件，源码等价章只转写当前 C++ 路径。
+
+当前求解器不接收 \texttt{HybridPowerSystem}，\fld{pcc\_ac\_bus} 只是稳定归因标签；
+模型不包含交流无功、电压、支路潮流或安全约束。任何 \fld{feasible} 结果因此只证明
+所建多载能代数模型存在后端原始解，不构成电网可行性证书。
 \end{abstract}
 
 \tableofcontents
 \newpage
 
-\section{阅读指南与约定}
-\subsection{数据来源}
-\begin{itemize}
-  \item \srcpath{include/hacdcpf/integrated\_energy/integrated\_energy\_optimizer.hpp} —— 唯一公共入口；
-  \item \srcpath{integrated\_energy\_options.hpp}、\srcpath{integrated\_energy\_result.hpp}、
-        \srcpath{integrated\_energy\_system.hpp} —— 选项、结果与数据集结构；
-  \item \srcpath{src/integrated\_energy/integrated\_energy\_optimizer.cpp} —— MILP 组装与求解实现；
-  \item \srcpath{docs/theory/integrated\_energy\_contract.md} —— 建模范围/有效性/局限契约；
-  \item \srcpath{tests/test\_integrated\_energy\_campus.cpp} —— 验证依据。
-\end{itemize}
-命名空间为 \texttt{hacdcpf::integrated\_energy}。
-
-\subsection{单位制与索引空间}
-时域为 \fld{num\_steps} 步、单步 \fld{step\_duration\_hr} 小时；功率 MW、能量 MWh、
-氢/燃料以等效 MW/MWh 计、距离 km、碳量 tCO\textsubscript{2}、电价 \$/MWh。所有平衡按
-时间步索引，各能量载体（电/热/氢/燃料/交通/储能）分别守恒；\fld{pcc\_ac\_bus} 仅为
-归因标签，\textbf{不}进入任何交流网络求解，并网点仅有单一聚合进出功率
-$p^{pcc}_t=p^{exp}_t-p^{imp}_t$
-（实现：\srcpath{src/integrated\_energy/integrated\_energy\_optimizer.cpp:solve\_campus\_ies}，export 减 import）。
-
-\subsection{诚实口径}
-求解结果的 \fld{model\_scope} 固定为 \texttt{isolated-campus-multi-carrier-milp}，
-有效性结构 \texttt{CampusIESValidity} 明示：\fld{multi\_carrier\_balances\_modelled}=true、
-\fld{aggregate\_pcc\_active\_power\_modelled}=true，而
-\fld{electrical\_network\_coupled}=false、\fld{reactive\_power\_modelled}=false、
-\fld{voltage\_and\_branch\_limits\_enforced}=false。\fld{fixed\_power\_factor} 必须恰为
-$1.0$，否则拒绝。转换/储能效率与保持率须为 $(0,1]$ 内有限值，否则抛异常；
-\fld{eta\_wasteheat} 与 \fld{eta\_carbon\_to\_fuel} 不在校验之列（默认 0.0，按原值参与建模），
-校验字段清单见源码等价章；热泵 COP 可大于 1。历史输入的默默归一化
-（如负容量截断、COP 缺省回填为 3.2）不构成输入校验；Sankey 流为可视化产物，非额外平衡约束。
-
-\section{功能定位与架构}
-\subsection{公共入口族}
-\begin{center}\footnotesize
-\begin{tabular}{@{}L{6.6cm}L{3.4cm}L{5.0cm}@{}}
-\toprule
-入口 & 定义位置 & 说明\\
-\midrule
-\srcpath{solve\_campus\_ies(data, options)} & integrated\_energy\_optimizer.hpp & 唯一公共入口：求解多能流 MILP\\
-\srcpath{make\_sample\_campus\_ies\_data(num\_steps)} & integrated\_energy\_system.hpp & 生成演示用完整数据集\\
-\bottomrule
-\end{tabular}
-\end{center}
-
-\subsection{关键数据结构}
-\compmeta{CampusIESData}{include/hacdcpf/integrated\_energy/integrated\_energy\_system.hpp}
-主要字段：负荷/资源曲线 \fld{electric\_load\_mw}/\fld{heat\_load\_mw}/\fld{hydrogen\_load\_mw}/
-\fld{fuel\_load\_mw}/\fld{transport\_demand\_km}/\fld{solar\_available\_mw}/\fld{wind\_available\_mw}；
-价格 \fld{grid\_buy\_price}/\fld{grid\_sell\_price}/\fld{grid\_carbon\_tco2\_mwh}；
-装机上限 \fld{chp\_power\_max\_mw}/\fld{electrolyzer\_power\_max\_mw}/\fld{fuel\_cell\_power\_max\_mw}/
-\fld{heat\_pump\_power\_max\_mw}；效率 \fld{eta\_electrolysis}/\fld{eta\_fuelcell}/
-\fld{cop\_heatpump}/\fld{eta\_chp\_*}；分层储氢（日/周/季容量与层间转移）；
-交通占比 \fld{ev\_ratio}/\fld{hv\_ratio}/\fld{icv\_ratio} 与 \fld{alpha\_*\_mwh\_per\_km}；
-CCUS（\fld{ccus\_capture\_fraction}、\fld{co2\_budget\_tco2}）。
-
-\compmeta{CampusIESOptions}{include/hacdcpf/integrated\_energy/integrated\_energy\_options.hpp}
-主要字段：\fld{solver}（\texttt{Auto}/\texttt{HiGHS}/\texttt{SCIP}/\texttt{Gurobi}/\texttt{Native}）、
-\fld{objective}（\texttt{Cost}/\allowbreak\texttt{Carbon}/\allowbreak
-\texttt{MinCurtailment}/\allowbreak\texttt{Weighted}）、
-\fld{enable\_carbon\_budget}、\fld{enforce\_terminal\_storage\_cyclic}、
-\fld{enable\_hydrogen\_storage\_layers}、\fld{time\_limit\_sec}、\fld{mip\_gap\_tol} 与各权重。
-
-\compmeta{CampusIESResult}{include/hacdcpf/integrated\_energy/integrated\_energy\_result.hpp}
-主要字段：\fld{feasible}/\fld{optimal}、\fld{objective}、
-\fld{model\_scope}=\texttt{isolated-campus-multi-carrier-milp}、\fld{validity}、
-\fld{model\_limitations}；逐步向量 \fld{p\_grid\_import\_mw}/\fld{p\_grid\_export\_mw}、\fld{p\_pcc\_mw}、
-\fld{p\_chp\_mw}/\fld{q\_chp\_mw}/\fld{f\_chp\_mw}、\fld{p\_electrolysis\_h2\_mw}、\fld{h\_storage\_*}、
-\fld{h\_weekly\_*}/\fld{h\_seasonal\_*}、\fld{d\_ev\_km}/\fld{d\_hv\_km}/\fld{d\_icv\_km}；
-可视化 \texttt{CampusIESSankeyFlow}。有效性 \texttt{CampusIESValidity} 见诚实口径。
-
+\input{chapters/overview_contract}
+\input{chapters/theory_multi_carrier_optimization}
+\input{chapters/theory_conservation_storage}
+\input{chapters/theory_optimization_duality}
 \input{chapters/source_equivalent_milp}
-
-\section{接口与参数}
-\begin{paramtable}
-\fld{num\_steps} & $T$ & 步 & 整数 & — & 优化时域步数\\
-\fld{step\_duration\_hr} & $\Delta t$ & h & 正数 & — & 单步时长\\
-\fld{eta\_electrolysis} & $\eta_{\text{ely}}$ & — & $(0,1]$ & — & 电解制氢效率\\
-\fld{eta\_fuelcell} & $\eta_{fc}$ & — & $(0,1]$ & — & 燃料电池发电效率\\
-\fld{cop\_heatpump} & COP & — & $\ge1$ & $3.2$ & 热泵性能系数（可$>$1）\\
-\fld{chp\_power\_max\_mw} & — & MW & 正数 & — & CHP 电出力上限\\
-\fld{electrolyzer\_power\_max\_mw} & — & MW & 正数 & — & 电解槽功率上限\\
-\fld{fuel\_cell\_power\_max\_mw} & — & MW & 正数 & — & 燃料电池功率上限\\
-\fld{heat\_pump\_power\_max\_mw} & — & MW & 正数 & — & 热泵电功率上限\\
-\fld{ccus\_capture\_fraction} & $\phi$ & — & $0\sim1$ & — & CCUS 捕集率\\
-\fld{co2\_budget\_tco2} & — & tCO\textsubscript{2} & 正数 & — & 碳预算（启用时）\\
-\fld{mip\_gap\_tol} & — & — & $\ge0$ & — & MILP 相对间隙容差\\
-\fld{time\_limit\_sec} & — & s & 正数 & — & 求解时限\\
-\fld{fixed\_power\_factor} & — & — & $=1.0$ & $1.0$ & 功率因数（仅允许 1.0，其余拒绝）\\
-\end{paramtable}
-\fld{objective} 与 \fld{solver} 决定目标口径与后端；\fld{enable\_hydrogen\_storage\_layers}
-控制是否启用日/周/季三层储氢；\fld{enforce\_terminal\_storage\_cyclic} 施加储能周期性末态约束。
-
-\section{验证与边界局限}
-\subsection{验证与校核}
-注册测试：\srcpath{test\_integrated\_energy\_campus}
-（\srcpath{tests/test\_integrated\_energy\_campus.cpp}），覆盖多能流平衡、分层储氢、
-目标切换与有效性字段一致性。
-
-\subsection{边界与局限（如实标注）}
-\begin{itemize}
-  \item \textbf{非交流网络模型}：求解不含 \texttt{HybridPowerSystem}、无功、电压、支路潮流、
-        短路或安全约束；\fld{pcc\_ac\_bus} 仅为归因标签；
-  \item \fld{fixed\_power\_factor} 必须恰为 $1.0$，其余取值被拒绝；建模范围在
-        \fld{model\_scope}/\fld{validity}/\fld{model\_limitations} 中重申；
-  \item 转换/储能效率与保持率须为 $(0,1]$ 内有限值（\fld{eta\_wasteheat}、
-        \fld{eta\_carbon\_to\_fuel} 除外，二者不校验、按原值使用），热泵 COP 可$>$1；
-  \item 历史输入的默默归一化（负容量截断、COP 回填为 3.2）不构成输入校验；
-  \item Sankey 流（\texttt{CampusIESSankeyFlow}）为可视化产物，非新增平衡约束。
-\end{itemize}
+\input{chapters/data_options_contract}
+\input{chapters/results_solver_contract}
+\input{chapters/numerical_cross_validation}
+\input{chapters/verification_admission}
 \input{../../_manual_common/industrial_evaluation}
 
 \end{document}

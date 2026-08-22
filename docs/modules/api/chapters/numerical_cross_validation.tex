@@ -1,0 +1,20 @@
+% numerical_cross_validation.tex -- API 数值与契约证据
+\section{能力真值表、入口回归与验证边界}\label{sec:api-numerical}
+
+macOS Release 的 \srcpath{test_solver_capabilities} 通过 17 cases/61 assertions，覆盖能力
+结构、可选后端派生标志和门面查询；\srcpath{test_hacdcpf} 提供公共入口装配回归。
+测试重点不是求解器精度，而是“能力报告与实际编译配置一致”。
+
+\begin{center}\small
+\begin{tabular}{@{}L{6.5cm}L{5.0cm}@{}}
+\toprule 契约 & 当前证据\\\midrule
+\fld{has\_sparse\_lu}=true、\fld{has\_native\_ipm}=true & Release 能力测试通过\\
+\fld{supports\_integer\_variables}=H\lor G\lor S & 17 cases/61 assertions\\
+safe 入口返回结构化 Result & 公共 API 回归覆盖\\
+句柄拓扑改变后重建 & 需专项生命周期测试，当前未独立量化\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+当前没有跨语言 ABI、异常吞吐性能或句柄长期时序 benchmark；本章不把门面测试扩展成各
+专项求解器的数值认证，也不把能力为 true 解释成特定算例必然收敛。

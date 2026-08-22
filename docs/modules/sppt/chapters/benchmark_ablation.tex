@@ -1,0 +1,51 @@
+\section{性能基准、机制消融与工具链}
+
+\subsection{自包含性能基准}
+
+\srcpath{src/sppt/benchmark.cpp:run\_benchmark\_case} 分别计时：
+\texttt{project\_to\_canonical\_models}、\texttt{make\_solver\_data}、\texttt{solve\_power\_flow}，
+再独立运行 MR3 PF 得到 commuting residual。每阶段采用
+\begin{equation}
+t_{reported}=\min_{1\le j\le\max(1,N)}t_j,
+\end{equation}
+即 best-of-N wall-clock；三个最小值可能来自不同重复，不能相加解释为一次端到端延迟。
+volatile sink 仅防止编译器消除投影/装配结果。
+
+\texttt{BenchmarkRow} 保存 authored AC bus/branch 数、PF 收敛、迭代、三段 ms、交换残差和 note。
+异常保留行。CSV 含全部字段，LaTeX 表省略 branch 数、收敛/迭代和 note；正式性能研究应另做 warm-up、
+CPU 绑定、分位数和内存统计，当前工具仅为回归/规模观察。
+
+\subsection{消融 A：移除 provenance}
+
+\srcpath{src/sppt/ablation.cpp:ablate\_provenance} 估算没有 provenance 时不可归因实体：
+合并组除代表外的成员、dead buses，以及 switch、circuit breaker、2W transformer、每台 3W transformer 的三条
+expanded branch。guarded 计数固定报告 0，fraction 分母为
+$\max(1,n_{acbus}+n_{acbranch})$。这是结构计数模型，不是重新运行一个真正删除所有 mapping 的生产分支。
+
+\subsection{消融 B：移除角色门}
+
+代码把所有 AC slack 降为 PQ、清除 generator slack 并停运 external grid；
+\fld{role\_guard\_rejects} 记录守卫是否拒绝，\fld{role\_raw\_silent} 记录原始 PF 是否仍返回 converged。
+后者依赖求解器隐式参考和校验路径，不应被解释为每个算例都必然静默错误。
+
+\subsection{消融 C：移除收缩保护}
+
+对有 switch/CB 的系统，guarded 路径正常装配；ablated 路径把这些设备替换为
+$10^{-6}+j10^{-6}$ pu 支路并清空设备 vector，使合并不触发。比较 Ybus 最大对角元
+\begin{equation}
+B=\frac{\max_i|Y_{ii}^{unmerged}|}{\max_i|Y_{ii}^{merged}|}.
+\end{equation}
+这是数值尺度放大指标，不等于条件数，也不直接证明 Newton 失败；其作用是展示未收缩极小阻抗的病态风险。
+
+\subsection{聚合与渲染}
+
+\texttt{AblationStudy} 汇总无 provenance 的不可归因总数、raw silent solve 数和最大 blowup，提供 CSV/LaTeX。
+不可读文件保留 note/空行而不终止 corpus。消融路径只用于证据，禁止作为生产分析替代路径。
+
+\subsection{命令行工具}
+
+仓库构建 \texttt{sppt\_certify}、\texttt{sppt\_ablation}、\texttt{sppt\_benchmark}、
+\texttt{sppt\_scale\_fault\_campaign} 和 \texttt{sppt\_agent\_demo}（存在源文件时）。Python 工具生成活动图、
+机制图、pandapower cross-check 或本地模型评估。工具输出不是规范源；其命令、输入 corpus、环境和生成文件
+必须与结果一同保存。
+

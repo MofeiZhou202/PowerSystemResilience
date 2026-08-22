@@ -1,0 +1,71 @@
+\section{单位换算、标准参数库与数据补全}
+
+\subsection{实际值到标幺值}
+
+\srcpath{src/model/unit\_conversion.cpp:convert\_actual\_to\_per\_unit} 原地修改系统，并通过
+\fld{per\_unit} 防止重复转换。AC 线路基准
+\begin{equation}
+Z_b=\frac{V_{LL,kV}^2}{S_{base,MVA}}\ \Omega,
+\end{equation}
+若给出每 km 参数和长度，则单回路 $R_\Omega=r'\ell$、$X_\Omega=x'\ell$；并联 $n_p$ 回路的
+$r_{pu},x_{pu}$ 再除以 $n_p$。总电纳按 $n_p$ 相乘。仅提供电容时
+\begin{equation}
+B_S=2\pi f\,c'_{nF/km}\,10^{-9}\ell,\qquad B_{pu}=B_SZ_b.
+\end{equation}
+
+DC 支路采用 $R_b=V_{dc,kV}^2/S_{base,MVA}$。母线角度从 degree 转 rad 的 helper 与主系统
+\fld{va\_deg} 存储语义必须区分：模型 POD 仍保存 degree，具体求解装配时转换。
+
+\subsection{变压器参数变换}
+
+二绕组短路试验的设备基准量满足
+\begin{equation}
+z=\frac{v_k}{100}\frac{S_b}{S_n},\qquad
+r=\frac{v_{kr}}{100}\frac{S_b}{S_n},\qquad
+x=\sqrt{\max(0,z^2-r^2)}.
+\end{equation}
+\srcpath{network\_utils.cpp:rx\_from\_vk\_vkr} 实现该式。并联台数在投影中使阻抗除以 $n_p$、
+容量乘以 $n_p$，产物重置为单个等值支路，避免下游二次缩放。三绕组按三对短路阻抗先构造星形腿，
+再形成三条规范 pair branch；每对使用对应绕组电压基准和移相。
+
+\subsection{标准参数规则}
+
+\texttt{StandardParameterLibrary} 包含 profile id、来源条目和带 min/default/max 的规则。
+\srcpath{make\_standard\_parameter\_library} 构造 50 Hz 配网规则，
+\srcpath{validate\_standard\_parameter\_library} 检查规则自身，
+\srcpath{validate\_component\_parameters} 只审计系统而不修改，
+\srcpath{apply\_standard\_parameter\_library} 按缺失/非法字段补全并返回 changes、issues、warnings。
+
+调用顺序应为“保留 authored 值 → 审计 → 明确选择是否补全 → 再 validation”。补全报告是研究数据来源的一部分；
+不得只保存补全后的系统而丢弃回退证据。
+
+\subsection{设计手册补全}
+
+\srcpath{complete\_design\_handbook\_parameters} 对线路截面、材料、环境温度、载流、可靠性和变压器
+短路参数执行工程估算。它可能使用 IEC 60228/GB/T 3956 电阻表和温度修正，也可能在数据不足时使用
+声明的工程假设。\texttt{DesignHandbookCompletionReport} 的 inferred/changed/warnings 必须与结果一起归档。
+
+\subsection{参数来源优先级与风险}
+
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{4.0cm}L{5.0cm}L{6.4cm}@{}}
+\toprule 来源 & 适用时机 & 风险控制\\\midrule
+\endfirsthead
+\toprule 来源 & 适用时机 & 风险控制\\\midrule\endhead
+用户/导入 authored 值 & 数据源明确 & validation 不得静默覆盖冲突的双侧界限\\
+结构体构造默认 & 新建对象 & 可能只是兼容占位，不等于设备典型值\\
+\texttt{Defaults} & 系统共享基准/容差 & 不能外推到所有组件字段\\
+StandardParameterLibrary & 规则化补缺和范围审计 & 保存来源、changes、warnings\\
+TypicalParameters & 示例/快速补全 & 不得改写合法零状态，如 scaling=0、shunt step=0\\
+求解器本地回退 & 最后兼容路径 & 必须由结果 limitation 或诊断披露\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{时间与百分比陷阱}
+
+\fld{self\_discharge\_pct} 的统一消费口径为 \%/h，步长递推使用
+$(1-p/100)^{\Delta t}$。生命周期 \fld{eol\_percent} 兼容 0--1 小数和大于 1 的百分数输入；
+这类兼容规则必须在导入层规范化后记录。ZIP 六个百分比要求有限、非负且 P、Q 各自和为 100；
+绕过 validation 的装配仍做归一化和零和恒功率回退。
+

@@ -792,6 +792,18 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/pf_doc_benchmark.cpp")
   hacdcpf_copy_opendss_runtime(pf_doc_benchmark)
 endif()
 
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/integrated_energy_validation/validate_integrated_energy_xref.cpp")
+  add_executable(integrated_energy_xref
+    tools/integrated_energy_validation/validate_integrated_energy_xref.cpp)
+  target_link_libraries(integrated_energy_xref PRIVATE hacdcpf::hacdcpf)
+endif()
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/model_validation/validate_model_projection.cpp")
+  add_executable(model_projection_xref
+    tools/model_validation/validate_model_projection.cpp)
+  target_link_libraries(model_projection_xref PRIVATE hacdcpf::hacdcpf)
+endif()
+
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/bpa_dat_convert.cpp")
   add_executable(bpa_dat_convert tools/bpa_dat_convert.cpp)
   target_link_libraries(bpa_dat_convert PRIVATE hacdcpf::hacdcpf)

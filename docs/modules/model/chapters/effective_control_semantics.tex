@@ -1,0 +1,62 @@
+\section{有效功率、容量、控制角色与换流器范围}
+
+\subsection{缩放清洗}
+
+\srcpath{include/hacdcpf/model/effective\_capacity.hpp:sanitize\_scaling} 定义
+\begin{equation}
+s_{eff}=\begin{cases}s,&s\text{ 有限且 }s>0,\\0,&\text{否则。}\end{cases}
+\end{equation}
+因此零、负、NaN 和无穷 scaling 均 fail-closed 为零。AC/DC 负荷 helper 返回正需求；静态发电 helper
+返回有符号源注入。它们均先检查 \fld{in\_service}。
+
+\subsection{容量回退}
+
+对不可控静态电源，恢复能力只等于当前正有效注入；对可控 AC 静态电源，
+\begin{equation}
+C^{eff}=s_{eff}\max\left(0,
+\begin{cases}P_{max},&P_{max}>0,\\P_{rated},&P_{rated}>0,\\P,&\text{否则；}\end{cases}\right)
+\end{equation}
+DC 版本在 $P_{max}$ 与 $P_{set}$ 间回退。同步机使用正 \fld{pmax\_mw}，否则回退
+$\max(0,P_g)$；储能使用正 \fld{pmax\_mw}，否则回退 $\max(0,P_{rated})$。
+这些 helper 是可靠性、弹性和拓扑供电判定的共享口径，不等同于 OPF 变量界的完整定义。
+
+\subsection{VSC 控制角色解析}
+
+\srcpath{include/hacdcpf/model/device\_control\_role.hpp:resolve\_device\_control\_role}
+把存储枚举解析为受控量、自由量和参考角色：
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{3.5cm}L{5.2cm}L{6.5cm}@{}}
+\toprule 模式 & 受控/自由量 & 参考语义\\\midrule
+\endfirsthead
+\toprule 模式 & 受控/自由量 & 参考语义\\\midrule\endhead
+\texttt{PQ\_MODE} & 控 $P_{ac},Q_{ac},P_{dc}$ & 不自动提供角度/电压参考\\
+\texttt{AC\_PV} & 控 $P_{ac},V_{ac},P_{dc}$；$Q_{ac}$ 自由 & 提供 AC 电压参考，不提供角参考\\
+\texttt{VDC\_Q} & 控 DC 电压下垂、$Q_{ac}$；$P_{ac}$ 自由 & 仅 $|k_{vdc}|>10^{-12}$ 或显式 GFM 时提供 DC 电压参考\\
+\texttt{VDC\_VAC} & 控 DC 电压下垂；$P_{ac}$ 自由 & 同上；legacy 实现的 AC-Q 口径由求解器声明\\
+\texttt{DC\_V\_DROOP\_AC\_V} & 控 DC 下垂和 AC 电压；P/Q 自由 & 提供 AC 电压及条件式 DC 电压参考\\
+\texttt{AC\_GRID\_FORMING} & 控 AC 内部角/压；P/Q 自由 & 提供 AC 角度与电压参考\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+显式 \fld{ac\_grid\_forming} 和 \fld{grid\_forming} flags 会与枚举结果合并。
+双侧构网还保存能量缓冲与 opt-in 字段，但是否可解由协调器和具体求解器决定。
+
+\subsection{GFM Norton 参数优先级}
+
+\srcpath{resolve\_gfm\_norton\_parameters} 的当前回退为
+\begin{align}
+E&=E_{gfm}>0?E_{gfm}:V_{ac,set},\\
+\theta&=(E_{gfm}>0\lor\theta_{gfm}\ne0)?\theta_{gfm}:\theta_{ac,set},\\
+R_v&=R_{gfm}\ne0?R_{gfm}:R_{conv},\qquad
+X_v=X_{gfm}\ne0?X_{gfm}:X_{sc}.
+\end{align}
+零值在这里表示“使用兼容字段”，不是物理零必然无效。角度输出转换为 rad。
+
+\subsection{结果侧换流器诚实口径}
+
+\texttt{ConverterModelScope} 用独立 flags 声明 VSC 损耗、AC 导通损耗、容量圆、电流限值、
+GFM Norton、优先级限流、岛参考、调制、Vdc 控制、多源协调、DCDC 损耗/占空比、LCC 准稳态/tap
+和方程闭合是否实际执行。结果生产者只有在相应方程或约束确实进入求解时才能置 true；事后告警、
+字段存在或预校验不能替代 enforced/modelled。
+

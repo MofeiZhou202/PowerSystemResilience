@@ -1,0 +1,141 @@
+% theory_multi_carrier_optimization.tex —— 综合能源通用理论层
+% 本文件遵循 docs/modules/THEORY_WRITING_GUIDE.md。
+\section{多载能系统优化理论}
+
+\begin{theorynote}
+本章为通用数学理论，给出离散时间能源枢纽、转换矩阵、库存递推、碳核算和多目标优化的
+统一表述。公式不要求逐式对应代码；当前实现的对应和缺口在章末明确列出。
+\end{theorynote}
+
+\subsection{载能网络与转换矩阵}
+
+令载能集合 $\mathcal C=\{e,q,h,f\}$ 分别表示电、热、氢和燃料。在时段 $t$，
+外部输入、内部转换、储能交换和终端需求满足
+\begin{equation}
+\mathbf u_t+\mathbf C\mathbf x_t+\mathbf d_t^{dis}
+=\boldsymbol\ell_t+\mathbf d_t^{ch}+\mathbf w_t.
+\label{eq:ies-hub-balance}
+\end{equation}
+其中 $\mathbf C$ 的每一列描述一个转换设备对各载能母线的有符号注入，$\mathbf w_t$
+包含弃能、辅助用能和损耗。式~\eqref{eq:ies-hub-balance} 是能源枢纽模型：它保证每个载能
+逐时守恒，但不表达载能输送网络的空间状态。
+
+若设备 $j$ 以载能 $a$ 输入、以 $b$ 输出，固定效率模型为
+\begin{equation}
+x_{bjt}=\eta_jx_{ajt},\qquad 0<\eta_j\le1.
+\end{equation}
+热泵的 COP 是环境热源参与下的性能系数，可大于 1，不能与被动能量转换效率混用。
+
+\subsection{CHP 凸可行域}
+
+多输出 CHP 的常用线性外逼近可写为
+\begin{equation}
+0\le P_t\le\eta_e F_t,\quad
+0\le Q_t\le\eta_h F_t,\quad
+P_t+Q_t\le\eta_{tot}F_t.
+\label{eq:ies-chp-envelope}
+\end{equation}
+它定义以燃料输入为尺度的凸多面体。若 $\eta_{tot}\le\eta_e+\eta_h$，第三个平面限制
+同时满发；若更大则可能冗余。该模型允许在可行域内部自由选择热电比，不能解释为背压机固定耦合曲线。
+
+\begin{gapnote}
+非凸 CHP 启停、最小负荷、抽凝机分段可行域、爬坡与启停成本属于机组组合模型；当前园区实现
+没有这些变量和约束。
+\end{gapnote}
+
+\subsection{库存递推与能量守恒}
+
+对任一储能 $s$，状态递推为
+\begin{equation}
+E_{s,t+1}=\rho_sE_{s,t}+\eta_s^{ch}\Delta t P_{s,t}^{ch}
+-\frac{\Delta t}{\eta_s^{dis}}P_{s,t}^{dis}+\Delta t\sum_r
+\left(\eta_{rs}F_{rs,t}-F_{sr,t}\right).
+\label{eq:ies-storage}
+\end{equation}
+其中 $0<\rho_s\le1$ 是每步保持率。若输入保持率本意为“每小时”，步长不为 1 h 时应使用
+$\rho_s^{\Delta t}$；若本意为“每步”，则直接使用 $\rho_s$。二者必须在接口契约中区分。
+
+循环末态 $E_{s,T}=E_{s,0}$ 消除时域末端免费放空/充满效应，但也意味着研究窗口代表周期运行。
+对季节储氢，短时域强制循环可能压制合理的跨季净转移，必须结合时域解释。
+
+\begin{proposition}[无互斥变量时的同时充放]
+若充放均有严格正吞吐成本、$\eta^{ch}\eta^{dis}<1$，且不存在负价格或其他奖励抵消损耗，
+则任一最优解都存在一个等价或更优解，使同一储能同一时段不同时充放。
+\end{proposition}
+\begin{proof}
+若 $P^{ch},P^{dis}>0$，沿保持净状态变化不变的方向同时减少二者，直至至少一个为零。
+载能母线净需求因往返损耗减少而不增加，严格正吞吐成本下降，故原点不可能是唯一更优结构。
+当电价为负、弃能惩罚或跨层奖励存在时，此论证的目标单调性可能失效，需显式互斥。
+\end{proof}
+
+\subsection{交通能源映射}
+
+若总里程 $D_t$ 和车型比例 $r_m$ 外生，则
+\begin{equation}
+D_{m,t}=r_mD_t,\qquad
+P_{m,t}=\frac{\alpha_mD_{m,t}}{\Delta t},\qquad \sum_mr_m=1.
+\end{equation}
+这是需求映射，不是交通分配优化。若 $r_m$ 成为决策变量，则需要车辆拥有量、补能能力、出行服务
+和基础设施容量等约束，否则会把全部里程移向目标最便宜的载能。
+
+\subsection{碳流、捕集和残余排放}
+
+外购电和燃料的直接核算可写为
+\begin{equation}
+E_t^{gross}=g_t^e\Delta tP_t^{imp}+g^f\Delta tF_t^{external}.
+\end{equation}
+捕集量满足 $0\le C_t\le\phi E_t^{gross}$，残余排放物理等式应为
+$R_t=E_t^{gross}-C_t$。若模型只施加 $R_t\ge E_t^{gross}-C_t$，则必须由正碳成本、碳目标或预算
+使其取紧；否则 $R_t$ 不是唯一物理量。
+
+\begin{gapnote}
+当前实现核算运行期直接排放，不含设备制造、燃料上游、网络损耗归因、边际排放因子反馈或碳库存。
+\end{gapnote}
+
+\subsection{多目标标度}
+
+加权和目标
+\begin{equation}
+J=w_C C+w_E E+w_U U
+\end{equation}
+只有在权重吸收三项量纲和数量级后才有明确偏好含义。词典序近似
+$E+\epsilon C$ 要求 $\epsilon$ 足够小，使任意可辨的 $E$ 改善都优先于 $C$，同时又大于求解器数值噪声。
+固定 $10^{-6}$ 只是实现选择，不对任意价格规模自动保证严格词典序。
+
+\subsection{与实现的对应}
+
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{7.0cm}L{8.2cm}@{}}
+\toprule
+理论条目 & 实现状态\\\midrule
+\endfirsthead
+\toprule 理论条目 & 实现状态\\\midrule\endhead
+四载能逐时平衡（式~\eqref{eq:ies-hub-balance}） &
+\implfull{src/integrated\_energy/integrated\_energy\_optimizer.cpp:solve\_campus\_ies}\\
+CHP 凸包络（式~\eqref{eq:ies-chp-envelope}） &
+\implfull{src/integrated\_energy/integrated\_energy\_optimizer.cpp:solve\_campus\_ies}\\
+五类库存与四条层间转移（式~\eqref{eq:ies-storage}） &
+\implpart{保持率按每步直接乘，不按 $\Delta t$ 指数化；层间方向不互斥}\\
+循环末态 & \implfull{src/integrated\_energy/integrated\_energy\_optimizer.cpp:solve\_campus\_ies}\\
+交通需求映射 & \implpart{比例固定并归一化；V2G 变量固定为零，车型比例不优化}\\
+碳捕集物理等式 & \implpart{残余碳只有下界；需目标或预算保证取紧}\\
+运行碳核算 & \implfull{src/integrated\_energy/integrated\_energy\_optimizer.cpp:solve\_campus\_ies}\\
+载能网络状态与安全约束 & \implnone\\
+随机/鲁棒多阶段优化 & \implnone\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{参考文献}
+{\renewcommand{\section}[2]{}%
+\begin{thebibliography}{9}\small
+\bibitem{ies:geidl2007} M.~Geidl, G.~Koeppel, P.~Favre-Perrod, B.~Klockl,
+G.~Andersson, and K.~Frohlich, Energy hubs for the future,
+\emph{IEEE Power and Energy Magazine}, vol.~5, no.~1, pp.~24--30, 2007.
+\bibitem{ies:morvaj2016} B.~Morvaj, R.~Evins, and J.~Carmeliet,
+Optimising urban energy systems: simultaneous system sizing, operation and district heating network layout,
+\emph{Energy}, vol.~116, pp.~619--636, 2016.
+\bibitem{ies:conejo2010} A.~J. Conejo, M.~Carrion, and J.~M. Morales,
+\emph{Decision Making Under Uncertainty in Electricity Markets}, Springer, 2010.
+\end{thebibliography}}
+

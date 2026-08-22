@@ -1,0 +1,37 @@
+% theory_server_consistency.tex -- Runtime API 通用理论层
+\section{会话一致性、缓存失效与异步作业理论}\label{sec:server-theory}
+
+\begin{theorynote}
+server 模块是 HTTP/JSON 编排层，不拥有电气系统数学模型。本章给出修订号、ETag、缓存和
+异步作业的状态不变量；GUI 单体后端是独立实现，不自动共享本模块会话。
+\end{theorynote}
+
+\subsection{乐观并发控制}
+会话 $s$ 的模型修订号为 $r_s$，ETag 是确定函数
+$E(s,r_s)=\texttt{hysim-}s\texttt{-r}r_s$。写请求只有在
+\begin{equation}
+If\text{-}Match=E(s,r_s)
+\end{equation}
+时才允许修改；缺失返回 428，冲突返回 412，二者都不得改变 $r_s$。
+
+\subsection{缓存与陈旧结果}
+拓扑缓存携带生成修订号 $r_c$，仅当 $r_c=r_s$ 时复用。作业在提交时记录 $r_j$；
+返回结果时
+\begin{equation}
+stale\iff r_{current}\ne r_j.
+\end{equation}
+旧作业可以完成，但必须返回旧修订号和当前修订号，禁止伪装成当前模型结果。
+
+\subsection{与实现的对应}
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{7.0cm}L{8.2cm}@{}}
+\toprule 理论条目 & 实现状态\\\midrule
+\endfirsthead\toprule 理论条目 & 实现状态\\\midrule\endhead
+ETag 构造 & \implfull{src/server/runtime_api_v1.cpp:model_etag}\\
+If-Match 前置条件 & \implfull{src/server/runtime_api_v1.cpp:require_if_match}\\
+拓扑缓存失效 & \implfull{src/server/runtime_api_v1.cpp:session_topology_lod2}\\
+作业陈旧标记 & \implfull{src/server/runtime_api_v1.cpp:job_json}\\
+跨进程持久化和认证 & \implnone\\
+\bottomrule
+\end{longtable}
+\end{center}

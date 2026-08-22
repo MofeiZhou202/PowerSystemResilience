@@ -1,0 +1,50 @@
+% theory_analysis_decision.tex -- 分析与决策理论层
+\section{承载力、薄弱环节与反事实决策理论}\label{sec:analysis-theory}
+
+\begin{theorynote}
+本章把三个分析入口分开：承载力是工程约束筛查，薄弱环节是多维证据排序，反事实是
+在系统副本上比较措施收益。它们都不是完整时序规划或因果识别器。
+\end{theorynote}
+
+\subsection{承载力}
+对下游供电区 $d$，设备可接入容量可抽象为
+\begin{equation}
+C_d=\min\{C_d^{thermal},C_d^{voltage},C_d^{short},C_d^{policy}\},
+\end{equation}
+并按电压等级与变压器边界聚合。任何工程校核关闭时，$C_d$ 只是规划筛查值，不能写成
+潮流可行域内的最大可接入功率。
+
+\subsection{多维薄弱环节}
+对实体 $i$ 和证据维度 $k$，归一化压力为
+$p_{ik}=\max(0,x_{ik})/\tau_k$。定义严重度、共识度和分歧度
+\begin{equation}
+h_i=\max_k p_{ik},\qquad c_i=\min_k p_{ik},\qquad g_i=h_i-c_i.
+\end{equation}
+Pareto 前沿只在同一组件组和同一覆盖集合内比较；缺失证据不是零压力。
+
+\subsection{反事实收益}
+令 $M_0$ 为基线指标，措施 $a$ 作用于系统副本后得到 $M_a$，收益向量为
+$\Delta_a=M_0-M_a$。两措施协同项为
+\begin{equation}
+S_{ab}=M_0-M_{ab}-(M_0-M_a)-(M_0-M_b).
+\end{equation}
+若措施改变拓扑、可靠性或弹性模型范围，比较必须附带结果 scope、失败状态和预算；
+不能把某一维度的下降直接解释成投资因果收益。
+
+\begin{gapnote}
+当前实现不提供 8760 小时接入规划、统计因果置信区间、三阶以上措施协同或全局投资优化。
+工程校核默认可关闭，反事实不可解措施会被标记并跳过。
+\end{gapnote}
+
+\subsection{与实现的对应}
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{7.0cm}L{8.2cm}@{}}
+\toprule 理论条目 & 实现状态\\\midrule
+\endfirsthead\toprule 理论条目 & 实现状态\\\midrule\endhead
+承载力分级 & \implfull{src/analysis/hosting_capacity.cpp:assess_hosting_capacity}\\
+多维归一化与 Pareto & \implfull{src/analysis/multidimensional_weak_link.cpp:run_multidimensional_weak_link_assessment}\\
+单措施/双措施收益 & \implfull{src/analysis/counterfactual_planning.cpp:benefit_between}\\
+三阶协同与全局投资优化 & \implnone\\
+\bottomrule
+\end{longtable}
+\end{center}

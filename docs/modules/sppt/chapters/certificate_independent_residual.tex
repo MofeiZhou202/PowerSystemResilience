@@ -1,0 +1,68 @@
+\section{证书语料与独立作者方程残差}
+
+\subsection{单案证书流水线}
+
+\srcpath{src/sppt/certificate.cpp:certify\_case} 对每个系统执行：
+\begin{enumerate}
+  \item MR3 PF 交换检查，记录 residual/pass，并从 detail 中推断是否出现 non-convergence；
+  \item 再运行一次生产 PF，把结果交给独立 authored residual；
+  \item 显式投影，统计 approximate merge，并对 AC bus、DC bus、converter transfer 归因求合取；
+  \item MR3d OPF dual 检查；只有 \fld{observation=Observed} 且无 non-convergence 才记
+        \fld{opf\_converged=true}。
+\end{enumerate}
+证书行的 \fld{tolerance} 是本次调用值。\fld{pf\_converged} 当前由 detail 字符串是否含
+\texttt{non-convergence} 推断，不是直接保存底层状态枚举，这是接口脆弱点。
+
+\subsection{all\_pass 的精确逻辑}
+
+\texttt{Certificate::all\_pass()} 要求每行 PF pass；独立残差仅在
+\fld{independent\_supported=true} 时必须 pass；OPF 仅在 \fld{opf\_converged=true} 时必须 pass。
+因此 unsupported independent 或未观测 OPF dual 不会单独使 corpus 失败。调用者若要求证据完整，
+必须另加“supported/observed 必须为真”的准入条件，不能只读 \fld{all\_pass}。
+
+\subsection{文件语料与失败保留}
+
+\srcpath{certify\_corpus} 按后缀 \texttt{.m} 走 MATPOWER，其余走 JSON；加载或求解异常产生
+non-passing row 和 note，不删除样本。\srcpath{certify\_systems} 用于已构造的原生混合系统。
+CSV 保存完整列；LaTeX 表压缩显示 PF/independent/merge/attribution/OPF，省略 note 和部分状态，
+故机器审计应以结构体或 CSV 为准。
+
+\subsection{独立残差的支持范围}
+
+\srcpath{src/sppt/independent\_residual.cpp:certify\_independent\_hybrid\_residual}
+有意不调用 \texttt{project\_to\_canonical\_models}、\texttt{make\_solver\_data} 或生产 residual evaluator。
+它只支持 authored primitive AC/DC/VSC/DCDC 视图；出现 2W/3W 变压器、开关/断路器、FlexibleLoad、
+AsymmetricLoad、电机、EnergyRouter、VPP、Microgrid、MobileStorage 或三相系统时返回
+\fld{supported=false} 和范围 note。
+
+它还要求 PF 已收敛，且 \fld{vm/va/vdc} 长度与 authored bus position 一致；否则证据不可得。
+
+\subsection{AC 残差}
+
+独立评估器从 authored ACBranch 重建稠密 $Y$：tap/shift、两端 $jb/2$、bus gs/bs 和 shunt 均显式盖章。
+令 $S_i^{net}=V_i\overline{(YV)_i}$，specified injection 聚合 bus 直挂需求、ZIP Load、Generator、
+StaticGenerator、Renewable、PV 曲线、Storage、ChargingStation 和求解器 VSC transfer。
+除 slack 外检查 P；除 slack/PV/电压控制节点外检查 Q：
+\begin{equation}
+r_{ac}=\max\left(
+\left|P_i^{sp}/S_b-\Re S_i^{net}\right|,
+\left|Q_i^{sp}/S_b-\Im S_i^{net}\right|
+\right).
+\end{equation}
+
+\subsection{DC 与换流器残差}
+
+DC 评估器由 $r_{pu}^{-1}$ 重建 $G$，聚合 DCBus additive demand、DCLoad、两类 static generator、PV、
+两套 storage、VSC 和 DCDC transfer。首个 \texttt{DC\_V} bus 作为 reference 跳过，其他非孤立节点检查
+\begin{equation}
+r_{dc}=\max_i\left|P_i^{sp}/S_b-v_i(Gv)_i\right|.
+\end{equation}
+VSC 期望损耗由常效率项和 $r_{conv,ac}|P_{ac}/S_b|^2/V_m^2$ 构成，检查
+$|P_{ac}+P_{dc}+P_{loss}|/S_b$。总残差取 AC、DC、converter 三者最大值。
+
+\subsection{独立性的边界}
+
+独立评估器与生产路径仍共享 POD 字段、符号约定和部分 helper（如 PV curve/effective load）；它是
+异构实现证据，不是外部 oracle。支持范围外返回 false 比在不完整方程上给出小残差更诚实。
+当前没有独立 OPF KKT、三相、动态或宏设备 residual evaluator。
+

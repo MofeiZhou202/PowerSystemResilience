@@ -1,0 +1,133 @@
+% theory_identity_units.tex -- 模型身份空间与量纲理论
+% 本文件遵循 docs/modules/THEORY_WRITING_GUIDE.md。
+\section{类型化身份空间、量纲与标幺相似性}
+
+\begin{theorynote}
+本章把稳定组件身份、容器位置、图索引和求解索引形式化为不同集合，并从量纲分析推导标幺变换。
+这些规则决定投影能否被审计；它们不是潮流或优化算法。当前实现的覆盖和缺口在章末逐项标记。
+\end{theorynote}
+
+\subsection{四类索引空间}
+
+令 $I_{ac},I_{dc}$ 分别为 authored AC/DC 稳定母线 ID 集，$P_X=\{0,\ldots,|X|-1\}$ 为容器位置，
+$N$ 为一次图构建的节点索引，$K$ 为某次数值装配的行列索引。正确的处理链是显式映射
+\begin{equation}
+ I_{ac}\xrightarrow{p_{ac}}P_{V_{ac}}\xrightarrow{g_{ac}}N
+ \xrightarrow{k_{ac}}K_{ac},
+ \qquad
+ I_{dc}\xrightarrow{p_{dc}}P_{V_{dc}}\xrightarrow{g_{dc}}N
+ \xrightarrow{k_{dc}}K_{dc}.
+ \label{eq:model-index-chain}
+\end{equation}
+其中任何箭头都可能随过滤、排序、投影或装配重建，只有最左侧稳定 ID 可用于对外引用。
+
+AC 与 DC 的合法身份空间是带标签不交并
+\begin{equation}
+ I=\{\mathrm{AC}\}\times I_{ac}\ \uplus\
+   \{\mathrm{DC}\}\times I_{dc}.
+ \label{eq:model-disjoint-id}
+\end{equation}
+
+\begin{theorem}[domain-qualified 身份的单射性]
+映射 $\iota(d,i)=(d,i)$ 从式~\eqref{eq:model-disjoint-id} 到类型化键空间是单射；删除域标签的映射
+$\pi(d,i)=i$ 在 $I_{ac}\cap I_{dc}\ne\varnothing$ 时不是单射。
+\end{theorem}
+\begin{proof}
+若 $\iota(d_1,i_1)=\iota(d_2,i_2)$，有序对相等给出 $d_1=d_2,i_1=i_2$，故单射。
+若存在 $i\in I_{ac}\cap I_{dc}$，则 $(\mathrm{AC},i)\ne(\mathrm{DC},i)$，但二者经 $\pi$ 均映为 $i$。
+\end{proof}
+
+这一定理不是编码偏好，而是信息论事实。任何只以裸整数为 key 的混合域 map 都无法在同号 ID 出现时
+无损恢复来源域。
+
+\subsection{稳定性、不变量与重编号}
+
+稳定 ID 允许稀疏且不要求排序；位置必须连续但可随 vector 变动。投影重编号函数
+$r:I\to\{1,\ldots,n\}$ 若不同时保存 $r^{-1}$，则稳定身份信息丢失。
+
+\begin{proposition}[无逆映射时的不可归因性]
+设两个 authored 系统只在 ID 置换上不同，规范化后得到相同连续编号。若输出仅含规范编号且没有置换证书，
+则不存在算法能唯一判断结果属于哪个 authored ID。
+\end{proposition}
+\begin{proof}
+两系统在观察空间中完全相同，但要求的 authored 归因不同。任何只依赖相同观察的确定算法给出相同答案，
+至少对一个系统错误。
+\end{proof}
+
+\subsection{量纲向量与合法公式}
+
+给物理量 $x$ 赋量纲向量
+$[x]=(a_M,a_L,a_T,a_I,\ldots)$。等式两侧和加法项必须量纲一致；效率、tap 和 pu 值是无量纲量，
+MW、MWh、kV、$\Omega$ 不可直接相加。状态递推中 $P\Delta t$ 才能与能量 $E$ 相加。
+
+三相系统以三相视在功率 $S_b$ 和线电压 $V_b$ 为基准时
+\begin{equation}
+ Z_b=\frac{V_b^2}{S_b},\qquad Y_b=\frac1{Z_b},\qquad
+ I_b=\frac{S_b}{\sqrt3V_b}.
+ \label{eq:model-base-quantities}
+\end{equation}
+只要 $V_b$ 用 kV、$S_b$ 用 MVA，$Z_b$ 的数值单位就是 $\Omega$。线路 $n$ 回并联、长度 $L$ 时
+\begin{equation}
+ r_{pu}=\frac{r_{\Omega/km}L/n}{Z_b},\quad
+ x_{pu}=\frac{x_{\Omega/km}L/n}{Z_b},\quad
+ b_{pu}=b_{S/km}LnZ_b.
+ \label{eq:model-line-pu}
+\end{equation}
+
+\begin{theorem}[标幺基准变换]
+同一物理阻抗 $Z$ 在基准 $(S_1,V_1)$ 与 $(S_2,V_2)$ 下满足
+\begin{equation}
+ z_{pu,2}=z_{pu,1}\frac{S_2}{S_1}\left(\frac{V_1}{V_2}\right)^2.
+ \label{eq:model-base-change}
+\end{equation}
+将任一侧还原为欧姆所得物理阻抗相同。
+\end{theorem}
+\begin{proof}
+$z_{pu,k}=Z/(V_k^2/S_k)=ZS_k/V_k^2$。两式相除即得
+式~\eqref{eq:model-base-change}；再乘各自 $Z_{b,k}$ 均恢复 $Z$。
+\end{proof}
+
+\subsection{变压器与相似变换}
+
+理想变压器变比 $a$ 把阻抗折算为 $Z'=a^2Z$，电压折算为 $V'=aV$；若基准电压也按同一变比选取，
+则标幺阻抗保持不变。这是跨电压等级网络采用协调标幺基准的原因。非 unity tap 和移相器改变端子电压关系，
+不能当作“同电位”理想连接参与母线商类收缩。
+
+\subsection{数值容差的量纲}
+
+绝对容差必须附带单位。$10^{-8}$ pu 电压在 $0.75$ kV 与 $500$ kV 基准上代表不同伏特误差；
+$10^{-6}$ MW 与 $10^{-6}$ pu 功率也不同。推荐同时报告
+\begin{equation}
+ e_{abs}=|\hat x-x|,\qquad
+ e_{rel}=\frac{|\hat x-x|}{\max(x_{scale},|x|)}.
+\end{equation}
+其中 $x_{scale}$ 由铭牌或基准给出，不能用任意极小数使相对误差爆炸。
+
+\begin{gapnote}
+当前模型以字段约定和校验器维护单位，没有编译期量纲类型系统；调用者仍可把数值正确但单位错误的数据写入
+同一 double 字段。导入器、手册与交叉验证共同承担单位边界。
+\end{gapnote}
+
+\subsection{与实现的对应}
+
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{7.1cm}L{8.1cm}@{}}
+\toprule 理论条目 & 实现状态\\\midrule
+\endfirsthead\toprule 理论条目 & 实现状态\\\midrule\endhead
+AC/DC domain-qualified 图映射 & \implfull{src/graph/power\_system\_graph.cpp:build\_power\_system\_graph}\\
+强类型稳定 ID/节点索引入口 & \implfull{include/hacdcpf/graph/power\_system\_graph.hpp:ac\_node\_idx}\\
+欧姆到标幺与并联回路式~\eqref{eq:model-line-pu} & \implfull{src/model/unit\_conversion.cpp:convert\_actual\_to\_per\_unit}\\
+非破坏、幂等单位转换 & \implfull{src/model/unit\_conversion.cpp:convert\_actual\_to\_per\_unit}\\
+自动基准变换式~\eqref{eq:model-base-change} & \implnone\\
+编译期量纲类型 & \implnone\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{参考文献}
+{\renewcommand{\section}[2]{}%
+\begin{thebibliography}{9}\small
+\bibitem{model:grainger1994} J.~Grainger and W.~Stevenson,
+\emph{Power System Analysis}, McGraw-Hill, 1994.
+\bibitem{model:ieee399} IEEE Std 399-1997, \emph{IEEE Recommended Practice for Industrial and Commercial Power Systems Analysis}.
+\end{thebibliography}}

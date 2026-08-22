@@ -1,0 +1,108 @@
+\section{组件族与公共数据语义}
+
+\subsection{阅读规则}
+
+本章按“端子--运行量--额定/约束--控制--可靠性/动态--归因”解释 POD，而不是暗示所有字段被所有模块消费。
+公共真值在 \srcpath{include/hacdcpf/model/ac\_components.hpp}、
+\srcpath{dc\_components.hpp}、\srcpath{converter\_components.hpp} 和
+\srcpath{hybrid\_power\_system.hpp}。运行时覆盖以 \srcpath{component\_runtime\_semantics} 为准。
+
+\subsection{AC 网络与变压器}
+
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{3.2cm}L{4.7cm}L{7.3cm}@{}}
+\toprule 类型 & 身份/端子 & 核心语义与边界\\\midrule
+\endfirsthead
+\toprule 类型 & 身份/端子 & 核心语义与边界\\\midrule\endhead
+\texttt{ACBus} & \fld{index}；节点 & \fld{pd/qd} 为母线直挂加性需求；\fld{vm/va} 是初值/状态；\fld{gs/bs} 为并联项；电压上下限与在役状态独立\\
+\texttt{ACBranch} & \fld{index}, \fld{from/to\_bus} & 正/零序 pu、tap/shift、A/B/C 额定、实际值线路数据、可靠性与短路温度字段；\fld{ideal\_connectivity} 可证明理想收缩意图\\
+\texttt{Transformer2W} & \fld{hv/lv\_bus} & 额定容量/电压、$v_k/v_{kr}$、空载支路、分接、移相、零序、并联台数和承载力元数据；投影为 ACBranch\\
+\texttt{Transformer3W} & \fld{hv/mv/lv\_bus} & 三对短路参数、三绕组容量/电压、分接与两侧移相；投影为三条 pair branch 并记录 pair number\\
+\texttt{Switch} & \fld{bus/bus2} & 开合、类型/角色/操作模式、能力、保护配置和恢复元数据；闭合设备可投影为等值支路并参与收缩\\
+\texttt{CircuitBreaker} & \fld{bus/bus2} & 开合状态、接触电阻/阻抗、额定电流和保护关联；结果端子流可能因理想收缩只能近似恢复\\
+\texttt{Shunt} & \fld{bus} & 固定或分步 $g_s/b_s$；\fld{current\_step}=0 是合法全切状态\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+支路 $\pi$ 型等值、变压器星--三角等值和开关收缩公式在
+\srcpath{src/model/network\_utils.cpp:add\_equivalent\_branch\_*} 实现；求解 Ybus 公式归潮流手册。
+
+\subsection{AC 电源、负荷与储能}
+
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{3.3cm}L{4.0cm}L{7.9cm}@{}}
+\toprule 类型 & 注入符号 & 语义摘要\\\midrule
+\endfirsthead
+\toprule 类型 & 注入符号 & 语义摘要\\\midrule\endhead
+\texttt{ExternalGrid} & 源为正 & 电压/角参考、短路强度、R/X、可控性、成本与碳 profile；不是普通定功率发电机\\
+\texttt{Generator} & \fld{pg/qg} 源为正 & P/Q 上下限、slack、二次成本、UC/爬坡、同步机和短路参数、排放与可靠性\\
+\texttt{StaticGenerator} & \fld{p/q}$\times$scaling 源为正 & 固定或可控静态电源、GFM/anti-islanding、容量回退和线性成本\\
+\texttt{RenewableGen} & \fld{p/q} 源为正 & 风/光/水等类型、额定、无功界、可弃、GFM、profile、成本和可靠性\\
+\texttt{PVSystem} & 源为正 & 逆变器 P/Q 与直流阵列铭牌并存；实际出力可由 PV 曲线计算，零串并联数可导致零物理阵列出力\\
+\texttt{Load} & \fld{p/q} 为正需求 & scaling、ZIP 百分比、可控削减、优先级、客户数及电机短路馈供；Exponential 因缺指数参数被 validation 拒绝\\
+\texttt{FlexibleLoad} & 正需求 & 基准 P/Q 加上下调能力、持续时间、响应和爬坡；是否成为优化变量取决于下游\\
+\texttt{AsymmetricLoad} & 每相正需求 & abc 相额定/运行 P/Q、接线和 scaling；平衡投影与三相原生分析保真度不同\\
+\texttt{AsynchronousMotor} & 正需求/短路源 & 铭牌基准 pu 阻抗、堵转电流、极对数、功率因数和效率\\
+\texttt{Storage} & \fld{p}>0 放电 & P/Q/能量额定、SOC 窗口、充放效率、每小时自放电、模式、成本、GFM 与可靠性\\
+\texttt{MobileStorage} & \fld{p}>0 放电 & AC 或 DC 域母线、位置/状态/旅行能耗、储能参数和构网能力；母线引用必须按 \fld{is\_dc} 分域\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\texttt{Charger} 自身没有 bus；必须通过 \fld{station\_id} 聚合到
+\texttt{ChargingStation.bus}。\srcpath{aggregate\_chargers\_into\_stations} 对站级总功率先清零后重算，
+孤立 charger 或无效站点母线显式拒绝。站级功率单位为 kW/kvar，进入系统注入时换算为 MW/Mvar。
+
+\subsection{DC 网络与设备}
+
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{3.4cm}L{4.0cm}L{7.8cm}@{}}
+\toprule 类型 & 端子/方向 & 语义摘要\\\midrule
+\endfirsthead
+\toprule 类型 & 端子/方向 & 语义摘要\\\midrule\endhead
+\texttt{DCBus} & 节点 & \fld{pd\_mw} 是与 \texttt{DCLoad} 相加的直挂需求；电压、基准 kV、上下限、DC 类型和在役状态\\
+\texttt{DCBranch} & from--to & $r_{pu}$、A 额定、\fld{rate\_a\_mva} 优先且 \fld{s\_max\_mva} 回退、长度/实际电阻和可靠性\\
+\texttt{StaticGeneratorDC} & 源为正 & \fld{p\_set}$\times$scaling、额定/上限、可控性、成本和碳\\
+\texttt{PVArrayDC} & 源为正 & 定功率与阵列参数、效率、profile、成本和可靠性\\
+\texttt{DCLoad} & 正需求 & scaling、可控最小功率、优先级、profile 和客户数\\
+\texttt{DCStorage} & \fld{p}>0 放电 & 与 AC Storage 对齐的功率、能量、SOC、效率、自放电、成本、构网和可靠性\\
+\texttt{DCCircuitBreaker} & from--to & 状态、额定/开断电流、保护阈值和动作时间\\
+DC 电容/电抗器 & 单端 & \texttt{DCCapacitor} 与 \texttt{DCReactor} 的 SI R/L/C、ESR/泄漏、额定与谐波/故障用途\\
+\texttt{HarmonicFilter} & AC 或 DC 单端 & domain、R/L/C 拓扑和额定；由谐波模块消费\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\srcpath{materialize\_dc\_storage} 将 legacy \fld{dc.storage} 复制到规范 \fld{dc.dc\_storage} 视图并保持幂等，
+用于跨模块统一；它不是把两套库存相加的许可。
+
+\subsection{换流器与能量路由器}
+
+\texttt{VSCConverter} 连接 \fld{bus\_ac} 与 \fld{bus\_dc}，保存模式、P/Q/Vdc/Vac 设定、效率/损耗、
+额定和电流限值、GFM Norton、短路、调制、动态和谐波参数。仅存字段不代表某引擎已执行相应约束；
+结果必须携带 \texttt{ConverterModelScope::ValidityFlags}。
+
+\texttt{LCCConverter} 描述整流/逆变站角色、控制量、阀组/桥数、换流变、平波电抗器和 tap 范围。
+\texttt{DCDCConverter} 连接两个 DC 母线，保存拓扑、模式、效率、功率/电压/占空比和谐波参数。
+
+\texttt{EnergyRouter} 是多端口宏设备。每个 \texttt{EnergyRouterPort} 显式声明 AC/DC 类型、侧别、
+控制模式和设定。\srcpath{expand\_energy\_routers} 将合法端口展开为 VSC/DCDC 和内部关联：
+DC 端口直接复用 DC 母线，AC 端口才生成 VSC；单侧、缺失母线、同侧冲突等结构 fail-closed。
+
+\subsection{三相、聚合与上下文对象}
+
+\texttt{ThreePhaseACSystem} 包含相域母线、线路、变压器、调压器、负荷、发电机与外网。
+\texttt{PhaseMask} 明确 A/B/C 连接；相矩阵线路由三相求解器消费，平衡投影只保留等值视图。
+\texttt{VirtualPowerPlant} 和 \texttt{Microgrid} 保存成员稳定 ID、聚合能力/边界、模式和构网要求，
+不能把成员 vector position 当 ID。
+
+\texttt{DynamicModelProfile} 保存模型标准、参数集和组件动态档案；\texttt{TelemetrySection} 保存
+time base、binding、sample、quality 与 state seed。二者是可选上下文，不会仅因挂在系统对象上就自动参与
+稳态求解。
+
+\subsection{组件存在与能力声明}
+
+对任一工作流，必须区分：字段已序列化、字段被投影、方程已消费、限制已强制、结果可恢复五个层级。
+\texttt{component\_runtime\_semantics()} 的一行契约和具体结果 validity 应共同使用；任何仅凭
+\texttt{HybridPowerSystem} 中存在某 vector 就宣称功能支持的判断都不成立。

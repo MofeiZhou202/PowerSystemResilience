@@ -1,0 +1,59 @@
+\section{验证证据、独立复算与工程准入}
+
+\subsection{注册测试覆盖}
+
+当前唯一模块专用注册目标为 \srcpath{tests/test\_integrated\_energy\_campus.cpp}，由
+\srcpath{tests/CMakeLists.txt} 注册为 \texttt{test\_integrated\_energy\_campus}。其六类用例覆盖：
+\begin{enumerate}
+  \item 24 步样例求解、四载能逐时平衡、状态长度和 Sankey carrier；
+  \item Cost/Carbon/MinCurtailment/Weighted 目标切换及求解状态；
+  \item 分层储氢开关、库存界限、转移变量和循环末态；
+  \item 聚合 PCC、模型范围、有效性 flags 和限制字符串；
+  \item 交通关闭时总里程为零，以及开启时 EV/HV/ICV 里程和为需求；
+  \item 非法被动效率与非 unity 功率因数的拒绝路径。
+\end{enumerate}
+测试证明的是构造算例上的实现一致性，不是外部综合能源系统工具的交叉验证。
+
+\subsection{结果独立复算}
+
+任何纳入研究结果的原始解至少应执行以下后验残差：
+\begin{align}
+r_e&=\max_t|\text{electric supply}_t-\text{electric demand}_t|,\\
+r_q&=\max_t|\text{heat supply}_t-\text{heat demand}_t|,\\
+r_h&=\max_t|\text{hydrogen supply}_t-\text{hydrogen demand}_t|,\\
+r_f&=\max_t|\text{fuel supply}_t-\text{fuel demand}_t|,\\
+r_s&=\max_{s,t}|E_{s,t+1}-\widehat E_{s,t+1}|.
+\end{align}
+$\widehat E$ 必须使用第 3 章的源码保持率/效率，而不是调用者另一个储能约定。
+同时复算可用新能源拆分、CHP 三个包络、CCUS 上限、碳预算、可再生比例和所有变量界限。
+
+\subsection{准入矩阵}
+
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{4.0cm}L{5.4cm}L{5.8cm}@{}}
+\toprule
+用途 & 最低证据 & 禁止的外推\\\midrule
+\endfirsthead
+\toprule 用途 & 最低证据 & 禁止的外推\\\midrule\endhead
+教学/接口演示 & 注册测试、\fld{feasible}、平衡残差 & 不声称电网或设备安全\\
+成本/碳情景比较 & 实际 solver/status/gap、同一输入边界、目标标度审计 & 不把非 optimal 解排序当全局最优排序\\
+储能规划研究 & 末态口径、库存残差、步长/保持率解释、敏感性 & 不把短时域循环解外推季节调度\\
+电网协同运行 & 另行 PF/OPF 回放 PCC 轨迹及网络限值 & 本模块单独结果不得准入\\
+生产控制 & 独立状态估计、滚动更新、故障与不确定性闭环 & 当前离线模型不构成控制器\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{已知证据边界}
+
+开发状态记录的最近聚焦基线为 6 个用例、106 个断言通过；该结果来自特定 Debug 配置且本地
+MIPSolvers 状态与记录 pin 不一致。它不替代完整 Release CTest、sanitizer、另一 MILP 引擎逐变量交叉验证，
+也不证明更长时域的性能。本文档修改后的实跑结果以
+\srcpath{docs/overview/development\_status.md} 最新条目为准。
+
+\subsection{后续闭环优先级}
+
+首要缺口是独立的模型 residual evaluator 与至少两后端同一固定算例的目标/变量交叉验证；其次是把
+数据清洗报告公开，避免非有限容量、COP 回退和比例重写不可见；电网耦合只能通过新增明确接口、
+网络变量/约束和回放测试实现，不能通过更改 \fld{model\_scope} 文案宣称完成。
+

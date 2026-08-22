@@ -1,0 +1,64 @@
+\section{准入守卫、代理循环与智能仿真权限}
+
+\subsection{默认请求观测量}
+
+\srcpath{src/sppt/guard.cpp:guard\_system} 默认请求 AC bus voltage；存在 DC bus、VSC、开关/断路器时
+分别追加 DC bus voltage、converter transfer、switch terminal flow。显式重载允许调用者给出
+\texttt{ObservableKind} 列表。未请求的 observable 不影响该次裁决，因此请求集本身必须作为审计输入保存。
+
+\subsection{三门裁决}
+
+\begin{equation}
+Accept=ValidationOK\land WellPosed\land AttributionTotal.
+\end{equation}
+第一门调用 \srcpath{validate\_full}，异常直接以 reason=validation 返回。第二门同时要求 validation error
+中没有 slack/reference/swing 关键词，且
+\srcpath{evaluate\_converter\_coordination(sys,true)} 无 blocking issue。第三门显式投影并要求每个请求
+observable 的 \fld{coverage.total()} 为真；异常归为 attribution failure。
+
+当多个门同时失败，\fld{reason} 按 validation、ill-posed reference、unattributable 顺序给出首个失败门，
+\fld{details} 保存更多诊断。因为 \fld{validation\_ok} 计算的是完整报告有效性，非参考类错误也会优先阻断。
+
+\subsection{混淆指标}
+
+正类定义为“应接纳”。\texttt{GuardMetrics} 统计 tp/fp/tn/fn，并在分母为零时把 precision、recall、
+catch rate、accuracy 返回 0。fp 是漏拒风险，fn 是过拒；只报 catch rate 会掩盖恒拒策略。
+
+\subsection{脚本化代理循环}
+
+\srcpath{src/sppt/agent.cpp:run\_agent\_loop} 对每个 \texttt{AgentEdit} 执行：
+\begin{enumerate}
+  \item 复制当前已接纳系统，在 candidate 上调用 \fld{apply}；
+  \item 守卫 candidate，并按 \fld{expected\_admissible} 更新混淆计数；
+  \item 仅 accepted 时把 candidate 赋给 current；
+  \item 若 \fld{run\_analysis=true}，运行 PF 并记录收敛及 \fld{pf.vm.size()}；
+  \item 若 applied 但不 accepted，或 accepted+analysis 且 attributed bus count 为零，则 \fld{sound=false}。
+\end{enumerate}
+该 soundness 是代码不提交守卫拒绝状态的流程不变量，不证明 accepted 编辑的物理真实或 PF 一定收敛。
+
+稳定 action id 当前有九个：负荷 +10\%、VSC AC/DC 虚假端子、删除 AC reference、删除 DC voltage support、
+非法 VSC 效率、恢复首母线 slack、发电出力 -5\% 和 no-op。未知 ID 抛异常。
+\texttt{default\_agent\_script} 只使用其中四个，是演示脚本而非语言模型接口本身。
+
+\subsection{智能仿真联合契约}
+
+\texttt{IntelligentSimulationContract} 声明 analysis domain、authority、请求观测量、是否允许 approximate projection、
+是否要求独立残差/不确定性，以及 solver/independent residual、相对不确定性和 confidence 阈值。
+\srcpath{evaluate\_intelligent\_simulation\_contract} 依次拒绝：空 contract id、guard 拒绝、未许可近似、
+solver 未收敛/残差非有限或越限、独立证据不可得/未收敛/越限、缺少或非法 uncertainty、uncertainty 越界。
+
+\texttt{UncertainQuantity::declared()} 只检查 quantity/provenance 非空、confidence 在 $[0,1]$、
+relative uncertainty 非负；非有限值的比较行为仍应由调用者预先校验。
+
+\subsection{权限裁决}
+
+所有证据门通过后，只有只读分析（\texttt{ReadOnlyAnalysis}）返回
+\texttt{AdmitReadOnly}。模型编辑（\texttt{ModelEdit}）、建议决策
+（\texttt{AdvisoryDecision}）和物理控制（\texttt{PhysicalControl}）均返回
+\texttt{RequireHumanReview} 并附理由。函数从不执行控制、修改系统或联系外部执行器。
+
+\subsection{威胁模型边界}
+
+当前守卫适合捕获结构引用、参考闭合和归因缺失。一个数值合理但语义错误的负荷、设定值或量测可能通过三门；
+这类错误需要独立 residual、telemetry、参数 provenance、操作员确认或统计检测。代理 action 的
+\fld{expected\_admissible} 是测试标签，不是运行时自动真值。

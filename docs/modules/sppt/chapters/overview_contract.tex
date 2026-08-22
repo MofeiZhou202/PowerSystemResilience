@@ -1,0 +1,61 @@
+\section{研究问题、证据层次与公共表面}
+
+\subsection{问题定义}
+
+对工程模型 $S$、规范投影 $\Pi$、分析器 $A$ 和恢复算子 $\mathcal R_S$，SPPT 关注交换误差
+\begin{equation}
+r(S)=d\!\left(A_{rich}(S),\mathcal R_S A_{can}(\Pi(S))\right),
+\end{equation}
+以及投影前后身份、参考角色和请求可观测量是否闭合。$r\le\varepsilon$ 是给定算例、分析器、
+距离和容差下的观察，不是对全部模型的证明。
+
+\subsection{公共入口族}
+
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{3.5cm}L{5.0cm}L{6.7cm}@{}}
+\toprule 能力 & 入口 & 输出/口径\\\midrule
+\endfirsthead
+\toprule 能力 & 入口 & 输出/口径\\\midrule\endhead
+蜕变关系 & \texttt{mr1\_*}--\texttt{mr7\_*}、MR3d/MR3t & \texttt{MetamorphicResult}: observation/pass/residual/tolerance/detail\\
+核心套件 & \texttt{run\_core\_metamorphic\_suite} & MR1、2、3、3d、4、5、7；不含 MR6/MR8\\
+证书语料 & \texttt{certify\_case/corpus/systems} & PF、独立残差、近似 merge、归因、OPF dual 与 CSV/LaTeX\\
+独立审计 & \srcpath{certify\_independent\_hybrid\_residual} & authored primitive AC/DC/VSC 方程残差及支持范围\\
+三门守卫 & \texttt{guard\_system} & validation、well-posedness、requested attribution 与首个失败门\\
+故障活动 & \texttt{run\_fault\_campaign} & 固定种子样本、五检测器、Wilson 区间和物理影响\\
+代理循环 & \texttt{run\_agent\_loop} & candidate-copy、guard、commit、analysis、混淆指标和 soundness\\
+智能准入 & \srcpath{evaluate\_intelligent\_simulation\_contract} & Reject、AdmitReadOnly 或 RequireHumanReview\\
+基准/消融 & \texttt{run\_benchmark*}/\texttt{run\_ablation*} & best-of-N timing、交换残差、三类机制移除影响\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+总入口头 \srcpath{include/hacdcpf/sppt/sppt.hpp} 只聚合声明，不执行默认认证。
+
+\subsection{证据层次}
+
+\begin{enumerate}
+  \item \textbf{结构证据}：引用、ID、参数范围、参考角色和可观测量归因；
+  \item \textbf{管线一致性}：生产 rich 与显式 canonical 两条路径结果交换残差；
+  \item \textbf{独立物理证据}：不复用生产投影/装配/残差的 authored primitive 方程；
+  \item \textbf{统计证据}：固定总体、无删除样本、混淆矩阵与 Wilson 区间；
+  \item \textbf{权限证据}：即便前四层通过，状态改变和物理控制仍需人工授权。
+\end{enumerate}
+同一路径重复计算不是独立证据。renderers 只序列化证据，不提升其等级。
+
+\subsection{结果与单位}
+
+\texttt{MetamorphicResult.residual} 的单位依关系而异：PF 电压通常为 pu/degree 比较的最大值组合，
+OPF dual 沿 LMP 单位，MR1 混合计数与矩阵差，MR4/MR7 甚至使用计数或固定零。
+因此不能跨 MR 排序 residual，也不能用一个全局阈值替代每个关系的定义。
+
+\subsection{身份与域纪律}
+
+所有 authored/canonical 比较必须先经稳定 ID 或投影映射对齐。AC/DC 同整数 bus ID 是合法输入；
+SPPT 不另建身份空间，而是继承 \texttt{BusMergeMap}、DC prestrip map、\texttt{BranchExpandMap} 和
+\texttt{ComponentMapping}。按 vector position 比较仅在函数显式确认形状一致时成立。
+
+\subsection{非能力声明}
+
+SPPT 不证明输入数据真实，不替代量测校准、网络安全分析、动态稳定、保护整定或优化全局最优；
+它也不保证未注入故障类、未请求 observable、未支持 rich macro 或未运行后端。准入结果的正确解读是
+“在声明范围内没有被当前证据否证”，而不是“系统绝对正确”。

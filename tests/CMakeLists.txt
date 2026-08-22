@@ -145,6 +145,33 @@ hacdcpf_add_test(test_sppt_guard           test_sppt_guard.cpp)
 hacdcpf_add_test(test_sppt_dae_wellposedness test_sppt_dae_wellposedness.cpp)
 hacdcpf_add_test(test_sppt_ablation        test_sppt_ablation.cpp)
 hacdcpf_add_test(test_sppt_benchmark       test_sppt_benchmark.cpp)
+
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(TARGET integrated_energy_xref AND Python3_EXECUTABLE AND
+   EXISTS "${CMAKE_SOURCE_DIR}/tools/integrated_energy_validation/run_cross_validation.py")
+  add_test(NAME integrated_energy_cross_validation
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/tools/integrated_energy_validation/run_cross_validation.py"
+            --executable "$<TARGET_FILE:integrated_energy_xref>"
+            --out "${CMAKE_CURRENT_BINARY_DIR}/integrated_energy_cross_validation.json"
+            --markdown "${CMAKE_CURRENT_BINARY_DIR}/integrated_energy_cross_validation.md")
+  set_tests_properties(integrated_energy_cross_validation PROPERTIES
+    LABELS "integrated_energy;cross_validation;python_oracle"
+    TIMEOUT 120)
+endif()
+
+if(TARGET model_projection_xref AND Python3_EXECUTABLE AND
+   EXISTS "${CMAKE_SOURCE_DIR}/tools/model_validation/run_projection_oracle.py")
+  add_test(NAME model_projection_cross_validation
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/tools/model_validation/run_projection_oracle.py"
+            --executable "$<TARGET_FILE:model_projection_xref>"
+            --out "${CMAKE_CURRENT_BINARY_DIR}/model_projection_cross_validation.json"
+            --markdown "${CMAKE_CURRENT_BINARY_DIR}/model_projection_cross_validation.md")
+  set_tests_properties(model_projection_cross_validation PROPERTIES
+    LABELS "model;projection;cross_validation;python_oracle"
+    TIMEOUT 120)
+endif()
 hacdcpf_add_test(test_sppt_fault_campaign  test_sppt_fault_campaign.cpp)
 hacdcpf_add_test(test_sppt_agent           test_sppt_agent.cpp)
 

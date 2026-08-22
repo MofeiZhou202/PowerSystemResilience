@@ -1,0 +1,66 @@
+\section{范围、架构与阅读契约}
+
+\subsection{模块定位}
+
+公共入口只有
+\begin{equation}
+R=\operatorname{solve\_campus\_ies}(D,O),
+\end{equation}
+其中 $D$ 为 \texttt{CampusIESData}，$O$ 为 \texttt{CampusIESOptions}，$R$ 为
+\texttt{CampusIESResult}。实现锚点为
+\srcpath{src/integrated\_energy/integrated\_energy\_optimizer.cpp:solve\_campus\_ies}。
+函数先复制并归一化输入，再用 MIPSolvers AML 创建变量、约束和目标，调用所选后端，最后把
+原始解提取为逐时序列、汇总指标和 Sankey 边。函数没有网络模型参数，也不调用 PF/OPF。
+
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{3.0cm}L{4.8cm}L{7.0cm}@{}}
+\toprule
+层 & 公共类型/实现 & 职责\\
+\midrule
+输入 & \texttt{CampusIESData} & 时域、需求、可用功率、容量、效率、价格、交通、碳与 CCUS 数据\\
+选项 & \texttt{CampusIESOptions} & 后端、目标、互斥开关、预算、末态和求解容差\\
+建模 & \texttt{solve\_campus\_ies} & AML 变量、线性等式/不等式、可选二进制变量和目标\\
+结果 & \texttt{CampusIESResult} & 求解状态、$n$ 项功率/流量、$n+1$ 项库存、总量与有效性声明\\
+示例 & \texttt{make\_sample\_campus\_ies\_data} & 生成可运行的合成 24 h 风光荷价曲线，不是标准算例\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{载能、符号与单位}
+
+功率/流率变量统一以 MW 表示，库存以 MWh 表示，时间步长以 h 表示；因此
+$\Delta t P_t$ 为 MWh。氢与燃料也使用能量等价值 MW/MWh，而不是 kg、Nm$^3$ 或低位热值质量流率。
+碳排放和捕集量为每步 tCO$_2$；排放因子为 tCO$_2$/MWh；交通需求为 km，
+车型能耗强度为 MWh/km。成本字段沿其乘数决定量纲，最终 \fld{total\_cost} 是调用者价格单位。
+
+电网交换采用两套符号：优化变量 $P_t^{imp},P_t^{exp}\ge0$；结果
+\begin{equation}
+P_t^{pcc}=P_t^{exp}-P_t^{imp},
+\end{equation}
+故正值表示园区向外送电。该符号由
+\srcpath{src/integrated\_energy/integrated\_energy\_optimizer.cpp:solve\_campus\_ies}
+提取循环定义。
+
+\subsection{时域与索引空间}
+
+所有逐时决策向量按输入时间位置 $t=0,\ldots,n-1$ 排列，不使用稳定组件 ID。
+五类库存向量按状态节点 $t=0,\ldots,n$ 排列，首项是输入初态，末项是时域结束状态。
+\fld{pcc\_ac\_bus} 是唯一稳定外部标签；它不用于矩阵索引和电气查找。
+
+\subsection{能力边界}
+
+\begin{itemize}
+  \item 模型是集中式园区能源枢纽，不表达载能网络节点、管道压降、热网温降或氢气压力；
+  \item PCC 只有聚合有功交换，无功被明确排除，\fld{fixed\_power\_factor} 非 1 时拒绝；
+  \item 风光出力为可用量拆分，未建模随机性、爬坡、最小开停机或预测误差；
+  \item CHP 是凸可行域上界，不是固定热电比，也没有启停二进制；
+  \item EV/HV/ICV 比例由输入归一化后固定，当前 $P^{EV,V2G}$ 上下界均为零；
+  \item 互斥开关开启时才形成 MILP；全部关闭时当前模型为 LP；
+  \item Sankey 边由解后汇总生成，不是独立约束，也不提供损耗闭合证明。
+\end{itemize}
+
+\subsection{推荐阅读顺序}
+
+研究读者先读第 2 章的标准枢纽模型，再用第 3 章确认当前代码采用的简化；接口调用者重点阅读
+第 4--5 章的默认值、长度、失败和索引契约；结果审核者应同时使用第 6 章的残差复算与准入表。
+

@@ -1,0 +1,41 @@
+% theory_api_contract.tex -- 公共 API 理论层
+\section{门面 API 的能力、生命周期与结果传播理论}\label{sec:api-theory}
+
+\begin{theorynote}
+API 门面不增加电气方程；本章形式化的是能力门控、异常边界、句柄复用和独立解后审计。
+具体求解模型仍由 PF/OPF/动态等专项手册负责。
+\end{theorynote}
+
+\subsection{能力门控}
+令 $H$、$G$、$S$ 分别表示 HiGHS、Gurobi、SCIP 可用，则整数变量能力为
+\begin{equation}
+supports_{int}=H\lor G\lor S.
+\end{equation}
+\fld{has\_*} 是编译/链接能力，\fld{supports\_*} 是由能力组合推出的特性；二者不应被
+调用方当作求解成功保证。
+
+\subsection{安全入口与异常语义}
+\texttt{safe\_solve\_power\_flow} 的调用契约是
+\begin{equation}
+validate\_input\land(\text{validation has Error})\Rightarrow Result<T>::error,
+\end{equation}
+而抛异常版本透传非法输入或求解失败。门面不把后端缺失、非收敛和 fallback 改写为成功。
+
+\subsection{会话复用}
+对网络结构签名 $\sigma$，缓存只在 $\sigma_{new}=\sigma_{cached}$ 时复用符号分析；
+结构变化必须重建。数值注入和设定可以在同一结构上刷新。该策略只减少装配/符号分析成本，
+不改变结果向量索引空间。
+
+\subsection{与实现的对应}
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{7.0cm}L{8.2cm}@{}}
+\toprule 理论条目 & 实现状态\\\midrule
+\endfirsthead\toprule 理论条目 & 实现状态\\\midrule\endhead
+能力派生布尔式 & \implfull{src/api/hacdcpf.cpp:get_solver_capabilities}\\
+安全 PF 入口 & \implfull{src/api/hacdcpf.cpp:safe_solve_power_flow}\\
+符号签名缓存 & \implfull{src/api/hacdcpf.cpp:hash_system_signature}\\
+OPF 解后审计 & \implfull{src/api/hacdcpf.cpp:verify_opf_result}\\
+跨进程会话持久化 & \implnone\\
+\bottomrule
+\end{longtable}
+\end{center}

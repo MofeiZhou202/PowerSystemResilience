@@ -1,0 +1,53 @@
+% theory_carbon_flow.tex -- 碳流通用理论层
+\section{碳流追踪、矩阵碳势与年度库存理论}\label{sec:carbon-theory}
+
+\begin{theorynote}
+本章给出比例追踪、碳势矩阵、损耗分摊和储能库存的通用理论。实现只覆盖本章标注的
+有限模型范围；非线性潮流、生命周期制造碳和外部碳因子不因理论公式而自动获得支持。
+\end{theorynote}
+
+\subsection{比例追踪}
+对有向支路 $e:i\to j$，令 $F_e>0$ 表示按潮流方向的有功流，母线 $j$ 的总入流为
+$P_j^{in}$。比例追踪假设来自各上游源的混合比例在母线内保持一致：
+\begin{equation}
+\rho_j=\frac{\sum_{e\in\delta^-(j)}F_e\rho_{o(e)}+\sum_{g\in j}P_ge_g}{P_j^{in}},
+\qquad C_{d,j}=P_{d,j}\rho_j.
+\end{equation}
+支路损耗若归送端，则 $C_e^{loss}=P_e^{loss}\rho_{i}$；这是一种责任分摊规则，不是
+损耗物理量的改变。
+
+\subsection{矩阵碳势}
+将节点入流比例写成稀疏矩阵 $A$，源碳注入写成 $b$，节点碳势满足
+\begin{equation}Aw=b.
+\end{equation}
+数值解必须同时检查秩、条件估计和归一化残差
+$r=\|Aw-b\|_2/\max(1,\|b\|_2)$。奇异系统不能用零向量代替未知碳势；应返回
+\fld{matrix\_solved=false} 或显式的非验证状态。
+
+\subsection{年度储能库存}
+储能放电碳强度是库存状态变量而非永久常数：
+\begin{align}
+E_{t+1}&=\rho E_t+\eta_{ch}P_t^{ch}\Delta t-P_t^{dis}\Delta t/\eta_{dis},\\
+C_{t+1}^{inv}&=\rho_C C_t^{inv}+C_t^{ch}-C_t^{dis}.
+\end{align}
+年度累计排放应按时间顺序更新 $C_t^{inv}$；将某一时刻的
+\fld{soc\_carbon\_intensity\_tco2\_mwh} 复制到全年会破坏库存守恒。
+
+\begin{gapnote}
+当前模块是已收敛 PF 的后处理；不重新调度、不修复失败潮流，不含制造碳、网络材料碳和
+外部生命周期数据库。AC 与 DC 结果向量也不能通过裸 bus ID 合并。
+\end{gapnote}
+
+\subsection{与实现的对应}
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{7.0cm}L{8.2cm}@{}}
+\toprule 理论条目 & 实现状态\\\midrule
+\endfirsthead\toprule 理论条目 & 实现状态\\\midrule\endhead
+比例追踪 & \implfull{src/carbon_analysis/carbon_analysis.cpp:proportional_tracing}\\
+稀疏矩阵碳势 & \implfull{src/carbon_analysis/carbon_analysis.cpp:solve_carbon_matrix}\\
+节点功率平衡重构 & \implfull{src/carbon_analysis/carbon_analysis.cpp:verify_node_power_balance}\\
+逐步储能库存碳 & \implfull{src/carbon_analysis/annual_carbon_analysis.cpp:update_storage_carbon_state}\\
+制造/网络材料生命周期碳 & \implnone\\
+\bottomrule
+\end{longtable}
+\end{center}

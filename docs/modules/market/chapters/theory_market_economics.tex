@@ -1,0 +1,69 @@
+% theory_market_economics.tex -- 电力市场通用理论层
+\section{市场清算、价格与安全约束理论}\label{sec:market-theory}
+
+\begin{theorynote}
+本章给出 SCUC、固定承诺 SCED、节点边际电价和 N-1 预防式清算的通用理论。
+公式用于解释经济含义；源码实际消费的变量、近似和回退以源码等价章为准。
+\end{theorynote}
+
+\subsection{日前机组组合}
+令 $u_{gt}\in\{0,1\}$ 为机组开机状态，$p_{gt}$ 为 MW 出力，$r_{gt}$ 为上调备用，
+则基本 UC 约束为
+\begin{align}
+\underline P_g u_{gt}&\le p_{gt}\le\overline P_g u_{gt},\\
+\sum_g p_{gt}+s_t&=D_t,\\
+\sum_g r_{gt}&\ge R_t,\qquad 0\le r_{gt}\le\overline P_g u_{gt}-p_{gt}.
+\end{align}
+启停变量把 $u_{gt}-u_{g,t-1}$ 分解为启动和停机事件；最小开停机、爬坡和储能 SOC
+把相邻时段连接起来。市场实现使用报价分段和求解器后端，因而 SCUC 的最优性必须由
+\fld{scuc\_optimality\_proven} 与实际 gap 一起解释。
+
+\subsection{固定承诺 SCED 与 LMP}
+固定 $u$ 后，线性 SCED 可写成
+\begin{equation}
+\min_{p,r,s}\;\sum_g c_g(p_g)+\mathrm{VOLL}\sum_i s_i
+\quad\text{s.t.}\quad Bp+Hs=d,
+\quad \underline x\le x\le\overline x.
+\end{equation}
+等式平衡约束的对偶 $\lambda_i$ 是节点边际价格；支路约束的对偶通过 PTDF/LODF
+形成拥塞分量。实现把 AC 母线 LMP 和 DC 母线 LMP 分开返回，不能把两个向量拼成一个
+未限定域的数组。
+
+\subsection{N-1 安全与认证}
+预防式 N-1 在基态出清中加入
+\begin{equation}
+ -\overline F_\ell\le f_\ell+\mathrm{LODF}_{\ell k}f_k\le\overline F_\ell,
+ \qquad k\in\mathcal K_{N-1},
+\end{equation}
+其中 $k$ 是停运支路。对机组、DC 支路、换流器和储能，当前实现还提供固定组合的
+校正性 SCED/AC 认证；这与“所有组件同时进入预防式线性模型”不同。
+
+\subsection{结算恒等式}
+发电商能量收入、备用收入、真实成本和报价成本必须分开：
+\begin{align}
+R_g^E&=\sum_t \lambda_{b(g),t}p_{gt}\Delta t,\\
+R_g^R&=\sum_t \lambda^R_t r_{gt}\Delta t,\\
+\Pi_g&=R_g^E+R_g^R+U_g-C_g^{true}.
+\end{align}
+\fld{as\_bid\_cost} 与 \fld{true\_cost} 不可互换；加价策略只改变报价，不应改写真实成本。
+
+\begin{gapnote}
+当前市场模型是线性化商业清算模型，不是完整 AC-OPF 市场：DC 支路损耗、换流器容量圆、
+电流和调制约束在商业出清中不完整，需由后置非线性认证报告。重复博弈是同步局部最优响应，
+不提供全局博弈均衡证明。
+\end{gapnote}
+
+\subsection{与实现的对应}
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{7.0cm}L{8.2cm}@{}}
+\toprule 理论条目 & 实现状态\\\midrule
+\endfirsthead\toprule 理论条目 & 实现状态\\\midrule\endhead
+UC 平衡、启停、备用 & \implfull{src/market/market_simulation.cpp:build_market_commitment_model}\\
+固定承诺 SCED & \implfull{src/market/market_simulation.cpp:build_pricing_model}\\
+LMP 对偶提取 & \implfull{src/market/market_simulation.cpp:extract_pricing}\\
+LODF N-1 割 & \implfull{src/market/market_simulation.cpp:build_lodf_model}\\
+全组件 N-1 校正 & \implpart{以固定组合再调度和 AC 认证实现，不是统一预防式模型}\\
+全局博弈均衡 & \implnone\\
+\bottomrule
+\end{longtable}
+\end{center}

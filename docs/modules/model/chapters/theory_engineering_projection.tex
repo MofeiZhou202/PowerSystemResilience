@@ -1,0 +1,93 @@
+% theory_engineering_projection.tex —— model 通用理论层
+% 本文件遵循 docs/modules/THEORY_WRITING_GUIDE.md。
+\section{工程模型、商图投影与可恢复性理论}
+
+\begin{theorynote}
+本章为通用数学理论，建立工程对象、分析等价类、单位制和结果恢复的统一框架。
+它不把完整理论自动视为当前代码能力；与实现的对应在章末逐条标记。
+\end{theorynote}
+
+\subsection{工程语义与分析视图}
+
+工程模型记为带类型属性图
+\begin{equation}
+S=(V_{ac},V_{dc},E,D,\tau,\iota,u,p),
+\end{equation}
+其中 $D$ 为设备集合，$\tau$ 给出设备类型，$\iota$ 给出稳定身份，$u$ 是单位元数据，$p$ 是参数。
+某分析 $A$ 只消费一个视图 $C_A$。投影
+\begin{equation}
+\Pi_A:S\longrightarrow C_A
+\end{equation}
+必须声明保留的端子、控制角色、守恒量和丢失信息。所谓 canonical 不是更“真实”的系统，而是特定
+分析所需的最小规范表示。
+
+\subsection{理想连接的商图}
+
+令 $u\sim v$ 当且仅当两节点由理想闭合连接的传递闭包相连。商图 $G/{\sim}$ 把每个等价类收缩为一点。
+
+\begin{proposition}[理想连接下的强度量恢复]
+若类内阻抗严格为零且没有非 unity 变比或移相，则任一有限支路电流解满足类内所有节点复电压相同。
+因此电压等强度量可从商图代表值广播回全部成员。
+\end{proposition}
+\begin{proof}
+理想边满足 $V_u-V_v=ZI=0$。等价关系由路径闭包生成，沿路径递推即得类内电压相等。
+非 unity 变比或移相改变端子关系，故不属于该等价关系。
+\end{proof}
+
+若以小阈值把非零阻抗边近似收缩，上述命题不再严格成立；误差与边电流和被忽略阻抗乘积相关，必须标为
+\texttt{ThresholdApproximate}。
+
+\subsection{广延量恢复}
+
+对合并类 $G_k$ 的总需求或总发电 $X_k$，选择非负参与因子 $w_i$ 且
+$\sum_{i\in G_k}w_i=1$，恢复
+\begin{equation}
+x_i=w_iX_k.
+\end{equation}
+该规则保证总量守恒但不保证设备级物理唯一性。需求和发电应使用不同基准；零基准时等分是一项显式约定。
+
+\begin{theorem}[强度量往返]
+设 lift 算子把类内一致的工程向量映射到代表向量，recovery 对强度量执行广播，则
+$\mathcal R\circ\iota=I$ 在类内一致子空间上成立。
+\end{theorem}
+\begin{proof}
+对任意成员 $i$，lift 读取其类代表的共同值；recovery 将同一代表值广播回 $i$，故逐分量相等。
+\end{proof}
+
+\subsection{单位变换}
+
+三相功率基准下
+\begin{equation}
+Z_b=\frac{V_b^2}{S_b},\qquad
+z_{pu}=\frac{z_{\Omega}}{Z_b},\qquad
+y_{pu}=y_S Z_b.
+\end{equation}
+并联 $n$ 回路的等值串联阻抗除以 $n$，并联电纳乘以 $n$。任何标幺字段都必须同时声明电压和功率基准；
+只写“pu”不足以跨设备比较。
+
+\subsection{与实现的对应}
+
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{7.0cm}L{8.2cm}@{}}
+\toprule 理论条目 & 实现状态\\\midrule
+\endfirsthead
+\toprule 理论条目 & 实现状态\\\midrule\endhead
+分析特定 rich-to-canonical 投影 & \implfull{src/model/network\_utils.cpp:project\_to\_canonical\_models}\\
+理想/阈值收缩分类 & \implfull{src/model/network\_utils.cpp:merge\_zero\_impedance\_buses\_impl}\\
+强度量广播、需求/发电广延量拆分 & \implfull{include/hacdcpf/projection/project\_to\_canonical.hpp:unproject\_bus\_vector}\\
+投影近似证书 & \implfull{include/hacdcpf/projection/canonical\_network.hpp:ProjectionCertificate}\\
+一般分析索引投影族 $\Pi_A$ & \implpart{公共实现提供一条主 canonical 投影；不同工作流再做本地装配}\\
+自动单位维度系统 & \implnone\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{参考文献}
+{\renewcommand{\section}[2]{}%
+\begin{thebibliography}{9}\small
+\bibitem{model:kron1939} G.~Kron, \emph{Tensor Analysis of Networks}, Wiley, 1939.
+\bibitem{model:dorfler2013} F.~Dorfler and F.~Bullo, Kron reduction of graphs with applications to electrical networks,
+\emph{IEEE Transactions on Circuits and Systems I}, vol.~60, no.~1, pp.~150--163, 2013.
+\bibitem{model:iec60038} IEC 60038:2009, \emph{IEC Standard Voltages}.
+\end{thebibliography}}
+

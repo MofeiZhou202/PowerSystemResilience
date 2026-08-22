@@ -1,0 +1,141 @@
+% theory_optimization_duality.tex -- 综合能源优化、对偶与数值准入理论
+% 本文件遵循 docs/modules/THEORY_WRITING_GUIDE.md。
+\section{LP/MILP 结构、对偶解释与数值准入}
+
+\begin{theorynote}
+本章说明园区模型为何在关闭互斥时是线性规划、开启互斥时成为混合整数线性规划，并给出 LP 强对偶、
+影子价格和误差准入的严格解释。对偶价格、冲突精炼与尺度自动化属于标准理论，不代表当前结果结构已经输出。
+\end{theorynote}
+
+\subsection{标准形与模型规模}
+
+汇总所有时段连续变量为 $x$、互斥变量为 $z$，模型可写成
+\begin{equation}
+ \min_{x,z}\ c^\top x+d^\top z,
+ \quad Ax=b,\quad Gx+Hz\le h,
+ \quad \ell\le x\le u,quad z\in\{0,1\}^{n_z}.
+ \label{eq:ies-milp-standard}
+\end{equation}
+固定 $z$ 或关闭互斥后即为 LP。变量和局部约束数量均为 $O(T)$；库存递推只连接相邻时段，故约束矩阵
+具有块双对角骨架。分支定界的最坏复杂度仍随 $n_z$ 指数增长，$O(T)$ 的模型尺寸不意味着 MILP
+求解时间线性增长。
+
+\begin{proposition}[连续模型的凸性]
+当效率、COP、价格、排放因子和需求均为给定参数，且不引入二元互斥时，可行域是闭凸多面体；若
+变量上下界使其有界且可行，则线性目标存在全局最优解。
+\end{proposition}
+\begin{proof}
+等式、线性不等式和盒约束的交集为闭凸多面体。有界非空多面体是紧集，连续线性函数在其上达到最小值。
+\end{proof}
+
+\subsection{LP 对偶与载能边际价格}
+
+为简洁起见，将 LP 写为
+\begin{equation}
+ \min c^\top x\quad\text{s.t.}\quad Ax=b,\ Gx\le h,\ x\ge0.
+\end{equation}
+其拉格朗日函数
+$L=c^\top x+\lambda^\top(Ax-b)+\mu^\top(Gx-h)$，其中 $\mu\ge0$。
+对偶为
+\begin{equation}
+ \max_{\lambda,\mu}\ -b^\top\lambda-h^\top\mu,
+ \quad c+A^\top\lambda+G^\top\mu\ge0,\quad \mu\ge0.
+ \label{eq:ies-lp-dual}
+\end{equation}
+在采用一致符号后，电、热、氢、燃料平衡行的 $\lambda_{c,t}$ 可解释为相应需求增加一单位对最优成本的
+局部敏感度。该解释要求最优基稳定；在退化点，单个对偶值可能不唯一。
+
+\begin{theorem}[强对偶与最优性证书]
+若原 LP 与对偶 LP 至少一方存在有限最优解并满足标准可行条件，则二者最优值相等。一个原始--对偶点
+若满足原始可行、对偶可行和互补松弛，即构成全局最优性证书。
+\end{theorem}
+
+MILP 的最终 incumbent 不能用式~\eqref{eq:ies-lp-dual} 直接证明全局最优；需要分支定界下界 $L$ 与
+incumbent $U$。常见相对 gap 为
+\begin{equation}
+ g=\frac{|U-L|}{\max(1,|U|)}.
+ \label{eq:ies-mip-gap}
+\end{equation}
+不同后端可能使用不同分母或绝对 gap 组合，手册只能按适配层实际返回的状态解释。
+
+\subsection{互斥二进制的 Big-M 强度}
+
+购售互斥可写为
+\begin{equation}
+ 0\le P_t^{imp}\le \bar P^{imp}z_t,\qquad
+ 0\le P_t^{exp}\le \bar P^{exp}(1-z_t).
+ \label{eq:ies-grid-binary}
+\end{equation}
+这里 $M$ 不是任意大数，而应直接取物理交换上界。过大的 $M$ 会削弱 LP 松弛、恶化数值尺度；小于真实
+上界则错误裁剪可行域。储能互斥同理，应以充放功率铭牌上界构造。
+
+\subsection{多目标量纲与 Pareto 前沿}
+
+成本 $C$、排放 $R$ 与弃能 $U$ 的单位分别可能为货币、tCO$_2$ 与 MWh。直接写
+$w_CC+w_RR+w_UU$ 时，权重带有逆单位。可采用锚点归一化
+\begin{equation}
+ \hat C=\frac{C-C^{min}}{C^{ref}-C^{min}},\quad
+ \hat R=\frac{R-R^{min}}{R^{ref}-R^{min}},\quad
+ \hat U=\frac{U-U^{min}}{U^{ref}-U^{min}},
+ \label{eq:ies-objective-normalization}
+\end{equation}
+再用无量纲权重。分母为零时该目标在当前可行域无变化，应移除而不是除零。
+
+当前 Carbon 与 MinCurtailment 目标用 $10^{-6}$ 成本作 tie-break。严格词典序要求次级目标的最大变化乘
+系数小于主目标的最小可分辨改善；固定系数对任意规模不自动满足此条件。
+
+\begin{gapnote}
+当前实现不生成 Pareto 前沿、不自动归一化权重，也不输出平衡约束对偶变量。手册中的对偶理论用于说明
+应如何扩展验证，不得把结果中的成本向量解释为节点或载能边际价格。
+\end{gapnote}
+
+\subsection{后端状态与准入谓词}
+
+研究级准入应是合取而不是只读一个布尔量：
+\begin{equation}
+ \mathcal A=(\text{has primal})\land(\text{termination acceptable})\land
+ (r_p\le\tau_p)\land(g\le\tau_g)\land(\text{scope sufficient}).
+ \label{eq:ies-admission}
+\end{equation}
+其中 $r_p$ 至少含四载能平衡、五类库存递推、转换等式、可再生可用量、交通映射与碳关系的最大残差。
+若研究问题要求电压或支路安全，当前 aggregate-PCC scope 永远不满足最后一项，无论 MILP 多么精确。
+
+\subsection{数值尺度与误差预算}
+
+MW/MWh 变量通常在 $10^{-3}$--$10^2$，交通里程可达 $10^2$--$10^5$，成本系数可跨多个数量级。
+可用对角尺度 $D_x,D_r$ 将 $x=D_x\hat x$、约束左乘 $D_r$。尺度变换不改变物理解，却会改变后端的绝对
+可行性容差所代表的物理误差。报告残差时应恢复到 MW、MWh、tCO$_2$ 等工程单位。
+
+独立重算的误差预算可分为
+\begin{equation}
+ \epsilon_{obs}\le\epsilon_{solver}+\epsilon_{extract}+\epsilon_{oracle},
+\end{equation}
+其中求解器容差、结果抽取舍入和 oracle 浮点误差来源不同。若误差超过阈值，首先比较逐式残差定位，
+不能仅通过放宽统一阈值使测试变绿。
+
+\subsection{与实现的对应}
+
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{7.1cm}L{8.1cm}@{}}
+\toprule 理论条目 & 实现状态\\\midrule
+\endfirsthead\toprule 理论条目 & 实现状态\\\midrule\endhead
+式~\eqref{eq:ies-milp-standard} 的连续/二元切换 & \implfull{src/integrated\_energy/integrated\_energy\_optimizer.cpp:solve\_campus\_ies}\\
+物理上界 Big-M & \implfull{src/integrated\_energy/integrated\_energy\_optimizer.cpp:solve\_campus\_ies}\\
+四类目标与固定 tie-break & \implfull{src/integrated\_energy/integrated\_energy\_optimizer.cpp:solve\_campus\_ies}\\
+对偶载能价格与 KKT 输出 & \implnone\\
+自动目标/行列尺度化 & \implnone\\
+后端 primal、termination 与 gap 归一 & \implpart{结果暴露 primal/optimal/status；不输出完整原始--对偶证书}\\
+独立工程单位残差 oracle & \implfull{tools/integrated\_energy\_validation/run\_cross\_validation.py:validate\_case}\\
+电网电压与支路安全准入 & \implnone\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{参考文献}
+{\renewcommand{\section}[2]{}%
+\begin{thebibliography}{9}\small
+\bibitem{ies:bertsimas1997} D.~Bertsimas and J.~Tsitsiklis,
+\emph{Introduction to Linear Optimization}, Athena Scientific, 1997.
+\bibitem{ies:nemhauser1988} G.~Nemhauser and L.~Wolsey,
+\emph{Integer and Combinatorial Optimization}, Wiley, 1988.
+\end{thebibliography}}
